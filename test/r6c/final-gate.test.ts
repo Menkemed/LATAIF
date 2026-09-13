@@ -59,7 +59,8 @@ const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 const registry = await import('../../src/core/bridge/command-registry.ts');
 for (const m of ['read-commands', 'invoice-command', 'customer-commands', 'product-commands', 'invoice-lifecycle-commands',
   'commercial-commands', 'service-commands', 'financial-commands', 'return-commands', 'invoice-cancel-command',
-  'lifecycle-commands', 'masterdata-commands', 'inventory-commands', 'store-read-commands']) {
+  'lifecycle-commands', 'masterdata-commands', 'inventory-commands', 'store-read-commands',
+  'money-commands', 'payables-commands', 'gold-commands', 'metal-commands']) {
   await import(`../../src/core/bridge/${m}.ts`);
 }
 const perms = await import('../../src/core/bridge/command-permissions.ts');
@@ -160,29 +161,32 @@ function fakeCore() {
 const R6C_MUT = ['suppliers.create', 'suppliers.update', 'agents.update', 'partners.create', 'partners.update', 'employees.create', 'employees.update',
   'inventory.start', 'inventory.save', 'inventory.finish', 'inventory.record_check'];
 const R6C_READ = ['inventory.session.get', 'inventory.checks.get'];
+// R6D — seither achtundzwanzig Buchungen und drei Auskünfte, alle HINTER den R6C-Namen (eigenes Gate: test/r6d).
+const R6D_MUT = ['tax.record_payment', 'banking.transfer', 'partners.record_tx', 'debts.create', 'debts.update', 'debts.record_payment', 'expenses.create', 'expenses.update', 'expenses.record_payment', 'expenses.template_create', 'expenses.template_update', 'purchases.record_payment', 'purchases.apply_credit', 'suppliers.pay', 'suppliers.apply_credit', 'suppliers.refund_credit', 'gold.payables.settle', 'gold.customer_credits.settle', 'repairs.record_gold_usage', 'repairs.add_material', 'orders.add_cost', 'orders.remove_cost', 'metals.create', 'metals.update_status', 'metals.set_spot_price', 'scrap_trades.create', 'scrap_trades.update', 'scrap_trades.cancel'];
+const R6D_READ = ['metals.spot_prices.get', 'debts.payments.get', 'suppliers.credits.get'];
 
 // ══ §1 — Registry 108 → 121 ══════════════════════════════════════════════════
 {
   const list = (t: string): string[] => [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const vorher = list(vor('src/core/bridge/command-registry.ts'));
   const jetzt = [...registry.ALLOWED_MUTATIONS];
-  ok(vorher.length === 41 && S(jetzt.filter((o) => !vorher.includes(o))) === S(R6C_MUT) && vorher.every((o) => jetzt.includes(o)) && jetzt.length === 52,
-    `REGISTRY Buchungen 41 → 52: GENAU die elf R6C-Namen, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
+  ok(vorher.length === 41 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6C_MUT, ...R6D_MUT]) && vorher.every((o) => jetzt.includes(o)) && jetzt.length === 80,
+    `REGISTRY Buchungen 41 → 52 (R6C) → 80 (R6D): GENAU die elf R6C- und die achtundzwanzig R6D-Namen, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
   const readsVor = catalogue(vor('src/core/bridge/store-read-ops.ts'));
   const readsJetzt = [...readOps.STORE_READ_OPS];
-  ok(S(readsJetzt.filter((o) => !readsVor.includes(o))) === S(R6C_READ) && readsJetzt.length === readsVor.length + 2,
-    `REGISTRY Auskünfte: GENAU die zwei R6C-Namen (${readsJetzt.filter((o) => !readsVor.includes(o)).join(',')})`);
+  ok(S(readsJetzt.filter((o) => !readsVor.includes(o))) === S([...R6C_READ, ...R6D_READ]) && readsJetzt.length === readsVor.length + 5,
+    `REGISTRY Auskünfte: GENAU die zwei R6C- und die drei R6D-Namen (${readsJetzt.filter((o) => !readsVor.includes(o)).join(',')})`);
   const rustOps = (t: string): string[] => {
     const l = /pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(t)?.[1] ?? '';
     return (l.match(/OP_[A-Z_]+/g) ?? []).map((c) => new RegExp(`pub const ${c}: &str = "([^"]+)"`).exec(t)?.[1] ?? c);
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 108 && rJetzt.length === 121 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6C_MUT, ...R6C_READ]),
-    `REGISTRY Rust 108 → 121: GENAU diese dreizehn, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
+  ok(rVor.length === 108 && rJetzt.length === 152 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6C_MUT, ...R6C_READ, ...R6D_MUT, ...R6D_READ]),
+    `REGISTRY Rust 108 → 121 (R6C) → 152 (R6D): GENAU diese dreizehn und einunddreißig, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 121 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 121 Namen, die Rust durchlässt (${known.length})`);
+  ok(known.length === 152 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 152 Namen, die Rust durchlässt (${known.length})`);
   for (const op of [...R6C_MUT, ...R6C_READ]) {
     const isMut = R6C_MUT.includes(op);
     ok(known.includes(op) && rJetzt.includes(op) && (isMut ? registry.ALLOWED_MUTATIONS.includes(op) : readOps.STORE_READ_OPS.includes(op))
@@ -207,7 +211,8 @@ const R6C_READ = ['inventory.session.get', 'inventory.checks.get'];
   // Unbekanntes bleibt fail-closed.
   const r = await registry.executeCommand('inventory.adjust', {}, identity(nextId(), 'inventory.adjust') as never);
   ok(r.kind === 'infrastructure_error' && r.code === 'BRIDGE_OP_NOT_REGISTERED', `FAILCLOSED ein unbekannter Name läuft nicht (${S(r)})`);
-  for (const op of ['suppliers.delete', 'employees.delete', 'partners.record_tx', 'inventory.adjust', 'inventory.reset', 'metals.create', 'tasks.create']) {
+  // R6D hat `partners.record_tx` und `metals.create` bewusst freigegeben (eigenes Gate: test/r6d) — sie stehen hier nicht mehr.
+  for (const op of ['suppliers.delete', 'employees.delete', 'partners.delete_tx', 'inventory.adjust', 'inventory.reset', 'metals.delete', 'tasks.create']) {
     let t = ''; try { registry.registerCommand(op, { kind: 'mutation', handler: () => ({}) }); } catch (e) { t = String(e); }
     ok(/refusing to register/.test(t) && !rJetzt.includes(op), `FAILCLOSED ${op} ist weder registrierbar noch in Rust`);
   }
@@ -434,8 +439,9 @@ marker('CENTRAL_UI_R6C_NO_INVENTED_LIMITS_PINNED');
   const zu = A.filter((p) => /geschlossen \(R6C\)/.test(p[7] ?? ''));
   ok(A.length === 95 && zu.length === 16 && A.length - zu.length === 79, `R6A A vorher 95, R6C geschlossen 16, verbleibend 79 (${A.length}/${zu.length}/${A.length - zu.length})`);
   ok(zu.every((p) => /^(Stammdaten|Inventur) ·/.test(p[8] ?? '')), 'R6A geschlossen sind nur Zeilen der Domänen Stammdaten und Inventur');
-  const nichtZu = A.filter((p) => /Aufgabe|Dokument|Texterkennung|Metall|Inbox-Foto/.test(p[1]));
-  ok(nichtZu.length === 8 && nichtZu.every((p) => !/geschlossen/.test(p[7] ?? '')), `R6A Aufgaben, Dokumente, Metall, Inbox-Foto bleiben offen (${nichtZu.length})`);
+  // R6D hat Metall geschlossen (eigenes Gate). Was R6C offen ließ und weiterhin offen ist: Aufgaben, Dokumente, Inbox-Foto.
+  const nichtZu = A.filter((p) => /Aufgabe|Dokument|Texterkennung|Inbox-Foto/.test(p[1]));
+  ok(nichtZu.length === 5 && nichtZu.every((p) => !/geschlossen/.test(p[7] ?? '')), `R6A Aufgaben, Dokumente, Inbox-Foto bleiben offen (${nichtZu.length})`);
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — r6c final gate: ${PASS} passed, ${fails.length} failed`);

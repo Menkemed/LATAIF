@@ -258,7 +258,7 @@ function rumpfVon(s: string, name: string): string {
   const erlaubt = src('src/core/bridge/command-registry.ts');
   const liste = /export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(erlaubt)?.[1] ?? '';
   const namen = [...liste.matchAll(/'([^']+)'/g)].map((m) => m[1]);
-  ok(namen.length === 52, `4 die Liste der Buchungen zaehlt 52 (R6C: +7 Stammdaten, +4 Inventur) — R4B selbst fügte keine hinzu (${namen.length})`);
+  ok(namen.length === 80, `4 die Liste der Buchungen zaehlt 80 (R6C: +7 Stammdaten, +4 Inventur; R6D: +28) — R4B selbst fügte keine hinzu (${namen.length})`);
   ok(!namen.includes('orders.convert_to_invoice_with_deposit'),
     '10 …und die Auftragsumwandlung hat KEINEN neuen halben Namen bekommen');
 }

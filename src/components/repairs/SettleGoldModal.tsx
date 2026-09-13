@@ -2,26 +2,35 @@
 // auf den drei Gold-Buckets (gold_payable, customer_gold_credit).
 //
 // Mode bestimmt die Aktion + Felder:
-//   - 'settle_supplier_return'  → gold_payables.settle_return_gold (Inflow ins Shop-Inventar)
-//   - 'convert_supplier_money'  → gold_payables.convert_to_money (Expense erzeugen)
-//   - 'apply_shop_to_supplier'  → applyShopGoldToSupplierPayable (Outflow Shop-Inventar)
-//   - 'return_customer'         → customer_gold_credits.return_to_customer
-//   - 'convert_customer_money'  → customer_gold_credits.convert_to_money
+//   - 'settle_supplier_return'  → gold.payables.settle mode 'return_gold' (Inflow ins Shop-Inventar)
+//   - 'convert_supplier_money'  → gold.payables.settle mode 'money' (Expense erzeugen)
+//   - 'apply_shop_to_supplier'  → gold.payables.settle mode 'shop_gold' (Outflow Shop-Inventar, auch Cross-Karat)
+//   - 'return_customer'         → gold.customer_credits.settle mode 'return'
+//   - 'convert_customer_money'  → gold.customer_credits.settle mode 'money'
 //
 // Plan repair-multi-supplier — Salesforce-Stil: jede Aktion ist explizit
-// gewaehlt, niemals automatisch. Soft-Warn bei verdaechtigen Eingaben
-// (z.B. Karat-Mismatch), aber nie blockierend.
+// gewaehlt, niemals automatisch. Soft-Warn bei verdaechtigen Eingaben.
+//
+// CENTRAL-UI-PARITY R6D — die Maske rechnet und schreibt nicht mehr selbst: am Primary laeuft der
+// Goldkern in EINER Klammer (`settleGold…OnPrimary`), auf PC2 dieselbe Absicht als Fernbefehl. Was
+// die SoftWarns als „wird beim Speichern zurueckgewiesen" ankuendigen, weist der Kern jetzt auch
+// wirklich zurueck — dieselbe Rechnung (`crossKaratPlan`, Ladenbestand) steht hinter beiden.
 
-import { useEffect, useMemo, useState } from 'react';
+import { useMemo, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SoftWarn } from '@/components/ui/SoftWarn';
-import { useGoldStore } from '@/stores/goldStore';
-import { KARAT_PURITY } from '@/core/gold/purity';
+import { useGoldStore, goldRevisionOf } from '@/stores/goldStore';
 import type { GoldPayable, CustomerGoldCredit } from '@/core/models/types';
 import { useSharedRead } from '@/core/data/shared-read';
 import { metalStockByKaratFor } from '@/core/data/page-reads';
+import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { crossKaratPlan, isKnownKarat, GRAM_EPS, type CrossKaratPlan } from '@/core/gold/gold-settle';
+import {
+  goldCreditSettleBody, goldPayableSettleBody, settleGoldCreditOnPrimary, settleGoldPayableOnPrimary,
+  type CreditSettleRequest, type PayableSettleRequest,
+} from '@/core/gold/gold-house';
 
 export type SettleGoldMode =
   | 'settle_supplier_return'
@@ -65,7 +74,8 @@ function modeHint(mode: SettleGoldMode): string {
 }
 
 export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId }: SettleGoldModalProps) {
-  const goldStore = useGoldStore();
+  const goldLoadAll = useGoldStore(s => s.loadAll);
+  const w = useSharedWrites();
   const [grams, setGrams] = useState<string>('');
   const [bhd, setBhd] = useState<string>('');
   const [notes, setNotes] = useState<string>('');
@@ -83,16 +93,22 @@ export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId
     : 0;
   const karat = payable?.karat || credit?.karat || '';
 
-  // Reset bei Modal-Open
-  useEffect(() => {
-    if (open) {
+  // Reset bei Modal-Open — einmal je Öffnen (und je Schuld), beim Rendern angeglichen statt per
+  // Effekt. R6D: nach einem gescheiterten Versuch bleiben die Eingaben stehen, damit „Confirm"
+  // denselben Rumpf wiederholt.
+  const openKey = open ? `${mode}:${payable?.id ?? credit?.id ?? ''}` : '';
+  const [resetFor, setResetFor] = useState('');
+  if (openKey !== resetFor) {
+    setResetFor(openKey);
+    if (openKey) {
       setGrams(remainingGrams.toFixed(3));
       setBhd('');
       setNotes('');
       setError('');
       setSourceKarat(karat);
+      w.clear();
     }
-  }, [open, remainingGrams, karat]);
+  }
 
   // v0.1.47 — fetche Shop-Inventory pro Karat damit der User sieht was zur
   // Verfuegung steht. Nur fuer apply_shop_to_supplier-Mode relevant.
@@ -103,22 +119,14 @@ export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId
     [mode, open, metalStock],
   );
 
-  // v0.1.47 — Conversion-Preview fuer Cross-Karat
-  const isCrossKarat = mode === 'apply_shop_to_supplier' && sourceKarat && sourceKarat !== karat;
+  // v0.1.47 — Conversion-Preview fuer Cross-Karat. R6D: dieselbe Rechnung wie der Kern (Toleranz
+  // einer halben Eingabestufe) — ein unbekanntes Karat hat keine Umrechnung, statt still 1.0.
+  const isCrossKarat = mode === 'apply_shop_to_supplier' && !!sourceKarat && sourceKarat !== karat;
   const sourceGramsNum = parseFloat(grams) || 0;
-  const conversionPreview = useMemo(() => {
-    if (!isCrossKarat || sourceGramsNum <= 0) return null;
-    try {
-      // sourceGrams im sourceKarat → wieviel ist das im targetKarat?
-      const sourceP = KARAT_PURITY[sourceKarat] || 1.0;
-      const targetP = KARAT_PURITY[karat] || 1.0;
-      const targetEquiv = (sourceGramsNum * sourceP) / targetP;
-      return {
-        sourceP, targetP, targetEquiv,
-        pureGoldGrams: sourceGramsNum * sourceP,
-      };
-    } catch { return null; }
-  }, [isCrossKarat, sourceGramsNum, sourceKarat, karat]);
+  const conversionPreview = useMemo<CrossKaratPlan | null>(() => {
+    if (!isCrossKarat || sourceGramsNum <= 0 || !isKnownKarat(sourceKarat) || !isKnownKarat(karat)) return null;
+    return crossKaratPlan(sourceKarat, karat, sourceGramsNum, remainingGrams);
+  }, [isCrossKarat, sourceGramsNum, sourceKarat, karat, remainingGrams]);
 
   const needsBhd = mode === 'convert_supplier_money' || mode === 'convert_customer_money';
 
@@ -126,74 +134,77 @@ export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId
   // unterschiedlichen Karaten — wir vergleichen target-equivalent vs remaining.
   let gramsWarn: string | undefined;
   const gNum = parseFloat(grams) || 0;
-  if (isCrossKarat && conversionPreview) {
-    const inv = shopInventory.find(i => i.karat === sourceKarat);
-    const avail = inv?.grams || 0;
-    if (gNum > avail + 0.0001) {
+  const avail = shopInventory.find(i => i.karat === (isCrossKarat ? sourceKarat : karat))?.grams || 0;
+  if (isCrossKarat && gNum > 0 && !conversionPreview) {
+    gramsWarn = `Karat ${sourceKarat} / ${karat} hat keine bekannte Reinheit — wird beim Speichern zurueckgewiesen.`;
+  } else if (isCrossKarat && conversionPreview) {
+    if (gNum > avail + GRAM_EPS) {
       gramsWarn = `Nur ${avail.toFixed(3)}g ${sourceKarat} im Bestand — wird beim Speichern zurueckgewiesen.`;
-    } else if (conversionPreview.targetEquiv > remainingGrams + 0.0001) {
-      gramsWarn = `${conversionPreview.targetEquiv.toFixed(3)}g ${karat}-equivalent uebersteigt die offene Schuld (${remainingGrams.toFixed(3)}g) — wird beim Speichern zurueckgewiesen.`;
-    } else if (conversionPreview.targetEquiv < remainingGrams - 0.0001) {
-      gramsWarn = `Partial settlement: ${(remainingGrams - conversionPreview.targetEquiv).toFixed(3)}g ${karat} bleiben offen.`;
+    } else if (conversionPreview.verdict === 'over') {
+      gramsWarn = `${conversionPreview.targetEquivalent.toFixed(3)}g ${karat}-equivalent uebersteigt die offene Schuld (${remainingGrams.toFixed(3)}g) — wird beim Speichern zurueckgewiesen.`;
+    } else if (conversionPreview.verdict === 'partial') {
+      gramsWarn = `Partial settlement: ${(remainingGrams - conversionPreview.targetEquivalent).toFixed(3)}g ${karat} bleiben offen.`;
     }
-  } else if (gNum > 0 && gNum > remainingGrams + 0.0001) {
+  } else if (gNum > 0 && gNum > remainingGrams + GRAM_EPS) {
     gramsWarn = `Mehr Gramm angegeben als offen (${remainingGrams.toFixed(3)}g) — wird beim Speichern zurueckgewiesen.`;
-  } else if (gNum > 0 && gNum < remainingGrams - 0.0001) {
+  } else if (mode === 'apply_shop_to_supplier' && gNum > avail + GRAM_EPS) {
+    gramsWarn = `Nur ${avail.toFixed(3)}g ${karat} im Bestand — wird beim Speichern zurueckgewiesen.`;
+  } else if (gNum > 0 && gNum < remainingGrams - GRAM_EPS) {
     gramsWarn = `Partial settlement: ${(remainingGrams - gNum).toFixed(3)}g bleiben offen.`;
   }
 
-  function handleConfirm() {
+  async function handleConfirm() {
     setError('');
     const g = parseFloat(grams) || 0;
     const b = parseFloat(bhd) || 0;
+    if (needsBhd && b <= 0) { setError('BHD-Betrag > 0 erforderlich'); return; }
+    if (!needsBhd && g <= 0) { setError('Gramm > 0 erforderlich'); return; }
+    // Die gesehene Fassung reist mit — ein zweiter Rechner soll nichts still ueberschreiben.
+    const revision = goldRevisionOf(payable ?? credit);
+    if (w.remote && !revision) { setError(fehlertext(nichtAmClient('settling gold (no revision loaded)'))); return; }
+    const note = notes || undefined;
 
-    try {
-      switch (mode) {
-        case 'settle_supplier_return':
-          if (!payable) throw new Error('payable required');
-          if (g <= 0) throw new Error('Gramm > 0 erforderlich');
-          goldStore.settleGoldReturn(payable.id, g, notes || undefined);
-          break;
-        case 'convert_supplier_money':
-          if (!payable) throw new Error('payable required');
-          if (b <= 0) throw new Error('BHD-Betrag > 0 erforderlich');
-          goldStore.convertGoldPayableToMoney(payable.id, b, 'bank', notes || undefined);
-          break;
-        case 'apply_shop_to_supplier':
-          if (!payable) throw new Error('payable required');
-          if (g <= 0) throw new Error('Gramm > 0 erforderlich');
-          if (sourceKarat && sourceKarat !== payable.karat) {
-            // Cross-Karat: andere Reinheit als Payable verlangt
-            goldStore.applyShopGoldCrossKaratToPayable(payable.id, sourceKarat, g);
-          } else {
-            goldStore.applyShopGoldToSupplierPayable(payable.id, g);
-          }
-          break;
-        case 'return_customer':
-          if (!credit) throw new Error('credit required');
-          if (g <= 0) throw new Error('Gramm > 0 erforderlich');
-          goldStore.returnCustomerCredit(credit.id, g, notes || undefined);
-          break;
-        case 'convert_customer_money':
-          if (!credit) throw new Error('credit required');
-          if (b <= 0) throw new Error('BHD-Betrag > 0 erforderlich');
-          goldStore.convertCustomerCreditToMoney(credit.id, b, notes || undefined);
-          break;
-      }
-      onClose();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+    let done = false;
+    if (mode === 'settle_supplier_return' || mode === 'apply_shop_to_supplier' || mode === 'convert_supplier_money') {
+      if (!payable) { setError('payable required'); return; }
+      const req: PayableSettleRequest = mode === 'convert_supplier_money'
+        ? { payableId: payable.id, expectedRevision: revision, mode: 'money', agreedBhd: b, notes: note }
+        : {
+            payableId: payable.id, expectedRevision: revision, grams: g, notes: note,
+            mode: mode === 'apply_shop_to_supplier' ? 'shop_gold' : 'return_gold',
+            // Cross-Karat: andere Reinheit als die Schuld verlangt — die Gramm sind Quellgramm.
+            ...(isCrossKarat ? { sourceKarat } : {}),
+          };
+      done = await w.ok('gold.payables.settle', {
+        local: () => settleGoldPayableOnPrimary(req),
+        remote: () => goldPayableSettleBody(req),
+      });
+    } else {
+      if (!credit) { setError('credit required'); return; }
+      const req: CreditSettleRequest = mode === 'convert_customer_money'
+        ? { creditId: credit.id, expectedRevision: revision, mode: 'money', agreedBhd: b, notes: note }
+        : { creditId: credit.id, expectedRevision: revision, mode: 'return', grams: g, notes: note };
+      done = await w.ok('gold.customer_credits.settle', {
+        local: () => settleGoldCreditOnPrimary(req),
+        remote: () => goldCreditSettleBody(req),
+      });
     }
+    // Nie schliessen, solange es nicht geglueckt ist — auch nicht bei offenem Ausgang (derselbe Versuch).
+    if (!done) return;
+    goldLoadAll();
+    onClose();
   }
+
+  const shownError = error || w.fehler;
 
   return (
     <Modal open={open} onClose={onClose} title={modeTitle(mode)} width={480}>
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      <div data-gold-settle-modal={mode} style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
         <p style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.5 }}>{modeHint(mode)}</p>
 
         <div style={{ padding: '10px 12px', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 6, fontSize: 12 }}>
           <div style={{ color: '#6B7280' }}>Offen:</div>
-          <div className="font-mono" style={{ color: '#0F0F10', fontSize: 14, marginTop: 2 }}>
+          <div className="font-mono" data-gold-settle-open-grams style={{ color: '#0F0F10', fontSize: 14, marginTop: 2 }}>
             {remainingGrams.toFixed(3)}g {karat}
           </div>
           {repairId && (
@@ -214,6 +225,7 @@ export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId
                 <button
                   key={inv.karat}
                   type="button"
+                  data-gold-settle-source-karat={inv.karat}
                   onClick={() => setSourceKarat(inv.karat)}
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
@@ -238,7 +250,7 @@ export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId
           <div>
             <Input
               label={isCrossKarat ? `WEIGHT (g ${sourceKarat})` : 'WEIGHT (g)'}
-              type="number" step="0.001" value={grams}
+              type="number" step="0.001" value={grams} data-gold-settle-grams
               onChange={e => setGrams(e.target.value)} autoFocus />
             <SoftWarn warning={gramsWarn} />
           </div>
@@ -246,7 +258,7 @@ export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId
 
         {/* v0.1.47 — Cross-Karat-Conversion-Preview */}
         {conversionPreview && (
-          <div style={{
+          <div data-gold-settle-preview={conversionPreview.verdict} style={{
             padding: '10px 12px', background: 'rgba(61,127,255,0.06)',
             border: '1px solid rgba(61,127,255,0.3)', borderRadius: 6, fontSize: 12,
           }}>
@@ -254,38 +266,43 @@ export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId
               ⇄ Cross-Karat Conversion
             </div>
             <div className="font-mono" style={{ color: '#0F0F10', fontSize: 13 }}>
-              {sourceGramsNum.toFixed(3)}g {sourceKarat} ({(conversionPreview.sourceP * 100).toFixed(1)}%)
+              {sourceGramsNum.toFixed(3)}g {sourceKarat} ({(conversionPreview.sourcePurity * 100).toFixed(1)}%)
               {' = '}
-              <strong>{conversionPreview.targetEquiv.toFixed(3)}g {karat}-equivalent</strong>
+              <strong>{conversionPreview.targetEquivalent.toFixed(3)}g {karat}-equivalent</strong>
             </div>
             <div style={{ color: '#6B7280', fontSize: 11, marginTop: 4 }}>
-              = {conversionPreview.pureGoldGrams.toFixed(3)}g pure gold · Payable wird mit {conversionPreview.targetEquiv.toFixed(3)}g {karat} fulfilled.
+              = {(sourceGramsNum * conversionPreview.sourcePurity).toFixed(3)}g pure gold · {conversionPreview.verdict === 'exact'
+                ? <>Payable wird vollstaendig beglichen ({remainingGrams.toFixed(3)}g {karat}).</>
+                : <>Payable wird mit {conversionPreview.targetEquivalent.toFixed(3)}g {karat} fulfilled.</>}
+            </div>
+            <div style={{ color: '#6B7280', fontSize: 11, marginTop: 2 }}>
+              Fuer volle Begleichung: {conversionPreview.exactSourceGrams.toFixed(3)}g {sourceKarat}.
             </div>
           </div>
         )}
 
         {needsBhd && (
-          <Input label="AGREED BHD" type="number" step="0.001" value={bhd}
+          <Input label="AGREED BHD" type="number" step="0.001" value={bhd} data-gold-settle-bhd
             onChange={e => setBhd(e.target.value)} autoFocus />
         )}
 
         <div>
           <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NOTES (optional)</span>
-          <textarea value={notes} onChange={e => setNotes(e.target.value)}
+          <textarea value={notes} onChange={e => setNotes(e.target.value)} data-gold-settle-notes
             rows={2}
             style={{ width: '100%', padding: '8px 10px', border: '1px solid #D5D9DE', borderRadius: 4,
                      fontSize: 13, color: '#0F0F10', background: 'transparent', resize: 'vertical' }} />
         </div>
 
-        {error && (
-          <div style={{ padding: '8px 10px', background: 'rgba(220,38,38,0.06)',
+        {shownError && (
+          <div data-gold-settle-error style={{ padding: '8px 10px', background: 'rgba(220,38,38,0.06)',
                         border: '1px solid rgba(220,38,38,0.3)', borderRadius: 6,
-                        fontSize: 12, color: '#DC2626' }}>{error}</div>
+                        fontSize: 12, color: '#DC2626' }}>{shownError}</div>
         )}
 
         <div className="flex justify-end gap-3" style={{ paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={handleConfirm}>Confirm</Button>
+          <Button variant="primary" onClick={() => void handleConfirm()} disabled={w.busy} data-gold-settle-confirm>Confirm</Button>
         </div>
       </div>
     </Modal>

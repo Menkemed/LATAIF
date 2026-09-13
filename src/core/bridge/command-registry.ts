@@ -118,6 +118,25 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // CENTRAL-UI-PARITY R6C — die Inventur über den Primary: Lauf beginnen, Arbeitsblatt speichern,
   // Lauf abschließen, und der Einzel-Check am Artikel. Keine davon ändert Bestand oder Hauptbuch.
   'inventory.start', 'inventory.save', 'inventory.finish', 'inventory.record_check',
+  // CENTRAL-UI-PARITY R6D — Steuer, Bank, Gesellschafter, Darlehen: eine fachliche Absicht, ein Name.
+  // „Einlage", „Entnahme" und „Gewinnverteilung" sind EINE Geldbewegung eines Gesellschafters mit Art.
+  'tax.record_payment', 'banking.transfer', 'partners.record_tx',
+  'debts.create', 'debts.update', 'debts.record_payment',
+  // R6D — Ausgaben, Vorlagen, Einkaufszahlung, Lieferant bezahlen/Guthaben. „Pay" an vier Stellen
+  // (Ausgabenliste, Lieferant, Auftrag, Reparatur) ist EIN `expenses.record_payment`; „Pausieren"
+  // ist `expenses.template_update` mit dem Zielwert.
+  'expenses.create', 'expenses.update', 'expenses.record_payment',
+  'expenses.template_create', 'expenses.template_update',
+  'purchases.record_payment', 'purchases.apply_credit',
+  'suppliers.pay', 'suppliers.apply_credit', 'suppliers.refund_credit',
+  // R6D — Gold: EINE Abrechnung je Gold-Topf (Verbindlichkeit beim Werkstattlieferanten,
+  // Kundengold), die Art der Abrechnung ist ein Feld. Kosten/Material mit Gold-Schuld.
+  'gold.payables.settle', 'gold.customer_credits.settle',
+  'repairs.record_gold_usage', 'repairs.add_material',
+  'orders.add_cost', 'orders.remove_cost',
+  // R6D — Edelmetall und Schrotthandel. „Verkaufen" und „Schmelzen" sind ein Zustandswechsel.
+  'metals.create', 'metals.update_status', 'metals.set_spot_price',
+  'scrap_trades.create', 'scrap_trades.update', 'scrap_trades.cancel',
 ];
 
 export interface CommandSpec {

@@ -169,18 +169,21 @@ const MD_OPS = ['suppliers.create', 'suppliers.update', 'agents.update', 'partne
 // ══ §1 — Umfang, Registry, Rechte ═══════════════════════════════════════════
 {
   ok(MD_OPS.every((op) => registry.ALLOWED_MUTATIONS.includes(op)), 'SCOPE die sieben Stammdaten-Aktionen sind namentlich freigegeben');
-  ok(registry.ALLOWED_MUTATIONS.length === 52 && registry.ALLOWED_MUTATIONS.at(-1) === 'inventory.record_check',
-    `SCOPE 41 + 7 Stammdaten + 4 Inventur = 52 Buchungen (${registry.ALLOWED_MUTATIONS.length})`);
+  ok(registry.ALLOWED_MUTATIONS.length === 80 && registry.ALLOWED_MUTATIONS.at(-1) === 'scrap_trades.cancel',
+    `SCOPE 41 + 7 Stammdaten + 4 Inventur + 28 R6D = 80 Buchungen (${registry.ALLOWED_MUTATIONS.length})`);
   ok(MD_OPS.every((op) => registry.knownCommands().includes(op)), 'SCOPE und registriert');
   ok(MD_OPS.every((op) => op in perms.OPERATION_PERMISSIONS && perms.OPERATION_PERMISSIONS[op] === null),
     'SCOPE kein erfundenes Recht — die Masken des Primary haben kein Tor (Befund)');
-  ok(!registry.ALLOWED_MUTATIONS.some((op) => /^(suppliers|agents|partners|employees)\.(delete|refund|pay)/.test(op)),
-    'SCOPE kein Löschen, kein Geld: Stammdaten sind Stammdaten (§5 / R6E)');
+  // R6D — Geld an Lieferant und Gesellschafter sind seither EIGENE Buchungen (suppliers.pay/refund_credit,
+  // partners.record_tx); die Stammdaten-Buchungen selbst bewegen weiterhin kein Geld, und Löschen bleibt Primary-only.
+  ok(!registry.ALLOWED_MUTATIONS.some((op) => /^(suppliers|agents|partners|employees)\.delete/.test(op))
+    && !md.MASTERDATA_OPS.some((op) => /pay|refund|record_tx/.test(op)),
+    'SCOPE kein Löschen; die Stammdaten-Buchungen bewegen kein Geld (§5)');
   const rust = src('src-tauri/src/bridge.rs');
   const list = /pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '';
   const count = (list.match(/OP_[A-Z_]+/g) ?? []).length;
-  ok(count === 121 && ['OP_SUPPLIERS_CREATE', 'OP_SUPPLIERS_UPDATE', 'OP_AGENTS_UPDATE', 'OP_PARTNERS_CREATE', 'OP_PARTNERS_UPDATE', 'OP_EMPLOYEES_CREATE', 'OP_EMPLOYEES_UPDATE'].every((c) => list.includes(c)),
-    `SCOPE Rust lässt dieselben Namen durch; Registry 108 → 121 (${count})`);
+  ok(count === 152 && ['OP_SUPPLIERS_CREATE', 'OP_SUPPLIERS_UPDATE', 'OP_AGENTS_UPDATE', 'OP_PARTNERS_CREATE', 'OP_PARTNERS_UPDATE', 'OP_EMPLOYEES_CREATE', 'OP_EMPLOYEES_UPDATE'].every((c) => list.includes(c)),
+    `SCOPE Rust lässt dieselben Namen durch; Registry 108 → 121 (R6C) → 152 (R6D) (${count})`);
   const listener = src('src/core/bridge/bridge-listener.ts');
   ok(/import '\.\/masterdata-commands';/.test(listener) && /import '\.\/inventory-commands';/.test(listener), 'SCOPE der Renderer des Primary lädt beide Befehlsdateien');
 }

@@ -21,6 +21,12 @@ import { matchesDeep } from '@/core/utils/deep-search';
 import type { Debt, DebtDirection, CashSource } from '@/core/models/types';
 import { canonicalLoanStatus, isLoanGiven } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
+// CENTRAL-UI-PARITY R6D — anlegen, zurückzahlen, berichtigen: am Primary die Hausfolge, auf PC2
+// `debts.create` / `debts.record_payment` / `debts.update`. Löschen bleibt am Primary.
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { saveDebtCreate, saveDebtPayment, saveDebtUpdate } from '@/core/finance/money-save';
+import { WriteError } from '@/components/shared/WriteError';
+import type { DebtView } from '@/stores/debtStore';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -128,8 +134,11 @@ function downloadCsv(rows: DebtRow[]) {
 
 export function DebtsPage() {
   const navigate = useNavigate();
-  const { debts, loadDebts, createDebt, updateDebt, deleteDebt,
-          paymentsByDebt, loadPaymentsForDebt, recordDebtPayment } = useDebtStore();
+  const { debts, loadDebts, deleteDebt, paymentsByDebt, loadPaymentsForDebt } = useDebtStore();
+  const w = useSharedWrites();
+  const [createFehler, setCreateFehler] = useState('');
+  const [payFehler, setPayFehler] = useState('');
+  const [editFehler, setEditFehler] = useState('');
   const { customers, loadCustomers } = useCustomerStore();
   const { loadEmployees } = useEmployeeStore();
   const [overdueOnly, setOverdueOnly] = useState(false);
@@ -185,6 +194,8 @@ export function DebtsPage() {
   useEffect(() => {
     if (detailId) {
       loadPaymentsForDebt(detailId);
+      setPayFehler('');
+      setEditFehler('');
       setPayAmount('');
       setPaySource('cash');
       setPayDate(new Date().toISOString().split('T')[0]);
@@ -268,46 +279,44 @@ export function DebtsPage() {
     });
   }
 
-  function handleCreate() {
-    const amt = parseFloat(form.amount);
-    // Industry-Standard: Jeder Loan/Debt MUSS einem Client zugeordnet sein,
-    // damit er korrekt in der Customer-Receivables-Übersicht erscheint.
-    if (!form.customerId) {
-      alert('Please select a client. Every loan must be linked to a customer.');
-      return;
-    }
-    if (!amt || amt <= 0) {
-      alert('Amount must be greater than zero.');
-      return;
-    }
-    const cust = getCustomer(form.customerId);
-    createDebt({
-      direction: form.direction,
-      counterparty: cust ? `${cust.firstName} ${cust.lastName}`.trim() : (form.counterparty.trim() || ''),
-      customerId: form.customerId,
-      amount: amt,
-      source: form.source,
-      dueDate: form.dueDate || undefined,
-      notes: form.notes.trim() || undefined,
-      staffId: form.staffId || undefined,
+  const detail: DebtView | undefined = debts.find(d => d.id === detailId);
+  const detailCustomer = detail ? getCustomer(detail.customerId) : undefined;
+  const detailPayments = detailId ? (paymentsByDebt[detailId] || []) : [];
+  const detailRemaining = detail ? Math.max(0, detail.amount - detail.paidAmount) : 0;
+
+  // R6D — vorher: `alert()` für die Pflichtfelder, dann ein direkter Store-Aufruf (Zeile, danach die
+  // Buchung mit verschlucktem Fehler); die Gegenpartei kam als Text aus der Maske. Jetzt dieselbe
+  // Prüfung wie am Primary („Every loan must be linked to a customer" bleibt die Regel), die
+  // Gegenpartei bestimmt der Primary aus dem Kunden, und die Maske schließt nur nach einem Erfolg.
+  async function handleCreate() {
+    setCreateFehler('');
+    const r = await saveDebtCreate(w, {
+      direction: form.direction, customerId: form.customerId, amount: form.amount, source: form.source,
+      dueDate: form.dueDate || undefined, notes: form.notes, staffId: form.staffId || undefined,
     });
+    if (r.kind !== 'ok') { setCreateFehler(`Could not create the debt: ${fehlertext(r)}`); return; }
     setShowNew(false);
     resetForm();
   }
 
-  function handlePay() {
-    if (!detailId) return;
-    const amt = parseFloat(payAmount);
-    if (!amt || amt <= 0) return;
-    recordDebtPayment(detailId, amt, paySource, payDate + 'T00:00:00Z', payNote.trim() || undefined);
+  // R6D — nie mehr als der offene Rest, nie auf ein storniertes Darlehen, mit der gesehenen Fassung.
+  async function handlePay() {
+    if (!detail) return;
+    setPayFehler('');
+    const r = await saveDebtPayment(w, detail, { amount: payAmount, source: paySource, paidAt: payDate, notes: payNote });
+    if (r.kind !== 'ok') { setPayFehler(`Could not record the repayment: ${fehlertext(r)}`); return; }
     setPayAmount('');
     setPayNote('');
   }
 
-  const detail: Debt | undefined = debts.find(d => d.id === detailId);
-  const detailCustomer = detail ? getCustomer(detail.customerId) : undefined;
-  const detailPayments = detailId ? (paymentsByDebt[detailId] || []) : [];
-  const detailRemaining = detail ? Math.max(0, detail.amount - detail.paidAmount) : 0;
+  // R6D — nur das Geänderte reist; Betrag 0 ist ein angezeigtes Nein statt eines ungefangenen Fehlers.
+  async function handleEditSave() {
+    if (!detail) return;
+    setEditFehler('');
+    const r = await saveDebtUpdate(w, detail, editForm);
+    if (r.kind !== 'ok') { setEditFehler(`Could not save the debt: ${fehlertext(r)}`); return; }
+    setEditDebt(false);
+  }
 
   return (
     <PageLayout
@@ -329,7 +338,7 @@ export function DebtsPage() {
           >
             <Download size={14} /> Export CSV
           </button>
-          <Button variant="primary" onClick={() => setShowNew(true)}><Plus size={14} /> New Debt</Button>
+          <Button variant="primary" onClick={() => { setCreateFehler(''); setShowNew(true); }} data-debt-create-open><Plus size={14} /> New Debt</Button>
         </div>
       }
     >
@@ -477,6 +486,7 @@ export function DebtsPage() {
               borderBottom: '1px solid rgba(229,225,214,0.6)',
             }}
             onClick={() => setDetailId(d.id)}
+            data-debt-row={d.id}
             onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.03)')}
             onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
           >
@@ -600,6 +610,7 @@ export function DebtsPage() {
       {/* New Debt Modal */}
       <Modal open={showNew} onClose={() => { setShowNew(false); resetForm(); }} title="New Debt" width={540}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <WriteError text={createFehler} />
           <div>
             <span className="text-overline" style={{ marginBottom: 8 }}>DIRECTION</span>
             <div className="flex gap-2" style={{ marginTop: 8 }}>
@@ -607,7 +618,7 @@ export function DebtsPage() {
                 { id: 'we_lend' as DebtDirection, label: 'We lend to someone', icon: <ArrowUpRight size={14} /> },
                 { id: 'we_borrow' as DebtDirection, label: 'We borrow from someone', icon: <ArrowDownLeft size={14} /> },
               ]).map(opt => (
-                <button key={opt.id} onClick={() => setForm(f => ({ ...f, direction: opt.id }))}
+                <button key={opt.id} onClick={() => setForm(f => ({ ...f, direction: opt.id }))} data-debt-create-direction={opt.id}
                   className="cursor-pointer rounded flex-1 flex items-center gap-2 justify-center" style={{
                     padding: '10px 14px', fontSize: 12,
                     border: `1px solid ${form.direction === opt.id ? '#0F0F10' : '#D5D9DE'}`,
@@ -620,7 +631,7 @@ export function DebtsPage() {
             </div>
           </div>
 
-          <div>
+          <div data-debt-create-customer>
             <SearchSelect
               label="CLIENT *"
               placeholder="Search and select a client (required)"
@@ -639,8 +650,8 @@ export function DebtsPage() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <Input required label="AMOUNT (BHD)" type="number" step="0.001"
               value={form.amount}
-              onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} />
-            <Input label="DUE DATE (optional)" type="date"
+              onChange={e => setForm(f => ({ ...f, amount: e.target.value }))} data-debt-create-amount />
+            <Input label="DUE DATE (optional)" type="date" data-debt-create-due
               value={form.dueDate}
               onChange={e => setForm(f => ({ ...f, dueDate: e.target.value }))} />
           </div>
@@ -649,7 +660,7 @@ export function DebtsPage() {
             <span className="text-overline" style={{ marginBottom: 8 }}>{form.direction === 'we_lend' ? 'PAID FROM' : 'RECEIVED INTO'}</span>
             <div className="flex gap-2" style={{ marginTop: 8 }}>
               {(['cash', 'bank', 'benefit'] as CashSource[]).map(s => (
-                <button key={s} onClick={() => setForm(f => ({ ...f, source: s }))}
+                <button key={s} onClick={() => setForm(f => ({ ...f, source: s }))} data-debt-create-source={s}
                   className="cursor-pointer rounded flex items-center gap-2" style={{
                     padding: '8px 18px', fontSize: 12,
                     border: `1px solid ${form.source === s ? '#0F0F10' : '#D5D9DE'}`,
@@ -663,7 +674,7 @@ export function DebtsPage() {
             </div>
           </div>
 
-          <Input label="NOTES (optional)"
+          <Input label="NOTES (optional)" data-debt-create-notes
             value={form.notes}
             onChange={e => setForm(f => ({ ...f, notes: e.target.value }))} />
 
@@ -672,7 +683,7 @@ export function DebtsPage() {
 
           <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => { setShowNew(false); resetForm(); }}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate}>Create Debt</Button>
+            <Button variant="primary" onClick={() => void handleCreate()} disabled={w.busy} data-debt-create-save>Create Debt</Button>
           </div>
         </div>
       </Modal>
@@ -715,7 +726,9 @@ export function DebtsPage() {
               {detailPayments.map(p => (
                 <div key={p.id} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 12 }}>
                   <div className="flex items-center gap-2">
-                    {p.source === 'cash' ? <Wallet size={12} style={{ color: '#4B5563' }} /> : <Building2 size={12} style={{ color: '#4B5563' }} />}
+                    {p.source === 'cash' ? <Wallet size={12} style={{ color: '#4B5563' }} />
+                      : p.source === 'bank' ? <Building2 size={12} style={{ color: '#4B5563' }} />
+                      : <Smartphone size={12} style={{ color: '#FF8730' }} />}
                     <span style={{ color: '#4B5563' }}>{fmtDate(p.paidAt)}</span>
                     {p.notes && <span style={{ color: '#6B7280' }}>· {p.notes}</span>}
                   </div>
@@ -728,34 +741,36 @@ export function DebtsPage() {
             {!isSettled(detail) && (
               <div style={{ padding: '14px 18px', border: '1px solid #D5D9DE', borderRadius: 10 }}>
                 <span className="text-overline" style={{ marginBottom: 10 }}>RECORD REPAYMENT</span>
+                <WriteError text={payFehler} />
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginTop: 10 }}>
                   <Input required label="AMOUNT (BHD)" type="number" step="0.001"
                     value={payAmount}
-                    onChange={e => setPayAmount(e.target.value)} />
+                    onChange={e => setPayAmount(e.target.value)} data-debt-pay-amount />
                   <Input required label="DATE" type="date"
                     value={payDate}
-                    onChange={e => setPayDate(e.target.value)} />
+                    onChange={e => setPayDate(e.target.value)} data-debt-pay-date />
                 </div>
                 <div style={{ marginTop: 10 }}>
                   <span className="text-overline" style={{ marginBottom: 6 }}>{detail.direction === 'we_lend' ? 'RECEIVED INTO' : 'PAID FROM'}</span>
                   <div className="flex gap-2" style={{ marginTop: 8 }}>
                     {(['cash', 'bank', 'benefit'] as CashSource[]).map(s => (
-                      <button key={s} onClick={() => setPaySource(s)}
+                      <button key={s} onClick={() => setPaySource(s)} data-debt-pay-source={s}
                         className="cursor-pointer rounded flex items-center gap-2" style={{
                           padding: '6px 14px', fontSize: 12,
                           border: `1px solid ${paySource === s ? '#0F0F10' : '#D5D9DE'}`,
                           color: paySource === s ? '#0F0F10' : '#6B7280',
                           background: paySource === s ? 'rgba(15,15,16,0.06)' : 'transparent',
                         }}>
-                        {s === 'cash' ? <Wallet size={12} /> : <Building2 size={12} />}
-                        {s === 'cash' ? 'Cash' : 'Bank'}
+                        {/* R6D — der dritte Knopf war mit „Bank" und dem Bank-Symbol beschriftet, buchte aber Benefit. */}
+                        {s === 'cash' ? <Wallet size={12} /> : s === 'bank' ? <Building2 size={12} /> : <Smartphone size={12} style={{ color: '#FF8730' }} />}
+                        {s === 'cash' ? 'Cash' : s === 'bank' ? 'Bank' : 'Benefit'}
                       </button>
                     ))}
                   </div>
                 </div>
-                <Input label="NOTE (optional)" value={payNote} onChange={e => setPayNote(e.target.value)} style={{ marginTop: 10 }} />
+                <Input label="NOTE (optional)" value={payNote} onChange={e => setPayNote(e.target.value)} style={{ marginTop: 10 }} data-debt-pay-note />
                 <div className="flex justify-end" style={{ marginTop: 12 }}>
-                  <Button variant="primary" onClick={handlePay} disabled={!payAmount || parseFloat(payAmount) <= 0}>Record Repayment</Button>
+                  <Button variant="primary" onClick={() => void handlePay()} disabled={!payAmount || parseFloat(payAmount) <= 0 || w.busy} data-debt-pay-save>Record Repayment</Button>
                 </div>
               </div>
             )}
@@ -771,8 +786,9 @@ export function DebtsPage() {
                     notes: detail.notes || '',
                     source: detail.source,
                   });
+                  setEditFehler('');
                   setEditDebt(true);
-                }}>Edit</Button>
+                }} data-debt-edit-open>Edit</Button>
                 <Button variant="ghost" onClick={() => setHistoryId(detail.id)}>History</Button>
                 <Button variant="ghost" onClick={() => setDetailId(null)}>Close</Button>
               </div>
@@ -782,20 +798,21 @@ export function DebtsPage() {
             {editDebt && (
               <div style={{ padding: '14px 18px', border: '1px solid #D5D9DE', borderRadius: 10, marginTop: 12 }}>
                 <span className="text-overline" style={{ marginBottom: 10 }}>EDIT DEBT</span>
+                <WriteError text={editFehler} />
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginTop: 10 }}>
-                  <Input required label="COUNTERPARTY" value={editForm.counterparty}
+                  <Input required label="COUNTERPARTY" value={editForm.counterparty} data-debt-edit-counterparty
                     onChange={e => setEditForm({ ...editForm, counterparty: e.target.value })} />
                   <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10 }}>
-                    <Input required label="AMOUNT (BHD)" type="number" step="0.001" value={editForm.amount}
+                    <Input required label="AMOUNT (BHD)" type="number" step="0.001" value={editForm.amount} data-debt-edit-amount
                       onChange={e => setEditForm({ ...editForm, amount: e.target.value })} />
-                    <Input label="DUE DATE" type="date" value={editForm.dueDate}
+                    <Input label="DUE DATE" type="date" value={editForm.dueDate} data-debt-edit-due
                       onChange={e => setEditForm({ ...editForm, dueDate: e.target.value })} />
                   </div>
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>SOURCE</span>
                     <div className="flex gap-2" style={{ marginTop: 6 }}>
                       {(['cash', 'bank', 'benefit'] as CashSource[]).map(s => (
-                        <button key={s} onClick={() => setEditForm({ ...editForm, source: s })}
+                        <button key={s} onClick={() => setEditForm({ ...editForm, source: s })} data-debt-edit-source={s}
                           className="cursor-pointer rounded"
                           style={{ padding: '6px 14px', fontSize: 12,
                             border: `1px solid ${editForm.source === s ? '#0F0F10' : '#D5D9DE'}`,
@@ -805,20 +822,11 @@ export function DebtsPage() {
                       ))}
                     </div>
                   </div>
-                  <Input label="NOTES" value={editForm.notes}
+                  <Input label="NOTES" value={editForm.notes} data-debt-edit-notes
                     onChange={e => setEditForm({ ...editForm, notes: e.target.value })} />
                   <div className="flex justify-end gap-2" style={{ marginTop: 8 }}>
                     <Button variant="ghost" onClick={() => setEditDebt(false)}>Cancel</Button>
-                    <Button variant="primary" onClick={() => {
-                      updateDebt(detail.id, {
-                        counterparty: editForm.counterparty,
-                        amount: parseFloat(editForm.amount) || 0,
-                        dueDate: editForm.dueDate || undefined,
-                        notes: editForm.notes || undefined,
-                        source: editForm.source,
-                      });
-                      setEditDebt(false);
-                    }}>Save</Button>
+                    <Button variant="primary" onClick={() => void handleEditSave()} disabled={w.busy} data-debt-edit-save>Save</Button>
                   </div>
                 </div>
               </div>

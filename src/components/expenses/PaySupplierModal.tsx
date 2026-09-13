@@ -8,24 +8,34 @@
 // aufgebraucht ist. User kann "Override" klicken und pro Zeile selber
 // verteilen.
 //
-// v0.7.12 erweitert: drei Quell-Töpfe in EINEM Modal:
-//   - Expenses (Workshop/Service, Consignment-Loss)  → recordExpensePayment
-//   - Purchases (Consignor-Payouts, Inventory)        → purchaseStore.addPayment
-// Jede Zeile traegt einen `kind`-Discriminator; Submit dispatcht per Kind.
-import { useEffect, useMemo, useRef, useState } from 'react';
+// CENTRAL-UI-PARITY R6D — die Zahlung ist EINE Buchung (`suppliers.pay`), der Guthaben-Modus eine
+// zweite (`suppliers.apply_credit`); beide am Primary in der Schreibreihenfolge, auf PC2 ueber die
+// Bruecke. Was vorher schief lag (bestaetigt):
+//   • Der Rest einer Ausgabe ignorierte eingeloestes Guthaben → FIFO verteilte zu viel, die Zahlung
+//     wurde still gekappt, und der Unterschied wurde nirgends Guthaben.
+//   • Die Zahlschleife lief ohne Klammer — ein Fehler mittendrin liess die ersten Zahlungen stehen,
+//     ein Wiederholen zahlte sie ein zweites Mal.
+//   • Der Guthaben-Modus lief ueber den Alt-Sync-Server; am Primary gibt es dort keinen Endpunkt —
+//     er kam NIE an.
+// Die Verteilung rechnet jetzt DERSELBE Planer wie das Haus (`planSupplierPayment`); am Ende rechnet
+// der Primary sie frisch nach. Die Maske schliesst NUR bei Erfolg.
+import { useEffect, useMemo, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
 import { Bhd } from '@/components/ui/Bhd';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
-import { useSupplierStore } from '@/stores/supplierStore';
+import { supplierCreditsFor } from '@/stores/supplierStore';
 import { planSupplierCreditExpenseAllocations } from '@/core/finance/expenseCreditAllocation';
-import { applySupplierCreditViaServer } from '@/core/operations/service';
 // CENTRAL-UI-PARITY R2D — Belegnummern ueber die gemeinsame Ladefunktion.
 import { useSharedRead } from '@/core/data/shared-read';
 import { refNumbersFor } from '@/core/data/page-reads';
 import { creditPaidFor } from '@/core/data/domain-reads';
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { PAYABLES_OP, planSupplierPayment, sortOpenItems, type SupplierOpenItem } from '@/core/payables/payables-house';
+import { saveSupplierCredit, saveSupplierPay, viaWrites } from '@/core/payables/payables-save';
 
 interface PaySupplierModalProps {
   supplierId: string | null;
@@ -48,15 +58,10 @@ type ItemKind =
   | 'inventory_purchase' // purchase, normal inventory buy
   | 'other_expense';
 
-interface OpenItem {
-  /** Unified open-payable item — covers both expenses and purchases. */
-  kind: ItemKind;
-  /** Discriminator: 'expense' uses expenseStore.recordExpensePayment, 'purchase' uses purchaseStore.addPayment. */
-  sourceTable: 'expense' | 'purchase';
-  id: string;
-  number: string;           // EXP-2026-… or PUR-2026-…
+interface OpenItem extends SupplierOpenItem {
+  /** Anzeige-Typ (Werkstatt, Einlieferer, Einkauf …). */
+  display: ItemKind;
   description: string;
-  date: string;             // YYYY-MM-DD
   remaining: number;
   sourceNumber?: string;    // verlinkter Beleg (REP-…/ORD-…/CON-…)
 }
@@ -84,31 +89,22 @@ function classifyPurchase(notes: string | undefined): ItemKind {
   return 'inventory_purchase';
 }
 
+const itemKey = (item: { kind: string; id: string }): string => `${item.kind}:${item.id}`;
+
 export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySupplierModalProps) {
   const expenses = useExpenseStore(s => s.expenses);
-  const recordExpensePayment = useExpenseStore(s => s.recordExpensePayment);
-  const loadExpenses = useExpenseStore(s => s.loadExpenses);
   const purchases = usePurchaseStore(s => s.purchases);
-  const addPurchasePayment = usePurchaseStore(s => s.addPayment);
-  const grantStandaloneCredit = useSupplierStore(s => s.grantStandaloneCredit);
-  // C1 — Credit-Methode laeuft jetzt ueber applySupplierCreditViaServer (autoritativer
-  // Serverpfad); nur noch frische Lesepfade fuer Snapshot/Vorschau hier.
-  const getOpenCredits = useSupplierStore(s => s.getOpenCredits);
-  const loadSuppliers = useSupplierStore(s => s.loadSuppliers);
+  const w = useSharedWrites();
 
   const [totalAmount, setTotalAmount] = useState<number>(0);
   const [method, setMethod] = useState<PayMethod>('bank');
   const [overrideMode, setOverrideMode] = useState(false);
-  // Map<itemKey, allocation> — itemKey = `${sourceTable}:${id}`
+  // Map<itemKey, allocation> — itemKey = `${kind}:${id}`
   const [manualAlloc, setManualAlloc] = useState<Record<string, number>>({});
-  // Busy-Lock (alle Methoden) — UI-Disabling. refreshTick erzwingt nach einem Store-Throw im
-  // Credit-Modus die Neuberechnung von Snapshot/Max/Vorschau aus frisch geladenen Daten.
-  const [busy, setBusy] = useState(false);
+  // refreshTick erzwingt nach einer Buchung (auch einer abgewiesenen) frische Guthaben und Vorschau.
   const [refreshTick, setRefreshTick] = useState(0);
-  // Synchroner Re-Entry-Riegel: schuetzt auch gegen Doppel-Submit im SELBEN Tick (busy-State ist
-  // async). Bei Erfolg bleibt er gesetzt (Modal schliesst) — erst ein erneutes Oeffnen (supplierId-
-  // Effect) gibt ihn frei; bei Fehler/Confirm-Abbruch wird er sofort freigegeben (Retry moeglich).
-  const submittingRef = useRef(false);
+  const [fehler, setFehler] = useState('');
+  const busy = w.busy;
 
   // CENTRAL-UI-PARITY R2D — die Nummern der verknuepften Vorgaenge, gebuendelt und
   // filialgebunden. Vorher stellte diese Maske je offener Zeile eine eigene Abfrage.
@@ -122,75 +118,60 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
   }, [expenses, supplierId]);
   const refNumbers = useSharedRead('refs.numbers.get', refIds, (ctx) => refNumbersFor(ctx, refIds),
     { orders: {}, repairs: {}, consignments: {} }, [refIds]);
+
+  // Credit-Einloesungen je Expense gebuendelt (eine GROUP-BY-Query, kein N+1) → settled = cash+credit.
+  const guthaben = useSharedRead('expenses.credit_paid.get', {}, creditPaidFor, { byExpense: {} }, [expenses, refreshTick]);
+  const creditPaidMap = useMemo(() => new Map(Object.entries(guthaben.byExpense)), [guthaben]);
+
   const openItems = useMemo<OpenItem[]>(() => {
     if (!supplierId) return [];
-
     const items: OpenItem[] = [];
 
-    // 1. Open Expenses (all modules + categories — kind discriminates downstream)
+    // 1. Open Expenses — R6D: Rest guthabenbewusst (cash + credit), wie im Haus.
     for (const e of expenses) {
       if (e.supplierId !== supplierId) continue;
       if (e.status === 'PAID' || e.status === 'CANCELLED') continue;
-      const remaining = (e.amount || 0) - (e.paidAmount || 0);
-      if (remaining <= 0.005) continue;
-
-      // CENTRAL-UI-PARITY R2D — die Belegnummer kommt aus der gemeinsamen Auskunft oben:
-      // eine Anfrage fuer alle Zeilen statt einer je Zeile.
+      const remainingF = toFils(e.amount || 0) - toFils(e.paidAmount || 0) - toFils(creditPaidMap.get(e.id) || 0);
+      if (remainingF <= 0) continue;
+      // CENTRAL-UI-PARITY R2D — die Belegnummer kommt aus der gemeinsamen Auskunft oben.
       const sourceNumber = e.relatedEntityId
         ? (e.relatedModule === 'order' ? refNumbers.orders[e.relatedEntityId]
           : e.relatedModule === 'repair' ? refNumbers.repairs[e.relatedEntityId]
           : e.relatedModule === 'consignment' ? refNumbers.consignments[e.relatedEntityId]
           : undefined)
         : undefined;
-
       items.push({
-        kind: classifyExpense(e.relatedModule, e.category),
-        sourceTable: 'expense',
-        id: e.id,
-        number: e.expenseNumber,
-        description: e.description || '',
+        kind: 'expense', id: e.id, number: e.expenseNumber,
         date: e.expenseDate || e.createdAt?.split('T')[0] || '',
-        remaining,
-        sourceNumber,
+        remainingF, takesOverpay: false,
+        display: classifyExpense(e.relatedModule, e.category),
+        description: e.description || '', remaining: fromFils(remainingF), sourceNumber,
       });
     }
 
-    // 2. Open Purchases — Consignor-Payouts + Inventory-Einkaeufe
+    // 2. Open Purchases — Consignor-Payouts + Inventory-Einkaeufe. Rest aus den Zahlungszeilen
+    // (cash + credit), nicht aus `remaining_amount` (das eine Altzahlung falsch ueberschrieben haben kann).
     for (const p of purchases) {
       if (p.supplierId !== supplierId) continue;
       if (p.status === 'PAID' || p.status === 'CANCELLED') continue;
-      const remaining = p.remainingAmount ?? Math.max(0, (p.totalAmount || 0) - (p.paidAmount || 0));
-      if (remaining <= 0.005) continue;
-
-      // Quell-Beleg: bei Consignor-Payout aus Notes parsen (z.B. "Consignor payout · CON-2026-00002")
-      let sourceNumber: string | undefined;
+      const creditF = (p.payments || []).filter((x) => x.method === 'credit').reduce((s, x) => s + toFils(x.amount), 0);
+      const remainingF = toFils(p.totalAmount || 0) - toFils(p.paidAmount || 0) - creditF;
+      if (remainingF <= 0) continue;
       const notes = p.notes || '';
       const m = notes.match(/CON-\d+-\d+/);
-      if (m) sourceNumber = m[0];
-
       items.push({
-        kind: classifyPurchase(notes),
-        sourceTable: 'purchase',
-        id: p.id,
-        number: p.purchaseNumber,
-        description: notes,
-        date: p.purchaseDate || '',
-        remaining,
-        sourceNumber,
+        kind: 'purchase', id: p.id, number: p.purchaseNumber, date: p.purchaseDate || '',
+        remainingF, takesOverpay: creditF === 0,
+        display: classifyPurchase(notes), description: notes, remaining: fromFils(remainingF),
+        sourceNumber: m ? m[0] : undefined,
       });
     }
 
-    // FIFO: aelteste zuerst. Wenn Datums identisch (alles am selben Tag erfasst),
-    // Tiebreaker via Doc-Nummer — PUR-001 vor PUR-006 etc.
-    items.sort((a, b) => {
-      const dCmp = a.date.localeCompare(b.date);
-      if (dCmp !== 0) return dCmp;
-      return a.number.localeCompare(b.number);
-    });
-    return items;
-  }, [supplierId, expenses, purchases, refNumbers]);
+    // FIFO: aelteste zuerst, dann Belegnummer — DIESELBE Reihenfolge wie im Haus.
+    return sortOpenItems(items);
+  }, [supplierId, expenses, purchases, refNumbers, creditPaidMap]);
 
-  const totalOutstanding = useMemo(() => openItems.reduce((s, e) => s + e.remaining, 0), [openItems]);
+  const totalOutstanding = useMemo(() => fromFils(openItems.reduce((s, e) => s + e.remainingF, 0)), [openItems]);
 
   useEffect(() => {
     if (supplierId) {
@@ -198,32 +179,26 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
       setMethod('bank');
       setOverrideMode(false);
       setManualAlloc({});
-      setBusy(false);
-      submittingRef.current = false;
+      setFehler('');
     }
   }, [supplierId]);
 
-  function itemKey(item: OpenItem): string {
-    return `${item.sourceTable}:${item.id}`;
-  }
-
+  // Die FIFO-Vorschau rechnet DERSELBE Planer wie der Primary.
+  const fifoPlan = useMemo(() => {
+    const amountF = toFils(totalAmount);
+    if (amountF <= 0) return { allocations: [], excessF: 0, overflowPurchaseId: null as string | null };
+    try { return planSupplierPayment(openItems, amountF, 'fifo'); }
+    catch { return { allocations: [], excessF: 0, overflowPurchaseId: null as string | null }; }
+  }, [totalAmount, openItems]);
   const fifoAllocation = useMemo<Record<string, number>>(() => {
     const out: Record<string, number> = {};
-    let pool = totalAmount;
-    for (const item of openItems) {
-      if (pool <= 0.005) break;
-      const take = Math.min(pool, item.remaining);
-      if (take > 0.005) {
-        out[itemKey(item)] = take;
-        pool -= take;
-      }
-    }
+    for (const a of fifoPlan.allocations) out[itemKey(a)] = fromFils(a.amountF);
     return out;
-  }, [totalAmount, openItems]);
+  }, [fifoPlan]);
 
   const effectiveAllocation = overrideMode ? manualAlloc : fifoAllocation;
   const allocatedSum = useMemo(
-    () => Object.values(effectiveAllocation).reduce((s, v) => s + (v || 0), 0),
+    () => fromFils(Object.values(effectiveAllocation).reduce((s, v) => s + toFils(v || 0), 0)),
     [effectiveAllocation],
   );
 
@@ -232,16 +207,18 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
   // ─────────────────────────────────────────────────────────────
   const isCredit = method === 'credit';
 
-  // Credit-Einloesungen je Expense gebuendelt (eine GROUP-BY-Query, kein N+1) → settled = cash+credit.
-  const guthaben = useSharedRead('expenses.credit_paid.get', {}, creditPaidFor, { byExpense: {} }, [expenses, refreshTick]);
-  const creditPaidMap = useMemo(() => new Map(Object.entries(guthaben.byExpense)), [guthaben]);
+  // R6D — die Guthaben DIESES Lieferanten in DIESER Filiale, aus der gemeinsamen Auskunft (PC2 auch).
+  const lieferGuthaben = useSharedRead(
+    'suppliers.credits.get', { supplierId: supplierId ?? '', v: refreshTick },
+    (ctx) => supplierCreditsFor(ctx, supplierId ?? ''),
+    { credits: [], availableAmount: 0 }, [supplierId, refreshTick, expenses, purchases],
+  );
 
   // Offene supplier-verknuepfte Expenses (settled-aware, > 0 offen) + offene Credits — NUR Expenses,
   // Purchases fliessen bewusst NICHT ein. Reines Lesen; speist Max + Vorschau.
   const creditSnapshot = useMemo(() => {
     const emptyExp: Array<{ id: string; createdAt: string; amountF: number; settledF: number; number: string; date: string; description: string }> = [];
-    const emptyCr: Array<{ id: string; createdAt: string; totalF: number; usedF: number }> = [];
-    if (!supplierId) return { expenses: emptyExp, credits: emptyCr };
+    if (!supplierId) return { expenses: emptyExp, credits: [] as Array<{ id: string; createdAt: string; totalF: number; usedF: number }> };
     const exps = expenses
       .filter(e => e.supplierId === supplierId && e.status !== 'CANCELLED')
       .map(e => ({
@@ -254,11 +231,11 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
         description: e.description || '',
       }))
       .filter(e => e.amountF - e.settledF > 0);
-    const credits = getOpenCredits(supplierId).map(c => ({
+    const credits = lieferGuthaben.credits.map(c => ({
       id: c.id, createdAt: c.createdAt || '', totalF: toFils(c.amount), usedF: toFils(c.usedAmount),
     }));
     return { expenses: exps, credits };
-  }, [supplierId, expenses, creditPaidMap, getOpenCredits, refreshTick]);
+  }, [supplierId, expenses, creditPaidMap, lieferGuthaben]);
 
   const creditAvailableFils = useMemo(
     () => creditSnapshot.credits.reduce((s, c) => s + Math.max(0, c.totalF - c.usedF), 0),
@@ -274,8 +251,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
 
   // Default-Betrag beim Wechsel auf Credit: liegt der aktuelle Betrag <= 0 ODER ueber dem Maximum,
   // wird er auf maxApplicable gesetzt; ein gueltiger bestehender Betrag bleibt erhalten. Dep NUR
-  // method (nicht maxApplicableFils) → KEIN stilles Kappen, wenn sich das Maximum spaeter (z.B.
-  // nach einem Store-Fehler-Reload) aendert. "Use maximum" bleibt zusaetzlich.
+  // method (nicht maxApplicableFils) → KEIN stilles Kappen, wenn sich das Maximum spaeter aendert.
   useEffect(() => {
     if (method !== 'credit' || maxApplicableFils <= 0) return;
     const reqF = toFils(totalAmount);
@@ -283,8 +259,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [method]);
 
-  // Reine, NICHT autoritative Vorschau auf dem aktuellen Snapshot (gleicher Planer wie der Store).
-  // Nur wenn der Betrag im gueltigen Bereich liegt; beim Bestaetigen rechnet der Store frisch neu.
+  // Reine, NICHT autoritative Vorschau auf dem aktuellen Snapshot (gleicher Planer wie das Haus).
   const creditPreview = useMemo(() => {
     if (!isCredit) return null;
     if (requestedFils <= 0 || requestedFils > maxApplicableFils) return null;
@@ -313,103 +288,51 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
   }
 
   async function handleSubmit() {
-    // Re-Entry-Riegel: busy (async UI-State) UND submittingRef (synchron, schuetzt denselben Tick).
-    if (busy || submittingRef.current) return;
-    if (!supplierId || totalAmount <= 0) return;
+    if (busy || !supplierId || totalAmount <= 0) return;
+    setFehler('');
 
-    // ── Slice B — Credit-Branch: VOR Override/Excess/Confirm/Cash-Schleife. Genau EIN Store-Aufruf
-    // (autoritativ; FIFO im Store). Ruft NIE recordExpensePayment/addPurchasePayment/grantStandaloneCredit
-    // und erzeugt nie Overflow-Credit. ──
+    // ── Guthaben-Modus: EINE Buchung, der atomare Schreiber des Hauses (FIFO dort, frisch). ──
     if (method === 'credit') {
-      // ── C1: autoritativer Serverpfad. KEIN lokaler Write vor der Serverentscheidung.
-      // Genau eine Operation je Credit (FIFO-Plan im Service); bei accepted wird das
-      // autoritative Envelope lokal (idempotent, ohne Re-Push) angewandt. ──
-      submittingRef.current = true;
-      setBusy(true);
-      try {
-        const res = await applySupplierCreditViaServer(supplierId, fromFils(requestedFils));
-        loadExpenses();                          // Settlement-Displays neu laden
-        loadSuppliers();                         // Supplier-KPIs/Liste
-        setRefreshTick(t => t + 1);              // Snapshot/Max/Vorschau neu rechnen
-        if (res.outcome === 'success') {
-          onClose();                             // Erfolg: schliessen (Riegel bleibt bis Re-Open)
-        } else {
-          // conflict / validation / bootstrap / offline / unknown / auth / server:
-          // Modal bleibt offen, klare Meldung, Retry erlaubt — KEIN automatischer Retry.
-          alert(res.message);
-          submittingRef.current = false;
-        }
-      } catch (e) {
-        alert(e instanceof Error ? e.message : String(e));
-        loadExpenses();
-        loadSuppliers();
-        setRefreshTick(t => t + 1);
-        submittingRef.current = false;
-      } finally {
-        setBusy(false);
-      }
+      const r = await saveSupplierCredit(viaWrites(w, PAYABLES_OP.SUPPLIERS_APPLY_CREDIT), supplierId, fromFils(requestedFils));
+      setRefreshTick(t => t + 1);
+      if (r.kind !== 'ok') { setFehler(fehlertext(r)); return; }
+      onClose();
       return;
     }
 
-    // ── cash/bank/benefit (fachlich unveraendert) ──
-    const cashMethod = method as 'cash' | 'bank' | 'benefit';
-    if (overrideMode && Math.abs(allocatedSum - totalAmount) > 0.005) {
-      alert(`Allocation sum (${fmt(allocatedSum)}) does not match total payment (${fmt(totalAmount)}).`);
+    // ── cash/bank/benefit ──
+    if (overrideMode && toFils(allocatedSum) !== toFils(totalAmount)) {
+      setFehler(`Allocation sum (${fmt(allocatedSum)}) does not match total payment (${fmt(totalAmount)}).`);
       return;
     }
-    submittingRef.current = true;
-    setBusy(true);
-    // Ueberschuss (nicht allozierbar): liegt ein offenes Purchase-Item vor, wird er darauf gebucht
-    // → reconcilePurchaseOverpayCredit reklassiert ihn zu SUPPLIER_CREDIT (PURCHASE_OVERPAY).
-    // Liegen NUR Expenses vor (kein Purchase), wird der Ueberschuss als standalone Supplier-Credit
-    // gutgeschrieben (DR SUPPLIER_CREDIT / CR cash) — kein Geld geht mehr verloren.
-    const excess = totalAmount - allocatedSum;
-    const overflowPurchase = openItems.find(i => i.sourceTable !== 'expense');
-    if (excess > 0.005 && !overflowPurchase) {
+    // Ueberschuss (nur FIFO): liegt ein Einkauf vor, der ihn tragen kann, wird er darauf gebucht
+    // (→ PURCHASE_OVERPAY-Guthaben); sonst entsteht ein Standalone-Guthaben. Letzteres bestaetigt
+    // der Mensch hier — der Primary entscheidet dieselbe Frage mit demselben Planer.
+    if (!overrideMode && fifoPlan.excessF > 0 && !fifoPlan.overflowPurchaseId) {
       if (!window.confirm(
         `You're paying ${fmt(totalAmount)} but only ${fmt(allocatedSum)} can be allocated ` +
-        `(${fmt(excess)} excess). The excess will be credited to ${supplierName || 'this supplier'} ` +
+        `(${fmt(fromFils(fifoPlan.excessF))} excess). The excess will be credited to ${supplierName || 'this supplier'} ` +
         `as redeemable supplier credit. Continue?`
-      )) {
-        submittingRef.current = false;           // Confirm abgebrochen → Riegel + Busy frei, keine Mutation
-        setBusy(false);
-        return;
-      }
+      )) return;
     }
-
-    try {
-      for (const item of openItems) {
-        const alloc = effectiveAllocation[itemKey(item)] || 0;
-        if (alloc <= 0.005) continue;
-        if (item.sourceTable === 'expense') {
-          recordExpensePayment(item.id, alloc, cashMethod);
-        } else {
-          addPurchasePayment(item.id, alloc, cashMethod);
-        }
-      }
-      // Ueberschuss verbuchen: bevorzugt auf ein offenes Purchase (PURCHASE_OVERPAY),
-      // sonst als standalone Supplier-Credit (DR SUPPLIER_CREDIT / CR cash).
-      if (excess > 0.005) {
-        if (overflowPurchase) {
-          addPurchasePayment(overflowPurchase.id, excess, cashMethod);
-        } else if (supplierId) {
-          grantStandaloneCredit(supplierId, excess, cashMethod, 'Supplier prepayment (PaySupplier overpayment)');
-        }
-      }
-      onClose();                                 // Erfolg: Riegel bleibt gesetzt bis Re-Open
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-      submittingRef.current = false;             // Fehler → Retry erlauben
-    } finally {
-      setBusy(false);
-    }
+    const allocations = overrideMode
+      ? openItems
+          .map((i) => ({ kind: i.kind, id: i.id, amount: manualAlloc[itemKey(i)] || 0 }))
+          .filter((a) => toFils(a.amount) > 0)
+      : undefined;
+    const r = await saveSupplierPay(viaWrites(w, PAYABLES_OP.SUPPLIERS_PAY), {
+      supplierId, amount: totalAmount, method, mode: overrideMode ? 'manual' : 'fifo', allocations,
+    });
+    setRefreshTick(t => t + 1);
+    if (r.kind !== 'ok') { setFehler(fehlertext(r)); return; }
+    onClose();
   }
 
   // Credit-Modus: Betrag > 0 und <= maxApplicable (Fils, kein stilles Cappen). Sonst: bestehende Mathe.
   const canSubmit = isCredit
     ? (requestedFils > 0 && requestedFils <= maxApplicableFils)
     : (totalAmount > 0 && (overrideMode
-        ? Math.abs(allocatedSum - totalAmount) <= 0.005
+        ? toFils(allocatedSum) === toFils(totalAmount)
         : allocatedSum > 0));
 
   return (
@@ -442,6 +365,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
                   value={totalAmount || ''}
                   disabled={busy}
                   onChange={e => setTotalAmount(parseFloat(e.target.value) || 0)}
+                  data-supplier-pay-amount
                 />
                 {isCredit && (
                   <div className="flex items-center justify-between" style={{ marginTop: 6, fontSize: 11, color: '#6B7280' }}>
@@ -449,6 +373,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
                     <button
                       onClick={() => !busy && setTotalAmount(fromFils(maxApplicableFils))}
                       disabled={busy || maxApplicableFils <= 0}
+                      data-supplier-credit-max
                       className="cursor-pointer rounded"
                       style={{
                         padding: '3px 10px', fontSize: 11, border: '1px solid #D5D9DE',
@@ -469,6 +394,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
                         key={m}
                         onClick={() => !busy && setMethod(m)}
                         disabled={busy}
+                        data-supplier-pay-method={m}
                         className="cursor-pointer rounded"
                         style={{
                           padding: '8px 16px',
@@ -494,6 +420,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
                         key="credit"
                         onClick={() => !disabled && setMethod('credit')}
                         disabled={disabled}
+                        data-supplier-pay-method="credit"
                         title={noExpense ? 'No open supplier-linked expenses to settle with credit' : undefined}
                         className="cursor-pointer rounded"
                         style={{
@@ -528,6 +455,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
                 <button
                   onClick={() => !busy && handleToggleOverride()}
                   disabled={busy}
+                  data-supplier-pay-mode={overrideMode ? 'manual' : 'fifo'}
                   className="cursor-pointer"
                   style={{
                     background: 'transparent',
@@ -557,8 +485,8 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
                 {openItems.map(item => {
                   const k = itemKey(item);
                   const alloc = effectiveAllocation[k] || 0;
-                  const km = KIND_META[item.kind];
-                  const fullyPaid = alloc >= item.remaining - 0.005 && alloc > 0;
+                  const km = KIND_META[item.display];
+                  const fullyPaid = toFils(alloc) >= item.remainingF && alloc > 0;
                   return (
                     <div key={k} style={{ display: 'contents' }}>
                       <span className="font-mono" style={{ fontSize: 11, color: '#0F0F10', padding: '8px 0', borderTop: '1px solid #E5E9EE' }}>{item.number}</span>
@@ -580,6 +508,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
                             step="0.01"
                             value={manualAlloc[k] ?? ''}
                             disabled={busy}
+                            data-supplier-pay-alloc={k}
                             onChange={ev => handleManualChange(k, parseFloat(ev.target.value) || 0, item.remaining)}
                             style={{
                               width: '100%',
@@ -620,7 +549,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
                 <span style={{ color: '#6B7280' }}>Payment amount:</span>
                 <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={totalAmount}/> BHD</span>
               </div>
-              {overrideMode && Math.abs(allocatedSum - totalAmount) > 0.005 && (
+              {overrideMode && toFils(allocatedSum) !== toFils(totalAmount) && (
                 <div className="flex justify-between" style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid #E5E9EE' }}>
                   <span style={{ color: '#DC2626', fontWeight: 500 }}>Difference:</span>
                   <span className="font-mono" style={{ color: '#DC2626', fontWeight: 500 }}>
@@ -631,7 +560,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
             </div>
             </>)}
 
-            {/* Slice B — Credit-Vorschau (NUR Expenses, rein informativ, gleicher Planer wie der Store). */}
+            {/* Slice B — Credit-Vorschau (NUR Expenses, rein informativ, gleicher Planer wie das Haus). */}
             {isCredit && (
               <div>
                 <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
@@ -681,9 +610,11 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
           </>
         )}
 
+        <WriteError text={fehler} />
         <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>
-          <Button variant="primary" onClick={handleSubmit} disabled={!canSubmit || busy}>
+          <Button variant="primary" onClick={() => void handleSubmit()} disabled={!canSubmit || busy}
+            {...(isCredit ? { 'data-supplier-credit-save': '' } : { 'data-supplier-pay-save': '' })}>
             {busy ? 'Working…' : isCredit
               ? `Apply Credit${totalAmount > 0 ? ' ' + fmt(totalAmount) + ' BHD' : ''}`
               : `Pay ${totalAmount > 0 ? fmt(totalAmount) + ' BHD' : ''}`}

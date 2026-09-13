@@ -73,18 +73,18 @@ const read = (p: string) => readFileSync(join(repo, p), 'utf8');
   // Store-Auskuenfte entstehen in einer Schleife ueber den Katalog — also 19 Fundstellen.
   // R1: fünf typisierte Auskünfte, jede einzeln registriert — deshalb 23 Fundstellen.
   const catalogue = (read('src/core/bridge/store-read-ops.ts').match(/^export const OP_[A-Z_]+ = '/gm) || []).length;
-  ok(probes === 1 && reads === 68 && catalogue === 50 && mutations === 52,
-    `SCOPE 1 Probe + 18 Auskünfte + 50 typisierte Auskünfte + 52 Buchungen (R6C: +2 Inventur-Auskünfte, +7 Stammdaten, +4 Inventur) (${probes}/${reads}/${catalogue}/${mutations})`);
+  ok(probes === 1 && reads === 71 && catalogue === 53 && mutations === 80,
+    `SCOPE 1 Probe + 18 Auskünfte + 53 typisierte Auskünfte + 80 Buchungen (R6C: +2 Inventur-Auskünfte, +7 Stammdaten, +4 Inventur; R6D: +28 Geld/Steuer/Gold/Metall, +3 Auskünfte) (${probes}/${reads}/${catalogue}/${mutations})`);
 
   const a = reg.indexOf('ALLOWED_MUTATIONS: readonly string[] = [');
   const body = reg.slice(reg.indexOf('[', a) + 1, reg.indexOf('\n];', a));
   const allow = [...body.matchAll(/'([^']+)'/g)].map((m) => m[1]);
-  ok(allow.length === 52, `SCOPE die Erlaubnisliste nennt genau 52 Buchungen (R6C) (${allow.length})`);
+  ok(allow.length === 80, `SCOPE die Erlaubnisliste nennt genau 80 Buchungen (R6D) (${allow.length})`);
 
   const bridge = read('src-tauri/src/bridge.rs').replace(/\r\n/g, '\n');
   const rustList = bridge.slice(bridge.indexOf('pub const REMOTE_OPS: &[&str] = &['));
   const rustOps = rustList.slice(0, rustList.indexOf('\n];')).split('\n').filter((l) => /^\s{4}OP_[A-Z0-9_]+,$/.test(l));
-  ok(rustOps.length === 121, `SCOPE und Rust lässt genau dieselben 121 Namen durch (${rustOps.length})`);
+  ok(rustOps.length === 152, `SCOPE und Rust lässt genau dieselben 152 Namen durch (${rustOps.length})`);
 }
 
 // ── §2 — der alte Desktop-Abgleich ist im Client-Modus verweigert ──────────

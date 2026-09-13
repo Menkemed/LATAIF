@@ -99,11 +99,40 @@ const MATRIX: Record<string, Zeile> = {
   'inventory.save': { ui: 'StockCheckInventoryModal — Save stock check', gleich: true },
   'inventory.finish': { ui: 'StockCheckInventoryModal — Finish inventory', gleich: true },
   'inventory.record_check': { ui: 'ProductDetail — Einzel-Check', gleich: true },
+  // R6D — Steuer, Geld, Gold, Metall.
+  'tax.record_payment': { ui: 'AnalyticsPage — Record VAT Payment', gleich: true },
+  'banking.transfer': { ui: 'BankingPage — Create Transfer', gleich: true },
+  'partners.record_tx': { ui: 'PartnersPage — Invest / Withdraw / Profit', gleich: true },
+  'debts.create': { ui: 'DebtsPage — New Loan', gleich: true },
+  'debts.update': { ui: 'DebtsPage — Save', gleich: true },
+  'debts.record_payment': { ui: 'DebtsPage — Record Repayment', gleich: true },
+  'expenses.create': { ui: 'ExpenseList — New Expense', gleich: true },
+  'expenses.update': { ui: 'ExpenseList — Save Expense', gleich: true },
+  'expenses.record_payment': { ui: 'PayExpenseModal — Pay (Ausgaben, Lieferant, Auftrag, Reparatur)', gleich: true },
+  'expenses.template_create': { ui: 'ExpenseList — New Recurring', gleich: true },
+  'expenses.template_update': { ui: 'ExpenseList — Pause/Resume, Save Template', gleich: true },
+  'purchases.record_payment': { ui: 'PurchaseDetail — Record Payment', gleich: true },
+  'purchases.apply_credit': { ui: 'PurchaseDetail — Apply Credit', gleich: true },
+  'suppliers.pay': { ui: 'PaySupplierModal — Pay Supplier', gleich: true },
+  'suppliers.apply_credit': { ui: 'PaySupplierModal — Supplier Credit', gleich: true },
+  'suppliers.refund_credit': { ui: 'SupplierDetail — Refund Credit', gleich: true },
+  'gold.payables.settle': { ui: 'SettleGoldModal — Return gold / Apply shop gold / → BHD', gleich: true },
+  'gold.customer_credits.settle': { ui: 'SettleGoldModal — Return to customer / → BHD', gleich: true },
+  'repairs.record_gold_usage': { ui: 'RepairDetail — Add Gold Usage', gleich: true },
+  'repairs.add_material': { ui: 'RepairDetail — Add Material', gleich: true },
+  'orders.add_cost': { ui: 'OrderDetail — Add Cost', gleich: true },
+  'orders.remove_cost': { ui: 'OrderDetail — Kostenzeile löschen', gleich: true },
+  'metals.create': { ui: 'MetalList — Add Item', gleich: true },
+  'metals.update_status': { ui: 'MetalList — Mark Sold / Confirm Melt', gleich: true },
+  'metals.set_spot_price': { ui: 'MetalList — Spotpreis/g', gleich: true },
+  'scrap_trades.create': { ui: 'ScrapTradeNew — Save Trade', gleich: true },
+  'scrap_trades.update': { ui: 'ScrapTradeDetail — Save Changes', gleich: true },
+  'scrap_trades.cancel': { ui: 'ScrapTradeDetail — Cancel Trade', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 52, `A 52 Buchungen (vierzig + invoices.cancel + elf aus R6C) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 80, `A 80 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

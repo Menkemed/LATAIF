@@ -50,6 +50,13 @@ import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-
 import { nextRepairStatus, repairStatusFlow } from '@/core/repairs/repair-status-flow';
 import { useSharedRead } from '@/core/data/shared-read';
 import { creditPaidFor } from '@/core/data/domain-reads';
+// CENTRAL-UI-PARITY R6D — „Add Gold Usage" und „Add Material": dieselbe Hausfolge wie der Fernbefehl.
+import {
+  addRepairMaterialOnPrimary, materialRowsFromModal, recordRepairGoldUsageOnPrimary, repairGoldUsageBody,
+  repairMaterialBody, type RepairGoldUsageRequest, type RepairMaterialRequest,
+} from '@/core/gold/gold-house';
+import { KARAT_PURITY } from '@/core/gold/purity';
+import type { MaterialLineInput } from '@/components/work-orders/AddMaterialModal';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -113,9 +120,6 @@ export function RepairDetail() {
   const goldLoadAll = useGoldStore(s => s.loadAll);
   const goldPayables = useGoldStore(s => s.goldPayables);
   const customerGoldCredits = useGoldStore(s => s.customerGoldCredits);
-  const createGoldPayable = useGoldStore(s => s.createGoldPayable);
-  const createCustomerGoldCredit = useGoldStore(s => s.createCustomerGoldCredit);
-  const creditShopGold = useGoldStore(s => s.creditShopGold);
   const { invoices, loadInvoices } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
@@ -193,6 +197,9 @@ export function RepairDetail() {
 
   // Live payment status from the linked expense — derived from expenseStore so it
   // re-renders automatically when recordExpensePayment() updates the store.
+  // R6D — das Guthaben je Ausgabe gehört zu den Abhängigkeiten (vorher fehlte es: kam die Auskunft
+  // später an, blieb der Chip auf dem alten Stand).
+  const creditByExpense = guthaben.byExpense;
   const workshopExpensePaid = useMemo(() => {
     if (!id || !repair) return false;
     const fee = repair.repairType === 'hybrid'
@@ -204,13 +211,17 @@ export function RepairDetail() {
     const linked = expenses.find(e => e.relatedModule === 'repair' && e.relatedEntityId === id);
     if (!linked) return !!repair.internalPaidFrom;
     // Settlement-SSOT: cash + credit. Eine credit-beglichene Workshop-Expense gilt als bezahlt.
-    const settlement = computeExpenseSettlement(linked.amount, linked.paidAmount || 0, guthaben.byExpense[linked.id] || 0, linked.status);
+    const settlement = computeExpenseSettlement(linked.amount, linked.paidAmount || 0, creditByExpense[linked.id] || 0, linked.status);
     return settlement.status === 'PAID';
-  }, [id, repair, expenses]);
+  }, [id, repair, expenses, creditByExpense]);
 
-  useEffect(() => {
-    if (repair) setForm({ ...repair });
-  }, [repair]);
+  // Die Formularkopie folgt der geladenen Reparatur — beim Rendern angeglichen statt per Effekt
+  // (dieselbe Wirkung, ohne zweiten Renderdurchlauf).
+  const [formVon, setFormVon] = useState<Repair | undefined>(undefined);
+  if (repair && repair !== formVon) {
+    setFormVon(repair);
+    setForm({ ...repair });
+  }
 
   // Plan repair-multi-supplier — State fuer Add-Line + Add-Gold + Settle-Modal
   const [showAddLineModal, setShowAddLineModal] = useState(false);
@@ -306,50 +317,50 @@ export function RepairDetail() {
     if (!id || !repair) return;
     const received = parseFloat(newGoldForm.receivedG) || 0;
     const used = parseFloat(newGoldForm.usedG) || 0;
-
-    if (newGoldForm.source === 'workshop') {
-      // Workshop hat eigenes Gold verwendet → gold_payable
-      if (!newGoldForm.supplierId || received <= 0) return;
-      createGoldPayable({
-        supplierId: newGoldForm.supplierId,
-        sourceRepairId: id,
-        weightGrams: received,
-        karat: newGoldForm.karat,
-        settlementType: newGoldForm.settlementType,
-      });
-    } else {
-      // Customer-Gold: leftover behandeln
-      if (received <= 0) return;
-      const leftover = received - used;
-      if (leftover > 0 && newGoldForm.leftoverDest === 'credit') {
-        createCustomerGoldCredit({
-          customerId: repair.customerId,
-          sourceRepairId: id,
-          weightGrams: leftover,
-          karat: newGoldForm.karat,
-          notes: `Customer-Gold leftover from repair ${repair.repairNumber}`,
-        });
-      } else if (leftover > 0 && newGoldForm.leftoverDest === 'shop_keep') {
-        // Plan v0.1.45: Shop-Keep buchen direkt ins precious_metals-Inventar
-        // via creditShopGold-Action. gold_movement-Audit-Eintrag entsteht
-        // automatisch (source=repair_consumption, target=precious_metals).
-        // Repair hat keine eigene branchId — Current-Branch aus Auth (Fallback branch-main).
-        const { currentBranchId: getBranch } = await import('@/core/db/helpers');
-        let branchId: string;
-        try { branchId = getBranch(); } catch { branchId = 'branch-main'; }
-        creditShopGold(branchId, newGoldForm.karat, leftover, {
-          repairId: id,
-          sourceLabel: `Customer-Gold leftover from repair ${repair.repairNumber}`,
-        });
-      }
-      // leftoverDest === 'return' → nichts buchen, nur Doku im Repair-Notes
-    }
+    if (received <= 0) return;
+    if (newGoldForm.source === 'workshop' && !newGoldForm.supplierId) return;
+    // CENTRAL-UI-PARITY R6D — EINE Handlung: Workshop-Gold → Gramm-Schuld; Kundengold → der Rest
+    // geht zurueck, wird Kundenguthaben oder bleibt im Laden. Die Regeln (mehr verbraucht als
+    // erhalten ist ein Nein, nur bekannte Karate, echter Lieferant) stehen im Haus.
+    const fassung = fassungOderNichts('recording gold usage');
+    if (fassung === null) return;
+    const req: RepairGoldUsageRequest = newGoldForm.source === 'workshop'
+      ? {
+          repairId: id, expectedRevision: fassung || undefined, source: 'workshop', karat: newGoldForm.karat,
+          receivedGrams: received, supplierId: newGoldForm.supplierId, settlementType: newGoldForm.settlementType,
+        }
+      : {
+          repairId: id, expectedRevision: fassung || undefined, source: 'customer', karat: newGoldForm.karat,
+          receivedGrams: received, usedGrams: used, leftover: newGoldForm.leftoverDest,
+        };
+    if (!await w.ok('repairs.record_gold_usage', {
+      local: () => recordRepairGoldUsageOnPrimary(req),
+      remote: () => repairGoldUsageBody(req),
+    })) return;
+    goldLoadAll();
 
     setShowAddGoldModal(false);
     setNewGoldForm({
       source: 'workshop', supplierId: '', receivedG: '', usedG: '', karat: '21K',
       settlementType: 'return_gold', leftoverDest: 'return',
     });
+  }
+
+  // v0.2.1 — Material (Diamond/Stone/Gold-Piece) als Repair-Zeilen. v0.7.6 — Goldschmied-Gold
+  // (Gold + Lieferant + Gramm) wird Gramm-Schuld statt BHD-A/P, verknüpft mit seiner Zeile.
+  // CENTRAL-UI-PARITY R6D — ALLE Positionen in EINER Buchung (vorher je Position eine eigene, ohne
+  // Fehlerbehandlung — ein zweiter Klick nach einem Fehler legte die ersten doppelt an).
+  async function handleAddMaterial(data: MaterialLineInput[]): Promise<boolean> {
+    if (!id || !repair) return false;
+    const fassung = fassungOderNichts('adding repair material');
+    if (fassung === null) return false;
+    const req: RepairMaterialRequest = { repairId: id, expectedRevision: fassung || undefined, rows: materialRowsFromModal(data) };
+    if (!await w.ok('repairs.add_material', {
+      local: () => addRepairMaterialOnPrimary(req),
+      remote: () => repairMaterialBody(req),
+    })) return false;
+    loadRepairs(); loadRepairLines(); goldLoadAll();
+    return true;
   }
 
   const nextStatus = getNextStatus(repair.status, repair.repairType, repair.repairScope);
@@ -1193,7 +1204,7 @@ export function RepairDetail() {
                   <Button variant="secondary" onClick={() => setShowAddLineModal(true)}>
                     <span style={{ fontSize: 14, marginRight: 4 }}>+</span> Add Work
                   </Button>
-                  <Button variant="secondary" onClick={() => setShowAddMaterialModal(true)}>
+                  <Button variant="secondary" onClick={() => setShowAddMaterialModal(true)} data-material-open>
                     <span style={{ fontSize: 14, marginRight: 4 }}>+</span> Add Material
                   </Button>
                 </div>
@@ -1332,7 +1343,7 @@ export function RepairDetail() {
                 <span className="text-overline">
                   GOLD USED ({repairGoldPayables.length + repairCustomerGoldCredits.length})
                 </span>
-                <button onClick={() => setShowAddGoldModal(true)}
+                <button onClick={() => setShowAddGoldModal(true)} data-gold-usage-open
                   className="cursor-pointer"
                   style={{ padding: '6px 12px', fontSize: 12, borderRadius: 6,
                            border: '1px solid #C6A36D', background: 'rgba(198,163,109,0.08)', color: '#8A7548' }}>
@@ -1368,11 +1379,11 @@ export function RepairDetail() {
                             </div>
                             {gp.status === 'OPEN' && remaining > 0 && (
                               <div style={{ display: 'flex', gap: 6 }}>
-                                <button onClick={() => setSettleModal({ open: true, mode: 'settle_supplier_return', payable: gp })}
+                                <button data-gold-settle-open="settle_supplier_return" onClick={() => setSettleModal({ open: true, mode: 'settle_supplier_return', payable: gp })}
                                   style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#0F0F10', cursor: 'pointer' }}>
                                   Settle
                                 </button>
-                                <button onClick={() => setSettleModal({ open: true, mode: 'convert_supplier_money', payable: gp })}
+                                <button data-gold-settle-open="convert_supplier_money" onClick={() => setSettleModal({ open: true, mode: 'convert_supplier_money', payable: gp })}
                                   style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #C6A36D', borderRadius: 4, background: 'rgba(198,163,109,0.08)', color: '#8A7548', cursor: 'pointer' }}>
                                   → BHD
                                 </button>
@@ -1405,11 +1416,11 @@ export function RepairDetail() {
                             </div>
                             {gc.status === 'OPEN' && remaining > 0 && (
                               <div style={{ display: 'flex', gap: 6 }}>
-                                <button onClick={() => setSettleModal({ open: true, mode: 'return_customer', credit: gc })}
+                                <button data-gold-settle-open="return_customer" onClick={() => setSettleModal({ open: true, mode: 'return_customer', credit: gc })}
                                   style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#0F0F10', cursor: 'pointer' }}>
                                   Return
                                 </button>
-                                <button onClick={() => setSettleModal({ open: true, mode: 'convert_customer_money', credit: gc })}
+                                <button data-gold-settle-open="convert_customer_money" onClick={() => setSettleModal({ open: true, mode: 'convert_customer_money', credit: gc })}
                                   style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #C6A36D', borderRadius: 4, background: 'rgba(198,163,109,0.08)', color: '#8A7548', cursor: 'pointer' }}>
                                   → BHD
                                 </button>
@@ -1561,7 +1572,7 @@ export function RepairDetail() {
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>GOLD SOURCE</span>
             <div style={{ display: 'flex', gap: 8 }}>
               {(['workshop', 'customer'] as const).map(src => (
-                <button key={src} type="button"
+                <button key={src} type="button" data-gold-usage-source={src}
                   onClick={() => setNewGoldForm({ ...newGoldForm, source: src })}
                   style={{ padding: '8px 14px', fontSize: 13, borderRadius: 6,
                            border: `1px solid ${newGoldForm.source === src ? '#0F0F10' : '#D5D9DE'}`,
@@ -1575,15 +1586,16 @@ export function RepairDetail() {
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-            <Input label="WEIGHT RECEIVED (g)" type="number" step="0.001"
+            <Input label="WEIGHT RECEIVED (g)" type="number" step="0.001" data-gold-usage-received
               value={newGoldForm.receivedG}
               onChange={e => setNewGoldForm({ ...newGoldForm, receivedG: e.target.value })} />
             <div>
               <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>KARAT</span>
-              <select value={newGoldForm.karat}
+              <select value={newGoldForm.karat} data-gold-usage-karat
                 onChange={e => setNewGoldForm({ ...newGoldForm, karat: e.target.value })}
                 style={{ width: '100%', padding: '9px 12px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 6, background: '#F2F7FA' }}>
-                {(['24K','22K','21K','18K','14K','9K','999','925','950'] as const).map(k => (
+                {/* R6D — genau die Karate, deren Reinheit das Haus kennt (purity.ts) — dieselbe Liste prueft der Kern. */}
+                {Object.keys(KARAT_PURITY).map(k => (
                   <option key={k} value={k}>{k}</option>
                 ))}
               </select>
@@ -1592,18 +1604,22 @@ export function RepairDetail() {
 
           {newGoldForm.source === 'workshop' ? (
             <>
-              <SearchSelect
-                label="SUPPLIER / GOLDSMITH"
-                placeholder="Pick supplier..."
-                options={supplierOptions}
-                value={newGoldForm.supplierId}
-                onChange={sid => setNewGoldForm({ ...newGoldForm, supplierId: sid })}
-              />
+              {/* R6D — Workshop-Gold ist eine Schuld bei einem ECHTEN Lieferanten: „In-house" gehoert
+                  nicht in diese Auswahl (vorher entstand damit eine Schuld bei „__INHOUSE__"). */}
+              <div data-gold-usage-supplier>
+                <SearchSelect
+                  label="SUPPLIER / GOLDSMITH"
+                  placeholder="Pick supplier..."
+                  options={supplierOptions.filter(o => o.id !== '__INHOUSE__')}
+                  value={newGoldForm.supplierId}
+                  onChange={sid => setNewGoldForm({ ...newGoldForm, supplierId: sid })}
+                />
+              </div>
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>SETTLEMENT TYPE</span>
                 <div style={{ display: 'flex', gap: 8 }}>
                   {(['return_gold', 'pay_money'] as const).map(st => (
-                    <button key={st} type="button"
+                    <button key={st} type="button" data-gold-usage-settlement={st}
                       onClick={() => setNewGoldForm({ ...newGoldForm, settlementType: st })}
                       style={{ padding: '8px 14px', fontSize: 13, borderRadius: 6,
                                border: `1px solid ${newGoldForm.settlementType === st ? '#0F0F10' : '#D5D9DE'}`,
@@ -1622,14 +1638,14 @@ export function RepairDetail() {
             </>
           ) : (
             <>
-              <Input label="WEIGHT USED IN REPAIR (g)" type="number" step="0.001"
+              <Input label="WEIGHT USED IN REPAIR (g)" type="number" step="0.001" data-gold-usage-used
                 value={newGoldForm.usedG}
                 onChange={e => setNewGoldForm({ ...newGoldForm, usedG: e.target.value })} />
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>LEFTOVER DESTINATION</span>
                 <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
                   {(['return', 'credit', 'shop_keep'] as const).map(d => (
-                    <button key={d} type="button"
+                    <button key={d} type="button" data-gold-usage-leftover={d}
                       onClick={() => setNewGoldForm({ ...newGoldForm, leftoverDest: d })}
                       style={{ padding: '8px 14px', fontSize: 13, borderRadius: 6,
                                border: `1px solid ${newGoldForm.leftoverDest === d ? '#0F0F10' : '#D5D9DE'}`,
@@ -1649,10 +1665,14 @@ export function RepairDetail() {
             </>
           )}
 
+          {w.fehler && (
+            <div data-gold-usage-error style={{ padding: '8px 10px', background: 'rgba(220,38,38,0.06)',
+              border: '1px solid rgba(220,38,38,0.3)', borderRadius: 6, fontSize: 12, color: '#DC2626' }}>{w.fehler}</div>
+          )}
           <div className="flex justify-end gap-3" style={{ paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowAddGoldModal(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleAddGold}
-              disabled={!parseFloat(newGoldForm.receivedG) ||
+            <Button variant="primary" onClick={() => void handleAddGold()} data-gold-usage-save
+              disabled={w.busy || !parseFloat(newGoldForm.receivedG) ||
                         (newGoldForm.source === 'workshop' && !newGoldForm.supplierId)}>
               Add Gold Usage
             </Button>
@@ -1682,43 +1702,9 @@ export function RepairDetail() {
         open={showAddMaterialModal}
         onClose={() => setShowAddMaterialModal(false)}
         showCustomerPrice={false}
-        onSubmit={(data) => {
-          // v0.7.6 — Goldsmith-Gold (Kind='gold' + Supplier + Gramm) wird als
-          // gold_payable (Gramm-Schuld) gebucht statt als BHD-A/P beim Supplier.
-          // Die repair_line traegt dann KEINEN Supplier-Link (sonst Doppel-A/P),
-          // behaelt aber costAmount fuer Margin-Calculation. Konsistent zum
-          // OrderDetail-Pfad (Z.243). Settlement-Type 'return_gold' default —
-          // der User kann spaeter auf 'pay_money' wechseln im Gold-Bucket.
-          const goldAsPayable = data.materialKind === 'gold' && !!data.supplierId && (data.weightGrams || 0) > 0;
-          const newLine = addRepairLine(repair.id, {
-            supplierId: goldAsPayable ? undefined : (data.supplierId || undefined),
-            workType: 'service',
-            description: data.description,
-            costAmount: data.totalCost,
-            materialKind: data.materialKind,
-            materialDetails: {
-              ct: data.caratPerPiece,
-              qty: data.quantity,
-              description: data.description,
-              karat: data.karat,
-              weightGrams: data.weightGrams,
-              supplierName: data.supplierName,
-            },
-          });
-          if (goldAsPayable && data.supplierId) {
-            createGoldPayable({
-              supplierId: data.supplierId,
-              sourceRepairId: repair.id,
-              // v0.7.6 — line-level link, damit cancelRepairLine die Gold-Schuld
-              // sauber mitloeschen kann (analog Order-Pattern).
-              sourceRepairLineId: newLine.id,
-              weightGrams: data.weightGrams!,
-              karat: data.karat || '22K',
-              // Default: settle by returning gold. User can pivot to pay_money later.
-              settlementType: 'return_gold',
-            });
-          }
-        }}
+        busy={w.busy}
+        submitError={w.fehler}
+        onSubmitAll={handleAddMaterial}
       />
     </div>
   );

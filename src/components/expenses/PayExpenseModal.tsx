@@ -2,9 +2,12 @@
 //
 // Vorher lebte das Modal inline in ExpenseList. Jetzt wiederverwendet von
 // SupplierDetail (Workshop & Service Costs Pay-Button), RepairDetail (A/P-
-// Chip-Klick) und OrderDetail (A/P-Chip-Klick). Eine UI, eine SSOT-Action
-// (`recordExpensePayment`) — Cross-Store-Reload triggert die anderen Views
-// automatisch via expenseStore.recordExpensePayment.
+// Chip-Klick) und OrderDetail (A/P-Chip-Klick). Eine UI, eine SSOT-Action.
+//
+// CENTRAL-UI-PARITY R6D — „Record Payment" ist EINE Buchung (`expenses.record_payment`): am Primary
+// die Hausfolge in der Schreibreihenfolge, auf PC2 die Fernbuchung. Mehr als offen wird vom Haus
+// abgewiesen (vorher still auf den Rest gekappt, waehrend die Maske den vollen Betrag meldete). Das
+// Modal schliesst NUR bei Erfolg; ein Fehler bleibt stehen. Alle vier Einstiege erben das hier.
 import { useEffect, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
@@ -14,6 +17,10 @@ import { useExpenseStore } from '@/stores/expenseStore';
 import { computeExpenseSettlement } from '@/core/finance/expenseSettlement';
 import { useSharedRead } from '@/core/data/shared-read';
 import { creditPaidFor } from '@/core/data/domain-reads';
+import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { PAYABLES_OP } from '@/core/payables/payables-house';
+import { saveExpensePayment } from '@/core/payables/payables-save';
 
 interface PayExpenseModalProps {
   expenseId: string | null;
@@ -26,7 +33,9 @@ type PayMethod = 'cash' | 'bank' | 'benefit';
 
 export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalProps) {
   const expenses = useExpenseStore(s => s.expenses);
-  const recordExpensePayment = useExpenseStore(s => s.recordExpensePayment);
+  const loadExpenses = useExpenseStore(s => s.loadExpenses);
+  const zahlen = useSharedWrite<Record<string, unknown>>(PAYABLES_OP.EXPENSES_RECORD_PAYMENT);
+  const [fehler, setFehler] = useState('');
 
   const [amount, setAmount] = useState<number>(0);
   const [method, setMethod] = useState<PayMethod>('bank');
@@ -41,10 +50,17 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
   const settlement = exp ? computeExpenseSettlement(exp.amount, exp.paidAmount || 0, creditPaid, exp.status) : null;
   const remaining = settlement ? settlement.remaining : 0;
 
+  // R6D — beim Oeffnen den Stand frisch holen: die Fassung, die „Record Payment" nennt, soll die
+  // aktuelle sein (auch wenn das Modal aus Reparatur/Auftrag kommt, die die Liste nicht laden).
+  useEffect(() => {
+    if (expenseId) loadExpenses();
+  }, [expenseId, loadExpenses]);
+
   // Wenn das Modal mit einer neuen expenseId oeffnet, Form mit Restbetrag +
   // Default-Methode vorbelegen. effect statt useState-Init damit ein
   // wiederholtes Oeffnen mit einer anderen Expense den State neu seedet.
   useEffect(() => {
+    setFehler('');
     if (exp) {
       setAmount(remaining);
       setMethod((exp.paymentMethod as PayMethod) || 'bank');
@@ -54,15 +70,14 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [expenseId]);
 
-  function handleSubmit() {
-    if (!expenseId || amount <= 0) return;
-    try {
-      recordExpensePayment(expenseId, amount, method);
-      onPaid?.();
-      onClose();
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-    }
+  async function handleSubmit() {
+    if (!expenseId || amount <= 0 || zahlen.busy) return;
+    if (!exp) { setFehler('This expense is not loaded yet — close and open it again.'); return; }
+    setFehler('');
+    const r = await saveExpensePayment(zahlen, exp, amount, method);
+    if (r.kind !== 'ok') { setFehler(fehlertext(r)); return; }
+    onPaid?.();
+    onClose();
   }
 
   return (
@@ -108,7 +123,9 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
           type="number"
           step="0.01"
           value={amount || ''}
+          disabled={zahlen.busy}
           onChange={e => setAmount(parseFloat(e.target.value) || 0)}
+          data-expense-pay-amount
         />
         <div>
           <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
@@ -118,7 +135,9 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
               return (
                 <button
                   key={m}
-                  onClick={() => setMethod(m)}
+                  onClick={() => !zahlen.busy && setMethod(m)}
+                  disabled={zahlen.busy}
+                  data-expense-pay-method={m}
                   className="cursor-pointer rounded"
                   style={{
                     padding: '8px 16px',
@@ -134,9 +153,12 @@ export function PayExpenseModal({ expenseId, onClose, onPaid }: PayExpenseModalP
             })}
           </div>
         </div>
+        <WriteError text={fehler} />
         <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-          <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={handleSubmit} disabled={amount <= 0}>Record Payment</Button>
+          <Button variant="ghost" onClick={onClose} disabled={zahlen.busy}>Cancel</Button>
+          <Button variant="primary" onClick={() => void handleSubmit()} disabled={amount <= 0 || zahlen.busy} data-expense-pay-save>
+            {zahlen.busy ? 'Saving…' : 'Record Payment'}
+          </Button>
         </div>
       </div>
     </Modal>

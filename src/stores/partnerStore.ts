@@ -6,7 +6,7 @@ import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import type { Partner, PartnerTransaction, PartnerTransactionType } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
+import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
@@ -16,11 +16,12 @@ import { localReadContext, type BusinessReadContext } from '@/core/data/read-con
 // CENTRAL-UI-PARITY R6C — die eine Stammdaten-Regel (Name Pflicht, Anteil 0–100 %).
 import { partnerCreateInput, partnerUpdateInput } from '@/core/masterdata/masterdata-rules';
 import {
-  postPartnerTransaction,
   postPartnerTransactionReversed,
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
+// CENTRAL-UI-PARITY R6D — Einlage, Entnahme und Gewinnausschüttung sind EINE Hausfolge.
+import { moneyAction, recordPartnerTxInHouse } from '@/core/finance/money-house';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -208,7 +209,10 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
   getPartnerLedger: (partnerId) => partnerLedgerFor(partnerId),
 }));
 
-// Helper — records a partner transaction with correct prefix
+// R6D — Einlage, Entnahme, Gewinnausschüttung. Vorher: Beleg, Zeile, Speichern, und DANACH die
+// Buchung mit verschlucktem Fehler; der Partner wurde gar nicht nachgeschlagen, die Filiale im
+// Zweifel 'branch-main'. Jetzt dieselbe Hausfolge wie die Maske und `partners.record_tx`, in einer
+// Klammer. Ohne Datum: heute (wie bisher).
 function recordTx(
   partnerId: string,
   type: PartnerTransactionType,
@@ -218,47 +222,14 @@ function recordTx(
   notes: string | undefined,
   get: () => PartnerStore
 ): PartnerTransaction {
-  const db = getDatabase();
-  const now = new Date().toISOString();
-  const id = uuid();
-  let branchId: string, userId: string;
-  try { branchId = currentBranchId(); userId = currentUserId(); }
-  catch { branchId = 'branch-main'; userId = 'user-owner'; }
-
-  // Plan §Settings §B: PST (Partner Investment), PWD (Partner Withdrawal)
-  const prefix = type === 'INVESTMENT' ? 'PST' : type === 'WITHDRAWAL' ? 'PWD' : 'PWD';
-  const txNumber = getNextDocumentNumber(prefix);
-
-  // Plan §8 #8 — Payment-Status: cash = direkt PAID (Geld fließt sofort),
-  // bank = PENDING bis zur Bestätigung (z.B. Überweisung kann scheitern).
-  const paymentStatus: 'PENDING' | 'PAID' = method === 'cash' ? 'PAID' : 'PENDING';
-  const paidAt = paymentStatus === 'PAID' ? now : null;
-
-  db.run(
-    `INSERT INTO partner_transactions (id, branch_id, partner_id, transaction_number, type, amount, method,
-      transaction_date, notes, payment_status, paid_at_actual, created_at, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [id, branchId, partnerId, txNumber, type, amount, method, date || now.split('T')[0],
-     notes || null, paymentStatus, paidAt, now, userId]
-  );
-  saveDatabase();
-  trackInsert('partner_transactions', id, { partnerId, type, amount, method, paymentStatus });
+  const tx = moneyAction((ctx) => recordPartnerTxInHouse({
+    partnerId, kind: type, amount, method,
+    date: date || new Date().toISOString().split('T')[0],
+    notes,
+  }, ctx));
   get().loadTransactions();
   get().loadPartners();
-
-  // ZIEL.md §3a — Partner-Transaction ans Ledger.
-  // Wir posten unabhängig von payment_status; das matched die existierende Cashflow-Logik
-  // im bankingStore, die PENDING-Bank-Transfers ebenfalls als bewegte Cash zählt.
-  safePost(`postPartnerTransaction(${id})`, () => {
-    if (hasLedgerEntries('PARTNER_TX', id)) return;
-    postPartnerTransaction({
-      id, partnerId, type, amount, method,
-      transactionDate: date || now.split('T')[0],
-      transactionNumber: txNumber,
-    });
-  });
-
-  return get().transactions.find(t => t.id === id)!;
+  return tx;
 }
 
 

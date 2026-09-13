@@ -88,6 +88,12 @@ export const OP_EXPENSES_CREDIT_PAID_GET = 'expenses.credit_paid.get';
 export const OP_INVENTORY_SESSION_GET = 'inventory.session.get';
 export const OP_INVENTORY_CHECKS_GET = 'inventory.checks.get';
 
+// CENTRAL-UI-PARITY R6D — was die Geld- und Metallflächen bisher selbst abfragten: der Spotpreis je
+// Metall (Filialeinstellung), die Rückzahlungen eines Darlehens, die offenen Guthaben eines Lieferanten.
+export const OP_METALS_SPOT_PRICES_GET = 'metals.spot_prices.get';
+export const OP_DEBTS_PAYMENTS_GET = 'debts.payments.get';
+export const OP_SUPPLIERS_CREDITS_GET = 'suppliers.credits.get';
+
 /**
  * Die Liste IST die Erlaubnis. Ein Name, der hier fehlt, existiert fuer das Netz nicht — genau
  * wie bei den Buchungen. Dieselbe Liste kennt auch Rust.
@@ -143,6 +149,9 @@ export const STORE_READ_OPS: readonly string[] = [
   OP_EXPENSES_CREDIT_PAID_GET,
   OP_INVENTORY_SESSION_GET,
   OP_INVENTORY_CHECKS_GET,
+  OP_METALS_SPOT_PRICES_GET,
+  OP_DEBTS_PAYMENTS_GET,
+  OP_SUPPLIERS_CREDITS_GET,
 ];
 
 // Nicht hier — und damit fern nicht aufrufbar — sind nur noch drei Arten von Zugriffen, und keine

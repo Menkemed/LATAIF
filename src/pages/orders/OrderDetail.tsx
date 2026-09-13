@@ -44,6 +44,11 @@ import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { updateOrderOnPrimary } from '@/core/orders/order-house';
+// CENTRAL-UI-PARITY R6D — „Add Cost" und das Löschen einer Kostenzeile: dieselbe Hausfolge wie der Fernbefehl.
+import {
+  addOrderCostOnPrimary, materialRowsFromModal, orderCostBody, orderCostRemoveBody, removeOrderCostOnPrimary,
+  type OrderCostRemoveRequest, type OrderCostRequest,
+} from '@/core/gold/gold-house';
 import { orderEditBody } from '@/core/orders/order-edit';
 import { WriteError } from '@/components/shared/WriteError';
 import { orderDetailReadsFor } from '@/core/data/page-reads';
@@ -80,12 +85,12 @@ export function OrderDetail() {
   const goBack = useGoBack('/orders');
   const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines,
     getBillableLines, markOrderLinesInvoiced, assertOrderLinesBillable, updateOrderLineStatus,
-    addOrderLine, deleteOrderLine, updateOrderLine,
+    updateOrderLine,
     markOrderLineOrdered, cancelOrderWithMoney } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
-  const { goldPayables, loadGoldPayables, createGoldPayable, deleteGoldPayable } = useGoldStore();
+  const { goldPayables, loadGoldPayables, deleteGoldPayable } = useGoldStore();
   const { products, loadProducts, createProduct } = useProductStore();
   // v0.7.7 — expenseStore: A/P-Chip-Klick auf einer Cost-Line oeffnet das Pay-
   // Modal in-place. Cross-Store-Reload triggert nach Submit den lineRefresh-Tick.
@@ -272,52 +277,37 @@ export function OrderDetail() {
     setShowPayment(false);
   }
 
-  // v0.5.0 — Kostenposition nachträglich erfassen (Quote-first „cost-later").
-  // Wird als ARRIVED angelegt → commitOrderLineExpenses bucht die A/P sofort.
-  function handleAddCostMaterial(data: MaterialLineInput) {
-    if (!id) return;
-    const ctLabel = (data.materialKind === 'diamond' || data.materialKind === 'stone')
-      ? `${data.quantity}× ${(data.caratPerPiece || 0).toFixed(2)}ct `
-      : '';
-    // v0.6.0 — Goldschmied-Gold (Gold-Kind + Supplier) → Gold-Verbindlichkeit
-    // (Gramm) statt Geld-A/P. Die Cost-Line traegt dann KEINEN Supplier — sie
-    // ist nur der COGS-Wert; die Gramm-Schuld lebt im gold_payable.
-    const goldAsPayable = data.materialKind === 'gold' && !!data.supplierId && (data.weightGrams || 0) > 0;
-    try {
-      const newLineId = addOrderLine(id, {
-        description: `${ctLabel}${data.description}`.trim(),
-        quantity: 1,
-        unitPrice: 0,
-        isCustomerFacing: false,
-        materialKind: data.materialKind,
-        supplierId: goldAsPayable ? undefined : (data.supplierId || undefined),
-        costAmount: data.totalCost,
-        status: 'ARRIVED',
-        materialDetails: {
-          ct: data.caratPerPiece,
-          qty: data.quantity,
-          description: data.description,
-          karat: data.karat,
-          weightGrams: data.weightGrams,
-          supplierName: data.supplierName,
-        },
-      });
-      // v0.6.5 — Gramm-Schuld mit der eben erzeugten Kostenzeile verknuepfen,
-      // damit sie beim Loeschen der Zeile automatisch mitentfernt wird.
-      if (goldAsPayable && data.supplierId) {
-        createGoldPayable({
-          supplierId: data.supplierId,
-          sourceOrderId: id,
-          sourceOrderLineId: newLineId,
-          weightGrams: data.weightGrams!,
-          karat: data.karat || '22K',
-        });
-        loadGoldPayables();
-      }
-      setLineRefresh(k => k + 1);
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-    }
+  // v0.5.0 — Kostenpositionen nachträglich erfassen (Quote-first „cost-later").
+  // Als ARRIVED angelegt → commitOrderLineExpenses bucht die A/P sofort; Goldschmied-Gold (Gold +
+  // Lieferant) wird Gramm-Schuld statt Geld-A/P (v0.6.0), verknüpft mit ihrer Zeile (v0.6.5).
+  // CENTRAL-UI-PARITY R6D — ALLE Positionen in EINER Buchung (vorher jede für sich, ein zweiter
+  // Klick nach einem Fehler legte die ersten doppelt an); Regeln und Schreiben stehen im Haus.
+  async function handleAddCosts(data: MaterialLineInput[]): Promise<boolean> {
+    if (!id || !order) return false;
+    const fassung = order.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('adding order costs (no revision loaded)'))); return false; }
+    const req: OrderCostRequest = { orderId: id, expectedRevision: fassung || undefined, rows: materialRowsFromModal(data) };
+    if (!await w.ok('orders.add_cost', {
+      local: () => addOrderCostOnPrimary(req),
+      remote: () => orderCostBody(req),
+    })) return false;
+    loadOrders(); loadGoldPayables(); loadExpenses();
+    setLineRefresh(k => k + 1);
+    return true;
+  }
+
+  /** R6D — eine Kostenzeile löschen: Zeile, offene Gramm-Schuld und A/P-Ausgabe in EINER Buchung. */
+  async function kostenzeileEntfernen(lineId: string) {
+    if (!id || !order) return;
+    const fassung = order.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('removing a cost line (no revision loaded)'))); return; }
+    const req: OrderCostRemoveRequest = { orderId: id, expectedRevision: fassung || undefined, lineId };
+    if (!await w.ok('orders.remove_cost', {
+      local: () => removeOrderCostOnPrimary(req),
+      remote: () => orderCostRemoveBody(req),
+    })) return;
+    loadOrders(); loadGoldPayables(); loadExpenses();
+    setLineRefresh(k => k + 1);
   }
 
   // v0.5.0 — Order-Beleg (Quotation) — Bestellbestätigung für den Kunden bei Anlage.
@@ -1354,7 +1344,7 @@ export function OrderDetail() {
               <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
                 <span className="text-overline">COSTS / MATERIALS ({costLines.length})</span>
                 {!isCancelled && perm.canManageOrders && (
-                  <Button variant="secondary" onClick={() => setShowAddCost(true)}>
+                  <Button variant="secondary" onClick={() => setShowAddCost(true)} data-order-add-cost-open>
                     <Plus size={14} /> Add Cost
                   </Button>
                 )}
@@ -1438,10 +1428,11 @@ export function OrderDetail() {
                         </span>
                         {!isCancelled && perm.canManageOrders ? (
                           <button
+                            data-order-cost-remove={l.id}
+                            disabled={w.busy}
                             onClick={() => {
                               if (!window.confirm('Diese Kostenposition löschen? Eine gebuchte A/P-Schuld wird storniert.')) return;
-                              try { deleteOrderLine(l.id); loadGoldPayables(); setLineRefresh(k => k + 1); }
-                              catch (e) { alert(e instanceof Error ? e.message : String(e)); }
+                              void kostenzeileEntfernen(l.id);
                             }}
                             className="cursor-pointer"
                             style={{ background: 'none', border: 'none', color: '#DC2626', borderTop: '1px solid #E5E9EE', padding: '10px 0' }}
@@ -1505,12 +1496,12 @@ export function OrderDetail() {
                       <div style={{ padding: '7px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                         {open && !isCancelled && perm.canManageOrders ? (
                           <>
-                            <button type="button" onClick={() => setSettleGold({ mode: 'apply_shop_to_supplier', payable: gp })}
+                            <button type="button" data-gold-settle-open="apply_shop_to_supplier" onClick={() => setSettleGold({ mode: 'apply_shop_to_supplier', payable: gp })}
                               className="cursor-pointer"
                               style={{ fontSize: 11, padding: '4px 10px', borderRadius: 4, border: '1px solid #C6A36D', color: '#9A7B3F', background: 'transparent' }}>
                               Gold geben
                             </button>
-                            <button type="button" onClick={() => setSettleGold({ mode: 'convert_supplier_money', payable: gp })}
+                            <button type="button" data-gold-settle-open="convert_supplier_money" onClick={() => setSettleGold({ mode: 'convert_supplier_money', payable: gp })}
                               className="cursor-pointer"
                               style={{ fontSize: 11, padding: '4px 10px', borderRadius: 4, border: '1px solid #6E8AAA', color: '#4B6A8A', background: 'transparent' }}>
                               In Geld
@@ -1719,7 +1710,9 @@ export function OrderDetail() {
       <AddMaterialModal
         open={showAddCost}
         onClose={() => setShowAddCost(false)}
-        onSubmit={handleAddCostMaterial}
+        onSubmitAll={handleAddCosts}
+        busy={w.busy}
+        submitError={w.fehler}
         showCustomerPrice={false}
         allowLabor={true}
       />

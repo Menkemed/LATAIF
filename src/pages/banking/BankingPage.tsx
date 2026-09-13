@@ -11,6 +11,10 @@ import { Input } from '@/components/ui/Input';
 import { useBankingStore, transferFlow, transferDirectionFor, type BankTransactionType, type BankAccount } from '@/stores/bankingStore';
 import { useSharedRead } from '@/core/data/shared-read';
 import { ledgerBalancesFor, LEERE_SALDEN } from '@/core/data/domain-reads';
+// CENTRAL-UI-PARITY R6D — die Umbuchung: am Primary die Hausfolge, auf PC2 `banking.transfer`.
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { saveBankTransfer } from '@/core/finance/money-save';
+import { WriteError } from '@/components/shared/WriteError';
 
 
 const TYPE_LABELS: Record<BankTransactionType, string> = {
@@ -38,7 +42,9 @@ const TYPE_COLORS: Record<BankTransactionType, string> = {
 };
 
 export function BankingPage() {
-  const { transfers, loadTransfers, createTransfer, getTransactions } = useBankingStore();
+  const { transfers, loadTransfers, getTransactions } = useBankingStore();
+  const w = useSharedWrites();
+  const [transferFehler, setTransferFehler] = useState('');
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const [showNew, setShowNew] = useState(false);
@@ -57,6 +63,7 @@ export function BankingPage() {
   // Dashboard-Shortcut „Transfer" → /banking?new=1 öffnet direkt das Transfer-Modal.
   useEffect(() => {
     if (searchParams.get('new') === '1') {
+      setTransferFehler('');
       setShowNew(true);
       setSearchParams({}, { replace: true });
     }
@@ -94,13 +101,20 @@ export function BankingPage() {
     return Array.from(set);
   }, [allTxs]);
 
-  function handleCreate() {
-    const amt = parseFloat(amount);
-    if (!amt || amt <= 0) return;
+  function openTransfer() {
+    setTransferFehler('');
+    setShowNew(true);
+  }
+
+  // R6D — vorher: direkter Store-Aufruf (Zeile, dann Buchung mit verschlucktem Fehler), die Maske
+  // schloss sich in jedem Fall. Jetzt schließt sie nur nach einem Erfolg; sonst steht der Grund da.
+  async function handleCreate() {
     if (fromAcc === toAcc) return;
     const dir = transferDirectionFor(fromAcc, toAcc);
     if (!dir) return;
-    createTransfer({ amount: amt, direction: dir, transferDate: date, notes: notes || undefined });
+    setTransferFehler('');
+    const r = await saveBankTransfer(w, { direction: dir, amount, transferDate: date, notes });
+    if (r.kind !== 'ok') { setTransferFehler(`Could not create the transfer: ${fehlertext(r)}`); return; }
     setAmount(''); setNotes('');
     setDate(new Date().toISOString().split('T')[0]);
     setShowNew(false);
@@ -132,7 +146,7 @@ export function BankingPage() {
     <PageLayout
       title="Banking"
       subtitle="Cash, Bank & Benefit (BenefitPay App) — live balances + unified transaction log"
-      actions={<Button variant="primary" onClick={() => setShowNew(true)}><ArrowRightLeft size={14} /> Transfer</Button>}
+      actions={<Button variant="primary" onClick={openTransfer} data-bank-transfer-open><ArrowRightLeft size={14} /> Transfer</Button>}
     >
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 20, marginBottom: 24 }}>
         <Card>
@@ -299,7 +313,7 @@ export function BankingPage() {
                 {(['cash', 'bank', 'benefit'] as const).map(a => {
                   const active = fromAcc === a;
                   return (
-                    <button key={a} onClick={() => pickFrom(a)} className="cursor-pointer rounded"
+                    <button key={a} onClick={() => pickFrom(a)} className="cursor-pointer rounded" data-bank-transfer-from={a}
                       style={{ padding: '8px 12px', fontSize: 13,
                         border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                         color: active ? '#0F0F10' : '#6B7280',
@@ -316,7 +330,7 @@ export function BankingPage() {
                   const active = toAcc === a;
                   const disabled = a === fromAcc;
                   return (
-                    <button key={a} onClick={() => !disabled && pickTo(a)}
+                    <button key={a} onClick={() => !disabled && pickTo(a)} data-bank-transfer-to={a}
                       className={disabled ? '' : 'cursor-pointer'}
                       disabled={disabled}
                       style={{ padding: '8px 12px', fontSize: 13, borderRadius: 4,
@@ -331,16 +345,17 @@ export function BankingPage() {
             </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-            <Input required label="AMOUNT (BHD)" type="number" step="0.001" placeholder="0.000" value={amount} onChange={e => setAmount(e.target.value)} autoFocus />
-            <Input required label="DATE" type="date" value={date} onChange={e => setDate(e.target.value)} />
+            <Input required label="AMOUNT (BHD)" type="number" step="0.001" placeholder="0.000" value={amount} onChange={e => setAmount(e.target.value)} autoFocus data-bank-transfer-amount />
+            <Input required label="DATE" type="date" value={date} onChange={e => setDate(e.target.value)} data-bank-transfer-date />
           </div>
-          <Input label="NOTES" placeholder="Optional" value={notes} onChange={e => setNotes(e.target.value)} />
+          <Input label="NOTES" placeholder="Optional" value={notes} onChange={e => setNotes(e.target.value)} data-bank-transfer-notes />
+          <WriteError text={transferFehler} />
           <div style={{ fontSize: 12, color: '#6B7280', padding: '8px 0' }}>
             {ACCOUNT_META[fromAcc].icon} {ACCOUNT_META[fromAcc].label} → {ACCOUNT_META[toAcc].label} {ACCOUNT_META[toAcc].icon}
           </div>
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate} disabled={!amount || parseFloat(amount) <= 0 || fromAcc === toAcc}>Create Transfer</Button>
+            <Button variant="primary" onClick={() => void handleCreate()} disabled={!amount || parseFloat(amount) <= 0 || fromAcc === toAcc || w.busy} data-bank-transfer-save>Create Transfer</Button>
           </div>
         </div>
       </Modal>

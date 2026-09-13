@@ -2102,6 +2102,77 @@ function runMigrations(database: Database): void {
        BEGIN
          UPDATE agent_transfers SET revision = revision + 1 WHERE id = OLD.transfer_id;
        END`,
+
+    // ── CENTRAL-UI-PARITY R6D — die Fassung für die änderbaren Geld- und Goldzustände ──────
+    //
+    // Darlehen, Ausgaben, Ausgabenvorlagen, Einkäufe, Gold-Verbindlichkeiten, Kundengold und
+    // Edelmetall bekommen einen zweiten Rechner, der sie ändern, bezahlen oder abrechnen kann.
+    // Derselbe Vertrag wie bei Rechnung und Auftrag (C3D/C3E): eine Ganzzahl, vom Trigger geführt,
+    // unteilbar mit der Wirkung. Jeder Zahlungs- und Abrechnungsweg schreibt die Kopfzeile ohnehin
+    // mit (Status, Rest, erfüllte Gramm) — der Kopf-Trigger genügt deshalb.
+    `ALTER TABLE debts ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_debts_revision`,
+    `CREATE TRIGGER trg_debts_revision
+       AFTER UPDATE ON debts
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE debts SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
+    `ALTER TABLE expenses ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_expenses_revision`,
+    `CREATE TRIGGER trg_expenses_revision
+       AFTER UPDATE ON expenses
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE expenses SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
+    `ALTER TABLE recurring_expense_templates ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_recurring_expense_templates_revision`,
+    `CREATE TRIGGER trg_recurring_expense_templates_revision
+       AFTER UPDATE ON recurring_expense_templates
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE recurring_expense_templates SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
+    `ALTER TABLE purchases ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_purchases_revision`,
+    `CREATE TRIGGER trg_purchases_revision
+       AFTER UPDATE ON purchases
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE purchases SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
+    `ALTER TABLE gold_payables ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_gold_payables_revision`,
+    `CREATE TRIGGER trg_gold_payables_revision
+       AFTER UPDATE ON gold_payables
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE gold_payables SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
+    `ALTER TABLE customer_gold_credits ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_customer_gold_credits_revision`,
+    `CREATE TRIGGER trg_customer_gold_credits_revision
+       AFTER UPDATE ON customer_gold_credits
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE customer_gold_credits SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
+    `ALTER TABLE precious_metals ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_precious_metals_revision`,
+    `CREATE TRIGGER trg_precious_metals_revision
+       AFTER UPDATE ON precious_metals
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE precious_metals SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

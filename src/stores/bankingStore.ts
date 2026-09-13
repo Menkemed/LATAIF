@@ -7,11 +7,12 @@
 // ═══════════════════════════════════════════════════════════
 
 import { create } from 'zustand';
-import { v4 as uuid } from 'uuid';
 import type { BankTransfer } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
-import { trackInsert, trackDelete } from '@/core/sync/track';
+import { query } from '@/core/db/helpers';
+import { trackDelete } from '@/core/sync/track';
+// CENTRAL-UI-PARITY R6D — die Umbuchung ist EINE Hausfolge (Zeile + Buchung, zusammen oder gar nicht).
+import { createBankTransferInHouse, moneyAction } from '@/core/finance/money-house';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
@@ -19,7 +20,6 @@ import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 import {
-  postBankTransfer,
   postBankTransferReversed,
   hasLedgerEntries,
   hasReversalFor,
@@ -158,30 +158,16 @@ export const useBankingStore = create<BankingStore>((set, get) => ({
   },
 
   createTransfer: (data) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const id = uuid();
-    let branchId: string, userId: string;
-    try { branchId = currentBranchId(); userId = currentUserId(); }
-    catch { branchId = 'branch-main'; userId = 'user-owner'; }
-
-    const date = data.transferDate || now.split('T')[0];
-    db.run(
-      `INSERT INTO bank_transfers (id, branch_id, amount, direction, transfer_date, notes, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, branchId, data.amount, data.direction, date, data.notes || null, now, userId]
-    );
-    saveDatabase();
-    trackInsert('bank_transfers', id, { amount: data.amount, direction: data.direction });
+    // R6D — vorher: Zeile, Speichern, Abgleich, und DANACH die Buchung mit verschlucktem Fehler
+    // (eine Umbuchung ohne Buchung blieb stehen); Filiale im Zweifel 'branch-main'. Jetzt dieselbe
+    // Hausfolge wie die Maske und `banking.transfer`, in einer Klammer. Ohne Datum: heute (wie bisher).
+    const transfer = moneyAction((ctx) => createBankTransferInHouse({
+      direction: data.direction,
+      amount: data.amount,
+      transferDate: data.transferDate || new Date().toISOString().split('T')[0],
+      notes: data.notes,
+    }, ctx));
     get().loadTransfers();
-    const transfer = get().transfers.find(t => t.id === id)!;
-
-    // ZIEL.md §3a — Ledger-Posting für Bank-Transfer.
-    safePost(`postBankTransfer(${id})`, () => {
-      if (hasLedgerEntries('BANK_TRANSFER', id)) return;
-      postBankTransfer(transfer);
-    });
-
     return transfer;
   },
 

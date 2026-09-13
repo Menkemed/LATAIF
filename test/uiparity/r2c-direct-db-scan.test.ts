@@ -48,7 +48,8 @@ const KATALOG: Record<string, Eintrag> = {
   // ── Schreiben: gehoert zu den 40 geprueften Buchungen — diese sind keine davon. ──
   // R6C — die Inventurmaske ist hier NICHT mehr: sie fragt keine Datenbank; ihre Hausfolge liegt in
   // `core/stock/inventory-house` (am Primary in der Schreibreihenfolge, auf PC2 als `inventory.*`).
-  'pages/analytics/AnalyticsPage.tsx': { art: 'schreib-luecke', abfragen: 1, grund: 'Steuerzahlung eintragen; die Schaltflaeche fehlt im Client' },
+  // R6D — die Steuerzahlung ist hier NICHT mehr: sie läuft über `core/finance/money-house` (am Primary in
+  // der Schreibreihenfolge, auf PC2 als `tax.record_payment`); die Seite fragt die Datenbank nicht mehr.
   // R5A — OrderDetail ist hier NICHT mehr: der Zahlungstopf wird in
   // `core/orders/order-payment-carryover` umgerechnet, die Ansicht fragt die Datenbank nicht mehr direkt.
   'pages/reports/BackfillPage.tsx': { art: 'schreib-luecke', abfragen: 3, grund: 'schreibt Hauptbuchzeilen nach; die Vorschau gehoert zum Schreibweg' },
@@ -136,7 +137,8 @@ const gefunden = new Map<string, number>([...scan('src/pages'), ...scan('src/com
   ok(!/clientMode \? \([\s\S]{0,300}\) : <ReconciliationPage \/>/.test(app),
     'E …die Abstimmung selbst ist aber keine Maschinenflaeche mehr');
   const analytics = readFileSync(resolvePath(repo, 'src/pages/analytics/AnalyticsPage.tsx'), 'utf8');
-  ok(/!readsFromPrimary\(\) && \(/.test(analytics), 'E die Steuerzahlung wird im Client nicht angeboten');
+  ok(/saveTaxPayment\(/.test(analytics) && !/!readsFromPrimary\(\) && \(/.test(analytics),
+    'E die Steuerzahlung läuft auf beiden Rechnern über die gemeinsame Hausfolge (R6D) — kein Client-Riegel mehr nötig');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r2c: direct database scan: ${PASS} passed, ${fails.length} failed`);

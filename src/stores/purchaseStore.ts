@@ -21,17 +21,19 @@ import { useProductStore } from '@/stores/productStore';
 import {
   postPurchaseReceived,
   postPurchasePayment,
-  postPurchaseOverpaymentCredit,
   postPurchaseCancelled,
   postEntries,
   reverseSource,
-  beginLedgerTransaction,
-  commitLedgerTransaction,
-  rollbackLedgerTransaction,
   getPurchaseLineInputSplit,
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
+// CENTRAL-UI-PARITY R6D — die Overpay-Helfer (Slice 4b) wohnen jetzt neben der Zahlungsfolge des
+// Hauses; der Store und das Haus benutzen DIESELBEN (unveraendert).
+import {
+  assertSupplierOverpayMutable, reconcilePurchaseOverpayCredit, teardownSupplierOverpayCredit,
+} from '@/core/payables/purchase-overpay';
+import { atomar, localHouseCtx, recordPurchasePaymentInHouse } from '@/core/payables/payables-house';
 import { restoreSupplierCreditUsage } from '@/core/finance/supplierCreditRestore';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
@@ -50,98 +52,9 @@ function safePost(label: string, fn: () => void): void {
 }
 
 // ── Slice 4b — Purchase-Ueberzahlung → SUPPLIER_CREDIT ────────────────────────
-// Overpay-Basis ist purchases.paid_amount (NETTO-CASH): addPayment erhoeht es, confirmReturn-
-// Refund senkt es, applyCreditToPurchase (Credit-Einloesung) fasst es NICHT an → Credit-
-// Zahlungen erzeugen nie Ueberzahlung (Entscheidung 5). Bewusst NICHT SUM(non-credit payments):
-// das wuerde nach einem Refund-Return den Ueberschuss um den Refund zu hoch ansetzen (AP-Drift).
-// SUPPLIER_CREDIT ist Asset/DEBIT-natur → Reklass DR SUPPLIER_CREDIT / CR ACCOUNTS_PAYABLE
-// (NICHT spiegelbildlich zur Customer-Seite). Diskriminator gegen Return-Credits:
-// source_purchase_id=? AND source_return_id IS NULL (Return-Credits setzen beide IDs).
-function purchaseOverpayOf(purchaseId: string): { over: number; supplierId: string } {
-  const r = query(`SELECT supplier_id, total_amount, paid_amount FROM purchases WHERE id = ?`, [purchaseId])[0];
-  if (!r) return { over: 0, supplierId: '' };
-  const over = Math.max(0, Math.round(((Number(r.paid_amount || 0)) - (Number(r.total_amount || 0))) * 1000) / 1000);
-  return { over, supplierId: (r.supplier_id as string) || '' };
-}
-function existingSupplierOverpayCredit(purchaseId: string): { id: string; amount: number; used: number } | null {
-  const r = query(
-    `SELECT id, amount, used_amount FROM supplier_credits WHERE source_purchase_id = ? AND source_return_id IS NULL`,
-    [purchaseId]
-  )[0];
-  return r ? { id: r.id as string, amount: Number(r.amount || 0), used: Number(r.used_amount || 0) } : null;
-}
-// BLOCK bei eingeloestem Overpay-Guthaben (Entscheidung 6: kein Auto-Reversal benutzter Credits).
-function assertSupplierOverpayCreditUnused(purchaseId: string, msg: string): void {
-  const ex = existingSupplierOverpayCredit(purchaseId);
-  if (ex && ex.used > 0.005) throw new Error(msg);
-}
-// Pre-Check VOR jeder Mutation: aendert sich der Ueberschuss, waehrend die bestehende Overpay-
-// Gutschrift schon (teil-)eingeloest ist → BLOCK. prospectiveTotal optional (Return-Pfade aendern total).
-function assertSupplierOverpayMutable(purchaseId: string, prospectivePaid: number, prospectiveTotal?: number): void {
-  const ex = existingSupplierOverpayCredit(purchaseId);
-  if (!ex || ex.used <= 0.005) return;
-  const total = prospectiveTotal !== undefined
-    ? prospectiveTotal
-    : Number(query(`SELECT total_amount FROM purchases WHERE id = ?`, [purchaseId])[0]?.total_amount || 0);
-  const newOver = Math.max(0, Math.round((prospectivePaid - total) * 1000) / 1000);
-  if (Math.abs(newOver - ex.amount) > 0.005) {
-    throw new Error('Cannot change this purchase payment/return: the supplier credit from its overpayment has already been (partially) redeemed. Reverse the credit usage first.');
-  }
-}
-// Domain-Row weg + syncen. Diskriminator MUSS mit (source_return_id IS NULL), sonst loescht es
-// versehentlich Return-Credits. In offener Ambient-Tx deferiert saveDatabase bis COMMIT.
-function clawbackSupplierOverpayCredit(purchaseId: string): void {
-  const db = getDatabase();
-  const rows = query(`SELECT id FROM supplier_credits WHERE source_purchase_id = ? AND source_return_id IS NULL`, [purchaseId]);
-  for (const r of rows) {
-    db.run(`DELETE FROM supplier_credits WHERE id = ?`, [r.id as string]);
-    trackDelete('supplier_credits', r.id as string);
-  }
-  saveDatabase();
-}
-// clawback-then-rebook: bringt die EINE Overpay-Gutschrift auf den aktuellen Ueberschuss.
-// Reklass-Bein (PURCHASE_OVERPAY) + supplier_credits-Row + Reverse atomar in EINER
-// beginLedgerTransaction (wirft → rollback). reverseSource ist multi-cycle-safe (per-Leg).
-function reconcilePurchaseOverpayCredit(purchaseId: string): void {
-  const db = getDatabase();
-  const now = new Date().toISOString();
-  const { over, supplierId } = purchaseOverpayOf(purchaseId);
-  const ex = existingSupplierOverpayCredit(purchaseId);
-  const exAmt = ex ? ex.amount : 0;
-  if (Math.abs(over - exAmt) <= 0.005) return;   // unveraendert → nichts tun
-  if (ex && ex.used > 0.005) throw new Error('supplier overpayment credit already redeemed — cannot rebook.');
-  let branchId = 'branch-main', userId = 'user-owner';
-  try { branchId = currentBranchId(); userId = currentUserId(); } catch { /* defaults */ }
-  beginLedgerTransaction();
-  try {
-    if (hasLedgerEntries('PURCHASE_OVERPAY', purchaseId)) reverseSource('PURCHASE_OVERPAY', purchaseId, now);
-    clawbackSupplierOverpayCredit(purchaseId);
-    if (over > 0.005 && supplierId) {
-      const creditId = uuid();
-      db.run(
-        `INSERT INTO supplier_credits (id, branch_id, supplier_id, source_return_id, source_purchase_id,
-           amount, used_amount, status, note, created_at, created_by)
-         VALUES (?, ?, ?, NULL, ?, ?, 0, 'OPEN', ?, ?, ?)`,
-        [creditId, branchId, supplierId, purchaseId, over, 'Ueberzahlung Purchase', now, userId]
-      );
-      trackInsert('supplier_credits', creditId, { supplierId, amount: over, sourcePurchaseId: purchaseId });
-      postPurchaseOverpaymentCredit(purchaseId, supplierId, over, now);
-    }
-    commitLedgerTransaction();
-  } catch (e) {
-    rollbackLedgerTransaction();
-    throw e;
-  }
-}
-// Terminaler Teardown (cancelPurchase): BLOCK bei eingeloest → reverse PURCHASE_OVERPAY → clawback.
-// Kein Rebook (Purchase storniert). reverseSource guarded (kein Doppel-Reverse).
-function teardownSupplierOverpayCredit(purchaseId: string, msg: string): void {
-  assertSupplierOverpayCreditUnused(purchaseId, msg);
-  if (hasLedgerEntries('PURCHASE_OVERPAY', purchaseId) && !hasReversalFor('PURCHASE_OVERPAY', purchaseId)) {
-    reverseSource('PURCHASE_OVERPAY', purchaseId, new Date().toISOString());
-  }
-  clawbackSupplierOverpayCredit(purchaseId);
-}
+// Die Helfer (Overpay-Basis purchases.paid_amount = NETTO-CASH, clawback-then-rebook, Teardown)
+// stehen seit R6D unveraendert in `core/payables/purchase-overpay.ts` — dort ruft sie auch die
+// Zahlungsfolge des Hauses, ohne diesen Store zu importieren.
 
 // F6 — beim Storno der EINLOESENDEN Purchase das auf einer Supplier-Gutschrift verbrauchte
 // used_amount zurueckgeben. Logik liegt jetzt im neutralen Core-Helfer restoreSupplierCreditUsage
@@ -219,7 +132,8 @@ interface PurchaseStore {
   dismissPurchaseInbox: (id: string) => void;
 }
 
-function rowToPurchase(row: Record<string, unknown>): Purchase {
+// R6D — die Fassung reist mit: „Add Payment" nennt sie, damit ein veralteter Stand abgewiesen wird.
+function rowToPurchase(row: Record<string, unknown>): Purchase & { revision?: number } {
   // Snapshot der Supplier-Daten zum Zeitpunkt des Purchase-Create (Audit-Trail).
   let snapshot: import('@/core/models/types').SupplierSnapshot | undefined;
   const snapRaw = row.supplier_snapshot as string | null | undefined;
@@ -245,6 +159,7 @@ function rowToPurchase(row: Record<string, unknown>): Purchase {
     updatedAt: row.updated_at as string,
     createdBy: row.created_by as string | undefined,
     sourceOrderId: (row.source_order_id as string | null) || undefined,
+    revision: Number(row.revision ?? 0) || undefined,
   };
 }
 
@@ -761,55 +676,11 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     return get().getPurchase(id)!;
   },
 
+  // R6D — die Hausfolge: Betrag > 0, storniert → Nein (vorher stilles Nichts), Rest und Status
+  // guthabenbewusst (vorher `total − cash`, was eine Guthaben-Einloesung ueberschrieb), Buchung
+  // strikt, Overpay → Lieferanten-Guthaben in DERSELBEN Klammer. Signatur unveraendert.
   addPayment: (purchaseId, amount, method, reference, note) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const p = get().getPurchase(purchaseId);
-    if (!p) return;
-    if (p.status === 'CANCELLED') return;
-    // Slice 4b — Pre-Check VOR dem INSERT: wuerde diese Zahlung den Ueberschuss aendern, waehrend
-    // die bestehende Overpay-Gutschrift schon eingeloest ist → BLOCK.
-    assertSupplierOverpayMutable(purchaseId, p.paidAmount + amount);
-
-    const paymentId = uuid();
-    const paidAt = now.split('T')[0];
-    db.run(
-      `INSERT INTO purchase_payments (id, purchase_id, amount, method, paid_at, reference, note, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [paymentId, purchaseId, amount, method, paidAt, reference || null, note || null, now]
-    );
-    const newPaid = p.paidAmount + amount;
-    const newStatus = computeStatus(p.totalAmount, newPaid);
-    db.run(
-      `UPDATE purchases SET paid_amount = ?, remaining_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
-      [newPaid, Math.max(0, p.totalAmount - newPaid), newStatus, now, purchaseId]
-    );
-    saveDatabase();
-    trackPayment('purchases', purchaseId, amount, method);
-    if (newStatus !== p.status) trackStatusChange('purchases', purchaseId, p.status, newStatus);
-    // LAN-Sync (Gruppe 3): paid_amount/remaining/status waren nur audit-getrackt (trackPayment/
-    // trackStatusChange) → B blieb stale; purchase_payments-Insert war ungetrackt. EIN Header-
-    // Snapshot nach dem Recompute + die Payment-Row mit stabiler id (purchases existiert auf B).
-    trackChange('purchases', purchaseId, 'update', {});
-    trackChange('purchase_payments', paymentId, 'insert', {});
-    get().loadPurchases();
-
-    // ZIEL.md §3a — Ledger-Posting für Supplier-Zahlung.
-    safePost(`postPurchasePayment(${paymentId})`, () => {
-      if (hasLedgerEntries('PURCHASE_PAYMENT', paymentId)) return;
-      postPurchasePayment(
-        {
-          id: paymentId, purchaseId, amount,
-          method, paidAt, reference, note, createdAt: now,
-        },
-        p.supplierId
-      );
-    });
-
-    // Slice 4b — nach dem Producer-Post (AP-Bein existiert) den Ueberschuss ueber total_amount
-    // in SUPPLIER_CREDIT reklassieren (clawback-then-rebook, idempotent). paid_amount-basiert →
-    // 'credit'-Einloesungen (applyCreditToPurchase fasst paid_amount nicht an) loesen nie aus.
-    reconcilePurchaseOverpayCredit(purchaseId);
+    atomar(() => recordPurchasePaymentInHouse(purchaseId, amount, method, localHouseCtx(), { reference, note }));
     get().loadPurchases();
   },
 

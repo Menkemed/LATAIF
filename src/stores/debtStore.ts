@@ -1,18 +1,18 @@
 import { create } from 'zustand';
-import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
-import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { query } from '@/core/db/helpers';
+import { trackUpdate, trackDelete } from '@/core/sync/track';
 import type { Debt, DebtPayment, DebtDirection, CashSource, DebtStatus } from '@/core/models/types';
-import { canonicalLoanDirection } from '@/core/models/types';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { hydrateFromPrimary, hydrateOneFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+// CENTRAL-UI-PARITY R6D — anlegen, zurückzahlen, berichtigen: EINE Hausfolge (Zeile + Buchung).
 import {
-  postLoanCreated,
-  postLoanPayment,
+  createDebtInHouse, moneyAction, recordDebtPaymentInHouse, updateDebtInHouse, type DebtUpdateInput,
+} from '@/core/finance/money-house';
+import {
   postLoanCancelled,
   postLoanPaymentReversed,
   hasLedgerEntries,
@@ -26,12 +26,18 @@ function safePost(label: string, fn: () => void): void {
   }
 }
 
+/**
+ * R6D — ein Darlehen, wie die Maske es sieht: samt der FASSUNG, die sie beim Bezahlen oder
+ * Berichtigen mitschickt (der Primary vergleicht sie in seiner Transaktion).
+ */
+export type DebtView = Debt & { revision: number };
+
 interface DebtStore {
-  debts: Debt[];
+  debts: DebtView[];
   paymentsByDebt: Record<string, DebtPayment[]>;
   loading: boolean;
   loadDebts: () => void;
-  getDebt: (id: string) => Debt | undefined;
+  getDebt: (id: string) => DebtView | undefined;
   createDebt: (data: Partial<Debt>) => Debt;
   updateDebt: (id: string, data: Partial<Debt>) => void;
   deleteDebt: (id: string) => void;
@@ -45,7 +51,7 @@ interface DebtStore {
   ) => DebtPayment;
 }
 
-function rowToDebt(row: Record<string, unknown>, paidAmount: number): Debt {
+function rowToDebt(row: Record<string, unknown>, paidAmount: number): DebtView {
   return {
     id: row.id as string,
     loanNumber: (row.loan_number as string | null) || undefined,
@@ -62,6 +68,7 @@ function rowToDebt(row: Record<string, unknown>, paidAmount: number): Debt {
     updatedAt: row.updated_at as string,
     settledAt: (row.settled_at as string | null) || undefined,
     paidAmount,
+    revision: Number(row.revision ?? 1),
   };
 }
 
@@ -89,28 +96,10 @@ function sumPaymentsFor(debtId: string): number {
   }
 }
 
-// Plan §Loan §10: OPEN / PARTIALLY_REPAID / REPAID / CANCELLED
-function reconcileStatus(db: ReturnType<typeof getDatabase>, debtId: string, amount: number, paidAmount: number): { status: DebtStatus; settledAt: string | null } {
-  const now = new Date().toISOString();
-  if (paidAmount >= amount) {
-    db.run(
-      `UPDATE debts SET status = 'REPAID', settled_at = COALESCE(settled_at, ?), updated_at = ? WHERE id = ?`,
-      [now, now, debtId],
-    );
-    return { status: 'REPAID', settledAt: now };
-  }
-  if (paidAmount > 0) {
-    db.run(
-      `UPDATE debts SET status = 'PARTIALLY_REPAID', settled_at = NULL, updated_at = ? WHERE id = ?`,
-      [now, debtId],
-    );
-    return { status: 'PARTIALLY_REPAID', settledAt: null };
-  }
-  db.run(
-    `UPDATE debts SET status = 'OPEN', settled_at = NULL, updated_at = ? WHERE id = ?`,
-    [now, debtId],
-  );
-  return { status: 'OPEN', settledAt: null };
+/** Die Maske schickt „YYYY-MM-DD" oder „YYYY-MM-DDT00:00:00Z" — die Hausfolge nimmt den Tag. */
+function dayOf(v: string): string {
+  const m = /^(\d{4}-\d{2}-\d{2})(T00:00:00(?:\.000)?Z)?$/.exec(String(v ?? ''));
+  return m ? m[1] : String(v ?? '');
 }
 
 export const useDebtStore = create<DebtStore>((set, get) => ({
@@ -130,118 +119,49 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
   getDebt: (id) => get().debts.find(d => d.id === id),
 
   createDebt: (data) => {
-    const amount = Number(data.amount);
-    if (!Number.isFinite(amount) || amount <= 0) {
-      throw new Error('Loan amount must be a positive number.');
-    }
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const id = uuid();
-
-    let branchId: string;
-    try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
-    let createdBy: string | null;
-    try { createdBy = currentUserId(); } catch { createdBy = null; }
-
-    const loanNumber = getNextDocumentNumber('LOA');
-
-    const debt: Debt = {
-      id,
-      loanNumber,
+    // R6D — vorher: Zeile, Speichern, und DANACH die Buchung mit verschlucktem Fehler; die
+    // Gegenpartei kam als freier Text aus der Maske. Jetzt dieselbe Hausfolge wie `debts.create`.
+    const { debt } = moneyAction((ctx) => createDebtInHouse({
       direction: data.direction || 'we_lend',
-      counterparty: data.counterparty || '',
-      customerId: data.customerId,
-      amount: data.amount || 0,
+      customerId: data.customerId ?? '',
+      amount: Number(data.amount),
       source: data.source || 'cash',
       dueDate: data.dueDate,
       notes: data.notes,
-      status: 'OPEN',
-      createdAt: now,
-      updatedAt: now,
-      paidAmount: 0,
-    };
-
-    db.run(
-      `INSERT INTO debts (id, branch_id, loan_number, direction, counterparty, customer_id, amount, source,
-        due_date, notes, status, staff_id, created_at, updated_at, settled_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?)`,
-      [
-        id, branchId, loanNumber, debt.direction, debt.counterparty, debt.customerId || null,
-        debt.amount, debt.source, debt.dueDate || null, debt.notes || null,
-        debt.status, data.staffId || null, now, now, createdBy,
-      ],
-    );
-
-    saveDatabase();
-    trackInsert('debts', id, {
-      direction: debt.direction, counterparty: debt.counterparty,
-      amount: debt.amount, source: debt.source,
-    });
+      staffId: data.staffId,
+    }, ctx));
     get().loadDebts();
-
-    // ZIEL.md §3a — Loan-Anlage ans Ledger.
-    safePost(`postLoanCreated(${id})`, () => {
-      if (hasLedgerEntries('LOAN', id)) return;
-      postLoanCreated(debt);
-    });
-
     return debt;
   },
 
   updateDebt: (id, data) => {
-    const before = get().debts.find(d => d.id === id);
-    // Validation BEVOR DB-Mutation, damit kein partieller State entsteht.
-    if (data.amount !== undefined) {
-      const newAmount = Number(data.amount);
-      if (!Number.isFinite(newAmount) || newAmount <= 0) {
-        throw new Error('Loan amount must be a positive number.');
-      }
-      const paid = sumPaymentsFor(id);
-      if (newAmount < paid) {
-        throw new Error(`Cannot reduce loan amount below already paid (${paid}). Reverse payments first.`);
-      }
-    }
+    // R6D — die Felder der Maske „Edit Debt" gehen durch die Hausfolge (nur Geändertes; Betrag und
+    // Konto buchen die Darlehenszeile neu; ein storniertes Darlehen wird nicht berichtigt). Ein
+    // übergebener, aber leerer Wert (`dueDate: undefined`) heißt wie bisher „löschen".
+    const edit: DebtUpdateInput = { debtId: id };
+    if ('counterparty' in data) edit.counterparty = data.counterparty;
+    if ('amount' in data) edit.amount = Number(data.amount);
+    if ('dueDate' in data) edit.dueDate = data.dueDate || null;
+    if ('notes' in data) edit.notes = data.notes || null;
+    if ('source' in data) edit.source = data.source;
+    if (Object.keys(edit).length > 1) moneyAction((ctx) => updateDebtInHouse(edit, ctx));
 
-    const db = getDatabase();
-    const now = new Date().toISOString();
+    // Stornieren (Status CANCELLED) bleibt der alte Primary-Weg — kein Fernbefehl, keine Maske.
+    const legacy: Record<string, string> = { direction: 'direction', customerId: 'customer_id', status: 'status', settledAt: 'settled_at' };
     const fields: string[] = [];
     const values: unknown[] = [];
-
-    const fieldMap: Record<string, string> = {
-      direction: 'direction',
-      counterparty: 'counterparty',
-      customerId: 'customer_id',
-      amount: 'amount',
-      source: 'source',
-      dueDate: 'due_date',
-      notes: 'notes',
-      status: 'status',
-      settledAt: 'settled_at',
-    };
-
-    for (const [key, val] of Object.entries(data)) {
-      const col = fieldMap[key];
-      if (col) {
-        fields.push(`${col} = ?`);
-        values.push(val === undefined ? null : val);
-      }
+    for (const [key, col] of Object.entries(legacy)) {
+      if (!(key in data)) continue;
+      const val = (data as Record<string, unknown>)[key];
+      fields.push(`${col} = ?`);
+      values.push(val === undefined ? null : val);
     }
-
-    if (fields.length === 0) return;
-
-    fields.push('updated_at = ?');
-    values.push(now);
-    values.push(id);
-
-    db.run(`UPDATE debts SET ${fields.join(', ')} WHERE id = ?`, values);
-
-    if (data.amount !== undefined) {
-      const paid = sumPaymentsFor(id);
-      reconcileStatus(db, id, Number(data.amount), paid);
-    }
-
+    if (fields.length === 0) { get().loadDebts(); return; }
+    const before = get().debts.find(d => d.id === id);
+    const db = getDatabase();
+    db.run(`UPDATE debts SET ${fields.join(', ')}, updated_at = ? WHERE id = ?`, [...values, new Date().toISOString(), id]);
     saveDatabase();
-    trackUpdate('debts', id, data);
+    trackUpdate('debts', id, Object.fromEntries(Object.keys(legacy).filter((k) => k in data).map((k) => [k, (data as Record<string, unknown>)[k]])));
     get().loadDebts();
 
     // ZIEL.md §3a — Loan-Storno bei Status='CANCELLED' (oder Legacy 'cancelled').
@@ -307,61 +227,43 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
   },
 
   loadPaymentsForDebt: (debtId) => {
+    const put = (payments: DebtPayment[]) => set(s => ({ paymentsByDebt: { ...s.paymentsByDebt, [debtId]: payments } }));
+    // R6D — auf PC2 fragte diese Stelle die EIGENE (nicht vorhandene) Datenbank und zeigte still
+    // „keine Rückzahlungen". Jetzt dieselbe Auskunft vom Primary (`debts.payments.get`).
+    if (hydrateOneFromPrimary('debts.payments.get', { debtId }, (d) => put((d.payments as DebtPayment[] | undefined) ?? []))) return;
     try {
-      const rows = query(
-        'SELECT * FROM debt_payments WHERE debt_id = ? ORDER BY paid_at ASC, created_at ASC',
-        [debtId],
-      );
-      set(s => ({
-        paymentsByDebt: { ...s.paymentsByDebt, [debtId]: rows.map(rowToPayment) },
-      }));
+      put(loadDebtPaymentsFor(localReadContext(), debtId).payments);
     } catch {
-      set(s => ({ paymentsByDebt: { ...s.paymentsByDebt, [debtId]: [] } }));
+      put([]);
     }
   },
 
   recordDebtPayment: (debtId, amount, source, paidAt, notes) => {
-    if (!Number.isFinite(amount) || amount <= 0) {
-      throw new Error('Debt payment amount must be a positive number.');
-    }
-    const db = getDatabase();
-    const id = uuid();
-    const now = new Date().toISOString();
-
-    db.run(
-      `INSERT INTO debt_payments (id, debt_id, amount, source, paid_at, notes, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [id, debtId, amount, source, paidAt, notes || null, now],
-    );
-
-    // Reconcile debt status
-    const debt = get().debts.find(d => d.id === debtId);
-    const originalAmount = debt?.amount || 0;
-    const newPaid = sumPaymentsFor(debtId);
-    reconcileStatus(db, debtId, originalAmount, newPaid);
-
-    saveDatabase();
-    trackInsert('debt_payments', id, { debtId, amount, source, paidAt });
-
+    // R6D — vorher: jeder Betrag (auch über den Rest), auch auf ein storniertes Darlehen, Richtung
+    // und Betrag aus der GELADENEN Liste, Status ohne Abgleich, Buchung mit verschlucktem Fehler.
+    // Jetzt dieselbe Hausfolge wie `debts.record_payment`.
+    const r = moneyAction((ctx) => recordDebtPaymentInHouse({ debtId, amount, source, paidAt: dayOf(paidAt), notes }, ctx));
     get().loadPaymentsForDebt(debtId);
     get().loadDebts();
-
-    // ZIEL.md §3a — Repayment ans Ledger.
-    safePost(`postLoanPayment(${id})`, () => {
-      if (hasLedgerEntries('LOAN_PAYMENT', id)) return;
-      const dir = canonicalLoanDirection(debt?.direction);
-      postLoanPayment(
-        { id, debtId, amount, source, paidAt, notes, createdAt: now },
-        dir
-      );
-    });
-
-    return { id, debtId, amount, source, paidAt, notes, createdAt: now };
+    return r.payment;
   },
 }));
 
 /** CENTRAL-UI-PARITY R2B — die Darlehen einer Filiale samt gezahlter Summen, zustandsfrei. */
-export function loadDebtsFor(ctx: BusinessReadContext): { debts: Debt[] } {
+export function loadDebtsFor(ctx: BusinessReadContext): { debts: DebtView[] } {
   const rows = query('SELECT * FROM debts WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
   return { debts: rows.map((r) => rowToDebt(r, sumPaymentsFor(r.id as string))) };
+}
+
+/**
+ * CENTRAL-UI-PARITY R6D — die Rückzahlungen EINES Darlehens, zustandsfrei. `debt_payments` kennt
+ * keine Filiale; sie steckt im Darlehen. Eine fremde Kennung liefert deshalb nichts.
+ */
+export function loadDebtPaymentsFor(ctx: BusinessReadContext, debtId: string): { payments: DebtPayment[] } {
+  const rows = query(
+    `SELECT dp.* FROM debt_payments dp JOIN debts d ON d.id = dp.debt_id
+      WHERE dp.debt_id = ? AND d.branch_id = ? ORDER BY dp.paid_at ASC, dp.created_at ASC`,
+    [debtId, ctx.branchId],
+  );
+  return { payments: rows.map(rowToPayment) };
 }

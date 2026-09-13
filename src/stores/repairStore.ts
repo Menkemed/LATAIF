@@ -19,6 +19,7 @@ import { formatRepairLineNumber } from '@/core/repairs/line-numbering';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — deleteRepair-Cascade (Gold-Buckets + repair_lines)
 import { trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+import { assertGoldPayablesRemovable } from '@/core/gold/gold-settle';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import {
   postRepairPayment,
@@ -1433,13 +1434,13 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
 
     // 1) Linked gold_payable(s) per line-level FK — OPEN/CANCELLED dürfen mitgehen,
     //    bereits FULFILLED-Schulden blockieren (sonst floatet die Settlement-Expense).
+    // CENTRAL-UI-PARITY R6D — dieselbe Regel zu Ende gedacht (Goldkern): auch eine TEILWEISE
+    // beglichene offene Schuld bleibt — ihr Gold hat den Bestand schon bewegt.
     const linkedGp = query(
-      `SELECT id, status FROM gold_payables WHERE source_repair_line_id = ?`,
+      `SELECT id, status, fulfilled_grams FROM gold_payables WHERE source_repair_line_id = ?`,
       [lineId]
     );
-    if (linkedGp.some(g => g.status !== 'OPEN' && g.status !== 'CANCELLED')) {
-      throw new Error('Die Gold-Verbindlichkeit dieser Zeile wurde bereits beglichen — bitte erst die Verbindlichkeit rückabwickeln.');
-    }
+    assertGoldPayablesRemovable(linkedGp, 'Zeile');
     for (const g of linkedGp) {
       db.run(`DELETE FROM gold_payables WHERE id = ?`, [g.id as string]);
       trackDelete('gold_payables', g.id as string);

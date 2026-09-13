@@ -45,6 +45,7 @@ import { useProductStore } from '@/stores/productStore';
 import {
   CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps,
 } from './mutation-engine';
+import { GoldRejected } from '@/core/gold/gold-settle';
 import type { CommandIdentity } from './command-ledger';
 import { registerCommand, type CommandActor } from './command-registry';
 import {
@@ -852,6 +853,8 @@ export function runCancelRepairLine(deps: EngineDeps, identity: CommandIdentity,
       // Buchung. Das ist kein Löschen eines Belegs — die Reparatur bleibt, was sie war.
       rs.cancelRepairLine(req.lineId, req.notes);
     } catch (err) {
+      // R6D — die Gold-Regel des Hauses (bereits ganz oder teilweise beglichene Gold-Schuld) ist ein Urteil.
+      if (err instanceof GoldRejected) throw new CommandRejected(err.code, err.message);
       const verdict = asVerdict(err, LINE_EDIT_VERDICTS);
       if (verdict) throw verdict;
       throw err;

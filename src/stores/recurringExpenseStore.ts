@@ -4,20 +4,35 @@
 // Pro Template eine Zeile in `recurring_expense_templates`. Generator laeuft
 // lazy bei App-Start + ExpenseList-Load und holt fehlende Monatsinstanzen
 // catch-up nach. Idempotenz via `last_generated_period` (YYYY-MM).
+//
+// CENTRAL-UI-PARITY R6D — Anlegen, Aendern, Pause/Resume und der Generator sind die Hausfolge
+// (`core/payables/payables-house.ts`), dieselbe wie im Fernbefehl:
+//   • Anlegen legt die Vorlage UND die faelligen Monate in EINER Klammer an (vorher lief der
+//     Generator danach, mit verschlucktem Fehler; Betrag 0 ging durch und scheiterte spaeter still).
+//   • Aendern schreibt nur die Formularfelder — `lastGeneratedPeriod` nie (vorher schrieb die Maske
+//     den ganzen Stand beim Oeffnen zurueck, samt `active`).
+//   • Resume holt die Pausenmonate NICHT nach (die Maske verspricht „keeps the schedule").
+//   • Der Generator klammert JE VORLAGE: ein faelliger Monat, der nicht angelegt werden kann, nimmt
+//     nur die Monate dieser Vorlage zurueck — und `last_generated_period` wird jetzt synchronisiert.
 // ═══════════════════════════════════════════════════════════
 
 import { create } from 'zustand';
-import { v4 as uuid } from 'uuid';
 import type { RecurringExpenseTemplate, ExpenseCategory } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
-import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { query } from '@/core/db/helpers';
+import { trackDelete } from '@/core/sync/track';
+import { inLedgerTransaction } from '@/core/ledger/posting';
 import { useExpenseStore } from '@/stores/expenseStore';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+import {
+  TEMPLATE_EDIT_FIELDS, atomar, localHouseCtx, activeTemplateIds,
+  createTemplateInHouse, updateTemplateInHouse, generateDueForTemplate,
+  type HouseCtx, type PayMethod, type TemplateEditFields,
+} from '@/core/payables/payables-house';
 
 interface RecurringExpenseStore {
   templates: RecurringExpenseTemplate[];
@@ -33,7 +48,9 @@ interface RecurringExpenseStore {
   runDueGenerator: () => { created: number; skipped: number; errors: string[] };
 }
 
-function rowToTemplate(row: Record<string, unknown>): RecurringExpenseTemplate {
+// R6D — die Fassung reist mit: „Edit"/„Pause"/„Resume" nennen sie, damit ein veralteter Stand
+// abgewiesen wird statt ihn zurueckzuschreiben.
+function rowToTemplate(row: Record<string, unknown>): RecurringExpenseTemplate & { revision?: number } {
   return {
     id:                  row.id as string,
     branchId:            row.branch_id as string,
@@ -52,37 +69,13 @@ function rowToTemplate(row: Record<string, unknown>): RecurringExpenseTemplate {
     createdAt:           row.created_at as string,
     updatedAt:           row.updated_at as string,
     createdBy:           (row.created_by as string) || undefined,
+    revision:            Number(row.revision ?? 0) || undefined,
   };
 }
 
-// ── Date-Helpers ──────────────────────────────────────────────
-
-function lastDayOfMonth(year: number, monthZeroBased: number): number {
-  return new Date(year, monthZeroBased + 1, 0).getDate();
-}
-
-function clampDay(year: number, monthZeroBased: number, day: number): number {
-  return Math.min(day, lastDayOfMonth(year, monthZeroBased));
-}
-
-function periodKey(year: number, monthZeroBased: number): string {
-  return `${year}-${String(monthZeroBased + 1).padStart(2, '0')}`;
-}
-
-function periodFromIso(iso: string): string {
-  return iso.slice(0, 7); // YYYY-MM
-}
-
-// Iteriert Monate von startKey (inkl) bis endKey (inkl) als 'YYYY-MM'.
-function* monthsBetween(startKey: string, endKey: string): Generator<{ year: number; month: number; key: string }> {
-  const [sy, sm] = startKey.split('-').map(Number);
-  const [ey, em] = endKey.split('-').map(Number);
-  let y = sy, m = sm - 1; // m ist 0-based
-  while (y < ey || (y === ey && m <= em - 1)) {
-    yield { year: y, month: m, key: periodKey(y, m) };
-    m++;
-    if (m > 11) { m = 0; y++; }
-  }
+function reloadAfterWrite(get: () => RecurringExpenseStore): void {
+  get().loadTemplates();
+  try { useExpenseStore.getState().loadExpenses(); } catch { /* ignore */ }
 }
 
 // ── Store ─────────────────────────────────────────────────────
@@ -101,73 +94,34 @@ export const useRecurringExpenseStore = create<RecurringExpenseStore>((set, get)
   getTemplate: (id) => get().templates.find(t => t.id === id),
 
   createTemplate: (data) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const id = uuid();
-    let branchId: string, userId: string;
-    try { branchId = currentBranchId(); userId = currentUserId(); }
-    catch { branchId = 'branch-main'; userId = 'user-owner'; }
-
-    const day = Math.max(1, Math.min(31, Math.round(data.dayOfMonth || 1)));
-    if (data.category === 'Salary' && !data.employeeId) {
-      throw new Error('Recurring Salary templates require an employee.');
-    }
-    db.run(
-      `INSERT INTO recurring_expense_templates
-         (id, branch_id, category, amount, payment_method, pay_now_default, description,
-          day_of_month, start_date, end_date, active, last_generated_period,
-          supplier_id, employee_id, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, branchId, data.category, data.amount, data.paymentMethod || 'bank',
-       data.payNowDefault ? 1 : 0, data.description || null,
-       day, data.startDate, data.endDate || null,
-       data.active === false ? 0 : 1, null,
-       data.supplierId || null, data.employeeId || null, now, now, userId]
-    );
-    saveDatabase();
-    trackInsert('recurring_expense_templates', id, { category: data.category, amount: data.amount });
-    get().loadTemplates();
-
-    // Direkt nach Anlage Generator laufen lassen — wenn Start in der Vergangenheit
-    // liegt, werden sofort fehlende Instanzen nachgeholt.
-    try { get().runDueGenerator(); } catch (e) { console.warn('[recurring] initial generator run failed:', e); }
-
-    return get().getTemplate(id)!;
+    const r = atomar(() => createTemplateInHouse({
+      category: data.category,
+      amount: data.amount,
+      paymentMethod: (data.paymentMethod || 'bank') as PayMethod,
+      payNowDefault: !!data.payNowDefault,
+      description: data.description,
+      dayOfMonth: data.dayOfMonth,
+      startDate: data.startDate,
+      endDate: data.endDate,
+      employeeId: data.employeeId,
+    }, localHouseCtx(), { supplierId: data.supplierId, active: data.active }));
+    reloadAfterWrite(get);
+    return get().getTemplate(r.templateId)!;
   },
 
+  // Nur die Formularfelder reisen in die Hausfolge; was das Haus fuehrt (`lastGeneratedPeriod`,
+  // Filiale, Zeitstempel) wird hier gar nicht erst weitergegeben.
   updateTemplate: (id, data) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const fields: string[] = [];
-    const values: unknown[] = [];
-    const map: Record<string, string> = {
-      category: 'category', amount: 'amount', paymentMethod: 'payment_method',
-      payNowDefault: 'pay_now_default', description: 'description',
-      dayOfMonth: 'day_of_month', startDate: 'start_date', endDate: 'end_date',
-      active: 'active', supplierId: 'supplier_id', lastGeneratedPeriod: 'last_generated_period',
-      employeeId: 'employee_id',
-    };
-    for (const [k, v] of Object.entries(data)) {
-      const col = map[k];
-      if (!col) continue;
-      let val: unknown = v;
-      if (k === 'payNowDefault' || k === 'active') val = v ? 1 : 0;
-      if (k === 'dayOfMonth') val = Math.max(1, Math.min(31, Math.round(Number(v) || 1)));
-      fields.push(`${col} = ?`); values.push(val ?? null);
-    }
-    if (fields.length === 0) return;
-    fields.push('updated_at = ?'); values.push(now); values.push(id);
-    db.run(`UPDATE recurring_expense_templates SET ${fields.join(', ')} WHERE id = ?`, values);
-    saveDatabase();
-    trackUpdate('recurring_expense_templates', id, data);
-    get().loadTemplates();
+    const src = data as Record<string, unknown>;
+    const edit: Record<string, unknown> = {};
+    for (const k of TEMPLATE_EDIT_FIELDS) if (src[k] !== undefined) edit[k] = src[k];
+    atomar(() => updateTemplateInHouse(id, edit as TemplateEditFields, localHouseCtx()));
+    reloadAfterWrite(get);
   },
 
+  // Pause/Resume ist ein Aendern mit dem ZIELWERT — Resume erzeugt im Haus nur, was jetzt faellig ist.
   setActive: (id, active) => {
     get().updateTemplate(id, { active });
-    if (active) {
-      try { get().runDueGenerator(); } catch (e) { console.warn('[recurring] generator after activate failed:', e); }
-    }
   },
 
   deleteTemplate: (id) => {
@@ -182,108 +136,31 @@ export const useRecurringExpenseStore = create<RecurringExpenseStore>((set, get)
 
   runDueGenerator: () => {
     const out = { created: 0, skipped: 0, errors: [] as string[] };
-    let branchId: string;
-    try { branchId = currentBranchId(); } catch { return out; }
-
-    // Direkt aus DB lesen — Generator laeuft auch ohne dass loadTemplates() schon
-    // gelaufen ist (App-Startup-Hook). HMR-Modul-Duplikate werden so umgangen.
-    let templates: RecurringExpenseTemplate[];
+    // PC2 fuehrt keine Buecher — der Primary erzeugt seine Monate selbst.
+    if (readsFromPrimary()) return out;
+    // Ist gerade eine fremde Klammer offen (ein laufender Auftrag), wird NICHT hineingeschrieben;
+    // der naechste Lauf (App-Start, Ausgabenliste) holt es nach.
+    if (inLedgerTransaction()) { out.errors.push('busy: another action is open'); return out; }
+    let ctx: HouseCtx;
+    try { ctx = localHouseCtx(); } catch { return out; }
+    let ids: string[];
     try {
-      templates = query(
-        `SELECT * FROM recurring_expense_templates WHERE branch_id = ? AND active = 1`,
-        [branchId]
-      ).map(rowToTemplate);
+      // Direkt aus DB lesen — Generator laeuft auch ohne dass loadTemplates() schon gelaufen ist.
+      ids = activeTemplateIds(ctx.branchId);
     } catch (e) {
       out.errors.push(`load-templates: ${(e as Error).message}`);
       return out;
     }
-
-    const today = new Date();
-    const todayKey = periodKey(today.getFullYear(), today.getMonth());
-
-    for (const t of templates) {
+    for (const id of ids) {
       try {
-        // Welcher Monat soll als naechster erzeugt werden?
-        // Wenn lastGeneratedPeriod existiert → nachfolgender Monat. Sonst Start-Monat.
-        let startKey: string;
-        if (t.lastGeneratedPeriod) {
-          const [y, m] = t.lastGeneratedPeriod.split('-').map(Number);
-          let ny = y, nm = m; // 1-based input → noch m+1 Logik draufsetzen
-          if (nm >= 12) { nm = 1; ny++; } else { nm++; }
-          startKey = `${ny}-${String(nm).padStart(2, '0')}`;
-        } else {
-          startKey = periodFromIso(t.startDate);
-        }
-
-        // Nicht ueber heute hinaus generieren.
-        const endKeyForLoop = todayKey;
-        if (startKey > endKeyForLoop) { out.skipped++; continue; }
-
-        // End-Date des Templates respektieren.
-        const templateEndKey = t.endDate ? periodFromIso(t.endDate) : null;
-        const effectiveEnd = templateEndKey && templateEndKey < endKeyForLoop ? templateEndKey : endKeyForLoop;
-        if (startKey > effectiveEnd) { out.skipped++; continue; }
-
-        // Pre-Start-Date Schutz: nicht vor t.startDate generieren.
-        const tStartKey = periodFromIso(t.startDate);
-        const finalStart = startKey < tStartKey ? tStartKey : startKey;
-
-        let lastDoneKey: string | null = null;
-        const startDateMonthKey = periodFromIso(t.startDate);
-        for (const m of monthsBetween(finalStart, effectiveEnd)) {
-          // Defensiv: Doppelung verhindern via Existenz-Check (falls last_generated_period
-          // noch nicht gesetzt war, z.B. bei Migration aus altem Stand).
-          const dup = query(
-            `SELECT 1 FROM expenses WHERE recurring_template_id = ?
-              AND substr(expense_date, 1, 7) = ?
-              AND status != 'CANCELLED' LIMIT 1`,
-            [t.id, m.key]
-          );
-          if (dup.length > 0) { out.skipped++; lastDoneKey = m.key; continue; }
-
-          // Erste Instanz (Start-Monat): exakt das vom User gewaehlte Datum nehmen.
-          // Sonst: day_of_month-Regel mit Clamp aufs Monatsende.
-          let expenseDate: string;
-          if (m.key === startDateMonthKey) {
-            expenseDate = t.startDate;
-          } else {
-            const day = clampDay(m.year, m.month, t.dayOfMonth);
-            expenseDate = `${m.key}-${String(day).padStart(2, '0')}`;
-          }
-
-          useExpenseStore.getState().createExpense({
-            category: t.category,
-            amount: t.amount,
-            paymentMethod: t.paymentMethod,
-            expenseDate,
-            description: t.description || `Recurring · ${t.category}`,
-            payNow: t.payNowDefault,
-            supplierId: t.supplierId,
-            employeeId: t.employeeId,
-            recurringTemplateId: t.id,
-          });
-          out.created++;
-          lastDoneKey = m.key;
-        }
-
-        if (lastDoneKey) {
-          // last_generated_period nachziehen.
-          const db = getDatabase();
-          db.run(
-            `UPDATE recurring_expense_templates SET last_generated_period = ?, updated_at = ? WHERE id = ?`,
-            [lastDoneKey, new Date().toISOString(), t.id]
-          );
-          saveDatabase();
-        }
+        const r = atomar(() => generateDueForTemplate(id, ctx));
+        out.created += r.created;
+        out.skipped += r.skipped;
       } catch (e) {
-        out.errors.push(`${t.id.slice(0, 8)}: ${(e as Error).message}`);
+        out.errors.push(`${id.slice(0, 8)}: ${(e as Error).message}`);
       }
     }
-
-    if (out.created > 0) {
-      try { useExpenseStore.getState().loadExpenses(); } catch { /* ignore */ }
-      try { get().loadTemplates(); } catch { /* ignore */ }
-    }
+    if (out.created > 0) reloadAfterWrite(get);
     return out;
   },
 }));

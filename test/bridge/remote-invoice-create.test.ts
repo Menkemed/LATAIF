@@ -199,9 +199,14 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   // CENTRAL-UI-PARITY R6C — Stammdaten und Inventur gehören ebenso zum ausgelieferten Zustand.
   await import('../../src/core/bridge/masterdata-commands.ts');
   await import('../../src/core/bridge/inventory-commands.ts');
+  // R6D — Steuer/Geld, Verbindlichkeiten, Gold, Metall.
+  await import('../../src/core/bridge/money-commands.ts');
+  await import('../../src/core/bridge/payables-commands.ts');
+  await import('../../src/core/bridge/gold-commands.ts');
+  await import('../../src/core/bridge/metal-commands.ts');
   await import('../../src/core/bridge/invoice-cancel-command.ts');
   ok(Array.isArray(registry.ALLOWED_MUTATIONS)
-    && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice,invoices.cancel,suppliers.create,suppliers.update,agents.update,partners.create,partners.update,employees.create,employees.update,inventory.start,inventory.save,inventory.finish,inventory.record_check',
+    && registry.ALLOWED_MUTATIONS.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice,invoices.cancel,suppliers.create,suppliers.update,agents.update,partners.create,partners.update,employees.create,employees.update,inventory.start,inventory.save,inventory.finish,inventory.record_check,tax.record_payment,banking.transfer,partners.record_tx,debts.create,debts.update,debts.record_payment,expenses.create,expenses.update,expenses.record_payment,expenses.template_create,expenses.template_update,purchases.record_payment,purchases.apply_credit,suppliers.pay,suppliers.apply_credit,suppliers.refund_credit,gold.payables.settle,gold.customer_credits.settle,repairs.record_gold_usage,repairs.add_material,orders.add_cost,orders.remove_cost,metals.create,metals.update_status,metals.set_spot_price,scrap_trades.create,scrap_trades.update,scrap_trades.cancel',
     `ALLOWLIST genau diese Namen stehen darauf (${JSON.stringify(registry.ALLOWED_MUTATIONS)})`);
 
   for (const op of ['products.delete', 'invoice.delete', 'purchase.create', 'anything.write']) {
@@ -214,16 +219,16 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   // CENTRAL-UI-PARITY: dazu 47 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
-  ok(known.length === 121, `ALLOWLIST produktiv einhunderteinundzwanzig Namen (R6C) (${known.length})`);
+  ok(known.length === 152, `ALLOWLIST produktiv einhundertzweiundfuenfzig Namen (R6D) (${known.length})`);
   // CENTRAL-UI-PARITY — 18 Auskuenfte aus C2 plus 48 typisierte Auskuenfte fuer die gemeinsame Oberflaeche.
-  ok(reads.length === 68 && known.includes('bridge.probe') && known.includes('invoices.create'),
-    `ALLOWLIST eine Probe, achtundsechzig Lesevorgaenge, zweiundfuenfzig Mutationen (${reads.length})`);
+  ok(reads.length === 71 && known.includes('bridge.probe') && known.includes('invoices.create'),
+    `ALLOWLIST eine Probe, einundsiebzig Lesevorgaenge, achtzig Mutationen (${reads.length})`);
 
   // Und Rust prueft dieselbe Liste ein zweites Mal.
   const rs = src('src-tauri/src/bridge.rs');
   ok(/pub const OP_INVOICES_CREATE: &str = "invoices.create";/.test(rs), 'ALLOWLIST Rust kennt den Namen…');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 121, 'ALLOWLIST …und seine Liste ist genau einhunderteinundzwanzig Namen lang');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 152, 'ALLOWLIST …und seine Liste ist genau einhundertzweiundfuenfzig Namen lang');
 
   // Der Umschlag wird in `lib.rs` VON HAND zusammengesetzt. Ein neues Feld an der Struktur
   // erreicht den Renderer deshalb nicht von selbst — genau daran scheiterte der erste Lauf:

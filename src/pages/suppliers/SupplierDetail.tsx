@@ -17,7 +17,7 @@ import { SoftWarn } from '@/components/ui/SoftWarn';
 import { PhoneInput } from '@/components/ui/PhoneInput';
 import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
-import { useSupplierStore, type SupplierCreditDisplay } from '@/stores/supplierStore';
+import { useSupplierStore, supplierCreditsFor, type SupplierCreditDisplay } from '@/stores/supplierStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { useGoldStore } from '@/stores/goldStore';
@@ -33,6 +33,10 @@ import { refNumbersFor, supplierDetailReadsFor, type SupplierDetailReads } from 
 import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { saveSupplierActive, saveSupplierUpdate } from '@/core/masterdata/masterdata-save';
+// CENTRAL-UI-PARITY R6D — „Refund Credit" ist EINE Buchung (`suppliers.refund_credit`); die Guthaben-
+// Karte liest die filialgebundene Auskunft `suppliers.credits.get` (auch auf PC2).
+import { PAYABLES_OP } from '@/core/payables/payables-house';
+import { saveSupplierRefund } from '@/core/payables/payables-save';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -54,7 +58,7 @@ export function SupplierDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/suppliers');
-  const { suppliers, loadSuppliers, deleteSupplier, getLedger, getSupplierCreditsForDisplay, deleteStandaloneSupplierCredit } = useSupplierStore();
+  const { suppliers, loadSuppliers, deleteSupplier, getLedger } = useSupplierStore();
   // CENTRAL-UI-PARITY R6C — „Save" und „Deactivate/Reactivate" sind EINE Buchung (`suppliers.update`):
   // am Primary die Hausfunktion, auf PC2 die Fernbuchung. Nur das Geänderte reist; der Aktiv-
   // Schalter schickt den Zielwert, keinen Umschalter.
@@ -93,7 +97,10 @@ export function SupplierDetail() {
   // die im Confirm-Modal anstehende Credit-Zeile; refundBusy sperrt den Commit-Button (Re-Entry-Schutz).
   const [refreshKey, setRefreshKey] = useState(0);
   const [refundCredit, setRefundCredit] = useState<SupplierCreditDisplay | null>(null);
-  const [refundBusy, setRefundBusy] = useState(false);
+  // R6D — der Wächter der Rückbuchung: busy sperrt den Commit-Button (Re-Entry-Schutz), und ein
+  // offener Ausgang wiederholt DIESELBE Absicht.
+  const erstatten = useSharedWrite<Record<string, unknown>>(PAYABLES_OP.SUPPLIERS_REFUND_CREDIT);
+  const [refundFehler, setRefundFehler] = useState('');
 
   useEffect(() => {
     loadSuppliers(); loadPurchases(); loadExpenses(); loadCustomers(); loadInvoices(); goldLoadAll();
@@ -164,7 +171,10 @@ export function SupplierDetail() {
     };
   }, [linkedCustomer, invoices]);
 
+  // Bestehende Formular-Synchronisierung (R6C). Die Regel meldet sie erst, seit R6D das
+  // try/finally der Rueckbuchung entfernt hat (vorher uebersprang der Compiler die ganze Komponente).
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (supplier) setForm({ ...supplier });
   }, [supplier]);
 
@@ -182,10 +192,13 @@ export function SupplierDetail() {
   //   - purchases/expenses → eine Credit-erzeugende Mutation (Purchase-Überzahlung, PaySupplier-Bulk
   //                          auf Purchase ODER auf supplier-verknüpfte Expense/Standalone) ändert
   //                          eines dieser Arrays → die Card aktualisiert sofort, ohne Remount.
-  const supplierCredits = useMemo(
-    () => id ? getSupplierCreditsForDisplay(id) : [],
-    [id, getSupplierCreditsForDisplay, refreshKey, purchases, expenses]
-  );
+  // R6D — die Karte liest die filialgebundene Auskunft (dieselbe Zeile, dieselbe Refund-Eignung wie
+  // am Primary); `v` holt nach einer Buchung auf PC2 frisch nach.
+  const supplierCredits = useSharedRead(
+    'suppliers.credits.get', { supplierId: id ?? '', v: refreshKey },
+    (ctx) => supplierCreditsFor(ctx, id ?? ''),
+    { credits: [], availableAmount: 0 }, [id, refreshKey, purchases, expenses],
+  ).credits;
 
   const supplierPurchases = useMemo(
     () => id ? purchases.filter(p => p.supplierId === id).sort((a, b) => b.purchaseDate.localeCompare(a.purchaseDate)) : [],
@@ -241,22 +254,16 @@ export function SupplierDetail() {
     }
   }
 
-  function handleRefundCredit() {
-    if (!refundCredit || refundBusy) return;
-    // Store ist autoritativ: deleteStandaloneSupplierCredit prueft used_amount/Asset-Leg FRISCH und
-    // wirft bei jedem Block/Race (kein stiller No-op). Daher KEIN optimistisches Entfernen — die Liste
-    // aktualisiert sich erst ueber refreshKey, NACHDEM der Store-Call zurueckkommt. Bei Erfolg = echte
-    // Rueckbuchung; bei Throw zeigen wir die Meldung und laden trotzdem neu (geracter Zustand sichtbar).
-    setRefundBusy(true);
-    try {
-      deleteStandaloneSupplierCredit(refundCredit.id);
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-    } finally {
-      setRefundBusy(false);
-      setRefundCredit(null);
-      setRefreshKey(k => k + 1);
-    }
+  async function handleRefundCredit() {
+    if (!refundCredit || erstatten.busy) return;
+    // Das Haus ist autoritativ: es prueft used_amount/Asset-Leg FRISCH und weist jeden Block/Race ab
+    // (kein stiller No-op). Daher KEIN optimistisches Entfernen — die Liste aktualisiert sich erst
+    // ueber refreshKey, NACHDEM die Buchung zurueckkommt. Ein Nein bleibt im Modal stehen.
+    setRefundFehler('');
+    const r = await saveSupplierRefund(erstatten, refundCredit.id);
+    setRefreshKey(k => k + 1);
+    if (r.kind !== 'ok') { setRefundFehler(fehlertext(r)); return; }
+    setRefundCredit(null);
   }
 
   async function handleToggleActive() {
@@ -429,7 +436,7 @@ export function SupplierDetail() {
         {(workshopExpenses.filter(e => e.status !== 'PAID' && e.status !== 'CANCELLED').length > 0
           || supplierPurchases.filter(p => p.status !== 'PAID' && p.status !== 'CANCELLED').length > 0) && (
           <div style={{ marginBottom: 32, display: 'flex', justifyContent: 'flex-end' }}>
-            <Button variant="primary" onClick={() => setShowPaySupplierModal(true)}>
+            <Button variant="primary" onClick={() => setShowPaySupplierModal(true)} data-supplier-pay-open>
               💰 Pay Supplier — Bulk
             </Button>
           </div>
@@ -700,7 +707,8 @@ export function SupplierDetail() {
                     <span style={{ padding: '6px 0', borderTop: '1px solid #E5E9EE', textAlign: 'right' }}>
                       {c.refundable ? (
                         <button
-                          onClick={() => setRefundCredit(c)}
+                          onClick={() => { setRefundFehler(''); setRefundCredit(c); }}
+                          data-supplier-refund-open={c.id}
                           style={{
                             fontSize: 11, padding: '4px 12px', border: '1px solid #DC2626',
                             borderRadius: 4, background: 'transparent', color: '#DC2626',
@@ -743,7 +751,7 @@ export function SupplierDetail() {
         </div>
       </Modal>
 
-      <Modal open={!!refundCredit} onClose={() => { if (!refundBusy) setRefundCredit(null); }} title="Refund Supplier Credit" width={440}>
+      <Modal open={!!refundCredit} onClose={() => { if (!erstatten.busy) setRefundCredit(null); }} title="Refund Supplier Credit" width={440}>
         {refundCredit && (
           <>
             <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '8px 16px', marginBottom: 16, fontSize: 13 }}>
@@ -762,10 +770,11 @@ export function SupplierDetail() {
                 Only completely unused standalone credits can be refunded.
               </p>
             </div>
+            <WriteError text={refundFehler} />
             <div className="flex justify-end gap-3">
-              <Button variant="ghost" onClick={() => setRefundCredit(null)} disabled={refundBusy}>Cancel</Button>
-              <Button variant="danger" onClick={handleRefundCredit} disabled={refundBusy}>
-                {refundBusy ? 'Refunding…' : 'Refund Credit'}
+              <Button variant="ghost" onClick={() => setRefundCredit(null)} disabled={erstatten.busy}>Cancel</Button>
+              <Button variant="danger" onClick={() => void handleRefundCredit()} disabled={erstatten.busy} data-supplier-refund-save>
+                {erstatten.busy ? 'Refunding…' : 'Refund Credit'}
               </Button>
             </div>
           </>

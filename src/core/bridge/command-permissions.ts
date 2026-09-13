@@ -143,6 +143,45 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'inventory.save': null,
   'inventory.finish': null,
   'inventory.record_check': null,
+
+  // ── Steuer, Geld, Gold, Metall (R6D) ────────────────────────────────────
+  // BEFUND: `AnalyticsPage` (Steuerzahlung), `BankingPage`, `PartnersPage`, `DebtsPage`,
+  // `ExpenseList`, `PayExpenseModal`, `PurchaseDetail`, `SupplierDetail`, `PaySupplierModal`,
+  // `CustomerDetail` (Kundengold), `SettleGoldModal`, `MetalList` und die Schrotthandel-Seiten
+  // fragen `usePermission` NICHT; `RepairDetail` bewacht „Add Material" und „Gold Used" nicht.
+  // Am Primary darf jeder angemeldete Benutzer das — der Fernweg erfindet kein Recht.
+  'tax.record_payment': null,
+  'banking.transfer': null,
+  'partners.record_tx': null,
+  'debts.create': null,
+  'debts.update': null,
+  'debts.record_payment': null,
+  'expenses.create': null,
+  'expenses.update': null,
+  'expenses.record_payment': null,
+  'expenses.template_create': null,
+  'expenses.template_update': null,
+  'purchases.record_payment': null,
+  'purchases.apply_credit': null,
+  'suppliers.pay': null,
+  'suppliers.apply_credit': null,
+  'suppliers.refund_credit': null,
+  // Eine Gold-Verbindlichkeit ist am Primary über `SupplierDetail` ohne Tor abrechenbar — dass
+  // `OrderDetail` dieselben Knöpfe hinter `perm.canManageOrders` stellt, macht die Handlung nicht
+  // strenger: PC2 darf nicht weniger als derselbe Benutzer am Primary.
+  'gold.payables.settle': null,
+  'gold.customer_credits.settle': null,
+  'repairs.record_gold_usage': null,
+  'repairs.add_material': null,
+  // OrderDetail: „Add Cost" und das Löschen einer Kostenzeile stehen hinter `perm.canManageOrders`.
+  'orders.add_cost': admin('OrderDetail: perm.canManageOrders'),
+  'orders.remove_cost': admin('OrderDetail: perm.canManageOrders'),
+  'metals.create': null,
+  'metals.update_status': null,
+  'metals.set_spot_price': null,
+  'scrap_trades.create': null,
+  'scrap_trades.update': null,
+  'scrap_trades.cancel': null,
 };
 
 /**

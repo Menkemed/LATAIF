@@ -30,7 +30,14 @@ const NEU = R5F1_NEUE_BUCHUNGEN.map((z) => z.op);
 // R6C — elf weitere Buchungen (Stammdaten, Inventur). Die Vierziger-Matrix bleibt abgeschlossen; ihre
 // Einordnung steht in der R6A-SSOT, ihre Beweise in test/r6c.
 const R6C = ['suppliers.create', 'suppliers.update', 'agents.update', 'partners.create', 'partners.update', 'employees.create', 'employees.update',
-  'inventory.start', 'inventory.save', 'inventory.finish', 'inventory.record_check'];
+  'inventory.start', 'inventory.save', 'inventory.finish', 'inventory.record_check',
+  // R6D — achtundzwanzig Geld-/Steuer-/Gold-/Metall-Buchungen; Beweise in test/r6d.
+  'tax.record_payment', 'banking.transfer', 'partners.record_tx', 'debts.create', 'debts.update', 'debts.record_payment',
+  'expenses.create', 'expenses.update', 'expenses.record_payment', 'expenses.template_create', 'expenses.template_update',
+  'purchases.record_payment', 'purchases.apply_credit', 'suppliers.pay', 'suppliers.apply_credit', 'suppliers.refund_credit',
+  'gold.payables.settle', 'gold.customer_credits.settle', 'repairs.record_gold_usage', 'repairs.add_material',
+  'orders.add_cost', 'orders.remove_cost', 'metals.create', 'metals.update_status', 'metals.set_spot_price',
+  'scrap_trades.create', 'scrap_trades.update', 'scrap_trades.cancel'];
 
 // ── §1 Die Matrix deckt sich mit der Freigabeliste ──────────────────────
 const registry = src('src/core/bridge/command-registry.ts');
@@ -38,7 +45,7 @@ const erlaubt = [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([
   .exec(registry)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
 
 ok(erlaubt.length === 40 + NEU.length + R6C.length && JSON.stringify(NEU) === JSON.stringify(['invoices.cancel']) && R6C.every((o) => erlaubt.includes(o) && !R4C_MATRIX.some((z) => z.op === o)),
-  `1 die Freigabeliste zaehlt die vierzig plus invoices.cancel plus die elf aus R6C (keine davon in der Vierziger-Matrix) (${erlaubt.length})`);
+  `1 die Freigabeliste zaehlt die vierzig plus invoices.cancel plus die elf aus R6C und die achtundzwanzig aus R6D (keine davon in der Vierziger-Matrix) (${erlaubt.length})`);
 ok(R4C_MATRIX.length === 40, `1 die Matrix zaehlt vierzig Zeilen (${R4C_MATRIX.length})`);
 for (const z of R5F1_NEUE_BUCHUNGEN) {
   ok(erlaubt.includes(z.op) && !R4C_MATRIX.some((x) => x.op === z.op), `1 ${z.op}: freigegeben, und NICHT in der Vierziger-Matrix`);
@@ -182,12 +189,12 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
 {
   const ops = src('src/core/bridge/store-read-ops.ts');
   const parity = [...ops.matchAll(/export const OP_[A-Z_]+ = '([^']+)'/g)].length;
-  ok(parity === 50, `10 fuenfzig typisierte Auskuenfte (R6C: +2 Inventur) (${parity})`);
-  ok(erlaubt.length === 52, `10 vierzig Buchungen plus die eine aus R5F.1 plus elf aus R6C (${erlaubt.length})`);
+  ok(parity === 53, `10 dreiundfuenfzig typisierte Auskuenfte (R6C: +2 Inventur; R6D: +3) (${parity})`);
+  ok(erlaubt.length === 80, `10 vierzig Buchungen plus die eine aus R5F.1 plus elf aus R6C plus achtundzwanzig aus R6D (${erlaubt.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '')
     .matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 121, `10 und Rust laesst dieselben 121 Namen durch (${rustOps})`);
+  ok(rustOps === 152, `10 und Rust laesst dieselben 152 Namen durch (${rustOps})`);
 }
 
 // ── R5A — Auftrag → Rechnung: EINE Handlung, EINE Buchung ───────────────

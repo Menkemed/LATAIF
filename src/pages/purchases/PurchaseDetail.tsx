@@ -16,6 +16,15 @@ import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { PurchaseStatus } from '@/core/models/types';
 import { getProductSpecs } from '@/core/utils/product-format';
 import { printPurchasePdf } from '@/core/pdf/purchase-pdf';
+// CENTRAL-UI-PARITY R6D — „Add Payment" (bar/Bank/Benefit) und der Credit-Modus sind je EINE
+// Buchung (`purchases.record_payment` / `purchases.apply_credit`); das verfuegbare Guthaben kommt
+// aus der filialgebundenen Auskunft `suppliers.credits.get` — auch auf PC2.
+import { useSharedRead } from '@/core/data/shared-read';
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { supplierCreditsFor } from '@/stores/supplierStore';
+import { PAYABLES_OP } from '@/core/payables/payables-house';
+import { savePurchaseCredit, savePurchasePayment, viaWrites } from '@/core/payables/payables-save';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -30,9 +39,12 @@ export function PurchaseDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/purchases');
-  const { purchases, loadPurchases, addPayment, cancelPurchase, createReturn, confirmReturn, returns, loadReturns } = usePurchaseStore();
+  const { purchases, loadPurchases, cancelPurchase, createReturn, confirmReturn, returns, loadReturns } = usePurchaseStore();
   const { employees, loadEmployees } = useEmployeeStore();
-  const { suppliers, loadSuppliers, getLedger, getOpenCredits, applyCreditToPurchase } = useSupplierStore();
+  const { suppliers, loadSuppliers } = useSupplierStore();
+  const w = useSharedWrites();
+  const [creditTick, setCreditTick] = useState(0);
+  const [payFehler, setPayFehler] = useState('');
   const { products, loadProducts, categories, loadCategories } = useProductStore();
 
   const [showPayment, setShowPayment] = useState(false);
@@ -52,7 +64,15 @@ export function PurchaseDetail() {
 
   const purchase = useMemo(() => purchases.find(p => p.id === id), [purchases, id]);
   const supplier = useMemo(() => purchase ? suppliers.find(s => s.id === purchase.supplierId) : undefined, [purchase, suppliers]);
-  const supplierLedger = useMemo(() => purchase ? getLedger(purchase.supplierId) : { creditBalance: 0, totalPurchases: 0, totalPaid: 0, outstandingBalance: 0 }, [purchase, getLedger, returns, purchases]);
+  // Das offene Guthaben DIESES Lieferanten in DIESER Filiale — dieselbe Zahl, gegen die das Haus beim
+  // Einloesen prueft (vorher: getLedger ueber alle Filialen, auf PC2 immer 0). `v` holt nach einer
+  // Buchung auf PC2 frisch nach.
+  const supplierCredits = useSharedRead(
+    'suppliers.credits.get', { supplierId: purchase?.supplierId ?? '', v: creditTick },
+    (ctx) => supplierCreditsFor(ctx, purchase?.supplierId ?? ''),
+    { credits: [], availableAmount: 0 }, [purchase?.supplierId, purchases, returns, creditTick],
+  );
+  const creditAvailable = supplierCredits.availableAmount;
   const linkedReturns = useMemo(() => returns.filter(r => r.purchaseId === id), [returns, id]);
 
 
@@ -60,44 +80,19 @@ export function PurchaseDetail() {
   const canCancel = !!purchase && purchase.status !== 'CANCELLED' && purchase.status !== 'PAID';
   const canReturn = !!purchase && purchase.status !== 'CANCELLED' && linkedReturns.filter(r => r.status !== 'CANCELLED').length === 0;
 
-  function handleAddPayment() {
+  // R6D — Credit-Modus: das Haus waehlt die Guthabenzeilen (FIFO, nur dieser Lieferant in dieser
+  // Filiale) und nimmt den Betrag nur GANZ an (≤ offen und ≤ verfuegbar). Vorher lief die Schleife
+  // hier in der Maske — ohne Klammer, ueber Guthaben aller Filialen, mit stillem Fehlbetrag.
+  // Bar/Bank/Benefit: Rest und Status guthabenbewusst im Haus. Das Modal schliesst NUR bei Erfolg.
+  async function handleAddPayment() {
     const amt = parseFloat(payAmount);
-    if (!amt || amt <= 0 || !id) return;
-    if (payMethod === 'credit') {
-      // Slice 4b-Fix — Credit-Einloesung ueber applyCreditToPurchase (FIFO ueber offene
-      // supplier_credits, aelteste zuerst), NICHT ueber addPayment: nur applyCreditToPurchase
-      // pflegt supplier_credits.used_amount + reference=creditId (F6) und bucht DR AP /
-      // CR SUPPLIER_CREDIT → Domain == Ledger (Reconciliation gruen). Deckt Return- UND
-      // Overpay-Credits (beide leben in supplier_credits).
-      // UI-Guard: Credit darf weder das verfuegbare Supplier-Guthaben noch den offenen
-      // Purchase-Rest uebersteigen — frueh + verstaendlich melden (der Store wirft sonst hart,
-      // siehe applyCreditToPurchase). remainingAmount = total − cash-paid − credit-paid.
-      // Vergleich in Fils (Minor Units), KEINE BHD-Toleranz — deckt sich mit dem Store-Guard.
-      const toFils = (n: number) => Math.round(n * 1000);
-      if (toFils(amt) > toFils(supplierLedger.creditBalance)) {
-        alert(`Not enough supplier credit. Available: ${fmt(supplierLedger.creditBalance)} BHD.`);
-        return;
-      }
-      const openBalance = purchase?.remainingAmount ?? 0;
-      if (toFils(amt) > toFils(openBalance)) {
-        alert(`Credit amount exceeds this purchase's open balance (${fmt(openBalance)} BHD). Enter at most that amount.`);
-        return;
-      }
-      const open = [...getOpenCredits(purchase!.supplierId)].sort((a, b) => a.createdAt.localeCompare(b.createdAt));
-      let remaining = amt;
-      for (const c of open) {
-        if (remaining <= 0.005) break;
-        const avail = c.amount - c.usedAmount;
-        if (avail <= 0.005) continue;
-        const use = Math.min(remaining, avail);
-        applyCreditToPurchase(c.id, id, use);
-        remaining -= use;
-      }
-      loadPurchases();
-      loadSuppliers();
-    } else {
-      addPayment(id, amt, payMethod, payRef || undefined);
-    }
+    if (!amt || amt <= 0 || !purchase || w.busy) return;
+    setPayFehler('');
+    const r = payMethod === 'credit'
+      ? await savePurchaseCredit(viaWrites(w, PAYABLES_OP.PURCHASES_APPLY_CREDIT), purchase, amt)
+      : await savePurchasePayment(viaWrites(w, PAYABLES_OP.PURCHASES_RECORD_PAYMENT), purchase, amt, payMethod, payRef || undefined);
+    if (r.kind !== 'ok') { setPayFehler(fehlertext(r)); return; }
+    setCreditTick((t) => t + 1);
     setShowPayment(false);
     setPayAmount('');
     setPayRef('');
@@ -174,7 +169,7 @@ export function PurchaseDetail() {
             <ArrowLeft size={16} /> Back
           </button>
           <div className="flex gap-2">
-            {canPay && <Button variant="primary" onClick={() => setShowPayment(true)}><CreditCard size={14} /> Add Payment</Button>}
+            {canPay && <Button variant="primary" onClick={() => { setPayFehler(''); setShowPayment(true); }} data-purchase-pay-open><CreditCard size={14} /> Add Payment</Button>}
             {canReturn && <Button variant="secondary" onClick={openReturnModal}><RotateCcw size={14} /> Return to Supplier</Button>}
             <Button variant="ghost" onClick={() => printPurchasePdf({ purchase, supplier, products, categories })}>
               <Printer size={14} /> Print
@@ -392,36 +387,43 @@ export function PurchaseDetail() {
       <Modal open={showPayment} onClose={() => setShowPayment(false)} title="Add Payment" width={420}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Input required label={`AMOUNT (max ${fmt(purchase.remainingAmount)} BHD outstanding)`} type="number" step="0.01"
-            value={payAmount} onChange={e => setPayAmount(e.target.value)} autoFocus />
+            value={payAmount} onChange={e => setPayAmount(e.target.value)} autoFocus disabled={w.busy} data-purchase-pay-amount />
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
             <div className="flex gap-2" style={{ marginTop: 6 }}>
               {(['cash', 'bank', 'benefit', 'credit'] as const).map(m => {
                 const active = payMethod === m;
-                const disabled = m === 'credit' && supplierLedger.creditBalance <= 0;
+                const disabled = w.busy || (m === 'credit' && creditAvailable <= 0);
                 return (
                   <button key={m} onClick={() => !disabled && setPayMethod(m)} className="cursor-pointer rounded"
                     disabled={disabled}
+                    data-purchase-pay-method={m}
                     style={{ padding: '8px 16px', fontSize: 13,
                       border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                       color: disabled ? '#D5D9DE' : (active ? '#0F0F10' : '#6B7280'),
                       background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
                       opacity: disabled ? 0.5 : 1,
                       cursor: disabled ? 'not-allowed' : 'pointer',
-                    }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : m === 'benefit' ? 'Benefit' : `Credit (${fmt(supplierLedger.creditBalance)})`}</button>
+                    }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : m === 'benefit' ? 'Benefit' : `Credit (${fmt(creditAvailable)})`}</button>
                 );
               })}
             </div>
             {payMethod === 'credit' && (
-              <p style={{ fontSize: 11, color: '#AA956E', marginTop: 6 }}>
-                Available supplier credit: <span className="font-mono"><Bhd v={supplierLedger.creditBalance}/> BHD</span>
+              <p style={{ fontSize: 11, color: '#AA956E', marginTop: 6 }} data-purchase-credit-available>
+                Available supplier credit: <span className="font-mono"><Bhd v={creditAvailable}/> BHD</span>
               </p>
             )}
           </div>
-          <Input label="REFERENCE (optional)" placeholder="Transaction ID / check no" value={payRef} onChange={e => setPayRef(e.target.value)} />
+          {payMethod !== 'credit' && (
+            <Input label="REFERENCE (optional)" placeholder="Transaction ID / check no" value={payRef} onChange={e => setPayRef(e.target.value)} disabled={w.busy} data-purchase-pay-reference />
+          )}
+          <WriteError text={payFehler} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setShowPayment(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleAddPayment} disabled={!payAmount || parseFloat(payAmount) <= 0}>Record Payment</Button>
+            <Button variant="ghost" onClick={() => setShowPayment(false)} disabled={w.busy}>Cancel</Button>
+            <Button variant="primary" onClick={() => void handleAddPayment()} disabled={w.busy || !payAmount || parseFloat(payAmount) <= 0}
+              {...(payMethod === 'credit' ? { 'data-purchase-credit-save': '' } : { 'data-purchase-pay-save': '' })}>
+              {w.busy ? 'Saving…' : payMethod === 'credit' ? 'Apply Credit' : 'Record Payment'}
+            </Button>
           </div>
         </div>
       </Modal>

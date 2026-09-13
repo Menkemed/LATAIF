@@ -2,11 +2,16 @@ import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import type { PreciousMetal, MetalStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId, getSetting } from '@/core/db/helpers';
+import { query, currentBranchId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { postMetalPayment, postMetalPaymentReversed, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
-import { useGoldStore } from '@/stores/goldStore';
-import { useExpenseStore } from '@/stores/expenseStore';
+// CENTRAL-UI-PARITY R6D — Anlegen, Status und Spotpreis laufen durch DIESELBE Hausfolge wie die
+// Maske und der Fernbefehl (`core/metals/metal-house`). Die Store-Einstiege bleiben für ihre
+// synchronen Aufrufer, halten aber keine eigene Logik mehr.
+import {
+  MetalRejected, changeMetalStatusInHouse, createMetalInHouse, inOneTransaction, localHouseBranch,
+  metalFromRow, setSpotPriceInHouse, spotPriceOf, type MetalRecord,
+} from '@/core/metals/metal-house';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
@@ -21,10 +26,10 @@ function safePost(label: string, fn: () => void): void {
 }
 
 interface MetalStore {
-  metals: PreciousMetal[];
+  metals: MetalRecord[];
   loading: boolean;
   loadMetals: () => void;
-  getMetal: (id: string) => PreciousMetal | undefined;
+  getMetal: (id: string) => MetalRecord | undefined;
   createMetal: (data: Partial<PreciousMetal>) => PreciousMetal;
   updateMetal: (id: string, data: Partial<PreciousMetal>) => void;
   deleteMetal: (id: string) => void;
@@ -33,34 +38,6 @@ interface MetalStore {
   // Plan §8 #4 — Payment-Tracking für Metall-Verkäufe
   recordMetalPayment: (metalId: string, amount: number, method: 'cash' | 'bank' | 'card', date?: string, note?: string) => void;
   getMetalPayments: (metalId: string) => Array<{ id: string; amount: number; method: string; paidAt: string; note?: string }>;
-}
-
-function rowToMetal(row: Record<string, unknown>): PreciousMetal {
-  return {
-    id: row.id as string,
-    metalType: row.metal_type as PreciousMetal['metalType'],
-    karat: row.karat as PreciousMetal['karat'] | undefined,
-    weightGrams: row.weight_grams as number,
-    description: row.description as string | undefined,
-    purchasePricePerGram: row.purchase_price_per_gram as number | undefined,
-    purchaseTotal: row.purchase_total as number | undefined,
-    spotPriceAtPurchase: row.spot_price_at_purchase as number | undefined,
-    currentSpotPrice: row.current_spot_price as number | undefined,
-    meltValue: row.melt_value as number | undefined,
-    salePrice: row.sale_price as number | undefined,
-    status: (row.status as MetalStatus) || 'in_stock',
-    paidAmount: (row.paid_amount as number) || 0,
-    paymentStatus: (row.payment_status as 'UNPAID' | 'PARTIALLY_PAID' | 'PAID') || 'UNPAID',
-    supplierName: row.supplier_name as string | undefined,
-    supplierId: row.supplier_id as string | undefined,
-    linkedExpenseId: row.linked_expense_id as string | undefined,
-    customerId: row.customer_id as string | undefined,
-    notes: row.notes as string | undefined,
-    images: JSON.parse((row.images as string) || '[]'),
-    createdAt: row.created_at as string,
-    updatedAt: row.updated_at as string,
-    createdBy: row.created_by as string | undefined,
-  };
 }
 
 export const useMetalStore = create<MetalStore>((set, get) => ({
@@ -79,121 +56,48 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
   getMetal: (id) => get().metals.find(m => m.id === id),
 
   getSpotPrice: (metalType: string): number => {
-    const val = getSetting(`spot_price.${metalType}`, '0');
-    return parseFloat(val) || 0;
+    try { return spotPriceOf(currentBranchId(), metalType); } catch { return 0; }
   },
 
+  // R6D — dieselbe Hausfolge wie `metals.set_spot_price`; ohne Sitzung kein stilles 'branch-main'.
   setSpotPrice: (metalType: string, price: number) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    let branchId: string;
-    try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
-    const key = `spot_price.${metalType}`;
-    db.run(
-      `INSERT INTO settings (branch_id, key, value, category, updated_at)
-       VALUES (?, ?, ?, 'metals', ?)
-       ON CONFLICT(branch_id, key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-      [branchId, key, String(price), now]
-    );
-    saveDatabase();
+    inOneTransaction(() => setSpotPriceInHouse(metalType, price, localHouseBranch()));
   },
 
+  // R6D — Zeile, Goldbewegung, Lieferantenschuld und Verknüpfung in EINER Transaktion; ein Fehler
+  // wirft (vorher blieben bis zu vier getrennte Commits und verschluckte Fehler zurück).
   createMetal: (data) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const id = uuid();
-
-    const metal: PreciousMetal = {
-      id,
-      metalType: data.metalType || 'gold',
+    const r = inOneTransaction(() => createMetalInHouse({
+      metalType: data.metalType,
       karat: data.karat,
-      weightGrams: data.weightGrams || 0,
-      description: data.description,
-      purchasePricePerGram: data.purchasePricePerGram,
+      weightGrams: data.weightGrams,
       purchaseTotal: data.purchaseTotal,
-      spotPriceAtPurchase: data.spotPriceAtPurchase,
-      currentSpotPrice: data.currentSpotPrice,
-      meltValue: data.meltValue,
-      salePrice: data.salePrice,
-      status: data.status || 'in_stock',
-      supplierName: data.supplierName,
+      purchasePricePerGram: data.purchasePricePerGram,
       supplierId: data.supplierId,
-      customerId: data.customerId,
+      supplierName: data.supplierName,
+      description: data.description,
       notes: data.notes,
-      images: data.images || [],
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    let branchId: string;
-    try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
-
-    db.run(
-      `INSERT INTO precious_metals (id, branch_id, metal_type, karat, weight_grams, description,
-        purchase_price_per_gram, purchase_total, spot_price_at_purchase, current_spot_price,
-        melt_value, sale_price, status, supplier_name, supplier_id, customer_id, notes, images,
-        created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, branchId, metal.metalType, metal.karat || null, metal.weightGrams,
-       metal.description || null, metal.purchasePricePerGram || null,
-       metal.purchaseTotal || null, metal.spotPriceAtPurchase || null,
-       metal.currentSpotPrice || null, metal.meltValue || null,
-       metal.salePrice || null, metal.status,
-       metal.supplierName || null, metal.supplierId || null, metal.customerId || null,
-       metal.notes || null, JSON.stringify(metal.images), now, now,
-       (() => { try { return currentUserId(); } catch { return null; } })()]
-    );
-
-    saveDatabase();
-    trackInsert('precious_metals', id, { metalType: metal.metalType, karat: metal.karat, weightGrams: metal.weightGrams });
-
-    // v0.1.46 — Audit-Eintrag fuer Bestands-Inflow. Gold ohne Karat zaehlt nicht
-    // (silver bekommt z.B. nur '925' was wir als Karat-String akzeptieren).
-    if (metal.metalType === 'gold' && metal.karat && metal.weightGrams > 0) {
-      try {
-        useGoldStore.getState().recordExternalGoldInflow(branchId, metal.karat, metal.weightGrams, {
-          supplierId: metal.supplierId,
-          metalId: id,
-          notes: metal.supplierId
-            ? `Purchase: ${metal.weightGrams}g ${metal.karat} (metal ${id.slice(0, 8)})`
-            : `Manual entry: ${metal.weightGrams}g ${metal.karat} (metal ${id.slice(0, 8)})`,
-        });
-      } catch (err) {
-        console.warn('[metals] gold_movement audit failed:', err);
-      }
-    }
-
-    // v0.1.46 — wenn Supplier + purchaseTotal > 0 angegeben → automatisch eine
-    // Expense erzeugen + Ledger A/P posten. Das schliesst die Geld-Schuld-Luecke
-    // (vorher konnte man Bestand erhoehen ohne dass irgendwo die Zahlung an den
-    // Lieferanten landet). payNow=false → A/P bleibt OPEN bis explizit bezahlt.
-    if (metal.supplierId && (metal.purchaseTotal || 0) > 0) {
-      try {
-        const exp = useExpenseStore.getState().createExpense({
-          category: 'Inventory',
-          amount: metal.purchaseTotal,
-          supplierId: metal.supplierId,
-          expenseDate: now.split('T')[0],
-          description: `Metal purchase: ${metal.weightGrams}g ${metal.karat || ''} (${id.slice(0, 8)})`,
-          relatedModule: 'metal',
-          relatedEntityId: id,
-          payNow: false,  // A/P, Owner zahlt spaeter via Supplier-Detail
-        });
-        // Link expense back to metal
-        db.run(`UPDATE precious_metals SET linked_expense_id = ?, updated_at = ? WHERE id = ?`, [exp.id, now, id]);
-        metal.linkedExpenseId = exp.id;
-        saveDatabase();
-        trackUpdate('precious_metals', id, { linkedExpenseId: exp.id });
-      } catch (err) {
-        console.error('[metals] auto-expense for supplier purchase failed:', err);
-      }
-    }
-
+    }, localHouseBranch()));
     get().loadMetals();
-    return metal;
+    return r.metal;
   },
 
   updateMetal: (id, data) => {
+    // R6D — ein Statuswechsel ist KEIN Feldupdate mehr: er geht durch die Hausfolge (nur von „am
+    // Lager", Spot/Schmelzwert vom Haus). Vorher ließ sich ein verkauftes Stück einschmelzen und ein
+    // zweites Mal verkaufen.
+    if (data.status !== undefined) {
+      if (data.status !== 'sold' && data.status !== 'melted') {
+        throw new MetalRejected('METAL_STATUS_INVALID', 'an item is either sold or melted');
+      }
+      const status = data.status;
+      inOneTransaction(() => changeMetalStatusInHouse({
+        metalId: id, status, salePrice: status === 'sold' ? data.salePrice : undefined,
+      }, localHouseBranch()));
+      get().loadMetals();
+      return;
+    }
+
     const db = getDatabase();
     const now = new Date().toISOString();
     const fields: string[] = [];
@@ -210,7 +114,6 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
       currentSpotPrice: 'current_spot_price',
       meltValue: 'melt_value',
       salePrice: 'sale_price',
-      status: 'status',
       supplierName: 'supplier_name',
       customerId: 'customer_id',
       notes: 'notes',
@@ -310,8 +213,8 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
   },
 }));
 
-/** CENTRAL-UI-PARITY R2B — die Edelmetall-Bestaende einer Filiale, zustandsfrei. */
-export function loadMetalsFor(ctx: BusinessReadContext): { metals: PreciousMetal[] } {
+/** CENTRAL-UI-PARITY R2B — die Edelmetall-Bestaende einer Filiale, zustandsfrei (R6D: samt Fassung). */
+export function loadMetalsFor(ctx: BusinessReadContext): { metals: MetalRecord[] } {
   const rows = query('SELECT * FROM precious_metals WHERE branch_id = ? ORDER BY updated_at DESC', [ctx.branchId]);
-  return { metals: rows.map(rowToMetal) };
+  return { metals: rows.map(metalFromRow) };
 }

@@ -12,6 +12,7 @@ import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — purchase_lines FK-Entkopplung
 import { trackProductRow } from '@/core/lots/lot-queries';
+import { assertGoldPayablesRemovable } from '@/core/gold/gold-settle';
 import { useProductStore } from '@/stores/productStore';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import { normalizeCardBrand } from '@/core/finance/card-fees';
@@ -798,9 +799,10 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     saveDatabase();
 
     // Bei ARRIVED/DELIVERED: A/P-Expense fuer supplier-Lines buchen (idempotent).
+    // CENTRAL-UI-PARITY R6D — kein verschluckter Fehler mehr: „Add Cost" laeuft in EINER Klammer
+    // (`addOrderCostInHouse`); scheitert die A/P, gibt es auch die Zeile nicht (vorher blieb sie ohne).
     if (status === 'ARRIVED' || status === 'DELIVERED') {
-      try { get().commitOrderLineExpenses(orderId); }
-      catch (err) { console.error('[order] commitOrderLineExpenses (addOrderLine) failed:', err); }
+      get().commitOrderLineExpenses(orderId);
     }
     get().recomputeOrderStatus(orderId);
     get().loadOrders();
@@ -825,23 +827,21 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     // v0.6.5 — verknuepfte Gold-Verbindlichkeit(en): OPEN → mitloeschen; bereits
     // beglichene (FULFILLED) → Loeschen blockieren, sonst verwaist die schon
     // gebuchte Settlement-Expense.
-    const linkedGp = query(`SELECT id, status FROM gold_payables WHERE source_order_line_id = ?`, [lineId]);
-    if (linkedGp.some(g => g.status !== 'OPEN' && g.status !== 'CANCELLED')) {
-      throw new Error('Die Gold-Verbindlichkeit dieser Position wurde bereits beglichen — bitte erst die Verbindlichkeit rückabwickeln.');
-    }
+    // CENTRAL-UI-PARITY R6D — dieselbe Regel zu Ende gedacht (Goldkern): auch eine TEILWEISE
+    // beglichene offene Schuld bleibt — ihr Gold hat den Bestand schon bewegt.
+    const linkedGp = query(`SELECT id, status, fulfilled_grams FROM gold_payables WHERE source_order_line_id = ?`, [lineId]);
+    assertGoldPayablesRemovable(linkedGp, 'Position');
     for (const g of linkedGp) {
       db.run(`DELETE FROM gold_payables WHERE id = ?`, [g.id as string]);
       trackDelete('gold_payables', g.id as string);
     }
     if (expenseId) {
-      try {
-        cancelOrderLineExpense(expenseId);
-        db.run(`DELETE FROM expense_payments WHERE expense_id = ?`, [expenseId]);
-        db.run(`DELETE FROM expenses WHERE id = ?`, [expenseId]);
-        trackDelete('expenses', expenseId);
-      } catch (err) {
-        console.error(`[order] order-line expense cleanup failed (${expenseId}):`, err);
-      }
+      // R6D — vorher in einem try/catch, das nur protokollierte: die Zeile verschwand, die Schuld
+      // beim Lieferanten blieb. Jetzt scheitert das Loeschen mit ihr (EINE Klammer, `removeOrderCostInHouse`).
+      cancelOrderLineExpense(expenseId);
+      db.run(`DELETE FROM expense_payments WHERE expense_id = ?`, [expenseId]);
+      db.run(`DELETE FROM expenses WHERE id = ?`, [expenseId]);
+      trackDelete('expenses', expenseId);
     }
     // Back-to-Back: eine evtl. verknuepfte Purchase-Zeile entkoppeln (defensiv —
     // sql.js erzwingt FK ON DELETE SET NULL evtl. nicht).

@@ -1,0 +1,369 @@
+// ════════════════════════════════════════════════════════════════════════════
+// CENTRAL-UI-PARITY R6D — Edelmetall und Altgold vom zweiten Rechner, ausschließlich über den Primary.
+//
+// Sechs Absichten, jede ruft DIESELBE Hausfolge wie die Maske des Primary (`core/metals/…-house`):
+//
+//   metals.create           — „Add Item": Zeile + Goldbewegung + Lieferantenschuld + Buchung + Verknüpfung
+//   metals.update_status    — „Mark Sold" / „Confirm Melt", nur von „am Lager", mit gesehener Fassung
+//   metals.set_spot_price   — der Spotpreis je Gramm einer Metallart (Filialeinstellung)
+//   scrap_trades.create     — „Save Trade"
+//   scrap_trades.update     — „Save Changes", gegen die gesehene Fassung (`version`)
+//   scrap_trades.cancel     — „Yes, Cancel Trade": Umkehrbuchungen und Status in EINER Transaktion
+//
+// Was ein Client NIE vorgibt: Kennung, Filiale, Benutzer, Zeitstempel, Status (außer als Ziel von
+// update_status), Fassung (außer der gesehenen), Spotpreis, Schmelzwert, Belegnummer, Summen,
+// Gewinn, Buchungskonten. Ein unbekanntes Feld wird abgewiesen statt ignoriert. Fotos reisen als
+// Kennungen der vorhandenen Zwischenablage (R5B), nie als Bytes im Auftrag.
+// ════════════════════════════════════════════════════════════════════════════
+import { getDatabase, saveDatabaseDurably } from '@/core/db/database';
+import {
+  beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
+} from '@/core/ledger/posting';
+import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
+import type { CommandIdentity } from './command-ledger';
+import { BusinessError, registerCommand, type CommandActor } from './command-registry';
+import {
+  assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStaged, parseStagingIds,
+  readStagedAsDataUrls, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader,
+} from './remote-create-support';
+import {
+  METAL_CREATE_FIELDS, MetalRejected, changeMetalStatusInHouse, createMetalInHouse, setSpotPriceInHouse,
+  type MetalCreateInput,
+} from '@/core/metals/metal-house';
+import {
+  SCRAP_MAX_PHOTOS, ScrapRejected, cancelScrapTradeInHouse, createScrapTradeInHouse, updateScrapTradeInHouse,
+  type ScrapTradeInput, type ScrapTradeLineInput, type ScrapTradePaymentInput,
+} from '@/core/metals/scrap-house';
+
+export const OP_METALS_CREATE = 'metals.create';
+export const OP_METALS_UPDATE_STATUS = 'metals.update_status';
+export const OP_METALS_SET_SPOT_PRICE = 'metals.set_spot_price';
+export const OP_SCRAP_TRADES_CREATE = 'scrap_trades.create';
+export const OP_SCRAP_TRADES_UPDATE = 'scrap_trades.update';
+export const OP_SCRAP_TRADES_CANCEL = 'scrap_trades.cancel';
+
+export const METAL_SCRAP_OPS = [
+  OP_METALS_CREATE, OP_METALS_UPDATE_STATUS, OP_METALS_SET_SPOT_PRICE,
+  OP_SCRAP_TRADES_CREATE, OP_SCRAP_TRADES_UPDATE, OP_SCRAP_TRADES_CANCEL,
+] as const;
+
+/** Ein unbrauchbarer Rumpf — eine Antwort, keine Störung. Der Client korrigiert und schickt neu. */
+export class MetalPayloadError extends Error {
+  readonly code: string;
+  constructor(message: string, code = 'METAL_PAYLOAD_INVALID') {
+    super(message);
+    this.name = 'MetalPayloadError';
+    this.code = code;
+  }
+}
+
+/** Wer, wo, wann, welche Kennung, welcher Zustand — nie vom Client. */
+const FORBIDDEN = ['id', 'branchId', 'tenantId', 'userId', 'createdBy', 'createdAt', 'updatedAt', 'revision', 'version', 'status'];
+/** Was das Metallhaus selbst ableitet oder führt. */
+export const METAL_DERIVED = [
+  'spotPriceAtPurchase', 'currentSpotPrice', 'meltValue', 'spotPrice', 'spot', 'purity',
+  'linkedExpenseId', 'expenseId', 'paidAmount', 'paymentStatus', 'salePrice', 'customerId', 'images',
+  'ledger', 'entries', 'account', 'debit', 'credit', 'transactionId', 'goldMovementId',
+];
+/** Was der Altgoldhandel selbst ableitet oder führt. */
+export const SCRAP_DERIVED = [
+  'tradeNumber', 'weightGrams', 'karat', 'purchasePrice', 'salePrice', 'profit',
+  'paymentMethodPurchase', 'paymentMethodSale', 'syncStatus', 'imagesPurchase', 'imagesSale',
+  'ledger', 'entries', 'account', 'debit', 'credit', 'transactionId',
+];
+
+const isPlain = (v: unknown): v is Record<string, unknown> =>
+  typeof v === 'object' && v !== null && !Array.isArray(v);
+
+function strict(raw: unknown, allowed: readonly string[], forbidden: readonly string[], what = 'payload'): Record<string, unknown> {
+  if (!isPlain(raw)) throw new MetalPayloadError(`${what} must be an object`);
+  for (const k of Object.keys(raw)) {
+    if (allowed.includes(k)) continue;
+    if (k === 'imagesPurchase' || k === 'imagesSale') {
+      throw new MetalPayloadError('photos travel as staged bytes (purchaseStagingIds / saleStagingIds), never inside the order');
+    }
+    if (forbidden.includes(k)) throw new MetalPayloadError(`the primary decides ${k}, not the client`);
+    throw new MetalPayloadError(`unknown field: ${k}`);
+  }
+  return raw;
+}
+
+function reqId(v: unknown, name: string): string {
+  if (typeof v !== 'string' || !v.trim()) throw new MetalPayloadError(`${name} is required`);
+  return v;
+}
+
+function optStr(v: unknown, name: string): string | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (typeof v !== 'string') throw new MetalPayloadError(`${name} must be text`);
+  return v;
+}
+
+function num(v: unknown, name: string): number {
+  if (typeof v !== 'number' || !Number.isFinite(v)) throw new MetalPayloadError(`${name} must be a number`);
+  return v;
+}
+
+function optNum(v: unknown, name: string): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  return num(v, name);
+}
+
+function seenRevision(v: unknown, name: string): number {
+  if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
+    throw new MetalPayloadError(`${name} is required — say which state of the record you saw`);
+  }
+  return v;
+}
+
+const without = (list: readonly string[], ...drop: string[]): string[] => list.filter((k) => !drop.includes(k));
+
+// ── Edelmetall ─────────────────────────────────────────────────────────────
+
+/** Die Form prüfen; die Regeln (Feinheit zur Metallart, Gewicht > 0, Beträge ≥ 0) prüft das Haus. */
+export function parseMetalCreate(raw: unknown): Partial<MetalCreateInput> {
+  const r = strict(raw, METAL_CREATE_FIELDS, [...FORBIDDEN, ...METAL_DERIVED]);
+  return {
+    metalType: optStr(r.metalType, 'metalType') as MetalCreateInput['metalType'],
+    karat: optStr(r.karat, 'karat') as MetalCreateInput['karat'],
+    weightGrams: num(r.weightGrams, 'weightGrams'),
+    purchaseTotal: optNum(r.purchaseTotal, 'purchaseTotal'),
+    purchasePricePerGram: optNum(r.purchasePricePerGram, 'purchasePricePerGram'),
+    supplierId: optStr(r.supplierId, 'supplierId'),
+    supplierName: optStr(r.supplierName, 'supplierName'),
+    description: optStr(r.description, 'description'),
+    notes: optStr(r.notes, 'notes'),
+  };
+}
+
+export interface MetalStatusRequest { metalId: string; expectedRevision: number; status: 'sold' | 'melted'; salePrice?: number }
+
+export function parseMetalStatus(raw: unknown): MetalStatusRequest {
+  const r = strict(raw, ['metalId', 'expectedRevision', 'status', 'salePrice'],
+    [...without(FORBIDDEN, 'status'), ...without(METAL_DERIVED, 'salePrice')]);
+  const status = r.status;
+  if (status !== 'sold' && status !== 'melted') throw new MetalPayloadError('status is sold or melted');
+  const salePrice = optNum(r.salePrice, 'salePrice');
+  if (status === 'sold' && salePrice === undefined) throw new MetalPayloadError('a sale needs its sale price');
+  if (status === 'melted' && salePrice !== undefined) throw new MetalPayloadError('melting takes no sale price');
+  return { metalId: reqId(r.metalId, 'metalId'), expectedRevision: seenRevision(r.expectedRevision, 'expectedRevision'), status, salePrice };
+}
+
+export function parseSpotPrice(raw: unknown): { metalType: string; price: number } {
+  const r = strict(raw, ['metalType', 'price'], [...FORBIDDEN, ...METAL_DERIVED]);
+  return { metalType: reqId(r.metalType, 'metalType'), price: num(r.price, 'price') };
+}
+
+// ── Altgold ────────────────────────────────────────────────────────────────
+
+const SCRAP_FIELDS = [
+  'sellerName', 'sellerPhone', 'sellerCustomerId', 'buyerName', 'buyerPhone', 'buyerSupplierId',
+  'tradeDate', 'notes', 'lines', 'paymentsOut', 'paymentsIn',
+] as const;
+const LINE_FIELDS = ['weightGrams', 'karat', 'purchasePrice', 'salePrice', 'notes', 'purchaseStagingIds', 'saleStagingIds'];
+const LINE_FORBIDDEN = ['id', 'scrapTradeId', 'position', 'profit', 'createdAt'];
+const PAYMENT_FIELDS = ['method', 'amount'];
+const PAYMENT_FORBIDDEN = ['id', 'scrapTradeId', 'direction', 'position', 'account', 'createdAt'];
+
+/** Die Eingabe ohne Fotos, dazu je Zeile die Kennungen der abgelegten Fotos. */
+export interface ScrapRequest { input: ScrapTradeInput; staged: Array<{ purchase: string[]; sale: string[] }> }
+
+function stagedList(v: unknown, what: string): string[] {
+  const ids = parseStagingIds(v, (m) => new MetalPayloadError(`${what}: ${m}`));
+  if (ids.length > SCRAP_MAX_PHOTOS) throw new MetalPayloadError(`${what}: at most ${SCRAP_MAX_PHOTOS} photos`);
+  return ids;
+}
+
+function parseScrapFields(r: Record<string, unknown>): ScrapRequest {
+  if (!Array.isArray(r.lines)) throw new MetalPayloadError('lines must be a list');
+  if (!Array.isArray(r.paymentsOut) || !Array.isArray(r.paymentsIn)) throw new MetalPayloadError('paymentsOut and paymentsIn must be lists');
+  const staged: ScrapRequest['staged'] = [];
+  const lines: ScrapTradeLineInput[] = r.lines.map((raw, i) => {
+    const l = strict(raw, LINE_FIELDS, LINE_FORBIDDEN, `item ${i + 1}`);
+    staged.push({
+      purchase: stagedList(l.purchaseStagingIds, `item ${i + 1} purchase photos`),
+      sale: stagedList(l.saleStagingIds, `item ${i + 1} sale photos`),
+    });
+    return {
+      weightGrams: num(l.weightGrams, `item ${i + 1} weightGrams`),
+      karat: optStr(l.karat, `item ${i + 1} karat`) ?? '',
+      purchasePrice: num(l.purchasePrice, `item ${i + 1} purchasePrice`),
+      salePrice: num(l.salePrice, `item ${i + 1} salePrice`),
+      notes: optStr(l.notes, `item ${i + 1} notes`),
+    };
+  });
+  const payments = (list: unknown[], what: string): ScrapTradePaymentInput[] => list.map((raw, i) => {
+    const p = strict(raw, PAYMENT_FIELDS, PAYMENT_FORBIDDEN, `${what} ${i + 1}`);
+    return { method: optStr(p.method, `${what} method`) as ScrapTradePaymentInput['method'], amount: num(p.amount, `${what} amount`) };
+  });
+  return {
+    input: {
+      sellerName: optStr(r.sellerName, 'sellerName') ?? '',
+      sellerPhone: optStr(r.sellerPhone, 'sellerPhone'),
+      sellerCustomerId: optStr(r.sellerCustomerId, 'sellerCustomerId'),
+      buyerName: optStr(r.buyerName, 'buyerName') ?? '',
+      buyerPhone: optStr(r.buyerPhone, 'buyerPhone'),
+      buyerSupplierId: optStr(r.buyerSupplierId, 'buyerSupplierId'),
+      tradeDate: optStr(r.tradeDate, 'tradeDate') ?? '',
+      notes: optStr(r.notes, 'notes'),
+      lines,
+      paymentsOut: payments(r.paymentsOut, 'payment out'),
+      paymentsIn: payments(r.paymentsIn, 'payment in'),
+    },
+    staged,
+  };
+}
+
+export function parseScrapCreate(raw: unknown): ScrapRequest {
+  return parseScrapFields(strict(raw, SCRAP_FIELDS, [...FORBIDDEN, ...SCRAP_DERIVED]));
+}
+
+export function parseScrapUpdate(raw: unknown): ScrapRequest & { tradeId: string; expectedVersion: number } {
+  const r = strict(raw, ['tradeId', 'expectedVersion', ...SCRAP_FIELDS], [...FORBIDDEN, ...SCRAP_DERIVED]);
+  return { ...parseScrapFields(r), tradeId: reqId(r.tradeId, 'tradeId'), expectedVersion: seenRevision(r.expectedVersion, 'expectedVersion') };
+}
+
+export function parseScrapCancel(raw: unknown): { tradeId: string; expectedVersion: number } {
+  const r = strict(raw, ['tradeId', 'expectedVersion'], [...FORBIDDEN, ...SCRAP_DERIVED]);
+  return { tradeId: reqId(r.tradeId, 'tradeId'), expectedVersion: seenRevision(r.expectedVersion, 'expectedVersion') };
+}
+
+// ── Die Läufe ──────────────────────────────────────────────────────────────
+
+export function metalDeps(): EngineDeps {
+  return {
+    db: getDatabase() as never,
+    begin: beginLedgerTransaction,
+    commit: commitLedgerTransaction,
+    rollback: rollbackLedgerTransaction,
+    durableSave: saveDatabaseDurably,
+    now: () => new Date().toISOString(),
+  };
+}
+
+/** Wie die Fotos einer Ablage geholt und danach geräumt werden — für Tests ersetzbar. */
+export interface ScrapMedia {
+  readStaged?: StagedMediaReader;
+  discardStaged?: StagedMediaDiscard;
+}
+
+/** Das Nein der Hausfolge wird eingefroren — ein Urteil über GENAU diese Anfrage. */
+function urteil<T>(fn: () => T): T {
+  try { return fn(); } catch (e) {
+    if (e instanceof MetalRejected || e instanceof ScrapRejected) throw new CommandRejected(e.code, e.message);
+    throw e;
+  }
+}
+
+export function runMetalCreate(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const input = parseMetalCreate(raw);
+  return runRemoteCommand(deps, identity, () => {
+    assertHouseBranch(identity);
+    const r = urteil(() => createMetalInHouse(input, identity.branchId));
+    return {
+      metalId: r.metal.id,
+      status: r.metal.status,
+      revision: r.metal.revision,
+      linkedExpenseId: r.linkedExpenseId ?? null,
+      spotPriceAtPurchase: r.metal.spotPriceAtPurchase ?? null,
+      meltValue: r.metal.meltValue ?? null,
+    };
+  });
+}
+
+export function runMetalStatus(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const req = parseMetalStatus(raw);
+  return runRemoteCommand(deps, identity, () => {
+    assertHouseBranch(identity);
+    return urteil(() => changeMetalStatusInHouse(req, identity.branchId)) as unknown as Record<string, unknown>;
+  });
+}
+
+export function runSpotPrice(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const req = parseSpotPrice(raw);
+  return runRemoteCommand(deps, identity, () => {
+    assertHouseBranch(identity);
+    return urteil(() => setSpotPriceInHouse(req.metalType, req.price, identity.branchId));
+  });
+}
+
+/** Die Fotos aus der Ablage holen — INNERHALB des Auftrags, als Eigentümer die geprüfte Identität. */
+async function withPhotos(req: ScrapRequest, identity: CommandIdentity, media: ScrapMedia): Promise<ScrapTradeInput> {
+  const read = media.readStaged ?? invokeReadStaged;
+  const owner = stagingOwnerOf(identity);
+  const fail = (m: string) => new MetalPayloadError(m, 'STAGED_IMAGE_GONE');
+  const lines: ScrapTradeLineInput[] = [];
+  for (let i = 0; i < req.input.lines.length; i++) {
+    const s = req.staged[i];
+    lines.push({
+      ...req.input.lines[i],
+      imagesPurchase: await readStagedAsDataUrls(s.purchase, owner, read, fail),
+      imagesSale: await readStagedAsDataUrls(s.sale, owner, read, fail),
+    });
+  }
+  return { ...req.input, lines };
+}
+
+const allStaged = (req: ScrapRequest): string[] => [...new Set(req.staged.flatMap((s) => [...s.purchase, ...s.sale]))];
+
+export async function runScrapCreate(deps: EngineDeps, identity: CommandIdentity, raw: unknown, media: ScrapMedia = {}): Promise<CommandOutcome> {
+  const req = parseScrapCreate(raw);
+  const outcome = await runRemoteCommand(deps, identity, async () => {
+    assertHouseBranch(identity);
+    const input = await withPhotos(req, identity, media);
+    return urteil(() => createScrapTradeInHouse(input, identity.branchId));
+  });
+  const staged = allStaged(req);
+  if (outcome.kind === 'ok' && staged.length) await discardStagedAfterSuccess(staged, stagingOwnerOf(identity), media.discardStaged ?? invokeDiscardStaged);
+  return outcome;
+}
+
+export async function runScrapUpdate(deps: EngineDeps, identity: CommandIdentity, raw: unknown, media: ScrapMedia = {}): Promise<CommandOutcome> {
+  const req = parseScrapUpdate(raw);
+  const outcome = await runRemoteCommand(deps, identity, async () => {
+    assertHouseBranch(identity);
+    const input = await withPhotos(req, identity, media);
+    return urteil(() => updateScrapTradeInHouse(req.tradeId, req.expectedVersion, input, identity.branchId));
+  });
+  const staged = allStaged(req);
+  if (outcome.kind === 'ok' && staged.length) await discardStagedAfterSuccess(staged, stagingOwnerOf(identity), media.discardStaged ?? invokeDiscardStaged);
+  return outcome;
+}
+
+export function runScrapCancel(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const req = parseScrapCancel(raw);
+  return runRemoteCommand(deps, identity, () => {
+    assertHouseBranch(identity);
+    return urteil(() => cancelScrapTradeInHouse(req.tradeId, req.expectedVersion, identity.branchId));
+  });
+}
+
+// ── Die Anmeldung ─────────────────────────────────────────────────────────
+
+type Run = (deps: EngineDeps, identity: CommandIdentity, raw: unknown) => Promise<CommandOutcome>;
+
+async function execute(run: Run, op: string, payload: unknown, actor?: CommandActor): Promise<Record<string, unknown>> {
+  if (!actor) throw new Error(`${op} needs an authenticated identity`);
+  const body = (payload as { input?: unknown } | null)?.input ?? payload;
+  let outcome: CommandOutcome;
+  try {
+    outcome = await run(metalDeps(), { ...actor, op }, body);
+  } catch (err) {
+    // Ein unbrauchbarer Rumpf ist eine Antwort: neu schicken mit einer NEUEN Kennung.
+    if (err instanceof MetalPayloadError) throw new BusinessError(err.code, err.message);
+    throw err;
+  }
+  if (outcome.kind === 'rejected') {
+    // Nur ein EINGEFRORENES Urteil ist ein fachliches Nein.
+    if (!outcome.frozen) throw new CommandNotEvaluated(outcome.code, outcome.message);
+    throw new BusinessError(outcome.code, outcome.message);
+  }
+  return { ...(outcome.value as Record<string, unknown>), replayed: outcome.replayed };
+}
+
+registerCommand(OP_METALS_CREATE, { kind: 'mutation', handler: (p, a) => execute(runMetalCreate, OP_METALS_CREATE, p, a) });
+registerCommand(OP_METALS_UPDATE_STATUS, { kind: 'mutation', handler: (p, a) => execute(runMetalStatus, OP_METALS_UPDATE_STATUS, p, a) });
+registerCommand(OP_METALS_SET_SPOT_PRICE, { kind: 'mutation', handler: (p, a) => execute(runSpotPrice, OP_METALS_SET_SPOT_PRICE, p, a) });
+registerCommand(OP_SCRAP_TRADES_CREATE, { kind: 'mutation', handler: (p, a) => execute((d, i, r) => runScrapCreate(d, i, r), OP_SCRAP_TRADES_CREATE, p, a) });
+registerCommand(OP_SCRAP_TRADES_UPDATE, { kind: 'mutation', handler: (p, a) => execute((d, i, r) => runScrapUpdate(d, i, r), OP_SCRAP_TRADES_UPDATE, p, a) });
+registerCommand(OP_SCRAP_TRADES_CANCEL, { kind: 'mutation', handler: (p, a) => execute(runScrapCancel, OP_SCRAP_TRADES_CANCEL, p, a) });

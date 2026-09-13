@@ -4,20 +4,21 @@ import {
   DollarSign, Clock, BarChart3, PieChart,
   Wallet, Building2, CheckCircle2, Smartphone,
 } from 'lucide-react';
-import { v4 as uuid } from 'uuid';
 import { KPICard } from '@/components/ui/KPICard';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
-import { currentBranchId } from '@/core/db/helpers';
+import { WriteError } from '@/components/shared/WriteError';
 // CENTRAL-UI-PARITY R2C — die Zahlen kommen aus dem gemeinsamen Bestand, nicht mehr aus
 // fünfzig Abfragen in dieser Datei.
 import { useAnalyticsStore } from '@/stores/analyticsStore';
 // Zwei reine Helfer, die die Anzeige mit der Rechnung teilt — eine Definition, kein Nachbau.
 import { num, safeDiv } from '@/core/reports/analytics-snapshot';
-import { readsFromPrimary } from '@/core/data/primary-source';
-import { getDatabase, saveDatabase } from '@/core/db/database';
+// CENTRAL-UI-PARITY R6D — „Mark paid" ist EINE Hausfolge (Zeile + Buchung), am Primary wie auf PC2.
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { saveTaxPayment } from '@/core/finance/money-save';
+import { vatQuarterState } from '@/core/finance/money-house';
 import { exportCsv } from '@/core/utils/export-file';
 
 // ── Helpers ──
@@ -157,7 +158,6 @@ function RankedItem({
 
 export function AnalyticsPage() {
   const [activeTab, setActiveTab] = useState<Tab>('sales');
-  const [branchId, setBranchId] = useState<string>('');
   const [refreshTick, setRefreshTick] = useState(0);
 
   // Tax payment modal state
@@ -166,14 +166,11 @@ export function AnalyticsPage() {
   const [taxPayDate, setTaxPayDate] = useState('');
   const [taxPaySource, setTaxPaySource] = useState<'cash' | 'bank'>('bank');
   const [taxPayNote, setTaxPayNote] = useState('');
-
-  useEffect(() => {
-    try {
-      setBranchId(currentBranchId());
-    } catch {
-      setBranchId('branch-main');
-    }
-  }, []);
+  const [taxPayFehler, setTaxPayFehler] = useState('');
+  // R6D — vorher schrieb diese Seite die Zeile selbst: ohne Hauptbuch, Filiale aus dem Bildschirm
+  // (Ersatz 'branch-main'), Fehler nur in der Konsole, und die Maske schloss sich trotzdem. Jetzt
+  // am Primary die Hausfolge in der Schreibreihenfolge, auf PC2 `tax.record_payment`.
+  const w = useSharedWrites();
 
   useEffect(() => {
     if (taxPayQuarter) {
@@ -181,25 +178,19 @@ export function AnalyticsPage() {
       setTaxPayDate(new Date().toISOString().split('T')[0]);
       setTaxPaySource('bank');
       setTaxPayNote('');
+      setTaxPayFehler('');
     }
   }, [taxPayQuarter]);
 
-  function confirmTaxPayment() {
+  async function confirmTaxPayment() {
     if (!taxPayQuarter) return;
-    const amt = parseFloat(taxPayAmount);
-    if (!amt || amt <= 0) return;
-    const now = new Date().toISOString();
-    try {
-      const db = getDatabase();
-      db.run(
-        `INSERT INTO tax_payments (id, branch_id, year, quarter, amount, source, paid_at, note, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [uuid(), branchId, taxPayQuarter.year, taxPayQuarter.quarter, amt, taxPaySource, taxPayDate + 'T00:00:00Z', taxPayNote || null, now]
-      );
-      saveDatabase();
-    } catch (e) {
-      console.warn('Tax payment save failed', e);
-    }
+    setTaxPayFehler('');
+    const r = await saveTaxPayment(w, {
+      year: taxPayQuarter.year, quarter: taxPayQuarter.quarter,
+      amount: taxPayAmount, source: taxPaySource, paidAt: taxPayDate, note: taxPayNote,
+    });
+    // Nur ein Erfolg schließt die Maske — ein Nein oder ein offener Ausgang bleibt sichtbar stehen.
+    if (r.kind !== 'ok') { setTaxPayFehler(`Could not record the payment: ${fehlertext(r)}`); return; }
     setTaxPayQuarter(null);
     setRefreshTick(t => t + 1);
   }
@@ -749,9 +740,8 @@ export function AnalyticsPage() {
                 {finance.quarterly.map(q => {
                   // Plan §Purchase §Tax + §Erstattung: Net-VAT = Schuld an NBR,
                   // Refund = Erstattung von NBR. Visuell unterscheiden.
-                  const isRefund = q.refund > 0.005;
-                  const remaining = q.netVat - q.paid;
-                  const isSettled = !isRefund && remaining <= 0.01;
+                  // R6D — dieselbe Definition wie in der Hausfolge: dort lehnt sie ein Bezahlen ab.
+                  const { isRefund, remaining, isSettled, payable } = vatQuarterState(q);
                   return (
                     <div key={`${q.year}-${q.quarter}`}
                       className="flex items-center justify-between"
@@ -792,12 +782,11 @@ export function AnalyticsPage() {
                             {isRefund ? '—' : fmtDec(Math.max(0, remaining), 2)}
                           </span>
                         </div>
-                        {/* Das Eintragen einer Steuerzahlung ist ein SCHREIBvorgang und gehört
-                            nicht zu den geprüften Fernbuchungen. Statt eine Schaltfläche
-                            anzubieten, die auf einem Rechner ohne Datenbank nichts täte, gibt
-                            es sie dort nicht — gelesen wird die Auswertung trotzdem vollständig. */}
-                        {!isSettled && !isRefund && !readsFromPrimary() && (
+                        {/* R6D — die Steuerzahlung ist eine geprüfte Buchung (`tax.record_payment`):
+                            der Knopf steht auf beiden Rechnern, solange das Quartal offen ist. */}
+                        {payable && (
                           <button
+                            data-tax-pay-open={`${q.year}-Q${q.quarter}`}
                             onClick={() => setTaxPayQuarter({ year: q.year, quarter: q.quarter, vat: q.netVat, paid: q.paid })}
                             className="cursor-pointer"
                             style={{ padding: '6px 14px', fontSize: 11, background: 'rgba(15,15,16,0.08)', border: '1px solid rgba(198,163,109,0.3)', borderRadius: 6, color: '#0F0F10' }}
@@ -993,13 +982,14 @@ export function AnalyticsPage() {
                 <span className="font-mono" style={{ color: '#AA6E6E' }}>{fmtDec(Math.max(0, taxPayQuarter.vat - taxPayQuarter.paid), 2)} BHD</span>
               </div>
             </div>
-            <Input label="AMOUNT (BHD)" type="number" step="0.001" value={taxPayAmount} onChange={e => setTaxPayAmount(e.target.value)} />
-            <Input label="PAID ON" type="date" value={taxPayDate} onChange={e => setTaxPayDate(e.target.value)} />
+            <WriteError text={taxPayFehler} />
+            <Input label="AMOUNT (BHD)" type="number" step="0.001" value={taxPayAmount} onChange={e => setTaxPayAmount(e.target.value)} data-tax-pay-amount />
+            <Input label="PAID ON" type="date" value={taxPayDate} onChange={e => setTaxPayDate(e.target.value)} data-tax-pay-date />
             <div>
               <span className="text-overline" style={{ marginBottom: 8 }}>PAID FROM</span>
               <div className="flex gap-2" style={{ marginTop: 8 }}>
                 {(['bank', 'cash'] as const).map(s => (
-                  <button key={s} onClick={() => setTaxPaySource(s)}
+                  <button key={s} onClick={() => setTaxPaySource(s)} data-tax-pay-source={s}
                     className="cursor-pointer rounded" style={{
                       padding: '6px 16px', fontSize: 12,
                       border: `1px solid ${taxPaySource === s ? '#0F0F10' : '#D5D9DE'}`,
@@ -1009,10 +999,10 @@ export function AnalyticsPage() {
                 ))}
               </div>
             </div>
-            <Input label="REFERENCE / NOTE (optional)" value={taxPayNote} onChange={e => setTaxPayNote(e.target.value)} placeholder="NBR confirmation #, etc." />
+            <Input label="REFERENCE / NOTE (optional)" value={taxPayNote} onChange={e => setTaxPayNote(e.target.value)} placeholder="NBR confirmation #, etc." data-tax-pay-note />
             <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
               <Button variant="ghost" onClick={() => setTaxPayQuarter(null)}>Cancel</Button>
-              <Button variant="primary" onClick={confirmTaxPayment}>Record Payment</Button>
+              <Button variant="primary" onClick={() => void confirmTaxPayment()} disabled={w.busy} data-tax-pay-save>Record Payment</Button>
             </div>
           </div>
         )}

@@ -18,32 +18,44 @@
 // ═══════════════════════════════════════════════════════════
 
 import { create } from 'zustand';
-import { v4 as uuid } from 'uuid';
 import type {
   GoldPayable, CustomerGoldCredit, GoldMovement, GoldBucket,
-  Expense,
 } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
-import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { postExpense, postGoldConversionCredit, hasLedgerEntries } from '@/core/ledger/posting';
-import { KARAT_PURITY as PURITY_LOOKUP } from '@/core/gold/purity';
+import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
+import { trackUpdate, trackDelete } from '@/core/sync/track';
+// CENTRAL-UI-PARITY R6D — Anlegen und Begleichen stehen im Goldkern; der Store ruft ihn nur noch
+// (dieselbe Folge wie die Maske des Primary und der Fernbefehl von PC2).
+import {
+  assertGoldPayablesRemovable, creditShopGoldCore, insertCustomerGoldCredit, insertGoldPayable,
+  recordGoldMovement, settleCustomerGoldCredit, settleGoldPayable, type GoldActor,
+} from '@/core/gold/gold-settle';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 
-function safePost(label: string, fn: () => void): void {
-  try { fn(); } catch (err) {
-    console.error(`[ledger] ${label} failed:`, err);
-  }
-}
-
 function nowIso(): string { return new Date().toISOString(); }
 
+/** R6D — die alten Store-Aufrufer (Prüfstand, R5E) handeln in der Filiale der Sitzung. */
+function storeActor(): GoldActor {
+  let userId = '';
+  try { userId = currentUserId(); } catch { /* Prüfstand ohne Benutzer */ }
+  return { branchId: currentBranchId(), userId };
+}
+
+/**
+ * CENTRAL-UI-PARITY R6D — die gesehene Fassung einer Gold-Zeile. Die Zeilen tragen sie seit R6D mit
+ * (`revision`); eine Begleichung nennt sie, damit ein zweiter Rechner nichts still überschreibt.
+ */
+export function goldRevisionOf(row: object | undefined | null): number | undefined {
+  const r = (row as { revision?: unknown } | undefined | null)?.revision;
+  return typeof r === 'number' && r > 0 ? r : undefined;
+}
+
 function rowToGoldPayable(row: Record<string, unknown>): GoldPayable {
-  return {
+  const out: GoldPayable & { revision: number } = {
     id: row.id as string,
     branchId: row.branch_id as string,
     supplierId: row.supplier_id as string,
@@ -62,11 +74,13 @@ function rowToGoldPayable(row: Record<string, unknown>): GoldPayable {
     notes: (row.notes as string) || undefined,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
+    revision: Number(row.revision ?? 0),
   };
+  return out;
 }
 
 function rowToCustomerGoldCredit(row: Record<string, unknown>): CustomerGoldCredit {
-  return {
+  const out: CustomerGoldCredit & { revision: number } = {
     id: row.id as string,
     branchId: row.branch_id as string,
     customerId: row.customer_id as string,
@@ -79,7 +93,9 @@ function rowToCustomerGoldCredit(row: Record<string, unknown>): CustomerGoldCred
     notes: (row.notes as string) || undefined,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
+    revision: Number(row.revision ?? 0),
   };
+  return out;
 }
 
 function rowToGoldMovement(row: Record<string, unknown>): GoldMovement {
@@ -99,101 +115,8 @@ function rowToGoldMovement(row: Record<string, unknown>): GoldMovement {
   };
 }
 
-// Schreibt einen Audit-Eintrag fuer eine Gramm-Bewegung. Wird intern von
-// allen Settlement-Aktionen aufgerufen. Branch-ID kommt aus der Aktion,
-// nicht aus der aktuellen Session — damit Cross-Branch-Bewegungen sauber
-// dokumentiert werden.
-function recordGoldMovement(args: {
-  branchId: string;
-  direction: 'in' | 'out';
-  weightGrams: number;
-  karat: string;
-  sourceBucket?: GoldBucket;
-  sourceId?: string;
-  targetBucket?: GoldBucket;
-  targetId?: string;
-  relatedRepairId?: string;
-  notes?: string;
-}): string {
-  const db = getDatabase();
-  const id = uuid();
-  const now = nowIso();
-  db.run(
-    `INSERT INTO gold_movements (id, branch_id, moved_at, direction, weight_grams, karat,
-       source_bucket, source_id, target_bucket, target_id, related_repair_id, notes)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-    [
-      id, args.branchId, now, args.direction, args.weightGrams, args.karat,
-      args.sourceBucket || null, args.sourceId || null,
-      args.targetBucket || null, args.targetId || null,
-      args.relatedRepairId || null, args.notes || null,
-    ]
-  );
-  trackInsert('gold_movements', id, {
-    direction: args.direction, weightGrams: args.weightGrams, karat: args.karat,
-    relatedRepairId: args.relatedRepairId,
-  });
-  return id;
-}
-
-// Adjustiert das Shop-Gold-Inventar in `precious_metals`. Sucht einen passenden
-// Eintrag (gleiche karat + in_stock), legt einen neuen an wenn keiner existiert
-// (bei Inflow) oder reduziert den Bestand (bei Outflow). SoftWarn bei
-// Inventar-negativ — UI muss SoftWarn anzeigen, hier wird einfach erlaubt
-// (Salesforce-Stil: User entscheidet bewusst).
-function adjustPreciousMetals(args: {
-  branchId: string;
-  karat: string;
-  deltaGrams: number;        // positiv = Inflow, negativ = Outflow
-  sourceLabel: string;
-}): void {
-  const db = getDatabase();
-  const now = nowIso();
-  // Suche existierenden in_stock-Eintrag fuer dieses Karat
-  const rows = query(
-    `SELECT id, weight_grams FROM precious_metals
-       WHERE branch_id = ? AND karat = ? AND status = 'in_stock'
-       ORDER BY created_at DESC LIMIT 1`,
-    [args.branchId, args.karat]
-  );
-  if (rows.length > 0) {
-    const existingId = rows[0].id as string;
-    const existingWeight = (rows[0].weight_grams as number) || 0;
-    const next = existingWeight + args.deltaGrams;
-    db.run(
-      `UPDATE precious_metals SET weight_grams = ?, updated_at = ? WHERE id = ?`,
-      [next, now, existingId]
-    );
-    trackUpdate('precious_metals', existingId, { weightGrams: next, source: args.sourceLabel });
-    return;
-  }
-  // Kein Eintrag — bei Inflow neu anlegen
-  if (args.deltaGrams > 0) {
-    let userId: string;
-    try { userId = currentUserId(); } catch { userId = 'user-owner'; }
-    const id = uuid();
-    db.run(
-      `INSERT INTO precious_metals (id, branch_id, metal_type, karat, weight_grams,
-         description, status, paid_amount, payment_status, images, created_at, updated_at, created_by)
-       VALUES (?, ?, 'gold', ?, ?, ?, 'in_stock', 0, 'UNPAID', '[]', ?, ?, ?)`,
-      [id, args.branchId, args.karat, args.deltaGrams, args.sourceLabel, now, now, userId]
-    );
-    trackInsert('precious_metals', id, { karat: args.karat, weightGrams: args.deltaGrams, source: args.sourceLabel });
-    return;
-  }
-  // Outflow ohne Bestand — wir lassen es als "negatives" Inventory laufen
-  // (legen einen Eintrag mit negativem Wert an, damit Reconciliation-Page das sichtbar zeigt).
-  let userId: string;
-  try { userId = currentUserId(); } catch { userId = 'user-owner'; }
-  const id = uuid();
-  db.run(
-    `INSERT INTO precious_metals (id, branch_id, metal_type, karat, weight_grams,
-       description, status, paid_amount, payment_status, images, created_at, updated_at, created_by)
-     VALUES (?, ?, 'gold', ?, ?, ?, 'in_stock', 0, 'UNPAID', '[]', ?, ?, ?)`,
-    [id, args.branchId, args.karat, args.deltaGrams, `NEG: ${args.sourceLabel}`, now, now, userId]
-  );
-  trackInsert('precious_metals', id, { karat: args.karat, weightGrams: args.deltaGrams, source: args.sourceLabel, negative: true });
-}
+// CENTRAL-UI-PARITY R6D — `recordGoldMovement` und die Bestandsanpassung wohnen jetzt im Goldkern
+// (`core/gold/gold-settle.ts`): dieselben zwei Bausteine für Store, Maske und Fernbefehl.
 
 interface GoldStore {
   // State
@@ -301,11 +224,15 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
   customerGoldCredits: [],
   loading: false,
 
+  // R6D — auch die Einzel-Loader holen auf PC2 den Stand vom Primary (vorher lasen sie dort gar
+  // nichts und leerten die Liste; die Auftragsseite ruft genau diese beiden).
   loadGoldPayables: () => {
+    if (hydrateFromPrimary('store.gold.get', (d) => set(d as never))) return;
     try { set(loadGoldPayablesFor(localReadContext())); } catch { set({ goldPayables: [] }); }
   },
 
   loadCustomerGoldCredits: () => {
+    if (hydrateFromPrimary('store.gold.get', (d) => set(d as never))) return;
     try { set(loadCustomerGoldCreditsFor(localReadContext())); } catch { set({ customerGoldCredits: [] }); }
   },
 
@@ -317,76 +244,26 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
     set({ loading: false });
   },
 
+  // R6D — die Zeile schreibt der Goldkern (`insertGoldPayable`): dieselben Vorgaben (we_owe,
+  // return_gold) und dieselben Prüfungen für den Auftrag (R5E), das Material und „Add Gold Usage".
   createGoldPayable: (data) => {
-    const db = getDatabase();
-    const id = uuid();
-    const now = nowIso();
     let branchId: string;
     try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
-
-    if (!data.supplierId) throw new Error('createGoldPayable: supplierId required');
-    if (!data.weightGrams || data.weightGrams <= 0) throw new Error('createGoldPayable: weightGrams must be > 0');
-    if (!data.karat) throw new Error('createGoldPayable: karat required');
-    // v0.2.1 — exactly one of sourceRepairId / sourceOrderId
-    if (data.sourceRepairId && data.sourceOrderId) {
-      throw new Error('createGoldPayable: only one of sourceRepairId / sourceOrderId may be set');
-    }
-
-    db.run(
-      `INSERT INTO gold_payables (id, branch_id, supplier_id, source_repair_id, source_repair_line_id, source_order_id,
-         source_order_line_id, direction, weight_grams, karat, settlement_type, fulfilled_grams, status, notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?, ?)`,
-      [
-        id, branchId, data.supplierId, data.sourceRepairId || null, data.sourceRepairLineId || null,
-        data.sourceOrderId || null, data.sourceOrderLineId || null,
-        data.direction || 'we_owe', data.weightGrams, data.karat,
-        data.settlementType || 'return_gold', data.notes || null, now, now,
-      ]
-    );
-    trackInsert('gold_payables', id, {
-      supplierId: data.supplierId, weightGrams: data.weightGrams, karat: data.karat,
-      settlementType: data.settlementType,
-      sourceRepairId: data.sourceRepairId,
-      sourceOrderId: data.sourceOrderId,
-      sourceOrderLineId: data.sourceOrderLineId,
-    });
+    const id = insertGoldPayable(branchId, data);
     saveDatabase();
     get().loadGoldPayables();
-    return get().goldPayables.find(p => p.id === id)!;
+    return get().goldPayables.find(p => p.id === id)
+      ?? rowToGoldPayable(query('SELECT * FROM gold_payables WHERE id = ?', [id])[0]);
   },
 
   createCustomerGoldCredit: (data) => {
-    const db = getDatabase();
-    const id = uuid();
-    const now = nowIso();
     let branchId: string;
     try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
-
-    if (!data.customerId) throw new Error('createCustomerGoldCredit: customerId required');
-    if (!data.weightGrams || data.weightGrams <= 0) throw new Error('createCustomerGoldCredit: weightGrams must be > 0');
-    if (!data.karat) throw new Error('createCustomerGoldCredit: karat required');
-    // v0.2.1 — exactly one of sourceRepairId / sourceOrderId
-    if (data.sourceRepairId && data.sourceOrderId) {
-      throw new Error('createCustomerGoldCredit: only one of sourceRepairId / sourceOrderId may be set');
-    }
-
-    db.run(
-      `INSERT INTO customer_gold_credits (id, branch_id, customer_id, source_repair_id, source_order_id,
-         weight_grams, karat, fulfilled_grams, status, notes, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?, ?)`,
-      [
-        id, branchId, data.customerId, data.sourceRepairId || null, data.sourceOrderId || null,
-        data.weightGrams, data.karat, data.notes || null, now, now,
-      ]
-    );
-    trackInsert('customer_gold_credits', id, {
-      customerId: data.customerId, weightGrams: data.weightGrams, karat: data.karat,
-      sourceRepairId: data.sourceRepairId,
-      sourceOrderId: data.sourceOrderId,
-    });
+    const id = insertCustomerGoldCredit(branchId, data);
     saveDatabase();
     get().loadCustomerGoldCredits();
-    return get().customerGoldCredits.find(c => c.id === id)!;
+    return get().customerGoldCredits.find(c => c.id === id)
+      ?? rowToCustomerGoldCredit(query('SELECT * FROM customer_gold_credits WHERE id = ?', [id])[0]);
   },
 
   // Workshop bringt physisch X Gramm zurueck (oder wir geben aus unserem Inventar
@@ -397,109 +274,18 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
   // Bei direction='we_owe' aber Apply-Shop-Gold-To-Supplier (cross-settle) ist das
   // ein Outflow aus Shop → wird ueber applyShopGoldToSupplierPayable() gesteuert.
   // Hier: die "natuerliche" return-Variante wo der Workshop liefert.
+  // R6D — die alten Store-Namen bleiben (Prüfstand, R5E-Umfeld); die Folge ist die EINE des
+  // Goldkerns (`settleGoldPayable`): gelesen aus der Datenbank, geprüft, strikt gebucht. Die Maske
+  // und PC2 gehen nicht hierüber, sondern über `settleGoldPayableOnPrimary` / `gold.payables.settle`.
   settleGoldReturn: (payableId, grams, notes) => {
-    const db = getDatabase();
-    const now = nowIso();
-    const p = get().goldPayables.find(x => x.id === payableId);
-    if (!p) throw new Error(`Gold-Payable ${payableId} nicht gefunden`);
-    if (p.status === 'FULFILLED' || p.status === 'CANCELLED') {
-      throw new Error(`Gold-Payable bereits ${p.status}`);
-    }
-    const newFulfilled = p.fulfilledGrams + grams;
-    const isDone = newFulfilled >= p.weightGrams - 0.0001;
-    const nextStatus = isDone ? 'FULFILLED' : 'OPEN';
-    db.run(
-      `UPDATE gold_payables SET fulfilled_grams = ?, status = ?, updated_at = ? WHERE id = ?`,
-      [newFulfilled, nextStatus, now, payableId]
-    );
-    trackUpdate('gold_payables', payableId, { fulfilledGrams: newFulfilled, status: nextStatus });
-
-    // Workshop liefert Gold zurueck → Shop-Inventar ↑
-    adjustPreciousMetals({
-      branchId: p.branchId, karat: p.karat, deltaGrams: grams,
-      sourceLabel: `Gold-Return from supplier (payable ${payableId.slice(0, 8)})`,
-    });
-
-    recordGoldMovement({
-      branchId: p.branchId, direction: 'in', weightGrams: grams, karat: p.karat,
-      sourceBucket: 'gold_payable', sourceId: payableId,
-      targetBucket: 'precious_metals',
-      relatedRepairId: p.sourceRepairId,
-      notes: notes || `Settlement (return_gold)`,
-    });
-
+    settleGoldPayable(storeActor(), { payableId, mode: 'return_gold', grams, notes });
     saveDatabase();
     get().loadGoldPayables();
   },
 
-  // Gold-Schuld in BHD umrechnen. Erzeugt eine Expense beim verknuepften Supplier
-  // (genau wie ein normaler Repair-Cost), markiert die gold_payable als FULFILLED
-  // und linkt die Expense-ID. Damit ist die Gramm-Schuld geschlossen und die
-  // Money-Schuld erscheint im normalen A/P-Flow.
+  // Gold-Schuld in BHD umrechnen: Expense beim verknüpften Supplier (+ Ledger), Schuld FULFILLED.
   convertGoldPayableToMoney: (payableId, agreedBhd, method = 'bank', notes) => {
-    const db = getDatabase();
-    const now = nowIso();
-    const p = get().goldPayables.find(x => x.id === payableId);
-    if (!p) throw new Error(`Gold-Payable ${payableId} nicht gefunden`);
-    if (p.status !== 'OPEN') throw new Error(`Gold-Payable bereits ${p.status}`);
-    if (agreedBhd <= 0) throw new Error('Agreed BHD muss > 0 sein');
-
-    let branchId: string, userId: string;
-    try { branchId = currentBranchId(); userId = currentUserId(); }
-    catch { branchId = p.branchId; userId = 'user-owner'; }
-
-    const expenseId = uuid();
-    const expenseNumber = getNextDocumentNumber('EXP');
-    const remainingGrams = p.weightGrams - p.fulfilledGrams;
-    const description = `Gold-Settlement: ${remainingGrams.toFixed(3)}g ${p.karat} (gold_payable ${payableId.slice(0, 8)})`;
-    // v0.6.0 — Order-Gold-Payables kapitalisieren in COGS (Kategorie 'Inventory',
-    // von den Betriebsausgaben ausgeschlossen); Repair-Gold bleibt 'RepairCosts'.
-    const expCategory: Expense['category'] = p.sourceOrderId ? 'Inventory' : 'RepairCosts';
-
-    db.run(
-      `INSERT INTO expenses (id, branch_id, expense_number, category, amount, paid_amount, payment_method,
-         expense_date, description, related_module, related_entity_id, supplier_id, status, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 'gold_payable', ?, ?, 'PENDING', ?, ?)`,
-      [
-        expenseId, branchId, expenseNumber, expCategory, agreedBhd, method,
-        now.split('T')[0], description, payableId, p.supplierId, now, userId,
-      ]
-    );
-    trackInsert('expenses', expenseId, {
-      category: 'RepairCosts', amount: agreedBhd, sourceGoldPayableId: payableId,
-      supplierId: p.supplierId, status: 'PENDING',
-    });
-
-    const expenseRecord: Expense = {
-      id: expenseId, expenseNumber, branchId, category: expCategory,
-      amount: agreedBhd, paidAmount: 0, paymentMethod: method,
-      expenseDate: now.split('T')[0], description,
-      relatedModule: 'gold_payable', relatedEntityId: payableId,
-      supplierId: p.supplierId, status: 'PENDING', createdAt: now,
-    };
-    safePost(`postExpense(${expenseId}) [gold-convert]`, () => {
-      if (hasLedgerEntries('EXPENSE', expenseId)) return;
-      postExpense(expenseRecord);
-    });
-
-    db.run(
-      `UPDATE gold_payables SET settlement_expense_id = ?, status = 'FULFILLED',
-         fulfilled_grams = weight_grams, notes = COALESCE(notes, '') || ?, updated_at = ?
-         WHERE id = ?`,
-      [expenseId, ' · ' + (notes || `Converted to ${agreedBhd} BHD`), now, payableId]
-    );
-    trackUpdate('gold_payables', payableId, {
-      status: 'FULFILLED', settlementExpenseId: expenseId, convertedTo: agreedBhd,
-    });
-
-    recordGoldMovement({
-      branchId: p.branchId, direction: 'out', weightGrams: remainingGrams, karat: p.karat,
-      sourceBucket: 'gold_payable', sourceId: payableId,
-      targetBucket: 'external',
-      relatedRepairId: p.sourceRepairId,
-      notes: notes || `Converted ${remainingGrams.toFixed(3)}g to ${agreedBhd} BHD`,
-    });
-
+    settleGoldPayable(storeActor(), { payableId, mode: 'money', agreedBhd, method, notes });
     saveDatabase();
     get().loadGoldPayables();
   },
@@ -522,13 +308,13 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
   // v0.6.5 — Offene Gramm-Schuld hart loeschen (z.B. wenn die verknuepfte
   // Order-Kostenzeile entfernt wird, oder verwaiste Alt-Eintraege aufraeumen).
   // Nur OPEN — beglichene Verbindlichkeiten haben Bestand/Geld bewegt.
+  // R6D — gelesen aus der Datenbank (nicht aus dem Zwischenspeicher), und dieselbe Regel wie beim
+  // Löschen einer Kosten-/Arbeitszeile: auch eine TEILWEISE beglichene Schuld bleibt (Goldkern).
   deleteGoldPayable: (payableId) => {
     const db = getDatabase();
-    const p = get().goldPayables.find(x => x.id === payableId);
+    const p = query('SELECT id, status, fulfilled_grams FROM gold_payables WHERE id = ?', [payableId])[0];
     if (!p) return;
-    if (p.status !== 'OPEN') {
-      throw new Error('Nur offene Gold-Verbindlichkeiten können gelöscht werden.');
-    }
+    assertGoldPayablesRemovable([p], 'Verbindlichkeit');
     db.run(`DELETE FROM gold_payables WHERE id = ?`, [payableId]);
     trackDelete('gold_payables', payableId);
     saveDatabase();
@@ -574,90 +360,19 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
   },
 
   // Customer holt physisch X Gramm seines Guthabens ab. Kein Ledger-Effekt.
+  // R6D — Customer holt physisch X Gramm seines Guthabens ab (Goldkern, kein Ledger-Effekt).
+  // Neu: nicht mehr als offen (die Maske kündigte es an, geprüft wurde es nie).
   returnCustomerCredit: (creditId, grams, notes) => {
-    const db = getDatabase();
-    const now = nowIso();
-    const c = get().customerGoldCredits.find(x => x.id === creditId);
-    if (!c) throw new Error(`Customer-Gold-Credit ${creditId} nicht gefunden`);
-    if (c.status !== 'OPEN') throw new Error(`Credit bereits ${c.status}`);
-    const newFulfilled = c.fulfilledGrams + grams;
-    const isDone = newFulfilled >= c.weightGrams - 0.0001;
-    const nextStatus = isDone ? 'FULFILLED' : 'OPEN';
-    db.run(
-      `UPDATE customer_gold_credits SET fulfilled_grams = ?, status = ?, updated_at = ?,
-         notes = COALESCE(notes, '') || ? WHERE id = ?`,
-      [newFulfilled, nextStatus, now, ' · returned ' + grams.toFixed(3) + 'g' + (notes ? ' (' + notes + ')' : ''), creditId]
-    );
-    trackUpdate('customer_gold_credits', creditId, { fulfilledGrams: newFulfilled, status: nextStatus });
-
-    recordGoldMovement({
-      branchId: c.branchId, direction: 'out', weightGrams: grams, karat: c.karat,
-      sourceBucket: 'customer_gold_credit', sourceId: creditId,
-      targetBucket: 'external',
-      notes: notes || `Returned to customer`,
-    });
-
+    settleCustomerGoldCredit(storeActor(), { creditId, mode: 'return', grams, notes });
     saveDatabase();
     get().loadCustomerGoldCredits();
   },
 
-  // Customer-Gold-Credit zu BHD-Refund konvertieren. Erzeugt einen
-  // customer_credits-Eintrag (BHD-basiert), den die Returns-Refund-Logik
-  // einloesen kann. Gold-Credit wird FULFILLED.
+  // Customer-Gold-Credit zu BHD-Guthaben (customer_credits). R6D: Guthaben, Buchung, Gold und
+  // Bewegung zusammen oder gar nicht — vorher wurde ein gescheitertes Guthaben verschluckt und das
+  // Gold trotzdem geschlossen.
   convertCustomerCreditToMoney: (creditId, agreedBhd, notes) => {
-    const db = getDatabase();
-    const now = nowIso();
-    const c = get().customerGoldCredits.find(x => x.id === creditId);
-    if (!c) throw new Error(`Customer-Gold-Credit ${creditId} nicht gefunden`);
-    if (c.status !== 'OPEN') throw new Error(`Credit bereits ${c.status}`);
-    if (agreedBhd <= 0) throw new Error('Agreed BHD muss > 0 sein');
-
-    const remainingGrams = c.weightGrams - c.fulfilledGrams;
-    let branchId: string;
-    try { branchId = currentBranchId(); } catch { branchId = c.branchId; }
-    const creditId2 = uuid();
-
-    // Pruefen ob die customer_credits-Tabelle existiert. Falls nicht, nur als
-    // Notiz im Credit speichern + Movement schreiben (Sicherheits-Fallback).
-    try {
-      db.run(
-        `INSERT INTO customer_credits (id, branch_id, customer_id, amount, used_amount, status,
-           source_type, source_id, note, created_at)
-         VALUES (?, ?, ?, ?, 0, 'OPEN', 'gold_conversion', ?, ?, ?)`,
-        [creditId2, branchId, c.customerId, agreedBhd, creditId,
-         `Gold-Conversion: ${remainingGrams.toFixed(3)}g ${c.karat}` + (notes ? ' · ' + notes : ''), now]
-      );
-      trackInsert('customer_credits', creditId2, {
-        customerId: c.customerId, amount: agreedBhd, sourceGoldCreditId: creditId,
-      });
-      // Credit-Modell Slice 4b — Ledger-Post NUR wenn der Domain-Insert gelang:
-      // DR GOLD_CREDIT_CLEARING / CR CUSTOMER_CREDIT (Bruecke Buch B → Buch A, kein P&L).
-      // Idempotent via hasLedgerEntries; gekeyt auf die customer_credits-Row-id.
-      safePost(`postGoldConversionCredit(${creditId2})`, () => {
-        if (hasLedgerEntries('GOLD_CONVERSION', creditId2)) return;
-        postGoldConversionCredit(creditId2, c.customerId, agreedBhd, now);
-      });
-    } catch (err) {
-      console.warn('[gold] customer_credits insert failed — table may not exist:', err);
-    }
-
-    db.run(
-      `UPDATE customer_gold_credits SET settlement_credit_id = ?, status = 'FULFILLED',
-         fulfilled_grams = weight_grams, notes = COALESCE(notes, '') || ?, updated_at = ?
-         WHERE id = ?`,
-      [creditId2, ' · Converted to ' + agreedBhd + ' BHD', now, creditId]
-    );
-    trackUpdate('customer_gold_credits', creditId, {
-      status: 'FULFILLED', settlementCreditId: creditId2, convertedTo: agreedBhd,
-    });
-
-    recordGoldMovement({
-      branchId: c.branchId, direction: 'out', weightGrams: remainingGrams, karat: c.karat,
-      sourceBucket: 'customer_gold_credit', sourceId: creditId,
-      targetBucket: 'external',
-      notes: notes || `Converted ${remainingGrams.toFixed(3)}g to ${agreedBhd} BHD`,
-    });
-
+    settleCustomerGoldCredit(storeActor(), { creditId, mode: 'money', agreedBhd, notes });
     saveDatabase();
     get().loadCustomerGoldCredits();
   },
@@ -680,120 +395,18 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
   // Cross-Settle: Shop-Inventar → Workshop-Gold-Payable. Setzt voraus dass
   // der User bewusst diese Aktion waehlt (z.B. weil eine Customer-Restmenge
   // beim Shop liegt und gleichzeitig ein Workshop-Payable offen ist).
+  // R6D — Cross-Settle über den Goldkern: nicht mehr als offen, nicht mehr als im Laden.
   applyShopGoldToSupplierPayable: (payableId, grams) => {
-    const db = getDatabase();
-    const now = nowIso();
-    const p = get().goldPayables.find(x => x.id === payableId);
-    if (!p) throw new Error(`Gold-Payable ${payableId} nicht gefunden`);
-    if (p.status !== 'OPEN') throw new Error(`Gold-Payable bereits ${p.status}`);
-    const remaining = p.weightGrams - p.fulfilledGrams;
-    if (grams > remaining + 0.0001) {
-      throw new Error(`Nur ${remaining.toFixed(3)}g verbleibend — kann nicht ${grams.toFixed(3)}g anwenden`);
-    }
-
-    // Shop-Inventar ↓ (Outflow)
-    adjustPreciousMetals({
-      branchId: p.branchId, karat: p.karat, deltaGrams: -grams,
-      sourceLabel: `Applied to supplier gold-payable ${payableId.slice(0, 8)}`,
-    });
-
-    // Gold-Payable ↑ fulfilled
-    const newFulfilled = p.fulfilledGrams + grams;
-    const isDone = newFulfilled >= p.weightGrams - 0.0001;
-    const nextStatus = isDone ? 'FULFILLED' : 'OPEN';
-    db.run(
-      `UPDATE gold_payables SET fulfilled_grams = ?, status = ?, updated_at = ? WHERE id = ?`,
-      [newFulfilled, nextStatus, now, payableId]
-    );
-    trackUpdate('gold_payables', payableId, { fulfilledGrams: newFulfilled, status: nextStatus });
-
-    recordGoldMovement({
-      branchId: p.branchId, direction: 'out', weightGrams: grams, karat: p.karat,
-      sourceBucket: 'precious_metals',
-      targetBucket: 'gold_payable', targetId: payableId,
-      relatedRepairId: p.sourceRepairId,
-      notes: `Cross-Settle: Shop gold applied to supplier payable`,
-    });
-
+    settleGoldPayable(storeActor(), { payableId, mode: 'shop_gold', grams });
     saveDatabase();
     get().loadGoldPayables();
   },
 
-  // Plan v0.1.47 — Cross-Karat-Settle: Shop-Inventar in einem ANDEREN Karat
-  // wird auf einen Supplier-Payable angewendet. Purity-Math sorgt fuer
-  // pure-gold-aequivalenten Transfer.
-  //
-  // Beispiel: Supplier-Payable verlangt 10g 21K (= 8.75g pure Au).
-  //   Shop hat 24K-Bestand. Wenn User 8.76g vom 24K-Bestand einsetzt
-  //   (=8.75g pure Au), wird der Payable voll getilgt.
-  //
-  // Aufrufer gibt sourceKarat + sourceGrams an. Wir berechnen wieviel das
-  // im Target-Karat (= p.karat) wert ist und fulfillen den Payable
-  // entsprechend (max bis voll). Wenn target_equivalent > remaining → Fehler
-  // (Aufrufer sollte vorher targetEquivalent() pruefen und ggf. weniger
-  // sourceGrams uebergeben).
+  // Plan v0.1.47 — Cross-Karat-Settle: Shop-Inventar in einem ANDEREN Karat, reinheitsgleich.
+  // R6D: dieselbe Formel, jetzt mit der Toleranz einer halben Eingabestufe (`crossKaratPlan`) —
+  // eine 0.001-g-Eingabe kann die Schuld wieder genau begleichen; unbekannte Karate sind ein Nein.
   applyShopGoldCrossKaratToPayable: (payableId, sourceKarat, sourceGrams) => {
-    const db = getDatabase();
-    const now = nowIso();
-    const p = get().goldPayables.find(x => x.id === payableId);
-    if (!p) throw new Error(`Gold-Payable ${payableId} nicht gefunden`);
-    if (p.status !== 'OPEN') throw new Error(`Gold-Payable bereits ${p.status}`);
-    if (!Number.isFinite(sourceGrams) || sourceGrams <= 0) {
-      throw new Error('sourceGrams muss > 0 sein');
-    }
-
-    // Purity-Math: wieviel Target-Karat-Aequivalent sind X Gramm Source-Karat?
-    // Async-Import um Bundle-Splitting nicht zu zerstoeren.
-    // (purity.ts ist 1kb, kein Issue.)
-    const sourceP = PURITY_LOOKUP[sourceKarat] ?? 1.0;
-    const targetP = PURITY_LOOKUP[p.karat] ?? 1.0;
-    if (sourceP <= 0 || targetP <= 0) {
-      throw new Error(`Ungueltiges Karat: source=${sourceKarat} target=${p.karat}`);
-    }
-    const targetEquivalentGrams = (sourceGrams * sourceP) / targetP;
-    const remaining = p.weightGrams - p.fulfilledGrams;
-    if (targetEquivalentGrams > remaining + 0.0001) {
-      throw new Error(
-        `${sourceGrams.toFixed(3)}g ${sourceKarat} = ${targetEquivalentGrams.toFixed(3)}g ${p.karat}-aequivalent — ` +
-        `Payable hat nur ${remaining.toFixed(3)}g verbleibend.`
-      );
-    }
-
-    // Shop-Inventar ↓ (Outflow in source-karat)
-    adjustPreciousMetals({
-      branchId: p.branchId, karat: sourceKarat, deltaGrams: -sourceGrams,
-      sourceLabel: `Cross-karat applied: ${sourceGrams.toFixed(3)}g ${sourceKarat} → payable ${payableId.slice(0, 8)} (${p.karat})`,
-    });
-
-    // Gold-Payable ↑ fulfilled (in target-karat)
-    const newFulfilled = p.fulfilledGrams + targetEquivalentGrams;
-    const isDone = newFulfilled >= p.weightGrams - 0.0001;
-    const nextStatus = isDone ? 'FULFILLED' : 'OPEN';
-    db.run(
-      `UPDATE gold_payables SET fulfilled_grams = ?, status = ?, updated_at = ? WHERE id = ?`,
-      [newFulfilled, nextStatus, now, payableId]
-    );
-    trackUpdate('gold_payables', payableId, { fulfilledGrams: newFulfilled, status: nextStatus });
-
-    // gold_movement-Audit: zwei separate Eintraege um Source + Target jeweils
-    // korrekt mit Karat + Gramm zu zeigen. Anders als bei Same-Karat-Cross-Settle
-    // muessen wir die unterschiedlichen Gewichte transparent machen — der Owner
-    // soll im Audit sehen "8.76g 24K wurden zu 10g 21K-Schuld aequivalent".
-    recordGoldMovement({
-      branchId: p.branchId, direction: 'out', weightGrams: sourceGrams, karat: sourceKarat,
-      sourceBucket: 'precious_metals',
-      targetBucket: 'gold_payable', targetId: payableId,
-      relatedRepairId: p.sourceRepairId,
-      notes: `Cross-Karat-Settle OUT: ${sourceGrams.toFixed(3)}g ${sourceKarat} (${(sourceP * 100).toFixed(1)}% fine) → ${targetEquivalentGrams.toFixed(3)}g ${p.karat}-equivalent`,
-    });
-    recordGoldMovement({
-      branchId: p.branchId, direction: 'in', weightGrams: targetEquivalentGrams, karat: p.karat,
-      sourceBucket: 'precious_metals',
-      targetBucket: 'gold_payable', targetId: payableId,
-      relatedRepairId: p.sourceRepairId,
-      notes: `Cross-Karat-Settle FULFILL: payable in ${p.karat} reduced by ${targetEquivalentGrams.toFixed(3)}g (au-equivalent from ${sourceKarat})`,
-    });
-
+    settleGoldPayable(storeActor(), { payableId, mode: 'shop_gold', sourceKarat, grams: sourceGrams });
     saveDatabase();
     get().loadGoldPayables();
   },
@@ -872,6 +485,7 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
       throw new Error('recordExternalGoldInflow: grams must be > 0');
     }
     if (!karat) throw new Error('recordExternalGoldInflow: karat required');
+    // R6D — derselbe Audit-Baustein wie jede Begleichung (Goldkern).
     recordGoldMovement({
       branchId, direction: 'in', weightGrams: grams, karat,
       sourceBucket: 'external',
@@ -890,27 +504,8 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
   // Audit-Trail klar zeigt woher das Gold kommt (Customer brachte X g, der
   // Shop behaelt den Rest als implizite Reparatur-Gebuehr-Komponente).
   creditShopGold: (branchId, karat, grams, opts = {}) => {
-    if (!Number.isFinite(grams) || grams <= 0) {
-      throw new Error('creditShopGold: grams must be > 0');
-    }
-    if (!karat) throw new Error('creditShopGold: karat required');
-
-    const label = opts.sourceLabel || (opts.repairId
-      ? `Customer-leftover from repair ${opts.repairId.slice(0, 8)}`
-      : `Shop-keeps gold credit`);
-
-    adjustPreciousMetals({
-      branchId, karat, deltaGrams: grams, sourceLabel: label,
-    });
-    recordGoldMovement({
-      branchId, direction: 'in', weightGrams: grams, karat,
-      sourceBucket: 'repair_consumption',
-      sourceId: opts.repairId,
-      targetBucket: 'precious_metals',
-      relatedRepairId: opts.repairId,
-      notes: opts.notes || label,
-    });
-
+    // R6D — dieselbe Folge wie „Add Gold Usage" → Shop Keeps (Goldkern: Bestand + Audit).
+    creditShopGoldCore({ branchId, userId: storeActor().userId }, karat, grams, opts);
     saveDatabase();
     // Reload nicht noetig — precious_metals wird nicht im Store gecacht.
   },

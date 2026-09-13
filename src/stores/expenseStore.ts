@@ -3,14 +3,11 @@
 // ═══════════════════════════════════════════════════════════
 
 import { create } from 'zustand';
-import { v4 as uuid } from 'uuid';
 import type { Expense, ExpenseCategory, ExpensePayment } from '@/core/models/types';
-import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
-import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { getDatabase } from '@/core/db/database';
+import { query } from '@/core/db/helpers';
+import { trackUpdate, trackDelete } from '@/core/sync/track';
 import {
-  postExpense,
-  postExpensePayment,
   postExpenseCancelled,
   reverseSource,
   hasLedgerEntries,
@@ -20,21 +17,19 @@ import {
   rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
 import { restoreSupplierCreditUsage } from '@/core/finance/supplierCreditRestore';
-import { computeExpenseSettlement, creditPaidForExpense, expenseHasActiveCreditSettlement, SUPPLIER_CREDIT_LOCK_MESSAGE, SUPPLIER_CREDIT_AMOUNT_LOCK_MESSAGE } from '@/core/finance/expenseSettlement';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
-
-// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
-// Buchungsfehler blockieren den operativen Domain-Insert NICHT; Reconciliation-View
-// surfaces Diskrepanzen.
-function safePost(label: string, fn: () => void): void {
-  try { fn(); } catch (err) {
-    console.error(`[ledger] ${label} failed:`, err);
-  }
-}
+// CENTRAL-UI-PARITY R6D — Anlegen, Aendern und Bezahlen laufen durch DIE Hausfolge, die auch der
+// Fernbefehl ruft. Die Store-Aktionen bleiben (Metall, Kommission, Dauerauftrag rufen sie), klammern
+// sich aber selbst atomar — und buchen strikt statt `safePost` (ein gescheiterter Post nimmt alles zurueck).
+import {
+  PayablesRejected, EXPENSE_EDIT_FIELDS, atomar, localHouseCtx,
+  createExpenseInHouse, updateExpenseInHouse, recordExpensePaymentInHouse,
+  type ExpenseEditFields, type PayMethod,
+} from '@/core/payables/payables-house';
 
 interface ExpenseStore {
   expenses: Expense[];
@@ -54,8 +49,10 @@ interface ExpenseStore {
   getMonthlyTotal: (year: number, month: number) => number;
 }
 
-function rowToExpense(row: Record<string, unknown>): Expense {
+// R6D — die Fassung reist mit: „Edit"/„Pay" nennen sie, damit ein veralteter Stand abgewiesen wird.
+function rowToExpense(row: Record<string, unknown>): Expense & { revision?: number } {
   return {
+    revision: Number(row.revision ?? 0) || undefined,
     id: row.id as string,
     expenseNumber: row.expense_number as string,
     branchId: row.branch_id as string,
@@ -89,12 +86,25 @@ function rowToExpensePayment(row: Record<string, unknown>): ExpensePayment {
   };
 }
 
-function deriveStatus(amount: number, paid: number): 'PENDING' | 'PAID' {
-  return paid >= amount - 0.005 ? 'PAID' : 'PENDING';
+/**
+ * v0.7.7 — Cross-Store-Propagation: haengt die Ausgabe an einer repair_line / order_line, deren
+ * Anzeige mit-aktualisieren, damit RepairDetail / OrderDetail sofort „Paid" statt „A/P booked"
+ * zeigen (feedback_linked_records_lifecycle.md). R6D: auch nach der Handlung am Primary gerufen.
+ */
+export function reloadLinkedExpenseViews(id: string): void {
+  try {
+    const linkedRepairLine = query('SELECT id FROM repair_lines WHERE expense_id = ? LIMIT 1', [id])[0];
+    if (linkedRepairLine) {
+      import('@/stores/repairStore').then(m => m.useRepairStore.getState().loadRepairLines());
+    }
+    const linkedOrderLine = query('SELECT id FROM order_lines WHERE expense_id = ? LIMIT 1', [id])[0];
+    if (linkedOrderLine) {
+      import('@/stores/orderStore').then(m => m.useOrderStore.getState().loadOrders());
+    }
+  } catch (err) {
+    console.warn('[expense] cross-store reload failed:', err);
+  }
 }
-
-// BHD = 3 Dezimalstellen (Fils). Settlement-Vergleiche laufen in Minor Units, keine 0.005-Toleranz.
-const toFils = (n: number) => Math.round(n * 1000);
 
 export const useExpenseStore = create<ExpenseStore>((set, get) => ({
   expenses: [],
@@ -109,94 +119,35 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
 
   getExpense: (id) => get().expenses.find(e => e.id === id),
 
+  // R6D — die Signatur bleibt (Metall, Kommission, Dauerauftrag rufen sie); die Wirkung ist die
+  // Hausfolge: Beleg + Erstzahlung + beide Buchungen in EINER Klammer, Gehaltsregel VOR der Nummer.
   createExpense: (data) => {
     const amount = Number(data.amount || 0);
     if (!Number.isFinite(amount) || amount <= 0) {
-      throw new Error('Expense amount must be positive.');
+      throw new PayablesRejected('EXPENSE_AMOUNT_INVALID', 'Expense amount must be positive.');
     }
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const id = uuid();
-    let branchId: string, userId: string;
-    try { branchId = currentBranchId(); userId = currentUserId(); }
-    catch { branchId = 'branch-main'; userId = 'user-owner'; }
-
-    const expenseNumber = getNextDocumentNumber('EXP');
-
     // Default: payNow=true für Backwards-Compat (sofortiger Cash/Bank-Abgang).
     // Nur wenn explizit payNow=false oder initialPaid<amount → PENDING.
     const explicitInitial = typeof data.initialPaid === 'number' ? data.initialPaid : null;
     const payNow = data.payNow !== false; // default true
-    let initialPaid: number;
-    if (explicitInitial !== null) {
-      initialPaid = Math.max(0, Math.min(amount, explicitInitial));
-    } else if (payNow) {
-      initialPaid = amount;
-    } else {
-      initialPaid = 0;
-    }
-
-    const status = deriveStatus(amount, initialPaid);
-    const method = data.paymentMethod || 'cash';
-    const expenseDate = data.expenseDate || now.split('T')[0];
-
-    // Salary-Validierung: category='Salary' verlangt employeeId. Andere
-    // Kategorien duerfen keine employeeId tragen (UI sollte sie nicht senden).
-    if (data.category === 'Salary' && !data.employeeId) {
-      throw new Error('Salary expenses require an employee. Pick an employee or change the category.');
-    }
-
-    db.run(
-      `INSERT INTO expenses (id, branch_id, expense_number, category, amount, paid_amount, payment_method,
-        expense_date, description, related_module, related_entity_id, supplier_id, status, recurring_template_id,
-        employee_id, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, branchId, expenseNumber, data.category || 'Miscellaneous', amount, initialPaid,
-       method, expenseDate,
-       data.description || null, data.relatedModule || null, data.relatedEntityId || null,
-       data.supplierId || null, status, data.recurringTemplateId || null,
-       data.employeeId || null, now, userId]
-    );
-
-    // Audit-Trail: Initial-Zahlung als expense_payments-Eintrag (falls > 0).
-    let initialPayId: string | null = null;
-    if (initialPaid > 0) {
-      initialPayId = uuid();
-      db.run(
-        `INSERT INTO expense_payments (id, expense_id, amount, method, paid_at, note, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [initialPayId, id, initialPaid, method, expenseDate, 'Initial payment on creation', now]
-      );
-      trackInsert('expense_payments', initialPayId, { expenseId: id, amount: initialPaid, method });
-    }
-
-    saveDatabase();
-    trackInsert('expenses', id, { expenseNumber, category: data.category, amount, paidAmount: initialPaid, status });
+    const initialPaid = explicitInitial !== null
+      ? Math.max(0, Math.min(amount, explicitInitial))
+      : (payNow ? amount : 0);
+    const r = atomar(() => createExpenseInHouse({
+      category: data.category || 'Miscellaneous',
+      amount,
+      paymentMethod: (data.paymentMethod || 'cash') as PayMethod,
+      expenseDate: data.expenseDate || new Date().toISOString().split('T')[0],
+      description: data.description || undefined,
+      initialPaid,
+      employeeId: data.employeeId,
+      supplierId: data.supplierId,
+      relatedModule: data.relatedModule,
+      relatedEntityId: data.relatedEntityId,
+      recurringTemplateId: data.recurringTemplateId,
+    }, localHouseCtx()));
     get().loadExpenses();
-
-    // ZIEL.md §3a — Ledger-Posting nach Domain-Insert.
-    safePost(`postExpense(${id})`, () => {
-      if (hasLedgerEntries('EXPENSE', id)) return;
-      const fresh = get().getExpense(id);
-      if (fresh) postExpense(fresh);
-    });
-    if (initialPayId && initialPaid > 0) {
-      const payId = initialPayId;
-      const supplierId = data.supplierId;
-      safePost(`postExpensePayment(${payId}) [initial]`, () => {
-        if (hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
-        postExpensePayment(
-          {
-            id: payId, expenseId: id, amount: initialPaid,
-            method, paidAt: expenseDate, createdAt: now,
-            note: 'Initial payment on creation',
-          },
-          supplierId
-        );
-      });
-    }
-
-    return get().getExpense(id)!;
+    return get().getExpense(r.expenseId)!;
   },
 
   updateExpense: (id, data) => {
@@ -217,34 +168,6 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
     }
     if (fields.length === 0) return;
     values.push(id);
-
-    // Slice-A-Invariante (Supplier-Credit suppliergebunden): Supplier-Wechsel A→B blockieren,
-    // solange die Expense eine aktive Credit-Einloesung traegt. Wirft VOR jedem Write → voller
-    // Rollback, kein Teilzustand. Greift NICHT im Cancel-Pfad (der reverst die Credit-Einloesung
-    // selbst + restored das Guthaben) und NICHT bei gleichbleibendem Supplier (A→A).
-    if (data.status !== 'CANCELLED' && data.supplierId !== undefined && before) {
-      const prevSup = before.supplierId || null;
-      const nextSup = (data.supplierId as string | null) || null;
-      if (prevSup !== nextSup && expenseHasActiveCreditSettlement(id)) {
-        throw new Error(SUPPLIER_CREDIT_LOCK_MESSAGE);
-      }
-    }
-
-    // D1 — Amount-Reduktion unter das bereits Beglichene (cash + credit) blockieren, solange
-    // eine aktive Credit-Einloesung besteht: sonst settled > amount (ueberbelegter Credit).
-    // Spiegelt die Server-Invariante (bridge.rs build_expense_projection → B0_SETTLEMENT_
-    // OVERPAYMENT). Wirft VOR jedem Write → voller Rollback, kein Teilzustand + kein
-    // fehlschlagender Legacy-Push. Greift NICHT im Cancel-Pfad (reverst die Einloesung selbst)
-    // und nur, wenn amount tatsaechlich uebergeben wird. Fils-genau, keine Toleranz.
-    if (data.status !== 'CANCELLED' && data.amount !== undefined && before) {
-      const nextAmountF = toFils(Number(data.amount) || 0);
-      if (expenseHasActiveCreditSettlement(id)) {
-        const settledF = toFils(before.paidAmount || 0) + toFils(creditPaidForExpense(id));
-        if (nextAmountF < settledF) {
-          throw new Error(SUPPLIER_CREDIT_AMOUNT_LOCK_MESSAGE);
-        }
-      }
-    }
 
     // Slice A — Cancel-Pfad VOLLSTAENDIG ATOMAR: Statuswechsel + Ledger-Reverse jeder Zahlung
     // (DR Cash/Bank/Benefit zurueck / CR AP; bei credit: DR SUPPLIER_CREDIT zurueck / CR AP) +
@@ -286,20 +209,29 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
       return;
     }
 
-    // Generischer (Nicht-Cancel-)Update-Pfad — Verhalten unveraendert.
-    db.run(`UPDATE expenses SET ${fields.join(', ')} WHERE id = ?`, values);
-    // Wenn amount geändert wurde, Status neu ableiten — Settlement-SSOT (cash + credit).
-    if (data.amount !== undefined) {
-      const row = query('SELECT amount, paid_amount FROM expenses WHERE id = ?', [id])[0];
-      if (row) {
-        const newStatus = computeExpenseSettlement(
-          Number(row.amount || 0), Number(row.paid_amount || 0), creditPaidForExpense(id),
-        ).status;
-        db.run('UPDATE expenses SET status = ? WHERE id = ? AND status != ?', [newStatus, id, 'CANCELLED']);
+    // Ein zweites Storno ist kein neuer Vorgang.
+    if (data.status === 'CANCELLED') return;
+
+    // R6D — der generische Weg ist „Edit Expense" und laeuft durch die Hausfolge (nur die fuenf
+    // Formularfelder; Betrag nie unter das Beglichene; Betrag/Datum → Aufwandsbuchung neu).
+    // Zuordnung, Lieferant, Mitarbeiter und Status aendert ein Bearbeiten NICHT: vorher schrieb die
+    // Maske den ganzen Stand beim Oeffnen zurueck. Ein abweichender Wert wird abgewiesen statt still
+    // uebernommen — das deckt auch die Slice-A-Sperre (Lieferantenwechsel bei Guthaben) ab.
+    const fixedRow = query('SELECT related_module, related_entity_id, supplier_id, employee_id, status FROM expenses WHERE id = ?', [id])[0];
+    if (!fixedRow) throw new PayablesRejected('EXPENSE_NOT_FOUND', 'no such expense');
+    const fixed: Array<[keyof Expense, string]> = [
+      ['relatedModule', 'related_module'], ['relatedEntityId', 'related_entity_id'],
+      ['supplierId', 'supplier_id'], ['employeeId', 'employee_id'], ['status', 'status'],
+    ];
+    for (const [k, col] of fixed) {
+      if (data[k] === undefined) continue;
+      if (((data[k] as unknown) || null) !== (fixedRow[col] || null)) {
+        throw new PayablesRejected('EXPENSE_FIELD_NOT_EDITABLE', `${String(k)} is not changed by editing an expense`);
       }
     }
-    saveDatabase();
-    trackUpdate('expenses', id, data);
+    const edit: Record<string, unknown> = {};
+    for (const k of EXPENSE_EDIT_FIELDS) if (data[k] !== undefined) edit[k] = data[k];
+    atomar(() => updateExpenseInHouse(id, edit as ExpenseEditFields, localHouseCtx()));
     get().loadExpenses();
   },
 
@@ -341,73 +273,12 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
     get().loadExpenses();
   },
 
+  // R6D — Settlement-SSOT (cash + credit) im Haus; eine Ueberzahlung wird ABGEWIESEN
+  // (EXPENSE_OVERPAYMENT) statt still auf den Rest gekappt. Signatur unveraendert.
   recordExpensePayment: (id, amount, method, date, note) => {
-    if (!Number.isFinite(amount) || amount <= 0) {
-      throw new Error('Payment amount must be positive.');
-    }
-    const exp = get().getExpense(id);
-    if (!exp) throw new Error('Expense not found');
-    if (exp.status === 'CANCELLED') throw new Error('Cannot record payment on cancelled expense');
-    // Settlement-SSOT: remaining/Status beruecksichtigen bestehende Credit-Einloesungen
-    // (settled = cash paid_amount + Σ credit-payments). paid_amount selbst bleibt cash-only;
-    // dieser Cash-Pfad addiert applied NUR zu paid_amount, nie Credit. Fils-genau, keine 0.005-Toleranz.
-    const creditPaid = creditPaidForExpense(id);
-    const before = computeExpenseSettlement(exp.amount, exp.paidAmount, creditPaid, exp.status);
-    if (toFils(before.remaining) <= 0) {
-      throw new Error('Expense is already fully paid');
-    }
-    const applied = Math.min(amount, before.remaining);
-    const newPaid = exp.paidAmount + applied;
-    const newStatus = computeExpenseSettlement(exp.amount, newPaid, creditPaid, exp.status).status;
-    const now = new Date().toISOString();
-    const payDate = date || now.split('T')[0];
-
-    const db = getDatabase();
-    const payId = uuid();
-    db.run(
-      `INSERT INTO expense_payments (id, expense_id, amount, method, paid_at, note, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`,
-      [payId, id, applied, method, payDate, note || null, now]
-    );
-    db.run(
-      `UPDATE expenses SET paid_amount = ?, payment_method = ?, status = ? WHERE id = ?`,
-      [newPaid, method, newStatus, id]
-    );
-    saveDatabase();
-    trackInsert('expense_payments', payId, { expenseId: id, amount: applied, method });
-    trackUpdate('expenses', id, { paidAmount: newPaid, status: newStatus });
+    atomar(() => recordExpensePaymentInHouse(id, amount, method, localHouseCtx(), { paidAt: date, note }));
     get().loadExpenses();
-
-    // ZIEL.md §3a — Ledger-Posting für Expense-Zahlung.
-    safePost(`postExpensePayment(${payId})`, () => {
-      if (hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
-      postExpensePayment(
-        {
-          id: payId, expenseId: id, amount: applied,
-          method, paidAt: payDate, createdAt: now, note: note ?? undefined,
-        },
-        exp.supplierId
-      );
-    });
-
-    // v0.7.7 — Cross-Store-Propagation: wenn diese Expense an einer
-    // repair_line / order_line haengt, deren paymentStatus mit-aktualisieren
-    // damit die Source-Detail-Pages (RepairDetail / OrderDetail) sofort
-    // "Paid" statt "A/P booked" zeigen — ohne dass der User refreshen muss.
-    // Per feedback_linked_records_lifecycle.md: cross-store mutations refresh
-    // dependent UIs.
-    try {
-      const linkedRepairLine = query('SELECT id FROM repair_lines WHERE expense_id = ? LIMIT 1', [id])[0];
-      if (linkedRepairLine) {
-        import('@/stores/repairStore').then(m => m.useRepairStore.getState().loadRepairLines());
-      }
-      const linkedOrderLine = query('SELECT id FROM order_lines WHERE expense_id = ? LIMIT 1', [id])[0];
-      if (linkedOrderLine) {
-        import('@/stores/orderStore').then(m => m.useOrderStore.getState().loadOrders());
-      }
-    } catch (err) {
-      console.warn('[expense] cross-store reload failed:', err);
-    }
+    reloadLinkedExpenseViews(id);
   },
 
   getExpensePayments: (id) => {

@@ -10,22 +10,22 @@ import { useMetalStore } from '@/stores/metalStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { matchesDeep } from '@/core/utils/deep-search';
-import type { PreciousMetal, MetalType, MetalKarat, MetalStatus } from '@/core/models/types';
+import type { PreciousMetal, MetalType, MetalStatus } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
-
-// ── Purity factors ──
-const PURITY: Record<string, number> = {
-  '24K': 1.0, '22K': 0.916, '21K': 0.875, '18K': 0.75,
-  '14K': 0.585, '9K': 0.375, '999': 0.999, '925': 0.925, '950': 0.95,
-};
-
-const METAL_TYPES: MetalType[] = ['gold', 'silver', 'platinum'];
-
-const KARAT_OPTIONS: Record<MetalType, MetalKarat[]> = {
-  gold: ['24K', '22K', '21K', '18K', '14K', '9K'],
-  silver: ['999', '925'],
-  platinum: ['950', '999'],
-};
+import { WriteError } from '@/components/shared/WriteError';
+// CENTRAL-UI-PARITY R6D — die Maske speichert, ohne zu wissen, wo die Datenbank steht: am Primary
+// die Hausfolge in EINER Transaktion, auf PC2 derselbe Vorgang als Auftrag. Spotpreis und
+// Schmelzwert, die gespeichert werden, bestimmt das Haus — die Anzeige hier ist nur Vorschau.
+import { useSharedWrites, fehlertext, nichtAmClient } from '@/core/data/shared-write';
+import { useSharedRead } from '@/core/data/shared-read';
+import {
+  METAL_KARATS, METAL_PURITY, METAL_TYPES, meltValueOf, spotPricesFor,
+  type MetalCreateInput, type MetalRecord, type SpotPrices,
+} from '@/core/metals/metal-house';
+import {
+  changeMetalStatusOnPrimary, createMetalOnPrimary, metalCreateBody, metalStatusBody,
+  setSpotPriceOnPrimary, spotPriceBody,
+} from '@/core/metals/metal-actions';
 
 const STATUS_FILTERS: { value: MetalStatus | ''; label: string }[] = [
   { value: '', label: 'All' },
@@ -34,18 +34,14 @@ const STATUS_FILTERS: { value: MetalStatus | ''; label: string }[] = [
   { value: 'melted', label: 'Melted' },
 ];
 
+const NO_SPOTS: SpotPrices = { gold: 0, silver: 0, platinum: 0 };
+
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 function fmtWeight(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 1, maximumFractionDigits: 1 });
-}
-
-function calcMeltValue(weight: number, karat: string | undefined, spotPrice: number): number {
-  if (!karat || !spotPrice) return 0;
-  const purity = PURITY[karat] ?? 1;
-  return weight * purity * spotPrice;
 }
 
 function metalColor(type: MetalType): string {
@@ -57,44 +53,50 @@ function metalColor(type: MetalType): string {
 }
 
 export function MetalList() {
-  const { metals, loadMetals, createMetal, updateMetal, deleteMetal, getSpotPrice, setSpotPrice } = useMetalStore();
+  const { metals, loadMetals, deleteMetal } = useMetalStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
+  const w = useSharedWrites();
   const [showNew, setShowNew] = useState(false);
   const [filterStatus, setFilterStatus] = useState<MetalStatus | ''>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [form, setForm] = useState<Partial<PreciousMetal>>({ metalType: 'gold', karat: '24K' });
-  const [sellTarget, setSellTarget] = useState<PreciousMetal | null>(null);
+  const [sellTarget, setSellTarget] = useState<MetalRecord | null>(null);
   const [sellPrice, setSellPrice] = useState('');
-  const [meltTarget, setMeltTarget] = useState<PreciousMetal | null>(null);
+  const [meltTarget, setMeltTarget] = useState<MetalRecord | null>(null);
 
-  // Spot prices (local state synced with settings)
-  const [spotGold, setSpotGold] = useState(0);
-  const [spotSilver, setSpotSilver] = useState(0);
-  const [spotPlatinum, setSpotPlatinum] = useState(0);
+  // R6D — die Spotpreise der Filiale: am Primary aus seiner Einstellung, auf PC2 über
+  // `metals.spot_prices.get`. Getippt wird in einen Entwurf; übernommen wird erst beim Verlassen
+  // des Feldes oder mit Enter (vorher schrieb JEDER Tastendruck in die Einstellung).
+  const gelesen = useSharedRead('metals.spot_prices.get', {}, spotPricesFor, NO_SPOTS);
+  const [uebernommen, setUebernommen] = useState<Partial<SpotPrices>>({});
+  const [entwurf, setEntwurf] = useState<Partial<Record<MetalType, string>>>({});
+  const spots: SpotPrices = { ...gelesen, ...uebernommen };
 
   useEffect(() => {
     loadMetals();
     loadSuppliers();
-    setSpotGold(getSpotPrice('gold'));
-    setSpotSilver(getSpotPrice('silver'));
-    setSpotPlatinum(getSpotPrice('platinum'));
-  }, [loadMetals, loadSuppliers, getSpotPrice]);
+  }, [loadMetals, loadSuppliers]);
 
   function getSpotForType(type: MetalType): number {
-    switch (type) {
-      case 'gold': return spotGold;
-      case 'silver': return spotSilver;
-      case 'platinum': return spotPlatinum;
-    }
+    return spots[type] || 0;
   }
 
-  function handleSpotChange(type: MetalType, value: number) {
-    switch (type) {
-      case 'gold': setSpotGold(value); break;
-      case 'silver': setSpotSilver(value); break;
-      case 'platinum': setSpotPlatinum(value); break;
-    }
-    setSpotPrice(type, value);
+  function entwurfWeg(type: MetalType) {
+    setEntwurf(d => { const n = { ...d }; delete n[type]; return n; });
+  }
+
+  async function commitSpot(type: MetalType) {
+    const draft = entwurf[type];
+    if (draft === undefined) return;
+    // Wie bisher: ein geleertes Feld ist 0.
+    const price = parseFloat(draft) || 0;
+    if (price === getSpotForType(type)) { entwurfWeg(type); return; }
+    if (!await w.ok('metals.set_spot_price', {
+      local: () => setSpotPriceOnPrimary(type, price),
+      remote: () => spotPriceBody(type, price),
+    })) return;   // der Entwurf bleibt stehen, der Grund steht in `w.fehler`
+    setUebernommen(u => ({ ...u, [type]: price }));
+    entwurfWeg(type);
   }
 
   const filtered = useMemo(() => {
@@ -109,53 +111,79 @@ export function MetalList() {
   // KPI calculations (in_stock only)
   const inStock = metals.filter(m => m.status === 'in_stock');
   const totalWeight = inStock.reduce((s, m) => s + m.weightGrams, 0);
-  const totalMeltValue = inStock.reduce((s, m) => s + calcMeltValue(m.weightGrams, m.karat, getSpotForType(m.metalType)), 0);
+  const totalMeltValue = inStock.reduce((s, m) => s + meltValueOf(m.weightGrams, m.karat, getSpotForType(m.metalType)), 0);
   const totalPurchaseCost = inStock.reduce((s, m) => s + (m.purchaseTotal || 0), 0);
   const profitPotential = totalMeltValue - totalPurchaseCost;
 
   // Form melt value preview
   const formMeltValue = form.weightGrams && form.karat
-    ? calcMeltValue(form.weightGrams, form.karat, getSpotForType(form.metalType || 'gold'))
+    ? meltValueOf(form.weightGrams, form.karat, getSpotForType(form.metalType || 'gold'))
     : 0;
 
   function openNew() {
+    w.clear();
     setForm({ metalType: 'gold', karat: '24K' });
     setShowNew(true);
   }
 
-  function handleCreate() {
+  async function handleCreate() {
     if (!form.metalType || !form.weightGrams) return;
-    const spot = getSpotForType(form.metalType);
-    const meltValue = calcMeltValue(form.weightGrams, form.karat, spot);
-    createMetal({
-      ...form,
-      spotPriceAtPurchase: spot,
-      currentSpotPrice: spot,
-      meltValue,
-    });
+    // Nur die Eingaben der Maske — Spot und Schmelzwert rechnet das Haus aus SEINER Einstellung.
+    const input: Partial<MetalCreateInput> = {
+      metalType: form.metalType,
+      karat: form.karat,
+      weightGrams: form.weightGrams,
+      purchaseTotal: form.purchaseTotal,
+      purchasePricePerGram: form.purchasePricePerGram,
+      supplierId: form.supplierId || undefined,
+      supplierName: form.supplierName,
+      description: form.description,
+      notes: form.notes,
+    };
+    if (!await w.ok('metals.create', {
+      local: () => createMetalOnPrimary(input),
+      remote: () => metalCreateBody(input),
+    })) return;
+    loadMetals();
     setShowNew(false);
   }
 
-  function openSell(m: PreciousMetal) {
-    const melt = calcMeltValue(m.weightGrams, m.karat, getSpotForType(m.metalType));
+  function openSell(m: MetalRecord) {
+    w.clear();
+    const melt = meltValueOf(m.weightGrams, m.karat, getSpotForType(m.metalType));
     setSellTarget(m);
     setSellPrice(melt > 0 ? melt.toFixed(2) : '');
   }
 
-  function confirmSell() {
+  async function confirmSell() {
     if (!sellTarget) return;
     const price = parseFloat(sellPrice);
     if (isNaN(price) || price < 0) { alert('Enter a valid sale price.'); return; }
-    updateMetal(sellTarget.id, { status: 'sold', salePrice: price });
+    const m = sellTarget;
+    if (w.remote && !m.revision) { alert(fehlertext(nichtAmClient('selling this item (no revision loaded)'))); return; }
+    if (!await w.ok('metals.update_status', {
+      local: () => changeMetalStatusOnPrimary({ metalId: m.id, status: 'sold', salePrice: price, expectedRevision: m.revision }),
+      remote: () => metalStatusBody(m.id, m.revision, 'sold', price),
+    })) return;
+    loadMetals();
     setSellTarget(null);
     setSellPrice('');
   }
 
-  function confirmMelt() {
+  function openMelt(m: MetalRecord) {
+    w.clear();
+    setMeltTarget(m);
+  }
+
+  async function confirmMelt() {
     if (!meltTarget) return;
-    const spot = getSpotForType(meltTarget.metalType);
-    const melt = calcMeltValue(meltTarget.weightGrams, meltTarget.karat, spot);
-    updateMetal(meltTarget.id, { status: 'melted', currentSpotPrice: spot, meltValue: melt });
+    const m = meltTarget;
+    if (w.remote && !m.revision) { alert(fehlertext(nichtAmClient('melting this item (no revision loaded)'))); return; }
+    if (!await w.ok('metals.update_status', {
+      local: () => changeMetalStatusOnPrimary({ metalId: m.id, status: 'melted', expectedRevision: m.revision }),
+      remote: () => metalStatusBody(m.id, m.revision, 'melted'),
+    })) return;
+    loadMetals();
     setMeltTarget(null);
   }
 
@@ -179,7 +207,7 @@ export function MetalList() {
                 }}>{sf.label}</button>
             ))}
           </div>
-          <Button variant="primary" onClick={openNew}>New Item</Button>
+          <Button variant="primary" onClick={openNew} data-metal-new-open>New Item</Button>
         </div>
       }
     >
@@ -201,7 +229,7 @@ export function MetalList() {
         className="rounded-lg"
         style={{
           display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 24,
-          padding: '20px 24px', marginBottom: 28,
+          padding: '20px 24px', marginBottom: showNew || sellTarget || meltTarget ? 28 : 12,
           background: '#FFFFFF', border: '1px solid #E5E9EE',
         }}
       >
@@ -217,10 +245,13 @@ export function MetalList() {
             <input
               type="number"
               step="0.01"
-              value={getSpotForType(type) || ''}
-              onChange={e => handleSpotChange(type, parseFloat(e.target.value) || 0)}
+              data-metal-spot-input={type}
+              value={entwurf[type] ?? (getSpotForType(type) || '')}
+              onChange={e => setEntwurf(d => ({ ...d, [type]: e.target.value }))}
+              onKeyDown={e => { if (e.key === 'Enter') e.currentTarget.blur(); }}
               placeholder="0.00"
               className="outline-none"
+              disabled={w.busy}
               style={{
                 background: 'transparent', border: 'none',
                 borderBottom: '1px solid #D5D9DE',
@@ -228,12 +259,14 @@ export function MetalList() {
                 width: 100, fontFamily: 'inherit',
               }}
               onFocus={e => (e.currentTarget.style.borderBottomColor = '#0F0F10')}
-              onBlur={e => (e.currentTarget.style.borderBottomColor = '#D5D9DE')}
+              onBlur={e => { e.currentTarget.style.borderBottomColor = '#D5D9DE'; void commitSpot(type); }}
             />
             <span style={{ fontSize: 11, color: '#6B7280' }}>BHD</span>
           </div>
         ))}
       </div>
+      {!showNew && !sellTarget && !meltTarget && <WriteError text={w.fehler} />}
+      <div style={{ marginBottom: 16 }} />
 
       {/* Table Header */}
       <div
@@ -264,13 +297,14 @@ export function MetalList() {
       )}
 
       {filtered.map(metal => {
-        const melt = calcMeltValue(metal.weightGrams, metal.karat, getSpotForType(metal.metalType));
+        const melt = meltValueOf(metal.weightGrams, metal.karat, getSpotForType(metal.metalType));
         const purchase = metal.purchaseTotal || 0;
         const diff = melt - purchase;
 
         return (
           <div
             key={metal.id}
+            data-metal-row={metal.id}
             className="transition-colors"
             style={{
               display: 'grid',
@@ -299,7 +333,7 @@ export function MetalList() {
 
             {/* Karat */}
             <span className="font-mono" style={{ fontSize: 13, color: metalColor(metal.metalType) }}>
-              {metal.karat || '\u2014'}
+              {metal.karat || '—'}
             </span>
 
             {/* Weight */}
@@ -326,7 +360,7 @@ export function MetalList() {
 
             {/* Status */}
             <div>
-              <span style={{
+              <span data-metal-status={metal.status} style={{
                 fontSize: 11, padding: '3px 10px', borderRadius: 999,
                 textTransform: 'capitalize',
                 color: metal.status === 'in_stock' ? '#7EAA6E' : metal.status === 'sold' ? '#0F0F10' : '#6B7280',
@@ -343,11 +377,13 @@ export function MetalList() {
                 <>
                   <button
                     onClick={() => openSell(metal)}
+                    data-metal-sell-open
                     className="cursor-pointer transition-all duration-200"
                     style={{ padding: '5px 10px', fontSize: 11, borderRadius: 999, border: '1px solid #0F0F10', color: '#0F0F10', background: 'rgba(15,15,16,0.06)' }}
                   >Sell</button>
                   <button
-                    onClick={() => setMeltTarget(metal)}
+                    onClick={() => openMelt(metal)}
+                    data-metal-melt-open
                     className="cursor-pointer transition-all duration-200"
                     style={{ padding: '5px 10px', fontSize: 11, borderRadius: 999, border: '1px solid #D5D9DE', color: '#4B5563', background: 'transparent' }}
                   >Melt</button>
@@ -375,7 +411,8 @@ export function MetalList() {
             <span className="text-overline" style={{ marginBottom: 8 }}>METAL TYPE</span>
             <div className="flex gap-2" style={{ marginTop: 8 }}>
               {METAL_TYPES.map(type => (
-                <button key={type} onClick={() => setForm({ ...form, metalType: type, karat: KARAT_OPTIONS[type][0] })}
+                <button key={type} onClick={() => setForm({ ...form, metalType: type, karat: METAL_KARATS[type][0] })}
+                  data-metal-type={type}
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '8px 20px', fontSize: 13, textTransform: 'capitalize',
@@ -393,8 +430,9 @@ export function MetalList() {
           <div>
             <span className="text-overline" style={{ marginBottom: 8 }}>PURITY / KARAT</span>
             <div className="flex gap-2 flex-wrap" style={{ marginTop: 8 }}>
-              {KARAT_OPTIONS[form.metalType || 'gold'].map(k => (
+              {METAL_KARATS[form.metalType || 'gold'].map(k => (
                 <button key={k} onClick={() => setForm({ ...form, karat: k })}
+                  data-metal-karat={k}
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '6px 14px', fontSize: 12,
@@ -402,7 +440,7 @@ export function MetalList() {
                     color: form.karat === k ? '#0F0F10' : '#6B7280',
                     background: form.karat === k ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>
-                  {k} <span style={{ fontSize: 10, color: '#6B7280', marginLeft: 4 }}>({(PURITY[k] * 100).toFixed(1)}%)</span>
+                  {k} <span style={{ fontSize: 10, color: '#6B7280', marginLeft: 4 }}>({(METAL_PURITY[k] * 100).toFixed(1)}%)</span>
                 </button>
               ))}
             </div>
@@ -415,6 +453,7 @@ export function MetalList() {
               type="number"
               step="0.01"
               placeholder="0.00"
+              data-metal-weight
               value={form.weightGrams || ''}
               onChange={e => setForm({ ...form, weightGrams: parseFloat(e.target.value) || 0 })}
             />
@@ -423,6 +462,7 @@ export function MetalList() {
               type="number"
               step="0.01"
               placeholder="0.00"
+              data-metal-purchase-total
               value={form.purchaseTotal || ''}
               onChange={e => setForm({ ...form, purchaseTotal: parseFloat(e.target.value) || 0 })}
             />
@@ -433,6 +473,7 @@ export function MetalList() {
             type="number"
             step="0.001"
             placeholder="0.000"
+            data-metal-price-per-gram
             value={form.purchasePricePerGram || ''}
             onChange={e => setForm({ ...form, purchasePricePerGram: parseFloat(e.target.value) || 0 })}
           />
@@ -451,7 +492,7 @@ export function MetalList() {
           {/* Supplier & Description */}
           <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
-              <div>
+              <div data-metal-supplier>
                 <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>SUPPLIER (OPTIONAL)</span>
                 <SearchSelect
                   options={suppliers.filter(s => s.active).map(s => ({
@@ -468,6 +509,7 @@ export function MetalList() {
               <Input
                 label="DESCRIPTION"
                 placeholder="e.g. Bar, Coin, Chain..."
+                data-metal-description
                 value={form.description || ''}
                 onChange={e => setForm({ ...form, description: e.target.value })}
               />
@@ -496,6 +538,7 @@ export function MetalList() {
           <div>
             <span className="text-overline" style={{ marginBottom: 8 }}>NOTES</span>
             <textarea
+              data-metal-notes
               style={{
                 width: '100%', marginTop: 8, background: 'transparent',
                 border: 'none', borderBottomStyle: 'solid', borderBottomWidth: 1, borderBottomColor: '#D5D9DE',
@@ -511,9 +554,10 @@ export function MetalList() {
             />
           </div>
 
+          <WriteError text={w.fehler} />
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate} disabled={!form.weightGrams}>Add Item</Button>
+            <Button variant="primary" onClick={() => void handleCreate()} disabled={!form.weightGrams || w.busy} data-metal-save>Add Item</Button>
           </div>
         </div>
       </Modal>
@@ -527,7 +571,7 @@ export function MetalList() {
                 {sellTarget.metalType} {sellTarget.karat || ''} · {fmtWeight(sellTarget.weightGrams)}g
               </div>
               <div className="font-mono" style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
-                Melt value: <Bhd v={calcMeltValue(sellTarget.weightGrams, sellTarget.karat, getSpotForType(sellTarget.metalType))}/> BHD
+                Melt value: <Bhd v={meltValueOf(sellTarget.weightGrams, sellTarget.karat, getSpotForType(sellTarget.metalType))}/> BHD
                 {sellTarget.purchaseTotal ? ` · Purchase: ${fmt(sellTarget.purchaseTotal)} BHD` : ''}
               </div>
             </div>
@@ -535,6 +579,7 @@ export function MetalList() {
               label="SALE PRICE (BHD)"
               type="number"
               step="0.01"
+              data-metal-sell-price
               value={sellPrice}
               onChange={e => setSellPrice(e.target.value)}
               autoFocus
@@ -544,9 +589,10 @@ export function MetalList() {
                 Margin: <Bhd v={parseFloat(sellPrice) - sellTarget.purchaseTotal}/> BHD
               </div>
             )}
+            <WriteError text={w.fehler} />
             <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
               <Button variant="ghost" onClick={() => setSellTarget(null)}>Cancel</Button>
-              <Button variant="primary" onClick={confirmSell} disabled={!sellPrice}>Mark Sold</Button>
+              <Button variant="primary" onClick={() => void confirmSell()} disabled={!sellPrice || w.busy} data-metal-sell-confirm>Mark Sold</Button>
             </div>
           </div>
         )}
@@ -561,15 +607,16 @@ export function MetalList() {
                 {meltTarget.metalType} {meltTarget.karat || ''} · {fmtWeight(meltTarget.weightGrams)}g
               </div>
               <div className="font-mono" style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
-                Current melt value: <Bhd v={calcMeltValue(meltTarget.weightGrams, meltTarget.karat, getSpotForType(meltTarget.metalType))}/> BHD
+                Current melt value: <Bhd v={meltValueOf(meltTarget.weightGrams, meltTarget.karat, getSpotForType(meltTarget.metalType))}/> BHD
               </div>
             </div>
             <p style={{ fontSize: 13, color: '#4B5563' }}>
               This will mark the item as melted. Use this when you've sent it for smelting or refining. The current spot price will be frozen on the record.
             </p>
+            <WriteError text={w.fehler} />
             <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
               <Button variant="ghost" onClick={() => setMeltTarget(null)}>Cancel</Button>
-              <Button variant="primary" onClick={confirmMelt}>Confirm Melt</Button>
+              <Button variant="primary" onClick={() => void confirmMelt()} disabled={w.busy} data-metal-melt-confirm>Confirm Melt</Button>
             </div>
           </div>
         )}

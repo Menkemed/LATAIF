@@ -30,6 +30,14 @@ import './lifecycle-commands';
 // CENTRAL-UI-PARITY R6C — Stammdaten (Lieferant, Agent, Partner, Mitarbeiter) und die Inventur.
 import './masterdata-commands';
 import './inventory-commands';
+// CENTRAL-UI-PARITY R6D — Steuer, Bank, Gesellschafter, Darlehen.
+import './money-commands';
+// CENTRAL-UI-PARITY R6D — Ausgaben, Vorlagen, Einkaufszahlung, Lieferant bezahlen/Guthaben.
+import './payables-commands';
+// CENTRAL-UI-PARITY R6D — Gold: Abrechnung, Verbrauch, Material, Kostenzeilen.
+import './gold-commands';
+// CENTRAL-UI-PARITY R6D — Edelmetall und Schrotthandel.
+import './metal-commands';
 // CENTRAL-UI-PARITY — die Store-Auskuenfte, mit denen der zweite Rechner DIESELBE Oberflaeche
 // fuellt wie der Primary. Ohne diesen Import kennt der Renderer sie nicht, und jede Seite auf PC2
 // bliebe leer.

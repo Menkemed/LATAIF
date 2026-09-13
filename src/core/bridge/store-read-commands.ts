@@ -628,3 +628,40 @@ registerCommand(OP_INVENTORY_CHECKS_GET, {
     return { data: { checks: await listStockChecks(productId, limit) } };
   },
 });
+
+// ── Rückzahlungen eines Darlehens (R6D) ─────────────────────────────────────
+// Die Darlehensmaske zeigt sie im Detail. `debt_payments` kennt keine Filiale — sie steckt im
+// Darlehen: eine Kennung aus einer fremden Filiale liefert deshalb schlicht keine Zeilen.
+registerCommand('debts.payments.get', {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const debtId = requiredId(payload, 'debtId');
+    return { data: (await import('@/stores/debtStore')).loadDebtPaymentsFor(ctx, debtId) };
+  },
+});
+
+// ── Edelmetall-Spotpreise (R6D) ─────────────────────────────────────────────
+// Die drei Tagespreise je Gramm der Filiale des ANFRAGENDEN — dieselbe Einstellung, aus der der
+// Primary Spot und Schmelzwert eines Metalls ableitet. PC2 zeigt sie; ändern geht nur über
+// `metals.set_spot_price`. Der Rumpf trägt nichts: die Filiale steht im geprüften Absender.
+registerCommand('metals.spot_prices.get', {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    return { data: { ...(await import('@/core/metals/metal-house')).spotPricesFor(ctx) } };
+  },
+});
+
+// ── Lieferanten-Guthaben (R6D) ──────────────────────────────────────────────
+// Die offenen Guthaben EINES Lieferanten in der Filiale des ANFRAGENDEN — fuer den Credit-Modus am
+// Einkauf, den Guthaben-Modus von „Pay Supplier" und die Guthaben-Karte (samt Refund-Eignung). Die
+// Lieferantenkennung ist Auswahl: eine fremde liefert schlicht keine Zeilen.
+registerCommand('suppliers.credits.get', {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const supplierId = requiredId(payload, 'supplierId');
+    return { data: (await import('@/stores/supplierStore')).supplierCreditsFor(ctx, supplierId) };
+  },
+});

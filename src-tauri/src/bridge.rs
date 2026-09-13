@@ -228,6 +228,42 @@ pub const OP_INVENTORY_RECORD_CHECK: &str = "inventory.record_check";
 pub const OP_INVENTORY_SESSION_GET: &str = "inventory.session.get";
 pub const OP_INVENTORY_CHECKS_GET: &str = "inventory.checks.get";
 
+// CENTRAL-UI-PARITY R6D — Steuer, Geld, Gold und Metall. Eine fachliche Absicht, ein Name: „Pay" an
+// vier Stellen ist EIN `expenses.record_payment`, die fuenf Abrechnungsarten des Gold-Modals sind ZWEI
+// Namen (je Gold-Topf einer), „Verkaufen"/„Schmelzen" ist ein Zustandswechsel. Loeschen bleibt
+// Primary-only; die Nachbuchung (Backfill) bleibt Werkzeug des Primary.
+pub const OP_TAX_RECORD_PAYMENT: &str = "tax.record_payment";
+pub const OP_BANKING_TRANSFER: &str = "banking.transfer";
+pub const OP_PARTNERS_RECORD_TX: &str = "partners.record_tx";
+pub const OP_DEBTS_CREATE: &str = "debts.create";
+pub const OP_DEBTS_UPDATE: &str = "debts.update";
+pub const OP_DEBTS_RECORD_PAYMENT: &str = "debts.record_payment";
+pub const OP_EXPENSES_CREATE: &str = "expenses.create";
+pub const OP_EXPENSES_UPDATE: &str = "expenses.update";
+pub const OP_EXPENSES_RECORD_PAYMENT: &str = "expenses.record_payment";
+pub const OP_EXPENSES_TEMPLATE_CREATE: &str = "expenses.template_create";
+pub const OP_EXPENSES_TEMPLATE_UPDATE: &str = "expenses.template_update";
+pub const OP_PURCHASES_RECORD_PAYMENT: &str = "purchases.record_payment";
+pub const OP_PURCHASES_APPLY_CREDIT: &str = "purchases.apply_credit";
+pub const OP_SUPPLIERS_PAY: &str = "suppliers.pay";
+pub const OP_SUPPLIERS_APPLY_CREDIT: &str = "suppliers.apply_credit";
+pub const OP_SUPPLIERS_REFUND_CREDIT: &str = "suppliers.refund_credit";
+pub const OP_GOLD_PAYABLES_SETTLE: &str = "gold.payables.settle";
+pub const OP_GOLD_CUSTOMER_CREDITS_SETTLE: &str = "gold.customer_credits.settle";
+pub const OP_REPAIRS_RECORD_GOLD_USAGE: &str = "repairs.record_gold_usage";
+pub const OP_REPAIRS_ADD_MATERIAL: &str = "repairs.add_material";
+pub const OP_ORDERS_ADD_COST: &str = "orders.add_cost";
+pub const OP_ORDERS_REMOVE_COST: &str = "orders.remove_cost";
+pub const OP_METALS_CREATE: &str = "metals.create";
+pub const OP_METALS_UPDATE_STATUS: &str = "metals.update_status";
+pub const OP_METALS_SET_SPOT_PRICE: &str = "metals.set_spot_price";
+pub const OP_SCRAP_TRADES_CREATE: &str = "scrap_trades.create";
+pub const OP_SCRAP_TRADES_UPDATE: &str = "scrap_trades.update";
+pub const OP_SCRAP_TRADES_CANCEL: &str = "scrap_trades.cancel";
+pub const OP_METALS_SPOT_PRICES_GET: &str = "metals.spot_prices.get";
+pub const OP_DEBTS_PAYMENTS_GET: &str = "debts.payments.get";
+pub const OP_SUPPLIERS_CREDITS_GET: &str = "suppliers.credits.get";
+
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
 // Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
 // `STORE_SOURCES` im Renderer. Ein Name, der hier fehlt, erreicht den Renderer nie.
@@ -355,6 +391,37 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_INVENTORY_RECORD_CHECK,
     OP_INVENTORY_SESSION_GET,
     OP_INVENTORY_CHECKS_GET,
+    OP_TAX_RECORD_PAYMENT,
+    OP_BANKING_TRANSFER,
+    OP_PARTNERS_RECORD_TX,
+    OP_DEBTS_CREATE,
+    OP_DEBTS_UPDATE,
+    OP_DEBTS_RECORD_PAYMENT,
+    OP_EXPENSES_CREATE,
+    OP_EXPENSES_UPDATE,
+    OP_EXPENSES_RECORD_PAYMENT,
+    OP_EXPENSES_TEMPLATE_CREATE,
+    OP_EXPENSES_TEMPLATE_UPDATE,
+    OP_PURCHASES_RECORD_PAYMENT,
+    OP_PURCHASES_APPLY_CREDIT,
+    OP_SUPPLIERS_PAY,
+    OP_SUPPLIERS_APPLY_CREDIT,
+    OP_SUPPLIERS_REFUND_CREDIT,
+    OP_GOLD_PAYABLES_SETTLE,
+    OP_GOLD_CUSTOMER_CREDITS_SETTLE,
+    OP_REPAIRS_RECORD_GOLD_USAGE,
+    OP_REPAIRS_ADD_MATERIAL,
+    OP_ORDERS_ADD_COST,
+    OP_ORDERS_REMOVE_COST,
+    OP_METALS_CREATE,
+    OP_METALS_UPDATE_STATUS,
+    OP_METALS_SET_SPOT_PRICE,
+    OP_SCRAP_TRADES_CREATE,
+    OP_SCRAP_TRADES_UPDATE,
+    OP_SCRAP_TRADES_CANCEL,
+    OP_METALS_SPOT_PRICES_GET,
+    OP_DEBTS_PAYMENTS_GET,
+    OP_SUPPLIERS_CREDITS_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

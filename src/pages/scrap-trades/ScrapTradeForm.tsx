@@ -8,6 +8,10 @@
 //   D. Total + Payment Methods
 //   E. Trade Notes (optional, trade-weit)
 //   F. Actions
+//
+// CENTRAL-UI-PARITY R6D — die Prüfungen hier sind Komfort (sofortige Rückmeldung); dieselben Regeln
+// prüft das Haus beim Speichern (`core/metals/scrap-house`). `busy` sperrt den Knopf, solange ein
+// Speichern läuft; die `data-scrap-*`-Marken sind die Griffe der Zwei-Rechner-Prüfung.
 
 import { useEffect, useMemo, useState } from 'react';
 import { TrendingUp, TrendingDown, Link2, Plus, X } from 'lucide-react';
@@ -25,9 +29,11 @@ import type { ScrapTradeInput, ScrapTradeLineInput, ScrapTradePaymentInput } fro
 interface ScrapTradeFormProps {
   initial?: ScrapTrade;
   submitLabel: string;
-  onSubmit: (values: ScrapTradeInput) => void;
+  onSubmit: (values: ScrapTradeInput) => void | Promise<void>;
   onCancel: () => void;
   disabled?: boolean;
+  /** Ein Speichern läuft — der Knopf bleibt gesperrt, ein zweiter Klick legt nichts doppelt an. */
+  busy?: boolean;
 }
 
 const KARAT_OPTIONS = ['24K', '22K', '21K', '18K', '14K', '9K'];
@@ -54,7 +60,7 @@ function emptyLine(): ScrapTradeLineInput {
   };
 }
 
-export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disabled = false }: ScrapTradeFormProps) {
+export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disabled = false, busy = false }: ScrapTradeFormProps) {
   const { customers, loadCustomers } = useCustomerStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
 
@@ -135,6 +141,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
   }
 
   function handleSubmit() {
+    if (busy) return;
     setError(null);
     if (!v.sellerName.trim()) { setError('Seller name is required'); return; }
     if (!v.buyerName.trim()) { setError('Buyer name is required'); return; }
@@ -163,7 +170,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
       if (!(Number(p.amount) > 0)) { setError('Each payment split must have amount > 0'); return; }
     }
 
-    onSubmit(v);
+    void onSubmit(v);
   }
 
   const profitColor = totals.profit > 0 ? '#16A34A' : totals.profit < 0 ? '#DC2626' : '#6B7280';
@@ -195,12 +202,14 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
           <Input
             label="Seller / Customer"
             required
+            data-scrap-seller-name
             value={v.sellerName}
             onChange={e => patch('sellerName', e.target.value)}
             disabled={disabled}
           />
           <Input
             label="Phone"
+            data-scrap-seller-phone
             value={v.sellerPhone || ''}
             onChange={e => patch('sellerPhone', e.target.value)}
             disabled={disabled}
@@ -209,6 +218,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
             label="Trade Date"
             type="date"
             required
+            data-scrap-trade-date
             value={v.tradeDate}
             onChange={e => patch('tradeDate', e.target.value)}
             disabled={disabled}
@@ -218,6 +228,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#6B7280', cursor: disabled ? 'not-allowed' : 'pointer' }}>
             <input
               type="checkbox"
+              data-scrap-seller-link
               checked={linkSeller}
               onChange={e => {
                 setLinkSeller(e.target.checked);
@@ -228,7 +239,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
             <Link2 size={12} /> Link to existing Customer
           </label>
           {linkSeller && (
-            <div style={{ marginTop: 8, maxWidth: 480 }}>
+            <div style={{ marginTop: 8, maxWidth: 480 }} data-scrap-seller-customer>
               <SearchSelect
                 placeholder="Search customer..."
                 options={customerOptions}
@@ -259,7 +270,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
         </div>
         {!disabled && (
           <div style={{ marginTop: 14 }}>
-            <Button variant="secondary" icon={<Plus size={14} />} onClick={addLine}>
+            <Button variant="secondary" icon={<Plus size={14} />} onClick={addLine} data-scrap-add-line>
               Add Item
             </Button>
           </div>
@@ -273,12 +284,14 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
           <Input
             label="Buyer / Dealer"
             required
+            data-scrap-buyer-name
             value={v.buyerName}
             onChange={e => patch('buyerName', e.target.value)}
             disabled={disabled}
           />
           <Input
             label="Phone"
+            data-scrap-buyer-phone
             value={v.buyerPhone || ''}
             onChange={e => patch('buyerPhone', e.target.value)}
             disabled={disabled}
@@ -289,6 +302,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
           <label style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, color: '#6B7280', cursor: disabled ? 'not-allowed' : 'pointer' }}>
             <input
               type="checkbox"
+              data-scrap-buyer-link
               checked={linkBuyer}
               onChange={e => {
                 setLinkBuyer(e.target.checked);
@@ -299,7 +313,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
             <Link2 size={12} /> Link to existing Supplier
           </label>
           {linkBuyer && (
-            <div style={{ marginTop: 8, maxWidth: 480 }}>
+            <div style={{ marginTop: 8, maxWidth: 480 }} data-scrap-buyer-supplier>
               <SearchSelect
                 placeholder="Search supplier..."
                 options={supplierOptions}
@@ -319,6 +333,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 24 }}>
           <SplitPaymentEditor
             label="Payment Out (to Seller)"
+            side="out"
             splits={v.paymentsOut}
             target={totals.purchase}
             onChange={splits => patch('paymentsOut', splits)}
@@ -326,6 +341,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
           />
           <SplitPaymentEditor
             label="Payment In (from Buyer)"
+            side="in"
             splits={v.paymentsIn}
             target={totals.sale}
             onChange={splits => patch('paymentsIn', splits)}
@@ -368,6 +384,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
       <Card>
         <SectionHeader title="E. Notes (optional)" subtitle="Anmerkungen zum gesamten Trade (item-spezifisch siehe pro Item)." />
         <textarea
+          data-scrap-notes
           value={v.notes || ''}
           onChange={e => patch('notes', e.target.value)}
           disabled={disabled}
@@ -386,12 +403,12 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginTop: 8 }}>
           <div>
             {error && (
-              <div style={{ color: '#DC2626', fontSize: 13, fontWeight: 500 }}>{error}</div>
+              <div data-scrap-form-error style={{ color: '#DC2626', fontSize: 13, fontWeight: 500 }}>{error}</div>
             )}
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
             <Button variant="secondary" onClick={onCancel}>Cancel</Button>
-            <Button variant="primary" onClick={handleSubmit}>{submitLabel}</Button>
+            <Button variant="primary" onClick={handleSubmit} disabled={busy} data-scrap-save={initial ? 'edit' : 'create'}>{submitLabel}</Button>
           </div>
         </div>
       )}
@@ -422,9 +439,10 @@ function TotalCell({ label, value, valueBhd }: { label: string; value?: string; 
 }
 
 function SplitPaymentEditor({
-  label, splits, target, onChange, disabled,
+  label, side, splits, target, onChange, disabled,
 }: {
   label: string;
+  side: 'out' | 'in';
   splits: ScrapTradePaymentInput[];
   target: number;
   onChange: (splits: ScrapTradePaymentInput[]) => void;
@@ -434,7 +452,7 @@ function SplitPaymentEditor({
   const remaining = Math.round((target - sum) * 1000) / 1000;
   const mismatch = Math.abs(remaining) > 0.001;
 
-  function patchSplit(idx: number, key: keyof ScrapTradePaymentInput, value: any) {
+  function patchSplit<K extends keyof ScrapTradePaymentInput>(idx: number, key: K, value: ScrapTradePaymentInput[K]) {
     onChange(splits.map((s, i) => (i === idx ? { ...s, [key]: value } : s)));
   }
   function addSplit() {
@@ -455,7 +473,7 @@ function SplitPaymentEditor({
   }
 
   return (
-    <div>
+    <div data-scrap-pay={side}>
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 8 }}>
         <label className="text-overline">{label}</label>
         <div style={{ fontSize: 11, color: mismatch ? '#DC2626' : '#16A34A', fontWeight: 500 }}>
@@ -471,6 +489,7 @@ function SplitPaymentEditor({
         {splits.map((split, idx) => (
           <div
             key={idx}
+            data-scrap-pay-row={idx}
             style={{
               display: 'grid',
               gridTemplateColumns: 'minmax(0, 1.5fr) minmax(0, 1.2fr) auto',
@@ -487,6 +506,7 @@ function SplitPaymentEditor({
                 <button
                   key={opt.value}
                   type="button"
+                  data-scrap-pay-method={opt.value}
                   onClick={() => patchSplit(idx, 'method', opt.value)}
                   disabled={disabled}
                   style={{
@@ -507,6 +527,7 @@ function SplitPaymentEditor({
               type="number"
               step="0.001"
               min="0"
+              data-scrap-pay-amount
               value={split.amount || ''}
               placeholder="0.000"
               onChange={e => patchSplit(idx, 'amount', Number(e.target.value) || 0)}
@@ -522,6 +543,7 @@ function SplitPaymentEditor({
             {!disabled && splits.length > 1 ? (
               <button
                 type="button"
+                data-scrap-pay-remove
                 onClick={() => removeSplit(idx)}
                 style={{
                   background: 'transparent', border: 'none', cursor: 'pointer',
@@ -542,6 +564,7 @@ function SplitPaymentEditor({
         <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
           <button
             type="button"
+            data-scrap-pay-add
             onClick={addSplit}
             style={{
               display: 'flex', alignItems: 'center', gap: 4,
@@ -555,6 +578,7 @@ function SplitPaymentEditor({
           {mismatch && remaining > 0 && splits.length === 1 && (
             <button
               type="button"
+              data-scrap-pay-fill
               onClick={autofillFirst}
               style={{
                 padding: '6px 12px', fontSize: 11, borderRadius: 999,
@@ -593,6 +617,7 @@ function LineEditor({
 
   return (
     <div
+      data-scrap-line={index}
       style={{
         padding: 18, borderRadius: 12,
         border: '1px solid #E5E9EE',
@@ -605,6 +630,7 @@ function LineEditor({
         {!disabled && canRemove && (
           <button
             type="button"
+            data-scrap-line-remove
             onClick={onRemove}
             style={{
               display: 'flex', alignItems: 'center', gap: 4,
@@ -627,6 +653,7 @@ function LineEditor({
           step="0.01"
           min="0"
           required
+          data-scrap-line-weight
           value={line.weightGrams || ''}
           onChange={e => set('weightGrams', Number(e.target.value) || 0)}
           disabled={disabled}
@@ -641,6 +668,7 @@ function LineEditor({
                 <button
                   key={k}
                   type="button"
+                  data-scrap-line-karat={k}
                   onClick={() => set('karat', k)}
                   disabled={disabled}
                   style={{
@@ -656,6 +684,7 @@ function LineEditor({
               ))}
               <button
                 type="button"
+                data-scrap-line-karat="custom"
                 onClick={() => { setKaratCustom(true); set('karat', ''); }}
                 disabled={disabled}
                 style={{
@@ -670,6 +699,7 @@ function LineEditor({
           ) : (
             <Input
               placeholder="e.g. 916, 750..."
+              data-scrap-line-karat-custom
               value={line.karat}
               onChange={e => set('karat', e.target.value)}
               disabled={disabled}
@@ -686,6 +716,7 @@ function LineEditor({
           step="0.001"
           min="0"
           required
+          data-scrap-line-purchase
           value={line.purchasePrice || ''}
           onChange={e => set('purchasePrice', Number(e.target.value) || 0)}
           disabled={disabled}
@@ -696,6 +727,7 @@ function LineEditor({
           step="0.001"
           min="0"
           required
+          data-scrap-line-sale
           value={line.salePrice || ''}
           onChange={e => set('salePrice', Number(e.target.value) || 0)}
           disabled={disabled}
@@ -712,6 +744,7 @@ function LineEditor({
       <div style={{ marginBottom: 14 }}>
         <Input
           label="Item Notes (optional)"
+          data-scrap-line-notes
           value={line.notes || ''}
           onChange={e => set('notes', e.target.value)}
           disabled={disabled}
@@ -720,7 +753,7 @@ function LineEditor({
 
       {/* Row 4: Photos */}
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-        <div>
+        <div data-scrap-line-photos="purchase">
           <label className="text-overline" style={{ marginBottom: 8, display: 'block' }}>Purchase Photo</label>
           <ImageUpload
             images={line.imagesPurchase || []}
@@ -729,7 +762,7 @@ function LineEditor({
             disabled={disabled}
           />
         </div>
-        <div>
+        <div data-scrap-line-photos="sale">
           <label className="text-overline" style={{ marginBottom: 8, display: 'block' }}>Sale Photo</label>
           <ImageUpload
             images={line.imagesSale || []}

@@ -25,6 +25,16 @@ import { matchesDeep } from '@/core/utils/deep-search';
 import { computeExpenseSettlement } from '@/core/finance/expenseSettlement';
 import { useSharedRead } from '@/core/data/shared-read';
 import { creditPaidFor } from '@/core/data/domain-reads';
+// CENTRAL-UI-PARITY R6D — Anlegen, Aendern, Pause/Resume sind je EINE Buchung (`expenses.create`,
+// `expenses.update`, `expenses.template_create`, `expenses.template_update`): am Primary die
+// Hausfolge in der Schreibreihenfolge, auf PC2 die Fernbuchung. Ein Modal schliesst NUR bei Erfolg.
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { readsFromPrimary } from '@/core/data/primary-source';
+import { WriteError } from '@/components/shared/WriteError';
+import { PAYABLES_OP } from '@/core/payables/payables-house';
+import {
+  runDueGeneratorOnPrimary, saveExpenseCreate, saveExpenseUpdate, saveTemplateCreate, saveTemplateUpdate, viaWrites,
+} from '@/core/payables/payables-save';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -59,16 +69,17 @@ const STATUS_STYLE: Record<DisplayStatus, { fg: string; bg: string }> = {
 };
 
 export function ExpenseList() {
-  const { expenses, loadExpenses, createExpense, updateExpense, deleteExpense, getTotalsByCategory } = useExpenseStore();
+  const { expenses, loadExpenses, deleteExpense, getTotalsByCategory } = useExpenseStore();
   const {
     templates: recurringTemplates,
     loadTemplates: loadRecurringTemplates,
-    createTemplate: createRecurringTemplate,
-    updateTemplate: updateRecurringTemplate,
-    setActive: setRecurringActive,
     deleteTemplate: deleteRecurringTemplate,
-    runDueGenerator: runRecurringGenerator,
   } = useRecurringExpenseStore();
+  // Ein Waechter je Buchung, EIN Zustand fuer die Seite (busy sperrt die Knoepfe).
+  const w = useSharedWrites();
+  // Der Grund eines Neins: im offenen Modal (`fehler`) bzw. ueber der Liste (Pause/Resume).
+  const [fehler, setFehler] = useState('');
+  const [listFehler, setListFehler] = useState('');
   const { employees, loadEmployees } = useEmployeeStore();
   const activeEmployees = useMemo(
     () => employees.filter(e => e.employmentStatus !== 'inactive'),
@@ -120,9 +131,10 @@ export function ExpenseList() {
     loadExpenses();
     loadRecurringTemplates();
     loadEmployees();
-    // Generator on mount — falls App noch nicht gelaufen ist seit dem 1.
-    try { runRecurringGenerator(); } catch { /* ignore */ }
-  }, [loadExpenses, loadRecurringTemplates, loadEmployees, runRecurringGenerator]);
+    // Generator on mount — falls App noch nicht gelaufen ist seit dem 1. R6D: am Primary in der
+    // Schreibreihenfolge (nie in die offene Klammer eines Fernauftrags); PC2 fuehrt keine Buecher.
+    if (!readsFromPrimary()) void runDueGeneratorOnPrimary().catch(() => { /* der naechste Lauf holt es nach */ });
+  }, [loadExpenses, loadRecurringTemplates, loadEmployees]);
 
   // Tag aus form.expenseDate ableiten und in recurringDayOfMonth spiegeln —
   // ausser User hat den Day-Wert manuell ueberschrieben. Greift wenn Recurring
@@ -189,63 +201,99 @@ export function ExpenseList() {
   const totalUnpaid = expenses.filter(e => e.status !== 'CANCELLED')
     .reduce((s, e) => s + (settlementByExpense.get(e.id)?.remaining || 0), 0);
 
-  function handleCreate() {
-    if (!form.amount || form.amount <= 0) return;
-    try {
-      if (form.category === 'Salary' && !form.employeeId) {
-        alert('Salary expenses require an employee. Pick one or change the category.');
+  // R6D — die Maske schickt die ABSICHT (Zahlweise, ggf. „jetzt bezahlt"), nicht das Ergebnis: die
+  // Erstzahlung leitet der Primary ab. Eine Teilzahlung ausserhalb 0 < x ≤ Betrag wird abgewiesen
+  // (vorher still auf den Betrag gekappt bzw. zu „later").
+  async function handleCreate() {
+    if (!form.amount || form.amount <= 0 || w.busy) return;
+    setFehler('');
+    if (form.category === 'Salary' && !form.employeeId) {
+      setFehler('Salary expenses require an employee. Pick one or change the category.');
+      return;
+    }
+    const today = new Date().toISOString().split('T')[0];
+    let r;
+    if (recurringEnabled) {
+      // Recurring: Vorlage + die faelligen Monate (erste Instanz auf dem User-Datum = start_date,
+      // danach day_of_month) in EINER Buchung.
+      if (payTiming === 'partial') {
+        setFehler('Partial payment is not available for recurring expenses — choose Pay now or Pay later.');
         return;
       }
-      if (recurringEnabled) {
-        // Recurring: nur Template anlegen — Generator erzeugt direkt die erste
-        // Instanz auf dem User-Datum (start_date), danach folgt day_of_month-Regel.
-        if (payTiming === 'partial') {
-          alert('Partial payment is not available for recurring expenses — choose Pay now or Pay later.');
-          return;
-        }
-        const startDate = form.expenseDate || new Date().toISOString().split('T')[0];
-        createRecurringTemplate({
-          category: form.category || 'Rent',
-          amount: form.amount,
-          paymentMethod: form.paymentMethod || 'bank',
-          payNowDefault: payTiming === 'now',
-          description: form.description,
-          dayOfMonth: recurringDayOfMonth,
-          startDate,
-          endDate: recurringEndDate || undefined,
-          active: true,
-          employeeId: form.employeeId,
-        });
-      } else {
-        const initial = payTiming === 'now' ? form.amount
-          : payTiming === 'partial' ? Math.max(0, Math.min(form.amount, partialAmount))
-          : 0;
-        createExpense({
-          category: form.category,
-          amount: form.amount,
-          paymentMethod: form.paymentMethod || 'bank',
-          expenseDate: form.expenseDate || new Date().toISOString().split('T')[0],
-          description: form.description,
-          payNow: payTiming === 'now',
-          initialPaid: initial,
-          employeeId: form.employeeId,
-        });
-      }
-      setForm({
-        category: 'Rent',
-        paymentMethod: 'bank',
-        expenseDate: new Date().toISOString().split('T')[0],
+      r = await saveTemplateCreate(viaWrites(w, PAYABLES_OP.EXPENSES_TEMPLATE_CREATE), {
+        category: form.category || 'Rent',
+        amount: form.amount,
+        paymentMethod: form.paymentMethod || 'bank',
+        payNowDefault: payTiming === 'now',
+        description: form.description,
+        dayOfMonth: recurringDayOfMonth,
+        startDate: form.expenseDate || today,
+        endDate: recurringEndDate || undefined,
+        employeeId: form.employeeId,
       });
-      setPayTiming('now');
-      setPartialAmount(0);
-      setRecurringEnabled(false);
-      setRecurringDayOfMonth(1);
-      setRecurringDayOverridden(false);
-      setRecurringEndDate('');
-      setShowNew(false);
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
+    } else {
+      r = await saveExpenseCreate(viaWrites(w, PAYABLES_OP.EXPENSES_CREATE), {
+        category: form.category,
+        amount: form.amount,
+        paymentMethod: form.paymentMethod || 'bank',
+        expenseDate: form.expenseDate || today,
+        description: form.description,
+        timing: payTiming,
+        partialAmount,
+        employeeId: form.employeeId,
+      });
     }
+    if (r.kind !== 'ok') { setFehler(fehlertext(r)); return; }
+    setForm({
+      category: 'Rent',
+      paymentMethod: 'bank',
+      expenseDate: today,
+    });
+    setPayTiming('now');
+    setPartialAmount(0);
+    setRecurringEnabled(false);
+    setRecurringDayOfMonth(1);
+    setRecurringDayOverridden(false);
+    setRecurringEndDate('');
+    setShowNew(false);
+  }
+
+  // „Pause"/„Resume" — der ZIELWERT, kein Umschalter: eine Wiederholung schaltet nicht zurueck, und
+  // Resume holt die Pausenmonate nicht nach.
+  async function toggleTemplate(t: RecurringExpenseTemplate) {
+    if (w.busy) return;
+    setListFehler('');
+    const r = await saveTemplateUpdate(viaWrites(w, PAYABLES_OP.EXPENSES_TEMPLATE_UPDATE), t, { active: !t.active });
+    if (r.kind !== 'ok') setListFehler(fehlertext(r));
+  }
+
+  // „Edit Recurring Template → Save": nur das Geaenderte, nie `lastGeneratedPeriod` / `active`
+  // aus dem Stand beim Oeffnen.
+  async function saveTemplateEdit() {
+    if (!editTemplateId || w.busy) return;
+    const base = recurringTemplates.find(t => t.id === editTemplateId);
+    if (!base) return;
+    setFehler('');
+    if (editTemplateForm.category === 'Salary' && !editTemplateForm.employeeId) {
+      setFehler('Salary templates require an employee.');
+      return;
+    }
+    const { active: _stand, lastGeneratedPeriod: _haus, ...formular } = editTemplateForm;
+    void _stand; void _haus;
+    const r = await saveTemplateUpdate(viaWrites(w, PAYABLES_OP.EXPENSES_TEMPLATE_UPDATE), base, formular);
+    if (r.kind !== 'ok') { setFehler(fehlertext(r)); return; }
+    setEditTemplateId(null);
+  }
+
+  // „Edit Expense → Save": nur die geaenderten Formularfelder, gegen die gesehene Fassung.
+  async function saveExpenseEdit() {
+    if (!editId || w.busy) return;
+    const base = expenses.find(e => e.id === editId);
+    if (!base) return;
+    setFehler('');
+    const r = await saveExpenseUpdate(viaWrites(w, PAYABLES_OP.EXPENSES_UPDATE), base, editForm);
+    if (r.kind !== 'ok') { setFehler(fehlertext(r)); return; }
+    setEditId(null);
   }
 
   function openPaymentModal(expenseId: string) {
@@ -293,10 +341,11 @@ export function ExpenseList() {
                 }}>Inventory</button>
             )}
           </div>
-          <Button variant="primary" onClick={() => setShowNew(true)}>New Expense</Button>
+          <Button variant="primary" onClick={() => { setFehler(''); setShowNew(true); }} data-expense-new-open>New Expense</Button>
         </div>
       }
     >
+      <WriteError text={listFehler} />
       {/* Category summary — operative Kategorien; Inventory (kapitalisiert) als
           eigene, abgesetzte Karte nur wenn vorhanden (fließt in Lagerwert→COGS,
           zählt bewusst NICHT zu den Betriebskosten = kein Doppelzählen). */}
@@ -391,7 +440,10 @@ export function ExpenseList() {
                   }}>{t.active ? 'Active' : 'Paused'}</span>
                   <div className="flex items-center gap-1">
                     <button
-                      onClick={() => setRecurringActive(t.id, !t.active)}
+                      onClick={() => void toggleTemplate(t)}
+                      disabled={w.busy}
+                      data-template-toggle={t.id}
+                      data-template-active={t.active ? '1' : '0'}
                       title={t.active ? 'Pause' : 'Resume'}
                       className="cursor-pointer"
                       style={{
@@ -402,7 +454,8 @@ export function ExpenseList() {
                       {t.active ? <Pause size={12} /> : <Play size={12} />}
                     </button>
                     <button
-                      onClick={() => { setEditTemplateId(t.id); setEditTemplateForm({ ...t }); }}
+                      onClick={() => { setFehler(''); setEditTemplateId(t.id); setEditTemplateForm({ ...t }); }}
+                      data-template-edit={t.id}
                       title="Edit"
                       className="cursor-pointer"
                       style={{
@@ -455,7 +508,8 @@ export function ExpenseList() {
                 gap: 12, padding: '12px 16px', alignItems: 'center',
                 borderBottom: '1px solid rgba(229,225,214,0.6)',
               }}
-              onClick={() => { setEditId(e.id); setEditForm({ ...e }); }}
+              onClick={() => { setFehler(''); setEditId(e.id); setEditForm({ ...e }); }}
+              data-expense-row={e.id}
               onMouseEnter={ev => (ev.currentTarget.style.background = 'rgba(15,15,16,0.03)')}
               onMouseLeave={ev => (ev.currentTarget.style.background = 'transparent')}>
                 {/* v0.8.1 — ellipsis greift nicht auf Flex-Containern: Text in inneren
@@ -481,6 +535,7 @@ export function ExpenseList() {
                   }}>{displayStatus}</span>
                   {canPay && (
                     <button onClick={(ev) => { ev.stopPropagation(); openPaymentModal(e.id); }}
+                      data-expense-pay-open={e.id}
                       title="Record payment"
                       className="cursor-pointer" style={{
                         padding: '3px 6px', fontSize: 10, border: '1px solid #16A34A',
@@ -506,6 +561,7 @@ export function ExpenseList() {
             <div className="flex flex-wrap gap-2" style={{ marginTop: 6 }}>
               {CATEGORIES.map(c => (
                 <button key={c.value} onClick={() => setForm({ ...form, category: c.value })}
+                  data-expense-category={c.value}
                   className="cursor-pointer rounded"
                   style={{
                     padding: '6px 12px', fontSize: 12,
@@ -518,8 +574,8 @@ export function ExpenseList() {
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <Input required label="AMOUNT (BHD)" type="number" step="0.01" placeholder="0.00"
-              value={form.amount ?? ''} onChange={e => setForm({ ...form, amount: parseFloat(e.target.value) || 0 })} />
-            <Input required label="DATE" type="date" value={form.expenseDate || ''} onChange={e => setForm({ ...form, expenseDate: e.target.value })} />
+              value={form.amount ?? ''} onChange={e => setForm({ ...form, amount: parseFloat(e.target.value) || 0 })} data-expense-amount />
+            <Input required label="DATE" type="date" value={form.expenseDate || ''} onChange={e => setForm({ ...form, expenseDate: e.target.value })} data-expense-date />
           </div>
 
           {/* Pay-Timing */}
@@ -531,6 +587,7 @@ export function ExpenseList() {
                 const label = t === 'now' ? 'Pay now (full)' : t === 'later' ? 'Pay later' : 'Partial payment';
                 return (
                   <button key={t} onClick={() => setPayTiming(t)}
+                    data-expense-timing={t}
                     className="cursor-pointer rounded"
                     style={{
                       padding: '7px 14px', fontSize: 12,
@@ -544,7 +601,7 @@ export function ExpenseList() {
             {payTiming === 'partial' && (
               <div style={{ marginTop: 10 }}>
                 <Input label="PAID NOW (BHD)" type="number" step="0.01" placeholder="0.00"
-                  value={partialAmount || ''} onChange={e => setPartialAmount(parseFloat(e.target.value) || 0)} />
+                  value={partialAmount || ''} onChange={e => setPartialAmount(parseFloat(e.target.value) || 0)} data-expense-partial />
                 <span style={{ fontSize: 11, color: '#6B7280', marginTop: 4, display: 'block' }}>
                   Remaining will be tracked as open in /payables until fully paid.
                 </span>
@@ -565,6 +622,7 @@ export function ExpenseList() {
                   const active = form.paymentMethod === m;
                   return (
                     <button key={m} onClick={() => setForm({ ...form, paymentMethod: m })}
+                      data-expense-method={m}
                       className="cursor-pointer rounded"
                       style={{
                         padding: '8px 16px', fontSize: 13,
@@ -579,7 +637,7 @@ export function ExpenseList() {
           )}
 
           <Input label="DESCRIPTION" placeholder="e.g. April office rent"
-            value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} />
+            value={form.description || ''} onChange={e => setForm({ ...form, description: e.target.value })} data-expense-description />
 
           {form.category === 'Salary' && (
             <div>
@@ -597,6 +655,7 @@ export function ExpenseList() {
                 <select
                   value={form.employeeId || ''}
                   onChange={e => setForm({ ...form, employeeId: e.target.value || undefined })}
+                  data-expense-employee
                   style={{
                     width: '100%', padding: '10px 12px', fontSize: 13,
                     border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF', color: '#0F0F10',
@@ -624,6 +683,7 @@ export function ExpenseList() {
                 type="checkbox"
                 checked={recurringEnabled}
                 onChange={e => setRecurringEnabled(e.target.checked)}
+                data-expense-recurring
                 style={{ accentColor: '#715DE3' }}
               />
               <Repeat size={13} style={{ color: '#715DE3' }} />
@@ -643,11 +703,13 @@ export function ExpenseList() {
                     setRecurringDayOfMonth(v);
                     setRecurringDayOverridden(true);
                   }}
+                  data-template-day
                 />
                 <Input
                   label="END DATE (OPTIONAL)" type="date"
                   value={recurringEndDate}
                   onChange={e => setRecurringEndDate(e.target.value)}
+                  data-template-end
                 />
                 <span style={{ gridColumn: '1 / -1', fontSize: 11, color: '#6B7280' }}>
                   First instance uses the <strong>Date</strong> above ({form.expenseDate || 'today'}).
@@ -658,10 +720,11 @@ export function ExpenseList() {
             )}
           </div>
 
+          <WriteError text={fehler} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate} disabled={!form.amount || form.amount <= 0}>
-              {recurringEnabled ? 'Create Recurring' : 'Create Expense'}
+            <Button variant="ghost" onClick={() => setShowNew(false)} disabled={w.busy}>Cancel</Button>
+            <Button variant="primary" onClick={() => void handleCreate()} disabled={w.busy || !form.amount || form.amount <= 0} data-expense-create-save>
+              {w.busy ? 'Saving…' : recurringEnabled ? 'Create Recurring' : 'Create Expense'}
             </Button>
           </div>
         </div>
@@ -688,10 +751,10 @@ export function ExpenseList() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <Input label="AMOUNT (BHD)" type="number" step="0.01"
               value={editTemplateForm.amount ?? ''}
-              onChange={e => setEditTemplateForm({ ...editTemplateForm, amount: parseFloat(e.target.value) || 0 })} />
+              onChange={e => setEditTemplateForm({ ...editTemplateForm, amount: parseFloat(e.target.value) || 0 })} data-template-edit-amount />
             <Input label="DAY OF MONTH" type="number" min="1" max="31"
               value={editTemplateForm.dayOfMonth ?? 1}
-              onChange={e => setEditTemplateForm({ ...editTemplateForm, dayOfMonth: Math.max(1, Math.min(31, parseInt(e.target.value) || 1)) })} />
+              onChange={e => setEditTemplateForm({ ...editTemplateForm, dayOfMonth: Math.max(1, Math.min(31, parseInt(e.target.value) || 1)) })} data-template-edit-day />
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <Input label="START DATE" type="date"
@@ -768,17 +831,12 @@ export function ExpenseList() {
           <span style={{ fontSize: 11, color: '#6B7280' }}>
             Changes apply only to <strong>future</strong> instances. Existing expenses already created stay as-is.
           </span>
+          <WriteError text={fehler} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setEditTemplateId(null)}>Cancel</Button>
-            <Button variant="primary" onClick={() => {
-              if (!editTemplateId) return;
-              if (editTemplateForm.category === 'Salary' && !editTemplateForm.employeeId) {
-                alert('Salary templates require an employee.');
-                return;
-              }
-              updateRecurringTemplate(editTemplateId, editTemplateForm);
-              setEditTemplateId(null);
-            }}>Save Changes</Button>
+            <Button variant="ghost" onClick={() => setEditTemplateId(null)} disabled={w.busy}>Cancel</Button>
+            <Button variant="primary" onClick={() => void saveTemplateEdit()} disabled={w.busy} data-template-save>
+              {w.busy ? 'Saving…' : 'Save Changes'}
+            </Button>
           </div>
         </div>
       </Modal>
@@ -823,15 +881,19 @@ export function ExpenseList() {
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <Input required label="AMOUNT (BHD)" type="number" step="0.01"
-              value={editForm.amount ?? ''} onChange={e => setEditForm({ ...editForm, amount: parseFloat(e.target.value) || 0 })} />
-            <Input required label="DATE" type="date" value={editForm.expenseDate || ''} onChange={e => setEditForm({ ...editForm, expenseDate: e.target.value })} />
+              value={editForm.amount ?? ''} onChange={e => setEditForm({ ...editForm, amount: parseFloat(e.target.value) || 0 })} data-expense-edit-amount />
+            <Input required label="DATE" type="date" value={editForm.expenseDate || ''} onChange={e => setEditForm({ ...editForm, expenseDate: e.target.value })} data-expense-edit-date />
           </div>
-          {editForm.id && (
-            <div style={{ padding: '10px 12px', background: '#F2F7FA', borderRadius: 8, fontSize: 12, color: '#4B5563' }}>
-              <div className="flex justify-between"><span>Paid:</span><span className="font-mono" style={{ color: '#16A34A' }}><Bhd v={editForm.paidAmount || 0}/> BHD</span></div>
-              <div className="flex justify-between" style={{ marginTop: 4 }}><span>Remaining:</span><span className="font-mono" style={{ color: '#DC2626' }}>{fmt(Math.max(0, (editForm.amount || 0) - (editForm.paidAmount || 0)))} BHD</span></div>
-            </div>
-          )}
+          {editForm.id && (() => {
+            // Settlement-SSOT: bezahlt = cash + credit — dieselbe Untergrenze, die das Haus beim Betrag prueft.
+            const settled = settlementByExpense.get(editForm.id)?.settled ?? (editForm.paidAmount || 0);
+            return (
+              <div style={{ padding: '10px 12px', background: '#F2F7FA', borderRadius: 8, fontSize: 12, color: '#4B5563' }}>
+                <div className="flex justify-between"><span>Paid:</span><span className="font-mono" style={{ color: '#16A34A' }}><Bhd v={settled}/> BHD</span></div>
+                <div className="flex justify-between" style={{ marginTop: 4 }}><span>Remaining:</span><span className="font-mono" style={{ color: '#DC2626' }}>{fmt(Math.max(0, (editForm.amount || 0) - settled))} BHD</span></div>
+              </div>
+            );
+          })()}
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>PAID FROM</span>
             <div className="flex gap-2" style={{ marginTop: 6 }}>
@@ -839,6 +901,7 @@ export function ExpenseList() {
                 const active = editForm.paymentMethod === m;
                 return (
                   <button key={m} onClick={() => setEditForm({ ...editForm, paymentMethod: m })}
+                    data-expense-edit-method={m}
                     className="cursor-pointer rounded"
                     style={{
                       padding: '8px 16px', fontSize: 13,
@@ -851,7 +914,8 @@ export function ExpenseList() {
             </div>
           </div>
           <Input label="DESCRIPTION"
-            value={editForm.description || ''} onChange={e => setEditForm({ ...editForm, description: e.target.value })} />
+            value={editForm.description || ''} onChange={e => setEditForm({ ...editForm, description: e.target.value })} data-expense-edit-description />
+          <WriteError text={fehler} />
           <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => {
               if (blockDeleteOnClient()) return;
@@ -861,16 +925,10 @@ export function ExpenseList() {
               }
             }}>Delete</Button>
             <div className="flex gap-2">
-              <Button variant="ghost" onClick={() => setEditId(null)}>Cancel</Button>
-              <Button variant="primary" onClick={() => {
-                if (!editId) return;
-                try {
-                  updateExpense(editId, editForm);
-                  setEditId(null);
-                } catch (e) {
-                  alert(e instanceof Error ? e.message : String(e));
-                }
-              }}>Save</Button>
+              <Button variant="ghost" onClick={() => setEditId(null)} disabled={w.busy}>Cancel</Button>
+              <Button variant="primary" onClick={() => void saveExpenseEdit()} disabled={w.busy} data-expense-edit-save>
+                {w.busy ? 'Saving…' : 'Save'}
+              </Button>
             </div>
           </div>
         </div>

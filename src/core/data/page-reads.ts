@@ -83,12 +83,16 @@ export function orderPaidTotalsFor(ctx: BusinessReadContext): OrderPaidTotals {
 // ── Gold-Modal: der Ladenbestand je Karat ─────────────────────────────────
 export interface MetalStock { rows: Array<{ karat: string; grams: number }> }
 
+// R6D — nur GOLD (vorher zählten Silber- und Platinzeilen mit gleichem Feingehalt mit), und die
+// Summe ist die, die die Regel „nicht mehr als im Laden" prüft (`shopGoldStock`, Goldkern): alle
+// Bestandszeilen des Karats, auch eine negative — was hier verfügbar steht, lässt die Regel zu.
 export function metalStockByKaratFor(ctx: BusinessReadContext): MetalStock {
   const rows = query(
     `SELECT karat, COALESCE(SUM(weight_grams), 0) AS total
        FROM precious_metals
-      WHERE branch_id = ? AND status = 'in_stock' AND weight_grams > 0
+      WHERE branch_id = ? AND status = 'in_stock' AND metal_type = 'gold' AND karat IS NOT NULL
       GROUP BY karat
+     HAVING total > 0
       ORDER BY karat DESC`,
     [ctx.branchId],
   );

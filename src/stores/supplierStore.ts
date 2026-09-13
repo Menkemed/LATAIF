@@ -4,19 +4,18 @@
 
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { Supplier, PurchasePayment } from '@/core/models/types';
+import type { Supplier } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { trackChange } from '@/core/sync/sync-service';   // sync-only Header-Snapshot (purchases-Status nach Credit-Einloesung)
+// CENTRAL-UI-PARITY R6D — Guthaben einloesen, gewaehren und zurueckbuchen laufen durch DIE
+// Hausfolge, die auch der Fernbefehl ruft (Filiale aus dem Rahmen, strikt gebucht, feste Codes).
+// Die Store-Aktionen bleiben mit ihrer Signatur und klammern sich selbst atomar.
 import {
-  postPurchasePayment, postStandaloneSupplierCredit, postExpenseSupplierCreditPayment,
-  hasLedgerEntries, hasReversalFor, reverseSource,
-  beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
-} from '@/core/ledger/posting';
-// Slice B — gemeinsamer reiner FIFO-Planer (kein DB/Mutation/Ledger). Der Writer ruft ihn IN
-// der Transaktion auf FRISCH geladenen Daten; dieselbe Funktion speist die UI-Vorschau.
-import { planSupplierCreditExpenseAllocations } from '@/core/finance/expenseCreditAllocation';
+  atomar, localHouseCtx, validateStandaloneCreditRefundSource,
+  applyOneCreditToPurchaseInHouse, applySupplierCreditToExpensesInHouse,
+  grantStandaloneCreditInHouse, refundStandaloneCreditInHouse, type PayMethod,
+} from '@/core/payables/payables-house';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
@@ -25,60 +24,15 @@ import { localReadContext, type BusinessReadContext } from '@/core/data/read-con
 // CENTRAL-UI-PARITY R6C — die eine Stammdaten-Regel (Name Pflicht und getrimmt, Texte getrimmt).
 import { supplierCreateInput, supplierUpdateInput } from '@/core/masterdata/masterdata-rules';
 
-function safePost(label: string, fn: () => void): void {
-  try { fn(); } catch (err) {
-    console.error(`[ledger] ${label} failed:`, err);
-  }
-}
-
 // BHD hat 3 Dezimalstellen (Fils). Vergleiche/Rundungen laufen in Minor Units (Fils),
 // konsistent zur Projekt-Konvention (posting.ts ROUND, card-fee-booking.ts ROUND3).
 // KEINE BHD-Toleranzwerte wie 0.005 — die erlaubten sonst mehrere Fils Schlupf.
 const toFils = (n: number) => Math.round(n * 1000);
 const round3 = (n: number) => toFils(n) / 1000;
 
-// Option B (read-only) — VOLLSTAENDIGE Validierung der Original-Source-Gruppe eines STANDALONE
-// Credits, NICHT nur "ein Asset-Konto existiert". SSOT fuer Anzeige (refundable) UND Refund-Pfad.
-// Liefert die Methode (Cash/Bank/Benefit) NUR bei exakt gueltiger Ledger-Struktur fuer
-// source_module='SUPPLIER_PREPAYMENT', source_id=creditId:
-//   - genau ZWEI Original-Legs (reverses_entry_id IS NULL) — kein drittes, kein fehlendes
-//   - genau ein  DR SUPPLIER_CREDIT, Betrag == expectedAmount (Fils)
-//   - genau ein  CR CASH|BANK|BENEFIT, Betrag == expectedAmount (Fils) — kein doppeltes Asset-Leg
-//   - beide Legs in derselben transaction_id
-//   - fuer KEINES der beiden Legs existiert bereits ein Reversal (auch ein TEIL-reversierter
-//     Source ist damit nie wieder refundierbar) — zusaetzlich harter Riegel via hasReversalFor
-//     (letzter Zyklus geschlossen → sofort raus).
-// Jede Abweichung → null = "Unavailable": kein Refund-Button, Store wirft, keine Loeschung,
-// keine Ledger-Rueckbuchung. Reines Lesen, kein Schema-/Ledger-Logik-Change.
-function validateStandaloneCreditRefundSource(creditId: string, expectedAmount: number): 'Cash' | 'Bank' | 'Benefit' | null {
-  try {
-    // Letzter Zyklus bereits vollstaendig reversiert → nichts zu refunden.
-    if (hasReversalFor('SUPPLIER_PREPAYMENT', creditId)) return null;
-    const legs = query(
-      `SELECT e1.account AS account, e1.direction AS direction, e1.amount AS amount, e1.transaction_id AS txn,
-              (SELECT COUNT(*) FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id) AS rev_count
-         FROM ledger_entries e1
-        WHERE e1.source_module = 'SUPPLIER_PREPAYMENT' AND e1.source_id = ?
-          AND e1.reverses_entry_id IS NULL`,
-      [creditId]
-    );
-    if (legs.length !== 2) return null;                                   // genau zwei Original-Legs
-    if (legs.some(l => Number(l.rev_count) > 0)) return null;             // kein Leg (auch teil-) reversiert
-    const want = toFils(expectedAmount);
-    if (legs.some(l => toFils((l.amount as number) || 0) !== want)) return null;  // Betrag matcht Credit (Fils)
-    if (new Set(legs.map(l => String(l.txn))).size !== 1) return null;    // beide Legs, eine Transaktion
-    const drLeg = legs.find(l => l.account === 'SUPPLIER_CREDIT' && l.direction === 'DEBIT');
-    const crLegs = legs.filter(l => l.direction === 'CREDIT'
-      && (l.account === 'CASH' || l.account === 'BANK' || l.account === 'BENEFIT'));
-    if (!drLeg || crLegs.length !== 1) return null;                       // genau ein DR SC + genau ein CR Asset
-    switch (String(crLegs[0].account)) {
-      case 'CASH':    return 'Cash';
-      case 'BANK':    return 'Bank';
-      case 'BENEFIT': return 'Benefit';
-      default:        return null;
-    }
-  } catch { return null; }
-}
+// Option B (read-only) — die VOLLSTAENDIGE Validierung der Original-Source-Gruppe eines STANDALONE
+// Credits steht seit R6D in `payables-house.ts` (`validateStandaloneCreditRefundSource`): EINE
+// Pruefung fuer Anzeige (refundable) UND Rueckbuchung.
 
 // ── SSOT: alle Tabellen/Spalten, die einen Supplier referenzieren ──
 // Hat EINE davon einen Treffer, gilt der Supplier als "verknuepft" und darf NICHT
@@ -218,6 +172,30 @@ function rowToSupplier(row: Record<string, unknown>): Supplier {
   };
 }
 
+// SUPPLIER-CREDITS-Card: eine Zeile mit Typ-Diskriminator (NULL-Konvention), Ursprungs-Methode (nur
+// standalone, Option B aus dem Ledger) und Refund-Eignung. Reines Lesen.
+function creditDisplayRow(r: Record<string, unknown>): SupplierCreditDisplay {
+  const amount = (r.amount as number) || 0;
+  const used = (r.used_amount as number) || 0;
+  const kind: SupplierCreditKind = r.source_return_id
+    ? 'return'
+    : (r.source_purchase_id ? 'purchase_overpay' : 'standalone');
+  const method = kind === 'standalone' ? validateStandaloneCreditRefundSource(r.id as string, amount) : null;
+  const refundable = kind === 'standalone' && toFils(used) === 0 && method !== null;
+  return {
+    id: r.id as string,
+    supplierId: r.supplier_id as string,
+    amount,
+    usedAmount: used,
+    remaining: Math.max(0, amount - used),
+    status: (r.status as 'OPEN' | 'USED' | 'EXPIRED') || 'OPEN',
+    createdAt: r.created_at as string,
+    kind,
+    method,
+    refundable,
+  };
+}
+
 export const useSupplierStore = create<SupplierStore>((set, get) => ({
   suppliers: [],
   loading: false,
@@ -347,10 +325,9 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     } catch { return []; }
   },
 
-  // SUPPLIER-CREDITS-Card (dieser Slice): ALLE offenen Credits eines Suppliers mit Typ-
-  // Diskriminator (NULL-Konvention), Ursprungs-Methode (nur standalone, Option B aus dem Ledger)
-  // und Refund-Eignung. refundable = standalone UND used_amount Fils-exakt 0 UND eindeutiges
-  // lebendes Asset-Leg (method != null). Reines Lesen — keine Mutation, kein Schema-Change.
+  // SUPPLIER-CREDITS-Card (dieser Slice): ALLE offenen Credits eines Suppliers typisiert.
+  // R6D — die Masken lesen jetzt `supplierCreditsFor` (filialgebunden, auch auf PC2); dieser
+  // Store-Weg bleibt fuer bestehende Aufrufer.
   getSupplierCreditsForDisplay: (supplierId) => {
     try {
       const rows = query(
@@ -358,314 +335,46 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
            FROM supplier_credits WHERE supplier_id = ? AND status = 'OPEN' ORDER BY created_at DESC`,
         [supplierId]
       );
-      return rows.map(r => {
-        const amount = (r.amount as number) || 0;
-        const used = (r.used_amount as number) || 0;
-        const kind: SupplierCreditKind = r.source_return_id
-          ? 'return'
-          : (r.source_purchase_id ? 'purchase_overpay' : 'standalone');
-        const method = kind === 'standalone' ? validateStandaloneCreditRefundSource(r.id as string, amount) : null;
-        const refundable = kind === 'standalone' && toFils(used) === 0 && method !== null;
-        return {
-          id: r.id as string,
-          supplierId: r.supplier_id as string,
-          amount,
-          usedAmount: used,
-          remaining: Math.max(0, amount - used),
-          status: (r.status as 'OPEN' | 'USED' | 'EXPIRED') || 'OPEN',
-          createdAt: r.created_at as string,
-          kind,
-          method,
-          refundable,
-        };
-      });
+      return rows.map(creditDisplayRow);
     } catch { return []; }
   },
 
   // Plan §8 #3 — Credit auf einen Purchase anwenden: used_amount erhöhen, Purchase als bezahlt verbuchen.
+  // R6D — EINE genannte Zeile, strikt: kein stilles Kappen auf das Verfuegbare, Filiale geprueft,
+  // Buchung DR AP / CR SUPPLIER_CREDIT ohne `safePost`. Die Maske benutzt jetzt den FIFO des Hauses
+  // (`purchases.apply_credit`); dieser Weg bleibt fuer bestehende Aufrufer.
   applyCreditToPurchase: (creditId, purchaseId, amount) => {
-    if (amount <= 0) return;
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const cRows = query(`SELECT amount, used_amount FROM supplier_credits WHERE id = ?`, [creditId]);
-    if (cRows.length === 0) return;
-    const total = (cRows[0].amount as number) || 0;
-    const used = (cRows[0].used_amount as number) || 0;
-    const available = total - used;
-    const apply = Math.min(amount, available);
-    if (apply <= 0) return;
-
-    // Credit-Ueberanwendung verhindern (kein stilles Cappen): der beantragte Betrag darf den
-    // echten offenen Rest der Purchase nicht uebersteigen. remaining = total_amount − paid_amount
-    // (cash/bank/benefit) − bereits gebuchte credit-payments. Bei Verstoss: harter Abbruch VOR
-    // jeder Mutation → kein used_amount-Update, keine purchase_payments-Row, kein Ledger-Post.
-    const guardRow = query(`SELECT total_amount, paid_amount FROM purchases WHERE id = ?`, [purchaseId])[0];
-    if (!guardRow) throw new Error('Purchase not found for credit application.');
-    const guardTotal = (guardRow.total_amount as number) || 0;
-    const guardPaid = (guardRow.paid_amount as number) || 0;
-    const guardCreditPaid = Number(query(
-      `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit'`,
-      [purchaseId]
-    )[0]?.t || 0);
-    const purchaseRemaining = guardTotal - guardPaid - guardCreditPaid;
-    // Vergleich in Fils (Minor Units), KEINE BHD-Toleranz: amount darf den offenen Rest nicht
-    // ueberschreiten — schon 0.001 BHD darueber wird blockiert. remaining 30.000/amount 30.000 ok,
-    // remaining 30.000/amount 30.001 → BLOCK. Abbruch VOR jeder Mutation.
-    if (toFils(amount) > toFils(purchaseRemaining)) {
-      throw new Error(
-        `Credit amount (${amount.toFixed(3)}) exceeds the purchase's open balance (${Math.max(0, purchaseRemaining).toFixed(3)}).`
-      );
-    }
-
-    const newUsed = used + apply;
-    const newStatus = newUsed >= total - 0.005 ? 'USED' : 'OPEN';
-    db.run(
-      `UPDATE supplier_credits SET used_amount = ?, status = ? WHERE id = ?`,
-      [newUsed, newStatus, creditId]
-    );
-    // Als Purchase-Payment mit method='credit' verbuchen.
-    const payId = uuid();
-    const paidAt = now.split('T')[0];
-    db.run(
-      `INSERT INTO purchase_payments (id, purchase_id, amount, method, paid_at, reference, note, created_at)
-       VALUES (?, ?, ?, 'credit', ?, ?, 'Applied from supplier credit', ?)`,
-      [payId, purchaseId, apply, paidAt, creditId, now]
-    );
-    // Slice 4b-Fix — Purchase-Status/Outstanding spiegeln die Credit-Einloesung, OHNE die Overpay-
-    // Basis paid_amount zu veraendern (die bleibt bewusst credit-frei; sonst zoege reconcile-
-    // PurchaseOverpayCredit eine Phantom-Ueberzahlung). settled = paid_amount + Σ credit-Payments →
-    // nur die Display-Felder status/remaining_amount werden nachgezogen.
-    const stRow = query(`SELECT total_amount, paid_amount FROM purchases WHERE id = ?`, [purchaseId])[0];
-    if (stRow) {
-      const totalAmt = (stRow.total_amount as number) || 0;
-      const paidAmt = (stRow.paid_amount as number) || 0;
-      const creditPaid = Number(query(
-        `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit'`,
-        [purchaseId]
-      )[0]?.t || 0);
-      const settled = paidAmt + creditPaid;
-      const newRemaining = Math.max(0, totalAmt - settled);
-      const purStatus = settled >= totalAmt - 0.005 ? 'PAID' : (settled > 0.005 ? 'PARTIALLY_PAID' : 'UNPAID');
-      db.run(`UPDATE purchases SET remaining_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
-        [newRemaining, purStatus, now, purchaseId]);
-      trackChange('purchases', purchaseId, 'update', {});
-    }
-    saveDatabase();
-    trackUpdate('supplier_credits', creditId, { usedAmount: newUsed, status: newStatus });
-    trackInsert('purchase_payments', payId, { purchaseId, amount: apply, method: 'credit' });
-
-    // Ledger-Post: Method='credit' bucht AP runter ↔ SUPPLIER_CREDIT runter (kein Cash).
-    // Ohne den Post bleibt sowohl die A/P-Reduktion als auch der Credit-Verbrauch unsichtbar
-    // im zentralen Ledger → Reconciliation-Page hat dauerhaft eine Diskrepanz.
-    const supRow = query(`SELECT supplier_id FROM purchases WHERE id = ?`, [purchaseId])[0];
-    const supplierId = (supRow?.supplier_id as string) || '';
-    if (supplierId) {
-      const payment: PurchasePayment = {
-        id: payId,
-        purchaseId,
-        amount: apply,
-        method: 'credit',
-        paidAt,
-        reference: creditId,
-        note: 'Applied from supplier credit',
-        createdAt: now,
-      };
-      safePost(`postPurchasePayment(${payId}) [credit]`, () => {
-        if (hasLedgerEntries('PURCHASE_PAYMENT', payId)) return;
-        postPurchasePayment(payment, supplierId);
-      });
-    }
+    atomar(() => applyOneCreditToPurchaseInHouse(creditId, purchaseId, amount, localHouseCtx()));
+    get().loadSuppliers();
   },
 
   // Slice A — Supplier-Credits gegen offene supplier-verknuepfte Expenses einloesen. AUTORITATIVER
   // Writer: berechnet den FIFO-Plan selbst aus FRISCH (in-Tx) geladenen Daten — die UI gibt keinen
-  // Plan vor. ALLES in EINER aeusseren beginLedgerTransaction; jeder Fehler → kompletter Rollback +
-  // Throw. Kein safePost, kein await, kein Zwischen-Save, kein Teilcommit. paid_amount bleibt cash-
-  // only — die credit-Begleichung lebt in expense_payments(method='credit', reference=creditId) und
-  // im Ledger (DR AP / CR SUPPLIER_CREDIT via postExpenseSupplierCreditPayment).
+  // Plan vor. paid_amount bleibt cash-only — die credit-Begleichung lebt in expense_payments
+  // (method='credit', reference=creditId) und im Ledger (DR AP / CR SUPPLIER_CREDIT).
+  // R6D — der Schreiber lebt jetzt als `applySupplierCreditToExpensesInHouse` im Haus (dieselbe
+  // Folge, Filiale aus dem Rahmen statt stillem 'branch-main', feste Codes); „Pay Supplier → Credit"
+  // ruft ihn am Primary und fern (`suppliers.apply_credit`). Die Store-Aktion klammert sich selbst.
   applySupplierCreditsToExpenses: (supplierId, requestedAmount, occurredAt) => {
-    const result: SupplierCreditExpenseApplication = { applied: 0, allocations: [] };
-    if (!supplierId) throw new Error('applySupplierCreditsToExpenses: supplierId required.');
-    if (!(toFils(requestedAmount) > 0)) throw new Error('Requested amount must be greater than zero.');
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    let branchId = 'branch-main';
-    try { branchId = currentBranchId(); } catch { /* default */ }
-    const occurred = occurredAt || now;
-    const paidAt = occurred.includes('T') ? occurred.split('T')[0] : occurred;
-
-    beginLedgerTransaction();
-    try {
-      // ── 2-3. Frisch laden: offene supplier-verknuepfte Expenses dieser Branch (settled = cash+credit) ──
-      const expenseRows = query(
-        `SELECT e.id AS id, e.amount AS amount, e.paid_amount AS paid, e.status AS status, e.created_at AS created_at,
-                COALESCE((SELECT SUM(ep.amount) FROM expense_payments ep
-                          WHERE ep.expense_id = e.id AND ep.method = 'credit'), 0) AS credit_paid
-           FROM expenses e
-          WHERE e.supplier_id = ? AND e.branch_id = ? AND e.status != 'CANCELLED'
-          ORDER BY e.created_at ASC, e.id ASC`,
-        [supplierId, branchId]
-      );
-      const openExpenses = expenseRows.map(r => {
-        const amountF = toFils(Number(r.amount) || 0);
-        const settledF = toFils(Number(r.paid) || 0) + toFils(Number(r.credit_paid) || 0);
-        return { id: r.id as string, createdAt: (r.created_at as string) || '', amountF, settledF, remF: amountF - settledF };
-      }).filter(e => e.remF > 0);
-
-      // ── Frisch laden: offene Credits dieser Branch (available = amount − used_amount) ──
-      const creditRows = query(
-        `SELECT id, amount, used_amount, created_at FROM supplier_credits
-          WHERE supplier_id = ? AND branch_id = ? AND status = 'OPEN'
-          ORDER BY created_at ASC, id ASC`,
-        [supplierId, branchId]
-      );
-      const openCredits = creditRows.map(r => {
-        const totalF = toFils(Number(r.amount) || 0);
-        const usedF = toFils(Number(r.used_amount) || 0);
-        const availF = totalF - usedF;
-        if (availF < 0) throw new Error('Supplier credit has a negative available balance — data inconsistency.');
-        return { id: r.id as string, createdAt: (r.created_at as string) || '', totalF, usedF, availF };
-      }).filter(c => c.availF > 0);
-
-      // ── 3+4. Gemeinsamer reiner Planer: validiert Fils-genau (wirft → Rollback) und liefert den
-      // FIFO-Plan (Expenses aeltester-zuerst, je Expense aus Credits aeltester-zuerst). KEIN stilles
-      // Cappen. Identische Logik wie die UI-Vorschau — der Store bleibt aber die Autoritaet (frisch
-      // geladen, in-Tx). ──
-      const reqF = toFils(requestedAmount);
-      const { allocations } = planSupplierCreditExpenseAllocations(openExpenses, openCredits, reqF);
-
-      // ── 5+8. Pro Allokation: expense_payments-Row (method='credit', reference) + Ledger DIRECT ──
-      const creditAppliedF = new Map<string, number>();
-      const expenseAppliedF = new Map<string, number>();
-      for (const a of allocations) {
-        const payId = uuid();
-        const amt = a.amountF / 1000;
-        db.run(
-          `INSERT INTO expense_payments (id, expense_id, amount, method, paid_at, reference, note, created_at)
-           VALUES (?, ?, ?, 'credit', ?, ?, 'Applied from supplier credit', ?)`,
-          [payId, a.expenseId, amt, paidAt, a.creditId, now]
-        );
-        trackInsert('expense_payments', payId, { expenseId: a.expenseId, amount: amt, method: 'credit', reference: a.creditId });
-        // Ledger DIREKT (kein safePost): wirft → propagiert → Rollback der gesamten Einloesung.
-        postExpenseSupplierCreditPayment(payId, a.expenseId, supplierId, amt, occurred);
-        creditAppliedF.set(a.creditId, (creditAppliedF.get(a.creditId) || 0) + a.amountF);
-        expenseAppliedF.set(a.expenseId, (expenseAppliedF.get(a.expenseId) || 0) + a.amountF);
-        result.allocations.push({ expenseId: a.expenseId, creditId: a.creditId, paymentId: payId, amount: amt });
-      }
-
-      // ── 6. supplier_credits.used_amount/status (aggregiert je Credit) ──
-      for (const [creditId, appliedF] of creditAppliedF) {
-        const cr = openCredits.find(c => c.id === creditId)!;
-        const newUsedF = cr.usedF + appliedF;
-        if (newUsedF > cr.totalF) throw new Error('Internal error: credit over-application detected.');
-        const newStatus = newUsedF >= cr.totalF ? 'USED' : 'OPEN';
-        db.run(`UPDATE supplier_credits SET used_amount = ?, status = ? WHERE id = ?`, [newUsedF / 1000, newStatus, creditId]);
-        trackUpdate('supplier_credits', creditId, { usedAmount: newUsedF / 1000, status: newStatus });
-      }
-
-      // ── 7. Expense-Status aus dem Settlement-SSOT (paid_amount UNVERAENDERT = cash-only) ──
-      for (const [expenseId, appliedF] of expenseAppliedF) {
-        const exp = openExpenses.find(e => e.id === expenseId)!;
-        const newSettledF = exp.settledF + appliedF;
-        const newStatus = newSettledF >= exp.amountF ? 'PAID' : 'PENDING';
-        db.run(`UPDATE expenses SET status = ? WHERE id = ? AND status != 'CANCELLED'`, [newStatus, expenseId]);
-        trackUpdate('expenses', expenseId, { status: newStatus });
-      }
-
-      result.applied = reqF / 1000;
-      commitLedgerTransaction();
-    } catch (e) {
-      rollbackLedgerTransaction();
-      throw e;
-    }
+    const result = atomar(() => applySupplierCreditToExpensesInHouse(supplierId, requestedAmount, localHouseCtx(), occurredAt));
     get().loadSuppliers();
     return result;
   },
 
   // Standalone Supplier-Prepayment/-Credit: Geld an einen Lieferanten ueber dessen offene Posten
-  // hinaus. supplier_credits-Row mit source_return_id IS NULL AND source_purchase_id IS NULL
-  // (= standalone, disjunkt von Return- und Purchase-Overpay-Credits). Ledger DR SUPPLIER_CREDIT /
-  // CR cash atomar in EINER beginLedgerTransaction (Post wirft → rollback, Row faellt mit).
+  // hinaus (DR SUPPLIER_CREDIT / CR cash). R6D — Hausfolge, strikt (vorher: stiller No-op bei 0).
   grantStandaloneCredit: (supplierId, amount, method, note) => {
-    const creditId = uuid();
-    if (!supplierId || !(amount > 0.005)) return creditId;
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    let branchId = 'branch-main', userId = 'user-owner';
-    try { branchId = currentBranchId(); userId = currentUserId(); } catch { /* defaults */ }
-    beginLedgerTransaction();
-    try {
-      db.run(
-        `INSERT INTO supplier_credits (id, branch_id, supplier_id, source_return_id, source_purchase_id,
-           amount, used_amount, status, note, created_at, created_by)
-         VALUES (?, ?, ?, NULL, NULL, ?, 0, 'OPEN', ?, ?, ?)`,
-        [creditId, branchId, supplierId, amount, note || 'Supplier prepayment', now, userId]
-      );
-      trackInsert('supplier_credits', creditId, { supplierId, amount });
-      postStandaloneSupplierCredit(creditId, supplierId, amount, method, now);
-      commitLedgerTransaction();
-    } catch (e) {
-      rollbackLedgerTransaction();
-      throw e;
-    }
+    const creditId = atomar(() => grantStandaloneCreditInHouse(supplierId, amount, method as PayMethod, note, localHouseCtx()));
     get().loadSuppliers();
     return creditId;
   },
 
   // Refund eines STANDALONE Supplier-Credits = reales Geld zurueck auf das urspruengliche
   // Cash/Bank/Benefit-Konto (CR SUPPLIER_CREDIT / DR cash via reverseSource) — NICHT nur Row-Delete.
-  // Gehaerteter, autoritativer Pfad; die UI darf sich NIE auf einen vorab geladenen used_amount
-  // verlassen. Alles wird hier FRISCH aus der DB geprueft:
-  //   1. Credit frisch laden  2. beide Source-IDs NULL (= standalone)  3. status='OPEN'
-  //   4. used_amount Fils-exakt 0 (schon 0.001 BLOCKT — keine 0.005-Toleranz mehr)
-  //   5. genau EIN lebendes, unreversiertes SUPPLIER_PREPAYMENT-Asset-Leg (Cash/Bank/Benefit)
-  //   6. erst dann atomar: Ledger reversen + Row loeschen + trackDelete + commit.
-  // Jeder verletzte Schritt WIRFT (kein stiller No-op) → die UI meldet nie faelschlich Erfolg,
-  // und bei Doppel-Refund/Race gibt es keine zweite Rueckbuchung. NUR fuer standalone Credits —
-  // Return-/Purchase-Overpay-Credits sind durch Schritt 2 ausgeschlossen.
+  // R6D — dieselbe gehaertete Folge (frisch lesen, standalone, OPEN, unbenutzt, lebende Quelle) im
+  // Haus, jetzt mit Filialpruefung; jeder verletzte Schritt WIRFT.
   deleteStandaloneSupplierCredit: (creditId) => {
-    const db = getDatabase();
-    // Read → Validate → Mutate laufen als EINE atomare Einheit INNERHALB der Transaktion:
-    // beginLedgerTransaction ZUERST, dann der frische SELECT, die Status-/Fils-Pruefung und die
-    // Zwei-Leg-Validierung — alle gegen denselben Snapshot, gegen den anschliessend committed wird.
-    // Jeder Fehler rollt die (bis dahin nur lesende) Transaktion zurueck und wirft verstaendlich;
-    // keine Loeschung/Rueckbuchung auf Basis veralteter Daten. Frontend-DB = sql.js (eine
-    // In-Memory-Verbindung), alles SYNCHRON → KEIN await/Race-Fenster zwischen Validierung und
-    // Commit; Cross-Client-Konkurrenz regelt der Sync-Layer (last-writer-wins), nicht SQLite-Locks.
-    beginLedgerTransaction();
-    try {
-      // 2. Credit frisch laden (nur standalone — beide Source-IDs NULL)
-      const c = query(
-        `SELECT amount, used_amount, status FROM supplier_credits
-          WHERE id = ? AND source_return_id IS NULL AND source_purchase_id IS NULL`,
-        [creditId]
-      )[0];
-      if (!c) {
-        throw new Error('Supplier credit not found or not a standalone credit — it may have already been refunded or redeemed.');
-      }
-      // 3. Status + used_amount (Fils-exakt 0, schon 0.001 BLOCKT)
-      if (String(c.status) !== 'OPEN') {
-        throw new Error('This supplier credit is no longer open and cannot be refunded.');
-      }
-      if (toFils(Number(c.used_amount) || 0) !== 0) {
-        throw new Error('Cannot refund this supplier credit because it has already been (partially) redeemed. Reverse the redemption first.');
-      }
-      // 4. Vollstaendige Source-Gruppen-Validierung (genau DR SUPPLIER_CREDIT + CR Asset, Betrag ==
-      //    amount auf Fils, gleiche Transaktion, kein Leg reversiert). method != null garantiert die
-      //    exakte, lebende, unreversierte 2-Leg-Struktur → reverseSource flippt sie vollstaendig.
-      const method = validateStandaloneCreditRefundSource(creditId, (c.amount as number) || 0);
-      if (!method) {
-        throw new Error('Cannot refund: the original Cash/Bank/Benefit ledger entry for this credit is unavailable or invalid (missing, incomplete, amount-mismatched, or already reversed). A refund must book the money back to the original account.');
-      }
-      // 5. Reversal  6. Row loeschen  7. trackDelete  8. Commit
-      reverseSource('SUPPLIER_PREPAYMENT', creditId, new Date().toISOString());
-      db.run(`DELETE FROM supplier_credits WHERE id = ?`, [creditId]);
-      trackDelete('supplier_credits', creditId);
-      commitLedgerTransaction();
-    } catch (e) {
-      rollbackLedgerTransaction();
-      throw e;
-    }
+    atomar(() => refundStandaloneCreditInHouse(creditId, localHouseCtx()));
     get().loadSuppliers();
   },
 }));
@@ -685,6 +394,24 @@ export function loadSuppliersFor(ctx: BusinessReadContext): { suppliers: Supplie
   // beide Wege dieselbe Zeile sehen. Die Rechnung selbst ist unveraendert.
   for (const s of suppliers) Object.assign(s, supplierLedgerFor(s.id));
   return { suppliers };
+}
+
+/**
+ * CENTRAL-UI-PARITY R6D — die offenen Guthaben EINES Lieferanten in DER Filiale des Anfragenden
+ * (Auskunft `suppliers.credits.get`). Einkauf (Credit-Modus), Sammelzahlung (Guthaben-Modus) und
+ * die Guthaben-Karte lasen sie bisher direkt aus der Datenbank — auf PC2 also nie, und am Primary
+ * ohne Filialgrenze. `availableAmount` ist der Betrag, gegen den das Haus beim Einloesen prueft.
+ */
+export function supplierCreditsFor(ctx: BusinessReadContext, supplierId: string): { credits: SupplierCreditDisplay[]; availableAmount: number } {
+  if (!supplierId) return { credits: [], availableAmount: 0 };
+  const rows = query(
+    `SELECT id, supplier_id, source_return_id, source_purchase_id, amount, used_amount, status, created_at
+       FROM supplier_credits WHERE supplier_id = ? AND branch_id = ? AND status = 'OPEN' ORDER BY created_at DESC, id DESC`,
+    [supplierId, ctx.branchId]
+  );
+  const credits = rows.map(creditDisplayRow);
+  const availableF = credits.reduce((s, c) => s + Math.max(0, toFils(c.amount) - toFils(c.usedAmount)), 0);
+  return { credits, availableAmount: availableF / 1000 };
 }
 
 /**

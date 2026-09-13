@@ -41,7 +41,18 @@ export interface MaterialLineInput {
 interface AddMaterialModalProps {
   open: boolean;
   onClose: () => void;
-  onSubmit: (data: MaterialLineInput) => void;
+  /** Eine Position nach der anderen — nur noch fuer das Sammeln in einer Maske (OrderCreate). */
+  onSubmit?: (data: MaterialLineInput) => void;
+  /**
+   * CENTRAL-UI-PARITY R6D — ALLE Positionen als EINE Buchung (RepairDetail „Add Material",
+   * OrderDetail „Add Cost"). Das Modal schliesst nur, wenn sie geglueckt ist; sonst bleibt die Liste
+   * stehen, und ein zweiter Klick wiederholt denselben Versuch.
+   */
+  onSubmitAll?: (rows: MaterialLineInput[]) => Promise<boolean>;
+  /** Solange eine Buchung laeuft, ist „Save" gesperrt. */
+  busy?: boolean;
+  /** Der Grund, wenn die Buchung nicht geglueckt ist. */
+  submitError?: string;
   showCustomerPrice?: boolean;  // Custom-Order: ja; Repair: nein
   allowLabor?: boolean;         // v0.5.0 — Labor-Kostenposition zulassen (OrderDetail)
 }
@@ -61,7 +72,9 @@ function round3(n: number): string {
   return String(Math.round(n * 1000) / 1000);
 }
 
-export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = false, allowLabor = false }: AddMaterialModalProps) {
+export function AddMaterialModal({
+  open, onClose, onSubmit, onSubmitAll, busy = false, submitError, showCustomerPrice = false, allowLabor = false,
+}: AddMaterialModalProps) {
   const { suppliers, loadSuppliers } = useSupplierStore();
   const [kind, setKind] = useState<Kind>('diamond');
   const [description, setDescription] = useState('');
@@ -228,9 +241,10 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
     resetEntry();
   }
 
-  // „Speichern" — gesammelte Liste + (falls angefangen) der aktuelle Block,
-  // jede Position einzeln an den Caller schicken.
-  function handleSave() {
+  // „Speichern" — gesammelte Liste + (falls angefangen) der aktuelle Block.
+  // R6D: mit `onSubmitAll` gehen ALLE Positionen als EINE Buchung; ohne (OrderCreate sammelt nur)
+  // wie bisher einzeln an den Caller.
+  async function handleSave() {
     setError('');
     let all = [...rows];
     // Wenn der Eingabe-Block angefangen wurde (Description gesetzt) → mitnehmen.
@@ -240,7 +254,12 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
       all = [...all, entry];
     }
     if (all.length === 0) { setError('Add at least one cost position'); return; }
-    all.forEach(onSubmit);
+    if (onSubmitAll) {
+      // Nur bei Erfolg schliessen — sonst bleibt alles stehen, und „Save" wiederholt denselben Versuch.
+      if (await onSubmitAll(all)) onClose();
+      return;
+    }
+    all.forEach((d) => onSubmit?.(d));
     onClose();
   }
 
@@ -265,6 +284,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
               <button
                 key={b.value}
                 type="button"
+                data-material-kind={b.value}
                 onClick={() => selectKind(b.value)}
                 className="cursor-pointer rounded transition-all duration-200"
                 style={{
@@ -289,6 +309,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
           value={description}
           onChange={e => setDescription(e.target.value)}
           autoFocus
+          data-material-description
         />
 
         {/* Quantity + Carat/Grams — bei Labor entfaellt das */}
@@ -301,6 +322,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
               min="1"
               value={qty}
               onChange={e => onQtyChange(e.target.value)}
+              data-material-quantity
             />
             {isCarat && (
               <Input
@@ -310,6 +332,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
                 placeholder="0.50"
                 value={ct}
                 onChange={e => onCtChange(e.target.value)}
+                data-material-carat
               />
             )}
             {kind === 'gold' && (
@@ -320,6 +343,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
                 placeholder="0.000"
                 value={grams}
                 onChange={e => setGrams(e.target.value)}
+                data-material-grams
               />
             )}
           </div>
@@ -333,6 +357,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
                 <button
                   key={k}
                   type="button"
+                  data-material-karat={k}
                   onClick={() => setKarat(k)}
                   className="cursor-pointer rounded"
                   style={{
@@ -358,6 +383,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
                 placeholder="0.000"
                 value={costPerCt}
                 onChange={e => onCostPerCtChange(e.target.value)}
+                data-material-cost-per-ct
               />
               <Input
                 label="TOTAL COST (BHD)"
@@ -366,6 +392,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
                 placeholder="0.000"
                 value={cost}
                 onChange={e => onCostChange(e.target.value)}
+                data-material-cost
               />
             </div>
             <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
@@ -383,6 +410,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
               placeholder="0.000"
               value={cost}
               onChange={e => { setGoldCostTouched(true); setCost(e.target.value); }}
+              data-material-cost
             />
             {(parseFloat(grams) || 0) > 0 && (
               <p style={{ fontSize: 11, marginTop: 6, color: goldCostTouched ? '#0F0F10' : (autoGoldCost > 0 ? '#16A34A' : '#DC2626') }}>
@@ -411,6 +439,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
             placeholder="0.000"
             value={cost}
             onChange={e => setCost(e.target.value)}
+            data-material-cost
           />
         )}
 
@@ -446,12 +475,14 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
           <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>
             SOURCE *
           </span>
-          <SearchSelect
-            options={supplierOptions}
-            value={supplierId}
-            onChange={(id) => setSupplierId(id)}
-            placeholder="Pick: Shop / Own Stock OR a supplier"
-          />
+          <div data-material-source>
+            <SearchSelect
+              options={supplierOptions}
+              value={supplierId}
+              onChange={(id) => setSupplierId(id)}
+              placeholder="Pick: Shop / Own Stock OR a supplier"
+            />
+          </div>
           {supplierId === '__INHOUSE__' && (
             <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
               ℹ️ From own stock — no A/P booking.
@@ -467,6 +498,7 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
         {/* v0.6.x — „+ Zur Liste": aktuelle Eingabe sammeln, weitere erfassen */}
         <button
           type="button"
+          data-material-add-to-list
           onClick={addToList}
           className="cursor-pointer rounded transition-colors"
           style={{
@@ -515,17 +547,17 @@ export function AddMaterialModal({ open, onClose, onSubmit, showCustomerPrice = 
           </div>
         )}
 
-        {error && (
-          <div style={{
+        {(error || submitError) && (
+          <div data-material-error style={{
             padding: '8px 10px', background: 'rgba(220,38,38,0.06)',
             border: '1px solid rgba(220,38,38,0.3)', borderRadius: 6,
             fontSize: 12, color: '#DC2626',
-          }}>{error}</div>
+          }}>{error || submitError}</div>
         )}
 
         <div className="flex justify-end gap-3" style={{ paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={onClose}>Cancel</Button>
-          <Button variant="primary" onClick={handleSave}>
+          <Button variant="primary" onClick={() => void handleSave()} disabled={busy} data-material-save>
             {pendingCount > 0 ? `Save (${pendingCount})` : 'Save'}
           </Button>
         </div>

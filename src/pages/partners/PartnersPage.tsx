@@ -19,6 +19,7 @@ import { Bhd } from '@/components/ui/Bhd';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { savePartnerCreate, savePartnerUpdate } from '@/core/masterdata/masterdata-save';
+import { savePartnerTx } from '@/core/finance/money-save';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -27,10 +28,10 @@ function fmt(v: number): string {
 type TxKind = 'INVESTMENT' | 'WITHDRAWAL' | 'PROFIT_DISTRIBUTION';
 
 export function PartnersPage() {
-  const { partners, transactions, loadPartners, loadTransactions, deletePartner,
-    recordInvestment, recordWithdrawal, recordProfitDistribution, deleteTransaction } = usePartnerStore();
+  const { partners, transactions, loadPartners, loadTransactions, deletePartner, deleteTransaction } = usePartnerStore();
   // CENTRAL-UI-PARITY R6C — Partner anlegen/ändern: am Primary die Hausfunktion, auf PC2
-  // `partners.create` / `partners.update`. Die Partnerbewegungen (Geld) bleiben R6E.
+  // `partners.create` / `partners.update`. R6D — die Partnerbewegungen (Einlage, Entnahme,
+  // Gewinnausschüttung) ebenso: am Primary die Hausfolge, auf PC2 `partners.record_tx`.
   const w = useSharedWrites();
 
   const [searchParams, setSearchParams] = useSearchParams();
@@ -65,11 +66,13 @@ export function PartnersPage() {
 
   const totalCapital = partners.reduce((s, p) => s + (p.balance || 0), 0);
 
+  const [txFehler, setTxFehler] = useState('');
   function openTx(partnerId: string, kind: TxKind) {
     setTxModal({ partnerId, kind });
     setTxAmount(''); setTxMethod('bank');
     setTxDate(new Date().toISOString().split('T')[0]);
     setTxNotes('');
+    setTxFehler('');
   }
 
   const [partnerFehler, setPartnerFehler] = useState('');
@@ -95,13 +98,15 @@ export function PartnersPage() {
     return findSimilarContacts({ name: partnerForm.name, phone: partnerForm.phone }, partners);
   }, [showNewPartner, partnerForm.name, partnerForm.phone, partners]);
 
-  function handleTx() {
+  // R6D — vorher: direkter Store-Aufruf (Beleg, Zeile, dann Buchung mit verschlucktem Fehler), die
+  // Maske schloss sich in jedem Fall. Jetzt schließt sie nur nach einem Erfolg.
+  async function handleTx() {
     if (!txModal) return;
-    const amt = parseFloat(txAmount);
-    if (!amt || amt <= 0) return;
-    if (txModal.kind === 'INVESTMENT') recordInvestment(txModal.partnerId, amt, txMethod, txDate, txNotes || undefined);
-    else if (txModal.kind === 'WITHDRAWAL') recordWithdrawal(txModal.partnerId, amt, txMethod, txDate, txNotes || undefined);
-    else recordProfitDistribution(txModal.partnerId, amt, txMethod, txDate, txNotes || undefined);
+    setTxFehler('');
+    const r = await savePartnerTx(w, {
+      partnerId: txModal.partnerId, kind: txModal.kind, amount: txAmount, method: txMethod, date: txDate, notes: txNotes,
+    });
+    if (r.kind !== 'ok') { setTxFehler(`Could not record the transaction: ${fehlertext(r)}`); return; }
     setTxModal(null);
   }
 
@@ -155,9 +160,9 @@ export function PartnersPage() {
               </div>
 
               <div className="flex gap-2" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE', flexWrap: 'wrap' }}>
-                <Button variant="secondary" onClick={() => openTx(p.id, 'INVESTMENT')}><TrendingUp size={12} /> Invest</Button>
-                <Button variant="secondary" onClick={() => openTx(p.id, 'WITHDRAWAL')}><TrendingDown size={12} /> Withdraw</Button>
-                <Button variant="ghost" onClick={() => openTx(p.id, 'PROFIT_DISTRIBUTION')}><Gift size={12} /> Profit Share</Button>
+                <Button variant="secondary" onClick={() => openTx(p.id, 'INVESTMENT')} data-partner-tx-open="INVESTMENT"><TrendingUp size={12} /> Invest</Button>
+                <Button variant="secondary" onClick={() => openTx(p.id, 'WITHDRAWAL')} data-partner-tx-open="WITHDRAWAL"><TrendingDown size={12} /> Withdraw</Button>
+                <Button variant="ghost" onClick={() => openTx(p.id, 'PROFIT_DISTRIBUTION')} data-partner-tx-open="PROFIT_DISTRIBUTION"><Gift size={12} /> Profit Share</Button>
                 <Button variant="ghost" onClick={() => { setEditPartner(p); setEditForm({ ...p }); }}>Edit</Button>
                 <Button variant="ghost" onClick={() => setHistoryId(p.id)}>History</Button>
               </div>
@@ -214,9 +219,10 @@ export function PartnersPage() {
         title={txModal?.kind === 'INVESTMENT' ? 'Record Investment' : txModal?.kind === 'WITHDRAWAL' ? 'Record Withdrawal' : 'Profit Distribution'}
         width={460}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <WriteError text={txFehler} />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-            <Input required label="AMOUNT (BHD)" type="number" step="0.01" placeholder="0.00" value={txAmount} onChange={e => setTxAmount(e.target.value)} autoFocus />
-            <Input required label="DATE" type="date" value={txDate} onChange={e => setTxDate(e.target.value)} />
+            <Input required label="AMOUNT (BHD)" type="number" step="0.01" placeholder="0.00" value={txAmount} onChange={e => setTxAmount(e.target.value)} autoFocus data-partner-tx-amount />
+            <Input required label="DATE" type="date" value={txDate} onChange={e => setTxDate(e.target.value)} data-partner-tx-date />
           </div>
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
@@ -224,7 +230,7 @@ export function PartnersPage() {
               {(['cash', 'bank', 'benefit'] as const).map(m => {
                 const active = txMethod === m;
                 return (
-                  <button key={m} onClick={() => setTxMethod(m)} className="cursor-pointer rounded"
+                  <button key={m} onClick={() => setTxMethod(m)} className="cursor-pointer rounded" data-partner-tx-method={m}
                     style={{ padding: '8px 16px', fontSize: 13,
                       border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                       color: active ? '#0F0F10' : '#6B7280',
@@ -234,10 +240,10 @@ export function PartnersPage() {
               })}
             </div>
           </div>
-          <Input label="NOTES" placeholder="Optional" value={txNotes} onChange={e => setTxNotes(e.target.value)} />
+          <Input label="NOTES" placeholder="Optional" value={txNotes} onChange={e => setTxNotes(e.target.value)} data-partner-tx-notes />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setTxModal(null)}>Cancel</Button>
-            <Button variant="primary" onClick={handleTx} disabled={!txAmount || parseFloat(txAmount) <= 0}>Confirm</Button>
+            <Button variant="primary" onClick={() => void handleTx()} disabled={!txAmount || parseFloat(txAmount) <= 0 || w.busy} data-partner-tx-save>Confirm</Button>
           </div>
         </div>
       </Modal>
