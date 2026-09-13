@@ -1288,7 +1288,15 @@ export interface CreditNote {
   notes?: string;
   createdAt: string;
   createdBy?: UUID;
+  // R6E — eine ausgestellte Gutschrift wird storniert, nicht geloescht (Nummer bleibt belegt).
+  // CANCELLED wirkt auf keine Summe mehr (Forderung, Guthaben, Steuer, Deckel) — nur noch Historie.
+  status?: CreditNoteStatus;
+  cancelledAt?: string;
+  cancelledBy?: UUID;
+  cancelReason?: string;
 }
+
+export type CreditNoteStatus = 'ISSUED' | 'CANCELLED';
 
 // Phase 5: Production & Consumption (Plan §Production)
 // Input-Snapshot enthält volle Produkt-Spec zum Zeitpunkt des Konsums (Inputs

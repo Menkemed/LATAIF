@@ -169,17 +169,18 @@ function domainArMap(run: SqlRunner, branchId: string): FilsMap {
     [branchId], -1, bhd);
   accumulate(run,
     `SELECT COALESCE(customer_id,'') AS cid, COALESCE(SUM(receivable_cancel_amount),0) AS t
-     FROM credit_notes WHERE branch_id=? GROUP BY cid`,
+     FROM credit_notes WHERE branch_id=? AND status!='CANCELLED' GROUP BY cid`,
     [branchId], -1, bhd);
   return toFilsMap(bhd);
 }
 
-// Customer-Credit je Kunde — Spiegel von domainCustomerCredit (Σ amount−used, alle Rows).
+// Customer-Credit je Kunde — Spiegel von domainCustomerCredit (Σ amount−used, alle Rows außer
+// CANCELLED: R6E-CN — Guthaben aus einer stornierten Gutschrift, Grant im Hauptbuch umgekehrt).
 function domainCustomerCreditMap(run: SqlRunner, branchId: string): FilsMap {
   const bhd = new Map<string, number>();
   accumulate(run,
     `SELECT COALESCE(customer_id,'') AS cid, COALESCE(SUM(amount-used_amount),0) AS t
-     FROM customer_credits WHERE branch_id=? GROUP BY cid`,
+     FROM customer_credits WHERE branch_id=? AND status!='CANCELLED' GROUP BY cid`,
     [branchId], 1, bhd);
   return toFilsMap(bhd);
 }
@@ -311,10 +312,15 @@ function auditCreditIntegrity(run: SqlRunner, branchId: string): CreditIssue[] {
   const ccByTypeSource = new Set<string>();
   for (const r of ccRows) {
     ccById.add(String(r.id));
-    ccByTypeSource.add(`${r.source_type}|${r.source_id}`);
+    // R6E-CN — eine CANCELLED-Zeile deckt keinen lebenden Grant mehr (ihr Grant ist umgekehrt).
+    // Steht er doch noch, meldet `ledger_no_credit` unten genau diesen Widerspruch.
+    if (String(r.status) !== 'CANCELLED') ccByTypeSource.add(`${r.source_type}|${r.source_id}`);
   }
 
   for (const r of ccRows) {
+    // R6E-CN — CANCELLED ist ein Endstatus (Gutschrift storniert, Buchung umgekehrt): kein
+    // Soll-Status aus used/amount, kein erwarteter Grant.
+    if (String(r.status) === 'CANCELLED') continue;
     const id = String(r.id);
     const cp = String(r.cp ?? '');
     const amt = toFils(r.amount);

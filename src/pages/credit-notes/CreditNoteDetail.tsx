@@ -53,6 +53,10 @@ export function CreditNoteDetail() {
     );
   }
 
+  // R6E-CN — eine stornierte Gutschrift bleibt als Urkunde sichtbar, klar markiert; sie wirkt auf
+  // keine Forderung, kein Guthaben und keine Steuer mehr und lässt sich nicht löschen (sie IST die Spur).
+  const cancelled = cn.status === 'CANCELLED';
+
   function handleDownload() {
     if (!cn) return;
     const itemLines = (ret?.lines || []).map(rl => {
@@ -61,7 +65,7 @@ export function CreditNoteDetail() {
       return { label: desc, value: `${fmt(rl.quantity * rl.unitPrice)} BHD` };
     });
     downloadPdf({
-      title: `Credit Note ${cn.creditNoteNumber}`,
+      title: `Credit Note ${cn.creditNoteNumber}${cancelled ? ' (CANCELLED)' : ''}`,
       number: cn.creditNoteNumber,
       date: fmtDate(cn.issuedAt),
       subtitle: `Reference Invoice: ${inv ? formatInvoiceDisplayShort(inv) : cn.invoiceId}`,
@@ -77,6 +81,11 @@ export function CreditNoteDetail() {
           ...(cn.refundMethod ? [{ label: 'Refund method', value: cn.refundMethod }] : []),
         ]},
         ...(cn.reason ? [{ title: 'Reason', lines: [{ label: cn.reason, value: '' }] }] : []),
+        ...(cancelled ? [{ title: 'Cancellation', lines: [
+          { label: 'Status', value: 'CANCELLED', bold: true },
+          { label: 'Cancelled on', value: fmtDate(cn.cancelledAt) },
+          ...(cn.cancelReason ? [{ label: 'Reason', value: cn.cancelReason }] : []),
+        ]}] : []),
       ],
       footer: `This Credit Note credits Invoice ${inv ? formatInvoiceDisplayShort(inv) : cn.invoiceId}. Original invoice remains on record.`,
     });
@@ -102,20 +111,38 @@ export function CreditNoteDetail() {
           </button>
           <div className="flex gap-2">
             <Button variant="secondary" onClick={handleDownload}><Download size={14} /> Download PDF</Button>
-            <Button variant="ghost" {...primaryOnlyDeleteProps()} onClick={handleDelete} style={{ color: '#DC2626' }}><Trash2 size={14} /> Delete</Button>
+            {!cancelled && (
+              <Button variant="ghost" {...primaryOnlyDeleteProps()} onClick={handleDelete} style={{ color: '#DC2626' }}><Trash2 size={14} /> Delete</Button>
+            )}
           </div>
         </div>
 
         {/* Hero */}
         <div className="animate-fade-in" style={{ marginBottom: 32 }}>
           <span className="text-overline" style={{ color: '#FF8730' }}>CREDIT NOTE</span>
-          <h1 className="font-display" style={{ fontSize: 32, color: '#0F0F10', marginTop: 4, lineHeight: 1.1 }}>{cn.creditNoteNumber}</h1>
+          {cancelled && (
+            <span className="text-overline" data-credit-note-cancelled style={{ color: '#DC2626', marginLeft: 8 }}>· CANCELLED</span>
+          )}
+          <h1 className="font-display" style={{ fontSize: 32, color: '#0F0F10', marginTop: 4, lineHeight: 1.1, textDecoration: cancelled ? 'line-through' : undefined }}>{cn.creditNoteNumber}</h1>
           <div className="flex items-center gap-3" style={{ marginTop: 8, fontSize: 13, color: '#6B7280' }}>
             <span>Issued {fmtDate(cn.issuedAt)}</span>
             <span>·</span>
             <span>Total credit <span className="font-mono" style={{ color: '#DC2626', fontWeight: 600 }}><Bhd v={cn.totalAmount}/> BHD</span></span>
           </div>
         </div>
+
+        {cancelled && (
+          <div data-credit-note-cancelled-banner
+            style={{ marginBottom: 24, padding: '14px 18px', borderRadius: 12, border: '1px solid rgba(220,38,38,0.3)', background: 'rgba(220,38,38,0.05)', fontSize: 13, color: '#0F0F10' }}>
+            <div style={{ fontWeight: 600, color: '#DC2626', marginBottom: 4 }}>
+              Cancelled on {fmtDate(cn.cancelledAt)}
+            </div>
+            <div style={{ color: '#4B5563' }}>
+              Its return was cancelled. This credit note stays on record but no longer affects the receivable, store credit or VAT — its booking has been reversed.
+            </div>
+            {cn.cancelReason && <div style={{ marginTop: 6, color: '#4B5563' }}>Reason: {cn.cancelReason}</div>}
+          </div>
+        )}
 
         {/* KPI Row */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 16, marginBottom: 32 }}>

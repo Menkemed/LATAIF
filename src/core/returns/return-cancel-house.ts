@@ -20,13 +20,17 @@
 // (`runOnPrimary` am Primary, `runRemoteCommand` für PC2). Diese Datei öffnet, schließt und rollt
 // nie selbst zurück; ein Nein ist ein geworfener `ReturnCancelRejected` mit festem Code.
 //
-// Gelöscht wird weiterhin, was schon vorher gelöscht wurde: die Gutschrift (`credit_notes` hat keine
-// Statusspalte, und JEDER Leser zählt sie je Rechnung ohne Filter — `updateInvoice` M-04, der
-// Guard B von `editInvoice`, offene Posten, Forderungen, Abstimmung) und das daraus entstandene,
-// UNBENUTZTE Store-Guthaben (die Abstimmung summiert `customer_credits` über ALLE Zeilen; eine
-// stehengelassene Zeile wäre Guthaben ohne Buchung). Die Spur sind die Stornobuchungen im Hauptbuch
-// und der atomare Protokolleintrag mit dem Vorher-Stand. Eine erhaltende Form bräuchte eine neue
-// Spalte — das entscheidet nicht diese Datei.
+// R6E-CN — die Gutschrift wird nicht mehr GELÖSCHT, sondern STORNIERT. Vorher verschwand die Zeile
+// samt Nummer (eine Steuerurkunde!) und das daraus entstandene, unbenutzte Store-Guthaben; die
+// einzige Spur waren die Stornobuchungen. Jetzt bleibt beides stehen:
+//   • `credit_notes.status = 'CANCELLED'` mit `cancelled_at`/`cancelled_by`/`cancel_reason` —
+//     Nummer, Beträge und Verweise unverändert (Historie, klar als storniert gekennzeichnet);
+//   • `customer_credits.status = 'CANCELLED'` (das Vokabular des Hauses) — nicht mehr einlösbar.
+// Die finanzielle Wahrheit bleibt das Hauptbuch (`reverseSource('CREDIT_NOTE')` wie bisher). Jeder
+// Leser, der Gutschriften oder Guthaben SUMMIERT (offene Posten, Forderungen, Deckel, Abstimmung,
+// Gegenpartei-Prüfung, Nachbuchung, Rechnungsstorno M-04, Guard B), lässt CANCELLED aus — damit
+// hat die stornierte Gutschrift genau die Wirkung, die sie vorher durch das Löschen hatte: keine.
+// Protokoll: je Gutschrift ein eigener Eintrag (ISSUED → CANCELLED, mit dem Menschen, der storniert).
 // ════════════════════════════════════════════════════════════════════════════
 import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
@@ -192,8 +196,12 @@ export interface ReturnCancelled {
   status: 'REJECTED';
   revision: number;
   invoiceStatus: string;
+  /** Zahl der Gutschriften, die storniert wurden (Hauptbuch umgekehrt, Zeile CANCELLED). */
   reversedCreditNotes: number;
-  removedCustomerCredits: number;
+  /** Ihre Nummern — sie bleiben belegt und sichtbar. */
+  cancelledCreditNoteNumbers: string[];
+  /** Zahl der unbenutzten Store-Guthaben, die CANCELLED wurden (nicht mehr gelöscht). */
+  cancelledCustomerCredits: number;
   cardFeeRestored: number;
 }
 
@@ -273,8 +281,8 @@ export function cancelReturnInHouse(
     returnNumber: String(r.return_number ?? ''),
     invoiceStatus: String(inv.status ?? ''),
   };
-  const deletedCnIds: string[] = [];
-  const deletedCcIds: string[] = [];
+  const cancelledCns: Array<{ id: string; number: string }> = [];
+  const cancelledCcIds: string[] = [];
   let feeRestored = 0;
   let feeExpenseId: string | null = null;
   let invoiceTouched = false;
@@ -293,20 +301,28 @@ export function cancelReturnInHouse(
     reverseSource('SALES_RETURN_COGS', returnId, now);
   }
 
-  // 4. Pro Credit Note: Ledger zurück (Revenue/AR/Cash/VAT/CUSTOMER_CREDIT), unverbrauchtes
-  //    Store-Guthaben abbauen (Sperre 2 garantiert used_amount = 0), CN-Row entfernen.
-  for (const cn of query(`SELECT id FROM credit_notes WHERE sales_return_id = ?`, [returnId])) {
+  // 4. Pro (noch wirksamer) Gutschrift: Ledger zurück (Revenue/AR/Cash/VAT/CUSTOMER_CREDIT), das
+  //    unverbrauchte Store-Guthaben (Sperre 2 garantiert used_amount = 0) und die Gutschrift selbst
+  //    auf CANCELLED — Zeile, Nummer und Beträge bleiben stehen (Steuerurkunde, Historie).
+  for (const cn of query(
+    `SELECT id, credit_note_number FROM credit_notes WHERE sales_return_id = ? AND status != 'CANCELLED'`, [returnId],
+  )) {
     const cnId = String(cn.id);
     if (hasLedgerEntries('CREDIT_NOTE', cnId) && !hasReversalFor('CREDIT_NOTE', cnId)) {
       reverseSource('CREDIT_NOTE', cnId, now);
     }
-    for (const cc of query(`SELECT id FROM customer_credits WHERE source_type = 'sales_return' AND source_id = ?`, [cnId])) {
-      db.run(`DELETE FROM customer_credits WHERE id = ?`, [String(cc.id)]);
-      deletedCcIds.push(String(cc.id));
+    for (const cc of query(
+      `SELECT id FROM customer_credits WHERE source_type = 'sales_return' AND source_id = ? AND status != 'CANCELLED'`, [cnId],
+    )) {
+      db.run(`UPDATE customer_credits SET status = 'CANCELLED' WHERE id = ?`, [String(cc.id)]);
+      cancelledCcIds.push(String(cc.id));
     }
-    deletedCnIds.push(cnId);
+    db.run(
+      `UPDATE credit_notes SET status = 'CANCELLED', cancelled_at = ?, cancelled_by = ?, cancel_reason = ? WHERE id = ?`,
+      [now, actor.userId, why, cnId],
+    );
+    cancelledCns.push({ id: cnId, number: String(cn.credit_note_number ?? '') });
   }
-  db.run(`DELETE FROM credit_notes WHERE sales_return_id = ?`, [returnId]);
 
   // 5. Karten-Gebühr-Erstattungen dieses Returns reversieren (Ledger + Expense auffüllen).
   const feeSrcs = query(
@@ -346,7 +362,8 @@ export function cancelReturnInHouse(
   //    PARTIAL (dieselbe Ableitung wie `editInvoice` für „bezahlt < Brutto").
   const nach = query(
     `SELECT i.status, i.gross_amount, i.paid_amount,
-            COALESCE((SELECT SUM(cn.receivable_cancel_amount) FROM credit_notes cn WHERE cn.invoice_id = i.id), 0) AS cn_cancel
+            COALESCE((SELECT SUM(cn.receivable_cancel_amount) FROM credit_notes cn
+                       WHERE cn.invoice_id = i.id AND cn.status != 'CANCELLED'), 0) AS cn_cancel
        FROM invoices i WHERE i.id = ?`,
     [invoiceId],
   )[0];
@@ -373,16 +390,32 @@ export function cancelReturnInHouse(
     oldValue: oldSnapshot,
     newValue: {
       status: 'REJECTED', reason: why, invoiceId, invoiceStatus,
-      reversedCreditNotes: deletedCnIds.length, removedCustomerCredits: deletedCcIds.length, cardFeeRestored: feeRestored,
+      reversedCreditNotes: cancelledCns.length, cancelledCreditNoteNumbers: cancelledCns.map((c) => c.number),
+      cancelledCustomerCredits: cancelledCcIds.length, cardFeeRestored: feeRestored,
     },
     actor: { userId: actor.userId, branchId },
   });
+  // …und je Gutschrift ein eigener Eintrag an IHRER Zeile: wer sie wann und warum storniert hat —
+  // auffindbar über die Gutschrift, nicht nur über die Retoure. Ebenso atomar.
+  for (const c of cancelledCns) {
+    logAuditOrThrow({
+      module: 'Sales',
+      entityType: 'credit_notes',
+      entityId: c.id,
+      action: 'STATUS_CHANGE',
+      field: 'status',
+      oldValue: 'ISSUED',
+      newValue: { status: 'CANCELLED', creditNoteNumber: c.number, returnId, reason: why, cancelledAt: now },
+      actor: { userId: actor.userId, branchId },
+    });
+  }
 
   // 9. Abgleich — in der Transaktion: ein Rollback verwirft auch diese Zeilen (`saveDatabase` wartet
   //    in einer offenen Transaktion auf deren Ende). Die Rechnung geht jetzt mit (Steuer, Status).
+  //    Gutschrift und Guthaben reisen als Änderung (volle Zeile mit Status), nicht als Löschung.
   trackChange('sales_returns', returnId, 'update', { status: 'REJECTED', cancelReason: why });
-  for (const cnId of deletedCnIds) trackChange('credit_notes', cnId, 'delete', {});
-  for (const ccId of deletedCcIds) trackChange('customer_credits', ccId, 'delete', {});
+  for (const c of cancelledCns) trackChange('credit_notes', c.id, 'update', { status: 'CANCELLED' });
+  for (const ccId of cancelledCcIds) trackChange('customer_credits', ccId, 'update', { status: 'CANCELLED' });
   if (feeExpenseId && feeRestored > 0.0005) trackChange('expenses', feeExpenseId, 'update', { cardFeeRestored: feeRestored });
   if (invoiceTouched) trackChange('invoices', invoiceId, 'update', {});
 
@@ -394,8 +427,9 @@ export function cancelReturnInHouse(
     status: 'REJECTED',
     revision: rev,
     invoiceStatus,
-    reversedCreditNotes: deletedCnIds.length,
-    removedCustomerCredits: deletedCcIds.length,
+    reversedCreditNotes: cancelledCns.length,
+    cancelledCreditNoteNumbers: cancelledCns.map((c) => c.number),
+    cancelledCustomerCredits: cancelledCcIds.length,
     cardFeeRestored: feeRestored,
   };
 }

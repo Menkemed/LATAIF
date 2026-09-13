@@ -85,10 +85,11 @@ function domainAR(branchId: string): number {
      WHERE i.branch_id = ? AND i.status = 'CANCELLED'`,
     [branchId]
   );
+  // R6E-CN — eine stornierte Gutschrift ist im Hauptbuch umgekehrt (AR wieder offen) → nicht abziehen.
   const cn = query(
     `SELECT COALESCE(SUM(receivable_cancel_amount), 0) AS t
      FROM credit_notes
-     WHERE branch_id = ?`,
+     WHERE branch_id = ? AND status != 'CANCELLED'`,
     [branchId]
   );
   return Number(inv[0]?.t || 0) - Number(activePay[0]?.t || 0) - Number(cancelledPay[0]?.t || 0) - Number(cn[0]?.t || 0);
@@ -172,10 +173,11 @@ function domainRevenue(branchId: string): number {
      WHERE i.branch_id = ? AND i.status != 'CANCELLED'`,
     [branchId]
   );
+  // R6E-CN — die Umsatzminderung einer stornierten Gutschrift ist im Hauptbuch umgekehrt.
   const cnRows = query(
     `SELECT COALESCE(SUM(total_amount - vat_amount), 0) AS t
      FROM credit_notes
-     WHERE branch_id = ?`,
+     WHERE branch_id = ? AND status != 'CANCELLED'`,
     [branchId]
   );
   return Number(invRows[0]?.t || 0) - Number(cnRows[0]?.t || 0);
@@ -204,10 +206,11 @@ function domainCustomerCredit(branchId: string): number {
   //   - DR(CUSTOMER_CREDIT) bei Einlösung (Invoice-Payment method='credit') über den Verbrauch
   // Domain-Spiegel = Σ (amount − used_amount) über ALLE Rows (USED trägt ~0 bei, exakt wie Ledger).
   // Domain > Ledger ⇒ Alt-Credits aus der Zeit VOR der Ledgerisierung (Backfill-Bedarf).
+  // R6E-CN — CANCELLED (Guthaben aus einer stornierten Gutschrift) ist im Hauptbuch umgekehrt → raus.
   const rows = query(
     `SELECT COALESCE(SUM(amount - used_amount), 0) AS t
      FROM customer_credits
-     WHERE branch_id = ?`,
+     WHERE branch_id = ? AND status != 'CANCELLED'`,
     [branchId]
   );
   return Number(rows[0]?.t || 0);

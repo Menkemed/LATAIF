@@ -84,7 +84,10 @@ export function reverseInvoiceInHouse(invoiceId: string, branchId: string, opts:
     const retouren = Number(query(
       `SELECT COUNT(*) AS c FROM sales_returns WHERE invoice_id = ? AND status != 'REJECTED'`, [invoiceId],
     )[0]?.c ?? 0);
-    const gutschriften = Number(query(`SELECT COUNT(*) AS c FROM credit_notes WHERE invoice_id = ?`, [invoiceId])[0]?.c ?? 0);
+    // R6E-CN — nur wirksame Gutschriften; eine stornierte hat keine Wirkung mehr (ihre Retoure ist REJECTED).
+    const gutschriften = Number(query(
+      `SELECT COUNT(*) AS c FROM credit_notes WHERE invoice_id = ? AND status != 'CANCELLED'`, [invoiceId],
+    )[0]?.c ?? 0);
     if (retouren > 0 || gutschriften > 0) {
       throw new InvoiceActionRejected(opts.requireNoReturns.code, opts.requireNoReturns.message);
     }

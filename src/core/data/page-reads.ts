@@ -52,8 +52,9 @@ export function invoiceListExtrasFor(ctx: BusinessReadContext): InvoiceListExtra
          - COALESCE(cn_totals.cancel_amount, 0)) > 0.005 THEN 1 ELSE 0 END), 0) AS cnt
      FROM invoices i
      LEFT JOIN (
+       -- R6E-CN: eine stornierte Gutschrift befreit keine Forderung mehr.
        SELECT invoice_id, SUM(receivable_cancel_amount) AS cancel_amount
-       FROM credit_notes GROUP BY invoice_id
+       FROM credit_notes WHERE status != 'CANCELLED' GROUP BY invoice_id
      ) cn_totals ON cn_totals.invoice_id = i.id
      WHERE i.branch_id = ? AND i.status NOT IN ('CANCELLED', 'DRAFT', 'FINAL', 'RETURNED')`,
     [ctx.branchId],
@@ -173,7 +174,7 @@ export function customerDetailReadsFor(ctx: BusinessReadContext, customerId: str
   const cnRows = query(
     `SELECT cn.invoice_id, COALESCE(SUM(cn.receivable_cancel_amount), 0) AS cancel_amount
        FROM credit_notes cn JOIN invoices i ON i.id = cn.invoice_id
-      WHERE i.customer_id = ? AND i.branch_id = ?
+      WHERE i.customer_id = ? AND i.branch_id = ? AND cn.status != 'CANCELLED'
       GROUP BY cn.invoice_id`,
     [customerId, ctx.branchId],
   );

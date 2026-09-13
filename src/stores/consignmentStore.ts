@@ -600,9 +600,11 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     // CN- + Sales-Return-Records, damit die Invoice-Cancel sauber durchlaufen kann.
     if (con.invoiceId) {
       try {
+        // R6E-CN — eine schon STORNIERTE Gutschrift (ihre Retoure ist REJECTED, Buchung umgekehrt)
+        // ist Historie; sie wird hier weder nochmals umgekehrt noch samt Retoure gelöscht.
         const cnRows = query(
           `SELECT id FROM credit_notes
-           WHERE invoice_id = ? AND reason LIKE ?`,
+           WHERE invoice_id = ? AND reason LIKE ? AND status != 'CANCELLED'`,
           [con.invoiceId, `Consignment post-sale return (${con.consignmentNumber})%`]
         );
         for (const row of cnRows) {

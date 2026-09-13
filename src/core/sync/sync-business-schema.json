@@ -199,6 +199,9 @@
       "record_id_field": "id",
       "allowed_fields": [
         "branch_id",
+        "cancel_reason",
+        "cancelled_at",
+        "cancelled_by",
         "cash_refund_amount",
         "created_at",
         "created_by",
@@ -212,6 +215,7 @@
         "receivable_cancel_amount",
         "refund_method",
         "sales_return_id",
+        "status",
         "total_amount",
         "vat_amount"
       ],

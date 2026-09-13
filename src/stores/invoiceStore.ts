@@ -443,8 +443,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // REVENUE/VAT/COGS/AR DOPPELT reversen (live bewiesen). Daher Ledger-Reverse
       // + Stock-Restore ueberspringen, sobald eine Credit-Note existiert. Die
       // strukturelle Entkopplung (Offer/Order/Auto-Expense) laeuft unabhaengig weiter.
+      // R6E-CN — nur WIRKSAME Gutschriften: eine stornierte ist samt Warenfolge schon zurückgedreht,
+      // die Rechnung braucht dann ihren vollen Storno (wie vorher, als die Zeile gelöscht wurde).
       const reversedByReturn =
-        (Number(query(`SELECT COUNT(*) c FROM credit_notes WHERE invoice_id = ?`, [id])[0]?.c) || 0) > 0;
+        (Number(query(`SELECT COUNT(*) c FROM credit_notes WHERE invoice_id = ? AND status != 'CANCELLED'`, [id])[0]?.c) || 0) > 0;
 
       // Phase 3 — Stock-Lots restoren: jede invoice_line gibt ihren Bestand zurueck.
       // Phase 7 Sync: products.quantity nach Restore nachziehen.
@@ -595,8 +597,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const activeReturns = Number(query(
       `SELECT COUNT(*) AS c FROM sales_returns WHERE invoice_id = ? AND status != 'REJECTED'`, [id]
     )[0]?.c || 0);
+    // R6E-CN — eine stornierte Gutschrift (ihre Retoure ist REJECTED) sperrt nicht mehr.
     const activeCreditNotes = Number(query(
-      `SELECT COUNT(*) AS c FROM credit_notes WHERE invoice_id = ?`, [id]
+      `SELECT COUNT(*) AS c FROM credit_notes WHERE invoice_id = ? AND status != 'CANCELLED'`, [id]
     )[0]?.c || 0);
     if (activeReturns > 0 || activeCreditNotes > 0) {
       const parts: string[] = [];

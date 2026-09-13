@@ -2207,6 +2207,16 @@ function runMigrations(database: Database): void {
        BEGIN
          UPDATE offers SET revision = revision + 1 WHERE id = OLD.offer_id;
        END`,
+    // CENTRAL-UI-PARITY R6E — eine ausgestellte Gutschrift wird storniert, nicht mehr geloescht.
+    // Sie ist eine Steuerurkunde mit eigener Nummer: nach "Cancel Return" bleibt sie mit Nummer,
+    // Betraegen und Verweisen stehen, traegt aber eindeutig ihren Storno (Status, wann, wer, warum).
+    // Das Vokabular ist das des Hauses (invoices/expenses/purchases/stock_lots: CANCELLED).
+    // Bestehende Zeilen werden ISSUED — genau das, was sie heute sind. Die Stornobuchung im
+    // Hauptbuch bleibt die finanzielle Wahrheit; jeder Leser der Summen filtert CANCELLED aus.
+    `ALTER TABLE credit_notes ADD COLUMN status TEXT NOT NULL DEFAULT 'ISSUED'`,
+    `ALTER TABLE credit_notes ADD COLUMN cancelled_at TEXT`,
+    `ALTER TABLE credit_notes ADD COLUMN cancelled_by TEXT`,
+    `ALTER TABLE credit_notes ADD COLUMN cancel_reason TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

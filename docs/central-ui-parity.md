@@ -2993,16 +2993,43 @@ wacht `watchLedgerPosts` — ein gescheiterter Post nimmt die ganze Handlung zur
   Absender (`created_by`) und Zeitpunkt entscheidet der Primary; nur anhängend, Idempotenz über die Kennung.
 
 **Bewusst belassen (Befunde, eigene Entscheidung nötig):**
-- Gutschriften (`credit_notes`) und unbenutztes Guthaben (`customer_credits`) aus der stornierten Retoure werden weiter
-  entfernt: `credit_notes` hat keine Statusspalte, und alle Leser zählen sie ungefiltert. Die Spur sind die
-  Stornobuchungen und der atomare Audit-Snapshot. Eine erhaltende Form braucht eine Schemaänderung
-  (`credit_notes.status` + Filter in rund 15 Lesern, `customer_credits` VOID) — nicht Teil von R6E.
-- `created_by` in Rechnung/Zahlung/Hauptbuch und `audit_log.changed_by` nennen bei Fernaufträgen außerhalb von
-  Retourenstorno und Nachrichtenprotokoll weiterhin die Anmeldung am Primary (`currentUserId()` in den alten
-  Store-Schreibern) — ein Querschnittsthema aller Fernbuchungen seit C3B.
+- (Beide früheren Befunde — Gutschrift beim Retourenstorno gelöscht, Urheber von Fernbuchungen = Anmeldung am Primary —
+  sind im Audit-Integrity-Gate unten behoben.)
 - Angebot rechnet mit dem Filial-MwSt-Satz, die Rechnung mit `vatRateFor(scheme)` (bei Standard 10 % identisch).
 - Eine als Store-Guthaben erstattete Retoure bleibt unstornierbar (Sperre „refund paid"); nach dem Storno einer Retoure an
   einer unbezahlten Rechnung steht der Artikel auf „sold" statt „reserved" (`revertDisposition`).
+
+### Audit-Integrity-Gate (13.09.2026)
+
+**Absender von Fernbuchungen** (`CENTRAL_UI_REMOTE_ACTOR_ATTRIBUTION_PROVED`). Befund, systemisch seit C3B: jede
+Fernbuchung, deren Hausfolge über die alten Store-Schreiber läuft (Rechnung, Zahlung, Gutschrift, Retoure, Auftrag,
+Kommission, Reparatur, Transfer, Einkauf — C3B bis C3H, R5*, R5F.1 und die R6E-Rechnungswege), schrieb `created_by`,
+`ledger_entries.created_by` und `audit_log.changed_by` mit `currentUserId()` — also mit der ANMELDUNG AM PRIMARY, nicht
+mit dem geprüften Absender von PC2. Die R6C/R6D-Hausfolgen mit eigenem Kontext aus `identity` waren schon richtig.
+**Behoben an EINER Stelle**, nicht je Befehl: `runRemoteCommand` führt den Handler im Namen von `identity.userId` aus
+(`core/auth/acting-user`), `currentUserId()` fragt zuerst den laufenden Fernauftrag, sonst die Anmeldung am Primary.
+Lokale Handlung am Primary → Anmeldung am Primary; Fernauftrag → authentifizierter Absender; kein Rumpf nennt den Urheber
+(`createdBy`/`userId`/`created_by`/`actor` werden abgewiesen). Nach Erfolg, Urteil oder Störung — auch über ein `await`
+hinweg — gilt wieder die Anmeldung am Primary. **Alte Zeilen bleiben unverändert**: ihre wirkliche Urheberschaft ist
+nicht beweisbar (der durable Nachweis nennt den Absender, aber nicht jede daraus entstandene Zeile), also wird nichts
+nachträglich umgeschrieben.
+
+**Gutschrift beim Retourenstorno** (`CENTRAL_UI_R6E_CREDIT_NOTE_REVERSAL_PROVED`). Eine ausgestellte Gutschrift wird nicht
+mehr gelöscht: Migration `credit_notes.status` (`ISSUED`/`CANCELLED`, Vokabular wie Rechnung/Ausgabe/Einkauf) mit
+`cancelled_at`, `cancelled_by`, `cancel_reason`; unbenutztes Guthaben daraus wird `customer_credits.status = 'CANCELLED'`.
+Nummer und Identität bleiben; die Hauptbuch-Umkehr (`CREDIT_NOTE`) bleibt die finanzielle Wahrheit; je Gutschrift ein
+eigener Protokolleintrag (Mensch und Zeit) in derselben Transaktion; der Abgleich trägt die Zeilen als Änderung.
+Alle Leser geprüft: Summen und Zählungen (offener Betrag, Kundensaldo und -guthaben, Forderungen, Abstimmung,
+Gegenpartei-Prüfung, Deckel neuer Gutschriften, Rechnungsstorno M-04, Guard B, `requireNoReturns`, Nachbuchung,
+Kommissions-Storno, Rechnungsseite) lassen `CANCELLED` weg — dieselbe Wirkung wie früher das Löschen; Steuer/Quartal/NBR
+lesen `credit_notes` gar nicht (MwSt aus `invoices.vat_amount`, das der Storno wiederherstellt). Liste und Detail zeigen
+die stornierte Gutschrift sichtbar markiert; Löschen einer stornierten Gutschrift ist gesperrt. Wiederholung → genau
+einmal (fern eingefrorenes `RETURN_ALREADY_CANCELLED`); Fehlerinjektion an Status, Guthaben, Protokoll, Buchung → nichts.
+
+**Zwei verschiedene Benutzer, zwei echte Anwendungen** (`CENTRAL_UI_R6E_DISTINCT_ACTOR_E2E_PROVED`): Primary als A, PC2 als
+B — Rechnung mit Zahlung, Teilzahlung auf eine offene Rechnung, Retourenstorno. Wirkung gleich; alle neuen Urheber-Spalten
+und Protokolleinträge der PC2-Handlung = B, der Primary-Handlung = A; der Primary bleibt als A angemeldet; ein Rumpf mit
+fremdem Urheber wird abgewiesen; PC2 bleibt ohne Datenbank. Ergebnis: 123/0 (1m 32s; Primary user-owner, PC2 user-r6e-b).
 
 ### Befehlsmodell, Rechte und Sicherheit (`CENTRAL_UI_R6E_AUTHORITY_PROVED`)
 
@@ -3017,10 +3044,11 @@ direkte Statusinjektion, unzulässige Übergänge und Stornozustände, fremder b
 ### Beweise
 
 ```
-Unit    r6e/offer 168/0 · r6e/invoice-lifecycle 134/0 · r6e/reversal 145/0 · r6e/message-log 98/0 · r6e/final-gate 99/0
+Unit    r6e/offer 168/0 · r6e/invoice-lifecycle 134/0 · r6e/reversal 146/0 · r6e/message-log 98/0 · r6e/final-gate 99/0
+        r6e/actor-attribution 37/0 · r6e/credit-note-reversal 136/0 (Audit-Integrity-Gate)
 Nachbarn r6d/r6c final-gate · r6b · r5c/r5d/r5e/r5f · c3g/c4/c6 · bridge invoice/remote-create/financial/lifecycle/service/write-foundation/client-ui · uiparity r1/r2c/r3/r4b/r4c — 41 Dateien grün
-Rust    cargo test --lib bridge 37/0 · sync_schema 8/0 · manifest-drift 1439/1439 · TS app/node 0 · Lint-Delta 0
-Two-App test/e2e/r6e-sales-offers-invoice.e2e.mjs 386/0 (4m 26s; auf dem Stand aller Produktänderungen gebaut)
+Rust    cargo test --lib bridge 37/0 · sync_schema 8/0 · manifest-drift 1443/1443 · TS app/node 0 · Lint-Delta 0
+Two-App test/e2e/r6e-sales-offers-invoice.e2e.mjs 386/0 (4m 26s) · Zwei-Benutzer test/e2e/r6e-actor-attribution.e2e.mjs 123/0 (1m 32s; Primary user-owner, PC2 user-r6e-b)
 ```
 
 ### Stand der R6A-SSOT nach R6E (`CENTRAL_UI_R6E_SSOT_UPDATED`)

@@ -38,13 +38,17 @@ export function CreditNoteList() {
     });
   }, [creditNotes, customers, invoices, search]);
 
-  const totalCash = creditNotes.reduce((s, cn) => s + (cn.cashRefundAmount || 0), 0);
-  const totalCancel = creditNotes.reduce((s, cn) => s + (cn.receivableCancelAmount || 0), 0);
+  // R6E-CN \u2014 eine stornierte Gutschrift bleibt in der Liste (Historie, markiert), z\u00e4hlt aber in
+  // keiner Summe mehr: ihre Erstattung und ihre Forderungsminderung sind im Hauptbuch umgekehrt.
+  const wirksam = creditNotes.filter(cn => cn.status !== 'CANCELLED');
+  const cancelledCount = creditNotes.length - wirksam.length;
+  const totalCash = wirksam.reduce((s, cn) => s + (cn.cashRefundAmount || 0), 0);
+  const totalCancel = wirksam.reduce((s, cn) => s + (cn.receivableCancelAmount || 0), 0);
 
   return (
     <PageLayout
       title="Credit Notes"
-      subtitle={`${creditNotes.length} credit note${creditNotes.length === 1 ? '' : 's'} \u00b7 ${fmt(totalCash)} BHD cash refunded \u00b7 ${fmt(totalCancel)} BHD receivable cancelled`}
+      subtitle={`${creditNotes.length} credit note${creditNotes.length === 1 ? '' : 's'}${cancelledCount > 0 ? ` (${cancelledCount} cancelled)` : ''} \u00b7 ${fmt(totalCash)} BHD cash refunded \u00b7 ${fmt(totalCancel)} BHD receivable cancelled`}
       showSearch onSearch={setSearch} searchPlaceholder="Search CN-, INV-, customer..."
     >
       {filtered.length === 0 ? (
@@ -67,17 +71,27 @@ export function CreditNoteList() {
           {filtered.map(cn => {
             const cust = customers.find(c => c.id === cn.customerId);
             const inv = invoices.find(i => i.id === cn.invoiceId);
+            const cancelled = cn.status === 'CANCELLED';
             return (
               <div key={cn.id} className="cursor-pointer transition-colors"
+                data-credit-note-row={cn.id} data-credit-note-status={cn.status || 'ISSUED'}
                 onClick={() => navigate(`/credit-notes/${cn.id}`)}
                 style={{
                   display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr) minmax(0,1.2fr) minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr)',
                   gap: 14, padding: '14px 16px', alignItems: 'center',
                   borderBottom: '1px solid rgba(229,225,214,0.6)',
+                  opacity: cancelled ? 0.6 : 1,
                 }}
                 onMouseEnter={ev => (ev.currentTarget.style.background = 'rgba(15,15,16,0.03)')}
                 onMouseLeave={ev => (ev.currentTarget.style.background = 'transparent')}>
-                <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{cn.creditNoteNumber}</span>
+                <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {cn.creditNoteNumber}
+                  {cancelled && (
+                    <span data-credit-note-cancelled style={{ marginLeft: 6, fontSize: 10, color: '#DC2626', padding: '1px 6px', borderRadius: 999, border: '1px solid rgba(220,38,38,0.3)', background: 'rgba(220,38,38,0.06)' }}>
+                      CANCELLED
+                    </span>
+                  )}
+                </span>
                 <span style={{ fontSize: 12, color: '#4B5563' }}>{fmtDate(cn.issuedAt)}</span>
                 <span className="font-mono" style={{ fontSize: 11, color: '#3D7FFF', display: 'inline-flex', alignItems: 'center', gap: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {inv ? formatInvoiceDisplayShort(inv) : cn.invoiceId.slice(0, 8)}
@@ -86,8 +100,8 @@ export function CreditNoteList() {
                 <span style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                   {cust ? `${cust.firstName} ${cust.lastName}`.trim() || cust.company || '\u2014' : '\u2014'}
                 </span>
-                <span className="font-mono" style={{ fontSize: 13, color: cn.cashRefundAmount > 0 ? '#DC2626' : '#6B7280', textAlign: 'right' }}><Bhd v={cn.cashRefundAmount}/></span>
-                <span className="font-mono" style={{ fontSize: 13, color: cn.receivableCancelAmount > 0 ? '#FF8730' : '#6B7280', textAlign: 'right' }}><Bhd v={cn.receivableCancelAmount}/></span>
+                <span className="font-mono" style={{ fontSize: 13, color: !cancelled && cn.cashRefundAmount > 0 ? '#DC2626' : '#6B7280', textAlign: 'right', textDecoration: cancelled ? 'line-through' : undefined }}><Bhd v={cn.cashRefundAmount}/></span>
+                <span className="font-mono" style={{ fontSize: 13, color: !cancelled && cn.receivableCancelAmount > 0 ? '#FF8730' : '#6B7280', textAlign: 'right', textDecoration: cancelled ? 'line-through' : undefined }}><Bhd v={cn.receivableCancelAmount}/></span>
               </div>
             );
           })}

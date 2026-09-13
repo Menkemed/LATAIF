@@ -149,7 +149,8 @@ export function InvoiceDetail() {
   function derivedInvoiceLabel(inv: { status: string; grossAmount: number; paidAmount: number; id: string }): string {
     if (inv.status === 'CANCELLED') return 'Cancelled';
     if (inv.status === 'DRAFT') return 'Pending';
-    const credited = (creditNotes || []).filter(cn => cn.invoiceId === inv.id).reduce((s, cn) => s + (cn.totalAmount || 0), 0);
+    // R6E-CN — eine stornierte Gutschrift mindert nichts mehr (ihre Buchung ist umgekehrt).
+    const credited = (creditNotes || []).filter(cn => cn.invoiceId === inv.id && cn.status !== 'CANCELLED').reduce((s, cn) => s + (cn.totalAmount || 0), 0);
     const effGross = Math.max(0, inv.grossAmount - credited);
     if (effGross < 0.01 && credited > 0) return 'Credited';
     if (inv.paidAmount >= effGross - 0.01) return 'Paid';
@@ -214,7 +215,8 @@ export function InvoiceDetail() {
 
   // Industry-Standard: Outstanding berücksichtigt Credit Notes — was per CN storniert wurde
   // ist keine Forderung mehr.
-  const creditedTotal = (creditNotes || []).filter(cn => cn.invoiceId === invoice.id).reduce((s, cn) => s + (cn.totalAmount || 0), 0);
+  // R6E-CN — nur wirksame Gutschriften; eine stornierte bleibt Historie ohne Wirkung auf den Rest.
+  const creditedTotal = (creditNotes || []).filter(cn => cn.invoiceId === invoice.id && cn.status !== 'CANCELLED').reduce((s, cn) => s + (cn.totalAmount || 0), 0);
   const effectiveGross = Math.max(0, invoice.grossAmount - creditedTotal);
   const remaining = Math.max(0, effectiveGross - invoice.paidAmount);
   // Customer-Credit UI-Slice 1 — offenes Store-Guthaben des Kunden (Σ amount-used_amount,

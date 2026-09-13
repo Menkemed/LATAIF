@@ -55,16 +55,17 @@ import { localReadContext, type BusinessReadContext } from '@/core/data/read-con
 // nach jedem CN-UPDATE noetig ist.
 function repostCreditNoteFromCnId(cnId: string, occurredAt: string): void {
   try {
-    // v0.7.3 — credit_notes hat keine status-Spalte (siehe Schema in database.ts).
-    // Vorher selectierten wir status, was 'no such column' warf und repost still ueberging.
+    // v0.7.3 — credit_notes hatte keine status-Spalte; seit R6E-CN hat sie eine (ISSUED/CANCELLED).
     const cnRow = query(
       `SELECT id, credit_note_number, branch_id, customer_id, invoice_id, sales_return_id,
               total_amount, vat_amount, cash_refund_amount, receivable_cancel_amount,
-              refund_method, reason, notes, issued_at, created_at
+              refund_method, reason, notes, issued_at, created_at, status
          FROM credit_notes WHERE id = ?`,
       [cnId]
     )[0];
     if (!cnRow) return;
+    // R6E-CN — eine stornierte Gutschrift wird nie neu gebucht (ihr Storno bliebe sonst wirkungslos).
+    if (String(cnRow.status ?? 'ISSUED') === 'CANCELLED') return;
     if (hasLedgerEntries('CREDIT_NOTE', cnId) && !hasReversalFor('CREDIT_NOTE', cnId)) {
       reverseSource('CREDIT_NOTE', cnId, occurredAt);
     }
@@ -479,9 +480,11 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     // Nach CN-Erstellung: wenn effektives Invoice-Outstanding (gross - paid - Σ CN.cancel) = 0,
     // Invoice auf RETURNED setzen (Forderung vollständig durch Return abgedeckt).
     try {
+      // R6E-CN — nur wirksame Gutschriften decken die Forderung (eine stornierte nicht mehr).
       const invCheck = query(
         `SELECT i.gross_amount, i.paid_amount,
-                COALESCE((SELECT SUM(cn.receivable_cancel_amount) FROM credit_notes cn WHERE cn.invoice_id = i.id), 0) AS cn_cancel
+                COALESCE((SELECT SUM(cn.receivable_cancel_amount) FROM credit_notes cn
+                           WHERE cn.invoice_id = i.id AND cn.status != 'CANCELLED'), 0) AS cn_cancel
          FROM invoices i WHERE i.id = ?`,
         [r.invoiceId]
       )[0];
@@ -576,10 +579,11 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     // 'credit' ohne Domain-Row nicht durch: der Repost buchte CR CUSTOMER_CREDIT, aber
     // die einlösbare Row entsteht nur in createCreditNote (Phantom-Guthaben, L-01).
     // Sauberer Weg bei gewünschtem Cash: Return löschen (baut Credit-Row ab) + neu anlegen.
+    // R6E-CN — nur ein WIRKSAMES Guthaben einer wirksamen Gutschrift zählt (CANCELLED ist Historie).
     const ccRows = query(
       `SELECT cc.id FROM customer_credits cc
          JOIN credit_notes cn ON cn.id = cc.source_id AND cc.source_type = 'sales_return'
-        WHERE cn.sales_return_id = ? LIMIT 1`,
+        WHERE cn.sales_return_id = ? AND cn.status != 'CANCELLED' AND cc.status != 'CANCELLED' LIMIT 1`,
       [returnId]
     );
     const hasStoreCredit = ccRows.length > 0;
@@ -628,8 +632,9 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
 
     // CN-Sync: cashRefund/receivableCancel-Split nachziehen.
     try {
+      // R6E-CN — eine stornierte Gutschrift wird nicht nachgezogen (und nie neu gebucht).
       const cnRows = query(
-        `SELECT id, total_amount FROM credit_notes WHERE sales_return_id = ? LIMIT 1`,
+        `SELECT id, total_amount FROM credit_notes WHERE sales_return_id = ? AND status != 'CANCELLED' LIMIT 1`,
         [returnId]
       );
       if (cnRows.length > 0) {
@@ -693,7 +698,8 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     try {
       const invCheck = query(
         `SELECT i.gross_amount, i.paid_amount, i.status AS inv_status,
-                COALESCE((SELECT SUM(cn.receivable_cancel_amount) FROM credit_notes cn WHERE cn.invoice_id = i.id), 0) AS cn_cancel
+                COALESCE((SELECT SUM(cn.receivable_cancel_amount) FROM credit_notes cn
+                           WHERE cn.invoice_id = i.id AND cn.status != 'CANCELLED'), 0) AS cn_cancel
          FROM invoices i WHERE i.id = ?`,
         [r.invoiceId]
       )[0];

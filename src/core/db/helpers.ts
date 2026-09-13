@@ -5,6 +5,7 @@
 
 import { getDatabase } from './database';
 import { authService } from '../auth/auth';
+import { actingUserId } from '../auth/acting-user';
 
 /**
  * Execute a SELECT and return rows as objects.
@@ -31,9 +32,13 @@ export function currentBranchId(): string {
 
 /**
  * Get current user ID.
+ *
+ * CENTRAL-UI-PARITY R6E — während ein Fernauftrag läuft, ist das der AUTHENTIFIZIERTE Absender (von
+ * `runRemoteCommand` gesetzt), sonst die Anmeldung am Primary. Rechnung, Zahlung, Hauptbuch und
+ * Protokoll fragen alle hier — der Urheber einer Buchung von PC2 ist damit PC2s Benutzer.
  */
 export function currentUserId(): string {
-  return authService.getCurrentUserId();
+  return actingUserId() ?? authService.getCurrentUserId();
 }
 
 /**

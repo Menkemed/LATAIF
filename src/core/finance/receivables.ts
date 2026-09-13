@@ -83,8 +83,9 @@ export function receivablesBreakdown(branchId?: string): ReceivableRow[] {
        JOIN invoices i  ON i.id = cs.invoice_id
        JOIN customers c ON c.id = i.customer_id
        LEFT JOIN (
+         -- R6E-CN: eine stornierte Gutschrift befreit keine Forderung mehr.
          SELECT invoice_id, SUM(receivable_cancel_amount) AS cancel_amount
-         FROM credit_notes GROUP BY invoice_id
+         FROM credit_notes WHERE status != 'CANCELLED' GROUP BY invoice_id
        ) cn ON cn.invoice_id = i.id
       WHERE cs.invoice_id IS NOT NULL
         AND i.status NOT IN ('CANCELLED', 'DRAFT', 'RETURNED')
@@ -132,8 +133,9 @@ export function receivablesBreakdown(branchId?: string): ReceivableRow[] {
        FROM invoices i
        JOIN customers c ON c.id = i.customer_id
        LEFT JOIN (
+         -- R6E-CN: eine stornierte Gutschrift befreit keine Forderung mehr.
          SELECT invoice_id, SUM(receivable_cancel_amount) AS cancel_amount
-         FROM credit_notes GROUP BY invoice_id
+         FROM credit_notes WHERE status != 'CANCELLED' GROUP BY invoice_id
        ) cn ON cn.invoice_id = i.id
        LEFT JOIN consignments cs ON cs.invoice_id = i.id
       WHERE cs.id IS NULL

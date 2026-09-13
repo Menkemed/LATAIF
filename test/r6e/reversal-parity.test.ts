@@ -359,8 +359,10 @@ marker('CENTRAL_UI_R6E_REVERSAL_SCOPE_PROVED');
   `PARITY lokal == fern: Retoure, Rechnung, Buchungen, Salden, Lose, Stück (${diff.join(' · ') || 'gleich'})`);
   ok(bildR.retoure.status === 'REJECTED' && n(wR.db, 'SELECT COUNT(*) FROM sales_return_lines') === 1,
     'CANCEL die Retoure bleibt als REJECTED stehen — samt Zeile (Historie)');
-  ok(bildR.gutschriften === 0 && n(wR.db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'CREDIT_NOTE' AND reverses_entry_id IS NOT NULL") > 0,
-    'CANCEL die Gutschrift ist im Hauptbuch storniert und als Zeile fort (credit_notes kennt keinen Status — s. Bericht)');
+  // R6E-CN — vorher: `gutschriften === 0` (Zeile gelöscht). Jetzt bleibt sie als CANCELLED stehen.
+  ok(bildR.gutschriften === 1 && n(wR.db, "SELECT COUNT(*) FROM credit_notes WHERE status = 'CANCELLED'") === 1
+    && n(wR.db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'CREDIT_NOTE' AND reverses_entry_id IS NOT NULL") > 0,
+  'CANCEL die Gutschrift ist im Hauptbuch storniert und bleibt als CANCELLED-Zeile stehen (Nummer belegt)');
   ok(n(wR.db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'SALES_RETURN_COGS' AND reverses_entry_id IS NOT NULL") > 0,
     'CANCEL der Wareneinsatz der Retoure ist zurückgedreht');
   ok(Number(bildR.rechnung.vat_amount) === 100, `CANCEL die Steuer der Rechnung ist wieder da (${S(bildR.rechnung.vat_amount)})`);
@@ -433,10 +435,14 @@ marker('CENTRAL_UI_R6E_RETURN_CANCEL_REPLAY_PROVED');
   const wC2 = retourenWelt({ bezahlt: 1100, methode: 'credit' });
   const rC = await fern(() => rev.runReturnCancel(deps(wC2.db), identity('402', 'returns.cancel'), stornoRumpf(wC2)));
   const ccNach = n(wC2.db, "SELECT COALESCE(ROUND(SUM(CASE WHEN direction='CREDIT' THEN amount ELSE -amount END), 3), 0) FROM ledger_entries WHERE account = 'CUSTOMER_CREDIT'");
-  ok(pC.ok && rC.ok && n(wC.db, 'SELECT COUNT(*) FROM customer_credits') === 0 && n(wC2.db, 'SELECT COUNT(*) FROM customer_credits') === 0,
-    `CREDIT das unbenutzte Guthaben ist fort — auf beiden Wegen (${pC.code || 'ok'} / ${rC.code || 'ok'})`);
+  // R6E-CN — vorher: COUNT(*) === 0 (Zeile gelöscht). Jetzt: die Zeile bleibt, CANCELLED, nicht einlösbar.
+  const ccStorniert = (db: Db): string => all(db, "SELECT status, used_amount FROM customer_credits WHERE source_type = 'sales_return'");
+  ok(pC.ok && rC.ok && ccStorniert(wC.db) === S([['CANCELLED', 0]]) && ccStorniert(wC2.db) === S([['CANCELLED', 0]])
+    && n(wC2.db, "SELECT COUNT(*) FROM customer_credits WHERE status = 'OPEN'") === 0,
+  `CREDIT das unbenutzte Guthaben ist CANCELLED (nicht mehr einlösbar) — auf beiden Wegen (${pC.code || 'ok'} / ${rC.code || 'ok'})`);
   ok(ccVor === 1100 && Math.abs(ccNach) < 0.0005, `CREDIT …und seine Buchung (CUSTOMER_CREDIT ${ccVor} → ${ccNach})`);
-  ok(Number(rC.value.removedCustomerCredits) === 1 && S(retourenBild(wC).salden) === S(retourenBild(wC2).salden),
+  // R6E-CN — vorher: `removedCustomerCredits === 1`; das Ergebnis heißt jetzt, was geschieht.
+  ok(Number(rC.value.cancelledCustomerCredits) === 1 && S(retourenBild(wC).salden) === S(retourenBild(wC2).salden),
     'CREDIT lokal == fern: dieselben Salden');
 
   // Verbraucht: der Wert floss schon auf eine andere Rechnung.
@@ -627,8 +633,13 @@ async function undoWelt(weg: 'primary' | 'fern') {
   ok(s(R.db, "SELECT counterparty_id FROM ledger_entries WHERE source_module = 'AGENT_TRANSFER_SOLD' AND account = 'ACCOUNTS_RECEIVABLE' ORDER BY rowid DESC LIMIT 1") === 'cust-1',
     'LEDGER …an denselben Kunden wie der Verkauf (nicht an den Rechnungskunden)');
   ok(balanced(P.db) && balanced(R.db), 'LEDGER jede Buchung gleicht sich aus');
-  const invP = ohne(row(P.db, 'SELECT * FROM invoices WHERE id = ?', [P.invId]));
-  const invR = ohne(row(R.db, 'SELECT * FROM invoices WHERE id = ?', [R.invId]));
+  // Audit-Integrity-Gate — der Urheber unterscheidet sich GEWOLLT: lokal die Anmeldung am Primary, fern
+  // der geprüfte Absender (zentrale Absender-Zuordnung, test/r6e/actor-attribution). Die Wirkung ist gleich.
+  ok(one(P.db, 'SELECT created_by FROM invoices WHERE id = ?', [P.invId]) === 'user-test'
+    && one(R.db, 'SELECT created_by FROM invoices WHERE id = ?', [R.invId]) === 'user-pc2',
+  'ACTOR die Rechnung der Umwandlung gehört lokal der Anmeldung am Primary, fern dem Absender');
+  const invP = ohne(row(P.db, 'SELECT * FROM invoices WHERE id = ?', [P.invId]), ['created_by']);
+  const invR = ohne(row(R.db, 'SELECT * FROM invoices WHERE id = ?', [R.invId]), ['created_by']);
   ok(unterschiede(invP, invR).length === 0 && buchungen(P.db) === buchungen(R.db),
     `PARITY lokal == fern: stornierte Rechnung und Buchungen (${unterschiede(invP, invR).join(' · ') || 'gleich'})`);
   ok(R.undo.value.invoiceStatus === 'CANCELLED' && R.undo.value.invoiceReversed === true && Number(R.undo.value.receivablesRestored) === 1

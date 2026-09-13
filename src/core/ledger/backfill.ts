@@ -323,6 +323,9 @@ export function backfillCreditNotes(branchId: string): BackfillResult {
   res.total = rows.length;
   for (const r of rows) {
     const id = r.id as string;
+    // R6E-CN — eine STORNIERTE Gutschrift bucht nie (wieder), auch wenn sie als Alt-Beleg nie
+    // ledgerisiert war: sonst hätte der Storno eine Wirkung erzeugt statt aufgehoben.
+    if (String(r.status ?? 'ISSUED') === 'CANCELLED') { res.skipped++; continue; }
     // Skip, sobald JE ledgerisiert (auch reversiert) — eine via cancelReturn reversierte CN
     // darf nicht erneut gepostet werden. hasLedgerEntries liefert bei reversierten false.
     if (hasAnyLedgerEntries('CREDIT_NOTE', id)) { res.skipped++; continue; }
@@ -889,7 +892,8 @@ export function cleanupOrphanedConsignmentReturnCN(branchId: string): BackfillRe
      JOIN invoices i ON i.id = cn.invoice_id
      WHERE cn.branch_id = ?
        AND cn.reason LIKE 'Consignment post-sale return%'
-       AND i.status = 'CANCELLED'`,
+       AND i.status = 'CANCELLED'
+       AND cn.status != 'CANCELLED'`,
     [branchId]
   );
 

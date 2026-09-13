@@ -41,6 +41,7 @@ import type { SqlDb } from '../sync/apply-change';
 import { lookupCommand, recordCommand, type CommandIdentity, type CommandRecord } from './command-ledger';
 import { ensureDurable, requireDurable } from './durability-state';
 import { assertTransactionHealthy, markTransactionUnhealthy } from '../db/transaction-health';
+import { withActingUser } from '../auth/acting-user';
 
 /**
  * Das endgültige fachliche Nein der Domäne: die Operation wurde ausgewertet und beurteilt.
@@ -143,7 +144,10 @@ export async function runRemoteCommand(
       replayed = true;
       record = seen.record;
     } else {
-      const value = await handler(db);
+      // R6E — der Handler läuft im Namen des AUTHENTIFIZIERTEN Absenders: jede Geschäftszeile, die er
+      // über `currentUserId()` schreibt (Rechnung, Zahlung, Hauptbuch, Protokoll), gehört ihm — nicht
+      // dem, der gerade am Primary angemeldet ist. Danach gilt wieder die Anmeldung am Primary.
+      const value = await withActingUser(identity.userId, () => handler(db));
       record = { status: 'completed', identity, result: value ?? null };
       recordCommand(db, record, deps.now());
     }

@@ -64,6 +64,11 @@ function rowToCN(row: Record<string, unknown>): CreditNote {
     notes: (row.notes as string | undefined) || undefined,
     createdAt: row.created_at as string,
     createdBy: (row.created_by as string | undefined) || undefined,
+    // R6E-CN — der Storno reist mit: Liste und Detail zeigen die Gutschrift als Historie, klar markiert.
+    status: (row.status as CreditNote['status']) || 'ISSUED',
+    cancelledAt: (row.cancelled_at as string | null) || undefined,
+    cancelledBy: (row.cancelled_by as string | null) || undefined,
+    cancelReason: (row.cancel_reason as string | null) || undefined,
   };
 }
 
@@ -106,8 +111,9 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
     const invRow = query('SELECT gross_amount FROM invoices WHERE id = ?', [input.invoiceId])[0];
     const invGross = (invRow?.gross_amount as number) || 0;
     if (invGross > 0) {
+      // R6E-CN — eine stornierte Gutschrift gibt ihren Anteil am Deckel frei (wie vorher das Löschen).
       const existingRow = query(
-        'SELECT COALESCE(SUM(total_amount), 0) AS s FROM credit_notes WHERE invoice_id = ?',
+        `SELECT COALESCE(SUM(total_amount), 0) AS s FROM credit_notes WHERE invoice_id = ? AND status != 'CANCELLED'`,
         [input.invoiceId]
       )[0];
       const existingTotal = Number(existingRow?.s || 0);
@@ -153,7 +159,7 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
       totalAmount: input.totalAmount, vatAmount: input.vatAmount,
       cashRefundAmount: input.cashRefundAmount, receivableCancelAmount: input.receivableCancelAmount,
       refundMethod: input.refundMethod, reason: input.reason, notes: input.notes,
-      createdAt: now, createdBy: userId || undefined,
+      createdAt: now, createdBy: userId || undefined, status: 'ISSUED',
     };
     set(state => ({ creditNotes: [cn, ...state.creditNotes] }));
 
@@ -189,6 +195,13 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
 
   deleteCreditNote: (id) => {
     const db = getDatabase();
+
+    // R6E-CN — eine STORNIERTE Gutschrift ist die Spur ihres Stornos (Nummer, wann, wer, warum);
+    // ihre Buchung ist schon umgekehrt. Sie zu löschen hieße, genau diese Spur zu vernichten.
+    const stRow = query('SELECT status FROM credit_notes WHERE id = ?', [id])[0];
+    if (stRow && String(stRow.status) === 'CANCELLED') {
+      throw new Error('This credit note is cancelled — it stays on record as a historical document.');
+    }
 
     // Credit-Modell Slice 3.5 / B2 — Guard GANZ OBEN: ein CN darf NICHT geloescht werden, wenn
     // das daraus entstandene Store-Guthaben bereits (teil-)eingeloest wurde (used_amount>0).
