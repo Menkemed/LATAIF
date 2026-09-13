@@ -174,7 +174,7 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
   // CENTRAL-C3H hat die sechzehn in C3G als `B_DEFERRED` klassifizierten Aktionen freigeschaltet.
   // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
-  ok(list.length === 80, `SCOPE genau 80 Mutationen (R6D) (${list.length})`);
+  ok(list.length === 88, `SCOPE genau 88 Mutationen (R6E) (${list.length})`);
   for (const op of ['repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned']) {
     ok(list.includes(op), `SCOPE ${op} steht namentlich auf der Liste`);
   }
@@ -182,7 +182,8 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
     'transfers.convert_to_invoice']) {
     ok(list.includes(op), `SCOPE ${op} ist seit C3H freigegeben`);
   }
-  for (const op of ['repairs.delete', 'transfers.delete', 'transfers.undo_convert',
+  // R6E — `transfers.undo_convert` ist seither freigegeben (Rechnungsstorno statt Löschen).
+  for (const op of ['repairs.delete', 'transfers.delete',
     'repairs.action', 'transfers.action', 'repairs.set_status']) {
     ok(!list.includes(op), `SCOPE ${op} bleibt fail-closed`);
   }

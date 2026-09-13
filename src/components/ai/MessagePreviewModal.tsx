@@ -1,11 +1,19 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Copy, RefreshCw, Download, Send, Sparkles } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
-import { useCustomerMessageStore } from '@/stores/customerMessageStore';
-import { readsFromPrimary } from '@/core/data/primary-source';
+import { logCustomerMessageOnPrimary } from '@/stores/customerMessageStore';
+import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
+import {
+  messageLogInput, type LoggedChannel, type MessageKind, type MessageLogInput,
+} from '@/core/customers/message-house';
 
-export type MessageType = 'follow_up' | 'repair_ready' | 'order_arrived' | 'promotion' | 'thank_you';
+// Der Name des geprüften Fernbefehls (`bridge/message-commands.ts`). Hier als Wert, nicht als
+// Import: die Oberfläche lädt die Befehlsdatei nicht (sie meldet beim Laden ihren Handler an).
+const OP_CUSTOMERS_LOG_MESSAGE = 'customers.log_message';
+
+// Die Nachrichtenarten wohnen im Haus — dieselbe Liste, die das Protokoll annimmt.
+export type MessageType = MessageKind;
 
 interface Props {
   open: boolean;
@@ -49,25 +57,50 @@ export function MessagePreviewModal({
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [type, setType] = useState<MessageType>(initialType);
-  const { logMessage } = useCustomerMessageStore();
-
   const waNumber = sanitizePhone(customerWhatsapp || customerPhone);
 
-  // CENTRAL-UI-PARITY R6B — kein Schein-Erfolg beim Protokoll. Kopieren und WhatsApp gehen immer;
-  // ob die Nachricht in der Kundenhistorie steht, wird GESAGT: auf einem Rechner ohne Datenbank gibt
-  // es dort (noch) keinen Eintrag, und ein gescheiterter Eintrag am Primary wird nicht verschwiegen.
+  // CENTRAL-UI-PARITY R6B/R6E — kein Schein-Erfolg beim Protokoll. Kopieren und WhatsApp gehen
+  // immer; der Eintrag in der Kundenhistorie ist die EINE Schreibhandlung dieser Maske und läuft auf
+  // beiden Rechnern über denselben Anschluss: am Primary die Hausfolge (`runOnPrimary`), auf PC2 der
+  // geprüfte Fernbefehl `customers.log_message`. „Added" steht nur nach einem echten Erfolg; jeder
+  // andere Ausgang wird mit seinem Grund gesagt (R6B sagte auf PC2 nur „not logged").
+  const logWrite = useSharedWrite<{ messageId: string }>(OP_CUSTOMERS_LOG_MESSAGE);
   const [logNote, setLogNote] = useState('');
-  function log(channel: 'whatsapp' | 'ai_copy') {
-    if (!customerId || !text.trim()) return;
-    if (readsFromPrimary()) {
-      setLogNote('Not added to the customer history — message logs are only recorded on the main computer.');
+  const [logStatus, setLogStatus] = useState<'' | 'busy' | 'ok' | 'error'>('');
+  // Der Rumpf des OFFENEN Versuchs. Bleibt ein Versuch ohne Antwort, wiederholt derselbe Klick mit
+  // demselben Text DIESELBE Kennung (genau ein Eintrag). Ein anderer Weg oder Text ist eine andere
+  // Nachricht — dann ein neuer Versuch; unter der alten Kennung wiese der Primary ihn ab.
+  const offenerRumpf = useRef('');
+  async function log(channel: LoggedChannel) {
+    if (!customerId) return;
+    let input: MessageLogInput;
+    try {
+      input = messageLogInput({ customerId, channel, body: text, kind: type, linkedEntityType, linkedEntityId });
+    } catch (e) {
+      // Dieselbe Eingaberegel wie am Primary — ein leerer Text verlässt den Rechner nicht.
+      setLogStatus('error');
+      setLogNote(e instanceof Error ? e.message : String(e));
       return;
     }
-    const eintrag = logMessage({
-      customerId, channel, body: text,
-      kind: type, linkedEntityType, linkedEntityId,
+    const rumpf: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(input)) if (v !== undefined) rumpf[k] = v;
+    const key = JSON.stringify(rumpf);
+    if (logWrite.openCommandId && offenerRumpf.current !== key) logWrite.forget();
+    offenerRumpf.current = key;
+    setLogStatus('busy'); setLogNote('Adding to the customer history…');
+    const r = await logWrite.save({
+      local: async () => ({ messageId: (await logCustomerMessageOnPrimary(input)).id }),
+      remote: () => rumpf,
+      shape: (v) => ({ messageId: String(v.messageId ?? '') }),
     });
-    setLogNote(eintrag ? '' : 'The message could not be added to the customer history.');
+    if (r.kind === 'ok') {
+      setLogStatus('ok');
+      setLogNote('Added to the customer history.');
+    } else {
+      setLogStatus('error');
+      // Ein offener Ausgang ist kein „nicht eingetragen" — er kann gelaufen sein.
+      setLogNote(r.kind === 'unknown' ? fehlertext(r) : `Not added to the customer history: ${fehlertext(r)}`);
+    }
   }
 
   async function generate(t: MessageType) {
@@ -94,7 +127,7 @@ export function MessagePreviewModal({
   useEffect(() => {
     if (open) {
       setType(initialType);
-      setText(''); setError(null); setCopied(false); setLogNote('');
+      setText(''); setError(null); setCopied(false); setLogNote(''); setLogStatus('');
       generate(initialType);
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -105,18 +138,21 @@ export function MessagePreviewModal({
     generate(t);
   }
 
+  // Die Handlung des Menschen zuerst und unabhängig vom Protokoll: Kopieren bzw. WhatsApp öffnen
+  // passiert IM Klick (ein `window.open` nach einem `await` blockt der Browser als Popup). Das
+  // Protokoll folgt und meldet seinen Ausgang selbst.
   function handleCopy() {
     navigator.clipboard.writeText(text);
     setCopied(true);
-    log('ai_copy');
     setTimeout(() => setCopied(false), 1500);
+    void log('ai_copy');
   }
 
   function handleWhatsApp() {
     if (!waNumber) { alert('No phone/WhatsApp number on this customer'); return; }
     const url = `https://wa.me/${waNumber}?text=${encodeURIComponent(text)}`;
-    log('whatsapp');
     window.open(url, '_blank');
+    void log('whatsapp');
   }
 
   function handleDownloadImage() {
@@ -225,15 +261,21 @@ export function MessagePreviewModal({
 
           <div className="flex justify-end gap-2" style={{ marginTop: 16 }}>
             <Button variant="ghost" onClick={onClose}>Close</Button>
-            <Button variant="secondary" onClick={handleCopy} disabled={!text || loading}>
+            <Button variant="secondary" data-message-copy onClick={handleCopy} disabled={!text || loading || logWrite.busy}>
               <Copy size={14} /> {copied ? 'Copied!' : 'Copy'}
             </Button>
-            <Button variant="primary" onClick={handleWhatsApp} disabled={!text || loading || !waNumber}>
+            <Button variant="primary" data-message-whatsapp onClick={handleWhatsApp} disabled={!text || loading || !waNumber || logWrite.busy}>
               <Send size={14} /> WhatsApp
             </Button>
           </div>
           {logNote && (
-            <div data-message-log-note style={{ fontSize: 11, color: '#AA6E6E', marginTop: 8, textAlign: 'right' }}>{logNote}</div>
+            <div
+              data-message-log-note
+              data-message-log-status={logStatus}
+              style={{ fontSize: 11, color: logStatus === 'error' ? '#AA6E6E' : '#4B5563', marginTop: 8, textAlign: 'right' }}
+            >
+              {logNote}
+            </div>
           )}
         </div>
       </div>

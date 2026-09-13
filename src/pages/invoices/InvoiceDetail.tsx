@@ -35,6 +35,8 @@ import { INVOICE_CANCEL_REFUND_METHODS, invoiceCancelBlocker, invoiceCancelBody 
 import { cancelInvoiceOnPrimary } from '@/core/invoices/invoice-cancel-house';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { invoicePaymentBody, recordInvoicePaymentOnPrimary } from '@/core/invoices/invoice-payment-house';
+import { invoiceButterflyBody, setInvoiceButterflyOnPrimary } from '@/core/invoices/invoice-flag-house';
 import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { WriteError } from '@/components/shared/WriteError';
@@ -486,20 +488,37 @@ export function InvoiceDetail() {
     const pending = pendingFinalPayment;
     setPendingFinalPayment(null);
     if (!id || !pending) return;
-    // Der Sonderkreis (eigene Belegnummer) ist kein Feld der Fernbuchung — am Client gesperrt,
-    // damit niemand ihn setzt und stillschweigend den normalen Kreis bekommt.
-    if (w.remote && specialMark) { alert(fehlertext(nichtAmClient('the special number circle'))); return; }
+    // R6E — die Nummernwahl reist als WAHL mit (`specialMarkOnFinal`); die Nummer selbst zieht der
+    // Primary aus seinem Zähler (SINV/SRINV bzw. INV/RINV). Am Primary dieselbe Hausfolge in EINER
+    // Transaktion — vorher lief diese Zahlung ohne Klammer (verschluckte Buchungsfehler).
+    const zahlung = {
+      invoiceId: id, amount: pending.amount, method: pending.method, cardBrand: pending.cardBrand,
+      specialMarkOnFinal: specialMark,
+    };
     if (!await w.ok('invoices.record_payment', {
-      local: () => { recordPayment(id, pending.amount, pending.method, undefined, specialMark, pending.cardBrand); return {}; },
-      remote: () => ({
-        invoiceId: id, amount: pending.amount, method: pending.method,
-        ...(pending.cardBrand ? { cardBrand: pending.cardBrand } : {}),
-      }),
+      local: () => recordInvoicePaymentOnPrimary(zahlung),
+      remote: () => invoicePaymentBody(zahlung),
     })) return;
     loadInvoices();
     setPaymentOpen(false);
     setPaymentAmount('');
     setPaymentMethod('bank_transfer');
+  }
+
+  // R6E — der Butterfly-Schalter ist eine eigene, enge Buchung (`invoices.set_butterfly`) statt des
+  // allgemeinen `updateInvoice`: am Primary die Hausfolge in der Schreibreihenfolge, fern mit der
+  // gesehenen Fassung. Ein Fehler steht in `w.fehler` (oben auf der Seite).
+  async function toggleButterfly() {
+    if (!invoice) return;
+    const next = !invoice.butterfly;
+    const fassung = invoice.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('flagging this invoice (no revision loaded)'))); return; }
+    const invId = invoice.id;
+    if (!await w.ok('invoices.set_butterfly', {
+      local: () => setInvoiceButterflyOnPrimary(invId, next, fassung),
+      remote: () => invoiceButterflyBody(invId, next, fassung as number),
+    })) return;
+    loadInvoices();
   }
 
   // Customer-Credit UI-Slice 1 — Store-Guthaben auf die Rechnung verrechnen.
@@ -689,7 +708,9 @@ export function InvoiceDetail() {
                 {perm.canEditInvoices && !isCancelled && (
                   <Button
                     variant={invoice.butterfly ? 'primary' : 'ghost'}
-                    onClick={() => updateInvoice(invoice.id, { butterfly: !invoice.butterfly })}
+                    data-invoice-butterfly={invoice.butterfly ? 'on' : 'off'}
+                    disabled={w.busy}
+                    onClick={() => { void toggleButterfly(); }}
                     title={invoice.butterfly ? 'Butterfly flag active — excluded from NBR export by default' : 'Flag as Butterfly (exclude from NBR export)'}
                   >
                     <Butterfly size={14} /> Butterfly{invoice.butterfly ? ' ✓' : ''}
@@ -1364,7 +1385,8 @@ export function InvoiceDetail() {
                           return (
                             <div style={{ marginTop: 8, paddingTop: 8, borderTop: '1px dashed #E5E9EE' }}>
                               {cb.canCancel ? (
-                                <button onClick={() => {
+                                <button data-return-cancel-open onClick={() => {
+                                  w.clear();
                                   setCancelReturnModal({ returnId: r.id, returnNumber: r.returnNumber, needsStockWarning: cb.needsStockWarning });
                                   setCancelReturnReason('');
                                 }}
@@ -1867,22 +1889,31 @@ export function InvoiceDetail() {
                 best-effort; please verify inventory and consignment status manually afterwards.
               </div>
             )}
-            <Input required label="REASON" value={cancelReturnReason}
+            <Input required label="REASON" value={cancelReturnReason} data-return-cancel-reason
               onChange={e => setCancelReturnReason(e.target.value)}
               placeholder="Why is this return being cancelled?" />
+            {/* R6E — der Ausgang des Stornos, im Dialog selbst (die Seitenanzeige liegt hinter ihm). */}
+            <WriteError text={w.fehler} />
             <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
               <Button variant="ghost" onClick={() => setCancelReturnModal(null)}>Keep Return</Button>
-              <Button variant="primary"
-                disabled={!cancelReturnReason.trim()}
-                onClick={() => {
-                  if (!cancelReturnReason.trim()) return;
-                  try {
-                    cancelReturn(cancelReturnModal.returnId, cancelReturnReason.trim());
-                    setCancelReturnModal(null);
-                    setCancelReturnReason('');
-                  } catch (e) {
-                    alert(e instanceof Error ? e.message : String(e));
-                  }
+              <Button variant="primary" data-return-cancel-confirm
+                disabled={!cancelReturnReason.trim() || w.busy}
+                onClick={async () => {
+                  // R6E — EINE Buchung `returns.cancel`: am Primary die Hausfolge (Owner der Sitzung,
+                  // EINE Klammer), auf PC2 der geprüfte Auftrag mit der gesehenen Fassung. Der Dialog
+                  // schließt nur, wenn es wirklich geglückt ist.
+                  const grund = cancelReturnReason.trim();
+                  if (!grund) return;
+                  const returnId = cancelReturnModal.returnId;
+                  const fassung = salesReturns.find((x) => x.id === returnId)?.revision;
+                  if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('cancelling this return (no revision loaded)'))); return; }
+                  if (!await w.ok('returns.cancel', {
+                    local: () => cancelReturn(returnId, grund),
+                    remote: () => ({ returnId, expectedRevision: fassung, reason: grund }),
+                  })) return;
+                  loadSalesReturns(); loadInvoices(); loadCreditNotes(); loadProducts();
+                  setCancelReturnModal(null);
+                  setCancelReturnReason('');
                 }}
                 style={{ background: '#DC2626' }}>
                 Cancel Return

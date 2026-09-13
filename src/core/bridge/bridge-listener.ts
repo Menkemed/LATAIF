@@ -38,6 +38,13 @@ import './payables-commands';
 import './gold-commands';
 // CENTRAL-UI-PARITY R6D — Edelmetall und Schrotthandel.
 import './metal-commands';
+// CENTRAL-UI-PARITY R6E — das Angebot (anlegen, speichern, Zustand, Umwandlung über den Rechnungsweg).
+import './offer-commands';
+// R6E — Nachrichtenprotokoll am Kunden; das Butterfly-Kennzeichen der Rechnung.
+import './message-commands';
+import './invoice-flag-commands';
+// R6E — Retourenstorno und Rücknahme einer Transfer-Umwandlung (Rechnungsstorno statt Löschen).
+import './sales-reversal-commands';
 // CENTRAL-UI-PARITY — die Store-Auskuenfte, mit denen der zweite Rechner DIESELBE Oberflaeche
 // fuellt wie der Primary. Ohne diesen Import kennt der Renderer sie nicht, und jede Seite auf PC2
 // bliebe leer.

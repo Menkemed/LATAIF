@@ -27,6 +27,7 @@ import { checkEditReason, EDIT_REASON_REQUIRED_MESSAGE } from '@/core/invoices/e
 import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-write';
 import { lotAggregatesFor, productLotsBatchFor, LEERE_LOSE } from '@/core/data/domain-reads';
+import { createInvoiceOnPrimary, invoiceCreatePaymentBody, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 type Method = 'cash' | 'bank_transfer' | 'card' | 'benefit';
@@ -63,7 +64,7 @@ export function InvoiceCreate() {
   const [searchParams] = useSearchParams();
   const { id: editId } = useParams<{ id: string }>();
   const isEditMode = !!editId;
-  const { invoices, loadInvoices, createDirectInvoice, recordPayment, editInvoice: editInvoiceFn, getInvoicePayments } = useInvoiceStore();
+  const { invoices, loadInvoices, editInvoice: editInvoiceFn, getInvoicePayments } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
   const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
@@ -286,14 +287,12 @@ export function InvoiceCreate() {
   }
 
   async function performSave(thenPrint: boolean, specialMark: boolean) {
-    // R4B — was auf einem verbundenen Rechner noch NICHT geht, sagt es. Kein stilles Nichts, und
-    // vor allem kein Rueckfall auf die lokale Datenbank:
-    //   • `invoices.create` kennt keine Zahlung; sie waere ein zweiter Vorsatz. Eine Rechnung
-    //     anzulegen und das Geld liegen zu lassen waere schlimmer als ein ehrliches Nein.
-    //   • R6B — Aendern geht jetzt fern (`invoices.update`, unten); nur eine Zahlung im Aendern nicht.
-    if (anlegen.remote && !isEditMode && paidAmount > 0) {
-      setError(fehlertext(nichtAmClient('recording a payment while creating an invoice'))); return;
-    }
+    // R6E — die Zahlung beim Anlegen geht jetzt auf BEIDEN Rechnern: sie ist ein Feld derselben
+    // Absicht (`invoices.create` → `payment`), und am Primary laufen Anlegen und Zahlung in EINER
+    // Transaktion (`createInvoiceOnPrimary`). Vorher waren es zwei lose Aufrufe: scheiterte die
+    // Zahlung, blieb eine unbezahlte Rechnung stehen. Nur im Aendern bleibt eine Zahlung fern ein
+    // ehrliches Nein (unten) — dort ist sie kein Feld.
+    const zahlung = invoiceCreatePaymentBody(paidAmount, paymentMethod, cardBrand);
     // CENTRAL-C3B — dieselbe Ableitung, die der Fernauftrag benutzt. Phase 3 (Cost-Snapshot aus
     // dem gewaehlten Lot, Fallback auf products.purchase_price) und die v0.7.1-Regel fuer MARGIN
     // (internalVat persistieren) stecken jetzt in `toInvoiceLine` — eine Stelle, zwei Aufrufer.
@@ -375,18 +374,17 @@ export function InvoiceCreate() {
       return;
     }
 
-    // CENTRAL-UI-PARITY R4B — dieselbe Absicht, zwei Anschluesse. Am Primary die vorhandene
-    // Domaenenfunktion (Nummernkreis, Bestandsabzug, Steuer, Buchung — alles unveraendert), am
-    // Client die vorhandene geprueste Fernbuchung `invoices.create`, die auf dem Primary GENAU
-    // DIESE Funktion ruft. Kopiert wird hier nichts.
+    // CENTRAL-UI-PARITY R4B/R6E — dieselbe Absicht, zwei Anschluesse. Am Primary die Hausfolge
+    // `createInvoiceInHouse` (Nummernkreis, Bestandsabzug, Steuer, Buchung, Zahlung, Endnummer —
+    // alles in den Store-Funktionen, in EINER Transaktion), am Client die gepruefte Fernbuchung
+    // `invoices.create`, die auf dem Primary GENAU DIESE Hausfolge ruft. Kopiert wird hier nichts.
     const r = await anlegen.save({
-      local: () => {
-        const inv = createDirectInvoice(customerId, payload, notes || undefined, issuedDate, undefined, staffId || undefined, specialMark);
-        if (!inv) throw new Error('Failed to create invoice');
-        if (paidAmount > 0) {
-          recordPayment(inv.id, paidAmount, paymentMethod, undefined, specialMark, paymentMethod === 'card' ? cardBrand : undefined);
-        }
-        return { invoiceId: inv.id };
+      local: async () => {
+        const inv = await createInvoiceOnPrimary({
+          customerId, lines: payload, notes: notes || undefined, issuedDate, staffId: staffId || undefined, specialMark,
+          payment: zahlung as InvoiceCreatePayment | undefined,
+        });
+        return { invoiceId: inv.invoiceId };
       },
       remote: () => ({
         customerId,
@@ -401,6 +399,7 @@ export function InvoiceCreate() {
         ...(issuedDate ? { issuedDate } : {}),
         ...(staffId ? { staffId } : {}),
         specialMark,
+        ...(zahlung ? { payment: zahlung } : {}),
       }),
       shape: (v) => ({ invoiceId: String(v.invoiceId ?? '') }),
     });
@@ -728,7 +727,7 @@ export function InvoiceCreate() {
                   ] as const).map(m => {
                     const active = paymentMethod === m.id;
                     return (
-                      <button key={m.id} type="button" onClick={() => setPaymentMethod(m.id)}
+                      <button key={m.id} type="button" onClick={() => setPaymentMethod(m.id)} data-invoice-pay-method={m.id}
                         className="cursor-pointer rounded"
                         style={{ padding: '8px 16px', fontSize: 13,
                           border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
@@ -747,7 +746,7 @@ export function InvoiceCreate() {
                     ] as const).map(b => {
                       const on = cardBrand === b.id;
                       return (
-                        <button key={b.id} type="button" onClick={() => setCardBrand(b.id)}
+                        <button key={b.id} type="button" onClick={() => setCardBrand(b.id)} data-invoice-pay-card-brand={b.id}
                           className="cursor-pointer rounded"
                           style={{ padding: '6px 14px', fontSize: 12,
                             border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`,
@@ -760,15 +759,15 @@ export function InvoiceCreate() {
                 )}
               </div>
               <Input label="PAID AMOUNT (BHD)" type="number" step="0.001"
-                value={paidAmount || ''} onChange={e => setPaidAmount(parseFloat(e.target.value) || 0)} />
+                value={paidAmount || ''} onChange={e => setPaidAmount(parseFloat(e.target.value) || 0)} data-invoice-pay-amount />
             </div>
             <div className="flex gap-2" style={{ marginTop: 14 }}>
-              <button onClick={() => setPaidAmount(total)}
+              <button onClick={() => setPaidAmount(total)} data-invoice-pay-full
                 className="cursor-pointer rounded"
                 style={{ padding: '6px 12px', fontSize: 11, border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}>
                 Pay Full
               </button>
-              <button onClick={() => setPaidAmount(0)}
+              <button onClick={() => setPaidAmount(0)} data-invoice-pay-later
                 className="cursor-pointer rounded"
                 style={{ padding: '6px 12px', fontSize: 11, border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}>
                 Pay Later
@@ -930,8 +929,8 @@ export function InvoiceCreate() {
         <div className="flex justify-between" style={{ marginTop: 24, paddingTop: 20, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={() => navigate(isEditMode && editInvoice ? `/invoices/${editInvoice.id}` : '/invoices')}><X size={14} /> Cancel</Button>
           <div className="flex gap-2">
-            <Button variant="secondary" onClick={() => handleSave(true)} disabled={anlegen.busy || aendernRechnung.busy}><Printer size={14} /> Save & Print</Button>
-            <Button variant="primary" onClick={() => handleSave(false)} disabled={anlegen.busy || aendernRechnung.busy} data-save-invoice><Save size={14} /> {anlegen.busy || aendernRechnung.busy ? 'Saving…' : (isEditMode ? 'Save Changes' : 'Save Invoice')}</Button>
+            <Button variant="secondary" onClick={() => handleSave(true)} disabled={anlegen.busy || aendernRechnung.busy} data-invoice-save-print><Printer size={14} /> Save & Print</Button>
+            <Button variant="primary" onClick={() => handleSave(false)} disabled={anlegen.busy || aendernRechnung.busy} data-save-invoice data-invoice-save><Save size={14} /> {anlegen.busy || aendernRechnung.busy ? 'Saving…' : (isEditMode ? 'Save Changes' : 'Save Invoice')}</Button>
           </div>
         </div>
       </div>

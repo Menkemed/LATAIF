@@ -3,47 +3,38 @@ import { create } from 'zustand';
 // die Nummer einer geloeschten Zeile erneut aus.
 import { ensureLegacySequence, legacySpec } from '@/core/db/legacy-sequences';
 import type { SqlDb } from '@/core/sync/apply-change';
-import { v4 as uuid } from 'uuid';
 import type { Offer, OfferLine, OfferStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
-import { eventBus } from '@/core/events/event-bus';
-import { vatEngine } from '@/core/tax/vat-engine';
-import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { query, getNextDocumentNumber } from '@/core/db/helpers';
+import { trackDelete } from '@/core/sync/track';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
-import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — offer_lines + offers-Totals
+import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — offer_lines beim Loeschen
+// CENTRAL-UI-PARITY R6E — Anlegen, Speichern, Status und Umwandeln leben in EINER Hausfolge
+// (`core/offers/offer-house.ts`), die Maske und Fernbefehl gleichermassen rufen. Die frueheren
+// Einzelschreiber (`updateOffer`, `updateOfferLine`, `addOfferLine`, `removeOfferLine`,
+// `recalcOfferTotals`) sind weg: jeder schrieb fuer sich, ohne Transaktion und ohne Fassung, der
+// Preis sogar bei jedem Tastendruck — und ein geaenderter Preis verlor bei VAT_10 die Steuer.
+import { createOfferInHouse, offerAction } from '@/core/offers/offer-house';
 
 interface OfferStore {
   offers: Offer[];
   loading: boolean;
   loadOffers: () => void;
   getOffer: (id: string) => Offer | undefined;
-  createOffer: (customerId: string, lines: { productId: string; unitPrice: number; taxScheme: string; purchasePrice: number }[], notes?: string, validUntil?: string) => Offer;
-  updateOffer: (id: string, data: Partial<Offer>) => void;
-  updateOfferLine: (offerId: string, lineId: string, data: Partial<OfferLine>) => void;
-  addOfferLine: (offerId: string, line: { productId: string; unitPrice: number; taxScheme: string; purchasePrice: number }) => void;
-  removeOfferLine: (offerId: string, lineId: string) => void;
+  /** R6E — dieselbe Hausfolge wie Maske und Fernbefehl. Einstand und Schema kommen aus der Datenbank. */
+  createOffer: (customerId: string, lines: { productId: string; unitPrice: number }[], notes?: string, validUntil?: string) => Offer;
   deleteOffer: (id: string) => void;
   getNextOfferNumber: () => string;
-  recalcOfferTotals: (offerId: string) => void;
-}
-
-function getVatRate(): number {
-  try {
-    const db = getDatabase();
-    const branchId = currentBranchId();
-    const r = db.exec(`SELECT value FROM settings WHERE branch_id = ? AND key = 'vat.standard_rate'`, [branchId]);
-    if (r.length > 0 && r[0].values.length > 0) return Number(r[0].values[0][0]);
-  } catch { /* */ }
-  return 10;
 }
 
 function rowToOffer(row: Record<string, unknown>): Offer {
   return {
+    // R6E — die Fassung reist mit (Speichern, Senden, Umwandeln nennen sie).
+    revision: row.revision === undefined || row.revision === null ? undefined : Number(row.revision),
     id: row.id as string,
     offerNumber: row.offer_number as string,
     customerId: row.customer_id as string,
@@ -98,143 +89,17 @@ export const useOfferStore = create<OfferStore>((set, get) => ({
     return getNextDocumentNumber('OFF');
   },
 
+  // R6E — der alte synchrone Aufruf laeuft durch dieselbe Hausfolge (eigene Klammer, oder die des
+  // Aufrufers). Auf einem Rechner ohne Datenbank verweigert sie, bevor sie etwas anfasst.
   createOffer: (customerId, lines, notes, validUntil) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const id = uuid();
-    const vatRate = getVatRate();
-    let branchId: string, userId: string;
-    try { branchId = currentBranchId(); userId = currentUserId(); }
-    catch { branchId = 'branch-main'; userId = 'user-owner'; }
-
-    const offerNumber = get().getNextOfferNumber();
-
-    // Plan §Tax §7: Netto-Eingabe. Total = Summe aus grossAmount (Kundenpreis).
-    let totalGross = 0;
-    let totalVat = 0;
-    const offerLines: OfferLine[] = lines.map((l, i) => {
-      const calc = vatEngine.calculateNet(l.unitPrice, l.purchasePrice, l.taxScheme as any, vatRate);
-      totalGross += calc.grossAmount;
-      totalVat += calc.vatAmount;
-      return {
-        id: uuid(), offerId: id, productId: l.productId,
-        unitPrice: l.unitPrice, vatRate, taxScheme: l.taxScheme as any,
-        lineTotal: calc.grossAmount, position: i + 1,
-      };
-    });
-
-    const subtotal = totalGross - totalVat;
-    const total = totalGross;
-
-    db.run(
-      `INSERT INTO offers (id, branch_id, offer_number, customer_id, status, valid_until, currency,
-        subtotal, vat_rate, vat_amount, total, notes, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, 'draft', ?, 'BHD', ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, branchId, offerNumber, customerId, validUntil || null,
-       subtotal, vatRate, totalVat, total, notes || null, now, now, userId]
-    );
-
-    const lineStmt = db.prepare(
-      `INSERT INTO offer_lines (id, offer_id, product_id, unit_price, vat_rate, tax_scheme, line_total, position)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-    );
-    for (const l of offerLines) {
-      lineStmt.run([l.id, id, l.productId, l.unitPrice, l.vatRate, l.taxScheme, l.lineTotal, l.position]);
-    }
-    lineStmt.free();
-
-    saveDatabase();
-    trackInsert('offers', id, { offerNumber, customerId, total });
-    // LAN-Sync: jede offer_line als insert syncen (Full-Row-Snapshot). Header zuerst
-    // (trackInsert oben), dann Lines (Parent-vor-Child). Post-write.
-    for (const l of offerLines) trackChange('offer_lines', l.id, 'insert', {});
-    eventBus.emit('offer.created', 'offer', id, { customerId, total });
+    const r = offerAction((ctx) => createOfferInHouse({
+      customerId,
+      lines: lines.map((l) => ({ productId: l.productId, unitPrice: l.unitPrice })),
+      notes,
+      validUntil,
+    }, ctx));
     get().loadOffers();
-
-    return { id, offerNumber, customerId, status: 'draft' as OfferStatus, currency: 'BHD' as const,
-      subtotal, vatRate, vatAmount: totalVat, total, taxScheme: 'MARGIN' as const,
-      lines: offerLines, createdAt: now, notes, validUntil };
-  },
-
-  updateOffer: (id, data) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const fields: string[] = [];
-    const values: unknown[] = [];
-
-    const map: Record<string, string> = {
-      status: 'status', notes: 'notes', validUntil: 'valid_until',
-      sentAt: 'sent_at', sentVia: 'sent_via', followUpAt: 'follow_up_at',
-      subtotal: 'subtotal', vatAmount: 'vat_amount', total: 'total',
-      customerId: 'customer_id', offerNumber: 'offer_number',
-    };
-
-    for (const [k, v] of Object.entries(data)) {
-      const col = map[k];
-      if (col) { fields.push(`${col} = ?`); values.push(v ?? null); }
-    }
-
-    if (fields.length === 0) return;
-    fields.push('updated_at = ?'); values.push(now); values.push(id);
-    db.run(`UPDATE offers SET ${fields.join(', ')} WHERE id = ?`, values);
-    saveDatabase();
-    trackUpdate('offers', id, data);
-
-    // Emit status change events for automation
-    if (data.status === 'sent') {
-      const offer = get().getOffer(id);
-      eventBus.emit('offer.sent', 'offer', id, { offerNumber: offer?.offerNumber, customerId: offer?.customerId });
-    } else if (data.status === 'accepted') {
-      const offer = get().getOffer(id);
-      eventBus.emit('offer.accepted', 'offer', id, { offerNumber: offer?.offerNumber, customerId: offer?.customerId });
-    } else if (data.status === 'rejected') {
-      eventBus.emit('offer.rejected', 'offer', id, {});
-    }
-
-    get().loadOffers();
-  },
-
-  updateOfferLine: (offerId, lineId, data) => {
-    const db = getDatabase();
-    const fields: string[] = [];
-    const values: unknown[] = [];
-    if (data.unitPrice !== undefined) { fields.push('unit_price = ?'); values.push(data.unitPrice); }
-    if (data.taxScheme) { fields.push('tax_scheme = ?'); values.push(data.taxScheme); }
-    if (data.lineTotal !== undefined) { fields.push('line_total = ?'); values.push(data.lineTotal); }
-    if (fields.length === 0) return;
-    values.push(lineId);
-    db.run(`UPDATE offer_lines SET ${fields.join(', ')} WHERE id = ?`, values);
-    saveDatabase();
-    trackChange('offer_lines', lineId, 'update', {});   // LAN-Sync: geänderte Line syncen (offers-Header folgt via recalc)
-    // Recalculate offer totals
-    get().recalcOfferTotals(offerId);
-    get().loadOffers();
-  },
-
-  addOfferLine: (offerId, line) => {
-    const db = getDatabase();
-    const vatRate = getVatRate();
-    const calc = vatEngine.calculateNet(line.unitPrice, line.purchasePrice, line.taxScheme as any, vatRate);
-    const lineId = uuid();
-    const pos = (get().getOffer(offerId)?.lines.length || 0) + 1;
-    db.run(
-      `INSERT INTO offer_lines (id, offer_id, product_id, unit_price, vat_rate, tax_scheme, line_total, position)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-      [lineId, offerId, line.productId, line.unitPrice, vatRate, line.taxScheme, calc.grossAmount, pos]
-    );
-    saveDatabase();
-    trackChange('offer_lines', lineId, 'insert', {});   // LAN-Sync: neue Line syncen (offers-Header folgt via recalc)
-    get().recalcOfferTotals(offerId);
-    get().loadOffers();
-  },
-
-  removeOfferLine: (offerId, lineId) => {
-    const db = getDatabase();
-    db.run(`DELETE FROM offer_lines WHERE id = ?`, [lineId]);
-    saveDatabase();
-    trackChange('offer_lines', lineId, 'delete', {});   // LAN-Sync: entfernte Line syncen (offers-Header folgt via recalc)
-    get().recalcOfferTotals(offerId);
-    get().loadOffers();
+    return get().getOffer(r.offerId)!;
   },
 
   deleteOffer: (id) => {
@@ -248,25 +113,6 @@ export const useOfferStore = create<OfferStore>((set, get) => ({
     trackDelete('offers', id);
     for (const lid of lineIds) trackChange('offer_lines', lid, 'delete', {});
     get().loadOffers();
-  },
-
-  recalcOfferTotals: (offerId: string) => {
-    const db = getDatabase();
-    const lineRows = query('SELECT * FROM offer_lines WHERE offer_id = ?', [offerId]);
-    let subtotal = 0;
-    let totalVat = 0;
-    for (const l of lineRows) {
-      subtotal += l.unit_price as number;
-      totalVat += (l.line_total as number) - (l.unit_price as number);
-    }
-    const total = subtotal + totalVat;
-    const now = new Date().toISOString();
-    db.run(`UPDATE offers SET subtotal = ?, vat_amount = ?, total = ?, updated_at = ? WHERE id = ?`,
-      [subtotal, totalVat, total, now, offerId]);
-    saveDatabase();
-    // LAN-Sync: genau EIN offers-Full-Row-Snapshot nach dem finalen Header-Update.
-    // Nur die 3 Line-Mutationen rufen recalc → kein Doppel-Snapshot mit create/updateOffer.
-    trackChange('offers', offerId, 'update', {});
   },
 }));
 

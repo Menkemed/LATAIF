@@ -10,10 +10,10 @@
 //    CN cashRefund/receivableCancel-Split wird live nachgezogen, refund_status
 //    transitioned. Auto-approve, falls noch REQUESTED, damit CN garantiert existiert.
 //  - refundReturn: Convenience-Wrapper (approve + recordRefundPayment in einem).
-//  - cancelReturn: einheitlicher Storno (UI: Owner-only). Reverst Disposition/COGS/CN/VAT/
-//    Customer-Credit/Card-Fee in EINER SQL-Transaktion und behaelt die Row als REJECTED
-//    (Historie + Lines bleiben). Blockt bei ausgezahltem Refund oder verbrauchtem Credit.
-//    Idempotent (schon REJECTED → No-op). Ersetzt die alten reject/delete-Pfade.
+//  - cancelReturn: einheitlicher Storno (UI: Owner-only). R6E — die Folge wohnt jetzt in
+//    `core/returns/return-cancel-house` (dieselbe für den Fernbefehl `returns.cancel`); hier nur
+//    noch der Anschluss der Maske: Owner der Sitzung, EINE Klammer über `runOnPrimary`.
+//    Idempotent am Primary (schon REJECTED → No-op). Ersetzt die alten reject/delete-Pfade.
 
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
@@ -21,7 +21,6 @@ import type { SalesReturn, SalesReturnLine, SalesReturnStatus, RefundStatus, Pro
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackStatusChange, trackRefund } from '@/core/sync/track';
-import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { trackChange } from '@/core/sync/sync-service';
 import { useAuthStore } from '@/stores/authStore';
 import { canonicalRole } from '@/core/models/types';
@@ -32,16 +31,20 @@ import {
   reverseSource,
   hasLedgerEntries,
   hasReversalFor,
-  beginLedgerTransaction,
-  commitLedgerTransaction,
-  rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
 import { restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+// CENTRAL-UI-PARITY R6E — der Storno ist EINE Hausfolge (Primary und PC2); der Store ist nur Anschluss.
+import { runOnPrimary } from '@/core/data/primary-action';
+import { isClientMode } from '@/core/bridge/client-mode';
+import {
+  ReturnCancelRejected, RETURN_OWNER_ONLY, RETURN_PRIMARY_ONLY, cancelReturnInHouse, returnCancelability,
+  type ReturnCancelability,
+} from '@/core/returns/return-cancel-house';
 import type { CreditNote } from '@/core/models/types';
 import { refundCardFeePortion } from '@/core/finance/card-fee-booking';
 import { computeCardFee, normalizeCardBrand } from '@/core/finance/card-fees';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
-import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
@@ -171,74 +174,8 @@ function applyDisposition(
   }
 }
 
-// Best-effort Revert (für reject/delete). KEEP_AS_OWN/RETURN_TO_OWNER nicht voll
-// reversibel — Logwarnung statt stillschweigend zerstören.
-function revertDisposition(
-  db: ReturnType<typeof getDatabase>,
-  lines: SalesReturnLine[],
-  disposition: ProductDisposition,
-  now: string,
-): void {
-  for (const line of lines) {
-    if (!line.productId) continue;
-    const qty = Math.max(1, line.quantity || 1);
-
-    if (disposition === 'IN_STOCK') {
-      db.run(
-        `UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`,
-        [now, line.productId]
-      );
-      // Phase 5 — den per applyDisposition restored Lot wieder konsumieren.
-      // Lot.qty_remaining wird um qty reduziert; bei 0 → EXHAUSTED. Spiegelt
-      // die Sale-Konsumption der Original-Invoice-Line.
-      if (line.invoiceLineId) {
-        const ilRows = query(`SELECT lot_id FROM invoice_lines WHERE id = ?`, [line.invoiceLineId]);
-        const lotId = (ilRows[0]?.lot_id as string | null) || null;
-        if (lotId) {
-          db.run(
-            `UPDATE stock_lots
-                SET qty_remaining = MAX(0, qty_remaining - ?),
-                    status = CASE WHEN qty_remaining - ? <= 0 THEN 'EXHAUSTED' ELSE status END
-              WHERE id = ?`,
-            [qty, qty, lotId]
-          );
-          trackLotRow(lotId, 'update');   // LAN-Sync Phase 1a (laeuft in cancelReturn-Tx → atomar)
-        }
-      }
-      // Phase 7 Sync — products.quantity aus Lots ableiten (ersetzt manuelles Decrement).
-      syncProductQuantity(line.productId);
-    } else if (disposition === 'UNDER_REPAIR' || disposition === 'WRITE_OFF') {
-      db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
-    } else if (disposition === 'KEEP_AS_OWN') {
-      // Phase 5 — den per applyDisposition synthetisch erzeugten Lot cancellen.
-      // Match: branchId implizit via product_id, purchase_id/line_id NULL, plus
-      // Restbestand > 0 (sonst wuerden wir bereits konsumierte Spuren ausloeschen).
-      // Wir cancellen den juengsten passenden Lot.
-      // LAN-Sync Phase 1a: den zu cancelnden Lot zuerst aufloesen (identische Auswahl
-      // wie zuvor die Subquery), per id cancellen und den finalen Snapshot tracken.
-      const keepCancelId = query(
-        `SELECT id FROM stock_lots
-            WHERE product_id = ? AND purchase_id IS NULL AND status = 'ACTIVE'
-              AND qty_remaining = qty_total
-            ORDER BY created_at DESC, id DESC LIMIT 1`,
-        [line.productId]
-      )[0]?.id as string | undefined;
-      if (keepCancelId) {
-        db.run(`UPDATE stock_lots SET status = 'CANCELLED' WHERE id = ?`, [keepCancelId]);
-        trackLotRow(keepCancelId, 'update');
-      }
-      console.warn(`[Return] reverted KEEP_AS_OWN for product ${line.productId} — purchase_price/source_type still need manual cleanup`);
-      db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
-      // Phase 7 Sync — products.quantity aus den verbleibenden Lots.
-      syncProductQuantity(line.productId);
-    } else if (disposition === 'RETURN_TO_OWNER') {
-      // Nicht voll reversibel (Consignment-Status zurueck war auf RETURNED_TO_OWNER).
-      console.warn(`[Return] cannot fully revert ${disposition} disposition for product ${line.productId} — manual cleanup may be needed`);
-      db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
-    }
-    trackProductRow(line.productId);   // LAN-Sync Phase 1b: finaler Product-Snapshot je Line
-  }
-}
+// R6E — die Rücknahme der Warenfolge (`revertDisposition`) wohnt jetzt bei ihrer einzigen Nutzerin,
+// der Storno-Hausfolge `core/returns/return-cancel-house`.
 
 // R5F FINAL — Geld auf Fils (BHD, 3 Stellen). Ein Drittel einer Zeile ist 333,333…; ohne Runden blieb nach
 // einem Storno ein Gleitkomma-Rest (5,7e-14), den eine offene Retoure noch „erstatten" konnte.
@@ -309,9 +246,13 @@ interface SalesReturnStore {
   // immer anteilig erstattet (Flag irrelevant).
   recordRefundPayment: (returnId: string, amount: number, method: 'cash' | 'bank' | 'benefit' | 'card' | 'credit' | 'other', date?: string, deductCardFee?: boolean) => void;
   // Einheitlicher Storno (Owner-only via UI). Atomar, behaelt die Row als REJECTED.
-  cancelReturn: (id: string, reason: string) => void;
+  // R6E — der Anschluss der Maske an die Hausfolge: EINE Klammer, erst danach durabel.
+  cancelReturn: (id: string, reason: string) => Promise<void>;
+  // R6E — die Storno-Auskunft je Retoure, wie sie der Primary mit der Liste ausliefert (PC2 hat
+  // keine Datenbank, um sie selbst zu fragen).
+  cancelability: Record<string, ReturnCancelability>;
   // Vorab-Pruefung fuer die UI: ob/warum ein Return (nicht) stornierbar ist + Lager-Warnflag.
-  getReturnCancelability: (id: string) => { canCancel: boolean; blockReason: string | null; needsStockWarning: boolean };
+  getReturnCancelability: (id: string) => ReturnCancelability;
   getInvoiceReturnSummary: (invoiceId: string, invoiceGross: number, invoicePaid?: number) => {
     returns: SalesReturn[];
     totalReturned: number;
@@ -371,12 +312,13 @@ function rowToLine(row: Record<string, unknown>): SalesReturnLine {
 
 export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
   returns: [],
+  cancelability: {},
 
   loadReturns: () => {
     if (hydrateFromPrimary('store.sales_returns.get', (d) => set(d as never))) return;
     try {
       set(loadSalesReturnsFor(localReadContext()));
-    } catch { set({ returns: [] }); }
+    } catch { set({ returns: [], cancelability: {} }); }
   },
 
   getReturn: (id) => get().returns.find(r => r.id === id),
@@ -780,205 +722,59 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
   },
 
   // ── Cancel (einheitlicher Storno) ────────────────────────
-  // Reverst Disposition/COGS/CN/VAT/Customer-Credit/Card-Fee in EINER SQL-Transaktion und
-  // setzt den Return auf REJECTED (Row + Lines bleiben → Historie, keine verwaisten FKs,
-  // Invoice via editInvoice-Guard-B wieder editierbar, Returned-Qty wieder 0/korrekt).
-  // Blockt bei ausgezahltem Refund oder bereits verbrauchtem Customer-Credit. Idempotent.
+  // R6E — die Folge (Disposition/COGS/CN/VAT/Customer-Credit/Card-Fee umkehren, REJECTED, Audit)
+  // wohnt in `cancelReturnInHouse` — DIESELBE, die `returns.cancel` von PC2 ruft. Hier nur der
+  // Anschluss der Maske: das Owner-Recht der SITZUNG, dann EINE Klammer (`runOnPrimary`: exklusiv,
+  // eine Transaktion, erst danach durabel). Vorher öffnete dieser Store seine eigene Transaktion
+  // und rollte bei Fehler selbst zurück.
+  // Keine eigene `async`-Aktion: die Handlung stellt sich über `runOnPrimary` in die EINE
+  // Schreibspur (`runExclusive`) — die Vorprüfungen davor fassen die Datenbank nicht an.
   cancelReturn: (id, reason) => {
+    if (isClientMode()) {
+      return Promise.reject(new ReturnCancelRejected(RETURN_PRIMARY_ONLY, 'a return is cancelled on the main computer — this window has no business database'));
+    }
     // Owner-only — store-seitig HART erzwungen (die UI versteckt den Button zusaetzlich via perm.isOwner).
     let actorRole: string | undefined;
     try { actorRole = useAuthStore.getState().role(); } catch { actorRole = undefined; }
     if (canonicalRole(actorRole) !== 'ADMIN') {
-      throw new Error('Only the owner can cancel a return.');
+      return Promise.reject(new ReturnCancelRejected(RETURN_OWNER_ONLY, 'Only the owner can cancel a return.'));
     }
-    const r = get().getReturn(id);
-    if (!r) return;
-    if (r.status === 'REJECTED') return; // idempotenter No-op (schon storniert)
-    if (!reason || !reason.trim()) {
-      throw new Error('A reason is required to cancel a return.');
-    }
-    // Block 1 — bereits ausgezahlter Cash/Bank/Card-Refund: echtes Geld ist raus; ein
-    // Ledger-Reverse wuerde es nur buchhalterisch zurueckholen. Hart blocken.
-    if ((r.refundPaidAmount || 0) > 0.005) {
-      throw new Error(`Cannot cancel: a refund of ${(r.refundPaidAmount || 0).toFixed(3)} BHD has already been paid out. Reclaim the payout first.`);
-    }
-    // Block 2 — aus diesem Return entstandenes Store-Guthaben bereits (teil-)verbraucht:
-    // Wert floss schon auf eine andere Rechnung → nicht sicher rueckabwickelbar.
-    const usedCredit = query(
-      `SELECT cc.id FROM customer_credits cc
-         JOIN credit_notes cn ON cn.id = cc.source_id
-        WHERE cn.sales_return_id = ? AND cc.source_type = 'sales_return'
-          AND cc.used_amount > 0.005 LIMIT 1`,
-      [id]
-    );
-    if (usedCredit.length > 0) {
-      throw new Error('Cannot cancel this return because its customer credit has already been used.');
-    }
-
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const wasApproved = r.status === 'APPROVED' || r.status === 'REFUNDED' || r.status === 'CLOSED';
-    const oldSnapshot = {
-      status: r.status,
-      refundStatus: r.refundStatus,
-      totalAmount: r.totalAmount,
-      refundPaidAmount: r.refundPaidAmount || 0,
-      vatCorrected: r.vatCorrected || 0,
-      disposition: r.productDisposition || 'IN_STOCK',
-    };
-    const deletedCnIds: string[] = [];
-    const deletedCcIds: string[] = [];
-    let feeRestored = 0;
-    let feeExpenseId: string | null = null;
-
-    // ── ALLES in EINER gemeinsamen SQL-Transaktion → all-or-nothing ──────────
-    beginLedgerTransaction();
-    try {
-      // 1. Inventory/Disposition zurueck (best-effort bei KEEP_AS_OWN/RETURN_TO_OWNER).
-      revertDisposition(db, r.lines, r.productDisposition || 'IN_STOCK', now);
-
-      // 2. VAT auf der Invoice wiederherstellen (nur wenn Approve sie reduziert hatte).
-      if (wasApproved && Number(r.vatCorrected || 0) > 0) {
-        db.run(
-          `UPDATE invoices SET vat_amount = vat_amount + ?, updated_at = ? WHERE id = ?`,
-          [Number(r.vatCorrected || 0), now, r.invoiceId]
-        );
-      }
-
-      // 3. COGS-Umkehr der Return spiegeln (greift nur bei IN_STOCK; guarded + idempotent).
-      if (hasLedgerEntries('SALES_RETURN_COGS', id) && !hasReversalFor('SALES_RETURN_COGS', id)) {
-        reverseSource('SALES_RETURN_COGS', id, now);
-      }
-
-      // 4. Pro Credit Note: Ledger zurueck (Revenue/AR/Cash/VAT/CUSTOMER_CREDIT),
-      //    unverbrauchtes Store-Guthaben abbauen, CN-Row entfernen.
-      const cnRows = query(`SELECT id FROM credit_notes WHERE sales_return_id = ?`, [id]);
-      for (const cn of cnRows) {
-        const cnId = cn.id as string;
-        if (hasLedgerEntries('CREDIT_NOTE', cnId) && !hasReversalFor('CREDIT_NOTE', cnId)) {
-          reverseSource('CREDIT_NOTE', cnId, now);
-        }
-        // Block 2 oben garantiert used_amount=0 → sauber loeschbar.
-        const ccRows = query(
-          `SELECT id FROM customer_credits WHERE source_type = 'sales_return' AND source_id = ?`,
-          [cnId]
-        );
-        for (const cc of ccRows) {
-          db.run(`DELETE FROM customer_credits WHERE id = ?`, [cc.id as string]);
-          deletedCcIds.push(cc.id as string);
-        }
-        deletedCnIds.push(cnId);
-      }
-      db.run(`DELETE FROM credit_notes WHERE sales_return_id = ?`, [id]);
-
-      // 5. Karten-Gebuehr-Erstattungen dieses Returns reversieren (Ledger + Expense auffuellen).
-      const feeSrcs = query(
-        `SELECT DISTINCT source_id FROM ledger_entries
-           WHERE source_module = 'REFUND' AND source_id LIKE ?`,
-        [`cardfee-refund:${id}:%`]
-      );
-      for (const fs of feeSrcs) {
-        const sid = fs.source_id as string;
-        if (!hasLedgerEntries('REFUND', sid) || hasReversalFor('REFUND', sid)) continue;
-        const amtRow = query(
-          `SELECT COALESCE(SUM(amount),0) a FROM ledger_entries
-             WHERE source_module='REFUND' AND source_id=? AND account='EXPENSES_OPERATING'
-               AND direction='CREDIT' AND reverses_entry_id IS NULL`,
-          [sid]
-        );
-        reverseSource('REFUND', sid, now); // DR EXPENSES / CR account — Gebuehr-Erstattung zurueck
-        feeRestored += Number(amtRow[0]?.a || 0);
-      }
-      if (feeRestored > 0.0005) {
-        const feeRows = query(
-          `SELECT id, amount FROM expenses
-             WHERE category='CardFees' AND related_module='invoice' AND related_entity_id=?
-             ORDER BY created_at DESC LIMIT 1`,
-          [r.invoiceId]
-        );
-        if (feeRows.length) {
-          feeExpenseId = feeRows[0].id as string;
-          const newAmt = Math.round(((Number(feeRows[0].amount) || 0) + feeRestored) * 1000) / 1000;
-          db.run(`UPDATE expenses SET amount = ?, paid_amount = ?, status = 'PAID' WHERE id = ?`, [newAmt, newAmt, feeExpenseId]);
-        }
-      }
-
-      // 6. Return auf REJECTED — Row + Lines bleiben erhalten (Historie, keine Orphans).
-      db.run(`UPDATE sales_returns SET status = 'REJECTED' WHERE id = ?`, [id]);
-
-      // 7. Audit ATOMAR in derselben Transaktion: logAuditOrThrow WIRFT bei Fehler →
-      //    der catch unten macht ROLLBACK, sodass weder Mutation noch Audit-Eintrag zurueckbleibt.
-      //    Kein saveDatabase hier — commitLedgerTransaction persistiert alles gemeinsam.
-      logAuditOrThrow({
-        module: 'Sales',
-        entityType: 'sales_returns',
-        entityId: id,
-        action: 'STATUS_CHANGE',
-        field: 'cancel',
-        oldValue: { ...oldSnapshot, invoiceId: r.invoiceId, returnNumber: r.returnNumber },
-        newValue: { status: 'REJECTED', reason: reason.trim(), invoiceId: r.invoiceId, reversedCreditNotes: deletedCnIds.length, removedCustomerCredits: deletedCcIds.length, cardFeeRestored: feeRestored },
-      });
-
-      commitLedgerTransaction();
-    } catch (err) {
-      rollbackLedgerTransaction();
+    // Keine stille Ersatzfiliale: ohne Sitzung wird nichts storniert.
+    let branchId: string;
+    let userId: string;
+    try { branchId = currentBranchId(); userId = currentUserId(); } catch (e) { return Promise.reject(e); }
+    return runOnPrimary(() => {
+      // Idempotent am Primary (wie bisher): eine schon stornierte Retoure ist ein No-op. Fern ist
+      // es ein eingefrorenes Nein (`RETURN_ALREADY_CANCELLED`) — dort sagt es dem Absender, dass
+      // SEIN Auftrag nichts mehr bewirkt hat.
+      const st = query('SELECT status FROM sales_returns WHERE id = ? AND branch_id = ?', [id, branchId])[0];
+      if (st && String(st.status) === 'REJECTED') return;
+      cancelReturnInHouse(id, reason, { userId, role: actorRole }, branchId);
+    }, () => {
       get().loadReturns();
       try { useCreditNoteStore.getState().loadCreditNotes(); } catch { /* */ }
-      throw err;
-    }
-
-    // ── Nach erfolgreichem Commit: NUR Sync-Tracking (trackChange → sync_changelog +
-    //    saveDatabase). Bewusst NICHT in der Transaktion — saveDatabase wuerde sonst einen
-    //    uncommitteten Zwischenstand leaken. Das Audit ist bereits ATOMAR im COMMIT (s. o.).
-    //    trackChange ist ein No-op, wenn kein LAN-Sync konfiguriert ist. ────────────────
-    try {
-      trackChange('sales_returns', id, 'update', { status: 'REJECTED', cancelReason: reason.trim() });
-      for (const cnId of deletedCnIds) trackChange('credit_notes', cnId, 'delete', {});
-      for (const ccId of deletedCcIds) trackChange('customer_credits', ccId, 'delete', {});
-      if (feeExpenseId && feeRestored > 0.0005) trackChange('expenses', feeExpenseId, 'update', { cardFeeRestored: feeRestored });
-    } catch (e) {
-      console.warn('[Return] cancel sync tracking failed (non-fatal):', e);
-    }
-
-    get().loadReturns();
-    try { useCreditNoteStore.getState().loadCreditNotes(); } catch { /* */ }
+    });
   },
 
   // Vorab-Pruefung fuer die UI: ob/warum ein Return (nicht) stornierbar ist + Lager-Warnflag.
+  // R6E — dieselbe Regel wie die Hausfolge (`returnCancelability`). Am Primary live gefragt; auf PC2
+  // kommt die Antwort des Primary mit der Liste (`store.sales_returns.get` → `cancelability`).
   getReturnCancelability: (id) => {
     const r = get().getReturn(id);
     if (!r) return { canCancel: false, blockReason: 'Return not found.', needsStockWarning: false };
-    if (r.status === 'REJECTED') return { canCancel: false, blockReason: 'Return is already cancelled.', needsStockWarning: false };
-    if ((r.refundPaidAmount || 0) > 0.005) {
-      return { canCancel: false, blockReason: `A refund of ${(r.refundPaidAmount || 0).toFixed(3)} BHD has already been paid out — reclaim it first.`, needsStockWarning: false };
-    }
-    // R4C.3 — diese Frage wird beim ZEICHNEN gestellt (die Storno-Schaltflaeche fragt sie fuer
-    // jede Retoure). Auf einem Rechner ohne eigene Datenbank warf sie mitten im Aufbau und riss
-    // die GANZE Rechnungsansicht mit: „Database not initialized". Ohne Auskunft ist die ehrliche
-    // Antwort nicht „darf stornieren", sondern das Gegenteil — dieselbe fail-closed Haltung, die
-    // `getInvoiceCardInfo` weiter unten schon hat.
-    let usedCredit: Array<Record<string, unknown>>;
+    // R4C.3 — diese Frage wird beim ZEICHNEN gestellt. Ohne Auskunft ist die ehrliche Antwort nicht
+    // „darf stornieren", sondern das Gegenteil — dieselbe fail-closed Haltung wie `getInvoiceCardInfo`.
+    const ohneAuskunft: ReturnCancelability = {
+      canCancel: false,
+      blockReason: 'Cancelling a return is only available on the main computer.',
+      needsStockWarning: false,
+    };
+    if (readsFromPrimary()) return get().cancelability[id] ?? ohneAuskunft;
     try {
-      usedCredit = query(
-        `SELECT cc.id FROM customer_credits cc
-           JOIN credit_notes cn ON cn.id = cc.source_id
-          WHERE cn.sales_return_id = ? AND cc.source_type = 'sales_return'
-            AND cc.used_amount > 0.005 LIMIT 1`,
-        [id]
-      );
+      return returnCancelability(r);
     } catch {
-      return {
-        canCancel: false,
-        blockReason: 'Cancelling a return is only available on the main computer.',
-        needsStockWarning: false,
-      };
+      return ohneAuskunft;
     }
-    if (usedCredit.length > 0) {
-      return { canCancel: false, blockReason: 'The store credit from this return has already been used.', needsStockWarning: false };
-    }
-    const disp = r.productDisposition || 'IN_STOCK';
-    const needsStockWarning = disp === 'KEEP_AS_OWN' || disp === 'RETURN_TO_OWNER';
-    return { canCancel: true, blockReason: null, needsStockWarning };
   },
 
   // ── Aggregations (unverändert — Reports lesen hier) ─────
@@ -1100,7 +896,10 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
  * geprueften Absender. Damit koennen beide Wege dieselbe Funktion benutzen, ohne dass das Lesen
  * des einen den Bildschirm des anderen anfasst.
  */
-export function loadSalesReturnsFor(ctx: BusinessReadContext): { returns: SalesReturn[] } {
+export function loadSalesReturnsFor(ctx: BusinessReadContext): {
+  returns: SalesReturn[];
+  cancelability: Record<string, ReturnCancelability>;
+} {
   const rows = query('SELECT * FROM sales_returns WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
   const returns: SalesReturn[] = rows.map((r) => {
     const ret = rowToReturn(r);
@@ -1108,5 +907,9 @@ export function loadSalesReturnsFor(ctx: BusinessReadContext): { returns: SalesR
     ret.lines = lineRows.map(rowToLine);
     return ret;
   });
-  return { returns };
+  // R6E — die Storno-Auskunft reist mit derselben Auskunft (`store.sales_returns.get`): der Knopf
+  // „Cancel Return" auf PC2 fragt dieselbe Regel wie die Hausfolge, gerechnet vom Primary.
+  const cancelability: Record<string, ReturnCancelability> = {};
+  for (const r of returns) cancelability[r.id] = returnCancelability(r);
+  return { returns, cancelability };
 }

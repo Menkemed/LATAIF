@@ -19,7 +19,8 @@ import { exportNbrVatReport, invoiceFinalizationDate } from '@/core/tax/nbr-expo
 import { matchesDeep } from '@/core/utils/deep-search';
 import { Bhd } from '@/components/ui/Bhd';
 import { useSharedRead } from '@/core/data/shared-read';
-import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
+import { useSharedWrites } from '@/core/data/shared-write';
+import { invoicePaymentBody, recordInvoicePaymentOnPrimary } from '@/core/invoices/invoice-payment-house';
 import { WriteError } from '@/components/shared/WriteError';
 import { invoiceListExtrasFor } from '@/core/data/page-reads';
 
@@ -244,8 +245,8 @@ export function InvoiceList() {
 
   // CENTRAL-UI-PARITY R6B — beide Einstiege dieser Liste (Zahlung, und die Nummernwahl, wenn sie
   // die Rechnung schliesst) fahren `invoices.record_payment`: am Primary dieselbe Domaenenfunktion
-  // wie bisher, fern dieselbe Buchung wie auf der Rechnungsseite. Der Sonderkreis ist kein Feld der
-  // Fernbuchung — am Client ein ehrliches Nein, nie still der Normalkreis.
+  // wie bisher, fern dieselbe Buchung wie auf der Rechnungsseite. R6E — die Nummernwahl reist als
+  // Wahl mit (`specialMarkOnFinal`); die Nummer vergibt der Primary.
   async function handlePayment() {
     if (!showPayment || payAmount <= 0) return;
     const inv = invoices.find(i => i.id === showPayment);
@@ -271,10 +272,11 @@ export function InvoiceList() {
     const p = pendingFinalPayment;
     setPendingFinalPayment(null);
     if (!p) return;
-    if (w.remote && specialMark) { alert(fehlertext(nichtAmClient('the special number circle'))); return; }
+    // R6E — dieselbe Hausfolge wie auf der Rechnungsseite, am Primary in EINER Transaktion.
+    const zahlung = { invoiceId: p.invoiceId, amount: p.amount, method: p.method, specialMarkOnFinal: specialMark };
     if (!await w.ok('invoices.record_payment', {
-      local: () => { recordPayment(p.invoiceId, p.amount, p.method, undefined, specialMark); return {}; },
-      remote: () => ({ invoiceId: p.invoiceId, amount: p.amount, method: p.method }),
+      local: () => recordInvoicePaymentOnPrimary(zahlung),
+      remote: () => invoicePaymentBody(zahlung),
     })) return;
     loadInvoices();
     setShowPayment(null);
@@ -514,12 +516,12 @@ export function InvoiceList() {
       {/* Record Payment */}
       <Modal open={!!showPayment} onClose={() => setShowPayment(null)} title="Record Payment" width={400}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
-          <Input label="AMOUNT (BHD)" type="number" value={payAmount || ''} onChange={e => setPayAmount(Number(e.target.value))} />
+          <Input label="AMOUNT (BHD)" type="number" value={payAmount || ''} onChange={e => setPayAmount(Number(e.target.value))} data-invoice-list-pay-amount />
           <div>
             <span className="text-overline" style={{ marginBottom: 8 }}>METHOD</span>
             <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
               {['bank_transfer', 'cash', 'card', 'benefit'].map(m => (
-                <button key={m} onClick={() => setPayMethod(m)}
+                <button key={m} onClick={() => setPayMethod(m)} data-invoice-list-pay-method={m}
                   className="cursor-pointer rounded" style={{
                     padding: '6px 14px', fontSize: 12,
                     border: `1px solid ${payMethod === m ? '#0F0F10' : '#D5D9DE'}`,

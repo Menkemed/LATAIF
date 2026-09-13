@@ -224,7 +224,8 @@ const MIGRIERT: Array<[string, string, string, string]> = [
   ['src/pages/customers/CustomerList.tsx', 'customers.create', 'createCustomer', 'handleCreate'],
   ['src/pages/customers/CustomerDetail.tsx', 'customers.update', 'updateCustomer', 'handleSave'],
   ['src/pages/watches/ProductDetail.tsx', 'products.update', 'editProductTextDurably', 'handleSave'],
-  ['src/pages/invoices/InvoiceCreate.tsx', 'invoices.create', 'createDirectInvoice', 'performSave'],
+  // R6E — der Primary-Anschluss ist die Hausfolge (Rechnung + Zahlung in EINER Transaktion).
+  ['src/pages/invoices/InvoiceCreate.tsx', 'invoices.create', 'createInvoiceOnPrimary', 'performSave'],
 ];
 /** Der Rumpf EINER Funktion — von ihrem Namen bis zur naechsten Funktion derselben Ebene. */
 function rumpfVon(s: string, name: string): string {
@@ -258,7 +259,7 @@ function rumpfVon(s: string, name: string): string {
   const erlaubt = src('src/core/bridge/command-registry.ts');
   const liste = /export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(erlaubt)?.[1] ?? '';
   const namen = [...liste.matchAll(/'([^']+)'/g)].map((m) => m[1]);
-  ok(namen.length === 80, `4 die Liste der Buchungen zaehlt 80 (R6C: +7 Stammdaten, +4 Inventur; R6D: +28) — R4B selbst fügte keine hinzu (${namen.length})`);
+  ok(namen.length === 88, `4 die Liste der Buchungen zaehlt 88 (R6C: +7 Stammdaten, +4 Inventur; R6D: +28; R6E: +8) — R4B selbst fügte keine hinzu (${namen.length})`);
   ok(!namen.includes('orders.convert_to_invoice_with_deposit'),
     '10 …und die Auftragsumwandlung hat KEINEN neuen halben Namen bekommen');
 }
@@ -322,8 +323,9 @@ function gehe(root: string): string[] {
   ok(/aendernRechnung\.remote && deltaPayment\)[\s\S]{0,120}nichtAmClient\('recording a payment while editing an invoice'\)/.test(inv)
     && /aendernRechnung\.save\(\{/.test(inv),
     '6 das Aendern einer Rechnung geht fern ueber invoices.update — nur eine Zahlung darin bleibt ein ehrliches Nein');
-  ok(/anlegen\.remote && !isEditMode && paidAmount > 0[\s\S]{0,160}nichtAmClient/.test(inv),
-    '6 …und eine Zahlung beim Anlegen ebenso — sie waere sonst Geld, das liegen bleibt');
+  // R6E — die Zahlung beim Anlegen geht seither mit (`invoices.create` + `payment`, EINE Transaktion).
+  ok(!/anlegen\.remote && !isEditMode && paidAmount > 0[\s\S]{0,160}nichtAmClient/.test(inv) && /invoiceCreatePaymentBody\(/.test(inv),
+    '6 …eine Zahlung beim Anlegen geht mit, statt liegen zu bleiben (R6E)');
 }
 
 // ════════════════════════════════════════════════════════════════════════════

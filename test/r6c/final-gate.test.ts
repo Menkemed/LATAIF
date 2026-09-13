@@ -60,7 +60,8 @@ const registry = await import('../../src/core/bridge/command-registry.ts');
 for (const m of ['read-commands', 'invoice-command', 'customer-commands', 'product-commands', 'invoice-lifecycle-commands',
   'commercial-commands', 'service-commands', 'financial-commands', 'return-commands', 'invoice-cancel-command',
   'lifecycle-commands', 'masterdata-commands', 'inventory-commands', 'store-read-commands',
-  'money-commands', 'payables-commands', 'gold-commands', 'metal-commands']) {
+  'money-commands', 'payables-commands', 'gold-commands', 'metal-commands',
+  'offer-commands', 'invoice-flag-commands', 'sales-reversal-commands', 'message-commands']) {
   await import(`../../src/core/bridge/${m}.ts`);
 }
 const perms = await import('../../src/core/bridge/command-permissions.ts');
@@ -164,14 +165,16 @@ const R6C_READ = ['inventory.session.get', 'inventory.checks.get'];
 // R6D — seither achtundzwanzig Buchungen und drei Auskünfte, alle HINTER den R6C-Namen (eigenes Gate: test/r6d).
 const R6D_MUT = ['tax.record_payment', 'banking.transfer', 'partners.record_tx', 'debts.create', 'debts.update', 'debts.record_payment', 'expenses.create', 'expenses.update', 'expenses.record_payment', 'expenses.template_create', 'expenses.template_update', 'purchases.record_payment', 'purchases.apply_credit', 'suppliers.pay', 'suppliers.apply_credit', 'suppliers.refund_credit', 'gold.payables.settle', 'gold.customer_credits.settle', 'repairs.record_gold_usage', 'repairs.add_material', 'orders.add_cost', 'orders.remove_cost', 'metals.create', 'metals.update_status', 'metals.set_spot_price', 'scrap_trades.create', 'scrap_trades.update', 'scrap_trades.cancel'];
 const R6D_READ = ['metals.spot_prices.get', 'debts.payments.get', 'suppliers.credits.get'];
+// R6E — seither acht Buchungen, keine Auskunft, alle HINTER den R6D-Namen (eigenes Gate: test/r6e).
+const R6E_MUT = ['offers.create', 'offers.update', 'offers.set_status', 'offers.convert_to_invoice', 'invoices.set_butterfly', 'returns.cancel', 'transfers.undo_convert', 'customers.log_message'];
 
 // ══ §1 — Registry 108 → 121 ══════════════════════════════════════════════════
 {
   const list = (t: string): string[] => [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const vorher = list(vor('src/core/bridge/command-registry.ts'));
   const jetzt = [...registry.ALLOWED_MUTATIONS];
-  ok(vorher.length === 41 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6C_MUT, ...R6D_MUT]) && vorher.every((o) => jetzt.includes(o)) && jetzt.length === 80,
-    `REGISTRY Buchungen 41 → 52 (R6C) → 80 (R6D): GENAU die elf R6C- und die achtundzwanzig R6D-Namen, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
+  ok(vorher.length === 41 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6C_MUT, ...R6D_MUT, ...R6E_MUT]) && vorher.every((o) => jetzt.includes(o)) && jetzt.length === 88,
+    `REGISTRY Buchungen 41 → 52 (R6C) → 80 (R6D) → 88 (R6E): GENAU die elf R6C-, die achtundzwanzig R6D- und die acht R6E-Namen, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
   const readsVor = catalogue(vor('src/core/bridge/store-read-ops.ts'));
   const readsJetzt = [...readOps.STORE_READ_OPS];
@@ -183,10 +186,10 @@ const R6D_READ = ['metals.spot_prices.get', 'debts.payments.get', 'suppliers.cre
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 108 && rJetzt.length === 152 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6C_MUT, ...R6C_READ, ...R6D_MUT, ...R6D_READ]),
-    `REGISTRY Rust 108 → 121 (R6C) → 152 (R6D): GENAU diese dreizehn und einunddreißig, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
+  ok(rVor.length === 108 && rJetzt.length === 160 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6C_MUT, ...R6C_READ, ...R6D_MUT, ...R6D_READ, ...R6E_MUT]),
+    `REGISTRY Rust 108 → 121 (R6C) → 152 (R6D) → 160 (R6E): GENAU diese dreizehn, einunddreißig und acht, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 152 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 152 Namen, die Rust durchlässt (${known.length})`);
+  ok(known.length === 160 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 160 Namen, die Rust durchlässt (${known.length})`);
   for (const op of [...R6C_MUT, ...R6C_READ]) {
     const isMut = R6C_MUT.includes(op);
     ok(known.includes(op) && rJetzt.includes(op) && (isMut ? registry.ALLOWED_MUTATIONS.includes(op) : readOps.STORE_READ_OPS.includes(op))

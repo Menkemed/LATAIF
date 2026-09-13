@@ -705,6 +705,7 @@
         "invoice_id",
         "notes",
         "offer_number",
+        "revision",
         "sent_at",
         "sent_via",
         "status",

@@ -799,12 +799,13 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
 // ── 10) Der Nachweis, dass nichts Zerstoerendes dabei ist ────────────────
 {
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 80, `SCOPE genau 80 Mutationen (R6D) (${list.length})`);
+  ok(list.length === 88, `SCOPE genau 88 Mutationen (R6E) (${list.length})`);
   for (const op of life.C3H_LIFECYCLE_MUTATIONS) ok(list.includes(op), `SCOPE ${op} ist freigegeben`);
   // Klasse C — namentlich, nicht als Sammelbegriff. Auch nach sechzehn neuen Namen.
   for (const op of fin.C3G_PRIMARY_ONLY) ok(!list.includes(op), `SCOPE ${op} bleibt Primary-only`);
-  for (const op of ['returns.cancel', 'invoices.set_special_mark', 'repairs.delete',
-    'consignments.mark_returned_after_sale', 'transfers.undo_convert', 'orders.cancel_with_money']) {
+  // R6E — `returns.cancel` (nur Eigentümer) und `transfers.undo_convert` (Storno statt Löschen) sind seither freigegeben.
+  for (const op of ['invoices.set_special_mark', 'repairs.delete',
+    'consignments.mark_returned_after_sale', 'orders.cancel_with_money']) {
     ok(!list.includes(op), `SCOPE ${op} ist NICHT dazugekommen`);
   }
   const known = knownCommands();

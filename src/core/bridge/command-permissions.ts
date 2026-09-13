@@ -18,7 +18,7 @@
 // dasselbe wie für einen unbekannten Namen — kein `runRemoteCommand`, kein Domänenaufruf, keine
 // Zeile im durablen Nachweis, keine Wirkung.
 
-import { isAdminOrManagerRole, roleHasPermission } from '../auth/role-permissions';
+import { isAdminOrManagerRole, isAdminRole, roleHasPermission } from '../auth/role-permissions';
 import { STORE_READ_OPS } from './store-read-ops';
 
 /** Wie ein Recht geprüft wird. Beides gibt es in `usePermission` schon so. */
@@ -28,13 +28,16 @@ export type PermissionRule =
   /** Die Ableitung `isAdmin` der Oberfläche: ADMIN oder MANAGER. */
   | { readonly kind: 'isAdmin'; readonly screen: string }
   /** Eines von beiden reicht — z. B. `hasPermission('payments.*') || isAdmin`. */
-  | { readonly kind: 'permissionOrAdmin'; readonly permission: string; readonly screen: string };
+  | { readonly kind: 'permissionOrAdmin'; readonly permission: string; readonly screen: string }
+  /** R6E — die Ableitung `isOwner` der Oberfläche: nur ADMIN (z. B. „Cancel Return"). */
+  | { readonly kind: 'isOwner'; readonly screen: string };
 
 const perm = (permission: string, screen: string): PermissionRule =>
   ({ kind: 'permission', permission, screen });
 const admin = (screen: string): PermissionRule => ({ kind: 'isAdmin', screen });
 const permOrAdmin = (permission: string, screen: string): PermissionRule =>
   ({ kind: 'permissionOrAdmin', permission, screen });
+const owner = (screen: string): PermissionRule => ({ kind: 'isOwner', screen });
 
 /**
  * `canRecordPayments` = `hasPermission('payments.*') || isAdmin` — InvoiceDetail bewacht damit
@@ -182,6 +185,23 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'scrap_trades.create': null,
   'scrap_trades.update': null,
   'scrap_trades.cancel': null,
+
+  // ── Angebot, Rechnungs-Lebenszyklus, Nachrichten (R6E) ──────────────────
+  // BEFUND: `OfferList` („New Offer", „Send", „Accept", „Reject") fragt `usePermission` NICHT, und
+  // „Create Invoice" in `OfferDetail` steht ohne Tor. Nur das Bearbeiten (Kopf und Positionen) sitzt
+  // hinter `perm.canEditOffers`. PC2 darf nicht weniger als derselbe Benutzer am Primary.
+  'offers.create': null,
+  'offers.update': perm('offers.edit', 'OfferDetail: perm.canEditOffers'),
+  'offers.set_status': null,
+  'offers.convert_to_invoice': null,
+  // Butterfly steht neben „Edit" hinter `perm.canEditInvoices`.
+  'invoices.set_butterfly': EDIT_INVOICES,
+  // „Cancel Return" steht nur für `perm.isOwner`, und `cancelReturn` erzwingt es zusätzlich im Store.
+  'returns.cancel': owner('InvoiceDetail: perm.isOwner (Cancel Return)'),
+  // BEFUND wie bei allen Transfer-Buchungen: `TransferTable`/`TransferDetail` ohne Rechte-Tor.
+  'transfers.undo_convert': null,
+  // `MessagePreviewModal` (Kunde, Angebot, Auftrag, Reparatur) protokolliert ohne Tor.
+  'customers.log_message': null,
 };
 
 /**
@@ -243,6 +263,7 @@ export function roleMayRunOp(role: string | null | undefined, op: string): boole
     case 'isAdmin': return isAdminOrManagerRole(role);
     case 'permissionOrAdmin':
       return roleHasPermission(role, rule.permission) || isAdminOrManagerRole(role);
+    case 'isOwner': return isAdminRole(role);
   }
 }
 
@@ -250,5 +271,7 @@ export function roleMayRunOp(role: string | null | undefined, op: string): boole
 export function requiredPermissionLabel(op: string): string {
   const rule = permissionForOp(op);
   if (!rule) return '';
-  return rule.kind === 'isAdmin' ? 'a manager or owner account' : rule.permission;
+  if (rule.kind === 'isAdmin') return 'a manager or owner account';
+  if (rule.kind === 'isOwner') return 'the owner account';
+  return rule.permission;
 }

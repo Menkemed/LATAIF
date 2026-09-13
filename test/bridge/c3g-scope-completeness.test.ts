@@ -192,7 +192,7 @@ const ACTIONS: Action[] = [
 // ── 3) Keine Klasse-C-Aktion ist registriert ─────────────────────────────
 {
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 80, `REGISTRY genau 80 Mutationen (${list.length}) — 24 aus C3G, 16 aus C3H, invoices.cancel, 11 aus R6C, 28 aus R6D`);
+  ok(list.length === 88, `REGISTRY genau 88 Mutationen (${list.length}) — 24 aus C3G, 16 aus C3H, invoices.cancel, 11 aus R6C, 28 aus R6D, 8 aus R6E`);
   const known = knownCommands();
   // CENTRAL-C3H hat die sechzehn `B_DEFERRED`-Aktionen freigeschaltet. Diese Datei bleibt der
   // Nachweis der KLASSIFIKATION — die Zahlen ziehen mit, die Einordnung nicht.
@@ -204,7 +204,8 @@ const ACTIONS: Action[] = [
       `${a.module}s.${a.fn.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase()}`,
       // R5F.1 — `invoices.cancel` ist der Rechnungsstorno (ausdruecklich freigegeben), keine der
       // beiden Klasse-C-Aktionen der Rechnung (Sondermarke, Loeschen).
-      `${a.module}s.delete`, ...(a.module === 'invoice' ? [] : [`${a.module}s.cancel`]),
+      // R6E — `returns.cancel` ist seither ausdrücklich freigegeben (Retourenstorno, nur Eigentümer).
+      `${a.module}s.delete`, ...(a.module === 'invoice' || a.module === 'return' ? [] : [`${a.module}s.cancel`]),
     ];
     ok(guesses.every((g) => !list.includes(g)),
       `REGISTRY ${a.module}.${a.fn} ist nicht registriert`);
@@ -240,7 +241,8 @@ const ACTIONS: Action[] = [
   }
   ok(new Set(Object.values(C3H_NAME_OF)).size === 16,
     'C3H sechzehn Aktionen, sechzehn Namen — keiner geteilt');
-  ok((fin.C3G_PRIMARY_ONLY as readonly string[]).length === 10,
+  // R6E — `transfers.undo_convert` ist seither freigegeben (Rechnungsstorno statt Löschen); neun bleiben Klasse C.
+  ok((fin.C3G_PRIMARY_ONLY as readonly string[]).length === 9 && !(fin.C3G_PRIMARY_ONLY as readonly string[]).includes('transfers.undo_convert'),
     'REGISTRY die Klasse-C-Liste steht als Konstante im Code');
 }
 
@@ -250,11 +252,11 @@ const ACTIONS: Action[] = [
 // zweiten Rechner nicht zu Ende zu bringen — und das wäre ein Loch, kein Feature.
 {
   const invSrc = src(INV);
-  // (a) Eine Vollzahlung braucht KEINE Sondermarke: `specialMarkOnFinal` ist ein optionaler
-  //     Parameter, und der Fernweg lässt ihn weg.
+  // (a) Eine Vollzahlung braucht KEINE Sondermarke: `specialMarkOnFinal` ist optional. R6E — der Fernweg
+  //     reicht die WAHL seither an die Hausfolge durch; die Nummer vergibt der Primary.
   const lifecycle = src('src/core/bridge/invoice-lifecycle-commands.ts');
-  ok(/recordPayment\(\s*\n?\s*req\.invoiceId, req\.amount, req\.method, req\.notes, undefined, req\.cardBrand,/.test(lifecycle.replace(/\r/g, '')),
-    'DEP die Fernzahlung uebergibt KEINE Sondermarke — sie ist optional');
+  ok(/recordInvoicePaymentInHouse\(/.test(lifecycle) && /specialMarkOnFinal: req\.specialMarkOnFinal/.test(lifecycle),
+    'DEP die Fernzahlung reicht die Wahl der Sondermarke durch — sie ist optional');
   ok(/specialMarkOnFinal\?: boolean|specialMarkOnFinal,/.test(invSrc),
     'DEP …und die Domaene behandelt sie als optional');
   ok(!/setSpecialMark\(/.test(src('src/core/bridge/financial-commands.ts')),

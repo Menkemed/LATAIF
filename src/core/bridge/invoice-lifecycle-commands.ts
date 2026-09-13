@@ -40,6 +40,8 @@ import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
 import { useInvoiceStore } from '@/stores/invoiceStore';
+import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
+import { recordInvoicePaymentInHouse } from '@/core/invoices/invoice-payment-house';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
@@ -232,20 +234,38 @@ export interface PaymentRequest {
   method: typeof METHODS[number];
   notes?: string;
   cardBrand?: typeof CARD_BRANDS[number];
+  /** R6E — die Wahl aus „Final Number Type"; wirkt nur auf der Zahlung, die die Rechnung schließt. */
+  specialMarkOnFinal?: boolean;
 }
 
 /**
+ * R6E — was eine Zahlung NIE mitbringt: die Nummer, die Marke, den Stand, den Status, den Schlüssel.
+ * Namentlich, damit die Antwort sagt, WER das entscheidet.
+ */
+const PAYMENT_FORBIDDEN = [
+  'id', 'paymentId', 'branchId', 'tenantId', 'userId', 'createdBy', 'createdAt', 'receivedAt', 'revision',
+  'status', 'invoiceNumber', 'specialMark', 'paidAmount', 'openAmount', 'grossAmount',
+  'ledger', 'account', 'debit', 'credit',
+];
+
+/**
  * Was ein Mensch am Zahlungsdialog eingibt — und nichts sonst. Ausdrücklich NICHT dabei: der
- * Zahlungsschlüssel (den vergibt der Primary), der neue Stand, der Status, die Belegnummer und die
- * Marke einer Sonderrechnung: `specialMarkOnFinal` entscheidet, unter welchem Zähler eine
- * Rechnung bei Vollzahlung ihre endgültige Nummer bekommt — das ist keine Eingabe eines
- * Zweitrechners.
+ * Zahlungsschlüssel (den vergibt der Primary), der neue Stand, der Status und die Belegnummer.
+ *
+ * R6E — `specialMarkOnFinal` ist jetzt dabei, als reine WAHL (ja/nein) aus dem Dialog „Final Number
+ * Type", den die Maske genau dann zeigt, wenn diese Zahlung die Rechnung schließt. Die Nummer selbst
+ * zieht der Primary aus seinem Zähler (SINV/SRINV bzw. INV/RINV); ein Client nennt sie nie. Auf einer
+ * Zahlung, die NICHT schließt, bleibt die Wahl ohne Wirkung — dieselbe Semantik wie am Primary.
  */
 export function parsePaymentPayload(raw: unknown): PaymentRequest {
   if (!isPlain(raw)) throw new InvoicePayloadError('payload must be an object');
-  const allowed = new Set(['invoiceId', 'amount', 'method', 'notes', 'cardBrand']);
+  const allowed = new Set(['invoiceId', 'amount', 'method', 'notes', 'cardBrand', 'specialMarkOnFinal']);
   for (const k of Object.keys(raw)) {
+    if (PAYMENT_FORBIDDEN.includes(k)) throw new InvoicePayloadError(`the primary decides ${k}, not the client`);
     if (!allowed.has(k)) throw new InvoicePayloadError(`unknown field: ${k}`);
+  }
+  if (raw.specialMarkOnFinal !== undefined && typeof raw.specialMarkOnFinal !== 'boolean') {
+    throw new InvoicePayloadError('specialMarkOnFinal must be true or false');
   }
   const invoiceId = raw.invoiceId;
   if (typeof invoiceId !== 'string' || !invoiceId.trim()) throw new InvoicePayloadError('invoiceId is required');
@@ -267,30 +287,29 @@ export function parsePaymentPayload(raw: unknown): PaymentRequest {
     method: method as PaymentRequest['method'],
     notes: raw.notes as string | undefined,
     cardBrand: raw.cardBrand as PaymentRequest['cardBrand'],
+    ...(typeof raw.specialMarkOnFinal === 'boolean' ? { specialMarkOnFinal: raw.specialMarkOnFinal } : {}),
   };
 }
 
 export function runInvoicePayment(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parsePaymentPayload(raw);
   return runRemoteCommand(deps, identity, () => {
-    const live = query('SELECT id, status FROM invoices WHERE id = ?', [req.invoiceId])[0];
-    if (!live) throw new CommandRejected('INVOICE_NOT_FOUND', 'no such invoice');
-    if (String(live.status) === 'CANCELLED') {
-      throw new CommandRejected('INVOICE_CANCELLED', 'a cancelled invoice takes no payment');
-    }
-    let paymentId: string;
     try {
-      // Der Rest wird vom Haus gegen den FRISCHEN Stand gerechnet: Aufteilung bei Überzahlung,
-      // Statuswechsel, und bei Vollzahlung die neue Belegnummer aus dem passenden Zähler.
-      paymentId = useInvoiceStore.getState().recordPayment(
-        req.invoiceId, req.amount, req.method, req.notes, undefined, req.cardBrand,
-      );
+      // R6E — DIESELBE Hausfolge wie „Record Payment" / „Final Number Type" am Primary: die
+      // Rechnung in der Filiale des Auftrags, frisch geladen; Aufteilung bei Überzahlung,
+      // Statuswechsel, bei Vollzahlung die Endnummer aus dem gewählten Zähler; eine gescheiterte
+      // Nebenbuchung (Kartengebühr) nimmt alles zurück.
+      const r = recordInvoicePaymentInHouse({
+        invoiceId: req.invoiceId, amount: req.amount, method: req.method, notes: req.notes,
+        cardBrand: req.cardBrand, specialMarkOnFinal: req.specialMarkOnFinal,
+      }, identity.branchId);
+      return { ...r } as unknown as Record<string, unknown>;
     } catch (err) {
+      if (err instanceof InvoiceActionRejected) throw new CommandRejected(err.code, err.message);
       const verdict = asEditVerdict(err);
       if (verdict) throw verdict;
       throw err;
     }
-    return { ...stateOf(req.invoiceId), paymentId } as unknown as Record<string, unknown>;
   });
 }
 

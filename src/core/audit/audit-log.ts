@@ -50,6 +50,12 @@ export interface LogAuditInput {
   field?: string;
   oldValue?: unknown;
   newValue?: unknown;
+  /**
+   * CENTRAL-UI-PARITY R6E — wer es WIRKLICH getan hat. Ein Fernauftrag läuft am Primary, dessen
+   * Sitzung ein anderer Mensch ist; ohne diese Angabe stünde dessen Name im Protokoll. Fehlt sie,
+   * gilt wie bisher die Sitzung.
+   */
+  actor?: { userId?: string; branchId?: string };
 }
 
 // STORAGE-PERF-I1 §13 — the ONE serialisation choke point for audit values, and
@@ -68,6 +74,8 @@ function writeAuditRow(input: LogAuditInput): void {
   let userId: string | null = null;
   try { branchId = currentBranchId(); } catch { /* not logged in yet */ }
   try { userId = currentUserId(); } catch { /* not logged in yet */ }
+  if (input.actor?.branchId) branchId = input.actor.branchId;
+  if (input.actor?.userId) userId = input.actor.userId;
 
   db.run(
     `INSERT INTO audit_log (id, branch_id, module, entity_type, entity_id, action_type,

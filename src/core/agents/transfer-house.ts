@@ -15,9 +15,11 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { query, currentBranchId } from '@/core/db/helpers';
 import { saveDatabaseDurably } from '@/core/db/database';
-import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction } from '@/core/ledger/posting';
+import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction, watchLedgerPosts } from '@/core/ledger/posting';
 import { runExclusive } from '@/core/bridge/command-scheduler';
-import { useAgentStore } from '@/stores/agentStore';
+import { runOnPrimary } from '@/core/data/primary-action';
+import { isClientMode } from '@/core/bridge/client-mode';
+import { useAgentStore, type TransferConvertUndone } from '@/stores/agentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useProductStore } from '@/stores/productStore';
@@ -184,4 +186,53 @@ export function convertTransferOnPrimary(transferId: string, billTo: TransferBil
 /** „Create Combined Invoice" am Primary. */
 export function convertTransfersOnPrimary(ids: readonly string[], billTo: TransferBillTo): Promise<TransferConversion> {
   return amPrimary(() => convertTransfersInHouse(ids, billTo, currentBranchId()));
+}
+
+// ── R6E — „Undo convert": die Umwandlung zurücknehmen, ohne die Rechnung zu löschen ──────────
+
+export interface TransferConversionUndone extends TransferConvertUndone {
+  transferId: string;
+}
+
+/** Der Knopf „Undo"/„Undo Convert": nur mit Rechnung, und nur solange sie (sichtbar) nicht bezahlt ist. */
+export function canUndoTransferConvert(t: { invoiceId?: string | null }, invoice?: { paidAmount?: number } | null): boolean {
+  return !!t.invoiceId && (!invoice || (invoice.paidAmount || 0) <= 0.005);
+}
+
+/** Der Rumpf von `transfers.undo_convert` — der Transfer mit seiner gesehenen Fassung, sonst nichts. */
+export function transferUndoBody(t: { id: string; revision?: number }): Record<string, unknown> {
+  return { transferId: t.id, expectedRevision: t.revision };
+}
+
+/**
+ * „Undo convert": die EINE Folge, die der Fernbefehl in seiner Transaktion ruft. Der Transfer muss
+ * in DIESER Filiale stehen; die gesehene Fassung wird vor jeder Regel verglichen. Den Rest — Regel
+ * „bezahlt", Storno der Rechnung, Stück, Verkaufsforderung, Entkoppeln aller Transfers — trägt die
+ * Hausfunktion. Eine abgefangene Buchung irgendwo darin bricht die ganze Handlung ab.
+ */
+export function undoTransferConversionInHouse(transferId: string, branchId: string, expectedRevision?: number): TransferConversionUndone {
+  if (isClientMode()) {
+    throw new TransferActionRejected('TRANSFER_PRIMARY_ONLY', 'a conversion is undone on the main computer — this window has no business database');
+  }
+  const row = query('SELECT id, revision FROM agent_transfers WHERE id = ? AND branch_id = ?', [transferId, branchId])[0];
+  if (!row) throw new TransferActionRejected('TRANSFER_NOT_FOUND', 'no such transfer in this branch');
+  if (expectedRevision !== undefined && Number(row.revision ?? 0) !== expectedRevision) {
+    throw new TransferActionRejected('RECORD_CHANGED',
+      `this transfer changed since you opened it (you saw ${expectedRevision}, it is now ${Number(row.revision ?? 0)}) — reopen it`);
+  }
+  frischLesen();
+  const buchung = watchLedgerPosts('undo transfer conversion');
+  const out = useAgentStore.getState().undoTransferInvoiceConvert(transferId, branchId);
+  buchung();
+  return { transferId, ...out };
+}
+
+/** „Undo convert" am Primary — dieselbe Folge, EINE Klammer, erst danach durabel. */
+export function undoTransferConversionOnPrimary(transferId: string, expectedRevision?: number): Promise<TransferConversionUndone> {
+  if (isClientMode()) {
+    return Promise.reject(new TransferActionRejected('TRANSFER_PRIMARY_ONLY',
+      'a conversion is undone on the main computer — this window has no business database'));
+  }
+  const branchId = currentBranchId();
+  return runOnPrimary(() => undoTransferConversionInHouse(transferId, branchId, expectedRevision), frischLesen);
 }

@@ -27,6 +27,51 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 // CENTRAL-UI-PARITY R6C — die eine Stammdaten-Regel; Umsatzsummen führt das Haus, kein Formular.
 import { agentUpdateInput } from '@/core/masterdata/masterdata-rules';
+// CENTRAL-UI-PARITY R6E — „Undo convert" storniert die Rechnung über die geteilte Grundlage.
+import { reverseInvoiceInHouse } from '@/core/invoices/invoice-reversal';
+import { TransferActionRejected } from '@/core/agents/transfer-rules';
+
+/** Was „Undo convert" bewirkt hat — die Antwort der Hausfunktion. */
+export interface TransferConvertUndone {
+  invoiceId: string;
+  /** Alle Transfers, die an dieser Rechnung hingen (Sammelrechnung: mehrere). */
+  transferIds: string[];
+  /** `false`: die Rechnung fehlte oder war schon storniert — dann wird nur entkoppelt (wie bisher). */
+  invoiceReversed: boolean;
+  /** Wie viele Verkaufsforderungen (AGENT_TRANSFER_SOLD) wieder stehen. */
+  receivablesRestored: number;
+}
+
+/**
+ * R6E — die Forderung aus dem Agenten-Verkauf wieder stellen, die die Umwandlung storniert hatte.
+ * Nur dort, wo es sie gab und ihr letzter Zyklus storniert ist (`hasReversalFor`): eine lebende
+ * Buchung (die Umwandlung hat sie nie angefasst) oder gar keine (Agent ohne Kunde beim Verkauf)
+ * bleibt, wie sie ist. Gebucht wird genau, was der Verkauf gebucht hatte — derselbe Betrag, derselbe
+ * Kunde, derselbe Einstand (`markTransferSold` rechnete sie aus Abrechnung, Agent-Kunde und ältestem
+ * Los) —, datiert auf jetzt, wie jede Neubuchung in einem Umkehr-Zyklus.
+ */
+function verkaufsforderungWiederStellen(transferId: string, occurredAt: string): boolean {
+  if (!hasReversalFor('AGENT_TRANSFER_SOLD', transferId)) return false;
+  const letzte = query(
+    `SELECT transaction_id FROM ledger_entries
+      WHERE source_module = 'AGENT_TRANSFER_SOLD' AND source_id = ? AND reverses_entry_id IS NULL
+      ORDER BY recorded_at DESC, rowid DESC LIMIT 1`,
+    [transferId],
+  )[0];
+  const beine = query(
+    `SELECT account, direction, amount, counterparty_id FROM ledger_entries
+      WHERE transaction_id = ? AND reverses_entry_id IS NULL`,
+    [String(letzte?.transaction_id ?? '')],
+  );
+  const ar = beine.find((b) => b.account === 'ACCOUNTS_RECEIVABLE' && b.direction === 'DEBIT');
+  if (!ar) throw new Error(`undo convert: the sale posting of ${transferId} has no receivable leg`);
+  const cogs = beine.find((b) => b.account === 'COGS' && b.direction === 'DEBIT');
+  postAgentTransferSold(
+    { transferId, amount: Number(ar.amount ?? 0), soldAt: occurredAt, cost: Number(cogs?.amount ?? 0) },
+    String(ar.counterparty_id ?? ''),
+  );
+  return true;
+}
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -70,7 +115,9 @@ interface AgentStore {
   convertTransfersToInvoice: (transferIds: string[], customerId: string) => Invoice;
   // Plan §Agent §Convert §Undo: Convert rückgängig machen. Erlaubt nur solange
   // die Invoice noch nicht (teilweise) bezahlt wurde — sonst Doppelbuchung.
-  undoTransferInvoiceConvert: (transferId: string) => void;
+  // R6E — die Hausfunktion hinter `undoTransferConversionInHouse` (Primary und PC2). Sie läuft in
+  // der Transaktion ihres Aufrufers; die Rechnung wird storniert, nicht mehr gelöscht.
+  undoTransferInvoiceConvert: (transferId: string, branchId?: string) => TransferConvertUndone;
   // Plan §8 #5 — Audit-Trail der Settlement-Zahlungen.
   getSettlementPayments: (transferId: string) => Array<{ id: string; amount: number; method: string; paidAt: string; note?: string }>;
   deleteTransfer: (id: string) => void;
@@ -786,37 +833,80 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     });
   },
 
-  undoTransferInvoiceConvert: (transferId) => {
-    const transfer = get().getTransfer(transferId);
-    if (!transfer) throw new Error('Transfer not found.');
-    if (!transfer.invoiceId) throw new Error('This transfer has no linked invoice.');
-    const inv = useInvoiceStore.getState();
-    const invoice = inv.invoices.find(i => i.id === transfer.invoiceId);
-    // Bulk-Convert: mehrere Transfers können auf dieselbe Invoice zeigen.
-    // Beim Undo löschen wir die geteilte Invoice — also müssen ALLE
-    // koppelnden Transfers entlinkt werden, sonst hängen sie mit toter
-    // invoiceId rum.
-    const sharedTransferIds = get().transfers
-      .filter(t => t.invoiceId === transfer.invoiceId)
-      .map(t => t.id);
-
-    if (!invoice) {
-      // Invoice fehlt → alle Links löschen, Daten konsistent halten.
-      for (const tid of sharedTransferIds) {
-        get().updateTransfer(tid, { invoiceId: undefined });
+  undoTransferInvoiceConvert: (transferId, branchIdArg) => {
+    // R6E — vorher LÖSCHTE dieser Weg die Rechnung hart (`deleteInvoice`: Beleg, Zeilen, Nummer
+    // fort) und koppelte die Transfers ab; die Forderung aus dem Agenten-Verkauf, die die
+    // Umwandlung storniert hatte, kam nie zurück — der Transfer stand „sold" ohne Forderung. Und
+    // er las Transfer und Rechnung aus den GELADENEN Listen. Jetzt, alles aus der DATENBANK und in
+    // der Transaktion des Aufrufers (`undoTransferConversionInHouse`):
+    //   1. die Rechnung wird STORNIERT (`reverseInvoiceInHouse`), der Beleg bleibt als CANCELLED;
+    //   2. das Stück bleibt, wie der Agenten-Verkauf es hinterlassen hat (s. u.);
+    //   3. die Verkaufsforderung steht wieder, wo die Umwandlung sie storniert hatte;
+    //   4. ALLE Transfers dieser Rechnung (Sammelrechnung) sind wieder ohne Rechnung — genau der
+    //      Stand vor der Umwandlung.
+    const branchId = branchIdArg ?? currentBranchId();
+    const t = query('SELECT id, invoice_id FROM agent_transfers WHERE id = ? AND branch_id = ?', [transferId, branchId])[0];
+    if (!t) throw new TransferActionRejected('TRANSFER_NOT_FOUND', 'no such transfer in this branch');
+    const invoiceId = String(t.invoice_id ?? '');
+    if (!invoiceId) throw new TransferActionRejected('TRANSFER_NOT_CONVERTED', 'This transfer has no linked invoice.');
+    // Bulk-Convert: mehrere Transfers können auf dieselbe Invoice zeigen — ALLE werden entkoppelt,
+    // sonst hingen sie an einer stornierten Rechnung.
+    const geteilt = query(
+      'SELECT id, product_id FROM agent_transfers WHERE invoice_id = ? AND branch_id = ? ORDER BY created_at, id',
+      [invoiceId, branchId],
+    );
+    const inv = query('SELECT id, branch_id, status, paid_amount FROM invoices WHERE id = ?', [invoiceId])[0];
+    if (inv && String(inv.branch_id ?? '') !== branchId) {
+      throw new TransferActionRejected('INVOICE_NOT_FOUND', 'the invoice of this transfer is not in this branch');
+    }
+    // Die bestehende Regel: mit einer Zahlung kein Undo (würde doppelt buchen).
+    if (inv && Number(inv.paid_amount ?? 0) > 0.005) {
+      throw new TransferActionRejected('TRANSFER_INVOICE_PAID',
+        'The invoice already has a payment — undo is not allowed (it would book twice). Delete the payment first, then undo.');
+    }
+    const now = new Date().toISOString();
+    let invoiceReversed = false;
+    let receivablesRestored = 0;
+    if (inv && String(inv.status ?? '') !== 'CANCELLED') {
+      // Das Stück hat der Agenten-VERKAUF aus dem Bestand genommen (`markTransferSold`: Menge −1,
+      // bei 0 „sold"), nicht die Rechnung. Der Storno der Rechnung gibt ihr Los zurück (richtig —
+      // vor der Umwandlung war es unberührt) und rechnet die Menge dabei aus den Losen neu; das
+      // hebt die Entnahme des Verkaufs auf. Also: Menge und Status des Stücks bleiben, wie sie vor
+      // dem Storno waren — die Umwandlung hatte sie nicht verändert.
+      const produktIds = [...new Set(geteilt.map((g) => String(g.product_id ?? '')).filter(Boolean))];
+      const stuecke = produktIds
+        .map((pid) => query('SELECT id, quantity, stock_status FROM products WHERE id = ?', [pid])[0])
+        .filter((p): p is Record<string, unknown> => !!p);
+      reverseInvoiceInHouse(invoiceId, branchId, {
+        requireNoReturns: {
+          code: 'TRANSFER_INVOICE_HAS_RETURNS',
+          message: 'this invoice has a return or credit note — cancel the return first, then undo the conversion',
+        },
+      });
+      invoiceReversed = true;
+      const db = getDatabase();
+      for (const p of stuecke) {
+        const jetzt = query('SELECT quantity, stock_status FROM products WHERE id = ?', [String(p.id)])[0];
+        if (jetzt && Number(jetzt.quantity ?? 0) === Number(p.quantity ?? 0) && String(jetzt.stock_status ?? '') === String(p.stock_status ?? '')) continue;
+        db.run('UPDATE products SET quantity = ?, stock_status = ?, updated_at = ? WHERE id = ?',
+          [p.quantity ?? null, p.stock_status ?? null, now, String(p.id)]);
+        trackProductRow(String(p.id));
       }
-      return;
+      for (const g of geteilt) {
+        if (verkaufsforderungWiederStellen(String(g.id), now)) receivablesRestored++;
+      }
     }
-    if ((invoice.paidAmount || 0) > 0.005) {
-      throw new Error(
-        'Invoice hat schon eine Zahlung — Undo nicht erlaubt (würde Doppelbuchung erzeugen). Erst Payment löschen, dann Undo.'
-      );
+    // Fehlt die Rechnung oder ist sie schon storniert, ist sie bereits umgekehrt — dann geht, wie
+    // bisher, nur die Verknüpfung.
+    for (const g of geteilt) {
+      get().updateTransfer(String(g.id), { invoiceId: undefined });
     }
-    inv.deleteInvoice(invoice.id);
-    for (const tid of sharedTransferIds) {
-      get().updateTransfer(tid, { invoiceId: undefined });
-      eventBus.emit('agent_transfer.invoice_undone', 'agent_transfer', tid, { invoiceId: invoice.id });
+    if (inv) {
+      for (const g of geteilt) {
+        eventBus.emit('agent_transfer.invoice_undone', 'agent_transfer', String(g.id), { invoiceId });
+      }
     }
+    return { invoiceId, transferIds: geteilt.map((g) => String(g.id)), invoiceReversed, receivablesRestored };
   },
 }));
 

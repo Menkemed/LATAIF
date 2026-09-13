@@ -1,8 +1,11 @@
 import { create } from 'zustand';
-import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
-import { trackInsert } from '@/core/sync/track';
+import { query } from '@/core/db/helpers';
+import { runOnPrimary } from '@/core/data/primary-action';
+import {
+  assertMessagesHere, localMessageCtx, logCustomerMessageInHouse,
+  type LoggedMessage, type MessageLogInput,
+} from '@/core/customers/message-house';
 
 export type MessageChannel = 'whatsapp' | 'ai_copy' | 'email' | 'sms' | 'phone' | 'in_person';
 export type MessageDirection = 'outbound' | 'inbound';
@@ -21,21 +24,11 @@ export interface CustomerMessage {
   createdAt: string;
 }
 
-interface LogInput {
-  customerId: string;
-  channel: MessageChannel;
-  body: string;
-  kind?: string;
-  subject?: string;
-  linkedEntityType?: string;
-  linkedEntityId?: string;
-  direction?: MessageDirection;
-}
-
 interface Store {
   messagesByCustomer: Record<string, CustomerMessage[]>;
   loadMessages: (customerId: string) => void;
-  logMessage: (input: LogInput) => CustomerMessage | null;
+  /** R6E — wirft bei einem Nein (kein stilles `null` mehr); siehe `logCustomerMessageOnPrimary`. */
+  logMessage: (input: MessageLogInput) => Promise<LoggedMessage>;
   deleteMessage: (id: string, customerId: string) => void;
 }
 
@@ -70,39 +63,9 @@ export const useCustomerMessageStore = create<Store>((set, get) => ({
     }
   },
 
-  logMessage: (input) => {
-    if (!input.body?.trim()) return null;
-    try {
-      const db = getDatabase();
-      const id = uuid();
-      const now = new Date().toISOString();
-      let branchId: string, userId: string;
-      try { branchId = currentBranchId(); userId = currentUserId(); }
-      catch { branchId = 'branch-main'; userId = 'user-owner'; }
-
-      db.run(
-        `INSERT INTO customer_messages
-           (id, branch_id, customer_id, channel, direction, kind, subject, body,
-            linked_entity_type, linked_entity_id, sent_at, created_by, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [id, branchId, input.customerId, input.channel, input.direction || 'outbound',
-         input.kind || null, input.subject || null, input.body,
-         input.linkedEntityType || null, input.linkedEntityId || null, now, userId, now]
-      );
-      saveDatabase();
-      trackInsert('customer_messages', id, { customerId: input.customerId, channel: input.channel, kind: input.kind });
-      get().loadMessages(input.customerId);
-      return {
-        id, customerId: input.customerId, channel: input.channel,
-        direction: input.direction || 'outbound', kind: input.kind, subject: input.subject,
-        body: input.body, linkedEntityType: input.linkedEntityType, linkedEntityId: input.linkedEntityId,
-        sentAt: now, createdAt: now,
-      };
-    } catch (err) {
-      console.warn('[CustomerMessages] log failed:', err);
-      return null;
-    }
-  },
+  // CENTRAL-UI-PARITY R6E — keine eigene Zeile mehr hier: dieselbe Hausfolge wie der Fernbefehl
+  // `customers.log_message`, in der Schreibreihenfolge des Primary.
+  logMessage: (input) => logCustomerMessageOnPrimary(input),
 
   deleteMessage: (id, customerId) => {
     const db = getDatabase();
@@ -111,3 +74,23 @@ export const useCustomerMessageStore = create<Store>((set, get) => ({
     get().loadMessages(customerId);
   },
 }));
+
+/**
+ * CENTRAL-UI-PARITY R6E — „Copy"/„WhatsApp" der Nachrichtenmaske am Primary: die Hausfolge
+ * exklusiv, in EINER Transaktion, erst danach durabel (`runOnPrimary`). Vorher schrieb der Store
+ * synchron an der Schreibreihenfolge vorbei, fiel ohne Sitzung auf 'branch-main'/'user-owner'
+ * zurück und machte aus jedem Fehler ein stilles `null`.
+ *
+ * Auf einem Rechner ohne Datenbank verweigert der Riegel, BEVOR eine Transaktion geöffnet wird —
+ * dort geht die Maske über die Brücke.
+ */
+export function logCustomerMessageOnPrimary(input: MessageLogInput): Promise<LoggedMessage> {
+  try { assertMessagesHere(); } catch (e) { return Promise.reject(e); }
+  return runOnPrimary(
+    () => {
+      const ctx = localMessageCtx();
+      return logCustomerMessageInHouse(input, ctx.branchId, ctx.userId);
+    },
+    () => useCustomerMessageStore.getState().loadMessages(input.customerId),
+  );
+}

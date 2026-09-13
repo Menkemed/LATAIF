@@ -24,7 +24,9 @@ import { WriteError } from '@/components/shared/WriteError';
 import {
   canCombineTransfer, canConvertTransfer, transferBillTo, transferConvertBody, transferConvertManyBody, transferEditPatch,
 } from '@/core/agents/transfer-rules';
-import { convertTransferOnPrimary, convertTransfersOnPrimary } from '@/core/agents/transfer-house';
+import {
+  canUndoTransferConvert, convertTransferOnPrimary, convertTransfersOnPrimary, transferUndoBody, undoTransferConversionOnPrimary,
+} from '@/core/agents/transfer-house';
 
 
 // Display-Status (User-Spec: Transfer ↔ Invoice synchron). Wenn der Transfer
@@ -74,7 +76,7 @@ interface TransferTableProps {
 export function TransferTable({ transfers, showAgentColumn = true, emptyMessage }: TransferTableProps) {
   const navigate = useNavigate();
   const { agents, transfers: allTransfers, markTransferSold, markTransferReturned,
-    undoTransferInvoiceConvert, updateTransfer, deleteTransfer } = useAgentStore();
+    updateTransfer, deleteTransfer } = useAgentStore();
   // CENTRAL-UI-PARITY R4C.2 — dieselbe Tabelle, zwei Anschluesse hinter jeder Handlung.
   const { loadTransfers } = useAgentStore();
   const w = useSharedWrites();
@@ -105,6 +107,20 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
       remote: () => ({ transferId, salePrice, expectedRevision: fassung }),
     })) return;
     loadTransfers();
+  }
+
+  /** R6E — „Undo": die Rechnung wird STORNIERT (nicht mehr geloescht), jeder Transfer dieser Rechnung
+   *  steht wieder ohne Rechnung und die Verkaufsforderung wieder da. Am Primary dieselbe Hausfolge. */
+  async function umwandlungZuruecknehmen(transferId: string) {
+    if (!window.confirm('Undo convert? The invoice will be cancelled and the transfer reset to "Sold".')) return;
+    const fassung = fassungVon(transferId, 'undoing this conversion');
+    if (fassung === null) return;
+    if (!await w.ok('transfers.undo_convert', {
+      local: () => undoTransferConversionOnPrimary(transferId, fassung || undefined),
+      remote: () => transferUndoBody({ id: transferId, revision: fassung }),
+    })) return;
+    loadTransfers();
+    useInvoiceStore.getState().loadInvoices();
   }
 
   /** R4C.2 — Stammdaten des Transfers: Preis, Rueckgabedatum, Notiz. R5D.1 — auf beiden Seiten
@@ -445,7 +461,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                 </button>
               )}
               {t.invoiceId && (() => {
-                const canUndo = !linkedInvoice || (linkedInvoice.paidAmount || 0) <= 0.005;
+                const canUndo = canUndoTransferConvert(t, linkedInvoice);
                 return (
                   <>
                     <button onClick={() => navigate(`/invoices/${t.invoiceId}`)}
@@ -453,11 +469,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                       <FileText size={11} /> View Invoice
                     </button>
                     {canUndo && (
-                      <button onClick={() => {
-                        if (!window.confirm(`Undo convert? The invoice will be deleted and the transfer reset to "Sold".`)) return;
-                        try { undoTransferInvoiceConvert(t.id); }
-                        catch (err) { alert(err instanceof Error ? err.message : String(err)); }
-                      }}
+                      <button data-transfer-undo disabled={w.busy} onClick={() => void umwandlungZuruecknehmen(t.id)}
                         title="Undo convert (only possible while invoice is unpaid)"
                         className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #D5D9DE', color: '#6B7280', borderRadius: 4, background: 'none' }}>
                         Undo

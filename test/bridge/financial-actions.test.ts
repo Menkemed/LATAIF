@@ -200,7 +200,7 @@ function giveCredit(db: Db, customerId: string, amount: number, id = 'cr-1'): vo
   // CENTRAL-C3H hat sechzehn weitere freigeschaltet — die, die C3G ausdruecklich als
   // `B_DEFERRED` liegen liess. Was diese Datei prueft, bleibt: die SIEBEN aus C3G stehen drauf,
   // und die zehn Klasse-C-Namen stehen es weiterhin NICHT.
-  ok(list.length === 80, `SCOPE genau 80 Mutationen (R6D) (${list.length})`);
+  ok(list.length === 88, `SCOPE genau 88 Mutationen (R6E) (${list.length})`);
   for (const op of ['invoices.apply_credit', 'invoices.update_payment', 'invoices.delete_payment',
     'orders.convert_to_invoice', 'consignments.record_payout', 'transfers.mark_sold', 'transfers.mark_settled']) {
     ok(list.includes(op), `SCOPE ${op} ist freigegeben`);
@@ -216,7 +216,8 @@ function giveCredit(db: Db, customerId: string, amount: number, id = 'cr-1'): vo
     'repairs.create_invoice', 'transfers.convert_to_invoice', 'orders.add_payment']) {
     ok(list.includes(op), `SCOPE ${op} ist in C3H freigeschaltet`);
   }
-  for (const op of ['invoices.create_return', 'invoices.create_credit_note', 'returns.cancel',
+  // R6E — `returns.cancel` gibt es seither wirklich (Retourenstorno, nur Eigentümer); die übrigen bleiben erfunden.
+  for (const op of ['invoices.create_return', 'invoices.create_credit_note',
     'repairs.set_status', 'orders.set_status']) {
     ok(!list.includes(op), `SCOPE ${op} gibt es nicht — kein erfundener Name`);
   }

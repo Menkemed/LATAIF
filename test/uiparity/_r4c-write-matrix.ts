@@ -59,8 +59,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   // ── Rechnungen ───────────────────────────────────────────────────────────
   {
     op: 'invoices.create', handlung: 'Direktverkauf anlegen', ort: 'pages/invoices/InvoiceCreate.tsx',
-    lokal: 'createDirectInvoice', paritaet: 'exakt', verdrahtet: true, luecke: null,
-    grund: 'R4B — ohne Zahlung beim Anlegen; die ist am Client sichtbar gesperrt (Klasse B).',
+    lokal: 'createInvoiceOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R4B — der Anlageweg. R6E — die Zahlung beim Anlegen geht mit (`payment`), Rechnung und Zahlung in EINER Hausfolge (core/invoices/invoice-create-house).',
   },
   {
     op: 'invoices.update', handlung: 'Rechnungszeilen aendern', ort: 'pages/invoices/InvoiceDetail.tsx',

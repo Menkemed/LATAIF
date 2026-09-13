@@ -93,33 +93,11 @@ eventBus.on('product.created', (event: DomainEvent) => {
   }
 });
 
-// ── offer.sent ──
-// Create a follow-up task in 3 days
-eventBus.on('offer.sent', (event: DomainEvent) => {
-  insertTask({
-    title: 'Follow up on sent offer',
-    description: `Offer ${event.payload.offerNumber || event.entityId} was sent. Follow up with the customer to check interest.`,
-    type: 'follow_up',
-    priority: 'medium',
-    dueAt: addDays(3),
-    linkedEntityType: 'offer',
-    linkedEntityId: event.entityId,
-  });
-});
-
-// ── offer.accepted ──
-// Create task "Create invoice"
-eventBus.on('offer.accepted', (event: DomainEvent) => {
-  insertTask({
-    title: 'Create invoice for accepted offer',
-    description: `Offer ${event.payload.offerNumber || event.entityId} has been accepted. Create an invoice to proceed with the sale.`,
-    type: 'general',
-    priority: 'high',
-    dueAt: addDays(1),
-    linkedEntityType: 'offer',
-    linkedEntityId: event.entityId,
-  });
-});
+// ── offer.sent / offer.accepted ──
+// CENTRAL-UI-PARITY R6E — die Nachfass-Aufgabe (3 Tage) und die Aufgabe „Create invoice" schreibt
+// jetzt die Hausfolge des Statuswechsels selbst (`core/offers/offer-house.ts`), in DERSELBEN
+// Transaktion wie den Status. Hier liefen sie NACH dem Schreiben mit verschlucktem Fehler — und
+// vom zweiten Rechner aus gar nicht, weil dort kein Ereignis entsteht.
 
 // ── invoice.issued ──
 // Create payment reminder (due in 14 days)
@@ -241,44 +219,11 @@ eventBus.on('customer.dormant', (event: DomainEvent) => {
 // CLOSED-LOOP: Product status + stock updates
 // ═══════════════════════════════════════════════════════════
 
-// ── offer.created ──
-// Mark all products in the offer as "offered"
-eventBus.on('offer.created', (event: DomainEvent) => {
-  const db = getDatabase();
-  const now = new Date().toISOString();
-  const offerLines = query(
-    `SELECT product_id FROM offer_lines WHERE offer_id = ?`,
-    [event.entityId]
-  );
-  for (const line of offerLines) {
-    db.run(
-      `UPDATE products SET stock_status = 'offered', last_offer_price = (SELECT unit_price FROM offer_lines WHERE offer_id = ? AND product_id = ?), updated_at = ? WHERE id = ? AND stock_status = 'in_stock'`,
-      [event.entityId, line.product_id, now, line.product_id]
-    );
-    trackProductRow(line.product_id as string);   // LAN-Sync Phase 1b
-  }
-  if (offerLines.length > 0) saveDatabase();
-});
-
-// ── offer.rejected / offer.expired ──
-// Revert products back to "in_stock" if still "offered"
-eventBus.on('offer.rejected', (event: DomainEvent) => {
-  revertOfferedProducts(event.entityId);
-});
-
-function revertOfferedProducts(offerId: string): void {
-  const db = getDatabase();
-  const now = new Date().toISOString();
-  const lines = query(`SELECT product_id FROM offer_lines WHERE offer_id = ?`, [offerId]);
-  for (const line of lines) {
-    db.run(
-      `UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ? AND stock_status = 'offered'`,
-      [now, line.product_id]
-    );
-    trackProductRow(line.product_id as string);   // LAN-Sync Phase 1b
-  }
-  if (lines.length > 0) saveDatabase();
-}
+// ── offer.created / offer.rejected ──
+// CENTRAL-UI-PARITY R6E — „offered" beim Anlegen (und für neu hinzugefügte Positionen) und „zurück
+// auf Lager" beim Ablehnen (und für entfernte Positionen) schreibt die Hausfolge des Angebots selbst
+// (`core/offers/offer-house.ts`), zusammen mit dem Angebot oder gar nicht. Ein Handler hier liefe
+// ein zweites Mal — und NACH dem Speichern, außerhalb der Transaktion.
 
 // ── invoice.paid ──
 // Mark products as "sold", update customer KPIs, update last_sale_price

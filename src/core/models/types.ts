@@ -220,6 +220,9 @@ export interface OfferLine {
 }
 
 export interface Offer {
+  // CENTRAL-UI-PARITY R6E — die Fassung reist mit: ohne sie kann ein Speichern, Senden oder Umwandeln
+  // nicht sagen, WORAUF es sich bezieht, und der Primary weist es ab.
+  revision?: number;
   id: UUID;
   offerNumber: string;
   customerId: UUID;

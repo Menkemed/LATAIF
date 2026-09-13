@@ -1,7 +1,6 @@
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import type { Invoice, InvoiceLine, InvoiceStatus, InvoiceTaxScheme, TaxScheme, PaymentMethod } from '@/core/models/types';
-import { vatEngine } from '@/core/tax/vat-engine';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
@@ -37,6 +36,8 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+// CENTRAL-UI-PARITY R6E — die Umwandlung Angebot → Rechnung lebt in der Hausfolge des Angebots.
+import { convertOfferToInvoiceInHouse, offerAction } from '@/core/offers/offer-house';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 // Domain-Insert + Ledger-Posting laufen in einem Try/Catch. Posting-Fehler werden
@@ -126,7 +127,7 @@ interface InvoiceStore {
   loadInvoices: () => void;
   getInvoice: (id: string) => Invoice | undefined;
   createInvoiceFromOffer: (offerId: string, perLineSchemes?: Record<string, TaxScheme>, staffId?: string, specialMark?: boolean) => Invoice;
-  createDirectInvoice: (customerId: string, lines: { productId: string; lotId?: string; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string, numbering?: 'sales' | 'repair', staffId?: string, specialMark?: boolean, opts?: { allowWithAgent?: boolean }) => Invoice;
+  createDirectInvoice: (customerId: string, lines: { productId: string; lotId?: string; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string, numbering?: 'sales' | 'repair', staffId?: string, specialMark?: boolean, opts?: { allowWithAgent?: boolean; offerId?: string }) => Invoice;
   updateInvoice: (id: string, data: Partial<Invoice>) => void;
   // Atomarer Gesamt-Edit einer gebuchten Rechnung (Header + Zeilen + Inventory +
   // Ledger-Reverse+Repost + optionale Delta-Zahlung + Status) in EINER SQL-Transaktion
@@ -223,184 +224,17 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   // neue INV-Nummer zugewiesen (siehe recordPayment).
   getNextInvoiceNumber: () => getNextDocumentNumber('PINV'),
 
+  // CENTRAL-UI-PARITY R6E — EIN Rechnungsweg. Hier stand ein zweiter, eigenständiger Rechnungsbau
+  // (eigene Los-Wahl, eigene Nummer, eigene Buchung mit verschlucktem Fehler) — und der Einstand je
+  // Zeile kam aus `products.purchase_price` statt aus dem verbrauchten Los, obwohl der Kommentar das
+  // Gegenteil versprach. Jetzt: die Hausfolge des Angebots (`core/offers/offer-house.ts`) baut die
+  // Zeilen mit derselben Ableitung wie das Formular (`toInvoiceLine`, Einstand aus dem Los) und legt
+  // die Rechnung über `createDirectInvoice` an — Rechnung, Los, Buchung und Verknüpfung am Angebot in
+  // EINER Transaktion. Die Unterschrift bleibt für alte Aufrufer.
   createInvoiceFromOffer: (offerId, perLineSchemes, staffId, specialMark) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const id = uuid();
-    let branchId: string, userId: string;
-    try { branchId = currentBranchId(); userId = currentUserId(); }
-    catch { branchId = 'branch-main'; userId = 'user-owner'; }
-
-    // Get offer data
-    const offerRows = query('SELECT * FROM offers WHERE id = ?', [offerId]);
-    if (offerRows.length === 0) throw new Error('Offer not found');
-    const offer = offerRows[0];
-
-    // H-03 — Doppelumwandlung verhindern. Prüft die invoices-Tabelle DIREKT
-    // (nicht offer.invoice_id), damit ein nach Invoice-DELETE verwaister Link
-    // keine legitime Re-Konvertierung blockiert. Storno setzt invoice_id selbst
-    // zurück; eine stornierte (CANCELLED) Rechnung blockiert daher absichtlich nicht.
-    const existingInv = query(
-      `SELECT invoice_number FROM invoices WHERE offer_id = ? AND status != 'CANCELLED' LIMIT 1`,
-      [offerId]
-    );
-    if (existingInv.length > 0) {
-      throw new Error(`Dieses Angebot wurde bereits in Rechnung ${existingInv[0].invoice_number as string} umgewandelt.`);
-    }
-
-    const offerLineRows = query('SELECT ol.*, p.purchase_price FROM offer_lines ol JOIN products p ON p.id = ol.product_id WHERE ol.offer_id = ?', [offerId]);
-
-    const invoiceNumber = get().getNextInvoiceNumber();
-    const dueDate = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
-
-    let totalPurchase = 0;
-    let totalSale = 0;
-    let sumNet = 0, sumVat = 0, sumGross = 0;
-    const vatRate = (offer.vat_rate as number) || 10;
-
-    // COGS-Anker-Fix (wie createDirectInvoice): _id einmal pro Line erzeugen und
-    // fuer INSERT UND postInvoiceIssued nutzen -> source_line_id == invoice_lines.id.
-    type OverrideLine = { _id: string; productId: string; description: string | null; purchasePrice: number; unitPrice: number; vatRate: number; taxScheme: string; vatAmount: number; lineTotal: number; position: number };
-    const lines: OverrideLine[] = [];
-
-    for (const l of offerLineRows) {
-      const pp = (l.purchase_price as number) || 0;
-      const origScheme = (l.tax_scheme as string) || 'MARGIN';
-      const offerLineId = l.id as string;
-      const overridden = perLineSchemes?.[offerLineId];
-      const scheme = overridden || origScheme;
-
-      // Offer lines store unit_price as NET (Plan §Tax §7). Recompute VAT/gross
-      // with the (possibly overridden) scheme using the Netto-API.
-      const offerNet = (l.unit_price as number) || 0;
-      const calc = vatEngine.calculateNet(offerNet, pp, scheme as TaxScheme, vatRate);
-      const net = calc.netAmount;
-      // v0.7.1 — NBR: MARGIN-Lines persistieren internalVatAmount.
-      const vatAmt = calc.internalVatAmount ?? calc.vatAmount;
-      const gross = calc.grossAmount;
-
-      totalPurchase += pp;
-      totalSale += net;
-      sumNet += net; sumVat += vatAmt; sumGross += gross;
-      lines.push({
-        _id: uuid(), productId: l.product_id as string, description: null,
-        purchasePrice: pp, unitPrice: net, vatRate, taxScheme: scheme, vatAmount: vatAmt, lineTotal: gross,
-        position: (l.position as number) || 0,
-      });
-    }
-
-    const finalSchemes = new Set(lines.map(l => l.taxScheme));
-    const invoiceScheme: string = finalSchemes.size === 1 ? [...finalSchemes][0] : 'mixed';
-
-    // Phase 3 — Offer→Invoice hat keine Lot-Info (Offers sind ohne Bestand).
-    // Auto-FIFO: aelteste ACTIVE Lot pro Produkt picken, Cost-Snapshot ueberschreiben
-    // mit lot.unit_cost falls Lot existiert (genauer als der von Offer mitgegebene
-    // Snapshot von products.purchase_price). F1: VOR dem INSERT aufgeloest, damit die
-    // Lot-Verfuegbarkeit vor jedem Write geprueft werden kann.
-    const lotsByProduct: Record<string, string | null> = {};
-    {
-      const productIds = [...new Set(lines.map(l => l.productId))];
-      for (const pid of productIds) {
-        const r = db.exec(
-          `SELECT id, unit_cost FROM stock_lots
-            WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
-            ORDER BY acquired_at ASC, id ASC LIMIT 1`,
-          [pid]
-        );
-        const row = r[0]?.values?.[0];
-        lotsByProduct[pid] = row ? (row[0] as string) : null;
-      }
-    }
-
-    // F1 — Lot-Verfuegbarkeit VOR dem INSERT pruefen (aggregiert pro Lot: mehrere
-    // Offer-Lines desselben Produkts ziehen denselben Auto-FIFO-Lot → der zweite consumeLot
-    // wuerde sonst still `false` liefern). Wirft bevor irgendetwas geschrieben wird.
-    // B5 — With-Agent-Guard: auch ueber einen (veralteten) Offer darf kein with_agent-Stueck
-    // fakturiert werden. Frisch aus der DB; kein Agent-opt-out auf dem Offer-Pfad.
-    assertProductsSellable(lines.map(l => l.productId));
-    assertLotsConsumable(lines.map(l => ({ lotId: lotsByProduct[l.productId] || null, qty: 1 })));
-
-    db.run(
-      `INSERT INTO invoices (id, branch_id, invoice_number, offer_id, customer_id, status, currency,
-        net_amount, vat_rate_snapshot, vat_amount, gross_amount, tax_scheme_snapshot,
-        purchase_price_snapshot, sale_price_snapshot, margin_snapshot,
-        paid_amount, issued_at, due_at, notes, staff_id, special_mark, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, 'PARTIAL', 'BHD', ?, ?, ?, ?, ?, 0, 0, 0, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, branchId, invoiceNumber, offerId, offer.customer_id,
-       sumNet, vatRate, sumVat, sumGross,
-       invoiceScheme, now, dueDate, offer.notes || null, staffId || null, specialMark ? 1 : 0, now, now, userId]
-    );
-
-    const lineStmt = db.prepare(
-      `INSERT INTO invoice_lines (id, invoice_id, product_id, description, quantity, unit_price, purchase_price_snapshot,
-        vat_rate, tax_scheme, vat_amount, line_total, position, lot_id)
-       VALUES (?, ?, ?, NULL, 1, ?, ?, ?, ?, ?, ?, ?, ?)`
-    );
-    for (const l of lines) {
-      const lotId = lotsByProduct[l.productId] || null;
-      lineStmt.run([l._id, id, l.productId, l.unitPrice, l.purchasePrice, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, l.position, lotId]);
-    }
-    lineStmt.free();
-
-    // Lots konsumieren (1 Stueck pro Line — Offer-Lines haben kein qty-Feld).
-    // Phase 7 Sync: betroffene Produkt-IDs sammeln und products.quantity nachziehen.
-    const productsToSync = new Set<string>();
-    for (const l of lines) {
-      const lotId = lotsByProduct[l.productId];
-      if (lotId) consumeLot(lotId, 1);
-      productsToSync.add(l.productId);
-    }
-    for (const pid of productsToSync) {
-      syncProductQuantity(pid);
-      // Plan §Sales §Partial-Payment-Reservation: Invoice startet als PARTIAL,
-      // also Produkt vorerst auf 'reserved' setzen. Voll-Zahlung → invoice.paid
-      // Handler markiert dann 'sold'.
-      reserveProductIfDepleted(pid);
-    }
-
-    const margin = totalSale - totalPurchase;
-    db.run(`UPDATE invoices SET purchase_price_snapshot = ?, sale_price_snapshot = ?, margin_snapshot = ? WHERE id = ?`,
-      [totalPurchase, totalSale, margin, id]);
-
-    // Update offer status + Plan §8 #10: bidirektionale Verknüpfung (offer.invoice_id).
-    db.run(`UPDATE offers SET status = 'accepted', invoice_id = ?, updated_at = ? WHERE id = ?`, [id, now, offerId]);
-
-    saveDatabase();
-    trackInsert('invoices', id, { invoiceNumber, customerId: offer.customer_id as string });
-    // Sync (Scope A): jede persistierte invoice_line mit ihrer kanonischen _id
-    // uebertragen. trackChange snapshottet die volle Zeile via SELECT * (inkl.
-    // lot_id/position/Preise/VAT) → Geraet B baut identische Lines. Erst HIER, nach
-    // erfolgreichem Domain-Insert + saveDatabase: warf ein vorheriges INSERT, wird
-    // nichts getrackt → kein verwaister Line-Sync-Eintrag bei fehlgeschlagenem Create.
-    for (const l of lines) trackChange('invoice_lines', l._id, 'insert', {});
-    eventBus.emit('invoice.created', 'invoice', id, { offerId, total: offer.total });
-    eventBus.emit('invoice.issued', 'invoice', id, {});
-
-    // ZIEL.md §3a — Ledger-Posting nach Domain-Insert.
-    safePost(`postInvoiceIssued(${id}) from offer`, () => {
-      if (hasLedgerEntries('INVOICE', id)) return;
-      const fresh: Invoice = {
-        id, invoiceNumber, customerId: offer.customer_id as string,
-        status: 'PARTIAL', currency: 'BHD',
-        netAmount: sumNet, vatRateSnapshot: vatRate, vatAmount: sumVat,
-        grossAmount: sumGross, taxSchemeSnapshot: invoiceScheme as InvoiceTaxScheme,
-        purchasePriceSnapshot: totalPurchase, salePriceSnapshot: totalSale, marginSnapshot: margin,
-        paidAmount: 0, issuedAt: now, dueAt: dueDate,
-        lines: lines.map((l, i) => ({
-          id: l._id, invoiceId: id, productId: l.productId,
-          quantity: 1,
-          unitPrice: l.unitPrice, purchasePriceSnapshot: l.purchasePrice,
-          vatRate: l.vatRate, taxScheme: l.taxScheme as TaxScheme,
-          vatAmount: l.vatAmount, lineTotal: l.lineTotal, position: i + 1,
-        })),
-        createdAt: now, createdBy: userId, offerId,
-      };
-      postInvoiceIssued(fresh);
-    });
-
+    const r = offerAction((ctx) => convertOfferToInvoiceInHouse({ offerId, perLineSchemes, staffId, specialMark }, ctx));
     get().loadInvoices();
-
-    return get().getInvoice(id)!;
+    return get().getInvoice(r.invoiceId)!;
   },
 
   createDirectInvoice: (customerId, lines, notes, issuedAtOverride, numbering, staffId, specialMark, opts) => {
@@ -488,13 +322,15 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const lineSchemes = new Set(lines.map(l => l.taxScheme));
     const taxScheme: string = lineSchemes.size === 1 ? [...lineSchemes][0] : 'mixed';
 
+    // R6E — `opts.offerId`: die Rechnung aus einem Angebot trägt dessen Kennung in DERSELBEN Zeile
+    // (vorher schrieb das nur der zweite Rechnungsweg `createInvoiceFromOffer`). Ohne Angebot NULL.
     db.run(
-      `INSERT INTO invoices (id, branch_id, invoice_number, customer_id, status, currency,
+      `INSERT INTO invoices (id, branch_id, invoice_number, offer_id, customer_id, status, currency,
         net_amount, vat_rate_snapshot, vat_amount, gross_amount, tax_scheme_snapshot,
         purchase_price_snapshot, sale_price_snapshot, margin_snapshot,
         paid_amount, issued_at, due_at, notes, staff_id, special_mark, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, 'PARTIAL', 'BHD', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, branchId, invoiceNumber, customerId,
+       VALUES (?, ?, ?, ?, ?, 'PARTIAL', 'BHD', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [id, branchId, invoiceNumber, opts?.offerId ?? null, customerId,
        netAmount, lines[0]?.vatRate || 10, totalVat, grossAmount,
        taxScheme, totalPurchase, netAmount, margin, issuedAt, dueDate, notes || null, staffId || null, specialMark ? 1 : 0, now, now, userId]
     );

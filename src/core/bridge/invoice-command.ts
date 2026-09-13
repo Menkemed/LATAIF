@@ -17,9 +17,15 @@
 //     keinen Nachweis; sonst würde ein Programmierfehler als „Kunde bekommt keine Rechnung"
 //     dauerhaft festgeschrieben.
 //
-// Bewusst NICHT dabei: Zahlung, Bearbeiten, Löschen, Gutschrift, Reparatur-Nummernkreis
-// (`numbering`) und der Agenten-Sonderweg (`allowWithAgent`). Die Rechnung entsteht als PARTIAL
-// mit 0 bezahlt — genau wie im Formular, wenn niemand etwas eingibt.
+// Bewusst NICHT dabei: Bearbeiten, Löschen, Gutschrift, Reparatur-Nummernkreis (`numbering`) und
+// der Agenten-Sonderweg (`allowWithAgent`).
+//
+// CENTRAL-UI-PARITY R6E — die ZAHLUNG beim Anlegen gehört jetzt dazu, als optionales Feld
+// `payment: { amount, method, cardBrand? }` DERSELBEN Absicht (kein zweiter Befehl). Anlegen und
+// Zahlung laufen in EINER Hausfolge (`createInvoiceInHouse`) — dieselbe, die die Maske am Primary
+// fährt: Aufteilung, Endnummer (INV/SINV nach der Nummernwahl `specialMark`), Kartengebühr und
+// Buchungen entscheidet der Primary. Ohne `payment` entsteht die Rechnung wie bisher als PARTIAL
+// mit 0 bezahlt.
 
 import { getDatabase, saveDatabaseDurably } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
@@ -29,7 +35,10 @@ import {
 import { STOCK_UNAVAILABLE_MESSAGE } from '@/core/lots/lot-availability';
 import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
 import { WITH_AGENT_INVOICE_BLOCKED_MESSAGE } from '@/core/products/product-sellability';
-import { useInvoiceStore } from '@/stores/invoiceStore';
+import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
+import {
+  createInvoiceInHouse, invoiceCreatePayment, type InvoiceCreatePayment,
+} from '@/core/invoices/invoice-create-house';
 import { resolveLineScheme, toInvoiceLine, type InvoiceLineInput, type RequestedScheme } from '@/core/invoices/line-derivation';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
@@ -131,6 +140,42 @@ export function parseInvoicePayload(raw: unknown): {
     staffId: raw.staffId as string | undefined,
     specialMark: raw.specialMark === true,
   };
+}
+
+/**
+ * R6E — was in der Zahlung beim Anlegen NIE vom Client kommt: ihr Schlüssel, der neue Stand, der
+ * Status, die Nummer, die Marke (die Nummernwahl ist `specialMark` der Rechnung), die Gebühr, das
+ * Guthaben einer Überzahlung, die Buchung.
+ */
+const PAYMENT_FORBIDDEN = [
+  'id', 'paymentId', 'invoiceId', 'branchId', 'tenantId', 'userId', 'createdBy', 'createdAt', 'receivedAt',
+  'status', 'paidAmount', 'openAmount', 'invoiceNumber', 'specialMark', 'specialMarkOnFinal',
+  'fee', 'cardFee', 'creditAmount', 'overpayment', 'ledger', 'account', 'debit', 'credit',
+];
+const PAYMENT_KEYS = new Set(['amount', 'method', 'cardBrand']);
+
+/**
+ * Der Rumpf von `invoices.create`: derselbe Wunsch wie `parseInvoicePayload` — plus, nur HIER, die
+ * optionale Zahlung. `invoices.update` teilt sich `parseInvoicePayload` und kennt `payment` damit
+ * weiterhin nicht (eine Zahlung ist dort kein Feld).
+ */
+export function parseInvoiceCreatePayload(raw: unknown): ReturnType<typeof parseInvoicePayload> & { payment?: InvoiceCreatePayment } {
+  if (!isPlain(raw)) throw new InvoicePayloadError('payload must be an object');
+  const { payment, ...rest } = raw;
+  const wish = parseInvoicePayload(rest);
+  if (payment === undefined) return wish;
+  if (!isPlain(payment)) throw new InvoicePayloadError('payment must be an object');
+  for (const k of Object.keys(payment)) {
+    if (PAYMENT_FORBIDDEN.includes(k)) throw new InvoicePayloadError(`the primary decides ${k}, not the client (payment)`);
+    if (!PAYMENT_KEYS.has(k)) throw new InvoicePayloadError(`unknown field in payment: ${k}`);
+  }
+  try {
+    // Dieselbe Regel wie in der Hausfolge — hier als Prüfung des Rumpfs.
+    return { ...wish, payment: invoiceCreatePayment(payment) };
+  } catch (err) {
+    if (err instanceof InvoiceActionRejected) throw new InvoicePayloadError(err.message);
+    throw err;
+  }
 }
 
 /**
@@ -236,12 +281,20 @@ export function asDomainVerdict(err: unknown): CommandRejected | null {
   return null;
 }
 
-/** Was der Client zurückbekommt. Bewusst schmal: die Nummer, die Kennung, der Betrag. */
+/**
+ * Was der Client zurückbekommt. Bewusst schmal: die Nummer, die Kennung, der Betrag — R6E dazu der
+ * Stand NACH einer Zahlung (Bezahltes, Status, Marke, Fassung), weil die Nummer bei Vollzahlung
+ * schon die Endnummer des Primary ist.
+ */
 export interface InvoiceCreateResult {
   invoiceId: string;
   invoiceNumber: string;
   grossAmount: number;
   status: string;
+  paidAmount: number;
+  specialMark: boolean;
+  revision: number;
+  paymentId?: string;
 }
 
 /** Die Transaktionsklammern des Hauses — dieselben, die `beginLedgerTransaction` überall setzt. */
@@ -261,28 +314,25 @@ export function invoiceEngineDeps(): EngineDeps {
  * Zeilen, Bestandsabzug, Buchung und der Nachweis der Kennung teilen ein Schicksal.
  */
 export function runInvoiceCreate(deps: EngineDeps, identity: CommandIdentity, rawPayload: unknown): Promise<CommandOutcome> {
-  const wish = parseInvoicePayload(rawPayload);
+  const wish = parseInvoiceCreatePayload(rawPayload);
   return runRemoteCommand(deps, identity, () => {
     const lines = buildInvoiceLines(wish.lines);
     try {
-      const invoice = useInvoiceStore.getState().createDirectInvoice(
-        wish.customerId,
+      // R6E — DIESELBE Hausfolge wie die Maske am Primary: der normale Verkaufskreis (nie der
+      // Reparaturkreis), kein Agenten-Sonderweg, und die Zahlung in derselben Transaktion.
+      const created = createInvoiceInHouse({
+        customerId: wish.customerId,
         lines,
-        wish.notes,
-        wish.issuedDate,
-        undefined,          // numbering: der normale Verkaufskreis, nie der Reparaturkreis
-        wish.staffId,
-        wish.specialMark,
-        undefined,          // opts: kein Agenten-Sonderweg über die Ferne
-      );
-      const result: InvoiceCreateResult = {
-        invoiceId: invoice.id,
-        invoiceNumber: invoice.invoiceNumber,
-        grossAmount: invoice.grossAmount,
-        status: invoice.status,
-      };
+        notes: wish.notes,
+        issuedDate: wish.issuedDate,
+        staffId: wish.staffId,
+        specialMark: wish.specialMark,
+        payment: wish.payment,
+      }, identity.branchId);
+      const result: InvoiceCreateResult = { ...created };
       return result;
     } catch (err) {
+      if (err instanceof InvoiceActionRejected) throw new CommandRejected(err.code, err.message);
       const verdict = asDomainVerdict(err);
       if (verdict) throw verdict;
       throw err;

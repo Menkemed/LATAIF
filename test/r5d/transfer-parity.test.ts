@@ -282,10 +282,10 @@ async function verkaufterTransfer(db: Db, nth: string, customerId: string, produ
   const nochB = R4C_MATRIX.filter((z) => z.luecke === 'B').map((z) => z.op).sort();
   ok(nochB.every((op) => vorher.includes(op) && !op.startsWith('transfers.')),
     `SCOPE die uebrigen Klasse-B-Zeilen stammen aus dem R5D-Rest (${nochB.join(', ')})`);
-  ok(ALLOWED_MUTATIONS.length === 80, `SCOPE invoices.cancel, die elf aus R6C und die achtundzwanzig aus R6D (${ALLOWED_MUTATIONS.length})`);
+  ok(ALLOWED_MUTATIONS.length === 88, `SCOPE invoices.cancel, die elf aus R6C, die achtundzwanzig aus R6D und die acht aus R6E (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 152, `SCOPE die Registry steht bei 152 (R6D) (${rustOps})`);
+  ok(rustOps === 160, `SCOPE die Registry steht bei 160 (R6E) (${rustOps})`);
   for (const op of ['transfers.update', 'transfers.mark_returned', 'transfers.mark_sold']) {
     const z = R4C_MATRIX.find((x) => x.op === op);
     ok(!!z && z.verdrahtet, `SCOPE Nachbar ${op} bleibt verdrahtet`);

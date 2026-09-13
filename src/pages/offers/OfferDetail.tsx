@@ -12,7 +12,6 @@ import { MessagePreviewModal } from '@/components/ai/MessagePreviewModal';
 import { useOfferStore } from '@/stores/offerStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
-import { useInvoiceStore } from '@/stores/invoiceStore';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { formatProductMultiLine, getProductSpecs } from '@/core/utils/product-format';
 import { usePermission } from '@/hooks/usePermission';
@@ -21,8 +20,16 @@ import { ConfirmTaxSchemeModal } from '@/components/shared/ConfirmTaxSchemeModal
 import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import type { TaxScheme } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
-import { useSharedRead } from '@/core/data/shared-read';
-import { lotAggregatesFor } from '@/core/data/domain-reads';
+import { vatEngine } from '@/core/tax/vat-engine';
+// CENTRAL-UI-PARITY R6E — Bearbeiten ist ein Entwurf im Fenster, gespeichert mit EINEM „Save";
+// Senden/Annehmen/Ablehnen und „Create Invoice" sind je EIN Auftrag. Alles durch die gemeinsame
+// Schreibweiche: am Primary die Hausfolge in einer Transaktion, auf PC2 der geprüfte Fernbefehl.
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import {
+  draftOf, priceFromField, saveOfferConvert, saveOfferStatus, saveOfferUpdate, type OfferDraft,
+} from '@/core/offers/offer-actions';
+import type { OfferTargetStatus } from '@/core/offers/offer-rules';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -32,41 +39,29 @@ export function OfferDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/offers');
-  const { offers, loadOffers, updateOffer, updateOfferLine, addOfferLine, removeOfferLine, deleteOffer } = useOfferStore();
+  const { offers, loadOffers, deleteOffer } = useOfferStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
-  const { createInvoiceFromOffer } = useInvoiceStore();
+  const w = useSharedWrites();
 
   const [editing, setEditing] = useState(false);
-  const [formNotes, setFormNotes] = useState('');
+  // R6E — der Entwurf: Kopf und Positionen, nur hier im Fenster, bis „Save". „Cancel" verwirft ihn.
+  const [draft, setDraft] = useState<OfferDraft | null>(null);
+  const [fehler, setFehler] = useState('');
   const [showVatConfirm, setShowVatConfirm] = useState(false);
   // 2026-05-16 — Nach VAT-Confirm fragen wir noch Normal vs Special Final.
   const [pendingPerLine, setPendingPerLine] = useState<Record<string, TaxScheme> | null>(null);
   const [showHistory, setShowHistory] = useState(false);
-  const [formValidUntil, setFormValidUntil] = useState('');
-  const [formCustomerId, setFormCustomerId] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showAddLine, setShowAddLine] = useState(false);
   const [customerSearch, setCustomerSearch] = useState('');
   const [showFollowUp, setShowFollowUp] = useState(false);
   const perm = usePermission();
 
-  useEffect(() => { loadOffers(); loadCustomers(); loadProducts(); loadCategories(); }, [loadOffers, loadCustomers, loadProducts, loadCategories]);
-  // CENTRAL-UI-PARITY R4A — die FIFO-Kosten kommen aus der gemeinsamen Kernauskunft:
-  // ein Durchgang fuer alle Artikel statt einer Abfrage je Zeile.
-  const bestand = useSharedRead('inventory.lot_aggregates.get', {}, lotAggregatesFor, { paare: [], fifo: [] }, []);
-  const fifoKosten = useMemo(() => new Map(bestand.fifo), [bestand]);
+  useEffect(() => { loadOffers(); loadCustomers(); loadProducts(); loadCategories(); }, [loadOffers, loadCustomers, loadProducts, loadCategories]);
 
   const offer = useMemo(() => offers.find(o => o.id === id), [offers, id]);
   const customer = useMemo(() => offer ? customers.find(c => c.id === offer.customerId) : null, [offer, customers]);
-
-  useEffect(() => {
-    if (offer) {
-      setFormNotes(offer.notes || '');
-      setFormValidUntil(offer.validUntil || '');
-      setFormCustomerId(offer.customerId);
-    }
-  }, [offer]);
 
   const filteredCustomers = useMemo(() => {
     if (!customerSearch) return customers.slice(0, 10);
@@ -76,9 +71,9 @@ export function OfferDetail() {
 
   const availableProducts = useMemo(() => {
     if (!offer) return [];
-    const usedIds = new Set(offer.lines.map(l => l.productId));
+    const usedIds = new Set((draft ? draft.lines : offer.lines).map(l => l.productId));
     return products.filter(p => p.stockStatus === 'in_stock' && !usedIds.has(p.id));
-  }, [products, offer]);
+  }, [products, offer, draft]);
 
   if (!offer) {
     return (
@@ -91,15 +86,31 @@ export function OfferDetail() {
   const canEdit = offer.status === 'draft';
   const canDelete = offer.status === 'draft' || offer.status === 'rejected';
   const canCreateInvoice = offer.status === 'accepted' && !offer.invoiceId;
+  const bearbeiten = editing && draft !== null;
 
-  function handleSave() {
-    if (!id) return;
-    updateOffer(id, {
-      notes: formNotes || undefined,
-      validUntil: formValidUntil || undefined,
-      customerId: formCustomerId,
-    });
+  function startEdit() {
+    if (!offer) return;
+    setFehler('');
+    setDraft(draftOf(offer));
+    setEditing(true);
+  }
+
+  function cancelEdit() {
     setEditing(false);
+    setDraft(null);
+    setShowAddLine(false);
+    setFehler('');
+  }
+
+  // R6E — EIN Speichern: Kopf und der ganze Positionsstand mit der gesehenen Fassung. Bei einem Nein
+  // bleibt der Entwurf stehen (nichts geht verloren), der Grund steht über der Seite.
+  async function handleSave() {
+    if (!offer || !draft) return;
+    setFehler('');
+    const r = await saveOfferUpdate(w, offer, draft);
+    if (r.kind !== 'ok') { setFehler(fehlertext(r)); return; }
+    setEditing(false);
+    setDraft(null);
   }
 
   function handleDelete() {
@@ -109,23 +120,16 @@ export function OfferDetail() {
     navigate('/offers');
   }
 
-  function handleSend() {
-    if (!id) return;
-    updateOffer(id, { status: 'sent', sentAt: new Date().toISOString() });
-  }
-
-  function handleAccept() {
-    if (!id) return;
-    updateOffer(id, { status: 'accepted' });
-  }
-
-  function handleReject() {
-    if (!id) return;
-    updateOffer(id, { status: 'rejected' });
+  async function handleStatus(status: OfferTargetStatus) {
+    if (!offer) return;
+    setFehler('');
+    const r = await saveOfferStatus(w, offer, status);
+    if (r.kind !== 'ok') setFehler(fehlertext(r));
   }
 
   function handleCreateInvoice() {
     if (!id) return;
+    setFehler('');
     setShowVatConfirm(true);
   }
 
@@ -136,14 +140,16 @@ export function OfferDetail() {
     setPendingPerLine(perLine);
   }
 
-  function handleNumberTypeConfirm(special: boolean) {
+  // R6E — die Rechnung entsteht am Primary über denselben Weg wie jede andere; erst bei Erfolg geht
+  // es zur Rechnung, sonst bleibt der Grund sichtbar.
+  async function handleNumberTypeConfirm(special: boolean) {
     const perLine = pendingPerLine;
     setPendingPerLine(null);
-    if (!id || !perLine) return;
-    const invoice = createInvoiceFromOffer(id, perLine, undefined, special);
-    if (invoice) {
-      navigate(`/invoices/${invoice.id}`);
-    }
+    if (!offer || !perLine) return;
+    setFehler('');
+    const r = await saveOfferConvert(w, offer, perLine, special);
+    if (r.kind !== 'ok') { setFehler(fehlertext(r)); return; }
+    navigate(`/invoices/${r.value.invoiceId}`);
   }
 
   function handleDownloadPdf() {
@@ -171,32 +177,55 @@ export function OfferDetail() {
     });
   }
 
+  // R6E — Hinzufügen/Entfernen/Preis ändern nur im Entwurf. Den Einstand rechnet der Primary beim
+  // Speichern mit SEINEM Los — die Seite schickt nur Artikel und Preis.
   function handleAddLine(product: typeof products[0]) {
-    if (!id) return;
-    // Phase 7 — Cost-Basis fuer Margin-Scheme/VAT-Calc kommt aus dem FIFO-Lot
-    // (= naechster Sale-Cost), nicht aus product.purchase_price. Bei Multi-Lot
-    // ist purchase_price irrefuehrend; bei keinem Lot Fallback.
-    const fifo = fifoKosten.get(product.id) ?? null;
-    const costBasis = fifo ? fifo.fifoCost : product.purchasePrice;
-    addOfferLine(id, {
-      productId: product.id,
-      unitPrice: product.plannedSalePrice || product.purchasePrice,
-      taxScheme: product.taxScheme,
-      purchasePrice: costBasis,
-    });
+    setDraft(d => d ? { ...d, lines: [...d.lines, { productId: product.id, price: String(product.plannedSalePrice || product.purchasePrice) }] } : d);
     setShowAddLine(false);
   }
 
-  function handleRemoveLine(lineId: string) {
-    if (!id) return;
-    removeOfferLine(id, lineId);
+  function handleRemoveLine(idx: number) {
+    setDraft(d => d ? { ...d, lines: d.lines.filter((_, i) => i !== idx) } : d);
   }
+
+  function setLinePrice(idx: number, price: string) {
+    setDraft(d => d ? { ...d, lines: d.lines.map((l, i) => i === idx ? { ...l, price } : l) } : d);
+  }
+
+  /** Das Schema einer Entwurfsposition: die bestehende behält ihres, eine neue nimmt das des Artikels. */
+  function schemeOfDraft(line: { id?: string; productId: string }): TaxScheme {
+    const saved = line.id ? offer?.lines.find(l => l.id === line.id) : undefined;
+    if (saved) return saved.taxScheme;
+    return (products.find(p => p.id === line.productId)?.taxScheme as TaxScheme) || 'MARGIN';
+  }
+
+  /** Nur die Vorschau im Entwurf; gespeichert rechnet der Primary (dieselbe Netto-Rechnung). */
+  function previewTotal(price: number, scheme: TaxScheme): number {
+    if (!Number.isFinite(price) || price < 0) return 0;
+    return vatEngine.calculateNet(price, 0, scheme, offer?.vatRate || 10).grossAmount;
+  }
+
+  const rows = bearbeiten
+    ? draft!.lines.map((l, idx) => {
+      const price = priceFromField(l.price);
+      return {
+        key: l.id ?? `new-${l.productId}`, idx, productId: l.productId,
+        unitPrice: Number.isFinite(price) ? price : 0, priceText: String(l.price),
+        lineTotal: previewTotal(price, schemeOfDraft(l)),
+      };
+    })
+    : offer.lines.map((l, idx) => ({
+      key: l.id, idx, productId: l.productId, unitPrice: l.unitPrice, priceText: String(l.unitPrice), lineTotal: l.lineTotal,
+    }));
+  const shownTotal = bearbeiten ? rows.reduce((s, r) => s + r.lineTotal, 0) : offer.total;
+  const lineCols = bearbeiten ? 'minmax(0,3fr) minmax(0,1fr) minmax(0,1fr) 32px' : 'minmax(0,3fr) minmax(0,1fr) minmax(0,1fr)';
+  const shownCustomerId = bearbeiten ? draft!.customerId : offer.customerId;
 
   function renderField(label: string, value: React.ReactNode, editField?: React.ReactNode) {
     return (
       <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
         <span style={{ fontSize: 13, color: '#6B7280' }}>{label}</span>
-        {editing && editField ? editField : <span style={{ fontSize: 13, color: '#0F0F10' }}>{value || '\u2014'}</span>}
+        {editing && editField ? editField : <span style={{ fontSize: 13, color: '#0F0F10' }}>{value || '—'}</span>}
       </div>
     );
   }
@@ -218,15 +247,15 @@ export function OfferDetail() {
           <div className="flex gap-2">
             {editing ? (
               <>
-                <Button variant="ghost" onClick={() => { setEditing(false); setFormNotes(offer.notes || ''); setFormValidUntil(offer.validUntil || ''); setFormCustomerId(offer.customerId); }}>Cancel</Button>
-                <Button variant="primary" onClick={handleSave}><Save size={14} /> Save</Button>
+                <Button variant="ghost" data-offer-cancel onClick={cancelEdit} disabled={w.busy}>Cancel</Button>
+                <Button variant="primary" data-offer-save onClick={() => { void handleSave(); }} disabled={w.busy}><Save size={14} /> Save</Button>
               </>
             ) : (
               <>
                 <Button variant="secondary" onClick={handleDownloadPdf}><Download size={14} /> PDF</Button>
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
-                {canEdit && perm.canEditOffers && <Button variant="secondary" onClick={() => setEditing(true)}><Edit3 size={14} /> Edit</Button>}
-                {offer.status === 'draft' && perm.canEditOffers && <Button variant="primary" onClick={handleSend}>Send Offer</Button>}
+                {canEdit && perm.canEditOffers && <Button variant="secondary" data-offer-edit onClick={startEdit}><Edit3 size={14} /> Edit</Button>}
+                {offer.status === 'draft' && perm.canEditOffers && <Button variant="primary" data-offer-send onClick={() => { void handleStatus('sent'); }} disabled={w.busy}>Send Offer</Button>}
                 {(offer.status === 'draft' || offer.status === 'sent') && customer?.whatsapp && (
                   <Button variant="ghost" onClick={() => {
                     const num = (customer.whatsapp || customer.phone || '').replace(/[^0-9+]/g, '').replace(/^\+/, '');
@@ -242,12 +271,12 @@ export function OfferDetail() {
                 )}
                 {offer.status === 'sent' && perm.canEditOffers && (
                   <>
-                    <Button variant="primary" onClick={handleAccept}>Accept</Button>
-                    <Button variant="danger" onClick={handleReject}>Reject</Button>
+                    <Button variant="primary" data-offer-accept onClick={() => { void handleStatus('accepted'); }} disabled={w.busy}>Accept</Button>
+                    <Button variant="danger" data-offer-reject onClick={() => { void handleStatus('rejected'); }} disabled={w.busy}>Reject</Button>
                   </>
                 )}
                 {canCreateInvoice && (
-                  <Button variant="primary" onClick={handleCreateInvoice}><FileText size={14} /> Create Invoice</Button>
+                  <Button variant="primary" data-offer-create-invoice onClick={handleCreateInvoice} disabled={w.busy}><FileText size={14} /> Create Invoice</Button>
                 )}
                 {canDelete && perm.canDeleteOffers && (
                   <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}><Trash2 size={14} /> Delete</Button>
@@ -256,6 +285,8 @@ export function OfferDetail() {
             )}
           </div>
         </div>
+
+        <WriteError text={fehler} />
 
         {/* Hero */}
         <div className="animate-fade-in" style={{ marginBottom: 40 }}>
@@ -279,8 +310,8 @@ export function OfferDetail() {
           <Card>
             <div className="flex justify-between items-center" style={{ marginBottom: 16 }}>
               <span className="text-overline">LINE ITEMS</span>
-              {canEdit && !editing && (
-                <button onClick={() => setShowAddLine(true)}
+              {bearbeiten && (
+                <button data-offer-line-add onClick={() => setShowAddLine(true)}
                   className="flex items-center gap-1 cursor-pointer transition-colors"
                   style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 12 }}
                   onMouseEnter={e => (e.currentTarget.style.opacity = '0.7')}
@@ -292,27 +323,27 @@ export function OfferDetail() {
             </div>
 
             {/* Line header */}
-            <div style={{ display: 'grid', gridTemplateColumns: canEdit ? 'minmax(0,3fr) minmax(0,1fr) minmax(0,1fr) 32px' : 'minmax(0,3fr) minmax(0,1fr) minmax(0,1fr)', gap: 12, padding: '8px 0', borderBottom: '1px solid #E5E9EE' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: lineCols, gap: 12, padding: '8px 0', borderBottom: '1px solid #E5E9EE' }}>
               <span style={{ fontSize: 11, color: '#6B7280' }}>PRODUCT</span>
               <span style={{ fontSize: 11, color: '#6B7280', textAlign: 'right' }}>UNIT PRICE</span>
               <span style={{ fontSize: 11, color: '#6B7280', textAlign: 'right' }}>TOTAL</span>
-              {canEdit && <span />}
+              {bearbeiten && <span />}
             </div>
 
-            {offer.lines.length === 0 && (
+            {rows.length === 0 && (
               <div style={{ padding: '32px 0', textAlign: 'center' }}>
                 <p style={{ fontSize: 13, color: '#6B7280' }}>No items added yet.</p>
               </div>
             )}
 
-            {offer.lines.map(line => {
+            {rows.map(line => {
               const product = products.find(p => p.id === line.productId);
               const outOfRange = product && (
                 (product.minSalePrice && line.unitPrice < product.minSalePrice) ||
                 (product.plannedSalePrice && line.unitPrice > product.plannedSalePrice)
               );
               return (
-                <div key={line.id} style={{ display: 'grid', gridTemplateColumns: canEdit ? 'minmax(0,3fr) minmax(0,1fr) minmax(0,1fr) 32px' : 'minmax(0,3fr) minmax(0,1fr) minmax(0,1fr)', gap: 12, padding: '12px 0', borderBottom: '1px solid rgba(229,225,214,0.6)', alignItems: 'center' }}>
+                <div key={line.key} data-offer-line={line.productId} style={{ display: 'grid', gridTemplateColumns: lineCols, gap: 12, padding: '12px 0', borderBottom: '1px solid rgba(229,225,214,0.6)', alignItems: 'center' }}>
                   <div>
                     <span style={{ fontSize: 13, color: '#0F0F10', display: 'block' }}>
                       {product ? `${product.brand} ${product.name}` : 'Unknown Product'}
@@ -342,14 +373,12 @@ export function OfferDetail() {
                       </span>
                     )}
                   </div>
-                  {canEdit ? (
+                  {bearbeiten ? (
                     <input
                       type="number"
-                      value={line.unitPrice}
-                      onChange={e => {
-                        const newPrice = Number(e.target.value) || 0;
-                        updateOfferLine(offer.id, line.id, { unitPrice: newPrice, lineTotal: newPrice });
-                      }}
+                      data-offer-line-price={line.productId}
+                      value={line.priceText}
+                      onChange={e => setLinePrice(line.idx, e.target.value)}
                       className="font-mono outline-none"
                       style={{ minWidth: 0, width: '100%', textAlign: 'right', padding: '2px 6px', fontSize: 13, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }}
                     />
@@ -357,8 +386,8 @@ export function OfferDetail() {
                     <span className="font-mono" style={{ fontSize: 13, color: '#4B5563', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={line.unitPrice}/></span>
                   )}
                   <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={line.lineTotal}/></span>
-                  {canEdit && (
-                    <button onClick={() => handleRemoveLine(line.id)}
+                  {bearbeiten && (
+                    <button data-offer-line-remove={line.productId} onClick={() => handleRemoveLine(line.idx)}
                       className="cursor-pointer transition-colors flex items-center justify-center"
                       style={{ background: 'none', border: 'none', color: '#6B7280', padding: 4 }}
                       onMouseEnter={e => (e.currentTarget.style.color = '#AA6E6E')}
@@ -372,11 +401,11 @@ export function OfferDetail() {
             })}
 
             {/* Total (brutto; VAT is embedded per business rule) */}
-            {offer.lines.length > 0 && (
+            {rows.length > 0 && (
               <div style={{ marginTop: 16, padding: '16px 0 0', borderTop: '1px solid #E5E9EE' }}>
                 <div className="flex justify-between" style={{ fontSize: 16, paddingTop: 10 }}>
                   <span style={{ color: '#0F0F10', fontWeight: 500 }}>Total</span>
-                  <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 500 }}><Bhd v={offer.total}/> BHD</span>
+                  <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 500 }}><Bhd v={shownTotal}/> BHD</span>
                 </div>
               </div>
             )}
@@ -393,8 +422,8 @@ export function OfferDetail() {
                 {renderField('Tax Scheme', offer.taxScheme === 'MARGIN' ? 'Margin Scheme' : offer.taxScheme === 'VAT_10' ? 'Standard VAT' : 'Exempt')}
                 {renderField(
                   'Client',
-                  customer ? `${customer.firstName} ${customer.lastName}` : '\u2014',
-                  editing ? (
+                  customer ? `${customer.firstName} ${customer.lastName}` : '—',
+                  bearbeiten ? (
                     <div style={{ width: 200 }}>
                       <input
                         placeholder="Search..."
@@ -405,11 +434,11 @@ export function OfferDetail() {
                       />
                       <div style={{ maxHeight: 100, overflowY: 'auto' }}>
                         {filteredCustomers.map(c => (
-                          <div key={c.id} onClick={() => setFormCustomerId(c.id)}
+                          <div key={c.id} data-offer-customer-option={c.id} onClick={() => setDraft(d => d ? { ...d, customerId: c.id } : d)}
                             className="cursor-pointer" style={{
                               padding: '4px 8px', fontSize: 12, borderRadius: 4,
-                              background: formCustomerId === c.id ? 'rgba(15,15,16,0.06)' : 'transparent',
-                              color: formCustomerId === c.id ? '#0F0F10' : '#4B5563',
+                              background: shownCustomerId === c.id ? 'rgba(15,15,16,0.06)' : 'transparent',
+                              color: shownCustomerId === c.id ? '#0F0F10' : '#4B5563',
                             }}>
                             {c.firstName} {c.lastName}
                           </div>
@@ -420,9 +449,9 @@ export function OfferDetail() {
                 )}
                 {renderField(
                   'Valid Until',
-                  offer.validUntil || '\u2014',
-                  editing ? (
-                    <Input type="date" value={formValidUntil} onChange={e => setFormValidUntil(e.target.value)} style={{ width: 160 }} />
+                  offer.validUntil || '—',
+                  bearbeiten ? (
+                    <Input type="date" data-offer-valid-until value={draft!.validUntil} onChange={e => { const v = e.target.value; setDraft(d => d ? { ...d, validUntil: v } : d); }} style={{ width: 160 }} />
                   ) : undefined
                 )}
                 {renderField('Created', offer.createdAt?.split('T')[0])}
@@ -435,7 +464,8 @@ export function OfferDetail() {
             <Card>
               <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
                 <span className="text-overline">NOTES</span>
-                {offer.status === 'draft' && (
+                {/* R6E — die Notiz gehört zum Entwurf: nur im Bearbeiten änderbar, gespeichert mit „Save". */}
+                {bearbeiten && offer.status === 'draft' && (
                   <button
                     className="cursor-pointer flex items-center gap-1 transition-colors"
                     style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11 }}
@@ -443,25 +473,27 @@ export function OfferDetail() {
                       const ai = await import('@/core/ai/ai-service');
                       if (!ai.isAiConfigured()) { alert('Set OpenAI API key in Settings > AI'); return; }
                       try {
-                        const items = offer.lines.map(l => {
+                        const items = (draft?.lines ?? []).map(l => {
                           const p = products.find(pr => pr.id === l.productId);
-                          return { brand: p?.brand || '', name: p?.name || '', price: l.unitPrice };
+                          const price = priceFromField(l.price);
+                          return { brand: p?.brand || '', name: p?.name || '', price: Number.isFinite(price) ? price : 0 };
                         });
                         const text = await ai.generateOfferText({
                           customerName: customer ? `${customer.firstName} ${customer.lastName}` : 'Customer',
-                          items, total: offer.total,
+                          items, total: shownTotal,
                         });
-                        setFormNotes(text);
+                        setDraft(d => d ? { ...d, notes: text } : d);
                       } catch (e) { alert(String(e)); }
                     }}
                   >Generate with AI</button>
                 )}
               </div>
               <div style={{ marginTop: 0 }}>
-                {editing || offer.status === 'draft' ? (
+                {bearbeiten ? (
                   <textarea
-                    value={formNotes}
-                    onChange={e => setFormNotes(e.target.value)}
+                    data-offer-notes
+                    value={draft!.notes}
+                    onChange={e => { const v = e.target.value; setDraft(d => d ? { ...d, notes: v } : d); }}
                     className="w-full outline-none transition-colors duration-300"
                     rows={4}
                     style={{ background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical' }}
@@ -519,7 +551,7 @@ export function OfferDetail() {
         open={!!pendingPerLine}
         variant="sales"
         onCancel={() => setPendingPerLine(null)}
-        onConfirm={handleNumberTypeConfirm}
+        onConfirm={(special) => { void handleNumberTypeConfirm(special); }}
       />
 
       {/* Delete confirmation modal */}
@@ -533,14 +565,14 @@ export function OfferDetail() {
         </div>
       </Modal>
 
-      {/* Add line item modal */}
+      {/* Add line item modal — fügt dem Entwurf hinzu, gespeichert wird mit „Save" */}
       <Modal open={showAddLine} onClose={() => setShowAddLine(false)} title="Add Item" width={500}>
         <div style={{ maxHeight: '50vh', overflowY: 'auto' }}>
           {availableProducts.length === 0 && (
             <p style={{ fontSize: 13, color: '#6B7280', padding: '24px 0', textAlign: 'center' }}>No available products.</p>
           )}
           {availableProducts.map(p => (
-            <div key={p.id} onClick={() => handleAddLine(p)}
+            <div key={p.id} data-offer-add-product={p.id} onClick={() => handleAddLine(p)}
               className="cursor-pointer rounded transition-colors"
               style={{ padding: '10px 12px', marginBottom: 2, borderBottom: '1px solid rgba(229,225,214,0.6)' }}
               onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.03)')}

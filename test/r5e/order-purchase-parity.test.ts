@@ -273,10 +273,10 @@ function bildDesAuftrags(db: Db, oid: string) {
   const nochB = R4C_MATRIX.filter((z) => z.luecke === 'B').map((z) => z.op).sort();
   const restR5E = vorher.filter((op) => !drei.includes(op));
   ok(nochB.every((op) => restR5E.includes(op)), `SCOPE die uebrigen Klasse-B-Zeilen stammen aus dem R5E-Rest (${nochB.join(', ')})`);
-  ok(ALLOWED_MUTATIONS.length === 80, `SCOPE invoices.cancel, die elf aus R6C und die achtundzwanzig aus R6D (${ALLOWED_MUTATIONS.length})`);
+  ok(ALLOWED_MUTATIONS.length === 88, `SCOPE invoices.cancel, die elf aus R6C, die achtundzwanzig aus R6D und die acht aus R6E (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 152, `SCOPE die Registry steht bei 152 (R6D) (${rustOps})`);
+  ok(rustOps === 160, `SCOPE die Registry steht bei 160 (R6E) (${rustOps})`);
   const stand = [R4C_MATRIX.filter((z) => z.verdrahtet).length, R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet).length,
     R4C_MATRIX.filter((z) => z.luecke === 'B').length, R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length];
   ok(stand[0] >= 33 && stand[1] === 0 && stand[3] >= 2 && stand[0] + stand[2] + stand[3] === 40,

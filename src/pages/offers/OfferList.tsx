@@ -18,6 +18,13 @@ import { matchesDeep } from '@/core/utils/deep-search';
 import { Bhd } from '@/components/ui/Bhd';
 import { useSharedRead } from '@/core/data/shared-read';
 import { lotAggregatesFor } from '@/core/data/domain-reads';
+// CENTRAL-UI-PARITY R6E — Anlegen und die Statusknöpfe der Zeilen gehen durch die gemeinsame
+// Schreibweiche: am Primary die Hausfolge in EINER Transaktion, auf PC2 der geprüfte Fernbefehl.
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { saveOfferCreate, saveOfferStatus } from '@/core/offers/offer-actions';
+import type { OfferTargetStatus } from '@/core/offers/offer-rules';
+import type { Offer } from '@/core/models/types';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -25,7 +32,10 @@ function fmt(v: number): string {
 
 export function OfferList() {
   const navigate = useNavigate();
-  const { offers, loadOffers, createOffer, updateOffer, deleteOffer } = useOfferStore();
+  const { offers, loadOffers, deleteOffer } = useOfferStore();
+  const w = useSharedWrites();
+  const [createFehler, setCreateFehler] = useState('');
+  const [rowFehler, setRowFehler] = useState('');
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts } = useProductStore();
   // v0.6.9 — Soft-Reservation: Offer kann ein Stueck binden, das schon in einer
@@ -108,6 +118,7 @@ export function OfferList() {
       const p = products.find(pr => pr.id === id);
       if (!p) return null;
       // Phase 7 — Cost-Basis fuer Margin-Scheme aus FIFO-Lot (= naechste Sale-Cost).
+      // R6E — nur noch fuer die Vorschau: gespeichert rechnet der Primary mit SEINEM Einstand.
       const fifo = fifoKosten.get(p.id) ?? null;
       const costBasis = fifo ? fifo.fifoCost : p.purchasePrice;
       return { productId: p.id, unitPrice: linePrices[id] ?? p.plannedSalePrice ?? p.purchasePrice, purchasePrice: costBasis, taxScheme: p.taxScheme };
@@ -125,19 +136,36 @@ export function OfferList() {
     return { subtotal: gross - vat, vatAmount: vat, total: gross };
   }, [selectedProducts]);
 
-  function handleCreate() {
+  function closeNew() {
+    setShowNew(false);
+    setCreateFehler('');
+  }
+
+  // R6E — EIN Auftrag „Angebot anlegen": der Primary vergibt Nummer, Summen und Einstand. Die Maske
+  // schließt nur bei Erfolg; ein Nein (oder ein offener Ausgang) bleibt sichtbar stehen.
+  async function handleCreate() {
     if (!selectedCustomerId || selectedProducts.length === 0) return;
-    try {
-      createOffer(selectedCustomerId, selectedProducts, notes, validUntil);
-      setShowNew(false);
-      setSelectedCustomerId('');
-      setSelectedProductIds([]);
-      setLinePrices({});
-      setNotes('');
-      setValidUntil('');
-    } catch (e) {
-      alert(`Could not create offer: ${e instanceof Error ? e.message : String(e)}`);
-    }
+    setCreateFehler('');
+    const r = await saveOfferCreate(w, {
+      customerId: selectedCustomerId,
+      lines: selectedProducts.map(l => ({ productId: l.productId, unitPrice: l.unitPrice })),
+      notes,
+      validUntil,
+    });
+    if (r.kind !== 'ok') { setCreateFehler(fehlertext(r)); return; }
+    setShowNew(false);
+    setSelectedCustomerId('');
+    setSelectedProductIds([]);
+    setLinePrices({});
+    setNotes('');
+    setValidUntil('');
+  }
+
+  // R6E — Send / Accept / Reject der Zeile: derselbe Statusauftrag wie im Detail, mit der Fassung der Liste.
+  async function rowStatus(offer: Offer, status: OfferTargetStatus) {
+    setRowFehler('');
+    const r = await saveOfferStatus(w, offer, status);
+    if (r.kind !== 'ok') setRowFehler(fehlertext(r));
   }
 
   return (
@@ -157,10 +185,12 @@ export function OfferList() {
                 }}>{s || 'All'}</button>
             ))}
           </div>
-          <Button variant="primary" onClick={() => setShowNew(true)}>New Offer</Button>
+          <Button variant="primary" data-offer-new onClick={() => { setCreateFehler(''); setShowNew(true); }}>New Offer</Button>
         </div>
       }
     >
+      <WriteError text={rowFehler} />
+
       {/* Table */}
       <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,2fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)', gap: 12, padding: '0 12px 10px' }}>
         {['OFFER #', 'CLIENT', 'ITEMS', 'TOTAL', 'STATUS', 'DATE'].map(h => (
@@ -199,14 +229,17 @@ export function OfferList() {
             <div className="flex items-center gap-2">
               <StatusDot status={offer.status} />
               {offer.status === 'draft' && (
-                <button onClick={(e) => { e.stopPropagation(); updateOffer(offer.id, { status: 'sent', sentAt: new Date().toISOString() }); }}
+                <button data-offer-row-send={offer.id} disabled={w.busy}
+                  onClick={(e) => { e.stopPropagation(); void rowStatus(offer, 'sent'); }}
                   className="cursor-pointer" style={{ padding: '2px 8px', fontSize: 10, border: '1px solid #6E8AAA', color: '#6E8AAA', borderRadius: 4, background: 'none' }}>Send</button>
               )}
               {offer.status === 'sent' && (
                 <>
-                  <button onClick={(e) => { e.stopPropagation(); updateOffer(offer.id, { status: 'accepted' }); }}
+                  <button data-offer-row-accept={offer.id} disabled={w.busy}
+                    onClick={(e) => { e.stopPropagation(); void rowStatus(offer, 'accepted'); }}
                     className="cursor-pointer" style={{ padding: '2px 8px', fontSize: 10, border: '1px solid #7EAA6E', color: '#7EAA6E', borderRadius: 4, background: 'none' }}>Accept</button>
-                  <button onClick={(e) => { e.stopPropagation(); updateOffer(offer.id, { status: 'rejected' }); }}
+                  <button data-offer-row-reject={offer.id} disabled={w.busy}
+                    onClick={(e) => { e.stopPropagation(); void rowStatus(offer, 'rejected'); }}
                     className="cursor-pointer" style={{ padding: '2px 8px', fontSize: 10, border: '1px solid #AA6E6E', color: '#AA6E6E', borderRadius: 4, background: 'none' }}>Reject</button>
                 </>
               )}
@@ -227,7 +260,7 @@ export function OfferList() {
       />
 
       {/* New Offer Modal */}
-      <Modal open={showNew} onClose={() => setShowNew(false)} title="New Offer" width={640}>
+      <Modal open={showNew} onClose={closeNew} title="New Offer" width={640}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20, maxHeight: '65vh', overflowY: 'auto', paddingRight: 4 }}>
           {/* Customer */}
           <div>
@@ -281,6 +314,7 @@ export function OfferList() {
                       <div className="flex items-center gap-2">
                         <input
                           type="number"
+                          data-offer-new-price={id}
                           value={price}
                           onChange={e => setLinePrices({ ...linePrices, [id]: Number(e.target.value) || 0 })}
                           className="outline-none font-mono"
@@ -306,16 +340,18 @@ export function OfferList() {
             </div>
           )}
 
-          <Input label="VALID UNTIL" type="date" value={validUntil} onChange={e => setValidUntil(e.target.value)} />
+          <Input label="VALID UNTIL" type="date" value={validUntil} onChange={e => setValidUntil(e.target.value)} data-offer-new-valid-until />
           <div>
             <span className="text-overline" style={{ marginBottom: 6 }}>NOTES</span>
-            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2}
+            <textarea value={notes} onChange={e => setNotes(e.target.value)} rows={2} data-offer-new-notes
               className="w-full outline-none" style={{ background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }} />
           </div>
 
+          <WriteError text={createFehler} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate} disabled={!selectedCustomerId || selectedProductIds.length === 0}>Create Offer</Button>
+            <Button variant="ghost" onClick={closeNew}>Cancel</Button>
+            <Button variant="primary" data-offer-create-save onClick={() => { void handleCreate(); }}
+              disabled={w.busy || !selectedCustomerId || selectedProductIds.length === 0}>Create Offer</Button>
           </div>
         </div>
       </Modal>

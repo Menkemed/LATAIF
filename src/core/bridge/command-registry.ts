@@ -137,6 +137,12 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // R6D — Edelmetall und Schrotthandel. „Verkaufen" und „Schmelzen" sind ein Zustandswechsel.
   'metals.create', 'metals.update_status', 'metals.set_spot_price',
   'scrap_trades.create', 'scrap_trades.update', 'scrap_trades.cancel',
+  // CENTRAL-UI-PARITY R6E — das Angebot: EINE fachliche Speicherung (Kopf und Positionen zusammen),
+  // EIN Zustandswechsel (senden/annehmen/ablehnen), EINE Umwandlung über den Rechnungsweg des Hauses.
+  'offers.create', 'offers.update', 'offers.set_status', 'offers.convert_to_invoice',
+  // R6E — Rechnungs-Lebenszyklus: das Butterfly-Kennzeichen, der Retourenstorno, die Rücknahme einer
+  // Transfer-Umwandlung (Storno statt Löschen) und das Nachrichtenprotokoll am Kunden.
+  'invoices.set_butterfly', 'returns.cancel', 'transfers.undo_convert', 'customers.log_message',
 ];
 
 export interface CommandSpec {

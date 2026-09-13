@@ -2129,38 +2129,38 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 
 | UI-Handlung | Ort | Laufweg am Primary | PC2 heute | Kat. | vorh. Buchung | nächster Schritt | Domäne · Risiko |
 |---|---|---|---|---|---|---|---|
-| Rechnung anlegen mit Zahlung > 0 | pages/invoices/InvoiceCreate:907 | createDirectInvoice + recordPayment | NAC | A | invoices.create + record_payment (zwei Schritte, nicht atomar) | atomare Folge „anlegen + zahlen“ | Verkauf/Geld · hoch |
+| Rechnung anlegen mit Zahlung > 0 | pages/invoices/InvoiceCreate:907 | createDirectInvoice + recordPayment | **angeschlossen (R6E)** | A | `invoices.create` (R6E) | **geschlossen (R6E)** | Verkauf/Geld · hoch |
 | Rechnung ändern (Edit-Seite) | InvoiceCreate:907 (Edit-Modus) | invoiceStore.editInvoice (Zeilen, Kopf, Zahlungsdelta, Grund) | **angeschlossen (R6B)** | B | invoices.update (ohne Zahlungsdelta) | **geschlossen (R6B)** | Verkauf · mittel |
 | Kopf speichern | pages/invoices/InvoiceDetail:649 | updateInvoice | UNERR (`editing` wird nie true) | D | — | toter Zweig | — |
 | Status-Override | InvoiceDetail:766 | updateInvoice({status}) | UNERR | D | — | toter Zweig | — |
 | Zeilen bearbeiten (Detail) | InvoiceDetail:784→1499 | editInvoice | UNERR | D | invoices.update | toter Zweig | — |
-| Butterfly-Schalter | InvoiceDetail:657 | updateInvoice({butterfly}) | TOT | A | — | Feld-Buchung | Verkauf · niedrig |
-| Schlusszahlung mit Sondernummer | InvoiceDetail:2095 | recordPayment(…, specialMark) | NAC | A | — (record_payment ohne specialMark) | Sondernummer-Vertrag | Nummernkreis · hoch |
+| Butterfly-Schalter | InvoiceDetail:657 | updateInvoice({butterfly}) | **angeschlossen (R6E)** | A | `invoices.set_butterfly` (R6E) | **geschlossen (R6E)** | Verkauf · niedrig |
+| Schlusszahlung mit Sondernummer | InvoiceDetail:2095 | recordPayment(…, specialMark) | **angeschlossen (R6E)** | A | `invoices.record_payment` (R6E) | **geschlossen (R6E)** | Nummernkreis · hoch |
 | „Mark as Picked Up“ | InvoiceDetail:669 | repairStore.updateStatus('picked_up') je Reparatur | **angeschlossen (R6B)** | B | repairs.update_status | **geschlossen (R6B)** | Reparatur · niedrig |
-| Retoure stornieren | InvoiceDetail:1345→1858 | salesReturnStore.cancelReturn | TOT (Alert) | A | — | neue Buchung | Retoure/Geld · hoch |
+| Retoure stornieren | InvoiceDetail:1345→1858 | salesReturnStore.cancelReturn | **angeschlossen (R6E)** | A | `returns.cancel` (R6E) | **geschlossen (R6E)** | Retoure/Geld · hoch |
 | Rechnung löschen | InvoiceDetail:697→1671 | invoiceStore.deleteInvoice | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | „Pay“ in der Rechnungsliste | pages/invoices/InvoiceList:430→514 | recordPayment | **angeschlossen (R6B)** | B | invoices.record_payment | **geschlossen (R6B)** | Geld · mittel |
 | Nummernwahl nach „Pay“ | InvoiceList:595–604 | recordPayment(…, specialMark) | **angeschlossen (R6B)** | B | invoices.record_payment (nur Normalnummer) | **geschlossen (R6B)** | Nummernkreis · mittel |
 | Gutschrift löschen | pages/credit-notes/CreditNoteDetail:103 | deleteCreditNote | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Angebot speichern | pages/offers/OfferDetail:220 | updateOffer | TOT | A | — | offers.* | Angebot · mittel |
-| Angebot senden | OfferDetail:227 | updateOffer({status:'sent'}) | TOT | A | — | offers.* | Angebot · mittel |
-| Angebot annehmen | OfferDetail:243 | updateOffer({status:'accepted'}) | TOT | A | — | offers.* | Angebot · mittel |
-| Angebot ablehnen | OfferDetail:244 | updateOffer({status:'rejected'}) | TOT | A | — | offers.* | Angebot · mittel |
-| Angebot → Rechnung | OfferDetail:248→520 | invoiceStore.createInvoiceFromOffer | TOT | A | — (invoices.create verliert Angebotsbezug/-status) | eigene Folge | Verkauf · hoch |
+| Angebot speichern | pages/offers/OfferDetail:220 | updateOffer | **angeschlossen (R6E)** | A | `offers.update` (R6E) | **geschlossen (R6E)** | Angebot · mittel |
+| Angebot senden | OfferDetail:227 | updateOffer({status:'sent'}) | **angeschlossen (R6E)** | A | `offers.set_status` (R6E) | **geschlossen (R6E)** | Angebot · mittel |
+| Angebot annehmen | OfferDetail:243 | updateOffer({status:'accepted'}) | **angeschlossen (R6E)** | A | `offers.set_status` (R6E) | **geschlossen (R6E)** | Angebot · mittel |
+| Angebot ablehnen | OfferDetail:244 | updateOffer({status:'rejected'}) | **angeschlossen (R6E)** | A | `offers.set_status` (R6E) | **geschlossen (R6E)** | Angebot · mittel |
+| Angebot → Rechnung | OfferDetail:248→520 | invoiceStore.createInvoiceFromOffer | **angeschlossen (R6E)** | A | `offers.convert_to_invoice` (R6E) | **geschlossen (R6E)** | Verkauf · hoch |
 | Angebot löschen | OfferDetail:251→530 | deleteOffer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Position hinzufügen | OfferDetail:281→541 | addOfferLine | TOT | A | — | offers.* | Angebot · mittel |
-| Positionspreis ändern | OfferDetail:349 | updateOfferLine (je Tastendruck) | TOT (wirft je Tastendruck) | A | — | offers.* | Angebot · mittel |
-| Position entfernen | OfferDetail:359 | removeOfferLine | TOT | A | — | offers.* | Angebot · mittel |
-| Angebot anlegen | pages/offers/OfferList:159→317 | createOffer | TOT (Alert) | A | — | offers.* | Angebot · mittel |
-| Senden (Liste) | OfferList:201 | updateOffer | TOT | A | — | offers.* | Angebot · mittel |
-| Annehmen (Liste) | OfferList:206 | updateOffer | TOT | A | — | offers.* | Angebot · mittel |
-| Ablehnen (Liste) | OfferList:208 | updateOffer | TOT | A | — | offers.* | Angebot · mittel |
+| Position hinzufügen | OfferDetail:281→541 | addOfferLine | **angeschlossen (R6E)** | A | `offers.update` (R6E) | **geschlossen (R6E)** | Angebot · mittel |
+| Positionspreis ändern | OfferDetail:349 | updateOfferLine (je Tastendruck) | **angeschlossen (R6E)** | A | `offers.update` (R6E) | **geschlossen (R6E)** | Angebot · mittel |
+| Position entfernen | OfferDetail:359 | removeOfferLine | **angeschlossen (R6E)** | A | `offers.update` (R6E) | **geschlossen (R6E)** | Angebot · mittel |
+| Angebot anlegen | pages/offers/OfferList:159→317 | createOffer | **angeschlossen (R6E)** | A | `offers.create` (R6E) | **geschlossen (R6E)** | Angebot · mittel |
+| Senden (Liste) | OfferList:201 | updateOffer | **angeschlossen (R6E)** | A | `offers.set_status` (R6E) | **geschlossen (R6E)** | Angebot · mittel |
+| Annehmen (Liste) | OfferList:206 | updateOffer | **angeschlossen (R6E)** | A | `offers.set_status` (R6E) | **geschlossen (R6E)** | Angebot · mittel |
+| Ablehnen (Liste) | OfferList:208 | updateOffer | **angeschlossen (R6E)** | A | `offers.set_status` (R6E) | **geschlossen (R6E)** | Angebot · mittel |
 | Löschen (Liste) | OfferList:213 | deleteOffer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Kunde löschen | pages/customers/CustomerDetail:588→1066 | deleteCustomer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Kundengold zurückgeben | CustomerDetail:752→SettleGoldModal:288 | goldStore.returnCustomerCredit | **angeschlossen (R6D)** | A | `gold.customer_credits.settle` (R6D) | **geschlossen (R6D)** | Gold · hoch |
 | Kundengold → BHD | CustomerDetail:756→SettleGoldModal:288 | convertCustomerCreditToMoney | **angeschlossen (R6D)** | A | `gold.customer_credits.settle` (R6D) | **geschlossen (R6D)** | Gold/Geld · hoch |
-| Nachricht kopieren (Protokoll) | components/ai/MessagePreviewModal:218 | customerMessageStore.logMessage | **ehrlich: „nicht protokolliert" (R6B)** | A | — | messages.log | CRM · niedrig |
-| WhatsApp (Protokoll) | MessagePreviewModal:221 | logMessage | **ehrlich: „nicht protokolliert" (R6B)** | A | — | messages.log | CRM · niedrig |
+| Nachricht kopieren (Protokoll) | components/ai/MessagePreviewModal:218 | customerMessageStore.logMessage | **angeschlossen (R6E)** | A | `customers.log_message` (R6E) | **geschlossen (R6E)** | CRM · niedrig |
+| WhatsApp (Protokoll) | MessagePreviewModal:221 | logMessage | **angeschlossen (R6E)** | A | `customers.log_message` (R6E) | **geschlossen (R6E)** | CRM · niedrig |
 | Spotpreis aktualisieren | pages/dashboard/Dashboard:612 | getSpotPrices (localStorage) | geht | C | — | — | — |
 
 **Artikel · Inventur · Einkauf · Lieferant**
@@ -2211,7 +2211,7 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Shop-Gold geben | OrderDetail:1506→SettleGoldModal:288 | applyShopGoldToSupplierPayable / …CrossKarat… | **angeschlossen (R6D)** | A | `gold.payables.settle` (R6D) | **geschlossen (R6D)** | Gold · hoch |
 | Gold → Geld (Auftrag) | OrderDetail:1511→SettleGoldModal:288 | convertGoldPayableToMoney | **angeschlossen (R6D)** | A | `gold.payables.settle` (R6D) | **geschlossen (R6D)** | Gold/Geld · hoch |
 | Gold-Verbindlichkeit ✕ | OrderDetail:1516 | deleteGoldPayable | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| AI-Benachrichtigung (Protokoll) | OrderDetail:789→MessagePreviewModal | logMessage | **ehrlich: „nicht protokolliert" (R6B)** | A | — | messages.log | CRM · niedrig |
+| AI-Benachrichtigung (Protokoll) | OrderDetail:789→MessagePreviewModal | logMessage | **angeschlossen (R6E)** | A | `customers.log_message` (R6E) | **geschlossen (R6E)** | CRM · niedrig |
 | „Pay“ in der Auftragsliste | pages/orders/OrderList:305→373 | orderPaymentStore.addPayment | **angeschlossen (R6B)** | B | orders.add_payment | **geschlossen (R6B)** | Geld · mittel |
 | Material hinzufügen | pages/repairs/RepairDetail:1194→AddMaterialModal:528 | addRepairLine(Material) + createGoldPayable | **angeschlossen (R6D)** | A | `repairs.add_material` (R6D) | **geschlossen (R6D)** | Reparatur/Gold · hoch |
 | A/P zahlen (Reparatur) | RepairDetail:1276→PayExpenseModal:60 | recordExpensePayment | **angeschlossen (R6D)** | A | `expenses.record_payment` (R6D) | **geschlossen (R6D)** | Geld · hoch |
@@ -2221,7 +2221,7 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Kundengold zurück (Reparatur) | RepairDetail:1406→SettleGoldModal | returnCustomerCredit | **angeschlossen (R6D)** | A | `gold.customer_credits.settle` (R6D) | **geschlossen (R6D)** | Gold · hoch |
 | Kundengold → BHD (Reparatur) | RepairDetail:1410→SettleGoldModal | convertCustomerCreditToMoney | **angeschlossen (R6D)** | A | `gold.customer_credits.settle` (R6D) | **geschlossen (R6D)** | Gold/Geld · hoch |
 | Reparatur löschen | RepairDetail:1163→1451 | deleteRepair | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| AI-Benachrichtigung (Reparatur) | RepairDetail:598→MessagePreviewModal | logMessage | **ehrlich: „nicht protokolliert" (R6B)** | A | — | messages.log | CRM · niedrig |
+| AI-Benachrichtigung (Reparatur) | RepairDetail:598→MessagePreviewModal | logMessage | **angeschlossen (R6E)** | A | `customers.log_message` (R6E) | **geschlossen (R6E)** | CRM · niedrig |
 | „+ New Supplier“ (Werkstatt) | pages/repairs/RepairList:1008→1189 | createSupplier | **angeschlossen (R6C)** | A | `suppliers.create` (R6C) | **geschlossen (R6C)** | Stammdaten · mittel |
 | Produktion anlegen | pages/production/ProductionPage:143→299 | productionStore.createRecord | TOT | A | — | production.create | Produktion/Bestand · hoch |
 | Produktion löschen (Liste) | ProductionPage:369→332 | deleteRecord | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
@@ -2233,9 +2233,9 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Rückgabe (Kommittent) | pages/consignors/ConsignorDetail:258 | markReturned | **angeschlossen (R6B)** | B | consignments.mark_returned | **geschlossen (R6B)** | Kommission · niedrig |
 | Agent ändern | pages/agents/AgentList:243→548 | updateAgent | **angeschlossen (R6C)** | A | `agents.update` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
 | Agent löschen | AgentList:243→536 | deleteAgent | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Umwandlung rückgängig (Tabelle) | components/agents/TransferTable:455 | undoTransferInvoiceConvert (löscht Rechnung) | TOT | A | — | transfers.undo_convert | Transfer/Verkauf · hoch |
+| Umwandlung rückgängig (Tabelle) | components/agents/TransferTable:455 | undoTransferInvoiceConvert (löscht Rechnung) | **angeschlossen (R6E)** | A | `transfers.undo_convert` (R6E) | **geschlossen (R6E)** | Transfer/Verkauf · hoch |
 | Transfer löschen (Tabelle) | TransferTable:602 | deleteTransfer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Umwandlung rückgängig (Detail) | pages/agents/TransferDetail:285 | undoTransferInvoiceConvert | TOT | A | — | transfers.undo_convert | Transfer/Verkauf · hoch |
+| Umwandlung rückgängig (Detail) | pages/agents/TransferDetail:285 | undoTransferInvoiceConvert | **angeschlossen (R6E)** | A | `transfers.undo_convert` (R6E) | **geschlossen (R6E)** | Transfer/Verkauf · hoch |
 | Transfer löschen (Detail) | TransferDetail:300→579 | deleteTransfer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Metall anlegen | pages/metals/MetalList:181→514 | createMetal | **angeschlossen (R6D)** | A | `metals.create` (R6D) | **geschlossen (R6D)** | Metall/Bestand · mittel |
 | Metall verkaufen | MetalList:344→547 | updateMetal | **angeschlossen (R6D)** | A | `metals.update_status` (R6D) | **geschlossen (R6D)** | Metall/Geld · mittel |
@@ -2920,3 +2920,123 @@ Registry            121 → 152   (1 Probe + 71 Auskünfte + 80 Buchungen)
 Verbleibend (R6E/R6G): Angebote, Rechnungs-Lebenszyklus, Einkauf zurückgeben/stornieren, Auftrag stornieren +
 Zeilenwege, Kommission, Transfer rückgängig, Produktion, Aufgaben, Dokumente/OCR, Nachrichtenprotokoll, Bildänderung,
 Inbox-Foto.
+
+## R6E — Verkauf, Angebote und Rechnungs-Lebenszyklus (13.09.2026)
+
+Ein Bündel, vier Domänen: Angebote, Rechnungs-Lebenszyklus (anlegen + zahlen, Sondernummer, Butterfly, Retoure
+stornieren), Rücknahme einer Transfer-Umwandlung und das Nachrichtenprotokoll am Kunden. Grundregel wie in R6D: **Primary
+fachlich prüfen → Primary-Fehler in der gemeinsamen Domäne beheben → Fernbuchung auf dieselbe Domäne → Primary und PC2
+gemeinsam testen.** Kein Primary-Fehler wurde in den Fernweg kopiert. R6F (Einkauf zurück/storno, Auftrag, Kommission,
+Produktion, Bildänderung, Aufgaben, Dokumente, Inbox-Foto) bleibt vollständig offen.
+
+### Umfang, eingefroren (`CENTRAL_UI_R6E_SCOPE_FROZEN`)
+
+Aus der SSOT gelesen: **22 Einstiege** — Angebote 12 · Rechnung 4 · Transfer-Rücknahme 2 · Nachrichtenprotokoll 4.
+
+| Domäne | UI-Einstiege (SSOT) | Laufweg am Primary vorher | Primary korrekt? | PC2 vorher | gemeinsame Domäne | Fernbuchung |
+|---|---|---|---|---|---|---|
+| Angebot | anlegen · speichern · Position hinzufügen/Preis/entfernen · senden/annehmen/ablehnen (Detail + Liste) | `offerStore` je Aktion ein Commit, Preis je Tastendruck, Folgen über den Ereignisbus | **nein**: keine Fassung, VAT_10-Preisänderung verlor die MwSt (line_total = netto), „offered"/Aufgaben NACH dem Commit und von PC2 nie, entfernter Artikel blieb „offered", stille Ersatzfiliale | TOT | `core/offers/offer-house` | `offers.create`, `offers.update`, `offers.set_status` |
+| Angebot → Rechnung | Create Invoice | `createInvoiceFromOffer` — ein ZWEITER Rechnungsweg | **nein**: Einstand aus `products.purchase_price` statt Los, verschluckte Buchung, Artikel ohne Produktzeile still weg, Los-Artikel ohne offenes Los ohne Bestandsabzug | TOT | offer-house → `createDirectInvoice` (+ `offerId`) | `offers.convert_to_invoice` |
+| Rechnung | anlegen mit Zahlung | `createDirectInvoice` + `recordPayment` lose hintereinander | **nein**: scheiterte die Zahlung, blieb eine unbezahlte Rechnung (Bestand + PINV verbraucht) | ehrliches Nein | `core/invoices/invoice-create-house` | `invoices.create` (+ `payment`) |
+| Rechnung | Schlusszahlung mit Sondernummer | `recordPayment(…, specialMarkOnFinal)` ohne Klammer | **nein**: verschluckte Buchung/Kartengebühr | ehrliches Nein | `core/invoices/invoice-payment-house` | `invoices.record_payment` (+ `specialMarkOnFinal`) |
+| Rechnung | Butterfly | allgemeines `updateInvoice` (kann Status/Beträge/Nummer schreiben) | eng genug nur durch die Maske | TOT | `core/invoices/invoice-flag-house` | `invoices.set_butterfly` |
+| Retoure | Retoure stornieren | `cancelReturn` mit eigener Klammer | **nein**: Owner aus der Primary-Anmeldung, Retoure aus der geladenen Liste, Audit mit Sitzungsbenutzer, Rechnung blieb RETURNED | TOT | `core/returns/return-cancel-house` | `returns.cancel` |
+| Transfer | Umwandlung rückgängig (Tabelle, Detail) | `undoTransferInvoiceConvert` → `deleteInvoice` | **nein**: Rechnung HART gelöscht, die Verkaufsforderung an den Agenten kam nie zurück | TOT | `core/invoices/invoice-reversal` + `transfer-house` | `transfers.undo_convert` |
+| Nachrichten | Kopieren · WhatsApp · AI-Benachrichtigung (Auftrag, Reparatur) | `logMessage`, Fehler → stilles `null` | **nein**: keine Prüfung von Kunde/Verknüpfung/Filiale, Ersatzfiliale, stilles Nichts | ehrlich „nicht protokolliert" | `core/customers/message-house` | `customers.log_message` |
+
+### Primary zuerst — Befunde und Behebung (`CENTRAL_UI_R6E_PRIMARY_FIRST_PROVED`)
+
+Jede Befund-Zeile ist in der gemeinsamen Domäne behoben; der Primary läuft seither über `runOnPrimary` (Schreibreihenfolge,
+eine Ledger-Transaktion, erst danach durabel), PC2 über `runRemoteCommand` — **dieselbe** Hausfolge. Die Store-Aktionen
+des Primary (`createOffer`, `createInvoiceFromOffer`, `cancelReturn`, `undoTransferInvoiceConvert`, `logMessage`) sind
+nur noch Anschlüsse an die Hausfolge. Buchungen in Hausfolgen sind streng: wo ein Store-Schreiber `safePost` benutzt,
+wacht `watchLedgerPosts` — ein gescheiterter Post nimmt die ganze Handlung zurück.
+
+- **Angebot — Fassung** (`CENTRAL_UI_R6E_OFFER_REVISION_PROVED`): `offers.revision` mit Trigger; jede Positionsänderung
+  hebt die Fassung des Angebots (wie `order_lines` → `orders`). „Speichern" ist EINE fachliche Handlung: Kopf und
+  vollständiger Positionsstand zusammen; Hinzufügen/Ändern/Entfernen leitet der Primary aus den Zeilen-IDs ab. Die Maske
+  arbeitet im Entwurf (kein Schreiben je Tastendruck). Veraltet → `RECORD_CHANGED`, nichts geschrieben; unverändert → keine
+  neue Fassung. Nur ein Entwurf ist bearbeitbar (`OFFER_NOT_EDITABLE`); Übergänge nur draft → sent → accepted/rejected.
+- **Angebot — Folgen atomar**: „offered" beim Anlegen/Hinzufügen, zurück auf Lager beim Ablehnen/Entfernen, Nachfass- und
+  „Create invoice"-Aufgabe entstehen IN der Transaktion; die Ereignis-Handler dafür sind entfernt (kein Doppel).
+- **Angebot → Rechnung** (`CENTRAL_UI_R6E_OFFER_TO_INVOICE_ATOMIC_PROVED`): kein zweiter Rechnungsweg mehr. Die Zeilen
+  entstehen mit derselben Ableitung wie das Rechnungsformular (`toInvoiceLine`, Einstand aus dem FIFO-Los), die Rechnung
+  über `createDirectInvoice` (`offer_id` im selben INSERT); Angebotsstatus und -verknüpfung in derselben Transaktion.
+  Bewiesen: gleiche Zeilen und Buchung wie das Formular; Fehlerinjektion an Buchung, Angebots-UPDATE, Aufgabe → keine halbe
+  Rechnung, Los und PINV-Zähler unverändert; verlorene Antwort → genau eine Rechnung; Doppelumwandlung abgewiesen.
+- **Anlegen + Zahlen**: eine Hausfolge, eine Transaktion. Der Primary entscheidet Summen, Steuer, Einstand, Forderung,
+  Zahlungszuordnung, Kartengebühr, Endnummer, Buchung, Filiale. Überzahlung beim Anlegen bleibt abgewiesen
+  (`PAYMENT_EXCEEDS_TOTAL`) — die bestehende Regel des Formulars („Überzahlung läuft über die Rechnungsseite").
+- **Sondernummer** (`CENTRAL_UI_R6E_SPECIAL_NUMBER_CONTRACT_PROVED`): eine ECHTE Belegnummer aus einem eigenen durablen
+  Zähler (SINV, bei Reparaturen SRINV), vergeben vom Primary in derselben Transaktion; der normale Kreis (INV/RINV) bleibt
+  unberührt und umgekehrt; zwei Finalisierungen → zwei verschiedene Nummern; eine verlorene Antwort verbraucht keine zweite.
+  Der Client schickt nie eine Nummer, nur die WAHL (`specialMarkOnFinal`); sie wirkt nur auf der Zahlung, die die Rechnung
+  schließt (sonst bleibt die Marke vom Anlegen) — genau wie am Primary. Wählen darf, wer die Zahlung erfassen darf.
+- **Butterfly**: eigene enge Handlung (nur die Spalte), Fassung, stornierte Rechnung → `INVOICE_CANCELLED`; gleicher Wert
+  schreibt nichts.
+- **Retoure stornieren** (`CENTRAL_UI_R6E_RETURN_CANCEL_PROVED`): der vollständige Effekt bleibt (Bestand/Disposition,
+  Rechnungs-MwSt, SALES_RETURN_COGS- und CREDIT_NOTE-Storno, Kartengebühr-Erstattung zurück, REJECTED, Audit atomar); das
+  Recht und das Audit gelten für den AUTHENTIFIZIERTEN Absender (zentral `isOwner`, zusätzlich in der Hausfolge), nicht
+  für die Anmeldung am Primary. Die Rechnung kehrt von RETURNED auf PARTIAL zurück, wenn ihre Forderung wieder offen ist.
+  Die Hausfolge rollt nie selbst zurück (ein ROLLBACK dort hätte die äußere Transaktion des Fernauftrags zerstört).
+  PC2 sieht die Stornierbarkeit über die vorhandene Auskunft `store.sales_returns.get` (`cancelability`).
+- **Transfer-Rücknahme** (`CENTRAL_UI_R6E_TRANSFER_UNDO_ATOMIC_PROVED`): kein Löschen mehr. Die gemeinsame Grundlage
+  `reverseInvoiceInHouse` storniert die Rechnung mit der bestehenden Storno-Semantik (Lose, Buchungsstorno, Zahlungen,
+  Auto-Ausgaben, Verknüpfungen) — der Beleg bleibt als CANCELLED stehen; R6F kann sie für den Kommissions-Storno
+  wiederverwenden. Danach werden alle Transfers derselben Rechnung auf ihren Stand VOR der Umwandlung gesetzt und die
+  Verkaufsforderung an den Agenten wird neu gebucht (die Umwandlung hatte sie storniert). Bewiesen: vor Umwandlung ==
+  nach Umwandlung + Rücknahme (Transfer, Artikel, Lose, Saldo je Konto und Gegenpartei), auch bei Sammelrechnungen;
+  Fehler zwischen Rechnungsstorno und Transfer-Rückstellung → vollständiger Rollback. Bezahlte Rechnung → abgewiesen
+  (bestehende Regel). „Rechnung löschen" bleibt Kategorie E am Primary.
+- **Nachrichtenprotokoll** (`CENTRAL_UI_R6E_MESSAGE_LOG_PROVED`): die vier Einstiege sind EINE Absicht →
+  `customers.log_message`. Kunde und Verknüpfung (Angebot/Auftrag/Reparatur) müssen in der Filiale existieren; Filiale,
+  Absender (`created_by`) und Zeitpunkt entscheidet der Primary; nur anhängend, Idempotenz über die Kennung.
+
+**Bewusst belassen (Befunde, eigene Entscheidung nötig):**
+- Gutschriften (`credit_notes`) und unbenutztes Guthaben (`customer_credits`) aus der stornierten Retoure werden weiter
+  entfernt: `credit_notes` hat keine Statusspalte, und alle Leser zählen sie ungefiltert. Die Spur sind die
+  Stornobuchungen und der atomare Audit-Snapshot. Eine erhaltende Form braucht eine Schemaänderung
+  (`credit_notes.status` + Filter in rund 15 Lesern, `customer_credits` VOID) — nicht Teil von R6E.
+- `created_by` in Rechnung/Zahlung/Hauptbuch und `audit_log.changed_by` nennen bei Fernaufträgen außerhalb von
+  Retourenstorno und Nachrichtenprotokoll weiterhin die Anmeldung am Primary (`currentUserId()` in den alten
+  Store-Schreibern) — ein Querschnittsthema aller Fernbuchungen seit C3B.
+- Angebot rechnet mit dem Filial-MwSt-Satz, die Rechnung mit `vatRateFor(scheme)` (bei Standard 10 % identisch).
+- Eine als Store-Guthaben erstattete Retoure bleibt unstornierbar (Sperre „refund paid"); nach dem Storno einer Retoure an
+  einer unbezahlten Rechnung steht der Artikel auf „sold" statt „reserved" (`revertDisposition`).
+
+### Befehlsmodell, Rechte und Sicherheit (`CENTRAL_UI_R6E_AUTHORITY_PROVED`)
+
+Acht neue Buchungen, zwei vorhandene erweitert: `offers.create/update/set_status/convert_to_invoice`,
+`invoices.set_butterfly`, `returns.cancel`, `transfers.undo_convert`, `customers.log_message`; `invoices.create`
+(+ `payment`) und `invoices.record_payment` (+ `specialMarkOnFinal`). Rechte wie am Primary: `offers.update` hinter
+`perm.canEditOffers`, `invoices.set_butterfly` hinter `perm.canEditInvoices`, `returns.cancel` nur Eigentümer (neue
+Regelart `isOwner`), der Rest ohne Tor wie die Maske. Negativ geprüft: fremde Filiale, fremde Angebote/Rechnungen/
+Retouren/Transfers/Kunden, veraltete Fassung, vom Client gesendete Summen/Einstand/Steuer/Buchungswerte, Belegnummern,
+direkte Statusinjektion, unzulässige Übergänge und Stornozustände, fremder bzw. nicht berechtigter Absender.
+
+### Beweise
+
+```
+Unit    r6e/offer 168/0 · r6e/invoice-lifecycle 134/0 · r6e/reversal 145/0 · r6e/message-log 98/0 · r6e/final-gate 99/0
+Nachbarn r6d/r6c final-gate · r6b · r5c/r5d/r5e/r5f · c3g/c4/c6 · bridge invoice/remote-create/financial/lifecycle/service/write-foundation/client-ui · uiparity r1/r2c/r3/r4b/r4c — 41 Dateien grün
+Rust    cargo test --lib bridge 37/0 · sync_schema 8/0 · manifest-drift 1439/1439 · TS app/node 0 · Lint-Delta 0
+Two-App test/e2e/r6e-sales-offers-invoice.e2e.mjs 386/0 (4m 26s; auf dem Stand aller Produktänderungen gebaut)
+```
+
+### Stand der R6A-SSOT nach R6E (`CENTRAL_UI_R6E_SSOT_UPDATED`)
+
+```
+A vorher             38
+R6E Umfang           22   (Angebote 12 · Rechnung 4 · Transfer-Rücknahme 2 · Nachrichtenprotokoll 4)
+geschlossen          22
+umklassifiziert       0
+verbleibend          16
+neue Buchungen        8   (+ 2 vorhandene erweitert: invoices.create, invoices.record_payment)
+neue Auskünfte        0   (Stornierbarkeit reist in store.sales_returns.get)
+Registry            152 → 160   (1 Probe + 71 Auskünfte + 88 Buchungen)
+```
+
+Verbleibend (R6F, vollständig offen): Rückgabe an Lieferant, Einkauf stornieren, Inbox-Foto verwerfen, Auftrag stornieren
+(mit Geld), Zeilenstatus ×2, Position bearbeiten (Auftrag), beim Lieferanten bestellt, Produktion anlegen, Kommission
+Rückgabe nach Verkauf / Verkauf stornieren, Bildänderung am Artikel, Aufgabe anlegen/ändern, Aufgabe erledigt, Dokument
+hochladen, Texterkennung.

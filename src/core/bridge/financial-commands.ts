@@ -86,7 +86,9 @@ export const C3G_PRIMARY_ONLY = [
   'orders.cancel_with_money', 'orders.delete',
   'consignments.cancel_sale', 'consignments.mark_returned_after_sale', 'consignments.delete',
   'repairs.delete',
-  'transfers.undo_convert', 'transfers.delete',
+  // R6E — `transfers.undo_convert` ist seither freigegeben: die Umwandlung wird als Rechnungsstorno
+  // zurückgenommen (die Rechnung bleibt als Beleg), nicht mehr gelöscht. Löschen bleibt hier.
+  'transfers.delete',
 ] as const;
 
 export class FinancialPayloadError extends Error {

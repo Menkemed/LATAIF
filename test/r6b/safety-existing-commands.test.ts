@@ -124,11 +124,14 @@ const koerper = (code: string, kopf: RegExp, ind = 2): string => {
   // InvoiceList: Zahlung + Nummernwahl → invoices.record_payment
   const c = codeOf(src('src/pages/invoices/InvoiceList.tsx'));
   ok((c.match(/w\.ok\('invoices\.record_payment'/g) ?? []).length === 2, 'WIRE InvoiceList: beide Einstiege fahren `invoices.record_payment`');
-  ok((c.match(/recordPayment\(/g) ?? []).length === 2 && (c.match(/local: \(\) => \{ recordPayment\(/g) ?? []).length === 2,
+  // R6E — die Schlusszahlung mit Nummernwahl läuft seither über die Hausfolge (EINE Transaktion am
+  // Primary) und fern mit der WAHL `specialMarkOnFinal`; die Nummer vergibt der Primary.
+  ok((c.match(/recordPayment\(/g) ?? []).length === 1 && (c.match(/local: \(\) => \{ recordPayment\(/g) ?? []).length === 1
+    && /local: \(\) => recordInvoicePaymentOnPrimary\(zahlung\)/.test(c),
     'WIRE InvoiceList: recordPayment läuft NUR in den lokalen Anschlüssen');
-  ok(/if \(w\.remote && specialMark\) \{ alert\(fehlertext\(nichtAmClient\('the special number circle'\)\)\); return; \}/.test(c),
-    'WIRE InvoiceList: der Sonderkreis ist fern ein ehrliches Nein (wie auf der Rechnungsseite)');
-  ok(/remote: \(\) => \(\{ invoiceId, amount, method \}\)/.test(c) && /remote: \(\) => \(\{ invoiceId: p\.invoiceId, amount: p\.amount, method: p\.method \}\)/.test(c),
+  ok(!/nichtAmClient\('the special number circle'\)/.test(c),
+    'WIRE InvoiceList: der Sonderkreis geht fern mit (R6E)');
+  ok(/remote: \(\) => \(\{ invoiceId, amount, method \}\)/.test(c) && /remote: \(\) => invoicePaymentBody\(zahlung\)/.test(c),
     'WIRE InvoiceList: die Rümpfe nennen Rechnung, Betrag, Weg — nichts sonst');
 }
 {
@@ -332,10 +335,12 @@ marker('CENTRAL_UI_R6B_CLIENT_LOGOUT_PROVED');
 {
   const m = codeOf(src('src/components/ai/MessagePreviewModal.tsx'));
   const log = koerper(m, /function log\(channel/);
-  ok(log.indexOf('readsFromPrimary()') > 0 && log.indexOf('readsFromPrimary()') < log.indexOf('logMessage('),
-    'FAKE auf dem Client wird das Protokoll nicht versucht, sondern gesagt');
-  ok(/const eintrag = logMessage\(/.test(log) && /setLogNote\(eintrag \? '' : /.test(log) && /data-message-log-note/.test(m),
-    'FAKE am Primary: ein gescheiterter Eintrag wird nicht verschwiegen');
+  // R6E — das Protokoll läuft seither auf BEIDEN Rechnern über `customers.log_message` (Beweis: test/r6e).
+  // Die R6B-Zusage bleibt: kein Schein-Erfolg — „Added" nur nach `ok`, jeder andere Ausgang mit Grund.
+  ok(/useSharedWrite<\{ messageId: string \}>\(OP_CUSTOMERS_LOG_MESSAGE\)/.test(m) && !/logMessage\(/.test(log),
+    'FAKE das Protokoll geht über den geteilten Schreibweg, nicht mehr am Store vorbei');
+  ok(/if \(r\.kind === 'ok'\) \{\s*setLogStatus\('ok'\)/.test(log) && /fehlertext\(r\)/.test(log) && /data-message-log-note/.test(m),
+    'FAKE ein gescheiterter Eintrag wird nicht verschwiegen');
 }
 marker('CENTRAL_UI_R6B_NO_FALSE_SUCCESS_PROVED');
 
@@ -384,12 +389,12 @@ marker('CENTRAL_UI_R6B_UNSUPPORTED_DELETES_FAIL_CLOSED');
 // ══ §8 — Registry und Matrix ══════════════════════════════════════════════════
 {
   // R6C — R6B selbst fügte keine Buchung hinzu; seither nur die elf aus R6C (hinter invoices.cancel).
-  ok(ALLOWED_MUTATIONS.length === 80 && ALLOWED_MUTATIONS[40] === 'invoices.cancel' && ALLOWED_MUTATIONS.at(-1) === 'scrap_trades.cancel',
-    `REGISTRY 41 Buchungen bis invoices.cancel, dahinter nur die elf aus R6C und die achtundzwanzig aus R6D (${ALLOWED_MUTATIONS.length})`);
+  ok(ALLOWED_MUTATIONS.length === 88 && ALLOWED_MUTATIONS[40] === 'invoices.cancel' && ALLOWED_MUTATIONS.at(-1) === 'customers.log_message',
+    `REGISTRY 41 Buchungen bis invoices.cancel, dahinter nur die elf aus R6C, die achtundzwanzig aus R6D und die acht aus R6E (${ALLOWED_MUTATIONS.length})`);
   const rs = src('src-tauri/src/bridge.rs');
   const block = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
   const n = (block.match(/^\s+OP_[A-Z0-9_]+,/gm) ?? []).length;
-  ok(n === 152, `REGISTRY Rust REMOTE_OPS = 152 (R6D) (${n})`);
+  ok(n === 160, `REGISTRY Rust REMOTE_OPS = 160 (R6E) (${n})`);
   const exakt = R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && z.verdrahtet).length;
   const keineUi = R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length;
   const enger = R4C_MATRIX.filter((z) => z.paritaet === 'enger').length;

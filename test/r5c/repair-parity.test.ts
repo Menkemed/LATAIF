@@ -248,10 +248,10 @@ const unterschiede = (a: Record<string, unknown>, b: Record<string, unknown>): s
     ok(!!z && z.paritaet === 'exakt' && z.verdrahtet && z.luecke === null, `SCOPE ${op} ist geschlossen`);
     ok(ALLOWED_MUTATIONS.includes(op), `SCOPE ${op} ist eine VORHANDENE Buchung`);
   }
-  ok(ALLOWED_MUTATIONS.length === 80, `SCOPE invoices.cancel, die elf aus R6C und die achtundzwanzig aus R6D (${ALLOWED_MUTATIONS.length})`);
+  ok(ALLOWED_MUTATIONS.length === 88, `SCOPE invoices.cancel, die elf aus R6C, die achtundzwanzig aus R6D und die acht aus R6E (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 152, `SCOPE die Registry steht bei 152 (R6D) (${rustOps})`);
+  ok(rustOps === 160, `SCOPE die Registry steht bei 160 (R6E) (${rustOps})`);
   for (const op of ['repairs.update_status', 'repairs.add_line', 'repairs.cancel_line']) {
     const z = R4C_MATRIX.find((x) => x.op === op);
     ok(!!z && z.verdrahtet, `SCOPE Nachbar ${op} bleibt verdrahtet`);

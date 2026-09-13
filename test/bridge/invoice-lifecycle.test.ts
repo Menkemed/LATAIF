@@ -184,8 +184,9 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
 
   // Freigegeben ist GENAU das Paar, dessen lokaler Vertrag hier durchdacht wurde.
   const cmd = code('src/core/bridge/invoice-lifecycle-commands.ts');
-  ok(/editInvoice\(/.test(cmd) && /recordPayment\(/.test(cmd),
-    'SCOPE freigegeben sind editInvoice und recordPayment…');
+  // R6E — die Zahlung läuft seither über die Hausfolge (invoice-payment-house), die `recordPayment` ruft.
+  ok(/editInvoice\(/.test(cmd) && /recordInvoicePaymentInHouse\(/.test(cmd),
+    'SCOPE freigegeben sind editInvoice und recordPayment (über die Hausfolge)…');
   for (const notYet of ['deleteInvoice', 'deletePayment', 'updatePayment', 'applyCreditToInvoice', 'updateInvoice', 'setSpecialMark']) {
     ok(!new RegExp(`${notYet}\\(`).test(cmd), `SCOPE …und ${notYet} ausdruecklich NICHT`);
   }
@@ -259,7 +260,8 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
     ['Guthaben-Einloesung', { invoiceId: 'i1', amount: 10, method: 'credit' }],
     ['eigener Zahlungsschluessel', { invoiceId: 'i1', amount: 10, method: 'cash', paymentId: 'p-forged' }],
     ['Status mitgeschickt', { invoiceId: 'i1', amount: 10, method: 'cash', status: 'FINAL' }],
-    ['Sondermarke', { invoiceId: 'i1', amount: 10, method: 'cash', specialMarkOnFinal: true }],
+    // R6E — die WAHL der Sondermarke (ja/nein) ist seither Teil des Vertrags; nur eine Nicht-Wahl wird abgewiesen.
+    ['Sondermarke als Zahl', { invoiceId: 'i1', amount: 10, method: 'cash', specialMarkOnFinal: 1 }],
     ['bezahlter Gesamtbetrag', { invoiceId: 'i1', amount: 10, method: 'cash', paidAmount: 999 }],
   ] as const) {
     let threw: string | null = null;
@@ -551,7 +553,7 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
 // ── 9) Keine zweite Rechnungslogik ────────────────────────────────────────
 {
   const cmd = code('src/core/bridge/invoice-lifecycle-commands.ts');
-  ok(/editInvoice\(/.test(cmd) && /recordPayment\(/.test(cmd), 'REUSE die ECHTEN Store-Funktionen…');
+  ok(/editInvoice\(/.test(cmd) && /recordInvoicePaymentInHouse\(/.test(cmd), 'REUSE die ECHTEN Store-Funktionen (die Zahlung über ihre Hausfolge, R6E)…');
   ok(!/INSERT INTO invoices|UPDATE invoices SET|INSERT INTO payments|INSERT INTO invoice_lines|ledger_entries/i.test(cmd),
     'REUSE …und keine einzige Zeile selbst geschrieben');
   ok(!/vatRate|computeVat|grossAmount =|paid_amount =/.test(cmd), 'REUSE keine zweite Rechnerei');
@@ -579,16 +581,21 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
   await import('../../src/core/bridge/payables-commands.ts');
   await import('../../src/core/bridge/gold-commands.ts');
   await import('../../src/core/bridge/metal-commands.ts');
+  // R6E — Angebot, Rechnungs-Lebenszyklus, Retourenstorno/Transfer-Rücknahme, Nachrichtenprotokoll.
+  await import('../../src/core/bridge/offer-commands.ts');
+  await import('../../src/core/bridge/invoice-flag-commands.ts');
+  await import('../../src/core/bridge/sales-reversal-commands.ts');
+  await import('../../src/core/bridge/message-commands.ts');
   await import('../../src/core/bridge/invoice-cancel-command.ts');
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = registry.ALLOWED_MUTATIONS;
-  ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice,invoices.cancel,suppliers.create,suppliers.update,agents.update,partners.create,partners.update,employees.create,employees.update,inventory.start,inventory.save,inventory.finish,inventory.record_check,tax.record_payment,banking.transfer,partners.record_tx,debts.create,debts.update,debts.record_payment,expenses.create,expenses.update,expenses.record_payment,expenses.template_create,expenses.template_update,purchases.record_payment,purchases.apply_credit,suppliers.pay,suppliers.apply_credit,suppliers.refund_credit,gold.payables.settle,gold.customer_credits.settle,repairs.record_gold_usage,repairs.add_material,orders.add_cost,orders.remove_cost,metals.create,metals.update_status,metals.set_spot_price,scrap_trades.create,scrap_trades.update,scrap_trades.cancel',
+  ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice,invoices.cancel,suppliers.create,suppliers.update,agents.update,partners.create,partners.update,employees.create,employees.update,inventory.start,inventory.save,inventory.finish,inventory.record_check,tax.record_payment,banking.transfer,partners.record_tx,debts.create,debts.update,debts.record_payment,expenses.create,expenses.update,expenses.record_payment,expenses.template_create,expenses.template_update,purchases.record_payment,purchases.apply_credit,suppliers.pay,suppliers.apply_credit,suppliers.refund_credit,gold.payables.settle,gold.customer_credits.settle,repairs.record_gold_usage,repairs.add_material,orders.add_cost,orders.remove_cost,metals.create,metals.update_status,metals.set_spot_price,scrap_trades.create,scrap_trades.update,scrap_trades.cancel,offers.create,offers.update,offers.set_status,offers.convert_to_invoice,invoices.set_butterfly,returns.cancel,transfers.undo_convert,customers.log_message',
     `ALLOWLIST genau diese vierzig Mutationen (${mutations.join(', ')})`);
   // CENTRAL-UI-PARITY R1: dazu 48 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
   const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get', 'page.dashboard.get', 'page.invoice_list.get', 'page.order_list.get', 'page.customer_detail.get', 'page.order_detail.get', 'page.supplier_detail.get', 'page.product_detail.get', 'page.purchase_create.get', 'refs.numbers.get', 'metals.stock_by_karat.get', 'search.global.get', 'page.reconciliation.get', 'ledger.balances.get', 'finance.receivables.get', 'inventory.lot_aggregates.get', 'product.lots.get', 'product.lots.batch.get', 'expenses.credit_paid.get', 'inventory.session.get', 'inventory.checks.get', 'metals.spot_prices.get', 'debts.payments.get', 'suppliers.credits.get'].includes(o));
-  ok(known.length === 152 && reads.length === 71 && parityReads.length === 53 && known.includes('bridge.probe'),
-    `ALLOWLIST 1 Probe + 18 Auskuenfte + 53 typisierte Auskuenfte + 80 Buchungen = 152 (R6D) (${known.length}/${reads.length}/${parityReads.length})`);
+  ok(known.length === 160 && reads.length === 71 && parityReads.length === 53 && known.includes('bridge.probe'),
+    `ALLOWLIST 1 Probe + 18 Auskuenfte + 53 typisierte Auskuenfte + 88 Buchungen = 160 (R6E) (${known.length}/${reads.length}/${parityReads.length})`);
   ok(!mutations.some((o) => o.endsWith('.delete')), 'ALLOWLIST kein Loeschen');
 
   for (const op of ['invoices.delete', 'payments.delete', 'payments.update', 'anything.write']) {
@@ -602,7 +609,7 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 152, 'ALLOWLIST Rust kennt dieselben einhundertzweiundfuenfzig Namen');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 160, 'ALLOWLIST Rust kennt dieselben einhundertsechzig Namen');
   ok(/OP_INVOICES_UPDATE: &str = "invoices.update"/.test(rs)
     && /OP_INVOICES_RECORD_PAYMENT: &str = "invoices.record_payment"/.test(rs),
     'ALLOWLIST …namentlich, nicht generisch');

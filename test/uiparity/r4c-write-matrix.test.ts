@@ -37,7 +37,9 @@ const R6C = ['suppliers.create', 'suppliers.update', 'agents.update', 'partners.
   'purchases.record_payment', 'purchases.apply_credit', 'suppliers.pay', 'suppliers.apply_credit', 'suppliers.refund_credit',
   'gold.payables.settle', 'gold.customer_credits.settle', 'repairs.record_gold_usage', 'repairs.add_material',
   'orders.add_cost', 'orders.remove_cost', 'metals.create', 'metals.update_status', 'metals.set_spot_price',
-  'scrap_trades.create', 'scrap_trades.update', 'scrap_trades.cancel'];
+  'scrap_trades.create', 'scrap_trades.update', 'scrap_trades.cancel',
+  // R6E — acht Angebots-/Rechnungs-/Retouren-/Transfer-/Nachrichten-Buchungen; Beweise in test/r6e.
+  'offers.create', 'offers.update', 'offers.set_status', 'offers.convert_to_invoice', 'invoices.set_butterfly', 'returns.cancel', 'transfers.undo_convert', 'customers.log_message'];
 
 // ── §1 Die Matrix deckt sich mit der Freigabeliste ──────────────────────
 const registry = src('src/core/bridge/command-registry.ts');
@@ -190,11 +192,11 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   const ops = src('src/core/bridge/store-read-ops.ts');
   const parity = [...ops.matchAll(/export const OP_[A-Z_]+ = '([^']+)'/g)].length;
   ok(parity === 53, `10 dreiundfuenfzig typisierte Auskuenfte (R6C: +2 Inventur; R6D: +3) (${parity})`);
-  ok(erlaubt.length === 80, `10 vierzig Buchungen plus die eine aus R5F.1 plus elf aus R6C plus achtundzwanzig aus R6D (${erlaubt.length})`);
+  ok(erlaubt.length === 88, `10 vierzig Buchungen plus die eine aus R5F.1 plus elf aus R6C plus achtundzwanzig aus R6D plus acht aus R6E (${erlaubt.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '')
     .matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 152, `10 und Rust laesst dieselben 152 Namen durch (${rustOps})`);
+  ok(rustOps === 160, `10 und Rust laesst dieselben 160 Namen durch (${rustOps})`);
 }
 
 // ── R5A — Auftrag → Rechnung: EINE Handlung, EINE Buchung ───────────────

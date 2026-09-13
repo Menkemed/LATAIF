@@ -128,11 +128,20 @@ const MATRIX: Record<string, Zeile> = {
   'scrap_trades.create': { ui: 'ScrapTradeNew — Save Trade', gleich: true },
   'scrap_trades.update': { ui: 'ScrapTradeDetail — Save Changes', gleich: true },
   'scrap_trades.cancel': { ui: 'ScrapTradeDetail — Cancel Trade', gleich: true },
+  // R6E — Angebot, Rechnungs-Lebenszyklus, Retoure, Transfer, Nachrichten.
+  'offers.create': { ui: 'OfferList — New Offer', gleich: true },
+  'offers.update': { ui: 'OfferDetail — Save (Kopf und Positionen)', gleich: true },
+  'offers.set_status': { ui: 'OfferDetail/OfferList — Send / Accept / Reject', gleich: true },
+  'offers.convert_to_invoice': { ui: 'OfferDetail — Create Invoice', gleich: true },
+  'invoices.set_butterfly': { ui: 'InvoiceDetail — Butterfly', gleich: true },
+  'returns.cancel': { ui: 'InvoiceDetail — Cancel Return', gleich: true },
+  'transfers.undo_convert': { ui: 'TransferTable/TransferDetail — Undo convert', gleich: true },
+  'customers.log_message': { ui: 'MessagePreviewModal — Copy / WhatsApp', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 80, `A 80 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 88, `A 88 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

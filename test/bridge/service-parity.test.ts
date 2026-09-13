@@ -444,7 +444,7 @@ const REPAIR_COMPARE = [
   // CENTRAL-C3H hat die sechzehn in C3G als `B_DEFERRED` klassifizierten Aktionen freigeschaltet.
   // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
-  ok(known.length === 59 && reads.length === 18 && ALLOWED_MUTATIONS.length === 80,
+  ok(known.length === 59 && reads.length === 18 && ALLOWED_MUTATIONS.length === 88,
     `SCOPE 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
   const c3f = ['repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned'];
   for (const op of c3f) ok((ALLOWED_MUTATIONS as readonly string[]).includes(op), `SCOPE ${op} steht darauf`);
@@ -452,7 +452,8 @@ const REPAIR_COMPARE = [
   for (const op of ['transfers.convert_to_invoice', 'repairs.update_status']) {
     ok((ALLOWED_MUTATIONS as readonly string[]).includes(op), `SCOPE ${op} ist seit C3H freigegeben`);
   }
-  for (const op of ['transfers.undo_convert', 'transfers.delete', 'repairs.delete']) {
+  // R6E — `transfers.undo_convert` ist seither freigegeben (Rechnungsstorno statt Löschen).
+  for (const op of ['transfers.delete', 'repairs.delete']) {
     ok(!(ALLOWED_MUTATIONS as readonly string[]).includes(op), `SCOPE ${op} bleibt draussen`);
   }
   const unknown = await executeCommand('transfers.delete', { input: {} }, identity('90', 'transfers.delete', 'z'));

@@ -263,6 +263,15 @@ pub const OP_SCRAP_TRADES_CANCEL: &str = "scrap_trades.cancel";
 pub const OP_METALS_SPOT_PRICES_GET: &str = "metals.spot_prices.get";
 pub const OP_DEBTS_PAYMENTS_GET: &str = "debts.payments.get";
 pub const OP_SUPPLIERS_CREDITS_GET: &str = "suppliers.credits.get";
+// CENTRAL-UI-PARITY R6E — Angebot, Rechnungs-Lebenszyklus, Nachrichtenprotokoll.
+pub const OP_OFFERS_CREATE: &str = "offers.create";
+pub const OP_OFFERS_UPDATE: &str = "offers.update";
+pub const OP_OFFERS_SET_STATUS: &str = "offers.set_status";
+pub const OP_OFFERS_CONVERT_TO_INVOICE: &str = "offers.convert_to_invoice";
+pub const OP_INVOICES_SET_BUTTERFLY: &str = "invoices.set_butterfly";
+pub const OP_RETURNS_CANCEL: &str = "returns.cancel";
+pub const OP_TRANSFERS_UNDO_CONVERT: &str = "transfers.undo_convert";
+pub const OP_CUSTOMERS_LOG_MESSAGE: &str = "customers.log_message";
 
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
 // Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
@@ -422,6 +431,14 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_METALS_SPOT_PRICES_GET,
     OP_DEBTS_PAYMENTS_GET,
     OP_SUPPLIERS_CREDITS_GET,
+    OP_OFFERS_CREATE,
+    OP_OFFERS_UPDATE,
+    OP_OFFERS_SET_STATUS,
+    OP_OFFERS_CONVERT_TO_INVOICE,
+    OP_INVOICES_SET_BUTTERFLY,
+    OP_RETURNS_CANCEL,
+    OP_TRANSFERS_UNDO_CONVERT,
+    OP_CUSTOMERS_LOG_MESSAGE,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

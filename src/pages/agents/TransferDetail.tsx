@@ -29,7 +29,9 @@ import type { AgentTransfer, Invoice } from '@/core/models/types';
 import { useSharedWrites, fehlertext, nichtAmClient } from '@/core/data/shared-write';
 import { canConvertTransfer, transferBillTo, transferConvertBody, transferEditPatch } from '@/core/agents/transfer-rules';
 import { WriteError } from '@/components/shared/WriteError';
-import { convertTransferOnPrimary } from '@/core/agents/transfer-house';
+import {
+  canUndoTransferConvert, convertTransferOnPrimary, transferUndoBody, undoTransferConversionOnPrimary,
+} from '@/core/agents/transfer-house';
 
 type TransferDisplayStatus = 'transferred' | 'unpaid' | 'partial' | 'settled' | 'returned';
 
@@ -55,7 +57,7 @@ export function TransferDetail() {
   const {
     agents, transfers, loadAgents, loadTransfers,
     markTransferSold, markTransferReturned,
-    undoTransferInvoiceConvert, updateTransfer, deleteTransfer,
+    updateTransfer, deleteTransfer,
   } = useAgentStore();
   const { products, categories, loadProducts, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
@@ -188,6 +190,18 @@ export function TransferDetail() {
     })) return;
     loadTransfers(); loadProducts();
   }
+  /** R6E — „Undo Convert": dieselbe Buchung wie die Zeile der Liste; die Rechnung wird storniert. */
+  async function umwandlungZuruecknehmen() {
+    const t = transfer!;
+    if (!window.confirm('Undo convert? The invoice will be cancelled and the transfer reset to "Sold".')) return;
+    const fassung = fassungVon('undoing this conversion');
+    if (fassung === null) return;
+    if (!await w.ok('transfers.undo_convert', {
+      local: () => undoTransferConversionOnPrimary(t.id, fassung || undefined),
+      remote: () => transferUndoBody({ id: t.id, revision: fassung }),
+    })) return;
+    loadTransfers(); loadInvoices(); loadProducts();
+  }
   async function speichern() {
     const t = transfer!;
     const fassung = fassungVon('editing this transfer');
@@ -282,12 +296,8 @@ export function TransferDetail() {
                 <Button variant="primary" onClick={() => navigate(`/invoices/${linkedInvoice.id}`)}>
                   <FileText size={14} /> Open Invoice ({formatInvoiceDisplayShort(linkedInvoice)})
                 </Button>
-                {(linkedInvoice.paidAmount || 0) <= 0.005 && (
-                  <Button variant="ghost" onClick={() => {
-                    if (!window.confirm(`Undo convert? The invoice will be deleted and the transfer reset to "Sold".`)) return;
-                    try { undoTransferInvoiceConvert(transfer.id); }
-                    catch (err) { alert(err instanceof Error ? err.message : String(err)); }
-                  }}>
+                {canUndoTransferConvert(transfer, linkedInvoice) && (
+                  <Button variant="ghost" onClick={() => void umwandlungZuruecknehmen()} disabled={w.busy} data-transfer-undo>
                     Undo Convert
                   </Button>
                 )}

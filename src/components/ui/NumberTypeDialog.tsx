@@ -55,6 +55,7 @@ export function NumberTypeDialog({
           label="Normal Final"
           preview={normalLabel}
           hint="Standard final invoice number."
+          hook="normal"
         />
         <NumberOption
           selected={special}
@@ -62,11 +63,12 @@ export function NumberTypeDialog({
           label="Special Final"
           preview={specialLabel}
           hint="Marked with a leading dot."
+          hook="special"
         />
 
         <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 6 }}>
-          <Button variant="ghost" onClick={onCancel}>Cancel</Button>
-          <Button variant="primary" onClick={() => onConfirm(special)}>Confirm</Button>
+          <Button variant="ghost" onClick={onCancel} data-final-number-cancel>Cancel</Button>
+          <Button variant="primary" onClick={() => onConfirm(special)} data-final-number-confirm>Confirm</Button>
         </div>
       </div>
     </Modal>
@@ -74,12 +76,16 @@ export function NumberTypeDialog({
 }
 
 function NumberOption({
-  selected, onClick, label, preview, hint,
-}: { selected: boolean; onClick: () => void; label: string; preview: string; hint: string }) {
+  selected, onClick, label, preview, hint, hook,
+}: { selected: boolean; onClick: () => void; label: string; preview: string; hint: string; hook: 'normal' | 'special' }) {
   return (
     <button
       type="button"
       onClick={onClick}
+      // R6E — stabile Haken für die Zwei-Rechner-Prüfung (welcher Kreis gewählt wurde).
+      data-final-number-normal={hook === 'normal' ? '' : undefined}
+      data-final-number-special={hook === 'special' ? '' : undefined}
+      aria-pressed={selected}
       style={{
         display: 'flex', alignItems: 'center', gap: 14,
         textAlign: 'left',

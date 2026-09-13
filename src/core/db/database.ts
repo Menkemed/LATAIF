@@ -2173,6 +2173,40 @@ function runMigrations(database: Database): void {
        BEGIN
          UPDATE precious_metals SET revision = OLD.revision + 1 WHERE id = NEW.id;
        END`,
+    // CENTRAL-UI-PARITY R6E — das Angebot bekommt eine echte Fassung. Kopf und Positionen sind EIN
+    // bearbeitbarer Zustand: zwei Rechner, die dasselbe Angebot speichern, dürfen einander nicht
+    // still überschreiben. Die alte Spalte `version` wurde nie gepflegt und bleibt unberührt.
+    `ALTER TABLE offers ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_offers_revision`,
+    `CREATE TRIGGER trg_offers_revision
+       AFTER UPDATE ON offers
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE offers SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
+    // Eine Position ändert das Angebot — dieselbe Regel wie `order_lines` → `orders`.
+    `DROP TRIGGER IF EXISTS trg_offer_lines_insert_offer_revision`,
+    `CREATE TRIGGER trg_offer_lines_insert_offer_revision
+       AFTER INSERT ON offer_lines
+       FOR EACH ROW
+       BEGIN
+         UPDATE offers SET revision = revision + 1 WHERE id = NEW.offer_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_offer_lines_update_offer_revision`,
+    `CREATE TRIGGER trg_offer_lines_update_offer_revision
+       AFTER UPDATE ON offer_lines
+       FOR EACH ROW
+       BEGIN
+         UPDATE offers SET revision = revision + 1 WHERE id = NEW.offer_id;
+       END`,
+    `DROP TRIGGER IF EXISTS trg_offer_lines_delete_offer_revision`,
+    `CREATE TRIGGER trg_offer_lines_delete_offer_revision
+       AFTER DELETE ON offer_lines
+       FOR EACH ROW
+       BEGIN
+         UPDATE offers SET revision = revision + 1 WHERE id = OLD.offer_id;
+       END`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {
