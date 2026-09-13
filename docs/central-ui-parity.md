@@ -2169,7 +2169,7 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 |---|---|---|---|---|---|---|---|
 | Mehrfach löschen | pages/watches/WatchList:539→1232 | deleteProducts | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Etiketten drucken | WatchList:1266 | printRawZpl (Drucker am Platz) | geht | C | — | — | — |
-| Artikel speichern mit Bildänderung | pages/watches/ProductDetail:515 (Zweig 417) | editProductWithMedia | NAC | A | — (products.update ohne Medienweg) | Medienweg | Artikel/Medien · hoch |
+| Artikel speichern mit Bildänderung | pages/watches/ProductDetail:515 (Zweig 417) | editProductWithMedia | **angeschlossen (R6F)** | A | `products.update` (R6F) | **geschlossen (R6F)** | Artikel/Medien · hoch |
 | KI-Identifikation bestätigen | ProductDetail:856 | updateProduct({aiConfirmedAt}) | **angeschlossen (R6B)** | B | products.update (Feld fehlt in `PRODUCT_UPDATE_FIELDS`) | **geschlossen (R6B)** | Artikel · niedrig |
 | Artikel löschen | ProductDetail:1519→1621 | deleteProduct | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Inventur öffnen (Lauf beginnen) | components/products/StockCheckInventoryModal:83–176 | ensureOpenSession + persistSessionItems | **angeschlossen (R6C)** | A | `inventory.start` (R6C) | **geschlossen (R6C)** | Inventur · hoch |
@@ -2179,9 +2179,9 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | „+ New Supplier“ im Einkauf | pages/purchases/PurchaseCreate:391→845 | createSupplier | **angeschlossen (R6C)** | A | `suppliers.create` (R6C) | **geschlossen (R6C)** | Stammdaten · mittel |
 | Einkauf: Zahlung erfassen | pages/purchases/PurchaseDetail:177→424 | purchaseStore.addPayment | **angeschlossen (R6D)** | A | `purchases.record_payment` (R6D) | **geschlossen (R6D)** | Geld · hoch |
 | Einkauf: Guthaben verrechnen | PurchaseDetail:424 (credit) | getOpenCredits + applyCreditToPurchase (FIFO) | **angeschlossen (R6D)** | A | `purchases.apply_credit` (R6D) | **geschlossen (R6D)** | Geld · hoch |
-| Rückgabe an Lieferant | PurchaseDetail:178→483 | createReturn + confirmReturn | TOT | A | — | purchases.return | Einkauf/Bestand · hoch |
-| Einkauf stornieren | PurchaseDetail:183→496 | cancelPurchase | TOT | A | — | purchases.cancel | Einkauf/Buchung · hoch |
-| Inbox-Foto verwerfen | pages/purchases/PurchaseList:115 | dismissPurchaseInbox | TOT | A | — | purchases.dismiss_inbox | Einkauf · niedrig |
+| Rückgabe an Lieferant | PurchaseDetail:178→483 | createReturn + confirmReturn | **angeschlossen (R6F)** | A | `purchases.return_to_supplier` (R6F) | **geschlossen (R6F)** | Einkauf/Bestand · hoch |
+| Einkauf stornieren | PurchaseDetail:183→496 | cancelPurchase | **angeschlossen (R6F)** | A | `purchases.cancel` (R6F) | **geschlossen (R6F)** | Einkauf/Buchung · hoch |
+| Inbox-Foto verwerfen | pages/purchases/PurchaseList:115 | dismissPurchaseInbox | **angeschlossen (R6F)** | A | `purchases.dismiss_inbox` (R6F) | **geschlossen (R6F)** | Einkauf · niedrig |
 | Lieferant anlegen | pages/suppliers/SupplierList:80→182 | createSupplier | **angeschlossen (R6C)** | A | `suppliers.create` (R6C) | **geschlossen (R6C)** | Stammdaten · mittel |
 | Lieferant ändern | pages/suppliers/SupplierDetail:285→280 | updateSupplier | **angeschlossen (R6C)** | A | `suppliers.update` (R6C) | **geschlossen (R6C)** | Stammdaten · mittel |
 | Lieferant (de)aktivieren | SupplierDetail:719 | updateSupplier({active}) | **angeschlossen (R6C)** | A | `suppliers.update` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
@@ -2199,12 +2199,12 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 
 | UI-Handlung | Ort | Laufweg am Primary | PC2 heute | Kat. | vorh. Buchung | nächster Schritt | Domäne · Risiko |
 |---|---|---|---|---|---|---|---|
-| Auftrag stornieren (mit Geld) | pages/orders/OrderDetail:798→CancelOrderModal:198 | cancelOrderWithMoney (+ deleteOrder) | TOT | A | — (update_status weist 'cancelled' ab) | orders.cancel | Auftrag/Geld · hoch |
+| Auftrag stornieren (mit Geld) | pages/orders/OrderDetail:798→CancelOrderModal:198 | cancelOrderWithMoney (+ deleteOrder) | **angeschlossen (R6F)** | A | `orders.cancel` (R6F) | **geschlossen (R6F)** | Auftrag/Geld · hoch |
 | Auftrag löschen | OrderDetail:1116→1880 | deleteOrder | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Zeilenstatus PENDING/ARRIVED/DELIVERED | OrderDetail:1207–1226 (ohne Rechteprüfung) | updateOrderLineStatus | TOT | A | — | orders.line_status | Auftrag · mittel |
-| Zeilenstatus zurück | OrderDetail:1197 | updateOrderLineStatus | TOT | A | — | orders.line_status | Auftrag · mittel |
-| Position bearbeiten | OrderDetail:1232→OrderLineEditModal:179 | updateOrderLine (legt ggf. Artikel an) | TOT | A | — | orders.update_line | Auftrag/Bestand · hoch |
-| Beim Lieferanten bestellt | OrderDetail:1259→1760 | markOrderLineOrdered | TOT | A | — | orders.line_status | Auftrag · mittel |
+| Zeilenstatus PENDING/ARRIVED/DELIVERED | OrderDetail:1207–1226 (ohne Rechteprüfung) | updateOrderLineStatus | **angeschlossen (R6F)** | A | `orders.update_line_status` (R6F) | **geschlossen (R6F)** | Auftrag · mittel |
+| Zeilenstatus zurück | OrderDetail:1197 | updateOrderLineStatus | **angeschlossen (R6F)** | A | `orders.update_line_status` (R6F) | **geschlossen (R6F)** | Auftrag · mittel |
+| Position bearbeiten | OrderDetail:1232→OrderLineEditModal:179 | updateOrderLine (legt ggf. Artikel an) | **angeschlossen (R6F)** | A | `orders.update_line` (R6F) | **geschlossen (R6F)** | Auftrag/Bestand · hoch |
+| Beim Lieferanten bestellt | OrderDetail:1259→1760 | markOrderLineOrdered | **angeschlossen (R6F)** | A | `orders.mark_line_ordered` (R6F) | **geschlossen (R6F)** | Auftrag · mittel |
 | Kostenposition hinzufügen | OrderDetail:1355→AddMaterialModal:528 | addOrderLine + createGoldPayable | **angeschlossen (R6D)** | A | `orders.add_cost` (R6D) | **geschlossen (R6D)** | Auftrag/Gold · hoch |
 | Kostenposition löschen | OrderDetail:1438 | deleteOrderLine (storniert A/P) | **angeschlossen (R6D)** | A | `orders.remove_cost` (R6D) | **geschlossen (R6D)** | Auftrag/Buchung · hoch |
 | A/P zahlen (Auftrag) | OrderDetail:1422→PayExpenseModal:60 | recordExpensePayment | **angeschlossen (R6D)** | A | `expenses.record_payment` (R6D) | **geschlossen (R6D)** | Geld · hoch |
@@ -2223,11 +2223,11 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Reparatur löschen | RepairDetail:1163→1451 | deleteRepair | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | AI-Benachrichtigung (Reparatur) | RepairDetail:598→MessagePreviewModal | logMessage | **angeschlossen (R6E)** | A | `customers.log_message` (R6E) | **geschlossen (R6E)** | CRM · niedrig |
 | „+ New Supplier“ (Werkstatt) | pages/repairs/RepairList:1008→1189 | createSupplier | **angeschlossen (R6C)** | A | `suppliers.create` (R6C) | **geschlossen (R6C)** | Stammdaten · mittel |
-| Produktion anlegen | pages/production/ProductionPage:143→299 | productionStore.createRecord | TOT | A | — | production.create | Produktion/Bestand · hoch |
+| Produktion anlegen | pages/production/ProductionPage:143→299 | productionStore.createRecord | **angeschlossen (R6F)** | A | `production.create` (R6F) | **geschlossen (R6F)** | Produktion/Bestand · hoch |
 | Produktion löschen (Liste) | ProductionPage:369→332 | deleteRecord | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Produktion löschen (Detail) | pages/production/ProductionDetail:70→189 | deleteRecord | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Rückgabe nach Verkauf | pages/consignments/ConsignmentDetail:476/487→1004 | markReturnedAfterSale | TOT | A | — | consignments.return_after_sale | Kommission/Geld · hoch |
-| Verkauf stornieren | ConsignmentDetail:478/483/491→1049 | cancelSale | TOT | A | — (invoices.cancel deckt nur die Rechnung) | consignments.cancel_sale | Kommission/Geld · hoch |
+| Rückgabe nach Verkauf | pages/consignments/ConsignmentDetail:476/487→1004 | markReturnedAfterSale | **angeschlossen (R6F)** | A | `consignments.return_after_sale` (R6F) | **geschlossen (R6F)** | Kommission/Geld · hoch |
+| Verkauf stornieren | ConsignmentDetail:478/483/491→1049 | cancelSale | **angeschlossen (R6F)** | A | `consignments.cancel_sale` (R6F) | **geschlossen (R6F)** | Kommission/Geld · hoch |
 | Kommission löschen | ConsignmentDetail:500→1060 | deleteConsignment | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Rückgabe (Kommissionsliste) | pages/consignments/ConsignmentList:716 | markReturned | **angeschlossen (R6B)** | B | consignments.mark_returned | **geschlossen (R6B)** | Kommission · niedrig |
 | Rückgabe (Kommittent) | pages/consignors/ConsignorDetail:258 | markReturned | **angeschlossen (R6B)** | B | consignments.mark_returned | **geschlossen (R6B)** | Kommission · niedrig |
@@ -2287,12 +2287,12 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Mitarbeiter löschen | EmployeeList:272 | deleteEmployee | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Beurlauben/Reaktivieren (Detail) | pages/employees/EmployeeDetail:152/156 | updateEmployee | **angeschlossen (R6C)** | A | `employees.update` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
 | Mitarbeiter speichern | EmployeeDetail:700 | updateEmployee | **angeschlossen (R6C)** | A | `employees.update` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
-| Aufgabe anlegen/ändern | pages/tasks/TaskList:313 | createTask / updateTask | TOT | A | — | tasks.* | Büro · niedrig |
-| Aufgabe erledigt | TaskList:595 | completeTask | TOT | A | — | tasks.* | Büro · niedrig |
+| Aufgabe anlegen/ändern | pages/tasks/TaskList:313 | createTask / updateTask | **angeschlossen (R6F)** | A | `tasks.create` (R6F) + `tasks.update` | **geschlossen (R6F)** | Büro · niedrig |
+| Aufgabe erledigt | TaskList:595 | completeTask | **angeschlossen (R6F)** | A | `tasks.update` (R6F) | **geschlossen (R6F)** | Büro · niedrig |
 | Aufgabe löschen | TaskList:627 | deleteTask | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Dokument hochladen | pages/documents/DocumentList:358 | uploadDocument | TOT (unbehandelte Ablehnung) | A | — | documents.* (Medienweg) | Büro · niedrig |
+| Dokument hochladen | pages/documents/DocumentList:358 | uploadDocument | **angeschlossen (R6F)** | A | `documents.upload` (R6F) | **geschlossen (R6F)** | Büro · niedrig |
 | Dokument löschen | DocumentList:476 | deleteDocument | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Texterkennung (OCR) | DocumentList:430 | extractOcr | TOT (Fehler im Feld) | A | — | documents.* | Büro · niedrig |
+| Texterkennung (OCR) | DocumentList:430 | extractOcr | **angeschlossen (R6F)** | A | `documents.set_ocr` (R6F) | **geschlossen (R6F)** | Büro · niedrig |
 | **Abmelden** | components/layout/Sidebar:372 | authService.logout → `getDatabase` + DELETE `sessions` | **geht — lokal abgemeldet, zurück zur Anmeldung (R6B)** | C | — | erledigt (R6B) | Sitzung · hoch (Oberfläche) |
 | Filiale wechseln | Sidebar:221 | switchBranch | VERST (eine Filiale) | C | — | — | — |
 | Update installieren | components/shared/UpdateBanner:193 | prepareAndInstallUpdate (Flush ohne DB ist wirkungslos) | geht (aus Code gelesen) | C | — | — | — |
@@ -3086,3 +3086,117 @@ Verbleibend (R6F, vollständig offen): Rückgabe an Lieferant, Einkauf storniere
 (mit Geld), Zeilenstatus ×2, Position bearbeiten (Auftrag), beim Lieferanten bestellt, Produktion anlegen, Kommission
 Rückgabe nach Verkauf / Verkauf stornieren, Bildänderung am Artikel, Aufgabe anlegen/ändern, Aufgabe erledigt, Dokument
 hochladen, Texterkennung.
+
+## R6F — Einkauf, Auftrag, Kommission, Produktion, Bilder, Büro (13.09.2026)
+
+Die letzten 16 offenen A-Einstiege. Grundregel wie R6D/R6E: **Primary fachlich prüfen → Primary-Fehler in der gemeinsamen
+Domäne beheben → Fernbuchung auf dieselbe Domäne → Primary und PC2 gemeinsam testen.** „Auftrag löschen" und alle
+anderen Löschknöpfe bleiben Kategorie E am Primary; C/D/E werden nicht als geschlossen ausgegeben.
+
+### Umfang, eingefroren (`CENTRAL_UI_R6F_SCOPE_FROZEN`)
+
+Einkauf 3 · Auftrag 5 · Kommission 2 · Produktion 1 · Bildänderung 1 · Aufgaben 2 · Dokumente/OCR 2 = **16**.
+
+### Primary zuerst — Befunde und Behebung (`CENTRAL_UI_R6F_PRIMARY_FIRST_PROVED`)
+
+- **Einkauf** (`CENTRAL_UI_R6F_PURCHASE_RETURN_PROVED`, `CENTRAL_UI_R6F_PURCHASE_CANCEL_ATOMIC_PROVED`,
+  `CENTRAL_UI_R6F_PURCHASE_INBOX_PROVED`): „Rückgabe an Lieferant" war zwei Aufrufe mit zwei Speichervorgängen und
+  verschluckter Buchung; verkaufte Ware ließ sich zurückgeben (Lager im Hauptbuch negativ), eine Rückgabe über der
+  Einkaufssumme wurde still gekappt, Benefit-Erstattung buchte auf BANK. Jetzt EINE Hausfolge
+  (`core/purchases/purchase-lifecycle-house`), `PURCHASE_RETURN_STOCK_UNAVAILABLE` / `…_EXCEEDS_PURCHASE`, Teilrückgabe
+  wie bisher. „Einkauf stornieren" buchte über `safePost`, las die geladene Liste und ließ eine bestätigte Retoure stehen;
+  jetzt strikt, aus der Datenbank, Retoure umgekehrt und CANCELLED, Lose/Artikel/Auftragszeilen/Guthaben zurück, Beleg
+  und Zahlungen bleiben (`cancelPurchaseInHouse`, auch vom Kommissions-Storno genutzt). „Inbox-Foto verwerfen" ist ein
+  einseitiger Übergang `pending → dismissed` (das Foto liegt inline in `purchase_inbox.images`, kein Media-Root, kein GC-
+  Verbraucher); ein schon übernommenes Foto (`done`) wird nicht mehr umgekippt.
+- **Auftrag** (`CENTRAL_UI_R6F_ORDER_CANCEL_PROVED`, `CENTRAL_UI_R6F_ORDER_LINE_LIFECYCLE_PROVED`,
+  `CENTRAL_UI_R6F_ORDER_MARK_ORDERED_PROVED`, `CENTRAL_UI_R6F_ORDER_LINE_EDIT_PROVED`): der Storno buchte über `safePost`,
+  zahlte umgewandelte Anzahlungen ein zweites Mal aus, verlor die Guthaben-Notiz, und „Delete Order" nach dem Storno kehrte
+  die Anzahlungen doppelt um. Jetzt EINE Hausfolge (`core/orders/order-lifecycle-house`); der Auftrag bleibt als
+  stornierter Beleg. **Der Artikel beim Storno** entsteht nur bei einem Sonderauftrag mit angefangener Arbeit (gebuchte A/P
+  an den Goldschmied, Kostenbasis > 0) — die Maske verspricht ihn ausdrücklich („The piece is created as a stock
+  product"), die Schuld bleibt offen: fachlich nötig, jetzt atomar statt verschluckt. Zeilenstatus ist EINE Übergangs-
+  Buchung (PENDING/ARRIVED/DELIVERED, „Undo" = PENDING); ARRIVED/DELIVERED buchen die A/P jetzt strikt und atomar mit dem
+  Status. „Beim Supplier bestellen" ist ein reiner Marker (ORDERED + geplanter Lieferant, kein Geld/Bestand/Schuld).
+  „Position bearbeiten": nur echte Eingaben, Rest/Summe/Marge vom Primary, ein neuer Artikel atomar, Überzahlung wird
+  Guthaben.
+- **Kommission** (`CENTRAL_UI_R6F_CONSIGNMENT_RETURN_PROVED`, `CENTRAL_UI_R6F_CONSIGNMENT_CANCEL_SALE_ATOMIC_PROVED`):
+„Rückgabe nach Verkauf" nahm den Nettopreis (bei VAT_10 blieben Forderung/Umsatz in Höhe der Steuer als Phantom),
+  zog die Retourennummer aus der Uhrzeit, führte die Barerstattung nicht an der Retoure, ließ den Wareneinsatz gebucht
+  (INVENTORY/COGS schief) und verschluckte Einkaufs- und Verluststorno. Jetzt über die vorhandene Retouren-Hausfolge
+  (`createReturnInHouse` + Freigabe + Erstattung, Brutto, durabler Zähler, `SALES_RETURN_COGS`); „Return to Owner"
+  steht danach auf 0 je Konto. „Verkauf stornieren" — der höchste Risikopfad — LÖSCHTE Gutschrift und Retoure hart,
+  stornierte die Rechnung am vorgesehenen Weg vorbei und verschluckte vier Teilschritte. Jetzt EINE Transaktion
+  (`core/consignment/consignment-reversal-house`): eigene Retoure über `cancelReturnInHouse` (Gutschrift CANCELLED,
+  Retoure REJECTED), Rechnung über die R6E-Grundlage `reverseInvoiceInHouse`, Auto-Einkauf über `cancelPurchaseInHouse`,
+  Verlust und Auszahlungen an den Einlieferer umgekehrt, Artikel zurück in den Kommissionsbestand, Protokoll mit dem
+  Absender. Bewiesen: Stand vor dem Verkauf je Konto und Gegenpartei; Fehlerinjektion nach dem Rechnungsstorno, nach der
+  Einliefererseite, nach dem Bestand, vor dem Commit und an einer Buchung → nichts. Eine bar erstattete Rückgabe nach
+  Verkauf sperrt den Verkaufsstorno (`RETURN_REFUND_PAID_OUT`, R6E-Regel).
+- **Produktion** (`CENTRAL_UI_R6F_PRODUCTION_PROVED`): ohne Transaktion, Eingänge ungeprüft (fremde Filiale, verkauft,
+  verbraucht), mehrstückige Eingänge still ganz verbraucht, Ergebnis-Bilder als JSON an `products.images` vorbei am
+  Medienweg, stille Ersatzfiliale. Jetzt EINE Hausfolge (`core/production/production-house`), Ergebnisse über
+  `createProductWithMedia` (Zwischenablage → Medienspeicher), Protokoll atomar; keine Buchung beim Anlegen (wie bisher).
+- **Bildänderung** (`CENTRAL_UI_R6F_PRODUCT_MEDIA_PROVED`): die vorhandene Buchung `products.update` mit Galerie-Plätzen
+  (`{keep: mediaId}` / `{stagingId}`); PC2 bekommt die Kennungen schon über `products.get` — keine neue Auskunft.
+  Behoben: `products.update` prüfte die Filiale nicht.
+- **Aufgaben/Dokumente** (`CENTRAL_UI_R6F_TASKS_PROVED`, `CENTRAL_UI_R6F_DOCUMENTS_OCR_PROVED`): Aufgaben ändern ohne
+  Filiale/Fassung/Vokabular, „Erledigt" doppelt möglich; jetzt `tasks.create` + `tasks.update` (Erledigen = Status) mit
+  Fassung. Dokumente: **Grenze abgeleitet, nicht erfunden** — die Zeile reist als ganzes JSON in den Abgleich, jeder andere
+  Rechner verwirft über `max_payload_bytes` (33 554 432); also Zeile ≤ diesem Wert, Datei ≤ 24 MiB (Base64); Typ aus dem
+  Inhalt (Signatur), Dateiname ohne Pfadtrenner/Traversal, Verknüpfung in der Filiale. **Texterkennung** ist eine
+  synchrone Mutation mit gespeichertem Ergebnis: der PRIMARY erkennt aus SEINEM gespeicherten Inhalt (Rumpf nur
+  `documentId` + Fassung), Fassung vor und nach der Erkennung geprüft, eine Wiederholung erkennt nicht erneut; der
+  fehlende Abgleich-Eintrag ist behoben.
+
+- **Medienaufnahme (gemeinsamer Rust-Kern, im Zwei-Rechner-Lauf gefunden):** am Primary scheiterten Bildaufnahmen
+  (Artikelbild, Produktionsergebnis, auch der rein lokale Speichern-Weg) zeitweise mit `MEDIA_IO_ERROR`: das Ersetzen des eben
+  verlinkten Aufnahme-Journals fand die Datei länger als die Frist von 0,8 s belegt (Echtzeitschutz von Windows Defender aktiv;
+  Journal blieb `preparing`, beide Bilddateien vollständig daneben — sauber, aber für den Benutzer ein Fehlschlag). Behoben in
+  `media/storage.rs`: die Wiederholung bei ERROR_ACCESS_DENIED/ERROR_SHARING_VIOLATION ist jetzt eine Zeitfrist (3 s je Schritt,
+  Pausen bis 100 ms), weiterhin nur für Ersetzen und Verlinken; `io_err` behält den Betriebssystem-Code (`io:PermissionDenied:os5`).
+  Bestand seit CENTRAL-C5, kein R6F-Code.
+
+**Bewusst belassen (Befunde, eigene Entscheidung nötig):** **Texterkennung läuft in der App nicht** — die CSP
+(`src-tauri/tauri.conf.json`: `script-src 'self' 'wasm-unsafe-eval'`) verbietet tesseract.js, seinen Worker von
+`cdn.jsdelivr.net` nachzuladen (im Zwei-Rechner-Lauf nachgewiesen: „CSP script-src-elem blocked"); Primary und PC2 lehnen
+identisch ab und schreiben nichts. Das bestand schon vor R6F; die Behebung (Worker, Kern und Sprachdaten mit der App ausliefern)
+ist eine eigene Entscheidung (Größe, Offline-Betrieb). · Lieferantenguthaben (Retoure/Überzahlung) und die
+Überzahlungs-Gutschrift eines stornierten Auftrags werden weiter gelöscht (`supplier_credits` ohne Statusspalte; gemeinsamer
+Helfer) · offene Gold-Schulden werden beim Auftragsstorno erlassen · `completeRecord` (Arbeits-/Gemeinkosten) ist über die
+Oberfläche nicht erreichbar · `production_inputs`/`production_outputs` stehen nicht im Abgleich-Manifest · das Notizfeld
+der Aufgabenmaske hat keine Spalte · große Dokumente/lange Erkennung können das 20-s-Brückenlimit reißen (Wiederholung
+mit derselben Kennung ist sicher).
+
+### Autorität und Atomarität (`CENTRAL_UI_R6F_AUTHORITY_PROVED`)
+
+Vierzehn neue Buchungen, jede durch die C3A-Maschine (Kennung, durabler Nachweis in derselben Transaktion). Rechte wie
+die Masken: `orders.cancel`/`mark_line_ordered`/`update_line` hinter `perm.canManageOrders`, die Kommission hinter
+`perm.canManageConsignments`, der Rest ohne Tor wie am Primary. Negativ geprüft: fremde Filiale, fremde Belege,
+vom Client gesendete Summen/Salden/Bestände/Buchungswerte, gefälschter Urheber, veraltete Fassung, ungültige Artikel-/Los-/
+Medienverweise, zu große/ungültige Dokumente, unzulässige Übergänge. Fehlerinjektion an den kritischen Punkten → nichts.
+
+### Beweise
+
+```
+Unit    r6f/purchase 203/0 · r6f/order 253/0 · r6f/consignment 427/0 · r6f/production 111/0 · r6f/product-media 46/0 · r6f/office 205/0 · r6f/final-gate 90/0
+Nachbarn r6e (alle 7) · r6d (4 + final-gate) · r6c (3) · r6b · r5b/r5c/r5d/r5e/r5f · bridge c3–c6/client-ui/return-chain · uiparity r1/r2c/r2d/r3/r4b/r4c · consignment/payout — 56 Dateien grün
+Rust    cargo test --lib bridge 37/0 · media 203/0 · sync_schema 8/0 · manifest-drift 1443/1443 · TS app/node 0 · Lint-Delta 0
+Two-App test/e2e/r6f-purchases-orders-office.e2e.mjs 438/0 (4m 54s; PC2 als Benutzer B, Primary als A; nach dem Medien-Fix neu gebaut)
+```
+
+### Stand der R6A-SSOT nach R6F (`CENTRAL_UI_R6F_SSOT_UPDATED`)
+
+```
+A vorher             16
+R6F Umfang           16   (Einkauf 3 · Auftrag 5 · Kommission 2 · Produktion 1 · Bildänderung 1 · Aufgaben 2 · Dokumente 2)
+geschlossen          16
+umklassifiziert       0
+verbleibend           0
+neue Buchungen       14   (Bildänderung über die vorhandene products.update)
+neue Auskünfte        0
+Registry            160 → 174   (1 Probe + 71 Auskünfte + 102 Buchungen)
+```
+
+Kategorie A ist damit geschlossen. Kategorie B war seit R6B geschlossen; C (Rechnerwerkzeuge), D (unerreichbar) und E
+(Löschen, Hauskonfiguration, Buchhaltungswerkzeuge) bleiben bewusst am Primary und sind NICHT als geschlossen gezählt.

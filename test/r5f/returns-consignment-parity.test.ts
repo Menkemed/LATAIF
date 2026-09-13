@@ -327,10 +327,10 @@ function bildDerRetoure(db: Db, inv: string) {
     const z = R4C_MATRIX.find((x) => x.op === op)!;
     ok(z.paritaet === 'keine-ui' && z.ort === '(keine)' && /invoices\.cancel/.test(z.grund), `SCOPE ${op}: ohne eigene Handlung — Teil von Anlegen/Storno`);
   }
-  ok(ALLOWED_MUTATIONS.length === 88 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `SCOPE invoices.cancel an Platz 41, seither nur die elf aus R6C, die achtundzwanzig aus R6D und die acht aus R6E (${ALLOWED_MUTATIONS.length})`);
+  ok(ALLOWED_MUTATIONS.length === 102 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `SCOPE invoices.cancel an Platz 41, seither nur die elf aus R6C, die achtundzwanzig aus R6D, die acht aus R6E und die vierzehn aus R6F (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 160 && /OP_INVOICES_CANCEL/.test(rust), `SCOPE die Registry steht bei 160 (R6E) (${rustOps})`);
+  ok(rustOps === 174 && /OP_INVOICES_CANCEL/.test(rust), `SCOPE die Registry steht bei 174 (R6F) (${rustOps})`);
   const stand = [R4C_MATRIX.filter((z) => z.verdrahtet).length, R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet).length,
     R4C_MATRIX.filter((z) => z.luecke === 'B').length, R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length];
   ok(S(stand) === S([36, 0, 0, 4]), `SCOPE die Matrix steht bei 36/0/0/4 (${stand.join('/')})`);

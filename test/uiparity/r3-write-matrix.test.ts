@@ -137,11 +137,26 @@ const MATRIX: Record<string, Zeile> = {
   'returns.cancel': { ui: 'InvoiceDetail — Cancel Return', gleich: true },
   'transfers.undo_convert': { ui: 'TransferTable/TransferDetail — Undo convert', gleich: true },
   'customers.log_message': { ui: 'MessagePreviewModal — Copy / WhatsApp', gleich: true },
+  // R6F — Einkauf, Auftrag, Kommission, Produktion, Büro.
+  'purchases.return_to_supplier': { ui: 'PurchaseDetail — Return to Supplier', gleich: true },
+  'purchases.cancel': { ui: 'PurchaseDetail — Cancel Purchase', gleich: true },
+  'purchases.dismiss_inbox': { ui: 'PurchaseList — Inbox-Foto verwerfen', gleich: true },
+  'orders.cancel': { ui: 'OrderDetail — Cancel Order (mit Geld)', gleich: true },
+  'orders.update_line_status': { ui: 'OrderDetail — Zeilenstatus', gleich: true },
+  'orders.mark_line_ordered': { ui: 'OrderDetail — Beim Supplier bestellen', gleich: true },
+  'orders.update_line': { ui: 'OrderDetail — Position bearbeiten', gleich: true },
+  'consignments.return_after_sale': { ui: 'ConsignmentDetail — Return after Sale', gleich: true },
+  'consignments.cancel_sale': { ui: 'ConsignmentDetail — Cancel Sale', gleich: true },
+  'production.create': { ui: 'ProductionPage — New Production', gleich: true },
+  'tasks.create': { ui: 'TaskList — New Task', gleich: true },
+  'tasks.update': { ui: 'TaskList — Edit / Complete', gleich: true },
+  'documents.upload': { ui: 'DocumentList — Upload', gleich: true },
+  'documents.set_ocr': { ui: 'DocumentList — OCR', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 88, `A 88 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 102, `A 102 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

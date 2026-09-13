@@ -84,7 +84,9 @@ export const C3G_MUTATIONS = [
 export const C3G_PRIMARY_ONLY = [
   'invoices.set_special_mark', 'invoices.delete',
   'orders.cancel_with_money', 'orders.delete',
-  'consignments.cancel_sale', 'consignments.mark_returned_after_sale', 'consignments.delete',
+  // R6F — `consignments.cancel_sale` ist seither freigegeben (Verkaufsstorno über die R6E-Storno-Grundlage,
+  // eine Transaktion, keine harte Löschung von Gutschrift oder Retoure).
+  'consignments.mark_returned_after_sale', 'consignments.delete',
   'repairs.delete',
   // R6E — `transfers.undo_convert` ist seither freigegeben: die Umwandlung wird als Rechnungsstorno
   // zurückgenommen (die Rechnung bleibt als Beleg), nicht mehr gelöscht. Löschen bleibt hier.

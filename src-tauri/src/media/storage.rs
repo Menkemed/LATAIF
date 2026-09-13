@@ -123,25 +123,37 @@ fn safe_io(err: &std::io::Error) -> String {
 /// oder gar nichts getan —, also ist ein erneuter Versuch unbedenklich und aendert keine Zusage:
 /// kein Ueberschreiben, kein halber Stand. Ohne diese kurze Wiederholung scheitert unter Last
 /// etwa jede fuenfhundertste Bildaufnahme an einem fremden Lesezugriff, obwohl nichts kaputt
-/// ist. Nach rund 0,8 Sekunden geben wir auf und melden den Fehler unveraendert weiter.
+/// ist.
+///
+/// CENTRAL-UI-PARITY R6F — die Frist ist eine ZEIT, keine Zahl von Versuchen. Die ersten 0,8 s
+/// (C5) reichten nicht: im Zwei-Rechner-Lauf mit aktivem Echtzeitschutz von Windows Defender
+/// scheiterte das Ersetzen des eben verlinkten Journals wiederholt nach Ablauf der Frist (Journal
+/// blieb `preparing`, beide Bilddateien vollstaendig daneben, `MEDIA_IO_ERROR`) — ein Scanner haelt
+/// eine frisch angelegte Datei laenger. Obergrenze jetzt 3 s je Schritt, Pausen verdoppelt bis
+/// 100 ms: auch wenn einige Schritte einer Aufnahme warten muessten, bleibt ein Fernauftrag unter
+/// der 20-s-Wartezeit der Bruecke (`DEFAULT_TIMEOUT`); und selbst dann waere ein Zeitablauf nur ein
+/// offener Ausgang, den dieselbe Kennung sicher wiederholt. Danach melden wir den Fehler
+/// unveraendert weiter.
 ///
 /// Ausserhalb von Windows gibt es diesen Zustand nicht; dort wird nie wiederholt.
 pub(crate) fn with_transient_retry<T>(
     mut op: impl FnMut() -> std::io::Result<T>,
 ) -> std::io::Result<T> {
+    let started = std::time::Instant::now();
     let mut wait = std::time::Duration::from_millis(1);
-    let mut retries_left = 19u32;
     loop {
         match op() {
-            Err(e) if retries_left > 0 && is_transient_denial(&e) => {
-                retries_left -= 1;
+            Err(e) if started.elapsed() < TRANSIENT_RETRY_BUDGET && is_transient_denial(&e) => {
                 std::thread::sleep(wait);
-                wait = (wait * 2).min(std::time::Duration::from_millis(50));
+                wait = (wait * 2).min(std::time::Duration::from_millis(100));
             }
             other => return other,
         }
     }
 }
+
+/// Wie lange ein belegtes Ziel hoechstens abgewartet wird (siehe `with_transient_retry`).
+pub(crate) const TRANSIENT_RETRY_BUDGET: std::time::Duration = std::time::Duration::from_secs(3);
 
 /// Nur die beiden Windows-Codes, die "gerade jemand anders dran" bedeuten — nicht eine echte
 /// Rechteverweigerung durch Dateisystemrechte, die sich durch Warten nie aendert. (POSIX vergibt

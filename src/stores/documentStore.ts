@@ -1,22 +1,31 @@
 import { create } from 'zustand';
-// CENTRAL-C2 — mehrphasige Geschaeftsschreibvorgaenge laufen in derselben Spur wie die
+// CENTRAL-C2 — mehrphasige Geschäftsschreibvorgaenge laufen in derselben Spur wie die
 // Fernauftraege: ein Lesen vom zweiten Rechner darf keinen Zwischenzustand sehen.
 import { runExclusive } from '@/core/bridge/command-scheduler';
-import { v4 as uuid } from 'uuid';
 import type { Document, DocumentClass, LinkedEntityType } from '@/core/models/types';
-import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
-import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { getDatabase, saveDatabase, saveDatabaseDurably } from '@/core/db/database';
+import { query } from '@/core/db/helpers';
+import { trackUpdate, trackDelete } from '@/core/sync/track';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary, readsFromPrimary, fetchFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+// CENTRAL-UI-PARITY R6F — Hochladen und Texterkennung laufen durch EINE Hausfolge, am Primary wie
+// fuer PC2 (`documents.upload`/`documents.set_ocr`). Kein eigenes SQL mehr fuer diese zwei.
+import { runOnPrimary } from '@/core/data/primary-action';
+import { localOfficeCtx, officeAction } from '@/core/office/office-rules';
+import {
+  assertDocumentsHere, setDocumentOcrInHouse, uploadDocumentInHouse,
+  type DocumentOcrDone, type DocumentOcrInput, type DocumentUploadInput, type DocumentUploaded, type OcrEngine,
+} from '@/core/office/document-house';
 
 /** Extended document with DB-only display fields */
 export interface DocumentRow extends Document {
   fileName: string;
   fileSize: number;
+  /** R6F — die Fassung: wer die Texterkennung anstößt, nennt, welchen Stand er gesehen hat. */
+  revision: number;
 }
 
 interface DocumentStore {
@@ -55,6 +64,7 @@ function rowToDocument(row: Record<string, unknown>): DocumentRow {
     ocrReviewed: Boolean(row.ocr_reviewed),
     extractedFields: row.extracted_fields ? JSON.parse(row.extracted_fields as string) : undefined,
     createdAt: row.created_at as string,
+    revision: Number(row.revision ?? 0),
   };
 }
 
@@ -65,6 +75,13 @@ function fileToBase64(file: File): Promise<string> {
     reader.onerror = reject;
     reader.readAsDataURL(file);
   });
+}
+
+/** R6F — die Datei als Data-URL, so wie sie die Hausfolge erwartet (am Primary wie fuer PC2). */
+export const readFileAsDataUrl = fileToBase64;
+
+function documentById(id: string): DocumentRow {
+  return rowToDocument(query('SELECT * FROM documents WHERE id = ?', [id])[0] ?? { id });
 }
 
 export const useDocumentStore = create<DocumentStore>((set, get) => ({
@@ -95,43 +112,17 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
     );
   },
 
+  // R6F — der alte Store-Aufruf ruft dieselbe Hausfolge wie die Maske: Typ und Größe aus dem
+  // Inhalt, Verknüpfung in DIESER Filiale, Abgleich-Grenze geprüft. Weiterhin in der Spur.
   uploadDocument: (file, docClass, linkedEntityType, linkedEntityId) => runExclusive(async () => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const id = uuid();
-    const dataUrl = await fileToBase64(file);
-
-    let branchId: string;
-    try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
-
-    const doc: DocumentRow = {
-      id,
-      fileName: file.name,
-      filePath: dataUrl,
-      fileType: file.type,
-      fileSize: file.size,
-      docClass,
-      linkedEntityType,
-      linkedEntityId,
-      ocrReviewed: false,
-      createdAt: now,
-    };
-
-    db.run(
-      `INSERT INTO documents (id, branch_id, file_name, file_path, file_type, file_size, doc_class,
-        linked_entity_type, linked_entity_id, ocr_reviewed, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?)`,
-      [
-        id, branchId, file.name, dataUrl, file.type, file.size, docClass,
-        linkedEntityType || null, linkedEntityId || null, now,
-        (() => { try { return currentUserId(); } catch { return null; } })(),
-      ],
-    );
-
-    saveDatabase();
-    trackInsert('documents', id, { fileName: file.name, docClass, linkedEntityType, linkedEntityId });
+    const content = await fileToBase64(file);
+    const r = await officeAction(assertDocumentsHere, (ctx) => uploadDocumentInHouse({
+      fileName: file.name, content, docClass,
+      linkedEntityType: linkedEntityType ?? null, linkedEntityId: linkedEntityId ?? null,
+    }, ctx));
+    await saveDatabaseDurably();
     get().loadDocuments();
-    return doc;
+    return documentById(r.documentId);
   }),
 
   deleteDocument: (id) => {
@@ -142,23 +133,13 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
     get().loadDocuments();
   },
 
+  // R6F — vorher: Dokument aus der Bildschirmliste, Ergebnis `WHERE id = ?` ohne Filiale, ohne
+  // Fassung und OHNE Abgleich-Eintrag. Jetzt dieselbe Hausfolge wie `documents.set_ocr`.
   extractOcr: (id) => runExclusive(async () => {
-    const doc = get().documents.find(d => d.id === id);
-    if (!doc || !doc.fileType?.startsWith('image/')) {
-      return { text: '', confidence: 0 };
-    }
-    const { runOcr } = await import('@/core/ai/ocr-service');
-    const result = await runOcr(doc.filePath);
-    if (result.text) {
-      const db = getDatabase();
-      db.run(
-        `UPDATE documents SET ocr_text = ?, ocr_confidence = ?, ocr_reviewed = 1 WHERE id = ?`,
-        [result.text, result.confidence, id]
-      );
-      saveDatabase();
-      get().loadDocuments();
-    }
-    return result;
+    const r = await officeAction(assertDocumentsHere, (ctx) => setDocumentOcrInHouse({ documentId: id }, ctx));
+    await saveDatabaseDurably();
+    get().loadDocuments();
+    return { text: r.text, confidence: r.confidence };
   }),
 
   updateDocument: (id, data) => {
@@ -188,6 +169,28 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
     get().loadDocuments();
   },
 }));
+
+// ── CENTRAL-UI-PARITY R6F — die Anschlüsse der Maske am Primary ─────────────
+//
+// Exklusiv, in EINER Transaktion, danach durabel (`runOnPrimary`) — dieselbe Klammer, die ein
+// Fernauftrag von der Maschine bekommt. Ohne Geschäftsdatenbank verweigern sie, BEVOR eine
+// Transaktion beginnt.
+
+function reloadDocuments(): void {
+  useDocumentStore.getState().loadDocuments();
+}
+
+/** „Upload" am Primary. */
+export function uploadDocumentOnPrimary(input: Record<string, unknown>): Promise<DocumentUploaded> {
+  try { assertDocumentsHere(); } catch (e) { return Promise.reject(e); }
+  return runOnPrimary(() => uploadDocumentInHouse(input as unknown as DocumentUploadInput, localOfficeCtx()), reloadDocuments);
+}
+
+/** „Extract Text (OCR)" am Primary — die Erkennung läuft auf dem gespeicherten Inhalt, im Haus. */
+export function extractOcrOnPrimary(input: Record<string, unknown>, engine?: OcrEngine): Promise<DocumentOcrDone> {
+  try { assertDocumentsHere(); } catch (e) { return Promise.reject(e); }
+  return runOnPrimary(() => setDocumentOcrInHouse(input as unknown as DocumentOcrInput, localOfficeCtx(), engine), reloadDocuments);
+}
 
 /**
  * CENTRAL-UI-PARITY R2B — die Belege einer Filiale, zustandsfrei.

@@ -259,7 +259,7 @@ function rumpfVon(s: string, name: string): string {
   const erlaubt = src('src/core/bridge/command-registry.ts');
   const liste = /export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(erlaubt)?.[1] ?? '';
   const namen = [...liste.matchAll(/'([^']+)'/g)].map((m) => m[1]);
-  ok(namen.length === 88, `4 die Liste der Buchungen zaehlt 88 (R6C: +7 Stammdaten, +4 Inventur; R6D: +28; R6E: +8) — R4B selbst fügte keine hinzu (${namen.length})`);
+  ok(namen.length === 102, `4 die Liste der Buchungen zaehlt 102 (R6C: +7 Stammdaten, +4 Inventur; R6D: +28; R6E: +8; R6F: +14) — R4B selbst fügte keine hinzu (${namen.length})`);
   ok(!namen.includes('orders.convert_to_invoice_with_deposit'),
     '10 …und die Auftragsumwandlung hat KEINEN neuen halben Namen bekommen');
 }
@@ -315,8 +315,10 @@ function gehe(root: string): string[] {
   }
   // Der Bildweg und der Aenderungsweg der Rechnung sind ausdruecklich gesperrt, nicht still.
   const prod = codeOf(src('src/pages/watches/ProductDetail.tsx'));
-  ok(/aendern\.remote[\s\S]{0,200}nichtAmClient\('editing product images'\)/.test(prod),
-    '6 der Bildweg meldet sich am Client als nicht verfuegbar');
+  // R6F — der Bildweg geht seither fern über die vorhandene Buchung `products.update` (Galerie-Plätze
+  // `{keep}`/`{stagingId}`); gesperrt ist er nicht mehr.
+  ok(!/nichtAmClient\('editing product images'\)/.test(prod) && /gallery/.test(prod),
+    '6 der Bildweg geht fern über products.update (gallery)');
   const inv = codeOf(src('src/pages/invoices/InvoiceCreate.tsx'));
   // R6B — das Aendern der Rechnung geht jetzt fern ueber die vorhandene Buchung `invoices.update`;
   // gesperrt bleibt nur, was diese Buchung nicht kennt: eine Zahlung im Aendern.

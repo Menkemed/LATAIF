@@ -45,6 +45,16 @@ import './message-commands';
 import './invoice-flag-commands';
 // R6E — Retourenstorno und Rücknahme einer Transfer-Umwandlung (Rechnungsstorno statt Löschen).
 import './sales-reversal-commands';
+// CENTRAL-UI-PARITY R6F — Produktion anlegen (Bilder der Ergebnisse über den Medienweg).
+import './production-commands';
+// R6F — Aufgaben und Dokumente (Upload, Texterkennung am Primary).
+import './office-commands';
+// R6F — der Auftrag: Storno mit Geld, Zeilenstatus, „beim Lieferanten bestellt", Position bearbeiten.
+import './order-lifecycle-commands';
+// R6F — der Einkauf: Rückgabe an den Lieferanten, Storno, Inbox-Foto verwerfen.
+import './purchase-lifecycle-commands';
+// R6F — die Kommission nach dem Verkauf: Rückgabe nach Verkauf, Verkaufsstorno (R6E-Storno-Grundlage).
+import './consignment-lifecycle-commands';
 // CENTRAL-UI-PARITY — die Store-Auskuenfte, mit denen der zweite Rechner DIESELBE Oberflaeche
 // fuellt wie der Primary. Ohne diesen Import kennt der Renderer sie nicht, und jede Seite auf PC2
 // bliebe leer.

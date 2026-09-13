@@ -206,8 +206,9 @@ const SPEC_TEXT = ['categoryId', 'brand', 'name', 'sku', 'condition', 'taxScheme
 /**
  * Ein Artikel-Entwurf im Rumpf: GENAU die Felder der Maske „New Item" — und statt der Fotos ihre
  * Kennungen in der Zwischenablage. Einstand, Preise, Menge, Bestand, Herkunft stehen nicht darin.
+ * R6F — exportiert: der Positionsdialog eines Auftrags („New Product") nimmt denselben Entwurf entgegen.
  */
-function parseSpec(raw: unknown, fields: readonly string[], what: string): { spec: Partial<Product>; stagingIds?: string[] } | undefined {
+export function parseSpec(raw: unknown, fields: readonly string[], what: string): { spec: Partial<Product>; stagingIds?: string[] } | undefined {
   if (raw === undefined || raw === null) return undefined;
   if (!isPlain(raw)) throw new CommercialPayloadError(`${what} must be an object`);
   onlyKnownFields(raw, [...fields.filter((f) => f !== 'images'), 'stagingIds']);
@@ -234,7 +235,7 @@ function parseSpec(raw: unknown, fields: readonly string[], what: string): { spe
 }
 
 /** Die Fotos eines Entwurfs — INNERHALB des Auftrags gelesen. Eine Wiederholung liest sie nie wieder. */
-async function mitFotos(
+export async function mitFotos(
   p: { spec: Partial<Product>; stagingIds?: string[] } | undefined, owner: StagingOwner, read: StagedMediaReader,
 ): Promise<Partial<Product> | undefined> {
   if (!p) return undefined;

@@ -2217,6 +2217,27 @@ function runMigrations(database: Database): void {
     `ALTER TABLE credit_notes ADD COLUMN cancelled_at TEXT`,
     `ALTER TABLE credit_notes ADD COLUMN cancelled_by TEXT`,
     `ALTER TABLE credit_notes ADD COLUMN cancel_reason TEXT`,
+    // CENTRAL-UI-PARITY R6F — Aufgaben und Dokumente werden von zwei Rechnern geändert (Aufgabe bearbeiten/
+    // erledigen, Texterkennung eines Dokuments). Eine echte Fassung verhindert, dass ein alter Stand einen
+    // neueren still überschreibt. Die alte Spalte `version` wurde nie gepflegt und bleibt unberührt.
+    `ALTER TABLE tasks ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_tasks_revision`,
+    `CREATE TRIGGER trg_tasks_revision
+       AFTER UPDATE ON tasks
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE tasks SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
+    `ALTER TABLE documents ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_documents_revision`,
+    `CREATE TRIGGER trg_documents_revision
+       AFTER UPDATE ON documents
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE documents SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

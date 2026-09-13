@@ -98,6 +98,12 @@ await import('../../src/core/bridge/offer-commands.ts');
 await import('../../src/core/bridge/invoice-flag-commands.ts');
 await import('../../src/core/bridge/sales-reversal-commands.ts');
 await import('../../src/core/bridge/message-commands.ts');
+// R6F — Einkauf, Auftrag, Kommission, Produktion, Büro.
+await import('../../src/core/bridge/purchase-lifecycle-commands.ts');
+await import('../../src/core/bridge/order-lifecycle-commands.ts');
+await import('../../src/core/bridge/consignment-lifecycle-commands.ts');
+await import('../../src/core/bridge/production-commands.ts');
+await import('../../src/core/bridge/office-commands.ts');
 await import('../../src/core/bridge/invoice-cancel-command.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
@@ -209,11 +215,11 @@ const ACT = (over: Record<string, unknown> = {}) => ({
 // ── 1) Alle 59 Operationen sind namentlich gegen Rechte geprüft ──────────
 {
   const known = knownCommands();
-  ok(known.length === 160, `COVER die Registrierung zaehlt 160 Namen (R6E) (${known.length})`);
+  ok(known.length === 174, `COVER die Registrierung zaehlt 174 Namen (R6F) (${known.length})`);
   const probes = known.filter((o) => o === 'bridge.probe');
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = known.filter((o) => !probes.includes(o) && !reads.includes(o));
-  ok(probes.length === 1 && reads.length === 71 && mutations.length === 88,
+  ok(probes.length === 1 && reads.length === 71 && mutations.length === 102,
     `COVER 1 Probe + 23 Auskuenfte (18 + 27 typisierte) + 40 Buchungen (${probes.length}/${reads.length}/${mutations.length})`);
 
   // JEDE Auskunft und JEDE Buchung ist bedacht. Die Probe braucht es nicht: sie liest nichts.

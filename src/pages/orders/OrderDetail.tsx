@@ -50,6 +50,15 @@ import {
   type OrderCostRemoveRequest, type OrderCostRequest,
 } from '@/core/gold/gold-house';
 import { orderEditBody } from '@/core/orders/order-edit';
+// CENTRAL-UI-PARITY R6F — Stornieren, Positionsstatus, „beim Supplier bestellt" und Positionsdialog:
+// dieselbe Hausfolge wie der Fernbefehl (am Primary in EINER Klammer, auf PC2 als Befehl).
+import {
+  cancelOrderOnPrimary, markOrderLineOrderedOnPrimary, orderCancelBody, orderLineEditBody, orderLineOrderedBody,
+  orderLineStatusBody, setOrderLineStatusOnPrimary, updateOrderLineOnPrimary,
+  type OrderCancelRequest, type OrderLineEditRequest, type OrderLineOrderedRequest, type OrderLineStatusRequest,
+  type OrderLineStatusTarget,
+} from '@/core/orders/order-lifecycle-house';
+import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { WriteError } from '@/components/shared/WriteError';
 import { orderDetailReadsFor } from '@/core/data/page-reads';
 import { creditPaidFor } from '@/core/data/domain-reads';
@@ -84,9 +93,7 @@ export function OrderDetail() {
   const navigate = useNavigate();
   const goBack = useGoBack('/orders');
   const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines,
-    getBillableLines, markOrderLinesInvoiced, assertOrderLinesBillable, updateOrderLineStatus,
-    updateOrderLine,
-    markOrderLineOrdered, cancelOrderWithMoney } = useOrderStore();
+    getBillableLines, markOrderLinesInvoiced, assertOrderLinesBillable, updateOrderLineStatus } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
@@ -104,8 +111,9 @@ export function OrderDetail() {
   const [form, setForm] = useState<Partial<Order>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
-  // v0.7.0 — Delete einer paid Order laeuft via Cancel-Modal: erst Geld-Wahl, dann Hard-Delete.
-  const [pendingHardDelete, setPendingHardDelete] = useState(false);
+  // v0.7.0 — Delete einer paid Order laeuft via Cancel-Modal: erst Geld-Wahl.
+  // R6F — danach KEIN Hard-Delete mehr (siehe handleCancel): der Auftrag bleibt als Beleg stehen.
+  const [cancelFromDelete, setCancelFromDelete] = useState(false);
   const [confirmAdvance, setConfirmAdvance] = useState<OrderStatus | null>(null);
   const [showMessage, setShowMessage] = useState(false);
   const [showPayment, setShowPayment] = useState(false);
@@ -435,47 +443,97 @@ export function OrderDetail() {
   }
 
   // Back-to-Back — Order-Position bearbeiten (Produkt/Menge/Preis/Beschreibung).
-  function handleSaveOrderLine(patch: OrderLineEditPatch) {
-    if (!editLine) return;
-    try {
-      updateOrderLine(editLine.id, patch);
-      setEditLine(null);
-      setLineRefresh(k => k + 1);
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
+  // CENTRAL-UI-PARITY R6F — nur die Eingaben des Dialogs; Zeilensumme, Preis, Rest, Marge und ein neuer
+  // Artikel entstehen im Haus in EINER Klammer. Der Dialog schliesst nur bei Erfolg.
+  async function handleSaveOrderLine(patch: OrderLineEditPatch) {
+    if (!id || !order || !editLine) return;
+    const fassung = order.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('editing an order line (no revision loaded)'))); return; }
+    const req: OrderLineEditRequest = { orderId: id, lineId: editLine.id, expectedRevision: fassung || undefined, ...patch };
+    // Auf dem zweiten Rechner reisen die Fotos eines neuen Artikels vorab in die Zwischenablage.
+    let body: Record<string, unknown> | null = null;
+    if (w.remote) {
+      try { body = await orderLineEditBody(req, stageDataUrls); }
+      catch (e) { alert(e instanceof StagingUploadError ? e.message : String(e)); return; }
     }
+    if (!await w.ok('orders.update_line', {
+      local: () => updateOrderLineOnPrimary(req),
+      remote: () => body as Record<string, unknown>,
+    })) return;
+    loadOrders(); loadProducts();
+    setEditLine(null);
+    setLineRefresh(k => k + 1);
   }
 
-  function handleCancel(choice: 'refund' | 'credit' | 'forfeit', refundMethod?: 'cash' | 'bank' | 'benefit') {
-    if (!id) return;
-    try {
-      cancelOrderWithMoney(id, choice, refundMethod);
-      setConfirmCancel(false);
-      // v0.7.0 — wenn der Cancel-Wizard ueber den Delete-Button getriggert wurde,
-      // direkt im Anschluss Hard-Delete + zurueck zur Liste.
-      if (pendingHardDelete) {
-        setPendingHardDelete(false);
-        deleteOrder(id);
-        navigate('/orders');
-      }
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-    }
+  // CENTRAL-UI-PARITY R6F — „Cancel Order": nur die Wahl der Maske. Betrag (die NICHT umgewandelten
+  // Anzahlungen), Guthaben, Buchung, Gold, Kosten, Lagerstueck und Status rechnet das Haus.
+  async function handleCancel(choice: 'refund' | 'credit' | 'forfeit', refundMethod?: 'cash' | 'bank' | 'benefit', note?: string) {
+    if (!id || !order) return;
+    const fassung = order.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('cancelling this order (no revision loaded)'))); return; }
+    const req: OrderCancelRequest = { orderId: id, expectedRevision: fassung || undefined, choice, refundMethod, note };
+    if (!await w.ok('orders.cancel', {
+      local: () => cancelOrderOnPrimary(req),
+      remote: () => orderCancelBody(req),
+    })) return;
+    loadOrders(); loadPayments(id); loadGoldPayables(); loadProducts(); loadExpenses();
+    setLineRefresh(k => k + 1);
+    setConfirmCancel(false);
+    // R6F — vorher folgte hier, wenn der Wizard ueber „Delete Order" kam, `deleteOrder`: es loeschte
+    // den eben stornierten Auftrag samt Anzahlungen hart und nahm deren Buchungen ein ZWEITES Mal
+    // zurueck (Rueckzahlung/Guthaben/Verfall PLUS Umkehr der Anzahlung). Der bezahlte Auftrag bleibt
+    // jetzt als stornierter Beleg stehen — genau wie jeder andere Storno.
+    setCancelFromDelete(false);
   }
 
   function handleDelete() {
     if (!id || !order) return;
     if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
-    // v0.7.0 — Delete einer paid Order: erst Geld klar machen (Modal), dann
-    // Hard-Delete. Bei totalPaid=0 direkt loeschen wie heute.
+    // v0.7.0 — Delete einer paid Order: erst Geld klar machen (Modal).
+    // R6F — ein bezahlter Auftrag wird dann storniert, nicht geloescht (siehe handleCancel).
+    // Bei totalPaid=0 direkt loeschen wie heute.
     if (totalPaid > 0.005) {
       setConfirmDelete(false);
-      setConfirmCancel(true);  // Cancel-Wizard fuer Geld-Handling. Hard-Delete folgt.
-      setPendingHardDelete(true);
+      w.clear();
+      setConfirmCancel(true);  // Cancel-Wizard fuer Geld-Handling.
+      setCancelFromDelete(true);
       return;
     }
     deleteOrder(id);
     navigate('/orders');
+  }
+
+  // CENTRAL-UI-PARITY R6F — ein Statusknopf einer Position (auch „↺ Undo"): EIN Uebergang; die
+  // Lieferanten-A/P einer angekommenen Position bucht das Haus in DERSELBEN Klammer.
+  async function zeilenStatus(lineId: string, status: OrderLineStatusTarget) {
+    if (!id || !order) return;
+    const fassung = order.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('changing a line status (no revision loaded)'))); return; }
+    const req: OrderLineStatusRequest = { orderId: id, lineId, status, expectedRevision: fassung || undefined };
+    const r = await w.save('orders.update_line_status', {
+      local: () => setOrderLineStatusOnPrimary(req),
+      remote: () => orderLineStatusBody(req),
+    });
+    if (r.kind !== 'ok') { alert(fehlertext(r)); return; }
+    loadOrders(); loadExpenses();
+    setLineRefresh(k => k + 1);
+  }
+
+  // CENTRAL-UI-PARITY R6F — „Bestellt markieren": ein reiner Marker (Status + geplanter Lieferant).
+  async function alsBestelltMarkieren() {
+    if (!id || !order || !markOrderedLine) return;
+    const fassung = order.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('marking a line as ordered (no revision loaded)'))); return; }
+    const req: OrderLineOrderedRequest = {
+      orderId: id, lineId: markOrderedLine.id, supplierId: markOrderedSupplier || undefined, expectedRevision: fassung || undefined,
+    };
+    if (!await w.ok('orders.mark_line_ordered', {
+      local: () => markOrderLineOrderedOnPrimary(req),
+      remote: () => orderLineOrderedBody(req),
+    })) return;
+    loadOrders();
+    setMarkOrderedLine(null);
+    setLineRefresh(k => k + 1);
   }
 
   // Carry-over Logik wird sowohl vom direkten als auch vom Legacy-Pfad benötigt.
@@ -787,7 +845,7 @@ export function OrderDetail() {
                 )}
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
                 {!isCancelled && !isCompleted && perm.canManageOrders && (
-                  <Button variant="danger" onClick={() => setConfirmCancel(true)}><XCircle size={14} /> Cancel Order</Button>
+                  <Button variant="danger" onClick={() => { w.clear(); setCancelFromDelete(false); setConfirmCancel(true); }} data-order-cancel-open><XCircle size={14} /> Cancel Order</Button>
                 )}
               </>
             )}
@@ -1171,7 +1229,7 @@ export function OrderDetail() {
                               onClick={() => navigate(`/invoices/${l.invoiceId}`)}>invoiced</span>
                           : <span style={{ color: '#9CA3AF' }}>—</span>}
                       </span>
-                      <div style={{ padding: '7px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 4, flexWrap: 'wrap' }}>
+                      <div data-order-line={l.id} style={{ padding: '7px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 4, flexWrap: 'wrap' }}>
                         {cancelled ? (
                           <span style={{ fontSize: 11, color: '#DC2626' }}>cancelled</span>
                         ) : l.status === 'ORDERED' ? (
@@ -1187,10 +1245,9 @@ export function OrderDetail() {
                               → Wareneingang erfassen
                             </span>
                             <button type="button"
-                              onClick={() => {
-                                try { updateOrderLineStatus(l.id, 'PENDING'); setLineRefresh(k => k + 1); }
-                                catch (e) { alert(e instanceof Error ? e.message : String(e)); }
-                              }}
+                              onClick={() => { void zeilenStatus(l.id, 'PENDING'); }}
+                              disabled={w.busy}
+                              data-order-line-status="PENDING" data-order-line-undo
                               style={{ fontSize: 10, padding: '3px 7px', borderRadius: 4, cursor: 'pointer',
                                 border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}
                               title="Bestellung beim Supplier zuruecknehmen — zurueck auf PENDING">↺ Undo</button>
@@ -1200,14 +1257,11 @@ export function OrderDetail() {
                             <button
                               key={st}
                               type="button"
+                              disabled={w.busy}
+                              data-order-line-status={st}
                               onClick={() => {
                                 if (l.status === st) return;
-                                try {
-                                  updateOrderLineStatus(l.id, st);
-                                  setLineRefresh(k => k + 1);
-                                } catch (e) {
-                                  alert(e instanceof Error ? e.message : String(e));
-                                }
+                                void zeilenStatus(l.id, st);
                               }}
                               style={{
                                 fontSize: 10, padding: '3px 7px', borderRadius: 4, cursor: 'pointer',
@@ -1221,7 +1275,8 @@ export function OrderDetail() {
                       </div>
                       <div style={{ padding: '7px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 4, flexWrap: 'wrap', alignItems: 'center' }}>
                         {!cancelled && !l.invoiceId && !isCancelled && perm.canManageOrders && (
-                          <button type="button" onClick={() => setEditLine(l)}
+                          <button type="button" onClick={() => { w.clear(); setEditLine(l); }}
+                            data-order-line-edit
                             className="cursor-pointer flex items-center gap-1"
                             style={{ fontSize: 10, padding: '3px 7px', borderRadius: 4, border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}
                             title="Position bearbeiten">
@@ -1249,7 +1304,8 @@ export function OrderDetail() {
                             }
                             return (
                               <button type="button"
-                                onClick={() => { setMarkOrderedLine(l); setMarkOrderedSupplier(l.orderedSupplierId || ''); }}
+                                onClick={() => { w.clear(); setMarkOrderedLine(l); setMarkOrderedSupplier(l.orderedSupplierId || ''); }}
+                                data-order-line-mark-ordered
                                 className="cursor-pointer pulse-orange"
                                 style={{ fontSize: 10, padding: '3px 7px', borderRadius: 4,
                                   border: '1px solid #D97706',
@@ -1722,6 +1778,8 @@ export function OrderDetail() {
         open={!!editLine}
         line={editLine}
         productLocked={!!(editLine && sourcedMap.has(editLine.id))}
+        busy={w.busy}
+        submitError={w.fehler}
         onClose={() => setEditLine(null)}
         onSave={handleSaveOrderLine}
       />
@@ -1743,7 +1801,7 @@ export function OrderDetail() {
             Supplier — der Wareneingang gruppiert die Posten danach. Den Wareneingang
             (Kosten + Lager) erfasst du spaeter als Purchase.
           </p>
-          <div>
+          <div data-order-line-mark-ordered-supplier>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>SUPPLIER (OPTIONAL)</span>
             <SearchSelect
               placeholder="Supplier waehlen — oder leer lassen"
@@ -1752,16 +1810,11 @@ export function OrderDetail() {
               onChange={setMarkOrderedSupplier}
             />
           </div>
+          <WriteError text={w.fehler} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setMarkOrderedLine(null)}>Abbrechen</Button>
-            <Button variant="primary" onClick={() => {
-              if (!markOrderedLine) return;
-              try {
-                markOrderLineOrdered(markOrderedLine.id, markOrderedSupplier || undefined);
-                setMarkOrderedLine(null);
-                setLineRefresh(k => k + 1);
-              } catch (e) { alert(e instanceof Error ? e.message : String(e)); }
-            }}>Bestellt markieren</Button>
+            <Button variant="primary" onClick={() => { void alsBestelltMarkieren(); }} disabled={w.busy}
+              data-order-line-mark-ordered-confirm>Bestellt markieren</Button>
           </div>
         </div>
       </Modal>
@@ -1818,11 +1871,15 @@ export function OrderDetail() {
         open={confirmCancel}
         order={order}
         orderLines={orderLineList}
-        totalPaid={totalPaid}
+        // R6F — dieselbe Summe, die das Haus bucht: nur die NICHT umgewandelten Anzahlungen.
+        totalPaid={totalPaidActive}
         sourcedLineIds={new Set(sourcedMap.keys())}
         openGoldPayableCount={orderGoldPayables.filter(gp => gp.status === 'OPEN').length}
-        onCancel={() => { setConfirmCancel(false); setPendingHardDelete(false); }}
-        onConfirm={(choice, refundMethod) => handleCancel(choice, refundMethod)}
+        busy={w.busy}
+        submitError={w.fehler}
+        fromDelete={cancelFromDelete}
+        onCancel={() => { setConfirmCancel(false); setCancelFromDelete(false); }}
+        onConfirm={(choice, refundMethod, note) => { void handleCancel(choice, refundMethod, note); }}
       />
 
       {/* Convert-to-Invoice VAT-Scheme Picker */}

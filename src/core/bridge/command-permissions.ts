@@ -202,6 +202,27 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'transfers.undo_convert': null,
   // `MessagePreviewModal` (Kunde, Angebot, Auftrag, Reparatur) protokolliert ohne Tor.
   'customers.log_message': null,
+
+  // ── Einkauf, Auftrag, Kommission, Produktion, Büro (R6F) ────────────────
+  // BEFUND: `PurchaseDetail`/`PurchaseList`, `ProductionPage`, `TaskList` und `DocumentList` fragen
+  // `usePermission` NICHT; die Zeilenstatus-Knöpfe in `OrderDetail` stehen ohne Tor. PC2 darf nicht
+  // weniger als derselbe Benutzer am Primary.
+  'purchases.return_to_supplier': null,
+  'purchases.cancel': null,
+  'purchases.dismiss_inbox': null,
+  // OrderDetail: „Cancel Order", „Edit" einer Position und „Beim Supplier bestellen" hinter `perm.canManageOrders`.
+  'orders.cancel': admin('OrderDetail: perm.canManageOrders'),
+  'orders.update_line_status': null,
+  'orders.mark_line_ordered': admin('OrderDetail: perm.canManageOrders'),
+  'orders.update_line': admin('OrderDetail: perm.canManageOrders'),
+  // ConsignmentDetail bewacht die Aktionen nach dem Verkauf mit `perm.canManageConsignments`.
+  'consignments.return_after_sale': admin('ConsignmentDetail: perm.canManageConsignments'),
+  'consignments.cancel_sale': admin('ConsignmentDetail: perm.canManageConsignments'),
+  'production.create': null,
+  'tasks.create': null,
+  'tasks.update': null,
+  'documents.upload': null,
+  'documents.set_ocr': null,
 };
 
 /**

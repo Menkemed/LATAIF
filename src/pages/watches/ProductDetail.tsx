@@ -13,7 +13,11 @@ import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { useProductStore, type EditProductResult } from '@/stores/productStore';
-import { useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-write';
+import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
+// CENTRAL-UI-PARITY R6F — der Bildweg auf PC2: Plätze aus dem Entwurf, neue Fotos über die Ablage.
+import { planRemoteGallery, GalleryPlanError } from '@/core/products/gallery-plan';
+import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
+import type { GallerySlot } from '@/core/bridge/product-commands';
 import { confirmAiIdentificationInHouse } from '@/core/products/ai-confirm';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { updatePayload, PRODUCT_UPDATE_FIELDS } from '@/core/data/write-payloads';
@@ -430,34 +434,57 @@ export function ProductDetail() {
       return;
     }
 
-    // R4B — der Bildweg gehoert dem Hauptrechner. Fail-closed und mit Grund, nicht still.
-    if (aendern.remote) {
-      setErrors(e => ({ ...e, _save: fehlertext(nichtAmClient('editing product images')) }));
+    // R4B — der Bildweg. R6F: er gehoert nicht mehr dem Hauptrechner allein. Auf einem verbundenen
+    // Rechner geht DIESELBE Absicht ueber die vorhandene Buchung `products.update` mit `gallery`
+    // (Platz fuer Platz: `{ keep: mediaId }` oder `{ stagingId }`), die am Primary GENAU
+    // `editProductWithMedia` faehrt — Text und Galerie in EINER Transaktion, mit Preissperre. Die
+    // Medienkennungen kennt PC2 schon aus `products.get` (sie stecken in `media.items`).
+
+    // MEDIA-EDIT-PRESERVE-R2 fail-closed guard: an image edit may ONLY be reconciled when the draft
+    // provably came from the final gallery. The image controls are disabled until then, so this is
+    // unreachable from the UI — it exists so no future path can reconcile a draft that never saw the
+    // existing images (which would retire them). The editor stays open with the draft intact, so no
+    // text/price input is lost; the user simply saves again once the gallery has loaded.
+    if (!draftSeeded) {
+      setErrors(e => ({ ...e, _media: 'MEDIA_EDIT_GALLERY_NOT_READY' }));
       return;
     }
-
-    let res: EditProductResult;
-    {
-      // MEDIA-EDIT-PRESERVE-R2 fail-closed guard: an image edit may ONLY be reconciled when the draft
-      // provably came from the final gallery. The image controls are disabled until then, so this is
-      // unreachable from the UI — it exists so no future path can reconcile a draft that never saw the
-      // existing images (which would retire them). The editor stays open with the draft intact, so no
-      // text/price input is lost; the user simply saves again once the gallery has loaded.
-      if (!draftSeeded) {
-        setErrors(e => ({ ...e, _media: 'MEDIA_EDIT_GALLERY_NOT_READY' }));
+    // R6F — PC2: aus dem Entwurf die Plaetze; neue Fotos vorher in die Zwischenablage des Primary.
+    // Was entfernt wird, rechnet der Primary gegen seine WIRKLICHE Galerie aus.
+    let gallery: GallerySlot[] = [];
+    if (aendern.remote) {
+      try {
+        gallery = await planRemoteGallery(form.images || [], media.status === 'media' ? media.items : [], stageDataUrls);
+      } catch (e) {
+        if (!mountedRef.current || idRef.current !== startId) return;
+        const code = e instanceof GalleryPlanError || e instanceof StagingUploadError ? e.code : String(e);
+        setErrors(er => ({ ...er, _save: `The photos could not be handed to the main computer (${code}). Nothing was saved — please try again.` }));
         return;
       }
-      // Real image edit → reconcile the durable gallery. A non-final gallery
-      // (loading/pending/conflict/integrity_error) maps to a non-editable status
-      // → editProductWithMedia fails closed and the editor stays open.
-      const status: ResolverStatus = presentationToResolverStatus(media.status);
-      const resolved = media.status === 'media' ? media.items.map(i => ({ url: i.url, mediaId: i.mediaId })) : [];
-      res = await editProductWithMedia(id, textPayload, { srcs: form.images || [], resolved, status });
     }
+    // Real image edit → reconcile the durable gallery. A non-final gallery
+    // (loading/pending/conflict/integrity_error) maps to a non-editable status
+    // → editProductWithMedia fails closed and the editor stays open.
+    const status: ResolverStatus = presentationToResolverStatus(media.status);
+    const resolved = media.status === 'media' ? media.items.map(i => ({ url: i.url, mediaId: i.mediaId })) : [];
+    const textDiff = updatePayload(product as unknown as Record<string, unknown>, textPayload as Record<string, unknown>, PRODUCT_UPDATE_FIELDS);
+    const r = await aendern.save({
+      local: async () => await editProductWithMedia(id, textPayload, { srcs: form.images || [], resolved, status }),
+      remote: () => ({ id, ...textDiff, gallery }),
+      shape: () => ({ status: 'edited' } as EditProductResult),
+    });
     // Stale-save guard: the user navigated to another product or the view
     // unmounted while the durable save ran — never apply this result onto a
     // different/gone product (no stale state, no foreign gallery).
     if (!mountedRef.current || idRef.current !== startId) return;
+    if (r.kind !== 'ok') {
+      // PC2: der Primary hat eine Altgalerie erst umgezogen (nicht bewertet) — die Galerie neu lesen,
+      // die Maske bleibt offen, derselbe Klick versucht es erneut.
+      if (r.code === 'PRODUCT_CUTOVER_RELOAD') { setMediaReloadNonce(n => n + 1); loadProducts(); }
+      setErrors(e => ({ ...e, _save: fehlertext(r) }));
+      return;
+    }
+    const res = r.value as EditProductResult;
     if (res.status === 'edited') {
       // Durable save done → force a resolver re-resolve: the new gallery loads
       // and the old Object-URLs are revoked exactly once. Then leave edit mode.
@@ -465,6 +492,8 @@ export function ProductDetail() {
       setImagesDirty(false);
       setDraftSeeded(false);
       setEditing(false);
+      // PC2 holt den Artikel frisch vom Primary (am Primary laedt die Store-Aktion selbst neu).
+      if (aendern.remote) loadProducts();
       return;
     }
     if (res.status === 'cutover_reload') {
@@ -633,7 +662,7 @@ export function ProductDetail() {
                     Images loading… photo editing unlocks once the gallery is loaded. Other fields can be edited and saved now.
                   </div>
                 )}
-                <div style={{ marginTop: 12 }}>
+                <div style={{ marginTop: 12 }} data-product-images={draftSeeded ? 'ready' : 'locked'} data-product-images-dirty={imagesDirty ? '1' : '0'}>
                   <ImageUpload images={form.images || []} disabled={!draftSeeded}
                     onChange={imgs => { setForm({ ...form, images: imgs }); setImagesDirty(true); }} maxImages={8} />
                 </div>

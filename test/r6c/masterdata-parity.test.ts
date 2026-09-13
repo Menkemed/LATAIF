@@ -169,8 +169,8 @@ const MD_OPS = ['suppliers.create', 'suppliers.update', 'agents.update', 'partne
 // ══ §1 — Umfang, Registry, Rechte ═══════════════════════════════════════════
 {
   ok(MD_OPS.every((op) => registry.ALLOWED_MUTATIONS.includes(op)), 'SCOPE die sieben Stammdaten-Aktionen sind namentlich freigegeben');
-  ok(registry.ALLOWED_MUTATIONS.length === 88 && registry.ALLOWED_MUTATIONS.at(-1) === 'customers.log_message',
-    `SCOPE 41 + 7 Stammdaten + 4 Inventur + 28 R6D + 8 R6E = 88 Buchungen (${registry.ALLOWED_MUTATIONS.length})`);
+  ok(registry.ALLOWED_MUTATIONS.length === 102 && registry.ALLOWED_MUTATIONS.at(-1) === 'documents.set_ocr',
+    `SCOPE 41 + 7 Stammdaten + 4 Inventur + 28 R6D + 8 R6E + 14 R6F = 102 Buchungen (${registry.ALLOWED_MUTATIONS.length})`);
   ok(MD_OPS.every((op) => registry.knownCommands().includes(op)), 'SCOPE und registriert');
   ok(MD_OPS.every((op) => op in perms.OPERATION_PERMISSIONS && perms.OPERATION_PERMISSIONS[op] === null),
     'SCOPE kein erfundenes Recht — die Masken des Primary haben kein Tor (Befund)');
@@ -182,8 +182,8 @@ const MD_OPS = ['suppliers.create', 'suppliers.update', 'agents.update', 'partne
   const rust = src('src-tauri/src/bridge.rs');
   const list = /pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '';
   const count = (list.match(/OP_[A-Z_]+/g) ?? []).length;
-  ok(count === 160 && ['OP_SUPPLIERS_CREATE', 'OP_SUPPLIERS_UPDATE', 'OP_AGENTS_UPDATE', 'OP_PARTNERS_CREATE', 'OP_PARTNERS_UPDATE', 'OP_EMPLOYEES_CREATE', 'OP_EMPLOYEES_UPDATE'].every((c) => list.includes(c)),
-    `SCOPE Rust lässt dieselben Namen durch; Registry 108 → 121 (R6C) → 152 (R6D) → 160 (R6E) (${count})`);
+  ok(count === 174 && ['OP_SUPPLIERS_CREATE', 'OP_SUPPLIERS_UPDATE', 'OP_AGENTS_UPDATE', 'OP_PARTNERS_CREATE', 'OP_PARTNERS_UPDATE', 'OP_EMPLOYEES_CREATE', 'OP_EMPLOYEES_UPDATE'].every((c) => list.includes(c)),
+    `SCOPE Rust lässt dieselben Namen durch; Registry 108 → 121 (R6C) → 152 (R6D) → 160 (R6E) → 174 (R6F) (${count})`);
   const listener = src('src/core/bridge/bridge-listener.ts');
   ok(/import '\.\/masterdata-commands';/.test(listener) && /import '\.\/inventory-commands';/.test(listener), 'SCOPE der Renderer des Primary lädt beide Befehlsdateien');
 }

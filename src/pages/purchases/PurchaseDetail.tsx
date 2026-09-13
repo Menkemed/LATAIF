@@ -25,6 +25,11 @@ import { WriteError } from '@/components/shared/WriteError';
 import { supplierCreditsFor } from '@/stores/supplierStore';
 import { PAYABLES_OP } from '@/core/payables/payables-house';
 import { savePurchaseCredit, savePurchasePayment, viaWrites } from '@/core/payables/payables-save';
+// CENTRAL-UI-PARITY R6F — „Confirm Return" und „Confirm Cancel" sind je EINE Buchung
+// (`purchases.return_to_supplier` / `purchases.cancel`): am Primary die Hausfolge in einer Klammer,
+// auf PC2 der geprüfte Befehl mit der gesehenen Fassung. Summen, Erstattung, Bestand rechnet der Primary.
+import { PURCHASE_LIFECYCLE_OP } from '@/core/purchases/purchase-lifecycle-house';
+import { savePurchaseCancel, savePurchaseReturn } from '@/core/purchases/purchase-house';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -39,7 +44,7 @@ export function PurchaseDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/purchases');
-  const { purchases, loadPurchases, cancelPurchase, createReturn, confirmReturn, returns, loadReturns } = usePurchaseStore();
+  const { purchases, loadPurchases, returns, loadReturns } = usePurchaseStore();
   const { employees, loadEmployees } = useEmployeeStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
   const w = useSharedWrites();
@@ -59,6 +64,8 @@ export function PurchaseDetail() {
   const [returnLines, setReturnLines] = useState<Record<string, { include: boolean; quantity: number; unitPrice: number }>>({});
   const [returnMethod, setReturnMethod] = useState<'cash' | 'bank' | 'benefit' | 'credit'>('bank');
   const [returnNotes, setReturnNotes] = useState('');
+  const [retFehler, setRetFehler] = useState('');
+  const [cancelFehler, setCancelFehler] = useState('');
 
   useEffect(() => { loadPurchases(); loadSuppliers(); loadReturns(); loadProducts(); loadCategories(); loadEmployees(); }, [loadPurchases, loadSuppliers, loadReturns, loadProducts, loadCategories, loadEmployees]);
 
@@ -104,6 +111,7 @@ export function PurchaseDetail() {
       init[l.id] = { include: false, quantity: l.quantity, unitPrice: l.unitPrice };
     });
     setReturnLines(init);
+    setRetFehler('');
     setShowReturn(true);
   }
 
@@ -128,26 +136,40 @@ export function PurchaseDetail() {
     );
   }
 
-  function handleCreateReturn() {
-    if (!id || !purchase) return;
-    const included = purchase.lines
+  // R6F — vorher zwei Store-Aufrufe (`createReturn`, dann `confirmReturn`), jeder mit eigenem
+  // Speichern und verschluckter Buchung. Jetzt EINE Handlung; das Modal schliesst NUR bei Erfolg.
+  // Es reist nur, was der Mensch hier waehlt: Zeile, Menge, Stueckpreis, Erstattungsweg, Notiz.
+  async function handleCreateReturn() {
+    if (!purchase || w.busy) return;
+    const lines = purchase.lines
       .filter(l => returnLines[l.id]?.include)
       .map(l => ({
         purchaseLineId: l.id,
-        productId: l.productId,
         quantity: returnLines[l.id].quantity,
         unitPrice: returnLines[l.id].unitPrice,
       }));
-    if (included.length === 0) return;
-    const ret = createReturn({
-      purchaseId: id,
+    if (lines.length === 0) return;
+    setRetFehler('');
+    const r = await savePurchaseReturn(viaWrites(w, PURCHASE_LIFECYCLE_OP.RETURN_TO_SUPPLIER), purchase, {
       refundMethod: returnMethod,
       notes: returnNotes || undefined,
-      lines: included,
+      lines,
     });
-    confirmReturn(ret.id);
+    if (r.kind !== 'ok') { setRetFehler(fehlertext(r)); return; }
+    setCreditTick((t) => t + 1);
     setShowReturn(false);
     setReturnNotes('');
+  }
+
+  // R6F — „Confirm Cancel": EINE Buchung gegen die gesehene Fassung (vorher: Store-Aufruf ohne
+  // Klammer, Buchungen verschluckt, Modal schloss auch bei Fehler).
+  async function handleCancelPurchase() {
+    if (!purchase || w.busy) return;
+    setCancelFehler('');
+    const r = await savePurchaseCancel(viaWrites(w, PURCHASE_LIFECYCLE_OP.CANCEL), purchase);
+    if (r.kind !== 'ok') { setCancelFehler(fehlertext(r)); return; }
+    setCreditTick((t) => t + 1);
+    setConfirmCancel(false);
   }
 
   const getProductName = (pid?: string) => {
@@ -170,12 +192,12 @@ export function PurchaseDetail() {
           </button>
           <div className="flex gap-2">
             {canPay && <Button variant="primary" onClick={() => { setPayFehler(''); setShowPayment(true); }} data-purchase-pay-open><CreditCard size={14} /> Add Payment</Button>}
-            {canReturn && <Button variant="secondary" onClick={openReturnModal}><RotateCcw size={14} /> Return to Supplier</Button>}
+            {canReturn && <Button variant="secondary" onClick={openReturnModal} data-purchase-return-open><RotateCcw size={14} /> Return to Supplier</Button>}
             <Button variant="ghost" onClick={() => printPurchasePdf({ purchase, supplier, products, categories })}>
               <Printer size={14} /> Print
             </Button>
             <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
-            {canCancel && <Button variant="danger" onClick={() => setConfirmCancel(true)}><XCircle size={14} /> Cancel</Button>}
+            {canCancel && <Button variant="danger" onClick={() => { setCancelFehler(''); setConfirmCancel(true); }} data-purchase-cancel><XCircle size={14} /> Cancel</Button>}
           </div>
         </div>
 
@@ -444,11 +466,14 @@ export function PurchaseDetail() {
               const r = returnLines[l.id] || { include: false, quantity: l.quantity, unitPrice: l.unitPrice };
               return (
                 <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '0.3fr 2fr 0.8fr 1fr 1fr', gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center' }}>
-                  <input type="checkbox" checked={r.include} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, include: e.target.checked } })} />
+                  <input type="checkbox" checked={r.include} disabled={w.busy} data-purchase-return-line={l.id}
+                    onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, include: e.target.checked } })} />
                   <span style={{ fontSize: 12, color: '#0F0F10' }}>{getProductName(l.productId)}</span>
-                  <input type="number" value={r.quantity} min={0} max={l.quantity} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, quantity: parseFloat(e.target.value) || 0 } })}
+                  <input type="number" value={r.quantity} min={0} max={l.quantity} disabled={w.busy} data-purchase-return-qty={l.id}
+                    onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, quantity: parseFloat(e.target.value) || 0 } })}
                     className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }} />
-                  <input type="number" step="0.01" value={r.unitPrice} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, unitPrice: parseFloat(e.target.value) || 0 } })}
+                  <input type="number" step="0.01" value={r.unitPrice} disabled={w.busy} data-purchase-return-price={l.id}
+                    onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, unitPrice: parseFloat(e.target.value) || 0 } })}
                     className="font-mono" style={{ padding: '4px 8px', fontSize: 12, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, color: '#0F0F10' }} />
                   <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}><Bhd v={r.quantity * r.unitPrice}/></span>
                 </div>
@@ -463,6 +488,7 @@ export function PurchaseDetail() {
                 const active = returnMethod === m;
                 return (
                   <button key={m} onClick={() => setReturnMethod(m)} className="cursor-pointer rounded"
+                    disabled={w.busy} data-purchase-return-method={m}
                     style={{ padding: '7px 14px', fontSize: 12,
                       border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                       color: active ? '#0F0F10' : '#6B7280',
@@ -473,16 +499,19 @@ export function PurchaseDetail() {
             </div>
           </div>
 
-          <Input label="NOTES" placeholder="e.g. damaged goods" value={returnNotes} onChange={e => setReturnNotes(e.target.value)} />
+          <Input label="NOTES" placeholder="e.g. damaged goods" value={returnNotes} onChange={e => setReturnNotes(e.target.value)} disabled={w.busy} data-purchase-return-notes />
 
           <div className="flex justify-between" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <span style={{ fontSize: 14, color: '#6B7280' }}>Return Total</span>
             <span className="font-mono" style={{ fontSize: 16, color: '#DC2626' }}><Bhd v={returnTotal}/> BHD</span>
           </div>
 
+          <WriteError text={retFehler} />
           <div className="flex justify-end gap-3">
-            <Button variant="ghost" onClick={() => setShowReturn(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreateReturn} disabled={returnTotal <= 0}>Confirm Return</Button>
+            <Button variant="ghost" onClick={() => setShowReturn(false)} disabled={w.busy}>Cancel</Button>
+            <Button variant="primary" onClick={() => void handleCreateReturn()} disabled={w.busy || returnTotal <= 0} data-purchase-return-confirm>
+              {w.busy ? 'Saving…' : 'Confirm Return'}
+            </Button>
           </div>
         </div>
       </Modal>
@@ -492,10 +521,18 @@ export function PurchaseDetail() {
         <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 20 }}>
           Cancel purchase <strong style={{ color: '#0F0F10' }}>{purchase.purchaseNumber}</strong>?
           Payable will be cleared. This cannot be undone.
+          {linkedReturns.some(r => r.status !== 'CANCELLED') && (
+            <span style={{ display: 'block', marginTop: 8, fontSize: 12, color: '#7A6B4F' }}>
+              Its supplier return will be cancelled as well.
+            </span>
+          )}
         </p>
+        <WriteError text={cancelFehler} />
         <div className="flex justify-end gap-3">
-          <Button variant="ghost" onClick={() => setConfirmCancel(false)}>Cancel</Button>
-          <Button variant="danger" onClick={() => { if (id) cancelPurchase(id); setConfirmCancel(false); }}>Confirm Cancel</Button>
+          <Button variant="ghost" onClick={() => setConfirmCancel(false)} disabled={w.busy}>Cancel</Button>
+          <Button variant="danger" onClick={() => void handleCancelPurchase()} disabled={w.busy} data-purchase-cancel-confirm>
+            {w.busy ? 'Cancelling…' : 'Confirm Cancel'}
+          </Button>
         </div>
       </Modal>
 

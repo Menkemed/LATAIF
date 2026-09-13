@@ -9,10 +9,14 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — Line-Tabellen + Invoice-Spiegel
-import { trackLotRow, trackProductRow, syncProductQuantity } from '@/core/lots/lot-queries';
-import { postConsignmentPayout, postCreditNote, hasLedgerEntries, hasReversalFor, reverseSource, reverseConsignmentPayouts } from '@/core/ledger/posting';
-import type { CreditNote } from '@/core/models/types';
+import { trackProductRow } from '@/core/lots/lot-queries';
+import { postConsignmentPayout, hasLedgerEntries, reverseConsignmentPayouts } from '@/core/ledger/posting';
+// CENTRAL-UI-PARITY R6F — Rückgabe nach dem Verkauf und Verkaufsstorno wohnen in EINER Hausfolge
+// (dieselbe für PC2); der Store ist nur noch der Anschluss, in der Klammer des Hauses.
+import { atomar } from '@/core/payables/payables-house';
+import {
+  cancelConsignmentSaleInHouse, localConsignmentActor, returnConsignmentAfterSaleInHouse,
+} from '@/core/consignment/consignment-reversal-house';
 import { useSupplierStore } from './supplierStore';
 import { useInvoiceStore } from './invoiceStore';
 import { usePurchaseStore } from './purchaseStore';
@@ -574,164 +578,15 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
   },
 
   // ── Cancel Sale: vollständiges Undo des recordSale-Flows ────────────────
-  // Reverst Invoice + Auto-Purchase + Loss-Expense (falls vorhanden) und setzt
-  // das Consignment zurück auf 'active'. Für „Verkauf war ein Fehler"-Cases.
+  // CENTRAL-UI-PARITY R6F — die Folge wohnt in `cancelConsignmentSaleInHouse` (dieselbe für
+  // `consignments.cancel_sale` von PC2): eigene Rückgabe nach dem Verkauf über den Retourenstorno
+  // (Gutschrift CANCELLED statt gelöscht), Rechnung über die Grundlage `reverseInvoiceInHouse`,
+  // Auto-Einkauf, Verlust-Ausgabe, Auszahlungen, Artikel und Kommission — strikt, in EINER Klammer.
+  // Vorher löschte dieser Store Gutschrift und Retoure hart und schluckte die Fehler von vier
+  // Teilschritten. Die Maske ruft `cancelConsignmentSaleOnPrimary`; dieser Anschluss bleibt für
+  // programmatische Aufrufer (allein atomar, in einer offenen Handlung ein Teil von ihr).
   cancelSale: (id) => {
-    const con = get().getConsignment(id);
-    if (!con) throw new Error(`Consignment ${id} not found`);
-    // Plan 2026-05: Cancel funktioniert für sold UND returned (= post-sale-return
-    // wurde schon ausgelöst, aber die Auto-Purchase + Loss-Expense aus dem
-    // recordSale-Flow hängen noch). Dann cleant Cancel-Sale die Reste auf.
-    // paid_out (Legacy-Payout via markPaidOut/recordPartialPayout) ist nur der
-    // Extremfall Teil-Payout=100% — Schritt 3b reverst die Payout-Postings, der
-    // Reset unten leert die Payout-Felder. deleteConsignment blockt paid_out
-    // weiterhin (L-05); DIES ist der saubere Teardown-Weg.
-    if (con.status !== 'sold' && con.status !== 'returned' && con.status !== 'paid_out') {
-      throw new Error(`Consignment ${con.consignmentNumber} is "${con.status}" — only sold/returned/paid_out consignments can be cancelled.`);
-    }
-
-    const db = getDatabase();
-    const now = new Date().toISOString();
-
-    // 0. Post-Sale-Return-Artefakte cleanen — wenn der User vorher ueber
-    // markReturnedAfterSale ein Sales-Return + Credit Note erzeugt hat, haengen
-    // diese sonst nach dem Cancel weiter (CN-Ledger-Posts bleiben aktiv → Phantom
-    // CASH/REVENUE-Bewegungen). Wir reversen die CN im Ledger und loeschen die
-    // CN- + Sales-Return-Records, damit die Invoice-Cancel sauber durchlaufen kann.
-    if (con.invoiceId) {
-      try {
-        // R6E-CN — eine schon STORNIERTE Gutschrift (ihre Retoure ist REJECTED, Buchung umgekehrt)
-        // ist Historie; sie wird hier weder nochmals umgekehrt noch samt Retoure gelöscht.
-        const cnRows = query(
-          `SELECT id FROM credit_notes
-           WHERE invoice_id = ? AND reason LIKE ? AND status != 'CANCELLED'`,
-          [con.invoiceId, `Consignment post-sale return (${con.consignmentNumber})%`]
-        );
-        for (const row of cnRows) {
-          const cnId = row.id as string;
-          try {
-            if (hasLedgerEntries('CREDIT_NOTE', cnId) && !hasReversalFor('CREDIT_NOTE', cnId)) {
-              reverseSource('CREDIT_NOTE', cnId, now);
-            }
-          } catch (e) {
-            console.warn('[cancelSale] CN reversal failed:', e);
-          }
-          // sales_return + lines + CN-row entfernen (dem User-Geist nach: nie passiert).
-          const srRow = query(`SELECT sales_return_id FROM credit_notes WHERE id = ?`, [cnId])[0];
-          const srId = srRow?.sales_return_id as string | undefined;
-          // LAN-Sync (Bug-6): betroffene IDs VOR dem Hard-Delete erfassen, danach als
-          // delete tracken — sonst behaelt Geraet B Return-/Credit-Artefakte (Orphans).
-          const srLineDelIds = srId
-            ? query(`SELECT id FROM sales_return_lines WHERE return_id = ?`, [srId]).map(r => r.id as string)
-            : [];
-          db.run(`DELETE FROM credit_notes WHERE id = ?`, [cnId]);
-          if (srId) {
-            db.run(`DELETE FROM sales_return_lines WHERE return_id = ?`, [srId]);
-            db.run(`DELETE FROM sales_returns WHERE id = ?`, [srId]);
-          }
-          // Reihenfolge fuer konvergenten Full-Replay: erst Lines, dann Header, dann CN.
-          for (const lid of srLineDelIds) trackChange('sales_return_lines', lid, 'delete', {});
-          if (srId) trackChange('sales_returns', srId, 'delete', {});
-          trackChange('credit_notes', cnId, 'delete', {});
-        }
-      } catch (e) {
-        console.warn('[cancelSale] post-sale-return cleanup failed:', e);
-      }
-    }
-
-    // 1. Linked Invoice cancellen — der invoiceStore.updateInvoice triggert
-    // Ledger-Reversal (postInvoiceCancelled), CN/Loss-Cleanup, Offer-Reset.
-    if (con.invoiceId) {
-      try {
-        useInvoiceStore.getState().updateInvoice(con.invoiceId, { status: 'CANCELLED' });
-      } catch (e) {
-        console.warn('[cancelSale] invoice cancel failed:', e);
-      }
-    }
-
-    // 2. Linked Auto-Purchase cancellen (direct SQL lookup, dann
-    // purchaseStore.cancelPurchase für Status + Ledger-Reversal). Direkter
-    // SQL statt store.purchases damit Re-Loads/HMR-Edge-Cases nicht stören.
-    try {
-      const purRows = query(
-        `SELECT id FROM purchases WHERE notes LIKE ? AND status != 'CANCELLED' LIMIT 1`,
-        [`%${con.consignmentNumber}%`]
-      );
-      if (purRows.length > 0) {
-        const purchaseId = purRows[0].id as string;
-        usePurchaseStore.getState().cancelPurchase(purchaseId);
-      }
-    } catch (e) {
-      console.warn('[cancelSale] purchase cancel failed:', e);
-    }
-
-    // 3. Linked Loss-Expense cancellen (direct SQL lookup, dann updateExpense
-    // für Status + postExpenseCancelled).
-    try {
-      const expRows = query(
-        `SELECT id FROM expenses
-         WHERE related_module = 'consignment' AND related_entity_id = ?
-           AND category = 'ConsignorLoss' AND status != 'CANCELLED'
-         LIMIT 1`,
-        [id]
-      );
-      if (expRows.length > 0) {
-        const expenseId = expRows[0].id as string;
-        useExpenseStore.getState().updateExpense(expenseId, { status: 'CANCELLED' });
-      }
-    } catch (e) {
-      console.warn('[cancelSale] loss-expense cancel failed:', e);
-    }
-
-    // 3b. M-22 — Consignor-Payout(s) reversen. Bei Teil-Payout bleibt der Status
-    // 'sold' (recordPartialPayout), also ist cancelSale erreichbar OBWOHL schon Geld
-    // an den Consignor floss; bei paid_out ist der Payout der Regelfall. Ohne Reverse
-    // blieben Pseudo-Aufwand + Cash-Abgang haengen. Guarded + idempotent (findet die
-    // synthetischen source_ids ueber metadata). Bewusst KEIN Fehler-Swallow: schlaegt
-    // der Reverse fehl, bricht der Cancel VOR dem Reset ab (sonst stuende das
-    // Consignment auf 'active' mit Phantom-Payout-Postings = stiller Geldfehler).
-    // Schritte 0-3 sind idempotent geguardet — ein erneuter Versuch raeumt nach.
-    reverseConsignmentPayouts(id, now);
-
-    // 4. Consignment zurück auf 'active', Sale-Felder leeren. Auch die Payout-
-    // Metadaten (method/date/reference) nullen — sonst blieben sie nach einem
-    // paid_out/Teil-Payout-Cancel als stale Daten stehen und erschienen beim
-    // naechsten Payout-Zyklus in der Payout-Details-Card.
-    db.run(
-      `UPDATE consignments SET
-         status = 'active',
-         sale_price = NULL,
-         buyer_id = NULL,
-         invoice_id = NULL,
-         commission_amount = NULL,
-         payout_amount = NULL,
-         payout_paid_amount = 0,
-         payout_status = 'pending',
-         payout_method = NULL,
-         payout_date = NULL,
-         payout_reference = NULL,
-         sale_method = NULL,
-         updated_at = ?
-       WHERE id = ?`,
-      [now, id]
-    );
-
-    // 5. Produkt zurück auf consignment-stock. quantity defensiv auf 1, wenn ≤0:
-    // der Legacy-Pfad (markSold ohne Invoice) dekrementierte die Stueckzahl und hat
-    // keinen Lot-Restore — ohne Heilung stuende das Produkt auf 'consignment' mit
-    // quantity=0. trackUpdate fehlte hier bisher komplett (Produkt-Reset erreichte
-    // den Sync-Changelog nie — zweites Geraet behielt 'sold').
-    db.run(
-      `UPDATE products SET stock_status = 'consignment', source_type = 'CONSIGNMENT',
-         quantity = CASE WHEN quantity <= 0 THEN 1 ELSE quantity END, updated_at = ?
-       WHERE id = ?`,
-      [now, con.productId]
-    );
-    trackUpdate('products', con.productId, { stockStatus: 'consignment', sourceType: 'CONSIGNMENT', cancelledSale: true });
-
-    saveDatabase();
-    trackUpdate('consignments', id, { status: 'active', cancelledSale: true });
-    eventBus.emit('consignment.sale_cancelled', 'consignment', id, { previousInvoiceId: con.invoiceId });
+    atomar(() => cancelConsignmentSaleInHouse(id, localConsignmentActor(), currentBranchId()));
     get().loadConsignments();
   },
 
@@ -818,239 +673,15 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
   },
 
   // Plan §Commission §13: Endkunde bringt Ware zurück (nach Verkauf).
-  // Erstellt automatisch einen Sales Return (RET) für die ursprüngliche Rechnung mit der gewählten Disposition.
+  // CENTRAL-UI-PARITY R6F — die Folge wohnt in `returnConsignmentAfterSaleInHouse` (dieselbe für
+  // `consignments.return_after_sale` von PC2): die Retoure über das Retourenhaus (Bruttopreis der
+  // Rechnung, Gutschrift, Erstattung, durable Nummer), der Wareneinsatz zurück, bei „Return to Owner"
+  // Einkauf und Verlust storniert, bei „Keep" Einstand = Auszahlung (v0.7.11) — strikt, EINE Klammer.
+  // Vorher baute dieser Store eine zweite Retourenlogik (Nettopreis, Gutschrift von Hand, verschluckte
+  // Buchung, Nummer aus der Uhrzeit). Die Maske ruft `returnConsignmentAfterSaleOnPrimary`.
   markReturnedAfterSale: (id, disposition) => {
-    const con = get().getConsignment(id);
-    if (!con) return;
-    const db = getDatabase();
-    const now = new Date().toISOString();
-
-    // v0.7.11 — Idempotenz-Guard: doppelter Aufruf (z.B. double-click oder
-    // versehentlicher Re-Run via UI/Eval) sonst → mehrere CN + RET pro Invoice
-    // + verkorkster Ledger. Erkenne über bereits existierende sales_returns
-    // dieser Invoice mit dem Consignment-Reason. Auch hartes Status-Match
-    // 'returned' triggert hier (consignment ist schon zurueck).
-    if (con.status === 'returned') {
-      console.warn(`[markReturnedAfterSale] ${con.consignmentNumber} already returned, skipping.`);
-      return;
-    }
-    if (con.invoiceId) {
-      const existingRet = query(
-        `SELECT id FROM sales_returns WHERE invoice_id = ? AND notes LIKE ? LIMIT 1`,
-        [con.invoiceId, `%Consignment post-sale return (${con.consignmentNumber})%`]
-      );
-      if (existingRet.length > 0) {
-        console.warn(`[markReturnedAfterSale] ${con.consignmentNumber} already has return ${existingRet[0].id}, skipping duplicate.`);
-        return;
-      }
-    }
-
-    if (!con.invoiceId || !con.salePrice) {
-      // Kein Invoice verknüpft oder noch nicht verkauft — Fallback auf normale Rückgabe
-      get().markReturned(id);
-      return;
-    }
-
-    // Finde die Invoice-Line für dieses Produkt
-    const lineRows = query(
-      `SELECT id, unit_price, vat_amount FROM invoice_lines WHERE invoice_id = ? AND product_id = ?`,
-      [con.invoiceId, con.productId]
-    );
-    if (lineRows.length === 0) {
-      get().markReturned(id);
-      return;
-    }
-
-    let branchId: string, userId: string;
-    try { branchId = currentBranchId(); userId = currentUserId(); }
-    catch { branchId = 'branch-main'; userId = 'user-owner'; }
-
-    const invRows = query('SELECT customer_id, paid_amount, gross_amount FROM invoices WHERE id = ?', [con.invoiceId]);
-    const customerId = invRows[0]?.customer_id as string;
-    // Bug-Fix 2026-05: Cash/Receivable-Split anhand der tatsaechlich vom Kunden
-    // gezahlten Summe — sonst entsteht eine Phantom-Cash-Auszahlung, wenn die
-    // Invoice (z.B. Consignment-Auto-Sale) nie bezahlt wurde. Spiegelt computeRefundSplit
-    // aus salesReturnStore (vereinfacht, da consignment-post-sale immer 1:1 zur Invoice).
-    const customerPaid = (invRows[0]?.paid_amount as number) || 0;
-
-    // Return-Nummer
-    const returnNumber = `RET-${Date.now().toString(36).toUpperCase().slice(-6)}`;
-    const returnId = uuid();
-    const totalAmount = lineRows.reduce((s, l) => s + ((l.unit_price as number) || 0), 0);
-    const vatCorrected = lineRows.reduce((s, l) => s + ((l.vat_amount as number) || 0), 0);
-
-    const cashRefundCap = Math.min(totalAmount, Math.max(0, customerPaid));
-    const receivableCancel = Math.max(0, totalAmount - cashRefundCap);
-    const refundMethod = cashRefundCap > 0 ? 'cash' : null;
-
-    db.run(
-      `INSERT INTO sales_returns (id, branch_id, return_number, invoice_id, customer_id, status, total_amount,
-        vat_corrected, return_date, refund_method, refund_amount, product_disposition, notes, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, 'REFUNDED', ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [returnId, branchId, returnNumber, con.invoiceId, customerId, totalAmount, vatCorrected,
-       now.split('T')[0], refundMethod, cashRefundCap, disposition,
-       `Consignment post-sale return (${con.consignmentNumber})`, now, userId]
-    );
-
-    // LAN-Sync (Bug-3b): stabile kanonische Line-IDs fangen (zuvor inline uuid() →
-    // nicht trackbar). Tracking folgt NACH dem sales_returns-Header-trackInsert (unten).
-    const srLineIds: string[] = [];
-    for (const l of lineRows) {
-      const srLineId = uuid();
-      srLineIds.push(srLineId);
-      db.run(
-        `INSERT INTO sales_return_lines (id, return_id, invoice_line_id, product_id, quantity, unit_price, vat_amount, line_total)
-         VALUES (?, ?, ?, ?, 1, ?, ?, ?)`,
-        [srLineId, returnId, l.id as string, con.productId, (l.unit_price as number) || 0,
-         (l.vat_amount as number) || 0, (l.unit_price as number) || 0]
-      );
-    }
-
-    // Produkt-Disposition
-    if (disposition === 'RETURN_TO_OWNER') {
-      db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ?`, [now, con.productId]);
-      trackProductRow(con.productId);   // LAN-Sync Phase 1b
-      get().updateConsignment(id, { status: 'returned' });
-      // v0.7.11 — Consignor-Purchase cancellen: wir haben die Ware an den
-      // Consignor zurueckgegeben, also schulden wir ihm nichts mehr. Vorher
-      // blieb der Purchase auf UNPAID stehen (Phantom-A/P).
-      // KEEP_AS_OWN-Pfad cancelt absichtlich NICHT — dort behalten wir die
-      // Ware und der Consignor erwartet seine Auszahlung.
-      try {
-        const purRows = query(
-          `SELECT id FROM purchases WHERE notes LIKE ? AND status != 'CANCELLED' LIMIT 1`,
-          [`%${con.consignmentNumber}%`]
-        );
-        if (purRows.length > 0) {
-          const purchaseId = purRows[0].id as string;
-          usePurchaseStore.getState().cancelPurchase(purchaseId);
-        }
-        // Loss-Expense (bei Below-Cost-Sale) auch cancellen — sonst bleibt der
-        // ConsignorLoss in Reports stehen obwohl der gesamte Sale rueckgaengig.
-        const expRows = query(
-          `SELECT id FROM expenses
-           WHERE related_module = 'consignment' AND related_entity_id = ?
-             AND category = 'ConsignorLoss' AND status != 'CANCELLED'
-           LIMIT 1`,
-          [id]
-        );
-        if (expRows.length > 0) {
-          const expenseId = expRows[0].id as string;
-          useExpenseStore.getState().updateExpense(expenseId, { status: 'CANCELLED' });
-        }
-      } catch (e) {
-        console.warn('[markReturnedAfterSale RETURN_TO_OWNER] purchase/expense cancel failed:', e);
-      }
-    } else {
-      // v0.7.11 — KEEP_AS_OWN: Cost-Basis = consignor_payout, NICHT sale_price.
-      //
-      // Vorher war's auf con.salePrice gesetzt (Plan §13B Annahme). Das ueberschaetzt
-      // unsere echten Cash-Kosten, weil der Buyer-Refund den Sale-Cash neutralisiert.
-      // Cash-Trace:
-      //    + sale_price  (vom Buyer)
-      //    - sale_price  (Refund an Buyer)
-      //    - payoutAmount (Auszahlung an Consignor, die wir noch schulden)
-      //    = -payoutAmount netto
-      //
-      // Also kostet uns die Uhr in echter Cash payoutAmount — das ist auch
-      // die Hoehe der A/P (purchases.total_amount) die offen bleibt. Beide
-      // muessen uebereinstimmen, sonst sind Margin + MARGIN_VAT bei der naechsten
-      // Verkaeufung falsch (z.B. Cost-Basis 1500 statt 1250 → 250 Profit gehen
-      // als 0 Margin durch die Kasse, MARGIN_VAT geht verloren).
-      const costBasis = con.payoutAmount ?? con.salePrice ?? 0;
-      // Reihenfolge-Fix (Bug: quantity blieb 0 trotz aktivem Lot). Erst den Lot
-      // erzeugen, dann quantity aus aktiven Lots ableiten, dann finalen Status
-      // setzen, dann den LETZTEN autoritativen Snapshot tracken — so enthaelt der
-      // letzte products-Full-Row alle finalen Werte (quantity, stock_status,
-      // source_type, updated_at).
-      //
-      // (1) Phase 5 — neuer Stock-Lot an consignor_payout-Preis als Acquisition-
-      // Cost. Originaler Lot der Sale-Konsumption bleibt EXHAUSTED.
-      if (costBasis > 0) {
-        const teardownLotId = uuid();   // LAN-Sync Phase 1a
-        db.run(
-          `INSERT INTO stock_lots
-             (id, branch_id, product_id, purchase_id, purchase_line_id,
-              unit_cost, qty_total, qty_remaining, status, acquired_at, created_at)
-           VALUES (?, ?, ?, NULL, NULL, ?, 1, 1, 'ACTIVE', ?, ?)`,
-          [teardownLotId, branchId, con.productId, costBasis, now.split('T')[0], now]
-        );
-        trackLotRow(teardownLotId, 'insert');
-      }
-      // (2) products.quantity aus den jetzt aktiven Lots ableiten (→ 1). Vorher
-      // fehlte dieser Aufruf → quantity blieb 0 obwohl die aktive Lot-Summe 1 ist.
-      // No-op (Legacy-Schutz, early-return) falls kein Lot erzeugt wurde (costBasis 0).
-      syncProductQuantity(con.productId);
-      // (3) finaler Status + source_type + cost-basis — zuletzt gesetzt, damit kein
-      // anderer Helfer ihn ueberschreibt (syncProductQuantity ruehrt nur quantity an).
-      db.run(
-        `UPDATE products SET stock_status = 'in_stock', source_type = 'OWN',
-         purchase_price = ?, updated_at = ? WHERE id = ?`,
-        [costBasis, now, con.productId]
-      );
-      // (4) letzter autoritativer Full-Row-Snapshot (quantity, stock_status,
-      // source_type, updated_at) — LAN-Sync Phase 1b.
-      trackProductRow(con.productId);
-      get().updateConsignment(id, { status: 'returned' });
-    }
-
-    // Invoice-VAT-Korrektur. paid_amount NICHT mehr abziehen — der Cash-Anteil
-    // ist via cashRefundCap im Ledger bereits korrekt verbucht; ein zweites Mal
-    // hier paid_amount zu kuerzen wuerde Listenanzeigen ('Remaining') verzerren.
-    db.run(
-      `UPDATE invoices SET
-         vat_amount = MAX(0, vat_amount - ?),
-         updated_at = ?
-       WHERE id = ?`,
-      [vatCorrected, now, con.invoiceId]
-    );
-
-    // Synthetische Credit Note + Ledger-Post. Cash/Receivable-Split entspricht
-    // der oben berechneten Aufteilung: nur was der Kunde tatsaechlich gezahlt hat,
-    // geht als Cash zurueck — der Rest cancelt die Forderung.
-    const cnId = uuid();
-    const cnNumber = getNextDocumentNumber('CN');
-    db.run(
-      `INSERT INTO credit_notes (id, branch_id, credit_note_number, invoice_id, customer_id,
-         issued_at, total_amount, vat_amount, cash_refund_amount, receivable_cancel_amount,
-         refund_method, sales_return_id, reason, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [cnId, branchId, cnNumber, con.invoiceId, customerId, now, totalAmount, vatCorrected,
-       cashRefundCap, receivableCancel, refundMethod || 'bank', returnId,
-       `Consignment post-sale return (${con.consignmentNumber})`, now, userId]
-    );
-    trackInsert('credit_notes', cnId, { creditNoteNumber: cnNumber, invoiceId: con.invoiceId, totalAmount });
-
-    saveDatabase();
-    trackInsert('sales_returns', returnId, { returnNumber, invoiceId: con.invoiceId, consignmentId: id, disposition });
-    // LAN-Sync (Bug-2): EIN Invoice-Full-Row-Snapshot NACH der VAT-Korrektur (vat_amount +
-    // updated_at; ZERO_VAT → nur updated_at, VAT_10 → auch vat_amount). Kein invoice_edits/Audit.
-    trackChange('invoices', con.invoiceId, 'update', {});
-    // LAN-Sync (Bug-3b): sales_return_lines NACH dem sales_returns-Header tracken (FK-Reihenfolge).
-    for (const srLineId of srLineIds) trackChange('sales_return_lines', srLineId, 'insert', {});
-
-    const cn: CreditNote = {
-      id: cnId,
-      creditNoteNumber: cnNumber,
-      branchId,
-      customerId,
-      invoiceId: con.invoiceId,
-      salesReturnId: returnId,
-      totalAmount,
-      vatAmount: vatCorrected,
-      cashRefundAmount: cashRefundCap,
-      receivableCancelAmount: receivableCancel,
-      refundMethod: (refundMethod as 'cash' | undefined) || 'bank',
-      reason: `Consignment post-sale return (${con.consignmentNumber})`,
-      issuedAt: now,
-      createdAt: now,
-    };
-    safePost(`postCreditNote(${cnId}) [consignment-return]`, () => {
-      if (hasLedgerEntries('CREDIT_NOTE', cnId)) return;
-      postCreditNote(cn);
-    });
-
-    eventBus.emit('consignment.returned', 'consignment', id, { disposition, returnId });
+    atomar(() => returnConsignmentAfterSaleInHouse(id, { disposition }, currentBranchId()));
+    get().loadConsignments();
   },
 
   deleteConsignment: (id) => {

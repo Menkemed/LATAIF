@@ -91,8 +91,13 @@ impl From<MediaError> for IngestError {
     }
 }
 
+/// Pfadfrei, aber mit dem Code des Betriebssystems: „io:PermissionDenied:os5" statt nur der Art —
+/// sonst ist ein Scanner-Zugriff (5/32) von einer echten Rechteverweigerung nicht zu unterscheiden.
 fn io_err(e: &std::io::Error) -> IngestError {
-    IngestError::Io(format!("io:{:?}", e.kind()))
+    match e.raw_os_error() {
+        Some(code) => IngestError::Io(format!("io:{:?}:os{code}", e.kind())),
+        None => IngestError::Io(format!("io:{:?}", e.kind())),
+    }
 }
 
 // ── DTOs ─────────────────────────────────────────────────────────────────────

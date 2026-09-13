@@ -1,9 +1,12 @@
 // v0.7.0 — Cancel-Order Wizard: Geld-Handling (Refund/Credit/Forfeit) + Info
 // ueber die automatischen Lifecycle-Effekte (A/P, Gold, beschaffte Ware).
+// CENTRAL-UI-PARITY R6F — die Maske waehlt nur (Weg, Zahlweg, Notiz); Betraege, Guthaben, Buchungen,
+// Lagerstueck und Status rechnet und schreibt das Haus (`cancelOrderInHouse`) — am Primary wie auf PC2.
 import { useEffect, useMemo, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { Bhd } from '@/components/ui/Bhd';
+import { WriteError } from '@/components/shared/WriteError';
 import type { Order, OrderLine } from '@/core/models/types';
 
 type Choice = 'refund' | 'credit' | 'forfeit';
@@ -13,17 +16,25 @@ export interface CancelOrderModalProps {
   open: boolean;
   order: Order;
   orderLines: OrderLine[];
+  /** R6F — die NICHT umgewandelten Anzahlungen: genau die Summe, die das Haus bucht. */
   totalPaid: number;
   /** Sourced-Map fuer Lines, die schon via Purchase beschafft wurden. */
   sourcedLineIds: Set<string>;
   /** Anzahl offener Gold-Verbindlichkeiten dieser Order. */
   openGoldPayableCount: number;
+  /** R6F — der Storno laeuft; der Knopf ist solange gesperrt. */
+  busy?: boolean;
+  /** R6F — warum der Storno nicht geglueckt ist (leer = kein Fehler). */
+  submitError?: string;
+  /** R6F — ueber „Delete Order" geoeffnet: ein bezahlter Auftrag wird storniert, nicht geloescht. */
+  fromDelete?: boolean;
   onCancel: () => void;
-  onConfirm: (choice: Choice, refundMethod?: RefundMethod) => void;
+  onConfirm: (choice: Choice, refundMethod?: RefundMethod, note?: string) => void;
 }
 
 export function CancelOrderModal({
   open, order, orderLines, totalPaid, sourcedLineIds, openGoldPayableCount,
+  busy = false, submitError = '', fromDelete = false,
   onCancel, onConfirm,
 }: CancelOrderModalProps) {
   const [choice, setChoice] = useState<Choice>('refund');
@@ -63,12 +74,33 @@ export function CancelOrderModal({
 
   const moneyShown = totalPaid > 0.005;
 
+  // R6F — vorher fiel die Notiz hier weg: die Maske fragte „Intended use of the credit…", der Knopf
+  // reichte sie aber nie weiter, und das Guthaben bekam immer den Standardtext. Die Notiz gehoert
+  // zum Guthaben, der Zahlweg zur Rueckzahlung — sonst reist keins von beiden mit.
+  function confirm() {
+    const trimmed = note.trim();
+    onConfirm(
+      choice,
+      choice === 'refund' ? refundMethod : undefined,
+      choice === 'credit' && trimmed ? trimmed : undefined,
+    );
+  }
+
   return (
     <Modal open={open} onClose={onCancel} title={`Cancel Order ${order.orderNumber}`} width={620}>
       <p style={{ fontSize: 13, color: '#4B5563', marginBottom: 18 }}>
         This order will be cancelled. Decide how to handle the amount already paid,
         and review the automatic effects below.
       </p>
+
+      {fromDelete && (
+        <div data-order-cancel-from-delete style={{ marginBottom: 18, padding: '12px 14px',
+                      background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 8,
+                      fontSize: 12, color: '#4B5563' }}>
+          This order has received payments. It is cancelled instead of deleted — the order stays as
+          the record of how the money was handled.
+        </div>
+      )}
 
       {/* ── Geld-Handling ── */}
       {moneyShown && (
@@ -96,6 +128,7 @@ export function CancelOrderModal({
                          background: choice === opt.v ? 'rgba(15,15,16,0.04)' : 'transparent',
                          cursor: 'pointer' }}>
                 <input type="radio" checked={choice === opt.v} onChange={() => setChoice(opt.v)}
+                  data-order-cancel-choice={opt.v}
                   style={{ marginTop: 2 }} />
                 <div style={{ flex: 1 }}>
                   <div style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500 }}>{opt.label}</div>
@@ -111,6 +144,7 @@ export function CancelOrderModal({
               <div className="flex gap-2">
                 {(['cash', 'bank', 'benefit'] as const).map(m => (
                   <button key={m} type="button" onClick={() => setRefundMethod(m)}
+                    data-order-cancel-refund-method={m}
                     style={{ padding: '6px 14px', fontSize: 12, borderRadius: 6,
                              border: `1px solid ${refundMethod === m ? '#0F0F10' : '#D5D9DE'}`,
                              color: refundMethod === m ? '#0F0F10' : '#6B7280',
@@ -127,6 +161,7 @@ export function CancelOrderModal({
             <div style={{ marginTop: 12 }}>
               <span className="text-overline" style={{ display: 'block', marginBottom: 6 }}>NOTE (OPTIONAL)</span>
               <input value={note} onChange={e => setNote(e.target.value)}
+                data-order-cancel-note
                 placeholder="Intended use of the credit…"
                 style={{ width: '100%', padding: '8px 10px', border: '1px solid #D5D9DE',
                          borderRadius: 6, fontSize: 13 }} />
@@ -193,9 +228,11 @@ export function CancelOrderModal({
         </ul>
       </div>
 
+      <WriteError text={submitError} />
+
       <div className="flex justify-end gap-3" style={{ paddingTop: 14, borderTop: '1px solid #E5E9EE' }}>
-        <Button variant="ghost" onClick={onCancel}>Back</Button>
-        <Button variant="danger" onClick={() => onConfirm(choice, choice === 'refund' ? refundMethod : undefined)}>
+        <Button variant="ghost" onClick={onCancel} data-order-cancel-back>Back</Button>
+        <Button variant="danger" onClick={confirm} disabled={busy} data-order-cancel-confirm>
           Cancel Order
         </Button>
       </div>

@@ -272,6 +272,21 @@ pub const OP_INVOICES_SET_BUTTERFLY: &str = "invoices.set_butterfly";
 pub const OP_RETURNS_CANCEL: &str = "returns.cancel";
 pub const OP_TRANSFERS_UNDO_CONVERT: &str = "transfers.undo_convert";
 pub const OP_CUSTOMERS_LOG_MESSAGE: &str = "customers.log_message";
+// CENTRAL-UI-PARITY R6F — Einkauf, Auftrag, Kommission, Produktion, Aufgaben, Dokumente.
+pub const OP_PURCHASES_RETURN_TO_SUPPLIER: &str = "purchases.return_to_supplier";
+pub const OP_PURCHASES_CANCEL: &str = "purchases.cancel";
+pub const OP_PURCHASES_DISMISS_INBOX: &str = "purchases.dismiss_inbox";
+pub const OP_ORDERS_CANCEL: &str = "orders.cancel";
+pub const OP_ORDERS_UPDATE_LINE_STATUS: &str = "orders.update_line_status";
+pub const OP_ORDERS_MARK_LINE_ORDERED: &str = "orders.mark_line_ordered";
+pub const OP_ORDERS_UPDATE_LINE: &str = "orders.update_line";
+pub const OP_CONSIGNMENTS_RETURN_AFTER_SALE: &str = "consignments.return_after_sale";
+pub const OP_CONSIGNMENTS_CANCEL_SALE: &str = "consignments.cancel_sale";
+pub const OP_PRODUCTION_CREATE: &str = "production.create";
+pub const OP_TASKS_CREATE: &str = "tasks.create";
+pub const OP_TASKS_UPDATE: &str = "tasks.update";
+pub const OP_DOCUMENTS_UPLOAD: &str = "documents.upload";
+pub const OP_DOCUMENTS_SET_OCR: &str = "documents.set_ocr";
 
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
 // Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
@@ -439,6 +454,20 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_RETURNS_CANCEL,
     OP_TRANSFERS_UNDO_CONVERT,
     OP_CUSTOMERS_LOG_MESSAGE,
+    OP_PURCHASES_RETURN_TO_SUPPLIER,
+    OP_PURCHASES_CANCEL,
+    OP_PURCHASES_DISMISS_INBOX,
+    OP_ORDERS_CANCEL,
+    OP_ORDERS_UPDATE_LINE_STATUS,
+    OP_ORDERS_MARK_LINE_ORDERED,
+    OP_ORDERS_UPDATE_LINE,
+    OP_CONSIGNMENTS_RETURN_AFTER_SALE,
+    OP_CONSIGNMENTS_CANCEL_SALE,
+    OP_PRODUCTION_CREATE,
+    OP_TASKS_CREATE,
+    OP_TASKS_UPDATE,
+    OP_DOCUMENTS_UPLOAD,
+    OP_DOCUMENTS_SET_OCR,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

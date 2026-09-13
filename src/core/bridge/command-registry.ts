@@ -143,6 +143,13 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // R6E — Rechnungs-Lebenszyklus: das Butterfly-Kennzeichen, der Retourenstorno, die Rücknahme einer
   // Transfer-Umwandlung (Storno statt Löschen) und das Nachrichtenprotokoll am Kunden.
   'invoices.set_butterfly', 'returns.cancel', 'transfers.undo_convert', 'customers.log_message',
+  // CENTRAL-UI-PARITY R6F — Einkauf zurückgeben/stornieren, Inbox-Foto verwerfen; der Auftrag (Storno mit Geld,
+  // Zeilenstatus, „beim Lieferanten bestellt", Position bearbeiten); die Kommission nach dem Verkauf; die
+  // Produktion; Aufgaben und Dokumente. „Löschen" bleibt Primary-only.
+  'purchases.return_to_supplier', 'purchases.cancel', 'purchases.dismiss_inbox',
+  'orders.cancel', 'orders.update_line_status', 'orders.mark_line_ordered', 'orders.update_line',
+  'consignments.return_after_sale', 'consignments.cancel_sale',
+  'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr',
 ];
 
 export interface CommandSpec {

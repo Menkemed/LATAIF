@@ -19,6 +19,11 @@ import { useOrderStore } from '@/stores/orderStore';
 import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs } from '@/core/utils/product-format';
 import type { Product, Category } from '@/core/models/types';
+// CENTRAL-UI-PARITY R6F — „Confirm Production" auf beiden Rechnern über dieselbe Weiche: am Primary
+// die Hausfolge (über den Store), auf PC2 der geprüfte Fernbefehl `production.create`.
+import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
+import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
+import { productionCreateRequest, productionOutputBodies, type ProductionCreateInput } from '@/core/production/production-house';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -39,6 +44,8 @@ export function ProductionPage() {
   // v0.6.9 — Soft-Reservation: Production verbraucht ein Stueck; wenn es in einer
   // offenen Order versprochen ist, Hinweis im Input-Picker.
   const { orders, loadOrders, getAllProductReservations } = useOrderStore();
+  // R6F — EINE Absicht, ein Wächter über die Lebensdauer der Seite (eine Kennung je Versuch).
+  const anlegen = useSharedWrite<unknown>('production.create');
 
   const [showNew, setShowNew] = useState(false);
   const [selectedInputIds, setSelectedInputIds] = useState<string[]>([]);
@@ -109,7 +116,7 @@ export function ProductionPage() {
     patchOutputValue(key, Math.max(0, Math.round(remaining * 1000) / 1000));
   }
 
-  function handleCreate() {
+  async function handleCreate() {
     setError('');
     if (selectedInputIds.length === 0) { setError('Select at least one input product.'); return; }
     if (outputs.length === 0) { setError('Add at least one output product.'); return; }
@@ -120,19 +127,35 @@ export function ProductionPage() {
       }
       if (!(o.value > 0)) { setError(`Output ${i + 1}: value must be > 0.`); return; }
     }
-    try {
-      createRecord({
-        notes: notes || undefined,
-        inputProductIds: selectedInputIds,
-        outputs: outputs.map(o => ({ spec: o.spec, value: o.value })),
-        laborCost: laborCost > 0 ? laborCost : undefined,
-        overheadCost: overheadCost > 0 ? overheadCost : undefined,
-      });
-      setShowNew(false);
-      resetForm();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
+    const input: ProductionCreateInput = {
+      notes: notes || undefined,
+      inputProductIds: selectedInputIds,
+      outputs: outputs.map(o => ({ spec: o.spec, value: o.value })),
+      laborCost: laborCost > 0 ? laborCost : undefined,
+      overheadCost: overheadCost > 0 ? overheadCost : undefined,
+    };
+    // R6F — auf einem verbundenen Rechner zuerst die Fotos der Ausgänge in die Zwischenablage des
+    // Primary; im Auftrag reisen nur ihre Kennungen. Dieselben Bytes ergeben dieselbe Kennung.
+    let bodies: Array<Record<string, unknown>> = [];
+    if (anlegen.remote) {
+      try {
+        bodies = await productionOutputBodies(input.outputs, stageDataUrls);
+      } catch (e) {
+        setError(`The photos could not be handed to the main computer (${e instanceof StagingUploadError ? e.code : String(e)}). Nothing was created — please try again.`);
+        return;
+      }
     }
+    // Erfolg NUR bei `ok`. Jeder andere Ausgang lässt die Maske samt Eingaben offen; derselbe Klick
+    // wiederholt DIESELBE Absicht (ein offener Ausgang legt nichts doppelt an).
+    const r = await anlegen.save({
+      local: () => createRecord(input),
+      remote: () => productionCreateRequest(input, bodies),
+    });
+    if (r.kind !== 'ok') { setError(fehlertext(r)); return; }
+    // Am Primary lädt die Hausfolge selbst neu; PC2 holt Liste und Bestand frisch vom Primary.
+    if (anlegen.remote) { loadRecords(); loadProducts(); }
+    setShowNew(false);
+    resetForm();
   }
 
   const editingOutput = editingOutputKey ? outputs.find(o => o.key === editingOutputKey) : null;
@@ -141,7 +164,7 @@ export function ProductionPage() {
     <PageLayout
       title="Production & Consumption"
       subtitle={`${records.length} records — Plan §Production (Input Value = Output Value)`}
-      actions={<Button variant="primary" onClick={() => setShowNew(true)} disabled={availableProducts.length === 0}>New Record</Button>}
+      actions={<Button variant="primary" onClick={() => setShowNew(true)} disabled={availableProducts.length === 0} data-production-new>New Record</Button>}
     >
       {records.length === 0 ? (
         <div style={{ padding: '80px 0', textAlign: 'center' }}>
@@ -176,7 +199,7 @@ export function ProductionPage() {
           </p>
 
           {/* Inputs */}
-          <div>
+          <div data-production-inputs={selectedInputIds.length}>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>INPUT PRODUCTS (will be consumed)</span>
             <SearchMultiSelect
               label=""
@@ -207,7 +230,7 @@ export function ProductionPage() {
           <div>
             <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
               <span className="text-overline">OUTPUT PRODUCTS (new inventory)</span>
-              <Button variant="secondary" icon={<Plus size={14} />} onClick={openAddOutput}>Add Output</Button>
+              <Button variant="secondary" icon={<Plus size={14} />} onClick={openAddOutput} data-production-output-add>Add Output</Button>
             </div>
 
             {outputs.length === 0 ? (
@@ -246,6 +269,7 @@ export function ProductionPage() {
               value={laborCost || ''}
               placeholder="0.000"
               onChange={e => setLaborCost(Number(e.target.value) || 0)}
+              data-production-labor
             />
             <Input
               label="Overhead Cost (optional)"
@@ -255,10 +279,11 @@ export function ProductionPage() {
               value={overheadCost || ''}
               placeholder="0.000"
               onChange={e => setOverheadCost(Number(e.target.value) || 0)}
+              data-production-overhead
             />
           </div>
 
-          <Input label="Notes" placeholder="Optional" value={notes} onChange={e => setNotes(e.target.value)} />
+          <Input label="Notes" placeholder="Optional" value={notes} onChange={e => setNotes(e.target.value)} data-production-notes />
 
           {/* Balance check */}
           <div style={{
@@ -292,12 +317,15 @@ export function ProductionPage() {
           </div>
 
           {error && (
-            <div style={{ padding: '8px 12px', background: 'rgba(220,38,38,0.08)', borderRadius: 6, fontSize: 12, color: '#DC2626' }}>{error}</div>
+            <div data-production-error style={{ padding: '8px 12px', background: 'rgba(220,38,38,0.08)', borderRadius: 6, fontSize: 12, color: '#DC2626' }}>{error}</div>
           )}
 
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => { setShowNew(false); resetForm(); }}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate} disabled={!balanced || inputTotal <= 0}>Confirm Production</Button>
+            <Button variant="ghost" onClick={() => { setShowNew(false); resetForm(); }} disabled={anlegen.busy}>Cancel</Button>
+            {/* R6F — solange ein Versuch läuft, gesperrt: ein zweiter Klick wäre sonst ein zweiter Vorgang. */}
+            <Button variant="primary" onClick={handleCreate} disabled={!balanced || inputTotal <= 0 || anlegen.busy} data-production-save>
+              {anlegen.busy ? 'Saving…' : 'Confirm Production'}
+            </Button>
           </div>
         </div>
       </Modal>
@@ -469,6 +497,7 @@ function OutputCard({
             value={draft.value || ''}
             placeholder="0.000"
             onChange={e => onValueChange(Number(e.target.value) || 0)}
+            data-production-output-value={index}
             style={{
               flex: 1, padding: '8px 10px', fontSize: 14, fontFamily: 'monospace',
               background: '#FFFFFF', border: '1px solid #D5D9DE', borderRadius: 6,
@@ -479,6 +508,7 @@ function OutputCard({
             <button
               type="button"
               onClick={onAutofill}
+              data-production-output-autofill={index}
               title="Fill with remaining input value"
               style={{
                 padding: '6px 10px', fontSize: 10, borderRadius: 999,
@@ -496,6 +526,7 @@ function OutputCard({
       <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
         <button
           onClick={onEdit}
+          data-production-output-edit={index}
           title="Edit details"
           style={{
             padding: 6, border: '1px solid #E5E9EE', background: '#FFFFFF',
@@ -506,6 +537,7 @@ function OutputCard({
         </button>
         <button
           onClick={onRemove}
+          data-production-output-remove={index}
           title="Remove output"
           style={{
             padding: 6, border: '1px solid #E5E9EE', background: '#FFFFFF',

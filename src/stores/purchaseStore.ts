@@ -10,31 +10,26 @@
 
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { Purchase, PurchaseLine, PurchasePayment, PurchaseStatus, PurchaseReturn, PurchaseReturnLine, PurchaseReturnStatus, Product, OrderStatus, OrderLineStatus } from '@/core/models/types';
-import { deriveOrderStatusFromLines } from '@/core/models/types';
+import type { Purchase, PurchaseLine, PurchasePayment, PurchaseStatus, PurchaseReturn, PurchaseReturnLine, PurchaseReturnStatus, Product } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
-import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment, trackRefund } from '@/core/sync/track';
+import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — Line-Tabellen
-import { consumeLot, restoreLot, getAvailableStock, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+import { getAvailableStock, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 import { useProductStore } from '@/stores/productStore';
 import {
   postPurchaseReceived,
   postPurchasePayment,
-  postPurchaseCancelled,
-  postEntries,
-  reverseSource,
-  getPurchaseLineInputSplit,
   hasLedgerEntries,
-  hasReversalFor,
 } from '@/core/ledger/posting';
-// CENTRAL-UI-PARITY R6D — die Overpay-Helfer (Slice 4b) wohnen jetzt neben der Zahlungsfolge des
-// Hauses; der Store und das Haus benutzen DIESELBEN (unveraendert).
-import {
-  assertSupplierOverpayMutable, reconcilePurchaseOverpayCredit, teardownSupplierOverpayCredit,
-} from '@/core/payables/purchase-overpay';
 import { atomar, localHouseCtx, recordPurchasePaymentInHouse } from '@/core/payables/payables-house';
-import { restoreSupplierCreditUsage } from '@/core/finance/supplierCreditRestore';
+// CENTRAL-UI-PARITY R6F — Retoure (Anlage + Wirkung), Storno, Retouren-Umkehr, Inbox-Verwerfen und
+// der Auftrags-Rollup wohnen jetzt in der Hausfolge des Einkaufs-Lebenszyklus (ohne Store-Import);
+// die Store-Aktionen hier sind nur noch ihre Altanschluesse — EINE Implementierung.
+import {
+  cancelPurchaseInHouse, confirmPurchaseReturnInHouse, createPurchaseReturnDraftInHouse,
+  dismissPurchaseInboxInHouse, recomputeOrderStatusRaw, reverseConfirmedPurchaseReturnInHouse,
+} from '@/core/purchases/purchase-lifecycle-house';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
@@ -57,10 +52,10 @@ function safePost(label: string, fn: () => void): void {
 // Zahlungsfolge des Hauses, ohne diesen Store zu importieren.
 
 // F6 — beim Storno der EINLOESENDEN Purchase das auf einer Supplier-Gutschrift verbrauchte
-// used_amount zurueckgeben. Logik liegt jetzt im neutralen Core-Helfer restoreSupplierCreditUsage
+// used_amount zurueckgeben. Logik liegt im neutralen Core-Helfer restoreSupplierCreditUsage
 // (gemeinsam mit dem Expense-Cancel/Delete-Pfad, Slice A — keine Duplikation). Link 1:1 ueber
 // purchase_payments.reference = supplier_credits.id; Idempotenz beim Caller (Capture vor Reverse,
-// gefiltert auf !hasReversalFor).
+// gefiltert auf !hasReversalFor) — seit R6F in `cancelPurchaseInHouse`.
 
 interface PurchaseInput {
   supplierId: string;
@@ -248,118 +243,18 @@ function computeStatus(total: number, paid: number, cancelled = false): Purchase
   return 'PARTIALLY_PAID';
 }
 
-// Slice 4a — Spiegelt confirmReturn vollstaendig zurueck. Wird von cancelReturn UND
-// deleteReturn aufgerufen, wenn der Return bereits CONFIRMED/COMPLETED war (DRAFT hat
-// keine Effekte). Reihenfolge: verbrauchten Credit blockieren -> Ledger -> Lots ->
-// Produkt-Status -> Purchase-Totals -> ungenutzten Credit entfernen. Ohne diese
-// Umkehr blieben INVENTORY/AP/Cash-Buchungen, konsumierte Lots, OPEN Supplier-Credits
-// und reduzierte Purchase-Totals verwaist (Verknuepfte-Records-Lifecycle).
-function reverseConfirmedPurchaseReturn(
-  db: SqlDb,
-  ret: PurchaseReturn,
-  purchase: Purchase | undefined,
-  now: string,
-): void {
-  // 1. Verbrauchten Supplier-Credit blockieren — sonst inkonsistenter Lieferanten-Saldo.
-  const creditRows = query(
-    `SELECT id, used_amount FROM supplier_credits WHERE source_return_id = ?`,
-    [ret.id]
-  );
-  for (const c of creditRows) {
-    if (Number(c.used_amount || 0) > 0.005) {
-      throw new Error(
-        'Return kann nicht storniert werden: der Supplier-Credit aus dieser Rueckgabe wurde bereits (teilweise) verrechnet.'
-      );
-    }
-  }
-
-  // 2. Ledger-Storno (INVENTORY/AP/Cash der PURCHASE_RETURN-Buchung). Guarded + idempotent.
-  try {
-    if (hasLedgerEntries('PURCHASE_RETURN', ret.id) && !hasReversalFor('PURCHASE_RETURN', ret.id)) {
-      reverseSource('PURCHASE_RETURN', ret.id, now);
-    }
-  } catch (err) { console.error('[ledger] reverse PURCHASE_RETURN failed:', err); }
-
-  // 3. Lots zurueck: je Line die beim Confirm konsumierte Menge wieder freigeben
-  //    (restoreLot cappt bei qty_total). Lot ueber purchase_line_id (1 Lot/Line).
-  const affected = new Set<string>();
-  for (const line of ret.lines) {
-    if (line.purchaseLineId) {
-      const lotRow = query(
-        `SELECT id FROM stock_lots
-           WHERE purchase_line_id = ? AND status != 'CANCELLED'
-           ORDER BY acquired_at ASC, id ASC LIMIT 1`,
-        [line.purchaseLineId]
-      )[0];
-      if (lotRow) restoreLot(lotRow.id as string, Math.max(0, line.quantity));
-    }
-    if (line.productId) affected.add(line.productId);
-  }
-
-  // 4. Produkt-Status: Bestand wieder da -> zurueck auf 'in_stock' (confirmReturn hatte
-  //    bei 0 Bestand 'returned' gesetzt).
-  for (const pid of affected) {
-    syncProductQuantity(pid);
-    if (getAvailableStock(pid) > 0) {
-      db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`, [now, pid]);
-      trackProductRow(pid);   // LAN-Sync Phase 1b
-    }
-  }
-
-  // 5. Purchase-Totals wiederherstellen (Spiegel zu confirmReturn: total += ret.total,
-  //    paid += refund). getPurchase liefert die bereits reduzierten Werte.
-  if (purchase) {
-    const restoredTotal = purchase.totalAmount + ret.totalAmount;
-    const restoredPaid = purchase.paidAmount + (ret.refundAmount || 0);
-    // Slice 4b — Pre-Check VOR dem Totals-Restore: das Wiederherstellen aendert den Ueberschuss
-    // (total steigt, paid steigt) → BLOCK falls die Overpay-Gutschrift schon eingeloest ist.
-    assertSupplierOverpayMutable(purchase.id, restoredPaid, restoredTotal);
-    const restoredRemaining = Math.max(0, restoredTotal - restoredPaid);
-    const restoredStatus = computeStatus(restoredTotal, restoredPaid, purchase.status === 'CANCELLED');
-    db.run(
-      `UPDATE purchases SET total_amount = ?, paid_amount = ?, remaining_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
-      [restoredTotal, restoredPaid, restoredRemaining, restoredStatus, now, purchase.id]
-    );
-    // LAN-Sync (Gruppe 1): der Return-Cancel restauriert den Parent-Purchase-Header — war ungetrackt.
-    trackChange('purchases', purchase.id, 'update', {});
-  }
-
-  // 6. Ungenutzten Supplier-Credit dieser Return entfernen (source_return_id-gekeyt → die
-  //    Overpay-Row mit source_return_id IS NULL bleibt unberuehrt).
-  for (const c of creditRows) {
-    db.run(`DELETE FROM supplier_credits WHERE id = ?`, [c.id as string]);
-    trackDelete('supplier_credits', c.id as string);
-  }
-
-  // Slice 4b — total_amount/paid_amount wurden restauriert → den Ueberschuss neu berechnen und
-  // die Overpay-Gutschrift nachziehen (clawback-then-rebook). Nach der Return-Credit-Entfernung.
-  if (purchase) reconcilePurchaseOverpayCredit(purchase.id);
-}
+// Slice 4a — die Umkehr einer CONFIRMED/COMPLETED-Retoure (Ledger → Lots → Produkt-Status →
+// Purchase-Totals → ungenutzten Credit entfernen) wohnt seit R6F als
+// `reverseConfirmedPurchaseReturnInHouse` in der Hausfolge — strikt statt verschluckter
+// Stornobuchung, und auch der Einkaufs-Storno nimmt damit eine wirksame Retoure mit zurueck.
 
 // ── Back-to-Back Beschaffung: Order-Line Status-Sync ──────────────────────
 // purchaseStore importiert NIE orderStore (HMR-Circular-Risk) — der Order-Line-
 // Status wird per Raw-SQL aktualisiert, der Order-Roll-up ueber die REINE
-// Funktion deriveOrderStatusFromLines (kein Store-Zugriff).
+// Funktion deriveOrderStatusFromLines (kein Store-Zugriff). R6F — der Roll-up
+// (`recomputeOrderStatusRaw`) und das Zuruecksetzen beim Storno wohnen in der Hausfolge.
 
 type SqlDb = ReturnType<typeof getDatabase>;
-
-function recomputeOrderStatusRaw(db: SqlDb, orderId: string): void {
-  const now = new Date().toISOString();
-  const orderRows = query(`SELECT status FROM orders WHERE id = ?`, [orderId]);
-  if (orderRows.length === 0) return;
-  const currentStatus = (orderRows[0].status as OrderStatus) || 'pending';
-  const lineRows = query(
-    `SELECT status FROM order_lines WHERE order_id = ? AND COALESCE(is_customer_facing, 1) = 1`,
-    [orderId]
-  );
-  if (lineRows.length === 0) return;
-  const statuses = lineRows.map(r => ((r.status as string) || 'PENDING') as OrderLineStatus);
-  const derived = deriveOrderStatusFromLines(statuses, currentStatus);
-  if (derived !== currentStatus) {
-    db.run(`UPDATE orders SET status = ?, updated_at = ? WHERE id = ?`, [derived, now, orderId]);
-    trackUpdate('orders', orderId, { status: derived });
-  }
-}
 
 // Nach createPurchase: verknuepfte Order-Zeilen auf ARRIVED setzen. Invoicte oder
 // stornierte Zeilen werden uebersprungen.
@@ -379,28 +274,6 @@ function arriveLinkedOrderLines(
     if ((rows[0].status as string) === 'CANCELLED') continue;
     db.run(`UPDATE order_lines SET status = 'ARRIVED' WHERE id = ?`, [lr.sourceOrderLineId]);
     trackUpdate('order_lines', lr.sourceOrderLineId, { status: 'ARRIVED' });
-    affectedOrders.add(rows[0].order_id as string);
-  }
-  for (const oid of affectedOrders) recomputeOrderStatusRaw(db, oid);
-}
-
-// Nach cancelPurchase: verknuepfte ARRIVED-Zeilen zurueck auf
-// PENDING (nur nicht-invoicte) — die Order kann dann neu beschafft werden.
-function revertLinkedOrderLines(db: SqlDb, purchaseId: string): void {
-  const linkRows = query(
-    `SELECT DISTINCT source_order_line_id AS olid FROM purchase_lines
-       WHERE purchase_id = ? AND source_order_line_id IS NOT NULL`,
-    [purchaseId]
-  );
-  const affectedOrders = new Set<string>();
-  for (const lr of linkRows) {
-    const olid = lr.olid as string;
-    const rows = query(`SELECT order_id, status, invoice_id FROM order_lines WHERE id = ?`, [olid]);
-    if (rows.length === 0) continue;
-    if (rows[0].invoice_id) continue;
-    if ((rows[0].status as string) !== 'ARRIVED') continue;
-    db.run(`UPDATE order_lines SET status = 'PENDING' WHERE id = ?`, [olid]);
-    trackUpdate('order_lines', olid, { status: 'PENDING' });
     affectedOrders.add(rows[0].order_id as string);
   }
   for (const oid of affectedOrders) recomputeOrderStatusRaw(db, oid);
@@ -435,11 +308,10 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     get().loadPurchaseInbox();
   },
 
+  // R6F — Altanschluss auf die Hausfolge (`dismissPurchaseInboxInHouse`): nur ein OFFENES Foto wird
+  // verworfen, das Protokoll ist atomar. Die Maske ruft `dismissPurchaseInboxOnPrimary` / den Fernbefehl.
   dismissPurchaseInbox: (id) => {
-    const db = getDatabase();
-    db.run(`UPDATE purchase_inbox SET status = 'dismissed' WHERE id = ?`, [id]);
-    saveDatabase();
-    trackUpdate('purchase_inbox', id, { status: 'dismissed' });
+    atomar(() => dismissPurchaseInboxInHouse(id, localHouseCtx().branchId));
     get().loadPurchaseInbox();
   },
 
@@ -684,329 +556,44 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     get().loadPurchases();
   },
 
+  // CENTRAL-UI-PARITY R6F — der Storno wohnt jetzt in `cancelPurchaseInHouse` (dieselbe Folge wie
+  // die Maske „Cancel" und der Fernbefehl `purchases.cancel`). Dieser Anschluss bleibt fuer die
+  // Altaufrufer (Kommission: Auto-Einkauf zuruecknehmen, Testseite) mit unveraenderter Signatur:
+  // ein fehlender oder schon stornierter Einkauf ist wie bisher ein No-op, und die Regel der Maske
+  // („nicht voll bezahlt") gilt hier nicht. Neu: gelesen wird aus der DATENBANK (vorher aus der
+  // geladenen Liste — ein nicht geladener Einkauf wurde still NICHT storniert), EINE Klammer
+  // (`atomar`, verschachtelt sich in eine offene Handlung), und jede Buchung ist strikt.
   cancelPurchase: (id) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const p = get().getPurchase(id);
-    if (!p) return;
-    // Slice 4b — VOR jeder Mutation die Ueberzahlungs-Gutschrift abbauen: BLOCK falls schon
-    // eingeloest; sonst Reklass-Bein (PURCHASE_OVERPAY) reversen + Domain-Row weg. Die
-    // PURCHASE_PAYMENT-Reverses unten heben das volle AP-Bein zurueck; ohne diesen Teardown
-    // bliebe das SUPPLIER_CREDIT-Asset + die Gutschrift als Orphan stehen.
-    teardownSupplierOverpayCredit(id,
-      'Cannot cancel this purchase because the supplier credit from its overpayment has already been used. Reverse that credit usage first.');
-    // Phase 7 Sync: betroffene Produkt-IDs VOR dem Cancel sammeln, damit wir
-    // products.quantity nachher korrekt aus den verbleibenden ACTIVE Lots ableiten koennen.
-    const affectedRows = query(
-      `SELECT DISTINCT product_id FROM stock_lots WHERE purchase_id = ?`,
-      [id]
-    );
-    const affectedProductIds = affectedRows.map(r => r.product_id as string);
-    db.run(`UPDATE purchases SET status = 'CANCELLED', updated_at = ? WHERE id = ?`, [now, id]);
-    // Phase 2 — Lots dieser Purchase soft-cancellen. Audit-Trail bleibt; kuenftige
-    // Sales-Picker filtern status='CANCELLED' raus (Phase 3). Bereits verkaufte
-    // Pieces (invoice_lines.lot_id) bleiben verknuepft — der historische
-    // Cost-Snapshot ist Eigentum der Invoice, nicht des Lots.
-    // LAN-Sync Phase 1a: betroffene Lot-IDs erfassen, soft-cancellen, dann je Lot
-    // den finalen Full-Row-Snapshot (status='CANCELLED') an Geraet B tracken.
-    const cancelledLotIds = query(`SELECT id FROM stock_lots WHERE purchase_id = ?`, [id]).map(r => r.id as string);
-    db.run(`UPDATE stock_lots SET status = 'CANCELLED' WHERE purchase_id = ?`, [id]);
-    for (const lid of cancelledLotIds) trackLotRow(lid, 'update');
-    for (const pid of affectedProductIds) {
-      syncProductQuantity(pid);
-      // F-PRC-01 — sonst bleibt stock_status='in_stock' bei 0 Lots stehen (Phantom:
-      // Produkt zeigt "auf Lager", ist aber leer). Nur in_stock-Produkte anfassen,
-      // damit sold/consumed/returned nicht ueberschrieben werden.
-      if (getAvailableStock(pid) === 0) {
-        db.run(
-          `UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ? AND stock_status = 'in_stock'`,
-          [now, pid]
-        );
-        trackProductRow(pid);   // LAN-Sync Phase 1b
-      }
-    }
-    // Back-to-Back: verknuepfte ARRIVED-Order-Zeilen zurueck auf PENDING.
-    if (p.sourceOrderId) revertLinkedOrderLines(db, id);
-    saveDatabase();
-    trackStatusChange('purchases', id, p.status, 'CANCELLED');
-    // LAN-Sync (Gruppe 1): Statuswechsel CANCELLED ist trackStatusChange = audit-only →
-    // Geraet B blieb auf altem Status. EIN Full-Row-Snapshot nach dem finalen Status-UPDATE.
-    trackChange('purchases', id, 'update', {});
-    get().loadPurchases();
-
-    // ZIEL.md §3a + B2 — Ledger-Storno bei Purchase-Cancel = vollstaendiger Rueckbau
-    // (full-unwind, User-Entscheid 2026-06-11). Erst JEDE geleistete Zahlung reversen
-    // (DR Cash/Bank/Benefit zurueck / CR AP), dann das PURCHASE-Bein selbst (spiegelt
-    // INVENTORY/VAT_INPUT/AP). Ohne den Payment-Reverse bliebe bei (teil)bezahlter
-    // Purchase das PURCHASE_PAYMENT-Bein stehen -> AP negativ + Cash/Bank/Benefit phantom
-    // (analog deleteExpense / expense-cancel B1). Eine echte Lieferanten-Forderung bei
-    // refundiertem Geld waere ein eigenes Feature (bewusst NICHT hier). Die purchase_payments
-    // bleiben am CANCELLED-Record (Historie); backfillPurchasePayments ist via
-    // hasLedgerEntries idempotent. Guards = kein Doppel-Reverse.
-    // F6 — VOR den Reverses die Credit-Einloesungen erfassen, die JETZT frisch reversiert werden
-    // (Ledger vorhanden + noch nicht reversed). Ihr used_amount wird NACH den Reverses auf der
-    // Supplier-Gutschrift restauriert. Beim 2. Cancel ist die Liste leer (schon reversed →
-    // herausgefiltert) → kein Doppel-Restore.
-    const creditPaysToRestore = query(
-      `SELECT id, reference, amount FROM purchase_payments WHERE purchase_id = ? AND method = 'credit' AND reference IS NOT NULL`,
-      [id]
-    ).filter(pp => hasLedgerEntries('PURCHASE_PAYMENT', pp.id as string) && !hasReversalFor('PURCHASE_PAYMENT', pp.id as string));
-
-    const pays = query('SELECT id FROM purchase_payments WHERE purchase_id = ?', [id]);
-    for (const pp of pays) {
-      const payId = pp.id as string;
-      safePost(`reversePurchasePayment(${payId}) [cancel]`, () => {
-        if (!hasLedgerEntries('PURCHASE_PAYMENT', payId)) return;
-        if (hasReversalFor('PURCHASE_PAYMENT', payId)) return;
-        reverseSource('PURCHASE_PAYMENT', payId, now);
-      });
-    }
-    safePost(`postPurchaseCancelled(${id})`, () => {
-      if (!hasLedgerEntries('PURCHASE', id)) return;
-      if (hasReversalFor('PURCHASE', id)) return;
-      postPurchaseCancelled({ id } as Purchase);
+    // `atomar` weist ein Fenster ohne Buecher ab, BEVOR hier irgendetwas gelesen wird.
+    atomar(() => {
+      const ctx = localHouseCtx();
+      const st = query('SELECT status FROM purchases WHERE id = ? AND branch_id = ?', [id, ctx.branchId])[0];
+      if (!st || String(st.status) === 'CANCELLED') return;
+      cancelPurchaseInHouse(id, ctx.branchId, { now: ctx.now });
     });
-
-    // F6 — used_amount der verbrauchten Supplier-Gutschriften zurueckgeben (NACH den Ledger-
-    // Reverses, die das CR-SUPPLIER_CREDIT-Bein bereits zurueckgedreht haben → Domain folgt dem
-    // Ledger). Nur fuer die oben erfassten, frisch reversierten Credit-Zahlungen → idempotent.
-    for (const cp of creditPaysToRestore) {
-      restoreSupplierCreditUsage(cp.reference as string, Number(cp.amount) || 0);
-    }
+    get().loadPurchases();
   },
 
   // ── Purchase Returns (Plan §Purchase Returns) ──
 
+  // CENTRAL-UI-PARITY R6F — Anlage und Wirkung einer Retoure wohnen in der Hausfolge
+  // (`createPurchaseReturnDraftInHouse` / `confirmPurchaseReturnInHouse`); „Confirm Return" der Maske
+  // ruft beide als EINE Handlung (`returnToSupplierInHouse`). Diese zwei Altanschluesse behalten ihre
+  // Signatur, lesen aus der DATENBANK (Filiale der Sitzung) und klammern sich selbst (`atomar`).
   createReturn: (input) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const id = uuid();
-    const purchase = get().getPurchase(input.purchaseId);
-    if (!purchase) throw new Error('Purchase not found');
-    let branchId: string, userId: string;
-    try { branchId = currentBranchId(); userId = currentUserId(); }
-    catch { branchId = 'branch-main'; userId = 'user-owner'; }
-
-    const returnNumber = getNextDocumentNumber('PRET');
-    const returnDate = input.returnDate || now.split('T')[0];
-    const total = input.lines.reduce((s, l) => s + l.quantity * l.unitPrice, 0);
-
-    db.run(
-      `INSERT INTO purchase_returns (id, branch_id, return_number, purchase_id, supplier_id, status, total_amount,
-        return_date, refund_method, refund_amount, notes, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, 'DRAFT', ?, ?, ?, 0, ?, ?, ?)`,
-      [id, branchId, returnNumber, input.purchaseId, purchase.supplierId, total, returnDate,
-       input.refundMethod || null, input.notes || null, now, userId]
-    );
-
-    const stmt = db.prepare(
-      `INSERT INTO purchase_return_lines (id, return_id, purchase_line_id, product_id, quantity, unit_price, line_total)
-       VALUES (?, ?, ?, ?, ?, ?, ?)`
-    );
-    // LAN-Sync (Bug-5): inline uuid() in kanonische Variable umstellen → Line-IDs trackbar.
-    const prLineIds: string[] = [];
-    for (const l of input.lines) {
-      const prLineId = uuid();
-      prLineIds.push(prLineId);
-      stmt.run([prLineId, id, l.purchaseLineId, l.productId || null, l.quantity, l.unitPrice, l.quantity * l.unitPrice]);
-    }
-    stmt.free();
-
-    saveDatabase();
-    trackInsert('purchase_returns', id, { returnNumber, purchaseId: input.purchaseId, total });
-    // LAN-Sync (Bug-5): purchase_return_lines NACH dem Header tracken (FK-Reihenfolge), sync-only.
-    for (const prLineId of prLineIds) trackChange('purchase_return_lines', prLineId, 'insert', {});
+    const { returnId } = atomar(() => createPurchaseReturnDraftInHouse(input, localHouseCtx()));
     get().loadReturns();
-    return get().getReturn(id)!;
+    return get().getReturn(returnId)!;
   },
 
-  // Confirm = perform the effects: reduce inventory + payable
+  // Confirm = perform the effects: reduce inventory + payable (Haus: strikte Buchung).
   confirmReturn: (id) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const ret = get().getReturn(id);
-    if (!ret || ret.status !== 'DRAFT') return;
-    const purchase = get().getPurchase(ret.purchaseId);
-    if (!purchase) return;
-
-    // Plan §7 + §8: Payable reduzieren ODER Refund
-    //  - wenn noch offen (remaining > 0): erst aus remaining runterziehen
-    //  - wenn mehr als remaining: Rest als Refund (Cash/Bank ↑)
-    let remainingPayable = purchase.remainingAmount;
-    let refundAmount = 0;
-    if (remainingPayable >= ret.totalAmount) {
-      remainingPayable -= ret.totalAmount;
-    } else {
-      refundAmount = ret.totalAmount - remainingPayable;
-      remainingPayable = 0;
-    }
-    const newTotal = Math.max(0, purchase.totalAmount - ret.totalAmount);
-    const newPaid = Math.max(0, purchase.paidAmount - refundAmount);
-    const newStatus = computeStatus(newTotal, newPaid, purchase.status === 'CANCELLED');
-    // Slice 4b — Pre-Check VOR dem Total-UPDATE: der Return aendert total/paid → den Ueberschuss.
-    // Ist die Overpay-Gutschrift schon eingeloest und wuerde sich aendern → BLOCK (fail-fast).
-    assertSupplierOverpayMutable(purchase.id, newPaid, newTotal);
-
-    db.run(
-      `UPDATE purchases SET total_amount = ?, paid_amount = ?, remaining_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
-      [newTotal, newPaid, remainingPayable, newStatus, now, purchase.id]
-    );
-    // LAN-Sync (Gruppe 1): der Return-Confirm reduziert den Parent-Purchase-Header
-    // (total_amount/paid/remaining/status) — war ungetrackt → B blieb auf dem alten Stand.
-    trackChange('purchases', purchase.id, 'update', {});
-
-    // H-07 — Rueckgabe an den Lieferanten: die Ware verlaesst unseren Bestand.
-    // Korrekt ueber die Stock-Lots reduzieren (NICHT stock_status='sold' setzen —
-    // das waere Verkauf an einen Kunden, das Gegenteil). Pro Return-Line das Lot
-    // der Purchase-Line (1 Lot/Line) um die zurueckgegebene Menge senken (gekappt
-    // auf qty_remaining, nie negativ), dann products.quantity aus den ACTIVE-Lots
-    // ableiten. Spiegelt cancelPurchase (Lots runter + sync, Status unberuehrt).
-    const returnAffectedProducts = new Set<string>();
-    for (const line of ret.lines) {
-      if (line.purchaseLineId) {
-        const lotRow = query(
-          `SELECT id, qty_remaining FROM stock_lots
-             WHERE purchase_line_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
-             ORDER BY acquired_at ASC, id ASC LIMIT 1`,
-          [line.purchaseLineId]
-        )[0];
-        if (lotRow) {
-          const reduce = Math.min(Math.max(0, line.quantity), Number(lotRow.qty_remaining) || 0);
-          if (reduce > 0) consumeLot(lotRow.id as string, reduce);
-        }
-      }
-      if (line.productId) returnAffectedProducts.add(line.productId);
-    }
-    for (const pid of returnAffectedProducts) {
-      syncProductQuantity(pid);
-      // Bestand 0 → das Produkt hat unseren verfuegbaren Bestand verlassen.
-      // Status auf 'returned' (NICHT 'sold' — das waere Kundenverkauf), Konvention
-      // wie salesReturnStore/consignmentStore. Bei Restbestand > 0 Status unberuehrt
-      // lassen (Teil-Rueckgabe bleibt 'in_stock'). Verhindert Phantom-Bestand
-      // (quantity bleibt durch syncProductQuantity's Legacy-Schutz stehen).
-      if (getAvailableStock(pid) === 0) {
-        db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ?`, [now, pid]);
-        trackProductRow(pid);   // LAN-Sync Phase 1b
-      }
-    }
-
-    // Plan §Purchase Returns §9: DRAFT → CONFIRMED → COMPLETED.
-    // COMPLETED wenn: kein Refund nötig (alles aus Payable) ODER Refund direkt via Cash/Bank abgewickelt.
-    // Bleibt CONFIRMED wenn refundMethod='credit' (Credit muss extern/später abgewickelt werden).
-    const finalStatus: 'CONFIRMED' | 'COMPLETED' =
-      (refundAmount === 0 || (ret.refundMethod && ret.refundMethod !== 'credit')) ? 'COMPLETED' : 'CONFIRMED';
-
-    db.run(
-      `UPDATE purchase_returns SET status = ?, refund_amount = ? WHERE id = ?`,
-      [finalStatus, refundAmount, id]
-    );
-    if (refundAmount > 0 && ret.refundMethod && ret.refundMethod !== 'credit') {
-      trackRefund('purchase_returns', id, refundAmount, ret.refundMethod);
-    }
-
-    // Plan §8 #3 — Supplier-Credit Ledger. Bei refundMethod='credit' + refundAmount > 0
-    // wird ein offenes Guthaben beim Lieferanten gebucht (gegen zukünftige Käufe verrechenbar).
-    if (refundAmount > 0 && ret.refundMethod === 'credit' && purchase.supplierId) {
-      let branchId: string, userId: string;
-      try { branchId = currentBranchId(); userId = currentUserId(); }
-      catch { branchId = 'branch-main'; userId = 'user-owner'; }
-      const creditId = uuid();
-      db.run(
-        `INSERT INTO supplier_credits (id, branch_id, supplier_id, source_return_id, source_purchase_id,
-           amount, used_amount, status, note, created_at, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, 0, 'OPEN', ?, ?, ?)`,
-        [creditId, branchId, purchase.supplierId, id, purchase.id, refundAmount,
-         `Credit aus Return ${ret.returnNumber || id.slice(0, 8)}`, now, userId]
-      );
-      trackInsert('supplier_credits', creditId, { supplierId: purchase.supplierId, amount: refundAmount });
-    }
-
-    saveDatabase();
-    trackStatusChange('purchase_returns', id, 'DRAFT', finalStatus);
-    // LAN-Sync (Gruppe 1): Full-Row-Snapshot nach dem finalen Status-UPDATE (audit-only zuvor).
-    trackChange('purchase_returns', id, 'update', {});
-
-    // Ledger: Net-Effekt der Return-Buchung — INVENTORY runter, A/P runter (Anteil
-    // ohne Refund) und Cash/Bank/SUPPLIER_CREDIT rauf (Refund-Anteil). Idempotent
-    // ueber sourceModule='PURCHASE_RETURN' + sourceId=id. VAT-Korrektur bleibt approx,
-    // weil purchase_return_lines kein vat_amount tragen — vernachlaessigt fuer jetzt.
-    const apReduction = ret.totalAmount - refundAmount;
-    const refundCashAcc =
-      ret.refundMethod === 'cash'   ? 'CASH'   :
-      ret.refundMethod === 'bank'   ? 'BANK'   :
-      ret.refundMethod === 'credit' ? 'SUPPLIER_CREDIT' :
-      'BANK';
-    safePost(`postPurchaseReturn(${id})`, () => {
-      if (hasLedgerEntries('PURCHASE_RETURN', id)) return;
-      const entries: Parameters<typeof postEntries>[0] = [];
-      // F-PRC-03 — INVENTORY-Gutschrift in netto + VAT_INPUT splitten, proportional
-      // aus der Original-PURCHASE-Buchung pro Line gespiegelt. Ohne Split bliebe die
-      // Vorsteuer (VAT_INPUT) dauerhaft zu hoch. Bilanz-sicher: totalNet = total − vat.
-      let totalVat = 0;
-      for (const line of ret.lines) {
-        if (!line.purchaseLineId) continue;
-        const { net, vat } = getPurchaseLineInputSplit(line.purchaseLineId);
-        const origGross = net + vat;
-        if (vat > 0 && origGross > 0) {
-          const lineReturn = Math.max(0, line.quantity) * line.unitPrice;
-          totalVat += Math.round(vat * Math.min(1, lineReturn / origGross) * 1000) / 1000;
-        }
-      }
-      totalVat = Math.min(totalVat, ret.totalAmount);
-      const totalNet = Math.round((ret.totalAmount - totalVat) * 1000) / 1000;
-      if (totalNet > 0.0005) {
-        entries.push({
-          account: 'INVENTORY',
-          direction: 'CREDIT',
-          amount: totalNet,
-          counterpartyType: 'SUPPLIER',
-          counterpartyId: purchase.supplierId,
-          metadata: { purchaseId: purchase.id, returnNumber: ret.returnNumber, side: 'inventory-net' },
-        });
-      }
-      if (totalVat > 0.0005) {
-        entries.push({
-          account: 'VAT_INPUT',
-          direction: 'CREDIT',
-          amount: totalVat,
-          counterpartyType: 'SUPPLIER',
-          counterpartyId: purchase.supplierId,
-          metadata: { purchaseId: purchase.id, returnNumber: ret.returnNumber, side: 'vat-input' },
-        });
-      }
-      if (apReduction > 0.005) {
-        entries.push({
-          account: 'ACCOUNTS_PAYABLE',
-          direction: 'DEBIT',
-          amount: apReduction,
-          counterpartyType: 'SUPPLIER',
-          counterpartyId: purchase.supplierId,
-          metadata: { purchaseId: purchase.id, returnNumber: ret.returnNumber, side: 'ap-reduction' },
-        });
-      }
-      if (refundAmount > 0.005) {
-        entries.push({
-          account: refundCashAcc,
-          direction: 'DEBIT',
-          amount: refundAmount,
-          counterpartyType: 'SUPPLIER',
-          counterpartyId: purchase.supplierId,
-          metadata: { purchaseId: purchase.id, returnNumber: ret.returnNumber, refundMethod: ret.refundMethod, side: 'refund-in' },
-        });
-      }
-      if (entries.length > 0) {
-        postEntries(entries, {
-          occurredAt: now,
-          sourceModule: 'PURCHASE_RETURN',
-          sourceId: id,
-        });
-      }
+    atomar(() => {
+      const ctx = localHouseCtx();
+      const st = query('SELECT status FROM purchase_returns WHERE id = ? AND branch_id = ?', [id, ctx.branchId])[0];
+      if (!st || String(st.status) !== 'DRAFT') return;
+      confirmPurchaseReturnInHouse(id, ctx);
     });
-
-    // Slice 4b — der Return hat total_amount/paid_amount geaendert → den Ueberschuss neu
-    // berechnen und die Overpay-Gutschrift nachziehen (clawback-then-rebook; Pre-Check oben).
-    reconcilePurchaseOverpayCredit(purchase.id);
-
     get().loadPurchases();
     get().loadReturns();
   },
@@ -1024,40 +611,37 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
   },
 
   cancelReturn: (id) => {
-    const db = getDatabase();
     const ret = get().getReturn(id);
     if (!ret) return;
     if (ret.status === 'CANCELLED') return; // idempotent
     const now = new Date().toISOString();
     const prevStatus = ret.status;
-    // Slice 4a — war der Return schon ausgefuehrt? Dann ALLE Effekte spiegeln,
-    // sonst bleiben Ledger/Lots/Credits/Totals verwaist. Wirft, wenn ein bereits
-    // verbrauchter Supplier-Credit den Reverse blockiert.
-    if (prevStatus === 'CONFIRMED' || prevStatus === 'COMPLETED') {
-      reverseConfirmedPurchaseReturn(db, ret, get().getPurchase(ret.purchaseId), now);
-    }
-    db.run(`UPDATE purchase_returns SET status = 'CANCELLED' WHERE id = ?`, [id]);
-    saveDatabase();
-    trackStatusChange('purchase_returns', id, prevStatus, 'CANCELLED');
-    trackChange('purchase_returns', id, 'update', {});   // LAN-Sync (Gruppe 1)
+    // Slice 4a — war der Return schon ausgefuehrt? Dann ALLE Effekte spiegeln, sonst bleiben
+    // Ledger/Lots/Credits/Totals verwaist. Wirft, wenn ein bereits verbrauchter Supplier-Credit den
+    // Reverse blockiert. R6F — die Umkehr ist strikt (Hausfolge) und laeuft in EINER Klammer.
+    atomar(() => {
+      if (prevStatus === 'CONFIRMED' || prevStatus === 'COMPLETED') reverseConfirmedPurchaseReturnInHouse(id, now);
+      getDatabase().run(`UPDATE purchase_returns SET status = 'CANCELLED' WHERE id = ?`, [id]);
+      trackStatusChange('purchase_returns', id, prevStatus, 'CANCELLED');
+      trackChange('purchase_returns', id, 'update', {});   // LAN-Sync (Gruppe 1)
+    });
     get().loadPurchases();
     get().loadReturns();
   },
 
   deleteReturn: (id) => {
-    const db = getDatabase();
     const ret = get().getReturn(id);
     const now = new Date().toISOString();
     // Slice 4a — bereits ausgefuehrte Returns vor dem Loeschen vollstaendig spiegeln
     // (sonst verwaiste Ledger/Lots/Credits/Totals). DRAFT/CANCELLED/REJECTED haben
-    // keine aktiven Effekte.
-    if (ret && (ret.status === 'CONFIRMED' || ret.status === 'COMPLETED')) {
-      reverseConfirmedPurchaseReturn(db, ret, get().getPurchase(ret.purchaseId), now);
-    }
-    db.run(`DELETE FROM purchase_return_lines WHERE return_id = ?`, [id]);
-    db.run(`DELETE FROM purchase_returns WHERE id = ?`, [id]);
-    saveDatabase();
-    trackDelete('purchase_returns', id);
+    // keine aktiven Effekte. R6F — strikt und in EINER Klammer.
+    atomar(() => {
+      if (ret && (ret.status === 'CONFIRMED' || ret.status === 'COMPLETED')) reverseConfirmedPurchaseReturnInHouse(id, now);
+      const db = getDatabase();
+      db.run(`DELETE FROM purchase_return_lines WHERE return_id = ?`, [id]);
+      db.run(`DELETE FROM purchase_returns WHERE id = ?`, [id]);
+      trackDelete('purchase_returns', id);
+    });
     get().loadPurchases();
     get().loadReturns();
   },

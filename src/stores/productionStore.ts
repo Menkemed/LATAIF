@@ -11,12 +11,20 @@
 
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { ProductionRecord, ProductionInput, ProductionOutput, Product, Expense } from '@/core/models/types';
+import type { ProductionRecord, ProductionInput, ProductionOutput, Expense } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { postExpense, postExpensePayment, reverseSource, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
-import { getActiveLots, consumeLot, restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+import { restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+// CENTRAL-UI-PARITY R6F — das Anlegen ist EINE Hausfolge für Primary und PC2 (production-house),
+// am Primary exklusiv in einer Transaktion (`runOnPrimary`), danach durabel.
+import { runOnPrimary } from '@/core/data/primary-action';
+import { useProductStore } from '@/stores/productStore';
+import {
+  assertProductionHere, createProductionInHouse, localProductionCtx,
+  type ProductionCreateInput, type ProductionCreated,
+} from '@/core/production/production-house';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
@@ -34,21 +42,11 @@ interface ProductionStore {
   loading: boolean;
   loadRecords: () => void;
   getRecord: (id: string) => ProductionRecord | undefined;
-  createRecord: (input: {
-    productionDate?: string;
-    notes?: string;
-    inputProductIds: string[];  // existing products consumed
-    outputs: Array<{
-      // Vollständige Produkt-Spec (categoryId/brand/name + dyn. attributes + images
-      // + condition + taxScheme etc. — wird via NewProductModal befüllt). 'value'
-      // ist der Production-Wert (= purchase_price des neuen Output-Produkts).
-      spec: Partial<Product>;
-      value: number;
-    }>;
-    // Plan §8 #7 — Cost-Tracking
-    laborCost?: number;
-    overheadCost?: number;
-  }) => ProductionRecord;
+  // CENTRAL-UI-PARITY R6F — asynchron: jeder Ausgang entsteht über den Anlageweg des Hauses
+  // (`createProductWithMedia`, Bilder in den Medienspeicher), und der hat Wartepunkte. Die
+  // Eingabe ist dieselbe wie bisher (Spec aus NewProductModal + Fertigungswert je Ausgang,
+  // Plan §8 #7 Arbeit/Gemeinkosten); geprüft und geschrieben wird in `production-house`.
+  createRecord: (input: ProductionCreateInput) => Promise<ProductionRecord>;
   // Plan §8 #7 — Record als abgeschlossen markieren + Kosten finalisieren
   completeRecord: (id: string, laborCost?: number, overheadCost?: number) => void;
   deleteRecord: (id: string) => void;
@@ -111,154 +109,12 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
 
   getRecord: (id) => get().records.find(r => r.id === id),
 
-  createRecord: (input) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const id = uuid();
-    let branchId: string, userId: string;
-    try { branchId = currentBranchId(); userId = currentUserId(); }
-    catch { branchId = 'branch-main'; userId = 'user-owner'; }
-
-    // Look up input products for their purchase_price snapshots + volle Spec
-    // (attributes/images), damit der Detail-View später zeigen kann, was konsumiert
-    // wurde. Die products-Row wird unten gelöscht — diese Daten sind danach nur
-    // noch im production_inputs.product_snapshot vorhanden.
-    const inputProducts: Product[] = [];
-    const inputRows = query(
-      `SELECT * FROM products WHERE id IN (${input.inputProductIds.map(() => '?').join(',')})`,
-      input.inputProductIds
-    );
-    for (const r of inputRows) {
-      let attrs: Record<string, string | number | boolean | string[]> = {};
-      let imgs: string[] = [];
-      try { attrs = JSON.parse((r.attributes as string) || '{}'); } catch { /* */ }
-      try { imgs = JSON.parse((r.images as string) || '[]'); } catch { /* */ }
-      inputProducts.push({
-        id: r.id as string,
-        categoryId: r.category_id as string,
-        brand: r.brand as string,
-        name: r.name as string,
-        sku: r.sku as string | undefined,
-        quantity: Math.max(1, (r.quantity as number) || 1),
-        condition: (r.condition as string) || '',
-        scopeOfDelivery: [], storageLocation: undefined, purchaseDate: r.purchase_date as string | undefined,
-        purchasePrice: (r.purchase_price as number) || 0,
-        purchaseCurrency: 'BHD', plannedSalePrice: undefined,
-        stockStatus: (r.stock_status as Product['stockStatus']) || 'in_stock',
-        taxScheme: (r.tax_scheme as Product['taxScheme']) || 'MARGIN',
-        sourceType: (r.source_type as Product['sourceType']) || 'OWN',
-        images: imgs, attributes: attrs, createdAt: r.created_at as string, updatedAt: r.updated_at as string,
-      });
-    }
-
-    const totalInput = inputProducts.reduce((s, p) => s + p.purchasePrice, 0);
-    const totalOutput = input.outputs.reduce((s, o) => s + (Number(o.value) || 0), 0);
-
-    // Plan §12: Total Input Value = Total Output Value. Wir tolerieren 0.01 BHD Rundung.
-    if (Math.abs(totalInput - totalOutput) > 0.01) {
-      throw new Error(`Value mismatch — Input ${totalInput.toFixed(2)} ≠ Output ${totalOutput.toFixed(2)}`);
-    }
-
-    const recordNumber = getNextDocumentNumber('PRD');
-    const prodDate = input.productionDate || now.split('T')[0];
-
-    const labor = input.laborCost || 0;
-    const overhead = input.overheadCost || 0;
-    const totalCost = totalInput + labor + overhead;
-    db.run(
-      `INSERT INTO production_records (id, branch_id, record_number, production_date, total_value, notes, status,
-         labor_cost, overhead_cost, total_cost, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, 'CONFIRMED', ?, ?, ?, ?, ?)`,
-      [id, branchId, recordNumber, prodDate, totalInput, input.notes || null,
-       labor, overhead, totalCost, now, userId]
-    );
-
-    // Log inputs — Plan §5 + Collection-History (2026-05-18): Input-Produkte werden
-    // NICHT mehr hart geloescht. Stattdessen stock_status='consumed', damit die
-    // Items in Collection unter dem Consumed-Filter weiter auffindbar bleiben und
-    // im Product-Detail die Production-History anzeigen koennen. Snapshot bleibt
-    // als Audit-Trail trotzdem auf production_inputs.product_snapshot.
-    const inStmt = db.prepare(
-      `INSERT INTO production_inputs (id, record_id, product_id, product_snapshot, input_value) VALUES (?, ?, ?, ?, ?)`
-    );
-    for (const p of inputProducts) {
-      const snapshot = {
-        categoryId: p.categoryId,
-        brand: p.brand,
-        name: p.name,
-        sku: p.sku,
-        condition: p.condition,
-        attributes: p.attributes,
-        images: p.images,
-        purchasePrice: p.purchasePrice,
-      };
-      inStmt.run([uuid(), id, p.id, JSON.stringify(snapshot), p.purchasePrice]);
-      db.run(`UPDATE products SET stock_status = 'consumed', updated_at = ? WHERE id = ?`, [now, p.id]);
-      trackProductRow(p.id);   // LAN-Sync Phase 1b — deckt Legacy-Input ab (syncProductQuantity persistiert nur bei vorhandener Lot-Historie); fuer Lot-Inputs harmloser Zwischen-Snapshot, von syncProductQuantity unten ueberschrieben
-      // H-04 — Input-Lots leeren, sonst bleiben sie ACTIVE (qty_remaining>0) und
-      // erscheinen als Phantom-Bestand (ueber Lot-Pfad verkaufbar) + ueberzaehlen
-      // den Bestandswert (Input-Wert steckt zusaetzlich im Output). consumeLot treibt
-      // jedes aktive Lot auf 0/EXHAUSTED (reversibel via restoreLot), danach sync.
-      for (const lot of getActiveLots(p.id)) consumeLot(lot.id, lot.qtyRemaining);
-      syncProductQuantity(p.id);
-    }
-    inStmt.free();
-
-    // Create outputs: new products, source_type=OWN, status=IN_STOCK.
-    // Vollständige Spec aus NewProductModal wird übertragen — attributes + images
-    // + condition etc. landen direkt auf der neuen Product-Row.
-    const outStmt = db.prepare(
-      `INSERT INTO production_outputs (id, record_id, product_id, output_value) VALUES (?, ?, ?, ?)`
-    );
-    for (const o of input.outputs) {
-      const pId = uuid();
-      const s = o.spec || {};
-      const attrJson = JSON.stringify(s.attributes || {});
-      const imgJson = JSON.stringify(s.images || []);
-      const scopeJson = JSON.stringify(s.scopeOfDelivery || []);
-      const userNotes = (s.notes ? `${s.notes}\n` : '') + `Created from Production ${recordNumber}`;
-      db.run(
-        `INSERT INTO products (id, branch_id, category_id, brand, name, sku, condition, scope_of_delivery,
-          purchase_date, purchase_price, purchase_currency, stock_status, tax_scheme, expected_margin, days_in_stock,
-          supplier_name, notes, images, attributes, source_type, created_at, updated_at, created_by)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'BHD', 'in_stock', ?, NULL, 0, NULL, ?, ?, ?, 'OWN', ?, ?, ?)`,
-        [
-          pId, branchId,
-          s.categoryId || 'cat-watch',
-          (s.brand || '').trim(),
-          (s.name || '').trim(),
-          s.sku || null,
-          s.condition || '',
-          scopeJson,
-          prodDate,
-          Number(o.value) || 0,
-          s.taxScheme || 'MARGIN',
-          userNotes,
-          imgJson,
-          attrJson,
-          now, now, userId,
-        ]
-      );
-      outStmt.run([uuid(), id, pId, Number(o.value) || 0]);
-      // F-PRD-03 — Output bekommt ein Stock-Lot (Cost-Provenance + Lot-Bestandswert
-      // bleibt erhalten: Input-Lots geleert ⇄ Output-Lot zum gleichen Wert). unit_cost
-      // = Output-Wert, purchase_id NULL (kein Einkauf), qty 1.
-      const outputLotId = uuid();   // LAN-Sync Phase 1a
-      db.run(
-        `INSERT INTO stock_lots (id, branch_id, product_id, purchase_id, purchase_line_id,
-           unit_cost, qty_total, qty_remaining, status, acquired_at, created_at)
-         VALUES (?, ?, ?, NULL, NULL, ?, 1, 1, 'ACTIVE', ?, ?)`,
-        [outputLotId, branchId, pId, Number(o.value) || 0, prodDate, now]
-      );
-      trackLotRow(outputLotId, 'insert');
-      syncProductQuantity(pId);
-    }
-    outStmt.free();
-
-    saveDatabase();
-    trackInsert('production_records', id, { recordNumber, totalValue: totalInput });
-    get().loadRecords();
-    return get().getRecord(id)!;
+  // CENTRAL-UI-PARITY R6F — dieselbe Hausfolge wie der Fernbefehl `production.create`; der Store
+  // schreibt nicht mehr selbst (vorher: Bilder als Text in products.images, Eingänge ungeprüft,
+  // stilles 'branch-main', Zwischen-saveDatabase ohne Klammer — siehe production-house).
+  createRecord: async (input) => {
+    const made = await createProductionOnPrimary(input);
+    return get().getRecord(made.recordId)!;
   },
 
   // Plan §8 #7 — Record abschließen (COMPLETED) + optional Kosten anpassen.
@@ -436,4 +292,21 @@ export function loadProductionRecordsFor(ctx: BusinessReadContext): { records: P
     return rec;
   });
   return { records };
+}
+
+/** Nach dem Anlegen (auch nach einer Rücknahme) zeigen Liste und Bestand den wirklichen Stand. */
+function nachFertigung(): void {
+  useProductionStore.getState().loadRecords();
+  useProductStore.getState().loadProducts();
+}
+
+/**
+ * CENTRAL-UI-PARITY R6F — „Confirm Production" am Primary: die Hausfolge exklusiv in EINER
+ * Transaktion, erst danach durabel. Auf einem Rechner ohne Datenbank verweigert der Riegel, BEVOR
+ * irgendetwas eine Datenbank anfasst — dort geht die Maske über `production.create`.
+ */
+export async function createProductionOnPrimary(input: ProductionCreateInput): Promise<ProductionCreated> {
+  assertProductionHere();
+  const ctx = localProductionCtx();
+  return runOnPrimary(() => createProductionInHouse(input, ctx), nachFertigung);
 }

@@ -333,10 +333,10 @@ function bildDesStornos(db: Db, inv: string) {
   ok(!vorher.includes("'invoices.cancel'"), 'DECISION vor R5F.1 gab es keine Buchung fuer den Storno');
   const upd = codeOf(src('src/core/bridge/invoice-lifecycle-commands.ts'));
   ok(!/status/.test((/onlyKnownFields\(raw, \[([^\]]*)\]\)/.exec(upd)?.[1]) ?? ''), 'DECISION invoices.update kennt keinen Status — es aendert Zeilen mit Grund');
-  ok(ALLOWED_MUTATIONS.length === 88 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `DECISION invoices.cancel bleibt die eine R5F.1-Buchung an Platz 41; seither nur die elf aus R6C, die achtundzwanzig aus R6D und die acht aus R6E (${ALLOWED_MUTATIONS.length})`);
+  ok(ALLOWED_MUTATIONS.length === 102 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `DECISION invoices.cancel bleibt die eine R5F.1-Buchung an Platz 41; seither nur die elf aus R6C, die achtundzwanzig aus R6D, die acht aus R6E und die vierzehn aus R6F (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 160 && /pub const OP_INVOICES_CANCEL: &str = "invoices\.cancel";/.test(rust), `DECISION Rust laesst genau diese eine mehr durch (${rustOps})`);
+  ok(rustOps === 174 && /pub const OP_INVOICES_CANCEL: &str = "invoices\.cancel";/.test(rust), `DECISION Rust laesst genau diese eine mehr durch (${rustOps})`);
   ok(!!(OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.cancel']
     && S((OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.cancel']) === S((OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.update']),
   'DECISION dasselbe Recht wie am Primary („Cancel" nur mit canEditInvoices)');
@@ -645,8 +645,10 @@ for (const weg of ['primary', 'fern'] as const) {
   const R6D_MUT = ['tax.record_payment', 'banking.transfer', 'partners.record_tx', 'debts.create', 'debts.update', 'debts.record_payment', 'expenses.create', 'expenses.update', 'expenses.record_payment', 'expenses.template_create', 'expenses.template_update', 'purchases.record_payment', 'purchases.apply_credit', 'suppliers.pay', 'suppliers.apply_credit', 'suppliers.refund_credit', 'gold.payables.settle', 'gold.customer_credits.settle', 'repairs.record_gold_usage', 'repairs.add_material', 'orders.add_cost', 'orders.remove_cost', 'metals.create', 'metals.update_status', 'metals.set_spot_price', 'scrap_trades.create', 'scrap_trades.update', 'scrap_trades.cancel'];
   // R6E — und acht Angebots-/Rechnungs-/Retouren-/Transfer-/Nachrichten-Buchungen, alle hinter den R6D-Namen.
   const R6E_MUT = ['offers.create', 'offers.update', 'offers.set_status', 'offers.convert_to_invoice', 'invoices.set_butterfly', 'returns.cancel', 'transfers.undo_convert', 'customers.log_message'];
-  ok(vorher.length === 40 && jetzt.length === 88 && S(jetzt.filter((o) => !vorher.includes(o))) === S(['invoices.cancel', ...R6C_MUT, ...R6D_MUT, ...R6E_MUT]) && vorher.every((o) => jetzt.includes(o)),
-    `REGISTRY vorher 40, R5F.1 +invoices.cancel, R6C +11, R6D +28, R6E +8 — keine faellt weg (${vorher.length} → ${jetzt.length})`);
+  // R6F — und vierzehn Einkaufs-/Auftrags-/Kommissions-/Produktions-/Büro-Buchungen, alle hinter den R6E-Namen.
+  const R6F_MUT = ['purchases.return_to_supplier', 'purchases.cancel', 'purchases.dismiss_inbox', 'orders.cancel', 'orders.update_line_status', 'orders.mark_line_ordered', 'orders.update_line', 'consignments.return_after_sale', 'consignments.cancel_sale', 'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr'];
+  ok(vorher.length === 40 && jetzt.length === 102 && S(jetzt.filter((o) => !vorher.includes(o))) === S(['invoices.cancel', ...R6C_MUT, ...R6D_MUT, ...R6E_MUT, ...R6F_MUT]) && vorher.every((o) => jetzt.includes(o)),
+    `REGISTRY vorher 40, R5F.1 +invoices.cancel, R6C +11, R6D +28, R6E +8, R6F +14 — keine faellt weg (${vorher.length} → ${jetzt.length})`);
   const zaehle = (t: string): number => [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
   const rustVorher = vor5f('src-tauri/src/bridge.rs');
   const rustJetzt = src('src-tauri/src/bridge.rs');
@@ -656,8 +658,9 @@ for (const weg of ['primary', 'fern'] as const) {
     'OP_INVENTORY_START', 'OP_INVENTORY_SAVE', 'OP_INVENTORY_FINISH', 'OP_INVENTORY_RECORD_CHECK', 'OP_INVENTORY_SESSION_GET', 'OP_INVENTORY_CHECKS_GET'];
   const R6D_RUST = ['OP_TAX_RECORD_PAYMENT', 'OP_BANKING_TRANSFER', 'OP_PARTNERS_RECORD_TX', 'OP_DEBTS_CREATE', 'OP_DEBTS_UPDATE', 'OP_DEBTS_RECORD_PAYMENT', 'OP_EXPENSES_CREATE', 'OP_EXPENSES_UPDATE', 'OP_EXPENSES_RECORD_PAYMENT', 'OP_EXPENSES_TEMPLATE_CREATE', 'OP_EXPENSES_TEMPLATE_UPDATE', 'OP_PURCHASES_RECORD_PAYMENT', 'OP_PURCHASES_APPLY_CREDIT', 'OP_SUPPLIERS_PAY', 'OP_SUPPLIERS_APPLY_CREDIT', 'OP_SUPPLIERS_REFUND_CREDIT', 'OP_GOLD_PAYABLES_SETTLE', 'OP_GOLD_CUSTOMER_CREDITS_SETTLE', 'OP_REPAIRS_RECORD_GOLD_USAGE', 'OP_REPAIRS_ADD_MATERIAL', 'OP_ORDERS_ADD_COST', 'OP_ORDERS_REMOVE_COST', 'OP_METALS_CREATE', 'OP_METALS_UPDATE_STATUS', 'OP_METALS_SET_SPOT_PRICE', 'OP_SCRAP_TRADES_CREATE', 'OP_SCRAP_TRADES_UPDATE', 'OP_SCRAP_TRADES_CANCEL', 'OP_METALS_SPOT_PRICES_GET', 'OP_DEBTS_PAYMENTS_GET', 'OP_SUPPLIERS_CREDITS_GET'];
   const R6E_RUST = ['OP_OFFERS_CREATE', 'OP_OFFERS_UPDATE', 'OP_OFFERS_SET_STATUS', 'OP_OFFERS_CONVERT_TO_INVOICE', 'OP_INVOICES_SET_BUTTERFLY', 'OP_RETURNS_CANCEL', 'OP_TRANSFERS_UNDO_CONVERT', 'OP_CUSTOMERS_LOG_MESSAGE'];
-  ok(zaehle(rustVorher) === 107 && zaehle(rustJetzt) === 160 && S(neuRust) === S(['OP_INVOICES_CANCEL', ...R6C_RUST, ...R6D_RUST, ...R6E_RUST]),
-    `REGISTRY Rust 107 → 108 (R5F.1: OP_INVOICES_CANCEL) → 121 (R6C: 13 namentlich) → 152 (R6D: 31 namentlich) → 160 (R6E: 8 namentlich) (${S(neuRust)})`);
+  const R6F_RUST = ['OP_PURCHASES_RETURN_TO_SUPPLIER', 'OP_PURCHASES_CANCEL', 'OP_PURCHASES_DISMISS_INBOX', 'OP_ORDERS_CANCEL', 'OP_ORDERS_UPDATE_LINE_STATUS', 'OP_ORDERS_MARK_LINE_ORDERED', 'OP_ORDERS_UPDATE_LINE', 'OP_CONSIGNMENTS_RETURN_AFTER_SALE', 'OP_CONSIGNMENTS_CANCEL_SALE', 'OP_PRODUCTION_CREATE', 'OP_TASKS_CREATE', 'OP_TASKS_UPDATE', 'OP_DOCUMENTS_UPLOAD', 'OP_DOCUMENTS_SET_OCR'];
+  ok(zaehle(rustVorher) === 107 && zaehle(rustJetzt) === 174 && S(neuRust) === S(['OP_INVOICES_CANCEL', ...R6C_RUST, ...R6D_RUST, ...R6E_RUST, ...R6F_RUST]),
+    `REGISTRY Rust 107 → 108 (R5F.1: OP_INVOICES_CANCEL) → 121 (R6C: 13 namentlich) → 152 (R6D: 31 namentlich) → 160 (R6E: 8 namentlich) → 174 (R6F: 14 namentlich) (${S(neuRust)})`);
   let zu = '';
   try { reg5.registerCommand('invoices.delete', { kind: 'mutation', handler: () => ({}) } as never); } catch (e) { zu = String(e); }
   ok(/refusing to register/.test(zu), 'REGISTRY eine nicht freigegebene Buchung bleibt fail-closed');

@@ -55,7 +55,8 @@ for (const m of ['read-commands', 'invoice-command', 'customer-commands', 'produ
   'commercial-commands', 'service-commands', 'financial-commands', 'return-commands', 'invoice-cancel-command',
   'lifecycle-commands', 'masterdata-commands', 'inventory-commands', 'store-read-commands',
   'money-commands', 'payables-commands', 'gold-commands', 'metal-commands',
-  'offer-commands', 'invoice-flag-commands', 'sales-reversal-commands', 'message-commands']) {
+  'offer-commands', 'invoice-flag-commands', 'sales-reversal-commands', 'message-commands',
+  'purchase-lifecycle-commands', 'order-lifecycle-commands', 'consignment-lifecycle-commands', 'production-commands', 'office-commands']) {
   await import(`../../src/core/bridge/${m}.ts`);
 }
 const perms = await import('../../src/core/bridge/command-permissions.ts');
@@ -77,6 +78,8 @@ const R6E_MUT = ['offers.create', 'offers.update', 'offers.set_status', 'offers.
 // Zwei vorhandene Buchungen sind erweitert, nicht neu: Zahlung beim Anlegen, Wahl der Sondernummer.
 const ERWEITERT = ['invoices.create', 'invoices.record_payment'];
 const MODULES: Record<string, number> = { 'offer-commands': 4, 'invoice-flag-commands': 1, 'sales-reversal-commands': 2, 'message-commands': 1 };
+// R6F — seither vierzehn weitere Buchungen HINTER den R6E-Namen (eigenes Gate: test/r6f).
+const R6F_MUT = ['purchases.return_to_supplier', 'purchases.cancel', 'purchases.dismiss_inbox', 'orders.cancel', 'orders.update_line_status', 'orders.mark_line_ordered', 'orders.update_line', 'consignments.return_after_sale', 'consignments.cancel_sale', 'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr'];
 const R6F_OPS = ['purchases.return', 'purchases.cancel', 'purchases.inbox_dismiss', 'purchases.dismiss_inbox', 'orders.cancel',
   'orders.update_line_status', 'orders.line_status', 'orders.update_line', 'consignments.return_after_sale', 'consignments.cancel_sale',
   'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr'];
@@ -86,8 +89,8 @@ const R6F_OPS = ['purchases.return', 'purchases.cancel', 'purchases.inbox_dismis
   const list = (t: string): string[] => [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const vorher = list(vor('src/core/bridge/command-registry.ts'));
   const jetzt = [...registry.ALLOWED_MUTATIONS];
-  ok(vorher.length === 80 && jetzt.length === 88 && S(jetzt.filter((o) => !vorher.includes(o))) === S(R6E_MUT) && vorher.every((o) => jetzt.includes(o)),
-    `REGISTRY Buchungen 80 → 88: GENAU die acht R6E-Namen, in dieser Reihenfolge, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
+  ok(vorher.length === 80 && jetzt.length === 102 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6E_MUT, ...R6F_MUT]) && vorher.every((o) => jetzt.includes(o)),
+    `REGISTRY Buchungen 80 → 88 (R6E) → 102 (R6F): GENAU die acht R6E- und vierzehn R6F-Namen, in dieser Reihenfolge, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
   const readsVor = catalogue(vor('src/core/bridge/store-read-ops.ts'));
   const readsJetzt = [...readOps.STORE_READ_OPS];
@@ -98,10 +101,10 @@ const R6F_OPS = ['purchases.return', 'purchases.cancel', 'purchases.inbox_dismis
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 152 && rJetzt.length === 160 && S(rJetzt.filter((o) => !rVor.includes(o))) === S(R6E_MUT),
-    `REGISTRY Rust 152 → 160: GENAU diese acht, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
+  ok(rVor.length === 152 && rJetzt.length === 174 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6E_MUT, ...R6F_MUT]),
+    `REGISTRY Rust 152 → 160 (R6E) → 174 (R6F): GENAU diese acht und vierzehn, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 160 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 160 Namen, die Rust durchlässt (${known.length})`);
+  ok(known.length === 174 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 174 Namen, die Rust durchlässt (${known.length})`);
   const soll: Record<string, string | null> = {
     'offers.create': null, 'offers.update': 'permission:offers.edit', 'offers.set_status': null, 'offers.convert_to_invoice': null,
     'invoices.set_butterfly': 'isAdmin', 'returns.cancel': 'isOwner', 'transfers.undo_convert': null, 'customers.log_message': null,
@@ -230,7 +233,8 @@ const R6F_ROWS = ['Rückgabe an Lieferant', 'Einkauf stornieren', 'Inbox-Foto ve
   const r6c = A.filter((p) => /geschlossen \(R6C\)/.test(p[7] ?? ''));
   const r6d = A.filter((p) => /geschlossen \(R6D\)/.test(p[7] ?? ''));
   const r6e = A.filter((p) => /geschlossen \(R6E\)/.test(p[7] ?? ''));
-  const offen = A.filter((p) => !/geschlossen/.test(p[7] ?? ''));
+  // R6F — seither sind die restlichen Zeilen geschlossen (eigenes Gate: test/r6f). Gemessen wird, was NACH R6E offen war.
+  const offen = A.filter((p) => !/geschlossen \(R6[CDE]\)/.test(p[7] ?? ''));
   ok(A.length === 95 && r6c.length === 16 && r6d.length === 41 && r6e.length === 22 && offen.length === 16,
     `SSOT A 95 · R6C 16 · R6D 41 · R6E 22 · verbleibend 16 (${A.length}/${r6c.length}/${r6d.length}/${r6e.length}/${offen.length})`);
   ok(S(r6e.map((p) => p[1]).sort()) === S([...FROZEN].sort()), `SSOT geschlossen sind GENAU die eingefrorenen 22 Zeilen (${r6e.map((p) => p[1]).filter((n) => !FROZEN.includes(n)).join(', ') || 'keine fremde'})`);
@@ -252,10 +256,13 @@ marker('CENTRAL_UI_R6E_SSOT_UPDATED');
 
 // ══ §6 — R6F bleibt vollständig offen ════════════════════════════════════════
 {
-  const offen = zeilenAus(src('docs/central-ui-parity.md')).filter((p) => p[5] === 'A' && !/geschlossen/.test(p[7] ?? ''));
+  const offen = zeilenAus(src('docs/central-ui-parity.md')).filter((p) => p[5] === 'A' && !/geschlossen \(R6[CDE]\)/.test(p[7] ?? ''));
   ok(S(offen.map((p) => p[1]).sort()) === S([...R6F_ROWS].sort()), `R6F die 16 offenen Zeilen sind genau der R6F-Umfang (${offen.map((p) => p[1]).join(' · ')})`);
   const rust = src('src-tauri/src/bridge.rs');
-  for (const op of R6F_OPS) ok(!registry.ALLOWED_MUTATIONS.includes(op) && !rust.includes(`"${op}"`), `R6F ${op} ist nicht vorgezogen`);
+  // R6F ist seither geschlossen (test/r6f). Geprüft bleibt: R6E hat keinen R6F-Namen vorgezogen — jeder steht HINTER den R6E-Namen.
+  void R6F_OPS;
+  for (const op of R6F_MUT) ok(registry.ALLOWED_MUTATIONS.indexOf(op) > registry.ALLOWED_MUTATIONS.indexOf('customers.log_message') && rust.includes(`"${op}"`),
+    `R6F ${op} kam erst mit R6F (hinter den R6E-Namen)`);
 }
 marker('CENTRAL_UI_R6F_UNTOUCHED');
 

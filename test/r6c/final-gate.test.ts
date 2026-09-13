@@ -61,7 +61,8 @@ for (const m of ['read-commands', 'invoice-command', 'customer-commands', 'produ
   'commercial-commands', 'service-commands', 'financial-commands', 'return-commands', 'invoice-cancel-command',
   'lifecycle-commands', 'masterdata-commands', 'inventory-commands', 'store-read-commands',
   'money-commands', 'payables-commands', 'gold-commands', 'metal-commands',
-  'offer-commands', 'invoice-flag-commands', 'sales-reversal-commands', 'message-commands']) {
+  'offer-commands', 'invoice-flag-commands', 'sales-reversal-commands', 'message-commands',
+  'purchase-lifecycle-commands', 'order-lifecycle-commands', 'consignment-lifecycle-commands', 'production-commands', 'office-commands']) {
   await import(`../../src/core/bridge/${m}.ts`);
 }
 const perms = await import('../../src/core/bridge/command-permissions.ts');
@@ -167,14 +168,16 @@ const R6D_MUT = ['tax.record_payment', 'banking.transfer', 'partners.record_tx',
 const R6D_READ = ['metals.spot_prices.get', 'debts.payments.get', 'suppliers.credits.get'];
 // R6E — seither acht Buchungen, keine Auskunft, alle HINTER den R6D-Namen (eigenes Gate: test/r6e).
 const R6E_MUT = ['offers.create', 'offers.update', 'offers.set_status', 'offers.convert_to_invoice', 'invoices.set_butterfly', 'returns.cancel', 'transfers.undo_convert', 'customers.log_message'];
+// R6F — seither vierzehn Buchungen, keine Auskunft, alle HINTER den R6E-Namen (eigenes Gate: test/r6f).
+const R6F_MUT = ['purchases.return_to_supplier', 'purchases.cancel', 'purchases.dismiss_inbox', 'orders.cancel', 'orders.update_line_status', 'orders.mark_line_ordered', 'orders.update_line', 'consignments.return_after_sale', 'consignments.cancel_sale', 'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr'];
 
 // ══ §1 — Registry 108 → 121 ══════════════════════════════════════════════════
 {
   const list = (t: string): string[] => [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const vorher = list(vor('src/core/bridge/command-registry.ts'));
   const jetzt = [...registry.ALLOWED_MUTATIONS];
-  ok(vorher.length === 41 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6C_MUT, ...R6D_MUT, ...R6E_MUT]) && vorher.every((o) => jetzt.includes(o)) && jetzt.length === 88,
-    `REGISTRY Buchungen 41 → 52 (R6C) → 80 (R6D) → 88 (R6E): GENAU die elf R6C-, die achtundzwanzig R6D- und die acht R6E-Namen, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
+  ok(vorher.length === 41 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6C_MUT, ...R6D_MUT, ...R6E_MUT, ...R6F_MUT]) && vorher.every((o) => jetzt.includes(o)) && jetzt.length === 102,
+    `REGISTRY Buchungen 41 → 52 (R6C) → 80 (R6D) → 88 (R6E) → 102 (R6F): GENAU die elf R6C-, achtundzwanzig R6D-, acht R6E- und vierzehn R6F-Namen, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
   const readsVor = catalogue(vor('src/core/bridge/store-read-ops.ts'));
   const readsJetzt = [...readOps.STORE_READ_OPS];
@@ -186,10 +189,10 @@ const R6E_MUT = ['offers.create', 'offers.update', 'offers.set_status', 'offers.
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 108 && rJetzt.length === 160 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6C_MUT, ...R6C_READ, ...R6D_MUT, ...R6D_READ, ...R6E_MUT]),
-    `REGISTRY Rust 108 → 121 (R6C) → 152 (R6D) → 160 (R6E): GENAU diese dreizehn, einunddreißig und acht, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
+  ok(rVor.length === 108 && rJetzt.length === 174 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6C_MUT, ...R6C_READ, ...R6D_MUT, ...R6D_READ, ...R6E_MUT, ...R6F_MUT]),
+    `REGISTRY Rust 108 → 121 (R6C) → 152 (R6D) → 160 (R6E) → 174 (R6F): GENAU diese dreizehn, einunddreißig, acht und vierzehn, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 160 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 160 Namen, die Rust durchlässt (${known.length})`);
+  ok(known.length === 174 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 174 Namen, die Rust durchlässt (${known.length})`);
   for (const op of [...R6C_MUT, ...R6C_READ]) {
     const isMut = R6C_MUT.includes(op);
     ok(known.includes(op) && rJetzt.includes(op) && (isMut ? registry.ALLOWED_MUTATIONS.includes(op) : readOps.STORE_READ_OPS.includes(op))
@@ -215,7 +218,8 @@ const R6E_MUT = ['offers.create', 'offers.update', 'offers.set_status', 'offers.
   const r = await registry.executeCommand('inventory.adjust', {}, identity(nextId(), 'inventory.adjust') as never);
   ok(r.kind === 'infrastructure_error' && r.code === 'BRIDGE_OP_NOT_REGISTERED', `FAILCLOSED ein unbekannter Name läuft nicht (${S(r)})`);
   // R6D hat `partners.record_tx` und `metals.create` bewusst freigegeben (eigenes Gate: test/r6d) — sie stehen hier nicht mehr.
-  for (const op of ['suppliers.delete', 'employees.delete', 'partners.delete_tx', 'inventory.adjust', 'inventory.reset', 'metals.delete', 'tasks.create']) {
+  // R6F ebenso `tasks.create` (Aufgaben über den Primary, eigenes Gate: test/r6f); `tasks.delete` bleibt draußen.
+  for (const op of ['suppliers.delete', 'employees.delete', 'partners.delete_tx', 'inventory.adjust', 'inventory.reset', 'metals.delete', 'tasks.delete']) {
     let t = ''; try { registry.registerCommand(op, { kind: 'mutation', handler: () => ({}) }); } catch (e) { t = String(e); }
     ok(/refusing to register/.test(t) && !rJetzt.includes(op), `FAILCLOSED ${op} ist weder registrierbar noch in Rust`);
   }
@@ -442,9 +446,11 @@ marker('CENTRAL_UI_R6C_NO_INVENTED_LIMITS_PINNED');
   const zu = A.filter((p) => /geschlossen \(R6C\)/.test(p[7] ?? ''));
   ok(A.length === 95 && zu.length === 16 && A.length - zu.length === 79, `R6A A vorher 95, R6C geschlossen 16, verbleibend 79 (${A.length}/${zu.length}/${A.length - zu.length})`);
   ok(zu.every((p) => /^(Stammdaten|Inventur) ·/.test(p[8] ?? '')), 'R6A geschlossen sind nur Zeilen der Domänen Stammdaten und Inventur');
-  // R6D hat Metall geschlossen (eigenes Gate). Was R6C offen ließ und weiterhin offen ist: Aufgaben, Dokumente, Inbox-Foto.
+  // R6D hat Metall geschlossen, R6F Aufgaben, Dokumente und Inbox-Foto (eigene Gates). Geprüft bleibt: R6C selbst hat sie
+  // NICHT geschlossen — sie tragen die Marke ihres eigenen Bündels.
   const nichtZu = A.filter((p) => /Aufgabe|Dokument|Texterkennung|Inbox-Foto/.test(p[1]));
-  ok(nichtZu.length === 5 && nichtZu.every((p) => !/geschlossen/.test(p[7] ?? '')), `R6A Aufgaben, Dokumente, Inbox-Foto bleiben offen (${nichtZu.length})`);
+  ok(nichtZu.length === 5 && nichtZu.every((p) => !/geschlossen \(R6C\)/.test(p[7] ?? '') && /geschlossen \(R6F\)/.test(p[7] ?? '')),
+    `R6A Aufgaben, Dokumente, Inbox-Foto: nicht von R6C, sondern von R6F geschlossen (${nichtZu.length})`);
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — r6c final gate: ${PASS} passed, ${fails.length} failed`);

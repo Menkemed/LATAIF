@@ -1,6 +1,8 @@
 // Back-to-Back Beschaffung — Bearbeiten einer kundenseitigen Order-Produkt-Zeile.
 // Produkt (Existing/New), Menge, Preis, Beschreibung. Produkt-Wechsel ist
 // gesperrt sobald die Zeile via aktivem Purchase beschafft wurde (productLocked).
+// CENTRAL-UI-PARITY R6F — die Maske schickt nur ihre Eingaben; Zeilensumme, vereinbarter Preis, Rest
+// und Marge rechnet das Haus (`updateOrderLineInHouse`). Sie schliesst nur bei Erfolg.
 import { useEffect, useMemo, useState } from 'react';
 import { Edit3 } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
@@ -10,6 +12,7 @@ import { SearchSelect } from '@/components/ui/SearchSelect';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { productSearchText } from '@/core/utils/product-format';
 import { NewProductModal } from '@/components/products/NewProductModal';
+import { WriteError } from '@/components/shared/WriteError';
 import { useProductStore } from '@/stores/productStore';
 import type { OrderLine, Product } from '@/core/models/types';
 
@@ -26,11 +29,15 @@ interface Props {
   line: OrderLine | null;
   /** true = Zeile via aktivem Purchase beschafft → Produkt-Wechsel gesperrt. */
   productLocked: boolean;
+  /** R6F — das Speichern laeuft; der Knopf ist solange gesperrt. */
+  busy?: boolean;
+  /** R6F — warum das Speichern nicht geglueckt ist (leer = kein Fehler). */
+  submitError?: string;
   onClose: () => void;
-  onSave: (patch: OrderLineEditPatch) => void;
+  onSave: (patch: OrderLineEditPatch) => void | Promise<unknown>;
 }
 
-export function OrderLineEditModal({ open, line, productLocked, onClose, onSave }: Props) {
+export function OrderLineEditModal({ open, line, productLocked, busy = false, submitError = '', onClose, onSave }: Props) {
   const { products, categories } = useProductStore();
 
   const [mode, setMode] = useState<'existing' | 'new'>('existing');
@@ -86,7 +93,7 @@ export function OrderLineEditModal({ open, line, productLocked, onClose, onSave 
         patch.productId = productId;
       }
     }
-    onSave(patch);
+    void onSave(patch);
   }
 
   if (!line) return null;
@@ -112,6 +119,7 @@ export function OrderLineEditModal({ open, line, productLocked, onClose, onSave 
                   const active = mode === m;
                   return (
                     <button key={m} type="button"
+                      data-order-line-edit-mode={m}
                       onClick={() => {
                         setMode(m);
                         if (m === 'new') setShowNewProductModal(true);
@@ -129,16 +137,18 @@ export function OrderLineEditModal({ open, line, productLocked, onClose, onSave 
                 })}
               </div>
               {mode === 'existing' ? (
-                <SearchSelect
-                  placeholder="Produkt waehlen..."
-                  options={productOptions}
-                  value={productId}
-                  onChange={pickProduct}
-                  renderPreview={id => {
-                    const p = products.find(x => x.id === id);
-                    return p ? <ProductHoverCard product={p} categories={categories} /> : null;
-                  }}
-                />
+                <div data-order-line-edit-product>
+                  <SearchSelect
+                    placeholder="Produkt waehlen..."
+                    options={productOptions}
+                    value={productId}
+                    onChange={pickProduct}
+                    renderPreview={id => {
+                      const p = products.find(x => x.id === id);
+                      return p ? <ProductHoverCard product={p} categories={categories} /> : null;
+                    }}
+                  />
+                </div>
               ) : newProduct ? (
                 <div className="flex items-center justify-between" style={{
                   padding: '8px 12px', background: '#F2F7FA', border: '1px solid #E5E9EE',
@@ -154,6 +164,7 @@ export function OrderLineEditModal({ open, line, productLocked, onClose, onSave 
               ) : (
                 <button onClick={() => setShowNewProductModal(true)}
                   className="cursor-pointer"
+                  data-order-line-edit-new-product
                   style={{
                     width: '100%', padding: '8px 12px', fontSize: 13, textAlign: 'left',
                     border: '1px dashed #D5D9DE', borderRadius: 6, background: '#FFFFFF', color: '#6B7280',
@@ -164,19 +175,21 @@ export function OrderLineEditModal({ open, line, productLocked, onClose, onSave 
             </div>
           )}
 
-          <Input label="BESCHREIBUNG" value={description}
+          <Input label="BESCHREIBUNG" value={description} data-order-line-edit-description
             onChange={e => setDescription(e.target.value)} />
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-            <Input label="MENGE" type="number" step="1" value={quantity || ''}
+            <Input label="MENGE" type="number" step="1" value={quantity || ''} data-order-line-edit-quantity
               onChange={e => setQuantity(Math.max(1, parseInt(e.target.value) || 1))} />
-            <Input label="NET PREIS / STUECK (BHD)" type="number" step="0.001" value={unitPrice || ''}
+            <Input label="NET PREIS / STUECK (BHD)" type="number" step="0.001" value={unitPrice || ''} data-order-line-edit-price
               onChange={e => setUnitPrice(parseFloat(e.target.value) || 0)} />
           </div>
 
+          <WriteError text={submitError} />
+
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={onClose}>Abbrechen</Button>
-            <Button variant="primary" onClick={save}>Speichern</Button>
+            <Button variant="primary" onClick={save} disabled={busy} data-order-line-save>Speichern</Button>
           </div>
         </div>
       </Modal>

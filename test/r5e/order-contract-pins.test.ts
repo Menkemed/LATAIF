@@ -420,10 +420,10 @@ async function editWelt(weg: 'primary' | 'fern', status: string, form: Record<st
 
 // ── §5 „+ New Supplier" im Einkauf: die in R5E festgehaltene Lücke — seit R6C geschlossen ───
 {
-  ok(ALLOWED_MUTATIONS.includes('suppliers.create') && ALLOWED_MUTATIONS.length === 88, 'GAP→R6C die Buchung suppliers.create gibt es jetzt — eine der elf R6C-Buchungen (88 seit R6E)');
+  ok(ALLOWED_MUTATIONS.includes('suppliers.create') && ALLOWED_MUTATIONS.length === 102, 'GAP→R6C die Buchung suppliers.create gibt es jetzt — eine der elf R6C-Buchungen (102 seit R6F)');
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(/"suppliers\.create"/.test(rust) && rustOps === 160, `GAP→R6C die Registry kennt sie und steht bei 160 (R6E) (${rustOps})`);
+  ok(/"suppliers\.create"/.test(rust) && rustOps === 174, `GAP→R6C die Registry kennt sie und steht bei 174 (R6F) (${rustOps})`);
   const stand = [R4C_MATRIX.filter((z) => z.verdrahtet).length, R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet).length,
     R4C_MATRIX.filter((z) => z.luecke === 'B').length, R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length];
   // R5F schliesst weitere Zeilen — die Matrix bleibt bei 40, ohne offene „exakt"-Zeile und ohne Lieferanten.

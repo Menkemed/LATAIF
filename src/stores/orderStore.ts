@@ -89,6 +89,23 @@ function cancelOrderLineExpense(expenseId: string): void {
   });
 }
 
+/**
+ * CENTRAL-UI-PARITY R6F — was „Cancel Order" bewirkt hat. Die Beträge rechnet der Store selbst;
+ * niemand reicht sie hinein.
+ */
+export interface OrderCancelEffects {
+  /** Die gebuchte Summe der NICHT umgewandelten Anzahlungen (0 = nichts zu buchen). */
+  settledAmount: number;
+  customerCreditId?: string;
+  /** Das angefangene Sonderstück, das als Lagerartikel entstanden ist. */
+  stockProductId?: string;
+  /** Der 'reserved'-Artikel einer abgebrochenen Umwandlung, der wieder frei ist (L-07). */
+  freedProductId?: string;
+  cancelledGoldPayableIds: string[];
+  /** Real gebuchte A/P-Ausgaben, die bewusst OFFEN bleiben (der Lieferant hat gearbeitet). */
+  openExpenseIds: string[];
+}
+
 interface OrderStore {
   orders: Order[];
   /** R5A.1 — die Positionen aus dem gemeinsamen Lesestand. Am Primary undefined: dort fragt
@@ -118,8 +135,10 @@ interface OrderStore {
   // ordered_supplier_id, setzt Lines + Order auf CANCELLED. Bei totalPaid > 0
   // wird der gewaehlte Geld-Pfad gebucht (refund/credit/forfeit). ARRIVED-Lines
   // via Purchase bleiben unberuehrt — Stueck bleibt im Lager (Standard-Bestand).
+  // CENTRAL-UI-PARITY R6F — liefert, was der Storno bewirkt hat (Guthaben, Lagerstueck, …), damit
+  // die Hausfolge es melden und pruefen kann. Einziger Aufrufer ist `cancelOrderInHouse`.
   cancelOrderWithMoney: (id: string, choice: 'refund' | 'credit' | 'forfeit',
-    refundMethod?: 'cash' | 'bank' | 'benefit', note?: string) => void;
+    refundMethod?: 'cash' | 'bank' | 'benefit', note?: string) => OrderCancelEffects;
   // Lines per Order — v0.2.1 erweitert um supplier-cost + material + customer-facing flag
   rewriteOrderLines: (orderId: string, lines: Array<{
     productId?: string;
@@ -912,39 +931,41 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     }
 
     // Produkt aufloesen: undefined = nicht aendern.
+    // CENTRAL-UI-PARITY R6F — kein verschluckter Fehler mehr: scheiterte das Anlegen des neuen
+    // Artikels, speicherte „Speichern" Menge und Preis trotzdem und liess die Zeile beim ALTEN Artikel
+    // stehen — der Mensch sah eine gespeicherte Aenderung, die nicht die seine war. Jetzt scheitert
+    // die ganze Aenderung mit ihm (EINE Klammer, `updateOrderLineInHouse`).
     let productId: string | null | undefined;
     if (patch.newProduct) {
-      try {
-        const created = useProductStore.getState().createProduct({
-          ...patch.newProduct,
-          stockStatus: 'in_stock',
-        });
-        // New-Produkt ohne Bestand — quantity 0 bis zum Wareneingang (Purchase).
-        db.run(`UPDATE products SET quantity = 0 WHERE id = ?`, [created.id]);
-        trackProductRow(created.id);   // LAN-Sync Phase 1b
-        productId = created.id;
-      } catch (err) {
-        console.error('[order] createProduct (updateOrderLine) failed:', err);
-      }
+      const created = useProductStore.getState().createProduct({
+        ...patch.newProduct,
+        stockStatus: 'in_stock',
+      });
+      // New-Produkt ohne Bestand — quantity 0 bis zum Wareneingang (Purchase).
+      db.run(`UPDATE products SET quantity = 0 WHERE id = ?`, [created.id]);
+      trackProductRow(created.id);   // LAN-Sync Phase 1b
+      productId = created.id;
     } else if (patch.productId !== undefined) {
       productId = patch.productId || null;
     }
 
     const fields: string[] = [];
     const values: unknown[] = [];
-    if (productId !== undefined) { fields.push('product_id = ?'); values.push(productId); }
-    if (patch.description !== undefined) { fields.push('description = ?'); values.push(patch.description || ''); }
+    // R6F — ins Protokoll gehen die geschriebenen Spalten, nicht der Entwurf samt seinen Fotos.
+    const written: Record<string, unknown> = {};
+    if (productId !== undefined) { fields.push('product_id = ?'); values.push(productId); written.productId = productId; }
+    if (patch.description !== undefined) { fields.push('description = ?'); values.push(patch.description || ''); written.description = patch.description || ''; }
     const qty = patch.quantity !== undefined ? Math.max(1, patch.quantity) : (Number(rows[0].quantity) || 1);
     const unitPrice = patch.unitPrice !== undefined ? patch.unitPrice : (Number(rows[0].unit_price) || 0);
-    if (patch.quantity !== undefined) { fields.push('quantity = ?'); values.push(qty); }
-    if (patch.unitPrice !== undefined) { fields.push('unit_price = ?'); values.push(unitPrice); }
+    if (patch.quantity !== undefined) { fields.push('quantity = ?'); values.push(qty); written.quantity = qty; }
+    if (patch.unitPrice !== undefined) { fields.push('unit_price = ?'); values.push(unitPrice); written.unitPrice = unitPrice; }
     if (patch.quantity !== undefined || patch.unitPrice !== undefined) {
-      fields.push('line_total = ?'); values.push(qty * unitPrice);
+      fields.push('line_total = ?'); values.push(qty * unitPrice); written.lineTotal = qty * unitPrice;
     }
     if (fields.length === 0) return;
     values.push(lineId);
     db.run(`UPDATE order_lines SET ${fields.join(', ')} WHERE id = ?`, values);
-    trackUpdate('order_lines', lineId, patch);
+    trackUpdate('order_lines', lineId, written);
 
     // agreed_price = Σ line_total der kundenseitigen Lines neu ableiten.
     const sumRow = query(
@@ -1176,21 +1197,19 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     const now = new Date().toISOString();
 
     // 0. Order + Customer laden
-    const oRows = query(`SELECT id, customer_id, status, product_id FROM orders WHERE id = ?`, [id]);
+    const oRows = query(`SELECT id, branch_id, customer_id, status, product_id FROM orders WHERE id = ?`, [id]);
     if (oRows.length === 0) throw new Error(`Order ${id} nicht gefunden`);
     const customerId = oRows[0].customer_id as string;
+    // R6F — das Guthaben gehoert in die Buecher des AUFTRAGS, nicht in eine Ersatz-Filiale.
+    const orderBranchId = oRows[0].branch_id as string;
     const currentStatus = oRows[0].status as OrderStatus;
     const linkedProductId = (oRows[0].product_id as string | null) || null;  // L-07
     if (currentStatus === 'cancelled') throw new Error('Order ist bereits storniert.');
+    const effects: OrderCancelEffects = { settledAmount: 0, cancelledGoldPayableIds: [], openExpenseIds: [] };
 
-    // Slice 4a — VOR der Geld-Buchung die Ueberzahlungs-Gutschrift abbauen: BLOCK falls schon
-    // eingeloest; sonst Reklass-Bein (ORDER_OVERPAY) reversen + Domain-Row weg. Zwingend vor dem
-    // 'credit'-Zweig unten, der DR CUSTOMER_DEPOSITS ueber den VOLLEN totalPaid bucht — sonst
-    // schreibt er die schon zu CUSTOMER_CREDIT umgebuchten Ueberschuss-Fil ein zweites Mal gut.
-    teardownOrderOverpayCredit(id,
-      'Cannot cancel this order because the store credit from its overpayment has already been used. Reverse that credit usage first.');
-
-    // 0a. Invoiced-Block: keine Line darf invoice_id != NULL haben
+    // 0a. Invoiced-Block: keine Line darf invoice_id != NULL haben.
+    // R6F — erst pruefen, dann schreiben: der Block stand HINTER dem Ueberzahlungs-Teardown, und ein
+    // Storno, der hier scheiterte, hatte die Gutschrift schon abgebaut.
     const invoicedRows = query(
       `SELECT COUNT(*) AS n FROM order_lines WHERE order_id = ? AND invoice_id IS NOT NULL`,
       [id]
@@ -1199,8 +1218,22 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       throw new Error('Mind. eine Zeile ist bereits in einer Invoice — bitte erst die Invoice stornieren.');
     }
 
-    // 1. totalPaid berechnen (SUM order_payments)
-    const payRows = query(`SELECT COALESCE(SUM(amount),0) AS t FROM order_payments WHERE order_id = ?`, [id]);
+    // Slice 4a — VOR der Geld-Buchung die Ueberzahlungs-Gutschrift abbauen: BLOCK falls schon
+    // eingeloest; sonst Reklass-Bein (ORDER_OVERPAY) reversen + Domain-Row weg. Zwingend vor dem
+    // 'credit'-Zweig unten, der DR CUSTOMER_DEPOSITS ueber den VOLLEN totalPaid bucht — sonst
+    // schreibt er die schon zu CUSTOMER_CREDIT umgebuchten Ueberschuss-Fil ein zweites Mal gut.
+    teardownOrderOverpayCredit(id,
+      'Cannot cancel this order because the store credit from its overpayment has already been used. Reverse that credit usage first.');
+
+    // 1. totalPaid berechnen (SUM order_payments).
+    // R6F — nur die NICHT umgewandelten Anzahlungen (M-08, wie Saldo, Banking und Abgleich). Eine
+    // umgewandelte Anzahlung ist beim Convert aus CUSTOMER_DEPOSITS herausgebucht worden; wurde die
+    // Rechnung spaeter storniert, loeste das nur die Zeilen — der Storno zahlte dasselbe Geld ein
+    // zweites Mal zurueck (bzw. schrieb es noch einmal gut / buchte es als Verfall).
+    const payRows = query(
+      `SELECT COALESCE(SUM(amount),0) AS t FROM order_payments WHERE order_id = ? AND COALESCE(converted_to_invoice, 0) = 0`,
+      [id]
+    );
     const totalPaid = Number(payRows[0]?.t || 0);
 
     // 1a. Geld-Buchung gemaess Wahl
@@ -1218,24 +1251,25 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       // sodass Domain-Row und Ledger-Saldo spiegelgleich + einloesbar sind.
       if (choice === 'credit') {
         const creditId = uuid();
-        let branchId: string;
-        try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
         db.run(
           `INSERT INTO customer_credits (id, branch_id, customer_id, amount, used_amount, status,
              source_type, source_id, note, created_at)
            VALUES (?, ?, ?, ?, 0, 'OPEN', 'order_cancel', ?, ?, ?)`,
-          [creditId, branchId, customerId, totalPaid, id,
+          [creditId, orderBranchId, customerId, totalPaid, id,
            note || `Storno Order — Guthaben zur weiteren Verrechnung`, now]
         );
         trackInsert('customer_credits', creditId, {
           customerId, amount: totalPaid, sourceOrderId: id,
         });
+        effects.customerCreditId = creditId;
       }
-      safePost(`postOrderCancellationChoice(${id}, ${choice})`, () => {
-        postOrderCancellationChoice({
-          orderId: id, customerId, totalPaid, choice, refundMethod,
-        });
+      // R6F — kein `safePost` mehr: scheiterte die Buchung, war der Auftrag trotzdem storniert — das
+      // Geld galt als zurueckgezahlt (bzw. gutgeschrieben / verfallen), im Hauptbuch stand es weiter
+      // als Anzahlung. Jetzt scheitert der Storno mit ihr (EINE Klammer, `cancelOrderInHouse`).
+      postOrderCancellationChoice({
+        orderId: id, customerId, totalPaid, choice, refundMethod,
       });
+      effects.settledAmount = totalPaid;
     }
 
     // 2. Cost-Lines analysieren: real-gebuchte A/P (expense_id != NULL) bleiben
@@ -1259,6 +1293,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       const lid = lr.id as string;
       db.run(`UPDATE order_lines SET expense_id = NULL WHERE id = ?`, [lid]);
       trackUpdate('order_lines', lid, { expenseId: null });
+      effects.openExpenseIds.push(lr.expense_id as string);
     }
 
     // 3. Offene Gold-Verbindlichkeiten cancellen.
@@ -1271,6 +1306,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       db.run(`UPDATE gold_payables SET status = 'CANCELLED', updated_at = ? WHERE id = ?`,
         [now, gpId]);
       trackUpdate('gold_payables', gpId, { status: 'CANCELLED' });
+      effects.cancelledGoldPayableIds.push(gpId);
     }
 
     // 4. ORDERED-Lines: ordered_supplier_id nullen (Supplier-Marker wegnehmen).
@@ -1303,6 +1339,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
           [now, linkedProductId]);
         trackUpdate('products', linkedProductId, { stockStatus: 'in_stock' });
         freedReservedProduct = true;
+        effects.freedProductId = linkedProductId;
       }
     }
 
@@ -1311,49 +1348,50 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     //    Arbeit/Material). Das fertige/halbfertige Stueck wird als Lagerprodukt
     //    angelegt mit kapitalisierter Kostenbasis als purchasePrice. So bleibt
     //    der Wert im System sichtbar und das Stueck ist weiterverkaeufbar.
+    //    CENTRAL-UI-PARITY R6F — das ist KEIN Nebeneffekt, sondern die Zusage der Storno-Maske
+    //    („CUSTOM WORK ALREADY STARTED … The piece is created as a stock product"): die A/P an den
+    //    Goldschmied bleibt offen, also muss das Stueck, fuer das sie steht, im Bestand auftauchen.
+    //    Vorher lief das Anlegen in einem try/catch, das nur protokollierte — der Auftrag war
+    //    storniert, die Schuld offen, und das Stueck gab es nirgends. Jetzt scheitert der Storno mit.
     if (!freedReservedProduct && customCostBasis > 0 && realizedCosts.length > 0) {
-      try {
-        const ord = query(
-          `SELECT category_id, attributes, condition, requested_brand, requested_model,
-                  agreed_price, custom_product_spec FROM orders WHERE id = ?`, [id]);
-        if (ord.length > 0) {
-          const row = ord[0];
-          let spec: Partial<Product> = {};
-          try {
-            const raw = row.custom_product_spec as string | null;
-            if (raw) spec = JSON.parse(raw) as Partial<Product>;
-          } catch { /* */ }
-          let attrs: Record<string, string | number | boolean | string[]> = {};
-          try { attrs = JSON.parse((row.attributes as string) || '{}'); } catch { /* */ }
-          const agreedPrice = (row.agreed_price as number) || 0;
-          const newProduct = useProductStore.getState().createProduct({
-            categoryId: spec.categoryId || (row.category_id as string) || '',
-            brand: spec.brand || (row.requested_brand as string) || 'Custom',
-            name: spec.name || (row.requested_model as string) || 'Custom (cancelled order)',
-            sku: spec.sku,
-            condition: spec.condition || (row.condition as string) || '',
-            attributes: (spec.attributes as Record<string, string | number | boolean | string[]>) || attrs,
-            images: spec.images || [],
-            scopeOfDelivery: spec.scopeOfDelivery || [],
-            purchasePrice: customCostBasis,
-            plannedSalePrice: agreedPrice > 0 ? agreedPrice : customCostBasis,
-            stockStatus: 'in_stock',  // frei verkaeuflich (anders als Convert: dort 'reserved')
-            taxScheme: spec.taxScheme || 'MARGIN',
-            sourceType: 'OWN',
-            notes: (spec.notes ? spec.notes + '\n\n' : '')
-              + `From cancelled custom order — capitalized costs ${customCostBasis.toFixed(3)} BHD.`,
-          });
-          console.info('[order] cancelled custom-order → product transferred to stock',
-            { orderId: id, productId: newProduct.id, value: customCostBasis });
-        }
-      } catch (err) {
-        console.error('[order] cancel: custom product overflow to stock failed:', err);
+      const ord = query(
+        `SELECT category_id, attributes, condition, requested_brand, requested_model,
+                agreed_price, custom_product_spec FROM orders WHERE id = ?`, [id]);
+      if (ord.length > 0) {
+        const row = ord[0];
+        let spec: Partial<Product> = {};
+        try {
+          const raw = row.custom_product_spec as string | null;
+          if (raw) spec = JSON.parse(raw) as Partial<Product>;
+        } catch { /* */ }
+        let attrs: Record<string, string | number | boolean | string[]> = {};
+        try { attrs = JSON.parse((row.attributes as string) || '{}'); } catch { /* */ }
+        const agreedPrice = (row.agreed_price as number) || 0;
+        const newProduct = useProductStore.getState().createProduct({
+          categoryId: spec.categoryId || (row.category_id as string) || '',
+          brand: spec.brand || (row.requested_brand as string) || 'Custom',
+          name: spec.name || (row.requested_model as string) || 'Custom (cancelled order)',
+          sku: spec.sku,
+          condition: spec.condition || (row.condition as string) || '',
+          attributes: (spec.attributes as Record<string, string | number | boolean | string[]>) || attrs,
+          images: spec.images || [],
+          scopeOfDelivery: spec.scopeOfDelivery || [],
+          purchasePrice: customCostBasis,
+          plannedSalePrice: agreedPrice > 0 ? agreedPrice : customCostBasis,
+          stockStatus: 'in_stock',  // frei verkaeuflich (anders als Convert: dort 'reserved')
+          taxScheme: spec.taxScheme || 'MARGIN',
+          sourceType: 'OWN',
+          notes: (spec.notes ? spec.notes + '\n\n' : '')
+            + `From cancelled custom order — capitalized costs ${customCostBasis.toFixed(3)} BHD.`,
+        });
+        effects.stockProductId = newProduct.id;
       }
     }
 
     saveDatabase();
     eventBus.emit('order.cancelled', 'order', id, { status: 'cancelled', choice });
     get().loadOrders();
+    return effects;
   },
 
   deleteOrder: (id) => {

@@ -152,6 +152,9 @@ for (const rel of readdirSync(join(repo, 'src'), { recursive: true, encoding: 'u
   for (const m of s.matchAll(/trackUpdate\('([a-z_]+)'/g)) addOp(m[1], 'update');
   for (const m of s.matchAll(/trackDelete\('([a-z_]+)'/g)) addOp(m[1], 'delete');
   for (const m of s.matchAll(/trackChange\('([a-z_]+)',[^,]+,\s*'(insert|update|delete)'/g)) addOp(m[1], m[2]);
+  // R6F — Aufgaben und Dokumente schreiben über `trackOfficeWrite(table, id, op, …)`, das genau dieses `trackChange`
+  // ruft (und prüft, dass der Eintrag entstand). Derselbe Schreiber, nur mit Beweis.
+  for (const m of s.matchAll(/trackOfficeWrite\('([a-z_]+)',[^,]+,\s*'(insert|update|delete)'/g)) addOp(m[1], m[2]);
   for (const m of s.matchAll(/trackLotRow\([^,]+,\s*'(insert|update|delete)'/g)) addOp('stock_lots', m[1]);
   for (const m of s.matchAll(/trackProductRow\(([^,)]+)(?:,\s*'(insert|update|delete)')?/g)) addOp('products', m[2] || 'update');
 }
@@ -173,7 +176,9 @@ for (const t of manifestTables) {
   if (declared.includes('update')) uC++;
   if (declared.includes('delete')) dC++;
 }
-check(iC === 50 && uC === 36 && dC === 37, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 50/36/37 — incl. the mobile purchase_inbox insert)`);
+// R6F — der Verkaufsstorno der Kommission löscht Retoure und Retourenzeilen nicht mehr (Retoure REJECTED, Gutschrift
+// CANCELLED); kein Produktionsschreiber sendet für `sales_returns`/`sales_return_lines` noch ein Löschen → 37 → 35.
+check(iC === 50 && uC === 36 && dC === 35, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 50/36/35 — incl. the mobile purchase_inbox insert)`);
 
 // ── 5. Rust/TS semantic parity: the SAME shared fixture the Rust test runs. Both sides must map
 //    each vector to the same verdict → transitively, Rust and TS agree byte-for-byte. ──

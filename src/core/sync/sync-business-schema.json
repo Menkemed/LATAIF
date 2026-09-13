@@ -404,6 +404,7 @@
         "ocr_confidence",
         "ocr_reviewed",
         "ocr_text",
+        "revision",
         "sync_status",
         "thumbnail_path",
         "version"
@@ -1272,8 +1273,7 @@
     },
     "sales_return_lines": {
       "allowed_operations": [
-        "insert",
-        "delete"
+        "insert"
       ],
       "record_id_field": "id",
       "allowed_fields": [
@@ -1292,8 +1292,7 @@
     "sales_returns": {
       "allowed_operations": [
         "insert",
-        "update",
-        "delete"
+        "update"
       ],
       "record_id_field": "id",
       "allowed_fields": [
@@ -1413,6 +1412,7 @@
         "linked_entity_id",
         "linked_entity_type",
         "priority",
+        "revision",
         "status",
         "sync_status",
         "title",

@@ -192,7 +192,7 @@ const ACTIONS: Action[] = [
 // ── 3) Keine Klasse-C-Aktion ist registriert ─────────────────────────────
 {
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 88, `REGISTRY genau 88 Mutationen (${list.length}) — 24 aus C3G, 16 aus C3H, invoices.cancel, 11 aus R6C, 28 aus R6D, 8 aus R6E`);
+  ok(list.length === 102, `REGISTRY genau 102 Mutationen (${list.length}) — 24 aus C3G, 16 aus C3H, invoices.cancel, 11 aus R6C, 28 aus R6D, 8 aus R6E, 14 aus R6F`);
   const known = knownCommands();
   // CENTRAL-C3H hat die sechzehn `B_DEFERRED`-Aktionen freigeschaltet. Diese Datei bleibt der
   // Nachweis der KLASSIFIKATION — die Zahlen ziehen mit, die Einordnung nicht.
@@ -207,7 +207,9 @@ const ACTIONS: Action[] = [
       // R6E — `returns.cancel` ist seither ausdrücklich freigegeben (Retourenstorno, nur Eigentümer).
       `${a.module}s.delete`, ...(a.module === 'invoice' || a.module === 'return' ? [] : [`${a.module}s.cancel`]),
     ];
-    ok(guesses.every((g) => !list.includes(g)),
+    // R6F — `orders.cancel` (Storno mit Geld) und `consignments.cancel_sale` (Verkaufsstorno) sind seither ausdrücklich
+    // freigegeben — als je EINE Hausfolge; Löschen bleibt Primary-only.
+    ok(guesses.filter((g) => !['orders.cancel', 'consignments.cancel_sale'].includes(g)).every((g) => !list.includes(g)),
       `REGISTRY ${a.module}.${a.fn} ist nicht registriert`);
   }
   // Die sechzehn Vertagten sind in C3H freigeschaltet worden — jede genau EINMAL und unter
@@ -242,7 +244,9 @@ const ACTIONS: Action[] = [
   ok(new Set(Object.values(C3H_NAME_OF)).size === 16,
     'C3H sechzehn Aktionen, sechzehn Namen — keiner geteilt');
   // R6E — `transfers.undo_convert` ist seither freigegeben (Rechnungsstorno statt Löschen); neun bleiben Klasse C.
-  ok((fin.C3G_PRIMARY_ONLY as readonly string[]).length === 9 && !(fin.C3G_PRIMARY_ONLY as readonly string[]).includes('transfers.undo_convert'),
+  // R6F — ebenso `consignments.cancel_sale`; acht bleiben Klasse C.
+  ok((fin.C3G_PRIMARY_ONLY as readonly string[]).length === 8 && !(fin.C3G_PRIMARY_ONLY as readonly string[]).includes('transfers.undo_convert')
+    && !(fin.C3G_PRIMARY_ONLY as readonly string[]).includes('consignments.cancel_sale'),
     'REGISTRY die Klasse-C-Liste steht als Konstante im Code');
 }
 

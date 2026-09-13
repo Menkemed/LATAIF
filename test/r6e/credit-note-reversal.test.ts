@@ -705,7 +705,6 @@ marker('CENTRAL_UI_R6E_PAID_REFUND_CANCEL_CONTRACT_PINNED');
     'src/core/sync/sync-service.ts': 'Tabellenzuordnung des Abgleichs',
     'src/core/db/database.ts': 'Schema/Migration',
     'src/stores/bankingStore.ts': 'Verweis; Retouren REJECTED und Guthaben-Erstattung ausgeschlossen',
-    'src/stores/consignmentStore.ts': 'Kommissions-Storno überspringt CANCELLED',
     'src/stores/creditNoteStore.ts': 'Liste (mit Status) und Löschsperre',
     'src/stores/customerStore.ts': 'Kundensaldo/-kennzahlen ohne CANCELLED',
     'src/stores/invoiceStore.ts': 'M-04, Guard B, Deckel ohne CANCELLED',

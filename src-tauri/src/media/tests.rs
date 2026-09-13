@@ -219,17 +219,23 @@ mod transient_retry {
             "ausserhalb von Windows wird gar nicht erst wiederholt"
         );
     }
-    // Aber nicht endlos: wer dauerhaft belegt ist, wird ehrlich als Fehler gemeldet.
+    // Aber nicht endlos: wer dauerhaft belegt ist, wird ehrlich als Fehler gemeldet — nach der
+    // Frist (R6F: eine Zeit, keine Versuchszahl), nicht vorher und nicht deutlich danach.
     #[cfg(windows)]
     #[test]
     fn a_permanently_blocked_target_gives_up_and_reports_the_truth() {
         let calls = Cell::new(0);
+        let started = std::time::Instant::now();
         let out: Result<()> = super::super::storage::with_transient_retry(|| {
             calls.set(calls.get() + 1);
             Err(Error::from_raw_os_error(32)) // ERROR_SHARING_VIOLATION
         });
+        let took = started.elapsed();
+        let budget = super::super::storage::TRANSIENT_RETRY_BUDGET;
         assert_eq!(out.unwrap_err().raw_os_error(), Some(32));
-        assert_eq!(calls.get(), 20, "ein Versuch plus neunzehn Wiederholungen");
+        assert!(took >= budget, "erst nach der Frist aufgeben ({took:?} < {budget:?})");
+        assert!(took < budget + std::time::Duration::from_millis(500), "und nicht deutlich danach ({took:?})");
+        assert!(calls.get() > 20, "mehr Versuche als die alte Grenze von zwanzig ({})", calls.get());
     }
 }
 struct TempRoot(PathBuf);

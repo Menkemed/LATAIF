@@ -31,7 +31,19 @@ import { PAYOUT_MODELS, payoutModelLock, payoutFieldsFor, normalizePayoutModel, 
 import {
   CONSIGNMENT_PAYOUT_METHODS, consignmentPayoutBody, consignmentSaleBody, payoutOpenAmount, type ConsignmentSaleInput,
 } from '@/core/consignment/consignment-finance';
-import { payOutConsignmentOnPrimary, recordConsignmentSaleOnPrimary } from '@/core/consignment/consignment-finance-house';
+import {
+  cancelConsignmentSaleOnPrimary, payOutConsignmentOnPrimary, recordConsignmentSaleOnPrimary, returnConsignmentAfterSaleOnPrimary,
+} from '@/core/consignment/consignment-finance-house';
+// R6F — Rückgabe nach dem Verkauf und Verkaufsstorno: Wege und Rümpfe aus EINER Quelle.
+import {
+  DEFAULT_POST_SALE_REFUND_METHOD, POST_SALE_REFUND_METHODS, consignmentCancelSaleBody, consignmentReturnAfterSaleBody,
+  type ConsignmentReturnAfterSaleInput, type PostSaleDisposition,
+} from '@/core/consignment/consignment-reversal';
+import type { ReturnRefundMethod } from '@/core/returns/return-create';
+
+const REFUND_LABEL: Record<ReturnRefundMethod, string> = {
+  cash: 'Cash', bank: 'Bank Transfer', card: 'Card', benefit: 'Benefit', credit: 'Store Credit', other: 'Other',
+};
 
 function daysUntil(dateStr: string): number {
   const now = new Date();
@@ -47,7 +59,7 @@ export function ConsignmentDetail() {
   const goBack = useGoBack('/consignments');
   const {
     consignments, loadConsignments, updateConsignment, updateConsignmentPayoutModel,
-    cancelSale, markReturned, markReturnedAfterSale, deleteConsignment,
+    markReturned, deleteConsignment,
   } = useConsignmentStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
@@ -81,7 +93,10 @@ export function ConsignmentDetail() {
   const [paidRef, setPaidRef] = useState('');
   const [returnModal, setReturnModal] = useState(false);
   const [postSaleReturnModal, setPostSaleReturnModal] = useState(false);
-  const [postSaleDisposition, setPostSaleDisposition] = useState<'RETURN_TO_OWNER' | 'KEEP_AS_OWN'>('RETURN_TO_OWNER');
+  const [postSaleDisposition, setPostSaleDisposition] = useState<PostSaleDisposition>('RETURN_TO_OWNER');
+  // R6F — die übrige Wahl des Dialogs: wie der Käufer sein Geld zurückbekommt (nur wenn er bezahlt hat) und warum.
+  const [postSaleRefundMethod, setPostSaleRefundMethod] = useState<ReturnRefundMethod>(DEFAULT_POST_SALE_REFUND_METHOD);
+  const [postSaleReason, setPostSaleReason] = useState('');
   const [cancelSaleModal, setCancelSaleModal] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -313,20 +328,48 @@ export function ConsignmentDetail() {
     setReturnModal(false);
   }
 
-  function handlePostSaleReturn() {
-    if (!id) return;
-    markReturnedAfterSale(id, postSaleDisposition);
-    setPostSaleReturnModal(false);
+  // R6F — nach einer Rücknahme ändern sich Kommission, Rechnung, Einkauf, Ausgabe, Artikel und Kunde.
+  function reloadAfterReversal() {
+    loadConsignments();
+    loadInvoices();
+    loadPurchases();
+    loadExpenses();
+    loadProducts();
+    loadCustomers();
   }
 
-  function handleCancelSale() {
-    if (!id) return;
-    try {
-      cancelSale(id);
-      setCancelSaleModal(false);
-    } catch (e) {
-      alert(`Cancel Sale failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
+  // R6F — „Buyer Returns the Item": die Wahl des Dialogs geht über EINE Buchung. Retoure, Gutschrift,
+  // Erstattung, Wareneinsatz, Einkauf des Einlieferers und Status schreibt das Haus in EINER Klammer —
+  // am Primary wie fern; die gesehene Fassung wacht gegen einen zwischenzeitlichen Storno.
+  async function handlePostSaleReturn() {
+    if (!id || !consignment) return;
+    const fassung = consignment.revision;
+    if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('returning this sale (no revision loaded)'))); return; }
+    const input: ConsignmentReturnAfterSaleInput = { disposition: postSaleDisposition };
+    // Ohne erhaltenes Geld fließt nichts zurück — dann gibt es auch keinen Weg zu wählen.
+    if ((linkedInvoice?.paidAmount || 0) > 0.005) input.refundMethod = postSaleRefundMethod;
+    if (postSaleReason.trim()) input.reason = postSaleReason.trim();
+    if (!await w.ok('consignments.return_after_sale', {
+      local: () => returnConsignmentAfterSaleOnPrimary(id, input),
+      remote: () => consignmentReturnAfterSaleBody(id, Number(fassung), input),
+    })) return;
+    reloadAfterReversal();
+    setPostSaleReturnModal(false);
+    setPostSaleReason('');
+  }
+
+  // R6F — „Cancel Sale": WELCHE Kommission in welcher Fassung — Rechnung, Retoure, Einkauf, Ausgabe,
+  // Auszahlungen und Bestand findet das Haus selbst. Kein lokaler try/alert-Pfad mehr.
+  async function handleCancelSale() {
+    if (!id || !consignment) return;
+    const fassung = consignment.revision;
+    if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('cancelling this sale (no revision loaded)'))); return; }
+    if (!await w.ok('consignments.cancel_sale', {
+      local: () => cancelConsignmentSaleOnPrimary(id),
+      remote: () => consignmentCancelSaleBody(id, Number(fassung)),
+    })) return;
+    reloadAfterReversal();
+    setCancelSaleModal(false);
   }
 
   function handleDelete() {
@@ -475,22 +518,23 @@ export function ConsignmentDetail() {
                   {!consignment.invoiceId && (
                     <Button variant="primary" onClick={() => setPaidModal(true)}>Pay Out (legacy)</Button>
                   )}
-                  <Button variant="ghost" onClick={() => setPostSaleReturnModal(true)}>Post-Sale Return</Button>
+                  <Button variant="ghost" onClick={() => { w.clear(); setPostSaleReturnModal(true); }} data-consignment-return-after-sale>Post-Sale Return</Button>
                   {consignment.invoiceId && (
-                    <Button variant="ghost" onClick={() => setCancelSaleModal(true)}>Cancel Sale</Button>
+                    <Button variant="ghost" onClick={() => { w.clear(); setCancelSaleModal(true); }} data-consignment-cancel-sale>Cancel Sale</Button>
                   )}
                 </>
               )}
               {consignment.status === 'returned' && consignment.invoiceId && (
-                <Button variant="ghost" onClick={() => setCancelSaleModal(true)}>Cancel Sale (cleanup)</Button>
+                <Button variant="ghost" onClick={() => { w.clear(); setCancelSaleModal(true); }} data-consignment-cancel-sale>Cancel Sale (cleanup)</Button>
               )}
               {consignment.status === 'paid_out' && (
                 <>
-                  <Button variant="ghost" onClick={() => setPostSaleReturnModal(true)}>Post-Sale Return</Button>
+                  <Button variant="ghost" onClick={() => { w.clear(); setPostSaleReturnModal(true); }} data-consignment-return-after-sale>Post-Sale Return</Button>
                   {/* paid_out-Teardown: bewusst OHNE invoiceId-Bedingung — die real
                       existierende paid_out-Population stammt aus dem Legacy-Pfad
-                      (markPaidOut ohne Invoice); der Store-Flow deckt beide Fälle. */}
-                  <Button variant="ghost" onClick={() => setCancelSaleModal(true)}>Cancel Sale</Button>
+                      (markPaidOut ohne Invoice); die Hausfolge deckt beide Fälle
+                      (dieselbe Regel: `cancelSaleBlocker`). */}
+                  <Button variant="ghost" onClick={() => { w.clear(); setCancelSaleModal(true); }} data-consignment-cancel-sale>Cancel Sale</Button>
                 </>
               )}
               <Button variant="ghost" onClick={openEditModal}>
@@ -973,7 +1017,7 @@ export function ConsignmentDetail() {
           What should happen with the item?
         </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
-          <button onClick={() => setPostSaleDisposition('RETURN_TO_OWNER')}
+          <button onClick={() => setPostSaleDisposition('RETURN_TO_OWNER')} data-consignment-return-disposition="RETURN_TO_OWNER"
             className="cursor-pointer text-left"
             style={{
               padding: '14px 16px', borderRadius: 8,
@@ -985,7 +1029,7 @@ export function ConsignmentDetail() {
               Goods leave our system back to <strong>{consignorName}</strong>. Our A/P to him gets cancelled (we owe nothing anymore {'—'} he has his watch back). No inventory effect for us.
             </div>
           </button>
-          <button onClick={() => setPostSaleDisposition('KEEP_AS_OWN')}
+          <button onClick={() => setPostSaleDisposition('KEEP_AS_OWN')} data-consignment-return-disposition="KEEP_AS_OWN"
             className="cursor-pointer text-left"
             style={{
               padding: '14px 16px', borderRadius: 8,
@@ -998,12 +1042,35 @@ export function ConsignmentDetail() {
             </div>
           </button>
         </div>
+        {(linkedInvoice?.paidAmount || 0) > 0.005 && (
+          <div style={{ marginBottom: 16 }}>
+            <span className="text-overline">REFUND METHOD</span>
+            <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
+              {POST_SALE_REFUND_METHODS.map(m => (
+                <button key={m} onClick={() => setPostSaleRefundMethod(m)} data-consignment-return-refund-method={m}
+                  className="cursor-pointer rounded transition-all duration-200"
+                  style={{
+                    padding: '7px 14px', fontSize: 12,
+                    border: `1px solid ${postSaleRefundMethod === m ? '#0F0F10' : '#D5D9DE'}`,
+                    color: postSaleRefundMethod === m ? '#0F0F10' : '#6B7280',
+                    background: postSaleRefundMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent',
+                  }}>{REFUND_LABEL[m]}</button>
+              ))}
+            </div>
+            <div style={{ fontSize: 12, color: '#6B7280', marginTop: 6 }}>
+              The buyer paid <Bhd v={linkedInvoice?.paidAmount || 0}/> BHD — that amount is refunded this way.
+            </div>
+          </div>
+        )}
+        <Input label="REASON" placeholder="Optional reason..." value={postSaleReason}
+          onChange={e => setPostSaleReason(e.target.value)} data-consignment-return-reason style={{ marginBottom: 16 }} />
         <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12, color: '#4B5563', marginBottom: 16 }}>
           A Credit Note + Sales Return will be created automatically to refund the buyer for the original sale.
         </div>
+        <WriteError text={w.fehler} />
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setPostSaleReturnModal(false)}>Cancel</Button>
-          <Button variant="primary" onClick={handlePostSaleReturn}>Confirm Return</Button>
+          <Button variant="primary" onClick={() => void handlePostSaleReturn()} disabled={w.busy} data-consignment-return-after-sale-confirm>Confirm Return</Button>
         </div>
       </Modal>
 
@@ -1016,14 +1083,19 @@ export function ConsignmentDetail() {
           {linkedInvoice && (
             <li>Buyer Invoice <span className="font-mono" style={{ color: '#3D7FFF' }}>{formatInvoiceDisplayShort(linkedInvoice)}</span> → <strong>CANCELLED</strong> (AR cleared)</li>
           )}
+          {consignment.status === 'returned' && (
+            <li>The post-sale return and its credit note → <strong>cancelled</strong> (kept as history, not deleted)</li>
+          )}
+          {/* R6F — die Worte folgen der Buchung: der Rechnungsstorno kehrt Zahlungen im Hauptbuch um
+              (vorher stand hier „NOT auto-refunded"), der Einkaufsstorno ebenso (vorher „stay booked"). */}
           {linkedInvoice && (linkedInvoice.paidAmount || 0) > 0.005 && (
-            <li style={{ color: '#B45309' }}>Buyer already paid <strong><Bhd v={linkedInvoice.paidAmount}/> BHD</strong> — this is <strong>NOT auto-refunded</strong> (refund or delete the payment separately)</li>
+            <li style={{ color: '#B45309' }}>Buyer's payment of <strong><Bhd v={linkedInvoice.paidAmount}/> BHD</strong> → <strong>reversed in the books</strong> — hand the money back to the buyer</li>
           )}
           {linkedPurchase && (
-            <li>Consignor Purchase <span className="font-mono" style={{ color: '#3D7FFF' }}>{linkedPurchase.purchaseNumber}</span> → <strong>CANCELLED</strong>{(linkedPurchase.paidAmount || 0) > 0.005 ? '' : ' (AP cleared)'}</li>
+            <li>Consignor Purchase <span className="font-mono" style={{ color: '#3D7FFF' }}>{linkedPurchase.purchaseNumber}</span> → <strong>CANCELLED</strong> (AP cleared)</li>
           )}
           {linkedPurchase && (linkedPurchase.paidAmount || 0) > 0.005 && (
-            <li style={{ color: '#B45309' }}>Payments of <strong><Bhd v={linkedPurchase.paidAmount}/> BHD</strong> on the consignor purchase stay booked → open receivable against the consignor</li>
+            <li style={{ color: '#B45309' }}>Payments of <strong><Bhd v={linkedPurchase.paidAmount}/> BHD</strong> on the consignor purchase → <strong>reversed in the books</strong> — collect the money back from the consignor</li>
           )}
           {linkedLossExpense && (
             <li>Consignor-Loss-Expense <span className="font-mono" style={{ color: '#DC2626' }}>{linkedLossExpense.expenseNumber}</span> → <strong>CANCELLED</strong></li>
@@ -1046,9 +1118,10 @@ export function ConsignmentDetail() {
             so make sure you actually collect <Bhd v={consignment.payoutPaidAmount || 0}/> BHD back from the consignor.</>
           )}
         </div>
+        <WriteError text={w.fehler} />
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setCancelSaleModal(false)}>Keep Sale</Button>
-          <Button variant="danger" onClick={handleCancelSale}>Cancel Sale</Button>
+          <Button variant="danger" onClick={() => void handleCancelSale()} disabled={w.busy} data-consignment-cancel-sale-confirm>Cancel Sale</Button>
         </div>
       </Modal>
 

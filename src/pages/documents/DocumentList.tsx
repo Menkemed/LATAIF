@@ -6,8 +6,15 @@ import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { SearchSelect } from '@/components/ui/SearchSelect';
-import { useDocumentStore, type DocumentRow } from '@/stores/documentStore';
+import {
+  useDocumentStore, extractOcrOnPrimary, readFileAsDataUrl, uploadDocumentOnPrimary, type DocumentRow,
+} from '@/stores/documentStore';
 import type { DocumentClass, LinkedEntityType } from '@/core/models/types';
+// CENTRAL-UI-PARITY R6F — Hochladen und Texterkennung über die gemeinsame Weiche: am Primary die
+// Hausfolge, auf PC2 derselbe Rumpf als geprüfter Fernauftrag (`documents.upload`/`documents.set_ocr`).
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { DOCUMENT_MAX_FILE_BYTES, documentUploadBody, type DocumentOcrDone } from '@/core/office/document-house';
 
 const DOC_CLASSES: DocumentClass[] = ['invoice', 'receipt', 'certificate', 'warranty', 'photo', 'note', 'other'];
 const ENTITY_TYPES: LinkedEntityType[] = ['customer', 'product', 'offer', 'invoice', 'repair', 'consignment', 'agent_transfer', 'order'];
@@ -46,11 +53,13 @@ function DocIcon({ fileType }: { fileType: string }) {
 }
 
 export function DocumentList() {
-  const { documents, loadDocuments, uploadDocument, deleteDocument, extractOcr, getContent } = useDocumentStore();
+  const { documents, loadDocuments, deleteDocument, getContent } = useDocumentStore();
+  // R6F — EINE Weiche fuer beide Schreibhandlungen der Seite (ein Waechter je Befehl).
+  const w = useSharedWrites();
   const [filterClass, setFilterClass] = useState<DocumentClass | ''>('');
   const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
   const [showUpload, setShowUpload] = useState(false);
-  const [ocrRunning, setOcrRunning] = useState(false);
+  const [uploadError, setUploadError] = useState('');
   const [ocrError, setOcrError] = useState('');
   const [showPreview, setShowPreview] = useState<DocumentRow | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState<string | null>(null);
@@ -85,21 +94,57 @@ export function DocumentList() {
     return documents.filter(d => d.docClass === filterClass);
   }, [documents, filterClass]);
 
+  // R6F — die Datei reist als Data-URL; Typ und Größe bestimmt der Primary aus dem Inhalt. Die
+  // Vorprüfung hier spart nur das Lesen einer Datei, die nie synchronisieren könnte — die Regel
+  // selbst (die Zeile passt in eine Abgleich-Änderung) prüft das Haus.
   async function handleUpload() {
     if (!uploadFile) return;
+    setUploadError('');
+    w.clear();
+    if (uploadFile.size > DOCUMENT_MAX_FILE_BYTES) {
+      setUploadError(`This file is too large (${formatBytes(uploadFile.size)}). A document must stay below `
+        + `${formatBytes(DOCUMENT_MAX_FILE_BYTES)} so it can sync to the other computers.`);
+      return;
+    }
     setUploading(true);
     try {
-      await uploadDocument(
-        uploadFile,
-        uploadClass,
-        uploadEntityType || undefined,
-        uploadEntityId || undefined,
-      );
+      const content = await readFileAsDataUrl(uploadFile);
+      const body = documentUploadBody({
+        fileName: uploadFile.name, content, docClass: uploadClass,
+        linkedEntityType: uploadEntityType || null, linkedEntityId: uploadEntityId || null,
+      });
+      if (!await w.ok('documents.upload', {
+        local: () => uploadDocumentOnPrimary(body),
+        remote: () => body,
+      })) return;
+      loadDocuments();
       setShowUpload(false);
       resetUploadForm();
+    } catch (e) {
+      setUploadError(`The file could not be read: ${e instanceof Error ? e.message : String(e)}`);
     } finally {
       setUploading(false);
     }
+  }
+
+  // R6F — der Primary erkennt den Text aus SEINEM gespeicherten Inhalt; der Rumpf nennt nur das
+  // Dokument und die gesehene Fassung. Kein Text erkannt: der alte bleibt stehen (wie in der Datenbank).
+  async function handleOcr(doc: DocumentRow) {
+    setOcrError('');
+    const body = { documentId: doc.id, expectedRevision: doc.revision };
+    const r = await w.save<DocumentOcrDone>('documents.set_ocr', {
+      local: () => extractOcrOnPrimary(body),
+      remote: () => body,
+    });
+    if (r.kind !== 'ok') { setOcrError(fehlertext(r)); return; }
+    const v = r.value;
+    if (!v.text) setOcrError('No text detected. Try a clearer photo.');
+    setShowPreview((p) => (p && p.id === doc.id ? {
+      ...p,
+      revision: v.revision,
+      ...(v.stored ? { ocrText: v.text, ocrConfidence: v.confidence, ocrReviewed: true } : {}),
+    } : p));
+    loadDocuments();
   }
 
   function resetUploadForm() {
@@ -107,6 +152,7 @@ export function DocumentList() {
     setUploadClass('other');
     setUploadEntityType('');
     setUploadEntityId('');
+    setUploadError('');
   }
 
   function handleDelete(id: string) {
@@ -151,7 +197,7 @@ export function DocumentList() {
           >
             {viewMode === 'grid' ? <List size={16} /> : <Grid size={16} />}
           </button>
-          <Button variant="primary" icon={<Upload size={15} />} onClick={() => { setShowUpload(true); resetUploadForm(); }}>
+          <Button variant="primary" icon={<Upload size={15} />} onClick={() => { w.clear(); setShowUpload(true); resetUploadForm(); }} data-document-upload>
             Upload
           </Button>
         </div>
@@ -267,14 +313,16 @@ export function DocumentList() {
       {/* Upload Modal */}
       <Modal open={showUpload} onClose={() => setShowUpload(false)} title="Upload Document">
         <div className="space-y-5">
+          <WriteError text={uploadError || w.fehler} />
           {/* File picker */}
           <div>
             <label style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 8 }}>File</label>
             <input
               ref={fileInputRef}
               type="file"
-              onChange={e => setUploadFile(e.target.files?.[0] || null)}
+              onChange={e => { setUploadError(''); setUploadFile(e.target.files?.[0] || null); }}
               style={{ display: 'none' }}
+              data-document-file
             />
             <div
               className="flex items-center justify-center rounded-md cursor-pointer transition-colors"
@@ -308,6 +356,7 @@ export function DocumentList() {
                 <button
                   key={c}
                   onClick={() => setUploadClass(c)}
+                  data-document-class={c}
                   className="cursor-pointer transition-all"
                   style={{
                     padding: '6px 14px', fontSize: 12, borderRadius: 6,
@@ -342,6 +391,7 @@ export function DocumentList() {
                     placeholder="Entity ID"
                     value={uploadEntityId}
                     onChange={e => setUploadEntityId(e.target.value)}
+                    data-document-link-id
                     className="w-full outline-none transition-colors"
                     style={{
                       background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 8,
@@ -358,7 +408,7 @@ export function DocumentList() {
           {/* Actions */}
           <div className="flex justify-end gap-3" style={{ paddingTop: 8 }}>
             <Button variant="ghost" onClick={() => setShowUpload(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleUpload} disabled={!uploadFile || uploading}>
+            <Button variant="primary" onClick={() => void handleUpload()} disabled={!uploadFile || uploading || w.busy} data-document-upload-confirm>
               {uploading ? 'Uploading...' : 'Upload'}
             </Button>
           </div>
@@ -430,20 +480,10 @@ export function DocumentList() {
                   <span className="text-overline">EXTRACTED TEXT {showPreview.ocrConfidence ? `(${Math.round(showPreview.ocrConfidence)}% confidence)` : ''}</span>
                   <Button
                     variant="secondary"
-                    onClick={async () => {
-                      setOcrRunning(true);
-                      setOcrError('');
-                      try {
-                        const res = await extractOcr(showPreview.id);
-                        if (!res.text) setOcrError('No text detected. Try a clearer photo.');
-                        setShowPreview({ ...showPreview, ocrText: res.text, ocrConfidence: res.confidence, ocrReviewed: true });
-                      } catch (e) {
-                        setOcrError(String(e));
-                      }
-                      setOcrRunning(false);
-                    }}
-                    disabled={ocrRunning}
-                  >{ocrRunning ? 'Extracting...' : showPreview.ocrText ? 'Re-run OCR' : 'Extract Text (OCR)'}</Button>
+                    onClick={() => void handleOcr(showPreview)}
+                    disabled={w.busy}
+                    data-document-ocr
+                  >{w.busy ? 'Extracting...' : showPreview.ocrText ? 'Re-run OCR' : 'Extract Text (OCR)'}</Button>
                 </div>
                 {showPreview.ocrText ? (
                   <pre style={{ fontSize: 12, color: '#4B5563', whiteSpace: 'pre-wrap', fontFamily: 'inherit', lineHeight: 1.6, maxHeight: 200, overflowY: 'auto', margin: 0 }}>

@@ -477,8 +477,12 @@ export async function runProductUpdate(
 
   const outcome = await runRemoteCommand(deps, identity, async () => {
     const store = useProductStore.getState();
+    // R6F — in die Bücher DIESER Filiale, oder gar nicht (wie beim Anlegen): der Ausweis einer
+    // anderen Filiale ändert hier nichts, und ein Artikel einer anderen Filiale ist von hier aus
+    // nicht vorhanden. Vorher prüfte der Befehl nur, OB es die Kennung gibt — nicht, wo.
+    assertHouseBranch(identity);
     // Den Artikel muss es geben — sonst liefe ein Edit still ins Leere und meldete Erfolg.
-    if (query('SELECT id FROM products WHERE id = ?', [id]).length === 0) {
+    if (query('SELECT id FROM products WHERE id = ? AND branch_id = ?', [id, identity.branchId]).length === 0) {
       throw new CommandRejected('PRODUCT_NOT_FOUND', 'no such product');
     }
 

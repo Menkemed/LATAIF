@@ -12,6 +12,13 @@ import { StaffFilterPill } from '@/components/employees/StaffFilterPill';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { PurchaseStatus } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
+// CENTRAL-UI-PARITY R6F — „Dismiss" am Inbox-Foto ist EINE Buchung (`purchases.dismiss_inbox`): am
+// Primary die Hausfolge in einer Klammer, auf PC2 der geprüfte Befehl. Das Foto selbst bleibt in
+// seiner Zeile (Vertrag der Inbox); verworfen heißt: kein Leser zeigt es mehr.
+import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { PURCHASE_LIFECYCLE_OP } from '@/core/purchases/purchase-lifecycle-house';
+import { saveInboxDismiss } from '@/core/purchases/purchase-house';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -21,9 +28,20 @@ type StatusFilter = '' | PurchaseStatus;
 
 export function PurchaseList() {
   const navigate = useNavigate();
-  const { purchases, loadPurchases, purchaseInbox, loadPurchaseInbox, dismissPurchaseInbox } = usePurchaseStore();
+  const { purchases, loadPurchases, purchaseInbox, loadPurchaseInbox } = usePurchaseStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
   const { loadEmployees } = useEmployeeStore();
+  const verwerfen = useSharedWrite<Record<string, unknown>>(PURCHASE_LIFECYCLE_OP.DISMISS_INBOX);
+  const [inboxFehler, setInboxFehler] = useState('');
+
+  // R6F — vorher ein blinder Status-Update direkt im Store. Jetzt EINE Buchung; ein Nein (z. B. das
+  // Foto wurde inzwischen schon verarbeitet) steht sichtbar in der Inbox-Karte.
+  async function dismissInboxPhoto(inboxId: string) {
+    if (verwerfen.busy) return;
+    setInboxFehler('');
+    const r = await saveInboxDismiss(verwerfen, inboxId);
+    if (r.kind !== 'ok') setInboxFehler(fehlertext(r));
+  }
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState('');
@@ -112,8 +130,10 @@ export function PurchaseList() {
                     : <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: 24 }}>🛒</div>}
                 </div>
                 <button
-                  onClick={() => dismissPurchaseInbox(item.id)}
+                  onClick={() => void dismissInboxPhoto(item.id)}
                   title="Dismiss"
+                  disabled={verwerfen.busy}
+                  data-purchase-inbox-dismiss={item.id}
                   style={{
                     position: 'absolute', top: -7, right: -7, width: 20, height: 20, borderRadius: 999,
                     background: '#0F0F10', color: '#FFFFFF', border: '2px solid #FFFFFF',
@@ -124,6 +144,7 @@ export function PurchaseList() {
               </div>
             ))}
           </div>
+          <WriteError text={inboxFehler} />
         </Card>
       )}
       {filtered.length === 0 ? (

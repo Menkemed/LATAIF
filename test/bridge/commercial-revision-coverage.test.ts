@@ -430,7 +430,8 @@ const ORDER = { customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, un
   const schema = src('src/core/db/schema.sql') + src('src/core/db/database.ts');
   ok(!/CREATE TABLE IF NOT EXISTS consignment_[a-z_]+/.test(schema),
     'CONSIGN-COVERAGE es gibt keine Kommissions-Kindtabelle — die Zeile IST der Vorgang');
-  const writers = [...src('src/stores/consignmentStore.ts').matchAll(/UPDATE consignments|updateConsignment\(/g)].length;
+  // R6F — Rückgabe nach Verkauf und Verkaufsstorno schreiben die Zeile seither in ihrer Hausfolge.
+  const writers = [...(src('src/stores/consignmentStore.ts') + src('src/core/consignment/consignment-reversal-house.ts')).matchAll(/UPDATE consignments|updateConsignment\(/g)].length;
   ok(writers >= 8, `CONSIGN-COVERAGE und alle Schreiber gehen ueber die Zeile (${writers} Stellen)`);
 }
 
@@ -544,7 +545,7 @@ const ORDER = { customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, un
   // CENTRAL-C3H hat die sechzehn in C3G als `B_DEFERRED` klassifizierten Aktionen freigeschaltet.
   // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
-  ok(known.length === 59 && reads.length === 18 && ALLOWED_MUTATIONS.length === 88,
+  ok(known.length === 59 && reads.length === 18 && ALLOWED_MUTATIONS.length === 102,
     `SCOPE 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
   ok(!ALLOWED_MUTATIONS.includes('purchases.update'),
     'SCOPE der Einkauf bleibt Create-only — es gibt keinen lokalen Edit-Pfad');

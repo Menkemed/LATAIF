@@ -15,9 +15,14 @@ import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { Modal } from '@/components/ui/Modal';
 import { StatusDot } from '@/components/ui/StatusDot';
-import { useTaskStore } from '@/stores/taskStore';
+import { useTaskStore, createTaskOnPrimary, updateTaskOnPrimary, type TaskRow } from '@/stores/taskStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Task, TaskType, TaskPriority, TaskStatus, LinkedEntityType } from '@/core/models/types';
+// CENTRAL-UI-PARITY R6F — Anlegen, Speichern und „Complete" über die gemeinsame Weiche: am Primary die
+// Hausfolge, auf PC2 derselbe Rumpf als geprüfter Fernauftrag (`tasks.create`/`tasks.update`).
+import { useSharedWrites } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { taskCompleteBody, taskCreateBody, taskUpdateBody } from '@/core/office/task-house';
 
 // ── Constants ──
 
@@ -87,14 +92,17 @@ function formatRelative(iso?: string): string {
 
 // ── Select Component ──
 
-function Select({ value, onChange, options, style }: {
+function Select({ value, onChange, options, style, hook }: {
   value: string;
   onChange: (v: string) => void;
   options: { value: string; label: string }[];
   style?: React.CSSProperties;
+  /** R6F — stabiler Haken fuer die E2E-Pruefung (`data-…`). */
+  hook?: string;
 }) {
   return (
     <select
+      {...(hook ? { [hook]: '' } : {})}
       value={value}
       onChange={e => onChange(e.target.value)}
       style={{
@@ -126,17 +134,19 @@ function Select({ value, onChange, options, style }: {
 
 // ── Textarea ──
 
-function Textarea({ label, value, onChange, rows = 3 }: {
+function Textarea({ label, value, onChange, rows = 3, hook }: {
   label?: string;
   value: string;
   onChange: (v: string) => void;
   rows?: number;
+  hook?: string;
 }) {
   const [focused, setFocused] = useState(false);
   return (
     <div>
       {label && <label className="text-overline" style={{ marginBottom: 6, display: 'block' }}>{label}</label>}
       <textarea
+        {...(hook ? { [hook]: '' } : {})}
         value={value}
         onChange={e => onChange(e.target.value)}
         rows={rows}
@@ -207,11 +217,14 @@ const EMPTY_FORM: TaskFormData = {
   notes: '',
 };
 
-function TaskFormModal({ open, onClose, task, onSave }: {
+function TaskFormModal({ open, onClose, task, onSave, busy, error }: {
   open: boolean;
   onClose: () => void;
   task?: Task | null;
-  onSave: (data: TaskFormData) => void;
+  /** R6F — `true` nur, wenn der Primary gespeichert hat; erst dann schliesst sich die Maske. */
+  onSave: (data: TaskFormData) => Promise<boolean>;
+  busy: boolean;
+  error: string;
 }) {
   const [form, setForm] = useState<TaskFormData>(EMPTY_FORM);
 
@@ -239,17 +252,20 @@ function TaskFormModal({ open, onClose, task, onSave }: {
   return (
     <Modal open={open} onClose={onClose} title={task ? 'Edit Task' : 'New Task'} width={560}>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
+        <WriteError text={error} />
         <Input
           label="TITLE"
           value={form.title}
           onChange={e => set('title', e.target.value)}
           placeholder="Task title..."
+          data-task-title
         />
 
         <Textarea
           label="DESCRIPTION"
           value={form.description}
           onChange={v => set('description', v)}
+          hook="data-task-description"
         />
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
@@ -260,6 +276,7 @@ function TaskFormModal({ open, onClose, task, onSave }: {
               onChange={v => set('type', v)}
               options={TASK_TYPES.map(t => ({ value: t.value, label: t.label }))}
               style={{ width: '100%' }}
+              hook="data-task-type"
             />
           </div>
           <div>
@@ -269,6 +286,7 @@ function TaskFormModal({ open, onClose, task, onSave }: {
               onChange={v => set('priority', v)}
               options={PRIORITIES.map(p => ({ value: p.value, label: p.label }))}
               style={{ width: '100%' }}
+              hook="data-task-priority"
             />
           </div>
         </div>
@@ -278,6 +296,7 @@ function TaskFormModal({ open, onClose, task, onSave }: {
           type="date"
           value={form.dueAt}
           onChange={e => set('dueAt', e.target.value)}
+          data-task-due
         />
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
@@ -288,6 +307,7 @@ function TaskFormModal({ open, onClose, task, onSave }: {
               onChange={v => set('linkedEntityType', v)}
               options={[{ value: '', label: 'None' }, ...ENTITY_TYPES.map(e => ({ value: e.value, label: e.label }))]}
               style={{ width: '100%' }}
+              hook="data-task-link-type"
             />
           </div>
           <div>
@@ -296,10 +316,12 @@ function TaskFormModal({ open, onClose, task, onSave }: {
               value={form.linkedEntityId}
               onChange={e => set('linkedEntityId', e.target.value)}
               placeholder="ID..."
+              data-task-link-id
             />
           </div>
         </div>
 
+        {/* R6F — offen: NOTES hat keine Spalte in `tasks` und wurde nie gespeichert (s. Bericht). */}
         <Textarea
           label="NOTES"
           value={form.notes}
@@ -311,8 +333,9 @@ function TaskFormModal({ open, onClose, task, onSave }: {
           <Button variant="secondary" onClick={onClose}>Cancel</Button>
           <Button
             variant="primary"
-            onClick={() => { onSave(form); onClose(); }}
-            disabled={!form.title.trim()}
+            onClick={async () => { if (await onSave(form)) onClose(); }}
+            disabled={!form.title.trim() || busy}
+            data-task-save
           >
             {task ? 'Save Changes' : 'Create Task'}
           </Button>
@@ -325,7 +348,9 @@ function TaskFormModal({ open, onClose, task, onSave }: {
 // ── Main Component ──
 
 export function TaskList() {
-  const { tasks, loadTasks, createTask, updateTask, completeTask, deleteTask } = useTaskStore();
+  const { tasks, loadTasks, deleteTask } = useTaskStore();
+  // R6F — EINE Weiche fuer die drei Schreibhandlungen der Seite (ein Waechter je Befehl).
+  const w = useSharedWrites();
 
   const [filterStatus, setFilterStatus] = useState<TaskStatus | ''>('');
   const [filterPriority, setFilterPriority] = useState<TaskPriority | ''>('');
@@ -333,7 +358,7 @@ export function TaskList() {
   const [searchQuery, setSearchQuery] = useState('');
 
   const [modalOpen, setModalOpen] = useState(false);
-  const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [editingTask, setEditingTask] = useState<TaskRow | null>(null);
 
   useEffect(() => {
     loadTasks();
@@ -358,34 +383,36 @@ export function TaskList() {
     overdue: tasks.filter(isOverdue).length,
   }), [tasks]);
 
-  const handleSave = (form: TaskFormData) => {
-    if (editingTask) {
-      updateTask(editingTask.id, {
-        title: form.title,
-        description: form.description || undefined,
-        type: form.type as TaskType,
-        priority: form.priority as TaskPriority,
-        dueAt: form.dueAt ? new Date(form.dueAt).toISOString() : undefined,
-        linkedEntityType: (form.linkedEntityType as LinkedEntityType) || undefined,
-        linkedEntityId: form.linkedEntityId || undefined,
+  // R6F — vorher schloss sich die Maske VOR dem Ergebnis; jetzt erst, wenn der Primary gespeichert
+  // hat. Das Faelligkeitsdatum reist als Tag — der Primary macht daraus denselben ISO-Zeitpunkt.
+  const handleSave = async (form: TaskFormData): Promise<boolean> => {
+    const t = editingTask;
+    const saved = t
+      ? await w.ok('tasks.update', {
+        local: () => updateTaskOnPrimary(taskUpdateBody(t, form)),
+        remote: () => taskUpdateBody(t, form),
+      })
+      : await w.ok('tasks.create', {
+        local: () => createTaskOnPrimary(taskCreateBody(form)),
+        remote: () => taskCreateBody(form),
       });
-    } else {
-      createTask({
-        title: form.title,
-        description: form.description || undefined,
-        type: form.type as TaskType,
-        priority: form.priority as TaskPriority,
-        dueAt: form.dueAt ? new Date(form.dueAt).toISOString() : undefined,
-        linkedEntityType: (form.linkedEntityType as LinkedEntityType) || undefined,
-        linkedEntityId: form.linkedEntityId || undefined,
-        notes: form.notes || undefined,
-      });
-    }
+    if (!saved) return false;
+    loadTasks();
     setEditingTask(null);
+    return true;
   };
 
-  const openNew = () => { setEditingTask(null); setModalOpen(true); };
-  const openEdit = (task: Task) => { setEditingTask(task); setModalOpen(true); };
+  // „Complete" ist eine Aenderung des Status — derselbe Befehl, mit der gesehenen Fassung.
+  const handleComplete = async (task: TaskRow): Promise<void> => {
+    if (!await w.ok('tasks.update', {
+      local: () => updateTaskOnPrimary(taskCompleteBody(task)),
+      remote: () => taskCompleteBody(task),
+    })) return;
+    loadTasks();
+  };
+
+  const openNew = () => { w.clear(); setEditingTask(null); setModalOpen(true); };
+  const openEdit = (task: TaskRow) => { w.clear(); setEditingTask(task); setModalOpen(true); };
 
   return (
     <PageLayout
@@ -395,11 +422,12 @@ export function TaskList() {
       onSearch={setSearchQuery}
       searchPlaceholder="Search tasks..."
       actions={
-        <Button variant="primary" icon={<Plus size={16} />} onClick={openNew}>
+        <Button variant="primary" icon={<Plus size={16} />} onClick={openNew} data-task-new>
           New Task
         </Button>
       }
     >
+      {!modalOpen && <WriteError text={w.fehler} />}
       {/* Summary Cards */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 32 }}>
         {[
@@ -486,8 +514,9 @@ export function TaskList() {
                 task={task}
                 overdue={overdue}
                 onEdit={() => openEdit(task)}
-                onComplete={() => completeTask(task.id)}
+                onComplete={() => void handleComplete(task)}
                 onDelete={() => { if (blockDeleteOnClient()) return; deleteTask(task.id); }}
+                busy={w.busy}
               />
             );
           })
@@ -497,9 +526,11 @@ export function TaskList() {
       {/* Modal */}
       <TaskFormModal
         open={modalOpen}
-        onClose={() => { setModalOpen(false); setEditingTask(null); }}
+        onClose={() => { setModalOpen(false); setEditingTask(null); w.clear(); }}
         task={editingTask}
         onSave={handleSave}
+        busy={w.busy}
+        error={w.fehler}
       />
     </PageLayout>
   );
@@ -507,12 +538,13 @@ export function TaskList() {
 
 // ── Task Row ──
 
-function TaskRow({ task, overdue, onEdit, onComplete, onDelete }: {
+function TaskRow({ task, overdue, onEdit, onComplete, onDelete, busy }: {
   task: Task;
   overdue: boolean;
   onEdit: () => void;
   onComplete: () => void;
   onDelete: () => void;
+  busy: boolean;
 }) {
   const [hovered, setHovered] = useState(false);
   const isCompleted = task.status === 'completed' || task.status === 'cancelled';
@@ -595,6 +627,8 @@ function TaskRow({ task, overdue, onEdit, onComplete, onDelete }: {
           <button
             onClick={onComplete}
             title="Complete"
+            disabled={busy}
+            data-task-complete
             style={{
               background: 'none',
               border: 'none',
@@ -612,6 +646,7 @@ function TaskRow({ task, overdue, onEdit, onComplete, onDelete }: {
         <button
           onClick={onEdit}
           title="Edit"
+          data-task-edit
           style={{
             background: 'none',
             border: 'none',

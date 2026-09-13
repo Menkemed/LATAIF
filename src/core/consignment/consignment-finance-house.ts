@@ -21,6 +21,13 @@ import {
   ACCEPTED_PAYOUT_METHODS, ConsignmentActionRejected, payoutOpenAmount,
   type ConsignmentPayoutInput, type ConsignmentSaleInput,
 } from './consignment-finance';
+// R6F — die Rücknahmen nach dem Verkauf: dieselbe Klammer, dieselben Listen danach.
+import { isClientMode } from '@/core/bridge/client-mode';
+import { CONSIGNMENT_PRIMARY_ONLY, type ConsignmentReturnAfterSaleInput } from './consignment-reversal';
+import {
+  cancelConsignmentSaleInHouse, localConsignmentActor, returnConsignmentAfterSaleInHouse,
+  type ConsignmentReturnedAfterSale, type ConsignmentSaleCancelled,
+} from './consignment-reversal-house';
 
 const SALE_VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/below consignor floor/i, 'SALE_BELOW_FLOOR'],
@@ -160,4 +167,30 @@ export function recordConsignmentSaleOnPrimary(id: string, input: ConsignmentSal
 /** „Pay Out Consignor" am Primary. */
 export function payOutConsignmentOnPrimary(id: string, input: ConsignmentPayoutInput): Promise<{ appliedAmount: number }> {
   return runOnPrimary(() => payOutConsignmentInHouse(id, input, currentBranchId()), frischLesen);
+}
+
+/**
+ * R6F — „Buyer Returns the Item" am Primary: dieselbe Hausfolge wie `consignments.return_after_sale`,
+ * exklusiv, in EINER Transaktion, erst danach durabel. Ohne Datenbank (PC2) kein lokaler Versuch.
+ */
+export function returnConsignmentAfterSaleOnPrimary(
+  id: string, input: ConsignmentReturnAfterSaleInput,
+): Promise<ConsignmentReturnedAfterSale> {
+  if (isClientMode()) {
+    return Promise.reject(new ConsignmentActionRejected(CONSIGNMENT_PRIMARY_ONLY,
+      'a post-sale return is booked on the main computer — this window has no business database'));
+  }
+  return runOnPrimary(() => returnConsignmentAfterSaleInHouse(id, input, currentBranchId()), frischLesen);
+}
+
+/**
+ * R6F — „Cancel Sale" am Primary: dieselbe Hausfolge wie `consignments.cancel_sale`. Verantwortlich ist
+ * die Sitzung — ihre Rolle entscheidet über den Storno einer eigenen Rückgabe nach dem Verkauf (Owner).
+ */
+export function cancelConsignmentSaleOnPrimary(id: string): Promise<ConsignmentSaleCancelled> {
+  if (isClientMode()) {
+    return Promise.reject(new ConsignmentActionRejected(CONSIGNMENT_PRIMARY_ONLY,
+      'a sale is cancelled on the main computer — this window has no business database'));
+  }
+  return runOnPrimary(() => cancelConsignmentSaleInHouse(id, localConsignmentActor(), currentBranchId()), frischLesen);
 }

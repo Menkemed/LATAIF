@@ -169,7 +169,7 @@ const PURCHASE_BODY = {
   // CENTRAL-C3H hat die sechzehn in C3G als `B_DEFERRED` klassifizierten Aktionen freigeschaltet.
   // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
-  ok(list.length === 88, `SCOPE genau 88 Mutationen sind freigegeben (R6E) (${list.length})`);
+  ok(list.length === 102, `SCOPE genau 102 Mutationen sind freigegeben (R6F) (${list.length})`);
   for (const op of ['purchases.create', 'consignments.create', 'consignments.update', 'orders.create', 'orders.update']) {
     ok(list.includes(op), `SCOPE ${op} steht namentlich in der Zulassungsliste`);
   }
@@ -178,7 +178,8 @@ const PURCHASE_BODY = {
     ok(list.includes(op), `SCOPE ${op} ist seit C3H freigegeben`);
   }
   for (const op of [
-    'purchases.update', 'purchases.cancel', 'purchases.add_payment', 'purchases.create_return',
+    // R6F — `purchases.cancel` ist seither freigegeben (Einkaufsstorno als EINE Hausfolge).
+    'purchases.update', 'purchases.add_payment', 'purchases.create_return',
     'consignments.mark_paid_out', 'consignments.delete',
     'orders.delete', 'orders.cancel_with_money',
   ]) {
