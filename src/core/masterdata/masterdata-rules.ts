@@ -46,10 +46,12 @@ function name(v: unknown, code: string, what: string): string {
   return t;
 }
 
-function number(v: unknown, what: string, min: number, max: number): number | undefined {
+function number(v: unknown, what: string, min: number, max = Number.POSITIVE_INFINITY): number | undefined {
   if (v === undefined || v === null || v === '') return undefined;
   if (typeof v !== 'number' || !Number.isFinite(v)) return fail('MASTERDATA_FIELD_INVALID', `${what} must be a number`);
-  if (v < min || v > max) return fail('MASTERDATA_FIELD_OUT_OF_RANGE', `${what} must be between ${min} and ${max}`);
+  if (v < min || v > max) {
+    return fail('MASTERDATA_FIELD_OUT_OF_RANGE', Number.isFinite(max) ? `${what} must be between ${min} and ${max}` : `${what} cannot be below ${min}`);
+  }
   return v;
 }
 
@@ -117,8 +119,7 @@ export type EmploymentStatusValue = typeof EMPLOYMENT_STATUSES[number];
 
 export const EMPLOYEE_FIELDS = ['name', 'role', 'employmentStatus', 'baseSalary', 'phone', 'email', 'notes'] as const;
 export const EMPLOYEE_NAME_REQUIRED = 'EMPLOYEE_NAME_REQUIRED';
-/** Ein Grundgehalt ist ein Monatsbetrag in BHD — nie negativ. */
-export const MAX_BASE_SALARY = 1_000_000;
+/** Ein Grundgehalt ist ein Monatsbetrag in BHD: eine endliche Zahl, nie negativ — keine Obergrenze. */
 
 export interface EmployeeCreateInput {
   name: string;
@@ -156,7 +157,7 @@ export function employeeCreateInput(raw: Record<string, unknown>): EmployeeCreat
     const v = text(raw[k], k);
     if (v !== undefined) out[k] = v;
   }
-  const salary = number(raw.baseSalary, 'baseSalary', 0, MAX_BASE_SALARY);
+  const salary = number(raw.baseSalary, 'baseSalary', 0);
   if (salary !== undefined) out.baseSalary = salary;
   return out;
 }
@@ -169,7 +170,7 @@ export function employeeUpdateInput(raw: Record<string, unknown>): EmployeeUpdat
   }
   if (has(raw, 'employmentStatus')) out.employmentStatus = status(raw.employmentStatus);
   if (Object.prototype.hasOwnProperty.call(raw, 'baseSalary')) {
-    out.baseSalary = number(raw.baseSalary, 'baseSalary', 0, MAX_BASE_SALARY) ?? null;
+    out.baseSalary = number(raw.baseSalary, 'baseSalary', 0) ?? null;
   }
   return out;
 }

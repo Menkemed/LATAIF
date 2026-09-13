@@ -606,7 +606,7 @@ registerCommand(OP_INVENTORY_SESSION_GET, {
     const { tauriInventoryCore } = await import('@/core/stock/inventory-core');
     const { getDatabase } = await import('@/core/db/database');
     const raw = inputOf(payload).productIds;
-    const asked = Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string' && x !== '').slice(0, house.MAX_INVENTORY_PRODUCTS) : [];
+    const asked = Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string' && x !== '') : [];
     const db = getDatabase() as never;
     const mine = [...house.productsOfBranch(db, ctx.branchId, asked)];
     return { data: { sheet: house.readSheet(db, ctx.branchId), latest: mine.length ? await tauriInventoryCore().latest(mine) : {} } };

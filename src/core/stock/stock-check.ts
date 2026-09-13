@@ -109,9 +109,22 @@ export async function recordStockCheck(params: {
   });
 }
 
+/**
+ * CENTRAL-UI-PARITY R6C — so viele Artikel beantwortet der Kern je Aufruf (`latest_stock_checks` nimmt
+ * die ersten 1000). Vorher fragte die Inventur mit der ganzen Liste — alles hinter Position 1000 blieb
+ * still ohne letzte Beobachtung und wurde nie eingefaltet. Jetzt wird in Blöcken gefragt: keine Grenze
+ * für die Inventur, keine stille Kürzung.
+ */
+export const LATEST_STOCK_CHECKS_BATCH = 1000;
+
 export async function latestStockChecks(productIds: string[]): Promise<Record<string, StockCheck>> {
   if (productIds.length === 0) return {};
-  return invoke<Record<string, StockCheck>>('latest_stock_checks', { productIds });
+  const out: Record<string, StockCheck> = {};
+  for (let i = 0; i < productIds.length; i += LATEST_STOCK_CHECKS_BATCH) {
+    const block = productIds.slice(i, i + LATEST_STOCK_CHECKS_BATCH);
+    Object.assign(out, await invoke<Record<string, StockCheck>>('latest_stock_checks', { productIds: block }));
+  }
+  return out;
 }
 
 /** Human label for a verdict. One place, so mobile and desktop wording cannot drift apart. */

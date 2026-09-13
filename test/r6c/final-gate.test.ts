@@ -271,9 +271,10 @@ marker('CENTRAL_UI_R6C_REGISTRY_121_AUDITED');
     ok((wirft(() => rules.partnerCreateInput({ name: 'P', sharePercentage: v })) === '') === good && (wirft(() => md.parsePartnerUpdate({ id: 'p', sharePercentage: v })) === '') === good,
       `AUTH Partneranteil ${String(v)}: ${good ? 'angenommen' : 'abgewiesen'} (Primary und fern)`);
   }
-  // Grundgehalt: der gepinnte Vertrag — endliche Zahl, 0 ≤ Gehalt ≤ MAX_BASE_SALARY.
-  ok(rules.MAX_BASE_SALARY === 1_000_000, 'AUTH Obergrenze Grundgehalt 1 000 000 BHD (Plausibilitätsriegel, dokumentiert)');
-  for (const [v, good] of [[0, true], [400, true], [1_000_000, true], [-0.01, false], [1_000_000.01, false], [Number.POSITIVE_INFINITY, false], ['400', false]] as Array<[unknown, boolean]>) {
+  // Grundgehalt: der kanonische Vertrag — endliche Zahl ≥ 0, keine Obergrenze.
+  ok(!('MAX_BASE_SALARY' in rules), 'AUTH keine erfundene Obergrenze für das Grundgehalt');
+  for (const [v, good] of [[0, true], [400, true], [1_000_000, true], [1_000_000.01, true], [50_000_000, true], [Number.MAX_SAFE_INTEGER, true],
+    [-0.01, false], [-1, false], [Number.POSITIVE_INFINITY, false], [Number.NaN, false], ['400', false]] as Array<[unknown, boolean]>) {
     ok((wirft(() => rules.employeeCreateInput({ name: 'E', baseSalary: v })) === '') === good && (wirft(() => md.parseEmployeeUpdate({ id: 'e', baseSalary: v })) === '') === good,
       `AUTH Grundgehalt ${String(v)}: ${good ? 'angenommen' : 'abgewiesen'} (Primary und fern)`);
   }
@@ -406,6 +407,23 @@ marker('CENTRAL_UI_R6C_INVENTORY_CONTRACT_PINNED');
     'DURABLE in der Maske stehen die lokalen Hausfolgen nur im Primary-Anschluss (`local:`)');
 }
 marker('CENTRAL_UI_R6C_INVENTORY_DURABILITY_PINNED');
+
+// ══ §4b — keine erfundenen Grenzen ══════════════════════════════════════════
+{
+  const { readdirSync } = await import('node:fs');
+  const walk = (dir: string): string[] => readdirSync(resolvePath(repo, dir), { withFileTypes: true })
+    .flatMap((e) => (e.isDirectory() ? walk(`${dir}/${e.name}`) : /\.(ts|tsx)$/.test(e.name) ? [`${dir}/${e.name}`] : []));
+  const hits = walk('src').filter((p) => /MAX_BASE_SALARY|MAX_INVENTORY_PRODUCTS|INVENTORY_TOO_MANY/.test(src(p)));
+  ok(hits.length === 0, `LIMIT keine Obergrenze fürs Grundgehalt, keine Höchstzahl für eine Inventur (${hits.join(', ') || 'nirgends'})`);
+  const rustTake = Number(/async fn latest_stock_checks[\s\S]*?\.take\((\d+)\)/.exec(src('src-tauri/src/lib.rs'))?.[1] ?? Number.NaN);
+  ok(stockCheck.LATEST_STOCK_CHECKS_BATCH <= rustTake, `LIMIT je Kernaufruf höchstens so viele Artikel, wie der Kern beantwortet (${stockCheck.LATEST_STOCK_CHECKS_BATCH} ≤ ${rustTake})`);
+  const lsc = codeOf(src('src/core/stock/stock-check.ts'));
+  ok(/i \+= LATEST_STOCK_CHECKS_BATCH/.test(lsc) && /productIds\.slice\(i, i \+ LATEST_STOCK_CHECKS_BATCH\)/.test(lsc),
+    'LIMIT die letzten Beobachtungen werden in Blöcken gelesen — keine stille Kürzung hinter Position 1000');
+  ok(!/\.slice\(0, [^)]*\)/.test(codeOf(src('src/core/stock/inventory-core.ts'))) && /latestStockChecks\(\[\.\.\.productIds\]\)/.test(src('src/core/stock/inventory-core.ts')),
+    'LIMIT der Anschluss des Primary reicht die ganze Liste weiter');
+}
+marker('CENTRAL_UI_R6C_NO_INVENTED_LIMITS_PINNED');
 
 // ══ §5 — R6A-Abschluss ══════════════════════════════════════════════════════
 {

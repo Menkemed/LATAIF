@@ -62,10 +62,6 @@ export const INVENTORY_PRODUCT_NOT_IN_BRANCH = 'INVENTORY_PRODUCT_NOT_IN_BRANCH'
 export const INVENTORY_PRODUCT_OUTSIDE_RUN = 'INVENTORY_PRODUCT_OUTSIDE_RUN';
 export const INVENTORY_VERDICT_INVALID = 'INVENTORY_VERDICT_INVALID';
 export const INVENTORY_NOTE_TOO_LONG = 'INVENTORY_NOTE_TOO_LONG';
-export const INVENTORY_TOO_MANY = 'INVENTORY_TOO_MANY';
-
-/** Eine Maske zeigt die gefilterte Sammlung — begrenzt, damit ein Auftrag keine Liste ohne Ende wird. */
-export const MAX_INVENTORY_PRODUCTS = 5000;
 
 /** Wie das Haus Beobachtungen liest und schreibt — der Kern des Primary (Tauri) oder im Test ein Ersatz. */
 export interface InventoryCore {
@@ -109,11 +105,11 @@ export function productsOfBranch(db: InventorySessionDb, branchId: string, wante
   return found;
 }
 
-/** Jeder genannte Artikel gehört zu DIESER Filiale — sonst ein Nein, bevor irgendetwas geschrieben wird. */
+/**
+ * Jeder genannte Artikel gehört zu DIESER Filiale — sonst ein Nein, bevor irgendetwas geschrieben wird.
+ * Keine Höchstzahl: eine Inventur umfasst alle Artikel der Filiale, gelesen wird in Blöcken.
+ */
 export function assertProductsInBranch(db: InventorySessionDb, branchId: string, wanted: readonly string[]): void {
-  if (wanted.length > MAX_INVENTORY_PRODUCTS) {
-    throw new InventoryRejected(INVENTORY_TOO_MANY, `at most ${MAX_INVENTORY_PRODUCTS} items per inventory`);
-  }
   const found = productsOfBranch(db, branchId, wanted);
   const missing = wanted.filter((id) => !found.has(id));
   if (missing.length > 0) {

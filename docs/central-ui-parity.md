@@ -2701,8 +2701,8 @@ Unbekannte Namen bleiben fail-closed (`BRIDGE_OP_NOT_REGISTERED`; `suppliers.del
 **Stammdaten — Autorität des Primary** (`CENTRAL_UI_R6C_MASTERDATA_AUTHORITY_PINNED`): keine Summe, kein Saldo, keine
 Provision aus einem Formularstand (weder in den Feldlisten noch in der Hausfunktion); Filiale und Kennung (UUID v4) nur
 vom Primary, Datensätze fremder Filialen „nicht vorhanden"; leere Pflichtnamen am Primary und fern mit demselben Code
-abgewiesen; Partneranteil **0–100 %** (Bereich des Modells); Grundgehalt **endlich, 0 ≤ Gehalt ≤ 1 000 000 BHD**
-(Untergrenze fachlich, Obergrenze Plausibilitätsriegel); Aktiv-Schalter nur als echter Wahrheitswert, Mitarbeiterstatus nur
+abgewiesen; Partneranteil **0–100 %** (Bereich des Modells); Grundgehalt **≥ 0** (endliche Zahl; negativ abgewiesen,
+keine Obergrenze — Primary und PC2 dieselbe Regel); Aktiv-Schalter nur als echter Wahrheitswert, Mitarbeiterstatus nur
 `active`/`on_leave`/`inactive`, jeder Übergang zwischen ihnen erlaubt wie am Primary.
 
 **Inventur — Vertrag** (`CENTRAL_UI_R6C_INVENTORY_CONTRACT_PINNED`): erfasst werden verfügbar / nicht verfügbar, Notiz
@@ -2710,8 +2710,10 @@ abgewiesen; Partneranteil **0–100 %** (Bereich des Modells); Grundgehalt **end
 `inventory_session_items` (plus der einmalige Bootstrap-Stempel), im Kern nur `stock_checks` (Geschäftsdatei nur
 lesend). **Kein** Mengenausgleich, **keine** Differenz-, Hauptbuch- oder Ausgabenbuchung; Soll-/Ergebnisbestand und
 Differenz existieren nur als abgewiesene Namen. Fassung: start 1 · Einfalten +1 · Speichern +1 · Speichern ohne
-Änderung ±0 · Einzel-Check ±0 · Abschließen +1 · neuer Lauf 1. Befund: eine Inventur umfasst höchstens 5 000 Artikel (der
-Kern las schon vorher nur die ersten 1 000 für das Einfalten).
+Änderung ±0 · Einzel-Check ±0 · Abschließen +1 · neuer Lauf 1. Umfang: eine Inventur umfasst **alle** Artikel der
+Filiale, ohne Höchstzahl. Der Kern beantwortet je Aufruf nur 1 000 Artikel; der Anschluss fragt deshalb in Blöcken zu je
+1 000 — der alte Primary-Fehler (nur die ersten 1 000 wurden eingefaltet) ist behoben
+(`CENTRAL_UI_R6C_NO_INVENTED_LIMITS_PINNED`, `CENTRAL_UI_R6C_INVENTORY_BEYOND_1000_PROVED`).
 
 **Inventur — Durabilität** (`CENTRAL_UI_R6C_INVENTORY_DURABILITY_PINNED`): alte Fassung vor jedem Schreiben abgewiesen
 (kein Kernaufruf); gescheitertes Speichern schließt die Maske nicht, gescheitertes Abschließen meldet kein „finished";
@@ -2726,8 +2728,10 @@ Befehlszeile ist entfernt); ein `lataif.exe`-Köder an einem anderen Pfad überl
 im Gate verboten.
 
 ```
-Final Gate  r6c/final-gate 126/0 · e2e-safety/process-isolation 35/0 · r6c/masterdata 88/0 · r6c/inventory 81/0
+Final Gate  r6c/final-gate 134/0 · e2e-safety/process-isolation 35/0 · r6c/masterdata 88/0 · r6c/inventory 81/0
+            r6c/inventory-large 28/0 (1 205 Artikel; Kern kürzt je Aufruf auf 1 000 wie lib.rs)
             c4-authorization · c4-read-revocation · r6b grün · Rust bridge grün · TS 0/0 · Lint-Delta 0
 R6A         A 95 · R6C 16 · geschlossen 16 · verbleibend 79 (Aufgaben, Dokumente, Metall, Inbox-Foto offen)
-Produktcode unverändert seit e03478c → Zwei-App 120/0 gilt
+Korrektur   Gehalt ohne Obergrenze · Inventur ohne Höchstzahl, Lesen in 1 000er-Blöcken — nur gemeinsame
+            Domäne/Validierung, Registry 121 unverändert → Zwei-App 120/0 (e03478c) bleibt gültig
 ```

@@ -31,7 +31,7 @@ import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import { assertHouseBranch } from './remote-create-support';
 import {
-  INSIDE_COMMAND, InventoryRejected, MAX_INVENTORY_PRODUCTS,
+  INSIDE_COMMAND, InventoryRejected,
   finishInventory, recordSingleCheck, saveInventory, startInventory,
   type InventoryCore, type VerdictInput,
 } from '@/core/stock/inventory-house';
@@ -84,7 +84,6 @@ function idOf(v: unknown, what: string): string {
 
 function idList(v: unknown, what: string): string[] {
   if (!Array.isArray(v)) throw new InventoryPayloadError(`${what} must be a list`);
-  if (v.length > MAX_INVENTORY_PRODUCTS) throw new InventoryPayloadError(`at most ${MAX_INVENTORY_PRODUCTS} items`);
   return v.map((x) => idOf(x, what));
 }
 
@@ -109,7 +108,6 @@ export function parseInventoryStart(raw: unknown): { productIds: string[] } {
 export function parseInventorySave(raw: unknown): { sessionId: string; expectedRevision: number; items: VerdictInput[]; visibleProductIds: string[] } {
   const r = strict(raw, ['sessionId', 'expectedRevision', 'items', 'visibleProductIds'], 'payload');
   if (!Array.isArray(r.items)) throw new InventoryPayloadError('items must be a list');
-  if (r.items.length > MAX_INVENTORY_PRODUCTS) throw new InventoryPayloadError(`at most ${MAX_INVENTORY_PRODUCTS} items`);
   return {
     sessionId: idOf(r.sessionId, 'sessionId'),
     expectedRevision: revisionOf(r.expectedRevision),
