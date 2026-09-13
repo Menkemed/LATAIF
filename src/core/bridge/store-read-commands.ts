@@ -36,6 +36,7 @@ import {
   OP_METALS_STOCK_BY_KARAT_GET, OP_SEARCH_GLOBAL_GET, OP_PAGE_RECONCILIATION_GET,
   OP_LEDGER_BALANCES_GET, OP_FINANCE_RECEIVABLES_GET, OP_INVENTORY_LOT_AGGREGATES_GET,
   OP_PRODUCT_LOTS_GET, OP_PRODUCT_LOTS_BATCH_GET, OP_EXPENSES_CREDIT_PAID_GET,
+  OP_INVENTORY_SESSION_GET, OP_INVENTORY_CHECKS_GET,
 } from './store-read-ops';
 
 /** Der Rumpf, den die Route baut: geprüfter Absender plus die Eingabe des Clients. */
@@ -591,5 +592,39 @@ registerCommand(OP_EXPENSES_CREDIT_PAID_GET, {
   handler: async (payload, actor): Promise<CommandResult> => {
     const ctx = contextOf(payload, actor);
     return { data: (await import('@/core/data/domain-reads')).creditPaidFor(ctx) };
+  },
+});
+
+// ── Inventur (R6C) ──────────────────────────────────────────────────────────
+// Das Arbeitsblatt des offenen Laufs DIESER Filiale und die letzte Beobachtung je Artikel. Gefragt
+// werden nur Artikel der Filiale des Anfragenden — eine fremde Kennung bleibt einfach unbeantwortet.
+registerCommand(OP_INVENTORY_SESSION_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const house = await import('@/core/stock/inventory-house');
+    const { tauriInventoryCore } = await import('@/core/stock/inventory-core');
+    const { getDatabase } = await import('@/core/db/database');
+    const raw = inputOf(payload).productIds;
+    const asked = Array.isArray(raw) ? raw.filter((x): x is string => typeof x === 'string' && x !== '').slice(0, house.MAX_INVENTORY_PRODUCTS) : [];
+    const db = getDatabase() as never;
+    const mine = [...house.productsOfBranch(db, ctx.branchId, asked)];
+    return { data: { sheet: house.readSheet(db, ctx.branchId), latest: mine.length ? await tauriInventoryCore().latest(mine) : {} } };
+  },
+});
+
+// Der Verlauf eines Artikels (Artikelseite). Nur für einen Artikel dieser Filiale.
+registerCommand(OP_INVENTORY_CHECKS_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const productId = requiredId(payload, 'productId');
+    const rawLimit = inputOf(payload).limit;
+    const limit = typeof rawLimit === 'number' && Number.isInteger(rawLimit) ? Math.min(Math.max(rawLimit, 1), 100) : 20;
+    const house = await import('@/core/stock/inventory-house');
+    const { getDatabase } = await import('@/core/db/database');
+    if (!house.productsOfBranch(getDatabase() as never, ctx.branchId, [productId]).has(productId)) return { data: { checks: [] } };
+    const { listStockChecks } = await import('@/core/stock/stock-check');
+    return { data: { checks: await listStockChecks(productId, limit) } };
   },
 });

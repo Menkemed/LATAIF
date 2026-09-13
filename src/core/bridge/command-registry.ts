@@ -111,6 +111,13 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   'transfers.convert_to_invoice', 'transfers.convert_many_to_invoice',
   // CENTRAL-UI-PARITY R5F.1 — der Rechnungsstorno, die EINE ausdrücklich freigegebene neue Buchung.
   'invoices.cancel',
+  // CENTRAL-UI-PARITY R6C — Stammdaten: eine fachliche Aktion, ein Name (drei „+ New Supplier" sind
+  // EIN `suppliers.create`; „Deactivate" ist `suppliers.update` mit dem Zielwert).
+  'suppliers.create', 'suppliers.update', 'agents.update',
+  'partners.create', 'partners.update', 'employees.create', 'employees.update',
+  // CENTRAL-UI-PARITY R6C — die Inventur über den Primary: Lauf beginnen, Arbeitsblatt speichern,
+  // Lauf abschließen, und der Einzel-Check am Artikel. Keine davon ändert Bestand oder Hauptbuch.
+  'inventory.start', 'inventory.save', 'inventory.finish', 'inventory.record_check',
 ];
 
 export interface CommandSpec {

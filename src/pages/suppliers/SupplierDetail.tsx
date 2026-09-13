@@ -30,6 +30,9 @@ import type { Supplier } from '@/core/models/types';
 // CENTRAL-UI-PARITY R2D — die Seite liest ueber gemeinsame Ladefunktionen.
 import { useSharedRead } from '@/core/data/shared-read';
 import { refNumbersFor, supplierDetailReadsFor, type SupplierDetailReads } from '@/core/data/page-reads';
+import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { saveSupplierActive, saveSupplierUpdate } from '@/core/masterdata/masterdata-save';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -51,7 +54,12 @@ export function SupplierDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/suppliers');
-  const { suppliers, loadSuppliers, updateSupplier, deleteSupplier, getLedger, getSupplierCreditsForDisplay, deleteStandaloneSupplierCredit } = useSupplierStore();
+  const { suppliers, loadSuppliers, deleteSupplier, getLedger, getSupplierCreditsForDisplay, deleteStandaloneSupplierCredit } = useSupplierStore();
+  // CENTRAL-UI-PARITY R6C — „Save" und „Deactivate/Reactivate" sind EINE Buchung (`suppliers.update`):
+  // am Primary die Hausfunktion, auf PC2 die Fernbuchung. Nur das Geänderte reist; der Aktiv-
+  // Schalter schickt den Zielwert, keinen Umschalter.
+  const aendern = useSharedWrite<{ id: string }>('suppliers.update');
+  const [aenderFehler, setAenderFehler] = useState('');
   const { purchases, loadPurchases } = usePurchaseStore();
   // v0.7.7 — Pay-direkt-am-Supplier. expenses + recordExpensePayment kommen
   // via Store; Modal lebt in src/components/expenses/PayExpenseModal.
@@ -210,18 +218,11 @@ export function SupplierDetail() {
     );
   }
 
-  function handleSave() {
-    if (!id) return;
-    updateSupplier(id, {
-      name: form.name,
-      phone: form.phone,
-      email: form.email,
-      address: form.address,
-      notes: form.notes,
-      cpr: form.cpr,
-      cprImage: form.cprImage,
-      active: form.active,
-    });
+  async function handleSave() {
+    if (!id || !supplier) return;
+    setAenderFehler('');
+    const r = await saveSupplierUpdate(aendern, supplier, form);
+    if (r.kind !== 'ok') { setAenderFehler(`Could not save the supplier: ${fehlertext(r)}`); return; }
     setEditing(false);
   }
 
@@ -258,11 +259,14 @@ export function SupplierDetail() {
     }
   }
 
-  function handleToggleActive() {
+  async function handleToggleActive() {
     if (!id || !supplier) return;
     // Deaktivieren/Reaktivieren — aendert NUR das active-Flag, keine Historie,
     // Ledger-Daten oder offenen Verbindlichkeiten. Verknuepfte Records bleiben.
-    updateSupplier(id, { active: !supplier.active });
+    // R6C — der ZIELWERT reist, kein Umschalter: eine Wiederholung schaltet nicht zurück.
+    setAenderFehler('');
+    const r = await saveSupplierActive(aendern, supplier, !supplier.active);
+    if (r.kind !== 'ok') setAenderFehler(`Could not change the status: ${fehlertext(r)}`);
   }
 
   return (
@@ -279,7 +283,7 @@ export function SupplierDetail() {
             {editing ? (
               <>
                 <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...supplier }); }}>Cancel</Button>
-                <Button variant="primary" onClick={handleSave}><Save size={14} /> Save</Button>
+                <Button variant="primary" onClick={() => void handleSave()} disabled={aendern.busy} data-supplier-save><Save size={14} /> Save</Button>
               </>
             ) : (
               <>
@@ -289,6 +293,7 @@ export function SupplierDetail() {
             )}
           </div>
         </div>
+        <WriteError text={aenderFehler} />
 
         {/* Hero */}
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32, marginBottom: 40 }}>
@@ -718,7 +723,7 @@ export function SupplierDetail() {
         {/* Danger zone */}
         {editing && (
           <div style={{ marginTop: 24, display: 'flex', gap: 12 }}>
-            <Button variant="secondary" onClick={handleToggleActive}>
+            <Button variant="secondary" onClick={() => void handleToggleActive()} disabled={aendern.busy} data-supplier-toggle-active>
               {supplier.active ? 'Deactivate Supplier' : 'Reactivate Supplier'}
             </Button>
             <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}>

@@ -18,6 +18,9 @@ import { useDebtStore } from '@/stores/debtStore';
 import type { Employee, EmploymentStatus } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
+import { useSharedWrites } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { saveEmployeeUpdate } from '@/core/masterdata/masterdata-save';
 
 function fmtDate(iso?: string): string {
   if (!iso) return '—';
@@ -80,7 +83,7 @@ export function EmployeeDetail() {
   const navigate = useNavigate();
   const goBack = useGoBack('/employees');
   const {
-    loadEmployees, getEmployee, updateEmployee, setStatus,
+    loadEmployees, getEmployee,
     getSalaryHistory, getSalaryStats, getSalesHistory, getSalesStats, getRepairsHandled,
     getPurchasesHandled, getPurchasesStats,
     getTransfersHandled, getConsignmentsHandled, getReturnsHandled, getDebtsHandled,
@@ -96,6 +99,10 @@ export function EmployeeDetail() {
   const [showEdit, setShowEdit] = useState(false);
   const [editForm, setEditForm] = useState<Partial<Employee>>({});
   const [activeTab, setActiveTab] = useState<TabKey>('salary');
+  // CENTRAL-UI-PARITY R6C — Status und „Save Changes": am Primary die Hausfunktion, auf PC2
+  // `employees.update`; nur das Geänderte reist.
+  const w = useSharedWrites();
+  const [editFehler, setEditFehler] = useState('');
 
   useEffect(() => {
     loadEmployees(); loadInvoices(); loadRepairs(); loadPurchases();
@@ -133,10 +140,20 @@ export function EmployeeDetail() {
     setShowEdit(true);
   }
 
-  function saveEdit() {
-    if (!id) return;
-    updateEmployee(id, editForm);
+  async function saveEdit() {
+    if (!id || !employee) return;
+    setEditFehler('');
+    const r = await saveEmployeeUpdate({ remote: w.remote, save: (a) => w.save('employees.update', a) }, employee, editForm);
+    if (r.kind !== 'ok') { setEditFehler(`Could not save: ${r.message || r.code}`); return; }
     setShowEdit(false);
+  }
+
+  /** „On Leave" / „Reactivate" — der Zielstatus, dieselbe Buchung wie das Ändern. */
+  async function setStatus(status: EmploymentStatus) {
+    if (!employee) return;
+    setEditFehler('');
+    const r = await saveEmployeeUpdate({ remote: w.remote, save: (a) => w.save('employees.update', a) }, employee, { ...employee, employmentStatus: status });
+    if (r.kind !== 'ok') setEditFehler(`Could not change the status: ${r.message || r.code}`);
   }
 
   return (
@@ -149,11 +166,11 @@ export function EmployeeDetail() {
             <ArrowLeft size={14} /> Back
           </Button>
           {employee.employmentStatus === 'active' ? (
-            <Button variant="ghost" onClick={() => setStatus(employee.id, 'on_leave')}>
+            <Button variant="ghost" disabled={w.busy} data-employee-status-detail onClick={() => void setStatus('on_leave')}>
               <Pause size={14} /> On Leave
             </Button>
           ) : (
-            <Button variant="ghost" onClick={() => setStatus(employee.id, 'active')}>
+            <Button variant="ghost" disabled={w.busy} data-employee-status-detail onClick={() => void setStatus('active')}>
               <Play size={14} /> Reactivate
             </Button>
           )}
@@ -161,6 +178,7 @@ export function EmployeeDetail() {
         </div>
       }
     >
+      <WriteError text={showEdit ? '' : editFehler} />
       {/* ── Top stats ── */}
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 24 }}>
         <Card>
@@ -665,6 +683,7 @@ export function EmployeeDetail() {
       {/* Edit Modal */}
       <Modal open={showEdit} onClose={() => setShowEdit(false)} title="Edit Employee" width={500}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <WriteError text={showEdit ? editFehler : ''} />
           <div style={{ display: 'grid', gridTemplateColumns: '1.5fr 1fr', gap: 12 }}>
             <Input required label="NAME" value={editForm.name || ''} onChange={e => setEditForm({ ...editForm, name: e.target.value })} />
             <Input label="ROLE" value={editForm.role || ''} onChange={e => setEditForm({ ...editForm, role: e.target.value })} />
@@ -697,7 +716,7 @@ export function EmployeeDetail() {
           <Input label="NOTES" value={editForm.notes || ''} onChange={e => setEditForm({ ...editForm, notes: e.target.value })} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowEdit(false)}>Cancel</Button>
-            <Button variant="primary" onClick={saveEdit}>Save Changes</Button>
+            <Button variant="primary" onClick={() => void saveEdit()} disabled={w.busy} data-employee-save>Save Changes</Button>
           </div>
         </div>
       </Modal>

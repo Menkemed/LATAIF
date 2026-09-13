@@ -192,7 +192,7 @@ const ACTIONS: Action[] = [
 // ── 3) Keine Klasse-C-Aktion ist registriert ─────────────────────────────
 {
   const list = ALLOWED_MUTATIONS as readonly string[];
-  ok(list.length === 41, `REGISTRY genau 41 Mutationen (${list.length}) — 24 aus C3G plus die 16 aus C3H`);
+  ok(list.length === 52, `REGISTRY genau 52 Mutationen (${list.length}) — 24 aus C3G, 16 aus C3H, invoices.cancel, 11 aus R6C`);
   const known = knownCommands();
   // CENTRAL-C3H hat die sechzehn `B_DEFERRED`-Aktionen freigeschaltet. Diese Datei bleibt der
   // Nachweis der KLASSIFIKATION — die Zahlen ziehen mit, die Einordnung nicht.

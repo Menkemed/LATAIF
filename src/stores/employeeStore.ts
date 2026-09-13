@@ -15,6 +15,8 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+// CENTRAL-UI-PARITY R6C — die eine Stammdaten-Regel (Name, Status, Grundgehalt ≥ 0).
+import { employeeCreateInput, employeeUpdateInput } from '@/core/masterdata/masterdata-rules';
 
 export interface SalaryHistoryRow {
   expenseId: string;
@@ -188,6 +190,9 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
   getEmployee: (id) => get().employees.find(e => e.id === id),
 
   createEmployee: (data) => {
+    // R6C — die eine Regel: Name Pflicht, Status aus der festen Liste, Grundgehalt nie negativ
+    // (vorher nahm das Feld „-500" an). Dieselbe Prüfung am Primary und fern.
+    const input = employeeCreateInput(data as unknown as Record<string, unknown>);
     const db = getDatabase();
     const now = new Date().toISOString();
     const id = uuid();
@@ -195,26 +200,26 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
     try { branchId = currentBranchId(); userId = currentUserId(); }
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
 
-    if (!data.name || !data.name.trim()) {
-      throw new Error('Employee name is required.');
-    }
-
     db.run(
       `INSERT INTO employees (id, branch_id, name, role, employment_status, base_salary,
         phone, email, notes, user_id, created_at, updated_at, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      [id, branchId, data.name.trim(), data.role || null,
-       data.employmentStatus || 'active', data.baseSalary ?? null,
-       data.phone || null, data.email || null, data.notes || null,
+      [id, branchId, input.name, input.role ?? null,
+       input.employmentStatus, input.baseSalary ?? null,
+       input.phone ?? null, input.email ?? null, input.notes ?? null,
        data.userId || null, now, now, userId]
     );
     saveDatabase();
-    trackInsert('employees', id, { name: data.name, role: data.role });
+    trackInsert('employees', id, { name: input.name, role: input.role });
     get().loadEmployees();
     return get().getEmployee(id)!;
   },
 
   updateEmployee: (id, data) => {
+    // R6C — dieselbe Regel wie beim Anlegen. Die Verknüpfung mit einem Login (`userId`) ist
+    // Hauskonfiguration und reist nur auf dem Primary mit, nie in einem Fernauftrag.
+    const input: Record<string, unknown> = { ...employeeUpdateInput(data as unknown as Record<string, unknown>) };
+    if (data.userId !== undefined) input.userId = data.userId;
     const db = getDatabase();
     const now = new Date().toISOString();
     const fields: string[] = [];
@@ -224,7 +229,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
       baseSalary: 'base_salary', phone: 'phone', email: 'email', notes: 'notes',
       userId: 'user_id',
     };
-    for (const [k, v] of Object.entries(data)) {
+    for (const [k, v] of Object.entries(input)) {
       const col = map[k];
       if (!col) continue;
       fields.push(`${col} = ?`);
@@ -234,7 +239,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
     fields.push('updated_at = ?'); values.push(now); values.push(id);
     db.run(`UPDATE employees SET ${fields.join(', ')} WHERE id = ?`, values);
     saveDatabase();
-    trackUpdate('employees', id, data);
+    trackUpdate('employees', id, input);
     get().loadEmployees();
   },
 

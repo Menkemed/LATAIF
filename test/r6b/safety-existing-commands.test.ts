@@ -275,24 +275,23 @@ marker('CENTRAL_UI_R6B_PRIMARY_CONTRACTS_AUDITED');
     `INVENTUR schreiben, lesen, Verlauf — keiner fragt den Kern dieses Rechners (${[e1, e2, e3].map((e) => e.split(' ')[0]).join(',')})`);
   alsPrimary();
   ok(stock.stockCheckAvailableHere(), 'INVENTUR am Primary unverändert verfügbar');
+  // CENTRAL-UI-PARITY R6C — die R6B-Sperre ist durch den echten Weg über den Primary ersetzt
+  // (test/r6c/inventory-parity). Was aus R6B bleibt und hier weiter gilt: der Kern DIESES Rechners
+  // wird auf dem Client nie gefragt (oben), und es gibt keinen halben Erfolg (unten).
   const m = codeOf(src('src/components/products/StockCheckInventoryModal.tsx'));
-  const oeffnen = m.slice(m.indexOf('if (!open) return;'), m.indexOf('if (!open) return;') + 200);
-  ok(/if \(!stockCheckAvailableHere\(\)\) return;/.test(oeffnen), 'INVENTUR das Öffnen beginnt auf dem Client KEINEN Lauf (vor jedem getDatabase)');
+  ok(!/getDatabase\(|ensureOpenSession\(|persistSessionItems\(|closeSession\(|recordStockCheck\(|latestStockChecks\(/.test(m),
+    'INVENTUR (R6C) die Maske fasst weder Datenbank noch Kern selbst an — auf beiden Rechnern dieselbe Hausfolge');
   const save = koerper(m, /const save = async \(\) => \{/);
   const finish = koerper(m, /const finishInventory = async \(\) => \{/);
-  ok(save.indexOf('stockCheckAvailableHere()') > 0 && save.indexOf('stockCheckAvailableHere()') < save.indexOf('getDatabase()'),
-    'INVENTUR Speichern: der Riegel steht vor jedem Datenbankgriff');
-  ok(finish.indexOf('stockCheckAvailableHere()') > 0 && finish.indexOf('stockCheckAvailableHere()') < finish.indexOf('closeSession('),
-    'INVENTUR Abschließen: kein „finished" ohne Wirkung');
-  ok(/let sheetStored = true;/.test(save) && /sheetStored = false;/.test(save) && /if \(!sheetStored\) return;/.test(save),
-    'INVENTUR am Primary: ein nicht gespeichertes Arbeitsblatt schließt die Maske nicht mehr weg (kein halber Erfolg)');
-  ok(/data-primary-only="inventory"/.test(m), 'INVENTUR die Maske sagt es sichtbar');
+  ok(/if \(r\.kind !== 'ok'\) \{[\s\S]{0,700}return;/.test(save) && save.lastIndexOf('onClose()') > save.indexOf("if (r.kind !== 'ok')"),
+    'INVENTUR Speichern: ein nicht gespeichertes Arbeitsblatt schließt die Maske nicht (kein halber Erfolg) — R6B bleibt');
+  ok(/if \(r\.kind !== 'ok'\) \{[\s\S]{0,300}could not be closed/.test(finish),
+    'INVENTUR Abschließen: kein „finished" ohne Wirkung — R6B bleibt');
   const p = codeOf(src('src/components/products/StockCheckPanel.tsx'));
-  ok(/if \(!stockCheckAvailableHere\(\)\) \{\s*return \(\s*<div[^>]*data-primary-only="stock-check"/.test(p)
-    && /const reload = useCallback\(async \(\) => \{\s*if \(!stockCheckAvailableHere\(\)\) \{ setLoaded\(true\); return; \}/.test(p),
-  'INVENTUR der Einzel-Check zeigt auf dem Client einen Satz statt zweier Knöpfe und liest nichts');
+  ok(/checksFromPrimary\(/.test(p) && /'inventory\.record_check'/.test(p) && !/recordStockCheck\(/.test(p),
+    'INVENTUR (R6C) der Einzel-Check liest und schreibt auf dem Client über den Primary');
   const w = codeOf(src('src/pages/watches/WatchList.tsx'));
-  ok(/data-testid="open-inventory"\s*disabled=\{filtered\.length === 0 \|\| !stockCheckAvailableHere\(\)\}/.test(w), 'INVENTUR der Knopf in der Collection ist auf dem Client gesperrt und erklärt');
+  ok(/data-testid="open-inventory"\s*disabled=\{filtered\.length === 0\}/.test(w), 'INVENTUR (R6C) „Stock Check" ist auf dem Client offen — über den Primary');
 }
 marker('CENTRAL_UI_R6B_INVENTORY_CLIENT_FAIL_CLOSED_PROVED');
 
@@ -384,11 +383,13 @@ marker('CENTRAL_UI_R6B_UNSUPPORTED_DELETES_FAIL_CLOSED');
 
 // ══ §8 — Registry und Matrix ══════════════════════════════════════════════════
 {
-  ok(ALLOWED_MUTATIONS.length === 41 && ALLOWED_MUTATIONS.at(-1) === 'invoices.cancel', `REGISTRY 41 Buchungen, die letzte bleibt invoices.cancel (${ALLOWED_MUTATIONS.length})`);
+  // R6C — R6B selbst fügte keine Buchung hinzu; seither nur die elf aus R6C (hinter invoices.cancel).
+  ok(ALLOWED_MUTATIONS.length === 52 && ALLOWED_MUTATIONS[40] === 'invoices.cancel' && ALLOWED_MUTATIONS.at(-1) === 'inventory.record_check',
+    `REGISTRY 41 Buchungen bis invoices.cancel, dahinter nur die elf aus R6C (${ALLOWED_MUTATIONS.length})`);
   const rs = src('src-tauri/src/bridge.rs');
   const block = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
   const n = (block.match(/^\s+OP_[A-Z0-9_]+,/gm) ?? []).length;
-  ok(n === 108, `REGISTRY Rust REMOTE_OPS = 108 (${n})`);
+  ok(n === 121, `REGISTRY Rust REMOTE_OPS = 121 (R6C) (${n})`);
   const exakt = R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && z.verdrahtet).length;
   const keineUi = R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length;
   const enger = R4C_MATRIX.filter((z) => z.paritaet === 'enger').length;

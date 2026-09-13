@@ -21,7 +21,7 @@ import { setDurableSaver, markDurabilityDegraded, noteDurableWrite } from '@/cor
 import { installWriteGuard } from './write-guard';
 import { assertTransactionHealthy, isTransactionUnhealthy } from './transaction-health';
 import {
-  INVENTORY_SESSION_DDL, INVENTORY_SESSION_ITEMS_DDL,
+  INVENTORY_SESSION_DDL, INVENTORY_SESSION_ITEMS_DDL, INVENTORY_SESSION_REVISION_UPGRADE,
   INVENTORY_BOOTSTRAP_DDL, INVENTORY_BOOTSTRAP_SEED,
 } from '../stock/inventory-session';
 import { getRuntimePaths } from '../runtime/runtime-paths';
@@ -693,6 +693,8 @@ function runMigrations(database: Database): void {
     // append-only record of what was observed, this one is the run in progress.
     INVENTORY_SESSION_DDL,
     INVENTORY_SESSION_ITEMS_DDL,
+    // CENTRAL-UI-PARITY R6C — die Fassung eines Laufs (bestehende Datenbanken; neue haben sie im DDL).
+    INVENTORY_SESSION_REVISION_UPGRADE,
 
     // The line under a history that existed before inventories did. Written by the FIRST boot that
     // gets here and never again, so an install upgrading into this feature does not open its first

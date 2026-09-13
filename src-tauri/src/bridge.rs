@@ -210,6 +210,24 @@ pub const OP_PRODUCT_LOTS_GET: &str = "product.lots.get";
 pub const OP_PRODUCT_LOTS_BATCH_GET: &str = "product.lots.batch.get";
 pub const OP_EXPENSES_CREDIT_PAID_GET: &str = "expenses.credit_paid.get";
 
+// CENTRAL-UI-PARITY R6C — Stammdaten und Inventur. Eine fachliche Aktion, ein Name: drei
+// „+ New Supplier"-Knoepfe sind EIN `suppliers.create`, „Deactivate" ist `suppliers.update`.
+// Die Inventur hat vier getrennte Absichten (beginnen, speichern, abschliessen, Einzel-Check) und
+// zwei Auskuenfte; keine davon aendert Bestand oder Hauptbuch. Loeschen bleibt Primary-only.
+pub const OP_SUPPLIERS_CREATE: &str = "suppliers.create";
+pub const OP_SUPPLIERS_UPDATE: &str = "suppliers.update";
+pub const OP_AGENTS_UPDATE: &str = "agents.update";
+pub const OP_PARTNERS_CREATE: &str = "partners.create";
+pub const OP_PARTNERS_UPDATE: &str = "partners.update";
+pub const OP_EMPLOYEES_CREATE: &str = "employees.create";
+pub const OP_EMPLOYEES_UPDATE: &str = "employees.update";
+pub const OP_INVENTORY_START: &str = "inventory.start";
+pub const OP_INVENTORY_SAVE: &str = "inventory.save";
+pub const OP_INVENTORY_FINISH: &str = "inventory.finish";
+pub const OP_INVENTORY_RECORD_CHECK: &str = "inventory.record_check";
+pub const OP_INVENTORY_SESSION_GET: &str = "inventory.session.get";
+pub const OP_INVENTORY_CHECKS_GET: &str = "inventory.checks.get";
+
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
 // Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
 // `STORE_SOURCES` im Renderer. Ein Name, der hier fehlt, erreicht den Renderer nie.
@@ -324,6 +342,19 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_PRODUCT_LOTS_GET,
     OP_PRODUCT_LOTS_BATCH_GET,
     OP_EXPENSES_CREDIT_PAID_GET,
+    OP_SUPPLIERS_CREATE,
+    OP_SUPPLIERS_UPDATE,
+    OP_AGENTS_UPDATE,
+    OP_PARTNERS_CREATE,
+    OP_PARTNERS_UPDATE,
+    OP_EMPLOYEES_CREATE,
+    OP_EMPLOYEES_UPDATE,
+    OP_INVENTORY_START,
+    OP_INVENTORY_SAVE,
+    OP_INVENTORY_FINISH,
+    OP_INVENTORY_RECORD_CHECK,
+    OP_INVENTORY_SESSION_GET,
+    OP_INVENTORY_CHECKS_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

@@ -15,6 +15,9 @@ import { findSimilarContacts } from '@/core/contacts/duplicate-check';
 import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { matchesDeep } from '@/core/utils/deep-search';
+import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
 import type { Supplier } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 
@@ -24,7 +27,11 @@ function fmt(v: number): string {
 
 export function SupplierList() {
   const navigate = useNavigate();
-  const { suppliers, loadSuppliers, createSupplier } = useSupplierStore();
+  const { suppliers, loadSuppliers } = useSupplierStore();
+  // CENTRAL-UI-PARITY R6C — „New Supplier": am Primary die Hausfunktion, auf PC2 `suppliers.create`.
+  // Dieselbe Folge wie „+ New Supplier" im Einkauf und in der Werkstatt (masterdata-save).
+  const anlegen = useSharedWrite<{ supplierId: string }>('suppliers.create');
+  const [fehler, setFehler] = useState('');
   const [search, setSearch] = useState('');
   const [showInactive, setShowInactive] = useState(false);
   const [showNew, setShowNew] = useState(false);
@@ -46,9 +53,10 @@ export function SupplierList() {
   const activeCount = useMemo(() => suppliers.filter(s => s.active).length, [suppliers]);
   const inactiveCount = suppliers.length - activeCount;
 
-  function handleCreate() {
-    if (!form.name) return;
-    createSupplier(form);
+  async function handleCreate() {
+    setFehler('');
+    const r = await saveSupplierCreate(anlegen, form);
+    if (r.kind !== 'ok') { setFehler(`Could not create supplier: ${fehlertext(r)}`); return; }
     setShowNew(false);
     setForm({});
   }
@@ -138,6 +146,7 @@ export function SupplierList() {
 
       <Modal open={showNew} onClose={() => setShowNew(false)} title="New Supplier" width={500}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <WriteError text={fehler} />
           {duplicateMatches.length > 0 && (
             <DuplicateWarningBanner
               matches={duplicateMatches}
@@ -179,7 +188,7 @@ export function SupplierList() {
           </div>
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate} disabled={!form.name}>
+            <Button variant="primary" onClick={() => void handleCreate()} disabled={!form.name || anlegen.busy} data-supplier-create-save>
               {duplicateMatches.length > 0 ? 'Create anyway' : 'Create Supplier'}
             </Button>
           </div>

@@ -22,6 +22,8 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+// CENTRAL-UI-PARITY R6C — die eine Stammdaten-Regel (Name Pflicht und getrimmt, Texte getrimmt).
+import { supplierCreateInput, supplierUpdateInput } from '@/core/masterdata/masterdata-rules';
 
 function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) {
@@ -230,6 +232,9 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
   getSupplier: (id) => get().suppliers.find(s => s.id === id),
 
   createSupplier: (data) => {
+    // R6C — vorher prüfte nur die Maske (zwei von drei ließen einen Namen aus Leerzeichen durch,
+    // nur eine trimmte). Jetzt prüft die Hausfunktion selbst — für jeden Einstieg, am Primary wie fern.
+    const input = supplierCreateInput(data as Record<string, unknown>);
     const db = getDatabase();
     const now = new Date().toISOString();
     const id = uuid();
@@ -240,18 +245,20 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     db.run(
       `INSERT INTO suppliers (id, branch_id, name, phone, email, address, notes, cpr, cpr_image, active, created_at, updated_at, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
-      [id, branchId, data.name || '', data.phone || null, data.email || null,
-       data.address || null, data.notes || null,
-       data.cpr || null, data.cprImage || null,
+      [id, branchId, input.name, input.phone ?? null, input.email ?? null,
+       input.address ?? null, input.notes ?? null,
+       input.cpr ?? null, input.cprImage ?? null,
        now, now, userId]
     );
     saveDatabase();
-    trackInsert('suppliers', id, { name: data.name });
+    trackInsert('suppliers', id, { name: input.name });
     get().loadSuppliers();
     return get().getSupplier(id)!;
   },
 
   updateSupplier: (id, data) => {
+    // R6C — ein geleertes Namensfeld schrieb bisher einen leeren Namen. Dieselbe Regel wie beim Anlegen.
+    const input = supplierUpdateInput(data as Record<string, unknown>);
     const db = getDatabase();
     const now = new Date().toISOString();
     const fields: string[] = [];
@@ -260,15 +267,15 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
       name: 'name', phone: 'phone', email: 'email', address: 'address', notes: 'notes',
       cpr: 'cpr', cprImage: 'cpr_image',
     };
-    for (const [k, v] of Object.entries(data)) {
+    for (const [k, v] of Object.entries(input)) {
       const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v ?? null); }
     }
-    if (data.active !== undefined) { fields.push('active = ?'); values.push(data.active ? 1 : 0); }
+    if (input.active !== undefined) { fields.push('active = ?'); values.push(input.active ? 1 : 0); }
     if (fields.length === 0) return;
     fields.push('updated_at = ?'); values.push(now); values.push(id);
     db.run(`UPDATE suppliers SET ${fields.join(', ')} WHERE id = ?`, values);
     saveDatabase();
-    trackUpdate('suppliers', id, data);
+    trackUpdate('suppliers', id, input);
     get().loadSuppliers();
   },
 

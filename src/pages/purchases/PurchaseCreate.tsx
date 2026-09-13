@@ -28,11 +28,12 @@ import { getProductSpecs, productSearchText } from '@/core/utils/product-format'
 // CENTRAL-UI-PARITY R2D — die Vorlage kommt aus der gemeinsamen Ladefunktion.
 import { useSharedRead } from '@/core/data/shared-read';
 import { purchaseCreatePrefillFor, type PurchaseCreatePrefill } from '@/core/data/page-reads';
-import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { useSharedWrites, useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { purchaseCreateBody, validatePurchaseCreate, type PurchaseCreateInput } from '@/core/purchases/purchase-create';
 import { createPurchaseOnPrimary } from '@/core/purchases/purchase-house';
+import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -64,7 +65,7 @@ export function PurchaseCreate() {
   // CENTRAL-UI-PARITY R5E — „Save Purchase" hat zwei Anschluesse: am Primary die Hausfolge in EINER
   // Klammer, auf dem zweiten Rechner `purchases.create` mit genau den Eingaben dieser Maske.
   const w = useSharedWrites();
-  const { suppliers, loadSuppliers, createSupplier } = useSupplierStore();
+  const { suppliers, loadSuppliers } = useSupplierStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
   const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
 
@@ -170,6 +171,8 @@ export function PurchaseCreate() {
   // direkt mit dem Beleg-Block ausgedruckt werden kann.
   const [showNewSupplier, setShowNewSupplier] = useState(false);
   const [newSupplierForm, setNewSupplierForm] = useState<Partial<Supplier>>({});
+  const neuerLieferant = useSharedWrite<{ supplierId: string }>('suppliers.create');
+  const [supplierFehler, setSupplierFehler] = useState('');
 
   // Duplicate-Check live im Quick-Modal (Salesforce-Stil): vermeidet
   // doppelt angelegte Suppliers wenn Counter-Mitarbeiter unter Druck schnell tippen.
@@ -181,10 +184,14 @@ export function PurchaseCreate() {
     );
   }, [showNewSupplier, newSupplierForm.name, newSupplierForm.phone, suppliers]);
 
-  function handleCreateSupplier() {
-    if (!newSupplierForm.name) return;
-    const created = createSupplier(newSupplierForm);
-    setSupplierId(created.id);
+  // CENTRAL-UI-PARITY R6C — „+ New Supplier" im Einkauf: dieselbe Folge wie in der Lieferantenliste
+  // und in der Werkstatt (masterdata-save). Am Primary die Hausfunktion, auf PC2 `suppliers.create`;
+  // der neue Lieferant ist danach sofort in der Auswahl und wird gewählt (bestehender Vertrag).
+  async function handleCreateSupplier() {
+    setSupplierFehler('');
+    const r = await saveSupplierCreate(neuerLieferant, newSupplierForm);
+    if (r.kind !== 'ok') { setSupplierFehler(`Could not create supplier: ${fehlertext(r)}`); return; }
+    setSupplierId(r.value.supplierId);
     setShowNewSupplier(false);
     setNewSupplierForm({});
   }
@@ -792,6 +799,7 @@ export function PurchaseCreate() {
       {/* Quick-Create Supplier — gleiche Felder wie SupplierList, inkl. CPR + ID-Card. */}
       <Modal open={showNewSupplier} onClose={() => setShowNewSupplier(false)} title="New Supplier" width={500}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <WriteError text={supplierFehler} />
           {supplierDuplicateMatches.length > 0 && (
             <DuplicateWarningBanner
               matches={supplierDuplicateMatches}
@@ -842,7 +850,7 @@ export function PurchaseCreate() {
           </div>
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => { setShowNewSupplier(false); setNewSupplierForm({}); }}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreateSupplier} disabled={!newSupplierForm.name}>
+            <Button variant="primary" onClick={() => void handleCreateSupplier()} disabled={!newSupplierForm.name || neuerLieferant.busy} data-purchase-new-supplier-save>
               {supplierDuplicateMatches.length > 0 ? 'Create anyway &amp; Use' : 'Create &amp; Use'}
             </Button>
           </div>

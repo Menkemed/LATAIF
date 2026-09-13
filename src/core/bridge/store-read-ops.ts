@@ -82,6 +82,12 @@ export const OP_PRODUCT_LOTS_GET = 'product.lots.get';
 export const OP_PRODUCT_LOTS_BATCH_GET = 'product.lots.batch.get';
 export const OP_EXPENSES_CREDIT_PAID_GET = 'expenses.credit_paid.get';
 
+// CENTRAL-UI-PARITY R6C — die Inventur vom Primary: das Arbeitsblatt des offenen Laufs samt der
+// letzten Beobachtung je Artikel, und der Verlauf eines Artikels. Beides liegt beim Primary (seine
+// Geschäftsdatenbank, sein Kern) — der Rechner ohne Datenbank fragt, statt eine eigene zu öffnen.
+export const OP_INVENTORY_SESSION_GET = 'inventory.session.get';
+export const OP_INVENTORY_CHECKS_GET = 'inventory.checks.get';
+
 /**
  * Die Liste IST die Erlaubnis. Ein Name, der hier fehlt, existiert fuer das Netz nicht — genau
  * wie bei den Buchungen. Dieselbe Liste kennt auch Rust.
@@ -135,6 +141,8 @@ export const STORE_READ_OPS: readonly string[] = [
   OP_PRODUCT_LOTS_GET,
   OP_PRODUCT_LOTS_BATCH_GET,
   OP_EXPENSES_CREDIT_PAID_GET,
+  OP_INVENTORY_SESSION_GET,
+  OP_INVENTORY_CHECKS_GET,
 ];
 
 // Nicht hier — und damit fern nicht aufrufbar — sind nur noch drei Arten von Zugriffen, und keine

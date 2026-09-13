@@ -46,7 +46,8 @@ const KATALOG: Record<string, Eintrag> = {
   'components/sync/SyncDuplicateGuard.tsx': { art: 'inert', abfragen: 1, grund: 'haengt am Abgleich, und der ist im Client verweigert' },
 
   // ── Schreiben: gehoert zu den 40 geprueften Buchungen — diese sind keine davon. ──
-  'components/products/StockCheckInventoryModal.tsx': { art: 'schreib-luecke', abfragen: 5, grund: 'Inventursitzung' },
+  // R6C — die Inventurmaske ist hier NICHT mehr: sie fragt keine Datenbank; ihre Hausfolge liegt in
+  // `core/stock/inventory-house` (am Primary in der Schreibreihenfolge, auf PC2 als `inventory.*`).
   'pages/analytics/AnalyticsPage.tsx': { art: 'schreib-luecke', abfragen: 1, grund: 'Steuerzahlung eintragen; die Schaltflaeche fehlt im Client' },
   // R5A — OrderDetail ist hier NICHT mehr: der Zahlungstopf wird in
   // `core/orders/order-payment-carryover` umgerechnet, die Ansicht fragt die Datenbank nicht mehr direkt.

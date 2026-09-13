@@ -2172,19 +2172,19 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Artikel speichern mit Bildänderung | pages/watches/ProductDetail:515 (Zweig 417) | editProductWithMedia | NAC | A | — (products.update ohne Medienweg) | Medienweg | Artikel/Medien · hoch |
 | KI-Identifikation bestätigen | ProductDetail:856 | updateProduct({aiConfirmedAt}) | **angeschlossen (R6B)** | B | products.update (Feld fehlt in `PRODUCT_UPDATE_FIELDS`) | **geschlossen (R6B)** | Artikel · niedrig |
 | Artikel löschen | ProductDetail:1519→1621 | deleteProduct | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Inventur öffnen (Lauf beginnen) | components/products/StockCheckInventoryModal:83–176 | ensureOpenSession + persistSessionItems | **gesperrt + erklärt, kein Kernaufruf (R6B)** | A | — | inventory.* | Inventur · hoch |
-| Inventur speichern | StockCheckInventoryModal:471 | recordStockCheck (Tauri, lokale Konfig-DB) + persistSessionItems | **gesperrt + erklärt, kein Kernaufruf (R6B)** | A | — | inventory.* / stock_checks über Primary | Inventur · hoch |
-| Inventur abschließen | StockCheckInventoryModal:503 | closeSession | **gesperrt + erklärt, kein Kernaufruf (R6B)** | A | — | inventory.* | Inventur · hoch |
-| Einzel-Check Verfügbar/Nicht | components/products/StockCheckPanel:119 (ProductDetail:1585) | recordStockCheck | **gesperrt + erklärt, kein Kernaufruf (R6B)** | A | — | stock_checks über Primary | Inventur · mittel |
-| „+ New Supplier“ im Einkauf | pages/purchases/PurchaseCreate:391→845 | createSupplier | TOT (ungefangen) | A | — | suppliers.create | Stammdaten · mittel |
+| Inventur öffnen (Lauf beginnen) | components/products/StockCheckInventoryModal:83–176 | ensureOpenSession + persistSessionItems | **angeschlossen (R6C)** | A | `inventory.start` (R6C) | **geschlossen (R6C)** | Inventur · hoch |
+| Inventur speichern | StockCheckInventoryModal:471 | recordStockCheck (Tauri, lokale Konfig-DB) + persistSessionItems | **angeschlossen (R6C)** | A | `inventory.save` (R6C) | **geschlossen (R6C)** | Inventur · hoch |
+| Inventur abschließen | StockCheckInventoryModal:503 | closeSession | **angeschlossen (R6C)** | A | `inventory.finish` (R6C) | **geschlossen (R6C)** | Inventur · hoch |
+| Einzel-Check Verfügbar/Nicht | components/products/StockCheckPanel:119 (ProductDetail:1585) | recordStockCheck | **angeschlossen (R6C)** | A | `inventory.record_check` (R6C) | **geschlossen (R6C)** | Inventur · mittel |
+| „+ New Supplier“ im Einkauf | pages/purchases/PurchaseCreate:391→845 | createSupplier | **angeschlossen (R6C)** | A | `suppliers.create` (R6C) | **geschlossen (R6C)** | Stammdaten · mittel |
 | Einkauf: Zahlung erfassen | pages/purchases/PurchaseDetail:177→424 | purchaseStore.addPayment | TOT | A | — | purchases.record_payment | Geld · hoch |
 | Einkauf: Guthaben verrechnen | PurchaseDetail:424 (credit) | getOpenCredits + applyCreditToPurchase (FIFO) | TOT | A | — | purchases.apply_credit | Geld · hoch |
 | Rückgabe an Lieferant | PurchaseDetail:178→483 | createReturn + confirmReturn | TOT | A | — | purchases.return | Einkauf/Bestand · hoch |
 | Einkauf stornieren | PurchaseDetail:183→496 | cancelPurchase | TOT | A | — | purchases.cancel | Einkauf/Buchung · hoch |
 | Inbox-Foto verwerfen | pages/purchases/PurchaseList:115 | dismissPurchaseInbox | TOT | A | — | purchases.dismiss_inbox | Einkauf · niedrig |
-| Lieferant anlegen | pages/suppliers/SupplierList:80→182 | createSupplier | TOT | A | — | suppliers.create | Stammdaten · mittel |
-| Lieferant ändern | pages/suppliers/SupplierDetail:285→280 | updateSupplier | TOT | A | — | suppliers.update | Stammdaten · mittel |
-| Lieferant (de)aktivieren | SupplierDetail:719 | updateSupplier({active}) | TOT | A | — | suppliers.update | Stammdaten · niedrig |
+| Lieferant anlegen | pages/suppliers/SupplierList:80→182 | createSupplier | **angeschlossen (R6C)** | A | `suppliers.create` (R6C) | **geschlossen (R6C)** | Stammdaten · mittel |
+| Lieferant ändern | pages/suppliers/SupplierDetail:285→280 | updateSupplier | **angeschlossen (R6C)** | A | `suppliers.update` (R6C) | **geschlossen (R6C)** | Stammdaten · mittel |
+| Lieferant (de)aktivieren | SupplierDetail:719 | updateSupplier({active}) | **angeschlossen (R6C)** | A | `suppliers.update` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
 | Lieferant löschen | SupplierDetail:722→735 | deleteSupplier | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Lieferantenguthaben erstatten | SupplierDetail:696→760 | deleteStandaloneSupplierCredit | VERST (zufällig: Guthabenliste leer) | A | — | suppliers.refund_credit | Geld · mittel |
 | „Pay Supplier — Bulk“ (Öffner) | SupplierDetail:425 → PaySupplierModal | siehe Finanzen | TOT | A | — | siehe Finanzen | Geld · hoch |
@@ -2222,7 +2222,7 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Kundengold → BHD (Reparatur) | RepairDetail:1410→SettleGoldModal | convertCustomerCreditToMoney | TOT | A | — | gold.* | Gold/Geld · hoch |
 | Reparatur löschen | RepairDetail:1163→1451 | deleteRepair | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | AI-Benachrichtigung (Reparatur) | RepairDetail:598→MessagePreviewModal | logMessage | **ehrlich: „nicht protokolliert" (R6B)** | A | — | messages.log | CRM · niedrig |
-| „+ New Supplier“ (Werkstatt) | pages/repairs/RepairList:1008→1189 | createSupplier | TOT | A | — | suppliers.create | Stammdaten · mittel |
+| „+ New Supplier“ (Werkstatt) | pages/repairs/RepairList:1008→1189 | createSupplier | **angeschlossen (R6C)** | A | `suppliers.create` (R6C) | **geschlossen (R6C)** | Stammdaten · mittel |
 | Produktion anlegen | pages/production/ProductionPage:143→299 | productionStore.createRecord | TOT | A | — | production.create | Produktion/Bestand · hoch |
 | Produktion löschen (Liste) | ProductionPage:369→332 | deleteRecord | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Produktion löschen (Detail) | pages/production/ProductionDetail:70→189 | deleteRecord | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
@@ -2231,7 +2231,7 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Kommission löschen | ConsignmentDetail:500→1060 | deleteConsignment | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Rückgabe (Kommissionsliste) | pages/consignments/ConsignmentList:716 | markReturned | **angeschlossen (R6B)** | B | consignments.mark_returned | **geschlossen (R6B)** | Kommission · niedrig |
 | Rückgabe (Kommittent) | pages/consignors/ConsignorDetail:258 | markReturned | **angeschlossen (R6B)** | B | consignments.mark_returned | **geschlossen (R6B)** | Kommission · niedrig |
-| Agent ändern | pages/agents/AgentList:243→548 | updateAgent | TOT | A | — | agents.update | Stammdaten · niedrig |
+| Agent ändern | pages/agents/AgentList:243→548 | updateAgent | **angeschlossen (R6C)** | A | `agents.update` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
 | Agent löschen | AgentList:243→536 | deleteAgent | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Umwandlung rückgängig (Tabelle) | components/agents/TransferTable:455 | undoTransferInvoiceConvert (löscht Rechnung) | TOT | A | — | transfers.undo_convert | Transfer/Verkauf · hoch |
 | Transfer löschen (Tabelle) | TransferTable:602 | deleteTransfer | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
@@ -2264,10 +2264,10 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 | Ausgabe speichern | ExpenseList:861 | updateExpense | TOT (Alert) | A | — | expenses.update | Ausgaben · mittel |
 | Fällige Ausgaben erzeugen (beim Öffnen) | ExpenseList:123 | runDueGenerator | still, nichts | C | — | bleibt Sache des Primary | — |
 | Umbuchung Kasse ↔ Bank | pages/banking/BankingPage:343 | bankingStore.createTransfer | TOT | A | — (transfers.* sind Agenten-Transfers) | banking.transfer | Geld · hoch |
-| Partner anlegen | pages/partners/PartnersPage:187 | createPartner | TOT | A | — | partners.* | Stammdaten · niedrig |
+| Partner anlegen | pages/partners/PartnersPage:187 | createPartner | **angeschlossen (R6C)** | A | `partners.create` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
 | Einlage / Entnahme / Gewinnverteilung | PartnersPage:222 | recordInvestment / recordWithdrawal / recordProfitDistribution | TOT | A | — | partners.record_tx | Geld/Buchung · hoch |
 | Partnerbewegung ✕ | PartnersPage:162 | deleteTransaction (+ Storno über safePost) | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Partner speichern | PartnersPage:279 | updatePartner | TOT | A | — | partners.* | Stammdaten · niedrig |
+| Partner speichern | PartnersPage:279 | updatePartner | **angeschlossen (R6C)** | A | `partners.update` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
 | Partner löschen | PartnersPage:267 | deletePartner | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
 | Schuld anlegen | pages/debts/DebtsPage:674 | createDebt | TOT | A | — | debts.* | Geld · hoch |
 | Rückzahlung erfassen | DebtsPage:757 | recordDebtPayment | TOT | A | — | debts.* | Geld · hoch |
@@ -2282,11 +2282,11 @@ Spalten: UI-Handlung | Ort (`src/…`) | Laufweg am Primary | PC2 heute | Kat. |
 
 | UI-Handlung | Ort | Laufweg am Primary | PC2 heute | Kat. | vorh. Buchung | nächster Schritt | Domäne · Risiko |
 |---|---|---|---|---|---|---|---|
-| Mitarbeiter anlegen | pages/employees/EmployeeList:257 | createEmployee | TOT (Alert) | A | — | employees.* | Stammdaten · niedrig |
-| Beurlauben/Reaktivieren (Liste) | EmployeeList:189/197 | updateEmployee | TOT | A | — | employees.* | Stammdaten · niedrig |
+| Mitarbeiter anlegen | pages/employees/EmployeeList:257 | createEmployee | **angeschlossen (R6C)** | A | `employees.create` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
+| Beurlauben/Reaktivieren (Liste) | EmployeeList:189/197 | updateEmployee | **angeschlossen (R6C)** | A | `employees.update` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
 | Mitarbeiter löschen | EmployeeList:272 | deleteEmployee | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
-| Beurlauben/Reaktivieren (Detail) | pages/employees/EmployeeDetail:152/156 | updateEmployee | TOT | A | — | employees.* | Stammdaten · niedrig |
-| Mitarbeiter speichern | EmployeeDetail:700 | updateEmployee | TOT | A | — | employees.* | Stammdaten · niedrig |
+| Beurlauben/Reaktivieren (Detail) | pages/employees/EmployeeDetail:152/156 | updateEmployee | **angeschlossen (R6C)** | A | `employees.update` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
+| Mitarbeiter speichern | EmployeeDetail:700 | updateEmployee | **angeschlossen (R6C)** | A | `employees.update` (R6C) | **geschlossen (R6C)** | Stammdaten · niedrig |
 | Aufgabe anlegen/ändern | pages/tasks/TaskList:313 | createTask / updateTask | TOT | A | — | tasks.* | Büro · niedrig |
 | Aufgabe erledigt | TaskList:595 | completeTask | TOT | A | — | tasks.* | Büro · niedrig |
 | Aufgabe löschen | TaskList:627 | deleteTask | **gesperrt + erklärt (R6B)** | E | — | bleibt am Primary (§5) | Löschen |
@@ -2487,3 +2487,189 @@ Registry 108 · Matrix 36/0/0/4 + invoices.cancel · keine neue Buchung
 
 Offen bleibt aus der R6A-Liste nur Punkt 7: zwei zufällig verborgene Guthaben-Aktionen. Sie sind A, und ihre Stelle ist
 R6E. Die „unverknüpft"-Anzeige der Mehrfach-Auswahl (Punkt 6) ist mit dem gesperrten „Select" nicht mehr erreichbar.
+
+## R6C — Stammdaten, Schnellanlagen und Inventur (13.09.2026)
+
+Grundlage ist die R6A-SSOT, nicht die Erinnerung. Baseline `5fc7bb2`, Version 0.8.54, Registry **108**, ursprüngliche
+40er-Matrix **36 / 0 / 0 / 4** + `invoices.cancel`, Kategorie B offen **0**. R6C fasst die in R6A getrennt geplanten
+Scheiben R6C (Stammdaten) und R6D (Inventur) zu einem Bündel zusammen.
+
+### Umfang, eingefroren (`CENTRAL_UI_R6C_SCOPE_FROZEN`)
+
+Aus der SSOT gelesen: alle A-Zeilen mit der Domäne **Stammdaten** oder **Inventur** — 16 Einstiege, davon drei
+Schnellanlagen. Primary-Laufweg, Befund und PC2-Stand VOR R6C:
+
+| UI-Einstieg | Laufweg am Primary | Primary fachlich korrekt? | PC2 vorher | gemeinsame Domäne | Fernbuchung |
+|---|---|---|---|---|---|
+| „New Supplier" (SupplierList) | `createSupplier(form)` | **nein**: Name aus Leerzeichen ging durch, nicht getrimmt | TOT | `masterdata-rules` + Store | `suppliers.create` |
+| „+ New Supplier" (PurchaseCreate) | `createSupplier(newSupplierForm)`, danach gewählt | **nein**: wie oben | TOT (ungefangen) | dieselbe | `suppliers.create` |
+| „+ New Supplier" (RepairList) | `createSupplier({name, phone})`, danach gewählt | ja (trimmte als einzige) | TOT | dieselbe | `suppliers.create` |
+| Lieferant ändern (SupplierDetail) | `updateSupplier(id, alle Felder)` | **nein**: geleerter Name schrieb „"; alle Felder zurückgeschrieben | TOT | dieselbe | `suppliers.update` |
+| Lieferant (de)aktivieren | `updateSupplier(id, {active: !active})` | ja (Umschalter) | TOT | dieselbe | `suppliers.update` (Zielwert) |
+| Agent ändern (AgentList „Edit Approval") | `updateAgent(id, {...agent})` | **nein**: schrieb `total_sales`/`total_commission` aus dem Stand beim Öffnen zurück | TOT | dieselbe | `agents.update` |
+| Partner anlegen | `createPartner(form)` | **nein**: Name aus Leerzeichen, Anteil ohne Grenze (250 %, −10 %) | TOT | dieselbe | `partners.create` |
+| Partner speichern | `updatePartner(id, {...partner})` | **nein**: wie oben | TOT | dieselbe | `partners.update` |
+| Mitarbeiter anlegen | `createEmployee(...)` | **nein**: negatives Grundgehalt ging durch | TOT (Alert) | dieselbe | `employees.create` |
+| Beurlauben/Reaktivieren (Liste) | `setStatus(id, s)` | ja | TOT | dieselbe | `employees.update` (Zielstatus) |
+| Beurlauben/Reaktivieren (Detail) | `setStatus(id, s)` | ja | TOT | dieselbe | `employees.update` (Zielstatus) |
+| Mitarbeiter speichern | `updateEmployee(id, {...employee})` | **nein**: wie Anlegen; alle Felder zurückgeschrieben | TOT | dieselbe | `employees.update` |
+| Inventur öffnen (Lauf beginnen) | Maske: `ensureOpenSession` + Einfalten, direkt in die DB | **nein**: an der Schreibreihenfolge vorbei, ohne Transaktion | gesperrt (R6B) | `inventory-house` | `inventory.start` |
+| Inventur speichern | Maske: `recordStockCheck` je Artikel + `persistSessionItems` | **nein**: wie oben; ein eben angelegter Artikel fiel im Kern durch (Datei noch nicht gespeichert) | gesperrt (R6B) | `inventory-house` | `inventory.save` |
+| Inventur abschließen | Maske: `closeSession` | **nein**: an der Schreibreihenfolge vorbei | gesperrt (R6B) | `inventory-house` | `inventory.finish` |
+| Einzel-Check (ProductDetail) | `recordStockCheck` | wie Speichern | gesperrt (R6B) | `inventory-house` | `inventory.record_check` |
+
+**Nicht im Umfang, mit Grund (Domänenspalte der SSOT):** Aufgaben ×2 und Dokumente/OCR ×2 sind *Büro* (→ R6G),
+Metall anlegen/verkaufen/schmelzen ×3 sind *Metall/Geld* (→ R6F, mit der Gold-Familie), „Inbox-Foto verwerfen" ist
+*Einkauf* (→ R6G). Einen weiteren Schnellanlage-Einstieg gibt es nicht: „+ New Client" ist seit R5D.1 angeschlossen,
+die Kommission legt ihren Lieferanten innerhalb von `consignments.create` an.
+
+### Primary zuerst (`CENTRAL_UI_R6C_PRIMARY_FIRST_CONTRACT_PROVED`)
+
+Jede Befund-Zeile oben ist in der **gemeinsamen Domäne** behoben, nicht nur im Fernweg:
+
+- **Eine Regel** (`core/masterdata/masterdata-rules.ts`): Name Pflicht und getrimmt, Texte getrimmt, ein geleertes Feld
+  beim Ändern ist `null`, Partneranteil 0–100 %, Grundgehalt ≥ 0, Status aus der festen Liste. Die Hausfunktionen
+  (`createSupplier`, `updateSupplier`, `updateAgent`, `createPartner`, `updatePartner`, `createEmployee`,
+  `updateEmployee`) prüfen selbst mit ihr — für jeden Einstieg, am Primary wie fern, mit demselben Code.
+- **Agent**: `total_sales`/`total_commission` sind in `updateAgent` nicht mehr schreibbar (die führt
+  `automation-handlers` beim Verkauf) — ein Verkauf während offener Maske bleibt stehen.
+- **Ändern schickt nur das Geänderte** (Lieferant, Agent, Partner, Mitarbeiter; M-01). Die Login-Verknüpfung eines
+  Mitarbeiters bleibt Hauskonfiguration.
+- **Schreibreihenfolge**: jede Stammdaten-Handlung am Primary läuft über `runOnPrimary` (exklusiv, eine Transaktion,
+  danach durabel), die Inventur über `runExclusive` mit eigener Transaktion. Vorher schrieben alle Masken synchron an
+  der Warteschlange vorbei; ein Fernauftrag, der gerade auf Bytes wartete, hätte ihre Zeilen in seine Transaktion
+  genommen.
+- **Inventur**: die Maske fasst keine Datenbank mehr an; vor dem Speichern wird die offene Speicherschuld beglichen (der
+  Kern prüft Artikel gegen die Datei auf der Platte). Der R6B-Fix (kein Schließen nach halbem Erfolg) bleibt.
+
+### Lieferant anlegen — der Vertrag (`CENTRAL_UI_R6C_SUPPLIER_CREATE_PROVED`)
+
+Pflicht: **Name**. Optional: Telefon (mit Ländervorwahl, nur weiche Warnung), E-Mail, Adresse, Notizen, CPR (weiche
+Warnung), Ausweisfoto. Keine USt-/CR-Felder, **kein Eröffnungssaldo**. Filiale und Benutzer aus der Sitzung des Primary,
+immer aktiv, Kennung UUID. **Doppelgänger**: das Haus warnt (Hinweisband, `findSimilarContacts`), es sperrt nicht —
+dieselbe Regel wie beim Kunden; ein neuer Vorsatz ist ein neuer Lieferant, eine verlorene Antwort nicht (durabler
+Nachweis). Protokoll: `trackInsert`. **Eine** Buchung für alle drei Einstiege (`suppliers.create`); das Ausweisfoto
+reist über die vorhandene Ablage aus R5B (`cprImageStagingId`), nie als Bytes im Auftrag.
+
+### Stammdaten — geschlossen (`CENTRAL_UI_R6C_MASTERDATA_GAPS_CLOSED`)
+
+Eine fachliche Aktion, ein Name — sieben Buchungen für zwölf Einstiege (`core/bridge/masterdata-commands.ts`):
+`suppliers.create` (3), `suppliers.update` (2), `agents.update` (1), `partners.create` (1), `partners.update` (1),
+`employees.create` (1), `employees.update` (3). Kein vorhandener Befehl war funktional gleich (Lieferant, Agent,
+Partner, Mitarbeiter hatten keinen Fernweg). Jeder Befehl: typisierter Rumpf mit Verbots- und Zulassungsliste,
+Filialprüfung (`BRANCH_MISMATCH`), Existenz in der Filiale (`*_NOT_FOUND`), die Regel als Rumpf- und als
+Domänenurteil, durabler Nachweis. Kein Löschen (§5), kein Geld (R6E).
+
+### Schnellanlagen — derselbe Ablauf (`CENTRAL_UI_R6C_QUICK_CREATE_RUNTIME_PROVED`)
+
+`+ New Supplier → Maske → Save → sofort da → gewählt` auf beiden Rechnern: `saveSupplierCreate` prüft vor dem Schicken
+mit derselben Regel, legt am Primary über die Hausfunktion an, auf PC2 über `suppliers.create`, und holt danach den
+Bestand frisch vom Primary, **bevor** die Maske weitermacht — Einkauf und Werkstatt wählen den neuen Lieferanten sofort
+(bestehender Vertrag), ohne Neuladen. Kein lokaler Store-Write auf PC2, keine Dublette bei verlorener Antwort.
+
+### Inventur — was sie in diesem Haus ist (`CENTRAL_UI_R6C_INVENTORY_PRIMARY_SEMANTICS_AUDITED`)
+
+- **Lebenszyklus**: ein offener Lauf je Filiale; das Öffnen der Maske beginnt ihn (bei der frühesten nicht erfassten
+  Beobachtung) oder nimmt den offenen auf; nur „Finish" beendet ihn; nichts läuft ab.
+- **Gezählt wird geurteilt**: verfügbar / nicht verfügbar, mit Notiz — kein Sollbestand, keine Stückzahl, **keine
+  Differenz, keine Bestandsbuchung, kein Hauptbuch**. Ein Urteil ist eine Beobachtung (`stock_checks` im Kern des
+  Primary, anhängend, Anfragekennung macht Wiederholungen harmlos) und steht im Arbeitsblatt
+  (`inventory_session_items`). Abschließen legt das Arbeitsblatt weg; der Verlauf bleibt.
+- **Erfasst** werden die Artikel der gefilterten Sammlung; Telefon-Beobachtungen während des Laufs werden genau einmal
+  eingefaltet. Wiederaufnahme: nach Tagen, nach Neustart, von jedem Rechner. Kein Recht nötig (Befund: kein Tor am Primary).
+
+### Inventur — das Befehlsmodell (`CENTRAL_UI_R6C_INVENTORY_COMMAND_MODEL_PROVED`)
+
+Aus dem Lebenszyklus abgeleitet — vier getrennte Absichten, zwei Auskünfte (`core/stock/inventory-house.ts`,
+`core/bridge/inventory-commands.ts`): `inventory.start`, `inventory.save`, `inventory.finish`,
+`inventory.record_check`; `inventory.session.get` (Arbeitsblatt + letzte Beobachtung je Artikel),
+`inventory.checks.get` (Verlauf eines Artikels). Speichern und Abschließen bleiben zwei Absichten: Abschließen speichert
+nichts, Speichern schließt nichts. Die Ergebnisse sind klein (eingefroren wird keine Liste); das Arbeitsblatt liest die
+Maske danach über die Auskunft. PC2 fragt nie seinen eigenen Kern (R6B-Invariante bleibt).
+
+### Nebenläufigkeit (`CENTRAL_UI_R6C_INVENTORY_CONCURRENCY_PROVED`)
+
+Neue Spalte `inventory_sessions.revision` (additiv). Speichern und Abschließen nennen die **gesehene Fassung**; jede
+Wirkung zählt sie hoch. Eine veraltete Fassung ist ein klares, eingefrorenes Nein (`INVENTORY_SESSION_STALE`) — vor jeder
+Beobachtung. Am Primary wird die Fassung zusätzlich **innerhalb** der Transaktion vor dem Arbeitsblatt noch einmal
+geprüft (zwischen den Beobachtungen kann ein Fernauftrag gelaufen sein). Vertrag bei mehreren Geräten nacheinander:
+sehen, dann schreiben — wer abgewiesen wird, öffnet neu. Kein Multi-Writer-Neudesign; alles läuft durch die eine
+Schreibreihenfolge des Primary und seine Transaktionsgrenze; Hintergrund-Speichern beendet keine offene Transaktion
+(R5B-Regeln unverändert).
+
+### Atomarität (`CENTRAL_UI_R6C_INVENTORY_ATOMICITY_PROVED`)
+
+Reihenfolge beim Speichern: prüfen → Beobachtungen (je wiedererkennbare Anfragekennung `<commandId>:<productId>`) →
+**erst wenn alle stehen** Arbeitsblatt + Fassung in einer Transaktion. Fehlerinjektion an echten Punkten:
+nach dem Anlegen des Laufs (kein Lauf, keine Zeile), nach der ersten Beobachtung (Arbeitsblatt und Fassung unverändert;
+dieselbe Kennung findet sie wieder — keine doppelte), beim Abschließen (Lauf bleibt offen, Arbeitsblatt vollständig),
+während der Durabilität (kein Erfolg; dieselbe Kennung: eingefrorene Antwort, keine zweite Beobachtung). Differenzrechnung
+und Bestandsbuchung gibt es nicht — bewiesen: die Hausfolge hat keinen Weg zu `products`, `stock_lots` oder dem
+Hauptbuch; Bestand und Hauptbuch sind nach dem ganzen Lebenszyklus unverändert.
+
+### Sicherheit (`CENTRAL_UI_R6C_INVENTORY_INPUT_AUTHORITY_PROVED`)
+
+Serverseitig abgewiesen: fremde Filiale (Ausweis und Artikel), fremde/erfundene Sitzung, Artikel außerhalb der Inventur,
+drittes Urteil, zwei Urteile je Artikel, Notiz über 500 Zeichen, fehlende oder alte Fassung, und jeder vom Client
+genannte Soll-/Ist-Bestand, jede Differenz, jeder Zeitstempel, Benutzer, jede Beobachtungskennung (Rumpf und Zeile).
+Der Primary bestimmt Beginn, Fassung, Zuordnung, Zeit und Kennung.
+
+### Zwei echte Anwendungen (`CENTRAL_UI_R6C_INVENTORY_RUNTIME_PROVED`)
+
+`test/e2e/r6c-masterdata-inventory.e2e.mjs`, frisch gebaute Programme, Primary + datenloser ADMIN-PC2 mit einer ALTEN
+`lataif.db` im Datenordner: drei „+ New Supplier" (je genau EIN `suppliers.create`, sofort gewählt), Lieferant ändern
+(nur das Geänderte) und deaktivieren (Zielwert), Agent (Summen unberührt), Partner, Mitarbeiter (anlegen, Status in
+Liste und Detail, ändern) — jeweils Primary == PC2. Inventur: beginnen → zählen → speichern mit **verlorener Antwort**
+(zweimal dieselbe Kennung, genau zwei Beobachtungen, Fassung genau einmal hoch) → wieder öffnen (vom Primary gelesen)
+→ Primary ändert → PC2 mit alter Fassung **abgewiesen**, nichts geschrieben → abschließen; sauberer Zwilling Primary ==
+PC2; Einzel-Check. Kein Datenbankgriff, kein Kernaufruf, die alte Datei unberührt, keine neue Datei.
+
+### E2E-Prozess-Isolation — dauerhafte Test-Invariante
+
+Kein Harness beendet mehr pauschal `lataif.exe`. `test/e2e/_e2e-process.mjs` ist die einzige Stelle mit `taskkill` —
+nur mit `/PID`, nur für Prozesse am **exakten** Test-Pfad (`target/debug/lataif.exe`, `lataif-e2e-client.exe`) oder
+selbst gestartete (gespeicherte PID, Pfad nachgeprüft); Headless-Browser nur mit eigener Profilkennung. Alle
+E2E-Dateien sind umgestellt. Gate `test/e2e-safety/process-isolation.test.ts` (im Node-Sweep): kein anderer
+Beende-Aufruf, kein Image-Name, kein `E:\LATAIF`, kein Port 3001/3443, Produktions-AppData nur lesend — und ein echter
+Harness-Beweis: ein Köder gleichen Namens an einem anderen Pfad überlebt jede Aufräumroutine, fremde `lataif.exe`
+(die Produktion) laufen danach weiter.
+
+### Test-Delta (alte Pins, bewusst geändert)
+
+- Registry-Pins **108 → 121** und Buchungs-Pins **41 → 52** in 26 Gates; die Namenslisten tragen die elf neuen Buchungen
+  und die zwei Auskünfte am Ende. `invoices.cancel` bleibt die eine R5F.1-Buchung an Platz 41; der R5F.1-Vergleich
+  „vorher/jetzt" nennt die R6C-Namen ausdrücklich.
+- `r4c-write-matrix`: die Vierziger-Matrix bleibt abgeschlossen; die R6C-Buchungen stehen daneben (wie
+  `invoices.cancel`). `r3-write-matrix`: „Inventursitzung ist eine Lücke" → „seit R6C geschlossen".
+- `r5e/order-contract-pins` §5: die festgehaltene Lücke „+ New Supplier" ist geschlossen (Buchung vorhanden, dieselbe
+  Folge an allen Einstiegen).
+- `r2c-direct-db-scan`: die Inventurmaske hat keinen direkten Datenbankzugriff mehr (Eintrag entfernt).
+- `r6b/safety-existing-commands` §3: die R6B-Sperre der Inventur ist durch den Weg über den Primary ersetzt; weiter
+  geprüft: kein Aufruf des eigenen Kerns auf dem Client, kein halber Erfolg, kein „finished" ohne Wirkung.
+- Rust `bridge_tests`: 121 Namen, die 52 Buchungen namentlich.
+
+### Beweise
+
+```
+Unit  r6c/masterdata-parity 88/0 · r6c/inventory-parity 81/0 · e2e-safety/process-isolation 31/0
+E2E   r6c-masterdata-inventory 120/0 (zwei echte Anwendungen, frisch gebaut; Isolation: nur eigene Prozesse beendet)
+Nachbarn (26 Registry-/Matrix-Gates, r6b, r5*, r4*, r3, r2c, stock/*, c4/c6) grün · Rust bridge 37/0
+TS    tsconfig.app 0 · tsconfig.node 0 · Lint-Delta 0
+Registry 121 · Matrix 36/0/0/4 + invoices.cancel (unverändert)
+```
+
+### Stand der R6A-SSOT nach R6C
+
+```
+A vorher            95
+A in R6C behandelt  16   (12 Stammdaten, davon 3 Schnellanlagen · 4 Inventur)
+A geschlossen       16
+A verbleibend       79
+neue Fernbuchungen  11   (suppliers.create/update, agents.update, partners.create/update,
+                          employees.create/update, inventory.start/save/finish/record_check)
+neue Auskünfte       2   (inventory.session.get, inventory.checks.get)
+Registry            108 → 121   (1 Probe + 68 Auskünfte + 52 Buchungen)
+B 0 offen · C 15 · D 12 · E 41 (unverändert)
+```
+
+Nächste Scheiben: R6E Finanzen/Steuer · R6F Gold (mit Metall) · R6G Lebenszyklen (mit Aufgaben, Dokumenten, Inbox-Foto).

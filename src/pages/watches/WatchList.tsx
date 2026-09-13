@@ -27,7 +27,6 @@ import { decideProductCreateUi, type ProductCreateResult } from '@/core/media/pr
 import { planProductCreate, productCreateRefusal, productCreateRequest } from '@/core/products/product-create';
 import { useSharedWrites } from '@/core/data/shared-write';
 import { primaryOnlyDeleteProps, blockDeleteOnClient, primaryOnlyLocked, primaryOnlyText } from '@/core/data/primary-only';
-import { stockCheckAvailableHere } from '@/core/stock/stock-check';
 import { WriteError } from '@/components/shared/WriteError';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { matchesDeep } from '@/core/utils/deep-search';
@@ -530,12 +529,10 @@ export function WatchList() {
               </Button>
               {/* POST-V0838 §C1 — the inventory modal takes the CURRENT working set: whatever the
                   search and the filters above have narrowed the page down to, never the whole stock. */}
-              {/* CENTRAL-UI-PARITY R6B — die Inventur schreibt (noch) in den Kern DIESES Rechners; ohne
-                  eigene Datenbank ist sie gesperrt und sagt es, bis R6D den Weg über den Primary baut. */}
+              {/* CENTRAL-UI-PARITY R6C — die Inventur läuft auf beiden Rechnern über den Primary
+                  (dieselbe Hausfolge, auf PC2 als Fernbefehl); der Kern von PC2 wird nie gefragt. */}
               <Button variant="ghost" data-testid="open-inventory"
-                disabled={filtered.length === 0 || !stockCheckAvailableHere()}
-                title={stockCheckAvailableHere() ? undefined : primaryOnlyText('Inventory')}
-                data-primary-only={stockCheckAvailableHere() ? undefined : 'inventory'}
+                disabled={filtered.length === 0}
                 onClick={() => setInventoryOpen(true)}>
                 Stock Check ({filtered.length})
               </Button>

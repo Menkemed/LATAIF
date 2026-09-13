@@ -122,6 +122,27 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'returns.approve': null,
   'returns.refund': RECORD_PAYMENTS,
   'returns.record_refund_payment': RECORD_PAYMENTS,
+
+  // ── Stammdaten (R6C) ────────────────────────────────────────────────────
+  // BEFUND: `SupplierList`, `SupplierDetail`, `PurchaseCreate`, `RepairList`, `AgentList`,
+  // `PartnersPage`, `EmployeeList` und `EmployeeDetail` fragen `usePermission` NICHT. Am Primary
+  // darf jeder angemeldete Benutzer diese Stammdaten anlegen und ändern — der Fernweg erfindet kein
+  // Recht (dieselbe Regel wie bei `purchases.create`). Der Befund steht im Bericht.
+  'suppliers.create': null,
+  'suppliers.update': null,
+  'agents.update': null,
+  'partners.create': null,
+  'partners.update': null,
+  'employees.create': null,
+  'employees.update': null,
+
+  // ── Inventur (R6C) ──────────────────────────────────────────────────────
+  // BEFUND: `WatchList` („Stock Check"), `StockCheckInventoryModal` und `StockCheckPanel` sind am
+  // Primary ohne Rechte-Tor. Kein erfundenes Recht.
+  'inventory.start': null,
+  'inventory.save': null,
+  'inventory.finish': null,
+  'inventory.record_check': null,
 };
 
 /**

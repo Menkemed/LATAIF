@@ -1,0 +1,209 @@
+// ════════════════════════════════════════════════════════════════════════════
+// CENTRAL-UI-PARITY R6C — die gemeinsame Speicherfolge der Stammdaten-Masken.
+//
+// Jede Maske (drei „+ New Supplier", Lieferant ändern und (de)aktivieren, Agent ändern, Partner
+// anlegen/ändern, Mitarbeiter anlegen/Status/ändern) ruft EINE Funktion dieser Datei. Die Funktion
+// kennt zwei Anschlüsse und keine Geschäftsregel außer der gemeinsamen (`masterdata-rules.ts`):
+//
+//   • am Primary die Hausfunktion (Store) — in derselben Schreibreihenfolge wie ein Fernauftrag
+//     (`runOnPrimary`: exklusiv, eine Transaktion, erst danach durabel). Vorher schrieb die Maske
+//     synchron an der Warteschlange vorbei; ein Fernauftrag, der gerade auf etwas wartete (etwa auf
+//     die Bytes eines Fotos), hätte ihre Zeile in seine Transaktion genommen.
+//   • auf dem Rechner ohne Datenbank die geprüfte Buchung (`suppliers.create`, …) über die Brücke.
+//
+// Geprüft wird VOR dem Schicken mit derselben Regel, die der Primary anwendet — damit sagt die
+// Maske auf beiden Rechnern dasselbe, und ein unbrauchbarer Rumpf verlässt den Rechner gar nicht.
+// Beim Ändern reist nur, was sich gegen den geladenen Stand geändert hat (M-01).
+// ════════════════════════════════════════════════════════════════════════════
+import type { Agent, Employee, Partner, Supplier } from '@/core/models/types';
+import { fetchFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
+import { runOnPrimary } from '@/core/data/primary-action';
+import type { WriteAdapters, WriteOutcome } from '@/core/data/shared-write';
+import { updatePayload } from '@/core/data/write-payloads';
+import { stageDataUrls } from '@/core/bridge/client-staging-upload';
+import { useSupplierStore } from '@/stores/supplierStore';
+import { useEmployeeStore } from '@/stores/employeeStore';
+import { usePartnerStore } from '@/stores/partnerStore';
+import { useAgentStore } from '@/stores/agentStore';
+import {
+  AGENT_UPDATE_FIELDS, EMPLOYEE_FIELDS, PARTNER_UPDATE_FIELDS, SUPPLIER_UPDATE_FIELDS,
+  agentUpdateInput, employeeCreateInput, employeeUpdateInput, partnerCreateInput, partnerUpdateInput,
+  supplierCreateInput, supplierUpdateInput,
+} from './masterdata-rules';
+
+/** Was eine Maske von ihrer Schreibweiche braucht — `useSharedWrite` und `useSharedWrites` passen. */
+export interface MasterdataWrite<T> {
+  readonly remote: boolean;
+  save: (adapters: WriteAdapters<T>) => Promise<WriteOutcome<T>>;
+}
+
+export type Saved = { id: string };
+
+function absage<T>(e: unknown): WriteOutcome<T> {
+  const code = (e as { code?: unknown })?.code;
+  return {
+    kind: 'business_error',
+    code: typeof code === 'string' && code ? code : 'LOCAL_WRITE_REJECTED',
+    message: e instanceof Error ? e.message : String(e),
+  };
+}
+
+const unveraendert = <T>(value: T): WriteOutcome<T> => ({ kind: 'ok', value, replayed: false });
+
+/** Das Ausweisfoto in die Ablage des Primary — dieselbe Zwischenablage wie beim Artikel (R5B). */
+async function stagePhoto(dataUrl: string): Promise<{ id: string } | { fail: WriteOutcome<never> }> {
+  try {
+    const [id] = await stageDataUrls([dataUrl]);
+    return { id };
+  } catch (e) {
+    const code = (e as { code?: unknown })?.code;
+    return {
+      fail: {
+        kind: 'not_executed',
+        code: typeof code === 'string' && code ? code : 'STAGING_FAILED',
+        message: `The ID-card photo could not be sent to the main computer (${e instanceof Error ? e.message : String(e)}). Nothing was saved.`,
+      },
+    };
+  }
+}
+
+/** Nach einem Erfolg auf PC2: den Bestand frisch vom Primary holen, BEVOR die Maske weitermacht —
+ *  so ist ein neuer Lieferant sofort in der Auswahl und kann gleich ausgewählt werden. Am Primary
+ *  lädt die Hausfunktion ihren Store selbst. */
+async function nachladen(op: string, apply: (d: Record<string, unknown>) => void): Promise<void> {
+  if (!readsFromPrimary()) return;
+  const d = await fetchFromPrimary(op);
+  if (d) apply(d);
+}
+
+const suppliersNeu = () => nachladen('store.suppliers.get', (d) => useSupplierStore.setState(d as never));
+const employeesNeu = () => nachladen('store.employees.get', (d) => useEmployeeStore.setState(d as never));
+const partnersNeu = () => nachladen('store.partners.get', (d) => usePartnerStore.setState(d as never));
+const agentsNeu = () => nachladen('store.agents.get', (d) => useAgentStore.setState(d as never));
+
+const suppliersHier = () => useSupplierStore.getState().loadSuppliers();
+const employeesHier = () => useEmployeeStore.getState().loadEmployees();
+const partnersHier = () => usePartnerStore.getState().loadPartners();
+const agentsHier = () => useAgentStore.getState().loadAgents();
+
+// ── Lieferant ──────────────────────────────────────────────────────────────
+
+/** „+ New Supplier" — dieselbe Folge an allen drei Stellen (SupplierList, PurchaseCreate, RepairList). */
+export async function saveSupplierCreate(
+  write: MasterdataWrite<{ supplierId: string }>, form: Partial<Supplier>,
+): Promise<WriteOutcome<{ supplierId: string }>> {
+  let input: ReturnType<typeof supplierCreateInput>;
+  try { input = supplierCreateInput(form as Record<string, unknown>); } catch (e) { return absage(e); }
+  const body: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(input)) if (k !== 'cprImage') body[k] = v;
+  if (write.remote && input.cprImage) {
+    const s = await stagePhoto(input.cprImage);
+    if ('fail' in s) return s.fail;
+    body.cprImageStagingId = s.id;
+  }
+  const r = await write.save({
+    local: () => runOnPrimary(() => ({ supplierId: useSupplierStore.getState().createSupplier(input).id }), suppliersHier),
+    remote: () => body,
+    shape: (v) => ({ supplierId: String(v.supplierId ?? '') }),
+  });
+  if (r.kind === 'ok') await suppliersNeu();
+  return r;
+}
+
+/** Lieferant ändern: nur das Geänderte; ein neues Foto reist über die Ablage, ein entferntes als `null`. */
+export async function saveSupplierUpdate(
+  write: MasterdataWrite<Saved>, base: Supplier, form: Partial<Supplier>,
+): Promise<WriteOutcome<Saved>> {
+  const diff = updatePayload(base as unknown as Record<string, unknown>, form as Record<string, unknown>, SUPPLIER_UPDATE_FIELDS);
+  if (Object.keys(diff).length === 0) return unveraendert({ id: base.id });
+  try { supplierUpdateInput(diff); } catch (e) { return absage(e); }
+  const body: Record<string, unknown> = { id: base.id, ...diff };
+  if (write.remote && typeof diff.cprImage === 'string') {
+    const s = await stagePhoto(diff.cprImage);
+    if ('fail' in s) return s.fail;
+    delete body.cprImage;
+    body.cprImageStagingId = s.id;
+  }
+  const r = await write.save({
+    local: () => runOnPrimary(() => { useSupplierStore.getState().updateSupplier(base.id, diff as Partial<Supplier>); return { id: base.id }; }, suppliersHier),
+    remote: () => body,
+    shape: () => ({ id: base.id }),
+  });
+  if (r.kind === 'ok') await suppliersNeu();
+  return r;
+}
+
+/** „Deactivate / Reactivate Supplier" — der ZIELWERT, kein Umschalter. */
+export function saveSupplierActive(write: MasterdataWrite<Saved>, supplier: Supplier, active: boolean): Promise<WriteOutcome<Saved>> {
+  return saveSupplierUpdate(write, supplier, { ...supplier, active });
+}
+
+// ── Agent ──────────────────────────────────────────────────────────────────
+
+export async function saveAgentUpdate(write: MasterdataWrite<Saved>, base: Agent, form: Partial<Agent>): Promise<WriteOutcome<Saved>> {
+  const diff = updatePayload(base as unknown as Record<string, unknown>, form as Record<string, unknown>, AGENT_UPDATE_FIELDS);
+  if (Object.keys(diff).length === 0) return unveraendert({ id: base.id });
+  try { agentUpdateInput(diff); } catch (e) { return absage(e); }
+  const r = await write.save({
+    local: () => runOnPrimary(() => { useAgentStore.getState().updateAgent(base.id, diff as Partial<Agent>); return { id: base.id }; }, agentsHier),
+    remote: () => ({ id: base.id, ...diff }),
+    shape: () => ({ id: base.id }),
+  });
+  if (r.kind === 'ok') await agentsNeu();
+  return r;
+}
+
+// ── Partner ────────────────────────────────────────────────────────────────
+
+export async function savePartnerCreate(write: MasterdataWrite<Saved>, form: Partial<Partner>): Promise<WriteOutcome<Saved>> {
+  let input: ReturnType<typeof partnerCreateInput>;
+  try { input = partnerCreateInput(form as Record<string, unknown>); } catch (e) { return absage(e); }
+  const r = await write.save({
+    local: () => runOnPrimary(() => ({ id: usePartnerStore.getState().createPartner(input).id }), partnersHier),
+    remote: () => ({ ...input }),
+    shape: (v) => ({ id: String(v.partnerId ?? '') }),
+  });
+  if (r.kind === 'ok') await partnersNeu();
+  return r;
+}
+
+export async function savePartnerUpdate(write: MasterdataWrite<Saved>, base: Partner, form: Partial<Partner>): Promise<WriteOutcome<Saved>> {
+  const diff = updatePayload(base as unknown as Record<string, unknown>, form as Record<string, unknown>, PARTNER_UPDATE_FIELDS);
+  if (Object.keys(diff).length === 0) return unveraendert({ id: base.id });
+  try { partnerUpdateInput(diff); } catch (e) { return absage(e); }
+  const r = await write.save({
+    local: () => runOnPrimary(() => { usePartnerStore.getState().updatePartner(base.id, diff as Partial<Partner>); return { id: base.id }; }, partnersHier),
+    remote: () => ({ id: base.id, ...diff }),
+    shape: () => ({ id: base.id }),
+  });
+  if (r.kind === 'ok') await partnersNeu();
+  return r;
+}
+
+// ── Mitarbeiter ────────────────────────────────────────────────────────────
+
+export async function saveEmployeeCreate(write: MasterdataWrite<Saved>, form: Partial<Employee>): Promise<WriteOutcome<Saved>> {
+  let input: ReturnType<typeof employeeCreateInput>;
+  try { input = employeeCreateInput(form as unknown as Record<string, unknown>); } catch (e) { return absage(e); }
+  const r = await write.save({
+    local: () => runOnPrimary(() => ({ id: useEmployeeStore.getState().createEmployee(input as never).id }), employeesHier),
+    remote: () => ({ ...input }),
+    shape: (v) => ({ id: String(v.employeeId ?? '') }),
+  });
+  if (r.kind === 'ok') await employeesNeu();
+  return r;
+}
+
+/** Mitarbeiter ändern — auch „On Leave" / „Reactivate" in Liste und Detail (nur der Status reist). */
+export async function saveEmployeeUpdate(write: MasterdataWrite<Saved>, base: Employee, form: Partial<Employee>): Promise<WriteOutcome<Saved>> {
+  const diff = updatePayload(base as unknown as Record<string, unknown>, form as Record<string, unknown>, EMPLOYEE_FIELDS);
+  if (Object.keys(diff).length === 0) return unveraendert({ id: base.id });
+  try { employeeUpdateInput(diff); } catch (e) { return absage(e); }
+  const r = await write.save({
+    local: () => runOnPrimary(() => { useEmployeeStore.getState().updateEmployee(base.id, diff as Partial<Employee>); return { id: base.id }; }, employeesHier),
+    remote: () => ({ id: base.id, ...diff }),
+    shape: () => ({ id: base.id }),
+  });
+  if (r.kind === 'ok') await employeesNeu();
+  return r;
+}

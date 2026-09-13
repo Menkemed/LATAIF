@@ -418,12 +418,12 @@ async function editWelt(weg: 'primary' | 'fern', status: string, form: Record<st
   ok(fo.code === 'BRANCH_MISMATCH' && n(dbF, 'SELECT COUNT(*) FROM orders') === 0, `DELTA die Filialpruefung bleibt (${fo.code})`);
 }
 
-// ── §5 „+ New Supplier" im Einkauf: eine NEUE Fern-Schreiblücke ───────────
+// ── §5 „+ New Supplier" im Einkauf: die in R5E festgehaltene Lücke — seit R6C geschlossen ───
 {
-  ok(!ALLOWED_MUTATIONS.includes('suppliers.create') && ALLOWED_MUTATIONS.length === 41, 'GAP es gibt keine Buchung suppliers.create — und keine weitere ausser invoices.cancel (41)');
+  ok(ALLOWED_MUTATIONS.includes('suppliers.create') && ALLOWED_MUTATIONS.length === 52, 'GAP→R6C die Buchung suppliers.create gibt es jetzt — eine der elf R6C-Buchungen (52)');
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(!/suppliers\.create/.test(rust) && rustOps === 108, `GAP die Registry kennt sie nicht und steht bei 108 (R5F.1: invoices.cancel) (${rustOps})`);
+  ok(/"suppliers\.create"/.test(rust) && rustOps === 121, `GAP→R6C die Registry kennt sie und steht bei 121 (${rustOps})`);
   const stand = [R4C_MATRIX.filter((z) => z.verdrahtet).length, R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet).length,
     R4C_MATRIX.filter((z) => z.luecke === 'B').length, R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length];
   // R5F schliesst weitere Zeilen — die Matrix bleibt bei 40, ohne offene „exakt"-Zeile und ohne Lieferanten.
@@ -431,8 +431,8 @@ async function editWelt(weg: 'primary' | 'fern', status: string, form: Record<st
     && stand[0] + stand[1] + stand[2] + stand[3] === 40,
   `GAP die Matrix zaehlt sie nicht mit (${stand.join('/')})`);
   const pc = codeOf(src('src/pages/purchases/PurchaseCreate.tsx'));
-  ok(/function handleCreateSupplier\(\)[\s\S]{0,300}createSupplier\(newSupplierForm\)/.test(pc) && !/'suppliers\./.test(pc),
-    'GAP „+ New Supplier" legt am Primary lokal an — einen Fernweg gibt es nicht');
+  ok(/async function handleCreateSupplier\(\)[\s\S]{0,300}saveSupplierCreate\(neuerLieferant, newSupplierForm\)/.test(pc) && /'suppliers\.create'/.test(pc) && !/createSupplier\(/.test(pc),
+    'GAP→R6C „+ New Supplier" geht am Primary über die Hausfunktion, auf PC2 über suppliers.create — dieselbe Folge wie in Liste und Werkstatt');
   const doc = src('docs/central-ui-parity.md');
   ok(doc.includes('CENTRAL_UI_R5E_NEW_SUPPLIER_WRITE_GAP_RECORDED') && doc.includes('+ New Supplier') && doc.includes('suppliers.create'),
     'GAP die Luecke steht im Dokument');

@@ -16,6 +16,9 @@ import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Partner } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { savePartnerCreate, savePartnerUpdate } from '@/core/masterdata/masterdata-save';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -24,8 +27,11 @@ function fmt(v: number): string {
 type TxKind = 'INVESTMENT' | 'WITHDRAWAL' | 'PROFIT_DISTRIBUTION';
 
 export function PartnersPage() {
-  const { partners, transactions, loadPartners, loadTransactions, createPartner, updatePartner, deletePartner,
+  const { partners, transactions, loadPartners, loadTransactions, deletePartner,
     recordInvestment, recordWithdrawal, recordProfitDistribution, deleteTransaction } = usePartnerStore();
+  // CENTRAL-UI-PARITY R6C — Partner anlegen/ändern: am Primary die Hausfunktion, auf PC2
+  // `partners.create` / `partners.update`. Die Partnerbewegungen (Geld) bleiben R6E.
+  const w = useSharedWrites();
 
   const [searchParams, setSearchParams] = useSearchParams();
   const [search, setSearch] = useState('');
@@ -66,11 +72,21 @@ export function PartnersPage() {
     setTxNotes('');
   }
 
-  function handleCreatePartner() {
-    if (!partnerForm.name) return;
-    createPartner(partnerForm);
+  const [partnerFehler, setPartnerFehler] = useState('');
+  async function handleCreatePartner() {
+    setPartnerFehler('');
+    const r = await savePartnerCreate({ remote: w.remote, save: (a) => w.save('partners.create', a) }, partnerForm);
+    if (r.kind !== 'ok') { setPartnerFehler(`Could not create partner: ${fehlertext(r)}`); return; }
     setShowNewPartner(false);
     setPartnerForm({});
+  }
+
+  async function handleSavePartner() {
+    if (!editPartner) return;
+    setPartnerFehler('');
+    const r = await savePartnerUpdate({ remote: w.remote, save: (a) => w.save('partners.update', a) }, editPartner, editForm);
+    if (r.kind !== 'ok') { setPartnerFehler(`Could not save partner: ${fehlertext(r)}`); return; }
+    setEditPartner(null);
   }
 
   // Duplicate-Check fuer New Partner Modal
@@ -174,6 +190,7 @@ export function PartnersPage() {
       {/* New Partner */}
       <Modal open={showNewPartner} onClose={() => setShowNewPartner(false)} title="New Partner" width={460}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <WriteError text={partnerFehler} />
           {partnerDuplicateMatches.length > 0 && (
             <DuplicateWarningBanner matches={partnerDuplicateMatches} entityLabel="partner" />
           )}
@@ -185,7 +202,7 @@ export function PartnersPage() {
           <Input required label="PROFIT SHARE (%)" type="number" step="0.01" placeholder="0" value={partnerForm.sharePercentage ?? ''} onChange={e => setPartnerForm({ ...partnerForm, sharePercentage: parseFloat(e.target.value) || 0 })} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNewPartner(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreatePartner} disabled={!partnerForm.name}>
+            <Button variant="primary" onClick={() => void handleCreatePartner()} disabled={!partnerForm.name || w.busy} data-partner-create-save>
               {partnerDuplicateMatches.length > 0 ? 'Create anyway' : 'Create Partner'}
             </Button>
           </div>
@@ -236,6 +253,7 @@ export function PartnersPage() {
       {/* Edit Partner Modal */}
       <Modal open={!!editPartner} onClose={() => setEditPartner(null)} title={`Edit Partner — ${editPartner?.name || ''}`} width={460}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <WriteError text={editPartner ? partnerFehler : ''} />
           <Input required label="NAME" value={editForm.name || ''} onChange={e => setEditForm({ ...editForm, name: e.target.value })} />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
             <PhoneInput label="PHONE" value={editForm.phone || ''} onChange={v => setEditForm({ ...editForm, phone: v })} />
@@ -278,11 +296,7 @@ export function PartnersPage() {
             }}>Delete</Button>
             <div className="flex gap-2">
               <Button variant="ghost" onClick={() => setEditPartner(null)}>Cancel</Button>
-              <Button variant="primary" onClick={() => {
-                if (!editPartner) return;
-                updatePartner(editPartner.id, editForm);
-                setEditPartner(null);
-              }}>Save</Button>
+              <Button variant="primary" disabled={w.busy} data-partner-save onClick={() => void handleSavePartner()}>Save</Button>
             </div>
           </div>
         </div>

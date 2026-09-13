@@ -32,10 +32,11 @@ import {
   repairCreateBody, repairInvoiceBody,
 } from '@/core/repairs/repair-rules';
 import { createRepairOnPrimary, invoiceRepairsOnPrimary } from '@/core/repairs/repair-house';
-import { useSharedWrites, fehlertext, nichtAmClient } from '@/core/data/shared-write';
+import { useSharedWrites, useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { quickRepairNext } from '@/core/repairs/repair-status-flow';
+import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -87,7 +88,7 @@ export function RepairList() {
   // auf einer offenen Order liegt, Hinweis im Picker.
   const { orders, loadOrders, getAllProductReservations } = useOrderStore();
   const { invoices, loadInvoices } = useInvoiceStore();
-  const { suppliers, loadSuppliers, createSupplier } = useSupplierStore();
+  const { suppliers, loadSuppliers } = useSupplierStore();
   const [showNew, setShowNew] = useState(false);
   const [filterStatus, setFilterStatus] = useState<RepairStatus | ''>('');
   const [filterCustomerId, setFilterCustomerId] = useState<string>('');
@@ -132,10 +133,15 @@ export function RepairList() {
   const [showQuickSupplier, setShowQuickSupplier] = useState(false);
   const [quickSupplierName, setQuickSupplierName] = useState('');
   const [quickSupplierPhone, setQuickSupplierPhone] = useState('');
-  function handleQuickSupplierCreate() {
-    if (!quickSupplierName.trim()) return;
-    const created = createSupplier({ name: quickSupplierName.trim(), phone: quickSupplierPhone.trim() || undefined });
-    setForm(f => ({ ...f, workshopSupplierId: created.id }));
+  // CENTRAL-UI-PARITY R6C — „+ New Supplier" in der Werkstatt: dieselbe Folge wie in der
+  // Lieferantenliste und im Einkauf (masterdata-save); danach sofort gewählt.
+  const neuerLieferant = useSharedWrite<{ supplierId: string }>('suppliers.create');
+  const [quickSupplierFehler, setQuickSupplierFehler] = useState('');
+  async function handleQuickSupplierCreate() {
+    setQuickSupplierFehler('');
+    const r = await saveSupplierCreate(neuerLieferant, { name: quickSupplierName, phone: quickSupplierPhone });
+    if (r.kind !== 'ok') { setQuickSupplierFehler(`Could not create supplier: ${fehlertext(r)}`); return; }
+    setForm(f => ({ ...f, workshopSupplierId: r.value.supplierId }));
     setQuickSupplierName('');
     setQuickSupplierPhone('');
     setShowQuickSupplier(false);
@@ -1177,6 +1183,7 @@ export function RepairList() {
 
       <Modal open={showQuickSupplier} onClose={() => setShowQuickSupplier(false)} title="New Supplier" width={420}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <WriteError text={quickSupplierFehler} />
           <Input label="NAME *" placeholder="e.g. Goldsmith Ali"
             value={quickSupplierName} onChange={e => setQuickSupplierName(e.target.value)} />
           <Input label="PHONE (OPTIONAL)" placeholder="+973…"
@@ -1186,7 +1193,7 @@ export function RepairList() {
           </p>
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowQuickSupplier(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleQuickSupplierCreate} disabled={!quickSupplierName.trim()}>
+            <Button variant="primary" onClick={() => void handleQuickSupplierCreate()} disabled={!quickSupplierName.trim() || neuerLieferant.busy} data-repair-quick-supplier-save>
               Create &amp; Select
             </Button>
           </div>

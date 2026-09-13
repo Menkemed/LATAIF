@@ -87,11 +87,23 @@ const MATRIX: Record<string, Zeile> = {
   'returns.record_refund_payment': { ui: 'ReturnDetail — Erstattung auszahlen', gleich: true },
   // R5F.1 — die eine seither freigegebene Buchung.
   'invoices.cancel': { ui: 'InvoiceDetail — Rechnung stornieren', gleich: true },
+  // R6C — Stammdaten und Inventur: je fachlicher Aktion EINE Buchung, jede Maske ein Anschluss.
+  'suppliers.create': { ui: 'SupplierList / PurchaseCreate / RepairList — + New Supplier', gleich: true },
+  'suppliers.update': { ui: 'SupplierDetail — speichern, (de)aktivieren', gleich: true },
+  'agents.update': { ui: 'AgentList — Edit Approval', gleich: true },
+  'partners.create': { ui: 'PartnersPage — New Partner', gleich: true },
+  'partners.update': { ui: 'PartnersPage — Edit Partner', gleich: true },
+  'employees.create': { ui: 'EmployeeList — New Employee', gleich: true },
+  'employees.update': { ui: 'EmployeeList / EmployeeDetail — speichern, On Leave, Reactivate', gleich: true },
+  'inventory.start': { ui: 'WatchList — Stock Check öffnen', gleich: true },
+  'inventory.save': { ui: 'StockCheckInventoryModal — Save stock check', gleich: true },
+  'inventory.finish': { ui: 'StockCheckInventoryModal — Finish inventory', gleich: true },
+  'inventory.record_check': { ui: 'ProductDetail — Einzel-Check', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 41, `A vierzig Buchungen (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 52, `A 52 Buchungen (vierzig + invoices.cancel + elf aus R6C) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));
@@ -161,8 +173,11 @@ const MATRIX: Record<string, Zeile> = {
     'D …seit R5A tut die Buchung es auch — dieselbe Kennung, eine Wirkung');
 
   // Die anderen drei haben ueberhaupt keine passende Buchung.
+  // R6C — die Inventursitzung ist keine Lücke mehr: Beginnen, Speichern, Abschließen und der Einzel-Check
+  // haben ihre Fernbuchungen (inventory.*). Die anderen beiden bleiben es.
+  ok(['inventory.start', 'inventory.save', 'inventory.finish', 'inventory.record_check'].every((m) => MUTATIONEN.includes(m)),
+    'D „Inventursitzung" ist seit R6C geschlossen — vier Fernbuchungen über den Primary');
   for (const [was, muster] of [
-    ['Inventursitzung', /inventory|stock_check/i],
     ['Steuerzahlung', /tax_payment/i],
     ['Nachbuchung', /backfill/i],
   ] as Array<[string, RegExp]>) {

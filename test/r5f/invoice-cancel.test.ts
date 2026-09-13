@@ -333,10 +333,10 @@ function bildDesStornos(db: Db, inv: string) {
   ok(!vorher.includes("'invoices.cancel'"), 'DECISION vor R5F.1 gab es keine Buchung fuer den Storno');
   const upd = codeOf(src('src/core/bridge/invoice-lifecycle-commands.ts'));
   ok(!/status/.test((/onlyKnownFields\(raw, \[([^\]]*)\]\)/.exec(upd)?.[1]) ?? ''), 'DECISION invoices.update kennt keinen Status — es aendert Zeilen mit Grund');
-  ok(ALLOWED_MUTATIONS.length === 41 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `DECISION genau eine neue Buchung, am Ende der Liste (${ALLOWED_MUTATIONS.length})`);
+  ok(ALLOWED_MUTATIONS.length === 52 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `DECISION invoices.cancel bleibt die eine R5F.1-Buchung an Platz 41; seither nur die elf aus R6C (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 108 && /pub const OP_INVOICES_CANCEL: &str = "invoices\.cancel";/.test(rust), `DECISION Rust laesst genau diese eine mehr durch (${rustOps})`);
+  ok(rustOps === 121 && /pub const OP_INVOICES_CANCEL: &str = "invoices\.cancel";/.test(rust), `DECISION Rust laesst genau diese eine mehr durch (${rustOps})`);
   ok(!!(OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.cancel']
     && S((OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.cancel']) === S((OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.update']),
   'DECISION dasselbe Recht wie am Primary („Cancel" nur mit canEditInvoices)');
@@ -637,14 +637,21 @@ for (const weg of ['primary', 'fern'] as const) {
   const vorher = [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(vor5f('src/core/bridge/command-registry.ts'))?.[1] ?? '')
     .matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const jetzt = [...ALLOWED_MUTATIONS];
-  ok(vorher.length === 40 && jetzt.length === 41 && S(jetzt.filter((o) => !vorher.includes(o))) === S(['invoices.cancel']) && vorher.every((o) => jetzt.includes(o)),
-    `REGISTRY vorher 40, jetzt 41 — die einzige neue ist invoices.cancel, keine faellt weg (${vorher.length} → ${jetzt.length})`);
+  // R6C — seither kamen elf weitere dazu (Stammdaten, Inventur), ALLE hinter invoices.cancel. Der Schritt
+  // von R5F.1 selbst bleibt genau ein Name; alles danach ist namentlich die R6C-Menge.
+  const R6C_MUT = ['suppliers.create', 'suppliers.update', 'agents.update', 'partners.create', 'partners.update', 'employees.create', 'employees.update',
+    'inventory.start', 'inventory.save', 'inventory.finish', 'inventory.record_check'];
+  ok(vorher.length === 40 && jetzt.length === 52 && S(jetzt.filter((o) => !vorher.includes(o))) === S(['invoices.cancel', ...R6C_MUT]) && vorher.every((o) => jetzt.includes(o)),
+    `REGISTRY vorher 40, R5F.1 +invoices.cancel, R6C +11 — keine faellt weg (${vorher.length} → ${jetzt.length})`);
   const zaehle = (t: string): number => [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
   const rustVorher = vor5f('src-tauri/src/bridge.rs');
   const rustJetzt = src('src-tauri/src/bridge.rs');
   const neuRust = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rustJetzt)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].map((m) => m[0])
     .filter((o) => !(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rustVorher)?.[1] ?? '').includes(o));
-  ok(zaehle(rustVorher) === 107 && zaehle(rustJetzt) === 108 && S(neuRust) === S(['OP_INVOICES_CANCEL']), `REGISTRY Rust 107 → 108, einzig OP_INVOICES_CANCEL (${S(neuRust)})`);
+  const R6C_RUST = ['OP_SUPPLIERS_CREATE', 'OP_SUPPLIERS_UPDATE', 'OP_AGENTS_UPDATE', 'OP_PARTNERS_CREATE', 'OP_PARTNERS_UPDATE', 'OP_EMPLOYEES_CREATE', 'OP_EMPLOYEES_UPDATE',
+    'OP_INVENTORY_START', 'OP_INVENTORY_SAVE', 'OP_INVENTORY_FINISH', 'OP_INVENTORY_RECORD_CHECK', 'OP_INVENTORY_SESSION_GET', 'OP_INVENTORY_CHECKS_GET'];
+  ok(zaehle(rustVorher) === 107 && zaehle(rustJetzt) === 121 && S(neuRust) === S(['OP_INVOICES_CANCEL', ...R6C_RUST]),
+    `REGISTRY Rust 107 → 108 (R5F.1: OP_INVOICES_CANCEL) → 121 (R6C: 13 namentlich) (${S(neuRust)})`);
   let zu = '';
   try { reg5.registerCommand('invoices.delete', { kind: 'mutation', handler: () => ({}) } as never); } catch (e) { zu = String(e); }
   ok(/refusing to register/.test(zu), 'REGISTRY eine nicht freigegebene Buchung bleibt fail-closed');

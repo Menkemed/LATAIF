@@ -30,8 +30,17 @@ export const INVENTORY_SESSION_DDL = `CREATE TABLE IF NOT EXISTS inventory_sessi
   status     TEXT NOT NULL DEFAULT 'open',
   started_at TEXT NOT NULL,
   closed_at  TEXT,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  revision   INTEGER NOT NULL DEFAULT 1
 )`;
+
+/**
+ * CENTRAL-UI-PARITY R6C — die Fassung eines Laufs. Zwei Rechner (oder Primary und PC2) dürfen
+ * dasselbe Arbeitsblatt nicht blind überschreiben: wer speichert oder abschließt, nennt die Fassung,
+ * die er gesehen hat, und jede Wirkung zählt sie hoch. Additiv für bestehende Datenbanken.
+ */
+export const INVENTORY_SESSION_REVISION_UPGRADE =
+  `ALTER TABLE inventory_sessions ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`;
 
 export const INVENTORY_SESSION_ITEMS_DDL = `CREATE TABLE IF NOT EXISTS inventory_session_items (
   session_id       TEXT NOT NULL,
@@ -90,6 +99,8 @@ export interface SessionItem {
 export interface OpenSession {
   sessionId: string;
   startedAt: string;
+  /** R6C — die Fassung des Laufs; jede Wirkung zählt sie hoch. */
+  revision: number;
   items: SessionItem[];
 }
 
@@ -146,7 +157,23 @@ export function loadOpenSession(db: InventorySessionDb, branchId: string): OpenS
       appliedCheckId: r[4] == null ? null : String(r[4]),
     });
   }
-  return { sessionId, startedAt, items };
+  return { sessionId, startedAt, revision: sessionRevision(db, sessionId), items };
+}
+
+/**
+ * R6C — die Fassung eines Laufs. Eigene Abfrage, damit eine Datenbank, die die Spalte noch nicht
+ * hat, den Lauf trotzdem findet (dann gilt Fassung 1) statt ihn zu übersehen und einen zweiten zu
+ * eröffnen.
+ */
+export function sessionRevision(db: InventorySessionDb, sessionId: string): number {
+  const r = rows(db, `SELECT revision FROM inventory_sessions WHERE session_id = ?`, [sessionId]);
+  const n = r.length ? Number(r[0][0]) : 1;
+  return Number.isInteger(n) && n > 0 ? n : 1;
+}
+
+/** R6C — jede Wirkung auf einen Lauf zählt seine Fassung hoch. */
+export function bumpSessionRevision(db: InventorySessionDb, sessionId: string): void {
+  db.run(`UPDATE inventory_sessions SET revision = COALESCE(revision, 1) + 1 WHERE session_id = ?`, [sessionId]);
 }
 
 /**

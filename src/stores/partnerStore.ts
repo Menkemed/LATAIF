@@ -13,6 +13,8 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+// CENTRAL-UI-PARITY R6C — die eine Stammdaten-Regel (Name Pflicht, Anteil 0–100 %).
+import { partnerCreateInput, partnerUpdateInput } from '@/core/masterdata/masterdata-rules';
 import {
   postPartnerTransaction,
   postPartnerTransactionReversed,
@@ -102,6 +104,9 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
   getPartner: (id) => get().partners.find(p => p.id === id),
 
   createPartner: (data) => {
+    // R6C — die eine Regel: Name Pflicht und getrimmt, Anteil 0–100 % (vorher nahm das Feld jede
+    // Zahl, auch 250 oder -10). Dieselbe Prüfung am Primary und fern.
+    const input = partnerCreateInput(data as Record<string, unknown>);
     const db = getDatabase();
     const now = new Date().toISOString();
     const id = uuid();
@@ -112,16 +117,17 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
     db.run(
       `INSERT INTO partners (id, branch_id, name, phone, email, share_percentage, active, notes, created_at, updated_at, created_by)
        VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
-      [id, branchId, data.name || '', data.phone || null, data.email || null,
-       data.sharePercentage || 0, data.notes || null, now, now, userId]
+      [id, branchId, input.name, input.phone ?? null, input.email ?? null,
+       input.sharePercentage, input.notes ?? null, now, now, userId]
     );
     saveDatabase();
-    trackInsert('partners', id, { name: data.name });
+    trackInsert('partners', id, { name: input.name });
     get().loadPartners();
     return get().getPartner(id)!;
   },
 
   updatePartner: (id, data) => {
+    const input = partnerUpdateInput(data as Record<string, unknown>);
     const db = getDatabase();
     const now = new Date().toISOString();
     const fields: string[] = [];
@@ -130,15 +136,15 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
       name: 'name', phone: 'phone', email: 'email',
       sharePercentage: 'share_percentage', notes: 'notes',
     };
-    for (const [k, v] of Object.entries(data)) {
+    for (const [k, v] of Object.entries(input)) {
       const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v ?? null); }
     }
-    if (data.active !== undefined) { fields.push('active = ?'); values.push(data.active ? 1 : 0); }
+    if (input.active !== undefined) { fields.push('active = ?'); values.push(input.active ? 1 : 0); }
     if (fields.length === 0) return;
     fields.push('updated_at = ?'); values.push(now); values.push(id);
     db.run(`UPDATE partners SET ${fields.join(', ')} WHERE id = ?`, values);
     saveDatabase();
-    trackUpdate('partners', id, data);
+    trackUpdate('partners', id, input);
     get().loadPartners();
   },
 

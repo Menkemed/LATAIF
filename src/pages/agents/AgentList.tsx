@@ -28,11 +28,12 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import type { Agent } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
-import { useSharedWrites } from '@/core/data/shared-write';
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { WriteError } from '@/components/shared/WriteError';
 import { clampTransferSplitPct, isTransferableStock, transferCreateBody } from '@/core/agents/transfer-rules';
 import { createTransferOnPrimary } from '@/core/agents/transfer-house';
+import { saveAgentUpdate } from '@/core/masterdata/masterdata-save';
 
 
 interface NewTransferForm {
@@ -49,7 +50,7 @@ interface NewTransferForm {
 }
 
 export function AgentList() {
-  const { agents, transfers, loadAgents, loadTransfers, updateAgent, deleteAgent } = useAgentStore();
+  const { agents, transfers, loadAgents, loadTransfers, deleteAgent } = useAgentStore();
   // CENTRAL-UI-PARITY R5D — „Transfer Item" hat zwei Anschlüsse: am Primary die Hausfolge in EINER
   // Klammer, auf dem zweiten Rechner `transfers.create` mit genau den Werten dieser Maske.
   const w = useSharedWrites();
@@ -68,6 +69,7 @@ export function AgentList() {
   const [transferForm, setTransferForm] = useState<NewTransferForm>({});
   const [editAgent, setEditAgent] = useState<Agent | null>(null);
   const [editAgentForm, setEditAgentForm] = useState<Partial<Agent>>({});
+  const [agentFehler, setAgentFehler] = useState('');
   const [showPrintAll, setShowPrintAll] = useState(false);
 
   const staffFilter = searchParams.get('staff') || '';
@@ -487,6 +489,7 @@ export function AgentList() {
       {/* Edit Agent Modal */}
       <Modal open={!!editAgent} onClose={() => setEditAgent(null)} title={`Edit Approval — ${editAgent?.name || ''}`} width={480}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <WriteError text={agentFehler} />
           {agentDuplicateMatches.length > 0 && (
             <DuplicateWarningBanner
               matches={agentDuplicateMatches}
@@ -547,10 +550,13 @@ export function AgentList() {
             }}>Delete</Button>
             <div className="flex gap-2">
               <Button variant="ghost" onClick={() => setEditAgent(null)}>Cancel</Button>
-              <Button variant="primary" onClick={() => {
+              <Button variant="primary" disabled={w.busy} data-agent-save onClick={() => {
                 if (!editAgent) return;
-                updateAgent(editAgent.id, editAgentForm);
-                setEditAgent(null);
+                // CENTRAL-UI-PARITY R6C — am Primary die Hausfunktion, auf PC2 `agents.update`; nur das
+                // Geänderte reist, die Umsatzsummen des Agenten nie.
+                setAgentFehler('');
+                void saveAgentUpdate({ remote: w.remote, save: (a) => w.save('agents.update', a) }, editAgent, editAgentForm)
+                  .then((r) => { if (r.kind === 'ok') setEditAgent(null); else setAgentFehler(`Could not save: ${fehlertext(r)}`); });
               }}>Save</Button>
             </div>
           </div>

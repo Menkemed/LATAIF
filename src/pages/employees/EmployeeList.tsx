@@ -14,6 +14,9 @@ import { useEmployeeStore } from '@/stores/employeeStore';
 import type { Employee, EmploymentStatus } from '@/core/models/types';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { Bhd } from '@/components/ui/Bhd';
+import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { WriteError } from '@/components/shared/WriteError';
+import { saveEmployeeCreate, saveEmployeeUpdate } from '@/core/masterdata/masterdata-save';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -27,7 +30,10 @@ const STATUS_STYLE: Record<EmploymentStatus, { fg: string; bg: string; label: st
 
 export function EmployeeList() {
   const navigate = useNavigate();
-  const { employees, loadEmployees, createEmployee, deleteEmployee, setStatus, getSalaryStats } = useEmployeeStore();
+  const { employees, loadEmployees, deleteEmployee, getSalaryStats } = useEmployeeStore();
+  // CENTRAL-UI-PARITY R6C — anlegen und „On Leave/Reactivate": am Primary die Hausfunktion, auf PC2
+  // `employees.create` / `employees.update` (der Status reist als Zielwert).
+  const w = useSharedWrites();
   const [search, setSearch] = useState('');
   const [statusFilter, setStatusFilter] = useState<EmploymentStatus | ''>('');
   const [showNew, setShowNew] = useState(false);
@@ -55,23 +61,28 @@ export function EmployeeList() {
     return { active, onLeave, inactive, totalBase };
   }, [employees]);
 
-  function handleCreate() {
-    if (!form.name || !form.name.trim()) return;
-    try {
-      createEmployee({
-        name: form.name.trim(),
-        role: form.role,
-        employmentStatus: form.employmentStatus || 'active',
-        baseSalary: form.baseSalary,
-        phone: form.phone,
-        email: form.email,
-        notes: form.notes,
-      });
-      setForm({ employmentStatus: 'active' });
-      setShowNew(false);
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-    }
+  const [fehler, setFehler] = useState('');
+  async function handleCreate() {
+    setFehler('');
+    const r = await saveEmployeeCreate({ remote: w.remote, save: (a) => w.save('employees.create', a) }, {
+      name: form.name,
+      role: form.role,
+      employmentStatus: form.employmentStatus || 'active',
+      baseSalary: form.baseSalary,
+      phone: form.phone,
+      email: form.email,
+      notes: form.notes,
+    });
+    if (r.kind !== 'ok') { setFehler(`Could not create employee: ${fehlertext(r)}`); return; }
+    setForm({ employmentStatus: 'active' });
+    setShowNew(false);
+  }
+
+  /** „On Leave" / „Reactivate" — der Zielstatus, dieselbe Buchung wie das Ändern. */
+  async function setStatus(e: Employee, status: EmploymentStatus) {
+    setFehler('');
+    const r = await saveEmployeeUpdate({ remote: w.remote, save: (a) => w.save('employees.update', a) }, e, { ...e, employmentStatus: status });
+    if (r.kind !== 'ok') setFehler(`Could not change the status: ${fehlertext(r)}`);
   }
 
   // Duplicate-Check live im New-Employee-Modal.
@@ -122,6 +133,7 @@ export function EmployeeList() {
         </div>
       }
     >
+      <WriteError text={showNew ? '' : fehler} />
       {filtered.length === 0 ? (
         <div style={{ padding: '64px 0', textAlign: 'center' }}>
           <Users size={40} strokeWidth={1} style={{ color: '#6B7280', margin: '0 auto 12px' }} />
@@ -188,7 +200,8 @@ export function EmployeeList() {
                 <div className="flex items-center gap-1">
                   {e.employmentStatus === 'active' ? (
                     <button
-                      onClick={(ev) => { ev.stopPropagation(); setStatus(e.id, 'on_leave'); }}
+                      onClick={(ev) => { ev.stopPropagation(); void setStatus(e, 'on_leave'); }}
+                      disabled={w.busy} data-employee-status={e.id}
                       title="Mark on leave"
                       className="cursor-pointer"
                       style={{ padding: '4px 6px', fontSize: 11, border: '1px solid #D5D9DE', color: '#FF8730', borderRadius: 4, background: 'none' }}>
@@ -196,7 +209,8 @@ export function EmployeeList() {
                     </button>
                   ) : (
                     <button
-                      onClick={(ev) => { ev.stopPropagation(); setStatus(e.id, 'active'); }}
+                      onClick={(ev) => { ev.stopPropagation(); void setStatus(e, 'active'); }}
+                      disabled={w.busy} data-employee-status={e.id}
                       title="Reactivate"
                       className="cursor-pointer"
                       style={{ padding: '4px 6px', fontSize: 11, border: '1px solid #D5D9DE', color: '#16A34A', borderRadius: 4, background: 'none' }}>
@@ -218,6 +232,7 @@ export function EmployeeList() {
       {/* New Employee Modal */}
       <Modal open={showNew} onClose={() => setShowNew(false)} title="New Employee" width={500}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <WriteError text={showNew ? fehler : ''} />
           {employeeDuplicateMatches.length > 0 && (
             <DuplicateWarningBanner matches={employeeDuplicateMatches} entityLabel="employee" />
           )}
@@ -256,7 +271,7 @@ export function EmployeeList() {
             value={form.notes || ''} onChange={e => setForm({ ...form, notes: e.target.value })} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleCreate} disabled={!form.name || !form.name.trim()}>
+            <Button variant="primary" onClick={() => void handleCreate()} disabled={!form.name || w.busy} data-employee-create-save>
               {employeeDuplicateMatches.length > 0 ? 'Create anyway' : 'Create Employee'}
             </Button>
           </div>

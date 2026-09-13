@@ -7,6 +7,10 @@
 //
 // It cannot change the product. The only backend calls it makes are the two stock-check commands,
 // and neither can reach `products`.
+//
+// CENTRAL-UI-PARITY R6C — on a DB-less PC2 the same block reads the history from the Primary
+// (`inventory.checks.get`) and records through the Primary (`inventory.record_check`). PC2's own
+// core is never asked (R6B): there, a local `lataif.db` would be a second truth.
 // ════════════════════════════════════════════════════════════════════════════
 
 import { Fragment, useCallback, useEffect, useState } from 'react';
@@ -14,14 +18,14 @@ import { Button } from '@/components/ui/Button';
 import { useAuthStore } from '@/stores/authStore';
 import {
   listStockChecks,
-  recordStockCheck,
-  stockCheckAvailableHere,
   prepareNotes,
   stockCheckLabel,
   MAX_STOCK_CHECK_NOTES,
   type StockCheck,
   type StockCheckStatus,
 } from '@/core/stock/stock-check';
+import { checksFromPrimary, recordCheckHere } from '@/core/stock/inventory-port';
+import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 
 function when(iso: string): string {
   const d = new Date(iso);
@@ -34,77 +38,63 @@ function tone(status: StockCheckStatus): string {
 
 export function StockCheckPanel({ productId }: { productId: string }) {
   const userId = useAuthStore(s => s.session?.userId);
+  // R6C — one intent per click: on the Primary the house records it, on PC2 the Primary does.
+  const pruefen = useSharedWrite<{ checkId: string }>('inventory.record_check');
+  const remote = pruefen.remote;
   const [checks, setChecks] = useState<StockCheck[]>([]);
   const [notes, setNotes] = useState('');
-  const [busy, setBusy] = useState(false);
   const [msg, setMsg] = useState<{ text: string; bad: boolean } | null>(null);
   const [loaded, setLoaded] = useState(false);
 
   const reload = useCallback(async () => {
-    // R6B — ohne eigene Datenbank wird der Kern DIESES Rechners gar nicht gefragt (siehe unten).
-    if (!stockCheckAvailableHere()) { setLoaded(true); return; }
     try {
-      setChecks(await listStockChecks(productId, 20));
+      if (remote) {
+        const fromPrimary = await checksFromPrimary(productId, 20);
+        if (fromPrimary === null) setMsg({ text: 'Check history unavailable.', bad: true });
+        else setChecks(fromPrimary);
+      } else {
+        setChecks(await listStockChecks(productId, 20));
+      }
     } catch {
       // A history that cannot be read must not break the page — the product details stay usable.
       setMsg({ text: 'Check history unavailable.', bad: true });
     } finally {
       setLoaded(true);
     }
-  }, [productId]);
+  }, [productId, remote]);
 
   useEffect(() => { void reload(); }, [reload]);
 
   const save = async (status: StockCheckStatus) => {
-    if (busy) return;
-    if (!stockCheckAvailableHere()) {
-      setMsg({ text: 'Stock checks are only available on the main computer.', bad: true });
-      return;
-    }
+    if (pruefen.busy) return;
     const prepared = prepareNotes(notes);
     if (!prepared.ok) {
       setMsg({ text: `Notes are limited to ${MAX_STOCK_CHECK_NOTES} characters.`, bad: true });
       return;
     }
-    setBusy(true);
     setMsg(null);
-    try {
+    const note = prepared.value ?? '';
+    const r = await pruefen.save({
       // A fresh id per click: a retry of THIS click is the same observation, a new click is a new one.
-      await recordStockCheck({
-        productId,
-        status,
-        notes: prepared.value,
-        userId,
-        requestId: crypto.randomUUID(),
-      });
-      setNotes('');
-      setMsg({ text: 'Saved.', bad: false });
-      await reload();
-    } catch (e) {
-      setMsg({ text: String(e), bad: true });
-    } finally {
-      setBusy(false);
+      local: async () => ({ checkId: (await recordCheckHere({ productId, status, notes: note, userId, requestId: crypto.randomUUID() })).check_id }),
+      remote: () => ({ productId, status, notes: note }),
+      shape: (v) => ({ checkId: String(v.checkId ?? '') }),
+    });
+    if (r.kind !== 'ok') {
+      setMsg({ text: fehlertext(r), bad: true });
+      return;
     }
+    setNotes('');
+    setMsg({ text: 'Saved.', bad: false });
+    await reload();
   };
-
-  // CENTRAL-UI-PARITY R6B — der Stock-Check spricht mit dem Kern DIESES Rechners (dessen Konfig-DB,
-  // dessen Geschäftsdatei). Ohne eigene Datenbank ist das die falsche Stelle: bis R6D den Weg über
-  // den Primary baut, steht hier ein Satz statt zweier Knöpfe, die ins Leere oder in eine alte Datei
-  // schrieben.
-  if (!stockCheckAvailableHere()) {
-    return (
-      <div className="mt-6 border-t border-white/10 pt-4" data-primary-only="stock-check">
-        <div className="text-[11px] uppercase tracking-wider text-gray-500 mb-2">Stock check</div>
-        <div className="text-sm text-gray-500">Stock checks are only available on the main computer.</div>
-      </div>
-    );
-  }
 
   const latest = checks[0] ?? null;
   const earlier = checks.slice(1);
+  const pending = remote && pruefen.openCommandId !== null;
 
   return (
-    <div className="mt-6 border-t border-white/10 pt-4">
+    <div className="mt-6 border-t border-white/10 pt-4" data-stock-check-panel>
       <div className="text-[11px] uppercase tracking-wider text-gray-500 mb-2">Stock check</div>
 
       <div className="text-sm mb-3">
@@ -130,14 +120,15 @@ export function StockCheckPanel({ productId }: { productId: string }) {
         type="text"
         value={notes}
         maxLength={MAX_STOCK_CHECK_NOTES}
+        disabled={pending}
         onChange={e => setNotes(e.target.value)}
         placeholder="Notes (optional) — e.g. in safe, with customer"
         className="w-full bg-black/30 border border-white/10 rounded px-3 py-2 text-sm"
       />
 
       <div className="flex gap-2 mt-2">
-        <Button variant="ghost" disabled={busy} onClick={() => void save('available')}>Available</Button>
-        <Button variant="ghost" disabled={busy} onClick={() => void save('not_available')}>Not available</Button>
+        <Button variant="ghost" disabled={pruefen.busy} data-stock-check="available" onClick={() => void save('available')}>Available</Button>
+        <Button variant="ghost" disabled={pruefen.busy} data-stock-check="not_available" onClick={() => void save('not_available')}>Not available</Button>
       </div>
 
       {msg && <div className={`text-xs mt-2 ${msg.bad ? 'text-red-400' : 'text-emerald-400'}`}>{msg.text}</div>}

@@ -25,6 +25,8 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+// CENTRAL-UI-PARITY R6C — die eine Stammdaten-Regel; Umsatzsummen führt das Haus, kein Formular.
+import { agentUpdateInput } from '@/core/masterdata/masterdata-rules';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -166,6 +168,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   updateAgent: (id, data) => {
+    // R6C — `total_sales`/`total_commission` führt das Haus (automation-handlers, beim Verkauf). Die
+    // Maske „Edit Approval" schickte beide aus dem Stand beim Öffnen zurück: ein Verkauf dazwischen
+    // verschwand. Sie sind hier nicht mehr schreibbar; der Name bleibt Pflicht, wenn er genannt wird.
+    const input = agentUpdateInput(data as Record<string, unknown>);
     const db = getDatabase();
     const now = new Date().toISOString();
     const fields: string[] = [];
@@ -173,18 +179,17 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const map: Record<string, string> = {
       name: 'name', company: 'company', phone: 'phone', whatsapp: 'whatsapp',
       email: 'email', commissionRate: 'commission_rate', notes: 'notes',
-      totalSales: 'total_sales', totalCommission: 'total_commission',
       customerId: 'customer_id',
     };
-    for (const [k, v] of Object.entries(data)) {
+    for (const [k, v] of Object.entries(input)) {
       const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v ?? null); }
     }
-    if (data.active !== undefined) { fields.push('active = ?'); values.push(data.active ? 1 : 0); }
+    if (input.active !== undefined) { fields.push('active = ?'); values.push(input.active ? 1 : 0); }
     if (fields.length === 0) return;
     fields.push('updated_at = ?'); values.push(now); values.push(id);
     db.run(`UPDATE agents SET ${fields.join(', ')} WHERE id = ?`, values);
     saveDatabase();
-    trackUpdate('agents', id, data);
+    trackUpdate('agents', id, input);
     get().loadAgents();
   },
 
