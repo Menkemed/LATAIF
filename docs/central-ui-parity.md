@@ -2673,3 +2673,61 @@ B 0 offen · C 15 · D 12 · E 41 (unverändert)
 ```
 
 Nächste Scheiben: R6E Finanzen/Steuer · R6F Gold (mit Metall) · R6G Lebenszyklen (mit Aufgaben, Dokumenten, Inbox-Foto).
+
+### R6C Final Gate — Registry-Diff und festgeschriebene Verträge
+
+Gegen den Stand VOR R6C (`5fc7bb2`, aus Git gelesen) sind **genau** diese dreizehn Namen dazugekommen — keine anderen,
+keiner fiel weg; TS-Registrierung == Rust-Zulassung == 121 (`CENTRAL_UI_R6C_REGISTRY_121_AUDITED`):
+
+| Name | Oberfläche / Domäne | TS | Rust | Recht | Idempotenz / Fassung |
+|---|---|---|---|---|---|
+| `suppliers.create` | SupplierList, PurchaseCreate, RepairList · Stammdaten | `masterdata-commands` | `OP_SUPPLIERS_CREATE` | kein Tor (wie Primary) | Kennung + durabler Nachweis |
+| `suppliers.update` | SupplierDetail Save + (De)aktivieren · Stammdaten | `masterdata-commands` | `OP_SUPPLIERS_UPDATE` | kein Tor | Kennung; Feld-Diff, Aktiv als Zielwert |
+| `agents.update` | AgentList „Edit Approval" · Stammdaten | `masterdata-commands` | `OP_AGENTS_UPDATE` | kein Tor | Kennung; Feld-Diff, keine Summen |
+| `partners.create` | PartnersPage „New Partner" · Stammdaten | `masterdata-commands` | `OP_PARTNERS_CREATE` | kein Tor | Kennung |
+| `partners.update` | PartnersPage „Edit Partner" · Stammdaten | `masterdata-commands` | `OP_PARTNERS_UPDATE` | kein Tor | Kennung; Feld-Diff |
+| `employees.create` | EmployeeList „New Employee" · Stammdaten | `masterdata-commands` | `OP_EMPLOYEES_CREATE` | kein Tor | Kennung |
+| `employees.update` | EmployeeList/-Detail Status + Save · Stammdaten | `masterdata-commands` | `OP_EMPLOYEES_UPDATE` | kein Tor | Kennung; Feld-Diff, Status als Zielwert |
+| `inventory.start` | WatchList „Stock Check" · Inventur | `inventory-commands` | `OP_INVENTORY_START` | kein Tor | Kennung; von Natur aus wiederholbar (derselbe offene Lauf) |
+| `inventory.save` | Inventurmaske „Save" · Inventur | `inventory-commands` | `OP_INVENTORY_SAVE` | kein Tor | Kennung; **gesehene Fassung Pflicht**; Beobachtung `<commandId>:<productId>` |
+| `inventory.finish` | Inventurmaske „Finish" · Inventur | `inventory-commands` | `OP_INVENTORY_FINISH` | kein Tor | Kennung; **gesehene Fassung Pflicht** |
+| `inventory.record_check` | ProductDetail Einzel-Check · Inventur | `inventory-commands` | `OP_INVENTORY_RECORD_CHECK` | kein Tor | Kennung = Anfragekennung der Beobachtung |
+| `inventory.session.get` | Inventurmaske (lesen) | `store-read-commands` | `OP_INVENTORY_SESSION_GET` | kein Tor (Lesen) | — (nur Artikel der Filiale) |
+| `inventory.checks.get` | Einzel-Check-Verlauf (lesen) | `store-read-commands` | `OP_INVENTORY_CHECKS_GET` | kein Tor (Lesen) | — (nur Artikel der Filiale) |
+
+Unbekannte Namen bleiben fail-closed (`BRIDGE_OP_NOT_REGISTERED`; `suppliers.delete`, `inventory.adjust`,
+`metals.create`, `tasks.create` … weder registrierbar noch in Rust).
+
+**Stammdaten — Autorität des Primary** (`CENTRAL_UI_R6C_MASTERDATA_AUTHORITY_PINNED`): keine Summe, kein Saldo, keine
+Provision aus einem Formularstand (weder in den Feldlisten noch in der Hausfunktion); Filiale und Kennung (UUID v4) nur
+vom Primary, Datensätze fremder Filialen „nicht vorhanden"; leere Pflichtnamen am Primary und fern mit demselben Code
+abgewiesen; Partneranteil **0–100 %** (Bereich des Modells); Grundgehalt **endlich, 0 ≤ Gehalt ≤ 1 000 000 BHD**
+(Untergrenze fachlich, Obergrenze Plausibilitätsriegel); Aktiv-Schalter nur als echter Wahrheitswert, Mitarbeiterstatus nur
+`active`/`on_leave`/`inactive`, jeder Übergang zwischen ihnen erlaubt wie am Primary.
+
+**Inventur — Vertrag** (`CENTRAL_UI_R6C_INVENTORY_CONTRACT_PINNED`): erfasst werden verfügbar / nicht verfügbar, Notiz
+(≤ 500), Beobachtung und Lauf-/Arbeitsblattzustand. Schreibziele vor und nach R6C identisch: `inventory_sessions`,
+`inventory_session_items` (plus der einmalige Bootstrap-Stempel), im Kern nur `stock_checks` (Geschäftsdatei nur
+lesend). **Kein** Mengenausgleich, **keine** Differenz-, Hauptbuch- oder Ausgabenbuchung; Soll-/Ergebnisbestand und
+Differenz existieren nur als abgewiesene Namen. Fassung: start 1 · Einfalten +1 · Speichern +1 · Speichern ohne
+Änderung ±0 · Einzel-Check ±0 · Abschließen +1 · neuer Lauf 1. Befund: eine Inventur umfasst höchstens 5 000 Artikel (der
+Kern las schon vorher nur die ersten 1 000 für das Einfalten).
+
+**Inventur — Durabilität** (`CENTRAL_UI_R6C_INVENTORY_DURABILITY_PINNED`): alte Fassung vor jedem Schreiben abgewiesen
+(kein Kernaufruf); gescheitertes Speichern schließt die Maske nicht, gescheitertes Abschließen meldet kein „finished";
+ohne bestätigtes Speichern kein Erfolg, dieselbe Kennung danach genau eine Wirkung; am Primary Schreibreihenfolge + eigene
+Transaktion + erst danach durabel, die Hausfolge committet und speichert nie selbst; auf PC2 wird weder der eigene Kern
+noch die lokale Hausfolge berührt — eine alte `lataif.db` dort ist bedeutungslos.
+
+**E2E-Prozess-Isolation, verschärft** (`CENTRAL_UI_R6C_E2E_PROCESS_ISOLATION_PINNED`): ein Kindprozess des laufenden
+Tests wird nur beendet, wenn PID **und** absoluter Startpfad noch zusammenpassen (`killOwnChild`); Reste früherer Läufe nur
+am exakten Test-Pfad; nie nach Name, Befehlszeile oder bloßer PID (das Aufräumen fremder Headless-Browser nach
+Befehlszeile ist entfernt); ein `lataif.exe`-Köder an einem anderen Pfad überlebt; Produktions-Datenort und Ports bleiben
+im Gate verboten.
+
+```
+Final Gate  r6c/final-gate 126/0 · e2e-safety/process-isolation 35/0 · r6c/masterdata 88/0 · r6c/inventory 81/0
+            c4-authorization · c4-read-revocation · r6b grün · Rust bridge grün · TS 0/0 · Lint-Delta 0
+R6A         A 95 · R6C 16 · geschlossen 16 · verbleibend 79 (Aufgaben, Dokumente, Metall, Inbox-Foto offen)
+Produktcode unverändert seit e03478c → Zwei-App 120/0 gilt
+```

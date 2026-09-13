@@ -20,7 +20,7 @@
 // full cleanup. Pure Node CDP + fetch; no npm deps. Drives the production com.lataif.app.e2e binary.
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
-import { killOwnChild, killTestBrowserByProfile, killTestImage, killTestPid } from './_e2e-process.mjs';
+import { killOwnChild, killTestImage, killTestPid } from './_e2e-process.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -113,7 +113,7 @@ function killApp() { try { killTestPid(appProc.pid); } catch {} }
 // server (with a different in-memory JWT secret) or browser can bind our port/CDP and contaminate the run.
 function killAllApp() {
   try { killTestImage('lataif.exe'); } catch {}
-  try { killTestBrowserByProfile('msedge.exe', 'lataif-uuid-e2e'); } catch {}
+  // Headless-Browser früherer Läufe werden NICHT beendet: aufgeräumt wird nur am exakten Test-Pfad (Prozess-Isolation).
 }
 async function waitPortFree(port, ms = 15000) {
   const end = Date.now() + ms;

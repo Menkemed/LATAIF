@@ -15,13 +15,16 @@
 //   • `killTestPid(pid)`     — eine gespeicherte PID, aber nur, wenn sie JETZT noch zum exakten
 //                              Test-Pfad gehört (eine wiederverwendete PID ist nicht mehr unsere).
 //   • `killOwnChild(child)`  — ein Kindprozess, den dieser Test selbst gestartet hat (z. B. ein
-//                              Headless-Browser): seine PID stammt aus unserem eigenen `spawn`.
+//                              Headless-Browser) — nur, wenn PID und Startpfad noch zusammenpassen.
+//
+// Was es NICHT gibt: Beenden nach Image-Namen, nach Befehlszeile oder nach einer bloßen PID. Reste früherer
+// Läufe werden ausschließlich am exakten Test-Pfad aufgeräumt; ein fremder Browser bleibt stehen.
 //
 // `taskkill` steht NUR in dieser Datei. Das Gate `test/e2e-safety/process-isolation.test.ts`
 // weist jeden anderen Beende-Aufruf in `test/e2e/` ab.
 // ════════════════════════════════════════════════════════════════════════════
 import { execFileSync, spawn } from 'node:child_process';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const REPO = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -120,10 +123,18 @@ export function killTestPid(pid, expectedPath, binaries = TEST_BINARIES) {
   return true;
 }
 
-/** Ein Kindprozess DIESES Tests (eigenes `spawn`) — seine PID ist unsere. */
+/**
+ * Ein Kindprozess DIESES Laufs (eigenes `spawn`) — aber nur, wenn die PID JETZT noch genau das Programm ist,
+ * das gestartet wurde: absoluter Startpfad == laufender Programmpfad. Eine bloße PID reicht nie (sie kann
+ * inzwischen einem anderen Prozess gehören), ein Startpfad ohne Ordner auch nicht.
+ */
 export function killOwnChild(child) {
   if (!child || !Number.isInteger(child.pid) || child.pid <= 0) return false;
   if (child.exitCode !== null && child.exitCode !== undefined) return false;
+  const from = typeof child.spawnfile === 'string' ? child.spawnfile : '';
+  if (!from || !isAbsolute(from)) return false;
+  const live = pathOfPid(child.pid);
+  if (!live || norm(live) !== norm(from)) return false;
   taskkillPid(child.pid);
   return true;
 }
@@ -178,23 +189,4 @@ export async function waitPidGone(pid, timeoutMs = 20000) {
     await new Promise((r) => setTimeout(r, 300));
   }
   return !pidAlive(pid);
-}
-
-/**
- * Headless-Browser eines Tests aufräumen: nur Prozesse, deren Befehlszeile die EIGENE
- * Profilkennung dieses Tests trägt (`lataif-…-e2e`). Ein bloßes „headless" oder ein Port reicht
- * nicht — das könnte ein fremder Browser sein.
- */
-export function killTestBrowserByProfile(image, profileMarker) {
-  if (!IMAGE.test(String(image))) throw new Error(`[e2e-process] not an image name: ${image}`);
-  if (!/^lataif-[a-z0-9-]*e2e[a-z0-9-]*$/i.test(String(profileMarker))) {
-    throw new Error(`[e2e-process] refusing a browser cleanup without the test's own profile marker (${profileMarker})`);
-  }
-  const out = ps(`Get-CimInstance Win32_Process -Filter "Name='${image}'" | ForEach-Object { "$($_.ProcessId)|$($_.CommandLine)" }`);
-  const victims = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean).map((l) => {
-    const i = l.indexOf('|');
-    return { pid: Number(l.slice(0, i)), cmd: l.slice(i + 1) };
-  }).filter((p) => Number.isInteger(p.pid) && p.pid > 0 && p.cmd.includes(profileMarker));
-  for (const v of victims) taskkillPid(v.pid);
-  return victims.map((v) => v.pid);
 }

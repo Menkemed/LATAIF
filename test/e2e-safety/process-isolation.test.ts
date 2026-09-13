@@ -66,6 +66,16 @@ const dateien = readdirSync(E2E).filter((f) => f.endsWith('.mjs')).sort();
   ok((hc.match(/'taskkill'/g) ?? []).length === 1 && /execFileSync\('taskkill', \['\/F', '\/T', '\/PID', String\(pid\)\]/.test(hc),
     'GATE der Helfer ruft taskkill genau EINMAL und nur mit /PID');
   ok(!/\/IM\b|IMAGENAME|Stop-Process|process\.kill\(/.test(hc), 'GATE der Helfer beendet nie nach Image-Namen');
+  ok(!/killTestBrowserByProfile|CommandLine/.test(hc), 'GATE der Helfer beendet nie nach Befehlszeile (auch keinen Browser)');
+  {
+    const own = hc.slice(hc.indexOf('export function killOwnChild'), hc.indexOf('export function spawnTracked'));
+    ok(/isAbsolute\(from\)/.test(own) && own.indexOf('pathOfPid(child.pid)') > 0 && own.indexOf('pathOfPid(child.pid)') < own.indexOf('taskkillPid(child.pid)')
+      && /norm\(live\) !== norm\(from\)/.test(own), 'GATE killOwnChild prüft Identität (absoluter Startpfad == laufender Pfad) VOR dem Beenden — nie eine bloße PID');
+    const pid = hc.slice(hc.indexOf('export function killTestPid'), hc.indexOf('export function killOwnChild'));
+    ok(pid.indexOf('pathOfPid(pid)') > 0 && pid.indexOf('pathOfPid(pid)') < pid.indexOf('taskkillPid(pid)'), 'GATE killTestPid prüft den exakten Test-Pfad VOR dem Beenden');
+    const img = hc.slice(hc.indexOf('export function killTestImage'), hc.indexOf('export function killTestPid'));
+    ok(/testProcesses\(image, binaries\)/.test(img), 'GATE Reste früherer Läufe nur am exakten Test-Pfad (testProcesses)');
+  }
   ok(/TEST_BINARIES = Object\.freeze\(\{\s*'lataif\.exe': join\(REPO, 'src-tauri', 'target', 'debug', 'lataif\.exe'\),\s*'lataif-e2e-client\.exe': join\(REPO, 'src-tauri', 'target', 'debug', 'lataif-e2e-client\.exe'\),\s*\}\)/.test(hc),
     'GATE die einzigen beendbaren Programme sind die zwei Test-Pfade unter target/debug');
 
@@ -80,6 +90,7 @@ const dateien = readdirSync(E2E).filter((f) => f.endsWith('.mjs')).sort();
     // (a) kein Beende-Aufruf außerhalb des Helfers
     if (/['"`]taskkill['"`]|\btaskkill\b/.test(code)) verstoesse.push(`${f}: taskkill`);
     if (/Stop-Process|IMAGENAME|['"]\/IM['"]|\bpskill\b|wmic[^'"]*delete|process\.kill\(|\.kill\(\s*['"]SIG/.test(code)) verstoesse.push(`${f}: Beende-Aufruf nach Name/Signal`);
+    if (/killTestBrowserByProfile|\.kill\(/.test(code)) verstoesse.push(`${f}: Beenden ohne Identitätsprüfung (Befehlszeile oder child.kill)`);
     // (b) kein Produktions-Datenort
     if (/E:[\\/]{1,2}LATAIF/i.test(roh.replace(/\/\/.*$/gm, ''))) verstoesse.push(`${f}: E:\\LATAIF`);
     // (c) keine Produktionsports — außer der Wächter-Konstante des Preflights
