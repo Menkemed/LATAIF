@@ -24,6 +24,7 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import { assertE2eBinary, assertE2eScope, e2ePreflight } from './_e2e-preflight.mjs';
+import { killTestImage, tasklistTestImage } from './_e2e-process.mjs';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -114,10 +115,10 @@ class CDP {
   close() { try { this.ws.close(); } catch { /* egal */ } }
 }
 
-const killImage = (name) => { try { execFileSync('taskkill', ['/F', '/IM', name, '/T'], { stdio: 'ignore' }); } catch { /* laeuft nicht */ } };
+const killImage = (name) => { try { killTestImage(name); } catch { /* laeuft nicht */ } };
 async function waitGone(name) {
   for (let i = 0; i < 60; i++) {
-    try { const out = execFileSync('tasklist', ['/FI', `IMAGENAME eq ${name}`], { encoding: 'utf8' }); if (!out.includes(name)) return; } catch { return; }
+    try { const out = tasklistTestImage(name); if (!out.includes(name)) return; } catch { return; }
     await sleep(300);
   }
 }

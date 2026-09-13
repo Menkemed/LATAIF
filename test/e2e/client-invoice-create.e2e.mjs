@@ -16,6 +16,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
+import { killTestImage, tasklistTestImage } from './_e2e-process.mjs';
 import { join } from 'node:path';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -68,10 +69,10 @@ class CDP {
   close() { try { this.ws.close(); } catch {} }
 }
 
-function killAllApp() { try { execFileSync('taskkill', ['/F', '/IM', 'lataif.exe', '/T'], { stdio: 'ignore' }); } catch {} }
+function killAllApp() { try { killTestImage('lataif.exe'); } catch {} }
 async function waitProcessGone() {
   for (let i = 0; i < 60; i++) {
-    try { const out = execFileSync('tasklist', ['/FI', 'IMAGENAME eq lataif.exe'], { encoding: 'utf8' }); if (!/lataif\.exe/i.test(out)) return; } catch { return; }
+    try { const out = tasklistTestImage('lataif.exe'); if (!/lataif\.exe/i.test(out)) return; } catch { return; }
     await sleep(300);
   }
 }

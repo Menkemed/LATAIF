@@ -20,6 +20,7 @@
 // full cleanup. Pure Node CDP + fetch; no npm deps. Drives the production com.lataif.app.e2e binary.
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
+import { killOwnChild, killTestBrowserByProfile, killTestImage, killTestPid } from './_e2e-process.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -107,12 +108,12 @@ async function startApp() {
   if (!page) throw new Error('app CDP page did not come up');
   return page.webSocketDebuggerUrl;
 }
-function killApp() { try { execFileSync('taskkill', ['/F', '/PID', String(appProc.pid), '/T'], { stdio: 'ignore' }); } catch {} }
+function killApp() { try { killTestPid(appProc.pid); } catch {} }
 // Kill EVERY stray e2e artefact — target/debug lataif instances AND our own headless Edge — so no zombie
 // server (with a different in-memory JWT secret) or browser can bind our port/CDP and contaminate the run.
 function killAllApp() {
-  try { execFileSync('powershell', ['-NoProfile', '-Command', "Get-Process lataif -EA SilentlyContinue | Where-Object { $_.Path -like '*target\\debug\\lataif.exe' } | Stop-Process -Force"], { stdio: 'ignore' }); } catch {}
-  try { execFileSync('powershell', ['-NoProfile', '-Command', "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" -EA SilentlyContinue | Where-Object { $_.CommandLine -match 'headless|remote-debugging-port=" + EDGE_CDP + "|lataif-uuid-e2e' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }"], { stdio: 'ignore' }); } catch {}
+  try { killTestImage('lataif.exe'); } catch {}
+  try { killTestBrowserByProfile('msedge.exe', 'lataif-uuid-e2e'); } catch {}
 }
 async function waitPortFree(port, ms = 15000) {
   const end = Date.now() + ms;
@@ -185,7 +186,7 @@ async function startEdge(url, neuterRandomUUID, profile = EDGE_PROFILE) {
   await sleep(1500);
   return { c, uploads, responses };
 }
-function killEdge() { try { execFileSync('taskkill', ['/F', '/PID', String(edgeProc.pid), '/T'], { stdio: 'ignore' }); } catch {} }
+function killEdge() { try { killOwnChild(edgeProc); } catch {} }
 const existsE = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
 const visibleE = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); return !!e && !e.classList.contains('hidden') && e.offsetParent!==null;`);
 async function waitE(c, sel, t = 20000) { const end = Date.now() + t; while (Date.now() < end) { if (await existsE(c, sel)) return true; await sleep(200); } throw new Error('waitE ' + sel); }

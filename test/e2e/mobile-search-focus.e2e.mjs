@@ -12,6 +12,7 @@
 // Isolated e2e identifier + AppData + sync port (3011); production (3001) is never touched.
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
+import { killOwnChild, killTestImage } from './_e2e-process.mjs';
 import { mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -83,8 +84,8 @@ async function startApp() {
   await c.send('Runtime.enable');
   return c;
 }
-function killAllApp() { try { execFileSync('powershell', ['-NoProfile', '-Command', "Get-Process lataif -EA SilentlyContinue | Where-Object { $_.Path -like '*target\\debug\\lataif.exe' } | Stop-Process -Force"], { stdio: 'ignore' }); } catch {} }
-function killEdge() { try { edgeProc && execFileSync('taskkill', ['/F', '/PID', String(edgeProc.pid), '/T'], { stdio: 'ignore' }); } catch {} }
+function killAllApp() { try { killTestImage('lataif.exe'); } catch {} }
+function killEdge() { try { edgeProc && killOwnChild(edgeProc); } catch {} }
 async function waitProcessGone(ms = 25000) {
   const end = Date.now() + ms;
   while (Date.now() < end) {

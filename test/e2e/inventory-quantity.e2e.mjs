@@ -18,6 +18,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
+import { killTestImage } from './_e2e-process.mjs';
 import { join } from 'node:path';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -76,7 +77,7 @@ async function startApp() {
   await c.send('Runtime.enable');
   return c;
 }
-function killAllApp() { try { execFileSync('powershell', ['-NoProfile', '-Command', "Get-Process lataif -EA SilentlyContinue | Where-Object { $_.Path -like '*target\\debug\\lataif.exe' } | Stop-Process -Force"], { stdio: 'ignore' }); } catch {} }
+function killAllApp() { try { killTestImage('lataif.exe'); } catch {} }
 async function waitProcessGone(ms = 25000) {
   const end = Date.now() + ms;
   while (Date.now() < end) {

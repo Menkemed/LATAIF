@@ -11,6 +11,7 @@
 // runtime identity guard before the process is spawned, and a production-untouched check at the end.
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
+import { killOwnChild, killTestImage, killTestPid } from './_e2e-process.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, dirname, sep } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -162,7 +163,7 @@ async function startEdge(url) {
   return { c, uploads, responses };
 }
 function killEdge() {
-  try { execFileSync('taskkill', ['/F', '/PID', String(edgeProc.pid), '/T'], { stdio: 'ignore' }); } catch (e) {}
+  try { killOwnChild(edgeProc); } catch (e) {}
 }
 const existsE = (c, sel) => c.ev('return !!document.querySelector(' + S(sel) + ');');
 const visibleE = (c, sel) => c.ev('const e=document.querySelector(' + S(sel) + '); if(!e||e.classList.contains("hidden")) return false; const r=e.getBoundingClientRect(); return (e.offsetParent!==null) || r.height>0 || r.width>0;');
@@ -232,9 +233,9 @@ async function startApp() {
   if (!page) throw new Error('app CDP page did not come up');
   return page.webSocketDebuggerUrl;
 }
-function killApp() { try { execFileSync('taskkill', ['/F', '/PID', String(appProc.pid), '/T'], { stdio: 'ignore' }); } catch {} }
+function killApp() { try { killTestPid(appProc.pid); } catch {} }
 function killAllApp() {
-  try { execFileSync('powershell', ['-NoProfile', '-Command', "Get-Process lataif -EA SilentlyContinue | Where-Object { $_.Path -like '*target\\debug\\lataif.exe' } | Stop-Process -Force"], { stdio: 'ignore' }); } catch {}
+  try { killTestImage('lataif.exe'); } catch {}
 }
 async function waitPortFree(port, ms = 20000) {
   const end = Date.now() + ms;

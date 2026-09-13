@@ -21,6 +21,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { spawn, execFileSync } from 'node:child_process';
 import { assertE2eBinary, assertE2eClientBinary, assertE2eScope, e2ePreflight } from './_e2e-preflight.mjs';
+import { killTestImage, tasklistTestImage } from './_e2e-process.mjs';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -93,11 +94,11 @@ class CDP {
   close() { try { this.ws.close(); } catch {} }
 }
 
-const killImage = (name) => { try { execFileSync('taskkill', ['/F', '/IM', name, '/T'], { stdio: 'ignore' }); } catch {} };
+const killImage = (name) => { try { killTestImage(name); } catch {} };
 function killAll() { killImage('lataif.exe'); killImage('lataif-e2e-client.exe'); }
 async function waitGone(name) {
   for (let i = 0; i < 60; i++) {
-    try { const out = execFileSync('tasklist', ['/FI', `IMAGENAME eq ${name}`], { encoding: 'utf8' }); if (!out.includes(name)) return; } catch { return; }
+    try { const out = tasklistTestImage(name); if (!out.includes(name)) return; } catch { return; }
     await sleep(300);
   }
 }

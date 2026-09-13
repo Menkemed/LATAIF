@@ -25,6 +25,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
+import { killTestPid } from './_e2e-process.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
@@ -60,7 +61,7 @@ const readJson = (p) => JSON.parse(readFileSync(p, 'utf8'));
 let appProc = null;
 function killApp() {
   if (!appProc) return;
-  try { execFileSync('taskkill', ['/F', '/PID', String(appProc.pid), '/T'], { stdio: 'ignore' }); } catch {}
+  try { killTestPid(appProc.pid); } catch {}
   appProc = null;
 }
 

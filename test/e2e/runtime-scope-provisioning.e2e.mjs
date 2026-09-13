@@ -14,6 +14,7 @@
 // Run (from desktop/): MSEDGEDRIVER unused; node test/e2e/runtime-scope-provisioning.e2e.mjs
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
+import { killTestPid } from './_e2e-process.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -72,7 +73,7 @@ async function startApp() {
   }
   throw new Error('app CDP page did not come up');
 }
-function killApp() { try { execFileSync('taskkill', ['/F', '/PID', String(appProc.pid), '/T'], { stdio: 'ignore' }); } catch {} }
+function killApp() { try { killTestPid(appProc.pid); } catch {} }
 
 // minimal CDP client over the page target's websocket
 class CDP {

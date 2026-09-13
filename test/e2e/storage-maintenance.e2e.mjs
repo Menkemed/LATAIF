@@ -10,6 +10,7 @@
 // writing. Pure Node CDP + node:sqlite; no npm deps.
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
+import { killTestImage, killTestPid } from './_e2e-process.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -74,9 +75,9 @@ async function startApp() {
   if (!page) throw new Error('app CDP page did not come up');
   return page.webSocketDebuggerUrl;
 }
-function killApp() { try { execFileSync('taskkill', ['/F', '/PID', String(appProc.pid), '/T'], { stdio: 'ignore' }); } catch { /* gone */ } }
+function killApp() { try { killTestPid(appProc.pid); } catch { /* gone */ } }
 function killAllApp() {
-  try { execFileSync('powershell', ['-NoProfile', '-Command', "Get-Process lataif -EA SilentlyContinue | Where-Object { $_.Path -like '*target\\debug\\lataif.exe' } | Stop-Process -Force"], { stdio: 'ignore' }); } catch { /* none */ }
+  try { killTestImage('lataif.exe'); } catch { /* none */ }
 }
 async function waitPortFree(port, ms = 20000) {
   const end = Date.now() + ms;

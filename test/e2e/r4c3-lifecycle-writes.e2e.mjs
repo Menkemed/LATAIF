@@ -18,6 +18,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { spawn, execFileSync } from 'node:child_process';
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
+import { killTestImage, tasklistTestImage } from './_e2e-process.mjs';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
 import os from 'node:os';
@@ -48,8 +49,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const S = (v) => JSON.stringify(v);
 const WACHHUND = setTimeout(() => {
   console.log('  x ABBRUCH: Zeitgrenze erreicht — der Lauf steht.');
-  try { execFileSync('taskkill', ['/F', '/IM', 'lataif.exe', '/T'], { stdio: 'ignore' }); } catch { /* weg */ }
-  try { execFileSync('taskkill', ['/F', '/IM', 'lataif-e2e-client.exe', '/T'], { stdio: 'ignore' }); } catch { /* weg */ }
+  try { killTestImage('lataif.exe'); } catch { /* weg */ }
+  try { killTestImage('lataif-e2e-client.exe'); } catch { /* weg */ }
   process.exit(1);
 }, 20 * 60 * 1000);
 
@@ -91,11 +92,11 @@ class CDP {
   close() { try { this.ws.close(); } catch { /* zu */ } }
 }
 
-const killImage = (n) => { try { execFileSync('taskkill', ['/F', '/IM', n, '/T'], { stdio: 'ignore' }); } catch { /* war nicht da */ } };
+const killImage = (n) => { try { killTestImage(n); } catch { /* war nicht da */ } };
 const killAll = () => { killImage('lataif.exe'); killImage('lataif-e2e-client.exe'); };
 async function waitGone(name) {
   for (let i = 0; i < 60; i++) {
-    try { const o = execFileSync('tasklist', ['/FI', `IMAGENAME eq ${name}`], { encoding: 'utf8' }); if (!o.includes(name)) return; } catch { return; }
+    try { const o = tasklistTestImage(name); if (!o.includes(name)) return; } catch { return; }
     await sleep(300);
   }
 }

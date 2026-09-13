@@ -9,6 +9,7 @@
 // Isolated e2e identifier + AppData + sync port (LATAIF_E2E_SYNC_PORT=3011); production (3001) never touched.
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
+import { killOwnChild, killTestBrowserByProfile, killTestImage, killTestPid } from './_e2e-process.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -93,10 +94,10 @@ async function startApp() {
   if (!page) throw new Error('app CDP page did not come up');
   return page.webSocketDebuggerUrl;
 }
-function killApp() { try { execFileSync('taskkill', ['/F', '/PID', String(appProc.pid), '/T'], { stdio: 'ignore' }); } catch {} }
+function killApp() { try { killTestPid(appProc.pid); } catch {} }
 function killAllApp() {
-  try { execFileSync('powershell', ['-NoProfile', '-Command', "Get-Process lataif -EA SilentlyContinue | Where-Object { $_.Path -like '*target\\debug\\lataif.exe' } | Stop-Process -Force"], { stdio: 'ignore' }); } catch {}
-  try { execFileSync('powershell', ['-NoProfile', '-Command', "Get-CimInstance Win32_Process -Filter \"Name='msedge.exe'\" -EA SilentlyContinue | Where-Object { $_.CommandLine -match 'lataif-mediaui-e2e|remote-debugging-port=" + EDGE_CDP + "' } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -EA SilentlyContinue }"], { stdio: 'ignore' }); } catch {}
+  try { killTestImage('lataif.exe'); } catch {}
+  try { killTestBrowserByProfile('msedge.exe', 'lataif-mediaui-e2e'); } catch {}
 }
 async function waitPortFree(port, ms = 15000) { const end = Date.now() + ms; while (Date.now() < end) { let n = 1; try { n = parseInt(execFileSync('powershell', ['-NoProfile', '-Command', `(Get-NetTCPConnection -State Listen -LocalPort ${port} -EA SilentlyContinue).Count`], { encoding: 'utf8' }).trim() || '0', 10); } catch { n = 0; } if (!n) return true; await sleep(500); } return false; }
 async function waitHealthy() { const end = Date.now() + 40000; while (Date.now() < end) { try { if ((await fetch(`${BASE}/api/health`, { signal: AbortSignal.timeout(2000) })).ok) return true; } catch {} await sleep(500); } throw new Error('server never healthy'); }
@@ -249,7 +250,7 @@ async function startEdge(url) {
   await c.send('Page.navigate', { url }); await sleep(1500);
   return { c, uploads, responses };
 }
-function killEdge() { try { execFileSync('taskkill', ['/F', '/PID', String(edgeProc.pid), '/T'], { stdio: 'ignore' }); } catch {} }
+function killEdge() { try { killOwnChild(edgeProc); } catch {} }
 const setOffline = (c, off) => c.send('Network.emulateNetworkConditions', { offline: off, latency: 0, downloadThroughput: off ? 0 : -1, uploadThroughput: off ? 0 : -1 });
 const existsE = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
 const visE = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); return !!e && !e.classList.contains('hidden') && e.offsetParent!==null;`);
