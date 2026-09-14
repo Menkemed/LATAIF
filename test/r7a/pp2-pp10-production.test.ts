@@ -531,5 +531,49 @@ marker('POST_PARITY_R7A_PP2_PRODUCTION_COMPLETION_FIXED');
 }
 marker('POST_PARITY_R7A_PP10_PRODUCTION_SYNC_FIXED');
 
+// ══ PP-2 §8 — der Kostenvertrag an einem Beispiel (R7A Final Contract Gate) ═══════
+// Material 250 (p1 + p2 → Ring A 150 + Ring B 100), Arbeit 150, Gemeinkosten 50. Der Einstand der Fertigteile
+// bleibt der Materialwert (die Fertigung ist wertgleich, bucht weder INVENTORY noch COGS); Arbeit + Gemeinkosten
+// sind EINE Betriebsausgabe (Miscellaneous, nicht in CAPITALIZED_EXPENSE_CATEGORIES). Später verkauft (400 + 300):
+// Σ Gewinn = Σ Erlös − total_cost — jeder Kostenteil genau EINMAL, im Hauptbuch (REVENUE − COGS − EXPENSES_OPERATING)
+// wie in den Berichten (Marge − Betriebsausgaben). Kapitalisieren UND Ausgabe buchen zählte 200 doppelt (Gewinn 50).
+{
+  const { isCapitalizedExpenseCategory } = await import('../../src/core/models/types.ts');
+  const db = await angelegt('P', { ...INPUT(), laborCost: 150, overheadCost: 50 });
+  const r = await abschliessen(db, 'P', { recordId: recId(db) });
+  const z = JSON.parse(abschluss(db));
+  ok(r.ok && Number(z.rec.total_value) === 250 && Number(z.rec.total_cost) === 450,
+    `KOSTEN Beleg: Material 250 + Arbeit 150 + Gemeinkosten 50 = total_cost 450 (${S(z.rec)})`);
+  ok(S(z.outCost) === S([[100], [150]]) && S(z.lots) === S([[100, 1, 'ACTIVE'], [150, 1, 'ACTIVE']]),
+    `KOSTEN Einstand der Fertigteile = Materialwert 100/150, Lose zum Materialwert (${S(z.outCost)} ${S(z.lots)})`);
+  ok(S(z.exp) === S([['Miscellaneous', 200, 200, 'cash', 'PAID', 'production']]) && !isCapitalizedExpenseCategory('Miscellaneous'),
+    `KOSTEN Arbeit + Gemeinkosten = EINE Betriebsausgabe 200, bar, nicht kapitalisiert (${S(z.exp)})`);
+  ok(saldo(db, 'CASH') === -200 && saldo(db, 'EXPENSES_OPERATING') === 200 && saldo(db, 'ACCOUNTS_PAYABLE') === 0
+    && n(db, "SELECT COUNT(*) FROM ledger_entries WHERE account IN ('INVENTORY', 'COGS')") === 0,
+    'KOSTEN Hauptbuch: Aufwand 200 gegen Kasse; die Fertigung selbst bucht weder INVENTORY noch COGS (wertgleich 250 → 250)');
+  // Späterer Verkauf beider Fertigteile — Einstand je Zeile nach der Regel des Rechnungswegs
+  // (ältestes aktives Los, sonst purchase_price; `invoiceStore` ResolvedLine).
+  const preis: Record<string, number> = { 'Ring A': 400, 'Ring B': 300 };
+  const zeilen = rows(db, 'SELECT p.id, p.name, p.purchase_price FROM production_outputs o JOIN products p ON p.id = o.product_id ORDER BY p.name')
+    .map((o, i) => {
+      const lot = rows(db, `SELECT unit_cost FROM stock_lots WHERE product_id = ? AND status = 'ACTIVE' AND qty_remaining > 0
+        ORDER BY acquired_at ASC, id ASC LIMIT 1`, [o.id])[0];
+      const p = preis[String(o.name)];
+      return { id: `il-r7a-${i}`, productId: String(o.id), quantity: 1, unitPrice: p, lineTotal: p, vatAmount: 0, vatRate: 0,
+        taxScheme: 'MARGIN', purchasePriceSnapshot: Number(lot?.unit_cost ?? o.purchase_price) };
+    });
+  const jetzt = new Date().toISOString();
+  posting.postInvoiceIssued({ id: 'inv-r7a-8', invoiceNumber: 'INV-R7A-8', customerId: 'c-r7a', currency: 'BHD',
+    issuedAt: jetzt, createdAt: jetzt, lines: zeilen } as never);
+  const marge = zeilen.reduce((sum, l) => sum + (l.unitPrice - l.purchasePriceSnapshot), 0);
+  const betrieb = n(db, 'SELECT COALESCE(SUM(amount), 0) FROM expenses');
+  const gewinnBuch = Math.round((-saldo(db, 'REVENUE') - saldo(db, 'COGS') - saldo(db, 'EXPENSES_OPERATING')) * 1000) / 1000;
+  ok(S(zeilen.map((l) => l.purchasePriceSnapshot)) === S([150, 100]) && saldo(db, 'COGS') === 250 && saldo(db, 'INVENTORY') === -250,
+    `VERKAUF Wareneinsatz = Materialwert (150/100), COGS 250 gegen INVENTORY 250 = Σ Eingangswert (${S(zeilen.map((l) => l.purchasePriceSnapshot))})`);
+  ok(marge === 450 && betrieb === 200 && marge - betrieb === 250 && gewinnBuch === 250 && 700 - Number(z.rec.total_cost) === 250 && balanced(db),
+    `MARGE Berichte 450 − Betriebsausgaben 200 = Hauptbuch ${gewinnBuch} = Erlös 700 − total_cost 450 — Arbeit/Gemeinkosten genau einmal`);
+}
+marker('POST_PARITY_R7A_PRODUCTION_ACCOUNTING_CONTRACT_PINNED');
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — post-parity r7a pp-2/pp-10 production completion + sync: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }

@@ -3598,10 +3598,21 @@ Abschluss im Abgleich des Primary-Servers, nichts in Quarantäne. Vier verlorene
 `E:\LATAIF\Data` und Ports 3001/3443 unberührt. Marker `POST_PARITY_R7A_PP1/PP2/PP8/PP9/PP10/PP11_RUNTIME_PROVED`,
 `POST_PARITY_R7A_LOST_RESPONSE_PROVED`, `POST_PARITY_R7A_TWO_APP_PROVED`.
 
-**Gates:** `test/r7a/` pp1 19/0 · pp8-pp9 54/0 · pp2-pp10 53/0 · pp11 22/0; Rust `bridge`/`sync_policy`/`sync_schema` 60/0;
-Node-Sweep 195/197 — die zwei Fehlschläge (`bridge/product-durability-ownership`, `uiparity/r4c1-role-parity`) sind
-vorbestehend und nicht R7A: beide Dateien seit R5F.1 (`4a8a68d`) unverändert, sie pinnen noch 41 Buchungen (vor R7A schon
-102); eigene Aufräumscheibe. Typcheck grün, Lint-Stand unverändert (7 Altfehler wie HEAD).
+**Kostenvertrag der Fertigung** (`POST_PARITY_R7A_PRODUCTION_ACCOUNTING_CONTRACT_PINNED`, pp2-pp10 §8): Material 250,
+Arbeit 150, Gemeinkosten 50 → Beleg `total_cost` 450; Einstand der Fertigteile 150/100 = Materialwert (die Fertigung ist
+wertgleich und bucht weder INVENTORY noch COGS); EINE Ausgabe 200 „Miscellaneous", bar (Soll EXPENSES_OPERATING / Haben
+Kasse, A/P 0), nicht in `CAPITALIZED_EXPENSE_CATEGORIES`; späterer Verkauf 400 + 300: COGS 250 zum Los-Einstand, Marge 450 −
+Betriebsausgaben 200 = Hauptbuch-Gewinn 250 = Erlös 700 − `total_cost` 450. Warum der Materialwert: das Hausmodell führt als
+Wareneinsatz nur den Einstand (Los bzw. `purchase_price`) und die kapitalisierte Kategorie „Inventory"; Arbeit/Gemeinkosten
+zu kapitalisieren bräuchte eine Buchung Soll INVENTORY, die es nicht gibt — zusammen mit der Ausgabe zählte sie doppelt
+(Gewinn 50), ohne sie liefe INVENTORY gegen die Lose auseinander. Vertrag bestätigt, keine Domänenänderung.
+
+**Gates:** `test/r7a/` pp1 19/0 · pp8-pp9 54/0 · pp2-pp10 59/0 · pp11 22/0; Rust `bridge`/`sync_policy`/`sync_schema` 60/0;
+Node-Sweep vor der Triage 195/197. Die zwei Fehlschläge (`bridge/product-durability-ownership`,
+`uiparity/r4c1-role-parity`) sind **Klasse A (veraltete Zählpins), nicht R7A**: an `51f1f5d` identisch reproduziert (gleiche
+Datei, gleiche Assertion, gleiche Meldung, gleicher Aufrufweg; einziger Unterschied die Zählung 102 → 103 durch
+`production.complete`). Erwartung auf den heutigen Vertrag gezogen (103 Buchungen, der R5F.1-Kern steht unverändert vorn);
+beide grün (70/0, 35/0). Typcheck grün, Lint-Stand unverändert (7 Altfehler wie HEAD).
 
 ```
 Category A = 0 · Category B = 0 (unverändert)
