@@ -3263,3 +3263,263 @@ Registry            160 → 174   (1 Probe + 71 Auskünfte + 102 Buchungen)
 
 Kategorie A ist damit geschlossen. Kategorie B war seit R6B geschlossen; C (Rechnerwerkzeuge), D (unerreichbar) und E
 (Löschen, Hauskonfiguration, Buchhaltungswerkzeuge) bleiben bewusst am Primary und sind NICHT als geschlossen gezählt.
+
+## Central UI Parity R4–R6F — CLOSED (14.09.2026)
+
+Stand `ac868a8` (`HEAD == origin/main`), Version **0.8.54**, kein Release, Public Latest `v0.8.54`. Reiner Abschluss-Audit:
+statisch gegen den Code und die vorhandenen kleinen Gates, kein Build, kein Zwei-Rechner-Lauf, keine Produktänderung.
+
+**Parität abgeschlossen heißt:** jede Schreibhandlung der gemeinsamen Oberfläche hat auf PC2 entweder den gemeinsamen Weg
+über den Primary oder ist bewusst und ehrlich maschinenlokal (C), untätig (D) oder Primary-only (E). Es heißt **nicht**, dass
+das Produkt fehlerfrei ist — der Post-Parity-Backlog unten bleibt offen.
+
+### Gesamtzahlen (`CENTRAL_UI_FINAL_COUNTS_PROVED`)
+
+```
+R6A-Inventur (12.09.2026)   231 Einstiege = 60 angeschlossen + 171 ohne gemeinsamen Weg
+  damals                    A 95 · B 8 · C 15 · D 12 · E 41
+Write-Gap-SSOT heute        171 Tabellenzeilen, maschinell gezählt: A 95 · B 8 · C 15 · D 12 · E 41
+  A                         95/95 geschlossen (R6C 16 · R6D 41 · R6E 22 · R6F 16)  → offen 0
+  B                          8/8  geschlossen (R6B)                                 → offen 0
+  C / D / E                 15 / 12 / 41 — einzeln neu geprüft (unten), alle korrekt eingeordnet
+```
+Die 60 angeschlossenen Einstiege sind die R6A-Zählung (40er-Matrix + `invoices.cancel` + Schnellanlage Kunde + Navigation);
+sie stehen nicht als Tabellenzeilen und wurden nicht einzeln neu gezählt — ihr Kern ist die 40er-Matrix (§ Matrix).
+
+### Kategorie C — maschinenlokal (`CENTRAL_UI_FINAL_CATEGORY_C_PROVED`)
+
+15/15 bleiben C (43 Einstiege). Keine C-Zeile ist ein täglicher Geschäfts-Write, der über den Primary gehen müsste; kein
+C-Weg schreibt auf PC2 in eine lokale Geschäfts-DB (Abmelden: eigener Client-Zweig `auth.ts:207`; Update-Sicherung ohne DB
+untätig; Ausgaben-Generator übersprungen; Filialwechsel verborgen; `/settings` = `PrimaryOnlyNotice`). Zu Recht lokal auf
+PC2: Spotpreis, Etikettendruck am Arbeitsplatz, Update, Anmelden/Trennen/Abmelden. Zwei Etiketten-Präzisierungen:
+„Fällige Ausgaben erzeugen" ist eine Automatik des Primary (auf PC2 still, nichts); der KI-Schlüssel gehört zu Recht dem
+Rechner, aber die KI-Knöpfe auf PC2 scheitern erst nach dem Klick → **PP-3**.
+
+### Kategorie D — untätig/unerreichbar (`CENTRAL_UI_FINAL_CATEGORY_D_PROVED`)
+
+12/12 bleiben D; kein versteckter aktiver Pfad, kein sichtbarer Knopf, der Erfolg vortäuscht. InvoiceDetail-Kopf/Status/
+Zeilen: `editing` wird nur je auf `false` gesetzt. SyncDuplicateGuard: sein Ereignis kommt nur aus `syncNow`, das im Client
+verweigert. Login/Onboarding/FirstRunGate: im Client nie gemountet. Alter ClientShell-Bereich + 11 Client-Formulare:
+nur bei defektem Ausweis/Speicher erreichbar — dann funktionieren sie (echte Fernaufträge), sind also nicht irreführend
+(Rückbau → **PP-7**).
+
+### Kategorie E — Admin/System/Primary-only (`CENTRAL_UI_FINAL_CATEGORY_E_PROVED`)
+
+41/41 sauber (28 Löschknöpfe + 13 Werkzeug-/Einstellungsgruppen). Kein sichtbarer PC2-Knopf scheitert spät: jeder
+Lösch-Öffner ist auf PC2 gesperrt und nennt den Grund; wo ein Bestätigungsdialog folgt, steht der Riegel davor; „Delete (n)"
+der Mehrfachauswahl ist nur über das gesperrte „Select" erreichbar, der Handler hat den Riegel. „Auftrag löschen" bleibt E
+(Riegel `OrderDetail.tsx:499` vor der Weiche; der Storno ruft `deleteOrder` nicht mehr). Import: Route = Hinweis, Knopf
+gesperrt, `ImportPage` stoppt vor Sicherung. Kein lokaler DB-Zugriff auf PC2. Härtung einzelner Handler ohne eigenen
+Riegel (heute unerreichbar) → **PP-6**.
+
+### Die ursprüngliche 40er-Matrix (`CENTRAL_UI_FINAL_ORIGINAL_MATRIX_PROVED`)
+
+Frisch aus `test/uiparity/_r4c-write-matrix.ts` gezählt: **40 = 36 verdrahtet · 0 exakt offen · 0 Klasse B · 4 ohne
+Handlung**; `invoices.cancel` steht getrennt in `R5F1_NEUE_BUCHUNGEN` (daher meldet das Gate „37 verdrahtet").
+`r4c-write-matrix` 456/0, `r3-write-matrix` 15/0.
+
+### Registry 174 (`CENTRAL_UI_FINAL_REGISTRY_174_PROVED`)
+
+`174 = 1 Probe + 71 Reads + 102 Mutationen`; TS (`ALLOWED_MUTATIONS` + angemeldete Auskünfte) == Rust (`bridge.rs`,
+174 `OP_*`, `REMOTE_OPS`). Jede der 102 Mutationen hat einen Eintrag in `OPERATION_PERMISSIONS` (Reads prüfen Filiale/
+Ausweis). Alle 92 Operationsnamen an Aufrufstellen der Oberfläche sind registriert, keine verwaiste Operation.
+Unbekannter Name dreifach abgewiesen: `/api/command` (`routes.rs:211`, `OpNotAllowed`), `submit` (`bridge.rs:884`),
+Renderer (`BRIDGE_OP_NOT_REGISTERED`). Gates: r6f final-gate 90/0, c3g 119/0, c4-authorization 169/0, Rust bridge 37/0.
+
+### PC2 ohne Datenbank (`CENTRAL_UI_FINAL_DBLESS_PC2_PROVED`)
+
+PC2 hat keine maßgebliche Geschäfts-DB: Start ohne DB (`CENTRAL_C2_CLIENT_DBLESS_STARTUP_PROVED`), keine Geschäftslesung
+aus einer lokalen DB (`CENTRAL_UI_R2C_NO_CLIENT_BUSINESS_DB_READ_PROVED`), Lesen vom Primary (`CENTRAL_C2_READ_AUTHORITY_PROVED`),
+Alt-Sync im Client verweigert (`legacySyncRefused`), jede Schreibhandlung = Fernauftrag; eine alte `lataif.db` auf PC2 bleibt
+unberührt und irrelevant (jeder Zwei-Rechner-Lauf prüft ihren Hash, zuletzt R6F 467/0). PC2 öffnet keine SQLite-Datei —
+weder lokal noch über SMB —, es spricht nur HTTP mit dem Primary. Der Primary ist einziger Schreiber; Fernaufträge sind
+durabel und idempotent (`CENTRAL_C3_DURABLE_IDEMPOTENCY_SCHEMA_PROVED`, `CENTRAL_C3_ATOMIC_COMMAND_TRANSACTION_PROVED`).
+Gates: client-read-mode 109/0, r2c-direct-db-scan 14/0, write-foundation 196/0, c6 38/0, r6b 95/0.
+
+### Urheber, Protokoll, Fassung (`CENTRAL_UI_FINAL_AUDIT_INTEGRITY_PROVED`)
+
+Fern = der geprüfte PC2-Absender aus dem Ausweis (`withActingUser`, R6E), lokal = die Primary-Anmeldung
+(`CENTRAL_UI_R6E_LOCAL_ACTOR_PROVED`); der Client kann `created_by`/Urheber nicht setzen (jede Hausfolge weist Urheber-
+Felder ab: „the primary decides …"). Bearbeitbare gemeinsame Domänen tragen `revision` + Trigger, veraltete Fassung →
+`RECORD_CHANGED`. Verlorene Antwort → dieselbe `commandId` → eingefrorenes Ergebnis, genau eine Wirkung
+(`CENTRAL_UI_R6F_IDEMPOTENCY_PINNED`, Zwei-Rechner-Läufe R5B–R6F). Gates: r6e actor-attribution 37/0, r6f final-gate 90/0.
+
+### Post-Parity-Backlog (`CENTRAL_UI_POST_PARITY_BACKLOG_PINNED`)
+
+Keiner ist eine A/B-Lücke: entweder kein fehlender Fernweg für eine Geschäftsbuchung, oder über Maske/PC2 nicht erreichbar.
+
+| ID | Beschreibung | Domäne | Schwere | warum kein A/B | spätere Behandlung |
+|---|---|---|---|---|---|
+| PP-1 | Nach einer STORNIERTEN Guthaben-Einlösung zeigt die stornierte Zahlung auf die gelöschte Lieferanten-Guthabenzeile; die Abstimmung meldet `bad_reference` (falsch-positiv, Salden richtig) | Einkauf/Lieferanten | niedrig | nur über Store-Altwege `cancelReturn`/`deleteReturn` ohne Aufrufer erreichbar | `counterpartyAudit` ignoriert stornierte Guthaben-Zahlungen, oder Zeile erhalten (dann Klasse A des Guthabens) |
+| PP-2 | `completeRecord` (Arbeits-/Gemeinkosten als Ausgabe + Kassenzahlung, COMPLETED) hat nie einen Aufrufer; erfasste Kosten werden nie gebucht | Produktion/GuV | mittel | eigener, nie verdrahteter Primary-Workflow; `production.create` ist für den Bestand vollständig | als Hausfolge (Transaktion, Client-Sperre, Filiale) anschließen, dann Fernbefehl |
+| PP-3 | KI-Identifizieren (`NewProductModal`, `WatchList`, `ProductDetail`), KI-Nachrichtentext und `/ai` sind auf PC2 sichtbar, melden aber erst nach dem Klick „Set OpenAI API key in Settings" — Settings ist auf PC2 gesperrt | KI/Artikel | mittel | keine Geschäftsbuchung fehlt (KI schlägt nur vor, gespeichert wird über `products.update`); Schlüssel ist maschinenlokal (C) | Primary-seitige KI (`/api/ai/identify`) auch für PC2 nutzen, oder auf PC2 sperren/erklären |
+| PP-4 | Fällige wiederkehrende Ausgaben entstehen nur beim Primary-Start/Filialwechsel und beim Öffnen der Ausgabenliste am Primary; läuft er über den Monatswechsel, erscheinen sie verspätet | Finanzen/Ausgaben | niedrig–mittel | Automatik des Primary, kein PC2-Einstieg | Auslöser bei Tageswechsel am Primary |
+| PP-5 | „Trennen" löscht `lataif_session` nicht (`client-mode.ts:50`), `clearClientSession` wird nie gerufen; ein späterer Start im Primary-Modus übernimmt die alte Sitzung ungeprüft | Anmeldung | niedrig | maschinenlokale Sitzung, keine Geschäftsbuchung | beim Trennen Sitzung leeren, beim Start prüfen |
+| PP-6 | Einstellungen, Nachbuchung, Hauptbuch-/Reparatur-Prüfstand und Orphan-Storno hängen nur an Route/Ausblendung (letzte Linie: `getDatabase()` wirft) | System | niedrig | E korrekt, auf PC2 unerreichbar | `assert…Here` im Handler |
+| PP-7 | Toter/alter Code: InvoiceDetail-`editing`-Zweig mit lokalen `updateInvoice`; alter ClientShell-Bereich (11 Testdateien nutzen noch seine Selektoren); `resetPrimarySource` beim Abmelden nie gerufen | Aufräumen | niedrig | unerreichbar (D) | entfernen, Tests umstellen |
+| PP-8 | R6F-Restbefunde: Überzahlungs-Gutschrift eines stornierten Auftrags wird gelöscht (`clawbackGrantedCredit`); `deleteOrder` (Primary-only) storniert teilweise beglichene Gold-Schulden; `production_inputs/outputs` nicht im Abgleich-Manifest; Notizfeld der Aufgabe ohne Spalte; große Dokumente können das 20-s-Brückenlimit reißen (Wiederholung sicher) | gemischt | niedrig–mittel | Primary-seitig bzw. E; kein fehlender Fernweg | je eigene Scheibe |
+
+Veraltete Stellen der SSOT (nur Hinweis, Inhalt gilt): Zeilenverweise der Tabelle sind teils verschoben (z. B. InvoiceDetail,
+WatchList, ExpenseList); der R6A-Abschnitt „Keine toten Knöpfe" beschreibt den Stand VOR R6B — heute: Abmelden geht auf PC2
+(`auth.ts:207`), Löschknöpfe gesperrt mit Grund, `/import` gesperrt, Inventur und Nachrichtenprotokoll über den Primary,
+Lieferantenguthaben erstatten/anwenden angeschlossen (R6D); der R6B-Test zählt heute 95/0 statt 97/0.
+
+### Finaler Status
+
+```
+Category A = 0
+Category B = 0
+Category C = bewusst Primary-/maschinenlokal (15)
+Category D = bewusst untätig/unerreichbar (12)
+Category E = bewusst Admin/System/Primary-only (41)
+Registry   = 174 (1 + 71 + 102)
+PC2        = ohne Geschäftsdatenbank
+Primary    = Autorität, einziger Schreiber
+Version 0.8.54 · kein Release · Post-Parity-Backlog PP-1…PP-8 offen
+```
+
+### Anhang — Einzelprüfung C, D, E (14.09.2026, statisch gegen `ac868a8`)
+
+
+#### Kategorie C
+
+##### Audit Kategorie C (maschinenlokal) — Write-Gap-SSOT, Stand HEAD ac868a8
+
+Nur gelesen, statisch. Keine Datei im Repo geändert, kein Build, kein Test.
+Grundlage: `docs/central-ui-parity.md` §„Write-Gap-SSOT“ (Z. 2124 ff.), 15 C-Zeilen (Z. 2164, 2171, 2265, 2296–2307), gegen den aktuellen Code geprüft.
+
+Client-Weiche: `isClientMode()` (`src/core/bridge/client-mode.ts:36`) = `readsFromPrimary()` (`src/core/data/primary-source.ts:21`). Im Client wird `initDatabase()` nie gerufen (`App.tsx:149–161`), also wirft `getDatabase()` (`src/core/db/database.ts:3438`). Die ganze Route `/settings` ist im Client eine `PrimaryOnlyNotice` (`App.tsx:477–482`). Deshalb erreicht PC2 keinen Einstieg in SettingsPage/BackupRestorePanel/StorageMaintenancePanel/DataLocationPanel (die drei Panels hängen nur an `SettingsPage.tsx:3144/3146/3148`).
+
+##### Tabelle
+
+| SSOT-Zeile | UI-Einstieg | Laufweg Primary | Warum lokal | PC2 fachlich nötig? | PC2 heute | Klassifikation |
+|---|---|---|---|---|---|---|
+| L2164 Spotpreis aktualisieren | `pages/dashboard/Dashboard.tsx:612` (`refreshSpot(true)`; Auto-Intervall :86–87) | `getSpotPrices` (`core/market/spot-prices.ts:65`) → `fetch api.gold-api.com` (:45) → Cache in localStorage (:31/:40) | Marktdaten-Anzeige plus Browser-Cache. Keine Geschäftsbuchung, kein DB-Zugriff | Ja, als Anzeige. Der Schreibanteil ist nur der eigene Cache | **Läuft lokal auf PC2, wie es soll** (kein `getDatabase`) | **C korrekt** (eigentlich gar kein Business-Write) |
+| L2171 Etiketten drucken | `pages/watches/WatchList.tsx:1276` (Print-Knopf im Modal; öffnen :508/:527. SSOT-Ref 1266 verschoben) | `buildBatchTagsZpl` (`core/print/zpl-tag.ts:286`, rein, nur Typ-Import) → `printRawZpl` (`core/print/raw-print.ts:42`) → Tauri `print_raw_zpl` (`src-tauri/src/lib.rs:1409`) → Windows-Raw-Spooler. Druckername in localStorage (`raw-print.ts:26/33`) | Zebra-Drucker am Arbeitsplatz, lokaler OS-Spooler | **Ja, täglich**. Deshalb gehört er genau auf den eigenen Rechner | **Läuft lokal auf PC2, wie es soll.** Artikel/Kategorien kommen aus der Primary-Hydrierung, kein DB-Zugriff, kein Status-Write. Druckerfehler erscheinen ehrlich im Modal (:1288–1289) | **C korrekt** |
+| L2265 Fällige Ausgaben erzeugen (beim Öffnen) | `pages/expenses/ExpenseList.tsx:136` (useEffect. SSOT-Ref :123 verschoben) und zusätzlich `App.tsx:352–358` (Start/Filialwechsel) | `runDueGeneratorOnPrimary` (`core/payables/payables-save.ts:212`) → `recurringExpenseStore.runDueGenerator` (`stores/recurringExpenseStore.ts:137`) → INSERT Ausgaben in die Primary-DB → `saveDatabaseDurably` | **Nicht maschinenlokal im eigentlichen Sinn.** Es ist eine Primary-eigene Automatik, die Geschäftsbuchungen erzeugt | Nein. PC2 soll sie nicht auslösen, der Primary führt seine Monate selbst | **Still, nichts** (`ExpenseList.tsx:136` `!readsFromPrimary()`; `App.tsx:353` `!dbReady` bleibt im Client false). Kein Schein-Erfolg, kein lokaler Write | Kein A/B, Ergebnis stimmt. **Etikett ungenau** („Primary-Automatik“ statt „maschinenlokal“). Nebenbefund: Der Primary startet den Generator nur beim Start/Filialwechsel und beim Öffnen der Ausgabenliste AM PRIMARY. Es gibt keinen Timer, und das Fern-Lesen `store.recurring_expenses.get` (`core/bridge/store-read-commands.ts:246`) löst ihn nicht aus. Bleibt der Primary über einen Monatswechsel an und arbeiten die Nutzer nur an PC2, erscheinen fällige Ausgaben verspätet |
+| L2296 Abmelden | `components/layout/Sidebar.tsx:372` | `authStore.logout` (`stores/authStore.ts:115`) → `authService.logout` (`core/auth/auth.ts:202`). Primary: DELETE `sessions` + `saveDatabase` (:213–219). Client-Zweig :207–211: Sitzung weg, `lataif_session` weg, `setClientToken(null)` | Sitzung und Ausweis dieses Fensters. Der Primary prüft jede Anfrage selbst | Ja (Sitzungsende). Lokal ist hier richtig | **Geht**: zurück zu ClientShell-SignIn (`App.tsx:367`; `ClientShell.tsx:74` `signedIn=Boolean(token)` → false). Kein DB-Write. Kosmetisch: `resetPrimarySource` (`primary-source.ts:144`, laut Kommentar „für den Abmeldeweg“) hat keinen Aufrufer, Store-Inhalte bleiben bis zur nächsten Hydrierung im Speicher | **C korrekt** |
+| L2297 Filiale wechseln | `Sidebar.tsx:221` (Dropdown nur bei `branches.length > 1`, :202/:210) | `authStore.switchBranch` (:124) → `authService.switchBranch` (`auth.ts:151`) → `getUserBranches` + SELECT `branches` (getDatabase) → `lataif_session` | Sitzungs-/Anzeigekontext der UI, keine Geschäftsbuchung | Bei einer Filiale nein. Bei Mehrfilialbetrieb bräuchte PC2 einen neuen Token vom Primary (Server-Auth); das wäre dann gerade nicht lokal | **Verborgen**: `branchesFor` (`authStore.ts:70–80`) fängt den `getDatabase`-Wurf ab und liefert genau die Token-Filiale, also kein Dropdown. Kein Write | **C vertretbar/korrekt** (heute einfilialig). Hinweis für später: Mehrfilialbetrieb auf PC2 wäre Token-Neuausstellung am Primary |
+| L2298 Update installieren | `components/shared/UpdateBanner.tsx:193` | `installUpdate` (:128) → `installOnce` (:65) → `prepareAndInstallUpdate` (`core/updater/update-orchestration.ts:50`): `saveDatabaseDurably` (`database.ts:3354–3355` `if (!db) return;` → No-op) → `downloadAndInstall` → `coordinatedRelaunch` (`core/lifecycle/relaunch-coordinator.ts:111`): `pauseAutoSync`/`waitForSyncIdle` (`sync-service.ts:599/608`), `stop_server_and_confirm_free` (`lib.rs:1566`; `server.stop` → „not running“, `src-tauri/src/sync/mod.rs:418`) → relaunch | Programmdatei dieses Rechners | **Ja**, PC2 muss seine eigene App aktualisieren | **Geht** (statisch gelesen). Banner ist auch im Client gemountet (`App.tsx:405`), Auto-Check nach 5 s (`UpdateBanner.tsx:146`). Flush ohne DB ist wirkungslos, aber harmlos. Kein DB-Write | **C korrekt** |
+| L2299 Anmelden | `components/startup/ClientShell.tsx:421–429` (SignIn) | `clientLogin` (`core/bridge/remote-read.ts:95`) → POST `{server}/api/auth/login` **am Primary** → `setClientToken` (localStorage) → `App.tsx:368–373` `installClientSession` (`core/auth/client-session.ts:86`) + `initialize` + `refreshClientSessionContext` | Verbindungs- und Sitzungszustand dieses Rechners. Das Passwort prüft der Primary | Ja | **Geht**, Fehler ehrlich („Server unavailable“ / „Wrong e-mail or password“, :427) | **C korrekt** |
+| L2300 Trennen | `ClientShell.tsx:153` (Alt-Bereich, Kat. D) und `:431` (SignIn) | `leaveClientMode` (`client-mode.ts:50–56`: entfernt mode/server/token) → `window.location.reload` → Primary-Boot (`App.tsx:162` FirstRunGate bzw. `initDatabase`) | Modus-Weiche dieses Rechners | Selten (Serverwechsel, Rückbau). Lokal richtig | **Geht.** Im normalen Programm nur über Abmelden → SignIn → Disconnect erreichbar (Settings = NOTICE). Kein Write im Client-Modus. Nebenbefund: `leaveClientMode` löscht `lataif_session` NICHT, und `clearClientSession` (`client-session.ts:131`) hat keinen Aufrufer. Liegt beim Trennen noch eine Client-Sitzung (nur ohne vorheriges Abmelden, z. B. über :153), übernimmt der folgende Primary-Boot sie ungeprüft (`auth.ts:47–58`, `App.tsx:184` `initialize`) | **C korrekt** |
+| L2301 Sprache, KI-Schlüssel/-Test (4) | `pages/settings/SettingsPage.tsx:1468/1478` (Sprache), `:1792` (Test), `:1795` (Speichern) | Sprache: `i18n.setLanguage` (`core/i18n/i18n.ts:17`) → localStorage + `dir`/`lang`. KI: `setApiKey` (`core/ai/ai-service.ts:83`) → localStorage `lataif_openai_key` + Schlüsseldatei im Datenort (`writeKeyToTauri` :57), `setModel` (:109). Test: `fetch api.openai.com/v1/models` (:1724) | Geräteeinstellung bzw. Geheimnis dieses Rechners | **KI-Schlüssel: JA.** KI-Identifizieren (`components/products/NewProductModal.tsx:353`, `WatchList.tsx:973`, `ProductDetail.tsx:571/687`), Nachrichtentext (`components/ai/MessagePreviewModal.tsx:110`) und `/ai` (`pages/ai/AIPage.tsx:210/254/337`) rufen OpenAI vom eigenen Rechner mit dem EIGENEN Schlüssel (`ai-service.ts:119–121`). Es gibt keinen Primary-Weg. OCR ist nicht betroffen (läuft am Primary, `stores/documentStore.ts:190`). Sprache: kaum (setzt nur `dir`/`lang`, i18n praktisch nicht verdrahtet) | **NOTICE** (ganze Route, `App.tsx:477–482`). Folge: KI-Knöpfe sind auf PC2 sichtbar und melden erst nach dem Klick „Set OpenAI API key in Settings > AI“. Settings sagt dort „only on main computer“, also **Sackgasse / fails late** | C für den Schlüssel inhaltlich korrekt (maschinenlokal), kein A/B. **Der PC2-Zustand „NOTICE“ ist hier falsch**: PC2 muss den Schlüssel selbst setzen können, oder KI läuft über den Primary |
+| L2302 Sync, Server, Owner, Adopt, Scope (14) | `SettingsPage.tsx:2089` (Owner setzen), `:2095` (ändern), `:2102` (Mobile-Scope → `RuntimeScopeDialog` :2215), `:2115` (Adopt → `PrimaryAdoptDialog` :2232), `:2126` (Start/Stop), `:2129` (Discover), `:2139` (Use), `:2167` (Sync Now), `:2168` (Disconnect), `:2198` (Connect), `OwnerProvisionDialog` :2225 | Tauri `sync_server_start`/`sync_server_stop` (`lib.rs:268/281`, Owner-Prüfung gegen Konfig-DB), Alt-Sync `sync-service` | LAN-Server, Primary-Rolle und Konfig-DB DIESES Rechners | Nein. PC2 verbindet sich über ClientShell, der Alt-Sync ist im Client ohnehin verweigert (`sync-service.ts:629` `legacySyncRefused`) | **NOTICE** | **C korrekt** |
+| L2303 Update prüfen | `SettingsPage.tsx:3455` | `manualCheck` (:3420) → Ereignis `lataif:check-update` (:3423) + `plugin-updater.check` | Programmdatei dieses Rechners | Nicht zwingend: UpdateBanner prüft auch auf PC2 beim Start automatisch (`UpdateBanner.tsx:146`) | **NOTICE**, kein manueller Check auf PC2 (geringes Manko) | **C korrekt** |
+| L2304 Purge / Werksreset (2) | `SettingsPage.tsx:3230` (`handlePurge` :3087), `:3277` (`handleReset` :3058) | `runSafePurge` mit `getDatabase()` + `createPreDestructiveBackup` / `runGuardedReset` (+ `isFactoryResetBlocked`) | Löscht bzw. sichert die DB DIESES Rechners | Nein (keine DB; Löschen ist ohnehin Primary-only, §5) | **NOTICE** | **C korrekt** (steht fachlich nahe an E, auf PC2 bleibt es beides Mal gesperrt) |
+| L2305 Sicherung/Wiederherstellung (8) | `pages/settings/BackupRestorePanel.tsx:216` (Backup), `:219` (Laden), `:245` (Restore wählen), `:268/269/270` (Ort ändern/zurücksetzen/öffnen), `:297/301` (Aufbewahrung), `:315` (Scan), `:329/342` (GC), `:359` (Backup bestätigen), `:376` (Restore bestätigen) | Tauri (Backup-Intent, koordinierter Relaunch, Medien-GC, OS-Ordnerdialog) | DB, Medien und Ordner DIESES Rechners | Nein (keine DB) | **NOTICE** (Panel nur in `SettingsPage.tsx:3144`) | **C korrekt** (tatsächlich eher 12+ Klickziele statt 8) |
+| L2306 Speicherwartung (3) | `pages/settings/StorageMaintenancePanel.tsx:114` (Dry-Run), `:116/:141` (Anwenden), `:183/:195` (Verdichten) | Tauri + Owner-Passwort | Medien- und DB-Datei DIESES Rechners | Nein | **NOTICE** (`SettingsPage.tsx:3146`) | **C korrekt** |
+| L2307 Datenort (3) | `pages/settings/DataLocationPanel.tsx:125` (wählen, OS-Dialog), `:128` (Preflight), `:149` (bestätigen) | Tauri Datenort-Umzug | Dateisystem DIESES Rechners | Nein (der Client hat keinen Datenort, `client-mode.ts:3–5`) | **NOTICE** (`SettingsPage.tsx:3148`) | **C korrekt** |
+
+##### Ergebnis
+
+- **Geprüft:** 15/15 C-Zeilen (43 Einstiege laut SSOT-Zählung).
+- **Kategorie C weiter richtig:** 15/15. Keine C-Zeile ist in Wahrheit ein normaler Geschäfts-Write, der über den Primary gehen müsste (A/B). Zwei Einschränkungen:
+  - L2265 ist inhaltlich eine Primary-Automatik, nicht maschinenlokal. Das Etikett ist ungenau, das Verhalten stimmt.
+  - L2301: Der KI-Schlüssel ist zu Recht lokal, aber sein PC2-Zustand (NOTICE) passt nicht zum Bedarf.
+- **(c) C-Weg, der auf PC2 in eine lokale Geschäfts-DB schreibt:** keiner. Logout geht im Client über den eigenen Zweig; der Update-Flush ist ein No-op ohne `db`; der Generator wird übersprungen; der Filialwechsel ist verborgen; Settings ist NOTICE.
+
+##### Befunde (ohne ID)
+
+1. **Mittel — KI auf PC2 in der Sackgasse (Post-Parity-UI-Defekt, fails late).** Den Schlüssel gibt es nur pro Rechner (`ai-service.ts:66–89`). Auf PC2 lässt er sich nicht setzen, weil `/settings` dort eine `PrimaryOnlyNotice` ist (`App.tsx:477–482`). Die KI-Knöpfe bleiben sichtbar (`NewProductModal.tsx:353`, `WatchList.tsx:973`, `ProductDetail.tsx:571/687`, `MessagePreviewModal.tsx:110`, `AIPage.tsx:254/337`), melden erst nach dem Klick „Set OpenAI API key in Settings > AI“ und verweisen damit auf die gesperrte Seite.
+2. **Niedrig–mittel — Generator für fällige Ausgaben ohne Takt am Primary.** Er läuft nur beim Primary-Start/Filialwechsel (`App.tsx:352–358`) und beim Öffnen der Ausgabenliste am Primary (`ExpenseList.tsx:136`). PC2-Nutzung und das Fern-Lesen (`store-read-commands.ts:246`) lösen ihn nie aus.
+3. **Niedrig — Trennen lässt `lataif_session` stehen.** `leaveClientMode` (`client-mode.ts:50–56`) räumt die Sitzung nicht, `clearClientSession` (`client-session.ts:131`) hat keinen Aufrufer. Der folgende Primary-Boot übernimmt eine liegengebliebene Sitzung ungeprüft (`auth.ts:47–58`, `App.tsx:184`). Das tritt nur auf, wenn ohne vorheriges Abmelden getrennt wird.
+4. **Kosmetisch.** `resetPrimarySource` hat beim Abmelden keinen Aufrufer. Sprache ist auf PC2 nicht umstellbar (kaum Wirkung). SSOT-Zeilenrefs verschoben: WatchList 1266→1276, ExpenseList 123→136.
+
+#### Kategorie D
+
+##### Final-Audit Kategorie D (untätig / unerreichbar) — Stand HEAD ac868a8
+
+Statisch, nur gelesen. Grundlage: `docs/central-ui-parity.md` §Write-Gap-SSOT (Zeilen 2134–2136, 2194–2196, 2317–2322) gegen den aktuellen Code.
+
+**Ergebnis:** 12 von 12 D-Zeilen geprüft. Alle 12 sind weiterhin richtig als D eingestuft. Keine ist falsch klassifiziert. Keine D-Zeile hat einen sichtbaren Knopf, der auf dem Primary oder auf PC2 funktionsfähig aussieht, aber nichts tut. Keine meldet einen Schein-Erfolg.
+
+##### Tabelle
+
+| SSOT-Zeile | UI-Einstieg (heute) | Warum untätig/unerreichbar (Beweis) | versteckter Pfad? | sichtbar & irreführend? | Klassifikation |
+|---|---|---|---|---|---|
+| L2134 Kopf speichern | `src/pages/invoices/InvoiceDetail.tsx:705` „Save“ → `handleSaveEdit` :266–275 → `updateInvoice` (lokal, ohne `w.ok`) | `editing` = `useState(false)` :82. Es gibt nur zwei Setter, beide mit `false`: :274 und :704 (Cancel). Kein `setEditing(true)`, auch nicht über `searchParams`; gelesen wird nur `print` :165. Der Knopf steht im Zweig `editing ? … : …` :702. Er wird auf dem Primary UND auf PC2 nie gerendert. | Nein. `handleSaveEdit` wird nur an :705 benutzt. Im Normalfall ist „Edit“ :709 → `/invoices/:id/edit` (InvoiceCreate, siehe L2133). | Nein, unsichtbar. Latentes Risiko: Wird der Zweig reaktiviert, schreibt er auf PC2 lokal ohne Fernweg. Das ist Code-Hygiene, kein UI-Defekt. | **D korrekt** (auf beiden Rechnern tot). Die Zeilennummer im SSOT ist veraltet (649 → 705). |
+| L2135 Status-Override | `InvoiceDetail.tsx:783–820` Status-Knöpfe, onClick :787 → `updateInvoice(id,{status})` :811 | Liegt in `{editing && (<Card>…)}` :758–833. `editing` wird nie `true` (Beweis siehe L2134). Das Banner :748 und die Inline-Felder für Fälligkeit/Notizen :1186–1216 hängen am selben toten Flag. | Nein. Kein zweiter Aufrufer von `updateInvoice({status})` in dieser Datei. | Nein, unsichtbar | **D korrekt**. Die Zeilennummer im SSOT ist veraltet (766 → 787/811). |
+| L2136 Zeilen bearbeiten (Detail) | `InvoiceDetail.tsx:829` „Edit Lines“ → `openLinesEdit` :277–293 → Modal :1417 → „Save Lines“ :1545 → `saveLines` :347 → `w.ok('invoices.update')` :371 | Der Knopf :829 liegt in der toten `editing`-Card. `openLinesEdit` wird nur an :829 benutzt. `setLinesModal(true)` gibt es nur in `openLinesEdit` :292. Das Modal ist deshalb nie offen. | Nein. „Manage Payments“ :830 in derselben Card ist ebenfalls tot. Das Zahlungs-Modal hat aber einen zweiten, aktiven Öffner :1030 (keine D-Zeile). | Nein, unsichtbar. `saveLines` wäre fernfähig (`invoices.update` mit `expectedRevision`). | **D korrekt**. Die Zeilennummer im SSOT ist veraltet (784→1499 → 829→1417/1545). |
+| L2194 Dubletten-Guard bestätigen | `src/components/sync/SyncDuplicateGuard.tsx:601` → `confirmMerge` :377–396 → `mergeIntoExisting` :381 + `updateProduct` :385 | Das Modal rendert nur bei nicht-leerer `queue`. `setQueue` wird nur im Handler :335 aufgerufen, der auf `lataif:sync-products-inserted` hört (:350). Einziger Sender ist `src/core/sync/sync-service.ts:508` in `pullChanges` :255. Deren einziger Aufrufer ist `syncNow` :540, das im Client-Modus bei :525 abbricht (`legacySyncRefused`, :41–48 `isClientMode()`). `startAutoSync` :573 und `connectToServer` :629 werden ebenfalls verweigert. | Auf PC2: nein (einziger Sender, grep geprüft). Auf dem Primary ist der Guard aktiv (gemountet in App.tsx:406). Das liegt außerhalb des PC2-Scopes. | Nein. Auf PC2 erscheint nie ein Modal. | **D korrekt** (PC2 UNERR) |
+| L2195 Dubletten-Guard übernehmen/ablehnen | `SyncDuplicateGuard.tsx:586`/`:598` „Ablehnen“ → `keepAsNew` :365 → `runAutoIdentify` :52–144 (`allocateSkuOnCreate` :108, `updateProduct` :144). `:589` „Daten übernehmen“ → `copyDetailsFromExisting` :404–456 (`allocateSkuOnCreate` :428, `updateProduct` :430/:444) | Dasselbe Modal wie L2194, dieselbe Beweiskette. Modal-`onClose` = `keepAsNew` :480. | Nein. `runAutoIdentify` ist nicht exportiert; die Aufrufer sind nur :347 und :372 (grep). „Bestehenden öffnen“ :585/:597 navigiert nur. | Nein | **D korrekt** |
+| L2196 Dubletten-Guard Hintergrund | `SyncDuplicateGuard.tsx:247–252`: roher `UPDATE products SET image_description…` + `saveDatabase` + `trackUpdate` | Liegt nur in Schritt 1 des Event-Handlers (:238–258). Das Ereignis wird auf PC2 nie gesendet (siehe L2194). Kein UI-Element. | Nein | Nein (keine Oberfläche) | **D korrekt** |
+| L2317 Alt-Bereich des Client-Fensters | `src/components/startup/ClientShell.tsx:131–313` (Bereichs-Chips :134–143, Refresh :148, Disconnect :153, Formulare :158–248, Edit-/Open-Knöpfe :273–312) | Bedingung: `App.tsx:365–375` (clientMode, clientReady, `!session`) UND ClientShell `signedIn=true` (:74 aus gespeichertem Token oder :128 nach SignIn). Die Session entsteht aus dem Token (`App.tsx:154`/`:370` → `installClientSession` → `sessionFromToken`, `src/core/auth/client-session.ts:65–91`). Sie fehlt nur, wenn im Token `sub`, `branch_id` oder `role` fehlen oder `localStorage.setItem` wirft (:89). Der Primary stellt alle drei Claims aus: `src-tauri/src/sync/routes.rs:303–336` (`ub.role` aus `user_branches`), `src-tauri/src/sync/auth.rs:21–27`. Logout im Client leert das Token (`src/core/auth/auth.ts:207–211`) und führt zu SignIn, nicht in den Alt-Bereich. Ein 401 leert das Token (`remote-read.ts:75`) und setzt `setSignedIn(false)` (ClientShell :110). | Ja, nur der im SSOT genannte Randfall (defektes Token ohne Rolle oder Speicherfehler). Dann ist der Bereich **funktionsfähig, nicht untätig**: Die Formulare senden über `CommandSaveController` an registrierte Ops (`command-registry.ts:87–100` `ALLOWED_MUTATIONS`). | Nein. Die Knöpfe tun, was sie zeigen (Fernauftrag an den Primary). Einziger Nachteil im Randfall: eine zweite, ältere Oberfläche statt der normalen App. Kein Defekt; Schwere höchstens niedrig. | **D korrekt** („unerreichbar im Normalbetrieb“; Rückbau prüfen bleibt richtig) |
+| L2318 client/*-Masken (11 Dateien) | `src/components/client/`: ClientInvoiceCreate, ClientCustomerForm, ClientProductForm, ClientInvoiceDetail, ClientPurchaseForm, ClientConsignmentForm, ClientOrderForm, ClientRepairForm, ClientTransferForm, ClientLifecyclePanels, client-action-panel (dazu 3 Hilfsdateien: client-invoice-request.ts, client-form-style.ts, client-form-atoms.tsx) | Einziger Importeur ist `ClientShell.tsx:17–31` (grep über `src` außerhalb von `components/client`: keine weiteren Treffer). Es gilt dieselbe Erreichbarkeit wie L2317. | Nur über den Randfall aus L2317. Schreibweg: `CommandSaveController` / `InvoiceSaveController` (ClientInvoiceCreate:26) → Fern-Ops. | Nein | **D korrekt**. Hinweis zum Rückbau: 11 Testdateien benutzen noch Alt-Bereich-Selektoren (`data-client-area`/`data-client-edit*`, 64 Treffer, u. a. `test/e2e/client-*.e2e.mjs`, `test/bridge/client-*-ui.test.ts`). Deren heutige Lauffähigkeit habe ich nicht geprüft. |
+| L2319 Erstlauf-Einrichtung | `src/pages/auth/OnboardingPage.tsx:209` „Start Using LATAIF“ → `handleFinish` :26 → `db.run` tenants/branches/users/settings :39–65 | Mount nur bei `App.tsx:397` `!clientMode && needsOnboarding`. `setNeedsOnboarding(true)` steht nur in `bootDatabase` :181. Im Client-Modus kehrt der Start-Effekt bei :149–161 vorher zurück; `isFirstRunPending`/`bootDatabase` :162–165 laufen nie. | Nein (einziger Importeur App.tsx:56) | Nein | **D korrekt** (auf dem Primary aktiv bei Neuinstallation) |
+| L2320 Anmelden (lokal) | `src/pages/auth/LoginPage.tsx:73` `<form onSubmit>` / :127 „Sign In“ → `handleLogin` :12 → `authStore.login` → `authService.login` (`auth.ts:82`, lokale `users`-Tabelle) | Mount nur bei `App.tsx:398` `if (!session)`. Im Client-Modus ist `!session` schon bei :366 (`null`) bzw. :367–375 (`ClientShell`) abgefangen. LoginPage wird auf PC2 also nie gerendert. | Nein (einziger Importeur App.tsx:55) | Nein | **D korrekt** |
+| L2321 Datenbank zurücksetzen (Login) | `LoginPage.tsx:145–154` „Reset Database“ → `handleReset` :26 → `runGuardedReset` :39 | Dieselbe Mount-Bedingung wie L2320 | Nein | Nein | **D korrekt** (auf dem Primary aktiv und durch Backup/Sync-Sperre geschützt) |
+| L2322 Erstlauf: neu / Ordner übernehmen / verbinden | `src/components/startup/FirstRunGate.tsx:125` `setUpNew` (:85), :236 `pickFolder` (:55, nur lesend), :268 `adopt` (:70), :197 Connect → `enterClientMode` | Mount nur bei `App.tsx:380` `!clientMode && firstRun`. Im Client-Modus `setFirstRun(false)` :150. | Nein (einziger Importeur App.tsx:77). Wer PC2 per Disconnect (ClientShell :153/:431 `leaveClientMode`) verlässt, ist danach kein Client mehr. Das ist gewollt. | Nein | **D korrekt** |
+
+##### Nebenbefunde (keine D-Umklassifizierung)
+
+1. **SSOT-Zeilennummern veraltet** für InvoiceDetail (L2134–2136): siehe die Tabelle oben. Die Nummern von SyncDuplicateGuard, ClientShell, OnboardingPage, LoginPage und FirstRunGate stimmen noch (±5).
+2. **Toter `editing`-Zweig in InvoiceDetail** (:82, :266–275, :702–706, :748–833, :1186–1216) ist auf beiden Rechnern tot. Er enthält lokale `updateInvoice`-Aufrufe ohne `useSharedWrites`. Empfehlung: nach der Parität entfernen (Hygiene, keine sichtbare Wirkung).
+3. **SSOT §„Keine toten Knöpfe“ Punkt 1** („Abmelden auf PC2 unmöglich“) ist im Code bereits behoben: `auth.ts:202–211` (R6B). Der Text der Liste ist veraltet. Außerhalb der D-Zeilen, nur zur Kenntnis.
+
+#### Kategorie E
+
+##### Audit Kategorie E — „absichtlich nicht fern“ (HEAD ac868a8, statisch, read-only)
+
+Grundlage: `docs/central-ui-parity.md` Write-Gap-SSOT (L2124 ff.), „Keine toten Knöpfe auf PC2“ (L2324 ff.), R6B (L2372 ff.), R6F (L3090 ff.).
+Weichen: `readsFromPrimary()` = `isClientMode()` (`core/data/primary-source.ts:21`); App-Routen nutzen `clientMode = isClientMode()` (`App.tsx:364`), also dieselbe Wahrheit.
+`primaryOnlyDeleteProps()` → auf PC2 `disabled: true` + `title` („Deleting is only available on the main computer.“) + `data-primary-only`; `Button.tsx:56` reicht alle drei durch (`{...props}`), native `<button>` ohnehin. `blockDeleteOnClient()` → auf PC2 `alert` + `true`, der Handler kehrt vor jedem Store-Aufruf um.
+Store-Löschfunktionen beginnen alle mit `getDatabase()`/`query()` (wirft auf PC2) — sie werden auf PC2 aber nie erreicht, weil der Riegel davor steht.
+Unit-Nachweis: `node test/r6b/safety-existing-commands.test.ts` → **95 passed, 0 failed** (inkl. `CENTRAL_UI_R6B_UNSUPPORTED_DELETES_FAIL_CLOSED`, `…_IMPORT_CLIENT_FAIL_CLOSED_PROVED`).
+
+Zählung: 28 Löschknöpfe + 13 Werkzeug-/Einstellungsgruppen = **41** (bestätigt).
+
+| SSOT-Zeile | UI-Einstieg (aktueller Code) | fachlicher Grund | PC2 UI | Handler geschützt? | lokale PC2-DB? | Klassifikation |
+|---|---|---|---|---|---|---|
+| L2141 | Rechnung löschen — `InvoiceDetail.tsx:742` → `handleDelete` :413 | hartes Löschen mit Storno der Auto-Ausgaben/Buchungen; Löschen nach §5 nie fern | gesperrt + erklärt (Tooltip) | ja, `blockDeleteOnClient` :413 vor `deleteInvoice` | nein | E, sauber |
+| L2144 | Gutschrift löschen — `CreditNoteDetail.tsx:115` → :96 | Löschen der Gutschrift (Storno-Spur); §5 | gesperrt + erklärt | ja, :96 vor `confirm()` und Store | nein | E, sauber |
+| L2150 | Angebot löschen — `OfferDetail.tsx:282` → :118 | Löschen inkl. Positionen; §5 | gesperrt + erklärt | ja, :118 | nein | E, sauber |
+| L2158 | Löschen (Angebotsliste) — `OfferList.tsx:247` | wie oben | gesperrt + erklärt | ja, inline :247 vor `deleteOffer` | nein | E, sauber |
+| L2159 | Kunde löschen — `CustomerDetail.tsx:590` → :246 | Stammdaten-Hartlöschung mit Referenzprüfung; §5 | gesperrt + erklärt | ja, :246 | nein | E, sauber |
+| L2170 | Mehrfach löschen — `WatchList.tsx:545` („Select“) → :1242 → `performDelete` :238 | Massen-Hartlöschung von Artikeln; §5 | „Select“ und Bestätigen gesperrt + erklärt; der „Delete (n)“-Knopf im Auswahlmodus (:519) trägt keine Sperre, ist aber nur über das gesperrte „Select“ erreichbar | ja, :238 vor `deleteProducts` | nein | E, sauber |
+| L2174 | Artikel löschen — `ProductDetail.tsx:1568` → :523 | Hartlöschung mit Link-Prüfung; §5 | gesperrt + erklärt | ja, :523 | nein | E, sauber |
+| L2188 | Lieferant löschen — `SupplierDetail.tsx:737` → :244 | Stammdaten-Hartlöschung; §5 | gesperrt + erklärt | ja, :244 | nein | E, sauber |
+| L2193 | Excel-Import — Route `App.tsx:486` (Notiz); Öffner `WatchList.tsx:548–552`; `ImportPage.tsx:213` | Vor-Sicherung der eigenen DB + Massenanlage je Zeile | Route zeigt `PrimaryOnlyNotice`; „Import Excel“ gesperrt + erklärt | ja, `primaryOnlyLocked()` :213 vor Backup und `createProduct` (der eigene Knopf :467 hat keine Client-Sperre, ist auf PC2 aber nicht renderbar) | nein | E, sauber (SSOT-Ortsspalte „nicht gesperrt“ ist veraltet) |
+| L2203 | Auftrag löschen — `OrderDetail.tsx:1174` → `handleDelete` :499 | Hartlöschung mit Umkehr von A/P und Gold; bezahlter Auftrag wird seit R6F storniert statt gelöscht | gesperrt + erklärt | ja, :499 **vor** der Bezahlt-Weiche; einziger UI-Aufruf `deleteOrder` :510; Storno-Pfad ruft seit R6F kein `deleteOrder` mehr (:490–494) | nein | E, sauber (R6F: bleibt E, bestätigt) |
+| L2213 | Gold-Verbindlichkeit ✕ — `OrderDetail.tsx:1582` → :1575 | Löschen einer (verwaisten) Gold-Verbindlichkeit; §5 | gesperrt + erklärt | ja, :1575 vor `confirm()` | nein | E, sauber |
+| L2223 | Reparatur löschen — `RepairDetail.tsx:1176` → :514 | Hartlöschung; §5 | gesperrt + erklärt | ja, :514 | nein | E, sauber |
+| L2227 | Produktion löschen (Liste) — `ProductionPage.tsx:398` (onDelete :188) → Modal :361 | Löschen mit Bestandsspiegelung; §5 | gesperrt + erklärt | ja, :361 | nein | E, sauber |
+| L2228 | Produktion löschen (Detail) — `ProductionDetail.tsx:71` → :191 | wie oben | gesperrt + erklärt | ja, :191 | nein | E, sauber |
+| L2231 | Kommission löschen — `ConsignmentDetail.tsx:546` → :377 | Hartlöschung (nur aktive); §5 | gesperrt + erklärt | ja, :377 | nein | E, sauber |
+| L2235 | Agent löschen — `AgentList.tsx:540` | Stammdaten, Referenzschutz; §5 | gesperrt + erklärt | ja, :541 vor `confirm()` | nein | E, sauber |
+| L2237 | Transfer löschen (Tabelle) — `TransferTable.tsx:615` | Löschen mit Buchungsfolgen; §5 | gesperrt + erklärt | ja, :616 vor `confirm()` | nein | E, sauber |
+| L2239 | Transfer löschen (Detail) — `TransferDetail.tsx:311` → :591 | wie oben | gesperrt + erklärt | ja, :591 | nein | E, sauber |
+| L2243 | Metall löschen — `MetalList.tsx:396` | Storno der Metallzahlungen + Löschen; §5 | gesperrt + erklärt | ja, :397 vor `confirm()` | nein | E, sauber |
+| L2248 | Schrotthandel löschen — `ScrapTradeDetail.tsx:109` → :152 | Löschen eines stornierten Handels; §5 | gesperrt + erklärt | ja, :152 | nein | E, sauber |
+| L2260 | Vorlage löschen — `ExpenseList.tsx:468` → Modal :856 | Löschen der wiederkehrenden Vorlage; §5 | gesperrt + erklärt | ja, :856 | nein | E, sauber |
+| L2262 | Ausgabe löschen (Liste) — `ExpenseList.tsx:546` → Modal :952 | Storno + Guthaben zurück + Löschen; §5 | gesperrt + erklärt | ja, :952 | nein | E, sauber |
+| L2263 | Ausgabe löschen (Maske) — `ExpenseList.tsx:920` | wie oben | gesperrt + erklärt | ja, :921 vor `confirm()` | nein | E, sauber |
+| L2269 | Partnerbewegung ✕ — `PartnersPage.tsx:184` | Löschen + Storno (nicht atomar); §5 | gesperrt + erklärt | ja, inline :184 | nein | E, sauber |
+| L2271 | Partner löschen — `PartnersPage.tsx:292` | Stammdaten, Referenzschutz; §5 | gesperrt + erklärt | ja, :293 | nein | E, sauber |
+| L2275 | Schuld löschen — `DebtsPage.tsx:779` → :852 | Zahlungsstorno + Löschen; §5 | gesperrt + erklärt | ja, :852 | nein | E, sauber |
+| L2277 | „Storniere alle Orphans“ — `ReconciliationPage.tsx:251` | schreibt Stornos ins Hauptbuch (Buchhaltungsreparatur) | versteckt (`!readsFromPrimary()`); die Auskunft bleibt sichtbar | nur versteckt, kein eigener Riegel im Handler (unerreichbar) | nein | E, sauber |
+| L2278 | Nachbuchung (20 Knöpfe) — Route `/ledger-backfill` `App.tsx:471`; Seitenleiste `Sidebar.tsx:78` | schreibt Nachbuchungen ins Hauptbuch | Link sichtbar → `PrimaryOnlyNotice`; die Knöpfe werden nie gerendert | nur die Routenweiche (Seite selbst ohne Client-Prüfung) | nein | E, sauber |
+| L2279 | Hauptbuch-Prüfstand (≈43) — `/ledger-debug` `App.tsx:489` | Testbuchungen/Rohzeilen am Hauptbuch | `PrimaryOnlyNotice` | nur die Routenweiche | nein | E, sauber |
+| L2287 | Mitarbeiter löschen — `EmployeeList.tsx:220` → :96 | Hartlöschung, Gehaltsreferenzen; §5 | gesperrt + erklärt | ja, :96 | nein | E, sauber |
+| L2292 | Aufgabe löschen — `TaskList.tsx:666` → onDelete :518 | Löschen; §5 (Anlegen/Ändern sind fern) | gesperrt + erklärt | ja, :518 | nein | E, sauber |
+| L2294 | Dokument löschen — `DocumentList.tsx:299` / :503 → :159 | Löschen des Belegs; §5 | beide Öffner gesperrt + erklärt | ja, :159 | nein | E, sauber |
+| L2308 | Firma speichern — `SettingsPage` (Route `App.tsx:477`) | Hauskonfiguration (`setSetting`) | `/settings` → `PrimaryOnlyNotice` | nur die Routenweiche | nein | E, sauber |
+| L2309 | Steuer/Finanzen speichern — dito | Hauskonfiguration | Notiz | nur die Route | nein | E, sauber |
+| L2310 | Kategorien (3) — dito | Hauskonfiguration (Kategorien) | Notiz | nur die Route | nein | E, sauber |
+| L2311 | Filialen (3) — dito | Hauskonfiguration (`db.run branches`) | Notiz | nur die Route | nein | E, sauber |
+| L2312 | Benutzer (3) — dito | Rechte (`users`/`user_branches`) | Notiz | nur die Route | nein | E, sauber |
+| L2313 | Nummernkreise — dito | Hauskonfiguration (Nummernkreise) | Notiz | nur die Route | nein | E, sauber |
+| L2314 | Ländervorwahlen (2) — dito; außerhalb nur `PhoneInput` (liest `load`) | Hauskonfiguration | Notiz; `country-codes-store.ts:41` greift auf PC2 nicht zu | Route; `add/update/remove/saveAll` nur aus SettingsPage | nein | E, sauber |
+| L2315 | Dubletten zusammenführen/löschen (4) — dito; Öffner „Find Duplicates“ `WatchList.tsx:542` | destruktives Zusammenführen/Löschen von Artikeln | Öffner sichtbar → `/settings` → Notiz (erklärt, nicht tot) | nur die Route | nein | E, sauber |
+| L2316 | Reparatur-Prüfstand (2) — `/admin/repair-flow-test` `App.tsx:423` | Testszenarien + Test-Purge direkt in der DB | `PrimaryOnlyNotice` | nur die Route | nein | E, sauber |
+
+##### Ergebnis
+
+- Geprüft: **41/41**, sauber: **41/41**.
+- Spät scheiternde sichtbare PC2-Knöpfe (erst Modal/Confirm, dann Fehler aus `getDatabase`): **keine.** Jeder Lösch-Öffner ist auf PC2 gesperrt. Bei Knöpfen mit `confirm()` (Gutschrift, Metall, Agent, Transfer-Tabelle, Ausgabe-Maske, Gold ✕) steht der Riegel VOR dem Dialog.
+- Fehlklassifikation: **keine.** „Auftrag löschen“ ist nach R6F weiter E und geschützt (:499 vor der Bezahlt-Weiche).
+- Lokaler DB-Griff auf PC2: **keiner.** Alle Store-Aufrufe liegen hinter Riegel oder Route. Ländervorwahlen lesen auf PC2 nicht.
+- Hinweise, kein Defekt:
+  1. Die SSOT-Ortsspalte des Imports (L2193) sagt noch „`/import`, nicht gesperrt“. Die Punkte 2–3 in „Nicht sauber“ (L2334–2338) beschreiben den R6A-Stand und sind durch R6B überholt. Doku-Drift, niedrig.
+  2. Die SSOT-Zeilennummern weichen vom Code ab (z. B. `InvoiceDetail:697→1671` gegenüber real :742/:413; `OrderDetail:1116→1880` gegenüber :1174/:499). Niedrig.
+  3. R6B-Doku (L2465) nennt 97/0 für `r6b/safety-existing-commands`, der aktuelle Lauf zeigt 95/0 (grün). Niedrig.
+  4. Die Werkzeugseiten (Settings, Backfill, LedgerDebug, RepairFlowTest) und der Orphan-Storno haben keinen eigenen Handler-Riegel. Sie hängen allein an Route bzw. Ausblendung und als letzte Linie am `getDatabase`-Wurf. Heute nicht erreichbar, daher nur Härtungsoption, niedrig.
