@@ -63,8 +63,10 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
     grund: 'R4B — der Anlageweg. R6E — die Zahlung beim Anlegen geht mit (`payment`), Rechnung und Zahlung in EINER Hausfolge (core/invoices/invoice-create-house).',
   },
   {
-    op: 'invoices.update', handlung: 'Rechnungszeilen aendern', ort: 'pages/invoices/InvoiceDetail.tsx',
-    lokal: 'editInvoice', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    // POST-PARITY R7B PP-7 — der tote „Edit Lines"-Weg in InvoiceDetail ist entfernt; geaendert wird
+    // (und wurde) im Rechnungsformular: `editInvoice` des Stores, dort als `editInvoiceFn` gebunden.
+    op: 'invoices.update', handlung: 'Rechnungszeilen aendern', ort: 'pages/invoices/InvoiceCreate.tsx',
+    lokal: 'editInvoiceFn', paritaet: 'exakt', verdrahtet: true, luecke: null,
     grund: 'Ein Aufruf mit Zeilen und Pflichtgrund; Umkehr, Neubuchung, Status und Audit stecken '
       + 'in derselben Transaktion des Hauses.',
   },

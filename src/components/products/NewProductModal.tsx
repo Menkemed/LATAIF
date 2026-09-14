@@ -19,6 +19,7 @@ import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/
 import { useProductStore } from '@/stores/productStore';
 import type { Product, Category } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
+import { useAiIdentifyGate } from '@/core/ai/ai-availability';
 import { validateProductFields, blockingIssues, stripStaleAttributes, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
 
 export interface NewProductModalProps {
@@ -50,6 +51,8 @@ export function NewProductModal({
   const [form, setForm] = useState<Partial<Product>>({});
   const [selectedCat, setSelectedCat] = useState<Category | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
+  // R7B PP-3 — auf PC2 erkennt der Primary; der Knopf weiß VOR dem Klick, ob das geht.
+  const aiGate = useAiIdentifyGate((form.images || []).length > 0);
   const [skuError, setSkuError] = useState(false);
   const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[]>([]);
   const lastCheckedFp = useRef('');
@@ -341,16 +344,20 @@ export function NewProductModal({
                 <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
                   Auto-fills brand, name, category fields and description — everything stays editable.
                 </div>
+                {aiGate.reason && <div data-ai-reason style={{ fontSize: 11, color: '#AA6E6E', marginTop: 4 }}>{aiGate.reason}</div>}
               </div>
-              <button disabled={aiBusy}
+              <button disabled={aiBusy || aiGate.disabled}
+                title={aiGate.reason}
+                data-ai-identify
+                data-ai-locked={aiGate.disabled ? 'true' : undefined}
                 className="cursor-pointer transition-colors"
                 style={{
-                  background: aiBusy ? '#6B7280' : '#0F0F10', color: '#FFFFFF',
+                  background: aiBusy || aiGate.disabled ? '#6B7280' : '#0F0F10', color: '#FFFFFF',
                   border: 'none', borderRadius: 8, fontSize: 12, padding: '8px 14px',
                 }}
                 onClick={async () => {
                   const ai = await import('@/core/ai/ai-service');
-                  if (!ai.isAiConfigured()) { alert('Set OpenAI API key in Settings > AI'); return; }
+                  if (!aiGate.client && !ai.isAiConfigured()) { alert('Set OpenAI API key in Settings > AI'); return; }
                   const hasImage = (form.images || []).length > 0;
                   const hasHints = !!form.brand || !!form.name || !!form.sku;
                   if (!hasImage && !hasHints) {

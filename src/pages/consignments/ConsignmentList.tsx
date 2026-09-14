@@ -37,6 +37,7 @@ import { payOutConsignmentOnPrimary, recordConsignmentSaleOnPrimary } from '@/co
 import { WriteError } from '@/components/shared/WriteError';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { createConsignmentOnPrimary, consignmentCreateRequest, type ConsignmentCreateInput } from '@/core/consignment/consignment-create';
+import { useAiIdentifyGate } from '@/core/ai/ai-availability';
 
 // SQLite gibt fehlende REAL-Spalten als JS-`null` zurück, nicht `undefined`.
 // fmt darf nicht crashen — sonst killt eine NULL-Spalte den ganzen Render.
@@ -112,6 +113,8 @@ export function ConsignmentList() {
     condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {},
   });
   const [aiBusy, setAiBusy] = useState(false);
+  // R7B PP-3 — auf PC2 erkennt der Primary; der Knopf weiß VOR dem Klick, ob das geht.
+  const aiGate = useAiIdentifyGate((productForm.images || []).length > 0);
   const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[]>([]);
   // MEDIA-04A-3B2C3-R1: AI stale/supersession guard.
   const aiReqRef = useRef(0);
@@ -995,16 +998,20 @@ export function ConsignmentList() {
                     <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
                       Auto-fills brand, name, category fields, description — everything editable.
                     </div>
+                    {aiGate.reason && <div data-ai-reason style={{ fontSize: 11, color: '#AA6E6E', marginTop: 4 }}>{aiGate.reason}</div>}
                   </div>
-                  <button disabled={aiBusy}
+                  <button disabled={aiBusy || aiGate.disabled}
+                    title={aiGate.reason}
+                    data-ai-identify
+                    data-ai-locked={aiGate.disabled ? 'true' : undefined}
                     className="cursor-pointer transition-colors"
                     style={{
-                      background: aiBusy ? '#6B7280' : '#0F0F10', color: '#FFFFFF',
+                      background: aiBusy || aiGate.disabled ? '#6B7280' : '#0F0F10', color: '#FFFFFF',
                       border: 'none', borderRadius: 8, fontSize: 12, padding: '8px 14px',
                     }}
                     onClick={async () => {
                       const ai = await import('@/core/ai/ai-service');
-                      if (!ai.isAiConfigured()) { alert('Set OpenAI API key in Settings > AI'); return; }
+                      if (!aiGate.client && !ai.isAiConfigured()) { alert('Set OpenAI API key in Settings > AI'); return; }
                       const hasImage = (productForm.images || []).length > 0;
                       const hasHints = !!productForm.brand || !!productForm.name || !!productForm.sku;
                       if (!hasImage && !hasHints) {

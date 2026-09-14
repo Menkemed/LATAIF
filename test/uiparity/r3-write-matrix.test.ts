@@ -165,21 +165,24 @@ const MATRIX: Record<string, Zeile> = {
   ok(erfunden.length === 0, `A und keine erfundene steht in der Matrix (${erfunden.join(', ') || 'keine'})`);
 }
 
-// ── B — was die ALTE Client-Oberfläche erreichte ─────────────────────────
+// ── B — die ALTE Client-Oberfläche ist entfernt (POST-PARITY R7B PP-7) ───
 //
-// Die Belege stehen in `src/components/client/*`: dort ruft jede Maske ihre Buchung beim Namen.
+// Bis R7B standen hier die Belege aus `src/components/client/*`: dort rief jede alte Maske ihre
+// Buchung beim Namen (≥38 der vierzig). Erreichbar war sie zuletzt nur noch mit einem Ausweis ohne
+// Sitzung — diesen Zustand gibt es seit PP-5 nicht mehr, und mit PP-7 ist sie entfernt. Die
+// gemeinsame Oberflaeche ist damit die EINZIGE Oberflaeche des Clients.
 {
-  const dir = resolvePath(repo, 'src/components/client');
-  let alt = '';
-  for (const f of readdirSync(dir)) if (/\.tsx?$/.test(f)) alt += readFileSync(resolvePath(dir, f), 'utf8');
-  const erreichbarAlt = MUTATIONEN.filter((m) => alt.includes(`'${m}'`) || alt.includes(`"${m}"`));
-  ok(erreichbarAlt.length >= 38,
-    `B die alte Client-Oberflaeche erreichte ${erreichbarAlt.length} der vierzig Buchungen`);
+  ok(!existsSync(resolvePath(repo, 'src/components/client')),
+    'B R7B PP-7 die alte Client-Oberflaeche (src/components/client) gibt es nicht mehr');
+  const shell = src('src/components/startup/ClientShell.tsx');
+  const inHuelle = MUTATIONEN.filter((m) => shell.includes(`'${m}'`) || shell.includes(`"${m}"`));
+  ok(inHuelle.length === 0,
+    `B …und die Anmeldehuelle ruft keine einzige Buchung beim Namen (${inHuelle.join(', ') || 'keine'})`);
 
-  // …und sie ist seit der Paritaet nur noch VOR der Anmeldung zu sehen.
+  // …sie erscheint nur VOR der Anmeldung; danach laeuft die gemeinsame Oberflaeche.
   const app = src('src/App.tsx');
   ok(/if \(!session\) \{[\s\S]{0,80}return <ClientShell/.test(app),
-    'B seit der Paritaet erscheint sie nur noch ohne Sitzung — danach laeuft die normale Anwendung');
+    'B ohne Sitzung erscheint nur die Anmeldung — danach laeuft die gemeinsame Oberflaeche, die einzige des Clients');
 }
 
 // ── C — was die GEMEINSAME Oberfläche heute erreicht ─────────────────────

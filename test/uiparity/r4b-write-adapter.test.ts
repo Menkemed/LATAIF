@@ -338,14 +338,15 @@ function gehe(root: string): string[] {
   ok(/if \(!session\) \{[\s\S]{0,200}<ClientShell/.test(app),
     '9 die Client-Huelle fuehrt nur bis zur Anmeldung');
   // Nach der Anmeldung laeuft dieselbe Anwendung: keine Route zeigt ein Client-Formular.
-  const clientForms = readdirSync(resolvePath(repo, 'src/components/client'))
-    .filter((f) => /^Client[A-Z].*\.tsx$/.test(f)).map((f) => f.replace('.tsx', ''));
+  // POST-PARITY R7B PP-7 — die Client-Fassungen (`src/components/client/`) sind entfernt; die
+  // gemeinsame Oberflaeche ist die einzige des Clients.
+  ok(!existsSync(resolvePath(repo, 'src/components/client')),
+    '9 R7B PP-7 die alten Client-Formulare (src/components/client) gibt es nicht mehr');
   let benutzt: string[] = [];
   for (const f of [...gehe('pages'), 'App.tsx']) {
-    const s = codeOf(src('src/' + f));
-    benutzt = benutzt.concat(clientForms.filter((c) => new RegExp('<' + c + '\\b').test(s)));
+    if (/components\/client\//.test(codeOf(src('src/' + f)))) benutzt.push(f);
   }
-  ok(benutzt.length === 0, `9 keine Seite zeichnet eine Client-Fassung eines Formulars (${benutzt.join(', ') || 'keine'})`);
+  ok(benutzt.length === 0, `9 keine Seite bindet eine Client-Fassung eines Formulars ein (${benutzt.join(', ') || 'keine'})`);
   for (const [datei] of MIGRIERT) {
     ok(!/isClientMode\(\)/.test(codeOf(src(datei))),
       `9 ${datei.split('/').pop()} fragt nicht selbst nach der Betriebsart — der Unterschied liegt hinter der Weiche`);

@@ -3398,6 +3398,8 @@ Keiner ist eine A/B-Lücke: entweder kein fehlender Fernweg für eine Geschäfts
 Business Correctness" am Ende dieses Dokuments); **offen** bleiben PP-3, PP-4, PP-5, PP-6, PP-7, PP-12. Registry seit R7A 175.
 **Neu nach R7A (14.09.2026):** PP-13 und PP-14 bestätigt und **geschlossen** (§ „PP-13 + PP-14 — Repair-Accounting-Abschluss" am
 Ende). Offen bleiben PP-3, PP-4, PP-5, PP-6, PP-7, PP-12.
+**Neu nach R7B (14.09.2026):** PP-3, PP-4, PP-5, PP-6, PP-7 und PP-12 **geschlossen** (§ „Post-Parity R7B — Plattform /
+Laufzeit / Härtung" am Ende). Der Post-Parity-Backlog ist leer; Registry unverändert 175.
 
 Veraltete Stellen der SSOT (nur Hinweis, Inhalt gilt): Zeilenverweise der Tabelle sind teils verschoben (z. B. InvoiceDetail,
 WatchList, ExpenseList); der R6A-Abschnitt „Keine toten Knöpfe" beschreibt den Stand VOR R6B — heute: Abmelden geht auf PC2
@@ -3776,4 +3778,44 @@ r7a, invoice-lifecycle, credit-note, offer, analytics); Typcheck grün; Lint ohn
 ```
 Post-Parity-Backlog: geschlossen PP-1, PP-2, PP-8, PP-9, PP-10, PP-11, PP-13, PP-14 · offen PP-3, PP-4, PP-5, PP-6, PP-7, PP-12
 Registry = 175 · Version 0.8.54 · kein Release
+```
+
+## Post-Parity R7B — Plattform / Laufzeit / Härtung (14.09.2026)
+
+Umfang: die sechs offenen Backlog-Punkte PP-3, PP-4, PP-5, PP-6, PP-7, PP-12. Keine neue Fernbuchung, Registry unverändert
+**175** (TS == Rust). PP-1/2/8/9/10/11/13/14 bleiben geschlossen und unberührt.
+
+| ID | Befund (bestätigt) | Behebung | Beweis |
+|---|---|---|---|
+| PP-3 | Alle KI-Aktionen riefen OpenAI direkt aus dem Fenster, mit dem Schlüssel DIESES Rechners (`lataif_openai_key` / `<Datenort>/openai.key`); auf PC2 gab es keinen (Settings gesperrt) → Fehler erst nach dem Klick. Der Primary hat mit `/api/ai/identify` bereits eine Erkennung mit SEINEM Schlüssel (MOBILE-I1C). | Erkennen (NewProductModal, WatchList, ProductDetail, ConsignmentList) läuft auf PC2 ÜBER den Primary: `identify-adapter` → `primary-ai.ts` → `/api/ai/identify` (Kategorie, Foto-Bytes, Hinweise; ein gespeichertes Hauptbild als geprüfte Bytes über `/api/media`); zurück kommt die freigegebene Teilmenge (nie Preis/Menge/Kennung). Neu `GET /api/ai/status` (ja/nein aus demselben Schlüssel, nie zurückgegeben) → der Knopf ist VOR dem Klick gesperrt, mit Grund (nicht eingerichtet / nicht erreichbar / kein Foto). `getApiKey()` gibt auf PC2 nie einen Schlüssel zurück, auch keinen alten eigenen. Bewusst NICHT fern: Preisvorschlag, Nachrichtentext, Angebotstext, Assistent `/ai` — sie bräuchten einen neuen Fernweg durch das Fenster des Primary, der Sekunden externer Wartezeit in seiner Schreibreihenfolge hielte; auf PC2 vor dem Klick gesperrt mit Grund (`AI_TEXT_ON_PRIMARY`), `/ai` = `PrimaryOnlyNotice`; der Text bleibt von Hand schreibbar. | `test/r7b` §1; Rust `ai_route_tests` (`key_present`, Status-Route), `w4`-Routenliste; Zwei-Rechner-Lauf PP-3 |
+| PP-4 | Fällige Daueraufträge nur bei Start/Filialwechsel und beim Öffnen der Ausgabenliste; der Startlauf lief an der Schreibreihenfolge vorbei (nicht durabel). | `core/payables/recurring-scheduler.ts`: am Primary jede Minute die Frage nach dem ÖRTLICHEN Tag; ein neuer Tag → der bestehende Generator `runDueGeneratorOnPrimary(now)` (Schreibreihenfolge, danach durabel). Genau einmal: Monatszeiger + Monatsprüfung in derselben Klammer; ein nicht fertiger Lauf (fremde Klammer, niemand angemeldet, Wurf) schließt den Tag nicht; Takte überholen sich nicht. Der Startlauf geht jetzt ebenfalls über `runDueGeneratorOnPrimary`. Keine neue Regel, kein externer Dienst, nie auf PC2. | `test/r7b` §2 zeitgesteuert: drei Monate nachgeholt, derselbe Tag nichts, Neustart (Datei neu geöffnet) nichts doppelt, 30.09. 23:59 / 01.10. 00:00 Ortszeit, stornierter Monat kommt nicht wieder, Pause/Resume ohne Nachholen, offene Klammer → nächster Takt, Hauptbuch ausgeglichen |
+| PP-5 | „Trennen" ließ `lataif_session` stehen; ein 401/403 warf nur den Ausweis weg; der Primary-Start übernahm eine gespeicherte Sitzung ungeprüft (fremdes JWT, fremde Filiale, fremde Rolle). Der Server führt keine Sitzungen (zustandsloser Ausweis, C4 `reauthorize` je Anfrage) — dort ist nichts zu entfernen und keine andere Sitzung zu beschädigen. | `leaveClientMode` und `setClientToken(null)` nehmen die Sitzung mit; ein Ausweis ohne brauchbare Sitzung wird verworfen (Start und Anmeldung); Abmelden auf PC2 vergisst laufende Fernladungen (`resetPrimarySource`) und baut das Fenster neu; `authService.verifyStoredSession()` am Primary-Start: gültig nur, wenn DIESE Datenbank das Token ausgestellt hat (`sessions.token`), der Benutzer aktiv ist und die Filiale hat — die Rolle frisch aus `user_branches`; sonst verworfen → Anmeldung (der Grund steht im Protokoll, nie das Token). | `test/r7b` §3; Zwei-Rechner-Lauf PP-5 |
+| PP-6 | Die sechs Maschinenflächen hatten keinen eigenen Handler-Riegel (geschützt über Route, fehlenden Fernweg, DB-losen PC2). | Gemeinsame Grenze: `postEntries`, `reverseSource`, `reverseTransaction` verweigern auf PC2 (`CLIENT_HAS_NO_BOOKS`, zählt für `watchLedgerPosts`) — damit jede `post*`-Funktion, jede Nachbuchung, der Ledger-Prüfstand und der Orphan-Storno. Dazu prüfen SettingsPage, BackfillPage, LedgerDebugPage, RepairFlowTestPage und RepairReconcilePage selbst, wo sie laufen (auf PC2 wird kein Handler eingehängt); Riegel in `withBranch`/`runAll` (Nachbuchung), `runAll`/`handlePurge` (Prüfstand), im Orphan-Storno und im Schreibhelfer `setSetting` (`blockPrimaryOnlyOnClient` / `assertPrimaryOnly`). Keine neue Fernfähigkeit. | `test/r7b` §4; Zwei-Rechner-Lauf: jede Fläche sagt auf PC2 „Only available on the main computer" |
+| PP-7 | Toter Alt-Code. | Entfernt: der InvoiceDetail-`editing`-Zweig samt „Edit Lines"-Kette (nie betreten; Bearbeiten = InvoiceCreate); der alte Client-Bereich `src/components/client/` (14 Dateien) — nur erreichbar mit einem Ausweis ohne Sitzung, und diesen Zustand gibt es seit PP-5 nicht mehr; `ClientShell` = nur noch Anmeldung. Dadurch verwaist und ebenfalls entfernt: `client-commercial-request`, `client-invoice-save`, `client-lifecycle-request`, `client-masterdata-draft`, `client-service-request`, `invoice-form-source`, `invoice-request` (kein Import, keine Registrierung, kein IPC/Route/Migration). `resetPrimarySource` war nicht tot, sondern unverdrahtet — jetzt am Abmelden auf PC2. Die Tests prüfen die lebenden Parser/Handler mit wörtlichen Rümpfen. Historische E2E-Skripte der alten Oberfläche (`client-*.e2e.mjs`, alte `c5`/`c6`-Selektoren) laufen im Sweep nicht mit und bleiben unverändert. | `test/r7b` §5; Typcheck grün; Registry 175 |
+| PP-12 | Jeder Fernbefehl wartete fest 20 s (`DEFAULT_TIMEOUT`), auch das größte Dokument (25 116 672 B) und die Texterkennung; die Oberfläche sagte „No answer from the primary", obwohl er noch arbeiten konnte; eine nicht geladene Vorschau blieb stumm leer. | `bridge::timeout_for(op, payload)`: alles Normale bleibt 20 s; `documents.upload` 20 s + Länge × 10 Durchgänge / 10 MB/s (größte Datei 53,5 s), `documents.content.get` 20 s + 32 MiB × 4 / 10 MB/s (33,4 s), `documents.set_ocr` 20 s + 10 s Start + 12 MP / 0,2 MP/s (90 s). Abgeleitet aus dem Vertrag des Hauses (Zeile ≤ 32 MiB) und der neuen Bildpunktgrenze der Erkennung (`OCR_MAX_PIXELS` = 12 MP; größere Bilder werden vorher maßstabsgleich verkleinert). Frist ≠ Erfolg (504 `unknown`), Wiederholung mit derselben Kennung, genau eine Wirkung. Oberfläche: „läuft seit N s" (Upload, Erkennung), Frist-Text „may still be working … press again", Vorschau-Fehler mit „Try again". | Rust `bridge_tests` (Fristen, Klammer, TS == Rust); `test/r7b` §6; Zwei-Rechner-Lauf PP-12 |
+
+**Zwei-Rechner-Lauf** `test/e2e/r7b-platform-hardening.e2e.mjs` **44/0** (frische E2E-Programme; nur die echten Laufzeitpunkte, kein
+historischer Sweep): Primary ohne Schlüssel → „AI Identify" auf PC2 vor dem Klick gesperrt mit Grund; mit Schlüssel erkennt PC2
+über den Primary (Mock-KI des e2e-Builds bekam genau EINE Anfrage mit dem Schlüssel des Primary, PC2 fragte nie OpenAI, auf PC2 kein
+Schlüssel — auch ein alter eigener wird nicht benutzt; kein Preis/Menge/SKU übernommen); Nachricht, Preis und `/ai` auf PC2 gesperrt;
+sieben Maschinenflächen sagen es auf PC2; das größte Dokument (25 116 672 B) über PC2 bytegenau in **20,0 s** (Frist 53,5 s — die
+alte feste Frist von 20 s wäre genau gerissen), zurück in die Vorschau in **5,0 s** (Frist 33,4 s), Erkennung an einem 24-MP-Bild in
+**15,0 s** (Frist 90 s), „läuft seit N s" sichtbar, keine Frist gerissen; Primary-Start mit der Sitzung eines fremden Rechners →
+Anmeldung verlangt, A meldet sich neu an, der Server lief weiter; PC2 abmelden/anmelden, unbrauchbarer Ausweis, Trennen
+(Erstlauf-Weiche, kein Kontrollzustand, keine Datei) und neu verbinden. PC2 ohne lokale Datenbank, alte `lataif.db` unberührt,
+Produktions-App, `E:\LATAIF\Data` und Ports 3001/3443 unberührt (`POST_PARITY_R7B_TWO_APP_PROVED`).
+Prüfstandsbefund: WebView2 bündelt `localStorage`-Commits (~5 s); ein hartes Beenden kurz nach der Anmeldung verliert sie — der
+Aufbau wartet deshalb vor dem Beenden (Harness, kein Produktfehler).
+
+**Einheitstests:** `test/r7b/r7b-platform-hardening.test.ts` **111/0**; direkte Nachbarn (48 Dateien, u. a. client-read-mode,
+r3/r4b/r4c-Matrix, c4, c6, r6b–r6f-Gates, payables, office, gold, pp13, r7a, remote-invoice-create, service-parity) grün; Rust
+`bridge_tests`/`ai_route_tests`/`w4` **64/0**; Typcheck grün; Lint ohne neue Fehler (InvoiceDetail −1).
+
+```
+PP offen vorher: 6
+R7B Scope:       6
+geschlossen:     6  (PP-3, PP-4, PP-5, PP-6, PP-7, PP-12)
+verbleibend:     0
+Registry 175 → 175
+Version 0.8.54 · kein Release
 ```

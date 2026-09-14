@@ -476,6 +476,60 @@ pub const REMOTE_OPS: &[&str] = &[
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.
 pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 
+// ── POST-PARITY R7B PP-12 — die Frist der Dokumentwege ──────────────────────────────────────────
+//
+// Normale Aufträge behalten `DEFAULT_TIMEOUT`. Genau drei Wege tragen eine ganze Datei durch den
+// Primary und bekommen einen Zuschlag, abgeleitet aus ihrem GRÖSSTEN zulässigen Fall:
+//
+//   documents.upload       der Rumpf trägt die Datei (Data-URL) — Zuschlag nach ihrer Länge;
+//   documents.content.get  die Antwort trägt sie; die Anfrage kennt ihre Länge nicht — die größte;
+//   documents.set_ocr      die Erkennung liest sie; ihr Aufwand hängt an den Bildpunkten, die der
+//                          Renderer vor der Erkennung auf `OCR_MAX_PIXELS` begrenzt (`ocr-service.ts`).
+//
+// Die Größe stammt aus dem Vertrag des Hauses: eine Dokumentzeile muss in eine Abgleich-Änderung
+// passen (`sync-business-schema.json` `max_payload_bytes` = 32 MiB); daraus folgt die größte Datei
+// (25 116 672 B, `DOCUMENT_MAX_FILE_BYTES`). Die Geschwindigkeiten sind UNTERGRENZEN; der
+// Zwei-Rechner-Lauf misst die echten Zeiten des größten Falls und prüft den Abstand zur Frist.
+// Eine abgelaufene Frist bleibt `unknown` (504), nie ein Erfolg; die Wiederholung mit derselben
+// Kennung bleibt genau eine Wirkung (durabler Nachweis im Renderer).
+
+/// Die größte Dokumentzeile (= größte Data-URL), die das Haus annimmt: 32 MiB.
+pub const DOCUMENT_MAX_CONTENT_BYTES: u64 = 32 * 1024 * 1024;
+/// So oft bewegt ein Upload seine Bytes am Primary: JSON lesen, Fingerabdruck, Übergabe ans
+/// Fenster, Inhaltsprüfung, Zeile, Abgleich-Zeile, zwei Größenprüfungen, durables Abbild (2 Zeilen).
+pub const DOCUMENT_UPLOAD_PASSES: u64 = 10;
+/// So oft bewegt eine Inhaltsauskunft sie: Zeile lesen, Übergabe zurück, JSON, HTTP.
+pub const DOCUMENT_CONTENT_PASSES: u64 = 4;
+/// Untergrenze für das Bewegen von Dokumentbytes am Primary: 10 MB/s.
+pub const DOCUMENT_FLOOR_BYTES_PER_SEC: u64 = 10_000_000;
+/// Höchstens so viele Bildpunkte bekommt die Texterkennung (`ocr-service.ts` `OCR_MAX_PIXELS`).
+pub const OCR_MAX_PIXELS: u64 = 12_000_000;
+/// Untergrenze der Erkennung: 0,2 Megapixel je Sekunde.
+pub const OCR_FLOOR_PIXELS_PER_SEC: u64 = 200_000;
+/// Start der Erkennung (Worker, Kern, eng+ara laden) — einmal je Aufruf.
+pub const OCR_WORKER_START: Duration = Duration::from_secs(10);
+
+fn bytes_at_floor(bytes: u64) -> Duration {
+    Duration::from_millis(bytes.saturating_mul(1000) / DOCUMENT_FLOOR_BYTES_PER_SEC)
+}
+
+/// Die Frist eines Auftrags vom zweiten Rechner (s. o.). Alles außer den drei Dokumentwegen: 20 s.
+pub fn timeout_for(op: &str, payload: &serde_json::Value) -> Duration {
+    match op {
+        OP_DOCUMENTS_UPLOAD => {
+            let len = payload.get("content").and_then(|v| v.as_str()).map(|s| s.len() as u64).unwrap_or(0);
+            DEFAULT_TIMEOUT + bytes_at_floor(len.min(DOCUMENT_MAX_CONTENT_BYTES) * DOCUMENT_UPLOAD_PASSES)
+        }
+        OP_DOCUMENTS_CONTENT_GET => {
+            DEFAULT_TIMEOUT + bytes_at_floor(DOCUMENT_MAX_CONTENT_BYTES * DOCUMENT_CONTENT_PASSES)
+        }
+        OP_DOCUMENTS_SET_OCR => {
+            DEFAULT_TIMEOUT + OCR_WORKER_START + Duration::from_secs(OCR_MAX_PIXELS / OCR_FLOOR_PIXELS_PER_SEC)
+        }
+        _ => DEFAULT_TIMEOUT,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BridgeError {
     /// Der Renderer hat noch keine Generation angemeldet — die Geschäftsmaschine läuft nicht.

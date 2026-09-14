@@ -297,3 +297,32 @@ fn the_request_contract_has_no_endpoint_field() {
     })).unwrap();
     assert!(!json.contains("evil.example"), "no client-supplied endpoint survives parsing");
 }
+
+// -- POST-PARITY R7B PP-3 -- /ai/status answers from the same key file, and only yes/no --------------
+#[test]
+fn key_present_follows_the_key_file_and_nothing_else() {
+    use base64::Engine;
+    let dir = std::env::temp_dir().join(format!("com.lataif.aistatus-{}", uuid::Uuid::new_v4().as_simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    assert!(!key_present(&dir), "no file: not ready");
+    std::fs::write(dir.join("openai.key"), "   ").unwrap();
+    assert!(!key_present(&dir), "an empty file: not ready");
+    let plain = b"sk-status-check";
+    let obf: Vec<u8> = plain.iter().enumerate().map(|(i, b)| b ^ OBF_SEED[i % OBF_SEED.len()]).collect();
+    std::fs::write(dir.join("openai.key"), base64::engine::general_purpose::STANDARD.encode(obf)).unwrap();
+    assert!(key_present(&dir), "a readable key: ready");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn the_status_route_returns_one_boolean_and_never_the_key() {
+    let src = include_str!("routes.rs");
+    let i = src.find("async fn ai_status_route").expect("the status handler exists");
+    let end = i + src[i..].find("\n}\n").expect("handler end");
+    let body = &src[i..end];
+    assert!(body.contains("key_present(state.data_root.path())"), "asks the same data root as identify");
+    assert!(body.contains(r#""identify": ready"#), "answers one boolean");
+    assert!(!body.contains("read_api_key"), "the handler never holds the key itself");
+    assert!(body.contains("claims.role.trim().is_empty()"), "the same role check as identify");
+    assert!(src.contains(r#".route("/ai/status", get(ai_status_route))"#), "a GET inside the protected group");
+}

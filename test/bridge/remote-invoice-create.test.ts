@@ -73,7 +73,8 @@ const {
 const { executeCommand } = await import('../../src/core/bridge/command-registry.ts');
 const { businessWriteScheduler } = await import('../../src/core/bridge/command-scheduler.ts');
 const { toInvoiceLine } = await import('../../src/core/invoices/line-derivation.ts');
-const { InvoiceSaveAttempt, InvoiceSaveController } = await import('../../src/core/bridge/client-invoice-save.ts');
+// R7B PP-7 — die Rechnungsbindung (`client-invoice-save`) ist entfernt; geprueft wird der gemeinsame Waechter.
+const { CommandSaveAttempt, CommandSaveController } = await import('../../src/core/bridge/client-command-save.ts');
 const { enterClientMode, leaveClientMode, setClientToken } = await import('../../src/core/bridge/client-mode.ts');
 await import('../../src/core/bridge/return-commands.ts');
 await import('../../src/core/bridge/lifecycle-commands.ts');
@@ -686,7 +687,7 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
     ({ status, ok: status >= 200 && status < 300, json: async () => body }) as unknown as Response;
 
   // (a) Zeitgrenze: der Ausgang ist offen — dieselbe Kennung, niemals eine neue.
-  const ctl = new InvoiceSaveController();
+  const ctl = new CommandSaveController('invoices.create');
   const attempt = ctl.beginAttempt();
   const firstId = attempt.commandId;
   const timeout = await attempt.send({ customerId: 'c' }, async () => reply(504, {}));
@@ -703,7 +704,7 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
   ok(ctl.beginAttempt().commandId !== firstId, 'CLIENT der naechste bewusste Save bekommt eine neue Kennung');
 
   // (b) Nachweislich nicht ausgefuehrt → dieselbe Kennung darf sofort erneut.
-  const ctl2 = new InvoiceSaveController();
+  const ctl2 = new CommandSaveController('invoices.create');
   const a2 = ctl2.beginAttempt();
   const notRun = await a2.send({ customerId: 'c' }, async () =>
     reply(503, { ok: false, error: 'BRIDGE_NOT_READY', outcome: 'not_executed' }));
@@ -712,7 +713,7 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
     'CLIENT …mit derselben Kennung');
 
   // (c) Ein fachliches Nein beendet den Versuch — ein neuer Wille bekommt eine neue Kennung.
-  const ctl3 = new InvoiceSaveController();
+  const ctl3 = new CommandSaveController('invoices.create');
   const a3 = ctl3.beginAttempt();
   const no = await a3.send({ customerId: 'c' }, async () =>
     reply(200, { ok: false, error: 'STOCK_UNAVAILABLE', message: 'nichts mehr da' }));
@@ -721,21 +722,20 @@ const payloadFor = (customerId: string, lotId: string | null, unitPrice = 150) =
     'CLIENT und ein bewusst neuer Versuch bekommt eine neue Kennung');
 
   // (d) Netz weg: ebenfalls offen, nie „ist nicht passiert".
-  const a4 = new InvoiceSaveAttempt();
+  const a4 = new CommandSaveAttempt('invoices.create');
   const gone = await a4.send({ customerId: 'c' }, async () => { throw new Error('ECONNRESET'); });
   ok(gone.kind === 'unknown', `CLIENT ein Abbruch laesst den Ausgang offen (${JSON.stringify(gone)})`);
 
   // Und im Code steht nirgends ein automatischer zweiter Versuch mit neuer Kennung.
   // Seit C3C liegt der Vertrag im generischen Modul — er gilt fuer JEDEN schreibenden Auftrag,
-  // nicht nur fuer Rechnungen. Die Regel muss dort stehen, und das Rechnungsmodul muss sie
-  // BENUTZEN statt sie ein zweites Mal zu schreiben.
+  // nicht nur fuer Rechnungen. Die Regel muss dort stehen.
   const genericSrc = src('src/core/bridge/client-command-save.ts');
   ok(/if \(this\.attempt && !this\.attempt\.isSettled\(\)\) return this\.attempt;/.test(genericSrc),
     'CLIENT die Regel steht im Code, nicht nur im Test');
-  const clientSrc = src('src/core/bridge/client-invoice-save.ts');
-  ok(/new CommandSaveController<InvoiceSaveValue>\(OP_INVOICES_CREATE\)/.test(clientSrc)
-    && !/newCommandId\(\)/.test(clientSrc),
-    'CLIENT …und das Rechnungsformular erzeugt keine Kennung an ihm vorbei');
+  // R7B PP-7 — die Rechnungsbindung des alten Formulars (`client-invoice-save`) ist entfernt; die
+  // Pruefungen oben laufen direkt am gemeinsamen Waechter.
+  ok(!existsSync(resolvePath(repo, 'src/core/bridge/client-invoice-save.ts')),
+    'CLIENT R7B PP-7 die alte Rechnungsbindung (client-invoice-save) ist entfernt — keine zweite Kennungsquelle');
 }
 
 // ── 11) Der Primary schreibt weiter lokal ─────────────────────────────────

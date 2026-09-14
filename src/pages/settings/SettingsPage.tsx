@@ -31,6 +31,8 @@ import { usePermission } from '@/hooks/usePermission';
 import { COUNTRIES, type CountryCode } from '@/core/contacts/country-codes';
 import { useCountryCodesStore } from '@/core/contacts/country-codes-store';
 import type { Category, CategoryAttribute, AttributeType, UserRole } from '@/core/models/types';
+import { PrimaryOnlyNotice } from '@/components/shared/PrimaryOnlyNotice';
+import { primaryOnlyLocked, assertPrimaryOnly } from '@/core/data/primary-only';
 
 // ── Constants ──
 
@@ -88,6 +90,8 @@ function getSetting(branchId: string, key: string): string {
 }
 
 function setSetting(branchId: string, key: string, value: string, category: string): void {
+  // R7B PP-6 — Einstellungen gehören zur Maschine mit der Datenbank; auf PC2 schreibt hier nichts.
+  assertPrimaryOnly('Changing settings');
   // Permission-Guard: nur ADMIN darf Settings ändern. State.role wird aus authStore live gelesen,
   // damit auch direkter Aufruf aus DevTools/Console abgewiesen wird.
   const { role } = useAuthStore.getState();
@@ -3287,7 +3291,18 @@ function DangerZoneTab() {
 // MAIN SETTINGS PAGE
 // ═══════════════════════════════════════════════════════════
 
+/**
+ * POST-PARITY R7B PP-6 — die Seite prüft selbst, wo sie läuft, nicht nur die Route davor: auf
+ * einem Rechner ohne eigene Datenbank wird kein einziger ihrer Handler auch nur eingehängt.
+ */
 export function SettingsPage() {
+  if (primaryOnlyLocked()) {
+    return <PrimaryOnlyNotice title="Settings" reason="Settings change this machine: data location, backups, updates, users and maintenance. They only work where the database lives, so open them on the main computer." />;
+  }
+  return <SettingsPageBody />;
+}
+
+function SettingsPageBody() {
   const perm = usePermission();
   // Initial-Tab via ?tab=<key>. Erlaubt Deeplinks von anderen Seiten (z.B.
   // Collection "Find Duplicates" → ?tab=duplicates).

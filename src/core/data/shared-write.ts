@@ -246,6 +246,12 @@ export function fehlertext(r: WriteOutcome<unknown>): string {
     case 'business_error': return r.message || r.code;
     case 'not_executed': return `Not saved (${r.code}). You can try again.`;
     case 'unknown':
+      // POST-PARITY R7B PP-12 — eine abgelaufene Frist heißt NICHT „keine Antwort": der Primary
+      // kann noch arbeiten. Offen ist es trotzdem — und die Wiederholung bleibt dieselbe.
+      if (r.code === 'BRIDGE_TIMEOUT') {
+        return 'The main computer did not finish within the time limit (BRIDGE_TIMEOUT) — it may still be working, '
+          + 'and it is not clear whether this was saved. Press again: the same attempt is repeated, and it can never happen twice.';
+      }
       return `No answer from the primary (${r.code}) — it is not clear whether this was saved. `
         + 'Press save again: the same attempt is repeated, and it can never create it twice.';
   }

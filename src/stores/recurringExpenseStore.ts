@@ -45,7 +45,8 @@ interface RecurringExpenseStore {
   deleteTemplate: (id: string) => void;
   // Erzeugt fehlende Monatsinstanzen aller aktiven Templates seit
   // start_date bzw. last_generated_period bis heute. Idempotent.
-  runDueGenerator: () => { created: number; skipped: number; errors: string[] };
+  // R7B PP-4 — `now` (ISO) nur fuer den Taktgeber und seine Tests; sonst die echte Uhr.
+  runDueGenerator: (now?: string) => { created: number; skipped: number; errors: string[] };
 }
 
 // R6D — die Fassung reist mit: „Edit"/„Pause"/„Resume" nennen sie, damit ein veralteter Stand
@@ -134,15 +135,17 @@ export const useRecurringExpenseStore = create<RecurringExpenseStore>((set, get)
     get().loadTemplates();
   },
 
-  runDueGenerator: () => {
+  runDueGenerator: (now?: string) => {
     const out = { created: 0, skipped: 0, errors: [] as string[] };
     // PC2 fuehrt keine Buecher — der Primary erzeugt seine Monate selbst.
     if (readsFromPrimary()) return out;
     // Ist gerade eine fremde Klammer offen (ein laufender Auftrag), wird NICHT hineingeschrieben;
-    // der naechste Lauf (App-Start, Ausgabenliste) holt es nach.
+    // der naechste Lauf (Taktgeber, App-Start, Ausgabenliste) holt es nach.
     if (inLedgerTransaction()) { out.errors.push('busy: another action is open'); return out; }
     let ctx: HouseCtx;
-    try { ctx = localHouseCtx(); } catch { return out; }
+    // R7B PP-4 — ohne Sitzung ist der Lauf NICHT erledigt: der Taktgeber versucht es wieder.
+    try { ctx = localHouseCtx(); } catch { out.errors.push('no-session: nobody is signed in'); return out; }
+    if (now) ctx = { ...ctx, now };
     let ids: string[];
     try {
       // Direkt aus DB lesen — Generator laeuft auch ohne dass loadTemplates() schon gelaufen ist.

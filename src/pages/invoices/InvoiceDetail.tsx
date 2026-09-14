@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
-import { ArrowLeft, Edit3, Save, XCircle, CreditCard, Printer, Download, Table, Plus, Trash2, ExternalLink, ChevronDown } from 'lucide-react';
+import { ArrowLeft, Edit3, XCircle, CreditCard, Printer, Download, Table, ExternalLink, ChevronDown } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 
 // Butterfly icon as inline SVG — renders reliably in all webviews (no emoji font dependency).
@@ -69,7 +69,7 @@ export function InvoiceDetail() {
   const navigate = useNavigate();
   const goBack = useGoBack('/invoices');
   const [searchParams, setSearchParams] = useSearchParams();
-  const { invoices, loadInvoices, updateInvoice, editInvoice, recordPayment, applyCreditToInvoice, getInvoicePayments, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
+  const { invoices, loadInvoices, recordPayment, applyCreditToInvoice, getInvoicePayments, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
   // CENTRAL-UI-PARITY R4C — dieselben Masken, zwei Anschluesse hinter jeder Geldhandlung.
   // Ein Waechter je Buchung; eine Anzeige fuer den Ausgang.
   const w = useSharedWrites();
@@ -79,20 +79,7 @@ export function InvoiceDetail() {
   const { repairs, loadRepairs, updateStatus: updateRepairStatus } = useRepairStore();
   const perm = usePermission();
 
-  const [editing, setEditing] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
-  const [editNotes, setEditNotes] = useState('');
-  const [editDueAt, setEditDueAt] = useState('');
-  const [editIssuedAt, setEditIssuedAt] = useState('');
-  const [editCustomerId, setEditCustomerId] = useState('');
-
-  // Lines-Edit Modal
-  const [linesModal, setLinesModal] = useState(false);
-  const [lineDraft, setLineDraft] = useState<Array<{ id?: string; productId: string; description: string; quantity: number; unitPrice: number; purchasePrice: number; vatRate: number; vatAmount: number; lineTotal: number; taxScheme: string }>>([]);
-  const [productPickerIdx, setProductPickerIdx] = useState<number | null>(null);
-  const [productPickerQuery, setProductPickerQuery] = useState('');
-  const [lineEditReason, setLineEditReason] = useState('');  // Pflicht-Grund fuer den Line-Edit (Audit)
-
   // Payments-Manage Modal
   const [paymentsModal, setPaymentsModal] = useState(false);
   // 2026-05-17: Default offen, damit User sofort sieht wann/wieviel bezahlt wurde.
@@ -181,15 +168,6 @@ export function InvoiceDetail() {
       .filter((src): src is string => !!src);
   }, [invoice, products]);
 
-  useEffect(() => {
-    if (invoice) {
-      setEditNotes(invoice.notes || '');
-      setEditDueAt(invoice.dueAt || '');
-      setEditIssuedAt((invoice.issuedAt || invoice.createdAt || '').split('T')[0]);
-      setEditCustomerId(invoice.customerId);
-    }
-  }, [invoice]);
-
   // Plan §Repair §Pickup-from-Invoice (User-Spec): wenn diese Invoice an Repairs
   // gekoppelt ist (auch eine Bulk-Invoice mit mehreren), voll bezahlt + mind. einer
   // noch nicht abgeholt → "Mark as Picked Up"-Button setzt ALLE verbundenen Repairs
@@ -261,132 +239,6 @@ export function InvoiceDetail() {
       if (!geglueckt) break;
     }
     loadRepairs();
-  }
-
-  function handleSaveEdit() {
-    if (!id) return;
-    updateInvoice(id, {
-      notes: editNotes,
-      dueAt: editDueAt,
-      issuedAt: editIssuedAt,
-      customerId: editCustomerId,
-    });
-    setEditing(false);
-  }
-
-  function openLinesEdit() {
-    if (!invoice) return;
-    setLineDraft(invoice.lines.map(l => ({
-      id: l.id,
-      productId: l.productId,
-      description: l.description || '',
-      quantity: Math.max(1, l.quantity || 1),
-      unitPrice: l.unitPrice,
-      purchasePrice: l.purchasePriceSnapshot,
-      vatRate: l.vatRate,
-      vatAmount: l.vatAmount,
-      lineTotal: l.lineTotal,
-      taxScheme: l.taxScheme,
-    })));
-    setLineEditReason('');
-    setLinesModal(true);
-  }
-
-  function recalcLine(idx: number, patch: Partial<typeof lineDraft[number]>) {
-    setLineDraft(prev => prev.map((l, i) => {
-      if (i !== idx) return l;
-      const merged = { ...l, ...patch };
-      const rate = Number(merged.vatRate) || 0;
-      const net = Number(merged.unitPrice) || 0;
-      const qty = Math.max(1, Number(merged.quantity) || 1);
-      // L-17 — vatAmount PRO LINE (createDirect-Konvention), nicht pro Stück: sonst
-      // doppelt rewriteInvoiceLines die VAT bei qty>1. lineNet = net × qty.
-      const lineNet = net * qty;
-      if (merged.taxScheme === 'VAT_10') {
-        merged.vatAmount = Math.round(lineNet * (rate / 100) * 1000) / 1000;
-        merged.lineTotal = lineNet + merged.vatAmount;
-      } else if (merged.taxScheme === 'MARGIN') {
-        const marginLine = Math.max(0, net - (Number(merged.purchasePrice) || 0)) * qty;
-        merged.vatAmount = Math.round(marginLine * (rate / (100 + rate)) * 1000) / 1000;
-        merged.lineTotal = lineNet;
-      } else {
-        merged.vatAmount = 0;
-        merged.lineTotal = lineNet;
-      }
-      return merged;
-    }));
-  }
-
-  function addLine() {
-    setLineDraft(prev => [...prev, {
-      productId: products[0]?.id || '',
-      description: '',
-      quantity: 1,
-      unitPrice: 0,
-      purchasePrice: 0,
-      vatRate: 10,
-      vatAmount: 0,
-      lineTotal: 0,
-      taxScheme: 'MARGIN',
-    }]);
-  }
-
-  function pickProductForLine(idx: number, productId: string) {
-    const p = products.find(pp => pp.id === productId);
-    if (!p) return;
-    recalcLine(idx, {
-      productId,
-      unitPrice: p.plannedSalePrice ?? p.lastSalePrice ?? p.purchasePrice ?? 0,
-      purchasePrice: p.purchasePrice ?? 0,
-      taxScheme: p.taxScheme || 'MARGIN',
-    });
-    setProductPickerIdx(null);
-    setProductPickerQuery('');
-  }
-
-  async function saveLines() {
-    if (!id || !invoice || lineDraft.length === 0) return;
-    // Pflicht-Aenderungsgrund (Audit). editInvoice wirft sonst — hier vorab pruefen.
-    const reason = lineEditReason.trim();
-    if (!reason) { alert('Please enter a reason for this edit.'); return; }
-    const payload = lineDraft.map(l => ({
-      productId: l.productId,
-      quantity: Math.max(1, Number(l.quantity) || 1),
-      unitPrice: Number(l.unitPrice) || 0,
-      purchasePrice: Number(l.purchasePrice) || 0,
-      taxScheme: l.taxScheme,
-      vatRate: Number(l.vatRate) || 0,
-      vatAmount: Number(l.vatAmount) || 0,
-      lineTotal: Number(l.lineTotal) || 0,
-      description: l.description || undefined,
-    }));
-    // Ein atomarer Vorgang im Store (reverse+repost+status+audit). Reduktion unter
-    // den bereits gezahlten Betrag wird dort blockiert (klare Fehlermeldung).
-    // R4C — fassungsbasiert: der Auftrag nennt die Fassung, die DIESER Bildschirm gesehen hat.
-    // Hat der Primary inzwischen etwas geaendert, weist er ihn ab, statt still zu ueberschreiben.
-    const fassung = invoice.revision;
-    if (w.remote && !fassung) {
-      w.clear(); alert(fehlertext(nichtAmClient('editing this invoice (no revision loaded)'))); return;
-    }
-    const geglueckt = await w.ok('invoices.update', {
-      local: () => { editInvoice(id, { lines: payload, reason }); return {}; },
-      remote: () => ({
-        id,
-        expectedRevision: fassung,
-        reason,
-        customerId: invoice.customerId,
-        lines: payload.map((l) => ({
-          productId: l.productId,
-          quantity: l.quantity,
-          unitPrice: l.unitPrice,
-          scheme: l.taxScheme,
-        })),
-      }),
-    });
-    if (!geglueckt) return;
-    loadInvoices();
-    setLinesModal(false);
-    setLineEditReason('');
   }
 
   async function handleCancelInvoice() {
@@ -699,12 +551,6 @@ export function InvoiceDetail() {
             <ArrowLeft size={16} /> Back
           </button>
           <div className="flex gap-2">
-            {editing ? (
-              <>
-                <Button variant="ghost" onClick={() => { setEditing(false); setEditNotes(invoice.notes || ''); setEditDueAt(invoice.dueAt || ''); }}>Cancel</Button>
-                <Button variant="primary" onClick={handleSaveEdit}><Save size={14} /> Save</Button>
-              </>
-            ) : (
               <>
                 {perm.canEditInvoices && !isCancelled && <Button variant="secondary" onClick={() => navigate(`/invoices/${invoice.id}/edit`)}><Edit3 size={14} /> Edit</Button>}
                 {perm.canEditInvoices && !isCancelled && (
@@ -741,96 +587,8 @@ export function InvoiceDetail() {
                 {canCancel && perm.canEditInvoices && <Button variant="danger" onClick={() => setConfirmCancel(true)}><XCircle size={14} /> Cancel</Button>}
                 {perm.canDeleteInvoices && !isPaid && <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}>Delete</Button>}
               </>
-            )}
           </div>
         </div>
-
-        {editing && !isDraft && (
-          <div style={{ marginBottom: 24, padding: '12px 16px', background: 'rgba(170,149,110,0.08)', border: '1px solid rgba(170,149,110,0.3)', borderRadius: 8 }}>
-            <span style={{ fontSize: 13, color: '#AA956E', fontWeight: 500 }}>Admin edit mode</span>
-            <p style={{ fontSize: 12, color: '#4B5563', marginTop: 4, lineHeight: 1.5 }}>
-              You are editing an {invoice.status === 'FINAL' ? 'already-paid' : invoice.status} invoice. All changes are tracked in the history log (user, time, old/new).
-            </p>
-          </div>
-        )}
-
-        {/* Edit Header — Customer + Issued Date + Due Date + Status-Override */}
-        {editing && (
-          <Card>
-            <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>HEADER FIELDS</span>
-            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 16, marginTop: 12 }}>
-              <div>
-                <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>CUSTOMER</span>
-                <select value={editCustomerId}
-                  onChange={e => setEditCustomerId(e.target.value)}
-                  style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF', color: '#0F0F10' }}>
-                  {customers.map(c => (
-                    <option key={c.id} value={c.id}>
-                      {c.firstName} {c.lastName}{c.company ? ` — ${c.company}` : ''}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <Input required label="ISSUED DATE" type="date" value={editIssuedAt}
-                onChange={e => setEditIssuedAt(e.target.value)} />
-              <Input required label="DUE DATE" type="date" value={editDueAt}
-                onChange={e => setEditDueAt(e.target.value)} />
-            </div>
-            {/* Manueller Status-Override (Plan §Sales §13) */}
-            <div style={{ marginTop: 16 }}>
-              <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>STATUS OVERRIDE</span>
-              <div className="flex gap-2 items-center" style={{ flexWrap: 'wrap' }}>
-                {(['DRAFT', 'PARTIAL', 'FINAL', 'CANCELLED'] as const).map(s => {
-                  const active = invoice.status === s;
-                  return (
-                    <button key={s}
-                      onClick={() => {
-                        if (!id) return;
-                        // FINAL ist nur erlaubt wenn paid >= gross — sonst Revenue-Verfälschung.
-                        if (s === 'FINAL' && invoice.paidAmount < invoice.grossAmount - 0.005) {
-                          alert(`Status FINAL not possible: outstanding ${(invoice.grossAmount - invoice.paidAmount).toFixed(3)} BHD. Record the payment first.`);
-                          return;
-                        }
-                        // PARTIAL braucht zumindest paid > 0.
-                        if (s === 'PARTIAL' && invoice.paidAmount <= 0) {
-                          alert('Status PARTIAL not possible: no payment recorded. Choose DRAFT or record a payment.');
-                          return;
-                        }
-                        // CANCELLED auf bezahlter Invoice → paid_amount > 0 + CANCELLED ist Cashflow-Inkonsistenz.
-                        // Erst Refund/Return durchführen damit paid wieder 0 ist.
-                        if (s === 'CANCELLED' && invoice.paidAmount > 0.005) {
-                          alert(`Status CANCELLED not possible: ${invoice.paidAmount.toFixed(3)} BHD already paid. Do Return + Refund first.`);
-                          return;
-                        }
-                        // DRAFT auf bezahlter Invoice → versteckt die Payment-Sichtbarkeit.
-                        if (s === 'DRAFT' && invoice.paidAmount > 0.005) {
-                          alert(`Status DRAFT not possible: ${invoice.paidAmount.toFixed(3)} BHD already paid. Cancel the payment first.`);
-                          return;
-                        }
-                        if (window.confirm(`Status manuell auf ${s} setzen? Wird normalerweise aus paid_amount berechnet.`)) {
-                          updateInvoice(id, { status: s });
-                        }
-                      }}
-                      className="cursor-pointer rounded"
-                      style={{
-                        padding: '6px 14px', fontSize: 12,
-                        border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
-                        color: active ? '#0F0F10' : '#6B7280',
-                        background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                      }}>{s}</button>
-                  );
-                })}
-                <span style={{ fontSize: 11, color: '#AA956E', marginLeft: 8 }}>
-                  ⚠ for corrections only. Normally the system reconciles from payments.
-                </span>
-              </div>
-            </div>
-            <div className="flex gap-2" style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid #E5E9EE', flexWrap: 'wrap' }}>
-              <Button variant="secondary" onClick={openLinesEdit}>Edit Lines ({invoice.lines.length})</Button>
-              <Button variant="secondary" onClick={() => setPaymentsModal(true)}>Manage Payments</Button>
-            </div>
-          </Card>
-        )}
 
         {/* Hero — 2-Spalten (Bilder | Daten) wenn Produkt-Bilder vorhanden,
             sonst 1-Spalten volle Breite. Bild-Grid: 1=full, 2=1x2, 3-4=2x2, ≥5=2x3 mit "+N more". */}
@@ -1183,13 +941,7 @@ export function InvoiceDetail() {
                 {renderField('Invoice Number', formatInvoiceDisplay(invoice))}
                 {renderField('Status', <StatusDot status={invoice.status} label={derivedInvoiceLabel(invoice)} />)}
                 {renderField('Issued', fmtDate(invoice.issuedAt))}
-                {editing ? (
-                  <div style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
-                    <Input required label="DUE DATE" type="date" value={editDueAt} onChange={e => setEditDueAt(e.target.value)} />
-                  </div>
-                ) : (
-                  renderField('Due', fmtDate(invoice.dueAt))
-                )}
+                {renderField('Due', fmtDate(invoice.dueAt))}
                 {renderField('Created', fmtDate(invoice.createdAt))}
                 {invoice.staffId && renderField('Staff',
                   (() => {
@@ -1204,18 +956,7 @@ export function InvoiceDetail() {
                 )}
                 {invoice.offerId && renderField('Linked Offer', invoice.offerId.slice(0, 8) + '...')}
 
-                {editing ? (
-                  <div style={{ marginTop: 12 }}>
-                    <span className="text-overline" style={{ marginBottom: 6 }}>NOTES</span>
-                    <textarea
-                      value={editNotes}
-                      onChange={e => setEditNotes(e.target.value)}
-                      className="w-full outline-none transition-colors duration-300"
-                      rows={3}
-                      style={{ background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical', marginTop: 6 }}
-                    />
-                  </div>
-                ) : invoice.notes ? (
+                {invoice.notes ? (
                   <div style={{ marginTop: 16 }}>
                     <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Notes</span>
                     <p style={{ fontSize: 13, color: '#4B5563', lineHeight: 1.6 }}>{invoice.notes}</p>
@@ -1412,141 +1153,6 @@ export function InvoiceDetail() {
           );
         })()}
       </div>
-
-      {/* Edit Lines Modal */}
-      <Modal open={linesModal} onClose={() => setLinesModal(false)} title={`Edit Lines — ${formatInvoiceDisplayShort(invoice)}`} width={1000}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-          <p style={{ fontSize: 12, color: '#6B7280' }}>
-            Click the product name → pick a different product. Quantity only visible for products with stock &gt; 1. Tax + Total are recomputed live per scheme. All changes are logged.
-          </p>
-          <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'visible', position: 'relative' }}>
-            <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.8fr) minmax(0,1.2fr) 50px minmax(0,0.9fr) minmax(0,0.9fr) 55px minmax(0,0.9fr) minmax(0,0.9fr) 44px', gap: 8, padding: '8px 10px', background: '#F2F7FA', borderBottom: '1px solid #E5E9EE', fontSize: 10, color: '#6B7280', textTransform: 'uppercase' }}>
-              <span>Product</span>
-              <span>Description</span>
-              <span>Qty</span>
-              <span>Unit Net</span>
-              <span>Purchase</span>
-              <span>VAT %</span>
-              <span>Scheme</span>
-              <span style={{ textAlign: 'right' }}>Line Total</span>
-              <span></span>
-            </div>
-            {lineDraft.map((l, idx) => {
-              const product = products.find(p => p.id === l.productId);
-              const stock = product?.quantity || 1;
-              const showQty = stock > 1; // Per User-Regel: Qty nur wenn Lager > 1
-              return (
-                <div key={idx} style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.8fr) minmax(0,1.2fr) 50px minmax(0,0.9fr) minmax(0,0.9fr) 55px minmax(0,0.9fr) minmax(0,0.9fr) 44px', gap: 8, padding: '8px 10px', borderBottom: '1px solid #E5E9EE', alignItems: 'center', position: 'relative' }}>
-                  {/* Product picker — Klick öffnet Suche */}
-                  <button onClick={() => { setProductPickerIdx(productPickerIdx === idx ? null : idx); setProductPickerQuery(''); }}
-                    className="cursor-pointer text-left" style={{
-                      padding: '6px 8px', fontSize: 12, background: '#FFFFFF', border: '1px solid #D5D9DE', borderRadius: 4,
-                      color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-                      minWidth: 0, width: '100%',
-                    }} title="Klick zum Wechseln">
-                    {product ? `${product.brand} ${product.name}` : '— pick product —'}
-                  </button>
-                  {productPickerIdx === idx && (
-                    <div style={{
-                      position: 'absolute', top: '100%', left: 8, zIndex: 100,
-                      width: 360, maxHeight: 320, overflowY: 'auto',
-                      background: '#FFFFFF', border: '1px solid #0F0F10', borderRadius: 6,
-                      boxShadow: '0 8px 24px rgba(0,0,0,0.15)', padding: 6,
-                    }}>
-                      <input autoFocus value={productPickerQuery}
-                        onChange={e => setProductPickerQuery(e.target.value)}
-                        placeholder="Search by brand, name, SKU…"
-                        style={{ width: '100%', padding: '6px 8px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4, marginBottom: 6 }} />
-                      {products
-                        .filter(p => {
-                          if (!productPickerQuery) return true;
-                          const q = productPickerQuery.toLowerCase();
-                          return (`${p.brand} ${p.name} ${p.sku || ''}`).toLowerCase().includes(q);
-                        })
-                        .slice(0, 30)
-                        .map(p => (
-                          <button key={p.id} onClick={() => pickProductForLine(idx, p.id)}
-                            className="cursor-pointer flex justify-between" style={{
-                              width: '100%', padding: '6px 8px', fontSize: 12, background: 'transparent', border: 'none',
-                              borderBottom: '1px solid #E5E9EE', textAlign: 'left', color: '#0F0F10',
-                            }}
-                            onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.04)')}
-                            onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
-                            <span>{p.brand} {p.name} {p.sku ? <span style={{ color: '#6B7280' }}>· {p.sku}</span> : ''}</span>
-                            <span className="font-mono" style={{ color: '#6B7280' }}>{(p.plannedSalePrice ?? p.purchasePrice).toFixed(0)}</span>
-                          </button>
-                        ))}
-                    </div>
-                  )}
-                  <input value={l.description}
-                    onChange={e => recalcLine(idx, { description: e.target.value })}
-                    placeholder="Description" style={{ padding: '4px 6px', fontSize: 11, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, minWidth: 0, width: '100%' }} />
-                  {showQty ? (
-                    <input type="number" min={1} max={stock} value={l.quantity}
-                      onChange={e => recalcLine(idx, { quantity: Math.max(1, Math.min(stock, parseInt(e.target.value) || 1)) })}
-                      title={`Stock: ${stock}`}
-                      className="font-mono" style={{ padding: '4px 6px', fontSize: 11, background: '#FFF8E5', border: '1px solid #C6A36D', borderRadius: 4, minWidth: 0, width: '100%' }} />
-                  ) : (
-                    <span style={{ fontSize: 11, color: '#6B7280', textAlign: 'center', minWidth: 0 }}>1</span>
-                  )}
-                  <input type="number" step="0.001" value={l.unitPrice}
-                    onChange={e => recalcLine(idx, { unitPrice: parseFloat(e.target.value) || 0 })}
-                    className="font-mono" style={{ padding: '4px 6px', fontSize: 11, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, minWidth: 0, width: '100%' }} />
-                  <input type="number" step="0.001" value={l.purchasePrice}
-                    onChange={e => recalcLine(idx, { purchasePrice: parseFloat(e.target.value) || 0 })}
-                    className="font-mono" style={{ padding: '4px 6px', fontSize: 11, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, minWidth: 0, width: '100%' }} />
-                  <input type="number" value={l.vatRate}
-                    onChange={e => recalcLine(idx, { vatRate: parseFloat(e.target.value) || 0 })}
-                    className="font-mono" style={{ padding: '4px 6px', fontSize: 11, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 4, minWidth: 0, width: '100%' }} />
-                  <select value={l.taxScheme}
-                    onChange={e => recalcLine(idx, { taxScheme: e.target.value })}
-                    style={{ padding: '4px 6px', fontSize: 11, border: '1px solid #D5D9DE', borderRadius: 4, minWidth: 0, width: '100%' }}>
-                    <option value="MARGIN">Margin</option>
-                    <option value="VAT_10">VAT 10%</option>
-                    <option value="ZERO">Zero</option>
-                  </select>
-                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', textAlign: 'right', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={l.lineTotal}/></span>
-                  <button onClick={() => setLineDraft(d => d.filter((_, i) => i !== idx))}
-                    title="Diese Zeile entfernen"
-                    className="cursor-pointer transition-all"
-                    style={{
-                      width: 32, height: 32, borderRadius: 8,
-                      display: 'flex', alignItems: 'center', justifyContent: 'center',
-                      background: 'rgba(220,38,38,0.10)',
-                      border: '1px solid rgba(220,38,38,0.30)',
-                      color: '#DC2626',
-                    }}
-                    onMouseEnter={e => { e.currentTarget.style.background = '#DC2626'; e.currentTarget.style.color = '#FFFFFF'; }}
-                    onMouseLeave={e => { e.currentTarget.style.background = 'rgba(220,38,38,0.10)'; e.currentTarget.style.color = '#DC2626'; }}>
-                    <Trash2 size={14} strokeWidth={2} />
-                  </button>
-                </div>
-              );
-            })}
-          </div>
-          <div className="flex items-center" style={{ marginTop: 4 }}>
-            <Button variant="secondary" onClick={addLine}><Plus size={12} /> Add Line</Button>
-          </div>
-          <div>
-            <span className="text-overline" style={{ marginBottom: 4, display: 'block' }}>EDIT REASON *</span>
-            <input value={lineEditReason}
-              onChange={e => setLineEditReason(e.target.value)}
-              placeholder="Why is this invoice being edited? (required — saved to the audit log)"
-              style={{ width: '100%', padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF', color: '#0F0F10' }} />
-          </div>
-          <div className="flex justify-between items-center" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <span style={{ fontSize: 12, color: '#6B7280' }}>
-              Net: <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={lineDraft.reduce((s, l) => s + (Number(l.unitPrice) || 0) * Math.max(1, Number(l.quantity) || 1), 0)}/></span>
-              {' · '}VAT: <span className="font-mono" style={{ color: '#AA956E' }}><Bhd v={lineDraft.reduce((s, l) => s + (Number(l.vatAmount) || 0) * Math.max(1, Number(l.quantity) || 1), 0)}/></span>
-              {' · '}Gross: <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={lineDraft.reduce((s, l) => s + (Number(l.lineTotal) || 0), 0)}/></span> BHD
-            </span>
-            <div className="flex gap-2">
-              <Button variant="ghost" onClick={() => setLinesModal(false)}>Cancel</Button>
-              <Button variant="primary" onClick={() => void saveLines()} data-save-lines disabled={w.busy || lineDraft.length === 0 || !lineEditReason.trim()}>Save Lines</Button>
-            </div>
-          </div>
-        </div>
-      </Modal>
 
       {/* Manage Payments Modal */}
       <Modal open={paymentsModal} onClose={() => setPaymentsModal(false)} title={`Payments — ${formatInvoiceDisplayShort(invoice)}`} width={680}>

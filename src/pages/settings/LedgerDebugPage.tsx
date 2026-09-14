@@ -46,6 +46,8 @@ import {
   findImbalancedTransactions,
 } from '@/core/ledger/queries';
 import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment } from '@/core/models/types';
+import { PrimaryOnlyNotice } from '@/components/shared/PrimaryOnlyNotice';
+import { primaryOnlyLocked } from '@/core/data/primary-only';
 
 const ALL_ACCOUNTS: LedgerAccount[] = [
   'CASH', 'BANK', 'CARD_CLEARING', 'BENEFIT',
@@ -76,7 +78,18 @@ interface RecentEntry {
   reverses_entry_id: string | null;
 }
 
+/**
+ * POST-PARITY R7B PP-6 — die Seite selbst gehört zum Primary. Ihre 29 Testbuchungen laufen alle
+ * durch `postEntries`/`reverseSource`/`reverseTransaction`, die auf PC2 zusätzlich verweigern.
+ */
 export function LedgerDebugPage() {
+  if (primaryOnlyLocked()) {
+    return <PrimaryOnlyNotice title="Ledger debug" reason="This diagnostic view reads raw ledger rows from the database. Open it on the main computer." />;
+  }
+  return <LedgerDebugPageBody />;
+}
+
+function LedgerDebugPageBody() {
   const [log, setLog] = useState<string[]>([]);
   const [balances, setBalances] = useState<Array<[LedgerAccount, number]>>([]);
   const [recent, setRecent] = useState<RecentEntry[]>([]);

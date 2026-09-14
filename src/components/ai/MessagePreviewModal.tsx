@@ -7,6 +7,7 @@ import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import {
   messageLogInput, type LoggedChannel, type MessageKind, type MessageLogInput,
 } from '@/core/customers/message-house';
+import { aiTextLocked, AI_TEXT_ON_PRIMARY } from '@/core/ai/ai-availability';
 
 // Der Name des geprüften Fernbefehls (`bridge/message-commands.ts`). Hier als Wert, nicht als
 // Import: die Oberfläche lädt die Befehlsdatei nicht (sie meldet beim Laden ihren Handler an).
@@ -58,6 +59,9 @@ export function MessagePreviewModal({
   const [copied, setCopied] = useState(false);
   const [type, setType] = useState<MessageType>(initialType);
   const waNumber = sanitizePhone(customerWhatsapp || customerPhone);
+  // POST-PARITY R7B PP-3 — auf PC2 schreibt die KI keinen Text (der Schlüssel bleibt am Primary);
+  // die Maske sagt es gleich beim Öffnen, und der Text wird von Hand geschrieben.
+  const aiLocked = aiTextLocked();
 
   // CENTRAL-UI-PARITY R6B/R6E — kein Schein-Erfolg beim Protokoll. Kopieren und WhatsApp gehen
   // immer; der Eintrag in der Kundenhistorie ist die EINE Schreibhandlung dieser Maske und läuft auf
@@ -104,6 +108,7 @@ export function MessagePreviewModal({
   }
 
   async function generate(t: MessageType) {
+    if (aiLocked) { setLoading(false); setError(null); return; }
     setLoading(true); setError(null);
     try {
       const ai = await import('@/core/ai/ai-service');
@@ -204,13 +209,18 @@ export function MessagePreviewModal({
             <span className="text-overline">To: {customerName}{waNumber ? ` \u00b7 +${waNumber}` : ''}</span>
             <button
               onClick={() => generate(type)}
-              disabled={loading}
+              disabled={loading || aiLocked}
+              title={aiLocked ? AI_TEXT_ON_PRIMARY : undefined}
+              data-ai-locked={aiLocked ? 'true' : undefined}
               className="cursor-pointer flex items-center gap-1 transition-colors"
-              style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, opacity: loading ? 0.4 : 1 }}
+              style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, opacity: loading || aiLocked ? 0.4 : 1 }}
             >
               <RefreshCw size={12} /> Regenerate
             </button>
           </div>
+          {aiLocked && (
+            <div data-ai-locked-note style={{ fontSize: 11, color: '#6B7280', marginBottom: 8 }}>{AI_TEXT_ON_PRIMARY}</div>
+          )}
 
           {allowTypeChange && (
             <div className="flex flex-wrap gap-1" style={{ marginBottom: 10 }}>

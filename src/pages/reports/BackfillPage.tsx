@@ -30,6 +30,8 @@ import {
   backfillConsignmentPayouts,
   type BackfillResult,
 } from '@/core/ledger/backfill';
+import { PrimaryOnlyNotice } from '@/components/shared/PrimaryOnlyNotice';
+import { primaryOnlyLocked, blockPrimaryOnlyOnClient } from '@/core/data/primary-only';
 
 interface ARRow {
   id: string;
@@ -44,7 +46,15 @@ interface ARRow {
 
 const fmt = (n: number) => n.toLocaleString('en-US');
 
+/** POST-PARITY R7B PP-6 — die Seite selbst, nicht nur die Route, gehört zum Primary. */
 export function BackfillPage() {
+  if (primaryOnlyLocked()) {
+    return <PrimaryOnlyNotice title="Ledger backfill" reason="Backfilling writes ledger entries into the database. It only runs on the main computer." />;
+  }
+  return <BackfillPageBody />;
+}
+
+function BackfillPageBody() {
   const [results, setResults] = useState<BackfillResult[]>([]);
   const [running, setRunning] = useState(false);
   const [auditQuery, setAuditQuery] = useState('');
@@ -119,6 +129,7 @@ export function BackfillPage() {
 
   function withBranch(fn: (branchId: string) => BackfillResult): () => void {
     return () => {
+      if (blockPrimaryOnlyOnClient('Ledger backfill')) return;
       let branchId = 'branch-main';
       try { branchId = currentBranchId(); } catch { /* */ }
       setRunning(true);
@@ -132,6 +143,7 @@ export function BackfillPage() {
   }
 
   function runAll() {
+    if (blockPrimaryOnlyOnClient('Ledger backfill')) return;
     let branchId = 'branch-main';
     try { branchId = currentBranchId(); } catch { /* */ }
     setRunning(true);

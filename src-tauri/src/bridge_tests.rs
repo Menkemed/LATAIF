@@ -1070,3 +1070,58 @@ fn the_retention_is_not_an_exactly_once_claim() {
         "und die Datei sagt selbst, dass dieser Schutz nicht durable ist"
     );
 }
+
+// -- POST-PARITY R7B PP-12 -- the deadline of the document paths ------------------------------------
+//
+// Normal commands keep the short deadline; only the three paths that carry a whole file through the
+// Primary get an allowance derived from their LARGEST admissible case. The constants must agree with
+// the renderer contract (row limit, OCR pixel cap), or the derivation is about a different system.
+
+fn upload_with(len: usize) -> serde_json::Value {
+    serde_json::json!({ "fileName": "x.png", "docClass": "other", "content": "a".repeat(len) })
+}
+
+#[test]
+fn normal_commands_keep_the_short_deadline() {
+    for op in [OP_PROBE, "invoices.create", "customers.update", "products.create", "store.documents.get", "expenses.create"] {
+        assert_eq!(timeout_for(op, &serde_json::json!({ "content": "a".repeat(1_000_000) })), DEFAULT_TIMEOUT, "{op}");
+    }
+}
+
+#[test]
+fn an_upload_gets_an_allowance_by_its_size_and_never_more_than_the_largest_file() {
+    let small = timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(1_000));
+    assert!(small >= DEFAULT_TIMEOUT && small < DEFAULT_TIMEOUT + Duration::from_millis(10), "{small:?}");
+    // The largest file the house accepts: 25 116 672 bytes -> base64 33 488 896 + data-URL head.
+    let biggest = timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(33_488_896 + 40));
+    assert!(biggest > Duration::from_secs(50) && biggest < Duration::from_secs(60), "{biggest:?}");
+    let beyond = timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(60_000_000));
+    assert_eq!(beyond, timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(DOCUMENT_MAX_CONTENT_BYTES as usize)), "clamped to the row limit");
+    let missing = timeout_for(OP_DOCUMENTS_UPLOAD, &serde_json::json!({}));
+    assert_eq!(missing, DEFAULT_TIMEOUT, "no content, no allowance");
+}
+
+#[test]
+fn content_and_ocr_get_the_allowance_of_their_largest_case() {
+    let content = timeout_for(OP_DOCUMENTS_CONTENT_GET, &serde_json::json!({ "documentId": "d" }));
+    assert_eq!(content, DEFAULT_TIMEOUT + Duration::from_millis(13_421));
+    let ocr = timeout_for(OP_DOCUMENTS_SET_OCR, &serde_json::json!({ "documentId": "d", "expectedRevision": 1 }));
+    assert_eq!(ocr, Duration::from_secs(90));
+    for d in [content, ocr, timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(DOCUMENT_MAX_CONTENT_BYTES as usize))] {
+        assert!(d <= Duration::from_secs(120), "no arbitrary huge deadline: {d:?}");
+    }
+}
+
+#[test]
+fn the_derivation_matches_the_renderer_contract() {
+    let schema = include_str!("../../src/core/sync/sync-business-schema.json");
+    assert!(schema.contains("33554432"), "the row limit the allowance is derived from");
+    assert_eq!(DOCUMENT_MAX_CONTENT_BYTES, 33_554_432);
+    let ocr = include_str!("../../src/core/ai/ocr-service.ts");
+    assert!(ocr.contains("export const OCR_MAX_PIXELS = 12_000_000;"), "the OCR pixel cap the allowance is derived from");
+    assert_eq!(OCR_MAX_PIXELS, 12_000_000);
+    let routes = include_str!("sync/routes.rs");
+    assert!(routes.contains("let deadline = crate::bridge::timeout_for(&req.op, &req.payload);"), "the route asks per command");
+    assert!(routes.contains(".submit_as(&identity, &claims.role, payload, deadline)"), "and waits exactly that long");
+    assert!(!routes.contains("claims.role, payload, crate::bridge::DEFAULT_TIMEOUT"), "no fixed 20 s for every command any more");
+}

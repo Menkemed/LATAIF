@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { authService, type Session, type UserBranch } from '@/core/auth/auth';
-import { readsFromPrimary } from '@/core/data/primary-source';
+import { readsFromPrimary, resetPrimarySource } from '@/core/data/primary-source';
 import type { UserRole } from '@/core/models/types';
 
 /**
@@ -115,6 +115,15 @@ export const useAuthStore = create<AuthStore>((set, get) => ({
   logout: () => {
     authService.logout();
     set({ session: null, branches: [] });
+    // POST-PARITY R7B PP-5 — auf PC2 hängt jeder Store-Stand an der abgemeldeten Sitzung (vom
+    // Primary geladen, in IHREM Namen). Die laufenden Fernladungen werden vergessen und das Fenster
+    // neu aufgebaut: die nächste Anmeldung — auch eines anderen Menschen, einer anderen Filiale —
+    // beginnt ohne einen Rest der vorigen. Der Primary behält sein Verhalten.
+    if (readsFromPrimary()) {
+      resetPrimarySource();
+      try { window.location.reload(); } catch { /* kein Fenster, z. B. im Test */ }
+      return;
+    }
     // MOBILE-04B2A13 — stop the bounded drain poller on logout (no polling/claim without a session).
     void import('@/core/media/mobile-upload-wiring')
       .then((w) => w.stopMobileDrainPoller())

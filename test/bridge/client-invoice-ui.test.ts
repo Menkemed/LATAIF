@@ -53,9 +53,10 @@ const storage = {
 (globalThis as { localStorage?: unknown }).localStorage = storage;
 
 const cm = await import('../../src/core/bridge/client-mode.ts');
-const { remoteFormSource, customerLabel, productLabel } = await import('../../src/core/invoices/invoice-form-source.ts');
-const { buildInvoiceRequest } = await import('../../src/core/invoices/invoice-request.ts');
-const { InvoiceSaveController } = await import('../../src/core/bridge/client-invoice-save.ts');
+// R7B PP-7 — der Waechter ist der gemeinsame (`client-command-save`). Die Rechnungsbindung
+// (`client-invoice-save`), die Fernquelle (`invoice-form-source`) und der Rumpfbau
+// (`invoice-request`) des entfernten Formulars sind mit ihm gegangen.
+const { CommandSaveController } = await import('../../src/core/bridge/client-command-save.ts');
 const { parseInvoicePayload } = await import('../../src/core/bridge/invoice-command.ts');
 const registry = await import('../../src/core/bridge/command-registry.ts');
 await import('../../src/core/bridge/read-commands.ts');
@@ -70,44 +71,24 @@ const code = (p: string): string => src(p)
   .filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')); })
   .join('\n');
 
+// POST-PARITY R7B PP-7 — das alte Rechnungsformular (`src/components/client/ClientInvoiceCreate.tsx`)
+// ist entfernt, mit ihm seine Fernquelle, sein Rumpfbau und seine Waechter-Bindung. Was hier bleibt,
+// prueft den echten Pruefer des Primary (mit woertlich gebautem Rumpf) und den gemeinsamen Waechter.
 const FORM = 'src/components/client/ClientInvoiceCreate.tsx';
-const SOURCE = 'src/core/invoices/invoice-form-source.ts';
+const LEGACY_MODULES = [
+  'src/core/invoices/invoice-form-source.ts',
+  'src/core/invoices/invoice-request.ts',
+  'src/core/bridge/client-invoice-save.ts',
+];
 
 // ── 1) Kein Weg zur lokalen Datenbank — im ganzen Importbaum ──────────────
-//
-// Eine einzelne Datei zu greppen waere zu wenig: ein Import drei Ebenen tiefer wuerde die Datenbank
-// genauso oeffnen. Deshalb wird der Baum abgelaufen.
 {
-  const seen = new Set<string>();
-  const offenders: string[] = [];
-  const visit = (file: string): void => {
-    if (seen.has(file)) return;
-    seen.add(file);
-    const text = readFileSync(resolvePath(repo, file), 'utf8');
-    const code = text.split(/\r?\n/).filter((l) => {
-      const t = l.trim();
-      return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'));
-    }).join('\n');
-    if (/\bgetDatabase\b|\binitDatabase\b|useProductStore|useCustomerStore|useInvoiceStore|useOrderStore|useEmployeeStore/.test(code)) {
-      offenders.push(file);
-    }
-    for (const m of code.matchAll(/from '(@\/[^']+)'/g)) {
-      const rel = 'src/' + m[1].slice(2);
-      for (const cand of [rel, rel + '.ts', rel + '.tsx']) {
-        if (existsSync(resolvePath(repo, cand)) && /\.(ts|tsx)$/.test(cand)) { visit(cand); break; }
-      }
-    }
-  };
-  visit(FORM);
-  visit(SOURCE);
-
-  ok(seen.size > 3, `DBLESS der Importbaum wurde wirklich abgelaufen (${seen.size} Dateien)`);
-  ok(offenders.length === 0, `DBLESS nirgends darin wird die lokale Datenbank oder ein Business-Store benutzt (${offenders.join(', ') || 'keine'})`);
-  ok([...seen].every((f) => !f.startsWith('src/core/db/')), `DBLESS und keine Datei aus der Datenschicht ist dabei (${[...seen].filter((f) => f.startsWith('src/core/db/')).join(', ') || 'keine'})`);
-
-  const form = src(FORM);
-  ok(!/outbox|localStorage|indexedDB/i.test(form), 'DBLESS das Formular legt auch keinen eigenen Ausgangskorb an');
-  ok(/remoteFormSource|InvoiceFormSource/.test(form), 'DBLESS seine Daten kommen aus der Fernquelle');
+  ok(!existsSync(resolvePath(repo, FORM)),
+    'DBLESS R7B PP-7 das alte Rechnungsformular (src/components/client) gibt es nicht mehr');
+  // R7B PP-7 — hier wurde der Importbaum der Fernquelle abgelaufen; die Quelle ist entfernt.
+  const left = LEGACY_MODULES.filter((f) => existsSync(resolvePath(repo, f)));
+  ok(left.length === 0,
+    `DBLESS R7B PP-7 Fernquelle, Rumpfbau und Waechter-Bindung des alten Formulars sind entfernt (${left.join(', ') || 'alle weg'})`);
 }
 
 // ── 2) Die Auswahllisten kommen aus den bestehenden C2-Lesevorgaengen ─────
@@ -115,44 +96,11 @@ const SOURCE = 'src/core/invoices/invoice-form-source.ts';
   cm.enterClientMode('https://primary.local');
   cm.setClientToken('tok');
 
-  const calls: Array<{ op: string; payload: unknown }> = [];
-  const fakeFetch = (async (_url: string, init: { body: string }) => {
-    const body = JSON.parse(init.body) as { op: string; payload: unknown };
-    calls.push({ op: body.op, payload: body.payload });
-    const items = body.op === 'customers.list'
-      ? [{ id: 'c1', firstName: 'Ali', lastName: 'Hassan', company: 'Lataif', phone: '+973' }]
-      : [{ id: 'p1', brand: 'Rolex', name: 'Datejust', sku: 'RLX-1', plannedSalePrice: 150, purchasePrice: 100, taxScheme: 'MARGIN', quantity: 1, stockStatus: 'in_stock' }];
-    return { status: 200, ok: true, json: async () => ({ ok: true, value: { items } }) };
-  }) as unknown as typeof fetch;
-
-  // Die ECHTE Quelle, nur mit gestelltem Transport.
-  const original = globalThis.fetch;
-  (globalThis as { fetch: typeof fetch }).fetch = fakeFetch;
-  const source = remoteFormSource();
-  const customers = await source.searchCustomers('');
-  const products = await source.searchProducts('');
-  (globalThis as { fetch: typeof fetch }).fetch = original;
-
-  ok(calls.map((c) => c.op).join(',') === 'customers.list,products.list',
-    `READS genau die bestehenden Lesevorgaenge (${calls.map((c) => c.op).join(',')})`);
-  ok(customers[0].label === 'Ali Hassan — Lataif', `READS der Kunde wird lesbar benannt (${customers[0].label})`);
-  ok(products[0].label === 'Rolex Datejust' && products[0].taxScheme === 'MARGIN' && products[0].quantity === 1,
-    `READS das Produkt bringt Schema und Menge mit (${JSON.stringify(products[0])})`);
-  ok(!('purchasePrice' in products[0]),
-    'READS …aber keine Einstandskosten — die gehen den Client nichts an');
-  ok(customerLabel({ id: 'x' }) === 'x' && productLabel({ id: 'y' }) === 'y',
-    'READS und ohne Namen bleibt wenigstens die Kennung stehen');
-
-  // C3E hat sieben Lesevorgaenge dazugelegt (Lieferant, Kategorie, Einkauf, Kommission,
-  // Auftrag). Fuer DIESES Formular aendert das nichts: es benutzt weiterhin nur die drei
-  // Auswahlquellen, die es schon hatte — genau das wird hier festgehalten.
+  // R7B PP-7 — die Pruefungen an der Fernquelle des alten Formulars (`remoteFormSource`, Benennung,
+  // keine Einstandskosten) sind mit ihr entfernt. Festgehalten bleibt die Zahl der Lesevorgaenge.
   const reads = src('src/core/bridge/read-commands.ts');
   ok((reads.match(/^registerCommand\(/gm) || []).length === 18,
-    'READS die Lesevorgaenge sind auf achtzehn gewachsen…');
-  const formSrc = src('src/components/client/ClientInvoiceCreate.tsx');
-  const usedByForm = [...formSrc.matchAll(/remoteRead[^(]*\(\s*'([a-z_.]+)'/g)].map((m) => m[1]);
-  ok(usedByForm.every((o) => ['products.list', 'customers.list', 'invoices.list', 'invoices.get'].includes(o)),
-    `READS …aber das Rechnungsformular brauchte keinen neuen (${usedByForm.join(', ') || 'keiner'})`);
+    'READS die Lesevorgaenge sind auf achtzehn gewachsen');
 }
 
 // ── 3) Was das Formular schickt, ist genau das, was der Primary erlaubt ───
@@ -161,20 +109,12 @@ const SOURCE = 'src/core/invoices/invoice-form-source.ts';
 // Oberfläche baut. Kein abgeleiteter Wert kommt durch — nicht, weil es niemand hinschreibt,
 // sondern weil er abgewiesen würde.
 {
-  const request = buildInvoiceRequest({
-    customerId: 'c1',
-    issuedDate: '2026-09-05',
-    notes: '  ',
-    lines: [{ productId: 'p1', quantity: 2.7, unitPrice: 150 }],
-  });
-  const keys = Object.keys(request).sort().join(',');
-  ok(keys === 'customerId,issuedDate,lines', `REQUEST nur Auswahl, nichts Abgeleitetes (${keys})`);
-  const lineKeys = Object.keys((request.lines as Array<Record<string, unknown>>)[0]).sort().join(',');
-  ok(lineKeys === 'productId,quantity,scheme,unitPrice', `REQUEST auch in der Zeile (${lineKeys})`);
-  ok((request.lines as Array<{ quantity: number }>)[0].quantity === 2, 'REQUEST eine Menge ist eine ganze Zahl');
-  ok(!('notes' in request), 'REQUEST eine leere Notiz wird gar nicht erst mitgeschickt');
-  ok((request.lines as Array<{ scheme: string }>)[0].scheme === 'auto',
-    'REQUEST das Steuerschema entscheidet das Produkt, nicht der Client');
+  // R7B PP-7 — der Rumpf steht woertlich hier (vorher `buildInvoiceRequest`); die Pruefungen am
+  // Rumpfbau selbst (Feldauswahl, ganze Menge, leere Notiz, `scheme: 'auto'`) sind mit ihm entfernt.
+  const request = {
+    customerId: 'c1', issuedDate: '2026-09-05',
+    lines: [{ productId: 'p1', quantity: 2, unitPrice: 150, scheme: 'auto' }],
+  };
 
   // Und der echte Pruefer nimmt ihn an.
   const parsed = parseInvoicePayload(request);
@@ -194,7 +134,9 @@ const SOURCE = 'src/core/invoices/invoice-form-source.ts';
   const reply = (status: number, body: Record<string, unknown>): Response =>
     ({ status, ok: status >= 200 && status < 300, json: async () => body }) as unknown as Response;
 
-  const ctl = new InvoiceSaveController();
+  // R7B PP-7 — gepruefter Waechter ist der gemeinsame (`CommandSaveController`) statt der entfernten
+  // Rechnungsbindung; Vertrag und Ausgaenge sind dieselben, der Erfolg traegt den Wert in `value`.
+  const ctl = new CommandSaveController<{ invoiceId: string; invoiceNumber: string; grossAmount: number }>('invoices.create');
   const first = ctl.beginAttempt();
   const id = first.commandId;
   const sent: string[] = [];
@@ -202,16 +144,17 @@ const SOURCE = 'src/core/invoices/invoice-form-source.ts';
     sent.push((JSON.parse(init.body) as { commandId: string }).commandId);
     return reply(504, {});
   }) as unknown as typeof fetch;
+  const body = { customerId: 'c1', issuedDate: '2026-09-05', lines: [{ productId: 'p1', quantity: 1, unitPrice: 150, scheme: 'auto' }] };
 
-  const pending = await first.send(buildInvoiceRequest({ customerId: 'c1', issuedDate: '2026-09-05', lines: [{ productId: 'p1', quantity: 1, unitPrice: 150 }] }), capture);
+  const pending = await first.send(body, capture);
   ok(pending.kind === 'unknown', `SAVE die Zeitgrenze laesst den Ausgang offen (${JSON.stringify(pending)})`);
 
   // Der zweite Klick — genau der Moment, in dem eine Oberflaeche eine zweite Rechnung schreibt.
   const again = ctl.beginAttempt();
   ok(again.commandId === id, 'SAVE ein zweiter Klick benutzt DIESELBE Kennung');
-  const settled = await again.send(buildInvoiceRequest({ customerId: 'c1', issuedDate: '2026-09-05', lines: [{ productId: 'p1', quantity: 1, unitPrice: 150 }] }),
+  const settled = await again.send(body,
     (async () => reply(200, { ok: true, value: { invoiceId: 'inv-1', invoiceNumber: 'PINV-2026-000001', grossAmount: 165, replayed: true } })) as unknown as typeof fetch);
-  ok(settled.kind === 'ok' && settled.replayed === true && settled.invoiceNumber === 'PINV-2026-000001',
+  ok(settled.kind === 'ok' && settled.replayed === true && settled.value.invoiceNumber === 'PINV-2026-000001',
     `SAVE …und bekommt die eine Rechnung des Primary (${JSON.stringify(settled)})`);
   ok(ctl.beginAttempt().commandId !== id, 'SAVE erst danach beginnt ein neuer Vorsatz');
 
@@ -219,7 +162,7 @@ const SOURCE = 'src/core/invoices/invoice-form-source.ts';
   // WICHTIG: der Primary schickt es als 409 — GENAU wie den Kennungskonflikt. Unterschieden werden
   // die beiden am Feld `outcome`, das nur die Bruecke setzt. Wer hier nur auf den Status schaut,
   // erzaehlt dem Benutzer bei „die Ware ist weg", er duerfe es gefahrlos nochmal versuchen.
-  const ctl2 = new InvoiceSaveController();
+  const ctl2 = new CommandSaveController('invoices.create');
   const a2 = ctl2.beginAttempt();
   const no = await a2.send({}, (async () => reply(409, { ok: false, error: 'STOCK_UNAVAILABLE', message: 'weg' })) as unknown as typeof fetch);
   ok(no.kind === 'business_error' && no.code === 'STOCK_UNAVAILABLE',
@@ -227,26 +170,12 @@ const SOURCE = 'src/core/invoices/invoice-form-source.ts';
   ok(ctl2.beginAttempt().commandId !== a2.commandId,
     'SAVE eine abgelehnte Kennung wird NICHT wiederverwendet');
 
-  const ctl3 = new InvoiceSaveController();
+  const ctl3 = new CommandSaveController('invoices.create');
   const a3 = ctl3.beginAttempt();
   const clash = await a3.send({}, (async () => reply(409, { ok: false, error: 'BRIDGE_COMMAND_ID_CONFLICT', outcome: 'not_executed' })) as unknown as typeof fetch);
   ok(clash.kind === 'not_executed',
     `SAVE ein 409 MIT outcome ist der Kennungskonflikt — er lief nie (${JSON.stringify(clash)})`);
-
-  // Und die Oberflaeche selbst haelt sich daran. Fuer die Verbote wird der Text OHNE Kommentare
-  // gelesen: ein Satz, der erklaert, warum hier kein `new InvoiceSaveAttempt()` steht, ist kein
-  // Aufruf — er wuerde die Pruefung sonst rot faerben, obwohl der Code richtig ist.
-  const form = src(FORM);
-  const formCode = code(FORM);
-  ok(/controller\.beginAttempt\(\)/.test(formCode) && !/new InvoiceSaveAttempt\(/.test(formCode),
-    'SAVE das Formular vergibt keine Kennung an der Wache vorbei');
-  ok(/data-client-invoice-pending/.test(form) && /not known/.test(form),
-    'SAVE es sagt dem Benutzer, dass der Ausgang offen ist');
-  ok(/Retry the same order/.test(form), 'SAVE …und dass Wiederholen denselben Auftrag prueft');
-  ok(/disabled=\{pending\}/.test(form), 'SAVE waehrend ein Ausgang offen ist, wird die Eingabe nicht veraendert');
-  ok(/data-client-invoice-number/.test(form) && /outcome\.invoiceNumber/.test(form),
-    'SAVE und angezeigt wird die Nummer des Primary, keine eigene');
-  ok(!/setTimeout|setInterval/.test(formCode), 'SAVE es gibt keinen automatischen zweiten Versuch');
+  // R7B PP-7 — die Knopf-Pruefungen am alten Rechnungsformular sind mit ihm entfernt.
 }
 
 // ── 5) Das Formular braucht genau EINEN Namen ─────────────────────────────
@@ -266,13 +195,7 @@ const SOURCE = 'src/core/invoices/invoice-form-source.ts';
     `REGISTRY 1 Probe + 18 Reads + 24 Mutationen (${known.join(', ')})`);
   ok(registry.ALLOWED_MUTATIONS.includes('invoices.create'),
     `REGISTRY der Name des Formulars steht darauf (${registry.ALLOWED_MUTATIONS.join(', ')})`);
-  const form = code(FORM);
-  // Das ANLEGE-Formular ruft weiterhin nur `invoices.create`. Aendern und Bezahlen sind seit C3D
-  // eigene Namen — und sie gehoeren in die Detailansicht, nicht hierher.
-  const foreign = registry.ALLOWED_MUTATIONS.filter((o: string) => o !== 'invoices.create')
-    .filter((o: string) => form.includes(o));
-  ok(foreign.length === 0,
-    `REGISTRY das Formular ruft keine fremde Mutation (${foreign.join(', ') || 'keine'})`);
+  // R7B PP-7 — die Pruefung „das alte Formular ruft keine fremde Mutation" ist mit ihm entfernt.
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3b client invoice ui: ${PASS} passed, ${fails.length} failed`);

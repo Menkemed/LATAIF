@@ -19,6 +19,7 @@ import { computePaymentSplit } from '@/core/ledger/payment-split';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { currentBranchId, currentUserId, query } from '@/core/db/helpers';
 import { trackChange } from '@/core/sync/sync-service';
+import { isClientMode } from '@/core/bridge/client-mode';
 import {
   isTransactionActive,
   enterTransaction,
@@ -305,8 +306,22 @@ export function rollbackLedgerTransaction(): void {
 // nicht ausführen muss, fragt diesen Zähler über `watchLedgerPosts` — und bricht dann ab.
 let postFailures = 0;
 
+/**
+ * POST-PARITY R7B PP-6 — die gemeinsame Grenze aller Hauptbuch-Schreiber (`postEntries`,
+ * `reverseSource`, `reverseTransaction`; jede `post*`-Funktion, jede Nachbuchung, jeder
+ * Prüfstand und der Orphan-Storno laufen hier durch). Das Hauptbuch steht dort, wo die Datenbank
+ * steht: auf einem Rechner ohne eigene Bücher schreibt keine Buchung — auch keine, die ein
+ * Handler unerwartet erreicht. Der Riegel zählt als gescheiterte Buchung (`watchLedgerPosts`).
+ */
+function assertLedgerHere(): void {
+  if (isClientMode()) {
+    throw new Error('CLIENT_HAS_NO_BOOKS: this computer keeps no ledger — the action belongs to the main computer');
+  }
+}
+
 export function postEntries(entries: LedgerEntryInput[], ctx: PostContext): PostingResult {
   try {
+    assertLedgerHere();
     return postEntriesOnce(entries, ctx);
   } catch (err) {
     postFailures++;
@@ -949,6 +964,7 @@ export function reverseSource(
   occurredAt: string
 ): PostingResult {
   try {
+    assertLedgerHere();
     return reverseSourceOnce(sourceModule, sourceId, occurredAt);
   } catch (err) {
     postFailures++;
@@ -1079,6 +1095,7 @@ export function postInvoiceCancelled(invoice: Invoice): PostingResult {
 /** R5F.1 — auch ein gescheiterter Transaktions-Storno zählt (er schreibt direkt). */
 export function reverseTransaction(transactionId: string, occurredAt: string): PostingResult {
   try {
+    assertLedgerHere();
     return reverseTransactionOnce(transactionId, occurredAt);
   } catch (err) {
     postFailures++;

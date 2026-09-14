@@ -30,6 +30,7 @@ import {
   draftOf, priceFromField, saveOfferConvert, saveOfferStatus, saveOfferUpdate, type OfferDraft,
 } from '@/core/offers/offer-actions';
 import type { OfferTargetStatus } from '@/core/offers/offer-rules';
+import { aiTextLocked, AI_TEXT_ON_PRIMARY } from '@/core/ai/ai-availability';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -468,7 +469,11 @@ export function OfferDetail() {
                 {bearbeiten && offer.status === 'draft' && (
                   <button
                     className="cursor-pointer flex items-center gap-1 transition-colors"
-                    style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11 }}
+                    // R7B PP-3 — auf PC2 bleibt der Angebotstext am Primary (Schlüssel dort); vor dem Klick gesagt.
+                    disabled={aiTextLocked()}
+                    title={aiTextLocked() ? AI_TEXT_ON_PRIMARY : undefined}
+                    data-ai-locked={aiTextLocked() ? 'true' : undefined}
+                    style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, opacity: aiTextLocked() ? 0.4 : 1 }}
                     onClick={async () => {
                       const ai = await import('@/core/ai/ai-service');
                       if (!ai.isAiConfigured()) { alert('Set OpenAI API key in Settings > AI'); return; }

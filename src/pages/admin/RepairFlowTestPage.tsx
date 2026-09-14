@@ -21,6 +21,8 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { usePermission } from '@/hooks/usePermission';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId } from '@/core/db/helpers';
+import { PrimaryOnlyNotice } from '@/components/shared/PrimaryOnlyNotice';
+import { primaryOnlyLocked, blockPrimaryOnlyOnClient } from '@/core/data/primary-only';
 
 const PREFIX = 'TEST_FLOW_';
 
@@ -1596,7 +1598,15 @@ const SCENARIOS: Array<{ name: string; run: (ctx: TestContext, result: ScenarioR
   { name: '18. Back-to-Back Beschaffung (Order → Purchase)', run: scenarioBackToBackSourcing },
 ];
 
+/** POST-PARITY R7B PP-6 — der Prüfstand schreibt Testdaten in DIESE Datenbank: nur am Primary. */
 export function RepairFlowTestPage() {
+  if (primaryOnlyLocked()) {
+    return <PrimaryOnlyNotice title="Repair flow test" reason="This test bench writes test records into the database. It only runs on the main computer." />;
+  }
+  return <RepairFlowTestPageBody />;
+}
+
+function RepairFlowTestPageBody() {
   const perm = usePermission();
   const [results, setResults] = useState<ScenarioResult[]>([]);
   const [running, setRunning] = useState(false);
@@ -1622,6 +1632,7 @@ export function RepairFlowTestPage() {
   const canRun = !isProd || prodConfirmed;
 
   async function runAll() {
+    if (blockPrimaryOnlyOnClient('The repair flow test')) return;
     setRunning(true);
     setResults([]);
     setSummary('');
@@ -1675,6 +1686,7 @@ export function RepairFlowTestPage() {
   }
 
   function handlePurge() {
+    if (blockPrimaryOnlyOnClient('Purging test data')) return;
     try {
       const msg = purgeTestData();
       setPurgeResult(msg);

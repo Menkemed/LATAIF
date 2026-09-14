@@ -64,68 +64,42 @@ const code = (p: string): string => src(p)
   .filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')); })
   .join('\n');
 
-const VIEW = 'src/components/client/ClientInvoiceDetail.tsx';
-const SHELL = 'src/components/startup/ClientShell.tsx';
-
-// Der Rumpfbau der Ansicht — als reine Funktion prüfbar, ohne Browser.
-const { buildUpdateRequest } = await import('../../src/components/client/client-invoice-request.ts');
+// POST-PARITY R7B PP-7 — die alte Client-Rechnungsansicht (`src/components/client/ClientInvoiceDetail.tsx`)
+// samt ihrem Rumpfbau (`client-invoice-request.ts`, `buildUpdateRequest`) ist entfernt. Geaendert
+// wird (und wurde) im Rechnungsformular der gemeinsamen Oberflaeche: `InvoiceCreate` → `invoices.update`.
+const LEGACY = 'src/components/client';
+const INVOICE_FORM = 'src/pages/invoices/InvoiceCreate.tsx';
 
 // ── 1) Kein Weg zur lokalen Datenbank ─────────────────────────────────────
 {
-  const seen = new Set<string>();
-  const offenders: string[] = [];
-  const visit = (file: string): void => {
-    if (seen.has(file)) return;
-    seen.add(file);
-    const text = readFileSync(resolvePath(repo, file), 'utf8');
-    const stripped = text.split(/\r?\n/).filter((l) => {
-      const t = l.trim();
-      return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'));
-    }).join('\n');
-    if (/\bgetDatabase\b|\binitDatabase\b|useInvoiceStore|useProductStore|useCustomerStore/.test(stripped)) {
-      offenders.push(file);
-    }
-    for (const m of stripped.matchAll(/from '(@\/[^']+)'/g)) {
-      const rel = 'src/' + m[1].slice(2);
-      for (const cand of [rel, rel + '.ts', rel + '.tsx']) {
-        if (existsSync(resolvePath(repo, cand)) && /\.(ts|tsx)$/.test(cand)) { visit(cand); break; }
-      }
-    }
-  };
-  visit(VIEW);
-
-  ok(seen.size > 2, `DBLESS der Importbaum wurde abgelaufen (${seen.size} Dateien)`);
-  ok(offenders.length === 0,
-    `DBLESS nirgends darin wird die lokale Datenbank oder ein Business-Store benutzt (${offenders.join(', ') || 'keine'})`);
-  ok([...seen].every((f) => !f.startsWith('src/core/db/')), 'DBLESS und keine Datei aus der Datenschicht ist dabei');
-  ok(!/outbox|localStorage|indexedDB/i.test(code(VIEW)), 'DBLESS die Ansicht legt keinen eigenen Ausgangskorb an');
-  ok(/remoteRead/.test(src(VIEW)), 'DBLESS ihre Daten kommen aus der Fernquelle');
-  ok(/'invoices\.get'/.test(src(VIEW)), 'DBLESS …aus dem bestehenden Lesebefehl');
+  ok(!existsSync(resolvePath(repo, LEGACY)),
+    'DBLESS R7B PP-7 die alte Client-Rechnungsansicht (src/components/client) gibt es nicht mehr');
 }
 
 // ── 2) Was sie schickt, erlaubt der Primary — und mehr nicht ──────────────
 {
-  const body = buildUpdateRequest({
-    id: 'inv-1', expectedRevision: 7, reason: '  Preis korrigiert  ',
-    customerId: 'cust-1',
-    lines: [{ productId: 'p1', quantity: 2.9, unitPrice: 150 }],
-    notes: '   ',
-  });
-  const keys = Object.keys(body).sort().join(',');
-  ok(keys === 'customerId,expectedRevision,id,lines,reason',
-    `REQUEST nur Auswahl, gesehene Fassung und Grund (${keys})`);
-  ok(body.expectedRevision === 7, 'REQUEST …und zwar genau die gelesene Fassung, unveraendert');
-  ok(body.reason === 'Preis korrigiert', 'REQUEST der Grund wird getrimmt, nicht erfunden');
-  ok(!('notes' in body), 'REQUEST eine leere Notiz wird gar nicht erst mitgeschickt');
-  const line = (body.lines as Array<Record<string, unknown>>)[0];
-  ok(Object.keys(line).sort().join(',') === 'productId,quantity,unitPrice',
-    `REQUEST auch in der Zeile (${Object.keys(line).join(',')})`);
-  ok(line.quantity === 2, 'REQUEST eine Menge ist eine ganze Zahl');
+  // Der lebende Aenderungsrumpf steht im Rechnungsformular (Fernanschluss von `invoices.update`).
+  const form = code(INVOICE_FORM);
+  const at = form.indexOf('aendernRechnung.save({');
+  const remoteAt = form.indexOf('remote: () => ({', at);
+  const remote = at > 0 && remoteAt > at ? form.slice(remoteAt, form.indexOf('});', remoteAt)) : '';
+  ok(/^remote: \(\) => \(\{\s*id: invId,\s*expectedRevision: fassung,\s*reason,\s*customerId,\s*lines: /.test(remote),
+    `REQUEST das Rechnungsformular schickt Kennung, gesehene Fassung, Grund und Auswahl (${remote.length} Zeichen)`);
+  ok(/const fassung = editInvoice\.revision;/.test(form),
+    'REQUEST …und zwar genau die Fassung, die es geladen hat');
+  ok(remote.length > 0 && !/grossAmount|paidAmount|status|invoiceNumber|deltaPayment/.test(remote),
+    'REQUEST …und nichts, was der Primary rechnet oder entscheidet');
 
-  // Und der ECHTE Prüfer nimmt genau diesen Rumpf an.
+  // Derselbe Rumpf, wie ihn das Formular baut — und der ECHTE Prüfer nimmt ihn an.
+  const body = {
+    id: 'inv-1', expectedRevision: 7, reason: 'Preis korrigiert', customerId: 'cust-1',
+    lines: [{ productId: 'p1', lotId: null, quantity: 2, unitPrice: 150, scheme: 'MARGIN' }],
+    notes: 'n', issuedDate: '2026-09-05', staffId: 'st-1',
+  };
   const parsed = parseInvoiceUpdate(body);
-  ok(parsed.id === 'inv-1' && parsed.reason === 'Preis korrigiert' && parsed.body.lines[0].quantity === 2,
-    'REQUEST der Pruefer des Primary nimmt ihn an');
+  ok(parsed.id === 'inv-1' && parsed.expectedRevision === 7 && parsed.reason === 'Preis korrigiert'
+    && parsed.body.lines[0].quantity === 2,
+  'REQUEST der Pruefer des Primary nimmt ihn an');
 
   // Ein Rumpf, der doch etwas Abgeleitetes mitschickte, käme nicht durch.
   for (const extra of ['grossAmount', 'paidAmount', 'status', 'invoiceNumber', 'deltaPayment']) {
@@ -133,29 +107,13 @@ const { buildUpdateRequest } = await import('../../src/components/client/client-
     try { parseInvoiceUpdate({ ...body, [extra]: 1 }); } catch { threw = true; }
     ok(threw, `REQUEST ${extra} wuerde abgewiesen`);
   }
-
-  // Die Ansicht selbst rechnet nichts.
-  const view = code(VIEW);
-  ok(!/grossAmount\s*=|vatRate|\* 1\.1|netAmount\s*=/.test(view), 'REQUEST die Ansicht rechnet keine Summe');
-  ok(/view\.grossAmount/.test(view) && /view\.openAmount/.test(view),
-    'REQUEST sie ZEIGT nur, was der Primary gerechnet hat');
-  ok(/expectedRevision: view\.revision/.test(view),
-    'REQUEST und sie schickt genau die Fassung mit, die sie geladen hat');
 }
 
 // ── 3) Die Zahlung: nur Betrag und Art ────────────────────────────────────
 {
-  const view = code(VIEW);
-  const sent = view.slice(view.indexOf('const pay = useCallback'), view.indexOf('if (loadError)'));
-  ok(/invoiceId: view\.id/.test(sent) && /amount: Number\(amount\)/.test(sent) && /method,/.test(sent),
-    'PAY der Auftrag traegt Rechnung, Betrag und Art');
-  ok(!/status|paidAmount|paymentId|specialMark/.test(sent),
-    'PAY …und nichts, was der Primary entscheidet');
   const p = parsePaymentPayload({ invoiceId: 'inv-1', amount: 25, method: 'cash' });
   ok(p.amount === 25 && p.method === 'cash', 'PAY der Pruefer des Primary nimmt ihn an');
-  ok(/METHODS = \['cash', 'card', 'bank_transfer', 'benefit', 'other'\]/.test(view),
-    'PAY die Auswahl zeigt genau die Zahlungsarten des Hauses');
-  ok(!/'credit'/.test(view), 'PAY …und NICHT die Guthaben-Einloesung — die ist ein eigener Vorgang');
+  // R7B PP-7 — die Pruefungen am Zahlungsfeld der alten Ansicht sind mit ihr entfernt.
 }
 
 // ── 4) Zwei Vorsätze, zwei Wächter ────────────────────────────────────────
@@ -206,32 +164,8 @@ const { buildUpdateRequest } = await import('../../src/components/client/client-
 
 // ── 5) Die Ansicht hält sich daran ────────────────────────────────────────
 {
-  const view = code(VIEW);
-  ok(/editCtl\.beginAttempt\(\)/.test(view) && /payCtl\.beginAttempt\(\)/.test(view),
-    'UI beide Wege gehen ueber ihren Waechter…');
-  ok(!/new CommandSaveAttempt\(/.test(view), 'UI …und keiner vergibt eine Kennung daran vorbei');
-  // Seit C3G sind es fuenf: aendern, bezahlen, Guthaben anrechnen, Zahlung berichtigen,
-  // Zahlung zuruecknehmen. Die Zusage war nie „genau zwei", sondern EINER JE VORSATZ — und
-  // dass keiner davon geteilt wird, ist der Punkt.
-  const ctls = [...view.matchAll(/const (\w+) = useMemo\(\(\) => new CommandSaveController/g)].map((m) => m[1]);
-  ok((view.match(/new CommandSaveController/g) || []).length === 5,
-    `UI es sind fuenf Waechter — einer je Vorsatz (${ctls.join(', ')})`);
-  ok(new Set(ctls).size === ctls.length, 'UI …und keiner wird doppelt benutzt');
-  ok(!/setTimeout|setInterval/.test(view), 'UI es gibt keinen automatischen zweiten Versuch');
-  ok(/disabled=\{editPending\}/.test(view) && /disabled=\{payPending\}/.test(view),
-    'UI waehrend ein Ausgang offen ist, wird die Eingabe nicht veraendert');
-  ok(/not known/.test(src(VIEW)), 'UI der offene Ausgang wird ausgesprochen');
-  ok(/canEdit = reason\.trim\(\) !== ''/.test(view),
-    'UI ohne Aenderungsgrund ist der Knopf aus — dieselbe Pflicht wie im Haus');
-  ok(/setTick\(\(t\) => t \+ 1\)/.test(view),
-    'UI nach einer Antwort wird neu geladen — der naechste Vorsatz fusst auf dem echten Stand');
-
-  const shell = code(SHELL);
-  ok(/ClientInvoiceDetail/.test(shell), 'SHELL die Ansicht haengt in der Schale');
-  ok(/setOpenInvoiceId\(s\(detail\.id\)\)/.test(shell),
-    'SHELL sie beginnt an einer GELESENEN Rechnung, nicht an einer eingetippten Kennung');
-  ok(!/data-client-delete|deleteInvoice|deletePayment/.test(shell),
-    'SHELL kein Loeschen — das steht auf keiner Zulassungsliste');
+  ok(!existsSync(resolvePath(repo, LEGACY + '/ClientInvoiceDetail.tsx')),
+    'UI R7B PP-7 die alte Rechnungsansicht mit ihren Waechtern und ihrem Platz in der Huelle ist entfernt');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3d client invoice lifecycle ui: ${PASS} passed, ${fails.length} failed`);

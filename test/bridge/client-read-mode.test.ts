@@ -102,7 +102,9 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   const initAt = app.indexOf('    initDatabase()');
   ok(clientAt > 0 && clientAt < firstRunAt, 'DBLESS die Client-Weiche kommt VOR der Erstlauf-Frage');
   ok(clientAt < initAt, 'DBLESS …und vor jedem `initDatabase()`');
-  ok(/if \(isClientMode\(\)\) \{[\s\S]{0,600}return \(\) => \{ cancelled = true; \};/.test(app),
+  // POST-PARITY R7B PP-5 — der Zweig ist um das Verwerfen eines unbrauchbaren Ausweises
+  // gewachsen; das Fenster reicht bis zum Ruecksprung, weiter nicht.
+  ok(/if \(isClientMode\(\)\) \{[\s\S]{0,1200}return \(\) => \{ cancelled = true; \};/.test(app),
     'DBLESS im Client-Modus kehrt der Start zurueck, ohne eine Datenbank zu oeffnen');
   // CENTRAL-UI-PARITY — hier hat sich die Zusage GEAENDERT, und zwar bewusst: frueher endete der
   // Client-Modus in einer eigenen, schlanken Oberflaeche. Jetzt fuehrt `ClientShell` nur noch zum
@@ -268,16 +270,17 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
     ok(refused, `READONLY ${name} kann nicht registriert werden`);
   }
 
-  // C3B: die Oberflaeche bietet GENAU EINEN schreibenden Weg an — das Rechnungsformular. Kein
-  // zweiter, und keiner, der an der Bruecke vorbei etwas anderes ruft.
-  const shell = src('src/components/startup/ClientShell.tsx');
+  // C3B bot die Huelle GENAU EINEN schreibenden Weg an — das Rechnungsformular. POST-PARITY R7B
+  // PP-7: seit die alte Client-Oberflaeche entfernt ist, hat die Huelle GAR KEINEN mehr. Sie meldet
+  // an; geschrieben wird danach nur in der gemeinsamen Oberflaeche ueber die gemeinsame Weiche.
+  const shell = code('src/components/startup/ClientShell.tsx');
   ok(!/products\.create|customers\.create|\.update|\.delete/.test(shell),
-    'READONLY die Client-Oberflaeche ruft keinen anderen schreibenden Befehl');
+    'READONLY die Client-Oberflaeche ruft keinen schreibenden Befehl');
   ok(!/read-only/.test(shell), 'READONLY …und behauptet nicht mehr, sie sei nur lesend');
-  ok(/ClientInvoiceCreate/.test(shell), 'READONLY der eine schreibende Weg ist das Rechnungsformular');
-  const form = src('src/components/client/ClientInvoiceCreate.tsx');
-  ok(/InvoiceSaveController/.test(form) && !/remoteRead\(/.test(form),
-    'READONLY …und es speichert ueber den Vertrag, nicht mit einem eigenen Aufruf');
+  ok(!/ClientInvoiceCreate|InvoiceSaveController|CommandSaveController|executeCommand|mutateViaPrimary|useSharedWrite|remoteRead\(/.test(shell),
+    'READONLY R7B PP-7 die Huelle hat keinen schreibenden Weg mehr — auch nicht das Rechnungsformular');
+  ok(!existsSync(resolvePath(repo, 'src/components/client')),
+    'READONLY R7B PP-7 …und die alten Client-Formulare (src/components/client) gibt es nicht mehr');
 }
 
 // ── 7) Server weg: sagen, nicht erfinden ──────────────────────────────────
@@ -332,13 +335,19 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
 
 // ── 9) Medien nur ueber die angemeldete Route ─────────────────────────────
 {
-  const shell = src('src/components/startup/ClientShell.tsx');
-  ok(/\$\{serverUrl\}\/api\/media\?key=\$\{encodeURIComponent\(key\)\}/.test(shell),
+  // POST-PARITY R7B PP-7 — die Bilder der alten Huelle sind mit ihr gegangen. Der lebende Weg ist
+  // die Galerie der gemeinsamen Oberflaeche auf dem zweiten Rechner (R5B): `client-media-source`.
+  const media = code('src/core/media/client-media-source.ts');
+  ok(/\$\{c\.serverUrl\}\/api\/media\?key=\$\{encodeURIComponent\(keys\[i\]\)\}/.test(media),
     'MEDIA Bilder kommen ueber die bestehende Medienroute');
-  ok(/Authorization: `Bearer \$\{token\}`/.test(shell), 'MEDIA …mit der Anmeldung, nie ohne');
-  ok(/if \(!res\.ok\) continue;/.test(shell), 'MEDIA ein fehlendes Bild bleibt ein fehlendes Bild');
-  ok(/data-client-no-media/.test(shell), 'MEDIA …und wird als solches angezeigt');
-  ok(!/file:\/\/|\\\\\\\\|smb:/.test(shell), 'MEDIA kein Pfad, keine Netzfreigabe');
+  ok(/Authorization: `Bearer \$\{c\.token\}`/.test(media), 'MEDIA …mit der Anmeldung, nie ohne');
+  ok(/if \(!c\?\.token\) throw new Error\('NOT_AUTHENTICATED'\)/.test(media),
+    'MEDIA …ohne Anmeldung wird gar nicht erst gefragt');
+  ok(/if \(!res\.ok\) throw new Error\(`MEDIA_UNAVAILABLE_\$\{res\.status\}`\)/.test(media),
+    'MEDIA ein fehlendes Bild bleibt ein fehlendes Bild — die Galerie ist dann ein Fehler, nie eine halbe');
+  ok(!/file:\/\/|\\\\\\\\|smb:/.test(media), 'MEDIA kein Pfad, keine Netzfreigabe');
+  ok(!/\/api\/media/.test(src('src/components/startup/ClientShell.tsx')),
+    'MEDIA R7B PP-7 die Anmeldehuelle hat keinen eigenen Medienweg mehr');
 
   const reads = src('src/core/bridge/read-commands.ts');
   // Seit C3C-FINAL nennt `products.get` neben dem Speicherschluessel auch die MEDIENKENNUNG:

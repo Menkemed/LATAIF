@@ -39,6 +39,7 @@ import { Bhd } from '@/components/ui/Bhd';
 import { sessionTenantId } from '@/core/data/shared-read';
 import { lotAggregatesFor } from '@/core/data/domain-reads';
 import { useSharedRead } from '@/core/data/shared-read';
+import { useAiIdentifyGate } from '@/core/ai/ai-availability';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -170,6 +171,8 @@ export function WatchList() {
   const [form, setForm] = useState<Partial<Product>>({
     condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {},
   });
+  // R7B PP-3 — auf PC2 erkennt der Primary; der Knopf weiß VOR dem Klick, ob das geht.
+  const aiGate = useAiIdentifyGate((form.images || []).length > 0);
   // Duplicate Detection — Matches werden gefüllt, wenn handleCreate ein
   // mögliches Duplikat erkennt; User entscheidet "Cancel" oder "Create anyway".
   const [duplicateMatches, setDuplicateMatches] = useState<DuplicateMatch[]>([]);
@@ -960,17 +963,21 @@ export function WatchList() {
                   <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
                     Fills brand, name, all category attributes, condition, market value, description — you can still edit anything after.
                   </div>
+                  {aiGate.reason && <div data-ai-reason style={{ fontSize: 11, color: '#AA6E6E', marginTop: 4 }}>{aiGate.reason}</div>}
                 </div>
                 <button
-                  disabled={aiBusy}
+                  disabled={aiBusy || aiGate.disabled}
+                  title={aiGate.reason}
+                  data-ai-identify
+                  data-ai-locked={aiGate.disabled ? 'true' : undefined}
                   className="cursor-pointer transition-colors"
                   style={{
-                    background: aiBusy ? '#6B7280' : '#0F0F10', color: '#FFFFFF',
+                    background: aiBusy || aiGate.disabled ? '#6B7280' : '#0F0F10', color: '#FFFFFF',
                     border: 'none', borderRadius: 8, fontSize: 12, padding: '8px 14px',
                   }}
                   onClick={async () => {
                     const ai = await import('@/core/ai/ai-service');
-                    if (!ai.isAiConfigured()) { alert('Set OpenAI API key in Settings > AI'); return; }
+                    if (!aiGate.client && !ai.isAiConfigured()) { alert('Set OpenAI API key in Settings > AI'); return; }
                     if (!form.categoryId) { alert('Select a category first'); return; }
                     const hasImage = (form.images || []).length > 0;
                     const hasHints = !!form.brand || !!form.name || !!form.sku;

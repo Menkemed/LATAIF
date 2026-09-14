@@ -446,15 +446,10 @@ const editBody = (id: string, revision: number, qty: number, reason: string, pri
 // Betrag ist dagegen genau das, was ein Mensch gesagt hat — und der bestehende
 // Überzahlungs→Guthaben-Vertrag bleibt richtig.
 {
-  const view = src('src/components/client/ClientInvoiceDetail.tsx');
-  const code = view.split(/\r?\n/).filter((l) => !l.trim().startsWith('//')).join('\n');
-  ok(/data-client-invoice-detail-amount/.test(code) && /type="number"/.test(code),
-    'INTENT der Benutzer TIPPT einen Betrag');
-  ok(/amount: Number\(amount\)/.test(code), 'INTENT …und genau der wird geschickt');
-  ok(!/openAmount\s*[,)]/.test(code.slice(code.indexOf('const pay = useCallback'), code.indexOf('if (loadError)'))),
-    'INTENT der offene Rest geht NICHT als Betrag mit');
-  ok(!/pay\s*remaining|payRemaining|restzahlung/i.test(code),
-    'INTENT es gibt keinen „zahle den Rest"-Knopf, der einen alten Rest mitschleppen koennte');
+  // POST-PARITY R7B PP-7 — die Pruefungen an der alten Client-Rechnungsansicht
+  // (`src/components/client/ClientInvoiceDetail.tsx`) sind mit ihr entfernt; die Zusage steht am Befehl.
+  ok(!existsSync(resolvePath(repo, 'src/components/client/ClientInvoiceDetail.tsx')),
+    'INTENT R7B PP-7 die alte Client-Rechnungsansicht gibt es nicht mehr');
 
   const cmd = src('src/core/bridge/invoice-lifecycle-commands.ts');
   ok(/amount must be a positive number/.test(cmd), 'INTENT der Befehl verlangt einen Betrag…');

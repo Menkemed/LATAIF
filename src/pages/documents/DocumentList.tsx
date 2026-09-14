@@ -2,7 +2,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { FileText, Image, File, Trash2, Upload, Grid, List } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
-import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
+import { primaryOnlyDeleteProps, blockDeleteOnClient, primaryOnlyLocked } from '@/core/data/primary-only';
+import { useElapsedSeconds } from '@/hooks/useElapsedSeconds';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { SearchSelect } from '@/components/ui/SearchSelect';
@@ -71,6 +72,12 @@ export function DocumentList() {
   const [uploadEntityId, setUploadEntityId] = useState('');
   const [uploading, setUploading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // POST-PARITY R7B PP-12 — läuft / Frist / erneut versuchen: sichtbar statt eines stummen Knopfs.
+  const [previewError, setPreviewError] = useState('');
+  const [previewTick, setPreviewTick] = useState(0);
+  const [ocrRunning, setOcrRunning] = useState(false);
+  const uploadSeconds = useElapsedSeconds(uploading);
+  const ocrSeconds = useElapsedSeconds(ocrRunning);
 
   useEffect(() => { loadDocuments(); }, [loadDocuments]);
 
@@ -78,16 +85,22 @@ export function DocumentList() {
   // ansieht. In dieser Tabelle steht die ganze Datei als Data-URL; die LISTE über das Netz mit
   // allen Inhalten zu schicken wären je Aufruf viele Megabyte für Bilder, die niemand geöffnet
   // hat. Am Primary steht der Inhalt ohnehin schon in der Zeile — dann tut das hier nichts.
+  // R7B PP-12 — eine Vorschau, die nicht kam, ist auf PC2 ein Satz mit „Try again" — kein leeres Feld.
   useEffect(() => {
     if (!showPreview || showPreview.filePath) return;
     const id = showPreview.id;
     let alive = true;
+    setPreviewError('');
     void getContent(id).then((content) => {
-      if (!alive || !content) return;
+      if (!alive) return;
+      if (!content) {
+        if (primaryOnlyLocked()) setPreviewError('The file could not be loaded from the main computer — it may still be busy.');
+        return;
+      }
       setShowPreview((p) => (p && p.id === id ? { ...p, filePath: content } : p));
     });
     return () => { alive = false; };
-  }, [showPreview, getContent]);
+  }, [showPreview, getContent, previewTick]);
 
   const filtered = useMemo(() => {
     if (!filterClass) return documents;
@@ -132,10 +145,11 @@ export function DocumentList() {
   async function handleOcr(doc: DocumentRow) {
     setOcrError('');
     const body = { documentId: doc.id, expectedRevision: doc.revision };
+    setOcrRunning(true);
     const r = await w.save<DocumentOcrDone>('documents.set_ocr', {
       local: () => extractOcrOnPrimary(body),
       remote: () => body,
-    });
+    }).finally(() => setOcrRunning(false));
     if (r.kind !== 'ok') { setOcrError(fehlertext(r)); return; }
     const v = r.value;
     if (!v.text) setOcrError('No text detected. Try a clearer photo.');
@@ -405,11 +419,17 @@ export function DocumentList() {
             </div>
           </div>
 
+          {uploading && (
+            <p data-document-upload-running style={{ fontSize: 12, color: '#6B7280' }}>
+              Saving on the main computer… {uploadSeconds}s. Large files can take up to a minute; this closes when the save is confirmed.
+            </p>
+          )}
+
           {/* Actions */}
           <div className="flex justify-end gap-3" style={{ paddingTop: 8 }}>
             <Button variant="ghost" onClick={() => setShowUpload(false)}>Cancel</Button>
             <Button variant="primary" onClick={() => void handleUpload()} disabled={!uploadFile || uploading || w.busy} data-document-upload-confirm>
-              {uploading ? 'Uploading...' : 'Upload'}
+              {uploading ? `Uploading… ${uploadSeconds}s` : 'Upload'}
             </Button>
           </div>
         </div>
@@ -424,12 +444,21 @@ export function DocumentList() {
               className="flex items-center justify-center rounded-md"
               style={{ minHeight: 300, maxHeight: 500, background: '#F2F7FA', marginBottom: 16, overflow: 'hidden' }}
             >
-              {isImage(showPreview.fileType) && showPreview.filePath ? (
+              {previewError ? (
+                <div className="text-center" style={{ padding: 40 }} data-document-preview-error>
+                  <p style={{ fontSize: 13, color: '#AA6E6E', marginBottom: 12 }}>{previewError}</p>
+                  <Button variant="secondary" onClick={() => setPreviewTick((t) => t + 1)} data-document-preview-retry>Try again</Button>
+                </div>
+              ) : isImage(showPreview.fileType) && showPreview.filePath ? (
                 <img
                   src={showPreview.filePath}
                   alt={showPreview.fileName}
                   style={{ maxWidth: '100%', maxHeight: 500, objectFit: 'contain' }}
                 />
+              ) : isImage(showPreview.fileType) && primaryOnlyLocked() ? (
+                <div className="text-center" style={{ padding: 40 }} data-document-preview-loading>
+                  <p style={{ fontSize: 13, color: '#6B7280' }}>Loading the file from the main computer…</p>
+                </div>
               ) : showPreview.fileType === 'application/pdf' ? (
                 <div className="text-center" style={{ padding: 40 }}>
                   <FileText size={48} strokeWidth={1} style={{ margin: '0 auto 16px', color: '#AA6E6E' }} />
@@ -483,7 +512,7 @@ export function DocumentList() {
                     onClick={() => void handleOcr(showPreview)}
                     disabled={w.busy}
                     data-document-ocr
-                  >{w.busy ? 'Extracting...' : showPreview.ocrText ? 'Re-run OCR' : 'Extract Text (OCR)'}</Button>
+                  >{ocrRunning ? `Extracting… ${ocrSeconds}s` : w.busy ? 'Extracting...' : showPreview.ocrText ? 'Re-run OCR' : 'Extract Text (OCR)'}</Button>
                 </div>
                 {showPreview.ocrText ? (
                   <pre style={{ fontSize: 12, color: '#4B5563', whiteSpace: 'pre-wrap', fontFamily: 'inherit', lineHeight: 1.6, maxHeight: 200, overflowY: 'auto', margin: 0 }}>

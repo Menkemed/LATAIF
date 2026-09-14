@@ -62,7 +62,6 @@ const { resetTransactionHealthForTest } = await import('../../src/core/db/transa
 const { installWriteGuard } = await import('../../src/core/db/write-guard.ts');
 const { SKU_SEQUENCES_DDL } = await import('../../src/core/products/sku-sequence.ts');
 const cmd = await import('../../src/core/bridge/service-commands.ts');
-const ui = await import('../../src/core/bridge/client-service-request.ts');
 const costs = await import('../../src/core/repairs/repair-cost.ts');
 const { executeCommand, ALLOWED_MUTATIONS, knownCommands } =
   await import('../../src/core/bridge/command-registry.ts');
@@ -199,8 +198,10 @@ const REPAIR_COMPARE = [
     'CALLPATH beide Bildschirme laden dieselbe Quelle');
   ok(/planRepairCreate\(/.test(service) && /buildRepairEditPatch\(/.test(service),
     'CALLPATH …und der Fernauftrag auch');
-  ok(src('src/core/bridge/client-service-request.ts').includes('repair-cost'),
-    'CALLPATH …und die Vorschau des Clients rechnet nicht selbst');
+  // R7B PP-7 — die Margen-Vorschau des alten Client-Formulars (`client-service-request`) ist mit ihm
+  // entfernt; die gemeinsame Oberflaeche rechnet ueber dieselben Primitive wie oben.
+  ok(!existsSync(resolvePath(repo, 'src/core/bridge/client-service-request.ts')),
+    'CALLPATH R7B PP-7 der alte Client-Rumpfbau (client-service-request) mit seiner Vorschau ist entfernt');
 
   // Und der Store rechnet weiterhin NICHTS davon — das ist der Grund, warum die Primitive nötig ist.
   // Die IMPLEMENTIERUNG, nicht die Schnittstellenzeile darueber — die traegt denselben Namen.
@@ -344,8 +345,8 @@ const REPAIR_COMPARE = [
     try { cmd.parseTransferUpdate({ id: 't1', expectedRevision: 1, [f]: 'x' }); } catch { threw = true; }
     ok(threw, `SCOPE ${f} wird abgewiesen — es ist lokal nicht editierbar`);
   }
-  ok(ui.TRANSFER_EDIT_FIELDS.join(',') === allowed.join(','),
-    `SCOPE und das Client-Formular kennt dieselben drei (${ui.TRANSFER_EDIT_FIELDS.join(',')})`);
+  // R7B PP-7 — der Feldsatz des alten Client-Formulars (`TRANSFER_EDIT_FIELDS` aus
+  // `client-service-request`) ist mit ihm entfernt; massgeblich ist der Pruefer oben.
 
   // §5 — die Unveränderlichkeit ist dokumentiert, nicht bloß unerwähnt.
   const mine = src('src/core/bridge/service-commands.ts');

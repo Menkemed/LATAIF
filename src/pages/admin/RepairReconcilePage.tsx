@@ -19,8 +19,21 @@ import { Button } from '@/components/ui/Button';
 import { useGoldStore } from '@/stores/goldStore';
 import { useRepairStore } from '@/stores/repairStore';
 import { usePermission } from '@/hooks/usePermission';
+import { PrimaryOnlyNotice } from '@/components/shared/PrimaryOnlyNotice';
+import { primaryOnlyLocked } from '@/core/data/primary-only';
 
+/**
+ * POST-PARITY R7B PP-6 — die Seite hat keinen schreibenden Handler (nur Anzeige); sie prüft
+ * trotzdem selbst, wo sie läuft, statt sich allein auf die Route zu verlassen.
+ */
 export function RepairReconcilePage() {
+  if (primaryOnlyLocked()) {
+    return <PrimaryOnlyNotice title="Repair reconcile" reason="This diagnostic view reads repair and gold drift from the database. Open it on the main computer." />;
+  }
+  return <RepairReconcilePageBody />;
+}
+
+function RepairReconcilePageBody() {
   const perm = usePermission();
   const navigate = useNavigate();
   // Stable selector for actions — avoid re-running effect every render

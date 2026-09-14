@@ -191,6 +191,12 @@ pub fn read_api_key(app_data_dir: &std::path::Path) -> Result<String, AiError> {
     Ok(key)
 }
 
+/// POST-PARITY R7B PP-3 — can this machine identify? Asked by a client BEFORE it sends a photo.
+/// The key is read exactly as the identify route reads it and dropped here; only yes/no leaves.
+pub fn key_present(app_data_dir: &std::path::Path) -> bool {
+    read_api_key(app_data_dir).is_ok()
+}
+
 /// Strip the model's answer down to what the mobile surface may adopt.
 ///
 /// The allow-list comes from the shared contract, so "what mobile may take" is one decision made in

@@ -41,3 +41,21 @@ export function blockDeleteOnClient(): boolean {
   try { window.alert(PRIMARY_ONLY_DELETE); } catch { /* kein Fenster, z. B. im Test */ }
   return true;
 }
+
+/**
+ * POST-PARITY R7B PP-6 — derselbe Riegel für die Handlungen der MASCHINE: Einstellungen,
+ * Nachbuchung, die Prüfstände, der Orphan-Storno. Sie sind auf PC2 schon an der Route ersetzt
+ * und haben dort keinen Fernweg; dieser Riegel steht trotzdem im Handler selbst — erreicht ihn
+ * etwas unerwartet (Tastatur, ein offener Dialog, ein künftiger Einstieg), kehrt er um, bevor
+ * irgendetwas angefasst wird. Am Primary `false`, dieselbe Wirkung wie immer.
+ */
+export function blockPrimaryOnlyOnClient(what: string): boolean {
+  if (!readsFromPrimary()) return false;
+  try { window.alert(primaryOnlyText(what)); } catch { /* kein Fenster, z. B. im Test */ }
+  return true;
+}
+
+/** Dieselbe Frage an Stellen ohne Oberfläche (Schreibhelfer): sie wirft, statt zu schreiben. */
+export function assertPrimaryOnly(what: string): void {
+  if (readsFromPrimary()) throw new Error(`PRIMARY_ONLY: ${primaryOnlyText(what)}`);
+}

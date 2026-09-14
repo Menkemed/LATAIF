@@ -209,9 +209,9 @@ export async function saveTemplateUpdate(
  * in die offene Klammer eines Fernauftrags schreibt. Auf PC2 gibt es ihn nicht: dort fuehrt der
  * Primary seine Monate selbst.
  */
-export function runDueGeneratorOnPrimary(): Promise<{ created: number; skipped: number; errors: string[] }> {
+export function runDueGeneratorOnPrimary(now?: string): Promise<{ created: number; skipped: number; errors: string[] }> {
   return runExclusive(async () => {
-    const r = useRecurringExpenseStore.getState().runDueGenerator();
+    const r = useRecurringExpenseStore.getState().runDueGenerator(now);
     if (r.created > 0) await saveDatabaseDurably();
     return r;
   });

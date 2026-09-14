@@ -56,74 +56,21 @@ const code = (p: string): string => src(p).split(/\r?\n/)
   .filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')); })
   .join('\n');
 
-const INVOICE = 'src/components/client/ClientInvoiceDetail.tsx';
-const ORDER = 'src/components/client/ClientOrderForm.tsx';
-const CONSIGN = 'src/components/client/ClientConsignmentForm.tsx';
-const TRANSFER = 'src/components/client/ClientTransferForm.tsx';
-const FORMS = [INVOICE, ORDER, CONSIGN, TRANSFER];
+// POST-PARITY R7B PP-7 — die alten Geldknoepfe (`src/components/client/ClientInvoiceDetail.tsx`,
+// `ClientOrderForm`, `ClientConsignmentForm`, `ClientTransferForm`) sind entfernt. Was hier bleibt,
+// prueft den Vertrag (`client-financial-request`), den echten Pruefer des Primary und den Waechter.
+const LEGACY = 'src/components/client';
 
 // ── 1) Kein Weg zur lokalen Datenbank ────────────────────────────────────
 {
-  const seen = new Set<string>();
-  const offenders: string[] = [];
-  const visit = (file: string): void => {
-    if (seen.has(file)) return;
-    seen.add(file);
-    const text = readFileSync(resolvePath(repo, file), 'utf8');
-    const stripped = text.split(/\r?\n/).filter((l) => {
-      const t = l.trim();
-      return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'));
-    }).join('\n');
-    if (/\bgetDatabase\b|\binitDatabase\b|useInvoiceStore|useOrderStore|useAgentStore|useConsignmentStore/.test(stripped)) {
-      offenders.push(file);
-    }
-    for (const m of stripped.matchAll(/from '(@\/[^']+)'/g)) {
-      const rel = 'src/' + m[1].slice(2);
-      for (const cand of [rel, rel + '.ts', rel + '.tsx']) {
-        if (existsSync(resolvePath(repo, cand)) && /\.(ts|tsx)$/.test(cand)) { visit(cand); break; }
-      }
-    }
-    for (const m of stripped.matchAll(/from '(\.[^']+)'/g)) {
-      const base = resolvePath(dirname(resolvePath(repo, file)), m[1]);
-      for (const cand of [base, base + '.ts', base + '.tsx']) {
-        if (existsSync(cand)) {
-          if (/\.(ts|tsx)$/.test(cand)) visit(cand.slice(repo.length + 1).replace(/\\/g, '/'));
-          break;
-        }
-      }
-    }
-  };
-  for (const f of FORMS) visit(f);
-  ok(offenders.length === 0,
-    `DBLESS nirgends im Importbaum wird die lokale Datenbank oder ein Business-Store benutzt (${offenders.join(', ') || 'keine'})`);
-  ok([...seen].every((f) => !f.startsWith('src/core/db/')), 'DBLESS und keine Datei aus der Datenschicht');
-  for (const f of FORMS) {
-    ok(!/outbox|localStorage|indexedDB/i.test(code(f)), `DBLESS ${f} legt keinen Ausgangskorb an`);
-    ok(/client-financial-request/.test(src(f)), `WIRED ${f} faehrt den geprueften Vertrag`);
-  }
+  ok(!existsSync(resolvePath(repo, LEGACY)),
+    'DBLESS R7B PP-7 die alten Client-Geldknoepfe (src/components/client) gibt es nicht mehr');
 }
 
 // ── 2) Ein Wächter je Vorsatz ────────────────────────────────────────────
 {
-  const inv = code(INVOICE);
-  for (const c of ['editCtl', 'payCtl', 'creditCtl', 'payEditCtl', 'payDelCtl']) {
-    ok(new RegExp(`const ${c} = useMemo`).test(inv), `IDS die Rechnungsansicht hat einen eigenen Waechter ${c}`);
-  }
-  ok((inv.match(/new CommandSaveController</g) ?? []).length === 5,
-    'IDS …genau fuenf, nicht einen gemeinsamen');
-  ok(/const soldController = useMemo/.test(code(TRANSFER)) && /const settleController = useMemo/.test(code(TRANSFER)),
-    'IDS Verkauf und Abrechnung haben je einen eigenen');
-  ok(/const payoutController = useMemo/.test(code(CONSIGN)), 'IDS die Auszahlung ebenso');
-  ok(/const convertController = useMemo/.test(code(ORDER)), 'IDS die Rechnungserzeugung ebenso');
-  for (const f of FORMS) {
-    ok(!/new CommandSaveAttempt\(/.test(code(f)), `IDS ${f} erzeugt keine Kennung selbst`);
-  }
-  // Die Bestaetigung „trotzdem verkaufen" ist ein NEUER Vorsatz.
-  const tf = code(TRANSFER);
-  ok(/data-client-transfer-sold-anyway[\s\S]{0,400}soldController\.forget\(\)/.test(tf),
-    'IDS „Sell anyway" verwirft den beantworteten Versuch…');
-  ok(/data-client-transfer-sold-anyway[\s\S]{0,700}attempt\.send\(markSoldRequest\([^)]*true\)\)/.test(tf),
-    'IDS …und schickt selbst, mit der ausdruecklichen Bestaetigung');
+  ok(!existsSync(resolvePath(repo, LEGACY + '/ClientInvoiceDetail.tsx')),
+    'IDS R7B PP-7 die alte Rechnungsansicht mit ihren fuenf Waechtern ist entfernt (Waechter-Vertrag: Abschnitt 5)');
 }
 
 // ── 3) Was die Knöpfe schicken, hält der echte Prüfer aus ────────────────
@@ -174,44 +121,18 @@ const FORMS = [INVOICE, ORDER, CONSIGN, TRANSFER];
 
 // ── 4) Klasse C taucht in keiner Oberfläche auf ──────────────────────────
 {
-  const all = FORMS.map(code).join('\n');
-  const CLASS_C = ['invoices.delete', 'invoices.set_special_mark', 'orders.delete',
-    'orders.cancel_with_money', 'consignments.delete', 'consignments.cancel_sale',
-    'transfers.delete', 'transfers.undo_convert', 'repairs.delete'];
-  for (const op of CLASS_C) {
-    // Als GANZER Name, nicht als Teilzeichenkette: `invoices.delete_payment` enthaelt
-    // `invoices.delete`, und die beiden sind nicht dasselbe.
-    const quoted = new RegExp("['\"`]" + op.replace(/\./g, "\\.") + "['\"`]");
-    ok(!quoted.test(all), `SCOPE ${op} steht in keiner Client-Oberflaeche`);
-  }
-  // Eine Guthaben-Zahlung bekommt keinen Berichtigen-Knopf.
-  ok(/data-client-invoice-payment-locked/.test(code(INVOICE)),
-    'SCOPE eine Guthaben-Zahlung wird als nicht berichtigbar gezeigt, statt einen toten Knopf anzubieten');
+  ok(!existsSync(resolvePath(repo, LEGACY + '/ClientTransferForm.tsx')),
+    'SCOPE R7B PP-7 die alten Client-Oberflaechen, deren Klasse-C-Freiheit hier geprueft wurde, sind entfernt');
 }
 
 // ── 4b) Nach einer Geldaktion gilt die NEUE Fassung ──────────────────────
 //
-// Der Befund des Zwei-Instanzen-E2E: die Formulare trugen weiter die Fassung, die sie beim Laden
-// gelesen hatten. Die naechste Aktion an demselben Vorgang nannte damit einen Stand, den der
-// eigene Klick gerade ueberholt hatte — und wurde zu Recht abgewiesen. Jede Antwort traegt die
-// neue Fassung; sie wird uebernommen.
+// Der Befund des Zwei-Instanzen-E2E galt den alten Formularen (sie trugen die beim Laden gelesene
+// Fassung weiter). Die gemeinsame Oberflaeche laedt nach dem Erfolg frisch — geprueft in
+// test/uiparity/r4c-write-matrix.test.ts §5.
 {
-  const tf = code(TRANSFER);
-  ok((tf.match(/setRevision\(/g) ?? []).length >= 4,
-    `REVISION das Transferformular uebernimmt die neue Fassung nach jeder Wirkung (${(tf.match(/setRevision\(/g) ?? []).length} Stellen)`);
-  for (const anchor of ['markSoldRequest', 'markSettledRequest', 'transferReturnRequest']) {
-    // Die AUFRUFSTELLE, nicht die Importzeile ganz oben — die traegt denselben Namen.
-    const at = tf.lastIndexOf(anchor);
-    ok(at > 0 && /setRevision\(/.test(tf.slice(at, at + 900)),
-      `REVISION …auch nach ${anchor}`);
-  }
-  const cf = code(CONSIGN);
-  const payoutAt = cf.lastIndexOf('recordPayoutRequest');
-  ok(payoutAt > 0 && /setRevision\(/.test(cf.slice(payoutAt, payoutAt + 900)),
-    'REVISION die Auszahlung ebenso — sonst scheitert die zweite Teilzahlung an sich selbst');
-  // Die Rechnungsansicht macht es anders, aber nicht schlechter: sie laedt nach jeder Wirkung neu.
-  ok(/if \(out\.kind === 'ok'\) setTick/.test(code(INVOICE)),
-    'REVISION die Rechnungsansicht laedt nach jeder Wirkung neu — dieselbe Zusage, anderer Weg');
+  ok(!existsSync(resolvePath(repo, LEGACY + '/ClientConsignmentForm.tsx')),
+    'REVISION R7B PP-7 die alten Formulare, deren Fassungs-Uebernahme hier geprueft wurde, sind entfernt');
 }
 
 // ── 5) Eine Kennung pro Vorsatz — am echten Wächter ──────────────────────

@@ -58,21 +58,6 @@ const storage = {
 const cm = await import('../../src/core/bridge/client-mode.ts');
 const { CommandSaveController, CommandSaveAttempt } = await import('../../src/core/bridge/client-command-save.ts');
 const { stageImage, StagingUploadError } = await import('../../src/core/bridge/client-staging-upload.ts');
-// Der Vertrag der Formulare — Feldliste und Unterschiedsbildung — liegt in einem eigenen Modul.
-// Die Komponenten selbst sind Anzeige; ihre Zusagen werden hier am Quelltext geprueft.
-const draft = await import('../../src/core/bridge/client-masterdata-draft.ts');
-const customerUi = {
-  CLIENT_CUSTOMER_FIELDS: draft.CLIENT_CUSTOMER_FIELDS,
-  draftFromRemote: (row: Record<string, unknown>) => draft.draftFrom(draft.CLIENT_CUSTOMER_FIELDS, row),
-  changedFields: (base: draft.Draft, now: draft.Draft) =>
-    draft.diffDraft(draft.CLIENT_CUSTOMER_FIELDS, draft.CUSTOMER_NUMERIC, base, now),
-};
-const productUi = {
-  CLIENT_PRODUCT_FIELDS: draft.CLIENT_PRODUCT_FIELDS,
-  draftFromRemote: (row: Record<string, unknown>) => draft.draftFrom(draft.CLIENT_PRODUCT_FIELDS, row),
-  changedFields: (base: draft.Draft, now: draft.Draft) =>
-    draft.diffDraft(draft.CLIENT_PRODUCT_FIELDS, draft.PRODUCT_NUMERIC, base, now),
-};
 const { parseCustomerCreate, parseCustomerUpdate } = await import('../../src/core/bridge/customer-commands.ts');
 const { parseProductCreate, parseProductUpdate } = await import('../../src/core/bridge/product-commands.ts');
 
@@ -85,48 +70,22 @@ const code = (p: string): string => src(p)
   .filter((l) => { const t = l.trim(); return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*')); })
   .join('\n');
 
-const CUSTOMER_FORM = 'src/components/client/ClientCustomerForm.tsx';
-const PRODUCT_FORM = 'src/components/client/ClientProductForm.tsx';
+// POST-PARITY R7B PP-7 — die alten Kunden-/Artikelformulare (`src/components/client/`), die
+// Bereiche der alten Huelle und ihr Formularvertrag (`client-masterdata-draft.ts`) sind entfernt.
+// Was hier bleibt, prueft die neutrale Ablage, den echten Pruefer des Primary (mit woertlich
+// gebauten Ruempfen) und den Waechter.
 const UPLOAD = 'src/core/bridge/client-staging-upload.ts';
 
 // ── 1) Kein Weg zur lokalen Datenbank — im ganzen Importbaum ──────────────
 {
-  const seen = new Set<string>();
-  const offenders: string[] = [];
-  const visit = (file: string): void => {
-    if (seen.has(file)) return;
-    seen.add(file);
-    const text = readFileSync(resolvePath(repo, file), 'utf8');
-    const stripped = text.split(/\r?\n/).filter((l) => {
-      const t = l.trim();
-      return !(t.startsWith('//') || t.startsWith('*') || t.startsWith('/*'));
-    }).join('\n');
-    if (/\bgetDatabase\b|\binitDatabase\b|useProductStore|useCustomerStore|useInvoiceStore|useOrderStore/.test(stripped)) {
-      offenders.push(file);
-    }
-    for (const m of stripped.matchAll(/from '(@\/[^']+)'/g)) {
-      const rel = 'src/' + m[1].slice(2);
-      for (const cand of [rel, rel + '.ts', rel + '.tsx']) {
-        if (existsSync(resolvePath(repo, cand)) && /\.(ts|tsx)$/.test(cand)) { visit(cand); break; }
-      }
-    }
-  };
-  visit(CUSTOMER_FORM);
-  visit(PRODUCT_FORM);
-  visit(UPLOAD);
-
-  ok(seen.size > 3, `DBLESS der Importbaum wurde wirklich abgelaufen (${seen.size} Dateien)`);
-  ok(offenders.length === 0,
-    `DBLESS nirgends darin wird die lokale Datenbank oder ein Business-Store benutzt (${offenders.join(', ') || 'keine'})`);
-  ok([...seen].every((f) => !f.startsWith('src/core/db/')),
-    `DBLESS und keine Datei aus der Datenschicht ist dabei (${[...seen].filter((f) => f.startsWith('src/core/db/')).join(', ') || 'keine'})`);
-  for (const f of [CUSTOMER_FORM, PRODUCT_FORM]) {
-    ok(!/outbox|localStorage|indexedDB/i.test(code(f)), `DBLESS ${f} legt keinen eigenen Ausgangskorb an`);
-    ok(/remoteRead/.test(src(f)), `DBLESS ${f} holt seine Daten aus der Fernquelle`);
-    ok(/client-masterdata-draft/.test(src(f)),
-      `WIRED ${f} faehrt genau den Vertrag, der hier geprueft wird`);
-    ok(/diffDraft\(/.test(code(f)), `WIRED ${f} bildet den Unterschied nicht selbst`);
-  }
+  ok(!existsSync(resolvePath(repo, 'src/components/client')),
+    'DBLESS R7B PP-7 die alten Kunden-/Artikelformulare (src/components/client) gibt es nicht mehr');
+  ok(!existsSync(resolvePath(repo, 'src/core/bridge/client-masterdata-draft.ts')),
+    'DBLESS R7B PP-7 ihr Formularvertrag (client-masterdata-draft) ist mit ihnen entfernt');
+  const up = code(UPLOAD);
+  ok(!/\bgetDatabase\b|\binitDatabase\b|use[A-Z][A-Za-z]*Store\b|@\/core\/db\//.test(up),
+    'DBLESS die neutrale Ablage fasst weder die lokale Datenbank noch einen Business-Store an');
+  ok(!/outbox|localStorage|indexedDB/i.test(up), 'DBLESS …und legt keinen eigenen Ausgangskorb an');
 }
 
 // ── 2) Beim Ändern wird NUR der Unterschied geschickt ─────────────────────
@@ -134,69 +93,36 @@ const UPLOAD = 'src/core/bridge/client-staging-upload.ts';
 // Ein Formular, das alles zurückschickt, überschreibt auch das, was jemand anderes inzwischen
 // geändert hat — mit dem Stand, den dieser Rechner beim Laden gesehen hat.
 {
-  const loaded = customerUi.draftFromRemote({
-    id: 'c1', firstName: 'Ali', lastName: 'Hassan', phone: '+973 1', vipLevel: 2, notes: 'alt',
-  });
-  ok(loaded.firstName === 'Ali' && loaded.vipLevel === '2',
-    `DIFF der geladene Stand wird zum Formularstand (${JSON.stringify(loaded)})`);
-  ok(Object.keys(customerUi.changedFields(loaded, loaded)).length === 0,
-    'DIFF ohne Aenderung wird nichts geschickt');
-
-  const touched = { ...loaded, phone: '+973 999' };
-  const diff = customerUi.changedFields(loaded, touched);
-  ok(Object.keys(diff).join(',') === 'phone' && diff.phone === '+973 999',
-    `DIFF nur das angefasste Feld geht raus (${JSON.stringify(diff)})`);
-
-  const cleared = customerUi.changedFields(loaded, { ...loaded, budgetMin: '' });
-  ok(Object.keys(cleared).length === 0, 'DIFF ein leeres Feld, das leer war, ist keine Aenderung');
-  const emptied = customerUi.changedFields({ ...loaded, budgetMin: '500' }, { ...loaded, budgetMin: '' });
-  ok(emptied.budgetMin === null, 'DIFF ein GELEERTES Zahlenfeld heisst „kein Wert", nicht 0');
-  const numeric = customerUi.changedFields(loaded, { ...loaded, vipLevel: '3' });
-  ok(numeric.vipLevel === 3 && typeof numeric.vipLevel === 'number',
-    'DIFF und eine Zahl geht als Zahl raus — der Primary weist Text ab');
-
-  // Und der ECHTE Pruefer nimmt genau diesen Rumpf an.
-  const parsed = parseCustomerUpdate({ id: 'c1', ...diff });
+  // R7B PP-7 — die Unterschiedsbildung des alten Formularvertrags (`client-masterdata-draft`) ist mit
+  // ihm entfernt. Der Unterschiedsrumpf steht woertlich hier; der ECHTE Pruefer nimmt genau ihn an.
+  const parsed = parseCustomerUpdate({ id: 'c1', phone: '+973 999' });
   ok(parsed.id === 'c1' && parsed.fields.phone === '+973 999', 'DIFF der Pruefer des Primary nimmt ihn an');
 
   // Dasselbe beim Artikel.
-  const pLoaded = productUi.draftFromRemote({ brand: 'Rolex', name: 'Datejust', purchasePrice: 100 });
-  const pDiff = productUi.changedFields(pLoaded, { ...pLoaded, name: 'Datejust 41' });
-  ok(Object.keys(pDiff).join(',') === 'name', `DIFF auch beim Artikel nur das Angefasste (${JSON.stringify(pDiff)})`);
-  const pParsed = parseProductUpdate({ id: 'p1', ...pDiff });
+  const pParsed = parseProductUpdate({ id: 'p1', name: 'Datejust 41' });
   ok(pParsed.fields.name === 'Datejust 41', 'DIFF und der Pruefer nimmt ihn an');
 }
 
 // ── 3) Was die Formulare schicken, erlaubt der Primary — und mehr nicht ───
 {
-  // Der Kunde: die Feldliste des Formulars ist eine TEILMENGE dessen, was der Primary annimmt.
-  const draft: Record<string, string> = {};
-  for (const f of customerUi.CLIENT_CUSTOMER_FIELDS) draft[f] = f === 'vipLevel' ? '1' : `wert-${f}`;
-  const body = customerUi.changedFields(
-    Object.fromEntries(customerUi.CLIENT_CUSTOMER_FIELDS.map((f) => [f, ''])) as never,
-    draft as never,
-  );
-  // budgetMin/budgetMax sind Zahlenfelder — der Text oben ergibt NaN, also hier echte Zahlen.
-  body.budgetMin = 100;
-  body.budgetMax = 200;
-  body.vipLevel = 1;
+  // R7B PP-7 — der Rumpf mit jedem Feld des (entfernten) Kundenformulars, woertlich; die Pruefungen
+  // an seiner Feldliste sind mit ihr entfernt.
+  const body: Record<string, unknown> = {
+    firstName: 'wert-firstName', lastName: 'wert-lastName', company: 'wert-company', phone: 'wert-phone',
+    whatsapp: 'wert-whatsapp', email: 'wert-email', country: 'wert-country', language: 'wert-language',
+    budgetMin: 100, budgetMax: 200, vipLevel: 1,
+    customerType: 'wert-customerType', salesStage: 'wert-salesStage', notes: 'wert-notes',
+  };
   let accepted = true;
   let why = '';
   try { parseCustomerCreate(body); } catch (e) { accepted = false; why = String(e); }
   ok(accepted, `PAYLOAD jedes Feld des Kundenformulars ist erlaubt (${why})`);
 
-  ok(!customerUi.CLIENT_CUSTOMER_FIELDS.some((f) => ['id', 'branchId', 'totalRevenue', 'purchaseCount'].includes(f)),
-    'PAYLOAD und keines der Felder gehoert dem Primary');
-
-  // Der Artikel: dasselbe, plus die drei Dinge, die es NICHT gibt.
-  ok(!productUi.CLIENT_PRODUCT_FIELDS.some((f) => ['sku', 'quantity', 'categoryId', 'images'].includes(f as string)),
-    `PAYLOAD das Artikelformular kennt weder SKU noch Menge noch Bilder als Feld (${productUi.CLIENT_PRODUCT_FIELDS.join(', ')})`);
-  const pDraft: Record<string, string> = {};
-  for (const f of productUi.CLIENT_PRODUCT_FIELDS) pDraft[f] = f.includes('Price') ? '' : `wert-${f}`;
-  const pAlle = productUi.changedFields(
-    Object.fromEntries(productUi.CLIENT_PRODUCT_FIELDS.map((f) => [f, ''])) as never,
-    pDraft as never,
-  ) as Record<string, unknown>;
+  // Der Artikel: jedes Textfeld des (entfernten) Artikelformulars, woertlich.
+  const pAlle: Record<string, unknown> = {
+    brand: 'wert-brand', name: 'wert-name', condition: 'wert-condition', storageLocation: 'wert-storageLocation',
+    stockStatus: 'wert-stockStatus', taxScheme: 'wert-taxScheme', sourceType: 'wert-sourceType', notes: 'wert-notes',
+  };
   // Seit R5B (`bc8220e`) entscheidet der Primary beim ANLEGEN Lagerstatus und Herkunft selbst (ein neuer
   // Artikel ist eigener Bestand, auf Lager). Diese beiden Felder gehoeren beim Anlegen nicht in den Rumpf —
   // die Erwartung „jedes Formularfeld ist erlaubt" war hier veraltet. Dass sie ABGEWIESEN werden, wird
@@ -216,13 +142,7 @@ const UPLOAD = 'src/core/bridge/client-staging-upload.ts';
     try { parseProductCreate({ ...pBody, [k]: pAlle[k] }); } catch (e) { why = String(e); }
     ok(/the primary decides/.test(why), `PAYLOAD ${k} beim Anlegen wird vom Primary abgewiesen (${why || 'ANGENOMMEN'})`);
   }
-
-  const form = code(PRODUCT_FORM);
-  ok(!/peekSku|nextAvailableSku|allocateSku/.test(form),
-    'PAYLOAD das Formular zeigt keine SKU-Vorschau — sie waere eine Luege');
-  ok(/The primary assigns the item number/.test(src(PRODUCT_FORM)),
-    'PAYLOAD …und sagt dem Benutzer, wer sie vergibt');
-  ok(/outcome\.value\.sku/.test(form), 'PAYLOAD angezeigt wird die Nummer des Primary');
+  // R7B PP-7 — die SKU-Anzeige-Pruefungen am alten Artikelformular sind mit ihm entfernt.
 }
 
 // ── 4) Der Speichervertrag an den echten Knöpfen ──────────────────────────
@@ -265,15 +185,7 @@ const UPLOAD = 'src/core/bridge/client-staging-upload.ts';
   const clash = await a3.send({}, (async () => reply(409, { ok: false, error: 'BRIDGE_COMMAND_ID_CONFLICT', outcome: 'not_executed' })) as unknown as typeof fetch);
   ok(clash.kind === 'not_executed', `SAVE ein 409 MIT outcome ist der Kennungskonflikt (${JSON.stringify(clash)})`);
 
-  // Und die Oberflaechen halten sich daran.
-  for (const f of [CUSTOMER_FORM, PRODUCT_FORM]) {
-    const c = code(f);
-    ok(/controller\.beginAttempt\(\)/.test(c) && !/new CommandSaveAttempt\(/.test(c),
-      `SAVE ${f} vergibt keine Kennung an der Wache vorbei`);
-    ok(!/setTimeout|setInterval/.test(c), `SAVE ${f} hat keinen automatischen zweiten Versuch`);
-    ok(/disabled=\{pending\}/.test(c), `SAVE ${f} veraendert die Eingabe nicht, waehrend ein Ausgang offen ist`);
-    ok(/not known/.test(src(f)), `SAVE ${f} sagt dem Benutzer, dass der Ausgang offen ist`);
-  }
+  // R7B PP-7 — die Knopf-Pruefungen an den alten Formularen sind mit ihnen entfernt.
   ok(CommandSaveAttempt !== undefined, 'SAVE der Vertrag liegt im gemeinsamen Modul');
 }
 
@@ -313,33 +225,35 @@ const UPLOAD = 'src/core/bridge/client-staging-upload.ts';
   ok(refused?.code === 'MOBILE_UPLOAD_UNSUPPORTED_MIME',
     `MEDIA der Grund des Primary kommt beim Benutzer an (${refused?.code})`);
 
-  const formCode = code(PRODUCT_FORM);
-  ok(/stagingIds: slots\.map\(/.test(formCode) && /\{ stagingId: s\.stagingId \}/.test(formCode),
-    'MEDIA der Auftrag traegt nur Kennungen, keine Bytes');
-  // Seit C3C-FINAL kann dasselbe Formular auch die Galerie eines BESTEHENDEN Artikels planen: eine
-  // Liste von Plaetzen, jeder entweder ein behaltenes Bild oder ein neues.
-  ok(/keep: s\.mediaId/.test(formCode) && /gallery: plan/.test(formCode),
-    'MEDIA …und beim Aendern eine geordnete Liste aus Behalten und Neu');
-  ok(/galleryTouched \? \{ gallery: plan \} : \{\}/.test(formCode),
-    'MEDIA ohne angefasste Galerie wird sie gar nicht erst mitgeschickt (MEDIA-EDIT-PRESERVE)');
-  ok(!/dataBase64|data:image/.test(formCode),
-    'MEDIA im Auftrag steht keine einzige Bild-Nutzlast');
-  ok(/prev\.some\(\(x\) => x\.kind === 'new' && x\.stagingId === up\.stagingId\)/.test(formCode),
-    'MEDIA dasselbe Bild zweimal bleibt EIN Bild — der Primary wuerde es sonst abweisen');
+  // POST-PARITY R7B PP-7 — der Galerieplan des alten Artikelformulars ist mit ihm gegangen. Der
+  // lebende Plan der gemeinsamen Oberflaeche (ProductDetail, R6F) ist `planRemoteGallery`: dieselben
+  // Plaetze (`{ keep }` / `{ stagingId }`), hier am echten Code geprueft.
+  const { planRemoteGallery, GalleryPlanError } = await import('../../src/core/products/gallery-plan.ts');
+  const neu = 'b'.repeat(64);
+  const plan = await planRemoteGallery(
+    ['blob:alt-1', 'data:image/jpeg;base64,AAAA'],
+    [{ url: 'blob:alt-1', mediaId: 'm1' }],
+    async () => [neu],
+  );
+  ok(JSON.stringify(plan) === JSON.stringify([{ keep: 'm1' }, { stagingId: neu }]),
+    `MEDIA beim Aendern eine geordnete Liste aus Behalten und Neu (${JSON.stringify(plan)})`);
+  ok(!/dataBase64|data:image/.test(JSON.stringify(plan)),
+    'MEDIA im Auftrag steht keine einzige Bild-Nutzlast — nur Kennungen');
+  let gallWhy = '';
+  try { parseProductUpdate({ id: 'p1', gallery: plan }); } catch (e) { gallWhy = String(e); }
+  ok(gallWhy === '', `MEDIA …und der Pruefer des Primary nimmt den Plan an (${gallWhy || 'ok'})`);
+  let doppelt: string | null = null;
+  try {
+    await planRemoteGallery(['blob:alt-1', 'blob:alt-1'], [{ url: 'blob:alt-1', mediaId: 'm1' }], async () => []);
+  } catch (e) { doppelt = (e as InstanceType<typeof GalleryPlanError>).code; }
+  ok(doppelt === 'MEDIA_EDIT_DUPLICATE_IMAGE',
+    `MEDIA dasselbe Bild zweimal wird nicht geschickt — der Primary wuerde es sonst abweisen (${doppelt})`);
 }
 
 // ── 6) Die Schale bietet genau die freigegebenen Schreibwege an ───────────
 {
-  const shell = code('src/components/startup/ClientShell.tsx');
-  ok(/ClientInvoiceCreate/.test(shell) && /ClientCustomerForm/.test(shell) && /ClientProductForm/.test(shell),
-    'SHELL drei Formulare: Rechnung, Kunde, Artikel');
-  ok(/editCustomerId/.test(shell) && /editProductId/.test(shell),
-    'SHELL …und je ein Aendern, das an einem GELESENEN Datensatz beginnt');
-  ok(!/data-client-delete|deleteCustomer|deleteProduct/.test(shell),
-    'SHELL kein Loeschen — das steht auf keiner Zulassungsliste');
-  // Das Aendern beginnt nie an einer frei eingetippten Kennung.
-  ok(/setEditCustomerId\(s\(detail\.id\)\)/.test(shell) && /setEditProductId\(s\(detail\.id\)\)/.test(shell),
-    'SHELL die Kennung kommt aus dem gelesenen Datensatz, nicht aus einem Eingabefeld');
+  ok(!/ClientCustomerForm|ClientProductForm|ClientInvoiceCreate|data-client-edit-/.test(code('src/components/startup/ClientShell.tsx')),
+    'SHELL R7B PP-7 die Huelle bietet keine alten Formulare mehr an — geschrieben wird nur in der gemeinsamen Oberflaeche');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3c client masterdata ui: ${PASS} passed, ${fails.length} failed`);

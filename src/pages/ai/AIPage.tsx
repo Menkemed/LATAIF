@@ -14,6 +14,12 @@ import { isAiConfigured } from '@/core/ai/ai-service';
 import { runBusinessQuery, type ChatMsg } from '@/core/ai/business-engine';
 import type { AIBlock, Cell, KPI, Tone } from '@/core/ai/business-tools';
 import { exportExcel } from '@/core/utils/export-file';
+import { PrimaryOnlyNotice } from '@/components/shared/PrimaryOnlyNotice';
+import { aiTextLocked } from '@/core/ai/ai-availability';
+
+/** POST-PARITY R7B PP-3 — was die Seite auf einem Rechner ohne eigene Datenbank sagt. */
+export const AI_PAGE_PRIMARY_ONLY =
+  "The AI assistant answers from the business data with the main computer's AI key. It runs where both live — open it on the main computer.";
 
 interface ChatTurn {
   id: string;
@@ -206,7 +212,13 @@ function BlockView({ b }: { b: AIBlock }) {
   );
 }
 
+/** R7B PP-3 — auf PC2 bewusst nicht fern: die Seite sagt es, statt nach der ersten Frage zu scheitern. */
 export function AIPage() {
+  if (aiTextLocked()) return <PrimaryOnlyNotice title="AI" reason={AI_PAGE_PRIMARY_ONLY} />;
+  return <AIPageBody />;
+}
+
+function AIPageBody() {
   const configured = isAiConfigured();
   const [turns, setTurns] = useState<ChatTurn[]>([]);
   const [history, setHistory] = useState<ChatMsg[]>([]);

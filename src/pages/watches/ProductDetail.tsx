@@ -42,6 +42,7 @@ import type { AiCategoryId } from '@/core/ai/ai-service';
 import { useSharedRead, sessionTenantId } from '@/core/data/shared-read';
 import { productDetailReadsFor } from '@/core/data/page-reads';
 import { productLotsFor } from '@/core/data/domain-reads';
+import { useAiIdentifyGate, aiTextLocked, AI_TEXT_ON_PRIMARY } from '@/core/ai/ai-availability';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -108,6 +109,8 @@ export function ProductDetail() {
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
+  // R7B PP-3 — auf PC2 erkennt der Primary (auch am gespeicherten Hauptbild); Preisvorschlag bleibt am Primary.
+  const aiGate = useAiIdentifyGate((form.images || []).length > 0);
   const [aiResult, setAiResult] = useState<string | null>(null);
   const [showHistory, setShowHistory] = useState(false);
   const [lotsExpanded, setLotsExpanded] = useState(true);
@@ -575,7 +578,8 @@ export function ProductDetail() {
                     setAiResult(`Suggested: ${result.suggestedPrice} BHD (${result.minPrice}-${result.maxPrice})\n${result.reasoning}`);
                   } catch (e) { setAiResult(String(e)); }
                   setAiLoading(false);
-                }} disabled={aiLoading}><Sparkles size={14} /> {aiLoading ? 'Analyzing...' : 'AI Price'}</Button>
+                }} disabled={aiLoading || aiTextLocked()} title={aiTextLocked() ? AI_TEXT_ON_PRIMARY : undefined}
+                  data-ai-locked={aiTextLocked() ? 'true' : undefined}><Sparkles size={14} /> {aiLoading ? 'Analyzing...' : 'AI Price'}</Button>
                 {perm.canEditProducts && <Button variant="secondary" onClick={() => {
                   // Enter edit with a CLEAN slate: media is not dirty and the draft is not yet seeded.
                   // Until the user touches an image the save is text-only and never reconciles the
@@ -674,17 +678,21 @@ export function ProductDetail() {
                       <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
                         Fills brand, name, category fields, condition, market value from the photo or hints (brand/name/SKU).
                       </div>
+                      {aiGate.reason && <div data-ai-reason style={{ fontSize: 11, color: '#AA6E6E', marginTop: 4 }}>{aiGate.reason}</div>}
                     </div>
                     <button
-                      disabled={aiBusy}
+                      disabled={aiBusy || aiGate.disabled}
+                      title={aiGate.reason}
+                      data-ai-identify
+                      data-ai-locked={aiGate.disabled ? 'true' : undefined}
                       className="cursor-pointer transition-colors"
                       style={{
-                        background: aiBusy ? '#6B7280' : '#0F0F10', color: '#FFFFFF',
+                        background: aiBusy || aiGate.disabled ? '#6B7280' : '#0F0F10', color: '#FFFFFF',
                         border: 'none', borderRadius: 8, fontSize: 12, padding: '8px 14px',
                       }}
                       onClick={async () => {
                         const ai = await import('@/core/ai/ai-service');
-                        if (!ai.isAiConfigured()) { alert('Set OpenAI API key in Settings > AI'); return; }
+                        if (!aiGate.client && !ai.isAiConfigured()) { alert('Set OpenAI API key in Settings > AI'); return; }
                         if (!form.categoryId) { alert('Kein category_id — bitte erst eine Kategorie zuweisen.'); return; }
                         const hasImage = (form.images || []).length > 0;
                         const hasHints = !!form.brand || !!form.name || !!form.sku;

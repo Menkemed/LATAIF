@@ -98,8 +98,10 @@ for (const z of R4C_MATRIX) {
 }
 
 // ── §3 „verdrahtet" ist im Quelltext nachweisbar ────────────────────────
+// Der Typparameter darf verschachtelt sein (`useSharedWrite<Record<string, unknown>>('…')`) —
+// deshalb genuegsam bis zum ersten `>(`, nicht `[^>]*`.
 const RUFT = (s: string, op: string) =>
-  new RegExp(`(useSharedWrite<[^>]*>\\(|\\w+\\.(ok|save)(<[^>]*>)?\\()\\s*'${op.replace(/\./g, '\\.')}'`).test(s);
+  new RegExp(`(useSharedWrite<.*?>\\(|\\w+\\.(ok|save)(<[^>]*>)?\\()\\s*'${op.replace(/\./g, '\\.')}'`).test(s);
 for (const z of ALLE.filter((x) => x.verdrahtet)) {
   const s = codeOf(src('src/' + z.ort));
   ok(RUFT(s, z.op), `3 ${z.op}: ${z.ort.split('/').pop()} ruft die Buchung ueber die gemeinsame Weiche`);

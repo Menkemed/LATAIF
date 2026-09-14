@@ -14,6 +14,7 @@ import { type CpSection, type CreditIssue } from '@/core/ledger/counterpartyAudi
 import { useAuthStore } from '@/stores/authStore';
 import { useSharedRead } from '@/core/data/shared-read';
 import { readsFromPrimary } from '@/core/data/primary-source';
+import { blockPrimaryOnlyOnClient } from '@/core/data/primary-only';
 import {
   reconciliationSnapshotFor, diff, status, EPSILON,
   type ReconciliationSnapshot,
@@ -250,6 +251,8 @@ export function ReconciliationPage() {
                 und dann still zu scheitern. Die AUSKUNFT oben ist auf beiden Rechnern dieselbe. */}
             {!readsFromPrimary() && <Button
               onClick={() => {
+                // R7B PP-6 — der Riegel im Handler, nicht nur das Ausblenden: der Storno schreibt ins Hauptbuch.
+                if (blockPrimaryOnlyOnClient('Cancelling orphan postings')) return;
                 if (!confirm(`Storniert alle ${data.orphans.length} Orphan-Buchungen via reverseSource (Ledger bleibt immutable). Fortfahren?`)) return;
                 let ok = 0, skipped = 0, failed = 0;
                 for (const o of data.orphans) {

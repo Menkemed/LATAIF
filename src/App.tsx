@@ -35,7 +35,7 @@ import { DebtsPage } from '@/pages/debts/DebtsPage';
 import { ReceivablesPage } from '@/pages/receivables/ReceivablesPage';
 import { EmployeeList } from '@/pages/employees/EmployeeList';
 import { EmployeeDetail } from '@/pages/employees/EmployeeDetail';
-import { AIPage } from '@/pages/ai/AIPage';
+import { AIPage, AI_PAGE_PRIMARY_ONLY } from '@/pages/ai/AIPage';
 import { CreditNoteList } from '@/pages/credit-notes/CreditNoteList';
 import { CreditNoteDetail } from '@/pages/credit-notes/CreditNoteDetail';
 import { SupplierList } from '@/pages/suppliers/SupplierList';
@@ -69,7 +69,8 @@ import { SyncDuplicateGuard } from '@/components/sync/SyncDuplicateGuard';
 import { initDatabase, flushDatabase, flushDatabaseSync, saveDatabaseDurably } from '@/core/db/database';
 // DATA-ROOT-B1a — die Erstlauf-Weiche und ihre eine, nichts veraendernde Frage.
 import { isFirstRunPending } from '@/core/lifecycle/first-run';
-import { isClientMode, clientConfig } from '@/core/bridge/client-mode';
+import { isClientMode, clientConfig, setClientToken } from '@/core/bridge/client-mode';
+import { authService } from '@/core/auth/auth';
 // CENTRAL-UI-PARITY — auf PC2 entsteht die Sitzung aus dem geprueften Ausweis statt aus einer
 // Benutzertabelle, die es dort nicht gibt.
 import { installClientSession, refreshClientSessionContext } from '@/core/auth/client-session';
@@ -155,6 +156,10 @@ export default function App() {
         initialize();
         // Beschriftung der Filiale kommt vom Primary, nicht aus einer Vermutung.
         void refreshClientSessionContext().then(() => initialize());
+      } else if (token) {
+        // POST-PARITY R7B PP-5 — ein Ausweis, aus dem keine Sitzung entsteht, ist unbrauchbar: er
+        // wird verworfen (samt Sitzung), und es geht zur Anmeldung. Kein halber Zwischenzustand.
+        setClientToken(null);
       }
       setClientReady(true);
       return () => { cancelled = true; };
@@ -181,6 +186,9 @@ export default function App() {
             setNeedsOnboarding(true);
           }
         } catch { /* ignore */ }
+        // POST-PARITY R7B PP-5 — eine gespeicherte Sitzung gilt hier nur, wenn DIESE Datenbank sie
+        // ausgestellt hat (war der Rechner vorher PC2, liegt dort womöglich eine fremde).
+        try { authService.verifyStoredSession(); } catch (e) { console.warn('[auth] stored session not verified:', e); }
         initialize();
         // CENTRAL-C1 — erst HIER meldet sich die Kommandobruecke als bereit: die Datenbank ist
         // offen und die Stores sind geladen. Vorher weist Rust jede Anfrage mit einer Begruendung
@@ -192,6 +200,9 @@ export default function App() {
           .catch((e) => console.warn('[bridge] not started:', e));
         if (!automationsRegistered) {
           initAutomation();
+          // POST-PARITY R7B PP-4 — faellige Dauerauftraege auch bei laufendem Primary (Tageswechsel).
+          import('@/core/payables/recurring-scheduler').then(m => m.startRecurringExpenseScheduler())
+            .catch((e) => console.warn('[recurring-expense] scheduler not started:', e));
           // Auto-configure LAN sync on Tauri desktop (become server if first, else client)
           import('@/core/sync/auto-lan').then(lan => { lan.autoLanSetup().catch(() => {}); });
           // Start sync if already configured (after manual setup or re-open)
@@ -349,12 +360,12 @@ export default function App() {
 
   // Recurring-Expense Generator: catch-up bei jedem Session-Wechsel / App-Start.
   // Laeuft erst nachdem session vorliegt (currentBranchId greift auf Session zu).
+  // R7B PP-4 — in der Schreibreihenfolge und durabel (vorher lief er hier an der Warteschlange vorbei);
+  // den Tageswechsel bei laufendem Primary uebernimmt der Taktgeber (`recurring-scheduler`).
   useEffect(() => {
     if (!dbReady || !session) return;
-    import('@/stores/recurringExpenseStore').then(m => {
-      try { m.useRecurringExpenseStore.getState().runDueGenerator(); }
-      catch (e) { console.warn('[recurring-expense] startup generator failed:', e); }
-    });
+    import('@/core/payables/payables-save').then(m => m.runDueGeneratorOnPrimary())
+      .catch((e) => console.warn('[recurring-expense] startup generator failed:', e));
   }, [dbReady, session?.branchId]);
 
   // CENTRAL-UI-PARITY — im Client-Modus fuehrt `ClientShell` nur noch zum Server und meldet an.
@@ -370,7 +381,10 @@ export default function App() {
         if (t && installClientSession(t)) {
           initialize();
           void refreshClientSessionContext().then(() => initialize());
+          return true;
         }
+        setClientToken(null);
+        return false;
       }} />;
     }
   }
@@ -473,7 +487,11 @@ export default function App() {
           ) : <BackfillPage />} />
           <Route path="/credit-notes" element={<CreditNoteList />} />
           <Route path="/credit-notes/:id" element={<CreditNoteDetail />} />
-          <Route path="/ai" element={<AIPage />} />
+          {/* POST-PARITY R7B PP-3 — der KI-Assistent rechnet mit dem Schlüssel und den Daten des
+              Primary; auf PC2 sagt die Route das, statt nach der ersten Frage zu scheitern. */}
+          <Route path="/ai" element={clientMode ? (
+            <PrimaryOnlyNotice title="AI" reason={AI_PAGE_PRIMARY_ONLY} />
+          ) : <AIPage />} />
           <Route path="/settings" element={clientMode ? (
             <PrimaryOnlyNotice
               title="Settings"

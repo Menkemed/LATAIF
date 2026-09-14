@@ -5,6 +5,7 @@
 
 import { buildSystemPrompt, buildUserPrompt, categorySpec, AI_MODEL_PARAMS } from './identify-prompt.ts';
 import { getRuntimePaths } from '../runtime/runtime-paths';
+import { isClientMode } from '../bridge/client-mode';
 
 const STORAGE_KEY = 'lataif_openai_key';
 const MODEL_KEY = 'lataif_openai_model';
@@ -64,6 +65,11 @@ async function writeKeyToTauri(key: string): Promise<void> {
 }
 
 export function getApiKey(): string {
+  // POST-PARITY R7B PP-3 — ein Rechner ohne eigene Datenbank ruft die KI NIE selbst: der Schlüssel
+  // gehört zum Primary und verlässt ihn nicht. Liegt auf PC2 noch ein alter eigener Schlüssel (etwa
+  // von früher, als er selbst Primary war), wird er nicht benutzt — das Erkennen geht über den
+  // Primary (`primary-ai.ts`), die übrigen KI-Knöpfe sind dort vor dem Klick gesperrt.
+  if (isClientMode()) return '';
   if (_apiKeyCache !== null) return _apiKeyCache;
   // Browser-Fallback: obfuscated in localStorage (besser als plain).
   const blob = localStorage.getItem(STORAGE_KEY) || '';

@@ -1162,6 +1162,12 @@ try {
     vorher: (x) => ({ ids: idSet('customer_messages'), au: idSet('audit_log'), opens: 0 }),
     fuellen: async (c) => {
       const r = [await clickIncludes(c, 'AI Message')];
+      // POST-PARITY R7B PP-3 — auf PC2 schreibt die KI keinen Text mehr (der Schlüssel bleibt am Primary,
+      // ein eigener alter Schlüssel wird nie benutzt): die Maske sagt es, der Text wird von Hand gesetzt.
+      if (c === client) {
+        if (!(await warteBis(c, q('[data-ai-locked-note]'), 20000))) return 'KEIN-KI-HINWEIS';
+        r.push(await setVal(c, 'textarea', KI_TEXT));
+      }
       if (!(await warteBis(c, `[...document.querySelectorAll('textarea')].some((t) => t.value === ${S(KI_TEXT)})`, 20000))) return 'KEIN-TEXT:' + String(await c.ev("return document.body.innerText.slice(-300);")).replace(/\s+/g, ' ');
       if (!(await warteBis(c, `${q('[data-message-whatsapp]')} && !${q('[data-message-whatsapp]')}.disabled`, 10000))) return 'WHATSAPP-GESPERRT';
       return alleOk(r);
@@ -1187,7 +1193,8 @@ try {
     const opensP = Number(await primary.ev('return (window.__opens || []).length;')) || 0;
     const kiP = Number(await primary.ev('return window.__aiCalls || 0;')) || 0;
     ok(opensC === 1 && opensP === 1, `MESSAGE WhatsApp wurde je Rechner genau einmal geöffnet (abgefangen, kein Fenster) (${opensC}/${opensP})`);
-    ok(kiP >= 1 && Number(await client.ev('return window.__aiCalls || 0;')) >= 1, 'MESSAGE der Text kam aus der (abgefangenen) KI-Anfrage — kein Aufruf ins Netz');
+    ok(kiP >= 1 && Number(await client.ev('return window.__aiCalls || 0;')) === 0,
+      'MESSAGE am Primary kam der Text aus der (abgefangenen) KI-Anfrage; auf PC2 gab es KEINE KI-Anfrage (R7B PP-3) — kein Aufruf ins Netz');
     EXTRA.nachricht = mC.length === 1 && mP.length === 1 && mC[0].created_by === absC && mP[0].created_by === PRIMARY_USER && opensC === 1 && opensP === 1;
     await client.ev("localStorage.removeItem('lataif_openai_key'); return 1;");
   }

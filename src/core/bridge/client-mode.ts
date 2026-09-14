@@ -9,6 +9,8 @@
 // Und es gibt keinen stillen Rückfall. Fällt der Server aus, sagt der Client das; er legt keine
 // Datenbank an, um „wenigstens etwas" zu zeigen.
 
+import { clearClientSession } from '../auth/client-session';
+
 const KEY_MODE = 'lataif_runtime_mode';
 const KEY_SERVER = 'lataif_client_server_url';
 const KEY_TOKEN = 'lataif_client_token';
@@ -46,13 +48,21 @@ export function enterClientMode(serverUrl: string): void {
   s.setItem(KEY_SERVER, url);
 }
 
-/** Zurück zum eigenständigen Betrieb. Löscht nur Kontrollzustand — es gibt hier nichts anderes. */
+/**
+ * Zurück zum eigenständigen Betrieb. Löscht nur Kontrollzustand — es gibt hier nichts anderes.
+ *
+ * POST-PARITY R7B PP-5 — dazu gehört die Sitzung, die aus dem Ausweis gebaut wurde
+ * (`lataif_session`). Blieb sie liegen, übernahm ein späterer Start im Primary-Modus die fremde
+ * Sitzung ungeprüft. Der Server führt keine Sitzung, die hier abzumelden wäre (der Ausweis ist
+ * zustandslos, jede Anfrage wird dort neu geprüft) — getrennt wird also genau DIESER Rechner.
+ */
 export function leaveClientMode(): void {
   const s = store();
   if (!s) return;
   s.removeItem(KEY_MODE);
   s.removeItem(KEY_SERVER);
   s.removeItem(KEY_TOKEN);
+  clearClientSession();
 }
 
 export function clientConfig(): ClientConfig | null {
@@ -62,11 +72,15 @@ export function clientConfig(): ClientConfig | null {
   return { serverUrl: url, token: s?.getItem(KEY_TOKEN) ?? null };
 }
 
+/**
+ * PP-5 — ein verworfener Ausweis nimmt die daraus gebaute Sitzung mit (401/403, Abmelden, ein
+ * unbrauchbarer Ausweis). Sonst stünde eine Sitzung ohne Ausweis da, die niemand mehr prüft.
+ */
 export function setClientToken(token: string | null): void {
   const s = store();
   if (!s) return;
   if (token) s.setItem(KEY_TOKEN, token);
-  else s.removeItem(KEY_TOKEN);
+  else { s.removeItem(KEY_TOKEN); clearClientSession(); }
 }
 
 /** `192.168.1.5:3001` und `http://…/` sollen dasselbe bedeuten — ohne Schrägstrich am Ende. */

@@ -61,6 +61,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // MOBILE-I1C — server-side AI identify. The phone sends image BYTES; the key is read here
         // and never travels. Same JWT layer and body limit as every other /api route.
         .route("/ai/identify", post(ai_identify_route))
+        // POST-PARITY R7B PP-3 — ja/nein: kann dieser Primary KI-Erkennen? Ein Client fragt es VOR
+        // dem Klick. Der Schlüssel wird gelesen und verworfen, nie zurückgegeben.
+        .route("/ai/status", get(ai_status_route))
         // MOBILE-04B2A8-I1 — authenticated mobile upload ingress. Separate route; `/sync/push` above is
         // untouched. Same JWT auth layer + the same 50 MB body limit (build_api_router) as every /api route.
         .route("/mobile/upload", post(mobile_upload_ingress))
@@ -215,6 +218,10 @@ async fn command_execute(
     // Wer fragt, gehört in die Nutzlast — nicht, weil der Renderer es glauben soll, sondern damit
     // eine Buchung später zuordenbar ist. Der Client kann diese Felder nicht setzen: sie kommen
     // aus dem geprüften Token, nicht aus dem Rumpf.
+    // POST-PARITY R7B PP-12 — die Frist nach dem, was der Auftrag bewegt: normale Aufträge bleiben
+    // bei `DEFAULT_TIMEOUT`, nur die Dokumentwege bekommen ihren abgeleiteten Zuschlag.
+    let deadline = crate::bridge::timeout_for(&req.op, &req.payload);
+
     let payload = serde_json::json!({
         "actor": {
             "userId": claims.sub,
@@ -237,7 +244,7 @@ async fn command_execute(
     };
 
     match bridge
-        .submit_as(&identity, &claims.role, payload, crate::bridge::DEFAULT_TIMEOUT)
+        .submit_as(&identity, &claims.role, payload, deadline)
         .await
     {
         Ok(crate::bridge::Reply::Ok { value }) => {
@@ -1409,6 +1416,22 @@ async fn ai_identify_route(
     }
 }
 
+/// POST-PARITY R7B PP-3 — whether this Primary can identify at all, asked by a client BEFORE it
+/// sends a photo (the button then says so instead of failing after the click).
+///
+/// Same JWT layer as `/ai/identify`. The answer is one boolean: the key is read from the data root
+/// exactly as the identify route reads it, dropped immediately, and never returned or logged.
+async fn ai_status_route(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if claims.role.trim().is_empty() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    let ready = super::ai_route::key_present(state.data_root.path());
+    Ok(Json(serde_json::json!({ "identify": ready })))
+}
+
 /// Best-effort display name for the person who recorded a check. Absent is fine — the check is
 /// still valid and still attributed by `checked_by`; only the label is missing.
 fn user_display_name(db: &rusqlite::Connection, user_id: &str) -> Option<String> {
@@ -1647,6 +1670,10 @@ mod legacy_push_tests {
                 // filtered patch; it touches no database and no file. The client may send image
                 // bytes, never a path or a URL, so it cannot be turned into a fetch primitive.
                 "/ai/identify",
+                // POST-PARITY R7B PP-3 — /ai/status: GET, READ ONLY. It answers one boolean (is a
+                // key present in this data root?) and touches no database and no file beyond reading
+                // the key file the identify route reads anyway. Nothing to gate.
+                "/ai/status",
                 "/mobile/upload",
                 // CENTRAL-C3C — /staging/media: die zweite Stelle, an der Bytes hereinkommen, und
                 // die einzige, die NICHTS entscheidet. Sie liegt in derselben JWT-geschuetzten
