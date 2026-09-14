@@ -178,7 +178,9 @@ for (const t of manifestTables) {
 }
 // R6F — der Verkaufsstorno der Kommission löscht Retoure und Retourenzeilen nicht mehr (Retoure REJECTED, Gutschrift
 // CANCELLED); kein Produktionsschreiber sendet für `sales_returns`/`sales_return_lines` noch ein Löschen → 37 → 35.
-check(iC === 50 && uC === 36 && dC === 35, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 50/36/35 — incl. the mobile purchase_inbox insert)`);
+// POST-PARITY R7A (PP-10) — `production_inputs`/`production_outputs` reisen mit dem Fertigungsbeleg
+// (insert beim Anlegen, delete beim Löschen) → 50/36/35 → 52/36/37.
+check(iC === 52 && uC === 36 && dC === 37, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 52/36/37 — incl. the mobile purchase_inbox insert and the R7A production child rows)`);
 
 // ── 5. Rust/TS semantic parity: the SAME shared fixture the Rust test runs. Both sides must map
 //    each vector to the same verdict → transitively, Rust and TS agree byte-for-byte. ──

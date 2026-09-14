@@ -945,6 +945,37 @@
       "required_fields": [],
       "immutable_fields": []
     },
+    "production_inputs": {
+      "allowed_operations": [
+        "insert",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "id",
+        "input_value",
+        "product_id",
+        "product_snapshot",
+        "record_id"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "production_outputs": {
+      "allowed_operations": [
+        "insert",
+        "delete"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "id",
+        "output_value",
+        "product_id",
+        "record_id"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
     "production_records": {
       "allowed_operations": [
         "insert",
@@ -1411,6 +1442,7 @@
         "id",
         "linked_entity_id",
         "linked_entity_type",
+        "notes",
         "priority",
         "revision",
         "status",

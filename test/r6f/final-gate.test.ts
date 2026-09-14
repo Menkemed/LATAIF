@@ -78,9 +78,11 @@ const R6F_MUT = ['purchases.return_to_supplier', 'purchases.cancel', 'purchases.
   'orders.cancel', 'orders.update_line_status', 'orders.mark_line_ordered', 'orders.update_line',
   'consignments.return_after_sale', 'consignments.cancel_sale',
   'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr'];
+/** POST-PARITY R7A (PP-2): der Fertigungsabschluss — die eine Buchung, die nach R6F hinten angehängt wurde. */
+const R7A_MUT = ['production.complete'];
 const MODULES: Record<string, number> = {
   'purchase-lifecycle-commands': 3, 'order-lifecycle-commands': 4, 'consignment-lifecycle-commands': 2,
-  'production-commands': 1, 'office-commands': 4,
+  'production-commands': 2, 'office-commands': 4,
 };
 const ADMIN_OPS = ['orders.cancel', 'orders.mark_line_ordered', 'orders.update_line', 'consignments.return_after_sale', 'consignments.cancel_sale'];
 /** Die Hausfolge des Verkaufsstornos der Kommission — der eine Ort, der Rechnung, Einkauf, Kommittent und Bestand zurücknimmt. */
@@ -93,8 +95,8 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   const list = (t: string): string[] => [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const vorher = list(vor('src/core/bridge/command-registry.ts'));
   const jetzt = [...registry.ALLOWED_MUTATIONS];
-  ok(vorher.length === 88 && jetzt.length === 102 && S(jetzt.filter((o) => !vorher.includes(o))) === S(R6F_MUT) && vorher.every((o) => jetzt.includes(o)),
-    `REGISTRY Buchungen 88 → 102: GENAU die vierzehn R6F-Namen, in dieser Reihenfolge, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
+  ok(vorher.length === 88 && jetzt.length === 103 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6F_MUT, ...R7A_MUT]) && vorher.every((o) => jetzt.includes(o)),
+    `REGISTRY Buchungen 88 → 102 (R6F) → 103 (R7A): GENAU die vierzehn R6F-Namen + eins aus R7A (production.complete), in dieser Reihenfolge, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
   ok(S([...readOps.STORE_READ_OPS]) === S(catalogue(vor('src/core/bridge/store-read-ops.ts'))),
     'REGISTRY Auskünfte unverändert — die Bildkennungen kommen schon über products.get, die Inbox über store.purchases.get');
@@ -104,14 +106,18 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 160 && rJetzt.length === 174 && S(rJetzt.filter((o) => !rVor.includes(o))) === S(R6F_MUT),
-    `REGISTRY Rust 160 → 174: GENAU diese vierzehn, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
+  ok(rVor.length === 160 && rJetzt.length === 175 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6F_MUT, ...R7A_MUT]),
+    `REGISTRY Rust 160 → 174 (R6F) → 175 (R7A): GENAU diese vierzehn + eins aus R7A (production.complete), in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 174 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 174 Namen, die Rust durchlässt (${known.length})`);
+  ok(known.length === 175 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 175 Namen (R7A), die Rust durchlässt (${known.length})`);
   for (const op of R6F_MUT) {
     const rule = (perms.OPERATION_PERMISSIONS as Record<string, { kind?: string } | null>)[op];
     const soll = ADMIN_OPS.includes(op) ? 'isAdmin' : null;
     ok(op in perms.OPERATION_PERMISSIONS && (soll === null ? rule === null : rule?.kind === soll), `RECHT ${op}: ${soll ?? 'kein Tor'} wie die Maske`);
+  }
+  for (const op of R7A_MUT) {
+    const rule = (perms.OPERATION_PERMISSIONS as Record<string, { kind?: string } | null>)[op];
+    ok(op in perms.OPERATION_PERMISSIONS && rule === null, `RECHT ${op} (R7A): kein Tor wie production.create`);
   }
   const ident = { commandId: '00000001-0000-4000-8000-000000000000', tenantId: 't', branchId: 'branch-main', userId: 'u', role: 'ADMIN', payloadHash: 'h' };
   const r = await registry.executeCommand('orders.delete', {}, { ...ident, op: 'orders.delete' } as never);

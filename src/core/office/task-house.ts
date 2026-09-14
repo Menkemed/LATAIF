@@ -61,6 +61,7 @@ export interface TaskCreateInput {
   linkedEntityType?: LinkedEntityType | null;
   linkedEntityId?: string | null;
   assignedTo?: string | null;
+  notes?: string | null;
 }
 
 export interface TaskUpdateInput {
@@ -75,12 +76,14 @@ export interface TaskUpdateInput {
   linkedEntityType?: LinkedEntityType | null;
   linkedEntityId?: string | null;
   assignedTo?: string | null;
+  notes?: string | null;
   status?: TaskStatus;
 }
 
 interface TaskCreateChecked {
   title: string; description: string | null; type: TaskType; priority: TaskPriority; dueAt: string | null;
   linkedEntityType: LinkedEntityType | null; linkedEntityId: string | null; assignedTo: string | null;
+  notes: string | null;
 }
 
 function oneOf<T extends string>(v: unknown, list: readonly T[], code: string, what: string): T {
@@ -139,6 +142,7 @@ export function taskCreateInput(rawIn: unknown): TaskCreateChecked {
     linkedEntityType: linkTypeOf(raw.linkedEntityType) ?? null,
     linkedEntityId: optionalText(raw.linkedEntityId, 'linkedEntityId', LINK_INVALID) ?? null,
     assignedTo: optionalText(raw.assignedTo, 'assignedTo', TASK_FIELD_INVALID) ?? null,
+    notes: optionalText(raw.notes, 'notes', TASK_FIELD_INVALID) ?? null,
   };
 }
 
@@ -160,6 +164,7 @@ export function taskUpdateInput(rawIn: unknown): TaskUpdateInput {
   if (raw.linkedEntityType !== undefined) out.linkedEntityType = linkTypeOf(raw.linkedEntityType) ?? null;
   if (raw.linkedEntityId !== undefined) out.linkedEntityId = optionalText(raw.linkedEntityId, 'linkedEntityId', LINK_INVALID) ?? null;
   if (raw.assignedTo !== undefined) out.assignedTo = optionalText(raw.assignedTo, 'assignedTo', TASK_FIELD_INVALID) ?? null;
+  if (raw.notes !== undefined) out.notes = optionalText(raw.notes, 'notes', TASK_FIELD_INVALID) ?? null;
   if (raw.status !== undefined) out.status = oneOf(raw.status, TASK_STATUSES, TASK_STATUS_INVALID, 'status');
   return out;
 }
@@ -215,10 +220,10 @@ export function createTaskInHouse(raw: TaskCreateInput, ctx: OfficeCtx): TaskCre
   const id = uuid();
   const now = new Date().toISOString();
   getDatabase().run(
-    `INSERT INTO tasks (id, branch_id, title, description, type, priority, due_at, linked_entity_type, linked_entity_id, assigned_to, status, auto_generated, created_at, created_by)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?)`,
+    `INSERT INTO tasks (id, branch_id, title, description, type, priority, due_at, linked_entity_type, linked_entity_id, assigned_to, notes, status, auto_generated, created_at, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'open', 0, ?, ?)`,
     [id, ctx.branchId, v.title, v.description, v.type, v.priority, v.dueAt,
-      v.linkedEntityType, v.linkedEntityId, v.assignedTo, now, ctx.userId || null],
+      v.linkedEntityType, v.linkedEntityId, v.assignedTo, v.notes, now, ctx.userId || null],
   );
   trackOfficeWrite('tasks', id, 'insert', { title: v.title, type: v.type });
   // Dasselbe Ereignis wie bisher (heute ohne Abonnenten) — NACH dem Schreiben, ohne Wirkung auf die Zeile.
@@ -253,6 +258,7 @@ export function updateTaskInHouse(raw: TaskUpdateInput, ctx: OfficeCtx): TaskUpd
   want('type', 'type', v.type);
   want('priority', 'priority', v.priority);
   want('due_at', 'dueAt', v.dueAt);
+  want('notes', 'notes', v.notes);
 
   const linkType = v.linkedEntityType !== undefined ? v.linkedEntityType : (was('linked_entity_type') as string | null);
   const linkId = v.linkedEntityId !== undefined ? v.linkedEntityId : (was('linked_entity_id') as string | null);
@@ -294,7 +300,7 @@ export function updateTaskInHouse(raw: TaskUpdateInput, ctx: OfficeCtx): TaskUpd
 
 // ── Die Rümpfe der Maske ────────────────────────────────────────────────────
 
-/** Was das Formular hält (`TaskFormData` in `TaskList`). NOTES hat keine Spalte — es reist nicht mit. */
+/** Was das Formular hält (`TaskFormData` in `TaskList`). R7A: NOTES hat seine Spalte und reist mit. */
 export interface TaskFormValues {
   title: string;
   description: string;
@@ -303,6 +309,7 @@ export interface TaskFormValues {
   dueAt: string;
   linkedEntityType: string;
   linkedEntityId: string;
+  notes: string;
 }
 
 /** Der Rumpf für „Create Task" — am Primary dieselbe Eingabe wie für PC2. Leeres Feld = `null`. */
@@ -315,6 +322,7 @@ export function taskCreateBody(f: TaskFormValues): Record<string, unknown> {
     dueAt: f.dueAt || null,
     linkedEntityType: f.linkedEntityType || null,
     linkedEntityId: f.linkedEntityId.trim() || null,
+    notes: f.notes.trim() || null,
   };
 }
 

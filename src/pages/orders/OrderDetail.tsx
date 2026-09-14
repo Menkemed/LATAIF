@@ -15,7 +15,7 @@ import { OrderLineEditModal, type OrderLineEditPatch } from '@/components/work-o
 import { SourceItemsModal } from '@/components/work-orders/SourceItemsModal';
 import { CancelOrderModal } from '@/components/work-orders/CancelOrderModal';
 import { ORDER_STATUS_FLOW, nextOrderStatus } from '@/core/orders/order-status-flow';
-import { useOrderStore, goldPayableSurvivesCancel } from '@/stores/orderStore';
+import { useOrderStore, goldPayableSurvivesCancel, orderDeleteBlocker } from '@/stores/orderStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useGoldStore } from '@/stores/goldStore';
@@ -507,6 +507,9 @@ export function OrderDetail() {
       setCancelFromDelete(true);
       return;
     }
+    // R7A (PP-9) — geliefertes/bewegtes Gold oder eine bezahlte Kostenposition: nicht loeschen, stornieren.
+    const blocked = orderDeleteBlocker(id);
+    if (blocked) { setConfirmDelete(false); alert(blocked.message); return; }
     deleteOrder(id);
     navigate('/orders');
   }
@@ -1887,6 +1890,8 @@ export function OrderDetail() {
         busy={w.busy}
         submitError={w.fehler}
         fromDelete={cancelFromDelete}
+        // R7A (PP-8) — derselbe Ueberschuss, den die Ueberzahlungs-Gutschrift traegt (bezahlt − vereinbart).
+        overpaymentCredit={Math.max(0, Math.round((totalPaidActive - (order.agreedPrice || 0)) * 1000) / 1000)}
         onCancel={() => { setConfirmCancel(false); setCancelFromDelete(false); }}
         onConfirm={(choice, refundMethod, note) => { void handleCancel(choice, refundMethod, note); }}
       />

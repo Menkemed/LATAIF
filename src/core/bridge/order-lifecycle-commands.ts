@@ -250,6 +250,9 @@ export function runOrderCancel(deps: EngineDeps, identity: CommandIdentity, raw:
       freedProductId: r.freedProductId ?? null,
       cancelledGoldPayables: r.cancelledGoldPayableIds.length, openGoldPayables: r.openGoldPayableIds.length,
       openExpenses: r.openExpenseIds.length,
+      // R7A (PP-8) — was mit der Überzahlungs-Gutschrift geschah: bleibt beim Kunden / storniert (nie gelöscht).
+      keptOverpayCredits: (r.keptOverpayCreditIds ?? []).length,
+      voidedOverpayCredits: (r.voidedOverpayCreditIds ?? []).length,
       revision: r.revision,
     };
   });

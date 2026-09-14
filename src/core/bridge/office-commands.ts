@@ -70,7 +70,7 @@ export const OFFICE_COMPUTED = {
     'reviewed', 'result', 'extractedFields', 'aiSuggestions', 'completedAt', 'ocrAt', 'content', 'filePath', 'fileType'],
 } as const;
 
-const TASK_FIELDS = ['title', 'description', 'type', 'priority', 'dueAt', 'linkedEntityType', 'linkedEntityId', 'assignedTo'];
+const TASK_FIELDS = ['title', 'description', 'type', 'priority', 'dueAt', 'linkedEntityType', 'linkedEntityId', 'assignedTo', 'notes'];
 
 const isPlain = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);

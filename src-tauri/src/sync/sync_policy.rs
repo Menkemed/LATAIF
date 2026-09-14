@@ -200,6 +200,9 @@ pub const KNOWN_BUSINESS_TABLES: &[&str] = &[
     "suppliers",
     "expenses",
     "production_records",
+    // POST-PARITY R7A (PP-10) — Ein- und Ausgänge eines Fertigungsbelegs reisen mit ihm.
+    "production_inputs",
+    "production_outputs",
     "partner_transactions",
     "sales_returns",
 ];

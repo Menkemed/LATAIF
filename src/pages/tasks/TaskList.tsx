@@ -239,7 +239,7 @@ function TaskFormModal({ open, onClose, task, onSave, busy, error }: {
           dueAt: task.dueAt ? task.dueAt.split('T')[0] : '',
           linkedEntityType: task.linkedEntityType || '',
           linkedEntityId: task.linkedEntityId || '',
-          notes: '',
+          notes: task.notes || '',
         });
       } else {
         setForm(EMPTY_FORM);
@@ -321,12 +321,13 @@ function TaskFormModal({ open, onClose, task, onSave, busy, error }: {
           </div>
         </div>
 
-        {/* R6F — offen: NOTES hat keine Spalte in `tasks` und wurde nie gespeichert (s. Bericht). */}
+        {/* R7A — NOTES wird gespeichert (Spalte `tasks.notes`), auf beiden Rechnern derselbe Rumpf. */}
         <Textarea
           label="NOTES"
           value={form.notes}
           onChange={v => set('notes', v)}
           rows={2}
+          hook="data-task-notes"
         />
 
         <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 12, marginTop: 8 }}>

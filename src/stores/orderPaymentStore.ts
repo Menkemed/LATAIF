@@ -2,7 +2,7 @@ import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
-import { trackInsert, trackDelete, trackPayment } from '@/core/sync/track';
+import { trackInsert, trackUpdate, trackDelete, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — orders-Summary + converted-Flag
 import { useOrderStore } from '@/stores/orderStore';
 import {
@@ -151,6 +151,42 @@ export function teardownOrderOverpayCredit(orderId: string, blockMsg: string): v
     reverseSource('ORDER_OVERPAY', orderId, new Date().toISOString());
   }
   clawbackGrantedCredit('order_overpayment', orderId);
+}
+
+// POST-PARITY R7A (PP-8) — die Ueberzahlungs-Gutschrift beim AUFTRAGSSTORNO. Sie ist ein eigenes
+// Finanzobjekt des Kunden (eigene Zeile, einloesbar, eigene Buchung ORDER_OVERPAY) und wird dort
+// nicht mehr hart geloescht (`teardownOrderOverpayCredit` bleibt fuer Umwandeln/Loeschen).
+/** Die noch lebende(n) Ueberzahlungs-Gutschrift(en) eines Auftrags — stornierte zaehlen nicht. */
+export function openOrderOverpayCredit(orderId: string): { ids: string[]; amount: number; used: number } {
+  const rows = query(
+    `SELECT id, amount, used_amount FROM customer_credits
+      WHERE source_type = 'order_overpayment' AND source_id = ? AND COALESCE(status, 'OPEN') != 'CANCELLED'`,
+    [orderId],
+  );
+  return {
+    ids: rows.map((r) => r.id as string),
+    amount: Math.round(rows.reduce((s, r) => s + Number(r.amount || 0), 0) * 1000) / 1000,
+    used: rows.reduce((s, r) => s + Number(r.used_amount || 0), 0),
+  };
+}
+
+/**
+ * „Refund" beim Storno: das Geld verlaesst den Laden ganz, also auch der Ueberschuss. Die Gutschrift
+ * wird STORNIERT statt geloescht — Zeile bleibt (status CANCELLED, aus jedem Guthaben-Saldo raus,
+ * der nur OPEN zaehlt), Protokoll schreibt den Statuswechsel, das Reklass-Bein wird zurueckgenommen.
+ * Nur fuer eine NICHT eingeloeste Gutschrift (der Aufrufer sperrt vorher).
+ */
+export function voidOrderOverpayCredit(orderId: string, reason: string): string[] {
+  const now = new Date().toISOString();
+  const { ids } = openOrderOverpayCredit(orderId);
+  if (hasLedgerEntries('ORDER_OVERPAY', orderId) && !hasReversalFor('ORDER_OVERPAY', orderId)) {
+    reverseSource('ORDER_OVERPAY', orderId, now);
+  }
+  for (const cid of ids) {
+    getDatabase().run(`UPDATE customer_credits SET status = 'CANCELLED' WHERE id = ?`, [cid]);
+    trackUpdate('customer_credits', cid, { status: 'CANCELLED', reason });
+  }
+  return ids;
 }
 
 export interface OrderPayment {

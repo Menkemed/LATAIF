@@ -28,7 +28,7 @@ import {
 // Slice 4a — gemeinsamer Order-Ueberzahlungs-Teardown (assert-unused → reverse ORDER_OVERPAY
 // → clawback). Runtime-Funktionsimport; der orderPaymentStore↔orderStore-Zyklus ist sicher
 // (beide Bindings werden nur in Actions zur Laufzeit aufgerufen, nicht bei Modul-Init).
-import { teardownOrderOverpayCredit, reconcileOrderOverpayCredit } from '@/stores/orderPaymentStore';
+import { teardownOrderOverpayCredit, reconcileOrderOverpayCredit, openOrderOverpayCredit, voidOrderOverpayCredit } from '@/stores/orderPaymentStore';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
@@ -107,6 +107,10 @@ export interface OrderCancelEffects {
   openGoldPayableIds: string[];
   /** Real gebuchte A/P-Ausgaben, die bewusst OFFEN bleiben (der Lieferant hat gearbeitet). */
   openExpenseIds: string[];
+  /** R7A (PP-8) — Ueberzahlungs-Gutschriften, die beim Kunden bleiben (Credit/Verfall). */
+  keptOverpayCreditIds?: string[];
+  /** R7A (PP-8) — Ueberzahlungs-Gutschriften, die mit der Rueckzahlung storniert (nicht geloescht) wurden. */
+  voidedOverpayCreditIds?: string[];
 }
 
 /**
@@ -116,6 +120,53 @@ export interface OrderCancelEffects {
  */
 export function goldPayableSurvivesCancel(fulfilledGrams: number | null | undefined, lineStatus: string | null | undefined): boolean {
   return Number(fulfilledGrams || 0) > GRAM_EPS || lineStatus === 'ARRIVED' || lineStatus === 'DELIVERED';
+}
+
+/** POST-PARITY R7A (PP-9) — ein fachliches Nein von „Delete Order", mit Code. */
+export class OrderDeleteBlocked extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'OrderDeleteBlocked';
+    this.code = code;
+  }
+}
+
+/**
+ * POST-PARITY R7A (PP-9) — darf „Delete Order" (Primary-only) diesen Auftrag HART loeschen? Nein, sobald
+ * er reale Folgen hat, die ein Loeschen nicht ehrlich rueckgaengig machen kann — dann ist Stornieren
+ * der Weg (der Storno laesst sie bewusst stehen):
+ *   • Gold: geliefert (Zeile ARRIVED/DELIVERED), schon Gramm bewegt oder ganz beglichen (FULFILLED).
+ *     Dieselbe Regel wie der Storno (`goldPayableSurvivesCancel`); das Loeschen stornierte vorher JEDE
+ *     offene Gramm-Schuld und liess eine beglichene mit Verweis auf den geloeschten Auftrag stehen.
+ *   • Eine schon BEZAHLTE Lieferanten-Kostenposition: das Loeschen entfernt die Zahlungszeilen, ohne
+ *     deren Buchung (EXPENSE_PAYMENT) zurueckzunehmen — ein Kassenabgang ohne Beleg.
+ * Nur reine Planung (nichts geliefert, nichts bewegt, nichts bezahlt) faellt mit dem Auftrag weg.
+ */
+export function orderDeleteBlocker(orderId: string): OrderDeleteBlocked | null {
+  const gold = query(
+    `SELECT gp.status, gp.fulfilled_grams, ol.status AS line_status
+       FROM gold_payables gp LEFT JOIN order_lines ol ON ol.id = gp.source_order_line_id
+      WHERE gp.source_order_id = ? AND gp.status != 'CANCELLED'`,
+    [orderId],
+  );
+  if (gold.some((g) => g.status === 'FULFILLED'
+    || goldPayableSurvivesCancel(g.fulfilled_grams as number | null, g.line_status as string | null))) {
+    return new OrderDeleteBlocked('ORDER_DELETE_GOLD_MOVED',
+      'This order cannot be deleted: gold for it has already been delivered or settled with the goldsmith. Cancel the order instead — cancelling keeps that gold liability.');
+  }
+  const paid = query(
+    `SELECT 1 FROM order_lines ol JOIN expenses e ON e.id = ol.expense_id
+      WHERE ol.order_id = ?
+        AND (COALESCE(e.paid_amount, 0) > 0.005 OR EXISTS (SELECT 1 FROM expense_payments ep WHERE ep.expense_id = e.id))
+      LIMIT 1`,
+    [orderId],
+  );
+  if (paid.length > 0) {
+    return new OrderDeleteBlocked('ORDER_DELETE_COSTS_PAID',
+      'This order cannot be deleted: a supplier cost of it has already been paid. Cancel the order instead.');
+  }
+  return null;
 }
 
 interface OrderStore {
@@ -1230,12 +1281,17 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       throw new Error('Mind. eine Zeile ist bereits in einer Invoice — bitte erst die Invoice stornieren.');
     }
 
-    // Slice 4a — VOR der Geld-Buchung die Ueberzahlungs-Gutschrift abbauen: BLOCK falls schon
-    // eingeloest; sonst Reklass-Bein (ORDER_OVERPAY) reversen + Domain-Row weg. Zwingend vor dem
-    // 'credit'-Zweig unten, der DR CUSTOMER_DEPOSITS ueber den VOLLEN totalPaid bucht — sonst
-    // schreibt er die schon zu CUSTOMER_CREDIT umgebuchten Ueberschuss-Fil ein zweites Mal gut.
-    teardownOrderOverpayCredit(id,
-      'Cannot cancel this order because the store credit from its overpayment has already been used. Reverse that credit usage first.');
+    // POST-PARITY R7A (PP-8) — die Ueberzahlungs-Gutschrift ist ein eigenes Finanzobjekt des Kunden.
+    // Vorher wurde sie hier HART geloescht (Reklass-Bein storniert, Zeile weg, kein Protokoll) und ihr
+    // Betrag in den Storno-Betrag gezogen — bei „Verfall" verfiel so auch Geld, das dem Kunden schon als
+    // Guthaben gehoerte. Jetzt: „Refund" zahlt alles zurueck und STORNIERT die Gutschrift (Zeile bleibt,
+    // CANCELLED, Protokoll); „Credit" und „Verfall" lassen sie unberuehrt beim Kunden und gelten nur fuer
+    // die Anzahlung (bezahlt bis zum vereinbarten Preis). Eine schon eingeloeste sperrt wie bisher —
+    // vor jedem Schreiben.
+    const overpay = openOrderOverpayCredit(id);
+    if (overpay.used > 0.005) {
+      throw new Error('Cannot cancel this order because the store credit from its overpayment has already been used. Reverse that credit usage first.');
+    }
 
     // 1. totalPaid berechnen (SUM order_payments).
     // R6F — nur die NICHT umgewandelten Anzahlungen (M-08, wie Saldo, Banking und Abgleich). Eine
@@ -1247,12 +1303,23 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       [id]
     );
     const totalPaid = Number(payRows[0]?.t || 0);
+    if (totalPaid > 0 && choice === 'refund' && !refundMethod) {
+      throw new Error('Refund braucht eine Zahlmethode (Cash / Bank / Benefit).');
+    }
+    // R7A (PP-8) — der Betrag, fuer den die Wahl gilt. Refund: alles (die Gutschrift wird vorher
+    // storniert, ihr Ueberschuss liegt dann wieder in CUSTOMER_DEPOSITS). Credit/Verfall: nur die
+    // Anzahlung — der Ueberschuss steht schon als Kundenguthaben (CUSTOMER_CREDIT) und bleibt dort.
+    if (choice === 'refund' && overpay.ids.length > 0) {
+      effects.voidedOverpayCreditIds = voidOrderOverpayCredit(id, 'order_cancel_refund');
+    } else if (overpay.ids.length > 0) {
+      effects.keptOverpayCreditIds = overpay.ids;
+    }
+    const settleAmount = choice === 'refund'
+      ? totalPaid
+      : Math.max(0, Math.round((totalPaid - overpay.amount) * 1000) / 1000);
 
     // 1a. Geld-Buchung gemaess Wahl
-    if (totalPaid > 0) {
-      if (choice === 'refund' && !refundMethod) {
-        throw new Error('Refund braucht eine Zahlmethode (Cash / Bank / Benefit).');
-      }
+    if (settleAmount > 0.0005) {
       // L-06 — der customer_credits-Insert (= die einloesbare Gutschrift fuer die
       // bereits erhaltene Anzahlung) darf NICHT mehr still per console.warn schlucken:
       // schlaegt er fehl, bricht der ganze Storno ab (Error bubbelt), BEVOR die Order
@@ -1267,11 +1334,11 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
           `INSERT INTO customer_credits (id, branch_id, customer_id, amount, used_amount, status,
              source_type, source_id, note, created_at)
            VALUES (?, ?, ?, ?, 0, 'OPEN', 'order_cancel', ?, ?, ?)`,
-          [creditId, orderBranchId, customerId, totalPaid, id,
+          [creditId, orderBranchId, customerId, settleAmount, id,
            note || `Storno Order — Guthaben zur weiteren Verrechnung`, now]
         );
         trackInsert('customer_credits', creditId, {
-          customerId, amount: totalPaid, sourceOrderId: id,
+          customerId, amount: settleAmount, sourceOrderId: id,
         });
         effects.customerCreditId = creditId;
       }
@@ -1279,9 +1346,9 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       // Geld galt als zurueckgezahlt (bzw. gutgeschrieben / verfallen), im Hauptbuch stand es weiter
       // als Anzahlung. Jetzt scheitert der Storno mit ihr (EINE Klammer, `cancelOrderInHouse`).
       postOrderCancellationChoice({
-        orderId: id, customerId, totalPaid, choice, refundMethod,
+        orderId: id, customerId, totalPaid: settleAmount, choice, refundMethod,
       });
-      effects.settledAmount = totalPaid;
+      effects.settledAmount = settleAmount;
     }
 
     // 2. Cost-Lines analysieren: real-gebuchte A/P (expense_id != NULL) bleiben
@@ -1419,6 +1486,9 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
   },
 
   deleteOrder: (id) => {
+    // R7A (PP-9) — erst pruefen, dann schreiben: ein Nein laesst ALLES unberuehrt.
+    const blocked = orderDeleteBlocker(id);
+    if (blocked) throw blocked;
     const db = getDatabase();
     // Slice 4a — VOR dem Order-Payment-Reverse die Ueberzahlungs-Gutschrift abbauen: BLOCK falls
     // schon eingeloest; sonst Reklass-Bein (ORDER_OVERPAY) reversen + Domain-Row weg (kein Orphan-

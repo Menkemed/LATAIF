@@ -3392,6 +3392,9 @@ Keiner ist eine A/B-Lücke: entweder kein fehlender Fernweg für eine Geschäfts
 | PP-11 | Die Aufgabenmaske zeigt „NOTES" (`TaskList.tsx:325–330`), `tasks` hat keine Spalte, der Wert wird verworfen (`taskStore.ts:100`) | Aufgaben | niedrig | `tasks.create`/`tasks.update` sind registriert; auf beiden Rechnern gleich verworfen — Schemafrage, kein Fernweg fehlt | Spalte + Migration, oder Feld entfernen |
 | PP-12 | Große Dokumente (bis 25 116 672 B) können die Standardfrist des Brücken-Rundlaufs reißen (`bridge.rs:474`, `DEFAULT_TIMEOUT` 20 s); Wiederholung mit derselben `commandId` ergibt genau eine Wirkung | Dokumente/Brücke | niedrig | `documents.upload` ist registriert und angeschlossen; es fehlt kein Weg, nur eine längere Frist | größenabhängige Frist für Dokument-Ops |
 
+**Stand nach Post-Parity R7A (14.09.2026):** PP-1, PP-2, PP-8, PP-9, PP-10, PP-11 **geschlossen** (bewiesen, § „Post-Parity R7A —
+Business Correctness" am Ende dieses Dokuments); **offen** bleiben PP-3, PP-4, PP-5, PP-6, PP-7, PP-12. Registry seit R7A 175.
+
 Veraltete Stellen der SSOT (nur Hinweis, Inhalt gilt): Zeilenverweise der Tabelle sind teils verschoben (z. B. InvoiceDetail,
 WatchList, ExpenseList); der R6A-Abschnitt „Keine toten Knöpfe" beschreibt den Stand VOR R6B — heute: Abmelden geht auf PC2
 (`auth.ts:207`), Löschknöpfe gesperrt mit Grund, `/import` gesperrt, Inventur und Nachrichtenprotokoll über den Primary,
@@ -3556,3 +3559,53 @@ Zählung: 28 Löschknöpfe + 13 Werkzeug-/Einstellungsgruppen = **41** (bestäti
   2. Die SSOT-Zeilennummern weichen vom Code ab (z. B. `InvoiceDetail:697→1671` gegenüber real :742/:413; `OrderDetail:1116→1880` gegenüber :1174/:499). Niedrig.
   3. R6B-Doku (L2465) nennt 97/0 für `r6b/safety-existing-commands`, der aktuelle Lauf zeigt 95/0 (grün). Niedrig.
   4. Die Werkzeugseiten (Settings, Backfill, LedgerDebug, RepairFlowTest) und der Orphan-Storno haben keinen eigenen Handler-Riegel. Sie hängen allein an Route bzw. Ausblendung und als letzte Linie am `getDatabase`-Wurf. Heute nicht erreichbar, daher nur Härtungsoption, niedrig.
+
+## Post-Parity R7A — Business Correctness (14.09.2026)
+
+Stand `51f1f5d` + R7A, Version **0.8.54**, kein Release. Umfang ausschließlich PP-1, PP-2, PP-8, PP-9, PP-10, PP-11 aus dem
+Post-Parity-Backlog; PP-3, PP-4, PP-5, PP-6, PP-7, PP-12 bleiben offen.
+
+```
+PP vorher offen   12
+R7A Scope          6   (PP-1, PP-2, PP-8, PP-9, PP-10, PP-11)
+geschlossen        6
+verbleibend        6   (PP-3, PP-4, PP-5, PP-6, PP-7, PP-12)
+Registry          174 → 175   (1 Probe + 71 Auskünfte + 103 Buchungen; neu: production.complete)
+```
+
+| ID | Befund | Behebung | Beweis |
+|---|---|---|---|
+| PP-1 | Nach einer STORNIERTEN Guthaben-Einlösung zeigt deren Zahlungszeile (Historie) auf eine später rechtmäßig abgewickelte Guthabenzeile → `bad_reference` (error), vorher schon `used_drift`; Salden korrekt. Erreichbar auch über die normale Maske/PC2 (Retoure als Guthaben → Einlösung → Storno der Einlösung → Storno des Retouren-Einkaufs; oder Erstattung eines Standalone-Guthabens) | `counterpartyAudit`: eine Einlösung, deren Buchung (`PURCHASE_PAYMENT`/`EXPENSE_PAYMENT`) vollständig gegengebucht ist, ist Historie — zählt nicht zu `applied`, wird nicht auf ihre Guthabenzeile geprüft. Lebende Einlösungen voll geprüft; der Prüfer schreibt nichts, keine Löschhistorie erfunden | `test/r7a/pp1-supplier-credit-reconciliation.test.ts` (Teil-/Vollnutzung, storniert, reproduzierter Befund, gemischt, echte Abweichungen: fehlende Zeile, used_drift, overused, ohne Referenz); R6F-Vertrag §5 umgestellt |
+| PP-2 | Der Abschluss (Arbeit + Gemeinkosten) hatte keinen Aufrufer; der alte Store-Weg ohne Klammer, verschluckte Buchungen, stilles `branch-main`, zweimal aufrufbar | Neue Hausfolge `completeProductionInHouse` + Fernbefehl `production.complete` + „Complete Production" in `ProductionDetail` (Primary und PC2 dieselbe Weiche). Nur ein CONFIRMED-Beleg dieser Filiale; genau EINE Ausgabe (Miscellaneous, bar bezahlt, `related_module 'production'`) über `createExpenseInHouse` (beide Buchungen strikt); `total_cost` rechnet der Primary; Einstand der Fertigteile bleibt der Materialwert (Arbeit/Gemeinkosten = Aufwand, nicht doppelt); zweiter Abschluss = `PRODUCTION_ALREADY_COMPLETED`; Altstand mit Ausgabe = `PRODUCTION_ALREADY_BOOKED`. `productionStore.completeRecord` entfernt | `test/r7a/pp2-pp10-production.test.ts` §1–§7 (Parität, genau einmal, verlorene Antwort, Beträge, Fehlerinjektion an vier Stellen, Autorität, Filiale, Client-Riegel, Löschen danach) |
+| PP-8 | Der Auftragsstorno löschte die Überzahlungs-Gutschrift HART (kein Protokoll) und zog ihren Betrag in den Storno — bei „Verfall" verfiel auch Kundenguthaben | `customer_credits` ist ein eigenes Finanzobjekt: Refund zahlt alles zurück und STORNIERT die Gutschrift (Zeile bleibt, `CANCELLED`, Protokoll, Reklass-Bein gegengebucht); Credit/Verfall lassen sie unberührt beim Kunden, die Wahl gilt nur für die Anzahlung. Maske zeigt, was mit der Überzahlung geschieht (`data-order-cancel-overpay`) | `test/r7a/pp8-pp9-order-credit-delete.test.ts` (drei Wahlen × Primary/PC2, Parität, Sperre bei eingelöster Gutschrift, verlorene Antwort, Fehlerinjektion nach dem Gutschrift-Storno, Akteur) |
+| PP-9 | „Delete Order" (Primary-only) stornierte jede offene Gramm-Schuld — auch geliefertes/teilweise beglichenes Gold — und ließ eine beglichene mit Verweis auf den gelöschten Auftrag stehen | `orderDeleteBlocker`: geliefertes (ARRIVED/DELIVERED), bewegtes oder beglichenes Gold → `ORDER_DELETE_GOLD_MOVED`; eine bezahlte Kostenposition → `ORDER_DELETE_COSTS_PAID` (sonst verschwände eine Zahlung ohne Gegenbuchung). Prüfung VOR jedem Schreiben, Maske nennt den Grund, der Weg ist „Cancel Order". Nur reine Planung fällt mit dem Auftrag weg | dieselbe Datei (Planung erlaubt, geliefert/bewegt/beglichen gesperrt ohne Schreibwirkung, Storno danach möglich, Kosten bezahlt/unbezahlt) |
+| PP-10 | `production_inputs`/`production_outputs` standen nicht im Abgleich-Manifest und wurden von keinem Schreiber nachgeführt — ein anderer Datenbank-Rechner sah Belege ohne Ein-/Ausgänge, Löschen hinterließ dort Waisen | Beide Tabellen im Manifest (`insert`/`delete`, genau die Spalten), nachgeführt beim Anlegen (`production-house`) und Löschen (`deleteRecord`), `KNOWN_BUSINESS_TABLES` und Modulzuordnung ergänzt; kein Parallel-Sync | `test/r7a/pp2-pp10-production.test.ts` PP-10 (Schreiber, Weitergabe Zeile für Zeile, Echo ohne Schreiben, Löschen ohne Waisen, Feldvertrag, Cursor-Regel); Manifest-/Klassifikations-Gates 52/37 |
+| PP-11 | Die Aufgabenmaske zeigte „NOTES", der Text wurde verworfen | Spalte `tasks.notes` (additive Migration), derselbe Rumpf `tasks.create`/`tasks.update` (keine neue Fähigkeit), Manifest-Feld, Maske lädt die gespeicherte Notiz | `test/r7a/pp11-task-note.test.ts` (Primary/PC2, Parität, verlorene Antwort, veraltete Fassung, Akteur, Auskunft, Echo ohne Fassung, anderer Datenbank-Rechner) |
+
+**Transaktionen/Sicherheit (PP-1/2/8/9):** der Primary bleibt Autorität und einziger Schreiber; kein Rumpf nennt Summen,
+Kosten, Buchungen oder Urheber (`the primary decides …`); jede Handlung in EINER Klammer (Fehlerinjektion: nichts
+Halbes); verlorene Antwort → dieselbe `commandId` → eingefrorenes Ergebnis; fern handelt der geprüfte PC2-Absender.
+
+**Zwei-Rechner-Lauf:** `test/e2e/r7a-business-correctness.e2e.mjs` — **207/0** (E2E-Programme einmal nach fertigem
+Produktcode gebaut). Alle sechs Handlungen auf PC2 (als B) UND am Primary (als A): `purchases.cancel` (Storno der Einlösung,
+dann Rücknahme der Retoure — die Abstimmung auf PC2 und am Primary ohne bad_reference/used_drift), `orders.cancel` (Verfall
+eines überzahlten Auftrags: die Gutschrift 300 bleibt dieselbe Zeile, OPEN), `production.create` + `production.complete`
+(genau eine Ausgabe 7.5, Einstand 250 unverändert), `tasks.create`/`tasks.update` mit Notiz (die Maske lädt sie); „Delete
+Order" mit geliefertem Gold am Primary gesperrt (nichts geschrieben), auf PC2 gesperrt (Primary-only); Ein-/Ausgänge und
+Abschluss im Abgleich des Primary-Servers, nichts in Quarantäne. Vier verlorene Antworten (`purchases.cancel`,
+`orders.cancel`, `production.create`, `production.complete`) je genau eine Wirkung, Akteur-Fehler 0, Hauptbuch des Laufs
+68 Zeilen / 34 Transaktionen ausgeglichen, PC2 ohne lokale Datenbank (alte `lataif.db` unberührt), Produktions-App,
+`E:\LATAIF\Data` und Ports 3001/3443 unberührt. Marker `POST_PARITY_R7A_PP1/PP2/PP8/PP9/PP10/PP11_RUNTIME_PROVED`,
+`POST_PARITY_R7A_LOST_RESPONSE_PROVED`, `POST_PARITY_R7A_TWO_APP_PROVED`.
+
+**Gates:** `test/r7a/` pp1 19/0 · pp8-pp9 54/0 · pp2-pp10 53/0 · pp11 22/0; Rust `bridge`/`sync_policy`/`sync_schema` 60/0;
+Node-Sweep 195/197 — die zwei Fehlschläge (`bridge/product-durability-ownership`, `uiparity/r4c1-role-parity`) sind
+vorbestehend und nicht R7A: beide Dateien seit R5F.1 (`4a8a68d`) unverändert, sie pinnen noch 41 Buchungen (vor R7A schon
+102); eigene Aufräumscheibe. Typcheck grün, Lint-Stand unverändert (7 Altfehler wie HEAD).
+
+```
+Category A = 0 · Category B = 0 (unverändert)
+Registry   = 175 (1 + 71 + 103)
+Post-Parity-Backlog: geschlossen PP-1, PP-2, PP-8, PP-9, PP-10, PP-11 · offen PP-3, PP-4, PP-5, PP-6, PP-7, PP-12
+Version 0.8.54 · kein Release
+```

@@ -1331,7 +1331,7 @@ async function scenarioOrderApReversal(ctx: TestContext, result: ScenarioResult)
 //  (B) Custom-Order: type-Derivation + Kostenbasis = Σ Kostenzeilen
 //  (C) createGoldPayable mit sourceOrderId
 //  (D) convertGoldPayableToMoney bei Order-Gold → Kategorie 'Inventory'
-//  (E) deleteOrder storniert offene Order-Gold-Verbindlichkeiten
+//  (E) deleteOrder mit beglichenem Order-Gold gesperrt (R7A PP-9)
 async function scenarioOrderGoldPayableModelB(ctx: TestContext, result: ScenarioResult) {
   const db = getDatabase();
   const { useOrderStore } = await import('@/stores/orderStore');
@@ -1420,16 +1420,21 @@ async function scenarioOrderGoldPayableModelB(ctx: TestContext, result: Scenario
     `gold_payable FULFILLED nach Convert erwartet`);
   ok(result.details, `Convert-to-Money: Expense='Inventory' (kapitalisiert), A/P +95, Payable FULFILLED`);
 
-  // ── Teil E — deleteOrder storniert offene Order-Gold-Verbindlichkeiten ──
+  // ── Teil E — deleteOrder: beglichenes Gold sperrt das Loeschen (R7A PP-9) ──
+  // Die erste Verbindlichkeit ist oben in Geld beglichen (FULFILLED). Vorher stornierte deleteOrder
+  // die zweite, offene und liess die beglichene mit Verweis auf den geloeschten Auftrag stehen. Jetzt:
+  // Nein mit Code, NICHTS geschrieben — der Weg ist „Cancel Order".
   const gp2 = goldStore.createGoldPayable({
     supplierId: ctx.supplierC, sourceOrderId: order.id, weightGrams: 3, karat: '21K',
   });
-  orderStore.deleteOrder(order.id);
-  assert(query(`SELECT status FROM gold_payables WHERE id=?`, [gp2.id])[0].status === 'CANCELLED',
-    `offene Order-Gold-Verbindlichkeit nach deleteOrder CANCELLED erwartet`);
-  assert((query(`SELECT COUNT(*) AS c FROM order_lines WHERE order_id=?`, [order.id])[0].c as number) === 0,
-    `order_lines nach deleteOrder geloescht`);
-  ok(result.details, `deleteOrder → offene Gold-Verbindlichkeit storniert (CANCELLED)`);
+  let deleteCode = '';
+  try { orderStore.deleteOrder(order.id); } catch (e) { deleteCode = String((e as { code?: string }).code || ''); }
+  assert(deleteCode === 'ORDER_DELETE_GOLD_MOVED', `deleteOrder mit beglichenem Gold gesperrt erwartet, got '${deleteCode}'`);
+  assert(query(`SELECT status FROM gold_payables WHERE id=?`, [gp2.id])[0].status === 'OPEN',
+    `offene Order-Gold-Verbindlichkeit bleibt OPEN (nichts geschrieben)`);
+  assert((query(`SELECT COUNT(*) AS c FROM orders WHERE id=?`, [order.id])[0].c as number) === 1,
+    `Auftrag bleibt bestehen`);
+  ok(result.details, `deleteOrder → mit beglichenem Gold gesperrt (ORDER_DELETE_GOLD_MOVED), nichts geschrieben`);
 
   // ── Cleanup ────────────────────────────────────────────────────────────
   db.run(`DELETE FROM ledger_entries WHERE source_id IN (SELECT id FROM expenses WHERE related_module='gold_payable' AND related_entity_id IN (?, ?))`, [gp.id, gp2.id]);

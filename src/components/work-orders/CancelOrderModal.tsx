@@ -30,13 +30,19 @@ export interface CancelOrderModalProps {
   submitError?: string;
   /** R6F — ueber „Delete Order" geoeffnet: ein bezahlter Auftrag wird storniert, nicht geloescht. */
   fromDelete?: boolean;
+  /**
+   * R7A (PP-8) — der Teil der Zahlungen ueber dem vereinbarten Preis, der schon als Kundenguthaben
+   * steht. Refund zahlt ihn mit zurueck (die Gutschrift wird storniert); Credit/Verfall lassen ihn
+   * beim Kunden und gelten nur fuer die Anzahlung.
+   */
+  overpaymentCredit?: number;
   onCancel: () => void;
   onConfirm: (choice: Choice, refundMethod?: RefundMethod, note?: string) => void;
 }
 
 export function CancelOrderModal({
   open, order, orderLines, totalPaid, sourcedLineIds, openGoldPayableCount, keptGoldPayableCount = 0,
-  busy = false, submitError = '', fromDelete = false,
+  busy = false, submitError = '', fromDelete = false, overpaymentCredit = 0,
   onCancel, onConfirm,
 }: CancelOrderModalProps) {
   const [choice, setChoice] = useState<Choice>('refund');
@@ -114,6 +120,18 @@ export function CancelOrderModal({
               <Bhd v={totalPaid}/> BHD
             </span>
           </div>
+
+          {overpaymentCredit > 0.005 && (
+            <div data-order-cancel-overpay style={{ marginBottom: 10, fontSize: 12, color: '#4B5563' }}>
+              {choice === 'refund' ? (
+                <>Includes the overpayment of <Bhd v={overpaymentCredit}/> BHD — refunded as well; its store credit is cancelled.</>
+              ) : (
+                <>The overpayment of <Bhd v={overpaymentCredit}/> BHD <strong>stays as the customer's store credit</strong>.
+                  {' '}{choice === 'credit' ? 'Keep as credit' : 'Forfeit'} applies to the down payment
+                  {' '}<Bhd v={Math.max(0, Math.round((totalPaid - overpaymentCredit) * 1000) / 1000)}/> BHD.</>
+              )}
+            </div>
+          )}
 
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
             {([

@@ -41,7 +41,9 @@ const R6C = ['suppliers.create', 'suppliers.update', 'agents.update', 'partners.
   // R6E — acht Angebots-/Rechnungs-/Retouren-/Transfer-/Nachrichten-Buchungen; Beweise in test/r6e.
   'offers.create', 'offers.update', 'offers.set_status', 'offers.convert_to_invoice', 'invoices.set_butterfly', 'returns.cancel', 'transfers.undo_convert', 'customers.log_message',
   // R6F — vierzehn Einkaufs-/Auftrags-/Kommissions-/Produktions-/Büro-Buchungen; Beweise in test/r6f.
-  'purchases.return_to_supplier', 'purchases.cancel', 'purchases.dismiss_inbox', 'orders.cancel', 'orders.update_line_status', 'orders.mark_line_ordered', 'orders.update_line', 'consignments.return_after_sale', 'consignments.cancel_sale', 'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr'];
+  'purchases.return_to_supplier', 'purchases.cancel', 'purchases.dismiss_inbox', 'orders.cancel', 'orders.update_line_status', 'orders.mark_line_ordered', 'orders.update_line', 'consignments.return_after_sale', 'consignments.cancel_sale', 'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr',
+  // POST-PARITY R7A (PP-2) — eins: der Fertigungsabschluss (ProductionDetail — Complete Production); Beweise in test/r7a.
+  'production.complete'];
 
 // ── §1 Die Matrix deckt sich mit der Freigabeliste ──────────────────────
 const registry = src('src/core/bridge/command-registry.ts');
@@ -49,7 +51,7 @@ const erlaubt = [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([
   .exec(registry)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
 
 ok(erlaubt.length === 40 + NEU.length + R6C.length && JSON.stringify(NEU) === JSON.stringify(['invoices.cancel']) && R6C.every((o) => erlaubt.includes(o) && !R4C_MATRIX.some((z) => z.op === o)),
-  `1 die Freigabeliste zaehlt die vierzig plus invoices.cancel plus die elf aus R6C und die achtundzwanzig aus R6D (keine davon in der Vierziger-Matrix) (${erlaubt.length})`);
+  `1 die Freigabeliste zaehlt die vierzig plus invoices.cancel plus die elf aus R6C und die achtundzwanzig aus R6D (+ acht aus R6E, vierzehn aus R6F, eins aus R7A (production.complete)) (keine davon in der Vierziger-Matrix) (${erlaubt.length})`);
 ok(R4C_MATRIX.length === 40, `1 die Matrix zaehlt vierzig Zeilen (${R4C_MATRIX.length})`);
 for (const z of R5F1_NEUE_BUCHUNGEN) {
   ok(erlaubt.includes(z.op) && !R4C_MATRIX.some((x) => x.op === z.op), `1 ${z.op}: freigegeben, und NICHT in der Vierziger-Matrix`);
@@ -194,11 +196,11 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   const ops = src('src/core/bridge/store-read-ops.ts');
   const parity = [...ops.matchAll(/export const OP_[A-Z_]+ = '([^']+)'/g)].length;
   ok(parity === 53, `10 dreiundfuenfzig typisierte Auskuenfte (R6C: +2 Inventur; R6D: +3) (${parity})`);
-  ok(erlaubt.length === 102, `10 vierzig Buchungen plus die eine aus R5F.1 plus elf aus R6C plus achtundzwanzig aus R6D plus acht aus R6E plus vierzehn aus R6F (${erlaubt.length})`);
+  ok(erlaubt.length === 103, `10 vierzig Buchungen plus die eine aus R5F.1 plus elf aus R6C plus achtundzwanzig aus R6D plus acht aus R6E plus vierzehn aus R6F plus eins aus R7A (production.complete) (${erlaubt.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '')
     .matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 174, `10 und Rust laesst dieselben 174 Namen durch (${rustOps})`);
+  ok(rustOps === 175, `10 und Rust laesst dieselben 175 Namen durch (R7A) (${rustOps})`);
 }
 
 // ── R5A — Auftrag → Rechnung: EINE Handlung, EINE Buchung ───────────────

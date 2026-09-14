@@ -249,6 +249,8 @@ function faulty(db: Db, pattern: RegExp) {
 const FORM = {
   title: ' Call Ali back ', description: 'Ring about the Daytona ', type: 'follow_up', priority: 'high',
   dueAt: '2026-09-20', linkedEntityType: 'customer', linkedEntityId: 'cust-1',
+  // R7A (PP-11) — die Notiz hat ihre Spalte und reist mit.
+  notes: ' Bring the box ',
 };
 const EDIT = { ...FORM, title: 'Call Ali again', description: '', priority: 'urgent', dueAt: '', linkedEntityType: '', linkedEntityId: '' };
 const taskRow = (db: Db): Record<string, unknown> => row(db, 'SELECT * FROM tasks ORDER BY created_at LIMIT 1');
@@ -385,8 +387,9 @@ const taskRow = (db: Db): Record<string, unknown> => row(db, 'SELECT * FROM task
     ok(r.thrown && /the primary decides/.test(r.message), `AUTHORITY update: ${k1} → „the primary decides"`);
   }
   ok(count() === vorN, 'AUTHORITY kein einziger gefälschter Rumpf hat eine Zeile angelegt');
-  const notes = await create('150', { title: 'x', notes: 'n' });
-  ok(notes.thrown && notes.message === 'unknown field: notes', 'AUTHORITY ein unbekanntes Feld wird abgewiesen statt ignoriert');
+  // R7A (PP-11) — `notes` ist seit R7A ein Feld der Maske; ein wirklich unbekanntes bleibt ein Nein.
+  const unbekannt = await create('150', { title: 'x', colour: 'red' });
+  ok(unbekannt.thrown && unbekannt.message === 'unknown field: colour', 'AUTHORITY ein unbekanntes Feld wird abgewiesen statt ignoriert');
 
   // Vokabular und Form.
   const cases: Array<[Record<string, unknown>, string]> = [
@@ -500,7 +503,7 @@ await imClient(async (touched, calls) => {
   const s1 = calls.find((x) => x.body.op === 'tasks.create');
   const s2 = calls.find((x) => x.body.op === 'tasks.update');
   ok(r1.kind === 'ok' && r2.kind === 'ok' && !!s1 && !!s2
-    && S(Object.keys(s1.body.payload as object).sort()) === S(['description', 'dueAt', 'linkedEntityId', 'linkedEntityType', 'priority', 'title', 'type'])
+    && S(Object.keys(s1.body.payload as object).sort()) === S(['description', 'dueAt', 'linkedEntityId', 'linkedEntityType', 'notes', 'priority', 'title', 'type'])
     && S(s2.body.payload) === S({ taskId: 't-pc2', expectedRevision: 5, status: 'completed' }) && touched() === 0,
   `CLIENT je EIN geprüfter Auftrag, ohne Urheber, Zeitpunkt oder Filiale — keine lokale Wirkung (${S(s1?.body.payload)} · ${S(s2?.body.payload)})`);
 });

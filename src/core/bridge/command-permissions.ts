@@ -219,6 +219,8 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'consignments.return_after_sale': admin('ConsignmentDetail: perm.canManageConsignments'),
   'consignments.cancel_sale': admin('ConsignmentDetail: perm.canManageConsignments'),
   'production.create': null,
+  // R7A — `ProductionDetail` fragt `usePermission` nicht (wie `ProductionPage` für das Anlegen).
+  'production.complete': null,
   'tasks.create': null,
   'tasks.update': null,
   'documents.upload': null,

@@ -527,11 +527,13 @@ marker('CENTRAL_UI_R6F_SUPPLIER_CREDIT_OVERPAY_REVERSAL_PINNED');
 }
 marker('CENTRAL_UI_R6F_SUPPLIER_CREDIT_USED_BLOCK_PINNED');
 
-// ══ §5 — FLAG: benutzt, Einloesung storniert (used → 0), dann Rueckabwicklung ══════
+// ══ §5 — benutzt, Einloesung storniert (used → 0), dann Rueckabwicklung ══════════════
 // Die Sperre prueft used_amount, nicht „nie benutzt". Nach dem Storno des einloesenden Einkaufs
 // bleibt dessen Zahlungszeile (method 'credit', reference = Guthaben-id) als Historie stehen; die
 // Rueckabwicklung loescht die Guthabenzeile trotzdem → die Referenz zeigt ins Leere. Geld/Salden
-// bleiben korrekt; die Counterparty-Pruefung (Reconciliation) meldet einen harten Befund.
+// bleiben korrekt. Bis R7A meldete die Counterparty-Pruefung dafuer einen harten Befund
+// (bad_reference) — POST-PARITY R7A (PP-1): eine vollstaendig stornierte Einloesung ist Historie und
+// wird weder als applied gezaehlt noch auf ihre Guthabenzeile geprueft.
 {
   const w = retourWelt();
   const y = kauf([{ productId: 'p3', quantity: 1, unitPrice: 1000 }]);
@@ -541,8 +543,10 @@ marker('CENTRAL_UI_R6F_SUPPLIER_CREDIT_USED_BLOCK_PINNED');
   const g = row(w.db, 'SELECT used_amount, status FROM supplier_credits WHERE id = ?', [w.creditId]);
   ok(c.ok && Number(g.used_amount) === 0 && g.status === 'OPEN', `SETUP Einloesender Einkauf storniert (Maske/Fern) → Guthaben used 0, OPEN (${S(g)})`);
   const zw = leser(w.db);
-  ok(einig(zw, 1000) && zw.errors.length === 0 && zw.warnings.includes('used_drift'),
-    `READERS 1000 einig; die Pruefung warnt schon hier used_drift (stornierte Einloesung zaehlt als applied) (${S(zw.warnings)})`);
+  // POST-PARITY R7A (PP-1) — die stornierte Einloesung ist Historie, keine lebende: sie zaehlt nicht
+  // mehr als applied → keine falsche used_drift-Warnung.
+  ok(einig(zw, 1000) && zw.errors.length === 0 && !zw.warnings.includes('used_drift'),
+    `READERS 1000 einig; die stornierte Einloesung zaehlt nicht als applied — keine used_drift (${S(zw.warnings)})`);
   nimm(w.db);
   usePurchaseStore.getState().cancelPurchase(w.pid);
   const ref = s(w.db, 'SELECT reference FROM purchase_payments WHERE id = ?', [payId]);
@@ -551,8 +555,9 @@ marker('CENTRAL_UI_R6F_SUPPLIER_CREDIT_USED_BLOCK_PINNED');
   'PINNED Rueckabwicklung erlaubt (used 0): Zeile geloescht, die Zahlungszeile des stornierten Einkaufs referenziert sie weiter');
   const nach = leser(w.db);
   ok(einig(nach, 0) && balanced(w.db) && salden(w.db) === '[]', `PINNED Salden bleiben korrekt: alle Leser 0, Hauptbuch auf 0 (${S(nach.werte)})`);
-  ok(S(nach.errors) === S([`bad_reference:${payId}`]), `PINNED Reconciliation meldet bad_reference (error) fuer genau diese Zahlung (${S(nach.errors)})`);
-  flag(`used-then-restored: supplier_credits ${w.creditId.slice(0, 8)} geloescht, purchase_payments.reference zeigt ins Leere → counterpartyAudit bad_reference (error). Geld korrekt, Pruefung falsch-positiv.`);
+  // R7A (PP-1) — vorher: bad_reference (error) fuer genau diese Zahlung, obwohl Geld und Salden stimmten.
+  ok(S(nach.errors) === '[]' && !nach.warnings.includes('used_drift'),
+    `R7A Reconciliation meldet KEINE falsche bad_reference mehr — die Zahlung ist storniert (Historie) (${S(nach.errors)})`);
 
   // Dasselbe beim Overpay-Rebook (keine volle Rueckabwicklung): Einloesung storniert, dann neue Zahlung.
   const wO = overWelt();
@@ -563,9 +568,8 @@ marker('CENTRAL_UI_R6F_SUPPLIER_CREDIT_USED_BLOCK_PINNED');
   usePurchaseStore.getState().addPayment(wO.pid, 100, 'cash');
   const lO = leser(wO.db);
   ok(n(wO.db, 'SELECT COUNT(*) FROM supplier_credits WHERE id = ?', [wO.creditId]) === 0 && einig(lO, 300)
-    && S(lO.errors) === S([`bad_reference:${app2.applications[0].paymentId}`]),
-  `PINNED Overpay-Rebook nach storniertem Einloesen: alte Zeile weg, Salden 300 korrekt, bad_reference (${S(lO.errors)})`);
-  flag('overpay rebook after a reversed redemption: same dangling reference (clawback-then-rebook gives the row a new id).');
+    && S(lO.errors) === '[]' && !!app2.applications[0].paymentId,
+  `R7A Overpay-Rebook nach storniertem Einloesen: alte Zeile weg, Salden 300 korrekt, keine falsche bad_reference (${S(lO.errors)})`);
 }
 marker('CENTRAL_UI_R6F_SUPPLIER_CREDIT_RESTORED_USAGE_FLAG_PINNED');
 

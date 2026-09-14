@@ -61,7 +61,8 @@ const LEGACY_SYNC_APPLY = new Set<string>(Object.keys(syncManifestJson.tables));
 const LEGACY_LOCAL_NON_SYNC = new Set<string>([
   'audit_log', 'authoritative_revisions', 'b1_applied_envelopes', 'b1_op_meta', 'b1_operations',
   'branches', 'categories', 'document_sequences', 'events', 'kpi_cache', 'ledger_sequence',
-  'production_inputs', 'production_outputs', 'scrap_trade_lines', 'scrap_trade_payments', 'scrap_trades',
+  // POST-PARITY R7A (PP-10): production_inputs/production_outputs are synced now (legacy_sync_apply).
+  'scrap_trade_lines', 'scrap_trade_payments', 'scrap_trades',
   'sessions', 'settings', 'sync_change_quarantine', 'sync_changelog', 'tax_payments', 'tenants',
   'user_branches', 'users',
   // MOBILE-04B2A2 — local cross-DB source binding for the mobile upload drain worker; never synced.
@@ -96,9 +97,9 @@ for (let i = 0; i < names.length; i++) for (let j = i + 1; j < names.length; j++
 }
 
 // §1 — semantic contracts, from independent sources
-ok(LEGACY_SYNC_APPLY.size === 50, `legacy_sync_apply = 50 sync allowlist tables (got ${LEGACY_SYNC_APPLY.size})`);
+ok(LEGACY_SYNC_APPLY.size === 52, `legacy_sync_apply = 52 sync allowlist tables (got ${LEGACY_SYNC_APPLY.size})`);
 for (const t of LEGACY_SYNC_APPLY) ok(actualLegacy.has(t), `sync_apply table ${t} is present in the legacy DDL`);
-ok(LEGACY_LOCAL_NON_SYNC.size === 25, `legacy_local_non_sync = 25 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
+ok(LEGACY_LOCAL_NON_SYNC.size === 23, `legacy_local_non_sync = 23 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
 ok(DEPRECATED_OR_UNREACHABLE_DDL.size === 0, 'deprecated_or_unreachable_ddl is empty (nothing unreachable)');
 
 // media: scanner sees them (anti-hiding), they equal MEDIA_TABLES, none is synced

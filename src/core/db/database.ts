@@ -2238,6 +2238,9 @@ function runMigrations(database: Database): void {
        BEGIN
          UPDATE documents SET revision = OLD.revision + 1 WHERE id = NEW.id;
        END`,
+    // POST-PARITY R7A (PP-11) — die Notiz der Aufgabenmaske bekommt ihre Spalte. Vorher zeigte die Maske
+    // „NOTES", verwarf den Text aber still. Additiv; der Fassungs-Trigger zählt eine Notizänderung mit.
+    `ALTER TABLE tasks ADD COLUMN notes TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

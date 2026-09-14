@@ -43,6 +43,7 @@ import { skuIsEmpty } from '@/core/products/sku-allocation';
 import { createPayload } from '@/core/data/write-payloads';
 import { TAX_SCHEMES, type Product } from '@/core/models/types';
 import type { MediaSource } from '@/core/media/product-media-create';
+import { createExpenseInHouse, PayablesRejected } from '@/core/payables/payables-house';
 
 /**
  * Die Felder, die ein Ausgang aus der Maske mitbringt — genau die, die `createRecord` bisher in die
@@ -293,10 +294,14 @@ export async function createProductionInHouse(input: ProductionCreateInput, ctx:
   // Eingänge: NICHT löschen (Collection-History 2026-05-18) — stock_status='consumed', Lose geleert
   // (H-04: sonst Phantom-Bestand und doppelt gezählter Wert), Menge aus den Losen.
   for (const p of inputs) {
+    const inputRowId = uuid();
     db.run(
       `INSERT INTO production_inputs (id, record_id, product_id, product_snapshot, input_value) VALUES (?, ?, ?, ?, ?)`,
-      [uuid(), id, p.id, JSON.stringify(p.snapshot), bhd(fils(p.purchasePrice))],
+      [inputRowId, id, p.id, JSON.stringify(p.snapshot), bhd(fils(p.purchasePrice))],
     );
+    // POST-PARITY R7A (PP-10) — die Eingangszeile reist mit dem Beleg (vorher nur `production_records`:
+    // ein anderer Datenbank-Rechner sah einen Beleg ohne Ein- und Ausgänge).
+    trackChange('production_inputs', inputRowId, 'insert', {});
     db.run(`UPDATE products SET stock_status = 'consumed', updated_at = ? WHERE id = ?`, [now, p.id]);
     trackProductRow(p.id);   // LAN-Sync Phase 1b — Legacy-Input ohne Lose; für Lot-Inputs überschreibt syncProductQuantity
     for (const lot of getActiveLots(p.id)) consumeLot(lot.id, lot.qtyRemaining);
@@ -336,10 +341,12 @@ export async function createProductionInHouse(input: ProductionCreateInput, ctx:
     const pId = made.productId;
     outputProductIds.push(pId);
     imageCount += o.images.length;
+    const outputRowId = uuid();
     db.run(
       `INSERT INTO production_outputs (id, record_id, product_id, output_value) VALUES (?, ?, ?, ?)`,
-      [uuid(), id, pId, bhd(o.valueFils)],
+      [outputRowId, id, pId, bhd(o.valueFils)],
     );
+    trackChange('production_outputs', outputRowId, 'insert', {});
     // F-PRD-03 — Output-Los: Eingangs-Lose geleert ⇄ Ausgangs-Los zum Ausgangswert (purchase_id NULL, qty 1).
     const lotId = uuid();
     db.run(
@@ -361,6 +368,98 @@ export async function createProductionInHouse(input: ProductionCreateInput, ctx:
     newValue: { recordNumber, totalValue },
   });
   return { recordId: id, recordNumber, totalValue, outputProductIds, imageCount };
+}
+
+// ════ POST-PARITY R7A (PP-2) — „Complete Production" ════════════════════════
+//
+// Bis R7A hatte der Abschluss (`productionStore.completeRecord`) keinen Aufrufer: Arbeit und Gemein-
+// kosten standen am Beleg, gebucht wurden sie nie. Der alte Weg hätte außerdem bei einem zweiten Aufruf
+// eine zweite Ausgabe gebucht (keine Statusprüfung) — ohne Klammer, mit verschluckten Buchungsfehlern
+// und stillem 'branch-main'. Jetzt EINE Hausfolge für Primary und PC2:
+//   • abgeschlossen wird nur ein BESTÄTIGTER Beleg dieser Filiale; ein abgeschlossener ist ein Nein —
+//     genau einmal gebucht, auch nach einem zweiten Klick oder aus einem veralteten Fenster;
+//   • Arbeit + Gemeinkosten > 0 → EINE Ausgabe (Miscellaneous, bar bezahlt, `related_module
+//     'production'`) über denselben Anlageweg wie jede Ausgabe (`createExpenseInHouse`: Beleg, Zahlung,
+//     beide Buchungen STRIKT) — dieselbe Wirkung wie der alte Abschluss, die `deleteRecord` schon kennt;
+//   • der Einstand des Fertigteils bleibt der Materialwert (= Ausgangswert, wie beim Anlegen): Arbeit und
+//     Gemeinkosten sind Aufwand, nicht Einstand — sonst stünden sie doppelt in den Büchern;
+//   • der Beleg wird COMPLETED, `total_cost` = Materialwert + Arbeit + Gemeinkosten (der Primary rechnet).
+// Alles in der Transaktion des Aufrufers; scheitert ein Teil, bleibt nichts — kein halber Abschluss.
+
+export interface ProductionCompleteInput {
+  recordId: string;
+  /** Die endgültigen Beträge — nicht genannt heißt: was am Beleg steht. */
+  laborCost?: number;
+  overheadCost?: number;
+}
+
+export interface ProductionCompleted {
+  recordId: string;
+  recordNumber: string;
+  status: 'COMPLETED';
+  laborCost: number;
+  overheadCost: number;
+  totalCost: number;
+  expenseId: string | null;
+  expenseNumber: string | null;
+}
+
+export function completeProductionInHouse(input: ProductionCompleteInput, ctx: ProductionCtx): ProductionCompleted {
+  assertProductionHere();
+  if (!ctx.branchId) throw new ProductionRejected('PRODUCTION_NO_SESSION', 'no branch for this production');
+  const rec = query('SELECT * FROM production_records WHERE id = ? AND branch_id = ?', [input.recordId, ctx.branchId])[0];
+  if (!rec) throw new ProductionRejected('PRODUCTION_NOT_FOUND', 'no such production record in this branch');
+  const status = String(rec.status || 'CONFIRMED');
+  if (status === 'COMPLETED') {
+    throw new ProductionRejected('PRODUCTION_ALREADY_COMPLETED', 'this production record is already completed — its labor and overhead are booked');
+  }
+  if (status !== 'CONFIRMED') {
+    throw new ProductionRejected('PRODUCTION_NOT_COMPLETABLE', `a ${status} production record cannot be completed`);
+  }
+  // Auch ein Altstand, der schon eine Ausgabe trägt, wird nicht ein zweites Mal gebucht.
+  if (query(`SELECT 1 FROM expenses WHERE related_module = 'production' AND related_entity_id = ? LIMIT 1`, [rec.id]).length > 0) {
+    throw new ProductionRejected('PRODUCTION_ALREADY_BOOKED', 'labor and overhead of this record are already booked as an expense');
+  }
+  const laborFils = fils(money(input.laborCost ?? Number(rec.labor_cost ?? 0), 'Labor cost'));
+  const overheadFils = fils(money(input.overheadCost ?? Number(rec.overhead_cost ?? 0), 'Overhead cost'));
+  const costFils = laborFils + overheadFils;
+  const totalCost = bhd(fils(Number(rec.total_value ?? 0)) + costFils);
+  const now = new Date().toISOString();
+  const recordId = String(rec.id);
+  const recordNumber = String(rec.record_number ?? '');
+
+  let expense: { expenseId: string; expenseNumber: string } | null = null;
+  if (costFils > 0) {
+    try {
+      expense = createExpenseInHouse({
+        category: 'Miscellaneous',
+        amount: bhd(costFils),
+        paymentMethod: 'cash',
+        expenseDate: now.split('T')[0],
+        description: `Production ${recordNumber} — Labor ${bhd(laborFils).toFixed(3)} + Overhead ${bhd(overheadFils).toFixed(3)}`,
+        initialPaid: bhd(costFils),
+        relatedModule: 'production',
+        relatedEntityId: recordId,
+      }, { branchId: ctx.branchId, userId: ctx.userId, now });
+    } catch (e) {
+      if (e instanceof PayablesRejected) throw new ProductionRejected(e.code, e.message);
+      throw e;
+    }
+  }
+  getDatabase().run(
+    `UPDATE production_records SET status = 'COMPLETED', labor_cost = ?, overhead_cost = ?, total_cost = ? WHERE id = ? AND branch_id = ?`,
+    [bhd(laborFils), bhd(overheadFils), totalCost, recordId, ctx.branchId],
+  );
+  const fx = { status: 'COMPLETED', laborCost: bhd(laborFils), overheadCost: bhd(overheadFils), totalCost, expenseId: expense?.expenseId ?? null };
+  trackChange('production_records', recordId, 'update', fx);
+  logAuditOrThrow({
+    module: 'Production', entityType: 'production_records', entityId: recordId, action: 'UPDATE', newValue: fx,
+  });
+  return {
+    recordId, recordNumber, status: 'COMPLETED',
+    laborCost: bhd(laborFils), overheadCost: bhd(overheadFils), totalCost,
+    expenseId: expense?.expenseId ?? null, expenseNumber: expense?.expenseNumber ?? null,
+  };
 }
 
 // ── PC2: der Rumpf ────────────────────────────────────────────────────────

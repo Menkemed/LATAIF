@@ -1,17 +1,21 @@
 // Production Record Detail — zeigt was konsumiert (Inputs) und was erzeugt
-// (Outputs) wurde, inkl. aller Attribute, Photos und Werte. Read-only,
-// Production-Records sind unveränderlich (Audit-Trail).
+// (Outputs) wurde, inkl. aller Attribute, Photos und Werte. Ein- und Ausgänge
+// sind unveränderlich (Audit-Trail); einzige Handlung außer Löschen ist seit
+// R7A der Abschluss (Arbeit + Gemeinkosten genau einmal gebucht).
 
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Trash2, Factory, ArrowDownCircle, ArrowUpCircle } from 'lucide-react';
+import { ArrowLeft, Trash2, Factory, ArrowDownCircle, ArrowUpCircle, CheckCircle } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
+import { Input } from '@/components/ui/Input';
+import { WriteError } from '@/components/shared/WriteError';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
+import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { Card } from '@/components/ui/Card';
 import { Bhd } from '@/components/ui/Bhd';
 import { Modal } from '@/components/ui/Modal';
-import { useProductionStore } from '@/stores/productionStore';
+import { useProductionStore, completeProductionOnPrimary } from '@/stores/productionStore';
 import { useProductStore } from '@/stores/productStore';
 import { getProductSpecs } from '@/core/utils/product-format';
 import type { Category, Product, ProductionInputSnapshot } from '@/core/models/types';
@@ -29,6 +33,14 @@ export function ProductionDetail() {
   const { records, loadRecords, deleteRecord } = useProductionStore();
   const { products, categories, loadProducts, loadCategories } = useProductStore();
   const [confirmDelete, setConfirmDelete] = useState(false);
+  // POST-PARITY R7A (PP-2) — „Complete Production": EINE Absicht, ein Wächter (eine Kennung je Versuch,
+  // dieselbe beim erneuten Speichern nach einer verlorenen Antwort). Am Primary die Hausfolge, auf PC2
+  // der Fernbefehl `production.complete` — derselbe Rumpf.
+  const abschluss = useSharedWrite<unknown>('production.complete');
+  const [completeOpen, setCompleteOpen] = useState(false);
+  const [labor, setLabor] = useState('0');
+  const [overhead, setOverhead] = useState('0');
+  const [completeError, setCompleteError] = useState('');
 
   useEffect(() => { if (records.length === 0) loadRecords(); loadProducts(); loadCategories(); }, [records.length, loadRecords, loadProducts, loadCategories]);
 
@@ -60,6 +72,29 @@ export function ProductionDetail() {
 
   const totalInputs = record.inputs.reduce((s, i) => s + (i.inputValue || 0), 0);
   const totalOutputs = record.outputs.reduce((s, o) => s + (o.outputValue || 0), 0);
+  const rec = record;
+
+  function openComplete() {
+    setLabor(String(rec.laborCost || 0));
+    setOverhead(String(rec.overheadCost || 0));
+    setCompleteError('');
+    setCompleteOpen(true);
+  }
+
+  // Nur die Absicht: welcher Beleg, welche endgültigen Beträge. Ausgabe, Buchung, Summe und Status
+  // rechnet und schreibt der Primary; die Maske schließt erst, wenn er gespeichert hat.
+  async function handleComplete() {
+    const body = { recordId: rec.id, laborCost: Number(labor) || 0, overheadCost: Number(overhead) || 0 };
+    setCompleteError('');
+    const r = await abschluss.save({
+      local: () => completeProductionOnPrimary(body),
+      remote: () => body,
+    });
+    if (r.kind !== 'ok') { setCompleteError(fehlertext(r)); return; }
+    setCompleteOpen(false);
+    loadRecords();
+    loadProducts();
+  }
 
   return (
     <PageLayout
@@ -68,6 +103,11 @@ export function ProductionDetail() {
       actions={
         <div style={{ display: 'flex', gap: 8 }}>
           <Button variant="ghost" icon={<ArrowLeft size={14} />} onClick={() => navigate('/production')}>Back</Button>
+          {record.status === 'CONFIRMED' && (
+            <Button variant="primary" icon={<CheckCircle size={14} />} onClick={openComplete} data-production-complete>
+              Complete Production
+            </Button>
+          )}
           <Button variant="danger" icon={<Trash2 size={14} />} {...primaryOnlyDeleteProps()} onClick={() => setConfirmDelete(true)}>Delete Record</Button>
         </div>
       }
@@ -180,6 +220,34 @@ export function ProductionDetail() {
           </div>
         </Card>
       </div>
+
+      <Modal open={completeOpen} onClose={() => setCompleteOpen(false)} title={`Complete Production ${record.recordNumber}`} width={480}>
+        <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 16, lineHeight: 1.6 }}>
+          Completing books labor and overhead once as a paid expense (cash) and marks the record COMPLETED.
+          The output products keep their material value as cost.
+        </p>
+        <div data-production-error>
+          <WriteError text={completeError} />
+        </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 16 }}>
+          <Input label="LABOR (BHD)" type="number" min={0} step="0.001" value={labor}
+            onChange={e => setLabor(e.target.value)} data-production-complete-labor />
+          <Input label="OVERHEAD (BHD)" type="number" min={0} step="0.001" value={overhead}
+            onChange={e => setOverhead(e.target.value)} data-production-complete-overhead />
+        </div>
+        <div className="flex justify-between" style={{ fontSize: 13, marginBottom: 20 }}>
+          <span style={{ color: '#6B7280' }}>Expense to book</span>
+          <span className="font-mono" data-production-complete-amount>
+            <Bhd v={Math.round(((Number(labor) || 0) + (Number(overhead) || 0)) * 1000) / 1000} /> BHD
+          </span>
+        </div>
+        <div className="flex justify-end gap-3">
+          <Button variant="ghost" onClick={() => setCompleteOpen(false)}>Cancel</Button>
+          <Button variant="primary" onClick={() => { void handleComplete(); }} disabled={abschluss.busy} data-production-complete-confirm>
+            Complete
+          </Button>
+        </div>
+      </Modal>
 
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Production Record" width={420}>
         <p style={{ fontSize: 13, color: '#6B7280', marginBottom: 20, lineHeight: 1.6 }}>

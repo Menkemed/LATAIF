@@ -152,11 +152,13 @@ const MATRIX: Record<string, Zeile> = {
   'tasks.update': { ui: 'TaskList — Edit / Complete', gleich: true },
   'documents.upload': { ui: 'DocumentList — Upload', gleich: true },
   'documents.set_ocr': { ui: 'DocumentList — OCR', gleich: true },
+  // POST-PARITY R7A (PP-2) — der Fertigungsabschluss.
+  'production.complete': { ui: 'ProductionDetail — Complete Production', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 102, `A 102 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 103, `A 103 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete)) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

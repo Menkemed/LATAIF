@@ -302,7 +302,7 @@ export function ProductionPage() {
             </div>
             {(laborCost > 0 || overheadCost > 0) && (
               <div className="flex justify-between" style={{ fontSize: 12, marginTop: 4, color: '#6B7280' }}>
-                <span>Labor + Overhead (booked separately)</span>
+                <span>Labor + Overhead (booked when the record is completed)</span>
                 <span className="font-mono">+ <Bhd v={laborCost + overheadCost}/> BHD</span>
               </div>
             )}

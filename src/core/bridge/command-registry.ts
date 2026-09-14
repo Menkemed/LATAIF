@@ -150,6 +150,9 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   'orders.cancel', 'orders.update_line_status', 'orders.mark_line_ordered', 'orders.update_line',
   'consignments.return_after_sale', 'consignments.cancel_sale',
   'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr',
+  // POST-PARITY R7A (PP-2) — der Fertigungsabschluss: Arbeit und Gemeinkosten eines bestätigten Belegs
+  // genau einmal als Ausgabe (bar bezahlt) gebucht, Beleg COMPLETED — an beiden Rechnern dieselbe Hausfolge.
+  'production.complete',
 ];
 
 export interface CommandSpec {

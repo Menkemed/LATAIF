@@ -73,18 +73,18 @@ const read = (p: string) => readFileSync(join(repo, p), 'utf8');
   // Store-Auskuenfte entstehen in einer Schleife ueber den Katalog — also 19 Fundstellen.
   // R1: fünf typisierte Auskünfte, jede einzeln registriert — deshalb 23 Fundstellen.
   const catalogue = (read('src/core/bridge/store-read-ops.ts').match(/^export const OP_[A-Z_]+ = '/gm) || []).length;
-  ok(probes === 1 && reads === 71 && catalogue === 53 && mutations === 102,
-    `SCOPE 1 Probe + 18 Auskünfte + 53 typisierte Auskünfte + 102 Buchungen (R6C: +2 Inventur-Auskünfte, +7 Stammdaten, +4 Inventur; R6D: +28 Geld/Steuer/Gold/Metall, +3 Auskünfte; R6E: +8 Angebot/Rechnung/Retoure/Transfer/Nachricht; R6F: +14 Einkauf/Auftrag/Kommission/Produktion/Büro) (${probes}/${reads}/${catalogue}/${mutations})`);
+  ok(probes === 1 && reads === 71 && catalogue === 53 && mutations === 103,
+    `SCOPE 1 Probe + 18 Auskünfte + 53 typisierte Auskünfte + 103 Buchungen (R6C: +2 Inventur-Auskünfte, +7 Stammdaten, +4 Inventur; R6D: +28 Geld/Steuer/Gold/Metall, +3 Auskünfte; R6E: +8 Angebot/Rechnung/Retoure/Transfer/Nachricht; R6F: +14 Einkauf/Auftrag/Kommission/Produktion/Büro; R7A: +1 production.complete) (${probes}/${reads}/${catalogue}/${mutations})`);
 
   const a = reg.indexOf('ALLOWED_MUTATIONS: readonly string[] = [');
   const body = reg.slice(reg.indexOf('[', a) + 1, reg.indexOf('\n];', a));
   const allow = [...body.matchAll(/'([^']+)'/g)].map((m) => m[1]);
-  ok(allow.length === 102, `SCOPE die Erlaubnisliste nennt genau 102 Buchungen (R6F) (${allow.length})`);
+  ok(allow.length === 103, `SCOPE die Erlaubnisliste nennt genau 103 Buchungen (R7A) (${allow.length})`);
 
   const bridge = read('src-tauri/src/bridge.rs').replace(/\r\n/g, '\n');
   const rustList = bridge.slice(bridge.indexOf('pub const REMOTE_OPS: &[&str] = &['));
   const rustOps = rustList.slice(0, rustList.indexOf('\n];')).split('\n').filter((l) => /^\s{4}OP_[A-Z0-9_]+,$/.test(l));
-  ok(rustOps.length === 174, `SCOPE und Rust lässt genau dieselben 174 Namen durch (${rustOps.length})`);
+  ok(rustOps.length === 175, `SCOPE und Rust lässt genau dieselben 175 Namen durch (R7A) (${rustOps.length})`);
 }
 
 // ── §2 — der alte Desktop-Abgleich ist im Client-Modus verweigert ──────────

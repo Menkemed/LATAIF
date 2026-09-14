@@ -362,11 +362,34 @@ function auditCreditIntegrity(run: SqlRunner, branchId: string): CreditIssue[] {
     if (!found) issues.push({ kind: 'ledger_no_credit', severity: sev, side: 'customer', entityId: `${mod}|${sid}`, detail: `CUSTOMER_CREDIT-Grant ohne passende customer_credits-Row (${mod})` });
   }
 
+  // POST-PARITY R7A (PP-1) — eine Guthaben-Einlösung, deren Buchung VOLLSTÄNDIG storniert ist (der
+  // einlösende Einkauf / die Ausgabe wurde storniert, die Zahlungszeile bleibt als Historie stehen und
+  // `restoreSupplierCreditUsage` hat `used_amount` zurückgegeben), ist keine lebende Einlösung mehr. Sie
+  // zählt nicht zu `applied` und muss auf keine Guthabenzeile mehr zeigen — die darf danach rechtmäßig
+  // erstattet oder abgewickelt (gelöscht) sein. „Storniert" heißt dasselbe wie `hasReversalFor`: jedes
+  // Original der Quelle hat seine Gegenbuchung. Eine LEBENDE Einlösung bleibt voll geprüft.
+  const reversedPay = new Set<string>();
+  for (const r of run(
+    `SELECT o.source_module AS m, o.source_id AS sid, COUNT(DISTINCT o.id) AS n,
+            COUNT(DISTINCT CASE WHEN r.id IS NOT NULL THEN o.id END) AS rv
+       FROM ledger_entries o LEFT JOIN ledger_entries r ON r.reverses_entry_id = o.id
+      WHERE o.source_module IN ('PURCHASE_PAYMENT','EXPENSE_PAYMENT') AND o.reverses_entry_id IS NULL
+      GROUP BY o.source_module, o.source_id`,
+    []
+  )) if (Number(r.n) > 0 && Number(r.rv) === Number(r.n)) reversedPay.add(`${r.m}|${r.sid}`);
+  const liveCreditPay = (mod: string, id: unknown): boolean => !reversedPay.has(`${mod}|${String(id)}`);
+  const appliedFils = new Map<string, number>();
+  for (const [table, mod] of [['purchase_payments', 'PURCHASE_PAYMENT'], ['expense_payments', 'EXPENSE_PAYMENT']] as const) {
+    for (const r of run(`SELECT id, reference, amount FROM ${table} WHERE method='credit' AND reference IS NOT NULL`, [])) {
+      if (!liveCreditPay(mod, r.id)) continue;
+      const ref = String(r.reference);
+      appliedFils.set(ref, (appliedFils.get(ref) ?? 0) + toFils(r.amount));
+    }
+  }
+
   // 1+6+7 — supplier_credits in EINER Query (overused/status/drift/credit_no_ledger).
   const scRows = run(
-    `SELECT sc.id, sc.supplier_id AS cp, sc.source_return_id, sc.source_purchase_id, sc.amount, sc.used_amount, sc.status,
-            COALESCE((SELECT SUM(amount) FROM purchase_payments WHERE method='credit' AND reference=sc.id),0)
-            + COALESCE((SELECT SUM(amount) FROM expense_payments WHERE method='credit' AND reference=sc.id),0) AS applied
+    `SELECT sc.id, sc.supplier_id AS cp, sc.source_return_id, sc.source_purchase_id, sc.amount, sc.used_amount, sc.status
      FROM supplier_credits sc WHERE sc.branch_id=?`,
     [branchId]
   );
@@ -394,7 +417,7 @@ function auditCreditIntegrity(run: SqlRunner, branchId: string): CreditIssue[] {
     if (used > amt) issues.push({ kind: 'overused', severity: 'error', side: 'supplier', entityId: id, counterpartyId: cp, amountFils: used - amt, detail: `used>amount (used ${used} > amount ${amt} fils)` });
     const expectedStatus = used >= amt - 5 ? 'USED' : 'OPEN';
     if (String(r.status) !== expectedStatus) issues.push({ kind: 'inconsistent_status', severity: 'warning', side: 'supplier', entityId: id, counterpartyId: cp, detail: `status='${r.status}' erwartet '${expectedStatus}' (used ${used}/amount ${amt} fils)` });
-    const applied = toFils(r.applied);
+    const applied = appliedFils.get(id) ?? 0;
     if (applied !== used) issues.push({ kind: 'used_drift', severity: 'warning', side: 'supplier', entityId: id, counterpartyId: cp, amountFils: applied - used, detail: `Σ credit-Payments ${applied} ≠ used_amount ${used} fils` });
     // credit_no_ledger (supplier): NULL-Konvention
     let expectKey: string | null = null;
@@ -422,7 +445,10 @@ function auditCreditIntegrity(run: SqlRunner, branchId: string): CreditIssue[] {
 
   // 5 — bad_reference: method='credit'-Payments müssen eine existierende supplier_credits.id referenzieren.
   const checkCreditRef = (rows: Array<Record<string, unknown>>, table: string) => {
+    const mod = table === 'purchase_payments' ? 'PURCHASE_PAYMENT' : 'EXPENSE_PAYMENT';
     for (const r of rows) {
+      // R7A (PP-1) — nur LEBENDE Einlösungen; eine vollständig stornierte ist Historie (siehe oben).
+      if (!liveCreditPay(mod, r.id)) continue;
       const ref = r.reference == null ? '' : String(r.reference);
       if (!ref) issues.push({ kind: 'bad_reference', severity: 'error', side: 'supplier', entityId: String(r.id), counterpartyId: String(r.cp ?? ''), amountFils: toFils(r.amount), detail: `${table}.method='credit' ohne reference` });
       else if (!scIds.has(ref)) issues.push({ kind: 'bad_reference', severity: 'error', side: 'supplier', entityId: String(r.id), counterpartyId: String(r.cp ?? ''), amountFils: toFils(r.amount), detail: `${table}.reference='${ref}' zeigt auf kein supplier_credits` });

@@ -287,6 +287,8 @@ pub const OP_TASKS_CREATE: &str = "tasks.create";
 pub const OP_TASKS_UPDATE: &str = "tasks.update";
 pub const OP_DOCUMENTS_UPLOAD: &str = "documents.upload";
 pub const OP_DOCUMENTS_SET_OCR: &str = "documents.set_ocr";
+// POST-PARITY R7A (PP-2) — der Fertigungsabschluss (Arbeit + Gemeinkosten genau einmal gebucht).
+pub const OP_PRODUCTION_COMPLETE: &str = "production.complete";
 
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
 // Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
@@ -468,6 +470,7 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_TASKS_UPDATE,
     OP_DOCUMENTS_UPLOAD,
     OP_DOCUMENTS_SET_OCR,
+    OP_PRODUCTION_COMPLETE,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

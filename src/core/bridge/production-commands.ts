@@ -30,12 +30,14 @@ import {
   discardStagedAfterSuccess, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader,
 } from './remote-create-support';
 import {
-  createProductionInHouse, PRODUCTION_OUTPUT_FIELDS, ProductionMediaIncomplete, ProductionRejected,
-  type ProductionCreateInput, type ProductionCtx,
+  createProductionInHouse, completeProductionInHouse, PRODUCTION_OUTPUT_FIELDS, ProductionMediaIncomplete, ProductionRejected,
+  type ProductionCreateInput, type ProductionCompleteInput, type ProductionCtx,
 } from '@/core/production/production-house';
 import { TAX_SCHEMES } from '@/core/models/types';
 
 export const OP_PRODUCTION_CREATE = 'production.create';
+/** POST-PARITY R7A (PP-2) — der Fertigungsabschluss: der Rumpf nennt den Beleg und die endgültigen Kosten. */
+export const OP_PRODUCTION_COMPLETE = 'production.complete';
 
 /** Eine technische Obergrenze des Rumpfs (dieselbe wie bei Angebot und Auftragsumwandlung) — keine Geschäftsregel. */
 const MAX_ITEMS = 500;
@@ -216,14 +218,49 @@ export async function runProductionCreate(
   return outcome;
 }
 
+// ── R7A (PP-2) — „Complete Production" ────────────────────────────────────
+
+/**
+ * Der Rumpf ist ein Wunsch: WELCHER Beleg, und optional die endgültigen Beträge für Arbeit und
+ * Gemeinkosten. Status, Summe, Ausgabe, Buchung, Zeitpunkt und der Mensch bestimmt der Primary.
+ * Keine Fassung nötig: der Abschluss prüft in der Transaktion den WIRKLICHEN Status (nur CONFIRMED) —
+ * ein zweiter Abschluss ist ein Nein, eine Wiederholung derselben Kennung das eingefrorene Ergebnis.
+ */
+export function parseProductionComplete(raw: unknown): ProductionCompleteInput {
+  if (!isPlain(raw)) throw new ProductionPayloadError('payload must be an object');
+  strict(raw, ['recordId', 'laborCost', 'overheadCost'], [...FORBIDDEN, ...COMPUTED.filter((k) => k !== 'recordId')], '');
+  if (typeof raw.recordId !== 'string' || !raw.recordId.trim()) throw new ProductionPayloadError('recordId is required');
+  return {
+    recordId: raw.recordId,
+    laborCost: amount(raw.laborCost, 'laborCost'),
+    overheadCost: amount(raw.overheadCost, 'overheadCost'),
+  };
+}
+
+export async function runProductionComplete(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const req = parseProductionComplete(raw);
+  return runRemoteCommand(deps, identity, async () => {
+    // In die Bücher DIESER Filiale, oder gar nicht.
+    assertHouseBranch(identity);
+    try {
+      return { ...completeProductionInHouse(req, ctxOf(identity)) };
+    } catch (e) {
+      if (e instanceof ProductionRejected) throw new CommandRejected(e.code, e.message);
+      throw e;
+    }
+  });
+}
+
 // ── Die Anmeldung ─────────────────────────────────────────────────────────
 
-async function execute(payload: unknown, actor?: CommandActor): Promise<Record<string, unknown>> {
-  if (!actor) throw new Error(`${OP_PRODUCTION_CREATE} needs an authenticated identity`);
+type Runner = (deps: EngineDeps, identity: CommandIdentity, body: unknown) => Promise<CommandOutcome>;
+
+async function execute(op: string, run: Runner, payload: unknown, actor?: CommandActor): Promise<Record<string, unknown>> {
+  if (!actor) throw new Error(`${op} needs an authenticated identity`);
   const body = (payload as { input?: unknown } | null)?.input ?? payload;
   let outcome: CommandOutcome;
   try {
-    outcome = await runProductionCreate(productionDeps(), { ...actor, op: OP_PRODUCTION_CREATE }, body);
+    outcome = await run(productionDeps(), { ...actor, op }, body);
   } catch (err) {
     // Ein unbrauchbarer Rumpf (auch eine verschwundene Ablage) ist eine Antwort: neu schicken.
     if (err instanceof ProductionPayloadError) throw new BusinessError(err.code, err.message);
@@ -239,5 +276,10 @@ async function execute(payload: unknown, actor?: CommandActor): Promise<Record<s
 
 registerCommand(OP_PRODUCTION_CREATE, {
   kind: 'mutation',
-  handler: (payload, actor?: CommandActor) => execute(payload, actor),
+  handler: (payload, actor?: CommandActor) => execute(OP_PRODUCTION_CREATE, (d, i, b) => runProductionCreate(d, i, b), payload, actor),
+});
+
+registerCommand(OP_PRODUCTION_COMPLETE, {
+  kind: 'mutation',
+  handler: (payload, actor?: CommandActor) => execute(OP_PRODUCTION_COMPLETE, runProductionComplete, payload, actor),
 });

@@ -134,6 +134,10 @@ export interface OrderCancelResult {
   /** Gramm-Schulden, die den Storno überleben: Gold geliefert oder schon Gramm bewegt. */
   openGoldPayableIds: string[];
   openExpenseIds: string[];
+  /** R7A (PP-8) — Überzahlungs-Gutschriften, die beim Kunden bleiben (Guthaben/Verfall). */
+  keptOverpayCreditIds?: string[];
+  /** R7A (PP-8) — Überzahlungs-Gutschriften, die mit der Rückzahlung storniert (nicht gelöscht) wurden. */
+  voidedOverpayCreditIds?: string[];
   revision: number;
 }
 
@@ -199,6 +203,8 @@ export function cancelOrderInHouse(req: OrderCancelRequest, branchId: string): O
     cancelledGoldPayableIds: fx.cancelledGoldPayableIds,
     openGoldPayableIds: fx.openGoldPayableIds,
     openExpenseIds: fx.openExpenseIds,
+    ...(fx.keptOverpayCreditIds?.length ? { keptOverpayCreditIds: fx.keptOverpayCreditIds } : {}),
+    ...(fx.voidedOverpayCreditIds?.length ? { voidedOverpayCreditIds: fx.voidedOverpayCreditIds } : {}),
     revision: num(after.revision),
   };
 }

@@ -533,8 +533,10 @@ marker('CENTRAL_UI_R6F_PRODUCTION_AUTHORITY_PROVED');
     { ...ACTOR, commandId: ID('73'), payloadHash: 'h73' } as never);
   ok(nein.kind === 'business_error' && (nein as { code: string }).code === 'PRODUCTION_INPUT_NOT_AVAILABLE', `BRIDGE ein Urteil kommt als fachliches Nein an (${S(nein)})`);
   const reg = codeOf(src('src/core/bridge/production-commands.ts'));
-  ok((reg.match(/registerCommand\(/g) ?? []).length === 1 && /registerCommand\(OP_PRODUCTION_CREATE, \{\s*kind: 'mutation'/.test(reg),
-    'BRIDGE genau EINE ausdrückliche Anmeldung');
+  // R7A (PP-2) — dazu kommt der Abschluss als ZWEITE ausdrückliche Anmeldung (production.complete).
+  ok((reg.match(/registerCommand\(/g) ?? []).length === 2 && /registerCommand\(OP_PRODUCTION_CREATE, \{\s*kind: 'mutation'/.test(reg)
+    && /registerCommand\(OP_PRODUCTION_COMPLETE, \{\s*kind: 'mutation'/.test(reg),
+  'BRIDGE genau ZWEI ausdrückliche Anmeldungen (Anlegen, Abschluss)');
 }
 marker('CENTRAL_UI_R6F_PRODUCTION_BRIDGE_PROVED');
 
@@ -601,7 +603,8 @@ marker('CENTRAL_UI_R6F_PRODUCTION_CLIENT_PROVED');
     ok(page.includes(attr), `UI ${attr}`);
   }
   const st = codeOf(src('src/stores/productionStore.ts'));
-  const create = st.slice(st.indexOf('createRecord: async (input)'), st.indexOf('completeRecord: (id, laborCost, overheadCost)'));
+  // R7A (PP-2) — `completeRecord` ist aus dem Store verschwunden (Abschluss = Hausfolge); der Schnitt endet an `deleteRecord`.
+  const create = st.slice(st.indexOf('createRecord: async (input)'), st.indexOf('deleteRecord: (id)'));
   ok(/createProductionOnPrimary\(input\)/.test(create) && !/INSERT INTO|branch-main|user-owner|saveDatabase/.test(create),
     'STORE createRecord ist nur noch der Anschluss an die Hausfolge (kein eigenes INSERT, kein stilles branch-main)');
   ok(/export async function createProductionOnPrimary[\s\S]{0,200}assertProductionHere\(\)[\s\S]{0,120}runOnPrimary\(\(\) => createProductionInHouse\(input, ctx\), nachFertigung\)/.test(st),

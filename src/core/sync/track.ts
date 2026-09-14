@@ -43,6 +43,8 @@ function moduleForTable(table: string): string {
     suppliers: 'Supplier',
     expenses: 'Expense',
     production_records: 'Production',
+    production_inputs: 'Production',
+    production_outputs: 'Production',
     partner_transactions: 'Partner',
     sales_returns: 'Sales',
   };

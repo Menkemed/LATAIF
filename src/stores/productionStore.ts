@@ -10,12 +10,13 @@
 // ═══════════════════════════════════════════════════════════
 
 import { create } from 'zustand';
-import { v4 as uuid } from 'uuid';
-import type { ProductionRecord, ProductionInput, ProductionOutput, Expense } from '@/core/models/types';
+import type { ProductionRecord, ProductionInput, ProductionOutput } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
-import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
-import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { postExpense, postExpensePayment, reverseSource, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
+import { query } from '@/core/db/helpers';
+import { trackDelete } from '@/core/sync/track';
+import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — Ein-/Ausgangszeilen
+import { completeProductionInHouse, type ProductionCompleteInput, type ProductionCompleted } from '@/core/production/production-house';
+import { reverseSource, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
 import { restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 // CENTRAL-UI-PARITY R6F — das Anlegen ist EINE Hausfolge für Primary und PC2 (production-house),
 // am Primary exklusiv in einer Transaktion (`runOnPrimary`), danach durabel.
@@ -47,8 +48,8 @@ interface ProductionStore {
   // Eingabe ist dieselbe wie bisher (Spec aus NewProductModal + Fertigungswert je Ausgang,
   // Plan §8 #7 Arbeit/Gemeinkosten); geprüft und geschrieben wird in `production-house`.
   createRecord: (input: ProductionCreateInput) => Promise<ProductionRecord>;
-  // Plan §8 #7 — Record als abgeschlossen markieren + Kosten finalisieren
-  completeRecord: (id: string, laborCost?: number, overheadCost?: number) => void;
+  // Plan §8 #7 — der Abschluss (Kosten finalisieren + buchen) ist seit R7A die Hausfolge
+  // `completeProductionInHouse` (am Primary: `completeProductionOnPrimary`, fern: `production.complete`).
   deleteRecord: (id: string) => void;
 }
 
@@ -115,86 +116,6 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
   createRecord: async (input) => {
     const made = await createProductionOnPrimary(input);
     return get().getRecord(made.recordId)!;
-  },
-
-  // Plan §8 #7 — Record abschließen (COMPLETED) + optional Kosten anpassen.
-  completeRecord: (id, laborCost, overheadCost) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    const r = get().getRecord(id);
-    if (!r) return;
-    const labor = typeof laborCost === 'number' ? laborCost : (r.laborCost || 0);
-    const overhead = typeof overheadCost === 'number' ? overheadCost : (r.overheadCost || 0);
-    const totalCost = (r.totalValue || 0) + labor + overhead;
-    db.run(
-      `UPDATE production_records SET status = 'COMPLETED', labor_cost = ?, overhead_cost = ?, total_cost = ? WHERE id = ?`,
-      [labor, overhead, totalCost, id]
-    );
-    saveDatabase();
-    trackUpdate('production_records', id, { status: 'COMPLETED', laborCost: labor, overheadCost: overhead, totalCost });
-    get().loadRecords();
-    // Auto-Expense für Arbeit + Overhead falls > 0 (optional, als Audit-Hilfe)
-    if (labor + overhead > 0) {
-      let branchId: string, userId: string;
-      try { branchId = currentBranchId(); userId = currentUserId(); }
-      catch { branchId = 'branch-main'; userId = 'user-owner'; }
-      const expenseId = uuid();
-      const expenseNumber = getNextDocumentNumber('EXP');
-      const expenseAmount = labor + overhead;
-      const expenseDate = now.split('T')[0];
-      const expenseDescription = `Production ${r.recordNumber} — Labor ${labor.toFixed(2)} + Overhead ${overhead.toFixed(2)}`;
-      db.run(
-        `INSERT INTO expenses (id, branch_id, expense_number, category, amount, paid_amount, payment_method,
-          expense_date, description, related_module, related_entity_id, status, created_at, created_by)
-         VALUES (?, ?, ?, 'Miscellaneous', ?, ?, 'cash', ?, ?, 'production', ?, 'PAID', ?, ?)`,
-        [expenseId, branchId, expenseNumber, expenseAmount, expenseAmount, expenseDate,
-         expenseDescription,
-         id, now, userId]
-      );
-      trackInsert('expenses', expenseId, { category: 'Miscellaneous', amount: expenseAmount, auto: true, productionId: id });
-      saveDatabase();
-
-      // Ledger-Post fuer Production-Expense (PAID, also direkt gegen Cash gegenbuchbar
-      // beim postExpense — siehe posting.ts: paidAmount > 0 fuehrt zur Cash-Side-Buchung).
-      const productionExpense: Expense = {
-        id: expenseId,
-        expenseNumber,
-        branchId,
-        category: 'Miscellaneous',
-        amount: expenseAmount,
-        paidAmount: expenseAmount,
-        paymentMethod: 'cash',
-        expenseDate,
-        description: expenseDescription,
-        relatedModule: 'production',
-        relatedEntityId: id,
-        status: 'PAID',
-        createdAt: now,
-      };
-      safePost(`postExpense(${expenseId}) [production]`, () => {
-        if (hasLedgerEntries('EXPENSE', expenseId)) return;
-        postExpense(productionExpense);
-      });
-      // Production-Expenses sind direkt PAID — Cash-Leg via expense_payment + Ledger-Post.
-      const payId = uuid();
-      db.run(
-        `INSERT INTO expense_payments (id, expense_id, amount, method, paid_at, note, created_at)
-         VALUES (?, ?, ?, 'cash', ?, ?, ?)`,
-        [payId, expenseId, expenseAmount, expenseDate, 'Auto-paid on production complete', now]
-      );
-      trackInsert('expense_payments', payId, { expenseId, amount: expenseAmount, method: 'cash' });
-      safePost(`postExpensePayment(${payId}) [production]`, () => {
-        if (hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
-        postExpensePayment(
-          {
-            id: payId, expenseId, amount: expenseAmount,
-            method: 'cash', paidAt: expenseDate, createdAt: now,
-            note: 'Auto-paid on production complete',
-          },
-          undefined
-        );
-      });
-    }
   },
 
   deleteRecord: (id) => {
@@ -272,10 +193,16 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
     }
 
     // 4. Inputs/Outputs-Zeilen + Record loeschen.
+    // R7A (PP-10) — die Kindzeilen reisen mit (vorher still nur lokal geloescht; ohne Fremdschluessel-
+    // Erzwingung blieben sie auf einem anderen Datenbank-Rechner als Waisen stehen).
+    const inRowIds = query(`SELECT id FROM production_inputs WHERE record_id = ?`, [id]).map(r => r.id as string);
+    const outRowIds = query(`SELECT id FROM production_outputs WHERE record_id = ?`, [id]).map(r => r.id as string);
     db.run(`DELETE FROM production_inputs WHERE record_id = ?`, [id]);
     db.run(`DELETE FROM production_outputs WHERE record_id = ?`, [id]);
     db.run('DELETE FROM production_records WHERE id = ?', [id]);
     saveDatabase();
+    for (const rid of inRowIds) trackChange('production_inputs', rid, 'delete', {});
+    for (const rid of outRowIds) trackChange('production_outputs', rid, 'delete', {});
     trackDelete('production_records', id);
     get().loadRecords();
   },
@@ -309,4 +236,15 @@ export async function createProductionOnPrimary(input: ProductionCreateInput): P
   assertProductionHere();
   const ctx = localProductionCtx();
   return runOnPrimary(() => createProductionInHouse(input, ctx), nachFertigung);
+}
+
+/**
+ * POST-PARITY R7A (PP-2) — „Complete Production" am Primary: dieselbe Hausfolge wie der Fernbefehl
+ * `production.complete`, exklusiv in EINER Transaktion, erst danach durabel. Ohne Datenbank verweigert
+ * der Riegel, BEVOR irgendetwas eine Datenbank anfasst.
+ */
+export async function completeProductionOnPrimary(input: ProductionCompleteInput): Promise<ProductionCompleted> {
+  assertProductionHere();
+  const ctx = localProductionCtx();
+  return runOnPrimary(() => completeProductionInHouse(input, ctx), nachFertigung);
 }
