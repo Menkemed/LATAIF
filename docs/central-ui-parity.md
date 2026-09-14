@@ -3276,15 +3276,21 @@ das Produkt fehlerfrei ist — der Post-Parity-Backlog unten bleibt offen.
 ### Gesamtzahlen (`CENTRAL_UI_FINAL_COUNTS_PROVED`)
 
 ```
-R6A-Inventur (12.09.2026)   231 Einstiege = 60 angeschlossen + 171 ohne gemeinsamen Weg
-  damals                    A 95 · B 8 · C 15 · D 12 · E 41
-Write-Gap-SSOT heute        171 Tabellenzeilen, maschinell gezählt: A 95 · B 8 · C 15 · D 12 · E 41
-  A                         95/95 geschlossen (R6C 16 · R6D 41 · R6E 22 · R6F 16)  → offen 0
-  B                          8/8  geschlossen (R6B)                                 → offen 0
-  C / D / E                 15 / 12 / 41 — einzeln neu geprüft (unten), alle korrekt eingeordnet
+R6A recorded baseline (12.09.2026, dokumentiert):
+   60 already shared/remote
++ 171 classified rows
+= 231 entrypoints
+
+Final audit freshly verified (14.09.2026, Write-Gap-SSOT gegen den Code):
+  171 classified rows       A 95 · B 8 · C 15 · D 12 · E 41   (maschinell gezählt)
+  A open 0                  95/95 geschlossen (R6C 16 · R6D 41 · R6E 22 · R6F 16)
+  B open 0                   8/8  geschlossen (R6B)
+  C / D / E                 15 / 12 / 41 — einzeln neu geprüft (Anhang), alle korrekt eingeordnet
 ```
-Die 60 angeschlossenen Einstiege sind die R6A-Zählung (40er-Matrix + `invoices.cancel` + Schnellanlage Kunde + Navigation);
-sie stehen nicht als Tabellenzeilen und wurden nicht einzeln neu gezählt — ihr Kern ist die 40er-Matrix (§ Matrix).
+Die **231 ist die dokumentierte R6A-Baseline, keine aktuelle Codezählung.** Die 60 bereits gemeinsamen Einstiege (R6A:
+40er-Matrix + `invoices.cancel` + Schnellanlage Kunde + Navigation) stehen nicht als Tabellenzeilen und wurden im Final
+Audit **nicht** einzeln neu gezählt. Frisch geprüft sind die 171 klassifizierten Zeilen und, getrennt, die 40er-Matrix
+(§ Matrix).
 
 ### Kategorie C — maschinenlokal (`CENTRAL_UI_FINAL_CATEGORY_C_PROVED`)
 
@@ -3309,8 +3315,31 @@ nur bei defektem Ausweis/Speicher erreichbar — dann funktionieren sie (echte F
 Lösch-Öffner ist auf PC2 gesperrt und nennt den Grund; wo ein Bestätigungsdialog folgt, steht der Riegel davor; „Delete (n)"
 der Mehrfachauswahl ist nur über das gesperrte „Select" erreichbar, der Handler hat den Riegel. „Auftrag löschen" bleibt E
 (Riegel `OrderDetail.tsx:499` vor der Weiche; der Storno ruft `deleteOrder` nicht mehr). Import: Route = Hinweis, Knopf
-gesperrt, `ImportPage` stoppt vor Sicherung. Kein lokaler DB-Zugriff auf PC2. Härtung einzelner Handler ohne eigenen
-Riegel (heute unerreichbar) → **PP-6**.
+gesperrt, `ImportPage` stoppt vor Sicherung. Kein lokaler DB-Zugriff auf PC2.
+
+**PP-6 aufgelöst — die Primary-only-Handler ohne eigenen Riegel, einzeln:**
+
+| Handler | Zeile | UI auf PC2 | Handler-Callpath | Bridge/Command | Renderer | lokale DB/Rust auf PC2 | bestehender Guard |
+|---|---|---|---|---|---|---|---|
+| `SettingsPage`: Firma, Steuer, Kategorien, Filialen, Benutzer, Nummernkreise, Ländervorwahlen, Dubletten; dazu Purge/Reset und die Panels Sicherung, Wartung, Datenort, Scope, Owner, Adopt | E L2308–L2315 | `/settings` → `PrimaryOnlyNotice` (`App.tsx:477`); die Öffner Sidebar `:352`, AIPage `:260`, WatchList `:542` führen nur auf diese Route | Closures in `SettingsPage`; einziger Importeur `App.tsx:57`; die sechs Panels und die Ländervorwahl-Schreiber nur aus `SettingsPage` | keine Mutation dieser Domänen in `command-registry.ts`/`bridge.rs` (174 `OP_*`; einziger Treffer: Auskunft `categories.list`) | nie montiert | `db` auf PC2 nie gesetzt → `getDatabase()` wirft (`database.ts:3439`), `saveDatabase` ohne `db` untätig (`:3326`); kein Tauri-Befehl für diese Schreibvorgänge (`lib.rs`, `generate_handler`) | Routenweiche + DB-los |
+| `BackfillPage` (20 Knöpfe) | E L2278 | `/ledger-backfill` → Hinweis (`App.tsx:471`); Sidebar-Link `:78` führt nur dorthin | Closures; einziger Importeur `App.tsx:54`; `core/ledger/backfill.ts` nur aus `BackfillPage` importiert | kein Op | nie montiert | wie oben | Routenweiche + DB-los |
+| `LedgerDebugPage` (≈43) | E L2279 | `/ledger-debug` → Hinweis (`App.tsx:489`); kein Link in der App | Closures; einziger Importeur `App.tsx:64` | kein Op | nie montiert | wie oben | Routenweiche + DB-los |
+| `RepairFlowTestPage` (2) | E L2316 | `/admin/repair-flow-test` → Hinweis (`App.tsx:423`); kein Link | Closures; einziger Importeur `App.tsx:16`; Rechte-Weiche `:1610` | kein Op | nie montiert | wie oben | Routen- + Rechteweiche + DB-los |
+| `RepairReconcilePage` (beim Audit mitgefunden; keine SSOT-Zeile, weil kein Link in der App) | — | `/admin/reconcile` → Hinweis (`App.tsx:429`, seit R2C) | einziger Importeur `App.tsx:17`; Rechte-Weiche `:48` | kein Op | nie montiert | wie oben | Routen- + Rechteweiche + DB-los |
+| Orphan-Storno „Storniere alle Orphans" | E L2277 | Seite läuft auf PC2 (Auskunft `page.reconciliation.get`), der Knopf wird nicht gerendert (`ReconciliationPage.tsx:251`, `!readsFromPrimary() &&`) | der Handler ist die Inline-Closure dieses Knopfs, kein anderer Aufrufer | kein Storno-Op (nur die Auskunft) | Closure existiert auf PC2 nicht | `hasReversalFor`/`reverseSource` → `getDatabase()` wirft → `catch` → „Reversed: 0 · failed: n": keine Schreibwirkung, keine Erfolgsmeldung | Renderweiche + DB-los |
+
+Befund: **Kein** Handler ist von PC2 grundsätzlich erreichbar.
+- Die Seiten werden auf PC2 nie montiert; die Routenweiche liest dieselbe Wahrheit `isClientMode()`, die auch den DB-Start
+  verhindert (`App.tsx:149–161`).
+- Es gibt keinen Moduswechsel im laufenden Fenster: `enterClientMode` und `leaveClientMode` laden sofort neu
+  (`FirstRunGate.tsx:199`, `ClientShell.tsx:153/431`), und im Primary-Modus ohne DB rendert die App keine Routen
+  (`App.tsx:382`).
+- Der Orphan-Handler existiert nur als Closure des nicht gerenderten Knopfs.
+- Einen Fernweg gibt es nicht; ein unbekannter Name wird dreifach abgewiesen.
+- Selbst ein erzwungener Aufruf endet am fehlenden `db`, ohne Schreibwirkung.
+
+**PP-6 ist damit Defense-in-Depth-/Härtungs-Backlog** (je Handler ein eigener `primaryOnlyLocked()`-Riegel), **kein offener
+Parity-Gap**; keine Produktänderung, E-Zahl unverändert 41.
 
 ### Die ursprüngliche 40er-Matrix (`CENTRAL_UI_FINAL_ORIGINAL_MATRIX_PROVED`)
 
@@ -3355,9 +3384,13 @@ Keiner ist eine A/B-Lücke: entweder kein fehlender Fernweg für eine Geschäfts
 | PP-3 | KI-Identifizieren (`NewProductModal`, `WatchList`, `ProductDetail`), KI-Nachrichtentext und `/ai` sind auf PC2 sichtbar, melden aber erst nach dem Klick „Set OpenAI API key in Settings" — Settings ist auf PC2 gesperrt | KI/Artikel | mittel | keine Geschäftsbuchung fehlt (KI schlägt nur vor, gespeichert wird über `products.update`); Schlüssel ist maschinenlokal (C) | Primary-seitige KI (`/api/ai/identify`) auch für PC2 nutzen, oder auf PC2 sperren/erklären |
 | PP-4 | Fällige wiederkehrende Ausgaben entstehen nur beim Primary-Start/Filialwechsel und beim Öffnen der Ausgabenliste am Primary; läuft er über den Monatswechsel, erscheinen sie verspätet | Finanzen/Ausgaben | niedrig–mittel | Automatik des Primary, kein PC2-Einstieg | Auslöser bei Tageswechsel am Primary |
 | PP-5 | „Trennen" löscht `lataif_session` nicht (`client-mode.ts:50`), `clearClientSession` wird nie gerufen; ein späterer Start im Primary-Modus übernimmt die alte Sitzung ungeprüft | Anmeldung | niedrig | maschinenlokale Sitzung, keine Geschäftsbuchung | beim Trennen Sitzung leeren, beim Start prüfen |
-| PP-6 | Einstellungen, Nachbuchung, Hauptbuch-/Reparatur-Prüfstand und Orphan-Storno hängen nur an Route/Ausblendung (letzte Linie: `getDatabase()` wirft) | System | niedrig | E korrekt, auf PC2 unerreichbar | `assert…Here` im Handler |
+| PP-6 | Defense-in-Depth: `SettingsPage`, `BackfillPage`, `LedgerDebugPage`, `RepairFlowTestPage`, `RepairReconcilePage` und der Orphan-Storno haben keinen eigenen Handler-Riegel; geschützt durch Routen-/Renderweiche, fehlenden Fernweg und DB-losen PC2 (einzeln belegt, § Kategorie E) | System/Wartung | niedrig (Härtung) | strukturell von PC2 unerreichbar — kein Fernweg, keine lokale DB; kein Parity-Gap | `primaryOnlyLocked()` am Handleranfang + statischer Pin |
 | PP-7 | Toter/alter Code: InvoiceDetail-`editing`-Zweig mit lokalen `updateInvoice`; alter ClientShell-Bereich (11 Testdateien nutzen noch seine Selektoren); `resetPrimarySource` beim Abmelden nie gerufen | Aufräumen | niedrig | unerreichbar (D) | entfernen, Tests umstellen |
-| PP-8 | R6F-Restbefunde: Überzahlungs-Gutschrift eines stornierten Auftrags wird gelöscht (`clawbackGrantedCredit`); `deleteOrder` (Primary-only) storniert teilweise beglichene Gold-Schulden; `production_inputs/outputs` nicht im Abgleich-Manifest; Notizfeld der Aufgabe ohne Spalte; große Dokumente können das 20-s-Brückenlimit reißen (Wiederholung sicher) | gemischt | niedrig–mittel | Primary-seitig bzw. E; kein fehlender Fernweg | je eigene Scheibe |
+| PP-8 | Der Auftragsstorno löscht die aus einer Überzahlung gewährte Kundengutschrift (`orderStore.ts:1237` → `teardownOrderOverpayCredit` → `clawbackGrantedCredit('order_overpayment')`, `orderPaymentStore.ts:39–44`) | Aufträge/Kundenguthaben | mittel | `orders.cancel` ist registriert und angeschlossen; beide Rechner laufen dieselbe Hausfolge am Primary — Fachregel, kein fehlender Fernweg | fachlich entscheiden (Guthaben stehen lassen oder erstatten), eigene Scheibe |
+| PP-9 | `deleteOrder` storniert jede offene Gold-Verbindlichkeit des Auftrags, auch geliefertes/teilweise beglichenes Gold (`orderStore.ts:1460–1468`); der Storno schont diese seit R6F (`goldPayableSurvivesCancel`) | Aufträge/Gold | niedrig | „Auftrag löschen" ist E (Primary-only, auf PC2 gesperrt, L2203); kein Fernweg vorgesehen | dieselbe Regel wie beim Storno, oder Löschen bei bewegtem Gold sperren |
+| PP-10 | `production_inputs`/`production_outputs` fehlen in `KNOWN_BUSINESS_TABLES` (`sync_policy.rs:172`, nur `production_records` :202) und in der Modulzuordnung `track.ts:45`, obwohl der Renderer sie neu lädt (`sync-service.ts:493`) | Produktion/Tabellen-Abgleich | niedrig | betrifft nur den Tabellen-Abgleich zwischen Datenbank-Rechnern; PC2 hat keine DB und schreibt über `production.create` am Primary | Tabellen aufnehmen + Policy-Test |
+| PP-11 | Die Aufgabenmaske zeigt „NOTES" (`TaskList.tsx:325–330`), `tasks` hat keine Spalte, der Wert wird verworfen (`taskStore.ts:100`) | Aufgaben | niedrig | `tasks.create`/`tasks.update` sind registriert; auf beiden Rechnern gleich verworfen — Schemafrage, kein Fernweg fehlt | Spalte + Migration, oder Feld entfernen |
+| PP-12 | Große Dokumente (bis 25 116 672 B) können die Standardfrist des Brücken-Rundlaufs reißen (`bridge.rs:474`, `DEFAULT_TIMEOUT` 20 s); Wiederholung mit derselben `commandId` ergibt genau eine Wirkung | Dokumente/Brücke | niedrig | `documents.upload` ist registriert und angeschlossen; es fehlt kein Weg, nur eine längere Frist | größenabhängige Frist für Dokument-Ops |
 
 Veraltete Stellen der SSOT (nur Hinweis, Inhalt gilt): Zeilenverweise der Tabelle sind teils verschoben (z. B. InvoiceDetail,
 WatchList, ExpenseList); der R6A-Abschnitt „Keine toten Knöpfe" beschreibt den Stand VOR R6B — heute: Abmelden geht auf PC2
@@ -3375,7 +3408,7 @@ Category E = bewusst Admin/System/Primary-only (41)
 Registry   = 174 (1 + 71 + 102)
 PC2        = ohne Geschäftsdatenbank
 Primary    = Autorität, einziger Schreiber
-Version 0.8.54 · kein Release · Post-Parity-Backlog PP-1…PP-8 offen
+Version 0.8.54 · kein Release · Post-Parity-Backlog PP-1…PP-12 offen
 ```
 
 ### Anhang — Einzelprüfung C, D, E (14.09.2026, statisch gegen `ac868a8`)
