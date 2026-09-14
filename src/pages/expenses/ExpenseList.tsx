@@ -920,7 +920,7 @@ export function ExpenseList() {
             <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => {
               if (blockDeleteOnClient()) return;
               if (editId && window.confirm('Delete this expense?')) {
-                deleteExpense(editId);
+                try { deleteExpense(editId); } catch (e) { alert((e as Error).message); return; }
                 setEditId(null);
               }
             }}>Delete</Button>
@@ -949,7 +949,7 @@ export function ExpenseList() {
         </p>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmDelete(null)}>Cancel</Button>
-          <Button variant="danger" onClick={() => { if (blockDeleteOnClient()) { setConfirmDelete(null); return; } if (confirmDelete) { deleteExpense(confirmDelete); setConfirmDelete(null); } }}>Delete</Button>
+          <Button variant="danger" onClick={() => { if (blockDeleteOnClient()) { setConfirmDelete(null); return; } if (confirmDelete) { try { deleteExpense(confirmDelete); } catch (e) { alert((e as Error).message); } setConfirmDelete(null); } }}>Delete</Button>
         </div>
       </Modal>
     </PageLayout>

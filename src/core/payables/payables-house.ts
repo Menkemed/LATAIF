@@ -33,6 +33,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { v4 as uuid } from 'uuid';
 import type { Expense, ExpenseCategory, PurchasePayment, PurchaseStatus } from '@/core/models/types';
+import { isCapitalizedRepairCost } from '@/core/models/types';
 import { getDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete, trackPayment, trackStatusChange } from '@/core/sync/track';
@@ -380,6 +381,18 @@ export function updateExpenseInHouse(expenseId: string, raw: ExpenseEditFields, 
   assertSeen('expenses', expenseId, expectedRevision);
   if (String(row.status) === 'CANCELLED') throw nein('EXPENSE_CANCELLED', 'a cancelled expense is not edited');
   const f = expenseEditFields(raw as Record<string, unknown>);
+  // POST-PARITY PP-13 — die kapitalisierte Werkstattschuld einer eigenen Reparatur hängt am Einstand des
+  // Artikels: ihren Betrag ändert nur die Reparaturzeile, und keine Reparaturausgabe wechselt über die
+  // Kategorie zwischen Aufwand und Bestand (sonst zählte der Betrag doppelt oder gar nicht).
+  if (txt(row.related_module) === 'repair') {
+    const catChange = f.category !== undefined && f.category !== row.category;
+    const amountChange = f.amount !== undefined && F(f.amount) !== F(row.amount);
+    const capitalized = isCapitalizedRepairCost({ category: String(row.category), relatedModule: 'repair' });
+    if ((catChange && (f.category === 'Inventory' || capitalized)) || (capitalized && amountChange)) {
+      throw nein('EXPENSE_REPAIR_COST_LOCKED',
+        'this is the capitalized workshop cost of an own-item repair — change or cancel its repair line instead');
+    }
+  }
 
   const sets: string[] = [];
   const vals: unknown[] = [];

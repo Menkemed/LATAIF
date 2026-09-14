@@ -45,7 +45,9 @@ import {
   REPAIR_MAX_PHOTOS, canInvoiceRepair, repairEditBody, repairEditHasChanges, repairInvoiceBody,
   repairPhotoPlan, repairPhotosChanged, type RepairPhotoSlot,
 } from '@/core/repairs/repair-rules';
-import { invoiceRepairsOnPrimary, updateRepairOnPrimary } from '@/core/repairs/repair-house';
+import {
+  addRepairLineOnPrimary, cancelRepairLineOnPrimary, invoiceRepairsOnPrimary, updateRepairOnPrimary, updateRepairStatusOnPrimary,
+} from '@/core/repairs/repair-house';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { nextRepairStatus, repairStatusFlow } from '@/core/repairs/repair-status-flow';
 import { useSharedRead } from '@/core/data/shared-read';
@@ -109,8 +111,8 @@ export function RepairDetail() {
   const navigate = useNavigate();
   const goBack = useGoBack('/repairs');
   const {
-    repairs, loadRepairs, updateStatus, deleteRepair,
-    repairLines, loadRepairLines, getRepairLines, addRepairLine, cancelRepairLine,
+    repairs, loadRepairs, deleteRepair,
+    repairLines, loadRepairLines, getRepairLines,
   } = useRepairStore();
   // v0.4.3 — KEIN useGoldStore() ohne Selector: das ganze Store-Objekt aendert
   // bei jeder Mutation seine Referenz. Als useEffect-Dependency + goldStore.loadAll()
@@ -169,7 +171,8 @@ export function RepairDetail() {
     const fassung = fassungOderNichts('changing the repair status');
     if (fassung === null) return;
     if (!await w.ok('repairs.update_status', {
-      local: () => { updateStatus(id, status); return {}; },
+      // POST-PARITY PP-13 — am Primary in EINER Klammer (Forderung, Kapitalisierung, Status).
+      local: async () => { await updateRepairStatusOnPrimary(id, status); return {}; },
       remote: () => ({ repairId: id, status, expectedRevision: fassung }),
     })) return;
     loadRepairs(); loadRepairLines();
@@ -181,7 +184,7 @@ export function RepairDetail() {
     const fassung = fassungOderNichts('cancelling a repair line');
     if (fassung === null) return;
     if (!await w.ok('repairs.cancel_line', {
-      local: () => { cancelRepairLine(lineId); return {}; },
+      local: async () => { await cancelRepairLineOnPrimary(lineId); return {}; },
       remote: () => ({ repairId: id, lineId, expectedRevision: fassung }),
     })) return;
     loadRepairs(); loadRepairLines();
@@ -290,8 +293,8 @@ export function RepairDetail() {
     const fassung = fassungOderNichts('adding a repair line');
     if (fassung === null) return;
     if (!await w.ok('repairs.add_line', {
-      local: () => {
-        addRepairLine(id, {
+      local: async () => {
+        await addRepairLineOnPrimary(id, {
           supplierId: realSupplierId,
           workType: newLineForm.workType,
           description: newLineForm.description || undefined,
@@ -512,7 +515,8 @@ export function RepairDetail() {
   function handleDelete() {
     if (!id) return;
     if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
-    deleteRepair(id);
+    // POST-PARITY PP-13 — bezahlte Werkstattkosten / verkaufter Artikel an eigener Ware sperren das Löschen.
+    try { deleteRepair(id); } catch (e) { alert((e as Error).message); setConfirmDelete(false); return; }
     navigate('/repairs');
   }
 

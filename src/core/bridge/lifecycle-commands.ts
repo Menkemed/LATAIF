@@ -42,6 +42,7 @@ import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useRepairStore } from '@/stores/repairStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useProductStore } from '@/stores/productStore';
+import { watchLedgerPosts } from '@/core/ledger/posting';
 import {
   CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps,
 } from './mutation-engine';
@@ -536,7 +537,16 @@ export function runUpdateRepairStatus(deps: EngineDeps, identity: CommandIdentit
     // Der Weg des Hauses: je nach Stufe die Lieferanten-Forderungen der Arbeitszeilen buchen,
     // bei eigener Ware die Kosten auf den Artikel und sein Los kapitalisieren, die Marge
     // ableiten, den Artikel in den Bestand zurückgeben.
-    rs.updateStatus(req.repairId, req.status);
+    // POST-PARITY PP-13 — Forderungen, Kapitalisierung und Status gemeinsam: scheitert eine (auch eine
+    // abgefangene) Buchung, fällt die ganze Handlung zurück; ein Nein der Kostenregel ist ein Urteil.
+    const buchung = watchLedgerPosts(OP_REPAIRS_UPDATE_STATUS);
+    try {
+      rs.updateStatus(req.repairId, req.status);
+    } catch (err) {
+      if (err instanceof RepairActionRejected) throw new CommandRejected(err.code, err.message);
+      throw err;
+    }
+    buchung();
     const after = repairState(req.repairId);
     if (s(after.status) !== req.status) {
       throw new CommandNotEvaluated('REPAIR_STATUS_NOT_APPLIED', `status is ${s(after.status)}`);
@@ -726,14 +736,22 @@ export function runAddRepairLine(deps: EngineDeps, identity: CommandIdentity, ra
     rs.loadRepairLines();
     // Der Weg des Hauses: Zeile anlegen, Position vergeben, Summen der Reparatur neu ableiten
     // und — wenn die Arbeit schon läuft — die Lieferanten-Forderung sofort buchen.
-    const line = rs.addRepairLine(req.repairId, {
-      supplierId: req.supplierId,
-      workType: req.workType as never,
-      description: req.description,
-      costAmount: req.costAmount,
-      dueDate: req.dueDate,
-      notes: req.notes,
-    });
+    const buchung = watchLedgerPosts(OP_REPAIRS_ADD_LINE);   // POST-PARITY PP-13 — s. update_status
+    let line: { id: string };
+    try {
+      line = rs.addRepairLine(req.repairId, {
+        supplierId: req.supplierId,
+        workType: req.workType as never,
+        description: req.description,
+        costAmount: req.costAmount,
+        dueDate: req.dueDate,
+        notes: req.notes,
+      });
+    } catch (err) {
+      if (err instanceof RepairActionRejected) throw new CommandRejected(err.code, err.message);
+      throw err;
+    }
+    buchung();
     return { ...repairState(req.repairId), lineId: line.id };
   });
 }
@@ -810,13 +828,16 @@ export function runUpdateRepairLine(deps: EngineDeps, identity: CommandIdentity,
     for (const k of ['costAmount', 'supplierId', 'workType', 'description', 'dueDate', 'notes'] as const) {
       if (req[k] !== undefined) patch[k] = req[k];
     }
+    const buchung = watchLedgerPosts(OP_REPAIRS_UPDATE_LINE);   // POST-PARITY PP-13 — s. update_status
     try {
       rs.updateRepairLine(req.lineId, patch as never);
     } catch (err) {
+      if (err instanceof RepairActionRejected) throw new CommandRejected(err.code, err.message);
       const verdict = asVerdict(err, LINE_EDIT_VERDICTS);
       if (verdict) throw verdict;
       throw err;
     }
+    buchung();
     return { ...repairState(req.repairId), lineId: req.lineId };
   });
 }
@@ -848,6 +869,7 @@ export function runCancelRepairLine(deps: EngineDeps, identity: CommandIdentity,
     const rs = useRepairStore.getState();
     rs.loadRepairs();
     rs.loadRepairLines();
+    const buchung = watchLedgerPosts(OP_REPAIRS_CANCEL_LINE);   // POST-PARITY PP-13 — s. update_status
     try {
       // Der Weg des Hauses: die Zeile verschwindet, und mit ihr ihre Lieferanten-Ausgabe samt
       // Buchung. Das ist kein Löschen eines Belegs — die Reparatur bleibt, was sie war.
@@ -855,10 +877,13 @@ export function runCancelRepairLine(deps: EngineDeps, identity: CommandIdentity,
     } catch (err) {
       // R6D — die Gold-Regel des Hauses (bereits ganz oder teilweise beglichene Gold-Schuld) ist ein Urteil.
       if (err instanceof GoldRejected) throw new CommandRejected(err.code, err.message);
+      // PP-13 — bezahlte Werkstattkosten / verkaufter Artikel an eigener Ware: ebenso ein Urteil.
+      if (err instanceof RepairActionRejected) throw new CommandRejected(err.code, err.message);
       const verdict = asVerdict(err, LINE_EDIT_VERDICTS);
       if (verdict) throw verdict;
       throw err;
     }
+    buchung();
     if (query("SELECT id FROM repair_lines WHERE id = ? AND status = 'OPEN'", [req.lineId])[0]) {
       throw new CommandNotEvaluated('LINE_CANCEL_INCOMPLETE', 'the work line is still open');
     }

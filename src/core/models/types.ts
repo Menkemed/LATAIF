@@ -1420,6 +1420,15 @@ export function isCapitalizedExpenseCategory(cat: string): boolean {
   return (CAPITALIZED_EXPENSE_CATEGORIES as readonly string[]).includes(cat);
 }
 
+// POST-PARITY PP-13 — die Werkstattschuld einer Reparatur an EIGENER Ware ist Anschaffungsnebenkosten des
+// Artikels: Kategorie „Inventory" mit Bezug 'repair'. Nur diese Ausgaben bucht das Hauptbuch auf den
+// Bestand (Soll INVENTORY statt EXPENSES_OPERATING) — der Einstand des Artikels trägt sie, der
+// Wareneinsatz beim Verkauf bucht sie genau einmal aus. Andere „Inventory"-Ausgaben (Metallkauf, R6D)
+// bleiben beim vereinfachten Vertrag.
+export function isCapitalizedRepairCost(e: { category?: string | null; relatedModule?: string | null }): boolean {
+  return e.category === 'Inventory' && e.relatedModule === 'repair';
+}
+
 export interface Expense {
   id: UUID;
   expenseNumber: string;

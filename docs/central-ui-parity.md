@@ -3392,10 +3392,11 @@ Keiner ist eine A/B-Lücke: entweder kein fehlender Fernweg für eine Geschäfts
 | PP-11 | Die Aufgabenmaske zeigt „NOTES" (`TaskList.tsx:325–330`), `tasks` hat keine Spalte, der Wert wird verworfen (`taskStore.ts:100`) | Aufgaben | niedrig | `tasks.create`/`tasks.update` sind registriert; auf beiden Rechnern gleich verworfen — Schemafrage, kein Fernweg fehlt | Spalte + Migration, oder Feld entfernen |
 | PP-12 | Große Dokumente (bis 25 116 672 B) können die Standardfrist des Brücken-Rundlaufs reißen (`bridge.rs:474`, `DEFAULT_TIMEOUT` 20 s); Wiederholung mit derselben `commandId` ergibt genau eine Wirkung | Dokumente/Brücke | niedrig | `documents.upload` ist registriert und angeschlossen; es fehlt kein Weg, nur eine längere Frist | größenabhängige Frist für Dokument-Ops |
 | PP-13 | Eigene Reparatur (OWN) mit Werkstatt: die Werkstattkosten wirken ZWEIMAL auf den Gewinn — Ausgabe `RepairCosts` (Soll EXPENSES_OPERATING) bei „in Arbeit" UND Kapitalisierung in Los/`purchase_price` bei „ready" (→ COGS beim Verkauf). Verkauf 300, Werkstatt 100: Gewinn 100 statt 200, im Hauptbuch wie in den Berichten, bezahlt wie unbezahlt (§ „PP-13" am Ende) | Reparaturen/GuV | mittel–hoch | kein Fernweg fehlt; Primary und PC2 laufen dieselbe `updateStatus`-Folge am Primary — Fachregel | Werkstattschuld einer OWN-Reparatur kapitalisiert buchen (Soll INVENTORY / Haben A/P), nicht als Betriebsausgabe; Zeilenstorno nimmt die Kapitalisierung zurück |
+| PP-14 | Kundenreparatur mit Werkstatt, Rechnungsweg: die Werkstattkosten wirken DREIMAL — `internalCost` spiegelt den Voranschlag (`internalCostOnCreate`), die Werkstattzeile trägt ihn ebenfalls, beide gehen in den Rechnungseinstand (`repairInvoiceLineCost` = internal + Zeilen → COGS 200), dazu die Betriebsausgabe `RepairCosts` 100. Rechnung 300, Werkstatt 100: Gewinn 0 statt 200; INVENTORY −200 für eine Dienstleistung ohne Bestand (§ „PP-13 — Behebung") | Reparaturen/GuV | hoch | kein Fernweg fehlt; eigener Vertrag: Dienstleistung ohne Bestand, zwei Erlöswege (Rechnung mit COGS, Direktzahlung `REPAIR_PAYMENT` ohne COGS) | Rechnungseinstand ohne Spiegel (bei „external" nur die Zeilen) und Werkstattschuld je Erlösweg genau einmal — eigene Entscheidung |
 
 **Stand nach Post-Parity R7A (14.09.2026):** PP-1, PP-2, PP-8, PP-9, PP-10, PP-11 **geschlossen** (bewiesen, § „Post-Parity R7A —
 Business Correctness" am Ende dieses Dokuments); **offen** bleiben PP-3, PP-4, PP-5, PP-6, PP-7, PP-12. Registry seit R7A 175.
-**Neu nach R7A (Untersuchung 14.09.2026):** PP-13 bestätigt und **offen** (noch nicht repariert).
+**Neu nach R7A (14.09.2026):** PP-13 bestätigt und **geschlossen** (§ „PP-13 — Behebung" am Ende); PP-14 bestätigt und **offen**.
 
 Veraltete Stellen der SSOT (nur Hinweis, Inhalt gilt): Zeilenverweise der Tabelle sind teils verschoben (z. B. InvoiceDetail,
 WatchList, ExpenseList); der R6A-Abschnitt „Keine toten Knöpfe" beschreibt den Stand VOR R6B — heute: Abmelden geht auf PC2
@@ -3663,3 +3664,42 @@ Betriebsausgabe; die Zahlung bleibt Soll A/P / Haben Kasse/Bank; ein Storno der 
 Ergebnis: 300 − 100 = **200** im Hauptbuch und in den Berichten, INVENTORY deckungsgleich mit den Losen. Folgefrage (nicht
 Teil dieser Untersuchung): der Rechnungsweg der KUNDEN-Reparatur (Einstand = `internalCost` + Zeilensumme, `repair-cost.ts`
 C3H) gegen dieselben Zeilenausgaben prüfen.
+
+## PP-13 — Behebung: eigene Reparatur, Werkstattkosten genau einmal (14.09.2026)
+
+`POST_PARITY_PP13_OWN_REPAIR_CAPITALIZATION_CONTRACT_PROVED` · `POST_PARITY_PP13_REPAIR_COST_REVERSAL_PROVED` — Registry
+unverändert **175** (keine neue Fähigkeit), Version 0.8.54.
+
+**Vertrag — EINE Regel für Zeilen- und Einzelweg (`core/repairs/own-repair-cost.ts`):** die Werkstattschuld einer Reparatur an
+EIGENER Ware ist eine Ausgabe „Inventory" mit Bezug 'repair' (`repairCostCategory`, `isCapitalizedRepairCost`) → `postExpense`
+Soll INVENTORY / Haben A/P (Werkstatt); die Berichte führen „Inventory" als kapitalisiert, nicht als Betriebsausgabe. Bei
+„ready" geht `ownRepairCost` in Artikel + Los (`shiftOwnRepairCost`), beim Verkauf als COGS genau einmal hinaus; die Zahlung
+ist nur Soll A/P / Haben Kasse/Bank. Zeile nach „ready", Betragsänderung, Zeilenstorno und Löschen der Reparatur verschieben
+den Einstand über denselben `shiftOwnRepairCost`; jede Rücknahme wird VOR dem Schreiben geprüft: bezahlt → `REPAIR_COST_PAID`,
+verkauft → `REPAIR_COST_ALREADY_SOLD`, nie negativ. Ohne verknüpfte Werkstatt gibt es keine Werkstattkosten mehr (kein Einstand
+aus dem gespiegelten `internalCost`). Die kapitalisierte Ausgabe ändert/löscht nur ihre Reparaturzeile
+(`EXPENSE_REPAIR_COST_LOCKED`); keine Reparaturausgabe wechselt über die Kategorie zwischen Aufwand und Bestand.
+
+**Klammer:** Status, Zeile hinzufügen und Zeile stornieren laufen am Primary über `repair-house` (`amPrimary` +
+`watchLedgerPosts`), fern über dieselben Store-Funktionen in `runRemoteCommand` mit derselben Buchungswache — auch ein im
+Store abgefangener Buchungsfehler nimmt die ganze Handlung zurück.
+
+**Beweis `test/pp13/own-repair-cost.test.ts` 65/0** (Einstand 0, Werkstatt 100, Verkauf 300): Primary == PC2 — nach „in
+Arbeit" INVENTORY 100 / A/P 100, Aufwand 0; nach „ready" Artikel + Los 100; Verkauf COGS 100, INVENTORY 0, **Gewinn Hauptbuch
+200 == Berichte 200**; bezahlt nur A/P −100 / Kasse −100, Einstand wie unbezahlt; Einzelweg identisch; verlorene Antwort →
+eingefroren, Einstand 100 (nicht 200), ein neuer „ready" = Nein; Fehlerinjektion bei der Buchung und am Los → nichts Halbes,
+der zweite Versuch wirkt genau einmal; Storno vor „ready" → kein Einstand; nach „ready" unbezahlt → Einstand, Los, INVENTORY
+und A/P gemeinsam zurück; bezahlt / verkauft → Nein ohne Schreiben; Zeile nach „ready" +50 / Storno −50; Betrag 100 → 120 (PC2);
+Löschen nimmt zurück bzw. ist gesperrt; Akteur fern = geprüfter PC2-Absender. Eigene Arbeit ohne Werkstatt unverändert
+(Einstand 100, keine Ausgabe, Gewinn 200; bekannt: ohne Bestandsbuchung steht INVENTORY danach −100 — keine Doppelzählung,
+eigene Frage). Kundenreparatur von PP-13 unberührt.
+
+**Nachbarn:** r5c 286/0 (Klammer-Pin 3 → 6), R4C-Matrix 456/0 (lokale Namen → Hausfunktionen), service-parity, service-documents,
+lifecycle-actions, payables, gold, metal/scrap, order, supplier-credit, r7a — grün; Typcheck grün; Lint ohne neue Fehler.
+Altbestand (frühere „RepairCosts" eigener Reparaturen) bleibt, wie er gebucht ist — keine Umbuchung.
+
+**Kundenreparatur-Nachbar → PP-14 (neu, offen, nicht behoben):** gemessen am Rechnungsweg — Rechnung 300, Werkstatt 100 →
+Rechnungseinstand 200 (`internalCost`-Spiegel 100 + Werkstattzeile 100, `repairInvoiceLineCost`), COGS 200, Aufwand 100,
+INVENTORY −200, Gewinn 0 statt 200. Fachlich eigenständig (Dienstleistung ohne Bestand; Erlös über Rechnung MIT COGS oder
+Direktzahlung `REPAIR_PAYMENT` OHNE COGS — der Einstand des einen Wegs ist im anderen falsch) → eigene Entscheidung, keine
+Ausweitung in PP-13. `POST_PARITY_REPAIR_CUSTOMER_COST_CONTRACT_PROVED` wird deshalb NICHT vergeben.

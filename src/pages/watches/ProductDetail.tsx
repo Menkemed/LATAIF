@@ -24,6 +24,7 @@ import { updatePayload, PRODUCT_UPDATE_FIELDS } from '@/core/data/write-payloads
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useRepairStore, computeRepairTotalCost, sumOpenRepairLineCosts } from '@/stores/repairStore';
+import { ownRepairCost } from '@/core/repairs/own-repair-cost';
 import { usePermission } from '@/hooks/usePermission';
 import { useAuthStore } from '@/stores/authStore';
 import { useProductMediaPresentation } from '@/hooks/useProductMediaPresentation';
@@ -1582,8 +1583,11 @@ export function ProductDetail() {
               <span className="text-overline" style={{ marginBottom: 16 }}>REPAIR HISTORY</span>
               <div style={{ marginTop: 12 }}>
                 {productRepairs.map(rep => {
-                  const totalCost = computeRepairTotalCost(rep, sumOpenRepairLineCosts(rep.id));
                   const isOwn = rep.repairScope === 'OWN';
+                  // POST-PARITY PP-13 — bei eigener Ware dieselbe Regel wie die Kapitalisierung.
+                  const totalCost = isOwn
+                    ? ownRepairCost(rep, sumOpenRepairLineCosts(rep.id))
+                    : computeRepairTotalCost(rep, sumOpenRepairLineCosts(rep.id));
                   return (
                     <div key={rep.id}
                       onClick={() => navigate(`/repairs/${rep.id}`)}

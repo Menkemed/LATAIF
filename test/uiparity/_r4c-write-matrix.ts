@@ -193,8 +193,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
   {
     op: 'repairs.update_status', handlung: 'Reparaturstatus setzen', ort: 'pages/repairs/RepairDetail.tsx',
-    lokal: 'updateStatus', paritaet: 'exakt', verdrahtet: true, luecke: null,
-    grund: 'Ein Aufruf; Kapitalisierung und Bestand folgen im Haus — fassungsbasiert.',
+    lokal: 'updateRepairStatusOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'Ein Aufruf; Kapitalisierung und Bestand folgen im Haus — fassungsbasiert. PP-13: am Primary in derselben Klammer wie der Fernbefehl (`repair-house`, ruft `updateStatus`).',
   },
   {
     op: 'repairs.create_invoice', handlung: 'Rechnung zur Reparatur', ort: 'pages/repairs/RepairList.tsx',
@@ -203,7 +203,7 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
   {
     op: 'repairs.add_line', handlung: 'Reparaturposition hinzufuegen', ort: 'pages/repairs/RepairDetail.tsx',
-    lokal: 'addRepairLine', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    lokal: 'addRepairLineOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
     grund: 'Ein Aufruf mit Werkstatt, Art, Beschreibung, Kosten und Termin. R4C.4 hat die zweite Arbeitsart-Liste des Fernbefehls entfernt: beide Seiten lesen jetzt REPAIR_WORK_TYPES. Die MATERIAL-Maske derselben Seite bleibt eine andere Handlung (Materialart, Materialdetails, auf Wunsch eine Gold-Verbindlichkeit) und dem Hauptrechner vorbehalten.',
   },
   {
@@ -214,8 +214,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
   {
     op: 'repairs.cancel_line', handlung: 'Reparaturposition stornieren', ort: 'pages/repairs/RepairDetail.tsx',
-    lokal: 'cancelRepairLine', paritaet: 'exakt', verdrahtet: true, luecke: null,
-    grund: 'Ein Aufruf; die verknuepfte Gold-Verbindlichkeit raeumt das Haus mit ab.',
+    lokal: 'cancelRepairLineOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'Ein Aufruf; die verknuepfte Gold-Verbindlichkeit raeumt das Haus mit ab. PP-13: bei eigener Ware nimmt es auch den Einstand zurueck (`repair-house`, ruft `cancelRepairLine`).',
   },
 
   // ── Agenten-Transfers ────────────────────────────────────────────────────

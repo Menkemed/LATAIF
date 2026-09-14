@@ -12,13 +12,13 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { query, currentBranchId } from '@/core/db/helpers';
 import { saveDatabaseDurably } from '@/core/db/database';
-import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction } from '@/core/ledger/posting';
+import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction, watchLedgerPosts } from '@/core/ledger/posting';
 import { runExclusive } from '@/core/bridge/command-scheduler';
 import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
 import { useRepairStore } from '@/stores/repairStore';
 import { useProductStore } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
-import type { Repair } from '@/core/models/types';
+import type { Repair, RepairLine, RepairStatus } from '@/core/models/types';
 import {
   RepairActionRejected, assertRepairEditRefs, buildRepairEditPatch, normalizeRepairCreate, planRepairCreate,
   type RepairHousePort, type RepairInvoiceOptions,
@@ -99,6 +99,46 @@ export function updateRepairOnPrimary(id: string, form: Partial<Repair>): Promis
     const patch = buildRepairEditPatch(form);
     assertRepairEditRefs(patch, seen, houseRepairPort(currentBranchId()));
     rs.updateRepair(id, patch);
+  });
+}
+
+// ── POST-PARITY PP-13 — Status und Kostenzeilen am Primary: dieselbe Klammer wie der Fernbefehl ──
+// Werkstattforderung (Soll INVENTORY bei eigener Ware), Kapitalisierung in Artikel + Los und Status
+// gehören zusammen: scheitert ein Teil — auch eine im Store abgefangene Buchung —, fällt ALLES zurück.
+function mitBuchungswache<T>(what: string, work: () => T): T {
+  const check = watchLedgerPosts(what);
+  const out = work();
+  check();
+  return out;
+}
+
+/** „Mark Ready" & Co. am Primary — derselbe Hausweg wie `repairs.update_status`. */
+export function updateRepairStatusOnPrimary(id: string, status: RepairStatus): Promise<void> {
+  return amPrimary(() => {
+    const rs = useRepairStore.getState();
+    rs.loadRepairs();
+    rs.loadRepairLines();
+    mitBuchungswache('repairs.update_status', () => rs.updateStatus(id, status));
+  });
+}
+
+/** „+ Add Line" am Primary — derselbe Hausweg wie `repairs.add_line`. */
+export function addRepairLineOnPrimary(repairId: string, data: Partial<RepairLine>): Promise<void> {
+  return amPrimary(() => {
+    const rs = useRepairStore.getState();
+    rs.loadRepairs();
+    rs.loadRepairLines();
+    mitBuchungswache('repairs.add_line', () => { rs.addRepairLine(repairId, data); });
+  });
+}
+
+/** „Cancel" einer Kostenzeile am Primary — derselbe Hausweg wie `repairs.cancel_line`. */
+export function cancelRepairLineOnPrimary(lineId: string): Promise<void> {
+  return amPrimary(() => {
+    const rs = useRepairStore.getState();
+    rs.loadRepairs();
+    rs.loadRepairLines();
+    mitBuchungswache('repairs.cancel_line', () => rs.cancelRepairLine(lineId));
   });
 }
 

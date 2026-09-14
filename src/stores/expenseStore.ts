@@ -4,6 +4,7 @@
 
 import { create } from 'zustand';
 import type { Expense, ExpenseCategory, ExpensePayment } from '@/core/models/types';
+import { isCapitalizedRepairCost } from '@/core/models/types';
 import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { trackUpdate, trackDelete } from '@/core/sync/track';
@@ -238,6 +239,12 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
   deleteExpense: (id) => {
     const db = getDatabase();
     const now = new Date().toISOString();
+    // POST-PARITY PP-13 — die kapitalisierte Werkstattschuld einer eigenen Reparatur geht nur mit ihrer
+    // Reparaturzeile (die nimmt auch den Einstand des Artikels zurück) — nie allein aus der Ausgabenliste.
+    const own = query('SELECT category, related_module FROM expenses WHERE id = ?', [id])[0];
+    if (own && isCapitalizedRepairCost({ category: String(own.category), relatedModule: (own.related_module as string | null) ?? null })) {
+      throw new Error('This is the capitalized workshop cost of an own-item repair — cancel its repair line instead.');
+    }
     // M-03 — Ledger-Storno VOR dem Löschen. Slice A: jetzt ATOMAR in EINER Ledger-Transaktion
     // + Credit-Restore. Der Capture der einzuloesenden Credit-Zahlungen MUSS VOR dem (Cascade-)
     // Delete passieren, sonst ist der reference-Link weg. Reverse → Restore → Delete → trackDelete

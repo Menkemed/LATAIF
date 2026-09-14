@@ -31,7 +31,7 @@ import {
   REPAIR_MAX_PHOTOS, canInvoiceRepair, isRepairableOwnProduct, missingRepairItemFields,
   repairCreateBody, repairInvoiceBody,
 } from '@/core/repairs/repair-rules';
-import { createRepairOnPrimary, invoiceRepairsOnPrimary } from '@/core/repairs/repair-house';
+import { createRepairOnPrimary, invoiceRepairsOnPrimary, updateRepairStatusOnPrimary } from '@/core/repairs/repair-house';
 import { useSharedWrites, useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
@@ -79,7 +79,7 @@ const PAY_STYLE = {
 
 export function RepairList() {
   const navigate = useNavigate();
-  const { repairs, loadRepairs, updateStatus } = useRepairStore();
+  const { repairs, loadRepairs } = useRepairStore();
   const { employees, loadEmployees } = useEmployeeStore();
   const activeEmployees = useMemo(() => employees.filter(e => e.employmentStatus !== 'inactive'), [employees]);
   const { customers, loadCustomers } = useCustomerStore();
@@ -347,7 +347,8 @@ export function RepairList() {
       return;
     }
     if (!await w.ok('repairs.update_status', {
-      local: () => { updateStatus(rep.id, newStatus); return {}; },
+      // POST-PARITY PP-13 — am Primary in EINER Klammer (Forderung, Kapitalisierung, Status).
+      local: async () => { await updateRepairStatusOnPrimary(rep.id, newStatus); return {}; },
       remote: () => ({ repairId: rep.id, status: newStatus, expectedRevision: rep.revision }),
     })) return;
     loadRepairs();

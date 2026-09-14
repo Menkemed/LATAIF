@@ -28,7 +28,7 @@ import {
   resetTransactionContext,
 } from '@/core/db/transaction-context';
 import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment, CanonicalLoanDirection, CashSource, ScrapPaymentMethod } from '@/core/models/types';
-import { canonicalLoanDirection } from '@/core/models/types';
+import { canonicalLoanDirection, isCapitalizedRepairCost } from '@/core/models/types';
 
 // ── Kontenrahmen (siehe ZIEL.md §3a) ──────────────────────────
 
@@ -1344,6 +1344,11 @@ export function postPurchaseCancelled(purchase: Purchase): PostingResult {
 //
 //   DEBIT  EXPENSES_OPERATING by amount
 //   CREDIT ACCOUNTS_PAYABLE   by amount (counterparty: supplier wenn gesetzt)
+//
+// POST-PARITY PP-13 — die kapitalisierte Werkstattschuld einer Reparatur an EIGENER Ware
+// (`isCapitalizedRepairCost`) bucht Soll INVENTORY statt EXPENSES_OPERATING: der Betrag steckt im
+// Einstand des Artikels und wird beim Verkauf als COGS genau einmal Aufwand. Storno/Neubuchung
+// (`reverseSource`) spiegeln das gebuchte Konto; Zahlungen bleiben Soll A/P / Haben Kasse/Bank.
 
 export function postExpense(expense: Expense): PostingResult {
   const amount = ROUND(expense.amount);
@@ -1355,7 +1360,7 @@ export function postExpense(expense: Expense): PostingResult {
   return postEntries(
     [
       {
-        account: 'EXPENSES_OPERATING',
+        account: isCapitalizedRepairCost(expense) ? 'INVENTORY' : 'EXPENSES_OPERATING',
         direction: 'DEBIT',
         amount,
         counterpartyType,

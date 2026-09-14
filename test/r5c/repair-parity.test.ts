@@ -964,7 +964,9 @@ for (const weg of ['fern', 'lokal'] as const) {
     && /remote: \(\) => repairEditBody\(id, fassung, repair, form, photos\)/.test(detail),
     'TRIPWIRE am zweiten Rechner reist der Rumpf der geteilten Regeln — nichts Eigenes');
   const house2 = codeOf(src('src/core/repairs/repair-house.ts'));
-  ok((house2.match(/return amPrimary\(/g) || []).length === 3, 'TRIPWIRE alle drei Handlungen laufen durch EINE Klammer');
+  // POST-PARITY PP-13: zu Anlegen/Ändern/Abrechnen kamen Status, Zeile hinzufügen, Zeile stornieren
+  // (Kapitalisierung eigener Ware) — alle sechs durch dieselbe Klammer.
+  ok((house2.match(/return amPrimary\(/g) || []).length === 6, 'TRIPWIRE alle sechs Handlungen laufen durch EINE Klammer');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r5c: repair create/update/invoice parity: ${PASS} passed, ${fails.length} failed`);
