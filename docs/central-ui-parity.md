@@ -3391,9 +3391,11 @@ Keiner ist eine A/B-Lücke: entweder kein fehlender Fernweg für eine Geschäfts
 | PP-10 | `production_inputs`/`production_outputs` fehlen in `KNOWN_BUSINESS_TABLES` (`sync_policy.rs:172`, nur `production_records` :202) und in der Modulzuordnung `track.ts:45`, obwohl der Renderer sie neu lädt (`sync-service.ts:493`) | Produktion/Tabellen-Abgleich | niedrig | betrifft nur den Tabellen-Abgleich zwischen Datenbank-Rechnern; PC2 hat keine DB und schreibt über `production.create` am Primary | Tabellen aufnehmen + Policy-Test |
 | PP-11 | Die Aufgabenmaske zeigt „NOTES" (`TaskList.tsx:325–330`), `tasks` hat keine Spalte, der Wert wird verworfen (`taskStore.ts:100`) | Aufgaben | niedrig | `tasks.create`/`tasks.update` sind registriert; auf beiden Rechnern gleich verworfen — Schemafrage, kein Fernweg fehlt | Spalte + Migration, oder Feld entfernen |
 | PP-12 | Große Dokumente (bis 25 116 672 B) können die Standardfrist des Brücken-Rundlaufs reißen (`bridge.rs:474`, `DEFAULT_TIMEOUT` 20 s); Wiederholung mit derselben `commandId` ergibt genau eine Wirkung | Dokumente/Brücke | niedrig | `documents.upload` ist registriert und angeschlossen; es fehlt kein Weg, nur eine längere Frist | größenabhängige Frist für Dokument-Ops |
+| PP-13 | Eigene Reparatur (OWN) mit Werkstatt: die Werkstattkosten wirken ZWEIMAL auf den Gewinn — Ausgabe `RepairCosts` (Soll EXPENSES_OPERATING) bei „in Arbeit" UND Kapitalisierung in Los/`purchase_price` bei „ready" (→ COGS beim Verkauf). Verkauf 300, Werkstatt 100: Gewinn 100 statt 200, im Hauptbuch wie in den Berichten, bezahlt wie unbezahlt (§ „PP-13" am Ende) | Reparaturen/GuV | mittel–hoch | kein Fernweg fehlt; Primary und PC2 laufen dieselbe `updateStatus`-Folge am Primary — Fachregel | Werkstattschuld einer OWN-Reparatur kapitalisiert buchen (Soll INVENTORY / Haben A/P), nicht als Betriebsausgabe; Zeilenstorno nimmt die Kapitalisierung zurück |
 
 **Stand nach Post-Parity R7A (14.09.2026):** PP-1, PP-2, PP-8, PP-9, PP-10, PP-11 **geschlossen** (bewiesen, § „Post-Parity R7A —
 Business Correctness" am Ende dieses Dokuments); **offen** bleiben PP-3, PP-4, PP-5, PP-6, PP-7, PP-12. Registry seit R7A 175.
+**Neu nach R7A (Untersuchung 14.09.2026):** PP-13 bestätigt und **offen** (noch nicht repariert).
 
 Veraltete Stellen der SSOT (nur Hinweis, Inhalt gilt): Zeilenverweise der Tabelle sind teils verschoben (z. B. InvoiceDetail,
 WatchList, ExpenseList); der R6A-Abschnitt „Keine toten Knöpfe" beschreibt den Stand VOR R6B — heute: Abmelden geht auf PC2
@@ -3620,3 +3622,44 @@ Registry   = 175 (1 + 71 + 103)
 Post-Parity-Backlog: geschlossen PP-1, PP-2, PP-8, PP-9, PP-10, PP-11 · offen PP-3, PP-4, PP-5, PP-6, PP-7, PP-12
 Version 0.8.54 · kein Release
 ```
+
+## PP-13 — Eigene Reparatur mit Werkstatt: doppelte Kosten (Untersuchung 14.09.2026)
+
+`OWN_REPAIR_WORKSHOP_DOUBLE_COST_INVESTIGATION_COMPLETE` — **bestätigt, noch nicht repariert.** Reproduziert am echten
+Primary-Weg (`createRepairOnPrimary` → `addRepairLine` → `updateStatus` in_progress/ready → `createDirectInvoice`) auf einer
+sql.js-Datenbank mit Schema und Migrationen; Artikel-Einstand 0, Verkauf 300, Werkstatt 100, keine weiteren Kosten.
+
+**Doppelter Aufrufweg:**
+1. **Erste Wirkung — Betriebsausgabe:** `repairStore.updateStatus` → `in_progress`/`sent_to_workshop` (`repairStore.ts:819–833`,
+   ebenso `addRepairLine` in diesen Stufen, `:1324–1331`) → `commitRepairLineExpenses` (`:390–474`) → Ausgabe `RepairCosts` 100
+   (Werkstatt, PENDING) + `postExpense` (`posting.ts:1348`): Soll EXPENSES_OPERATING 100 / Haben ACCOUNTS_PAYABLE 100.
+2. **Zweite Wirkung — Einstand:** `updateStatus` → `ready`, Zweig OWN (`repairStore.ts:853–892`) → `computeRepairTotalCost`
+   (`:175`, external + Zeilen = Zeilensumme 100) → `products.purchase_price` +100 und `stock_lots.unit_cost` +100 → beim
+   Verkauf löst `createDirectInvoice` den Los-Einstand auf (`invoiceStore.ts:276–292`) → `purchase_price_snapshot` 100 →
+   `postInvoiceIssued` Soll COGS 100 / Haben INVENTORY 100 (`posting.ts:572–594`); Berichte: Marge 300 − 100.
+
+Beides sind **echte finanzielle Wirkungen**, keine Darstellung: EXPENSES_OPERATING UND COGS im Hauptbuch; in den Berichten
+Marge (Einstand) UND Betriebsausgabe (`RepairCosts` steht nicht in `CAPITALIZED_EXPENSE_CATEGORIES`). Der Kommentar am
+Einzelweg („Kosten sind bereits kapitalisiert", `repairStore.ts:915–916`) nimmt genau das an, bucht die Werkstattschuld aber
+trotzdem als Betriebsausgabe.
+
+| Fall | Einstand nach „ready" | Ausgabe | Gewinn Hauptbuch | Gewinn Berichte | Soll |
+|---|---|---|---|---|---|
+| A ohne Werkstatt (internal, eigene Kosten 100) | 100 | — | 200 | 200 | 200 ✓ |
+| B Werkstatt-Zeile 100, unbezahlt | 100 | 100 (A/P 100) | **100** | **100** | 200 ✗ |
+| C Werkstatt-Zeile 100, bezahlt (Kasse −100) | 100 | 100 PAID | **100** | **100** | 200 ✗ |
+| D Werkstatt Einzelweg (`estimatedCost` 100), unbezahlt | 100 | 100 (A/P 100) | **100** | **100** | 200 ✗ |
+| E Einzelweg, bezahlt | 100 | 100 PAID | **100** | **100** | 200 ✗ |
+| F = B, Werkstattzeile nach „ready" storniert | **100 bleibt** | Ausgabe gelöscht + gegengebucht | 200 | 200 | 300 (keine echten Kosten) ✗ |
+
+Die Zahlung ändert nichts am Fehler (nur Soll A/P / Haben Kasse). Nebenbefunde (kein Doppel): in A–E steht INVENTORY nach dem
+Verkauf auf −100, weil die Kapitalisierung nie Soll INVENTORY bucht (in A fließen die eigenen Kosten auch nicht über
+Kasse/Bank ins Hauptbuch); F zeigt, dass der Zeilenstorno die Kapitalisierung nicht zurücknimmt.
+
+**Soll-Vertrag:** Die Kosten einer Reparatur an EIGENER Ware sind Anschaffungsnebenkosten des Artikels und wirken genau
+EINMAL — über den Einstand (Los/`purchase_price`) als COGS beim Verkauf. Die Werkstattschuld einer OWN-Reparatur bucht
+Soll INVENTORY / Haben A/P (Werkstatt), nicht EXPENSES_OPERATING, und zählt in den Berichten als kapitalisiert, nicht als
+Betriebsausgabe; die Zahlung bleibt Soll A/P / Haben Kasse/Bank; ein Storno der Zeile/Gebühr nimmt die Kapitalisierung zurück.
+Ergebnis: 300 − 100 = **200** im Hauptbuch und in den Berichten, INVENTORY deckungsgleich mit den Losen. Folgefrage (nicht
+Teil dieser Untersuchung): der Rechnungsweg der KUNDEN-Reparatur (Einstand = `internalCost` + Zeilensumme, `repair-cost.ts`
+C3H) gegen dieselben Zeilenausgaben prüfen.
