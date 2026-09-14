@@ -386,6 +386,19 @@ const EXP_OWN_100 = S([['Inventory', 100, 0, 'PENDING', 'sup-1', 'repair']]);
   ok(S(bilder.P) === S(bilder.C), '§3 PARITÄT Einzelweg Primary == PC2');
 }
 
+// ── §3b „hybrid": eigene Arbeit + Werkstatt — der Voranschlag wird nicht gespiegelt ─────
+for (const [own, soll] of [[0, 100], [10, 110]] as Array<[number, number]>) {
+  const db = welt();
+  const id = await eigene({ repairType: 'hybrid', workshopSupplierId: 'sup-1', estimatedCost: 100, ...(own ? { internalCost: own } : {}) });
+  await status('P', db, id, 'in_progress');
+  await status('P', db, id, 'ready');
+  const b = stand(db);
+  const g = gewinn(db, verkaufen(db));
+  ok(n(db, 'SELECT internal_cost FROM repairs WHERE id = ?', [id]) === own && b.einstand === soll && b.INVENTORY === 100 && b.EXP_OP === 0
+    && g.buch === 300 - soll && g.berichte === 300 - soll,
+    `§3b hybrid, eigene Arbeit ${own} + Werkstatt 100: Einstand ${soll} (nicht ${soll + 100}), Gewinn ${300 - soll} (${S(b)} ${S(g)})`);
+}
+
 // ── §4 Wiederholung / verlorene Antwort — genau EINE Kapitalisierung ─────
 {
   const db = welt();

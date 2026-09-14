@@ -189,7 +189,7 @@ const REPAIR_COMPARE = [
   // ruft dieselben.
   const rules = codeOf('src/core/repairs/repair-rules.ts');
   const service = codeOf('src/core/bridge/service-commands.ts');
-  ok(/createRepairOnPrimary\(form\)/.test(list) && /internalCost: internalCostOnCreate\(input\)/.test(rules),
+  ok(/createRepairOnPrimary\(form\)/.test(list) && /internalCost: input\.repairScope === 'OWN' && input\.repairType === 'hybrid'\s*\?\s*\(input\.internalCost \?\? 0\)\s*:\s*internalCostOnCreate\(input\)/.test(rules),
     'CALLPATH die Aufnahme leitet die eigenen Kosten mit der GETEILTEN Primitive ab');
   ok(/updateRepairOnPrimary\(id, form\)/.test(detail) && /internalCost: internalCostOnEdit\(cost\)/.test(rules)
     && /repairMargin\(cost\)/.test(rules),

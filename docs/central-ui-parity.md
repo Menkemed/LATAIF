@@ -3677,14 +3677,15 @@ Soll INVENTORY / Haben A/P (Werkstatt); die Berichte führen „Inventory" als k
 ist nur Soll A/P / Haben Kasse/Bank. Zeile nach „ready", Betragsänderung, Zeilenstorno und Löschen der Reparatur verschieben
 den Einstand über denselben `shiftOwnRepairCost`; jede Rücknahme wird VOR dem Schreiben geprüft: bezahlt → `REPAIR_COST_PAID`,
 verkauft → `REPAIR_COST_ALREADY_SOLD`, nie negativ. Ohne verknüpfte Werkstatt gibt es keine Werkstattkosten mehr (kein Einstand
-aus dem gespiegelten `internalCost`). Die kapitalisierte Ausgabe ändert/löscht nur ihre Reparaturzeile
+aus dem gespiegelten `internalCost`); bei „hybrid" an eigener Ware spiegelt die Anlage den Voranschlag nicht mehr in die eigenen
+Kosten (die Werkstattzeile trägt ihn — sonst Einstand 200 statt 100; dieselbe Regel wie `internalCostOnEdit`). Die kapitalisierte Ausgabe ändert/löscht nur ihre Reparaturzeile
 (`EXPENSE_REPAIR_COST_LOCKED`); keine Reparaturausgabe wechselt über die Kategorie zwischen Aufwand und Bestand.
 
 **Klammer:** Status, Zeile hinzufügen und Zeile stornieren laufen am Primary über `repair-house` (`amPrimary` +
 `watchLedgerPosts`), fern über dieselben Store-Funktionen in `runRemoteCommand` mit derselben Buchungswache — auch ein im
 Store abgefangener Buchungsfehler nimmt die ganze Handlung zurück.
 
-**Beweis `test/pp13/own-repair-cost.test.ts` 65/0** (Einstand 0, Werkstatt 100, Verkauf 300): Primary == PC2 — nach „in
+**Beweis `test/pp13/own-repair-cost.test.ts` 67/0** (Einstand 0, Werkstatt 100, Verkauf 300): Primary == PC2 — nach „in
 Arbeit" INVENTORY 100 / A/P 100, Aufwand 0; nach „ready" Artikel + Los 100; Verkauf COGS 100, INVENTORY 0, **Gewinn Hauptbuch
 200 == Berichte 200**; bezahlt nur A/P −100 / Kasse −100, Einstand wie unbezahlt; Einzelweg identisch; verlorene Antwort →
 eingefroren, Einstand 100 (nicht 200), ein neuer „ready" = Nein; Fehlerinjektion bei der Buchung und am Los → nichts Halbes,
