@@ -5,10 +5,11 @@ import { ensureLegacySequence, legacySpec } from '@/core/db/legacy-sequences';
 import type { SqlDb } from '@/core/sync/apply-change';
 import { v4 as uuid } from 'uuid';
 import type { Repair, RepairStatus, RepairLine, RepairLineStatus, RepairWorkType } from '@/core/models/types';
-import { repairInvoiceLineCost } from '@/core/repairs/repair-cost';
+import { repairCostParts } from '@/core/repairs/repair-cost';
 import {
-  assertOwnRepairCostUnsettled, ownRepairCapitalized, ownRepairCost, repairCostCategory, shiftOwnRepairCost,
-} from '@/core/repairs/own-repair-cost';
+  assertRepairCostUnsettled, ownRepairCapitalized, repairCostCategory, repairHeaderCostsBooked, shiftOwnRepairCost,
+  syncRepairHeaderCosts,
+} from '@/core/repairs/repair-cost-booking';
 import { canonicalRepairStatus, REPAIR_CUSTOMER_PAID_FROM, REPAIR_TAX_SCHEMES } from '@/core/models/types';
 // CENTRAL-UI-PARITY R5C — die Regel „abrechenbar" und der Rechnungsvermerk: EINE Quelle für
 // Liste, Detailseite und Fernbefehl.
@@ -176,20 +177,13 @@ function syncRepairCustomerPayment(repairId: string, prevBrand?: string | null):
 // die Legacy-estimatedCost-Logik. Call-Sites die noch ohne Lines arbeiten
 // (Default=0) verhalten sich rueckwaerts-kompatibel.
 export function computeRepairTotalCost(
-  r: Pick<Repair, 'repairType' | 'internalCost' | 'estimatedCost'>,
+  r: Pick<Repair, 'repairType' | 'internalCost' | 'estimatedCost'> & { workshopSupplierId?: string | null },
   lineTotal = 0,
 ): number {
-  const internal = r.internalCost || 0;
-  if (lineTotal > 0) {
-    if (r.repairType === 'hybrid') return internal + lineTotal;
-    if (r.repairType === 'external') return lineTotal;
-    return internal; // internal-only sollte keine Lines haben
-  }
-  // Legacy single-supplier path
-  if (r.repairType === 'hybrid') {
-    return internal + (r.estimatedCost || 0);
-  }
-  return internal;
+  // POST-PARITY PP-13/PP-14 — EINE Ableitung für Marge, Einstand eigener Ware und Rechnungseinstand
+  // (`repairCostParts`): eigene Arbeit (bei „external" ist internalCost der Spiegel), jede offene Zeile,
+  // ohne Zeilen die Gebühr einer verknüpften Werkstatt. Jeder Teil ist genau eine Ausgabe.
+  return repairCostParts(r, lineTotal).total;
 }
 
 // Helper fuer das Multi-Line-Total — wird sowohl in Store-internen Aufrufen
@@ -412,7 +406,7 @@ function commitRepairLineExpenses(repairId: string): void {
   const lineRows = query(
     `SELECT id, position, supplier_id, work_type, description, cost_amount
        FROM repair_lines
-       WHERE repair_id = ? AND status = 'OPEN' AND supplier_id IS NOT NULL AND expense_id IS NULL
+       WHERE repair_id = ? AND status = 'OPEN' AND expense_id IS NULL
          AND cost_amount > 0
        ORDER BY position`,
     [repairId]
@@ -422,7 +416,9 @@ function commitRepairLineExpenses(repairId: string): void {
   for (const lr of lineRows) {
     const lineId = lr.id as string;
     const position = (lr.position as number) || 0;
-    const supplierId = lr.supplier_id as string;
+    // POST-PARITY PP-13/PP-14 — JEDE Kostenzeile ist genau eine Ausgabe: mit Werkstatt A/P an sie,
+    // im Haus (ohne Werkstatt) bezahlt über `internal_paid_from`, sonst offen.
+    const supplierId = (lr.supplier_id as string | null) || null;
     const workType = (lr.work_type as string) || 'service';
     const description = (lr.description as string) || '';
     const cost = (lr.cost_amount as number) || 0;
@@ -431,12 +427,14 @@ function commitRepairLineExpenses(repairId: string): void {
     const expenseId = uuid();
     const expenseNumber = getNextDocumentNumber('EXP');
     const method = (internalPaidFrom as 'cash' | 'bank' | 'benefit' | null) || 'bank';
-    const expStatus = 'PENDING' as const;
+    const paidNow = !supplierId && !!internalPaidFrom;
+    const expStatus: 'PAID' | 'PENDING' = paidNow ? 'PAID' : 'PENDING';
+    const paidAmount = paidNow ? cost : 0;
 
     // Supplier-Label fuer Description
     let supplierLabel = '';
     try {
-      const sRow = query(`SELECT name FROM suppliers WHERE id = ?`, [supplierId]);
+      const sRow = supplierId ? query(`SELECT name FROM suppliers WHERE id = ?`, [supplierId]) : [];
       if (sRow.length > 0) supplierLabel = ' · ' + (sRow[0].name as string);
     } catch { /* */ }
 
@@ -446,8 +444,8 @@ function commitRepairLineExpenses(repairId: string): void {
     db.run(
       `INSERT INTO expenses (id, branch_id, expense_number, category, amount, paid_amount, payment_method,
          expense_date, description, related_module, related_entity_id, supplier_id, status, created_at, created_by)
-       VALUES (?, ?, ?, ?, ?, 0, ?, ?, ?, 'repair', ?, ?, ?, ?, ?)`,
-      [expenseId, branchId, expenseNumber, category, cost, method,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'repair', ?, ?, ?, ?, ?)`,
+      [expenseId, branchId, expenseNumber, category, cost, paidAmount, method,
        now.split('T')[0], desc, repairId, supplierId, expStatus, now, userId]
     );
     trackInsert('expenses', expenseId, {
@@ -465,15 +463,28 @@ function commitRepairLineExpenses(repairId: string): void {
     // Ledger-Post (idempotent via hasLedgerEntries-Guard)
     const expenseRecord: Expense = {
       id: expenseId, expenseNumber, branchId, category,
-      amount: cost, paidAmount: 0, paymentMethod: method,
+      amount: cost, paidAmount, paymentMethod: method,
       expenseDate: now.split('T')[0], description: desc,
       relatedModule: 'repair', relatedEntityId: repairId,
-      supplierId, status: expStatus, createdAt: now,
+      supplierId: supplierId ?? undefined, status: expStatus, createdAt: now,
     };
     safePost(`postExpense(${expenseId}) [repair-line-commit]`, () => {
       if (hasLedgerEntries('EXPENSE', expenseId)) return;
       postExpense(expenseRecord);
     });
+    if (paidNow) {
+      const payId = uuid();
+      db.run(
+        `INSERT INTO expense_payments (id, expense_id, amount, method, paid_at, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        [payId, expenseId, cost, method, now.split('T')[0], 'Paid with the repair (in-house cost)', now],
+      );
+      trackInsert('expense_payments', payId, { expenseId, amount: cost, method });
+      safePost(`postExpensePayment(${payId}) [repair-line-commit]`, () => {
+        if (hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
+        postExpensePayment({ id: payId, expenseId, amount: cost, method, paidAt: now.split('T')[0], createdAt: now,
+          note: 'Paid with the repair (in-house cost)' });
+      });
+    }
   }
   saveDatabase();
 }
@@ -808,6 +819,27 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // before?.customerCardBrand = Brand VOR dem Update (Brand-Aenderung erkennen).
     syncRepairCustomerPayment(id, before?.customerCardBrand ?? null);
 
+    // POST-PARITY PP-13/PP-14 — nach „ready" folgen die gebuchten Kopfkosten (eigene Arbeit, Altgebühr)
+    // jeder Änderung: Ausgabe und — bei eigener Ware — Einstand um genau die Differenz; beglichen,
+    // abgerechnet oder verkauft ist ein Nein. Die Marge der Kundenreparatur rechnet dieselbe Ableitung
+    // wie Einstand und Rechnung (die Maske schickt eine Schätzung ohne die Zeilen mit).
+    if (before && repairHeaderCostsBooked(before)) {
+      syncRepairHeaderCosts(id, now, { capitalize: ownRepairCapitalized(before) });
+    }
+    const m = query(`SELECT repair_scope, charge_to_customer, repair_type, internal_cost, estimated_cost, workshop_supplier_id, margin
+      FROM repairs WHERE id = ?`, [id])[0];
+    if (m && m.repair_scope !== 'OWN' && Number(m.charge_to_customer) > 0) {
+      const margin = Number(m.charge_to_customer) - repairCostParts({
+        repairType: m.repair_type as string, internalCost: Number(m.internal_cost) || 0,
+        estimatedCost: m.estimated_cost === null ? null : Number(m.estimated_cost),
+        workshopSupplierId: (m.workshop_supplier_id as string | null) ?? null,
+      }, sumOpenRepairLineCosts(id)).total;
+      if (Math.abs(margin - (Number(m.margin) || 0)) > 0.0005 || m.margin === null) {
+        db.run('UPDATE repairs SET margin = ? WHERE id = ?', [margin, id]);
+        trackUpdate('repairs', id, { margin, recomputedMargin: true });
+      }
+    }
+
     get().loadRepairs();
   },
 
@@ -839,30 +871,19 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       case 'READY':
       case 'ready': {
         updates.completed_at = now;
-
-        // Workshop-Fee für Supplier-A/P:
-        // – Hybrid: der externe Anteil liegt explizit in estimatedCost.
-        // – External: Workshop-Fee liegt in estimatedCost (oder gespiegelt in
-        //   internalCost via handleCreate-Fallback). Prefer estimatedCost.
-        const workshopFee =
-          repair.repairType === 'hybrid'
-            ? (repair.estimatedCost || 0)
-            : repair.repairType === 'external'
-            ? (repair.estimatedCost || repair.internalCost || 0)
-            : 0;
-
-        // Multi-Line-Total: SUM aller OPEN repair_lines. Wird sowohl fuer
-        // OWN-Capitalisation als auch fuer Customer-Margin verwendet.
+        // POST-PARITY PP-13/PP-14 — bei „ready" werden die Kopfkosten (eigene Arbeit, Gebühr einer
+        // verknüpften Werkstatt ohne Zeilen) genau EINMAL Ausgaben — nach Eigentum auf INVENTORY bzw.
+        // COGS (`syncRepairHeaderCosts`). Die Zeilen haben ihre Ausgaben seit „in Arbeit". Dieselbe
+        // Summe (`computeRepairTotalCost`) ist Einstand eigener Ware bzw. Marge der Kundenreparatur.
         const lineTotal = sumOpenRepairLineCosts(id);
+        const firstReady = !repair.completedAt;
+        if (firstReady) syncRepairHeaderCosts(id, now, { capitalize: false });
+        const totalCost = computeRepairTotalCost(repair, lineTotal);
 
         if (repair.repairScope === 'OWN') {
-          // OWN-Item: gesamter Repair-Cost auf verlinkte Produkt kapitalisieren.
-          // Idempotent: nur beim ersten Übergang nach READY (completedAt guard).
-          if (repair.productId && !repair.completedAt) {
-            // POST-PARITY PP-13 — EINE Regel für Zeilen- und Einzelweg (`ownRepairCost`); die Werkstattschuld
-            // dazu steht als kapitalisierte Ausgabe auf INVENTORY, nicht als Aufwand. Artikel + Los (das
-            // gewählte, sonst das älteste aktive — FIFO wie der Verkauf), perPiece = Betrag / Restmenge.
-            const totalCost = ownRepairCost(repair, lineTotal);
+          // OWN-Item: gesamter Repair-Cost auf Artikel + Los (das gewählte, sonst das älteste aktive —
+          // FIFO wie der Verkauf). Idempotent: nur beim ersten Übergang nach READY (completedAt-Riegel).
+          if (repair.productId && firstReady) {
             if (totalCost > 0) shiftOwnRepairCost(repair, totalCost, now, 'ready');
             // Own-Item: kein Pickup-Schritt — Produkt geht direkt zurück in Bestand.
             db.run(
@@ -871,113 +892,9 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
             );
             trackProductRow(repair.productId);   // LAN-Sync Phase 1b
           }
-          // KEIN break hier — Expense-Block unten gilt auch für OWN wenn Supplier verlinkt.
-        } else {
-          // CUSTOMER-scope: Margin berechnen — beruecksichtigt Multi-Line-Kosten.
-          if (repair.chargeToCustomer) {
-            const totalCost = computeRepairTotalCost(repair, lineTotal);
-            if (totalCost > 0) {
-              updates.margin = repair.chargeToCustomer - totalCost;
-            }
-          }
-        }
-
-        // Plan §Repair §9 + §Expenses §8 + §Workshop-as-Supplier:
-        // Expense für Workshop-Fee (Supplier-A/P) automatisch buchen.
-        // – CUSTOMER-scope: immer wenn externe/hybride Kosten vorhanden (P&L + Supplier-Bilanz).
-        // – OWN-scope: nur wenn Supplier verlinkt (reine A/P-Erfassung für Supplier-Bilanz;
-        //   Kosten sind bereits in product.purchase_price kapitalisiert).
-        //
-        // Plan repair-multi-supplier: Bei Multi-Line-Repair (lineTotal > 0) sind
-        // die Expenses bereits per-Line beim IN_PROGRESS-Stage erzeugt worden.
-        // Wir ueberspringen den Legacy-Single-Expense-Pfad damit kein Duplikat
-        // entsteht.
-        const isExternalOrHybrid = repair.repairType === 'external' || repair.repairType === 'hybrid';
-        const expenseNeeded = isExternalOrHybrid
-          && workshopFee > 0
-          && lineTotal === 0
-          && (repair.repairScope !== 'OWN' || !!repair.workshopSupplierId);
-
-        if (expenseNeeded) {
-          const existing = query(
-            `SELECT id FROM expenses WHERE related_module = 'repair' AND related_entity_id = ?`,
-            [id]
-          );
-          if (existing.length === 0) {
-            let branchId: string, userId: string;
-            try { branchId = currentBranchId(); userId = currentUserId(); }
-            catch { branchId = 'branch-main'; userId = 'user-owner'; }
-            const expenseId = uuid();
-            const expenseNumber = getNextDocumentNumber('EXP');
-            const method = repair.internalPaidFrom || 'bank';
-            // POST-PARITY PP-13 — eigene Ware: dieselbe kapitalisierte Kategorie wie der Zeilenweg.
-            const category = repairCostCategory(repair.repairScope);
-            const expStatus = repair.internalPaidFrom ? 'PAID' : 'PENDING';
-            let workshopLabel = '';
-            if (repair.workshopSupplierId) {
-              const sRow = query(`SELECT name FROM suppliers WHERE id = ?`, [repair.workshopSupplierId]);
-              if (sRow.length > 0) workshopLabel = ' · ' + (sRow[0].name as string);
-            }
-            if (!workshopLabel && repair.externalVendor) workshopLabel = ' · ' + repair.externalVendor;
-            const paidAmount = expStatus === 'PAID' ? workshopFee : 0;
-            db.run(
-              `INSERT INTO expenses (id, branch_id, expense_number, category, amount, paid_amount, payment_method,
-                expense_date, description, related_module, related_entity_id, supplier_id, status, created_at, created_by)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'repair', ?, ?, ?, ?, ?)`,
-              [expenseId, branchId, expenseNumber, category, workshopFee, paidAmount, method,
-               now.split('T')[0],
-               `External repair ${repair.repairNumber}${workshopLabel}`,
-               id, repair.workshopSupplierId || null, expStatus, now, userId]
-            );
-            trackInsert('expenses', expenseId, {
-              category, amount: workshopFee, repairId: id,
-              supplierId: repair.workshopSupplierId, status: expStatus,
-            });
-
-            // Ohne diesen Post wuerde A/P im Ledger fehlen → Supplier-Outstanding
-            // zeigt zu wenig (Bug v0.1.25, sichtbar an „ali gold" Detail-Page).
-            const expenseDescription = `External repair ${repair.repairNumber}${workshopLabel}`;
-            const expenseRecord: Expense = {
-              id: expenseId,
-              expenseNumber,
-              branchId,
-              category,
-              amount: workshopFee,
-              paidAmount,
-              paymentMethod: method,
-              expenseDate: now.split('T')[0],
-              description: expenseDescription,
-              relatedModule: 'repair',
-              relatedEntityId: id,
-              supplierId: repair.workshopSupplierId,
-              status: expStatus as Expense['status'],
-              createdAt: now,
-            };
-            safePost(`postExpense(${expenseId}) [repair-ready]`, () => {
-              if (hasLedgerEntries('EXPENSE', expenseId)) return;
-              postExpense(expenseRecord);
-            });
-            if (expStatus === 'PAID' && paidAmount > 0) {
-              const payId = uuid();
-              db.run(
-                `INSERT INTO expense_payments (id, expense_id, amount, method, paid_at, note, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-                [payId, expenseId, paidAmount, method, now.split('T')[0], 'Auto-paid on repair ready', now]
-              );
-              trackInsert('expense_payments', payId, { expenseId, amount: paidAmount, method });
-              safePost(`postExpensePayment(${payId}) [repair-ready]`, () => {
-                if (hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
-                postExpensePayment(
-                  {
-                    id: payId, expenseId, amount: paidAmount,
-                    method, paidAt: now.split('T')[0], createdAt: now,
-                    note: 'Auto-paid on repair ready',
-                  },
-                  repair.workshopSupplierId
-                );
-              });
-            }
-          }
+        } else if (repair.chargeToCustomer) {
+          // CUSTOMER-scope: die Marge aus derselben Kostensumme wie Rechnungseinstand und Ausgaben.
+          updates.margin = repair.chargeToCustomer - totalCost;
         }
         break;
       }
@@ -1038,13 +955,17 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
   deleteRepair: (id) => {
     const db = getDatabase();
     const repair = get().getRepair(id);
-    // POST-PARITY PP-13 — an EIGENER Ware nach „ready": der Einstand wird zurückgenommen (die Ausgaben
-    // storniert der Rest wie bisher); beglichene Werkstattkosten oder ein verkaufter Artikel sperren.
-    if (repair && ownRepairCapitalized(repair)) {
+    // POST-PARITY PP-13/PP-14 — beglichene Reparaturkosten sperren das Löschen (sonst bliebe die Zahlung
+    // ohne Gegenstück); an EIGENER Ware nach „ready" wird der Einstand zurückgenommen (die Ausgaben
+    // storniert der Rest wie bisher) — ein verkaufter Artikel sperrt.
+    if (repair) {
       const linked = query(
-        `SELECT id FROM expenses WHERE related_module = 'repair' AND related_entity_id = ? AND status != 'CANCELLED'`, [id]);
-      for (const e of linked) assertOwnRepairCostUnsettled(e.id as string);
-      shiftOwnRepairCost(repair, -ownRepairCost(repair, sumOpenRepairLineCosts(id)), new Date().toISOString(), 'repair-deleted');
+        `SELECT id FROM expenses WHERE related_module = 'repair' AND related_entity_id = ? AND status != 'CANCELLED'
+            AND category != 'CardFees'`, [id]);
+      for (const e of linked) assertRepairCostUnsettled(e.id as string);
+      if (ownRepairCapitalized(repair)) {
+        shiftOwnRepairCost(repair, -computeRepairTotalCost(repair, sumOpenRepairLineCosts(id)), new Date().toISOString(), 'repair-deleted');
+      }
     }
     // Restore product status if needed
     let restoredProductId: string | null = null;
@@ -1228,7 +1149,10 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       const vat = gross - net;
       // CENTRAL-C3H — dieselbe Ableitung, die jetzt auch der Einzelweg der Detailseite und der
       // Fernauftrag benutzen. Vorher stand sie nur hier, und der Einzelweg rechnete anders.
-      const fullCost = repairInvoiceLineCost(r, sumOpenRepairLineCosts(r.id));
+      // POST-PARITY PP-14 — der Einstand ist die EINE Kostensumme (vorher internalCost + Zeilen: bei
+      // „external" zählte der Spiegel neben der Werkstattzeile). Gebucht ist sie schon (Soll COGS bei der
+      // Kostenentstehung); die Rechnung trägt sie nur für Marge und Berichte.
+      const fullCost = computeRepairTotalCost(r, sumOpenRepairLineCosts(r.id));
       return {
         productId,
         unitPrice: net,
@@ -1271,6 +1195,10 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const now = new Date().toISOString();
     let branchId: string;
     try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+    // POST-PARITY PP-14 — eine abgerechnete Reparatur nimmt keine Kostenzeile mehr (ihr Rechnungseinstand steht).
+    if (get().getRepair(repairId)?.invoiceId) {
+      throw new RepairActionRejected('REPAIR_ALREADY_INVOICED', 'this repair is already invoiced — its cost lines are frozen');
+    }
 
     // Next position = max existing + 1
     const existingRows = query(
@@ -1326,6 +1254,10 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const now = new Date().toISOString();
     const line = get().repairLines.find(l => l.id === lineId);
     if (!line) throw new Error(`Repair-Line ${lineId} nicht gefunden`);
+    // POST-PARITY PP-14 — eine abgerechnete Reparatur ändert ihre Kostenzeilen nicht mehr.
+    if (get().getRepair(line.repairId)?.invoiceId) {
+      throw new RepairActionRejected('REPAIR_ALREADY_INVOICED', 'this repair is already invoiced — its cost lines are frozen');
+    }
 
     // Salesforce-Stil: Wenn die linkierte Expense bereits eine Zahlung hat,
     // duerfen Cost/Supplier NICHT direkt geaendert werden — User muss Cancel+Replace.
@@ -1429,15 +1361,16 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     if (!line) return;
     if (line.status === 'CANCELLED') return;
 
-    // POST-PARITY PP-13 — Kosten an EIGENER Ware: eine schon beglichene Werkstattschuld bleibt (die Zeile
-    // ist dann nicht mehr stornierbar); nach „ready" wird ihr Betrag aus dem Einstand zurückgenommen —
-    // geprüft VOR jedem Schreiben (verkauft → Nein, nie negativ).
+    // POST-PARITY PP-13/PP-14 — eine abgerechnete Reparatur und eine schon beglichene Kostenzeile bleiben
+    // (sonst verwaiste Zahlung bzw. falscher Rechnungseinstand); an EIGENER Ware nach „ready" wird der
+    // Betrag aus dem Einstand zurückgenommen — alles geprüft VOR jedem Schreiben (verkauft → Nein).
     const rep = get().getRepair(line.repairId);
-    if (rep?.repairScope === 'OWN') {
-      assertOwnRepairCostUnsettled(line.expenseId);
-      if (ownRepairCapitalized(rep) && (line.costAmount || 0) > 0) {
-        shiftOwnRepairCost(rep, -(line.costAmount || 0), now, 'line-cancelled');
-      }
+    if (rep?.invoiceId) {
+      throw new RepairActionRejected('REPAIR_ALREADY_INVOICED', 'this repair is already invoiced — its cost lines are frozen');
+    }
+    assertRepairCostUnsettled(line.expenseId);
+    if (rep && ownRepairCapitalized(rep) && (line.costAmount || 0) > 0) {
+      shiftOwnRepairCost(rep, -(line.costAmount || 0), now, 'line-cancelled');
     }
 
     // 1) Linked gold_payable(s) per line-level FK — OPEN/CANCELLED dürfen mitgehen,
@@ -1510,19 +1443,20 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const values: (string | number | null)[] = [newSupplierId, totalCost, newType, now];
     let newMargin: number | undefined;
     if (charge > 0) {
+      // POST-PARITY PP-14 — dieselbe Ableitung wie Rechnungseinstand und Ausgaben (mit der Werkstatt, die
+      // die Zeilen nach diesem Nachziehen tragen), und auch bei Kosten 0 (sonst bliebe die alte Marge stehen).
       const costForMargin = computeRepairTotalCost(
         {
           repairType: newType,
           internalCost: Number(currentRow?.internal_cost) || 0,
           estimatedCost: Number(currentRow?.estimated_cost) || 0,
+          workshopSupplierId: newSupplierId,
         },
         totalCost,
       );
-      if (costForMargin > 0) {
-        newMargin = charge - costForMargin;
-        fields.push('margin = ?');
-        values.push(newMargin);
-      }
+      newMargin = charge - costForMargin;
+      fields.push('margin = ?');
+      values.push(newMargin);
     }
     values.push(repairId);
     db.run(`UPDATE repairs SET ${fields.join(', ')} WHERE id = ?`, values);

@@ -459,9 +459,16 @@ export function financeFor(ctx: BusinessReadContext) {
       );
       repairBankIn -= Math.round(num(repairCardFeeRow[0] || {}, 'fee') * 1000) / 1000;
       const rpOut = qry(
+        // POST-PARITY PP-13/PP-14 — ist die eigene Arbeit als Ausgabe gebucht (eine Ausgabe der Reparatur
+        // ohne Werkstatt und ohne Kostenzeile), zählt sie schon unter den Ausgaben — nicht noch einmal hier.
         `SELECT internal_paid_from, COALESCE(SUM(internal_cost),0) as total
-         FROM repairs WHERE branch_id = ? AND internal_paid_from IS NOT NULL
-         AND internal_cost > 0 GROUP BY internal_paid_from`,
+         FROM repairs r WHERE branch_id = ? AND internal_paid_from IS NOT NULL
+         AND internal_cost > 0
+         AND NOT EXISTS (SELECT 1 FROM expenses e
+               WHERE e.related_module = 'repair' AND e.related_entity_id = r.id AND e.supplier_id IS NULL
+                 AND e.category IN ('Inventory', 'RepairServiceCost') AND e.status != 'CANCELLED'
+                 AND NOT EXISTS (SELECT 1 FROM repair_lines l WHERE l.expense_id = e.id))
+         GROUP BY internal_paid_from`,
         [branchId]
       );
       for (const r of rpOut) {

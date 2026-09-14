@@ -1408,25 +1408,36 @@ export interface PartnerTransaction {
 }
 
 // Expense (Plan §Expenses §3 + §11)
-export type ExpenseCategory = 'Rent' | 'Salary' | 'Utilities' | 'CardFees' | 'RepairCosts' | 'Transport' | 'ConsignorLoss' | 'Inventory' | 'Miscellaneous';
+// POST-PARITY PP-14 — 'RepairServiceCost': die Kosten einer Reparatur an KUNDENWARE (Werkstatt, eigene
+// Arbeit, Zeilen) — Dienstleistungs-Einstand, nie Bestand; nur die Reparatur legt sie an.
+export type ExpenseCategory = 'Rent' | 'Salary' | 'Utilities' | 'CardFees' | 'RepairCosts' | 'Transport' | 'ConsignorLoss' | 'Inventory' | 'Miscellaneous' | 'RepairServiceCost';
 
 // v0.6.0 — Kategorien deren Kosten in den Produkt-/Inventar-Wert kapitalisiert
 // werden (→ COGS beim Verkauf) und daher NICHT als laufende Betriebsausgabe
 // zaehlen. Sonst wuerde dieselbe Kost doppelt zaehlen — einmal als COGS in der
 // Invoice-Marge, einmal als operative Ausgabe.
-export const CAPITALIZED_EXPENSE_CATEGORIES: readonly ExpenseCategory[] = ['Inventory'];
+// POST-PARITY PP-14 — ebenso der Dienstleistungs-Einstand der Kundenreparatur: er steht in der Marge
+// (Rechnungs- bzw. Reparatur-Einstand), also nicht noch einmal unter den Betriebsausgaben.
+export const CAPITALIZED_EXPENSE_CATEGORIES: readonly ExpenseCategory[] = ['Inventory', 'RepairServiceCost'];
 
 export function isCapitalizedExpenseCategory(cat: string): boolean {
   return (CAPITALIZED_EXPENSE_CATEGORIES as readonly string[]).includes(cat);
 }
 
-// POST-PARITY PP-13 — die Werkstattschuld einer Reparatur an EIGENER Ware ist Anschaffungsnebenkosten des
-// Artikels: Kategorie „Inventory" mit Bezug 'repair'. Nur diese Ausgaben bucht das Hauptbuch auf den
-// Bestand (Soll INVENTORY statt EXPENSES_OPERATING) — der Einstand des Artikels trägt sie, der
-// Wareneinsatz beim Verkauf bucht sie genau einmal aus. Andere „Inventory"-Ausgaben (Metallkauf, R6D)
-// bleiben beim vereinfachten Vertrag.
-export function isCapitalizedRepairCost(e: { category?: string | null; relatedModule?: string | null }): boolean {
-  return e.category === 'Inventory' && e.relatedModule === 'repair';
+// POST-PARITY PP-13/PP-14 — das Konto einer Reparaturkosten-Ausgabe (Bezug 'repair'), nach Eigentum:
+//   • EIGENE Ware   — Kategorie „Inventory"         → Soll INVENTORY: Anschaffungsnebenkosten des
+//     Artikels; der Einstand trägt sie, der Wareneinsatz beim Verkauf bucht sie genau einmal aus;
+//   • KUNDENWARE    — Kategorie „RepairServiceCost" → Soll COGS: Dienstleistungs-Einstand, nie Bestand;
+//     die Reparaturrechnung bucht dafür keinen zweiten Wareneinsatz.
+// Alles andere (auch „Inventory" des Metallkaufs, R6D, und Alt-„RepairCosts") bleibt Soll EXPENSES_OPERATING.
+export function repairCostAccount(e: { category?: string | null; relatedModule?: string | null }): 'INVENTORY' | 'COGS' | null {
+  if (e.relatedModule !== 'repair') return null;
+  if (e.category === 'Inventory') return 'INVENTORY';
+  if (e.category === 'RepairServiceCost') return 'COGS';
+  return null;
+}
+export function isBookedRepairCost(e: { category?: string | null; relatedModule?: string | null }): boolean {
+  return repairCostAccount(e) !== null;
 }
 
 export interface Expense {

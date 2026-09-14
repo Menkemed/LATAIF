@@ -86,6 +86,32 @@ export function repairMargin(input: RepairCostInput & { chargeToCustomer?: numbe
   return charge - totalRepairCost(input);
 }
 
+// ── POST-PARITY PP-13/PP-14 — die Kosten EINER Reparatur, EINE Ableitung ─────────────────
+//
+// Vorher drei Rechnungen derselben Frage: `computeRepairTotalCost` (Marge, Einstand eigener Ware),
+// `repairInvoiceLineCost` (Rechnungseinstand = internalCost + Zeilen) und der Einzelweg bei „ready".
+// Bei „external" ist `internalCost` der gespiegelte Voranschlag (`internalCostOnCreate`) — die
+// Rechnung zählte ihn NEBEN der Werkstattzeile, dazu die Ausgabe: dreimal. Jetzt drei Teile, jeder
+// genau EINE Ausgabe (`repair-cost-booking`):
+//   • own   — die eigenen Kosten (`internalCost`), außer bei „external" (dort ist es der Spiegel);
+//   • lines — jede offene Kostenzeile (Werkstatt oder im Haus) mit ihrem Betrag;
+//   • fee   — nur ohne Zeilen und mit verknüpfter Werkstatt (Altbestand vor den Zeilen): die Gebühr.
+// Ohne Zeile und ohne Werkstatt ist ein Voranschlag nur ein Voranschlag, keine Kosten.
+export interface RepairCostParts { own: number; lines: number; fee: number; total: number }
+export function repairCostParts(
+  r: { repairType?: string | null; internalCost?: number | null; estimatedCost?: number | null; workshopSupplierId?: string | null },
+  openLineTotal = 0,
+): RepairCostParts {
+  const internal = num(r.internalCost) ?? 0;
+  const own = r.repairType === 'external' ? 0 : internal;
+  const lines = Number.isFinite(openLineTotal) && openLineTotal > 0 ? openLineTotal : 0;
+  const ext = r.repairType === 'external' || r.repairType === 'hybrid';
+  const fee = lines === 0 && ext && !!r.workshopSupplierId
+    ? (r.repairType === 'hybrid' ? (num(r.estimatedCost) ?? 0) : ((num(r.estimatedCost) || 0) || internal))
+    : 0;
+  return { own, lines, fee, total: own + lines + fee };
+}
+
 // ── CENTRAL-C3H — die Kosten, die auf die RECHNUNGSZEILE einer Reparatur gehoeren ────────
 //
 // Gemessen, nicht vermutet: das Haus hatte hier ZWEI Ableitungen.

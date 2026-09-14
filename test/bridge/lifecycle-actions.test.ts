@@ -99,7 +99,7 @@ const { nextOrderStatus, isAllowedOrderAdvance, ORDER_STATUS_FLOW } =
   await import('../../src/core/orders/order-status-flow.ts');
 const { allowedRepairStatusTargets, nextRepairStatus, quickRepairNext } =
   await import('../../src/core/repairs/repair-status-flow.ts');
-const { repairInvoiceLineCost } = await import('../../src/core/repairs/repair-cost.ts');
+const { repairCostParts } = await import('../../src/core/repairs/repair-cost.ts');
 
 let PASS = 0; const fails: string[] = [];
 const ok = (c: unknown, m: string): void => { if (c) PASS++; else { fails.push(m); console.log('  x ' + m); } };
@@ -624,8 +624,14 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
   const openLines = n(db, "SELECT COALESCE(SUM(cost_amount),0) FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'", [rid]);
   const cost = n(db, 'SELECT purchase_price_snapshot FROM invoice_lines WHERE invoice_id = ?', [invId]);
   ok(openLines > 0, `INVOICE es gibt Arbeitszeilen (${openLines})`);
-  ok(Math.abs(cost - repairInvoiceLineCost({ internalCost: internal }, openLines)) < 0.005,
-    `INVOICE der Einstand ist internalCost + Arbeitszeilen (${cost} = ${internal} + ${openLines})`);
+  // POST-PARITY PP-14 — der Einstand ist die EINE Kostensumme (`repairCostParts`): bei „external" ist
+  // internalCost der gespiegelte Voranschlag und zählt NICHT neben den Arbeitszeilen (vorher internal + Zeilen).
+  const repRes = db.exec('SELECT repair_type, internal_cost, estimated_cost, workshop_supplier_id FROM repairs WHERE id = ?', [rid])[0];
+  const rep: Record<string, unknown> = repRes ? Object.fromEntries(repRes.columns.map((c, i) => [c, repRes.values[0][i]])) : {};
+  const soll = repairCostParts({ repairType: String(rep.repair_type), internalCost: Number(rep.internal_cost) || 0,
+    estimatedCost: rep.estimated_cost === null ? null : Number(rep.estimated_cost), workshopSupplierId: (rep.workshop_supplier_id as string | null) ?? null }, openLines).total;
+  ok(Math.abs(cost - soll) < 0.005,
+    `INVOICE der Einstand ist die eine Kostensumme der Reparatur (${cost} = ${soll}; ${String(rep.repair_type)}, eigene ${internal}, Zeilen ${openLines})`);
   ok(cost > internal,
     `INVOICE …und damit groesser als der alte Einzelweg schrieb (${cost} statt ${internal})`);
 

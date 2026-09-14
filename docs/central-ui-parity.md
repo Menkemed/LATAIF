@@ -3396,7 +3396,8 @@ Keiner ist eine A/B-Lücke: entweder kein fehlender Fernweg für eine Geschäfts
 
 **Stand nach Post-Parity R7A (14.09.2026):** PP-1, PP-2, PP-8, PP-9, PP-10, PP-11 **geschlossen** (bewiesen, § „Post-Parity R7A —
 Business Correctness" am Ende dieses Dokuments); **offen** bleiben PP-3, PP-4, PP-5, PP-6, PP-7, PP-12. Registry seit R7A 175.
-**Neu nach R7A (14.09.2026):** PP-13 bestätigt und **geschlossen** (§ „PP-13 — Behebung" am Ende); PP-14 bestätigt und **offen**.
+**Neu nach R7A (14.09.2026):** PP-13 und PP-14 bestätigt und **geschlossen** (§ „PP-13 + PP-14 — Repair-Accounting-Abschluss" am
+Ende). Offen bleiben PP-3, PP-4, PP-5, PP-6, PP-7, PP-12.
 
 Veraltete Stellen der SSOT (nur Hinweis, Inhalt gilt): Zeilenverweise der Tabelle sind teils verschoben (z. B. InvoiceDetail,
 WatchList, ExpenseList); der R6A-Abschnitt „Keine toten Knöpfe" beschreibt den Stand VOR R6B — heute: Abmelden geht auf PC2
@@ -3704,3 +3705,59 @@ Rechnungseinstand 200 (`internalCost`-Spiegel 100 + Werkstattzeile 100, `repairI
 INVENTORY −200, Gewinn 0 statt 200. Fachlich eigenständig (Dienstleistung ohne Bestand; Erlös über Rechnung MIT COGS oder
 Direktzahlung `REPAIR_PAYMENT` OHNE COGS — der Einstand des einen Wegs ist im anderen falsch) → eigene Entscheidung, keine
 Ausweitung in PP-13. `POST_PARITY_REPAIR_CUSTOMER_COST_CONTRACT_PROVED` wird deshalb NICHT vergeben.
+
+## PP-13 + PP-14 — Repair-Accounting-Abschluss (14.09.2026)
+
+**Gemeinsame Ursache:** derselbe Kostenbetrag wirkte über mehrere Wege — Ausgabe (Soll EXPENSES_OPERATING), Einstand eigener
+Ware, gespiegelter `internalCost` (`internalCostOnCreate` bei „external"/„hybrid") und der Wareneinsatz der Reparaturrechnung
+(`internalCost` + Zeilen, Haben INVENTORY auch für Kundenware). Eigene Ware 300/100 ergab 100, Kundenware 300/100 ergab 0.
+`POST_PARITY_REPAIR_COST_DOMAIN_PROVED`
+
+**EINE Domain (`core/repairs/repair-cost.ts` `repairCostParts` + `core/repairs/repair-cost-booking.ts`):** die Kosten einer
+Reparatur sind drei Teile — eigene Arbeit (`internalCost`, außer bei „external": dort der Spiegel), jede offene Kostenzeile
+(Werkstatt oder im Haus), und nur ohne Zeilen mit verknüpfter Werkstatt die Gebühr (Altbestand). Jeder Teil ist genau EINE
+Ausgabe: Zeilen bei „in Arbeit"/„an Werkstatt" bzw. beim Hinzufügen danach, eigene Arbeit und Gebühr bei „ready"
+(`syncRepairHeaderCosts`, danach folgen sie jeder Änderung). Werkstatt → A/P an sie; ohne Werkstatt bezahlt über
+`internal_paid_from`, sonst offen — dasselbe Muster wie die Werkstattgebühr des Hauses. Dieselbe Summe ist Einstand eigener
+Ware, Marge und Rechnungseinstand (`computeRepairTotalCost` delegiert). Ohne Zeile und ohne Werkstatt ist ein Voranschlag keine
+Kosten.
+
+**Zwei Buchungsverträge nach Eigentum (`repairCostAccount`, `postExpense`):**
+- **Eigene Ware (PP-13)** — Kategorie „Inventory" → Soll INVENTORY / Haben A/P; bei „ready" Artikel + Los um genau diese Summe;
+  Verkauf 300 → COGS 100 (Los-Einstand), INVENTORY zurück auf 0, Gewinn 200. Auch die eigene Arbeit ohne Werkstatt
+  (`POST_PARITY_PP13_INTERNAL_REPAIR_CAPITALIZATION_PROVED`: Einstand 100 = INVENTORY +100, nach dem Verkauf 0).
+- **Kundenware (PP-14)** — Kategorie „RepairServiceCost" (legt nur die Reparatur an, in `CAPITALIZED_EXPENSE_CATEGORIES` =
+  nicht operativ) → Soll COGS / Haben A/P; nie Bestand. Die Reparaturrechnung (`svc-repair-…`) bucht KEINEN zweiten
+  Wareneinsatz (`postInvoiceIssued`, `postInvoiceCogsBackfill`); Rechnung 300 → Einstand 100, Marge 200, Gewinn 200 — ebenso
+  bei Direktzahlung ohne Rechnung (`REPAIR_PAYMENT`: Erlös 300, COGS 100). `POST_PARITY_PP14_CUSTOMER_REPAIR_ACCOUNTING_PROVED`
+- Die Zahlung ist nur Soll A/P / Haben Kasse/Bank (Gewinn vor und nach der Zahlung gleich). Analytics zählt gebuchte eigene
+  Arbeit nicht zusätzlich als Reparatur-Abfluss.
+
+**Rücknahme (`POST_PARITY_PP13_REPAIR_COST_REVERSAL_PROVED`, `POST_PARITY_PP14_CUSTOMER_REPAIR_REVERSAL_PROVED`):** vor „ready"
+→ Ausgabe gegengebucht, danach kein Einstand; nach „ready" unbezahlt → Einstand, Los, INVENTORY, A/P gemeinsam zurück; Zeile nach
+„ready" +/−, Betrag geändert (Differenz), Reparatur gelöscht (zurück); Kopfkosten nach „ready" geändert → dieselbe Ausgabe
+(Storno + Neubuchung) und Einstand/Marge um die Differenz. Gesperrt ohne Schreiben: beglichen → `REPAIR_COST_PAID`, verkauft →
+`REPAIR_COST_ALREADY_SOLD` (auch keine neue Zeile), abgerechnet → `REPAIR_ALREADY_INVOICED`, nie negativ. Rechnungsstorno:
+Erlös zurück, die Werkstattarbeit bleibt EINE Kostenwirkung (COGS, A/P an die Werkstatt). Gebuchte Reparaturkosten ändert oder
+löscht nur die Reparatur (`EXPENSE_REPAIR_COST_LOCKED`, `EXPENSE_CATEGORY_RESERVED`).
+
+**Atomarität:** Status, Zeile hinzufügen/stornieren und „Save" laufen am Primary über `repair-house` (`amPrimary` +
+`watchLedgerPosts`), fern über dieselben Store-Funktionen in `runRemoteCommand` mit derselben Buchungswache; ein im Store
+abgefangener Buchungsfehler nimmt die ganze Handlung zurück. Registry unverändert **175**.
+
+**Beweis:** `test/pp13/repair-cost-accounting.test.ts` **104/0** (Domain, eigene Ware Zeilen-/Einzelweg/hybrid/eigene Arbeit,
+Kundenware Werkstatt/bezahlt/eigene Arbeit/Direktzahlung, alle Rücknahmen, verlorene Antwort, Fehlerinjektion, Primary == PC2,
+Hauptbuch == Berichte, `POST_PARITY_REPAIR_LEDGER_REPORT_PARITY_PROVED`). Zwei-Rechner-Lauf
+`test/e2e/pp14-repair-cost-accounting.e2e.mjs` **301/0** (frische E2E-Programme, einmal gebaut): eigene Ware + Werkstatt
+(in Arbeit → an Werkstatt → fertig mit verlorener Antwort: Artikel + Los 100 genau einmal), eigene Arbeit, Kundenware + Werkstatt,
+Zahlung, Rechnung (Einstand 100, Marge 200, kein Wareneinsatz auf der Reparaturrechnung), Storno der unbezahlten Zeile, Nein für
+die bezahlte (`REPAIR_COST_PAID`), Verkauf der eigenen Ware (COGS 100, INVENTORY 0, Marge 200) — jede Handlung auf PC2 (B)
+UND am Primary (A), Akteur-Fehler 0, Hauptbuch 52 Zeilen / 22 Transaktionen ausgeglichen, PC2 ohne lokale Datenbank, Produktions-
+App, `E:\LATAIF\Data` und Ports 3001/3443 unberührt (`POST_PARITY_PP13_PP14_TWO_APP_PROVED`). Nachbarn grün (r5c 286/0, service-parity,
+service-documents, lifecycle-actions 200/0 mit nachgezogenem Einstand-Pin, payables, gold, metal, order, invoice-cancel, returns,
+r7a, invoice-lifecycle, credit-note, offer, analytics); Typcheck grün; Lint ohne neue Fehler.
+
+```
+Post-Parity-Backlog: geschlossen PP-1, PP-2, PP-8, PP-9, PP-10, PP-11, PP-13, PP-14 · offen PP-3, PP-4, PP-5, PP-6, PP-7, PP-12
+Registry = 175 · Version 0.8.54 · kein Release
+```

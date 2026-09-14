@@ -98,7 +98,8 @@ export function updateRepairOnPrimary(id: string, form: Partial<Repair>): Promis
     if (!seen) throw new RepairActionRejected('REPAIR_NOT_FOUND', 'no such repair');
     const patch = buildRepairEditPatch(form);
     assertRepairEditRefs(patch, seen, houseRepairPort(currentBranchId()));
-    rs.updateRepair(id, patch);
+    // POST-PARITY PP-13/PP-14 — gebuchte Kopfkosten folgen der Änderung; dieselbe Buchungswache wie fern.
+    mitBuchungswache('repairs.update', () => rs.updateRepair(id, patch));
   });
 }
 

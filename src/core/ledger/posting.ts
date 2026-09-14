@@ -28,7 +28,14 @@ import {
   resetTransactionContext,
 } from '@/core/db/transaction-context';
 import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment, CanonicalLoanDirection, CashSource, ScrapPaymentMethod } from '@/core/models/types';
-import { canonicalLoanDirection, isCapitalizedRepairCost } from '@/core/models/types';
+import { canonicalLoanDirection, repairCostAccount } from '@/core/models/types';
+
+/** POST-PARITY PP-14 — die Zeile einer Reparaturrechnung (Artikel `svc-repair-<Filiale>`): ihre Kosten sind
+ * bereits als Dienstleistungs-Einstand gebucht (Soll COGS bei der Kostenentstehung) — kein zweiter Wareneinsatz,
+ * und NIE Haben INVENTORY für Kundenware. */
+function isRepairServiceLine(productId: string | null | undefined): boolean {
+  return String(productId ?? '').startsWith('svc-repair-');
+}
 
 // ── Kontenrahmen (siehe ZIEL.md §3a) ──────────────────────────
 
@@ -576,7 +583,7 @@ export function postInvoiceIssued(invoice: Invoice): PostingResult {
     // automatisch ueber reverseSource('INVOICE') bei Cancel/Delete.
     const cogsQty = Math.max(1, line.quantity || 1);
     const cogsCost = ROUND((line.purchasePriceSnapshot || 0) * cogsQty);
-    if (cogsCost > 0) {
+    if (cogsCost > 0 && !isRepairServiceLine(line.productId)) {
       entries.push({
         account: 'COGS',
         direction: 'DEBIT',
@@ -617,7 +624,7 @@ export function postInvoiceCogsBackfill(invoice: Invoice): PostingResult | null 
   for (const line of invoice.lines) {
     const qty = Math.max(1, line.quantity || 1);
     const cost = ROUND((line.purchasePriceSnapshot || 0) * qty);
-    if (cost > 0) {
+    if (cost > 0 && !isRepairServiceLine(line.productId)) {   // PP-14 — s. postInvoiceIssued
       entries.push({
         account: 'COGS',
         direction: 'DEBIT',
@@ -1345,9 +1352,9 @@ export function postPurchaseCancelled(purchase: Purchase): PostingResult {
 //   DEBIT  EXPENSES_OPERATING by amount
 //   CREDIT ACCOUNTS_PAYABLE   by amount (counterparty: supplier wenn gesetzt)
 //
-// POST-PARITY PP-13 — die kapitalisierte Werkstattschuld einer Reparatur an EIGENER Ware
-// (`isCapitalizedRepairCost`) bucht Soll INVENTORY statt EXPENSES_OPERATING: der Betrag steckt im
-// Einstand des Artikels und wird beim Verkauf als COGS genau einmal Aufwand. Storno/Neubuchung
+// POST-PARITY PP-13/PP-14 — Reparaturkosten (`repairCostAccount`) buchen nach Eigentum: eigene Ware
+// Soll INVENTORY (Einstand des Artikels, beim Verkauf genau einmal COGS), Kundenware Soll COGS
+// (Dienstleistungs-Einstand; die Reparaturrechnung bucht keinen zweiten). Storno/Neubuchung
 // (`reverseSource`) spiegeln das gebuchte Konto; Zahlungen bleiben Soll A/P / Haben Kasse/Bank.
 
 export function postExpense(expense: Expense): PostingResult {
@@ -1360,7 +1367,7 @@ export function postExpense(expense: Expense): PostingResult {
   return postEntries(
     [
       {
-        account: isCapitalizedRepairCost(expense) ? 'INVENTORY' : 'EXPENSES_OPERATING',
+        account: repairCostAccount(expense) ?? 'EXPENSES_OPERATING',
         direction: 'DEBIT',
         amount,
         counterpartyType,

@@ -58,6 +58,7 @@ import {
 } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
+import { watchLedgerPosts } from '@/core/ledger/posting';
 
 export const OP_REPAIRS_CREATE = 'repairs.create';
 export const OP_REPAIRS_UPDATE = 'repairs.update';
@@ -457,7 +458,11 @@ export async function runRepairUpdate(
     try {
       // Der Weg des Hauses: die Zeile, dazu die Umbuchung der Kundenzahlung samt Kartengebühr
       // (`syncRepairCustomerPayment`) und das Nachziehen einer spät gesetzten Werkstatt.
-      rs.updateRepair(req.id, patch);
+      // POST-PARITY PP-13/PP-14 — gebuchte Kopfkosten folgen der Änderung; eine (auch abgefangene)
+      // gescheiterte Buchung nimmt alles zurück, ein Nein der Kostenregel ist ein Urteil.
+      const buchung = watchLedgerPosts(OP_REPAIRS_UPDATE);
+      house(() => rs.updateRepair(req.id, patch));
+      buchung();
     } catch (e) {
       if (e instanceof Error && e.message === SUPPLIER_CREDIT_LOCK_MESSAGE) {
         throw new CommandRejected('SUPPLIER_CREDIT_LOCKED', e.message);

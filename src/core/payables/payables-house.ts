@@ -33,7 +33,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { v4 as uuid } from 'uuid';
 import type { Expense, ExpenseCategory, PurchasePayment, PurchaseStatus } from '@/core/models/types';
-import { isCapitalizedRepairCost } from '@/core/models/types';
+import { isBookedRepairCost } from '@/core/models/types';
 import { getDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete, trackPayment, trackStatusChange } from '@/core/sync/track';
@@ -128,6 +128,8 @@ const txt = (v: unknown): string | undefined => (typeof v === 'string' && v !== 
 
 export const EXPENSE_CATEGORIES: readonly ExpenseCategory[] = [
   'Rent', 'Salary', 'Utilities', 'CardFees', 'RepairCosts', 'Transport', 'ConsignorLoss', 'Inventory', 'Miscellaneous',
+  // POST-PARITY PP-14 — legt nur die Reparatur an (Kundenware); die Maske bietet sie nicht an.
+  'RepairServiceCost',
 ];
 export const PAY_METHODS = ['cash', 'bank', 'benefit'] as const;
 export type PayMethod = typeof PAY_METHODS[number];
@@ -326,6 +328,10 @@ export function createExpenseInHouse(core: ExpenseCreateCore, ctx: HouseCtx): Ex
 
 /** „New Expense" aus der Maske: die Absicht wird zur Anlage. */
 export function createExpenseFromIntent(intent: ExpenseCreateIntent, ctx: HouseCtx): ExpenseCreated {
+  // POST-PARITY PP-14 — der Dienstleistungs-Einstand der Kundenreparatur entsteht nur an der Reparatur.
+  if (intent.category === 'RepairServiceCost') {
+    throw nein('EXPENSE_CATEGORY_RESERVED', 'repair service costs are booked by the repair itself');
+  }
   return createExpenseInHouse({ ...intent, initialPaid: initialPaidOf(intent) }, ctx);
 }
 
@@ -387,10 +393,11 @@ export function updateExpenseInHouse(expenseId: string, raw: ExpenseEditFields, 
   if (txt(row.related_module) === 'repair') {
     const catChange = f.category !== undefined && f.category !== row.category;
     const amountChange = f.amount !== undefined && F(f.amount) !== F(row.amount);
-    const capitalized = isCapitalizedRepairCost({ category: String(row.category), relatedModule: 'repair' });
-    if ((catChange && (f.category === 'Inventory' || capitalized)) || (capitalized && amountChange)) {
+    const booked = isBookedRepairCost({ category: String(row.category), relatedModule: 'repair' });
+    const toBooked = f.category !== undefined && isBookedRepairCost({ category: f.category, relatedModule: 'repair' });
+    if ((catChange && (toBooked || booked)) || (booked && amountChange)) {
       throw nein('EXPENSE_REPAIR_COST_LOCKED',
-        'this is the capitalized workshop cost of an own-item repair — change or cancel its repair line instead');
+        'this is a booked repair cost — change or cancel its repair line (or change the repair) instead');
     }
   }
 
