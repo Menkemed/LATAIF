@@ -8,7 +8,8 @@
 //
 //   EIGENE WARE + WERKSTATT   in Arbeit → an Werkstatt → fertig (verlorene Antwort): Ausgabe „Inventory",
 //                             Soll INVENTORY / Haben A/P, Artikel + Los 100, kein Aufwand; Verkauf 300 → COGS 100, Gewinn 200
-//   EIGENE WARE, EIGENE ARBEIT in Arbeit → fertig: die eigenen Kosten 100 auf INVENTORY/A/P, Artikel + Los 100; Verkauf → Gewinn 200
+//   EIGENE WARE, EIGENE ARBEIT in Arbeit → fertig: eigene Kosten 100 ohne Zahlweg als aktivierte Eigenleistung
+//                             (Soll INVENTORY / Haben EXPENSES_OPERATING — keine Verbindlichkeit, keine Kasse), Artikel + Los 100
 //   KUNDENWARE + WERKSTATT    in Arbeit → an Werkstatt → fertig → Rechnung 300: Ausgabe „RepairServiceCost",
 //                             Soll COGS / Haben A/P, KEIN Bestand, die Rechnung bucht keinen zweiten Wareneinsatz, Marge 200
 //   BEZAHLT                   die Werkstatt der Kundenreparatur bezahlt: nur A/P / Kasse, Marge und COGS unverändert
@@ -825,12 +826,14 @@ function netto(ids) {
 }
 const artikelKosten = (pid) => ({ einstand: Number(zeile('products', pid).purchase_price), los: Number(zeile('stock_lots', pid + '-lot').unit_cost), bestand: zeile('products', pid).stock_status });
 /** Die Reparatur, wie sie verglichen wird: Stand, Ausgaben, Konten ihrer Ausgaben und Zahlungen, Artikel. */
+/** Quellen der aktivierten Eigenleistung: die Reparatur (eigene Kosten) und ihre Zeilen im Haus. */
+const eigenQuellen = (rep) => [rep, ...dbQ(BIZ_DB, 'SELECT id FROM repair_lines WHERE repair_id = ?', [rep]).map((r) => r.id)];
 const reparaturZustand = (rep, pid) => {
   const ids = alleAusgabenIds(rep);
   return {
     rep: repStand(rep),
     exp: repAusgaben(rep).map((e) => [e.category, Number(e.amount), Number(e.paid_amount), e.status, e.supplier_id ? 'WERKSTATT' : null]),
-    konten: netto([...ids, ...zahlungIds(ids)]),
+    konten: netto([...ids, ...zahlungIds(ids), ...eigenQuellen(rep)]),
     artikel: pid ? artikelKosten(pid) : null,
   };
 };
@@ -1086,12 +1089,12 @@ try {
   // PP-13 — eigene Ware, eigene Arbeit 100 (keine Werkstatt)
   // ══════════════════════════════════════════════════════════════════════
   await paar(weiter('RI → in Arbeit', RI, 'in_progress', OI));
-  await paar(weiter('RI → fertig (eigene Arbeit auf den Bestand)', RI, 'ready', OI, { neu: true, zeilen: 2 }));
+  await paar(weiter('RI → fertig (eigene Arbeit auf den Bestand)', RI, 'ready', OI, { zeilen: 2 }));
   {
     const je = XS.map((x) => reparaturZustand(RI(x), OI(x)));
-    EXTRA.ownInternal = je.every((z) => S(z.exp) === S([['Inventory', 100, 0, 'PENDING', null]]) && S(z.konten) === S({ ACCOUNTS_PAYABLE: -100, INVENTORY: 100 })
+    EXTRA.ownInternal = je.every((z) => S(z.exp) === '[]' && S(z.konten) === S({ EXPENSES_OPERATING: -100, INVENTORY: 100 })
       && z.artikel.einstand === 100 && z.artikel.los === 100);
-    ok(EXTRA.ownInternal, `PP-13 eigene Arbeit: EINE Ausgabe „Inventory" 100 ohne Werkstatt, Soll INVENTORY / Haben A/P, Artikel + Los 100 (${S(je).slice(0, 500)})`);
+    ok(EXTRA.ownInternal, `PP-13 eigene Arbeit ohne Zahlweg: KEINE Ausgabe/Verbindlichkeit/Kasse — aktivierte Eigenleistung Soll INVENTORY / Haben EXPENSES_OPERATING, Artikel + Los 100 (${S(je).slice(0, 500)})`);
   }
   console.log('POST_PARITY_PP13_INTERNAL_RUNTIME_CANDIDATE');
 
@@ -1178,12 +1181,12 @@ try {
         const kopf = inv ? zeile('invoices', inv) : {};
         const rep = pid === OW(x) ? RO(x) : RI(x);
         const ids = alleAusgabenIds(rep);
-        const konten = netto([...ids, ...zahlungIds(ids), inv || '']);
+        const konten = netto([...ids, ...zahlungIds(ids), ...eigenQuellen(rep), inv || '']);
         ergebnis.push({ x, pid, einstand: Number(line.purchase_price_snapshot), marge: Number(kopf.margin_snapshot), konten });
       }
     }
     EXTRA.sale = ergebnis.every((e) => e.einstand === 100 && e.marge === 200 && (e.konten.INVENTORY ?? 0) === 0 && e.konten.COGS === 100
-      && e.konten.REVENUE === -300 && !('EXPENSES_OPERATING' in e.konten));
+      && e.konten.REVENUE === -300 && (e.pid.includes('-oi-') ? e.konten.EXPENSES_OPERATING === -100 : !('EXPENSES_OPERATING' in e.konten)));
     ok(EXTRA.sale, `PP-13 Verkauf 300 je eigene Ware: Wareneinsatz 100 = Einstand, INVENTORY zurück auf 0, Marge 200, kein Aufwand (${S(ergebnis).slice(0, 700)})`);
   }
 

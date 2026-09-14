@@ -7,8 +7,8 @@ import { v4 as uuid } from 'uuid';
 import type { Repair, RepairStatus, RepairLine, RepairLineStatus, RepairWorkType } from '@/core/models/types';
 import { repairCostParts } from '@/core/repairs/repair-cost';
 import {
-  assertRepairCostUnsettled, ownRepairCapitalized, repairCostCategory, repairHeaderCostsBooked, shiftOwnRepairCost,
-  syncRepairHeaderCosts,
+  assertRepairCostUnsettled, hasOwnWork, ownRepairCapitalized, repairCostCategory, repairHeaderCostsBooked, reverseOwnWork,
+  shiftOwnRepairCost, syncOwnWork, syncRepairHeaderCosts,
 } from '@/core/repairs/repair-cost-booking';
 import { canonicalRepairStatus, REPAIR_CUSTOMER_PAID_FROM, REPAIR_TAX_SCHEMES } from '@/core/models/types';
 // CENTRAL-UI-PARITY R5C — die Regel „abrechenbar" und der Rechnungsvermerk: EINE Quelle für
@@ -398,6 +398,7 @@ function commitRepairLineExpenses(repairId: string): void {
   const internalPaidFrom = repair.internal_paid_from as string | null;
   // POST-PARITY PP-13 — an eigener Ware ist die Werkstattschuld kapitalisiert (Soll INVENTORY), sonst Aufwand.
   const category = repairCostCategory(repair.repair_scope as string | null);
+  const scope = (repair.repair_scope as string | null) ?? 'CUSTOMER';
   let branchId: string, userId: string;
   try { branchId = currentBranchId(); userId = currentUserId(); }
   catch { branchId = (repair.branch_id as string) || 'branch-main'; userId = 'user-owner'; }
@@ -416,20 +417,21 @@ function commitRepairLineExpenses(repairId: string): void {
   for (const lr of lineRows) {
     const lineId = lr.id as string;
     const position = (lr.position as number) || 0;
-    // POST-PARITY PP-13/PP-14 — JEDE Kostenzeile ist genau eine Ausgabe: mit Werkstatt A/P an sie,
-    // im Haus (ohne Werkstatt) bezahlt über `internal_paid_from`, sonst offen.
+    // POST-PARITY PP-13/PP-14 — JEDE Kostenzeile wirkt genau einmal: mit Werkstatt eine Ausgabe (A/P an sie);
+    // im Haus („own labor / own stock … no A/P booking") KEINE Verbindlichkeit und kein Geldfluss, sondern
+    // aktivierte Eigenleistung — Soll INVENTORY (eigene Ware) bzw. COGS (Kundenware) / Haben EXPENSES_OPERATING.
     const supplierId = (lr.supplier_id as string | null) || null;
     const workType = (lr.work_type as string) || 'service';
     const description = (lr.description as string) || '';
     const cost = (lr.cost_amount as number) || 0;
     if (cost <= 0) continue;
+    if (!supplierId) { syncOwnWork(lineId, repairId, scope, cost, now); continue; }
 
     const expenseId = uuid();
     const expenseNumber = getNextDocumentNumber('EXP');
     const method = (internalPaidFrom as 'cash' | 'bank' | 'benefit' | null) || 'bank';
-    const paidNow = !supplierId && !!internalPaidFrom;
-    const expStatus: 'PAID' | 'PENDING' = paidNow ? 'PAID' : 'PENDING';
-    const paidAmount = paidNow ? cost : 0;
+    const expStatus = 'PENDING' as const;
+    const paidAmount = 0;
 
     // Supplier-Label fuer Description
     let supplierLabel = '';
@@ -472,19 +474,6 @@ function commitRepairLineExpenses(repairId: string): void {
       if (hasLedgerEntries('EXPENSE', expenseId)) return;
       postExpense(expenseRecord);
     });
-    if (paidNow) {
-      const payId = uuid();
-      db.run(
-        `INSERT INTO expense_payments (id, expense_id, amount, method, paid_at, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-        [payId, expenseId, cost, method, now.split('T')[0], 'Paid with the repair (in-house cost)', now],
-      );
-      trackInsert('expense_payments', payId, { expenseId, amount: cost, method });
-      safePost(`postExpensePayment(${payId}) [repair-line-commit]`, () => {
-        if (hasLedgerEntries('EXPENSE_PAYMENT', payId)) return;
-        postExpensePayment({ id: payId, expenseId, amount: cost, method, paidAt: now.split('T')[0], createdAt: now,
-          note: 'Paid with the repair (in-house cost)' });
-      });
-    }
   }
   saveDatabase();
 }
@@ -966,6 +955,10 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       if (ownRepairCapitalized(repair)) {
         shiftOwnRepairCost(repair, -computeRepairTotalCost(repair, sumOpenRepairLineCosts(id)), new Date().toISOString(), 'repair-deleted');
       }
+      // Die aktivierte Eigenleistung (eigene Kosten, Zeilen im Haus) geht mit.
+      const jetzt = new Date().toISOString();
+      reverseOwnWork(id, jetzt);
+      for (const l of query('SELECT id FROM repair_lines WHERE repair_id = ?', [id])) reverseOwnWork(l.id as string, jetzt);
     }
     // Restore product status if needed
     let restoredProductId: string | null = null;
@@ -1258,6 +1251,14 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     if (get().getRepair(line.repairId)?.invoiceId) {
       throw new RepairActionRejected('REPAIR_ALREADY_INVOICED', 'this repair is already invoiced — its cost lines are frozen');
     }
+    // POST-PARITY PP-13/PP-14 — die Kostenquelle einer gebuchten Zeile (Werkstatt ↔ im Haus) wechselt nicht:
+    // Werkstatt = Ausgabe an sie, im Haus = aktivierte Eigenleistung. Dafür: Zeile stornieren, neu anlegen.
+    const ownWorkLine = hasOwnWork(lineId);
+    if (data.supplierId !== undefined && (line.expenseId || ownWorkLine)
+      && !!(data.supplierId || null) !== !!(line.supplierId || null)) {
+      throw new RepairActionRejected('REPAIR_LINE_SOURCE_LOCKED',
+        'the cost source of a booked line does not change — cancel the line and add a new one');
+    }
 
     // Salesforce-Stil: Wenn die linkierte Expense bereits eine Zahlung hat,
     // duerfen Cost/Supplier NICHT direkt geaendert werden — User muss Cancel+Replace.
@@ -1345,6 +1346,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       }
     }
 
+    // POST-PARITY PP-13/PP-14 — eine gebuchte Zeile im Haus: die aktivierte Eigenleistung folgt dem Betrag.
+    if (data.costAmount !== undefined && ownWorkLine) {
+      syncOwnWork(lineId, line.repairId, get().getRepair(line.repairId)?.repairScope, data.costAmount || 0, now);
+    }
+
     saveDatabase();
     get().loadRepairLines();
     get().recomputeRepairAggregates(line.repairId);
@@ -1369,9 +1375,6 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       throw new RepairActionRejected('REPAIR_ALREADY_INVOICED', 'this repair is already invoiced — its cost lines are frozen');
     }
     assertRepairCostUnsettled(line.expenseId);
-    if (rep && ownRepairCapitalized(rep) && (line.costAmount || 0) > 0) {
-      shiftOwnRepairCost(rep, -(line.costAmount || 0), now, 'line-cancelled');
-    }
 
     // 1) Linked gold_payable(s) per line-level FK — OPEN/CANCELLED dürfen mitgehen,
     //    bereits FULFILLED-Schulden blockieren (sonst floatet die Settlement-Expense).
@@ -1382,6 +1385,12 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       [lineId]
     );
     assertGoldPayablesRemovable(linkedGp, 'Zeile');
+    // POST-PARITY PP-13/PP-14 — erst NACH allen Prüfungen schreiben (sonst bliebe bei einem Nein der Gold-Regel
+    // eine halbe Rücknahme stehen): Einstand eigener Ware zurück, aktivierte Eigenleistung der Zeile gegenbuchen.
+    if (rep && ownRepairCapitalized(rep) && (line.costAmount || 0) > 0) {
+      shiftOwnRepairCost(rep, -(line.costAmount || 0), now, 'line-cancelled');
+    }
+    reverseOwnWork(lineId, now);
     for (const g of linkedGp) {
       db.run(`DELETE FROM gold_payables WHERE id = ?`, [g.id as string]);
       trackDelete('gold_payables', g.id as string);

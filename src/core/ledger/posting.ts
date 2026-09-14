@@ -120,6 +120,9 @@ export type SourceModule =
   // IN_STOCK). Eigener sourceModule, gekeyt auf returnId — bewusst NICHT unter
   // CREDIT_NOTE, weil repostCreditNoteFromCnId CN-Eintraege reverst+neu-postet.
   | 'SALES_RETURN_COGS'
+  // POST-PARITY PP-13/PP-14 — eigene Arbeit / eigener Bestand einer Reparatur (aktivierte Eigenleistung),
+  // gekeyt auf die Kostenzeile „In-house" bzw. auf die Reparatur (eigene Kosten ohne Zahlweg).
+  | 'REPAIR_OWN_WORK'
   // v0.7.0 — Order-Cancel Geld-Handling (Refund / Forfeit / Credit). 'credit'
   // reklassifiziert die Anzahlung DR CUSTOMER_DEPOSITS / CR CUSTOMER_CREDIT
   // (Credit-Modell) → einloesbar ueber denselben CUSTOMER_CREDIT-Pfad wie Return-Guthaben.
@@ -2174,6 +2177,29 @@ export function postRepairPayment(payment: RepairPaymentLike): PostingResult {
 
 export function postRepairPaymentReversed(paymentId: string): PostingResult {
   return reverseSource('REPAIR_PAYMENT', paymentId, new Date().toISOString());
+}
+
+// ── POST-PARITY PP-13/PP-14 — eigene Arbeit / eigener Bestand einer Reparatur ─────────
+//
+// Die Kostenzeile „🏠 In-house / Own work" (Maske: „own labor / own stock … no A/P booking") und die
+// eigenen Kosten ohne Zahlweg („INTERNAL PAID FROM: None") sind KEIN Zahlungsanspruch und KEIN Geldfluss:
+// die Kosten stecken schon in gebuchten Betriebsausgaben (Lohn, Material). Die Reparatur aktiviert sie —
+// aktivierte Eigenleistung, ohne Verbindlichkeit und ohne Kasse:
+//   DEBIT  INVENTORY (eigene Ware: Einstand des Artikels) bzw. COGS (Kundenware: Dienstleistungs-Einstand)
+//   CREDIT EXPENSES_OPERATING
+// Gekeyt auf die Zeile bzw. die Reparatur; eine Änderung ist Storno + Neubuchung (`reverseSource`).
+export function postRepairOwnWork(input: {
+  sourceId: string; repairId: string; account: 'INVENTORY' | 'COGS'; amount: number; occurredAt: string;
+}): PostingResult {
+  const amount = ROUND(input.amount);
+  if (amount <= 0) throw new Error(`postRepairOwnWork: amount must be > 0 (got ${input.amount})`);
+  return postEntries(
+    [
+      { account: input.account, direction: 'DEBIT', amount, metadata: { repairId: input.repairId, kind: 'repair_own_work' } },
+      { account: 'EXPENSES_OPERATING', direction: 'CREDIT', amount, metadata: { repairId: input.repairId, kind: 'repair_own_work' } },
+    ],
+    { occurredAt: input.occurredAt, sourceModule: 'REPAIR_OWN_WORK', sourceId: input.sourceId },
+  );
 }
 
 // ── Metal Payment (Verkauf von Edelmetallen) ──────────────────

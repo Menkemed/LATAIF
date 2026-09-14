@@ -316,6 +316,9 @@ function verkaufen(db: Db): string {
 const operativ = (db: Db): number => (db.exec("SELECT category, amount FROM expenses WHERE status != 'CANCELLED'")[0]?.values ?? [])
   .filter((v) => !types.isCapitalizedExpenseCategory(String(v[0]))).reduce((a, v) => a + Number(v[1]), 0);
 const buchGewinn = (db: Db): number => Math.round((-saldo(db, 'REVENUE') - saldo(db, 'COGS') - saldo(db, 'EXPENSES_OPERATING')) * 1000) / 1000;
+/** Rohertrag im Hauptbuch (Erlös − Wareneinsatz) — die Größe der Marge in den Berichten. */
+const brutto = (db: Db): number => Math.round((-saldo(db, 'REVENUE') - saldo(db, 'COGS')) * 1000) / 1000;
+const eigenleistung = (db: Db): number => n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'REPAIR_OWN_WORK'");
 /** Einstand, Los, Ausgaben und die Konten — ohne Kennungen und Zeitpunkte. */
 function stand(db: Db) {
   return {
@@ -443,9 +446,9 @@ for (const [own, soll] of [[0, 100], [10, 110]] as Array<[number, number]>) {
   await status('P', db, id, 'ready');
   const b = stand(db);
   const g = gewinn(db, verkaufen(db));
-  ok(n(db, 'SELECT internal_cost FROM repairs WHERE id = ?', [id]) === own && b.einstand === soll && b.INVENTORY === soll && b.EXP_OP === 0
-    && g.buch === 300 - soll && g.berichte === 300 - soll && g.INVENTORY === 0,
-    `§3b hybrid, eigene Arbeit ${own} + Werkstatt 100: Einstand = INVENTORY ${soll} (nicht ${soll + 100}), Gewinn ${300 - soll} (${S(b)} ${S(g)})`);
+  ok(n(db, 'SELECT internal_cost FROM repairs WHERE id = ?', [id]) === own && b.einstand === soll && b.INVENTORY === soll && b.EXP_OP === -own
+    && b.AP === 100 && brutto(db) === 300 - soll && g.marge === 300 - soll && g.INVENTORY === 0,
+    `§3b hybrid, eigene Arbeit ${own} + Werkstatt 100: Einstand = INVENTORY ${soll} (nicht ${soll + 100}); A/P nur die Werkstatt (100), die eigene Arbeit als Eigenleistung (${-own}); Rohertrag ${300 - soll} == Marge (${S(b)} ${S(g)})`);
 }
 
 // ── §4 Wiederholung / verlorene Antwort — genau EINE Kostenwirkung ───────
@@ -628,10 +631,10 @@ M.pp13reversal = fails.length === 0;
     const b = stand(db);
     const g = gewinn(db, verkaufen(db));
     bilder[weg] = [b, g];
-    ok(b.einstand === 100 && b.los === 100 && b.exp === S([['Inventory', 100, 0, 'PENDING', null, 'repair']]) && b.INVENTORY === 100 && b.AP === 100 && b.EXP_OP === 0,
-      `§8 ${weg} eigene Arbeit 100 (unbezahlt): Artikel + Los 100, Soll INVENTORY / Haben A/P — dasselbe Muster wie die Werkstattgebühr (${S(b)})`);
-    ok(g.COGS === 100 && g.INVENTORY === 0 && g.buch === 200 && g.berichte === 200 && balanced(db),
-      `§8 ${weg} Verkauf 300: INVENTORY 0, COGS 100, Gewinn 200 == 200 (${S(g)})`);
+    ok(b.einstand === 100 && b.los === 100 && b.exp === '[]' && b.INVENTORY === 100 && b.AP === 0 && b.CASH === 0 && b.EXP_OP === -100,
+      `§8 ${weg} eigene Arbeit 100 ohne Zahlweg: KEINE Ausgabe, KEINE Verbindlichkeit, KEIN Geldfluss — aktivierte Eigenleistung Soll INVENTORY / Haben EXPENSES_OPERATING, Artikel + Los 100 (${S(b)})`);
+    ok(g.COGS === 100 && g.INVENTORY === 0 && brutto(db) === 200 && g.marge === 200 && g.operativ === 0 && balanced(db),
+      `§8 ${weg} Verkauf 300: COGS 100, INVENTORY 0, Rohertrag 200 == Marge 200 (${S(g)})`);
   }
   ok(S(bilder.P) === S(bilder.C), '§8 PARITÄT eigene Arbeit Primary == PC2');
   const db = welt();
@@ -641,8 +644,20 @@ M.pp13reversal = fails.length === 0;
   await status('P', db, id, 'ready');
   const b = stand(db);
   const g = gewinn(db, verkaufen(db));
-  ok(b.exp === S([['Inventory', 100, 100, 'PAID', null, 'repair']]) && b.INVENTORY === 100 && b.AP === 0 && b.CASH === -100 && g.buch === 200 && g.INVENTORY === 0,
-    `§8 eigene Arbeit bar bezahlt: Soll INVENTORY / Haben Kasse (über A/P), Gewinn 200 (${S(b)} ${S(g)})`);
+  ok(b.exp === S([['Inventory', 100, 100, 'PAID', null, 'repair']]) && b.INVENTORY === 100 && b.AP === 0 && b.CASH === -100 && g.buch === 200 && g.INVENTORY === 0
+    && eigenleistung(db) === 0,
+    `§8 eigene Kosten bar bezahlt (INTERNAL PAID FROM Cash): EINE Ausgabe, Soll INVENTORY / Haben Kasse (über A/P, netto 0), keine Eigenleistung, Gewinn 200 (${S(b)} ${S(g)})`);
+  { // Gesamtbild: die eigene Arbeit steckt schon in einer gebuchten Betriebsausgabe (Lohn 100, bar) — sie wirkt genau einmal.
+    const db2 = welt();
+    amStore(() => payables.createExpenseInHouse({ category: 'Miscellaneous', amount: 100, paymentMethod: 'cash', expenseDate: '2026-09-10',
+      initialPaid: 100, description: 'Lohn der eigenen Werkstatt' } as never, { branchId: 'branch-main', userId: 'user-test', now: NOW }));
+    const id2 = await eigene({ repairType: 'internal', internalCost: 100 });
+    await status('P', db2, id2, 'in_progress');
+    await status('P', db2, id2, 'ready');
+    const g2 = gewinn(db2, verkaufen(db2));
+    ok(g2.buch === 200 && saldo(db2, 'EXPENSES_OPERATING') === 0 && saldo(db2, 'COGS') === 100 && saldo(db2, 'CASH') === -100 && -saldo(db2, 'ACCOUNTS_PAYABLE') === 0,
+      `§8 Gesamtbild: Lohn 100 (gebucht) + eigene Arbeit aktiviert → Aufwand 0, COGS 100, Kasse −100 (der Lohn), keine Verbindlichkeit — Gewinn 200, der Betrag wirkt genau EINMAL (${S(g2)})`);
+  }
   M.pp13internal = fails.length === 0;
 }
 M.pp13 = fails.length === 0;
@@ -767,8 +782,8 @@ for (const weg of ['P', 'C'] as Weg[]) {
   await status('P', db, id, 'ready');
   amStore(() => { rs().loadRepairs(); rs().updateRepair(id, { internalCost: 120 }); });
   const k1 = kundenStand(db, id);
-  ok(k1.exp === S([['RepairServiceCost', 120, 0, 'PENDING', null, 'repair']]) && k1.COGS === 120 && k1.margin === 180 && k1.AP === 120,
-    `§15 eigene Kosten 100 → 120 nach „ready": dieselbe Ausgabe 120 (Storno + Neubuchung), COGS 120, Marge 180 (${S(k1)})`);
+  ok(k1.exp === '[]' && k1.COGS === 120 && k1.margin === 180 && k1.AP === 0 && k1.EXP_OP === -120 && eigenleistung(db) === 6,
+    `§15 eigene Kosten (ohne Zahlweg) 100 → 120 nach „ready": Eigenleistung storniert + neu gebucht (Soll COGS / Haben EXPENSES_OPERATING 120), keine Verbindlichkeit, Marge 180 (${S(k1)})`);
   await abrechnen('P', db, id);
   let code = '';
   try { amStore(() => { rs().loadRepairs(); rs().updateRepair(id, { internalCost: 130 }); }); } catch (e) { code = String((e as { code?: string }).code ?? ''); }
@@ -798,9 +813,11 @@ M.pp14reversal = fails.length === 0;
   const r2 = await abrechnen('C', db, id, 'LOSTI');
   const k = kundenStand(db, id);
   ok(a.ok && b.ok && (b.replayed || b.frozen) && r1.aus.ok && r2.aus.ok && (r2.aus.replayed || r2.aus.frozen)
-    && n(db, 'SELECT COUNT(*) FROM expenses') === 1 && n(db, 'SELECT COUNT(*) FROM invoices') === 1 && k.COGS === 100 && k.buch === 200,
-    `§16 PC2 verlorene Antwort bei „ready" und bei der Rechnung: je eingefroren, EINE Ausgabe, EINE Rechnung, Gewinn 200 (${S(k)})`);
-  ok(s(db, 'SELECT created_by FROM expenses') === 'user-pc2', '§16 Akteur der eigenen Kosten: der geprüfte PC2-Absender');
+    && n(db, 'SELECT COUNT(*) FROM expenses') === 0 && eigenleistung(db) === 2 && n(db, 'SELECT COUNT(*) FROM invoices') === 1
+    && k.COGS === 100 && brutto(db) === 200 && k.invMarge === 200,
+    `§16 PC2 verlorene Antwort bei „ready" und bei der Rechnung: je eingefroren, EINE Eigenleistung (keine Ausgabe), EINE Rechnung, Rohertrag 200 (${S(k)})`);
+  ok(s(db, "SELECT created_by FROM ledger_entries WHERE source_module = 'REPAIR_OWN_WORK' LIMIT 1") === 'user-pc2',
+    `§16 Akteur der Eigenleistung: der geprüfte PC2-Absender (${s(db, "SELECT created_by FROM ledger_entries WHERE source_module = 'REPAIR_OWN_WORK' LIMIT 1")})`);
 }
 
 // ── §17 Kundenreparatur: Fehlerinjektion bei „ready" ────────────────────
@@ -808,16 +825,52 @@ for (const weg of ['P', 'C'] as Weg[]) {
   const db = freshDb();
   const id = await kunde({ repairType: 'internal', internalCost: 100 });
   await status(weg, db, id, 'in_progress');
-  db.run("CREATE TRIGGER pp14_exp BEFORE INSERT ON expenses BEGIN SELECT RAISE(ABORT, 'pp14 injected'); END;");
+  db.run("CREATE TRIGGER pp14_led BEFORE INSERT ON ledger_entries BEGIN SELECT RAISE(ABORT, 'pp14 injected'); END;");
   const a = await status(weg, db, id, 'ready');
-  db.run('DROP TRIGGER pp14_exp');
+  db.run('DROP TRIGGER pp14_led');
   ok(!a.ok && s(db, 'SELECT status FROM repairs WHERE id = ?', [id]) === 'in_progress' && n(db, 'SELECT COUNT(*) FROM expenses') === 0
     && n(db, 'SELECT COUNT(*) FROM ledger_entries') === 0 && !s(db, 'SELECT completed_at FROM repairs WHERE id = ?', [id]),
-    `§17 ${weg} die eigene Kosten-Ausgabe scheitert → „ready" ganz zurück (Status, Marge, completed_at, keine Buchung)`);
+    `§17 ${weg} die Buchung der eigenen Kosten scheitert → „ready" ganz zurück (Status, Marge, completed_at, keine Buchung)`);
   const b = await status(weg, db, id, 'ready');
-  ok(b.ok && n(db, 'SELECT COUNT(*) FROM expenses') === 1 && kundenStand(db, id).COGS === 100, `§17 ${weg} …der zweite Versuch bucht genau einmal`);
+  ok(b.ok && eigenleistung(db) === 2 && n(db, 'SELECT COUNT(*) FROM expenses') === 0 && kundenStand(db, id).COGS === 100,
+    `§17 ${weg} …der zweite Versuch bucht genau einmal`);
 }
 M.pp14 = fails.length === 0;
+
+// ── §18 Abstimmung je Eigentumsart — Quelle == Hauptbuch == A/P/Kasse == Einstand == COGS == Berichte ──
+// hybrid: eigene Kosten 20 + Werkstattzeile 100 (unbezahlt) + Zeile im Haus 30 = Quelle 150; Preis 300.
+for (const scope of ['OWN', 'CUSTOMER'] as const) {
+  for (const bezahlt of [false, true]) {
+    const db = welt();
+    const form = { repairType: 'hybrid', workshopSupplierId: 'sup-1', estimatedCost: 100, internalCost: 20 };
+    const id = scope === 'OWN' ? await eigene(form) : await kunde(form);
+    if (bezahlt) amStore(() => { rs().loadRepairs(); rs().updateRepair(id, { internalPaidFrom: 'cash' }); });
+    const zl = await lokal(() => house.addRepairLineOnPrimary(id, { workType: 'service' as never, costAmount: 30 }));
+    await status('P', db, id, 'in_progress');
+    await status('P', db, id, 'ready');
+    rs().loadRepairs();
+    const rep = rs().getRepair(id)!;
+    const quelle = costs.repairCostParts(rep, n(db, "SELECT COALESCE(SUM(cost_amount),0) FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'", [id])).total;
+    const konto = scope === 'OWN' ? 'INVENTORY' : 'COGS';
+    const vor = { quelle, soll: saldo(db, konto), ap: -saldo(db, 'ACCOUNTS_PAYABLE'), kasse: saldo(db, 'CASH'), eigen: saldo(db, 'EXPENSES_OPERATING'),
+      andere: saldo(db, scope === 'OWN' ? 'COGS' : 'INVENTORY'), einstand: scope === 'OWN' ? n(db, "SELECT purchase_price FROM products WHERE id = 'p1'") : null };
+    let nach: Record<string, unknown>;
+    if (scope === 'OWN') {
+      const g = gewinn(db, verkaufen(db));
+      nach = { einstandVerkauf: g.snap, COGS: g.COGS, INVENTORY: g.INVENTORY, marge: g.marge, brutto: brutto(db), operativ: g.operativ };
+    } else {
+      await abrechnen('P', db, id);
+      const k = kundenStand(db, id);
+      nach = { einstandVerkauf: k.invEinstand, COGS: k.COGS, INVENTORY: k.INVENTORY, marge: k.invMarge, brutto: brutto(db), operativ: operativ(db) };
+    }
+    const gut = zl.ok && vor.quelle === 150 && vor.soll === 150 && vor.ap === 100 && vor.kasse === (bezahlt ? -20 : 0) && vor.eigen === (bezahlt ? -30 : -50)
+      && vor.andere === 0 && (scope === 'OWN' ? vor.einstand === 150 : vor.einstand === null)
+      && nach.einstandVerkauf === 150 && nach.COGS === 150 && nach.INVENTORY === 0 && nach.marge === 150 && nach.brutto === 150 && nach.operativ === 0 && balanced(db);
+    ok(gut, `§18 ${scope}${bezahlt ? ' (eigene Kosten bar)' : ''}: Quelle 150 == ${konto} 150; A/P nur die Werkstatt 100; Kasse nur, wenn bezahlt (${vor.kasse}); `
+      + `eigene Arbeit als Eigenleistung (${vor.eigen}); Einstand/COGS 150; Marge 150 == Rohertrag 150; keine Betriebsausgabe (${S(vor)} ${S(nach)})`);
+  }
+}
+M.gegenkonto = fails.length === 0;
 
 // ── §10 Verdrahtung, Registry ───────────────────────────────────────────
 {
@@ -838,6 +891,10 @@ M.pp14 = fails.length === 0;
   ok((lc.match(/watchLedgerPosts\(OP_REPAIRS_(UPDATE_STATUS|ADD_LINE|UPDATE_LINE|CANCEL_LINE)\)/g) ?? []).length === 4
     && /watchLedgerPosts\(OP_REPAIRS_UPDATE\)/.test(sc), '§10 die fünf Fernbefehle wachen über ihre Buchungen');
   ok(/AND NOT EXISTS \(SELECT 1 FROM expenses e/.test(an), '§10 Analytics zählt gebuchte eigene Arbeit nicht zusätzlich als Reparatur-Abfluss');
+  ok(/if \(!supplierId\) \{ syncOwnWork\(lineId, repairId, scope, cost, now\); continue; \}/.test(store)
+    && /account: 'EXPENSES_OPERATING', direction: 'CREDIT', amount, metadata: \{ repairId: input\.repairId, kind: 'repair_own_work' \}/.test(post)
+    && !/Paid with the repair \(in-house cost\)/.test(store),
+    '§10 Zeile im Haus / eigene Kosten ohne Zahlweg: aktivierte Eigenleistung (Haben EXPENSES_OPERATING) — keine künstliche Verbindlichkeit, kein künstlicher Geldfluss');
   ok(ALLOWED_MUTATIONS.length === 103, `§10 Registry unverändert: 103 Buchungen (${ALLOWED_MUTATIONS.length}) — keine neue Fähigkeit`);
 }
 
@@ -850,3 +907,4 @@ console.log('POST_PARITY_PP13_REPAIR_COST_REVERSAL_PROVED');
 console.log('POST_PARITY_PP14_CUSTOMER_REPAIR_ACCOUNTING_PROVED');
 console.log('POST_PARITY_PP14_CUSTOMER_REPAIR_REVERSAL_PROVED');
 console.log('POST_PARITY_REPAIR_LEDGER_REPORT_PARITY_PROVED');
+console.log('POST_PARITY_PP13_PP14_COUNTERACCOUNT_PINNED');

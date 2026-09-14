@@ -352,8 +352,10 @@ marker('CENTRAL_UI_R6D_GOLD_COMMAND_MODEL_PROVED');
   await primary(() => house.settleGoldPayableOnPrimary({ payableId: gpRl, mode: 'return_gold', grams: 0.5 }));
   vor = snap(db);
   useRepairStore.getState().loadRepairLines();
-  ok(wirft(() => useRepairStore.getState().cancelRepairLine(rlGold)) === 'GOLD_PAYABLE_PARTLY_SETTLED' && snap(db) === vor,
-    'PARTLY …und das Stornieren einer Reparaturzeile (repairs.cancel_line)');
+  const rlCode = wirft(() => useRepairStore.getState().cancelRepairLine(rlGold));
+  // POST-PARITY PP-13/PP-14 — auch die aktivierte Eigenleistung der Zeile bleibt unberührt (erst prüfen, dann schreiben).
+  ok(rlCode === 'GOLD_PAYABLE_PARTLY_SETTLED' && snap(db) === vor,
+    `PARTLY …und das Stornieren einer Reparaturzeile (repairs.cancel_line) (${rlCode})`);
   // (h) Die Maske sieht, was die Regel zulässt: nur GOLD, netto je Karat, nur die eigene Filiale.
   db = freshDb();
   const ms = metalStockByKaratFor({ branchId: 'branch-main' } as never);

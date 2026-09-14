@@ -26,7 +26,7 @@ import { query, currentUserId } from '@/core/db/helpers';
 import { trackUpdate } from '@/core/sync/track';
 import { trackLotRow } from '@/core/lots/lot-queries';
 import { computeExpenseSettlement, creditPaidForExpense, expenseHasActiveCreditSettlement } from '@/core/finance/expenseSettlement';
-import { hasLedgerEntries, postExpense, reverseSource } from '@/core/ledger/posting';
+import { hasLedgerEntries, postExpense, postRepairOwnWork, reverseSource } from '@/core/ledger/posting';
 import { createExpenseInHouse } from '@/core/payables/payables-house';
 import { canonicalRepairStatus, type Expense, type ExpenseCategory, type Repair } from '@/core/models/types';
 import { repairCostParts } from './repair-cost';
@@ -93,6 +93,33 @@ export function shiftOwnRepairCost(r: Pick<Repair, 'id' | 'productId' | 'lotId'>
     db.run(`UPDATE stock_lots SET unit_cost = unit_cost + ? WHERE id = ?`, [delta / lot.qty, lot.id]);
     trackLotRow(lot.id, 'update');
   }
+}
+
+// ── Eigene Arbeit / eigener Bestand: aktivierte Eigenleistung (keine Verbindlichkeit, kein Geldfluss) ──
+// Die Kostenzeile „In-house" (Maske: „own labor / own stock … no A/P booking") und die eigenen Kosten ohne
+// Zahlweg sind kein Zahlungsanspruch: `postRepairOwnWork` — Soll INVENTORY bzw. COGS / Haben EXPENSES_OPERATING.
+// Mit Zahlweg (`internal_paid_from`) sind die eigenen Kosten dagegen real bezahlt: eine Ausgabe gegen Kasse/Bank.
+
+/** Was für diese Quelle (Zeile oder Reparatur) als eigene Arbeit gebucht und nicht storniert ist. */
+function ownWorkPosted(sourceId: string): number {
+  return Number(query(`SELECT COALESCE(SUM(e1.amount), 0) AS t FROM ledger_entries e1
+     WHERE e1.source_module = 'REPAIR_OWN_WORK' AND e1.source_id = ? AND e1.direction = 'DEBIT' AND e1.reverses_entry_id IS NULL
+       AND NOT EXISTS (SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id)`, [sourceId])[0]?.t) || 0;
+}
+export function hasOwnWork(sourceId: string): boolean {
+  return ownWorkPosted(sourceId) > EPS;
+}
+/** Bringt die eigene Arbeit einer Quelle auf ihren Betrag — genau einmal, Änderung = Storno + Neubuchung. */
+export function syncOwnWork(sourceId: string, repairId: string, scope: string | null | undefined, target: number, now: string): void {
+  const posted = ownWorkPosted(sourceId);
+  if (F(posted) === F(target)) return;
+  if (posted > EPS) reverseSource('REPAIR_OWN_WORK', sourceId, now);
+  if (F(target) > 0) {
+    postRepairOwnWork({ sourceId, repairId, account: scope === 'OWN' ? 'INVENTORY' : 'COGS', amount: target, occurredAt: now });
+  }
+}
+export function reverseOwnWork(sourceId: string, now: string): void {
+  if (ownWorkPosted(sourceId) > EPS) reverseSource('REPAIR_OWN_WORK', sourceId, now);
 }
 
 /** Eine schon (bar oder per Guthaben) beglichene Reparaturkosten-Ausgabe bleibt — ihre Zeile ist nicht mehr stornierbar. */
@@ -179,10 +206,14 @@ export function syncRepairHeaderCosts(repairId: string, now: string, opts: { cap
     workshopSupplierId: str(r.workshop_supplier_id),
   }, openLineTotal(repairId));
   const { own, fee } = headerExpenses(repairId);
-  const dOwn = parts.own - (own ? Number(own.amount) || 0 : 0);
+  const paidFrom = str(r.internal_paid_from);
+  const absorbed = ownWorkPosted(repairId);
+  const dOwn = parts.own - ((own ? Number(own.amount) || 0 : 0) + absorbed);
   const dFee = parts.fee - (fee ? Number(fee.amount) || 0 : 0);
   const feeMoved = !!fee && parts.fee > 0 && str(fee.supplier_id) !== str(r.workshop_supplier_id);
-  if (Math.abs(dOwn) < EPS && Math.abs(dFee) < EPS && !feeMoved) return;
+  // Die Buchungsform der eigenen Kosten folgt dem Zahlweg: bezahlt → Ausgabe gegen Kasse/Bank; ohne → Eigenleistung.
+  const formMoved = (!!paidFrom && absorbed > EPS) || (!paidFrom && !!own);
+  if (Math.abs(dOwn) < EPS && Math.abs(dFee) < EPS && !feeMoved && !formMoved) return;
   if (str(r.invoice_id)) {
     throw new RepairActionRejected('REPAIR_ALREADY_INVOICED',
       'this repair is already invoiced — its costs are part of the invoice and are not changed any more');
@@ -190,7 +221,16 @@ export function syncRepairHeaderCosts(repairId: string, now: string, opts: { cap
   const scope = str(r.repair_scope) ?? 'CUSTOMER';
   const nr = str(r.repair_number) ?? '';
   const base = { repairId, branchId: str(r.branch_id) ?? '', category: repairCostCategory(scope), now, paidFrom: str(r.internal_paid_from) };
-  adjustHeaderExpense(own, parts.own, { ...base, label: `${nr} · own work` });
+  if (paidFrom) {
+    // Real bezahlt: EINE Ausgabe, bezahlt über den Zahlweg (Soll INVENTORY/COGS, über A/P gegen Kasse/Bank).
+    syncOwnWork(repairId, repairId, scope, 0, now);
+    adjustHeaderExpense(own, parts.own, { ...base, label: `${nr} · own work` });
+  } else {
+    // Ohne Zahlweg: aktivierte Eigenleistung — keine Verbindlichkeit, kein Geldfluss. Eine schon bezahlte
+    // Ausgabe lässt sich nicht zurück in Eigenleistung verwandeln (`REPAIR_COST_PAID`).
+    if (own) adjustHeaderExpense(own, 0, { ...base, label: `${nr} · own work` });
+    syncOwnWork(repairId, repairId, scope, parts.own, now);
+  }
   const workshop = { ...base, supplierId: str(r.workshop_supplier_id), label: `External repair ${nr}` };
   if (feeMoved) {
     adjustHeaderExpense(fee, 0, workshop);

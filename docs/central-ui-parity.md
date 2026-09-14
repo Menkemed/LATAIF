@@ -3733,6 +3733,22 @@ Kosten.
 - Die Zahlung ist nur Soll A/P / Haben Kasse/Bank (Gewinn vor und nach der Zahlung gleich). Analytics zählt gebuchte eigene
   Arbeit nicht zusätzlich als Reparatur-Abfluss.
 
+**Gegenkonto der eigenen Kosten (Final Counteraccount Pin, `POST_PARITY_PP13_PP14_COUNTERACCOUNT_PINNED`):** Die Maske
+definiert die Kostenzeile ohne Werkstatt als „🏠 In-house / Own work — own labor / own stock" mit dem Hinweis „(no A/P
+booking)"; die eigenen Kosten haben den Zahlweg „INTERNAL PAID FROM: None | Cash | Bank | Benefit" (Schema: „our cost (parts,
+labor)"); Analytics zählte sie nur mit Zahlweg als Abfluss. Also: **ohne Zahlweg** (und jede Zeile im Haus) ist das kein
+Zahlungsanspruch und kein Geldfluss — die Kosten stecken schon in gebuchten Betriebsausgaben (Lohn, Material, Metallkauf) und
+werden **aktiviert** (Quelle `REPAIR_OWN_WORK`, `postRepairOwnWork`): Soll INVENTORY (eigene Ware) bzw. COGS (Kundenware) /
+Haben EXPENSES_OPERATING — keine Verbindlichkeit, keine Kasse. **Mit Zahlweg** real bezahlt: EINE Ausgabe gegen Kasse/Bank (A/P
+nur durchlaufend, netto 0). Nur die Werkstatt ist A/P. Korrigiert gegenüber `8581e1c`: dort entstand für eigene Arbeit ohne
+Zahlweg eine offene Ausgabe ohne Gläubiger (künstliche Verbindlichkeit). Beispiel 100 ohne Zahlweg, eigene Ware: Einstand/Los
+100, INVENTORY +100 / EXPENSES_OPERATING −100, Verkauf 300 → COGS 100, INVENTORY 0, Rohertrag 200 == Marge 200; mit dem schon
+gebuchten Lohn 100 Gewinn 200, der Betrag wirkt genau einmal. Kundenware: COGS 100 statt Bestand, Rechnung 300 → Marge 200.
+Abstimmung (hybrid: eigene 20 + Werkstatt 100 + im Haus 30 = 150, beide Eigentumsarten, bar/ohne Zahlweg): Quelle 150 ==
+INVENTORY bzw. COGS 150, A/P 100 (nur die Werkstatt), Kasse −20 nur wenn bezahlt, Eigenleistung −50/−30, Einstand und COGS 150,
+Marge 150 == Rohertrag 150, keine Reparaturkosten als Betriebsausgabe. Eine Rücknahme prüft zuerst alles (auch die Gold-Regel)
+und schreibt erst dann.
+
 **Rücknahme (`POST_PARITY_PP13_REPAIR_COST_REVERSAL_PROVED`, `POST_PARITY_PP14_CUSTOMER_REPAIR_REVERSAL_PROVED`):** vor „ready"
 → Ausgabe gegengebucht, danach kein Einstand; nach „ready" unbezahlt → Einstand, Los, INVENTORY, A/P gemeinsam zurück; Zeile nach
 „ready" +/−, Betrag geändert (Differenz), Reparatur gelöscht (zurück); Kopfkosten nach „ready" geändert → dieselbe Ausgabe
