@@ -12,7 +12,7 @@ import { commitPulledBatch, applyChangesAtomic } from './durable-cursor';
 // the applySyncChange dispatcher) lives in the node-safe `apply-change.ts` so the behavioral gate
 // can drive the REAL functions against a real sql.js database. Same implementation, one home.
 import { applySyncChange, assertSyncIdentifier } from './apply-change';
-import { pushBatch, pushBody } from './push-batch';
+import { planPush, pushBody } from './push-batch';
 // M6-B3A §9/§11 — the client's durable quarantine writer + status reader (node-safe, driven by the
 // b3a gate too).
 import { recordClientQuarantine, quarantineStatus, type QuarantineStatus } from './quarantine';
@@ -199,7 +199,7 @@ export function trackChange(tableName: string, recordId: string, action: 'insert
 
 // ── Push: Send local changes to server ──
 
-async function pushChanges(): Promise<number> {
+export async function pushChanges(): Promise<number> {
   const url = localStorage.getItem(STORAGE_KEY_URL);
   const token = localStorage.getItem(STORAGE_KEY_TOKEN);
   if (!url || !token) return 0;
@@ -210,13 +210,27 @@ async function pushChanges(): Promise<number> {
 
   if (unsynced.length === 0) return 0;
 
-  // R6F — höchstens so viele, wie in EINEN Rumpf unter der Grenze des Primary passen (push-batch.ts).
-  const changes = pushBatch(unsynced.map(row => ({
+  // R6F — höchstens so viele, wie in EINEN Rumpf unter der Grenze des Primary passen; was er nie
+  // annehmen kann, geht gar nicht erst (push-batch.ts).
+  const all = unsynced.map(row => ({
     table_name: row.table_name as string,
     record_id: row.record_id as string,
     action: row.action as string,
     data: row.data as string,
-  })));
+  }));
+  const plan = planPush(all);
+  const db = getDatabase();
+
+  // `synced = 2`: zu groß für den Primary, nie gesendet, bleibt hier stehen — hält keine spätere
+  // Änderung mehr auf (die Aufräumung löscht nur `synced = 1`).
+  if (plan.refused.length > 0) {
+    const refused = plan.refused.map(i => unsynced[i].id as number);
+    for (const id of refused) db.run(`UPDATE sync_changelog SET synced = 2 WHERE id = ?`, [id]);
+    saveDatabase();
+    console.warn(`[Sync] ${refused.length} change(s) larger than the primary accepts — kept here, not sent (sync_changelog ${refused.join(', ')})`);
+  }
+  if (plan.send.length === 0) return 0;
+  const changes = plan.send.map(i => all[i]);
 
   const res = await fetch(`${url}/api/sync/push`, {
     method: 'POST',
@@ -226,9 +240,8 @@ async function pushChanges(): Promise<number> {
 
   if (!res.ok) throw new Error(`Push failed: ${res.status}`);
 
-  // Mark as synced — genau die gesendeten (ein Anfang der Liste).
-  const db = getDatabase();
-  const ids = unsynced.slice(0, changes.length).map(r => r.id as number);
+  // Mark as synced — genau die gesendeten.
+  const ids = plan.send.map(i => unsynced[i].id as number);
   for (const id of ids) {
     db.run(`UPDATE sync_changelog SET synced = 1 WHERE id = ?`, [id]);
   }

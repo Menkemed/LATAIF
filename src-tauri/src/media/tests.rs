@@ -112,6 +112,24 @@ mod transient_retry {
         }
     }
 
+    // R6F FINAL — nur 5 und 32 gelten als voruebergehend: jeder andere Betriebssystem-Code (Pfad
+    // fehlt, Verzeichnis fehlt, Datentraeger schreibgeschuetzt/nicht bereit, Datei existiert,
+    // Datentraeger voll, …) scheitert beim ERSTEN Aufruf, ohne Warten, mit seinem Code sichtbar.
+    #[test]
+    fn any_other_os_error_fails_at_once_and_keeps_its_code() {
+        for code in [2, 3, 19, 21, 80, 112, 183, 1224] {
+            let calls = Cell::new(0);
+            let started = std::time::Instant::now();
+            let out: Result<()> = super::super::storage::with_transient_retry(|| {
+                calls.set(calls.get() + 1);
+                Err(Error::from_raw_os_error(code))
+            });
+            assert_eq!(out.unwrap_err().raw_os_error(), Some(code), "der Code bleibt sichtbar");
+            assert_eq!(calls.get(), 1, "os {code} wird nicht wiederholt");
+            assert!(started.elapsed() < std::time::Duration::from_millis(50), "os {code} ohne Warten");
+        }
+    }
+
     // Ein belegter Nachbar der Zieldatei ist ein Zustand: beim zweiten Anlauf ist er weg.
     #[cfg(windows)]
     #[test]

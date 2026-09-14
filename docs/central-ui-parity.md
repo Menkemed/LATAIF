@@ -3187,6 +3187,18 @@ Gold-Schulden beim Auftragsstorno und Lieferantenguthaben: geklärt in R6F FINAL
    **Gefunden und behoben:** der Push schickte bis zu 100 Änderungen in EINEM Rumpf — zwei große Dokumente überschritten die
    50 MiB (413), und jeder weitere Push scheiterte an denselben Einträgen. `sync/push-batch.ts` schneidet den Stapel jetzt
    nach Bytes (kleine Stapel unverändert, Reihenfolge bleibt).
+   **Draht-Nachweis** (`CENTRAL_UI_R6F_DOCUMENT_WIRE_SIZE_PROVED`): die Abgleich-Zeile ist Byte für Byte `JSON.stringify(SELECT *)`
+   — dieselbe Serialisierung, die das Haus vor dem Quittieren misst; Upload UND Texterkennung prüfen exakt Zeile (≤ 32 MiB)
+   und Push-Umschlag dieser einen Änderung (≤ 50 MiB). Der feste Wert 25 116 672 allein reicht nach OCR nicht: ein Text voller
+   Anführungszeichen (13,5 Mio.) hält die Zeile unter 32 MiB, den Umschlag aber über 50 MiB — jetzt `DOCUMENT_TOO_LARGE`,
+   nichts geschrieben. **Sync-Aufteilung** (`CENTRAL_UI_R6F_SYNC_SIZE_BATCHING_PROVED`, echte `pushChanges`): zwei große
+   Dokumente → zwei Rümpfe, jeder ≤ 50 MiB inkl. Umschlag; kleine weiter 100 je Push in Reihenfolge; Ablehnung → nichts
+   quittiert, Wiederholung = derselbe Stapel. **Gefunden und behoben:** eine Änderung, die der Primary NIE annimmt (Daten
+   > `max_payload_bytes` oder allein ein Rumpf > 50 MiB — z. B. ein Alt-Dokument von vor R6F), stand für immer vorn und
+   blockierte jede spätere; jetzt wird sie nicht gesendet, bleibt als `synced = 2` stehen (die Aufräumung löscht nur
+   `synced = 1`), mit Warnung — die nächste Änderung geht im selben Push.
+   **Medien-Wiederholung** (`CENTRAL_UI_R6F_MEDIA_TRANSIENT_RETRY_PINNED`): nur Windows 5/32 beim Ersetzen/Verlinken, 3 s;
+   jeder andere Code (2, 3, 19, 21, 80, 112, 183, 1224, NotFound, AlreadyExists) scheitert beim ersten Aufruf mit seinem Code.
 3. **Auftragsstorno und Gold** (`CENTRAL_UI_R6F_ORDER_GOLD_CANCEL_CONTRACT_PINNED`). Die Gramm-Schuld an den Goldschmied
    entsteht aus der Extra-Gold-Kostenzeile (`order-house` → `insertGoldPayable`) oder aus „Add Cost" (Zeile gleich ARRIVED).
    Vorher stornierte der Auftragsstorno JEDE offene Schuld — auch geliefertes und teilweise beglichenes Gold. Jetzt eine
@@ -3205,6 +3217,13 @@ Gold-Schulden beim Auftragsstorno und Lieferantenguthaben: geklärt in R6F FINAL
    Gemeinkosten als Ausgabe + Kassenzahlung) hatte nie einen Aufrufer (seit dem ersten Commit); die beim Anlegen erfassten
    Arbeits-/Gemeinkosten werden nie gebucht — GuV/Kasse, nicht Bestand. Beim Anschließen: ohne Transaktion, ohne
    Client-Sperre, mit stiller Ersatzfiliale — dieselben Fehler, die R6F aus dem Anlegen entfernt hat.
+
+**Post-Parity-Produktfehler (Backlog, nicht R6F):**
+- **PP-1 Lieferantenguthaben-Abstimmung:** nach einer STORNIERTEN Einlösung zeigt die stornierte Zahlung auf die gelöschte
+  Guthabenzeile; `counterpartyAudit` meldet `bad_reference` (falsch-positiv, Salden richtig). Heute nicht über Maske oder
+  PC2 erreichbar (nur Store-Altwege `cancelReturn`/`deleteReturn` ohne Aufrufer).
+- **PP-2 Produktionsabschluss:** `completeRecord` (Arbeits-/Gemeinkosten als Ausgabe + Kassenzahlung) ist in der Oberfläche
+  unerreichbar und von `production.create` getrennt; die erfassten Kosten werden nie gebucht.
 
 ### Autorität und Atomarität (`CENTRAL_UI_R6F_AUTHORITY_PROVED`)
 

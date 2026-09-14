@@ -735,25 +735,124 @@ const docRow = (db: Db, id?: string): Record<string, unknown> =>
     && n(db, "SELECT COUNT(*) FROM sync_changelog WHERE table_name = 'documents' AND action = 'update' AND record_id = ?", [bid]) === 1,
   `SIZE ein Text, der die Zeile 1 Byte über die Grenze brächte → DOCUMENT_TOO_LARGE, nichts geschrieben (${o2.code})`);
 
-  // Der Push-Stapel nach Bytes: zwei große Dokumente gehen nie in EINEN Rumpf.
-  const big2 = { ...change, record_id: 'doc-2' };
-  const klein = (i: number) => ({ table_name: 'tasks', record_id: 't' + i, action: 'update', data: '{"title":"x"}' });
-  const st1 = pb.pushBatch([change, big2, klein(1)]);
-  const st2 = pb.pushBatch([big2, klein(1)]);
-  ok(st1.length === 1 && st2.length === 2 && bytes(pb.pushBody(st1)) <= pb.SYNC_PUSH_BODY_LIMIT_BYTES && bytes(pb.pushBody(st2)) <= pb.SYNC_PUSH_BODY_LIMIT_BYTES,
-    `PUSH zwei große Dokumente: je Rumpf eines, der Rest folgt in Reihenfolge (${st1.length}/${st2.length})`);
-  const hundert = Array.from({ length: 100 }, (_, i) => klein(i));
-  ok(pb.pushBatch(hundert).length === 100 && pb.pushBody(hundert) === JSON.stringify({ changes: hundert }),
-    'PUSH kleine Änderungen: der Stapel bleibt, wie er war (100), derselbe Rumpf');
-  ok(pb.pushBatch(hundert, bytes(pb.pushBody(hundert.slice(0, 10)))).length === 10 && pb.pushBatch([change], 10).length === 1,
-    'PUSH die Grenze ist exakt; ein einzelner Eintrag geht immer (allein)');
-  ok(/pub const MAX_SYNC_PUSH_BODY_BYTES: usize = 50 \* 1024 \* 1024;/.test(src('src-tauri/src/sync/routes.rs')) && pb.SYNC_PUSH_BODY_LIMIT_BYTES === 50 * 1024 * 1024,
-    'PUSH die Grenze ist die des Rust-Routers (MAX_SYNC_PUSH_BODY_BYTES)');
-  const ss = codeOf(src('src/core/sync/sync-service.ts'));
-  ok(/const changes = pushBatch\(unsynced\.map\(/.test(ss) && /body: pushBody\(changes\)/.test(ss) && /unsynced\.slice\(0, changes\.length\)\.map\(r => r\.id as number\)/.test(ss),
-    'PUSH pushChanges schickt den Stapel nach Bytes und markiert genau die gesendeten');
+  // Dieselbe Serialisierung wie in Produktion: die Abgleich-Zeile IST `JSON.stringify(SELECT *)` —
+  // genau das misst das Haus vor dem Quittieren.
+  ok(data === JSON.stringify(row(db, 'SELECT * FROM documents WHERE id = ?', [id])) && d1 === JSON.stringify(row(db, 'SELECT * FROM documents WHERE id = ?', [bid])),
+    'WIRE die Abgleich-Zeile (insert und update) ist Byte für Byte JSON.stringify(SELECT *) — dieselbe Serialisierung, die das Haus prüft');
+
+  // Der Umschlag: ein Text voller Anführungszeichen hält die Zeile unter 32 MiB, bringt den Push-Rumpf
+  // aber über 50 MiB (jedes `"` steht im Zeilen-JSON als `\"` und im Umschlag als `\\\"`).
+  const dbQ = freshDb();
+  const kl = await fern(() => office.runDocumentUpload(deps(dbQ), identity('510', 'documents.upload'), upBody()));
+  const kid = String(kl.value.documentId);
+  const QUOTES = '"'.repeat(13_500_000);
+  const probe = JSON.stringify({ ...row(dbQ, 'SELECT * FROM documents WHERE id = ?', [kid]), ocr_text: QUOTES, ocr_confidence: 90, ocr_reviewed: 1, revision: 2 });
+  const probeEnv = bytes(pb.pushBody([{ table_name: 'documents', record_id: kid, action: 'update', data: probe }]));
+  ok(bytes(probe) <= LIMIT && probeEnv > pb.SYNC_PUSH_BODY_LIMIT_BYTES,
+    `WIRE Prüfling: Zeile ${bytes(probe)} ≤ ${LIMIT} B, ihr Push-Umschlag ${probeEnv} > ${pb.SYNC_PUSH_BODY_LIMIT_BYTES} B`);
+  const q1 = await fern(() => office.runDocumentOcr(deps(dbQ), identity('511', 'documents.set_ocr'), { documentId: kid, expectedRevision: 1 }, async () => ({ text: QUOTES, confidence: 90 })));
+  ok(!q1.ok && q1.code === 'DOCUMENT_TOO_LARGE' && (q1.message === '' || /send to the primary/.test(q1.message))
+    && n(dbQ, 'SELECT revision FROM documents WHERE id = ?', [kid]) === 1 && one(dbQ, 'SELECT ocr_text FROM documents WHERE id = ?', [kid]) === null
+    && cl(dbQ, 'documents', 'update') === 0,
+  `WIRE dieser Text → DOCUMENT_TOO_LARGE am Umschlag, nichts geschrieben, kein Abgleich-Eintrag (${q1.code}${q1.message ? ': ' + q1.message.slice(0, 70) : ''})`);
+  ok(/assertRowSyncs\(id, 'insert'\);/.test(codeOf(src('src/core/office/document-house.ts'))) && /assertRowSyncs\(v\.documentId, 'update'\);/.test(codeOf(src('src/core/office/document-house.ts'))),
+    'WIRE Upload und Texterkennung prüfen Zeile UND Umschlag, bevor sie quittieren');
 }
 marker('CENTRAL_UI_R6F_DOCUMENT_SIZE_CONTRACT_PINNED');
+marker('CENTRAL_UI_R6F_DOCUMENT_WIRE_SIZE_PROVED');
+
+// ══ §5c — Der Push nach Bytes: die ECHTE pushChanges gegen eine gestellte Gegenstelle ═══════════
+{
+  const sync = await import('../../src/core/sync/sync-service.ts');
+  const pb = await import('../../src/core/sync/push-batch.ts');
+  const LIMIT = pb.SYNC_PAYLOAD_LIMIT_BYTES, BODY = pb.SYNC_PUSH_BODY_LIMIT_BYTES;
+  const bytes = (t: string): number => Buffer.byteLength(t, 'utf8');
+  const db = freshDb();
+  db.run('DELETE FROM sync_changelog');
+  const add = (table: string, rid: string, action: string, data: string): number => {
+    db.run('INSERT INTO sync_changelog (table_name, record_id, branch_id, action, data, synced, created_at) VALUES (?,?,?,?,?,0,?)', [table, rid, 'branch-main', action, data, NOW]);
+    return n(db, 'SELECT MAX(id) FROM sync_changelog');
+  };
+  const synced = (id: number): number => n(db, 'SELECT synced FROM sync_changelog WHERE id = ?', [id]);
+  const BIG = JSON.stringify({ id: 'big', file_path: 'data:image/png;base64,' + 'A'.repeat(LIMIT - 64) });
+  const TOO = JSON.stringify({ id: 'too', file_path: 'A'.repeat(LIMIT) });
+  const small = (i: number): string => JSON.stringify({ id: 't' + i, title: 'x' });
+  ok(bytes(BIG) <= LIMIT && 2 * bytes(BIG) > BODY && bytes(TOO) > LIMIT,
+    `PUSH Prüflinge: groß ${bytes(BIG)} ≤ ${LIMIT} B (zwei > ${BODY} B), zu groß ${bytes(TOO)} B`);
+
+  const bodies: Array<{ bytes: number; ids: string[] }> = [];
+  let status = 200;
+  const realFetch = globalThis.fetch;
+  (globalThis as { fetch: unknown }).fetch = async (_url: string, init: { body: string }) => {
+    const body = String(init.body);
+    bodies.push({ bytes: bytes(body), ids: (JSON.parse(body) as { changes: Array<{ record_id: string }> }).changes.map((c) => c.record_id) });
+    return { ok: status < 300, status };
+  };
+  const warnVorher = console.warn; const warnings: string[] = [];
+  console.warn = (...a: unknown[]): void => { warnings.push(String(a[0])); };
+  try {
+    const a = add('tasks', 's1', 'update', small(1));
+    const b1 = add('documents', 'big-1', 'insert', BIG);
+    const b2 = add('documents', 'big-2', 'insert', BIG);
+    const s2 = add('tasks', 's2', 'update', small(2));
+    const too = add('documents', 'too-big', 'insert', TOO);
+    const s3 = add('tasks', 's3', 'delete', small(3));
+    const alle = [a, b1, b2, s2, too, s3];
+
+    status = 500;
+    const f = await sync.pushChanges().then(() => 'ok', (e: unknown) => String(e));
+    ok(/Push failed: 500/.test(f) && alle.every((x) => synced(x) === 0) && S(bodies[0]?.ids) === S(['s1', 'big-1']),
+      `ACK der Primary lehnt ab → nichts quittiert (${f})`);
+    status = 200;
+    const r1 = await sync.pushChanges();
+    ok(r1 === 2 && S(bodies[1].ids) === S(bodies[0].ids) && synced(a) === 1 && synced(b1) === 1 && synced(b2) === 0,
+      `RETRY die Wiederholung schickt denselben Stapel und quittiert genau ihn (${S(bodies[1].ids)})`);
+    const r2 = await sync.pushChanges();
+    ok(r2 === 3 && S(bodies[2].ids) === S(['big-2', 's2', 's3']) && synced(b2) === 1 && synced(s2) === 1 && synced(s3) === 1 && synced(too) === 2,
+      `STARVATION die zu große Zeile geht nie, bleibt hier (synced = 2) — die spätere geht im selben Push (${S(bodies[2].ids)})`);
+    const r3 = await sync.pushChanges();
+    ok(r3 === 0 && bodies.length === 3 && !bodies.some((b) => b.ids.includes('too-big')) && warnings.some((w) => /larger than the primary accepts/.test(w)),
+      'STARVATION kein weiterer Versuch, keine Schleife — eine Warnung nennt sie');
+    ok(bodies.every((b) => b.bytes <= BODY) && bodies.slice(1).map((b) => b.ids.join(',')).join('|') === 's1,big-1|big-2,s2,s3',
+      `LIMIT jeder Rumpf ≤ ${BODY} B inkl. Umschlag (${bodies.map((b) => b.bytes).join(' / ')}); Reihenfolge wie geschrieben`);
+
+    // Nur die zu große Zeile ganz vorn: sie geht nicht hinaus, die nächste schon.
+    db.run('DELETE FROM sync_changelog');
+    const t2 = add('documents', 'too-2', 'update', TOO);
+    const s4 = add('tasks', 's4', 'update', small(4));
+    const vor = bodies.length;
+    const r4 = await sync.pushChanges();
+    ok(r4 === 1 && bodies.length === vor + 1 && S(bodies[vor].ids) === S(['s4']) && synced(t2) === 2 && synced(s4) === 1,
+      'STARVATION eine zu große Zeile ganz vorn hält die nächste nicht auf');
+
+    // Kleine Änderungen bleiben gebündelt wie bisher: 100 je Push, in Reihenfolge.
+    db.run('DELETE FROM sync_changelog');
+    const ids = Array.from({ length: 105 }, (_, i) => add('tasks', 'k' + i, 'update', small(i)));
+    const v2 = bodies.length;
+    const r5 = await sync.pushChanges();
+    const r6 = await sync.pushChanges();
+    ok(r5 === 100 && r6 === 5 && S(bodies[v2].ids) === S(ids.slice(0, 100).map((_, i) => 'k' + i)) && S(bodies[v2 + 1].ids) === S(['k100', 'k101', 'k102', 'k103', 'k104'])
+      && ids.every((x) => synced(x) === 1), 'BATCH kleine Änderungen: 100 je Push in Reihenfolge, dann der Rest — wie bisher');
+  } finally {
+    (globalThis as { fetch: unknown }).fetch = realFetch;
+    console.warn = warnVorher;
+  }
+
+  // Die Regel selbst und ihre Grenzen.
+  const ch = (rid: string, data: string, action = 'insert') => ({ table_name: 'documents', record_id: rid, action, data });
+  const zwei = pb.planPush([ch('a', BIG), ch('b', BIG), ch('c', small(1))]);
+  const exakt = pb.planPush([ch('a', small(1)), ch('b', small(2))], { payload: LIMIT, body: bytes(pb.pushBody([ch('a', small(1))])) });
+  const del = pb.planPush([ch('d', 'x'.repeat(LIMIT + 1), 'delete')]);
+  ok(S(zwei) === S({ send: [0], refused: [] }) && S(exakt) === S({ send: [0], refused: [] }) && S(del) === S({ send: [0], refused: [] }),
+    'PLAN zwei große → einer je Rumpf; die Grenze ist exakt; ein delete wird nicht nach Daten gemessen (der Primary prüft dort keine)');
+  ok(/pub const MAX_SYNC_PUSH_BODY_BYTES: usize = 50 \* 1024 \* 1024;/.test(src('src-tauri/src/sync/routes.rs')) && BODY === 50 * 1024 * 1024
+    && LIMIT === MANIFEST.limits.max_payload_bytes && /data\.len\(\) > schema\(\)\.max_payload_bytes/.test(src('src-tauri/src/sync/sync_schema.rs')),
+  'PLAN die Grenzen sind die des Primary: Körper 50 MiB (Router), Änderung max_payload_bytes (validate_business_payload)');
+  const ret = codeOf(src('src/core/storage/changelog-retention.ts'));
+  ok(/DELETE FROM sync_changelog WHERE synced = 1/.test(ret) && !/synced\s*(<>|!=)\s*0|synced\s*(=|>=?)\s*2/.test(ret),
+    'ACK die Aufräumung löscht nur quittierte Zeilen (synced = 1) — eine abgewiesene bleibt');
+}
+marker('CENTRAL_UI_R6F_SYNC_SIZE_BATCHING_PROVED');
 
 // ══ §6 — Texterkennung: der Primary rechnet, aus SEINEM Inhalt ═══════════════
 function stub(result: unknown = { text: ' Rolex Daytona 116500 \n', confidence: 87.5 }, fail = false) {
