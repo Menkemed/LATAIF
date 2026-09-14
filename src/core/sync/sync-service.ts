@@ -12,6 +12,7 @@ import { commitPulledBatch, applyChangesAtomic } from './durable-cursor';
 // the applySyncChange dispatcher) lives in the node-safe `apply-change.ts` so the behavioral gate
 // can drive the REAL functions against a real sql.js database. Same implementation, one home.
 import { applySyncChange, assertSyncIdentifier } from './apply-change';
+import { pushBatch, pushBody } from './push-batch';
 // M6-B3A §9/§11 — the client's durable quarantine writer + status reader (node-safe, driven by the
 // b3a gate too).
 import { recordClientQuarantine, quarantineStatus, type QuarantineStatus } from './quarantine';
@@ -209,24 +210,25 @@ async function pushChanges(): Promise<number> {
 
   if (unsynced.length === 0) return 0;
 
-  const changes = unsynced.map(row => ({
+  // R6F — höchstens so viele, wie in EINEN Rumpf unter der Grenze des Primary passen (push-batch.ts).
+  const changes = pushBatch(unsynced.map(row => ({
     table_name: row.table_name as string,
     record_id: row.record_id as string,
     action: row.action as string,
     data: row.data as string,
-  }));
+  })));
 
   const res = await fetch(`${url}/api/sync/push`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-    body: JSON.stringify({ changes }),
+    body: pushBody(changes),
   });
 
   if (!res.ok) throw new Error(`Push failed: ${res.status}`);
 
-  // Mark as synced
+  // Mark as synced — genau die gesendeten (ein Anfang der Liste).
   const db = getDatabase();
-  const ids = unsynced.map(r => r.id as number);
+  const ids = unsynced.slice(0, changes.length).map(r => r.id as number);
   for (const id of ids) {
     db.run(`UPDATE sync_changelog SET synced = 1 WHERE id = ?`, [id]);
   }

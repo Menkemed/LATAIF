@@ -65,7 +65,7 @@ const LEDGER = ['ledger', 'entries', 'account', 'accounts', 'debit', 'credit', '
 export const ORDER_LIFECYCLE_COMPUTED = {
   cancel: ['totalPaid', 'paidAmount', 'amount', 'settledAmount', 'refundAmount', 'creditAmount', 'customerId',
     'customerCreditId', 'productId', 'stockProductId', 'freedProductId', 'purchasePrice', 'costBasis', 'customCostBasis',
-    'goldPayableIds', 'cancelledGoldPayableIds', 'expenseIds', 'openExpenseIds', 'lines', 'invoiceId', ...LEDGER],
+    'goldPayableIds', 'cancelledGoldPayableIds', 'openGoldPayableIds', 'expenseIds', 'openExpenseIds', 'lines', 'invoiceId', ...LEDGER],
   lineStatus: ['orderStatus', 'previousStatus', 'expenseId', 'expenseIds', 'bookedExpenseIds', 'costAmount', 'supplierId',
     'orderedSupplierId', 'invoiceId', 'lineTotal', ...LEDGER],
   markOrdered: ['orderedSupplierId', 'orderStatus', 'invoiceId', 'lineTotal', ...LEDGER],
@@ -248,7 +248,8 @@ export function runOrderCancel(deps: EngineDeps, identity: CommandIdentity, raw:
       orderId: r.orderId, status: r.status, choice: r.choice, settledAmount: r.settledAmount,
       customerCreditId: r.customerCreditId ?? null, stockProductId: r.stockProductId ?? null,
       freedProductId: r.freedProductId ?? null,
-      cancelledGoldPayables: r.cancelledGoldPayableIds.length, openExpenses: r.openExpenseIds.length,
+      cancelledGoldPayables: r.cancelledGoldPayableIds.length, openGoldPayables: r.openGoldPayableIds.length,
+      openExpenses: r.openExpenseIds.length,
       revision: r.revision,
     };
   });

@@ -491,10 +491,10 @@ export function DocumentList() {
                   </pre>
                 ) : (
                   <p style={{ fontSize: 12, color: '#6B7280', margin: 0 }}>
-                    Click "Extract Text" to run offline OCR (English + Arabic). First run downloads ~3 MB of language data.
+                    Click "Extract Text" to run offline OCR (English + Arabic).
                   </p>
                 )}
-                {ocrError && <p style={{ fontSize: 11, color: '#AA6E6E', marginTop: 6 }}>{ocrError}</p>}
+                {ocrError && <p style={{ fontSize: 11, color: '#AA6E6E', marginTop: 6 }} data-ocr-error>{ocrError}</p>}
               </div>
             )}
 

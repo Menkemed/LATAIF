@@ -18,9 +18,9 @@
 //   PRODUCTION  New Record mit Ausgangsfoto über die Zwischenablage (verlorene Antwort)
 //   MEDIA       Produktbild ändern: eins weg, eins dazu → media_links am Primary
 //   OFFICE      Aufgabe anlegen / ändern / erledigen; Dokument hochladen (verlorene Antwort) + OCR
-//               (am Primary aus SEINEM gespeicherten Inhalt — die echte Erkennung; kann sie im
-//               E2E-Build nicht laufen, wird genau das berichtet: gleiches Nein auf beiden Seiten,
-//               nichts geschrieben)
+//               (verlorene Antwort; am Primary aus SEINEM gespeicherten Inhalt — die echte Erkennung
+//               mit den Dateien der App: derselbe Text auf beiden Seiten, gespeichert, kein Request
+//               an einen fremden Host, weder am Primary noch auf PC2)
 //   LEDGER      jede Buchungstransaktion dieses Laufs ist ausgeglichen
 //   SAFETY      PC2 mit einer ALTEN lataif.db: unberührt, kein eigener Kern, keine lokale Datenbank
 //
@@ -36,6 +36,7 @@ import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, copyFileSync,
 import { createHash } from 'node:crypto';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
+import { OCR_FILES } from '../../src/core/ai/ocr-assets.ts';
 
 const IDENT = 'com.lataif.app.e2e';
 const CLIENT_IDENT = 'com.lataif.app.e2e.client';
@@ -92,8 +93,16 @@ class CDP {
     this.ws = new WebSocket(wsUrl); this.id = 0; this.pending = new Map();
     this.ready = new Promise((res, rej) => { this.ws.addEventListener('open', res); this.ws.addEventListener('error', rej); });
     this.events = [];
+    // Nur Beobachtung: jede URL, die diese Seite UND ihre Worker anfragen (ab `netzAn`).
+    this.requests = []; this.netz = false;
     this.ws.addEventListener('message', (e) => {
       const m = JSON.parse(e.data);
+      if (m.method === 'Network.requestWillBeSent') this.requests.push(String(m.params?.request?.url || ''));
+      if (m.method === 'Target.attachedToTarget' && this.netz && m.params?.sessionId) {
+        for (const method of ['Network.enable', 'Runtime.runIfWaitingForDebugger']) {
+          this.ws.send(JSON.stringify({ id: ++this.id, sessionId: m.params.sessionId, method, params: {} }));
+        }
+      }
       if (m.method === 'Runtime.consoleAPICalled' && /error|warn/.test(m.params?.type || '')) {
         this.events.push(`${m.params.type}: ${(m.params.args || []).map((a) => a.value ?? a.description ?? '').join(' ')}`.slice(0, 400));
       }
@@ -106,14 +115,25 @@ class CDP {
       }
     });
   }
-  async send(method, params = {}) {
+  // Jede Anfrage mit Frist: ein ausbleibendes Protokoll-Echo bricht laut ab, statt den Lauf stumm anzuhalten.
+  async send(method, params = {}, ms = 180000) {
     await this.ready; const id = ++this.id;
-    return new Promise((res, rej) => { this.pending.set(id, { res, rej }); this.ws.send(JSON.stringify({ id, method, params })); });
+    return new Promise((res, rej) => {
+      const t = setTimeout(() => { this.pending.delete(id); rej(new Error(`CDP ${method}: keine Antwort in ${ms / 1000} s`)); }, ms);
+      this.pending.set(id, { res: (v) => { clearTimeout(t); res(v); }, rej: (e) => { clearTimeout(t); rej(e); } });
+      this.ws.send(JSON.stringify({ id, method, params }));
+    });
   }
   async ev(expr) {
     const r = await this.send('Runtime.evaluate', { expression: `(async () => { ${expr} })()`, awaitPromise: true, returnByValue: true });
     if (r.exceptionDetails) throw new Error(r.exceptionDetails.text + ' ' + (r.exceptionDetails.exception?.description || ''));
     return r.result?.value;
+  }
+  async netzAn() {
+    if (this.netz) return;
+    this.netz = true;
+    await this.send('Network.enable', {}, 10000);
+    await this.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: false, flatten: true }, 10000);
   }
   close() { try { this.ws.close(); } catch { /* zu */ } }
 }
@@ -132,6 +152,12 @@ async function attachOnly(cdpPort, budget = 60000) {
   const c = new CDP(page.webSocketDebuggerUrl);
   await c.send('Runtime.enable');
   return c;
+}
+/** Nur Beobachtung, auf einer EIGENEN Verbindung: die Netz-Mitschrift stört nie die Verbindung, die bedient. */
+async function netzBeobachter(cdpPort) {
+  const b = await attachOnly(cdpPort, 30000);
+  await b.netzAn();
+  return b;
 }
 async function attach(cdpPort, exe, env) {
   spawnTracked(exe, [], { env, stdio: 'ignore', detached: true }).unref();
@@ -293,7 +319,7 @@ const antworten = (c) => c.ev('return JSON.stringify(window.__answers || []);').
 const treffer = (c) => c.ev('return JSON.stringify(window.__dbHits || []);').then((s) => JSON.parse(s || '[]'));
 const aufrufe = (c) => c.ev('return JSON.stringify(window.__invokes || []);').then((s) => JSON.parse(s || '[]'));
 const spuelen = (p) => p.ev('return await window.__TAURI_INTERNALS__.invoke("flush_database_now").catch((e)=>String(e));');
-const FEHLER_SEL = '[data-save-error],[data-production-error]';
+const FEHLER_SEL = '[data-save-error],[data-production-error],[data-ocr-error]';
 const fehlerText = (c, sel = FEHLER_SEL) => c.ev(`return [...document.querySelectorAll(${S(sel)})].map(e=>e.textContent).join(' | ') + ((window.__alerts || []).length ? ' | alert: ' + window.__alerts.slice(-2).join(' / ') : '');`).catch(() => '');
 const sha = (f) => createHash('sha256').update(readFileSync(f)).digest('hex');
 let primary = null, client = null;
@@ -462,9 +488,9 @@ const OPS = [
   'orders.mark_line_ordered', 'orders.update_line_status', 'orders.update_line', 'orders.cancel',
   'consignments.return_after_sale', 'consignments.cancel_sale',
   'production.create', 'products.update',
-  'tasks.create', 'tasks.update', 'documents.upload',
+  'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr',
 ];
-const LOST_OPS = ['purchases.cancel', 'orders.cancel', 'consignments.cancel_sale', 'production.create', 'documents.upload'];
+const LOST_OPS = ['purchases.cancel', 'orders.cancel', 'consignments.cancel_sale', 'production.create', 'documents.upload', 'documents.set_ocr'];
 const BEWEIS = Object.fromEntries(OPS.map((o) => [o, { C: 0, P: 0, versuche: 0 }]));
 const LOST = {};
 const EXTRA = { purchase: false, inbox: false, order: false, presale: false, noDelete: false, keep: false, production: false, bild: false, tasks: false, upload: false, ocr: '' };
@@ -1571,67 +1597,61 @@ try {
   });
   ok(EXTRA.upload, 'DOC-UPLOAD der Inhalt steht bytegenau am Primary, Typ und Größe bestimmt der Primary aus dem Inhalt, Verknüpfung zum Kunden, angelegt vom Handelnden');
 
-  // OCR — am Primary aus SEINEM gespeicherten Inhalt. Ausgang je Seite: gespeichert (Text) oder das
-  // Nein der Maske. Parität heißt: derselbe Ausgang; bei einem Nein ist NICHTS geschrieben.
+  // OCR — am Primary aus SEINEM gespeicherten Inhalt, mit den Dateien der App (Worker, Kern, eng+ara) —
+  // kein CDN. PC2: die erste Antwort geht verloren; die Wiederholung bekommt das eingefrorene Ergebnis:
+  // genau EINE Erkennung, EINE neue Fassung, kein zweites Dokument.
   {
-    const OCR = {};
-    for (const x of ['C', 'P']) {
-      await syncRuhe();
-      let c;
-      if (x === 'C') { client = await lade(client, '/documents'); c = client; } else { await gehFrisch(primary, '/documents'); c = primary; }
-      const vor = zeile('documents', DOC[x]);
-      const karte = `[...document.querySelectorAll('div')].find((d) => d.children.length === 0 && d.textContent.trim() === ${S(DOC_NAME(x))})`;
-      const r = [];
-      if (!(await warteBis(c, karte, 30000))) r.push('KEINE-KARTE');
-      else { await c.ev(`${karte}.click(); return 1;`); }
-      if (!(await warteBis(c, q('[data-document-ocr]'), 20000))) r.push('KEIN-OCR-KNOPF');
-      const vorCmd = x === 'C' ? (await buchungen(c)).length : 0;
-      const vorAnt = x === 'C' ? (await antworten(c)).length : 0;
-      if (r.length === 0) r.push(await klick(c, '[data-document-ocr]'));
-      const meldung = "(() => { const p = [...document.querySelectorAll('p')].find((e) => /No text detected|text recognition|failed|DOCUMENT_OCR|No answer|Not saved/i.test(e.textContent)); return p ? p.textContent : ''; })()";
-      const t0 = Date.now(); const end = t0 + 240000; let out = null;
-      while (alleOk(r) === 'OK' && Date.now() < end) {
-        await spuelen(primary);
+    const karte = (x) => `[...document.querySelectorAll('div')].find((d) => d.children.length === 0 && d.textContent.trim() === ${S(DOC_NAME(x))})`;
+    const docsVor = zahl('SELECT COUNT(*) AS n FROM documents');
+    const beobP = await netzBeobachter(APP_CDP), beobC = await netzBeobachter(CLIENT_CDP);
+    let netzC = [];
+    await paar({
+      name: 'DOC-OCR', op: 'documents.set_ocr', lost: '[data-ocr-error]',
+      route: () => '/documents',
+      bereit: (x) => karte(x),
+      vorher: (x) => ({ rev: Number(zeile('documents', DOC[x]).revision) }),
+      fuellen: async (c, x) => {
+        if (x === 'C') beobC.requests.length = 0;
+        const r = [await klickAusdruck(c, karte(x), 'karte')];
+        if (!(await warteBis(c, q('[data-document-ocr]'), 20000))) r.push('KEIN-OCR-KNOPF');
+        return alleOk(r);
+      },
+      speichern: (c) => klick(c, '[data-document-ocr]'),
+      fertig: (x, v) => { const d = zeile('documents', DOC[x]); return Number(d.ocr_reviewed) === 1 && !!d.ocr_text && Number(d.revision) === v.rev + 1; },
+      zu: () => `${q('[data-document-ocr]')} && ${q('[data-document-ocr]')}.textContent.includes('Re-run OCR')`,
+      keys: ['documentId', 'expectedRevision'],
+      rumpf: (p, x, v) => p.documentId === DOC.C && p.expectedRevision === v.rev,
+      zustand: (x, v) => {
+        if (x === 'C') netzC = [...beobC.requests];
         const d = zeile('documents', DOC[x]);
-        if (Number(d.ocr_reviewed) === 1 && d.ocr_text) { out = { stored: true, text: String(d.ocr_text), rev: Number(d.revision) - Number(vor.revision) }; break; }
-        const t = await c.ev(`return ${meldung};`).catch(() => '');
-        if (t) { out = { stored: false, meldung: String(t).slice(0, 700) }; break; }
-        await sleep(1000);
-      }
-      const nach = zeile('documents', DOC[x]);
-      OCR[x] = { eingabe: alleOk(r), out, ms: Date.now() - t0, unberuehrt: Number(nach.revision) === Number(vor.revision) && !nach.ocr_text && Number(nach.ocr_reviewed || 0) === 0 };
-      if (x === 'C') {
-        const cc = (await buchungen(c)).slice(vorCmd);
-        const an = (await antworten(c)).slice(vorAnt).filter((a) => a.op === 'documents.set_ocr');
-        OCR.C.antwort = an.map((a) => a.ok ? 'ok' : a.error).join(',');
-        ok(cc.length === 1 && cc[0].op === 'documents.set_ocr' && S(Object.keys(cc[0].payload || {}).sort()) === S(['documentId', 'expectedRevision'])
-          && cc[0].payload.documentId === DOC.C && cc[0].payload.expectedRevision === Number(vor.revision),
-        `OCR [PC2/B] genau EIN Auftrag documents.set_ocr, der Rumpf nennt nur Dokument + gesehene Fassung — nie ein Ergebnis (${S(cc.map((k) => k.payload))})`);
-        if (cc[0]) ok(absenderVon(cc[0].commandId) === B_ID || !OCR.C.out?.stored, `OCR [PC2/B] der Nachweis nennt B (${absenderVon(cc[0]?.commandId) || 'kein Nachweis — Erkennung nicht gelaufen'})`);
-      }
-      console.log(`  · OCR ${x === 'C' ? 'PC2' : 'Primary'}: ${S(OCR[x]).slice(0, 300)}`);
-    }
-    const beideGespeichert = OCR.C.out?.stored && OCR.P.out?.stored && OCR.C.out.text.trim() === OCR.P.out.text.trim() && OCR.C.out.rev === OCR.P.out.rev;
-    const beideNein = OCR.C.out && OCR.P.out && !OCR.C.out.stored && !OCR.P.out.stored && OCR.C.unberuehrt && OCR.P.unberuehrt;
-    ok(beideGespeichert || beideNein,
-      `OCR gleicher Ausgang am Primary für PC2 und für den Primary selbst: ${beideGespeichert ? `Text gespeichert „${OCR.C.out.text.slice(0, 60)}"` : beideNein ? `die Erkennung läuft im E2E-Build nicht — dasselbe Nein auf beiden Seiten, nichts geschrieben (PC2: ${OCR.C.out.meldung} · Primary: ${OCR.P.out.meldung})` : S(OCR).slice(0, 400)}`);
-    EXTRA.ocr = beideGespeichert ? 'stored' : beideNein ? 'engine-unavailable (same refusal, nothing written)' : '';
-    if (beideNein) {
-      // Beleg der Ursache (nur Diagnose, ändert nichts): derselbe Weg wie tesseract.js — ein Blob-Worker,
-      // der sein Skript vom CDN per importScripts holt — in der Seite des Primary, mit ihrer CSP.
-      const url = (String(OCR.P.out.meldung).match(/https:\/\/[^'"\s]+/) || ['https://cdn.jsdelivr.net/npm/tesseract.js@v7.0.0/dist/worker.min.js'])[0];
-      const probe = await primary.ev(`
-        const meta = [...document.querySelectorAll('meta[http-equiv]')].map((m) => m.getAttribute('http-equiv') + ': ' + m.content).join(' | ');
-        const src = "const out=[]; self.addEventListener('securitypolicyviolation', (e) => out.push('CSP ' + e.violatedDirective + ' blocked ' + e.blockedURI));"
-          + "try { importScripts(" + JSON.stringify(${S(url)}) + "); out.push('importScripts ok'); } catch (e) { out.push('importScripts: ' + e.name + ': ' + e.message); }"
-          + "setTimeout(() => postMessage(out.join(' || ')), 300);";
-        const w = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
-        const r = await new Promise((res) => { w.onmessage = (e) => res(String(e.data)); w.onerror = (e) => res('worker error: ' + (e.message || e)); setTimeout(() => res('timeout'), 8000); });
-        w.terminate();
-        return JSON.stringify({ meta: meta.slice(0, 600), worker: r.slice(0, 600) });`).catch((e) => String(e));
-      console.log(`  · OCR-Ursache (Primary-Seite, Blob-Worker wie tesseract.js): ${probe}`);
-    }
-    if (beideGespeichert) ok(/4711|R6F|LATAIF/i.test(OCR.C.out.text), `OCR der erkannte Text stammt aus dem gespeicherten Bild (${OCR.C.out.text.slice(0, 60)})`);
+        return { text: String(d.ocr_text || '').trim(), conf: Number(d.ocr_confidence), reviewed: Number(d.ocr_reviewed), rev: Number(d.revision) - v.rev, audit: auditVon([DOC[x]]) };
+      },
+      buchungsZeilen: 0,
+    });
+    await spuelen(primary);
+    const dC = zeile('documents', DOC.C), dP = zeile('documents', DOC.P);
+    const tC = String(dC.ocr_text || '').trim(), tP = String(dP.ocr_text || '').trim();
+    ok(!!tC && tC === tP && /4711|R6F|LATAIF/i.test(tC), `OCR echte Erkennung für PC2 und am Primary: derselbe Text aus dem gespeicherten Bild („${tC.slice(0, 60)}")`);
+    const gespeichert = Number(dC.ocr_reviewed) === 1 && Number(dP.ocr_reviewed) === 1 && Number(dC.ocr_confidence) > 0 && Number(dC.ocr_confidence) === Number(dP.ocr_confidence);
+    ok(gespeichert, `OCR Text, „gelaufen" und Sicherheit stehen in der Datenbankdatei des Primary (${S([dC.ocr_confidence, dP.ocr_confidence])})`);
+    const keinDoppel = zahl('SELECT COUNT(*) AS n FROM documents') === docsVor;
+    ok(keinDoppel, 'OCR kein zweites Dokument — auch nicht durch die Wiederholung');
+    // Kein CDN: jede Anfrage der Seite UND ihrer Worker (CDP, ab dem ersten Klick) ging an die App selbst.
+    const netzP = [...beobP.requests];
+    beobP.close(); beobC.close();
+    const eigen = (u) => /^(https?:\/\/(tauri\.localhost|ipc\.localhost|127\.0\.0\.1(:\d+)?)(\/|$)|ipc:|data:|blob:)/.test(String(u));
+    const fremd = [...netzP, ...netzC].filter((u) => !eigen(u));
+    const geladen = Object.keys(OCR_FILES).filter((f) => netzP.some((u) => u === `http://tauri.localhost/ocr/${f}`));
+    console.log(`  · OCR-Netz: Primary ${netzP.length} Anfragen (OCR-Dateien: ${geladen.join(', ') || 'keine gesehen'}), PC2 ${netzC.length}`);
+    ok(fremd.length === 0, `OCR kein Request an einen fremden Host — kein CDN (${S(fremd).slice(0, 300)})`);
+    ok(geladen.length === Object.keys(OCR_FILES).length, `OCR Worker, Kern und Sprachdaten kamen vom Primary selbst (${geladen.length}/${Object.keys(OCR_FILES).length})`);
+    const quelle = Object.fromEntries(Object.entries(OCR_FILES).map(([f, p]) => [f, readFileSync(join(process.cwd(), p)).length]));
+    const imApp = JSON.parse(String(await primary.ev(`const out = {}; for (const f of ${S(Object.keys(OCR_FILES))}) {
+      try { const r = await fetch('/ocr/' + f); out[f] = r.ok ? (await r.arrayBuffer()).byteLength : -r.status; } catch (e) { out[f] = String(e); } }
+      return JSON.stringify(out);`)));
+    const ausgeliefert = S(imApp) === S(quelle);
+    ok(ausgeliefert, `OCR die App liefert jede OCR-Datei selbst aus, bytegenau so groß wie die Quelle (${S(imApp)})`);
+    EXTRA.ocr = tC && tC === tP && gespeichert && keinDoppel && fremd.length === 0 && geladen.length === Object.keys(OCR_FILES).length && ausgeliefert ? 'stored' : '';
   }
   console.log('CENTRAL_UI_R6F_OFFICE_RUNTIME_PROVED_CANDIDATE');
 
@@ -1695,9 +1715,9 @@ const alleBeide = (ops) => ops.every((o) => BEWEIS[o].C > 0 && BEWEIS[o].P > 0);
 console.log(`  verlorene Antwort: ${LOST_OPS.map((o) => `${o}=${LOST[o] ? 'ja' : 'NEIN'}`).join(' · ')}`);
 console.log(`  Zusatz: ${Object.entries(EXTRA).map(([k, v]) => `${k}=${v === true ? 'ja' : v === false ? 'NEIN' : (v || 'NEIN')}`).join(' · ')} · Akteur-Fehler ${AKTEUR_FEHL}`);
 ok(alleBeide(OPS), `ALLE ${OPS.length} Handlungen auf PC2 UND am Primary bewiesen (fehlend: ${OPS.filter((o) => !(BEWEIS[o].C > 0 && BEWEIS[o].P > 0)).join(', ') || 'keine'})`);
-ok(LOST_OPS.every((o) => LOST[o]), 'LOST alle fünf verlorenen Antworten: dieselbe Kennung, genau eine Wirkung, dieselbe Buchung');
+ok(LOST_OPS.every((o) => LOST[o]), `LOST alle ${LOST_OPS.length} verlorenen Antworten: dieselbe Kennung, genau eine Wirkung, dieselbe Buchung`);
 ok(AKTEUR_FEHL === 0, `AKTEUR jede Fernbuchung gehört B, jede Primary-Buchung A — kein Leck (${AKTEUR_FEHL} Fehler)`);
-ok(!!EXTRA.ocr, `OCR gleicher Ausgang auf beiden Seiten (${EXTRA.ocr || 'kein Ausgang'})`);
+ok(EXTRA.ocr === 'stored', `OCR echte Erkennung auf beiden Seiten gespeichert, offline (${EXTRA.ocr || 'kein Ausgang'})`);
 const dauer = Math.round((Date.now() - T0) / 1000);
 const ZEILE = `central ui parity r6f: purchases + orders + consignment + production/media + office, lost response, two apps, two users (${Math.floor(dauer / 60)}m ${dauer % 60}s): ${PASS} passed, ${FAIL} failed`;
 if (FAIL > 0) {
@@ -1709,7 +1729,8 @@ if (alleBeide(['purchases.return_to_supplier', 'purchases.cancel', 'purchases.di
 if (alleBeide(['orders.mark_line_ordered', 'orders.update_line_status', 'orders.update_line', 'orders.cancel']) && EXTRA.order) console.log('CENTRAL_UI_R6F_ORDERS_RUNTIME_PROVED');
 if (alleBeide(['consignments.return_after_sale', 'consignments.cancel_sale']) && EXTRA.keep && EXTRA.presale && EXTRA.noDelete) console.log('CENTRAL_UI_R6F_CONSIGNMENT_RUNTIME_PROVED');
 if (alleBeide(['production.create', 'products.update']) && EXTRA.production && EXTRA.bild) console.log('CENTRAL_UI_R6F_PRODUCTION_MEDIA_RUNTIME_PROVED');
-if (alleBeide(['tasks.create', 'tasks.update', 'documents.upload']) && EXTRA.tasks && EXTRA.upload && EXTRA.ocr) console.log('CENTRAL_UI_R6F_OFFICE_RUNTIME_PROVED');
+if (alleBeide(['tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr']) && EXTRA.tasks && EXTRA.upload && EXTRA.ocr === 'stored') console.log('CENTRAL_UI_R6F_OFFICE_RUNTIME_PROVED');
+if (alleBeide(['documents.set_ocr']) && LOST['documents.set_ocr'] && EXTRA.ocr === 'stored') console.log('CENTRAL_UI_R6F_OCR_RUNTIME_PROVED');
 if (LOST_OPS.every((o) => LOST[o])) console.log('CENTRAL_UI_R6F_LOST_RESPONSE_PROVED');
 console.log('CENTRAL_UI_R6F_TWO_APP_PROVED');
 console.log(`\nPASS — ${ZEILE}`);

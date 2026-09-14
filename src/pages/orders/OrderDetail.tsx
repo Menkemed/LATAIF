@@ -15,7 +15,7 @@ import { OrderLineEditModal, type OrderLineEditPatch } from '@/components/work-o
 import { SourceItemsModal } from '@/components/work-orders/SourceItemsModal';
 import { CancelOrderModal } from '@/components/work-orders/CancelOrderModal';
 import { ORDER_STATUS_FLOW, nextOrderStatus } from '@/core/orders/order-status-flow';
-import { useOrderStore } from '@/stores/orderStore';
+import { useOrderStore, goldPayableSurvivesCancel } from '@/stores/orderStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useGoldStore } from '@/stores/goldStore';
@@ -184,6 +184,14 @@ export function OrderDetail() {
     () => goldPayables.filter(gp => gp.sourceOrderId === id),
     [goldPayables, id]
   );
+  // R6F — die Vorschau des Stornos nach derselben Regel wie der Storno: reine Planung faellt weg,
+  // geliefertes oder schon bewegtes Gold bleibt dem Goldschmied geschuldet.
+  const goldOnCancel = useMemo(() => {
+    const open = orderGoldPayables.filter(gp => gp.status === 'OPEN');
+    const kept = open.filter(gp => goldPayableSurvivesCancel(gp.fulfilledGrams,
+      orderLineList.find(l => l.id === gp.sourceOrderLineId)?.status));
+    return { cancelled: open.length - kept.length, kept: kept.length };
+  }, [orderGoldPayables, orderLineList]);
   // v0.5.0 — die kundenseitige Quote-Line (der Quoted Price) — falls vorhanden.
   const quoteLine = useMemo(() => customerLines.find(l => l.materialKind === 'custom'), [customerLines]);
   // Back-to-Back — pro customer-facing Zeile: gibt es einen aktiven (nicht
@@ -1874,7 +1882,8 @@ export function OrderDetail() {
         // R6F — dieselbe Summe, die das Haus bucht: nur die NICHT umgewandelten Anzahlungen.
         totalPaid={totalPaidActive}
         sourcedLineIds={new Set(sourcedMap.keys())}
-        openGoldPayableCount={orderGoldPayables.filter(gp => gp.status === 'OPEN').length}
+        openGoldPayableCount={goldOnCancel.cancelled}
+        keptGoldPayableCount={goldOnCancel.kept}
         busy={w.busy}
         submitError={w.fehler}
         fromDelete={cancelFromDelete}

@@ -131,6 +131,8 @@ export interface OrderCancelResult {
   stockProductId?: string;
   freedProductId?: string;
   cancelledGoldPayableIds: string[];
+  /** Gramm-Schulden, die den Storno überleben: Gold geliefert oder schon Gramm bewegt. */
+  openGoldPayableIds: string[];
   openExpenseIds: string[];
   revision: number;
 }
@@ -156,7 +158,8 @@ export function assertOrderCancelChoice(req: Pick<OrderCancelRequest, 'choice' |
 
 /**
  * „Cancel Order": das erhaltene Geld nach Wahl (Rückzahlung / Guthaben / Verfall), die Überzahlungs-
- * Gutschrift abgebaut, offene Gold-Verbindlichkeiten storniert, der Lieferanten-Marker entfernt, ein
+ * Gutschrift abgebaut, offene Gold-Verbindlichkeiten storniert — nur die reine Planung; geliefertes
+ * oder schon bewegtes Gold bleibt geschuldet —, der Lieferanten-Marker entfernt, ein
  * reservierter Artikel wieder frei, ein angefangenes Sonderstück als Lagerartikel, Positionen und
  * Auftrag CANCELLED — alles in EINER Klammer. Beträge rechnet der Store selbst; die Maske wählt nur.
  */
@@ -194,6 +197,7 @@ export function cancelOrderInHouse(req: OrderCancelRequest, branchId: string): O
     ...(fx.stockProductId ? { stockProductId: fx.stockProductId } : {}),
     ...(fx.freedProductId ? { freedProductId: fx.freedProductId } : {}),
     cancelledGoldPayableIds: fx.cancelledGoldPayableIds,
+    openGoldPayableIds: fx.openGoldPayableIds,
     openExpenseIds: fx.openExpenseIds,
     revision: num(after.revision),
   };

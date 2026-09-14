@@ -12,7 +12,7 @@ import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — purchase_lines FK-Entkopplung
 import { trackProductRow } from '@/core/lots/lot-queries';
-import { assertGoldPayablesRemovable } from '@/core/gold/gold-settle';
+import { GRAM_EPS, assertGoldPayablesRemovable } from '@/core/gold/gold-settle';
 import { useProductStore } from '@/stores/productStore';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import { normalizeCardBrand } from '@/core/finance/card-fees';
@@ -101,9 +101,21 @@ export interface OrderCancelEffects {
   stockProductId?: string;
   /** Der 'reserved'-Artikel einer abgebrochenen Umwandlung, der wieder frei ist (L-07). */
   freedProductId?: string;
+  /** Gold-Verbindlichkeiten, die reine Planung waren (nichts geliefert, nichts bewegt) — CANCELLED. */
   cancelledGoldPayableIds: string[];
+  /** Gold-Verbindlichkeiten, die bewusst OFFEN bleiben: Gold geliefert oder schon Gramm bewegt. */
+  openGoldPayableIds: string[];
   /** Real gebuchte A/P-Ausgaben, die bewusst OFFEN bleiben (der Lieferant hat gearbeitet). */
   openExpenseIds: string[];
+}
+
+/**
+ * R6F ORDER CANCEL / GOLD LIABILITY — ueberlebt eine offene Gramm-Schuld den Storno? Ja, sobald das
+ * Gold geliefert ist (Zeile ARRIVED/DELIVERED) oder schon Gramm bewegt wurden; nur reine Planung
+ * faellt weg. EINE Regel fuer den Storno und fuer die Vorschau der Maske (`CancelOrderModal`).
+ */
+export function goldPayableSurvivesCancel(fulfilledGrams: number | null | undefined, lineStatus: string | null | undefined): boolean {
+  return Number(fulfilledGrams || 0) > GRAM_EPS || lineStatus === 'ARRIVED' || lineStatus === 'DELIVERED';
 }
 
 interface OrderStore {
@@ -1189,7 +1201,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
   //   1. Customer-Money (totalPaid > 0) → choice-basierte Ledger-Buchung +
   //      bei 'credit' Insert in customer_credits.
   //   2. Cost-Line-Expenses reverten + DELETE.
-  //   3. Open gold_payables → CANCELLED.
+  //   3. Open gold_payables → CANCELLED, ausser Gold geliefert/bewegt (bleibt OFFEN).
   //   4. ORDERED-Lines → ordered_supplier_id NULL.
   //   5. Status → cancelled. Lines → CANCELLED.
   cancelOrderWithMoney: (id, choice, refundMethod, note) => {
@@ -1205,7 +1217,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     const currentStatus = oRows[0].status as OrderStatus;
     const linkedProductId = (oRows[0].product_id as string | null) || null;  // L-07
     if (currentStatus === 'cancelled') throw new Error('Order ist bereits storniert.');
-    const effects: OrderCancelEffects = { settledAmount: 0, cancelledGoldPayableIds: [], openExpenseIds: [] };
+    const effects: OrderCancelEffects = { settledAmount: 0, cancelledGoldPayableIds: [], openGoldPayableIds: [], openExpenseIds: [] };
 
     // 0a. Invoiced-Block: keine Line darf invoice_id != NULL haben.
     // R6F — erst pruefen, dann schreiben: der Block stand HINTER dem Ueberzahlungs-Teardown, und ein
@@ -1296,13 +1308,25 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       effects.openExpenseIds.push(lr.expense_id as string);
     }
 
-    // 3. Offene Gold-Verbindlichkeiten cancellen.
+    // 3. Offene Gold-Verbindlichkeiten: nur die reine PLANUNG faellt mit dem Auftrag weg.
+    //    R6F ORDER CANCEL / GOLD LIABILITY — vorher wurde JEDE offene Gramm-Schuld storniert. Offen
+    //    heisst im Goldkern aber auch „teilweise beglichen" (`fulfil` laesst den Rest OPEN), und eine
+    //    Goldzeile aus „Add Cost" kommt ARRIVED an (der Goldschmied hat das Gold geliefert). Beides
+    //    ist ein echter Anspruch des Lieferanten und bleibt OFFEN — dieselbe Regel wie die realisierte
+    //    A/P oben und wie `assertGoldPayablesRemovable` (sobald Gramm bewegt wurden, bleibt die Schuld).
+    //    Der Zeilenstatus wird HIER gelesen, vor der CANCELLED-Kaskade in Schritt 5.
     const gpRows = query(
-      `SELECT id FROM gold_payables WHERE source_order_id = ? AND status = 'OPEN'`,
+      `SELECT gp.id, gp.fulfilled_grams, ol.status AS line_status
+         FROM gold_payables gp LEFT JOIN order_lines ol ON ol.id = gp.source_order_line_id
+        WHERE gp.source_order_id = ? AND gp.status = 'OPEN'`,
       [id]
     );
     for (const gr of gpRows) {
       const gpId = gr.id as string;
+      if (goldPayableSurvivesCancel(gr.fulfilled_grams as number | null, gr.line_status as string | null)) {
+        effects.openGoldPayableIds.push(gpId);
+        continue;
+      }
       db.run(`UPDATE gold_payables SET status = 'CANCELLED', updated_at = ? WHERE id = ?`,
         [now, gpId]);
       trackUpdate('gold_payables', gpId, { status: 'CANCELLED' });

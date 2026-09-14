@@ -3143,7 +3143,7 @@ Einkauf 3 · Auftrag 5 · Kommission 2 · Produktion 1 · Bildänderung 1 · Auf
 - **Aufgaben/Dokumente** (`CENTRAL_UI_R6F_TASKS_PROVED`, `CENTRAL_UI_R6F_DOCUMENTS_OCR_PROVED`): Aufgaben ändern ohne
   Filiale/Fassung/Vokabular, „Erledigt" doppelt möglich; jetzt `tasks.create` + `tasks.update` (Erledigen = Status) mit
   Fassung. Dokumente: **Grenze abgeleitet, nicht erfunden** — die Zeile reist als ganzes JSON in den Abgleich, jeder andere
-  Rechner verwirft über `max_payload_bytes` (33 554 432); also Zeile ≤ diesem Wert, Datei ≤ 24 MiB (Base64); Typ aus dem
+  Rechner verwirft über `max_payload_bytes` (33 554 432); also Zeile ≤ diesem Wert, Datei ≤ 25 116 672 B (Vertrag: R6F FINAL unten); Typ aus dem
   Inhalt (Signatur), Dateiname ohne Pfadtrenner/Traversal, Verknüpfung in der Filiale. **Texterkennung** ist eine
   synchrone Mutation mit gespeichertem Ergebnis: der PRIMARY erkennt aus SEINEM gespeicherten Inhalt (Rumpf nur
   `documentId` + Fassung), Fassung vor und nach der Erkennung geprüft, eine Wiederholung erkennt nicht erneut; der
@@ -3157,16 +3157,54 @@ Einkauf 3 · Auftrag 5 · Kommission 2 · Produktion 1 · Bildänderung 1 · Auf
   Pausen bis 100 ms), weiterhin nur für Ersetzen und Verlinken; `io_err` behält den Betriebssystem-Code (`io:PermissionDenied:os5`).
   Bestand seit CENTRAL-C5, kein R6F-Code.
 
-**Bewusst belassen (Befunde, eigene Entscheidung nötig):** **Texterkennung läuft in der App nicht** — die CSP
-(`src-tauri/tauri.conf.json`: `script-src 'self' 'wasm-unsafe-eval'`) verbietet tesseract.js, seinen Worker von
-`cdn.jsdelivr.net` nachzuladen (im Zwei-Rechner-Lauf nachgewiesen: „CSP script-src-elem blocked"); Primary und PC2 lehnen
-identisch ab und schreiben nichts. Das bestand schon vor R6F; die Behebung (Worker, Kern und Sprachdaten mit der App ausliefern)
-ist eine eigene Entscheidung (Größe, Offline-Betrieb). · Lieferantenguthaben (Retoure/Überzahlung) und die
-Überzahlungs-Gutschrift eines stornierten Auftrags werden weiter gelöscht (`supplier_credits` ohne Statusspalte; gemeinsamer
-Helfer) · offene Gold-Schulden werden beim Auftragsstorno erlassen · `completeRecord` (Arbeits-/Gemeinkosten) ist über die
-Oberfläche nicht erreichbar · `production_inputs`/`production_outputs` stehen nicht im Abgleich-Manifest · das Notizfeld
-der Aufgabenmaske hat keine Spalte · große Dokumente/lange Erkennung können das 20-s-Brückenlimit reißen (Wiederholung
-mit derselben Kennung ist sicher).
+**Bewusst belassen (Befunde, eigene Entscheidung nötig):** `completeRecord` (Arbeits-/Gemeinkosten) ist über die
+Oberfläche nicht erreichbar — eigener Produktfehler nach der Parität (R6F FINAL §5) · die Überzahlungs-Gutschrift eines
+stornierten Auftrags wird weiter gelöscht (gemeinsamer Helfer `clawbackGrantedCredit`) · `production_inputs`/
+`production_outputs` stehen nicht im Abgleich-Manifest · das Notizfeld der Aufgabenmaske hat keine Spalte · große Dokumente
+können das 20-s-Brückenlimit reißen (Wiederholung mit derselben Kennung ist sicher). Texterkennung, Dokumentgröße,
+Gold-Schulden beim Auftragsstorno und Lieferantenguthaben: geklärt in R6F FINAL.
+
+### R6F FINAL — Funktionsabschluss
+
+1. **Texterkennung läuft** (`CENTRAL_UI_R6F_OCR_RUNTIME_PROVED`). Befund: tesseract.js 7.0.0 holte Worker (`worker.min.js`),
+   Kern (`tesseract-core-*-lstm.wasm.js`, Wahl nach SIMD) und die Sprachdaten `eng`+`ara` (`4.0.0_best_int`, LSTM, OEM 1)
+   von `cdn.jsdelivr.net` und legte sie in IndexedDB ab; die CSP ließ schon den Worker nicht laden — OCR lief nie in der App.
+   Jetzt liefert die App fünf Dateien unter `/ocr/` selbst aus (`core/ai/ocr-assets.ts`, Vite-Plugin in `vite.config.ts`,
+   Sprachpakete `@tesseract.js-data/eng`/`ara` exakt 1.0.0): der Worker-Eingang `ocr-worker.js` (lässt nur denselben Ursprung
+   zu — `fetch`/`importScripts` zu einem fremden Host wirft `OCR_OFFLINE_ONLY`, denn `connect-src` erlaubt https: für andere
+   Teile), `worker.min.js`, `tesseract-core-simd-lstm.wasm.js`, `eng.traineddata.gz`, `ara.traineddata.gz` — zusammen
+   8,23 MiB mehr. CSP unverändert, Sprachen unverändert, kein IndexedDB-Cache (`cacheMethod: 'none'`). Der Primary erkennt
+   aus SEINEM gespeicherten Dokument; PC2 schickt nur `documentId` + Fassung (verlorene Antwort → eingefrorenes Ergebnis,
+   keine zweite Erkennung, kein zweites Dokument).
+2. **Dokumentgröße** (`CENTRAL_UI_R6F_DOCUMENT_SIZE_CONTRACT_PINNED`). Schichten: Rohbytes → Base64 (4 Zeichen je angefangene
+   3 Bytes) → Zeile als JSON (`trackChange`, `SELECT *`) ≤ `max_payload_bytes` 33 554 432 (Rust: Bytes; `apply-change`:
+   Zeichen) → Push-Umschlag (maskiert nur `"`/`\`) ≤ 50 MiB Körpergrenze; `/api/command` von PC2 hinter derselben Grenze.
+   Größte Datei **25 116 672 B** = ⌊(33 554 432 − 65 536) / 4⌋ × 3: die Reserve von 64 KiB trägt Kopf (≤ 512 Zeichen), Name
+   (≤ 255 Zeichen), Typ (≤ 255), Verknüpfung (≤ 255), die übrigen Spalten (< 4 KiB) und ≥ 60 KiB erkannten Text. Die alte
+   Angabe „24 MiB" war nie erreichbar (ihr Base64 allein füllte die Zeile). Geprüft: größte Datei mit den längsten Angaben
+   angenommen (Primary und PC2, Empfänger nimmt die Zeile an, Umschlag < 50 MiB); ein Byte mehr → `DOCUMENT_TOO_LARGE` vor
+   jeder Arbeit, nichts geschrieben; ein Text, der die Zeile um 1 Byte überschritte → abgewiesen, alter Text bleibt.
+   **Gefunden und behoben:** der Push schickte bis zu 100 Änderungen in EINEM Rumpf — zwei große Dokumente überschritten die
+   50 MiB (413), und jeder weitere Push scheiterte an denselben Einträgen. `sync/push-batch.ts` schneidet den Stapel jetzt
+   nach Bytes (kleine Stapel unverändert, Reihenfolge bleibt).
+3. **Auftragsstorno und Gold** (`CENTRAL_UI_R6F_ORDER_GOLD_CANCEL_CONTRACT_PINNED`). Die Gramm-Schuld an den Goldschmied
+   entsteht aus der Extra-Gold-Kostenzeile (`order-house` → `insertGoldPayable`) oder aus „Add Cost" (Zeile gleich ARRIVED).
+   Vorher stornierte der Auftragsstorno JEDE offene Schuld — auch geliefertes und teilweise beglichenes Gold. Jetzt eine
+   Regel (`goldPayableSurvivesCancel`, Store = Haus für Primary und PC2): reine Planung → CANCELLED; geliefert oder Gramm
+   bewegt → bleibt OFFEN (`openGoldPayableIds`), die Maske zeigt beides getrennt. Gold des Kunden ist keine Schuld (nur
+   Notiz). Vertrag: geplant / geliefert / teilweise beglichen, Goldbestand und Hauptbuch (ausgeglichen) — 35/0.
+4. **Lieferantenguthaben** (`CENTRAL_UI_R6F_SUPPLIER_CREDIT_REVERSAL_CONTRACT_PINNED`): **Klasse B**, operative Saldozeile —
+   keine Nummer, kein Druck/Export, keine Detailansicht; die Überzahlungszeile wird bei jeder Neuberechnung neu angelegt.
+   Die Historie steht in Einkauf/Retoure (CANCELLED), Hauptbuch (Original + Storno) und Protokoll (CREATE/DELETE); alle
+   elf Leser zeigen vorher und nachher denselben Saldo. Eine aktive Einlösung sperrt jede Rückabwicklung
+   (`PURCHASE_RETURN_CREDIT_USED`/`PURCHASE_OVERPAY_CREDIT_REDEEMED`). Gepinnter Rest: nach einer STORNIERTEN Einlösung zeigt
+   die stornierte Zahlung auf die gelöschte Zeile — die Abstimmung meldet `bad_reference` (Salden richtig; über Maske und
+   PC2 nicht erreichbar, nur die Store-Altwege `cancelReturn`/`deleteReturn` ohne Aufrufer). Vertrag 48/0.
+5. **Produktionsabschluss — Post-Parity-Produktfehler, R6F nicht erweitert.** `production.create` ist für den Bestand
+   vollständig (CONFIRMED, Eingänge verbraucht, Ergebnis im Lager mit Kosten). `completeRecord` (COMPLETED, Arbeits-/
+   Gemeinkosten als Ausgabe + Kassenzahlung) hatte nie einen Aufrufer (seit dem ersten Commit); die beim Anlegen erfassten
+   Arbeits-/Gemeinkosten werden nie gebucht — GuV/Kasse, nicht Bestand. Beim Anschließen: ohne Transaktion, ohne
+   Client-Sperre, mit stiller Ersatzfiliale — dieselben Fehler, die R6F aus dem Anlegen entfernt hat.
 
 ### Autorität und Atomarität (`CENTRAL_UI_R6F_AUTHORITY_PROVED`)
 
@@ -3183,6 +3221,12 @@ Unit    r6f/purchase 203/0 · r6f/order 253/0 · r6f/consignment 427/0 · r6f/pr
 Nachbarn r6e (alle 7) · r6d (4 + final-gate) · r6c (3) · r6b · r5b/r5c/r5d/r5e/r5f · bridge c3–c6/client-ui/return-chain · uiparity r1/r2c/r2d/r3/r4b/r4c · consignment/payout — 56 Dateien grün
 Rust    cargo test --lib bridge 37/0 · media 203/0 · sync_schema 8/0 · manifest-drift 1443/1443 · TS app/node 0 · Lint-Delta 0
 Two-App test/e2e/r6f-purchases-orders-office.e2e.mjs 438/0 (4m 54s; PC2 als Benutzer B, Primary als A; nach dem Medien-Fix neu gebaut)
+FINAL   r6f/ocr-offline 24/0 · r6f/office 223/0 (inkl. Größenvertrag) · r6f/order-gold-cancel-contract 35/0 · r6f/supplier-credit-reversal-contract 48/0 ·
+        r6f/order 253/0 · r6f/final-gate 90/0 · Nachbarn 23 Dateien grün (Gates r6c–r6e, r5e Auftrag, r6d Gold, Sync/Cursor, Push, UI-Matrix) ·
+        manifest-drift 1443/1443 · TS app/node 0 · Lint-Delta 0
+Two-App FINAL (neu gebaut; voller Lauf, weil der Push-Weg aller Flüsse und der Auftragsstorno geändert wurden) 467/0 (4m 52s):
+        OCR echt für PC2 und am Primary, derselbe Text, gespeichert, verlorene Antwort → eingefrorenes Ergebnis; Netz (CDP, Seite +
+        Worker): alle fünf OCR-Dateien vom Primary selbst, kein fremder Host; App-Datei +5,8 MiB (51 619 328 → 57 726 464 B, Debug)
 ```
 
 ### Stand der R6A-SSOT nach R6F (`CENTRAL_UI_R6F_SSOT_UPDATED`)

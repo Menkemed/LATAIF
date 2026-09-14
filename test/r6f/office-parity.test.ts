@@ -570,16 +570,17 @@ const docRow = (db: Db, id?: string): Record<string, unknown> =>
 
   // Die Grenze — aus dem Manifest, nicht erfunden.
   const LIMIT = docHouse.DOCUMENT_ROW_LIMIT_BYTES;
-  ok(LIMIT === MANIFEST.limits.max_payload_bytes && LIMIT === 33554432 && docHouse.DOCUMENT_MAX_FILE_BYTES === Math.floor(LIMIT * 3 / 4),
-    `LIMIT die Grenze ist die des Abgleich-Manifests (${LIMIT}), die Datei höchstens ⌊×3/4⌋ = ${docHouse.DOCUMENT_MAX_FILE_BYTES}`);
+  ok(LIMIT === MANIFEST.limits.max_payload_bytes && LIMIT === 33554432
+    && docHouse.DOCUMENT_MAX_FILE_BYTES === Math.floor((LIMIT - docHouse.DOCUMENT_ROW_RESERVE_BYTES) / 4) * 3,
+  `LIMIT die Grenze ist die des Abgleich-Manifests (${LIMIT}), die Datei höchstens ⌊(Grenze − Reserve)/4⌋×3 = ${docHouse.DOCUMENT_MAX_FILE_BYTES}`);
   const PREFIX = 'data:application/octet-stream;base64,';
   const huge = await up('210', upBody({ fileName: 'huge.bin', content: PREFIX + 'A'.repeat(LIMIT) }));
   ok(huge.thrown && huge.code === 'DOCUMENT_TOO_LARGE' && count() === 0 && frei(db, '210', 'documents.upload'),
     `LIMIT Inhalt über der Grenze → DOCUMENT_TOO_LARGE vor jeder Arbeit, nichts eingefroren (${huge.code})`);
   let k = LIMIT - PREFIX.length; k -= k % 4;
   const knapp = await up('211', upBody({ fileName: 'nearly.bin', content: PREFIX + 'A'.repeat(k) }));
-  ok(!knapp.ok && knapp.code === 'DOCUMENT_TOO_LARGE' && knapp.frozen && count() === 0 && cl(db, 'documents') === 0,
-    `LIMIT die exakte Regel: Inhalt passt, die ZEILE nicht → nein, die Zeile geht mit zurück (${knapp.code})`);
+  ok(knapp.thrown && knapp.code === 'DOCUMENT_TOO_LARGE' && frei(db, '211', 'documents.upload') && count() === 0 && cl(db, 'documents') === 0,
+    `LIMIT Base64 bis an die Zeilengrenze: die Datei ist größer als erlaubt → nein vor jeder Arbeit (${knapp.code})`);
   const mb = await up('212', upBody({ fileName: 'one-mb.bin', content: PREFIX + 'A'.repeat(1_048_576) }));
   ok(mb.ok && mb.value.fileSize === 786432 && mb.value.fileType === 'application/octet-stream', `LIMIT 1 MiB Base64 → 768 KiB Datei, angenommen (${S(mb.value)})`);
 
@@ -648,6 +649,111 @@ const docRow = (db: Db, id?: string): Record<string, unknown> =>
   }
   ok(lc(db) === 0, 'LEDGER keine Buchung');
 }
+
+// ══ §5b — Größenvertrag: Datei → Base64 → Zeile → Push-Umschlag → 32-MiB-Grenze ═════
+{
+  const { changeContractViolation } = await import('../../src/core/sync/apply-change.ts');
+  const pb = await import('../../src/core/sync/push-batch.ts');
+  const LIMIT = docHouse.DOCUMENT_ROW_LIMIT_BYTES;
+  const MAX = docHouse.DOCUMENT_MAX_FILE_BYTES;
+  const RES = docHouse.DOCUMENT_ROW_RESERVE_BYTES;
+  const bytes = (t: string): number => Buffer.byteLength(t, 'utf8');
+  ok(RES === 65536 && MAX === 25116672 && MAX % 3 === 0 && (MAX / 3) * 4 + RES === LIMIT,
+    `SIZE abgeleitet: ⌊(${LIMIT} − ${RES}) / 4⌋ × 3 = ${MAX} Bytes — ihr Base64 plus Reserve ist genau die Grenze`);
+
+  // Die längsten Angaben, die das Haus zulässt: Kopf 512 Zeichen (Typ 255 + Parameter), Name 255 Zeichen
+  // zu je 4 Bytes, Verknüpfung auf eine Kennung von 255 Zeichen.
+  const LINK = 'P'.repeat(docHouse.DOCUMENT_LINK_ID_MAX);
+  const mitLink = (db: Db): void => {
+    db.run(`INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition,
+        scope_of_delivery, purchase_price, purchase_currency, planned_sale_price, stock_status,
+        tax_scheme, days_in_stock, images, attributes, source_type, created_at, updated_at)
+      VALUES (?,'branch-main','cat-w','Rolex','Lang','SKU-LANG',1,'Pre-Owned','[]',100,'BHD',150,'in_stock','MARGIN',0,'[]','{}','OWN',?,?)`, [LINK, NOW, NOW]);
+  };
+  const HEAD = `data:${'x'.repeat(127)}/${'y'.repeat(127)};p=${'v'.repeat(119)};q=${'v'.repeat(119)};base64,`;
+  const B64 = 'A'.repeat((MAX / 3) * 4);
+  const NAME = '\u{1F600}'.repeat(docHouse.DOCUMENT_NAME_MAX);
+  const maxBody = upBody({ fileName: NAME, content: HEAD + B64, docClass: 'certificate', linkedEntityType: 'product', linkedEntityId: LINK });
+  const PLUS = 'data:application/octet-stream;base64,' + B64 + 'AA==';
+  ok(HEAD.length === docHouse.DOCUMENT_DATA_URL_HEADER_MAX && bytes(NAME) === 1020, `SIZE Prüfling: Kopf ${HEAD.length} Zeichen, Name ${bytes(NAME)} Bytes`);
+
+  const db = freshDb();
+  mitLink(db);
+  const up = (x: string, body: Record<string, unknown>) => fern(() => office.runDocumentUpload(deps(db), identity(x, 'documents.upload'), body));
+  const counts = (): string => S([n(db, 'SELECT COUNT(*) FROM documents'), cl(db, 'documents'), audits(db, 'documents')]);
+
+  // Knapp unter / genau am Maximum: angenommen, und der echte Transport hält.
+  const r = await up('500', maxBody);
+  const id = String(r.value.documentId);
+  const data = s(db, "SELECT data FROM sync_changelog WHERE table_name = 'documents' AND action = 'insert' AND record_id = ?", [id]);
+  const rowBytes = bytes(data);
+  ok(r.ok && r.value.fileSize === MAX && rowBytes <= LIMIT,
+    `SIZE die größte Datei (${MAX} B) mit den längsten Angaben wird angenommen — ihre Abgleich-Zeile ${rowBytes} ≤ ${LIMIT} B (${r.code || 'ok'})`);
+  const platz = LIMIT - rowBytes;
+  ok(platz >= 60 * 1024, `SIZE daneben bleiben ${platz} B für den erkannten Text (≥ 60 KiB)`);
+  ok(changeContractViolation('documents', 'insert', data) === null, 'SIZE der Empfänger (apply-change) nimmt genau diese Zeile an');
+  const change = { table_name: 'documents', record_id: id, action: 'insert', data };
+  const umschlag = bytes(pb.pushBody([change]));
+  ok(umschlag <= pb.SYNC_PUSH_BODY_LIMIT_BYTES, `SIZE ihr Push-Umschlag ${umschlag} B ≤ ${pb.SYNC_PUSH_BODY_LIMIT_BYTES} B (Körpergrenze des Primary)`);
+  const dbP = freshDb();
+  mitLink(dbP);
+  const pOk = await primary(() => docStore.uploadDocumentOnPrimary(maxBody));
+  ok(pOk.ok && pOk.value.fileSize === MAX, `SIZE am Primary dieselbe Annahme (${pOk.code || 'ok'})`);
+  setTestDatabase(db as never);
+
+  // Ein Byte mehr: klar abgewiesen, vor jeder Arbeit, kein Teil-Dokument.
+  const vor = counts();
+  const plus = await up('501', upBody({ fileName: 'plus-one.bin', content: PLUS }));
+  ok(plus.thrown && plus.code === 'DOCUMENT_TOO_LARGE' && plus.message.includes(`${MAX + 1} bytes; at most ${MAX}`)
+    && frei(db, '501', 'documents.upload') && counts() === vor,
+  `SIZE ein Byte mehr → DOCUMENT_TOO_LARGE mit beiden Zahlen, vor jeder Arbeit: kein Dokument, kein Abgleich, kein Protokoll (${plus.message})`);
+  const pNo = await primary(() => docStore.uploadDocumentOnPrimary(upBody({ fileName: 'plus-one.bin', content: PLUS })));
+  ok(pNo.code === 'DOCUMENT_TOO_LARGE' && counts() === vor, `SIZE am Primary dieselbe Absage, nichts geschrieben (${pNo.code})`);
+  const h513 = await up('502', upBody({ content: HEAD.replace(';base64,', 'v;base64,') + 'AAAA' }));
+  const l256 = await up('503', upBody({ linkedEntityType: 'product', linkedEntityId: LINK + 'P' }));
+  ok(h513.code === 'DOCUMENT_CONTENT_INVALID' && l256.code === 'LINK_INVALID' && frei(db, '502', 'documents.upload') && frei(db, '503', 'documents.upload') && counts() === vor,
+    `SIZE Kopf 513 Zeichen / Verknüpfung 256 Zeichen → nein vor jeder Arbeit (${S([h513.code, l256.code])})`);
+
+  // Der erkannte Text (nur an Bildern): ein Bild der größten Größe mit dem längsten Kopf, Namen und
+  // Verknüpfung nimmt 60 KiB Text auf; einer, der die Zeile ein Byte über die Grenze brächte, wird von
+  // der exakten Zeilenregel abgewiesen — nichts geschrieben, der alte Text bleibt.
+  const IMG_HEAD = `data:image/png;p=${'v'.repeat(119)};q=${'v'.repeat(119)};r=${'v'.repeat(119)};s=${'v'.repeat(121)};base64,`;
+  const IMG = IMG_HEAD + Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0]).toString('base64') + 'A'.repeat(((MAX - 9) / 3) * 4);
+  const bild = await up('506', upBody({ fileName: NAME, content: IMG, linkedEntityType: 'product', linkedEntityId: LINK }));
+  const bid = String(bild.value.documentId);
+  ok(IMG_HEAD.length === docHouse.DOCUMENT_DATA_URL_HEADER_MAX && bild.ok && bild.value.fileSize === MAX && bild.value.fileType === 'image/png',
+    `SIZE das größte Bild (PNG, ${MAX} B, Kopf ${IMG_HEAD.length}) wird angenommen (${bild.code || 'ok'})`);
+  const TXT = 'T'.repeat(60 * 1024);
+  const o1 = await fern(() => office.runDocumentOcr(deps(db), identity('504', 'documents.set_ocr'), { documentId: bid, expectedRevision: 1 }, async () => ({ text: TXT, confidence: 90 })));
+  const d1 = s(db, "SELECT data FROM sync_changelog WHERE table_name = 'documents' AND action = 'update' AND record_id = ?", [bid]);
+  ok(o1.ok && o1.value.stored === true && bytes(d1) > TXT.length && bytes(d1) <= LIMIT && changeContractViolation('documents', 'update', d1) === null,
+    `SIZE das größte Bild nimmt 60 KiB erkannten Text auf, der Empfänger nimmt die Zeile an (${bytes(d1)} ≤ ${LIMIT}; ${o1.code || 'ok'})`);
+  const zuLang = 'T'.repeat(TXT.length + (LIMIT - bytes(d1)) + 1);
+  const o2 = await fern(() => office.runDocumentOcr(deps(db), identity('505', 'documents.set_ocr'), { documentId: bid, expectedRevision: 2 }, async () => ({ text: zuLang, confidence: 90 })));
+  ok(!o2.ok && o2.code === 'DOCUMENT_TOO_LARGE' && n(db, 'SELECT revision FROM documents WHERE id = ?', [bid]) === 2
+    && s(db, 'SELECT ocr_text FROM documents WHERE id = ?', [bid]) === TXT
+    && n(db, "SELECT COUNT(*) FROM sync_changelog WHERE table_name = 'documents' AND action = 'update' AND record_id = ?", [bid]) === 1,
+  `SIZE ein Text, der die Zeile 1 Byte über die Grenze brächte → DOCUMENT_TOO_LARGE, nichts geschrieben (${o2.code})`);
+
+  // Der Push-Stapel nach Bytes: zwei große Dokumente gehen nie in EINEN Rumpf.
+  const big2 = { ...change, record_id: 'doc-2' };
+  const klein = (i: number) => ({ table_name: 'tasks', record_id: 't' + i, action: 'update', data: '{"title":"x"}' });
+  const st1 = pb.pushBatch([change, big2, klein(1)]);
+  const st2 = pb.pushBatch([big2, klein(1)]);
+  ok(st1.length === 1 && st2.length === 2 && bytes(pb.pushBody(st1)) <= pb.SYNC_PUSH_BODY_LIMIT_BYTES && bytes(pb.pushBody(st2)) <= pb.SYNC_PUSH_BODY_LIMIT_BYTES,
+    `PUSH zwei große Dokumente: je Rumpf eines, der Rest folgt in Reihenfolge (${st1.length}/${st2.length})`);
+  const hundert = Array.from({ length: 100 }, (_, i) => klein(i));
+  ok(pb.pushBatch(hundert).length === 100 && pb.pushBody(hundert) === JSON.stringify({ changes: hundert }),
+    'PUSH kleine Änderungen: der Stapel bleibt, wie er war (100), derselbe Rumpf');
+  ok(pb.pushBatch(hundert, bytes(pb.pushBody(hundert.slice(0, 10)))).length === 10 && pb.pushBatch([change], 10).length === 1,
+    'PUSH die Grenze ist exakt; ein einzelner Eintrag geht immer (allein)');
+  ok(/pub const MAX_SYNC_PUSH_BODY_BYTES: usize = 50 \* 1024 \* 1024;/.test(src('src-tauri/src/sync/routes.rs')) && pb.SYNC_PUSH_BODY_LIMIT_BYTES === 50 * 1024 * 1024,
+    'PUSH die Grenze ist die des Rust-Routers (MAX_SYNC_PUSH_BODY_BYTES)');
+  const ss = codeOf(src('src/core/sync/sync-service.ts'));
+  ok(/const changes = pushBatch\(unsynced\.map\(/.test(ss) && /body: pushBody\(changes\)/.test(ss) && /unsynced\.slice\(0, changes\.length\)\.map\(r => r\.id as number\)/.test(ss),
+    'PUSH pushChanges schickt den Stapel nach Bytes und markiert genau die gesendeten');
+}
+marker('CENTRAL_UI_R6F_DOCUMENT_SIZE_CONTRACT_PINNED');
 
 // ══ §6 — Texterkennung: der Primary rechnet, aus SEINEM Inhalt ═══════════════
 function stub(result: unknown = { text: ' Rolex Daytona 116500 \n', confidence: 87.5 }, fail = false) {

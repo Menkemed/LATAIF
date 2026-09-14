@@ -20,8 +20,10 @@ export interface CancelOrderModalProps {
   totalPaid: number;
   /** Sourced-Map fuer Lines, die schon via Purchase beschafft wurden. */
   sourcedLineIds: Set<string>;
-  /** Anzahl offener Gold-Verbindlichkeiten dieser Order. */
+  /** Offene Gold-Verbindlichkeiten, die der Storno aufhebt (reine Planung). */
   openGoldPayableCount: number;
+  /** R6F — offene Gold-Verbindlichkeiten, die bleiben: Gold geliefert oder schon Gramm bewegt. */
+  keptGoldPayableCount?: number;
   /** R6F — der Storno laeuft; der Knopf ist solange gesperrt. */
   busy?: boolean;
   /** R6F — warum der Storno nicht geglueckt ist (leer = kein Fehler). */
@@ -33,7 +35,7 @@ export interface CancelOrderModalProps {
 }
 
 export function CancelOrderModal({
-  open, order, orderLines, totalPaid, sourcedLineIds, openGoldPayableCount,
+  open, order, orderLines, totalPaid, sourcedLineIds, openGoldPayableCount, keptGoldPayableCount = 0,
   busy = false, submitError = '', fromDelete = false,
   onCancel, onConfirm,
 }: CancelOrderModalProps) {
@@ -213,6 +215,9 @@ export function CancelOrderModal({
           )}
           {openGoldPayableCount > 0 && (
             <li>{openGoldPayableCount} open gold liabilit{openGoldPayableCount === 1 ? 'y' : 'ies'} (grams) — set to CANCELLED</li>
+          )}
+          {keptGoldPayableCount > 0 && (
+            <li>{keptGoldPayableCount} gold liabilit{keptGoldPayableCount === 1 ? 'y' : 'ies'} already delivered or partly settled — <strong>stays open</strong> (the goldsmith is still owed the grams)</li>
           )}
           {stats.orderedMarkerCount > 0 && (
             <li>{stats.orderedMarkerCount} line{stats.orderedMarkerCount === 1 ? '' : 's'} "ordered from supplier" — supplier marker removed (no real purchase, no effect on supplier)</li>
