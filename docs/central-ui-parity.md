@@ -3398,8 +3398,9 @@ Keiner ist eine A/B-Lücke: entweder kein fehlender Fernweg für eine Geschäfts
 Business Correctness" am Ende dieses Dokuments); **offen** bleiben PP-3, PP-4, PP-5, PP-6, PP-7, PP-12. Registry seit R7A 175.
 **Neu nach R7A (14.09.2026):** PP-13 und PP-14 bestätigt und **geschlossen** (§ „PP-13 + PP-14 — Repair-Accounting-Abschluss" am
 Ende). Offen bleiben PP-3, PP-4, PP-5, PP-6, PP-7, PP-12.
-**Neu nach R7B (14.09.2026):** PP-3, PP-4, PP-5, PP-6, PP-7 und PP-12 **geschlossen** (§ „Post-Parity R7B — Plattform /
-Laufzeit / Härtung" am Ende). Der Post-Parity-Backlog ist leer; Registry unverändert 175.
+**Neu nach R7B (14.09.2026):** PP-3, PP-4, PP-5, PP-6 und PP-7 **geschlossen**; PP-12 **teilweise** (Fristen je Dokumentweg und
+Anzeige gebaut, die Upload-Frist berücksichtigt aber die mit der Datenbankgröße wachsende durable Speicherung nicht — § „Post-Parity
+R7B — Plattform / Laufzeit / Härtung", Review-Nachweis). Registry unverändert 175.
 
 Veraltete Stellen der SSOT (nur Hinweis, Inhalt gilt): Zeilenverweise der Tabelle sind teils verschoben (z. B. InvoiceDetail,
 WatchList, ExpenseList); der R6A-Abschnitt „Keine toten Knöpfe" beschreibt den Stand VOR R6B — heute: Abmelden geht auf PC2
@@ -3787,7 +3788,7 @@ Umfang: die sechs offenen Backlog-Punkte PP-3, PP-4, PP-5, PP-6, PP-7, PP-12. Ke
 
 | ID | Befund (bestätigt) | Behebung | Beweis |
 |---|---|---|---|
-| PP-3 | Alle KI-Aktionen riefen OpenAI direkt aus dem Fenster, mit dem Schlüssel DIESES Rechners (`lataif_openai_key` / `<Datenort>/openai.key`); auf PC2 gab es keinen (Settings gesperrt) → Fehler erst nach dem Klick. Der Primary hat mit `/api/ai/identify` bereits eine Erkennung mit SEINEM Schlüssel (MOBILE-I1C). | Erkennen (NewProductModal, WatchList, ProductDetail, ConsignmentList) läuft auf PC2 ÜBER den Primary: `identify-adapter` → `primary-ai.ts` → `/api/ai/identify` (Kategorie, Foto-Bytes, Hinweise; ein gespeichertes Hauptbild als geprüfte Bytes über `/api/media`); zurück kommt die freigegebene Teilmenge (nie Preis/Menge/Kennung). Neu `GET /api/ai/status` (ja/nein aus demselben Schlüssel, nie zurückgegeben) → der Knopf ist VOR dem Klick gesperrt, mit Grund (nicht eingerichtet / nicht erreichbar / kein Foto). `getApiKey()` gibt auf PC2 nie einen Schlüssel zurück, auch keinen alten eigenen. Bewusst NICHT fern: Preisvorschlag, Nachrichtentext, Angebotstext, Assistent `/ai` — sie bräuchten einen neuen Fernweg durch das Fenster des Primary, der Sekunden externer Wartezeit in seiner Schreibreihenfolge hielte; auf PC2 vor dem Klick gesperrt mit Grund (`AI_TEXT_ON_PRIMARY`), `/ai` = `PrimaryOnlyNotice`; der Text bleibt von Hand schreibbar. | `test/r7b` §1; Rust `ai_route_tests` (`key_present`, Status-Route), `w4`-Routenliste; Zwei-Rechner-Lauf PP-3 |
+| PP-3 | Alle KI-Aktionen riefen OpenAI direkt aus dem Fenster, mit dem Schlüssel DIESES Rechners (`lataif_openai_key` / `<Datenort>/openai.key`); auf PC2 gab es keinen (Settings gesperrt) → Fehler erst nach dem Klick. Der Primary hat mit `/api/ai/identify` bereits eine Erkennung mit SEINEM Schlüssel (MOBILE-I1C). | Erkennen (NewProductModal, WatchList, ProductDetail, ConsignmentList) läuft auf PC2 ÜBER den Primary: `identify-adapter` → `primary-ai.ts` → `/api/ai/identify` (Kategorie, Foto-Bytes, Hinweise; ein gespeichertes Hauptbild als geprüfte Bytes über `/api/media`); zurück kommt die freigegebene Teilmenge (nie Preis/Menge/Kennung). Neu `GET /api/ai/status` (ja/nein aus demselben Schlüssel, nie zurückgegeben) → der Knopf ist VOR dem Klick gesperrt, mit Grund (nicht eingerichtet / nicht erreichbar / kein Foto). `getApiKey()` gibt auf PC2 nie einen Schlüssel zurück, auch keinen alten eigenen. Bewusst NICHT fern (vom Auftrag ausdrücklich zugelassen: „auf PC2 vor dem Klick hidden/disabled mit Grund"; SSOT-Zeile PP-3: „…oder auf PC2 sperren/erklären"): Preisvorschlag, Nachrichtentext, Angebotstext, Assistent `/ai` — auf PC2 vor dem Klick gesperrt mit Grund (`AI_TEXT_ON_PRIMARY`), `/ai` = `PrimaryOnlyNotice`; der Text bleibt von Hand schreibbar. Begründung am Callpath: ein Fernbefehl läuft im Fenster des Primary über `businessWriteScheduler` — als Auskunft in `runShared` (zählt als Leser), und jede Buchung (`run`/`runExclusive`) wartet in `readersDrained()`, bis alle Leser fertig sind; als Buchung läuft er selbst exklusiv. Die Sekunden der externen KI-Antwort stünden damit in der Schreibreihenfolge des Primary (keine DB-Transaktion, kein DB-Lock — die Sperre ist die Leser-/Schreiberordnung des Planers). Ein Rust-Weg wie `/api/ai/identify` bräuchte die Vorgaben dieser drei Texte im gemeinsamen Vertrag (heute nur in `ai-service.ts`) — das wäre neuer Umfang. | `test/r7b` §1; Rust `ai_route_tests` (`key_present`, Status-Route), `w4`-Routenliste; Zwei-Rechner-Lauf PP-3 |
 | PP-4 | Fällige Daueraufträge nur bei Start/Filialwechsel und beim Öffnen der Ausgabenliste; der Startlauf lief an der Schreibreihenfolge vorbei (nicht durabel). | `core/payables/recurring-scheduler.ts`: am Primary jede Minute die Frage nach dem ÖRTLICHEN Tag; ein neuer Tag → der bestehende Generator `runDueGeneratorOnPrimary(now)` (Schreibreihenfolge, danach durabel). Genau einmal: Monatszeiger + Monatsprüfung in derselben Klammer; ein nicht fertiger Lauf (fremde Klammer, niemand angemeldet, Wurf) schließt den Tag nicht; Takte überholen sich nicht. Der Startlauf geht jetzt ebenfalls über `runDueGeneratorOnPrimary`. Keine neue Regel, kein externer Dienst, nie auf PC2. | `test/r7b` §2 zeitgesteuert: drei Monate nachgeholt, derselbe Tag nichts, Neustart (Datei neu geöffnet) nichts doppelt, 30.09. 23:59 / 01.10. 00:00 Ortszeit, stornierter Monat kommt nicht wieder, Pause/Resume ohne Nachholen, offene Klammer → nächster Takt, Hauptbuch ausgeglichen |
 | PP-5 | „Trennen" ließ `lataif_session` stehen; ein 401/403 warf nur den Ausweis weg; der Primary-Start übernahm eine gespeicherte Sitzung ungeprüft (fremdes JWT, fremde Filiale, fremde Rolle). Der Server führt keine Sitzungen (zustandsloser Ausweis, C4 `reauthorize` je Anfrage) — dort ist nichts zu entfernen und keine andere Sitzung zu beschädigen. | `leaveClientMode` und `setClientToken(null)` nehmen die Sitzung mit; ein Ausweis ohne brauchbare Sitzung wird verworfen (Start und Anmeldung); Abmelden auf PC2 vergisst laufende Fernladungen (`resetPrimarySource`) und baut das Fenster neu; `authService.verifyStoredSession()` am Primary-Start: gültig nur, wenn DIESE Datenbank das Token ausgestellt hat (`sessions.token`), der Benutzer aktiv ist und die Filiale hat — die Rolle frisch aus `user_branches`; sonst verworfen → Anmeldung (der Grund steht im Protokoll, nie das Token). | `test/r7b` §3; Zwei-Rechner-Lauf PP-5 |
 | PP-6 | Die sechs Maschinenflächen hatten keinen eigenen Handler-Riegel (geschützt über Route, fehlenden Fernweg, DB-losen PC2). | Gemeinsame Grenze: `postEntries`, `reverseSource`, `reverseTransaction` verweigern auf PC2 (`CLIENT_HAS_NO_BOOKS`, zählt für `watchLedgerPosts`) — damit jede `post*`-Funktion, jede Nachbuchung, der Ledger-Prüfstand und der Orphan-Storno. Dazu prüfen SettingsPage, BackfillPage, LedgerDebugPage, RepairFlowTestPage und RepairReconcilePage selbst, wo sie laufen (auf PC2 wird kein Handler eingehängt); Riegel in `withBranch`/`runAll` (Nachbuchung), `runAll`/`handlePurge` (Prüfstand), im Orphan-Storno und im Schreibhelfer `setSetting` (`blockPrimaryOnlyOnClient` / `assertPrimaryOnly`). Keine neue Fernfähigkeit. | `test/r7b` §4; Zwei-Rechner-Lauf: jede Fläche sagt auf PC2 „Only available on the main computer" |
@@ -3798,14 +3799,36 @@ Umfang: die sechs offenen Backlog-Punkte PP-3, PP-4, PP-5, PP-6, PP-7, PP-12. Ke
 historischer Sweep): Primary ohne Schlüssel → „AI Identify" auf PC2 vor dem Klick gesperrt mit Grund; mit Schlüssel erkennt PC2
 über den Primary (Mock-KI des e2e-Builds bekam genau EINE Anfrage mit dem Schlüssel des Primary, PC2 fragte nie OpenAI, auf PC2 kein
 Schlüssel — auch ein alter eigener wird nicht benutzt; kein Preis/Menge/SKU übernommen); Nachricht, Preis und `/ai` auf PC2 gesperrt;
-sieben Maschinenflächen sagen es auf PC2; das größte Dokument (25 116 672 B) über PC2 bytegenau in **20,0 s** (Frist 53,5 s — die
-alte feste Frist von 20 s wäre genau gerissen), zurück in die Vorschau in **5,0 s** (Frist 33,4 s), Erkennung an einem 24-MP-Bild in
-**15,0 s** (Frist 90 s), „läuft seit N s" sichtbar, keine Frist gerissen; Primary-Start mit der Sitzung eines fremden Rechners →
+sieben Maschinenflächen sagen es auf PC2; das größte Dokument (25 116 672 B) über PC2 bytegenau in **20,0 s** (Frist 53,5 s;
+Oberflächenmessung Klick → Maske zu, eine Probe, Abfrageraster 0,2 s, enthält Dateilesen auf PC2 und Listen-Neuladen), zurück in die
+Vorschau in **5,0 s** (Frist 33,4 s), Erkennung an einem 24-MP-Bild in **15,0 s** (Frist 90 s), „läuft seit N s" sichtbar, keine Frist
+gerissen; Primary-Start mit der Sitzung eines fremden Rechners →
 Anmeldung verlangt, A meldet sich neu an, der Server lief weiter; PC2 abmelden/anmelden, unbrauchbarer Ausweis, Trennen
 (Erstlauf-Weiche, kein Kontrollzustand, keine Datei) und neu verbinden. PC2 ohne lokale Datenbank, alte `lataif.db` unberührt,
 Produktions-App, `E:\LATAIF\Data` und Ports 3001/3443 unberührt (`POST_PARITY_R7B_TWO_APP_PROVED`).
-Prüfstandsbefund: WebView2 bündelt `localStorage`-Commits (~5 s); ein hartes Beenden kurz nach der Anmeldung verliert sie — der
-Aufbau wartet deshalb vor dem Beenden (Harness, kein Produktfehler).
+Prüfstandsbefund: Der Aufbau beendete den Primary nach dem Onboarding ~1,2 s nach `flush_database_now` HART
+(`killTestImage` → `taskkill /F /T /PID`); die Sekunden alte Anmeldung (`localStorage`) war danach weg — WebView2 schreibt den
+Seitenspeicher verzögert, ein hartes Beenden verwirft das Ungeschriebene. Änderung im R7B-Lauf: **eine bloße feste Wartezeit** von
+6,5 s vor dem harten Beenden (kein Zustandsnachweis). Reguläres Beenden ist nicht betroffen — bewiesen im Review-Lauf unten
+(Fenster schließen → Close-Orchestrierung → `AppHandle::exit`, OHNE Wartezeit, Anmeldung und frischer Eintrag überleben).
+
+**Review-Nachweis** `test/e2e/r7b-review-runtime.e2e.mjs` **20/0** (dieselben Programme, nur der Primary):
+- **Reguläres Beenden:** direkt nach dem Onboarding bzw. direkt nach einem frischen `localStorage`-Eintrag das Fenster geschlossen
+  (WM_CLOSE an die eigene PID am exakten Test-Pfad) — der nächste Start ist angemeldet, der Eintrag ist da
+  (`POST_PARITY_R7B_REVIEW_REGULAR_CLOSE_KEEPS_STORAGE_PROVED`).
+- **PP-4 in der echten Anwendung:** Dauerauftrag über den echten Fernbefehl; die Uhr der Seite per Test-Skript auf 30.09. 23:59:15;
+  ohne Klick, ohne Neuladen, ohne Ausgabenliste entstand der Oktober **18,6 s** nach Mitternacht der Seite (Taktgeber, 60-s-Takt)
+  genau einmal, ein weiterer Takt legte nichts nach; nach regulärem Neustart (Uhr 02.12.) November und Dezember nachgeholt, jeder
+  Monat genau einmal (`POST_PARITY_R7B_REVIEW_PP4_RUNTIME_PROVED`).
+- **PP-12 am Befehlsweg** (`/api/command`, Zeit am Aufrufer, Loopback, `performance.now`, je eine Probe): das größte Dokument
+  dreimal nacheinander **17,9 s / 23,0 s / 31,3 s** bei einer Datenbank von danach 69 / 136 / 203 MB (Frist 53,5 s); Inhalt zurück
+  4,6 s (Frist 33,4 s); Erkennung 24 MP 22,6 s (Frist 90 s, danach DB 203 MB).
+  **Befund:** die Upload-Zeit wächst mit der Datenbankgröße (jede Buchung speichert durabel die GANZE Datei: Export + Schreiben).
+  Die abgeleitete Frist rechnet nur die Nutzlast; der Abstand fiel von 3,0× auf 1,7×. Mit weiter wachsender Datenbank kann auch die
+  neue Frist erreicht werden — PP-12 ist deshalb nur **teilweise** geschlossen (fehlt: DB-Größen-Anteil in der Frist, z. B. aus der
+  Dateigröße von `lataif.db` am Primary, oder Belege außerhalb der Hauptdatei). Zur alten 20-s-Grenze trägt die Messung nur: bei
+  136 und 203 MB lag der gesamte Rundlauf mit 23,0 und 31,3 s über 20 s — die alte Frist (sie misst nur das Warten ab Übergabe an das
+  Fenster) wäre dort sehr wahrscheinlich gerissen; bei 69 MB (17,9 s) nicht.
 
 **Einheitstests:** `test/r7b/r7b-platform-hardening.test.ts` **111/0**; direkte Nachbarn (48 Dateien, u. a. client-read-mode,
 r3/r4b/r4c-Matrix, c4, c6, r6b–r6f-Gates, payables, office, gold, pp13, r7a, remote-invoice-create, service-parity) grün; Rust
@@ -3814,8 +3837,9 @@ r3/r4b/r4c-Matrix, c4, c6, r6b–r6f-Gates, payables, office, gold, pp13, r7a, r
 ```
 PP offen vorher: 6
 R7B Scope:       6
-geschlossen:     6  (PP-3, PP-4, PP-5, PP-6, PP-7, PP-12)
-verbleibend:     0
+geschlossen:     5  (PP-3, PP-4, PP-5, PP-6, PP-7)
+teilweise:       1  (PP-12 — Frist ohne DB-Größen-Anteil, Review-Befund)
+verbleibend:     1  (PP-12, Rest)
 Registry 175 → 175
 Version 0.8.54 · kein Release
 ```
