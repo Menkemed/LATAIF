@@ -583,6 +583,70 @@ async fn business_and_infrastructure_answers_stay_apart() {
     }
 }
 
+// ── 9b) POST-PARITY R7C R3 — vom durablen Nachweis abgewiesen: nicht als Besitzer merken ─────
+#[tokio::test]
+async fn a_request_the_durable_ledger_refused_does_not_block_the_original_afterwards() {
+    let (bridge, sink) = bridge_with_sink();
+    let bridge = Arc::new(bridge);
+    bridge.announce_generation();
+    // Nach einem Neustart kennt der Speicher die Kennung nicht; sie steht nur im durablen Nachweis
+    // des Renderers — dort gehört sie dem ursprünglichen Rumpf.
+    const ID: &str = "7c7c7c7c-1a2b-4c3d-8e4f-5a6b7c8d9e0f";
+    let original = serde_json::json!({ "firstName": "R7C", "lastName": "Offen" });
+    let other = serde_json::json!({ "firstName": "R7C", "lastName": "Geaendert" });
+
+    // (1) Ein anderer Rumpf unter der Kennung: der Renderer weist ihn ab (Nachweis-Konflikt).
+    let b = bridge.clone();
+    let s = sink.clone();
+    tokio::spawn(async move {
+        for _ in 0..500 {
+            if let Some(env) = s.last() {
+                let _ = b.reply(&env.op_id, env.generation, Reply::NotExecuted {
+                    code: "BRIDGE_COMMAND_ID_CONFLICT".into(),
+                    message: "this command id is already used for a different request".into(),
+                });
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    });
+    let refused = bridge
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &other), "ADMIN", other.clone(), Duration::from_secs(5))
+        .await
+        .expect("eine Antwort des Renderers");
+    assert!(matches!(refused, Reply::NotExecuted { .. }), "der Nachweis hat abgewiesen");
+    assert_eq!(bridge.remembered_identities(), 0, "die abgewiesene Identität bleibt nicht als Besitzer stehen");
+    sink.seen.lock().unwrap().clear();
+
+    // (2) Der ursprüngliche Auftrag unter derselben Kennung wird zugestellt (nicht 409 aus dem Speicher)
+    //     — der Renderer entscheidet aus dem Nachweis (Replay).
+    let b = bridge.clone();
+    let s = sink.clone();
+    tokio::spawn(async move {
+        for _ in 0..500 {
+            if let Some(env) = s.last() {
+                let _ = b.reply(&env.op_id, env.generation, Reply::Ok { value: serde_json::json!({ "replayed": true }) });
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(2)).await;
+        }
+    });
+    let replay = bridge
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &original), "ADMIN", original.clone(), Duration::from_secs(5))
+        .await
+        .expect("zugestellt, nicht vom Speicher abgewiesen");
+    assert_eq!(replay, Reply::Ok { value: serde_json::json!({ "replayed": true }) });
+    // Der Zähler des Ersatzes läuft über den ganzen Test: je Anfrage genau eine Zustellung.
+    assert_eq!(sink.count(), 2, "die abgewiesene und der ursprüngliche — je genau eine Zustellung");
+
+    // (3) Danach ist der Speicherschutz wieder da: ein anderer Rumpf wird VOR der Zustellung abgewiesen.
+    let again = bridge
+        .submit_as(&identity_with(ID, OP_PROBE, "user-a", &other), "ADMIN", other, SHORT)
+        .await
+        .expect_err("die Kennung gehört wieder dem ursprünglichen Rumpf");
+    assert_eq!(again, BridgeError::CommandIdConflict);
+}
+
 // ── 10) Jeder Fehler hat seinen eigenen Code und Status ────────────────────
 #[test]
 fn every_state_says_something_different() {

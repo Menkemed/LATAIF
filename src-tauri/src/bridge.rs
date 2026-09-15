@@ -819,6 +819,19 @@ impl IdentityStore {
         self.evict();
     }
 
+    /// POST-PARITY R7C R3 — der durable Nachweis hat DIESE Anfrage abgewiesen (die Kennung gehört dort
+    /// einem anderen Rumpf). Dann darf sie hier nicht als „die" Identität der Kennung stehen bleiben:
+    /// sonst wiese dieser Speicher den rechtmäßigen ursprünglichen Auftrag ab (409), bis die Kennung
+    /// verdrängt ist oder der Primary neu startet. Entfernt wird nur genau diese Identität, und nur,
+    /// wenn nichts mehr darauf läuft.
+    fn forget_refused(&mut self, identity: &CommandIdentity) {
+        let drop = matches!(self.map.get(&identity.command_id), Some(e) if e.identity == *identity && e.in_flight == 0);
+        if drop {
+            self.map.remove(&identity.command_id);
+            self.order.retain(|k| k != &identity.command_id);
+        }
+    }
+
     /// Verdrängt die ältesten, ÜBERSPRINGT aber alles, was gerade läuft. Die Schleife ist durch die
     /// Länge begrenzt: sind ausnahmsweise alle Einträge offen, wird nichts verdrängt und der
     /// Speicher wächst vorübergehend, statt einen laufenden Auftrag zu verlieren.
@@ -940,6 +953,10 @@ impl Bridge {
         {
             let mut store = self.identities.lock().unwrap_or_else(|e| e.into_inner());
             store.finish(&identity.command_id);
+            // R7C R3 — vom durablen Nachweis abgewiesen: diese Identität nicht als Besitzer merken.
+            if matches!(out, Ok(Reply::NotExecuted { .. })) {
+                store.forget_refused(identity);
+            }
         }
         out
     }
