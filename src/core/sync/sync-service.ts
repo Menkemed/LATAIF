@@ -11,7 +11,8 @@ import { commitPulledBatch, applyChangesAtomic } from './durable-cursor';
 // M6-B2DE4 §5 — the apply path (denylist, identifier gates, applyUpsert, the DELETE branch and
 // the applySyncChange dispatcher) lives in the node-safe `apply-change.ts` so the behavioral gate
 // can drive the REAL functions against a real sql.js database. Same implementation, one home.
-import { applySyncChange, assertSyncIdentifier } from './apply-change';
+import { applySyncChange, assertSyncIdentifier, SyncPoisonError } from './apply-change';
+import { prepareRecordImages, SYNC_RECORD_IMAGE_REJECTED } from './pulled-record-images';
 import { planPush, pushBody } from './push-batch';
 // M6-B3A §9/§11 — the client's durable quarantine writer + status reader (node-safe, driven by the
 // b3a gate too).
@@ -355,6 +356,20 @@ async function pullChanges(): Promise<number> {
     return 0;
   }
 
+  // POST-PARITY R7B PP-12 — die Fotos einer abgeholten Zeile (Handy-Reparatur, Einkaufs-Inbox, jede
+  // Bildspalte des Manifests) erfüllen bei der Übernahme denselben Vertrag wie am Primary: neue durch
+  // den EINEN Normalisierer, schon gespeicherte dieser Zeile unverändert, ein unspeicherbares Foto
+  // macht die Änderung zum Quarantänefall (s. `pulled-record-images`). Vor der Transaktion, weil der
+  // Normalisierer asynchron ist — aber im selben exklusiven Platz (`syncNow`), also ohne fremden
+  // Schreiber zwischen Lesen und Anwenden.
+  const prepared = await prepareRecordImages(changes, (table, id, column) => {
+    assertSyncIdentifier('table', table);
+    assertSyncIdentifier('column', column);
+    const r = db.exec(`SELECT ${column} FROM ${table} WHERE id = ?`, [id]);
+    return r[0]?.values?.[0]?.[0];
+  });
+  changes = prepared.changes;
+
   // Apply remote changes to local DB
   // Plan §Sync-Duplicate-Detection: track IDs of products freshly inserted
   // via Sync (z.B. Foto-Upload vom Handy), damit der SyncDuplicateGuard
@@ -380,6 +395,10 @@ async function pullChanges(): Promise<number> {
       applyChangesAtomic(changes, {
         begin: () => db.run('BEGIN'),
         applyChange: (change) => {
+          const photo = prepared.rejected.get(change);
+          if (photo) {
+            throw new SyncPoisonError(SYNC_RECORD_IMAGE_REJECTED, `[Sync] ${SYNC_RECORD_IMAGE_REJECTED}: a photo in this change cannot be stored (${photo}).`);
+          }
           // M6-B2DE4 §5 / M6-B3A §4/§5 — the REAL apply dispatcher (control-plane denylist, canonical
           // table name, business allowlist, allowed operation, then the payload field/shape/limit
           // contract, then applyUpsert / DELETE). Every guard throws a SyncPoisonError BEFORE any SQL
