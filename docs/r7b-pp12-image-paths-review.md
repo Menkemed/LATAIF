@@ -6,6 +6,16 @@ Registry 175 (unverändert) · kein Push/Tag/Release. PP-3 … PP-7 gelten als g
 
 ## 0. Status je Punkt (jeder mit eigenem Beleg; keine Sammel-Aussage)
 
+**Freigabestatus (getrennt geführt):**
+
+| Stufe | Stand |
+|---|---|
+| technisch freigegeben | **ja** — `R7B_TECHNICAL_REVIEW_APPROVED_FCA07B1`, unabhängige Prüfung des Quellstands `fca07b1e33929f972d7c66c8ca22789f8f7ab3bc` (drei Nachforderungen zu `19ac2da` + korrigierte Meldung, § 13, § 14) |
+| lokal committed | ja — `main`, Freigabe-Doku als reiner Doku-Folgecommit auf `fca07b1` |
+| gepusht | **nein** |
+| released | **nein** (Version 0.8.54, Registry 175 unverändert, kein Tag) |
+| offen, nicht akzeptiert | R1, R2, R3, R4, G5 (Tabelle unten) |
+
 | Punkt | Status | Beleg (Einzelheiten im Abschnitt) |
 |---|---|---|
 | **PP-12 Frist der Dokumentwege** (DB-Größe + Wachstum, normale Befehle 20 s) | **geschlossen** (unverändert seit `1479b09`) | § 7; `r7b-pp12-large-db` 13/0 (bis 451/518 MB) |
@@ -548,5 +558,16 @@ entering it again." Keine Änderung an R1. Nachweis `r7b-platform-hardening` §6
 §7 „LEER"/„BESTAND" und §1–§4 grün; der Handy-Lauf sendet JSON-Text-Listen), übrige Einheitstests (`verifyStoredSession`,
 `fehlertext`, `prepareRecordImages` haben keine weiteren Testaufrufer). `tsc -b` grün; Lint der geänderten Dateien ohne neue
 Fehler. Offen, separat geführt und **nicht** stillschweigend akzeptiert: R1, R2, R3, R4, G5 (§ 0).
+
+## 14. Technische Freigabe
+
+Unabhängige Prüfung des Quellstands **`fca07b1e33929f972d7c66c8ca22789f8f7ab3bc`** abgeschlossen: Status
+**`R7B_TECHNICAL_REVIEW_APPROVED_FCA07B1`**. Freigegeben sind die drei Nachforderungen zu `19ac2da` (PP-5 Sitzungsablauf und
+Fehlerfall `App.tsx`, PP-12 ungültige Bildformen, Persistenz-Wortlaut) und die korrigierte Meldung bei offenem Ausgang (§ 13).
+Die Freigabe gilt für diesen Commit; der nachfolgende Commit ändert nur Dokumentation (dieses Review, SSOT) — kein Produktcode,
+keine Tests, keine neuen Läufe; es gelten die vorhandenen Nachweise.
+
+Getrennt: technisch freigegeben **ja** · lokal committed **ja** · gepusht **nein** · released **nein** (0.8.54, Registry 175).
+Nicht Teil der Freigabe und weiter offen, nicht akzeptiert: **R1, R2, R3, R4, G5** (§ 0).
 
 Version 0.8.54 und Registry 175 unverändert (keine technische Notwendigkeit).

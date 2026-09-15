@@ -3880,7 +3880,8 @@ Version 0.8.54 · kein Release
 
 ## R7B / PP-12 — Abschlussprüfung: Beenden, Handy-Übernahme, Artikelbilder (15.09.2026, Nachtrag)
 
-Unabhängige Prüfung von `0a15565` (Freigabe offen): Befunde einzeln nachgewiesen und — wo Pflicht — behoben. PP-3 … PP-7 nicht
+Unabhängige Prüfung von `0a15565`, zuletzt des Quellstands `fca07b1` — **technisch freigegeben**
+(`R7B_TECHNICAL_REVIEW_APPROVED_FCA07B1`; nicht gepusht, nicht released; R1–R4, G5 offen, Review § 0/§ 14): Befunde einzeln nachgewiesen und — wo Pflicht — behoben. PP-3 … PP-7 nicht
 angefasst. Review mit Callpaths, Messungen und Baseline: `docs/r7b-pp12-image-paths-review.md`. Keine neue Fernbuchung, Registry
 unverändert **175**.
 
@@ -3906,7 +3907,10 @@ PP offen vorher:     0  (Post-Parity-Backlog PP-1 … PP-14 geschlossen)
 Prüfbefunde:         F4 behoben · G2 behoben · G3 zusammengeführt · Rust-Pin behoben ·
                      G7/G6/F2/F1 belegt eingeordnet · Review 19ac2da: PP-5-Ablauf, PP-12-Formen, Meldung behoben ·
                      offen (separat, nicht akzeptiert): R1–R4, G5 (eigene Entscheidung)
-verbleibend PP:      0  (unabhängige Freigabe offen)
+verbleibend PP:      0
+Freigabe:            technisch freigegeben R7B_TECHNICAL_REVIEW_APPROVED_FCA07B1 (geprüft: fca07b1e33929f972d7c66c8ca22789f8f7ab3bc)
+                     · lokal committed ja · gepusht nein · released nein
+offen, nicht akzeptiert: R1, R2, R3, R4, G5
 Registry 175 → 175
 Version 0.8.54 · kein Release
 ```
