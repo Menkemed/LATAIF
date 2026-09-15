@@ -702,6 +702,11 @@ pub enum Reply {
     Ok { value: serde_json::Value },
     BusinessError { code: String, message: String },
     InfrastructureError { code: String },
+    /// POST-PARITY R7C R3 — nachweislich NICHT ausgeführt: der durable Nachweis des Renderers hält
+    /// die Kennung für eine andere Anfrage. Nach außen genau wie `BridgeError::CommandIdConflict`
+    /// (409, `outcome: not_executed`) — auch wenn der Kennungsspeicher sie verdrängt hat oder der
+    /// Primary neu gestartet ist.
+    NotExecuted { code: String, message: String },
 }
 
 /// Wem eine logische Kennung gehört. Der Client vergibt sie EINMAL pro Speicherversuch und

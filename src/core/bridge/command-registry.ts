@@ -181,11 +181,18 @@ export function knownCommands(): string[] {
   return [...REGISTRY.keys()].sort();
 }
 
-/** Die drei Ausgänge, die auch Rust kennt. */
+/** Die Ausgänge, die auch Rust kennt (`bridge::Reply`). */
 export type Reply =
   | { kind: 'ok'; value: CommandResult }
   | { kind: 'business_error'; code: string; message: string }
-  | { kind: 'infrastructure_error'; code: string };
+  | { kind: 'infrastructure_error'; code: string }
+  /** POST-PARITY R7C R3 — nachweislich NICHT ausgeführt: die Kennung steht im durablen Nachweis für
+   *  eine andere Anfrage. Rust antwortet damit wie beim Konflikt aus seinem Kennungsspeicher (409,
+   *  `outcome: not_executed`) — auch nach Verdrängung oder Neustart. */
+  | { kind: 'not_executed'; code: string; message: string };
+
+/** Der Kennungskonflikt nach außen — derselbe Code wie `BridgeError::CommandIdConflict` in Rust. */
+export const BRIDGE_COMMAND_ID_CONFLICT = 'BRIDGE_COMMAND_ID_CONFLICT';
 
 /**
  * Führt einen Auftrag aus und übersetzt JEDEN Ausgang in eine Antwort. Diese Funktion wirft nicht:
@@ -250,6 +257,13 @@ export async function executeCommand(op: string, payload: unknown, actor?: Comma
     // Kein Urteil, sondern ein Nicht-Zustandekommen (dieselbe Kennung, anderer Rumpf). Das ist
     // ausdrücklich KEIN fachliches Nein: der Vorgang wurde nie bewertet.
     if (err instanceof CommandNotEvaluated) {
+      // R7C R3 — die Kennungskollision ist belegt (der Nachweis hält die Kennung für eine andere
+      // Anfrage): DIESE Anfrage lief nachweislich nicht. Früher kam sie als Störung (500, ohne
+      // `outcome`) an und sah beim Client wie „unbekannt" aus — anders als derselbe Konflikt aus dem
+      // Kennungsspeicher der Brücke. Alle übrigen Nicht-Zustandekommen bleiben, was sie sind.
+      if (err.code === 'COMMAND_ID_CONFLICT') {
+        return { kind: 'not_executed', code: BRIDGE_COMMAND_ID_CONFLICT, message: 'this command id is already used for a different request' };
+      }
       return { kind: 'infrastructure_error', code: err.code };
     }
     if (err instanceof TransactionUnhealthyError) {

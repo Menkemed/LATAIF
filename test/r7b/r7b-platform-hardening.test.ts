@@ -536,8 +536,8 @@ marker('POST_PARITY_R7B_PP7_DEAD_CODE_REMOVED');
     `UI eine abgelaufene Frist heißt „läuft vielleicht noch", nicht „keine Antwort" (${t})`);
   const u = fehlertext({ kind: 'unknown', code: 'SERVER_UNAVAILABLE' } as never);
   ok(/No answer from the primary/.test(u) && /not clear whether/.test(u), 'UI ein nicht erreichbarer Primary bleibt „keine Antwort"');
-  ok([t, u].every((m) => /If you leave this form or reload first, check whether it was saved/.test(m) && !/never/.test(m)),
-    'UI keine absolute Zusage „nie doppelt": die Wiederholung gilt aus DERSELBEN Maske; nach Verlassen/Neuladen erst nachsehen (R1 offen)');
+  ok([t, u].every((m) => /If you leave this form or reload, it stays listed under "Unresolved saves"/.test(m) && !/never/.test(m)),
+    'UI keine absolute Zusage „nie doppelt": die Wiederholung gilt aus derselben Maske; nach Verlassen/Neuladen steht der Vorgang unter „Unresolved saves" (R7C R1)');
   ok(!/saved\b.*successfully|Saved!/.test(t), 'UI Frist ≠ Erfolg');
   const a = ocr.ocrTargetSize(4000, 3000), b = ocr.ocrTargetSize(8000, 6000), c = ocr.ocrTargetSize(20000, 1000);
   ok(!a.scaled && b.scaled && b.width * b.height <= ocr.OCR_MAX_PIXELS && Math.abs(b.width / b.height - 4 / 3) < 0.01 && c.scaled && c.width * c.height <= ocr.OCR_MAX_PIXELS,

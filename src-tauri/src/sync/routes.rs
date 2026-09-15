@@ -251,22 +251,70 @@ async fn command_execute(
         .submit_as(&identity, &claims.role, payload, deadline)
         .await
     {
-        Ok(crate::bridge::Reply::Ok { value }) => {
-            (StatusCode::OK, Json(serde_json::json!({ "ok": true, "value": value }))).into_response()
+        Ok(reply) => {
+            let (status, body) = command_reply_parts(reply);
+            (status, Json(body)).into_response()
         }
+        Err(e) => error_response(e),
+    }
+}
+
+/// Die Antwort des Renderers als HTTP-Status + Rumpf.
+pub(crate) fn command_reply_parts(reply: crate::bridge::Reply) -> (StatusCode, serde_json::Value) {
+    match reply {
+        crate::bridge::Reply::Ok { value } => (StatusCode::OK, serde_json::json!({ "ok": true, "value": value })),
         // Ein fachliches Nein ist eine Antwort, kein Serverfehler: 409, damit ein Client es nicht
         // blind wiederholt.
-        Ok(crate::bridge::Reply::BusinessError { code, message }) => (
+        crate::bridge::Reply::BusinessError { code, message } => (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({ "ok": false, "error": code, "message": message })),
-        )
-            .into_response(),
-        Ok(crate::bridge::Reply::InfrastructureError { code }) => (
+            serde_json::json!({ "ok": false, "error": code, "message": message }),
+        ),
+        crate::bridge::Reply::InfrastructureError { code } => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(serde_json::json!({ "ok": false, "error": code })),
+            serde_json::json!({ "ok": false, "error": code }),
+        ),
+        // R7C R3 — derselbe Konflikt wie aus dem Kennungsspeicher der Brücke (`error_response`):
+        // 409 MIT `outcome`, damit der Client ihn nicht für ein fachliches Nein hält.
+        crate::bridge::Reply::NotExecuted { code, message } => (
+            StatusCode::CONFLICT,
+            serde_json::json!({ "ok": false, "error": code, "message": message, "outcome": "not_executed" }),
+        ),
+    }
+}
+
+#[cfg(test)]
+mod command_reply_tests {
+    use super::*;
+
+    #[test]
+    fn a_ledger_id_conflict_from_the_renderer_is_the_same_409_not_executed_as_the_bridge_conflict() {
+        // Genau die Form, die der Renderer (`command-registry.ts`) sendet.
+        let reply: crate::bridge::Reply = serde_json::from_str(
+            r#"{"kind":"not_executed","code":"BRIDGE_COMMAND_ID_CONFLICT","message":"this command id is already used for a different request"}"#,
         )
-            .into_response(),
-        Err(e) => error_response(e),
+        .unwrap();
+        let (status, body) = command_reply_parts(reply);
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["outcome"], "not_executed");
+        assert_eq!(body["error"], "BRIDGE_COMMAND_ID_CONFLICT");
+        assert_eq!(body["ok"], false);
+        let bridge = crate::bridge::BridgeError::CommandIdConflict;
+        assert_eq!(bridge.code(), "BRIDGE_COMMAND_ID_CONFLICT");
+        assert_eq!(bridge.http_status(), 409);
+        assert_eq!(bridge.outcome().as_str(), "not_executed");
+    }
+
+    #[test]
+    fn the_other_replies_keep_their_shape() {
+        let (s, b) = command_reply_parts(crate::bridge::Reply::Ok { value: serde_json::json!({ "a": 1 }) });
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["value"]["a"], 1);
+        let (s, b) = command_reply_parts(crate::bridge::Reply::BusinessError { code: "NO".into(), message: "m".into() });
+        assert_eq!(s, StatusCode::CONFLICT);
+        assert!(b.get("outcome").is_none(), "a business no carries no outcome");
+        let (s, b) = command_reply_parts(crate::bridge::Reply::InfrastructureError { code: "X".into() });
+        assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(b.get("outcome").is_none());
     }
 }
 

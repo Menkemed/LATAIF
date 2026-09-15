@@ -75,6 +75,7 @@ import { authService } from '@/core/auth/auth';
 // Benutzertabelle, die es dort nicht gibt.
 import { installClientSession, refreshClientSessionContext } from '@/core/auth/client-session';
 import { ClientShell } from '@/components/startup/ClientShell';
+import { PendingSavesBar } from '@/components/shared/PendingSavesBar';
 import { FirstRunGate } from '@/components/startup/FirstRunGate';
 import { prepareAndCloseApplication, createSingleFlight, type CloseStatus } from '@/core/lifecycle/close-orchestration';
 import { isRelaunchApproved, withTimeout, syncIdleBudgetMs, flushBudgetMs } from '@/core/lifecycle/relaunch-coordinator';
@@ -420,6 +421,7 @@ export default function App() {
         <CloseOverlay status={closeStatus ?? reloadStatus} mode={closeStatus ? 'close' : 'reload'} />
         <GlobalSearch />
         <UpdateBanner />
+        {clientMode && <PendingSavesBar />}
         <SyncDuplicateGuard />
         <Sidebar />
         <ErrorBoundary>

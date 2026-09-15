@@ -37,6 +37,8 @@ import { useCallback, useMemo, useRef, useState } from 'react';
 import { readsFromPrimary } from '@/core/data/primary-source';
 import {
   CommandSaveController, type CommandSaveAttempt, type SaveOutcome,
+  COMMAND_ID_CONFLICT, ORIGINAL_UNRESOLVED, EARLIER_SAVE_UNRESOLVED, EARLIER_TRY_OPEN,
+  PENDING_STORE_FAILED, PENDING_CONTEXT_MISMATCH,
 } from '@/core/bridge/client-command-save';
 
 /** Der Ausgang eines Speicherversuchs, wie ihn ein Formular sieht. */
@@ -139,6 +141,12 @@ export function useSharedWrite<T>(op: string): SharedWrite<T> {
     laeuft.current = true;
     setBusy(true);
     try {
+      // R7C R1 — eine NEUE Kennung, während ein früherer Vorgang dieser Buchung offen ist, erst
+      // nach ausdrücklicher Bestätigung (zweiter Klick).
+      if (remote) {
+        const halt = await controller.guardNewEntry();
+        if (halt) return halt as WriteOutcome<T>;
+      }
       // Derselbe Versuch, solange er offen ist: eine Zeitgrenze macht aus einer Absicht keine neue.
       const attempt = remote ? controller.beginAttempt() : null;
       if (attempt) setOpenCommandId(attempt.commandId);
@@ -213,6 +221,8 @@ export function useSharedWrites(): SharedWrites {
       if (remote) {
         let c = waechter.current.get(op);
         if (!c) { c = new CommandSaveController<Record<string, unknown>>(op); waechter.current.set(op, c); }
+        const halt = await c.guardNewEntry();
+        if (halt) { setFehler(fehlertext(halt)); return halt as WriteOutcome<T>; }
         attempt = c.beginAttempt();
       }
       const r = await runSharedWrite<T>(remote, adapters, attempt);
@@ -238,26 +248,42 @@ export function useSharedWrites(): SharedWrites {
  *
  * Der offene Ausgang bekommt bewusst eigene Worte: „nicht gespeichert" wäre falsch (es kann
  * passiert sein), „gespeichert" wäre schlimmer. Die ehrliche Auskunft ist, dass es offen ist und
- * dass ein erneuter Versuch AUS DIESER MASKE nichts doppelt anlegt. Das gilt nur, solange die Maske
- * offen bleibt: die offene Kennung lebt im Speicher der Maske (R7B-Review R1) — nach Verlassen oder
- * Neuladen erst nachsehen, ob es gespeichert wurde.
+ * dass ein erneuter Versuch nichts doppelt anlegt. Seit R7C R1 gilt das auch nach Verlassen oder
+ * Neuladen: der Vorgang bleibt unter „Unresolved saves" stehen und wird dort mit derselben Kennung
+ * und dem ursprünglichen Auftrag geklärt.
  */
+const BLEIBT = 'If you leave this form or reload, it stays listed under "Unresolved saves" — clarify it there before entering it again.';
 export function fehlertext(r: WriteOutcome<unknown>): string {
   switch (r.kind) {
     case 'ok': return '';
     case 'business_error': return r.message || r.code;
-    case 'not_executed': return `Not saved (${r.code}). You can try again.`;
+    case 'not_executed':
+      if (r.code === COMMAND_ID_CONFLICT) {
+        return 'The main computer already holds this save number for different content, so this attempt was NOT executed. '
+          + 'What was recorded under the number earlier is on the main computer — check there. The save stays listed under "Unresolved saves".';
+      }
+      if (r.code === PENDING_STORE_FAILED) return `Not sent (${r.code}): this computer could not keep a safe record of the save, so nothing was sent. You can try again.`;
+      if (r.code === PENDING_CONTEXT_MISMATCH) return r.message;
+      return `Not saved (${r.code}). You can try again.`;
     case 'unknown':
+      // R7C R2 — das Formular hat sich geändert, der frühere Vorgang ist offen: nichts ging hinaus.
+      if (r.code === ORIGINAL_UNRESOLVED) {
+        return 'Your earlier save of this form is still unresolved, and the form has changed since — your changes were NOT sent. '
+          + 'First clarify the earlier save under "Unresolved saves" (it repeats the ORIGINAL under its own number); '
+          + 'then save your changes as an edit or a new entry.';
+      }
+      if (r.code === EARLIER_SAVE_UNRESOLVED) return r.message;
+      if (r.code === EARLIER_TRY_OPEN) return `${r.message}. ${BLEIBT}`;
       // POST-PARITY R7B PP-12 — eine abgelaufene Frist heißt NICHT „keine Antwort": der Primary
       // kann noch arbeiten. Offen ist es trotzdem — und die Wiederholung bleibt dieselbe.
       if (r.code === 'BRIDGE_TIMEOUT') {
         return 'The main computer did not finish within the time limit (BRIDGE_TIMEOUT) — it may still be working, '
           + 'and it is not clear whether this was saved. Press again on this form: the same attempt is repeated and is not saved twice. '
-          + 'If you leave this form or reload first, check whether it was saved before entering it again.';
+          + BLEIBT;
       }
       return `No answer from the primary (${r.code}) — it is not clear whether this was saved. `
         + 'Press save again on this form: the same attempt is repeated and is not saved twice. '
-        + 'If you leave this form or reload first, check whether it was saved before entering it again.';
+        + BLEIBT;
   }
 }
 

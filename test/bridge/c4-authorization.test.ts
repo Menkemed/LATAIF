@@ -419,16 +419,18 @@ const ACT = (over: Record<string, unknown> = {}) => ({
   // Gleiche Kennung, gleicher Rumpf, ANDERER Benutzer → kein Replay, sondern Konflikt.
   const otherUser = await executeCommand('orders.update_status', body,
     ACT({ commandId: ID('91'), payloadHash: 'hX', userId: 'user-two' }) as never);
-  ok(otherUser.kind === 'infrastructure_error' && (otherUser as { code: string }).code === 'COMMAND_ID_CONFLICT',
+  // R7C R3 — der Konflikt aus dem durablen Nachweis ist „nachweislich nicht ausgeführt" (wie der aus
+  // dem Kennungsspeicher der Brücke), nicht mehr eine Störung.
+  ok(otherUser.kind === 'not_executed' && (otherUser as { code: string }).code === 'BRIDGE_COMMAND_ID_CONFLICT',
     `ISO dieselbe Kennung unter fremdem Benutzer ist ein Konflikt (${JSON.stringify(otherUser)})`);
   // Und unter fremder Filiale ebenso.
   const otherBranch = await executeCommand('orders.update_status', body,
     ACT({ commandId: ID('91'), payloadHash: 'hX', branchId: 'branch-two' }) as never);
-  ok(otherBranch.kind === 'infrastructure_error' && (otherBranch as { code: string }).code === 'COMMAND_ID_CONFLICT',
+  ok(otherBranch.kind === 'not_executed' && (otherBranch as { code: string }).code === 'BRIDGE_COMMAND_ID_CONFLICT',
     `ISO …und unter fremder Filiale auch (${JSON.stringify(otherBranch)})`);
   const otherTenant = await executeCommand('orders.update_status', body,
     ACT({ commandId: ID('91'), payloadHash: 'hX', tenantId: 'tenant-two' }) as never);
-  ok(otherTenant.kind === 'infrastructure_error' && (otherTenant as { code: string }).code === 'COMMAND_ID_CONFLICT',
+  ok(otherTenant.kind === 'not_executed' && (otherTenant as { code: string }).code === 'BRIDGE_COMMAND_ID_CONFLICT',
     `ISO …und unter fremdem Mandanten auch (${JSON.stringify(otherTenant)})`);
   ok(n(db, 'SELECT COUNT(*) FROM remote_command_ledger') === 1,
     'ISO es steht genau EINE Zeile im Nachweis — die des ersten');
@@ -514,7 +516,10 @@ const ACT = (over: Record<string, unknown> = {}) => ({
   ok(/setClientToken\(null\)/.test(save), 'SESSION …und wirft sein Token weg');
   ok(/return \{ kind: 'not_executed', code: 'NOT_AUTHENTICATED'/.test(save),
     'SESSION …und meldet AUSDRUECKLICH „nicht ausgefuehrt", nicht „vielleicht"');
-  ok(/if \(!c\.token\) return \{ kind: 'not_executed'/.test(save),
+  // R7C R3 — `notSent` meldet „nicht ausgeführt", solange kein früherer Versand angekommen sein kann;
+  // sonst bleibt der frühere Vorgang offen.
+  ok(/if \(!c\.token\) return this\.notSent\('NOT_AUTHENTICATED'/.test(save)
+    && /if \(this\.mayHaveRun\) return \{ kind: 'unknown'[^\n]*\n\s*return \{ kind: 'not_executed', code, message \};/.test(save),
     'SESSION ohne Token wird gar nicht erst gesendet');
   const read = codeOf('src/core/bridge/remote-read.ts');
   ok(/401|403/.test(read) && /setClientToken\(null\)/.test(read),
