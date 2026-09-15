@@ -97,6 +97,7 @@ export async function startDataRootMove(
   await coord.coordinatedRelaunch({
     blockWrites: () => { sync.pauseAutoSync(); wiring.stopMobileDrainPoller(); },
     awaitWritersIdle: () => sync.waitForSyncIdle(),
+    dbBytes: () => db.getLastPersistedDbBytes(),
     flushDurably: () => db.saveDatabaseDurably(),
     stopServerConfirmFree: () => core.invoke('stop_server_and_confirm_free'),
     restartServer: async () => { await core.invoke('sync_server_start'); },

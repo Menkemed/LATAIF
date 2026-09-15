@@ -46,6 +46,35 @@ export const SYNC_IDLE_TIMEOUT_MS = 8000;
 export const FLUSH_TIMEOUT_MS = 15000;
 export const SERVER_STOP_CONFIRM_TIMEOUT_MS = 6000;
 
+// POST-PARITY R7B PP-12 — die Wartefristen kennen die Datenbankgröße.
+//
+// Befund (nachgestellt, isolierte Test-Datenbank 518 MB): Fenster schließen, während der Primary seinen
+// Abgleich mit sich selbst fährt (eigene Änderungen hoch, das Echo zurück) → das Warten auf den laufenden
+// Abgleich lief nach der festen Frist von 8 s ab, das Beenden brach nach Regel A/B ab („Save failed …
+// 'flushing' did not complete within 8000 ms"), und die Anwendung blieb offen, bis jemand erneut schloss.
+// Ein Abgleichslauf speichert die GANZE Datenbank bis zu zweimal (Markierung nach dem Hochladen, durables
+// Übernehmen nach dem Abholen), der Flush ebenso (ein laufendes Speichern + das eigene) — beides wächst mit
+// der Datei, die festen Fristen wuchsen nicht mit. Jetzt: der feste Anteil wie bisher + zweimal „die
+// ganze Datei bei der Untergrenze der Brücke" (bridge.rs `SAVE_FLOOR_BYTES_PER_SEC`, PP-12). Bei kleiner
+// Datenbank praktisch unverändert (2 MB: +1 s). Es bleibt eine FRIST: läuft sie ab, bricht der Vorgang
+// weiter sichtbar ab — kein erzwungenes Beenden, kein stilles Weiterwarten.
+export const SAVE_FLOOR_BYTES_PER_SEC = 4_000_000;
+export const WHOLE_DB_SAVES_PER_WAIT = 2;
+
+/** Die ganze Datei einmal speichern, bei der Untergrenze gerechnet (ms). */
+export function saveAtFloorMs(dbBytes: number): number {
+  const b = Number.isFinite(dbBytes) && dbBytes > 0 ? dbBytes : 0;
+  return Math.ceil((b * 1000) / SAVE_FLOOR_BYTES_PER_SEC);
+}
+/** Warten auf einen laufenden Abgleich / Schreiber. */
+export function syncIdleBudgetMs(dbBytes: number): number {
+  return SYNC_IDLE_TIMEOUT_MS + WHOLE_DB_SAVES_PER_WAIT * saveAtFloorMs(dbBytes);
+}
+/** Der durable Flush vor dem Beenden / Neuladen / Neustart. */
+export function flushBudgetMs(dbBytes: number): number {
+  return FLUSH_TIMEOUT_MS + WHOLE_DB_SAVES_PER_WAIT * saveAtFloorMs(dbBytes);
+}
+
 export class RelaunchTimeoutError extends Error {
   readonly stage: RelaunchPhase;
   constructor(stage: RelaunchPhase, ms: number) {
@@ -75,8 +104,10 @@ export function withTimeout<T>(p: Promise<T>, ms: number, stage: RelaunchPhase):
 export interface CoordinatedRelaunchOps {
   /** Block NEW writes (pause auto-sync + stop mobile drain). Reversible until intent is persisted. */
   blockWrites: () => void;
-  /** Await every in-flight writer to reach a terminal state. Bounded by SYNC_IDLE_TIMEOUT_MS. */
+  /** Await every in-flight writer to reach a terminal state. Bounded by `syncIdleBudgetMs(dbBytes)`. */
   awaitWritersIdle: () => Promise<void>;
+  /** POST-PARITY R7B PP-12 — die Größe der Geschäftsdatenbank (Bytes) für die Wartefristen; ohne sie die festen. */
+  dbBytes?: () => number;
   /** Durable frontend-DB flush; MUST resolve only after the on-disk copy is committed. */
   flushDurably: () => Promise<void>;
   /** Stop the LAN server and CONFIRM the listener is released (Rust). Bounded. */
@@ -119,9 +150,10 @@ export async function coordinatedRelaunch(ops: CoordinatedRelaunchOps): Promise<
     ops.blockWrites();
     set('flushing', ops);
     // Bounded wait for writers. On timeout we do NOT know they finished → abort without resuming.
-    await withTimeout(ops.awaitWritersIdle(), SYNC_IDLE_TIMEOUT_MS, 'flushing');
+    const dbBytes = ops.dbBytes?.() ?? 0;
+    await withTimeout(ops.awaitWritersIdle(), syncIdleBudgetMs(dbBytes), 'flushing');
     writersTerminal = true;             // idle resolved → writers are terminal, safe to resume on abort
-    await withTimeout(ops.flushDurably(), FLUSH_TIMEOUT_MS, 'flushing');
+    await withTimeout(ops.flushDurably(), flushBudgetMs(dbBytes), 'flushing');
     set('stopping-server', ops);
     await withTimeout(ops.stopServerConfirmFree(), SERVER_STOP_CONFIRM_TIMEOUT_MS, 'stopping-server');
     serverStopped = true;              // the LAN server is now stopped + the port confirmed free

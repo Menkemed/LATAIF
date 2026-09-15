@@ -66,7 +66,7 @@ import { GlobalSearch } from '@/components/shared/GlobalSearch';
 import { UpdateBanner } from '@/components/shared/UpdateBanner';
 import { ErrorBoundary } from '@/components/shared/ErrorBoundary';
 import { SyncDuplicateGuard } from '@/components/sync/SyncDuplicateGuard';
-import { initDatabase, flushDatabase, flushDatabaseSync, saveDatabaseDurably } from '@/core/db/database';
+import { initDatabase, flushDatabase, flushDatabaseSync, saveDatabaseDurably, getLastPersistedDbBytes } from '@/core/db/database';
 // DATA-ROOT-B1a — die Erstlauf-Weiche und ihre eine, nichts veraendernde Frage.
 import { isFirstRunPending } from '@/core/lifecycle/first-run';
 import { isClientMode, clientConfig, setClientToken } from '@/core/bridge/client-mode';
@@ -77,7 +77,7 @@ import { installClientSession, refreshClientSessionContext } from '@/core/auth/c
 import { ClientShell } from '@/components/startup/ClientShell';
 import { FirstRunGate } from '@/components/startup/FirstRunGate';
 import { prepareAndCloseApplication, createSingleFlight, type CloseStatus } from '@/core/lifecycle/close-orchestration';
-import { isRelaunchApproved, withTimeout, SYNC_IDLE_TIMEOUT_MS, FLUSH_TIMEOUT_MS } from '@/core/lifecycle/relaunch-coordinator';
+import { isRelaunchApproved, withTimeout, syncIdleBudgetMs, flushBudgetMs } from '@/core/lifecycle/relaunch-coordinator';
 import { prepareAndReloadApplication, createSingleFlight as createReloadSingleFlight, type ReloadStatus } from '@/core/lifecycle/reload-orchestration';
 import { useAuthStore } from '@/stores/authStore';
 import { initAutomation } from '@/core/automation/automation-handlers';
@@ -263,11 +263,13 @@ export default function App() {
           // SHUTDOWN-FINAL — BOUNDED: ein gegen einen toten/haengenden Server steckengebliebener Sync darf
           // den X-Close nicht mehr unbegrenzt haengen lassen. Timeout → sichtbarer Abbruch (Overlay 'error'),
           // App bleibt offen, KEIN Hard-Exit, KEINE zweite PID (der Close spawnt nie einen Prozess).
+          // POST-PARITY R7B PP-12 — die Frist kennt die Datenbankgröße: ein laufender Abgleich speichert die
+          // ganze Datei bis zu zweimal; bei 518 MB lief die feste 8-s-Frist ab und das Beenden brach ab.
           waitForPendingOperations: () =>
-            withTimeout(sync.waitForSyncIdle(), SYNC_IDLE_TIMEOUT_MS, 'flushing'),
+            withTimeout(sync.waitForSyncIdle(), syncIdleBudgetMs(getLastPersistedDbBytes()), 'flushing'),
           // Persistenzbarriere: schliesst alle angeforderten Writes ab und WIRFT bei Fehler (kein Schlucken).
           // Ebenfalls bounded, damit ein haengender Flush den Close nicht blockiert.
-          flushPendingDatabaseWrites: () => withTimeout(flushDatabase(), FLUSH_TIMEOUT_MS, 'flushing'),
+          flushPendingDatabaseWrites: () => withTimeout(flushDatabase(), flushBudgetMs(getLastPersistedDbBytes()), 'flushing'),
           // M4-D: finaler Abschluss vollstaendig nativ. Rust stoppt den Sync-Server und beendet den
           // Prozess via AppHandle::exit(0) — KEIN win.destroy(), KEIN Webview-setTimeout(proc.exit).
           // Im Erfolgsfall stirbt der Prozess → dieser invoke loest nie auf (normaler Exit-Pfad, KEIN
@@ -339,7 +341,7 @@ export default function App() {
         pauseBackgroundWrites: () => sync.pauseAutoSync(),         // M4-A1: neue Sync-Laeufe pausieren
         // SHUTDOWN-FINAL — BOUNDED wie Close/Restore: ein haengender Sync darf den Reload nicht blockieren.
         waitForPendingOperations: () =>
-          withTimeout(sync.waitForSyncIdle(), SYNC_IDLE_TIMEOUT_MS, 'flushing'),  // laufenden Sync abwarten (bounded)
+          withTimeout(sync.waitForSyncIdle(), syncIdleBudgetMs(getLastPersistedDbBytes()), 'flushing'),  // laufenden Sync abwarten (bounded, nach Größe)
         durableSave: saveDatabaseDurably,                          // M2: frischer db.export + persist, wirft bei Fehler/aktiver Tx
         reloadApplication: () => window.location.reload(),         // nur nach bestaetigter Persistenz
         resumeBackgroundWrites: () => sync.resumeAutoSync(),       // bei Fehler: Sync wieder freigeben

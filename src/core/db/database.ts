@@ -3405,6 +3405,12 @@ export function getLastSaveError(): unknown {
   return saver.getLastError();
 }
 
+// POST-PARITY R7B PP-12 — die Größe der Datei, wie sie zuletzt geladen oder geschrieben wurde (0 =
+// unbekannt). Kostet nichts (kein Export, kein Dateizugriff): die Fristen beim Beenden rechnen damit.
+export function getLastPersistedDbBytes(): number {
+  return lastKnownDiskSig?.size ?? 0;
+}
+
 // Wartet bis alle pending writes durch sind. MUSS vor App-Quit awaited werden, sonst killt
 // der OS den Prozess waehrend ein writeFile noch laeuft. Wirft den letzten Persist-Fehler,
 // damit der Quit-Handler ihn beobachten/loggen kann (App.tsx fängt ihn im Promise.race).

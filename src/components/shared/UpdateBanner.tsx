@@ -108,6 +108,7 @@ export function UpdateBanner() {
         await coord.coordinatedRelaunch({
           blockWrites: () => { sync.pauseAutoSync(); wiring.stopMobileDrainPoller(); },
           awaitWritersIdle: () => sync.waitForSyncIdle(),
+          dbBytes: () => db.getLastPersistedDbBytes(),
           flushDurably: () => db.saveDatabaseDurably(),
           stopServerConfirmFree: () => invoke('stop_server_and_confirm_free'),
           restartServer: async () => { await invoke('sync_server_start'); },

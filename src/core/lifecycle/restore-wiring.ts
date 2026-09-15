@@ -198,6 +198,7 @@ export async function scheduleBackupSnapshot(
   await coord.coordinatedRelaunch({
     blockWrites: () => { sync.pauseAutoSync(); wiring.stopMobileDrainPoller(); },
     awaitWritersIdle: () => sync.waitForSyncIdle(),
+    dbBytes: () => db.getLastPersistedDbBytes(),
     flushDurably: () => db.saveDatabaseDurably(),
     stopServerConfirmFree: () => core.invoke('stop_server_and_confirm_free'),
     restartServer: async () => { await core.invoke('sync_server_start'); },
@@ -231,6 +232,7 @@ export async function scheduleMediaGc(
   await coord.coordinatedRelaunch({
     blockWrites: () => { sync.pauseAutoSync(); wiring.stopMobileDrainPoller(); },
     awaitWritersIdle: () => sync.waitForSyncIdle(),
+    dbBytes: () => db.getLastPersistedDbBytes(),
     flushDurably: () => db.saveDatabaseDurably(),
     stopServerConfirmFree: () => core.invoke('stop_server_and_confirm_free'),
     restartServer: async () => { await core.invoke('sync_server_start'); },
@@ -259,18 +261,20 @@ export async function startRestore(
   params: RestoreParams,
   setStatus?: (status: RestoreStatus | null) => void,
 ): Promise<void> {
-  const [deps, core, coord, proc] = await Promise.all([
+  const [deps, core, coord, proc, db] = await Promise.all([
     buildDefaultRestoreDeps(setStatus),
     import('@tauri-apps/api/core'),
     import('@/core/lifecycle/relaunch-coordinator'),
     import('@tauri-apps/plugin-process'),
+    import('@/core/db/database'),
   ]);
   const bounded: RestoreRuntimeDeps = {
     ...deps,
     // Bounded quiescence: a stuck writer/flush can no longer hang the restore (visible abort instead).
-    waitForSyncIdle: () => coord.withTimeout(deps.waitForSyncIdle(), coord.SYNC_IDLE_TIMEOUT_MS, 'flushing'),
+    // POST-PARITY R7B PP-12 — bounded by the database size, not a fixed 8 s / 15 s.
+    waitForSyncIdle: () => coord.withTimeout(deps.waitForSyncIdle(), coord.syncIdleBudgetMs(db.getLastPersistedDbBytes()), 'flushing'),
     flushAndCloseFrontendDb: () =>
-      coord.withTimeout(deps.flushAndCloseFrontendDb(), coord.FLUSH_TIMEOUT_MS, 'flushing'),
+      coord.withTimeout(deps.flushAndCloseFrontendDb(), coord.flushBudgetMs(db.getLastPersistedDbBytes()), 'flushing'),
     // Coordinated relaunch tail: stop server + confirm port free → approve (CloseRequested bypass) → relaunch.
     relaunch: () =>
       coord.stopServerThenApproveRelaunch({
