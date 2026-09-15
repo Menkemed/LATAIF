@@ -87,6 +87,14 @@ const FIRST_RUN_SAFE: &[&str] = &[
     // keine Datei. Ohne Wurzel (PC2, Erstlauf-Weiche) gibt es weder Bruecke noch Server — dort
     // endet nur der Prozess. Vorher verlangte er den Zustand und PC2 liess sich nicht schliessen.
     "finalize_application_shutdown",
+
+    // POST-PARITY R7B PP-12 / N2 — Belegbild umrechnen: Base64 hinein (Groesse VOR dem Dekodieren
+    // begrenzt), `normalize_record_image` im Speicher (JPEG ≤ 100 000 B, ≤ 1600 px, Metadaten weg),
+    // Base64 + Masse heraus. Kein Zustand, keine Datei, keine DB, kein Medienspeicher — reine Bildbytes,
+    // keine Geschaeftsdaten. ABSICHTLICH ohne Wurzel erreichbar: PC2 (Client-Modus, Erstlauf-Zweig)
+    // rechnet damit vor dem Ablegen am Primary (`stageRecordDataUrls` → `normalizeRecordImages`).
+    // Wurzelgebunden gemacht, koennte PC2 kein Belegbild mehr senden. Gepinnt unten.
+    "media_normalize_record_image",
 ];
 
 #[test]
@@ -156,6 +164,34 @@ fn closing_works_without_a_data_root_and_without_a_stand_in_state() {
     }
     // Der Zustand wird weiterhin an genau einer Stelle verwaltet — im Start mit Datenwurzel.
     assert_eq!(SRC.matches("manage(AppHandleState").count(), 1, "AppHandleState managed in exactly one place");
+}
+
+#[test]
+fn the_record_image_normalizer_stays_pure_bytes_in_bytes_out() {
+    // N2: die Einordnung oben gilt nur, solange der Befehl nichts anfasst. Faengt er an zu speichern
+    // oder einen Zustand zu brauchen, faellt dieser Test um — dann gehoert er an die Wurzel.
+    let p = params_of("media_normalize_record_image").expect("command exists");
+    assert_eq!(p, "data_base64: String", "only the image bytes come in: {p}");
+
+    let at = SRC.find("fn media_normalize_record_image(").unwrap();
+    let body = &SRC[at..];
+    let body = &body[..body.find("\n}").unwrap()];
+    let cap = body.find("MAX_UPLOAD_IMAGE_BYTES").expect("size capped");
+    let decode = body.find(".decode(").expect("decoded");
+    assert!(cap < decode, "the size cap comes before decoding");
+    assert!(body.contains("record_image::record_image_json(&bytes)"), "the one normalizer, in memory");
+    for forbidden in ["State<", "try_state", "data_root_of(", "std::fs::", "open_config_db", "media_root", "staging"] {
+        assert!(!body.contains(forbidden), "the command must not use {forbidden}");
+    }
+    // Der Normalisierer selbst: keine Datei, kein Pfad, keine Datenbank.
+    for (name, src) in [
+        ("media/record_image.rs", include_str!("media/record_image.rs")),
+        ("media/normalize.rs", include_str!("media/normalize.rs")),
+    ] {
+        for forbidden in ["std::fs", "File::", "OpenOptions", "rusqlite", "PathBuf", "Path::"] {
+            assert!(!src.contains(forbidden), "{name} must stay pure (found {forbidden})");
+        }
+    }
 }
 
 #[test]

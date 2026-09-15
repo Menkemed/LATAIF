@@ -3929,7 +3929,7 @@ Folgeauftrag zu den offenen R7B-Restbefunden. Review mit Callpaths, Lösung je B
 | R4 0-Byte-`lataif.db` startet leer | `loadDbFile`: 0 Byte → unlesbar → `DB_RECOVERY_REQUIRED` vor Schema/Migration/Speichern, Datei unverändert; „fehlt" nur bei ausdrücklichem „nicht gefunden" (Lesefehler ≠ fehlend) | ja (`c4098a8`) | ja — c6 **27/0**; E2E S5 (Wiederherstellungsmeldung, Datei unverändert, Bytes zurück → normaler Start) | **ja** (s. R1) |
 | G5 Ganz-DB-Speichern skaliert | — | nein | — | **OPEN, nicht akzeptiert** |
 | N1 (neu, vorbestehend) PC2 lässt sich über das Fenster nicht regulär beenden | `finalize_application_shutdown` verlangte `State<AppHandleState>`, den nur ein Start mit Datenwurzel verwaltet (PC2 läuft im Erstlauf-Zweig: keine Brücke, kein Server, keine DB) → „state not managed … The app stays open". Jetzt nur `AppHandle`; Server über `try_state` gestoppt, WENN vorhanden, dann `exit(0)` — kein Ersatzzustand, Primary-Pfad unverändert | ja (Folgecommit N1) | ja — Rust neuer Test + `shutdown_tests` 5/0; gezielter Zwei-App-Lauf S3 **21/0**: PC2 endet nach WM_CLOSE von selbst (Exit-Code 0, 2 s, kein Helfer), Datei Byte für Byte erhalten, weiter B, Replay genau einmal, keine DB auf PC2 | **nein** |
-| N2 (neu, vorbestehend seit `02c976b`) Rust-Gate `every_command_is_either_root_bound_or_named_as_first_run_safe` rot | `media_normalize_record_image` (R7B PP-12) keiner Klasse zugeordnet; beim N1-Testlauf gefunden, nicht geändert | nein | belegt (Testausgabe) | **OPEN, nicht akzeptiert** |
+| N2 (neu, vorbestehend seit `02c976b`) Rust-Gate `every_command_is_either_root_bound_or_named_as_first_run_safe` rot | `media_normalize_record_image` (R7B PP-12) keiner Klasse zugeordnet. Klassifiziert **B — absichtlich ohne Wurzel erreichbar**: nur `data_base64` hinein, Normalisierung rein im Speicher, Base64 + Maße heraus; keine Datei/DB/Medienspeicher, keine Geschäftsdaten; PC2 (ohne Wurzel) braucht ihn vor dem Ablegen (`stageRecordDataUrls`). Nur Test: `FIRST_RUN_SAFE`-Eintrag mit Begründung + Reinheits-Pin | ja (Folgecommit N2, nur Test) | ja — `first_run_ipc` **5/0** | **nein** |
 
 E2E `test/e2e/r7c-pending-saves.e2e.mjs`: Lauf 1 (Build `2b98e46`) 27/2 → Fund Rust-Kennungsspeicher, behoben `8f37ee5`;
 Lauf 2 (Build `8f37ee5`) **28/1**, alle R1–R4-Prüfungen ja, der eine Fehler ist N1 — **Korrektur:** in Lauf 1 und 2 wurde PC2
@@ -3939,7 +3939,8 @@ Builds aus dem N1-Stand): **21/0**, PC2 regulär beendet (Exit-Code 0, kein Helf
 ```
 R7C:                 R1, R2, R3, R4 umgesetzt + lokal getestet · unabhängig technisch freigegeben (laut Auftrag)
 N1:                  umgesetzt + lokal getestet · unabhängige Freigabe ausstehend
-offen, nicht akzeptiert: G5, N2
+N2:                  klassifiziert (B, nur Test) + lokal getestet · unabhängige Freigabe ausstehend
+offen, nicht akzeptiert: G5
 Registry 175 → 175
 Version 0.8.54 · kein Push/Tag/Release
 ```

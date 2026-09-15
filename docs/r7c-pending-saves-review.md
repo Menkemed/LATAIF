@@ -13,7 +13,7 @@ Herkunft der Befunde: `docs/r7b-pp12-image-paths-review.md` § 0 (R1–R4), § 5
 | **R4** vorhandene 0-Byte-`lataif.db` → `DB_RECOVERY_REQUIRED` | ja — `c4098a8` | ja — c6 27/0, E2E S5 | **ja** (s. R1) |
 | **G5** Ganz-DB-Speichern skaliert | nein | — | **OPEN, nicht akzeptiert** |
 | **N1 (neu, vorbestehend)** PC2 lässt sich über das Fenster nicht regulär beenden | ja — Folgecommit N1 (§ 6a) | ja — Rust `first_run_ipc`/`shutdown_tests` (neuer Test grün), gezielter Zwei-App-Lauf S3 **21/0** (PC2 endet nach WM_CLOSE von selbst, Exit-Code 0, kein Helfer) | **nein** (ausstehend) |
-| **N2 (neu, vorbestehend seit `02c976b`)** Rust-Gate `every_command_is_either_root_bound_or_named_as_first_run_safe` rot (`media_normalize_record_image` nicht eingeordnet) | nein (nicht Teil von N1) | beim N1-Testlauf gefunden (§ 7) | **OPEN, nicht akzeptiert** |
+| **N2 (neu, vorbestehend seit `02c976b`)** Rust-Gate `every_command_is_either_root_bound_or_named_as_first_run_safe` rot (`media_normalize_record_image` nicht eingeordnet) | ja — eingeordnet als **B (absichtlich ohne Wurzel erreichbar)**, nur Test/Klassifikation (§ 7) | ja — `cargo test --lib -- first_run_ipc` **5/0** (inkl. neuem Reinheits-Pin) | **nein** (ausstehend) |
 
 ## 1. Ausgangslage (Callpaths vor R7C)
 
@@ -183,8 +183,16 @@ offen; zwei offene Vorgänge unabhängig; fremder Kontext; neue Kennung nur ausd
 - **N2 (neu, vorbestehend seit `02c976b`, R7B PP-12)** Das Rust-Gate
   `first_run_ipc_tests::every_command_is_either_root_bound_or_named_as_first_run_safe` ist rot: `media_normalize_record_image`
   (Belegbild im Speicher umrechnen, ohne `AppHandleState`, ohne Datei/DB) ist keiner Klasse zugeordnet. Beim gezielten
-  N1-Testlauf gefunden; nicht Teil von N1, nicht geändert (die Einordnung ist eine eigene Entscheidung, s. Kopf der Testdatei)
-  — **OPEN, nicht akzeptiert**.
+  N1-Testlauf gefunden. **Klassifiziert (Folgecommit N2): B — absichtlich ohne Wurzel erreichbar.** Callpath: registriert in
+  `generate_handler!`; Parameter nur `data_base64: String` (kein `State`, kein `data_root_of`); Größe vor dem Dekodieren
+  begrenzt; `record_image_json` → `normalize_record_image` → `normalize_stock_image` rein im Speicher (`spawn_blocking`); heraus
+  Base64 + `mime`/`bytes`/Maße. Keine Datei, keine DB, kein Medienspeicher, keine Geschäftsdaten — nur Bildbytes. Aufrufer:
+  Primary (`repair-house`, `scrap-house`, `masterdata-save`, Abgleich) UND PC2 vor dem Ablegen (`stageRecordDataUrls` →
+  `normalizeRecordImages`) — PC2 läuft im Erstlauf-Zweig ohne Wurzel; wurzelgebunden könnte PC2 kein Belegbild mehr senden (A
+  wäre ein Produktbruch, C liegt nicht vor: keine ungeschützte Grenze). Änderung nur im Test: Eintrag mit Begründung in
+  `FIRST_RUN_SAFE` + Pin `the_record_image_normalizer_stays_pure_bytes_in_bytes_out` (nur `data_base64`, Deckel vor
+  Dekodieren, kein Zustand/Datei/DB im Rumpf, `record_image.rs`/`normalize.rs` ohne `std::fs`/`File::`/`rusqlite`/Pfade) — fängt
+  der Befehl an zu speichern, fällt der Test um. `cargo test --lib -- first_run_ipc` **5/0**. Kein Build/E2E (kein Produktcode).
 - Die Ablage folgt dem bestehenden Persistenzvertrag: neustartfest; Stromausfall-Dauerhaftigkeit nicht garantiert (kein
   fsync, wie die Geschäftsdatenbank, R7B-Review § 6).
 - Ein Vorgang im Zustand `conflict` lässt sich nicht automatisch klären (der Primary hält die Kennung für anderen Inhalt):
