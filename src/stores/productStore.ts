@@ -7,6 +7,7 @@ import { getStockAggregates, computeStockValuation, isOwnStockAsset , type LotAg
 // CENTRAL-C2 — mehrphasige Geschaeftsschreibvorgaenge laufen in derselben Spur wie die
 // Fernauftraege: ein Lesen vom zweiten Rechner darf keinen Zwischenzustand sehen.
 import { runExclusiveUnless } from '@/core/bridge/command-scheduler';
+import { scheduleNewItemMediaCutover } from '@/core/media/new-item-media';
 import { nextSkuFrom } from '@/core/products/sku-allocation';
 import { peekNextSku, resolveSkuDurable, type SkuSequenceDb } from '@/core/products/sku-sequence';
 import { eventBus } from '@/core/events/event-bus';
@@ -812,6 +813,10 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // berechnet (2-5s, ~$0.001/Item). Ohne API-Key wird nichts mehr berechnet;
     // Duplicate-Detection greift dann nur auf SKU/Serial/Brand+Reference zurueck.
     if (product.images.length > 0) {
+      // POST-PARITY R7B PP-12 — der „New Item"-Artikel (Einkauf, Auftrag) zieht mit seinen Fotos in den
+      // Medienspeicher um, wie jeder andere Artikel: als NÄCHSTER Auftrag der Schreibreihenfolge, also
+      // nach Commit und durablem Speichern dieses Vorgangs (s. `new-item-media`).
+      scheduleNewItemMediaCutover(id);
       const imgUrl = product.images[0];
       if (isAiConfigured()) {
         computeImageEmbedding(imgUrl)

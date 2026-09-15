@@ -1247,10 +1247,15 @@ try {
     const r = await befehl('purchases.create', body, TOKEN);
     await spuelen(primary);
     P_EINKAUF = String(dbQ(BIZ_DB, 'SELECT product_id FROM purchase_lines WHERE purchase_id = ?', [String(r.j?.value?.purchaseId || '')])[0]?.product_id || '');
-    let imgs = [];
-    try { imgs = JSON.parse(String(dbQ(BIZ_DB, 'SELECT images FROM products WHERE id = ?', [P_EINKAUF])[0]?.images || '[]')).map(jpegInfo); } catch { /* leer */ }
-    PP.purchase = r.status === 200 && imgs.length === 1 && passt(imgs[0]) && imgs[0].sha === bytesSha(n[2]);
-    ok(PP.purchase, `FERN Einkauf „New Item": das Foto des neuen Artikels gespeichert ≤ 100 000 B (${r.status} ${r.j?.error || ''} ${String(r.j?.message || '').slice(0, 80)}; ${imgs.map(kurz)})`);
+    // R7B PP-12 (Nachtrag) — der „New Item"-Artikel zieht nach dem Commit mit seinem Foto in den Medienspeicher um
+    // (derselbe Cutover-Dienst wie beim Bearbeiten: Hauptbild + Vorschau); products.images ist danach leer.
+    const links = (pid) => Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM media_links WHERE entity_type = 'product' AND entity_id = ? AND deleted_at IS NULL", [pid])[0]?.n ?? 0);
+    const vorschau = (pid) => Number(dbQ(BIZ_DB, `SELECT COUNT(*) AS n FROM media_links l JOIN media_variants v ON v.tenant_id = l.tenant_id AND v.media_id = l.media_id
+      AND v.variant_type = 'thumbnail' AND v.deleted_at IS NULL WHERE l.entity_type = 'product' AND l.entity_id = ? AND l.deleted_at IS NULL`, [pid])[0]?.n ?? 0);
+    const spalteLeer = (pid) => dbQ(BIZ_DB, 'SELECT images FROM products WHERE id = ?', [pid])[0]?.images === '[]';
+    for (let i = 0; i < 200 && !(P_EINKAUF && links(P_EINKAUF) === 1 && spalteLeer(P_EINKAUF)); i++) await sleep(600);
+    PP.purchase = r.status === 200 && links(P_EINKAUF) === 1 && vorschau(P_EINKAUF) === 1 && spalteLeer(P_EINKAUF);
+    ok(PP.purchase, `FERN Einkauf „New Item": das Foto des neuen Artikels im Medienspeicher (Hauptbild + Vorschau), products.images leer (${r.status} ${r.j?.error || ''} ${String(r.j?.message || '').slice(0, 80)}; ${links(P_EINKAUF)}/${vorschau(P_EINKAUF)})`);
   }
 
   // ══════════════════════════════════════════════════════════════════════
@@ -1341,7 +1346,7 @@ try {
       bilder(REP).map((u) => jpegInfo(u).sha),
       dbQ(BIZ_DB, 'SELECT cpr_image FROM suppliers WHERE id = ?', [LIEF_NEU]).map((r) => jpegInfo(r.cpr_image).sha),
       dbQ(BIZ_DB, 'SELECT images_purchase, images_sale FROM scrap_trade_lines WHERE scrap_trade_id = ?', [TRADE]),
-      dbQ(BIZ_DB, 'SELECT images FROM products WHERE id = ?', [P_EINKAUF]),
+      [dbQ(BIZ_DB, MEDIA_MAIN, [P_EINKAUF]), dbQ(BIZ_DB, MEDIA_THUMB, [P_EINKAUF])].map((rows) => rows.map((x) => [x.bytes, datei(x.key)])),
       [dbQ(BIZ_DB, MEDIA_MAIN, [P_MEDIA]), dbQ(BIZ_DB, MEDIA_THUMB, [P_MEDIA])].map((rows) => rows.map((x) => [x.bytes, datei(x.key)])),
     ]);
     await spuelen(primary);
