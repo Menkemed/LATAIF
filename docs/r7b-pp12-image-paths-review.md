@@ -45,6 +45,9 @@ Protokoll):**
 | R4 | Eine 0-Byte-`lataif.db` öffnet als LEERE Datenbank statt `DB_RECOVERY_REQUIRED` | nach einem Stromausfall/Absturz kurz nach einem Speichern (oder einem Eingriff von außen) startet die App leer, ohne Wiederherstellungshinweis | Start des Primary (§ 6) |
 | G5 | Ganz-DB-Speichern skaliert mit der Dateigröße | normale Befehle bei ~450 MB zur Hälfte Speichern; mit belegter Schlange 504 `unknown` (Wirkung genau einmal) | alle schreibenden Befehle (§ 8) |
 
+> **Nachtrag R7C (15.09.2026):** R1–R3 behoben in `2b98e46`, R4 in `c4098a8` — umgesetzt und lokal getestet, unabhängige
+> Freigabe ausstehend (`docs/r7c-pending-saves-review.md`). G5 bleibt OPEN, nicht akzeptiert.
+
 ## 1. Reguläres Beenden bei großer Datenbank (F4)
 
 **Nachstellung** (isolierte Test-DB `com.lataif.app.e2e`, Port 3011, nur eigene PID am exakten Test-Pfad; die Spur ist reine

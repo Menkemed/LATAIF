@@ -3910,7 +3910,32 @@ Prüfbefunde:         F4 behoben · G2 behoben · G3 zusammengeführt · Rust-Pi
 verbleibend PP:      0
 Freigabe:            technisch freigegeben R7B_TECHNICAL_REVIEW_APPROVED_FCA07B1 (geprüft: fca07b1e33929f972d7c66c8ca22789f8f7ab3bc)
                      · lokal committed ja · gepusht nein · released nein
-offen, nicht akzeptiert: R1, R2, R3, R4, G5
+                     [Nachtrag: gepusht ja — `d988810..1635c8a` am 15.09.2026, nach Freigabe + PP-5-Randfall]
+offen, nicht akzeptiert: R1, R2, R3, R4, G5   [R1–R4 → Abschnitt R7C unten]
 Registry 175 → 175
 Version 0.8.54 · kein Release
+```
+
+## R7C — offene PC2-Speichervorgänge (R1–R3) und Datenbank-Startschutz (R4) (15.09.2026)
+
+Folgeauftrag zu den offenen R7B-Restbefunden. Review mit Callpaths, Lösung je Befund, Nachweisen und Grenzen:
+`docs/r7c-pending-saves-review.md`. Keine neue Fernbuchung, Registry unverändert **175**, Version 0.8.54.
+
+| Befund | Behebung | umgesetzt | getestet (lokal) | unabhängig freigegeben |
+|---|---|---|---|---|
+| R1 offene Kennung nur im Maskenspeicher | Jeder Versuch wird VOR dem ersten Versand gesichert (`pending-saves`: eine Datei je Vorgang unter AppLocalData, Kennung + ursprünglicher Auftrag + Kontext; scheitert das, geht nichts hinaus). Wiederaufnahme mit derselben Kennung nur im selben Primary/Mandant/Benutzer/Filiale über die Leiste „Unresolved saves" (Replay über den durablen Nachweis, keine zweite Wahrheit); neue Kennung neben einem offenen Vorgang derselben Buchung nur ausdrücklich (zweiter Klick); mehrere offene Vorgänge unabhängig; fehlende Staging-Bilder → begründetes Nein | ja (`2b98e46`) | ja — `test/r7c/pending-saves` **56/0**; E2E S1/S3 (Wiederaufnahme nach PC2- und Primary-Neustart, Replay, genau ein Kunde) | **nein** |
+| R2 geändertes Formular → Dauer-Konflikt | Ursprünglicher Auftrag und Formularänderung getrennt: die Änderung geht unter der offenen Kennung nicht hinaus (`ORIGINAL_UNRESOLVED`, nichts gesendet), Weg: erst klären, dann ändern oder neu erfassen | ja (`2b98e46`) | ja — Einheit; E2E S2 (nichts gesendet) | **nein** |
+| R3 Konflikt nach Verdrängung/Neustart als 500 „unbekannt" | Renderer `Reply` `not_executed` → Rust `Reply::NotExecuted` → 409 `outcome: not_executed` wie der Brücken-Konflikt; eine vom Nachweis abgewiesene Anfrage bleibt nicht als Besitzer im Kennungsspeicher (sonst 409 für den ursprünglichen Auftrag — E2E-Fund, `8f37ee5`); Konflikt hält den Vorgang offen; `not_executed` nach einem offenen Versand bleibt offen (`EARLIER_TRY_OPEN`) | ja (`2b98e46`, `8f37ee5`) | ja — Einheit, `cargo test command_reply` 2/0, `bridge` 44/0, `sync::routes` 76/0; E2E S4 (409 `not_executed`, danach Replay) | **nein** |
+| R4 0-Byte-`lataif.db` startet leer | `loadDbFile`: 0 Byte → unlesbar → `DB_RECOVERY_REQUIRED` vor Schema/Migration/Speichern, Datei unverändert; „fehlt" nur bei ausdrücklichem „nicht gefunden" (Lesefehler ≠ fehlend) | ja (`c4098a8`) | ja — c6 **27/0**; E2E S5 (Wiederherstellungsmeldung, Datei unverändert, Bytes zurück → normaler Start) | **nein** |
+| G5 Ganz-DB-Speichern skaliert | — | nein | — | **OPEN, nicht akzeptiert** |
+| N1 (neu, vorbestehend) PC2 lässt sich über das Fenster nicht regulär beenden | im R7C-E2E gefunden: `finalize_application_shutdown` verlangt den Tauri-Zustand `AppHandleState`, der im Client-Modus nicht verwaltet wird → „Save failed … The app stays open"; nicht Teil von R1–R4, nicht geändert | nein | belegt (Diagnose im E2E) | **OPEN, nicht akzeptiert** |
+
+E2E `test/e2e/r7c-pending-saves.e2e.mjs`: Lauf 1 (Build `2b98e46`) 27/2 → Fund Rust-Kennungsspeicher, behoben `8f37ee5`;
+Lauf 2 (Build `8f37ee5`) **28/1**, alle R1–R4-Prüfungen ja, der eine Fehler ist N1.
+
+```
+R7C:                 R1, R2, R3, R4 umgesetzt + lokal getestet · unabhängige Freigabe ausstehend
+offen, nicht akzeptiert: G5, N1
+Registry 175 → 175
+Version 0.8.54 · kein Push/Tag/Release
 ```

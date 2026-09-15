@@ -1,0 +1,162 @@
+# R7C — offene PC2-Speichervorgänge (R1–R3) und Datenbank-Startschutz (R4)
+
+Stand 15.09.2026 · Basis `1635c8a` (R7B, gepusht) · Version 0.8.54 · Registry 175 (unverändert) · kein Push/Tag/Release.
+Herkunft der Befunde: `docs/r7b-pp12-image-paths-review.md` § 0 (R1–R4), § 5 (Wiederholung), § 6 (Persistenz).
+
+## 0. Status (umgesetzt · getestet · unabhängig freigegeben — getrennt)
+
+| Punkt | umgesetzt | getestet (lokal) | unabhängig freigegeben |
+|---|---|---|---|
+| **R1** Vorgang überlebt Maskenwechsel / Neuladen / Neustart | ja — `2b98e46` | ja — Einheit 56/0, E2E S1 + S3 (Wiederaufnahme nach Zustandsverlust) | **nein** (ausstehend) |
+| **R2** Formularänderung nach unklarem Ausgang | ja — `2b98e46` | ja — Einheit, E2E S2 | **nein** |
+| **R3** Konflikt nach Verdrängung / Neustart korrekt; „dieser Versuch lief nicht" ≠ Beweis | ja — `2b98e46` | ja — Einheit, Rust 2/0 + 44/0 + 76/0, E2E S4 (nach Fund und Behebung `8f37ee5`) | **nein** |
+| **R4** vorhandene 0-Byte-`lataif.db` → `DB_RECOVERY_REQUIRED` | ja — `c4098a8` | ja — c6 27/0, E2E S5 | **nein** |
+| **G5** Ganz-DB-Speichern skaliert | nein | — | **OPEN, nicht akzeptiert** |
+| **N1 (neu, vorbestehend)** PC2 lässt sich über das Fenster nicht regulär beenden | nein (nicht Teil von R7C) | belegt im E2E (Diagnose § 6) | **OPEN, nicht akzeptiert** |
+
+## 1. Ausgangslage (Callpaths vor R7C)
+
+- **R1:** `CommandSaveController` / `CommandSaveAttempt` lebten in `useMemo`/`useRef` der Maske (`shared-write.ts`). Nach
+  „keine Antwort" + Maskenwechsel/Neuladen gab `beginAttempt` eine NEUE Kennung aus; hatte der erste Lauf committet → zweite
+  Wirkung. Kein Ort außerhalb der Maske kannte den Vorgang.
+- **R2:** `shared-write` baut den Rumpf bei jedem Klick neu. Nach „keine Antwort" + Formularänderung ging der neue Rumpf unter
+  der alten Kennung hinaus → 409 `BRIDGE_COMMAND_ID_CONFLICT` `not_executed`; der Versuch blieb offen → jeder Klick derselbe
+  Konflikt.
+- **R3:** Nach Verdrängung der Kennung aus dem Rust-Speicher (> 1024) oder Neustart kam der Konflikt aus dem durablen Nachweis
+  (`mutation-engine` → `CommandNotEvaluated('COMMAND_ID_CONFLICT')`) über `command-registry` als `infrastructure_error` →
+  `routes.rs` 500 ohne `outcome` → PC2 „unbekannt". Zudem galt jedes `not_executed` als „nichts passiert", auch wenn ein
+  früherer Versand desselben Vorgangs mit offenem Ausgang geendet hatte.
+- **R4:** `loadSavedDb`: `exists` → `readFile` → `bytes` auch bei 0 Byte; sql.js öffnet 0 Byte als leere Datenbank →
+  `initDatabase` legte Schema/Migrationen an (entgegen C6-P1). Außerdem galt `exists: false` als „fehlt", obwohl Rust
+  `Path::exists` jeden Metadatenfehler (z. B. Zugriff verweigert) als „nein" meldet.
+
+## 2. R1 — der offene Vorgang bleibt erhalten
+
+**Ablage** (`src/core/bridge/pending-saves.ts`): eine Datei je Vorgang `<AppLocalData>/pending-saves/<Kennung>.json`
+(Temp-Datei + Umbenennen; Tauri plugin-fs, Rechte `fs:default` = AppLocalData lesen inkl. `read_dir`, schreiben/umbenennen
+über den bestehenden Scope). Inhalt: `commandId`, `op`, der ursprüngliche Auftrag (`payload`, genau so gesendet), Kontext
+(`server` = Primary-Adresse, `tenantId`, `userId`, `branchId` aus dem Ausweis), Zustand `sending | unresolved | conflict`.
+Keine zweite Wahrheit über Geschäftsergebnisse: ob der Vorgang stattfand, sagt weiterhin nur der durable Nachweis des
+Primary; die Ablage hält nur Kennung + Auftrag, um ihn dort zu fragen.
+
+**Vor dem ersten Versand** (`CommandSaveAttempt.send`): Datei schreiben → erst dann `fetch`. Scheitert das Schreiben →
+`not_executed PENDING_STORE_FAILED`, nichts geht hinaus.
+
+**Nach der Antwort** (`conclude`): Erfolg oder endgültiges Nein → Datei entfernt; offen → `unresolved`; Konflikt →
+`conflict`; `not_executed` ohne jeden früher vielleicht angekommenen Versand → Datei entfernt (nichts passiert).
+
+**Wiederaufnahme** (`attemptForPending`): derselbe laufende Versuch der Maske, sonst aus der Datei — dieselbe Kennung, derselbe
+Auftrag; gilt als „kann gelaufen sein". Nur im selben Kontext (`sameContext`): anderer Primary/Mandant/Benutzer/Filiale →
+`PENDING_CONTEXT_MISMATCH`, nichts gesendet; die Leiste zählt ihn als „gehört zu einer anderen Anmeldung".
+
+**Sichtbar klären** (`src/components/shared/PendingSavesBar.tsx`, nur PC2): „Unresolved saves" listet die offenen Vorgänge des
+Kontexts; „Clarify now" wiederholt den URSPRÜNGLICHEN Auftrag unter SEINER Kennung → Replay (war gespeichert, nichts kommt
+hinzu) oder genau einmal ausgeführt; das Ergebnis wird in Worten gezeigt. „Remove…" nur mit zweitem Klick („nach Prüfung am
+Primary"). Eine neue Kennung entsteht dort nie.
+
+**Neue Vorgänge bleiben möglich** (`CommandSaveController.guardNewEntry`, in `useSharedWrite`/`useSharedWrites` VOR
+`beginAttempt`): ist für dieselbe Buchung ein früherer Vorgang offen, sagt der erste Klick das
+(`EARLIER_SAVE_UNRESOLVED`, nichts gesendet); der zweite Klick ist die ausdrückliche Entscheidung „neuer, eigener Vorgang" →
+neue Kennung. Mehrere offene Vorgänge = mehrere Dateien; keiner überschreibt einen anderen.
+
+**Bild-/Staging-Verweise:** gespeichert wird der Auftrag mit seinen `stagingId`s. War der Vorgang schon gebucht, braucht die
+Klärung die Ablage des Primary nicht (Replay aus dem Nachweis). War er es nicht und hat der Primary die nicht abgeholte
+Ablage inzwischen aufgeräumt (Karenz 1 h beim Start), antwortet er mit dem endgültigen Nein `STAGED_IMAGE_GONE` → die Leiste
+sagt „die Fotos sind nicht mehr auf dem Primary — mit Fotos neu erfassen"; der Vorgang ist beantwortet.
+
+## 3. R2 — ursprünglicher Auftrag und Formularänderung getrennt
+
+`send` vergleicht den Rumpf (schlüsselstabil, `stableJson`) mit dem gesicherten ursprünglichen Auftrag. Abweichung →
+`unknown ORIGINAL_UNRESOLVED`, **nichts gesendet**, beliebig oft. Meldung: „your changes were NOT sent … first clarify the
+earlier save under ‚Unresolved saves' (it repeats the ORIGINAL under its own number); then save your changes as an edit or a
+new entry". Nach der Klärung ist der Versuch der Maske beantwortet (dieselbe Instanz); der nächste Klick ist ein neuer
+Vorgang mit neuer Kennung — bewusst, nicht als automatischer Ausweg.
+
+## 4. R3 — Ergebnis korrekt einordnen
+
+- Renderer (`command-registry.ts`): `CommandNotEvaluated('COMMAND_ID_CONFLICT')` → `{ kind: 'not_executed', code:
+  'BRIDGE_COMMAND_ID_CONFLICT' }` (alle anderen Nicht-Zustandekommen bleiben `infrastructure_error`).
+- Rust (`bridge.rs` `Reply::NotExecuted`, `routes.rs` `command_reply_parts`): → 409 `{ error, message, outcome: 'not_executed' }`
+  — dieselbe Form wie `BridgeError::CommandIdConflict` aus dem Kennungsspeicher. Serde-Form im Rust-Test aus dem exakten JSON
+  des Renderers.
+- Rust-Kennungsspeicher (`bridge.rs` `IdentityStore::forget_refused`, `8f37ee5`): eine Anfrage, die der durable Nachweis
+  abgewiesen hat (`Reply::NotExecuted`), bleibt NICHT als Besitzer der Kennung im Speicher stehen. Vorher (gefunden im
+  E2E-Lauf 1, S4) wies der Speicher danach den rechtmäßigen ursprünglichen Auftrag selbst mit 409 ab — bis Verdrängung oder
+  Neustart. Entfernt wird nur genau diese Identität und nur ohne laufenden Auftrag; danach schützt der Speicher die Kennung
+  wieder für den ursprünglichen Rumpf (`bridge_tests` `a_request_the_durable_ledger_refused_does_not_block_the_original_afterwards`).
+- PC2: Konflikt → Vorgang bleibt offen (`conflict`), nie beendet. `not_executed` nach einem früher offenen Versand →
+  `unknown EARLIER_TRY_OPEN` (z. B. 401 nach 504): „dieser Versuch lief nicht, der frühere ist offen".
+- Grenzen unverändert: Berechtigung vor dem Handler (`executeCommand`), eine Transaktion mit Nachweis (`runRemoteCommand`),
+  Audit/Buchung/Bestand im Handler, Nachweis `remote_command_ledger` wie bisher.
+
+## 5. R4 — vorhandene leere Datenbank
+
+`src/core/db/db-file-load.ts` `loadDbFile` (von `loadSavedDb` benutzt): Existenzfrage scheitert → unlesbar; `exists: false` →
+Nachfrage `stat`: nur „nicht gefunden" (os error 2/3, ENOENT) = fehlt → Erststart; jeder andere Fehler → unlesbar („absence not
+proven"); Datei gefunden → lesen; **0 Byte → unlesbar** („kept unchanged; restore the last backup"). `initDatabase` wirft bei
+unlesbar `DB_RECOVERY_REQUIRED` VOR Schema, Migration, Speichern (C6-P1) — die Datei wird weder neu erstellt noch
+überschrieben, gelöscht oder wiederhergestellt. Kein Integritätsaudit, kein Speicherumbau.
+
+## 6. Nachweise
+
+| Lauf | Ergebnis | Quellstand |
+|---|---|---|
+| `node test/r7c/pending-saves.test.ts` | **56/0** (`POST_PARITY_R7C_PENDING_SAVES_PROVED`) | Arbeitsbaum = `2b98e46` |
+| `node test/c6/c6-db-fail-closed.test.ts` | **27/0** (R4 §3: 0-Byte unverändert + Recovery, fehlend → Erststart, gültig lesbar, Lesefehler ≠ fehlend) | = `c4098a8` |
+| Nachbarn: `client-invoice-ui`, `client-invoice-lifecycle-ui`, `client-masterdata-ui`, `client-commercial-ui` 26/0, `client-financial-ui` 23/0, `client-lifecycle-ui` 24/0, `client-service-ui` 16/0, `client-read-mode`, `remote-invoice-create`, `r4b-write-adapter`, `c4-authorization` 169/0, `r7b-platform-hardening`, `write-foundation` | alle rc=0 | = `2b98e46` |
+| `npx tsc -b` | rc=0 | = `2b98e46` |
+| `cargo test --lib -- command_reply` · `cargo test --lib bridge` | 2/0 · 43/0 | = `2b98e46` |
+| `cargo test --lib bridge` nach `8f37ee5` | **44/0** (neu: vom Nachweis abgewiesene Anfrage blockiert den ursprünglichen Auftrag nicht) | `8f37ee5` |
+| `cargo test --lib sync::routes` | erst **3 rot** (w4/w5/raw_body_gate_order: die Quelltext-Gates lesen bis zum ERSTEN `#[cfg(test)]`, das neue Testmodul stand mitten in der Datei) → Testmodul ans Dateiende (`04808fb`) → **76/0** | `04808fb` |
+| ESLint geänderter Dateien | 0 neue Fehler (database.ts 1 = vorher 1) | = `2b98e46` |
+| E2E `test/e2e/r7c-pending-saves.e2e.mjs` Lauf 1 | **27/2** — Fund R3: nach einer vom Nachweis abgewiesenen Anfrage wies der Rust-Kennungsspeicher den ursprünglichen Auftrag selbst ab (409 statt Replay) → behoben `8f37ee5`; zweiter Fehler = N1 | Build `2b98e46` |
+| E2E Lauf 2 (final) | **28/1** — alle R1–R4-Prüfungen ja; der eine Fehler ist die Teilprüfung „PC2 endet nach dem Schließen selbst" = **N1** | Build `8f37ee5` (`lataif.exe` sha256 `770bf758…`, Client `6e8e5aad…`) |
+
+**E2E Lauf 2 im Einzelnen** (zwei echte Anwendungen, PC2 als B, isoliert):
+- **S1** „New Client" auf PC2, die Antwort geht verloren: Maske „No answer from the primary", der Primary hat genau einmal
+  gebucht (1 Kunde, 1 Nachweiszeile), `pending-saves/<Kennung>.json` = `unresolved` mit dem gesendeten Rumpf, B und Primary.
+- **S2** Feld geändert, Speichern: „changes were NOT sent", kein Auftrag, kein Nachweis, 0 Kunden mit dem geänderten Namen,
+  die Datei behält den ursprünglichen Rumpf.
+- **S3** Primary regulär neu gestartet (Kennungsspeicher leer), PC2 beendet (regulär nicht möglich → N1; eigener Prozess über
+  den Helfer) und neu gestartet, weiter als B angemeldet: die Datei hat überlebt, die Leiste zeigt genau diesen Vorgang,
+  „Clarify now" schickt den ursprünglichen Rumpf unter derselben Kennung → 200 `replayed`, „WAS saved"; 1 Kunde, 0 geändert,
+  1 Nachweiszeile, Datei weg, Leiste leer.
+- **S4** Primary erneut neu gestartet: dieselbe Kennung + anderer Rumpf über HTTP mit B's Ausweis → **409
+  `BRIDGE_COMMAND_ID_CONFLICT` / `not_executed`**; danach der ursprüngliche Rumpf → **200 `replayed`**; Bestand unverändert.
+- **S5** Primary regulär beendet, `lataif.db` beiseite kopiert und auf 0 Byte gesetzt, gestartet: Wiederherstellungsmeldung,
+  keine Anwendung, kein Ersteinrichten; die Datei bleibt 0 Byte mit derselben Änderungszeit, keine `lataif.db.tmp-*` — auch
+  nach dem Beenden; Bytes zurück → normaler Start, angemeldet, der Kunde aus S1 ist da.
+
+**N1 — Diagnose (wörtlich aus dem Fenster von PC2 nach WM_CLOSE):** „Save failed state not managed for field `state` on
+command `finalize_application_shutdown`. You must call `.manage()` before using this command The app stays open. Please close
+again to retry." Der Abschlussbefehl verlangt den Tauri-Zustand `AppHandleState`, der nur im Primary-Aufbau verwaltet wird
+(`lib.rs` `app.manage(AppHandleState { … })`); im Client-Modus fehlt er → das Beenden bricht nach Regel A/B sichtbar ab, das
+Fenster bleibt offen. Vorbestehend: `lib.rs` ist zwischen `1635c8a` und HEAD unverändert; kein früherer Test beendete PC2
+regulär. Auswirkung: PC2 lässt sich nur über den Task-Manager beenden. Nicht Teil von R1–R4, nicht geändert; die offenen
+Vorgänge überleben auch dieses harte Ende (S3).
+
+Die Einheitstests prüfen die fachliche Wirkung (Buchungs- und Nachweiszeilen an sql.js), nicht nur Rückgabewerte: verlorene
+Antwort + Neuladen + Primary-Neustart → Klärung = Replay, genau eine Buchung; nie angekommen → Klärung bucht genau einmal;
+Ablage scheitert → nichts gesendet; Formularänderung → nichts gesendet, erst Klärung, dann die Änderung als eigener Vorgang
+(je genau einmal); Konflikt nach Neustart → 409 `not_executed`, Vorgang offen, keine Wirkung; 401 nach offenem Versand →
+offen; zwei offene Vorgänge unabhängig; fremder Kontext; neue Kennung nur ausdrücklich; Staging weg → begründetes Nein.
+
+## 7. Grenzen (ausgewiesen, nicht Teil dieses Auftrags)
+
+- **G5** Ganz-DB-Speichern skaliert mit der Dateigröße — **OPEN, nicht akzeptiert** (R7B-Review § 8).
+- **N1** PC2 lässt sich über das Fenster nicht regulär beenden (`finalize_application_shutdown` ohne verwalteten Zustand im
+  Client-Modus) — vorbestehend, im R7C-E2E gefunden, **OPEN, nicht akzeptiert**, nicht geändert (§ 6).
+- Die Ablage folgt dem bestehenden Persistenzvertrag: neustartfest; Stromausfall-Dauerhaftigkeit nicht garantiert (kein
+  fsync, wie die Geschäftsdatenbank, R7B-Review § 6).
+- Ein Vorgang im Zustand `conflict` lässt sich nicht automatisch klären (der Primary hält die Kennung für anderen Inhalt):
+  Prüfung am Primary, dann „Remove…".
+- Im Browser-Entwicklungsmodus (ohne Tauri) liegt die Ablage nur im Speicher des Fensters.
+
+## 8. Git
+
+- `c4098a8` — R4 (`db-file-load.ts`, `database.ts`, c6-Test).
+- `2b98e46` — R1–R3 (`pending-saves.ts`, `client-command-save.ts`, `shared-write.ts`, `command-registry.ts`,
+  `PendingSavesBar.tsx`, `App.tsx`, `bridge.rs`, `routes.rs`, Tests).
+- `04808fb` — Folge: Rust-Testmodul `command_reply_tests` ans Ende von `routes.rs` (nur Testcode; Produktcode = `2b98e46`).
+- `8f37ee5` — Folge R3: Kennungsspeicher merkt eine vom durablen Nachweis abgewiesene Anfrage nicht als Besitzer (E2E-Fund).
+- Doku-/E2E-Commit — dieses Review, SSOT, `test/e2e/r7c-pending-saves.e2e.mjs` (Lauf 2: 28/1, der Fehler = N1).
