@@ -14,6 +14,7 @@
 
 import { clientConfig, setClientToken } from './client-mode';
 import { ERR_UNAVAILABLE } from './remote-read';
+import { normalizeRecordImages, RecordImageRejected } from '@/core/media/record-image';
 
 /** Was der Server über eine angenommene Ablage sagt. Die Kennung vergibt ER. */
 export interface StagedImage {
@@ -112,4 +113,24 @@ export async function stageDataUrls(urls: readonly string[], fetchFn: typeof fet
     ids.push(staged.stagingId);
   }
   return ids;
+}
+
+/**
+ * POST-PARITY R7B PP-12 — Belegbilder (Reparatur, Altgold, Ausweis, Einkaufs-/Auftragsentwurf) rechnet
+ * der AUFNEHMENDE Rechner durch denselben Normalisierer (Rust, dieselbe Anwendung), BEVOR sie reisen:
+ * abgelegt wird die gespeicherte Fassung (JPEG ≤ 100 000 B). So liegt die Rechenzeit nicht in der Frist
+ * des Auftrags am Primary; der Primary prüft beim Abholen trotzdem (`staging_media_read_record` — ein Foto
+ * in der gespeicherten Form bleibt dort Byte für Byte). `keep`: schon gespeicherte Fotos reisen unverändert.
+ */
+export async function stageRecordDataUrls(
+  urls: readonly string[], keep: readonly string[] = [], fetchFn: typeof fetch = fetch,
+): Promise<string[]> {
+  let ready: string[];
+  try {
+    ready = await normalizeRecordImages(urls, { keep });
+  } catch (e) {
+    if (e instanceof RecordImageRejected) throw new StagingUploadError(e.code, e.message);
+    throw e;
+  }
+  return stageDataUrls(ready, fetchFn);
 }

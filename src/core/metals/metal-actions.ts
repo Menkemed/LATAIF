@@ -11,7 +11,7 @@
 // alten, synchronen Einstiege): lägen die Nachlade-Aufrufe im Haus, hinge Store an Haus an Store.
 // ════════════════════════════════════════════════════════════════════════════
 import { runOnPrimary } from '@/core/data/primary-action';
-import { stageDataUrls } from '@/core/bridge/client-staging-upload';
+import { stageRecordDataUrls } from '@/core/bridge/client-staging-upload';
 import { useMetalStore } from '@/stores/metalStore';
 import { useScrapTradeStore } from '@/stores/scrapTradeStore';
 import { useExpenseStore } from '@/stores/expenseStore';
@@ -20,7 +20,7 @@ import {
   type MetalCreateInput, type MetalStatusChange, type MetalStatusResult,
 } from './metal-house';
 import {
-  cancelScrapTradeInHouse, createScrapTradeInHouse, updateScrapTradeInHouse,
+  cancelScrapTradeInHouse, createScrapTradeInHouse, updateScrapTradeInHouse, storedScrapPhotos, withRecordScrapPhotos,
   type ScrapTradeInput, type ScrapTradeResult,
 } from './scrap-house';
 
@@ -81,14 +81,19 @@ function geschaefteNeuLesen(): void {
   useScrapTradeStore.getState().loadTrades();
 }
 
-/** „Save Trade" am Primary. */
-export function createScrapTradeOnPrimary(input: ScrapTradeInput): Promise<ScrapTradeResult> {
-  return runOnPrimary(() => createScrapTradeInHouse(input, localHouseBranch()), geschaefteNeuLesen);
+/**
+ * „Save Trade" am Primary. POST-PARITY R7B PP-12 — jedes Foto durch den EINEN Normalisierer, wie fern —
+ * VOR der Klammer: das Umrechnen hält die Schreibreihenfolge des Primary nicht auf.
+ */
+export async function createScrapTradeOnPrimary(input: ScrapTradeInput): Promise<ScrapTradeResult> {
+  const photos = await withRecordScrapPhotos(input, []);
+  return runOnPrimary(() => createScrapTradeInHouse(photos, localHouseBranch()), geschaefteNeuLesen);
 }
 
-/** „Save Changes" am Primary — gegen die Fassung, die die Detailseite geladen hat. */
-export function updateScrapTradeOnPrimary(tradeId: string, expectedVersion: number, input: ScrapTradeInput): Promise<ScrapTradeResult> {
-  return runOnPrimary(() => updateScrapTradeInHouse(tradeId, expectedVersion, input, localHouseBranch()), geschaefteNeuLesen);
+/** „Save Changes" am Primary — gegen die Fassung, die die Detailseite geladen hat. Gespeicherte Fotos bleiben. */
+export async function updateScrapTradeOnPrimary(tradeId: string, expectedVersion: number, input: ScrapTradeInput): Promise<ScrapTradeResult> {
+  const photos = await withRecordScrapPhotos(input, storedScrapPhotos(tradeId, localHouseBranch()));
+  return runOnPrimary(() => updateScrapTradeInHouse(tradeId, expectedVersion, photos, localHouseBranch()), geschaefteNeuLesen);
 }
 
 /** „Yes, Cancel Trade" am Primary. */
@@ -104,8 +109,15 @@ export interface StagedScrapPhotos { purchase: string[]; sale: string[] }
  * Primary (R5B), der Auftrag nennt nur ihre Kennungen. Beim Ändern werden auch die schon
  * gespeicherten Fotos neu abgelegt — derselbe Inhalt ergibt dieselbe Kennung, es entsteht nichts
  * doppelt, und das Haus ersetzt die Zeilen samt Fotos wie am Primary.
+ * POST-PARITY R7B PP-12 — neue Fotos rechnet PC2 vorher durch den Normalisierer; die gespeicherten
+ * (`keep`) reisen unverändert, damit der Primary sie an ihrer Kennung wiedererkennt.
  */
-export async function stageScrapPhotos(input: ScrapTradeInput, stage: (urls: readonly string[]) => Promise<string[]> = stageDataUrls): Promise<StagedScrapPhotos[]> {
+export async function stageScrapPhotos(
+  input: ScrapTradeInput,
+  stage?: (urls: readonly string[]) => Promise<string[]>,
+  keep: readonly string[] = [],
+): Promise<StagedScrapPhotos[]> {
+  stage ??= (urls) => stageRecordDataUrls(urls, keep);
   const out: StagedScrapPhotos[] = [];
   for (const l of input.lines) {
     out.push({ purchase: await stage(l.imagesPurchase ?? []), sale: await stage(l.imagesSale ?? []) });

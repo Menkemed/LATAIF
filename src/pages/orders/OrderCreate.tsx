@@ -31,7 +31,7 @@ import { useSharedRead } from '@/core/data/shared-read';
 import { lotAggregatesFor } from '@/core/data/domain-reads';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
-import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
+import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { ORDER_CREATE_STATUSES, orderCreateBody, orderCreateInput, validateOrderCreate } from '@/core/orders/order-create';
 import { createOrderOnPrimary } from '@/core/orders/order-house';
 
@@ -341,7 +341,7 @@ export function OrderCreate() {
     // der Auftrag nennt nur ihre Kennungen.
     let body: Record<string, unknown> | null = null;
     if (w.remote) {
-      try { body = await orderCreateBody(input, stageDataUrls); }
+      try { body = await orderCreateBody(input, stageRecordDataUrls); }
       catch (e) { setError(e instanceof StagingUploadError ? e.message : String(e)); return; }
     }
     const r = await w.save('orders.create', {

@@ -18,6 +18,7 @@ import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
 import { useRepairStore } from '@/stores/repairStore';
 import { useProductStore } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
+import { normalizeRecordImages } from '@/core/media/record-image';
 import type { Repair, RepairLine, RepairStatus } from '@/core/models/types';
 import {
   RepairActionRejected, assertRepairEditRefs, buildRepairEditPatch, normalizeRepairCreate, planRepairCreate,
@@ -82,15 +83,28 @@ function amPrimary<T>(work: () => T | Promise<T>): Promise<T> {
 }
 
 /** „Create Repair" am Primary — dieselbe Vorbereitung wie der Fernbefehl, dann `createRepair`. */
-export function createRepairOnPrimary(form: Partial<Repair>): Promise<Repair> {
+export async function createRepairOnPrimary(form: Partial<Repair>): Promise<Repair> {
+  // POST-PARITY R7B PP-12 — jedes Foto durch den EINEN Normalisierer (≤ 100 000 B), wie fern — VOR der
+  // Klammer: das Umrechnen hält die Schreibreihenfolge des Primary nicht auf.
+  const images = await normalizeRecordImages(form.images ?? []);
   return amPrimary(() => {
     const data = planRepairCreate(normalizeRepairCreate(form), houseRepairPort(currentBranchId()));
-    return useRepairStore.getState().createRepair({ ...data, images: form.images ?? [] });
+    return useRepairStore.getState().createRepair({ ...data, images });
   });
 }
 
+/** Die gespeicherten Fotos einer Reparatur — sie bleiben beim Ändern, wie sie sind. */
+function gespeicherteFotos(id: string): string[] {
+  try {
+    const list = JSON.parse(String(query('SELECT images FROM repairs WHERE id = ?', [id])[0]?.images ?? '[]'));
+    return Array.isArray(list) ? list.filter((x): x is string => typeof x === 'string') : [];
+  } catch { return []; }
+}
+
 /** „Save" der Detailseite am Primary — derselbe Schreibsatz wie der Fernbefehl. */
-export function updateRepairOnPrimary(id: string, form: Partial<Repair>): Promise<void> {
+export async function updateRepairOnPrimary(id: string, form: Partial<Repair>): Promise<void> {
+  // POST-PARITY R7B PP-12 — neue Fotos durch den Normalisierer (vor der Klammer); gespeicherte bleiben.
+  if (form.images !== undefined) form = { ...form, images: await normalizeRecordImages(form.images, { keep: gespeicherteFotos(id) }) };
   return amPrimary(() => {
     const rs = useRepairStore.getState();
     rs.loadRepairs();

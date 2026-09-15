@@ -23,16 +23,17 @@ import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOut
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import {
-  assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStaged, parseStagingIds,
-  readStagedAsDataUrls, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader,
+  assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStagedRecord, parseStagingIds,
+  readStagedAsRecordImages, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader,
 } from './remote-create-support';
+import { sha256OfDataUrl } from '@/core/media/record-image';
 import {
   METAL_CREATE_FIELDS, METAL_PAYMENT_METHODS, MetalRejected, changeMetalStatusInHouse, createMetalInHouse, setSpotPriceInHouse,
   type MetalCreateInput, type MetalPaymentMethod,
 } from '@/core/metals/metal-house';
 import {
   SCRAP_MAX_PHOTOS, ScrapRejected, cancelScrapTradeInHouse, createScrapTradeInHouse, updateScrapTradeInHouse,
-  type ScrapTradeInput, type ScrapTradeLineInput, type ScrapTradePaymentInput,
+  storedScrapPhotos, type ScrapTradeInput, type ScrapTradeLineInput, type ScrapTradePaymentInput,
 } from '@/core/metals/scrap-house';
 
 export const OP_METALS_CREATE = 'metals.create';
@@ -298,19 +299,32 @@ export function runSpotPrice(deps: EngineDeps, identity: CommandIdentity, raw: u
   });
 }
 
-/** Die Fotos aus der Ablage holen — INNERHALB des Auftrags, als Eigentümer die geprüfte Identität. */
-async function withPhotos(req: ScrapRequest, identity: CommandIdentity, media: ScrapMedia): Promise<ScrapTradeInput> {
-  const read = media.readStaged ?? invokeReadStaged;
+/**
+ * Die Fotos aus der Ablage holen — INNERHALB des Auftrags, als Eigentümer die geprüfte Identität.
+ * POST-PARITY R7B PP-12 — der Standardleser gibt ein Foto so heraus, wie es gespeichert wird
+ * (≤ 100 000 B). Beim Ändern legt PC2 auch die schon gespeicherten Fotos neu ab; dieselben Bytes
+ * tragen dieselbe Kennung (ihren SHA-256) — ein solches Foto bleibt die gespeicherte Fassung und
+ * wird nicht ein zweites Mal gerechnet.
+ */
+async function withPhotos(req: ScrapRequest, identity: CommandIdentity, media: ScrapMedia, tradeId?: string): Promise<ScrapTradeInput> {
+  const read = media.readStaged ?? invokeReadStagedRecord;
   const owner = stagingOwnerOf(identity);
   const fail = (m: string) => new MetalPayloadError(m, 'STAGED_IMAGE_GONE');
+  const stored = new Map<string, string>();
+  if (tradeId) {
+    for (const url of storedScrapPhotos(tradeId, identity.branchId)) {
+      try { stored.set(await sha256OfDataUrl(url), url); } catch { /* keine lesbare Daten-URL — wird nicht wiedererkannt */ }
+    }
+  }
+  const photos = async (ids: readonly string[]): Promise<string[]> => {
+    const out: string[] = [];
+    for (const id of ids) out.push(stored.get(id) ?? (await readStagedAsRecordImages([id], owner, read, fail))[0]);
+    return out;
+  };
   const lines: ScrapTradeLineInput[] = [];
   for (let i = 0; i < req.input.lines.length; i++) {
     const s = req.staged[i];
-    lines.push({
-      ...req.input.lines[i],
-      imagesPurchase: await readStagedAsDataUrls(s.purchase, owner, read, fail),
-      imagesSale: await readStagedAsDataUrls(s.sale, owner, read, fail),
-    });
+    lines.push({ ...req.input.lines[i], imagesPurchase: await photos(s.purchase), imagesSale: await photos(s.sale) });
   }
   return { ...req.input, lines };
 }
@@ -333,7 +347,7 @@ export async function runScrapUpdate(deps: EngineDeps, identity: CommandIdentity
   const req = parseScrapUpdate(raw);
   const outcome = await runRemoteCommand(deps, identity, async () => {
     assertHouseBranch(identity);
-    const input = await withPhotos(req, identity, media);
+    const input = await withPhotos(req, identity, media, req.tradeId);
     return urteil(() => updateScrapTradeInHouse(req.tradeId, req.expectedVersion, input, identity.branchId));
   });
   const staged = allStaged(req);

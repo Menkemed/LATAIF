@@ -17,6 +17,7 @@ import { useProductStore } from '@/stores/productStore';
 import { useGoldStore } from '@/stores/goldStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import type { Order } from '@/core/models/types';
+import { normalizeSpecImages } from '@/core/media/record-image';
 import { OrderActionRejected, planOrderCreate, type OrderCreateInput, type OrderCreatePort } from './order-create';
 import { planOrderEdit, orderEditInput, type OrderEditInput } from './order-edit';
 
@@ -111,8 +112,14 @@ export function updateOrderInHouse(id: string, input: OrderEditInput, branchId: 
 }
 
 /** „Save Order" am Primary. */
-export function createOrderOnPrimary(input: OrderCreateInput): Promise<OrderCreated> {
-  return runOnPrimary(() => createOrderInHouse(input, currentBranchId()), frischLesen);
+export async function createOrderOnPrimary(input: OrderCreateInput): Promise<OrderCreated> {
+  // POST-PARITY R7B PP-12 — Fotos neuer Artikel und des Sonderstück-Entwurfs durch den EINEN
+  // Normalisierer (≤ 100 000 B), wie fern — vor der Klammer, damit das Umrechnen die Schreibreihenfolge
+  // nicht aufhält.
+  const lines: OrderCreateInput['lines'] = [];
+  for (const l of input.lines) lines.push(l.newProduct ? { ...l, newProduct: await normalizeSpecImages(l.newProduct) } : l);
+  const customProductSpec = await normalizeSpecImages(input.customProductSpec);
+  return runOnPrimary(() => createOrderInHouse({ ...input, lines, customProductSpec }, currentBranchId()), frischLesen);
 }
 
 /** „Save" der Auftragsseite am Primary — die sechs Werte des Formulars. */

@@ -50,8 +50,8 @@ import { houseRepairPort } from '@/core/repairs/repair-house';
 import { TRANSFER_SETTLEMENT_MODELS, TransferActionRejected, normalizeTransferCreate } from '@/core/agents/transfer-rules';
 import { createTransferInHouse } from '@/core/agents/transfer-house';
 import {
-  assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStaged, isStagingId,
-  readStagedAsDataUrls, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader, type StagingOwner,
+  assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStagedRecord, isStagingId,
+  readStagedAsRecordImages, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader, type StagingOwner,
 } from './remote-create-support';
 import {
   CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps,
@@ -196,7 +196,8 @@ async function resolvePhotos(
   slots: readonly RepairPhotoSlot[], current: readonly string[], owner: StagingOwner, read: StagedMediaReader,
 ): Promise<string[]> {
   const ids = [...new Set(slots.flatMap((x) => ('stagingId' in x ? [x.stagingId] : [])))];
-  const data = await readStagedAsDataUrls(ids, owner, read, (m) => new ServicePayloadError(m));
+  // POST-PARITY R7B PP-12 — der Standardleser gibt das Foto so heraus, wie es gespeichert wird (≤ 100 000 B).
+  const data = await readStagedAsRecordImages(ids, owner, read, (m) => new ServicePayloadError(m));
   const byId = new Map(ids.map((id, i) => [id, data[i]]));
   return slots.map((x) => {
     if ('stagingId' in x) return String(byId.get(x.stagingId));
@@ -327,7 +328,7 @@ export async function runRepairCreate(
   deps: EngineDeps, identity: CommandIdentity, raw: unknown, extras: RepairEngineExtras = {},
 ): Promise<CommandOutcome> {
   const req = parseRepairCreate(raw);
-  const read = extras.readStaged ?? invokeReadStaged;
+  const read = extras.readStaged ?? invokeReadStagedRecord;
   const discard = extras.discardStaged ?? invokeDiscardStaged;
   const owner = stagingOwnerOf(identity);
   const outcome = await runRemoteCommand(deps, identity, async () => {
@@ -431,7 +432,7 @@ export async function runRepairUpdate(
   deps: EngineDeps, identity: CommandIdentity, raw: unknown, extras: RepairEngineExtras = {},
 ): Promise<CommandOutcome> {
   const req = parseRepairUpdate(raw);
-  const read = extras.readStaged ?? invokeReadStaged;
+  const read = extras.readStaged ?? invokeReadStagedRecord;
   const discard = extras.discardStaged ?? invokeDiscardStaged;
   const owner = stagingOwnerOf(identity);
   const outcome = await runRemoteCommand(deps, identity, async () => {

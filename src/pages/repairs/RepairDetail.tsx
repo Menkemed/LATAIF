@@ -48,7 +48,7 @@ import {
 import {
   addRepairLineOnPrimary, cancelRepairLineOnPrimary, invoiceRepairsOnPrimary, updateRepairOnPrimary, updateRepairStatusOnPrimary,
 } from '@/core/repairs/repair-house';
-import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
+import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { nextRepairStatus, repairStatusFlow } from '@/core/repairs/repair-status-flow';
 import { useSharedRead } from '@/core/data/shared-read';
 import { creditPaidFor } from '@/core/data/domain-reads';
@@ -470,7 +470,7 @@ export function RepairDetail() {
       if (!repairEditHasChanges(repair, form)) { setEditing(false); return; }
       if (repairPhotosChanged(repair, form)) {
         try {
-          photos = await repairPhotoPlan(repair.images ?? [], form.images ?? [], (urls) => stageDataUrls(urls));
+          photos = await repairPhotoPlan(repair.images ?? [], form.images ?? [], (urls) => stageRecordDataUrls(urls));
         } catch (e) {
           alert(`The photos could not be handed to the main computer (${e instanceof StagingUploadError ? e.code : String(e)}). Nothing was saved — please try again.`);
           return;

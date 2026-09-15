@@ -30,7 +30,7 @@ import { useSharedRead } from '@/core/data/shared-read';
 import { purchaseCreatePrefillFor, type PurchaseCreatePrefill } from '@/core/data/page-reads';
 import { useSharedWrites, useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
-import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
+import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { purchaseCreateBody, validatePurchaseCreate, type PurchaseCreateInput } from '@/core/purchases/purchase-create';
 import { createPurchaseOnPrimary } from '@/core/purchases/purchase-house';
 import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
@@ -330,7 +330,7 @@ export function PurchaseCreate() {
     // Auftrag nennt nur ihre Kennungen.
     let body: Record<string, unknown> | null = null;
     if (w.remote) {
-      try { body = await purchaseCreateBody(input, stageDataUrls); }
+      try { body = await purchaseCreateBody(input, stageRecordDataUrls); }
       catch (e) { setError(e instanceof StagingUploadError ? e.message : String(e)); return; }
     }
     const r = await w.save('purchases.create', {

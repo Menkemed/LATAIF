@@ -71,6 +71,7 @@ import { CommandNotEvaluated } from './mutation-engine';
 import {
   invokeReadStaged, invokeDiscardStaged, assertHouseBranch, parseStagingIds, readStagedAsDataUrls,
   discardStagedAfterSuccess, stagingOwnerOf, type StagedMediaReader, type StagedMediaDiscard, type StagingOwner,
+  invokeReadStagedRecord, readStagedAsRecordImages,
 } from './remote-create-support';
 import {
   createConsignmentWithProduct, houseConsignmentPort, ConsignmentCreateRejected, ConsignmentMediaIncomplete,
@@ -234,13 +235,17 @@ export function parseSpec(raw: unknown, fields: readonly string[], what: string)
   };
 }
 
-/** Die Fotos eines Entwurfs — INNERHALB des Auftrags gelesen. Eine Wiederholung liest sie nie wieder. */
+/**
+ * Die Fotos eines Entwurfs — INNERHALB des Auftrags gelesen. Eine Wiederholung liest sie nie wieder.
+ * POST-PARITY R7B PP-12 — sie landen in `products.images` bzw. im Entwurf des Auftrags; der
+ * Standardleser (`invokeReadStagedRecord`) gibt sie so heraus, wie sie gespeichert werden (≤ 100 000 B).
+ */
 export async function mitFotos(
   p: { spec: Partial<Product>; stagingIds?: string[] } | undefined, owner: StagingOwner, read: StagedMediaReader,
 ): Promise<Partial<Product> | undefined> {
   if (!p) return undefined;
   if (p.stagingIds === undefined) return { ...p.spec };
-  const images = await readStagedAsDataUrls(p.stagingIds, owner, read, (m) => new CommercialPayloadError(m));
+  const images = await readStagedAsRecordImages(p.stagingIds, owner, read, (m) => new CommercialPayloadError(m));
   return { ...p.spec, images };
 }
 
@@ -338,7 +343,7 @@ export async function runPurchaseCreate(
 ): Promise<CommandOutcome> {
   const req = parsePurchaseCreate(raw);
   const owner = stagingOwnerOf(identity);
-  const read = extras.readStaged ?? invokeReadStaged;
+  const read = extras.readStaged ?? invokeReadStagedRecord;
   const staged = req.specs.flatMap((s) => s?.stagingIds ?? []);
   const outcome = await runRemoteCommand(deps, identity, async () => {
     // R5E — in die Bücher DIESER Filiale, oder gar nicht.
@@ -802,7 +807,7 @@ export async function runOrderCreate(
 ): Promise<CommandOutcome> {
   const req = parseOrderCreate(raw);
   const owner = stagingOwnerOf(identity);
-  const read = extras.readStaged ?? invokeReadStaged;
+  const read = extras.readStaged ?? invokeReadStagedRecord;
   const staged = [...req.specs.flatMap((s) => s?.stagingIds ?? []), ...(req.finalSpec?.stagingIds ?? [])];
   const outcome = await runRemoteCommand(deps, identity, async () => {
     // R5E — in die Bücher DIESER Filiale, oder gar nicht.

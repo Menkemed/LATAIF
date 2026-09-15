@@ -25,7 +25,7 @@ import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOut
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import {
-  assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStaged, stagingOwnerOf,
+  assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStagedRecord, stagingOwnerOf,
 } from './remote-create-support';
 import { CommercialPayloadError, mitFotos, parseSpec, type StagingExtras } from './commercial-commands';
 import { EMBEDDED_PRODUCT_FIELDS, EmbeddedProductRejected } from '@/core/products/embedded-product';
@@ -285,7 +285,8 @@ export async function runOrderLineEdit(
 ): Promise<CommandOutcome> {
   const req = parseOrderLineEdit(raw);
   const owner = stagingOwnerOf(identity);
-  const read = extras.readStaged ?? invokeReadStaged;
+  // POST-PARITY R7B PP-12 — die Fotos des Entwurfs landen in `products.images`: so gelesen, wie sie gespeichert werden.
+  const read = extras.readStaged ?? invokeReadStagedRecord;
   const staged = req.newProduct?.stagingIds ?? [];
   const outcome = await runRemoteCommand(deps, identity, async () => {
     // Ein neuer Artikel entsteht in den Büchern dieses Rechners.

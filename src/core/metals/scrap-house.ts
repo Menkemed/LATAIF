@@ -21,6 +21,7 @@ import { getDatabase } from '@/core/db/database';
 import { query, currentUserId } from '@/core/db/helpers';
 import { postScrapTrade, reverseTransaction } from '@/core/ledger/posting';
 import type { ScrapPaymentMethod } from '@/core/models/types';
+import { normalizeRecordImages } from '@/core/media/record-image';
 import { assertKeepsBooks } from './metal-house';
 
 /** Ein fachliches Nein des Altgoldhandels. */
@@ -397,4 +398,39 @@ export function cancelScrapTradeInHouse(tradeId: string, expectedVersion: number
     [now, tradeId, expectedVersion],
   );
   return resultOf(tradeId);
+}
+
+// ── POST-PARITY R7B PP-12 — die Fotos eines Geschäfts durch den EINEN Normalisierer ─────────────
+
+/** Die gespeicherten Fotos eines Geschäfts dieser Filiale — sie bleiben beim Ändern, wie sie sind. */
+export function storedScrapPhotos(tradeId: string, branchId: string): string[] {
+  const rows = query(
+    `SELECT l.images_purchase, l.images_sale FROM scrap_trade_lines l
+       JOIN scrap_trades t ON t.id = l.scrap_trade_id
+      WHERE l.scrap_trade_id = ? AND t.branch_id = ?`,
+    [tradeId, branchId],
+  );
+  const out: string[] = [];
+  for (const r of rows) {
+    for (const col of [r.images_purchase, r.images_sale]) {
+      try {
+        const list = JSON.parse(String(col || '[]'));
+        if (Array.isArray(list)) for (const x of list) if (typeof x === 'string') out.push(x);
+      } catch { /* keine lesbare Liste */ }
+    }
+  }
+  return out;
+}
+
+/** Neue Fotos je Seite durch den Normalisierer (≤ 100 000 B); `keep` bleibt Byte für Byte. */
+export async function withRecordScrapPhotos(input: ScrapTradeInput, keep: readonly string[]): Promise<ScrapTradeInput> {
+  const lines: ScrapTradeLineInput[] = [];
+  for (const l of input.lines) {
+    lines.push({
+      ...l,
+      imagesPurchase: await normalizeRecordImages(l.imagesPurchase ?? [], { keep }),
+      imagesSale: await normalizeRecordImages(l.imagesSale ?? [], { keep }),
+    });
+  }
+  return { ...input, lines };
 }

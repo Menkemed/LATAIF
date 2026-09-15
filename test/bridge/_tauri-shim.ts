@@ -111,6 +111,24 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
       if (!bytes || sha(bytes) !== id) throw new Error('STAGING_NOT_FOUND');
       return { mime: 'image/jpeg', bytes: bytes.length, dataBase64: Buffer.from(bytes).toString('base64') } as T;
     }
+    // POST-PARITY R7B PP-12 — der Belegbild-Weg. Der echte Normalisierer (Rust `media::record_image`)
+    // rechnet das Foto in ein JPEG ≤ 100 000 B um; hier steht er — wie `media_prepare_stock_image`
+    // für den Medienspeicher — mit derselben Form und den Bytes selbst (Kennzeichen: immer JPEG).
+    // Was er WIRKLICH tut, prüfen `cargo test media::record_image` und der Zwei-Rechner-Lauf.
+    case 'staging_media_read_record': {
+      if (tauriState.readShouldThrow) throw new Error('STAGING_IO');
+      const id = String(a.stagingId ?? '');
+      const key = `${ownerKey({
+        tenantId: String(a.tenantId ?? ''), branchId: String(a.branchId ?? ''), userId: String(a.userId ?? ''),
+      })}/${id}`;
+      const bytes = tauriState.staged.get(key);
+      if (!bytes || sha(bytes) !== id) throw new Error('STAGING_NOT_FOUND');
+      return { mime: 'image/jpeg', bytes: bytes.length, width: 0, height: 0, dataBase64: Buffer.from(bytes).toString('base64') } as T;
+    }
+    case 'media_normalize_record_image': {
+      const b64 = String(a.dataBase64 ?? '');
+      return { mime: 'image/jpeg', bytes: Buffer.from(b64, 'base64').length, width: 0, height: 0, dataBase64: b64 } as T;
+    }
     case 'staging_media_discard': {
       const id = String(a.stagingId ?? '');
       const key = `${ownerKey({

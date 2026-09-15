@@ -1,5 +1,6 @@
 import { useRef, useState } from 'react';
 import { Plus, X, Image as ImageIcon } from 'lucide-react';
+import { captureImage } from '@/core/media/capture-profile';
 
 interface ImageUploadProps {
   images: string[];
@@ -8,43 +9,29 @@ interface ImageUploadProps {
   disabled?: boolean;
 }
 
-function compressImage(file: File, maxWidth = 800, quality = 0.7): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onload = () => {
-      const img = new window.Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        const ratio = Math.min(maxWidth / img.width, maxWidth / img.height, 1);
-        canvas.width = img.width * ratio;
-        canvas.height = img.height * ratio;
-        const ctx = canvas.getContext('2d')!;
-        ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-        resolve(canvas.toDataURL('image/jpeg', quality));
-      };
-      img.onerror = reject;
-      img.src = reader.result as string;
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(file);
-  });
-}
-
 export function ImageUpload({ images, onChange, maxImages = 6, disabled = false }: ImageUploadProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
+  const [skipped, setSkipped] = useState(0);
 
+  // POST-PARITY R7B PP-12 — das Aufnahmeprofil steht an EINER Stelle (`capture-profile.ts`). Eine
+  // unlesbare Datei wird übersprungen und genannt, statt die gültigen mitzureißen.
   async function handleFiles(files: FileList | null) {
     if (!files || disabled) return;
     const remaining = maxImages - images.length;
     const toProcess = Array.from(files).slice(0, remaining);
     const newImages: string[] = [];
+    let unreadable = 0;
     for (const file of toProcess) {
-      if (!file.type.startsWith('image/')) continue;
-      const dataUrl = await compressImage(file);
-      newImages.push(dataUrl);
+      if (!file.type.startsWith('image/')) { unreadable++; continue; }
+      try {
+        newImages.push(await captureImage(file));
+      } catch {
+        unreadable++;
+      }
     }
-    onChange([...images, ...newImages]);
+    setSkipped(unreadable);
+    if (newImages.length) onChange([...images, ...newImages]);
   }
 
   function removeImage(index: number) {
@@ -91,6 +78,12 @@ export function ImageUpload({ images, onChange, maxImages = 6, disabled = false 
           </div>
         )}
       </div>
+
+      {skipped > 0 && (
+        <p data-image-upload-skipped={skipped} style={{ fontSize: 11, marginTop: 6, color: '#DC2626' }}>
+          {skipped === 1 ? '1 file could not be read as a photo and was skipped.' : `${skipped} files could not be read as photos and were skipped.`}
+        </p>
+      )}
 
       {images.length === 0 && disabled && (
         <div className="flex items-center justify-center rounded-lg" style={{ height: 120, border: '1px solid #E5E9EE', background: '#F2F7FA' }}>

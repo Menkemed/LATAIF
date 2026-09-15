@@ -34,7 +34,7 @@ import {
 import { createRepairOnPrimary, invoiceRepairsOnPrimary, updateRepairStatusOnPrimary } from '@/core/repairs/repair-house';
 import { useSharedWrites, useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
-import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
+import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { quickRepairNext } from '@/core/repairs/repair-status-flow';
 import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
 
@@ -324,7 +324,7 @@ export function RepairList() {
     let fotos: string[] = [];
     if (w.remote && (form.images?.length ?? 0) > 0) {
       try {
-        fotos = await stageDataUrls(form.images ?? []);
+        fotos = await stageRecordDataUrls(form.images ?? []);
       } catch (e) {
         alert(`The photos could not be handed to the main computer (${e instanceof StagingUploadError ? e.code : String(e)}). Nothing was created — please try again.`);
         return;

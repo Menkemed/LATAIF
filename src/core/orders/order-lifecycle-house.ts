@@ -38,6 +38,7 @@ import type { Product } from '@/core/models/types';
 import {
   EMBEDDED_PRODUCT_FIELDS, EmbeddedProductRejected, checkEmbeddedProduct, pickProductSpec, stageSpecImages,
 } from '@/core/products/embedded-product';
+import { normalizeSpecImages } from '@/core/media/record-image';
 import { OrderActionRejected } from './order-create';
 import { planOrderEdit } from './order-edit';
 import { houseOrderPort } from './order-house';
@@ -547,5 +548,8 @@ export async function markOrderLineOrderedOnPrimary(req: OrderLineOrderedRequest
 
 export async function updateOrderLineOnPrimary(req: OrderLineEditRequest): Promise<OrderLineEditResult> {
   const branchId = primaryBranch('editing an order line');
-  return runOnPrimary(() => updateOrderLineInHouse(req, branchId), frischLesen);
+  // POST-PARITY R7B PP-12 — die Fotos eines neuen Artikels durch den EINEN Normalisierer, wie fern —
+  // vor der Klammer, damit das Umrechnen die Schreibreihenfolge nicht aufhält.
+  const ready = req.newProduct ? { ...req, newProduct: await normalizeSpecImages(req.newProduct) } : req;
+  return runOnPrimary(() => updateOrderLineInHouse(ready, branchId), frischLesen);
 }

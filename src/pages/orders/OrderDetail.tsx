@@ -58,7 +58,7 @@ import {
   type OrderCancelRequest, type OrderLineEditRequest, type OrderLineOrderedRequest, type OrderLineStatusRequest,
   type OrderLineStatusTarget,
 } from '@/core/orders/order-lifecycle-house';
-import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
+import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { WriteError } from '@/components/shared/WriteError';
 import { orderDetailReadsFor } from '@/core/data/page-reads';
 import { creditPaidFor } from '@/core/data/domain-reads';
@@ -461,7 +461,7 @@ export function OrderDetail() {
     // Auf dem zweiten Rechner reisen die Fotos eines neuen Artikels vorab in die Zwischenablage.
     let body: Record<string, unknown> | null = null;
     if (w.remote) {
-      try { body = await orderLineEditBody(req, stageDataUrls); }
+      try { body = await orderLineEditBody(req, stageRecordDataUrls); }
       catch (e) { alert(e instanceof StagingUploadError ? e.message : String(e)); return; }
     }
     if (!await w.ok('orders.update_line', {

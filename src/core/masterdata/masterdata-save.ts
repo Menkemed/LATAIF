@@ -20,7 +20,8 @@ import { fetchFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
 import { runOnPrimary } from '@/core/data/primary-action';
 import type { WriteAdapters, WriteOutcome } from '@/core/data/shared-write';
 import { updatePayload } from '@/core/data/write-payloads';
-import { stageDataUrls } from '@/core/bridge/client-staging-upload';
+import { stageRecordDataUrls } from '@/core/bridge/client-staging-upload';
+import { normalizeRecordImage } from '@/core/media/record-image';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { usePartnerStore } from '@/stores/partnerStore';
@@ -53,7 +54,8 @@ const unveraendert = <T>(value: T): WriteOutcome<T> => ({ kind: 'ok', value, rep
 /** Das Ausweisfoto in die Ablage des Primary — dieselbe Zwischenablage wie beim Artikel (R5B). */
 async function stagePhoto(dataUrl: string): Promise<{ id: string } | { fail: WriteOutcome<never> }> {
   try {
-    const [id] = await stageDataUrls([dataUrl]);
+    // POST-PARITY R7B PP-12 — PC2 rechnet das Foto vorher durch den Normalisierer (≤ 100 000 B).
+    const [id] = await stageRecordDataUrls([dataUrl]);
     return { id };
   } catch (e) {
     const code = (e as { code?: unknown })?.code;
@@ -102,7 +104,12 @@ export async function saveSupplierCreate(
     body.cprImageStagingId = s.id;
   }
   const r = await write.save({
-    local: () => runOnPrimary(() => ({ supplierId: useSupplierStore.getState().createSupplier(input).id }), suppliersHier),
+    // POST-PARITY R7B PP-12 — das Ausweisfoto durch den EINEN Normalisierer (≤ 100 000 B), wie fern —
+    // vor der Klammer, damit das Umrechnen die Schreibreihenfolge nicht aufhält.
+    local: async () => {
+      const ready = input.cprImage ? { ...input, cprImage: await normalizeRecordImage(input.cprImage) } : input;
+      return runOnPrimary(() => ({ supplierId: useSupplierStore.getState().createSupplier(ready).id }), suppliersHier);
+    },
     remote: () => body,
     shape: (v) => ({ supplierId: String(v.supplierId ?? '') }),
   });
@@ -125,7 +132,12 @@ export async function saveSupplierUpdate(
     body.cprImageStagingId = s.id;
   }
   const r = await write.save({
-    local: () => runOnPrimary(() => { useSupplierStore.getState().updateSupplier(base.id, diff as Partial<Supplier>); return { id: base.id }; }, suppliersHier),
+    local: async () => {
+      // POST-PARITY R7B PP-12 — ein NEUES Ausweisfoto durch den Normalisierer (vor der Klammer); das gespeicherte bleibt.
+      const d = typeof diff.cprImage === 'string' && diff.cprImage
+        ? { ...diff, cprImage: await normalizeRecordImage(diff.cprImage, base.cprImage) } : diff;
+      return runOnPrimary(() => { useSupplierStore.getState().updateSupplier(base.id, d as Partial<Supplier>); return { id: base.id }; }, suppliersHier);
+    },
     remote: () => body,
     shape: () => ({ id: base.id }),
   });

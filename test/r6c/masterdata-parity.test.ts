@@ -395,8 +395,11 @@ marker('CENTRAL_UI_R6C_PRIMARY_PARITY_PROVED');
   ok(/saveEmployeeCreate\(/.test(el) && /saveEmployeeUpdate\(/.test(el) && !/createEmployee\(|updateEmployee\(/.test(el), 'UI Mitarbeiter anlegen und Status (Liste): ein Anschluss');
   ok(/saveEmployeeUpdate\(/.test(ed) && !/updateEmployee\(/.test(ed) && !/useEmployeeStore\(\)[\s\S]{0,200}setStatus/.test(ed), 'UI Mitarbeiter ändern und Status (Detail): ein Anschluss');
   const ms = codeOf(src('src/core/masterdata/masterdata-save.ts'));
-  ok((ms.match(/local: \(\) => runOnPrimary\(/g) ?? []).length === 7, 'UI am Primary läuft jede Stammdaten-Handlung in der Schreibreihenfolge (runOnPrimary) — nicht mehr an ihr vorbei');
-  ok(/stageDataUrls\(\[dataUrl\]\)/.test(ms) && /cprImageStagingId = s\.id/.test(ms), 'UI das Foto reist auf PC2 über die vorhandene Ablage (kein neuer Medienweg)');
+  // POST-PARITY R7B PP-12 — die zwei Lieferanten-Anschlüsse rechnen das Ausweisfoto VOR der Klammer; die Klammer bleibt.
+  ok((ms.match(/local: \(\) => runOnPrimary\(/g) ?? []).length === 5 && (ms.match(/local: async \(\) => \{[\s\S]{0,400}?return runOnPrimary\(/g) ?? []).length === 2,
+    'UI am Primary läuft jede Stammdaten-Handlung in der Schreibreihenfolge (runOnPrimary) — nicht mehr an ihr vorbei');
+  // POST-PARITY R7B PP-12 — dieselbe Ablage; PC2 rechnet das Foto vorher durch den Normalisierer.
+  ok(/stageRecordDataUrls\(\[dataUrl\]\)/.test(ms) && /cprImageStagingId = s\.id/.test(ms), 'UI das Foto reist auf PC2 über die vorhandene Ablage (kein neuer Medienweg)');
   ok(/updatePayload\(base as unknown as Record<string, unknown>, form as Record<string, unknown>, SUPPLIER_UPDATE_FIELDS\)/.test(ms), 'UI beim Ändern reist nur das Geänderte (M-01)');
 }
 marker('CENTRAL_UI_R6C_QUICK_CREATES_PROVED');
@@ -417,10 +420,16 @@ marker('CENTRAL_UI_R6C_QUICK_CREATES_PROVED');
     if (body.op === 'store.suppliers.get') return new Response(JSON.stringify({ ok: true, value: { data: { suppliers: [{ id: 'sup-remote', name: 'Photo', active: true }] } } }), { status: 200 });
     return new Response('{}', { status: 500 });
   }) as never;
+  // POST-PARITY R7B PP-12 — PC2 rechnet das Foto vor dem Ablegen durch den Normalisierer (Rust derselben
+  // Anwendung). Node hat kein Tauri: hier gestellt (JPEG, dieselben Bytes) und gezählt.
+  const recordImage = await import('../../src/core/media/record-image.ts');
+  let normalisiert = 0;
+  recordImage.setRecordImageNormalizer(async (dataBase64) => { normalisiert++; return { mime: 'image/jpeg', dataBase64, bytes: 0, width: 0, height: 0 }; });
   try {
     const ctl = new CommandSaveController<Record<string, unknown>>('suppliers.create');
     const write = { remote: true, save: <T,>(a: never) => runSharedWrite<T>(true, a, ctl.beginAttempt()) };
     const r = await save.saveSupplierCreate(write as never, { name: '  Photo  ', phone: '+973 9', cprImage: 'data:image/png;base64,iVBORw0K' });
+    ok(normalisiert === 1, 'CLIENT das Ausweisfoto ging vor dem Ablegen durch den Normalisierer');
     const cmd = calls.find((c) => c.body.op === 'suppliers.create');
     ok(r.kind === 'ok' && (r as { value: { supplierId: string } }).value.supplierId === 'sup-remote', 'CLIENT der Auftrag kommt zurück mit der Kennung des Primary');
     ok(calls[0]?.url.endsWith('/api/staging/media') && !!cmd && cmd.body.payload && S(Object.keys(cmd.body.payload as object).sort()) === S(['cprImageStagingId', 'name', 'phone'])

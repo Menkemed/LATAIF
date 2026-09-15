@@ -31,8 +31,8 @@ import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOut
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import {
-  assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStaged, isStagingId,
-  readStagedAsDataUrls, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader,
+  assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStagedRecord, isStagingId,
+  readStagedAsRecordImages, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader,
 } from './remote-create-support';
 import {
   AGENT_UPDATE_FIELDS, EMPLOYEE_FIELDS, MasterdataInputError, PARTNER_CREATE_FIELDS, PARTNER_UPDATE_FIELDS,
@@ -223,7 +223,8 @@ function mustExist(table: 'suppliers' | 'agents' | 'partners' | 'employees' | 'c
 
 async function stagedImage(ids: string[], identity: CommandIdentity, media: MasterdataMedia): Promise<string | undefined> {
   if (ids.length === 0) return undefined;
-  const [img] = await readStagedAsDataUrls(ids, stagingOwnerOf(identity), media.readStaged ?? invokeReadStaged,
+  // POST-PARITY R7B PP-12 — das Ausweisfoto kommt so aus der Ablage, wie es gespeichert wird (≤ 100 000 B).
+  const [img] = await readStagedAsRecordImages(ids, stagingOwnerOf(identity), media.readStaged ?? invokeReadStagedRecord,
     (m) => new MasterdataPayloadError(m, 'STAGED_IMAGE_GONE'));
   return img;
 }

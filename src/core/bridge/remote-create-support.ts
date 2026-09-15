@@ -45,6 +45,17 @@ export async function invokeReadStaged(stagingId: string, owner: StagingOwner): 
   return invoke('staging_media_read', { stagingId, ...owner });
 }
 
+/**
+ * POST-PARITY R7B PP-12 — ein Belegbild (Reparatur, Altgold, Ausweis, Einkaufs-/Auftragsentwurf)
+ * holt der Primary so aus der Ablage, wie es in der Zeile gespeichert wird: durch denselben
+ * Normalisierer wie das Artikelbild (JPEG, ≤ 100 000 B, ≤ 1600 px). Artikelbilder im Medienspeicher
+ * brauchen das nicht — dort normalisiert die Aufnahme selbst (`invokeReadStaged`).
+ */
+export async function invokeReadStagedRecord(stagingId: string, owner: StagingOwner): Promise<{ mime: string; dataBase64: string }> {
+  const { invoke } = await import('@tauri-apps/api/core');
+  return invoke('staging_media_read_record', { stagingId, ...owner });
+}
+
 export async function invokeDiscardStaged(stagingId: string, owner: StagingOwner): Promise<void> {
   const { invoke } = await import('@tauri-apps/api/core');
   await invoke('staging_media_discard', { stagingId, ...owner });
@@ -83,6 +94,27 @@ export async function readStagedAsDataUrls(
       // Kein Urteil der Domäne: nichts wird festgehalten, die Transaktion geht zurück. Dieselben
       // Bytes bekommen beim erneuten Ablegen dieselbe Kennung.
       throw fail(`staged image is gone: ${id} (${String(e)})`);
+    }
+    images.push(`data:${blob.mime};base64,${blob.dataBase64}`);
+  }
+  return images;
+}
+
+/**
+ * Belegbilder aus der Ablage (Standardleser `invokeReadStagedRecord`). Wie `readStagedAsDataUrls` —
+ * nur sagt ein Nein des Normalisierers, WAS mit dem Foto ist (`MEDIA_…`), statt „weg".
+ */
+export async function readStagedAsRecordImages(
+  ids: readonly string[], owner: StagingOwner, read: StagedMediaReader, fail: (message: string) => Error,
+): Promise<string[]> {
+  const images: string[] = [];
+  for (const id of ids) {
+    let blob: { mime: string; dataBase64: string };
+    try {
+      blob = await read(id, owner);
+    } catch (e) {
+      const code = /\b(MEDIA_[A-Z_]+)\b/.exec(String(e))?.[1];
+      throw fail(code ? `staged photo not stored: ${code} (${id})` : `staged image is gone: ${id} (${String(e)})`);
     }
     images.push(`data:${blob.mime};base64,${blob.dataBase64}`);
   }

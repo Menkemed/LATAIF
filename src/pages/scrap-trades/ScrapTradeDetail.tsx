@@ -57,7 +57,8 @@ export function ScrapTradeDetail() {
       let staged: StagedScrapPhotos[] = [];
       if (w.remote) {
         try {
-          staged = await stageScrapPhotos(values);
+          // POST-PARITY R7B PP-12 — gespeicherte Fotos reisen unverändert (der Primary erkennt sie an ihrer Kennung).
+          staged = await stageScrapPhotos(values, undefined, t.lines.flatMap((l) => [...(l.imagesPurchase ?? []), ...(l.imagesSale ?? [])]));
         } catch (e) {
           alert(`The photos could not be handed to the main computer (${e instanceof StagingUploadError ? e.code : String(e)}). Nothing was saved — please try again.`);
           return;

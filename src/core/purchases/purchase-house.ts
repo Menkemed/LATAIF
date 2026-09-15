@@ -16,6 +16,7 @@ import type { Purchase } from '@/core/models/types';
 import type { WriteAdapters, WriteOutcome } from '@/core/data/shared-write';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { localHouseCtx } from '@/core/payables/payables-house';
+import { normalizeSpecImages } from '@/core/media/record-image';
 import { planPurchaseCreate, type PurchaseCreateInput, type PurchaseCreatePort } from './purchase-create';
 import {
   PURCHASE_PRIMARY_ONLY, PurchaseLifecycleRejected,
@@ -68,8 +69,12 @@ export function createPurchaseInHouse(input: PurchaseCreateInput, branchId: stri
 }
 
 /** „Save Purchase" am Primary. */
-export function createPurchaseOnPrimary(input: PurchaseCreateInput): Promise<Purchase> {
-  return runOnPrimary(() => createPurchaseInHouse(input, currentBranchId()), frischLesen);
+export async function createPurchaseOnPrimary(input: PurchaseCreateInput): Promise<Purchase> {
+  // POST-PARITY R7B PP-12 — die Fotos eines neuen Artikels durch den EINEN Normalisierer, wie fern —
+  // vor der Klammer, damit das Umrechnen die Schreibreihenfolge nicht aufhält.
+  const lines: PurchaseCreateInput['lines'] = [];
+  for (const l of input.lines) lines.push(l.newProduct ? { ...l, newProduct: await normalizeSpecImages(l.newProduct) } : l);
+  return runOnPrimary(() => createPurchaseInHouse({ ...input, lines }, currentBranchId()), frischLesen);
 }
 
 // ════════════════════════════════════════════════════════════════════════════

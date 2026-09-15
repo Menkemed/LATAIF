@@ -721,7 +721,9 @@ marker('CENTRAL_UI_R6F_ORDER_MARK_ORDERED_PROVED');
 // ══ §7 — Der Positionsdialog ══════════════════════════════════════════════════
 const PNG = 'data:image/png;base64,AAAA';
 const STAGE = 'a'.repeat(64);
-const readStaged = async () => ({ mime: 'image/png', dataBase64: 'AAAA' });
+// POST-PARITY R7B PP-12 — steht für `staging_media_read_record`: ein Belegbild kommt als JPEG aus der Ablage.
+const readStaged = async () => ({ mime: 'image/jpeg', dataBase64: 'AAAA' });
+const JPEG_AAAA = 'data:image/jpeg;base64,AAAA';
 const editFern = (w: Welt, lineId: string, extra: Record<string, unknown>, cid = nx(), discard?: (id: string) => Promise<void>) =>
   fern(() => cmd.runOrderLineEdit(deps(w.db), identity(cid, 'orders.update_line'),
     { orderId: w.oid, lineId, expectedRevision: orev(w.db, w.oid), ...extra },
@@ -764,7 +766,7 @@ const editFern = (w: Welt, lineId: string, extra: Record<string, unknown>, cid =
     `NEWPRODUCT der Rumpf trägt nur die Felder der Maske und die Kennung des Fotos (${S(body.newProduct)})`);
   ok(p.ok && r.ok && bP === bR, `NEWPRODUCT lokal == fern (${p.code || 'ok'} / ${r.code || 'ok'} ${diff(bP, bR)})`);
   const neu = row(wR.db, "SELECT id, quantity, purchase_price, stock_status, images, created_by FROM products WHERE brand = 'Neu'");
-  ok(Number(neu.quantity) === 0 && Number(neu.purchase_price) === 0 && neu.stock_status === 'in_stock' && neu.images === S([PNG]),
+  ok(Number(neu.quantity) === 0 && Number(neu.purchase_price) === 0 && neu.stock_status === 'in_stock' && neu.images === S([JPEG_AAAA]),
     `NEWPRODUCT der Artikel entsteht ohne Bestand und ohne Einstand (die kommen mit dem Wareneingang), mit Foto (${S(neu)})`);
   ok(s(wR.db, 'SELECT product_id FROM order_lines WHERE id = ?', [wR.p1]) === neu.id && r.value.createdProductId === neu.id,
     'NEWPRODUCT die Position zeigt auf den neuen Artikel');
@@ -910,7 +912,7 @@ marker('CENTRAL_UI_R6F_ORDER_CLIENT_NO_LOCAL_DB_PROVED');
     'UI die Statusknöpfe (und „↺ Undo") über EINE Buchung');
   ok(/w\.ok\('orders\.mark_line_ordered'/.test(od) && /local: \(\) => markOrderLineOrderedOnPrimary\(req\)/.test(od) && /remote: \(\) => orderLineOrderedBody\(req\)/.test(od),
     'UI „Bestellt markieren" über EINE Buchung');
-  ok(/w\.ok\('orders\.update_line'/.test(od) && /local: \(\) => updateOrderLineOnPrimary\(req\)/.test(od) && /orderLineEditBody\(req, stageDataUrls\)/.test(od),
+  ok(/w\.ok\('orders\.update_line'/.test(od) && /local: \(\) => updateOrderLineOnPrimary\(req\)/.test(od) && /orderLineEditBody\(req, stageRecordDataUrls\)/.test(od),
     'UI der Positionsdialog über EINE Buchung, Fotos über die Zwischenablage');
   ok(!/cancelOrderWithMoney\(|\bmarkOrderLineOrdered\(|\bupdateOrderLine\(|updateOrderLineStatus\(/.test(od),
     'UI …keine der vier Store-Schreibaktionen mehr direkt aus der Seite');

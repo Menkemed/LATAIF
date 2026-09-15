@@ -62,6 +62,12 @@ const { resetTransactionHealthForTest } = await import('../../src/core/db/transa
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 const registry = await import('../../src/core/bridge/command-registry.ts');
+// POST-PARITY R7B PP-12 — Node hat kein Tauri: der Belegbild-Normalisierer wird hier gestellt (JPEG,
+// dieselben Bytes). Was der echte tut (≤ 100 000 B), prüfen `cargo test media::record_image` und der
+// Zwei-Rechner-Lauf; hier zählt, DASS die Maske des Primary ihn ruft.
+const recordImage = await import('../../src/core/media/record-image.ts');
+let normalisiert = 0;
+recordImage.setRecordImageNormalizer(async (dataBase64) => { normalisiert++; return { mime: 'image/jpeg', dataBase64, bytes: 0, width: 0, height: 0 }; });
 const perms = await import('../../src/core/bridge/command-permissions.ts');
 const readOps = await import('../../src/core/bridge/store-read-ops.ts');
 const mc = await import('../../src/core/bridge/metal-commands.ts');
@@ -715,10 +721,12 @@ marker('CENTRAL_UI_R6D_SCRAP_CANCEL_PROVED');
   const staged = await actions.stageScrapPhotos(TRADE({ lines: [{ weightGrams: 1, karat: '22K', purchasePrice: 120, salePrice: 155, imagesPurchase: ['data:image/png;base64,AA'], imagesSale: [] }] }),
     async (urls) => urls.map((_, i) => String(i + 1).repeat(64)));
   ok(S(staged) === S([{ purchase: ['1'.repeat(64)], sale: [] }]), 'MEDIA PC2 legt je Zeile und Seite in der Reihenfolge der Maske ab');
-  // Primary: die Fotos der Maske sind Daten-URLs und bleiben es
+  // Primary: die Fotos der Maske gehen durch den EINEN Normalisierer (R7B PP-12) und landen als JPEG.
   const dbP = freshDb();
+  const vorNorm = normalisiert;
   await actions.createScrapTradeOnPrimary(TRADE({ lines: [{ weightGrams: 1, karat: '22K', purchasePrice: 120, salePrice: 155, imagesPurchase: ['data:image/png;base64,AA'] }] }));
-  ok(one(dbP, 'SELECT images_purchase FROM scrap_trade_lines') === S(['data:image/png;base64,AA']), 'MEDIA am Primary unverändert: die Daten-URL der Maske');
+  ok(one(dbP, 'SELECT images_purchase FROM scrap_trade_lines') === S(['data:image/jpeg;base64,AA']) && normalisiert === vorNorm + 1,
+    'MEDIA am Primary: das Foto der Maske ging durch den Normalisierer und liegt als JPEG-Daten-URL in der Zeile');
 }
 marker('CENTRAL_UI_R6D_SCRAP_MEDIA_PROVED');
 
