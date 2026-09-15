@@ -3405,6 +3405,10 @@ R7B — Plattform / Laufzeit / Härtung", Review-Nachweis). Registry unveränder
 am Primary in ihre Frist ein, belegt bis 451/518 MB; dazu die Bild-Uploads bestandsaufgenommen und die Belegbilder auf den EINEN
 Normalisierer geführt (§ „R7B / PP-12 — Bildwege und Frist nach der echten Speicherung" am Ende; Review
 `docs/r7b-pp12-image-paths-review.md`). Registry unverändert 175.
+**Neu nach der PP-12-Abschlussprüfung (15.09.2026, Nachtrag):** PP-12 bleibt geschlossen; das reguläre Beenden bei großer
+Datenbank ist behoben (Ursache: feste 8-s-Frist auf den Selbst-Abgleich, vorbestehend), Handy-Reparatur-/Inbox-Fotos erfüllen
+den Bildvertrag bei der Übernahme, der „New Item"-Artikel trägt seine Fotos im Medienspeicher; jeder weitere Befund mit eigenem
+Status (§ „R7B / PP-12 — Abschlussprüfung" am Ende). Registry unverändert 175.
 
 Veraltete Stellen der SSOT (nur Hinweis, Inhalt gilt): Zeilenverweise der Tabelle sind teils verschoben (z. B. InvoiceDetail,
 WatchList, ExpenseList); der R6A-Abschnitt „Keine toten Knöpfe" beschreibt den Stand VOR R6B — heute: Abmelden geht auf PC2
@@ -3868,6 +3872,33 @@ Datenbank (10,7 s bei 451 MB, mit belegter Schlange über 20 s); die Frist enth�
 PP offen vorher: 1  (PP-12, Rest)
 geschlossen:     1  (PP-12)
 verbleibend:     0  (Post-Parity-Backlog PP-1 … PP-14: alle geschlossen, lokal — unabhängige Prüfung offen)
+Registry 175 → 175
+Version 0.8.54 · kein Release
+```
+
+## R7B / PP-12 — Abschlussprüfung: Beenden, Handy-Übernahme, Artikelbilder (15.09.2026, Nachtrag)
+
+Unabhängige Prüfung von `0a15565` (Freigabe offen): Befunde einzeln nachgewiesen und — wo Pflicht — behoben. PP-3 … PP-7 nicht
+angefasst. Review mit Callpaths, Messungen und Baseline: `docs/r7b-pp12-image-paths-review.md`. Keine neue Fernbuchung, Registry
+unverändert **175**.
+
+| Punkt | Status | Beweis |
+|---|---|---|
+| PP-12 Frist der Dokumentwege | geschlossen (unverändert seit `1479b09`) | `r7b-pp12-large-db` 13/0 |
+| Reguläres Beenden bei großer DB (F4) | **behoben** — wartender Schritt: `waitForSyncIdle` mit fester 8-s-Frist, während der Selbst-Abgleich des Primary die ganze DB zweimal speichert; vorbestehend (Baseline `d988810` hängt identisch). Die Wartefristen (Abgleich, Flush) rechnen jetzt 2 × Datei / 4 MB/s dazu, an jedem Wartepunkt (Schließen, Neuladen, Backup, GC, Restore, Updater, Datenort) | `pp12-close-budget` 19/0; `r7b-pp12-shutdown` **14/0** (518 MB, Abgleich unterwegs: endet regulär nach 23,9 s; Neustart vollständig) |
+| Handy-Reparatur / Einkaufs-Inbox (G2) | **behoben** — die Grenze fehlte an jeder Stelle (Handy → `/api/sync/push` → Übernahme); jetzt bei der Übernahme jedes neue Foto jeder Bildspalte durch den EINEN Normalisierer, gespeicherte unverändert, Umweg → Quarantäne | `pp12-pulled-images` 26/0; `r7b-pp12-mobile-takeover` **20/0** (Handyfoto 474 184 B → 89 841 B 982×655, Inbox 475 075 B → 90 475 B; Umweg → 2 Quarantänefälle; Ergänzen: gespeichertes Byte für Byte; Anzeige Primary + PC2; Neustart) |
+| „New Item"-Artikel in `products.images` (G3) | **zusammengeführt** — Cutover-Dienst nach dem Commit: Hauptbild ≤ 100 000 B + Vorschau ≤ 20 000 B im Medienspeicher; übrige Schreiber begründet | `pp12-new-item-media` 17/0; Mobile-Lauf (Einkauf 95 406 B + Vorschau 16 731 B, Auftrag 81 447 B + 19 273 B, Spalte leer auch nach Echo und Neustart); `r7b-pp12-images` **22/0** |
+| Aufnahmeprofil 800 / 1600 px (G7) | gemessen begründet (Phasen, Bildqualität); ursprünglicher 504 neu erklärt | Review § 4 |
+| Schlange / weiterlaufende Mutation (G6) | dokumentiert; Wiederholungssicherheit belegt; offen (keine Ergebnisabfrage) | Review § 5 |
+| fsync (F1) | eingeordnet: neustartfest ja, stromausfallfest nein; nicht geändert | Review § 6 |
+| Normale Befehle bei großer DB (G5) | Skalierungsbefund, offen | Review § 8 |
+| Rust `legacy_push … o1_o5_o10` | **behoben** (52/36/37 aus dem Manifest; rot seit `ab7f169`) | `cargo test sync::routes` 74/0 |
+
+```
+PP offen vorher:     0  (Post-Parity-Backlog PP-1 … PP-14 geschlossen)
+Prüfbefunde:         F4 behoben · G2 behoben · G3 zusammengeführt · Rust-Pin behoben ·
+                     G7/G6/F1 belegt eingeordnet · G5, F2, Ergebnisabfrage offen (eigene Entscheidung)
+verbleibend PP:      0  (unabhängige Freigabe offen)
 Registry 175 → 175
 Version 0.8.54 · kein Release
 ```

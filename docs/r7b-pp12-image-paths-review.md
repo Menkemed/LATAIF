@@ -1,143 +1,270 @@
-# R7B / PP-12 — Bildwege, Vereinheitlichung, Frist nach der echten Speicherung
+# R7B / PP-12 — Bildwege, Frist nach der echten Speicherung, reguläres Beenden
 
-Stand 15.09.2026 · Basis `243e4e6` (R7B + Review) · Version 0.8.54 · Registry 175 (unverändert) · kein Push/Tag/Release.
+Stand 15.09.2026 (Abschlussprüfung, Nachtrag) · Basis `0a15565` (PP-12-Abschluss) auf `243e4e6` · Version 0.8.54 ·
+Registry 175 (unverändert) · kein Push/Tag/Release. PP-3 … PP-7 gelten als geschlossen und wurden nicht angefasst.
 
-Auftrag: alle produktiv erreichbaren Bild-Uploads (Handy, Primary, PC2) erfassen, fachlich gleichartige Bildwege auf
-eine zentrale Verarbeitung führen, PP-12 anhand der echten Speicherwege schließen. Dokument-Uploads und Handy-Bilder
-getrennt betrachtet; die großen Dokument-Messungen des Reviews sind kein Handy-Nachweis.
+## 0. Status je Punkt (jeder mit eigenem Beleg; keine Sammel-Aussage)
 
-## 1. Bestandsaufnahme — Vorher / Nachher je Einstieg
+| Punkt | Status | Beleg (Einzelheiten im Abschnitt) |
+|---|---|---|
+| **PP-12 Frist der Dokumentwege** (DB-Größe + Wachstum, normale Befehle 20 s) | **geschlossen** (unverändert seit `1479b09`) | § 7; `r7b-pp12-large-db` 13/0 (bis 451/518 MB) |
+| **F4 Reguläres Beenden bei großer DB** | **behoben** — Ursache gefunden, vorbestehend (Baseline `d988810`) | § 1; Nachstellung HEAD vorher + Baseline hängen, `r7b-pp12-shutdown` **14/0** (518 MB, Abgleich unterwegs: endet nach 23,9 s) |
+| **G2 Handy-Reparatur / Einkaufs-Inbox ohne Byte-Grenze** | **behoben** — Normalisierung bei der Übernahme (Abholen), Umweg → Quarantäne | § 2; `pp12-pulled-images` 26/0, `r7b-pp12-mobile-takeover` **20/0** |
+| **G3 Artikelbilder in `products.images`** (Einkauf/Auftrag „New Item") | **zusammengeführt** — derselbe Cutover-Dienst wie beim Bearbeiten: Medienspeicher + Vorschau nach dem Commit | § 3; `pp12-new-item-media` 17/0, Mobile-Lauf 20/0, `r7b-pp12-images` **22/0** |
+| Verbliebene `products.images`-Schreiber | **begründet** (kein neues Foto / Migration / Abgleich-Transport) | § 3 Tabelle |
+| **G7 Aufnahmeprofil 800 px (Desktop) vs. 1600 px (Handy)** | **gemessen begründet** (Phasen + Bildqualität); der ursprüngliche 504 neu erklärt | § 4 |
+| **G4 Keine Vorschau für Belegbilder** | begründet, unverändert (Vorschau gibt es nur, wo ein Medienspeicher-Objekt entsteht) | § 2 |
+| **G6 Schlangenwartezeit / weiterlaufende Mutation** | **dokumentiert**, Wiederholungssicherheit belegt; offen (keine Ergebnisabfrage ohne erneutes Senden) | § 5 |
+| **F1 „kein fsync"** | **eingeordnet**: neustartfest ja, stromausfallfest nein (Befund, nicht geändert) | § 6 |
+| **G5 Normale Befehle 10,7 s bei 451 MB** | **Skalierungsbefund**, offen (keine pauschale Fristerhöhung, kein Speicherumbau) | § 8 |
+| **F2 Handy-Drain-Lease ohne Verlängerung** | Beobachtung, unverändert | § 8 |
+| **Rust `legacy_push_tests::o1_o5_o10`** | **behoben** — Erwartung aus dem kanonischen Manifest (52/36/37), vorbestehend rot seit `ab7f169` | § 9 |
 
-Legende Speichern: **ganze DB** = jede Buchung exportiert die ganze sql.js-Datenbank und schreibt sie als Datei
-(`saveDatabaseDurably` → `db.export()` → `atomicWrite`: Temp-Datei + Umbenennen; s. Befund F1 zu fsync).
+## 1. Reguläres Beenden bei großer Datenbank (F4)
 
-| # | Einstieg (produktiv) | Auswahl → Transport → Handler | Speicherort | Grenzen & Durchsetzung VORHER | NACHHER |
-|---|---|---|---|---|---|
-| A | **Handy: Collection anlegen** (1–8 Fotos) | `mobile_page.rs` `resizePhoto(f, 1600, 0.85)` (Canvas, EIN Durchgang, kein Byte-Ziel) → IndexedDB-Warteschlange (`uploadEventId` einmal vergeben) → `POST /api/mobile/upload` (JSON, Base64) → `accept_upload` (Rust): Magic Bytes, ≤ 25 MiB, ≤ 8192 px, ≤ 24 MP, ≤ 8 Bilder, ≤ 40 MiB, Dekodierprobe; die **Originalbytes** gehen fsync'd in `mobile-upload-staging` → 201 „accepted" ans Handy. Desktop holt alle 15 s ab (Drain, Lease 120 s): `ingest.prepare` → `normalize_stock_image` + `create_thumbnail` → Datei im Medienspeicher → `createProductWithMedia` | Dateien `<Datenort>/media/…` (Haupt + Vorschau), Metadaten in 6 Media-Tabellen; `products.images = '[]'` | **Hauptbild ≤ 100 000 B, Vorschau ≤ 20 000 B — dezimal, HART** (`normalize.rs` Qualitätsleiter 85→40, dann −15 % Kante, unter 320/96 px Ablehnung `MEDIA_IMAGE_DETAIL_INSUFFICIENT`); am Handy und an der HTTP-Grenze nur Transportgrenzen. Speichern: ganze DB **2 + N-mal** je Auftrag (Registrierung, je Bild ein Checkpoint — `orchestrator.ts`) | unverändert (bereits der zentrale Weg). Transportfassung bleibt 1600 px / 0,85: sie ist die KI-Vorlage (MEDIA-02E), gespeichert wird nur die normalisierte Fassung |
-| B | **Handy: Galerie ändern / Text ändern** | wie A, `kind: 'gallery_edit'`/`'text_edit'`; Galerie-Plan nennt `keep`/`remove` ausdrücklich, Baseline-Vergleich → `applyEditDurably` | wie A | wie A; Entfernen = Verknüpfung zurückziehen (Datei bleibt, GC); veraltete Baseline = endgültiger Konflikt | unverändert |
-| C | **Handy: KI-Erkennen** | `collectionPhotos[0]` → `POST /api/ai/identify` → Rust → OpenAI (Schlüssel bleibt am Primary) | nichts gespeichert | Transport 25 MiB | unverändert |
-| D | **Handy: Reparatur-Annahme, Einkaufs-Inbox-Foto** | `resizePhoto(1600, 0.85)` → Datensatz-JSON mit Daten-URL → `POST /api/sync/push` (Abgleich-Protokoll, Zeile wörtlich) | `repairs.images` / `purchase_inbox.images` (Base64 in der Zeile) | **keine Byte-Grenze**, nur 50-MiB-Rumpf | **unverändert — offen** (§ 5 G2) |
-| E | **Desktop/PC2: Artikel anlegen/ändern, Kommission, Fertigung** | `ImageUpload` → Primary lokal: `createProductWithMedia`/`editProductWithMedia`; PC2: `POST /api/staging/media` (Rust prüft wie A, Kennung = SHA-256) → `products.create`/`products.update`/`consignments.create`/`production.create` → `readStagedAsDataUrls` (roh) → derselbe Medienweg | Medienspeicher (wie A) | 100 000 / 20 000 B HART (derselbe Normalisierer); Aufnahme 800 px / 0,7; eine unlesbare Datei riss die ganze Auswahl mit, Transparenz → Schwarz | Speicherweg unverändert. Aufnahmeprofil an EINER Stelle (`capture-profile.ts`), **bewusst 800 px / 0,7** (gemessen, § 3); unlesbare Datei wird übersprungen und genannt, Transparenz auf Weiß |
-| F | **Einkauf „New Item"** (auch aus einem Inbox-Foto) | `NewProductModal`/`ImageUpload` → `createPurchaseOnPrimary` bzw. `purchases.create` (`mitFotos`) → `createPurchase` → `productStore.createProduct` | `products.images` (Base64 in der Zeile) | **keine Byte-Grenze**, 800 px / 0,7 als Ziel | **≤ 100 000 B, derselbe Normalisierer** — gerechnet am aufnehmenden Rechner (Primary: `normalizeSpecImages` vor der Klammer; PC2: `stageRecordDataUrls` vor dem Ablegen), geprüft beim Abholen (`invokeReadStagedRecord`) — Speicherort unverändert (§ 5 G3) |
-| G | **Auftrag: neuer Artikel (Anlegen, Positionsdialog), Sonderstück-Entwurf** | `createOrderOnPrimary` / `orders.create`; `updateOrderLineOnPrimary` / `orders.update_line` | `products.images`, `orders.custom_product_spec` (Base64) | keine Byte-Grenze | **≤ 100 000 B, derselbe Normalisierer** (beide Wege) — Speicherort unverändert (§ 5 G3) |
-| H | **Reparatur anlegen/ändern** | `ImageUpload` (≤ 6) → `createRepairOnPrimary`/`updateRepairOnPrimary` bzw. `repairs.create`/`repairs.update` (Fotos als `stagingId`/`keep:n`) | `repairs.images` | keine Byte-Grenze | **≤ 100 000 B, derselbe Normalisierer** (aufnehmender Rechner; Primary prüft beim Abholen); gespeicherte Fotos (`keep`) bleiben Byte für Byte |
-| I | **Altgold anlegen/ändern** (3 + 3 je Zeile) | `ScrapTradeForm` → `create/updateScrapTradeOnPrimary` bzw. `scrap_trades.create/update` (PC2 legt beim Ändern ALLE Fotos neu ab) | `scrap_trade_lines.images_purchase/_sale` | keine Byte-Grenze | **≤ 100 000 B** (aufnehmender Rechner); PC2 legt die gespeicherten Fotos unverändert neu ab (`keep`), der Primary erkennt sie an ihrer Kennung (SHA-256) und behält die gespeicherte Fassung |
-| J | **Lieferant: Ausweisfoto (CPR)** (SupplierList, SupplierDetail, PurchaseCreate) | `saveSupplierCreate/Update` bzw. `suppliers.create/update` (`cprImageStagingId`) | `suppliers.cpr_image` (+ Kopie im Beleg-Schnappschuss `purchases.supplier_snapshot`) | keine Byte-Grenze | **≤ 100 000 B** (Beschluss MEDIA-02F: auch Ausweis-/Belegfotos als Raster ≤ 100 KB) |
-| K | **KI-Erkennen am Desktop / auf PC2** | Primary: Anbieter direkt; PC2: `/api/ai/identify` über den Primary (R7B PP-3) | nichts gespeichert | 25 MiB / 8192 px / 24 MP | unverändert (Vorlage = Aufnahmefassung) |
-| L | **Dokumente** (Upload, Vorschau, Texterkennung) | `DocumentList` → `documents.upload` (Daten-URL im Rumpf) → `uploadDocumentInHouse` | `documents.file_path` (Original als Daten-URL) + Kopie in `sync_changelog` | Datei ≤ 25 116 672 B (Zeile ≤ 32 MiB); Texterkennung auf 12 MP begrenzt (nur im Speicher) | **Original bleibt** (§ 5 G1); Frist jetzt mit DB-Größe (§ 4) |
-| M | kein Upload, nur der Vollständigkeit halber | Dubletten-Zusammenführung kopiert `images[0]` eines vorhandenen Artikels; Excel-Import schreibt `images: []`; Firmenlogo ist ein Text-URL-Feld | — | — | unverändert |
+**Nachstellung** (isolierte Test-DB `com.lataif.app.e2e`, Port 3011, nur eigene PID am exakten Test-Pfad; die Spur ist reine
+Beobachtung: Kern-Aufrufe `plugin:fs|write_file/rename`, `finalize_application_shutdown`, `/api/sync/push|pull`, Overlay-Text,
+Warnungen — keine Zeile der Anwendung ersetzt):
 
-Fristen VORHER: Handy-`fetch` ohne Frist, axum ohne Zeitschicht; `/api/command` 20 s (Dokumente seit R7B größenabhängig); die
-Drain-Lease 120 s. Fehler/Wiederholung: Handy — dieselbe `uploadEventId`, Ersatz nur über ausdrückliches `remove`; PC2 — dieselbe
-`commandId` (504 = `unknown`, Wiederholung wartet in der Schreibreihenfolge und bekommt das eingefrorene Ergebnis).
+| Lauf | Programm | Zustand beim Schließen | Ergebnis |
+|---|---|---|---|
+| Buchung + Foto, 2 → 355 MB | HEAD vorher | nichts unterwegs | endet 1,7 s |
+| größtes Dokument / Texterkennung, 69 → 422 MB | HEAD vorher | nichts unterwegs (Selbst-Abgleich lief nicht: 401) | endet 1,6–1,7 s |
+| 1 bzw. 3 Befehle unterwegs, 451 MB | HEAD vorher | Speichern eines Befehls läuft | endet 2,8–2,9 s (Befehl 2/3: `BRIDGE_RENDERER_RELOADED` = Ausgang offen) |
+| exakte Abfolge des alten Laufs (normal → 25-MB-Dokument → kleiner Upload → Texterkennung), 518 MB | HEAD vorher | **Selbst-Abgleich des Primary läuft** | **hängt**: Overlay „Save failed — Relaunch aborted: 'flushing' did not complete within 8000 ms" nach 9,0 s, Prozess lebt nach 241 s |
+| dieselbe Abfolge, Abgleich deterministisch unterwegs (Schließen direkt nach `sync push start`) | **Baseline `d988810`** (gepushter Stand, eigener E2E-Build) | Selbst-Abgleich läuft | **hängt** genauso: Overlay nach 9,1 s, Prozess lebt nach 242 s; danach alle 30 s ein leerer Abgleich |
+| dieselbe Abfolge ohne Abgleich unterwegs | Baseline `d988810` | nichts unterwegs | endet 1,8 s |
+| Beweislauf `r7b-pp12-shutdown` (Abgleich an, deterministisch unterwegs) | **HEAD nachher** | Selbst-Abgleich läuft | **endet regulär nach 23,9 s** (wartet den Abgleich ab, dann Flush + Finalizer); kein Overlay-Fehler |
 
-## 2. Handy-Vorgabe 100 KB / 20 KB — tatsächliche Umsetzung
+**Der wartende Schritt:** `prepareAndCloseApplication` → `waitForPendingOperations` = `withTimeout(sync.waitForSyncIdle(), 8000)`.
+Nicht die Mutation, nicht der Flush, kein Worker, nicht die Prozessbeendigung: der **Scheduler-Auftrag „Abgleich"** (`syncNow`,
+im exklusiven Platz). Der Primary gleicht mit seinem eigenen Server ab (eigene Änderungen hoch, das Echo zurück); nach einer
+Buchung speichert dieser Lauf die ganze Datenbank bis zu zweimal (`saveDatabase()` nach dem Markieren, `saveDatabaseDurably()` nach
+dem Abholen) — bei 518 MB je ~13 s. Die Frist von 8 s läuft ab, das Beenden bricht nach Regel A/B sichtbar ab („Please close again
+to retry"), der Abgleich wird wieder freigegeben, und niemand schließt ein zweites Mal → der Prozess „endet nicht". Genau das ist
+auch der Grund der 40-s-Antworten des kleinen Uploads: er stand in der Schreibreihenfolge hinter den zwei Speicherungen.
 
-- Grenzen `MAIN_MAX_BYTES = 100_000`, `THUMB_MAX_BYTES = 20_000` (`src-tauri/src/media/normalize.rs`) — **dezimal** (nicht 102 400 /
-  20 480), **hart**: die Kodierung probiert die Qualitätsleiter 85→40, verkleinert dann um 15 %, unter 320 px (Haupt) bzw. 96 px
-  (Vorschau) wird abgelehnt statt still größer gespeichert. Die Vorschau wird unabhängig aus den Originalbytes gerechnet.
-- Durchgesetzt beim Übernehmen am Desktop (`ingest.prepare`), zusätzlich beim Lesen gespeicherter Dateien (`MAX_STORED_BYTES`). Am
-  Handy und an `/api/mobile/upload` gelten nur die Transportgrenzen; gesendet werden typ. 200–600 KB je Foto.
-- Nicht erhöht, nicht verändert. Beweis: `cargo test` Byte-Budget-Tests (`main_image_within_100kb_and_decodable`,
-  `thumbnail_within_20kb_and_decodable`) und — für den Medienspeicher-Weg am PC2-Transport — der Lauf unten (Punkt „Medienspeicher").
-- Die Handy-Wege sind in diesem Auftrag unverändert; ein Handy-E2E wurde deshalb nicht wiederholt (gültige Nachweise: v0.8.47/48-Gates).
+**Neu oder vorbestehend:** vorbestehend. `SYNC_IDLE_TIMEOUT_MS = 8000` / `FLUSH_TIMEOUT_MS = 15000` stammen aus `0e5e852`
+(03.08.2026); Close-Pfad, Abgleich und Speichern sind zwischen `d988810` und `0a15565` unverändert; die Baseline-Binary hängt
+identisch. Frühere Läufe endeten nur, wenn beim Schließen gerade kein Abgleich lief (nicht deterministisch).
 
-## 3. Gewählter gemeinsamer Bildweg und Begründung
+**Behebung (konkrete Ursache):** die Wartefristen kennen die Datenbankgröße — dieselbe Untergrenze wie die Brücke (PP-12):
 
-**Grundlage: der Rust-Normalisierer des Medienspeichers (`normalize_stock_image`).** Er ist der einzige vorhandene Weg mit harter
-Byte-Grenze, Magic-Byte-Prüfung, EXIF-Ausrichtung und Metadaten-Entfernung; Handy (A/B) und Desktop-Artikelbilder (E) nutzen ihn
-bereits, er ist mit Einheitstests und live (v0.8.47) belegt. Verworfen: die Browser-Kompression (`ImageUpload`, ein Ziel ohne
-Grenze, keine Fehlerbehandlung, Transparenz → Schwarz) und eine zweite Byte-Schleife in JavaScript (zweite Implementierung derselben
-Regel, am Primary nicht erzwingbar).
+```
+syncIdle = 8 s  + 2 × dbBytes / 4 MB/s      flush = 15 s + 2 × dbBytes / 4 MB/s     (dbBytes = zuletzt geladene/geschriebene Datei)
+2 MB → 9 s / 16 s        518 MB → 267 s / 274 s (gemessen: Abgleich ~26 s, Speichern ~13 s)
+```
 
-Umsetzung: `media::record_image::normalize_record_image` = derselbe Normalisierer mit den Eingangsgrenzen des Hauses
-(25 MiB / 8192 px / 24 MP wie `/api/mobile/upload` und die Ablage). Ein Foto, das schon die gespeicherte Form hat (JPEG,
-≤ 100 000 B, ≤ 1600 px, kein Metadaten-Segment APP1…APP15, dekodiert vollständig), bleibt Byte für Byte — die Funktion ist
-idempotent. Zwei Tauri-Befehle, beide neben dem Hauptfaden (`spawn_blocking`): `media_normalize_record_image` und
-`staging_media_read_record` (Abholen aus der Ablage).
+`relaunch-coordinator.ts` (`saveAtFloorMs`, `syncIdleBudgetMs`, `flushBudgetMs`, Operation `dbBytes`), `database.ts`
+`getLastPersistedDbBytes()` (kein Export, kein Dateizugriff), angeschlossen an jedem Wartepunkt auf Abgleich/Flush: Fenster
+schließen und Neuladen (`App.tsx`), Backup-Neustart, Medien-Aufräumen, Wiederherstellen (`restore-wiring.ts`), Updater
+(`UpdateBanner.tsx`), Datenort-Umzug (`data-root-move.ts`). Unverändert: Regel A/B (geschlossen wird nur nach bestätigtem Flush,
+sonst sichtbarer Fehler, App bleibt offen), kein erzwungenes Ende, Single-Flight, Finalizer. Die Frist bleibt eine Frist; läuft
+sie ab (z. B. ein hängender Abgleich), bricht das Beenden weiter sichtbar ab.
 
-**Wo gerechnet wird — befundbasiert.** Der erste Lauf ließ den Primary die Belegbilder beim Abholen rechnen: zwei große Fotos
-rissen die 20-s-Frist eines normalen Befehls (504, E2E-Programm im Debug-Build). Messung im Release-Build (`record_image`-Bench,
-`cargo test --release … bench -- --ignored`):
+**Nachweis:** `test/r7b/pp12-close-budget.test.ts` **19/0** (Fristen gegen die Untergrenze aus `bridge.rs`, Koordinator,
+jeder Wartepunkt verdrahtet, Regel A/B unverändert); Nachbarn `m4 window-close-persistence` 50/50, `m5 reload-persistence` 30/30,
+`post-release-shutdown relaunch-coordinator` 28/28, `restore-wiring` 15/0, `backup-workflow` 20/0.
+`test/e2e/r7b-pp12-shutdown.e2e.mjs` **14/0** (`POST_PARITY_PP12_REGULAR_CLOSE_LARGE_DATABASE_PROVED`, HEAD-Build): Selbst-Abgleich
+des Primary an wie in der Produktion; geschlossen wird wie ein Mensch (CDP-Verbindung zu, WM_CLOSE, kein zweiter Klick).
 
-| Vorlage | Eingang | Hauptbild | Zeit Hauptbild | Zeit Vorschau |
-|---|---|---|---|---|
-| Foto 3000×2000, q92 | 2 588 031 B | 96 155 B 1600×1067 | 969 ms | 292 ms |
-| Aufnahme 1600×1067, q85 | 559 629 B | 96 902 B 1156×771 | 1 609 ms | 80 ms |
-| Aufnahme 800×533, q70 | 98 496 B | 98 493 B 800×533 | 72 ms | 24 ms |
-| Rauschen 3000×2000 (Obergrenze) | 12 145 821 B | 98 636 B 834×556 | 4 279 ms | 480 ms |
+| Schritt | DB | Ergebnis |
+|---|---|---|
+| bestätigte Buchung + Belegfoto, schließen | 2 MB | endet 1,7 s |
+| Füllen (Anwendung zu), Neustart | 451 MB | angemeldet, erreichbar, Abgleich an, kleine Stufe da |
+| Buchung + Foto · größtes Dokument (200, 42,6 s) · kleiner Upload (200, 42,5 s) · Texterkennung (200, 14,8 s) | 451 → 518 MB | jede Wirkung in der Datei |
+| letzte Buchung, warten bis `sync push start`, **schließen während der Abgleich läuft** | 518 MB | **endet regulär nach 23,9 s**, kein „Save failed" |
+| Neustart | 518 MB | Buchungen, Fotos Byte für Byte, Dokumente, Texterkennung da; Foto wird angezeigt |
+| schließen ohne neue Buchung | 518 MB | endet 1,7 s |
+| erzwungenes Ende in diesem Lauf | — | **keines** |
 
-Daraus: (1) Belegbilder rechnet der **aufnehmende Rechner** — am Primary VOR der Klammer (das Umrechnen hält die
-Schreibreihenfolge nicht auf), auf PC2 VOR dem Ablegen (`stageRecordDataUrls`, derselbe Rust-Befehl derselben Anwendung). Der
-Primary prüft beim Abholen trotzdem; ein Foto in gespeicherter Form übernimmt er Byte für Byte, alles andere (z. B. ein älterer
-Client) rechnet er selbst. (2) Das Aufnahmeprofil des Desktops bleibt **800 px / 0,7**: ein Artikel mit 8 Fotos wird vom
-Medienspeicher am Primary INNERHALB der 20-s-Frist normalisiert (Haupt + Vorschau) — mit 1600-px-Aufnahmen ~13,5 s nur für die
-Bilder, mit 800 px ~0,8 s. Transporte bleiben verschieden, wo nötig (Handy: Inbox + Drain; PC2: Ablage + Befehl; Primary: direkt).
+## 2. Handy-Reparatur und Einkaufs-Inbox (G2)
 
-## 4. Änderungen
+**Callpath** (vorher, `file:line` im Stand `0a15565`):
 
-1. **Rust** `src-tauri/src/media/record_image.rs` (neu, 4 Tests); `lib.rs` zwei Befehle + Registrierung; `media/mod.rs`.
-2. **TS** `src/core/media/record-image.ts` (neu): `normalizeRecordImages(urls, { keep })`, `normalizeRecordImage`,
-   `normalizeSpecImages`, feste Codes + Meldung (`MEDIA_IMAGE_DETAIL_INSUFFICIENT` → „take a closer photo"); `sha256OfDataUrl`.
-   `src/core/bridge/remote-create-support.ts`: `invokeReadStagedRecord`, `readStagedAsRecordImages`.
-3. **Belegbild-Eingänge** — Primary (vor der Klammer): `repair-house.ts` (anlegen/ändern, `keep` = gespeicherte Fotos),
-   `metal-actions.ts` + `scrap-house.ts` (`withRecordScrapPhotos`, `storedScrapPhotos`), `masterdata-save.ts` (Ausweis,
-   `keep: base.cprImage`), `purchase-house.ts`, `order-house.ts`, `order-lifecycle-house.ts` (`normalizeSpecImages`).
-   PC2 (vor dem Ablegen): `client-staging-upload.ts` `stageRecordDataUrls` in RepairList, RepairDetail, PurchaseCreate,
-   OrderCreate, OrderDetail, `masterdata-save.ts`, `metal-actions.ts` (`stageScrapPhotos`, gespeicherte Fotos als `keep` aus
-   ScrapTradeDetail). Primary beim Abholen: Standardleser `invokeReadStagedRecord` in `service-commands.ts` (2),
-   `metal-commands.ts` (+ Behalten per SHA-256), `masterdata-commands.ts`, `commercial-commands.ts` (`runPurchaseCreate`,
-   `runOrderCreate`, `mitFotos`), `order-lifecycle-commands.ts`. Artikel, Kommission, Fertigung bleiben roh (`stageDataUrls` /
-   `invokeReadStaged`) — der Medienspeicher normalisiert selbst, mit Vorschau.
-4. **Aufnahme** `src/core/media/capture-profile.ts` (neu) + `ImageUpload.tsx`: das Profil an einer Stelle (800 px / 0,7, § 3),
-   Transparenz auf Weiß, eine unlesbare Datei wird übersprungen und genannt (`data-image-upload-skipped`), die gültigen bleiben.
-5. **PP-12** `bridge.rs` `timeout_for(op, payload, db_bytes)`, `routes.rs` liest die Größe von `lataif.db` am Primary
-   (`frontend_db_path`). Formel und Messgrundlage § 6.
-6. **Tests** `test/r7b/pp12-images.test.ts` (neu), `test/e2e/r7b-pp12-images.e2e.mjs` (neu), Rust-Tests; angepasst: IPC-Grenze
-   `test/bridge/_tauri-shim.ts` (beide Befehle), `r6d/metal-scrap-parity` (Normalisierer gestellt, Erwartung JPEG),
-   `r6f/order-parity` (Ablage-Leser liefert JPEG), `r7b-platform-hardening` (Signatur).
+| Schritt | Ort | Grenze |
+|---|---|---|
+| Aufnahme | `mobile_page.rs:1729` `resizePhoto(file, 1600, 0.85)` (Canvas, ein Durchgang) | kein Byte-Ziel |
+| Zeile | `mobile_page.rs:2212` `images: JSON.stringify([dataUrl])` (+ Kunde `:2216-2219`); Inbox `:2241`, `:2246` | — |
+| Transport | `mobile_page.rs:1940` → `routes.rs` `sync_push` | Rumpf ≤ 50 MiB, eine Änderung ≤ 32 MiB, Spalten-Allowlist — **keine Bildprüfung** |
+| Ablage | `sync_changelog` des Servers, wörtlich | — |
+| **Übernahme** | Primary `pullChanges` → `applySyncChange` → `applyUpsert` | 32 MiB — **keine Bildprüfung** |
+| Ziel | `repairs.images`, `purchase_inbox.images` | — |
 
-Bestehende Medien: nichts wird umgerechnet oder gelöscht. `keep` (Primary) bzw. der SHA-256-Abgleich (PC2-Altgold) lassen jedes
-gespeicherte Foto Byte für Byte stehen — auch ein Altbild über 100 KB.
+Die Byte-Grenze fehlte an **jeder** Stelle; normalisiert wurde nirgends (erst beim späteren Einkauf „New Item" das Inbox-Foto).
+Derselbe Eingang (`/api/sync/push`) nimmt von jedem angemeldeten Rechner jede Bildspalte des Manifests an (`repairs`,
+`purchase_inbox`, `products`, `precious_metals`, `suppliers.cpr_image`, `orders.custom_product_spec`) — ein Umweg an allen
+Desktop-Normalisierungen vorbei.
 
-## 5. Verbleibende Unterschiede und Grenzen (offen, begründet)
+**Behebung an der endgültigen Übernahme** (`src/core/sync/pulled-record-images.ts`, `sync-service.ts` `pullChanges`): vor der
+Transaktion des Stapels, im selben exklusiven Platz, geht jedes NEUE Foto jeder Bildspalte durch den EINEN Normalisierer
+(`normalizeRecordImages` → Rust `normalize_stock_image`: JPEG, ≤ 100 000 B, ≤ 1600 px, EXIF-Ausrichtung, Metadaten weg). Ein
+schon gespeichertes Foto derselben Zeile bleibt Byte für Byte (`keep`) — der Primary spielt seine eigenen Änderungen beim
+nächsten Abholen wieder ein; ein Altbild wird dadurch nicht umgerechnet. Ein unspeicherbares Foto (fester Code) oder ein
+Verweis statt eines Fotos macht die GANZE Änderung zum Quarantänefall (`SYNC_RECORD_IMAGE_REJECTED`, dieselbe Transaktion, der
+Stapel läuft weiter) — nichts halb, nichts still ohne Foto. Ist der Normalisierer nicht erreichbar, ist das kein Urteil: der
+Stapel wird nicht übernommen, der Stand rückt nicht vor. Dokumente (`documents.file_path`) sind ausgenommen (Original =
+OCR-Vorlage). Warum nicht im Abgleich-Server (`sync_push`): dort liegt der Transportvertrag (gespeichert wird, was gesendet
+wurde), und das Echo eigener Altzeilen würde im Server-Log umgerechnet, ohne dass die Geschäftszeile es erfährt.
 
-- **G1 Dokumente:** Originale bleiben unverändert (auch Bilder). Grund: Beleg-/OCR-Vorlage; die Auftragsvorgabe verbietet eine
-  ungeprüfte Reduktion; die OCR-Begrenzung (12 MP) arbeitet nur im Speicher.
-- **G2 Handy Reparatur-Annahme / Einkaufs-Inbox:** laufen über den Abgleich-Push (Zeile wörtlich) — ohne Byte-Grenze. Eine
-  Normalisierung bräuchte entweder eine Umschreibung im Abgleich-Server (dessen Vertrag: gespeichert wird, was gesendet wurde) oder
-  eine zweite Byte-Schleife im Handy — beides eigener Umfang. Das Inbox-Foto wird beim Einkauf „New Item" normalisiert (F).
-- **G3 Speicherort Einkauf/Auftrag „neuer Artikel":** gleiche Verarbeitung/Grenze, aber weiter `products.images` statt Medienspeicher.
-  Grund: `createPurchase`/`createOrder`/`updateOrderLine` sind synchrone Teile der Buchungsklammer; der Medienspeicher-Weg ist
-  asynchron (Checkpoints, Datei-Veröffentlichung vor dem Commit) — der Umbau berührt den Einkaufs-/Auftrags-Buchungsweg und seine
-  Tests (eigener Schnitt, Muster: Fertigung). Vorhandene Altbilder lesen weiter über den Rückfall des Resolvers.
-- **G4 Keine Vorschau (20 KB) für Belegbilder:** die Zeile trägt je Eintrag ein Bild; eine Vorschau gehört zum Medienspeicher.
-- **G5 Normale Befehle bleiben 20 s** (Umfang). Auch ein normaler Befehl speichert die ganze Datenbank: gemessen 0,1 s (2 MB),
-  5,3 s (203 MB), 10,7 s (451 MB); mit belegter Schlange lag er bei 453 MB über 20 s (504 `unknown`). Ab einigen hundert MB wird
-  die 20-s-Frist normaler Befehle eng — eigene Entscheidung (Frist oder Speicherweg).
-- **F4 Beenden bei großer Datenbank (Befund, nicht geändert):** nach WM_CLOSE endete der Primary bei ~340 MB nicht in 15 min und
-  bei 518 MB nicht in 10 min. Die Close-Orchestrierung schließt nur nach bestätigtem Flush und bleibt sonst offen (Regel A/B,
-  `close-orchestration.ts`) — kein Datenverlust, aber kein Ende. Ursache nicht isoliert (Flush zu langsam, gescheitert oder
-  eine wartende Operation); bei ~70 MB beendete er in denselben Läufen regulär.
-- **G6 Warteschlange:** die Frist beginnt mit der Übergabe an das Fenster; ein Auftrag hinter einem anderen langen (z. B. OCR) wartet
-  in ihr mit. Bei Ablauf: 504 `unknown`; die Buchung läuft im Fenster weiter und kann schon gespeichert sein; dieselbe `commandId`
-  wartet in der Schreibreihenfolge und bekommt das eingefrorene Ergebnis. Eine Ergebnisabfrage ohne erneutes Senden gibt es nicht.
-- **F1 fsync (Befund, nicht geändert):** `saveDatabaseDurably` schreibt über `@tauri-apps/plugin-fs` `writeFile` + `rename`;
-  `tauri-plugin-fs 2.5.0` `write_file_inner` ruft nur `write_all`, kein `sync_all` — „durabel" heißt hier atomar (Temp + Umbenennen),
-  nicht auf die Platte gezwungen. Rusts eigenes `data_root::write_atomic` ruft `sync_all`.
-- **F2 Handy-Drain (Beobachtung):** Lease 120 s, `renew` wird nie gerufen; mit 2 + N Voll-Speicherungen je Auftrag kann ein großer
-  Auftrag bei großer Datenbank die Lease verlieren (`ready_rejected`); der nächste Lauf nimmt ihn über die Quittung wieder auf.
-- **F3 PC2 Artikel mit 8 Fotos:** Normalisieren (Haupt + Vorschau je Foto, bei 800-px-Aufnahmen ~0,1 s je Foto im Release) und das
-  ganze Speichern laufen in den 20 s eines normalen Befehls — bei großer Datenbank kann die Frist reißen (dann `unknown` +
-  Wiederholung wie oben). Unverändert (Umfang: normale Befehle 20 s).
-- **G7 Aufnahmeprofil Desktop ≠ Handy:** Desktop 800 px / 0,7, Handy 1600 px / 0,85 — gemessen begründet (§ 3). Gespeichert wird
-  auf beiden Wegen ≤ 100 000 B; Desktop-Artikelbilder bleiben dadurch höchstens 800 px breit.
+**Handy-Collection** (`/api/mobile/upload`, Drain, `ingest.prepare`) war schon der zentrale Weg (Hauptbild ≤ 100 000 B +
+Vorschau ≤ 20 000 B); unverändert. **Vorschau für Belegbilder (G4):** Reparatur-/Inbox-/Altgold-/Ausweisfotos wohnen in ihrer
+Zeile; eine Vorschau entsteht nur für ein Medienspeicher-Objekt. Das Inbox-Foto bekommt seine Vorschau, sobald es als Artikel
+übernommen wird (§ 3).
 
-## 6. PP-12 — Frist nach der echten Speicherung
+**Nachweis:** `test/r7b/pp12-pulled-images.test.ts` **26/0** (Formen JSON-Text/Feld/Einzelfoto/Auftragsentwurf, `keep`,
+fremde Zeile, Ablehnung → Quarantäne, kein Urteil → Stapel bleibt, Dokument/Löschen unberührt, jede Foto-Spalte des Manifests
+abgedeckt, Verdrahtung vor `commitPulledBatch`). `test/e2e/r7b-pp12-mobile-takeover.e2e.mjs` **20/0**
+(`POST_PARITY_PP12_MOBILE_TAKEOVER_AND_NEW_ITEM_MEDIA_PROVED`, HEAD-Build, Primary + PC2): gesendet werden genau die Zeilen der
+Handy-Seite (Pin auf `mobile_page.rs`: `resizePhoto(file, 1600, 0.85)`, Kunde + Reparatur, Inbox, `/api/sync/push`), die Fotos wie
+dort erzeugt (Kamera 3000×2000 → 1600 px / 0,85). Übernommen nach 88 s (Abgleich alle 30 s): Reparaturfoto 474 184 B 1600×1067
+→ **89 841 B 982×655**, Inbox-Foto 475 075 B → **90 475 B 982×655** (JPEG, ohne Metadaten); kaputtes Foto + Verweis über
+denselben Eingang → 2 Quarantänefälle, nichts übernommen, die gültige Reparatur daneben schon; Ergänzen: gespeichertes Foto Byte
+für Byte, das neue normalisiert; Anzeige Primary + PC2 (angemeldet als B); regulärer Neustart: alles Byte für Byte.
+Befund des ersten Anlaufs (Harness, nicht Produkt): der Primary hatte im Testaufbau noch keinen Abgleichsstand mit seinem Server
+(sein Selbst-Abgleich scheiterte vorher mit 401) — die Historie begann mit Handy-Änderungen, und der bestehende Vertrag
+SYNC-SAFETY-A1 hielt das Abholen korrekt an (`recovery-required`, `sync_cursor` leer). Der Lauf wartet jetzt wie die Produktion
+auf den Stand des Primary (29 s), bevor das Handy sendet.
 
-Callpath (unverändert, geprüft): `command_execute` → `timeout_for` → `submit_as` → `dispatch`: die Frist beginnt NACH dem Lesen des
-HTTP-Rumpfs mit der Übergabe ans Fenster (`tokio::time::timeout` auf die Antwort). Im Fenster: `runExclusive` → Transaktion →
-`uploadDocumentInHouse` (+ Abgleich-Zeile) → Commit → `saveDatabaseDurably` (ganze DB) → erst dann `bridge_reply`.
+Kosten: das Normalisieren läuft beim Abholen im exklusiven Platz (Release ~1,6 s je 1600-px-Handyfoto, § 4) — ein Stapel mit
+vielen Handyfotos verzögert nachfolgende Aufträge entsprechend (G6).
+
+## 3. `products.images` — alle Schreibwege
+
+| Schreiber | Aufrufer | vorher | nachher |
+|---|---|---|---|
+| `createProduct` (`productStore.ts`) | Einkauf „New Item" (`purchaseStore.ts:360`), Auftrag Neuanlage (`orderStore.ts:494`), Positionsänderung (`:1003`), Storno Sonderstück (`:1461`), Alt-Umwandlung (`OrderDetail.tsx:638`), Rechnung aus Auftrag (`order-invoice-lines.ts:66`) | normalisierte Fotos (PP-12) in der Spalte, **keine Vorschau** | **Medienspeicher**: `scheduleNewItemMediaCutover(id)` → als NÄCHSTER Auftrag der Schreibreihenfolge (nach Commit + durablem Speichern) `ProductMediaCutoverService.ensureProductMediaCutover` — alle Fotos in Reihenfolge durabel importiert (Hauptbild + Vorschau), geprüft, DANN `products.images = '[]'` (durabel) |
+| `createProductWithMedia` / `editProductWithMedia` | Sammlung, PC2-Artikel, Kommission, Fertigung, Handy-Drain, Artikel bearbeiten | Medienspeicher | unverändert |
+| `createProduct` | Excel-Import (`ImportPage.tsx:185`) | `images: []` | unverändert (kein Foto → kein Umzug) |
+| Inline-INSERT | Einkauf ohne Artikel-Spec (`purchaseStore.ts:373`) | `'[]'` | unverändert |
+| `mergeIntoExisting` | Dubletten-Zusammenführung (`SyncDuplicateGuard`) | kopiert ein VORHANDENES `images[0]` | unverändert — kein neues Foto; eine Umwandlung wäre eine Konvertierung bestehender Medien |
+| Migration `backfillConsumedProducts`, Speicherpflege-Cutover, Service-Artikel, Seed | `database.ts`, `legacy-media-wiring.ts`, `repairStore.ts` | Bestand / `'[]'` | unverändert (Bestand bleibt) |
+| Abgleich-Übernahme (`applyUpsert`) | abgeholte Produktzeile | wörtlich | **normalisiert** bei der Übernahme (§ 2); bleibt Spalte, weil die Zeile das Transportformat des Abgleichs ist (ausgelieferte Clients gleichen seit C6 nicht mehr ab) |
+
+Warum nicht `createProductWithMedia` IN der Einkaufs-/Auftragsklammer: diese Geldwege sind synchron und laufen in einer
+Transaktion mit Zeilen und Hauptbuch; der Medienweg schreibt Dateien und ist asynchron. Der Cutover-Dienst ist der vorhandene,
+schon doppelt benutzte Umzug (Bearbeiten eines Altartikels, Speicherpflege) mit dem Vertrag „erst alle Bilder durabel, dann die
+Spalte". Scheitert er, bleibt die Spalte die Wahrheit (das Foto wird weiter gezeigt), gemeldet; die Speicherpflege holt ihn nach.
+Ein zurückgenommener Vorgang hinterlässt keinen Artikel — der Dienst findet nichts. Bestehende Artikel werden nie angefasst (nur
+Kennungen, die `createProduct` in diesem Leben mit Fotos anlegte). Filiale/Mandant kommen aus der Artikelzeile (auch für PC2).
+Das Leeren der Spalte wird wie jede Änderung erfasst (`trackUpdate`): die Abgleich-Zeile der Anlage trägt die volle Zeile MIT
+Fotos, und der Primary spielt seine eigenen Änderungen beim nächsten Abholen wieder ein — ohne die zweite Zeile hätte das Echo
+die Spalte wieder gefüllt (bei der Prüfung des eigenen Umbaus gefunden, Folgecommit; der Handy-Lauf prüft die leere Spalte nach
+mehreren Abgleichsläufen und dem Neustart).
+Kosten: je Foto ein Import mit durablem Checkpoint (ganze DB) — derselbe Preis wie jeder Medienspeicher-Artikel (G5).
+
+**Nachweis:** `test/r7b/pp12-new-item-media.test.ts` **17/0** (Reihenfolge nach dem Vorgang, ein Umzugsauftrag, zurückgenommen →
+nichts, Fehler → Spalte bleibt, nur `createProduct` mit Fotos, jeder synchrone Anlageweg, Echo-fest). Mobile-Lauf: Inbox → Einkauf
+„New Item" über den Fernweg (Befehl 200 in 547 ms) → Hauptbild **95 406 B** + Vorschau **16 731 B** als Dateien, `products.images
+= '[]'`, Inbox erledigt; Auftrag „New Item" → **81 447 B** + **19 273 B**, Spalte leer; nach mehreren Abgleichsläufen und dem
+Neustart unverändert (Echo füllt nichts). `r7b-pp12-images` **22/0** (Einkauf „New Item" vom PC2: genau eine Medienverknüpfung + eine Vorschau, `products.images = '[]'`;
+Anzeige Primary + PC2; regulärer Neustart mit Hauptbild/Vorschau-Dateien unverändert). Die übrigen Belegbildwege desselben Laufs
+unverändert grün: PC2-Reparatur (Aufnahmen 84 785–94 478 B → normalisiert 55 458–99 526 B, Byte für Byte übernommen, 622 ms),
+Rückfall roh 399 644 B → 91 026 B (3,3 s Debug), Primary-Maske 2 653 984 B → 97 454 B 800×533, Wiederholung, Ersetzen, Ausweis,
+Altgold-`keep`, Medienspeicher-Artikel 99 526 B + 16 337 B.
+
+## 4. Aufnahmeprofil 800 px (Desktop) vs. 1600 px (Handy) — gemessen
+
+**Messaufbau** (`_tmp-r7b-capture-measure`, im Fenster des Primary — derselbe WebView-Canvas wie die Masken, Debug-Build):
+Vorlage 3000×2000 (Kamera-JPEG q0,92); Desktop-Fassung wie `captureImage` (≤ 800 px, q0,7, weiß hinterlegt), Handy-Fassung wie
+`resizePhoto(file, 1600, 0.85)`; jede durch `media_normalize_record_image`; Qualität = PSNR des GESPEICHERTEN Bilds gegen die
+Vorlage in der Anzeigegröße 800×533 und 1600×1067. Release-Zeiten aus der vorhandenen Bench (`record_image`, `--release`).
+
+| Vorlage | Fassung | gesendet | normalisiert (Debug) | gespeichert | PSNR 800 px | PSNR 1600 px |
+|---|---|---|---|---|---|---|
+| Probe 1 (mäßiges Rauschen; zwei Läufe) | Kamera roh | 2 177 772 B | 62,2–65,7 s | 98 433 B 982×655 | 31,19 dB | 28,04 dB |
+| | Handy 1600 / 0,85 | 422 124 B | 29,8–31,0 s | 96 346 B 982×655 | 30,80 dB | 27,75 dB |
+| | Desktop 800 / 0,7 | 82 230 B | 1,19–1,27 s | 96 579 B 800×533 | 27,41 dB | 26,09 dB |
+| | gespeicherte Form erneut (Prüfung beim Abholen) | 96 579 B | 0,27 s | Byte für Byte gleich | — | — |
+| Probe 2 (mäßiges Rauschen) | Kamera roh | 2 143 698 B | 62,0 s | 96 469 B 982×655 | 31,33 dB | 28,20 dB |
+| | Handy 1600 / 0,85 | 409 092 B | 29,7 s | 94 426 B 982×655 | 30,93 dB | 27,89 dB |
+| | Desktop 800 / 0,7 | 80 535 B | 1,18 s | 95 102 B 800×533 | 27,57 dB | 26,16 dB |
+| | gespeicherte Form erneut | 95 102 B | 0,27 s | Byte für Byte gleich | — | — |
+
+Release (Bench): Kamera 3000×2000 969 ms, 1600-px-Fassung 1 609 ms, 800-px-Fassung 72 ms (Hauptbild; Vorschau 292 / 80 / 24 ms),
+Rauschen-Obergrenze 4 279 ms. Debug ist damit 16–68× langsamer als Release. Eine stärker verrauschte Kamera-Vorlage (Rauschen
+±36 bzw. ±60) kam im Debug-Build zweimal nicht innerhalb von 3 bzw. 20 min durch den Normalisierer (Protokolle im Anhang) — die
+Obergrenze ist deshalb nur als Release-Wert belegt.
+
+**Der ursprüngliche 504 neu eingeordnet:** im ersten Bildlauf rechnete der Primary zwei ROHE Kamerafotos beim Abholen, im
+Debug-Build — gemessen ~62 s je Foto. Die 20 s eines normalen Befehls konnten dabei nicht halten. Im Release wären es ~2 × 1 s.
+Der 504 war also ein Debug-Artefakt des Rückfallwegs (Primary rechnet) und **begründet die 800 px nicht**. Die Befehlsphasen am
+selben Programm (Debug, kleine Datenbank; „fertig" = die Wirkung steht in der Datei):
+
+| Befehl | Ablegen je Foto (vor dem Befehl) | Antwort | fertig |
+|---|---|---|---|
+| Reparatur, 2 **rohe** Kamerafotos (der ursprüngliche 504: der Primary rechnet beim Abholen) | 62,1 s | **504 nach 20,0 s** | **124,8 s** (≈ 2 × 62 s Normalisieren + Speichern; genau eine Reparatur) |
+| Reparatur, 2 vornormalisierte 1600-px-Aufnahmen (PC2 rechnet vorher) | 2,4 / 2,1 s | 200 in 0,83 s | 0,84 s |
+| Reparatur, 2 vornormalisierte 800-px-Aufnahmen | 1,2 / 1,0 s | 200 in 0,70 s | 0,71 s |
+| Artikel, 8 × 800-px-Aufnahme (Medienspeicher: Primary rechnet Haupt + Vorschau IM Befehl) | — | 504 nach 20,0 s | 21,1 s |
+| Artikel, 8 × 1600-px-Aufnahme | — | 504 nach 20,0 s | 405,6 s |
+
+Die Phasen des 504 sind damit gemessen, nicht aus Einzelzeiten abgeleitet: ~124 s Normalisieren im Befehl gegen 20 s Frist.
+Mit vornormalisierten Fotos (heutiger Weg) liegt dieselbe Reparatur bei 0,7–0,8 s, gleich welche Fassung. Im Debug-Build reißt
+auch der 800-px-Artikel knapp (21,1 s); im Release (16–68× schneller) nicht — der 1600-px-Artikel (405,6 s Debug) ist der Fall,
+den § „Was die 800 px tatsächlich begründet" beschreibt.
+
+**Was die 800 px tatsächlich begründet (Release-Zahlen):** die Aufnahme (`ImageUpload`) ist für Belegbilder UND Artikelbilder
+dieselbe. Artikelbilder vom zweiten Rechner reisen roh und werden IM Befehl am Primary normalisiert (Hauptbild + Vorschau,
+Medienspeicher): 8 Fotos × (1 609 + 80) ms ≈ 13,5 s bei 1600 px gegen 8 × (72 + 24) ms ≈ 0,8 s bei 800 px — und dazu 2 + 8
+Ganz-DB-Speicherungen (§ 8). Mit 1600 px bleibt einem Artikel mit 8 Fotos schon bei kleiner Datenbank kaum Luft (≈ 13,5 s
+Bilder + 10 × ~0,1 s Speichern ≈ 14,5 s von 20 s); mit 800 px sind es ≈ 1,8 s. Ab einigen hundert MB reißen die Speicherungen
+die Frist bei beiden Fassungen (§ 8, F3) — die Aufnahmegröße ist dort nicht mehr der Engpass. Belegbilder rechnet
+der aufnehmende Rechner VOR der Frist; dort kosten 1600 px ~1,6 s Wartezeit je Foto am aufnehmenden Rechner (6 Reparaturfotos ≈
+10 s). Das Handy darf 1600 px: seine Fotos werden beim Abholen bzw. im Drain gerechnet, ohne Brückenfrist, und seine Aufnahme ist
+die Vorlage der KI-Erkennung.
+
+**Was die 800 px kosten (gemessen):** bei gleicher Grenze (≤ 100 000 B) ist das gespeicherte Belegbild 800×533 statt 982×655
+und 3,4 dB schlechter in der 800-px-Anzeige (1,7 dB in der 1600-px-Anzeige): die 800-px-Aufnahme wird vom Normalisierer ein
+zweites Mal kodiert (q0,7 → Qualitätsleiter ab 85, Generationsverlust), die 1600-px-Aufnahme nur einmal verkleinert.
+Entscheidung: 800 px bleiben (gemeinsame Aufnahme, Frist des Artikelwegs). Ein eigenes 1600-px-Profil nur für Belegbilder
+(Rechenzeit am aufnehmenden Rechner, keine Frist) wäre möglich — das ist eine Produktentscheidung und hier nicht umgesetzt.
+
+## 5. Fristen: Beginn, Ende, Schlange, weiterlaufende Mutation, Wiederholung
+
+- **Beginn:** `command_execute` liest den HTTP-Rumpf, prüft Anmeldung und Kennung, rechnet `timeout_for(op, payload, db_bytes)`;
+  die Frist beginnt in `Bridge::dispatch` mit der Zustellung ans Fenster (`tokio::time::timeout(timeout, rx)`). Das Senden des
+  Rumpfs (bei 33 MB Base64 spürbar) liegt davor und zählt nicht.
+- **Ende:** die Antwort `bridge_reply` — der Renderer sendet sie erst nach `runRemoteCommand`: Transaktion, Commit, Kennungsnachweis
+  in derselben Transaktion, `ensureDurable` (ganze DB). Frist ≠ Erfolg: bei Ablauf 504 `BRIDGE_TIMEOUT`, Ausgang **unknown**.
+- **Schlange:** die Zustellung reiht den Auftrag in die EINE Schreibreihenfolge (`runExclusive`, FIFO). Wartezeit hinter anderen
+  Aufträgen — dem Selbst-Abgleich (bis 2 Ganz-DB-Speicherungen), einer Texterkennung, dem Normalisieren abgeholter Handyfotos —
+  **verbraucht die Frist**; die Formel hat dafür keinen Anteil. Gemessen (Baseline, 518 MB): kleiner Upload 504 nach 20 s, fertig
+  nach 42 s; HEAD mit abgeleiteter Upload-Frist: 200 nach 40,3 s bzw. 42,5 s.
+- **Nach Ablauf läuft die Mutation weiter:** Rust nimmt den Wartenden heraus (`take_pending`), der Renderer arbeitet den Auftrag zu
+  Ende, committet, speichert durabel; seine Antwort findet niemanden (`reply not delivered`). Die Wirkung kann also schon
+  gespeichert sein — genau das sagt `unknown`.
+- **Wiederholungssicherheit (bestehend):** dieselbe `commandId` mit derselben Identität wird angenommen (`IdentityStore::begin`,
+  `in_flight`), wartet in der Schreibreihenfolge hinter dem ersten Lauf und findet dessen Nachweis in der Transaktion
+  (`lookupCommand` → `replay`) → das eingefrorene Ergebnis, keine zweite Wirkung; dieselbe Kennung für etwas anderes →
+  `BRIDGE_COMMAND_ID_CONFLICT`. Belege: `test/bridge/write-foundation` (Nachweis/Replay, `CENTRAL_C3_…_PROVED`),
+  `remote-invoice-create` 131/0, `service-documents` 167/0 (jetzt gelaufen); E2E `r7b-pp12-images` (dieselbe Kennung → dieselbe
+  Reparatur, genau eine), `r7b-pp12-large-db` (jede Wirkung genau einmal, auch nach 504). Offen bleibt: eine Ergebnisabfrage
+  ohne erneutes Senden gibt es nicht.
+
+## 6. Persistenz: „kein fsync" gegen den Vertrag
+
+Vollständiger Speicherpfad der Geschäftsdatenbank: `saveDatabaseDurably` → Save-Coalescer (ein Schreiben gleichzeitig) →
+`db.export()` → `persistDb` → `atomicWrite`: SQLite-Kopfprüfung → Stale-Guard (Größe + mtime) → `plugin:fs|write_file`
+(`tauri-plugin-fs 2.5.0` `write_file_inner`: `OpenOptions` + `write_all`, **kein `sync_all`**) → Größenprüfung der Temp-Datei →
+`plugin:fs|rename` (`std::fs::rename` = `MoveFileExW(REPLACE_EXISTING)`, **ohne `WRITE_THROUGH`**) → neue Signatur.
+Der Vertrag im Code (`saveDatabaseDurably`, M2): „dauerhaft auf die aktive DB-Datei geschrieben". Einordnung:
+
+- **Neustartfest: ja.** Nach dem Umbenennen steht der neue Stand vollständig im Dateisystem (Seiten-Cache des Betriebssystems);
+  ein Absturz der Anwendung, ein regulärer oder erzwungener Prozess-Exit ändern daran nichts — der nächste Start liest genau diese
+  Datei (so belegt in jedem Neustart-Nachweis: Beenden → Neustart → alles da). Die Temp-Datei schützt gegen einen abgebrochenen
+  Schreibvorgang: die alte Datei bleibt bis zum Umbenennen unberührt.
+- **Stromausfall-/Betriebssystemabsturz-fest: nein.** Ohne `FlushFileBuffers` kann das Umbenennen (Metadaten, im NTFS-Journal)
+  vor den Datenseiten auf der Platte stehen. Fällt der Strom in diesem Fenster (typ. Sekunden nach jedem Speichern), kann die
+  Datei alt, leer oder beschädigt sein. Erkennung: der Start weist eine nicht lesbare Datenbank ab (`DB_RECOVERY_REQUIRED`,
+  C6-P1) statt einen leeren Bestand anzulegen; eine beschädigte, aber lesbare Seite würde nicht erkannt (keine
+  `integrity_check` beim Start). Rettung: Sicherung. Rusts eigene Dateien (Medienspeicher, Datenort, Staging, Journale) rufen
+  `sync_all` (+ Verzeichnis-Sync); nur die Geschäftsdatenbank nicht — nach einem Stromausfall können Mediendateien also neuer sein
+  als die Datenbank (verwaist → Aufräumen mit Quarantäne).
+- Nicht geändert (Umfang: kein allgemeiner Speicherumbau). Ein `fsync` bräuchte einen eigenen Rust-Befehl (Temp schreiben +
+  `sync_all` + Umbenennen + Verzeichnis-Sync) und kostet bei 500 MB zusätzliche Sekunden je Speichern.
+
+## 7. PP-12 — Frist nach der echten Speicherung (unverändert seit `1479b09`)
 
 ```
 upload   = 20 s + min(len, 32 MiB) × 10 / 10 MB/s  +  (db_bytes + 2 × len) / 4 MB/s
@@ -146,77 +273,91 @@ content  = 20 s + 32 MiB × 4 / 10 MB/s             (liest nur, speichert nichts
 sonst    = 20 s
 ```
 
-`db_bytes` = Größe von `lataif.db` am Primary im Moment der Anfrage. Untergrenze 4 MB/s gegen gemessen ~10 MB/s (+134 MB → +13,4 s).
-Die Review-Messungen gegen die neue Frist: 17,9 / 23,0 / 31,3 s bei 69 / 136 / 203 MB → Frist 87,5 / 104,2 / 121,0 s, Abstand
-4,9× / 4,5× / 3,9× (vorher 3,0× / 2,3× / 1,7×).
+`db_bytes` = Größe von `lataif.db` am Primary im Moment der Anfrage (`routes.rs` `command_execute`). Nachweis
+`r7b-pp12-large-db` 13/0:
 
-**Größere synthetische Datenbank** (`test/e2e/r7b-pp12-large-db.e2e.mjs`, nur der Test-Datenordner, zufällige nicht komprimierbare
-Füllzeilen; je Stufe über `/api/command` mit leerer Schreibreihenfolge; „fertig" = die Zeile steht in der Datei, gemessen am
-Aufrufer ab Beginn der Anfrage, eine Probe je Punkt):
-
-| DB bei der Anfrage | normaler Befehl (Frist 20 s) | größtes Dokument: fertig / Frist | alte Frist | Texterkennung: fertig / Frist |
+| DB bei der Anfrage | normaler Befehl (20 s) | größtes Dokument fertig / Frist | alte Frist | Texterkennung fertig / Frist |
 |---|---|---|---|---|
-| 2 MB | 0,1 s | 17,8 s / 70,6 s | 53,5 s | 2,9 s / 107,2 s (DB 69 MB) |
-| 203 MB (Lauf 1) | 5,3 s | 21,9 s / 121,0 s | 53,5 s | 7,5 s / 157,5 s (DB 270 MB) |
-| 451 MB (Lauf 2) | 10,7 s | 27,8 s / 182,9 s | 53,5 s | 13,4 s / 219,5 s (DB 518 MB) |
+| 2 MB | 0,1 s | 17,8 / 70,6 s | 53,5 s | 2,9 / 107,2 s (69 MB) |
+| 203 MB | 5,3 s | 21,9 / 121,0 s | 53,5 s | 7,5 / 157,5 s (270 MB) |
+| 451 MB | 10,7 s | 27,8 / 182,9 s | 53,5 s | 13,4 / 219,5 s (518 MB) |
 
-Alle Antworten 200, jede Wirkung genau einmal. Getesteter Bereich: bis 451 MB (Upload) bzw. 518 MB (Texterkennung). Die Messung
-trägt nicht, dass die alte Frist bei 451 MB gerissen wäre (27,8 s < 53,5 s bei leerer Schlange). Sie trägt aber: im ersten Lauf
-(453 MB, direkt nach dem Start, Schlange belegt) lag schon der normale Befehl über 20 s, und das größte Dokument brauchte 192,8 s —
-über der neuen Frist (183,4 s), weil die Frist die Wartezeit hinter anderen Aufträgen nicht enthält (G6). Die Untergrenze
-(4 MB/s) bleibt: die gemessene Speicherleistung lag bei 451 MB über ~40 MB/s (normaler Befehl 10,7 s); die Formel lässt dem
-größten Dokument dort 6,6× Luft.
+Mit laufendem Selbst-Abgleich (dieser Nachtrag, 518 MB): größtes Dokument 42,6 s bei Frist 182,9 s → 200; mit der alten Frist
+(Baseline) 504 nach 30,2 s, fertig nach 30,8 s.
 
-## 7. Tests und Nachweise
+## 8. Skalierungsbefund normale Befehle (G5) und Handy-Drain (F2)
 
-**Einheitstests (Node):** `test/r7b/pp12-images.test.ts` **56/0** (Aufnahmeprofil, Normalisierer-Vertrag mit `keep`, Codes, jede
-Verdrahtung Primary/PC2/Abholen, Medienspeicher-Wege roh, Frist-Formel gegen die Review-Messungen). Nachbarn nach der Änderung
-grün: r7b-platform-hardening 111/0, r6c masterdata-parity 89/0, r6f order-parity 253/0, r6d metal-scrap-parity, r5c repair-parity,
-r5e order-purchase-parity, r5e order-contract-pins 70/0, r6f purchase-parity 203/0, r6f product-media-parity, r6f production-parity,
-r6f/r6c/r6d final-gate, uiparity r4b/r4c, bridge client-masterdata-ui, service-parity 112/0, commercial-documents 238/0,
-pp13 repair-cost-accounting, media-edit-preserve edit-routing 34/0, r5f returns-consignment-parity. Typcheck grün; Lint: keine neuen
-Fehler (Fehlerzahl je geänderter Seite gegen HEAD gleich).
+Jeder schreibende Befehl speichert die ganze Datenbank (`db.export()` + Schreiben): gemessen 0,1 s (2 MB), 5,3 s (203 MB),
+10,6–12,7 s (451 MB). Die Frist normaler Befehle bleibt 20 s — bei ~450 MB ist die Hälfte davon Speichern; eine Wartezeit hinter
+dem Selbst-Abgleich (bis 2 × 13 s bei 518 MB) reißt sie (504 `unknown`, Wirkung genau einmal, s. § 5). Das ist ein
+Skalierungsbefund des Ganz-Datenbank-Speicherns, kein Fehler einzelner Wege; daraus werden hier weder eine pauschale
+Fristerhöhung noch ein Speicherumbau abgeleitet (eigene Entscheidung). F2: die Drain-Lease (120 s) wird nie verlängert; mit
+2 + N Ganz-DB-Speicherungen je Handy-Auftrag kann sie bei großer DB ablaufen (`ready_rejected`), der nächste Lauf nimmt den Auftrag
+über die Quittung wieder auf — unverändert.
 
-**Rust:** `media::record_image` **6/0** (+ 1 Bench, ignoriert) — ≤ 100 000 B aus 3000×2000, Antwortform, gespeicherte Form bleibt
-Byte für Byte (idempotent), Metadaten-/Maß-/PNG-Eingänge werden gerechnet, feste Codes, Eingangsgrenzen; `bridge_tests` inkl.
-`the_writing_document_paths_grow_with_the_database` (46/0 mit `record_image` im ersten Lauf).
+## 9. Rust `legacy_push_tests::o1_o5_o10_operation_matrix_enforced_for_every_table`
 
-**Zwei-Rechner-Lauf Bildwege** `test/e2e/r7b-pp12-images.e2e.mjs` (frische E2E-Programme, Debug-Build) — Bildteil **22/0**:
-- PC2 normalisiert vor dem Ablegen: Aufnahmen 84 785–94 478 B → 55 458–99 526 B; der Primary übernahm sie Byte für Byte
-  (SHA-256 gleich), Reparatur mit zwei Fotos 617 ms.
-- Nicht normalisiertes Foto (399 644 B, 1000×667, Qualität 0,95) → der Primary rechnete beim Abholen: 91 026 B, 3,2 s (Debug).
-- Wiederholung derselben Kennung: dieselbe Reparatur, genau eine, Fotos unverändert. Ersetzen: erstes Byte für Byte, neues ≤ 100 000 B.
-- Primary-Maske: Kamerafoto 2 653 984 B (3000×2000) über die echte Dateiauswahl → gespeichert 97 454 B (800×533); die zwei
-  gespeicherten unverändert.
-- Ausweisfoto, Einkauf „New Item": gespeichert = die von PC2 normalisierte Fassung. Altgold ändern: das neu abgelegte, schon
-  gespeicherte Foto blieb Byte für Byte, das neue ≤ 100 000 B.
-- Medienspeicher (Artikel vom PC2-Transport): Hauptbild 99 526 B, Vorschau 16 337 B als Dateien (Dateigröße = Datensatz),
-  `products.images = '[]'`, 5,0 s (Debug). Die Maße führt `media_blob_generations` hier nicht (NULL) — geprüft sind Bytes und Datei.
-- Anzeige: Primary und PC2 (echte Oberfläche, angemeldet als B) zeigen Reparaturfotos, Einkaufsartikel und Medienspeicher-Artikel.
-- Reguläres Beenden + Neustart: alle Fotos Byte für Byte da, Medien-Dateien unverändert, Anzeige wieder da.
-- Befund dieses Laufs, der das Design bestimmt hat: im ersten Anlauf rechnete der Primary zwei rohe Fotos (3000×2000) beim Abholen —
-  504 nach 20 s (§ 3).
+Rot an HEAD: `(52, 36, 37)` gegen erwartet `(50, 36, 37)` (`cargo test --lib o1_o5_o10`). Herleitung aus dem kanonischen
+Manifest `src/core/sync/sync-business-schema.json` (`allowed_operations` gezählt je Stand):
 
-**Große Datenbank** `test/e2e/r7b-pp12-large-db.e2e.mjs` **13/0** (Lauf 2; Zahlen § 6) —
-`POST_PARITY_PP12_LARGE_DATABASE_DEADLINE_PROVED`. Lauf 1 brach beim Übergang 270 → 450 MB ab: nach regulärem Schließen endete
-der Primary (DB ~340 MB) nicht in 15 min (Befund F4); seine 2- und 203-MB-Stufe sind vollständig gemessen (Log). Deshalb misst
-Lauf 2 nur Ausgangsgröße und 451 MB; am Ende endete der Primary nach WM_CLOSE auch dort nicht (602 s, DB 518 MB) und wurde
-über den Prozess-Helfer beendet — nur dieser eigene Test-Prozess am exakten Test-Pfad. Produktion, `E:\LATAIF\Data`,
-Ports 3001/3443: unberührt (Isolationsprüfung in jedem Lauf).
+| Stand | Tabellen | insert / update / delete |
+|---|---|---|
+| `663c2d7` (Test gesetzt) … `be76e50` | 50 | 50 / 36 / 37 — grün |
+| `ab7f169` (R6F: `sales_returns`, `sales_return_lines` ohne `delete`) | 50 | 50 / 36 / **35** — rot seit hier |
+| `aaa14d9` (R7A PP-10: `production_inputs`/`_outputs` insert+delete) … `d988810` … HEAD | 52 | **52** / 36 / 37 — rot |
 
-Rust-Nachbarn: `sync::routes`, `staging_route_tests`, `mobile_ingress_route_tests`, `w4`, `bridge`, `media::record_image` —
-127/1; der eine rote Test (`legacy_push_tests::o1_o5_o10_operation_matrix_enforced_for_every_table`, erwartet 50 Insert-Tabellen,
-das Abgleich-Manifest hat 52) ist **vorbestehend** seit R7A (`aaa14d9` erweiterte `sync-business-schema.json`; Datei und Test in
-diesem Auftrag unverändert) — nicht behoben, gemeldet.
+Der TS-Drift-Gate (`test/m6b3a/manifest-drift.test.ts`) pinnt denselben Vertrag bereits mit 52/36/37 und derselben Begründung;
+der Rust-Pin wurde beide Male nicht mitgeführt. Korrektur: `(52, 36, 37)` + Herleitung im Kommentar. Kein Manifest geändert.
+`cargo test --lib sync::routes` **74/0**.
 
-## 8. Git
+## 10. Bestandsaufnahme aller Bild-Uploads — Vorher / Nachher (aktualisiert)
 
-Folgecommits auf `243e4e6` (kein Amend, kein Push/Tag/Release):
+| # | Einstieg | Speicherort | vorher | nachher |
+|---|---|---|---|---|
+| A/B | Handy Collection anlegen / Galerie / Text | Medienspeicher | 100 000 / 20 000 B hart (`ingest.prepare`) | unverändert |
+| C/K | KI-Erkennen (Handy, Desktop, PC2) | nichts gespeichert | Transportgrenzen | unverändert |
+| D | **Handy Reparatur, Einkaufs-Inbox** | `repairs.images`, `purchase_inbox.images` | keine Byte-Grenze | **≤ 100 000 B bei der Übernahme**, gespeicherte unverändert, Umweg → Quarantäne |
+| E | Desktop/PC2 Artikel, Kommission, Fertigung | Medienspeicher | hart, Aufnahme 800 px | unverändert |
+| F | Einkauf „New Item" (auch aus Inbox) | `products.images` | ≤ 100 000 B (PP-12), keine Vorschau | **Medienspeicher** (Hauptbild + Vorschau) nach dem Commit |
+| G | Auftrag „New Item" / Sonderstück (Artikel) | `products.images`; Entwurf `orders.custom_product_spec` | ≤ 100 000 B | Artikel **Medienspeicher**; der Entwurf bleibt Belegbild ≤ 100 000 B |
+| H/I/J | Reparatur, Altgold, Ausweis (Desktop/PC2) | Zeile | ≤ 100 000 B (PP-12) | unverändert |
+| X | **jede Bildspalte über `/api/sync/push`** | Zeile | wörtlich | **normalisiert bei der Übernahme** |
+| L | Dokumente | `documents.file_path` (Original) | ≤ 25 116 672 B | **unverändert** (Original = OCR-Vorlage), Frist nach DB-Größe |
 
-1. `02c976b` — Rust: `media::record_image` + zwei Tauri-Befehle (Normalisierer für Belegbilder).
-2. `1479b09` — Rust: PP-12-Frist mit Datenbankgröße (`bridge.rs`, `routes.rs`, Tests).
-3. `e1706a7` — TS: Bildwege vereinheitlicht (Primary vor der Klammer, PC2 vor dem Ablegen, Prüfung beim Abholen), Aufnahmeprofil,
-   Einheitstests, angepasste Nachbartests.
-4. dieser Commit — E2E-Läufe (`r7b-pp12-images`, `r7b-pp12-large-db`), dieses Review, SSOT (PP-12 geschlossen).
+## 11. Tests und Nachweise (zum finalen Code)
+
+Alle Läufe gegen den finalen Code (E2E-Programme nach dem letzten Codecommit neu gebaut: Primary + PC2-Client, Debug, isoliert
+`com.lataif.app.e2e`, Port 3011; Produktion, `E:\LATAIF\Data`, 3001/3443 unberührt, jede fremde `lataif.exe` geprüft). Die
+vollständigen Ausgaben stehen im Anhang `pp12-closure-test-outputs.log`.
+
+**Einheitstests (Node), neu:** `pp12-close-budget` 19/0, `pp12-pulled-images` 26/0, `pp12-new-item-media` 17/0.
+**Nachbarn** (von den Änderungen berührt): `pp12-images` 56/0, `m4 window-close-persistence` 50/50, `m5 reload-persistence` 30/30,
+`post-release-shutdown relaunch-coordinator` 28/28, `mobile04b2a12u1 restore-wiring` 15/0, `mobile04b2a12u2 backup-workflow` 20/0,
+`media04b2a2 drain-handoff` 94/0, `consignment duplicate-single-create` 34/0, `sku-desktop-unify` 60/0, `sync cursor-safety` 120/0,
+`m2 mobile-sync-durable-cursor` 46/46, `c6 release-hardening` 38/0, `storage-perf sync-payload-contract` 18/0,
+`m6b3a manifest-drift` 1475/1475, `r6f order-parity` 253/0, `r6d metal-scrap-parity` 253/0, `r6c masterdata-parity` 89/0,
+`bridge write-foundation` (PROVED), `remote-invoice-create` 131/0, `service-documents` 167/0, `r7b-platform-hardening` 111/0,
+SSOT-Gates `r6c/r6d/r6e/r6f final-gate`, `r6b safety`, `r5e order-contract-pins` (Anhang). Typcheck `tsc -b` grün. Lint: keine
+neuen Fehler (Fehlerzahl je geänderter Datei = HEAD; neue Dateien 0).
+**Rust:** `cargo test --lib sync::routes` **74/0** (inkl. `o1_o5_o10`), `media::record_image` (Anhang).
+**E2E (HEAD, final):** `r7b-pp12-shutdown` **14/0**, `r7b-pp12-mobile-takeover` **20/0**, `r7b-pp12-images` **22/0**.
+**Nachstellungen / Baseline** (temporäre Skripte, nicht eingecheckt; Protokolle im Anhang): HEAD vorher 1–4 (§ 1),
+Baseline `d988810` ohne und mit laufendem Abgleich (§ 1), Messung Aufnahmeprofil (§ 4).
+Nicht wiederholt (unverändert, gültige Nachweise): `r7b-pp12-large-db` 13/0 (Fristen der Dokumentwege; nur ein Kommentar
+aktualisiert).
+
+## 12. Git
+
+Folgecommits auf `0a15565` (kein Amend, kein Push/Tag/Release):
+
+1. `30ec48e` — Rust: `legacy_push … o1_o5_o10` Erwartung aus dem kanonischen Manifest (52/36/37).
+2. `025434f` — Beenden/Neuladen/Neustart: Wartefristen nach Datenbankgröße (`relaunch-coordinator.ts`, `database.ts`, alle
+   Wartepunkte) + `pp12-close-budget`.
+3. `44e83ce` — Fotos aus dem Abgleich bei der Übernahme normalisiert (`pulled-record-images.ts`, `sync-service.ts`) +
+   `pp12-pulled-images`.
+4. `82d35f3` — „New Item"-Artikel in den Medienspeicher (`new-item-media.ts`, `productStore.ts`) + `pp12-new-item-media`,
+   Bildlauf-Erwartung.
+5. `fa4676a` — Folgecommit: das Leeren von `products.images` wird erfasst (Echo-fest).
+6. dieser Commit — E2E `r7b-pp12-shutdown`, `r7b-pp12-mobile-takeover`, Kommentar `r7b-pp12-large-db`, dieses Review, SSOT.
 
 Version 0.8.54 und Registry 175 unverändert (keine technische Notwendigkeit).

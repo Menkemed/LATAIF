@@ -1,14 +1,16 @@
 // ════════════════════════════════════════════════════════════════════════════
-// POST-PARITY R7B / PP-12 — die Frist der Dokumentwege bei großer Geschäftsdatenbank (gezielt, nur der Primary).
-// Run: node test/e2e/r7b-pp12-large-db.e2e.mjs
+// POST-PARITY R7B / PP-12 — die Handy-Fotos bei ihrer Übernahme am Desktop, und der „New Item"-Artikel im
+// Medienspeicher (Primary + PC2).
+// Run: node test/e2e/r7b-pp12-mobile-takeover.e2e.mjs
 //
-// Je Stufe (Ausgangsgröße, dann 200 MB und 450 MB synthetische Füllzeilen — NUR im Test-Datenordner) über den echten
-// Fernweg (/api/command, dasselbe Token-Protokoll wie PC2), jeweils mit leerer Schreibreihenfolge:
-//   NORMAL   ein normaler Befehl (Lieferant anlegen) — HTTP-Antwort UND der Zeitpunkt, an dem die Zeile in der Datei steht;
-//   UPLOAD   das größte Dokument (25 116 672 B) — Antwort, Fertig-Zeitpunkt, die abgeleitete Frist dieser Anfrage;
-//   OCR      Texterkennung eines kleinen Belegs — dasselbe.
-// „Fertig" = die Zeile steht in der Datei (das durable Speichern ist durch) — gemessen am Rechner des Aufrufers ab Beginn der
-// Anfrage (enthält das Senden des Rumpfs; die Frist des Primary beginnt erst mit der Übergabe ans Fenster). Jede Wirkung genau einmal.
+//   HANDY    Reparatur (Kunde + Reparatur mit Foto) und Einkaufs-Inbox-Foto — genau die Zeilen, die die Handy-Seite
+//            (`mobile_page.rs`, resizePhoto 1600 px / 0,85) an `/api/sync/push` schickt; der Primary übernimmt sie beim
+//            Abholen: jedes Foto ≤ 100 000 B, ≤ 1600 px, JPEG, ohne Metadaten.
+//   UMWEG    ein kaputtes Foto / ein Verweis über denselben Eingang → Quarantäne, nichts in der Geschäftsdatenbank.
+//   ERGÄNZEN das gespeicherte Foto einer Zeile bleibt Byte für Byte, nur das neue wird gerechnet.
+//   ÜBERNAHME Inbox → Einkauf „New Item" (Fernweg wie PC2) und Auftrag „New Item": der Artikel trägt seine Fotos im
+//            Medienspeicher (Hauptbild ≤ 100 000 B, Vorschau ≤ 20 000 B, Dateien da), products.images leer.
+//   ANZEIGE  Primary und PC2; NEUSTART nach regulärem Beenden: alles Byte für Byte da.
 //
 // PROZESS-ISOLATION (dauerhafte Regel): gestartet wird nur über `spawnTracked`; beendet wird nur, was dieser
 // Lauf gestartet hat — hart nur über den Helfer, regulär nur nach Prüfung von PID UND exaktem Test-Pfad. Die
@@ -46,14 +48,14 @@ const APP = join(process.cwd(), 'src-tauri', 'target', 'debug', 'lataif.exe');
 const CLIENT_APP = join(process.cwd(), 'src-tauri', 'target', 'debug', 'lataif-e2e-client.exe');
 const OWNER_EMAIL = 'admin@lataif.com';
 const ONBOARD_PW = 'e2epass123';
-const OWNER_PW = 'pp12-large-owner-' + Math.random().toString(36).slice(2);
+const OWNER_PW = 'pp12-shutdown-owner-' + Math.random().toString(36).slice(2);
 // Der zweite echte Benutzer (wie im R6E-Akteurslauf): eigene Kennung/E-Mail, Owner-Rolle, der bcrypt-Wert
 // des Owners kopiert — die Anmeldung prüft ihn mit dem echten `bcrypt::verify`.
-const B_ID = 'user-pp12-images-b';
-const B_EMAIL = 'kollege.pp12-images@lataif.com';
+const B_ID = 'user-pp12-shutdown-b';
+const B_EMAIL = 'kollege.pp12-shutdown@lataif.com';
 const B_NAME = 'PP14 Kollege B';
 
-const RUN = join(os.tmpdir(), 'lataif-pp12-large-db', 'run-' + Date.now());
+const RUN = join(os.tmpdir(), (process.argv[6] || 'lataif-pp12-shutdown') + '', 'run-' + Date.now());
 const REAL_APPDATA = process.env.APPDATA || join(os.homedir(), 'AppData', 'Roaming');
 const APP_DATA_DIR = join(REAL_APPDATA, IDENT);
 const BIZ_DB = join(APP_DATA_DIR, 'lataif.db');
@@ -982,10 +984,10 @@ try {
   if (await exists(primary, '[data-first-run-new]')) { await click(primary, '[data-first-run-new]'); await sleep(1500); }
   await waitFor(primary, 'input[placeholder="e.g. Al-Khalifa Luxury"], input[type="email"]', 60000);
   if (await exists(primary, 'input[placeholder="e.g. Al-Khalifa Luxury"]')) {
-    await setVal(primary, 'input[placeholder="e.g. Al-Khalifa Luxury"]', 'PP12 LargeDB Co');
-    await setVal(primary, 'input[placeholder="e.g. Main Store"]', 'PP12 Images Branch');
+    await setVal(primary, 'input[placeholder="e.g. Al-Khalifa Luxury"]', 'PP12 Shutdown Co');
+    await setVal(primary, 'input[placeholder="e.g. Main Store"]', 'PP12 Shutdown Branch');
     await clickText(primary, 'Next'); await waitFor(primary, 'input[placeholder="Full name"]');
-    await setVal(primary, 'input[placeholder="Full name"]', 'PP12 Images Admin A');
+    await setVal(primary, 'input[placeholder="Full name"]', 'PP12 Shutdown Admin A');
     await setVal(primary, 'input[placeholder="you@company.com"]', OWNER_EMAIL);
     await setVal(primary, 'input[placeholder="Choose a password"]', ONBOARD_PW);
     await clickText(primary, 'Next'); await waitFor(primary, 'input[placeholder="10"]');
@@ -1033,9 +1035,12 @@ try {
   // ══════════════════════════════════════════════════════════════════════
   // Helfer dieses Laufs
   // ══════════════════════════════════════════════════════════════════════
-  const GR = { measured: false, onceEach: false, uploadsAnswered: false, ocrAnswered: false };
-  const MESS = { stufen: [] };
-  RV_STATE = GR; MESS_STATE = MESS;
+  const MT = {
+    phoneContract: false, phoneRepair: false, phoneInbox: false, bypass: false, keep: false,
+    purchaseMedia: false, orderMedia: false, displayPrimary: false, displayPc2: false, restart: false,
+  };
+  const MESS = {};
+  RV_STATE = MT; MESS_STATE = MESS;
   const api = async (pfad, body, token) => {
     const t0 = performance.now();
     const r = await fetch(`http://127.0.0.1:${PORT}${pfad}`, {
@@ -1049,122 +1054,281 @@ try {
   };
   const befehl = (op, payload, token, commandId = crypto.randomUUID()) => api('/api/command', { op, commandId, payload }, token);
   const zahl = (sql, p) => Number(dbQ(BIZ_DB, sql, p)[0]?.n ?? 0);
-  /** Wartet, bis die Zeile in der Datei steht (das durable Speichern ist durch); ms ab `t0`, NaN nach der Frist. */
-  async function fertig(sql, p, t0, budgetMs = 900000) {
-    while (performance.now() - t0 < budgetMs) {
-      if (zahl(sql, p) > 0) return performance.now() - t0;
-      await sleep(400);
+  async function bis(pruefe, budgetMs = 150000) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < budgetMs) { if (pruefe()) return true; await sleep(700); }
+    return false;
+  }
+  const bytesSha = (b64) => createHash('sha256').update(Buffer.from(String(b64), 'base64')).digest('hex');
+  function jpegInfo(url) {
+    const s = String(url || '');
+    const b = Buffer.from(s.slice(s.indexOf(',') + 1), 'base64');
+    const jpeg = b.length > 3 && b[0] === 0xff && b[1] === 0xd8;
+    let w = 0, h = 0;
+    if (jpeg) {
+      let i = 2;
+      while (i + 9 < b.length) {
+        if (b[i] !== 0xff) { i++; continue; }
+        const m = b[i + 1];
+        if (m >= 0xc0 && m <= 0xcf && m !== 0xc4 && m !== 0xc8 && m !== 0xcc) { h = b.readUInt16BE(i + 5); w = b.readUInt16BE(i + 7); break; }
+        i += 2 + b.readUInt16BE(i + 2);
+      }
     }
-    return NaN;
+    return { mime: s.slice(5, s.indexOf(';')), jpeg, bytes: b.length, w, h, sha: createHash('sha256').update(b).digest('hex'), exif: b.includes(Buffer.from('Exif\0\0', 'latin1')) };
   }
-  // Die Frist, die bridge.rs für diese Anfrage rechnet (dieselbe Formel, dieselben Konstanten).
-  const SAVE_FLOOR = Number(/pub const SAVE_FLOOR_BYTES_PER_SEC: u64 = ([\d_]+);/.exec(readFileSync(join(process.cwd(), 'src-tauri/src/bridge.rs'), 'utf8'))?.[1].replace(/_/g, '') || 0);
-  const fristUpload = (db, len) => 20 + Math.floor(Math.min(len, 33_554_432) * 10 * 1000 / 10_000_000) / 1000 + Math.floor((db + Math.min(len, 33_554_432) * 2) * 1000 / SAVE_FLOOR) / 1000;
-  const fristOcr = (db) => 90 + Math.floor(db * 1000 / SAVE_FLOOR) / 1000;
-  const DOC_MAX = 25_116_672;
-  const png = Buffer.from(String(await primary.ev(`const c=document.createElement('canvas'); c.width=720; c.height=180; const g=c.getContext('2d');
-    g.fillStyle='#ffffff'; g.fillRect(0,0,720,180); g.fillStyle='#000000'; g.font='bold 64px Arial'; g.fillText('LATAIF PP12 4711', 24, 112);
-    return c.toDataURL('image/png').split(',')[1];`)), 'base64');
-  const big = Buffer.alloc(DOC_MAX); png.copy(big, 0);
-  const URL_GROSS = 'data:image/png;base64,' + big.toString('base64');
-  const KLEIN = 'data:image/jpeg;base64,' + String(await primary.ev(`const c=document.createElement('canvas'); c.width=1200; c.height=400; const g=c.getContext('2d');
-    g.fillStyle='#ffffff'; g.fillRect(0,0,1200,400); g.fillStyle='#000000'; g.font='bold 96px Arial'; g.fillText('LATAIF PP12 4711', 40, 240);
-    return c.toDataURL('image/jpeg', 0.9).split(',')[1];`));
-  ok(SAVE_FLOOR > 0 && big.length === DOC_MAX, `SETUP Frist-Untergrenze aus bridge.rs ${SAVE_FLOOR} B/s, größtes Dokument ${DOC_MAX} B`);
+  const passt = (x) => !!x && x.mime === 'image/jpeg' && x.jpeg && x.bytes > 0 && x.bytes <= 100000 && x.w > 0 && Math.max(x.w, x.h) <= 1600 && !x.exif;
+  const kurz = (x) => `${x.bytes} B ${x.w}×${x.h}`;
+  const liste = (t, id, col = 'images') => { try { return JSON.parse(String(dbQ(BIZ_DB, `SELECT ${col} FROM ${t} WHERE id = ?`, [id])[0]?.[col] || '[]')); } catch { return []; } };
+  const MEDIA_MAIN = `SELECT g.byte_size AS bytes, g.storage_key AS key, g.width AS w, g.height AS h FROM media_links l
+      JOIN media_objects o ON o.tenant_id = l.tenant_id AND o.media_id = l.media_id
+      JOIN media_blobs b ON b.tenant_id = o.tenant_id AND b.blob_id = o.master_blob_id
+      JOIN media_blob_generations g ON g.tenant_id = b.tenant_id AND g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no
+     WHERE l.entity_type = 'product' AND l.entity_id = ? AND l.deleted_at IS NULL`;
+  const MEDIA_THUMB = `SELECT g.byte_size AS bytes, g.storage_key AS key, g.width AS w, g.height AS h FROM media_links l
+      JOIN media_variants v ON v.tenant_id = l.tenant_id AND v.media_id = l.media_id AND v.variant_type = 'thumbnail' AND v.deleted_at IS NULL
+      JOIN media_blobs b ON b.tenant_id = v.tenant_id AND b.blob_id = v.blob_id
+      JOIN media_blob_generations g ON g.tenant_id = b.tenant_id AND g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no
+     WHERE l.entity_type = 'product' AND l.entity_id = ? AND l.deleted_at IS NULL`;
+  const datei = (k) => { try { return statSync(join(APP_DATA_DIR, 'media', String(k))).size; } catch { return -1; } };
+  const medien = (pid) => {
+    const main = dbQ(BIZ_DB, MEDIA_MAIN, [pid])[0] || {};
+    const thumb = dbQ(BIZ_DB, MEDIA_THUMB, [pid])[0] || {};
+    const legacy = dbQ(BIZ_DB, 'SELECT images FROM products WHERE id = ?', [pid])[0]?.images;
+    return { main: [Number(main.bytes) || 0, Number(main.w) || 0, Number(main.h) || 0, datei(main.key)], thumb: [Number(thumb.bytes) || 0, Number(thumb.w) || 0, Number(thumb.h) || 0, datei(thumb.key)], legacy };
+  };
+  const medienOk = (m) => m.main[0] > 0 && m.main[0] <= 100000 && m.main[3] === m.main[0] && Math.max(m.main[1], m.main[2]) <= 1600
+    && m.thumb[0] > 0 && m.thumb[0] <= 20000 && m.thumb[3] === m.thumb[0] && m.legacy === '[]';
+  const EIN_BILD = '[...document.images].some(i => i.complete && i.naturalWidth >= 200)';
+  const BELEGBILD = `[...document.images].some(i => i.complete && i.naturalWidth > 0 && /^data:image\\/jpeg/.test(i.src))`;
+  const aufnahme = (seed, w = 800, h = 533, q = 0.7) => primary.ev(`const c=document.createElement('canvas'); c.width=${w}; c.height=${h}; const g=c.getContext('2d');
+    const gr=g.createLinearGradient(0,0,${w},${h}); gr.addColorStop(0,'#2b4a6f'); gr.addColorStop(1,'#d9b38c'); g.fillStyle=gr; g.fillRect(0,0,${w},${h});
+    let s=${seed}; const r=()=>{ s=(s*1103515245+12345)&0x7fffffff; return s/0x7fffffff; };
+    for(let i=0;i<500;i++){ g.fillStyle='rgba('+Math.floor(r()*255)+','+Math.floor(r()*255)+','+Math.floor(r()*255)+',0.55)'; g.beginPath(); g.arc(r()*${w}, r()*${h}, 2+r()*24, 0, 6.283); g.fill(); }
+    g.fillStyle='#ffffff'; g.font='bold 48px Arial'; g.fillText('LATAIF PP12 ${seed}', 30, 90);
+    return c.toDataURL('image/jpeg', ${q}).split(',')[1];`);
+  const normalisiert = (b64) => primary.ev(`const r = await window.__TAURI_INTERNALS__.invoke('media_normalize_record_image', { dataBase64: ${S(b64)} }); return r.dataBase64;`);
+  /** Ein Kamerafoto (3000×2000), dann EXAKT `resizePhoto(file, 1600, 0.85)` der Handy-Seite — die Daten-URL, die das Handy sendet. */
+  const handyFoto = (seed) => primary.ev(`const W=3000,H=2000; const c=document.createElement('canvas'); c.width=W; c.height=H; const g=c.getContext('2d');
+    const gr=g.createLinearGradient(0,0,W,H); gr.addColorStop(0,'#2b4a6f'); gr.addColorStop(1,'#d9b38c'); g.fillStyle=gr; g.fillRect(0,0,W,H);
+    let s=${seed}; const r=()=>{ s=(s*1103515245+12345)&0x7fffffff; return s/0x7fffffff; };
+    for(let i=0;i<1400;i++){ g.fillStyle='rgba('+Math.floor(r()*255)+','+Math.floor(r()*255)+','+Math.floor(r()*255)+',0.55)'; g.beginPath(); g.arc(r()*W, r()*H, 4+r()*60, 0, 6.283); g.fill(); }
+    const d=g.getImageData(0,0,W,H); for(let i=0;i<d.data.length;i+=4){ const n=(r()-0.5)*36; d.data[i]+=n; d.data[i+1]+=n; d.data[i+2]+=n; } g.putImageData(d,0,0);
+    g.fillStyle='#ffffff'; g.font='bold 160px Arial'; g.fillText('LATAIF HANDY ${seed}', 120, 400);
+    const kamera = c.toDataURL('image/jpeg', 0.92);
+    const img = new Image(); await new Promise((ja, nein) => { img.onload = ja; img.onerror = nein; img.src = kamera; });
+    let width = img.width, height = img.height; const maxDim = 1600;
+    if (width > maxDim || height > maxDim) { if (width > height) { height = Math.round(height * maxDim / width); width = maxDim; } else { width = Math.round(width * maxDim / height); height = maxDim; } }
+    const c2 = document.createElement('canvas'); c2.width = width; c2.height = height; c2.getContext('2d').drawImage(img, 0, 0, width, height);
+    return c2.toDataURL('image/jpeg', 0.85);`);
+  async function abgleichAn() {
+    const st = await primary.ev('return await window.__TAURI_INTERNALS__.invoke("sync_server_status", {}).catch(() => null);');
+    if (st?.selfToken) await primary.ev(`localStorage.setItem('lataif_sync_url', ${S(`http://127.0.0.1:${PORT}`)}); localStorage.setItem('lataif_sync_token', ${S(st.selfToken)}); return 1;`);
+    return !!st?.selfToken;
+  }
 
-  async function anmelden() {
-    const l = await api('/api/auth/login', { email: OWNER_EMAIL, password: OWNER_PW });
-    return l.j?.token;
+  // ══ SETUP ══════════════════════════════════════════════════════════════
+  const login = await api('/api/auth/login', { email: OWNER_EMAIL, password: OWNER_PW });
+  const TOKEN = login.j?.token;
+  // Das Handy meldet sich an wie `mobile_page.rs` (`/api/auth/login` → Token, Filiale, Benutzer).
+  const HANDY = { token: login.j?.token, branch: login.j?.branch_id || 'branch-main', user: login.j?.user_id || null };
+  const abg = await abgleichAn();
+  // Wie in der Produktion: der Primary hat seinen Abgleichsstand mit dem eigenen Server, BEVOR ein Handy sendet (sein erster
+  // Abgleich gegen das noch leere Protokoll schreibt Stand 0, durabel). Ohne diesen Stand hält der bestehende Vertrag
+  // SYNC-SAFETY-A1 das Abholen an (`recovery-required`: die Historie beginnt mit etwas Fremdem) — so im ersten Anlauf gesehen.
+  const t0Stand = Date.now();
+  const stand = await bis(() => zahl('SELECT COUNT(*) AS n FROM sync_cursor') > 0, 120000);
+  MESS.abgleichsstandS = Math.round((Date.now() - t0Stand) / 1000);
+  const KUNDE = String(dbQ(BIZ_DB, "SELECT id FROM customers WHERE customer_type = 'PRIVATE' ORDER BY id LIMIT 1")[0]?.id || '');
+  const LIEF = String(dbQ(BIZ_DB, 'SELECT id FROM suppliers WHERE COALESCE(active, 1) = 1 ORDER BY id LIMIT 1')[0]?.id || '');
+  const PH = [];
+  for (const seed of [101, 202, 303, 404]) PH.push(String(await handyFoto(seed)));
+  MESS.handyGesendet = PH.map((u) => kurz(jpegInfo(u)));
+  ok(!!TOKEN && abg && stand && !!KUNDE && !!LIEF && PH.every((u) => jpegInfo(u).bytes > 100000 && Math.max(jpegInfo(u).w, jpegInfo(u).h) === 1600),
+    `SETUP angemeldet, Abgleich des Primary an und sein Stand durabel (${MESS.abgleichsstandS} s), Handyfotos wie gesendet (${MESS.handyGesendet.join(' / ')}) — jedes über 100 000 B`);
+  {
+    const mp = readFileSync(join(process.cwd(), 'src-tauri/src/sync/mobile_page.rs'), 'utf8').replace(/\r\n/g, '\n');
+    MT.phoneContract = mp.includes('photos[mode] = await resizePhoto(file, 1600, 0.85);')
+      && mp.includes('images: JSON.stringify(photos.repair ? [photos.repair] : []),')
+      && mp.includes('images: JSON.stringify([photos.purchase]),')
+      && mp.includes("{ table_name: 'repairs', record_id: repairId, action: 'insert', data: JSON.stringify(repairData) },")
+      && mp.includes("await pushChanges([{ table_name: 'purchase_inbox', record_id: inboxId, action: 'insert', data: JSON.stringify(inboxData) }]);")
+      && mp.includes("const res = await fetch('/api/sync/push', {");
+    ok(MT.phoneContract, 'HANDY die hier gesendeten Zeilen sind die der Handy-Seite (resizePhoto 1600/0,85; Kunde + Reparatur; Inbox; /api/sync/push)');
   }
-  /** Regulär beenden, die Datenbank (nur Test-Datenordner) auf `ziel` Bytes füllen, neu starten, Server an. */
-  async function neustartMit(ziel) {
+  const handyPush = (changes) => api('/api/sync/push', { changes }, HANDY.token);
+  const jetzt = () => new Date().toISOString();
+
+  // ══ HANDY — Reparatur (Kunde + Reparatur mit Foto) und Einkaufs-Inbox ═════════
+  const KH = crypto.randomUUID(), REP_H = crypto.randomUUID(), INBOX_H = crypto.randomUUID();
+  {
+    const now = jetzt();
+    const customerData = { id: KH, branch_id: HANDY.branch, first_name: 'Handy', last_name: 'Kunde PP12', created_at: now, updated_at: now };
+    const repairData = {
+      id: REP_H, branch_id: HANDY.branch, repair_number: 'REP-MOB-' + Date.now(), voucher_code: crypto.randomUUID().replace(/-/g, '').substring(0, 8).toUpperCase(),
+      customer_id: KH, item_brand: 'Omega', item_model: 'Seamaster', issue_description: 'PP12 Handy-Reparatur', repair_type: 'internal', status: 'received',
+      received_at: now, images: JSON.stringify([PH[0]]), notes: null, created_at: now, updated_at: now, created_by: HANDY.user,
+    };
+    const inboxData = { id: INBOX_H, branch_id: HANDY.branch, images: JSON.stringify([PH[1]]), note: 'PP12 Handy-Inbox', status: 'pending', created_at: now, created_by: HANDY.user };
+    const t0 = Date.now();
+    const p1 = await handyPush([
+      { table_name: 'customers', record_id: KH, action: 'insert', data: JSON.stringify(customerData) },
+      { table_name: 'repairs', record_id: REP_H, action: 'insert', data: JSON.stringify(repairData) },
+    ]);
+    const p2 = await handyPush([{ table_name: 'purchase_inbox', record_id: INBOX_H, action: 'insert', data: JSON.stringify(inboxData) }]);
+    const da = await bis(() => zahl('SELECT COUNT(*) AS n FROM repairs WHERE id = ?', [REP_H]) === 1 && zahl('SELECT COUNT(*) AS n FROM purchase_inbox WHERE id = ?', [INBOX_H]) === 1);
+    MESS.abholenS = Math.round((Date.now() - t0) / 1000);
+    const r = liste('repairs', REP_H).map(jpegInfo), i = liste('purchase_inbox', INBOX_H).map(jpegInfo);
+    const roh = [jpegInfo(PH[0]), jpegInfo(PH[1])];
+    MESS.handyReparatur = { gesendet: kurz(roh[0]), gespeichert: r.map(kurz) };
+    MESS.handyInbox = { gesendet: kurz(roh[1]), gespeichert: i.map(kurz) };
+    MT.phoneRepair = p1.status === 200 && da && r.length === 1 && passt(r[0]) && r[0].sha !== roh[0].sha && zahl('SELECT COUNT(*) AS n FROM customers WHERE id = ?', [KH]) === 1;
+    MT.phoneInbox = p2.status === 200 && da && i.length === 1 && passt(i[0]) && i[0].sha !== roh[1].sha;
+    ok(MT.phoneRepair, `HANDY Reparatur übernommen (nach ${MESS.abholenS} s): Foto ${kurz(roh[0])} → ${r.map(kurz)} (≤ 100 000 B, ≤ 1600 px, JPEG, ohne Metadaten), Kunde da (${p1.status})`);
+    ok(MT.phoneInbox, `HANDY Inbox-Foto übernommen: ${kurz(roh[1])} → ${i.map(kurz)} (${p2.status})`);
+  }
+
+  // ══ UMWEG — derselbe Eingang mit einem kaputten Foto und einem Verweis: Quarantäne; das Gültige daneben kommt an ══
+  {
+    const now = jetzt();
+    const R_BAD = crypto.randomUUID(), I_LINK = crypto.randomUUID(), R_OK = crypto.randomUUID();
+    const kaputt = 'data:image/jpeg;base64,' + Buffer.from('das ist kein JPEG — PP12 Umweg').toString('base64');
+    const rep = (id, imgs) => ({ id, branch_id: HANDY.branch, repair_number: 'REP-MOB-' + id.slice(0, 8), customer_id: KH, issue_description: 'PP12 Umweg ' + id.slice(0, 4), repair_type: 'internal', status: 'received', received_at: now, images: JSON.stringify(imgs), created_at: now, updated_at: now, created_by: HANDY.user });
+    const q0 = zahl("SELECT COUNT(*) AS n FROM sync_change_quarantine WHERE reason_code = 'SYNC_RECORD_IMAGE_REJECTED'");
+    const p = await handyPush([
+      { table_name: 'repairs', record_id: R_BAD, action: 'insert', data: JSON.stringify(rep(R_BAD, [kaputt])) },
+      { table_name: 'purchase_inbox', record_id: I_LINK, action: 'insert', data: JSON.stringify({ id: I_LINK, branch_id: HANDY.branch, images: JSON.stringify(['https://example.invalid/foto.jpg']), status: 'pending', created_at: now, created_by: HANDY.user }) },
+      { table_name: 'repairs', record_id: R_OK, action: 'insert', data: JSON.stringify(rep(R_OK, [PH[2]])) },
+    ]);
+    const da = await bis(() => zahl('SELECT COUNT(*) AS n FROM repairs WHERE id = ?', [R_OK]) === 1);
+    const q1 = zahl("SELECT COUNT(*) AS n FROM sync_change_quarantine WHERE reason_code = 'SYNC_RECORD_IMAGE_REJECTED'");
+    const gut = liste('repairs', R_OK).map(jpegInfo);
+    MT.bypass = p.status === 200 && da && zahl('SELECT COUNT(*) AS n FROM repairs WHERE id = ?', [R_BAD]) === 0
+      && zahl('SELECT COUNT(*) AS n FROM purchase_inbox WHERE id = ?', [I_LINK]) === 0 && q1 - q0 === 2 && gut.length === 1 && passt(gut[0]);
+    ok(MT.bypass, `UMWEG kaputtes Foto und Verweis → nicht übernommen, 2 Quarantänefälle SYNC_RECORD_IMAGE_REJECTED (${q0} → ${q1}); die gültige Reparatur daneben ${gut.map(kurz)} (${p.status})`);
+  }
+
+  // ══ ERGÄNZEN — das gespeicherte Foto bleibt Byte für Byte, nur das neue wird gerechnet ═════
+  {
+    const gespeichert = liste('repairs', REP_H)[0];
+    const now = jetzt();
+    const p = await handyPush([{ table_name: 'repairs', record_id: REP_H, action: 'update', data: JSON.stringify({ id: REP_H, images: JSON.stringify([gespeichert, PH[3]]), updated_at: now }) }]);
+    const da = await bis(() => liste('repairs', REP_H).length === 2);
+    const n = liste('repairs', REP_H);
+    const neu = jpegInfo(n[1]);
+    MT.keep = p.status === 200 && da && n[0] === gespeichert && passt(neu) && neu.sha !== jpegInfo(PH[3]).sha;
+    ok(MT.keep, `ERGÄNZEN das gespeicherte Foto Byte für Byte (${n[0] === gespeichert}), das neue ${kurz(jpegInfo(PH[3]))} → ${kurz(neu)} (${p.status})`);
+  }
+
+  // ══ ÜBERNAHME — Inbox → Einkauf „New Item" (wie PC2: Foto abgelegt, dann der Befehl) ═════
+  let P_EIN = '';
+  {
+    const inboxFoto = liste('purchase_inbox', INBOX_H)[0];
+    const s = String((await api('/api/staging/media', { mime: 'image/jpeg', dataBase64: String(inboxFoto).slice(String(inboxFoto).indexOf(',') + 1) }, TOKEN)).j?.stagingId || '');
+    const body = {
+      supplierId: LIEF, purchaseDate: '2026-09-15', taxScheme: 'ZERO', paymentAmount: 0, paymentMethod: 'cash', notes: '', staffId: '', inboxId: INBOX_H,
+      lines: [{ mode: 'new', brand: 'PP12', name: 'Handy-Inbox Einkauf', sku: '', categoryId: 'pp14-cat', quantity: 1, unitPrice: 200,
+        newProduct: { categoryId: 'pp14-cat', brand: 'PP12', name: 'Handy-Inbox Einkauf', stagingIds: [s] } }],
+    };
+    const r = await befehl('purchases.create', body, TOKEN);
+    P_EIN = String(dbQ(BIZ_DB, 'SELECT product_id FROM purchase_lines WHERE purchase_id = ?', [String(r.j?.value?.purchaseId || '')])[0]?.product_id || '');
+    const um = await bis(() => !!P_EIN && medienOk(medien(P_EIN)), 120000);
+    const m = medien(P_EIN);
+    const status = String(dbQ(BIZ_DB, 'SELECT status FROM purchase_inbox WHERE id = ?', [INBOX_H])[0]?.status || '');
+    MESS.einkaufNewItem = { status: r.status, ms: Math.round(r.ms), ...m, inbox: status };
+    MT.purchaseMedia = r.status === 200 && um && status !== 'pending';
+    ok(MT.purchaseMedia, `ÜBERNAHME Inbox → Einkauf „New Item": Hauptbild ≤ 100 000 B + Vorschau ≤ 20 000 B im Medienspeicher (Dateien da), products.images leer, Inbox erledigt (${S(MESS.einkaufNewItem)} ${r.j?.error || ''})`);
+  }
+
+  // ══ AUFTRAG „New Item" — derselbe Umzug ═════
+  let P_AUF = '';
+  {
+    const s = String((await api('/api/staging/media', { mime: 'image/jpeg', dataBase64: String(await normalisiert(String(await aufnahme(515)))) }, TOKEN)).j?.stagingId || '');
+    const body = { customerId: KUNDE, lines: [{ mode: 'new', newProduct: { categoryId: 'pp14-cat', brand: 'PP12', name: 'Auftrag New Item', stagingIds: [s] }, description: 'PP12 Auftrag New Item', scheme: 'ZERO', quantity: 1, unitPrice: 150 }] };
+    const r = await befehl('orders.create', body, TOKEN);
+    const orderId = String(r.j?.value?.orderId || r.j?.value?.id || '');
+    P_AUF = String(dbQ(BIZ_DB, "SELECT product_id FROM order_lines WHERE description = 'PP12 Auftrag New Item' ORDER BY rowid DESC LIMIT 1")[0]?.product_id || '');
+    const um = await bis(() => !!P_AUF && medienOk(medien(P_AUF)), 120000);
+    MESS.auftragNewItem = { status: r.status, orderId, ...medien(P_AUF) };
+    MT.orderMedia = r.status === 200 && um;
+    ok(MT.orderMedia, `AUFTRAG „New Item": der Artikel trägt sein Foto im Medienspeicher (Hauptbild + Vorschau), products.images leer (${S(MESS.auftragNewItem)} ${r.j?.error || ''} ${String(r.j?.message || '').slice(0, 100)})`);
+  }
+
+  // ══ ANZEIGE — Primary ═════
+  {
+    await gehFrisch(primary, `/repairs/${REP_H}`);
+    const rep = await warteBis(primary, BELEGBILD, 30000);
+    await gehFrisch(primary, `/collection/${P_EIN}`);
+    const pe = await warteBis(primary, EIN_BILD, 30000);
+    await gehFrisch(primary, `/collection/${P_AUF}`);
+    const pa = await warteBis(primary, EIN_BILD, 30000);
+    MT.displayPrimary = rep && pe && pa;
+    ok(MT.displayPrimary, `ANZEIGE Primary: Handy-Reparaturfoto, Einkaufsartikel und Auftragsartikel aus dem Medienspeicher (${[rep, pe, pa]})`);
+  }
+
+  // ══ ANZEIGE — PC2 (echte Oberfläche, frischer Rechner ohne Datenbank, angemeldet als B) ═════
+  {
+    client = await attach(CLIENT_CDP, CLIENT_APP, clientEnv());
+    await waitInvoke(client);
+    await client.ev('localStorage.clear(); return 1;');
+    await client.ev('location.reload(); return 1;'); await sleep(3500);
+    client.close(); client = await attachOnly(CLIENT_CDP);
+    await waitFor(client, '[data-first-run-gate]', 90000);
+    await click(client, '[data-first-run-connect]');
+    await waitFor(client, '[data-first-run-server]', 20000);
+    await setVal(client, '[data-first-run-server]', `127.0.0.1:${PORT}`);
+    await click(client, '[data-first-run-connect-go]');
+    await sleep(3500);
+    client.close(); client = await attachOnly(CLIENT_CDP);
+    await waitFor(client, 'input[type="password"]', 60000);
+    await setVal(client, 'input[type="email"]', B_EMAIL);
+    await setVal(client, 'input[type="password"]', OWNER_PW);
+    await click(client, '[data-client-signin]');
+    await waitFor(client, SHELL, 90000);
+    const sitzung = JSON.parse(String(await client.ev('return localStorage.getItem("lataif_session") || "{}";')) || '{}');
+    ok(sitzung.userId === B_ID, `ANZEIGE PC2 verbunden, angemeldet als B (${sitzung.userId})`);
+    await geh(client, `/repairs/${REP_H}`); await sleep(2500);
+    const rep = await warteBis(client, BELEGBILD, 40000);
+    await geh(client, `/collection/${P_EIN}`); await sleep(2500);
+    const pe = await warteBis(client, EIN_BILD, 40000);
+    await geh(client, `/collection/${P_AUF}`); await sleep(2500);
+    const pa = await warteBis(client, EIN_BILD, 40000);
+    MT.displayPc2 = rep && pe && pa;
+    ok(MT.displayPc2, `ANZEIGE PC2: Handy-Reparaturfoto, Einkaufsartikel, Auftragsartikel (${[rep, pe, pa]})`);
+    client.close(); client = null;
+    killTestImage('lataif-e2e-client.exe'); await waitTestImageGone('lataif-e2e-client.exe');
+  }
+
+  // ══ NEUSTART — reguläres Beenden, dann alles Byte für Byte da ═════
+  {
+    const stand = () => S([
+      liste('repairs', REP_H).map((u) => jpegInfo(u).sha),
+      liste('purchase_inbox', INBOX_H).map((u) => jpegInfo(u).sha),
+      [medien(P_EIN), medien(P_AUF)],
+    ]);
+    const vorher = stand();
     const pid = eigenerPrimary();
     primary.close(); primary = null;
-    const zu = regulaerSchliessen(pid);
-    const weg = await waitPidGone(pid, 900000);
-    if (!(zu && weg)) throw new Error(`primary did not close regularly (${zu}/${weg})`);
-    if (!BIZ_DB.includes('com.lataif.app.e2e')) throw new Error('refusing to touch a database outside the e2e data dir: ' + BIZ_DB);
-    const fdb = new DatabaseSync(BIZ_DB);
-    fdb.exec('CREATE TABLE IF NOT EXISTS e2e_pp12_filler (id INTEGER PRIMARY KEY, blob BLOB NOT NULL)');
-    const ins = fdb.prepare('INSERT INTO e2e_pp12_filler (blob) VALUES (?)');
-    fdb.exec('BEGIN');
-    let groesse = statSync(BIZ_DB).size, dazu = 0;
-    while (groesse + dazu < ziel) { const b = randomBytes(4 * 1024 * 1024); ins.run(b); dazu += b.length; }
-    fdb.exec('COMMIT');
-    fdb.close();
     const t0 = Date.now();
+    const zu = regulaerSchliessen(pid);
+    const weg = await waitPidGone(pid, 180000);
+    MESS.beendenS = Math.round((Date.now() - t0) / 1000);
+    ok(zu && weg, `NEUSTART der Primary endet nach dem Schließen selbst (${MESS.beendenS} s)`);
+    if (!weg) { killTestImage('lataif.exe'); await waitTestImageGone('lataif.exe'); }
     primary = await attach(APP_CDP, APP, appEnv());
     await waitInvoke(primary);
-    const oben = await warteBis(primary, `!!document.querySelector(${S(SHELL)})`, 600000);
+    const oben = await warteBis(primary, `!!document.querySelector(${S(SHELL)})`, 120000);
     await primary.ev(DIALOGE_PRIMARY);
-    await primary.ev('return await window.__TAURI_INTERNALS__.invoke("sync_server_start", {}).catch((e)=>String(e));').catch(() => null);
-    let da = false;
-    for (let i = 0; i < 240 && !da; i++) { try { da = (await fetch(`http://127.0.0.1:${PORT}/api/health`)).ok; } catch { /* noch nicht */ } if (!da) await sleep(500); }
-    ok(oben && da, `STUFE ${Math.round(statSync(BIZ_DB).size / 1e6)} MB: regulär beendet, gefüllt, Start angemeldet und erreichbar (${Math.round((Date.now() - t0) / 1000)} s)`);
-    return anmelden();
-  }
-
-  // ══════════════════════════════════════════════════════════════════════
-  // Die Stufen
-  // ══════════════════════════════════════════════════════════════════════
-  let tok = await anmelden();
-  ok(!!tok, 'SETUP Anmeldung am Primary-Server');
-  let einmal = true, gemessen = true, uploadsOk = true, ocrOk = true;
-  for (const ziel of [0, 450_000_000]) {
-    if (ziel > 0) tok = await neustartMit(ziel);
-    const stufe = { dbMB: Math.round(statSync(BIZ_DB).size / 1e6) };
-    // NORMAL
-    const name = `PP12 normal ${ziel}`;
-    let t0 = performance.now();
-    const n1 = await befehl('suppliers.create', { name }, tok);
-    const fN = await fertig('SELECT COUNT(*) AS n FROM suppliers WHERE name = ?', [name], t0);
-    stufe.normal = { status: n1.status, antwortS: +(n1.ms / 1000).toFixed(1), fertigS: +(fN / 1000).toFixed(1), fristS: 20 };
-    // UPLOAD (die Schreibreihenfolge ist jetzt leer: die normale Buchung steht in der Datei)
-    const fname = `pp12-gross-${ziel}.png`;
-    const dbU = statSync(BIZ_DB).size;
-    t0 = performance.now();
-    const up = await befehl('documents.upload', { fileName: fname, content: URL_GROSS, docClass: 'other', linkedEntityType: null, linkedEntityId: null }, tok);
-    const fU = await fertig('SELECT COUNT(*) AS n FROM documents WHERE file_name = ?', [fname], t0);
-    stufe.upload = { status: up.status, antwortS: +(up.ms / 1000).toFixed(1), fertigS: +(fU / 1000).toFixed(1), fristS: +fristUpload(dbU, URL_GROSS.length).toFixed(1), dbMB: Math.round(dbU / 1e6) };
-    // OCR eines kleinen Belegs
-    const kname = `pp12-ocr-${ziel}.jpg`;
-    t0 = performance.now();
-    const kl = await befehl('documents.upload', { fileName: kname, content: KLEIN, docClass: 'other', linkedEntityType: null, linkedEntityId: null }, tok);
-    const fK = await fertig('SELECT COUNT(*) AS n FROM documents WHERE file_name = ?', [kname], t0);
-    const doc = dbQ(BIZ_DB, 'SELECT id, revision FROM documents WHERE file_name = ?', [kname])[0] || {};
-    const dbO = statSync(BIZ_DB).size;
-    t0 = performance.now();
-    const oc = await befehl('documents.set_ocr', { documentId: doc.id, expectedRevision: doc.revision }, tok);
-    const fO = await fertig("SELECT COUNT(*) AS n FROM documents WHERE file_name = ? AND COALESCE(ocr_text, '') <> ''", [kname], t0);
-    stufe.kleinerUpload = { status: kl.status, antwortS: +(kl.ms / 1000).toFixed(1), fertigS: +(fK / 1000).toFixed(1) };
-    stufe.ocr = { status: oc.status, antwortS: +(oc.ms / 1000).toFixed(1), fertigS: +(fO / 1000).toFixed(1), fristS: +fristOcr(dbO).toFixed(1), dbMB: Math.round(dbO / 1e6) };
-    // Genau eine Wirkung je Anfrage — auch wenn eine Antwort 504 war.
-    const genau = zahl('SELECT COUNT(*) AS n FROM suppliers WHERE name = ?', [name]) === 1
-      && zahl('SELECT COUNT(*) AS n FROM documents WHERE file_name = ?', [fname]) === 1
-      && zahl('SELECT COUNT(*) AS n FROM documents WHERE file_name = ?', [kname]) === 1;
-    MESS.stufen.push(stufe);
-    einmal = einmal && genau;
-    gemessen = gemessen && [fN, fU, fK, fO].every(Number.isFinite);
-    uploadsOk = uploadsOk && up.status === 200;
-    ocrOk = ocrOk && oc.status === 200;
-    ok([fN, fU, fK, fO].every(Number.isFinite) && genau, `STUFE ${stufe.dbMB} MB gemessen, jede Wirkung genau einmal: ${S(stufe)}`);
-  }
-  GR.measured = gemessen; GR.onceEach = einmal; GR.uploadsAnswered = uploadsOk; GR.ocrAnswered = ocrOk;
-  ok(uploadsOk && ocrOk, `FRIST das größte Dokument und die Texterkennung antworten auf jeder Stufe mit 200 innerhalb ihrer Frist (${S(MESS.stufen.map((s) => [s.dbMB, s.upload.status, s.ocr.status]))})`);
-
-  // Ende: regulär beenden. Befund aus Lauf 1 (Primary endete nach WM_CLOSE nicht, wenn gerade sein Selbst-Abgleich lief —
-  // feste 8-s-Frist auf `waitForSyncIdle`) ist behoben und in `r7b-pp12-shutdown.e2e.mjs` bewiesen. Hier wird die Dauer nur
-  // festgehalten; endet er nicht, beendet der Prozess-Helfer NUR diesen eigenen Test-Prozess am exakten Pfad.
-  {
-    const pid = eigenerPrimary();
-    primary.close(); primary = null;
-    const t0 = Date.now();
-    const zu = regulaerSchliessen(pid);
-    const weg = await waitPidGone(pid, 600000);
-    MESS.ende = { dbMB: Math.round(statSync(BIZ_DB).size / 1e6), wmClose: zu, beendet: weg, sekunden: Math.round((Date.now() - t0) / 1000) };
-    if (!weg) { killTestImage('lataif.exe'); await waitTestImageGone('lataif.exe'); }
-    console.log('  ENDE ' + JSON.stringify(MESS.ende));
-    if (APP_DATA_DIR.includes('com.lataif.app.e2e')) rmSync(APP_DATA_DIR, { recursive: true, force: true });
+    const nachher = stand();
+    await gehFrisch(primary, `/collection/${P_EIN}`);
+    const pe = await warteBis(primary, EIN_BILD, 30000);
+    await gehFrisch(primary, `/repairs/${REP_H}`);
+    const rep = await warteBis(primary, BELEGBILD, 30000);
+    // Zwischen Umzug und Neustart lagen mehrere Abgleichsläufe des Primary (eigene Änderungen hoch, Echo zurück): die Spalte
+    // bleibt leer — das Echo der Anlage (volle Zeile MIT Fotos) füllt sie nicht wieder.
+    const echoFest = medienOk(medien(P_EIN)) && medienOk(medien(P_AUF));
+    MESS.nachNeustart = { einkauf: medien(P_EIN), auftrag: medien(P_AUF) };
+    MT.restart = zu && weg && oben && vorher === nachher && pe && rep && echoFest;
+    ok(MT.restart, `NEUSTART nach regulärem Beenden: Handy-Fotos, Inbox, Medien der New-Item-Artikel Byte für Byte da und angezeigt, products.images nach den Abgleichsläufen weiter leer (${vorher === nachher}/${pe}/${rep}/${echoFest})`);
   }
 
   // Die Produktion (fremde lataif.exe) ist durch diesen Lauf nicht berührt worden.
@@ -1184,15 +1348,15 @@ try {
 }
 
 clearTimeout(WACHHUND);
-console.log('\n  PP-12 große Datenbank             Ergebnis');
+console.log('\n  PP-12 Handy-Übernahme / New Item   Ergebnis');
 for (const [k, v] of Object.entries(RV_STATE)) console.log(`  ${k.padEnd(34)}${v === true ? 'ja' : 'NEIN'}`);
-for (const s of (MESS_STATE.stufen || [])) console.log(`  Stufe ${JSON.stringify(s)}`);
+console.log('  Messung ' + JSON.stringify(MESS_STATE));
 const dauer = Math.round((Date.now() - T0) / 1000);
-const ZEILE = `post-parity r7b pp-12 large database: normal command, largest document and ocr over /api/command at growing database sizes, completion time vs. derived deadline, exactly once (${Math.floor(dauer / 60)}m ${dauer % 60}s): ${PASS} passed, ${FAIL} failed`;
+const ZEILE = `post-parity r7b pp-12 mobile takeover: phone repair and inbox photos meet the record image contract at takeover, bypass quarantined, stored photos kept, new item products in the media store with thumbnail, display primary + pc2, regular restart (${Math.floor(dauer / 60)}m ${dauer % 60}s): ${PASS} passed, ${FAIL} failed`;
 if (FAIL > 0) {
   console.log(`\nFAIL — ${ZEILE}`);
   for (const f of fails) console.log('  - ' + f);
   process.exit(1);
 }
-if (RV_STATE.measured && RV_STATE.onceEach && RV_STATE.uploadsAnswered && RV_STATE.ocrAnswered) console.log('POST_PARITY_PP12_LARGE_DATABASE_DEADLINE_PROVED');
+if (Object.values(RV_STATE).every((v) => v === true)) console.log('POST_PARITY_PP12_MOBILE_TAKEOVER_AND_NEW_ITEM_MEDIA_PROVED');
 console.log(`\nPASS — ${ZEILE}`);

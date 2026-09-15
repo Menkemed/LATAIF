@@ -1,14 +1,12 @@
 // ════════════════════════════════════════════════════════════════════════════
-// POST-PARITY R7B / PP-12 — die Frist der Dokumentwege bei großer Geschäftsdatenbank (gezielt, nur der Primary).
-// Run: node test/e2e/r7b-pp12-large-db.e2e.mjs
+// POST-PARITY R7B / PP-12 — reguläres Beenden bei großer Geschäftsdatenbank (gezielt, nur der Primary).
+// Run: node test/e2e/r7b-pp12-shutdown.e2e.mjs
 //
-// Je Stufe (Ausgangsgröße, dann 200 MB und 450 MB synthetische Füllzeilen — NUR im Test-Datenordner) über den echten
-// Fernweg (/api/command, dasselbe Token-Protokoll wie PC2), jeweils mit leerer Schreibreihenfolge:
-//   NORMAL   ein normaler Befehl (Lieferant anlegen) — HTTP-Antwort UND der Zeitpunkt, an dem die Zeile in der Datei steht;
-//   UPLOAD   das größte Dokument (25 116 672 B) — Antwort, Fertig-Zeitpunkt, die abgeleitete Frist dieser Anfrage;
-//   OCR      Texterkennung eines kleinen Belegs — dasselbe.
-// „Fertig" = die Zeile steht in der Datei (das durable Speichern ist durch) — gemessen am Rechner des Aufrufers ab Beginn der
-// Anfrage (enthält das Senden des Rumpfs; die Frist des Primary beginnt erst mit der Übergabe ans Fenster). Jede Wirkung genau einmal.
+// Kleine Datenbank, dann 350 MB (synthetische Füllzeilen — NUR im Test-Datenordner, bei geschlossener Anwendung):
+//   je Stufe eine bestätigte Buchung und ein Belegfoto über den echten Fernweg (/api/command), dann Fenster schließen
+//   (WM_CLOSE) und beobachten, bis der Prozess endet: welche Kern-Aufrufe (Datei schreiben/umbenennen, Finalizer)
+//   wann beginnen und enden und was das Overlay sagt. Danach regulärer Neustart: Buchung und Foto sind da.
+// Ein Beenden per Helfer zählt NICHT als regulär — es wird nur gebraucht, damit ein hängender Lauf aufräumt.
 //
 // PROZESS-ISOLATION (dauerhafte Regel): gestartet wird nur über `spawnTracked`; beendet wird nur, was dieser
 // Lauf gestartet hat — hart nur über den Helfer, regulär nur nach Prüfung von PID UND exaktem Test-Pfad. Die
@@ -46,14 +44,14 @@ const APP = join(process.cwd(), 'src-tauri', 'target', 'debug', 'lataif.exe');
 const CLIENT_APP = join(process.cwd(), 'src-tauri', 'target', 'debug', 'lataif-e2e-client.exe');
 const OWNER_EMAIL = 'admin@lataif.com';
 const ONBOARD_PW = 'e2epass123';
-const OWNER_PW = 'pp12-large-owner-' + Math.random().toString(36).slice(2);
+const OWNER_PW = 'pp12-shutdown-owner-' + Math.random().toString(36).slice(2);
 // Der zweite echte Benutzer (wie im R6E-Akteurslauf): eigene Kennung/E-Mail, Owner-Rolle, der bcrypt-Wert
 // des Owners kopiert — die Anmeldung prüft ihn mit dem echten `bcrypt::verify`.
-const B_ID = 'user-pp12-images-b';
-const B_EMAIL = 'kollege.pp12-images@lataif.com';
+const B_ID = 'user-pp12-shutdown-b';
+const B_EMAIL = 'kollege.pp12-shutdown@lataif.com';
 const B_NAME = 'PP14 Kollege B';
 
-const RUN = join(os.tmpdir(), 'lataif-pp12-large-db', 'run-' + Date.now());
+const RUN = join(os.tmpdir(), 'lataif-pp12-shutdown', 'run-' + Date.now());
 const REAL_APPDATA = process.env.APPDATA || join(os.homedir(), 'AppData', 'Roaming');
 const APP_DATA_DIR = join(REAL_APPDATA, IDENT);
 const BIZ_DB = join(APP_DATA_DIR, 'lataif.db');
@@ -982,10 +980,10 @@ try {
   if (await exists(primary, '[data-first-run-new]')) { await click(primary, '[data-first-run-new]'); await sleep(1500); }
   await waitFor(primary, 'input[placeholder="e.g. Al-Khalifa Luxury"], input[type="email"]', 60000);
   if (await exists(primary, 'input[placeholder="e.g. Al-Khalifa Luxury"]')) {
-    await setVal(primary, 'input[placeholder="e.g. Al-Khalifa Luxury"]', 'PP12 LargeDB Co');
-    await setVal(primary, 'input[placeholder="e.g. Main Store"]', 'PP12 Images Branch');
+    await setVal(primary, 'input[placeholder="e.g. Al-Khalifa Luxury"]', 'PP12 Shutdown Co');
+    await setVal(primary, 'input[placeholder="e.g. Main Store"]', 'PP12 Shutdown Branch');
     await clickText(primary, 'Next'); await waitFor(primary, 'input[placeholder="Full name"]');
-    await setVal(primary, 'input[placeholder="Full name"]', 'PP12 Images Admin A');
+    await setVal(primary, 'input[placeholder="Full name"]', 'PP12 Shutdown Admin A');
     await setVal(primary, 'input[placeholder="you@company.com"]', OWNER_EMAIL);
     await setVal(primary, 'input[placeholder="Choose a password"]', ONBOARD_PW);
     await clickText(primary, 'Next'); await waitFor(primary, 'input[placeholder="10"]');
@@ -1033,9 +1031,9 @@ try {
   // ══════════════════════════════════════════════════════════════════════
   // Helfer dieses Laufs
   // ══════════════════════════════════════════════════════════════════════
-  const GR = { measured: false, onceEach: false, uploadsAnswered: false, ocrAnswered: false };
-  const MESS = { stufen: [] };
-  RV_STATE = GR; MESS_STATE = MESS;
+  const SD = { smallClosed: false, largeSequenceClosed: false, restartComplete: false, largeClosedAgain: false, neverForced: false };
+  const MESS = { schliessen: [], stufen: [] };
+  RV_STATE = SD; MESS_STATE = MESS;
   const api = async (pfad, body, token) => {
     const t0 = performance.now();
     const r = await fetch(`http://127.0.0.1:${PORT}${pfad}`, {
@@ -1049,7 +1047,6 @@ try {
   };
   const befehl = (op, payload, token, commandId = crypto.randomUUID()) => api('/api/command', { op, commandId, payload }, token);
   const zahl = (sql, p) => Number(dbQ(BIZ_DB, sql, p)[0]?.n ?? 0);
-  /** Wartet, bis die Zeile in der Datei steht (das durable Speichern ist durch); ms ab `t0`, NaN nach der Frist. */
   async function fertig(sql, p, t0, budgetMs = 900000) {
     while (performance.now() - t0 < budgetMs) {
       if (zahl(sql, p) > 0) return performance.now() - t0;
@@ -1057,32 +1054,112 @@ try {
     }
     return NaN;
   }
-  // Die Frist, die bridge.rs für diese Anfrage rechnet (dieselbe Formel, dieselben Konstanten).
-  const SAVE_FLOOR = Number(/pub const SAVE_FLOOR_BYTES_PER_SEC: u64 = ([\d_]+);/.exec(readFileSync(join(process.cwd(), 'src-tauri/src/bridge.rs'), 'utf8'))?.[1].replace(/_/g, '') || 0);
-  const fristUpload = (db, len) => 20 + Math.floor(Math.min(len, 33_554_432) * 10 * 1000 / 10_000_000) / 1000 + Math.floor((db + Math.min(len, 33_554_432) * 2) * 1000 / SAVE_FLOOR) / 1000;
-  const fristOcr = (db) => 90 + Math.floor(db * 1000 / SAVE_FLOOR) / 1000;
-  const DOC_MAX = 25_116_672;
-  const png = Buffer.from(String(await primary.ev(`const c=document.createElement('canvas'); c.width=720; c.height=180; const g=c.getContext('2d');
-    g.fillStyle='#ffffff'; g.fillRect(0,0,720,180); g.fillStyle='#000000'; g.font='bold 64px Arial'; g.fillText('LATAIF PP12 4711', 24, 112);
-    return c.toDataURL('image/png').split(',')[1];`)), 'base64');
-  const big = Buffer.alloc(DOC_MAX); png.copy(big, 0);
-  const URL_GROSS = 'data:image/png;base64,' + big.toString('base64');
-  const KLEIN = 'data:image/jpeg;base64,' + String(await primary.ev(`const c=document.createElement('canvas'); c.width=1200; c.height=400; const g=c.getContext('2d');
-    g.fillStyle='#ffffff'; g.fillRect(0,0,1200,400); g.fillStyle='#000000'; g.font='bold 96px Arial'; g.fillText('LATAIF PP12 4711', 40, 240);
-    return c.toDataURL('image/jpeg', 0.9).split(',')[1];`));
-  ok(SAVE_FLOOR > 0 && big.length === DOC_MAX, `SETUP Frist-Untergrenze aus bridge.rs ${SAVE_FLOOR} B/s, größtes Dokument ${DOC_MAX} B`);
-
+  const bytesSha = (b64) => createHash('sha256').update(Buffer.from(String(b64), 'base64')).digest('hex');
+  const bilder = (id) => { try { return JSON.parse(String(dbQ(BIZ_DB, 'SELECT images FROM repairs WHERE id = ?', [id])[0]?.images || '[]')); } catch { return []; } };
+  const bildSha = (url) => bytesSha(String(url || '').slice(String(url || '').indexOf(',') + 1));
+  const aufnahme = (seed, w = 800, h = 533, q = 0.7) => primary.ev(`const c=document.createElement('canvas'); c.width=${w}; c.height=${h}; const g=c.getContext('2d');
+    const gr=g.createLinearGradient(0,0,${w},${h}); gr.addColorStop(0,'#2b4a6f'); gr.addColorStop(1,'#d9b38c'); g.fillStyle=gr; g.fillRect(0,0,${w},${h});
+    let s=${seed}; const r=()=>{ s=(s*1103515245+12345)&0x7fffffff; return s/0x7fffffff; };
+    for(let i=0;i<500;i++){ g.fillStyle='rgba('+Math.floor(r()*255)+','+Math.floor(r()*255)+','+Math.floor(r()*255)+',0.55)'; g.beginPath(); g.arc(r()*${w}, r()*${h}, 2+r()*24, 0, 6.283); g.fill(); }
+    g.fillStyle='#ffffff'; g.font='bold 48px Arial'; g.fillText('LATAIF PP12 ${seed}', 30, 90);
+    return c.toDataURL('image/jpeg', ${q}).split(',')[1];`);
+  const normalisiert = (b64) => primary.ev(`const r = await window.__TAURI_INTERNALS__.invoke('media_normalize_record_image', { dataBase64: ${S(b64)} }); return r.dataBase64;`);
   async function anmelden() {
     const l = await api('/api/auth/login', { email: OWNER_EMAIL, password: OWNER_PW });
     return l.j?.token;
   }
-  /** Regulär beenden, die Datenbank (nur Test-Datenordner) auf `ziel` Bytes füllen, neu starten, Server an. */
-  async function neustartMit(ziel) {
+  const ablegen = async (b64, token) => {
+    const r = await api('/api/staging/media', { mime: 'image/jpeg', dataBase64: b64 }, token);
+    return r.status === 201 ? String(r.j?.stagingId || '') : `FEHLER:${r.status}`;
+  };
+  // Der Primary gleicht — wie in der Produktion — mit seinem eigenen Server ab (eigener Schlüssel). Genau dieser
+  // Lauf (eigene Änderungen hoch, das Echo zurück) speichert die ganze Datenbank zweimal und war beim Hänger unterwegs.
+  async function abgleichAn() {
+    const st = await primary.ev('return await window.__TAURI_INTERNALS__.invoke("sync_server_status", {}).catch(() => null);');
+    if (st?.selfToken) await primary.ev(`localStorage.setItem('lataif_sync_url', ${S(`http://127.0.0.1:${PORT}`)}); localStorage.setItem('lataif_sync_token', ${S(st.selfToken)}); return 1;`);
+    return !!st?.selfToken;
+  }
+
+  // Die Spur des Beendens — nur Beobachtung (kein Ersatz eines Anwendungsteils): jedes Speichern, der Finalizer,
+  // das Overlay, jede Warnung. Ab dem Start installiert, damit der Abgleich vor dem Schließen mit in der Spur steht.
+  const SPUR = `
+    if (!window.__sdSpur) {
+      window.__sdSpur = []; const t0 = Date.now(); window.__sdT0 = t0;
+      const merk = (w) => window.__sdSpur.push([Date.now() - t0, String(w).slice(0, 300)]);
+      window.__sdMerk = merk;
+      const t = window.__TAURI_INTERNALS__;
+      const oi = t.invoke.bind(t);
+      t.invoke = (cmd, args, opts) => {
+        const c = String(cmd);
+        const zeigen = /^plugin:fs\\|(write_file|rename)|finalize_application_shutdown/.test(c);
+        if (zeigen) merk(c + ' start');
+        const p = oi(cmd, args, opts);
+        if (zeigen) p.then(() => merk(c + ' ok'), (e) => merk(c + ' err ' + e));
+        return p;
+      };
+      window.__sdOverlay = '';
+      new MutationObserver(() => {
+        const o = document.querySelector('[role="status"][aria-live="assertive"]');
+        const txt = o ? o.innerText.replace(/\\s+/g, ' ').trim() : '';
+        if (txt !== window.__sdOverlay) { window.__sdOverlay = txt; merk('overlay: ' + (txt || '(weg)')); }
+      }).observe(document.body, { childList: true, subtree: true, characterData: true });
+      const of = window.fetch;
+      window.fetch = async (...a) => {
+        const u = String(a[0] && a[0].url ? a[0].url : a[0]);
+        const s = /\\/api\\/sync\\/(push|pull)/.exec(u);
+        if (s) merk('sync ' + s[1] + ' start');
+        try { const r = await of(...a); if (s) merk('sync ' + s[1] + ' ' + r.status); return r; } catch (e) { if (s) merk('sync ' + s[1] + ' err'); throw e; }
+      };
+      const ow = console.warn; console.warn = (...a) => { merk('warn: ' + a.map(String).join(' ')); ow(...a); };
+      const oe = console.error; console.error = (...a) => { merk('error: ' + a.map(String).join(' ')); oe(...a); };
+    }
+    return 1;`;
+  /**
+   * Fenster schließen (WM_CLOSE, eigene PID am exakten Test-Pfad) wie ein Mensch: die CDP-Verbindung ist zu, niemand
+   * klickt ein zweites Mal. Endet der Prozess nicht im Budget, wird die Spur über eine neue Verbindung gelesen und —
+   * nur zum Aufräumen, NICHT als reguläres Ende gezählt — der eigene Test-Prozess beendet.
+   */
+  async function schliessenBeobachtet(was, budgetMs) {
     const pid = eigenerPrimary();
+    await primary.ev(SPUR);
+    await primary.ev('window.__sdMerk("vor WM_CLOSE"); return 1;');
     primary.close(); primary = null;
+    const t0 = Date.now();
     const zu = regulaerSchliessen(pid);
-    const weg = await waitPidGone(pid, 900000);
-    if (!(zu && weg)) throw new Error(`primary did not close regularly (${zu}/${weg})`);
+    const weg = await waitPidGone(pid, budgetMs);
+    const sekunden = +((Date.now() - t0) / 1000).toFixed(1);
+    let spur = null, overlay = null;
+    if (!weg) {
+      try {
+        primary = await attachOnly(APP_CDP, 30000);
+        const r = await primary.send('Runtime.evaluate', { expression: 'JSON.stringify({ spur: window.__sdSpur || [], overlay: window.__sdOverlay || "", t0: window.__sdT0 })', returnByValue: true }, 60000);
+        const v = JSON.parse(r.result?.value || '{}');
+        overlay = v.overlay;
+        spur = (v.spur || []).map(([ms, w]) => [ms - (t0 - v.t0), w]).filter(([ms]) => ms > -120000).slice(-60);
+      } catch (e) { spur = ['(Spur nicht lesbar) ' + String(e)]; }
+      try { primary.close(); } catch { /* zu */ }
+      primary = null;
+    }
+    const r = { was, dbMB: Math.round(statSync(BIZ_DB).size / 1e6), wmClose: zu, beendet: weg, sekunden, overlay, spur };
+    MESS.schliessen.push(r);
+    console.log('  SCHLIESSEN ' + JSON.stringify(r));
+    if (!weg) { SD.forced = true; killTestImage('lataif.exe'); await waitTestImageGone('lataif.exe'); }
+    return r;
+  }
+  async function starten() {
+    const t0 = Date.now();
+    primary = await attach(APP_CDP, APP, appEnv());
+    await waitInvoke(primary);
+    await primary.ev(SPUR);
+    const oben = await warteBis(primary, `!!document.querySelector(${S(SHELL)})`, 600000);
+    await primary.ev(DIALOGE_PRIMARY);
+    await primary.ev('return await window.__TAURI_INTERNALS__.invoke("sync_server_start", {}).catch((e)=>String(e));').catch(() => null);
+    let da = false;
+    for (let i = 0; i < 240 && !da; i++) { try { da = (await fetch(`http://127.0.0.1:${PORT}/api/health`)).ok; } catch { /* noch nicht */ } if (!da) await sleep(500); }
+    const abgleich = await abgleichAn();
+    return { oben: oben && da, abgleich, sekunden: Math.round((Date.now() - t0) / 1000) };
+  }
+  function fuellen(ziel) {
     if (!BIZ_DB.includes('com.lataif.app.e2e')) throw new Error('refusing to touch a database outside the e2e data dir: ' + BIZ_DB);
     const fdb = new DatabaseSync(BIZ_DB);
     fdb.exec('CREATE TABLE IF NOT EXISTS e2e_pp12_filler (id INTEGER PRIMARY KEY, blob BLOB NOT NULL)');
@@ -1092,80 +1169,116 @@ try {
     while (groesse + dazu < ziel) { const b = randomBytes(4 * 1024 * 1024); ins.run(b); dazu += b.length; }
     fdb.exec('COMMIT');
     fdb.close();
-    const t0 = Date.now();
-    primary = await attach(APP_CDP, APP, appEnv());
-    await waitInvoke(primary);
-    const oben = await warteBis(primary, `!!document.querySelector(${S(SHELL)})`, 600000);
-    await primary.ev(DIALOGE_PRIMARY);
-    await primary.ev('return await window.__TAURI_INTERNALS__.invoke("sync_server_start", {}).catch((e)=>String(e));').catch(() => null);
-    let da = false;
-    for (let i = 0; i < 240 && !da; i++) { try { da = (await fetch(`http://127.0.0.1:${PORT}/api/health`)).ok; } catch { /* noch nicht */ } if (!da) await sleep(500); }
-    ok(oben && da, `STUFE ${Math.round(statSync(BIZ_DB).size / 1e6)} MB: regulär beendet, gefüllt, Start angemeldet und erreichbar (${Math.round((Date.now() - t0) / 1000)} s)`);
-    return anmelden();
   }
+  async function buchen(tok, label) {
+    const name = `PP12 close ${label}`;
+    let t0 = performance.now();
+    const s = await befehl('suppliers.create', { name }, tok);
+    const fS = await fertig('SELECT COUNT(*) AS n FROM suppliers WHERE name = ?', [name], t0);
+    const sid = await ablegen(FOTO, tok);
+    t0 = performance.now();
+    const r = await befehl('repairs.create', { customerId: KUNDE, issueDescription: name, photos: [{ stagingId: sid }] }, tok);
+    const rid = String(r.j?.value?.repairId || '');
+    const fR = await fertig("SELECT COUNT(*) AS n FROM repairs WHERE id = ? AND instr(images, 'data:image/jpeg') > 0", [rid], t0);
+    const b = { label, name, rid, supplier: s.status, repair: r.status, supplierFertigS: +(fS / 1000).toFixed(1), repairFertigS: +(fR / 1000).toFixed(1), dbMB: Math.round(statSync(BIZ_DB).size / 1e6) };
+    MESS.stufen.push(b);
+    return b;
+  }
+  function vorhanden(b) {
+    const img = bilder(b.rid);
+    return zahl('SELECT COUNT(*) AS n FROM suppliers WHERE name = ?', [b.name]) === 1 && img.length === 1 && bildSha(img[0]) === FOTO_SHA;
+  }
+  /**
+   * Deterministisch: eine letzte kleine Buchung (ihre Änderung wartet auf das Hochladen), dann warten, bis der Abgleich
+   * des Primary sein Hochladen BEGINNT — ab da läuft er (Markierung speichern, Echo abholen, durabel speichern). Genau in
+   * diesem Zustand wird geschlossen; vorher hing hier das Beenden an der festen 8-s-Frist.
+   */
+  async function abgleichLaeuft(tok, budgetMs = 90000) {
+    const name = `PP12 vor dem Schließen ${Date.now()}`;
+    const t0 = performance.now();
+    await befehl('suppliers.create', { name }, tok);
+    await fertig('SELECT COUNT(*) AS n FROM suppliers WHERE name = ?', [name], t0);
+    await primary.ev('window.__sdMerk("warte auf Abgleich"); return 1;');
+    const tw = Date.now();
+    while (Date.now() - tw < budgetMs) {
+      try {
+        const r = await primary.send('Runtime.evaluate', { expression: 'JSON.stringify(window.__sdSpur || [])', returnByValue: true }, 3000);
+        const s = JSON.parse(r.result?.value || '[]');
+        const i = s.map((e) => e[1]).lastIndexOf('warte auf Abgleich');
+        if (i >= 0 && s.slice(i).some((e) => e[1] === 'sync push start')) return true;
+      } catch { /* Fenster gerade beschäftigt */ }
+      await sleep(250);
+    }
+    return false;
+  }
+  const schritt = (was, r, f) => { const s = { was, status: r.status, antwortS: +(r.ms / 1000).toFixed(1), fertigS: +(f / 1000).toFixed(1), dbMB: Math.round(statSync(BIZ_DB).size / 1e6) }; MESS.stufen.push(s); console.log('  SCHRITT ' + JSON.stringify(s)); return s; };
 
   // ══════════════════════════════════════════════════════════════════════
   // Die Stufen
   // ══════════════════════════════════════════════════════════════════════
   let tok = await anmelden();
-  ok(!!tok, 'SETUP Anmeldung am Primary-Server');
-  let einmal = true, gemessen = true, uploadsOk = true, ocrOk = true;
-  for (const ziel of [0, 450_000_000]) {
-    if (ziel > 0) tok = await neustartMit(ziel);
-    const stufe = { dbMB: Math.round(statSync(BIZ_DB).size / 1e6) };
-    // NORMAL
-    const name = `PP12 normal ${ziel}`;
-    let t0 = performance.now();
-    const n1 = await befehl('suppliers.create', { name }, tok);
-    const fN = await fertig('SELECT COUNT(*) AS n FROM suppliers WHERE name = ?', [name], t0);
-    stufe.normal = { status: n1.status, antwortS: +(n1.ms / 1000).toFixed(1), fertigS: +(fN / 1000).toFixed(1), fristS: 20 };
-    // UPLOAD (die Schreibreihenfolge ist jetzt leer: die normale Buchung steht in der Datei)
-    const fname = `pp12-gross-${ziel}.png`;
-    const dbU = statSync(BIZ_DB).size;
-    t0 = performance.now();
-    const up = await befehl('documents.upload', { fileName: fname, content: URL_GROSS, docClass: 'other', linkedEntityType: null, linkedEntityId: null }, tok);
-    const fU = await fertig('SELECT COUNT(*) AS n FROM documents WHERE file_name = ?', [fname], t0);
-    stufe.upload = { status: up.status, antwortS: +(up.ms / 1000).toFixed(1), fertigS: +(fU / 1000).toFixed(1), fristS: +fristUpload(dbU, URL_GROSS.length).toFixed(1), dbMB: Math.round(dbU / 1e6) };
-    // OCR eines kleinen Belegs
-    const kname = `pp12-ocr-${ziel}.jpg`;
-    t0 = performance.now();
-    const kl = await befehl('documents.upload', { fileName: kname, content: KLEIN, docClass: 'other', linkedEntityType: null, linkedEntityId: null }, tok);
-    const fK = await fertig('SELECT COUNT(*) AS n FROM documents WHERE file_name = ?', [kname], t0);
-    const doc = dbQ(BIZ_DB, 'SELECT id, revision FROM documents WHERE file_name = ?', [kname])[0] || {};
-    const dbO = statSync(BIZ_DB).size;
-    t0 = performance.now();
-    const oc = await befehl('documents.set_ocr', { documentId: doc.id, expectedRevision: doc.revision }, tok);
-    const fO = await fertig("SELECT COUNT(*) AS n FROM documents WHERE file_name = ? AND COALESCE(ocr_text, '') <> ''", [kname], t0);
-    stufe.kleinerUpload = { status: kl.status, antwortS: +(kl.ms / 1000).toFixed(1), fertigS: +(fK / 1000).toFixed(1) };
-    stufe.ocr = { status: oc.status, antwortS: +(oc.ms / 1000).toFixed(1), fertigS: +(fO / 1000).toFixed(1), fristS: +fristOcr(dbO).toFixed(1), dbMB: Math.round(dbO / 1e6) };
-    // Genau eine Wirkung je Anfrage — auch wenn eine Antwort 504 war.
-    const genau = zahl('SELECT COUNT(*) AS n FROM suppliers WHERE name = ?', [name]) === 1
-      && zahl('SELECT COUNT(*) AS n FROM documents WHERE file_name = ?', [fname]) === 1
-      && zahl('SELECT COUNT(*) AS n FROM documents WHERE file_name = ?', [kname]) === 1;
-    MESS.stufen.push(stufe);
-    einmal = einmal && genau;
-    gemessen = gemessen && [fN, fU, fK, fO].every(Number.isFinite);
-    uploadsOk = uploadsOk && up.status === 200;
-    ocrOk = ocrOk && oc.status === 200;
-    ok([fN, fU, fK, fO].every(Number.isFinite) && genau, `STUFE ${stufe.dbMB} MB gemessen, jede Wirkung genau einmal: ${S(stufe)}`);
-  }
-  GR.measured = gemessen; GR.onceEach = einmal; GR.uploadsAnswered = uploadsOk; GR.ocrAnswered = ocrOk;
-  ok(uploadsOk && ocrOk, `FRIST das größte Dokument und die Texterkennung antworten auf jeder Stufe mit 200 innerhalb ihrer Frist (${S(MESS.stufen.map((s) => [s.dbMB, s.upload.status, s.ocr.status]))})`);
+  const KUNDE = String(dbQ(BIZ_DB, "SELECT id FROM customers WHERE customer_type = 'PRIVATE' ORDER BY id LIMIT 1")[0]?.id || '');
+  const FOTO = String(await normalisiert(String(await aufnahme(71))));
+  const FOTO_SHA = bytesSha(FOTO);
+  const DOC_MAX = 25_116_672;
+  const png = Buffer.from(String(await primary.ev(`const c=document.createElement('canvas'); c.width=720; c.height=180; const g=c.getContext('2d');
+    g.fillStyle='#ffffff'; g.fillRect(0,0,720,180); g.fillStyle='#000000'; g.font='bold 64px Arial'; g.fillText('LATAIF PP12 4711', 24, 112);
+    return c.toDataURL('image/png').split(',')[1];`)), 'base64');
+  const big = Buffer.alloc(DOC_MAX); png.copy(big, 0);
+  const URL_GROSS = 'data:image/png;base64,' + big.toString('base64');
+  const KLEIN = 'data:image/jpeg;base64,' + String(await primary.ev(`const c=document.createElement('canvas'); c.width=1200; c.height=400; const g=c.getContext('2d');
+    g.fillStyle='#ffffff'; g.fillRect(0,0,1200,400); g.fillStyle='#000000'; g.font='bold 96px Arial'; g.fillText('LATAIF PP12 4711', 40, 240);
+    return c.toDataURL('image/jpeg', 0.9).split(',')[1];`));
+  await primary.ev(SPUR);
+  const abg0 = await abgleichAn();
+  ok(!!tok && !!KUNDE && Buffer.from(FOTO, 'base64').length <= 100000 && abg0, `SETUP Anmeldung, Kunde ${KUNDE}, Belegfoto ${Buffer.from(FOTO, 'base64').length} B, Abgleich des Primary mit seinem Server an (${abg0})`);
 
-  // Ende: regulär beenden. Befund aus Lauf 1 (Primary endete nach WM_CLOSE nicht, wenn gerade sein Selbst-Abgleich lief —
-  // feste 8-s-Frist auf `waitForSyncIdle`) ist behoben und in `r7b-pp12-shutdown.e2e.mjs` bewiesen. Hier wird die Dauer nur
-  // festgehalten; endet er nicht, beendet der Prozess-Helfer NUR diesen eigenen Test-Prozess am exakten Pfad.
-  {
-    const pid = eigenerPrimary();
-    primary.close(); primary = null;
-    const t0 = Date.now();
-    const zu = regulaerSchliessen(pid);
-    const weg = await waitPidGone(pid, 600000);
-    MESS.ende = { dbMB: Math.round(statSync(BIZ_DB).size / 1e6), wmClose: zu, beendet: weg, sekunden: Math.round((Date.now() - t0) / 1000) };
-    if (!weg) { killTestImage('lataif.exe'); await waitTestImageGone('lataif.exe'); }
-    console.log('  ENDE ' + JSON.stringify(MESS.ende));
-    if (APP_DATA_DIR.includes('com.lataif.app.e2e')) rmSync(APP_DATA_DIR, { recursive: true, force: true });
-  }
+  // 1) kleine Datenbank — bestätigte Buchung + Foto, dann schließen
+  const klein = await buchen(tok, 'klein');
+  const zuKlein = await schliessenBeobachtet('klein nach Buchung', 120000);
+  SD.smallClosed = zuKlein.beendet;
+  ok(klein.supplier === 200 && klein.repair === 200 && Number.isFinite(klein.repairFertigS) && zuKlein.beendet,
+    `SCHLIESSEN ${zuKlein.dbMB} MB: bestätigte Buchung + Foto in der Datei, Fenster schließen → Prozess endet regulär (${zuKlein.sekunden} s)`);
+
+  // 2) 450 MB (gefüllt bei geschlossener Anwendung) — exakt die Abfolge, nach der der Primary vorher nicht endete
+  fuellen(450_000_000);
+  const st1 = await starten();
+  tok = await anmelden();
+  ok(st1.oben && st1.abgleich && vorhanden(klein), `NEUSTART ${Math.round(statSync(BIZ_DB).size / 1e6)} MB: angemeldet, erreichbar, Abgleich an, Buchung + Foto der kleinen Stufe da (${st1.sekunden} s)`);
+  const gross = await buchen(tok, 'gross');
+  let t0 = performance.now();
+  const up = await befehl('documents.upload', { fileName: 'pp12-close-gross.png', content: URL_GROSS, docClass: 'other', linkedEntityType: null, linkedEntityId: null }, tok);
+  schritt('upload', up, await fertig('SELECT COUNT(*) AS n FROM documents WHERE file_name = ?', ['pp12-close-gross.png'], t0));
+  t0 = performance.now();
+  const kl = await befehl('documents.upload', { fileName: 'pp12-close-ocr.jpg', content: KLEIN, docClass: 'other', linkedEntityType: null, linkedEntityId: null }, tok);
+  schritt('kleinerUpload', kl, await fertig('SELECT COUNT(*) AS n FROM documents WHERE file_name = ?', ['pp12-close-ocr.jpg'], t0));
+  const doc = dbQ(BIZ_DB, 'SELECT id, revision FROM documents WHERE file_name = ?', ['pp12-close-ocr.jpg'])[0] || {};
+  t0 = performance.now();
+  const oc = await befehl('documents.set_ocr', { documentId: doc.id, expectedRevision: doc.revision }, tok);
+  schritt('ocr', oc, await fertig("SELECT COUNT(*) AS n FROM documents WHERE file_name = ? AND COALESCE(ocr_text, '') <> ''", ['pp12-close-ocr.jpg'], t0));
+  const laeuft = await abgleichLaeuft(tok);
+  MESS.abgleichBeimSchliessen = laeuft;
+  const zuGross = await schliessenBeobachtet('450 MB nach Buchung, größtem Dokument, kleinem Upload, Texterkennung — Abgleich läuft', 600000);
+  SD.largeSequenceClosed = zuGross.beendet && laeuft;
+  ok(gross.repair === 200 && up.status === 200 && oc.status === 200 && laeuft && zuGross.beendet,
+    `SCHLIESSEN ${zuGross.dbMB} MB nach der Abfolge des früheren Hängers, WÄHREND der Abgleich des Primary läuft (${laeuft}) → Prozess endet regulär (${zuGross.sekunden} s; Overlay ${zuGross.overlay ?? '—'})`);
+
+  // 3) Neustart: alles da und sichtbar; dann ohne neue Buchung schließen
+  const st2 = await starten();
+  const alle = vorhanden(klein) && vorhanden(gross)
+    && zahl('SELECT COUNT(*) AS n FROM documents WHERE file_name = ?', ['pp12-close-gross.png']) === 1
+    && zahl("SELECT COUNT(*) AS n FROM documents WHERE file_name = ? AND COALESCE(ocr_text, '') <> ''", ['pp12-close-ocr.jpg']) === 1;
+  await gehFrisch(primary, `/repairs/${gross.rid}`);
+  const sichtbar = await warteBis(primary, `[...document.images].some(i => i.complete && i.naturalWidth > 0 && /^data:image\\/jpeg/.test(i.src))`, 60000);
+  SD.restartComplete = st2.oben && alle && sichtbar;
+  ok(SD.restartComplete, `NEUSTART ${Math.round(statSync(BIZ_DB).size / 1e6)} MB nach regulärem Beenden: Buchungen, Fotos (Byte für Byte), Dokumente, Texterkennung da, das Foto wird angezeigt (${st2.sekunden} s; ${alle}/${sichtbar})`);
+  const zuWieder = await schliessenBeobachtet('groß ohne Buchung', 600000);
+  SD.largeClosedAgain = zuWieder.beendet;
+  ok(zuWieder.beendet, `SCHLIESSEN ${zuWieder.dbMB} MB ohne neue Buchung → Prozess endet regulär (${zuWieder.sekunden} s)`);
+  SD.neverForced = !SD.forced;
+  delete SD.forced;
+  ok(SD.neverForced, 'KEIN erzwungenes Ende: jeder Prozess dieses Laufs endete nach dem Schließen selbst');
+  if (APP_DATA_DIR.includes('com.lataif.app.e2e')) rmSync(APP_DATA_DIR, { recursive: true, force: true });
 
   // Die Produktion (fremde lataif.exe) ist durch diesen Lauf nicht berührt worden.
   const fremdNachher = foreignProcesses('lataif.exe').map((p) => p.pid);
@@ -1184,15 +1297,15 @@ try {
 }
 
 clearTimeout(WACHHUND);
-console.log('\n  PP-12 große Datenbank             Ergebnis');
+console.log('\n  PP-12 reguläres Beenden            Ergebnis');
 for (const [k, v] of Object.entries(RV_STATE)) console.log(`  ${k.padEnd(34)}${v === true ? 'ja' : 'NEIN'}`);
-for (const s of (MESS_STATE.stufen || [])) console.log(`  Stufe ${JSON.stringify(s)}`);
+for (const s of (MESS_STATE.schliessen || [])) console.log(`  Schließen ${JSON.stringify({ ...s, spur: undefined })}`);
 const dauer = Math.round((Date.now() - T0) / 1000);
-const ZEILE = `post-parity r7b pp-12 large database: normal command, largest document and ocr over /api/command at growing database sizes, completion time vs. derived deadline, exactly once (${Math.floor(dauer / 60)}m ${dauer % 60}s): ${PASS} passed, ${FAIL} failed`;
+const ZEILE = `post-parity r7b pp-12 regular close: window close ends the process after a confirmed booking and record photo at a small and a large database, restart finds both (${Math.floor(dauer / 60)}m ${dauer % 60}s): ${PASS} passed, ${FAIL} failed`;
 if (FAIL > 0) {
   console.log(`\nFAIL — ${ZEILE}`);
   for (const f of fails) console.log('  - ' + f);
   process.exit(1);
 }
-if (RV_STATE.measured && RV_STATE.onceEach && RV_STATE.uploadsAnswered && RV_STATE.ocrAnswered) console.log('POST_PARITY_PP12_LARGE_DATABASE_DEADLINE_PROVED');
+if (Object.values(RV_STATE).every((v) => v === true)) console.log('POST_PARITY_PP12_REGULAR_CLOSE_LARGE_DATABASE_PROVED');
 console.log(`\nPASS — ${ZEILE}`);
