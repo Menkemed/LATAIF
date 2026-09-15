@@ -282,42 +282,6 @@ pub(crate) fn command_reply_parts(reply: crate::bridge::Reply) -> (StatusCode, s
     }
 }
 
-#[cfg(test)]
-mod command_reply_tests {
-    use super::*;
-
-    #[test]
-    fn a_ledger_id_conflict_from_the_renderer_is_the_same_409_not_executed_as_the_bridge_conflict() {
-        // Genau die Form, die der Renderer (`command-registry.ts`) sendet.
-        let reply: crate::bridge::Reply = serde_json::from_str(
-            r#"{"kind":"not_executed","code":"BRIDGE_COMMAND_ID_CONFLICT","message":"this command id is already used for a different request"}"#,
-        )
-        .unwrap();
-        let (status, body) = command_reply_parts(reply);
-        assert_eq!(status, StatusCode::CONFLICT);
-        assert_eq!(body["outcome"], "not_executed");
-        assert_eq!(body["error"], "BRIDGE_COMMAND_ID_CONFLICT");
-        assert_eq!(body["ok"], false);
-        let bridge = crate::bridge::BridgeError::CommandIdConflict;
-        assert_eq!(bridge.code(), "BRIDGE_COMMAND_ID_CONFLICT");
-        assert_eq!(bridge.http_status(), 409);
-        assert_eq!(bridge.outcome().as_str(), "not_executed");
-    }
-
-    #[test]
-    fn the_other_replies_keep_their_shape() {
-        let (s, b) = command_reply_parts(crate::bridge::Reply::Ok { value: serde_json::json!({ "a": 1 }) });
-        assert_eq!(s, StatusCode::OK);
-        assert_eq!(b["value"]["a"], 1);
-        let (s, b) = command_reply_parts(crate::bridge::Reply::BusinessError { code: "NO".into(), message: "m".into() });
-        assert_eq!(s, StatusCode::CONFLICT);
-        assert!(b.get("outcome").is_none(), "a business no carries no outcome");
-        let (s, b) = command_reply_parts(crate::bridge::Reply::InfrastructureError { code: "X".into() });
-        assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR);
-        assert!(b.get("outcome").is_none());
-    }
-}
-
 fn error_response(e: crate::bridge::BridgeError) -> axum::response::Response {
     use axum::response::IntoResponse;
     let status = StatusCode::from_u16(e.http_status()).unwrap_or(StatusCode::SERVICE_UNAVAILABLE);
@@ -3506,3 +3470,41 @@ mod legacy_push_tests {
 #[cfg(test)]
 #[path = "mobile_ingress_route_tests.rs"]
 mod mobile_ingress_route_tests;
+
+// POST-PARITY R7C R3 — am Dateiende: die Quelltext-Gates oben lesen den Produktionscode bis zum ERSTEN
+// `#[cfg(test)]`; ein Testmodul davor schnitte ihnen Routen und Handler ab.
+#[cfg(test)]
+mod command_reply_tests {
+    use super::*;
+
+    #[test]
+    fn a_ledger_id_conflict_from_the_renderer_is_the_same_409_not_executed_as_the_bridge_conflict() {
+        // Genau die Form, die der Renderer (`command-registry.ts`) sendet.
+        let reply: crate::bridge::Reply = serde_json::from_str(
+            r#"{"kind":"not_executed","code":"BRIDGE_COMMAND_ID_CONFLICT","message":"this command id is already used for a different request"}"#,
+        )
+        .unwrap();
+        let (status, body) = command_reply_parts(reply);
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body["outcome"], "not_executed");
+        assert_eq!(body["error"], "BRIDGE_COMMAND_ID_CONFLICT");
+        assert_eq!(body["ok"], false);
+        let bridge = crate::bridge::BridgeError::CommandIdConflict;
+        assert_eq!(bridge.code(), "BRIDGE_COMMAND_ID_CONFLICT");
+        assert_eq!(bridge.http_status(), 409);
+        assert_eq!(bridge.outcome().as_str(), "not_executed");
+    }
+
+    #[test]
+    fn the_other_replies_keep_their_shape() {
+        let (s, b) = command_reply_parts(crate::bridge::Reply::Ok { value: serde_json::json!({ "a": 1 }) });
+        assert_eq!(s, StatusCode::OK);
+        assert_eq!(b["value"]["a"], 1);
+        let (s, b) = command_reply_parts(crate::bridge::Reply::BusinessError { code: "NO".into(), message: "m".into() });
+        assert_eq!(s, StatusCode::CONFLICT);
+        assert!(b.get("outcome").is_none(), "a business no carries no outcome");
+        let (s, b) = command_reply_parts(crate::bridge::Reply::InfrastructureError { code: "X".into() });
+        assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(b.get("outcome").is_none());
+    }
+}
