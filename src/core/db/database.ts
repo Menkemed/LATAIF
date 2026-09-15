@@ -115,37 +115,37 @@ export class DatabaseRecoveryRequiredError extends Error {
 
 async function loadSavedDb(): Promise<LoadedDb> {
   if (isTauri()) {
+    let fs: Awaited<ReturnType<typeof getTauriFs>>;
     let path: string;
-    let exists: boolean;
     try {
-      const fs = await getTauriFs();
+      fs = await getTauriFs();
       path = await getDbFilePath();
-      exists = await fs.exists(path);
     } catch (err) {
       // Wir konnten nicht einmal FRAGEN, ob es die Datei gibt. Abwesenheit ist damit nicht
       // bewiesen — und ohne diesen Beweis wird nichts Neues angelegt.
       return { kind: 'unreadable', reason: `existence check failed: ${String(err)}` };
     }
-    if (!exists) {
+    // POST-PARITY R7C R4 — fehlt / Bytes / unlesbar entscheidet `loadDbFile`: eine vorhandene
+    // 0-Byte-Datei ist unlesbar (nie „leer anfangen"), und „fehlt" gilt erst, wenn die Nachfrage
+    // ausdrücklich „nicht gefunden" meldet — ein Lesefehler ist kein Beweis für eine fehlende Datei.
+    const { loadDbFile } = await import('./db-file-load');
+    const r = await loadDbFile({
+      exists: (p) => fs.exists(p),
+      readFile: (p) => fs.readFile(p),
+      stat: async (p) => { const s = await fs.stat(p); return { size: s.size, mtime: s.mtime }; },
+    }, path);
+    if (r.kind === 'missing') {
       lastKnownDiskSig = null; // keine Datei → keine Baseline
       return { kind: 'missing' };
     }
-    try {
-      const fs = await getTauriFs();
-      const data = await fs.readFile(path);
-      // D2: Baseline-Signatur der GERADE geladenen Datei merken — der Stale-Guard
-      // vergleicht spätere Saves gegen genau diesen Stand.
-      try {
-        const st = await fs.stat(path);
-        lastKnownDiskSig = { size: st.size, mtimeMs: st.mtime ? st.mtime.getTime() : null };
-      } catch {
-        lastKnownDiskSig = null; // nicht stat-bar → keine Baseline (Stale-Check fällt fail-open aus)
-      }
-      return { kind: 'bytes', data: new Uint8Array(data) };
-    } catch (err) {
-      console.warn('[DB] Tauri file load failed:', err);
-      return { kind: 'unreadable', reason: `read failed: ${String(err)}` };
+    if (r.kind === 'unreadable') {
+      console.warn('[DB] Tauri file load refused:', r.reason);
+      return r;
     }
+    // D2: Baseline-Signatur der GERADE geladenen Datei — der Stale-Guard vergleicht spätere Saves
+    // gegen genau diesen Stand (nicht stat-bar → keine Baseline, fail-open wie bisher).
+    lastKnownDiskSig = r.sig;
+    return { kind: 'bytes', data: r.data };
   }
 
   // Browser fallback

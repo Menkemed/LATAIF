@@ -53,8 +53,9 @@ const ok = (c: boolean, m: string) => { if (c) PASS++; else { fails.push(m); con
   const elseBranch = db.slice(db.indexOf("  } else {\n    db = new SQL.Database();"), db.indexOf('void triggerStartupMediaRecoverySafe();'));
   ok(/if \(isTauri\(\)\) \{\s*\n\s*await seedCleanDatabase\(db\);/.test(elseBranch),
     'FIRST-RUN eine bewiesen fehlende Datei legt weiterhin den sauberen Bestand an');
-  ok(/if \(!exists\) \{\s*\n\s*lastKnownDiskSig = null;[^\n]*\n\s*return \{ kind: 'missing' \};/.test(db),
-    'FIRST-RUN …und nur der Fall "Datei existiert nicht" fuehrt dorthin');
+  ok(/if \(r\.kind === 'missing'\) \{\s*\n\s*lastKnownDiskSig = null;[^\n]*\n\s*return \{ kind: 'missing' \};/.test(db)
+    && /const r = await loadDbFile\(/.test(db),
+    'FIRST-RUN …und nur der Fall "Datei existiert nicht" (R7C R4: entschieden von loadDbFile) fuehrt dorthin');
 
   // Die drei Zustaende teilen sich keinen Ausweg mehr.
   ok(db.indexOf("if (saved.kind === 'unreadable')") < db.indexOf("if (saved.kind === 'bytes')")
@@ -124,6 +125,73 @@ const ok = (c: boolean, m: string) => { if (c) PASS++; else { fails.push(m); con
   ok(after.length === empty.length && !after.equals(real),
     `NEGATIVKONTROLLE der leere Bestand ersetzt die vorhandene Datei (${real.length}B → ${after.length}B)`);
   ok(true, 'NEGATIVKONTROLLE also schuetzt die Persistenz NICHT — der Riegel muss beim Laden sitzen');
+}
+
+// ── §3 — POST-PARITY R7C R4: das ECHTE Lademodul an echten Dateien ─────────
+//
+// `loadDbFile` ist die Entscheidung fehlt / Bytes / unlesbar, die `loadSavedDb` am Primary trifft
+// (mit Tauri plugin-fs; hier mit Node `fs` an einem Temp-Verzeichnis). `unreadable` endet in
+// `initDatabase` VOR Schema, Migration oder Speichern im Wiederherstellungsweg (§1).
+{
+  const { loadDbFile } = await import('../../src/core/db/db-file-load.ts');
+  const initSqlJs = (await import('sql.js')).default;
+  const SQL = await initSqlJs({ locateFile: (f: string) => join(repo, 'node_modules/sql.js/dist', f) });
+  const nodeFs = {
+    exists: async (p: string) => existsSync(p),
+    readFile: async (p: string) => new Uint8Array(readFileSync(p)),
+    stat: async (p: string) => { const st = statSync(p); return { size: st.size, mtime: st.mtime }; },
+  };
+  const dir = mkdtempSync(join(tmpdir(), 'r7c-r4-'));
+
+  // (a) Eine vorhandene 0-Byte-Datei: unlesbar, und sie bleibt, wie sie ist.
+  const empty = join(dir, 'lataif-empty.db');
+  writeFileSync(empty, new Uint8Array(0));
+  const before = statSync(empty);
+  const r0 = await loadDbFile(nodeFs, empty);
+  const after = statSync(empty);
+  ok(r0.kind === 'unreadable' && /0 bytes/.test((r0 as { reason: string }).reason),
+    `R4 eine vorhandene 0-Byte-lataif.db ist unlesbar → DB_RECOVERY_REQUIRED, kein leerer Neuanfang (${JSON.stringify(r0)})`);
+  ok(existsSync(empty) && after.size === 0 && after.mtimeMs === before.mtimeMs,
+    'R4 …und die Datei bleibt unverändert (0 Byte, gleiche Änderungszeit — nichts neu erstellt, überschrieben, gelöscht)');
+
+  // (b) Eine fehlende Datei — auch in einem noch nicht angelegten Ordner — erlaubt den Erststart.
+  const r1 = await loadDbFile(nodeFs, join(dir, 'lataif.db'));
+  const r2 = await loadDbFile(nodeFs, join(dir, 'noch-nicht-da', 'lataif.db'));
+  ok(r1.kind === 'missing' && r2.kind === 'missing', 'R4 eine nachweislich fehlende Datei (auch ohne Ordner) → Erststart erlaubt');
+
+  // (c) Ein gültiger Bestand bleibt lesbar, Byte für Byte.
+  const good = new SQL.Database();
+  good.run("CREATE TABLE t (a TEXT); INSERT INTO t VALUES ('bestand')");
+  const goodBytes = good.export();
+  const goodPath = join(dir, 'lataif-good.db');
+  writeFileSync(goodPath, goodBytes);
+  const r3 = await loadDbFile(nodeFs, goodPath);
+  const reopened = r3.kind === 'bytes' ? new SQL.Database(r3.data) : null;
+  ok(r3.kind === 'bytes' && r3.data.length === goodBytes.length && r3.sig?.size === goodBytes.length
+    && String(reopened?.exec('SELECT a FROM t')[0]?.values[0][0]) === 'bestand',
+    'R4 ein gültiger Bestand wird gelesen und bleibt lesbar (mit Stale-Guard-Grundlinie)');
+
+  // (d) Ein Lesefehler ist kein Beweis für eine fehlende Datei.
+  const deny = (msg: string) => ({ ...nodeFs, exists: async () => false, stat: async () => { throw new Error(msg); } });
+  const rDenied = await loadDbFile(deny('failed to get metadata of path: Access is denied. (os error 5)'), goodPath);
+  const rNotFoundWin = await loadDbFile(deny('failed to get metadata of path: The system cannot find the file specified. (os error 2)'), goodPath);
+  const rNoPathWin = await loadDbFile(deny('The system cannot find the path specified. (os error 3)'), goodPath);
+  ok(rDenied.kind === 'unreadable' && /absence not proven/.test((rDenied as { reason: string }).reason),
+    'R4 „exists: nein" + Metadaten verweigert (os error 5) → unlesbar, KEIN Erststart');
+  ok(rNotFoundWin.kind === 'missing' && rNoPathWin.kind === 'missing', 'R4 nur „nicht gefunden" (os error 2 / 3) gilt als fehlend');
+  const rExistsThrows = await loadDbFile({ ...nodeFs, exists: async () => { throw new Error('forbidden path'); } }, goodPath);
+  ok(rExistsThrows.kind === 'unreadable' && /existence check failed/.test((rExistsThrows as { reason: string }).reason),
+    'R4 wer nicht fragen kann, darf Abwesenheit nicht annehmen');
+  const rReadFails = await loadDbFile({ ...nodeFs, readFile: async () => { throw new Error('sharing violation (os error 32)'); } }, goodPath);
+  ok(rReadFails.kind === 'unreadable', 'R4 eine vorhandene, nicht lesbare Datei → unlesbar');
+  const rLateFound = await loadDbFile({ ...nodeFs, exists: async () => false }, goodPath);
+  ok(rLateFound.kind === 'bytes', 'R4 sagt „exists" nein, findet die Nachfrage sie doch → sie wird gelesen, nicht ersetzt');
+
+  // (e) Die Verdrahtung: loadSavedDb nutzt genau dieses Modul, und „unlesbar" endet vor dem Schema.
+  const dbSrc = read('src/core/db/database.ts');
+  ok(/const \{ loadDbFile \} = await import\('\.\/db-file-load'\);/.test(dbSrc)
+    && dbSrc.indexOf("if (saved.kind === 'unreadable')") < dbSrc.indexOf('db.run(SCHEMA);'),
+    'R4 loadSavedDb entscheidet über loadDbFile; initDatabase bricht bei „unlesbar" VOR Schema/Migration ab');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c6 p1: existing database fails closed: ${PASS} passed, ${fails.length} failed`);
