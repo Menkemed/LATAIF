@@ -3401,6 +3401,10 @@ Ende). Offen bleiben PP-3, PP-4, PP-5, PP-6, PP-7, PP-12.
 **Neu nach R7B (14.09.2026):** PP-3, PP-4, PP-5, PP-6 und PP-7 **geschlossen**; PP-12 **teilweise** (Fristen je Dokumentweg und
 Anzeige gebaut, die Upload-Frist berücksichtigt aber die mit der Datenbankgröße wachsende durable Speicherung nicht — § „Post-Parity
 R7B — Plattform / Laufzeit / Härtung", Review-Nachweis). Registry unverändert 175.
+**Neu nach R7B / PP-12-Abschluss (15.09.2026):** PP-12 **geschlossen** — die schreibenden Dokumentwege rechnen die Datenbankgröße
+am Primary in ihre Frist ein, belegt bis 451/518 MB; dazu die Bild-Uploads bestandsaufgenommen und die Belegbilder auf den EINEN
+Normalisierer geführt (§ „R7B / PP-12 — Bildwege und Frist nach der echten Speicherung" am Ende; Review
+`docs/r7b-pp12-image-paths-review.md`). Registry unverändert 175.
 
 Veraltete Stellen der SSOT (nur Hinweis, Inhalt gilt): Zeilenverweise der Tabelle sind teils verschoben (z. B. InvoiceDetail,
 WatchList, ExpenseList); der R6A-Abschnitt „Keine toten Knöpfe" beschreibt den Stand VOR R6B — heute: Abmelden geht auf PC2
@@ -3840,6 +3844,30 @@ R7B Scope:       6
 geschlossen:     5  (PP-3, PP-4, PP-5, PP-6, PP-7)
 teilweise:       1  (PP-12 — Frist ohne DB-Größen-Anteil, Review-Befund)
 verbleibend:     1  (PP-12, Rest)
+Registry 175 → 175
+Version 0.8.54 · kein Release
+```
+
+## R7B / PP-12 — Bildwege und Frist nach der echten Speicherung (15.09.2026)
+
+Bestandsaufnahme aller produktiv erreichbaren Bild-Uploads (Handy, Primary, PC2) mit Callpath, Grenzen, Speicherort,
+Fristen und Vorher/Nachher: `docs/r7b-pp12-image-paths-review.md`. Keine neue Fernbuchung, Registry unverändert **175**.
+
+| Punkt | Behebung | Beweis |
+|---|---|---|
+| PP-12 (Rest) | `bridge::timeout_for(op, payload, db_bytes)`; `db_bytes` = Größe von `lataif.db` am Primary (`command_execute`). `documents.upload` + (DB + 2 × Länge) / 4 MB/s (Dokumentzeile + Abgleich-Zeile), `documents.set_ocr` + DB / 4 MB/s; `documents.content.get` (liest nur) und alle normalen Befehle unverändert. Frist ≠ Erfolg (504 `unknown`), dieselbe Kennung wartet in der Schreibreihenfolge und bekommt das eingefrorene Ergebnis. | Rust `bridge_tests` (`the_writing_document_paths_grow_with_the_database`); `test/r7b/pp12-images` §4; `test/e2e/r7b-pp12-large-db` **13/0**: größtes Dokument 17,8 s / 21,9 s / 27,8 s bei 2 / 203 / 451 MB gegen Frist 70,6 / 121,0 / 182,9 s, Texterkennung bis 518 MB, jede Wirkung genau einmal |
+| Bildwege | EIN Normalisierer für Belegbilder (Reparatur, Altgold, Ausweisfoto, Einkauf/Auftrag „New Item", Sonderstück-Entwurf): `media::record_image` = `normalize_stock_image` des Medienspeichers (JPEG ≤ 100 000 B, ≤ 1600 px, EXIF-Ausrichtung, Metadaten weg; ein Foto in gespeicherter Form bleibt Byte für Byte). Gerechnet am aufnehmenden Rechner — Primary vor der Klammer, PC2 vor dem Ablegen (`stageRecordDataUrls`); der Primary prüft beim Abholen (`staging_media_read_record`). Gespeicherte Fotos werden nie umgerechnet. Artikel, Kommission, Fertigung bleiben im Medienspeicher (Hauptbild ≤ 100 000 B + Vorschau ≤ 20 000 B). | `cargo test media::record_image` 6/0; `test/r7b/pp12-images` **56/0**; `test/e2e/r7b-pp12-images` Bildteil **22/0** (Primary-Maske, PC2-Transport, Wiederholung, Ersetzen, Anzeige Primary + PC2, regulärer Neustart) |
+| Aufnahme | Profil an einer Stelle (`capture-profile.ts`), bewusst 800 px / 0,7 (Handy 1600 / 0,85): gemessen kostet eine 1600-px-Aufnahme im Normalisierer ~1,6 s je Foto innerhalb der 20-s-Frist eines PC2-Artikels. Unlesbare Datei wird übersprungen und genannt, Transparenz auf Weiß. | `test/r7b/pp12-images` §1; Release-Bench `record_image` |
+
+Offen, nicht Teil von PP-12 (zur Entscheidung, Einzelheiten im Review): Handy-Reparatur-/Inbox-Fotos über den Abgleich-Push ohne
+Byte-Grenze; Artikelbilder aus Einkauf/Auftrag weiter in `products.images` statt Medienspeicher; normale Befehle bei großer
+Datenbank (10,7 s bei 451 MB, mit belegter Schlange über 20 s); die Frist enthält keine Wartezeit hinter anderen Aufträgen;
+`plugin-fs writeFile` ohne fsync; Handy-Drain-Lease ohne Verlängerung; nach WM_CLOSE endete der Primary bei ≥ ~340 MB nicht.
+
+```
+PP offen vorher: 1  (PP-12, Rest)
+geschlossen:     1  (PP-12)
+verbleibend:     0  (Post-Parity-Backlog PP-1 … PP-14: alle geschlossen, lokal — unabhängige Prüfung offen)
 Registry 175 → 175
 Version 0.8.54 · kein Release
 ```
