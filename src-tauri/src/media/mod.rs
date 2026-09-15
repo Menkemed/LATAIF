@@ -33,6 +33,8 @@ mod detect;
 // the thin Tauri command wrappers in `lib.rs` can reach it; still no UI/DB.
 pub(crate) mod ingest;
 mod normalize;
+// POST-PARITY R7B PP-12 — Belegbilder (Zeile, Daten-URL) durch denselben Normalisierer wie das Artikelbild.
+pub mod record_image;
 pub(crate) mod storage;
 
 pub use normalize::{create_thumbnail, inspect_image_bytes, normalize_stock_image};

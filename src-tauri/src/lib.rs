@@ -2419,6 +2419,45 @@ fn staging_media_read(
     }))
 }
 
+// ── POST-PARITY R7B PP-12 — Belegbilder durch den EINEN Normalisierer ───────
+//
+// Ein Reparatur-, Altgold-, Ausweis-, Einkaufs- oder Auftragsfoto wird in seiner Zeile gespeichert.
+// Bevor es dort landet, geht es durch `normalize_stock_image` (s. `media::record_image`): am Primary
+// selbst ueber `media_normalize_record_image`, vom zweiten Rechner beim Abholen aus der Ablage ueber
+// `staging_media_read_record` — dieselbe Pruefung, dieselbe Grenze, dasselbe Ergebnis. Beide laufen
+// neben dem Hauptfaden (`spawn_blocking`): das Umrechnen eines grossen Fotos haelt das Fenster nicht an.
+#[tauri::command]
+async fn media_normalize_record_image(data_base64: String) -> Result<serde_json::Value, String> {
+    use base64::Engine;
+    // Vor dem Dekodieren: mehr als die groesste zulaessige Datei kann es nicht werden.
+    if data_base64.len() > sync::mobile_upload::MAX_UPLOAD_IMAGE_BYTES / 3 * 4 + 8 {
+        return Err(media::record_image::ERR_RECORD_IMAGE_TOO_LARGE.to_string());
+    }
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(data_base64.as_bytes())
+        .map_err(|_| "MEDIA_IMAGE_DECODE_FAILED".to_string())?;
+    tauri::async_runtime::spawn_blocking(move || media::record_image::record_image_json(&bytes))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
+/// Wie `staging_media_read`, aber das Foto kommt so heraus, wie es in der Zeile gespeichert wird.
+#[tauri::command]
+async fn staging_media_read_record(
+    state: tauri::State<'_, AppHandleState>,
+    staging_id: String,
+    tenant_id: String,
+    branch_id: String,
+    user_id: String,
+) -> Result<serde_json::Value, String> {
+    let root = state.data_root.command_staging_root();
+    let owner = sync::media_staging::owner_key(&tenant_id, &branch_id, &user_id);
+    let bytes = sync::media_staging::read_staged(&root, &owner, &staging_id).map_err(|e| e.to_string())?;
+    tauri::async_runtime::spawn_blocking(move || media::record_image::record_image_json(&bytes))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 /// Nach einem gelungenen Auftrag sind die Bytes im Medienspeicher — die Ablage darf weg. Sie MUSS
 /// es nicht: was liegen bleibt, verschwindet beim naechsten Start von selbst.
 #[tauri::command]
@@ -3322,6 +3361,9 @@ pub fn run() {
             // keine Geschaeftstabelle; die Kennung ist der Hash des Inhalts.
             staging_media_read,
             staging_media_discard,
+            // POST-PARITY R7B PP-12 — Belegbilder: am Primary und beim Abholen aus der Ablage.
+            media_normalize_record_image,
+            staging_media_read_record,
             mobile_runtime_scope_evidence,
             // MOBILE-04B2A5 — the secure owner runtime-scope provisioning path: a non-secret OPTIONS
             // read + the owner-gated CONFIGURE (bcrypt via authorize_owner). These configure the
