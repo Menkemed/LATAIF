@@ -80,6 +80,13 @@ const FIRST_RUN_SAFE: &[&str] = &[
     // zu beantworten.
     "bridge_announce_ready",
     "bridge_reply",
+
+    // POST-PARITY R7C N1 — der Abschluss nach dem durablen Flush. Er beendet nur den Prozess: die
+    // Bruecke nimmt nichts mehr an (falls es sie gibt), der Server des `AppHandleState` wird
+    // gestoppt (falls es den Zustand gibt), dann `exit(0)`. Keine Datenbank, kein Verzeichnis,
+    // keine Datei. Ohne Wurzel (PC2, Erstlauf-Weiche) gibt es weder Bruecke noch Server — dort
+    // endet nur der Prozess. Vorher verlangte er den Zustand und PC2 liess sich nicht schliessen.
+    "finalize_application_shutdown",
 ];
 
 #[test]
@@ -125,6 +132,30 @@ fn the_one_unbound_mutating_command_refuses_while_the_question_is_open() {
     let mutation = body.find("clear_intent(").expect("the mutation it guards");
     assert!(guard < mutation, "the guard must come before the deletion");
     assert!(body.contains("DATA_ROOT_FIRST_RUN_UNDECIDED"), "and it must say why it refused");
+}
+
+#[test]
+fn closing_works_without_a_data_root_and_without_a_stand_in_state() {
+    // N1: als Parameter `State<'_, AppHandleState>` konnte Tauri den Abschluss in einem Start ohne
+    // Wurzel gar nicht aufloesen („state not managed for field `state`") — PC2 blieb offen.
+    let p = params_of("finalize_application_shutdown").expect("command exists");
+    assert!(!p.contains("State<"), "the finalizer must not demand any managed state: {p}");
+
+    let at = SRC.find("fn finalize_application_shutdown(").unwrap();
+    let body = &SRC[at..];
+    let body = &body[..body.find("\n}").unwrap()];
+    // Der Server kommt aus dem Zustand, WENN es ihn gibt — und wird nur dann gestoppt, VOR dem Exit.
+    let lookup = body.find("try_state::<AppHandleState>()").expect("server looked up optionally");
+    let stop = body.find("server.stop()").expect("the server of a rooted start is still stopped");
+    let exit = body.find(".exit(0)").expect("the process still ends natively");
+    assert!(lookup < stop && stop < exit, "look up, then stop, then exit");
+    assert!(body.contains("if let Some(server) = server"), "no server → nothing to stop");
+    // Nichts wird erfunden oder angefasst: kein Ersatzzustand, kein Serverstart, keine Datei, keine DB.
+    for forbidden in ["manage(", "SyncServer::new", ".start(", "std::fs::", "open_config_db", "data_root_of("] {
+        assert!(!body.contains(forbidden), "the finalizer must not use {forbidden}");
+    }
+    // Der Zustand wird weiterhin an genau einer Stelle verwaltet — im Start mit Datenwurzel.
+    assert_eq!(SRC.matches("manage(AppHandleState").count(), 1, "AppHandleState managed in exactly one place");
 }
 
 #[test]

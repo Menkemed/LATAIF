@@ -7,12 +7,13 @@ Herkunft der Befunde: `docs/r7b-pp12-image-paths-review.md` § 0 (R1–R4), § 5
 
 | Punkt | umgesetzt | getestet (lokal) | unabhängig freigegeben |
 |---|---|---|---|
-| **R1** Vorgang überlebt Maskenwechsel / Neuladen / Neustart | ja — `2b98e46` | ja — Einheit 56/0, E2E S1 + S3 (Wiederaufnahme nach Zustandsverlust) | **nein** (ausstehend) |
-| **R2** Formularänderung nach unklarem Ausgang | ja — `2b98e46` | ja — Einheit, E2E S2 | **nein** |
-| **R3** Konflikt nach Verdrängung / Neustart korrekt; „dieser Versuch lief nicht" ≠ Beweis | ja — `2b98e46` | ja — Einheit, Rust 2/0 + 44/0 + 76/0, E2E S4 (nach Fund und Behebung `8f37ee5`) | **nein** |
-| **R4** vorhandene 0-Byte-`lataif.db` → `DB_RECOVERY_REQUIRED` | ja — `c4098a8` | ja — c6 27/0, E2E S5 | **nein** |
+| **R1** Vorgang überlebt Maskenwechsel / Neuladen / Neustart | ja — `2b98e46` | ja — Einheit 56/0, E2E S1 + S3 (Wiederaufnahme nach Zustandsverlust) | **ja** — unabhängig technisch freigegeben (Auftrag N1, 15.09.2026) |
+| **R2** Formularänderung nach unklarem Ausgang | ja — `2b98e46` | ja — Einheit, E2E S2 | **ja** (s. R1) |
+| **R3** Konflikt nach Verdrängung / Neustart korrekt; „dieser Versuch lief nicht" ≠ Beweis | ja — `2b98e46` | ja — Einheit, Rust 2/0 + 44/0 + 76/0, E2E S4 (nach Fund und Behebung `8f37ee5`) | **ja** (s. R1) |
+| **R4** vorhandene 0-Byte-`lataif.db` → `DB_RECOVERY_REQUIRED` | ja — `c4098a8` | ja — c6 27/0, E2E S5 | **ja** (s. R1) |
 | **G5** Ganz-DB-Speichern skaliert | nein | — | **OPEN, nicht akzeptiert** |
-| **N1 (neu, vorbestehend)** PC2 lässt sich über das Fenster nicht regulär beenden | nein (nicht Teil von R7C) | belegt im E2E (Diagnose § 6) | **OPEN, nicht akzeptiert** |
+| **N1 (neu, vorbestehend)** PC2 lässt sich über das Fenster nicht regulär beenden | ja — Folgecommit N1 (§ 6a) | ja — Rust `first_run_ipc`/`shutdown_tests` (neuer Test grün), gezielter Zwei-App-Lauf S3 **21/0** (PC2 endet nach WM_CLOSE von selbst, Exit-Code 0, kein Helfer) | **nein** (ausstehend) |
+| **N2 (neu, vorbestehend seit `02c976b`)** Rust-Gate `every_command_is_either_root_bound_or_named_as_first_run_safe` rot (`media_normalize_record_image` nicht eingeordnet) | nein (nicht Teil von N1) | beim N1-Testlauf gefunden (§ 7) | **OPEN, nicht akzeptiert** |
 
 ## 1. Ausgangslage (Callpaths vor R7C)
 
@@ -132,8 +133,41 @@ command `finalize_application_shutdown`. You must call `.manage()` before using 
 again to retry." Der Abschlussbefehl verlangt den Tauri-Zustand `AppHandleState`, der nur im Primary-Aufbau verwaltet wird
 (`lib.rs` `app.manage(AppHandleState { … })`); im Client-Modus fehlt er → das Beenden bricht nach Regel A/B sichtbar ab, das
 Fenster bleibt offen. Vorbestehend: `lib.rs` ist zwischen `1635c8a` und HEAD unverändert; kein früherer Test beendete PC2
-regulär. Auswirkung: PC2 lässt sich nur über den Task-Manager beenden. Nicht Teil von R1–R4, nicht geändert; die offenen
-Vorgänge überleben auch dieses harte Ende (S3).
+regulär. Auswirkung: PC2 lässt sich nur über den Task-Manager beenden. Nicht Teil von R1–R4; die offenen Vorgänge überleben
+auch dieses harte Ende (S3). **Korrektur zu Lauf 1/2:** PC2 wurde dort in S3 NICHT regulär beendet, sondern nach 20 s über den
+harten Test-Helfer (`killTestPid`, eigene PID am exakten Test-Pfad; Lauf 2: `hart: true`, 103 s). „Regulär" galt in beiden
+Läufen nur für den Primary. Behoben und regulär nachgewiesen erst in § 6a.
+
+### 6a. N1 — PC2 regulär beenden (Folgecommit)
+
+**Callpath:** Fenster-X → `onCloseRequested` (`App.tsx`) → `prepareAndCloseApplication` (Sync pausieren, abwarten, Flush) →
+`closeWindow` → `invoke('finalize_application_shutdown')`. Der Finalizer nahm `tauri::State<'_, AppHandleState>`. Diesen
+Zustand verwaltet nur `setup()` eines Starts MIT Datenwurzel; PC2 (Client-Modus, leeres Kontrollverzeichnis) läuft im Zweig
+`Resolution::FirstRunUndecided` → nur `FirstRunState`, keine Brücke, kein Server, keine Datenbank. Tauri konnte den Parameter
+nicht auflösen → Fehler vor dem Exit → Regel A/B: sichtbar abgebrochen, App bleibt offen.
+
+**Braucht der Finalizer den Zustand auf PC2?** Nein. Er benutzt davon nur `server` (Sync-Server stoppen). Ohne Wurzel wurde nie
+ein Server gebaut oder gestartet; die Brücke (`bridge::global()`) ist dort ebenfalls nicht installiert und wird schon bisher
+optional behandelt. **Änderung** (`lib.rs`): der Finalizer nimmt nur `AppHandle`; `app.try_state::<AppHandleState>()` liefert
+den Server, WENN es den Zustand gibt → Stopp (3-s-Deckel) → `exit(0)`; gibt es ihn nicht → nichts zu stoppen → `exit(0)`. Kein
+Ersatzzustand, kein Serverstart, keine Datei/DB. Primary-Pfad unverändert (gleicher Server-Stopp, gleiche Reihenfolge,
+Idempotenz `SHUTDOWN_STARTED`). `first_run_ipc_tests`: Finalizer als „ohne Wurzel erreichbar" eingeordnet (Zusage: beendet nur
+den Prozess) + neuer Test `closing_works_without_a_data_root_and_without_a_stand_in_state` (kein `State<`, optionaler Lookup →
+Stopp → Exit, kein `manage(`/`SyncServer::new`/`.start(`/`std::fs::`/DB im Rumpf, `AppHandleState` weiter an genau einer Stelle
+verwaltet).
+
+| Lauf | Ergebnis | Quellstand / Binary |
+|---|---|---|
+| `cargo test --lib -- first_run_ipc shutdown_tests` | 8/1 — neuer N1-Test **ok**, `shutdown_tests` 5/0, `first_run_pending`-Weiche/Riegel ok; der 1 Fehler = **N2** (`media_normalize_record_image`, vorbestehend seit `02c976b`, im Diff nicht berührt) | Arbeitsbaum = N1-Commit |
+| E2E gezielt `R7C_NUR=S3 node test/e2e/r7c-pending-saves.e2e.mjs` (S1-Schritte nur als Vorbedingung; S2/S4/S5 nicht wiederholt — deren Produktcode unverändert) | **21/0**, `POST_PARITY_R7C_TARGETED_S3_PROVED` | frische Builds aus dem N1-Stand: `lataif.exe` sha256 `5d520c50bd922c3cf9b47aaa788e8e2778977cdfc7c25686b2bcef6d9121a72e`, `lataif-e2e-client.exe` `7a9fcfe3874d253f9c929de323408df6f640f281ae4da78b2dc288459a8ebc53` |
+
+Gemessen (S3): offener Vorgang `unresolved` vorhanden → PC2-Fenster schließen (WM_CLOSE) → **PC2 endet von selbst nach 2 s,
+Exit-Code 0, kein Helfer** (`zu/weg: true`, `hart: false`) → Datei vor und nach dem Beenden da, **Byte für Byte gleich** →
+Neustart: **weiterhin B**, ohne neue Anmeldung → die Leiste zeigt genau diesen Vorgang → „Clarify now" sendet den
+ursprünglichen Rumpf unter derselben Kennung → **200 `replayed`**, 1 Kunde, 1 Nachweiszeile → Datei weg, Leiste leer. Keine
+`lataif*.db*` unter den Profilorten von PC2 (vor dem Beenden, danach, nach Neustart + Klärung: 0/0/0). Primary im selben Lauf
+regulär beendet (Exit-Code 0, 2 s) und neu gestartet, beantwortet die Klärung. Produktion (fremde `lataif.exe`), `E:\LATAIF\Data`,
+Ports 3001/3443 unberührt (Isolationsprüfung des Laufs grün).
 
 Die Einheitstests prüfen die fachliche Wirkung (Buchungs- und Nachweiszeilen an sql.js), nicht nur Rückgabewerte: verlorene
 Antwort + Neuladen + Primary-Neustart → Klärung = Replay, genau eine Buchung; nie angekommen → Klärung bucht genau einmal;
@@ -144,8 +178,13 @@ offen; zwei offene Vorgänge unabhängig; fremder Kontext; neue Kennung nur ausd
 ## 7. Grenzen (ausgewiesen, nicht Teil dieses Auftrags)
 
 - **G5** Ganz-DB-Speichern skaliert mit der Dateigröße — **OPEN, nicht akzeptiert** (R7B-Review § 8).
-- **N1** PC2 lässt sich über das Fenster nicht regulär beenden (`finalize_application_shutdown` ohne verwalteten Zustand im
-  Client-Modus) — vorbestehend, im R7C-E2E gefunden, **OPEN, nicht akzeptiert**, nicht geändert (§ 6).
+- **N1** PC2 ließ sich über das Fenster nicht regulär beenden — behoben im Folgecommit (§ 6a), lokal nachgewiesen,
+  unabhängige Freigabe ausstehend.
+- **N2 (neu, vorbestehend seit `02c976b`, R7B PP-12)** Das Rust-Gate
+  `first_run_ipc_tests::every_command_is_either_root_bound_or_named_as_first_run_safe` ist rot: `media_normalize_record_image`
+  (Belegbild im Speicher umrechnen, ohne `AppHandleState`, ohne Datei/DB) ist keiner Klasse zugeordnet. Beim gezielten
+  N1-Testlauf gefunden; nicht Teil von N1, nicht geändert (die Einordnung ist eine eigene Entscheidung, s. Kopf der Testdatei)
+  — **OPEN, nicht akzeptiert**.
 - Die Ablage folgt dem bestehenden Persistenzvertrag: neustartfest; Stromausfall-Dauerhaftigkeit nicht garantiert (kein
   fsync, wie die Geschäftsdatenbank, R7B-Review § 6).
 - Ein Vorgang im Zustand `conflict` lässt sich nicht automatisch klären (der Primary hält die Kennung für anderen Inhalt):
@@ -159,4 +198,6 @@ offen; zwei offene Vorgänge unabhängig; fremder Kontext; neue Kennung nur ausd
   `PendingSavesBar.tsx`, `App.tsx`, `bridge.rs`, `routes.rs`, Tests).
 - `04808fb` — Folge: Rust-Testmodul `command_reply_tests` ans Ende von `routes.rs` (nur Testcode; Produktcode = `2b98e46`).
 - `8f37ee5` — Folge R3: Kennungsspeicher merkt eine vom durablen Nachweis abgewiesene Anfrage nicht als Besitzer (E2E-Fund).
-- Doku-/E2E-Commit — dieses Review, SSOT, `test/e2e/r7c-pending-saves.e2e.mjs` (Lauf 2: 28/1, der Fehler = N1).
+- `617c2c8` — Doku-/E2E-Commit — dieses Review, SSOT, `test/e2e/r7c-pending-saves.e2e.mjs` (Lauf 2: 28/1, der Fehler = N1).
+- Folgecommit N1 — `finalize_application_shutdown` ohne Pflicht-Zustand (`lib.rs`), `first_run_ipc_tests.rs`, E2E gezielt
+  (`R7C_NUR`, Exit-Code-Beleg, keine DB auf PC2), Doku inkl. Korrektur „PC2 regulär" (§ 6).

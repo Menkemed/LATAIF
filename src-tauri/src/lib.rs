@@ -1474,11 +1474,15 @@ mod shutdown {
 // M4-D — Nativer Close-Finalizer. Das Frontend ruft diesen Command AUSSCHLIESSLICH nach einem
 // erfolgreich bestaetigten durablen DB-Flush (prepareAndCloseApplication). Terminierung liegt
 // damit nativ bei Rust statt an einem fragilen Webview-Timer.
+//
+// POST-PARITY R7C N1 — der Abschluss verlangt KEINEN `AppHandleState` mehr. Den verwaltet nur ein
+// Start mit Datenwurzel; ein Start ohne (PC2 im Client-Modus, die Erstlauf-Weiche) hat nie einen
+// Server gebaut, eine Bruecke installiert oder eine Datenbank geoeffnet. Als Kommando-Parameter
+// liess Tauri den Aufruf dort gar nicht erst zu („state not managed") → das Fenster blieb offen.
+// Jetzt: gibt es den Zustand, wird sein Server gestoppt; gibt es ihn nicht, gibt es nichts zu
+// stoppen — nur zu beenden. Kein Ersatzzustand, kein Server-Start, keine Datei.
 #[tauri::command]
-async fn finalize_application_shutdown(
-    app: tauri::AppHandle,
-    state: tauri::State<'_, AppHandleState>,
-) -> Result<(), String> {
+async fn finalize_application_shutdown(app: tauri::AppHandle) -> Result<(), String> {
     // Idempotenz gegen Doppel-X: nur der erste Aufruf wirkt (atomarer compare_exchange).
     let proceed = SHUTDOWN_STARTED
         .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
@@ -1488,7 +1492,7 @@ async fn finalize_application_shutdown(
     // zwischen "Server laeuft noch" und "Renderer ist weg" kein Auftrag mehr eingeht.
     if let Some(b) = bridge::global() { b.stop_accepting(); }
     // Arc/Handle vor dem await klonen — kein State-Borrow ueber den await-Punkt.
-    let server = state.server.clone();
+    let server = app.try_state::<AppHandleState>().map(|s| s.server.clone());
     let app_handle = app.clone();
     shutdown::finalize_shutdown_sequence(
         proceed,
@@ -1496,7 +1500,9 @@ async fn finalize_application_shutdown(
         // Server-Stop ist idempotent (SyncServer::stop → Ok bei "nicht laufend"); Fehler/Timeout
         // duerfen den Exit nicht blockieren → Ergebnis bewusst verworfen.
         async move {
-            let _ = server.stop().await;
+            if let Some(server) = server {
+                let _ = server.stop().await;
+            }
         },
         move || app_handle.exit(0),
     )

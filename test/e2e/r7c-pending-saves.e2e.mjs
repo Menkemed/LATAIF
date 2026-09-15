@@ -12,6 +12,9 @@
 //   S3 R1       reguläres Beenden + Neustart des Primary (Speicher der Brücke leer) UND von PC2: die Leiste
 //               „Unresolved saves" zeigt genau diesen Vorgang; „Clarify now" → „WAS saved" (Replay), nichts
 //               doppelt, die Datei ist weg, die Leiste leer.
+//               N1: PC2 endet nach WM_CLOSE von selbst (Exit-Code 0, kein Helfer), weiter als B, keine Datenbank auf
+//               PC2. (Bis `617c2c8` ging das nicht — Lauf 2 beendete PC2 über den Helfer.)
+//               Gezielt: `R7C_NUR=S3 node test/e2e/r7c-pending-saves.e2e.mjs` (S1-Schritte als Vorbedingung).
 //   S4 R3       Primary erneut regulär neu gestartet (die Kennung steht nur noch im durablen Nachweis):
 //               dieselbe Kennung mit anderem Rumpf → 409 BRIDGE_COMMAND_ID_CONFLICT / not_executed; mit dem
 //               ursprünglichen Rumpf → 200 replayed. Kundenbestand unverändert.
@@ -77,6 +80,10 @@ const ok = (c, m) => { if (c) PASS++; else { FAIL++; fails.push(m); console.log(
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const S = (v) => JSON.stringify(v);
 const T0 = Date.now();
+// Gezielter Lauf, z. B. `R7C_NUR=S3` (N1: PC2 regulär beenden): die S1-Schritte laufen dann nur als Vorbedingung (sie erzeugen
+// den offenen Vorgang), die übrigen Szenarien entfallen.
+const NUR = String(process.env.R7C_NUR || '').split(',').map((s) => s.trim()).filter(Boolean);
+const laeuft = (s) => NUR.length === 0 || NUR.includes(s);
 const aufraeumen = () => { killStarted(); killTestImage('lataif.exe'); killTestImage('lataif-e2e-client.exe'); };
 const WACHHUND = setTimeout(() => {
   console.log('  x ABBRUCH: Zeitgrenze erreicht — der Lauf steht.');
@@ -169,8 +176,16 @@ async function netzBeobachter(cdpPort) {
   await b.netzAn();
   return b;
 }
+/** Exit-Code je eigener PID — Beleg für „regulär": `AppHandle::exit(0)` endet mit 0, der Helfer (`taskkill /F`) nicht. */
+const EXITS = new Map();
+async function exitCodeVon(pid) {
+  for (let i = 0; i < 50 && !EXITS.has(Number(pid)); i++) await sleep(100);
+  return EXITS.has(Number(pid)) ? EXITS.get(Number(pid)).code : null;
+}
 async function attach(cdpPort, exe, env) {
-  spawnTracked(exe, [], { env, stdio: 'ignore', detached: true }).unref();
+  const ch = spawnTracked(exe, [], { env, stdio: 'ignore', detached: true });
+  ch.on('exit', (code, signal) => EXITS.set(ch.pid, { code, signal }));
+  ch.unref();
   return attachOnly(cdpPort, 120000);
 }
 const exists = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
@@ -1042,7 +1057,8 @@ try {
   // ══════════════════════════════════════════════════════════════════════
   // Helfer dieses Laufs
   // ══════════════════════════════════════════════════════════════════════
-  const R7C = { lost: false, changedNotSent: false, clarifyAfterRestart: false, ledgerConflictHttp: false, zeroByteRecovery: false, restoreStart: false };
+  const R7C_ALLE = { lost: 'S1', changedNotSent: 'S2', clarifyAfterRestart: 'S3', pc2RegularClose: 'S3', ledgerConflictHttp: 'S4', zeroByteRecovery: 'S5', restoreStart: 'S5' };
+  const R7C = Object.fromEntries(Object.entries(R7C_ALLE).filter(([, s]) => s === 'S1' || laeuft(s)).map(([k]) => [k, false]));
   const MESS = {};
   RV_STATE = R7C; MESS_STATE = MESS;
   const api = async (pfad, body, token) => {
@@ -1100,7 +1116,7 @@ try {
       hartWeg = await waitPidGone(pid, 30000);
       console.log(`      (${wer}) endete nicht nach dem Schließen — eigener Prozess ${pid} über den Helfer beendet (${hart}/${hartWeg})`);
     }
-    return { wer, zu, weg, hart, beendet: weg || hartWeg, sekunden: Math.round((Date.now() - t0) / 1000) };
+    return { wer, zu, weg, hart, beendet: weg || hartWeg, exitCode: await exitCodeVon(pid), sekunden: Math.round((Date.now() - t0) / 1000) };
   }
   async function primaryStarten() {
     const t0 = Date.now();
@@ -1150,6 +1166,22 @@ try {
     try { return JSON.parse(readFileSync(f, 'utf8')); } catch (e) { return { unlesbar: String(e) }; }
   }
   const pendAlle = () => pendKandidaten().flatMap((d) => (existsSync(d) ? readdirSync(d).filter((f) => /\.json$/i.test(f)).map((f) => f.slice(0, -5)) : []));
+  /** Jede `lataif*.db*` unter den Profilorten von PC2 (nur lesen) — PC2 darf keine Geschäfts- oder Serverdatenbank haben. */
+  function pc2Datenbanken() {
+    const out = [];
+    const lauf = (d, tiefe) => {
+      if (tiefe > 8 || !existsSync(d)) return;
+      let eintraege = [];
+      try { eintraege = readdirSync(d, { withFileTypes: true }); } catch { return; }
+      for (const x of eintraege) {
+        const p = join(d, x.name);
+        if (x.isDirectory()) lauf(p, tiefe + 1);
+        else if (/^lataif.*\.db/i.test(x.name)) out.push(p);
+      }
+    };
+    for (const w of [CLIENT_HOME, join(REAL_LOCALAPPDATA, CLIENT_IDENT), join(REAL_APPDATA, CLIENT_IDENT)]) lauf(w, 0);
+    return out;
+  }
 
   // Der Kunde dieses Laufs (Vor- und Nachname eindeutig) und der durable Nachweis des Primary.
   const STEMPEL = Date.now().toString(36);
@@ -1240,7 +1272,7 @@ try {
   }
 
   // ══ S2 R2 — dieselbe offene Maske, ein Feld geändert: nichts geht hinaus ═════════════════════════════════════
-  {
+  if (laeuft('S2')) {
     const vorCmd = (await kommandos(client)).length;
     const vorAnlagen = anlagenImNachweis();
     const r = [await setByLabel(client, 'LAST NAME', NACH2)];
@@ -1265,13 +1297,19 @@ try {
     const pGut = p.zu && p.weg && !p.hart && p.oben && p.da;
     ok(pGut, `S3 der Primary endet nach dem Schließen selbst und startet neu — angemeldet, erreichbar (${S(p)})`);
     await ernte(client);
-    // Diagnose des regulären Beendens von PC2 (Lauf 1: nach WM_CLOSE nicht beendet): Fenster schließen, 20 s warten;
-    // lebt er noch, wird VOR dem Helfer mitgeschrieben, was das Fenster zeigt und was die Konsole sagt.
+    // N1 — PC2 regulär beenden: Fenster schließen (WM_CLOSE) und warten, bis der Prozess VON SELBST endet (Exit-Code 0 aus
+    // `AppHandle::exit(0)`). Bis `617c2c8` ging das nicht (Lauf 2: „state not managed … The app stays open", PC2 über den
+    // Helfer beendet). Der Helfer bleibt nur Sicherheitsnetz und zählt dann als NEIN. Lebt PC2 nach 30 s noch, wird VOR dem
+    // Helfer mitgeschrieben, was das Fenster zeigt und was die Konsole sagt. Vorher/nachher: die Datei des offenen Vorgangs
+    // Byte für Byte gleich; keine Datenbank unter den Profilorten von PC2.
     const pc2Pid = eigenerPc2();
+    const dateiVor = pendDatei(CMD_ID);
+    const shaVor = dateiVor ? sha(dateiVor) : '';
+    const dbVor = pc2Datenbanken();
     const t0 = Date.now();
     let zu1 = false, diag = null;
     try { zu1 = regulaerSchliessenPc2(pc2Pid); } catch (err) { diag = String(err); }
-    const ersterWeg = await waitPidGone(pc2Pid, 20000);
+    const ersterWeg = await waitPidGone(pc2Pid, 30000);
     if (!ersterWeg) {
       try {
         diag = {
@@ -1285,9 +1323,14 @@ try {
     try { steuer.close(); } catch { /* zu */ }
     client = null; steuer = null;
     const e = ersterWeg
-      ? { wer: 'PC2 S3', zu: zu1, weg: true, hart: false, beendet: true, sekunden: Math.round((Date.now() - t0) / 1000) }
-      : await eigenenBeenden('PC2 S3', pc2Pid, CLIENT_APP, 100000);
-    const dateiUeberlebt = !!pendDatei(CMD_ID);
+      ? { wer: 'PC2 S3', zu: zu1, weg: true, hart: false, beendet: true, exitCode: await exitCodeVon(pc2Pid), sekunden: Math.round((Date.now() - t0) / 1000) }
+      : await eigenenBeenden('PC2 S3', pc2Pid, CLIENT_APP, 30000);
+    const dateiNach = pendDatei(CMD_ID);
+    const dateiUeberlebt = !!dateiVor && !!dateiNach && sha(dateiNach) === shaVor;
+    const dbNachEnde = pc2Datenbanken();
+    const regulaer = e.zu === true && e.weg === true && e.hart === false && e.exitCode === 0;
+    ok(regulaer, `S3 N1 PC2 endet nach dem Schließen (WM_CLOSE) von selbst — Exit-Code 0, kein Helfer (${S(e)}${diag ? '; Diagnose ' + S(diag) : ''})`);
+    R7C.pc2RegularClose = regulaer;
     client = await attach(CLIENT_CDP, CLIENT_APP, clientEnv());
     await waitInvoke(client);
     const bereit = await warteBis(client, `${q(SHELL)} || ${q('[data-client-signin]')}`, 120000);
@@ -1297,9 +1340,9 @@ try {
     await beobachterLegen();
     client = await lade(client, '/clients');
     await waitFor(client, SHELL, 45000);
-    MESS.pc2Neustart = { ...e, dateiUeberlebt, neuAngemeldet, userId: sitzung.userId };
-    const eGut = e.zu && e.weg && !e.hart && dateiUeberlebt && sitzung.userId === B_ID;
-    ok(eGut, `S3 PC2 endet nach dem Schließen selbst, startet neu, angemeldet als B; die Datei überlebt (${S(MESS.pc2Neustart)})`);
+    MESS.pc2Neustart = { ...e, dateiVor: !!dateiVor, dateiUeberlebt, neuAngemeldet, userId: sitzung.userId, datenbanken: [dbVor.length, dbNachEnde.length] };
+    const eGut = regulaer && dateiUeberlebt && sitzung.userId === B_ID && !neuAngemeldet;
+    ok(eGut, `S3 PC2 nach dem regulären Ende neu gestartet: weiterhin als B angemeldet (ohne neue Anmeldung); die Datei des offenen Vorgangs vor und nach dem Beenden da, Byte für Byte gleich (${S(MESS.pc2Neustart)})`);
 
     const leiste = await warteBis(client, `${q(BAR)} && document.querySelectorAll(${S(ROW)}).length > 0`, 60000);
     const zeilen = await zeilenDerLeiste(client);
@@ -1325,11 +1368,14 @@ try {
     ok(k === 'OK' && notiz && gleich && replay, `S3 R1 „Clarify now" wiederholt den URSPRÜNGLICHEN Auftrag unter SEINER Kennung → „WAS saved" (Replay) (${S(MESS.s3)})`);
     ok(bestand, `S3 R1 nichts doppelt: 1 Kunde „${VOR} ${NACH1}", 0 mit „${NACH2}", genau 1 Nachweis für die Kennung`);
     ok(weg && keineZeile, `S3 R1 die Datei ist weg, die Leiste hat keine Zeile mehr (${weg}/${keineZeile})`);
-    R7C.clarifyAfterRestart = pGut && eGut && leisteGut && k === 'OK' && notiz && gleich && replay && bestand && weg && keineZeile;
+    const dbEnde = pc2Datenbanken();
+    const keineDb = dbVor.length === 0 && dbNachEnde.length === 0 && dbEnde.length === 0;
+    ok(keineDb, `S3 keine Datenbank auf PC2 — vor dem Beenden, danach und nach Neustart + Klärung (${S([dbVor, dbNachEnde, dbEnde])})`);
+    R7C.clarifyAfterRestart = pGut && eGut && leisteGut && k === 'OK' && notiz && gleich && replay && bestand && weg && keineZeile && keineDb;
   }
 
   // ══ S4 R3 — die Kennung nur noch im durablen Nachweis: anderer Rumpf → 409 not_executed, ursprünglicher → Replay ══
-  {
+  if (laeuft('S4')) {
     const p = await primaryNeustart('S4');
     const pGut = p.zu && p.weg && !p.hart && p.oben && p.da;
     ok(pGut, `S4 der Primary erneut regulär neu gestartet — die Kennung steht nur noch im durablen Nachweis (${S(p)})`);
@@ -1353,7 +1399,7 @@ try {
   }
 
   // ══ S5 R4 — die vorhandene 0-Byte-Geschäftsdatenbank: Wiederherstellungsmeldung, Datei unberührt ════════════════
-  {
+  if (laeuft('S5')) {
     if (!BIZ_DB.includes('com.lataif.app.e2e') || !APP_DATA_DIR.includes('com.lataif.app.e2e')) throw new Error('refusing to touch a database outside the e2e data dir: ' + BIZ_DB);
     const pid = eigenerPrimary();
     try { primary.close(); } catch { /* zu */ }
@@ -1433,11 +1479,11 @@ console.log('\n  R7C offene Speichervorgänge        Ergebnis');
 for (const [k, v] of Object.entries(RV_STATE)) console.log(`  ${k.padEnd(34)}${v === true ? 'ja' : 'NEIN'}`);
 console.log('  Messung ' + JSON.stringify(MESS_STATE));
 const dauer = Math.round((Date.now() - T0) / 1000);
-const ZEILE = `post-parity r7c pending saves: lost answer kept as unresolved file, changed form not sent, clarify after primary + pc2 restart replays once, durable-ledger id conflict is 409 not_executed, 0-byte business db stays untouched behind the recovery screen (${Math.floor(dauer / 60)}m ${dauer % 60}s): ${PASS} passed, ${FAIL} failed`;
+const ZEILE = `post-parity r7c pending saves${NUR.length ? ` [gezielt: ${NUR.join(',')}; S1-Schritte als Vorbedingung]` : ''}: lost answer kept as unresolved file, changed form not sent, pc2 closes on its own, clarify after primary + pc2 restart replays once, durable-ledger id conflict is 409 not_executed, 0-byte business db stays untouched behind the recovery screen (${Math.floor(dauer / 60)}m ${dauer % 60}s): ${PASS} passed, ${FAIL} failed`;
 if (FAIL > 0) {
   console.log(`\nFAIL — ${ZEILE}`);
   for (const f of fails) console.log('  - ' + f);
   process.exit(1);
 }
-if (Object.keys(RV_STATE).length > 0 && Object.values(RV_STATE).every((v) => v === true)) console.log('POST_PARITY_R7C_PENDING_SAVES_E2E_PROVED');
+if (Object.keys(RV_STATE).length > 0 && Object.values(RV_STATE).every((v) => v === true)) console.log(NUR.length ? `POST_PARITY_R7C_TARGETED_${NUR.join('_')}_PROVED` : 'POST_PARITY_R7C_PENDING_SAVES_E2E_PROVED');
 console.log(`\nPASS — ${ZEILE}`);
