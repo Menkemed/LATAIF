@@ -75,6 +75,8 @@ const nim = await import('../../src/core/media/new-item-media.ts');
   ok(/new ProductMediaCutoverService\(/.test(m) && /ensureProductMediaCutover\(productId\)/.test(m)
     && /UPDATE products SET images = '\[\]' WHERE id = \?/.test(m) && /await saveDatabaseDurably\(\)/.test(m),
     'UMZUG derselbe Cutover-Dienst wie beim Bearbeiten eines Altartikels: erst alle Bilder durabel, DANN die Spalte leeren (durabel)');
+  ok(/UPDATE products SET images = '\[\]' WHERE id = \?`, \[pid\]\);\s*trackUpdate\('products', pid, \{ images: \[\] \}\);\s*await saveDatabaseDurably\(\);/.test(m),
+    'ECHO das Leeren wird wie jede Änderung erfasst (nach der Abgleich-Zeile der Anlage mit Fotos kommt diese) — das Echo füllt die Spalte nicht wieder');
   ok(/FROM products p JOIN branches b ON b\.id = p\.branch_id WHERE p\.id = \?/.test(m), 'UMZUG Filiale und Mandant aus der Zeile des Artikels (auch für einen Fernauftrag)');
   // Jeder synchrone Anlageweg mit Fotos geht durch `createProduct`.
   const callers: Array<[string, RegExp]> = [

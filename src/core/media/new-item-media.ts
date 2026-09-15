@@ -91,10 +91,11 @@ export async function drainNewItemMediaCutovers(deps?: NewItemMediaDeps): Promis
 }
 
 async function liveDeps(): Promise<NewItemMediaDeps> {
-  const [{ getDatabase, saveDatabaseDurably }, { ProductMediaCutoverService }, { getStockMediaOrchestrator }] = await Promise.all([
+  const [{ getDatabase, saveDatabaseDurably }, { ProductMediaCutoverService }, { getStockMediaOrchestrator }, { trackUpdate }] = await Promise.all([
     import('../db/database.ts'),
     import('./product-media-cutover.ts'),
     import('./orchestrator.ts'),
+    import('../sync/track.ts'),
   ]);
   type RawDb = { run(sql: string, params?: unknown[]): void; exec(sql: string, params?: unknown[]): Array<{ columns: string[]; values: unknown[][] }> };
   const db = () => getDatabase() as unknown as RawDb;
@@ -110,8 +111,12 @@ async function liveDeps(): Promise<NewItemMediaDeps> {
         orchestrator: await getStockMediaOrchestrator(),
         // Der Vorgang, der den Artikel anlegte, hat ihn schon durabel gespeichert (runOnPrimary /
         // runRemoteCommand) — deshalb kein zusätzliches Speichern VOR dem ersten Bild.
+        // Das Leeren wird wie jede Änderung erfasst: die Abgleich-Zeile der Anlage trägt die volle Zeile
+        // MIT Fotos, und der Primary spielt seine eigenen Änderungen beim nächsten Abholen wieder ein —
+        // ohne diese zweite Zeile füllte das Echo der Anlage die Spalte wieder. So kommt nach ihr diese.
         commitLegacyCleared: async (pid: string) => {
           getDatabase().run(`UPDATE products SET images = '[]' WHERE id = ?`, [pid]);
+          trackUpdate('products', pid, { images: [] });
           await saveDatabaseDurably();
         },
         tenantId: scope.tenantId,
