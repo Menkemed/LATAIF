@@ -1,6 +1,7 @@
 # R7B / PP-12 — Bildwege, Frist nach der echten Speicherung, reguläres Beenden
 
-Stand 15.09.2026 (Abschlussprüfung, Nachtrag) · Basis `0a15565` (PP-12-Abschluss) auf `243e4e6` · Version 0.8.54 ·
+Stand 15.09.2026 (Abschlussprüfung, Nachtrag + Belegpaket) · Basis `0a15565` (PP-12-Abschluss) auf `243e4e6`, Baseline des
+Pakets `d988810` · Version 0.8.54 ·
 Registry 175 (unverändert) · kein Push/Tag/Release. PP-3 … PP-7 gelten als geschlossen und wurden nicht angefasst.
 
 ## 0. Status je Punkt (jeder mit eigenem Beleg; keine Sammel-Aussage)
@@ -12,13 +13,24 @@ Registry 175 (unverändert) · kein Push/Tag/Release. PP-3 … PP-7 gelten als g
 | **G2 Handy-Reparatur / Einkaufs-Inbox ohne Byte-Grenze** | **behoben** — Normalisierung bei der Übernahme (Abholen), Umweg → Quarantäne | § 2; `pp12-pulled-images` 26/0, `r7b-pp12-mobile-takeover` **20/0** |
 | **G3 Artikelbilder in `products.images`** (Einkauf/Auftrag „New Item") | **zusammengeführt** — derselbe Cutover-Dienst wie beim Bearbeiten: Medienspeicher + Vorschau nach dem Commit | § 3; `pp12-new-item-media` 17/0, Mobile-Lauf 20/0, `r7b-pp12-images` **22/0** |
 | Verbliebene `products.images`-Schreiber | **begründet** (kein neues Foto / Migration / Abgleich-Transport) | § 3 Tabelle |
-| **G7 Aufnahmeprofil 800 px (Desktop) vs. 1600 px (Handy)** | **gemessen begründet** (Phasen + Bildqualität); der ursprüngliche 504 neu erklärt | § 4 |
+| **G7 Aufnahmeprofil 800 px (Desktop) vs. 1600 px (Handy)** | **gemessen begründet — Release** (Artikelweg 8 Aufnahmen, Belegweg; Bytes Debug = Release, damit gilt die Qualitätsmessung); der ursprüngliche 504 als Debug-Artefakt erklärt; kein neues Profil | § 4 |
 | **G4 Keine Vorschau für Belegbilder** | begründet, unverändert (Vorschau gibt es nur, wo ein Medienspeicher-Objekt entsteht) | § 2 |
-| **G6 Schlangenwartezeit / weiterlaufende Mutation** | **dokumentiert**, Wiederholungssicherheit belegt; offen (keine Ergebnisabfrage ohne erneutes Senden) | § 5 |
-| **F1 „kein fsync"** | **eingeordnet**: neustartfest ja, stromausfallfest nein (Befund, nicht geändert) | § 6 |
+| **G6 Timeout / Wiederholung derselben Kennung** | **belegt am Callpath**: während des ersten Laufs, nach 504, nach Commit bei verlorener Antwort, nach Neustart → genau eine Wirkung (Replay); Wartezeit in der Schreibreihenfolge zählt gegen die Frist (SSOT korrigiert). Keine neue Ergebnis-API nötig. Offen ausgewiesen: R1–R3 | § 5 |
+| **F2 Handy-Drain-Lease** | **belegt**: 120 s je Auftrag, Token-Besitz; Ablauf WÄHREND der Übernahme gezielt getestet (`drain-handoff` §20 neu, 106/0): alter Besitzer `ready_rejected`, ein Produkt, nichts verloren. Frühere Aussage „läuft bei großer DB ab → `ready_rejected`" korrigiert | § 5a |
+| **F1 Persistenz** | **getrennt eingeordnet**: Neustart/App-Absturz fest; Stromausfall fest außerhalb eines Fensters von Sekunden nach jedem Speichern, darin Verlust der letzten Speicherungen oder unlesbare Datei möglich (pauschales „stromausfallfest nein" korrigiert). Vorbestehend seit `88e1199`, nicht geändert. Offen ausgewiesen: R4 | § 6 |
 | **G5 Normale Befehle 10,7 s bei 451 MB** | **Skalierungsbefund**, offen (keine pauschale Fristerhöhung, kein Speicherumbau) | § 8 |
-| **F2 Handy-Drain-Lease ohne Verlängerung** | Beobachtung, unverändert | § 8 |
 | **Rust `legacy_push_tests::o1_o5_o10`** | **behoben** — Erwartung aus dem kanonischen Manifest (52/36/37), vorbestehend rot seit `ab7f169` | § 9 |
+
+**Bestätigte Restbefunde (offen, mit Auswirkung und Scope; alle vorbestehend, keiner aus PP-12, keiner mit Doppelwirkung am
+Protokoll):**
+
+| # | Befund | Auswirkung | Scope |
+|---|---|---|---|
+| R1 | Die offene Vorgangskennung lebt nur im Speicher der PC2-Maske | wird die Maske nach „keine Antwort" verlassen oder PC2 neu geladen und der Vorgang neu erfasst, entsteht eine zweite Wirkung, falls der erste Lauf committet hatte | alle Fernschreibwege von PC2 (§ 5) |
+| R2 | Nach „keine Antwort" + geändertem Formular antwortet der Primary 409 `not_executed`; der Versuch bleibt absichtlich offen | jeder weitere Klick bekommt denselben Konflikt, bis das Formular zurückgesetzt oder die Maske verlassen wird (dann R1) | PC2-Masken (§ 5) |
+| R3 | Konflikt nach Verdrängung der Kennung aus Rust (> 1024 neuere) oder nach Neustart: Renderer antwortet 500 ohne `outcome` | PC2 zeigt „unbekannt" statt „nicht ausgeführt"; keine Wirkung | Fernbefehle (§ 5) |
+| R4 | Eine 0-Byte-`lataif.db` öffnet als LEERE Datenbank statt `DB_RECOVERY_REQUIRED` | nach Stromausfall im Fenster (oder Eingriff von außen) startet die App leer, ohne Wiederherstellungshinweis | Start des Primary (§ 6) |
+| G5 | Ganz-DB-Speichern skaliert mit der Dateigröße | normale Befehle bei ~450 MB zur Hälfte Speichern; mit belegter Schlange 504 `unknown` (Wirkung genau einmal) | alle schreibenden Befehle (§ 8) |
 
 ## 1. Reguläres Beenden bei großer Datenbank (F4)
 
@@ -168,7 +180,8 @@ Altgold-`keep`, Medienspeicher-Artikel 99 526 B + 16 337 B.
 **Messaufbau** (`_tmp-r7b-capture-measure`, im Fenster des Primary — derselbe WebView-Canvas wie die Masken, Debug-Build):
 Vorlage 3000×2000 (Kamera-JPEG q0,92); Desktop-Fassung wie `captureImage` (≤ 800 px, q0,7, weiß hinterlegt), Handy-Fassung wie
 `resizePhoto(file, 1600, 0.85)`; jede durch `media_normalize_record_image`; Qualität = PSNR des GESPEICHERTEN Bilds gegen die
-Vorlage in der Anzeigegröße 800×533 und 1600×1067. Release-Zeiten aus der vorhandenen Bench (`record_image`, `--release`).
+Vorlage in der Anzeigegröße 800×533 und 1600×1067. Die Zeiten DIESER Tabelle sind Debug (Fenster des E2E-Programms); die
+Begründung weiter unten stützt sich allein auf die Release-Messung.
 
 | Vorlage | Fassung | gesendet | normalisiert (Debug) | gespeichert | PSNR 800 px | PSNR 1600 px |
 |---|---|---|---|---|---|---|
@@ -181,13 +194,30 @@ Vorlage in der Anzeigegröße 800×533 und 1600×1067. Release-Zeiten aus der vo
 | | Desktop 800 / 0,7 | 80 535 B | 1,18 s | 95 102 B 800×533 | 27,57 dB | 26,16 dB |
 | | gespeicherte Form erneut | 95 102 B | 0,27 s | Byte für Byte gleich | — | — |
 
-Release (Bench): Kamera 3000×2000 969 ms, 1600-px-Fassung 1 609 ms, 800-px-Fassung 72 ms (Hauptbild; Vorschau 292 / 80 / 24 ms),
-Rauschen-Obergrenze 4 279 ms. Debug ist damit 16–68× langsamer als Release. Eine stärker verrauschte Kamera-Vorlage (Rauschen
-±36 bzw. ±60) kam im Debug-Build zweimal nicht innerhalb von 3 bzw. 20 min durch den Normalisierer (Protokolle im Anhang) — die
-Obergrenze ist deshalb nur als Release-Wert belegt.
+**Release-Messung an HEAD** (`bench_capture_profile`, `record_image.rs`, `#[ignore]`, in diesem Paket ergänzt; je Fassung 8
+verschiedene fotoähnliche Aufnahmen mit APP1-Segment — also nicht die gespeicherte Form, sie werden gerechnet wie die
+Desktop-Aufnahme im Fenster; jeder Weg als Stapel gemessen, nicht aus Einzelzeiten addiert; 3 Läufe einzeln, Anhang
+`release-bench_capture-profile_*.log`):
+
+| Weg | 800 px / q0,7 | 1600 px / q0,85 |
+|---|---|---|
+| **Artikel** am Primary IM Befehl: 8 × (Hauptbild + Vorschau), genau `ingest.rs` (rechnet jedes Foto) | **0,85–0,89 s** (105–111 ms/Foto); Hauptbild ≤ 99 630 B 800×533, Vorschau ≤ 18 088 B | **13,7–13,9 s** (1,72–1,74 s/Foto); Hauptbild ≤ 99 245 B 1156×771, Vorschau ≤ 13 447 B |
+| **Belegbild** am aufnehmenden Rechner (`normalize_record_image`) | 78–80 ms/Foto → 800×533 | 1,60–1,62 s/Foto → 1156×771 |
+| dieselben Aufnahmen im Debug-Build (1 Lauf) | Artikel 15,6 s, Beleg 1,0 s/Foto | Artikel 214,5 s, Beleg 23,8 s/Foto |
+| Hash der Ausgabe, Debug = Release | `8070da3411b8` / `86e6c63024db` | `acb1c21c4ffe` / `2328372988e8` |
+
+Debug ist auf diesen Wegen 15–18× langsamer. Die Ausgaben sind in beiden Builds Byte für Byte gleich — die im Fenster (Debug)
+gemessene Bildqualität gilt damit für Release. Obergrenze (Rauschen 3000×2000, `bench_normalize_times`, 3 Läufe an `3035f49`):
+4,30–4,34 s Hauptbild + 0,49–0,50 s Vorschau; Kamera 3000×2000: 0,99–1,03 s. In `bench_normalize_times` läuft die synthetische
+800-px-Aufnahme OHNE Metadaten als gespeicherte Form durch (5–9 ms, Byte für Byte) — so verhält sich nur der Belegweg; der
+Artikelweg rechnet jedes Foto. Die früher zitierten „72 ms" stammen aus einem Zwischenstand von `record_image.rs` vor dem Commit
+`02c976b` und sind ersetzt. Eine stärker verrauschte Kamera-Vorlage (Rauschen ±36 bzw. ±60) kam im Debug-Build zweimal nicht
+innerhalb von 3 bzw. 20 min durch den Normalisierer (Protokolle im Anhang) — die Obergrenze ist deshalb nur als Release-Wert
+belegt.
 
 **Der ursprüngliche 504 neu eingeordnet:** im ersten Bildlauf rechnete der Primary zwei ROHE Kamerafotos beim Abholen, im
-Debug-Build — gemessen ~62 s je Foto. Die 20 s eines normalen Befehls konnten dabei nicht halten. Im Release wären es ~2 × 1 s.
+Debug-Build — gemessen ~62 s je Foto. Die 20 s eines normalen Befehls konnten dabei nicht halten. Im Release sind es
+~2 × 1 s (Kamera 3000×2000: 0,99–1,03 s).
 Der 504 war also ein Debug-Artefakt des Rückfallwegs (Primary rechnet) und **begründet die 800 px nicht**. Die Befehlsphasen am
 selben Programm (Debug, kleine Datenbank; „fertig" = die Wirkung steht in der Datei):
 
@@ -201,68 +231,160 @@ selben Programm (Debug, kleine Datenbank; „fertig" = die Wirkung steht in der 
 
 Die Phasen des 504 sind damit gemessen, nicht aus Einzelzeiten abgeleitet: ~124 s Normalisieren im Befehl gegen 20 s Frist.
 Mit vornormalisierten Fotos (heutiger Weg) liegt dieselbe Reparatur bei 0,7–0,8 s, gleich welche Fassung. Im Debug-Build reißt
-auch der 800-px-Artikel knapp (21,1 s); im Release (16–68× schneller) nicht — der 1600-px-Artikel (405,6 s Debug) ist der Fall,
-den § „Was die 800 px tatsächlich begründet" beschreibt.
+auch der 800-px-Artikel knapp (21,1 s); im Release (Artikelweg gemessen 0,85–0,89 s für 8 Aufnahmen) nicht — der
+1600-px-Artikel (405,6 s Debug, 13,7–13,9 s Release) ist der Fall, den der folgende Absatz beschreibt.
 
-**Was die 800 px tatsächlich begründet (Release-Zahlen):** die Aufnahme (`ImageUpload`) ist für Belegbilder UND Artikelbilder
-dieselbe. Artikelbilder vom zweiten Rechner reisen roh und werden IM Befehl am Primary normalisiert (Hauptbild + Vorschau,
-Medienspeicher): 8 Fotos × (1 609 + 80) ms ≈ 13,5 s bei 1600 px gegen 8 × (72 + 24) ms ≈ 0,8 s bei 800 px — und dazu 2 + 8
-Ganz-DB-Speicherungen (§ 8). Mit 1600 px bleibt einem Artikel mit 8 Fotos schon bei kleiner Datenbank kaum Luft (≈ 13,5 s
-Bilder + 10 × ~0,1 s Speichern ≈ 14,5 s von 20 s); mit 800 px sind es ≈ 1,8 s. Ab einigen hundert MB reißen die Speicherungen
-die Frist bei beiden Fassungen (§ 8, F3) — die Aufnahmegröße ist dort nicht mehr der Engpass. Belegbilder rechnet
-der aufnehmende Rechner VOR der Frist; dort kosten 1600 px ~1,6 s Wartezeit je Foto am aufnehmenden Rechner (6 Reparaturfotos ≈
-10 s). Das Handy darf 1600 px: seine Fotos werden beim Abholen bzw. im Drain gerechnet, ohne Brückenfrist, und seine Aufnahme ist
-die Vorlage der KI-Erkennung.
+**Was die 800 px begründet (nur Release-Messung):** die Aufnahme (`ImageUpload`, `capture-profile.ts`) ist für Beleg- UND
+Artikelbilder dieselbe. Artikelbilder vom zweiten Rechner reisen roh und werden IM Befehl am Primary gerechnet (Hauptbild +
+Vorschau). Gemessen für einen Artikel mit 8 Aufnahmen: **13,7–13,9 s bei 1600 px gegen 0,85–0,89 s bei 800 px** — dazu 2 + 8
+Ganz-DB-Speicherungen (bei kleiner Datenbank je ~0,1 s, § 8) und jede Wartezeit in der Schreibreihenfolge, die gegen die Frist
+zählt (§ 5). Mit 1600 px bleiben von 20 s schon bei kleiner Datenbank ~5 s für Speichern und Schlange — ein laufender
+Selbst-Abgleich (2 Ganz-DB-Speicherungen) oder eine wachsende Datei reißt die Frist (504 `unknown`); mit 800 px bleiben ~18 s. Ab
+einigen hundert MB reißen die Speicherungen die Frist bei beiden Fassungen (§ 8, G5) — dort ist die Aufnahmegröße nicht mehr
+der Engpass. Belegbilder rechnet der aufnehmende Rechner VOR der Frist: 1600 px kosten dort 1,60–1,62 s Wartezeit je Foto
+(6 Reparaturfotos ≈ 9,7 s) gegen 78–80 ms. Das Handy darf 1600 px: seine Fotos werden beim Abholen bzw. im Drain gerechnet,
+ohne Brückenfrist (Drain: gegen die Lease läuft nur das Vorbereiten, ≤ 8 × ~1,7 s ≪ 120 s, § 5a), und seine Aufnahme ist die
+Vorlage der KI-Erkennung.
 
 **Was die 800 px kosten (gemessen):** bei gleicher Grenze (≤ 100 000 B) ist das gespeicherte Belegbild 800×533 statt 982×655
 und 3,4 dB schlechter in der 800-px-Anzeige (1,7 dB in der 1600-px-Anzeige): die 800-px-Aufnahme wird vom Normalisierer ein
 zweites Mal kodiert (q0,7 → Qualitätsleiter ab 85, Generationsverlust), die 1600-px-Aufnahme nur einmal verkleinert.
 Entscheidung: 800 px bleiben (gemeinsame Aufnahme, Frist des Artikelwegs). Ein eigenes 1600-px-Profil nur für Belegbilder
-(Rechenzeit am aufnehmenden Rechner, keine Frist) wäre möglich — das ist eine Produktentscheidung und hier nicht umgesetzt.
+(Rechenzeit am aufnehmenden Rechner, keine Frist) wäre möglich — das ist eine Produktentscheidung und wird für diesen Abschluss
+ausdrücklich nicht eingeführt.
 
-## 5. Fristen: Beginn, Ende, Schlange, weiterlaufende Mutation, Wiederholung
+## 5. Timeout und Wiederholung derselben Vorgangskennung (tatsächliche Callpaths)
 
-- **Beginn:** `command_execute` liest den HTTP-Rumpf, prüft Anmeldung und Kennung, rechnet `timeout_for(op, payload, db_bytes)`;
-  die Frist beginnt in `Bridge::dispatch` mit der Zustellung ans Fenster (`tokio::time::timeout(timeout, rx)`). Das Senden des
-  Rumpfs (bei 33 MB Base64 spürbar) liegt davor und zählt nicht.
-- **Ende:** die Antwort `bridge_reply` — der Renderer sendet sie erst nach `runRemoteCommand`: Transaktion, Commit, Kennungsnachweis
-  in derselben Transaktion, `ensureDurable` (ganze DB). Frist ≠ Erfolg: bei Ablauf 504 `BRIDGE_TIMEOUT`, Ausgang **unknown**.
-- **Schlange:** die Zustellung reiht den Auftrag in die EINE Schreibreihenfolge (`runExclusive`, FIFO). Wartezeit hinter anderen
-  Aufträgen — dem Selbst-Abgleich (bis 2 Ganz-DB-Speicherungen), einer Texterkennung, dem Normalisieren abgeholter Handyfotos —
-  **verbraucht die Frist**; die Formel hat dafür keinen Anteil. Gemessen (Baseline, 518 MB): kleiner Upload 504 nach 20 s, fertig
-  nach 42 s; HEAD mit abgeleiteter Upload-Frist: 200 nach 40,3 s bzw. 42,5 s.
-- **Nach Ablauf läuft die Mutation weiter:** Rust nimmt den Wartenden heraus (`take_pending`), der Renderer arbeitet den Auftrag zu
-  Ende, committet, speichert durabel; seine Antwort findet niemanden (`reply not delivered`). Die Wirkung kann also schon
-  gespeichert sein — genau das sagt `unknown`.
-- **Wiederholungssicherheit (bestehend):** dieselbe `commandId` mit derselben Identität wird angenommen (`IdentityStore::begin`,
-  `in_flight`), wartet in der Schreibreihenfolge hinter dem ersten Lauf und findet dessen Nachweis in der Transaktion
-  (`lookupCommand` → `replay`) → das eingefrorene Ergebnis, keine zweite Wirkung; dieselbe Kennung für etwas anderes →
-  `BRIDGE_COMMAND_ID_CONFLICT`. Belege: `test/bridge/write-foundation` (Nachweis/Replay, `CENTRAL_C3_…_PROVED`),
-  `remote-invoice-create` 131/0, `service-documents` 167/0 (jetzt gelaufen); E2E `r7b-pp12-images` (dieselbe Kennung → dieselbe
-  Reparatur, genau eine), `r7b-pp12-large-db` (jede Wirkung genau einmal, auch nach 504). Offen bleibt: eine Ergebnisabfrage
-  ohne erneutes Senden gibt es nicht.
+**Weg** (Stand HEAD): PC2 `CommandSaveAttempt.send` (`client-command-save.ts`) → `POST /api/command` → `routes.rs`
+`command_execute` (Rumpf, Anmeldung, Identität, `timeout_for(op, payload, db_bytes)`) → `Bridge::submit_as` →
+`IdentityStore::begin` (`bridge.rs:792-806`) → `Bridge::dispatch` (`bridge.rs:978-1005`: je Zustellung eine frische `op_id`,
+eigener `pending`-Eintrag, `sink.deliver`, `tokio::time::timeout(timeout, rx)`) → Renderer `bridge-listener` →
+`command-registry.ts:238` `runExclusive(handler)` (EINE Schreibreihenfolge, FIFO) → `runRemoteCommand` (`mutation-engine.ts`:
+BEGIN, `lookupCommand` `:138`, Handler, `recordCommand` `:152` in DERSELBEN Transaktion wie die Wirkung, COMMIT, `ensureDurable`
+`:213`) → `bridge_reply` → HTTP (`routes.rs:255-279`); danach `IdentityStore::finish` (`bridge.rs:935-938`).
 
-## 6. Persistenz: „kein fsync" gegen den Vertrag
+- **Frist:** Beginn = Zustellung in `dispatch`; Ende = `bridge_reply`, gesendet erst nach `ensureDurable` (ganze DB). Das Senden
+  des Rumpfs liegt davor und zählt nicht. **Die Wartezeit in `runExclusive` hinter anderen Aufträgen** (Selbst-Abgleich bis 2
+  Ganz-DB-Speicherungen, Texterkennung, Normalisieren abgeholter Handyfotos) liegt zwischen Beginn und Ende und **zählt gegen die
+  Frist**; die Formel (§ 7) hat dafür keinen Anteil. Frühere SSOT-Sätze, die sich anders lesen ließen, sind ausdrücklich
+  korrigiert (`central-ui-parity.md`, R7B-Review „misst nur das Warten ab Übergabe an das Fenster" und PP-12 „die Frist enthält
+  keine Wartezeit hinter anderen Aufträgen"). Gemessen (518 MB, Abgleich unterwegs): kleiner Upload Baseline 504 nach 20 s,
+  fertig nach 42 s; HEAD mit abgeleiteter Upload-Frist 200 nach 40,3–42,5 s.
+- **Frist ≠ Erfolg:** bei Ablauf 504 `BRIDGE_TIMEOUT`, `outcome: unknown`; Rust nimmt nur den Wartenden heraus (`take_pending`),
+  der Renderer arbeitet den Auftrag zu Ende, committet, speichert; seine Antwort findet niemanden (No-op).
 
-Vollständiger Speicherpfad der Geschäftsdatenbank: `saveDatabaseDurably` → Save-Coalescer (ein Schreiben gleichzeitig) →
-`db.export()` → `persistDb` → `atomicWrite`: SQLite-Kopfprüfung → Stale-Guard (Größe + mtime) → `plugin:fs|write_file`
-(`tauri-plugin-fs 2.5.0` `write_file_inner`: `OpenOptions` + `write_all`, **kein `sync_all`**) → Größenprüfung der Temp-Datei →
-`plugin:fs|rename` (`std::fs::rename` = `MoveFileExW(REPLACE_EXISTING)`, **ohne `WRITE_THROUGH`**) → neue Signatur.
-Der Vertrag im Code (`saveDatabaseDurably`, M2): „dauerhaft auf die aktive DB-Datei geschrieben". Einordnung:
+| Fall | Verhalten am Callpath | Ergebnis | Beleg (vorhandene Tests) |
+|---|---|---|---|
+| **1** dieselbe Kennung + derselbe Rumpf, **während der erste Lauf noch arbeitet** | `begin`: gleiche Identität → `in_flight += 1`, **zweite Zustellung** mit eigener `op_id` (der erste Wartende wird weder überschrieben noch übernommen); im Renderer wartet sie in `runExclusive` hinter dem ersten; ihr `lookupCommand` findet dessen Nachweis → `replay` | 200, eingefrorenes Ergebnis + `replayed: true`, **keine zweite Wirkung**; dauert der erste länger als die Frist der Wiederholung, auch hier 504 `unknown` — weiter ohne zweite Wirkung | Rust `bridge_tests`: `the_same_id_with_the_same_payload_is_a_retry`, `a_running_command_is_never_evicted`; E2E `c5-operational-acceptance` CONC-MONEY (zwei gleichzeitige Sendungen derselben Kennung: genau 30 gebucht, eine Zahlungszeile) |
+| **1b** dieselbe Kennung, **anderer Rumpf**, solange Rust sie kennt | `begin` → `CommandIdConflict` VOR der Zustellung | 409 `BRIDGE_COMMAND_ID_CONFLICT`, `outcome: not_executed` | `the_same_id_with_a_different_payload_is_refused_before_dispatch`, `a_changed_identity_still_conflicts_even_with_the_same_payload`, `within_the_retention_a_changed_payload_still_conflicts` |
+| **2** erster Lauf in Rust **abgelaufen (504)**, Renderer arbeitet weiter | `finish` senkt nur `in_flight`, die Kennung bleibt gemerkt (bis 1024 neuere, laufende nie verdrängt); Wiederholung wie Fall 1 | Replay, keine zweite Wirkung | `silence_ends_in_a_bounded_failure_and_leaves_nothing_behind`, `a_reply_nobody_waits_for_changes_nothing`, `a_lost_reply_is_unknown_not_failed`, `the_identity_store_stays_bounded`; `write-foundation` RETRY |
+| **3** **committet und durabel, Antwort verloren** (504, Verbindung) | Nachweis `remote_command_ledger` (PK `command_id`) in derselben Transaktion; `lookupCommand` vergleicht Mandant, Filiale, Benutzer, op, `payloadHash` (`command-ledger.ts:92-121`) | `completed` → 200, dasselbe Ergebnis + `replayed: true`; ein eingefrorenes fachliches Nein → wieder dasselbe 409 | `write-foundation` RETRY/CONFLICT; `remote-invoice-create` RETRY (keine zweite Bestands-/Hauptbuchbuchung), PERSIST (Speichern scheiterte → die Wiederholung begleicht zuerst die Speicherschuld, dann Replay); E2E `r7b-platform-hardening` LOST (erste Antwort verworfen, der Primary HAT ausgeführt, die Wiederholung bekommt dieselbe Wirkung) |
+| **4** Primary **neu gestartet** | `IdentityStore` (Speicher) ist weg, der Nachweis liegt in `lataif.db` → Replay über `lookupCommand`; starb der Prozess zwischen COMMIT und Speichern, fehlen Wirkung UND Nachweis gemeinsam → die Wiederholung läuft genau einmal (`fresh`) | genau eine Wirkung | `write-foundation` RESTART A/B, `remote-invoice-create` RESTART |
+| **5** PC2 | kein automatisches Wiederholen (ein `fetch` je Klick); `CommandSaveController.beginAttempt` gibt bei offenem Versuch DIESELBE Kennung aus, erst eine beantwortete Anfrage schließt ihn | die Wiederholung ist der erneute Klick | `remote-invoice-create` CLIENT, `r4b-write-adapter` |
 
-- **Neustartfest: ja.** Nach dem Umbenennen steht der neue Stand vollständig im Dateisystem (Seiten-Cache des Betriebssystems);
-  ein Absturz der Anwendung, ein regulärer oder erzwungener Prozess-Exit ändern daran nichts — der nächste Start liest genau diese
-  Datei (so belegt in jedem Neustart-Nachweis: Beenden → Neustart → alles da). Die Temp-Datei schützt gegen einen abgebrochenen
-  Schreibvorgang: die alte Datei bleibt bis zum Umbenennen unberührt.
-- **Stromausfall-/Betriebssystemabsturz-fest: nein.** Ohne `FlushFileBuffers` kann das Umbenennen (Metadaten, im NTFS-Journal)
-  vor den Datenseiten auf der Platte stehen. Fällt der Strom in diesem Fenster (typ. Sekunden nach jedem Speichern), kann die
-  Datei alt, leer oder beschädigt sein. Erkennung: der Start weist eine nicht lesbare Datenbank ab (`DB_RECOVERY_REQUIRED`,
-  C6-P1) statt einen leeren Bestand anzulegen; eine beschädigte, aber lesbare Seite würde nicht erkannt (keine
-  `integrity_check` beim Start). Rettung: Sicherung. Rusts eigene Dateien (Medienspeicher, Datenort, Staging, Journale) rufen
-  `sync_all` (+ Verzeichnis-Sync); nur die Geschäftsdatenbank nicht — nach einem Stromausfall können Mediendateien also neuer sein
-  als die Datenbank (verwaist → Aufräumen mit Quarantäne).
-- Nicht geändert (Umfang: kein allgemeiner Speicherumbau). Ein `fsync` bräuchte einen eigenen Rust-Befehl (Temp schreiben +
-  `sync_all` + Umbenennen + Verzeichnis-Sync) und kostet bei 500 MB zusätzliche Sekunden je Speichern.
+**Ergebnis:** jede Kombination endet in genau einer Wirkung; die „Ergebnisabfrage" ist die Wiederholung selbst (Replay). Eine
+neue Ergebnis-API ist für die Wiederholungssicherheit nicht nötig. Die Kette „Rust 504 → Renderer schließt ab → Wiederholung =
+Replay" ist durch ihre Glieder belegt (Tabelle), nicht als ein E2E-Ablauf.
+
+**Offen ausgewiesen (bestätigt am Code, vorbestehend, keine Doppelwirkung am Protokoll, nicht geändert):**
+- **R1** Die offene Kennung lebt nur im Speicher der Maske (`shared-write.ts:128` `useMemo`, `:199` `useRef`). Verlässt der
+  Benutzer nach „keine Antwort" die Maske oder lädt PC2 neu und erfasst den Vorgang erneut, bekommt er eine neue Kennung —
+  hatte der erste Lauf committet, entsteht eine zweite Wirkung. Die Oberfläche sagt an dieser Stelle „may still be working …
+  press again". Behebung wäre eine dauerhafte offene Kennung je Maske (Produktentscheidung).
+- **R2** Der Rumpf wird bei jedem Klick neu gebaut. Nach „keine Antwort" + geändertem Formular antwortet der Primary 409
+  `not_executed`; `send` gibt `not_executed` zurück, der Versuch bleibt absichtlich offen (der erste Ausgang ist weiter
+  unbekannt) → jeder weitere Klick bekommt denselben Konflikt, bis das Formular zurückgesetzt oder die Maske verlassen wird.
+- **R3** Nach Verdrängung der Kennung aus Rust (> 1024 neuere) oder nach Neustart meldet der Renderer den Konflikt als
+  `CommandNotEvaluated` → 500 ohne `outcome`; PC2 zeigt „unbekannt" statt „nicht ausgeführt".
+
+## 5a. Handy-Drain-Lease: Dauer, Geltung, Ablauf während der Übernahme
+
+- **Dauer:** `MOBILE_DRAIN_LEASE_SECONDS = 120` (`mobile-upload-drain.ts:38`), beim Claim übergeben (`:820`); Rust klemmt auf
+  1…3600 s (`lib.rs:2295-2296`). Nie verlängert (`renew` existiert, hat keinen Aufrufer).
+- **Geltung:** je Handy-Auftrag (`mobile_upload_claim`, PK Mandant/Filiale/Benutzer/`upload_event_id`); Besitz = frisches
+  `claim_token` je Claim.
+- **Wo sie zählt:** beim Claim (ein `processing`-Auftrag mit abgelaufener Lease ist wieder zu haben, `mobile_upload.rs:1124/1143`,
+  neues Token `:1153-1154`) und beim Vorbereiten jedes Fotos (`lease_until >= now`, `:743`). `mark_ready`, `release`,
+  `quarantine` prüfen nur das Token (`:1310-1340`): ein Besitzer mit abgelaufener Lease darf fertig machen, solange niemand
+  übernommen hat.
+- **Reihenfolge der Übernahme:** Claim → Fotos vorbereiten (Rust, Lease-geprüft) → Produkt + Quittung + Changelog/Audit +
+  Ingest-Aufträge in EINEM durablen Checkpoint → Medien veröffentlichen → Prüfen (`verifyReady` + Dreifachabgleich
+  Quittung/Batch/Galerie) → `markReady` (Rust, eine Transaktion: Auftrag `ready`, Claim gelöscht).
+- **Dauer einer Übernahme gegen die Lease:** gegen die Lease läuft nur das Vorbereiten: ≤ 8 Fotos (`MAX_UPLOAD_IMAGES`) ×
+  Release-Obergrenze 4,3 s + 0,5 s (§ 4, Rauschen) ≈ 39 s < 120 s. Die Ganz-DB-Speicherungen danach (518 MB: je ~13 s) zählen
+  für `ready` nicht gegen die Lease (nur Token). **Korrektur** der früheren Aussage (§ 8 im Stand `3035f49`: „mit 2 + N
+  Ganz-DB-Speicherungen kann sie bei großer DB ablaufen (`ready_rejected`)"): Ablauf allein lehnt nichts ab; `ready_rejected`
+  gibt es nur, wenn ein anderer Claimer übernommen hat.
+
+| Gefahr | Schutz | Beleg |
+|---|---|---|
+| veralteter Besitzer | Übernahme vergibt ein neues Token; `mark_ready` mit altem Token → `Rejected` (B arbeitet noch) bzw. `AlreadyReady` (B fertig, gleiche Kennungen) — nie ein zweiter Übergang; `release`/`quarantine` mit altem Token wirken nicht; `ready_rejected` beendet die Runde | Rust `expired_claim_is_taken_over_and_old_token_is_stale`, `processing_claim_survives_reopen_and_reclaims_after_expiry`, `prepared_provenance_full_binding_deterministic_and_claim_gated` (abgelaufene Lease → kein Vorbereiten); TS `drain-handoff` §9, **§20 (neu)** |
+| doppelte Übernahme | Produktkennung = `entity_id` des Auftrags, `products.id` PK; Quittung PK + `INSERT OR IGNORE` im selben Checkpoint (`productStore.ts:965`); ein zweiter Claimer findet die Quittung → Resume auf DASSELBE Produkt | Rust `claim_accepted_then_mark_ready_exactly_once`; `drain-handoff` §2 (Absturz nach Checkpoint → Resume), §9, §20 |
+| Verlust | `ready` erst nach geprüftem, durablem Produkt; Speichern gescheitert → `release`; `pending` → `release` (Resume); Staging-Dateien bleiben bis `ready` (Aufräumen nur `conflict`/`quarantined`/verwaist, nach Karenz) | `drain-handoff` §2, §19 (Umbindung während des Laufs → freigegeben, weiter zu haben), §20 |
+
+**Gezielter Test der einen Beweislücke:** bisher lief kein Test die Übernahme des alten Besitzers bis zu ihrem eigenen
+abgelehnten `ready` (§9 legte A vollständig an, BEVOR B übernahm, und rief `markReady` direkt). Neu `drain-handoff` **§20**: A
+übernimmt und legt durabel an; WÄHREND A prüft, läuft die Lease ab (+121 s) und B übernimmt mit neuem Token; A's Saga endet
+`ready_rejected`, ohne B's Claim anzufassen (Auftrag bleibt `processing` bei B); B setzt fort (`resumed`) → `ready`; genau ein
+Produkt, eine Quittung, ein Changelog, ein Audit, ein Batch (2 Aufträge), beide Fotos in der Galerie; ein spätes `ready` mit A's
+altem Token → `already_ready`, ändert nichts. `node test/media04b2a2/drain-handoff.test.ts` **106/0** (vorher 94/0).
+Wann ein zweiter Claimer überhaupt entsteht: im selben Fenster verhindert der Single-Flight das; nur ein neuer Worker (Epoche,
+Filiale oder Bindungsrevision gewechselt) oder ein neu gestartetes Fenster (dann ist A tot) claimt.
+
+Nicht bestätigt, nicht geändert (Verdacht, kein Umbau): (a) Vorbereiten > 120 s — nur im Debug-Build erreichbar — endet in
+`CLAIM_INVALID` → Freigabe → derselbe Auftrag wird ohne Verlängerung erneut versucht; (b) zwei Worker zugleich UND A's
+Checkpoint scheitert, nachdem B die noch nicht gespeicherte Quittung gesehen hat → B würde den Auftrag in Quarantäne setzen.
+Beides braucht mehrere seltene Bedingungen zugleich; nicht nachgestellt.
+
+## 6. Persistenz: regulärer Neustart und Stromausfall getrennt
+
+**Speicherpfad und Vertrag (vorbestehend, unverändert):** `saveDatabaseDurably` (M2, `513bd1b` 14.07.2026: das Versprechen
+erfüllt sich erst, wenn der Stand „dauerhaft auf die aktive DB-Datei geschrieben" ist, `database.ts:3351-3356`) →
+Save-Coalescer → `db.export()` → `persistDb` → `atomicWrite` (`atomic-persist.ts:114-157`, eingeführt `88e1199` 08.07.2026):
+Kopfprüfung → Stale-Guard (Größe + mtime) → `plugin:fs|write_file` in `lataif.db.tmp-<Sitzung>-<n>` (`tauri-plugin-fs 2.5.0`
+`commands.rs:1090-1170`: öffnen + `write_all`, **kein `sync_all`**) → Größenprüfung → `plugin:fs|rename` (`commands.rs:830`
+`std::fs::rename` = `MoveFileExW(REPLACE_EXISTING)`, **ohne `WRITE_THROUGH`**). „Dauerhaft" heißt in diesem Vertrag: in der
+aktiven Datei im Dateisystem — nicht „auf den Datenträger geleert". Kein Dokument des Hauses sagt der Geschäftsdatenbank
+Stromausfallfestigkeit zu (Suche Stromausfall/power loss/FlushFileBuffers: nur der Datenort-Umzug,
+`data-root-i1-contract.md:430-431`, dessen Rust-Weg `sync_all` nutzt). Startschutz C6-P1 (`9a5505c` 07.09.2026): eine
+vorhandene, nicht lesbare/öffenbare Datei → `DB_RECOVERY_REQUIRED`, nichts wird ersetzt.
+
+**A. Regulärer Neustart, App-Absturz, erzwungenes Prozessende — fest.** Nach dem Umbenennen steht der neue Stand vollständig
+im Dateisystem (Cache des Betriebssystems); jedes Ende des Prozesses lässt ihn stehen, der nächste Start liest genau diese Datei.
+Ein abgebrochenes Schreiben lässt die alte Datei unberührt (Temp + Umbenennen). Belegt in jedem Neustart dieses Pakets
+(`r7b-pp12-shutdown` 518 MB: Beenden → Neustart → Buchungen, Fotos Byte für Byte, Dokumente; Mobile- und Bildlauf ebenso).
+
+**B. Stromausfall / Betriebssystemabsturz — fest außerhalb eines kurzen Fensters, darin nicht garantiert.** Das korrigiert die
+pauschale Aussage „stromausfallfest: nein" / „übersteht keinen Stromausfall" (Stand `3035f49` § 0 und § 6, SSOT-Zeile F1,
+Abschlussbericht):
+- **Außerhalb des Fensters:** Windows schreibt geänderte Cache-Seiten selbsttätig zurück (Lazy Writer: jede Sekunde ein Achtel
+  der schmutzigen Seiten — dokumentiertes Verhalten, hier nicht gemessen) und führt das NTFS-Journal für die Metadaten. Liegt
+  das letzte Speichern einige Sekunden zurück, steht der Stand auf dem Datenträger; ein Stromausfall verliert dann nichts.
+- **Im Fenster** (Sekunden nach einem Speichern, bei großer Datei länger):
+  1. Umbenennen noch nicht im Journal → der vorige Stand; verloren sind die letzten Speicherungen, obwohl die Oberfläche sie
+     bestätigt hatte.
+  2. Umbenennen im Journal, Datenseiten noch nicht → nicht geschriebene Bereiche lesen sich als Nullen. Kopf genullt → sql.js
+     `file is not a database` → `DB_RECOVERY_REQUIRED` (erkannt, Hinweis auf Wiederherstellen). Kopf da, spätere Seiten
+     genullt → öffnet; erst der Zugriff meldet `database disk image is malformed` — beim Start **nicht** erkannt (keine
+     `integrity_check`).
+  3. **R4 (bestätigt, vorbestehend):** eine 0-Byte-Datei öffnet sql.js als LEERE Datenbank; `loadSavedDb` liefert `bytes`,
+     `initDatabase` legt Schema und Migrationen an → die Anwendung startet leer statt mit `DB_RECOVERY_REQUIRED` — entgegen dem
+     C6-P1-Satz „Ein neuer Bestand entsteht ausschließlich, wenn BEWIESEN ist, dass es keine Datei gibt" (`database.ts:2853-2856`).
+     Im normalen Betrieb entsteht keine 0-Byte-Datei (Größenprüfung vor dem Umbenennen), nur durch Stromausfall/Absturz im Fenster
+     oder Eingriff von außen. Diagnose (sql.js 1:1 wie im Start): 0 B → geöffnet, Schema angelegt; 4096 Nullbytes → `file is not a
+     database`; gültige Datei ab Seite 2 genullt → geöffnet, `SELECT` → `malformed` (Anhang `persistenz-diagnose.log`).
+     Behebung wäre klein (Kopf-/Längenprüfung beim Laden → Recovery-Weg), ändert aber das Startverhalten → nicht in diesem
+     Abschluss, offen.
+- **Kein Vorgängerstand:** das Umbenennen ersetzt die Datei, `.bak`/Rotation gibt es nicht. Sicherungen entstehen auf Anstoß des
+  Owners (`schedule_backup_snapshot`, `lib.rs:2699`, beim nächsten Start ausgeführt) und vor zerstörenden Aktionen; auch sie
+  schreiben ohne `sync_all` (`media/backup.rs:195`; nur die Absichtsdatei `:311`).
+- Rust-eigene Dateien (Medienspeicher `ingest.rs`/`storage.rs`, Handy-Staging `mobile_upload.rs`, Datenort, Geräte-Identität,
+  Journale) rufen `sync_all`; der Verzeichnis-Sync ist best-effort. Nach einem Stromausfall können Mediendateien daher neuer sein
+  als die Datenbank → verwaist → Aufräumen mit Quarantäne.
+
+**Einordnung:** vorbestehend seit `88e1199` (08.07.2026), nicht Teil von PP-12, nicht geändert (kein allgemeiner
+Speicherumbau). Ein `fsync` bräuchte einen eigenen Rust-Befehl (Temp + `sync_all` + Umbenennen + Verzeichnis-Sync) und kostet
+bei 500 MB zusätzliche Sekunden je Speichern (gegen G5).
 
 ## 7. PP-12 — Frist nach der echten Speicherung (unverändert seit `1479b09`)
 
@@ -285,15 +407,13 @@ sonst    = 20 s
 Mit laufendem Selbst-Abgleich (dieser Nachtrag, 518 MB): größtes Dokument 42,6 s bei Frist 182,9 s → 200; mit der alten Frist
 (Baseline) 504 nach 30,2 s, fertig nach 30,8 s.
 
-## 8. Skalierungsbefund normale Befehle (G5) und Handy-Drain (F2)
+## 8. Skalierungsbefund normale Befehle (G5)
 
 Jeder schreibende Befehl speichert die ganze Datenbank (`db.export()` + Schreiben): gemessen 0,1 s (2 MB), 5,3 s (203 MB),
 10,6–12,7 s (451 MB). Die Frist normaler Befehle bleibt 20 s — bei ~450 MB ist die Hälfte davon Speichern; eine Wartezeit hinter
 dem Selbst-Abgleich (bis 2 × 13 s bei 518 MB) reißt sie (504 `unknown`, Wirkung genau einmal, s. § 5). Das ist ein
 Skalierungsbefund des Ganz-Datenbank-Speicherns, kein Fehler einzelner Wege; daraus werden hier weder eine pauschale
-Fristerhöhung noch ein Speicherumbau abgeleitet (eigene Entscheidung). F2: die Drain-Lease (120 s) wird nie verlängert; mit
-2 + N Ganz-DB-Speicherungen je Handy-Auftrag kann sie bei großer DB ablaufen (`ready_rejected`), der nächste Lauf nimmt den Auftrag
-über die Quittung wieder auf — unverändert.
+Fristerhöhung noch ein Speicherumbau abgeleitet (eigene Entscheidung). Die Handy-Drain-Lease (F2) steht jetzt in § 5a.
 
 ## 9. Rust `legacy_push_tests::o1_o5_o10_operation_matrix_enforced_for_every_table`
 
@@ -312,23 +432,31 @@ der Rust-Pin wurde beide Male nicht mitgeführt. Korrektur: `(52, 36, 37)` + Her
 
 ## 10. Bestandsaufnahme aller Bild-Uploads — Vorher / Nachher (aktualisiert)
 
-| # | Einstieg | Speicherort | vorher | nachher |
-|---|---|---|---|---|
-| A/B | Handy Collection anlegen / Galerie / Text | Medienspeicher | 100 000 / 20 000 B hart (`ingest.prepare`) | unverändert |
-| C/K | KI-Erkennen (Handy, Desktop, PC2) | nichts gespeichert | Transportgrenzen | unverändert |
-| D | **Handy Reparatur, Einkaufs-Inbox** | `repairs.images`, `purchase_inbox.images` | keine Byte-Grenze | **≤ 100 000 B bei der Übernahme**, gespeicherte unverändert, Umweg → Quarantäne |
-| E | Desktop/PC2 Artikel, Kommission, Fertigung | Medienspeicher | hart, Aufnahme 800 px | unverändert |
-| F | Einkauf „New Item" (auch aus Inbox) | `products.images` | ≤ 100 000 B (PP-12), keine Vorschau | **Medienspeicher** (Hauptbild + Vorschau) nach dem Commit |
-| G | Auftrag „New Item" / Sonderstück (Artikel) | `products.images`; Entwurf `orders.custom_product_spec` | ≤ 100 000 B | Artikel **Medienspeicher**; der Entwurf bleibt Belegbild ≤ 100 000 B |
-| H/I/J | Reparatur, Altgold, Ausweis (Desktop/PC2) | Zeile | ≤ 100 000 B (PP-12) | unverändert |
-| X | **jede Bildspalte über `/api/sync/push`** | Zeile | wörtlich | **normalisiert bei der Übernahme** |
-| L | Dokumente | `documents.file_path` (Original) | ≤ 25 116 672 B | **unverändert** (Original = OCR-Vorlage), Frist nach DB-Größe |
+„vorher" = Stand `d988810` (gepushte Baseline); „nachher" = HEAD. Grenzen: Hauptbild/Belegbild JPEG ≤ 100 000 B, ≤ 1600 px;
+Vorschau ≤ 20 000 B (nur Medienspeicher). Ausgenommen ist nur, was kein neues Foto speichert oder ein Original sein muss.
+
+| # | Einstieg | Speicherort | vorher (`d988810`) | nachher (HEAD) | Ausnahme / Begründung | Beleg |
+|---|---|---|---|---|---|---|
+| A/B | Handy Collection anlegen / Galerie / Text | Medienspeicher | 100 000 / 20 000 B hart (`ingest.prepare`) | unverändert | — (war schon der zentrale Weg) | `drain-handoff` 106/0 |
+| C/K | KI-Erkennen (Handy, Desktop, PC2) | nichts gespeichert | Transportgrenzen | unverändert | **Ausnahme**: speichert kein Foto; nur Transportgrenzen | R7B PP-3 |
+| D | Handy Reparatur, Einkaufs-Inbox | `repairs.images`, `purchase_inbox.images` | **keine Byte-Grenze** (1600 px / 0,85 Canvas, ~475 000 B) | **≤ 100 000 B bei der Übernahme**, gespeicherte Byte für Byte, Umweg → Quarantäne | Vorschau nicht (Belegbild in der Zeile, G4) | `pp12-pulled-images` 26/0, `r7b-pp12-mobile-takeover` 20/0 |
+| E | Desktop/PC2 Artikel, Kommission, Fertigung | Medienspeicher | hart, Aufnahme 800 px | unverändert | — | `r7b-pp12-images` 22/0 |
+| F | Einkauf „New Item" (auch aus Inbox) | `products.images` → Medienspeicher | Spalte, keine Byte-Grenze (vor PP-12) | **Medienspeicher** (Hauptbild + Vorschau) nach dem Commit, Spalte `[]` | — | `pp12-new-item-media` 17/0, Mobile 20/0, Bilder 22/0 |
+| G | Auftrag „New Item" / Sonderstück | Artikel; Entwurf `orders.custom_product_spec` | Spalte / Entwurf ohne Byte-Grenze | Artikel **Medienspeicher**; Entwurf Belegbild ≤ 100 000 B | Entwurf bleibt Belegbild (kein Artikel, kein Medienspeicher-Objekt) | Mobile 20/0, `pp12-images` 56/0 |
+| H/I/J | Reparatur, Altgold, Ausweis (Desktop/PC2) | Zeile | ohne Byte-Grenze (vor PP-12) | ≤ 100 000 B am aufnehmenden Rechner, Primary prüft beim Abholen | Vorschau nicht (G4) | `r7b-pp12-images` 22/0 |
+| X | jede Bildspalte über `/api/sync/push` | Zeile | **wörtlich** | **normalisiert bei der Übernahme**, gespeicherte Byte für Byte, unspeicherbar → Quarantäne | Transportvertrag des Servers bleibt wörtlich (Echo eigener Altzeilen) | `pp12-pulled-images` 26/0, Mobile 20/0 |
+| L | Dokumente | `documents.file_path` (Original) | ≤ 25 116 672 B | unverändert, Frist nach DB-Größe | **Ausnahme**: Original = OCR-Vorlage und Beleg; nie umgerechnet | `r7b-pp12-large-db` 13/0 |
+| M | Excel-Import | `products.images = []` | kein Foto | unverändert | **Ausnahme**: kein Foto | § 3 |
+| N | Dubletten-Zusammenführung, Migration/Backfill, Speicherpflege | Bestand | kopiert/verschiebt vorhandene | unverändert | **Ausnahme**: kein neues Foto; Umrechnen wäre Konvertierung des Bestands | § 3 |
+
+Die Matrix liegt dem Belegpaket zusätzlich als eigene Datei bei (`matrix/upload-wege-vorher-nachher.md`).
 
 ## 11. Tests und Nachweise (zum finalen Code)
 
 Alle Läufe gegen den finalen Code (E2E-Programme nach dem letzten Codecommit neu gebaut: Primary + PC2-Client, Debug, isoliert
 `com.lataif.app.e2e`, Port 3011; Produktion, `E:\LATAIF\Data`, 3001/3443 unberührt, jede fremde `lataif.exe` geprüft). Die
-vollständigen Ausgaben stehen im Anhang `pp12-closure-test-outputs.log`.
+vollständigen Ausgaben stehen im Belegpaket (`tests/einheit-typcheck-rust-e2e_3035f49.log`, E2E-Protokolle in `shutdown/`,
+`mobile/`, `bilder/`).
 
 **Einheitstests (Node), neu:** `pp12-close-budget` 19/0, `pp12-pulled-images` 26/0, `pp12-new-item-media` 17/0.
 **Nachbarn** (von den Änderungen berührt): `pp12-images` 56/0, `m4 window-close-persistence` 50/50, `m5 reload-persistence` 30/30,
@@ -346,6 +474,15 @@ Baseline `d988810` ohne und mit laufendem Abgleich (§ 1), Messung Aufnahmeprofi
 Nicht wiederholt (unverändert, gültige Nachweise): `r7b-pp12-large-db` 13/0 (Fristen der Dokumentwege; nur ein Kommentar
 aktualisiert).
 
+**Belegpaket (Nachtrag):** gezielt neu gelaufen, sonst wiederverwendet (Produktcode seit `fa4676a` unverändert; das Paket
+ändert nur Doku, einen TS-Test und eine `#[ignore]`-Messfunktion):
+- `test/media04b2a2/drain-handoff.test.ts` **106/0** (neu §20: Lease-Ablauf während der Übernahme, § 5a).
+- Release-Messung Aufnahmeprofil `bench_capture_profile` + `bench_normalize_times` (3 Wiederholungen) und die normalen
+  `media::record_image`-Tests im Release-Build; ein Debug-Lauf nur für den Byte-Vergleich (§ 4).
+- Persistenz-Diagnose sql.js (§ 6, R4).
+- Zuordnung jedes Laufs zu Quellstand und getesteter Binary (Build-Zeit, Hash, Produktcode-Gleichheit): `LIESMICH.md` im
+  Belegpaket.
+
 ## 12. Git
 
 Folgecommits auf `0a15565` (kein Amend, kein Push/Tag/Release):
@@ -358,6 +495,10 @@ Folgecommits auf `0a15565` (kein Amend, kein Push/Tag/Release):
 4. `82d35f3` — „New Item"-Artikel in den Medienspeicher (`new-item-media.ts`, `productStore.ts`) + `pp12-new-item-media`,
    Bildlauf-Erwartung.
 5. `fa4676a` — Folgecommit: das Leeren von `products.images` wird erfasst (Echo-fest).
-6. dieser Commit — E2E `r7b-pp12-shutdown`, `r7b-pp12-mobile-takeover`, Kommentar `r7b-pp12-large-db`, dieses Review, SSOT.
+6. `3035f49` — E2E `r7b-pp12-shutdown`, `r7b-pp12-mobile-takeover`, Kommentar `r7b-pp12-large-db`, dieses Review, SSOT.
+7. Folgecommit Belegpaket — Review §§ 0, 4, 5, 5a, 6, 10–12 (Callpaths Timeout/Wiederholung, Handy-Lease, Persistenz
+   getrennt, Release-Begründung 800/1600 px, Matrix mit Ausnahmen, Restbefunde R1–R4); SSOT: frühere Sätze zur Wartezeit
+   ausdrücklich korrigiert, Statuszeilen; `drain-handoff` §20; Messfunktion `bench_capture_profile` (`#[ignore]`). Kein
+   Produktcode.
 
 Version 0.8.54 und Registry 175 unverändert (keine technische Notwendigkeit).

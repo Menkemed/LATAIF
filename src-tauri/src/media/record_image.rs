@@ -184,27 +184,29 @@ mod tests {
         assert_eq!(normalize_record_image(&broken).unwrap_err(), "MEDIA_IMAGE_DECODE_FAILED");
     }
 
+    /// Fotoähnliche Vorlage für die Messungen: Verlauf, Formen, leichtes Rauschen.
+    fn photo(w: u32, h: u32, seed: u32) -> image::RgbImage {
+        let mut s = seed;
+        let mut rnd = move || { s ^= s << 13; s ^= s >> 17; s ^= s << 5; s };
+        let circles: Vec<(i64, i64, i64, [u8; 3])> = (0..600)
+            .map(|_| ((rnd() % w) as i64, (rnd() % h) as i64, (4 + rnd() % 60) as i64, [rnd() as u8, (rnd() >> 8) as u8, (rnd() >> 16) as u8]))
+            .collect();
+        image::RgbImage::from_fn(w, h, |x, y| {
+            let mut p = [(40 + x * 180 / w) as u8, (70 + y * 120 / h) as u8, (110 + (x + y) * 80 / (w + h)) as u8];
+            for (cx, cy, r, c) in circles.iter().take(80) {
+                let (dx, dy) = (x as i64 - cx, y as i64 - cy);
+                if dx * dx + dy * dy < r * r { p = *c; }
+            }
+            let n = ((x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503)) % 36) as i16 - 18;
+            image::Rgb([(p[0] as i16 + n).clamp(0, 255) as u8, (p[1] as i16 + n).clamp(0, 255) as u8, (p[2] as i16 + n).clamp(0, 255) as u8])
+        })
+    }
+
     /// Messung (nicht im normalen Lauf): `cargo test --release --lib media::record_image::tests::bench -- --ignored --nocapture`.
-    /// Fotoähnliche Vorlagen (Verlauf, Formen, leichtes Rauschen) und reines Rauschen als Obergrenze.
+    /// Fotoähnliche Vorlagen und reines Rauschen als Obergrenze.
     #[test]
     #[ignore]
     fn bench_normalize_times() {
-        fn photo(w: u32, h: u32, seed: u32) -> image::RgbImage {
-            let mut s = seed;
-            let mut rnd = move || { s ^= s << 13; s ^= s >> 17; s ^= s << 5; s };
-            let circles: Vec<(i64, i64, i64, [u8; 3])> = (0..600)
-                .map(|_| ((rnd() % w) as i64, (rnd() % h) as i64, (4 + rnd() % 60) as i64, [rnd() as u8, (rnd() >> 8) as u8, (rnd() >> 16) as u8]))
-                .collect();
-            image::RgbImage::from_fn(w, h, |x, y| {
-                let mut p = [(40 + x * 180 / w) as u8, (70 + y * 120 / h) as u8, (110 + (x + y) * 80 / (w + h)) as u8];
-                for (cx, cy, r, c) in circles.iter().take(80) {
-                    let (dx, dy) = (x as i64 - cx, y as i64 - cy);
-                    if dx * dx + dy * dy < r * r { p = *c; }
-                }
-                let n = ((x.wrapping_mul(2654435761) ^ y.wrapping_mul(40503)) % 36) as i16 - 18;
-                image::Rgb([(p[0] as i16 + n).clamp(0, 255) as u8, (p[1] as i16 + n).clamp(0, 255) as u8, (p[2] as i16 + n).clamp(0, 255) as u8])
-            })
-        }
         let cases: Vec<(&str, Vec<u8>)> = vec![
             ("photo 3000x2000 q92", jpeg(&photo(3000, 2000, 3), 92)),
             ("photo 1600x1067 q85 (desktop/phone capture)", jpeg(&photo(1600, 1067, 5), 85)),
@@ -220,6 +222,56 @@ mod tests {
             let thumb = t2.elapsed();
             println!("BENCH {name}: in {} B -> main {} B {}x{} in {} ms; thumbnail {} B in {} ms",
                 src.len(), d.byte_size, d.width, d.height, rec.as_millis(), th.byte_size, thumb.as_millis());
+        }
+    }
+
+    /// Aufnahmeprofil 800 vs. 1600 px auf den echten Wegen (nicht im normalen Lauf):
+    /// `cargo test --release --lib media::record_image::tests::bench_capture -- --ignored --nocapture`.
+    /// Artikel = 8 Aufnahmen (Höchstzahl eines Artikels), je Aufnahme `normalize_stock_image` + `create_thumbnail`
+    /// mit `Limits::default()` — genau das Vorbereiten in `ingest.rs`, das der Primary IM Befehl rechnet.
+    /// Belegbild = `normalize_record_image`. Jede Aufnahme trägt ein APP1-Segment (wie eine Aufnahme mit
+    /// Metadaten) und ist damit nicht die gespeicherte Form, wird also gerechnet. Der Hash der Ausgabe macht
+    /// Debug- und Release-Lauf vergleichbar (gleiche Bytes → die im Debug-Fenster gemessene Qualität gilt).
+    #[test]
+    #[ignore]
+    fn bench_capture_profile() {
+        use sha2::{Digest, Sha256};
+        fn with_app1(plain: &[u8]) -> Vec<u8> {
+            let mut v = vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x0E];
+            v.extend_from_slice(b"Exif\0\0GPS-X\0");
+            v.extend_from_slice(&plain[2..]);
+            v
+        }
+        let limits = Limits::default();
+        for (name, w, h, q) in [("800x533 q70", 800u32, 533u32, 70u8), ("1600x1067 q85", 1600, 1067, 85)] {
+            let shots: Vec<Vec<u8>> = (0..8u32).map(|i| with_app1(&jpeg(&photo(w, h, 11 + i), q))).collect();
+            let mut hash = Sha256::new();
+            let (mut main_max, mut thumb_max) = (0u64, 0u64);
+            let t = std::time::Instant::now();
+            for s in &shots {
+                let m = normalize_stock_image(s, &limits).unwrap();
+                let th = super::super::create_thumbnail(s, &limits).unwrap();
+                main_max = main_max.max(m.byte_size as u64);
+                thumb_max = thumb_max.max(th.byte_size as u64);
+                hash.update(&m.bytes);
+                hash.update(&th.bytes);
+            }
+            let article = t.elapsed();
+            let mut rec_hash = Sha256::new();
+            let mut rec_dims = (0u32, 0u32);
+            let t2 = std::time::Instant::now();
+            for s in &shots {
+                let r = normalize_record_image(s).unwrap();
+                assert!(r.bytes != *s, "a capture with metadata is not the stored form");
+                rec_dims = (r.width, r.height);
+                rec_hash.update(&r.bytes);
+            }
+            let record = t2.elapsed();
+            let hex = |d: &[u8]| d.iter().take(6).map(|b| format!("{b:02x}")).collect::<String>();
+            println!("CAPTURE {name}: in {}..{} B; article 8 x (main + thumbnail) {} ms ({} ms/photo), main <= {} B, thumbnail <= {} B, out {}; record 8 x {} ms ({} ms/photo) {}x{}, out {}",
+                shots.iter().map(|s| s.len()).min().unwrap(), shots.iter().map(|s| s.len()).max().unwrap(),
+                article.as_millis(), article.as_millis() / 8, main_max, thumb_max, hex(&hash.finalize()),
+                record.as_millis(), record.as_millis() / 8, rec_dims.0, rec_dims.1, hex(&rec_hash.finalize()));
         }
     }
 

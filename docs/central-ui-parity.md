@@ -3836,7 +3836,8 @@ Seitenspeicher verzögert, ein hartes Beenden verwirft das Ungeschriebene. Ände
   neue Frist erreicht werden — PP-12 ist deshalb nur **teilweise** geschlossen (fehlt: DB-Größen-Anteil in der Frist, z. B. aus der
   Dateigröße von `lataif.db` am Primary, oder Belege außerhalb der Hauptdatei). Zur alten 20-s-Grenze trägt die Messung nur: bei
   136 und 203 MB lag der gesamte Rundlauf mit 23,0 und 31,3 s über 20 s — die alte Frist (sie misst nur das Warten ab Übergabe an das
-  Fenster) wäre dort sehr wahrscheinlich gerissen; bei 69 MB (17,9 s) nicht.
+  Fenster) wäre dort sehr wahrscheinlich gerissen; bei 69 MB (17,9 s) nicht. **[Korrektur 15.09.2026: „ab Übergabe an das Fenster"
+  schließt die Wartezeit in der Schreibreihenfolge des Primary ein — sie zählt gegen die Frist; `docs/r7b-pp12-image-paths-review.md` § 5.]**
 
 **Einheitstests:** `test/r7b/r7b-platform-hardening.test.ts` **111/0**; direkte Nachbarn (48 Dateien, u. a. client-read-mode,
 r3/r4b/r4c-Matrix, c4, c6, r6b–r6f-Gates, payables, office, gold, pp13, r7a, remote-invoice-create, service-parity) grün; Rust
@@ -3865,7 +3866,8 @@ Fristen und Vorher/Nachher: `docs/r7b-pp12-image-paths-review.md`. Keine neue Fe
 
 Offen, nicht Teil von PP-12 (zur Entscheidung, Einzelheiten im Review): Handy-Reparatur-/Inbox-Fotos über den Abgleich-Push ohne
 Byte-Grenze; Artikelbilder aus Einkauf/Auftrag weiter in `products.images` statt Medienspeicher; normale Befehle bei großer
-Datenbank (10,7 s bei 451 MB, mit belegter Schlange über 20 s); die Frist enthält keine Wartezeit hinter anderen Aufträgen;
+Datenbank (10,7 s bei 451 MB, mit belegter Schlange über 20 s); die Frist enthält keine Wartezeit hinter anderen Aufträgen **[Korrektur 15.09.2026: gemeint ist „die Formel hat
+dafür keinen Anteil" — die Wartezeit zählt gegen die Frist und verlängert sie nicht; Review § 5]**;
 `plugin-fs writeFile` ohne fsync; Handy-Drain-Lease ohne Verlängerung; nach WM_CLOSE endete der Primary bei ≥ ~340 MB nicht.
 
 ```
@@ -3888,16 +3890,18 @@ unverändert **175**.
 | Reguläres Beenden bei großer DB (F4) | **behoben** — wartender Schritt: `waitForSyncIdle` mit fester 8-s-Frist, während der Selbst-Abgleich des Primary die ganze DB zweimal speichert; vorbestehend (Baseline `d988810` hängt identisch). Die Wartefristen (Abgleich, Flush) rechnen jetzt 2 × Datei / 4 MB/s dazu, an jedem Wartepunkt (Schließen, Neuladen, Backup, GC, Restore, Updater, Datenort) | `pp12-close-budget` 19/0; `r7b-pp12-shutdown` **14/0** (518 MB, Abgleich unterwegs: endet regulär nach 23,9 s; Neustart vollständig) |
 | Handy-Reparatur / Einkaufs-Inbox (G2) | **behoben** — die Grenze fehlte an jeder Stelle (Handy → `/api/sync/push` → Übernahme); jetzt bei der Übernahme jedes neue Foto jeder Bildspalte durch den EINEN Normalisierer, gespeicherte unverändert, Umweg → Quarantäne | `pp12-pulled-images` 26/0; `r7b-pp12-mobile-takeover` **20/0** (Handyfoto 474 184 B → 89 841 B 982×655, Inbox 475 075 B → 90 475 B; Umweg → 2 Quarantänefälle; Ergänzen: gespeichertes Byte für Byte; Anzeige Primary + PC2; Neustart) |
 | „New Item"-Artikel in `products.images` (G3) | **zusammengeführt** — Cutover-Dienst nach dem Commit: Hauptbild ≤ 100 000 B + Vorschau ≤ 20 000 B im Medienspeicher; übrige Schreiber begründet | `pp12-new-item-media` 17/0; Mobile-Lauf (Einkauf 95 406 B + Vorschau 16 731 B, Auftrag 81 447 B + 19 273 B, Spalte leer auch nach Echo und Neustart); `r7b-pp12-images` **22/0** |
-| Aufnahmeprofil 800 / 1600 px (G7) | gemessen begründet (Phasen, Bildqualität); ursprünglicher 504 neu erklärt | Review § 4 |
-| Schlange / weiterlaufende Mutation (G6) | dokumentiert; Wiederholungssicherheit belegt; offen (keine Ergebnisabfrage) | Review § 5 |
-| fsync (F1) | eingeordnet: neustartfest ja, stromausfallfest nein; nicht geändert | Review § 6 |
+| Aufnahmeprofil 800 / 1600 px (G7) | gemessen begründet auf Release-Messung (Artikelweg 8 Aufnahmen + Belegweg; Bytes Debug = Release); ursprünglicher 504 als Debug-Artefakt erklärt; kein neues Profil | Review § 4; Release-Bench `bench_capture_profile` |
+| Timeout / Wiederholung derselben Kennung (G6) | belegt am Callpath: während des ersten Laufs, nach 504, nach Commit bei verlorener Antwort, nach Neustart → genau eine Wirkung (Replay); keine neue Ergebnis-API nötig | Review § 5; Rust `bridge_tests`, `write-foundation`, `remote-invoice-create`, E2E CONC-MONEY / LOST |
+| Handy-Drain-Lease (F2) | belegt: 120 s je Auftrag, Token-Besitz; Ablauf während der Übernahme → alter Besitzer `ready_rejected`, ein Produkt, nichts verloren. Korrektur: Ablauf allein lehnt nichts ab (nur eine Übernahme durch einen anderen Claimer) | Review § 5a; `drain-handoff` §20 **106/0** |
+| Persistenz (F1) | **korrigiert**: Neustart/App-Absturz fest; Stromausfall fest außerhalb eines Fensters von Sekunden nach jedem Speichern, darin Verlust der letzten Speicherungen oder unlesbare Datei möglich (die frühere Zeile „stromausfallfest nein" war pauschal); vorbestehend seit `88e1199`, nicht geändert | Review § 6; Diagnose sql.js |
 | Normale Befehle bei großer DB (G5) | Skalierungsbefund, offen | Review § 8 |
+| Restbefunde R1–R4 (bestätigt, vorbestehend, offen) | R1 offene Kennung nur im Speicher der PC2-Maske (Maske verlassen nach „keine Antwort" → zweite Wirkung möglich); R2 geändertes Formular nach „keine Antwort" → wiederholter Konflikt; R3 Konflikt nach Verdrängung/Neustart als 500 „unbekannt"; R4 0-Byte-`lataif.db` startet leer statt `DB_RECOVERY_REQUIRED` | Review § 0, § 5, § 6 |
 | Rust `legacy_push … o1_o5_o10` | **behoben** (52/36/37 aus dem Manifest; rot seit `ab7f169`) | `cargo test sync::routes` 74/0 |
 
 ```
 PP offen vorher:     0  (Post-Parity-Backlog PP-1 … PP-14 geschlossen)
 Prüfbefunde:         F4 behoben · G2 behoben · G3 zusammengeführt · Rust-Pin behoben ·
-                     G7/G6/F1 belegt eingeordnet · G5, F2, Ergebnisabfrage offen (eigene Entscheidung)
+                     G7/G6/F2/F1 belegt eingeordnet (Stand Belegpaket) · offen: R1–R4, G5 (eigene Entscheidung)
 verbleibend PP:      0  (unabhängige Freigabe offen)
 Registry 175 → 175
 Version 0.8.54 · kein Release

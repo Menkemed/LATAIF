@@ -570,6 +570,39 @@ async function main(): Promise<void> {
     db.close();
   }
 
+  // ── §20 R7B PP-12: the lease runs out DURING A's own takeover (product durable, before A's ready); B
+  //    takes the job over with a fresh token. A's saga ends ready_rejected without touching B's claim,
+  //    B resumes to the SAME product — nothing doubled, nothing lost; a later stale ready is idempotent ─
+  {
+    const { db, gw, disk, bridge } = freshEnv(SQL);
+    bridge.seedAccepted('ev-20', 'prod-20', ['a', 'b']);
+    const depsA = makeDeps(db, gw, disk, bridge);
+    const depsB = makeDeps(db, gw, disk, bridge);
+    let gB: ClaimGrant | null = null;
+    const origVerify = depsA.verifyReady;
+    depsA.verifyReady = async (g) => {
+      bridge.clock += 121; // A's 120-s lease is over while A still verifies its durable product
+      gB = await bridge.claim('worker-2', 120);
+      return origVerify(g);
+    };
+    const gA = await bridge.claim('worker-1', 120);
+    const outA = await processMobileUploadClaim(gA!, depsA);
+    ok(gB !== null && gB!.claimToken !== gA!.claimToken, 'B took the expired lease over with a fresh token');
+    ok(outA.code === 'ready_rejected', `A's own ready with the stale token → ready_rejected (got ${outA.code}/${outA.detail ?? ''})`);
+    ok(bridge.stateOf('ev-20') === 'processing', 'A neither released nor quarantined the job B now holds');
+    ok(count(db, `SELECT COUNT(*) FROM products WHERE id='prod-20'`) === 1, "A's product is there once");
+    const outB = await processMobileUploadClaim(gB!, depsB);
+    ok(outB.code === 'resumed', `B resumes A's durable product (got ${outB.code}/${outB.detail ?? ''})`);
+    ok(bridge.stateOf('ev-20') === 'ready', 'ready via B, the current token');
+    ok(count(db, `SELECT COUNT(*) FROM products`) === 1, 'exactly one product');
+    ok(count(db, `SELECT COUNT(*) FROM mobile_upload_receipts WHERE upload_event_id='ev-20'`) === 1, 'one receipt');
+    ok(count(db, `SELECT COUNT(*) FROM sync_changelog WHERE record_id='prod-20'`) === 1 && count(db, `SELECT COUNT(*) FROM audit_log WHERE entity_id='prod-20'`) === 1, 'one changelog, one audit');
+    ok(orderOf(db, 'prod-20') === '0,1' && productImages(db, 'prod-20') === '[]', 'both photos in the gallery, none lost');
+    ok(count(db, `SELECT COUNT(*) FROM media_ingest_jobs WHERE requested_entity_id='prod-20'`) === 2, 'one create batch (2 jobs), not two');
+    ok((await bridge.markReady('user-origin', 'ev-20', gA!.claimToken, 'prod-20', 'ph-ev-20', 'prod-20')) === 'already_ready', 'a late stale ready after B changes nothing (idempotent)');
+    db.close();
+  }
+
   console.log(`\nMOBILE-04B2A2 drain-handoff: ${PASS} passed, ${FAIL} failed`);
   if (FAIL > 0) { for (const f of failures) console.log('  - ' + f); process.exit(1); }
 }
