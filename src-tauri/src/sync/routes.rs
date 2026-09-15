@@ -196,6 +196,7 @@ struct CommandRequest {
 }
 
 async fn command_execute(
+    State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Json(req): Json<CommandRequest>,
 ) -> axum::response::Response {
@@ -219,8 +220,11 @@ async fn command_execute(
     // eine Buchung später zuordenbar ist. Der Client kann diese Felder nicht setzen: sie kommen
     // aus dem geprüften Token, nicht aus dem Rumpf.
     // POST-PARITY R7B PP-12 — die Frist nach dem, was der Auftrag bewegt: normale Aufträge bleiben
-    // bei `DEFAULT_TIMEOUT`, nur die Dokumentwege bekommen ihren abgeleiteten Zuschlag.
-    let deadline = crate::bridge::timeout_for(&req.op, &req.payload);
+    // bei `DEFAULT_TIMEOUT`, nur die Dokumentwege bekommen ihren abgeleiteten Zuschlag — seit dem
+    // Review auch nach der Größe der Datenbank, die ihr durables Speichern ganz schreibt. Ist die
+    // Datei nicht lesbar, fehlt nur dieser Anteil (0): die Frist wird nie kleiner als vorher.
+    let db_bytes = std::fs::metadata(&state.frontend_db_path).map(|m| m.len()).unwrap_or(0);
+    let deadline = crate::bridge::timeout_for(&req.op, &req.payload, db_bytes);
 
     let payload = serde_json::json!({
         "actor": {

@@ -1084,32 +1084,69 @@ fn upload_with(len: usize) -> serde_json::Value {
 #[test]
 fn normal_commands_keep_the_short_deadline() {
     for op in [OP_PROBE, "invoices.create", "customers.update", "products.create", "store.documents.get", "expenses.create"] {
-        assert_eq!(timeout_for(op, &serde_json::json!({ "content": "a".repeat(1_000_000) })), DEFAULT_TIMEOUT, "{op}");
+        assert_eq!(timeout_for(op, &serde_json::json!({ "content": "a".repeat(1_000_000) }), 0), DEFAULT_TIMEOUT, "{op}");
+        // The database term is only for the two WRITING document paths — a big database leaves
+        // every other command at 20 s (scope: normal commands keep the short deadline).
+        assert_eq!(timeout_for(op, &serde_json::json!({}), 900_000_000), DEFAULT_TIMEOUT, "{op}");
     }
 }
 
 #[test]
 fn an_upload_gets_an_allowance_by_its_size_and_never_more_than_the_largest_file() {
-    let small = timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(1_000));
+    let small = timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(1_000), 0);
     assert!(small >= DEFAULT_TIMEOUT && small < DEFAULT_TIMEOUT + Duration::from_millis(10), "{small:?}");
     // The largest file the house accepts: 25 116 672 bytes -> base64 33 488 896 + data-URL head.
-    let biggest = timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(33_488_896 + 40));
-    assert!(biggest > Duration::from_secs(50) && biggest < Duration::from_secs(60), "{biggest:?}");
-    let beyond = timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(60_000_000));
-    assert_eq!(beyond, timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(DOCUMENT_MAX_CONTENT_BYTES as usize)), "clamped to the row limit");
-    let missing = timeout_for(OP_DOCUMENTS_UPLOAD, &serde_json::json!({}));
+    // Without a database the allowance is the content term plus the growth the upload itself adds.
+    let biggest = timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(33_488_896 + 40), 0);
+    assert!(biggest > Duration::from_secs(60) && biggest < Duration::from_secs(80), "{biggest:?}");
+    let beyond = timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(60_000_000), 0);
+    assert_eq!(beyond, timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(DOCUMENT_MAX_CONTENT_BYTES as usize), 0), "clamped to the row limit");
+    let missing = timeout_for(OP_DOCUMENTS_UPLOAD, &serde_json::json!({}), 0);
     assert_eq!(missing, DEFAULT_TIMEOUT, "no content, no allowance");
 }
 
 #[test]
 fn content_and_ocr_get_the_allowance_of_their_largest_case() {
-    let content = timeout_for(OP_DOCUMENTS_CONTENT_GET, &serde_json::json!({ "documentId": "d" }));
+    let content = timeout_for(OP_DOCUMENTS_CONTENT_GET, &serde_json::json!({ "documentId": "d" }), 0);
     assert_eq!(content, DEFAULT_TIMEOUT + Duration::from_millis(13_421));
-    let ocr = timeout_for(OP_DOCUMENTS_SET_OCR, &serde_json::json!({ "documentId": "d", "expectedRevision": 1 }));
+    let ocr = timeout_for(OP_DOCUMENTS_SET_OCR, &serde_json::json!({ "documentId": "d", "expectedRevision": 1 }), 0);
     assert_eq!(ocr, Duration::from_secs(90));
-    for d in [content, ocr, timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(DOCUMENT_MAX_CONTENT_BYTES as usize))] {
-        assert!(d <= Duration::from_secs(120), "no arbitrary huge deadline: {d:?}");
+    for d in [content, ocr, timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(DOCUMENT_MAX_CONTENT_BYTES as usize), 0)] {
+        assert!(d <= Duration::from_secs(120), "no arbitrary huge deadline without a database: {d:?}");
     }
+}
+
+// R7B review (PP-12): the two writing document paths answer only after the durable save, and that
+// save writes the WHOLE database. Their deadline therefore grows with the database the Primary sees
+// on disk plus the growth of the upload (document row + its sync row), at `SAVE_FLOOR_BYTES_PER_SEC`.
+#[test]
+fn the_writing_document_paths_grow_with_the_database() {
+    let len = 33_488_896u64 + 40;
+    let db = 203_000_000u64;
+    let at0 = timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(len as usize), 0);
+    let at_db = timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(len as usize), db);
+    assert_eq!(at_db - at0, Duration::from_millis(db * 1000 / SAVE_FLOOR_BYTES_PER_SEC), "exactly the database at the floor");
+    let expected = DEFAULT_TIMEOUT
+        + Duration::from_millis(len * DOCUMENT_UPLOAD_PASSES * 1000 / DOCUMENT_FLOOR_BYTES_PER_SEC)
+        + Duration::from_millis((db + len * DOCUMENT_UPLOAD_GROWTH_COPIES) * 1000 / SAVE_FLOOR_BYTES_PER_SEC);
+    assert_eq!(at_db, expected);
+    // The measured round trip of the largest upload at a 203 MB database was 31.3 s (R7B review).
+    // The new deadline keeps more than 3x of it; the old one (53.5 s) kept 1.7x.
+    assert!(at_db >= Duration::from_millis(31_300 * 3), "{at_db:?}");
+    let ocr0 = timeout_for(OP_DOCUMENTS_SET_OCR, &serde_json::json!({ "documentId": "d" }), 0);
+    let ocr_db = timeout_for(OP_DOCUMENTS_SET_OCR, &serde_json::json!({ "documentId": "d" }), 400_000_000);
+    assert_eq!(ocr_db - ocr0, Duration::from_secs(100), "OCR writes its text and saves the database too");
+    let content_db = timeout_for(OP_DOCUMENTS_CONTENT_GET, &serde_json::json!({ "documentId": "d" }), 400_000_000);
+    assert_eq!(content_db, DEFAULT_TIMEOUT + Duration::from_millis(13_421), "reading saves nothing");
+    // Monotone in the database: a bigger database never shortens the deadline.
+    let mut prev = Duration::ZERO;
+    for mb in [0u64, 50, 100, 400, 1_000, 4_000] {
+        let d = timeout_for(OP_DOCUMENTS_UPLOAD, &upload_with(1_000), mb * 1_000_000);
+        assert!(d >= prev, "{mb} MB");
+        prev = d;
+    }
+    assert_eq!(SAVE_FLOOR_BYTES_PER_SEC, 4_000_000);
+    assert_eq!(DOCUMENT_UPLOAD_GROWTH_COPIES, 2);
 }
 
 #[test]
@@ -1121,7 +1158,9 @@ fn the_derivation_matches_the_renderer_contract() {
     assert!(ocr.contains("export const OCR_MAX_PIXELS = 12_000_000;"), "the OCR pixel cap the allowance is derived from");
     assert_eq!(OCR_MAX_PIXELS, 12_000_000);
     let routes = include_str!("sync/routes.rs");
-    assert!(routes.contains("let deadline = crate::bridge::timeout_for(&req.op, &req.payload);"), "the route asks per command");
+    assert!(routes.contains("let deadline = crate::bridge::timeout_for(&req.op, &req.payload, db_bytes);"), "the route asks per command");
+    assert!(routes.contains("let db_bytes = std::fs::metadata(&state.frontend_db_path).map(|m| m.len()).unwrap_or(0);"),
+        "with the size of the database file the durable save writes");
     assert!(routes.contains(".submit_as(&identity, &claims.role, payload, deadline)"), "and waits exactly that long");
     assert!(!routes.contains("claims.role, payload, crate::bridge::DEFAULT_TIMEOUT"), "no fixed 20 s for every command any more");
 }

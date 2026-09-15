@@ -510,7 +510,8 @@ marker('POST_PARITY_R7B_PP7_DEAD_CODE_REMOVED');
   const os = codeOf(src('src/core/ai/ocr-service.ts'));
   ok(/const bounded = await boundedOcrInput\(input\)\.catch\(\(\) => input\);/.test(os) && /tesseract\.recognize\(bounded as never/.test(os), 'OCR die Erkennung bekommt das begrenzte Bild');
   const br = src('src-tauri/src/bridge.rs');
-  ok(/pub fn timeout_for\(op: &str, payload: &serde_json::Value\) -> Duration/.test(br) && /_ => DEFAULT_TIMEOUT,/.test(br), 'BRIDGE je Auftrag eine Frist, alles Normale bleibt 20 s');
+  // R7B-Review: die Frist kennt seitdem auch die Größe der Datenbank (nur die schreibenden Dokumentwege).
+  ok(/pub fn timeout_for\(op: &str, payload: &serde_json::Value, db_bytes: u64\) -> Duration/.test(br) && /_ => DEFAULT_TIMEOUT,/.test(br), 'BRIDGE je Auftrag eine Frist, alles Normale bleibt 20 s');
   const dl = src('src/pages/documents/DocumentList.tsx');
   ok(/data-document-upload-running/.test(dl) && /`Uploading… \$\{uploadSeconds\}s`/.test(dl) && /`Extracting… \$\{ocrSeconds\}s`/.test(dl) && /\.finally\(\(\) => setOcrRunning\(false\)\)/.test(dl),
     'UI „läuft": Upload und Erkennung zeigen, seit wann');

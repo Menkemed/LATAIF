@@ -492,6 +492,14 @@ pub const DEFAULT_TIMEOUT: Duration = Duration::from_secs(20);
 // Zwei-Rechner-Lauf misst die echten Zeiten des größten Falls und prüft den Abstand zur Frist.
 // Eine abgelaufene Frist bleibt `unknown` (504), nie ein Erfolg; die Wiederholung mit derselben
 // Kennung bleibt genau eine Wirkung (durabler Nachweis im Renderer).
+//
+// R7B-Review (PP-12, Befund): die beiden SCHREIBENDEN Dokumentwege antworten erst nach dem durablen
+// Speichern — und das schreibt die GANZE Datenbank (sql.js-Export → Datei), nicht nur die neue
+// Zeile. Gemessen stieg die Zeit des größten Uploads mit der Datenbank (69/136/203 MB → 17,9/23,0/
+// 31,3 s), die Frist nicht. Deshalb bekommen `documents.upload` und `documents.set_ocr` einen zweiten
+// Zuschlag: die Datenbankgröße, die der Primary auf der Platte sieht, plus das Wachstum durch den
+// Upload (die Daten-URL steht in der Dokumentzeile UND in ihrer Abgleich-Zeile), zur Untergrenze
+// `SAVE_FLOOR_BYTES_PER_SEC`. `documents.content.get` liest nur und speichert nichts.
 
 /// Die größte Dokumentzeile (= größte Data-URL), die das Haus annimmt: 32 MiB.
 pub const DOCUMENT_MAX_CONTENT_BYTES: u64 = 32 * 1024 * 1024;
@@ -509,22 +517,40 @@ pub const OCR_FLOOR_PIXELS_PER_SEC: u64 = 200_000;
 /// Start der Erkennung (Worker, Kern, eng+ara laden) — einmal je Aufruf.
 pub const OCR_WORKER_START: Duration = Duration::from_secs(10);
 
+/// Untergrenze für das durable Speichern der ganzen Datenbank am Primary: 4 MB/s. Gemessen wurden
+/// rund 10 MB/s (R7B-Review: +134 MB Datenbank → +13,4 s); die Untergrenze lässt das 2,5-Fache Luft.
+pub const SAVE_FLOOR_BYTES_PER_SEC: u64 = 4_000_000;
+/// Um so viele Kopien seiner Daten-URL wächst die Datenbank durch einen Upload: Dokumentzeile und
+/// Abgleich-Zeile (`trackChange` hält die ganze Zeile).
+pub const DOCUMENT_UPLOAD_GROWTH_COPIES: u64 = 2;
+
 fn bytes_at_floor(bytes: u64) -> Duration {
     Duration::from_millis(bytes.saturating_mul(1000) / DOCUMENT_FLOOR_BYTES_PER_SEC)
 }
 
+fn save_at_floor(bytes: u64) -> Duration {
+    Duration::from_millis(bytes.saturating_mul(1000) / SAVE_FLOOR_BYTES_PER_SEC)
+}
+
 /// Die Frist eines Auftrags vom zweiten Rechner (s. o.). Alles außer den drei Dokumentwegen: 20 s.
-pub fn timeout_for(op: &str, payload: &serde_json::Value) -> Duration {
+/// `db_bytes` ist die Größe der Geschäftsdatenbank am Primary (die Datei, die das Speichern schreibt).
+pub fn timeout_for(op: &str, payload: &serde_json::Value, db_bytes: u64) -> Duration {
     match op {
         OP_DOCUMENTS_UPLOAD => {
             let len = payload.get("content").and_then(|v| v.as_str()).map(|s| s.len() as u64).unwrap_or(0);
-            DEFAULT_TIMEOUT + bytes_at_floor(len.min(DOCUMENT_MAX_CONTENT_BYTES) * DOCUMENT_UPLOAD_PASSES)
+            let len = len.min(DOCUMENT_MAX_CONTENT_BYTES);
+            DEFAULT_TIMEOUT
+                + bytes_at_floor(len * DOCUMENT_UPLOAD_PASSES)
+                + save_at_floor(db_bytes.saturating_add(len * DOCUMENT_UPLOAD_GROWTH_COPIES))
         }
         OP_DOCUMENTS_CONTENT_GET => {
             DEFAULT_TIMEOUT + bytes_at_floor(DOCUMENT_MAX_CONTENT_BYTES * DOCUMENT_CONTENT_PASSES)
         }
         OP_DOCUMENTS_SET_OCR => {
-            DEFAULT_TIMEOUT + OCR_WORKER_START + Duration::from_secs(OCR_MAX_PIXELS / OCR_FLOOR_PIXELS_PER_SEC)
+            DEFAULT_TIMEOUT
+                + OCR_WORKER_START
+                + Duration::from_secs(OCR_MAX_PIXELS / OCR_FLOOR_PIXELS_PER_SEC)
+                + save_at_floor(db_bytes)
         }
         _ => DEFAULT_TIMEOUT,
     }
