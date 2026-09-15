@@ -151,6 +151,75 @@ const ch = (table_name: string, record_id: string, action: string, data: Record<
   ok(/normalizeRecordImages\(inc\.list, \{ keep \}\)/.test(mod) && !/documents/.test(mod.replace(/\/\/.*$/gm, '')), 'MODUL derselbe Normalisierer mit `keep`; kein Dokument in der Liste');
 }
 
+// ══ §7 — R7B-Review: ungültige Bildformen. Die Übernahme dahinter prüft nur die Transportform
+//    (`validateBusinessPayload`), `applyUpsert` schreibt jedes Objekt als JSON-Text — ohne das Tor stünde
+//    die Form wörtlich in der Zeile. Jetzt: Quarantäne; leere Felder und unveränderte Bestandswerte bleiben ══
+{
+  const { applySyncChange } = await import('../../src/core/sync/apply-change.ts');
+  const initSqlJs = (await import('sql.js')).default;
+  const SQL = await initSqlJs({ locateFile: () => join(repo, 'node_modules', 'sql.js', 'dist', 'sql-wasm.wasm') });
+  const sdb = new SQL.Database();
+  sdb.run('CREATE TABLE repairs (id TEXT PRIMARY KEY, images TEXT)');
+  applySyncChange(sdb as never, { table_name: 'repairs', record_id: 'rx', action: 'insert', data: JSON.stringify({ id: 'rx', images: { a: 'x' } }) } as never);
+  ok(String(sdb.exec("SELECT images FROM repairs WHERE id='rx'")[0]?.values[0][0]) === '{"a":"x"}',
+    'SCHREIBGRENZE ohne das Tor schreibt die Übernahme eine Objekt-„Bildliste" wörtlich (nur die Transportform wird geprüft)');
+  sdb.close();
+
+  calls = 0;
+  const bad = [
+    ch('repairs', 'rb1', 'insert', { id: 'rb1', images: [RAW1, 42] }),
+    ch('repairs', 'rb2', 'insert', { id: 'rb2', images: JSON.stringify([RAW1, { x: 1 }]) }),
+    ch('purchase_inbox', 'ib1', 'insert', { id: 'ib1', images: { a: RAW1 } }),
+    ch('purchase_inbox', 'ib2', 'insert', { id: 'ib2', images: '{"a":1}' }),
+    ch('products', 'pb1', 'insert', { id: 'pb1', images: RAW1 }),
+    ch('precious_metals', 'mb1', 'insert', { id: 'mb1', images: 5 }),
+    ch('suppliers', 'sb1', 'insert', { id: 'sb1', cpr_image: 42 }),
+    ch('suppliers', 'sb2', 'insert', { id: 'sb2', cpr_image: [RAW1] }),
+    ch('orders', 'ob1', 'insert', { id: 'ob1', custom_product_spec: JSON.stringify({ name: 'Ring', images: 'not-a-list' }) }),
+    ch('orders', 'ob2', 'insert', { id: 'ob2', custom_product_spec: { name: 'Ring', images: [RAW1, 7] } }),
+    ch('orders', 'ob3', 'insert', { id: 'ob3', custom_product_spec: JSON.stringify({ name: 'Ring', images: { a: RAW1 } }) }),
+    ch('orders', 'ob4', 'insert', { id: 'ob4', custom_product_spec: '[1,2]' }),
+  ];
+  const p = await pull.prepareRecordImages(bad, stored);
+  const miss = bad.filter((c, i) => p.changes[i] !== c || p.rejected.get(c) !== pull.RECORD_IMAGE_SHAPE_INVALID).map((c) => c.record_id);
+  ok(miss.length === 0, `FORM gemischte Liste, Objekt statt Liste, Einzeltext statt Liste, Nicht-Text als Einzelfoto, Entwurf ohne gültige Fotoliste → Quarantänefall RECORD_IMAGE_SHAPE_INVALID, Änderung unverändert (abweichend: ${miss.join(',') || '—'})`);
+  ok(calls === 0, 'FORM keine ungültige Form erreicht den Normalisierer oder die Zeile');
+
+  calls = 0;
+  const empty = [
+    ch('repairs', 're1', 'insert', { id: 're1', images: null }),
+    ch('repairs', 're2', 'insert', { id: 're2', images: '' }),
+    ch('repairs', 're3', 'insert', { id: 're3', images: '[]' }),
+    ch('products', 'pe1', 'insert', { id: 'pe1', images: [] }),
+    ch('suppliers', 'se1', 'insert', { id: 'se1', cpr_image: null }),
+    ch('suppliers', 'se2', 'insert', { id: 'se2', cpr_image: '' }),
+    ch('orders', 'oe1', 'insert', { id: 'oe1', custom_product_spec: null }),
+    ch('orders', 'oe2', 'insert', { id: 'oe2', custom_product_spec: JSON.stringify({ name: 'Ring' }) }),
+    ch('orders', 'oe3', 'insert', { id: 'oe3', custom_product_spec: JSON.stringify({ name: 'Ring', images: [] }) }),
+    ch('orders', 'oe4', 'insert', { id: 'oe4', custom_product_spec: '' }),
+    ch('orders', 'oe5', 'insert', { id: 'oe5', custom_product_spec: JSON.stringify({ name: 'Ring', images: null }) }),
+  ];
+  const e = await pull.prepareRecordImages(empty, stored);
+  ok(empty.every((c, i) => e.changes[i] === c) && e.rejected.size === 0 && calls === 0,
+    'LEER gültige leere Felder (null, "", [], "[]", Entwurf ohne / mit leerer Fotoliste) bleiben unverändert, keine Ablehnung');
+
+  calls = 0;
+  DB.repairs['r-weird'] = { images: '{"legacy":true}' };
+  DB.suppliers['s-weird'] = { cpr_image: 7 };
+  DB.orders['o-weird'] = { custom_product_spec: 'Freitext-Entwurf ohne JSON' };
+  const same = [
+    ch('repairs', 'r-weird', 'update', { id: 'r-weird', images: '{"legacy":true}' }),
+    ch('suppliers', 's-weird', 'update', { id: 's-weird', cpr_image: 7 }),
+    ch('orders', 'o-weird', 'update', { id: 'o-weird', custom_product_spec: 'Freitext-Entwurf ohne JSON' }),
+  ];
+  const s = await pull.prepareRecordImages(same, stored);
+  ok(same.every((c, i) => s.changes[i] === c) && s.rejected.size === 0 && calls === 0,
+    'BESTAND ein unverändert zurückgespielter Altwert (auch in fremder Form) bleibt Byte für Byte, keine Ablehnung');
+  const changedWeird = ch('repairs', 'r-weird', 'update', { id: 'r-weird', images: '{"legacy":false}' });
+  const cw = await pull.prepareRecordImages([changedWeird], stored);
+  ok(cw.rejected.get(changedWeird) === pull.RECORD_IMAGE_SHAPE_INVALID, 'BESTAND eine GEÄNDERTE ungültige Form in derselben Zeile → Quarantänefall');
+}
+
 rec.setRecordImageNormalizer(null);
 if (fails.length) {
   console.log(`\nFAIL — r7b pp-12 pulled record images: ${PASS} passed, ${fails.length} failed`);

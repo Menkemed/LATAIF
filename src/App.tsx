@@ -188,7 +188,8 @@ export default function App() {
         } catch { /* ignore */ }
         // POST-PARITY R7B PP-5 — eine gespeicherte Sitzung gilt hier nur, wenn DIESE Datenbank sie
         // ausgestellt hat (war der Rechner vorher PC2, liegt dort womöglich eine fremde).
-        try { authService.verifyStoredSession(); } catch (e) { console.warn('[auth] stored session not verified:', e); }
+        // Scheitert die Prüfung, gilt die gespeicherte Sitzung NICHT als bestätigt → Anmeldung.
+        try { authService.verifyStoredSession(); } catch (e) { authService.discardStoredSession(`check-threw (${e instanceof Error ? e.name : 'error'})`); }
         initialize();
         // CENTRAL-C1 — erst HIER meldet sich die Kommandobruecke als bereit: die Datenbank ist
         // offen und die Stores sind geladen. Vorher weist Rust jede Anfrage mit einer Begruendung

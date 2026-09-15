@@ -3893,7 +3893,10 @@ unverändert **175**.
 | Aufnahmeprofil 800 / 1600 px (G7) | gemessen begründet auf Release-Messung (Artikelweg 8 Aufnahmen + Belegweg; Bytes Debug = Release); ursprünglicher 504 als Debug-Artefakt erklärt; kein neues Profil | Review § 4; Release-Bench `bench_capture_profile` |
 | Timeout / Wiederholung derselben Kennung (G6) | belegt am Callpath: während des ersten Laufs, nach 504, nach Commit bei verlorener Antwort, nach Neustart → genau eine Wirkung (Replay); keine neue Ergebnis-API nötig | Review § 5; Rust `bridge_tests`, `write-foundation`, `remote-invoice-create`, E2E CONC-MONEY / LOST |
 | Handy-Drain-Lease (F2) | belegt: 120 s je Auftrag, Token-Besitz; Ablauf während der Übernahme → alter Besitzer `ready_rejected`, ein Produkt, nichts verloren. Korrektur: Ablauf allein lehnt nichts ab (nur eine Übernahme durch einen anderen Claimer) | Review § 5a; `drain-handoff` §20 **106/0** |
-| Persistenz (F1) | **korrigiert**: Neustart/App-Absturz fest; Stromausfall fest außerhalb eines Fensters von Sekunden nach jedem Speichern, darin Verlust der letzten Speicherungen oder unlesbare Datei möglich (die frühere Zeile „stromausfallfest nein" war pauschal); vorbestehend seit `88e1199`, nicht geändert | Review § 6; Diagnose sql.js |
+| Persistenz (F1) | **korrigiert (Review `19ac2da`)**: regulärer Neustart durch die vorhandenen Neustart-Nachweise belegt; Stromausfall-Dauerhaftigkeit nach der Speicherbestätigung **nicht garantiert**; eine feste zeitliche Obergrenze des Risikofensters ist nicht belegt (die Fassung „fest nach einigen Sekunden" ist als unbelegt zurückgenommen); vorbestehend seit `88e1199`, nicht geändert (kein Speicherumbau) | Review § 6; Diagnose sql.js |
+| PP-5 Sitzungsablauf (Review `19ac2da`) | **behoben**: `verifyStoredSession` prüft `sessions.expires_at` der eigenen DB (abgelaufen / unlesbar / leer → verworfen); scheitert die Prüfung, wird die Sitzung verworfen — auch der Fang in `App.tsx` (vorher nur protokolliert) | Review § 13.1; `r7b-platform-hardening` **118/0** |
+| PP-12 ungültige Bildformen (Review `19ac2da`) | **behoben**: dahinter prüft die Übernahme nur die Transportform (belegt); gemischte Liste, Objekt statt Liste, Nicht-Text bei `cpr_image`, Entwurf ohne gültige Fotoliste → Quarantäne `RECORD_IMAGE_SHAPE_INVALID`; leere Felder und unveränderte Bestandswerte bleiben | Review § 13.2; `pp12-pulled-images` **32/0** |
+| Meldung bei offenem Ausgang (Review `19ac2da`) | **korrigiert**: kein absolutes „it can never happen twice"; die Wiederholung gilt aus derselben Maske, nach Verlassen/Neuladen erst nachsehen (R1 bleibt offen) | Review § 13.4 |
 | Normale Befehle bei großer DB (G5) | Skalierungsbefund, offen | Review § 8 |
 | Restbefunde R1–R4 (bestätigt, vorbestehend, offen) | R1 offene Kennung nur im Speicher der PC2-Maske (Maske verlassen nach „keine Antwort" → zweite Wirkung möglich); R2 geändertes Formular nach „keine Antwort" → wiederholter Konflikt; R3 Konflikt nach Verdrängung/Neustart als 500 „unbekannt"; R4 0-Byte-`lataif.db` startet leer statt `DB_RECOVERY_REQUIRED` | Review § 0, § 5, § 6 |
 | Rust `legacy_push … o1_o5_o10` | **behoben** (52/36/37 aus dem Manifest; rot seit `ab7f169`) | `cargo test sync::routes` 74/0 |
@@ -3901,7 +3904,8 @@ unverändert **175**.
 ```
 PP offen vorher:     0  (Post-Parity-Backlog PP-1 … PP-14 geschlossen)
 Prüfbefunde:         F4 behoben · G2 behoben · G3 zusammengeführt · Rust-Pin behoben ·
-                     G7/G6/F2/F1 belegt eingeordnet (Stand Belegpaket) · offen: R1–R4, G5 (eigene Entscheidung)
+                     G7/G6/F2/F1 belegt eingeordnet · Review 19ac2da: PP-5-Ablauf, PP-12-Formen, Meldung behoben ·
+                     offen (separat, nicht akzeptiert): R1–R4, G5 (eigene Entscheidung)
 verbleibend PP:      0  (unabhängige Freigabe offen)
 Registry 175 → 175
 Version 0.8.54 · kein Release

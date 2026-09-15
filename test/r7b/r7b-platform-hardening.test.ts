@@ -383,11 +383,34 @@ marker('POST_PARITY_R7B_PP4_RECURRING_EXPENSE_SCHEDULER_FIXED');
   ok(authService.verifyStoredSession() === 'dropped' && !mem.has('lataif_session'), 'START ein unlesbarer Merkzettel: verworfen');
   mem.delete('lataif_session');
   ok(authService.verifyStoredSession() === 'none', 'START ohne Merkzettel: nichts zu tun');
+  // R7B-Review — die Ablaufzeit gilt aus DIESER Datenbank: abgelaufen / unlesbar → verworfen; gültig → bleibt.
+  insert('sessions', { id: 's3', user_id: 'u-a', branch_id: 'branch-main', token: 't-expired', expires_at: '2020-01-01T00:00:00.000Z', created_at: NOW });
+  insert('sessions', { id: 's4', user_id: 'u-a', branch_id: 'branch-main', token: 't-badexp', expires_at: 'kaputt', created_at: NOW });
+  insert('sessions', { id: 's5', user_id: 'u-a', branch_id: 'branch-main', token: 't-noexp', expires_at: '', created_at: NOW });
+  insert('sessions', { id: 's6', user_id: 'u-a', branch_id: 'branch-main', token: 't-fresh', expires_at: new Date(Date.now() + 86_400_000).toISOString(), created_at: NOW });
+  put({ ...base, token: 't-expired', userId: 'u-a', branchId: 'branch-main', role: 'owner' });
+  ok(authService.verifyStoredSession() === 'dropped' && !mem.has('lataif_session') && authService.getSession() === null,
+    'START eine ABGELAUFENE Sitzung (sessions.expires_at vorbei): verworfen, niemand angemeldet');
+  put({ ...base, token: 't-badexp', userId: 'u-a', branchId: 'branch-main', role: 'owner' });
+  ok(authService.verifyStoredSession() === 'dropped' && !mem.has('lataif_session'), 'START eine unlesbare Ablaufzeit: verworfen');
+  put({ ...base, token: 't-noexp', userId: 'u-a', branchId: 'branch-main', role: 'owner' });
+  ok(authService.verifyStoredSession() === 'dropped' && !mem.has('lataif_session'), 'START eine leere Ablaufzeit: verworfen');
+  put({ ...base, token: 't-fresh', userId: 'u-a', branchId: 'branch-main', role: 'viewer' });
+  ok(authService.verifyStoredSession() === 'kept' && authService.getSession()?.role === 'owner',
+    'START eine gültige Sitzung (Ablauf morgen, Format wie `login`) bleibt — mit der Rolle von JETZT');
+  db.run('ALTER TABLE sessions RENAME TO sessions_weg');
+  put({ ...base, token: 't-fresh', userId: 'u-a', branchId: 'branch-main', role: 'owner' });
+  ok(authService.verifyStoredSession() === 'dropped' && !mem.has('lataif_session') && authService.getSession() === null,
+    'START die Prüfung selbst scheitert (keine sessions-Tabelle) → verworfen: eine ungeprüfte Sitzung ist keine bestätigte');
+  db.run('ALTER TABLE sessions_weg RENAME TO sessions');
+  mem.delete('lataif_session');
 
   const app = codeOf(src('src/App.tsx'));
   const boot = app.slice(app.indexOf('function bootDatabase()'), app.indexOf('.catch(err =>'));
   ok(boot.indexOf('authService.verifyStoredSession()') > 0 && boot.indexOf('authService.verifyStoredSession()') < boot.indexOf('initialize();'),
     'WIRE der Primary prüft die gespeicherte Sitzung, BEVOR die Anwendung sie übernimmt');
+  ok(/try \{ authService\.verifyStoredSession\(\); \} catch \(e\) \{ authService\.discardStoredSession\(/.test(boot),
+    'WIRE scheitert die Prüfung beim Start, wird die gespeicherte Sitzung verworfen — nicht nur protokolliert und weiterbenutzt');
   ok(/\} else if \(token\) \{\s*setClientToken\(null\);/.test(app) && /return true;\s*\}\s*setClientToken\(null\);\s*return false;/.test(app),
     'WIRE ein Ausweis ohne brauchbare Sitzung wird verworfen (Start und Anmeldung) — kein halber Zwischenzustand');
   const st = codeOf(src('src/stores/authStore.ts'));
@@ -498,10 +521,12 @@ marker('POST_PARITY_R7B_PP7_DEAD_CODE_REMOVED');
 // ══ §6 — PP-12: Dokumentfristen ══════════════════════════════════════════════
 {
   const t = fehlertext({ kind: 'unknown', code: 'BRIDGE_TIMEOUT' } as never);
-  ok(/did not finish within the time limit/.test(t) && /may still be working/.test(t) && /can never happen twice/.test(t) && !/No answer from the primary/.test(t),
+  ok(/did not finish within the time limit/.test(t) && /may still be working/.test(t) && /on this form: the same attempt is repeated and is not saved twice/.test(t) && !/No answer from the primary/.test(t),
     `UI eine abgelaufene Frist heißt „läuft vielleicht noch", nicht „keine Antwort" (${t})`);
   const u = fehlertext({ kind: 'unknown', code: 'SERVER_UNAVAILABLE' } as never);
   ok(/No answer from the primary/.test(u) && /not clear whether/.test(u), 'UI ein nicht erreichbarer Primary bleibt „keine Antwort"');
+  ok([t, u].every((m) => /If you leave this form or reload first, check whether it was saved/.test(m) && !/never/.test(m)),
+    'UI keine absolute Zusage „nie doppelt": die Wiederholung gilt aus DERSELBEN Maske; nach Verlassen/Neuladen erst nachsehen (R1 offen)');
   ok(!/saved\b.*successfully|Saved!/.test(t), 'UI Frist ≠ Erfolg');
   const a = ocr.ocrTargetSize(4000, 3000), b = ocr.ocrTargetSize(8000, 6000), c = ocr.ocrTargetSize(20000, 1000);
   ok(!a.scaled && b.scaled && b.width * b.height <= ocr.OCR_MAX_PIXELS && Math.abs(b.width / b.height - 4 / 3) < 0.01 && c.scaled && c.width * c.height <= ocr.OCR_MAX_PIXELS,

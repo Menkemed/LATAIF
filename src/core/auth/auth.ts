@@ -66,44 +66,59 @@ export class AuthService {
    * Gültig ist sie hier nur, wenn DIESE Datenbank sie ausgestellt hat (`sessions.token`), der
    * Benutzer aktiv ist und die Filiale noch hat. Die Rolle kommt dabei frisch aus `user_branches`,
    * nicht aus dem Merkzettel. Sonst wird sie verworfen und es geht zur Anmeldung.
+   *
+   * R7B-Review — auch die Ablaufzeit gilt aus DIESER Datenbank (`sessions.expires_at`, von `login`
+   * als ISO-Zeit geschrieben): abgelaufen oder kein lesbarer Zeitpunkt → verworfen. Scheitert die
+   * Prüfung selbst, gilt die Sitzung ebenfalls nicht — eine ungeprüfte Sitzung ist keine bestätigte.
    */
   verifyStoredSession(): 'kept' | 'dropped' | 'none' {
     let saved: string | null = null;
     try { saved = localStorage.getItem('lataif_session'); } catch { return 'none'; }
     if (!saved) return 'none';
-    // Der Grund steht im Protokoll (und für diese Sitzung des Fensters abrufbar) — nie das Token.
-    const drop = (reason: string): 'dropped' => {
-      this.currentSession = null;
-      try { localStorage.removeItem('lataif_session'); } catch { /* kein Speicher */ }
-      console.warn('[auth] stored session not accepted:', reason);
-      try { sessionStorage.setItem('lataif_session_check', reason); } catch { /* kein Speicher */ }
-      return 'dropped';
-    };
+    const drop = (reason: string): 'dropped' => this.discardStoredSession(reason);
     let s: Session;
     try { s = JSON.parse(saved) as Session; } catch { return drop('unreadable'); }
     if (!s || typeof s.token !== 'string' || typeof s.userId !== 'string' || typeof s.branchId !== 'string') return drop('incomplete');
-    const db = getDatabase();
-    const has = (sql: string, p: unknown[]): boolean => (db.exec(sql, p)[0]?.values?.length ?? 0) > 0;
-    const r = db.exec(
-      `SELECT ub.role FROM sessions se
-         JOIN users u ON u.id = se.user_id AND u.active = 1
-         JOIN user_branches ub ON ub.user_id = u.id AND ub.branch_id = ?
-         JOIN branches b ON b.id = ub.branch_id AND b.active = 1
-        WHERE se.token = ? AND se.user_id = ?
-        LIMIT 1`,
-      [s.branchId, s.token, s.userId],
-    );
-    const role = r[0]?.values[0]?.[0];
-    if (typeof role !== 'string' || !role) {
-      if (!has('SELECT 1 FROM sessions WHERE token = ?', [s.token])) return drop(`not-issued-here (${has('SELECT 1 FROM sessions', []) ? 'other sessions exist' : 'no sessions'})`);
-      if (!has('SELECT 1 FROM sessions WHERE token = ? AND user_id = ?', [s.token, s.userId])) return drop('other-user');
-      if (!has('SELECT 1 FROM users WHERE id = ? AND active = 1', [s.userId])) return drop('user-inactive');
-      return drop('no-branch-access');
+    try {
+      const db = getDatabase();
+      const has = (sql: string, p: unknown[]): boolean => (db.exec(sql, p)[0]?.values?.length ?? 0) > 0;
+      const r = db.exec(
+        `SELECT ub.role, se.expires_at FROM sessions se
+           JOIN users u ON u.id = se.user_id AND u.active = 1
+           JOIN user_branches ub ON ub.user_id = u.id AND ub.branch_id = ?
+           JOIN branches b ON b.id = ub.branch_id AND b.active = 1
+          WHERE se.token = ? AND se.user_id = ?
+          LIMIT 1`,
+        [s.branchId, s.token, s.userId],
+      );
+      const role = r[0]?.values[0]?.[0];
+      if (typeof role !== 'string' || !role) {
+        if (!has('SELECT 1 FROM sessions WHERE token = ?', [s.token])) return drop(`not-issued-here (${has('SELECT 1 FROM sessions', []) ? 'other sessions exist' : 'no sessions'})`);
+        if (!has('SELECT 1 FROM sessions WHERE token = ? AND user_id = ?', [s.token, s.userId])) return drop('other-user');
+        if (!has('SELECT 1 FROM users WHERE id = ? AND active = 1', [s.userId])) return drop('user-inactive');
+        return drop('no-branch-access');
+      }
+      const expiresAt = r[0]?.values[0]?.[1];
+      const until = typeof expiresAt === 'string' && /^\d{4}-\d{2}-\d{2}/.test(expiresAt.trim()) ? Date.parse(expiresAt.trim()) : NaN;
+      if (!Number.isFinite(until)) return drop('expiry-unreadable');
+      if (until <= Date.now()) return drop('expired');
+      const verified: Session = { ...s, role: role as UserRole };
+      this.currentSession = verified;
+      localStorage.setItem('lataif_session', JSON.stringify(verified));
+      return 'kept';
+    } catch (e) {
+      return drop(`check-failed (${e instanceof Error ? e.name : 'error'})`);
     }
-    const verified: Session = { ...s, role: role as UserRole };
-    this.currentSession = verified;
-    localStorage.setItem('lataif_session', JSON.stringify(verified));
-    return 'kept';
+  }
+
+  /** Die gespeicherte Sitzung verwerfen: Merkzettel weg, nichts angemeldet. Der Grund steht im
+   *  Protokoll (und für diese Sitzung des Fensters abrufbar) — nie das Token. */
+  discardStoredSession(reason: string): 'dropped' {
+    this.currentSession = null;
+    try { localStorage.removeItem('lataif_session'); } catch { /* kein Speicher */ }
+    console.warn('[auth] stored session not accepted:', reason);
+    try { sessionStorage.setItem('lataif_session_check', reason); } catch { /* kein Speicher */ }
+    return 'dropped';
   }
 
   isAuthenticated(): boolean {

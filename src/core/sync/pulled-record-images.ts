@@ -22,6 +22,14 @@
 import { normalizeRecordImages, RecordImageRejected } from '../media/record-image.ts';
 
 export const SYNC_RECORD_IMAGE_REJECTED = 'SYNC_RECORD_IMAGE_REJECTED';
+/**
+ * R7B-Review — eine Bildspalte in fremder Form (gemischte Liste, Objekt statt Liste, Nicht-Text als
+ * Einzelfoto, Auftragsentwurf ohne gültige Fotoliste). Hinter dieser Stelle prüft die Übernahme nur
+ * die Transportform (`validateBusinessPayload`), und `applyUpsert` schreibt jedes Objekt als JSON-Text
+ * — ohne dieses Nein stünde die Form wörtlich in der Zeile, am Normalisierer vorbei. Leere Felder und
+ * ein unverändert zurückgespielter Bestandswert bleiben erlaubt.
+ */
+export const RECORD_IMAGE_SHAPE_INVALID = 'RECORD_IMAGE_SHAPE_INVALID';
 
 type Shape = 'list' | 'single' | 'spec';
 
@@ -79,6 +87,15 @@ function readSpec(v: unknown): { spec: Record<string, unknown>; asText: boolean 
 
 const sameList = (a: readonly string[], b: readonly string[]) => a.length === b.length && a.every((x, i) => x === b[i]);
 
+/** Steht genau dieser Wert schon in der Zeile? Verglichen wird, was `applyUpsert` binden würde (Objekt → JSON-Text). */
+function sameAsStored(v: unknown, before: unknown): boolean {
+  if (v === null || v === undefined || before === null || before === undefined) return false;
+  return String(typeof v === 'object' ? JSON.stringify(v) : v) === String(before);
+}
+
+const shapeInvalid = (table: string, column: string): RecordImageRejected =>
+  new RecordImageRejected(RECORD_IMAGE_SHAPE_INVALID, `${table}.${column} is not a photo in the stored form`);
+
 /**
  * Bereitet einen abgeholten Stapel für die Übernahme vor: neue Fotos normalisiert, gespeicherte
  * unverändert, unspeicherbare als Quarantänefall markiert. Läuft VOR der Transaktion des Stapels
@@ -102,23 +119,29 @@ export async function prepareRecordImages<C extends PulledChangeLike>(changes: r
       for (const { column, shape } of cols) {
         if (!Object.prototype.hasOwnProperty.call(data, column)) continue;
         const before = stored(change.table_name, change.record_id, column);
+        const raw = data[column];
         if (shape === 'list') {
-          const inc = readList(data[column]);
-          if (!inc || inc.list.length === 0) continue;
+          const inc = readList(raw);
+          if (!inc) { if (sameAsStored(raw, before)) continue; throw shapeInvalid(change.table_name, column); }
+          if (inc.list.length === 0) continue;
           const keep = readList(before)?.list ?? [];
           const next = await normalizeRecordImages(inc.list, { keep });
           normalized += next.filter((x, i) => x !== inc.list[i]).length;
           if (!sameList(next, inc.list)) { data[column] = inc.asText ? JSON.stringify(next) : next; changed = true; }
         } else if (shape === 'single') {
-          const inc = data[column];
-          if (typeof inc !== 'string' || inc === '') continue;
+          const inc = raw;
+          if (inc === null || inc === undefined || inc === '') continue;
+          if (typeof inc !== 'string') { if (sameAsStored(inc, before)) continue; throw shapeInvalid(change.table_name, column); }
           const keep = typeof before === 'string' && before ? [before] : [];
           const [next] = await normalizeRecordImages([inc], { keep });
           if (next !== inc) { data[column] = next; changed = true; normalized++; }
         } else {
-          const inc = readSpec(data[column]);
-          const imgs = inc ? readList(inc.spec.images) : null;
-          if (!inc || !imgs || imgs.list.length === 0) continue;
+          if (raw === null || raw === undefined || raw === '') continue;
+          const inc = readSpec(raw);
+          if (!inc) { if (sameAsStored(raw, before)) continue; throw shapeInvalid(change.table_name, column); }
+          const imgs = readList(inc.spec.images);
+          if (!imgs) { if (sameAsStored(raw, before)) continue; throw shapeInvalid(change.table_name, column); }
+          if (imgs.list.length === 0) continue;
           const keep = readList(readSpec(before)?.spec.images)?.list ?? [];
           const next = await normalizeRecordImages(imgs.list, { keep });
           normalized += next.filter((x, i) => x !== imgs.list[i]).length;

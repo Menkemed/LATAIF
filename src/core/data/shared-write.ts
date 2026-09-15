@@ -238,7 +238,9 @@ export function useSharedWrites(): SharedWrites {
  *
  * Der offene Ausgang bekommt bewusst eigene Worte: „nicht gespeichert" wäre falsch (es kann
  * passiert sein), „gespeichert" wäre schlimmer. Die ehrliche Auskunft ist, dass es offen ist und
- * dass ein erneuter Versuch nichts doppelt anlegt.
+ * dass ein erneuter Versuch AUS DIESER MASKE nichts doppelt anlegt. Das gilt nur, solange die Maske
+ * offen bleibt: die offene Kennung lebt im Speicher der Maske (R7B-Review R1) — nach Verlassen oder
+ * Neuladen erst nachsehen, ob es gespeichert wurde.
  */
 export function fehlertext(r: WriteOutcome<unknown>): string {
   switch (r.kind) {
@@ -250,10 +252,12 @@ export function fehlertext(r: WriteOutcome<unknown>): string {
       // kann noch arbeiten. Offen ist es trotzdem — und die Wiederholung bleibt dieselbe.
       if (r.code === 'BRIDGE_TIMEOUT') {
         return 'The main computer did not finish within the time limit (BRIDGE_TIMEOUT) — it may still be working, '
-          + 'and it is not clear whether this was saved. Press again: the same attempt is repeated, and it can never happen twice.';
+          + 'and it is not clear whether this was saved. Press again on this form: the same attempt is repeated and is not saved twice. '
+          + 'If you leave this form or reload first, check whether it was saved before entering it again.';
       }
       return `No answer from the primary (${r.code}) — it is not clear whether this was saved. `
-        + 'Press save again: the same attempt is repeated, and it can never create it twice.';
+        + 'Press save again on this form: the same attempt is repeated and is not saved twice. '
+        + 'If you leave this form or reload first, check whether it was saved before entering it again.';
   }
 }
 

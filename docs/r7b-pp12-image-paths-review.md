@@ -17,7 +17,10 @@ Registry 175 (unverändert) · kein Push/Tag/Release. PP-3 … PP-7 gelten als g
 | **G4 Keine Vorschau für Belegbilder** | begründet, unverändert (Vorschau gibt es nur, wo ein Medienspeicher-Objekt entsteht) | § 2 |
 | **G6 Timeout / Wiederholung derselben Kennung** | **belegt am Callpath**: während des ersten Laufs, nach 504, nach Commit bei verlorener Antwort, nach Neustart → genau eine Wirkung (Replay); Wartezeit in der Schreibreihenfolge zählt gegen die Frist (SSOT korrigiert). Keine neue Ergebnis-API nötig. Offen ausgewiesen: R1–R3 | § 5 |
 | **F2 Handy-Drain-Lease** | **belegt**: 120 s je Auftrag, Token-Besitz; Ablauf WÄHREND der Übernahme gezielt getestet (`drain-handoff` §20 neu, 106/0): alter Besitzer `ready_rejected`, ein Produkt, nichts verloren. Frühere Aussage „läuft bei großer DB ab → `ready_rejected`" korrigiert | § 5a |
-| **F1 Persistenz** | **getrennt eingeordnet**: Neustart/App-Absturz fest; Stromausfall fest außerhalb eines Fensters von Sekunden nach jedem Speichern, darin Verlust der letzten Speicherungen oder unlesbare Datei möglich (pauschales „stromausfallfest nein" korrigiert). Vorbestehend seit `88e1199`, nicht geändert. Offen ausgewiesen: R4 | § 6 |
+| **F1 Persistenz** | **getrennt eingeordnet (Review `19ac2da` nachgeschärft)**: regulärer Neustart durch die vorhandenen Neustart-Nachweise belegt; Stromausfall-Dauerhaftigkeit nach der Speicherbestätigung **nicht garantiert**; eine feste zeitliche Obergrenze des Risikofensters ist nicht belegt (die unbelegte Fassung „fest nach einigen Sekunden" ist zurückgenommen). Vorbestehend seit `88e1199`, nicht geändert. Offen ausgewiesen: R4 | § 6 |
+| **PP-5 Sitzungsablauf** (Review `19ac2da`) | **behoben**: `verifyStoredSession` prüft `sessions.expires_at` der eigenen DB (abgelaufen, unlesbar, leer → verworfen); eine scheiternde Prüfung verwirft die Sitzung, auch der Fang in `App.tsx` | § 13.1; `r7b-platform-hardening` **118/0** |
+| **PP-12 ungültige Bildformen** (Review `19ac2da`) | **behoben**: nachgelagert prüft die Übernahme nur die Transportform (belegt); jetzt gemischte Liste, Objekt statt Liste, Nicht-Text bei `cpr_image`, Entwurf ohne gültige Fotoliste → Quarantäne `RECORD_IMAGE_SHAPE_INVALID`; leere Felder und unveränderte Bestandswerte bleiben | § 13.2; `pp12-pulled-images` **32/0** |
+| **Meldung bei offenem Ausgang** (Review `19ac2da`) | **korrigiert**: kein absolutes „it can never happen twice" mehr; die Wiederholung gilt aus derselben Maske, nach Verlassen/Neuladen erst nachsehen (R1 bleibt offen) | § 13.4 |
 | **G5 Normale Befehle 10,7 s bei 451 MB** | **Skalierungsbefund**, offen (keine pauschale Fristerhöhung, kein Speicherumbau) | § 8 |
 | **Rust `legacy_push_tests::o1_o5_o10`** | **behoben** — Erwartung aus dem kanonischen Manifest (52/36/37), vorbestehend rot seit `ab7f169` | § 9 |
 
@@ -29,7 +32,7 @@ Protokoll):**
 | R1 | Die offene Vorgangskennung lebt nur im Speicher der PC2-Maske | wird die Maske nach „keine Antwort" verlassen oder PC2 neu geladen und der Vorgang neu erfasst, entsteht eine zweite Wirkung, falls der erste Lauf committet hatte | alle Fernschreibwege von PC2 (§ 5) |
 | R2 | Nach „keine Antwort" + geändertem Formular antwortet der Primary 409 `not_executed`; der Versuch bleibt absichtlich offen | jeder weitere Klick bekommt denselben Konflikt, bis das Formular zurückgesetzt oder die Maske verlassen wird (dann R1) | PC2-Masken (§ 5) |
 | R3 | Konflikt nach Verdrängung der Kennung aus Rust (> 1024 neuere) oder nach Neustart: Renderer antwortet 500 ohne `outcome` | PC2 zeigt „unbekannt" statt „nicht ausgeführt"; keine Wirkung | Fernbefehle (§ 5) |
-| R4 | Eine 0-Byte-`lataif.db` öffnet als LEERE Datenbank statt `DB_RECOVERY_REQUIRED` | nach Stromausfall im Fenster (oder Eingriff von außen) startet die App leer, ohne Wiederherstellungshinweis | Start des Primary (§ 6) |
+| R4 | Eine 0-Byte-`lataif.db` öffnet als LEERE Datenbank statt `DB_RECOVERY_REQUIRED` | nach einem Stromausfall/Absturz kurz nach einem Speichern (oder einem Eingriff von außen) startet die App leer, ohne Wiederherstellungshinweis | Start des Primary (§ 6) |
 | G5 | Ganz-DB-Speichern skaliert mit der Dateigröße | normale Befehle bei ~450 MB zur Hälfte Speichern; mit belegter Schlange 504 `unknown` (Wirkung genau einmal) | alle schreibenden Befehle (§ 8) |
 
 ## 1. Reguläres Beenden bei großer Datenbank (F4)
@@ -289,8 +292,9 @@ Replay" ist durch ihre Glieder belegt (Tabelle), nicht als ein E2E-Ablauf.
 **Offen ausgewiesen (bestätigt am Code, vorbestehend, keine Doppelwirkung am Protokoll, nicht geändert):**
 - **R1** Die offene Kennung lebt nur im Speicher der Maske (`shared-write.ts:128` `useMemo`, `:199` `useRef`). Verlässt der
   Benutzer nach „keine Antwort" die Maske oder lädt PC2 neu und erfasst den Vorgang erneut, bekommt er eine neue Kennung —
-  hatte der erste Lauf committet, entsteht eine zweite Wirkung. Die Oberfläche sagt an dieser Stelle „may still be working …
-  press again". Behebung wäre eine dauerhafte offene Kennung je Maske (Produktentscheidung).
+  hatte der erste Lauf committet, entsteht eine zweite Wirkung. Die Meldung sagt das seit dem Review von `19ac2da` ehrlich
+  („on this form … If you leave this form or reload first, check whether it was saved", § 13.4). Behebung wäre eine dauerhafte
+  offene Kennung je Maske (Produktentscheidung, nicht in diesem Auftrag).
 - **R2** Der Rumpf wird bei jedem Klick neu gebaut. Nach „keine Antwort" + geändertem Formular antwortet der Primary 409
   `not_executed`; `send` gibt `not_executed` zurück, der Versuch bleibt absichtlich offen (der erste Ausgang ist weiter
   unbekannt) → jeder weitere Klick bekommt denselben Konflikt, bis das Formular zurückgesetzt oder die Maske verlassen wird.
@@ -354,13 +358,15 @@ im Dateisystem (Cache des Betriebssystems); jedes Ende des Prozesses lässt ihn 
 Ein abgebrochenes Schreiben lässt die alte Datei unberührt (Temp + Umbenennen). Belegt in jedem Neustart dieses Pakets
 (`r7b-pp12-shutdown` 518 MB: Beenden → Neustart → Buchungen, Fotos Byte für Byte, Dokumente; Mobile- und Bildlauf ebenso).
 
-**B. Stromausfall / Betriebssystemabsturz — fest außerhalb eines kurzen Fensters, darin nicht garantiert.** Das korrigiert die
-pauschale Aussage „stromausfallfest: nein" / „übersteht keinen Stromausfall" (Stand `3035f49` § 0 und § 6, SSOT-Zeile F1,
-Abschlussbericht):
-- **Außerhalb des Fensters:** Windows schreibt geänderte Cache-Seiten selbsttätig zurück (Lazy Writer: jede Sekunde ein Achtel
-  der schmutzigen Seiten — dokumentiertes Verhalten, hier nicht gemessen) und führt das NTFS-Journal für die Metadaten. Liegt
-  das letzte Speichern einige Sekunden zurück, steht der Stand auf dem Datenträger; ein Stromausfall verliert dann nichts.
-- **Im Fenster** (Sekunden nach einem Speichern, bei großer Datei länger):
+**B. Stromausfall / Betriebssystemabsturz — Dauerhaftigkeit nach der Speicherbestätigung nicht garantiert.** Die Bestätigung
+(`saveDatabaseDurably`) heißt „in der aktiven Datei im Dateisystem", nicht „auf dem Datenträger": auf dem Pfad leert nichts den
+Cache (kein `sync_all`/`FlushFileBuffers`, Umbenennen ohne `WRITE_THROUGH`). Wann das Betriebssystem die Seiten selbst
+zurückschreibt, steuert das Haus nicht und hat es nicht gemessen — **eine feste zeitliche Obergrenze des Risikofensters ist
+nicht belegt.** Zurückgenommen: die Fassung in `19ac2da` („fest außerhalb eines Fensters von Sekunden", mit Verweis auf das
+Rückschreiben des Betriebssystems) war eine unbelegte Garantie; die Fassung davor („übersteht keinen Stromausfall",
+`3035f49`) war pauschal. Es gilt: regulärer Neustart belegt (A); Stromausfall-Dauerhaftigkeit nach Bestätigung nicht
+garantiert; ohne zugesagte Frist.
+- **Nach einem Stromausfall mögliche Zustände** (aus dem Speicherpfad abgeleitet, nicht nachgestellt):
   1. Umbenennen noch nicht im Journal → der vorige Stand; verloren sind die letzten Speicherungen, obwohl die Oberfläche sie
      bestätigt hatte.
   2. Umbenennen im Journal, Datenseiten noch nicht → nicht geschriebene Bereiche lesen sich als Nullen. Kopf genullt → sql.js
@@ -370,8 +376,8 @@ Abschlussbericht):
   3. **R4 (bestätigt, vorbestehend):** eine 0-Byte-Datei öffnet sql.js als LEERE Datenbank; `loadSavedDb` liefert `bytes`,
      `initDatabase` legt Schema und Migrationen an → die Anwendung startet leer statt mit `DB_RECOVERY_REQUIRED` — entgegen dem
      C6-P1-Satz „Ein neuer Bestand entsteht ausschließlich, wenn BEWIESEN ist, dass es keine Datei gibt" (`database.ts:2853-2856`).
-     Im normalen Betrieb entsteht keine 0-Byte-Datei (Größenprüfung vor dem Umbenennen), nur durch Stromausfall/Absturz im Fenster
-     oder Eingriff von außen. Diagnose (sql.js 1:1 wie im Start): 0 B → geöffnet, Schema angelegt; 4096 Nullbytes → `file is not a
+     Im normalen Betrieb entsteht keine 0-Byte-Datei (Größenprüfung vor dem Umbenennen), nur durch einen Stromausfall/Absturz
+     nach einem Speichern oder einen Eingriff von außen. Diagnose (sql.js 1:1 wie im Start): 0 B → geöffnet, Schema angelegt; 4096 Nullbytes → `file is not a
      database`; gültige Datei ab Seite 2 genullt → geöffnet, `SELECT` → `malformed` (Anhang `persistenz-diagnose.log`).
      Behebung wäre klein (Kopf-/Längenprüfung beim Laden → Recovery-Weg), ändert aber das Startverhalten → nicht in diesem
      Abschluss, offen.
@@ -499,6 +505,48 @@ Folgecommits auf `0a15565` (kein Amend, kein Push/Tag/Release):
 7. Folgecommit Belegpaket — Review §§ 0, 4, 5, 5a, 6, 10–12 (Callpaths Timeout/Wiederholung, Handy-Lease, Persistenz
    getrennt, Release-Begründung 800/1600 px, Matrix mit Ausnahmen, Restbefunde R1–R4); SSOT: frühere Sätze zur Wartezeit
    ausdrücklich korrigiert, Statuszeilen; `drain-handoff` §20; Messfunktion `bench_capture_profile` (`#[ignore]`). Kein
-   Produktcode.
+   Produktcode. (= `19ac2da`)
+8. Folgecommit Review `19ac2da` — PP-5 Sitzungsablauf (`auth.ts`, `App.tsx`), PP-12 ungültige Bildformen
+   (`pulled-record-images.ts`), ehrliche Meldung bei offenem Ausgang (`shared-write.ts`), Persistenz-Wortlaut (§ 6, SSOT),
+   § 13; Tests `r7b-platform-hardening` 118/0, `pp12-pulled-images` 32/0.
+
+## 13. Nachforderungen des unabhängigen Reviews zu `19ac2da` (R7B_REVIEW_CHANGES_REQUIRED)
+
+**13.1 PP-5 — Ablauf der gespeicherten Sitzung.** Bestätigt: `verifyStoredSession` prüfte Token, Benutzer und Filiale, nicht
+`sessions.expires_at` — eine abgelaufene Sitzung galt als `kept`. Im selben Callpath fing `App.tsx` einen Fehler der Prüfung nur
+ab (`console.warn`) und lief weiter; der ungeprüfte Merkzettel blieb in `localStorage`, und `getSession()` hätte ihn übernommen.
+Behebung (`auth.ts`): dieselbe Abfrage liest `se.expires_at` der eigenen Datenbank; kein lesbarer ISO-Zeitpunkt
+(`YYYY-MM-DD…`) → `expiry-unreadable`, vorbei → `expired`, beides verworfen (Merkzettel weg, niemand angemeldet); jede Ausnahme
+der Prüfung → `check-failed`, verworfen. `App.tsx`: der Fang ruft `discardStoredSession` (fail closed). `login` schreibt
+`expires_at` als ISO-Zeit + 30 Tage — gültige Sitzungen bleiben. Nachweis `node test/r7b/r7b-platform-hardening.test.ts`
+**118/0** (vorher 111/0): abgelaufen, unlesbar, leer → verworfen; Ablauf morgen (Format wie `login`) → `kept` mit der Rolle von
+jetzt; fehlende `sessions`-Tabelle → verworfen; Verdrahtung des Fangs.
+
+**13.2 PP-12 — ungültige Bildformen bis zur Schreibgrenze.** Callpath nach `prepareRecordImages`: `commitPulledBatch` →
+`applySyncChange` (`apply-change.ts:420`) → `validateBusinessPayload` (`:281-326`: JSON-Objekt, doppelte Schlüssel, Größe,
+Feldname in der Allowlist — laut Kommentar ausdrücklich keine Typ-/Wertregeln) → `applyUpsert` (`:340-380`: bindet jedes
+Objekt als `JSON.stringify`). Der Server-Eingang `/api/sync/push` prüft ebenfalls nur Transport und Spalten-Allowlist (§ 2).
+Ergebnis: **keine nachgelagerte Ablehnung** — die Form stünde wörtlich in der Zeile (im Test belegt: `applySyncChange` schreibt
+`{"a":"x"}` in `repairs.images`). Behebung (`pulled-record-images.ts`): jede Bildspalte braucht eine gespeicherte Form — Liste:
+Feld oder JSON-Text einer Liste aus Texten; Einzelfoto: Text; Auftragsentwurf: Objekt (oder JSON-Text) mit fehlender, leerer oder
+gültiger `images`-Liste. Sonst `RECORD_IMAGE_SHAPE_INVALID` → dieselbe Quarantäne wie ein unspeicherbares Foto
+(`SYNC_RECORD_IMAGE_REJECTED`, dieselbe Transaktion, der Stapel läuft weiter). Erlaubt bleiben leere Felder (`null`, `""`,
+`[]`, `"[]"`, Entwurf ohne/mit leerer Fotoliste) und ein unverändert zurückgespielter Bestandswert (derselbe gebundene Wert wie
+in der Zeile, auch in fremder Form — das Echo des Primary schickt keine Altzeile in die Quarantäne; eine GEÄNDERTE ungültige
+Form schon). Nachweis `node test/r7b/pp12-pulled-images.test.ts` **32/0** (vorher 26/0; neu §7: Schreibgrenze, 12 ungültige
+Formen über alle sechs Bildspalten, 11 gültige leere Formen, Bestandswerte).
+
+**13.3 Persistenz-Wortlaut.** § 0, § 6 B und die SSOT-Zeile F1 ohne die unbelegte Frist-Garantie (s. § 6 B). Kein
+Speicherumbau.
+
+**13.4 Meldung bei offenem Ausgang.** `shared-write.ts` `fehlertext` sagte bei `BRIDGE_TIMEOUT` „it can never happen twice" und
+sonst „it can never create it twice" — absolut, obwohl R1 nach Verlassen/Neuladen offen ist. Jetzt: „Press again on this form:
+the same attempt is repeated and is not saved twice. If you leave this form or reload first, check whether it was saved before
+entering it again." Keine Änderung an R1. Nachweis `r7b-platform-hardening` §6 (beide Meldungen, kein „never").
+
+**Nicht erneut gelaufen** (unveränderter Callpath, gültige Nachweise): E2E-Läufe (gültige Bildformen gehen unverändert durch —
+§7 „LEER"/„BESTAND" und §1–§4 grün; der Handy-Lauf sendet JSON-Text-Listen), übrige Einheitstests (`verifyStoredSession`,
+`fehlertext`, `prepareRecordImages` haben keine weiteren Testaufrufer). `tsc -b` grün; Lint der geänderten Dateien ohne neue
+Fehler. Offen, separat geführt und **nicht** stillschweigend akzeptiert: R1, R2, R3, R4, G5 (§ 0).
 
 Version 0.8.54 und Registry 175 unverändert (keine technische Notwendigkeit).
