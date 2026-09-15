@@ -526,7 +526,7 @@ Folgecommits auf `0a15565` (kein Amend, kein Push/Tag/Release):
 `sessions.expires_at` — eine abgelaufene Sitzung galt als `kept`. Im selben Callpath fing `App.tsx` einen Fehler der Prüfung nur
 ab (`console.warn`) und lief weiter; der ungeprüfte Merkzettel blieb in `localStorage`, und `getSession()` hätte ihn übernommen.
 Behebung (`auth.ts`): dieselbe Abfrage liest `se.expires_at` der eigenen Datenbank; kein lesbarer ISO-Zeitpunkt
-(`YYYY-MM-DD…`) → `expiry-unreadable`, vorbei → `expired`, beides verworfen (Merkzettel weg, niemand angemeldet); jede Ausnahme
+(strikt das Format von `login`: `YYYY-MM-DDTHH:mm:ss(.sss)Z`, kalendarisch geprüft — Nachtrag unten) → `expiry-unreadable`, vorbei → `expired`, beides verworfen (Merkzettel weg, niemand angemeldet); jede Ausnahme
 der Prüfung → `check-failed`, verworfen. `App.tsx`: der Fang ruft `discardStoredSession` (fail closed). `login` schreibt
 `expires_at` als ISO-Zeit + 30 Tage — gültige Sitzungen bleiben. Nachweis `node test/r7b/r7b-platform-hardening.test.ts`
 **118/0** (vorher 111/0): abgelaufen, unlesbar, leer → verworfen; Ablauf morgen (Format wie `login`) → `kept` mit der Rolle von
@@ -569,5 +569,13 @@ keine Tests, keine neuen Läufe; es gelten die vorhandenen Nachweise.
 
 Getrennt: technisch freigegeben **ja** · lokal committed **ja** · gepusht **nein** · released **nein** (0.8.54, Registry 175).
 Nicht Teil der Freigabe und weiter offen, nicht akzeptiert: **R1, R2, R3, R4, G5** (§ 0).
+
+**Nachtrag nach der Freigabe (PP-5-Randfall, eigener Folgecommit, nicht von `…APPROVED_FCA07B1` umfasst):** `fca07b1` las
+`expires_at` mit Präfix-Regex + `Date.parse` — `2099-02-30` rollte still auf den 2. März und galt als gültig. Jetzt
+`parseSessionExpiry` (`auth.ts`): nur das Format, das der einzige Schreiber `login` erzeugt (`toISOString`,
+`YYYY-MM-DDTHH:mm:ss(.sss)Z`), mit Kalenderprüfung (Rückrechnung von Jahr/Monat/Tag) und Grenzen für Stunde/Minute/Sekunde;
+nur Datum ist kein Bestand (kein Schreiber) und gilt als unlesbar. Nachweis `node test/r7b/r7b-platform-hardening.test.ts`
+(gültig → `kept`; abgelaufen → verworfen; 30. Februar, 31. April, Monat 13/00, 24:00, Minute 60, Sekunde 61, nur Datum,
+Zeitzone → `expiry-unreadable`, verworfen). Kein weiterer Lauf.
 
 Version 0.8.54 und Registry 175 unverändert (keine technische Notwendigkeit).

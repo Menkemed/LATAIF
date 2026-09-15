@@ -361,8 +361,8 @@ marker('POST_PARITY_R7B_PP4_RECURRING_EXPENSE_SCHEDULER_FIXED');
   insert('users', { id: 'u-off', email: 'o@x', password_hash: 'h', name: 'O', active: 0, created_at: NOW, updated_at: NOW });
   insert('user_branches', { user_id: 'u-a', branch_id: 'branch-main', role: 'owner', is_default: 1, created_at: NOW });
   insert('user_branches', { user_id: 'u-off', branch_id: 'branch-main', role: 'owner', is_default: 1, created_at: NOW });
-  insert('sessions', { id: 's1', user_id: 'u-a', branch_id: 'branch-main', token: 't-own', expires_at: '2099-01-01', created_at: NOW });
-  insert('sessions', { id: 's2', user_id: 'u-off', branch_id: 'branch-main', token: 't-off', expires_at: '2099-01-01', created_at: NOW });
+  insert('sessions', { id: 's1', user_id: 'u-a', branch_id: 'branch-main', token: 't-own', expires_at: '2099-01-01T00:00:00.000Z', created_at: NOW });
+  insert('sessions', { id: 's2', user_id: 'u-off', branch_id: 'branch-main', token: 't-off', expires_at: '2099-01-01T00:00:00.000Z', created_at: NOW });
   const put = (s: unknown): void => { (authService as unknown as { currentSession: unknown }).currentSession = null; mem.set('lataif_session', typeof s === 'string' ? s : JSON.stringify(s)); };
   const base = { user: { id: 'u-a', email: 'a@x', name: 'A' }, branch: { id: 'branch-main', name: 'Haupt', country: 'BH', currency: 'BHD' } };
   put({ ...base, token: 't-own', userId: 'u-a', branchId: 'branch-main', role: 'viewer' });
@@ -395,6 +395,17 @@ marker('POST_PARITY_R7B_PP4_RECURRING_EXPENSE_SCHEDULER_FIXED');
   ok(authService.verifyStoredSession() === 'dropped' && !mem.has('lataif_session'), 'START eine unlesbare Ablaufzeit: verworfen');
   put({ ...base, token: 't-noexp', userId: 'u-a', branchId: 'branch-main', role: 'owner' });
   ok(authService.verifyStoredSession() === 'dropped' && !mem.has('lataif_session'), 'START eine leere Ablaufzeit: verworfen');
+  // Nur das Format, das `login` schreibt (toISOString) — kein Kalender-Unding, das Date.parse still weiterrollt.
+  const odd = ['2099-02-30T00:00:00.000Z', '2099-02-30', '2099-13-01T00:00:00.000Z', '2099-00-10T00:00:00.000Z', '2099-04-31T00:00:00.000Z',
+    '2099-01-01T24:00:00.000Z', '2099-01-01T12:60:00.000Z', '2099-01-01T12:00:61.000Z', '2099-01-01', '2099-01-01T12:00:00+02:00'];
+  odd.forEach((v, i) => insert('sessions', { id: `s-odd-${i}`, user_id: 'u-a', branch_id: 'branch-main', token: `t-odd-${i}`, expires_at: v, created_at: NOW }));
+  const reasons: string[] = [];
+  const warn = console.warn;
+  console.warn = (...a: unknown[]) => { if (a[0] === '[auth] stored session not accepted:') reasons.push(String(a[1])); else warn(...a); };
+  const oddKept = odd.filter((_, i) => { put({ ...base, token: `t-odd-${i}`, userId: 'u-a', branchId: 'branch-main', role: 'owner' }); return authService.verifyStoredSession() !== 'dropped' || mem.has('lataif_session'); });
+  console.warn = warn;
+  ok(oddKept.length === 0 && reasons.length === odd.length && reasons.every((r) => r === 'expiry-unreadable'),
+    `START 30. Februar, 31. April, Monat 13/00, 24:00, Minute 60, Sekunde 61, nur Datum, Zeitzone → expiry-unreadable, verworfen (angenommen: ${oddKept.join(', ') || '—'}; Gründe: ${[...new Set(reasons)].join(', ')})`);
   put({ ...base, token: 't-fresh', userId: 'u-a', branchId: 'branch-main', role: 'viewer' });
   ok(authService.verifyStoredSession() === 'kept' && authService.getSession()?.role === 'owner',
     'START eine gültige Sitzung (Ablauf morgen, Format wie `login`) bleibt — mit der Rolle von JETZT');

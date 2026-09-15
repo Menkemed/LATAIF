@@ -41,6 +41,22 @@ async function hashPassword(password: string): Promise<string> {
   return Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, '0')).join('');
 }
 
+/**
+ * `sessions.expires_at` genau im Format, das `login` schreibt (`toISOString`): `YYYY-MM-DDTHH:mm:ss(.sss)Z`.
+ * Einziger Schreiber ist `login`; anderes (nur Datum, Zeitzone, Kalender-Unding wie 2099-02-30, das
+ * `Date.parse` still auf den 2. März weiterrollt) ist unlesbar → `NaN`.
+ */
+function parseSessionExpiry(v: unknown): number {
+  if (typeof v !== 'string') return NaN;
+  const m = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2}):(\d{2})(?:\.(\d{1,3}))?Z$/.exec(v);
+  if (!m) return NaN;
+  const [y, mo, d, h, mi, s] = m.slice(1, 7).map(Number);
+  if (mo < 1 || mo > 12 || d < 1 || h > 23 || mi > 59 || s > 59) return NaN;
+  const t = Date.UTC(y, mo - 1, d, h, mi, s, m[7] ? Number(m[7].padEnd(3, '0')) : 0);
+  const back = new Date(t);
+  return back.getUTCFullYear() === y && back.getUTCMonth() === mo - 1 && back.getUTCDate() === d ? t : NaN;
+}
+
 export class AuthService {
   private currentSession: Session | null = null;
 
@@ -98,8 +114,7 @@ export class AuthService {
         if (!has('SELECT 1 FROM users WHERE id = ? AND active = 1', [s.userId])) return drop('user-inactive');
         return drop('no-branch-access');
       }
-      const expiresAt = r[0]?.values[0]?.[1];
-      const until = typeof expiresAt === 'string' && /^\d{4}-\d{2}-\d{2}/.test(expiresAt.trim()) ? Date.parse(expiresAt.trim()) : NaN;
+      const until = parseSessionExpiry(r[0]?.values[0]?.[1]);
       if (!Number.isFinite(until)) return drop('expiry-unreadable');
       if (until <= Date.now()) return drop('expired');
       const verified: Session = { ...s, role: role as UserRole };
