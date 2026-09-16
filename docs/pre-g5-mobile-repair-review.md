@@ -59,7 +59,9 @@ Maske (`formRepair`): Kunde wählen oder anlegen (`customers.list` / `customers.
 Beschreibung, geschätzte Kosten, Fertigstellung, Diagnose (nur beim Bearbeiten), Notizen; Arbeitszeilen als
 **Auskunft** mit „Cancel line“ je offener Zeile; Statusknöpfe ausschließlich aus `allowedStatusTargets` des Primary.
 Werkstattkarte (nur an einer bestehenden Reparatur): **Arbeitszeile** (Arbeitsart, Lieferant oder eigene Werkstatt,
-Betrag, Text), **Material** (Art, Text, Lieferant, Menge/Gewicht/Karat, Kosten), **Goldeinsatz** (Werkstattgold mit
+Betrag, Text), **Material** (Art, Text, Lieferant, Menge, Kosten — dazu Karat je Stück bei Diamant/Stein bzw.
+Gewicht und Karat beim Goldstück; die jeweils andere Angabe wird ausgeblendet, weil der Primary sie
+abweist. `labor` bietet das Telefon nicht an, weil eine Reparatur diese Art nicht annimmt), **Goldeinsatz** (Werkstattgold mit
 Lieferant und Abrechnung ODER Kundengold mit Verbrauch und Rest — die jeweils anderen Felder werden ausgeblendet,
 weil der Primary einen gemischten Rumpf abweist) und **Rechnung** (Steuerart; der Knopf verschwindet, sobald eine
 Rechnung existiert). Was der Rechner nicht anbietet (`repairs.update_line`) und was destruktiv ist (Löschen), fehlt
@@ -87,7 +89,9 @@ Dieselbe Infrastruktur wie PC2: Belegbild-Vertrag (JPEG ≤ 100 000 B, ≤ 1600 
 Verwerfen erst nach Erfolg. Bytes reisen nie in einem Befehl. Mehrere Fotos: Plan aus `{keep:i}` für gespeicherte und
 `{stagingId}` für neue — gespeicherte Bilder werden nie neu gerechnet. Dasselbe Foto zweimal hochgeladen ergibt
 dieselbe Kennung, also kein zweites Bild. Keine zweite Medienpipeline, kein Eingriff in Medien-GC oder Inbox.
-`PRE_G5_REPAIR_MEDIA_PROVED`
+Die Auskunft `repairs.get` gibt die gespeicherte Liste **Stelle für Stelle** heraus und lässt keinen
+Eintrag weg: `{keep:i}` zählt genau auf diese Liste, ein Filter verschöbe jede folgende Stelle und ein
+Speichern behielte still das falsche Foto. `PRE_G5_REPAIR_MEDIA_PROVED`
 
 ## 5. Primary + PC2
 
@@ -123,7 +127,7 @@ gibt es dafür keine Benutzerfunktion) und das Löschen einer Reparatur (destruk
 
 | Lauf | Ergebnis |
 |---|---|
-| `node test/preg5/mobile-repair.test.ts` | **107/0** (§1 Rumpf/verbotene Felder, §2 Idempotenz, §3 AI-Leitplanken, §4 Verdrahtung, §5 keine Phantomfelder, §6 Werkstattwege) |
+| `node test/preg5/mobile-repair.test.ts` | **125/0** (§1 Rumpf/verbotene Felder, §2 Idempotenz, §3 AI-Leitplanken, §4 Verdrahtung, §5 keine Phantomfelder, §6 Werkstattwege, §7 Vokabeln des Hauses) |
 | `node test/preg5/mobile-repair-ui.test.ts` | **20/0** — die Oberfläche mit DOM-Ersatz: Erfassen, Ändern, veralteter Stand, verlorene Antwort |
 | `node test/preg5/mobile-repair-page.e2e.mjs` | **21/0** — dieselben drei Dateien in einem **echten** Browser gegen einen Attrappen-Server (Sekunden statt Minuten) |
 | `node test/e2e/pre-g5-mobile-repair.e2e.mjs` | **30/0**, `PRE_G5_MOBILE_REPAIR_E2E_PROVED` — Primary + echte `/mobile`-Seite in Edge + PC2 |
@@ -150,6 +154,24 @@ jedes Bild JPEG ≤ 100 000 B, **nie** `/api/sync/push`, keine Datenbank auf PC2
 3. **Testaufbau:** liegengebliebene Test-Browser früherer Läufe hielten den Debug-Port — gemessen wurde eine **alte**
    Seite. Jetzt eigener Port je Lauf, Anbindung an die exakte Adresse, Aufräumen beim Start. Das kostete vier Läufe.
 
+## 9b. Aus dem unabhängigen Review (nach `aefa96e` behoben)
+
+1. **Die Materialkarte bot Sackgassen an:** `labor` weist der Primary an einer Reparatur immer ab
+   (`addRepairMaterialInHouse` ruft `checkMaterialRows(..., allowLabor = false)`), und Diamant/Stein
+   verlangen das Karat je Stück — dafür gab es auf dem Telefon kein Feld. Gewicht und Karat reisten
+   außerdem unabhängig von der Art mit (`MATERIAL_FIELD_NOT_APPLICABLE`). Nutzbar war faktisch nur
+   Gold. Jetzt bietet die Auswahl genau die Arten an, die eine Reparatur annimmt, und die Felder
+   hängen an der Art — wie im Modal des Rechners.
+2. **Der Bildindex konnte verrutschen:** `repairs.get` filterte die Bilder auf `data:image/`, die
+   Auflösung von `{keep:i}` zählt aber auf die **ungefilterte** gespeicherte Liste
+   (`resolvePhotos` gegen `seen.images`). Ein einziger anders geformter Eintrag hätte beim
+   Speichern still das falsche Foto behalten. Jetzt bleibt jede Stelle erhalten.
+3. **Die Vokabeln waren eine ungepinnte zweite Liste** (Arbeitsarten, Materialarten, Goldquellen,
+   Rest-Ziele, Abrechnungsarten, Steuerarten, „eigene Werkstatt"). Genau die Falle aus R4C.3/R4C.4.
+   § 7 des Einheitstests nagelt sie jetzt Zeichen für Zeichen an die Quelle des Hauses.
+4. Diese Grenzenliste widersprach § 2 und § 7 (sie nannte die Werkstattwege als „nicht mobil",
+   obwohl V2 sie gebaut hat) — unten korrigiert.
+
 ## 10. Grenzen
 
 - **AI-Live-Nachweis offen (manuell):** ohne hinterlegten Schlüssel ist der Aufruf gegen den echten Anbieter im
@@ -160,7 +182,11 @@ jedes Bild JPEG ≤ 100 000 B, **nie** `/api/sync/push`, keine Datenbank auf PC2
   zeigt. Betrifft nur den Test.
 - **G5** Ganz-DB-Speichern skaliert mit der Dateigröße — **OPEN, nicht akzeptiert**, von diesem Schnitt unberührt.
 - AI gegen den echten Anbieter im Zwei-App-Lauf nicht gefahren (§ 3).
-- Mobil bewusst nicht: Arbeitszeilen, Material, Gold, Rechnung, Löschen (§ 7).
+- Mobil bewusst nicht: `repairs.update_line` (am Rechner gibt es dafür keine Benutzerfunktion) und
+  das Löschen einer Reparatur (destruktiv, Primary-only) — § 7. Die Werkstattwege (Arbeitszeile,
+  Storno, Material, Gold, Rechnung) sind seit `aefa96e` gebaut, siehe § 2.
+- Materialart `labor` gibt es am Telefon nicht, weil eine Reparatur sie nicht annimmt (§ 9b.1) —
+  das ist keine Lücke gegenüber dem Rechner, der sie dort ebenso wenig anbietet.
 - Das Telefon braucht einen laufenden Primary (wie PC2): ohne Fenster am Primary antwortet die Brücke mit 503, und die
   Maske sagt das.
 - Die Ablage offener Vorgänge liegt im IndexedDB **dieses** Browsers; ein anderes Telefon sieht sie nicht.

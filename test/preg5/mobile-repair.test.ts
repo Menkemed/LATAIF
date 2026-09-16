@@ -486,6 +486,14 @@ group('§3 AI-Leitplanken');
     '§4 `repairs.get` holt die Bilder und die restlichen Warenfelder dazu');
   ok(/images: repairImages\(found\[0\]\.images\)/.test(get),
     '§4 …und reicht sie gepruefte weiter (`repairImages`), nicht roh aus der Spalte');
+  // Der Index IST der Vertrag: `{keep:i}` einer Aenderung loest der Primary gegen die gespeicherte
+  // Liste auf (`resolvePhotos` gegen `seen.images`). Ein Filter hier verschoebe jede folgende
+  // Stelle — und ein Speichern wuerde still das falsche Foto behalten.
+  const bilder = /function repairImages\(v: unknown\): string\[\] \{([\s\S]*?)\n\}/.exec(rc)?.[1] ?? 'FEHLT';
+  ok(/parsed\.map\(/.test(bilder) && !/\.filter\(/.test(bilder) && !/startsWith\('data:image/.test(bilder),
+    '§4 `repairs.get` laesst KEINEN Bildeintrag weg — sonst zeigt `{keep:i}` spaeter auf ein anderes Bild');
+  ok(/typeof x === 'string' \? x : ''/.test(bilder),
+    '§4 …und haelt die Zaehlung auch bei einem unerwarteten Eintrag (leerer Platzhalter statt Luecke)');
   for (const feld of ['itemReference', 'itemDescription', 'itemCategoryId', 'itemAttributes', 'staffId']) {
     ok(new RegExp(`\\n\\s*${feld}: `).test(get.slice(0, get.indexOf('// ── Agenten-Transfers'))),
       `§4 …und nennt \`${feld}\` — ohne das koennte die Handy-Maske nicht bearbeiten, ohne Felder zu leeren`);
@@ -561,6 +569,30 @@ group('§5 Keine Phantomfelder');
     `§6 Material reist als EINE Position mit Art, Text, Lieferant und Kosten (${J(mat.body.rows[0])})`);
   ok((M.materialBody(rep, { materialKind: 'gold', description: 'x', totalCost: '5' }) as { code: string }).code === 'SUPPLIER_REQUIRED',
     '§6 Material ohne Lieferant (oder eigene Werkstatt) geht nicht');
+  // Die Art entscheidet ueber die Felder — dieselbe Weiche wie `checkMaterialRows` am Primary.
+  ok((M.materialBody(rep, { materialKind: 'labor', description: 'x', supplierId: 'sup-2', totalCost: '5' }) as { code: string })
+    .code === 'MATERIAL_KIND_REQUIRED',
+    '§6 `labor` gibt es an einer Reparatur nicht — der Primary weist es immer ab, also bietet das Telefon es nicht an');
+  const stein = M.materialBody(rep, {
+    materialKind: 'diamond', description: '0,5 ct', supplierId: 'sup-2', totalCost: '40', quantity: '2', caratPerPiece: '0,5',
+  }) as { ok: boolean; body: { rows: Array<Record<string, unknown>> } };
+  ok(stein.ok && stein.body.rows[0].caratPerPiece === 0.5 && stein.body.rows[0].quantity === 2
+    && !('weightGrams' in stein.body.rows[0]) && !('karat' in stein.body.rows[0]),
+    `§6 Diamant/Stein: Karat je Stueck ja, Gewicht und Karatangabe nein (${J(stein.body.rows[0])})`);
+  ok((M.materialBody(rep, { materialKind: 'stone', description: 'x', supplierId: 'sup-2', totalCost: '5' }) as { code: string })
+    .code === 'CARAT_REQUIRED',
+    '§6 …ohne Karat je Stueck geht ein Stein nicht hinaus (der Primary verlangt es)');
+  ok(!('caratPerPiece' in mat.body.rows[0]),
+    '§6 …und ein Goldstueck traegt kein Karat je Stueck');
+  ok((M.materialBody(rep, { materialKind: 'gold', description: 'x', supplierId: 'sup-2', totalCost: '5', karat: '21K' }) as { code: string })
+    .code === 'WEIGHT_REQUIRED',
+    '§6 Gold ohne Gewicht geht nicht');
+  ok((M.materialBody(rep, { materialKind: 'gold', description: 'x', supplierId: 'sup-2', totalCost: '5', weightGrams: '2' }) as { code: string })
+    .code === 'KARAT_REQUIRED',
+    '§6 Gold ohne Karat geht nicht');
+  ok((M.materialBody(rep, { materialKind: 'gold', description: 'x', supplierId: 'sup-2', totalCost: '5', weightGrams: '2', karat: '21K', quantity: '0' }) as { code: string })
+    .code === 'QUANTITY_INVALID',
+    '§6 eine angegebene Menge ist groesser als null');
 
   // Gold — zwei Faelle mit verschiedenen Feldern
   const werkstatt = M.goldBody(rep, { source: 'workshop', supplierId: 'sup-3', karat: '21K', receivedGrams: '10', settlementType: 'pay_money' }) as
@@ -594,6 +626,59 @@ group('§5 Keine Phantomfelder');
   }
 }
 group('§6 Werkstattwege');
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §7 — die Vokabeln gehoeren dem HAUS, nicht dem Telefon
+//
+// Zweimal teuer gelernt (R4C.3, R4C.4): wo eine zweite Liste desselben Vokabulars steht, laeuft sie
+// mit dem Haus auseinander — und die Maske bietet dann Woerter an, die der Primary nicht kennt
+// (`unknown work type: service`). Das Telefon BRAUCHT die Woerter als Werte (eine Auswahl muss sie
+// anbieten), also werden sie hier Zeichen fuer Zeichen gegen die Quelle des Hauses genagelt.
+// ══════════════════════════════════════════════════════════════════════════════
+{
+  const typen = src('src/core/models/types.ts');
+  const goldHaus = src('src/core/gold/gold-house.ts');
+  const goldBefehl = src('src/core/bridge/gold-commands.ts');
+  /** Die Woerter einer `export const X = [...]`-Liste, so wie sie im Quelltext stehen. */
+  const listeAus = (text: string, name: string): string[] => {
+    const m = new RegExp(`export const ${name}[^=]*=\\s*\\[([\\s\\S]*?)\\]`).exec(text);
+    return m ? [...m[1].matchAll(/'([^']+)'/g)].map((x) => x[1]) : [];
+  };
+
+  const hausArbeit = listeAus(typen, 'REPAIR_WORK_TYPES');
+  ok(hausArbeit.length === 8 && J(M.WORK_TYPES) === J(hausArbeit),
+    `§7 Arbeitsarten == REPAIR_WORK_TYPES des Hauses (${J(hausArbeit)})`);
+
+  const hausSteuer = listeAus(typen, 'REPAIR_TAX_SCHEMES');
+  ok(hausSteuer.length === 2 && J(M.TAX_SCHEMES) === J(hausSteuer),
+    `§7 Steuerarten == REPAIR_TAX_SCHEMES (${J(hausSteuer)})`);
+
+  const hausMaterial = listeAus(goldHaus, 'MATERIAL_KINDS');
+  ok(hausMaterial.length === 4 && J(M.MATERIAL_KINDS) === J(hausMaterial),
+    `§7 Materialarten == MATERIAL_KINDS des Hauses (${J(hausMaterial)})`);
+  // …und was eine REPARATUR davon annimmt, entscheidet `allowLabor` am Haus — nicht das Telefon.
+  ok(/addRepairMaterialInHouse[\s\S]*?checkMaterialRows\(req\.rows, actor\.branchId, false\)/.test(goldHaus),
+    '§7 eine Reparatur nimmt kein `labor` an (checkMaterialRows(..., false))');
+  ok(J(M.REPAIR_MATERIAL_KINDS) === J(hausMaterial.filter((w) => w !== 'labor')),
+    `§7 …also bietet das Telefon genau die uebrigen an (${J(M.REPAIR_MATERIAL_KINDS)})`);
+
+  const hausRest = listeAus(goldHaus, 'GOLD_LEFTOVER_DESTINATIONS');
+  ok(hausRest.length === 3 && J(M.GOLD_LEFTOVER) === J(hausRest),
+    `§7 Rest-Ziele == GOLD_LEFTOVER_DESTINATIONS (${J(hausRest)})`);
+
+  const hausAbrechnung = listeAus(goldHaus, 'GOLD_SETTLEMENT_TYPES');
+  ok(hausAbrechnung.length === 2 && J(M.GOLD_SETTLEMENT) === J(hausAbrechnung),
+    `§7 Abrechnungsarten == GOLD_SETTLEMENT_TYPES (${J(hausAbrechnung)})`);
+
+  // Die Quelle des Goldes steht nicht als Liste, sondern als Pruefung im Befehl — also wird SIE gelesen.
+  const quellen = /source !== '([a-z]+)' && source !== '([a-z]+)'/.exec(goldBefehl);
+  ok(quellen !== null && J(M.GOLD_SOURCES) === J([quellen[1], quellen[2]]),
+    `§7 Goldquellen == die Pruefung in parseRepairGoldUsage (${quellen ? quellen[1] + '/' + quellen[2] : 'FEHLT'})`);
+
+  const platzhalter = /export const INHOUSE_SOURCE = '([^']+)'/.exec(goldHaus)?.[1] ?? 'FEHLT';
+  ok(M.INHOUSE === platzhalter, `§7 „eigene Werkstatt" == INHOUSE_SOURCE (${platzhalter})`);
+}
+group('§7 Vokabeln des Hauses');
 
 // ══════════════════════════════════════════════════════════════════════════════
 for (const [name, n] of groups) console.log(`  ${name}: ${n}`);

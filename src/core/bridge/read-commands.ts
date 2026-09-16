@@ -827,7 +827,13 @@ function repairImages(v: unknown): string[] {
   try {
     const parsed: unknown = JSON.parse(v);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter((x): x is string => typeof x === 'string' && x.startsWith('data:image/'));
+    // Die STELLE zaehlt: eine Aenderung nennt ein behaltenes Bild als `{keep:i}`, und der Primary
+    // loest das gegen die GESPEICHERTE Liste auf (`resolvePhotos` gegen `seen.images`). Wer hier
+    // einen Eintrag wegfiltert, verschiebt jede folgende Stelle — dann behaelt ein Speichern still
+    // das falsche Foto und wirft ein anderes weg. Also bleibt jeder Eintrag an seinem Platz; was
+    // kein Text ist, wird zu einem leeren Platzhalter, damit die Zaehlung stimmt und `{keep:i}`
+    // den unveraenderten Eintrag zurueckgibt.
+    return parsed.map((x) => (typeof x === 'string' ? x : ''));
   } catch {
     return [];
   }

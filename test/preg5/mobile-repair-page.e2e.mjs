@@ -358,9 +358,10 @@ try {
     ok(ohneBetrag.length === 0 && /cost greater than zero/.test(meldung),
       `§4 ohne Betrag geht NICHTS hinaus, die Maske sagt es (${S(meldung)})`);
 
-    const material = await knopf('rpMatAddBtn', "document.getElementById('rpMatKind').value='gold'; document.getElementById('rpMatText').value='21K Draht'; document.getElementById('rpMatSupplier').value='sup-1'; document.getElementById('rpMatCost').value='30'; document.getElementById('rpMatWeight').value='3.5';");
+    const material = await knopf('rpMatAddBtn', "document.getElementById('rpMatKind').value='gold'; document.getElementById('rpMatText').value='21K Draht'; document.getElementById('rpMatSupplier').value='sup-1'; document.getElementById('rpMatCost').value='30'; document.getElementById('rpMatWeight').value='3.5'; document.getElementById('rpMatKarat').value='21K';");
     ok(material.length === 1 && material[0].body.op === 'repairs.add_material'
-      && material[0].body.payload.rows.length === 1 && material[0].body.payload.rows[0].weightGrams === 3.5,
+      && material[0].body.payload.rows.length === 1 && material[0].body.payload.rows[0].weightGrams === 3.5
+      && material[0].body.payload.rows[0].karat === '21K' && !('caratPerPiece' in material[0].body.payload.rows[0]),
     `§4 „Add material" sendet repairs.add_material als eine Position (${S(material[0] && material[0].body.payload.rows)})`);
 
     const gold = await knopf('rpGoldAddBtn', "document.getElementById('rpGoldSource').value='customer'; document.getElementById('rpGoldSource').dispatchEvent(new Event('change')); document.getElementById('rpGoldKarat').value='18K'; document.getElementById('rpGoldReceived').value='8'; document.getElementById('rpGoldUsed').value='6'; document.getElementById('rpGoldLeftover').value='credit';");

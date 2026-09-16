@@ -276,6 +276,9 @@
     COST_REQUIRED: 'Please enter a cost greater than zero.',
     WORK_TYPE_INVALID: 'Please choose a work type.',
     MATERIAL_KIND_REQUIRED: 'Please choose a material kind.',
+    CARAT_REQUIRED: 'Please enter the carat per piece (diamond and stone are priced by carat).',
+    WEIGHT_REQUIRED: 'Please enter the weight in grams.',
+    QUANTITY_INVALID: 'A quantity, if you give one, is greater than zero.',
     DESCRIPTION_REQUIRED: 'Please describe the material.',
     SUPPLIER_REQUIRED: 'Please choose a supplier (or the own workshop).',
     SOURCE_REQUIRED: 'Please choose where the gold came from.',
@@ -343,12 +346,14 @@
 
   function rpWerkstattVorbereiten() {
     rpFuelle('rpLineType', MobileRepair.WORK_TYPES.map((w) => ({ wert: w, text: RP_WORT(w) })), undefined);
-    rpFuelle('rpMatKind', MobileRepair.MATERIAL_KINDS.map((w) => ({ wert: w, text: RP_WORT(w) })), undefined);
+    // NUR die Arten, die eine Reparatur annimmt (`labor` weist der Primary dort immer ab).
+    rpFuelle('rpMatKind', MobileRepair.REPAIR_MATERIAL_KINDS.map((w) => ({ wert: w, text: RP_WORT(w) })), undefined);
     rpFuelle('rpGoldSource', MobileRepair.GOLD_SOURCES.map((w) => ({ wert: w, text: w === 'workshop' ? 'From the workshop' : 'From the customer' })), undefined);
     rpFuelle('rpGoldLeftover', MobileRepair.GOLD_LEFTOVER.map((w) => ({ wert: w, text: RP_WORT(w) })), 'Leftover…');
     rpFuelle('rpGoldSettlement', MobileRepair.GOLD_SETTLEMENT.map((w) => ({ wert: w, text: RP_WORT(w) })), 'Settlement…');
     rpFuelle('rpTaxScheme', MobileRepair.TAX_SCHEMES.map((w) => ({ wert: w, text: w === 'ZERO' ? 'Zero-rated' : 'VAT 10%' })), 'As stored…');
     rpGoldFelder();
+    rpMatFelder();
   }
   /** Werkstattgold und Kundengold brauchen VERSCHIEDENE Felder — die anderen werden ausgeblendet. */
   function rpGoldFelder() {
@@ -359,6 +364,19 @@
     $('rpGoldLeftover').classList.toggle('hidden', werkstatt);
   }
   $('rpGoldSource').onchange = rpGoldFelder;
+  /**
+   * Material: die Felder haengen an der Art. Ein Karat je Stueck gehoert zu Diamant und Stein,
+   * Gewicht und Karat zum Goldstueck — der Primary weist die jeweils andere Angabe ab
+   * (`MATERIAL_FIELD_NOT_APPLICABLE`). Sichtbar ist deshalb nur, was die Art wirklich braucht.
+   */
+  function rpMatFelder() {
+    const art = $('rpMatKind').value;
+    const stein = art === 'diamond' || art === 'stone';
+    $('rpMatCarat').classList.toggle('hidden', !stein);
+    $('rpMatWeight').classList.toggle('hidden', stein);
+    $('rpMatKarat').classList.toggle('hidden', stein);
+  }
+  $('rpMatKind').onchange = rpMatFelder;
 
   $('rpLineAddBtn').onclick = async () => {
     const gut = await rpWerkstatt('repairs.add_line', 'line-add', () => MobileRepair.lineBody(RP.repair, {
@@ -371,9 +389,13 @@
     const gut = await rpWerkstatt('repairs.add_material', 'material-add', () => MobileRepair.materialBody(RP.repair, {
       materialKind: $('rpMatKind').value, description: $('rpMatText').value,
       supplierId: $('rpMatSupplier').value, totalCost: $('rpMatCost').value,
-      quantity: $('rpMatQty').value, weightGrams: $('rpMatWeight').value, karat: $('rpMatKarat').value,
+      quantity: $('rpMatQty').value, caratPerPiece: $('rpMatCarat').value,
+      weightGrams: $('rpMatWeight').value, karat: $('rpMatKarat').value,
     }), 'The material was added.');
-    if (gut) { $('rpMatText').value = ''; $('rpMatCost').value = ''; $('rpMatQty').value = ''; $('rpMatWeight').value = ''; $('rpMatKarat').value = ''; }
+    if (gut) {
+      $('rpMatText').value = ''; $('rpMatCost').value = ''; $('rpMatQty').value = '';
+      $('rpMatCarat').value = ''; $('rpMatWeight').value = ''; $('rpMatKarat').value = '';
+    }
   };
   $('rpGoldAddBtn').onclick = async () => {
     const gut = await rpWerkstatt('repairs.record_gold_usage', 'gold-add', () => MobileRepair.goldBody(RP.repair, {

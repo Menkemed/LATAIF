@@ -53,7 +53,13 @@
   // Rumpf sie pruefen muss — dieselbe Lehre wie bei den Arbeitsarten am Rechner (R4C.4): eine
   // zweite Liste laeuft irgendwann auseinander, deshalb sind es genau die Woerter des Primary.
   const WORK_TYPES = ['service', 'polishing', 'spare_part', 'gold_work', 'stone_setting', 'engraving', 'plating', 'other'];
+  // Das Vokabular des Hauses (`MATERIAL_KINDS`, gold-house.ts) — und was eine REPARATUR davon
+  // annimmt: `addRepairMaterialInHouse` ruft `checkMaterialRows(..., allowLabor = false)`, also
+  // weist der Primary `labor` an einer Reparatur IMMER ab (`MATERIAL_KIND_INVALID`). Der Rechner
+  // bietet es dort ebenso wenig an (RepairDetail reicht kein `allowLabor`). Eine Art, die nur
+  // abgewiesen werden kann, gehoert nicht in die Auswahl — das waere ein Knopf ins Leere.
   const MATERIAL_KINDS = ['labor', 'diamond', 'stone', 'gold'];
+  const REPAIR_MATERIAL_KINDS = ['diamond', 'stone', 'gold'];
   const GOLD_SOURCES = ['workshop', 'customer'];
   const GOLD_LEFTOVER = ['return', 'credit', 'shop_keep'];
   const GOLD_SETTLEMENT = ['return_gold', 'pay_money'];
@@ -211,10 +217,18 @@
     return { ok: true, body: body };
   }
 
-  /** Eine Materialposition. `supplierId` ist Pflicht — ein Lieferant ODER die eigene Werkstatt. */
+  /**
+   * Eine Materialposition. `supplierId` ist Pflicht — ein Lieferant ODER die eigene Werkstatt.
+   *
+   * Die Felder haengen an der ART, genau wie am Rechner (`AddMaterialModal`) und wie der Primary
+   * prueft (`checkMaterialRows`): Diamant/Stein brauchen das Karat JE STUECK und tragen weder
+   * Gewicht noch Karatangabe; ein Goldstueck braucht Gewicht und Karat und kein Karat je Stueck.
+   * Ein Feld der falschen Art weist der Primary ab (`MATERIAL_FIELD_NOT_APPLICABLE`) — deshalb
+   * reist hier nur, was zur gewaehlten Art gehoert.
+   */
   function materialBody(repair, form) {
     const art = textOrNull(form.materialKind);
-    if (art === null || MATERIAL_KINDS.indexOf(art) < 0) return { ok: false, code: 'MATERIAL_KIND_REQUIRED' };
+    if (art === null || REPAIR_MATERIAL_KINDS.indexOf(art) < 0) return { ok: false, code: 'MATERIAL_KIND_REQUIRED' };
     const text = textOrNull(form.description);
     if (text === null) return { ok: false, code: 'DESCRIPTION_REQUIRED' };
     const lief = textOrNull(form.supplierId);
@@ -222,10 +236,24 @@
     const kosten = moneyOrNull(form.totalCost);
     if (kosten === null || kosten <= 0) return { ok: false, code: 'COST_REQUIRED' };
     const zeile = { materialKind: art, description: text, supplierId: lief, totalCost: kosten };
-    const menge = moneyOrNull(form.quantity); if (menge !== null) zeile.quantity = menge;
-    const karat = textOrNull(form.karat); if (karat !== null) zeile.karat = karat;
-    const gramm = moneyOrNull(form.weightGrams); if (gramm !== null) zeile.weightGrams = gramm;
-    const ct = moneyOrNull(form.caratPerPiece); if (ct !== null) zeile.caratPerPiece = ct;
+    // Ohne Angabe rechnet der Primary mit einem Stueck; eine angegebene Menge muss > 0 sein.
+    const menge = moneyOrNull(form.quantity);
+    if (menge !== null) {
+      if (menge <= 0) return { ok: false, code: 'QUANTITY_INVALID' };
+      zeile.quantity = menge;
+    }
+    if (art === 'diamond' || art === 'stone') {
+      const ct = moneyOrNull(form.caratPerPiece);
+      if (ct === null || ct <= 0) return { ok: false, code: 'CARAT_REQUIRED' };
+      zeile.caratPerPiece = ct;
+    } else {
+      const gramm = moneyOrNull(form.weightGrams);
+      if (gramm === null || gramm <= 0) return { ok: false, code: 'WEIGHT_REQUIRED' };
+      const karat = textOrNull(form.karat);
+      if (karat === null) return { ok: false, code: 'KARAT_REQUIRED' };
+      zeile.weightGrams = gramm;
+      zeile.karat = karat;
+    }
     return { ok: true, body: { repairId: repair.id, expectedRevision: repair.revision, rows: [zeile] } };
   }
 
@@ -414,6 +442,7 @@
     editHasChanges: editHasChanges,
     WORK_TYPES: WORK_TYPES,
     MATERIAL_KINDS: MATERIAL_KINDS,
+    REPAIR_MATERIAL_KINDS: REPAIR_MATERIAL_KINDS,
     GOLD_SOURCES: GOLD_SOURCES,
     GOLD_LEFTOVER: GOLD_LEFTOVER,
     GOLD_SETTLEMENT: GOLD_SETTLEMENT,
