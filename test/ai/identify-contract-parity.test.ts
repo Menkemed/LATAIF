@@ -15,6 +15,7 @@ import { execFileSync } from 'node:child_process';
 import {
   buildSystemPrompt, buildUserPrompt, knownCategoryIds, categorySpec,
   contractFingerprint, fnv1a64, MOBILE_ALLOWED_FIELDS, MOBILE_FORBIDDEN_FIELDS,
+  buildRepairSystemPrompt, buildRepairUserPrompt, REPAIR_FIELDS,
 } from '../../src/core/ai/identify-prompt.ts';
 
 let PASS = 0, FAIL = 0;
@@ -124,6 +125,39 @@ for (const id of knownCategoryIds()) {
   ok(overlap.length === 0, `§5 no field is both allowed and forbidden (overlap: ${overlap.join(',')})`);
 }
 
+// ── REPAIR-INTAKE §1/§2 — the SECOND form kind, TypeScript side ────────────
+//
+// The repair form has no released reference to compare against — it is new — so what is asserted
+// here is its closed shape: exactly six fields, both prompts naming all of them, the intake framing,
+// and the refusal to invent money, customer data, ids, status or dates.
+{
+  const SIX = ['itemBrand', 'itemModel', 'itemReference', 'itemSerial', 'itemDescription', 'issueDescription'];
+  const FORBID = 'invent, estimate or output prices, costs, repair estimates, customer data, ids, record numbers, status values or dates';
+
+  ok(JSON.stringify([...REPAIR_FIELDS]) === JSON.stringify(SIX),
+    `§1 the repair form declares exactly the six allowed fields (got ${[...REPAIR_FIELDS].join(',')})`);
+  ok(!knownCategoryIds().includes('repair') && knownCategoryIds().length === 6,
+    '§1 the repair form is NOT a product category — knownCategoryIds() stays product-only');
+  ok(categorySpec('repair') === null, '§1 repair does not resolve as a category spec');
+
+  const sys = buildRepairSystemPrompt();
+  const plain = buildRepairUserPrompt('');
+  const hinted = buildRepairUserPrompt('brand: Rolex');
+  for (const [label, p] of [['system', sys], ['user', plain], ['user-hints', hinted]] as const) {
+    ok(p.length > 0, `§2 the repair ${label} prompt assembles`);
+    ok(!/\{\{[A-Z_]+\}\}/.test(p), `§2 the repair ${label} prompt resolves every placeholder`);
+    ok(SIX.every(f => p.includes(f)), `§2 the repair ${label} prompt names all six fields`);
+    ok(p.includes('REPAIR INTAKE'), `§2 the repair ${label} prompt states it is a repair intake photo`);
+    ok(p.includes(FORBID), `§2 the repair ${label} prompt forbids invented money/customer/ids/dates`);
+  }
+  ok(hinted.startsWith('User-provided hints:') && hinted.includes('brand: Rolex'),
+    '§2 hints are inserted verbatim into the repair prompt');
+  ok(plain !== hinted, '§2 the hinted repair prompt differs from the plain one');
+  ok(!['estimatedValue', 'purchasePriceEstimate', 'taxScheme', 'scopeOfDelivery', 'sku', 'quantity']
+      .some(f => (sys + plain).includes(f)),
+    '§2 the repair prompt never asks for a product/pricing field');
+}
+
 // ── §5 — the fingerprint's input must be structurally unambiguous ──────────
 {
   // Rebuild the same components the fingerprint hashes, and assert the shape rather than the value:
@@ -135,18 +169,34 @@ for (const id of knownCategoryIds()) {
     parts.push(`${id}:user:${fnv1a64(buildUserPrompt(id, ''))}`);
     parts.push(`${id}:user-hints:${fnv1a64(buildUserPrompt(id, 'brand: Rolex'))}`);
   }
-  ok(parts.length === 18, '§5 the fingerprint has a fixed 18 components (6 categories x 3 prompts)');
+  // REPAIR-INTAKE §5 — appended AFTER every category line, so the product half of the input is
+  // byte-identical to what it was before the repair form existed.
+  parts.push(`repair:system:${fnv1a64(buildRepairSystemPrompt())}`);
+  parts.push(`repair:user:${fnv1a64(buildRepairUserPrompt(''))}`);
+  parts.push(`repair:user-hints:${fnv1a64(buildRepairUserPrompt('brand: Rolex'))}`);
+
+  ok(parts.length === 21, '§5 the fingerprint has a fixed 21 components (6 categories x 3 + repair x 3)');
   ok(parts.every(p => /:[0-9a-f]{16}$/.test(p)), '§5 every component ends in a 16-hex-digit digest');
   ok(parts.every(p => !p.includes('|')), '§5 no component can contain the join separator');
-  ok(new Set(parts.map(p => p.slice(0, p.lastIndexOf(':')))).size === 18, '§5 every component key is unique');
+  ok(new Set(parts.map(p => p.slice(0, p.lastIndexOf(':')))).size === 21, '§5 every component key is unique');
   const order = parts.filter((_, i) => i % 3 === 0).map(p => p.split(':')[0]);
-  ok(JSON.stringify(order) === JSON.stringify([...order].sort()), '§5 categories are emitted in sorted order');
+  ok(JSON.stringify(order.slice(0, 6)) === JSON.stringify([...order.slice(0, 6)].sort()),
+    '§5 categories are emitted in sorted order');
+  ok(order[6] === 'repair', '§5 the repair form is emitted last, after every category');
+  ok(fnv1a64(parts.join('|')) === contractFingerprint(),
+    '§5 contractFingerprint() hashes exactly these components in exactly this order');
   ok(parts[0].includes(':system:') && parts[1].includes(':user:') && parts[2].includes(':user-hints:'),
     '§5 the three prompts of a category always appear in the same order');
 }
 
 // ── the fingerprint both sides compare against ──────────────────────────────
 {
+  // The SAME value `EXPECTED_FINGERPRINT` pins in src-tauri/src/sync/ai_identify_tests.rs. If one
+  // language's assembly drifts — a category prompt, or now a repair prompt — exactly one of the two
+  // gates goes red and names the side that moved.
+  const EXPECTED_FINGERPRINT = '0c33a03188de4b83';
+  ok(contractFingerprint() === EXPECTED_FINGERPRINT,
+    `the TypeScript fingerprint matches the Rust EXPECTED_FINGERPRINT (got ${contractFingerprint()})`);
   ok(/^[0-9a-f]{16}$/.test(contractFingerprint()), 'the contract fingerprint is a 16-hex-digit value');
   ok(fnv1a64('') === 'cbf29ce484222325', 'FNV-1a offset basis matches the reference implementation');
   ok(fnv1a64('a') === 'af63dc4c8601ec8c', 'FNV-1a of "a" matches the reference implementation');

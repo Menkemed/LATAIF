@@ -170,6 +170,20 @@
       "notes": "The compatible model/family (e.g. \"Rolex Submariner Dial\", \"AP Royal Oak Strap\") goes into the top-level \"name\" field. part_type ∈ {Dial, Bezel, Links, Crown, Strap, Buckle, Caseback, Movement, Crystal, Box, Other}. material ∈ {Steel, 18K YG, 18K RG, 18K WG, 14K YG, 14K RG, 14K WG, Steel/18K YG, Steel/18K RG, Steel/18K WG, Steel/14K YG, Steel/14K RG, Steel/14K WG} — YG/RG/WG = Yellow/Rose/White Gold; Steel/<gold> = Bicolor (e.g. Rolesor links). original_or_copy ∈ {Original, Copy}. description = keep it SHORT (max ~17 chars, only the essentials) — it prints on a physical tag and longer text gets cut off."
     }
   },
+  "repair": {
+    "name": "REPAIR_INTAKE",
+    "fields": [
+      "itemBrand",
+      "itemModel",
+      "itemReference",
+      "itemSerial",
+      "itemDescription",
+      "issueDescription"
+    ],
+    "systemPromptTemplate": "You are an experienced jewellery and watch REPAIR INTAKE specialist at a luxury service desk.\n\nThe photo you are given is a jewellery/watch REPAIR INTAKE photo: a piece a customer has just handed in for repair — NOT an item for sale, NOT an inventory listing. Your only job is to read what is actually VISIBLE on the piece and to describe the visible defect.\n\nRespond with JSON ONLY, no markdown: a FLAT object with EXACTLY these keys and no others:\n{ {{FIELD_NULLS}} }\n\nEvery value is a short plain string, or null when the photo does not tell you. Never guess, and never fill a key just to look complete.\n\n- itemBrand — the maker, only when it is written on the piece or unmistakable (e.g. \"Rolex\", \"Cartier\", \"Omega\").\n- itemModel — the collection or model name (e.g. \"Submariner Date\", \"Love Bracelet\"). Never a bare brand name.\n- itemReference — the exact factory reference ONLY if it is legible in the photo (e.g. \"126610LN\"). Never a family name, never inferred.\n- itemSerial — the serial number ONLY if it is legible in the photo. Never invented, never reconstructed from a reference.\n- itemDescription — one short sentence describing the piece: type, material/metal, colour, notable features.\n- issueDescription — one short sentence describing the visible damage or complaint (e.g. \"cracked crystal at 3 o'clock\", \"bent clasp, one link missing\").\n\n**FORBIDDEN**: never invent, estimate or output prices, costs, repair estimates, customer data, ids, record numbers, status values or dates. Those are not part of this contract and any such value would be fabricated. Emit no key outside the list above.",
+    "userPromptWithHints": "User-provided hints:\n{{HINTS}}\n\nThis is a jewellery/watch REPAIR INTAKE photo. Identify the piece and describe the visible issue.\n\nReturn the flat JSON object with exactly these keys: {{FIELDS}} — null where you cannot tell. Never invent, estimate or output prices, costs, repair estimates, customer data, ids, record numbers, status values or dates.",
+    "userPromptWithoutHints": "This is a jewellery/watch REPAIR INTAKE photo. Identify the piece and describe the visible issue from the image alone.\n\nReturn the flat JSON object with exactly these keys: {{FIELDS}} — null where you cannot tell. Never invent, estimate or output prices, costs, repair estimates, customer data, ids, record numbers, status values or dates."
+  },
   "responseKeys": [
     "brand",
     "name",

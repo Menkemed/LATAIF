@@ -1,0 +1,143 @@
+<!-- ─────────── PRE-G5 MOBILE REPAIR — Uebersicht ─────────── -->
+<div id="repairHome" class="hidden">
+  <button class="back" data-back>‹ Back</button>
+  <div class="brand" style="margin-top: 4px;">
+    <h1>LATAIF</h1>
+    <p>Repairs</p>
+  </div>
+
+  <div id="rpHomeError" class="error hidden"></div>
+  <div id="rpOpenBox" class="card hidden">
+    <div class="header-row">
+      <span style="font-size: 13px; color: #A1A1AA;">Unresolved saves</span>
+    </div>
+    <div id="rpOpenList"></div>
+  </div>
+
+  <button id="rpNewBtn">＋&nbsp; New Repair Intake</button>
+
+  <div class="card">
+    <div class="row">
+      <label>Find a repair</label>
+      <input id="rpSearch" type="search" placeholder="number, brand or model" />
+    </div>
+    <button id="rpSearchBtn" class="secondary">Search</button>
+  </div>
+
+  <div id="rpList"></div>
+</div>
+
+<!-- ─────────── PRE-G5 MOBILE REPAIR — Erfassen und Bearbeiten ─────────── -->
+<div id="formRepair" class="hidden">
+  <button class="back" data-back-repair>‹ Repairs</button>
+  <div class="brand" style="margin-top: 4px;">
+    <h1 id="rpHeadline">New Repair Intake</h1>
+    <p id="rpSubline">Customer item handed in for repair</p>
+  </div>
+
+  <div id="rpError" class="error hidden"></div>
+  <div id="rpSuccess" class="success hidden"></div>
+
+  <!-- Kunde: beim Erfassen gewaehlt, bei einer Aenderung nur Auskunft (der Kunde einer Reparatur
+       wird am Rechner gewechselt, nicht unterwegs). -->
+  <div class="card" id="rpCustomerCard">
+    <div class="header-row">
+      <span style="font-size: 13px; color: #A1A1AA;">Customer</span>
+      <span id="rpCustomerPicked" class="badge hidden"></span>
+    </div>
+    <div id="rpCustomerPick">
+      <div class="row">
+        <input id="rpCustomerSearch" type="search" placeholder="search name or phone" />
+      </div>
+      <button id="rpCustomerSearchBtn" class="secondary">Search customers</button>
+      <div id="rpCustomerResults"></div>
+      <div class="row" style="margin-top: 10px;">
+        <label>New customer</label>
+        <input id="rpCustomerFirst" type="text" placeholder="First name" />
+        <input id="rpCustomerLast" type="text" placeholder="Last name" />
+        <input id="rpCustomerPhone" type="text" placeholder="Phone (optional)" />
+      </div>
+      <button id="rpCustomerCreateBtn" class="secondary">Create customer</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="header-row">
+      <span style="font-size: 13px; color: #A1A1AA;">Photos</span>
+      <span id="rpPhotoStatus" class="badge hidden"></span>
+    </div>
+    <label for="rpPhotoInput" class="photo-area" id="rpPhotoArea">
+      <div class="icon">📷</div>
+      <div>Tap to take photos</div>
+      <div class="hint">the item as handed in — up to 6</div>
+    </label>
+    <input id="rpPhotoInput" class="hidden" type="file" accept="image/*" capture="environment" multiple />
+    <div id="rpPhotoStrip" class="photo-strip hidden"></div>
+    <div id="rpPhotoHint" class="hint hidden">Tap a photo to make it the first one.</div>
+    <button id="rpAiBtn" class="secondary hidden">✨&nbsp; AI Identify</button>
+    <div id="rpAiMsg" class="hint"></div>
+  </div>
+
+  <div class="card">
+    <div class="row">
+      <label>Issue / Problem *</label>
+      <textarea id="rpIssue" rows="3" placeholder="What needs to be repaired?"></textarea>
+    </div>
+    <div class="row">
+      <label>Item Brand</label>
+      <input id="rpBrand" type="text" placeholder="e.g. Rolex" />
+    </div>
+    <div class="row">
+      <label>Item Model</label>
+      <input id="rpModel" type="text" placeholder="e.g. Datejust" />
+    </div>
+    <div class="row">
+      <label>Reference</label>
+      <input id="rpReference" type="text" placeholder="optional" />
+    </div>
+    <div class="row">
+      <label>Serial</label>
+      <input id="rpSerial" type="text" placeholder="optional" />
+    </div>
+    <div class="row">
+      <label>Item Description</label>
+      <textarea id="rpItemDescription" rows="2" placeholder="optional"></textarea>
+    </div>
+    <div class="row">
+      <label>Estimated Cost (BHD)</label>
+      <input id="rpEstimatedCost" type="number" inputmode="decimal" step="0.001" min="0" placeholder="optional" />
+    </div>
+    <div class="row">
+      <label>Estimated Ready</label>
+      <input id="rpEstimatedReady" type="date" />
+    </div>
+    <div class="row" id="rpDiagnosisRow">
+      <label>Diagnosis</label>
+      <textarea id="rpDiagnosis" rows="2" placeholder="what the workshop found"></textarea>
+    </div>
+    <div class="row">
+      <label>Notes</label>
+      <textarea id="rpNotes" rows="2" placeholder="optional"></textarea>
+    </div>
+  </div>
+
+  <!-- Arbeitszeilen: Auskunft. Geld und Lieferanten werden am Rechner gebucht. -->
+  <div class="card hidden" id="rpLinesCard">
+    <div class="header-row">
+      <span style="font-size: 13px; color: #A1A1AA;">Work lines</span>
+      <span id="rpLinesTotal" class="badge"></span>
+    </div>
+    <div id="rpLines"></div>
+    <div class="hint">Work lines, gold and invoices stay on the desktop.</div>
+  </div>
+
+  <div class="card hidden" id="rpStatusCard">
+    <div class="header-row">
+      <span style="font-size: 13px; color: #A1A1AA;">Status</span>
+      <span id="rpStatusNow" class="badge"></span>
+    </div>
+    <div id="rpStatusRow"></div>
+  </div>
+
+  <button id="rpSaveBtn">Save Repair</button>
+</div>

@@ -91,6 +91,7 @@ fn every_refusal_has_a_distinct_code_and_an_explicit_status() {
     let all = [
         (AiError::NoImage, 400), (AiError::UnsupportedMediaType, 400),
         (AiError::ImageTooLarge, 413), (AiError::UnknownCategory, 400),
+        (AiError::UnknownForm, 400),
         (AiError::MalformedRequest, 400), (AiError::KeyMissing, 503),
         (AiError::UpstreamFailed, 502), (AiError::MalformedResponse, 502),
     ];
@@ -240,6 +241,204 @@ fn an_empty_answer_yields_an_empty_patch_rather_than_defaults() {
 fn an_unknown_category_yields_no_attributes_at_all() {
     let out = filter_for_mobile(&hostile_answer(), "cat-nonsense");
     assert!(out.attributes.is_empty(), "an unknown category cannot declare keys");
+}
+
+// ── REPAIR-INTAKE §3/§4 — the second form kind ──────────────────────────────
+//
+// Same posture as the product filter: the model may answer with anything at all, and exactly six
+// keys are believed. A repair intake sits next to money (a cost estimate, a deposit) and next to
+// customer data, so everything outside those six is dropped rather than "ignored downstream".
+
+const REPAIR_SIX: [&str; 6] = [
+    "itemBrand", "itemModel", "itemReference", "itemSerial", "itemDescription", "issueDescription",
+];
+
+fn hostile_repair_answer() -> serde_json::Value {
+    serde_json::json!({
+        "itemBrand": "Rolex",
+        "itemModel": "Submariner Date",
+        "itemReference": "126610LN",
+        "itemSerial": "  7K5N2X1  ",
+        "itemDescription": "Steel diver's watch on an Oyster bracelet",
+        "issueDescription": "Cracked crystal at 3 o'clock, bezel does not turn",
+        // Everything below is what the model volunteers and the repair form must never adopt.
+        "estimatedCost": 180,
+        "repairCost": "180 BHD",
+        "customerId": "cust-4711",
+        "customerName": "Ahmed",
+        "customerPhone": "+973 3000 0000",
+        "status": "IN_PROGRESS",
+        "repairNumber": "RPR-2026-0001",
+        "id": "some-other-repair",
+        "dueDate": "2026-10-01",
+        "createdAt": "2026-09-16T10:00:00Z",
+        "notes": "should not be adopted either"
+    })
+}
+
+#[test]
+fn the_repair_filter_keeps_exactly_the_six_allowed_fields() {
+    let out = filter_for_repair(&hostile_repair_answer());
+    let keys: Vec<&str> = out.keys().map(String::as_str).collect();
+    let mut expected: Vec<&str> = REPAIR_SIX.to_vec();
+    expected.sort_unstable();
+    assert_eq!(keys, expected, "exactly the six contract fields, nothing else");
+    assert_eq!(out.get("itemBrand").map(String::as_str), Some("Rolex"));
+    assert_eq!(out.get("itemReference").map(String::as_str), Some("126610LN"));
+    // Whitespace around a value is the model's, not the user's.
+    assert_eq!(out.get("itemSerial").map(String::as_str), Some("7K5N2X1"));
+    assert_eq!(
+        out.get("issueDescription").map(String::as_str),
+        Some("Cracked crystal at 3 o'clock, bezel does not turn")
+    );
+}
+
+#[test]
+fn no_cost_customer_id_status_or_date_survives_the_repair_filter() {
+    let out = filter_for_repair(&hostile_repair_answer());
+    let json = serde_json::to_string(&out).unwrap();
+    for forbidden in [
+        "estimatedCost", "repairCost", "customerId", "customerName", "customerPhone",
+        "status", "repairNumber", "id", "dueDate", "createdAt", "notes",
+        "180", "cust-4711", "Ahmed", "IN_PROGRESS", "RPR-2026-0001", "some-other-repair",
+        "2026-10-01",
+    ] {
+        assert!(!json.contains(forbidden), "{forbidden} leaked through the repair filter: {json}");
+    }
+    for key in out.keys() {
+        assert!(REPAIR_SIX.contains(&key.as_str()), "{key} is not an allowed repair field");
+    }
+}
+
+#[test]
+fn repair_null_like_and_non_string_answers_are_dropped() {
+    let raw = serde_json::json!({
+        "itemBrand": "null",
+        "itemModel": "N/A",
+        "itemReference": "-",
+        "itemSerial": "   ",
+        // A number, an object and an array are hallucinated shapes, not values.
+        "itemDescription": 42,
+        "issueDescription": { "text": "broken" }
+    });
+    let out = filter_for_repair(&raw);
+    assert!(out.is_empty(), "nothing is invented when the model knows nothing: {out:?}");
+
+    let arrays = serde_json::json!({ "itemBrand": ["Rolex"], "itemModel": true, "itemSerial": null });
+    assert!(filter_for_repair(&arrays).is_empty(), "only strings are believed");
+    assert!(filter_for_repair(&serde_json::json!({})).is_empty());
+    assert!(filter_for_repair(&serde_json::json!("not an object")).is_empty());
+}
+
+#[test]
+fn an_over_long_repair_value_is_truncated_rather_than_adopted_whole() {
+    let long = "ä".repeat(REPAIR_MAX_VALUE_LEN + 250);
+    let raw = serde_json::json!({ "issueDescription": format!("  {long}  ") });
+    let out = filter_for_repair(&raw);
+    let v = out.get("issueDescription").expect("a long value is kept, capped");
+    assert_eq!(v.chars().count(), REPAIR_MAX_VALUE_LEN, "capped by characters, not bytes");
+    // Truncating a multi-byte string by bytes would produce invalid UTF-8 or a split character.
+    assert!(v.chars().all(|c| c == 'ä'));
+}
+
+/// The model sometimes echoes the `{ … }` skeleton it was shown wrapped in a `fields` object.
+#[test]
+fn a_repair_answer_wrapped_in_fields_is_read_the_same_way() {
+    let raw = serde_json::json!({ "fields": { "itemBrand": "Cartier", "customerId": "c-1" } });
+    let out = filter_for_repair(&raw);
+    assert_eq!(out.get("itemBrand").map(String::as_str), Some("Cartier"));
+    assert!(!out.contains_key("customerId"));
+}
+
+#[test]
+fn the_repair_response_serialises_under_a_fields_envelope() {
+    let out = AiIdentifyOutcome::Repair(RepairIdentifyResponse {
+        fields: filter_for_repair(&serde_json::json!({ "itemBrand": "Rolex" })),
+    });
+    assert_eq!(serde_json::to_string(&out).unwrap(), r#"{"fields":{"itemBrand":"Rolex"}}"#);
+    // …while the product arm keeps the shape it always had.
+    let product = AiIdentifyOutcome::Product(AiIdentifyResponse::default());
+    assert_eq!(serde_json::to_string(&product).unwrap(), r#"{"attributes":{}}"#);
+}
+
+// ── REPAIR-INTAKE §4 — request shape and dispatch ───────────────────────────
+#[test]
+fn kind_defaults_to_product_when_the_client_does_not_send_one() {
+    let req: AiIdentifyRequest = serde_json::from_str(
+        r#"{"category_id":"cat-watch","image":"data:image/jpeg;base64,AAAA"}"#,
+    )
+    .expect("an older client sends no kind at all");
+    assert_eq!(req.kind, "product", "an absent kind is the product form, never an error");
+
+    let explicit: AiIdentifyRequest = serde_json::from_str(
+        r#"{"category_id":"","image":"data:image/jpeg;base64,AAAA","kind":"repair"}"#,
+    )
+    .unwrap();
+    assert_eq!(explicit.kind, "repair");
+}
+
+fn req(kind: &str, category_id: &str) -> AiIdentifyRequest {
+    serde_json::from_value(serde_json::json!({
+        "category_id": category_id,
+        "image": img("image/jpeg", OK_BODY),
+        "kind": kind,
+    }))
+    .unwrap()
+}
+
+#[tokio::test]
+async fn the_repair_form_needs_no_category_while_the_product_form_still_does() {
+    // An empty directory: no key. Getting as far as KeyMissing proves the category was never
+    // consulted, and no network call can happen without a key.
+    let dir = std::env::temp_dir().join(format!("com.lataif.aikind-{}", uuid::Uuid::new_v4().as_simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+
+    for category in ["", "   ", "cat-nonsense", "cat-watch"] {
+        assert_eq!(
+            identify(&dir, &req("repair", category)).await.unwrap_err(),
+            AiError::KeyMissing,
+            "the repair form ignores category_id ({category:?})"
+        );
+    }
+    // The product form is unchanged: an unknown category is refused before anything else.
+    assert_eq!(
+        identify(&dir, &req("product", "cat-nonsense")).await.unwrap_err(),
+        AiError::UnknownCategory
+    );
+    assert_eq!(identify(&dir, &req("", "cat-watch")).await.unwrap_err(), AiError::KeyMissing);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn an_unknown_form_kind_is_refused_with_its_own_code() {
+    let dir = std::env::temp_dir().join(format!("com.lataif.aikind-{}", uuid::Uuid::new_v4().as_simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for kind in ["Repair", "repairs", "product-v2", "invoice", "../repair"] {
+        let err = identify(&dir, &req(kind, "cat-watch")).await.unwrap_err();
+        assert_eq!(err, AiError::UnknownForm, "{kind} must not resolve to a form");
+        assert_eq!(err.code(), "AI_UNKNOWN_FORM");
+        assert_eq!(err.status(), 400);
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[tokio::test]
+async fn the_repair_form_validates_the_image_exactly_like_the_product_form() {
+    let dir = std::env::temp_dir().join(format!("com.lataif.aikind-{}", uuid::Uuid::new_v4().as_simple()));
+    std::fs::create_dir_all(&dir).unwrap();
+    for (image, expected) in [
+        ("", AiError::NoImage),
+        ("https://evil.example/pixel.jpg", AiError::UnsupportedMediaType),
+        ("file:///etc/passwd", AiError::UnsupportedMediaType),
+        ("data:image/svg+xml;base64,PHN2Zz48L3N2Zz4=", AiError::UnsupportedMediaType),
+    ] {
+        let r: AiIdentifyRequest = serde_json::from_value(serde_json::json!({
+            "category_id": "", "image": image, "kind": "repair",
+        }))
+        .unwrap();
+        assert_eq!(identify(&dir, &r).await.unwrap_err(), expected, "repair: {image}");
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 // ── §7 — malformed upstream answers ─────────────────────────────────────────

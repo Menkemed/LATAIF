@@ -32,6 +32,25 @@ pub struct CategorySpec {
     pub notes: String,
 }
 
+/// REPAIR-INTAKE §1 — the SECOND form kind in the same contract.
+///
+/// Deliberately NOT a pseudo-category: a repair intake is not a product category, and putting it in
+/// `categories` would leak it into `knownCategoryIds()` and into every product enumeration. It is a
+/// sibling section with its own prompts and its own closed field list.
+#[derive(Debug, Deserialize)]
+pub struct RepairForm {
+    pub name: String,
+    /// The ONLY keys a repair identification may ever produce. The list is data, so the prompt, the
+    /// filter and the tests all read the same six names from one place.
+    pub fields: Vec<String>,
+    #[serde(rename = "systemPromptTemplate")]
+    pub system_prompt_template: String,
+    #[serde(rename = "userPromptWithHints")]
+    pub user_prompt_with_hints: String,
+    #[serde(rename = "userPromptWithoutHints")]
+    pub user_prompt_without_hints: String,
+}
+
 #[derive(Debug, Deserialize)]
 pub struct ModelParams {
     #[serde(rename = "maxTokens")]
@@ -53,6 +72,7 @@ pub struct IdentifyContract {
     #[serde(rename = "userPromptWithoutHints")]
     pub user_prompt_without_hints: String,
     pub categories: std::collections::BTreeMap<String, CategorySpec>,
+    pub repair: RepairForm,
     #[serde(rename = "mobileAllowedFields")]
     pub mobile_allowed_fields: Vec<String>,
     #[serde(rename = "mobileForbiddenFields")]
@@ -109,6 +129,41 @@ pub fn build_user_prompt(category_id: &str, hints: &str) -> Option<String> {
     )
 }
 
+// ── REPAIR-INTAKE §1 — the repair form's prompts ────────────────────────────
+//
+// No category is involved: a repair intake asks about the piece on the bench and the defect on it,
+// never about price, stock or a customer. The six field names come from the contract file, so the
+// prompt cannot ask for a key the filter would then drop.
+
+/// The six suggestible repair fields, straight from the contract.
+pub fn repair_fields() -> &'static [String] {
+    &contract().repair.fields
+}
+
+fn repair_fill(template: &str) -> String {
+    let r = &contract().repair;
+    let nulls = r
+        .fields
+        .iter()
+        .map(|k| format!("\"{k}\": null"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    template
+        .replace("{{FORM_NAME}}", &r.name)
+        .replace("{{FIELDS}}", &r.fields.join(", "))
+        .replace("{{FIELD_NULLS}}", &nulls)
+}
+
+pub fn build_repair_system_prompt() -> String {
+    repair_fill(&contract().repair.system_prompt_template)
+}
+
+pub fn build_repair_user_prompt(hints: &str) -> String {
+    let r = &contract().repair;
+    let template = if hints.is_empty() { &r.user_prompt_without_hints } else { &r.user_prompt_with_hints };
+    repair_fill(template).replace("{{HINTS}}", hints)
+}
+
 /// 64-bit FNV-1a, lowercase hex — byte-for-byte the same function the TypeScript side runs.
 pub fn fnv1a64(input: &str) -> String {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -126,6 +181,15 @@ pub fn contract_fingerprint() -> String {
     // unambiguous, so the result cannot depend on a separator convention or on how either language
     // joins a list. Each line reads `<id>:<kind>:<hash>`, which also makes a mismatch legible - the
     // differing line names the category and the prompt that drifted.
+    let lines = fingerprint_components();
+    debug_assert_eq!(lines.len(), contract().categories.len() * 3 + 3);
+    fnv1a64(&lines.join("|"))
+}
+
+/// The fingerprint's INPUT lines, exposed so a gate can assert its structure rather than only its
+/// value: a fixed count, a fixed order, and one fixed-width digest per component. Without that, an
+/// ambiguous concatenation could produce a matching hash for two different contracts.
+pub fn fingerprint_components() -> Vec<String> {
     let mut lines: Vec<String> = Vec::new();
     // BTreeMap iterates in sorted key order, matching the TS side's explicit sort.
     for id in contract().categories.keys() {
@@ -136,23 +200,11 @@ pub fn contract_fingerprint() -> String {
             fnv1a64(&build_user_prompt(id, "brand: Rolex").unwrap_or_default())
         ));
     }
-    debug_assert_eq!(lines.len(), contract().categories.len() * 3);
-    fnv1a64(&lines.join("|"))
-}
-
-/// The fingerprint's INPUT lines, exposed so a gate can assert its structure rather than only its
-/// value: a fixed count, a fixed order, and one fixed-width digest per component. Without that, an
-/// ambiguous concatenation could produce a matching hash for two different contracts.
-pub fn fingerprint_components() -> Vec<String> {
-    let mut lines: Vec<String> = Vec::new();
-    for id in contract().categories.keys() {
-        lines.push(format!("{id}:system:{}", fnv1a64(&build_system_prompt(id).unwrap_or_default())));
-        lines.push(format!("{id}:user:{}", fnv1a64(&build_user_prompt(id, "").unwrap_or_default())));
-        lines.push(format!(
-            "{id}:user-hints:{}",
-            fnv1a64(&build_user_prompt(id, "brand: Rolex").unwrap_or_default())
-        ));
-    }
+    // REPAIR-INTAKE §5 — the second form kind is covered too, APPENDED after the category lines so
+    // the product part of the input is byte-identical to what it was before repair existed.
+    lines.push(format!("repair:system:{}", fnv1a64(&build_repair_system_prompt())));
+    lines.push(format!("repair:user:{}", fnv1a64(&build_repair_user_prompt(""))));
+    lines.push(format!("repair:user-hints:{}", fnv1a64(&build_repair_user_prompt("brand: Rolex"))));
     lines
 }
 

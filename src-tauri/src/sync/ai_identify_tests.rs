@@ -9,7 +9,10 @@
 use super::*;
 
 /// Must equal `contractFingerprint()` on the TypeScript side.
-const EXPECTED_FINGERPRINT: &str = "0b50cba3b834d514";
+/// REPAIR-INTAKE §5 — was `0b50cba3b834d514` while the contract knew only product categories; the
+/// repair form's three prompt lines are now part of the same input, appended after the category
+/// lines, so the value moved once and deliberately.
+const EXPECTED_FINGERPRINT: &str = "0c33a03188de4b83";
 
 #[test]
 fn rust_and_typescript_assemble_the_identical_prompts() {
@@ -107,13 +110,77 @@ fn money_quantity_and_system_fields_are_denied_for_mobile() {
     }
 }
 
+// ── REPAIR-INTAKE §1/§2 — the second form kind ──────────────────────────────
+
+/// The six names are repeated here on purpose: if someone widens the contract's list, this test is
+/// the thing that has to be edited too, in the open.
+const REPAIR_SIX: [&str; 6] = [
+    "itemBrand",
+    "itemModel",
+    "itemReference",
+    "itemSerial",
+    "itemDescription",
+    "issueDescription",
+];
+
+/// The sentence that refuses invention. Written without its leading "Never"/"never" so the same
+/// marker matches the system prompt and both user prompts.
+const REPAIR_FORBID: &str =
+    "invent, estimate or output prices, costs, repair estimates, customer data, ids, record numbers, status values or dates";
+
+#[test]
+fn the_repair_form_declares_exactly_six_fields_and_is_not_a_category() {
+    assert_eq!(repair_fields(), &REPAIR_SIX.map(String::from));
+    // A repair intake must never appear in the product category enumeration.
+    assert!(category_spec("repair").is_none(), "repair is not a product category");
+    assert!(category_spec("cat-repair").is_none());
+    assert_eq!(contract().categories.len(), 6, "the product categories are untouched");
+}
+
+#[test]
+fn the_repair_prompts_assemble_and_name_every_allowed_field() {
+    let sys = build_repair_system_prompt();
+    let plain = build_repair_user_prompt("");
+    let hinted = build_repair_user_prompt("brand: Rolex");
+
+    for p in [&sys, &plain, &hinted] {
+        assert!(!p.is_empty());
+        for probe in ["{{FIELDS}}", "{{FIELD_NULLS}}", "{{HINTS}}", "{{FORM_NAME}}", "{{CATEGORY_NAME}}"] {
+            assert!(!p.contains(probe), "unresolved {probe} in a repair prompt");
+        }
+        for field in REPAIR_SIX {
+            assert!(p.contains(field), "a repair prompt must name {field}");
+        }
+        assert!(
+            p.contains("REPAIR INTAKE"),
+            "the model must be told this is a repair intake photo, not an item for sale"
+        );
+        assert!(p.contains(REPAIR_FORBID), "a repair prompt must forbid invented money/ids/dates");
+    }
+    assert!(sys.contains("jewellery"), "the domain is stated");
+    assert!(hinted.starts_with("User-provided hints:"));
+    assert!(hinted.contains("brand: Rolex"));
+    assert_ne!(plain, hinted);
+}
+
+#[test]
+fn the_repair_prompt_never_asks_for_a_product_field() {
+    let all = format!("{}{}", build_repair_system_prompt(), build_repair_user_prompt(""));
+    for never in [
+        "estimatedValue", "purchasePriceEstimate", "minSalePrice", "maxSalePrice",
+        "taxScheme", "scopeOfDelivery", "sku", "quantity",
+    ] {
+        assert!(!all.contains(never), "the repair form must not ask for {never}");
+    }
+}
+
 /// MOBILE-I1C §5 — the fingerprint may stay separator-free only while its input is unambiguous:
 /// a fixed number of components, a fixed order, and each component ending in a fixed-width digest.
 #[test]
 fn the_fingerprint_input_is_structurally_unambiguous() {
     let parts = fingerprint_components();
-    assert_eq!(parts.len(), 18, "6 categories x 3 prompts - a fixed count, not a variable list");
-    assert_eq!(parts.len(), contract().categories.len() * 3);
+    assert_eq!(parts.len(), 21, "6 categories x 3 prompts + the repair form's 3 - a fixed count");
+    assert_eq!(parts.len(), contract().categories.len() * 3 + 3);
 
     let mut seen = std::collections::BTreeSet::new();
     for (i, line) in parts.iter().enumerate() {
@@ -127,9 +194,19 @@ fn the_fingerprint_input_is_structurally_unambiguous() {
 
     // Fixed order: sorted category ids, and within a category always system, user, user-hints.
     let ids: Vec<&str> = parts.iter().step_by(3).map(|l| l.split(':').next().unwrap()).collect();
-    let mut sorted = ids.clone();
+    let cats = &ids[..ids.len() - 1];
+    let mut sorted = cats.to_vec();
     sorted.sort_unstable();
-    assert_eq!(ids, sorted, "categories must be emitted in sorted order");
+    assert_eq!(cats, sorted.as_slice(), "categories must be emitted in sorted order");
+    // REPAIR-INTAKE §5 — the repair triple is APPENDED last, so the category lines keep the exact
+    // positions they had before a second form kind existed.
+    assert_eq!(*ids.last().unwrap(), "repair", "the repair form's lines come after every category");
+    assert_eq!(parts[18], format!("repair:system:{}", fnv1a64(&build_repair_system_prompt())));
+    assert_eq!(parts[19], format!("repair:user:{}", fnv1a64(&build_repair_user_prompt(""))));
+    assert_eq!(
+        parts[20],
+        format!("repair:user-hints:{}", fnv1a64(&build_repair_user_prompt("brand: Rolex")))
+    );
     for chunk in parts.chunks(3) {
         assert!(chunk[0].contains(":system:"));
         assert!(chunk[1].contains(":user:"));

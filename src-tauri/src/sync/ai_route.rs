@@ -58,6 +58,9 @@ pub enum AiError {
     UnsupportedMediaType,
     ImageTooLarge,
     UnknownCategory,
+    /// A `kind` the contract does not know. Distinct from `UnknownCategory` so a caller can tell
+    /// "this form does not exist" from "this product category does not exist".
+    UnknownForm,
     MalformedRequest,
     KeyMissing,
     UpstreamFailed,
@@ -71,6 +74,7 @@ impl AiError {
             AiError::UnsupportedMediaType => "AI_IMAGE_UNSUPPORTED_TYPE",
             AiError::ImageTooLarge => "AI_IMAGE_TOO_LARGE",
             AiError::UnknownCategory => "AI_UNKNOWN_CATEGORY",
+            AiError::UnknownForm => "AI_UNKNOWN_FORM",
             AiError::MalformedRequest => "AI_MALFORMED_REQUEST",
             AiError::KeyMissing => "AI_NOT_CONFIGURED",
             AiError::UpstreamFailed => "AI_UPSTREAM_FAILED",
@@ -84,6 +88,7 @@ impl AiError {
             AiError::NoImage
             | AiError::UnsupportedMediaType
             | AiError::UnknownCategory
+            | AiError::UnknownForm
             | AiError::MalformedRequest => 400,
             AiError::ImageTooLarge => 413,
             AiError::KeyMissing => 503,
@@ -93,6 +98,15 @@ impl AiError {
     }
 }
 
+/// The default form kind. An older client sends no `kind` at all and must keep behaving exactly as
+/// it did, so the absent value resolves to the product form rather than to an error.
+pub const KIND_PRODUCT: &str = "product";
+pub const KIND_REPAIR: &str = "repair";
+
+fn default_kind() -> String {
+    KIND_PRODUCT.to_string()
+}
+
 #[derive(Debug, Deserialize)]
 pub struct AiIdentifyRequest {
     pub category_id: String,
@@ -100,6 +114,9 @@ pub struct AiIdentifyRequest {
     pub image: String,
     #[serde(default)]
     pub hints: Option<String>,
+    /// Which form is asking: `"product"` (the default, unchanged behaviour) or `"repair"`.
+    #[serde(default = "default_kind")]
+    pub kind: String,
 }
 
 #[derive(Debug, Serialize, Default, PartialEq)]
@@ -122,6 +139,27 @@ pub struct AiIdentifyResponse {
     /// dropped: it would become a stale attribute the v2 upload contract then rejects.
     pub attributes: std::collections::BTreeMap<String, String>,
 }
+
+/// The repair form's answer: one flat map of the six allowed keys, nested under `fields` so the
+/// route's `{"result": …}` envelope stays one shape while the two form kinds stay distinguishable.
+#[derive(Debug, Serialize, Default, PartialEq)]
+pub struct RepairIdentifyResponse {
+    pub fields: std::collections::BTreeMap<String, String>,
+}
+
+/// What one identification produced. Untagged: the product arm serialises EXACTLY as it always did
+/// (`{"result": {…product fields…}}`), the repair arm as `{"result": {"fields": {…}}}`.
+#[derive(Debug, Serialize, PartialEq)]
+#[serde(untagged)]
+pub enum AiIdentifyOutcome {
+    Product(AiIdentifyResponse),
+    Repair(RepairIdentifyResponse),
+}
+
+/// Longest value a single repair field may carry. The model is asked for one short sentence; a
+/// runaway paragraph is truncated rather than refused, because a clipped hint is still useful and a
+/// dropped one is not.
+pub const REPAIR_MAX_VALUE_LEN: usize = 400;
 
 /// Validate the incoming image and return its decoded byte length.
 ///
@@ -278,6 +316,42 @@ pub fn filter_for_mobile(raw: &serde_json::Value, category_id: &str) -> AiIdenti
     }
 }
 
+/// Strip a repair answer down to the six fields the repair form may adopt.
+///
+/// Same posture as `filter_for_mobile`: an allow-list from the shared contract, applied to the
+/// model's answer. A cost estimate, a customer name, a record number or a status the model
+/// volunteered is dropped silently — it is never believed, not merely discouraged in the prompt.
+pub fn filter_for_repair(raw: &serde_json::Value) -> std::collections::BTreeMap<String, String> {
+    // The model occasionally wraps its answer in the `fields` object it was shown; accept both
+    // shapes, but read the values from exactly one of them.
+    let src = raw
+        .get("fields")
+        .filter(|v| v.is_object())
+        .unwrap_or(raw);
+
+    let mut out = std::collections::BTreeMap::new();
+    for key in super::ai_identify::repair_fields() {
+        // Only strings. A number, an object or an array in one of these slots is a hallucinated
+        // shape (a price, a nested record) and is dropped rather than rendered into text.
+        let Some(value) = src.get(key.as_str()).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        let trimmed = value.trim();
+        // The model returns literal "null"/"N/A"/"-" instead of omitting a field it does not know.
+        if trimmed.is_empty()
+            || trimmed.eq_ignore_ascii_case("null")
+            || trimmed.eq_ignore_ascii_case("n/a")
+            || trimmed == "-"
+        {
+            continue;
+        }
+        // Truncate by CHARACTERS, never by bytes — a byte slice could split a multi-byte character.
+        let capped: String = trimmed.chars().take(REPAIR_MAX_VALUE_LEN).collect();
+        out.insert(key.clone(), capped);
+    }
+    out
+}
+
 /// Pull the JSON object out of a chat completion, tolerating the ```json fences the model adds.
 pub fn parse_completion(body: &serde_json::Value) -> Result<serde_json::Value, AiError> {
     let content = body
@@ -296,7 +370,41 @@ pub fn parse_completion(body: &serde_json::Value) -> Result<serde_json::Value, A
 }
 
 /// Execute one identification. The key is read here and never leaves this function.
+///
+/// Two form kinds share this path. `product` is the original behaviour, byte for byte: the same
+/// category check, the same prompts, the same filter, the same response shape. `repair` ignores the
+/// category entirely, uses the repair prompts and answers with the six-field map. The image
+/// validation is the SAME call for both — no form gets a weaker check than another.
 pub async fn identify(
+    app_data_dir: &std::path::Path,
+    req: &AiIdentifyRequest,
+) -> Result<AiIdentifyOutcome, AiError> {
+    let kind = req.kind.trim();
+    // An empty string is what an over-eager client sends instead of omitting the field; it means
+    // the same thing as absent.
+    let kind = if kind.is_empty() { KIND_PRODUCT } else { kind };
+    match kind {
+        KIND_PRODUCT => identify_product(app_data_dir, req).await.map(AiIdentifyOutcome::Product),
+        KIND_REPAIR => identify_repair(app_data_dir, req).await.map(AiIdentifyOutcome::Repair),
+        _ => Err(AiError::UnknownForm),
+    }
+}
+
+/// REPAIR-INTAKE §4 — the repair form. No category is consulted, so `category_id` may be empty or
+/// nonsense; the only inputs that matter are the photo and the optional hints.
+async fn identify_repair(
+    app_data_dir: &std::path::Path,
+    req: &AiIdentifyRequest,
+) -> Result<RepairIdentifyResponse, AiError> {
+    validate_image(&req.image)?;
+    let system = super::ai_identify::build_repair_system_prompt();
+    let hints = req.hints.as_deref().unwrap_or("").trim().to_string();
+    let user_text = super::ai_identify::build_repair_user_prompt(&hints);
+    let parsed = call_model(app_data_dir, &system, &user_text, &req.image).await?;
+    Ok(RepairIdentifyResponse { fields: filter_for_repair(&parsed) })
+}
+
+async fn identify_product(
     app_data_dir: &std::path::Path,
     req: &AiIdentifyRequest,
 ) -> Result<AiIdentifyResponse, AiError> {
@@ -309,6 +417,19 @@ pub async fn identify(
     let system = super::ai_identify::build_system_prompt(category_id).ok_or(AiError::UnknownCategory)?;
     let hints = req.hints.as_deref().unwrap_or("").trim().to_string();
     let user_text = super::ai_identify::build_user_prompt(category_id, &hints).ok_or(AiError::UnknownCategory)?;
+
+    let parsed = call_model(app_data_dir, &system, &user_text, &req.image).await?;
+    Ok(filter_for_mobile(&parsed, category_id))
+}
+
+/// One upstream call, shared by both form kinds so neither can drift into its own transport rules.
+/// The key is read here and dropped here; no error path carries it.
+async fn call_model(
+    app_data_dir: &std::path::Path,
+    system: &str,
+    user_text: &str,
+    image: &str,
+) -> Result<serde_json::Value, AiError> {
     let params = &super::ai_identify::contract().model;
 
     let key = read_api_key(app_data_dir)?;
@@ -320,7 +441,7 @@ pub async fn identify(
             { "role": "system", "content": system },
             { "role": "user", "content": [
                 { "type": "text", "text": user_text },
-                { "type": "image_url", "image_url": { "url": req.image } }
+                { "type": "image_url", "image_url": { "url": image } }
             ]}
         ]
     });
@@ -341,8 +462,7 @@ pub async fn identify(
         return Err(AiError::UpstreamFailed);
     }
     let body: serde_json::Value = res.json().await.map_err(|_| AiError::MalformedResponse)?;
-    let parsed = parse_completion(&body)?;
-    Ok(filter_for_mobile(&parsed, category_id))
+    parse_completion(&body)
 }
 
 #[cfg(test)]

@@ -85,6 +85,32 @@ export function buildUserPrompt(categoryId: string, hintsText: string): string {
     .replace(/\{\{WATCH_EXTRA\}\}/g, watchExtra);
 }
 
+// ── REPAIR-INTAKE §1 — the SECOND form kind ─────────────────────────────────
+//
+// A repair intake is not a product category: it never appears in `knownCategoryIds()` and has no
+// attributes, no condition and no scope of delivery. It is a sibling section of the same contract
+// with its own prompts and a closed list of six suggestible fields.
+
+/** The ONLY fields a repair identification may ever produce. */
+export const REPAIR_FIELDS: readonly string[] = contract.repair.fields;
+
+function repairFill(template: string): string {
+  const nulls = contract.repair.fields.map(k => `"${k}": null`).join(', ');
+  return template
+    .replace(/\{\{FORM_NAME\}\}/g, contract.repair.name)
+    .replace(/\{\{FIELDS\}\}/g, contract.repair.fields.join(', '))
+    .replace(/\{\{FIELD_NULLS\}\}/g, nulls);
+}
+
+export function buildRepairSystemPrompt(): string {
+  return repairFill(contract.repair.systemPromptTemplate);
+}
+
+export function buildRepairUserPrompt(hintsText: string): string {
+  const template = hintsText ? contract.repair.userPromptWithHints : contract.repair.userPromptWithoutHints;
+  return repairFill(template).replace(/\{\{HINTS\}\}/g, hintsText);
+}
+
 /**
  * FNV-1a over the assembled prompts of every category, as lowercase hex.
  *
@@ -104,6 +130,11 @@ export function contractFingerprint(): string {
     lines.push(id + ':user:' + fnv1a64(buildUserPrompt(id, '')));
     lines.push(id + ':user-hints:' + fnv1a64(buildUserPrompt(id, 'brand: Rolex')));
   }
+  // REPAIR-INTAKE §5 — appended AFTER the category lines, so the product part of the input stays
+  // byte-identical to what it was before the repair form existed.
+  lines.push('repair:system:' + fnv1a64(buildRepairSystemPrompt()));
+  lines.push('repair:user:' + fnv1a64(buildRepairUserPrompt('')));
+  lines.push('repair:user-hints:' + fnv1a64(buildRepairUserPrompt('brand: Rolex')));
   return fnv1a64(lines.join('|'));
 }
 

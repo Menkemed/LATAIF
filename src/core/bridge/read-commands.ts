@@ -812,6 +812,40 @@ const REPAIR_COLUMNS =
   + 'workshop_supplier_id, estimated_cost, actual_cost, internal_cost, charge_to_customer, '
   + 'margin, status, received_at, estimated_ready, tax_scheme, invoice_id, updated_at, revision';
 
+/**
+ * PRE-G5 — die Belegbilder EINER Reparatur.
+ *
+ * Bilder reisen in diesem Haus sonst nie in einer Auskunft mit: ein Artikelbild ist eine Datei, und
+ * `products.get` nennt deshalb nur ihren Schluessel. Ein Belegbild IST aber die Zeile (Daten-URL in
+ * `repairs.images`, R7B PP-12) — es gibt keinen Schluessel, den man stattdessen nennen koennte. Also
+ * reist es hier mit, und zwar NUR in `repairs.get` (eine Reparatur, hoechstens sechs Bilder), nie in
+ * `repairs.list`. Das ist deutlich weniger als der bestehende Weg `store.repairs.get`, der einem
+ * Client alle Reparaturen der Filiale samt Bildern auf einmal gibt.
+ */
+function repairImages(v: unknown): string[] {
+  if (typeof v !== 'string' || v.trim() === '') return [];
+  try {
+    const parsed: unknown = JSON.parse(v);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((x): x is string => typeof x === 'string' && x.startsWith('data:image/'));
+  } catch {
+    return [];
+  }
+}
+
+/** Die Merkmale der Ware, so wie die Maske sie gespeichert hat. Kaputt gespeichert = keine. */
+function repairAttributes(v: unknown): Record<string, unknown> {
+  if (typeof v !== 'string' || v.trim() === '') return {};
+  try {
+    const parsed: unknown = JSON.parse(v);
+    return parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed as Record<string, unknown>
+      : {};
+  } catch {
+    return {};
+  }
+}
+
 function repairDto(r: Row): CommandResult {
   return {
     id: str(r.id),
@@ -872,7 +906,12 @@ registerCommand(OP_REPAIRS_GET, {
   handler: (p) => {
     const branch = actorBranch(p);
     const id = idOf(p);
-    const found = rows(`SELECT ${REPAIR_COLUMNS}, notes, voucher_code FROM repairs WHERE id = ? AND branch_id = ?`, [id, branch]);
+    const found = rows(
+      `SELECT ${REPAIR_COLUMNS}, notes, voucher_code, images, item_reference, item_description,
+              item_category_id, item_attributes, staff_id
+         FROM repairs WHERE id = ? AND branch_id = ?`,
+      [id, branch],
+    );
     if (found.length === 0) throw new BusinessError('NOT_FOUND', 'no such repair in this branch');
     // Die Arbeitszeilen gehören dazu: sie tragen die Kosten, und wer den Kopf ändert, muss sehen,
     // worauf er sich bezieht.
@@ -901,6 +940,15 @@ registerCommand(OP_REPAIRS_GET, {
     return {
       ...repairDto(found[0]), notes: str(found[0].notes),
       voucherCode: str(found[0].voucher_code), lines, openLineTotal,
+      // PRE-G5 — was eine Maske ohne eigene Datenbank zum BEARBEITEN braucht: die restlichen
+      // Warenfelder und die Bilder dieser einen Reparatur. Die Reihenfolge der Bilder ist die
+      // gespeicherte; `{keep:i}` einer Aenderung zaehlt genau auf diese Liste.
+      itemReference: str(found[0].item_reference),
+      itemDescription: str(found[0].item_description),
+      itemCategoryId: str(found[0].item_category_id),
+      itemAttributes: repairAttributes(found[0].item_attributes),
+      staffId: str(found[0].staff_id),
+      images: repairImages(found[0].images),
     };
   },
 });

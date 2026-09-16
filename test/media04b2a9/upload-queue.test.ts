@@ -148,14 +148,23 @@ await (async () => {
   ok(/include_str!\("mobile_upload_queue\.js"\)/.test(page), 'the queue module is included into MOBILE_HTML');
   ok(/\/api\/mobile\/upload/.test(page), 'the page references /api/mobile/upload');
   ok(/MobileUploadQueue/.test(page), 'the collection handler uses the durable queue');
-  // repair + purchase submit handlers still push their records via /sync/push (unchanged path). Anchor on
-  // the ONCLICK handler (not the earlier HTML button id) and read to the end of that handler.
-  const repair = page.slice(page.indexOf("rSaveBtn').onclick"), page.indexOf("bSaveBtn').onclick"));
+  // PRE-G5 — der REPARATUR-Weg des Telefons schreibt keine Zeile mehr selbst: er ist seit diesem
+  // Schnitt ein Fernbefehl an den Primary (`mobile_repair_ui.js` → /api/command), genau wie bei PC2.
+  // Der alte Anker (`rSaveBtn').onclick`) existiert deshalb nicht mehr; hier steht jetzt die neue
+  // Wahrheit — sonst wuerde ein stiller Rueckfall auf /sync/push nicht auffallen.
+  ok(!/rSaveBtn/.test(page) && !/REP-MOB-/.test(page), 'the phone-side repair write (own row + invented number) is gone');
+  const repairUi = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_ui.js'), 'utf8');
+  ok(/include_str!\("mobile_repair_ui\.js"\)/.test(page), 'the repair surface is included into MOBILE_HTML');
+  const repairCmds = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_commands.js'), 'utf8');
+  ok(/rpClient\.mutate\(/.test(repairUi) && !/pushChanges\(/.test(repairUi),
+    'the repair surface writes only through the command client, never via /sync/push');
+  ok(/\/api\/command/.test(repairCmds) && /\/api\/staging\/media/.test(repairCmds),
+    'the command client posts to /api/command and stages photos first');
+  // purchase submit handler still pushes its record via /sync/push (unchanged path).
   const purchase = page.slice(page.indexOf("bSaveBtn').onclick"), page.indexOf("bSaveBtn').onclick") + 2000);
-  ok(/pushChanges\(/.test(repair) && /repairs/.test(repair), 'repair still uses pushChanges (/sync/push) — unchanged');
   ok(/pushChanges\(/.test(purchase) && /purchase_inbox/.test(purchase), 'purchase still uses pushChanges (/sync/push) — unchanged');
   // the collection handler must NOT push a products record anymore (it goes through the queue).
-  const collection = page.slice(page.indexOf("cSaveBtn').onclick"), page.indexOf("rSaveBtn').onclick"));
+  const collection = page.slice(page.indexOf("cSaveBtn').onclick"), page.indexOf("bSaveBtn').onclick"));
   ok(/uploadQueue\.(enqueue|drainEntry)/.test(collection) && !/pushChanges\(/.test(collection), 'collection handler uses the queue, not pushChanges');
 }
 

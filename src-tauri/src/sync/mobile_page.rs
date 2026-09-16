@@ -209,55 +209,7 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
   </div>
 </div>
 
-<!-- ─────────── Repair — New Intake ─────────── -->
-<div id="formRepair" class="hidden">
-  <button class="back" data-back>‹ Back</button>
-  <div class="brand" style="margin-top: 4px;">
-    <h1>LATAIF</h1>
-    <p>New Repair Intake</p>
-  </div>
-
-  <div id="rError" class="error hidden"></div>
-  <div id="rSuccess" class="success hidden"></div>
-
-  <div class="card">
-    <div class="header-row">
-      <span style="font-size: 13px; color: #A1A1AA;">Item Photo</span>
-      <span id="rPhotoStatus" class="badge hidden">Captured</span>
-    </div>
-    <label for="rPhotoInput" class="photo-area" id="rPhotoArea">
-      <div class="icon">📷</div>
-      <div>Tap to take photo</div>
-      <div class="hint">photograph the item at intake</div>
-    </label>
-    <input id="rPhotoInput" class="hidden" type="file" accept="image/*" capture="environment" />
-  </div>
-
-  <div class="card">
-    <div class="row">
-      <label>Customer Name *</label>
-      <input id="rCustomer" type="text" placeholder="e.g. Ahmed Al-Khalifa" />
-    </div>
-    <div class="row">
-      <label>Item Brand</label>
-      <input id="rBrand" type="text" placeholder="e.g. Rolex (optional)" />
-    </div>
-    <div class="row">
-      <label>Item Model</label>
-      <input id="rModel" type="text" placeholder="e.g. Datejust (optional)" />
-    </div>
-    <div class="row">
-      <label>Issue / Problem *</label>
-      <textarea id="rIssue" rows="3" placeholder="What needs to be repaired?"></textarea>
-    </div>
-    <div class="row">
-      <label>Notes</label>
-      <textarea id="rNotes" rows="2" placeholder="Optional"></textarea>
-    </div>
-  </div>
-
-  <button id="rSaveBtn">Save Repair Intake</button>
-</div>
+"##, include_str!("mobile_repair.html"), r##"
 
 <!-- ─────────── Purchase — Photo to Inbox ─────────── -->
 <div id="formPurchase" class="hidden">
@@ -345,6 +297,7 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
 <script>
 window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), r##";
 "##, include_str!("mobile_upload_queue.js"), r##"
+"##, include_str!("mobile_repair_commands.js"), r##"
 (function () {
   const TOKEN_KEY = 'lataif_mobile_token';
   const BRANCH_KEY = 'lataif_mobile_branch';
@@ -355,11 +308,11 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   const hide = (id) => $(id).classList.add('hidden');
   const setText = (id, t) => { const el = $(id); el.textContent = t; if (t) el.classList.remove('hidden'); else el.classList.add('hidden'); };
 
-  const SCREENS = ['login', 'modePicker', 'formCollection', 'formRepair', 'formPurchase', 'scanScreen'];
+  const SCREENS = ['login', 'modePicker', 'formCollection', 'repairHome', 'formRepair', 'formPurchase', 'scanScreen'];
   function screen(id) { SCREENS.forEach(s => hide(s)); show(id); window.scrollTo({ top: 0 }); }
 
   // Foto-State pro Modus.
-  const photos = { collection: null, repair: null, purchase: null };
+  const photos = { collection: null, purchase: null };
 
   // Secure UUID v4 for upload/entity ids. crypto.randomUUID exists on secure origins (HTTPS, and localhost);
   // on a plain-HTTP LAN origin (phone → http://<ip>:3001/mobile) it is undefined, so we fall back to
@@ -478,7 +431,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     btn.onclick = () => {
       const mode = btn.getAttribute('data-mode');
       if (mode === 'collection') screen('formCollection');
-      else if (mode === 'repair') screen('formRepair');
+      else if (mode === 'repair') rpHomeOpen();
       else if (mode === 'purchase') screen('formPurchase');
       else if (mode === 'scan') { screen('scanScreen'); findMode('scan'); }
     };
@@ -1745,7 +1698,6 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     };
   }
   const EMPTY_C = '<div class="icon">📷</div><div>Tap to take photos</div><div class="hint">or choose from gallery — several at once</div>';
-  const EMPTY_R = '<div class="icon">📷</div><div>Tap to take photo</div><div class="hint">photograph the item at intake</div>';
   const EMPTY_B = '<div class="icon">📷</div><div>Tap to take photo</div><div class="hint">snap the item you bought</div>';
 
   // ── MOBILE-MULTI-IMAGE §3 — the collection form keeps an ORDERED LIST of photos ─────────────
@@ -1919,7 +1871,6 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       $('cAiBtn').textContent = '✨  AI Identify';
     }
   };
-  bindPhoto('repair', 'rPhotoArea', 'rPhotoInput', 'rPhotoStatus', 'rError', EMPTY_R);
   bindPhoto('purchase', 'bPhotoArea', 'bPhotoInput', 'bPhotoStatus', 'bError', EMPTY_B);
 
   function clearPhoto(mode, areaId, inputId, statusId, emptyHtml) {
@@ -2176,57 +2127,6 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // Initial render for the default (first) category.
   renderCollectionFields($('cCategory').value);
 
-  // ── Repair — New Intake ──
-  $('rSaveBtn').onclick = async () => {
-    setText('rError', ''); setText('rSuccess', '');
-    const custName = $('rCustomer').value.trim();
-    const issue = $('rIssue').value.trim();
-    if (!custName) return setText('rError', 'Customer name is required.');
-    if (!issue) return setText('rError', 'Describe the issue / problem.');
-    $('rSaveBtn').disabled = true;
-    try {
-      const { now, branchId, userId } = ctx();
-      const customerId = uuid();
-      const repairId = uuid();
-      const parts = custName.split(/\s+/);
-      const firstName = parts[0];
-      const lastName = parts.slice(1).join(' ');
-      const customerData = {
-        id: customerId, branch_id: branchId,
-        first_name: firstName, last_name: lastName,
-        created_at: now, updated_at: now,
-      };
-      const repairData = {
-        id: repairId, branch_id: branchId,
-        repair_number: 'REP-MOB-' + Date.now(),
-        // v0.4.1 — Pickup-Voucher-Code generieren (8 Hex, wie repairStore.generateVoucherCode).
-        // Ohne den hat das vom Handy angelegte Repair keinen Abhol-Code.
-        voucher_code: uuid().replace(/-/g, '').substring(0, 8).toUpperCase(),
-        customer_id: customerId,
-        item_brand: $('rBrand').value.trim() || null,
-        item_model: $('rModel').value.trim() || null,
-        issue_description: issue,
-        repair_type: 'internal',
-        status: 'received',
-        received_at: now,
-        images: JSON.stringify(photos.repair ? [photos.repair] : []),
-        notes: $('rNotes').value.trim() || null,
-        created_at: now, updated_at: now, created_by: userId,
-      };
-      await pushChanges([
-        { table_name: 'customers', record_id: customerId, action: 'insert', data: JSON.stringify(customerData) },
-        { table_name: 'repairs', record_id: repairId, action: 'insert', data: JSON.stringify(repairData) },
-      ]);
-      setText('rSuccess', 'Repair intake for ' + custName + ' saved. Check the desktop within 30 seconds.');
-      $('rCustomer').value = ''; $('rBrand').value = ''; $('rModel').value = '';
-      $('rIssue').value = ''; $('rNotes').value = '';
-      clearPhoto('repair', 'rPhotoArea', 'rPhotoInput', 'rPhotoStatus', EMPTY_R);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
-    } catch (e) {
-      if (e.message !== 'Session expired') setText('rError', e.message || 'Save failed');
-    }
-    $('rSaveBtn').disabled = false;
-  };
 
   // ── Purchase — Photo to Inbox ──
   $('bSaveBtn').onclick = async () => {
@@ -2254,6 +2154,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     $('bSaveBtn').disabled = false;
   };
 
+"##, include_str!("mobile_repair_ui.js"), r##"
   init();
 })();
 </script>
