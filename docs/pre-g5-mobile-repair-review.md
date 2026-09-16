@@ -19,7 +19,13 @@ Matrix (Auszug; Vollbild aus dem Audit in `docs/central-ui-parity.md`):
 | Kopf ändern | `buildRepairEditPatch` → `updateRepair` | Spalten, Kartengebühr, Kopfkosten, Marge | **ja** `repairs.update` | **ja** |
 | Status | `repairStatusFlow` → `updateStatus` | Kosten buchen, Bestand, Marge | **ja** `repairs.update_status` | **ja** |
 | Lesen | `repairs.list` / `repairs.get` | — | **ja** | **ja** |
-| Arbeitszeile, Material, Gold, Rechnung, Löschen | `addRepairLine…`, `gold-house`, `createCombinedRepairInvoice`, `deleteRepair` | Geld, Lieferanten, Hauptbuch | ja (Löschen: Primary-only) | **nein** (bewusst, § 7) |
+| Arbeitszeile anlegen | `addRepairLineOnPrimary` | Zeile + A/P-Ausgabe, Revision | **ja** `repairs.add_line` | **ja** (V2) |
+| Zeile zurücknehmen | `cancelRepairLineOnPrimary` | Zeile, Ausgabe, Zahlung und Buchung aufgelöst | **ja** `repairs.cancel_line` | **ja** (V2) |
+| Material | `addRepairMaterialOnPrimary` | Zeilen + ggf. Goldschuld | **ja** `repairs.add_material` | **ja** (V2) |
+| Goldeinsatz | `recordRepairGoldUsageOnPrimary` | Goldschuld / Kundengold-Guthaben | **ja** `repairs.record_gold_usage` | **ja** (V2) |
+| Rechnung | `invoiceRepairsOnPrimary` | Rechnung + Zeilen, `invoice_id` | **ja** `repairs.create_invoice` | **ja** (V2) |
+| Zeile ändern | nur im Store, **keine** Desktop-Benutzerfunktion | — | ja (`repairs.update_line`) | **nein** — was der Rechner nicht anbietet, bietet das Telefon auch nicht |
+| Reparatur löschen | `deleteRepair` | destruktive Kaskade | **nein** (Primary-only, `C3G_PRIMARY_ONLY`) | **nein** |
 
 **Ergebnis:** Für Mobile fehlte **keine** Domänenlogik und **keine** Operation — nur eine Oberfläche, die den
 vorhandenen Weg benutzt. `PRE_G5_REPAIR_SCOPE_PROVED`
@@ -51,7 +57,13 @@ Der Altweg ist **entfernt**: in `mobile_page.rs` gibt es kein `rSaveBtn`, kein `
 Maske (`formRepair`): Kunde wählen oder anlegen (`customers.list` / `customers.create`), bis zu **6 Fotos**
 (Kamera/Galerie, erstes Foto antippen = nach vorn), Problem (Pflicht), Marke, Modell, Referenz, Seriennummer,
 Beschreibung, geschätzte Kosten, Fertigstellung, Diagnose (nur beim Bearbeiten), Notizen; Arbeitszeilen als
-**Auskunft**; Statusknöpfe ausschließlich aus `allowedStatusTargets` des Primary.
+**Auskunft** mit „Cancel line“ je offener Zeile; Statusknöpfe ausschließlich aus `allowedStatusTargets` des Primary.
+Werkstattkarte (nur an einer bestehenden Reparatur): **Arbeitszeile** (Arbeitsart, Lieferant oder eigene Werkstatt,
+Betrag, Text), **Material** (Art, Text, Lieferant, Menge/Gewicht/Karat, Kosten), **Goldeinsatz** (Werkstattgold mit
+Lieferant und Abrechnung ODER Kundengold mit Verbrauch und Rest — die jeweils anderen Felder werden ausgeblendet,
+weil der Primary einen gemischten Rumpf abweist) und **Rechnung** (Steuerart; der Knopf verschwindet, sobald eine
+Rechnung existiert). Was der Rechner nicht anbietet (`repairs.update_line`) und was destruktiv ist (Löschen), fehlt
+bewusst.
 
 ## 3. AI
 
@@ -101,19 +113,20 @@ Mobile-Sonderformat, keine eigene Datenbank auf PC2. `PRE_G5_REPAIR_PC2_COMPAT_P
 
 **Neue Reads: 0. Neue Mutations: 0. Registry vorher 175, nachher 175.**
 Wiederverwendet: `repairs.list`, `repairs.get`, `repairs.create`, `repairs.update`, `repairs.update_status`,
-`customers.list`, `customers.create`. Erweitert wurde nur der **vorhandene** Lese-DTO `repairs.get` um Felder, die eine
+`repairs.add_line`, `repairs.cancel_line`, `repairs.add_material`, `repairs.record_gold_usage`,
+`repairs.create_invoice`, `customers.list`, `customers.create`, `suppliers.list`. Erweitert wurde nur der **vorhandene** Lese-DTO `repairs.get` um Felder, die eine
 Maske ohne eigene Datenbank zum Bearbeiten braucht (`images`, `itemReference`, `itemDescription`, `itemCategoryId`,
-`itemAttributes`, `staffId`); `repairs.list` bleibt ohne Bilder. Bewusst **nicht** mobil: Arbeitszeilen, Material,
-Gold, Rechnung, Löschen — Geld- und Lieferantenwege bleiben am Rechner. `PRE_G5_REPAIR_ALLOWLIST_PROVED`
+`itemAttributes`, `staffId`); `repairs.list` bleibt ohne Bilder. Bewusst **nicht** mobil: `repairs.update_line` (am Rechner
+gibt es dafür keine Benutzerfunktion) und das Löschen einer Reparatur (destruktiv, Primary-only). `PRE_G5_REPAIR_ALLOWLIST_PROVED`
 
 ## 8. Nachweise
 
 | Lauf | Ergebnis |
 |---|---|
-| `node test/preg5/mobile-repair.test.ts` | **86/0** (§1 Rumpf/verbotene Felder, §2 Idempotenz, §3 AI-Leitplanken, §4 Verdrahtung, §5 keine Phantomfelder) |
+| `node test/preg5/mobile-repair.test.ts` | **107/0** (§1 Rumpf/verbotene Felder, §2 Idempotenz, §3 AI-Leitplanken, §4 Verdrahtung, §5 keine Phantomfelder, §6 Werkstattwege) |
 | `node test/preg5/mobile-repair-ui.test.ts` | **20/0** — die Oberfläche mit DOM-Ersatz: Erfassen, Ändern, veralteter Stand, verlorene Antwort |
-| `node test/preg5/mobile-repair-page.e2e.mjs` | **13/0** — dieselben drei Dateien in einem **echten** Browser gegen einen Attrappen-Server (Sekunden statt Minuten) |
-| `node test/e2e/pre-g5-mobile-repair.e2e.mjs` | **25/0**, `PRE_G5_MOBILE_REPAIR_E2E_PROVED` — Primary + echte `/mobile`-Seite in Edge + PC2 |
+| `node test/preg5/mobile-repair-page.e2e.mjs` | **21/0** — dieselben drei Dateien in einem **echten** Browser gegen einen Attrappen-Server (Sekunden statt Minuten) |
+| `node test/e2e/pre-g5-mobile-repair.e2e.mjs` | **30/0**, `PRE_G5_MOBILE_REPAIR_E2E_PROVED` — Primary + echte `/mobile`-Seite in Edge + PC2 |
 | `node test/media04b2a9/upload-queue.test.ts` | **51/0** (Nachbar: Anker auf den Altweg auf die neue Wahrheit gezogen) |
 | `npx tsc -b` | rc 0 |
 | `cargo test --lib -- ai_identify ai_route first_run_ipc mobile_field` | **72/0** |
@@ -122,7 +135,10 @@ Gold, Rechnung, Löschen — Geld- und Lieferantenwege bleiben am Rechner. `PRE_
 **Zwei-App-Lauf im Einzelnen:** M1 Erfassen (Kunde + 2 Fotos, Nummer vom Primary, genau eine Nachweiszeile) ·
 M2 Ändern (+ drittes Foto, alte Bilder Byte für Byte, Fassung steigt) · M3 verlorene Antwort (Antwort verworfen,
 Primary hatte gebucht, „Clarify now" → Replay, keine zweite Reparatur) · M4 veralteter Stand (PC2 ändert zuerst →
-`RECORD_CHANGED`, nichts überschrieben) · M5 beide Oberflächen sehen denselben Datensatz · M6 Ablage danach leer,
+`RECORD_CHANGED`, nichts überschrieben) · M5 beide Oberflächen sehen denselben Datensatz ·
+**M7 Werkstatt am echten Datenbestand:** Arbeitszeile angelegt (`polishing`, 12,500) → dieselbe Zeile zurückgenommen
+(Zeile und Ausgabe weg) → Status über die erlaubten Schritte bis `ready` → Kundenbetrag 45 gespeichert → Rechnung
+erzeugt (`invoice_id` gesetzt, Brutto > 0), danach bietet die Maske keine zweite an · M6 Ablage danach leer,
 jedes Bild JPEG ≤ 100 000 B, **nie** `/api/sync/push`, keine Datenbank auf PC2.
 
 ## 9. Gefundene Fehler (in diesem Schnitt behoben)
@@ -136,6 +152,12 @@ jedes Bild JPEG ≤ 100 000 B, **nie** `/api/sync/push`, keine Datenbank auf PC2
 
 ## 10. Grenzen
 
+- **AI-Live-Nachweis offen (manuell):** ohne hinterlegten Schlüssel ist der Aufruf gegen den echten Anbieter im
+  Testaufbau nicht fahrbar. Offener Handnachweis: auf einem Primary mit Schlüssel ein Reparaturfoto aufnehmen,
+  „AI Identify“ drücken und prüfen, dass nur leere beschreibende Felder gefüllt werden.
+- **Testaufbau (nicht Produkt):** die Anmeldung von PC2 im Zwei-App-Lauf ist gelegentlich wackelig (in 2 von 7 Läufen
+  kam der Ausweis nicht zustande); der Lauf wiederholt sie dreimal und schreibt bei Fehlschlag auf, was die Maske
+  zeigt. Betrifft nur den Test.
 - **G5** Ganz-DB-Speichern skaliert mit der Dateigröße — **OPEN, nicht akzeptiert**, von diesem Schnitt unberührt.
 - AI gegen den echten Anbieter im Zwei-App-Lauf nicht gefahren (§ 3).
 - Mobil bewusst nicht: Arbeitszeilen, Material, Gold, Rechnung, Löschen (§ 7).

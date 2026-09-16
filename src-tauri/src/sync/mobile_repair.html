@@ -108,6 +108,10 @@
       <input id="rpEstimatedCost" type="number" inputmode="decimal" step="0.001" min="0" placeholder="optional" />
     </div>
     <div class="row">
+      <label>Customer Pays (BHD)</label>
+      <input id="rpChargeToCustomer" type="number" inputmode="decimal" step="0.001" min="0" placeholder="what the customer is charged" />
+    </div>
+    <div class="row">
       <label>Estimated Ready</label>
       <input id="rpEstimatedReady" type="date" />
     </div>
@@ -121,14 +125,62 @@
     </div>
   </div>
 
-  <!-- Arbeitszeilen: Auskunft. Geld und Lieferanten werden am Rechner gebucht. -->
+  <!-- Arbeitszeilen: sichtbar, und eine offene Zeile laesst sich zuruecknehmen. -->
   <div class="card hidden" id="rpLinesCard">
     <div class="header-row">
       <span style="font-size: 13px; color: #A1A1AA;">Work lines</span>
       <span id="rpLinesTotal" class="badge"></span>
     </div>
     <div id="rpLines"></div>
-    <div class="hint">Work lines, gold and invoices stay on the desktop.</div>
+  </div>
+
+  <!-- Werkstatt: Arbeitszeile, Material, Goldeinsatz, Rechnung — alles ueber die Fernbefehle des
+       Primary. Gerechnet und gebucht wird dort, hier wird nur erfasst. -->
+  <div class="card hidden" id="rpWorkCard">
+    <div class="header-row">
+      <span style="font-size: 13px; color: #A1A1AA;">Workshop</span>
+    </div>
+    <div id="rpWorkMsg" class="hint"></div>
+
+    <div class="row">
+      <label>Add work line</label>
+      <select id="rpLineType"></select>
+      <select id="rpLineSupplier"></select>
+      <input id="rpLineCost" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Cost (BHD) *" />
+      <input id="rpLineText" type="text" placeholder="Description (optional)" />
+    </div>
+    <button id="rpLineAddBtn" class="secondary">＋&nbsp; Add work line</button>
+
+    <div class="row" style="margin-top: 14px;">
+      <label>Add material</label>
+      <select id="rpMatKind"></select>
+      <input id="rpMatText" type="text" placeholder="Description *" />
+      <select id="rpMatSupplier"></select>
+      <input id="rpMatQty" type="number" inputmode="decimal" step="0.01" min="0" placeholder="Quantity" />
+      <input id="rpMatWeight" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Weight (g)" />
+      <input id="rpMatKarat" type="text" placeholder="Karat (e.g. 21K)" />
+      <input id="rpMatCost" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Total cost (BHD) *" />
+    </div>
+    <button id="rpMatAddBtn" class="secondary">＋&nbsp; Add material</button>
+
+    <div class="row" style="margin-top: 14px;">
+      <label>Record gold usage</label>
+      <select id="rpGoldSource"></select>
+      <select id="rpGoldSupplier"></select>
+      <input id="rpGoldKarat" type="text" placeholder="Karat (e.g. 21K) *" />
+      <input id="rpGoldReceived" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Received (g) *" />
+      <input id="rpGoldUsed" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Used (g)" />
+      <select id="rpGoldLeftover"></select>
+      <select id="rpGoldSettlement"></select>
+    </div>
+    <button id="rpGoldAddBtn" class="secondary">＋&nbsp; Record gold</button>
+
+    <div class="row" style="margin-top: 14px;">
+      <label>Invoice</label>
+      <select id="rpTaxScheme"></select>
+    </div>
+    <button id="rpInvoiceBtn" class="secondary">Create invoice</button>
+    <div class="hint">Deleting a repair stays on the desktop.</div>
   </div>
 
   <div class="card hidden" id="rpStatusCard">

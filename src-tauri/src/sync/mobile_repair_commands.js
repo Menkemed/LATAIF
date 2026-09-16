@@ -49,6 +49,18 @@
   // Vergleich nie auseinanderlaufen.
   const MONEY_FIELDS = ['estimatedCost', 'actualCost', 'chargeToCustomer'];
 
+  // Die Vokabeln des Hauses. Sie stehen hier als WERTE, weil eine Auswahl sie anbieten und ein
+  // Rumpf sie pruefen muss — dieselbe Lehre wie bei den Arbeitsarten am Rechner (R4C.4): eine
+  // zweite Liste laeuft irgendwann auseinander, deshalb sind es genau die Woerter des Primary.
+  const WORK_TYPES = ['service', 'polishing', 'spare_part', 'gold_work', 'stone_setting', 'engraving', 'plating', 'other'];
+  const MATERIAL_KINDS = ['labor', 'diamond', 'stone', 'gold'];
+  const GOLD_SOURCES = ['workshop', 'customer'];
+  const GOLD_LEFTOVER = ['return', 'credit', 'shop_keep'];
+  const GOLD_SETTLEMENT = ['return_gold', 'pay_money'];
+  const TAX_SCHEMES = ['ZERO', 'VAT_10'];
+  /** „Eigene Werkstatt" — derselbe Platzhalter wie am Rechner. */
+  const INHOUSE = '__INHOUSE__';
+
   /** Derselbe Inhalt ergibt dieselbe Zeichenkette, gleich in welcher Reihenfolge die Schluessel stehen. */
   function stableJson(v) {
     if (Array.isArray(v)) return '[' + v.map(function (x) { return stableJson(x === undefined ? null : x); }).join(',') + ']';
@@ -161,6 +173,107 @@
       filled += 1;
     }
     return filled;
+  }
+
+  // ── Werkstattwege: Arbeitszeile, Storno, Material, Gold, Rechnung ───────────────────────────
+  //
+  // Alle fuenf sind VORHANDENE Fernbefehle des Primary; hier entsteht nur ihr Rumpf. Was der
+  // Primary ausrechnet oder bucht (Ausgabe, Gegenkonto, Hauptbuch, Marge, Rechnungsnummer),
+  // kommt nie von hier. Jeder Rumpf traegt die GELESENE Fassung — aendert jemand anders die
+  // Reparatur zwischendurch, weist der Primary ab, statt eine fremde Aenderung zu ueberschreiben.
+  //
+  // Die Pruefungen hier sind KEINE zweite Fachlogik: sie sagen dem Menschen vor dem Senden, was
+  // fehlt. Das Urteil faellt immer der Primary.
+
+  /** Eine Arbeitszeile (Werkstatt oder eigene Arbeit). */
+  function lineBody(repair, form) {
+    const kosten = moneyOrNull(form.costAmount);
+    if (kosten === null || kosten <= 0) return { ok: false, code: 'COST_REQUIRED' };
+    const art = textOrNull(form.workType);
+    if (art !== null && WORK_TYPES.indexOf(art) < 0) return { ok: false, code: 'WORK_TYPE_INVALID' };
+    const body = { repairId: repair.id, expectedRevision: repair.revision, costAmount: kosten };
+    if (art !== null) body.workType = art;
+    // Eigene Arbeit hat keinen Lieferanten — der Platzhalter reist NICHT mit.
+    const lief = textOrNull(form.supplierId);
+    if (lief !== null && lief !== INHOUSE) body.supplierId = lief;
+    const text = textOrNull(form.description);
+    if (text !== null) body.description = text;
+    return { ok: true, body: body };
+  }
+
+  /** Eine Zeile zuruecknehmen. Der Primary loest Ausgabe, Zahlung und Buchung mit auf. */
+  function cancelLineBody(repair, lineId, notes) {
+    const id = textOrNull(lineId);
+    if (id === null) return { ok: false, code: 'LINE_REQUIRED' };
+    const body = { repairId: repair.id, expectedRevision: repair.revision, lineId: id };
+    const n = textOrNull(notes);
+    if (n !== null) body.notes = n;
+    return { ok: true, body: body };
+  }
+
+  /** Eine Materialposition. `supplierId` ist Pflicht — ein Lieferant ODER die eigene Werkstatt. */
+  function materialBody(repair, form) {
+    const art = textOrNull(form.materialKind);
+    if (art === null || MATERIAL_KINDS.indexOf(art) < 0) return { ok: false, code: 'MATERIAL_KIND_REQUIRED' };
+    const text = textOrNull(form.description);
+    if (text === null) return { ok: false, code: 'DESCRIPTION_REQUIRED' };
+    const lief = textOrNull(form.supplierId);
+    if (lief === null) return { ok: false, code: 'SUPPLIER_REQUIRED' };
+    const kosten = moneyOrNull(form.totalCost);
+    if (kosten === null || kosten <= 0) return { ok: false, code: 'COST_REQUIRED' };
+    const zeile = { materialKind: art, description: text, supplierId: lief, totalCost: kosten };
+    const menge = moneyOrNull(form.quantity); if (menge !== null) zeile.quantity = menge;
+    const karat = textOrNull(form.karat); if (karat !== null) zeile.karat = karat;
+    const gramm = moneyOrNull(form.weightGrams); if (gramm !== null) zeile.weightGrams = gramm;
+    const ct = moneyOrNull(form.caratPerPiece); if (ct !== null) zeile.caratPerPiece = ct;
+    return { ok: true, body: { repairId: repair.id, expectedRevision: repair.revision, rows: [zeile] } };
+  }
+
+  /**
+   * Goldeinsatz. Zwei Faelle mit VERSCHIEDENEN Feldern — der Primary weist einen gemischten Rumpf
+   * ab, deshalb wird hier genau der eine oder der andere gebaut:
+   *   Werkstattgold  → wird in voller Hoehe eine Goldschuld (Lieferant, ohne Verbrauch/Rest)
+   *   Kundengold     → Verbrauch und Rest (zurueck, Guthaben oder im Haus behalten), ohne Lieferant
+   */
+  function goldBody(repair, form) {
+    const quelle = textOrNull(form.source);
+    if (quelle === null || GOLD_SOURCES.indexOf(quelle) < 0) return { ok: false, code: 'SOURCE_REQUIRED' };
+    const karat = textOrNull(form.karat);
+    if (karat === null) return { ok: false, code: 'KARAT_REQUIRED' };
+    const erhalten = moneyOrNull(form.receivedGrams);
+    if (erhalten === null || erhalten <= 0) return { ok: false, code: 'RECEIVED_REQUIRED' };
+    const body = {
+      repairId: repair.id, expectedRevision: repair.revision,
+      source: quelle, karat: karat, receivedGrams: erhalten,
+    };
+    if (quelle === 'workshop') {
+      const lief = textOrNull(form.supplierId);
+      if (lief === null || lief === INHOUSE) return { ok: false, code: 'SUPPLIER_REQUIRED' };
+      body.supplierId = lief;
+      const art = textOrNull(form.settlementType);
+      if (art !== null) {
+        if (GOLD_SETTLEMENT.indexOf(art) < 0) return { ok: false, code: 'SETTLEMENT_INVALID' };
+        body.settlementType = art;
+      }
+    } else {
+      const rest = textOrNull(form.leftover);
+      if (rest === null || GOLD_LEFTOVER.indexOf(rest) < 0) return { ok: false, code: 'LEFTOVER_REQUIRED' };
+      body.leftover = rest;
+      const genutzt = moneyOrNull(form.usedGrams);
+      if (genutzt !== null) body.usedGrams = genutzt;
+    }
+    return { ok: true, body: body };
+  }
+
+  /** Die Rechnung zu GENAU dieser Reparatur. Ob sie erlaubt ist, entscheidet der Primary. */
+  function invoiceBody(repair, taxScheme) {
+    const body = { repairId: repair.id, expectedRevision: repair.revision };
+    const steuer = textOrNull(taxScheme);
+    if (steuer !== null) {
+      if (TAX_SCHEMES.indexOf(steuer) < 0) return { ok: false, code: 'TAX_SCHEME_INVALID' };
+      body.taxScheme = steuer;
+    }
+    return { ok: true, body: body };
   }
 
   /** Was aus einer Antwort des Primary wird — dieselben Ausgaenge wie am Rechner. */
@@ -299,6 +412,18 @@
     photosUnchanged: photosUnchanged,
     editBody: editBody,
     editHasChanges: editHasChanges,
+    WORK_TYPES: WORK_TYPES,
+    MATERIAL_KINDS: MATERIAL_KINDS,
+    GOLD_SOURCES: GOLD_SOURCES,
+    GOLD_LEFTOVER: GOLD_LEFTOVER,
+    GOLD_SETTLEMENT: GOLD_SETTLEMENT,
+    TAX_SCHEMES: TAX_SCHEMES,
+    INHOUSE: INHOUSE,
+    lineBody: lineBody,
+    cancelLineBody: cancelLineBody,
+    materialBody: materialBody,
+    goldBody: goldBody,
+    invoiceBody: invoiceBody,
     applyAiSuggestions: applyAiSuggestions,
     classify: classify,
     createClient: createClient,

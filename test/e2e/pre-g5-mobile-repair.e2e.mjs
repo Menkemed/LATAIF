@@ -15,6 +15,8 @@
 //                   speichert → `RECORD_CHANGED`, die Aenderung von PC2 bleibt unangetastet.
 //   M5  Beide Wege  Telefon sieht die PC2-Aenderung nach dem Neuladen; PC2 sieht die Reparatur des
 //                   Telefons in seiner Liste. Ein Datensatz, zwei Oberflaechen.
+//   M7  Werkstatt  Arbeitszeile anlegen und zuruecknehmen, Status bis „ready“, Kundenbetrag, Rechnung —
+//                   alles ueber die vorhandenen Fernbefehle des Primary, am echten Datenbestand.
 //   M6  Medien      Die Ablage des Primary ist nach dem Erfolg leer (keine verwaisten Blobs), jedes
 //                   Bild ist JPEG <= 100 000 B, und das Telefon hat nie `/api/sync/push` gerufen.
 //
@@ -68,7 +70,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const S = (v) => JSON.stringify(v);
 const T0 = Date.now();
 const MESS = {};
-const RV = { create: false, edit: false, lostAnswer: false, staleEdit: false, bothSurfaces: false, media: false };
+const RV = { create: false, edit: false, lostAnswer: false, staleEdit: false, bothSurfaces: false, workshop: false, media: false };
 
 let edgeProc = null;
 const aufraeumen = () => {
@@ -453,7 +455,11 @@ try {
     const shell = await warteBis(client, `${q(SHELL)} && (localStorage.getItem('lataif_client_token') || '').length > 0`, 60000);
     pc2Token = Number(await client.ev("return (localStorage.getItem('lataif_client_token') || '').length;").catch(() => 0));
     pc2Da = shell && pc2Token > 0;
-    if (!pc2Da) { console.log(`      (PC2) Anmeldeversuch ${versuch + 1}: Oberflaeche ${shell}, Ausweis ${pc2Token} Zeichen`); await sleep(1500); }
+    if (!pc2Da) {
+      const bild = String(await client.ev("return JSON.stringify({ knopf: !!document.querySelector('[data-client-signin]'), gesperrt: (document.querySelector('[data-client-signin]') || {}).disabled, email: (document.querySelector('[data-client-email]') || {}).value, text: document.body.innerText.slice(0, 220) });").catch((e) => String(e)));
+      console.log(`      (PC2) Anmeldeversuch ${versuch + 1}: Oberflaeche ${shell}, Ausweis ${pc2Token} Zeichen — ${bild.slice(0, 320)}`);
+      await sleep(2000);
+    }
   }
   ok(pc2Da, `SETUP PC2 ist angemeldet (ohne eigene Datenbank; Ausweis ${pc2Token} Zeichen)`);
 
@@ -522,6 +528,67 @@ try {
     if (!sieht) console.log('      (M5 Diagnose) Diagnosefeld: ' + String(await phone.ev("return document.getElementById('rpDiagnosis').value;")) + ' | Trefferzahl: ' + String(await phone.ev("return document.querySelectorAll('#rpList button').length;")) + ' | Kopf: ' + String(await text(phone, '#rpHeadline')));
     ok(sieht, 'M5 das Telefon sieht die Aenderung von PC2 nach dem Neuladen');
     RV.bothSurfaces = sichtbar && pc2Ok && sieht;
+  }
+
+  // ══ M7 — Werkstattwege am ECHTEN Primary: Arbeitszeile, Storno, Status, Rechnung ══════════════
+  {
+    const zeilen = () => dbQ(BIZ_DB, 'SELECT id, work_type, cost_amount, status FROM repair_lines WHERE repair_id = ?', [REP_ID]);
+    const vorZeilen = zeilen().length;
+    const vorAusgaben = Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM expenses WHERE related_module = 'repair' AND related_entity_id = ?", [REP_ID])[0]?.n || 0);
+
+    // ── Arbeitszeile (eigene Werkstatt, damit keine Lieferantenschuld noetig ist)
+    await phone.ev(`
+      document.getElementById('rpLineCost').value = '12.5';
+      document.getElementById('rpLineType').value = 'polishing';
+      document.getElementById('rpLineSupplier').value = ${S('__INHOUSE__')};
+      document.getElementById('rpLineAddBtn').click();
+      return 1;`);
+    const zeileDa = await warteAuf(() => zeilen().length === vorZeilen + 1, 90);
+    const neueZeile = zeilen().find((z) => Number(z.cost_amount) === 12.5) || {};
+    const werkMeldung = await text(phone, '#rpWorkMsg');
+    MESS.m7 = { zeilen: [vorZeilen, zeilen().length], art: neueZeile.work_type, kosten: Number(neueZeile.cost_amount || 0), meldung: werkMeldung.slice(0, 60) };
+    ok(zeileDa && neueZeile.work_type === 'polishing', `M7 „Add work line" schreibt die Zeile am Primary (${S(MESS.m7)})`);
+
+    // ── Dieselbe Zeile zuruecknehmen (zwei Klicks: erst Nachfrage)
+    const lineId = String(neueZeile.id || '');
+    await phone.ev(`const b=document.querySelector('[data-line-cancel="' + ${S(lineId)} + '"]'); if (b) b.click(); return 1;`);
+    await sleep(300);
+    await phone.ev(`const b=document.querySelector('[data-line-cancel="' + ${S(lineId)} + '"]'); if (b) b.click(); return 1;`);
+    const zeileWeg = await warteAuf(() => zeilen().length === vorZeilen, 90);
+    const ausgabenNachher = Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM expenses WHERE related_module = 'repair' AND related_entity_id = ? AND status != 'CANCELLED'", [REP_ID])[0]?.n || 0);
+    ok(zeileWeg && ausgabenNachher === vorAusgaben,
+      `M7 „Cancel line" nimmt die Zeile samt Ausgabe zurueck (${zeilen().length} Zeilen, ${ausgabenNachher} offene Ausgaben)`);
+
+    // ── Status bis „ready" ueber die Schritte, die der PRIMARY erlaubt
+    let schritte = 0;
+    for (let i = 0; i < 4; i++) {
+      const stand = String(repById(REP_ID)?.status || '');
+      if (stand === 'ready') break;
+      const ziel = await phone.ev("const b=[...document.querySelectorAll('#rpStatusRow button')][0]; if (!b) return ''; const t=b.textContent.replace('Mark as ',''); b.click(); return t;");
+      if (!ziel) break;
+      schritte += 1;
+      await warteAuf(() => String(repById(REP_ID)?.status || '') === String(ziel), 90);
+      await sleep(800);
+    }
+    const bereit = String(repById(REP_ID)?.status || '');
+    ok(bereit === 'ready', `M7 der Status laeuft ueber die vom Primary erlaubten Schritte bis „ready" (${schritte} Schritte, jetzt ${bereit})`);
+
+    // ── Kundenbetrag setzen (eigenes Maskenfeld) und Rechnung stellen
+    await setVal(phone, '#rpChargeToCustomer', '45');
+    await klick(phone, '#rpSaveBtn');
+    await warteAuf(() => Number(repById(REP_ID)?.charge_to_customer || 0) === 45, 90);
+    const betrag = Number(repById(REP_ID)?.charge_to_customer || 0);
+    await phone.ev("document.getElementById('rpTaxScheme').value='VAT_10'; document.getElementById('rpInvoiceBtn').click(); return 1;");
+    const fakturiert = await warteAuf(() => String(repById(REP_ID)?.invoice_id || '') !== '', 120);
+    const rechnungsId = String(repById(REP_ID)?.invoice_id || '');
+    const rechnung = dbQ(BIZ_DB, 'SELECT id, invoice_number, gross_amount, tax_scheme_snapshot, customer_id FROM invoices WHERE id = ?', [rechnungsId])[0] || {};
+    const werkMeldung2 = await text(phone, '#rpWorkMsg');
+    MESS.m7rechnung = { betrag, rechnungsId: rechnungsId.slice(0, 8), nummer: String(rechnung.invoice_number || ''), brutto: Number(rechnung.gross_amount || 0), steuer: String(rechnung.tax_scheme_snapshot || ''), meldung: werkMeldung2.slice(0, 60) };
+    ok(betrag === 45 && fakturiert && rechnungsId !== '' && !!rechnung.id && Number(rechnung.gross_amount || 0) > 0,
+      `M7 „Create invoice" erzeugt die Rechnung am Primary (${S(MESS.m7rechnung)})`);
+    const keineZweite = await warteBis(phone, `document.getElementById('rpInvoiceBtn').classList.contains('hidden')`, 30000);
+    ok(keineZweite, 'M7 danach bietet die Maske keine zweite Rechnung mehr an');
+    RV.workshop = zeileDa && zeileWeg && bereit === 'ready' && fakturiert && keineZweite;
   }
 
   // ══ M6 — Medien und Grenzen ═══════════════════════════════════════════════════════════════════

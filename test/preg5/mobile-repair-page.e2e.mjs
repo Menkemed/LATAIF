@@ -309,6 +309,93 @@ try {
   ok(up3.length === 1 && S(up3[0].body.payload.photos) === S([{ keep: 0 }, { stagingId: 'c'.repeat(64) }]),
     `§3 der Bildplan ist {keep:0} + neue Kennung (${S(up3[0] && up3[0].body.payload.photos)})`);
   if (!z3.sichtbar) console.log('      (Diagnose §3) ' + S(z3.protokoll) + ' | ' + c.konsole.slice(-10).join(' ~ '));
+
+  // ── §4 Werkstattwege: Arbeitszeile, Storno, Material, Gold, Rechnung ─────────────────────────
+  {
+    const rep = {
+      id: 'rep-1', repairNumber: 'REP-2026-00042', revision: 5, status: 'ready',
+      issueDescription: 'Krone lose', notes: '', repairType: 'internal', actualCost: null,
+      chargeToCustomer: 40, workshopSupplierId: '', images: [], openLineTotal: 12,
+      lines: [{ id: 'line-1', workType: 'service', costAmount: 12, status: 'OPEN', editable: true }],
+      allowedStatusTargets: [], invoiceId: '',
+    };
+    antwortGeber = (url, body) => {
+      const op = body && body.op;
+      if (op === 'repairs.get') return { status: 200, body: { ok: true, value: rep } };
+      if (op === 'repairs.list') return { status: 200, body: { ok: true, value: { items: [{ id: 'rep-1', repairNumber: 'REP-2026-00042', status: 'ready' }] } } };
+      if (op === 'suppliers.list') return { status: 200, body: { ok: true, value: { items: [{ id: 'sup-1', name: 'Gold Souq Works' }] } } };
+      return { status: 200, body: { ok: true, value: {} } };
+    };
+    await c.ev("window.__rpHomeOpen(); return 1;");
+    await sleep(500);
+    await c.ev("document.getElementById('rpSearchBtn').click(); return 1;");
+    await sleep(600);
+    await c.ev("const b=document.querySelectorAll('#rpList button')[0]; if (b) b.click(); return 1;");
+    await sleep(900);
+    const werkstattDa = await c.ev("return !document.getElementById('rpWorkCard').classList.contains('hidden') && document.querySelectorAll('#rpLineSupplier option').length >= 2;");
+    ok(werkstattDa, '§4 die Werkstattkarte steht an einer bestehenden Reparatur, mit Lieferanten');
+
+    const knopf = async (id, vorbereiten) => {
+      gesehen.length = 0;
+      if (vorbereiten) await c.ev(vorbereiten + ' return 1;');
+      await c.ev(`document.getElementById('${id}').click(); return 1;`);
+      for (let i = 0; i < 40; i++) {
+        if (gesehen.some((g) => g.body && g.body.op && g.body.op !== 'repairs.get' && g.body.op !== 'suppliers.list')) break;
+        await sleep(200);
+      }
+      await sleep(400);
+      return gesehen.filter((g) => g.body && g.body.op && g.body.op !== 'repairs.get' && g.body.op !== 'suppliers.list');
+    };
+
+    const linie = await knopf('rpLineAddBtn', "document.getElementById('rpLineCost').value='12.5'; document.getElementById('rpLineType').value='polishing'; document.getElementById('rpLineSupplier').value='sup-1';");
+    ok(linie.length === 1 && linie[0].body.op === 'repairs.add_line'
+      && linie[0].body.payload.costAmount === 12.5 && linie[0].body.payload.expectedRevision === 5
+      && linie[0].body.payload.supplierId === 'sup-1',
+    `§4 „Add work line" sendet repairs.add_line mit Betrag, Art, Lieferant und Fassung (${S(linie[0] && linie[0].body.payload)})`);
+
+    const ohneBetrag = await knopf('rpLineAddBtn', "document.getElementById('rpLineCost').value='';");
+    const meldung = await c.ev("return document.getElementById('rpWorkMsg').textContent;");
+    ok(ohneBetrag.length === 0 && /cost greater than zero/.test(meldung),
+      `§4 ohne Betrag geht NICHTS hinaus, die Maske sagt es (${S(meldung)})`);
+
+    const material = await knopf('rpMatAddBtn', "document.getElementById('rpMatKind').value='gold'; document.getElementById('rpMatText').value='21K Draht'; document.getElementById('rpMatSupplier').value='sup-1'; document.getElementById('rpMatCost').value='30'; document.getElementById('rpMatWeight').value='3.5';");
+    ok(material.length === 1 && material[0].body.op === 'repairs.add_material'
+      && material[0].body.payload.rows.length === 1 && material[0].body.payload.rows[0].weightGrams === 3.5,
+    `§4 „Add material" sendet repairs.add_material als eine Position (${S(material[0] && material[0].body.payload.rows)})`);
+
+    const gold = await knopf('rpGoldAddBtn', "document.getElementById('rpGoldSource').value='customer'; document.getElementById('rpGoldSource').dispatchEvent(new Event('change')); document.getElementById('rpGoldKarat').value='18K'; document.getElementById('rpGoldReceived').value='8'; document.getElementById('rpGoldUsed').value='6'; document.getElementById('rpGoldLeftover').value='credit';");
+    ok(gold.length === 1 && gold[0].body.op === 'repairs.record_gold_usage'
+      && gold[0].body.payload.leftover === 'credit' && !('supplierId' in gold[0].body.payload),
+    `§4 „Record gold" sendet Kundengold ohne Lieferant (${S(gold[0] && gold[0].body.payload)})`);
+
+    const rechnung = await knopf('rpInvoiceBtn', "document.getElementById('rpTaxScheme').value='VAT_10';");
+    ok(rechnung.length === 1 && rechnung[0].body.op === 'repairs.create_invoice'
+      && rechnung[0].body.payload.taxScheme === 'VAT_10' && rechnung[0].body.payload.expectedRevision === 5,
+    `§4 „Create invoice" sendet repairs.create_invoice mit Steuerart und Fassung (${S(rechnung[0] && rechnung[0].body.payload)})`);
+
+    // Storno: zwei Klicks (der erste fragt nach), dann geht genau ein Befehl hinaus.
+    gesehen.length = 0;
+    await c.ev("const b=document.querySelector('[data-line-cancel]'); b.click(); return 1;");
+    const nachfrage = await c.ev("return document.querySelector('[data-line-cancel]').textContent;");
+    const sofort = gesehen.filter((g) => g.body && g.body.op === 'repairs.cancel_line').length;
+    await c.ev("const b=document.querySelector('[data-line-cancel]'); b.click(); return 1;");
+    for (let i = 0; i < 40; i++) { if (gesehen.some((g) => g.body && g.body.op === 'repairs.cancel_line')) break; await sleep(200); }
+    const storno = gesehen.filter((g) => g.body && g.body.op === 'repairs.cancel_line');
+    ok(/Really cancel/.test(nachfrage) && sofort === 0 && storno.length === 1
+      && storno[0].body.payload.lineId === 'line-1' && storno[0].body.payload.expectedRevision === 5,
+    `§4 „Cancel line" fragt erst nach und sendet dann genau einmal (${S(nachfrage)}; ${S(storno[0] && storno[0].body.payload)})`);
+
+    // Eine bereits fakturierte Reparatur bietet keine zweite Rechnung an.
+    rep.invoiceId = 'inv-1';
+    await c.ev("window.__rpHomeOpen(); return 1;");
+    await sleep(400);
+    await c.ev("document.getElementById('rpSearchBtn').click(); return 1;");
+    await sleep(500);
+    await c.ev("const b=document.querySelectorAll('#rpList button')[0]; if (b) b.click(); return 1;");
+    await sleep(800);
+    const versteckt = await c.ev("return document.getElementById('rpInvoiceBtn').classList.contains('hidden');");
+    ok(versteckt, '§4 eine fakturierte Reparatur bietet keine zweite Rechnung an');
+  }
 } catch (e) {
   FAIL++; fails.push('ABBRUCH: ' + String(e && e.stack ? e.stack : e));
   console.log('  x ABBRUCH: ' + String(e && e.stack ? e.stack : e));

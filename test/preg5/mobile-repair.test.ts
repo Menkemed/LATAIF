@@ -449,17 +449,27 @@ group('§3 AI-Leitplanken');
   const ops = new Set<string>();
   for (const m of ui.matchAll(/rpClient\.read\(\s*'([^']+)'/g)) ops.add(m[1]);
   for (const m of ui.matchAll(/rpClient\.mutate\(\s*[^,]+,\s*'([^']+)'/g)) ops.add(m[1]);
-  const ERLAUBT = ['customers.create', 'customers.list', 'repairs.create', 'repairs.get',
-    'repairs.list', 'repairs.update', 'repairs.update_status'];
+  // Die Werkstattwege nennen ihren Befehl beim Aufruf des gemeinsamen Helfers.
+  for (const m of ui.matchAll(/rpWerkstatt\(\s*'([^']+)'/g)) ops.add(m[1]);
+  // Genau der vereinbarte mobile Umfang — alles VORHANDENE Operationen, keine einzige neue.
+  const ERLAUBT = ['customers.create', 'customers.list', 'repairs.add_line', 'repairs.add_material',
+    'repairs.cancel_line', 'repairs.create', 'repairs.create_invoice', 'repairs.get', 'repairs.list',
+    'repairs.record_gold_usage', 'repairs.update', 'repairs.update_status', 'suppliers.list'];
   ok(J([...ops].sort()) === J(ERLAUBT),
     `§4 die Oberflaeche ruft GENAU diese Fernbefehle: ${[...ops].sort().join(', ')}`);
   // Jeder Aufruf muss von der Zaehlung erfasst sein — sonst koennte ein neuer Befehl unbemerkt
   // hinzukommen. Der einzige Aufruf ohne Zeichenkette ist die Klaerung, die den GESPEICHERTEN
   // Befehl wiederholt.
+  // Zwei Aufrufe tragen KEINE Zeichenkette an der Aufrufstelle, und beide sind erklaert: die
+  // Klaerung wiederholt den gespeicherten Befehl, und der Werkstatt-Helfer bekommt seinen Namen
+  // als Parameter (oben mitgezaehlt). Alles andere muss namentlich dastehen.
   const aufrufe = (ui.match(/rpClient\.(read|mutate)\(/g) || []).length;
-  const mitLiteral = (ui.match(/rpClient\.read\(\s*'/g) || []).length + (ui.match(/rpClient\.mutate\(\s*[^,]+,\s*'/g) || []).length;
-  ok(aufrufe === mitLiteral + 1 && /rpClient\.mutate\(rec\.key, rec\.op, rec\.payload, \{ clarify: true \}\)/.test(ui),
-    `§4 …und der einzige Aufruf ohne festen Namen ist die Klaerung eines gespeicherten Vorhabens (${aufrufe} Aufrufe, ${mitLiteral} mit Namen)`);
+  const direkt = (ui.match(/rpClient\.read\(\s*'/g) || []).length + (ui.match(/rpClient\.mutate\(\s*[^,]+,\s*'/g) || []).length;
+  const werkstattAufrufe = (ui.match(/rpWerkstatt\(\s*'/g) || []).length;
+  ok(aufrufe === direkt + 2 && werkstattAufrufe === 5
+    && /rpClient\.mutate\(rec\.key, rec\.op, rec\.payload, \{ clarify: true \}\)/.test(ui)
+    && /rpClient\.mutate\(key, op, res\.body\)/.test(ui),
+    `§4 …ohne festen Namen sind genau die Klaerung und der Werkstatt-Helfer (${aufrufe} Aufrufe, ${direkt} direkt benannt, ${werkstattAufrufe} Werkstattwege)`);
   ok(!ui.includes('/api/sync/push'),
     '§4 die Oberflaeche kennt den Abgleichkanal NICHT — Reparaturen reisen als Befehl, nicht als geschobene Zeile');
   ok(!/fetch\(\s*'\/api\/command'/.test(ui) && /rpClient/.test(ui),
@@ -511,6 +521,79 @@ group('§4 Verdrahtung');
   ok(geleert.diagnosis === null, '§5 ein geleertes Maskenfeld reist als `null` — Leeren bleibt moeglich');
 }
 group('§5 Keine Phantomfelder');
+
+// ── §6 Werkstattwege: Arbeitszeile, Storno, Material, Gold, Rechnung ─────────
+//
+// Fuenf VORHANDENE Fernbefehle. Hier wird nur geprueft, dass der Rumpf genau das traegt, was der
+// Primary annimmt — und nichts, was er ausrechnet oder bucht.
+{
+  const rep = { id: 'rep-1', revision: 7 };
+
+  // Arbeitszeile
+  const linie = M.lineBody(rep, { costAmount: '12,5', workType: 'polishing', supplierId: 'sup-1', description: 'Politur' }) as
+    { ok: boolean; body: Record<string, unknown> };
+  ok(linie.ok && linie.body.repairId === 'rep-1' && linie.body.expectedRevision === 7,
+    '§6 die Arbeitszeile nennt Reparatur und GELESENE Fassung');
+  ok(linie.body.costAmount === 12.5 && linie.body.workType === 'polishing' && linie.body.supplierId === 'sup-1',
+    `§6 …Kosten (Komma wird Punkt), Arbeitsart und Lieferant (${J(linie.body)})`);
+  const eigen = M.lineBody(rep, { costAmount: '5', workType: 'service', supplierId: M.INHOUSE }) as
+    { ok: boolean; body: Record<string, unknown> };
+  ok(eigen.ok && !('supplierId' in eigen.body),
+    '§6 eigene Arbeit reist OHNE Lieferant — der Platzhalter ist kein Lieferant');
+  ok((M.lineBody(rep, { costAmount: '0', workType: 'service' }) as { code: string }).code === 'COST_REQUIRED',
+    '§6 ohne Betrag geht nichts hinaus');
+  ok((M.lineBody(rep, { costAmount: '5', workType: 'erfunden' }) as { code: string }).code === 'WORK_TYPE_INVALID',
+    '§6 eine erfundene Arbeitsart wird hier schon abgewiesen');
+
+  // Storno
+  const storno = M.cancelLineBody(rep, 'line-9', null) as { ok: boolean; body: Record<string, unknown> };
+  ok(storno.ok && J(Object.keys(storno.body).sort()) === J(['expectedRevision', 'lineId', 'repairId']),
+    `§6 das Storno nennt genau Reparatur, Zeile und Fassung (${J(storno.body)})`);
+  ok((M.cancelLineBody(rep, '', null) as { code: string }).code === 'LINE_REQUIRED', '§6 ohne Zeile kein Storno');
+
+  // Material
+  const mat = M.materialBody(rep, {
+    materialKind: 'gold', description: '21K Draht', supplierId: 'sup-2', totalCost: '30',
+    quantity: '2', weightGrams: '3,5', karat: '21K',
+  }) as { ok: boolean; body: { rows: Array<Record<string, unknown>> } };
+  ok(mat.ok && mat.body.rows.length === 1 && mat.body.rows[0].materialKind === 'gold'
+    && mat.body.rows[0].totalCost === 30 && mat.body.rows[0].weightGrams === 3.5,
+    `§6 Material reist als EINE Position mit Art, Text, Lieferant und Kosten (${J(mat.body.rows[0])})`);
+  ok((M.materialBody(rep, { materialKind: 'gold', description: 'x', totalCost: '5' }) as { code: string }).code === 'SUPPLIER_REQUIRED',
+    '§6 Material ohne Lieferant (oder eigene Werkstatt) geht nicht');
+
+  // Gold — zwei Faelle mit verschiedenen Feldern
+  const werkstatt = M.goldBody(rep, { source: 'workshop', supplierId: 'sup-3', karat: '21K', receivedGrams: '10', settlementType: 'pay_money' }) as
+    { ok: boolean; body: Record<string, unknown> };
+  ok(werkstatt.ok && werkstatt.body.supplierId === 'sup-3' && !('usedGrams' in werkstatt.body) && !('leftover' in werkstatt.body),
+    `§6 Werkstattgold: Lieferant ja, Verbrauch/Rest nein (${J(werkstatt.body)})`);
+  const kunde = M.goldBody(rep, { source: 'customer', karat: '18K', receivedGrams: '8', usedGrams: '6', leftover: 'credit' }) as
+    { ok: boolean; body: Record<string, unknown> };
+  ok(kunde.ok && kunde.body.leftover === 'credit' && kunde.body.usedGrams === 6 && !('supplierId' in kunde.body),
+    `§6 Kundengold: Verbrauch und Rest ja, Lieferant nein (${J(kunde.body)})`);
+  ok((M.goldBody(rep, { source: 'customer', karat: '18K', receivedGrams: '8' }) as { code: string }).code === 'LEFTOVER_REQUIRED',
+    '§6 Kundengold ohne Aussage ueber den Rest geht nicht');
+  ok((M.goldBody(rep, { source: 'workshop', karat: '18K', receivedGrams: '8', supplierId: M.INHOUSE }) as { code: string }).code === 'SUPPLIER_REQUIRED',
+    '§6 Werkstattgold braucht einen ECHTEN Lieferanten');
+
+  // Rechnung
+  const re = M.invoiceBody(rep, 'VAT_10') as { ok: boolean; body: Record<string, unknown> };
+  ok(re.ok && J(Object.keys(re.body).sort()) === J(['expectedRevision', 'repairId', 'taxScheme']),
+    `§6 die Rechnung nennt Reparatur, Fassung und Steuerart (${J(re.body)})`);
+  ok((M.invoiceBody(rep, '') as { ok: boolean; body: Record<string, unknown> }).body.taxScheme === undefined,
+    '§6 ohne Wahl bleibt die gespeicherte Steuerart stehen');
+  ok((M.invoiceBody(rep, 'PHANTASIE') as { code: string }).code === 'TAX_SCHEME_INVALID', '§6 erfundene Steuerart: nein');
+
+  // Und keiner der fuenf Rueempfe traegt je ein Feld, das der Primary selbst setzt.
+  const verboten = ['id', 'repairNumber', 'voucherCode', 'status', 'branchId', 'tenantId', 'userId',
+    'createdBy', 'margin', 'internalCost', 'invoiceId', 'expenseId', 'revision'];
+  for (const [name, res] of [['line', linie], ['cancel', storno], ['material', mat], ['gold', werkstatt], ['invoice', re]] as const) {
+    const text = J((res as { body: unknown }).body);
+    const treffer = verboten.filter((f) => new RegExp(`"${f}"\\s*:`).test(text));
+    ok(treffer.length === 0, `§6 ${name}: kein Feld des Primary im Rumpf (${treffer.join(', ') || 'keins'})`);
+  }
+}
+group('§6 Werkstattwege');
 
 // ══════════════════════════════════════════════════════════════════════════════
 for (const [name, n] of groups) console.log(`  ${name}: ${n}`);

@@ -38,8 +38,8 @@
   const RP_INPUTS = {
     issueDescription: 'rpIssue', itemBrand: 'rpBrand', itemModel: 'rpModel',
     itemReference: 'rpReference', itemSerial: 'rpSerial', itemDescription: 'rpItemDescription',
-    estimatedCost: 'rpEstimatedCost', estimatedReady: 'rpEstimatedReady',
-    diagnosis: 'rpDiagnosis', notes: 'rpNotes',
+    estimatedCost: 'rpEstimatedCost', chargeToCustomer: 'rpChargeToCustomer',
+    estimatedReady: 'rpEstimatedReady', diagnosis: 'rpDiagnosis', notes: 'rpNotes',
   };
   // `slots` sind die Bilder in der Reihenfolge, die der Benutzer sieht: entweder ein GESPEICHERTES
   // (`keep` = sein Platz in der gespeicherten Liste) oder ein NEUES (Daten-URL, spaeter eine
@@ -230,6 +230,13 @@
     rpRenderPhotos();
     rpRenderLines(rep);
     rpRenderStatus(rep);
+    // Werkstattwege gibt es nur an einer BESTEHENDEN Reparatur — und die Rechnung nur, solange es
+    // keine gibt (der Primary wuerde eine zweite ohnehin abweisen; hier steht sie gar nicht erst).
+    $('rpWorkCard').classList.remove('hidden');
+    $('rpInvoiceBtn').classList.toggle('hidden', !!rep.invoiceId);
+    $('rpTaxScheme').classList.toggle('hidden', !!rep.invoiceId);
+    rpSay('rpWorkMsg', rep.invoiceId ? 'This repair is invoiced — its cost lines are frozen.' : '', true);
+    await rpLadeLieferanten();
     screen('formRepair');
   }
 
@@ -240,10 +247,146 @@
     const box = $('rpLines');
     box.innerHTML = '';
     lines.forEach((l) => {
-      box.appendChild(el('div', { class: 'hint' },
+      const zeile = el('div', { class: 'row' });
+      zeile.appendChild(el('div', { class: 'hint' },
         (l.workType || 'work') + ' · ' + (l.costAmount || 0) + ' · ' + (l.status || '')));
+      // Zuruecknehmen nur, wo der PRIMARY es erlaubt: `editable` heisst offen und ohne gebuchte
+      // Zahlung. Das entscheidet er, nicht eine Nachbildung hier.
+      if (l.editable) {
+        const b = el('button', { type: 'button', class: 'secondary', 'data-line-cancel': l.id }, 'Cancel line');
+        let sicher = false;
+        b.onclick = async () => {
+          if (!sicher) { sicher = true; b.textContent = 'Really cancel?'; return; }
+          b.disabled = true;
+          await rpWerkstatt('repairs.cancel_line', 'line-cancel:' + l.id,
+            () => MobileRepair.cancelLineBody(RP.repair, l.id, null), 'The line was taken back.');
+          b.disabled = false;
+        };
+        zeile.appendChild(b);
+      }
+      box.appendChild(zeile);
     });
   }
+
+  // ── Werkstatt ────────────────────────────────────────────────────────────────────────────────
+  //
+  // Vier vorhandene Fernbefehle, ein Muster: Rumpf bauen (fehlt etwas, sagt es die Maske), unter
+  // der Kennung DIESES Vorhabens senden, danach den Stand neu lesen. Gebucht wird am Primary.
+  const RP_GRUND = {
+    COST_REQUIRED: 'Please enter a cost greater than zero.',
+    WORK_TYPE_INVALID: 'Please choose a work type.',
+    MATERIAL_KIND_REQUIRED: 'Please choose a material kind.',
+    DESCRIPTION_REQUIRED: 'Please describe the material.',
+    SUPPLIER_REQUIRED: 'Please choose a supplier (or the own workshop).',
+    SOURCE_REQUIRED: 'Please choose where the gold came from.',
+    KARAT_REQUIRED: 'Please enter the karat.',
+    RECEIVED_REQUIRED: 'Please enter the received grams.',
+    LEFTOVER_REQUIRED: 'Please say what happens to the leftover.',
+    SETTLEMENT_INVALID: 'Please choose how the workshop gold is settled.',
+    TAX_SCHEME_INVALID: 'Please choose a tax scheme.',
+    LINE_REQUIRED: 'This line has no id.',
+  };
+  async function rpWerkstatt(op, zweck, bau, erfolgstext) {
+    if (RP.busy || !RP.repair) return false;
+    rpSay('rpWorkMsg', '', true);
+    const res = bau();
+    if (!res.ok) { rpSay('rpWorkMsg', RP_GRUND[res.code] || res.code, false); return false; }
+    RP.busy = true;
+    try {
+      // Dieselbe Kennung, solange dasselbe Vorhaben offen ist — eine Wiederholung nach einer
+      // verlorenen Antwort bucht deshalb nicht ein zweites Mal.
+      RP.werkKeys = RP.werkKeys || {};
+      if (!RP.werkKeys[zweck]) RP.werkKeys[zweck] = uuid();
+      const key = zweck + ':' + RP.repair.id + ':' + RP.werkKeys[zweck];
+      const r = await rpClient.mutate(key, op, res.body);
+      if (r.kind === 'ok') {
+        delete RP.werkKeys[zweck];
+        const id = RP.repair.id;
+        await rpOpen(id, { keepMsgs: true });
+        rpSay('rpWorkMsg', erfolgstext, true);
+        return true;
+      }
+      rpSay('rpWorkMsg', r.code === 'RECORD_CHANGED'
+        ? 'Someone changed this repair in the meantime. Nothing was booked — open it again.'
+        : rpMessageFor(r, 'Not booked'), false);
+      return false;
+    } finally {
+      RP.busy = false;
+      await rpRenderOpen();
+    }
+  }
+
+  /** Eine Auswahl fuellen. `leer` ist der Eintrag „nichts gewaehlt", falls es ihn geben darf. */
+  function rpFuelle(id, werte, leer) {
+    const sel = $(id);
+    if (!sel) return;
+    sel.innerHTML = '';
+    if (leer !== undefined) sel.appendChild(el('option', { value: '' }, leer));
+    werte.forEach((w) => sel.appendChild(el('option', { value: w.wert }, w.text)));
+  }
+  const RP_WORT = (w) => String(w).replace(/_/g, ' ');
+
+  /** Die Lieferanten des Hauses — einmal je geoeffneter Reparatur, ueber den vorhandenen Leseweg. */
+  async function rpLadeLieferanten() {
+    const eigene = [{ wert: MobileRepair.INHOUSE, text: 'Own workshop (in-house)' }];
+    let liste = [];
+    const r = await rpClient.read('suppliers.list', { limit: 50 });
+    if (r.ok) {
+      liste = ((r.value && r.value.items) || []).map((s) => ({
+        wert: s.id, text: s.name || s.company || s.id,
+      }));
+    }
+    rpFuelle('rpLineSupplier', eigene.concat(liste), undefined);
+    rpFuelle('rpMatSupplier', eigene.concat(liste), undefined);
+    rpFuelle('rpGoldSupplier', liste, 'Supplier…');
+  }
+
+  function rpWerkstattVorbereiten() {
+    rpFuelle('rpLineType', MobileRepair.WORK_TYPES.map((w) => ({ wert: w, text: RP_WORT(w) })), undefined);
+    rpFuelle('rpMatKind', MobileRepair.MATERIAL_KINDS.map((w) => ({ wert: w, text: RP_WORT(w) })), undefined);
+    rpFuelle('rpGoldSource', MobileRepair.GOLD_SOURCES.map((w) => ({ wert: w, text: w === 'workshop' ? 'From the workshop' : 'From the customer' })), undefined);
+    rpFuelle('rpGoldLeftover', MobileRepair.GOLD_LEFTOVER.map((w) => ({ wert: w, text: RP_WORT(w) })), 'Leftover…');
+    rpFuelle('rpGoldSettlement', MobileRepair.GOLD_SETTLEMENT.map((w) => ({ wert: w, text: RP_WORT(w) })), 'Settlement…');
+    rpFuelle('rpTaxScheme', MobileRepair.TAX_SCHEMES.map((w) => ({ wert: w, text: w === 'ZERO' ? 'Zero-rated' : 'VAT 10%' })), 'As stored…');
+    rpGoldFelder();
+  }
+  /** Werkstattgold und Kundengold brauchen VERSCHIEDENE Felder — die anderen werden ausgeblendet. */
+  function rpGoldFelder() {
+    const werkstatt = $('rpGoldSource').value === 'workshop';
+    $('rpGoldSupplier').classList.toggle('hidden', !werkstatt);
+    $('rpGoldSettlement').classList.toggle('hidden', !werkstatt);
+    $('rpGoldUsed').classList.toggle('hidden', werkstatt);
+    $('rpGoldLeftover').classList.toggle('hidden', werkstatt);
+  }
+  $('rpGoldSource').onchange = rpGoldFelder;
+
+  $('rpLineAddBtn').onclick = async () => {
+    const gut = await rpWerkstatt('repairs.add_line', 'line-add', () => MobileRepair.lineBody(RP.repair, {
+      costAmount: $('rpLineCost').value, workType: $('rpLineType').value,
+      supplierId: $('rpLineSupplier').value, description: $('rpLineText').value,
+    }), 'The work line was added.');
+    if (gut) { $('rpLineCost').value = ''; $('rpLineText').value = ''; }
+  };
+  $('rpMatAddBtn').onclick = async () => {
+    const gut = await rpWerkstatt('repairs.add_material', 'material-add', () => MobileRepair.materialBody(RP.repair, {
+      materialKind: $('rpMatKind').value, description: $('rpMatText').value,
+      supplierId: $('rpMatSupplier').value, totalCost: $('rpMatCost').value,
+      quantity: $('rpMatQty').value, weightGrams: $('rpMatWeight').value, karat: $('rpMatKarat').value,
+    }), 'The material was added.');
+    if (gut) { $('rpMatText').value = ''; $('rpMatCost').value = ''; $('rpMatQty').value = ''; $('rpMatWeight').value = ''; $('rpMatKarat').value = ''; }
+  };
+  $('rpGoldAddBtn').onclick = async () => {
+    const gut = await rpWerkstatt('repairs.record_gold_usage', 'gold-add', () => MobileRepair.goldBody(RP.repair, {
+      source: $('rpGoldSource').value, supplierId: $('rpGoldSupplier').value, karat: $('rpGoldKarat').value,
+      receivedGrams: $('rpGoldReceived').value, usedGrams: $('rpGoldUsed').value,
+      leftover: $('rpGoldLeftover').value, settlementType: $('rpGoldSettlement').value,
+    }), 'The gold was recorded.');
+    if (gut) { $('rpGoldKarat').value = ''; $('rpGoldReceived').value = ''; $('rpGoldUsed').value = ''; }
+  };
+  $('rpInvoiceBtn').onclick = async () => {
+    await rpWerkstatt('repairs.create_invoice', 'invoice', () => MobileRepair.invoiceBody(RP.repair, $('rpTaxScheme').value),
+      'The invoice was created.');
+  };
 
   function rpRenderStatus(rep) {
     const targets = rep.allowedStatusTargets || [];
@@ -286,6 +429,7 @@
     $('rpDiagnosisRow').classList.add('hidden');
     $('rpLinesCard').classList.add('hidden');
     $('rpStatusCard').classList.add('hidden');
+    $('rpWorkCard').classList.add('hidden');
     $('rpSaveBtn').textContent = 'Save Repair';
     rpRenderPhotos();
     screen('formRepair');
@@ -399,6 +543,7 @@
   };
 
   // ── Einstiege ────────────────────────────────────────────────────────────────────────────────
+  rpWerkstattVorbereiten();
   $('rpNewBtn').onclick = rpNewIntake;
   $('rpSearchBtn').onclick = () => rpLoadList($('rpSearch').value);
   $('rpSearch').onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); rpLoadList($('rpSearch').value); } };

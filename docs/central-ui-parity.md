@@ -3954,11 +3954,12 @@ und Grenzen: `docs/pre-g5-mobile-repair-review.md`.
 
 | Punkt | Lösung | umgesetzt | getestet (lokal) | unabhängig freigegeben |
 |---|---|---|---|---|
-| Mobile Repair Erfassen/Bearbeiten | Neue Oberfläche in drei eingebetteten Dateien (`mobile_repair.html`, `mobile_repair_commands.js`, `mobile_repair_ui.js`); Domäne unverändert (`planRepairCreate`/`buildRepairEditPatch` am Primary) | ja | ja — Einheit **86/0**, Oberfläche **20/0**, echter Browser **13/0**, Zwei-App **25/0** | **nein** |
+| Mobile Repair Werkstatt (V2) | Arbeitszeile, Zeile zurücknehmen, Material, Goldeinsatz, Rechnung — alles über die VORHANDENEN Fernbefehle (`repairs.add_line/cancel_line/add_material/record_gold_usage/create_invoice`), Lieferanten über `suppliers.list`; `repairs.update_line` und Löschen bleiben aus (am Rechner keine Benutzerfunktion bzw. destruktiv) | ja | ja — Einheit §6, echter Browser §4, Zwei-App M7 (Zeile angelegt und zurückgenommen, Status bis `ready`, Rechnung erzeugt) | **nein** |
+| Mobile Repair Erfassen/Bearbeiten | Neue Oberfläche in drei eingebetteten Dateien (`mobile_repair.html`, `mobile_repair_commands.js`, `mobile_repair_ui.js`); Domäne unverändert (`planRepairCreate`/`buildRepairEditPatch` am Primary) | ja | ja — Einheit **107/0**, Oberfläche **20/0**, echter Browser **21/0**, Zwei-App **30/0** | **nein** |
 | Schreibsicherheit | Kennung vor dem Senden durabel; verlorene Antwort → „Unresolved saves" + Klären = Replay; anderer Rumpf unter offener Kennung geht nicht hinaus; `expectedRevision` aus dem gelesenen Stand → `RECORD_CHANGED` statt Überschreiben; nur Felder, die die Maske zeigt | ja | ja — E2E M3/M4, Einheit §2/§5 | **nein** |
 | Bilder | Belegbild-Vertrag wie PC2 (≤ 100 000 B, ≤ 1600 px), Ablage + `{keep}`/`{stagingId}`, Verwerfen nach Erfolg | ja | ja — E2E M1/M2/M6 | **nein** |
 | AI | Zweite Formart im vorhandenen Vertrag (`kind: "repair"`), Antwort auf genau sechs beschreibende Felder gefiltert; füllt nur leere Felder, speichert nichts | ja | ja — Rust 42/0, Einheit §3; echter Anbieter nicht gefahren | **nein** |
-| Freischaltung | **0 neue Reads, 0 neue Mutations**; wiederverwendet: `repairs.list/get/create/update/update_status`, `customers.list/create`; erweitert nur der Lese-DTO `repairs.get` | ja | ja — Registry-Pins grün (`c4-authorization` 169/0) | **nein** |
+| Freischaltung | **0 neue Reads, 0 neue Mutations**; wiederverwendet: `repairs.list/get/create/update/update_status/add_line/cancel_line/add_material/record_gold_usage/create_invoice`, `customers.list/create`, `suppliers.list`; erweitert nur der Lese-DTO `repairs.get` | ja | ja — Registry-Pins grün (`c4-authorization` 169/0) | **nein** |
 
 ```
 PRE-G5:              Mobile Repair umgesetzt + lokal getestet · unabhängige Freigabe ausstehend
