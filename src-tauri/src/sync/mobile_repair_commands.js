@@ -409,6 +409,9 @@
       return {
         kind: out.kind,
         code: out.code,
+        // Der Primary begruendet eine Ablehnung in Worten (Duplikatstreffer, Fehlbetrag). Wer sie
+        // verschweigt, laesst den Menschen mit einem Code allein.
+        message: (r.body && r.body.message) || '',
         value: (r.body && r.body.value) || null,
         status: r.status,
         commandId: entry.commandId,

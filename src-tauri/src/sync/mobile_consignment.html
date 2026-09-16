@@ -1,0 +1,193 @@
+<!-- ─────────── PRE-G5 MOBILE CONSIGNMENT — Uebersicht ─────────── -->
+<div id="consignHome" class="hidden">
+  <button class="back" data-back>‹ Back</button>
+  <div class="brand" style="margin-top: 4px;">
+    <h1>LATAIF</h1>
+    <p>Consignments</p>
+  </div>
+
+  <div id="cnHomeError" class="error hidden"></div>
+  <div id="cnOpenBox" class="card hidden">
+    <div class="header-row">
+      <span style="font-size: 13px; color: #A1A1AA;">Unresolved saves</span>
+    </div>
+    <div id="cnOpenList"></div>
+  </div>
+
+  <button id="cnNewBtn">＋&nbsp; New Consignment Intake</button>
+
+  <div class="card">
+    <div class="row">
+      <label>Find a consignment</label>
+      <input id="cnSearch" type="search" placeholder="consignment number" />
+    </div>
+    <button id="cnSearchBtn" class="secondary">Search</button>
+  </div>
+
+  <div id="cnList"></div>
+</div>
+
+<!-- ─────────── PRE-G5 MOBILE CONSIGNMENT — Erfassen und Bearbeiten ─────────── -->
+<div id="formConsign" class="hidden">
+  <button class="back" data-back-consign>‹ Consignments</button>
+  <div class="brand" style="margin-top: 4px;">
+    <h1 id="cnHeadline">New Consignment Intake</h1>
+    <p id="cnSubline">An item left with us to sell</p>
+  </div>
+
+  <div id="cnError" class="error hidden"></div>
+  <div id="cnSuccess" class="success hidden"></div>
+
+  <!-- Der Einlieferer: beim Erfassen gewaehlt. Er wechselt nie — eine Kommission gehoert dem, der
+       sie gebracht hat; am Rechner gibt es dafuer ebenfalls keinen Weg. -->
+  <div class="card" id="cnConsignorCard">
+    <div class="header-row">
+      <span style="font-size: 13px; color: #A1A1AA;">Consignor</span>
+      <span id="cnConsignorPicked" class="badge hidden"></span>
+    </div>
+    <div class="row">
+      <input id="cnConsignorSearch" type="search" placeholder="search name or phone" />
+    </div>
+    <button id="cnConsignorSearchBtn" class="secondary">Search clients</button>
+    <div id="cnConsignorResults"></div>
+    <div class="row" style="margin-top: 10px;">
+      <label>New client</label>
+      <input id="cnConsignorFirst" type="text" placeholder="First name" />
+      <input id="cnConsignorLast" type="text" placeholder="Last name" />
+      <input id="cnConsignorPhone" type="text" placeholder="Phone (optional)" />
+    </div>
+    <button id="cnConsignorCreateBtn" class="secondary">Create client</button>
+  </div>
+
+  <!-- Der Zustand einer bestehenden Kommission — reine Auskunft des Primary. -->
+  <div class="card hidden" id="cnStateCard">
+    <div class="header-row">
+      <span style="font-size: 13px; color: #A1A1AA;">Status</span>
+      <span id="cnStateBadge" class="badge"></span>
+    </div>
+    <div id="cnStateLines" class="hint"></div>
+  </div>
+
+  <!-- Fotos: Kamera oder Galerie, bis zu acht. -->
+  <div class="card">
+    <div class="header-row">
+      <span style="font-size: 13px; color: #A1A1AA;">Photos</span>
+      <span id="cnPhotoStatus" class="badge hidden"></span>
+    </div>
+    <label class="photo-area" id="cnPhotoArea" for="cnPhotoInput">
+      <div class="icon">📷</div>
+      <div>Tap to take photos</div>
+      <div class="hint">the item as handed in — up to 8</div>
+    </label>
+    <input id="cnPhotoInput" type="file" accept="image/*" multiple class="hidden" />
+    <div id="cnPhotoStrip" class="photo-strip hidden"></div>
+    <div id="cnPhotoHint" class="hint hidden">Tap a photo to make it the first one.</div>
+    <button id="cnAiBtn" class="secondary hidden">✨&nbsp; AI Identify</button>
+    <div id="cnAiMsg" class="hint hidden"></div>
+    <button id="cnGallerySaveBtn" class="secondary hidden">Save photo changes</button>
+  </div>
+
+  <!-- Die Ware. Kategorie, Marke, Name, Zustand und die Merkmale der Kategorie kommen aus
+       demselben Feldschema wie das Anlegeformular des Telefons (SSOT `field-contract.ts`). -->
+  <div class="card" id="cnItemCard">
+    <div class="row">
+      <label>Category <span class="req">*</span></label>
+      <select id="cnCategory"></select>
+    </div>
+    <div class="row">
+      <label id="cnBrandLabel">Brand</label>
+      <input id="cnBrand" type="text" placeholder="e.g. Rolex" />
+    </div>
+    <div class="row">
+      <label id="cnNameLabel">Model / Name</label>
+      <input id="cnName" type="text" placeholder="e.g. Datejust 36" />
+    </div>
+    <div class="row">
+      <label>Condition</label>
+      <select id="cnCondition"></select>
+    </div>
+    <div id="cnAttrs"></div>
+    <div class="row hidden" id="cnScopeRow">
+      <label>Included</label>
+      <div id="cnScope" class="chips"></div>
+    </div>
+    <div class="row">
+      <label>Reference / SKU</label>
+      <input id="cnSku" type="text" placeholder="leave empty — the main computer allocates one" />
+    </div>
+  </div>
+
+  <!-- Die Vereinbarung. -->
+  <div class="card">
+    <div class="row">
+      <label>Agreed price (BHD) <span class="req">*</span></label>
+      <input id="cnAgreedPrice" type="number" inputmode="decimal" step="0.001" min="0" placeholder="what the consignor gets as a basis" />
+    </div>
+    <div class="row">
+      <label>Minimum price (BHD)</label>
+      <input id="cnMinimumPrice" type="number" inputmode="decimal" step="0.001" min="0" placeholder="optional" />
+    </div>
+    <div class="row">
+      <label>Payout model <span class="req">*</span></label>
+      <select id="cnPayoutModel"></select>
+      <input id="cnCommissionRate" type="number" inputmode="decimal" step="0.01" min="0" max="100" placeholder="Commission rate (%)" />
+      <input id="cnExcessSplitPct" type="number" inputmode="decimal" step="1" min="1" max="99" placeholder="Shop's share of the excess (%)" />
+      <div id="cnPayoutLockMsg" class="hint hidden"></div>
+    </div>
+    <div class="row">
+      <label>Expiry date</label>
+      <input id="cnExpiryDate" type="date" />
+    </div>
+    <div class="row">
+      <label>Notes</label>
+      <textarea id="cnNotes" rows="2" placeholder="optional"></textarea>
+    </div>
+  </div>
+
+  <!-- Die Duplikatsfrage des Primary: sie blockiert nicht, sie fragt. -->
+  <div class="card hidden" id="cnDuplicateCard">
+    <div class="header-row">
+      <span style="font-size: 13px; color: #A1A1AA;">Possible duplicate</span>
+    </div>
+    <div id="cnDuplicateText" class="hint"></div>
+    <button id="cnCreateAnywayBtn" class="secondary">Create anyway</button>
+  </div>
+
+  <button id="cnSaveBtn">Save Consignment</button>
+
+  <!-- Was an einer BESTEHENDEN Kommission moeglich ist. Jede dieser Handlungen ist ein vorhandener
+       Fernbefehl; gebucht wird am Primary. -->
+  <div class="card hidden" id="cnActionsCard">
+    <div class="header-row">
+      <span style="font-size: 13px; color: #A1A1AA;">Actions</span>
+    </div>
+    <div id="cnActionMsg" class="hint hidden"></div>
+
+    <div class="row" id="cnSaleRow">
+      <label>Record a sale</label>
+      <input id="cnBuyerSearch" type="search" placeholder="search the buyer" />
+      <button id="cnBuyerSearchBtn" class="secondary">Search buyers</button>
+      <div id="cnBuyerResults"></div>
+      <span id="cnBuyerPicked" class="badge hidden"></span>
+      <input id="cnSalePrice" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Sale price (BHD) *" />
+      <select id="cnSpecialMark"></select>
+      <input id="cnSaleNotes" type="text" placeholder="Note (optional)" />
+      <div id="cnShortfallMsg" class="hint hidden"></div>
+    </div>
+    <button id="cnSaleBtn" class="secondary">Record sale</button>
+
+    <div class="row" id="cnPayoutRow" style="margin-top: 14px;">
+      <label>Pay the consignor</label>
+      <input id="cnPayoutAmount" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Amount (BHD) *" />
+      <select id="cnPayoutMethod"></select>
+      <input id="cnPayoutReference" type="text" placeholder="Reference (optional)" />
+    </div>
+    <button id="cnPayoutBtn" class="secondary">Record payout</button>
+
+    <div class="row" style="margin-top: 14px;">
+      <label>Unsold</label>
+      <div class="hint">Give the item back to the consignor. The main computer closes the consignment.</div>
+    </div>
+    <button id="cnReturnBtn" class="secondary">Return to consignor</button>
+  </div>
+</div>

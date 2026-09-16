@@ -109,6 +109,7 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
     <label style="margin-bottom: 14px;">What are you capturing?</label>
     <button class="mode-btn" data-mode="collection">📦&nbsp; New Collection Item<span>Add a product to inventory</span></button>
     <button class="mode-btn" data-mode="repair">🔧&nbsp; New Repair Intake<span>Customer item handed in for repair</span></button>
+    <button class="mode-btn" data-mode="consign">🤝&nbsp; New Consignment Intake<span>An item left with us to sell</span></button>
     <button class="mode-btn" data-mode="purchase">🛒&nbsp; Purchase Photo<span>Snap the item — finish the purchase on desktop</span></button>
     <button class="mode-btn" data-mode="scan">🔍&nbsp; Check Item<span>Scan a tag — see full product details</span></button>
   </div>
@@ -210,6 +211,7 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
 </div>
 
 "##, include_str!("mobile_repair.html"), r##"
+"##, include_str!("mobile_consignment.html"), r##"
 
 <!-- ─────────── Purchase — Photo to Inbox ─────────── -->
 <div id="formPurchase" class="hidden">
@@ -298,6 +300,7 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
 window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), r##";
 "##, include_str!("mobile_upload_queue.js"), r##"
 "##, include_str!("mobile_repair_commands.js"), r##"
+"##, include_str!("mobile_consignment_commands.js"), r##"
 (function () {
   const TOKEN_KEY = 'lataif_mobile_token';
   const BRANCH_KEY = 'lataif_mobile_branch';
@@ -308,7 +311,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   const hide = (id) => $(id).classList.add('hidden');
   const setText = (id, t) => { const el = $(id); el.textContent = t; if (t) el.classList.remove('hidden'); else el.classList.add('hidden'); };
 
-  const SCREENS = ['login', 'modePicker', 'formCollection', 'repairHome', 'formRepair', 'formPurchase', 'scanScreen'];
+  const SCREENS = ['login', 'modePicker', 'formCollection', 'repairHome', 'formRepair', 'consignHome', 'formConsign', 'formPurchase', 'scanScreen'];
   function screen(id) { SCREENS.forEach(s => hide(s)); show(id); window.scrollTo({ top: 0 }); }
 
   // Foto-State pro Modus.
@@ -432,6 +435,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       const mode = btn.getAttribute('data-mode');
       if (mode === 'collection') screen('formCollection');
       else if (mode === 'repair') rpHomeOpen();
+      else if (mode === 'consign') cnHomeOpen();
       else if (mode === 'purchase') screen('formPurchase');
       else if (mode === 'scan') { screen('scanScreen'); findMode('scan'); }
     };
@@ -1778,7 +1782,8 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // The server already stripped every price and system field (shared allow-list), so nothing here
   // has to remember to avoid them — but the merge below only ever touches named identity fields
   // anyway, which is the second line of the same defence.
-  function aiApplyToForm(result) {
+  function aiApplyToForm(result, ids) {
+    const T = ids || { brand: 'cBrand', name: 'cName', condition: 'cCondition', attrPrefix: 'attr_' };
     let filled = 0;
     const setIfEmpty = (id, value) => {
       const el = $(id);
@@ -1787,11 +1792,11 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       el.value = value;
       filled++;
     };
-    setIfEmpty('cBrand', result.brand);
-    setIfEmpty('cName', result.name);
+    setIfEmpty(T.brand, result.brand);
+    setIfEmpty(T.name, result.name);
 
     // Condition is a select: adopt only when the value is actually one of the offered options.
-    const cond = $('cCondition');
+    const cond = $(T.condition);
     if (cond && result.condition && !String(cond.value || '').trim()) {
       const match = Array.from(cond.options).find(o => o.value && o.value.toLowerCase() === String(result.condition).toLowerCase());
       if (match) { cond.value = match.value; filled++; }
@@ -1800,7 +1805,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     // Category attributes, keyed exactly as renderCollectionFields created them.
     const attrs = result.attributes || {};
     for (const key of Object.keys(attrs)) {
-      const el = $('attr_' + key);
+      const el = $(T.attrPrefix + key);
       if (!el) continue;                        // not a field of the chosen category → dropped
       if (el.tagName === 'SELECT') {
         if (String(el.value || '').trim() !== '') continue;
@@ -1935,9 +1940,11 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // Prefix, damit dieselbe Aufbaulogik zweimal im DOM leben kann: das Anlegeformular unter `attr_`,
   // das Bearbeitungsformular unter `pea_`. Ohne den Prefix wuerden sich die Element-Ids ueberlagern
   // und `$()` das falsche Feld liefern.
+  const ROW_PREFIX = { 'attr_': 'row_', 'pea_': 'perow_', 'cna_': 'cnrow_' };
   function applyDependencies(cat, pre) {
     const p = pre || 'attr_';
-    for (const a of cat.attributes) { if (!a.dependsOn) continue; const row = $((p === 'attr_' ? 'row_' : 'perow_') + a.key); if (row) row.classList.toggle('hidden', !dependsSatisfied(a, p)); }
+    const rowPre = ROW_PREFIX[p] || 'row_';
+    for (const a of cat.attributes) { if (!a.dependsOn) continue; const row = $(rowPre + a.key); if (row) row.classList.toggle('hidden', !dependsSatisfied(a, p)); }
   }
   function makeControl(a, pre) {
     const idOf = (k) => (pre || 'attr_') + k;
@@ -2155,6 +2162,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   };
 
 "##, include_str!("mobile_repair_ui.js"), r##"
+"##, include_str!("mobile_consignment_ui.js"), r##"
   init();
 })();
 </script>
