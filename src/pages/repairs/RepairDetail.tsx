@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Trash2, Save, ClipboardCheck, ExternalLink, Download, MessageCircle, FileText, RotateCcw } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
+import { shouldAdoptRecord } from '@/core/data/form-sync';
 import { Button } from '@/components/ui/Button';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
@@ -220,8 +221,16 @@ export function RepairDetail() {
 
   // Die Formularkopie folgt der geladenen Reparatur — beim Rendern angeglichen statt per Effekt
   // (dieselbe Wirkung, ohne zweiten Renderdurchlauf).
+  //
+  // ABER NICHT, solange jemand tippt: `loadRepairs()` gibt bei JEDEM Neuladen frische Objekte
+  // zurueck — nach einer Arbeitszeile, nach einem Status, und auch wenn der Abgleich eine fremde
+  // Aenderung einspielt (sync-service: reload der Reparaturen). Die Kopie wurde dann still
+  // ueberschrieben und die ungespeicherte Eingabe war weg; ein anschliessendes "Save" schrieb den
+  // alten Stand zurueck, ohne dass es jemand merkte. Dass der Stand sich inzwischen geaendert haben
+  // koennte, faengt die Fassung ab (`expectedRevision` → RECORD_CHANGED) — nicht ein heimliches
+  // Zuruecksetzen der Maske. Dieselbe Regel gilt am Telefon.
   const [formVon, setFormVon] = useState<Repair | undefined>(undefined);
-  if (repair && repair !== formVon) {
+  if (shouldAdoptRecord(repair, formVon, editing)) {
     setFormVon(repair);
     setForm({ ...repair });
   }

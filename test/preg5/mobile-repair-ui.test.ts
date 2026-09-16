@@ -11,6 +11,7 @@
 // Rueckmeldung ist im ersten E2E-Lauf ausgeblieben, obwohl der Primary laengst gebucht hatte.
 
 import { readFileSync } from 'node:fs';
+import { shouldAdoptRecord } from '../../src/core/data/form-sync.ts';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -55,6 +56,9 @@ class El {
   appendChild(child: El) { this.children.push(child); return child; }
   setAttribute(k: string, v: string) { this.attrs[k] = v; }
   getAttribute(k: string) { return this.attrs[k] ?? null; }
+  /** Die Maske holt den Blick zu einer Meldung — der Ersatz merkt sich nur, DASS sie es tut. */
+  scrolls = 0;
+  scrollIntoView() { this.scrolls += 1; }
   dispatchEvent() { return true; }
   click() { return this.onclick ? this.onclick({ stopPropagation() {}, preventDefault() {} }) : undefined; }
   alleKinder(): El[] { return this.children.flatMap((c) => [c, ...c.alleKinder()]); }
@@ -305,6 +309,102 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
     && (create[1].body as { commandId: string }).commandId === kennungVorher,
     '§4 „Clarify now" wiederholt DIESELBE Kennung — kein zweiter Vorgang');
   ok(t.speicher.size === 0, `§4 nach dem Erfolg ist der Vorgang abgeschlossen (${t.speicher.size})`);
+}
+
+// ── §5 Ungespeicherte Eingaben ueberleben eine Werkstatthandlung (Telefon) ──
+//
+// Der Fund aus dem Handlauf: tippen, dann „Add work line" — und das Getippte war weg. Die Maske
+// liest nach jeder Handlung neu und fuellte dabei ALLE Kopffelder aus dem gespeicherten Stand.
+// Danach sah „Save Changes" keine Aenderung mehr („Nothing changed.") und die Arbeit war verloren,
+// ohne dass es jemand gemerkt haette — die Meldung stand ausserdem weit ausserhalb des Bildes.
+{
+  const stand = (revision: number, diagnosis: string, notes: string) => ({
+    id: 'rep-1', repairNumber: 'REP-2026-00007', revision, status: 'received',
+    issueDescription: 'Krone lose', diagnosis, notes, itemBrand: 'Rolex',
+    images: ['data:image/jpeg;base64,GESPEICHERT'], lines: [], openLineTotal: 0,
+    allowedStatusTargets: ['diagnosed'],
+  });
+  let fassung = 4;
+  let notizenImStand = 'vom Primary';
+  const antworten = (url: string, body: unknown): Antwort => {
+    const b = body as { op?: string } | null;
+    if (/staging\/media/.test(url)) return { status: 201, body: { stagingId: 'b'.repeat(64) } };
+    if (b?.op === 'repairs.get') return { status: 200, body: { ok: true, value: stand(fassung, '', notizenImStand) } };
+    if (b?.op === 'repairs.add_line') { fassung += 1; notizenImStand = 'vom Primary (neu)'; return { status: 200, body: { ok: true, value: {} } }; }
+    if (b?.op === 'repairs.update_status') { fassung += 1; return { status: 200, body: { ok: true, value: {} } }; }
+    if (b?.op === 'repairs.update') { fassung += 1; return { status: 200, body: { ok: true, value: {} } }; }
+    if (b?.op === 'repairs.list') {
+      return { status: 200, body: { ok: true, value: { items: [{ id: 'rep-1', repairNumber: 'REP-2026-00007', itemBrand: 'Rolex', itemModel: '', status: 'received' }] } } };
+    }
+    return { status: 200, body: { ok: true, value: { items: [] } } };
+  };
+  const t = starteOberflaeche(antworten);
+  const $ = (id: string) => t.document.getElementById(id)!;
+  await t.api.rpHomeOpen();
+  await warte();
+  await t.nach.rpList.alleKinder().find((e: El) => e.tagName === 'BUTTON')?.onclick?.();
+  await warte();
+
+  // Der Mensch tippt — und haengt ein Foto an, das noch nirgends gespeichert ist.
+  $('rpDiagnosis').value = 'Krone neu verschraubt';
+  t.nach.rpPhotoInput.files = [{}];
+  await t.nach.rpPhotoInput.onchange!({ target: { files: [{}] } });
+  await warte();
+  const fotosVorher = (t.MobileRepair as { MAX_PHOTOS: number }) && $('rpPhotoStatus').textContent;
+
+  // …und fuehrt DANACH eine Werkstatthandlung aus, die den Stand neu liest.
+  $('rpLineCost').value = '12.5';
+  await $('rpLineAddBtn').onclick!();
+  await warte();
+
+  ok($('rpDiagnosis').value === 'Krone neu verschraubt',
+    '§5 das GETIPPTE Kopffeld ueberlebt die Werkstatthandlung (' + $('rpDiagnosis').value + ')');
+  ok($('rpNotes').value === 'vom Primary (neu)',
+    '§5 …ein NICHT angefasstes Feld kommt frisch vom Primary (' + $('rpNotes').value + ')');
+  ok($('rpPhotoStatus').textContent === fotosVorher && /2 \/ 6/.test($('rpPhotoStatus').textContent),
+    '§5 …und das neue, noch nicht gespeicherte Foto steht weiter da (' + $('rpPhotoStatus').textContent + ')');
+  ok(/unsaved entries are still here/.test($('rpSuccess').textContent),
+    '§5 …die Maske sagt es auch, statt es stumm zu tun');
+
+  // Und die Antwort auf „Save Changes" holt den Blick zu sich — der Knopf steht unten, die
+  // Meldung oben; im echten Browser lagen 2498 px dazwischen.
+  const vorherScrolls = $('rpSuccess').scrolls + $('rpError').scrolls;
+  await $('rpSaveBtn').onclick!();
+  await warte();
+  ok($('rpSuccess').scrolls + $('rpError').scrolls > vorherScrolls,
+    '§5 die Speicher-Antwort wird in den sichtbaren Bereich geholt');
+  const update = t.gerufen.filter((g) => (g.body as { op?: string })?.op === 'repairs.update');
+  const rumpf = update.length ? (update[0].body as { payload: Record<string, unknown> }).payload : {};
+  ok(update.length === 1 && rumpf.diagnosis === 'Krone neu verschraubt' && !('notes' in rumpf),
+    '§5 …und gespeichert wird genau das Getippte, nichts sonst (' + JSON.stringify(rumpf) + ')');
+}
+
+// ── §6 Dieselbe Regel am Rechner (PC2 und Primary) ──────────────────────────
+//
+// Die React-Maske hielt es genauso falsch: ihre Arbeitskopie folgte der Objektreferenz des
+// Ladens — und die ist nach JEDEM Neuladen neu (eigene Handlung ODER eingespielte fremde
+// Aenderung, sync-service). Die Regel steht jetzt an einer Stelle und wird hier AUSGEFUEHRT,
+// nicht im Quelltext gesucht.
+{
+  const a = { id: 'rep-1', revision: 4 };
+  const b = { id: 'rep-1', revision: 4 };   // gleiche Daten, frisches Objekt — genau das liefert loadRepairs()
+  ok(shouldAdoptRecord(a, undefined, false), '§6 beim ersten Laden uebernimmt die Maske den Datensatz');
+  ok(!shouldAdoptRecord(a, a, false), '§6 dieselbe Referenz uebernimmt sie nicht noch einmal');
+  ok(!shouldAdoptRecord(b, a, true), '§6 waehrend des Bearbeitens wird NICHT uebernommen — die Eingabe bleibt stehen');
+  ok(shouldAdoptRecord(b, a, false), '§6 …nach Save oder Cancel greift die Uebernahme sofort wieder');
+  ok(!shouldAdoptRecord(undefined, a, false), '§6 ohne Datensatz gibt es nichts zu uebernehmen');
+
+  const detail = readFileSync(join(repo, 'src/pages/repairs/RepairDetail.tsx'), 'utf8');
+  ok(/if \(shouldAdoptRecord\(repair, formVon, editing\)\) \{/.test(detail),
+    '§6 die Maske fragt genau diese Regel — keine zweite Bedingung im Bauch der Komponente');
+  ok(!/if \(repair && repair !== formVon\) \{/.test(detail),
+    '§6 …und die alte, bedingungslose Uebernahme ist weg');
+  // Der Schutz gegen fremde Aenderungen bleibt, wo er hingehoert: an der Fassung.
+  ok(/expectedRevision: fassung/.test(detail) && /fassungOderNichts\(/.test(detail),
+    '§6 jede Handlung schickt weiter die GELESENE Fassung mit');
+  const svc = readFileSync(join(repo, 'src/core/bridge/service-commands.ts'), 'utf8');
+  ok(/'RECORD_CHANGED',/.test(svc),
+    '§6 …und ein veralteter Stand bleibt ein RECORD_CHANGED des Primary');
 }
 
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — preg5 mobile repair ui: ${PASS} passed, ${FAIL} failed`);

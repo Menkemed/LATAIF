@@ -61,6 +61,12 @@
     if (!el2) { try { console.error('[repair] message target missing: ' + id + ' — ' + text); } catch (e) { /* egal */ } return; }
     el2.textContent = text || '';
     el2.classList.toggle('hidden', !text);
+    // Der Knopf steht unten, die Meldung oben: auf einem Telefon liegen Welten dazwischen (gemessen
+    // 2498 px). Wer speichert und nichts sieht, haelt den Knopf fuer tot und tippt weiter. Also holt
+    // die Meldung den Blick zu sich.
+    if (text && typeof el2.scrollIntoView === 'function') {
+      try { el2.scrollIntoView({ block: 'center', behavior: 'smooth' }); } catch (e) { /* aeltere Form, egal */ }
+    }
     if (good !== undefined && id === 'rpAiMsg') el2.style.color = good ? '#7FA87F' : '#AA6E6E';
   }
   function rpClearMsgs() { rpSay('rpError', ''); rpSay('rpSuccess', ''); rpSay('rpAiMsg', ''); }
@@ -214,6 +220,13 @@
   // dabei NICHT verschwinden, sonst hat der Benutzer gespeichert und sieht nie, dass es geklappt hat.
   async function rpOpen(id, opts) {
     if (!opts || !opts.keepMsgs) rpClearMsgs();
+    // `keepForm`: nach einer Werkstatt- oder Statushandlung wird der Stand neu gelesen — aber was der
+    // Mensch in die Kopffelder getippt und NOCH NICHT gespeichert hat, darf dabei nicht verschwinden.
+    // Vorher loeschte das Neuladen es still; danach sah „Save Changes" keine Aenderung mehr und sagte
+    // „Nothing changed." — die Arbeit war weg, ohne dass es jemand gemerkt haette.
+    const vorherRep = RP.repair;
+    const getippt = (opts && opts.keepForm && vorherRep) ? rpFormValues() : null;
+    const neueFotos = (opts && opts.keepForm) ? RP.slots.filter((s) => typeof s.keep !== 'number') : [];
     const r = await rpClient.read('repairs.get', { id: id });
     if (!r.ok) { rpSay('rpHomeError', 'Could not open the repair (' + r.code + ').'); return; }
     const rep = r.value || {};
@@ -222,6 +235,21 @@
     RP.customer = null;
     RP.slots = (rep.images || []).map((src, i) => ({ keep: i, src: src }));
     rpFillForm(rep);
+    if (getippt) {
+      // Nur die Felder zurueckholen, die gegenueber dem ZULETZT GELESENEN Stand getippt waren — der
+      // Rest kommt frisch vom Primary (er hat vielleicht gerechnet, etwa Kosten und Marge).
+      let offen = 0;
+      for (const k in RP_INPUTS) {
+        const alt = (vorherRep[k] === null || vorherRep[k] === undefined) ? '' : String(vorherRep[k]);
+        if (getippt[k] !== alt) { $(RP_INPUTS[k]).value = getippt[k]; offen += 1; }
+      }
+      for (const foto of neueFotos) {
+        if (RP.slots.length < MobileRepair.MAX_PHOTOS) { RP.slots.push(foto); offen += 1; }
+      }
+      if (offen) {
+        rpSay('rpSuccess', 'Your unsaved entries are still here — press "Save Changes" to store them.');
+      }
+    }
     $('rpHeadline').textContent = rep.repairNumber || 'Repair';
     $('rpSubline').textContent = (rep.itemBrand || '') + ' ' + (rep.itemModel || '');
     $('rpCustomerCard').classList.add('hidden');
@@ -305,7 +333,7 @@
       if (r.kind === 'ok') {
         delete RP.werkKeys[zweck];
         const id = RP.repair.id;
-        await rpOpen(id, { keepMsgs: true });
+        await rpOpen(id, { keepMsgs: true, keepForm: true });
         rpSay('rpWorkMsg', erfolgstext, true);
         return true;
       }
@@ -427,7 +455,7 @@
           repairId: rep.id, status: t, expectedRevision: rep.revision,
         });
         RP.busy = false; b.disabled = false;
-        if (r.kind === 'ok') { await rpOpen(rep.id, { keepMsgs: true }); rpSay('rpSuccess', 'Status is now ' + t + '.'); }
+        if (r.kind === 'ok') { await rpOpen(rep.id, { keepMsgs: true, keepForm: true }); rpSay('rpSuccess', 'Status is now ' + t + '.'); }
         else rpSay('rpError', rpMessageFor(r, 'The status was not changed'));
         await rpRenderOpen();
       };
