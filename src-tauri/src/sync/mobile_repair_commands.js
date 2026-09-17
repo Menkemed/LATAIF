@@ -141,6 +141,38 @@
       .filter(function (t) { return !!t; }).join(' · ');
   }
 
+  /**
+   * Die eine Zeile eines Goldeinsatzes — Wort fuer Wort wie am Rechner
+   * (`core/gold/gold-usage-view.ts`); der Einheitstest haelt beide gegeneinander.
+   */
+  function goldGramm(v) {
+    const n = Number(v);
+    return isFinite(n) ? n.toFixed(3) + ' g' : '';
+  }
+
+  function goldUsageLine(h) {
+    const e = h || {};
+    const teile = [];
+    const erhalten = goldGramm(e.receivedGrams);
+    if (erhalten) teile.push('Received ' + erhalten);
+    if (String(e.source || '') === 'workshop') {
+      teile.push('gold debt');
+      if (e.settlementType === 'pay_money') teile.push('settled in money');
+      else if (e.settlementType === 'return_gold') teile.push('settled in gold');
+      return teile.join(' · ');
+    }
+    const verbraucht = goldGramm(e.usedGrams);
+    if (verbraucht) teile.push('Used ' + verbraucht);
+    const rest = goldGramm(e.remainderGrams);
+    if (rest) teile.push('Remainder ' + rest);
+    if (Number(e.remainderGrams) > 0) {
+      if (e.leftover === 'credit') teile.push('kept as customer credit');
+      else if (e.leftover === 'shop_keep') teile.push('kept by the shop');
+      else if (e.leftover === 'return') teile.push('back to the customer');
+    }
+    return teile.join(' · ');
+  }
+
   /** Nur gesetzte Felder aus einer Erlaubnisliste — der Rumpf traegt nie ein fremdes Feld. */
   function pick(form, fields) {
     const out = {};
@@ -498,6 +530,7 @@
     INHOUSE: INHOUSE,
     lineText: lineText,
     materialDetailText: materialDetailText,
+    goldUsageLine: goldUsageLine,
     lineBody: lineBody,
     cancelLineBody: cancelLineBody,
     materialBody: materialBody,

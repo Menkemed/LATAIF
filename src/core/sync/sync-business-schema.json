@@ -1211,6 +1211,32 @@
       "required_fields": [],
       "immutable_fields": []
     },
+    "repair_gold_usage_history": {
+      "allowed_operations": [
+        "insert"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "branch_id",
+        "gold_credit_id",
+        "gold_payable_id",
+        "id",
+        "karat",
+        "leftover",
+        "received_grams",
+        "recorded_at",
+        "recorded_by",
+        "remainder_grams",
+        "repair_id",
+        "settlement_type",
+        "shop_kept_grams",
+        "source",
+        "supplier_id",
+        "used_grams"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
     "repair_lines": {
       "allowed_operations": [
         "insert",

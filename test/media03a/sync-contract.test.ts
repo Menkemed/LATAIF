@@ -52,9 +52,9 @@ const diff = (a: Set<string>, b: Set<string>) => [...a].filter((x) => !b.has(x))
 const source = (t: string) => [S.has(t) ? 'schema.sql' : null, D.has(t) ? 'database.ts' : null, M.has(t) ? 'migration.ts' : null].filter(Boolean).join('+') || '(none)';
 
 // ── set sizes ──
-ok(b2de48.size === 49, `b2de48 (database.ts ∪ migration.ts CREATE TABLE) = 49 (got ${b2de48.size})`);
+ok(b2de48.size === 50, `b2de48 (database.ts ∪ migration.ts CREATE TABLE) = 50 (got ${b2de48.size})`);
 // POST-PARITY R7A (PP-10) — production_inputs/production_outputs sind jetzt synchronisiert → 52.
-ok(sync50.size === 52, `sync50 (allowlist) = 52 (got ${sync50.size})`);
+ok(sync50.size === 53, `sync50 (allowlist) = 53 (got ${sync50.size})`);
 
 // ── sync50 − b2de48 : in the allowlist, NOT scanned by B2DE4 (all live in schema.sql) ──
 const syncOnly = diff(sync50, b2de48);
@@ -87,9 +87,9 @@ console.log(`  b2de48 − sync50 = ${b2deOnly.length} (control-plane/local table
 
 // ── intersection ──
 const inter = [...sync50].filter((t) => b2de48.has(t));
-ok(inter.length === 37, `sync50 ∩ b2de48 = 37 (got ${inter.length})`);
-ok(inter.length + syncOnly.length === 52, 'intersection + sync-only accounts for all 52 sync tables');
-ok(inter.length + b2deOnly.length === 49, 'intersection + b2de-only accounts for all 49 B2DE4 tables');
+ok(inter.length === 38, `sync50 ∩ b2de48 = 38 (got ${inter.length})`);
+ok(inter.length + syncOnly.length === 53, 'intersection + sync-only accounts for all 53 sync tables');
+ok(inter.length + b2deOnly.length === 50, 'intersection + b2de-only accounts for all 50 B2DE4 tables');
 
 // ── B2DE4 is a documented grammar subset, not the sync schema ──
 // (its scan excludes schema.sql on purpose; that is WHY 15 real sync tables are absent from it)

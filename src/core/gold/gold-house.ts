@@ -15,7 +15,10 @@
 // `…OnPrimary` in `runOnPrimary` (exklusiv, eine Klammer, durabel). Die Gramm-, Karat- und
 // Begleichungslogik selbst steht NUR im Goldkern (`gold-settle.ts`); diese Datei setzt zusammen.
 // ════════════════════════════════════════════════════════════════════════════
+import { v4 as uuid } from 'uuid';
+import { getDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
+import { trackInsert } from '@/core/sync/track';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { readsFromPrimary } from '@/core/data/primary-source';
 import { watchLedgerPosts } from '@/core/ledger/posting';
@@ -250,6 +253,50 @@ export interface RepairGoldUsageResult {
 }
 
 /**
+ * Der FACHVERLAUF eines angenommenen Goldeinsatzes — und nur er.
+ *
+ * Es wird nichts gerechnet und nichts gebucht: geschrieben werden die Werte, die der Vorgang
+ * ohnehin hat (Quelle, Karat, erhalten, verbraucht, Rest, Verbleib, Ausgleichsart) und die
+ * Kennungen dessen, was die Domäne GERADE gebucht hat. Der Aufruf steht am Ende jedes
+ * angenommenen Zweigs — eine Ablehnung wirft vorher, und dann gibt es auch keinen Eintrag.
+ * Die Klammer hält der Aufrufer (`runRemoteCommand` bzw. `runOnPrimary`), deshalb gehört die
+ * Zeile zu derselben Transaktion wie die Buchung.
+ */
+function insertGoldUsageHistory(
+  actor: GoldActor,
+  req: RepairGoldUsageRequest,
+  v: {
+    karat: string; received: number; used?: number; rest?: number;
+    leftover?: GoldLeftover; settlementType?: GoldPayable['settlementType'];
+    result: RepairGoldUsageResult;
+  },
+): string {
+  const db = getDatabase();
+  const id = uuid();
+  const now = new Date().toISOString();
+  db.run(
+    `INSERT INTO repair_gold_usage_history
+       (id, branch_id, repair_id, source, supplier_id, karat, received_grams, used_grams,
+        remainder_grams, leftover, settlement_type, shop_kept_grams, gold_payable_id,
+        gold_credit_id, recorded_at, recorded_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [
+      id, actor.branchId, req.repairId, req.source, req.supplierId ?? null, v.karat, v.received,
+      v.used === undefined ? null : v.used,
+      v.rest === undefined ? null : v.rest,
+      v.leftover ?? null, v.settlementType ?? null,
+      v.result.shopKeptGrams, v.result.payableId ?? null, v.result.goldCreditId ?? null,
+      now, actor.userId || null,
+    ],
+  );
+  trackInsert('repair_gold_usage_history', id, {
+    repairId: req.repairId, source: req.source, karat: v.karat, receivedGrams: v.received,
+    usedGrams: v.used, remainderGrams: v.rest,
+  });
+  return id;
+}
+
+/**
  * Workshop-Gold → Gramm-Schuld beim Goldschmied. Kundengold → der Rest (erhalten − verbraucht) geht
  * zurück (nichts zu buchen), wird Guthaben des Kunden oder bleibt im Laden. Alles in EINER Klammer.
  */
@@ -269,7 +316,11 @@ export function recordRepairGoldUsageInHouse(actor: GoldActor, req: RepairGoldUs
     const payableId = insertGoldPayable(actor.branchId, {
       supplierId: req.supplierId, sourceRepairId: req.repairId, weightGrams: received, karat, settlementType,
     });
-    return { repairId: req.repairId, source: 'workshop', payableId, leftoverGrams: 0, shopKeptGrams: 0 };
+    const werkstatt: RepairGoldUsageResult = {
+      repairId: req.repairId, source: 'workshop', payableId, leftoverGrams: 0, shopKeptGrams: 0,
+    };
+    insertGoldUsageHistory(actor, req, { karat, received, settlementType, result: werkstatt });
+    return werkstatt;
   }
   if (req.source !== 'customer') throw new GoldRejected('GOLD_SOURCE_INVALID', 'gold comes from the workshop or from the customer');
 
@@ -285,8 +336,13 @@ export function recordRepairGoldUsageInHouse(actor: GoldActor, req: RepairGoldUs
   }
   const rest = round3(received - used);
   const out: RepairGoldUsageResult = { repairId: req.repairId, source: 'customer', leftoverGrams: rest, shopKeptGrams: 0 };
-  if (rest <= GRAM_EPS) return out;
   const number = str(rep.repair_number);
+  // Kein Rest heisst: nichts zu buchen. Der VORGANG bleibt trotzdem stehen — genau dieser Fall
+  // („5 g gebracht, 5 g verarbeitet") war bisher hinterher nirgends mehr zu sehen.
+  if (rest <= GRAM_EPS) {
+    insertGoldUsageHistory(actor, req, { karat, received, used, rest, leftover, result: out });
+    return out;
+  }
   if (leftover === 'credit') {
     const customerId = str(rep.customer_id);
     if (!customerId || !query('SELECT id FROM customers WHERE id = ? AND branch_id = ?', [customerId, actor.branchId])[0]) {
@@ -302,6 +358,7 @@ export function recordRepairGoldUsageInHouse(actor: GoldActor, req: RepairGoldUs
     out.shopKeptGrams = rest;
   }
   // 'return' — der Kunde nimmt den Rest wieder mit: nichts zu buchen (wie bisher).
+  insertGoldUsageHistory(actor, req, { karat, received, used, rest, leftover, result: out });
   return out;
 }
 

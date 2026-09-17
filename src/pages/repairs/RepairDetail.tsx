@@ -51,6 +51,7 @@ import {
 } from '@/core/repairs/repair-house';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { nextRepairStatus, repairStatusFlow } from '@/core/repairs/repair-status-flow';
+import { goldUsageLine } from '@/core/gold/gold-usage-view';
 import {
   isOwnWorkLine, ownWorkDescription, materialDescription, showsInternalCostRow,
   OWN_WORK_KIND, OWN_WORK_SOURCE,
@@ -127,6 +128,7 @@ export function RepairDetail() {
   const goldLoadAll = useGoldStore(s => s.loadAll);
   const goldPayables = useGoldStore(s => s.goldPayables);
   const customerGoldCredits = useGoldStore(s => s.customerGoldCredits);
+  const goldUsageAll = useGoldStore(s => s.repairGoldUsage);
   const { invoices, loadInvoices } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
@@ -280,6 +282,11 @@ export function RepairDetail() {
   const repairGoldPayables = useMemo(
     () => id ? goldPayables.filter(gp => gp.sourceRepairId === id) : [],
     [id, goldPayables],
+  );
+  // PRE-G5 — der Fachverlauf dieser Reparatur. Er bucht nichts; er zeigt, was passiert ist.
+  const repairGoldUsage = useMemo(
+    () => (id ? goldUsageAll.filter(h => h.repairId === id) : []),
+    [id, goldUsageAll],
   );
   const repairCustomerGoldCredits = useMemo(
     () => id ? customerGoldCredits.filter(gc => gc.sourceRepairId === id) : [],
@@ -1457,6 +1464,44 @@ export function RepairDetail() {
                     </div>
                   )}
                 </>
+              )}
+            </Card>
+          </div>
+
+          {/* PRE-G5 — GOLD USAGE HISTORY: was bei einem Goldeinsatz PASSIERT ist, auch wenn es
+              nichts zu buchen gab. Bewusst getrennt von „GOLD USED": dort stehen Schuld und
+              Guthaben, hier steht der Vorgang. */}
+          <div style={{ marginTop: 20, gridColumn: '1 / -1' }}>
+            <Card>
+              <div className="flex justify-between items-center" style={{ marginBottom: 12 }}>
+                <span className="text-overline">GOLD USAGE HISTORY ({repairGoldUsage.length})</span>
+                <span style={{ fontSize: 11, color: '#9CA3AF' }}>record only — no debt, no credit</span>
+              </div>
+              {repairGoldUsage.length === 0 ? (
+                <p style={{ fontSize: 13, color: '#6B7280', padding: '12px 0' }}>
+                  No gold usage recorded for this repair.
+                </p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {repairGoldUsage.map((h) => {
+                    const sup = h.supplierId ? suppliers.find(s => s.id === h.supplierId) : null;
+                    return (
+                      <div key={h.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+                        gap: 10, padding: '8px 0', borderTop: '1px solid #E5E9EE', fontSize: 12 }}>
+                        <span style={{ color: '#0F0F10' }}>
+                          {h.source === 'workshop' ? `Workshop · ${sup?.name || '—'}` : 'Customer'}
+                          <span className="font-mono" style={{ color: '#8A7548', marginLeft: 10 }}>{h.karat}</span>
+                        </span>
+                        <span className="font-mono" style={{ color: '#4B5563' }}>
+                          {goldUsageLine(h)}
+                        </span>
+                        <span style={{ color: '#9CA3AF', fontSize: 11 }}>
+                          {h.recordedAt ? h.recordedAt.slice(0, 16).replace('T', ' ') : '—'}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
               )}
             </Card>
           </div>

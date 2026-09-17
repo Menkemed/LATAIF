@@ -771,6 +771,33 @@ export interface CustomerGoldCredit {
   updatedAt: string;
 }
 
+/**
+ * Der Fachverlauf EINES angenommenen Goldeinsatzes an einer Reparatur — Nachweis, keine Buchung.
+ * Was gebucht wurde (Schuld, Guthaben, Hausbestand), steht weiterhin in seinen eigenen Tabellen;
+ * hier verweisen nur die Kennungen darauf. Kundengold ohne Rest bucht nichts und steht trotzdem.
+ */
+export interface RepairGoldUsage {
+  id: UUID;
+  branchId: UUID;
+  repairId: UUID;
+  source: 'customer' | 'workshop';
+  supplierId?: UUID;
+  karat: MetalKarat | string;
+  receivedGrams: number;
+  /** Nur bei Kundengold — Werkstattgold wird in voller Höhe eine Schuld. */
+  usedGrams?: number;
+  remainderGrams?: number;
+  /** Kundengold: wohin der Rest ging. */
+  leftover?: 'return' | 'credit' | 'shop_keep';
+  /** Werkstattgold: wie ausgeglichen wird. */
+  settlementType?: 'return_gold' | 'pay_money';
+  shopKeptGrams: number;
+  goldPayableId?: UUID;
+  goldCreditId?: UUID;
+  recordedAt: string;
+  recordedBy?: UUID;
+}
+
 // Audit-Trail aller Gramm-Bewegungen. Schreibt sich automatisch bei jeder
 // Settle/Convert/Cross-Settle-Action (analog ledger_entries fuer BHD).
 export type GoldBucket =

@@ -1068,6 +1068,28 @@ registerCommand(OP_REPAIRS_GET, {
       editable: str(l.status) === 'OPEN'
         && num(rows('SELECT COALESCE(paid_amount, 0) AS p FROM expenses WHERE id = ?', [str(l.expense_id)])[0]?.p) <= 0,
     }));
+    // PRE-G5 — der Fachverlauf der Goldeinsaetze. Er bucht nichts; er haelt fest, was passiert
+    // ist, auch wenn nichts zu buchen war (Kundengold ohne Rest). Juengster zuerst.
+    const goldUsage = rows(
+      `SELECT h.source, h.karat, h.received_grams, h.used_grams, h.remainder_grams, h.leftover,
+              h.settlement_type, h.shop_kept_grams, h.recorded_at, s.name AS supplier_name
+         FROM repair_gold_usage_history h
+         LEFT JOIN suppliers s ON s.id = h.supplier_id
+        WHERE h.repair_id = ? AND h.branch_id = ?
+        ORDER BY h.recorded_at DESC`,
+      [id, branch],
+    ).map((g) => ({
+      source: str(g.source),
+      supplierName: str(g.supplier_name),
+      karat: str(g.karat),
+      receivedGrams: num(g.received_grams),
+      usedGrams: g.used_grams === null || g.used_grams === undefined ? null : num(g.used_grams),
+      remainderGrams: g.remainder_grams === null || g.remainder_grams === undefined ? null : num(g.remainder_grams),
+      leftover: str(g.leftover),
+      settlementType: str(g.settlement_type),
+      shopKeptGrams: num(g.shop_kept_grams),
+      recordedAt: str(g.recorded_at),
+    }));
     // Was die offenen Arbeitszeilen zusammen kosten — die Zahl, die in den Einstand der
     // Rechnungszeile eingeht. Vom Primary summiert.
     const openLineTotal = num(rows(
@@ -1076,7 +1098,7 @@ registerCommand(OP_REPAIRS_GET, {
     )[0]?.t);
     return {
       ...repairDto(found[0]), notes: str(found[0].notes),
-      voucherCode: str(found[0].voucher_code), lines, openLineTotal,
+      voucherCode: str(found[0].voucher_code), lines, openLineTotal, goldUsage,
       // PRE-G5 — was eine Maske ohne eigene Datenbank zum BEARBEITEN braucht: die restlichen
       // Warenfelder und die Bilder dieser einen Reparatur. Die Reihenfolge der Bilder ist die
       // gespeicherte; `{keep:i}` einer Aenderung zaehlt genau auf diese Liste.

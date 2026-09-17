@@ -97,7 +97,7 @@ for (let i = 0; i < names.length; i++) for (let j = i + 1; j < names.length; j++
 }
 
 // §1 — semantic contracts, from independent sources
-ok(LEGACY_SYNC_APPLY.size === 52, `legacy_sync_apply = 52 sync allowlist tables (got ${LEGACY_SYNC_APPLY.size})`);
+ok(LEGACY_SYNC_APPLY.size === 53, `legacy_sync_apply = 53 sync allowlist tables (got ${LEGACY_SYNC_APPLY.size})`);
 for (const t of LEGACY_SYNC_APPLY) ok(actualLegacy.has(t), `sync_apply table ${t} is present in the legacy DDL`);
 ok(LEGACY_LOCAL_NON_SYNC.size === 23, `legacy_local_non_sync = 23 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
 ok(DEPRECATED_OR_UNREACHABLE_DDL.size === 0, 'deprecated_or_unreachable_ddl is empty (nothing unreachable)');

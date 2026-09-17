@@ -19,7 +19,7 @@
 
 import { create } from 'zustand';
 import type {
-  GoldPayable, CustomerGoldCredit, GoldMovement, GoldBucket,
+  GoldPayable, CustomerGoldCredit, GoldMovement, GoldBucket, RepairGoldUsage,
 } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
@@ -122,11 +122,14 @@ interface GoldStore {
   // State
   goldPayables: GoldPayable[];
   customerGoldCredits: CustomerGoldCredit[];
+  /** Fachverlauf der Goldeinsaetze an Reparaturen — Nachweis, keine Buchung. */
+  repairGoldUsage: RepairGoldUsage[];
   loading: boolean;
 
   // Loaders
   loadGoldPayables: () => void;
   loadCustomerGoldCredits: () => void;
+  loadRepairGoldUsage: () => void;
   loadAll: () => void;
 
   // Create — wird beim Repair-Form-Save aufgerufen
@@ -222,6 +225,7 @@ interface GoldStore {
 export const useGoldStore = create<GoldStore>((set, get) => ({
   goldPayables: [],
   customerGoldCredits: [],
+  repairGoldUsage: [],
   loading: false,
 
   // R6D — auch die Einzel-Loader holen auf PC2 den Stand vom Primary (vorher lasen sie dort gar
@@ -236,11 +240,18 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
     try { set(loadCustomerGoldCreditsFor(localReadContext())); } catch { set({ customerGoldCredits: [] }); }
   },
 
+  /** Der Fachverlauf der Goldeinsaetze — Nachweis, keine Buchung. */
+  loadRepairGoldUsage: () => {
+    if (hydrateFromPrimary('store.gold.get', (d) => set(d as never))) return;
+    try { set(loadRepairGoldUsageFor(localReadContext())); } catch { set({ repairGoldUsage: [] }); }
+  },
+
   loadAll: () => {
     if (hydrateFromPrimary('store.gold.get', (d) => set(d as never))) return;
     set({ loading: true });
     get().loadGoldPayables();
     get().loadCustomerGoldCredits();
+    get().loadRepairGoldUsage();
     set({ loading: false });
   },
 
@@ -798,4 +809,38 @@ export function loadCustomerGoldCreditsFor(ctx: BusinessReadContext): { customer
     [ctx.branchId]
   );
   return { customerGoldCredits: rows.map(rowToCustomerGoldCredit) };
+}
+
+/**
+ * Der Fachverlauf der Goldeinsaetze einer Filiale, zustandsfrei — juengster zuerst. Er bucht
+ * nichts: Schuld, Guthaben und Hausbestand stehen weiterhin in ihren eigenen Tabellen.
+ */
+export function loadRepairGoldUsageFor(ctx: BusinessReadContext): { repairGoldUsage: RepairGoldUsage[] } {
+  const rows = query(
+    'SELECT * FROM repair_gold_usage_history WHERE branch_id = ? ORDER BY recorded_at DESC',
+    [ctx.branchId],
+  );
+  return { repairGoldUsage: rows.map(rowToRepairGoldUsage) };
+}
+
+function rowToRepairGoldUsage(row: Record<string, unknown>): RepairGoldUsage {
+  const zahl = (v: unknown): number | undefined => (v === null || v === undefined ? undefined : Number(v));
+  return {
+    id: row.id as string,
+    branchId: row.branch_id as string,
+    repairId: row.repair_id as string,
+    source: (row.source as string) === 'workshop' ? 'workshop' : 'customer',
+    supplierId: (row.supplier_id as string) || undefined,
+    karat: row.karat as string,
+    receivedGrams: Number(row.received_grams) || 0,
+    usedGrams: zahl(row.used_grams),
+    remainderGrams: zahl(row.remainder_grams),
+    leftover: (row.leftover as RepairGoldUsage['leftover']) || undefined,
+    settlementType: (row.settlement_type as RepairGoldUsage['settlementType']) || undefined,
+    shopKeptGrams: Number(row.shop_kept_grams) || 0,
+    goldPayableId: (row.gold_payable_id as string) || undefined,
+    goldCreditId: (row.gold_credit_id as string) || undefined,
+    recordedAt: row.recorded_at as string,
+    recordedBy: (row.recorded_by as string) || undefined,
+  };
 }

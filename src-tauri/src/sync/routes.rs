@@ -2589,11 +2589,12 @@ mod legacy_push_tests {
 
     // O1/O2/O3/O4/O5/O10 — table-driven over the WHOLE manifest: every allowed op is accepted, every
     // disallowed op is SYNC_OPERATION_NOT_ALLOWED (never silently reinterpreted), and the exact
-    // insert/update/delete table counts are asserted (52/36/37 — proving the matrix is not uniform).
+    // insert/update/delete table counts are asserted (53/36/37 — proving the matrix is not uniform).
     // The counts are the canonical manifest's (`sync-business-schema.json`), the same ones the TS drift
     // gate pins (`test/m6b3a/manifest-drift.test.ts`): R6F (ab7f169) took `delete` from
     // sales_returns/sales_return_lines (37 → 35), R7A (aaa14d9, PP-10) added production_inputs/outputs
-    // with insert+delete (50/36/35 → 52/36/37). This pin was not carried along either time.
+    // with insert+delete (50/36/35 → 52/36/37), PRE-G5 added repair_gold_usage_history with insert only
+    // (52/36/37 → 53/36/37). This pin was not carried along the first two times.
     #[test]
     fn o1_o5_o10_operation_matrix_enforced_for_every_table() {
         let schema = super::super::sync_schema::schema();
@@ -2618,7 +2619,7 @@ mod legacy_push_tests {
             if contract.ops.contains("update") { upd += 1; }
             if contract.ops.contains("delete") { del += 1; }
         }
-        assert_eq!((ins, upd, del), (52, 36, 37), "insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
+        assert_eq!((ins, upd, del), (53, 36, 37), "insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
     }
 
     // O6 — a mixed batch with one disallowed operation writes NOTHING (all-or-nothing).

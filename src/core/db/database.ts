@@ -1613,6 +1613,35 @@ function runMigrations(database: Database): void {
     `CREATE INDEX IF NOT EXISTS idx_customer_gold_credits_customer ON customer_gold_credits(customer_id, status)`,
     `CREATE INDEX IF NOT EXISTS idx_customer_gold_credits_source ON customer_gold_credits(source_repair_id)`,
 
+    // Repair-Gold-Usage-History: der FACHVERLAUF eines Goldeinsatzes an einer Reparatur.
+    //
+    // Warum es sie braucht: `recordRepairGoldUsageInHouse` schreibt nur, wo etwas zu buchen IST —
+    // Werkstattgold wird eine Gramm-Schuld, ein Kundenrest wird Guthaben oder Hausbestand. Ist der
+    // Kundenrest 0 oder nimmt der Kunde ihn mit, bleibt nichts zurueck: „5 g gebracht, 5 g
+    // verarbeitet" war danach nirgends mehr zu sehen. Diese Tabelle haelt genau diesen Vorgang
+    // fest — sie ist KEINE Buchung: keine Schuld, kein Guthaben, kein Ledger, keine Wirkung auf
+    // Bestand oder Bilanz. Was gebucht wird, steht weiterhin in `gold_payables`,
+    // `customer_gold_credits` und `precious_metals`; von dort verweist die Zeile nur zurueck.
+    `CREATE TABLE IF NOT EXISTS repair_gold_usage_history (
+      id                TEXT PRIMARY KEY,
+      branch_id         TEXT NOT NULL,
+      repair_id         TEXT NOT NULL REFERENCES repairs(id) ON DELETE CASCADE,
+      source            TEXT NOT NULL,
+      supplier_id       TEXT REFERENCES suppliers(id),
+      karat             TEXT NOT NULL,
+      received_grams    REAL NOT NULL,
+      used_grams        REAL,
+      remainder_grams   REAL,
+      leftover          TEXT,
+      settlement_type   TEXT,
+      shop_kept_grams   REAL NOT NULL DEFAULT 0,
+      gold_payable_id   TEXT REFERENCES gold_payables(id) ON DELETE SET NULL,
+      gold_credit_id    TEXT REFERENCES customer_gold_credits(id) ON DELETE SET NULL,
+      recorded_at       TEXT NOT NULL,
+      recorded_by       TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_repair_gold_usage_repair ON repair_gold_usage_history(repair_id, recorded_at)`,
+
     // Gold-Movements: universeller Audit-Trail fuer alle Gramm-Bewegungen
     // (analog ledger_entries fuer BHD). Schreibt sich automatisch bei jeder
     // Settle/Convert/Cross-Settle-Action.

@@ -747,6 +747,157 @@ marker('CENTRAL_UI_R6D_GOLD_CLIENT_NO_LOCAL_DB_PROVED');
 }
 marker('CENTRAL_UI_R6D_GOLD_UI_WIRING_PROVED');
 
+// ══ §9 — PRE-G5: der Fachverlauf eines Goldeinsatzes ══════════════════════════
+//
+// Der Befund aus dem Feldversuch: Kundengold, alles verarbeitet, kein Rest — danach war der
+// Vorgang nirgends mehr zu sehen, weil es NICHTS ZU BUCHEN gab. Der Verlauf haelt ihn fest.
+// Er ist Nachweis, keine Buchung: keine Schuld, kein Guthaben, kein Ledger, kein Bestand.
+{
+  const verlauf = (db: Db, repairId = 'rep-1') =>
+    rows(db, 'SELECT * FROM repair_gold_usage_history WHERE repair_id = ? ORDER BY recorded_at', [repairId]);
+
+  // (1) Kundengold, alles verarbeitet: Verlauf JA, Schuld/Guthaben NEIN.
+  let db = freshDb();
+  let vor = snap(db);
+  let a = await primary(() => house.recordRepairGoldUsageOnPrimary(
+    { repairId: 'rep-1', source: 'customer', karat: '21K', receivedGrams: 5, usedGrams: 5, leftover: 'return' }));
+  ok(a.kind === 'ok', `HIST Kundengold ohne Rest geht durch (${a.code})`);
+  let h = verlauf(db);
+  ok(h.length === 1 && String(h[0].source) === 'customer' && Number(h[0].received_grams) === 5
+    && Number(h[0].used_grams) === 5 && Number(h[0].remainder_grams) === 0 && String(h[0].leftover) === 'return'
+    && String(h[0].karat) === '21K' && String(h[0].branch_id) === 'branch-main' && !!h[0].recorded_at,
+  `HIST …und steht mit allen Werten im Verlauf (${JSON.stringify(h[0])})`);
+  ok(snap(db) === vor, 'HIST …waehrend Schuld, Guthaben und Bestand unveraendert bleiben — der Verlauf bucht nichts');
+  ok(!h[0].supplier_id && !h[0].gold_payable_id && !h[0].gold_credit_id && Number(h[0].shop_kept_grams) === 0,
+    'HIST …ohne Lieferant und ohne erfundene Buchungskennung');
+
+  // (2) Kundengold mit Rest, der Kunde nimmt ihn mit: ebenfalls nur Verlauf.
+  db = freshDb(); vor = snap(db);
+  a = await primary(() => house.recordRepairGoldUsageOnPrimary(
+    { repairId: 'rep-1', source: 'customer', karat: '21K', receivedGrams: 8, usedGrams: 6, leftover: 'return' }));
+  h = verlauf(db);
+  ok(a.kind === 'ok' && h.length === 1 && Number(h[0].remainder_grams) === 2 && String(h[0].leftover) === 'return',
+    `HIST der zurueckgegebene Rest steht im Verlauf (${JSON.stringify(h[0] && h[0].remainder_grams)})`);
+  ok(snap(db) === vor, 'HIST …und erzeugt weiterhin KEINE Forderung');
+
+  // (3) Kundengold mit Rest als Guthaben: bestehende Wirkung UND genau ein Verlaufseintrag.
+  db = freshDb();
+  a = await primary(() => house.recordRepairGoldUsageOnPrimary(
+    { repairId: 'rep-1', source: 'customer', karat: '21K', receivedGrams: 8, usedGrams: 6, leftover: 'credit' }));
+  h = verlauf(db);
+  const gutschrift = rows(db, "SELECT id, weight_grams FROM customer_gold_credits WHERE source_repair_id = 'rep-1'");
+  ok(a.kind === 'ok' && gutschrift.length === 1 && Number(gutschrift[0].weight_grams) === 2,
+    'HIST der Rest als Guthaben bucht weiterhin genau ein Kundenguthaben');
+  ok(h.length === 1 && String(h[0].gold_credit_id) === String(gutschrift[0].id) && String(h[0].leftover) === 'credit',
+    'HIST …und der Verlauf verweist auf genau dieses Guthaben');
+
+  // …und der Rest, den der Laden behaelt.
+  db = freshDb();
+  a = await primary(() => house.recordRepairGoldUsageOnPrimary(
+    { repairId: 'rep-1', source: 'customer', karat: '21K', receivedGrams: 8, usedGrams: 6, leftover: 'shop_keep' }));
+  h = verlauf(db);
+  ok(a.kind === 'ok' && h.length === 1 && Number(h[0].shop_kept_grams) === 2 && String(h[0].leftover) === 'shop_keep',
+    `HIST der im Haus behaltene Rest steht als solcher im Verlauf (${JSON.stringify(h[0] && h[0].shop_kept_grams)})`);
+
+  // (4) Werkstattgold: Schuld wie bisher, dazu der Verlauf mit ihrer Kennung.
+  db = freshDb();
+  a = await primary(() => house.recordRepairGoldUsageOnPrimary(
+    { repairId: 'rep-1', source: 'workshop', karat: '21K', receivedGrams: 3, supplierId: 'sup-1', settlementType: 'pay_money' }));
+  h = verlauf(db);
+  // Die Vorlage bringt bereits Schulden mit — gemeint ist die, die GERADE entstanden ist.
+  const neueId = String((a.value as { payableId?: string }).payableId || '');
+  const schuld = rows(db, 'SELECT id, weight_grams, settlement_type FROM gold_payables WHERE id = ?', [neueId]);
+  ok(a.kind === 'ok' && schuld.length === 1 && Number(schuld[0].weight_grams) === 3
+    && String(schuld[0].settlement_type) === 'pay_money',
+  `HIST Werkstattgold bucht weiterhin genau eine Gramm-Schuld (${JSON.stringify(schuld[0])})`);
+  ok(h.length === 1 && String(h[0].source) === 'workshop' && String(h[0].supplier_id) === 'sup-1'
+    && String(h[0].gold_payable_id) === String(schuld[0].id) && String(h[0].settlement_type) === 'pay_money'
+    && h[0].used_grams === null && h[0].remainder_grams === null,
+  `HIST …und der Verlauf nennt Lieferant, Ausgleichsart und die Schuld — ohne erfundenen Verbrauch (${JSON.stringify(h[0])})`);
+
+  // (5) Eine Ablehnung schreibt nichts.
+  db = freshDb();
+  a = await primary(() => house.recordRepairGoldUsageOnPrimary(
+    { repairId: 'rep-1', source: 'customer', karat: '21K', receivedGrams: 3, usedGrams: 4, leftover: 'return' }));
+  ok(a.kind === 'rejected' && a.code === 'GOLD_USED_EXCEEDS_RECEIVED' && verlauf(db).length === 0,
+    `HIST eine abgewiesene Buchung hinterlaesst KEINEN Verlauf (${a.code})`);
+  a = await primary(() => house.recordRepairGoldUsageOnPrimary(
+    { repairId: 'rep-1', source: 'workshop', karat: '21K', receivedGrams: 3 }));
+  ok(a.kind === 'rejected' && verlauf(db).length === 0, `HIST …auch die ohne Lieferant nicht (${a.code})`);
+
+  // (6) Dieselbe Kennung zweimal: EIN Vorgang, EIN Verlaufseintrag.
+  db = freshDb();
+  const rumpf = { repairId: 'rep-1', expectedRevision: 1, source: 'customer', karat: '21K', receivedGrams: 5, usedGrams: 5, leftover: 'return' };
+  const eins = await fern(() => cmd.runRepairGoldUsage(deps(db), identity('gold-hist-1', 'repairs.record_gold_usage'), rumpf));
+  const zwei = await fern(() => cmd.runRepairGoldUsage(deps(db), identity('gold-hist-1', 'repairs.record_gold_usage'), rumpf));
+  ok(eins.kind === 'ok' && zwei.kind === 'ok' && zwei.replayed === true,
+    'HIST die Wiederholung derselben Kennung antwortet aus dem Buch');
+  ok(verlauf(db).length === 1, `HIST …und schreibt keinen zweiten Verlaufseintrag (${verlauf(db).length})`);
+  const anders = await fern(() => cmd.runRepairGoldUsage(
+    deps(db), identity('gold-hist-1', 'repairs.record_gold_usage', 'branch-main', 'anderer-hash'), { ...rumpf, receivedGrams: 9 }));
+  ok(anders.kind === 'rejected' && verlauf(db).length === 1,
+    `HIST …und derselbe Auftrag mit anderem Inhalt bleibt der bestehende Konflikt (${anders.code})`);
+
+  // (9) Migration: eine Datenbank OHNE die Tabelle bekommt sie additiv, alte Daten bleiben.
+  {
+    const alt = new SQL.Database() as unknown as Db;
+    alt.run(src('src/core/db/schema.sql'));
+    for (const stmt of MIGRATIONS) {
+      if (/repair_gold_usage_history/.test(stmt)) continue;   // der Stand VOR diesem Schnitt
+      try { alt.run(stmt); } catch { /* schon da */ }
+    }
+    alt.run("INSERT INTO branches (id, tenant_id, name, created_at, updated_at) VALUES ('branch-main','tenant-1','Haupt',?,?)", [NOW, NOW]);
+    insert(alt, 'customers', { id: 'c1', branch_id: 'branch-main', first_name: 'Alt', last_name: 'Bestand', created_at: NOW, updated_at: NOW });
+    insert(alt, 'repairs', { id: 'rep-alt', branch_id: 'branch-main', repair_number: 'REP-2020-00001', customer_id: 'c1', status: 'received', created_at: NOW, updated_at: NOW });
+    ok(rows(alt, "SELECT name FROM sqlite_master WHERE type='table' AND name='repair_gold_usage_history'").length === 0,
+      'HIST-MIG vor dem Schnitt gibt es die Tabelle nicht');
+    for (const stmt of MIGRATIONS) { try { alt.run(stmt); } catch { /* schon da */ } }
+    ok(rows(alt, "SELECT name FROM sqlite_master WHERE type='table' AND name='repair_gold_usage_history'").length === 1,
+      'HIST-MIG die Migration legt sie an — additiv, ohne Datenverlust');
+    ok(rows(alt, "SELECT id FROM repairs WHERE id = 'rep-alt'").length === 1
+      && rows(alt, 'SELECT * FROM repair_gold_usage_history').length === 0,
+    'HIST-MIG …die vorhandene Reparatur bleibt unveraendert und hat einfach keinen Verlauf');
+  }
+
+  // (7/8) Die eine Schreibweise — Rechner und Telefon lesen denselben Satz.
+  const ansicht = await import('../../src/core/gold/gold-usage-view.ts');
+  const telefon: { MobileRepair?: { goldUsageLine(h: Record<string, unknown>): string } } = {};
+  new Function('self', src('src-tauri/src/sync/mobile_repair_commands.js'))(telefon);
+  const faelle = [
+    { source: 'customer', karat: '21K', receivedGrams: 5, usedGrams: 5, remainderGrams: 0, leftover: 'return' },
+    { source: 'customer', karat: '18K', receivedGrams: 8, usedGrams: 6, remainderGrams: 2, leftover: 'credit' },
+    { source: 'customer', karat: '18K', receivedGrams: 8, usedGrams: 6, remainderGrams: 2, leftover: 'shop_keep' },
+    { source: 'workshop', karat: '21K', receivedGrams: 3, settlementType: 'pay_money' },
+  ];
+  ok(ansicht.goldUsageLine(faelle[0]) === 'Received 5.000 g · Used 5.000 g · Remainder 0.000 g',
+    `HIST-VIEW der Fall ohne Rest liest sich vollstaendig (${ansicht.goldUsageLine(faelle[0])})`);
+  ok(ansicht.goldUsageLine(faelle[1]) === 'Received 8.000 g · Used 6.000 g · Remainder 2.000 g · kept as customer credit',
+    `HIST-VIEW …mit Rest steht auch sein Verbleib da (${ansicht.goldUsageLine(faelle[1])})`);
+  ok(ansicht.goldUsageLine(faelle[3]) === 'Received 3.000 g · gold debt · settled in money',
+    `HIST-VIEW …und Werkstattgold nennt die Schuld, nicht einen erfundenen Verbrauch (${ansicht.goldUsageLine(faelle[3])})`);
+  ok(faelle.every((f) => ansicht.goldUsageLine(f) === telefon.MobileRepair!.goldUsageLine(f)),
+    'HIST-VIEW Telefon und Rechner schreiben denselben Satz, Zeichen fuer Zeichen');
+
+  // (7) Der Rechner zeigt ihn — getrennt von Schuld und Guthaben.
+  const seite = src('src/pages/repairs/RepairDetail.tsx');
+  ok(/GOLD USAGE HISTORY \(\{repairGoldUsage\.length\}\)/.test(seite)
+    && /goldUsageLine\(h\)/.test(seite) && /useGoldStore\(s => s\.repairGoldUsage\)/.test(seite),
+  'HIST-UI die Reparaturseite hat eine eigene Sektion aus demselben Satz');
+  ok(/GOLD USED \(\{repairGoldPayables\.length \+ repairCustomerGoldCredits\.length\}\)/.test(seite),
+    'HIST-UI …und die alte Karte fuer Schuld und Guthaben steht unveraendert daneben');
+  // (8) Das Telefon zeigt ihn — nur lesend.
+  const handy = src('src-tauri/src/sync/mobile_repair_ui.js');
+  ok(/rpRenderGoldHistory\(rep\)/.test(handy) && /MobileRepair\.goldUsageLine\(h\)/.test(handy),
+    'HIST-UI das Telefon zeichnet denselben Satz');
+  ok(!/record_gold_usage/.test(handy.split('rpRenderGoldHistory')[1].split('function ')[1] || ''),
+    'HIST-UI …und die Anzeige schreibt nichts — „Record gold" bleibt die eine Aktion');
+  // Der Verlauf reist in der BESTEHENDEN Auskunft mit — keine neue Operation.
+  const reads = src('src/core/bridge/read-commands.ts');
+  ok(/FROM repair_gold_usage_history h/.test(reads) && /voucherCode: str\(found\[0\]\.voucher_code\), lines, openLineTotal, goldUsage,/.test(reads),
+    'HIST-READ `repairs.get` traegt den Verlauf — ohne neue Leseoperation');
+}
+marker('PRE_G5_REPAIR_GOLD_USAGE_HISTORY_PROVED');
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — r6d gold parity: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
 console.log('CENTRAL_UI_R6D_GOLD_PROVED');

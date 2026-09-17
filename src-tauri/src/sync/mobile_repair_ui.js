@@ -257,6 +257,7 @@
     $('rpSaveBtn').textContent = 'Save Changes';
     rpRenderPhotos();
     rpRenderLines(rep);
+    rpRenderGoldHistory(rep);
     rpRenderStatus(rep);
     // Werkstattwege gibt es nur an einer BESTEHENDEN Reparatur — und die Rechnung nur, solange es
     // keine gibt (der Primary wuerde eine zweite ohnehin abweisen; hier steht sie gar nicht erst).
@@ -293,6 +294,27 @@
         };
         zeile.appendChild(b);
       }
+      box.appendChild(zeile);
+    });
+  }
+
+  /**
+   * Der Fachverlauf der Goldeinsaetze — NUR lesen. Er kommt fertig vom Primary (`repairs.get`);
+   * gebucht wird weiterhin ueber „Record gold". Eine zweite Goldlogik gibt es hier nicht.
+   */
+  function rpRenderGoldHistory(rep) {
+    const eintraege = (rep && rep.goldUsage) || [];
+    $('rpGoldHistoryCard').classList.toggle('hidden', eintraege.length === 0);
+    $('rpGoldHistoryCount').textContent = String(eintraege.length);
+    const box = $('rpGoldHistory');
+    box.innerHTML = '';
+    eintraege.forEach((h) => {
+      const wer = h.source === 'workshop'
+        ? 'Workshop' + (h.supplierName ? ' · ' + h.supplierName : '')
+        : 'Customer';
+      const zeile = el('div', { class: 'row' });
+      zeile.appendChild(el('div', { class: 'hint' },
+        wer + ' · ' + (h.karat || '') + ' · ' + MobileRepair.goldUsageLine(h)));
       box.appendChild(zeile);
     });
   }
@@ -479,6 +501,7 @@
     $('rpCustomerResults').innerHTML = '';
     $('rpDiagnosisRow').classList.add('hidden');
     $('rpLinesCard').classList.add('hidden');
+    $('rpGoldHistoryCard').classList.add('hidden');
     $('rpStatusCard').classList.add('hidden');
     $('rpWorkCard').classList.add('hidden');
     $('rpSaveBtn').textContent = 'Save Repair';

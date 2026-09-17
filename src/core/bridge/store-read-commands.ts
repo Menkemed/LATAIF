@@ -278,7 +278,14 @@ registerCommand(OP_STORE_GOLD_GET, {
   handler: async (payload, actor): Promise<CommandResult> => {
     const ctx = contextOf(payload, actor);
     const s = await import('@/stores/goldStore');
-    return { data: { ...s.loadGoldPayablesFor(ctx), ...s.loadCustomerGoldCreditsFor(ctx) } };
+    // PRE-G5 — der Fachverlauf gehoert in denselben Beutel: PC2 fuellt seinen Bestand aus genau
+    // dieser Auskunft, also sieht er die Goldeinsaetze ohne eine zweite Operation.
+    return {
+      data: {
+        ...s.loadGoldPayablesFor(ctx), ...s.loadCustomerGoldCreditsFor(ctx),
+        ...s.loadRepairGoldUsageFor(ctx),
+      },
+    };
   },
 });
 
