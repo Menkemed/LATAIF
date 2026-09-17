@@ -51,6 +51,8 @@ function funktionAusSeite(kopf) {
 const helferEl = funktionAusSeite('function el(tag, attrs, text) {');
 const helferUuid = funktionAusSeite('function uuid() {');
 const helferResize = funktionAusSeite('function resizePhoto(file, maxDim, quality) {');
+// Die aufklappbaren Abschnitte sind Sache der SEITE — auch sie woertlich, nicht nachgebaut.
+const helferFolds = funktionAusSeite('function foldsWire() {');
 
 // Die Helfer der echten Seite als globale Bausteine — WOERTLICH aus `mobile_page.rs` geschnitten,
 // damit dieser Test keine Nachbildung prueft.
@@ -68,6 +70,8 @@ function screen(id) { SCREENS.forEach(function (s) { hide(s); }); show(id); }
 ${helferEl}
 ${helferUuid}
 ${helferResize}
+${helferFolds}
+foldsWire();
 var idbReq = function (req) { return new Promise(function (res, rej) { req.onsuccess = function () { res(req.result); }; req.onerror = function () { rej(req.error); }; }); };
 var echtesFetch = window.fetch.bind(window);
 window.fetch = function (u, o) { window.__PROTOKOLL.push('fetch ' + u); return echtesFetch(u, o); };
@@ -334,6 +338,23 @@ try {
     await sleep(900);
     const werkstattDa = await c.ev("return !document.getElementById('rpWorkCard').classList.contains('hidden') && document.querySelectorAll('#rpLineSupplier option').length >= 2;");
     ok(werkstattDa, '§4 die Werkstattkarte steht an einer bestehenden Reparatur, mit Lieferanten');
+
+    // Die vier Werkstattwege liegen ZU — ein Telefon hat wenig Platz. Der Kopf ist der Schalter.
+    const zu = await c.ev(`return Array.from(document.querySelectorAll('#rpWorkCard .fold'))
+      .map((f) => f.id + ':' + (f.querySelector('.fold-body').classList.contains('hidden') ? 'zu' : 'auf')).join(',');`);
+    ok(zu === 'rpFoldLine:zu,rpFoldMaterial:zu,rpFoldGold:zu,rpFoldInvoice:zu',
+      `§4b beim Oeffnen liegen alle vier Abschnitte zu (${zu})`);
+    const aufklappen = async (id) => c.ev(`document.querySelector('[data-fold="${id}"]').click();
+      return document.getElementById('${id}').classList.contains('open')
+        && !document.querySelector('#${id} .fold-body').classList.contains('hidden');`);
+    ok(await aufklappen('rpFoldLine'), '§4b ein Tipp auf den Kopf klappt den Abschnitt auf');
+    const nurEiner = await c.ev(`return document.querySelector('#rpFoldMaterial .fold-body').classList.contains('hidden');`);
+    ok(nurEiner, '§4b …und nur diesen einen — die anderen bleiben, wie sie waren');
+    ok(await c.ev(`document.querySelector('[data-fold="rpFoldLine"]').click();
+      return document.querySelector('#rpFoldLine .fold-body').classList.contains('hidden')
+        && !document.getElementById('rpFoldLine').classList.contains('open');`),
+      '§4b derselbe Tipp klappt ihn wieder zu');
+    for (const f of ['rpFoldLine', 'rpFoldMaterial', 'rpFoldGold', 'rpFoldInvoice']) await aufklappen(f);
 
     const knopf = async (id, vorbereiten) => {
       gesehen.length = 0;

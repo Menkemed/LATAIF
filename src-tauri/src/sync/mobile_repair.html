@@ -142,6 +142,10 @@
     </div>
     <div id="rpWorkMsg" class="hint"></div>
 
+    <!-- Jeder Werkstattweg liegt zu, bis er gebraucht wird: der Kopf ist der Schalter. -->
+    <div class="fold" id="rpFoldLine">
+    <button type="button" class="fold-head" data-fold="rpFoldLine">Add work line<span class="caret">▸</span></button>
+    <div class="fold-body hidden">
     <div class="row">
       <label>Add work line</label>
       <select id="rpLineType"></select>
@@ -150,7 +154,12 @@
       <input id="rpLineText" type="text" placeholder="Description (optional)" />
     </div>
     <button id="rpLineAddBtn" class="secondary">＋&nbsp; Add work line</button>
+    </div>
+    </div>
 
+    <div class="fold" id="rpFoldMaterial">
+    <button type="button" class="fold-head" data-fold="rpFoldMaterial">Add material<span class="caret">▸</span></button>
+    <div class="fold-body hidden">
     <div class="row" style="margin-top: 14px;">
       <label>Add material</label>
       <select id="rpMatKind"></select>
@@ -163,7 +172,12 @@
       <input id="rpMatCost" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Total cost (BHD) *" />
     </div>
     <button id="rpMatAddBtn" class="secondary">＋&nbsp; Add material</button>
+    </div>
+    </div>
 
+    <div class="fold" id="rpFoldGold">
+    <button type="button" class="fold-head" data-fold="rpFoldGold">Record gold usage<span class="caret">▸</span></button>
+    <div class="fold-body hidden">
     <div class="row" style="margin-top: 14px;">
       <label>Record gold usage</label>
       <select id="rpGoldSource"></select>
@@ -175,13 +189,20 @@
       <select id="rpGoldSettlement"></select>
     </div>
     <button id="rpGoldAddBtn" class="secondary">＋&nbsp; Record gold</button>
+    </div>
+    </div>
 
+    <div class="fold" id="rpFoldInvoice">
+    <button type="button" class="fold-head" data-fold="rpFoldInvoice">Invoice<span class="caret">▸</span></button>
+    <div class="fold-body hidden">
     <div class="row" style="margin-top: 14px;">
       <label>Invoice</label>
       <select id="rpTaxScheme"></select>
     </div>
     <button id="rpInvoiceBtn" class="secondary">Create invoice</button>
     <div class="hint">Deleting a repair stays on the desktop.</div>
+    </div>
+    </div>
   </div>
 
   <div class="card hidden" id="rpStatusCard">

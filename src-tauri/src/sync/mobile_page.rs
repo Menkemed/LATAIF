@@ -54,6 +54,16 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
   #cAttrs .row:first-child { margin-top: 14px; }
   .logout { display: block; text-align: center; color: #6B6B73; font-size: 12px; margin-top: 20px; text-decoration: none; }
   .logout:hover { color: #AA6E6E; }
+  /* Aufklappbarer Abschnitt: der Kopf ist der Schalter, das Zeichen zeigt die Richtung.
+     Ein Telefon hat wenig Platz — die Werkstattwege liegen deshalb zu, bis einer gebraucht wird. */
+  .fold + .fold { margin-top: 10px; }
+  .fold-head { display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    background: #08080A; border: 1px solid #1A1A1F; color: #A1A1AA; padding: 13px 14px;
+    font-size: 13px; font-weight: 600; letter-spacing: 0.04em; text-align: left; }
+  .fold.open > .fold-head { border-color: #C6A36D; color: #EAEAEA; }
+  .fold-head .caret { color: #C6A36D; font-size: 12px; transition: transform .15s ease; }
+  .fold.open > .fold-head .caret { transform: rotate(90deg); }
+  .fold-body { padding-top: 12px; }
   .header-row { display: flex; align-items: center; justify-content: space-between; margin-bottom: 16px; }
   .header-row .badge { background: rgba(126,170,110,0.08); color: #7EAA6E; padding: 4px 10px; border-radius: 999px; font-size: 11px; }
   /* Vorfilter mode picker */
@@ -428,6 +438,8 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     localStorage.removeItem(USER_KEY);
     init();
   };
+
+  foldsWire();
 
   // ── Vorfilter: Modus waehlen ──
   document.querySelectorAll('.mode-btn').forEach(btn => {
@@ -1926,6 +1938,26 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const sel = $('cCategory'); sel.innerHTML = '';
     for (const c of SCHEMA.categories) { const o = document.createElement('option'); o.value = c.id; o.textContent = c.name; sel.appendChild(o); }
   })();
+
+  /**
+   * Aufklappbare Abschnitte. Ein Telefon hat wenig Platz: die Werkstattwege (Arbeitszeile,
+   * Material, Gold, Rechnung) liegen zu, bis einer gebraucht wird. EIN Schalter fuer alle, per
+   * Delegierung — so gilt er auch fuer Abschnitte, die erst spaeter in die Seite kommen.
+   */
+  function foldsWire() {
+    document.addEventListener('click', (ev) => {
+      const kopf = ev.target && ev.target.closest ? ev.target.closest('.fold-head') : null;
+      if (!kopf) return;
+      const kasten = document.getElementById(kopf.getAttribute('data-fold'));
+      if (!kasten) return;
+      const koerper = kasten.querySelector('.fold-body');
+      if (!koerper) return;
+      const auf = koerper.classList.contains('hidden');
+      koerper.classList.toggle('hidden', !auf);
+      kasten.classList.toggle('open', auf);
+      kopf.setAttribute('aria-expanded', auf ? 'true' : 'false');
+    });
+  }
 
   function el(tag, attrs, text) {
     const e = document.createElement(tag);
