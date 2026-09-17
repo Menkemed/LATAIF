@@ -42,13 +42,19 @@
   const CN_INPUTS = {
     agreedPrice: 'cnAgreedPrice', minimumPrice: 'cnMinimumPrice', expiryDate: 'cnExpiryDate', notes: 'cnNotes',
   };
-  /** Die drei Verkaufsvorstellungen am Artikel — in der Reihenfolge des Vertrags. */
+  /**
+   * Die drei Verkaufsvorstellungen des ARTIKELS. Sie haben hier kein Feld — der Rechner hat beim
+   * Anlegen einer Kommission ebenfalls keines; geaendert werden sie auf der Artikelseite. „Copy
+   * details" uebernimmt sie vom gefundenen Stueck, und der Anlagerumpf traegt sie mit; dazwischen
+   * stehen sie im Zustand der Maske, nicht in einer Eingabe.
+   */
   const CN_PRICE_FIELDS = ['plannedSalePrice', 'minSalePrice', 'maxSalePrice'];
-  const CN_PRICE_INPUTS = ['cnPlannedSalePrice', 'cnMinSalePrice', 'cnMaxSalePrice'];
   const CN_ATTR_PREFIX = 'cna_';
   const CN = {
     mode: 'create', con: null, product: null, slots: [], consignor: null, buyer: null,
     draftKey: null, busy: false, scope: new Set(), werkKeys: {},
+    // Was „Copy details" an Verkaufsvorstellungen uebernommen hat — ohne Uebernahme leer.
+    preise: {},
   };
 
   function cnSay(id, text, good) {
@@ -463,7 +469,7 @@
     for (const k in CN_INPUTS) $(CN_INPUTS[k]).value = '';
     $('cnSku').value = ''; $('cnBrand').value = ''; $('cnName').value = '';
     $('cnTaxScheme').value = ''; $('cnItemNotes').value = '';
-    for (const id of CN_PRICE_INPUTS) $(id).value = '';
+    CN.preise = {};
     $('cnPayoutModel').value = 'percent';
     $('cnCommissionRate').value = ''; $('cnExcessSplitPct').value = '';
     for (const id of ['cnPayoutModel', 'cnCommissionRate', 'cnExcessSplitPct']) $(id).disabled = false;
@@ -493,9 +499,10 @@
       brand: $('cnBrand').value, name: $('cnName').value,
       condition: $('cnCondition').value, sku: $('cnSku').value,
       taxScheme: $('cnTaxScheme').value, itemNotes: $('cnItemNotes').value,
-      plannedSalePrice: $('cnPlannedSalePrice').value,
-      minSalePrice: $('cnMinSalePrice').value,
-      maxSalePrice: $('cnMaxSalePrice').value,
+      // Kein Feld, sondern das, was „Copy details" uebernommen hat (sonst gar nichts).
+      plannedSalePrice: CN.preise.plannedSalePrice,
+      minSalePrice: CN.preise.minSalePrice,
+      maxSalePrice: CN.preise.maxSalePrice,
       attributes: merkmale.attributes, scopeOfDelivery: Array.from(CN.scope),
       agreedPrice: $('cnAgreedPrice').value, minimumPrice: $('cnMinimumPrice').value,
       expiryDate: $('cnExpiryDate').value, notes: $('cnNotes').value,
@@ -635,11 +642,13 @@
     const passend = Array.from(steuer.options).find((o) => o.value && o.value === werte.taxScheme);
     steuer.value = passend ? passend.value : '';
     $('cnItemNotes').value = werte.itemNotes;
-    // Die Verkaufsvorstellungen: der Rechner setzt sie unbesehen, das Telefon auch. Ein Artikel
-    // ohne solche Vorstellung laesst das Feld leer, statt eine Null hineinzuschreiben.
-    for (let i = 0; i < CN_PRICE_FIELDS.length; i++) {
-      const wert = werte[CN_PRICE_FIELDS[i]];
-      $(CN_PRICE_INPUTS[i]).value = (wert === null || wert === undefined) ? '' : String(wert);
+    // Die Verkaufsvorstellungen: der Rechner uebernimmt sie unbesehen, das Telefon auch — nur
+    // stehen sie hier im Zustand der Maske statt in einem Feld. Ein Artikel ohne solche
+    // Vorstellung traegt nichts bei, statt eine Null zu hinterlassen.
+    CN.preise = {};
+    for (const k of CN_PRICE_FIELDS) {
+      const wert = werte[k];
+      if (wert !== null && wert !== undefined && wert !== '') CN.preise[k] = wert;
     }
     const cat = catById($('cnCategory').value);
     if (cat) applyDependencies(cat, CN_ATTR_PREFIX);

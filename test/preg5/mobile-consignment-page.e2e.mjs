@@ -330,14 +330,23 @@ try {
   const mehr = await c.ev(`return {
     steuer: document.getElementById('cnTaxScheme').value,
     notiz: document.getElementById('cnItemNotes').value,
-    geplant: document.getElementById('cnPlannedSalePrice').value,
-    min: document.getElementById('cnMinSalePrice').value,
-    max: document.getElementById('cnMaxSalePrice').value,
     fotos: document.querySelectorAll('#cnPhotoStrip .photo-thumb').length };`);
   ok(mehr.steuer === 'MARGIN' && mehr.notiz === 'Kratzer am Boden',
     `§1b …Steuerart und Artikel-Notiz kommen mit, wie am Rechner (${S(mehr)})`);
-  ok(Number(mehr.geplant) === 900 && Number(mehr.min) === 800 && Number(mehr.max) === 1000,
-    `§1b …und die drei Verkaufsvorstellungen stehen in ihren Feldern (${S({ geplant: mehr.geplant, min: mehr.min, max: mehr.max })})`);
+
+  // Die Verkaufsvorstellungen des ARTIKELS haben hier KEIN Feld — der Rechner hat beim Anlegen
+  // einer Kommission ebenfalls keines. Die Maske zeigt genau zwei Preise: die Abmachung mit dem
+  // Einlieferer. Uebernommen wird trotzdem (und gespeichert — s. §1c).
+  const preisfelder = await c.ev(`return {
+    verboten: ['cnPlannedSalePrice', 'cnMinSalePrice', 'cnMaxSalePrice']
+      .filter((id) => !!document.getElementById(id)),
+    sichtbar: Array.from(document.querySelectorAll('#formConsign .row label'))
+      .filter((l) => l.offsetParent !== null && /\\(BHD\\)/.test(l.textContent || ''))
+      .map((l) => (l.textContent || '').replace(/\\s+/g, ' ').trim()) };`);
+  ok(preisfelder.verboten.length === 0,
+    `§1b es gibt kein Eingabefeld fuer geplanten/niedrigsten/hoechsten Verkaufspreis (${S(preisfelder.verboten)})`);
+  ok(S(preisfelder.sichtbar) === S(['Agreed price (BHD) *', 'Minimum price (BHD)']),
+    `§1b …sichtbar sind genau die zwei Preise der Abmachung mit dem Einlieferer (${S(preisfelder.sichtbar)})`);
   ok(mehr.fotos === 1,
     `§1b …und die Bilder des Treffers bleiben AUSSEN, weil schon ein eigenes Foto haengt (${mehr.fotos})`);
 
@@ -376,6 +385,10 @@ try {
     `§1 „Create anyway" ist ein eigener Auftrag mit eigener Kennung (${zweite.length}/${bestaetigte.length})`);
   ok(await c.ev("return /Saved as CON-2026-0007/.test(document.getElementById('cnSuccess').textContent);"),
     '§1 der Mensch sieht die Nummer des Primary');
+  // §1c — und die uebernommenen Verkaufsvorstellungen reisen mit, obwohl sie kein Feld haben.
+  const angelegt = bestaetigte[0].body.payload.product;
+  ok(angelegt.plannedSalePrice === 900 && angelegt.minSalePrice === 800 && angelegt.maxSalePrice === 1000,
+    `§1c die uebernommenen Verkaufsvorstellungen werden mitgespeichert, ohne Eingabefeld (${S(angelegt)})`);
   ok(duplikatGefragt === 2, '§1 …und gefragt wurde bei JEDEM unbestaetigten Versuch, nie danach');
 
   // ── §2 Bearbeiten: nur Geaendertes, Fassung, gesperrtes Modell ──────────────────────────────
