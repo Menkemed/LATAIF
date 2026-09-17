@@ -1,6 +1,6 @@
 # PRE-G5 — Kommission vom Telefon (Mobile Consignment)
 
-Stand 16.09.2026 · Basis `1d97cf9` · Version 0.8.54 · Registry **175 → 175** · kein Push/Tag/Release.
+Stand 16.09.2026 · Basis `1d97cf9` · Version 0.8.54 · Registry **175 → 176** · kein Push/Tag/Release.
 
 ## 0. Scope-Audit am echten Code
 
@@ -118,9 +118,16 @@ Die Merkmale kommen bereits gefiltert vom Primary (`copiedAttributes`): die **Re
 neuen Stück). **Bilder nur in ein leeres Ziel**: hängt schon ein eigenes Foto an der Maske,
 bleiben die Bilder des Treffers außen; sonst holt das Telefon sie über die angemeldete
 Medienroute und behandelt sie wie eigene Aufnahmen — Wort für Wort die Regel des Rechners.
-**Die drei Verkaufspreise bleiben außen vor**, und zwar nicht aus Bequemlichkeit: der Vertrag
-einer Kommission trägt sie nicht, ein Feld dafür wäre eine Sackgasse. Der Einstand einer
-Kommission ist ohnehin der Erwartungswert des Hauses.
+**Die drei Verkaufsvorstellungen kommen mit** — der echte Weg des Rechners nachgeprüft:
+`onCopyDetails` setzt `plannedSalePrice/minSalePrice/maxSalePrice` ins Formular, `doCreate` reicht
+das ganze Formular als `product` an den Vorgang, `planProductCreate` gibt es unverändert weiter,
+und `createProductWithMedia` schreibt es in die Artikelzeile (`planned_sale_price`,
+`min_sale_price`, `max_sale_price`, daraus `expected_margin`). Der Fernvertrag trug sie bis
+PRE-G5 nicht — derselbe Klick verlor sie also auf dem zweiten Rechner und am Telefon. Jetzt stehen
+sie in `CONSIGNMENT_PRODUCT_FIELDS`, `parseConsignmentCreate` prüft sie mit demselben Zahlenriegel
+wie jeden Betrag, und die Maske am Telefon hat drei Felder dafür. Eine zweite Preisregel entsteht
+nicht: der vereinbarte Preis, der Mindestpreis und der Einstand der Kommission bleiben, was sie
+waren — der Einstand ist weiterhin der Erwartungswert des Hauses.
 
 Die Auskunft selbst ist **fail-closed**: sie nimmt genau `categoryId, brand, name, sku, attributes`,
 jeder andere Schlüssel wird mit `UNKNOWN_FIELD` abgewiesen statt still übergangen.
@@ -177,8 +184,8 @@ Wiederverwendet: `consignments.list`, `consignments.get`, `consignments.create`,
 
 | Lauf | Ergebnis |
 |---|---|
-| `node test/preg5/mobile-consignment.test.ts` | **94/0** (neu §8 Copy-Details-Parität gegen den Quelltext des Rechners) (§1 Anlegen, §2 Auszahlungsmodelle, §3 Ändern, §4 Galerie, §5 Handlungen, §6 AI, §7 Verdrahtung/Vokabeln) |
-| `node test/preg5/mobile-consignment-page.e2e.mjs` | **42/0** — die drei echten Dateien in einem echten Edge gegen einen Attrappen-Primary (inkl. „Copy details") |
+| `node test/preg5/mobile-consignment.test.ts` | **98/0** (§8 Copy-Details-Parität gegen den Quelltext des Rechners, inkl. der drei Verkaufsvorstellungen) (§1 Anlegen, §2 Auszahlungsmodelle, §3 Ändern, §4 Galerie, §5 Handlungen, §6 AI, §7 Verdrahtung/Vokabeln) |
+| `node test/preg5/mobile-consignment-page.e2e.mjs` | **43/0** — die drei echten Dateien in einem echten Edge gegen einen Attrappen-Primary (inkl. „Copy details") |
 | `node test/e2e/pre-g5-mobile-consignment.e2e.mjs` | **26/0**, `PRE_G5_MOBILE_CONSIGNMENT_E2E_PROVED` — echter Primary + echte `/mobile`-Seite in Edge + echtes PC2, isolierte Instanz (Port 3011, eigener Datenordner) |
 | Brücken-Gates nach der neuen Auskunft (c4-authorization, c4-read-revocation, client-read-mode, write-foundation, customer/product/invoice-remote-write, c6, r5c/r5d/r5e/r5f, r6b, r6c–r6f final gates, masterdata, r7b, r4c-Matrix) | alle grün auf 176 |
 | `node test/preg5/mobile-repair.test.ts` · `-ui` · `-page` | **125/0 · 35/0 · 21/0** (Nachbarn: der Auftraggeber reicht jetzt die Begründung des Primary durch) |

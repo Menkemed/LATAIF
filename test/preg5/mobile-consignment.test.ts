@@ -62,6 +62,7 @@ interface Api {
   copyDetails(match: Record<string, unknown>, opts?: { hasPhotos?: boolean }): Record<string, never> & {
     categoryId: string; brand: string; name: string; condition: string; taxScheme: string;
     itemNotes: string; attributes: Record<string, unknown>; scopeOfDelivery: string[]; mediaKeys: string[];
+    plannedSalePrice: number | null; minSalePrice: number | null; maxSalePrice: number | null;
   };
 }
 const M = sandbox.MobileConsignment as unknown as Api;
@@ -354,12 +355,35 @@ group('§7 Verdrahtung und Vokabeln');
     && J(leer.scopeOfDelivery) === J(['Box']),
     `§8 …mit den Werten des gefundenen Artikels (${J(leer)})`);
 
-  // 2) Preise traegt der Vertrag der Kommission NICHT — es gibt am Telefon kein Feld dafuer,
-  //    also wird auch nichts kopiert (ein Feld ohne Weg waere eine Sackgasse).
+  // 2) Die drei Verkaufsvorstellungen. Am Rechner kopiert sie derselbe Klick, und der Anlageweg
+  //    SPEICHERT sie am erzeugten Artikel — der echte Pfad steht hier als Nagel im Quelltext.
+  //    Deshalb traegt der Fernvertrag sie seit PRE-G5, und deshalb hat das Telefon drei Felder.
+  const anlage = src('src/stores/productStore.ts');
+  ok(/data\.plannedSalePrice \|\| null,\s*\n\s*data\.minSalePrice \|\| null, data\.maxSalePrice \|\| null,/.test(anlage),
+    '§8 der Anlageweg schreibt die drei Preise wirklich in die Artikelzeile (planned/min/max)');
   for (const preis of ['plannedSalePrice', 'minSalePrice', 'maxSalePrice']) {
-    ok(!vertrag.includes(preis) && !(preis in leer),
-      `§8 ${preis} steht nicht im Kommissionsvertrag und wird deshalb nicht uebernommen`);
+    ok(rechnerFelder.includes(preis) && vertrag.includes(preis) && (preis in leer),
+      `§8 ${preis}: der Rechner uebernimmt ihn, der Kommissionsvertrag traegt ihn, das Telefon kopiert ihn`);
   }
+  ok(leer.plannedSalePrice === 900 && leer.minSalePrice === 800 && leer.maxSalePrice === 1000,
+    `§8 …mit den Werten des gefundenen Artikels (${J([leer.plannedSalePrice, leer.minSalePrice, leer.maxSalePrice])})`);
+  // Kein Feld ohne Weg: was die Maske traegt, reist auch im Anlagerumpf mit.
+  const mitPreisen = M.createBody({
+    consignorId: 'cust-1', categoryId: 'cat-watch', brand: 'Rolex', name: 'Datejust 41',
+    agreedPrice: '500', payoutModel: 'percent', commissionRate: '15',
+    plannedSalePrice: '900', minSalePrice: '800', maxSalePrice: '1000',
+  }, [], {});
+  const pProd = (mitPreisen.body?.product ?? {}) as Record<string, unknown>;
+  ok(mitPreisen.ok === true && pProd.plannedSalePrice === 900 && pProd.minSalePrice === 800
+    && pProd.maxSalePrice === 1000,
+    `§8 …und sie reisen als Zahlen im Anlagerumpf mit (${J(pProd)})`);
+  const ohnePreise = M.createBody({
+    consignorId: 'cust-1', categoryId: 'cat-watch', brand: 'Rolex', name: 'Datejust 41',
+    agreedPrice: '500', payoutModel: 'percent', commissionRate: '15',
+    plannedSalePrice: '', minSalePrice: '', maxSalePrice: '',
+  }, [], {});
+  ok(!('plannedSalePrice' in ((ohnePreise.body?.product ?? {}) as Record<string, unknown>)),
+    '§8 …ein leeres Feld reist gar nicht mit, statt als Null zu gelten');
 
   // 3) Referenz ja (der Rechner macht es auch), Seriennummer nie, SKU nie.
   ok(leer.attributes.reference_number === '126334', '§8 die Referenznummer wird uebernommen — wie am Rechner');

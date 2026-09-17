@@ -304,7 +304,7 @@ try {
       return { status: 200, body: { ok: true, value: { items: [{
         id: 'prod-alt', brand: 'Rolex', name: 'Datejust 41', sku: 'RLX-1', categoryId: 'cat-watch',
         condition: 'Pre-Owned', taxScheme: 'MARGIN', notes: 'Kratzer am Boden', plannedSalePrice: 900,
-        minSalePrice: null, maxSalePrice: null, scopeOfDelivery: ['Box'], mediaKeys: ['k-1', 'k-2'],
+        minSalePrice: 800, maxSalePrice: 1000, scopeOfDelivery: ['Box'], mediaKeys: ['k-1', 'k-2'],
         // GEFILTERT vom Primary: die Seriennummer ist nicht dabei.
         attributes: { dial: 'Silver', material: 'Steel' }, matchClass: 'POSSIBLE', reasons: ['brand+model'],
       }] } } };
@@ -330,9 +330,14 @@ try {
   const mehr = await c.ev(`return {
     steuer: document.getElementById('cnTaxScheme').value,
     notiz: document.getElementById('cnItemNotes').value,
+    geplant: document.getElementById('cnPlannedSalePrice').value,
+    min: document.getElementById('cnMinSalePrice').value,
+    max: document.getElementById('cnMaxSalePrice').value,
     fotos: document.querySelectorAll('#cnPhotoStrip .photo-thumb').length };`);
   ok(mehr.steuer === 'MARGIN' && mehr.notiz === 'Kratzer am Boden',
     `§1b …Steuerart und Artikel-Notiz kommen mit, wie am Rechner (${S(mehr)})`);
+  ok(Number(mehr.geplant) === 900 && Number(mehr.min) === 800 && Number(mehr.max) === 1000,
+    `§1b …und die drei Verkaufsvorstellungen stehen in ihren Feldern (${S({ geplant: mehr.geplant, min: mehr.min, max: mehr.max })})`);
   ok(mehr.fotos === 1,
     `§1b …und die Bilder des Treffers bleiben AUSSEN, weil schon ein eigenes Foto haengt (${mehr.fotos})`);
 

@@ -42,6 +42,11 @@ export const PRODUCT_CREATE_FIELDS = [
 export const CONSIGNMENT_PRODUCT_FIELDS = [
   'categoryId', 'brand', 'name', 'condition', 'notes', 'attributes',
   'taxScheme', 'storageLocation', 'scopeOfDelivery',
+  // PRE-G5 — die drei Verkaufsvorstellungen: die Maske am Primary füllt sie über „Copy details",
+  // und der Anlageweg SPEICHERT sie am Artikel (`planned_sale_price`, `min_sale_price`,
+  // `max_sale_price`, daraus die erwartete Marge). Fehlten sie hier, verlöre derselbe Klick auf
+  // dem zweiten Rechner und am Telefon genau das, was er am Primary behält.
+  'plannedSalePrice', 'minSalePrice', 'maxSalePrice',
 ] as const;
 
 /**

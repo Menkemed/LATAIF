@@ -33,6 +33,12 @@
   // einen anderen Platz. Vorher trug ein einziges Feld beides — dann stand die Vereinbarung auch
   // am Artikel.
   const PRODUCT_TEXT_FIELDS = ['categoryId', 'brand', 'name', 'condition', 'sku', 'storageLocation', 'taxScheme'];
+  /**
+   * Die Verkaufsvorstellungen am Artikel. Sie sind KEINE Erfindung des Telefons: die Maske am
+   * Rechner fuellt sie ueber „Copy details", und der Anlageweg des Hauses speichert sie am
+   * angelegten Artikel. Der Fernvertrag traegt sie seit PRE-G5 — hier reisen sie nur mit.
+   */
+  const PRODUCT_MONEY_FIELDS = ['plannedSalePrice', 'minSalePrice', 'maxSalePrice'];
   /** Was die Maske am Kopf der Kommission aendern darf (`consignments.update`). */
   const EDIT_FIELDS = ['agreedPrice', 'minimumPrice', 'expiryDate', 'notes'];
   const MONEY_FIELDS = ['agreedPrice', 'minimumPrice'];
@@ -83,6 +89,10 @@
     const product = {};
     for (const k of PRODUCT_TEXT_FIELDS) {
       const v = textOrNull(form[k]);
+      if (v !== null) product[k] = v;
+    }
+    for (const k of PRODUCT_MONEY_FIELDS) {
+      const v = moneyOrNull(form[k]);
       if (v !== null) product[k] = v;
     }
     const artikelNotiz = textOrNull(form.itemNotes);
@@ -244,6 +254,10 @@
       condition: textOrNull(m.condition) || '',
       taxScheme: textOrNull(m.taxScheme) || '',
       itemNotes: textOrNull(m.notes) || '',
+      // Die Verkaufsvorstellungen uebernimmt der Rechner unbesehen — also auch das Telefon.
+      plannedSalePrice: moneyOrNull(m.plannedSalePrice),
+      minSalePrice: moneyOrNull(m.minSalePrice),
+      maxSalePrice: moneyOrNull(m.maxSalePrice),
       attributes: (m.attributes && typeof m.attributes === 'object') ? m.attributes : {},
       scopeOfDelivery: Array.isArray(m.scopeOfDelivery) ? m.scopeOfDelivery.slice() : [],
       // Bilder NUR in ein leeres Ziel — wortwoertlich die Regel des Rechners
@@ -279,6 +293,7 @@
     PAYOUT_METHODS: PAYOUT_METHODS,
     TAX_SCHEMES: TAX_SCHEMES,
     PRODUCT_TEXT_FIELDS: PRODUCT_TEXT_FIELDS,
+    PRODUCT_MONEY_FIELDS: PRODUCT_MONEY_FIELDS,
     EDIT_FIELDS: EDIT_FIELDS,
     AI_FIELDS: AI_FIELDS,
     payoutPart: payoutPart,

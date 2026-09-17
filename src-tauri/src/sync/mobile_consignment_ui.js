@@ -42,6 +42,9 @@
   const CN_INPUTS = {
     agreedPrice: 'cnAgreedPrice', minimumPrice: 'cnMinimumPrice', expiryDate: 'cnExpiryDate', notes: 'cnNotes',
   };
+  /** Die drei Verkaufsvorstellungen am Artikel — in der Reihenfolge des Vertrags. */
+  const CN_PRICE_FIELDS = ['plannedSalePrice', 'minSalePrice', 'maxSalePrice'];
+  const CN_PRICE_INPUTS = ['cnPlannedSalePrice', 'cnMinSalePrice', 'cnMaxSalePrice'];
   const CN_ATTR_PREFIX = 'cna_';
   const CN = {
     mode: 'create', con: null, product: null, slots: [], consignor: null, buyer: null,
@@ -460,6 +463,7 @@
     for (const k in CN_INPUTS) $(CN_INPUTS[k]).value = '';
     $('cnSku').value = ''; $('cnBrand').value = ''; $('cnName').value = '';
     $('cnTaxScheme').value = ''; $('cnItemNotes').value = '';
+    for (const id of CN_PRICE_INPUTS) $(id).value = '';
     $('cnPayoutModel').value = 'percent';
     $('cnCommissionRate').value = ''; $('cnExcessSplitPct').value = '';
     for (const id of ['cnPayoutModel', 'cnCommissionRate', 'cnExcessSplitPct']) $(id).disabled = false;
@@ -489,6 +493,9 @@
       brand: $('cnBrand').value, name: $('cnName').value,
       condition: $('cnCondition').value, sku: $('cnSku').value,
       taxScheme: $('cnTaxScheme').value, itemNotes: $('cnItemNotes').value,
+      plannedSalePrice: $('cnPlannedSalePrice').value,
+      minSalePrice: $('cnMinSalePrice').value,
+      maxSalePrice: $('cnMaxSalePrice').value,
       attributes: merkmale.attributes, scopeOfDelivery: Array.from(CN.scope),
       agreedPrice: $('cnAgreedPrice').value, minimumPrice: $('cnMinimumPrice').value,
       expiryDate: $('cnExpiryDate').value, notes: $('cnNotes').value,
@@ -628,6 +635,12 @@
     const passend = Array.from(steuer.options).find((o) => o.value && o.value === werte.taxScheme);
     steuer.value = passend ? passend.value : '';
     $('cnItemNotes').value = werte.itemNotes;
+    // Die Verkaufsvorstellungen: der Rechner setzt sie unbesehen, das Telefon auch. Ein Artikel
+    // ohne solche Vorstellung laesst das Feld leer, statt eine Null hineinzuschreiben.
+    for (let i = 0; i < CN_PRICE_FIELDS.length; i++) {
+      const wert = werte[CN_PRICE_FIELDS[i]];
+      $(CN_PRICE_INPUTS[i]).value = (wert === null || wert === undefined) ? '' : String(wert);
+    }
     const cat = catById($('cnCategory').value);
     if (cat) applyDependencies(cat, CN_ATTR_PREFIX);
     // Lieferumfang: dieselbe Auswahl, die der gefundene Artikel hat.

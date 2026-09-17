@@ -467,10 +467,47 @@ const CONSIGN_BODY = {
   // R5B — der Artikel traegt, was die Kommissionsmaske fuer ihn erfasst — und nichts, was die
   // Kommission fest setzt (Einstand, Menge, Bestandsstatus, Herkunft).
   ok(Object.keys(parsed.product).sort().join(',')
-    === 'attributes,brand,categoryId,condition,name,notes,scopeOfDelivery,sku,storageLocation,taxScheme',
+    === 'attributes,brand,categoryId,condition,maxSalePrice,minSalePrice,name,notes,plannedSalePrice,'
+      + 'scopeOfDelivery,sku,storageLocation,taxScheme',
     `AUTHORITY …und der Artikel traegt genau die Felder der Maske (${Object.keys(parsed.product).sort().join(',')})`);
   const getippt = cmd.parseConsignmentCreate({ ...CONSIGN_BODY, product: { ...CONSIGN_BODY.product, sku: '  R5B-1  ' } });
   ok(getippt.product.sku === 'R5B-1', `AUTHORITY eine eingetippte SKU reist getrimmt mit (${getippt.product.sku})`);
+
+  // PRE-G5 — die drei Verkaufsvorstellungen: die Maske am Primary fuellt sie ueber „Copy details",
+  // und der Anlageweg speichert sie am Artikel. Der Rumpf traegt sie deshalb AUCH vom zweiten
+  // Rechner und vom Telefon — sonst verlöre derselbe Klick dort genau das, was er hier behaelt.
+  const mitPreis = cmd.parseConsignmentCreate({
+    ...CONSIGN_BODY,
+    product: { ...CONSIGN_BODY.product, plannedSalePrice: 1400, minSalePrice: 1200, maxSalePrice: 1600 },
+  });
+  ok(mitPreis.product.plannedSalePrice === 1400 && mitPreis.product.minSalePrice === 1200
+    && mitPreis.product.maxSalePrice === 1600,
+  `AUTHORITY die drei Verkaufsvorstellungen reisen mit (${JSON.stringify(mitPreis.product)})`);
+  for (const kaputt of [{ plannedSalePrice: 'viel' }, { minSalePrice: -1 }, { maxSalePrice: {} }]) {
+    let threw = '';
+    try { cmd.parseConsignmentCreate({ ...CONSIGN_BODY, product: { ...CONSIGN_BODY.product, ...kaputt } }); } catch (e) {
+      threw = e instanceof Error ? e.message : String(e);
+    }
+    ok(threw !== '', `AUTHORITY …aber nur als echte Zahl ab null (${JSON.stringify(kaputt)} → ${threw || 'DURCHGELASSEN'})`);
+  }
+}
+
+// ── 7c) Kommission: die Verkaufsvorstellungen landen WIRKLICH an der Artikelzeile ──
+{
+  resetDurabilityStateForTest();
+  const db = freshDb();
+  const d = deps(db);
+  const out = await cmd.runConsignmentCreate(d, identity('7c', 'consignments.create'), {
+    ...CONSIGN_BODY,
+    product: { ...CONSIGN_BODY.product, plannedSalePrice: 1400, minSalePrice: 1200, maxSalePrice: 1600 },
+  });
+  ok(out.kind === 'ok', `CONSIGN-PRICE die Kommission entsteht (${JSON.stringify(out)})`);
+  const pid = val<{ productId: string }>(out).productId;
+  const zeile = db.exec(
+    'SELECT planned_sale_price, min_sale_price, max_sale_price FROM products WHERE id = ?', [pid],
+  )[0].values[0];
+  ok(Number(zeile[0]) === 1400 && Number(zeile[1]) === 1200 && Number(zeile[2]) === 1600,
+    `CONSIGN-PRICE …und die drei Preise stehen an der Artikelzeile (${zeile.join('/')})`);
 }
 
 // ── 8) Kommission: ändern — ein Save, zwei Verträge, eine Transaktion ─────

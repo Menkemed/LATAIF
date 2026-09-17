@@ -135,6 +135,12 @@ function money(v: unknown, name: string, opts: { min?: number } = {}): number {
   return v;
 }
 
+/** Ein Betrag, den es geben DARF: fehlt er, fehlt er — steht er da, gilt für ihn `money`. */
+function optMoney(v: unknown, name: string): number | undefined {
+  if (v === undefined || v === null) return undefined;
+  return money(v, name);
+}
+
 function countOf(v: unknown, name: string): number {
   if (typeof v !== 'number' || !Number.isInteger(v) || v <= 0) {
     throw new CommercialPayloadError(`${name} must be a whole number greater than zero`);
@@ -389,6 +395,10 @@ export interface ConsignmentCreateRequest {
     taxScheme?: string;
     storageLocation?: string;
     scopeOfDelivery?: string[];
+    /** Die Verkaufsvorstellungen der Maske — dieselben Felder, die der Anlageweg ohnehin speichert. */
+    plannedSalePrice?: number;
+    minSalePrice?: number;
+    maxSalePrice?: number;
   };
   agreedPrice: number;
   minimumPrice?: number;
@@ -456,6 +466,11 @@ export function parseConsignmentCreate(raw: unknown): ConsignmentCreateRequest {
       taxScheme,
       storageLocation: optString(p.storageLocation, 'product.storageLocation'),
       scopeOfDelivery: Array.isArray(p.scopeOfDelivery) ? (p.scopeOfDelivery as string[]) : undefined,
+      // Keine zweite Preisregel: derselbe Zahlenriegel wie überall im Rumpf (eine Zahl, nicht
+      // negativ). Was daraus fachlich folgt — die erwartete Marge —, rechnet der Anlageweg.
+      plannedSalePrice: optMoney(p.plannedSalePrice, 'product.plannedSalePrice'),
+      minSalePrice: optMoney(p.minSalePrice, 'product.minSalePrice'),
+      maxSalePrice: optMoney(p.maxSalePrice, 'product.maxSalePrice'),
     },
     // Dieselbe Pflicht wie am Bildschirm: ohne vereinbarten Preis gibt es keine Kommission.
     agreedPrice: money(raw.agreedPrice, 'agreedPrice', { min: 0.001 }),
