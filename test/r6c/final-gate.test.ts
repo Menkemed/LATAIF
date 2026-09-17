@@ -191,10 +191,10 @@ const R7A_MUT = ['production.complete'];
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 108 && rJetzt.length === 175 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6C_MUT, ...R6C_READ, ...R6D_MUT, ...R6D_READ, ...R6E_MUT, ...R6F_MUT, ...R7A_MUT]),
-    `REGISTRY Rust 108 → 121 (R6C) → 152 (R6D) → 160 (R6E) → 174 (R6F) → 175 (R7A): GENAU diese dreizehn, einunddreißig, acht und vierzehn + eins aus R7A (production.complete), in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
+  ok(rVor.length === 108 && rJetzt.length === 176 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6C_MUT, ...R6C_READ, ...R6D_MUT, ...R6D_READ, ...R6E_MUT, ...R6F_MUT, ...R7A_MUT, 'products.duplicates.get']),
+    `REGISTRY Rust 108 → 121 (R6C) → 152 (R6D) → 160 (R6E) → 174 (R6F) → 175 (R7A) → 176 (PRE-G5): GENAU diese dreizehn, einunddreißig, acht und vierzehn + eins aus R7A (production.complete), in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 175 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 175 Namen (R7A), die Rust durchlässt (${known.length})`);
+  ok(known.length === 176 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 176 Namen (PRE-G5), die Rust durchlässt (${known.length})`);
   for (const op of [...R6C_MUT, ...R6C_READ]) {
     const isMut = R6C_MUT.includes(op);
     ok(known.includes(op) && rJetzt.includes(op) && (isMut ? registry.ALLOWED_MUTATIONS.includes(op) : readOps.STORE_READ_OPS.includes(op))

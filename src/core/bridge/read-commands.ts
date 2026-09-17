@@ -23,6 +23,10 @@ import { getStockAggregates } from '@/core/lots/lot-queries';
 // zweites Mal gefragt. Zwei Fragen an dieselbe Funktion, nie eine Nachbildung.
 import { payoutModelLock } from '@/core/consignment/payout-edit';
 import { rowToConsignment } from '@/stores/consignmentStore';
+// PRE-G5 — die Duplikatserkennung und das Kopieren sind Regeln des Hauses; sie werden hier
+// GERUFEN, nie nachgebaut.
+import { useProductStore } from '@/stores/productStore';
+import { copiedAttributes } from '@/core/products/duplicate-dismiss';
 // CENTRAL-C3H — welcher Schritt als naechstes erlaubt ist, ist eine Aussage der DOMAENE. Sie
 // wird hier gelesen, damit der Client sie anzeigen kann — und beim Schreiben ein zweites Mal
 // gefragt. Zwei Fragen an dieselbe Funktion, nie eine Nachbildung.
@@ -31,6 +35,10 @@ import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
 
 export const OP_PRODUCTS_LIST = 'products.list';
 export const OP_PRODUCTS_GET = 'products.get';
+// PRE-G5 — moegliche Duplikate zu einer Eingabe: die Frage UND die Antwort auf
+// Copy details kommen aus der Autoritaet. Ohne sie muesste ein zweiter Bildschirm die
+// Erkennung und das Kopieren nachbauen — zwei Meinungen ueber dasselbe.
+export const OP_PRODUCTS_DUPLICATES_GET = 'products.duplicates.get';
 export const OP_CUSTOMERS_LIST = 'customers.list';
 export const OP_CUSTOMERS_GET = 'customers.get';
 export const OP_INVOICES_LIST = 'invoices.list';
@@ -60,7 +68,7 @@ export const OP_TRANSFERS_GET = 'transfers.get';
 
 /** Jede Leseoperation, die C2 freischaltet — dieselbe Liste kennt auch Rust. */
 export const C2_READ_OPS = [
-  OP_PRODUCTS_LIST, OP_PRODUCTS_GET,
+  OP_PRODUCTS_LIST, OP_PRODUCTS_GET, OP_PRODUCTS_DUPLICATES_GET,
   OP_CUSTOMERS_LIST, OP_CUSTOMERS_GET,
   OP_INVOICES_LIST, OP_INVOICES_GET,
   OP_SUPPLIERS_LIST, OP_CATEGORIES_LIST,
@@ -260,6 +268,67 @@ registerCommand(OP_PRODUCTS_GET, {
       // …und die Kennungen daneben, in DERSELBEN Reihenfolge: ohne sie kann ein zweiter Rechner
       // keine Galerie planen, denn „behalte dieses Bild" braucht eine Identität, keinen Inhalt.
       mediaIds: gal.map((g) => g.mediaId),
+    };
+  },
+});
+
+/**
+ * PRE-G5 — moegliche Duplikate zu einer EINGABE, und was „Copy details" davon uebernimmt.
+ *
+ * Warum das eine Auskunft des Primary ist und keine Rechnung des Clients: die Erkennung ist eine
+ * Formel des Hauses (`findPossibleDuplicates` — SKU, Seriennummer, Marke/Modell, Merkmale, mit
+ * Schwellen und Match-Klassen), und WAS kopiert wird, ist ebenfalls eine Regel des Hauses
+ * (`copiedAttributes`: die Seriennummer bleibt zurueck, weil gerade ein ZWEITES Stueck erfasst
+ * wird). Beides zweimal zu halten hiesse, dass sie auseinanderlaufen.
+ *
+ * Es entsteht nichts Neues: dieselbe Erkennung, die `consignments.create` vor dem Anlegen fragt,
+ * und dieselbe Uebernahme, die der Duplikatsdialog am Rechner benutzt.
+ */
+registerCommand(OP_PRODUCTS_DUPLICATES_GET, {
+  kind: 'read',
+  handler: (p) => {
+    const branch = actorBranch(p);
+    // Die Eingabe steht im UMSCHLAG (actor + input) — genau wie bei jeder anderen Auskunft.
+    const eingabe = input(p);
+    const attrs = eingabe.attributes;
+    const kandidat = {
+      categoryId: str(eingabe.categoryId),
+      brand: str(eingabe.brand),
+      name: str(eingabe.name),
+      sku: str(eingabe.sku),
+      attributes: attrs !== null && typeof attrs === 'object' && !Array.isArray(attrs)
+        ? attrs as Record<string, unknown> : {},
+    };
+    const ps = useProductStore.getState();
+    ps.loadProducts();
+    // Nur die eigene Filiale — und zwar gegen die DATENBANK, nicht gegen ein Feld des Modells:
+    // `Product` traegt keine Filiale, ein Vergleich mit `p.branchId` waere immer leer gewesen.
+    const eigene = new Set(rows('SELECT id FROM products WHERE branch_id = ?', [branch]).map((r) => str(r.id)));
+    const treffer = useProductStore.getState().findPossibleDuplicates(kandidat as never)
+      .filter((h) => eigene.has(String((h.product as { id?: string }).id ?? '')))
+      .slice(0, 5);
+    return {
+      items: treffer.map((h) => {
+        const pr = h.product as unknown as Record<string, unknown>;
+        return {
+          id: str(pr.id),
+          brand: str(pr.brand),
+          name: str(pr.name),
+          sku: str(pr.sku),
+          categoryId: str(pr.categoryId),
+          condition: str(pr.condition),
+          taxScheme: str(pr.taxScheme),
+          notes: str(pr.notes),
+          plannedSalePrice: pr.plannedSalePrice === null || pr.plannedSalePrice === undefined ? null : num(pr.plannedSalePrice),
+          minSalePrice: pr.minSalePrice === null || pr.minSalePrice === undefined ? null : num(pr.minSalePrice),
+          maxSalePrice: pr.maxSalePrice === null || pr.maxSalePrice === undefined ? null : num(pr.maxSalePrice),
+          scopeOfDelivery: Array.isArray(pr.scopeOfDelivery) ? pr.scopeOfDelivery.map((x) => String(x)) : [],
+          // Die Merkmale GENAU so, wie „Copy details" sie uebernimmt — ohne die Seriennummer.
+          attributes: copiedAttributes(h.product as never),
+          matchClass: str(h.matchClass),
+          reasons: Array.isArray(h.reasons) ? h.reasons.map((x) => String(x)) : [],
+        };
+      }),
     };
   },
 });

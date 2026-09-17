@@ -520,6 +520,7 @@
       cnSay('cnDuplicateText', (r.message || 'This looks like an item we already have.')
         + ' Check the shelf first; press "Create anyway" only if it is really a second item.');
       cnSay('cnError', 'Not saved — please answer the duplicate question below.');
+      await cnZeigeTreffer(gesammelt.form);
       return;
     }
     cnSay('cnError', cnMessageFor(r, 'The consignment was not saved'));
@@ -561,6 +562,74 @@
       await cnRenderOpen();
     }
   };
+  /**
+   * Die Treffer des Hauses — und „Copy details" daraus.
+   *
+   * Beides kommt aus der Autoritaet: die Erkennung ist `findPossibleDuplicates`, die uebernommenen
+   * Merkmale sind `copiedAttributes` (beide am Primary, gelesen ueber `products.duplicates.get`).
+   * Das Telefon setzt nur, was die Maske zeigt — die SKU bleibt die des neuen Stuecks.
+   */
+  async function cnZeigeTreffer(form) {
+    const box = $('cnDuplicateList');
+    box.innerHTML = '';
+    const r = await cnClient.read('products.duplicates.get', MobileConsignment.duplicateQuery(form));
+    const items = (r.ok && r.value && r.value.items) || [];
+    if (!items.length) return;
+    items.forEach((m) => {
+      const zeile = el('div', { class: 'row' });
+      zeile.appendChild(el('div', { class: 'hint' },
+        [m.brand, m.name, m.sku ? '(' + m.sku + ')' : '', m.matchClass ? '· ' + m.matchClass : ''].filter(Boolean).join(' ')));
+      const b = el('button', { type: 'button', class: 'secondary', 'data-copy-details': m.id }, 'Copy details');
+      b.onclick = () => { cnUebernehmen(m); };
+      zeile.appendChild(b);
+      box.appendChild(zeile);
+    });
+  }
+
+  function cnUebernehmen(match) {
+    const werte = MobileConsignment.copyDetails(match);
+    if (werte.categoryId && werte.categoryId !== $('cnCategory').value) {
+      $('cnCategory').value = werte.categoryId;
+      cnRenderFields(werte.categoryId);
+    }
+    $('cnBrand').value = werte.brand;
+    $('cnName').value = werte.name;
+    const cond = $('cnCondition');
+    const treffer = Array.from(cond.options).find((o) => o.value && o.value.toLowerCase() === werte.condition.toLowerCase());
+    cond.value = treffer ? treffer.value : '';
+    // Die Merkmale in die Felder DIESER Kategorie; was es hier nicht gibt, faellt weg.
+    for (const key in werte.attributes) {
+      const e = $(CN_ATTR_PREFIX + key);
+      if (!e) continue;
+      const wert = werte.attributes[key];
+      if (e.tagName === 'SELECT') {
+        const o = Array.from(e.options).find((x) => x.value && String(x.value).toLowerCase() === String(wert).toLowerCase());
+        if (o) e.value = o.value;
+      } else if (e.tagName === 'INPUT') {
+        e.value = Array.isArray(wert) ? wert.join(', ') : String(wert);
+      } else {
+        // Chips (Mehrfachauswahl / Ja-Nein): die genannten anschalten.
+        const gewaehlt = Array.isArray(wert) ? wert.map(String) : [String(wert)];
+        for (const kind of e.children) {
+          const an = gewaehlt.indexOf(kind.textContent) >= 0
+            || (kind.dataset && kind.dataset.val === String(wert));
+          kind.classList.toggle('on', an);
+        }
+      }
+    }
+    const cat = catById($('cnCategory').value);
+    if (cat) applyDependencies(cat, CN_ATTR_PREFIX);
+    // Lieferumfang: dieselbe Auswahl, die der gefundene Artikel hat.
+    CN.scope.clear();
+    const scopeHost = $('cnScope');
+    for (const kind of scopeHost.children) {
+      const an = werte.scopeOfDelivery.indexOf(kind.textContent) >= 0;
+      kind.classList.toggle('on', an);
+      if (an) CN.scope.add(kind.textContent);
+    }
+    cnSay('cnSuccess', 'Details copied — the reference stays yours. Check them, then press "Create anyway".');
+  }
+
   $('cnCreateAnywayBtn').onclick = async () => {
     if (CN.busy) return;
     CN.busy = true;

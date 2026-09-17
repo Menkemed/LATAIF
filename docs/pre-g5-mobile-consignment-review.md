@@ -15,7 +15,8 @@ auf ein Telefon gehört:
 |---|---|---|---|
 | Kommission anlegen (`ConsignmentList` → „New") — legt **Artikel und Kommission in EINER Transaktion** an | `createConsignmentWithProduct` / `createConsignmentOnPrimary` | **ja** `consignments.create` | **ja** |
 | Duplikatsfrage vor dem Anlegen | `findPossibleDuplicates` (Haus), `duplicate-dismiss` (Bildschirmhilfen) | im Rumpf: `acknowledgeDuplicate` | **ja** — fragen und „Create anyway" |
-| „Copy details" / „Pick existing" aus dem Duplikatsdialog | reine Formularhilfen am Bildschirm (`copiedAttributes`, `fingerprintAfterCopy`) | — (kein Fernbefehl, es wird nichts geschrieben) | **nein** — das Telefon bekommt vom Primary nur die Nennung der Treffer (Marke, Name, SKU), nicht deren Felder; ein Kopieren bräuchte einen neuen Lese-DTO |
+| „Copy details" aus dem Duplikatsdialog | `findPossibleDuplicates` + `copiedAttributes` (beide am Primary) | **ja, neu**: die Auskunft `products.duplicates.get` — sie fragt dieselbe Erkennung und gibt genau die Felder heraus, die „Copy details" übernimmt | **ja** |
+| „Pick existing" aus dem Duplikatsdialog | Navigation zur Artikelseite — es wird nichts geschrieben | — | **nein** — reine Bildschirmnavigation des Rechners |
 | Kopf ändern (vereinbarter Preis, Mindestpreis, Ablauf, Notiz) | `updateConsignment` | **ja** `consignments.update` | **ja** |
 | Auszahlungsmodell ändern (`percent` / `consignor_fixed` / `cost_split`) | `buildPayoutPatch` + `updateConsignmentPayoutModel`, Sperre `payoutModelLock` (+ dieselbe Bedingung als SQL **im** UPDATE) | **ja** `consignments.update` (`payout`) | **ja**, aber nur wenn der Primary es erlaubt (`payoutLocked` der Auskunft) |
 | Verkauf erfassen | `recordConsignmentSaleInHouse` (Einkauf beim Einlieferer, Rechnung, ggf. Verlust, Status) | **ja** `consignments.record_sale` | **ja** |
@@ -125,8 +126,11 @@ denselben Rumpffeldern, und der Primary fährt darunter **dieselbe** Hausfolge w
 Maske. Belegt im Browserlauf: eine Änderung, die von einem anderen Rechner kommt (neuer Preis,
 neue Fassung), steht nach dem Laden in der Handy-Maske; ein veralteter Stand wird mit
 `RECORD_CHANGED` abgewiesen und überschreibt nichts.
-**Grenze:** der Zwei-App-Lauf (echter Primary + echtes PC2 + echte DB) wurde für diesen Schnitt
-**nicht** gefahren — siehe § 9.
+Im **Zwei-App-Lauf am echten Datenbestand** belegt (`26/0`): das Telefon legt an → PC2 sieht die
+Kommission in seiner Liste (nach Einlieferer gruppiert, aufgeklappt mit der Nummer des Primary)
+und denselben Artikel samt **beiden** Bildern über `products.get` → PC2 ändert den vereinbarten
+Preis → das Telefon zeigt ihn nach dem Neuladen; die veraltete Handy-Änderung wird mit
+`RECORD_CHANGED` abgewiesen und überschreibt nichts.
 
 ## 7. Schreibsicherheit
 
@@ -140,7 +144,12 @@ anderem Rumpf wird gar nicht erst gesendet. Veralteter Stand → `expectedRevisi
 
 ## 8. Freischaltung — nichts Neues
 
-**Neue Reads: 0. Neue Mutations: 0. Registry vorher 175, nachher 175.**
+**Neue Reads: 1 (`products.duplicates.get`). Neue Mutations: 0. Registry vorher 175, nachher 176**
+(1 Probe + 19 Auskünfte + 53 typisierte Auskünfte + 103 Buchungen); TS und Rust nennen denselben
+Namen, und jede Zähl- und Zuwachs-Prüfung der Brücke wurde mitgezogen.
+Die neue Auskunft ist die kleinste, die „Copy details" am Telefon **Primary-autoritativ** macht:
+sie ruft `findPossibleDuplicates` und gibt die Merkmale durch `copiedAttributes` heraus (ohne
+Seriennummer), damit weder Erkennung noch Kopierregel ein zweites Mal existieren.
 Wiederverwendet: `consignments.list`, `consignments.get`, `consignments.create`,
 `consignments.update`, `consignments.record_sale`, `consignments.record_payout`,
 `consignments.mark_returned`, `products.get`, `products.update`, `customers.list`,
@@ -151,16 +160,24 @@ Wiederverwendet: `consignments.list`, `consignments.get`, `consignments.create`,
 
 | Lauf | Ergebnis |
 |---|---|
-| `node test/preg5/mobile-consignment.test.ts` | **79/0** (§1 Anlegen, §2 Auszahlungsmodelle, §3 Ändern, §4 Galerie, §5 Handlungen, §6 AI, §7 Verdrahtung/Vokabeln) |
-| `node test/preg5/mobile-consignment-page.e2e.mjs` | **34/0** — die drei echten Dateien in einem echten Edge gegen einen Attrappen-Primary |
+| `node test/preg5/mobile-consignment.test.ts` | **81/0** (§1 Anlegen, §2 Auszahlungsmodelle, §3 Ändern, §4 Galerie, §5 Handlungen, §6 AI, §7 Verdrahtung/Vokabeln) |
+| `node test/preg5/mobile-consignment-page.e2e.mjs` | **38/0** — die drei echten Dateien in einem echten Edge gegen einen Attrappen-Primary (inkl. „Copy details") |
+| `node test/e2e/pre-g5-mobile-consignment.e2e.mjs` | **26/0**, `PRE_G5_MOBILE_CONSIGNMENT_E2E_PROVED` — echter Primary + echte `/mobile`-Seite in Edge + echtes PC2, isolierte Instanz (Port 3011, eigener Datenordner) |
+| Brücken-Gates nach der neuen Auskunft (c4-authorization, c4-read-revocation, client-read-mode, write-foundation, customer/product/invoice-remote-write, c6, r5c/r5d/r5e/r5f, r6b, r6c–r6f final gates, masterdata, r7b, r4c-Matrix) | alle grün auf 176 |
 | `node test/preg5/mobile-repair.test.ts` · `-ui` · `-page` | **125/0 · 35/0 · 21/0** (Nachbarn: der Auftraggeber reicht jetzt die Begründung des Primary durch) |
 | `npx tsc -b` | rc 0 |
 | `cargo check --lib` · `cargo test --lib -- mobile_field` | grün · **25/0** |
 
 **Grenzen:**
-- **Zwei-App-Lauf offen:** Mobile → echter Primary → echte DB ← echtes PC2 ist für die Kommission
-  **nicht** gefahren. Bewiesen sind Vertrag und Oberfläche (dieselben Operationen, dieselben
-  Rümpfe, dieselben Hausfolgen); der laufende Beweis am echten Datenbestand fehlt.
+- **Testaufbau (nicht Produkt):** die Anmeldung von PC2 im Zwei-App-Lauf ist wackelig — in 3 von
+  6 Läufen kam der Ausweis trotz fünf Versuchen nicht zustande; der Lauf meldet das ehrlich und
+  bricht die PC2-Prüfungen ab. Dieselbe Grenze steht im Reparaturschnitt.
+- **Was der Zwei-App-Lauf zeigt:** K1 Anlegen (Kommission, Artikel mit den festen Werten des
+  Hauses, Einstand = Erwartungswert 400 bei 500/20 %, SKU vom Primary, beide Fotos im
+  Medienspeicher) · K2 Duplikatsfrage, „Copy details" aus der Autorität (Modell und Merkmale ja,
+  Referenz nein), „Create anyway" als eigener Auftrag · K3 verlorene Antwort → Klärung unter
+  derselben Kennung, keine zweite Kommission · K4/K5 PC2 · K6 eine Auszahlung ohne Verkauf weist
+  der Primary ab (`NOTHING_TO_PAY_OUT`) · K7 keine eigene Datenbank auf PC2, kein `/api/sync/push`.
 - **AI-Live:** der Aufruf gegen den echten Anbieter ist im Testaufbau nicht fahrbar (kein
   Schlüssel); geprüft sind Weg, Übernahme und Leitplanken.
 - Mobil bewusst nicht: Post-Sale Return, Cancel Sale, das Ändern der Ware selbst (§ 0).

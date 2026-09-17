@@ -246,7 +246,7 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
  * den geprüften Ansprüchen und weist ohne sie ab (`BRANCH_REQUIRED`) — kein Rumpf kommt daran.
  */
 export const READ_PERMISSIONS: Readonly<Record<string, PermissionRule | null>> = {
-  'products.list': null, 'products.get': null,
+  'products.list': null, 'products.get': null, 'products.duplicates.get': null,
   'customers.list': null, 'customers.get': null,
   'invoices.list': null, 'invoices.get': null,
   'suppliers.list': null, 'categories.list': null,

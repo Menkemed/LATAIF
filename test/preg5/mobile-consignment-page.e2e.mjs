@@ -297,15 +297,51 @@ try {
   ok(!('purchasePrice' in rumpf.product) && !('stockStatus' in rumpf.product) && !('sourceType' in rumpf.product),
     '§1 …und nichts, was der Primary selbst setzt');
 
+  // „Copy details": die Treffer und was uebernommen wird, kommen aus der AUTORITAET.
+  const vorherGeber = antwortGeber;
+  antwortGeber = (u, body) => {
+    if (body && body.op === 'products.duplicates.get') {
+      return { status: 200, body: { ok: true, value: { items: [{
+        id: 'prod-alt', brand: 'Rolex', name: 'Datejust 41', sku: 'RLX-1', categoryId: 'cat-watch',
+        condition: 'Pre-Owned', taxScheme: 'STANDARD', notes: '', plannedSalePrice: 900,
+        minSalePrice: null, maxSalePrice: null, scopeOfDelivery: ['Box'],
+        // GEFILTERT vom Primary: die Seriennummer ist nicht dabei.
+        attributes: { dial: 'Silver', material: 'Steel' }, matchClass: 'POSSIBLE', reasons: ['brand+model'],
+      }] } } };
+    }
+    return vorherGeber(u, body);
+  };
+  await c.ev("document.getElementById('cnSaveBtn').click(); await new Promise((r) => setTimeout(r, 900)); return 1;");
+  ok(await c.ev("return document.querySelectorAll('#cnDuplicateList [data-copy-details]').length === 1;"),
+    '§1b die Treffer des Hauses stehen unter der Frage');
+  await c.ev("document.querySelector('#cnDuplicateList [data-copy-details]').click(); await new Promise((r) => setTimeout(r, 300)); return 1;");
+  const kopiert = await c.ev(`return {
+    name: document.getElementById('cnName').value,
+    zustand: document.getElementById('cnCondition').value,
+    dial: document.getElementById('cna_dial').value,
+    sku: document.getElementById('cnSku').value,
+    serial: document.getElementById('cna_serial_number') ? document.getElementById('cna_serial_number').value : '',
+    scope: Array.from(document.getElementById('cnScope').children).filter((x) => x.classList.contains('on')).map((x) => x.textContent) };`);
+  ok(kopiert.name === 'Datejust 41' && kopiert.zustand === 'Pre-Owned' && kopiert.dial === 'Silver'
+    && S(kopiert.scope) === S(['Box']),
+    `§1b „Copy details" uebernimmt Modell, Zustand, Merkmale und Lieferumfang (${S(kopiert)})`);
+  ok(kopiert.sku === '' && kopiert.serial === '',
+    `§1b …aber NIE die Referenz und nie die Seriennummer — die gehoeren dem neuen Stueck (${S({ sku: kopiert.sku, serial: kopiert.serial })})`);
+  const fragen = gesehen.filter((g) => g.body?.op === 'products.duplicates.get');
+  ok(fragen.length >= 1 && fragen[0].body.payload.categoryId === 'cat-watch' && fragen[0].body.payload.brand === 'Rolex',
+    `§1b die Frage nennt genau die Felder des Fingerabdrucks (${S(fragen[0] && fragen[0].body.payload)})`);
+  antwortGeber = vorherGeber;
+
   await c.ev("document.getElementById('cnCreateAnywayBtn').click(); return 1;");
   await sleep(1000);
   const zweite = gesehen.filter((g) => g.body?.op === 'consignments.create');
-  ok(zweite.length === 2 && zweite[1].body.payload.acknowledgeDuplicate === true
-    && zweite[0].body.commandId !== zweite[1].body.commandId,
-    '§1 „Create anyway" ist ein eigener Auftrag mit eigener Kennung');
+  const bestaetigte = zweite.filter((g) => g.body.payload.acknowledgeDuplicate === true);
+  ok(zweite.length === 3 && bestaetigte.length === 1
+    && zweite.slice(0, 2).every((g) => g.body.commandId !== bestaetigte[0].body.commandId),
+    `§1 „Create anyway" ist ein eigener Auftrag mit eigener Kennung (${zweite.length}/${bestaetigte.length})`);
   ok(await c.ev("return /Saved as CON-2026-0007/.test(document.getElementById('cnSuccess').textContent);"),
     '§1 der Mensch sieht die Nummer des Primary');
-  ok(duplikatGefragt === 1, '§1 …und die Frage kam genau einmal');
+  ok(duplikatGefragt === 2, '§1 …und gefragt wurde bei JEDEM unbestaetigten Versuch, nie danach');
 
   // ── §2 Bearbeiten: nur Geaendertes, Fassung, gesperrtes Modell ──────────────────────────────
   const geladen = await c.ev(`return {
@@ -482,7 +518,7 @@ try {
     `§2d die AI fuellt nur LEERE Felder — auch die Merkmale der Kategorie (${S(nachAi)})`);
   ok(nachAi.preis === '' && /Filled 3 empty fields|Filled/.test(nachAi.meldung),
     `§2d …sie fasst keinen Preis an und sagt, was sie getan hat (${S(nachAi.meldung.slice(0, 50))})`);
-  ok(gesehen.filter((g) => g.body?.op === 'consignments.create').length === 2,
+  ok(gesehen.filter((g) => g.body?.op === 'consignments.create').length === 3,
     '§2d …und sie speichert nichts');
 
   // ── §4 Verkauf mit Fehlbetrag: erst das Nein des Primary, dann die Bestaetigung ──────────────

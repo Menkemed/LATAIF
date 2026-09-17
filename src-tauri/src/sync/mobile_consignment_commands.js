@@ -202,6 +202,41 @@
   }
 
   /**
+   * Die Frage nach moeglichen Duplikaten — mit GENAU den Feldern, aus denen das Haus seinen
+   * Fingerabdruck bildet. Gerechnet wird am Primary (`products.duplicates.get` ruft
+   * `findPossibleDuplicates`); das Telefon stellt nur die Frage, die der Rechner beim Tippen
+   * ebenfalls stellt.
+   */
+  function duplicateQuery(form) {
+    const out = { categoryId: textOrNull(form.categoryId) || '' };
+    const marke = textOrNull(form.brand); if (marke !== null) out.brand = marke;
+    const name = textOrNull(form.name); if (name !== null) out.name = name;
+    const sku = textOrNull(form.sku); if (sku !== null) out.sku = sku;
+    if (form.attributes && Object.keys(form.attributes).length > 0) out.attributes = form.attributes;
+    return out;
+  }
+
+  /**
+   * „Copy details": was aus einem gefundenen Artikel in die Maske uebernommen wird.
+   *
+   * Die Merkmale kommen bereits gefiltert vom Primary (`copiedAttributes` — die Seriennummer
+   * bleibt zurueck, weil gerade ein ZWEITES Stueck erfasst wird); hier wird nichts noch einmal
+   * entschieden. Uebernommen wird nur, was die Maske des Telefons auch zeigt — die SKU NIE, sie
+   * gehoert dem neuen Stueck.
+   */
+  function copyDetails(match) {
+    const m = match || {};
+    return {
+      categoryId: textOrNull(m.categoryId) || '',
+      brand: textOrNull(m.brand) || '',
+      name: textOrNull(m.name) || '',
+      condition: textOrNull(m.condition) || '',
+      attributes: (m.attributes && typeof m.attributes === 'object') ? m.attributes : {},
+      scopeOfDelivery: Array.isArray(m.scopeOfDelivery) ? m.scopeOfDelivery.slice() : [],
+    };
+  }
+
+  /**
    * Was die AI vorschlagen darf: beschreibende Felder der WARE. Kein Preis, kein Modell, kein
    * Einlieferer, keine Nummer — die Antwort des Primary ist ohnehin gefiltert, aber ein Rumpf, der
    * es gar nicht erst anbietet, kann es auch nicht versehentlich uebernehmen.
@@ -239,6 +274,8 @@
     saleBody: saleBody,
     payoutBody: payoutBody,
     returnBody: returnBody,
+    duplicateQuery: duplicateQuery,
+    copyDetails: copyDetails,
     applyAiSuggestions: applyAiSuggestions,
   };
 }));

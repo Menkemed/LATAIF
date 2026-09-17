@@ -303,7 +303,10 @@ group('§6 AI-Leitplanken');
   // Die Registry bleibt, wie sie ist: kein neuer Name.
   const rust = src('src-tauri/src/bridge.rs');
   const liste = rust.slice(rust.indexOf('pub const REMOTE_OPS'), rust.indexOf('];', rust.indexOf('pub const REMOTE_OPS')));
-  ok((liste.match(/OP_[A-Z_]+/g) ?? []).length === 175, '§7 die Registry zaehlt weiterhin 175 Namen');
+  // PRE-G5 — genau EINE neue Auskunft: die Duplikatsfrage samt 'Copy details' aus der Autoritaet.
+  ok((liste.match(/OP_[A-Z_]+/g) ?? []).length === 176, '§7 die Registry zaehlt 176 Namen (175 + products.duplicates.get)');
+  ok(/OP_PRODUCTS_DUPLICATES_GET: &str = "products.duplicates.get"/.test(rust), '§7 …und Rust kennt sie namentlich');
+  ok(ui.includes("'products.duplicates.get'"), '§7 die Maske fragt sie, statt Duplikate selbst zu suchen');
   const registry = src('src/core/bridge/command-registry.ts');
   for (const op of ['consignments.create', 'consignments.update', 'consignments.record_sale',
     'consignments.record_payout', 'consignments.mark_returned', 'products.update', 'customers.create']) {

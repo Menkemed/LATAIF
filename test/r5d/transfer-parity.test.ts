@@ -285,7 +285,7 @@ async function verkaufterTransfer(db: Db, nth: string, customerId: string, produ
   ok(ALLOWED_MUTATIONS.length === 103, `SCOPE invoices.cancel, die elf aus R6C, die achtundzwanzig aus R6D, die acht aus R6E und die vierzehn aus R6F + eins aus R7A (production.complete) (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 175, `SCOPE die Registry steht bei 175 (R7A) (${rustOps})`);
+  ok(rustOps === 176, `SCOPE die Registry steht bei 176 (PRE-G5) (${rustOps})`);
   for (const op of ['transfers.update', 'transfers.mark_returned', 'transfers.mark_sold']) {
     const z = R4C_MATRIX.find((x) => x.op === op);
     ok(!!z && z.verdrahtet, `SCOPE Nachbar ${op} bleibt verdrahtet`);

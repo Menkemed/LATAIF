@@ -423,7 +423,7 @@ async function editWelt(weg: 'primary' | 'fern', status: string, form: Record<st
   ok(ALLOWED_MUTATIONS.includes('suppliers.create') && ALLOWED_MUTATIONS.length === 103, 'GAP→R6C die Buchung suppliers.create gibt es jetzt — eine der elf R6C-Buchungen (103 seit R7A)');
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(/"suppliers\.create"/.test(rust) && rustOps === 175, `GAP→R6C die Registry kennt sie und steht bei 175 (R7A) (${rustOps})`);
+  ok(/"suppliers\.create"/.test(rust) && rustOps === 176, `GAP→R6C die Registry kennt sie und steht bei 175 (R7A) (${rustOps})`);
   const stand = [R4C_MATRIX.filter((z) => z.verdrahtet).length, R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet).length,
     R4C_MATRIX.filter((z) => z.luecke === 'B').length, R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length];
   // R5F schliesst weitere Zeilen — die Matrix bleibt bei 40, ohne offene „exakt"-Zeile und ohne Lieferanten.

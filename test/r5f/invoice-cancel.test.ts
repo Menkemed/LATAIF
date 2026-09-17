@@ -336,7 +336,7 @@ function bildDesStornos(db: Db, inv: string) {
   ok(ALLOWED_MUTATIONS.length === 103 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `DECISION invoices.cancel bleibt die eine R5F.1-Buchung an Platz 41; seither nur die elf aus R6C, die achtundzwanzig aus R6D, die acht aus R6E und die vierzehn aus R6F + eins aus R7A (production.complete) (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 175 &&/pub const OP_INVOICES_CANCEL: &str = "invoices\.cancel";/.test(rust), `DECISION Rust laesst genau diese eine mehr durch (${rustOps})`);
+  ok(rustOps === 176 &&/pub const OP_INVOICES_CANCEL: &str = "invoices\.cancel";/.test(rust), `DECISION Rust laesst genau diese eine mehr durch (${rustOps})`);
   ok(!!(OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.cancel']
     && S((OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.cancel']) === S((OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.update']),
   'DECISION dasselbe Recht wie am Primary („Cancel" nur mit canEditInvoices)');
@@ -662,8 +662,10 @@ for (const weg of ['primary', 'fern'] as const) {
   const R6E_RUST = ['OP_OFFERS_CREATE', 'OP_OFFERS_UPDATE', 'OP_OFFERS_SET_STATUS', 'OP_OFFERS_CONVERT_TO_INVOICE', 'OP_INVOICES_SET_BUTTERFLY', 'OP_RETURNS_CANCEL', 'OP_TRANSFERS_UNDO_CONVERT', 'OP_CUSTOMERS_LOG_MESSAGE'];
   const R6F_RUST = ['OP_PURCHASES_RETURN_TO_SUPPLIER', 'OP_PURCHASES_CANCEL', 'OP_PURCHASES_DISMISS_INBOX', 'OP_ORDERS_CANCEL', 'OP_ORDERS_UPDATE_LINE_STATUS', 'OP_ORDERS_MARK_LINE_ORDERED', 'OP_ORDERS_UPDATE_LINE', 'OP_CONSIGNMENTS_RETURN_AFTER_SALE', 'OP_CONSIGNMENTS_CANCEL_SALE', 'OP_PRODUCTION_CREATE', 'OP_TASKS_CREATE', 'OP_TASKS_UPDATE', 'OP_DOCUMENTS_UPLOAD', 'OP_DOCUMENTS_SET_OCR'];
   const R7A_RUST = ['OP_PRODUCTION_COMPLETE'];
-  ok(zaehle(rustVorher) === 107 && zaehle(rustJetzt) === 175 && S(neuRust) === S(['OP_INVOICES_CANCEL', ...R6C_RUST, ...R6D_RUST, ...R6E_RUST, ...R6F_RUST, ...R7A_RUST]),
-    `REGISTRY Rust 107 → 108 (R5F.1: OP_INVOICES_CANCEL) → 121 (R6C: 13 namentlich) → 152 (R6D: 31 namentlich) → 160 (R6E: 8 namentlich) → 174 (R6F: 14 namentlich) → 175 (R7A: OP_PRODUCTION_COMPLETE) (${S(neuRust)})`);
+  // PRE-G5 — die Duplikatsauskunft (Copy details am Telefon aus der Autoritaet).
+  const PREG5_RUST = ['OP_PRODUCTS_DUPLICATES_GET'];
+  ok(zaehle(rustVorher) === 107 && zaehle(rustJetzt) === 176 && S(neuRust) === S(['OP_INVOICES_CANCEL', ...R6C_RUST, ...R6D_RUST, ...R6E_RUST, ...R6F_RUST, ...R7A_RUST, ...PREG5_RUST]),
+    `REGISTRY Rust 107 → 108 (R5F.1: OP_INVOICES_CANCEL) → 121 (R6C: 13 namentlich) → 152 (R6D: 31 namentlich) → 160 (R6E: 8 namentlich) → 174 (R6F: 14 namentlich) → 175 (R7A: OP_PRODUCTION_COMPLETE) → 176 (PRE-G5: OP_PRODUCTS_DUPLICATES_GET) (${S(neuRust)})`);
   let zu = '';
   try { reg5.registerCommand('invoices.delete', { kind: 'mutation', handler: () => ({}) } as never); } catch (e) { zu = String(e); }
   ok(/refusing to register/.test(zu), 'REGISTRY eine nicht freigegebene Buchung bleibt fail-closed');
