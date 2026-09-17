@@ -271,6 +271,23 @@ const ACT = (over: Record<string, unknown> = {}) => ({
   ok(foreign.kind === 'ok'
     && ((foreign as { value: { items: unknown[] } }).value.items.length === 0),
     'READ eine fremde Filiale sieht NICHTS — auch als ADMIN');
+  // PRE-G5 — die Duplikatsauskunft nimmt NUR ihre eigenen Eingabefelder: ein unbekannter
+  // Schluessel wird abgewiesen, nicht stillschweigend uebergangen. Ein ignoriertes Feld sieht fuer
+  // den Absender aus wie ein angenommenes.
+  const dupOk = await executeCommand('products.duplicates.get',
+    { actor: ACT({ role: 'ADMIN' }), input: { categoryId: 'cat-1', brand: 'Rolex', name: 'Datejust', sku: '', attributes: {} } }, undefined);
+  ok(dupOk.kind === 'ok' && Array.isArray((dupOk as { value: { items: unknown[] } }).value.items),
+    `READ die Duplikatsauskunft antwortet auf ihre eigenen Felder (${JSON.stringify(dupOk).slice(0, 60)})`);
+  for (const [feld, wert] of [['limit', 5], ['q', 'x'], ['branchId', 'branch-two'], ['tenantId', 't2']] as Array<[string, unknown]>) {
+    const abgewiesen = await executeCommand('products.duplicates.get',
+      { actor: ACT({ role: 'ADMIN' }), input: { brand: 'Rolex', [feld]: wert } }, undefined);
+    ok(abgewiesen.kind === 'business_error' && (abgewiesen as { code: string }).code === 'UNKNOWN_FIELD',
+      `READ …und weist "${feld}" ab, statt es zu ignorieren (${JSON.stringify(abgewiesen).slice(0, 70)})`);
+  }
+  const dupOhneFiliale = await executeCommand('products.duplicates.get', { input: { brand: 'Rolex' } }, undefined);
+  ok(dupOhneFiliale.kind === 'business_error' && (dupOhneFiliale as { code: string }).code === 'BRANCH_REQUIRED',
+    'READ …und ohne geprüfte Filiale antwortet sie gar nicht');
+
   const none = await executeCommand('products.list', { input: {} }, undefined);
   ok(none.kind === 'business_error' && (none as { code: string }).code === 'BRANCH_REQUIRED',
     `READ ohne geprüfte Filiale gar nichts (${JSON.stringify(none).slice(0, 50)})`);

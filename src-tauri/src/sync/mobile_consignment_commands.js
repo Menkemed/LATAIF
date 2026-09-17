@@ -25,9 +25,14 @@
   // Die Vokabeln des Hauses, als WERTE (Lehre aus R4C.4). Der Test nagelt sie an die Quelle.
   const PAYOUT_MODELS = ['percent', 'consignor_fixed', 'cost_split'];
   const PAYOUT_METHODS = ['bank_transfer', 'cash', 'card', 'benefit'];
+  // Die Steuerarten des Hauses (`TAX_SCHEMES`) — `consignments.create` prueft gegen genau diese.
+  const TAX_SCHEMES = ['VAT_10', 'ZERO', 'MARGIN'];
 
   /** Die Felder des Artikels, die `consignments.create` annimmt (plus `sku`). */
-  const PRODUCT_TEXT_FIELDS = ['categoryId', 'brand', 'name', 'condition', 'notes', 'sku', 'storageLocation'];
+  // `itemNotes` ist die Notiz AM ARTIKEL; die Notiz der Kommission heisst `notes` und geht an
+  // einen anderen Platz. Vorher trug ein einziges Feld beides — dann stand die Vereinbarung auch
+  // am Artikel.
+  const PRODUCT_TEXT_FIELDS = ['categoryId', 'brand', 'name', 'condition', 'sku', 'storageLocation', 'taxScheme'];
   /** Was die Maske am Kopf der Kommission aendern darf (`consignments.update`). */
   const EDIT_FIELDS = ['agreedPrice', 'minimumPrice', 'expiryDate', 'notes'];
   const MONEY_FIELDS = ['agreedPrice', 'minimumPrice'];
@@ -80,11 +85,16 @@
       const v = textOrNull(form[k]);
       if (v !== null) product[k] = v;
     }
+    const artikelNotiz = textOrNull(form.itemNotes);
+    if (artikelNotiz !== null) product.notes = artikelNotiz;
     if (form.attributes && Object.keys(form.attributes).length > 0) product.attributes = form.attributes;
     if (Array.isArray(form.scopeOfDelivery) && form.scopeOfDelivery.length > 0) {
       product.scopeOfDelivery = form.scopeOfDelivery.slice();
     }
 
+    if (product.taxScheme !== undefined && TAX_SCHEMES.indexOf(product.taxScheme) < 0) {
+      return { ok: false, code: 'TAX_SCHEME_INVALID' };
+    }
     const body = { consignorId: einlieferer, product: product, agreedPrice: preis, payout: modell.payout };
     const min = moneyOrNull(form.minimumPrice);
     if (min !== null) body.minimumPrice = min;
@@ -224,15 +234,21 @@
    * entschieden. Uebernommen wird nur, was die Maske des Telefons auch zeigt — die SKU NIE, sie
    * gehoert dem neuen Stueck.
    */
-  function copyDetails(match) {
+  function copyDetails(match, opts) {
     const m = match || {};
+    const options = opts || {};
     return {
       categoryId: textOrNull(m.categoryId) || '',
       brand: textOrNull(m.brand) || '',
       name: textOrNull(m.name) || '',
       condition: textOrNull(m.condition) || '',
+      taxScheme: textOrNull(m.taxScheme) || '',
+      itemNotes: textOrNull(m.notes) || '',
       attributes: (m.attributes && typeof m.attributes === 'object') ? m.attributes : {},
       scopeOfDelivery: Array.isArray(m.scopeOfDelivery) ? m.scopeOfDelivery.slice() : [],
+      // Bilder NUR in ein leeres Ziel — wortwoertlich die Regel des Rechners
+      // (`images: (f.images && f.images.length > 0) ? f.images : src.images`).
+      mediaKeys: options.hasPhotos ? [] : (Array.isArray(m.mediaKeys) ? m.mediaKeys.slice(0, MAX_PHOTOS) : []),
     };
   }
 
@@ -261,6 +277,7 @@
     MAX_PHOTOS: MAX_PHOTOS,
     PAYOUT_MODELS: PAYOUT_MODELS,
     PAYOUT_METHODS: PAYOUT_METHODS,
+    TAX_SCHEMES: TAX_SCHEMES,
     PRODUCT_TEXT_FIELDS: PRODUCT_TEXT_FIELDS,
     EDIT_FIELDS: EDIT_FIELDS,
     AI_FIELDS: AI_FIELDS,

@@ -108,6 +108,23 @@ bestimmen; gespeichert wird nichts, jede Übernahme ist sichtbar („Filled N em
   `sourceType: 'CONSIGNMENT'`, SKU und Kommissionsnummer setzt der Primary — der Rumpf trägt sie
   nicht einmal. `PRE_G5_CONSIGNMENT_DOMAIN_PROVED`
 
+## 4b. „Copy details" — Feldmenge und Bedeutung des Rechners
+
+Der Rechner ist die SSOT (`ConsignmentList`, `onCopyDetails`). Das Telefon übernimmt jedes Feld,
+das er übernimmt UND das der Vertrag einer Kommission trägt (`CONSIGNMENT_PRODUCT_FIELDS`):
+Kategorie, Marke, Modell, Zustand, **Steuerart**, **Artikel-Notiz**, Merkmale und Lieferumfang.
+Die Merkmale kommen bereits gefiltert vom Primary (`copiedAttributes`): die **Referenznummer wird
+übernommen** — wie am Rechner —, die **Seriennummer nie**, und die **SKU nie** (sie gehört dem
+neuen Stück). **Bilder nur in ein leeres Ziel**: hängt schon ein eigenes Foto an der Maske,
+bleiben die Bilder des Treffers außen; sonst holt das Telefon sie über die angemeldete
+Medienroute und behandelt sie wie eigene Aufnahmen — Wort für Wort die Regel des Rechners.
+**Die drei Verkaufspreise bleiben außen vor**, und zwar nicht aus Bequemlichkeit: der Vertrag
+einer Kommission trägt sie nicht, ein Feld dafür wäre eine Sackgasse. Der Einstand einer
+Kommission ist ohnehin der Erwartungswert des Hauses.
+
+Die Auskunft selbst ist **fail-closed**: sie nimmt genau `categoryId, brand, name, sku, attributes`,
+jeder andere Schlüssel wird mit `UNKNOWN_FIELD` abgewiesen statt still übergangen.
+
 ## 5. Bilder
 
 Dieselbe Infrastruktur wie PC2: Ablage über `/api/staging/media` (Kennung = SHA-256 der Bytes, der
@@ -160,8 +177,8 @@ Wiederverwendet: `consignments.list`, `consignments.get`, `consignments.create`,
 
 | Lauf | Ergebnis |
 |---|---|
-| `node test/preg5/mobile-consignment.test.ts` | **81/0** (§1 Anlegen, §2 Auszahlungsmodelle, §3 Ändern, §4 Galerie, §5 Handlungen, §6 AI, §7 Verdrahtung/Vokabeln) |
-| `node test/preg5/mobile-consignment-page.e2e.mjs` | **38/0** — die drei echten Dateien in einem echten Edge gegen einen Attrappen-Primary (inkl. „Copy details") |
+| `node test/preg5/mobile-consignment.test.ts` | **94/0** (neu §8 Copy-Details-Parität gegen den Quelltext des Rechners) (§1 Anlegen, §2 Auszahlungsmodelle, §3 Ändern, §4 Galerie, §5 Handlungen, §6 AI, §7 Verdrahtung/Vokabeln) |
+| `node test/preg5/mobile-consignment-page.e2e.mjs` | **42/0** — die drei echten Dateien in einem echten Edge gegen einen Attrappen-Primary (inkl. „Copy details") |
 | `node test/e2e/pre-g5-mobile-consignment.e2e.mjs` | **26/0**, `PRE_G5_MOBILE_CONSIGNMENT_E2E_PROVED` — echter Primary + echte `/mobile`-Seite in Edge + echtes PC2, isolierte Instanz (Port 3011, eigener Datenordner) |
 | Brücken-Gates nach der neuen Auskunft (c4-authorization, c4-read-revocation, client-read-mode, write-foundation, customer/product/invoice-remote-write, c6, r5c/r5d/r5e/r5f, r6b, r6c–r6f final gates, masterdata, r7b, r4c-Matrix) | alle grün auf 176 |
 | `node test/preg5/mobile-repair.test.ts` · `-ui` · `-page` | **125/0 · 35/0 · 21/0** (Nachbarn: der Auftraggeber reicht jetzt die Begründung des Primary durch) |

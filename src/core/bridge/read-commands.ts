@@ -284,12 +284,24 @@ registerCommand(OP_PRODUCTS_GET, {
  * Es entsteht nichts Neues: dieselbe Erkennung, die `consignments.create` vor dem Anlegen fragt,
  * und dieselbe Uebernahme, die der Duplikatsdialog am Rechner benutzt.
  */
+/** Was diese Auskunft an Eingabe annimmt — mehr gibt es nicht, und mehr wird auch nicht geduldet. */
+const DUPLICATE_INPUT_FIELDS: readonly string[] = ['categoryId', 'brand', 'name', 'sku', 'attributes'];
+
 registerCommand(OP_PRODUCTS_DUPLICATES_GET, {
   kind: 'read',
   handler: (p) => {
     const branch = actorBranch(p);
     // Die Eingabe steht im UMSCHLAG (actor + input) — genau wie bei jeder anderen Auskunft.
     const eingabe = input(p);
+    // …und sie ist ABSCHLIESSEND: ein Schlüssel, den diese Auskunft nicht kennt, wird abgewiesen,
+    // nicht stillschweigend übergangen. Ein ignoriertes Feld sieht für den Absender aus wie ein
+    // angenommenes; beim nächsten Vertrag wäre das der Unterschied zwischen „gefiltert" und
+    // „gar nicht gefragt".
+    for (const k of Object.keys(eingabe)) {
+      if (!DUPLICATE_INPUT_FIELDS.includes(k)) {
+        throw new BusinessError('UNKNOWN_FIELD', `this read does not take "${k}"`);
+      }
+    }
     const attrs = eingabe.attributes;
     const kandidat = {
       categoryId: str(eingabe.categoryId),
@@ -325,6 +337,9 @@ registerCommand(OP_PRODUCTS_DUPLICATES_GET, {
           scopeOfDelivery: Array.isArray(pr.scopeOfDelivery) ? pr.scopeOfDelivery.map((x) => String(x)) : [],
           // Die Merkmale GENAU so, wie „Copy details" sie uebernimmt — ohne die Seriennummer.
           attributes: copiedAttributes(h.product as never),
+          // Dieselbe Regel wie am Rechner: Bilder werden nur in ein LEERES Ziel übernommen. Die
+          // Bytes holt der Client über die angemeldete Medienroute, hier reist nur der Schlüssel.
+          mediaKeys: galleryOf(actorTenant(p), str(pr.id)).map((g) => g.key),
           matchClass: str(h.matchClass),
           reasons: Array.isArray(h.reasons) ? h.reasons.map((x) => String(x)) : [],
         };

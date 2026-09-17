@@ -303,8 +303,8 @@ try {
     if (body && body.op === 'products.duplicates.get') {
       return { status: 200, body: { ok: true, value: { items: [{
         id: 'prod-alt', brand: 'Rolex', name: 'Datejust 41', sku: 'RLX-1', categoryId: 'cat-watch',
-        condition: 'Pre-Owned', taxScheme: 'STANDARD', notes: '', plannedSalePrice: 900,
-        minSalePrice: null, maxSalePrice: null, scopeOfDelivery: ['Box'],
+        condition: 'Pre-Owned', taxScheme: 'MARGIN', notes: 'Kratzer am Boden', plannedSalePrice: 900,
+        minSalePrice: null, maxSalePrice: null, scopeOfDelivery: ['Box'], mediaKeys: ['k-1', 'k-2'],
         // GEFILTERT vom Primary: die Seriennummer ist nicht dabei.
         attributes: { dial: 'Silver', material: 'Steel' }, matchClass: 'POSSIBLE', reasons: ['brand+model'],
       }] } } };
@@ -327,6 +327,36 @@ try {
     `§1b „Copy details" uebernimmt Modell, Zustand, Merkmale und Lieferumfang (${S(kopiert)})`);
   ok(kopiert.sku === '' && kopiert.serial === '',
     `§1b …aber NIE die Referenz und nie die Seriennummer — die gehoeren dem neuen Stueck (${S({ sku: kopiert.sku, serial: kopiert.serial })})`);
+  const mehr = await c.ev(`return {
+    steuer: document.getElementById('cnTaxScheme').value,
+    notiz: document.getElementById('cnItemNotes').value,
+    fotos: document.querySelectorAll('#cnPhotoStrip .photo-thumb').length };`);
+  ok(mehr.steuer === 'MARGIN' && mehr.notiz === 'Kratzer am Boden',
+    `§1b …Steuerart und Artikel-Notiz kommen mit, wie am Rechner (${S(mehr)})`);
+  ok(mehr.fotos === 1,
+    `§1b …und die Bilder des Treffers bleiben AUSSEN, weil schon ein eigenes Foto haengt (${mehr.fotos})`);
+
+  // Dieselbe Uebernahme in ein LEERES Ziel: jetzt kommen die Bilder mit (Regel des Rechners).
+  await c.ev(`
+    document.querySelectorAll('#cnPhotoStrip .photo-thumb .rm').forEach((b) => b.click());
+    return 1;`);
+  await sleep(300);
+  ok(await c.ev("return document.querySelectorAll('#cnPhotoStrip .photo-thumb').length === 0;"),
+    '§1b die Maske ist ohne eigenes Foto');
+  await c.ev("document.querySelector('#cnDuplicateList [data-copy-details]').click(); return 1;");
+  for (let i = 0; i < 30; i++) {
+    const n = await c.ev("return document.querySelectorAll('#cnPhotoStrip .photo-thumb').length;");
+    if (n === 2) break;
+    await sleep(200);
+  }
+  const mitBildern = await c.ev("return document.querySelectorAll('#cnPhotoStrip .photo-thumb').length;");
+  ok(mitBildern === 2, `§1b …in ein leeres Ziel kopiert sie die Bilder des Treffers mit (${mitBildern})`);
+  // …und fuer das Speichern zaehlen sie wie eigene Aufnahmen: ein Foto wieder entfernen, damit der
+  // folgende Vergleich der Bildkennungen unveraendert bleibt.
+  await c.ev(`
+    document.querySelectorAll('#cnPhotoStrip .photo-thumb .rm').forEach((b, i) => { if (i > 0) b.click(); });
+    return 1;`);
+  await sleep(300);
   const fragen = gesehen.filter((g) => g.body?.op === 'products.duplicates.get');
   ok(fragen.length >= 1 && fragen[0].body.payload.categoryId === 'cat-watch' && fragen[0].body.payload.brand === 'Rolex',
     `§1b die Frage nennt genau die Felder des Fingerabdrucks (${S(fragen[0] && fragen[0].body.payload)})`);

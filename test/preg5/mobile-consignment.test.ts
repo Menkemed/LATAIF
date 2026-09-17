@@ -58,6 +58,11 @@ interface Api {
   payoutBody(con: Record<string, unknown>, form: Record<string, unknown>): Ergebnis;
   returnBody(con: Record<string, unknown>): Ergebnis;
   applyAiSuggestions(form: Record<string, unknown>, s: unknown): number;
+  duplicateQuery(form: Record<string, unknown>): Record<string, unknown>;
+  copyDetails(match: Record<string, unknown>, opts?: { hasPhotos?: boolean }): Record<string, never> & {
+    categoryId: string; brand: string; name: string; condition: string; taxScheme: string;
+    itemNotes: string; attributes: Record<string, unknown>; scopeOfDelivery: string[]; mediaKeys: string[];
+  };
 }
 const M = sandbox.MobileConsignment as unknown as Api;
 
@@ -314,6 +319,66 @@ group('§6 AI-Leitplanken');
   }
 }
 group('§7 Verdrahtung und Vokabeln');
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §8 — „Copy details": dieselbe Feldmenge und dieselbe Bedeutung wie am Rechner
+//
+// Der Rechner ist die SSOT (ConsignmentList, onCopyDetails). Was er uebernimmt, wird hier aus
+// seinem Quelltext GELESEN und gegen die Uebernahme des Telefons gehalten — so kann keine
+// zweite Kopiersemantik entstehen, auch nicht spaeter.
+// ══════════════════════════════════════════════════════════════════════════════
+{
+  const liste = src('src/pages/consignments/ConsignmentList.tsx');
+  const block = /onCopyDetails=\{\(id\) => \{([\s\S]*?)\n        \}\}/.exec(liste)?.[1] ?? '';
+  const rechnerFelder = [...block.matchAll(/^\s{12}([a-zA-Z]+):/gm)].map((m) => m[1]);
+  ok(rechnerFelder.length >= 10, `§8 der Uebernahmeblock des Rechners ist lesbar (${J(rechnerFelder)})`);
+
+  const treffer = {
+    id: 'prod-9', brand: 'Rolex', name: 'Datejust 41', sku: 'RLX-1', categoryId: 'cat-watch',
+    condition: 'Pre-Owned', taxScheme: 'MARGIN', notes: 'Kratzer am Boden',
+    plannedSalePrice: 900, minSalePrice: 800, maxSalePrice: 1000, scopeOfDelivery: ['Box'],
+    attributes: { dial: 'Silver', reference_number: '126334' },
+    mediaKeys: ['k-1', 'k-2'], matchClass: 'POSSIBLE', reasons: ['brand+model'],
+  };
+  const leer = M.copyDetails(treffer, { hasPhotos: false });
+
+  // 1) Was der Rechner uebernimmt UND der Kommissionsvertrag traegt, uebernimmt auch das Telefon.
+  const vertrag = [...(/export const CONSIGNMENT_PRODUCT_FIELDS = \[([\s\S]*?)\]/.exec(src('src/core/data/write-payloads.ts'))?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  const mobilName = { itemNotes: 'notes' } as Record<string, string>;
+  const mobilFelder = Object.keys(leer).map((k) => mobilName[k] ?? k);
+  const sollen = rechnerFelder.filter((f) => vertrag.includes(f) && f !== 'attributes');
+  const fehlen = sollen.filter((f) => !mobilFelder.includes(f));
+  ok(fehlen.length === 0, `§8 jedes uebernommene Feld des Rechners, das die Kommission traegt, uebernimmt auch das Telefon (fehlt: ${fehlen.join(', ') || 'keins'})`);
+  ok(leer.taxScheme === 'MARGIN' && leer.itemNotes === 'Kratzer am Boden' && leer.condition === 'Pre-Owned'
+    && leer.categoryId === 'cat-watch' && leer.brand === 'Rolex' && leer.name === 'Datejust 41'
+    && J(leer.scopeOfDelivery) === J(['Box']),
+    `§8 …mit den Werten des gefundenen Artikels (${J(leer)})`);
+
+  // 2) Preise traegt der Vertrag der Kommission NICHT — es gibt am Telefon kein Feld dafuer,
+  //    also wird auch nichts kopiert (ein Feld ohne Weg waere eine Sackgasse).
+  for (const preis of ['plannedSalePrice', 'minSalePrice', 'maxSalePrice']) {
+    ok(!vertrag.includes(preis) && !(preis in leer),
+      `§8 ${preis} steht nicht im Kommissionsvertrag und wird deshalb nicht uebernommen`);
+  }
+
+  // 3) Referenz ja (der Rechner macht es auch), Seriennummer nie, SKU nie.
+  ok(leer.attributes.reference_number === '126334', '§8 die Referenznummer wird uebernommen — wie am Rechner');
+  ok(!('sku' in leer), '§8 die SKU wird NIE uebernommen — sie gehoert dem neuen Stueck');
+  const strippt = src('src/core/products/duplicate-dismiss.ts');
+  ok(/delete out\.serial_number;/.test(strippt) && /delete \(out as \{ serialNo\?: unknown \}\)\.serialNo;/.test(strippt),
+    '§8 …und die Seriennummer streicht das HAUS (copiedAttributes), nicht das Telefon');
+  ok(!/serial/i.test(src('src-tauri/src/sync/mobile_consignment_commands.js')),
+    '§8 …das Telefon kennt das Wort nicht einmal');
+
+  // 4) Bilder nur in ein LEERES Ziel — dieselbe Regel wie am Rechner.
+  ok(/images: \(f\.images && f\.images\.length > 0\) \? f\.images : \[\.\.\.\(src\.images \|\| \[\]\)\]/.test(liste),
+    '§8 der Rechner behaelt eigene Bilder und kopiert nur in ein leeres Ziel');
+  ok(J(leer.mediaKeys) === J(['k-1', 'k-2']), `§8 …ohne eigene Fotos kopiert das Telefon die Bilder mit (${J(leer.mediaKeys)})`);
+  const voll = M.copyDetails(treffer, { hasPhotos: true });
+  ok(J(voll.mediaKeys) === J([]) && voll.taxScheme === 'MARGIN',
+    `§8 …mit eigenen Fotos bleiben die eigenen, der Rest wird trotzdem uebernommen (${J(voll.mediaKeys)})`);
+}
+group('§8 Copy-Details-Paritaet');
 
 // ══════════════════════════════════════════════════════════════════════════════
 for (const [name, n] of groups) console.log(`  ${name}: ${n}`);

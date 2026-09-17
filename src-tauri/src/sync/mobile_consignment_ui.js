@@ -435,6 +435,10 @@
     cnFuelle('cnSpecialMark', [{ wert: '', text: 'Normal invoice number' }, { wert: 'special', text: 'Special number series' }], undefined);
   }
 
+  function cnSteuerAuswahl() {
+    cnFuelle('cnTaxScheme', MobileConsignment.TAX_SCHEMES.map((w) => ({ wert: w, text: CN_WORT(w) })), 'As the house decides…');
+  }
+
   function cnPayoutModellAuswahl() {
     cnFuelle('cnPayoutModel', MobileConsignment.PAYOUT_MODELS.map((w) => ({
       wert: w,
@@ -455,6 +459,7 @@
     cnSetConsignor(null, '');
     for (const k in CN_INPUTS) $(CN_INPUTS[k]).value = '';
     $('cnSku').value = ''; $('cnBrand').value = ''; $('cnName').value = '';
+    $('cnTaxScheme').value = ''; $('cnItemNotes').value = '';
     $('cnPayoutModel').value = 'percent';
     $('cnCommissionRate').value = ''; $('cnExcessSplitPct').value = '';
     for (const id of ['cnPayoutModel', 'cnCommissionRate', 'cnExcessSplitPct']) $(id).disabled = false;
@@ -483,6 +488,7 @@
       categoryId: $('cnCategory').value,
       brand: $('cnBrand').value, name: $('cnName').value,
       condition: $('cnCondition').value, sku: $('cnSku').value,
+      taxScheme: $('cnTaxScheme').value, itemNotes: $('cnItemNotes').value,
       attributes: merkmale.attributes, scopeOfDelivery: Array.from(CN.scope),
       agreedPrice: $('cnAgreedPrice').value, minimumPrice: $('cnMinimumPrice').value,
       expiryDate: $('cnExpiryDate').value, notes: $('cnNotes').value,
@@ -580,14 +586,14 @@
       zeile.appendChild(el('div', { class: 'hint' },
         [m.brand, m.name, m.sku ? '(' + m.sku + ')' : '', m.matchClass ? '· ' + m.matchClass : ''].filter(Boolean).join(' ')));
       const b = el('button', { type: 'button', class: 'secondary', 'data-copy-details': m.id }, 'Copy details');
-      b.onclick = () => { cnUebernehmen(m); };
+      b.onclick = () => { void cnUebernehmen(m); };
       zeile.appendChild(b);
       box.appendChild(zeile);
     });
   }
 
-  function cnUebernehmen(match) {
-    const werte = MobileConsignment.copyDetails(match);
+  async function cnUebernehmen(match) {
+    const werte = MobileConsignment.copyDetails(match, { hasPhotos: CN.slots.length > 0 });
     if (werte.categoryId && werte.categoryId !== $('cnCategory').value) {
       $('cnCategory').value = werte.categoryId;
       cnRenderFields(werte.categoryId);
@@ -617,6 +623,11 @@
         }
       }
     }
+    // Steuerart und Artikel-Notiz — der Rechner uebernimmt beide.
+    const steuer = $('cnTaxScheme');
+    const passend = Array.from(steuer.options).find((o) => o.value && o.value === werte.taxScheme);
+    steuer.value = passend ? passend.value : '';
+    $('cnItemNotes').value = werte.itemNotes;
     const cat = catById($('cnCategory').value);
     if (cat) applyDependencies(cat, CN_ATTR_PREFIX);
     // Lieferumfang: dieselbe Auswahl, die der gefundene Artikel hat.
@@ -627,7 +638,32 @@
       kind.classList.toggle('on', an);
       if (an) CN.scope.add(kind.textContent);
     }
-    cnSay('cnSuccess', 'Details copied — the reference stays yours. Check them, then press "Create anyway".');
+    // Bilder: NUR wenn noch keines an der Maske haengt (Regel des Rechners). Die Bytes kommen
+    // ueber die angemeldete Medienroute; sie werden wie eigene Aufnahmen behandelt und beim
+    // Speichern ganz normal in die Ablage gelegt.
+    let fotos = 0;
+    for (const key of werte.mediaKeys) {
+      if (CN.slots.length >= MobileConsignment.MAX_PHOTOS) break;
+      try {
+        const res = await fetch('/api/media?key=' + encodeURIComponent(key), {
+          headers: { Authorization: 'Bearer ' + (localStorage.getItem(TOKEN_KEY) || '') },
+        });
+        if (!res.ok) continue;
+        const blob = await res.blob();
+        const dataUrl = await new Promise((fertig, schief) => {
+          const leser = new FileReader();
+          leser.onload = () => fertig(String(leser.result || ''));
+          leser.onerror = () => schief(leser.error);
+          leser.readAsDataURL(blob);
+        });
+        if (dataUrl.indexOf('data:image/') !== 0) continue;
+        CN.slots.push({ dataUrl: dataUrl, src: dataUrl });
+        fotos += 1;
+      } catch (e) { /* ein Bild weniger ist kein Grund, die Uebernahme abzubrechen */ }
+    }
+    if (fotos) cnRenderPhotos();
+    cnSay('cnSuccess', 'Details copied' + (fotos ? ' (with ' + fotos + ' photo' + (fotos === 1 ? '' : 's') + ')' : '')
+      + ' — the reference stays yours. Check them, then press "Create anyway".');
   }
 
   $('cnCreateAnywayBtn').onclick = async () => {
@@ -787,6 +823,7 @@
     for (const c of SCHEMA.categories) sel.appendChild(el('option', { value: c.id }, c.name));
     sel.addEventListener('change', () => { $('cnCondition').value = ''; cnRenderFields(sel.value); });
     cnPayoutModellAuswahl();
+    cnSteuerAuswahl();
     cnPayoutFelder();
     cnRenderFields(sel.value);
   }());
