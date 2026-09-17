@@ -10,12 +10,21 @@
 // nichts gebucht: derselbe Datensatz, dieselbe Summe, nur eine Beschriftung.
 // ════════════════════════════════════════════════════════════════════════════
 
+/** Was an einer Materialzeile erfasst wurde — genau die Schlüssel, die das Haus speichert. */
+export interface RepairMaterialDetails {
+  qty?: number | null;
+  ct?: number | null;
+  weightGrams?: number | null;
+  karat?: string | null;
+}
+
 /** So viel von einer Zeile, wie die Beschriftung braucht. */
 export interface RepairLineView {
   supplierId?: string | null;
   materialKind?: string | null;
   workType?: string | null;
   description?: string | null;
+  materialDetails?: RepairMaterialDetails | null;
 }
 
 /**
@@ -47,6 +56,47 @@ export function ownWorkDescription(line: RepairLineView): string {
   const art = workTypeLabel(line.workType);
   const notiz = String(line.description || '').trim();
   return notiz ? `${art} — ${notiz}` : art;
+}
+
+const zahl = (v: unknown, stellen: number): string => {
+  const n = Number(v);
+  return Number.isFinite(n) ? n.toFixed(stellen) : '';
+};
+
+/**
+ * Was an einer Materialzeile ERFASST wurde, in einem Satz: `3 × 0.25 ct` für Diamant und Stein,
+ * `5.200 g · 21K` für ein Goldstück. Bis hierher stand davon nichts an der Karte — nur die
+ * abgeleitete Spalte „COST/CT", und bei Gold nicht einmal die. Gespeichert war es immer
+ * (`materialDetails`), gelesen hat es niemand.
+ */
+export function materialDetailText(line: RepairLineView): string {
+  const d = line.materialDetails || {};
+  const art = String(line.materialKind || '');
+  if (art === 'diamond' || art === 'stone') {
+    const ct = zahl(d.ct, 2);
+    if (!ct || Number(d.ct) <= 0) return '';
+    const menge = Number(d.qty);
+    const stueck = Number.isFinite(menge) && menge > 0 ? menge : 1;
+    return `${stueck} × ${ct} ct`;
+  }
+  if (art === 'gold') {
+    const g = zahl(d.weightGrams, 3);
+    const karat = String(d.karat || '').trim();
+    if (!g || Number(d.weightGrams) <= 0) return karat;
+    return karat ? `${g} g · ${karat}` : `${g} g`;
+  }
+  return '';
+}
+
+/**
+ * Die Beschreibung einer Materialzeile: erst das Erfasste, dann die Notiz. Fehlt eines von
+ * beiden, steht nur das andere da.
+ */
+export function materialDescription(line: RepairLineView): string {
+  const detail = materialDetailText(line);
+  const notiz = String(line.description || '').trim();
+  if (detail && notiz) return `${detail} — ${notiz}`;
+  return detail || notiz || '—';
 }
 
 /**

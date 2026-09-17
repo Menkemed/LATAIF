@@ -172,6 +172,47 @@ jedes Bild JPEG ≤ 100 000 B, **nie** `/api/sync/push`, keine Datenbank auf PC2
 4. Diese Grenzenliste widersprach § 2 und § 7 (sie nannte die Werkstattwege als „nicht mobil",
    obwohl V2 sie gebaut hat) — unten korrigiert.
 
+## 9c. Aus dem Feldversuch am Telefon (17.09.2026 behoben)
+
+1. **„Create invoice" scheiterte mit „has no charge".** Die Maske fragt „Customer Pays (BHD)", aber
+   `CREATE_FIELDS` des Telefons kannte `chargeToCustomer` nicht — der Betrag fiel beim ANLEGEN still weg,
+   obwohl `parseRepairCreate` ihn ausdrücklich annimmt. Danach verweigerte der Rechnungsweg zu Recht
+   (`REPAIR_HAS_NO_CHARGE`). Dieselbe Klasse wie die Materialsackgassen: ein Feld ohne Weg. Behoben; der
+   Nachweis führt den Rumpf des Telefons durch den echten Anlagebefehl bis an die Frage des Rechnungswegs.
+   Gegenprobe im Test: **jedes** beim Anlegen sichtbare Maskenfeld hat einen Weg (die Diagnose ist dort
+   ausgeblendet, sie gehört zur Arbeit).
+2. **Zeilen waren am Telefon nicht zu unterscheiden** („polishing · 12.5 · OPEN"). Alles Nötige stand
+   längst in der Zeile, die Auskunft `repairs.get` gab es nur nicht heraus. Jetzt trägt sie Text, Art,
+   Materialangaben und den Namen des Lieferanten — **keine neue Operation, Registry bleibt 176** —, und
+   die Zeile heißt „Quelle · Art — Angaben — Text · Betrag · Stand".
+3. **Materialangaben waren am Rechner unsichtbar.** Menge, Karat je Stück, Gewicht und Karat werden seit
+   jeher gespeichert (`materialDetails`), die Kostenkarte zeigte aber nur die abgeleitete Spalte
+   „COST/CT" — bei Gold nicht einmal die. Jetzt steht in der Beschreibung `3 × 0.25 ct — <Notiz>` bzw.
+   `5.200 g · 21K — <Notiz>`. Betrag, Summe, A/P und jede Buchung unverändert.
+
+**Nebenbefund aus diesem Lauf:** sechs Prüfdateien hielten noch die alte Teilzahl der geladenen Befehle
+(59/18 bzw. 43/18) und waren seit `products.duplicates.get` rot — beim Zählerumbau auf 176 übersehen,
+weil sie nicht die Registry zählen, sondern die Befehle IHRER Importe. Nur Zahlen in Tests, kein Produkt.
+
+## 9d. Offener Feature-Gap — `Repair Gold Usage History`
+
+**Frage aus dem Feldversuch:** ein Goldeinsatz vom KUNDEN war danach am Rechner nirgends zu sehen.
+
+- **Was bei Kundengold mit Rest 0 dauerhaft gespeichert wird: nichts.** `recordRepairGoldUsageInHouse`
+  prüft Karat und Gramm, rechnet den Rest — und kehrt bei `rest <= GRAM_EPS` zurück, ohne zu schreiben.
+  Erst ein Rest erzeugt etwas: „credit" ein Kundengold-Guthaben, „shop_keep" einen Zufluss in den
+  Hausbestand samt Eintrag. „return" — der Kunde nimmt den Rest mit — schreibt ebenfalls nichts.
+  Es entsteht also keine Zeile, keine Schuld, kein Guthaben und kein Eintrag; die Reparatur selbst
+  bleibt unverändert.
+- **Gibt es schon einen Nachweis, aus dem PC2 oder das Telefon den Einsatz anzeigen könnten? Nein.**
+  Das Befehlsbuch (`remote_command_ledger`) hält nur Name, Ausgang und den **Hash** der Nutzlast — die
+  Gramm und das Karat stehen dort nicht, und für eine Erfassung am Rechner gibt es gar keinen Eintrag.
+- **Deshalb offen als eigener Schnitt** `Repair Gold Usage History`: eine dauerhafte Spur je Goldeinsatz
+  (Quelle, Karat, erhalten, verbraucht, Rest samt Verbleib), lesbar für Rechner und Telefon. Hier bewusst
+  NICHT erfunden — das wäre neue Buchungslogik ohne Auftrag.
+- **Kein Lieferant bei Kundengold:** der Hausvertrag verlangt ihn nur für Werkstattgold; die Maske am
+  Telefon blendet das Feld für Kundengold aus. Vertrag und Maske sind einig — nichts zu ändern.
+
 ## 10. Grenzen
 
 - **AI-Live-Nachweis offen (manuell):** ohne hinterlegten Schlüssel ist der Aufruf gegen den echten Anbieter im

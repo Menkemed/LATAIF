@@ -14,6 +14,7 @@ import { readFileSync } from 'node:fs';
 import { shouldAdoptRecord } from '../../src/core/data/form-sync.ts';
 import {
   isOwnWorkLine, ownWorkDescription, showsInternalCostRow, workTypeLabel,
+  materialDescription, materialDetailText,
   OWN_WORK_KIND, OWN_WORK_SOURCE,
 } from '../../src/core/repairs/repair-line-view.ts';
 import { join, dirname } from 'node:path';
@@ -451,6 +452,23 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
   ok(!isOwnWorkLine({ materialKind: 'gold', description: 'Goldschuld' }),
     '§7 …auch die Goldzeile, deren A/P-Spalte „Gold debt" nennt');
 
+  // Materialangaben: gespeichert war es immer, gezeigt wurde es nie — nur die abgeleitete
+  // Spalte „COST/CT", und bei Gold nicht einmal die.
+  const diamant = { supplierId: 'sup-1', materialKind: 'diamond', description: 'Round Brilliant', materialDetails: { qty: 3, ct: 0.25 } };
+  ok(materialDescription(diamant) === '3 × 0.25 ct — Round Brilliant',
+    `§7 Diamant nennt Menge und Karat je Stueck neben der Notiz (${materialDescription(diamant)})`);
+  ok(materialDescription({ materialKind: 'gold', description: 'Fassung', materialDetails: { weightGrams: 5.2, karat: '21K' } })
+    === '5.200 g · 21K — Fassung',
+    '§7 Gold nennt Gewicht und Karat — die Spalte COST/CT bleibt dort leer, also stand bisher gar nichts da');
+  ok(materialDescription({ materialKind: 'stone', materialDetails: { ct: 1.5 } }) === '1 × 1.50 ct',
+    '§7 ohne Menge ist es ein Stueck, ohne Notiz steht nur die Angabe');
+  ok(materialDescription({ materialKind: 'diamond', description: 'nur Text', materialDetails: {} }) === 'nur Text',
+    '§7 …und ohne Angaben bleibt es beim Text, statt etwas zu erfinden');
+  ok(materialDescription({ materialKind: 'gold', materialDetails: {} }) === '—',
+    '§7 …ganz ohne beides der Gedankenstrich von vorher');
+  ok(materialDetailText({ workType: 'polishing', description: 'x' }) === '',
+    '§7 eine Arbeitszeile hat keine Materialangaben — da wird auch keine gebaut');
+
   const detail7 = readFileSync(join(repo, 'src/pages/repairs/RepairDetail.tsx'), 'utf8');
   ok(/const showInHouseRow = showsInternalCostRow\(repair\.repairType, inHouseCost\);/.test(detail7)
     && !/const showInHouseRow = repair\.repairType === 'internal'/.test(detail7),
@@ -458,7 +476,8 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
   ok(/const eigeneArbeit = isOwnWorkLine\(l\);/.test(detail7)
     && /eigeneArbeit \? OWN_WORK_KIND/.test(detail7)
     && /eigeneArbeit \? OWN_WORK_SOURCE/.test(detail7)
-    && /eigeneArbeit \? ownWorkDescription\(l\)/.test(detail7),
+    && /eigeneArbeit \? ownWorkDescription\(l\)/.test(detail7)
+    && /l\.materialKind \? materialDescription\(l\)/.test(detail7),
     '§7 …und die drei Spalten kommen aus derselben Stelle, nicht aus drei Bedingungen im Bauch');
   // Beweis, dass nur die Beschriftung angefasst wurde: die Summe zaehlt weiter Zeilen + Pauschale.
   ok(/const totalCost = explicitLines\.reduce\(\(s, l\) => s \+ \(l\.costAmount \|\| 0\), 0\) \+ inHouseCost;/.test(detail7),

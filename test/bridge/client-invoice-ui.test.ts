@@ -99,8 +99,8 @@ const LEGACY_MODULES = [
   // R7B PP-7 — die Pruefungen an der Fernquelle des alten Formulars (`remoteFormSource`, Benennung,
   // keine Einstandskosten) sind mit ihr entfernt. Festgehalten bleibt die Zahl der Lesevorgaenge.
   const reads = src('src/core/bridge/read-commands.ts');
-  ok((reads.match(/^registerCommand\(/gm) || []).length === 18,
-    'READS die Lesevorgaenge sind auf achtzehn gewachsen');
+  ok((reads.match(/^registerCommand\(/gm) || []).length === 19,
+    'READS die Lesevorgaenge sind auf neunzehn gewachsen (PRE-G5: products.duplicates.get)');
 }
 
 // ── 3) Was das Formular schickt, ist genau das, was der Primary erlaubt ───
@@ -191,8 +191,8 @@ const LEGACY_MODULES = [
   await import('../../src/core/bridge/financial-commands.ts');
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 43 && reads.length === 18 && known.includes('bridge.probe'),
-    `REGISTRY 1 Probe + 18 Reads + 24 Mutationen (${known.join(', ')})`);
+  ok(known.length === 44 && reads.length === 19 && known.includes('bridge.probe'),
+    `REGISTRY 1 Probe + 19 Reads + 24 Mutationen (${known.join(', ')})`);
   ok(registry.ALLOWED_MUTATIONS.includes('invoices.create'),
     `REGISTRY der Name des Formulars steht darauf (${registry.ALLOWED_MUTATIONS.join(', ')})`);
   // R7B PP-7 — die Pruefung „das alte Formular ruft keine fremde Mutation" ist mit ihm entfernt.

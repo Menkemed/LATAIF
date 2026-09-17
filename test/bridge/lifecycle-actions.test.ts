@@ -816,8 +816,8 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
   }
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 59 && reads.length === 18,
-    `SCOPE 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length}/${reads.length})`);
+  ok(known.length === 60 && reads.length === 19,
+    `SCOPE 1 Probe + 19 Reads + 40 Mutationen = 60 (${known.length}/${reads.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   for (const op of life.C3H_LIFECYCLE_MUTATIONS) ok(rust.includes(`"${op}"`), `SCOPE Rust kennt ${op} ebenfalls`);
   ok(!/entity\.delete|"[a-z_]+\.delete"/.test(rust), 'SCOPE es gibt weiterhin keinen generischen Loeschnamen');

@@ -906,6 +906,40 @@ const REPAIR_COLUMNS =
  * `repairs.list`. Das ist deutlich weniger als der bestehende Weg `store.repairs.get`, der einem
  * Client alle Reparaturen der Filiale samt Bildern auf einmal gibt.
  */
+/**
+ * Was an einer Materialzeile erfasst wurde — nur die vier Angaben, die eine Maske anzeigt. Der
+ * Rest des gespeicherten Kastens (Lieferantenname, Text) reist ohnehin als eigenes Feld mit.
+ */
+function materialDetailsOf(v: unknown): Record<string, unknown> | null {
+  if (typeof v !== 'string' || v.trim() === '') return null;
+  try {
+    const parsed: unknown = JSON.parse(v);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const d = parsed as Record<string, unknown>;
+    const out: Record<string, unknown> = {};
+    for (const k of ['qty', 'ct', 'weightGrams'] as const) {
+      if (d[k] !== undefined && d[k] !== null && Number.isFinite(Number(d[k]))) out[k] = Number(d[k]);
+    }
+    if (typeof d.karat === 'string' && d.karat.trim() !== '') out.karat = d.karat.trim();
+    return Object.keys(out).length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+/** Der Name, der im gespeicherten Kasten steht — nur für die Goldschuld ohne Lieferantenkennung. */
+function detailsSupplierName(v: unknown): string {
+  if (typeof v !== 'string' || v.trim() === '') return '';
+  try {
+    const parsed: unknown = JSON.parse(v);
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return '';
+    const n = (parsed as Record<string, unknown>).supplierName;
+    return typeof n === 'string' ? n.trim() : '';
+  } catch {
+    return '';
+  }
+}
+
 function repairImages(v: unknown): string[] {
   if (typeof v !== 'string' || v.trim() === '') return [];
   try {
@@ -1006,13 +1040,26 @@ registerCommand(OP_REPAIRS_GET, {
     // Die Arbeitszeilen gehören dazu: sie tragen die Kosten, und wer den Kopf ändert, muss sehen,
     // worauf er sich bezieht.
     const lines = rows(
-      `SELECT id, supplier_id, work_type, cost_amount, status, position
-         , expense_id FROM repair_lines WHERE repair_id = ? ORDER BY position ASC`,
+      `SELECT id, supplier_id, work_type, description, cost_amount, status, position
+         , material_kind, material_details, expense_id
+         FROM repair_lines WHERE repair_id = ? ORDER BY position ASC`,
       [id],
     ).map((l) => ({
       id: str(l.id),
       supplierId: str(l.supplier_id),
+      // PRE-G5 — eine Zeile ohne ihren Text ist am Telefon nicht zu unterscheiden: „polishing ·
+      // 12.500 · OPEN" sagt nicht, WAS poliert wurde, von wem und woraus. Alles hier stand längst
+      // in der Zeile, es wurde nur nie mitgegeben. Der Name des Lieferanten kommt aus der
+      // Datenbank des Primary, nicht aus einer Liste im Client.
+      // Goldschmied-Gold traegt keine Lieferantenkennung an der Zeile (die Schuld lebt als
+      // `gold_payable`), aber der Name steht im gespeicherten Kasten — sonst hiesse die Zeile am
+      // Telefon faelschlich „In-house".
+      supplierName: str(rows('SELECT name FROM suppliers WHERE id = ?', [str(l.supplier_id)])[0]?.name)
+        || detailsSupplierName(l.material_details),
       workType: str(l.work_type),
+      description: str(l.description),
+      materialKind: str(l.material_kind),
+      materialDetails: materialDetailsOf(l.material_details),
       costAmount: num(l.cost_amount),
       status: str(l.status),
       // Eine Zeile mit gebuchter Zahlung wird nicht mehr geaendert — das sagt der Primary, nicht

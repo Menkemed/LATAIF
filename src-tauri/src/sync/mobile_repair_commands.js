@@ -26,9 +26,12 @@
   // Genau die Felder, die `repairs.create` am Primary annimmt und die auf einem Telefon Sinn
   // haben. Alles andere (Nummer, Status, Kennungen, Filiale, Benutzer, Mandant, Marge) setzt der
   // Primary — das Telefon kann es nicht einmal senden.
+  // `chargeToCustomer` gehoert dazu: die Maske fragt „Customer Pays (BHD)", der Primary nimmt es
+  // beim ANLEGEN an (`parseRepairCreate`), und ohne den Betrag verweigert er spaeter zu Recht die
+  // Rechnung (`REPAIR_HAS_NO_CHARGE`). Bis hierher fiel er still weg — ein Feld ohne Weg.
   const CREATE_FIELDS = [
     'customerId', 'itemBrand', 'itemModel', 'itemReference', 'itemSerial', 'itemDescription',
-    'issueDescription', 'notes', 'estimatedCost', 'estimatedReady',
+    'issueDescription', 'notes', 'estimatedCost', 'chargeToCustomer', 'estimatedReady',
   ];
 
   // Und die Felder einer Aenderung (Teilmenge von REPAIR_EDIT_INPUTS). Der Primary mischt sie
@@ -94,6 +97,48 @@
 
   function valueOf(form, key) {
     return MONEY_FIELDS.indexOf(key) >= 0 ? moneyOrNull(form[key]) : textOrNull(form[key]);
+  }
+
+  /**
+   * Wie eine Kostenzeile am Telefon HEISST. „polishing · 12.500 · OPEN" sagte nicht, was gemacht
+   * wurde, von wem und woraus — dabei steht alles davon laengst in der Zeile (die Auskunft
+   * `repairs.get` gibt es jetzt mit). Dieselbe Schreibweise wie am Rechner
+   * (`core/repairs/repair-line-view.ts`); der Einheitstest haelt beide gegeneinander.
+   */
+  function wortArt(wort) {
+    const t = String(wort || '').trim();
+    if (!t) return '';
+    return t.split('_').map(function (w) { return w.charAt(0).toUpperCase() + w.slice(1); }).join(' ');
+  }
+
+  function materialDetailText(zeile) {
+    const d = (zeile && zeile.materialDetails) || {};
+    const art = String((zeile && zeile.materialKind) || '');
+    if (art === 'diamond' || art === 'stone') {
+      const ct = Number(d.ct);
+      if (!isFinite(ct) || ct <= 0) return '';
+      const menge = Number(d.qty);
+      return (isFinite(menge) && menge > 0 ? menge : 1) + ' × ' + ct.toFixed(2) + ' ct';
+    }
+    if (art === 'gold') {
+      const g = Number(d.weightGrams);
+      const karat = String(d.karat || '').trim();
+      if (!isFinite(g) || g <= 0) return karat;
+      return karat ? g.toFixed(3) + ' g · ' + karat : g.toFixed(3) + ' g';
+    }
+    return '';
+  }
+
+  /** Quelle · Art — Erfasstes — Text · Betrag · Stand. */
+  function lineText(zeile) {
+    const z = zeile || {};
+    const quelle = textOrNull(z.supplierName) || (textOrNull(z.supplierId) ? 'Supplier' : 'In-house');
+    const art = wortArt(z.materialKind || z.workType) || 'Other';
+    const teile = [art, materialDetailText(z), textOrNull(z.description) || ''];
+    const mitte = teile.filter(function (t) { return !!t; }).join(' — ');
+    const betrag = Number(z.costAmount);
+    return [quelle, mitte, (isFinite(betrag) ? betrag : 0).toFixed(3), String(z.status || '')]
+      .filter(function (t) { return !!t; }).join(' · ');
   }
 
   /** Nur gesetzte Felder aus einer Erlaubnisliste — der Rumpf traegt nie ein fremdes Feld. */
@@ -451,6 +496,8 @@
     GOLD_SETTLEMENT: GOLD_SETTLEMENT,
     TAX_SCHEMES: TAX_SCHEMES,
     INHOUSE: INHOUSE,
+    lineText: lineText,
+    materialDetailText: materialDetailText,
     lineBody: lineBody,
     cancelLineBody: cancelLineBody,
     materialBody: materialBody,

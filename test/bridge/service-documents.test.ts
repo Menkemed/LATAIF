@@ -189,8 +189,8 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
   }
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 59 && reads.length === 18,
-    `SCOPE 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length}/${reads.length})`);
+  ok(known.length === 60 && reads.length === 19,
+    `SCOPE 1 Probe + 19 Reads + 40 Mutationen = 60 (${known.length}/${reads.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   for (const op of ['repairs.list', 'repairs.get', 'transfers.list', 'transfers.get',
     'repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned']) {
@@ -659,6 +659,46 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
   (LIST as string[]).splice(before);
   ok(LIST.length === before && !(LIST as string[]).includes('transfers.delete'),
     'CONTROL-C die Liste ist danach wieder genau so lang, und der echte Name steht NICHT darauf');
+}
+
+// ── 9) „Customer Pays" vom TELEFON bis an die Rechnung ───────────────────
+//
+// Der Fund eines echten Durchlaufs: die Maske am Telefon fragt „Customer Pays (BHD)", der Betrag
+// kam aber nie an — und „Create invoice" wurde danach zu Recht mit `REPAIR_HAS_NO_CHARGE`
+// abgewiesen. Geprueft wird deshalb der GANZE Weg: der Rumpf, den die eingebettete Datei des
+// Telefons baut, durch den echten Anlagebefehl, in die Zeile, und dann die Frage, die der
+// Rechnungsweg stellt.
+{
+  resetDurabilityStateForTest();
+  const db = freshDb();
+  const d = deps(db);
+  const telefon: { MobileRepair?: { createBody(f: Record<string, unknown>, ids?: string[]): Record<string, unknown> } } = {};
+  new Function('self', readFileSync(resolvePath(repo, 'src-tauri/src/sync/mobile_repair_commands.js'), 'utf8'))(telefon);
+  const rumpf = telefon.MobileRepair!.createBody({
+    customerId: 'cust-1', itemBrand: 'Rolex', issueDescription: 'Krone klemmt',
+    estimatedCost: '40', chargeToCustomer: '100.500',
+  });
+  ok(rumpf.chargeToCustomer === 100.5, `MOBILE-CHARGE der Rumpf des Telefons traegt den Betrag (${JSON.stringify(rumpf)})`);
+
+  const out = await cmd.runRepairCreate(d, identity('95', 'repairs.create'), rumpf);
+  ok(out.kind === 'ok', `MOBILE-CHARGE die Reparatur entsteht (${JSON.stringify(out)})`);
+  const rid = val<{ repairId: string }>(out).repairId;
+  ok(Math.abs(n(db, 'SELECT charge_to_customer FROM repairs WHERE id = ?', [rid]) - 100.5) < 0.0005,
+    `MOBILE-CHARGE …und der Betrag steht in der Zeile (${n(db, 'SELECT charge_to_customer FROM repairs WHERE id = ?', [rid])})`);
+
+  const { repairInvoiceBlocker } = await import('../../src/core/repairs/repair-rules.ts');
+  const gelesen = {
+    repairNumber: s(db, 'SELECT repair_number FROM repairs WHERE id = ?', [rid]),
+    status: 'ready',
+    invoiceId: null,
+    chargeToCustomer: n(db, 'SELECT charge_to_customer FROM repairs WHERE id = ?', [rid]),
+    repairScope: s(db, 'SELECT repair_scope FROM repairs WHERE id = ?', [rid]),
+    customerId: s(db, 'SELECT customer_id FROM repairs WHERE id = ?', [rid]),
+  };
+  ok(repairInvoiceBlocker(gelesen) === null,
+    `MOBILE-CHARGE …die Rechnung ist damit moeglich (${JSON.stringify(repairInvoiceBlocker(gelesen))})`);
+  ok(repairInvoiceBlocker({ ...gelesen, chargeToCustomer: 0 })?.code === 'REPAIR_HAS_NO_CHARGE',
+    'MOBILE-CHARGE …und ohne Betrag bleibt es bei genau der Ablehnung, die im Feldversuch kam');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3f service documents: ${PASS} passed, ${fails.length} failed`);

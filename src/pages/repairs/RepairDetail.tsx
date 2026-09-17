@@ -52,7 +52,8 @@ import {
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { nextRepairStatus, repairStatusFlow } from '@/core/repairs/repair-status-flow';
 import {
-  isOwnWorkLine, ownWorkDescription, showsInternalCostRow, OWN_WORK_KIND, OWN_WORK_SOURCE,
+  isOwnWorkLine, ownWorkDescription, materialDescription, showsInternalCostRow,
+  OWN_WORK_KIND, OWN_WORK_SOURCE,
 } from '@/core/repairs/repair-line-view';
 import { useSharedRead } from '@/core/data/shared-read';
 import { creditPaidFor } from '@/core/data/domain-reads';
@@ -1287,7 +1288,9 @@ export function RepairDetail() {
                           {eigeneArbeit ? OWN_WORK_SOURCE : (supName || '— own cost')}
                         </span>
                         <span style={{ fontSize: 13, color: '#0F0F10', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
-                          {eigeneArbeit ? ownWorkDescription(l) : (l.description || '—')}
+                          {eigeneArbeit ? ownWorkDescription(l)
+                            : l.materialKind ? materialDescription(l)
+                            : (l.description || '—')}
                         </span>
                         <span className="font-mono" style={{ fontSize: 12, color: '#6B7280', textAlign: 'right', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
                           {perCt > 0 ? <Bhd v={perCt}/> : '—'}

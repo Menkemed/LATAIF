@@ -19,6 +19,7 @@
 // aussen gereicht bekommen, genau damit das hier pruefbar ist.
 // ════════════════════════════════════════════════════════════════════════════
 import { readFileSync } from 'node:fs';
+import { materialDetailText } from '../../src/core/repairs/repair-line-view.ts';
 import { fileURLToPath } from 'node:url';
 import { dirname, resolve as resolvePath, join } from 'node:path';
 
@@ -57,6 +58,8 @@ interface Api {
   editBody(repair: Record<string, unknown>, form: Record<string, unknown>, plan?: unknown[]): Record<string, unknown>;
   editHasChanges(body: Record<string, unknown>): boolean;
   applyAiSuggestions(form: Record<string, unknown>, s: unknown): number;
+  lineText(line: Record<string, unknown>): string;
+  materialDetailText(line: Record<string, unknown>): string;
   classify(status: number, body: unknown): { kind: string; code: string };
   createClient(deps: Record<string, unknown>): {
     read(op: string, input?: unknown): Promise<{ ok: boolean; value?: unknown; status?: number; code?: string }>;
@@ -681,6 +684,78 @@ group('§6 Werkstattwege');
 group('§7 Vokabeln des Hauses');
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// §9 — „Customer Pays" reist beim ANLEGEN mit, und eine Zeile sagt, was sie ist
+//
+// Zwei Funde eines echten Durchlaufs am Telefon:
+//   a) „Create invoice" wurde abgewiesen („has no charge"), obwohl der Betrag in der Maske stand:
+//      `CREATE_FIELDS` kannte `chargeToCustomer` nicht, der Betrag fiel still weg. Ein Feld ohne
+//      Weg — dieselbe Klasse wie die Materialsackgassen.
+//   b) Die Zeilenliste sagte „polishing · 12.5 · OPEN" und damit nichts ueber Quelle, Material
+//      oder Text. Alles davon stand laengst in der Zeile.
+// ══════════════════════════════════════════════════════════════════════════════
+{
+  const rumpf = M.createBody({
+    customerId: 'cust-1', issueDescription: 'Krone klemmt',
+    estimatedCost: '40', chargeToCustomer: '100,500',
+  });
+  ok(rumpf.chargeToCustomer === 100.5,
+    `§9 der Betrag der Maske reist beim Anlegen mit — als Zahl (${J(rumpf.chargeToCustomer)})`);
+  ok(M.CREATE_FIELDS.includes('chargeToCustomer') && M.MONEY_FIELDS.includes('chargeToCustomer'),
+    '§9 …er steht in der Anlageliste und gilt als Geld');
+
+  // Der Primary nimmt beim ANLEGEN genau das an — aus seinem Quelltext gelesen, nicht geraten.
+  const erlaubt = /export function parseRepairCreate[\s\S]*?onlyKnownFields\(raw, \[([\s\S]*?)\]\);/
+    .exec(src('src/core/bridge/service-commands.ts'))?.[1] ?? '';
+  const primaerFelder = [...erlaubt.matchAll(/'([^']+)'/g)].map((m) => m[1]);
+  const fremd = M.CREATE_FIELDS.filter((f) => f !== 'customerId' && !primaerFelder.includes(f));
+  ok(primaerFelder.includes('chargeToCustomer') && fremd.length === 0,
+    `§9 …und der Primary nimmt jedes Feld der Anlage an (fremd: ${fremd.join(', ') || 'keins'})`);
+
+  // Die Gegenprobe zum Fund: JEDES Maskenfeld, das beim Anlegen SICHTBAR ist, hat einen Weg.
+  // Sichtbar = in `RP_INPUTS` und nicht beim Anlegen ausgeblendet (`rpDiagnosisRow`).
+  const ui = src('src-tauri/src/sync/mobile_repair_ui.js');
+  const zuordnung = /const RP_INPUTS = \{([\s\S]*?)\};/.exec(ui)?.[1] ?? '';
+  const maskenFelder = [...zuordnung.matchAll(/([a-zA-Z]+):\s*'([^']+)'/g)].map((m) => m[1]);
+  ok(maskenFelder.length >= 10, `§9 die Feldzuordnung der Maske ist lesbar (${maskenFelder.length})`);
+  const versteckt = /rpNewIntake\(\)[\s\S]*?\$\('rpDiagnosisRow'\)\.classList\.add\('hidden'\)/.test(ui)
+    ? ['diagnosis'] : [];
+  ok(versteckt.length === 1, '§9 …und die Diagnose ist beim Anlegen ausgeblendet (sie gehoert zur Arbeit)');
+  const sackgassen = maskenFelder.filter((f) => !versteckt.includes(f) && !M.CREATE_FIELDS.includes(f));
+  ok(sackgassen.length === 0,
+    `§9 kein sichtbares Feld der Anlage ohne Weg (Sackgasse: ${sackgassen.join(', ') || 'keine'})`);
+
+  // b) Die Beschriftung einer Zeile.
+  ok(M.lineText({ workType: 'polishing', description: 'Gehaeuse und Band', costAmount: 12.5, status: 'OPEN' })
+    === 'In-house · Polishing — Gehaeuse und Band · 12.500 · OPEN',
+    `§9 eigene Arbeit: Quelle, Art, Text, Betrag, Stand (${M.lineText({ workType: 'polishing', description: 'Gehaeuse und Band', costAmount: 12.5, status: 'OPEN' })})`);
+  ok(M.lineText({ supplierId: 'sup-1', supplierName: 'Al Noor', workType: 'spare_part', description: 'Zugfeder', costAmount: 25, status: 'OPEN' })
+    === 'Al Noor · Spare Part — Zugfeder · 25.000 · OPEN',
+    '§9 fremde Arbeit nennt den Lieferanten beim Namen');
+  const stein = { supplierId: 'sup-1', supplierName: 'Al Noor', materialKind: 'diamond', description: 'Round Brilliant', materialDetails: { qty: 3, ct: 0.25 }, costAmount: 45, status: 'OPEN' };
+  ok(M.lineText(stein) === 'Al Noor · Diamond — 3 × 0.25 ct — Round Brilliant · 45.000 · OPEN',
+    `§9 Diamant nennt Menge und Karat je Stueck (${M.lineText(stein)})`);
+  const gold = { supplierName: 'Goldsmith Ali', materialKind: 'gold', description: 'Fassung', materialDetails: { weightGrams: 5.2, karat: '21K' }, costAmount: 80, status: 'OPEN' };
+  ok(M.lineText(gold) === 'Goldsmith Ali · Gold — 5.200 g · 21K — Fassung · 80.000 · OPEN',
+    `§9 Gold nennt Gewicht und Karat — und den Goldschmied, obwohl die Zeile keine Lieferantenkennung traegt (${M.lineText(gold)})`);
+  ok(M.lineText({ materialKind: 'gold', materialDetails: {}, costAmount: 3, status: 'CANCELLED' })
+    === 'In-house · Gold · 3.000 · CANCELLED',
+    '§9 …und was fehlt, wird nicht erfunden: kein leerer Gedankenstrich');
+
+  // Dieselbe Schreibweise wie am Rechner — sonst liest dasselbe Stueck an zwei Orten anders.
+  ok(M.materialDetailText(stein) === materialDetailText(stein as never)
+    && M.materialDetailText(gold) === materialDetailText(gold as never),
+    '§9 Telefon und Rechner schreiben die Materialangaben Zeichen fuer Zeichen gleich');
+
+  // Die Auskunft gibt die Felder auch wirklich heraus (sonst bliebe die Beschriftung leer).
+  const reads = src('src/core/bridge/read-commands.ts');
+  ok(/SELECT id, supplier_id, work_type, description, cost_amount, status, position[\s\S]*?material_kind, material_details/.test(reads)
+    && /materialDetails: materialDetailsOf\(l\.material_details\)/.test(reads)
+    && /supplierName: str\(rows\('SELECT name FROM suppliers WHERE id = \?'/.test(reads),
+    '§9 `repairs.get` gibt Text, Art, Materialangaben und den Namen des Lieferanten mit heraus');
+}
+group('§9 Anlagebetrag und Zeilenbeschriftung');
+
 for (const [name, n] of groups) console.log(`  ${name}: ${n}`);
 if (fails.length > 0) {
   console.log(`\nFAIL — preg5 mobile repair: ${PASS} passed, ${fails.length} failed`);

@@ -276,8 +276,9 @@
     box.innerHTML = '';
     lines.forEach((l) => {
       const zeile = el('div', { class: 'row' });
-      zeile.appendChild(el('div', { class: 'hint' },
-        (l.workType || 'work') + ' · ' + (l.costAmount || 0) + ' · ' + (l.status || '')));
+      // Quelle, Art, Erfasstes, Text, Betrag, Stand — die Beschriftung baut MobileRepair, damit am
+      // Telefon und am Rechner dieselbe Schreibweise steht.
+      zeile.appendChild(el('div', { class: 'hint' }, MobileRepair.lineText(l)));
       // Zuruecknehmen nur, wo der PRIMARY es erlaubt: `editable` heisst offen und ohne gebuchte
       // Zahlung. Das entscheidet er, nicht eine Nachbildung hier.
       if (l.editable) {
