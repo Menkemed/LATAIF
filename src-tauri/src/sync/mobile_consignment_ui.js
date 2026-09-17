@@ -55,6 +55,8 @@
     draftKey: null, busy: false, scope: new Set(), werkKeys: {},
     // Was „Copy details" an Verkaufsvorstellungen uebernommen hat — ohne Uebernahme leer.
     preise: {},
+    // Objekt-URLs der gespeicherten Bilder dieser Ansicht.
+    bildUrls: [],
   };
 
   function cnSay(id, text, good) {
@@ -157,7 +159,9 @@
     CN.slots.forEach((slot, i) => {
       const t = el('div', { class: 'photo-thumb' + (i === 0 ? ' is-primary' : '') });
       const im = el('img');
-      im.src = slot.src || slot.dataUrl;
+      // Ohne Bytes bleibt das Bild LEER statt kaputt: ein gespeichertes Foto wird gerade geholt.
+      const quelle = slot.src || slot.dataUrl;
+      if (quelle) im.src = quelle;
       t.appendChild(im);
       if (i === 0) t.appendChild(el('div', { class: 'cover' }, 'FIRST'));
       const rm = el('button', { type: 'button', class: 'rm' }, '✕');
@@ -350,12 +354,43 @@
     msg.classList.toggle('hidden', !gesperrt);
   }
   function cnFillProduct(p) {
+    cnGibBilderFrei();
     CN.slots = [];
     if (p && Array.isArray(p.mediaKeys)) {
       p.mediaKeys.forEach((key, i) => {
-        CN.slots.push({ mediaId: (p.mediaIds || [])[i], src: '/api/media?key=' + encodeURIComponent(key) });
+        // Die ADRESSE der Medienroute gehoert NIE in ein `src`: die Route ist angemeldet, ein
+        // `<img>` schickt aber keinen Ausweis — der Browser bekaeme eine Abweisung und zeichnete
+        // eine schwarze Kachel. Die Bytes holt deshalb dieselbe angemeldete Abholung wie an der
+        // Artikelansicht (`paintMedia`) und bei „Copy details"; die Medienkennung bleibt am Platz,
+        // damit ein Speichern weiterhin `{keep:<mediaId>}` schickt.
+        CN.slots.push({ mediaId: (p.mediaIds || [])[i], key: key });
       });
+      void cnMalGespeicherteBilder();
     }
+  }
+
+  /** Objekt-URLs dieser Ansicht — sie werden freigegeben, sobald eine andere geladen wird. */
+  function cnGibBilderFrei() {
+    while (CN.bildUrls.length) { try { URL.revokeObjectURL(CN.bildUrls.pop()); } catch (x) { /* egal */ } }
+  }
+
+  /** Ein gespeichertes Bild angemeldet holen und als Objekt-URL an die Vorschau geben. */
+  async function cnMalGespeicherteBilder() {
+    let gemalt = 0;
+    for (const slot of CN.slots) {
+      if (slot.src || !slot.key) continue;
+      try {
+        const res = await fetch('/api/media?key=' + encodeURIComponent(slot.key), {
+          headers: { Authorization: 'Bearer ' + (localStorage.getItem(TOKEN_KEY) || '') },
+        });
+        if (!res.ok) continue;
+        const url = URL.createObjectURL(await res.blob());
+        CN.bildUrls.push(url);
+        slot.src = url;
+        gemalt += 1;
+      } catch (err) { /* ein fehlendes Foto darf die Maske nicht aufhalten */ }
+    }
+    if (gemalt) cnRenderPhotos();
   }
 
   function cnRenderState(con) {
@@ -462,6 +497,7 @@
     CN.mode = 'create';
     CN.con = null;
     CN.product = null;
+    cnGibBilderFrei();
     CN.slots = [];
     CN.draftKey = uuid();
     CN.buyer = null;

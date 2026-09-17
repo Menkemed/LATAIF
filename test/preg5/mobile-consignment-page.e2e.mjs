@@ -98,6 +98,8 @@ if (process.env.PREG5_DUMP) {
 
 let antwortGeber = () => ({ status: 200, body: { ok: true, value: {} } });
 const gesehen = [];
+/** Jeder Abruf der Medienroute — mit dem Ausweis, den er mitgebracht hat (oder ohne). */
+const medienAbrufe = [];
 const server = createServer((req, res) => {
   if (req.method === 'GET') {
     const js = {
@@ -109,6 +111,14 @@ const server = createServer((req, res) => {
       return;
     }
     if (req.url.startsWith('/api/media')) {   // eine winzige echte PNG-Antwort
+      // Wie die ECHTE Route: sie laeuft hinter der Anmeldung. Ohne Ausweis gibt es nichts —
+      // ein nacktes `<img src="/api/media?...">` faellt damit hier genauso auf wie im Haus.
+      medienAbrufe.push({ url: req.url, ausweis: String(req.headers.authorization || '') });
+      if (!/^Bearer .+/.test(String(req.headers.authorization || ''))) {
+        res.writeHead(401, { 'content-type': 'application/json' });
+        res.end('{"error":"unauthorized"}');
+        return;
+      }
       res.writeHead(200, { 'content-type': 'image/png' });
       res.end(Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64'));
       return;
@@ -399,6 +409,28 @@ try {
     preis: document.getElementById('cnAgreedPrice').value };`);
   ok(geladen.kopf === 'CON-2026-0007' && geladen.fotos === 2 && geladen.ware && geladen.preis === '500',
     `§2 nach dem Anlegen steht die Kommission da — mit den GESPEICHERTEN Bildern (${S(geladen)})`);
+
+  // §2b — die Vorschau eines GESPEICHERTEN Bildes. Die Medienroute laeuft hinter der Anmeldung;
+  // ein nacktes `<img src="/api/media?...">` bekaeme eine Abweisung und zeichnete eine schwarze
+  // Kachel. Genau das war der Feldbefund.
+  for (let i = 0; i < 30; i++) {
+    const fertig = await c.ev(`return Array.from(document.querySelectorAll('#cnPhotoStrip img'))
+      .every((e) => (e.getAttribute('src') || '').indexOf('blob:') === 0);`);
+    if (fertig) break;
+    await sleep(200);
+  }
+  const quellen = await c.ev(`return Array.from(document.querySelectorAll('#cnPhotoStrip img'))
+    .map((e) => (e.getAttribute('src') || '').slice(0, 5));`);
+  ok(S(quellen) === S(['blob:', 'blob:']),
+    `§2b die Vorschau haengt an einer Objekt-URL, nicht an der Adresse der Medienroute (${S(quellen)})`);
+  ok(await c.ev(`return Array.from(document.querySelectorAll('#cnPhotoStrip img'))
+    .every((e) => !/\\/api\\/media/.test(e.getAttribute('src') || ''));`),
+    '§2b …kein Bild zeigt direkt auf `/api/media`');
+  ok(medienAbrufe.length >= 2 && medienAbrufe.every((m) => /^Bearer .+/.test(m.ausweis)),
+    `§2b jeder Abruf der Medienroute bringt den Ausweis mit (${S(medienAbrufe.map((m) => !!m.ausweis))})`);
+  ok(await c.ev(`return Array.from(document.querySelectorAll('#cnPhotoStrip img'))
+    .every((e) => e.naturalWidth > 0);`),
+    '§2b …und die Bytes sind wirklich angekommen — die Vorschau ist nicht leer');
 
   antwortGeber = (u, body) => {
     if (/staging/.test(u)) return { status: 201, body: { stagingId: 'b'.repeat(64) } };
