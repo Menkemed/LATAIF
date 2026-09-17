@@ -51,6 +51,9 @@ import {
 } from '@/core/repairs/repair-house';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { nextRepairStatus, repairStatusFlow } from '@/core/repairs/repair-status-flow';
+import {
+  isOwnWorkLine, ownWorkDescription, showsInternalCostRow, OWN_WORK_KIND, OWN_WORK_SOURCE,
+} from '@/core/repairs/repair-line-view';
 import { useSharedRead } from '@/core/data/shared-read';
 import { creditPaidFor } from '@/core/data/domain-reads';
 // CENTRAL-UI-PARITY R6D — „Add Gold Usage" und „Add Material": dieselbe Hausfolge wie der Fernbefehl.
@@ -1203,7 +1206,7 @@ export function RepairDetail() {
             const inHouseCost = (repair.internalCost
               ?? (repair.repairType === 'internal' ? repair.estimatedCost : 0)
               ?? 0);
-            const showInHouseRow = repair.repairType === 'internal' || repair.repairType === 'hybrid';
+            const showInHouseRow = showsInternalCostRow(repair.repairType, inHouseCost);
             const totalLineCount = explicitLines.length + (showInHouseRow ? 1 : 0);
             const totalCost = explicitLines.reduce((s, l) => s + (l.costAmount || 0), 0) + inHouseCost;
             const charge = repair.chargeToCustomer || 0;
@@ -1261,6 +1264,10 @@ export function RepairDetail() {
                     const km = COST_KIND_META[l.materialKind || l.workType || 'other'] || COST_KIND_META.other;
                     const sup = l.supplierId ? suppliers.find(s => s.id === l.supplierId) : null;
                     const supName = sup?.name || l.materialDetails?.supplierName;
+                    // Eigene Arbeit heisst auch so: Kind „In-house", Quelle „Internal labor / own
+                    // work", und die Beschreibung nennt die Arbeitsart samt Notiz. Nur Beschriftung
+                    // — Betrag, Buchung und A/P-Spalte bleiben, was sie sind.
+                    const eigeneArbeit = isOwnWorkLine(l);
                     const totalCt = (l.materialDetails?.ct || 0) * (l.materialDetails?.qty || 0);
                     const perCt = (l.materialKind === 'diamond' || l.materialKind === 'stone') && totalCt > 0
                       ? (l.costAmount || 0) / totalCt : 0;
@@ -1270,15 +1277,17 @@ export function RepairDetail() {
                       && (l.materialDetails?.weightGrams || 0) > 0 && !!l.materialDetails?.supplierName;
                     return (
                       <div key={l.id} style={{ display: 'contents' }}>
-                        <span style={{ fontSize: 12, padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>{km.icon} {km.label}</span>
-                        <span style={{ fontSize: 12, color: supName ? '#0F0F10' : '#9CA3AF',
+                        <span style={{ fontSize: 12, padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
+                          {eigeneArbeit ? OWN_WORK_KIND : `${km.icon} ${km.label}`}
+                        </span>
+                        <span style={{ fontSize: 12, color: (supName && !eigeneArbeit) ? '#0F0F10' : '#9CA3AF',
                                        padding: '10px 0', borderTop: '1px solid #E5E9EE',
-                                       cursor: sup ? 'pointer' : 'default' }}
-                          onClick={() => sup && navigate(`/suppliers/${sup.id}`)}>
-                          {supName || '— own cost'}
+                                       cursor: (sup && !eigeneArbeit) ? 'pointer' : 'default' }}
+                          onClick={() => !eigeneArbeit && sup && navigate(`/suppliers/${sup.id}`)}>
+                          {eigeneArbeit ? OWN_WORK_SOURCE : (supName || '— own cost')}
                         </span>
                         <span style={{ fontSize: 13, color: '#0F0F10', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
-                          {l.description || '—'}
+                          {eigeneArbeit ? ownWorkDescription(l) : (l.description || '—')}
                         </span>
                         <span className="font-mono" style={{ fontSize: 12, color: '#6B7280', textAlign: 'right', padding: '10px 0', borderTop: '1px solid #E5E9EE' }}>
                           {perCt > 0 ? <Bhd v={perCt}/> : '—'}

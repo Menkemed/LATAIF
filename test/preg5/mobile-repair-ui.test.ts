@@ -12,6 +12,10 @@
 
 import { readFileSync } from 'node:fs';
 import { shouldAdoptRecord } from '../../src/core/data/form-sync.ts';
+import {
+  isOwnWorkLine, ownWorkDescription, showsInternalCostRow, workTypeLabel,
+  OWN_WORK_KIND, OWN_WORK_SOURCE,
+} from '../../src/core/repairs/repair-line-view.ts';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -405,6 +409,62 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
   const svc = readFileSync(join(repo, 'src/core/bridge/service-commands.ts'), 'utf8');
   ok(/'RECORD_CHANGED',/.test(svc),
     '§6 …und ein veralteter Stand bleibt ein RECORD_CHANGED des Primary');
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// §7 — Kostenkarte der Reparatur: eigene Arbeit heisst auch so (NUR Darstellung)
+//
+// Eine im Haus gearbeitete Zeile trug ihre Arbeitsart als „Kind" und in der Quellenspalte ein
+// blasses „— own cost"; die Pauschale des Kopfes sah fast genauso aus und stand selbst dann da,
+// wenn sie 0,000 war. Jetzt: Kind „In-house", Quelle „Internal labor / own work", Beschreibung
+// = Arbeitsart und Notiz — und die Pauschale nur, wenn es sie wirklich gibt.
+// Gerechnet und gebucht wird NICHTS anders; das ist hier mitbewiesen.
+// ══════════════════════════════════════════════════════════════════════════════
+{
+  const polieren = { workType: 'polishing', description: 'Gehaeuse und Band, Hochglanz' };
+  ok(isOwnWorkLine(polieren), '§7 eine Arbeitszeile ohne Lieferant ist eigene Arbeit');
+  ok(ownWorkDescription(polieren) === 'Polishing — Gehaeuse und Band, Hochglanz',
+    `§7 …und die Beschreibung nennt Arbeitsart UND Notiz (${ownWorkDescription(polieren)})`);
+  ok(OWN_WORK_KIND === '🏠 In-house' && OWN_WORK_SOURCE === 'Internal labor / own work',
+    `§7 …unter „In-house" mit der Quelle des eigenen Hauses (${OWN_WORK_KIND} / ${OWN_WORK_SOURCE})`);
+
+  const ohneNotiz = { workType: 'polishing', description: '' };
+  ok(ownWorkDescription(ohneNotiz) === 'Polishing',
+    `§7 ohne Notiz bleibt es bei der Arbeitsart — kein einsamer Gedankenstrich (${ownWorkDescription(ohneNotiz)})`);
+  ok(ownWorkDescription({ description: 'ohne Art' }) === 'Other — ohne Art',
+    '§7 …und eine Zeile ohne Arbeitsart faellt auf „Other", statt leer zu bleiben');
+  ok(workTypeLabel('spare_part') === 'Spare Part',
+    '§7 die Arbeitsart wird geschrieben wie in der Auswahl der Maske');
+
+  ok(!showsInternalCostRow('internal', 0) && !showsInternalCostRow('hybrid', 0),
+    '§7 ohne Pauschale (Internal Cost = 0) gibt es KEINE Pauschalen-Zeile mehr');
+  ok(showsInternalCostRow('internal', 12.5) && showsInternalCostRow('hybrid', 0.001),
+    '§7 …mit Pauschale steht sie weiterhin da');
+  ok(!showsInternalCostRow('external', 12.5),
+    '§7 …und eine reine Fremdreparatur hat ohnehin keine');
+
+  // Fremde Zeilen bleiben, wie sie waren — Lieferant, Material, Goldschuld.
+  ok(!isOwnWorkLine({ workType: 'polishing', supplierId: 'sup-1' }),
+    '§7 eine Zeile MIT Lieferant ist keine Hauszeile — sie zeigt weiter den Lieferanten');
+  ok(!isOwnWorkLine({ materialKind: 'diamond', description: 'Round Brilliant' }),
+    '§7 …und eine Materialzeile behaelt ihre eigene Art (Diamond), auch ohne Lieferant');
+  ok(!isOwnWorkLine({ materialKind: 'gold', description: 'Goldschuld' }),
+    '§7 …auch die Goldzeile, deren A/P-Spalte „Gold debt" nennt');
+
+  const detail7 = readFileSync(join(repo, 'src/pages/repairs/RepairDetail.tsx'), 'utf8');
+  ok(/const showInHouseRow = showsInternalCostRow\(repair\.repairType, inHouseCost\);/.test(detail7)
+    && !/const showInHouseRow = repair\.repairType === 'internal'/.test(detail7),
+    '§7 die Karte fragt genau diese Regel — die alte, bedingungslose Zeile ist weg');
+  ok(/const eigeneArbeit = isOwnWorkLine\(l\);/.test(detail7)
+    && /eigeneArbeit \? OWN_WORK_KIND/.test(detail7)
+    && /eigeneArbeit \? OWN_WORK_SOURCE/.test(detail7)
+    && /eigeneArbeit \? ownWorkDescription\(l\)/.test(detail7),
+    '§7 …und die drei Spalten kommen aus derselben Stelle, nicht aus drei Bedingungen im Bauch');
+  // Beweis, dass nur die Beschriftung angefasst wurde: die Summe zaehlt weiter Zeilen + Pauschale.
+  ok(/const totalCost = explicitLines\.reduce\(\(s, l\) => s \+ \(l\.costAmount \|\| 0\), 0\) \+ inHouseCost;/.test(detail7),
+    '§7 die Kostensumme ist unveraendert — es wurde nichts umgerechnet');
+  ok(!/repair-line-view/.test(readFileSync(join(repo, 'src/core/repairs/repair-cost.ts'), 'utf8')),
+    '§7 …und die Rechnung des Hauses weiss von dieser Beschriftung nichts');
 }
 
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — preg5 mobile repair ui: ${PASS} passed, ${FAIL} failed`);
