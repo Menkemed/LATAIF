@@ -190,7 +190,7 @@ const REPAIR_COMPARE = [
   const service = codeOf('src/core/bridge/service-commands.ts');
   ok(/createRepairOnPrimary\(form\)/.test(list) && /internalCost: input\.repairScope === 'OWN' && input\.repairType === 'hybrid'\s*\?\s*\(input\.internalCost \?\? 0\)\s*:\s*internalCostOnCreate\(input\)/.test(rules),
     'CALLPATH die Aufnahme leitet die eigenen Kosten mit der GETEILTEN Primitive ab');
-  ok(/updateRepairOnPrimary\(id, form\)/.test(detail) && /internalCost: internalCostOnEdit\(cost, openLineTotal\)/.test(rules)
+  ok(/updateRepairOnPrimary\(id, form, fassung\)/.test(detail) && /internalCost: internalCostOnEdit\(cost, openLineTotal\)/.test(rules)
     && /repairMargin\(cost\)/.test(rules),
     'CALLPATH …und die Detailseite ebenso');
   ok(src('src/pages/repairs/RepairList.tsx').includes('repair-rules') && src('src/pages/repairs/RepairDetail.tsx').includes('repair-rules')

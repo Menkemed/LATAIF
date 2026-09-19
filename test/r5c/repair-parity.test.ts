@@ -89,6 +89,7 @@ const { useRepairStore } = await import('../../src/stores/repairStore.ts');
 const { useSupplierStore } = await import('../../src/stores/supplierStore.ts');
 const house = await import('../../src/core/repairs/repair-house.ts');
 const rules = await import('../../src/core/repairs/repair-rules.ts');
+const { editBaselineRevision, shouldAdoptRecord } = await import('../../src/core/data/form-sync.ts');
 const { R4C_MATRIX } = await import('../uiparity/_r4c-write-matrix.ts');
 
 let PASS = 0; const fails: string[] = [];
@@ -452,7 +453,7 @@ async function aendernZwilling(weg: 'lokal' | 'fern') {
     const seen = rs.getRepair(rid) as unknown as Record<string, unknown>;
     const form = schritt(seen);
     if (weg === 'lokal') {
-      await house.updateRepairOnPrimary(rid, form as never);
+      await house.updateRepairOnPrimary(rid, form as never, rev(db, rid));
     } else {
       const photos = rules.repairPhotosChanged(seen as never, form as never)
         ? await rules.repairPhotoPlan(seen.images as string[], form.images as string[], ablegen)
@@ -839,7 +840,7 @@ for (const weg of ['fern', 'lokal'] as const) {
     rs.loadRepairs();
     const seen = rs.getRepair(r.id) as unknown as Record<string, unknown>;
     let c = '';
-    try { await house.updateRepairOnPrimary(r.id, { ...seen, [f]: -1 } as never); } catch (e) { c = code(e); }
+    try { await house.updateRepairOnPrimary(r.id, { ...seen, [f]: -1 } as never, Number(seen.revision)); } catch (e) { c = code(e); }
     ok(c === 'INVALID_AMOUNT', `AMOUNT am Primary: ${f} < 0 beim Speichern ist ein Nein (${c || 'DURCHGELASSEN'})`);
     let t = false;
     try { cmd.parseRepairUpdate({ id: r.id, expectedRevision: 1, [f]: -1 }); } catch { t = true; }
@@ -969,6 +970,89 @@ for (const weg of ['fern', 'lokal'] as const) {
   ok((house2.match(/return amPrimary\(/g) || []).length === 6, 'TRIPWIRE alle sechs Handlungen laufen durch EINE Klammer');
 }
 
+// ── §9 Veralteter Entwurf am PRIMARY (Live-Test 19.09.2026, Schritt 34) ──────────────────────
+// Primary öffnet Edit → PC2 ändert dieselbe Reparatur und speichert → Primary „Save" überschrieb die
+// PC2-Änderung still. Jetzt: derselbe Fassungsvertrag wie der Fernbefehl, Fassung von BEIM EINTRITT.
+{
+  const db = freshDb();
+  const rs = useRepairStore.getState();
+  const neu = async (notes: string) => (await house.createRepairOnPrimary({
+    repairScope: 'CUSTOMER', customerId: 'cust-1', issueDescription: 'stale', repairType: 'internal', estimatedCost: 10, notes,
+  } as never)).id;
+  const eintritt = (id: string) => { rs.loadRepairs(); return rs.getRepair(id) as unknown as Record<string, unknown>; };
+
+  // (1) Ohne fremde Änderung: Save geht durch.
+  const r1 = await neu('eins');
+  const a1 = eintritt(r1);
+  const b1 = editBaselineRevision(a1 as never);
+  ok(b1 === rev(db, r1), `STALE(1) die Fassung beim Eintritt ist die der Zeile (${b1})`);
+  await house.updateRepairOnPrimary(r1, { ...a1, notes: 'eins geaendert' } as never, b1 as number);
+  ok(s(db, 'SELECT notes FROM repairs WHERE id = ?', [r1]) === 'eins geaendert' && rev(db, r1) === (b1 as number) + 1,
+    'STALE(1) Primary-Save ohne Fremdaenderung speichert');
+
+  // (2) Primary tritt ein, PC2 speichert, Primary speichert.
+  const rid = await neu('alt');
+  const adopted = eintritt(rid);
+  const basis = editBaselineRevision(adopted as never) as number;
+  const entwurf = { ...adopted, notes: 'Entwurfstest' };
+  const pc2Seen = eintritt(rid);
+  const pc2Out = await cmd.runRepairUpdate(deps(db), identity('9001', 'repairs.update'),
+    rules.repairEditBody(rid, rev(db, rid), pc2Seen as never, { ...pc2Seen, notes: 'PC2', diagnosis: 'von PC2' } as never, undefined));
+  ok(pc2Out.kind === 'ok', `STALE(2) PC2 speichert ueber den Fernbefehl (${JSON.stringify(pc2Out).slice(0, 120)})`);
+  const nachPc2 = rev(db, rid);
+
+  // (4) Das Hintergrund-Neuladen ersetzt den Entwurf nicht — und verschiebt die Fassung nicht.
+  const geladen = eintritt(rid);
+  ok(geladen !== adopted && !shouldAdoptRecord(geladen, adopted, true),
+    'STALE(4) Background-Reload waehrend Edit: die Maske uebernimmt NICHT, der Entwurf bleibt');
+  ok(editBaselineRevision(adopted as never) === basis && Number(geladen.revision) === nachPc2 && nachPc2 > basis,
+    `STALE(4) …die Save-Fassung bleibt die vom Eintritt (${basis}), nicht die neu geladene (${nachPc2})`);
+
+  const buchungenVorher = buchungen(db);
+  let c = ''; let msg = '';
+  try { await house.updateRepairOnPrimary(rid, entwurf as never, basis); } catch (e) { c = code(e); msg = String((e as Error).message); }
+  ok(c === 'RECORD_CHANGED', `STALE(2) Primary-Save gegen die alte Fassung → RECORD_CHANGED (${c || 'DURCHGELASSEN'})`);
+  ok(/changed since you opened it/.test(msg) && /nothing was saved/.test(msg) && /Cancel/.test(msg),
+    `STALE(2) …mit verstaendlichem Hinweis (${msg.slice(0, 90)})`);
+  // (3) Die PC2-Änderung bleibt; nichts teilweise gespeichert.
+  ok(s(db, 'SELECT notes FROM repairs WHERE id = ?', [rid]) === 'PC2'
+    && s(db, 'SELECT diagnosis FROM repairs WHERE id = ?', [rid]) === 'von PC2' && rev(db, rid) === nachPc2,
+    'STALE(3) die PC2-Aenderung bleibt erhalten, keine Fassung verbraucht');
+  ok(buchungen(db) === buchungenVorher, 'STALE(3) …und keine Buchung hat sich bewegt (nichts teilweise)');
+
+  // Derselbe Vertrag wie am zweiten Rechner: ein PC2-Save gegen die alte Fassung ergibt denselben Code.
+  const fern = await cmd.runRepairUpdate(deps(db), identity('9002', 'repairs.update'),
+    rules.repairEditBody(rid, basis, adopted as never, entwurf as never, undefined));
+  ok(fern.kind !== 'ok' && code(fern) === 'RECORD_CHANGED', `STALE(2) …der Fernbefehl urteilt identisch (${code(fern)})`);
+
+  // Ohne gültige Fassung wird gar nicht gespeichert.
+  ok(editBaselineRevision(undefined) === null && editBaselineRevision({} as never) === null
+    && editBaselineRevision({ revision: 0 } as never) === null, 'STALE keine gelesene Fassung → kein Save');
+  let c0 = '';
+  try { await house.updateRepairOnPrimary(rid, entwurf as never, Number.NaN); } catch (e) { c0 = code(e); }
+  ok(c0 === 'RECORD_CHANGED' && s(db, 'SELECT notes FROM repairs WHERE id = ?', [rid]) === 'PC2',
+    `STALE …und am Primary faellt eine ungueltige Fassung geschlossen aus (${c0})`);
+
+  // (5) Nach Cancel übernimmt die Maske den aktuellen Stand — und speichert dann gegen DESSEN Fassung.
+  ok(shouldAdoptRecord(geladen, adopted, false), 'STALE(5) nach Cancel uebernimmt die Maske den neuen Stand');
+  ok(geladen.notes === 'PC2' && geladen.diagnosis === 'von PC2', 'STALE(5) …und sieht die PC2-Aenderung');
+  const basis2 = editBaselineRevision(geladen as never) as number;
+  await house.updateRepairOnPrimary(rid, { ...geladen, notes: 'nach Reload' } as never, basis2);
+  ok(s(db, 'SELECT notes FROM repairs WHERE id = ?', [rid]) === 'nach Reload'
+    && s(db, 'SELECT diagnosis FROM repairs WHERE id = ?', [rid]) === 'von PC2',
+    'STALE(5) …ein erneutes Save auf frischem Stand geht durch und behaelt die PC2-Diagnose');
+
+  // Verdrahtung der Maske: die Fassung von BEIM EINTRITT, an beide Wege.
+  const detail = codeOf(src('src/pages/repairs/RepairDetail.tsx'));
+  ok(/const fassung = editBaselineRevision\(formVon\);/.test(detail)
+    && /local: \(\) => updateRepairOnPrimary\(id, form, fassung\)/.test(detail)
+    && /remote: \(\) => repairEditBody\(id, fassung, repair, form, photos\)/.test(detail),
+    'STALE Detailseite: Save nimmt die Eintritts-Fassung fuer Primary UND zweiten Rechner');
+  const h = codeOf(src('src/core/repairs/repair-house.ts'));
+  ok(/return amPrimary\(\(\) => \{\s*assertRepairRevision\(id, expectedRevision\);/.test(h),
+    'STALE repair-house: die Fassung wird ZUERST in der Klammer geprueft');
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r5c: repair create/update/invoice parity: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
 console.log('CENTRAL_UI_R5C_REPAIR_SCOPE_FROZEN');
@@ -981,3 +1065,4 @@ console.log('CENTRAL_UI_R5C_REPAIR_INPUT_AUTHORITY_PROVED');
 console.log('CENTRAL_UI_R5C_INVOICE_DESCRIPTION_CONTRACT_PINNED');
 console.log('CENTRAL_UI_R5C_AMOUNT_SIGN_CONTRACT_PINNED');
 console.log('CENTRAL_UI_R5C_BILLABLE_CONTRACT_PINNED');
+console.log('REPAIR_PRIMARY_STALE_EDIT_FIX_READY');

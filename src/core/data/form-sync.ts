@@ -15,6 +15,17 @@
  *
  * Dieselbe Regel gilt am Telefon (`rpOpen(..., { keepForm: true })` in `mobile_repair_ui.js`).
  */
+/**
+ * Die Fassung, gegen die „Save" schreibt: die des Datensatzes, den die Maske beim Eintritt ins
+ * Bearbeiten übernommen hat — NICHT die des gerade geladenen. Der Laden liest im Hintergrund neu;
+ * wer dessen Fassung nähme, bestätigte eine fremde Änderung, die er nie gesehen hat.
+ * Keine gültige Fassung → `null` (die Maske speichert dann nicht).
+ */
+export function editBaselineRevision(adopted: { revision?: number } | null | undefined): number | null {
+  const r = adopted?.revision;
+  return typeof r === 'number' && Number.isInteger(r) && r >= 1 ? r : null;
+}
+
 export function shouldAdoptRecord<T>(record: T | null | undefined, adopted: T | undefined, editing: boolean): boolean {
   return !!record && record !== adopted && !editing;
 }

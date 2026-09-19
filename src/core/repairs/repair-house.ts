@@ -101,11 +101,31 @@ function gespeicherteFotos(id: string): string[] {
   } catch { return []; }
 }
 
-/** „Save" der Detailseite am Primary — derselbe Schreibsatz wie der Fernbefehl. */
-export async function updateRepairOnPrimary(id: string, form: Partial<Repair>): Promise<void> {
+/**
+ * Die Fassung, die die Maske beim Eintritt ins Bearbeiten gelesen hat — derselbe Vertrag wie der
+ * Fernbefehl (`assertRevision` in `service-commands`: gleicher Code, gleicher Wortlaut), INNERHALB
+ * der Klammer gegen die Zeile selbst. Feldbefund (Live-Test 19.09.2026): der Primary schrieb seine
+ * ganze Maske zurück und überschrieb still, was der zweite Rechner inzwischen gespeichert hatte.
+ */
+function assertRepairRevision(id: string, expected: number): void {
+  const live = query('SELECT revision FROM repairs WHERE id = ? AND branch_id = ?', [id, currentBranchId()])[0];
+  if (!live) throw new RepairActionRejected('REPAIR_NOT_FOUND', 'no such repair');
+  const now = Number(live.revision ?? 0);
+  if (!Number.isInteger(expected) || now !== expected) {
+    throw new RepairActionRejected(
+      'RECORD_CHANGED',
+      `this record changed since you opened it (you saw ${expected}, it is now ${now})`
+        + ' — nothing was saved. Your entries are still in the form; Cancel loads the current version.',
+    );
+  }
+}
+
+/** „Save" der Detailseite am Primary — derselbe Schreibsatz wie der Fernbefehl, gegen die gesehene Fassung. */
+export async function updateRepairOnPrimary(id: string, form: Partial<Repair>, expectedRevision: number): Promise<void> {
   // POST-PARITY R7B PP-12 — neue Fotos durch den Normalisierer (vor der Klammer); gespeicherte bleiben.
   if (form.images !== undefined) form = { ...form, images: await normalizeRecordImages(form.images, { keep: gespeicherteFotos(id) }) };
   return amPrimary(() => {
+    assertRepairRevision(id, expectedRevision);
     const rs = useRepairStore.getState();
     rs.loadRepairs();
     const seen = rs.getRepair(id);

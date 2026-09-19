@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Trash2, Save, ClipboardCheck, ExternalLink, Download, MessageCircle, FileText, RotateCcw } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
-import { shouldAdoptRecord } from '@/core/data/form-sync';
+import { shouldAdoptRecord, editBaselineRevision } from '@/core/data/form-sync';
 import { Button } from '@/components/ui/Button';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
@@ -483,8 +483,11 @@ export function RepairDetail() {
     // Am Primary in EINER Klammer — die Umbuchung der Kundenzahlung samt Kartengebuehr
     // eingeschlossen; am zweiten Rechner reist nur der Unterschied samt gesehener Fassung, neue
     // Fotos vorab ueber die Zwischenablage.
-    const fassung = fassungOderNichts('saving the repair');
-    if (fassung === null) return;
+    // Die Fassung von BEIM EINTRITT ins Bearbeiten (`formVon`), nicht die des Hintergrund-Neuladens —
+    // an beiden Rechnern. Hat sich der Datensatz seitdem geändert: RECORD_CHANGED, nichts gespeichert,
+    // der Entwurf bleibt stehen; Cancel übernimmt den aktuellen Stand.
+    const fassung = editBaselineRevision(formVon);
+    if (fassung === null) { alert(fehlertext(nichtAmClient('saving the repair (no revision loaded)'))); return; }
     let photos: RepairPhotoSlot[] | undefined;
     if (w.remote) {
       if (!repairEditHasChanges(repair, form)) { setEditing(false); return; }
@@ -498,7 +501,7 @@ export function RepairDetail() {
       }
     }
     if (!await w.ok('repairs.update', {
-      local: () => updateRepairOnPrimary(id, form),
+      local: () => updateRepairOnPrimary(id, form, fassung),
       remote: () => repairEditBody(id, fassung, repair, form, photos),
     })) return;
     loadRepairs(); loadRepairLines();
