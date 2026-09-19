@@ -18,6 +18,7 @@ import { matchesDeep } from '@/core/utils/deep-search';
 import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
+import { UseCustomerAsSupplier } from '@/components/suppliers/UseCustomerAsSupplier';
 import type { Supplier } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 
@@ -36,6 +37,8 @@ export function SupplierList() {
   const [showInactive, setShowInactive] = useState(false);
   const [showNew, setShowNew] = useState(false);
   const [form, setForm] = useState<Partial<Supplier>>({});
+  // CUSTOMER-SUPPLIER-ROLE-LINK — „New Supplier": neu erfassen ODER die Lieferanten-Rolle eines Kunden.
+  const [createMode, setCreateMode] = useState<'new' | 'customer'>('new');
 
   useEffect(() => { loadSuppliers(); }, [loadSuppliers]);
 
@@ -144,8 +147,18 @@ export function SupplierList() {
         </Card>
       )}
 
-      <Modal open={showNew} onClose={() => setShowNew(false)} title="New Supplier" width={500}>
+      <Modal open={showNew} onClose={() => { setShowNew(false); setCreateMode('new'); }} title="New Supplier" width={500}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ display: 'flex', gap: 8 }} data-supplier-create-mode>
+            <Button variant={createMode === 'new' ? 'primary' : 'ghost'} onClick={() => setCreateMode('new')}>New supplier</Button>
+            <Button variant={createMode === 'customer' ? 'primary' : 'ghost'} onClick={() => setCreateMode('customer')}>Use existing customer</Button>
+          </div>
+          {createMode === 'customer' ? (
+            <UseCustomerAsSupplier
+              onCancel={() => { setShowNew(false); setCreateMode('new'); }}
+              onDone={(id) => { setShowNew(false); setCreateMode('new'); navigate(`/suppliers/${id}`); }}
+            />
+          ) : <>
           <WriteError text={fehler} />
           {duplicateMatches.length > 0 && (
             <DuplicateWarningBanner
@@ -192,6 +205,7 @@ export function SupplierList() {
               {duplicateMatches.length > 0 ? 'Create anyway' : 'Create Supplier'}
             </Button>
           </div>
+          </>}
         </div>
       </Modal>
     </PageLayout>

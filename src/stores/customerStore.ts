@@ -222,6 +222,14 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
       throw new Error(`Cannot delete customer with linked records: ${detail}. Cancel or reassign these first.`);
     }
     const db = getDatabase();
+    // CUSTOMER-SUPPLIER-ROLE-LINK — die Lieferanten-Rolle derselben Person BLEIBT (eigene Kennung,
+    // eigene Einkäufe und Verbindlichkeiten); nur ihr Verweis auf diesen Kunden wird gelöst.
+    const rollen = query('SELECT id FROM suppliers WHERE linked_customer_id = ?', [id]);
+    const jetzt = new Date().toISOString();
+    for (const r of rollen) {
+      db.run('UPDATE suppliers SET linked_customer_id = NULL, updated_at = ? WHERE id = ?', [jetzt, r.id]);
+      trackUpdate('suppliers', String(r.id), { linkedCustomerId: null });
+    }
     db.run('DELETE FROM customers WHERE id = ?', [id]);
     saveDatabase();
     trackDelete('customers', id);

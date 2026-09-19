@@ -117,6 +117,30 @@ export async function saveSupplierCreate(
   return r;
 }
 
+/**
+ * CUSTOMER-SUPPLIER-ROLE-LINK — „New Supplier → Use existing customer". Am Primary die Hausfunktion,
+ * auf PC2 derselbe Befehl `suppliers.create` mit der Kunden-Kennung. Die Identität kommt in beiden
+ * Fällen aus der Kundenzeile des Primary; die Maske schickt nur, was ein Lieferant zusätzlich braucht.
+ */
+export async function saveSupplierFromCustomer(
+  write: MasterdataWrite<{ supplierId: string; existing: boolean }>,
+  customer: { id: string; updatedAt: string },
+  extras: { address?: string; notes?: string },
+): Promise<WriteOutcome<{ supplierId: string; existing: boolean }>> {
+  const body: Record<string, unknown> = { linkedCustomerId: customer.id, linkedCustomerUpdatedAt: customer.updatedAt };
+  for (const [k, v] of Object.entries(extras)) if (typeof v === 'string' && v.trim()) body[k] = v.trim();
+  const r = await write.save({
+    local: () => runOnPrimary(() => {
+      const out = useSupplierStore.getState().createSupplierFromCustomer(customer.id, body, customer.updatedAt);
+      return { supplierId: out.supplier.id, existing: out.existing };
+    }, suppliersHier),
+    remote: () => body,
+    shape: (v) => ({ supplierId: String(v.supplierId ?? ''), existing: v.existing === true }),
+  });
+  if (r.kind === 'ok') await suppliersNeu();
+  return r;
+}
+
 /** Lieferant ändern: nur das Geänderte; ein neues Foto reist über die Ablage, ein entferntes als `null`. */
 export async function saveSupplierUpdate(
   write: MasterdataWrite<Saved>, base: Supplier, form: Partial<Supplier>,

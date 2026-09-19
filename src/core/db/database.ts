@@ -1536,6 +1536,15 @@ function runMigrations(database: Database): void {
     `ALTER TABLE suppliers ADD COLUMN cpr TEXT`,
     `ALTER TABLE suppliers ADD COLUMN cpr_image TEXT`,
 
+    // CUSTOMER-SUPPLIER-ROLE-LINK — dieselbe reale Person/Firma kann Kunde UND Lieferant sein. Die
+    // Lieferanten-Rolle bekommt ihre EIGENE Kennung (alle Einkaeufe, Verbindlichkeiten, Zahlungen und
+    // Buchungen haengen weiter an `supplier_id` / Gegenpartei SUPPLIER) und zeigt nur explizit auf die
+    // Kunden-Rolle, aus der sie angelegt wurde. Keine Verrechnung, keine gemeinsame Kennung, keine
+    // Verbindung ueber Name/Telefon. Hoechstens EINE Lieferanten-Rolle je Kunde und Filiale — der
+    // Index ist die Sperre gegen einen Doppelversuch, nicht die Maske.
+    `ALTER TABLE suppliers ADD COLUMN linked_customer_id TEXT REFERENCES customers(id) ON DELETE SET NULL`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_suppliers_linked_customer ON suppliers(branch_id, linked_customer_id) WHERE linked_customer_id IS NOT NULL`,
+
     // Audit-Snapshot der Supplier-Daten zum Zeitpunkt des Purchase-Create.
     // Salesforce-Pattern: vermeidet rueckwirkende Aenderungen am gedruckten
     // Beleg wenn der Supplier-Datensatz spaeter editiert/geloescht wird.

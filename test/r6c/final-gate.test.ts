@@ -307,7 +307,7 @@ marker('CENTRAL_UI_R6C_REGISTRY_121_AUDITED');
   ok(S(kette) === S(['on_leave', 'inactive', 'active', 'inactive']), `AUTH Mitarbeiterstatus: jeder Übergang zwischen den drei Werten, wie am Primary (${S(kette)})`);
   ok((await fern(() => md.runEmployeeUpdate(d, identity(nextId(), 'employees.update'), { id: eid, employmentStatus: 'fired' }))).code === 'EMPLOYEE_STATUS_INVALID', 'AUTH ein vierter Status existiert nicht');
   // Dieselbe Domäne: jede Hausfunktion prüft selbst, jeder Fernbefehl ruft die Hausfunktion.
-  for (const [file, fns] of [['src/stores/supplierStore.ts', ['createSupplier: (data) => {', 'updateSupplier: (id, data) => {']], ['src/stores/partnerStore.ts', ['createPartner: (data) => {', 'updatePartner: (id, data) => {']],
+  for (const [file, fns] of [['src/stores/supplierStore.ts', ['createSupplier: (data, opts) => {', 'updateSupplier: (id, data) => {']], ['src/stores/partnerStore.ts', ['createPartner: (data) => {', 'updatePartner: (id, data) => {']],
     ['src/stores/employeeStore.ts', ['createEmployee: (data) => {', 'updateEmployee: (id, data) => {']], ['src/stores/agentStore.ts', ['updateAgent: (id, data) => {']]] as Array<[string, string[]]>) {
     const c = codeOf(src(file));
     for (const fn of fns) ok(/Input\(/.test(c.slice(c.indexOf(fn), c.indexOf(fn) + 400)), `DOMAIN ${fn.split(':')[0]} prüft mit der gemeinsamen Regel`);

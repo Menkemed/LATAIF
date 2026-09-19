@@ -141,6 +141,9 @@ export function SupplierDetail() {
   // Card mit offenen Receivables + Link zum Customer-Profil.
   const linkedCustomer = useMemo(() => {
     if (!supplier) return undefined;
+    // CUSTOMER-SUPPLIER-ROLE-LINK — die ausdrückliche Verknüpfung zuerst; der alte Abgleich über
+    // Telefon/Name nur für Lieferanten OHNE Verknüpfung (nur Anzeige, nie eine Buchung).
+    if (supplier.linkedCustomerId) return customers.find(c => c.id === supplier.linkedCustomerId);
     const norm = (s?: string) => (s || '').replace(/\s+/g, '').toLowerCase();
     const phoneA = norm(supplier.phone);
     if (phoneA) {

@@ -34,6 +34,7 @@ import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-st
 import { purchaseCreateBody, validatePurchaseCreate, type PurchaseCreateInput } from '@/core/purchases/purchase-create';
 import { createPurchaseOnPrimary } from '@/core/purchases/purchase-house';
 import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
+import { UseCustomerAsSupplier } from '@/components/suppliers/UseCustomerAsSupplier';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -171,6 +172,8 @@ export function PurchaseCreate() {
   // direkt mit dem Beleg-Block ausgedruckt werden kann.
   const [showNewSupplier, setShowNewSupplier] = useState(false);
   const [newSupplierForm, setNewSupplierForm] = useState<Partial<Supplier>>({});
+  // CUSTOMER-SUPPLIER-ROLE-LINK — der Verkäufer ist schon Kunde: seine Lieferanten-Rolle nehmen/anlegen.
+  const [supplierCreateMode, setSupplierCreateMode] = useState<'new' | 'customer'>('new');
   const neuerLieferant = useSharedWrite<{ supplierId: string }>('suppliers.create');
   const [supplierFehler, setSupplierFehler] = useState('');
 
@@ -797,8 +800,18 @@ export function PurchaseCreate() {
       />
 
       {/* Quick-Create Supplier — gleiche Felder wie SupplierList, inkl. CPR + ID-Card. */}
-      <Modal open={showNewSupplier} onClose={() => setShowNewSupplier(false)} title="New Supplier" width={500}>
+      <Modal open={showNewSupplier} onClose={() => { setShowNewSupplier(false); setSupplierCreateMode('new'); }} title="New Supplier" width={500}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
+          <div style={{ display: 'flex', gap: 8 }} data-supplier-create-mode>
+            <Button variant={supplierCreateMode === 'new' ? 'primary' : 'ghost'} onClick={() => setSupplierCreateMode('new')}>New supplier</Button>
+            <Button variant={supplierCreateMode === 'customer' ? 'primary' : 'ghost'} onClick={() => setSupplierCreateMode('customer')}>Use existing customer</Button>
+          </div>
+          {supplierCreateMode === 'customer' ? (
+            <UseCustomerAsSupplier
+              onCancel={() => { setShowNewSupplier(false); setSupplierCreateMode('new'); }}
+              onDone={(id) => { setSupplierId(id); setShowNewSupplier(false); setSupplierCreateMode('new'); }}
+            />
+          ) : <>
           <WriteError text={supplierFehler} />
           {supplierDuplicateMatches.length > 0 && (
             <DuplicateWarningBanner
@@ -854,6 +867,7 @@ export function PurchaseCreate() {
               {supplierDuplicateMatches.length > 0 ? 'Create anyway &amp; Use' : 'Create &amp; Use'}
             </Button>
           </div>
+          </>}
         </div>
       </Modal>
     </div>

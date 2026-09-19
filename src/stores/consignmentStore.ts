@@ -57,19 +57,25 @@ export function findOrCreateSupplierForConsignor(consignorCustomerId: string): s
   const phone = ((c.phone as string) || '').trim();
   const branchId = (c.branch_id as string) || currentBranchId();
 
+  // CUSTOMER-SUPPLIER-ROLE-LINK — ZUERST die explizite Lieferanten-Rolle dieses Kunden. Nur wenn es
+  // keine gibt, greift die alte Suche über Telefon/Name — und die darf nie eine Rolle finden, die
+  // ausdrücklich zu einem ANDEREN Kunden gehört (sonst liefe die Auszahlung an die falsche Person).
+  const rolle = query(`SELECT id FROM suppliers WHERE branch_id = ? AND linked_customer_id = ? LIMIT 1`, [branchId, consignorCustomerId]);
+  if (rolle.length > 0) return rolle[0].id as string;
+
   // Match-Strategie: Phone primär (eindeutig), Name als Fallback. Vermeidet Duplikate
   // wenn der gleiche Consignor schon mal als Supplier angelegt wurde (manuell oder
   // durch früheres recordSale).
   if (phone) {
     const byPhone = query(
-      `SELECT id FROM suppliers WHERE branch_id = ? AND TRIM(phone) = ? LIMIT 1`,
+      `SELECT id FROM suppliers WHERE branch_id = ? AND TRIM(phone) = ? AND linked_customer_id IS NULL LIMIT 1`,
       [branchId, phone]
     );
     if (byPhone.length > 0) return byPhone[0].id as string;
   }
   if (fullName) {
     const byName = query(
-      `SELECT id FROM suppliers WHERE branch_id = ? AND LOWER(TRIM(name)) = ? LIMIT 1`,
+      `SELECT id FROM suppliers WHERE branch_id = ? AND LOWER(TRIM(name)) = ? AND linked_customer_id IS NULL LIMIT 1`,
       [branchId, fullName.toLowerCase()]
     );
     if (byName.length > 0) return byName[0].id as string;
@@ -82,7 +88,7 @@ export function findOrCreateSupplierForConsignor(consignorCustomerId: string): s
     phone: (c.phone as string) || undefined,
     email: (c.email as string) || undefined,
     notes: `Auto-created from consignor (customer ${consignorCustomerId})`,
-  });
+  }, { linkedCustomerId: consignorCustomerId });
   return created.id;
 }
 

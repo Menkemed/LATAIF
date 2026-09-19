@@ -22,7 +22,10 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 // CENTRAL-UI-PARITY R6C — die eine Stammdaten-Regel (Name Pflicht und getrimmt, Texte getrimmt).
-import { supplierCreateInput, supplierUpdateInput } from '@/core/masterdata/masterdata-rules';
+import {
+  supplierCreateInput, supplierUpdateInput, supplierSeedFromCustomer, supplierFromCustomerExtras,
+  MasterdataInputError, CUSTOMER_CHANGED,
+} from '@/core/masterdata/masterdata-rules';
 
 // BHD hat 3 Dezimalstellen (Fils). Vergleiche/Rundungen laufen in Minor Units (Fils),
 // konsistent zur Projekt-Konvention (posting.ts ROUND, card-fee-booking.ts ROUND3).
@@ -137,7 +140,10 @@ interface SupplierStore {
   loading: boolean;
   loadSuppliers: () => void;
   getSupplier: (id: string) => Supplier | undefined;
-  createSupplier: (data: Partial<Supplier>) => Supplier;
+  createSupplier: (data: Partial<Supplier>, opts?: { linkedCustomerId?: string }) => Supplier;
+  /** CUSTOMER-SUPPLIER-ROLE-LINK — die Lieferanten-Rolle eines bestehenden Kunden: gibt es sie schon,
+   *  wird SIE zurückgegeben (`existing: true`), sonst genau eine neue mit eigener Kennung. */
+  createSupplierFromCustomer: (customerId: string, extras: Record<string, unknown>, seenCustomerUpdatedAt?: string) => { supplier: Supplier; existing: boolean };
   updateSupplier: (id: string, data: Partial<Supplier>) => void;
   deleteSupplier: (id: string) => void;
   getLedger: (id: string) => { totalPurchases: number; totalPaid: number; outstandingBalance: number; creditBalance: number };
@@ -166,6 +172,7 @@ function rowToSupplier(row: Record<string, unknown>): Supplier {
     notes: row.notes as string | undefined,
     cpr: (row.cpr as string) || undefined,
     cprImage: (row.cpr_image as string) || undefined,
+    linkedCustomerId: (row.linked_customer_id as string) || undefined,
     active: Number(row.active) === 1,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
@@ -209,7 +216,7 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
 
   getSupplier: (id) => get().suppliers.find(s => s.id === id),
 
-  createSupplier: (data) => {
+  createSupplier: (data, opts) => {
     // R6C — vorher prüfte nur die Maske (zwei von drei ließen einen Namen aus Leerzeichen durch,
     // nur eine trimmte). Jetzt prüft die Hausfunktion selbst — für jeden Einstieg, am Primary wie fern.
     const input = supplierCreateInput(data as Record<string, unknown>);
@@ -221,17 +228,45 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
 
     db.run(
-      `INSERT INTO suppliers (id, branch_id, name, phone, email, address, notes, cpr, cpr_image, active, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+      `INSERT INTO suppliers (id, branch_id, name, phone, email, address, notes, cpr, cpr_image, linked_customer_id, active, created_at, updated_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
       [id, branchId, input.name, input.phone ?? null, input.email ?? null,
        input.address ?? null, input.notes ?? null,
-       input.cpr ?? null, input.cprImage ?? null,
+       input.cpr ?? null, input.cprImage ?? null, opts?.linkedCustomerId ?? null,
        now, now, userId]
     );
     saveDatabase();
     trackInsert('suppliers', id, { name: input.name });
     get().loadSuppliers();
     return get().getSupplier(id)!;
+  },
+
+  createSupplierFromCustomer: (customerId, extras, seenCustomerUpdatedAt) => {
+    let branchId: string;
+    try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+    // Schon verknüpft? Dann ist DAS die Lieferanten-Rolle — kein zweiter Lieferant, gleich wie oft
+    // (oder von welchem Rechner) es versucht wird.
+    const linked = query('SELECT id FROM suppliers WHERE branch_id = ? AND linked_customer_id = ? LIMIT 1', [branchId, customerId])[0];
+    if (linked) {
+      get().loadSuppliers();
+      return { supplier: get().getSupplier(String(linked.id)) ?? rowToSupplier(query('SELECT * FROM suppliers WHERE id = ?', [linked.id])[0]), existing: true };
+    }
+    const c = query(
+      'SELECT first_name, last_name, company, phone, whatsapp, email, personal_id, updated_at FROM customers WHERE id = ? AND branch_id = ?',
+      [customerId, branchId],
+    )[0];
+    if (!c) throw new MasterdataInputError('CUSTOMER_NOT_FOUND', 'no such customer in this branch');
+    // Die Maske hat den Kunden in einem bestimmten Stand gezeigt. Hat er sich seither geändert, wird
+    // nicht mit Daten angelegt, die niemand gesehen hat.
+    if (seenCustomerUpdatedAt !== undefined && String(c.updated_at) !== seenCustomerUpdatedAt) {
+      throw new MasterdataInputError(CUSTOMER_CHANGED, 'this customer changed since you opened it — reload and check the data');
+    }
+    const seed = supplierSeedFromCustomer({
+      firstName: c.first_name as string, lastName: c.last_name as string, company: c.company as string,
+      phone: c.phone as string, whatsapp: c.whatsapp as string, email: c.email as string, personalId: c.personal_id as string,
+    });
+    const supplier = get().createSupplier({ ...seed, ...supplierFromCustomerExtras(extras) }, { linkedCustomerId: customerId });
+    return { supplier, existing: false };
   },
 
   updateSupplier: (id, data) => {

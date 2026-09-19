@@ -133,15 +133,20 @@ export function CustomerDetail() {
   // Wenn gefunden → 'Also as Supplier' Card mit offenen Payables-Summe + Link.
   const linkedSupplier = useMemo(() => {
     if (!customer) return undefined;
+    // CUSTOMER-SUPPLIER-ROLE-LINK — die ausdrückliche Lieferanten-Rolle zuerst; der alte Abgleich
+    // über Telefon/Name nur unter Lieferanten, die mit KEINEM Kunden verknüpft sind (nur Anzeige).
+    const rolle = suppliers.find(s => s.linkedCustomerId === customer.id);
+    if (rolle) return rolle;
+    const frei = suppliers.filter(s => !s.linkedCustomerId);
     const norm = (s?: string) => (s || '').replace(/\s+/g, '').toLowerCase();
     const phoneA = norm(customer.phone);
     if (phoneA) {
-      const byPhone = suppliers.find(s => norm(s.phone) === phoneA);
+      const byPhone = frei.find(s => norm(s.phone) === phoneA);
       if (byPhone) return byPhone;
     }
     const fullName = `${customer.firstName} ${customer.lastName}`.trim().toLowerCase();
     if (fullName) {
-      return suppliers.find(s => (s.name || '').trim().toLowerCase() === fullName);
+      return frei.find(s => (s.name || '').trim().toLowerCase() === fullName);
     }
     return undefined;
   }, [customer, suppliers]);

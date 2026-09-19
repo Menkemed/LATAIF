@@ -396,7 +396,8 @@ marker('CENTRAL_UI_R6C_PRIMARY_PARITY_PROVED');
   ok(/saveEmployeeUpdate\(/.test(ed) && !/updateEmployee\(/.test(ed) && !/useEmployeeStore\(\)[\s\S]{0,200}setStatus/.test(ed), 'UI Mitarbeiter ändern und Status (Detail): ein Anschluss');
   const ms = codeOf(src('src/core/masterdata/masterdata-save.ts'));
   // POST-PARITY R7B PP-12 — die zwei Lieferanten-Anschlüsse rechnen das Ausweisfoto VOR der Klammer; die Klammer bleibt.
-  ok((ms.match(/local: \(\) => runOnPrimary\(/g) ?? []).length === 5 && (ms.match(/local: async \(\) => \{[\s\S]{0,400}?return runOnPrimary\(/g) ?? []).length === 2,
+  // CUSTOMER-SUPPLIER-ROLE-LINK — sechs statt fünf: dazu „Lieferant aus Kunde" (saveSupplierFromCustomer).
+  ok((ms.match(/local: \(\) => runOnPrimary\(/g) ?? []).length === 6 && (ms.match(/local: async \(\) => \{[\s\S]{0,400}?return runOnPrimary\(/g) ?? []).length === 2,
     'UI am Primary läuft jede Stammdaten-Handlung in der Schreibreihenfolge (runOnPrimary) — nicht mehr an ihr vorbei');
   // POST-PARITY R7B PP-12 — dieselbe Ablage; PC2 rechnet das Foto vorher durch den Normalisierer.
   ok(/stageRecordDataUrls\(\[dataUrl\]\)/.test(ms) && /cprImageStagingId = s\.id/.test(ms), 'UI das Foto reist auf PC2 über die vorhandene Ablage (kein neuer Medienweg)');

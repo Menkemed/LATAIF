@@ -36,7 +36,8 @@ import {
 } from './remote-create-support';
 import {
   AGENT_UPDATE_FIELDS, EMPLOYEE_FIELDS, MasterdataInputError, PARTNER_CREATE_FIELDS, PARTNER_UPDATE_FIELDS,
-  SUPPLIER_CREATE_FIELDS, SUPPLIER_UPDATE_FIELDS,
+  SUPPLIER_CREATE_FIELDS, SUPPLIER_UPDATE_FIELDS, SUPPLIER_FROM_CUSTOMER_EXTRA_FIELDS, SUPPLIER_IDENTITY_FROM_CUSTOMER,
+  supplierFromCustomerExtras,
   agentUpdateInput, employeeCreateInput, employeeUpdateInput, partnerCreateInput, partnerUpdateInput,
   supplierCreateInput, supplierUpdateInput,
   type AgentUpdateInput, type EmployeeCreateInput, type EmployeeUpdateInput, type PartnerCreateInput,
@@ -123,7 +124,12 @@ function nothing(fields: Record<string, unknown>, extra = false): void {
 
 // ── Lieferant ──────────────────────────────────────────────────────────────
 
-export interface SupplierCreateRequest { input: SupplierCreateInput; cprImageStagingId?: string }
+export interface SupplierCreateRequest {
+  input: SupplierCreateInput;
+  cprImageStagingId?: string;
+  /** CUSTOMER-SUPPLIER-ROLE-LINK — angelegt AUS diesem Kunden: Identität vom Primary, nicht aus dem Rumpf. */
+  fromCustomer?: { customerId: string; seenCustomerUpdatedAt: string; extras: { address?: string; notes?: string } };
+}
 export interface SupplierUpdateRequest { id: string; fields: SupplierUpdateInput; cprImageStagingId?: string }
 
 function stagingIdOf(raw: Record<string, unknown>): string | undefined {
@@ -134,6 +140,7 @@ function stagingIdOf(raw: Record<string, unknown>): string | undefined {
 }
 
 export function parseSupplierCreate(raw: unknown): SupplierCreateRequest {
+  if (isPlain(raw) && 'linkedCustomerId' in raw) return parseSupplierFromCustomer(raw);
   if (isPlain(raw) && 'cprImage' in raw) {
     throw new MasterdataPayloadError('an ID-card photo travels as staged bytes (cprImageStagingId), never inside the order');
   }
@@ -142,6 +149,30 @@ export function parseSupplierCreate(raw: unknown): SupplierCreateRequest {
   const allowed = [...SUPPLIER_CREATE_FIELDS.filter((f) => f !== 'cprImage'), 'cprImageStagingId'];
   const r = strict(raw, allowed, MASTERDATA_COMPUTED.supplier);
   return { input: rule(() => supplierCreateInput(without(r, 'cprImageStagingId'))), cprImageStagingId: stagingIdOf(r) };
+}
+
+/**
+ * CUSTOMER-SUPPLIER-ROLE-LINK — „New Supplier → Use existing customer". Der Rumpf nennt NUR den Kunden,
+ * den Stand, in dem er ihn gesehen hat, und die Felder, die nur ein Lieferant braucht. Name, Telefon,
+ * E-Mail und Ausweisnummer übernimmt der Primary selbst aus der Kundenzeile (`supplierSeedFromCustomer`)
+ * — ein Rumpf, der sie mitschickt, wird abgewiesen, statt sie still zu überschreiben.
+ */
+function parseSupplierFromCustomer(raw: Record<string, unknown>): SupplierCreateRequest {
+  for (const k of SUPPLIER_IDENTITY_FROM_CUSTOMER) {
+    if (k in raw) throw new MasterdataPayloadError(`${k} comes from the customer, not from the client`);
+  }
+  if ('cprImage' in raw || 'cprImageStagingId' in raw) {
+    throw new MasterdataPayloadError('no ID photo in this step — the identity comes from the customer');
+  }
+  const r = strict(raw, ['linkedCustomerId', 'linkedCustomerUpdatedAt', ...SUPPLIER_FROM_CUSTOMER_EXTRA_FIELDS], MASTERDATA_COMPUTED.supplier);
+  const customerId = r.linkedCustomerId;
+  if (typeof customerId !== 'string' || !customerId.trim()) throw new MasterdataPayloadError('linkedCustomerId is required');
+  const seen = r.linkedCustomerUpdatedAt;
+  if (typeof seen !== 'string' || !seen) {
+    throw new MasterdataPayloadError('linkedCustomerUpdatedAt is required — the state of the customer you saw');
+  }
+  const extras = rule(() => supplierFromCustomerExtras(r));
+  return { input: { name: '' }, fromCustomer: { customerId, seenCustomerUpdatedAt: seen, extras } };
 }
 
 export function parseSupplierUpdate(raw: unknown): SupplierUpdateRequest {
@@ -232,6 +263,15 @@ async function stagedImage(ids: string[], identity: CommandIdentity, media: Mast
 export async function runSupplierCreate(deps: EngineDeps, identity: CommandIdentity, raw: unknown, media: MasterdataMedia = {}): Promise<CommandOutcome> {
   const req = parseSupplierCreate(raw);
   const staged = req.cprImageStagingId ? [req.cprImageStagingId] : [];
+  if (req.fromCustomer) {
+    const fc = req.fromCustomer;
+    return runRemoteCommand(deps, identity, () => {
+      assertHouseBranch(identity);
+      mustExist('customers', fc.customerId, identity.branchId, 'CUSTOMER_NOT_FOUND');
+      const r = urteil(() => useSupplierStore.getState().createSupplierFromCustomer(fc.customerId, fc.extras, fc.seenCustomerUpdatedAt));
+      return { supplierId: r.supplier.id, name: r.supplier.name, linkedCustomerId: fc.customerId, existing: r.existing };
+    });
+  }
   const outcome = await runRemoteCommand(deps, identity, async () => {
     assertHouseBranch(identity);
     const cprImage = await stagedImage(staged, identity, media);

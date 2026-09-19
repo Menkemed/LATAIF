@@ -112,6 +112,54 @@ export function supplierUpdateInput(raw: Record<string, unknown>): SupplierUpdat
   return out;
 }
 
+// ── Lieferant aus einem bestehenden Kunden (CUSTOMER-SUPPLIER-ROLE-LINK) ──────
+//
+// Die EINE Übernahmeregel. Eine Maske kopiert nichts selbst: sie zeigt, was diese Regel aus dem
+// Kunden macht, und schickt nur die Kunden-Kennung. Übernommen wird genau das, was die Person
+// ausweist (Name, Telefon, E-Mail, Ausweisnummer). Was nur den KUNDEN beschreibt — Notizen, VIP,
+// Budget, Vorlieben, Verkaufsstufe, Umsatzzahlen, Steuernummer — bleibt beim Kunden. Was nur der
+// Lieferant braucht (Adresse, Lieferanten-Notiz), ergänzt der Benutzer.
+//
+// Einmalige, kontrollierte Übernahme beim Anlegen — KEINE Live-Synchronisierung: ändert sich später
+// die Telefonnummer des Kunden, bleibt die des Lieferanten, bis jemand sie dort ändert.
+
+export const SUPPLIER_FROM_CUSTOMER_EXTRA_FIELDS = ['address', 'notes'] as const;
+/** Die Felder, die aus dem Kunden kommen — und darum NICHT im Auftrag stehen dürfen. */
+export const SUPPLIER_IDENTITY_FROM_CUSTOMER = ['name', 'phone', 'email', 'cpr'] as const;
+export const CUSTOMER_CHANGED = 'CUSTOMER_CHANGED';
+
+export interface CustomerIdentitySource {
+  firstName?: string | null;
+  lastName?: string | null;
+  company?: string | null;
+  phone?: string | null;
+  whatsapp?: string | null;
+  email?: string | null;
+  personalId?: string | null;
+}
+
+export function supplierSeedFromCustomer(c: CustomerIdentitySource): SupplierCreateInput {
+  const clean = (v: unknown): string | undefined => (typeof v === 'string' && v.trim() ? v.trim() : undefined);
+  const person = [clean(c.firstName), clean(c.lastName)].filter(Boolean).join(' ');
+  const out: SupplierCreateInput = { name: name(clean(c.company) ?? person, SUPPLIER_NAME_REQUIRED, 'the supplier name') };
+  const phone = clean(c.phone) ?? clean(c.whatsapp);
+  if (phone) out.phone = phone;
+  const email = clean(c.email);
+  if (email) out.email = email;
+  const cpr = clean(c.personalId);
+  if (cpr) out.cpr = cpr;
+  return out;
+}
+
+export function supplierFromCustomerExtras(raw: Record<string, unknown>): { address?: string; notes?: string } {
+  const out: { address?: string; notes?: string } = {};
+  for (const k of SUPPLIER_FROM_CUSTOMER_EXTRA_FIELDS) {
+    const v = text(raw[k], k);
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
+
 // ── Mitarbeiter ────────────────────────────────────────────────────────────
 
 export const EMPLOYMENT_STATUSES = ['active', 'on_leave', 'inactive'] as const;

@@ -1136,6 +1136,12 @@ export interface Supplier {
   // von Privatpersonen — Compliance-relevant).
   cpr?: string;
   cprImage?: string;
+  /** CUSTOMER-SUPPLIER-ROLE-LINK — die Kunden-Rolle derselben Person, aus der diese Lieferanten-Rolle
+   *  angelegt wurde. Nur eine Verknuepfung: Salden, Belege und Buchungen bleiben getrennt.
+   *  Media-Vorbereitung: ein kuenftiges Ausweisfoto gehoert EINMAL zur Person (Media-Link am
+   *  Kunden); die Lieferanten-Rolle findet es ueber diese Verknuepfung — keine zweite Kopie, kein
+   *  Base64 in `cpr_image`. Aktiviert wird das erst mit dem Media-Sicherheitsvertrag (heute BLOCKED). */
+  linkedCustomerId?: string;
   active: boolean;
   createdAt: string;
   updatedAt: string;
