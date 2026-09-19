@@ -156,3 +156,32 @@ fn the_required_set_names_a_pdf_by_its_stored_extension() {
     let keys = crate::media::reachability::required_keys(&conn).unwrap();
     assert!(keys.contains(&format!("t/cc/{h}.pdf")), "{keys:?}");
 }
+
+// ── MEDIA-S1 review — the two doors stay apart ───────────────────────────────────────────────
+#[test]
+fn the_rendition_path_refuses_an_original_kind() {
+    let root = tmp_dir();
+    let doc = pdf(500);
+    let h = sha256_hex(&doc);
+    // a caller naming "pdf" on the rendition path does NOT get a magic-byte-free publish
+    assert!(matches!(publish_atomically(&root, "tenant-1", &doc, &h, "pdf"), Err(MediaError::InvalidExtension)));
+    let not_pdf = b"MZ-anything-at-all".to_vec();
+    let h2 = sha256_hex(&not_pdf);
+    assert!(matches!(publish_atomically(&root, "tenant-1", &not_pdf, &h2, "pdf"), Err(MediaError::InvalidExtension)));
+    assert!(!root.join("tenant-1").exists(), "nothing was written");
+    // the checked door still works — and the product rendition door is unchanged
+    assert!(storage::publish_original(&root, "tenant-1", &doc, "pdf", Some(&h)).is_ok());
+    let jpg = vec![0xFF, 0xD8, 0xFF, 9, 9, 9];
+    assert!(publish_atomically(&root, "tenant-1", &jpg, &sha256_hex(&jpg), "jpg").is_ok());
+}
+
+#[test]
+fn the_old_json_read_serves_renditions_only() {
+    assert_eq!(json_read_allowed("jpg"), Ok(()), "product JPEG reads unchanged");
+    assert_eq!(json_read_allowed("pdf"), Err("MEDIA_ORIGINAL_REQUIRES_RAW_READ"), "a PDF never becomes a JSON number[]");
+    assert_eq!(json_read_allowed("exe"), Err("MEDIA_INVALID_EXTENSION"));
+    let lib = include_str!("../lib.rs");
+    let at = lib.find("fn media_read_verified(").expect("command");
+    let body = &lib[at..at + 700];
+    assert!(body.contains("media::raw_transport::json_read_allowed(&extension)"), "the JSON command checks first");
+}

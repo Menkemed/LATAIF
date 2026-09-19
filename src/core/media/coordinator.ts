@@ -14,7 +14,8 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 import { evaluatePriceEligibility, touchesPriceColumns } from '../products/price-eligibility.ts';
-import { enterTransaction, leaveNestedTransaction, resetTransactionContext } from '../db/transaction-context.ts';
+import { enterTransaction, leaveNestedTransaction, resetTransactionContext, isTransactionActive } from '../db/transaction-context.ts';
+import { isTransactionUnhealthy } from '../db/transaction-health.ts';
 import {
   blobIdFor,
   dedupTokenFor,
@@ -311,6 +312,8 @@ export interface RecoveryReport {
   productId?: string;
   role?: string;
   jobState: string;
+  /** MEDIA-S1 — for `left_pending_job_blocked`: the job-local reason, as the coordinator named it. */
+  errorCode?: string;
   action:
     | 'noop_already_ready'
     | 'noop_terminal_state'
@@ -325,7 +328,26 @@ export interface RecoveryReport {
     | 'noop_edit_already_applied'
     | 'left_pending_edit_baseline_changed'
     // MEDIA-S1 — the product half of a frozen edit no longer matches (fields or price eligibility)
-    | 'left_pending_edit_product_changed';
+    | 'left_pending_edit_product_changed'
+    // MEDIA-S1 — this job's own frozen data cannot be converged (a coordinator validation refused
+    // it). Left exactly as it is — never repaired, never forced — and the pass goes on.
+    | 'left_pending_job_blocked';
+}
+
+/**
+ * MEDIA-S1 — is this a failure of ONE job, so that recovery may go on with the next?
+ *
+ * Job-local: the coordinator's own validation refused this job's frozen data against the current
+ * rows (`CoordinatorError` — e.g. `MEDIA_EDIT_KEEP_MISSING`, `MEDIA_EDIT_RENDITION_DIVERGED`, a
+ * malformed resulting gallery). Such a check throws before its transaction commits, and the
+ * outermost transaction is rolled back — nothing of this job remains.
+ *
+ * Systemic — the pass stops, as before: anything that is not a coordinator validation (SQL, IO,
+ * the Rust bridge), and ANY failure while a transaction is still open (recover running inside
+ * someone else's bracket cannot prove a clean rollback) or the house transaction is unhealthy.
+ */
+function isJobLocalRecoveryError(e: unknown): e is CoordinatorError {
+  return e instanceof CoordinatorError && !isTransactionActive() && !isTransactionUnhealthy();
 }
 
 /**
@@ -1449,6 +1471,8 @@ export class MediaDbCoordinator {
             out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'quarantined_verification_failed' });
           } else if (code === 'MEDIA_INGEST_NOT_FOUND' || code === 'MEDIA_INGEST_INVALID_STATE') {
             out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'left_pending_no_rust_result' });
+          } else if (isJobLocalRecoveryError(e)) {
+            out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'left_pending_job_blocked', errorCode: code });
           } else {
             throw e;
           }
@@ -1495,7 +1519,12 @@ export class MediaDbCoordinator {
           out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'left_pending_no_rust_result' });
           continue;
         }
-        throw e; // anything else is a bug, not a recovery outcome
+        if (isJobLocalRecoveryError(e)) {
+          // MEDIA-S1 — one job's data cannot be converged; the next, independent job still can.
+          out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'left_pending_job_blocked', errorCode: String(e.message || e.code) });
+          continue;
+        }
+        throw e; // anything else is systemic, not a recovery outcome — the pass stops
       }
     }
     return out;

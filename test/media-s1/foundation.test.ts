@@ -259,6 +259,60 @@ async function main(): Promise<void> {
       '§6 no writer claims encryption: generations are written is_encrypted = 0');
   }
 
+  // ── §7 recovery isolation: job-local vs systemic ────────────────────────────────────────────
+  {
+    class DivergingGateway extends FakeGateway {
+      divergeFor = ''; bridgeDownFor = '';
+      override async commitStockImage(i: CommitInput): Promise<CommitResult> {
+        if (i.ingestRequestId === this.bridgeDownFor) throw new Error('BRIDGE_DISCONNECTED');
+        const r = await super.commitStockImage(i);
+        return i.ingestRequestId === this.divergeFor ? { ...r, main_descriptor: { ...r.main_descriptor, hash: 'f'.repeat(64) } } : r;
+      }
+    }
+    const setup = async () => {
+      const db = new SQL.Database(); seed(db); applyMediaSchema(db);
+      const gw = new DivergingGateway();
+      const orch = new StockMediaOrchestrator({ gateway: gw, leaseFactory: () => leaseFor(db) });
+      for (const pid of ['p1', 'p3']) { const it = [item('product', pid, 0, 1)]; await orch.prepareAndRegisterBatch(it); await orch.finalizeBatch(it); }
+      // X: an edit of p1 that adds a new image — its rendition will diverge (job-local, permanent)
+      const nb = dataBytes('p1-new');
+      const [x0] = gal(db, 'p1');
+      await orch.prepareAndRegisterEdit(scopeFor('product', 'p1'),
+        [{ tenantId: 't1', ingestRequestId: 'edit-new:p1:x', requestHash: sha256Hex(nb), imageBytes: nb }],
+        async (baseline, prepared) => buildEditPlanEnvelope({ batchId: 'edit:x', tenantId: 't1', branchId: 'b1', scopeKind: 'branch', entityType: 'product', entityId: 'p1', role: ROLE,
+          baseline, desired: [keep(x0), { source: 'new', requestId: 'edit-new:p1:x', requestHash: sha256Hex(nb) }], prepared }, digestHex));
+      // Y: an independent, healthy edit of p3, registered AFTER X
+      const [y0] = gal(db, 'p3');
+      await orch.prepareAndRegisterEdit(scopeFor('product', 'p3'), [], async (baseline, prepared) => buildEditPlanEnvelope({
+        batchId: 'edit:y', tenantId: 't1', branchId: 'b1', scopeKind: 'branch', entityType: 'product', entityId: 'p3', role: ROLE,
+        baseline, desired: [keep(y0)], prepared }, digestHex));
+      return { db, gw, x0 };
+    };
+    {
+      const { db, gw, x0 } = await setup();
+      gw.divergeFor = 'edit-new:p1:x';
+      let threw = ''; let rep: Awaited<ReturnType<MediaDbCoordinator['recover']>> = [];
+      try { rep = await new MediaDbCoordinator(db as never, gw).recover(); } catch (e) { threw = String((e as Error).message); }
+      const x = rep.find((r) => r.ingestRequestId === 'edit:edit:x');
+      const y = rep.find((r) => r.ingestRequestId === 'edit:edit:y');
+      ok(threw === '' && x?.action === 'left_pending_job_blocked' && x.errorCode === 'MEDIA_EDIT_RENDITION_DIVERGED',
+        `§7 a job-local, permanent failure is reported with its code (${threw || x?.action}/${x?.errorCode})`);
+      ok(y?.action === 'edit_applied_from_plan', `§7 …and the later independent job is still recovered (${y?.action})`);
+      ok(JSON.stringify(gal(db, 'p1')) === JSON.stringify([x0]), '§7 the blocked job changed nothing (gallery as before)');
+      ok(db.exec(`SELECT state FROM media_ingest_jobs WHERE ingest_request_id='edit:edit:x'`)[0].values[0][0] === 'accepted', '§7 …and stays pending, not rewritten');
+    }
+    {
+      const { db, gw } = await setup();
+      gw.bridgeDownFor = 'edit-new:p1:x';
+      let threw = '';
+      try { await new MediaDbCoordinator(db as never, gw).recover(); } catch (e) { threw = String((e as Error).message); }
+      ok(threw === 'BRIDGE_DISCONNECTED', `§7 a systemic fault (the bridge) still stops the pass — fail-closed (${threw || 'kein Abbruch'})`);
+    }
+    const coordSrc = readFileSync(join(repo, 'src/core/media/coordinator.ts'), 'utf8');
+    ok(/return e instanceof CoordinatorError && !isTransactionActive\(\) && !isTransactionUnhealthy\(\);/.test(coordSrc),
+      '§7 job-local = a coordinator validation with no transaction left open — not a blanket catch');
+  }
+
   console.log(`\n${failures.length === 0 ? 'PASS' : 'FAIL'} — media s1 foundation: ${PASS} passed, ${failures.length} failed`);
   if (failures.length) { for (const f of failures) console.log('  - ' + f); process.exit(1); }
   console.log('MEDIA_S1_FOUNDATION_TS_PROVED');

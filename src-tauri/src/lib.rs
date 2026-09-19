@@ -2229,6 +2229,8 @@ fn media_read_verified(
     hash: String,
     extension: String,
 ) -> Result<media::ingest::MediaBytes, String> {
+    // MEDIA-S1 — JSON (number[]) only for small renditions; originals go through the raw read.
+    media::raw_transport::json_read_allowed(&extension).map_err(|e| e.to_string())?;
     let svc = media_ingest_service(&state);
     svc.read(&tenant_scope, &hash, &extension)
         .map_err(|e| e.code().to_string())

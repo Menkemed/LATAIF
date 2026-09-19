@@ -334,7 +334,9 @@ pub fn publish_atomically(
     expected_hash: &str,
     ext: &str,
 ) -> Result<Published, MediaError> {
-    publish_impl(root, tenant_scope, bytes, expected_hash, ext, || {})
+    // MEDIA-S1 — RENDITIONS ONLY. An original (a document) is published exclusively through
+    // `publish_original`, which proves its leading bytes first; naming "pdf" here is refused.
+    publish_impl(root, tenant_scope, bytes, expected_hash, ext, false, || {})
 }
 
 /// Shared implementation. `before_publish` runs exactly once, after the temp
@@ -347,8 +349,14 @@ fn publish_impl<F: FnOnce()>(
     bytes: &[u8],
     expected_hash: &str,
     ext: &str,
+    allow_original: bool,
     before_publish: F,
 ) -> Result<Published, MediaError> {
+    // MEDIA-S1 — the two doors stay apart: renditions here, originals only from `publish_original`.
+    let kind = stored_kind(ext).ok_or(MediaError::InvalidExtension)?;
+    if kind.original && !allow_original {
+        return Err(MediaError::InvalidExtension);
+    }
     if sha256_hex(bytes) != expected_hash {
         return Err(MediaError::FileHashMismatch);
     }
@@ -446,6 +454,7 @@ pub(crate) fn publish_with_barrier<F: FnOnce()>(
         bytes,
         expected_hash,
         ext,
+        false,
         before_publish,
     )
 }
@@ -509,5 +518,5 @@ pub fn publish_original(
             return Err(MediaError::FileHashMismatch);
         }
     }
-    publish_atomically(root, tenant_scope, bytes, &hash, ext)
+    publish_impl(root, tenant_scope, bytes, &hash, ext, true, || {})
 }

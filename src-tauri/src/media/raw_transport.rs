@@ -7,6 +7,13 @@
 //! (`InvokeBody::Raw`), with the metadata in request headers, and hands raw bytes back with
 //! `tauri::ipc::Response` (an `ArrayBuffer` in JS). No JSON array, no Base64 copy on either leg.
 //!
+//! RESIDUAL RISK (documented, NOT solved): Tauri hands the command the raw body only once it is
+//! fully received — the renderer→IPC transfer has already allocated it. The 25 MiB check below
+//! therefore protects hashing, the file and publication, but not that upstream allocation; the
+//! only earlier guard is the client-side check in `OriginalMediaTransport` (`ORIGINAL_MAX_BYTES`).
+//! No visible document writer exists. Before large document uploads are activated (S5), decide
+//! whether an upstream transport limit is possible and needed.
+//!
 //! This module holds everything about that path that does not need a live webview: parsing and
 //! bounding the request, and storing the original through the storage contract. The two thin
 //! `#[tauri::command]` wrappers live in `lib.rs`. Nothing writes business rows here — a stored
@@ -47,6 +54,17 @@ pub struct OriginalDescriptor {
     pub extension: String,
     pub content_kind: String,
     pub reused: bool,
+}
+
+/// MEDIA-S1 — the OLD JSON read (`media_read_verified`) answers with a JSON `number[]`. It stays
+/// for what it was built for — small renditions (product JPEGs) — and refuses every original kind:
+/// those are read only through `media_read_verified_raw`. An unlisted extension is refused too.
+pub fn json_read_allowed(ext: &str) -> Result<(), &'static str> {
+    match stored_kind(ext) {
+        Some(k) if !k.original => Ok(()),
+        Some(_) => Err("MEDIA_ORIGINAL_REQUIRES_RAW_READ"),
+        None => Err("MEDIA_INVALID_EXTENSION"),
+    }
 }
 
 /// Validate one raw original upload. `body` is `None` when the call did not arrive as raw bytes
