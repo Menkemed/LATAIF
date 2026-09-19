@@ -1366,6 +1366,44 @@ export function RepairDetail() {
             );
           })()}
 
+          {/* PRE-G5 — GOLD USAGE HISTORY: was bei einem Goldeinsatz PASSIERT ist, auch wenn es
+              nichts zu buchen gab. Bewusst getrennt von „GOLD DEBTS & CREDITS" und davor: erst was
+              passiert ist, dann was daraus offen ist. */}
+          <div style={{ marginTop: 20, gridColumn: '1 / -1' }}>
+            <Card>
+              <div className="flex justify-between items-center" style={{ marginBottom: 12 }}>
+                <span className="text-overline">GOLD USAGE HISTORY ({repairGoldUsage.length})</span>
+                <span style={{ fontSize: 11, color: '#9CA3AF' }}>record only — no debt, no credit</span>
+              </div>
+              {repairGoldUsage.length === 0 ? (
+                <p style={{ fontSize: 13, color: '#6B7280', padding: '12px 0' }}>
+                  No gold usage recorded for this repair.
+                </p>
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  {repairGoldUsage.map((h) => {
+                    const sup = h.supplierId ? suppliers.find(s => s.id === h.supplierId) : null;
+                    return (
+                      <div key={h.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+                        gap: 10, padding: '8px 0', borderTop: '1px solid #E5E9EE', fontSize: 12 }}>
+                        <span style={{ color: '#0F0F10' }}>
+                          {h.source === 'workshop' ? `Workshop · ${sup?.name || '—'}` : 'Customer'}
+                          <span className="font-mono" style={{ color: '#8A7548', marginLeft: 10 }}>{h.karat}</span>
+                        </span>
+                        <span className="font-mono" style={{ color: '#4B5563' }}>
+                          {goldUsageLine(h)}
+                        </span>
+                        <span style={{ color: '#9CA3AF', fontSize: 11 }}>
+                          {h.recordedAt ? h.recordedAt.slice(0, 16).replace('T', ' ') : '—'}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </Card>
+          </div>
+
           {/* Plan repair-multi-supplier — Gold-Used Block (Workshop + Customer Gold).
               Workshop-Gold legt eine gold_payable an. Customer-Gold-Rest entweder
               zurueck, als Credit, oder vom Shop behalten. */}
@@ -1373,7 +1411,7 @@ export function RepairDetail() {
             <Card>
               <div className="flex justify-between items-center" style={{ marginBottom: 12 }}>
                 <span className="text-overline">
-                  GOLD USED ({repairGoldPayables.length + repairCustomerGoldCredits.length})
+                  GOLD DEBTS & CREDITS ({repairGoldPayables.length + repairCustomerGoldCredits.length})
                 </span>
                 <button onClick={() => setShowAddGoldModal(true)} data-gold-usage-open
                   className="cursor-pointer"
@@ -1383,7 +1421,7 @@ export function RepairDetail() {
                 </button>
               </div>
               {repairGoldPayables.length === 0 && repairCustomerGoldCredits.length === 0 ? (
-                <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No gold positions recorded for this repair.</p>
+                <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>Nothing to settle — this repair created no gold debt and no customer gold credit.</p>
               ) : (
                 <>
                   {repairGoldPayables.length > 0 && (
@@ -1468,43 +1506,6 @@ export function RepairDetail() {
             </Card>
           </div>
 
-          {/* PRE-G5 — GOLD USAGE HISTORY: was bei einem Goldeinsatz PASSIERT ist, auch wenn es
-              nichts zu buchen gab. Bewusst getrennt von „GOLD USED": dort stehen Schuld und
-              Guthaben, hier steht der Vorgang. */}
-          <div style={{ marginTop: 20, gridColumn: '1 / -1' }}>
-            <Card>
-              <div className="flex justify-between items-center" style={{ marginBottom: 12 }}>
-                <span className="text-overline">GOLD USAGE HISTORY ({repairGoldUsage.length})</span>
-                <span style={{ fontSize: 11, color: '#9CA3AF' }}>record only — no debt, no credit</span>
-              </div>
-              {repairGoldUsage.length === 0 ? (
-                <p style={{ fontSize: 13, color: '#6B7280', padding: '12px 0' }}>
-                  No gold usage recorded for this repair.
-                </p>
-              ) : (
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  {repairGoldUsage.map((h) => {
-                    const sup = h.supplierId ? suppliers.find(s => s.id === h.supplierId) : null;
-                    return (
-                      <div key={h.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
-                        gap: 10, padding: '8px 0', borderTop: '1px solid #E5E9EE', fontSize: 12 }}>
-                        <span style={{ color: '#0F0F10' }}>
-                          {h.source === 'workshop' ? `Workshop · ${sup?.name || '—'}` : 'Customer'}
-                          <span className="font-mono" style={{ color: '#8A7548', marginLeft: 10 }}>{h.karat}</span>
-                        </span>
-                        <span className="font-mono" style={{ color: '#4B5563' }}>
-                          {goldUsageLine(h)}
-                        </span>
-                        <span style={{ color: '#9CA3AF', fontSize: 11 }}>
-                          {h.recordedAt ? h.recordedAt.slice(0, 16).replace('T', ' ') : '—'}
-                        </span>
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </Card>
-          </div>
         </div>
       </div>
 

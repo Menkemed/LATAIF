@@ -883,8 +883,31 @@ marker('CENTRAL_UI_R6D_GOLD_UI_WIRING_PROVED');
   ok(/GOLD USAGE HISTORY \(\{repairGoldUsage\.length\}\)/.test(seite)
     && /goldUsageLine\(h\)/.test(seite) && /useGoldStore\(s => s\.repairGoldUsage\)/.test(seite),
   'HIST-UI die Reparaturseite hat eine eigene Sektion aus demselben Satz');
-  ok(/GOLD USED \(\{repairGoldPayables\.length \+ repairCustomerGoldCredits\.length\}\)/.test(seite),
-    'HIST-UI …und die alte Karte fuer Schuld und Guthaben steht unveraendert daneben');
+  // Die zweite Karte heisst, was sie zeigt: nur was zu BEGLEICHEN ist. Vorher stand dort „GOLD USED"
+  // und bei vollstaendig verbrauchtem Kundengold „No gold positions recorded" — direkt neben einem
+  // Goldeinsatz, der sehr wohl erfasst war (Feldbefund 19.09.2026).
+  ok(/GOLD DEBTS & CREDITS \(\{repairGoldPayables\.length \+ repairCustomerGoldCredits\.length\}\)/.test(seite)
+    && !/GOLD USED \(/.test(seite),
+  'HIST-UI die Karte fuer Schuld und Guthaben heisst „GOLD DEBTS & CREDITS"');
+  ok(/repairGoldPayables\.length === 0 && repairCustomerGoldCredits\.length === 0 \? \(\s*<p[^>]*>Nothing to settle — this repair created no gold debt and no customer gold credit\.<\/p>/.test(seite)
+    && !/No gold positions recorded for this repair/.test(seite),
+  'HIST-UI …leer sagt sie „Nothing to settle", statt einen erfassten Goldeinsatz zu verleugnen');
+  ok(seite.indexOf('GOLD USAGE HISTORY (') > 0 && seite.indexOf('GOLD USAGE HISTORY (') < seite.indexOf('GOLD DEBTS & CREDITS ('),
+    'HIST-UI erst der Verlauf (was passiert ist), dann was daraus offen ist');
+  ok(/repairGoldPayables\.map\(/.test(seite) && /data-gold-settle-open="settle_supplier_return"/.test(seite)
+    && /data-gold-settle-open="convert_supplier_money"/.test(seite) && /repairCustomerGoldCredits\.map\(/.test(seite),
+  'HIST-UI die Schuld- und Guthabenzeilen samt ihren Knoepfen sind unveraendert da');
+  // Vollstaendig verbrauchtes Kundengold (oben, Fall 1): Verlauf ja, Schuld/Guthaben nein — genau
+  // die Lage, in der die erste Karte etwas zeigt und die zweite „Nothing to settle".
+  {
+    const leer = freshDb();
+    await primary(() => house.recordRepairGoldUsageOnPrimary(
+      { repairId: 'rep-1', source: 'customer', karat: '21K', receivedGrams: 5, usedGrams: 5, leftover: 'return' }));
+    ok(verlauf(leer).length === 1
+      && rows(leer, "SELECT id FROM gold_payables WHERE source_repair_id = 'rep-1' AND created_at > ?", [NOW]).length === 0
+      && rows(leer, "SELECT id FROM customer_gold_credits WHERE source_repair_id = 'rep-1'").length === 0,
+    'HIST-UI verbrauchtes Kundengold: ein Verlaufseintrag, nichts zu begleichen');
+  }
   // (8) Das Telefon zeigt ihn — nur lesend.
   const handy = src('src-tauri/src/sync/mobile_repair_ui.js');
   ok(/rpRenderGoldHistory\(rep\)/.test(handy) && /MobileRepair\.goldUsageLine\(h\)/.test(handy),
