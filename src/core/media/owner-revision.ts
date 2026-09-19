@@ -34,6 +34,17 @@ export type OwnerRevisionResult =
   /** The owner table has no revision contract (yet) — nothing to advance, and that is reported, not hidden. */
   | { kind: 'not_revisioned' };
 
+/** MEDIA-S2 — refuse a link to an owner that does not exist in its scope, BEFORE anything is written. */
+export function assertMediaOwnerExists(
+  db: OwnerRevisionDb,
+  owner: { entityType: string; entityId: string; scopeId: string },
+): void {
+  const e = MEDIA_ENTITY_SCOPE[owner.entityType];
+  if (!e) throw new OwnerRevisionError('MEDIA_OWNER_ENTITY_UNKNOWN', `unknown media owner type: ${owner.entityType}`);
+  const hit = db.exec(`SELECT 1 FROM ${e.table} WHERE ${e.idCol} = ? AND ${e.scopeCol} = ? LIMIT 1`, [owner.entityId, owner.scopeId])[0]?.values.length;
+  if (!hit) throw new OwnerRevisionError('MEDIA_OWNER_NOT_FOUND', `no ${owner.entityType} ${owner.entityId} in this scope`);
+}
+
 /**
  * Advance the owner's revision by exactly one, scoped to the owner's branch (or tenant). The owner
  * must exist in that scope — otherwise the link change is refused (a link to a record the caller

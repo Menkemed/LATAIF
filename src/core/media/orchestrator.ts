@@ -52,6 +52,8 @@ import type {
   EditBaselineLink,
   EditApplyResult,
   ProductEditIntent,
+  ObjectIngestInput,
+  ObjectIngestResult,
 } from './coordinator.ts';
 import { MediaDbCoordinator } from './coordinator.ts';
 
@@ -305,6 +307,49 @@ export class StockMediaOrchestrator {
         }
 
         return dbResult;
+      } finally {
+        lease.release();
+      }
+    });
+  }
+
+  /**
+   * MEDIA-S2 — ingest WITHOUT a business link: the same two checkpoints as
+   * `ingestAndFinalizeStockImage` (intent durable before publish, object durable after), but the
+   * result is a verified, UNLINKED media object. The caller links it to its owner later, inside its
+   * own business transaction (`MediaOwnerLinks`). One pipeline: same Rust prepare/commit, same
+   * coordinator writers, same recovery.
+   */
+  async ingestObject(input: ObjectIngestInput & { imageBytes: Uint8Array; originalName?: string }): Promise<ObjectIngestResult> {
+    return this.withOpsLock(async () => {
+      const lease = await this.leaseFactory();
+      try {
+        const coordinator = this.coordinatorFactory(lease.db, this.gateway);
+        let prepareResult: PrepareResult;
+        try {
+          prepareResult = await this.gateway.prepareStockImage({
+            tenantScope: input.tenantId,
+            ingestRequestId: input.ingestRequestId,
+            requestHash: input.requestHash,
+            imageBytes: input.imageBytes,
+            originalName: input.originalName,
+          });
+        } catch (e) {
+          throw new OrchestratorError('MEDIA_ORCH_PREPARE_FAILED', asMessage(e), e);
+        }
+        coordinator.registerPendingObjectIntent(input, prepareResult);
+        try {
+          await lease.saveDurably();
+        } catch (e) {
+          this.wrapLeaseError(e, 'MEDIA_ORCH_DB_PERSIST_FAILED');
+        }
+        const result = await coordinator.finalizeObject(input);
+        try {
+          await lease.saveDurably();
+        } catch (e) {
+          this.wrapLeaseError(e, 'MEDIA_ORCH_DB_PERSIST_FAILED');
+        }
+        return result;
       } finally {
         lease.release();
       }
@@ -656,7 +701,8 @@ export class StockMediaOrchestrator {
           (r) =>
             r.action === 'finalized_from_ready_rust' ||
             r.action === 'replaced_from_ready_rust' ||
-            r.action === 'quarantined_verification_failed',
+            r.action === 'quarantined_verification_failed' ||
+            r.action === 'object_finalized_from_ready_rust',
         );
         if (dbChanged) {
           try {

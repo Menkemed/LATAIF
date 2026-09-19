@@ -16,6 +16,7 @@
 import { evaluatePriceEligibility, touchesPriceColumns } from '../products/price-eligibility.ts';
 import { enterTransaction, leaveNestedTransaction, resetTransactionContext, isTransactionActive } from '../db/transaction-context.ts';
 import { isTransactionUnhealthy } from '../db/transaction-health.ts';
+import { assertOwnerKind, type MediaSecurityClass } from './media-owner.ts';
 import {
   blobIdFor,
   dedupTokenFor,
@@ -239,6 +240,42 @@ export interface ReplaceInput extends FinalizeInput {
   previousLinkId: string;
 }
 
+/**
+ * MEDIA-S2 — an ingest WITHOUT a business link. The bytes become a verified media object (blob
+ * generations + object + thumbnail variant); NO link is written. A later business transaction
+ * links it to its owner (`media-links.ts`), together with the owner's revision — or never, in
+ * which case the object stays unreachable and the existing GC contract applies.
+ *
+ * The intended owner TYPE and role are recorded on the job (recovery classifies by them); the
+ * owner id is optional — the owner row may only come into being in that later transaction.
+ */
+export interface ObjectIngestInput {
+  tenantId: string;
+  branchId: string | null;
+  scopeKind: 'branch' | 'tenant';
+  ingestRequestId: string;
+  requestHash: string;
+  ownerType: string;
+  ownerId?: string | null;
+  role: string;
+  securityClass?: MediaSecurityClass;
+  retentionClass?: 'transient' | 'standard' | 'legal_hold';
+}
+
+export interface ObjectIngestResult {
+  jobId: string;
+  ingestRequestId: string;
+  requestHash: string;
+  state: 'ready';
+  mediaId: string;
+  mainBlobId: string;
+  thumbnailBlobId: string;
+  variantId: string;
+  ownerType: string;
+  main: RustStoredDescriptor & { storage_key: string };
+  thumbnail: RustStoredDescriptor & { storage_key: string };
+}
+
 export interface RemoveLinkInput {
   tenantId: string;
   linkId: string;
@@ -296,7 +333,7 @@ export interface PendingIntentPayload {
 }
 
 /** The two gallery-mutating ingest operations a durable intent can describe. */
-export type IntentOperation = 'append' | 'replace';
+export type IntentOperation = 'append' | 'replace' | 'object_only';
 
 export interface RecoveryReport {
   tenantId: string;
@@ -331,7 +368,9 @@ export interface RecoveryReport {
     | 'left_pending_edit_product_changed'
     // MEDIA-S1 — this job's own frozen data cannot be converged (a coordinator validation refused
     // it). Left exactly as it is — never repaired, never forced — and the pass goes on.
-    | 'left_pending_job_blocked';
+    | 'left_pending_job_blocked'
+    // MEDIA-S2 — an unlinked (object-only) ingest converged: object ready, still NO link
+    | 'object_finalized_from_ready_rust';
 }
 
 /**
@@ -358,7 +397,8 @@ function isJobLocalRecoveryError(e: unknown): e is CoordinatorError {
  */
 type RecoveryPlan =
   | { op: 'append'; input: FinalizeInput }
-  | { op: 'replace'; input: ReplaceInput };
+  | { op: 'replace'; input: ReplaceInput }
+  | { op: 'object_only'; input: ObjectIngestInput };
 
 // ── the ambient sql.js `Database` handle ───────────────────────────────────
 //
@@ -665,6 +705,93 @@ export class MediaDbCoordinator {
         now,
       ] as unknown[],
     );
+  }
+
+  // ── MEDIA-S2 — ingest without a link ───────────────────────────────────────────────────────
+
+  /** The FinalizeInput-shaped view the shared job/object writers need (entity id may be null). */
+  private objectAsFinalizeShape(input: ObjectIngestInput): FinalizeInput {
+    return {
+      tenantId: input.tenantId, branchId: input.branchId, scopeKind: input.scopeKind,
+      ingestRequestId: input.ingestRequestId, requestHash: input.requestHash,
+      entityType: input.ownerType, entityId: (input.ownerId ?? null) as unknown as string, role: input.role,
+      securityClass: input.securityClass ?? 'internal', retentionClass: input.retentionClass ?? 'standard',
+    };
+  }
+
+  private validateObjectInput(input: ObjectIngestInput): void {
+    validateFinalizeInput(this.objectAsFinalizeShape(input));
+    try {
+      assertOwnerKind({ tenantId: input.tenantId, scopeKind: input.scopeKind, branchId: input.branchId,
+        entityType: input.ownerType, role: input.role, securityClass: input.securityClass });
+    } catch (e) {
+      throw new CoordinatorError('MEDIA_INVALID_INPUT', (e as { code?: string }).code ?? 'MEDIA_OWNER_INVALID');
+    }
+  }
+
+  /** Freeze the object-only intent BEFORE the Rust core publishes (same checkpoint rule as append). */
+  registerPendingObjectIntent(input: ObjectIngestInput, prepared: PrepareResult): void {
+    this.validateObjectInput(input);
+    if (prepared.request_hash !== input.requestHash) throw new CoordinatorError('MEDIA_INVALID_INPUT');
+    this.persistIntent(this.objectAsFinalizeShape(input), objectIntentFor(input.tenantId, prepared), () => {});
+  }
+
+  /**
+   * Publish + verify + write the media OBJECT (blob generations, object, thumbnail variant) in one
+   * transaction — and NO link. Idempotent under retry; the same frozen-intent rules as `finalize`.
+   */
+  async finalizeObject(input: ObjectIngestInput): Promise<ObjectIngestResult> {
+    this.validateObjectInput(input);
+    const shape = this.objectAsFinalizeShape(input);
+    const now = timestamp();
+    const existing = this.jobRow(input.tenantId, input.ingestRequestId);
+    if (existing) {
+      if (existing.request_hash !== input.requestHash) throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT');
+      if (existing.state === 'ready') {
+        const done = parseCachedObjectResult(existing.result_json);
+        if (done) return done;
+        // A ready job of another kind under this id is a different request.
+        throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT', 'MEDIA_INTENT_OPERATION_MISMATCH');
+      }
+    }
+    const prior = parseCachedIntent(existing?.result_json);
+    if (prior && operationOf(prior) !== 'object_only') {
+      throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT', 'MEDIA_INTENT_OPERATION_MISMATCH');
+    }
+    const commit: CommitResult = await this.gateway.commitStockImage({
+      tenantScope: input.tenantId, ingestRequestId: input.ingestRequestId, requestHash: input.requestHash,
+    });
+    if (prior && !intentsEqual(prior, objectIntentFor(input.tenantId, commit, { main: commit.main_storage_key, thumb: commit.thumbnail_storage_key }))) {
+      throw new CoordinatorError('MEDIA_INGEST_REQUEST_CONFLICT');
+    }
+    await this.readVerified(input.tenantId, commit.main_descriptor);
+    await this.readVerified(input.tenantId, commit.thumbnail_descriptor);
+    return this.withTx(() => {
+      this.upsertJob(shape, commit, now);
+      const mainBlobId = blobIdFor(commit.main_descriptor.hash);
+      const thumbBlobId = blobIdFor(commit.thumbnail_descriptor.hash);
+      this.ensureBlobGeneration(input.tenantId, mainBlobId, commit.main_descriptor, commit.main_storage_key, now);
+      this.ensureBlobGeneration(input.tenantId, thumbBlobId, commit.thumbnail_descriptor, commit.thumbnail_storage_key, now);
+      const mediaId = mediaIdFor(input.ingestRequestId);
+      this.ensureObject(shape, mainBlobId, mediaId, now);
+      const variantId = variantIdFor(mediaId, 'thumbnail');
+      this.ensureVariant(input.tenantId, variantId, mediaId, thumbBlobId, now);
+      const result: ObjectIngestResult = {
+        jobId: this.readJobId(input.tenantId, input.ingestRequestId),
+        ingestRequestId: input.ingestRequestId, requestHash: input.requestHash, state: 'ready',
+        mediaId, mainBlobId, thumbnailBlobId: thumbBlobId, variantId, ownerType: input.ownerType,
+        main: { ...commit.main_descriptor, storage_key: commit.main_storage_key },
+        thumbnail: { ...commit.thumbnail_descriptor, storage_key: commit.thumbnail_storage_key },
+      };
+      this.db.run(
+        `UPDATE media_ingest_jobs
+            SET state = 'ready', target_media_id = ?, target_blob_id = ?, result_json = ?,
+                completed_at = ?, updated_at = ?
+          WHERE tenant_id = ? AND ingest_request_id = ?`,
+        [mediaId, mainBlobId, JSON.stringify({ kind: 'object_result', value: result }), now, now, input.tenantId, input.ingestRequestId] as unknown[],
+      );
+      return result;
+    });
   }
 
   /**
@@ -1485,7 +1612,12 @@ export class MediaDbCoordinator {
         continue;
       }
       try {
-        if (plan.op === 'replace') {
+        if (plan.op === 'object_only') {
+          // MEDIA-S2 — converge the OBJECT only. No link, so nothing product-specific follows:
+          // the report carries no productId, and the embedding hook never sees it.
+          await this.finalizeObject(plan.input);
+          out.push({ tenantId, ingestRequestId: irid, ...scope, productId: undefined, jobState: state, action: 'object_finalized_from_ready_rust' });
+        } else if (plan.op === 'replace') {
           await this.replace(plan.input);
           out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'replaced_from_ready_rust' });
         } else {
@@ -1541,6 +1673,21 @@ export class MediaDbCoordinator {
     const entityId = row.requested_entity_id as string | null | undefined;
     const role = row.requested_role as string | null | undefined;
     const hash = row.request_hash as string | null | undefined;
+    // MEDIA-S2 — an object-only intent needs no owner id (the owner may not exist yet).
+    if (scopeKind && entityType && role && hash && (scopeKind === 'branch' || scopeKind === 'tenant')) {
+      let oi: PendingIntentPayload | null = null;
+      try { oi = parseCachedIntent(row.result_json); } catch { return null; }
+      if (oi && operationOf(oi) === 'object_only') {
+        return { op: 'object_only', input: {
+          tenantId: String(row.tenant_id),
+          branchId: scopeKind === 'branch' ? (row.branch_id ? String(row.branch_id) : null) : null,
+          scopeKind, ingestRequestId: String(row.ingest_request_id), requestHash: hash,
+          ownerType: entityType, ownerId: entityId ?? null, role,
+          securityClass: (row.security_class as MediaSecurityClass) ?? 'internal',
+          retentionClass: (row.retention_class as ObjectIngestInput['retentionClass']) ?? 'standard',
+        } };
+      }
+    }
     if (!scopeKind || !entityType || !entityId || !role || !hash) return null;
     if (scopeKind !== 'branch' && scopeKind !== 'tenant') return null;
     // 3A-R1/R2: the gallery slot AND the operation come from the DURABLE
@@ -2215,6 +2362,7 @@ type ResultJsonView =
   | { kind: 'intent'; intent: PendingIntentPayload }
   | { kind: 'result'; result: FinalizeResult }
   | { kind: 'edit_plan'; env: EditPlanEnvelope }
+  | { kind: 'object_result'; result: ObjectIngestResult }
   | { kind: 'corrupt' };
 
 const CORRUPT: ResultJsonView = { kind: 'corrupt' };
@@ -2231,6 +2379,7 @@ function parseResultJson(raw: unknown): ResultJsonView {
   if (parsed.kind === 'result') return parseResultEnvelope(parsed);
   if (parsed.kind === 'intent') return parseIntentEnvelope(parsed);
   if (parsed.kind === 'edit_plan') return parseEditPlanEnvelope(parsed);
+  if (parsed.kind === 'object_result') return parseObjectResultEnvelope(parsed);
   return CORRUPT; // unknown discriminator → fail closed
 }
 
@@ -2303,6 +2452,37 @@ function parseResultEnvelope(parsed: any): ResultJsonView {
   return { kind: 'result', result: v as FinalizeResult };
 }
 
+function parseObjectResultEnvelope(parsed: any): ResultJsonView {
+  const v = parsed.value;
+  if (!v || typeof v !== 'object') return CORRUPT;
+  const ok = typeof v.jobId === 'string' && typeof v.ingestRequestId === 'string' &&
+    typeof v.requestHash === 'string' && v.state === 'ready' && typeof v.mediaId === 'string' &&
+    typeof v.ownerType === 'string' && !!v.main && !!v.thumbnail;
+  return ok ? { kind: 'object_result', result: v as ObjectIngestResult } : CORRUPT;
+}
+
+/** MEDIA-S2 — the frozen object-only result, or null for any other payload. Throws on damage. */
+function parseCachedObjectResult(raw: unknown): ObjectIngestResult | null {
+  const view = parseResultJson(raw);
+  if (view.kind === 'corrupt') throw corruptIntent();
+  return view.kind === 'object_result' ? view.result : null;
+}
+
+/** MEDIA-S2 — the object-only intent: the descriptors, no slot, no batch. */
+function objectIntentFor(
+  scope: string,
+  d: { main_descriptor: RustStoredDescriptor; thumbnail_descriptor: RustStoredDescriptor },
+  keys?: { main: string; thumb: string },
+): PendingIntentPayload {
+  return {
+    kind: 'intent',
+    intentVersion: 3,
+    operation: 'object_only',
+    main: { ...d.main_descriptor, storage_key: keys?.main ?? storageKeyFor(scope, d.main_descriptor.hash, d.main_descriptor.extension) },
+    thumbnail: { ...d.thumbnail_descriptor, storage_key: keys?.thumb ?? storageKeyFor(scope, d.thumbnail_descriptor.hash, d.thumbnail_descriptor.extension) },
+  };
+}
+
 function parseIntentEnvelope(parsed: any): ResultJsonView {
   if (!parsed.main || !parsed.thumbnail) return CORRUPT;
   const ver = parsed.intentVersion;
@@ -2310,7 +2490,7 @@ function parseIntentEnvelope(parsed: any): ResultJsonView {
 
   // ── operation (v3+) ──
   const hasOp = parsed.operation !== undefined;
-  if (hasOp && parsed.operation !== 'append' && parsed.operation !== 'replace') {
+  if (hasOp && parsed.operation !== 'append' && parsed.operation !== 'replace' && parsed.operation !== 'object_only') {
     return CORRUPT;
   }
   const operation: IntentOperation = hasOp ? parsed.operation : 'append';
@@ -2321,6 +2501,12 @@ function parseIntentEnvelope(parsed: any): ResultJsonView {
     if (typeof prev !== 'string' || prev === '') return CORRUPT;
   } else if (prev !== undefined) {
     return CORRUPT;
+  }
+
+  // ── object-only (MEDIA-S2): no slot and no batch — a link is not this intent's business ──
+  if (operation === 'object_only') {
+    if (parsed.linkIntent !== undefined || parsed.batch !== undefined || ver !== 3) return CORRUPT;
+    return { kind: 'intent', intent: { ...(parsed as PendingIntentPayload), operation } };
   }
 
   // ── batch (3B2B-R2, optional) ──
