@@ -530,37 +530,77 @@ try {
     `§2b ein veralteter Stand wird abgewiesen, nichts wird ueberschrieben (${S(nachStale.slice(0, 60))})`);
 
   // ── §2c Die Galerie: behaltene Bilder nach Kennung, neue aus der Ablage ──────────────────────
+  //
+  // Feldbefund (Live-Test 19.09.2026): (a) wer nur ein Foto HINZUFUEGTE, sah keinen Knopf „Save
+  // photo changes" — ein neues Foto zaehlte erst nach dem Hochladen, und hochgeladen wird beim
+  // Speichern; (b) nach dem Speichern stand das neue Bild zweimal da — einmal von der Galerie, einmal
+  // als „ungespeichert" zurueckgeholt.
+  let galerieGespeichert = false;
   antwortGeber = (u, body) => {
     if (/staging/.test(u)) return { status: 201, body: { stagingId: 'c'.repeat(64) } };
     const op = body && body.op;
     if (op === 'consignments.get') return { status: 200, body: { ok: true, value: KOMMISSION(9, { agreedPrice: 777, notes: 'von PC2' }) } };
-    if (op === 'products.get') return { status: 200, body: { ok: true, value: ARTIKEL } };
-    if (op === 'products.update') return { status: 200, body: { ok: true, value: {} } };
+    // Nach dem Speichern liefert der Primary die NEUE Galerie: m-1 behalten, m-3 aus der Ablage.
+    if (op === 'products.get') {
+      return { status: 200, body: { ok: true, value: galerieGespeichert
+        ? { ...ARTIKEL, mediaKeys: ['k-1', 'k-3'], mediaIds: ['m-1', 'm-3'] } : ARTIKEL } };
+    }
+    if (op === 'products.update') { galerieGespeichert = true; return { status: 200, body: { ok: true, value: {} } }; }
     return { status: 200, body: { ok: true, value: { items: [] } } };
   };
-  await c.ev(`
-    // das zweite gespeicherte Bild entfernen und ein neues aufnehmen
-    document.querySelectorAll('#cnPhotoStrip .photo-thumb .rm')[1].click();
+  const knopfDa = () => c.ev("return !document.getElementById('cnGallerySaveBtn').classList.contains('hidden');");
+  const warteKnopf = async (soll) => {
+    // true = der Knopf hat den erwarteten Zustand erreicht, false = nicht innerhalb der Frist.
+    for (let i = 0; i < 30; i++) { if ((await knopfDa()) === soll) return true; await sleep(150); }
+    return false;
+  };
+  const fotoAufnehmen = (farbe) => c.ev(`
     const c2 = document.createElement('canvas'); c2.width = 30; c2.height = 20;
-    const x = c2.getContext('2d'); x.fillStyle = '#39c'; x.fillRect(0, 0, 30, 20);
+    const x = c2.getContext('2d'); x.fillStyle = '${farbe}'; x.fillRect(0, 0, 30, 20);
     const blob = await (await fetch(c2.toDataURL('image/jpeg', 0.9))).blob();
-    const dt = new DataTransfer(); dt.items.add(new File([blob], 'zwei.jpg', { type: 'image/jpeg' }));
+    const dt = new DataTransfer(); dt.items.add(new File([blob], 'neu.jpg', { type: 'image/jpeg' }));
     const inp = document.getElementById('cnPhotoInput');
     inp.files = dt.files;
     inp.dispatchEvent(new Event('change', { bubbles: true }));
     return 1;`);
-  for (let i = 0; i < 30; i++) {
-    const sichtbar = await c.ev("return !document.getElementById('cnGallerySaveBtn').classList.contains('hidden');");
-    if (sichtbar) break;
-    await sleep(200);
-  }
-  ok(await c.ev("return !document.getElementById('cnGallerySaveBtn').classList.contains('hidden');"),
-    '§2c „Save photo changes" erscheint erst, wenn die Galerie wirklich anders ist');
-  await c.ev("document.getElementById('cnGallerySaveBtn').click(); await new Promise((r) => setTimeout(r, 900)); return 1;");
+  const bilder = () => c.ev("return document.querySelectorAll('#cnPhotoStrip .photo-thumb').length;");
+
+  ok(!(await knopfDa()), '§2c unveraenderte Galerie: kein Knopf');
+  // (1) NUR hinzufuegen
+  await fotoAufnehmen('#39c');
+  ok(await warteKnopf(true), '§2c nur ein Foto HINZUGEFUEGT → „Save photo changes" erscheint');
+  // …und wieder weg damit: die Galerie ist wieder die gespeicherte, der Knopf verschwindet.
+  await c.ev("const t = document.querySelectorAll('#cnPhotoStrip .photo-thumb .rm'); t[t.length - 1].click(); return 1;");
+  ok(await warteKnopf(false), '§2c das neue Foto wieder entfernt → nichts zu speichern, kein Knopf');
+  // (2) NUR entfernen
+  await c.ev("document.querySelectorAll('#cnPhotoStrip .photo-thumb .rm')[1].click(); return 1;");
+  ok(await warteKnopf(true), '§2c nur ein gespeichertes Bild ENTFERNT → der Knopf erscheint');
+  // (3) entfernen + hinzufuegen
+  await fotoAufnehmen('#c93');
+  ok(await warteKnopf(true) && (await bilder()) === 2, '§2c entfernen + hinzufuegen → der Knopf bleibt, zwei Bilder');
+
+  await c.ev("document.getElementById('cnGallerySaveBtn').click(); await new Promise((r) => setTimeout(r, 1200)); return 1;");
   const galerie = gesehen.filter((g) => g.body?.op === 'products.update');
   ok(galerie.length === 1 && S(galerie[0].body.payload.gallery) === S([{ keep: 'm-1' }, { stagingId: 'c'.repeat(64) }])
     && S(Object.keys(galerie[0].body.payload).sort()) === S(['gallery', 'id']),
     `§2c der Galerieauftrag nennt behaltene Kennungen und neue Ablagekennungen — sonst nichts (${S(galerie[0] && galerie[0].body.payload.gallery)})`);
+  // (4) Nach dem Speichern: die Galerie kommt vom Primary, jedes Bild genau EINMAL.
+  for (let i = 0; i < 30; i++) {
+    const fertig = await c.ev(`return Array.from(document.querySelectorAll('#cnPhotoStrip img'))
+      .every((e) => (e.getAttribute('src') || '').indexOf('blob:') === 0);`);
+    if (fertig) break;
+    await sleep(150);
+  }
+  const nachher = await c.ev(`return {
+    anzahl: document.querySelectorAll('#cnPhotoStrip .photo-thumb').length,
+    quellen: Array.from(document.querySelectorAll('#cnPhotoStrip img')).map((e) => (e.getAttribute('src') || '').slice(0, 5)),
+    ungespeichert: /unsaved entries/.test(document.getElementById('cnSuccess').textContent || '') };`);
+  ok(nachher.anzahl === 2 && S(nachher.quellen) === S(['blob:', 'blob:']),
+    `§2c nach dem Speichern steht jedes Bild genau einmal da — beide aus der Galerie des Primary (${S(nachher)})`);
+  ok(!nachher.ungespeichert, '§2c …und das gerade gespeicherte Foto gilt NICHT als „ungespeichert"');
+  ok(!(await knopfDa()), '§2c …nichts mehr zu speichern: kein Knopf');
+  ok(gesehen.filter((g) => g.body?.op === 'products.update').length === 1,
+    '§2c …und es wurde genau EINMAL gespeichert');
 
   // ── §2d AI: sie fuellt nur LEERES und speichert nichts ───────────────────────────────────────
   await c.ev("document.querySelector('[data-back-consign]').click(); await new Promise((r) => setTimeout(r, 300)); document.getElementById('cnNewBtn').click(); await new Promise((r) => setTimeout(r, 200)); return 1;");
@@ -632,6 +672,9 @@ try {
     document.getElementById('cnSaleBtn').click();
     await new Promise((r) => setTimeout(r, 800));
     return 1;`);
+  const kaestchen = () => c.ev(`return {
+    sichtbar: !document.getElementById('cnShortfallAckRow').classList.contains('hidden'),
+    an: document.getElementById('cnShortfallAck').checked };`);
   const nachNein = await c.ev(`return {
     hinweis: document.getElementById('cnShortfallMsg').textContent,
     sichtbar: !document.getElementById('cnShortfallMsg').classList.contains('hidden') };`);
@@ -641,12 +684,52 @@ try {
   ok(ersterVerkauf.length === 1 && ersterVerkauf[0].body.payload.acknowledgeShortfall === undefined
     && ersterVerkauf[0].body.payload.buyerId === 'cust-9',
     '§4 …und der erste Versuch hat NICHT vorsorglich bestaetigt');
+  let k = await kaestchen();
+  ok(k.sichtbar && !k.an, `§4 nach dem Nein steht das Kaestchen „I confirm — record this shortfall as Consignor Loss" da, LEER (${S(k)})`);
+
+  // Feldbefund (19.09.2026): ein zweites Tippen auf „Record sale" buchte den Verlust. Jetzt nicht mehr.
+  await c.ev("document.getElementById('cnSaleBtn').click(); await new Promise((r) => setTimeout(r, 600)); return 1;");
+  ok(verkaufVersuche === 1 && gesehen.filter((g) => g.body?.op === 'consignments.record_sale').length === 1,
+    `§4 ohne Haekchen geht beim zweiten Tippen NICHTS hinaus (${verkaufVersuche})`);
+  ok(/tick/.test(await c.ev("return document.getElementById('cnActionMsg').textContent;")),
+    '§4 …die Maske sagt, was fehlt');
+
+  // Preis geaendert → es ist ein anderer Verkauf: das Ja ist weg.
+  await c.ev("document.getElementById('cnShortfallAck').click(); return 1;");
+  ok((await kaestchen()).an, '§4 das Haekchen laesst sich setzen');
+  await c.ev(`const f = document.getElementById('cnSalePrice'); f.value = '320';
+    f.dispatchEvent(new Event('input', { bubbles: true })); return 1;`);
+  k = await kaestchen();
+  ok(!k.sichtbar && !k.an, `§4 PREIS geaendert → Haekchen und Frage sind zurueckgesetzt (${S(k)})`);
+  await c.ev("document.getElementById('cnSaleBtn').click(); await new Promise((r) => setTimeout(r, 800)); return 1;");
+  let verkaeufe = gesehen.filter((g) => g.body?.op === 'consignments.record_sale');
+  ok(verkaeufe.length === 2 && verkaeufe[1].body.payload.acknowledgeShortfall === undefined
+    && verkaeufe[1].body.payload.salePrice === 320,
+    '§4 …der neue Preis geht OHNE Bestaetigung hinaus und wird vom Primary neu beurteilt');
+
+  // Kaeufer geaendert → ebenso zurueckgesetzt.
+  await c.ev("document.getElementById('cnShortfallAck').click(); return 1;");
+  await c.ev(`document.getElementById('cnBuyerSearchBtn').click();
+    await new Promise((r) => setTimeout(r, 400));
+    document.querySelector('#cnBuyerResults button').click(); return 1;`);
+  k = await kaestchen();
+  ok(!k.sichtbar && !k.an, `§4 KAEUFER geaendert → Haekchen und Frage sind zurueckgesetzt (${S(k)})`);
+  await c.ev("document.getElementById('cnSaleBtn').click(); await new Promise((r) => setTimeout(r, 800)); return 1;");
+  verkaeufe = gesehen.filter((g) => g.body?.op === 'consignments.record_sale');
+  ok(verkaeufe.length === 3 && verkaeufe[2].body.payload.acknowledgeShortfall === undefined,
+    '§4 …auch dann geht der Verkauf erst einmal OHNE Bestaetigung hinaus');
+
+  // Jetzt ausdruecklich: Haekchen → derselbe bestehende Verkaufsauftrag, mit Bestaetigung.
+  await c.ev("document.getElementById('cnShortfallAck').click(); return 1;");
   await c.ev("document.getElementById('cnSaleBtn').click(); await new Promise((r) => setTimeout(r, 900)); return 1;");
-  const beideVerkaeufe = gesehen.filter((g) => g.body?.op === 'consignments.record_sale');
-  ok(beideVerkaeufe.length === 2 && beideVerkaeufe[1].body.payload.acknowledgeShortfall === true
-    && beideVerkaeufe[0].body.commandId !== beideVerkaeufe[1].body.commandId,
-    '§4 die Bestaetigung ist ein eigener Auftrag mit eigener Kennung');
-  ok(verkaufVersuche === 2, '§4 …und genau zwei Versuche haben den Primary erreicht');
+  verkaeufe = gesehen.filter((g) => g.body?.op === 'consignments.record_sale');
+  const bestaetigt = verkaeufe[verkaeufe.length - 1];
+  ok(verkaeufe.length === 4 && bestaetigt.body.payload.acknowledgeShortfall === true
+    && verkaeufe.slice(0, 3).every((g) => g.body.commandId !== bestaetigt.body.commandId),
+    '§4 mit Haekchen: der bestehende Verkaufsauftrag, bestaetigt, unter eigener Kennung');
+  ok(verkaufVersuche === 4, `§4 …und genau vier Versuche haben den Primary erreicht (${verkaufVersuche})`);
+  k = await kaestchen();
+  ok(!k.sichtbar && !k.an, '§4 nach dem gebuchten Verkauf ist die Frage wieder weg');
 
   // ── §5 Verlorene Antwort: der Vorgang bleibt offen und wird unter DERSELBEN Kennung geklaert ─
   antwortGeber = (u, body) => {

@@ -173,8 +173,11 @@
     $('cnAiBtn').classList.toggle('hidden', !hat);
     // „Save photo changes" gibt es nur an einer bestehenden Kommission und nur, wenn sich die
     // Galerie wirklich unterscheidet — sonst waere es ein Knopf, der nichts tut.
+    // Ein NEUES Foto ist eine Aenderung, auch wenn es noch nicht hochgeladen ist — hochgeladen wird
+    // erst beim Speichern, und bis dahin kannte der Plan es nicht: wer nur hinzufuegte, sah keinen Knopf.
     const plan = MobileConsignment.galleryPlan(CN.slots);
-    const gleich = MobileConsignment.galleryUnchanged(plan, (CN.product && CN.product.mediaIds) || []);
+    const neuesFoto = CN.slots.some((s) => !s.mediaId);
+    const gleich = !neuesFoto && MobileConsignment.galleryUnchanged(plan, (CN.product && CN.product.mediaIds) || []);
     $('cnGallerySaveBtn').classList.toggle('hidden', CN.mode !== 'edit' || !CN.product || gleich);
   }
   $('cnPhotoInput').onchange = async (e) => {
@@ -291,8 +294,12 @@
     if (!options.keepMsgs) cnClearMsgs();
     const vorher = CN.con;
     const getippt = (options.keepForm && vorher) ? cnFormValues() : null;
-    const neueFotos = options.keepForm ? CN.slots.filter((s) => !s.mediaId) : [];
+    // Nach einem GELUNGENEN Galerie-Speichern sind die neuen Fotos gespeichert — sie kommen mit der
+    // Galerie vom Primary zurueck und duerfen nicht zusaetzlich als „ungespeichert" stehen bleiben.
+    const neueFotos = (options.keepForm && options.keepPhotos !== false) ? CN.slots.filter((s) => !s.mediaId) : [];
 
+    // Eine andere Kommission ist ein anderer Verkauf: eine offene Verlustfrage gilt dort nicht.
+    if (!vorher || vorher.id !== id) cnShortfallZuruecksetzen();
     const r = await cnClient.read('consignments.get', { id: id });
     if (!r.ok) { cnSay('cnHomeError', 'Could not open the consignment (' + r.code + ').'); return; }
     const con = r.value || {};
@@ -435,7 +442,21 @@
     badge.textContent = CN.consignor ? CN.consignor.name : '';
     badge.classList.toggle('hidden', !CN.consignor);
   }
+  /**
+   * Die Frage nach dem Verlust gilt GENAU dem Verkauf, zu dem der Primary sie gestellt hat. Aendert
+   * sich Preis, Kaeufer oder Kommission, ist es ein anderer Verkauf — dann ist auch das Ja weg.
+   */
+  function cnShortfallZuruecksetzen() {
+    CN.shortfallOffen = false;
+    $('cnShortfallAck').checked = false;
+    $('cnShortfallAckRow').classList.add('hidden');
+    $('cnShortfallMsg').classList.add('hidden');
+    $('cnShortfallMsg').textContent = '';
+  }
+  $('cnSalePrice').addEventListener('input', cnShortfallZuruecksetzen);
+
   function cnSetBuyer(id, name) {
+    cnShortfallZuruecksetzen();
     CN.buyer = id ? { id: id, name: name || id } : null;
     const badge = $('cnBuyerPicked');
     badge.textContent = CN.buyer ? CN.buyer.name : '';
@@ -498,6 +519,7 @@
     CN.con = null;
     CN.product = null;
     cnGibBilderFrei();
+    cnShortfallZuruecksetzen();
     CN.slots = [];
     CN.draftKey = uuid();
     CN.buyer = null;
@@ -750,7 +772,7 @@
       const r = await cnClient.mutate('gallery:' + CN.product.id + ':' + CN.werkKeys.gallery, 'products.update', gebaut.body);
       if (r.kind === 'ok') {
         delete CN.werkKeys.gallery;
-        await cnOpen(CN.con.id, { keepMsgs: true, keepForm: true });
+        await cnOpen(CN.con.id, { keepMsgs: true, keepForm: true, keepPhotos: false });
         cnSay('cnSuccess', 'The photos were saved.');
         return;
       }
@@ -785,7 +807,9 @@
         CN.shortfallOffen = true;
         $('cnShortfallMsg').classList.remove('hidden');
         $('cnShortfallMsg').textContent = (r.message || 'This sale is below the consignor floor.')
-          + ' Press "Record sale" again to confirm — the difference is booked as a consignor loss.';
+          + ' Tick the box below to confirm — the difference is then booked as a consignor loss.';
+        $('cnShortfallAck').checked = false;
+        $('cnShortfallAckRow').classList.remove('hidden');
         cnSay('cnActionMsg', 'Not booked — the sale is below the consignor floor.', false);
         return false;
       }
@@ -800,14 +824,19 @@
   }
 
   $('cnSaleBtn').onclick = async () => {
-    const bestaetigt = CN.shortfallOffen === true;
+    // Hat der Primary nach dem Verlust gefragt, geht NICHTS hinaus, solange das Kaestchen leer ist —
+    // ein zweites Tippen auf den Knopf ist kein Ja (wie am Rechner: dort ist es ebenfalls ein Haekchen).
+    if (CN.shortfallOffen === true && !$('cnShortfallAck').checked) {
+      cnSay('cnActionMsg', 'Not booked — tick "I confirm — record this shortfall as Consignor Loss" or change the price.', false);
+      return;
+    }
+    const bestaetigt = CN.shortfallOffen === true && $('cnShortfallAck').checked === true;
     const gut = await cnHandlung('consignments.record_sale', bestaetigt ? 'sale-ack' : 'sale', () => MobileConsignment.saleBody(CN.con, {
       buyerId: CN.buyer ? CN.buyer.id : '', salePrice: $('cnSalePrice').value,
       specialMark: $('cnSpecialMark').value === 'special', notes: $('cnSaleNotes').value,
     }, { acknowledgeShortfall: bestaetigt }), 'The sale was recorded.');
     if (gut) {
-      CN.shortfallOffen = false;
-      $('cnShortfallMsg').classList.add('hidden');
+      cnShortfallZuruecksetzen();
       $('cnSalePrice').value = ''; $('cnSaleNotes').value = '';
       cnSetBuyer(null, '');
     }

@@ -187,6 +187,14 @@
       <select id="cnSpecialMark"></select>
       <input id="cnSaleNotes" type="text" placeholder="Note (optional)" />
       <div id="cnShortfallMsg" class="hint hidden"></div>
+      <!-- Wie am Rechner: ein Verkauf unter dem Boden des Einlieferers braucht ein AUSDRUECKLICHES
+           Ja. Ein zweites Tippen auf „Record sale" war zu wenig — ein Doppeltipp reichte. -->
+      <div id="cnShortfallAckRow" class="hidden">
+        <label style="display:flex; align-items:center; gap:10px; text-transform:none; letter-spacing:0; font-size:13px; color:#EAEAEA; margin-top:10px;">
+          <input id="cnShortfallAck" type="checkbox" style="width:auto;" />
+          <span>I confirm — record this shortfall as Consignor Loss</span>
+        </label>
+      </div>
     </div>
     <button id="cnSaleBtn" class="secondary">Record sale</button>
 
