@@ -2234,6 +2234,41 @@ fn media_read_verified(
         .map_err(|e| e.code().to_string())
 }
 
+// MEDIA-S1 — the binary path (Tauri 2 `tauri::ipc`): bytes travel raw, never as a JSON `number[]`.
+// Read: the verified bytes come back as an ArrayBuffer. Write: a byte-exact ORIGINAL (a document)
+// arrives as a raw request body with its metadata in headers. Neither writes a business row; no
+// writer calls the upload yet (documents come in S5).
+#[tauri::command]
+fn media_read_verified_raw(
+    state: tauri::State<'_, AppHandleState>,
+    tenant_scope: String,
+    hash: String,
+    extension: String,
+) -> Result<tauri::ipc::Response, String> {
+    let svc = media_ingest_service(&state);
+    let m = svc.read(&tenant_scope, &hash, &extension).map_err(|e| e.code().to_string())?;
+    Ok(tauri::ipc::Response::new(m.bytes))
+}
+
+#[tauri::command]
+fn media_publish_original(
+    state: tauri::State<'_, AppHandleState>,
+    request: tauri::ipc::Request<'_>,
+) -> Result<media::raw_transport::OriginalDescriptor, String> {
+    let body = match request.body() {
+        tauri::ipc::InvokeBody::Raw(b) => Some(b.as_slice()),
+        tauri::ipc::InvokeBody::Json(_) => None,
+    };
+    let headers = request.headers();
+    let up = media::raw_transport::parse_original_upload(
+        |name| headers.get(name).and_then(|v| v.to_str().ok()).map(|s| s.to_string()),
+        body,
+    )
+    .map_err(|e| e.to_string())?;
+    let svc = media_ingest_service(&state);
+    media::raw_transport::store_original(svc.media_root(), &up).map_err(|e| e.code().to_string())
+}
+
 #[tauri::command]
 fn media_recover_ingests(
     state: tauri::State<'_, AppHandleState>,
@@ -3347,6 +3382,8 @@ pub fn run() {
             media_commit_stock_image,
             media_abort_stock_image,
             media_read_verified,
+            media_read_verified_raw,
+            media_publish_original,
             media_recover_ingests,
             // MOBILE-04B2A6-I1 — the internal mobile-upload claim/handoff commands are now REGISTERED,
             // but activation is scope-gated: every wrapper's first act (after opening the config DB and

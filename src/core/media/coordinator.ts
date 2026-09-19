@@ -303,6 +303,11 @@ export interface RecoveryReport {
   /** Scope of the recovered job — lets the caller tell which product's batch
    *  just advanced/completed (3B2B-R3). Absent when the row had no manifest. */
   branchId?: string | null;
+  /** MEDIA-S1 — the entity the job belongs to (`requested_entity_type`/`_id`). */
+  entityType?: string;
+  entityId?: string;
+  /** Set ONLY when `entityType === 'product'`: everything product-specific downstream (the
+   *  embedding guard above all) keys off this field, so a repair or document job can never reach it. */
   productId?: string;
   role?: string;
   jobState: string;
@@ -318,7 +323,9 @@ export interface RecoveryReport {
     // 3B2C1 edit-batch outcomes
     | 'edit_applied_from_plan'
     | 'noop_edit_already_applied'
-    | 'left_pending_edit_baseline_changed';
+    | 'left_pending_edit_baseline_changed'
+    // MEDIA-S1 — the product half of a frozen edit no longer matches (fields or price eligibility)
+    | 'left_pending_edit_product_changed';
 }
 
 /**
@@ -1103,6 +1110,10 @@ export class MediaDbCoordinator {
     }
     // Product half (3B2C2): the product must be at its baseline or already at
     // the target — else the product row changed under us.
+    // MEDIA-S1 — and it exists ONLY for a product: a product edit riding on any other entity is refused.
+    if (plan.productEdit && plan.entityType !== 'product') {
+      throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MEDIA_EDIT_PRODUCT_BASELINE_CHANGED');
+    }
     if (plan.productEdit) {
       const st = this.productEditState(plan);
       if (!st.atBaseline && !st.atTarget) {
@@ -1394,9 +1405,16 @@ export class MediaDbCoordinator {
       const tenantId = String(r.tenant_id);
       const irid = String(r.ingest_request_id);
       const state = String(r.state);
+      // MEDIA-S1 — recovery distinguishes the owner: only a PRODUCT job carries `productId`.
+      // Before, every job's entity id was reported as a product id, so a finished non-product
+      // ingest would have been fed to the product embedding.
+      const entityType = r.requested_entity_type == null ? undefined : String(r.requested_entity_type);
+      const entityId = r.requested_entity_id == null ? undefined : String(r.requested_entity_id);
       const scope = {
         branchId: r.branch_id == null ? null : String(r.branch_id),
-        productId: r.requested_entity_id == null ? undefined : String(r.requested_entity_id),
+        entityType,
+        entityId,
+        productId: entityType === 'product' ? entityId : undefined,
         role: r.requested_role == null ? undefined : String(r.requested_role),
       };
       if (state === 'ready') {
@@ -1420,6 +1438,12 @@ export class MediaDbCoordinator {
           if (code === 'MEDIA_EDIT_BASELINE_CHANGED') {
             // The gallery moved under the plan — never force a stale edit onto it.
             out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'left_pending_edit_baseline_changed' });
+          } else if (code === 'MEDIA_EDIT_PRODUCT_BASELINE_CHANGED' || code === 'MOBILE_PRICE_NOT_ELIGIBLE') {
+            // MEDIA-S1 — the PRODUCT half moved under the plan (a later edit changed the fields, or
+            // the price may no longer be changed). Same rule as the gallery: never force it, never
+            // mutate — leave it pending. Before, this code fell through to `throw` and aborted the
+            // WHOLE recovery pass on every start (field finding: one such job since 25.08.2026).
+            out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'left_pending_edit_product_changed' });
           } else if (code === 'MEDIA_INGEST_FILE_MISSING' || code === 'MEDIA_INGEST_HASH_MISMATCH' || code === 'MEDIA_INGEST_VERIFICATION_FAILED') {
             this.markJobQuarantined(tenantId, irid, code);
             out.push({ tenantId, ingestRequestId: irid, ...scope, jobState: state, action: 'quarantined_verification_failed' });

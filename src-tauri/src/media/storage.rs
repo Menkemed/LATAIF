@@ -17,11 +17,57 @@ use std::fs::{self, File};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-/// The largest stored raster this writer can ever produce (the main-image
-/// budget). Any file at a hash path exceeding this is refused *before* being
-/// read into memory — it cannot have been written by us, so reading it would
-/// only risk unbounded allocation on a planted file.
-const MAX_STORED_BYTES: u64 = 100_000;
+/// MEDIA-S1 — the ONE contract of what may live in the store. Every stored file is one of these
+/// kinds, identified by its extension; the kind fixes its MIME type, its `content_kind` (the same
+/// vocabulary as `media_blob_generations.content_kind`), whether it is a normalised rendition or a
+/// byte-exact original, and the largest size a file of that kind may have.
+///
+/// The size is checked BEFORE a stored file is read into memory — a file above its kind's limit
+/// cannot have been written by us, so reading it would only risk unbounded allocation on a planted
+/// file. An extension that is not listed here is refused outright: there is no "any file" mode.
+///
+/// `jpg` is exactly the product-image contract of before (normalised JPEG, main ≤ 100 000 B,
+/// thumbnail ≤ 20 000 B), unchanged. `pdf` is the first byte-exact original kind: stored as
+/// received, never re-encoded, verified by its leading bytes and by hash.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StoredKind {
+    pub ext: &'static str,
+    pub mime: &'static str,
+    pub content_kind: &'static str,
+    /// `true` = byte-exact original (never normalised); `false` = a rendition this app produced.
+    pub original: bool,
+    pub max_bytes: u64,
+}
+
+/// Normalised renditions (product images and record photos): the historic 100 000 B budget.
+pub const RENDITION_MAX_BYTES: u64 = 100_000;
+/// Byte-exact documents. Today's largest inline document is about 24 MB.
+pub const DOCUMENT_MAX_BYTES: u64 = 25 * 1024 * 1024;
+
+pub const STORED_KINDS: &[StoredKind] = &[
+    StoredKind { ext: "jpg", mime: "image/jpeg", content_kind: "raster_image", original: false, max_bytes: RENDITION_MAX_BYTES },
+    StoredKind { ext: "pdf", mime: "application/pdf", content_kind: "pdf", original: true, max_bytes: DOCUMENT_MAX_BYTES },
+];
+
+/// The stored-kind contract for an extension, or `None` for anything not explicitly allowed.
+pub fn stored_kind(ext: &str) -> Option<&'static StoredKind> {
+    STORED_KINDS.iter().find(|k| k.ext == ext)
+}
+
+/// Do these bytes really have the container the kind claims? Decided by the leading bytes only
+/// (`detect::sniff_kind`), never by a name or a client-supplied type.
+pub fn bytes_match_kind(kind: &StoredKind, bytes: &[u8]) -> bool {
+    use super::detect::{sniff_kind, Kind};
+    match kind.ext {
+        "jpg" => sniff_kind(bytes) == Kind::Jpeg,
+        "pdf" => sniff_kind(bytes) == Kind::Pdf,
+        _ => false,
+    }
+}
+
+fn max_bytes_for(ext: &str) -> Result<u64, MediaError> {
+    stored_kind(ext).map(|k| k.max_bytes).ok_or(MediaError::InvalidExtension)
+}
 
 /// Outcome of an atomic publication.
 #[derive(Debug, Clone)]
@@ -102,7 +148,7 @@ pub fn derive_storage_path(
     if !is_valid_hash(hash) {
         return Err(MediaError::InvalidHash);
     }
-    if ext != "jpg" {
+    if stored_kind(ext).is_none() {
         return Err(MediaError::InvalidExtension);
     }
     let rel = format!("{tenant_scope}/{}/{hash}.{ext}", &hash[0..2]);
@@ -245,10 +291,10 @@ pub(crate) fn assert_no_reparse_under_root(
 /// Inspect an existing file at `path` for reuse: `Ok(Some(size))` when it exists
 /// and hashes to `expected_hash`, `Ok(None)` when absent, and an error when it
 /// is oversized (refused before reading) or its bytes do not match.
-fn reuse_if_matches(path: &Path, expected_hash: &str) -> Result<Option<usize>, MediaError> {
+fn reuse_if_matches(path: &Path, expected_hash: &str, max_bytes: u64) -> Result<Option<usize>, MediaError> {
     match fs::metadata(path) {
         Ok(md) => {
-            if md.len() > MAX_STORED_BYTES {
+            if md.len() > max_bytes {
                 return Err(MediaError::FileTooLarge);
             }
             let existing = fs::read(path).map_err(|e| MediaError::Io(safe_io(&e)))?;
@@ -306,6 +352,11 @@ fn publish_impl<F: FnOnce()>(
     if sha256_hex(bytes) != expected_hash {
         return Err(MediaError::FileHashMismatch);
     }
+    // MEDIA-S1 — the kind decides the ceiling: nothing above it is ever written.
+    let max_bytes = max_bytes_for(ext)?;
+    if bytes.len() as u64 > max_bytes {
+        return Err(MediaError::FileTooLarge);
+    }
     fs::create_dir_all(root).map_err(|e| MediaError::Io(safe_io(&e)))?;
     let canon_root = canonical_root_existing(root)?;
     let final_path = derive_storage_path(&canon_root, tenant_scope, expected_hash, ext)?;
@@ -350,7 +401,7 @@ fn publish_impl<F: FnOnce()>(
             // winner and reuse if it matches, never overwriting it.
             let _ = fs::remove_file(&tmp);
             if is_already_exists(&e) {
-                match reuse_if_matches(&final_path, expected_hash)? {
+                match reuse_if_matches(&final_path, expected_hash, max_bytes)? {
                     Some(size) => Ok(Published {
                         path: final_path,
                         hash: expected_hash.to_string(),
@@ -411,13 +462,14 @@ pub fn read_verified_media(
     let canon_root = canonical_root_existing(root)?;
     let path = derive_storage_path(&canon_root, tenant_scope, hash, ext)?;
     assert_no_reparse_under_root(&canon_root, &path)?;
+    let max_bytes = max_bytes_for(ext)?;
 
     let md = match fs::metadata(&path) {
         Ok(md) => md,
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(MediaError::FileMissing),
         Err(e) => return Err(MediaError::Io(safe_io(&e))),
     };
-    if md.len() > MAX_STORED_BYTES {
+    if md.len() > max_bytes {
         return Err(MediaError::FileTooLarge);
     }
     let bytes = fs::read(&path).map_err(|e| MediaError::Io(safe_io(&e)))?;
@@ -425,4 +477,37 @@ pub fn read_verified_media(
         return Err(MediaError::FileHashMismatch);
     }
     Ok(bytes)
+}
+
+/// MEDIA-S1 — store a byte-exact ORIGINAL (a document). Nothing is decoded, resized or re-encoded:
+/// the file is kept exactly as received and addressed by the SHA-256 of those very bytes.
+///
+/// Fail-closed, in this order: the extension must be a listed ORIGINAL kind (a rendition kind such
+/// as `jpg` is refused here — those are produced only by the normaliser), the size must be within
+/// the kind's limit, the leading bytes must be that container, and a caller-supplied hash, if any,
+/// must equal the computed one. Only then is the file published (no-clobber, verified reuse).
+pub fn publish_original(
+    root: &Path,
+    tenant_scope: &str,
+    bytes: &[u8],
+    ext: &str,
+    expected_hash: Option<&str>,
+) -> Result<Published, MediaError> {
+    let kind = stored_kind(ext).ok_or(MediaError::InvalidExtension)?;
+    if !kind.original {
+        return Err(MediaError::InvalidExtension);
+    }
+    if bytes.is_empty() || bytes.len() as u64 > kind.max_bytes {
+        return Err(MediaError::FileTooLarge);
+    }
+    if !bytes_match_kind(kind, bytes) {
+        return Err(MediaError::InvalidExtension);
+    }
+    let hash = sha256_hex(bytes);
+    if let Some(h) = expected_hash {
+        if h != hash {
+            return Err(MediaError::FileHashMismatch);
+        }
+    }
+    publish_atomically(root, tenant_scope, bytes, &hash, ext)
 }

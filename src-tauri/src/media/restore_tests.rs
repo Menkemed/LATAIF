@@ -395,3 +395,99 @@ fn simulated_swap_failure_rolls_back_to_exact_prior_state() {
     assert_eq!(dir_hashes(&live), prior, "live rolled back to the exact prior state");
     assert!(!live.join(".restore-staging").exists() && !live.join(".restore-rollback").exists());
 }
+
+// ── MEDIA-S1 — backup / restore / integrity follow the STORED kind, not a jpg assumption ──────
+
+/// Add a byte-exact PDF original (linked, current, available) to a live tree built by `build_live`.
+fn add_pdf(base: &std::path::Path, bytes: &[u8], ext: &str) -> String {
+    let h = sha256_hex(bytes);
+    let abs = base.join("media").join(format!("t/{}/{}.{}", &h[0..2], h, ext));
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, bytes).unwrap();
+    let c = rusqlite::Connection::open(base.join("lataif.db")).unwrap();
+    c.execute_batch(&format!(
+        "INSERT INTO media_links VALUES('t','md','document',NULL);
+         INSERT INTO media_objects VALUES('t','md','bd',NULL);
+         INSERT INTO media_blobs VALUES('t','bd','present',1);
+         INSERT INTO media_blob_generations VALUES('t','bd',1,'available','t/{a}/{h}.{ext}','{h}',{s},'{ext}');",
+        a = &h[0..2], h = h, s = bytes.len(), ext = ext
+    )).unwrap();
+    h
+}
+
+fn big_pdf(len: usize) -> Vec<u8> {
+    let mut b = b"%PDF-1.7\n".to_vec();
+    b.resize(len, b'x');
+    b
+}
+
+#[test]
+fn a_pdf_original_survives_backup_precheck_restore_and_integrity() {
+    let b = tmp();
+    let src = b.join("src"); std::fs::create_dir_all(&src).unwrap();
+    build_live(&src, b"ORIGINAL-MASTER", b"ORIGINAL-THUMB");
+    // 300 000 B: three times the image budget — before S1 this failed as "not a jpg" / "too large".
+    let doc = big_pdf(300_000);
+    add_pdf(&src, &doc, "pdf");
+    let backup = b.join("backup");
+    let m = make_backup(&src, &backup, &b);
+    assert_eq!(m.files.len(), 3, "master + thumbnail + the document");
+    assert!(m.files.iter().any(|f| f.rel_path.ends_with(".pdf") && f.byte_size == 300_000));
+    validate_snapshot(&backup).expect("pre-check accepts the pdf");
+    let want = dir_hashes(&src);
+
+    let live = b.join("live"); std::fs::create_dir_all(&live).unwrap();
+    build_live(&live, b"WRONG-MASTER-DATA", b"WRONG-THUMB-DATA");
+    let r = restore(&RestoreInput { backup_dir: &backup, app_data_dir: &live }, false).expect("restore ok");
+    assert_eq!(dir_hashes(&live), want, "restored tree is hash-identical, the pdf byte-exact");
+    assert_eq!(verify_restored(&live, &r).unwrap(), 3, "all three verified by their stored kind");
+}
+
+#[test]
+fn backup_stays_fail_closed_for_bad_hash_size_and_unlisted_kind() {
+    // tampered pdf bytes → hash mismatch in the backup itself
+    let b = tmp();
+    let src = b.join("src"); std::fs::create_dir_all(&src).unwrap();
+    build_live(&src, b"M", b"T");
+    let h = add_pdf(&src, &big_pdf(2_000), "pdf");
+    std::fs::write(src.join("media").join(format!("t/{}/{}.pdf", &h[0..2], h)), big_pdf(2_001)).unwrap();
+    let front = src.join("lataif.db");
+    let sel = backup::collect_selection_from_db(&rusqlite::Connection::open(&front).unwrap()).unwrap();
+    let out = b.join("bk");
+    let err = backup::snapshot(&backup::SnapshotInput {
+        media_root: &src.join("media"), frontend_db: &front, server_db: None, selection: &sel,
+        created_at: "x".into(), app_version: "e2e".into(), schema_version: "s1".into(), media_schema_version: "m1".into(),
+        out_dir: &out, workspace_parent: &b,
+    }).unwrap_err();
+    assert_eq!(err.code(), "MEDIA_FILE_HASH_MISMATCH");
+    assert!(!out.exists(), "nothing published");
+
+    // an extension outside the storage contract → refused, never copied
+    let b2 = tmp();
+    let src2 = b2.join("src"); std::fs::create_dir_all(&src2).unwrap();
+    build_live(&src2, b"M", b"T");
+    add_pdf(&src2, b"MZ-an-executable", "exe");
+    let front2 = src2.join("lataif.db");
+    let sel2 = backup::collect_selection_from_db(&rusqlite::Connection::open(&front2).unwrap()).unwrap();
+    let out2 = b2.join("bk");
+    let err2 = backup::snapshot(&backup::SnapshotInput {
+        media_root: &src2.join("media"), frontend_db: &front2, server_db: None, selection: &sel2,
+        created_at: "x".into(), app_version: "e2e".into(), schema_version: "s1".into(), media_schema_version: "m1".into(),
+        out_dir: &out2, workspace_parent: &b2,
+    }).unwrap_err();
+    assert_eq!(err2.code(), "MEDIA_INVALID_EXTENSION");
+    assert!(!out2.exists(), "nothing published");
+
+    // a restored pdf whose bytes do not match is caught by the post-restore integrity check
+    let b3 = tmp();
+    let src3 = b3.join("src"); std::fs::create_dir_all(&src3).unwrap();
+    build_live(&src3, b"M", b"T");
+    let h3 = add_pdf(&src3, &big_pdf(5_000), "pdf");
+    let bk3 = b3.join("bk"); let m3 = make_backup(&src3, &bk3, &b3);
+    let live3 = b3.join("live"); std::fs::create_dir_all(&live3).unwrap();
+    build_live(&live3, b"X", b"Y");
+    let r3 = restore(&RestoreInput { backup_dir: &bk3, app_data_dir: &live3 }, false).unwrap();
+    std::fs::write(live3.join("media").join(format!("t/{}/{}.pdf", &h3[0..2], h3)), big_pdf(5_001)).unwrap();
+    assert_eq!(verify_restored(&live3, &r3).unwrap_err().code(), "MEDIA_FILE_HASH_MISMATCH");
+    let _ = m3;
+}

@@ -261,25 +261,118 @@ fn only_a_well_formed_storage_key_resolves_to_a_path() {
     }
     // a hex-shaped name with a disallowed extension is still refused
     assert!(media_path_for_key(root, &format!("tenant-1/53/{}.exe", "a".repeat(64))).is_none());
+    // MEDIA-S1 — the extension allowlist is the storage contract, nothing wider.
+    assert!(media_path_for_key(root, &format!("tenant-1/53/{}.png", "a".repeat(64))).is_none());
+    assert!(media_path_for_key(root, &format!("tenant-1/53/{}.pdf", "a".repeat(64))).is_some());
     // extra path segments are refused (no nesting beyond scope/shard/file)
     assert!(media_path_for_key(root, &format!("tenant-1/53/sub/{}.jpg", "a".repeat(64))).is_none());
 }
 
-#[test]
-fn an_unknown_media_key_is_not_served() {
+// ── MEDIA-S1 — /api/media: a key alone is not enough ─────────────────────────────────────────
+//
+// S0 found that any authenticated client of the tenant could read any stored key it learned. The
+// grant now decides from the token (tenant, branch) and the database (current generation, active
+// object, active link, an owner of the caller's branch, a class that may travel over the LAN).
+
+const GRANT_DDL: &str = r#"
+CREATE TABLE media_blob_generations (tenant_id TEXT, blob_id TEXT, generation_no INTEGER, storage_key TEXT,
+  stored_blob_hash TEXT, byte_size INTEGER, extension TEXT, gen_status TEXT, deleted_at TEXT);
+CREATE TABLE media_blobs (tenant_id TEXT, blob_id TEXT, blob_status TEXT, current_generation_no INTEGER);
+CREATE TABLE media_objects (tenant_id TEXT, media_id TEXT, master_blob_id TEXT, security_class TEXT, deleted_at TEXT);
+CREATE TABLE media_variants (tenant_id TEXT, media_id TEXT, variant_type TEXT, blob_id TEXT, deleted_at TEXT);
+CREATE TABLE media_links (tenant_id TEXT, link_id TEXT, media_id TEXT, entity_type TEXT, entity_id TEXT,
+  scope_kind TEXT, branch_id TEXT, deleted_at TEXT);
+"#;
+
+fn key(n: &str) -> String { format!("t-1/{}/{}.jpg", &n.repeat(64)[0..2], n.repeat(64)) }
+
+/// One product image (master + thumbnail) of p-dj41 in b-1, plus deliberately wrong neighbours.
+fn grant_fixture() -> std::path::PathBuf {
     let d = tmp_dir();
     let db = fixture(&d);
     let conn = Connection::open(&db).unwrap();
-    conn.execute_batch(
-        "CREATE TABLE media_blob_generations (tenant_id TEXT, storage_key TEXT, gen_status TEXT, deleted_at TEXT);
-         INSERT INTO media_blob_generations VALUES ('t-1','tenant-1/53/known.jpg','available',NULL),
-                                                   ('t-1','tenant-1/54/gone.jpg','deleted',NULL);",
-    )
-    .unwrap();
-    assert!(media_key_is_known(&db, "t-1", "tenant-1/53/known.jpg"));
-    assert!(!media_key_is_known(&db, "t-1", "tenant-1/54/gone.jpg"), "a deleted generation is not offered");
-    assert!(!media_key_is_known(&db, "t-1", "tenant-1/99/never.jpg"));
-    assert!(!media_key_is_known(&db, "t-other", "tenant-1/53/known.jpg"), "keys are tenant-scoped");
+    conn.execute_batch(GRANT_DDL).unwrap();
+    let blob = |id: &str, n: &str, status: &str| {
+        conn.execute("INSERT INTO media_blob_generations VALUES ('t-1',?1,1,?2,?3,10,'jpg',?4,NULL)",
+            rusqlite::params![id, key(n), n.repeat(64), status]).unwrap();
+        conn.execute("INSERT INTO media_blobs VALUES ('t-1',?1,'present',1)", rusqlite::params![id]).unwrap();
+    };
+    blob("b-main", "a", "available");
+    blob("b-thumb", "b", "available");
+    blob("b-repair", "c", "available");
+    blob("b-other-branch", "d", "available");
+    blob("b-secret", "e", "available");
+    blob("b-unlinked", "f", "available");
+    conn.execute_batch("
+      INSERT INTO media_objects VALUES ('t-1','m-1','b-main','internal',NULL),
+                                       ('t-1','m-rep','b-repair','internal',NULL),
+                                       ('t-1','m-oth','b-other-branch','internal',NULL),
+                                       ('t-1','m-sec','b-secret','sensitive',NULL),
+                                       ('t-1','m-free','b-unlinked','internal',NULL);
+      INSERT INTO media_variants VALUES ('t-1','m-1','thumbnail','b-thumb',NULL);
+      INSERT INTO media_links VALUES
+        ('t-1','l-1','m-1','product','p-dj41','branch','b-1',NULL),
+        ('t-1','l-rep','m-rep','repair','p-dj41','branch','b-1',NULL),
+        ('t-1','l-oth','m-oth','product','p-elsewhere','branch','b-other',NULL),
+        ('t-1','l-sec','m-sec','product','p-dj41','branch','b-1',NULL);
+    ").unwrap();
+    db
+}
+
+#[test]
+fn media_read_grant_serves_the_owners_branch_only() {
+    let db = grant_fixture();
+    let g = media_read_grant(&db, "t-1", "b-1", &key("a")).expect("the product image of my branch");
+    assert_eq!((g.hash.as_str(), g.byte_size, g.ext.as_str()), ("a".repeat(64).as_str(), 10, "jpg"));
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("b")).is_some(), "its active thumbnail too");
+    // wrong branch
+    assert!(media_read_grant(&db, "t-1", "b-other", &key("a")).is_none(), "another branch may not read it");
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("d")).is_none(), "a product image of another branch");
+    // wrong tenant
+    assert!(media_read_grant(&db, "t-other", "b-1", &key("a")).is_none(), "keys are tenant-scoped");
+    // wrong owner / no owner
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("c")).is_none(), "a non-product owner has no read rule yet");
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("f")).is_none(), "an unlinked object is served to nobody");
+    // class
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("e")).is_none(), "sensitive media never travel this route");
+    // unknown
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("9")).is_none());
+}
+
+#[test]
+fn media_read_grant_follows_the_live_state() {
+    let db = grant_fixture();
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("UPDATE media_links SET deleted_at = 'x' WHERE link_id = 'l-1'", []).unwrap();
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("a")).is_none(), "a removed image is no longer served");
+    conn.execute("UPDATE media_links SET deleted_at = NULL WHERE link_id = 'l-1'", []).unwrap();
+    conn.execute("DELETE FROM products WHERE id = 'p-dj41'", []).unwrap();
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("a")).is_none(), "an owner that is gone grants nothing");
+    let db = grant_fixture();
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("UPDATE media_blobs SET current_generation_no = 2 WHERE blob_id = 'b-main'", []).unwrap();
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("a")).is_none(), "a superseded generation is not offered");
+    let db = grant_fixture();
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("UPDATE media_blob_generations SET gen_status = 'deleted' WHERE blob_id = 'b-main'", []).unwrap();
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("a")).is_none(), "a deleted generation is not offered");
+}
+
+#[test]
+fn a_granted_file_is_served_only_if_size_and_hash_hold() {
+    let d = tmp_dir();
+    let p = d.join("f.jpg");
+    let bytes = b"\xFF\xD8\xFFjpeg-bytes".to_vec();
+    std::fs::write(&p, &bytes).unwrap();
+    let good = MediaReadGrant { hash: crate::media::storage::sha256_hex(&bytes), byte_size: bytes.len() as u64, ext: "jpg".into() };
+    assert_eq!(read_granted_media(&p, &good).as_deref(), Some(bytes.as_slice()));
+    assert!(read_granted_media(&p, &MediaReadGrant { hash: "0".repeat(64), ..good.clone() }).is_none(), "wrong hash");
+    assert!(read_granted_media(&p, &MediaReadGrant { byte_size: 3, ..good.clone() }).is_none(), "wrong size");
+    assert!(read_granted_media(&p, &MediaReadGrant { ext: "exe".into(), ..good.clone() }).is_none(), "unlisted kind");
+    let big = d.join("big.jpg");
+    std::fs::write(&big, vec![0u8; 100_001]).unwrap();
+    let g = MediaReadGrant { hash: "0".repeat(64), byte_size: 100_001, ext: "jpg".into() };
+    assert!(read_granted_media(&big, &g).is_none(), "above the kind limit it is never even read");
 }
 
 // ── MOBILE-EDIT-S3 §1 — ein Lesefehler ist keine leere Galerie ──────────────

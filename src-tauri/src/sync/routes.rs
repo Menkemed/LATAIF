@@ -1274,20 +1274,19 @@ async fn media_blob(
 ) -> Result<axum::response::Response, StatusCode> {
     use axum::response::IntoResponse;
 
-    if !super::product_query::media_key_is_known(&state.frontend_db_path, &claims.tenant_id, &params.key) {
+    // MEDIA-S1 — the key must be readable BY THIS CALLER: tenant, branch, owner and class decide
+    // (`media_read_grant`), not the mere knowledge of a key. Every refusal looks the same (404).
+    let Some(grant) = super::product_query::media_read_grant(
+        &state.frontend_db_path, &claims.tenant_id, &claims.branch_id, &params.key,
+    ) else {
         return Err(StatusCode::NOT_FOUND);
-    }
+    };
     // DATA-ROOT-I1 — from the resolved root, not re-derived from a DB path.
     let media_root = state.data_root.media_root();
     let path = super::product_query::media_path_for_key(&media_root, &params.key)
         .ok_or(StatusCode::BAD_REQUEST)?;
-    let bytes = std::fs::read(&path).map_err(|_| StatusCode::NOT_FOUND)?;
-
-    let ct = match path.extension().and_then(|e| e.to_str()) {
-        Some("png") => "image/png",
-        Some("webp") => "image/webp",
-        _ => "image/jpeg",
-    };
+    let bytes = super::product_query::read_granted_media(&path, &grant).ok_or(StatusCode::NOT_FOUND)?;
+    let ct = crate::media::storage::stored_kind(&grant.ext).map(|k| k.mime).ok_or(StatusCode::NOT_FOUND)?;
     Ok((
         StatusCode::OK,
         [

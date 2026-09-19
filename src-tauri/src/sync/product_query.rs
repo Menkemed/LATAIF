@@ -516,27 +516,84 @@ pub fn media_path_for_key(media_root: &std::path::Path, key: &str) -> Option<std
     let (stem, ext) = file.rsplit_once('.')?;
     let file_ok = stem.len() == 64
         && stem.chars().all(|c| c.is_ascii_hexdigit())
-        && matches!(ext, "jpg" | "jpeg" | "png" | "webp");
+        && crate::media::storage::stored_kind(ext).is_some();
     if !(scope_ok && shard_ok && file_ok) {
         return None;
     }
     Some(media_root.join(scope).join(shard).join(file))
 }
 
-/// Is this storage key one the business database actually knows and still offers?
-pub fn media_key_is_known(db_path: &std::path::Path, tenant_id: &str, key: &str) -> bool {
-    let Some(conn) = open_read_only(db_path) else { return false };
+/// MEDIA-S1 — what a verified read of one stored file may rely on: the content hash and size the
+/// database holds for it, and its extension (which fixes MIME type and size limit).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MediaReadGrant {
+    pub hash: String,
+    pub byte_size: u64,
+    pub ext: String,
+}
+
+/// MEDIA-S1 — may THIS caller read THIS stored file? A well-formed, existing key alone is no longer
+/// enough (S0 finding: any authenticated client of the tenant could read any key it learned).
+///
+/// Everything comes from the verified token and the database, nothing from the request but the key:
+///   • tenant  — the generation belongs to the caller's tenant;
+///   • the file is the CURRENT, available generation of a present blob;
+///   • it is the master or an active variant of an active media object;
+///   • that object is linked (active link) to an OWNER the caller may see: today exactly a product
+///     of the caller's branch that still exists — every other entity type is refused until its own
+///     read rule is written (fail-closed, no silent widening);
+///   • security class `public` or `internal` only — `sensitive` and `highly_sensitive` are never
+///     served over this LAN route.
+/// Any read error is a refusal.
+pub fn media_read_grant(
+    db_path: &std::path::Path,
+    tenant_id: &str,
+    branch_id: &str,
+    key: &str,
+) -> Option<MediaReadGrant> {
+    let conn = open_read_only(db_path)?;
     conn.query_row(
-        "SELECT 1 FROM media_blob_generations
-          WHERE tenant_id = ?1 AND storage_key = ?2 AND gen_status = 'available' AND deleted_at IS NULL
+        "SELECT g.stored_blob_hash, g.byte_size, g.extension
+           FROM media_blob_generations g
+           JOIN media_blobs b ON b.tenant_id = g.tenant_id AND b.blob_id = g.blob_id
+                             AND b.current_generation_no = g.generation_no AND b.blob_status = 'present'
+           JOIN media_objects o ON o.tenant_id = g.tenant_id AND o.deleted_at IS NULL
+                               AND o.security_class IN ('public', 'internal')
+                               AND (o.master_blob_id = g.blob_id OR EXISTS (
+                                     SELECT 1 FROM media_variants v
+                                      WHERE v.tenant_id = o.tenant_id AND v.media_id = o.media_id
+                                        AND v.blob_id = g.blob_id AND v.deleted_at IS NULL))
+           JOIN media_links l ON l.tenant_id = o.tenant_id AND l.media_id = o.media_id AND l.deleted_at IS NULL
+           JOIN products p ON p.id = l.entity_id AND p.branch_id = l.branch_id
+           JOIN branches br ON br.id = p.branch_id AND br.tenant_id = g.tenant_id
+          WHERE g.tenant_id = ?1 AND g.storage_key = ?2 AND g.gen_status = 'available' AND g.deleted_at IS NULL
+            AND l.entity_type = 'product' AND l.scope_kind = 'branch' AND l.branch_id = ?3
           LIMIT 1",
-        rusqlite::params![tenant_id, key],
-        |r| r.get::<_, i64>(0),
+        rusqlite::params![tenant_id, key, branch_id],
+        |r| Ok(MediaReadGrant {
+            hash: r.get::<_, String>(0)?,
+            byte_size: r.get::<_, i64>(1)? as u64,
+            ext: r.get::<_, String>(2)?,
+        }),
     )
     .optional()
     .ok()
     .flatten()
-    .is_some()
+}
+
+/// MEDIA-S1 — read the granted file and hand it out only if it is exactly what the database vouches
+/// for: within its kind's size limit (checked before reading), the recorded size, the recorded hash.
+pub fn read_granted_media(path: &std::path::Path, grant: &MediaReadGrant) -> Option<Vec<u8>> {
+    let kind = crate::media::storage::stored_kind(&grant.ext)?;
+    let md = std::fs::metadata(path).ok()?;
+    if !md.is_file() || md.len() > kind.max_bytes || md.len() != grant.byte_size {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if bytes.len() as u64 != grant.byte_size || crate::media::storage::sha256_hex(&bytes) != grant.hash {
+        return None;
+    }
+    Some(bytes)
 }
 
 #[cfg(test)]

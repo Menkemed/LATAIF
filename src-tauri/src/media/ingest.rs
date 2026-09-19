@@ -941,6 +941,11 @@ impl MediaIngestService {
 
     // ── read ─────────────────────────────────────────────────────────────────
 
+    /// MEDIA-S1 — the injected media root (the raw original path stores beside the ingest files).
+    pub fn media_root(&self) -> &std::path::Path {
+        &self.media_root
+    }
+
     pub fn read(&self, scope: &str, hash: &str, ext: &str) -> Result<MediaBytes, IngestError> {
         if !storage::is_valid_scope(scope) || !is_valid_hash64(hash) {
             return Err(IngestError::InvalidRequest);
@@ -949,7 +954,9 @@ impl MediaIngestService {
         Ok(MediaBytes {
             byte_size: bytes.len(),
             hash: hash.to_string(),
-            mime_type: "image/jpeg".to_string(),
+            // MEDIA-S1 — the stored kind names the type; `read_verified_media` already refused any
+            // extension outside the contract.
+            mime_type: storage::stored_kind(ext).map(|k| k.mime).unwrap_or("application/octet-stream").to_string(),
             extension: ext.to_string(),
             bytes,
         })

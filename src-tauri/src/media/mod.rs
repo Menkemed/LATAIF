@@ -36,6 +36,8 @@ mod normalize;
 // POST-PARITY R7B PP-12 — Belegbilder (Zeile, Daten-URL) durch denselben Normalisierer wie das Artikelbild.
 pub mod record_image;
 pub(crate) mod storage;
+// MEDIA-S1 — raw binary transport for byte-exact originals (documents); no writer uses it yet.
+pub(crate) mod raw_transport;
 
 pub use normalize::{create_thumbnail, inspect_image_bytes, normalize_stock_image};
 pub use storage::{

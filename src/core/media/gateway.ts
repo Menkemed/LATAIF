@@ -167,3 +167,71 @@ export class TauriMediaGateway implements MediaCommandGateway {
     return this.invoker<RecoveryOutcome[]>('media_recover_ingests');
   }
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+// MEDIA-S1 — the binary path for byte-exact originals (documents).
+//
+// Tauri 2 sends a `Uint8Array`/`ArrayBuffer` argument as a RAW request body (metadata in headers)
+// and returns a `tauri::ipc::Response` as an `ArrayBuffer`. That is the transport for originals:
+// the bytes never become a JSON `number[]` and never a Base64 string. The product-image methods
+// above stay exactly as they were (their inputs are small and normalised). Nothing calls
+// `publishOriginal` yet — documents arrive in S5.
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Same ceiling as `raw_transport::max_raw_transport_bytes` (the largest original kind, 25 MiB). */
+export const ORIGINAL_MAX_BYTES = 25 * 1024 * 1024;
+/** The original kinds the store accepts — mirror of `STORED_KINDS` where `original: true`. */
+export const ORIGINAL_EXTENSIONS = ['pdf'] as const;
+export type OriginalExtension = typeof ORIGINAL_EXTENSIONS[number];
+
+export interface OriginalDescriptor {
+  storage_key: string;
+  hash: string;
+  byte_size: number;
+  mime_type: string;
+  extension: string;
+  content_kind: string;
+  reused: boolean;
+}
+
+export class OriginalTransportError extends Error {
+  readonly code: string;
+  constructor(code: string) { super(code); this.code = code; this.name = 'OriginalTransportError'; }
+}
+
+type RawInvoker = <T = unknown>(cmd: string, args?: unknown, options?: { headers?: Record<string, string> }) => Promise<T>;
+
+export class OriginalMediaTransport {
+  private readonly invoker: RawInvoker;
+  constructor(invoker?: RawInvoker) {
+    this.invoker = invoker ?? (async <T>(cmd: string, args?: unknown, options?: { headers?: Record<string, string> }): Promise<T> => {
+      const mod = await import('@tauri-apps/api/core');
+      return mod.invoke<T>(cmd, args as never, options);
+    });
+  }
+
+  /** Store a document byte-exactly. Refused here already when it cannot pass the store (kind, size). */
+  async publishOriginal(input: { tenantScope: string; extension: OriginalExtension; bytes: Uint8Array; sha256?: string }): Promise<OriginalDescriptor> {
+    if (!(ORIGINAL_EXTENSIONS as readonly string[]).includes(input.extension)) throw new OriginalTransportError('MEDIA_ORIGINAL_KIND_NOT_ALLOWED');
+    if (!(input.bytes instanceof Uint8Array) || input.bytes.byteLength === 0) throw new OriginalTransportError('MEDIA_ORIGINAL_EMPTY');
+    if (input.bytes.byteLength > ORIGINAL_MAX_BYTES) throw new OriginalTransportError('MEDIA_ORIGINAL_TOO_LARGE');
+    const headers: Record<string, string> = {
+      'x-lataif-tenant-scope': input.tenantScope,
+      'x-lataif-extension': input.extension,
+    };
+    if (input.sha256) headers['x-lataif-sha256'] = input.sha256;
+    // The typed array itself is the argument — Tauri carries it as a raw body.
+    return this.invoker<OriginalDescriptor>('media_publish_original', input.bytes, { headers });
+  }
+
+  /** Read verified bytes as a raw ArrayBuffer (any stored kind). */
+  async readVerifiedRaw(input: ReadVerifiedInput): Promise<Uint8Array> {
+    const raw = await this.invoker<ArrayBuffer | Uint8Array>('media_read_verified_raw', {
+      tenantScope: input.tenantScope, hash: input.hash, extension: input.extension,
+    });
+    if (raw instanceof Uint8Array) return raw;
+    if (raw instanceof ArrayBuffer) return new Uint8Array(raw);
+    // A JSON array here would mean the raw path silently fell back — refuse rather than accept it.
+    throw new OriginalTransportError('MEDIA_RAW_RESPONSE_EXPECTED');
+  }
+}
