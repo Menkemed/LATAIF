@@ -125,13 +125,37 @@ export async function saveSupplierCreate(
 export async function saveSupplierFromCustomer(
   write: MasterdataWrite<{ supplierId: string; existing: boolean }>,
   customer: { id: string; updatedAt: string },
-  extras: { address?: string; notes?: string },
+  extras: { address?: string; notes?: string; createDespiteExistingSuppliers?: boolean },
 ): Promise<WriteOutcome<{ supplierId: string; existing: boolean }>> {
   const body: Record<string, unknown> = { linkedCustomerId: customer.id, linkedCustomerUpdatedAt: customer.updatedAt };
-  for (const [k, v] of Object.entries(extras)) if (typeof v === 'string' && v.trim()) body[k] = v.trim();
+  for (const k of ['address', 'notes'] as const) { const v = extras[k]; if (typeof v === 'string' && v.trim()) body[k] = v.trim(); }
+  if (extras.createDespiteExistingSuppliers === true) body.createDespiteExistingSuppliers = true;
   const r = await write.save({
     local: () => runOnPrimary(() => {
       const out = useSupplierStore.getState().createSupplierFromCustomer(customer.id, body, customer.updatedAt);
+      return { supplierId: out.supplier.id, existing: out.existing };
+    }, suppliersHier),
+    remote: () => body,
+    shape: (v) => ({ supplierId: String(v.supplierId ?? ''), existing: v.existing === true }),
+  });
+  if (r.kind === 'ok') await suppliersNeu();
+  return r;
+}
+
+/**
+ * CUSTOMER-SUPPLIER-ROLE-LINK V2 — einen bestehenden, unverknüpften Lieferanten ausdrücklich als
+ * Lieferanten-Rolle dieses Kunden bestätigen. Auf PC2 `suppliers.update` mit der Kunden-Kennung.
+ * Nur `linked_customer_id` wird gesetzt — keine Einkäufe, Verbindlichkeiten oder Buchungen.
+ */
+export async function saveSupplierLinkToCustomer(
+  write: MasterdataWrite<{ supplierId: string; existing: boolean }>,
+  supplierId: string,
+  customer: { id: string; updatedAt: string },
+): Promise<WriteOutcome<{ supplierId: string; existing: boolean }>> {
+  const body: Record<string, unknown> = { id: supplierId, linkedCustomerId: customer.id, linkedCustomerUpdatedAt: customer.updatedAt };
+  const r = await write.save({
+    local: () => runOnPrimary(() => {
+      const out = useSupplierStore.getState().linkSupplierToCustomer(supplierId, customer.id, customer.updatedAt);
       return { supplierId: out.supplier.id, existing: out.existing };
     }, suppliersHier),
     remote: () => body,

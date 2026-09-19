@@ -337,7 +337,7 @@ const gegenparteien = (db: Db): string => all(db,
   const leser = walk(resolvePath(repo, 'src')).filter((p) => /\.(ts|tsx)$/.test(p))
     .filter((p) => /linked_customer_id|linkedCustomerId/.test(readFileSync(p, 'utf8')))
     .map((p) => p.slice(resolvePath(repo, 'src').length + 1).replace(/\\/g, '/')).sort();
-  const erlaubt = ['components/suppliers/UseCustomerAsSupplier.tsx', 'core/bridge/masterdata-commands.ts', 'core/db/database.ts', 'core/masterdata/masterdata-save.ts',
+  const erlaubt = ['components/suppliers/UseCustomerAsSupplier.tsx', 'core/bridge/masterdata-commands.ts', 'core/db/database.ts', 'core/masterdata/masterdata-rules.ts', 'core/masterdata/masterdata-save.ts',
     'core/models/types.ts', 'pages/customers/CustomerDetail.tsx', 'pages/suppliers/SupplierDetail.tsx', 'stores/consignmentStore.ts',
     'stores/customerStore.ts', 'stores/supplierStore.ts'];
   ok(leser.every((p) => erlaubt.includes(p)), `ACCOUNTING kein Ledger-/Rechnungs-/Einkaufscode liest die Verknüpfung (${S(leser)})`);
@@ -348,6 +348,102 @@ const gegenparteien = (db: Db): string => all(db,
     'UI „Use existing customer" in der Lieferantenliste und im Einkauf');
   const manifest = JSON.parse(src('src/core/sync/sync-business-schema.json'));
   ok(manifest.tables.suppliers.allowed_fields.includes('linked_customer_id'), 'SYNC die Verknüpfung reist mit der Lieferantenzeile');
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+// V2 — Filiale, eindeutige Zuordnung, bestehende Rolle ausdrücklich verknüpfen
+// ═════════════════════════════════════════════════════════════════════════════════════════════
+{
+  const db = freshDb();
+  db.run("INSERT INTO branches (id, tenant_id, name, created_at, updated_at) VALUES ('branch-other','tenant-1','Andere',?,?)", [NOW, NOW]);
+  const cons = await import('../../src/stores/consignmentStore.ts');
+  const lieferanten = () => n(db, 'SELECT COUNT(*) FROM suppliers');
+  const raw = (id: string, name: string, phone: string | null, notes: string | null = null) =>
+    db.run('INSERT INTO suppliers (id, branch_id, name, phone, notes, active, created_at, updated_at) VALUES (?,?,?,?,?,1,?,?)', [id, 'branch-main', name, phone, notes, NOW, NOW]);
+
+  // ── V2-1 Filiale: kein Lieferant, keine Buchung ────────────────────────────────────────────
+  db.run(`INSERT INTO customers (id, branch_id, first_name, last_name, country, language, vip_level, preferences, customer_type, sales_stage, created_at, updated_at)
+    VALUES ('cB','branch-other','Bea','Branch','BH','en',0,'[]','collector','active',?,?)`, [NOW, NOW]);
+  const vorher = lieferanten();
+  const buchungenVorher = n(db, 'SELECT COUNT(*) FROM ledger_entries');
+  ok(wirft(() => imHaus(() => useSupplierStore.getState().createSupplierFromCustomer('cB', {}, NOW))) === 'CUSTOMER_BRANCH_MISMATCH', 'V2 Filiale: Primary → CUSTOMER_BRANCH_MISMATCH');
+  const fb = await fern(() => md.runSupplierCreate(deps(db), identity('70', 'suppliers.create'), { linkedCustomerId: 'cB', linkedCustomerUpdatedAt: NOW }));
+  ok(fb.kind === 'rejected' && fb.code === 'CUSTOMER_BRANCH_MISMATCH' && fb.frozen === true, `V2 Filiale: PC2 → dasselbe Urteil (${S(fb)})`);
+  ok(wirft(() => imHaus(() => cons.findOrCreateSupplierForConsignor('cB'))) === 'CONSIGNOR_BRANCH_MISMATCH', 'V2 Filiale: Kommission → CONSIGNOR_BRANCH_MISMATCH');
+  ok(lieferanten() === vorher && n(db, 'SELECT COUNT(*) FROM ledger_entries') === buchungenVorher, 'V2 Filiale: kein Lieferant, keine Buchung');
+  const rs = src('src/stores/consignmentStore.ts');
+  const beginn = rs.indexOf('recordSale: (id, params) => {');
+  const zu = rs.indexOf('findOrCreateSupplierForConsignor(con.consignorId)', beginn);
+  ok(zu > beginn && zu < rs.indexOf('purch.createPurchase(', beginn) && zu < rs.indexOf('inv.createDirectInvoice(', beginn),
+    'V2 Filiale: die Zuordnung fällt VOR Einkauf und Rechnung — ein Nein hinterlässt keine Auszahlung');
+
+  // ── V2-2 mehrdeutige / fremde Treffer → keine Auswahl ─────────────────────────────────────
+  customer(db, 'cN', 'Nadia', 'Twin');             // ohne Telefon
+  raw('sN1', 'Nadia Twin', null); raw('sN2', 'nadia twin ', null);
+  const v0 = lieferanten();
+  ok(wirft(() => imHaus(() => cons.findOrCreateSupplierForConsignor('cN'))) === 'CONSIGNOR_SUPPLIER_AMBIGUOUS', 'V2 zwei Lieferanten mit gleichem Namen → keine automatische Auswahl');
+  ok(lieferanten() === v0, 'V2 …und kein neuer angelegt');
+  customer(db, 'cP', 'Pia', 'Phone', { phone: '+973 5500 0001' });
+  raw('sP1', 'Irgendwer', '+973 5500 0001'); raw('sP2', 'Jemand', '+97355000001');
+  ok(wirft(() => imHaus(() => cons.findOrCreateSupplierForConsignor('cP'))) === 'CONSIGNOR_SUPPLIER_AMBIGUOUS', 'V2 zwei Lieferanten mit derselben Nummer → fail-closed');
+  customer(db, 'cS', 'Sam', 'Same', { phone: '+973 5500 0002' });
+  raw('sS', 'Sam Same', '+973 5500 0099');          // gleicher Name, ANDERE Nummer = andere Person
+  const cS = imHaus(() => cons.findOrCreateSupplierForConsignor('cS'));
+  ok(cS !== 'sS' && one(db, 'SELECT linked_customer_id FROM suppliers WHERE id = ?', [cS]) === 'cS',
+    'V2 gleicher Name, andere Nummer → nicht der Fremde; eine eigene, verknüpfte Rolle');
+  customer(db, 'cM', 'Mia', 'Mirror', { phone: '+973 5500 0003' });
+  raw('sM', 'Mia M. (alt)', null, rules.consignorMirrorNote('cM'));
+  ok(imHaus(() => cons.findOrCreateSupplierForConsignor('cM')) === 'sM', 'V2 der alte Kommissions-Spiegel mit GENAU dieser Kunden-Kennung wird wiedergefunden');
+
+  // ── V2-3 bestehende Rolle: nicht still eine zweite, sondern ausdrücklich verknüpfen ────────
+  customer(db, 'cL', 'Lina', 'Legacy', { phone: '+973 5500 0004', personal_id: '870011223' });
+  raw('sL', 'Lina Legacy', '+973 5500 0004');
+  reload();
+  const pAlt = imHaus(() => usePurchaseStore.getState().createPurchase({
+    supplierId: 'sL', lines: [{ productId: 'p-buy', quantity: 1, unitPrice: 200, taxScheme: 'ZERO' as const, vatRate: 0 }],
+  }).id);
+  const apAlt = supplierBalance('sL', 'branch-main');
+  const kand = rules.supplierLinkCandidates({ id: 'cL', firstName: 'Lina', lastName: 'Legacy', phone: '+973 5500 0004', personalId: '870011223' },
+    [{ id: 'sL', name: 'Lina Legacy', phone: '+973 5500 0004' }, { id: 'sX', name: 'Lina Legacy', phone: '+973 5500 0004', linkedCustomerId: 'other' }]);
+  ok(kand.length === 1 && kand[0].supplier.id === 'sL' && S(kand[0].reasons) === S(['same_phone', 'same_name']),
+    `V2 Kandidat angezeigt (mit Grund), ein fremd verknüpfter nie (${S(kand)})`);
+  const vN = lieferanten();
+  ok(wirft(() => imHaus(() => useSupplierStore.getState().createSupplierFromCustomer('cL', {}, NOW))) === 'SUPPLIER_CANDIDATES_EXIST', 'V2 „Use existing customer" legt NICHT still eine zweite Rolle an');
+  const pc2k = await fern(() => md.runSupplierCreate(deps(db), identity('71', 'suppliers.create'), { linkedCustomerId: 'cL', linkedCustomerUpdatedAt: NOW }));
+  ok(pc2k.kind === 'rejected' && pc2k.code === 'SUPPLIER_CANDIDATES_EXIST' && lieferanten() === vN, 'V2 …auch nicht von PC2');
+  const vorLink = row(db, 'SELECT * FROM suppliers WHERE id = ?', ['sL']);
+  const link = await fern(() => md.runSupplierUpdate(deps(db), identity('72', 'suppliers.update'), { id: 'sL', linkedCustomerId: 'cL', linkedCustomerUpdatedAt: NOW }));
+  ok(link.kind === 'ok' && link.value?.supplierId === 'sL', `V2 der eindeutige bestehende Lieferant wird ausdrücklich verknüpft (${S(link)})`);
+  const nachLink = row(db, 'SELECT * FROM suppliers WHERE id = ?', ['sL']);
+  const geaendert = Object.keys(nachLink).filter((k) => S(nachLink[k]) !== S(vorLink[k])).sort();
+  ok(S(geaendert) === S(['linked_customer_id', 'updated_at']), `V2 …nur die Verknüpfung ändert sich (${S(geaendert)})`);
+  ok(one(db, 'SELECT supplier_id FROM purchases WHERE id = ?', [pAlt]) === 'sL' && Math.abs(supplierBalance('sL', 'branch-main') - apAlt) < 0.001,
+    'V2 historische Einkäufe/Verbindlichkeiten bleiben auf derselben Lieferanten-Kennung');
+  ok(imHaus(() => cons.findOrCreateSupplierForConsignor('cL')) === 'sL', 'V2 danach nimmt die Kommissions-Auszahlung genau diese Rolle');
+  const pNeu = imHaus(() => usePurchaseStore.getState().createPurchase({
+    supplierId: 'sL', lines: [{ productId: 'p-buy', quantity: 1, unitPrice: 100, taxScheme: 'ZERO' as const, vatRate: 0 }],
+  }).id);
+  ok(one(db, 'SELECT supplier_id FROM purchases WHERE id = ?', [pNeu]) === 'sL' && Math.abs(supplierBalance('sL', 'branch-main') - (apAlt + 100)) < 0.001,
+    'V2 ein neuer Einkauf läuft auf dieselbe Rolle weiter');
+  const invL = await fern(() => runInvoiceCreate(deps(db) as never, identity('73', 'invoices.create') as never, { customerId: 'cL', lines: [{ productId: 'p-sale', quantity: 1, unitPrice: 500 }] }));
+  ok(invL.kind === 'ok' && Math.abs(customerBalance('cL', 'branch-main') - 500) < 0.001 && Math.abs(supplierBalance('sL', 'branch-main') - (apAlt + 100)) < 0.001,
+    'V2 die Forderung an den Kunden steht getrennt daneben');
+  ok(n(db, "SELECT COUNT(*) FROM ledger_entries WHERE (counterparty_type = 'CUSTOMER' AND counterparty_id = 'sL') OR (counterparty_type = 'SUPPLIER' AND counterparty_id = 'cL')") === 0,
+    'V2 keine Buchung vertauscht Rolle und Kennung');
+  const again = await fern(() => md.runSupplierUpdate(deps(db), identity('74', 'suppliers.update'), { id: 'sL', linkedCustomerId: 'cL', linkedCustomerUpdatedAt: NOW }));
+  ok(again.kind === 'ok' && again.value?.existing === true, 'V2 erneutes Verknüpfen ist ein No-op');
+  raw('sQ', 'Quelle', null);
+  ok(wirft(() => imHaus(() => useSupplierStore.getState().linkSupplierToCustomer('sQ', 'cL', NOW))) === 'CUSTOMER_ALREADY_SUPPLIER', 'V2 ein Kunde bekommt keine zweite Rolle per Verknüpfung');
+  ok(wirft(() => imHaus(() => useSupplierStore.getState().linkSupplierToCustomer('sL', 'cM', NOW))) === 'SUPPLIER_ALREADY_LINKED', 'V2 eine fremd verknüpfte Rolle wird nicht umgehängt');
+  // ausdrücklich neu trotz Kandidat
+  customer(db, 'cK', 'Kai', 'Kandidat', { phone: '+973 5500 0005' });
+  raw('sK', 'Kai Kandidat', '+973 5500 0005');
+  const neu = imHaus(() => useSupplierStore.getState().createSupplierFromCustomer('cK', { createDespiteExistingSuppliers: true }, NOW));
+  ok(!neu.existing && neu.supplier.id !== 'sK' && one(db, 'SELECT linked_customer_id FROM suppliers WHERE id = ?', ['sK']) == null,
+    'V2 „Create a new supplier instead" legt ausdrücklich neu an; der alte bleibt unverknüpft');
+  const ui = src('src/components/suppliers/UseCustomerAsSupplier.tsx');
+  ok(/supplierLinkCandidates\(picked, suppliers\)/.test(ui) && /saveSupplierLinkToCustomer\(verknuepfen/.test(ui) && /createDespiteExistingSuppliers: trotzdemNeu/.test(ui),
+    'V2 UI: Kandidaten anzeigen, ausdrücklich verknüpfen oder ausdrücklich neu anlegen');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — customer/supplier role link: ${PASS} passed, ${fails.length} failed`);

@@ -24,8 +24,26 @@ import { localReadContext, type BusinessReadContext } from '@/core/data/read-con
 // CENTRAL-UI-PARITY R6C — die eine Stammdaten-Regel (Name Pflicht und getrimmt, Texte getrimmt).
 import {
   supplierCreateInput, supplierUpdateInput, supplierSeedFromCustomer, supplierFromCustomerExtras,
-  MasterdataInputError, CUSTOMER_CHANGED,
+  MasterdataInputError, CUSTOMER_CHANGED, CUSTOMER_BRANCH_MISMATCH, SUPPLIER_CANDIDATES_EXIST,
+  supplierLinkCandidates,
 } from '@/core/masterdata/masterdata-rules';
+
+/** Die Kundenzeile, die eine Lieferanten-Rolle bestimmt — mit der Filialprüfung VOR jeder Anlage. */
+function customerForRole(customerId: string, branchId: string): Record<string, unknown> {
+  const c = query(
+    'SELECT id, branch_id, first_name, last_name, company, phone, whatsapp, email, personal_id, updated_at FROM customers WHERE id = ?',
+    [customerId],
+  )[0];
+  if (!c) throw new MasterdataInputError('CUSTOMER_NOT_FOUND', 'no such customer');
+  if (String(c.branch_id) !== branchId) {
+    throw new MasterdataInputError(CUSTOMER_BRANCH_MISMATCH, 'this customer belongs to another branch — no supplier role is created here');
+  }
+  return c;
+}
+const identityOf = (c: Record<string, unknown>) => ({
+  id: String(c.id), firstName: c.first_name as string, lastName: c.last_name as string, company: c.company as string,
+  phone: c.phone as string, whatsapp: c.whatsapp as string, email: c.email as string, personalId: c.personal_id as string,
+});
 
 // BHD hat 3 Dezimalstellen (Fils). Vergleiche/Rundungen laufen in Minor Units (Fils),
 // konsistent zur Projekt-Konvention (posting.ts ROUND, card-fee-booking.ts ROUND3).
@@ -144,6 +162,9 @@ interface SupplierStore {
   /** CUSTOMER-SUPPLIER-ROLE-LINK — die Lieferanten-Rolle eines bestehenden Kunden: gibt es sie schon,
    *  wird SIE zurückgegeben (`existing: true`), sonst genau eine neue mit eigener Kennung. */
   createSupplierFromCustomer: (customerId: string, extras: Record<string, unknown>, seenCustomerUpdatedAt?: string) => { supplier: Supplier; existing: boolean };
+  /** CUSTOMER-SUPPLIER-ROLE-LINK V2 — einen BESTEHENDEN, unverknüpften Lieferanten ausdrücklich mit dem
+   *  Kunden verknüpfen. Ändert nur `linked_customer_id`; Einkäufe, Verbindlichkeiten, Buchungen bleiben. */
+  linkSupplierToCustomer: (supplierId: string, customerId: string, seenCustomerUpdatedAt?: string) => { supplier: Supplier; existing: boolean };
   updateSupplier: (id: string, data: Partial<Supplier>) => void;
   deleteSupplier: (id: string) => void;
   getLedger: (id: string) => { totalPurchases: number; totalPaid: number; outstandingBalance: number; creditBalance: number };
@@ -251,22 +272,52 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
       get().loadSuppliers();
       return { supplier: get().getSupplier(String(linked.id)) ?? rowToSupplier(query('SELECT * FROM suppliers WHERE id = ?', [linked.id])[0]), existing: true };
     }
-    const c = query(
-      'SELECT first_name, last_name, company, phone, whatsapp, email, personal_id, updated_at FROM customers WHERE id = ? AND branch_id = ?',
-      [customerId, branchId],
-    )[0];
-    if (!c) throw new MasterdataInputError('CUSTOMER_NOT_FOUND', 'no such customer in this branch');
+    const c = customerForRole(customerId, branchId);
     // Die Maske hat den Kunden in einem bestimmten Stand gezeigt. Hat er sich seither geändert, wird
     // nicht mit Daten angelegt, die niemand gesehen hat.
     if (seenCustomerUpdatedAt !== undefined && String(c.updated_at) !== seenCustomerUpdatedAt) {
       throw new MasterdataInputError(CUSTOMER_CHANGED, 'this customer changed since you opened it — reload and check the data');
     }
-    const seed = supplierSeedFromCustomer({
-      firstName: c.first_name as string, lastName: c.last_name as string, company: c.company as string,
-      phone: c.phone as string, whatsapp: c.whatsapp as string, email: c.email as string, personalId: c.personal_id as string,
-    });
+    const seed = supplierSeedFromCustomer(identityOf(c));
+    // V2 — gibt es schon einen unverknüpften Lieferanten, der diese Person sein könnte, wird NICHT still
+    // eine zweite Rolle angelegt: der Mensch entscheidet (verknüpfen ODER ausdrücklich neu anlegen).
+    if (extras.createDespiteExistingSuppliers !== true) {
+      const frei = query('SELECT id, name, phone, cpr, notes, linked_customer_id FROM suppliers WHERE branch_id = ? AND linked_customer_id IS NULL', [branchId]);
+      const kandidaten = supplierLinkCandidates(identityOf(c), frei.map((r) => ({
+        id: String(r.id), name: r.name as string, phone: r.phone as string, cpr: r.cpr as string, notes: r.notes as string,
+      })));
+      if (kandidaten.length > 0) {
+        throw new MasterdataInputError(SUPPLIER_CANDIDATES_EXIST,
+          `an existing supplier may be this person (${kandidaten.map((k) => k.supplier.name).join(', ')}) — link it, or create a new supplier explicitly`);
+      }
+    }
     const supplier = get().createSupplier({ ...seed, ...supplierFromCustomerExtras(extras) }, { linkedCustomerId: customerId });
     return { supplier, existing: false };
+  },
+
+  linkSupplierToCustomer: (supplierId, customerId, seenCustomerUpdatedAt) => {
+    let branchId: string;
+    try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
+    const s = query('SELECT id, branch_id, linked_customer_id FROM suppliers WHERE id = ?', [supplierId])[0];
+    if (!s || String(s.branch_id) !== branchId) throw new MasterdataInputError('SUPPLIER_NOT_FOUND', 'no such supplier in this branch');
+    if (s.linked_customer_id === customerId) {
+      get().loadSuppliers();
+      return { supplier: get().getSupplier(supplierId)!, existing: true };
+    }
+    if (s.linked_customer_id != null) throw new MasterdataInputError('SUPPLIER_ALREADY_LINKED', 'this supplier already belongs to another customer');
+    const c = customerForRole(customerId, branchId);
+    if (seenCustomerUpdatedAt !== undefined && String(c.updated_at) !== seenCustomerUpdatedAt) {
+      throw new MasterdataInputError(CUSTOMER_CHANGED, 'this customer changed since you opened it — reload and check the data');
+    }
+    const andere = query('SELECT id FROM suppliers WHERE branch_id = ? AND linked_customer_id = ? LIMIT 1', [branchId, customerId])[0];
+    if (andere) throw new MasterdataInputError('CUSTOMER_ALREADY_SUPPLIER', 'this customer already has a supplier role');
+    const now = new Date().toISOString();
+    // NUR die Verknüpfung — kein Feld des Lieferanten, kein Beleg, keine Buchung wird berührt.
+    getDatabase().run('UPDATE suppliers SET linked_customer_id = ?, updated_at = ? WHERE id = ?', [customerId, now, supplierId]);
+    saveDatabase();
+    trackUpdate('suppliers', supplierId, { linkedCustomerId: customerId });
+    get().loadSuppliers();
+    return { supplier: get().getSupplier(supplierId)!, existing: false };
   },
 
   updateSupplier: (id, data) => {

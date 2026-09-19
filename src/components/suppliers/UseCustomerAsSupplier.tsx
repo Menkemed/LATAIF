@@ -13,9 +13,16 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
-import { saveSupplierFromCustomer } from '@/core/masterdata/masterdata-save';
-import { supplierSeedFromCustomer } from '@/core/masterdata/masterdata-rules';
+import { saveSupplierFromCustomer, saveSupplierLinkToCustomer } from '@/core/masterdata/masterdata-save';
+import { supplierSeedFromCustomer, supplierLinkCandidates, type LinkCandidateReason } from '@/core/masterdata/masterdata-rules';
 import type { Customer } from '@/core/models/types';
+
+const WARUM: Record<LinkCandidateReason, string> = {
+  created_from_this_customer: 'created from this customer (consignment)',
+  same_phone: 'same phone',
+  same_id_number: 'same CPR / ID number',
+  same_name: 'same name',
+};
 
 export function UseCustomerAsSupplier({ onDone, onCancel }: {
   /** Die Lieferanten-Rolle, die jetzt gilt — neu angelegt oder schon vorhanden. */
@@ -25,6 +32,9 @@ export function UseCustomerAsSupplier({ onDone, onCancel }: {
   const { customers, loadCustomers } = useCustomerStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
   const anlegen = useSharedWrite<{ supplierId: string; existing: boolean }>('suppliers.create');
+  const verknuepfen = useSharedWrite<{ supplierId: string; existing: boolean }>('suppliers.update');
+  // V2 — der Benutzer hat die vorhandenen Kandidaten gesehen und will trotzdem eine NEUE Rolle.
+  const [trotzdemNeu, setTrotzdemNeu] = useState(false);
   const [search, setSearch] = useState('');
   const [picked, setPicked] = useState<Customer | null>(null);
   const [address, setAddress] = useState('');
@@ -44,15 +54,30 @@ export function UseCustomerAsSupplier({ onDone, onCancel }: {
     try { return supplierSeedFromCustomer(picked); } catch { return null; }
   }, [picked]);
   const schonLieferant = picked ? suppliers.find((s) => s.linkedCustomerId === picked.id) : undefined;
+  // V2 — unverknüpfte Lieferanten, die diese Person sein könnten (nur exakte Merkmale). Nichts wird
+  // automatisch verknüpft: der Benutzer wählt einen aus oder legt ausdrücklich neu an.
+  const kandidaten = useMemo(
+    () => (picked && !schonLieferant ? supplierLinkCandidates(picked, suppliers) : []),
+    [picked, schonLieferant, suppliers],
+  );
+
+  async function link(supplierId: string) {
+    if (!picked) return;
+    setFehler('');
+    const r = await saveSupplierLinkToCustomer(verknuepfen, supplierId, picked);
+    if (r.kind !== 'ok') { setFehler(`Could not link supplier: ${fehlertext(r)}`); loadCustomers(); loadSuppliers(); return; }
+    onDone(r.value.supplierId, true);
+  }
 
   async function save() {
     if (!picked) return;
     setFehler('');
-    const r = await saveSupplierFromCustomer(anlegen, picked, { address, notes });
+    const r = await saveSupplierFromCustomer(anlegen, picked, { address, notes, createDespiteExistingSuppliers: trotzdemNeu });
     if (r.kind !== 'ok') {
       setFehler(`Could not create supplier: ${fehlertext(r)}`);
       // Der Kunde hat sich geändert: frisch laden, damit die Übernahme wieder stimmt.
       loadCustomers();
+      loadSuppliers();
       return;
     }
     onDone(r.value.supplierId, r.value.existing);
@@ -75,7 +100,7 @@ export function UseCustomerAsSupplier({ onDone, onCancel }: {
           <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
             {hits.map((c) => (
               <button key={c.id} type="button" data-customer-pick={c.id}
-                onClick={() => setPicked(c)}
+                onClick={() => { setPicked(c); setTrotzdemNeu(false); }}
                 style={{ textAlign: 'left', padding: '8px 10px', border: '1px solid #E5E9EE', borderRadius: 6, background: 'transparent', cursor: 'pointer' }}>
                 <div style={{ fontSize: 14, color: '#0F0F10' }}>{c.firstName} {c.lastName}{c.company ? ` · ${c.company}` : ''}</div>
                 <div style={{ fontSize: 11, color: '#6B7280' }}>{c.phone || c.whatsapp || c.email || ''}</div>
@@ -92,6 +117,25 @@ export function UseCustomerAsSupplier({ onDone, onCancel }: {
           <div className="flex justify-end gap-3" style={{ paddingTop: 12 }}>
             <Button variant="ghost" onClick={() => setPicked(null)}>Choose another</Button>
             <Button variant="primary" onClick={() => onDone(schonLieferant.id, true)}>Use this supplier</Button>
+          </div>
+        </div>
+      ) : kandidaten.length > 0 && !trotzdemNeu ? (
+        <div data-supplier-link-candidates>
+          <p style={{ fontSize: 13, color: '#0F0F10', marginBottom: 8 }}>
+            An existing supplier may already be {picked.firstName} {picked.lastName}. Link it — its purchases and payables stay exactly as they are — or create a new supplier.
+          </p>
+          {kandidaten.map((k) => (
+            <div key={k.supplier.id} style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '8px 10px', border: '1px solid #E5E9EE', borderRadius: 6, marginBottom: 6 }}>
+              <div>
+                <div style={{ fontSize: 14, color: '#0F0F10' }}>{k.supplier.name}</div>
+                <div style={{ fontSize: 11, color: '#6B7280' }}>{k.reasons.map((r) => WARUM[r]).join(' · ')}{k.supplier.phone ? ` · ${k.supplier.phone}` : ''}</div>
+              </div>
+              <Button variant="primary" onClick={() => void link(k.supplier.id)} disabled={verknuepfen.busy} data-supplier-link={k.supplier.id}>Link this supplier</Button>
+            </div>
+          ))}
+          <div className="flex justify-end gap-3" style={{ paddingTop: 12 }}>
+            <Button variant="ghost" onClick={() => setPicked(null)}>Choose another</Button>
+            <Button variant="ghost" onClick={() => setTrotzdemNeu(true)} data-supplier-create-despite>Create a new supplier instead</Button>
           </div>
         </div>
       ) : (

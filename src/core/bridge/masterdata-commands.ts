@@ -128,9 +128,15 @@ export interface SupplierCreateRequest {
   input: SupplierCreateInput;
   cprImageStagingId?: string;
   /** CUSTOMER-SUPPLIER-ROLE-LINK — angelegt AUS diesem Kunden: Identität vom Primary, nicht aus dem Rumpf. */
-  fromCustomer?: { customerId: string; seenCustomerUpdatedAt: string; extras: { address?: string; notes?: string } };
+  fromCustomer?: { customerId: string; seenCustomerUpdatedAt: string; extras: { address?: string; notes?: string }; createDespiteExistingSuppliers: boolean };
 }
-export interface SupplierUpdateRequest { id: string; fields: SupplierUpdateInput; cprImageStagingId?: string }
+export interface SupplierUpdateRequest {
+  id: string;
+  fields: SupplierUpdateInput;
+  cprImageStagingId?: string;
+  /** CUSTOMER-SUPPLIER-ROLE-LINK V2 — diesen bestehenden Lieferanten ausdrücklich mit dem Kunden verknüpfen. */
+  linkTo?: { customerId: string; seenCustomerUpdatedAt: string };
+}
 
 function stagingIdOf(raw: Record<string, unknown>): string | undefined {
   const v = raw.cprImageStagingId;
@@ -164,7 +170,9 @@ function parseSupplierFromCustomer(raw: Record<string, unknown>): SupplierCreate
   if ('cprImage' in raw || 'cprImageStagingId' in raw) {
     throw new MasterdataPayloadError('no ID photo in this step — the identity comes from the customer');
   }
-  const r = strict(raw, ['linkedCustomerId', 'linkedCustomerUpdatedAt', ...SUPPLIER_FROM_CUSTOMER_EXTRA_FIELDS], MASTERDATA_COMPUTED.supplier);
+  const r = strict(raw, ['linkedCustomerId', 'linkedCustomerUpdatedAt', 'createDespiteExistingSuppliers', ...SUPPLIER_FROM_CUSTOMER_EXTRA_FIELDS], MASTERDATA_COMPUTED.supplier);
+  const despite = r.createDespiteExistingSuppliers;
+  if (despite !== undefined && typeof despite !== 'boolean') throw new MasterdataPayloadError('createDespiteExistingSuppliers must be true or false');
   const customerId = r.linkedCustomerId;
   if (typeof customerId !== 'string' || !customerId.trim()) throw new MasterdataPayloadError('linkedCustomerId is required');
   const seen = r.linkedCustomerUpdatedAt;
@@ -172,10 +180,22 @@ function parseSupplierFromCustomer(raw: Record<string, unknown>): SupplierCreate
     throw new MasterdataPayloadError('linkedCustomerUpdatedAt is required — the state of the customer you saw');
   }
   const extras = rule(() => supplierFromCustomerExtras(r));
-  return { input: { name: '' }, fromCustomer: { customerId, seenCustomerUpdatedAt: seen, extras } };
+  return { input: { name: '' }, fromCustomer: { customerId, seenCustomerUpdatedAt: seen, extras, createDespiteExistingSuppliers: despite === true } };
+}
+
+/** V2 — „diesen Lieferanten mit dem Kunden verknüpfen": nur Kennung, Kunde, gesehener Stand. */
+function parseSupplierLink(raw: Record<string, unknown>): SupplierUpdateRequest {
+  const r = strict(raw, ['linkedCustomerId', 'linkedCustomerUpdatedAt'], MASTERDATA_COMPUTED.supplier, ['id']);
+  const id = requiredId(r);
+  const customerId = r.linkedCustomerId;
+  if (typeof customerId !== 'string' || !customerId.trim()) throw new MasterdataPayloadError('linkedCustomerId is required');
+  const seen = r.linkedCustomerUpdatedAt;
+  if (typeof seen !== 'string' || !seen) throw new MasterdataPayloadError('linkedCustomerUpdatedAt is required — the state of the customer you saw');
+  return { id, fields: {}, linkTo: { customerId, seenCustomerUpdatedAt: seen } };
 }
 
 export function parseSupplierUpdate(raw: unknown): SupplierUpdateRequest {
+  if (isPlain(raw) && 'linkedCustomerId' in raw) return parseSupplierLink(raw);
   if (isPlain(raw) && 'cprImage' in raw && raw.cprImage !== null) {
     throw new MasterdataPayloadError('an ID-card photo travels as staged bytes (cprImageStagingId), never inside the order');
   }
@@ -267,8 +287,9 @@ export async function runSupplierCreate(deps: EngineDeps, identity: CommandIdent
     const fc = req.fromCustomer;
     return runRemoteCommand(deps, identity, () => {
       assertHouseBranch(identity);
-      mustExist('customers', fc.customerId, identity.branchId, 'CUSTOMER_NOT_FOUND');
-      const r = urteil(() => useSupplierStore.getState().createSupplierFromCustomer(fc.customerId, fc.extras, fc.seenCustomerUpdatedAt));
+      // Kunde fehlt / andere Filiale / schon ein möglicher Lieferant: das Urteil fällt die Hausfunktion.
+      const r = urteil(() => useSupplierStore.getState().createSupplierFromCustomer(fc.customerId,
+        { ...fc.extras, createDespiteExistingSuppliers: fc.createDespiteExistingSuppliers }, fc.seenCustomerUpdatedAt));
       return { supplierId: r.supplier.id, name: r.supplier.name, linkedCustomerId: fc.customerId, existing: r.existing };
     });
   }
@@ -284,6 +305,14 @@ export async function runSupplierCreate(deps: EngineDeps, identity: CommandIdent
 
 export async function runSupplierUpdate(deps: EngineDeps, identity: CommandIdentity, raw: unknown, media: MasterdataMedia = {}): Promise<CommandOutcome> {
   const req = parseSupplierUpdate(raw);
+  if (req.linkTo) {
+    const lt = req.linkTo;
+    return runRemoteCommand(deps, identity, () => {
+      assertHouseBranch(identity);
+      const r = urteil(() => useSupplierStore.getState().linkSupplierToCustomer(req.id, lt.customerId, lt.seenCustomerUpdatedAt));
+      return { supplierId: r.supplier.id, name: r.supplier.name, linkedCustomerId: lt.customerId, existing: r.existing };
+    });
+  }
   const staged = req.cprImageStagingId ? [req.cprImageStagingId] : [];
   const outcome = await runRemoteCommand(deps, identity, async () => {
     assertHouseBranch(identity);

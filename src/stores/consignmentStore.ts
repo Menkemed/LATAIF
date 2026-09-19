@@ -10,6 +10,7 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { trackProductRow } from '@/core/lots/lot-queries';
+import { consignorMirrorNote } from '@/core/masterdata/masterdata-rules';
 import { postConsignmentPayout, hasLedgerEntries, reverseConsignmentPayouts } from '@/core/ledger/posting';
 // CENTRAL-UI-PARITY R6F — Rückgabe nach dem Verkauf und Verkaufsstorno wohnen in EINER Hausfolge
 // (dieselbe für PC2); der Store ist nur noch der Anschluss, in der Klammer des Hauses.
@@ -44,6 +45,12 @@ function safePost(label: string, fn: () => void): void {
 //
 // Direkter SQL-Lookup (statt Store-State) damit der Helper unabhängig von
 // loadCustomers/loadSuppliers-Reihenfolge oder HMR-Modul-Duplikaten funktioniert.
+/** Ein fachliches Nein beim Zuordnen des Kommittenten zu seiner Lieferanten-Rolle. */
+export class ConsignorSupplierError extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) { super(message); this.code = code; this.name = 'ConsignorSupplierError'; }
+}
+
 export function findOrCreateSupplierForConsignor(consignorCustomerId: string): string {
   const custRows = query(
     `SELECT first_name, last_name, phone, email, branch_id FROM customers WHERE id = ?`,
@@ -55,30 +62,51 @@ export function findOrCreateSupplierForConsignor(consignorCustomerId: string): s
   const c = custRows[0];
   const fullName = `${(c.first_name as string) || ''} ${(c.last_name as string) || ''}`.trim();
   const phone = ((c.phone as string) || '').trim();
-  const branchId = (c.branch_id as string) || currentBranchId();
+  // CUSTOMER-SUPPLIER-ROLE-LINK V2 — Kommittent und Lieferanten-Rolle gehören in DIESE Filiale. Sonst
+  // entsteht weder ein Lieferant noch eine Verbindlichkeit (der Verkauf bricht als Ganzes ab).
+  const branchId = currentBranchId();
+  if (String(c.branch_id ?? '') !== branchId) {
+    throw new ConsignorSupplierError('CONSIGNOR_BRANCH_MISMATCH',
+      'the consignor belongs to another branch — no supplier role and no payout are booked here');
+  }
 
-  // CUSTOMER-SUPPLIER-ROLE-LINK — ZUERST die explizite Lieferanten-Rolle dieses Kunden. Nur wenn es
-  // keine gibt, greift die alte Suche über Telefon/Name — und die darf nie eine Rolle finden, die
-  // ausdrücklich zu einem ANDEREN Kunden gehört (sonst liefe die Auszahlung an die falsche Person).
+  // 1) Die ausdrückliche Lieferanten-Rolle dieses Kunden hat IMMER Vorrang.
   const rolle = query(`SELECT id FROM suppliers WHERE branch_id = ? AND linked_customer_id = ? LIMIT 1`, [branchId, consignorCustomerId]);
   if (rolle.length > 0) return rolle[0].id as string;
 
-  // Match-Strategie: Phone primär (eindeutig), Name als Fallback. Vermeidet Duplikate
-  // wenn der gleiche Consignor schon mal als Supplier angelegt wurde (manuell oder
-  // durch früheres recordSale).
+  // 2) Der bisherige Kommissions-Spiegel — erkennbar an seiner Notiz mit GENAU dieser Kunden-Kennung.
+  //    Unter unverknüpften Lieferanten; mehr als einer ist mehrdeutig → fail-closed.
+  const eindeutig = (rows: Array<Record<string, unknown>>, was: string): string | null => {
+    if (rows.length === 1) return rows[0].id as string;
+    if (rows.length > 1) {
+      throw new ConsignorSupplierError('CONSIGNOR_SUPPLIER_AMBIGUOUS',
+        `${rows.length} unlinked suppliers match this consignor by ${was} — link the right one to the customer first`);
+    }
+    return null;
+  };
+  const spiegel = eindeutig(query(
+    `SELECT id FROM suppliers WHERE branch_id = ? AND linked_customer_id IS NULL AND notes LIKE ? ESCAPE '\\'`,
+    [branchId, '%' + consignorMirrorNote(consignorCustomerId).replace(/[\\%_]/g, (m) => '\\' + m) + '%'],
+  ), 'their mirror note');
+  if (spiegel) return spiegel;
+
+  // 3) Die bestehende Identitätsregel — Telefon zuerst, Name nur hilfsweise — aber nur, wenn GENAU EIN
+  //    unverknüpfter Lieferant passt. Ein Namens-Treffer mit einer ANDEREN Telefonnummer ist eine andere
+  //    Person und kein Treffer. Keine Ähnlichkeitssuche.
   if (phone) {
-    const byPhone = query(
-      `SELECT id FROM suppliers WHERE branch_id = ? AND TRIM(phone) = ? AND linked_customer_id IS NULL LIMIT 1`,
-      [branchId, phone]
-    );
-    if (byPhone.length > 0) return byPhone[0].id as string;
+    const byPhone = eindeutig(query(
+      `SELECT id FROM suppliers WHERE branch_id = ? AND linked_customer_id IS NULL AND REPLACE(TRIM(phone), ' ', '') = ?`,
+      [branchId, phone.replace(/\s+/g, '')],
+    ), 'phone');
+    if (byPhone) return byPhone;
   }
   if (fullName) {
-    const byName = query(
-      `SELECT id FROM suppliers WHERE branch_id = ? AND LOWER(TRIM(name)) = ? AND linked_customer_id IS NULL LIMIT 1`,
-      [branchId, fullName.toLowerCase()]
-    );
-    if (byName.length > 0) return byName[0].id as string;
+    const byName = eindeutig(query(
+      `SELECT id FROM suppliers WHERE branch_id = ? AND linked_customer_id IS NULL AND LOWER(TRIM(name)) = ?
+          AND (? = '' OR phone IS NULL OR TRIM(phone) = '')`,
+      [branchId, fullName.toLowerCase(), phone],
+    ), 'name');
+    if (byName) return byName;
   }
 
   // Kein Match → neuen Supplier anlegen via SupplierStore (postet nichts ins Ledger,
@@ -87,7 +115,7 @@ export function findOrCreateSupplierForConsignor(consignorCustomerId: string): s
     name: fullName || 'Unnamed Consignor',
     phone: (c.phone as string) || undefined,
     email: (c.email as string) || undefined,
-    notes: `Auto-created from consignor (customer ${consignorCustomerId})`,
+    notes: consignorMirrorNote(consignorCustomerId),
   }, { linkedCustomerId: consignorCustomerId });
   return created.id;
 }

@@ -127,6 +127,57 @@ export const SUPPLIER_FROM_CUSTOMER_EXTRA_FIELDS = ['address', 'notes'] as const
 /** Die Felder, die aus dem Kunden kommen — und darum NICHT im Auftrag stehen dürfen. */
 export const SUPPLIER_IDENTITY_FROM_CUSTOMER = ['name', 'phone', 'email', 'cpr'] as const;
 export const CUSTOMER_CHANGED = 'CUSTOMER_CHANGED';
+/** Kunde und Lieferanten-Rolle gehören in dieselbe Filiale — sonst wird nichts angelegt/verknüpft. */
+export const CUSTOMER_BRANCH_MISMATCH = 'CUSTOMER_BRANCH_MISMATCH';
+/** Es gibt schon einen unverknüpften Lieferanten, der diese Person sein könnte — der Mensch entscheidet. */
+export const SUPPLIER_CANDIDATES_EXIST = 'SUPPLIER_CANDIDATES_EXIST';
+
+export type LinkCandidateReason = 'created_from_this_customer' | 'same_phone' | 'same_id_number' | 'same_name';
+
+export interface LinkCandidateSupplier {
+  id: string;
+  name?: string | null;
+  phone?: string | null;
+  cpr?: string | null;
+  notes?: string | null;
+  linkedCustomerId?: string | null;
+}
+
+/** Die Notiz, mit der die Kommission ihre Lieferanten-Spiegel seit jeher anlegt — mit der EXAKTEN Kunden-Kennung. */
+export function consignorMirrorNote(customerId: string): string {
+  return `Auto-created from consignor (customer ${customerId})`;
+}
+
+const digits = (v: unknown): string => (typeof v === 'string' ? v.replace(/\s+/g, '') : '');
+const lower = (v: unknown): string => (typeof v === 'string' ? v.trim().toLowerCase() : '');
+
+/**
+ * Unverknüpfte Lieferanten, die DIESE Person sein könnten — nur exakte Merkmale, keine Ähnlichkeit:
+ * der Kommissions-Spiegel mit genau dieser Kunden-Kennung, dieselbe Telefonnummer (ohne Leerzeichen),
+ * dieselbe Ausweisnummer, derselbe vollständige Name. Nichts wird damit automatisch verknüpft; die
+ * Liste ist die Vorlage für eine ausdrückliche Entscheidung des Benutzers.
+ */
+export function supplierLinkCandidates(
+  customer: CustomerIdentitySource & { id: string },
+  suppliers: readonly LinkCandidateSupplier[],
+): Array<{ supplier: LinkCandidateSupplier; reasons: LinkCandidateReason[] }> {
+  const phones = new Set([digits(customer.phone), digits(customer.whatsapp)].filter(Boolean));
+  const idNo = lower(customer.personalId);
+  const person = lower([customer.firstName, customer.lastName].filter(Boolean).join(' '));
+  const company = lower(customer.company);
+  const out: Array<{ supplier: LinkCandidateSupplier; reasons: LinkCandidateReason[] }> = [];
+  for (const s of suppliers) {
+    if (s.linkedCustomerId) continue;
+    const reasons: LinkCandidateReason[] = [];
+    if (typeof s.notes === 'string' && s.notes.includes(consignorMirrorNote(customer.id))) reasons.push('created_from_this_customer');
+    if (phones.size && phones.has(digits(s.phone))) reasons.push('same_phone');
+    if (idNo && idNo === lower(s.cpr)) reasons.push('same_id_number');
+    const n = lower(s.name);
+    if (n && (n === person || (company && n === company))) reasons.push('same_name');
+    if (reasons.length) out.push({ supplier: s, reasons });
+  }
+  return out;
+}
 
 export interface CustomerIdentitySource {
   firstName?: string | null;
