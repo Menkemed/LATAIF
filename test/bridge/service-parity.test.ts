@@ -190,7 +190,7 @@ const REPAIR_COMPARE = [
   const service = codeOf('src/core/bridge/service-commands.ts');
   ok(/createRepairOnPrimary\(form\)/.test(list) && /internalCost: input\.repairScope === 'OWN' && input\.repairType === 'hybrid'\s*\?\s*\(input\.internalCost \?\? 0\)\s*:\s*internalCostOnCreate\(input\)/.test(rules),
     'CALLPATH die Aufnahme leitet die eigenen Kosten mit der GETEILTEN Primitive ab');
-  ok(/updateRepairOnPrimary\(id, form\)/.test(detail) && /internalCost: internalCostOnEdit\(cost\)/.test(rules)
+  ok(/updateRepairOnPrimary\(id, form\)/.test(detail) && /internalCost: internalCostOnEdit\(cost, openLineTotal\)/.test(rules)
     && /repairMargin\(cost\)/.test(rules),
     'CALLPATH …und die Detailseite ebenso');
   ok(src('src/pages/repairs/RepairList.tsx').includes('repair-rules') && src('src/pages/repairs/RepairDetail.tsx').includes('repair-rules')
@@ -311,6 +311,24 @@ const REPAIR_COMPARE = [
     'CONTROL …die Marge entsprechend (100 − 65)');
   ok(costs.repairMargin({ repairType: 'internal', estimatedCost: 40 } as never) === null,
     'CONTROL ohne Kundenpreis gibt es keine Marge — und das ist nicht 0');
+
+  // PRE-G5 — MIT offenen Kostenzeilen ist `actual_cost` deren Summe (Feldbefund 19.09.2026):
+  // daraus darf keine eigene Arbeit werden, sonst zaehlen die Zeilen doppelt.
+  const mitZeilen = { repairType: 'internal', estimatedCost: 40, actualCost: 125 };
+  ok(costs.internalCostOnEdit(mitZeilen as never, 125) === 0,
+    'COST mit offenen Zeilen wird aus actual_cost KEINE eigene Arbeit (0, nicht 125)');
+  ok(costs.repairCostParts({ repairType: 'internal', internalCost: costs.internalCostOnEdit(mitZeilen as never, 125) }, 125).total === 125,
+    'COST …der Kostenvertrag zaehlt die Zeilen damit genau einmal (125, nicht 250)');
+  ok(costs.internalCostOnEdit({ ...mitZeilen, internalCost: 20 } as never, 125) === 20,
+    'COST eingetragene eigene Arbeit bleibt, auch mit Zeilen');
+  ok(costs.internalCostOnEdit({ repairType: 'hybrid', internalCost: 20, actualCost: 60 } as never, 60) === 20,
+    'COST bei Mischarbeit unveraendert: nur die eingetragene eigene Arbeit');
+  ok(costs.internalCostOnEdit(both as never) === 55 && costs.internalCostOnEdit(both as never, 0) === 55,
+    'COST ohne Zeilen bleibt der alte Vertrag: der eingetragene Aufwand ist die eigene Arbeit');
+  // Beide Anschluesse reichen die offenen Zeilen durch — am Primary und aus der Ferne.
+  ok(/buildRepairEditPatch\(form, sumOpenRepairLineCosts\(id\)\)/.test(codeOf('src/core/repairs/repair-house.ts'))
+    && /buildRepairEditPatch\(effective, sumOpenRepairLineCosts\(req\.id\)\)/.test(codeOf('src/core/bridge/service-commands.ts')),
+  'COST „Save" am Primary und der Fernbefehl rechnen mit denselben offenen Zeilen');
 }
 
 // ── 4) Der Feldsatz des Transfer-Aenderns ────────────────────────────────
@@ -445,8 +463,8 @@ const REPAIR_COMPARE = [
   // CENTRAL-C3H hat die sechzehn in C3G als `B_DEFERRED` klassifizierten Aktionen freigeschaltet.
   // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
-  ok(known.length === 59 && reads.length === 18 && ALLOWED_MUTATIONS.length === 103,
-    `SCOPE 1 Probe + 18 Reads + 40 Mutationen = 59 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
+  ok(known.length === 60 && reads.length === 19 && ALLOWED_MUTATIONS.length === 103,
+    `SCOPE 1 Probe + 19 Reads + 40 Mutationen = 60 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
   const c3f = ['repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned'];
   for (const op of c3f) ok((ALLOWED_MUTATIONS as readonly string[]).includes(op), `SCOPE ${op} steht darauf`);
   // Umwandlung und Zustandsmaschine sind in C3H dazugekommen — die ZERSTOERENDEN nicht.

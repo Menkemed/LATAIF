@@ -213,6 +213,57 @@ weil sie nicht die Registry zählen, sondern die Befehle IHRER Importe. Nur Zahl
 - **Kein Lieferant bei Kundengold:** der Hausvertrag verlangt ihn nur für Werkstattgold; die Maske am
   Telefon blendet das Feld für Kundengold aus. Vertrag und Maske sind einig — nichts zu ändern.
 
+## 9e. Reparaturkosten doppelt gezählt (Live-Test 19.09.2026, behoben)
+
+**Befund:** offene Zeilen 30 + 90 + 5 = 125, Kunde zahlt 150. Nach „Save Changes" stand
+`internal_cost = 125`, der Rechnungseinstand war 250, die Marge −100.
+
+**Kostenvertrag, am Code gemessen:**
+
+| Feld / Teil | Bedeutung | wer schreibt | Marge | Rechnungseinstand |
+|---|---|---|---|---|
+| `internal_cost` | eigene Arbeit (bei `external` der gespiegelte Voranschlag) | Anlage `internalCostOnCreate`; „Save" `internalCostOnEdit` | ja, als `own` (nicht bei `external`) | ja, als `own` |
+| `actual_cost` | seit den Kostenzeilen die **Summe der offenen Zeilen** | `recomputeRepairAggregates` bei jeder Zeile; das Formularfeld „ACTUAL COST" | nein (nur über den alten Fallback) | nein |
+| offene `repair_lines` (Arbeit, Material, Werkstatt) | je eine Kostenposition | `add_line` / `add_material` / automatische Werkstattzeile | ja, als `lines` | ja, als `lines` |
+| zurückgenommene Zeile | gelöscht, samt Ausgabe und Goldschuld | `cancelRepairLine` | nein | nein |
+| Gebühr (`fee`) | nur ohne Zeilen, mit verknüpfter Werkstatt (Altbestand) | — | ja | ja |
+| Goldschuld / Kundengold | Gramm-Konten, kein Teil der BHD-Kosten der Reparatur | Goldkern | nein | nein |
+
+`repairCostParts(own, lines, fee)` ist der EINE Vertrag: Marge (`updateRepair`,
+`recomputeRepairAggregates`, Statuswechsel), Rechnungseinstand und Kopfbuchung bei „ready"
+(`syncRepairHeaderCosts`) lesen ihn. Falsch war nur ein **Eingang**: `internalCostOnEdit` nahm bei
+leerer eigener Arbeit `actual_cost` (oder den Voranschlag) als eigene Arbeit — aus der Zeit vor den
+Zeilen, als `actual_cost` noch der Aufwand war. Mit Zeilen ist es deren Summe → doppelt gezählt.
+
+**Fix:** sind Kostenzeilen offen, leitet `internalCostOnEdit` nichts mehr ab — eigene Arbeit gibt
+es dann nur, wenn sie eingetragen ist. Ohne Zeilen bleibt der alte Vertrag. Beide Anschlüsse
+(„Save" am Primary und `repairs.update`) reichen die offenen Zeilen durch. Keine zweite
+Kostenlogik, keine Änderung an `repairCostParts`, Buchung, Werkstatt oder Gold.
+
+**Bestehende Daten — keine automatische Korrektur.** Betroffen sein kann jede Reparatur, an der
+nach dem Erfassen von Zeilen „Save" gedrückt wurde, ohne eigene Arbeit einzutragen. Zuverlässig
+unterscheiden lässt sich das NICHT: der falsche Wert ist die Zeilensumme **zum Zeitpunkt des
+ersten Speicherns** und bleibt danach stehen (er gilt ab dann als „eingetragen"), auch wenn sich
+die Zeilen später ändern — und eine echte eigene Arbeit kann zufällig genauso hoch sein.
+Kandidaten findet diese Abfrage (nur lesen):
+
+```sql
+SELECT r.repair_number, r.repair_type, r.internal_cost, r.actual_cost,
+       (SELECT COALESCE(SUM(cost_amount),0) FROM repair_lines l
+         WHERE l.repair_id = r.id AND l.status = 'OPEN') AS zeilen,
+       r.invoice_id IS NOT NULL AS abgerechnet
+  FROM repairs r
+ WHERE r.internal_cost > 0 AND r.repair_type <> 'hybrid'
+   AND EXISTS (SELECT 1 FROM repair_lines l WHERE l.repair_id = r.id AND l.status = 'OPEN');
+```
+
+Korrektur je Kandidat, von Hand und nur nach Prüfung: in der Reparatur „INTERNAL COST" auf 0 setzen
+und speichern — Marge und (bei „ready") die Kopfbuchung folgen dem Vertrag. Eine **abgerechnete**
+Reparatur ändert ihre Kosten nicht mehr (`REPAIR_ALREADY_INVOICED`); dort bleibt nur eine
+Korrektur über die Rechnung. Stand der Produktion am 19.09.2026 (Kopie, gelesen): genau **eine**
+Reparatur, die Testreparatur `REP-2026-00001` (abgerechnet) — sie verschwindet mit dem geplanten
+Zurückspielen der Sicherung.
+
 ## 10. Grenzen
 
 - **AI-Live-Nachweis offen (manuell):** ohne hinterlegten Schlüssel ist der Aufruf gegen den echten Anbieter im

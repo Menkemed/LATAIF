@@ -35,7 +35,7 @@ import { query } from '@/core/db/helpers';
 import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
-import { useRepairStore } from '@/stores/repairStore';
+import { useRepairStore, sumOpenRepairLineCosts } from '@/stores/repairStore';
 import { useAgentStore } from '@/stores/agentStore';
 import { CARD_BRANDS } from '@/core/finance/card-fees';
 import { SUPPLIER_CREDIT_LOCK_MESSAGE } from '@/core/finance/expenseSettlement';
@@ -454,7 +454,8 @@ export async function runRepairUpdate(
 
     // DIESELBE Funktion wie „Save" am Primary: jedes Feld der Maske, dazu die eigenen Kosten, die
     // Marge und die Kartenart — nie aus dem Rumpf.
-    const patch = house(() => buildRepairEditPatch(effective));
+    // Mit den offenen Kostenzeilen dieser Reparatur — sonst zaehlte ihre Summe doppelt.
+    const patch = house(() => buildRepairEditPatch(effective, sumOpenRepairLineCosts(req.id)));
     house(() => assertRepairEditRefs(patch, seen, houseRepairPort(identity.branchId)));
     try {
       // Der Weg des Hauses: die Zeile, dazu die Umbuchung der Kundenzahlung samt Kartengebühr

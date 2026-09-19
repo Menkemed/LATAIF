@@ -62,11 +62,18 @@ export function internalCostOnCreate(input: RepairCostInput): number {
  * ausdrücklich NICHT: dort ist `estimatedCost` die Werkstattgebühr, und sie in die eigenen Kosten
  * zu spiegeln zählte sie in der Marge zweimal.
  */
-export function internalCostOnEdit(input: RepairCostInput): number {
+export function internalCostOnEdit(input: RepairCostInput, openLineTotal = 0): number {
   const own = num(input.internalCost) ?? 0;
   if (input.repairType === 'hybrid') return own;
-  const derived = num(input.actualCost) ?? num(input.estimatedCost) ?? 0;
-  return own > 0 ? own : derived;
+  if (own > 0) return own;
+  // PRE-G5 — sobald Kostenzeilen offen sind, TRAGEN SIE den Aufwand: `actual_cost` ist dann ihre
+  // Summe (`recomputeRepairAggregates` schreibt sie bei jeder Zeile), und ein Voranschlag ist
+  // keine eigene Arbeit. Wer daraus eigene Kosten ableitet, zaehlt die Zeilen zweimal — genau der
+  // Feldbefund: Zeilen 125, „Save" → `internal_cost` 125, Einstand 250, Marge −100. Eigene Arbeit
+  // gibt es dann nur, wenn jemand sie ausdruecklich eintraegt (oben: `own`).
+  if (Number.isFinite(openLineTotal) && openLineTotal > 0) return 0;
+  // Ohne Zeilen bleibt es beim alten Vertrag: dort ist `actualCost` der tatsaechliche Aufwand.
+  return num(input.actualCost) ?? num(input.estimatedCost) ?? 0;
 }
 
 /** Die Gesamtkosten, gegen die die Marge gerechnet wird. Bei `hybrid` beide Teile. */

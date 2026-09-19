@@ -15,7 +15,7 @@ import { saveDatabaseDurably } from '@/core/db/database';
 import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction, watchLedgerPosts } from '@/core/ledger/posting';
 import { runExclusive } from '@/core/bridge/command-scheduler';
 import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
-import { useRepairStore } from '@/stores/repairStore';
+import { useRepairStore, sumOpenRepairLineCosts } from '@/stores/repairStore';
 import { useProductStore } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { normalizeRecordImages } from '@/core/media/record-image';
@@ -110,7 +110,8 @@ export async function updateRepairOnPrimary(id: string, form: Partial<Repair>): 
     rs.loadRepairs();
     const seen = rs.getRepair(id);
     if (!seen) throw new RepairActionRejected('REPAIR_NOT_FOUND', 'no such repair');
-    const patch = buildRepairEditPatch(form);
+    // Die offenen Kostenzeilen gehoeren in die Ableitung — sonst zaehlt ihre Summe doppelt.
+    const patch = buildRepairEditPatch(form, sumOpenRepairLineCosts(id));
     assertRepairEditRefs(patch, seen, houseRepairPort(currentBranchId()));
     // POST-PARITY PP-13/PP-14 — gebuchte Kopfkosten folgen der Änderung; dieselbe Buchungswache wie fern.
     mitBuchungswache('repairs.update', () => rs.updateRepair(id, patch));

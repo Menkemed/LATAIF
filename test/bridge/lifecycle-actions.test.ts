@@ -837,5 +837,131 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
   ok(unknownRefused, 'SCOPE …und ein Aufruf darauf faellt mit BRIDGE_OP_NOT_REGISTERED');
 }
 
+// ── PRE-G5 — Reparaturkosten: die Zeilen genau EINMAL ────────────────────
+//
+// Feldbefund (Live-Test 19.09.2026): offene Zeilen 30 + 90 + 5 = 125, Kunde zahlt 150. Nach einem
+// „Save Changes" stand `internal_cost = 125` — kopiert aus `actual_cost`, das seit den Kostenzeilen
+// die SUMME DER ZEILEN ist. Einstand der Rechnung danach 125 (eigene Arbeit) + 125 (Zeilen) = 250,
+// Marge −100. Geprueft wird hier der ganze Weg des Hauses: anlegen, Zeilen, Speichern, fertig,
+// Rechnung — und ob Einstand, Marge und Kopfbuchung DENSELBEN Kostenvertrag benutzen.
+{
+  const { repairCostParts } = await import('../../src/core/repairs/repair-cost.ts');
+  const { showsInternalCostRow } = await import('../../src/core/repairs/repair-line-view.ts');
+  resetDurabilityStateForTest();
+  const db = freshDb();
+  const d = deps(db);
+  let nr = 900;
+  const next = (): string => String(nr++);
+
+  const anlegen = async (body: Record<string, unknown>): Promise<string> => {
+    const v = must(await cmdS.runRepairCreate(d, identity(next(), 'repairs.create'), {
+      customerId: 'cust-1', itemBrand: 'Rolex', issueDescription: 'Kosten', taxScheme: 'ZERO', ...body,
+    }), 'repair');
+    return String(v.repairId ?? v.id);
+  };
+  const zeile = async (rid: string, cost: number, supplierId?: string): Promise<void> => {
+    must(await life.runAddRepairLine(d, identity(next(), 'repairs.add_line'), {
+      repairId: rid, costAmount: cost, workType: 'service', expectedRevision: prev(db, rid),
+      ...(supplierId ? { supplierId } : {}),
+    }), 'line');
+  };
+  const speichern = async (rid: string, changes: Record<string, unknown> = { notes: 'Save Changes' }): Promise<void> => {
+    must(await cmdS.runRepairUpdate(d, identity(next(), 'repairs.update'), {
+      id: rid, expectedRevision: prev(db, rid), ...changes,
+    }), 'save');
+  };
+  const fertig = async (rid: string): Promise<void> => {
+    for (const status of ['in_progress', 'ready']) {
+      must(await life.runUpdateRepairStatus(d, identity(next(), 'repairs.update_status'),
+        { repairId: rid, status, expectedRevision: prev(db, rid) }), status);
+    }
+  };
+  const rechnung = async (rid: string): Promise<number> => {
+    const inv = must(await life.runCreateRepairInvoice(d, identity(next(), 'repairs.create_invoice'),
+      { repairId: rid, expectedRevision: prev(db, rid) }), 'invoice');
+    return n(db, 'SELECT purchase_price_snapshot FROM invoice_lines WHERE invoice_id = ?', [String(inv.invoiceId)]);
+  };
+  const zeilen = (rid: string): number =>
+    n(db, "SELECT COALESCE(SUM(cost_amount),0) FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'", [rid]);
+  /** Der Kostenvertrag des Hauses — aus der Zeile gelesen, nicht nachgerechnet. */
+  const ssot = (rid: string): number => {
+    const r = db.exec('SELECT repair_type, internal_cost, estimated_cost, workshop_supplier_id FROM repairs WHERE id = ?', [rid])[0].values[0];
+    return repairCostParts({
+      repairType: String(r[0]), internalCost: Number(r[1]) || 0,
+      estimatedCost: r[2] === null ? null : Number(r[2]), workshopSupplierId: r[3] === null ? null : String(r[3]),
+    }, zeilen(rid)).total;
+  };
+  const intern = (rid: string): number => n(db, 'SELECT internal_cost FROM repairs WHERE id = ?', [rid]);
+  const marge = (rid: string): number => n(db, 'SELECT margin FROM repairs WHERE id = ?', [rid]);
+
+  // (1)+(3) Der Feldbefund: Zeilen 125, keine eigene Arbeit, „Save Changes" vor der Rechnung.
+  const a = await anlegen({ repairType: 'internal', estimatedCost: 40, chargeToCustomer: 150 });
+  await zeile(a, 30); await zeile(a, 90); await zeile(a, 5);
+  ok(n(db, 'SELECT actual_cost FROM repairs WHERE id = ?', [a]) === 125,
+    'COST actual_cost ist die Summe der offenen Zeilen (125) — so fuehrt das Haus es seit den Kostenzeilen');
+  await speichern(a);
+  ok(intern(a) === 0, `COST „Save Changes" macht aus den Zeilen KEINE eigene Arbeit (internal_cost ${intern(a)})`);
+  ok(ssot(a) === 125, `COST der Kostenvertrag zaehlt die Zeilen genau einmal (${ssot(a)})`);
+  ok(marge(a) === 25, `COST Marge = 150 − 125 = 25 (${marge(a)})`);
+  ok(!showsInternalCostRow('internal', intern(a)),
+    'COST …und die Kostenkarte zeigt keine Pauschalenzeile „Internal labor / own work" mehr');
+  await fertig(a);
+  const einstandA = await rechnung(a);
+  ok(einstandA === 125 && einstandA === ssot(a),
+    `COST der Rechnungseinstand ist derselbe Vertrag: 125, nicht 250 (${einstandA})`);
+  ok(150 - einstandA === marge(a), 'COST Rechnung und Marge rechnen gegen dieselben Kosten');
+
+  // (2) Echte eigene Arbeit, ausdruecklich eingetragen: sie bleibt — und zaehlt EINMAL daneben.
+  const b = await anlegen({ repairType: 'internal', internalCost: 20, chargeToCustomer: 200 });
+  await zeile(b, 30); await zeile(b, 90); await zeile(b, 5);
+  await speichern(b);
+  ok(intern(b) === 20 && ssot(b) === 145 && marge(b) === 55,
+    `COST eingetragene eigene Arbeit 20 + Zeilen 125 = 145, Marge 55 (${intern(b)}/${ssot(b)}/${marge(b)})`);
+  ok(showsInternalCostRow('internal', intern(b)), 'COST …und DIESE Pauschale steht weiterhin auf der Karte');
+  await fertig(b);
+  ok(await rechnung(b) === 145, 'COST …auch in der Rechnung');
+
+  // (4) Fremdarbeit: das Haus legt aus dem Voranschlag der Werkstatt selbst eine Zeile an (30);
+  // dazu eine zweite (60). Gezaehlt werden genau diese Zeilen — der gespiegelte Voranschlag in
+  // `internal_cost` kommt NICHT noch einmal dazu.
+  const c = await anlegen({ repairType: 'external', workshopSupplierId: 'sup-1', estimatedCost: 30, chargeToCustomer: 120 });
+  await zeile(c, 60, 'sup-1');
+  await speichern(c);
+  ok(zeilen(c) === 90 && ssot(c) === 90 && marge(c) === 30,
+    `COST Fremdarbeit: Zeilen 30 + 60, nichts doppelt, Marge 30 (${zeilen(c)}/${ssot(c)}/${marge(c)})`);
+  await fertig(c);
+  ok(await rechnung(c) === 90, 'COST …und so steht es in der Rechnung');
+
+  // (5) Mischarbeit: eigene Arbeit + Werkstatt + Hauszeile, jedes genau einmal.
+  const h = await anlegen({ repairType: 'internal', internalCost: 20, chargeToCustomer: 200 });
+  await zeile(h, 50, 'sup-1'); await zeile(h, 10);
+  ok(s(db, 'SELECT repair_type FROM repairs WHERE id = ?', [h]) === 'hybrid', 'COST mit einer Werkstattzeile wird die Reparatur hybrid');
+  await speichern(h);
+  ok(intern(h) === 20 && ssot(h) === 80 && marge(h) === 120,
+    `COST Mischarbeit 20 + 50 + 10 = 80, Marge 120 (${intern(h)}/${ssot(h)}/${marge(h)})`);
+  await fertig(h);
+  ok(await rechnung(h) === 80, 'COST …und die Rechnung ebenso');
+
+  // (6) Eine zurueckgenommene Zeile zaehlt nicht mehr — vor und nach dem Speichern.
+  const z = await anlegen({ repairType: 'internal', chargeToCustomer: 100 });
+  await zeile(z, 30); await zeile(z, 90);
+  const weg = s(db, 'SELECT id FROM repair_lines WHERE repair_id = ? AND cost_amount = 90', [z]);
+  must(await life.runCancelRepairLine(d, identity(next(), 'repairs.cancel_line'),
+    { repairId: z, lineId: weg, expectedRevision: prev(db, z) }), 'cancel');
+  await speichern(z);
+  ok(intern(z) === 0 && ssot(z) === 30 && marge(z) === 70,
+    `COST die zurueckgenommene Zeile faellt heraus: 30, Marge 70 (${intern(z)}/${ssot(z)}/${marge(z)})`);
+  // …und eine Zeile NACH dem Speichern kommt genau einmal dazu.
+  await zeile(z, 15);
+  ok(intern(z) === 0 && ssot(z) === 45 && marge(z) === 55, `COST eine spaetere Zeile kommt genau einmal dazu (${ssot(z)}/${marge(z)})`);
+  await fertig(z);
+  ok(await rechnung(z) === 45, 'COST …bis in die Rechnung');
+
+  // Ohne Kostenzeilen bleibt die alte Ableitung, wie sie war: dort IST `actual_cost` der Aufwand.
+  const o = await anlegen({ repairType: 'internal', estimatedCost: 40, chargeToCustomer: 100 });
+  await speichern(o, { actualCost: 55 });
+  ok(intern(o) === 55 && ssot(o) === 55, `COST ohne Zeilen gilt ein eingetragener Aufwand weiter als eigene Arbeit (${intern(o)})`);
+}
+
 console.log(`\n${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);

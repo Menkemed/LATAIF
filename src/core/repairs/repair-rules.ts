@@ -368,7 +368,7 @@ export function repairEditInputs(e: Partial<Repair>): Record<RepairEditInput, un
  * der Änderung gilt (Zeile + Auftrag). Die abgeleiteten Werte (eigene Kosten, Marge, Kartenart)
  * rechnet in beiden Fällen DIESE Funktion; der Auftrag trägt sie nie.
  */
-export function buildRepairEditPatch(e: Partial<Repair>): Partial<Repair> {
+export function buildRepairEditPatch(e: Partial<Repair>, openLineTotal = 0): Partial<Repair> {
   const i = repairEditInputs(e);
   const u = <T>(v: unknown): T | undefined => (v === null ? undefined : v as T);
   const cost = {
@@ -382,7 +382,9 @@ export function buildRepairEditPatch(e: Partial<Repair>): Partial<Repair> {
     diagnosis: u(i.diagnosis),
     estimatedCost: u(i.estimatedCost),
     actualCost: u(i.actualCost),
-    internalCost: internalCostOnEdit(cost),
+    // Die offenen Kostenzeilen kennt nur der Aufrufer (er haelt die Zeile) — ohne sie wuerde ihre
+    // Summe in `actual_cost` hier noch einmal als eigene Arbeit gelesen.
+    internalCost: internalCostOnEdit(cost, openLineTotal),
     chargeToCustomer: u(i.chargeToCustomer),
     customerPaidFrom: i.customerPaidFrom as Repair['customerPaidFrom'],
     customerCardBrand: i.customerCardBrand as Repair['customerCardBrand'],
