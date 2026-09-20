@@ -174,6 +174,14 @@ const VERBOTEN = ['id', 'repairNumber', 'voucherCode', 'status', 'branchId', 'te
   const gemischt = M.photoPlan([{ keep: 'media-b' }, { stagingId: 'c'.repeat(64) }, { keep: 'media-a' }, { nonsense: 1 }]);
   ok(J(gemischt) === J([{ keep: 'media-b' }, { stagingId: 'c'.repeat(64) }, { keep: 'media-a' }]),
     '§1 der Bildplan mischt Behaltenes und Neues und laesst Unbrauchbares fallen');
+  // ALTBESTAND — solange die alte Bildspalte noch etwas haelt, ist jede Speicherung eine Aenderung:
+  // sonst bliebe die alte Liste stehen und käme nach „alle entfernt" beim naechsten Lesen zurueck.
+  ok(M.photosUnchanged([], [], 1) === false && M.photosUnchanged([], [], 0) === true,
+    '§1 Altbestand: „alle entfernt" ist eine Aenderung; ohne Altbestand ist die leere Galerie unveraendert');
+  const altRepair = { ...repair, images: ['data:image/jpeg;base64,ALT'], mediaIds: [] };
+  const altBody = M.editBody(altRepair, form, M.photoPlan([]));
+  ok(Array.isArray(altBody.photos) && (altBody.photos as unknown[]).length === 0,
+    `§1 …und der Rumpf traegt dann die LEERE Galerie (${JSON.stringify(altBody.photos)})`);
   ok(M.photosUnchanged(M.photoPlan([{ keep: 'media-a' }]), ['media-a', 'media-b']) === false,
     '§1 ein geloeschtes Bild ist eine Aenderung (kuerzerer Plan als die gespeicherte Liste)');
 }

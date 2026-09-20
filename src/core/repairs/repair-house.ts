@@ -151,9 +151,10 @@ export async function updateRepairOnPrimary(id: string, form: Partial<Repair>, e
     assertRepairEditRefs(patch, seen, houseRepairPort(currentBranchId()));
     // POST-PARITY PP-13/PP-14 — gebuchte Kopfkosten folgen der Änderung; dieselbe Buchungswache wie fern.
     mitBuchungswache('repairs.update', () => {
-      rs.updateRepair(id, patch);
-      // Eine fachliche Änderung — eine Fassung: die Galerie in derselben Klammer.
+      // Eine fachliche Änderung — eine Fassung: die Galerie ZUERST (sie leert auch die alte Spalte),
+      // dann die Zeile — so trägt der Abgleich den Stand NACH der Fotoänderung.
       if (galleryMediaIds) applyRepairGallery(id, galleryMediaIds);
+      rs.updateRepair(id, patch);
     });
   });
 }

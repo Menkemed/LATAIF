@@ -230,6 +230,8 @@ const ablegen = async (urls: string[]): Promise<string[]> =>
 //   §5 Fremde Reparatur, fehlendes Medium → Nein
 //   §6 Auskunft, Sicherung, Wiederherstellung, GC, kein Produkt-Embedding
 // ════════════════════════════════════════════════════════════════════════════
+const registry = await import('../../src/core/bridge/command-registry.ts');
+await import('../../src/core/bridge/read-commands.ts');
 const media = await import('../../src/core/repairs/repair-media.ts');
 const rules2 = await import('../../src/core/repairs/repair-rules.ts');
 
@@ -375,6 +377,75 @@ const jetztStand = (id: string) => ({ ...(useRepairStore.getState().getRepair(id
   const mc = codeOf(src('src-tauri/src/sync/mobile_repair_commands.js'));
   ok(/typeof s\.keep === 'string'/.test(mc) && /p\.keep === ids\[i\]/.test(mc),
     'VERTRAG Telefon: „behalten" nennt die stabile Kennung, nicht die Position');
+}
+
+
+// ── §7 Altbestand: Bilder aus der Zeit vor dem Medienkern ───────────────────────────────────
+//
+// Eine Reparatur von früher hält ihre Fotos als Daten-URLs in der Spalte und hat keine
+// Verknüpfung. Sie müssen sichtbar bleiben, sich behalten lassen — und sobald die Reparatur ihre
+// Galerie über den Medienkern setzt, ist die Spalte erledigt: sonst käme ein bewusst entferntes
+// Foto beim nächsten Lesen aus der Spalte zurück.
+{
+  const db = freshDb();
+  const lesen = async (id: string) => await registry.executeCommand('repairs.get', { actor: ACTOR, input: { id } }, ACTOR as never)
+    .then((r: { kind: string; value?: unknown }) => (r.kind === 'ok' ? (r.value as Record<string, unknown>) : { fehler: r }));
+  const altBild1 = alsDataUrl(bild(11));
+  const altBild2 = alsDataUrl(bild(12));
+  const legacy = (id: string) => {
+    insert(db, 'repairs', {
+      id, branch_id: 'branch-main', repair_number: 'REP-ALT-' + id, customer_id: 'cust-1', issue_description: 'alt',
+      status: 'received', received_at: NOW, voucher_code: 'ALT' + id, charge_to_customer: 20, repair_scope: 'CUSTOMER',
+      images: JSON.stringify([altBild1, altBild2]), created_at: NOW, updated_at: NOW,
+    });
+    useRepairStore.getState().loadRepairs();
+  };
+
+  // (a) Lesen: ohne Verknüpfung zeigt die Auskunft die alten Bilder — unverändert.
+  legacy('rep-alt-1');
+  const vorher = await lesen('rep-alt-1') as Record<string, unknown>;
+  ok(JSON.stringify(vorher.images) === JSON.stringify([altBild1, altBild2]) && JSON.stringify(vorher.mediaIds) === '[]',
+    '§7 Altbestand bleibt sichtbar, solange es keine Verknüpfung gibt');
+
+  // (b) Erstes Speichern MIT den alten Bildern: sie werden übernommen, nichts geht verloren.
+  await house.updateRepairOnPrimary('rep-alt-1', { ...jetztStand('rep-alt-1'), images: [altBild1, altBild2] } as never, rev(db, 'rep-alt-1'));
+  const g = galerie(db, 'rep-alt-1');
+  ok(g.length === 2, `§7 beim ersten Speichern werden beide alten Bilder übernommen (${g.length})`);
+  ok(s(db, 'SELECT images FROM repairs WHERE id = ?', ['rep-alt-1']) === '[]',
+    '§7 …und die alte Spalte ist danach geleert (kein zweiter Wahrheitsort)');
+  const nachher = await lesen('rep-alt-1') as Record<string, unknown>;
+  ok(JSON.stringify(nachher.mediaIds) === JSON.stringify(g) && JSON.stringify(nachher.images) === '[]',
+    '§7 …die Auskunft nennt jetzt Kennungen; PC2 und Telefon sehen dasselbe');
+
+  // (c) Danach ALLE Bilder entfernen: die Galerie bleibt leer — der Altbestand kommt NICHT zurück.
+  await house.updateRepairOnPrimary('rep-alt-1', { ...jetztStand('rep-alt-1'), images: [] } as never, rev(db, 'rep-alt-1'));
+  const leer = await lesen('rep-alt-1') as Record<string, unknown>;
+  ok(galerie(db, 'rep-alt-1').length === 0 && JSON.stringify(leer.images) === '[]' && JSON.stringify(leer.mediaIds) === '[]',
+    '§7 alle entfernt → leer, und die alten Daten-URLs erscheinen nicht wieder');
+  ok(media.repairPhotoRefs('rep-alt-1').length === 0 && s(db, 'SELECT images FROM repairs WHERE id = ?', ['rep-alt-1']) === '[]',
+    '§7 …auch beim erneuten Öffnen (Neuladen) bleibt es leer');
+
+  // (d) Direktes „alle entfernt" an einer Reparatur, die NUR Altbestand hat.
+  legacy('rep-alt-2');
+  await house.updateRepairOnPrimary('rep-alt-2', { ...jetztStand('rep-alt-2'), images: [] } as never, rev(db, 'rep-alt-2'));
+  ok(galerie(db, 'rep-alt-2').length === 0 && s(db, 'SELECT images FROM repairs WHERE id = ?', ['rep-alt-2']) === '[]',
+    '§7 …dasselbe, wenn die alten Bilder ohne Umweg entfernt werden');
+
+  // (e) Der Fernbefehl übernimmt den Altbestand genauso (Ablage → Medium), und danach ist die Spalte leer.
+  legacy('rep-alt-3');
+  const plan = await rules2.repairPhotoPlan([], [altBild1], ablegen);
+  const out = await cmd.runRepairUpdate(deps(db), identity('720', 'repairs.update'),
+    rules2.repairEditBody('rep-alt-3', rev(db, 'rep-alt-3'), {} as never, {} as never, plan));
+  ok(out.kind === 'ok' && galerie(db, 'rep-alt-3').length === 1
+    && s(db, 'SELECT images FROM repairs WHERE id = ?', ['rep-alt-3']) === '[]',
+    `§7 PC2/Telefon: Übernahme über die Ablage, danach keine alte Liste mehr (${JSON.stringify(out).slice(0, 80)})`);
+  ok(galerie(db, 'rep-alt-3')[0] === media.repairGalleryMediaIds('rep-alt-3')[0]
+    && n(db, 'SELECT COUNT(*) FROM media_objects') === 2,
+    '§7 …dieselben Bytes bleiben dasselbe Medium (zwei alte Bilder, zwei Objekte)');
+
+  // (f) Keine neue Daten-URL irgendwo in einer Reparaturzeile.
+  ok(n(db, "SELECT COUNT(*) FROM repairs WHERE images LIKE '%data:%'") === 0,
+    '§7 keine Reparatur hält nach diesem Bündel noch eine Daten-URL');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — media repair photos: ${PASS} passed, ${fails.length} failed`);

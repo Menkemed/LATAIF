@@ -568,10 +568,11 @@
   // also entsteht bei einer Wiederholung kein zweites Bild.
   async function rpStageSlots() {
     for (const slot of RP.slots) {
-      // Ein Foto aus der Zeit vor dem Medienkern (nur Daten-URL in der Spalte) wird NICHT neu
-      // hochgeladen: es bleibt, wo es steht, und wird nie neu geschrieben.
-      if (slot.stagingId || slot.keep || slot.legacy) continue;
-      const r = await rpClient.stagePhoto(slot.dataUrl);
+      // Ein Foto aus der Zeit vor dem Medienkern hat noch keine Kennung: es wird beim ersten
+      // Speichern MIT hochgeladen und damit übernommen — sonst ginge es verloren, sobald die
+      // Reparatur eine Galerie hat.
+      if (slot.stagingId || slot.keep) continue;
+      const r = await rpClient.stagePhoto(slot.dataUrl || slot.src);
       if (!r.ok) return { ok: false, code: r.code };
       slot.stagingId = r.stagingId;
     }

@@ -217,7 +217,8 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
     if (/staging\/media/.test(url)) return { status: 201, body: { stagingId: 'b'.repeat(64) } };
     if (b?.op === 'repairs.list') return { status: 200, body: { ok: true, value: { items: [{ id: 'rep-9', repairNumber: 'REP-2026-00009', itemBrand: 'Rolex', itemModel: 'DJ', status: 'received' }] } } };
     if (b?.op === 'repairs.get') {
-      return { status: 200, body: { ok: true, value: { id: 'rep-9', repairNumber: 'REP-2026-00009', revision: fassung, status: 'received', issueDescription: 'Glas kaputt', notes: '', images: ['data:image/jpeg;base64,AAAA'], lines: [], openLineTotal: 0, allowedStatusTargets: ['diagnosed'] } } };
+      // MEDIA-REPAIR — eine Reparatur MIT Medien: die Galerie sind Kennungen und Schluessel.
+      return { status: 200, body: { ok: true, value: { id: 'rep-9', repairNumber: 'REP-2026-00009', revision: fassung, status: 'received', issueDescription: 'Glas kaputt', notes: '', images: [], mediaIds: ['media-x'], mediaKeys: ['tenant-1/aa/x.jpg'], lines: [], openLineTotal: 0, allowedStatusTargets: ['diagnosed'] } } };
     }
     if (b?.op === 'repairs.update') { fassung += 1; return { status: 200, body: { ok: true, value: { repairId: 'rep-9' } } }; }
     return { status: 200, body: { ok: true, value: {} } };
@@ -245,6 +246,36 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
   ok(rumpf.notes === 'Am Schalter abgegeben' && rumpf.issueDescription === undefined,
     `§2 nur das geaenderte Feld reist mit (${JSON.stringify(rumpf)})`);
   ok(rumpf.photos === undefined, '§2 unveraenderte Bilder → kein Bildplan im Rumpf');
+}
+
+// ── §2b Altbestand: ein Foto aus der Zeit vor dem Medienkern wird beim ersten Speichern uebernommen ──
+{
+  let fassung = 3;
+  const antworten = (url: string, body: unknown): Antwort => {
+    const b = body as { op?: string } | null;
+    if (url.includes('staging/media')) return { status: 201, body: { stagingId: 'c'.repeat(64) } };
+    if (b?.op === 'repairs.list') return { status: 200, body: { ok: true, value: { items: [{ id: 'rep-alt', repairNumber: 'REP-ALT', status: 'received' }] } } };
+    if (b?.op === 'repairs.get') {
+      return { status: 200, body: { ok: true, value: { id: 'rep-alt', repairNumber: 'REP-ALT', revision: fassung, status: 'received', issueDescription: 'Alt', notes: '', images: ['data:image/jpeg;base64,ALT'], lines: [], openLineTotal: 0, allowedStatusTargets: [] } } };
+    }
+    if (b?.op === 'repairs.update') { fassung += 1; return { status: 200, body: { ok: true, value: { repairId: 'rep-alt' } } }; }
+    return { status: 200, body: { ok: true, value: {} } };
+  };
+  const t = starteOberflaeche(antworten);
+  const $ = (id: string) => t.document.getElementById(id)!;
+  await t.api.rpHomeOpen();
+  await warte();
+  await t.document.querySelectorAll('#rpList button')[0].onclick!();
+  await warte();
+  $('rpNotes').value = 'nur ein Wort';
+  await $('rpSaveBtn').onclick!();
+  await warte();
+  const rumpf2 = (t.gerufen.filter((g) => (g.body as { op?: string })?.op === 'repairs.update')[0]?.body as { payload?: Record<string, unknown> })?.payload ?? {};
+  const plan = (rumpf2.photos ?? []) as Array<Record<string, unknown>>;
+  ok(plan.length === 1 && typeof plan[0].stagingId === 'string',
+    `§2b das alte Foto wird beim ersten Speichern MIT uebernommen (${JSON.stringify(plan)})`);
+  // „Alle entfernt" beweist die Regel selbst (mobile-repair.test.ts, §1): ein Altbestand macht
+  // JEDE Speicherung zu einer Aenderung, auch die leere Galerie.
 }
 
 // ── §3 Veralteter Stand: die Maske sagt es, statt zu ueberschreiben ─────────

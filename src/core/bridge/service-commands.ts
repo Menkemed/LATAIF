@@ -477,9 +477,10 @@ export async function runRepairUpdate(
       // POST-PARITY PP-13/PP-14 — gebuchte Kopfkosten folgen der Änderung; eine (auch abgefangene)
       // gescheiterte Buchung nimmt alles zurück, ein Nein der Kostenregel ist ein Urteil.
       const buchung = watchLedgerPosts(OP_REPAIRS_UPDATE);
-      house(() => rs.updateRepair(req.id, patch));
-      // MEDIA-REPAIR — die Galerie in derselben Klammer; eine fachliche Änderung, eine Fassung.
+      // MEDIA-REPAIR — die Galerie ZUERST (sie leert auch die alte Bildspalte), dann die Zeile: eine
+      // fachliche Änderung, eine Fassung, und der Abgleich trägt den Stand danach.
       if (galleryMediaIds) house(() => applyRepairGallery(req.id, galleryMediaIds));
+      house(() => rs.updateRepair(req.id, patch));
       buchung();
     } catch (e) {
       if (e instanceof Error && e.message === SUPPLIER_CREDIT_LOCK_MESSAGE) {

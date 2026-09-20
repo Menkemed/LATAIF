@@ -210,7 +210,11 @@
 
   /** Hat sich an den Bildern etwas geaendert? Unveraendert = der Plan ist 0,1,2,… ueber alle. */
   // MEDIA-REPAIR — unveraendert heisst: genau die gespeicherten Medien, in genau dieser Reihenfolge.
-  function photosUnchanged(plan, stored) {
+  // ALTBESTAND: hat die Reparatur noch Bilder in der alten Spalte, ist JEDE Speicherung eine
+  // Aenderung — auch „alle entfernt". Sonst bliebe die alte Liste stehen und käme beim naechsten
+  // Lesen zurueck.
+  function photosUnchanged(plan, stored, legacyCount) {
+    if (legacyCount) return false;
     var ids = Array.isArray(stored) ? stored : [];
     if (!Array.isArray(plan) || plan.length !== ids.length) return false;
     return plan.every(function (p, i) { return p && p.keep === ids[i]; });
@@ -237,7 +241,7 @@
       const now = valueOf(form, k);
       if (stableJson(was) !== stableJson(now)) body[k] = now;
     }
-    if (plan && !photosUnchanged(plan, repair.mediaIds || [])) body.photos = plan;
+    if (plan && !photosUnchanged(plan, repair.mediaIds || [], (repair.images || []).length)) body.photos = plan;
     return body;
   }
 

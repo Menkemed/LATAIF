@@ -69,6 +69,11 @@ export function applyRepairGallery(
     // ist die EINE Fassung dieser Speicherung. Ein zweiter Zähler hier hiesse: eine Aenderung, zwei
     // Fassungen — und ein Austausch (raus + rein) waere plötzlich zwei.
     const r = links.setGallery(repairMediaOwner(repairId), mediaIds, { bumpOwner: opts.bumpOwner ?? false });
+    // ALTBESTAND — sobald eine Reparatur ihre Galerie über den Medienkern setzt, ist die alte Spalte
+    // erledigt: sie wird in DERSELBEN Klammer geleert. Sonst käme ein bewusst entferntes Foto beim
+    // nächsten Lesen aus der Spalte zurück („keine Verknüpfung → alte Liste"), und ein Speichern
+    // hätte still rückgängig gemacht, was der Mensch gelöscht hat.
+    getDatabase().run("UPDATE repairs SET images = '[]' WHERE id = ? AND COALESCE(images, '') NOT IN ('', '[]')", [repairId]);
     return { changed: r.changed };
   } catch (e) {
     const code = (e as { code?: string }).code;
