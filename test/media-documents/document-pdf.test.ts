@@ -439,6 +439,89 @@ async function hochladen(db: Db, nr: string, bytes: Uint8Array, extra: Record<st
     '§3 …und nimmt niemals Base64 entgegen');
 }
 
+// ── §19 Der Rohweg: wer darf überhaupt ablegen, und wessen Mandant gilt ─────────────────────
+{
+  // Die Datei kann CRLF tragen; für eine Abschnittsgrenze zählt die Zeile, nicht ihr Ende.
+  const routes = src('src-tauri/src/sync/routes.rs').replace(/\r\n/g, '\n');
+  const start = routes.indexOf('async fn document_raw_put');
+  const rumpf = routes.slice(start, routes.indexOf('\n}\n', start));
+  ok(/\.route_layer\(middleware::from_fn_with_state\(state, auth::auth_middleware\)\)/.test(routes)
+    && routes.indexOf('"/documents/raw"') < routes.indexOf('.route_layer(middleware::from_fn_with_state(state, auth::auth_middleware))'),
+  '§19 der Rohweg liegt HINTER der Anmeldung — ein anonymer Rechner im Netz legt gar nichts ab');
+  ok(/Extension\(claims\): Extension<Claims>/.test(rumpf) && /claims\.role\.trim\(\)\.is_empty\(\)/.test(rumpf),
+    '§19 …und eine Anmeldung ohne Rolle ist keine');
+  ok(/state\.primary_state\.may_write_sync\(\)/.test(rumpf), '§19 nur ein schreibfähiger Primary nimmt etwas an');
+  ok(/&claims\.tenant_id/.test(rumpf) && !/req\.|body\.tenant|serde_json::from/.test(rumpf),
+    '§19 der Mandant kommt AUSSCHLIESSLICH aus dem geprüften Ausweis — der Rumpf hat kein Feld dafür');
+  ok(/is_pdf_content_type\(&headers\)/.test(rumpf) && /UNSUPPORTED_MEDIA_TYPE/.test(rumpf),
+    '§19 ein anderer angekündigter Typ wird in der Tür abgewiesen');
+  ok(/publish_original\(/.test(rumpf) && /"pdf",/.test(rumpf),
+    '§19 …und über die BYTES entscheidet der Speichervertrag, nicht die Ankündigung');
+  ok(!/INSERT INTO|media_links|media_objects/.test(rumpf),
+    '§3 der Rohweg schreibt KEINE Geschäftszeile und KEINE Verknüpfung — er legt nur ab');
+
+  // §2 Mandantenbindung: der Speicher ist nach Mandant getrennt, schon im Pfad.
+  const storage = src('src-tauri/src/media/storage.rs');
+  ok(/let rel = format!\("\{tenant_scope\}\/\{\}\/\{hash\}\.\{ext\}"/.test(storage),
+    '§2 der Ablagepfad TRÄGT den Mandanten: ein fremder Hash liegt schlicht woanders');
+  const dm = codeOf(src('src/core/office/document-media.ts'));
+  ok(/statDocumentOriginal\(\s*\n?\s*tenantScope: string/.test(dm) || /export async function statDocumentOriginal\(\s*\n?\s*tenantScope: string/.test(dm),
+    '§2 die Prüfung fragt IMMER mit einem Mandanten');
+  ok(/stat\(scope\.tenantId, named\.hash\)/.test(dm),
+    '§2 …und zwar mit dem des autorisierten Kontexts, nie mit einem aus dem Rumpf');
+  const oc = codeOf(src('src/core/bridge/office-commands.ts'));
+  ok(/\{ tenantId: identity\.tenantId, branchId: identity\.branchId \}/.test(oc),
+    '§2 fern ist dieser Kontext der geprüfte Absender');
+  const ds = codeOf(src('src/stores/documentStore.ts'));
+  ok(/resolveDocumentMedia\(input, documentMediaScope\(\)\)/.test(ds),
+    '§2 am Primary die eigene Sitzung — beide Male nicht der Rumpf');
+  ok(!/media\.tenantId|body\.tenantId|raw\.tenantId/.test(dm + oc + ds),
+    '§2 nirgends ein Mandant aus dem Rumpf');
+}
+
+// ── §20 Ohne Auftrag: kein Beleg, nichts lesbar ─────────────────────────────────────────────
+{
+  const db = freshDb();
+  const abgelegt = await docMedia.sendDocumentFile(PDF(600, 0x3b), { remote: false, tenantScope: 'tenant-1' });
+  ok(dokRows(db).length === 0, '§20 ein Rohweg-Upload allein legt KEINEN Beleg an');
+  ok(n(db, 'SELECT COUNT(*) FROM media_links') === 0 && n(db, 'SELECT COUNT(*) FROM media_objects') === 0,
+    '§20 …und auch keine Verknüpfung und kein Medienobjekt: die Zeilen entstehen erst im Auftrag');
+  // Erst der Auftrag macht daraus ein Objekt; ohne ihn bleibt es beim reinen Dateibestand.
+  const mediaId = docMedia.registerDocumentOriginal(
+    await docMedia.statDocumentOriginal('tenant-1', abgelegt.hash), { tenantId: 'tenant-1', branchId: 'branch-main' });
+  ok(n(db, 'SELECT COUNT(*) FROM media_links') === 0,
+    '§20 auch ein angemeldetes Objekt ist ohne Auftrag UNVERKNÜPFT');
+  ok((docMedia.documentFileRefsFor(['egal']).get('egal') ?? []).length === 0,
+    '§20 …und über die Besitzerauskunft erreicht es niemand');
+  const grant = src('src-tauri/src/sync/product_query.rs');
+  ok(/JOIN media_links l ON l\.tenant_id = o\.tenant_id AND l\.media_id = o\.media_id AND l\.deleted_at IS NULL/.test(grant),
+    '§20 das Tor der LAN-Route verlangt eine AKTIVE Verknüpfung — ohne sie gibt es nichts, auch mit Schlüssel');
+  void mediaId;
+}
+
+// ── §21 Die Bilddokumente bleiben unberührt ────────────────────────────────────────────────
+{
+  const db = freshDb();
+  const png = new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 1, 2, 3, 4, 5, 6, 7, 8]);
+  const url = `data:image/png;base64,${Buffer.from(png).toString('base64')}`;
+  const out = await fern(() => office.runDocumentUpload(deps(db), identity('901', 'documents.upload'), DOK({ fileName: 'scan.png', content: url })));
+  ok(out.kind === 'ok', `§21 ein Bilddokument geht weiter seinen bisherigen Weg (${out.kind} ${out.code})`);
+  const zeile = dokRows(db)[0];
+  ok(String(zeile?.file_type) === 'image/png' && String(zeile?.file_path) === url,
+    '§21 …seine Bytes stehen unverändert in der Zeile — Zeichen für Zeichen dieselbe Daten-URL');
+  ok(n(db, 'SELECT COUNT(*) FROM media_links') === 0,
+    '§21 …und es entsteht KEINE Medienverknüpfung: dieses Bündel ist PDF');
+  const dh = codeOf(src('src/core/office/document-house.ts'));
+  ok(/if \(!String\(d\.file_type \?\? ''\)\.startsWith\('image\/'\) \|\| !content\.startsWith\('data:image\/'\)\)/.test(dh),
+    '§21 die Texterkennung prüft weiterhin denselben Inhalt in derselben Spalte');
+  const dl = codeOf(src('src/pages/documents/DocumentList.tsx'));
+  ok(/const istPdf = isPdfBytes\(rohbytes\);/.test(dl) && /istPdf \? '' : await readFileAsDataUrl\(uploadFile\)/.test(dl),
+    '§21 die Maske entscheidet an den BYTES: eine PDF nimmt nie den Bildweg, ein Bild nie den Originalweg');
+  const st = src('src-tauri/src/media/storage.rs');
+  ok(/"jpg" => sniff_kind\(bytes\) == Kind::Jpeg/.test(st) && /"pdf" => sniff_kind\(bytes\) == Kind::Pdf/.test(st),
+    '§21 und der Speicher selbst liesse eine PDF nie als Rendition durch');
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — media documents (pdf): ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
 console.log('MEDIA_DOCUMENTS_PDF_PROVED');

@@ -162,6 +162,12 @@ async fn document_raw_put(
     if claims.role.trim().is_empty() {
         return Err(StatusCode::FORBIDDEN);
     }
+    // Dieser Weg traegt GENAU einen Vertrag. Ueber die Bytes entscheiden am Ende die fuehrenden
+    // Bytes (`publish_original`), aber wer etwas anderes ANKUENDIGT, hat sich in der Tuer geirrt und
+    // bekommt das gesagt — nicht erst nach 25 MiB Uebertragung eine Absage ueber den Inhalt.
+    if !is_pdf_content_type(&headers) {
+        return Err(StatusCode::UNSUPPORTED_MEDIA_TYPE);
+    }
     // Der Mandant kommt AUSSCHLIESSLICH aus dem geprueften Ausweis; der Aufrufer hat kein Feld dafuer.
     let expected = headers
         .get(crate::media::raw_transport::H_SHA256)
@@ -619,6 +625,20 @@ fn is_json_content_type(headers: &HeaderMap) -> bool {
     // media type = everything before the first ';' (drop parameters like charset), trimmed+lowercased
     let media = text.split(';').next().unwrap_or("").trim().to_ascii_lowercase();
     media == "application/json" || (media.starts_with("application/") && media.ends_with("+json"))
+}
+
+/// MEDIA-DOCUMENTS — der Rohweg nimmt genau EINEN angekuendigten Typ. Parameter wie `;charset=…`
+/// werden abgeschnitten wie oben; ein fehlender Kopf ist keine Ankuendigung, also ein Nein. Ueber
+/// die BYTES entscheiden weiterhin ihre fuehrenden Zeichen — dieser Riegel ist der frueheste,
+/// nicht der einzige.
+fn is_pdf_content_type(headers: &HeaderMap) -> bool {
+    let Some(value) = headers.get(axum::http::header::CONTENT_TYPE) else {
+        return false;
+    };
+    let Ok(text) = value.to_str() else {
+        return false;
+    };
+    text.split(';').next().unwrap_or("").trim().to_ascii_lowercase() == "application/pdf"
 }
 
 async fn sync_push(
