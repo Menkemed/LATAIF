@@ -285,6 +285,7 @@ CREATE TABLE media_links (tenant_id TEXT, link_id TEXT, media_id TEXT, entity_ty
 CREATE TABLE customers (id TEXT, branch_id TEXT);
 CREATE TABLE suppliers (id TEXT, branch_id TEXT);
 CREATE TABLE purchases (id TEXT, branch_id TEXT, supplier_snapshot TEXT);
+CREATE TABLE scrap_trade_lines (id TEXT, scrap_trade_id TEXT, line_key TEXT, branch_id TEXT);
 "#;
 
 /// MEDIA-IDENTITY — die Rolle gehoert zum Tor. Wo ein Test sie nicht prueft, steht die staerkste
@@ -319,6 +320,9 @@ fn grant_fixture() -> std::path::PathBuf {
     blob("b-cust-id", "3", "available");
     blob("b-supp-id", "4", "available");
     blob("b-cust-internal", "5", "available");
+    // MEDIA-SCRAP — ein Belegfoto einer Position (Kauf-Seite) und eines in fremder Filiale.
+    blob("b-scrap", "6", "available");
+    blob("b-scrap-other", "7", "available");
     conn.execute_batch("
       INSERT INTO media_objects VALUES ('t-1','m-1','b-main','internal',NULL),
                                        ('t-1','m-rep','b-repair','internal',NULL),
@@ -330,11 +334,15 @@ fn grant_fixture() -> std::path::PathBuf {
                                        ('t-1','m-role','b-role','internal',NULL),
                                        ('t-1','m-cust-id','b-cust-id','sensitive',NULL),
                                        ('t-1','m-supp-id','b-supp-id','sensitive',NULL),
-                                       ('t-1','m-cust-int','b-cust-internal','internal',NULL);
+                                       ('t-1','m-cust-int','b-cust-internal','internal',NULL),
+                                       ('t-1','m-scrap','b-scrap','internal',NULL),
+                                       ('t-1','m-scrap-oth','b-scrap-other','internal',NULL);
       INSERT INTO media_variants VALUES ('t-1','m-1','thumbnail','b-thumb',NULL);
       INSERT INTO repairs (id, branch_id) VALUES ('rep-1','b-1'), ('rep-other','b-other');
       INSERT INTO customers (id, branch_id) VALUES ('cust-1','b-1'), ('cust-other','b-other');
       INSERT INTO suppliers (id, branch_id) VALUES ('sup-1','b-1');
+      INSERT INTO scrap_trade_lines (id, scrap_trade_id, line_key, branch_id)
+        VALUES ('row-1','tr-1','lk-1','b-1'), ('row-2','tr-2','lk-other','b-other');
       INSERT INTO media_links VALUES
         ('t-1','l-1','m-1','product','p-dj41','stock_image','branch','b-1',NULL),
         ('t-1','l-rep','m-rep','repair','rep-1','gallery','branch','b-1',NULL),
@@ -345,7 +353,9 @@ fn grant_fixture() -> std::path::PathBuf {
         ('t-1','l-sec','m-sec','product','p-dj41','stock_image','branch','b-1',NULL),
         ('t-1','l-cid','m-cust-id','customer','cust-1','identity_document','branch','b-1',NULL),
         ('t-1','l-sid','m-supp-id','supplier','sup-1','identity_document','branch','b-1',NULL),
-        ('t-1','l-cint','m-cust-int','customer','cust-other','identity_document','branch','b-1',NULL);
+        ('t-1','l-cint','m-cust-int','customer','cust-other','identity_document','branch','b-1',NULL),
+        ('t-1','l-scrap','m-scrap','scrap_trade_line','lk-1','purchase_photo','branch','b-1',NULL),
+        ('t-1','l-scrap-oth','m-scrap-oth','scrap_trade_line','lk-other','sale_photo','branch','b-other',NULL);
     ").unwrap();
     db
 }
@@ -368,6 +378,28 @@ fn media_read_grant_serves_the_owners_branch_only() {
     assert!(grant(&db, "t-1", "b-1", &key("e")).is_none(), "a sensitive product image never travels this route");
     // unknown
     assert!(grant(&db, "t-1", "b-1", &key("9")).is_none());
+}
+
+// ── MEDIA-SCRAP — das Belegfoto einer POSITION: eigene Kennung, eigene Rollen, eigene Filiale ──
+#[test]
+fn media_read_grant_serves_scrap_line_photos_of_this_branch_only() {
+    let db = grant_fixture();
+    assert!(grant(&db, "t-1", "b-1", &key("6")).is_some(), "the photo of a line in my branch");
+    assert!(grant(&db, "t-1", "b-other", &key("6")).is_none(), "another branch may not read it");
+    assert!(grant(&db, "t-1", "b-1", &key("7")).is_none(), "a line of another branch");
+    assert!(grant(&db, "t-other", "b-1", &key("6")).is_none(), "keys stay tenant-scoped");
+    let conn = Connection::open(&db).unwrap();
+    // Die Zeile wird bei jedem Speichern neu geschrieben — solange ihr SCHLUESSEL bleibt, bleibt
+    // auch das Foto erreichbar. Verschwindet die Position wirklich, ist es niemandes Foto mehr.
+    conn.execute("UPDATE scrap_trade_lines SET id = 'row-1-neu' WHERE line_key = 'lk-1'", []).unwrap();
+    assert!(grant(&db, "t-1", "b-1", &key("6")).is_some(), "a rewritten row keeps its key and its photo");
+    conn.execute("DELETE FROM scrap_trade_lines WHERE line_key = 'lk-1'", []).unwrap();
+    assert!(grant(&db, "t-1", "b-1", &key("6")).is_none(), "a line that is gone grants nothing");
+    // Und eine fremde Rolle unter diesem Besitzer wird nicht bedient.
+    let db2 = grant_fixture();
+    let c2 = Connection::open(&db2).unwrap();
+    c2.execute("UPDATE media_links SET media_role = 'gallery' WHERE link_id = 'l-scrap'", []).unwrap();
+    assert!(grant(&db2, "t-1", "b-1", &key("6")).is_none(), "a scrap link under a foreign role is refused");
 }
 
 // ── MEDIA-IDENTITY §1 — das Ausweisdokument: Besitzer, Rolle, Klasse, Filiale, Rolle des Lesers ──

@@ -82,6 +82,10 @@ export const MEDIA_ENTITY_SCOPE: Readonly<Record<string, EntityScopeEntry>> = {
   offer:          { table: 'offers',          idCol: 'id', scope: 'branch', scopeCol: 'branch_id' },
   precious_metal: { table: 'precious_metals', idCol: 'id', scope: 'branch', scopeCol: 'branch_id' },
   scrap_trade:    { table: 'scrap_trades',    idCol: 'id', scope: 'branch', scopeCol: 'branch_id' },
+  // MEDIA-SCRAP — die Fotos eines Altgold-Geschäfts gehören der einzelnen POSITION, nicht dem
+  // Geschäft: ein Beleg zeigt dieses Goldstück, nicht den Stapel. Die Kennung ist `line_key` und
+  // nicht `id`, weil die Zeile bei jedem Ändern neu entsteht — der Schlüssel aber bleibt.
+  scrap_trade_line: { table: 'scrap_trade_lines', idCol: 'line_key', scope: 'branch', scopeCol: 'branch_id' },
   // ── tenant-scoped (3) ──
   branch_logo:    { table: 'branches',        idCol: 'id', scope: 'tenant', scopeCol: 'tenant_id' },
   user_avatar:    { table: 'users',           idCol: 'id', scope: 'tenant', scopeCol: 'tenant_id' },

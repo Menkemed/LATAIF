@@ -10,6 +10,7 @@
 // Eine eigene Datei, weil die Stores ihrerseits die Hausfolge rufen (EINE Implementierung für die
 // alten, synchronen Einstiege): lägen die Nachlade-Aufrufe im Haus, hinge Store an Haus an Store.
 // ════════════════════════════════════════════════════════════════════════════
+import { resolveScrapPhotoSlots, type PhotoSlotRequest } from '@/core/metals/scrap-media';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { stageRecordDataUrls } from '@/core/bridge/client-staging-upload';
 import { useMetalStore } from '@/stores/metalStore';
@@ -20,7 +21,7 @@ import {
   type MetalCreateInput, type MetalStatusChange, type MetalStatusResult,
 } from './metal-house';
 import {
-  cancelScrapTradeInHouse, createScrapTradeInHouse, updateScrapTradeInHouse, storedScrapPhotos, withRecordScrapPhotos,
+  cancelScrapTradeInHouse, createScrapTradeInHouse, updateScrapTradeInHouse,
   type ScrapTradeInput, type ScrapTradeResult,
 } from './scrap-house';
 
@@ -86,13 +87,13 @@ function geschaefteNeuLesen(): void {
  * VOR der Klammer: das Umrechnen hält die Schreibreihenfolge des Primary nicht auf.
  */
 export async function createScrapTradeOnPrimary(input: ScrapTradeInput): Promise<ScrapTradeResult> {
-  const photos = await withRecordScrapPhotos(input, []);
+  const photos = await mitMedien(input);
   return runOnPrimary(() => createScrapTradeInHouse(photos, localHouseBranch()), geschaefteNeuLesen);
 }
 
 /** „Save Changes" am Primary — gegen die Fassung, die die Detailseite geladen hat. Gespeicherte Fotos bleiben. */
 export async function updateScrapTradeOnPrimary(tradeId: string, expectedVersion: number, input: ScrapTradeInput): Promise<ScrapTradeResult> {
-  const photos = await withRecordScrapPhotos(input, storedScrapPhotos(tradeId, localHouseBranch()));
+  const photos = await mitMedien(input, tradeId);
   return runOnPrimary(() => updateScrapTradeInHouse(tradeId, expectedVersion, photos, localHouseBranch()), geschaefteNeuLesen);
 }
 
@@ -102,7 +103,32 @@ export function cancelScrapTradeOnPrimary(tradeId: string, expectedVersion: numb
 }
 
 /** Die abgelegten Fotos je Zeile — in der Reihenfolge der Maske. */
-export interface StagedScrapPhotos { purchase: string[]; sale: string[] }
+/**
+ * MEDIA-SCRAP — der Wunsch der Maske wird zu MEDIENKENNUNGEN, VOR der Klammer.
+ *
+ * Was die Maske hält, ist eine Mischung: schon gespeicherte Medien (`media-…`) und frische
+ * Aufnahmen (Daten-URLs). Die einen bleiben, die anderen werden hier aufgenommen — geprüft,
+ * normalisiert, veröffentlicht. Die Reihenfolge bleibt die der Maske.
+ */
+function slotsOf(list: readonly string[] | undefined): PhotoSlotRequest[] {
+  return (list ?? []).map((x) => (x.startsWith('data:') ? { dataUrl: x } : { keep: x }));
+}
+
+async function mitMedien(input: ScrapTradeInput, tradeId?: string): Promise<ScrapTradeInput> {
+  const lines: ScrapTradeInput['lines'] = [];
+  for (const l of input.lines) {
+    lines.push({
+      ...l,
+      imagesPurchase: await resolveScrapPhotoSlots(slotsOf(l.imagesPurchase), 'purchase', undefined, tradeId),
+      imagesSale: await resolveScrapPhotoSlots(slotsOf(l.imagesSale), 'sale', undefined, tradeId),
+    });
+  }
+  return { ...input, lines };
+}
+
+/** Je Zeile und Seite: was bleibt (Medienkennung) und was neu abgelegt wurde (Inhaltskennung). */
+export interface StagedScrapPhotos { purchase: ScrapPhotoSlot[]; sale: ScrapPhotoSlot[] }
+export type ScrapPhotoSlot = { keep: string } | { stagingId: string };
 
 /**
  * Auf PC2 reisen Fotos nie im Auftrag: die Bytes gehen zuerst in die vorhandene Zwischenablage des
@@ -118,10 +144,18 @@ export async function stageScrapPhotos(
   keep: readonly string[] = [],
 ): Promise<StagedScrapPhotos[]> {
   stage ??= (urls) => stageRecordDataUrls(urls, keep);
+  // MEDIA-SCRAP — NUR neue Aufnahmen gehen in die Ablage. Ein schon gespeichertes Foto ist eine
+  // Medienkennung und reist als `keep`: es noch einmal hochzuladen wäre Arbeit für nichts und
+  // brächte die Reihenfolge durcheinander, in der der Mensch seine Bilder sortiert hat.
+  const seite = async (list: readonly string[] | undefined): Promise<ScrapPhotoSlot[]> => {
+    const werte = list ?? [];
+    const neu = werte.filter((x) => x.startsWith('data:'));
+    const ids = neu.length ? await stage(neu) : [];
+    let i = 0;
+    return werte.map((x) => (x.startsWith('data:') ? { stagingId: ids[i++] } : { keep: x }));
+  };
   const out: StagedScrapPhotos[] = [];
-  for (const l of input.lines) {
-    out.push({ purchase: await stage(l.imagesPurchase ?? []), sale: await stage(l.imagesSale ?? []) });
-  }
+  for (const l of input.lines) out.push({ purchase: await seite(l.imagesPurchase), sale: await seite(l.imagesSale) });
   return out;
 }
 
@@ -140,9 +174,12 @@ function scrapFields(input: ScrapTradeInput, staged: readonly StagedScrapPhotos[
       weightGrams: l.weightGrams, karat: l.karat, purchasePrice: l.purchasePrice, salePrice: l.salePrice,
     };
     if (!leer(l.notes)) line.notes = l.notes;
+    // MEDIA-SCRAP — die bleibende Kennung DIESER Position reist mit, damit der Primary die Fotos
+    // wiederfindet, nachdem er die Zeilen ersetzt hat. Eine neue Zeile hat noch keine.
+    if (!leer(l.lineKey)) line.lineKey = l.lineKey;
     const s = staged[i];
-    if (s?.purchase.length) line.purchaseStagingIds = [...s.purchase];
-    if (s?.sale.length) line.saleStagingIds = [...s.sale];
+    if (s?.purchase.length) line.purchasePhotos = [...s.purchase];
+    if (s?.sale.length) line.salePhotos = [...s.sale];
     return line;
   });
   out.paymentsOut = input.paymentsOut.map((p) => ({ method: p.method, amount: p.amount }));

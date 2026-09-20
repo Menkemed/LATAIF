@@ -1633,6 +1633,14 @@ export type ScrapPaymentDirection = 'OUT' | 'IN';   // OUT = zum Seller, IN = vo
 
 export interface ScrapTradeLine {
   id: UUID;
+  /**
+   * MEDIA-SCRAP — die bleibende Kennung DIESER Position.
+   *
+   * `id` ist es NICHT: die Zeilen eines Geschäfts werden bei jedem Speichern gelöscht und neu
+   * eingefügt. Der Schlüssel hier übersteht das und trägt die Zuordnung der Fotos. Für die
+   * Buchhaltung bedeutet er nichts.
+   */
+  lineKey: string;
   scrapTradeId: UUID;
   position: number;
   weightGrams: number;
@@ -1641,9 +1649,24 @@ export interface ScrapTradeLine {
   salePrice: number;
   profit: number;                   // = salePrice - purchasePrice (persisted)
   notes?: string;
-  imagesPurchase: string[];         // base64 data URLs PRO Item
+  /**
+   * ALTBESTAND — Daten-URLs in der Zeile. Wird NICHT mehr geschrieben (MEDIA-SCRAP); die Fotos
+   * sind Medien an dieser Position. Bleibt lesbar für Geschäfte von früher.
+   */
+  imagesPurchase: string[];
   imagesSale: string[];
+  /** MEDIA-SCRAP — die geltenden Fotos als REFERENZEN, nie Bytes. */
+  photos?: { purchase: ScrapLinePhotoRef[]; sale: ScrapLinePhotoRef[] };
   createdAt: string;
+}
+
+/** Was eine Geschäftsauskunft über ein Positionsfoto sagt: genug zum Anzeigen, keine Bytes. */
+export interface ScrapLinePhotoRef {
+  mediaId: string;
+  key: string;
+  thumbKey: string | null;
+  hash: string;
+  extension: string;
 }
 
 // Split-Payments: ein Trade kann mehrere Payments pro Direction haben.
@@ -1702,6 +1725,9 @@ export function rowToScrapTradePayment(row: any): ScrapTradePayment {
 export function rowToScrapTradeLine(row: any): ScrapTradeLine {
   return {
     id: row.id,
+    // MEDIA-SCRAP — aeltere Zeilen haben noch keinen eigenen Schluessel; ihre `id` ist einer
+    // (die Wanderung setzt genau das) und taugt auch als Rueckfall, falls eine Zeile durchrutscht.
+    lineKey: String(row.line_key || row.id),
     scrapTradeId: row.scrap_trade_id,
     position: Number(row.position) || 1,
     weightGrams: Number(row.weight_grams) || 0,

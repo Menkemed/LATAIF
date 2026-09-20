@@ -43,6 +43,8 @@
 //     verlorene Update kein Randfall mehr. Der Token ist derselbe wie bei der Rechnung: eine vom
 //     Trigger geführte Ganzzahl, verglichen INNERHALB der Transaktion. Kein Zeitstempel.
 
+import { ingestOrderPhotos } from '@/core/orders/order-media';
+import { ohneVorlagenbilder } from '@/core/orders/order-house';
 import { getDatabase, saveDatabaseDurably } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import {
@@ -824,19 +826,35 @@ export async function runOrderCreate(
   const owner = stagingOwnerOf(identity);
   const read = extras.readStaged ?? invokeReadStagedRecord;
   const staged = [...req.specs.flatMap((s) => s?.stagingIds ?? []), ...(req.finalSpec?.stagingIds ?? [])];
+  // MEDIA-ORDER — die Vorlagenbilder des Sonderstücks werden VOR der Klammer zu Medien: der Ingest
+  // hat eigene durable Haltepunkte und darf nicht in einer offenen Geschäftstransaktion sitzen.
+  // Ein Nein wird mitgenommen statt geworfen — eine Wiederholung desselben Auftrags (die Ablage ist
+  // dann geräumt) muss die eingefrorene Antwort bekommen, nicht einen neuen Fehler.
+  let referenceMediaIds: string[] = [];
+  let fotoFehler: unknown = null;
+  if (req.finalSpec?.stagingIds?.length) {
+    try {
+      const urls = await readStagedAsRecordImages(req.finalSpec.stagingIds, owner, read, (m) => new CommercialPayloadError(m));
+      referenceMediaIds = await ingestOrderPhotos(urls);
+    } catch (e) { fotoFehler = e; }
+  }
   const outcome = await runRemoteCommand(deps, identity, async () => {
+    if (fotoFehler) throw fotoFehler;
     // R5E — in die Bücher DIESER Filiale, oder gar nicht.
     assertHouseBranch(identity);
     const lines: Array<(typeof req.lines)[number]> = [];
     for (let i = 0; i < req.lines.length; i++) {
       lines.push({ ...req.lines[i], newProduct: await mitFotos(req.specs[i], owner, read) });
     }
-    const input: OrderCreateInput = { ...req, lines, customProductSpec: await mitFotos(req.finalSpec, owner, read) };
+    // Das Schema reist ohne Bilder — die hängen als Verknüpfungen am Auftrag, nicht in seiner Zeile.
+    const input: OrderCreateInput = {
+      ...req, lines, customProductSpec: ohneVorlagenbilder(req.finalSpec ? { ...req.finalSpec.spec } : undefined).spec,
+    };
     // Dieselbe Folge wie „Save Order" am Primary (`createOrderOnPrimary`): die Vorbereitung leitet
     // Zeilen, Summe, Steuer, Kopf und Kundenmaterial ab, die Hausfunktion legt Auftrag, neue
     // Artikel, Anzahlung, Buchung und Kartengebühr an — und die Gold-Verbindlichkeit beim
     // Goldschmied entsteht in DERSELBEN Transaktion.
-    const made = urteil(() => createOrderInHouse(input, identity.branchId));
+    const made = urteil(() => createOrderInHouse(input, identity.branchId, {}, referenceMediaIds));
     return { ...orderState(made.order.id), goldPayableId: made.goldPayableId ?? null } as unknown as Record<string, unknown>;
   });
   if (outcome.kind === 'ok') await discardStagedAfterSuccess(staged, owner, extras.discardStaged ?? invokeDiscardStaged);

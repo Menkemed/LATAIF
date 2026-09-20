@@ -12,6 +12,7 @@
 // unterscheidet, wird HINEINGEREICHT (woher ein Artikel kommt, wie einer entsteht) — nicht
 // nachgebaut.
 // ════════════════════════════════════════════════════════════════════════════
+import { adoptOrderPhotosToProduct } from '@/core/orders/order-media';
 import { vatEngine } from '@/core/tax/vat-engine';
 import type { Order, OrderLine, Product, TaxScheme } from '@/core/models/types';
 
@@ -79,6 +80,11 @@ export function buildOrderInvoiceLines(args: BuildOrderInvoiceLinesArgs): OrderI
         sourceType: 'OWN',
         notes: spec.notes || `From order ${order.orderNumber}`,
       });
+      // MEDIA-ORDER §7 — aus der Vorlage wird ein Artikelbild: DASSELBE Medienobjekt bekommt eine
+      // neue, legitime Verknüpfung am Artikel (Rolle `stock_image`, Klasse unverändert `internal`).
+      // Keine zweite Datei, kein Neucodieren. `spec.images` oben ist nur noch der Altbestand eines
+      // Auftrags von früher — für den findet sich hier nichts, und das ist richtig.
+      if (isCustomPiece) adoptOrderPhotosToProduct(order.id, prod.id);
     }
     const qty = Math.max(1, ol.quantity);
     // v0.6.7 — Custom-Quote-Lines speichern BRUTTO (Quoted Price = Endpreis).

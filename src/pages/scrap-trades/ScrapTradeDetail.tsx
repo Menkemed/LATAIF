@@ -58,7 +58,9 @@ export function ScrapTradeDetail() {
       if (w.remote) {
         try {
           // POST-PARITY R7B PP-12 — gespeicherte Fotos reisen unverändert (der Primary erkennt sie an ihrer Kennung).
-          staged = await stageScrapPhotos(values, undefined, t.lines.flatMap((l) => [...(l.imagesPurchase ?? []), ...(l.imagesSale ?? [])]));
+          // MEDIA-SCRAP — nur NEUE Aufnahmen gehen in die Ablage; gespeicherte Fotos sind
+          // Medienkennungen und reisen als `keep`. Ein `keep` wird nie hochgeladen.
+          staged = await stageScrapPhotos(values);
         } catch (e) {
           alert(`The photos could not be handed to the main computer (${e instanceof StagingUploadError ? e.code : String(e)}). Nothing was saved — please try again.`);
           return;

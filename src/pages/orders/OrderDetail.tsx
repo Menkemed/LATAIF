@@ -1,3 +1,4 @@
+import { adoptOrderPhotosToProduct } from '@/core/orders/order-media';
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Trash2, Save, XCircle, ShoppingBag, MessageCircle, Download, Plus } from 'lucide-react';
@@ -656,6 +657,9 @@ export function OrderDetail() {
         notes: spec.notes
           || (order.requestedDetails ? `From order ${order.orderNumber}: ${order.requestedDetails}` : `From order ${order.orderNumber}`),
       });
+      // MEDIA-ORDER §7 — die Vorlage des Auftrags wird zum Artikelbild: DASSELBE Medienobjekt,
+      // neue Verknüpfung, Rolle `stock_image`, Klasse unverändert. Keine zweite Datei.
+      adoptOrderPhotosToProduct(order.id, newProduct.id);
       setPendingProduct(newProduct);
       updateOrder(id, { productId: newProduct.id });
     }

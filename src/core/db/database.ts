@@ -2280,6 +2280,28 @@ function runMigrations(database: Database): void {
     // „NOTES", verwarf den Text aber still. Additiv; der Fassungs-Trigger zählt eine Notizänderung mit.
     `ALTER TABLE tasks ADD COLUMN notes TEXT`,
 
+    // ── MEDIA-SCRAP — eine Zeile, die ein Ändern übersteht ────────────────────
+    //
+    // Die Positionen eines Altgold-Geschäfts werden bei JEDEM Speichern gelöscht und neu
+    // eingefügt (`updateScrapTradeInHouse`), mit frischen `id`s. Für die Buchhaltung ist das
+    // gleichgültig — sie rechnet mit Summen —, für ein Foto ist es fatal: es hinge an einer
+    // Kennung, die der nächste Klick auf „Save" wegwirft, oder schlimmer an der Position im
+    // Formular, und dann läge nach dem Löschen der ersten Zeile das Foto der zweiten bei der
+    // dritten.
+    //
+    // Also eine Kennung, die dem MENSCHLICHEN Gegenstand gehört, nicht der Datenbankzeile:
+    // `line_key` entsteht einmal und reist durch jedes Ändern. Bestehende Zeilen bekommen ihre
+    // heutige `id` als Schlüssel — sie ist genau so eindeutig und war bisher schon da.
+    //
+    // `branch_id` kommt dazu, weil eine Verknüpfung im Medienkern immer in einer Filiale hängt;
+    // sie wird aus dem Geschäft übernommen und ändert an der Buchung nichts.
+    `ALTER TABLE scrap_trade_lines ADD COLUMN line_key TEXT`,
+    `ALTER TABLE scrap_trade_lines ADD COLUMN branch_id TEXT`,
+    `UPDATE scrap_trade_lines SET line_key = id WHERE line_key IS NULL OR line_key = ''`,
+    `UPDATE scrap_trade_lines SET branch_id = (SELECT t.branch_id FROM scrap_trades t WHERE t.id = scrap_trade_id)
+       WHERE branch_id IS NULL OR branch_id = ''`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS ux_scrap_line_key ON scrap_trade_lines(line_key)`,
+
     // ── MEDIA-IDENTITY §9 — die Fassung eines Kunden und eines Lieferanten ────
     //
     // Beide hatten bisher KEINE. Am Primary allein fiel das kaum auf; mit einem zweiten Rechner

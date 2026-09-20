@@ -66,7 +66,12 @@ function seed(db: any): void {
   db.run(`CREATE TABLE repairs (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT, notes TEXT, revision INTEGER NOT NULL DEFAULT 1)`);
   db.run(`CREATE TRIGGER trg_repairs_revision AFTER UPDATE ON repairs FOR EACH ROW WHEN NEW.revision = OLD.revision
           BEGIN UPDATE repairs SET revision = OLD.revision + 1 WHERE id = NEW.id; END`);
-  for (const t of Object.values(MEDIA_ENTITY_SCOPE)) db.run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT)`);
+  // Jeder Besitzertyp mit SEINER Kennspalte: die Altgold-Position wird ueber `line_key`
+  // gefunden, nicht ueber `id` (MEDIA-SCRAP).
+  for (const t of Object.values(MEDIA_ENTITY_SCOPE)) {
+    const extra = t.idCol === 'id' ? '' : `, ${t.idCol} TEXT`;
+    db.run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT${extra})`);
+  }
   db.run(`ALTER TABLE products ADD COLUMN images TEXT DEFAULT '[]'`);
   db.run(`INSERT INTO tenants (id) VALUES ('t1')`);
   db.run(`INSERT INTO branches (id, tenant_id) VALUES ('b1','t1'),('b2','t1')`);

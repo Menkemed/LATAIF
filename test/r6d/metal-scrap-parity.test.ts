@@ -20,7 +20,10 @@ import { dirname, resolve as resolvePath } from 'node:path';
 const repo = resolvePath(dirname(fileURLToPath(import.meta.url)), '..', '..');
 registerHooks({
   resolve(specifier: string, context: { parentURL?: string }, nextResolve: (s: string, c: unknown) => unknown) {
-    if (specifier === '@/core/db/database') {
+    if (specifier === '@tauri-apps/api/core') {
+      return { url: pathToFileURL(resolvePath(repo, 'test/bridge/_tauri-shim.ts')).href, shortCircuit: true };
+    }
+    if (specifier === '@/core/db/database' || specifier === '../db/database.ts') {
       return { url: pathToFileURL(resolvePath(repo, 'test/sync/_db-shim.ts')).href, shortCircuit: true };
     }
     if ((specifier === './database' || specifier === '../db/database') && context.parentURL) {
@@ -61,6 +64,7 @@ const { resetDurabilityStateForTest } = await import('../../src/core/bridge/dura
 const { resetTransactionHealthForTest } = await import('../../src/core/db/transaction-health.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
+const { applyMediaSchema } = await import('../../src/core/db/media-schema.ts');
 const registry = await import('../../src/core/bridge/command-registry.ts');
 // POST-PARITY R7B PP-12 — Node hat kein Tauri: der Belegbild-Normalisierer wird hier gestellt (JPEG,
 // dieselben Bytes). Was der echte tut (≤ 100 000 B), prüfen `cargo test media::record_image` und der
@@ -138,6 +142,9 @@ function freshDb(): Db {
   const spot = (b: string, t: string, v: string) => db.run("INSERT INTO settings (branch_id, key, value, category, updated_at) VALUES (?, ?, ?, 'metals', ?)", [b, `spot_price.${t}`, v, NOW]);
   spot('branch-main', 'gold', '30'); spot('branch-main', 'silver', '0.5');
   spot('branch-other', 'gold', '99');
+  // MEDIA-SCRAP — der Medienkern gehört zur Datenbank, die die Produktion hat: die Belegfotos
+  // einer Position sind seit diesem Bund Medien, keine Bytes in der Zeile.
+  applyMediaSchema(db as never);
   setTestDatabase(db as never);
   resetDurabilityStateForTest();
   resetTransactionHealthForTest();
@@ -494,7 +501,9 @@ marker('CENTRAL_UI_R6D_SPOT_PRICE_PROVED');
   const cT = rows(dbC, 'SELECT * FROM scrap_trades')[0] ?? {};
   const dT = /^(id|created_at|updated_at)$/;
   ok(rc.kind === 'ok' && norm(pT, dT) === norm(cT, dT), `PARITY Kopf Primary == PC2${norm(pT, dT) === norm(cT, dT) ? '' : ` (${norm(pT, dT)} / ${norm(cT, dT)})`}`);
-  const lines = (db: Db) => rows(db, 'SELECT * FROM scrap_trade_lines ORDER BY position').map((r) => norm(r, /^(id|scrap_trade_id|created_at)$/)).join('|');
+  // MEDIA-SCRAP — `line_key` ist wie `id` eine frisch vergebene Kennung: sie MUSS zwischen zwei
+  // Läufen verschieden sein, und ihr Vergleich sagte nichts über Parität.
+  const lines = (db: Db) => rows(db, 'SELECT * FROM scrap_trade_lines ORDER BY position').map((r) => norm(r, /^(id|line_key|scrap_trade_id|created_at)$/)).join('|');
   const pays = (db: Db) => rows(db, 'SELECT * FROM scrap_trade_payments ORDER BY direction, position').map((r) => norm(r, /^(id|scrap_trade_id|created_at)$/)).join('|');
   ok(lines(dbP) === lines(dbC) && pays(dbP) === pays(dbC) && n(dbC, 'SELECT COUNT(*) FROM scrap_trade_lines') === 2 && n(dbC, 'SELECT COUNT(*) FROM scrap_trade_payments') === 3,
     'PARITY Zeilen und Zahlungen Primary == PC2');
@@ -545,7 +554,7 @@ marker('CENTRAL_UI_R6D_SPOT_PRICE_PROVED');
   }
   const withLine = (extra: Record<string, unknown>) => { const b = actions.scrapCreateBody(TRADE()); (b.lines as Array<Record<string, unknown>>)[0] = { ...(b.lines as Array<Record<string, unknown>>)[0], ...extra }; return b; };
   ok(/the primary decides profit/.test(parseFails(() => mc.parseScrapCreate(withLine({ profit: 999 })))), 'PAYLOAD der Gewinn einer Zeile ist abgeleitet');
-  ok(/staged bytes/.test(parseFails(() => mc.parseScrapCreate(withLine({ imagesPurchase: ['data:image/png;base64,AA'] })))), 'PAYLOAD Fotos reisen nie als Bytes im Auftrag');
+  ok(/as a plan/.test(parseFails(() => mc.parseScrapCreate(withLine({ imagesPurchase: ['data:image/png;base64,AA'] })))), 'PAYLOAD Fotos reisen nie als Bytes im Auftrag');
   const withPay = (extra: Record<string, unknown>) => { const b = actions.scrapCreateBody(TRADE()); (b.paymentsIn as Array<Record<string, unknown>>)[0] = { ...(b.paymentsIn as Array<Record<string, unknown>>)[0], ...extra }; return b; };
   ok(/the primary decides direction/.test(parseFails(() => mc.parseScrapCreate(withPay({ direction: 'OUT' })))), 'PAYLOAD die Richtung eines Splits bestimmt seine Liste');
   ok(/unknown field/.test(parseFails(() => mc.parseScrapCreate({ ...actions.scrapCreateBody(TRADE()), bogus: 1 }))), 'PAYLOAD ein unbekanntes Feld wird abgewiesen');
@@ -626,7 +635,7 @@ marker('CENTRAL_UI_R6D_SCRAP_CREATE_PROVED');
     else await fern(() => mc.runScrapUpdate(deps(d), identity(nextId(), 'scrap_trades.update'), actions.scrapUpdateBody(id, 1, EDIT)));
     return {
       t: norm(rows(d, 'SELECT * FROM scrap_trades')[0], /^(id|created_at|updated_at)$/),
-      l: rows(d, 'SELECT * FROM scrap_trade_lines').map((r) => norm(r, /^(id|scrap_trade_id|created_at)$/)).join('|'),
+      l: rows(d, 'SELECT * FROM scrap_trade_lines').map((r) => norm(r, /^(id|line_key|scrap_trade_id|created_at)$/)).join('|'),
       p: rows(d, 'SELECT * FROM scrap_trade_payments ORDER BY direction, position').map((r) => norm(r, /^(id|scrap_trade_id|created_at)$/)).join('|'),
       g: shape(ledgerRows(d)),
     };
@@ -699,34 +708,49 @@ marker('CENTRAL_UI_R6D_SCRAP_CANCEL_PROVED');
 {
   const db = freshDb();
   const A = 'a'.repeat(64); const B = 'b'.repeat(64);
-  const body = actions.scrapCreateBody(TRADE(), [{ purchase: [A], sale: [B] }, { purchase: [], sale: [] }]);
-  ok(!/imagesPurchase|imagesSale|base64/.test(S(body)) && S((body.lines as Array<Record<string, unknown>>)[0].purchaseStagingIds) === S([A]), 'MEDIA der Rumpf nennt Kennungen, keine Bytes');
+  const body = actions.scrapCreateBody(TRADE(), [{ purchase: [{ stagingId: A }], sale: [{ stagingId: B }] }, { purchase: [], sale: [] }]);
+  ok(!/imagesPurchase|imagesSale|base64/.test(S(body))
+    && S((body.lines as Array<Record<string, unknown>>)[0].purchasePhotos) === S([{ stagingId: A }]),
+    'MEDIA der Rumpf nennt Kennungen, keine Bytes');
   const discarded: string[] = [];
   let owner: Record<string, string> = {};
   const r = await fern(() => mc.runScrapCreate(deps(db), identity(nextId(), 'scrap_trades.create'), body, {
     readStaged: async (id, o) => { owner = o as never; return { mime: 'image/jpeg', dataBase64: id === A ? 'QUFB' : 'QkJC' }; },
     discardStaged: async (id) => { discarded.push(id); },
   }));
-  const l1 = rows(db, 'SELECT images_purchase, images_sale FROM scrap_trade_lines WHERE position = 1')[0];
-  ok(r.kind === 'ok' && l1.images_purchase === S(['data:image/jpeg;base64,QUFB']) && l1.images_sale === S(['data:image/jpeg;base64,QkJC']),
-    'MEDIA der Primary holt die Fotos INNERHALB des Auftrags und legt sie wie seine eigene Maske ab');
+  // MEDIA-SCRAP — die Bytes gehen in den Medienkern und hängen als Verknüpfungen an der POSITION
+  // (Rolle je Seite); die alten Spalten bleiben leer.
+  const l1 = rows(db, 'SELECT line_key, images_purchase, images_sale FROM scrap_trade_lines WHERE position = 1')[0];
+  const linksOf = (key: unknown, role: string) =>
+    n(db, "SELECT COUNT(*) FROM media_links WHERE entity_type='scrap_trade_line' AND entity_id=? AND media_role=? AND deleted_at IS NULL", [key, role]);
+  ok(r.kind === 'ok' && l1.images_purchase === '[]' && l1.images_sale === '[]'
+    && linksOf(l1.line_key, 'purchase_photo') === 1 && linksOf(l1.line_key, 'sale_photo') === 1,
+    'MEDIA der Primary nimmt die Fotos auf und hängt sie an DIESE Position — keine Bytes in der Zeile');
   ok(S(discarded.sort()) === S([A, B]) && owner.branchId === 'branch-main' && owner.userId === 'user-test', 'MEDIA nach dem Erfolg geräumt; die Ablage gehört der geprüften Identität');
   const idG = nextId();
   const gone = await fern(() => mc.runScrapCreate(deps(db), identity(idG, 'scrap_trades.create'), body, { readStaged: async () => { throw new Error('missing'); } }));
   ok(gone.kind === 'thrown' && gone.code === 'STAGED_IMAGE_GONE' && n(db, 'SELECT COUNT(*) FROM scrap_trades') === 1 && lookupCommand(db as never, identity(idG, 'scrap_trades.create')).kind === 'fresh',
     'MEDIA eine verschwundene Ablage legt nichts an und verbrennt die Kennung nicht');
-  const four = actions.scrapCreateBody(TRADE(), [{ purchase: ['1', '2', '3', '4'].map((c) => c.repeat(64)), sale: [] }]);
+  const four = actions.scrapCreateBody(TRADE(), [{ purchase: ['1', '2', '3', '4'].map((c) => ({ stagingId: c.repeat(64) })), sale: [] }]);
   ok(/at most 3 photos/.test(parseFails(() => mc.parseScrapCreate(four))), 'MEDIA höchstens drei Fotos je Seite — dieselbe Zahl wie die Maske');
-  ok(/content hash/.test(parseFails(() => mc.parseScrapCreate(actions.scrapCreateBody(TRADE(), [{ purchase: ['../etc/passwd'], sale: [] }])))), 'MEDIA eine Ablagekennung ist ein Inhaltshash, sonst nichts');
-  const staged = await actions.stageScrapPhotos(TRADE({ lines: [{ weightGrams: 1, karat: '22K', purchasePrice: 120, salePrice: 155, imagesPurchase: ['data:image/png;base64,AA'], imagesSale: [] }] }),
+  ok(/content hash/.test(parseFails(() => mc.parseScrapCreate(actions.scrapCreateBody(TRADE(), [{ purchase: [{ stagingId: '../etc/passwd' }], sale: [] }])))),
+    'MEDIA eine Ablagekennung ist ein Inhaltshash, sonst nichts');
+  // MEDIA-SCRAP — nur NEUE Aufnahmen gehen in die Ablage; ein gespeichertes Medium reist als `keep`.
+  const staged = await actions.stageScrapPhotos(TRADE({ lines: [{ weightGrams: 1, karat: '22K', purchasePrice: 120, salePrice: 155, imagesPurchase: ['media-alt', 'data:image/png;base64,AA'], imagesSale: [] }] }),
     async (urls) => urls.map((_, i) => String(i + 1).repeat(64)));
-  ok(S(staged) === S([{ purchase: ['1'.repeat(64)], sale: [] }]), 'MEDIA PC2 legt je Zeile und Seite in der Reihenfolge der Maske ab');
-  // Primary: die Fotos der Maske gehen durch den EINEN Normalisierer (R7B PP-12) und landen als JPEG.
+  ok(S(staged) === S([{ purchase: [{ keep: 'media-alt' }, { stagingId: '1'.repeat(64) }], sale: [] }]),
+    'MEDIA PC2 legt NUR neue Aufnahmen ab und behält die Reihenfolge der Maske');
+  // MEDIA-SCRAP — am Primary geht das Foto der Maske in den MEDIENKERN: Rust normalisiert,
+  // prüft und veröffentlicht, und an der Zeile hängt eine Verknüpfung. Die alte Spalte bleibt leer.
   const dbP = freshDb();
-  const vorNorm = normalisiert;
   await actions.createScrapTradeOnPrimary(TRADE({ lines: [{ weightGrams: 1, karat: '22K', purchasePrice: 120, salePrice: 155, imagesPurchase: ['data:image/png;base64,AA'] }] }));
-  ok(one(dbP, 'SELECT images_purchase FROM scrap_trade_lines') === S(['data:image/jpeg;base64,AA']) && normalisiert === vorNorm + 1,
-    'MEDIA am Primary: das Foto der Maske ging durch den Normalisierer und liegt als JPEG-Daten-URL in der Zeile');
+  const lk = String(one(dbP, 'SELECT line_key FROM scrap_trade_lines'));
+  ok(one(dbP, 'SELECT images_purchase FROM scrap_trade_lines') === '[]'
+    && n(dbP, "SELECT COUNT(*) FROM media_links WHERE entity_type='scrap_trade_line' AND entity_id=? AND media_role='purchase_photo' AND deleted_at IS NULL", [lk]) === 1
+    && n(dbP, "SELECT COUNT(*) FROM media_objects WHERE security_class='internal'") >= 1,
+    'MEDIA am Primary: das Foto der Maske ging in den Medienkern und hängt an DIESER Position');
+  ok(n(dbP, "SELECT COUNT(*) FROM scrap_trade_lines WHERE images_purchase LIKE '%data:%' OR images_sale LIKE '%data:%'") === 0,
+    'MEDIA …und nirgends eine neue Daten-URL in einer Zeile');
 }
 marker('CENTRAL_UI_R6D_SCRAP_MEDIA_PROVED');
 

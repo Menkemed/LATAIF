@@ -126,8 +126,12 @@ marker('POST_PARITY_PP12_ONE_RECORD_NORMALIZER');
     && /galleryMediaIds = await resolveRepairPhotoSlots\(/.test(rh),
   'PRIMARY Reparatur anlegen/ändern — vor der Klammer; die Galerie sind Medien, keine Bytes');
   const ma = code(src('src/core/metals/metal-actions.ts'));
-  ok(/const photos = await withRecordScrapPhotos\(input, \[\]\);\s*return runOnPrimary\(/.test(ma)
-    && /withRecordScrapPhotos\(input, storedScrapPhotos\(tradeId, localHouseBranch\(\)\)\);\s*return runOnPrimary\(/.test(ma),
+  // MEDIA-SCRAP — die Fotos einer Position gehen jetzt in den MEDIENKERN: aufgelöst wird VOR der
+  // Klammer (`mitMedien` → Rust normalisiert, prüft, veröffentlicht), und ein schon gespeichertes
+  // Foto bleibt als Medienkennung stehen, statt erneut gerechnet zu werden.
+  ok(/const photos = await mitMedien\(input\);\s*return runOnPrimary\(/.test(ma)
+    && /const photos = await mitMedien\(input, tradeId\);\s*return runOnPrimary\(/.test(ma)
+    && /await resolveScrapPhotoSlots\(slotsOf\(l\.imagesPurchase\), 'purchase'/.test(ma),
   'PRIMARY Altgold anlegen/ändern — vor der Klammer; ändern behält die gespeicherten Fotos');
   const ms = code(src('src/core/masterdata/masterdata-save.ts'));
   const is = code(src('src/core/identity/identity-save.ts'));
@@ -141,7 +145,11 @@ marker('POST_PARITY_PP12_ONE_RECORD_NORMALIZER');
     'PRIMARY …und zwar über den Medienkern, nicht über einen zweiten Rechenweg');
   ok(/normalizeSpecImages\(l\.newProduct\)[\s\S]*return runOnPrimary\(\(\) => createPurchaseInHouse\(/.test(code(src('src/core/purchases/purchase-house.ts'))), 'PRIMARY Einkauf „New Item"');
   const oh = code(src('src/core/orders/order-house.ts'));
-  ok(/normalizeSpecImages\(input\.customProductSpec\);\s*return runOnPrimary\(\(\) => createOrderInHouse\(\{ \.\.\.input, lines, customProductSpec \}/.test(oh), 'PRIMARY Auftrag: neuer Artikel und Sonderstück-Entwurf');
+  // MEDIA-ORDER — der Entwurf des Sonderstücks geht in den Medienkern (aufnehmen VOR der Klammer,
+  // verknüpfen INNERHALB); die Fotos NEUER ARTIKEL einer Auftragszeile gehen weiter ihren Weg.
+  ok(/normalizeSpecImages\(l\.newProduct\)/.test(oh)
+    && /const \{ spec: customProductSpec, urls \} = ohneVorlagenbilder\(input\.customProductSpec\);\s*const referenceMediaIds = await ingestOrderPhotos\(urls\);\s*return runOnPrimary\(/.test(oh),
+  'PRIMARY Auftrag: neuer Artikel und Sonderstück-Entwurf');
   ok(/const ready = req\.newProduct \? \{ \.\.\.req, newProduct: await normalizeSpecImages\(req\.newProduct\) \} : req;\s*return runOnPrimary\(\(\) => updateOrderLineInHouse\(ready, branchId\)/.test(code(src('src/core/orders/order-lifecycle-house.ts'))),
     'PRIMARY Positionsdialog: neuer Artikel');
 
@@ -160,8 +168,11 @@ marker('POST_PARITY_PP12_ONE_RECORD_NORMALIZER');
     ['src/core/metals/metal-actions.ts', /stage \?\?= \(urls\) => stageRecordDataUrls\(urls, keep\)/],
   ];
   for (const [f, re] of record) ok(re.test(code(src(f))), `PC2 ${f}: Belegbilder über stageRecordDataUrls`);
-  ok(/stageScrapPhotos\(values, undefined, t\.lines\.flatMap\(/.test(code(src('src/pages/scrap-trades/ScrapTradeDetail.tsx'))),
-    'PC2 Altgold ändern: die gespeicherten Fotos reisen unverändert (keep)');
+  // MEDIA-SCRAP — gespeicherte Fotos werden NICHT mehr erneut hochgeladen: sie sind
+  // Medienkennungen und reisen als `keep`. Nur neue Aufnahmen gehen in die Ablage.
+  ok(/stageScrapPhotos\(values\);/.test(code(src('src/pages/scrap-trades/ScrapTradeDetail.tsx')))
+    && /\{ keep: x \}/.test(code(src('src/core/metals/metal-actions.ts'))),
+    'PC2 Altgold ändern: die gespeicherten Fotos reisen als Kennung (keep), nicht als Bytes');
   const pipeline: Array<[string, RegExp]> = [
     ['src/pages/watches/WatchList.tsx', /stageDataUrls\(form\.images/], ['src/pages/watches/ProductDetail.tsx', /stageDataUrls\)/],
     ['src/pages/consignments/ConsignmentList.tsx', /stageDataUrls\(bilder\)/], ['src/pages/production/ProductionPage.tsx', /productionOutputBodies\(input\.outputs, stageDataUrls\)/],
@@ -180,8 +191,12 @@ marker('POST_PARITY_PP12_ONE_RECORD_NORMALIZER');
   const mit = cc.slice(cc.indexOf('export async function mitFotos'), cc.indexOf('function num0'));
   ok(/readStagedAsRecordImages\(p\.stagingIds/.test(mit), 'ABHOLEN Entwurfsfotos (Einkauf/Auftrag) als Belegbilder');
   const mc = code(src('src/core/bridge/metal-commands.ts'));
-  ok(/stored\.get\(id\) \?\? \(await readStagedAsRecordImages\(\[id\]/.test(mc) && /withPhotos\(req, identity, media, req\.tradeId\)/.test(mc),
-    'ABHOLEN Altgold ändern: ein neu abgelegtes, schon gespeichertes Foto (gleicher SHA-256) bleibt die gespeicherte Fassung');
+  // MEDIA-SCRAP — ein `keep` wird gar nicht erst geholt (es IST schon ein Medium); nur ein
+  // `stagingId` geht durch den prüfenden Standardleser, und beides landet in DERSELBEN Auflösung.
+  ok(/if \('keep' in s\) \{ slots\.push\(\{ keep: s\.keep \}\); continue; \}/.test(mc)
+    && /await readStagedAsRecordImages\(\[s\.stagingId\], owner, read, fail\)/.test(mc)
+    && /withPhotos\(req, identity, media, req\.tradeId\)/.test(mc),
+    'ABHOLEN Altgold ändern: ein gespeichertes Foto bleibt die gespeicherte Fassung, ohne zweiten Upload');
   const raw = walk('src').filter((f) => /\.ts$/.test(f) && /readStagedAsDataUrls\(/.test(code(src(f))) && !/remote-create-support\.ts$/.test(f));
   ok(S(raw.sort()) === S(['src/core/bridge/commercial-commands.ts', 'src/core/bridge/product-commands.ts', 'src/core/bridge/production-commands.ts']),
     `MEDIENSPEICHER roh gelesen wird nur für Artikel, Kommission, Fertigung (${S(raw)})`);

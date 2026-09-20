@@ -14,6 +14,9 @@
 // Store-Einstiege bleiben für synchrone Aufrufer, halten aber keine eigene Logik mehr.
 // ═══════════════════════════════════════════════════════════
 
+import { scrapPhotoRefs } from '@/core/metals/scrap-media';
+import type { OwnerMediaRef } from '@/core/media/owner-media-resolver';
+import type { ScrapLinePhotoRef } from '@/core/models/types';
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import { getDatabase, saveDatabase } from '@/core/db/database';
@@ -175,6 +178,14 @@ export const useScrapTradeStore = create<ScrapTradeStore>((set, get) => ({
  * Filiale des Ausweises eingeschraenkt. Vorher las sie ALLE Filialen — am Ein-Filial-Betrieb
  * faellt das nicht auf, ueber das Netz waere es eine Preisgabe fremder Daten.
  */
+/** Eine Medienreferenz in der Form, die eine Geschaeftsauskunft weitergibt. */
+function alsFotoReferenz(r: OwnerMediaRef): ScrapLinePhotoRef {
+  return {
+    mediaId: r.mediaId, key: r.main.storageKey, thumbKey: r.thumbnail?.storageKey ?? null,
+    hash: r.main.hash, extension: r.main.extension,
+  };
+}
+
 export function loadScrapTradesFor(ctx: BusinessReadContext): { trades: ScrapTrade[] } {
   const tradeRows = query(
     `SELECT * FROM scrap_trades WHERE branch_id = ? ORDER BY trade_date DESC, created_at DESC`,
@@ -198,6 +209,18 @@ export function loadScrapTradesFor(ctx: BusinessReadContext): { trades: ScrapTra
       const list = linesByTrade.get(line.scrapTradeId) || [];
       list.push(line);
       linesByTrade.set(line.scrapTradeId, list);
+    }
+    // MEDIA-SCRAP — die Fotos als REFERENZEN dazu, in wenigen Abfragen statt einer je Zeile.
+    // Eine Liste bleibt damit eine Liste: keine Bytes, keine Daten-URLs.
+    for (const [tradeId, list] of linesByTrade) {
+      const refs = scrapPhotoRefs(tradeId);
+      for (const line of list) {
+        const r = refs.get(line.lineKey);
+        line.photos = {
+          purchase: (r?.purchase ?? []).map(alsFotoReferenz),
+          sale: (r?.sale ?? []).map(alsFotoReferenz),
+        };
+      }
     }
 
     const pmtRows = query(

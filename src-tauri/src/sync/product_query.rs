@@ -633,6 +633,15 @@ fn live_media_grant(
                  AND l.entity_type = 'repair' AND l.media_role = 'gallery'
                  AND EXISTS (SELECT 1 FROM repairs r WHERE r.id = l.entity_id AND r.branch_id = l.branch_id))
               OR
+              -- MEDIA-SCRAP — die Belegfotos EINER Position eines Altgold-Geschäfts. Die Kennung
+              -- ist `line_key` und nicht `id`: die Zeile entsteht bei jedem Ändern neu, der
+              -- Schlüssel bleibt. Zwei feste Rollen, eine Filiale, Klasse wie ein Belegfoto.
+              (o.security_class IN ('public', 'internal')
+                 AND l.entity_type = 'scrap_trade_line'
+                 AND l.media_role IN ('purchase_photo', 'sale_photo')
+                 AND EXISTS (SELECT 1 FROM scrap_trade_lines sl
+                              WHERE sl.line_key = l.entity_id AND sl.branch_id = l.branch_id))
+              OR
               (o.security_class = 'sensitive' AND ?4 = 1
                  AND l.entity_type = 'customer' AND l.media_role = 'identity_document'
                  AND EXISTS (SELECT 1 FROM customers c WHERE c.id = l.entity_id AND c.branch_id = l.branch_id))

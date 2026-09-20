@@ -15,6 +15,7 @@
 // Gewinn, Buchungskonten. Ein unbekanntes Feld wird abgewiesen statt ignoriert. Fotos reisen als
 // Kennungen der vorhandenen Zwischenablage (R5B), nie als Bytes im Auftrag.
 // ════════════════════════════════════════════════════════════════════════════
+import { resolveScrapPhotoSlots, type PhotoSlotRequest } from '@/core/metals/scrap-media';
 import { getDatabase, saveDatabaseDurably } from '@/core/db/database';
 import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
@@ -26,14 +27,13 @@ import {
   assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStagedRecord, parseStagingIds,
   readStagedAsRecordImages, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader,
 } from './remote-create-support';
-import { sha256OfDataUrl } from '@/core/media/record-image';
 import {
   METAL_CREATE_FIELDS, METAL_PAYMENT_METHODS, MetalRejected, changeMetalStatusInHouse, createMetalInHouse, setSpotPriceInHouse,
   type MetalCreateInput, type MetalPaymentMethod,
 } from '@/core/metals/metal-house';
 import {
   SCRAP_MAX_PHOTOS, ScrapRejected, cancelScrapTradeInHouse, createScrapTradeInHouse, updateScrapTradeInHouse,
-  storedScrapPhotos, type ScrapTradeInput, type ScrapTradeLineInput, type ScrapTradePaymentInput,
+  type ScrapTradeInput, type ScrapTradeLineInput, type ScrapTradePaymentInput,
 } from '@/core/metals/scrap-house';
 
 export const OP_METALS_CREATE = 'metals.create';
@@ -81,7 +81,7 @@ function strict(raw: unknown, allowed: readonly string[], forbidden: readonly st
   for (const k of Object.keys(raw)) {
     if (allowed.includes(k)) continue;
     if (k === 'imagesPurchase' || k === 'imagesSale') {
-      throw new MetalPayloadError('photos travel as staged bytes (purchaseStagingIds / saleStagingIds), never inside the order');
+      throw new MetalPayloadError('photos travel as a plan (purchasePhotos / salePhotos), never inside the order');
     }
     if (forbidden.includes(k)) throw new MetalPayloadError(`the primary decides ${k}, not the client`);
     throw new MetalPayloadError(`unknown field: ${k}`);
@@ -172,18 +172,40 @@ const SCRAP_FIELDS = [
   'sellerName', 'sellerPhone', 'sellerCustomerId', 'buyerName', 'buyerPhone', 'buyerSupplierId',
   'tradeDate', 'notes', 'lines', 'paymentsOut', 'paymentsIn',
 ] as const;
-const LINE_FIELDS = ['weightGrams', 'karat', 'purchasePrice', 'salePrice', 'notes', 'purchaseStagingIds', 'saleStagingIds'];
+// MEDIA-SCRAP — statt zweier Listen von Ablagekennungen reist je Seite ein PLAN: was bleibt
+// (`{keep: <Medienkennung>}`) und was neu ist (`{stagingId: <Inhaltskennung>}`), in der Reihenfolge
+// der Maske. Ein schon gespeichertes Foto noch einmal hochzuladen wäre Arbeit für nichts.
+// `lineKey` ist die bleibende Kennung der Position — ohne sie fände der Primary nach dem Ersetzen
+// der Zeilen nicht mehr, welches Foto zu welchem Goldstück gehört.
+const LINE_FIELDS = ['lineKey', 'weightGrams', 'karat', 'purchasePrice', 'salePrice', 'notes', 'purchasePhotos', 'salePhotos'];
 const LINE_FORBIDDEN = ['id', 'scrapTradeId', 'position', 'profit', 'createdAt'];
 const PAYMENT_FIELDS = ['method', 'amount'];
 const PAYMENT_FORBIDDEN = ['id', 'scrapTradeId', 'direction', 'position', 'account', 'createdAt'];
 
-/** Die Eingabe ohne Fotos, dazu je Zeile die Kennungen der abgelegten Fotos. */
-export interface ScrapRequest { input: ScrapTradeInput; staged: Array<{ purchase: string[]; sale: string[] }> }
+/** Ein Platz in der Galerie einer Seite: ein bestehendes Medium behalten ODER eine neue Aufnahme. */
+export type ScrapPhotoPlanSlot = { keep: string } | { stagingId: string };
 
-function stagedList(v: unknown, what: string): string[] {
-  const ids = parseStagingIds(v, (m) => new MetalPayloadError(`${what}: ${m}`));
-  if (ids.length > SCRAP_MAX_PHOTOS) throw new MetalPayloadError(`${what}: at most ${SCRAP_MAX_PHOTOS} photos`);
-  return ids;
+/** Die Eingabe ohne Fotos, dazu je Zeile der Plan beider Seiten. */
+export interface ScrapRequest { input: ScrapTradeInput; staged: Array<{ purchase: ScrapPhotoPlanSlot[]; sale: ScrapPhotoPlanSlot[] }> }
+
+function planList(v: unknown, what: string): ScrapPhotoPlanSlot[] {
+  if (v === undefined) return [];
+  if (!Array.isArray(v)) throw new MetalPayloadError(`${what}: must be a list`);
+  if (v.length > SCRAP_MAX_PHOTOS) throw new MetalPayloadError(`${what}: at most ${SCRAP_MAX_PHOTOS} photos`);
+  return v.map((slot) => {
+    if (slot && typeof slot === 'object' && !Array.isArray(slot)) {
+      const keys = Object.keys(slot as Record<string, unknown>);
+      const s = slot as Record<string, unknown>;
+      if (keys.length === 1 && keys[0] === 'stagingId') {
+        const [id] = parseStagingIds([s.stagingId], (m) => new MetalPayloadError(`${what}: ${m}`));
+        return { stagingId: id };
+      }
+      if (keys.length === 1 && keys[0] === 'keep' && typeof s.keep === 'string' && s.keep.startsWith('media-')) {
+        return { keep: s.keep };
+      }
+    }
+    throw new MetalPayloadError(`${what}: a photo is { keep: <media id> } or { stagingId: <content hash> }`);
+  });
 }
 
 function parseScrapFields(r: Record<string, unknown>): ScrapRequest {
@@ -193,10 +215,11 @@ function parseScrapFields(r: Record<string, unknown>): ScrapRequest {
   const lines: ScrapTradeLineInput[] = r.lines.map((raw, i) => {
     const l = strict(raw, LINE_FIELDS, LINE_FORBIDDEN, `item ${i + 1}`);
     staged.push({
-      purchase: stagedList(l.purchaseStagingIds, `item ${i + 1} purchase photos`),
-      sale: stagedList(l.saleStagingIds, `item ${i + 1} sale photos`),
+      purchase: planList(l.purchasePhotos, `item ${i + 1} purchase photos`),
+      sale: planList(l.salePhotos, `item ${i + 1} sale photos`),
     });
     return {
+      lineKey: optStr(l.lineKey, `item ${i + 1} lineKey`),
       weightGrams: num(l.weightGrams, `item ${i + 1} weightGrams`),
       karat: optStr(l.karat, `item ${i + 1} karat`) ?? '',
       purchasePrice: num(l.purchasePrice, `item ${i + 1} purchasePrice`),
@@ -310,32 +333,40 @@ async function withPhotos(req: ScrapRequest, identity: CommandIdentity, media: S
   const read = media.readStaged ?? invokeReadStagedRecord;
   const owner = stagingOwnerOf(identity);
   const fail = (m: string) => new MetalPayloadError(m, 'STAGED_IMAGE_GONE');
-  const stored = new Map<string, string>();
-  if (tradeId) {
-    for (const url of storedScrapPhotos(tradeId, identity.branchId)) {
-      try { stored.set(await sha256OfDataUrl(url), url); } catch { /* keine lesbare Daten-URL — wird nicht wiedererkannt */ }
+  // MEDIA-SCRAP — aus dem Plan werden MEDIENKENNUNGEN: neue Bytes aus der Ablage werden
+  // aufgenommen (geprüft, normalisiert, veröffentlicht), behaltene Kennungen bleiben stehen.
+  const seite = async (plan: readonly ScrapPhotoPlanSlot[], side: 'purchase' | 'sale'): Promise<string[]> => {
+    const slots: PhotoSlotRequest[] = [];
+    for (const s of plan) {
+      if ('keep' in s) { slots.push({ keep: s.keep }); continue; }
+      const [url] = await readStagedAsRecordImages([s.stagingId], owner, read, fail);
+      slots.push({ dataUrl: url });
     }
-  }
-  const photos = async (ids: readonly string[]): Promise<string[]> => {
-    const out: string[] = [];
-    for (const id of ids) out.push(stored.get(id) ?? (await readStagedAsRecordImages([id], owner, read, fail))[0]);
-    return out;
+    return resolveScrapPhotoSlots(slots, side, undefined, tradeId);
   };
   const lines: ScrapTradeLineInput[] = [];
   for (let i = 0; i < req.input.lines.length; i++) {
     const s = req.staged[i];
-    lines.push({ ...req.input.lines[i], imagesPurchase: await photos(s.purchase), imagesSale: await photos(s.sale) });
+    lines.push({ ...req.input.lines[i], imagesPurchase: await seite(s.purchase, 'purchase'), imagesSale: await seite(s.sale, 'sale') });
   }
   return { ...req.input, lines };
 }
 
-const allStaged = (req: ScrapRequest): string[] => [...new Set(req.staged.flatMap((s) => [...s.purchase, ...s.sale]))];
+const allStaged = (req: ScrapRequest): string[] => [...new Set(
+  req.staged.flatMap((s) => [...s.purchase, ...s.sale]).flatMap((x) => ('stagingId' in x ? [x.stagingId] : [])),
+)];
 
 export async function runScrapCreate(deps: EngineDeps, identity: CommandIdentity, raw: unknown, media: ScrapMedia = {}): Promise<CommandOutcome> {
   const req = parseScrapCreate(raw);
+  // MEDIA-SCRAP — aufnehmen VOR der Klammer (eigene durable Haltepunkte); ein Nein wird
+  // mitgenommen, damit eine Wiederholung die eingefrorene Antwort bekommt und keinen neuen Fehler.
+  let vorbereitet: ScrapTradeInput | null = null;
+  let fotoFehler: unknown = null;
+  try { vorbereitet = await withPhotos(req, identity, media); } catch (e) { fotoFehler = e; }
   const outcome = await runRemoteCommand(deps, identity, async () => {
+    if (fotoFehler) throw fotoFehler;
     assertHouseBranch(identity);
-    const input = await withPhotos(req, identity, media);
+    const input = vorbereitet as ScrapTradeInput;
     return urteil(() => createScrapTradeInHouse(input, identity.branchId));
   });
   const staged = allStaged(req);
@@ -345,9 +376,13 @@ export async function runScrapCreate(deps: EngineDeps, identity: CommandIdentity
 
 export async function runScrapUpdate(deps: EngineDeps, identity: CommandIdentity, raw: unknown, media: ScrapMedia = {}): Promise<CommandOutcome> {
   const req = parseScrapUpdate(raw);
+  let vorbereitet: ScrapTradeInput | null = null;
+  let fotoFehler: unknown = null;
+  try { vorbereitet = await withPhotos(req, identity, media, req.tradeId); } catch (e) { fotoFehler = e; }
   const outcome = await runRemoteCommand(deps, identity, async () => {
+    if (fotoFehler) throw fotoFehler;
     assertHouseBranch(identity);
-    const input = await withPhotos(req, identity, media, req.tradeId);
+    const input = vorbereitet as ScrapTradeInput;
     return urteil(() => updateScrapTradeInHouse(req.tradeId, req.expectedVersion, input, identity.branchId));
   });
   const staged = allStaged(req);

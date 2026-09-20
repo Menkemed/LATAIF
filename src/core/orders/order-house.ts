@@ -10,6 +10,7 @@
 //     seiner Transaktion ruft;
 //   • `…OnPrimary` — dieselbe Folge für die Maske des Primary, exklusiv, in EINER Transaktion.
 // ════════════════════════════════════════════════════════════════════════════
+import { applyOrderGallery, ingestOrderPhotos } from '@/core/orders/order-media';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { useOrderStore } from '@/stores/orderStore';
@@ -68,10 +69,22 @@ export interface OrderCreated { order: Order; goldPayableId?: string }
  * Verbindlichkeit in Gramm, verknüpft mit der Extra-Gold-Kostenzeile. EINE Folge; scheitert die
  * Verbindlichkeit, gibt es auch den Auftrag nicht (vorher blieb er ohne sie stehen).
  */
-export function createOrderInHouse(input: OrderCreateInput, branchId: string, extras: Record<string, unknown> = {}): OrderCreated {
+export function createOrderInHouse(
+  input: OrderCreateInput,
+  branchId: string,
+  extras: Record<string, unknown> = {},
+  /**
+   * MEDIA-ORDER — die Vorlagenbilder des Sonderstücks, schon AUFGENOMMEN (geprüft, normalisiert,
+   * veröffentlicht) und noch unverknüpft. Sie werden hier, in DERSELBEN Klammer wie der Auftrag,
+   * an ihn gehängt. Der Ingest selbst gehört vor die Klammer — er hat eigene durable Haltepunkte.
+   */
+  referenceMediaIds: readonly string[] = [],
+): OrderCreated {
   const plan = planOrderCreate(input, houseOrderPort(branchId));
   const os = useOrderStore.getState();
   const order = os.createOrder({ ...plan.order, ...extras } as never);
+  // Die Auftragszeile ist gerade entstanden; sie IST die Änderung, also keine zweite Fassung.
+  if (referenceMediaIds.length > 0) applyOrderGallery(order.id, referenceMediaIds, { bumpOwner: false });
   let goldPayableId: string | undefined;
   if (plan.goldPayable) {
     const egLine = useOrderStore.getState().getOrderLines(order.id)
@@ -113,13 +126,30 @@ export function updateOrderInHouse(id: string, input: OrderEditInput, branchId: 
 
 /** „Save Order" am Primary. */
 export async function createOrderOnPrimary(input: OrderCreateInput): Promise<OrderCreated> {
-  // POST-PARITY R7B PP-12 — Fotos neuer Artikel und des Sonderstück-Entwurfs durch den EINEN
-  // Normalisierer (≤ 100 000 B), wie fern — vor der Klammer, damit das Umrechnen die Schreibreihenfolge
-  // nicht aufhält.
+  // POST-PARITY R7B PP-12 — Fotos neuer Artikel durch den EINEN Normalisierer (≤ 100 000 B), wie
+  // fern — vor der Klammer, damit das Umrechnen die Schreibreihenfolge nicht aufhält.
   const lines: OrderCreateInput['lines'] = [];
   for (const l of input.lines) lines.push(l.newProduct ? { ...l, newProduct: await normalizeSpecImages(l.newProduct) } : l);
-  const customProductSpec = await normalizeSpecImages(input.customProductSpec);
-  return runOnPrimary(() => createOrderInHouse({ ...input, lines, customProductSpec }, currentBranchId()), frischLesen);
+  // MEDIA-ORDER — die Vorlage des Sonderstücks geht in den Medienkern: aufnehmen VOR der Klammer
+  // (Rust normalisiert, prüft, veröffentlicht), verknüpfen INNERHALB. Ins Schema kommt sie nicht
+  // mehr — der Auftrag hält keine Bytes.
+  const { spec: customProductSpec, urls } = ohneVorlagenbilder(input.customProductSpec);
+  const referenceMediaIds = await ingestOrderPhotos(urls);
+  return runOnPrimary(
+    () => createOrderInHouse({ ...input, lines, customProductSpec }, currentBranchId(), {}, referenceMediaIds),
+    frischLesen,
+  );
+}
+
+/** Das Schema ohne seine Bilderliste, und die Bilder daneben. Eine Stelle, zwei Anschlüsse. */
+export function ohneVorlagenbilder(
+  spec: Partial<Product> | undefined,
+): { spec: Partial<Product> | undefined; urls: string[] } {
+  if (!spec) return { spec: undefined, urls: [] };
+  const urls = (spec.images ?? []).filter((x): x is string => typeof x === 'string' && x.length > 0);
+  const rest = { ...spec };
+  delete rest.images;
+  return { spec: rest, urls };
 }
 
 /** „Save" der Auftragsseite am Primary — die sechs Werte des Formulars. */

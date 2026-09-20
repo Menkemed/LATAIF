@@ -16,6 +16,7 @@
 // Unverändert (Befund): die Altgold-Tabellen werden nicht synchronisiert und stehen nicht im
 // Sync-Manifest; die Buchung kennt keinen Geschäftspartner (weder Verkäufer noch Käufer).
 // ════════════════════════════════════════════════════════════════════════════
+import { applyScrapGalleries } from '@/core/metals/scrap-media';
 import { v4 as uuid } from 'uuid';
 import { getDatabase } from '@/core/db/database';
 import { query, currentUserId } from '@/core/db/helpers';
@@ -36,11 +37,21 @@ export class ScrapRejected extends Error {
 
 // Input-Shape pro Line beim Create/Update (ohne IDs, Position, Timestamps — die füllt das Haus auf).
 export interface ScrapTradeLineInput {
+  /**
+   * MEDIA-SCRAP — die Kennung DIESER Position, über ein Ändern hinweg.
+   *
+   * Die Zeilen eines Geschäfts werden beim Speichern gelöscht und neu eingefügt; ihre `id` ist
+   * danach eine andere. Was bleiben muss, ist die Zuordnung „dieses Foto gehört zu diesem
+   * Goldstück" — und genau dafür reist dieser Schlüssel mit. Eine neue Zeile lässt ihn weg und
+   * bekommt einen frischen; die Buchhaltung sieht ihn nie.
+   */
+  lineKey?: string;
   weightGrams: number;
   karat: string;
   purchasePrice: number;
   salePrice: number;
   notes?: string;
+  /** Nach der Auflösung MEDIENKENNUNGEN, nicht mehr Bytes (MEDIA-SCRAP). */
   imagesPurchase?: string[];
   imagesSale?: string[];
 }
@@ -204,29 +215,56 @@ export function allUnreversedTransactionsFor(tradeId: string): string[] {
   return rows.map(r => r.transaction_id as string);
 }
 
-function insertLines(tradeId: string, lines: ScrapTradeLineInput[], createdAt: string): void {
+/**
+ * Die Positionen schreiben — und dabei ihre bleibende Kennung mitführen.
+ *
+ * Zurück kommen die WIRKLICH vergebenen Schlüssel in der Reihenfolge der Eingabe: der Aufrufer
+ * hängt die Fotos daran, und eine neue Zeile bekommt hier ihren ersten.
+ *
+ * MEDIA-SCRAP — `images_purchase`/`images_sale` bleiben leer: die Fotos sind Medien und hängen als
+ * Verknüpfungen an der Zeile, nicht als Bytes in ihr.
+ */
+function insertLines(tradeId: string, lines: ScrapTradeLineInput[], createdAt: string, branchId: string): string[] {
   const db = getDatabase();
+  const keys: string[] = [];
   for (let i = 0; i < lines.length; i++) {
     const l = lines[i];
     const purchase = round3(Number(l.purchasePrice) || 0);
     const sale = round3(Number(l.salePrice) || 0);
+    const lineKey = (typeof l.lineKey === 'string' && l.lineKey.trim()) ? l.lineKey.trim() : uuid();
+    keys.push(lineKey);
     db.run(
       `INSERT INTO scrap_trade_lines (
         id, scrap_trade_id, position, weight_grams, karat,
         purchase_price, sale_price, profit, notes,
-        images_purchase, images_sale, created_at
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        images_purchase, images_sale, created_at, line_key, branch_id
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '[]', '[]', ?, ?, ?)`,
       [
         uuid(), tradeId, i + 1,
         round3(Number(l.weightGrams) || 0), l.karat,
         purchase, sale, round3(sale - purchase),
         l.notes || null,
-        JSON.stringify(l.imagesPurchase || []),
-        JSON.stringify(l.imagesSale || []),
-        createdAt,
+        createdAt, lineKey, branchId,
       ]
     );
   }
+  return keys;
+}
+
+/** Die Fotos der Positionen an ihre Zeilen hängen — in DERSELBEN Klammer wie das Geschäft. */
+function linkLinePhotos(tradeId: string, lines: ScrapTradeLineInput[], keys: string[], vorher: string[] = []): void {
+  applyScrapGalleries(
+    tradeId,
+    lines.map((l, i) => ({ lineKey: keys[i], purchase: l.imagesPurchase ?? [], sale: l.imagesSale ?? [] })),
+    keys,
+    vorher,
+  );
+}
+
+/** Welche Positionen dieses Geschäft JETZT hat — gefragt, BEVOR sie ersetzt werden. */
+function currentLineKeys(tradeId: string): string[] {
+  return query('SELECT line_key FROM scrap_trade_lines WHERE scrap_trade_id = ?', [tradeId])
+    .map((r) => String(r.line_key ?? '')).filter(Boolean);
 }
 
 function insertPayments(tradeId: string, paymentsOut: ScrapTradePaymentInput[], paymentsIn: ScrapTradePaymentInput[], createdAt: string): void {
@@ -324,7 +362,8 @@ export function createScrapTradeInHouse(raw: ScrapTradeInput, branchId: string):
       now, now, userId,
     ]
   );
-  insertLines(id, input.lines, now);
+  const keys = insertLines(id, input.lines, now, branchId);
+  linkLinePhotos(id, input.lines, keys);
   insertPayments(id, input.paymentsOut, input.paymentsIn, now);
   post(id, input);
   return resultOf(id);
@@ -369,9 +408,14 @@ export function updateScrapTradeInHouse(tradeId: string, expectedVersion: number
   );
 
   // Lines + Payments komplett ersetzen
+  const vorherigeSchluessel = currentLineKeys(tradeId);
   db.run(`DELETE FROM scrap_trade_lines WHERE scrap_trade_id = ?`, [tradeId]);
   db.run(`DELETE FROM scrap_trade_payments WHERE scrap_trade_id = ?`, [tradeId]);
-  insertLines(tradeId, input.lines, now);
+  // MEDIA-SCRAP — die Zeilen entstehen neu, ihre Schlüssel nicht: eine Position, die der Mensch
+  // behalten hat, bekommt denselben zurück und behält damit ihre Fotos. Eine gelöschte Position
+  // verliert ihre — `linkLinePhotos` räumt genau das auf.
+  const keys = insertLines(tradeId, input.lines, now, branchId);
+  linkLinePhotos(tradeId, input.lines, keys, vorherigeSchluessel);
   insertPayments(tradeId, input.paymentsOut, input.paymentsIn, now);
 
   // Ledger reverse + repost — alle offenen Transaktionen zurueckdrehen (L-14)

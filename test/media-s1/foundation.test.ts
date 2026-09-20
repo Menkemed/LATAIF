@@ -69,7 +69,11 @@ function desc(hash: string, size: number) { return { hash, extension: 'jpg', con
 function leaseFor(db: OrchestratorRawDb): OrchestratorLease { return { db, epoch: 0, async saveDurably() {}, release() {} }; }
 function seed(db: any): void {
   db.run(`CREATE TABLE tenants (id TEXT PRIMARY KEY)`); db.run(`CREATE TABLE branches (id TEXT PRIMARY KEY, tenant_id TEXT)`); db.run(`CREATE TABLE users (id TEXT PRIMARY KEY, tenant_id TEXT)`);
-  for (const t of Object.values(MEDIA_ENTITY_SCOPE)) db.run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT)`);
+  // Jeder Besitzertyp mit SEINER Kennspalte (MEDIA-SCRAP: die Position ueber `line_key`).
+  for (const t of Object.values(MEDIA_ENTITY_SCOPE)) {
+    const extra = t.idCol === 'id' ? '' : `, ${t.idCol} TEXT`;
+    db.run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT${extra})`);
+  }
   for (const c of ['images TEXT DEFAULT \'[]\'', 'purchase_price REAL', 'planned_sale_price REAL', 'min_sale_price REAL', 'notes TEXT']) db.run(`ALTER TABLE products ADD COLUMN ${c}`);
   db.run(`INSERT INTO tenants (id) VALUES ('t1')`);
   db.run(`INSERT INTO branches (id, tenant_id) VALUES ('b1','t1'),('b2','t1')`);

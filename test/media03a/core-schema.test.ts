@@ -53,6 +53,11 @@ function seedEntityStubs(db: any): void {
   db.run(`CREATE TABLE branches (id TEXT PRIMARY KEY, tenant_id TEXT)`);
   db.run(`CREATE TABLE users    (id TEXT PRIMARY KEY, tenant_id TEXT)`);
   for (const t of ['products','repairs','purchase_inbox','purchases','suppliers','customers','documents','orders','offers','precious_metals','scrap_trades']) {
+    db.run(`CREATE TABLE IF NOT EXISTS ${t} (id TEXT PRIMARY KEY, branch_id TEXT)`);
+  }
+  // MEDIA-SCRAP — die Position hat ihre eigene Kennung (`line_key`) und ihre eigene Filiale.
+  db.run('CREATE TABLE IF NOT EXISTS scrap_trade_lines (id TEXT PRIMARY KEY, line_key TEXT, branch_id TEXT)');
+  for (const t of [] as string[]) {
     db.run(`CREATE TABLE ${t} (id TEXT PRIMARY KEY, branch_id TEXT)`);
   }
   db.run(`INSERT INTO tenants (id) VALUES ('t1'),('t2')`);
@@ -106,10 +111,12 @@ async function main(): Promise<void> {
   applyMediaSchema(db);
   ok(tableCount(db) === afterFirst, 'fresh: second applyMediaSchema is idempotent (table count stable)');
   ok(afterFirst - beforeCount === MEDIA_TABLES.length, `fresh: exactly ${MEDIA_TABLES.length} tables added`);
-  // entity-scope SSOT completeness (14 types, production_input excluded)
-  // MEDIA-IDENTITY — vierzehn statt dreizehn: `customer` ist seit dem Ausweisdokument ein
-  // Medienbesitzer (Rolle `identity_document`, Klasse `sensitive`).
-  ok(Object.keys(MEDIA_ENTITY_SCOPE).length === 14, 'entity-scope SSOT has 14 types');
+  // entity-scope SSOT completeness (15 types, production_input excluded)
+  // MEDIA-IDENTITY — `customer` ist seit dem Ausweisdokument ein Medienbesitzer (Rolle
+  // `identity_document`, Klasse `sensitive`).
+  // MEDIA-SCRAP — und `scrap_trade_line`, weil ein Belegfoto der POSITION gehört und nicht dem
+  // Geschäft; seine Kennung ist `line_key`, nicht `id`.
+  ok(Object.keys(MEDIA_ENTITY_SCOPE).length === 15, 'entity-scope SSOT has 15 types');
   ok(!('production_input' in MEDIA_ENTITY_SCOPE), 'production_input excluded from entity scope');
 
   // ── generation size CHECK (§12) ──

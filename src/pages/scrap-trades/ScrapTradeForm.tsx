@@ -13,6 +13,7 @@
 // prüft das Haus beim Speichern (`core/metals/scrap-house`). `busy` sperrt den Knopf, solange ein
 // Speichern läuft; die `data-scrap-*`-Marken sind die Griffe der Zwei-Rechner-Prüfung.
 
+import { emptyScrapPhotoUrls, loadScrapPhotos, revokeScrapPhotos, toModel, toView, type ScrapPhotoUrls } from '@/core/metals/scrap-photo-view';
 import { useEffect, useMemo, useState } from 'react';
 import { TrendingUp, TrendingDown, Link2, Plus, X } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
@@ -64,6 +65,18 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
   const { customers, loadCustomers } = useCustomerStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
 
+  // MEDIA-SCRAP — die gespeicherten Fotos einmal holen (geprüft) und als Objekt-URLs zeigen; beim
+  // Verlassen wieder freigeben. Gespeichert wird weiterhin die Medienkennung.
+  const [fotoUrls, setFotoUrls] = useState<ScrapPhotoUrls>(() => emptyScrapPhotoUrls());
+  useEffect(() => {
+    let weg = false;
+    let geholt: ScrapPhotoUrls | null = null;
+    loadScrapPhotos(initial)
+      .then((u) => { geholt = u; if (weg) { revokeScrapPhotos(u); return; } setFotoUrls(u); })
+      .catch(() => { /* ein fehlendes Foto darf die Maske nicht aufhalten */ });
+    return () => { weg = true; revokeScrapPhotos(geholt); };
+  }, [initial]);
+
   const [linkSeller, setLinkSeller] = useState(!!initial?.sellerCustomerId);
   const [linkBuyer, setLinkBuyer] = useState(!!initial?.buyerSupplierId);
   const [error, setError] = useState<string | null>(null);
@@ -79,13 +92,18 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
     notes: initial?.notes || '',
     lines: initial?.lines?.length
       ? initial.lines.map(l => ({
+          // MEDIA-SCRAP — die bleibende Kennung der Position reist mit, sonst fände der Primary
+          // nach dem Ersetzen der Zeilen nicht mehr, welches Foto zu welchem Goldstück gehört.
+          lineKey: l.lineKey,
           weightGrams: l.weightGrams,
           karat: l.karat,
           purchasePrice: l.purchasePrice,
           salePrice: l.salePrice,
           notes: l.notes || '',
-          imagesPurchase: l.imagesPurchase,
-          imagesSale: l.imagesSale,
+          // Das Modell der Maske sind MEDIENKENNUNGEN. Nur ein Geschäft von früher, das nie über
+          // den Medienkern gespeichert wurde, bringt noch seine alten Daten-URLs mit.
+          imagesPurchase: l.photos?.purchase.length ? l.photos.purchase.map(p => p.mediaId) : l.imagesPurchase,
+          imagesSale: l.photos?.sale.length ? l.photos.sale.map(p => p.mediaId) : l.imagesSale,
         }))
       : [emptyLine()],
     paymentsOut: initial?.paymentsOut?.length
@@ -756,8 +774,8 @@ function LineEditor({
         <div data-scrap-line-photos="purchase">
           <label className="text-overline" style={{ marginBottom: 8, display: 'block' }}>Purchase Photo</label>
           <ImageUpload
-            images={line.imagesPurchase || []}
-            onChange={imgs => set('imagesPurchase', imgs)}
+            images={toView(line.imagesPurchase, fotoUrls)}
+            onChange={imgs => set('imagesPurchase', toModel(imgs, fotoUrls))}
             maxImages={3}
             disabled={disabled}
           />
@@ -765,8 +783,8 @@ function LineEditor({
         <div data-scrap-line-photos="sale">
           <label className="text-overline" style={{ marginBottom: 8, display: 'block' }}>Sale Photo</label>
           <ImageUpload
-            images={line.imagesSale || []}
-            onChange={imgs => set('imagesSale', imgs)}
+            images={toView(line.imagesSale, fotoUrls)}
+            onChange={imgs => set('imagesSale', toModel(imgs, fotoUrls))}
             maxImages={3}
             disabled={disabled}
           />
