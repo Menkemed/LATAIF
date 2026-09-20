@@ -32,6 +32,8 @@ import type { OrderLineStatus, OrderStatus, Purchase, PurchaseStatus } from '@/c
 import { deriveOrderStatusFromLines } from '@/core/models/types';
 import { getDatabase } from '@/core/db/database';
 import { query, getNextDocumentNumber } from '@/core/db/helpers';
+import { currentUserId } from '@/core/db/helpers';
+import { applyInboxGallery } from '@/core/purchases/inbox-media';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { trackInsert, trackUpdate, trackRefund, trackDelete } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
@@ -53,6 +55,14 @@ export const PURCHASE_LIFECYCLE_OP = {
   RETURN_TO_SUPPLIER: 'purchases.return_to_supplier',
   CANCEL: 'purchases.cancel',
   DISMISS_INBOX: 'purchases.dismiss_inbox',
+  /**
+   * MEDIA-INBOX — das Telefon legt einen Posteingangs-Eintrag an.
+   *
+   * Vorher tat es das über den allgemeinen Abgleich-Push: eine Tabellenzeile mit einer Daten-URL
+   * darin, an jeder Geschäftsregel vorbei. Ein Foto, das ein Mensch aufnimmt, ist eine HANDLUNG
+   * des Hauses — sie bekommt einen Namen, einen geprüften Absender und eine Auftragskennung.
+   */
+  CREATE_INBOX: 'purchase_inbox.create',
 } as const;
 
 /** Ein fachliches Nein des Einkaufs-Lebenszyklus — am Primary eine Absage der Maske, fern ein eingefrorenes Urteil. */
@@ -801,6 +811,45 @@ export interface PurchaseInboxDismissed { inboxId: string; status: 'dismissed' }
  * dem schon ein Einkauf entstand (`done`), zurück auf „verworfen". Die Zeile hat keine Fassung;
  * der einseitige Übergang aus `pending`, geprüft in der Transaktion, ist ihr Wächter.
  */
+/** Was beim Anlegen eines Posteingangs-Eintrags herauskommt. */
+export interface PurchaseInboxCreated { inboxId: string; status: 'pending'; photoCount: number }
+
+/**
+ * MEDIA-INBOX §3 — einen Posteingangs-Eintrag anlegen und sein Foto in DERSELBEN Klammer anhängen.
+ *
+ * Die Bytes sind vorher schon ein geprüftes, veröffentlichtes Medium geworden (der Ingest hat seine
+ * eigenen durablen Haltepunkte und gehört nicht in eine offene Geschäftstransaktion). Hier entsteht
+ * nur noch die Zeile — ohne Bilderliste — und die Verknüpfung. Scheitert eines von beiden, nimmt
+ * die Klammer beides zurück: kein halber Eintrag, keine halbe Verknüpfung.
+ */
+export function createPurchaseInboxInHouse(
+  input: { note?: string; mediaIds: readonly string[] },
+  branchId: string,
+  now: string,
+): PurchaseInboxCreated {
+  assertBooks();
+  if (input.mediaIds.length === 0) throw nein('INBOX_PHOTO_REQUIRED', 'an inbox entry is a photo — there is nothing to file without one');
+  const inboxId = uuid();
+  let userId: string | null = null;
+  try { userId = currentUserId() || null; } catch { userId = null; }
+  getDatabase().run(
+    `INSERT INTO purchase_inbox (id, branch_id, images, note, status, created_at, created_by)
+     VALUES (?, ?, '[]', ?, 'pending', ?, ?)`,
+    [inboxId, branchId, input.note || null, now, userId],
+  );
+  applyInboxGallery(inboxId, input.mediaIds);
+  logAuditOrThrow({
+    module: 'Purchase', entityType: 'purchase_inbox', entityId: inboxId, action: 'CREATE', field: 'status',
+    oldValue: '', newValue: 'pending', actor: { branchId },
+  });
+  // Die Zeile reist über den normalen Abgleich — OHNE Bildbytes; das Foto ist ein Medium.
+  trackChange('purchase_inbox', inboxId, 'insert', {
+    id: inboxId, branch_id: branchId, images: '[]', note: input.note || null,
+    status: 'pending', created_at: now, created_by: userId,
+  });
+  return { inboxId, status: 'pending', photoCount: input.mediaIds.length };
+}
+
 export function dismissPurchaseInboxInHouse(inboxId: string, branchId: string): PurchaseInboxDismissed {
   assertBooks();
   const r = query('SELECT id, status FROM purchase_inbox WHERE id = ? AND branch_id = ?', [inboxId, branchId])[0];

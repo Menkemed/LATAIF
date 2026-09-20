@@ -154,11 +154,14 @@ const MATRIX: Record<string, Zeile> = {
   'documents.set_ocr': { ui: 'DocumentList — OCR', gleich: true },
   // POST-PARITY R7A (PP-2) — der Fertigungsabschluss.
   'production.complete': { ui: 'ProductionDetail — Complete Production', gleich: true },
+  // MEDIA-INBOX — das Telefon: ein Foto in den Einkaufs-Posteingang. Am Bildschirm gibt es dafuer
+  // keine eigene Maske; die sichtbare Handlung ist der Knopf des Telefons.
+  'purchase_inbox.create': { ui: 'Mobile — Purchase: Send photo to inbox', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 103, `A 103 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete)) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 104, `A 104 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete)) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

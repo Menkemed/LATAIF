@@ -43,7 +43,10 @@ const R6C = ['suppliers.create', 'suppliers.update', 'agents.update', 'partners.
   // R6F — vierzehn Einkaufs-/Auftrags-/Kommissions-/Produktions-/Büro-Buchungen; Beweise in test/r6f.
   'purchases.return_to_supplier', 'purchases.cancel', 'purchases.dismiss_inbox', 'orders.cancel', 'orders.update_line_status', 'orders.mark_line_ordered', 'orders.update_line', 'consignments.return_after_sale', 'consignments.cancel_sale', 'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr',
   // POST-PARITY R7A (PP-2) — eins: der Fertigungsabschluss (ProductionDetail — Complete Production); Beweise in test/r7a.
-  'production.complete'];
+  'production.complete',
+  // MEDIA-INBOX — eins: der Einkaufs-Posteingang des Telefons (Mobile — Purchase: Send photo to inbox);
+  // Beweise in test/media-business/purchase-inbox.
+  'purchase_inbox.create'];
 
 // ── §1 Die Matrix deckt sich mit der Freigabeliste ──────────────────────
 const registry = src('src/core/bridge/command-registry.ts');
@@ -202,11 +205,11 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   const ops = src('src/core/bridge/store-read-ops.ts');
   const parity = [...ops.matchAll(/export const OP_[A-Z_]+ = '([^']+)'/g)].length;
   ok(parity === 53, `10 dreiundfuenfzig typisierte Auskuenfte (R6C: +2 Inventur; R6D: +3) (${parity})`);
-  ok(erlaubt.length === 103, `10 vierzig Buchungen plus die eine aus R5F.1 plus elf aus R6C plus achtundzwanzig aus R6D plus acht aus R6E plus vierzehn aus R6F plus eins aus R7A (production.complete) (${erlaubt.length})`);
+  ok(erlaubt.length === 104, `10 vierzig Buchungen plus die eine aus R5F.1 plus elf aus R6C plus achtundzwanzig aus R6D plus acht aus R6E plus vierzehn aus R6F plus eins aus R7A (production.complete) (${erlaubt.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '')
     .matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 176, `10 und Rust laesst dieselben 176 Namen durch (PRE-G5) (${rustOps})`);
+  ok(rustOps === 177, `10 und Rust laesst dieselben 177 Namen durch (PRE-G5) (${rustOps})`);
 }
 
 // ── R5A — Auftrag → Rechnung: EINE Handlung, EINE Buchung ───────────────

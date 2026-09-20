@@ -333,10 +333,10 @@ function bildDesStornos(db: Db, inv: string) {
   ok(!vorher.includes("'invoices.cancel'"), 'DECISION vor R5F.1 gab es keine Buchung fuer den Storno');
   const upd = codeOf(src('src/core/bridge/invoice-lifecycle-commands.ts'));
   ok(!/status/.test((/onlyKnownFields\(raw, \[([^\]]*)\]\)/.exec(upd)?.[1]) ?? ''), 'DECISION invoices.update kennt keinen Status — es aendert Zeilen mit Grund');
-  ok(ALLOWED_MUTATIONS.length === 103 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `DECISION invoices.cancel bleibt die eine R5F.1-Buchung an Platz 41; seither nur die elf aus R6C, die achtundzwanzig aus R6D, die acht aus R6E und die vierzehn aus R6F + eins aus R7A (production.complete) (${ALLOWED_MUTATIONS.length})`);
+  ok(ALLOWED_MUTATIONS.length === 104 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `DECISION invoices.cancel bleibt die eine R5F.1-Buchung an Platz 41; seither nur die elf aus R6C, die achtundzwanzig aus R6D, die acht aus R6E und die vierzehn aus R6F + eins aus R7A (production.complete) (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 176 &&/pub const OP_INVOICES_CANCEL: &str = "invoices\.cancel";/.test(rust), `DECISION Rust laesst genau diese eine mehr durch (${rustOps})`);
+  ok(rustOps === 177 &&/pub const OP_INVOICES_CANCEL: &str = "invoices\.cancel";/.test(rust), `DECISION Rust laesst genau diese eine mehr durch (${rustOps})`);
   ok(!!(OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.cancel']
     && S((OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.cancel']) === S((OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.update']),
   'DECISION dasselbe Recht wie am Primary („Cancel" nur mit canEditInvoices)');
@@ -649,7 +649,9 @@ for (const weg of ['primary', 'fern'] as const) {
   const R6F_MUT = ['purchases.return_to_supplier', 'purchases.cancel', 'purchases.dismiss_inbox', 'orders.cancel', 'orders.update_line_status', 'orders.mark_line_ordered', 'orders.update_line', 'consignments.return_after_sale', 'consignments.cancel_sale', 'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr'];
   // POST-PARITY R7A (PP-2) — und eine: der Fertigungsabschluss, hinter den R6F-Namen.
   const R7A_MUT = ['production.complete'];
-  ok(vorher.length === 40 && jetzt.length === 103 && S(jetzt.filter((o) => !vorher.includes(o))) === S(['invoices.cancel', ...R6C_MUT, ...R6D_MUT, ...R6E_MUT, ...R6F_MUT, ...R7A_MUT]) && vorher.every((o) => jetzt.includes(o)),
+  // MEDIA-INBOX — die eine Buchung dieses Bundles: der Posteingang des Telefons.
+  const PREG5_MUT = ['purchase_inbox.create'];
+  ok(vorher.length === 40 && jetzt.length === 104 && S(jetzt.filter((o) => !vorher.includes(o))) === S(['invoices.cancel', ...R6C_MUT, ...R6D_MUT, ...R6E_MUT, ...R6F_MUT, ...R7A_MUT, ...PREG5_MUT]) && vorher.every((o) => jetzt.includes(o)),
     `REGISTRY vorher 40, R5F.1 +invoices.cancel, R6C +11, R6D +28, R6E +8, R6F +14, R7A +1 (production.complete) — keine faellt weg (${vorher.length} → ${jetzt.length})`);
   const zaehle = (t: string): number => [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
   const rustVorher = vor5f('src-tauri/src/bridge.rs');
@@ -663,8 +665,8 @@ for (const weg of ['primary', 'fern'] as const) {
   const R6F_RUST = ['OP_PURCHASES_RETURN_TO_SUPPLIER', 'OP_PURCHASES_CANCEL', 'OP_PURCHASES_DISMISS_INBOX', 'OP_ORDERS_CANCEL', 'OP_ORDERS_UPDATE_LINE_STATUS', 'OP_ORDERS_MARK_LINE_ORDERED', 'OP_ORDERS_UPDATE_LINE', 'OP_CONSIGNMENTS_RETURN_AFTER_SALE', 'OP_CONSIGNMENTS_CANCEL_SALE', 'OP_PRODUCTION_CREATE', 'OP_TASKS_CREATE', 'OP_TASKS_UPDATE', 'OP_DOCUMENTS_UPLOAD', 'OP_DOCUMENTS_SET_OCR'];
   const R7A_RUST = ['OP_PRODUCTION_COMPLETE'];
   // PRE-G5 — die Duplikatsauskunft (Copy details am Telefon aus der Autoritaet).
-  const PREG5_RUST = ['OP_PRODUCTS_DUPLICATES_GET'];
-  ok(zaehle(rustVorher) === 107 && zaehle(rustJetzt) === 176 && S(neuRust) === S(['OP_INVOICES_CANCEL', ...R6C_RUST, ...R6D_RUST, ...R6E_RUST, ...R6F_RUST, ...R7A_RUST, ...PREG5_RUST]),
+  const PREG5_RUST = ['OP_PRODUCTS_DUPLICATES_GET', 'OP_PURCHASE_INBOX_CREATE'];
+  ok(zaehle(rustVorher) === 107 && zaehle(rustJetzt) === 177 && S(neuRust) === S(['OP_INVOICES_CANCEL', ...R6C_RUST, ...R6D_RUST, ...R6E_RUST, ...R6F_RUST, ...R7A_RUST, ...PREG5_RUST]),
     `REGISTRY Rust 107 → 108 (R5F.1: OP_INVOICES_CANCEL) → 121 (R6C: 13 namentlich) → 152 (R6D: 31 namentlich) → 160 (R6E: 8 namentlich) → 174 (R6F: 14 namentlich) → 175 (R7A: OP_PRODUCTION_COMPLETE) → 176 (PRE-G5: OP_PRODUCTS_DUPLICATES_GET) (${S(neuRust)})`);
   let zu = '';
   try { reg5.registerCommand('invoices.delete', { kind: 'mutation', handler: () => ({}) } as never); } catch (e) { zu = String(e); }

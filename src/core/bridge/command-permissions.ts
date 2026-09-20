@@ -210,6 +210,10 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'purchases.return_to_supplier': null,
   'purchases.cancel': null,
   'purchases.dismiss_inbox': null,
+  // MEDIA-INBOX — dasselbe Recht wie das Anlegen eines Einkaufs: wer einkaufen darf, darf ein Foto
+  // in den Posteingang legen. Am Telefon gibt es keine Maske, die ein eigenes Recht prüfen könnte;
+  // die Rolle des geprüften Absenders entscheidet.
+  'purchase_inbox.create': null,
   // OrderDetail: „Cancel Order", „Edit" einer Position und „Beim Supplier bestellen" hinter `perm.canManageOrders`.
   'orders.cancel': admin('OrderDetail: perm.canManageOrders'),
   'orders.update_line_status': null,

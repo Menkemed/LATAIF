@@ -8,6 +8,7 @@
 //  - Status: DRAFT | UNPAID | PARTIALLY_PAID | PAID | CANCELLED
 //  - Teilzahlungen erlaubt, Status wird automatisch aktualisiert
 
+import { inboxPhotoRefsFor } from '@/core/purchases/inbox-media';
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import type { Purchase, PurchaseLine, PurchasePayment, PurchaseStatus, PurchaseReturn, PurchaseReturnLine, PurchaseReturnStatus, Product, SupplierSnapshot } from '@/core/models/types';
@@ -92,7 +93,20 @@ interface PurchaseInput {
 export interface PurchaseInboxItem {
   id: string;
   branchId: string;
+  /**
+   * ALTBESTAND — Daten-URLs in der Zeile, von einem älteren Telefon. Wird NICHT mehr geschrieben
+   * (MEDIA-INBOX); das Foto ist ein Medium. Bleibt lesbar, damit ein alter Eintrag nicht blind wird.
+   */
   images: string[];
+  /**
+   * MEDIA-INBOX — das Foto als REFERENZ: genug zum Anzeigen, nie Bytes. `thumb` ist die kleine
+   * Fassung; eine Kachel von 92 Pixeln braucht nicht die große, und der Medienkern hat sie schon.
+   */
+  photos?: Array<{
+    mediaId: string;
+    main: { key: string; hash: string; extension: string };
+    thumb: { key: string; hash: string; extension: string } | null;
+  }>;
   note?: string;
   status: string;
   createdAt: string;
@@ -700,7 +714,17 @@ export function loadPurchaseInboxFor(ctx: BusinessReadContext): { purchaseInbox:
     `SELECT * FROM purchase_inbox WHERE branch_id = ? AND status = 'pending' ORDER BY created_at DESC`,
     [ctx.branchId],
   );
-  return { purchaseInbox: rows.map(rowToInboxItem) };
+  const purchaseInbox = rows.map(rowToInboxItem);
+  // MEDIA-INBOX — die Fotos als Referenzen dazu, in EINER Abfrage. Die Liste bleibt eine Liste.
+  const refs = inboxPhotoRefsFor(purchaseInbox.map((i) => i.id), ctx.branchId);
+  for (const item of purchaseInbox) {
+    item.photos = (refs.get(item.id) ?? []).map((r) => ({
+      mediaId: r.mediaId,
+      main: { key: r.main.storageKey, hash: r.main.hash, extension: r.main.extension },
+      thumb: r.thumbnail ? { key: r.thumbnail.storageKey, hash: r.thumbnail.hash, extension: r.thumbnail.extension } : null,
+    }));
+  }
+  return { purchaseInbox };
 }
 
 /**

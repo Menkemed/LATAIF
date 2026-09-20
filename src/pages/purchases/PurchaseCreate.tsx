@@ -100,7 +100,10 @@ export function PurchaseCreate() {
   useEffect(() => {
     if (!inboxId || inboxLoaded || categories.length === 0 || !prefill.inbox) return;
     const imgs = prefill.inbox.images;
-    if (imgs.length > 0) {
+    // MEDIA-INBOX — ein Eintrag von heute bringt Medienkennungen statt Bytes mit; sein Foto hängt
+    // der Einkauf nach dem Anlegen an den neuen Artikel. Die Maske muss trotzdem in den
+    // „New Item"-Modus gehen — sonst verschwände der Weg, den der Mensch gerade gegangen ist.
+    if (imgs.length > 0 || prefill.inbox.mediaIds.length > 0) {
       setLines(prev => {
         const next = [...prev];
         next[0] = {

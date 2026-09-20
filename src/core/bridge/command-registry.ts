@@ -153,6 +153,11 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // POST-PARITY R7A (PP-2) — der Fertigungsabschluss: Arbeit und Gemeinkosten eines bestätigten Belegs
   // genau einmal als Ausgabe (bar bezahlt) gebucht, Beleg COMPLETED — an beiden Rechnern dieselbe Hausfolge.
   'production.complete',
+  // MEDIA-INBOX — das Telefon legt einen Posteingangs-Eintrag an. Vorher war das ein allgemeiner
+  // Abgleich-Push mit einer Daten-URL in der Zeile, an jeder Geschäftsregel vorbei; jetzt ist es
+  // eine benannte Handlung mit geprüftem Absender, Filiale, Auftragskennung und Medienreferenz.
+  // Sie steht am ENDE: die Liste wächst chronologisch, und ihre Reihenfolge ist Vertrag.
+  'purchase_inbox.create',
 ];
 
 export interface CommandSpec {

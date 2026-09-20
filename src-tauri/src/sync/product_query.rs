@@ -642,6 +642,14 @@ fn live_media_grant(
                  AND EXISTS (SELECT 1 FROM scrap_trade_lines sl
                               WHERE sl.line_key = l.entity_id AND sl.branch_id = l.branch_id))
               OR
+              -- MEDIA-INBOX — das Foto im Einkaufs-Posteingang. Der zweite Rechner zeigt diese
+              -- Liste genauso, also muss er sie auch sehen duerfen. Eine Rolle, die Filiale des
+              -- Eintrags, Klasse wie ein internes Arbeitsfoto — nie `sensitive`.
+              (o.security_class IN ('public', 'internal')
+                 AND l.entity_type = 'purchase_inbox' AND l.media_role = 'intake_photo'
+                 AND EXISTS (SELECT 1 FROM purchase_inbox pi
+                              WHERE pi.id = l.entity_id AND pi.branch_id = l.branch_id))
+              OR
               (o.security_class = 'sensitive' AND ?4 = 1
                  AND l.entity_type = 'customer' AND l.media_role = 'identity_document'
                  AND EXISTS (SELECT 1 FROM customers c WHERE c.id = l.entity_id AND c.branch_id = l.branch_id))

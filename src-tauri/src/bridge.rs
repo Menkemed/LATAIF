@@ -290,6 +290,10 @@ pub const OP_DOCUMENTS_UPLOAD: &str = "documents.upload";
 pub const OP_DOCUMENTS_SET_OCR: &str = "documents.set_ocr";
 // POST-PARITY R7A (PP-2) — der Fertigungsabschluss (Arbeit + Gemeinkosten genau einmal gebucht).
 pub const OP_PRODUCTION_COMPLETE: &str = "production.complete";
+// MEDIA-INBOX — das Telefon legt einen Einkaufs-Posteingangs-Eintrag an. Ein benannter Auftrag
+// statt eines allgemeinen Abgleich-Pushes: geprüfter Absender, Filiale, Auftragskennung, und das
+// Foto reist als Ablagekennung, nie als Bytes.
+pub const OP_PURCHASE_INBOX_CREATE: &str = "purchase_inbox.create";
 
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
 // Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
@@ -474,6 +478,8 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_PRODUCTION_COMPLETE,
     // PRE-G5 — die Duplikatsauskunft: dieselbe Erkennung und dasselbe Kopieren wie am Bildschirm.
     OP_PRODUCTS_DUPLICATES_GET,
+    // MEDIA-BUSINESS — der Posteingang des Telefons als Geschäftsauftrag.
+    OP_PURCHASE_INBOX_CREATE,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

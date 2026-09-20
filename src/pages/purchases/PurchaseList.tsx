@@ -19,9 +19,39 @@ import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { PURCHASE_LIFECYCLE_OP } from '@/core/purchases/purchase-lifecycle-house';
 import { saveInboxDismiss } from '@/core/purchases/purchase-house';
+// MEDIA-INBOX — das Foto steht nicht mehr in der Zeile. Die Kachel holt die Bytes über den
+// geprüften Weg (Primary: Hash-Prüfung; PC2: `/api/media` mit Ausweis) und macht daraus eine
+// Objekt-URL, die mit der Kachel wieder verschwindet. `images[0]` bleibt für Einträge von früher.
+import { loadVerifiedMedia, revokeVerifiedMedia } from '@/core/media/verified-view';
+import type { PurchaseInboxItem } from '@/stores/purchaseStore';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+}
+
+function InboxThumb({ item }: { item: PurchaseInboxItem }) {
+  const legacy = item.images[0] ?? null;
+  // Die kleine Fassung genügt für 92 Pixel; gibt es sie nicht, die große.
+  const quelle = item.photos?.[0]?.thumb ?? item.photos?.[0]?.main ?? null;
+  const key = quelle?.key ?? '';
+  const hash = quelle?.hash ?? '';
+  const extension = quelle?.extension ?? '';
+  const [geladen, setGeladen] = useState<string | null>(null);
+  useEffect(() => {
+    if (!key) return;
+    let lebt = true;
+    let sicht: { url: string; revocable: boolean } | null = null;
+    void loadVerifiedMedia({ key, hash, extension }, fetch, 'INTAKE_PHOTO_UNAVAILABLE')
+      .then((v) => { if (!lebt) { revokeVerifiedMedia(v); return; } sicht = v; setGeladen(v.url); })
+      // Kein leeres Bild vortäuschen: die Kachel bleibt der Platzhalter, der Eintrag bleibt klickbar.
+      .catch(() => { /* nicht lesbar — der Platzhalter bleibt stehen */ });
+    return () => { lebt = false; revokeVerifiedMedia(sicht); };
+  }, [key, hash, extension]);
+  // Ein Eintrag von heute zeigt sein Medium, einer von früher seine alte Daten-URL.
+  const url = key ? geladen : legacy;
+  return url
+    ? <img src={url} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
+    : <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: 24 }}>🛒</div>;
 }
 
 type StatusFilter = '' | PurchaseStatus;
@@ -125,9 +155,7 @@ export function PurchaseList() {
                     width: 92, height: 92, borderRadius: 8, overflow: 'hidden',
                     border: '1px solid #E5E9EE', background: '#F2F4F7',
                   }}>
-                  {item.images[0]
-                    ? <img src={item.images[0]} alt="" style={{ width: '100%', height: '100%', objectFit: 'cover' }} />
-                    : <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%', fontSize: 24 }}>🛒</div>}
+                  <InboxThumb item={item} />
                 </div>
                 <button
                   onClick={() => void dismissInboxPhoto(item.id)}

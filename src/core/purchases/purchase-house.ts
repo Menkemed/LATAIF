@@ -17,6 +17,7 @@ import type { WriteAdapters, WriteOutcome } from '@/core/data/shared-write';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { localHouseCtx } from '@/core/payables/payables-house';
 import { normalizeSpecImages } from '@/core/media/record-image';
+import { adoptInboxPhotosToProduct } from './inbox-media';
 import { planPurchaseCreate, type PurchaseCreateInput, type PurchaseCreatePort } from './purchase-create';
 import {
   PURCHASE_PRIMARY_ONLY, PurchaseLifecycleRejected,
@@ -64,7 +65,17 @@ export function createPurchaseInHouse(input: PurchaseCreateInput, branchId: stri
   const payload = planPurchaseCreate(input, housePurchasePort(branchId));
   const store = usePurchaseStore.getState();
   const purchase = store.createPurchase(payload as never);
-  if (input.inboxId) usePurchaseStore.getState().markPurchaseInboxDone(input.inboxId);
+  if (input.inboxId) {
+    // MEDIA-INBOX §6 — aus dem Posteingangsfoto wird das Bild des neuen Artikels: DASSELBE
+    // Medienobjekt, neue Verknüpfung (`stock_image`, Klasse unverändert `internal`). Erst ab
+    // hier ist es Artikelmedium, und erst ab hier gilt der Produktvertrag samt Embedding.
+    // Entsteht kein neuer Artikel (der Einkauf lief auf einen vorhandenen), bleibt das Foto beim
+    // Eintrag: er ist dann der einzige Ort, an dem dieser Nachweis hängt.
+    const idx = input.lines.findIndex((l) => l.newProduct);
+    const productId = idx >= 0 ? purchase.lines[idx]?.productId : undefined;
+    if (productId) adoptInboxPhotosToProduct(input.inboxId, productId);
+    usePurchaseStore.getState().markPurchaseInboxDone(input.inboxId);
+  }
   return purchase;
 }
 

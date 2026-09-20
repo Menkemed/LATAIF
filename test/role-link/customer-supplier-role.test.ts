@@ -327,11 +327,11 @@ const gegenparteien = (db: Db): string => all(db,
 
 // ── Vertrag: Registry, Buchungscode, Oberfläche ─────────────────────────────────────────────
 {
-  ok((registry.ALLOWED_MUTATIONS as readonly string[]).length === 103 && (registry.ALLOWED_MUTATIONS as readonly string[]).includes('suppliers.create'),
+  ok((registry.ALLOWED_MUTATIONS as readonly string[]).length === 104 && (registry.ALLOWED_MUTATIONS as readonly string[]).includes('suppliers.create'),
     'REGISTRY keine neue Buchung — suppliers.create trägt die Rolle (103 Mutationen)');
   const rust = src('src-tauri/src/bridge.rs');
   const ops = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(ops === 176, `REGISTRY 176 unverändert (${ops})`);
+  ok(ops === 177, `REGISTRY 176 unverändert (${ops})`);
   // Kein Buchungs-, Saldo- oder Belegcode liest die Verknüpfung.
   const walk = (d: string): string[] => readdirSync(d).flatMap((f) => { const p = join(d, f); return statSync(p).isDirectory() ? walk(p) : [p]; });
   const leser = walk(resolvePath(repo, 'src')).filter((p) => /\.(ts|tsx)$/.test(p))

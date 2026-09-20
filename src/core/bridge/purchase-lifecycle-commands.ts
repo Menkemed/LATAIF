@@ -29,14 +29,22 @@ import { BusinessError, registerCommand, type CommandActor } from './command-reg
 import { assertHouseBranch } from './remote-create-support';
 import {
   PURCHASE_LIFECYCLE_OP, PurchaseLifecycleRejected, isRefundMethod, type RefundMethod,
-  returnToSupplierInHouse, cancelPurchaseInHouse, dismissPurchaseInboxInHouse,
+  returnToSupplierInHouse, cancelPurchaseInHouse, dismissPurchaseInboxInHouse, createPurchaseInboxInHouse,
 } from '@/core/purchases/purchase-lifecycle-house';
+import {
+  discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStagedRecord,
+  isStagingId, readStagedAsRecordImages, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader,
+} from './remote-create-support';
+import { ingestInboxPhotos } from '@/core/purchases/inbox-media';
 
 export const OP_PURCHASES_RETURN_TO_SUPPLIER = PURCHASE_LIFECYCLE_OP.RETURN_TO_SUPPLIER;
 export const OP_PURCHASES_CANCEL = PURCHASE_LIFECYCLE_OP.CANCEL;
 export const OP_PURCHASES_DISMISS_INBOX = PURCHASE_LIFECYCLE_OP.DISMISS_INBOX;
+export const OP_PURCHASE_INBOX_CREATE = PURCHASE_LIFECYCLE_OP.CREATE_INBOX;
 
-export const PURCHASE_LIFECYCLE_OPS = [OP_PURCHASES_RETURN_TO_SUPPLIER, OP_PURCHASES_CANCEL, OP_PURCHASES_DISMISS_INBOX] as const;
+export const PURCHASE_LIFECYCLE_OPS = [
+  OP_PURCHASES_RETURN_TO_SUPPLIER, OP_PURCHASES_CANCEL, OP_PURCHASES_DISMISS_INBOX, OP_PURCHASE_INBOX_CREATE,
+] as const;
 
 /** Ein unbrauchbarer Rumpf — eine Antwort, keine Störung. Der Client korrigiert und schickt neu. */
 export class PurchaseLifecyclePayloadError extends Error {
@@ -185,6 +193,73 @@ export function runPurchaseCancel(deps: EngineDeps, identity: CommandIdentity, r
   });
 }
 
+/**
+ * MEDIA-INBOX §2 — der Rumpf des neuen Befehls: eine Notiz und die Kennungen der abgelegten Fotos.
+ * NIE Bytes; eine Kennung ist der Inhaltshash der Ablage, sonst nichts.
+ */
+export interface InboxCreateRequest { note?: string; stagingIds: string[] }
+
+export const INBOX_MAX_PHOTOS = 3;
+
+export function parseInboxCreate(raw: unknown): InboxCreateRequest {
+  if (!isPlain(raw)) throw new PurchaseLifecyclePayloadError('payload must be an object');
+  for (const k of Object.keys(raw)) {
+    if (FORBIDDEN.includes(k)) throw new PurchaseLifecyclePayloadError(`the primary decides ${k}, not the client`);
+    if (k === 'images' || k === 'image') {
+      throw new PurchaseLifecyclePayloadError('an intake photo travels as staged bytes (photos: [{ stagingId }]), never inside the order');
+    }
+    if (!['note', 'photos'].includes(k)) throw new PurchaseLifecyclePayloadError(`unknown field: ${k}`);
+  }
+  const photos = raw.photos;
+  if (!Array.isArray(photos) || photos.length === 0) {
+    throw new PurchaseLifecyclePayloadError('an inbox entry is a photo — name at least one staged photo');
+  }
+  if (photos.length > INBOX_MAX_PHOTOS) throw new PurchaseLifecyclePayloadError(`at most ${INBOX_MAX_PHOTOS} photos`);
+  const stagingIds = photos.map((slot) => {
+    if (isPlain(slot) && Object.keys(slot).length === 1 && isStagingId(slot.stagingId)) return String(slot.stagingId);
+    throw new PurchaseLifecyclePayloadError('a photo is { stagingId: <content hash> }');
+  });
+  const note = raw.note;
+  if (note !== undefined && note !== null && typeof note !== 'string') {
+    throw new PurchaseLifecyclePayloadError('note must be text');
+  }
+  return { note: typeof note === 'string' && note.trim() ? note.trim() : undefined, stagingIds };
+}
+
+/**
+ * MEDIA-INBOX §3 — die Bytes holen und AUFNEHMEN, bevor die Klammer aufgeht.
+ *
+ * Der Ingest hat eigene durable Haltepunkte; in einer offenen Geschäftstransaktion hätte er keine.
+ * Ein Nein wird mitgenommen statt geworfen: eine Wiederholung desselben Auftrags — die Ablage ist
+ * dann längst geräumt — muss die eingefrorene Antwort bekommen und keinen neuen Fehler.
+ */
+export async function runInboxCreate(
+  deps: EngineDeps, identity: CommandIdentity, raw: unknown, media: InboxMedia = {},
+): Promise<CommandOutcome> {
+  const req = parseInboxCreate(raw);
+  const read = media.readStaged ?? invokeReadStagedRecord;
+  const owner = stagingOwnerOf(identity);
+  let mediaIds: string[] = [];
+  let fotoFehler: unknown = null;
+  try {
+    const urls = await readStagedAsRecordImages(req.stagingIds, owner, read,
+      (m) => new PurchaseLifecyclePayloadError(m, 'STAGED_IMAGE_GONE'));
+    mediaIds = await ingestInboxPhotos(urls);
+  } catch (e) { fotoFehler = e; }
+  const outcome = await runRemoteCommand(deps, identity, () => {
+    if (fotoFehler) throw fotoFehler;
+    assertHouseBranch(identity);
+    return { ...urteil(() => createPurchaseInboxInHouse({ note: req.note, mediaIds }, identity.branchId, deps.now())) };
+  });
+  if (outcome.kind === 'ok') {
+    await discardStagedAfterSuccess(req.stagingIds, owner, media.discardStaged ?? invokeDiscardStaged);
+  }
+  return outcome;
+}
+
+/** Nur für Tests: die Zwischenablage ohne Tauri. Voreingestellt sind die echten Aufrufe. */
+export interface InboxMedia { readStaged?: StagedMediaReader; discardStaged?: StagedMediaDiscard }
+
 export function runInboxDismiss(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseInboxDismiss(raw);
   return runRemoteCommand(deps, identity, () => {
@@ -220,3 +295,4 @@ async function execute(run: Run, op: string, payload: unknown, actor?: CommandAc
 registerCommand(OP_PURCHASES_RETURN_TO_SUPPLIER, { kind: 'mutation', handler: (p, a) => execute(runPurchaseReturn, OP_PURCHASES_RETURN_TO_SUPPLIER, p, a) });
 registerCommand(OP_PURCHASES_CANCEL, { kind: 'mutation', handler: (p, a) => execute(runPurchaseCancel, OP_PURCHASES_CANCEL, p, a) });
 registerCommand(OP_PURCHASES_DISMISS_INBOX, { kind: 'mutation', handler: (p, a) => execute(runInboxDismiss, OP_PURCHASES_DISMISS_INBOX, p, a) });
+registerCommand(OP_PURCHASE_INBOX_CREATE, { kind: 'mutation', handler: (p, a) => execute((d, i, r) => runInboxCreate(d, i, r), OP_PURCHASE_INBOX_CREATE, p, a) });

@@ -525,7 +525,7 @@ marker('POST_PARITY_R7B_PP6_PRIMARY_ONLY_GUARDS_FIXED');
   ok(S(ccs) === S(['src/core/bridge/client-mode.ts']), `WIRED clearClientSession hängt am Trennen und am Verwerfen des Ausweises (${S(ccs)})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rl = rust.slice(rust.indexOf('pub const REMOTE_OPS'), rust.indexOf('];', rust.indexOf('pub const REMOTE_OPS')));
-  ok((rl.match(/OP_[A-Z_]+/g) ?? []).length === 176, 'REGISTRY unverändert 175 (TS == Rust; R7B fügt keinen Fernbefehl hinzu)');
+  ok((rl.match(/OP_[A-Z_]+/g) ?? []).length === 177, 'REGISTRY unverändert 175 (TS == Rust; R7B fügt keinen Fernbefehl hinzu)');
 }
 marker('POST_PARITY_R7B_PP7_DEAD_CODE_REMOVED');
 

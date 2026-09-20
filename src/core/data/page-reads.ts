@@ -16,6 +16,7 @@
 //      fragen darf, entscheidet allein der geprüfte Absender. Eine fremde Kennung ist deshalb
 //      nicht „verboten", sondern schlicht leer.
 // ════════════════════════════════════════════════════════════════════════════
+import { inboxGalleryMediaIds } from '@/core/purchases/inbox-media';
 import { query } from '@/core/db/helpers';
 import type { BusinessReadContext } from '@/core/data/read-context';
 
@@ -425,7 +426,12 @@ export function productDetailReadsFor(ctx: BusinessReadContext, productId: strin
 
 // ── Einkauf anlegen: die Vorlage aus Wareneingang oder Auftrag ───────────
 export interface PurchaseCreatePrefill {
-  inbox: { images: string[]; note: string } | null;
+  /**
+   * MEDIA-INBOX — `mediaIds` sind die Fotos des Eintrags im Medienspeicher; `images` bleibt der
+   * Altbestand eines älteren Eintrags. Der Einkauf übernimmt das vorhandene Medium, statt die
+   * Bytes noch einmal durch den Rechner zu schicken.
+   */
+  inbox: { images: string[]; mediaIds: string[]; note: string } | null;
   order: { orderNumber: string; customerName: string } | null;
   lines: Array<{ id: string; productId?: string; description: string; quantity: number }>;
 }
@@ -443,7 +449,8 @@ export function purchaseCreatePrefillFor(
         const parsed = JSON.parse(s(rows[0].images) || '[]') as unknown;
         if (Array.isArray(parsed)) images = parsed as string[];
       } catch { /* kein Bild */ }
-      inbox = { images, note: s(rows[0].note) };
+      // MEDIA-INBOX — die Medienkennungen des Eintrags; `images` ist nur noch der Altbestand.
+      inbox = { images, mediaIds: inboxGalleryMediaIds(params.inboxId), note: s(rows[0].note) };
     }
   }
 

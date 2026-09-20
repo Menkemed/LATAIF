@@ -286,6 +286,7 @@ CREATE TABLE customers (id TEXT, branch_id TEXT);
 CREATE TABLE suppliers (id TEXT, branch_id TEXT);
 CREATE TABLE purchases (id TEXT, branch_id TEXT, supplier_snapshot TEXT);
 CREATE TABLE scrap_trade_lines (id TEXT, scrap_trade_id TEXT, line_key TEXT, branch_id TEXT);
+CREATE TABLE purchase_inbox (id TEXT, branch_id TEXT);
 "#;
 
 /// MEDIA-IDENTITY — die Rolle gehoert zum Tor. Wo ein Test sie nicht prueft, steht die staerkste

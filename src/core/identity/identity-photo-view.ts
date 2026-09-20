@@ -11,9 +11,7 @@
 // Es entsteht nirgends eine Daten-URL, die irgendwo liegen bleibt: kein Zustand, kein Cache, keine
 // Spalte. Wer die Maske verlässt, gibt die Objekt-URL wieder frei.
 // ════════════════════════════════════════════════════════════════════════════
-import { readsFromPrimary } from '@/core/data/primary-source';
-import { clientConfig } from '@/core/bridge/client-mode';
-import { TauriMediaGateway } from '@/core/media/gateway';
+import { loadVerifiedMedia, revokeVerifiedMedia } from '@/core/media/verified-view';
 import type { IdentityDocumentRef, PurchaseIdentityReference } from '@/core/models/types';
 
 export interface IdentityPhotoView {
@@ -29,28 +27,13 @@ export interface IdentityPhotoView {
 
 /** Objekt-URLs freigeben — genau einmal, beim Verlassen der Maske. */
 export function revokeIdentityPhoto(view: IdentityPhotoView | null): void {
-  if (view?.revocable) { try { URL.revokeObjectURL(view.url); } catch { /* schon weg */ } }
+  revokeVerifiedMedia(view);
 }
 
-async function fromPrimary(ref: IdentityDocumentRef): Promise<IdentityPhotoView> {
-  const gateway = new TauriMediaGateway();
-  const scope = ref.key.split('/')[0];
-  const m = await gateway.readVerifiedMedia({ tenantScope: scope, hash: ref.hash, extension: ref.extension });
-  const blob = new Blob([m.bytes as unknown as BlobPart], { type: m.mime_type || 'image/jpeg' });
-  return { mediaId: ref.mediaId, url: URL.createObjectURL(blob), revocable: true, fromLinkedCustomer: ref.fromLinkedCustomer };
-}
-
-async function fromClient(ref: IdentityDocumentRef, fetchFn: typeof fetch): Promise<IdentityPhotoView> {
-  const c = clientConfig();
-  if (!c?.token) throw new Error('NOT_AUTHENTICATED');
-  const res = await fetchFn(`${c.serverUrl}/api/media?key=${encodeURIComponent(ref.key)}`, {
-    headers: { Authorization: `Bearer ${c.token}` },
-  });
-  // Ein abgewiesener Zugriff ist ein Fehler, nie ein leeres Bild: „nicht da" und „darfst du nicht"
-  // sähen sonst gleich aus, und niemand wüsste, welches von beidem gilt.
-  if (!res.ok) throw new Error(`IDENTITY_MEDIA_UNAVAILABLE_${res.status}`);
-  const blob = await res.blob();
-  return { mediaId: ref.mediaId, url: URL.createObjectURL(blob), revocable: true, fromLinkedCustomer: ref.fromLinkedCustomer };
+/** Die beiden geprüften Wege stehen EINMAL (`verified-view`); hier kommt nur die Herkunft dazu. */
+async function holen(ref: IdentityDocumentRef, fetchFn: typeof fetch): Promise<IdentityPhotoView> {
+  const v = await loadVerifiedMedia(ref, fetchFn, 'IDENTITY_MEDIA_UNAVAILABLE');
+  return { mediaId: ref.mediaId, url: v.url, revocable: v.revocable, fromLinkedCustomer: ref.fromLinkedCustomer };
 }
 
 /**
@@ -77,7 +60,7 @@ export async function loadPurchaseIdentityPhoto(
     sourceOwnerId: identity.ownerId,
     fromLinkedCustomer: identity.ownerType === 'customer',
   };
-  return readsFromPrimary() ? fromClient(ref, fetchFn) : fromPrimary(ref);
+  return holen(ref, fetchFn);
 }
 
 /**
@@ -118,5 +101,5 @@ export async function loadIdentityPhoto(
   if (!ref) {
     return legacy ? { mediaId: '', url: legacy, revocable: false, fromLinkedCustomer: false } : null;
   }
-  return readsFromPrimary() ? fromClient(ref, fetchFn) : fromPrimary(ref);
+  return holen(ref, fetchFn);
 }

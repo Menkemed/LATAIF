@@ -174,7 +174,7 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
   // CENTRAL-C3H hat die sechzehn in C3G als `B_DEFERRED` klassifizierten Aktionen freigeschaltet.
   // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
-  ok(list.length === 103, `SCOPE genau 103 Mutationen (R7A) (${list.length})`);
+  ok(list.length === 104, `SCOPE genau 104 Mutationen (R7A) (${list.length})`);
   for (const op of ['repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned']) {
     ok(list.includes(op), `SCOPE ${op} steht namentlich auf der Liste`);
   }

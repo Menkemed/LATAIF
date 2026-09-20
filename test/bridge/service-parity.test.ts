@@ -463,7 +463,7 @@ const REPAIR_COMPARE = [
   // CENTRAL-C3H hat die sechzehn in C3G als `B_DEFERRED` klassifizierten Aktionen freigeschaltet.
   // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
-  ok(known.length === 60 && reads.length === 19 && ALLOWED_MUTATIONS.length === 103,
+  ok(known.length === 60 && reads.length === 19 && ALLOWED_MUTATIONS.length === 104,
     `SCOPE 1 Probe + 19 Reads + 40 Mutationen = 60 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
   const c3f = ['repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned'];
   for (const op of c3f) ok((ALLOWED_MUTATIONS as readonly string[]).includes(op), `SCOPE ${op} steht darauf`);

@@ -1901,24 +1901,51 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     syncAiButtonState();
   }
 
-  // Gemeinsamer Sync-Push. Wirft bei 401 (Session) + Fehlern.
-  async function pushChanges(changes) {
-    const token = localStorage.getItem(TOKEN_KEY);
-    if (!token) { init(); throw new Error('Not signed in'); }
-    const res = await fetch('/api/sync/push', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
-      body: JSON.stringify({ changes }),
+  // MEDIA-INBOX — der Posteingang des Einkaufs ist ein GESCHÄFTSAUFTRAG, kein Tabellen-Push.
+  //
+  // Vorher schrieb dieser Reiter eine Zeile samt Daten-URL über `/api/sync/push` — an jeder
+  // Geschäftsregel vorbei, ohne Auftragskennung: blieb die Antwort aus, wusste niemand, ob der
+  // Eintrag entstanden war, und ein zweiter Versuch legte einen zweiten an. Jetzt geht das Foto
+  // zuerst in die Ablage des Primary und danach ein benannter Auftrag mit seiner Kennung — derselbe
+  // durable Weg wie bei Reparatur und Kommission.
+  const PI_DB = 'lataif-inbox-intents'; const PI_STORE = 'intents';
+  function piIdbOpen() {
+    return new Promise((resolve, reject) => {
+      const r = indexedDB.open(PI_DB, 1);
+      r.onupgradeneeded = () => {
+        const db = r.result;
+        if (!db.objectStoreNames.contains(PI_STORE)) db.createObjectStore(PI_STORE, { keyPath: 'key' });
+      };
+      r.onsuccess = () => resolve(r.result);
+      r.onerror = () => reject(r.error);
     });
-    if (res.status === 401) {
-      localStorage.removeItem(TOKEN_KEY);
-      init();
-      setText('loginError', 'Session expired. Please sign in again.');
-      throw new Error('Session expired');
-    }
-    if (!res.ok) throw new Error('Save failed: ' + res.status);
-    return res.json();
   }
+  const piStore = {
+    async get(k) { const db = await piIdbOpen(); return idbReq(db.transaction(PI_STORE, 'readonly').objectStore(PI_STORE).get(k)); },
+    async put(e) { const db = await piIdbOpen(); return idbReq(db.transaction(PI_STORE, 'readwrite').objectStore(PI_STORE).put(e)); },
+    async delete(k) { const db = await piIdbOpen(); return idbReq(db.transaction(PI_STORE, 'readwrite').objectStore(PI_STORE).delete(k)); },
+    async getAll() { const db = await piIdbOpen(); return idbReq(db.transaction(PI_STORE, 'readonly').objectStore(PI_STORE).getAll()); },
+  };
+  let piClient = null;
+  function inboxClient() {
+    if (!piClient) {
+      piClient = MobileRepair.createClient({
+        fetchFn: (u, o) => fetch(u, o),
+        store: piStore,
+        genId: uuid,
+        token: () => localStorage.getItem(TOKEN_KEY) || '',
+      });
+    }
+    return piClient;
+  }
+  // Die Kennung DIESER Aufnahme. Sie entsteht mit dem Foto und bleibt, bis der Auftrag durch ist:
+  // ein zweiter Versuch schickt damit denselben Auftrag und legt keine zweite Zeile an.
+  let piIntentKey = null;
+
+  // MEDIA-INBOX — der allgemeine Abgleich-Push ist FORT. Das Telefon schrieb damit als einziger
+  // Weg eine Geschäftszeile (`purchase_inbox`) samt Daten-URL direkt in die Tabelle; seit der
+  // Posteingang ein benannter Auftrag ist, gibt es dafür keinen Aufrufer mehr — und die Funktion
+  // wieder einzuführen hiesse, den Umweg wieder zu öffnen.
 
   const ctx = () => ({
     now: new Date().toISOString(),
@@ -2173,20 +2200,39 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     if (!photos.purchase) return setText('bError', 'Take a photo of the item first.');
     $('bSaveBtn').disabled = true;
     try {
-      const { now, branchId, userId } = ctx();
-      const inboxId = uuid();
-      const inboxData = {
-        id: inboxId, branch_id: branchId,
-        images: JSON.stringify([photos.purchase]),
-        note: $('bNote').value.trim() || null,
-        status: 'pending',
-        created_at: now, created_by: userId,
-      };
-      await pushChanges([{ table_name: 'purchase_inbox', record_id: inboxId, action: 'insert', data: JSON.stringify(inboxData) }]);
-      setText('bSuccess', 'Photo sent to the Purchase Inbox. Open it on the desktop to create the purchase.');
-      $('bNote').value = '';
-      clearPhoto('purchase', 'bPhotoArea', 'bPhotoInput', 'bPhotoStatus', EMPTY_B);
-      window.scrollTo({ top: 0, behavior: 'smooth' });
+      const client = inboxClient();
+      // Erst die Bytes in die Ablage des Primary — im Auftrag steht nur ihre Inhaltskennung.
+      // Scheitert das (kein Netz, kein Primary), geht GAR NICHTS hinaus: das Foto bleibt in der
+      // Maske, und derselbe Knopf schickt es später erneut. Genau wie bisher.
+      const staged = await client.stagePhoto(photos.purchase);
+      if (!staged.ok) {
+        setText('bError', 'The photo could not be sent (' + staged.code + '). Nothing was filed — try again.');
+        $('bSaveBtn').disabled = false;
+        return;
+      }
+      if (!piIntentKey) piIntentKey = 'inbox:' + uuid();
+      const note = $('bNote').value.trim();
+      const body = { photos: [{ stagingId: staged.stagingId }] };
+      if (note) body.note = note;
+      const r = await client.mutate(piIntentKey, 'purchase_inbox.create', body);
+      if (r.kind === 'ok') {
+        setText('bSuccess', 'Photo sent to the Purchase Inbox. Open it on the desktop to create the purchase.');
+        $('bNote').value = '';
+        piIntentKey = null;
+        clearPhoto('purchase', 'bPhotoArea', 'bPhotoInput', 'bPhotoStatus', EMPTY_B);
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      } else if (r.kind === 'rejected') {
+        piIntentKey = null;
+        setText('bError', 'The photo was not filed: ' + (r.code || 'refused by the main computer') + '.');
+      } else if (r.kind === 'unauthorized') {
+        localStorage.removeItem(TOKEN_KEY); init();
+        setText('loginError', 'Session expired. Please sign in again.');
+      } else {
+        // Offener Ausgang (kein Netz, kein Fenster am Primary): die Kennung BLEIBT. Derselbe Knopf
+        // schickt denselben Auftrag noch einmal — und der Primary antwortet dann mit seinem
+        // eingefrorenen Ergebnis statt eine zweite Zeile anzulegen.
+        setText('bError', 'The main computer did not answer (' + (r.code || 'no answer') + '). Tap Save again — the same entry is retried, never a second one.');
+      }
     } catch (e) {
       if (e.message !== 'Session expired') setText('bError', e.message || 'Save failed');
     }
