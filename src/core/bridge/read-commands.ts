@@ -32,6 +32,7 @@ import { copiedAttributes } from '@/core/products/duplicate-dismiss';
 // gefragt. Zwei Fragen an dieselbe Funktion, nie eine Nachbildung.
 import { nextOrderStatus } from '@/core/orders/order-status-flow';
 import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
+import { repairPhotoRefs } from '@/core/repairs/repair-media';
 
 export const OP_PRODUCTS_LIST = 'products.list';
 export const OP_PRODUCTS_GET = 'products.get';
@@ -1096,6 +1097,8 @@ registerCommand(OP_REPAIRS_GET, {
       "SELECT COALESCE(SUM(cost_amount), 0) AS t FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'",
       [id],
     )[0]?.t);
+    // MEDIA-REPAIR — die Fotos dieser Reparatur aus dem gemeinsamen Medienkern, in ihrer Ordnung.
+    const fotos = repairPhotoRefs(id);
     return {
       ...repairDto(found[0]), notes: str(found[0].notes),
       voucherCode: str(found[0].voucher_code), lines, openLineTotal, goldUsage,
@@ -1107,7 +1110,13 @@ registerCommand(OP_REPAIRS_GET, {
       itemCategoryId: str(found[0].item_category_id),
       itemAttributes: repairAttributes(found[0].item_attributes),
       staffId: str(found[0].staff_id),
-      images: repairImages(found[0].images),
+      // MEDIA-REPAIR — die Galerie sind REFERENZEN: die stabile Medienkennung (genau sie nennt ein
+      // „behalten") und der Speicherschluessel fuer die angemeldete Medienroute. Bytes reisen nie in
+      // einer Auskunft. Die alte Spalte wird nur noch gelesen, wenn es keine Verknuepfung gibt.
+      mediaIds: fotos.map((f) => f.mediaId),
+      mediaKeys: fotos.map((f) => f.main.storageKey),
+      thumbKeys: fotos.map((f) => f.thumbnail?.storageKey ?? f.main.storageKey),
+      images: fotos.length > 0 ? [] : repairImages(found[0].images),
     };
   },
 });

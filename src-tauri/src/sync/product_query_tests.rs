@@ -66,7 +66,7 @@ fn fixture(dir: &std::path::Path) -> std::path::PathBuf {
         CREATE TABLE agent_transfers (id TEXT PRIMARY KEY, product_id TEXT);
         CREATE TABLE production_inputs (id TEXT PRIMARY KEY, product_id TEXT);
         CREATE TABLE production_outputs (id TEXT PRIMARY KEY, product_id TEXT);
-        CREATE TABLE repairs (id TEXT PRIMARY KEY, product_id TEXT);
+        CREATE TABLE repairs (id TEXT PRIMARY KEY, product_id TEXT, branch_id TEXT);
         "#,
     )
     .unwrap();
@@ -281,7 +281,7 @@ CREATE TABLE media_blobs (tenant_id TEXT, blob_id TEXT, blob_status TEXT, curren
 CREATE TABLE media_objects (tenant_id TEXT, media_id TEXT, master_blob_id TEXT, security_class TEXT, deleted_at TEXT);
 CREATE TABLE media_variants (tenant_id TEXT, media_id TEXT, variant_type TEXT, blob_id TEXT, deleted_at TEXT);
 CREATE TABLE media_links (tenant_id TEXT, link_id TEXT, media_id TEXT, entity_type TEXT, entity_id TEXT,
-  scope_kind TEXT, branch_id TEXT, deleted_at TEXT);
+  media_role TEXT, scope_kind TEXT, branch_id TEXT, deleted_at TEXT);
 "#;
 
 fn key(n: &str) -> String { format!("t-1/{}/{}.jpg", &n.repeat(64)[0..2], n.repeat(64)) }
@@ -303,18 +303,28 @@ fn grant_fixture() -> std::path::PathBuf {
     blob("b-other-branch", "d", "available");
     blob("b-secret", "e", "available");
     blob("b-unlinked", "f", "available");
+    blob("b-gone", "0", "available");
+    blob("b-repx", "1", "available");
+    blob("b-role", "2", "available");
     conn.execute_batch("
       INSERT INTO media_objects VALUES ('t-1','m-1','b-main','internal',NULL),
                                        ('t-1','m-rep','b-repair','internal',NULL),
                                        ('t-1','m-oth','b-other-branch','internal',NULL),
                                        ('t-1','m-sec','b-secret','sensitive',NULL),
-                                       ('t-1','m-free','b-unlinked','internal',NULL);
+                                       ('t-1','m-free','b-unlinked','internal',NULL),
+                                       ('t-1','m-gone','b-gone','internal',NULL),
+                                       ('t-1','m-repx','b-repx','internal',NULL),
+                                       ('t-1','m-role','b-role','internal',NULL);
       INSERT INTO media_variants VALUES ('t-1','m-1','thumbnail','b-thumb',NULL);
+      INSERT INTO repairs (id, branch_id) VALUES ('rep-1','b-1'), ('rep-other','b-other');
       INSERT INTO media_links VALUES
-        ('t-1','l-1','m-1','product','p-dj41','branch','b-1',NULL),
-        ('t-1','l-rep','m-rep','repair','p-dj41','branch','b-1',NULL),
-        ('t-1','l-oth','m-oth','product','p-elsewhere','branch','b-other',NULL),
-        ('t-1','l-sec','m-sec','product','p-dj41','branch','b-1',NULL);
+        ('t-1','l-1','m-1','product','p-dj41','stock_image','branch','b-1',NULL),
+        ('t-1','l-rep','m-rep','repair','rep-1','gallery','branch','b-1',NULL),
+        ('t-1','l-gone','m-gone','repair','rep-gone','gallery','branch','b-1',NULL),
+        ('t-1','l-repx','m-repx','repair','rep-other','gallery','branch','b-other',NULL),
+        ('t-1','l-role','m-role','repair','rep-1','stock_image','branch','b-1',NULL),
+        ('t-1','l-oth','m-oth','product','p-elsewhere','stock_image','branch','b-other',NULL),
+        ('t-1','l-sec','m-sec','product','p-dj41','stock_image','branch','b-1',NULL);
     ").unwrap();
     db
 }
@@ -331,12 +341,27 @@ fn media_read_grant_serves_the_owners_branch_only() {
     // wrong tenant
     assert!(media_read_grant(&db, "t-other", "b-1", &key("a")).is_none(), "keys are tenant-scoped");
     // wrong owner / no owner
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("c")).is_none(), "a non-product owner has no read rule yet");
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("c")).is_some(), "a repair of this branch is served too (MEDIA-REPAIR)");
     assert!(media_read_grant(&db, "t-1", "b-1", &key("f")).is_none(), "an unlinked object is served to nobody");
     // class
     assert!(media_read_grant(&db, "t-1", "b-1", &key("e")).is_none(), "sensitive media never travel this route");
     // unknown
     assert!(media_read_grant(&db, "t-1", "b-1", &key("9")).is_none());
+}
+
+// ── MEDIA-REPAIR — die Reparatur ist ein Besitzer wie der Artikel, mit IHRER Rolle ──────────────
+#[test]
+fn media_read_grant_serves_repair_photos_of_this_branch_only() {
+    let db = grant_fixture();
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("c")).is_some(), "the photo of a repair in my branch");
+    assert!(media_read_grant(&db, "t-1", "b-other", &key("c")).is_none(), "another branch may not read it");
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("1")).is_none(), "a repair of another branch");
+    assert!(media_read_grant(&db, "t-other", "b-1", &key("c")).is_none(), "keys stay tenant-scoped");
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("0")).is_none(), "a repair that does not exist grants nothing");
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("2")).is_none(), "a repair link under the product role is refused");
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("UPDATE media_links SET deleted_at = 'x' WHERE link_id = 'l-rep'", []).unwrap();
+    assert!(media_read_grant(&db, "t-1", "b-1", &key("c")).is_none(), "a removed repair photo is no longer served");
 }
 
 #[test]

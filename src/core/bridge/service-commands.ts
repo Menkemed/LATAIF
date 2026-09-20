@@ -47,6 +47,7 @@ import {
   normalizeRepairCreate, planRepairCreate, type RepairCreateInput, type RepairEditInput, type RepairPhotoSlot,
 } from '@/core/repairs/repair-rules';
 import { houseRepairPort } from '@/core/repairs/repair-house';
+import { applyRepairGallery, resolveRepairPhotoSlots } from '@/core/repairs/repair-media';
 import { TRANSFER_SETTLEMENT_MODELS, TransferActionRejected, normalizeTransferCreate } from '@/core/agents/transfer-rules';
 import { createTransferInHouse } from '@/core/agents/transfer-house';
 import {
@@ -180,10 +181,10 @@ function parsePhotos(raw: unknown, allowKeep: boolean): RepairPhotoSlot[] | unde
       const keys = Object.keys(slot);
       if (keys.length === 1 && keys[0] === 'stagingId' && isStagingId(slot.stagingId)) return { stagingId: slot.stagingId };
       if (allowKeep && keys.length === 1 && keys[0] === 'keep'
-        && typeof slot.keep === 'number' && Number.isInteger(slot.keep) && slot.keep >= 0) return { keep: slot.keep };
+        && typeof slot.keep === 'string' && slot.keep.startsWith('media-')) return { keep: slot.keep };
     }
     throw new ServicePayloadError(allowKeep
-      ? 'a photo is { keep: <position> } or { stagingId: <content hash> }'
+      ? 'a photo is { keep: <media id> } or { stagingId: <content hash> }'
       : 'a new repair has only new photos: { stagingId: <content hash> }');
   });
 }
@@ -192,20 +193,21 @@ function parsePhotos(raw: unknown, allowKeep: boolean): RepairPhotoSlot[] | unde
  * Die Fotos auflösen — INNERHALB des Auftrags: neue Bytes aus der Zwischenablage (Eigentümer ist
  * die geprüfte Identität), vorhandene aus der Liste, die die Fassung gerade bestätigt hat.
  */
-async function resolvePhotos(
-  slots: readonly RepairPhotoSlot[], current: readonly string[], owner: StagingOwner, read: StagedMediaReader,
+/**
+ * MEDIA-REPAIR — aus dem Plan des zweiten Rechners wird die Galerie in MEDIENKENNUNGEN:
+ * neue Bytes aus der Zwischenablage werden aufgenommen (geprüft, normalisiert, veröffentlicht),
+ * behaltene Kennungen bleiben. Das läuft VOR der Klammer des Auftrags — der Ingest hat seine
+ * eigenen durablen Haltepunkte und darf nicht in einer offenen Transaktion sitzen.
+ */
+async function resolvePhotoMedia(
+  slots: readonly RepairPhotoSlot[], repairId: string | undefined, owner: StagingOwner, read: StagedMediaReader,
 ): Promise<string[]> {
   const ids = [...new Set(slots.flatMap((x) => ('stagingId' in x ? [x.stagingId] : [])))];
   // POST-PARITY R7B PP-12 — der Standardleser gibt das Foto so heraus, wie es gespeichert wird (≤ 100 000 B).
   const data = await readStagedAsRecordImages(ids, owner, read, (m) => new ServicePayloadError(m));
   const byId = new Map(ids.map((id, i) => [id, data[i]]));
-  return slots.map((x) => {
-    if ('stagingId' in x) return String(byId.get(x.stagingId));
-    if (x.keep >= current.length) {
-      throw new CommandRejected('PHOTO_NOT_FOUND', 'this photo is not on the repair (any more)');
-    }
-    return current[x.keep];
-  });
+  const plan = slots.map((x) => ('stagingId' in x ? { dataUrl: String(byId.get(x.stagingId)) } : { keep: x.keep }));
+  return resolveRepairPhotoSlots(plan, undefined, repairId);
 }
 
 const stagedIdsOf = (slots: readonly RepairPhotoSlot[] | undefined): string[] =>
@@ -340,11 +342,14 @@ export async function runRepairCreate(
     // Kosten aus der geteilten Ableitung (C3F FINAL), und bei eigener Ware die Angaben DES ARTIKELS.
     const data = house(() => planRepairCreate(req.input, houseRepairPort(identity.branchId)));
     // Die Fotos INNERHALB des Auftrags: eine Wiederholung derselben Kennung kommt gar nicht bis hierher.
-    const images = await resolvePhotos(req.photos, [], owner, read);
+    const mediaIds = await resolvePhotoMedia(req.photos, undefined, owner, read);
     // Ab hier rechnet das Haus: Belegnummer und Gutscheincode aus seinen eigenen Quellen, der
     // Anfangsstatus, bei eigener Ware `in_repair` am Artikel und der Platzhalter-Kunde, und — wenn
     // Werkstatt und Kosten zusammenkommen — die erste Arbeitszeile.
-    const repair = useRepairStore.getState().createRepair({ ...data, images });
+    // MEDIA-REPAIR — die Zeile hält keine Bytes mehr; die Fotos hängen als Verknüpfungen daran,
+    // in DERSELBEN Klammer wie die Reparatur.
+    const repair = useRepairStore.getState().createRepair({ ...data, images: [] });
+    if (mediaIds.length > 0) house(() => applyRepairGallery(repair.id, mediaIds));
     return repairState(repair.id) as unknown as Record<string, unknown>;
   });
   // Erst wenn der Auftrag wirklich durch ist, verliert die Ablage ihren Zweck.
@@ -435,7 +440,16 @@ export async function runRepairUpdate(
   const read = extras.readStaged ?? invokeReadStagedRecord;
   const discard = extras.discardStaged ?? invokeDiscardStaged;
   const owner = stagingOwnerOf(identity);
+  // MEDIA-REPAIR — die neuen Aufnahmen werden VOR der Klammer zu Medien (eigene Haltepunkte). Ein
+  // Nein der Ablage wird NICHT hier geworfen: eine Wiederholung desselben Auftrags (die Ablage ist
+  // dann längst geräumt) muss die eingefrorene Antwort bekommen, nicht einen Fehler.
+  let galleryMediaIds: string[] | undefined;
+  let fotoFehler: unknown = null;
+  if (req.photos) {
+    try { galleryMediaIds = await resolvePhotoMedia(req.photos, req.id, owner, read); } catch (e) { fotoFehler = e; }
+  }
   const outcome = await runRemoteCommand(deps, identity, async () => {
+    if (fotoFehler) throw fotoFehler;
     assertHouseBranch(identity);
     const live = query('SELECT id FROM repairs WHERE id = ? AND branch_id = ?', [req.id, identity.branchId])[0];
     if (!live) throw new CommandRejected('REPAIR_NOT_FOUND', 'no such repair in this branch');
@@ -450,7 +464,7 @@ export async function runRepairUpdate(
     // was der Client gesehen hat — also ist das hier derselbe Stand wie seine Maske.
     const effective: Partial<Repair> = { ...seen };
     for (const [k, v] of Object.entries(req.changes)) (effective as Record<string, unknown>)[k] = v === null ? undefined : v;
-    if (req.photos) effective.images = await resolvePhotos(req.photos, seen.images ?? [], owner, read);
+    void galleryMediaIds;
 
     // DIESELBE Funktion wie „Save" am Primary: jedes Feld der Maske, dazu die eigenen Kosten, die
     // Marge und die Kartenart — nie aus dem Rumpf.
@@ -464,6 +478,8 @@ export async function runRepairUpdate(
       // gescheiterte Buchung nimmt alles zurück, ein Nein der Kostenregel ist ein Urteil.
       const buchung = watchLedgerPosts(OP_REPAIRS_UPDATE);
       house(() => rs.updateRepair(req.id, patch));
+      // MEDIA-REPAIR — die Galerie in derselben Klammer; eine fachliche Änderung, eine Fassung.
+      if (galleryMediaIds) house(() => applyRepairGallery(req.id, galleryMediaIds));
       buchung();
     } catch (e) {
       if (e instanceof Error && e.message === SUPPLIER_CREDIT_LOCK_MESSAGE) {

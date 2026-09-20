@@ -202,14 +202,20 @@
   function photoPlan(slots) {
     const plan = [];
     for (const s of (slots || []).slice(0, MAX_PHOTOS)) {
-      if (s && typeof s.keep === 'number' && s.keep >= 0) plan.push({ keep: s.keep });
+      if (s && typeof s.keep === 'string' && s.keep) plan.push({ keep: s.keep });
       else if (s && typeof s.stagingId === 'string' && s.stagingId) plan.push({ stagingId: s.stagingId });
     }
     return plan;
   }
 
   /** Hat sich an den Bildern etwas geaendert? Unveraendert = der Plan ist 0,1,2,… ueber alle. */
-  function photosUnchanged(plan, storedCount) {
+  // MEDIA-REPAIR — unveraendert heisst: genau die gespeicherten Medien, in genau dieser Reihenfolge.
+  function photosUnchanged(plan, stored) {
+    var ids = Array.isArray(stored) ? stored : [];
+    if (!Array.isArray(plan) || plan.length !== ids.length) return false;
+    return plan.every(function (p, i) { return p && p.keep === ids[i]; });
+  }
+  function photosUnchangedLegacy(plan, storedCount) {
     if (plan.length !== storedCount) return false;
     return plan.every(function (p, i) { return typeof p.keep === 'number' && p.keep === i; });
   }
@@ -231,7 +237,7 @@
       const now = valueOf(form, k);
       if (stableJson(was) !== stableJson(now)) body[k] = now;
     }
-    if (plan && !photosUnchanged(plan, (repair.images || []).length)) body.photos = plan;
+    if (plan && !photosUnchanged(plan, repair.mediaIds || [])) body.photos = plan;
     return body;
   }
 

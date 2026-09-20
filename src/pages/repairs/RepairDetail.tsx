@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Trash2, Save, ClipboardCheck, ExternalLink, Download, MessageCircle, FileText, RotateCcw } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { shouldAdoptRecord, editBaselineRevision } from '@/core/data/form-sync';
+import { loadRepairPhotos, revokeRepairPhotos, type RepairPhotoView } from '@/core/repairs/repair-photo-view';
 import { Button } from '@/components/ui/Button';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
@@ -202,6 +203,24 @@ export function RepairDetail() {
     if (w.remote && !rev) { alert(fehlertext(nichtAmClient(was + ' (no revision loaded)'))); return null; }
     return rev ?? 0;
   }
+  // Die Bytes holt die Maske ueber den geprueften Weg — und gibt sie beim Verlassen wieder frei.
+  useEffect(() => {
+    if (!id) return;
+    let lebt = true;
+    let geladen: RepairPhotoView[] = [];
+    setFotoFehler('');
+    loadRepairPhotos(id, repair?.images ?? [])
+      .then((v) => {
+        geladen = v;
+        if (!lebt) { revokeRepairPhotos(v); return; }
+        setFotos(v);
+        setForm((f) => ({ ...f, images: v.map((x) => x.mediaId || x.url) }));
+      })
+      .catch((e) => { if (lebt) setFotoFehler(`The photos could not be loaded (${String((e as Error).message)}).`); });
+    return () => { lebt = false; revokeRepairPhotos(geladen); setFotos([]); };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id, repair?.revision]);
+
   const customer = useMemo(() => repair ? customers.find(c => c.id === repair.customerId) : null, [repair, customers]);
   const product = useMemo(() => repair?.productId ? products.find(p => p.id === repair.productId) : null, [repair, products]);
 
@@ -235,6 +254,11 @@ export function RepairDetail() {
   // alten Stand zurueck, ohne dass es jemand merkte. Dass der Stand sich inzwischen geaendert haben
   // koennte, faengt die Fassung ab (`expectedRevision` → RECORD_CHANGED) — nicht ein heimliches
   // Zuruecksetzen der Maske. Dieselbe Regel gilt am Telefon.
+  // MEDIA-REPAIR — die Galerie ist eine Liste von REFERENZEN. `fotos` ist, was angezeigt wird
+  // (Objekt-URLs), `form.images` das Modell: eine Medienkennung heisst „behalten", eine Daten-URL
+  // ist eine neue Aufnahme. Beide Listen liegen in derselben Reihenfolge nebeneinander.
+  const [fotos, setFotos] = useState<RepairPhotoView[]>([]);
+  const [fotoFehler, setFotoFehler] = useState('');
   const [formVon, setFormVon] = useState<Repair | undefined>(undefined);
   if (shouldAdoptRecord(repair, formVon, editing)) {
     setFormVon(repair);
@@ -1138,15 +1162,22 @@ export function RepairDetail() {
               {/* Item-Fotos \u2014 Zustand bei Annahme */}
               <div style={{ marginTop: 16 }}>
                 <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Item Photos</span>
+                {fotoFehler && <p style={{ fontSize: 12, color: '#DC2626' }}>{fotoFehler}</p>}
                 {editing ? (
                   <ImageUpload
-                    images={form.images || []}
-                    onChange={imgs => setForm({ ...form, images: imgs })}
+                    images={fotos.map((f) => f.url)}
+                    onChange={(sichtbar) => {
+                      // Was sichtbar bleibt, bleibt auch im Modell: Objekt-URL → Medienkennung,
+                      // eine neue Daten-URL ist eine neue Aufnahme.
+                      const zuModell = new Map(fotos.map((f) => [f.url, f.mediaId || f.url]));
+                      setFotos(sichtbar.map((u) => fotos.find((f) => f.url === u) ?? { mediaId: '', url: u, revocable: false }));
+                      setForm({ ...form, images: sichtbar.map((u) => zuModell.get(u) ?? u) });
+                    }}
                     maxImages={REPAIR_MAX_PHOTOS}
                   />
-                ) : (repair.images && repair.images.length > 0) ? (
+                ) : (fotos.length > 0) ? (
                   <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    {repair.images.map((src, i) => (
+                    {fotos.map((f) => f.url).map((src, i) => (
                       <img
                         key={i}
                         src={src}
@@ -1165,9 +1196,9 @@ export function RepairDetail() {
               </div>
 
               {/* v0.7.19 — Foto-Lightbox via shared component (ESC + Galerie-Navigation). */}
-              {lightboxIdx !== null && repair.images && repair.images.length > 0 && (
+              {lightboxIdx !== null && fotos.length > 0 && (
                 <ImageLightbox
-                  images={repair.images}
+                  images={fotos.map((f) => f.url)}
                   index={lightboxIdx}
                   onClose={() => setLightboxIdx(null)}
                   alt="Item photo"
@@ -1521,7 +1552,7 @@ export function RepairDetail() {
           customerName={`${customer.firstName} ${customer.lastName}`}
           customerPhone={customer.phone}
           customerWhatsapp={customer.whatsapp}
-          productImage={repair.images?.[0] || product?.images?.[0]}
+          productImage={fotos[0]?.url || product?.images?.[0]}
           productLabel={repair.itemBrand ? `${repair.itemBrand} ${repair.itemModel || ''}`.trim() : (product ? `${product.brand} ${product.name}` : undefined)}
           details={`Voucher code: ${repair.voucherCode}. Repair: ${repair.repairNumber}.${repair.chargeToCustomer ? ` Amount due: ${repair.chargeToCustomer} BHD.` : ''}`}
           linkedEntityType="repair"

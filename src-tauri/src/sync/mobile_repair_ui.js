@@ -44,7 +44,7 @@
   // `slots` sind die Bilder in der Reihenfolge, die der Benutzer sieht: entweder ein GESPEICHERTES
   // (`keep` = sein Platz in der gespeicherten Liste) oder ein NEUES (Daten-URL, spaeter eine
   // Staging-Kennung). Genau daraus wird der Bildplan der Aenderung.
-  const RP = { mode: 'create', repair: null, slots: [], customer: null, draftKey: null, busy: false };
+  const RP = { mode: 'create', repair: null, slots: [], customer: null, draftKey: null, busy: false, bildUrls: [] };
 
   function rpFormValues() {
     const f = {};
@@ -72,6 +72,48 @@
   function rpClearMsgs() { rpSay('rpError', ''); rpSay('rpSuccess', ''); rpSay('rpAiMsg', ''); }
 
   // ── Bilder ───────────────────────────────────────────────────────────────────────────────────
+  /** Objekt-URLs der gespeicherten Fotos wieder freigeben (eine Maske, ein Satz). */
+  function rpGibBilderFrei() {
+    for (const u of RP.bildUrls || []) { try { URL.revokeObjectURL(u); } catch (e) { /* schon weg */ } }
+    RP.bildUrls = [];
+  }
+
+  /** Die Bytes eines gespeicherten Fotos einmalig als Daten-URL — nur fuer die KI-Anfrage. */
+  async function rpBytesAlsDatenUrl(key) {
+    try {
+      const res = await fetch('/api/media?key=' + encodeURIComponent(key), {
+        headers: { Authorization: 'Bearer ' + (localStorage.getItem(TOKEN_KEY) || '') },
+      });
+      if (!res.ok) return '';
+      const blob = await res.blob();
+      return await new Promise((fertig) => {
+        const leser = new FileReader();
+        leser.onload = () => fertig(String(leser.result || ''));
+        leser.onerror = () => fertig('');
+        leser.readAsDataURL(blob);
+      });
+    } catch (e) { return ''; }
+  }
+
+  /** Ein gespeichertes Foto ANGEMELDET holen und als Objekt-URL in die Vorschau geben. */
+  async function rpMalGespeicherteBilder() {
+    let gemalt = 0;
+    for (const slot of RP.slots) {
+      if (slot.src || !slot.key) continue;
+      try {
+        const res = await fetch('/api/media?key=' + encodeURIComponent(slot.key), {
+          headers: { Authorization: 'Bearer ' + (localStorage.getItem(TOKEN_KEY) || '') },
+        });
+        if (!res.ok) continue;
+        const url = URL.createObjectURL(await res.blob());
+        RP.bildUrls.push(url);
+        slot.src = url;
+        gemalt += 1;
+      } catch (err) { /* ein fehlendes Foto darf die Maske nicht aufhalten */ }
+    }
+    if (gemalt) rpRenderPhotos();
+  }
+
   function rpRenderPhotos() {
     const strip = $('rpPhotoStrip'), area = $('rpPhotoArea'), hint = $('rpPhotoHint'), status = $('rpPhotoStatus');
     strip.innerHTML = '';
@@ -86,7 +128,12 @@
       : '<div class="icon">📷</div><div>Tap to take photos</div><div class="hint">the item as handed in — up to 6</div>';
     RP.slots.forEach((slot, i) => {
       const t = el('div', { class: 'photo-thumb' + (i === 0 ? ' is-primary' : '') });
-      const im = el('img'); im.src = slot.src || slot.dataUrl; t.appendChild(im);
+      const im = el('img');
+      // Ohne Quelle bleibt das Feld leer, bis die angemeldete Medienroute geantwortet hat — nie ein
+      // nacktes <img src="/api/media/…">, das ohne Ausweis nur ein Fragezeichen zeigt.
+      const quelle = slot.src || slot.dataUrl;
+      if (quelle) im.src = quelle;
+      t.appendChild(im);
       if (i === 0) t.appendChild(el('div', { class: 'cover' }, 'FIRST'));
       const rm = el('button', { type: 'button', class: 'rm' }, '✕');
       rm.onclick = (ev) => { ev.stopPropagation(); ev.preventDefault(); RP.slots.splice(i, 1); rpRenderPhotos(); };
@@ -226,14 +273,19 @@
     // „Nothing changed." — die Arbeit war weg, ohne dass es jemand gemerkt haette.
     const vorherRep = RP.repair;
     const getippt = (opts && opts.keepForm && vorherRep) ? rpFormValues() : null;
-    const neueFotos = (opts && opts.keepForm) ? RP.slots.filter((s) => typeof s.keep !== 'number') : [];
+    const neueFotos = (opts && opts.keepForm) ? RP.slots.filter((s) => !s.keep && !s.legacy) : [];
     const r = await rpClient.read('repairs.get', { id: id });
     if (!r.ok) { rpSay('rpHomeError', 'Could not open the repair (' + r.code + ').'); return; }
     const rep = r.value || {};
     RP.mode = 'edit';
     RP.repair = rep;
     RP.customer = null;
-    RP.slots = (rep.images || []).map((src, i) => ({ keep: i, src: src }));
+    // MEDIA-REPAIR — gespeicherte Fotos sind Referenzen: die Kennung bleibt im Platz, die Bytes
+    // holt die Maske gleich ueber die angemeldete Medienroute (nie ein nacktes <img src=…>).
+    rpGibBilderFrei();
+    RP.slots = (rep.mediaIds || []).map((mediaId, i) => ({ keep: mediaId, key: (rep.mediaKeys || [])[i], src: '' }));
+    if (!RP.slots.length) RP.slots = (rep.images || []).map((src) => ({ keep: '', src: src, legacy: true }));
+    void rpMalGespeicherteBilder();
     rpFillForm(rep);
     if (getippt) {
       // Nur die Felder zurueckholen, die gegenueber dem ZULETZT GELESENEN Stand getippt waren — der
@@ -516,7 +568,9 @@
   // also entsteht bei einer Wiederholung kein zweites Bild.
   async function rpStageSlots() {
     for (const slot of RP.slots) {
-      if (slot.stagingId || typeof slot.keep === 'number') continue;
+      // Ein Foto aus der Zeit vor dem Medienkern (nur Daten-URL in der Spalte) wird NICHT neu
+      // hochgeladen: es bleibt, wo es steht, und wird nie neu geschrieben.
+      if (slot.stagingId || slot.keep || slot.legacy) continue;
       const r = await rpClient.stagePhoto(slot.dataUrl);
       if (!r.ok) return { ok: false, code: r.code };
       slot.stagingId = r.stagingId;
@@ -582,7 +636,10 @@
   $('rpAiBtn').onclick = async () => {
     if (RP.busy || !RP.slots.length) { rpSay('rpAiMsg', 'Take a photo first.', false); return; }
     const first = RP.slots[0];
-    const image = first.dataUrl || first.src;
+    // MEDIA-REPAIR — die KI bekommt die Bytes nur voruebergehend, fuer diesen einen Aufruf. Ein
+    // gespeichertes Foto wird dafuer angemeldet geholt und NIE wieder als Daten-URL abgelegt.
+    const image = first.dataUrl || (first.key ? await rpBytesAlsDatenUrl(first.key) : first.src);
+    if (!image) { rpSay('rpAiMsg', 'The photo could not be read.', false); return; }
     RP.busy = true;
     $('rpAiBtn').textContent = 'Identifying…';
     rpSay('rpAiMsg', 'Reading the photo…', true);

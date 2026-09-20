@@ -19,6 +19,7 @@ import { useRepairStore, sumOpenRepairLineCosts } from '@/stores/repairStore';
 import { useProductStore } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { normalizeRecordImages } from '@/core/media/record-image';
+import { applyRepairGallery, ingestRepairPhotos, resolveRepairPhotoSlots } from '@/core/repairs/repair-media';
 import type { Repair, RepairLine, RepairStatus } from '@/core/models/types';
 import {
   RepairActionRejected, assertRepairEditRefs, buildRepairEditPatch, normalizeRepairCreate, planRepairCreate,
@@ -86,10 +87,15 @@ function amPrimary<T>(work: () => T | Promise<T>): Promise<T> {
 export async function createRepairOnPrimary(form: Partial<Repair>): Promise<Repair> {
   // POST-PARITY R7B PP-12 — jedes Foto durch den EINEN Normalisierer (≤ 100 000 B), wie fern — VOR der
   // Klammer: das Umrechnen hält die Schreibreihenfolge des Primary nicht auf.
+  // MEDIA-REPAIR — die Fotos werden VOR der Klammer zu geprüften Medienobjekten (noch ohne
+  // Verknüpfung, eigene durable Haltepunkte). Danach: Reparatur + Verknüpfungen in EINER Klammer.
   const images = await normalizeRecordImages(form.images ?? []);
+  const mediaIds = await ingestRepairPhotos(images);
   return amPrimary(() => {
     const data = planRepairCreate(normalizeRepairCreate(form), houseRepairPort(currentBranchId()));
-    return useRepairStore.getState().createRepair({ ...data, images });
+    const repair = useRepairStore.getState().createRepair({ ...data, images: [] });
+    if (mediaIds.length > 0) applyRepairGallery(repair.id, mediaIds);
+    return repair;
   });
 }
 
@@ -122,8 +128,18 @@ function assertRepairRevision(id: string, expected: number): void {
 
 /** „Save" der Detailseite am Primary — derselbe Schreibsatz wie der Fernbefehl, gegen die gesehene Fassung. */
 export async function updateRepairOnPrimary(id: string, form: Partial<Repair>, expectedRevision: number): Promise<void> {
-  // POST-PARITY R7B PP-12 — neue Fotos durch den Normalisierer (vor der Klammer); gespeicherte bleiben.
-  if (form.images !== undefined) form = { ...form, images: await normalizeRecordImages(form.images, { keep: gespeicherteFotos(id) }) };
+  // MEDIA-REPAIR — `form.images` ist die gewünschte Galerie: eine bestehende Medienkennung (behalten)
+  // oder eine neue Aufnahme als Daten-URL. Neue Aufnahmen werden VOR der Klammer aufgenommen.
+  // POST-PARITY R7B PP-12 — neue Fotos durch den EINEN Normalisierer; gespeicherte bleiben.
+  let galleryMediaIds: string[] | undefined;
+  if (form.images !== undefined) {
+    const wunsch = form.images.filter((x): x is string => typeof x === 'string');
+    const neu = await normalizeRecordImages(wunsch.filter((x) => x.startsWith('data:')));
+    let i = 0;
+    galleryMediaIds = await resolveRepairPhotoSlots(
+      wunsch.map((x) => (x.startsWith('data:') ? { dataUrl: neu[i++] } : { keep: x })), undefined, id,
+    );
+  }
   return amPrimary(() => {
     assertRepairRevision(id, expectedRevision);
     const rs = useRepairStore.getState();
@@ -134,7 +150,11 @@ export async function updateRepairOnPrimary(id: string, form: Partial<Repair>, e
     const patch = buildRepairEditPatch(form, sumOpenRepairLineCosts(id));
     assertRepairEditRefs(patch, seen, houseRepairPort(currentBranchId()));
     // POST-PARITY PP-13/PP-14 — gebuchte Kopfkosten folgen der Änderung; dieselbe Buchungswache wie fern.
-    mitBuchungswache('repairs.update', () => rs.updateRepair(id, patch));
+    mitBuchungswache('repairs.update', () => {
+      rs.updateRepair(id, patch);
+      // Eine fachliche Änderung — eine Fassung: die Galerie in derselben Klammer.
+      if (galleryMediaIds) applyRepairGallery(id, galleryMediaIds);
+    });
   });
 }
 

@@ -135,13 +135,16 @@ const VERBOTEN = ['id', 'repairNumber', 'voucherCode', 'status', 'branchId', 'te
     actualCost: null, chargeToCustomer: null, repairType: 'WORKSHOP', workshopSupplierId: 'sup-1',
     estimatedReady: '2026-02-01', itemBrand: 'Rolex', itemModel: 'Sub', itemReference: '116610',
     itemSerial: 'S-1', itemDescription: 'steel', issueDescription: 'does not run',
-    images: ['data:image/png;base64,AAA', 'data:image/png;base64,BBB'],
+    images: [],
+    // MEDIA-REPAIR — die Galerie sind Referenzen: stabile Medienkennungen, nie Bytes.
+    mediaIds: ['media-a', 'media-b'],
+    mediaKeys: ['tenant-1/aa/a.jpg', 'tenant-1/bb/b.jpg'],
   };
   // Das Formular liest ALLES als Text — genau wie ein `<input>`. Dass daraus keine Scheinaenderung
   // wird, ist die eigentliche Aussage hier.
   const form: Record<string, unknown> = {};
   for (const k of M.EDIT_FIELDS) form[k] = repair[k] === null || repair[k] === undefined ? '' : String(repair[k]);
-  const behalten = M.photoPlan([{ keep: 0 }, { keep: 1 }]);
+  const behalten = M.photoPlan([{ keep: 'media-a' }, { keep: 'media-b' }]);
 
   const gleich = M.editBody(repair, form, behalten);
   ok(J(gleich) === J({ id: 'rep-1', expectedRevision: 4 }),
@@ -162,16 +165,16 @@ const VERBOTEN = ['id', 'repairNumber', 'voucherCode', 'status', 'branchId', 'te
   ok(VERBOTEN.filter((k) => k !== 'id' && k !== 'revision').every((k) => !(k in geaendert)) && !('revision' in geaendert),
     '§1 auch die Aenderung traegt kein Feld des Primary (nur `id` + `expectedRevision`)');
 
-  ok(M.photosUnchanged(behalten, 2) === true && !('photos' in geaendert),
+  ok(M.photosUnchanged(behalten, ['media-a', 'media-b']) === true && !('photos' in geaendert),
     '§1 unveraenderte Bilder → gar kein `photos` (ein Plan, der nichts aendert, wird nicht gesendet)');
-  const gedreht = M.photoPlan([{ keep: 1 }, { keep: 0 }]);
-  ok(M.photosUnchanged(gedreht, 2) === false
-    && J(M.editBody(repair, form, gedreht).photos) === J([{ keep: 1 }, { keep: 0 }]),
+  const gedreht = M.photoPlan([{ keep: 'media-b' }, { keep: 'media-a' }]);
+  ok(M.photosUnchanged(gedreht, ['media-a', 'media-b']) === false
+    && J(M.editBody(repair, form, gedreht).photos) === J([{ keep: 'media-b' }, { keep: 'media-a' }]),
     '§1 …nur umsortiert ist schon eine Aenderung (das erste Bild ist das Titelbild)');
-  const gemischt = M.photoPlan([{ keep: 1 }, { stagingId: 'c'.repeat(64) }, { keep: 0 }, { nonsense: 1 }]);
-  ok(J(gemischt) === J([{ keep: 1 }, { stagingId: 'c'.repeat(64) }, { keep: 0 }]),
+  const gemischt = M.photoPlan([{ keep: 'media-b' }, { stagingId: 'c'.repeat(64) }, { keep: 'media-a' }, { nonsense: 1 }]);
+  ok(J(gemischt) === J([{ keep: 'media-b' }, { stagingId: 'c'.repeat(64) }, { keep: 'media-a' }]),
     '§1 der Bildplan mischt Behaltenes und Neues und laesst Unbrauchbares fallen');
-  ok(M.photosUnchanged(M.photoPlan([{ keep: 0 }]), 2) === false,
+  ok(M.photosUnchanged(M.photoPlan([{ keep: 'media-a' }]), ['media-a', 'media-b']) === false,
     '§1 ein geloeschtes Bild ist eine Aenderung (kuerzerer Plan als die gespeicherte Liste)');
 }
 group('§1 Rumpf/verbotene Felder');
@@ -487,8 +490,8 @@ group('§3 AI-Leitplanken');
   const get = rc.slice(rc.indexOf('registerCommand(OP_REPAIRS_GET'));
   ok(/SELECT \$\{REPAIR_COLUMNS\}, notes, voucher_code, images, item_reference, item_description,/.test(get),
     '§4 `repairs.get` holt die Bilder und die restlichen Warenfelder dazu');
-  ok(/images: repairImages\(found\[0\]\.images\)/.test(get),
-    '§4 …und reicht sie gepruefte weiter (`repairImages`), nicht roh aus der Spalte');
+  ok(/mediaIds: fotos\.map/.test(get) && /images: fotos\.length > 0 \? \[\] : repairImages\(found\[0\]\.images\)/.test(get),
+    '§4 …als Medien-Referenzen; die alte Spalte nur noch fuer Reparaturen ohne Verknuepfung');
   // Der Index IST der Vertrag: `{keep:i}` einer Aenderung loest der Primary gegen die gespeicherte
   // Liste auf (`resolvePhotos` gegen `seen.images`). Ein Filter hier verschoebe jede folgende
   // Stelle — und ein Speichern wuerde still das falsche Foto behalten.

@@ -402,7 +402,9 @@ export function buildRepairEditPatch(e: Partial<Repair>, openLineTotal = 0): Par
     itemSerial: u(i.itemSerial),
     itemDescription: u(i.itemDescription),
     issueDescription: i.issueDescription as string,
-    images: i.images as string[],
+    // MEDIA-REPAIR — Fotos stehen NICHT mehr im Schreibsatz: sie hängen als Medien-Verknüpfungen an
+    // der Reparatur (`repair-media`). Die alte Spalte bleibt unberührt, damit eine Reparatur von
+    // früher ihre Bilder behält, bis sie neu gespeichert wird.
   };
 }
 
@@ -454,15 +456,25 @@ export function repairEditHasChanges(seen: Partial<Repair>, now: Partial<Repair>
  * dass es dieselbe ist) oder ein neues (seine Kennung in der Zwischenablage). Nie Bytes.
  * Dieselbe Form wie die Galerie beim Artikel ändern.
  */
-export type RepairPhotoSlot = { keep: number } | { stagingId: string };
+/**
+ * MEDIA-REPAIR — ein Platz der Galerie: ein BESTEHENDES Medium (stabile Kennung, kein Index in
+ * einer Liste, die sich unter dem Client ändern kann) oder eine neue Aufnahme aus der Ablage.
+ */
+export type RepairPhotoSlot = { keep: string } | { stagingId: string };
 
+/**
+ * Der Plan einer Galerie für den zweiten Rechner: `now` ist die gewünschte Reihenfolge, in der ein
+ * Eintrag entweder eine Medienkennung (behalten) oder eine Daten-URL (neu) ist. Neue Aufnahmen
+ * reisen über die Zwischenablage, behaltene nur als Kennung — nie als Bytes.
+ */
 export async function repairPhotoPlan(
-  seen: readonly string[], now: readonly string[], stage: (urls: string[]) => Promise<string[]>,
+  _seen: readonly string[], now: readonly string[], stage: (urls: string[]) => Promise<string[]>,
 ): Promise<RepairPhotoSlot[]> {
-  const fresh = now.filter((u) => !seen.includes(u));
+  const wunsch = now.filter((u): u is string => typeof u === 'string' && u.length > 0);
+  const fresh = wunsch.filter((u) => u.startsWith('data:'));
   const ids = fresh.length > 0 ? await stage(fresh) : [];
   const idOf = new Map(fresh.map((u, i) => [u, ids[i]]));
-  return now.map((u) => (seen.includes(u) ? { keep: seen.indexOf(u) } : { stagingId: String(idOf.get(u)) }));
+  return wunsch.map((u) => (u.startsWith('data:') ? { stagingId: String(idOf.get(u)) } : { keep: u }));
 }
 
 export function repairEditBody(

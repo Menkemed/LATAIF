@@ -126,6 +126,70 @@ export class MediaOwnerLinks {
     });
   }
 
+  /**
+   * MEDIA-REPAIR — die Galerie des Besitzers auf GENAU diese Medien in GENAU dieser Reihenfolge
+   * bringen: behalten, hinzufügen, entfernen und umsortieren in EINEM Schritt.
+   *
+   * Eine fachliche Änderung — eine Revision. Ein Austausch („das eine raus, das andere rein") ist
+   * hier ein Aufruf und erhöht die Revision des Besitzers genau einmal, nicht zweimal. Ändert sich
+   * nichts, wird auch nichts geschrieben und nichts revisioniert (eine Wiederholung derselben
+   * Speicherung ist damit folgenlos).
+   */
+  setGallery(
+    owner: MediaOwner,
+    mediaIds: readonly string[],
+    opts: {
+      /** `false`, wenn der Besitzer in DERSELBEN Transaktion ohnehin geschrieben wird (sein eigener
+       *  Trigger ist dann die EINE Fassung — sonst zählte ein Speichern doppelt). */
+      bumpOwner?: boolean;
+    } = {},
+  ): { changed: boolean; linkIds: string[]; revision: OwnerRevisionResult } {
+    assertMediaOwner(owner);
+    const ids = [...mediaIds];
+    if (new Set(ids).size !== ids.length) throw new MediaLinkError('MEDIA_LINK_ALREADY_ACTIVE', 'the same medium cannot occupy two slots');
+    return this.inTx(() => {
+      assertMediaOwnerExists(this.db, { entityType: owner.entityType, entityId: owner.entityId, scopeId: ownerScopeId(owner) });
+      const active = this.gallery(owner);
+      const byMedia = new Map(active.map((r) => [String(r.media_id), r]));
+      const same = active.length === ids.length && ids.every((m, i) => String(active[i].media_id) === m);
+      if (same) {
+        return { changed: false, linkIds: active.map((r) => String(r.link_id)), revision: { kind: 'not_revisioned' } as OwnerRevisionResult };
+      }
+      for (const mediaId of ids) if (!byMedia.has(mediaId)) this.assertLinkableObject(owner, mediaId);
+      const now = new Date().toISOString();
+      // 1) alle Erstplatzierungen lösen, damit beim Umsortieren kein zweiter „primary" entsteht
+      this.clearPrimary(owner);
+      // 2) was nicht mehr gewünscht ist, wird still gelegt (die Zeile bleibt als Nachweis)
+      for (const [mediaId, r] of byMedia) {
+        if (ids.includes(mediaId)) continue;
+        this.db.run(`UPDATE media_links SET deleted_at = ?, is_primary = 0 WHERE tenant_id = ? AND link_id = ?`, [now, owner.tenantId, String(r.link_id)]);
+      }
+      // 3) jede gewünschte Kennung an ihren Platz — behalten, wieder aufnehmen oder neu anlegen
+      const linkIds: string[] = [];
+      ids.forEach((mediaId, i) => {
+        const linkId = linkIdFor({ ...owner, mediaId });
+        const existing = this.one(`SELECT deleted_at FROM media_links WHERE tenant_id = ? AND link_id = ?`, [owner.tenantId, linkId]);
+        if (existing) {
+          this.db.run(`UPDATE media_links SET deleted_at = NULL, sort_order = ?, is_primary = 0 WHERE tenant_id = ? AND link_id = ?`,
+            [i, owner.tenantId, linkId]);
+        } else {
+          this.db.run(
+            `INSERT INTO media_links (tenant_id, link_id, scope_kind, branch_id, entity_type, entity_id, media_id, media_role, sort_order, is_primary, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?)`,
+            [owner.tenantId, linkId, owner.scopeKind, owner.scopeKind === 'branch' ? owner.branchId : null,
+              owner.entityType, owner.entityId, mediaId, owner.role, i, now],
+          );
+        }
+        linkIds.push(linkId);
+      });
+      // 4) Platz 0 ist die Erstplatzierung (eine leere Galerie hat keine)
+      if (linkIds.length > 0) this.db.run(`UPDATE media_links SET is_primary = 1 WHERE tenant_id = ? AND link_id = ?`, [owner.tenantId, linkIds[0]]);
+      this.assertGallery(owner);
+      const revision: OwnerRevisionResult = opts.bumpOwner === false ? { kind: 'not_revisioned' } : this.bump(owner);
+      return { changed: true, linkIds, revision };
+    });
+  }
+
   // ── internals ────────────────────────────────────────────────────────────────────────────
 
   private bump(owner: MediaOwner): OwnerRevisionResult {
@@ -161,7 +225,7 @@ export class MediaOwnerLinks {
 
   private gallery(owner: MediaOwner): Row[] {
     return this.all(
-      `SELECT link_id, sort_order, is_primary FROM media_links
+      `SELECT link_id, media_id, sort_order, is_primary FROM media_links
         WHERE tenant_id = ? AND scope_kind = ? AND ${owner.scopeKind === 'branch' ? 'branch_id = ?' : 'branch_id IS NULL'}
           AND entity_type = ? AND entity_id = ? AND media_role = ? AND deleted_at IS NULL
         ORDER BY sort_order ASC`,

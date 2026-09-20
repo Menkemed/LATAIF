@@ -113,9 +113,12 @@ marker('POST_PARITY_PP12_ONE_RECORD_NORMALIZER');
 
   // Primary: der Normalisierer läuft VOR der Klammer (das Umrechnen hält die Schreibreihenfolge nicht auf).
   const rh = code(src('src/core/repairs/repair-house.ts'));
-  ok(/const images = await normalizeRecordImages\(form\.images \?\? \[\]\);\s*return amPrimary\(\(\) => \{/.test(rh)
-    && /normalizeRecordImages\(form\.images, \{ keep: gespeicherteFotos\(id\) \}\) \};\s*return amPrimary\(\(\) => \{/.test(rh),
-  'PRIMARY Reparatur anlegen/ändern — vor der Klammer; ändern behält die gespeicherten Fotos');
+  // MEDIA-REPAIR — das Umrechnen UND die Aufnahme ins Medium laufen vor der Klammer; „behalten"
+  // nennt jetzt die stabile Medienkennung statt der gespeicherten Daten-URL.
+  ok(/const images = await normalizeRecordImages\(form\.images \?\? \[\]\);\s*const mediaIds = await ingestRepairPhotos\(images\);\s*return amPrimary\(\(\) => \{/.test(rh)
+    && /const neu = await normalizeRecordImages\(wunsch\.filter\(\(x\) => x\.startsWith\('data:'\)\)\);/.test(rh)
+    && /galleryMediaIds = await resolveRepairPhotoSlots\(/.test(rh),
+  'PRIMARY Reparatur anlegen/ändern — vor der Klammer; die Galerie sind Medien, keine Bytes');
   const ma = code(src('src/core/metals/metal-actions.ts'));
   ok(/const photos = await withRecordScrapPhotos\(input, \[\]\);\s*return runOnPrimary\(/.test(ma)
     && /withRecordScrapPhotos\(input, storedScrapPhotos\(tradeId, localHouseBranch\(\)\)\);\s*return runOnPrimary\(/.test(ma),

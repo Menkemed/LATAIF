@@ -564,10 +564,18 @@ pub fn media_read_grant(
                                       WHERE v.tenant_id = o.tenant_id AND v.media_id = o.media_id
                                         AND v.blob_id = g.blob_id AND v.deleted_at IS NULL))
            JOIN media_links l ON l.tenant_id = o.tenant_id AND l.media_id = o.media_id AND l.deleted_at IS NULL
-           JOIN products p ON p.id = l.entity_id AND p.branch_id = l.branch_id
-           JOIN branches br ON br.id = p.branch_id AND br.tenant_id = g.tenant_id
+           JOIN branches br ON br.id = l.branch_id AND br.tenant_id = g.tenant_id
           WHERE g.tenant_id = ?1 AND g.storage_key = ?2 AND g.gen_status = 'available' AND g.deleted_at IS NULL
-            AND l.entity_type = 'product' AND l.scope_kind = 'branch' AND l.branch_id = ?3
+            AND l.scope_kind = 'branch' AND l.branch_id = ?3
+            -- MEDIA-REPAIR — jeder Besitzertyp mit SEINER Rolle und SEINER Tabelle: der Datensatz muss
+            -- existieren und in genau dieser Filiale liegen. Ein Typ ohne Regel wird nicht bedient.
+            AND (
+              (l.entity_type = 'product' AND l.media_role = 'stock_image'
+                 AND EXISTS (SELECT 1 FROM products p WHERE p.id = l.entity_id AND p.branch_id = l.branch_id))
+              OR
+              (l.entity_type = 'repair' AND l.media_role = 'gallery'
+                 AND EXISTS (SELECT 1 FROM repairs r WHERE r.id = l.entity_id AND r.branch_id = l.branch_id))
+            )
           LIMIT 1",
         rusqlite::params![tenant_id, key, branch_id],
         |r| Ok(MediaReadGrant {

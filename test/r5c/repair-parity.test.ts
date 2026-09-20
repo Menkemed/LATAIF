@@ -228,7 +228,19 @@ const COLS = [
   'customer_paid_from', 'customer_card_brand', 'internal_paid_from', 'customer_paid_amount',
   'customer_payment_status', 'customer_payment_method',
 ].join(', ');
+/** MEDIA-REPAIR — die Galerie einer Reparatur: Medienkennungen in ihrer Reihenfolge. */
+const galerie = (db: Db, id: string): string[] =>
+  (db.exec("SELECT media_id FROM media_links WHERE entity_type = 'repair' AND entity_id = ? AND deleted_at IS NULL ORDER BY sort_order", [id])[0]?.values ?? [])
+    .map((v) => String(v[0]));
+/** Die Bytes hinter einem Medium — fuer den Beweis, dass genau DIESES Foto haengt. */
+const medienHash = (db: Db, mediaId: string): string =>
+  String(db.exec(`SELECT g.stored_blob_hash FROM media_objects o
+     JOIN media_blobs b ON b.tenant_id = o.tenant_id AND b.blob_id = o.master_blob_id
+     JOIN media_blob_generations g ON g.tenant_id = b.tenant_id AND g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no
+    WHERE o.media_id = ?`, [mediaId])[0]?.values?.[0]?.[0] ?? '');
+
 const bildDerReparatur = (db: Db, id: string) => ({
+  galerie: JSON.stringify(galerie(db, id).map((m) => medienHash(db, m))),
   zeile: row(db, `SELECT ${COLS} FROM repairs WHERE id = ?`, [id]),
   arbeit: all(db, 'SELECT position, supplier_id, work_type, cost_amount, status FROM repair_lines WHERE repair_id = ? ORDER BY position', [id]),
   nummer: s(db, 'SELECT repair_number FROM repairs WHERE id = ?', [id]),
@@ -297,7 +309,11 @@ let lokalKunde: ReturnType<typeof bildDerReparatur>;
     'CREATE Referenz, Beschreibung und Mitarbeiter kommen an');
   ok(z.item_brand === 'Rolex', `CREATE der Text ist auf beiden Seiten gleich aufbereitet (${JSON.stringify(z.item_brand)})`);
   ok(z.tax_scheme === 'ZERO' && Number(z.internal_cost) === 30, 'CREATE Steuerwahl und die abgeleiteten eigenen Kosten');
-  ok(JSON.parse(String(z.images))[0] === alsDataUrl(bild(1)), 'CREATE das Foto steht byte-gleich in der Reparatur');
+  // MEDIA-REPAIR — das Foto steht NICHT mehr in der Zeile: es haengt als Medium an der Reparatur.
+  ok(String(z.images ?? '[]') === '[]' && galerie(db, rid).length === 1,
+    `CREATE die Zeile haelt keine Bytes; genau ein Medium haengt an der Reparatur (${String(z.images)})`);
+  ok(lokalKunde.galerie === fern.galerie && fern.galerie !== '[]',
+    `CREATE lokal und fern haengen DASSELBE Foto an (${fern.galerie})`);
   ok(tauriState.discarded.length === 1, 'CREATE …und die Ablage ist nach dem Erfolg geraeumt');
   const again = await cmd.runRepairCreate(deps(db), identity('1', 'repairs.create'), body);
   ok(again.kind === 'ok' && (again as { replayed: boolean }).replayed === true
@@ -437,7 +453,7 @@ async function aendernZwilling(weg: 'lokal' | 'fern') {
       itemCategoryId: 'cat-watch', itemAttributes: { material: 'Steel', dial: 'Blue' },
       itemBrand: 'Rolex', itemModel: 'Daytona', itemReference: '116500', itemDescription: 'neu',
       issueDescription: 'Glas ersetzen', diagnosis: 'Glas gesprungen', actualCost: 55, chargeToCustomer: 150,
-      images: [(seen.images as string[])[0], alsDataUrl(bild(3))],
+      images: [...galerie(db, rid), alsDataUrl(bild(3))],
     }),
     // Nur die Kartenart wechselt: die Gebühr MUSS neu gebucht werden (2,5 % → 2,2 %).
     (seen) => ({ ...seen, customerCardBrand: 'normal' }),
@@ -450,13 +466,14 @@ async function aendernZwilling(weg: 'lokal' | 'fern') {
   let k = 400;
   for (const schritt of schritte) {
     rs.loadRepairs();
-    const seen = rs.getRepair(rid) as unknown as Record<string, unknown>;
+    // MEDIA-REPAIR — was die Maske zeigt: die Galerie sind Medienkennungen, nicht die alte Spalte.
+    const seen = { ...(rs.getRepair(rid) as unknown as Record<string, unknown>), images: galerie(db, rid) };
     const form = schritt(seen);
     if (weg === 'lokal') {
       await house.updateRepairOnPrimary(rid, form as never, rev(db, rid));
     } else {
-      const photos = rules.repairPhotosChanged(seen as never, form as never)
-        ? await rules.repairPhotoPlan(seen.images as string[], form.images as string[], ablegen)
+      const photos = JSON.stringify(form.images ?? []) !== JSON.stringify(galerie(db, rid))
+        ? await rules.repairPhotoPlan([], form.images as string[], ablegen)
         : undefined;
       const body = rules.repairEditBody(rid, rev(db, rid), seen as never, form as never, photos);
       ok(!('margin' in body) && !('internalCost' in body && body.internalCost !== form.internalCost),
@@ -492,9 +509,10 @@ async function aendernZwilling(weg: 'lokal' | 'fern') {
   ok(z1.item_category_id === 'cat-watch' && JSON.parse(String(z1.item_attributes)).dial === 'Blue'
     && z1.item_reference === '116500' && z1.item_description === 'neu' && z1.issue_description === 'Glas ersetzen',
     'EDIT Kategorie, Merkmale, Referenz, Beschreibung und Problem kommen an');
-  const fotos = JSON.parse(String(z1.images)) as string[];
-  ok(fotos.length === 2 && fotos[0] === alsDataUrl(bild(2)) && fotos[1] === alsDataUrl(bild(3)),
-    'EDIT das vorhandene Foto bleibt, das neue kommt dahinter — byte-gleich');
+  const fotos = JSON.parse(fern.bilder[0].galerie) as string[];
+  ok(String(z1.images ?? '[]') === '[]' && fotos.length === 2 && fotos[0] !== fotos[1],
+    `EDIT das vorhandene Foto bleibt, das neue kommt dahinter — als Medien, nicht als Bytes (${fotos.length})`);
+  ok(JSON.parse(fern.bilder[2].galerie).length === 0, 'EDIT ein entferntes Foto ist danach nicht mehr verknuepft');
   ok(/"active"|"ACTIVE"|PENDING|PAID/.test(fern.bilder[0].gebuehren) || fern.bilder[0].gebuehren !== '[]',
     `EDIT bei Kartenzahlung entsteht die Kartengebuehr (${fern.bilder[0].gebuehren})`);
   ok(fern.bilder[1].gebuehren !== fern.bilder[0].gebuehren, 'EDIT ein Wechsel der Kartenart bucht die Gebuehr neu');
@@ -513,7 +531,7 @@ async function aendernZwilling(weg: 'lokal' | 'fern') {
   const seen = rev(db, rid);
   const stale = await cmd.runRepairUpdate(deps(db), identity('450', 'repairs.update'), { id: rid, expectedRevision: seen - 1, notes: 'alt' });
   ok(stale.kind === 'rejected' && code(stale) === 'RECORD_CHANGED' && frozen(stale), 'EDIT-AUTH ein alter Stand traegt nicht');
-  const keep = await cmd.runRepairUpdate(deps(db), identity('451', 'repairs.update'), { id: rid, expectedRevision: seen, photos: [{ keep: 3 }] });
+  const keep = await cmd.runRepairUpdate(deps(db), identity('451', 'repairs.update'), { id: rid, expectedRevision: seen, photos: [{ keep: 'media-does-not-exist' }] });
   ok(keep.kind === 'rejected' && code(keep) === 'PHOTO_NOT_FOUND' && frozen(keep), 'EDIT-AUTH ein Foto, das es nicht gibt, ist ein Nein');
   let warf = false;
   try {
