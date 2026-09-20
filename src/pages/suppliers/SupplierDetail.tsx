@@ -37,6 +37,7 @@ import { saveSupplierActive, saveSupplierUpdate } from '@/core/masterdata/master
 // Karte liest die filialgebundene Auskunft `suppliers.credits.get` (auch auf PC2).
 import { PAYABLES_OP } from '@/core/payables/payables-house';
 import { saveSupplierRefund } from '@/core/payables/payables-save';
+import { IdentityPhotoField } from '@/components/identity/IdentityPhotoField';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -178,7 +179,10 @@ export function SupplierDetail() {
   // try/finally der Rueckbuchung entfernt hat (vorher uebersprang der Compiler die ganze Komponente).
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    if (supplier) setForm({ ...supplier });
+    // MEDIA-IDENTITY §3 — `cprImage` ist im Formular NICHT der gespeicherte Stand, sondern der
+    // WUNSCH: `undefined` heisst unveraendert, `null` entfernen, eine Daten-URL ein neues Bild.
+    // Den gespeicherten Stand zeigt `IdentityPhotoField` selbst aus der Referenz.
+    if (supplier) setForm({ ...supplier, cprImage: undefined });
   }, [supplier]);
 
   // v0.7.7 — expenses als Dep, damit Pay-Action auf Workshop-Expenses die KPIs
@@ -292,7 +296,7 @@ export function SupplierDetail() {
           <div className="flex gap-2">
             {editing ? (
               <>
-                <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...supplier }); }}>Cancel</Button>
+                <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...supplier, cprImage: undefined }); }}>Cancel</Button>
                 <Button variant="primary" onClick={() => void handleSave()} disabled={aendern.busy} data-supplier-save><Save size={14} /> Save</Button>
               </>
             ) : (
@@ -336,15 +340,18 @@ export function SupplierDetail() {
                     <Input label="CPR / ID NUMBER" value={form.cpr || ''} onChange={e => setForm({ ...form, cpr: e.target.value })} />
                     <SoftWarn warning={validateCpr(form.cpr).warning} />
                   </div>
-                  <div>
-                    <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>CPR / ID CARD PHOTO</span>
-                    <p style={{ fontSize: 11, color: '#9CA3AF', marginBottom: 6 }}>Wird auf jedem Ankaufs-Print mitgedruckt.</p>
-                    <ImageUpload
-                      images={form.cprImage ? [form.cprImage] : []}
-                      onChange={imgs => setForm({ ...form, cprImage: imgs[0] || undefined })}
-                      maxImages={1}
-                    />
-                  </div>
+                  {/* MEDIA-IDENTITY §3/§4 — das Ausweisdokument ist ein Medium, keine Spalte. Das
+                      Feld zeigt das gespeicherte (ueber den geprueften Leser) und nimmt ein neues
+                      oder ein Entfernen entgegen; bei einem verknuepften Lieferanten zeigt es das
+                      Dokument des Kunden und bietet nichts zum Aendern an. */}
+                  <IdentityPhotoField
+                    label="CPR / ID CARD PHOTO"
+                    refDoc={supplier.identity}
+                    legacy={supplier.identity ? null : supplier.cprImage}
+                    value={form.cprImage as string | null | undefined}
+                    onChange={(next) => setForm({ ...form, cprImage: next as string | undefined })}
+                    editable
+                  />
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>NOTES</span>
                     <textarea
@@ -366,9 +373,15 @@ export function SupplierDetail() {
                       <span className="font-mono">{supplier.cpr}</span>
                     </div>
                   )}
-                  {supplier.cprImage && (
+                  {(supplier.identity || supplier.cprImage) && (
                     <div style={{ marginTop: 10 }}>
-                      <img src={supplier.cprImage} alt="CPR / ID Card" style={{ maxWidth: 220, maxHeight: 140, border: '1px solid #E5E9EE', borderRadius: 6, objectFit: 'contain', background: '#F2F7FA' }} />
+                      <IdentityPhotoField
+                        label="CPR / ID CARD"
+                        refDoc={supplier.identity}
+                        legacy={supplier.identity ? null : supplier.cprImage}
+                        value={undefined}
+                        onChange={() => { /* Ansicht */ }}
+                      />
                     </div>
                   )}
                   {supplier.notes && <div style={{ fontSize: 13, color: '#4B5563', marginTop: 12, lineHeight: 1.5 }}>{supplier.notes}</div>}

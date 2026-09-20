@@ -63,6 +63,28 @@ pub const REQUIRED_VARIANT_SQL: &str = "SELECT v.tenant_id, v.media_id, v.varian
      JOIN media_blob_generations g ON g.tenant_id=b.tenant_id AND g.blob_id=b.blob_id AND g.generation_no=b.current_generation_no AND g.gen_status='available' \
      WHERE v.deleted_at IS NULL";
 
+/// MEDIA-IDENTITY §7/§8 — the ONE historical reference the data set has: the ID-document version a
+/// purchase froze at the moment of the purchase.
+///
+/// Every other REQUIRED row is reachable through a live LINK at its CURRENT generation. This one is
+/// not, and that is the whole point of it: a supplier (or the linked customer) may replace the ID
+/// document, or remove it altogether, and the old purchase must still show the version that was
+/// used. So the join is on the EXACT generation the snapshot names — not the current one — and
+/// there is deliberately no `l.deleted_at IS NULL` and no `o.deleted_at IS NULL` here: the evidence
+/// of a past purchase does not disappear because somebody unlinked the document today.
+///
+/// The hash is required to match as well. If the snapshot's hash and the generation's hash disagree
+/// the row is simply not selected — a mismatched pair is not the evidence this purchase recorded,
+/// and silently substituting a different file would be worse than showing none.
+pub const REQUIRED_PURCHASE_IDENTITY_SQL: &str = "SELECT o.tenant_id, o.media_id, 'identity_snapshot', g.stored_blob_hash, g.byte_size, g.generation_no, g.extension \
+     FROM purchases p \
+     JOIN media_objects o ON o.media_id = json_extract(p.supplier_snapshot, '$.identity.mediaId') \
+     JOIN media_blobs b ON b.tenant_id=o.tenant_id AND b.blob_id=o.master_blob_id \
+     JOIN media_blob_generations g ON g.tenant_id=b.tenant_id AND g.blob_id=b.blob_id \
+                                  AND g.generation_no = json_extract(p.supplier_snapshot, '$.identity.generationNo') \
+                                  AND g.stored_blob_hash = json_extract(p.supplier_snapshot, '$.identity.blobHash') \
+     WHERE p.supplier_snapshot IS NOT NULL AND json_extract(p.supplier_snapshot, '$.identity.mediaId') IS NOT NULL";
+
 /// Media-root-relative storage path, the same layout the store writes: `<scope>/<hh>/<hash>.<ext>`.
 pub fn rel_path_for(scope: &str, hash: &str, ext: &str) -> Result<String, MediaError> {
     if hash.len() < 2 || !hash.bytes().all(|b| b.is_ascii_alphanumeric()) {
@@ -74,6 +96,23 @@ pub fn rel_path_for(scope: &str, hash: &str, ext: &str) -> Result<String, MediaE
 fn open_ro(db: &std::path::Path) -> Result<Connection, MediaError> {
     Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| MediaError::Io(format!("open business db: {e}")))
+}
+
+/// Does this database have that table at all?
+///
+/// A media-only fixture, a very old data set, a database from before the purchases module: all of
+/// them legitimately have no `purchases`. That is the answer "no purchase froze an ID document",
+/// not a failure to read — but it has to be ASKED, because a bare query against a missing table
+/// would abort the whole set and make every file look dispensable.
+pub fn table_exists(conn: &Connection, name: &str) -> Result<bool, MediaError> {
+    let n: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
+            [name],
+            |r| r.get(0),
+        )
+        .map_err(|e| MediaError::Io(format!("table probe: {e}")))?;
+    Ok(n > 0)
 }
 
 fn collect_keys(conn: &Connection, sql: &str, out: &mut BTreeSet<String>) -> Result<(), MediaError> {
@@ -99,6 +138,12 @@ pub fn required_keys(conn: &Connection) -> Result<BTreeSet<String>, MediaError> 
     let mut out = BTreeSet::new();
     collect_keys(conn, REQUIRED_MASTER_SQL, &mut out)?;
     collect_keys(conn, REQUIRED_VARIANT_SQL, &mut out)?;
+    // MEDIA-IDENTITY §8 — a purchase snapshot is a REAL reference. Without this line a backup of a
+    // shop whose supplier has since replaced his ID would restore into an installation where the
+    // old purchases have lost their evidence — and nothing would report it.
+    if table_exists(conn, "purchases")? {
+        collect_keys(conn, REQUIRED_PURCHASE_IDENTITY_SQL, &mut out)?;
+    }
     Ok(out)
 }
 

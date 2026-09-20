@@ -26,6 +26,15 @@ export interface MatrixZeile {
   ort: string;
   /** Die lokale Funktion, die der Primary ruft — und die auch der Fernbefehl ruft. */
   lokal: string;
+  /**
+   * MEDIA-IDENTITY §2 — wo die ZWEI ANSCHLÜSSE stehen, wenn nicht in der Maske selbst.
+   *
+   * Meist ist die Maske beides: sie zeigt das Formular und baut die beiden Anschlüsse. Wo eine
+   * Absicht mehr ist als ein Formular (Felder UND Ausweisdokument, mit Stand und Reihenfolge),
+   * steht die Speicherfolge in einem gemeinsamen Modul — dieselbe Hausfunktion, nur einmal
+   * geschrieben statt dreimal. Die Maske ruft sie; der Vertrag bleibt derselbe.
+   */
+  anschluss?: string;
   paritaet: 'exakt' | 'enger' | 'keine-ui';
   /** Ist die Handlung über `useSharedWrite` an die Fernbuchung angeschlossen? */
   verdrahtet: boolean;
@@ -37,11 +46,11 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   // ── Stammdaten ───────────────────────────────────────────────────────────
   {
     op: 'customers.create', handlung: 'Neuen Kunden anlegen', ort: 'pages/customers/CustomerList.tsx',
-    lokal: 'createCustomer', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    lokal: 'createCustomer', anschluss: 'core/customers/customer-save.ts', paritaet: 'exakt', verdrahtet: true, luecke: null,
     grund: 'R4B — ein Aufruf, dieselbe Funktion.',
   },
   {
-    op: 'customers.update', handlung: 'Kunden aendern', ort: 'pages/customers/CustomerDetail.tsx',
+    op: 'customers.update', handlung: 'Kunden aendern', ort: 'pages/customers/CustomerDetail.tsx', anschluss: 'core/customers/customer-save.ts',
     lokal: 'updateCustomer', paritaet: 'exakt', verdrahtet: true, luecke: null,
     grund: 'R4B — nur der Unterschied faehrt mit.',
   },

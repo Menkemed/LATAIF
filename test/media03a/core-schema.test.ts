@@ -52,7 +52,7 @@ function seedEntityStubs(db: any): void {
   db.run(`CREATE TABLE tenants  (id TEXT PRIMARY KEY)`);
   db.run(`CREATE TABLE branches (id TEXT PRIMARY KEY, tenant_id TEXT)`);
   db.run(`CREATE TABLE users    (id TEXT PRIMARY KEY, tenant_id TEXT)`);
-  for (const t of ['products','repairs','purchase_inbox','purchases','suppliers','documents','orders','offers','precious_metals','scrap_trades']) {
+  for (const t of ['products','repairs','purchase_inbox','purchases','suppliers','customers','documents','orders','offers','precious_metals','scrap_trades']) {
     db.run(`CREATE TABLE ${t} (id TEXT PRIMARY KEY, branch_id TEXT)`);
   }
   db.run(`INSERT INTO tenants (id) VALUES ('t1'),('t2')`);
@@ -106,8 +106,10 @@ async function main(): Promise<void> {
   applyMediaSchema(db);
   ok(tableCount(db) === afterFirst, 'fresh: second applyMediaSchema is idempotent (table count stable)');
   ok(afterFirst - beforeCount === MEDIA_TABLES.length, `fresh: exactly ${MEDIA_TABLES.length} tables added`);
-  // entity-scope SSOT completeness (13 types, production_input excluded)
-  ok(Object.keys(MEDIA_ENTITY_SCOPE).length === 13, 'entity-scope SSOT has 13 types');
+  // entity-scope SSOT completeness (14 types, production_input excluded)
+  // MEDIA-IDENTITY — vierzehn statt dreizehn: `customer` ist seit dem Ausweisdokument ein
+  // Medienbesitzer (Rolle `identity_document`, Klasse `sensitive`).
+  ok(Object.keys(MEDIA_ENTITY_SCOPE).length === 14, 'entity-scope SSOT has 14 types');
   ok(!('production_input' in MEDIA_ENTITY_SCOPE), 'production_input excluded from entity scope');
 
   // ── generation size CHECK (§12) ──

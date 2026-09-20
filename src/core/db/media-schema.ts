@@ -69,6 +69,11 @@ export const MEDIA_ENTITY_SCOPE: Readonly<Record<string, EntityScopeEntry>> = {
   // ── branch-scoped (10) ──
   product:        { table: 'products',        idCol: 'id', scope: 'branch', scopeCol: 'branch_id' },
   repair:         { table: 'repairs',         idCol: 'id', scope: 'branch', scopeCol: 'branch_id' },
+  // MEDIA-IDENTITY — der Kunde ist jetzt ein Medienbesitzer (Rolle `identity_document`, Klasse
+  // `sensitive`). Er fehlte bis hierher bewusst: ein Ausweisfoto ohne Zugriffsvertrag waere eine
+  // Datei gewesen, die jeder mit einem Speicherschluessel lesen kann. Den Vertrag gibt es jetzt
+  // (Tor in `media_read_grant`, eigene Rolle, eigene Klasse), also darf der Typ existieren.
+  customer:       { table: 'customers',       idCol: 'id', scope: 'branch', scopeCol: 'branch_id' },
   purchase_inbox: { table: 'purchase_inbox',  idCol: 'id', scope: 'branch', scopeCol: 'branch_id' },
   purchase:       { table: 'purchases',       idCol: 'id', scope: 'branch', scopeCol: 'branch_id' },
   supplier:       { table: 'suppliers',       idCol: 'id', scope: 'branch', scopeCol: 'branch_id' },
@@ -89,6 +94,37 @@ function quotedList(values: readonly string[]): string {
 }
 
 const ENTITY_TYPES = Object.keys(MEDIA_ENTITY_SCOPE);
+
+/** The exact CHECK text the current entity map produces — also the marker the upgrade looks for. */
+export const MEDIA_LINKS_ENTITY_CHECK = `CHECK (entity_type IN (${quotedList(ENTITY_TYPES)}))`;
+
+/** Declared once, because the upgrade below has to build the SAME table the schema declares. */
+export const MEDIA_LINKS_DDL = `CREATE TABLE IF NOT EXISTS media_links (
+    tenant_id    TEXT NOT NULL,
+    link_id      TEXT NOT NULL,
+    scope_kind   TEXT NOT NULL,
+    branch_id    TEXT,
+    entity_type  TEXT NOT NULL,
+    entity_id    TEXT NOT NULL,
+    media_id     TEXT NOT NULL,
+    media_role   TEXT NOT NULL,
+    sort_order   INTEGER NOT NULL DEFAULT 0,
+    is_primary   INTEGER NOT NULL DEFAULT 0,
+    created_at   TEXT NOT NULL,
+    deleted_at   TEXT,
+    PRIMARY KEY (tenant_id, link_id),
+    CHECK (scope_kind IN ('branch','tenant')),
+    CHECK ((scope_kind='branch' AND branch_id IS NOT NULL) OR (scope_kind='tenant' AND branch_id IS NULL)),
+    CHECK (is_primary IN (0,1)),
+    ${MEDIA_LINKS_ENTITY_CHECK}
+  )`;
+
+/** The link table's own indexes and scope triggers — dropped and rebuilt together with it. */
+const MEDIA_LINKS_OWNED_OBJECTS = [
+  'ix_ml_entity', 'ix_ml_media', 'ux_ml_primary_branch', 'ux_ml_primary_tenant',
+  'ux_ml_nat_branch', 'ux_ml_nat_tenant',
+];
+const MEDIA_LINKS_TRIGGERS = ['trg_ml_entity_scope_ins', 'trg_ml_entity_scope_upd'];
 
 // The join to the CURRENT generation of a blob, reused by several guards.
 const CURRENT_GEN_JOIN =
@@ -441,25 +477,7 @@ const MEDIA_03A_STATEMENTS: string[] = [
   )`,
 
   // ── media_links — scope-aware entity ↔ media association ──
-  `CREATE TABLE IF NOT EXISTS media_links (
-    tenant_id    TEXT NOT NULL,
-    link_id      TEXT NOT NULL,
-    scope_kind   TEXT NOT NULL,
-    branch_id    TEXT,
-    entity_type  TEXT NOT NULL,
-    entity_id    TEXT NOT NULL,
-    media_id     TEXT NOT NULL,
-    media_role   TEXT NOT NULL,
-    sort_order   INTEGER NOT NULL DEFAULT 0,
-    is_primary   INTEGER NOT NULL DEFAULT 0,
-    created_at   TEXT NOT NULL,
-    deleted_at   TEXT,
-    PRIMARY KEY (tenant_id, link_id),
-    CHECK (scope_kind IN ('branch','tenant')),
-    CHECK ((scope_kind='branch' AND branch_id IS NOT NULL) OR (scope_kind='tenant' AND branch_id IS NULL)),
-    CHECK (is_primary IN (0,1)),
-    CHECK (entity_type IN (${quotedList(ENTITY_TYPES)}))
-  )`,
+  MEDIA_LINKS_DDL,
 
   // ── media_ingest_jobs — idempotent ingest state machine (no writer yet) ──
   `CREATE TABLE IF NOT EXISTS media_ingest_jobs (
@@ -943,8 +961,63 @@ export { MEDIA_03A_STATEMENTS };
  * every startup (all statements are IF NOT EXISTS). No data is written and no
  * runtime workflow is activated by this call.
  */
-export function applyMediaSchema(database: { run: (sql: string) => void }): void {
+export function applyMediaSchema(database: MediaSchemaDb): void {
+  // MEDIA-IDENTITY — ZUERST der Umbau, dann die Anweisungen. Siehe `upgradeMediaLinkEntityTypes`.
+  upgradeMediaLinkEntityTypes(database);
   for (const sql of MEDIA_SCHEMA_STATEMENTS) {
     database.run(sql);
+  }
+}
+
+export interface MediaSchemaDb {
+  run(sql: string, params?: unknown[]): unknown;
+  exec?(sql: string, params?: unknown[]): Array<{ columns: string[]; values: unknown[][] }>;
+}
+
+/**
+ * MEDIA-IDENTITY — einen neuen Besitzertyp in eine BESTEHENDE Datenbank bringen.
+ *
+ * Die Liste der erlaubten Besitzertypen steht an zwei Stellen, die SQLite unterschiedlich
+ * behandelt: in den Wächter-Triggern (die lassen sich neu schreiben) und in einer `CHECK`-Bedingung
+ * der Tabelle `media_links` — und die ist in SQLite unveränderlich. Ein `IF NOT EXISTS` beim
+ * Anlegen hilft nicht: die Tabelle existiert ja, also bliebe die alte Bedingung stehen und ein Kundenfoto
+ * würde beim Verknüpfen mit einem nackten `CHECK constraint failed` abgewiesen — auf jedem
+ * Rechner, der schon einmal lief, und auf keinem Testrechner, der frisch anfängt.
+ *
+ * Also einmal umbauen: Wächter und Indizes weg, Tabelle beiseite, neue Tabelle aus DERSELBEN
+ * Erklärung, Zeilen hinüber, alte weg. Die Wächter fehlen währenddessen mit Absicht — sie würden
+ * jede kopierte Zeile erneut prüfen, und eine Verknüpfung auf einen inzwischen gelöschten Datensatz
+ * (aus einer Zeit, als es den Wächter noch nicht gab) hätte den Start der Anwendung angehalten.
+ * Das Kopieren ändert keine Zeile; es bewegt sie.
+ *
+ * Alles in EINER Transaktion: bricht etwas ab, steht die alte Tabelle unverändert da.
+ */
+export function upgradeMediaLinkEntityTypes(database: MediaSchemaDb): void {
+  if (typeof database.exec !== 'function') return; // frische Datenbank ohne Lesezugriff — nichts zu heben
+  const rows = database.exec(
+    `SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'media_links'`,
+  )[0]?.values ?? [];
+  const current = rows.length > 0 ? String(rows[0][0] ?? '') : '';
+  // Keine Tabelle → die Anweisungen legen sie gleich richtig an. Passende Bedingung → nichts zu tun.
+  if (current === '' || current.includes(MEDIA_LINKS_ENTITY_CHECK)) return;
+  const OLD = 'media_links_pre_identity';
+  database.run('BEGIN IMMEDIATE');
+  try {
+    for (const t of MEDIA_LINKS_TRIGGERS) database.run(`DROP TRIGGER IF EXISTS ${t}`);
+    for (const i of MEDIA_LINKS_OWNED_OBJECTS) database.run(`DROP INDEX IF EXISTS ${i}`);
+    database.run(`DROP TABLE IF EXISTS ${OLD}`);
+    database.run(`ALTER TABLE media_links RENAME TO ${OLD}`);
+    database.run(MEDIA_LINKS_DDL);
+    database.run(
+      `INSERT INTO media_links (tenant_id, link_id, scope_kind, branch_id, entity_type, entity_id,
+                                media_id, media_role, sort_order, is_primary, created_at, deleted_at)
+       SELECT tenant_id, link_id, scope_kind, branch_id, entity_type, entity_id,
+              media_id, media_role, sort_order, is_primary, created_at, deleted_at FROM ${OLD}`,
+    );
+    database.run(`DROP TABLE ${OLD}`);
+    database.run('COMMIT');
+  } catch (e) {
+    try { database.run('ROLLBACK'); } catch { /* sql.js hat bei einem Abbruch schon zurückgerollt */ }
+    throw e;
   }
 }

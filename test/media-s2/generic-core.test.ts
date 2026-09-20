@@ -122,7 +122,9 @@ async function main(): Promise<void> {
     ok(again.mediaId === r.mediaId && gw.commits === commits, '§2 a retry returns the frozen object — no second publish (idempotent)');
     ok(Number(db.exec(`SELECT COUNT(*) FROM media_objects`)[0].values[0][0]) === 1, '§2 …no second object');
     ok((await acode(() => obj(orch, 'hs', { securityClass: 'highly_sensitive' }))).includes('MEDIA_CLASS_REQUIRES_ENCRYPTION'), '§2 highly_sensitive cannot be ingested (no encryption, no silent downgrade)');
-    ok((await acode(() => obj(orch, 'cu', { ownerType: 'customer' }))).includes('MEDIA_OWNER_TYPE_UNKNOWN'), '§2 an owner type the schema cannot hold (customer) is refused');
+    // MEDIA-IDENTITY — `customer` IST seit dem Ausweisdokument ein Besitzertyp; abgewiesen wird,
+    // was die Karte `MEDIA_ENTITY_SCOPE` nicht kennt. Der Test fragt jetzt danach.
+    ok((await acode(() => obj(orch, 'cu', { ownerType: 'stammtisch' }))).includes('MEDIA_OWNER_TYPE_UNKNOWN'), '§2 an owner type the schema cannot hold is refused');
     ok((await acode(() => obj(orch, 'sc', { ownerType: 'tenant_logo' }))).includes('MEDIA_OWNER_SCOPE_MISMATCH'), '§2 a tenant-scoped owner with a branch context is refused');
   }
 

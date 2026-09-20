@@ -478,17 +478,37 @@
   }
   $('cnConsignorSearchBtn').onclick = () => cnSucheKunden('cnConsignorSearch', 'cnConsignorResults', cnSetConsignor);
   $('cnBuyerSearchBtn').onclick = () => cnSucheKunden('cnBuyerSearch', 'cnBuyerResults', cnSetBuyer);
+  // MEDIA-IDENTITY §5 — dasselbe optionale Ausweisfoto wie bei der Reparatur, derselbe Weg.
+  CN.idPhoto = null;
+  $('cnConsignorIdPhoto').onchange = async (e) => {
+    const f = (e.target && e.target.files && e.target.files[0]) || null;
+    $('cnConsignorIdPhoto').value = '';
+    if (!f) return;
+    try {
+      CN.idPhoto = await resizePhoto(f, 1600, 0.85);
+      const p = $('cnConsignorIdPreview');
+      p.src = CN.idPhoto; p.classList.remove('hidden');
+    } catch (err) { CN.idPhoto = null; cnSay('cnError', 'That ID photo could not be read.'); }
+  };
   $('cnConsignorCreateBtn').onclick = async () => {
     const first = $('cnConsignorFirst').value.trim(), last = $('cnConsignorLast').value.trim();
     if (!first && !last) { cnSay('cnError', 'A new client needs a name.'); return; }
     const body = { firstName: first, lastName: last };
     const phone = MobileRepair.textOrNull($('cnConsignorPhone').value);
     if (phone) body.phone = phone;
+    if (CN.idPhoto) {
+      const s = await cnClient.stagePhoto(CN.idPhoto);
+      if (!s.ok) { cnSay('cnError', 'The ID photo could not be sent (' + s.code + '). Nothing was created.'); return; }
+      body.idPhotoStagingId = s.stagingId;
+    }
     const r = await cnClient.mutate('consignor:' + (CN.draftKey || 'draft'), 'customers.create', body);
     if (r.kind === 'ok' && r.value && r.value.customerId) {
       cnSetConsignor(r.value.customerId, r.value.name || (first + ' ' + last).trim());
       cnSay('cnSuccess', 'Client created.');
       $('cnConsignorFirst').value = ''; $('cnConsignorLast').value = ''; $('cnConsignorPhone').value = '';
+      CN.idPhoto = null;
+      const p = $('cnConsignorIdPreview');
+      p.removeAttribute('src'); p.classList.add('hidden');
     } else {
       cnSay('cnError', cnMessageFor(r, 'The client was not created'));
     }

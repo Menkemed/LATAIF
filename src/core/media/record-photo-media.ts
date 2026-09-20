@@ -19,9 +19,17 @@ import type { StockMediaOrchestrator } from '@/core/media/orchestrator';
 export interface RecordPhotoScope {
   tenantId: string;
   branchId: string | null;
-  /** `repair`, später weitere — immer ein Typ aus `MEDIA_ENTITY_SCOPE`. */
+  /** `repair`, `customer`, `supplier` — immer ein Typ aus `MEDIA_ENTITY_SCOPE`. */
   ownerType: string;
   role: string;
+  /**
+   * MEDIA-IDENTITY — die Sicherheitsklasse des entstehenden Objekts. Sie gehört zur
+   * AUFNAHME, nicht erst zur Verknüpfung: ein Ausweisfoto muss von Anfang an `sensitive`
+   * sein, sonst entstünde es als `internal`, und der Verknüpfungsvertrag lehnte es später
+   * wegen Klassenunterschied ab — oder schlimmer, jemand stufte es still herunter.
+   * Ohne Angabe bleibt es `internal` wie bisher.
+   */
+  securityClass?: 'public' | 'internal' | 'sensitive';
   /** Test-Einsprung; in der Anwendung der Produktions-Orchestrator. */
   orchestrator?: StockMediaOrchestrator;
 }
@@ -51,6 +59,12 @@ export async function photoIngestRequestId(bytes: Uint8Array, scope: RecordPhoto
   return { id: toIngestRequestId(`photo-${scope.ownerType}-${scope.role}-${requestHash}`), requestHash };
 }
 
+/** Die Klasse dieser Aufnahme — genannt oder `internal`. An EINER Stelle, damit Aufnahme und
+ *  Verknüpfung nicht auseinanderlaufen können. */
+export function photoSecurityClass(scope: RecordPhotoScope): 'public' | 'internal' | 'sensitive' {
+  return scope.securityClass ?? 'internal';
+}
+
 /**
  * Daten-URLs → verifizierte, noch UNVERKNÜPFTE Medienobjekte (in der Reihenfolge der Eingabe).
  * Läuft VOR der Geschäftstransaktion: jeder Ingest hat seine eigenen durablen Haltepunkte.
@@ -70,7 +84,7 @@ export async function ingestRecordPhotos(urls: readonly string[], scope: RecordP
       requestHash,
       ownerType: scope.ownerType,
       role: scope.role,
-      securityClass: 'internal',
+      securityClass: photoSecurityClass(scope),
       imageBytes: bytes,
     });
     out.push(r.mediaId);

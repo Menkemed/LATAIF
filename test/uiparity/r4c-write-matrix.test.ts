@@ -76,8 +76,11 @@ for (const z of R4C_MATRIX) {
   ok(existsSync(resolvePath(repo, pfad)), `1 ${z.op}: die genannte Datei gibt es (${z.ort})`);
   if (!existsSync(resolvePath(repo, pfad))) continue;
   const s = codeOf(src(pfad));
-  ok(new RegExp(`\\b${z.lokal}\\(`).test(s),
-    `1 ${z.op}: ${z.lokal}() steht wirklich in ${z.ort.split('/').pop()}`);
+  // MEDIA-IDENTITY §2 — die Hausfunktion steht in der Maske ODER in der gemeinsamen
+  // Speicherfolge, die die Maske ruft. Was zählt: sie wird gerufen, und nur an EINER Stelle.
+  const anschluss = z.anschluss ? codeOf(src('src/' + z.anschluss)) : s;
+  ok(new RegExp(`\\b${z.lokal}\\(`).test(anschluss),
+    `1 ${z.op}: ${z.lokal}() steht wirklich in ${(z.anschluss ?? z.ort).split('/').pop()}`);
 }
 
 // ── §2/§7 Die Einordnung ist vollstaendig und widerspruchsfrei ──────────
@@ -127,7 +130,8 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   const dateien = [...new Set(ALLE.filter((z) => z.verdrahtet).map((z) => z.ort))];
   for (const f of dateien) {
     const s = codeOf(src('src/' + f));
-    ok(/await \w+\.ok\(|await \w+\.save\(/.test(s), `4 ${f.split('/').pop()}: gespeichert wird mit await`);
+    // …oder über die gemeinsame Speicherfolge, die ihrerseits die Weiche ruft (MEDIA-IDENTITY §2).
+    ok(/await \w+\.ok\(|await \w+\.save\(|await save[A-Z]\w*\(/.test(s), `4 ${f.split('/').pop()}: gespeichert wird mit await`);
     ok(/\w+\.busy/.test(s), `4 ${f.split('/').pop()}: …und der Knopf ist waehrenddessen gesperrt`);
     ok(/<WriteError text=|data-save-error/.test(s), `4 ${f.split('/').pop()}: …und der Ausgang wird angezeigt`);
     ok(!/isClientMode\(\)/.test(s), `4 …die Seite fragt nicht selbst nach der Betriebsart`);

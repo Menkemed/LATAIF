@@ -180,6 +180,24 @@
       box.appendChild(b);
     });
   };
+  // MEDIA-IDENTITY §5 — das optionale Ausweisfoto des neuen Kunden. Es liegt NUR hier, bis der
+  // Auftrag hinausgeht: kein Entwurf speichert es, keine Wiederherstellung bringt es zurueck.
+  RP.idPhoto = null;
+  $('rpCustomerIdPhoto').onchange = async (e) => {
+    const f = (e.target && e.target.files && e.target.files[0]) || null;
+    $('rpCustomerIdPhoto').value = '';
+    if (!f) return;
+    try {
+      RP.idPhoto = await resizePhoto(f, 1600, 0.85);
+      const p = $('rpCustomerIdPreview');
+      p.src = RP.idPhoto; p.classList.remove('hidden');
+    } catch (err) { RP.idPhoto = null; rpSay('rpError', 'That ID photo could not be read.'); }
+  };
+  function rpClearIdPhoto() {
+    RP.idPhoto = null;
+    const p = $('rpCustomerIdPreview');
+    p.removeAttribute('src'); p.classList.add('hidden');
+  }
   $('rpCustomerCreateBtn').onclick = async () => {
     const first = $('rpCustomerFirst').value.trim(), last = $('rpCustomerLast').value.trim();
     if (!first && !last) { rpSay('rpError', 'A new customer needs a name.'); return; }
@@ -187,11 +205,20 @@
     const body = { firstName: first, lastName: last };
     const phone = MobileRepair.textOrNull($('rpCustomerPhone').value);
     if (phone) body.phone = phone;
+    // Erst die Bytes in die Ablage, dann der Auftrag mit ihrer Kennung. Scheitert die Ablage,
+    // geht GAR NICHTS hinaus — sonst entstuende ein Kunde ohne das Dokument, das jemand gerade
+    // aufgenommen hat, und niemand wuesste, dass es fehlt.
+    if (RP.idPhoto) {
+      const s = await rpClient.stagePhoto(RP.idPhoto);
+      if (!s.ok) { rpSay('rpError', 'The ID photo could not be sent (' + s.code + '). Nothing was created.'); return; }
+      body.idPhotoStagingId = s.stagingId;
+    }
     const r = await rpClient.mutate(key, 'customers.create', body);
     if (r.kind === 'ok' && r.value && r.value.customerId) {
       rpSetCustomer(r.value.customerId, r.value.name || (first + ' ' + last).trim());
       rpSay('rpSuccess', 'Customer created.');
       $('rpCustomerFirst').value = ''; $('rpCustomerLast').value = ''; $('rpCustomerPhone').value = '';
+      rpClearIdPhoto();
     } else {
       rpSay('rpError', rpMessageFor(r, 'The customer was not created'));
     }

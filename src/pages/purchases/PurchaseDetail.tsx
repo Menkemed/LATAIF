@@ -30,6 +30,7 @@ import { savePurchaseCredit, savePurchasePayment, viaWrites } from '@/core/payab
 // auf PC2 der geprüfte Befehl mit der gesehenen Fassung. Summen, Erstattung, Bestand rechnet der Primary.
 import { PURCHASE_LIFECYCLE_OP } from '@/core/purchases/purchase-lifecycle-house';
 import { savePurchaseCancel, savePurchaseReturn } from '@/core/purchases/purchase-house';
+import { loadPurchaseIdentityPhoto, purchaseIdentityDataUrl, revokeIdentityPhoto, type IdentityPhotoView } from '@/core/identity/identity-photo-view';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -193,7 +194,11 @@ export function PurchaseDetail() {
           <div className="flex gap-2">
             {canPay && <Button variant="primary" onClick={() => { setPayFehler(''); setShowPayment(true); }} data-purchase-pay-open><CreditCard size={14} /> Add Payment</Button>}
             {canReturn && <Button variant="secondary" onClick={openReturnModal} data-purchase-return-open><RotateCcw size={14} /> Return to Supplier</Button>}
-            <Button variant="ghost" onClick={() => printPurchasePdf({ purchase, supplier, products, categories })}>
+            <Button variant="ghost" onClick={async () => printPurchasePdf({
+              purchase, supplier, products, categories,
+              // Für den Druck werden die Bytes einmal geholt — nichts davon bleibt liegen.
+              identityDataUrl: await purchaseIdentityDataUrl(purchase.supplierSnapshot?.identity).catch(() => null),
+            })}>
               <Printer size={14} /> Print
             </Button>
             <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
@@ -241,7 +246,9 @@ export function PurchaseDetail() {
           const sName = snap?.name ?? supplier?.name ?? '—';
           const sPhone = snap?.phone ?? supplier?.phone;
           const sCpr = snap?.cpr ?? supplier?.cpr;
-          const sCprImage = snap?.cprImage ?? supplier?.cprImage;
+          // MEDIA-IDENTITY §7 — die Fassung, die BEIM KAUF galt (asynchron über den geprüften
+          // Leser geholt). Nur wenn der Beleg keine Referenz trägt, gilt der Altbestand.
+          const sCprImage = idPhotoUrl ?? snap?.cprImage ?? supplier?.cprImage;
           const drifted = !!snap && !!supplier && (
             snap.name !== supplier.name ||
             snap.phone !== supplier.phone ||

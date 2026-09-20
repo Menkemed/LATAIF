@@ -10,7 +10,8 @@
 
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
-import type { Purchase, PurchaseLine, PurchasePayment, PurchaseStatus, PurchaseReturn, PurchaseReturnLine, PurchaseReturnStatus, Product } from '@/core/models/types';
+import type { Purchase, PurchaseLine, PurchasePayment, PurchaseStatus, PurchaseReturn, PurchaseReturnLine, PurchaseReturnStatus, Product, SupplierSnapshot } from '@/core/models/types';
+import { identityDocumentFor, supplierLegacyIdPhoto } from '@/core/identity/identity-media';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
@@ -406,19 +407,41 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     let snapshotJson: string | null = null;
     try {
       const sup = query(
-        'SELECT name, phone, email, address, cpr, cpr_image FROM suppliers WHERE id = ?',
+        'SELECT name, phone, email, address, cpr FROM suppliers WHERE id = ?',
         [input.supplierId]
       )[0];
       if (sup) {
-        const snap = {
+        const snap: SupplierSnapshot = {
           name: (sup.name as string) || '',
           phone: (sup.phone as string) || undefined,
           email: (sup.email as string) || undefined,
           address: (sup.address as string) || undefined,
           cpr: (sup.cpr as string) || undefined,
-          cprImage: (sup.cpr_image as string) || undefined,
           snapshotAt: now,
         };
+        // MEDIA-IDENTITY §7 — der Ausweisnachweis reist als REFERENZ auf genau die Fassung, die
+        // JETZT gilt: Medium, Fassungsnummer, Inhalt-Hash, und wem das Dokument gehört. Beim
+        // verknüpften Lieferanten ist das die Fassung des Kunden — festgehalten wird trotzdem die
+        // konkrete Version, damit ein späterer Austausch diesen Beleg nicht rückwirkend ändert.
+        const doc = identityDocumentFor('supplier', input.supplierId);
+        if (doc.ref) {
+          snap.identity = {
+            mediaId: doc.ref.mediaId,
+            generationNo: doc.ref.main.generationNo,
+            blobHash: doc.ref.main.hash,
+            byteSize: doc.ref.main.byteSize,
+            storageKey: doc.ref.main.storageKey,
+            extension: doc.ref.main.extension,
+            ownerType: doc.source.ownerType,
+            ownerId: doc.source.ownerId,
+          };
+        } else {
+          // ALTBESTAND — dieser Lieferant hat seinen Ausweis noch nie im Medienspeicher gehabt.
+          // Dann ist die Spalte der einzige Nachweis, den es gibt, und ein Beleg ohne Nachweis
+          // wäre rückwirkend nicht mehr zu reparieren. Sobald das Dokument umzieht, gilt oben.
+          const legacy = supplierLegacyIdPhoto(input.supplierId);
+          if (legacy) snap.cprImage = legacy;
+        }
         snapshotJson = JSON.stringify(snap);
       }
     } catch (err) {

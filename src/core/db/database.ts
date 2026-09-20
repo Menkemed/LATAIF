@@ -2279,6 +2279,33 @@ function runMigrations(database: Database): void {
     // POST-PARITY R7A (PP-11) — die Notiz der Aufgabenmaske bekommt ihre Spalte. Vorher zeigte die Maske
     // „NOTES", verwarf den Text aber still. Additiv; der Fassungs-Trigger zählt eine Notizänderung mit.
     `ALTER TABLE tasks ADD COLUMN notes TEXT`,
+
+    // ── MEDIA-IDENTITY §9 — die Fassung eines Kunden und eines Lieferanten ────
+    //
+    // Beide hatten bisher KEINE. Am Primary allein fiel das kaum auf; mit einem zweiten Rechner
+    // und einem Ausweisfoto ist es der gefährliche Fall: zwei Menschen öffnen denselben Kunden,
+    // einer tauscht das Ausweisdokument, der andere speichert seinen alten Stand darüber — und das
+    // ausgetauschte Dokument wäre still wieder das alte. Es wird DERSELBE Vertrag genommen wie bei
+    // Rechnung, Auftrag, Reparatur und Dokument: eine Ganzzahl, vom Trigger geführt, streng
+    // steigend, unteilbar mit der Wirkung. Die nie gepflegte Spalte `version` bleibt unberührt.
+    `ALTER TABLE customers ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_customers_revision`,
+    `CREATE TRIGGER trg_customers_revision
+       AFTER UPDATE ON customers
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE customers SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
+    `ALTER TABLE suppliers ADD COLUMN revision INTEGER NOT NULL DEFAULT 1`,
+    `DROP TRIGGER IF EXISTS trg_suppliers_revision`,
+    `CREATE TRIGGER trg_suppliers_revision
+       AFTER UPDATE ON suppliers
+       FOR EACH ROW
+       WHEN NEW.revision = OLD.revision
+       BEGIN
+         UPDATE suppliers SET revision = OLD.revision + 1 WHERE id = NEW.id;
+       END`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

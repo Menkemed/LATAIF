@@ -28,6 +28,10 @@ import { useEmployeeStore } from '@/stores/employeeStore';
 import { usePartnerStore } from '@/stores/partnerStore';
 import { useAgentStore } from '@/stores/agentStore';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
+import { assertRevision } from './financial-commands';
+import {
+  applyIdentityDocument, ingestIdentityPhoto, IdentityMediaError, type IdentityPhotoPlan,
+} from '@/core/identity/identity-media';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import {
@@ -106,6 +110,14 @@ function urteil<T>(fn: () => T): T {
   }
 }
 
+/** MEDIA-IDENTITY — ein Nein des Ausweisvertrags ist ein eingefrorenes Nein mit SEINEM Code. */
+function ausweis<T>(fn: () => T): T {
+  try { return fn(); } catch (e) {
+    if (e instanceof IdentityMediaError) throw new CommandRejected(e.code, e.message);
+    throw e;
+  }
+}
+
 function requiredId(raw: Record<string, unknown>): string {
   const id = raw.id;
   if (typeof id !== 'string' || !id.trim()) throw new MasterdataPayloadError('id is required');
@@ -134,6 +146,8 @@ export interface SupplierUpdateRequest {
   id: string;
   fields: SupplierUpdateInput;
   cprImageStagingId?: string;
+  /** MEDIA-IDENTITY §9 — die Fassung, die der Client gesehen hat. Beim Ausweisdokument Pflicht. */
+  expectedRevision?: number;
   /** CUSTOMER-SUPPLIER-ROLE-LINK V2 — diesen bestehenden Lieferanten ausdrücklich mit dem Kunden verknüpfen. */
   linkTo?: { customerId: string; seenCustomerUpdatedAt: string };
 }
@@ -199,13 +213,29 @@ export function parseSupplierUpdate(raw: unknown): SupplierUpdateRequest {
   if (isPlain(raw) && 'cprImage' in raw && raw.cprImage !== null) {
     throw new MasterdataPayloadError('an ID-card photo travels as staged bytes (cprImageStagingId), never inside the order');
   }
-  const r = strict(raw, [...SUPPLIER_UPDATE_FIELDS, 'cprImageStagingId'], MASTERDATA_COMPUTED.supplier, ['id']);
+  const r = strict(raw, [...SUPPLIER_UPDATE_FIELDS, 'cprImageStagingId', 'expectedRevision'], MASTERDATA_COMPUTED.supplier, ['id']);
   const id = requiredId(r);
   const cprImageStagingId = stagingIdOf(r);
   if (cprImageStagingId && 'cprImage' in r) throw new MasterdataPayloadError('replace the photo OR remove it, not both');
-  const fields = rule(() => supplierUpdateInput(without(r, 'id', 'cprImageStagingId')));
+  const fields = rule(() => supplierUpdateInput(without(r, 'id', 'cprImageStagingId', 'expectedRevision')));
   nothing(fields as Record<string, unknown>, !!cprImageStagingId);
-  return { id, fields, cprImageStagingId };
+  const expectedRevision = revisionOf(r.expectedRevision);
+  // MEDIA-IDENTITY §9 — wer ein Ausweisdokument tauscht oder entfernt, MUSS sagen, welchen Stand
+  // er dabei vor sich hatte. Ohne diesen Stand kann ein zweiter Bildschirm ein gerade
+  // ausgetauschtes Dokument still wieder durch das alte ersetzen — und niemand sähe es.
+  if ((cprImageStagingId || fields.cprImage === null) && expectedRevision === undefined) {
+    throw new MasterdataPayloadError('expectedRevision is required when the ID document changes');
+  }
+  return { id, fields, cprImageStagingId, expectedRevision };
+}
+
+/** Eine genannte Fassung ist eine ganze Zahl ab 1 — oder sie fehlt. */
+function revisionOf(v: unknown): number | undefined {
+  if (v === undefined) return undefined;
+  if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
+    throw new MasterdataPayloadError('expectedRevision must be the revision you saw');
+  }
+  return v;
 }
 
 // ── Mitarbeiter ────────────────────────────────────────────────────────────
@@ -293,10 +323,25 @@ export async function runSupplierCreate(deps: EngineDeps, identity: CommandIdent
       return { supplierId: r.supplier.id, name: r.supplier.name, linkedCustomerId: fc.customerId, existing: r.existing };
     });
   }
+  // MEDIA-IDENTITY §3 — Bytes holen UND aufnehmen VOR der Klammer: der Ingest hat seine eigenen
+  // durablen Haltepunkte und darf nicht in einer offenen Geschäftstransaktion sitzen. Ein Nein
+  // wird hier NICHT geworfen, sondern mitgenommen: eine Wiederholung desselben Auftrags (die
+  // Ablage ist dann geräumt) muss die eingefrorene Antwort bekommen, nicht einen neuen Fehler.
+  let identityMediaId: string | null = null;
+  let fotoFehler: unknown = null;
+  if (staged.length) {
+    try {
+      const dataUrl = await stagedImage(staged, identity, media);
+      identityMediaId = dataUrl ? await ingestIdentityPhoto(dataUrl, 'supplier') : null;
+    } catch (e) { fotoFehler = e; }
+  }
   const outcome = await runRemoteCommand(deps, identity, async () => {
+    if (fotoFehler) throw fotoFehler;
     assertHouseBranch(identity);
-    const cprImage = await stagedImage(staged, identity, media);
-    const s = urteil(() => useSupplierStore.getState().createSupplier({ ...req.input, ...(cprImage ? { cprImage } : {}) }));
+    const s = urteil(() => useSupplierStore.getState().createSupplier(req.input));
+    // Die Zeile ist gerade entstanden; ihre Fassung ist 1 und niemand hält einen älteren Stand.
+    // Also keine zusätzliche Fassung für das Dokument — das Anlegen IST die Änderung.
+    if (identityMediaId) ausweis(() => applyIdentityDocument('supplier', s.id, identityMediaId, { bumpOwner: false }));
     return { supplierId: s.id, name: s.name };
   });
   if (outcome.kind === 'ok' && staged.length) await discardStagedAfterSuccess(staged, stagingOwnerOf(identity), media.discardStaged ?? invokeDiscardStaged);
@@ -314,11 +359,35 @@ export async function runSupplierUpdate(deps: EngineDeps, identity: CommandIdent
     });
   }
   const staged = req.cprImageStagingId ? [req.cprImageStagingId] : [];
+  // Was mit dem Ausweisdokument geschehen soll: neu (Ablage), entfernen (`cprImage: null`) oder
+  // nichts. Aufgenommen wird VOR der Klammer, Fehler werden mitgenommen (siehe Anlegen).
+  const plan: IdentityPhotoPlan | undefined =
+    staged.length ? undefined : (req.fields.cprImage === null ? null : undefined);
+  let identityMediaId: string | null = null;
+  let identityChanges = plan === null;
+  let fotoFehler: unknown = null;
+  if (staged.length) {
+    try {
+      const dataUrl = await stagedImage(staged, identity, media);
+      identityMediaId = dataUrl ? await ingestIdentityPhoto(dataUrl, 'supplier', { ownerId: req.id }) : null;
+      identityChanges = true;
+    } catch (e) { fotoFehler = e; }
+  }
+  // Was wirklich in die Zeile geht — das Foto gehört nicht mehr dazu.
+  const rowFields = without(req.fields as Record<string, unknown>, 'cprImage');
   const outcome = await runRemoteCommand(deps, identity, async () => {
+    if (fotoFehler) throw fotoFehler;
     assertHouseBranch(identity);
     mustExist('suppliers', req.id, identity.branchId, 'SUPPLIER_NOT_FOUND');
-    const cprImage = await stagedImage(staged, identity, media);
-    urteil(() => useSupplierStore.getState().updateSupplier(req.id, { ...req.fields, ...(cprImage ? { cprImage } : {}) } as never));
+    if (req.expectedRevision !== undefined) assertRevision('suppliers', req.id, req.expectedRevision, 'SUPPLIER_NOT_FOUND');
+    // Schreibt dieser Auftrag die Zeile ohnehin, ist IHR Trigger die eine Fassung; ändert sich nur
+    // das Dokument, muss die Verknüpfung selbst zählen — sonst bliebe der Tausch unsichtbar.
+    if (identityChanges) {
+      ausweis(() => applyIdentityDocument('supplier', req.id, identityMediaId, {
+        bumpOwner: Object.keys(rowFields).length === 0,
+      }));
+    }
+    if (Object.keys(rowFields).length > 0) urteil(() => useSupplierStore.getState().updateSupplier(req.id, rowFields as never));
     const row = query('SELECT name, active FROM suppliers WHERE id = ?', [req.id])[0];
     return { supplierId: req.id, name: String(row?.name ?? ''), active: Number(row?.active) === 1 };
   });

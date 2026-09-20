@@ -56,7 +56,13 @@ const cap = await import('../../src/core/media/capture-profile.ts');
   const cp = code(src('src/core/media/capture-profile.ts'));
   ok(/fillStyle = '#FFFFFF'/.test(cp) && /toDataURL\('image\/jpeg', CAPTURE_JPEG_QUALITY\)/.test(cp), 'PROFIL Transparenz auf Weiß (wie der Normalisierer), JPEG');
   const users = walk('src').filter((f) => /\.tsx$/.test(f) && /<ImageUpload\b/.test(src(f)));
-  ok(users.length === 10, `PROFIL zehn Masken wählen Fotos über dieselbe Komponente (${users.length})`);
+  // MEDIA-IDENTITY §3 — neun statt zehn: die Lieferantenmaske zeigt ihr Ausweisdokument jetzt über
+  // `IdentityPhotoField` (ANSEHEN kommt dort über den geprüften Leser, nicht aus einer Spalte). Die
+  // Auswahl einer Datei geht auch dort durch `captureImage` — dasselbe Profil, eine andere Hülle.
+  ok(users.length === 9, `PROFIL neun Masken wählen Fotos über dieselbe Komponente (${users.length})`);
+  const ipf = code(src('src/components/identity/IdentityPhotoField.tsx'));
+  ok(/import \{ captureImage \} from '@\/core\/media\/capture-profile'/.test(ipf) && /await captureImage\(f\)/.test(ipf),
+    'PROFIL …und die zehnte (das Ausweisdokument) nutzt dasselbe Aufnahmeprofil');
 }
 marker('POST_PARITY_PP12_ONE_CAPTURE_PROFILE');
 
@@ -124,8 +130,15 @@ marker('POST_PARITY_PP12_ONE_RECORD_NORMALIZER');
     && /withRecordScrapPhotos\(input, storedScrapPhotos\(tradeId, localHouseBranch\(\)\)\);\s*return runOnPrimary\(/.test(ma),
   'PRIMARY Altgold anlegen/ändern — vor der Klammer; ändern behält die gespeicherten Fotos');
   const ms = code(src('src/core/masterdata/masterdata-save.ts'));
-  ok((ms.match(/await normalizeRecordImage\(/g) ?? []).length === 2 && /normalizeRecordImage\(diff\.cprImage, base\.cprImage\)/.test(ms)
-    && (ms.match(/local: async \(\) => \{/g) ?? []).length === 2, 'PRIMARY Ausweisfoto anlegen/ändern — vor der Klammer');
+  const is = code(src('src/core/identity/identity-save.ts'));
+  // MEDIA-IDENTITY §3/§6 — das Ausweisfoto geht nicht mehr durch den TS-Normalisierer in eine
+  // Spalte, sondern durch den Medienkern: `ingestIdentityPhoto` → Rust normalisiert (JPEG,
+  // ≤ 100 000 B, EXIF), prüft und veröffentlicht. Es bleibt bei EINEM Normalisierer, und der
+  // Aufruf steht weiterhin VOR der Klammer.
+  ok(!/normalizeRecordImage\(/.test(ms) && /await prepareIdentityPhoto\(/.test(ms)
+    && !/local: async \(\) => \{/.test(ms), 'PRIMARY Ausweisfoto anlegen/ändern — vor der Klammer');
+  ok(/await ingestIdentityPhoto\(intent\.dataUrl/.test(is),
+    'PRIMARY …und zwar über den Medienkern, nicht über einen zweiten Rechenweg');
   ok(/normalizeSpecImages\(l\.newProduct\)[\s\S]*return runOnPrimary\(\(\) => createPurchaseInHouse\(/.test(code(src('src/core/purchases/purchase-house.ts'))), 'PRIMARY Einkauf „New Item"');
   const oh = code(src('src/core/orders/order-house.ts'));
   ok(/normalizeSpecImages\(input\.customProductSpec\);\s*return runOnPrimary\(\(\) => createOrderInHouse\(\{ \.\.\.input, lines, customProductSpec \}/.test(oh), 'PRIMARY Auftrag: neuer Artikel und Sonderstück-Entwurf');
@@ -142,7 +155,8 @@ marker('POST_PARITY_PP12_ONE_RECORD_NORMALIZER');
     ['src/pages/purchases/PurchaseCreate.tsx', /purchaseCreateBody\(input, stageRecordDataUrls\)/],
     ['src/pages/orders/OrderCreate.tsx', /orderCreateBody\(input, stageRecordDataUrls\)/],
     ['src/pages/orders/OrderDetail.tsx', /orderLineEditBody\(req, stageRecordDataUrls\)/],
-    ['src/core/masterdata/masterdata-save.ts', /stageRecordDataUrls\(\[dataUrl\]\)/],
+    // MEDIA-IDENTITY §3 — dieselbe Ablage, nur an EINER Stelle für Kunde und Lieferant.
+    ['src/core/identity/identity-save.ts', /stageRecordDataUrls\(\[intent\.dataUrl\]\)/],
     ['src/core/metals/metal-actions.ts', /stage \?\?= \(urls\) => stageRecordDataUrls\(urls, keep\)/],
   ];
   for (const [f, re] of record) ok(re.test(code(src(f))), `PC2 ${f}: Belegbilder über stageRecordDataUrls`);

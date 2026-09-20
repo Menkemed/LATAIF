@@ -21,7 +21,16 @@ export interface OwnerMediaRef {
   sortOrder: number;
   isPrimary: boolean;
   securityClass: MediaSecurityClass;
-  main: { storageKey: string; hash: string; byteSize: number; mimeType: string; extension: string };
+  main: {
+    storageKey: string; hash: string; byteSize: number; mimeType: string; extension: string;
+    /**
+     * MEDIA-IDENTITY §7 — WELCHE Fassung der Datei das gerade ist. Für eine Galerie egal (dort
+     * gilt immer die aktuelle), für einen historischen Beleg der ganze Punkt: ein Einkauf hält
+     * fest, welche Fassung beim Kauf galt, und muss sie später wiederfinden, auch wenn inzwischen
+     * eine neuere gilt.
+     */
+    generationNo: number;
+  };
   thumbnail: { storageKey: string; hash: string; byteSize: number; mimeType: string; extension: string } | null;
 }
 
@@ -58,7 +67,10 @@ export function resolveOwnerMedia(db: ReadDb, q: OwnerMediaQuery): Map<string, O
     const rows = db.exec(
       `SELECT l.entity_id, l.link_id, l.media_id, l.sort_order, l.is_primary, o.security_class,
               g.storage_key, g.stored_blob_hash, g.byte_size, g.mime_type, g.extension,
-              tg.storage_key, tg.stored_blob_hash, tg.byte_size, tg.mime_type, tg.extension
+              tg.storage_key, tg.stored_blob_hash, tg.byte_size, tg.mime_type, tg.extension,
+              -- Angehängt, nicht eingefügt: die Zuordnung unten läuft über Spaltenpositionen, und
+              -- eine Spalte in der Mitte hätte jede folgende stillschweigend verschoben.
+              g.generation_no
          FROM media_links l
          JOIN media_objects o ON o.tenant_id = l.tenant_id AND o.media_id = l.media_id
                              AND o.deleted_at IS NULL AND o.ingest_status = 'ready'
@@ -90,7 +102,10 @@ export function resolveOwnerMedia(db: ReadDb, q: OwnerMediaQuery): Map<string, O
         sortOrder: Number(v[3]),
         isPrimary: Number(v[4]) === 1,
         securityClass: String(v[5]) as MediaSecurityClass,
-        main: { storageKey: String(v[6]), hash: String(v[7]), byteSize: Number(v[8]), mimeType: String(v[9]), extension: String(v[10]) },
+        main: {
+          storageKey: String(v[6]), hash: String(v[7]), byteSize: Number(v[8]),
+          mimeType: String(v[9]), extension: String(v[10]), generationNo: Number(v[16]),
+        },
         thumbnail: v[11] == null ? null : {
           storageKey: String(v[11]), hash: String(v[12]), byteSize: Number(v[13]), mimeType: String(v[14]), extension: String(v[15]),
         },

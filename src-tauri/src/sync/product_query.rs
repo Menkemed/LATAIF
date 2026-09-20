@@ -523,6 +523,37 @@ pub fn media_path_for_key(media_root: &std::path::Path, key: &str) -> Option<std
     Some(media_root.join(scope).join(shard).join(file))
 }
 
+/// MEDIA-IDENTITY §1 — die kanonische Rolle, fail-closed.
+///
+/// Dieselbe Abbildung wie `canonicalRole` in `src/core/models/types.ts`, mit EINEM bewussten
+/// Unterschied: dort wird ein unbekannter Wert auf die schwächste Rolle abgebildet, damit eine
+/// Oberfläche etwas anzeigen kann. Hier geht es um Dateibytes über das Netz — eine Rolle, die wir
+/// nicht kennen, bekommt nichts.
+fn canonical_role(role: &str) -> Option<&'static str> {
+    match role.trim() {
+        "owner" | "ADMIN" => Some("ADMIN"),
+        "manager" | "MANAGER" => Some("MANAGER"),
+        "sales" | "SALES" | "viewer" => Some("SALES"),
+        "backoffice" | "ACCOUNTANT" => Some("ACCOUNTANT"),
+        _ => None,
+    }
+}
+
+/// Darf DIESE Rolle das Ausweisdokument DIESER Art sehen?
+///
+/// Die Antwort ist aus `ROLE_PERMISSIONS` abgeleitet und nicht erfunden: ein Ausweisdokument sieht,
+/// wer den Datensatz selbst sehen darf. `customers.view` hat jede bekannte Rolle; `suppliers.view`
+/// hat SALES nicht — also sieht der Verkauf den Lieferantenausweis auch nicht. Ein Parity-Test auf
+/// der TypeScript-Seite hält die beiden Listen zusammen.
+pub fn role_may_read_identity(role: &str, owner_type: &str) -> bool {
+    let Some(c) = canonical_role(role) else { return false };
+    match owner_type {
+        "customer" => matches!(c, "ADMIN" | "MANAGER" | "SALES" | "ACCOUNTANT"),
+        "supplier" => matches!(c, "ADMIN" | "MANAGER" | "ACCOUNTANT"),
+        _ => false,
+    }
+}
+
 /// MEDIA-S1 — what a verified read of one stored file may rely on: the content hash and size the
 /// database holds for it, and its extension (which fixes MIME type and size limit).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -549,16 +580,37 @@ pub fn media_read_grant(
     db_path: &std::path::Path,
     tenant_id: &str,
     branch_id: &str,
+    role: &str,
     key: &str,
 ) -> Option<MediaReadGrant> {
     let conn = open_read_only(db_path)?;
+    // MEDIA-IDENTITY §1 — die Rollenfrage wird HIER beantwortet, nicht in SQL: eine Rollentabelle
+    // in einer WHERE-Klausel wäre eine zweite Rollenarchitektur neben `role-permissions.ts`.
+    let may_customer = if role_may_read_identity(role, "customer") { 1i64 } else { 0 };
+    let may_supplier = if role_may_read_identity(role, "supplier") { 1i64 } else { 0 };
+    if let Some(g) = live_media_grant(&conn, tenant_id, branch_id, key, may_customer, may_supplier) {
+        return Some(g);
+    }
+    // MEDIA-IDENTITY §7 — und erst dann die Geschichte: die Fassung, die ein Einkauf eingefroren
+    // hat. Sie ist absichtlich NICHT mehr die aktuelle, also faellt sie durch die Regel oben.
+    historical_identity_grant(&conn, tenant_id, branch_id, key, may_customer, may_supplier)
+}
+
+/// Die lebende Regel: ein Medium, das JETZT an einem Datensatz dieser Filiale haengt.
+fn live_media_grant(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    branch_id: &str,
+    key: &str,
+    may_customer: i64,
+    may_supplier: i64,
+) -> Option<MediaReadGrant> {
     conn.query_row(
         "SELECT g.stored_blob_hash, g.byte_size, g.extension
            FROM media_blob_generations g
            JOIN media_blobs b ON b.tenant_id = g.tenant_id AND b.blob_id = g.blob_id
                              AND b.current_generation_no = g.generation_no AND b.blob_status = 'present'
            JOIN media_objects o ON o.tenant_id = g.tenant_id AND o.deleted_at IS NULL
-                               AND o.security_class IN ('public', 'internal')
                                AND (o.master_blob_id = g.blob_id OR EXISTS (
                                      SELECT 1 FROM media_variants v
                                       WHERE v.tenant_id = o.tenant_id AND v.media_id = o.media_id
@@ -567,17 +619,78 @@ pub fn media_read_grant(
            JOIN branches br ON br.id = l.branch_id AND br.tenant_id = g.tenant_id
           WHERE g.tenant_id = ?1 AND g.storage_key = ?2 AND g.gen_status = 'available' AND g.deleted_at IS NULL
             AND l.scope_kind = 'branch' AND l.branch_id = ?3
-            -- MEDIA-REPAIR — jeder Besitzertyp mit SEINER Rolle und SEINER Tabelle: der Datensatz muss
-            -- existieren und in genau dieser Filiale liegen. Ein Typ ohne Regel wird nicht bedient.
+            -- MEDIA-REPAIR / MEDIA-IDENTITY — jeder Besitzertyp mit SEINER Rolle, SEINER Tabelle UND
+            -- SEINER Sicherheitsklasse: der Datensatz muss existieren und in genau dieser Filiale
+            -- liegen. Die Klasse steht bewusst je Zweig und nicht mehr gemeinsam oben — ein
+            -- Ausweisdokument ist `sensitive`, ein Artikelbild darf das nie sein. Ein Typ ohne Regel
+            -- wird nicht bedient, `highly_sensitive` von keinem Zweig.
             AND (
-              (l.entity_type = 'product' AND l.media_role = 'stock_image'
+              (o.security_class IN ('public', 'internal')
+                 AND l.entity_type = 'product' AND l.media_role = 'stock_image'
                  AND EXISTS (SELECT 1 FROM products p WHERE p.id = l.entity_id AND p.branch_id = l.branch_id))
               OR
-              (l.entity_type = 'repair' AND l.media_role = 'gallery'
+              (o.security_class IN ('public', 'internal')
+                 AND l.entity_type = 'repair' AND l.media_role = 'gallery'
                  AND EXISTS (SELECT 1 FROM repairs r WHERE r.id = l.entity_id AND r.branch_id = l.branch_id))
+              OR
+              (o.security_class = 'sensitive' AND ?4 = 1
+                 AND l.entity_type = 'customer' AND l.media_role = 'identity_document'
+                 AND EXISTS (SELECT 1 FROM customers c WHERE c.id = l.entity_id AND c.branch_id = l.branch_id))
+              OR
+              (o.security_class = 'sensitive' AND ?5 = 1
+                 AND l.entity_type = 'supplier' AND l.media_role = 'identity_document'
+                 AND EXISTS (SELECT 1 FROM suppliers s WHERE s.id = l.entity_id AND s.branch_id = l.branch_id))
             )
           LIMIT 1",
-        rusqlite::params![tenant_id, key, branch_id],
+        rusqlite::params![tenant_id, key, branch_id, may_customer, may_supplier],
+        |r| Ok(MediaReadGrant {
+            hash: r.get::<_, String>(0)?,
+            byte_size: r.get::<_, i64>(1)? as u64,
+            ext: r.get::<_, String>(2)?,
+        }),
+    )
+    .optional()
+    .ok()
+    .flatten()
+}
+
+/// MEDIA-IDENTITY §7/§8 — die EINE historische Ausnahme: die Ausweisfassung, die ein Einkauf
+/// dieser Filiale eingefroren hat.
+///
+/// Warum es sie braucht: ein alter Beleg muss die Fassung zeigen, die BEIM KAUF galt. Sobald der
+/// Kunde sein Dokument austauscht, ist die damalige nicht mehr die aktuelle — die lebende Regel
+/// oben weist sie also ab, und der zweite Rechner saehe bei einem alten Einkauf entweder nichts
+/// oder, schlimmer, das NEUE Foto als vermeintlichen Nachweis.
+///
+/// Warum das kein Loch ist: es wird nicht nach dem Schluessel allein entschieden. Der Beleg muss
+/// in der Filiale des Aufrufers liegen, er muss GENAU diese Fassung benennen (Schluessel, Hash und
+/// Fassungsnummer zusammen), und die Rolle des Lesers muss zu dem passen, wessen Ausweis es war.
+/// Die Verknuepfung wird hier bewusst NICHT verlangt — dass sie fehlt, ist der Normalfall eines
+/// historischen Nachweises.
+fn historical_identity_grant(
+    conn: &rusqlite::Connection,
+    tenant_id: &str,
+    branch_id: &str,
+    key: &str,
+    may_customer: i64,
+    may_supplier: i64,
+) -> Option<MediaReadGrant> {
+    conn.query_row(
+        "SELECT g.stored_blob_hash, g.byte_size, g.extension
+           FROM purchases p
+           JOIN branches br ON br.id = p.branch_id AND br.tenant_id = ?1
+           JOIN media_blob_generations g ON g.tenant_id = ?1 AND g.storage_key = ?2
+                                        AND g.stored_blob_hash = json_extract(p.supplier_snapshot, '$.identity.blobHash')
+                                        AND g.generation_no = json_extract(p.supplier_snapshot, '$.identity.generationNo')
+          WHERE p.branch_id = ?3
+            AND json_extract(p.supplier_snapshot, '$.identity.storageKey') = ?2
+            AND (
+              (json_extract(p.supplier_snapshot, '$.identity.ownerType') = 'customer' AND ?4 = 1)
+              OR
+              (json_extract(p.supplier_snapshot, '$.identity.ownerType') = 'supplier' AND ?5 = 1)
+            )
+          LIMIT 1",
+        rusqlite::params![tenant_id, key, branch_id, may_customer, may_supplier],
         |r| Ok(MediaReadGrant {
             hash: r.get::<_, String>(0)?,
             byte_size: r.get::<_, i64>(1)? as u64,

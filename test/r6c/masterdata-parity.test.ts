@@ -19,7 +19,12 @@ import { dirname, resolve as resolvePath } from 'node:path';
 const repo = resolvePath(dirname(fileURLToPath(import.meta.url)), '..', '..');
 registerHooks({
   resolve(specifier: string, context: { parentURL?: string }, nextResolve: (s: string, c: unknown) => unknown) {
-    if (specifier === '@/core/db/database') {
+    // MEDIA-IDENTITY §3 — das Ausweisfoto eines Lieferanten geht jetzt durch den Medienkern, und
+    // der spricht mit Rust. Gestellt wird genau diese Grenze, nichts sonst.
+    if (specifier === '@tauri-apps/api/core') {
+      return { url: pathToFileURL(resolvePath(repo, 'test/bridge/_tauri-shim.ts')).href, shortCircuit: true };
+    }
+    if (specifier === '@/core/db/database' || specifier === '../db/database.ts') {
       return { url: pathToFileURL(resolvePath(repo, 'test/sync/_db-shim.ts')).href, shortCircuit: true };
     }
     if ((specifier === './database' || specifier === '../db/database') && context.parentURL) {
@@ -60,6 +65,7 @@ const { resetDurabilityStateForTest } = await import('../../src/core/bridge/dura
 const { resetTransactionHealthForTest } = await import('../../src/core/db/transaction-health.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
+const { applyMediaSchema } = await import('../../src/core/db/media-schema.ts');
 const rules = await import('../../src/core/masterdata/masterdata-rules.ts');
 const md = await import('../../src/core/bridge/masterdata-commands.ts');
 const registry = await import('../../src/core/bridge/command-registry.ts');
@@ -125,6 +131,9 @@ function freshDb(): Db {
   db.run("INSERT INTO branches (id, tenant_id, name, created_at, updated_at) VALUES ('branch-other','tenant-1','Andere',?,?)", [NOW, NOW]);
   insert(db, 'customers', { id: 'c1', branch_id: 'branch-main', first_name: 'Maya', last_name: 'Main', created_at: NOW, updated_at: NOW });
   insert(db, 'customers', { id: 'c2', branch_id: 'branch-other', first_name: 'Otto', last_name: 'Other', created_at: NOW, updated_at: NOW });
+  // MEDIA-IDENTITY §3 — der Medienkern gehört zur Datenbank, die die Produktion hat: das
+  // Ausweisfoto eines Lieferanten ist seit diesem Bund ein Medium, keine Spalte.
+  applyMediaSchema(db as never);
   setTestDatabase(db as never);
   resetDurabilityStateForTest();
   resetTransactionHealthForTest();
@@ -256,8 +265,14 @@ marker('CENTRAL_UI_R6C_PRIMARY_FIRST_CONTRACT_PROVED');
     readStaged: async (_id, o) => { owner = o as never; return { mime: 'image/png', dataBase64: 'iVBORw0K' }; },
     discardStaged: async (id) => { discarded.push(id); },
   }));
-  ok(g.kind === 'ok' && one(db, 'SELECT cpr_image FROM suppliers WHERE id = ?', [g.value.supplierId]) === 'data:image/png;base64,iVBORw0K' && discarded.join() === sid,
-    'MEDIA das Ausweisfoto kam über die vorhandene Ablage (R5B), danach geräumt');
+  // MEDIA-IDENTITY §3 — der Weg der Ablage ist DERSELBE; das Ziel ist ein anderes: das Foto wird
+  // ein Medium (`identity_document`, `sensitive`) und landet nicht mehr in der Spalte.
+  const idLinks = (sup: string): number =>
+    n(db, "SELECT COUNT(*) FROM media_links WHERE entity_type='supplier' AND entity_id=? AND media_role='identity_document' AND deleted_at IS NULL", [sup]);
+  ok(g.kind === 'ok' && discarded.join() === sid && idLinks(String(g.value.supplierId)) === 1,
+    'MEDIA das Ausweisfoto kam über die vorhandene Ablage (R5B), wurde ein Medium und die Ablage geräumt');
+  ok(one(db, 'SELECT cpr_image FROM suppliers WHERE id = ?', [g.value.supplierId]) === null,
+    'MEDIA …und die alte Bildspalte bleibt leer (kein Base64 mehr in der Zeile)');
   ok(owner.branchId === 'branch-main' && owner.userId === 'user-test', 'MEDIA die Ablage gehört der GEPRÜFTEN Identität');
   const before = n(db, 'SELECT COUNT(*) FROM suppliers');
   const idH = nextId();
@@ -271,14 +286,18 @@ marker('CENTRAL_UI_R6C_SUPPLIER_CREATE_PROVED');
 {
   const db = freshDb();
   const d = deps(db);
-  const s = useSupplierStore.getState().createSupplier({ name: 'Old', phone: '1', cprImage: 'data:image/png;base64,QQ' });
+  const s = useSupplierStore.getState().createSupplier({ name: 'Old', phone: '1' });
+  // ALTBESTAND — eine Zeile aus der Zeit vor dem Medienkern. Sie wird gesetzt wie sie damals
+  // entstand (direkt in der Spalte) und darf von keinem Ändern mehr angefasst werden.
+  db.run("UPDATE suppliers SET cpr_image = 'data:image/png;base64,QQ' WHERE id = ?", [s.id]);
   insert(db, 'suppliers', { id: 'sx', branch_id: 'branch-other', name: 'Foreign', active: 1, created_at: NOW, updated_at: NOW });
   ok(parseFails(() => md.parseSupplierUpdate({ id: s.id, cprImage: 'data:image/png;base64,AA' })) !== '', 'PAYLOAD ein Foto ändert sich nur über die Ablage');
   ok(parseFails(() => md.parseSupplierUpdate({ id: s.id })) === 'nothing to change', 'PAYLOAD ein leeres Ändern ist keine Absicht');
   ok(parseFails(() => md.parseSupplierUpdate({ id: s.id, creditBalance: 5 })) !== '', 'PAYLOAD Salden rechnet das Haus');
   const r1 = await fern(() => md.runSupplierUpdate(d, identity(nextId(), 'suppliers.update'), { id: s.id, name: ' New ', phone: '' }));
   const row = rows(db, 'SELECT name, phone, cpr_image FROM suppliers WHERE id = ?', [s.id])[0];
-  ok(r1.kind === 'ok' && row.name === 'New' && row.phone === null && row.cpr_image === 'data:image/png;base64,QQ', 'UPDATE nur das Genannte ändert sich; das Foto bleibt');
+  ok(r1.kind === 'ok' && row.name === 'New' && row.phone === null && row.cpr_image === 'data:image/png;base64,QQ',
+    'UPDATE nur das Genannte ändert sich; der Altbestand bleibt unangetastet');
   ok((await fern(() => md.runSupplierUpdate(d, identity(nextId(), 'suppliers.update'), { id: 'nope', name: 'X' }))).code === 'SUPPLIER_NOT_FOUND', 'UPDATE ein unbekannter Lieferant: eingefrorenes Nein');
   ok((await fern(() => md.runSupplierUpdate(d, identity(nextId(), 'suppliers.update'), { id: 'sx', name: 'X' }))).code === 'SUPPLIER_NOT_FOUND' && one(db, "SELECT name FROM suppliers WHERE id = 'sx'") === 'Foreign',
     'UPDATE ein Lieferant einer anderen Filiale ist von hier aus nicht vorhanden');
@@ -287,8 +306,17 @@ marker('CENTRAL_UI_R6C_SUPPLIER_CREATE_PROVED');
   const t2 = await fern(() => md.runSupplierUpdate(d, identity(idT, 'suppliers.update'), { id: s.id, active: false }));
   ok(t1.kind === 'ok' && t2.replayed && Number(one(db, 'SELECT active FROM suppliers WHERE id = ?', [s.id])) === 0,
     'ACTIVE „Deactivate" reist als Zielwert — eine Wiederholung schaltet nicht zurück');
-  const r5 = await fern(() => md.runSupplierUpdate(d, identity(nextId(), 'suppliers.update'), { id: s.id, cprImage: null }));
-  ok(r5.kind === 'ok' && one(db, 'SELECT cpr_image FROM suppliers WHERE id = ?', [s.id]) === null, 'UPDATE ein entferntes Foto ist `null`');
+  // MEDIA-IDENTITY §3/§9 — entfernen gilt dem DOKUMENT und nennt den Stand, den der Bildschirm
+  // sah. Der Altbestand in der Spalte bleibt: er ist der Nachweis alter Einkaufsbelege.
+  const r5 = await fern(() => md.runSupplierUpdate(d, identity(nextId(), 'suppliers.update'),
+    { id: s.id, cprImage: null, expectedRevision: Number(one(db, 'SELECT revision FROM suppliers WHERE id = ?', [s.id])) }));
+  ok(r5.kind === 'ok'
+    && n(db, "SELECT COUNT(*) FROM media_links WHERE entity_type='supplier' AND entity_id=? AND deleted_at IS NULL", [s.id]) === 0
+    && one(db, 'SELECT cpr_image FROM suppliers WHERE id = ?', [s.id]) === 'data:image/png;base64,QQ',
+    'UPDATE ein entferntes Foto entfernt das Dokument — und lässt den Altbestand in Ruhe');
+  const r5b = await fern(() => md.runSupplierUpdate(d, identity(nextId(), 'suppliers.update'), { id: s.id, cprImage: null }));
+  ok(r5b.kind === 'thrown' && r5b.code === 'MASTERDATA_PAYLOAD_INVALID' && /expectedRevision is required/.test(String(r5b.message)),
+    'UPDATE …und ohne genannten Stand wird ein Dokumentwechsel gar nicht erst angenommen');
   const r6 = await fern(() => md.runSupplierUpdate(d, identity(nextId(), 'suppliers.update'), { id: s.id, name: '' }));
   ok(r6.kind === 'thrown' && r6.code === rules.SUPPLIER_NAME_REQUIRED && one(db, 'SELECT name FROM suppliers WHERE id = ?', [s.id]) === 'New', 'UPDATE fern dieselbe Namensregel');
 }
@@ -397,10 +425,18 @@ marker('CENTRAL_UI_R6C_PRIMARY_PARITY_PROVED');
   const ms = codeOf(src('src/core/masterdata/masterdata-save.ts'));
   // POST-PARITY R7B PP-12 — die zwei Lieferanten-Anschlüsse rechnen das Ausweisfoto VOR der Klammer; die Klammer bleibt.
   // CUSTOMER-SUPPLIER-ROLE-LINK — sieben statt fünf: dazu „Lieferant aus Kunde" und „Lieferant mit Kunde verknüpfen".
-  ok((ms.match(/local: \(\) => runOnPrimary\(/g) ?? []).length === 7 && (ms.match(/local: async \(\) => \{[\s\S]{0,400}?return runOnPrimary\(/g) ?? []).length === 2,
+  // MEDIA-IDENTITY §3 — neun statt sieben plus zwei: das Ausweisfoto wird jetzt VOR der Klammer
+  // aufgenommen (`prepareIdentityPhoto`), also brauchen auch die zwei Lieferanten-Anschlüsse keine
+  // asynchrone Vorstufe INNERHALB der Klammer mehr.
+  ok((ms.match(/local: \(\) => runOnPrimary\(/g) ?? []).length === 9 && !/local: async \(\) => \{/.test(ms),
     'UI am Primary läuft jede Stammdaten-Handlung in der Schreibreihenfolge (runOnPrimary) — nicht mehr an ihr vorbei');
   // POST-PARITY R7B PP-12 — dieselbe Ablage; PC2 rechnet das Foto vorher durch den Normalisierer.
-  ok(/stageRecordDataUrls\(\[dataUrl\]\)/.test(ms) && /cprImageStagingId = s\.id/.test(ms), 'UI das Foto reist auf PC2 über die vorhandene Ablage (kein neuer Medienweg)');
+  // MEDIA-IDENTITY §3 — derselbe Weg, an EINER Stelle: `prepareIdentityPhoto` legt auf PC2 in die
+  // vorhandene Ablage und nimmt am Primary auf. Kein zweiter Medienweg, kein zweiter Normalisierer.
+  const is = codeOf(src('src/core/identity/identity-save.ts'));
+  ok(/prepareIdentityPhoto\(/.test(ms) && /SUPPLIER_PHOTO_KEYS/.test(ms)
+    && /stageRecordDataUrls\(\[intent\.dataUrl\]\)/.test(is) && /ingestIdentityPhoto\(/.test(is),
+    'UI das Foto reist auf PC2 über die vorhandene Ablage (kein neuer Medienweg)');
   ok(/updatePayload\(base as unknown as Record<string, unknown>, form as Record<string, unknown>, SUPPLIER_UPDATE_FIELDS\)/.test(ms), 'UI beim Ändern reist nur das Geänderte (M-01)');
 }
 marker('CENTRAL_UI_R6C_QUICK_CREATES_PROVED');

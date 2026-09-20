@@ -17,6 +17,9 @@ import { createPayload, CUSTOMER_EDITABLE } from '@/core/data/write-payloads';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Customer, VIPLevel } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
+import { IdentityPhotoField } from '@/components/identity/IdentityPhotoField';
+import { saveCustomerCreate } from '@/core/customers/customer-save';
+import { intentOf } from '@/core/identity/identity-save';
 
 
 const BRANDS = ['Rolex', 'Patek Philippe', 'Audemars Piguet', 'Richard Mille', 'Vacheron Constantin', 'A. Lange & Sohne', 'Omega', 'Cartier'];
@@ -28,6 +31,7 @@ export function CustomerList() {
   const [showNew, setShowNew] = useState(false);
   const [saveError, setSaveError] = useState('');
   const anlegen = useSharedWrite<{ customerId: string }>('customers.create');
+  const [idPhoto, setIdPhoto] = useState<string | null | undefined>(undefined);
   const [form, setForm] = useState<Partial<Customer>>({
     country: 'BH', language: 'en', vipLevel: 0, customerType: 'collector', salesStage: 'lead', preferences: [],
   });
@@ -68,11 +72,9 @@ export function CustomerList() {
   async function handleCreate() {
     if (!form.firstName || !form.lastName) return;
     setSaveError('');
-    const r = await anlegen.save({
-      local: () => ({ customerId: createCustomer(form).id }),
-      remote: () => createPayload(form as Record<string, unknown>, CUSTOMER_EDITABLE),
-      shape: (v) => ({ customerId: String(v.customerId ?? '') }),
-    });
+    // MEDIA-IDENTITY §2 — Anlegen mit oder ohne Ausweisdokument, in EINER Speicherfolge. Ohne
+    // Foto ist der Normalfall und kostet nichts: `intentOf(undefined)` heisst „nichts zu tun".
+    const r = await saveCustomerCreate(anlegen, form as Record<string, unknown>, intentOf(idPhoto));
     // `unknown` ist KEIN Erfolg: der Ausgang ist offen, dieselbe Absicht wird wiederholt.
     if (r.kind !== 'ok') { setSaveError(fehlertext(r)); return; }
     // Der Stand kommt dort her, wo er entsteht — am Primary aus der Datenbank, am Client
@@ -80,6 +82,7 @@ export function CustomerList() {
     loadCustomers();
     setShowNew(false);
     setSaveError('');
+    setIdPhoto(undefined);
     setForm({ country: 'BH', language: 'en', vipLevel: 0, customerType: 'collector', salesStage: 'lead', preferences: [] });
   }
 
@@ -236,6 +239,13 @@ export function CustomerList() {
           </div>
           <Input label="EMAIL" placeholder="email@example.com" value={form.email || ''} onChange={e => setForm({ ...form, email: e.target.value })} />
           <Input label="VAT ACCOUNT NUMBER (optional)" placeholder="For NBR VAT export" value={form.vatAccountNumber || ''} onChange={e => setForm({ ...form, vatAccountNumber: e.target.value })} />
+          <IdentityPhotoField
+            label="ID / CPR / PASSPORT PHOTO (optional)"
+            refDoc={null}
+            value={idPhoto}
+            onChange={setIdPhoto}
+            editable
+          />
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
             <Input label="BUDGET MIN (BHD)" type="number" placeholder="10000" value={form.budgetMin || ''} onChange={e => setForm({ ...form, budgetMin: Number(e.target.value) || undefined })} />
             <Input label="BUDGET MAX (BHD)" type="number" placeholder="350000" value={form.budgetMax || ''} onChange={e => setForm({ ...form, budgetMax: Number(e.target.value) || undefined })} />

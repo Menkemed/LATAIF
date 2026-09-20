@@ -27,6 +27,12 @@ import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOut
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import { CUSTOMER_EDITABLE } from '@/core/data/write-payloads';
+import { assertRevision } from './financial-commands';
+import {
+  assertHouseBranch, discardStagedAfterSuccess, invokeDiscardStaged, invokeReadStagedRecord, isStagingId,
+  readStagedAsRecordImages, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader,
+} from './remote-create-support';
+import { applyIdentityDocument, ingestIdentityPhoto, IdentityMediaError } from '@/core/identity/identity-media';
 
 export const OP_CUSTOMERS_CREATE = 'customers.create';
 export const OP_CUSTOMERS_UPDATE = 'customers.update';
@@ -92,29 +98,83 @@ export function parseCustomerFields(raw: unknown): Record<string, unknown> {
   return out;
 }
 
+// ── MEDIA-IDENTITY §2 — das Ausweisdokument im Auftrag ────────────────────────
+//
+// Es reist NIE als Bytes. Ein neues Foto wird vorher in die Zwischenablage des Primary gelegt
+// (R5B) und hier nur bei seiner Inhaltskennung genannt; ein entferntes ist ein ausdrückliches
+// `idPhoto: null`. Beides zusammen wäre kein Wunsch, sondern ein Widerspruch.
+const PHOTO_KEYS = ['idPhoto', 'idPhotoStagingId', 'expectedRevision'];
+
+export interface CustomerIdentityPlan {
+  /** Eine neue Aufnahme, benannt nach ihrem Inhalt. */
+  stagingId?: string;
+  /** Ausdrücklich entfernen. */
+  remove: boolean;
+}
+
+function parseIdentityPlan(raw: Record<string, unknown>): CustomerIdentityPlan {
+  const staging = raw.idPhotoStagingId;
+  const remove = 'idPhoto' in raw;
+  if (remove && raw.idPhoto !== null) {
+    throw new CustomerPayloadError('an ID document travels as staged bytes (idPhotoStagingId); only `idPhoto: null` removes it');
+  }
+  if (staging === undefined) return { remove };
+  if (!isStagingId(staging)) throw new CustomerPayloadError('a staged image is named by its content hash');
+  if (remove) throw new CustomerPayloadError('replace the ID document OR remove it, not both');
+  return { stagingId: staging, remove: false };
+}
+
+function expectedRevisionOf(raw: Record<string, unknown>): number | undefined {
+  const v = raw.expectedRevision;
+  if (v === undefined) return undefined;
+  if (typeof v !== 'number' || !Number.isInteger(v) || v < 1) {
+    throw new CustomerPayloadError('expectedRevision must be the revision you saw');
+  }
+  return v;
+}
+
+const withoutKeys = (raw: Record<string, unknown>, keys: readonly string[]): Record<string, unknown> => {
+  const out: Record<string, unknown> = {};
+  for (const [k, v] of Object.entries(raw)) if (!keys.includes(k)) out[k] = v;
+  return out;
+};
+
 /** Anlegen: mindestens ein Name. Genau die Regel des Schnell-Anlegen-Dialogs im Haus. */
-export function parseCustomerCreate(raw: unknown): Record<string, unknown> {
+export function parseCustomerCreate(raw: unknown): { fields: Record<string, unknown>; photo: CustomerIdentityPlan } {
   if (!isPlain(raw)) throw new CustomerPayloadError('payload must be an object');
-  const fields = parseCustomerFields(raw);
+  const photo = parseIdentityPlan(raw);
+  if (photo.remove) throw new CustomerPayloadError('a new customer has nothing to remove');
+  const fields = parseCustomerFields(withoutKeys(raw, PHOTO_KEYS));
   const first = String(fields.firstName ?? '').trim();
   const last = String(fields.lastName ?? '').trim();
   if (!first && !last) throw new CustomerPayloadError('a customer needs at least a first or last name');
-  return fields;
+  return { fields, photo };
 }
 
 /** Ändern: eine Kennung und mindestens ein Feld — ein leeres Update ist keine Absicht. */
-export function parseCustomerUpdate(raw: unknown): { id: string; fields: Record<string, unknown> } {
+export function parseCustomerUpdate(raw: unknown): {
+  id: string; fields: Record<string, unknown>; photo: CustomerIdentityPlan; expectedRevision?: number;
+} {
   if (!isPlain(raw)) throw new CustomerPayloadError('payload must be an object');
   const { id, ...rest } = raw as { id?: unknown };
   if (typeof id !== 'string' || !id.trim()) throw new CustomerPayloadError('id is required');
-  const fields = parseCustomerFields(rest);
-  if (Object.keys(fields).length === 0) throw new CustomerPayloadError('nothing to change');
+  const photo = parseIdentityPlan(rest as Record<string, unknown>);
+  const expectedRevision = expectedRevisionOf(rest as Record<string, unknown>);
+  const changesPhoto = photo.remove || photo.stagingId !== undefined;
+  // MEDIA-IDENTITY §9 — wer das Ausweisdokument tauscht oder entfernt, MUSS sagen, welchen Stand
+  // er dabei gesehen hat. Sonst ersetzt ein zweiter Bildschirm ein gerade getauschtes Dokument
+  // still wieder durch das alte.
+  if (changesPhoto && expectedRevision === undefined) {
+    throw new CustomerPayloadError('expectedRevision is required when the ID document changes');
+  }
+  const fields = parseCustomerFields(withoutKeys(rest as Record<string, unknown>, PHOTO_KEYS));
+  if (Object.keys(fields).length === 0 && !changesPhoto) throw new CustomerPayloadError('nothing to change');
   const first = 'firstName' in fields ? String(fields.firstName ?? '').trim() : null;
   const last = 'lastName' in fields ? String(fields.lastName ?? '').trim() : null;
   if (first !== null && last !== null && !first && !last) {
     throw new CustomerPayloadError('a customer needs at least a first or last name');
   }
-  return { id, fields };
+  return { id, fields, photo, expectedRevision };
 }
 
 /** Absichtlich ein Typ-Alias: das Ergebnis wird als `CommandResult` (mit Index-Signatur)
@@ -136,26 +196,83 @@ export function customerEngineDeps(): EngineDeps {
   };
 }
 
-export function runCustomerCreate(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
-  const fields = parseCustomerCreate(raw);
-  return runRemoteCommand(deps, identity, () => {
+/** Nur für Tests: die Zwischenablage ohne Tauri. Voreingestellt sind die echten Aufrufe. */
+export interface CustomerMediaExtras {
+  readStaged?: StagedMediaReader;
+  discardStaged?: StagedMediaDiscard;
+}
+
+/** Ein Nein des Ausweisvertrags ist ein eingefrorenes Nein mit SEINEM Code. */
+function ausweis<T>(fn: () => T): T {
+  try { return fn(); } catch (e) {
+    if (e instanceof IdentityMediaError) throw new CommandRejected(e.code, e.message);
+    throw e;
+  }
+}
+
+/**
+ * MEDIA-IDENTITY §2 — die Bytes aus der Ablage holen und zu einem geprüften Medium machen.
+ * VOR der Klammer: der Ingest hat eigene durable Haltepunkte und darf nicht in einer offenen
+ * Geschäftstransaktion sitzen. Ein Nein wird mitgenommen statt geworfen, damit eine Wiederholung
+ * desselben Auftrags die eingefrorene Antwort bekommt und nicht einen neuen Fehler.
+ */
+async function ingestStagedIdentity(
+  photo: CustomerIdentityPlan, identity: CommandIdentity, extras: CustomerMediaExtras, customerId?: string,
+): Promise<{ mediaId: string | null; error: unknown }> {
+  if (!photo.stagingId) return { mediaId: null, error: null };
+  try {
+    const [dataUrl] = await readStagedAsRecordImages(
+      [photo.stagingId], stagingOwnerOf(identity), extras.readStaged ?? invokeReadStagedRecord,
+      (m) => new CustomerPayloadError(m),
+    );
+    return { mediaId: dataUrl ? await ingestIdentityPhoto(dataUrl, 'customer', { ownerId: customerId }) : null, error: null };
+  } catch (e) {
+    return { mediaId: null, error: e };
+  }
+}
+
+export async function runCustomerCreate(
+  deps: EngineDeps, identity: CommandIdentity, raw: unknown, extras: CustomerMediaExtras = {},
+): Promise<CommandOutcome> {
+  const { fields, photo } = parseCustomerCreate(raw);
+  const { mediaId, error } = await ingestStagedIdentity(photo, identity, extras);
+  const outcome = await runRemoteCommand(deps, identity, () => {
+    if (error) throw error;
+    assertHouseBranch(identity);
     const created = useCustomerStore.getState().createCustomer(fields as never);
+    // Die Zeile ist gerade entstanden — das Anlegen IST die Änderung, also keine zweite Fassung.
+    if (mediaId) ausweis(() => applyIdentityDocument('customer', created.id, mediaId, { bumpOwner: false }));
     const result: CustomerCommandResult = {
       customerId: created.id,
       name: `${created.firstName} ${created.lastName}`.trim(),
     };
     return result;
   });
+  if (outcome.kind === 'ok' && photo.stagingId) {
+    await discardStagedAfterSuccess([photo.stagingId], stagingOwnerOf(identity), extras.discardStaged ?? invokeDiscardStaged);
+  }
+  return outcome;
 }
 
-export function runCustomerUpdate(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
-  const { id, fields } = parseCustomerUpdate(raw);
-  return runRemoteCommand(deps, identity, () => {
+export async function runCustomerUpdate(
+  deps: EngineDeps, identity: CommandIdentity, raw: unknown, extras: CustomerMediaExtras = {},
+): Promise<CommandOutcome> {
+  const { id, fields, photo, expectedRevision } = parseCustomerUpdate(raw);
+  const changesPhoto = photo.remove || photo.stagingId !== undefined;
+  const { mediaId, error } = await ingestStagedIdentity(photo, identity, extras, id);
+  const outcome = await runRemoteCommand(deps, identity, () => {
+    if (error) throw error;
     // Der Kunde muss es geben — sonst schriebe ein `UPDATE` still ins Leere und meldete Erfolg.
     // Das ist ein Urteil der Domäne über DIESE Anfrage und wird deshalb eingefroren.
     const rows = query('SELECT id, first_name, last_name FROM customers WHERE id = ?', [id]);
     if (rows.length === 0) throw new CommandRejected('CUSTOMER_NOT_FOUND', 'no such customer');
-    useCustomerStore.getState().updateCustomer(id, fields as never);
+    if (expectedRevision !== undefined) assertRevision('customers', id, expectedRevision, 'CUSTOMER_NOT_FOUND');
+    // Schreibt dieser Auftrag die Zeile ohnehin, ist IHR Trigger die eine Fassung; ändert sich nur
+    // das Dokument, zählt die Verknüpfung selbst — ein Tausch ist genau EINE Fassung.
+    if (changesPhoto) {
+      ausweis(() => applyIdentityDocument('customer', id, mediaId, { bumpOwner: Object.keys(fields).length === 0 }));
+    }
+    if (Object.keys(fields).length > 0) useCustomerStore.getState().updateCustomer(id, fields as never);
     const after = query('SELECT first_name, last_name FROM customers WHERE id = ?', [id])[0];
     const result: CustomerCommandResult = {
       customerId: id,
@@ -163,6 +280,10 @@ export function runCustomerUpdate(deps: EngineDeps, identity: CommandIdentity, r
     };
     return result;
   });
+  if (outcome.kind === 'ok' && photo.stagingId) {
+    await discardStagedAfterSuccess([photo.stagingId], stagingOwnerOf(identity), extras.discardStaged ?? invokeDiscardStaged);
+  }
+  return outcome;
 }
 
 // ── Die Anmeldung ─────────────────────────────────────────────────────────

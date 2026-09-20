@@ -36,6 +36,9 @@ import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 // CENTRAL-UI-PARITY R2D — die Seite liest ueber die gemeinsame Ladefunktion.
 import { useSharedRead } from '@/core/data/shared-read';
 import { customerDetailReadsFor, type CustomerDetailReads } from '@/core/data/page-reads';
+import { IdentityPhotoField } from '@/components/identity/IdentityPhotoField';
+import { saveCustomerUpdate } from '@/core/customers/customer-save';
+import { intentOf } from '@/core/identity/identity-save';
 
 function fmtDate(iso?: string | null): string {
   if (!iso) return '\u2014';
@@ -113,6 +116,9 @@ export function CustomerDetail() {
   // CENTRAL-UI-PARITY R4B — dieselbe Maske, zwei Anschluesse hinter dem Speichern.
   const aendern = useSharedWrites();
   const [form, setForm] = useState<Partial<Customer>>({});
+  // MEDIA-IDENTITY §2 — der WUNSCH zum Ausweisdokument: `undefined` unveraendert, `null` entfernen,
+  // eine Daten-URL ein neues Bild. Den gespeicherten Stand zeigt das Feld selbst aus der Referenz.
+  const [idPhoto, setIdPhoto] = useState<string | null | undefined>(undefined);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showMessage, setShowMessage] = useState(false);
   const [noteModal, setNoteModal] = useState(false);
@@ -169,7 +175,7 @@ export function CustomerDetail() {
   const customerGoldCredits = useMemo(() => id ? getGoldCreditsByCustomer(id) : [], [id, getGoldCreditsByCustomer, allGoldCredits]);
 
   useEffect(() => {
-    if (customer) setForm({ ...customer });
+    if (customer) { setForm({ ...customer }); setIdPhoto(undefined); }
   }, [customer]);
 
   const customerInvoices = useMemo(
@@ -219,16 +225,17 @@ export function CustomerDetail() {
       }, 50);
       return;
     }
-    const diff = updatePayload(customer as unknown as Record<string, unknown>, form as Record<string, unknown>, CUSTOMER_EDITABLE);
-    // Nichts geaendert ist keine Absicht: der Fernbefehl weist einen leeren Auftrag ab, und das
-    // waere hier eine Fehlermeldung fuer ein „Speichern", das nichts wollte.
-    if (aendern.remote && Object.keys(diff).length === 0) { setEditErrors({}); setEditing(false); return; }
-    if (!await aendern.ok('customers.update', {
-      local: () => { updateCustomer(id, form); return {}; },
-      remote: () => ({ id, ...diff }),
-    })) return;
+    // MEDIA-IDENTITY §2/§9 — Felder UND Ausweisdokument in EINER Speicherfolge, mit dem Stand, den
+    // dieser Bildschirm gesehen hat. Nichts geaendert ist keine Absicht (`null` als Ergebnis).
+    const r = await saveCustomerUpdate(
+      { remote: aendern.remote, save: (a) => aendern.save('customers.update', a) },
+      customer, form as Record<string, unknown>, intentOf(idPhoto),
+    );
+    if (r === null) { setEditErrors({}); setIdPhoto(undefined); setEditing(false); return; }
+    if (r.kind !== 'ok') return;   // der Grund steht in `aendern.fehler`
     loadCustomers();
     setEditErrors({});
+    setIdPhoto(undefined);
     setEditing(false);
   }
 
@@ -324,7 +331,7 @@ export function CustomerDetail() {
           <div className="flex gap-2">
             {editing ? (
               <>
-                <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...customer }); setEditErrors({}); aendern.clear(); }}>Cancel</Button>
+                <Button variant="ghost" onClick={() => { setEditing(false); setForm({ ...customer }); setIdPhoto(undefined); setEditErrors({}); aendern.clear(); }}>Cancel</Button>
                 <Button variant="primary" onClick={() => void handleSave()} disabled={aendern.busy} data-save-client>
                   <Save size={14} /> {aendern.busy ? 'Saving…' : 'Save'}
                 </Button>
@@ -513,6 +520,15 @@ export function CustomerDetail() {
                 </div>
                 <Input label="VAT ACCOUNT NUMBER (optional)" placeholder="For NBR B2B export" value={form.vatAccountNumber || ''} onChange={e => setForm({ ...form, vatAccountNumber: e.target.value })} />
               </div>
+              {/* MEDIA-IDENTITY §2 — Ausweis/CPR/Pass als Medium: hinzufuegen, austauschen, entfernen.
+                  Nie als Daten-URL gespeichert; gezeigt wird es ueber den geprueften Leser. */}
+              <IdentityPhotoField
+                label="ID / CPR / PASSPORT PHOTO"
+                refDoc={customer.identity}
+                value={idPhoto}
+                onChange={setIdPhoto}
+                editable
+              />
               <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1fr) minmax(0,1fr)', gap: 12 }}>
                 <Input label="COUNTRY" value={form.country || ''} onChange={e => setForm({ ...form, country: e.target.value })} />
                 <Input label="LANGUAGE" value={form.language || ''} onChange={e => setForm({ ...form, language: e.target.value })} />

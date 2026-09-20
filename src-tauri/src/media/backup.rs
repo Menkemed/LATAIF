@@ -142,6 +142,7 @@ pub fn collect_selection_from_db(conn: &rusqlite::Connection) -> Result<Vec<Medi
     // so "the backup considers this complete" and "the move considers this complete" cannot drift.
     let master_sql = super::reachability::REQUIRED_MASTER_SQL;
     let variant_sql = super::reachability::REQUIRED_VARIANT_SQL;
+    let identity_sql = super::reachability::REQUIRED_PURCHASE_IDENTITY_SQL;
     let mut collect = |sql: &str, is_variant: bool| -> Result<(), MediaError> {
         let mut stmt = conn.prepare(sql).map_err(|e| MediaError::Io(format!("prepare: {}", e)))?;
         let rowset = stmt
@@ -175,6 +176,11 @@ pub fn collect_selection_from_db(conn: &rusqlite::Connection) -> Result<Vec<Medi
     };
     collect(master_sql, false)?;
     collect(variant_sql, true)?;
+    // MEDIA-IDENTITY §8 — the ID-document version a purchase froze. Not reachable through a live
+    // link (that is the point), so it has to be named separately or a restore loses it.
+    if super::reachability::table_exists(conn, "purchases")? {
+        collect(identity_sql, false)?;
+    }
     Ok(out.into_values().collect())
 }
 

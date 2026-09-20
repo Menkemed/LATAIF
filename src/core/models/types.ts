@@ -201,6 +201,30 @@ export interface Customer {
   createdAt: string;
   updatedAt: string;
   createdBy?: UUID;
+  /** MEDIA-IDENTITY §9 — die Fassung der Zeile. Ein Ändern nennt sie; die Datenbank zählt sie. */
+  revision?: number;
+  /** MEDIA-IDENTITY §10 — das Ausweisdokument als REFERENZ. Nie Bytes, nie eine Daten-URL. */
+  identity?: IdentityDocumentRef | null;
+}
+
+/**
+ * MEDIA-IDENTITY §10 — was eine Geschäftsauskunft über ein Ausweisdokument sagt.
+ *
+ * Genug, um es anzuzeigen (der Speicherschlüssel führt über einen geprüften Leser zu den Bytes)
+ * und um zu sagen, WESSEN Dokument es ist — beim verknüpften Lieferanten das des Kunden. Der
+ * Schlüssel allein berechtigt zu nichts: das Tor entscheidet (§1).
+ */
+export interface IdentityDocumentRef {
+  mediaId: string;
+  key: string;
+  thumbKey: string | null;
+  hash: string;
+  extension: string;
+  generationNo: number;
+  sourceOwnerType: 'customer' | 'supplier';
+  sourceOwnerId: UUID;
+  /** true: das Dokument gehört dem verknüpften Kunden, nicht diesem Lieferanten. */
+  fromLinkedCustomer: boolean;
 }
 
 // ── Offer ──
@@ -1135,13 +1159,22 @@ export interface Supplier {
   // Erscheint auf Purchase-Print-PDFs als Beleg-Block (z.B. fuer Altgold/used watches
   // von Privatpersonen — Compliance-relevant).
   cpr?: string;
+  /**
+   * ALTBESTAND — das Ausweisbild als Daten-URL in der Zeile. Wird NICHT mehr geschrieben
+   * (MEDIA-IDENTITY §3); es bleibt lesbar, solange dieser Lieferant nie ein Dokument im
+   * Medienspeicher hatte. Als EINGABE eines Formulars heißt das Feld weiterhin „das neue
+   * Ausweisfoto" — der Speicherweg macht daraus ein Medium, keine Spalte.
+   */
   cprImage?: string;
   /** CUSTOMER-SUPPLIER-ROLE-LINK — die Kunden-Rolle derselben Person, aus der diese Lieferanten-Rolle
    *  angelegt wurde. Nur eine Verknuepfung: Salden, Belege und Buchungen bleiben getrennt.
-   *  Media-Vorbereitung: ein kuenftiges Ausweisfoto gehoert EINMAL zur Person (Media-Link am
-   *  Kunden); die Lieferanten-Rolle findet es ueber diese Verknuepfung — keine zweite Kopie, kein
-   *  Base64 in `cpr_image`. Aktiviert wird das erst mit dem Media-Sicherheitsvertrag (heute BLOCKED). */
+   *  MEDIA-IDENTITY §4: das Ausweisdokument gehoert dann EINMAL zur Person (am Kunden); die
+   *  Lieferanten-Rolle findet es ueber diese Verknuepfung — keine zweite Kopie, keine zweite Datei. */
   linkedCustomerId?: string;
+  /** MEDIA-IDENTITY §9 — die Fassung der Zeile. */
+  revision?: number;
+  /** MEDIA-IDENTITY §10 — das geltende Ausweisdokument als Referenz (ggf. das des Kunden). */
+  identity?: IdentityDocumentRef | null;
   active: boolean;
   createdAt: string;
   updatedAt: string;
@@ -1192,13 +1225,44 @@ export interface PurchasePayment {
 // live Supplier zurueck. So zeigt der gedruckte Beleg immer die Daten an,
 // die zum Ankaufszeitpunkt galten — Compliance-relevant fuer Altgold-/
 // Used-Watch-Belege.
+/**
+ * MEDIA-IDENTITY §7 — der Identitätsnachweis eines Einkaufs, als REFERENZ.
+ *
+ * Nicht das Ausweisdokument des Lieferanten, sondern genau die Fassung, die beim Kauf galt.
+ * Tauscht der Lieferant (oder der verknüpfte Kunde) sein Dokument später aus, zeigt dieser Einkauf
+ * weiterhin die damalige — darum steht hier die Fassungsnummer und der Inhalt-Hash und nicht bloß
+ * die Medienkennung.
+ *
+ * Für den GC ist das eine ECHTE Referenz: die benannte Fassung darf nicht verschwinden, auch wenn
+ * niemand mehr auf sie verlinkt.
+ */
+export interface PurchaseIdentityReference {
+  mediaId: string;
+  /** Die Fassung der Datei — zusammen mit dem Hash die eindeutige Version. */
+  generationNo: number;
+  blobHash: string;
+  byteSize: number;
+  /** Der Speicherschlüssel dieser Fassung — er allein berechtigt zu nichts (§1). */
+  storageKey: string;
+  extension: string;
+  /** Wem der Nachweis damals gehörte: dem Lieferanten selbst oder dem verknüpften Kunden. */
+  ownerType: 'supplier' | 'customer';
+  ownerId: string;
+}
+
 export interface SupplierSnapshot {
   name: string;
   phone?: string;
   email?: string;
   address?: string;
   cpr?: string;
+  /**
+   * ALTBESTAND — die Bytes im Beleg. Wird nur noch für Lieferanten geschrieben, deren Ausweis
+   * NIE im Medienspeicher lag: sonst verlöre so ein Einkauf seinen einzigen Nachweis. Sobald das
+   * Dokument dort liegt, reist stattdessen `identity`. Alte Belege bleiben lesbar.
+   */
   cprImage?: string;
+  identity?: PurchaseIdentityReference;
   snapshotAt: string;
 }
 

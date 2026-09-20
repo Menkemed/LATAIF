@@ -2,6 +2,7 @@
 // LATAIF — Supplier Store (Plan §Supplier)
 // ═══════════════════════════════════════════════════════════
 
+import { identityDocumentsFor } from '@/core/identity/identity-media';
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import type { Supplier } from '@/core/models/types';
@@ -184,6 +185,7 @@ interface SupplierStore {
 
 function rowToSupplier(row: Record<string, unknown>): Supplier {
   return {
+    revision: Number(row.revision ?? 1),
     id: row.id as string,
     branchId: row.branch_id as string,
     name: row.name as string,
@@ -249,11 +251,15 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
 
     db.run(
-      `INSERT INTO suppliers (id, branch_id, name, phone, email, address, notes, cpr, cpr_image, linked_customer_id, active, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+      // MEDIA-IDENTITY §3 — `cpr_image` wird NICHT mehr geschrieben. Das Ausweisfoto ist ein
+      // Medium (`identity_document`, Klasse `sensitive`) und wird vom Aufrufer in DERSELBEN
+      // Klammer verknüpft (`applyIdentityDocument`). Die Spalte bleibt stehen und lesbar: alte
+      // Lieferanten und alte Einkaufsbelege zeigen ihren Abzug weiterhin.
+      `INSERT INTO suppliers (id, branch_id, name, phone, email, address, notes, cpr, linked_customer_id, active, created_at, updated_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
       [id, branchId, input.name, input.phone ?? null, input.email ?? null,
        input.address ?? null, input.notes ?? null,
-       input.cpr ?? null, input.cprImage ?? null, opts?.linkedCustomerId ?? null,
+       input.cpr ?? null, opts?.linkedCustomerId ?? null,
        now, now, userId]
     );
     saveDatabase();
@@ -329,7 +335,10 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
     const values: unknown[] = [];
     const map: Record<string, string> = {
       name: 'name', phone: 'phone', email: 'email', address: 'address', notes: 'notes',
-      cpr: 'cpr', cprImage: 'cpr_image',
+      cpr: 'cpr',
+      // MEDIA-IDENTITY §3 — `cprImage` fehlt hier mit Absicht: das Ausweisfoto ist ein Medium und
+      // wird nicht mehr in die Zeile geschrieben. Ein Rumpf, der es trotzdem mitbringt, ändert
+      // hier nichts — das Dokument setzt `applyIdentityDocument`.
     };
     for (const [k, v] of Object.entries(input)) {
       const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v ?? null); }
@@ -479,6 +488,10 @@ export function loadSuppliersFor(ctx: BusinessReadContext): { suppliers: Supplie
   // Die Ledger-Zahlen gehoeren zur Anzeige eines Lieferanten; sie werden hier mitgerechnet, damit
   // beide Wege dieselbe Zeile sehen. Die Rechnung selbst ist unveraendert.
   for (const s of suppliers) Object.assign(s, supplierLedgerFor(s.id));
+  // MEDIA-IDENTITY §4/§10 — das GELTENDE Ausweisdokument, in einer Abfrage: beim verknuepften
+  // Lieferanten das des Kunden, sonst sein eigenes. Referenzen, nie Bytes.
+  const docs = identityDocumentsFor('supplier', suppliers.map((s) => s.id), ctx.branchId);
+  for (const s of suppliers) s.identity = docs.get(s.id) ?? null;
   return { suppliers };
 }
 

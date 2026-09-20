@@ -1277,7 +1277,7 @@ async fn media_blob(
     // MEDIA-S1 — the key must be readable BY THIS CALLER: tenant, branch, owner and class decide
     // (`media_read_grant`), not the mere knowledge of a key. Every refusal looks the same (404).
     let Some(grant) = super::product_query::media_read_grant(
-        &state.frontend_db_path, &claims.tenant_id, &claims.branch_id, &params.key,
+        &state.frontend_db_path, &claims.tenant_id, &claims.branch_id, &claims.role, &params.key,
     ) else {
         return Err(StatusCode::NOT_FOUND);
     };

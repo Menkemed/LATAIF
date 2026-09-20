@@ -282,7 +282,16 @@ CREATE TABLE media_objects (tenant_id TEXT, media_id TEXT, master_blob_id TEXT, 
 CREATE TABLE media_variants (tenant_id TEXT, media_id TEXT, variant_type TEXT, blob_id TEXT, deleted_at TEXT);
 CREATE TABLE media_links (tenant_id TEXT, link_id TEXT, media_id TEXT, entity_type TEXT, entity_id TEXT,
   media_role TEXT, scope_kind TEXT, branch_id TEXT, deleted_at TEXT);
+CREATE TABLE customers (id TEXT, branch_id TEXT);
+CREATE TABLE suppliers (id TEXT, branch_id TEXT);
+CREATE TABLE purchases (id TEXT, branch_id TEXT, supplier_snapshot TEXT);
 "#;
+
+/// MEDIA-IDENTITY — die Rolle gehoert zum Tor. Wo ein Test sie nicht prueft, steht die staerkste
+/// (`owner` = ADMIN), damit die Aussage des Tests die bleibt, die sie war.
+fn grant(db: &std::path::Path, tenant: &str, branch: &str, key: &str) -> Option<MediaReadGrant> {
+    media_read_grant(db, tenant, branch, "owner", key)
+}
 
 fn key(n: &str) -> String { format!("t-1/{}/{}.jpg", &n.repeat(64)[0..2], n.repeat(64)) }
 
@@ -306,6 +315,10 @@ fn grant_fixture() -> std::path::PathBuf {
     blob("b-gone", "0", "available");
     blob("b-repx", "1", "available");
     blob("b-role", "2", "available");
+    // MEDIA-IDENTITY — Ausweisdokumente: Kunde, Lieferant, und eines mit falscher Klasse.
+    blob("b-cust-id", "3", "available");
+    blob("b-supp-id", "4", "available");
+    blob("b-cust-internal", "5", "available");
     conn.execute_batch("
       INSERT INTO media_objects VALUES ('t-1','m-1','b-main','internal',NULL),
                                        ('t-1','m-rep','b-repair','internal',NULL),
@@ -314,9 +327,14 @@ fn grant_fixture() -> std::path::PathBuf {
                                        ('t-1','m-free','b-unlinked','internal',NULL),
                                        ('t-1','m-gone','b-gone','internal',NULL),
                                        ('t-1','m-repx','b-repx','internal',NULL),
-                                       ('t-1','m-role','b-role','internal',NULL);
+                                       ('t-1','m-role','b-role','internal',NULL),
+                                       ('t-1','m-cust-id','b-cust-id','sensitive',NULL),
+                                       ('t-1','m-supp-id','b-supp-id','sensitive',NULL),
+                                       ('t-1','m-cust-int','b-cust-internal','internal',NULL);
       INSERT INTO media_variants VALUES ('t-1','m-1','thumbnail','b-thumb',NULL);
       INSERT INTO repairs (id, branch_id) VALUES ('rep-1','b-1'), ('rep-other','b-other');
+      INSERT INTO customers (id, branch_id) VALUES ('cust-1','b-1'), ('cust-other','b-other');
+      INSERT INTO suppliers (id, branch_id) VALUES ('sup-1','b-1');
       INSERT INTO media_links VALUES
         ('t-1','l-1','m-1','product','p-dj41','stock_image','branch','b-1',NULL),
         ('t-1','l-rep','m-rep','repair','rep-1','gallery','branch','b-1',NULL),
@@ -324,7 +342,10 @@ fn grant_fixture() -> std::path::PathBuf {
         ('t-1','l-repx','m-repx','repair','rep-other','gallery','branch','b-other',NULL),
         ('t-1','l-role','m-role','repair','rep-1','stock_image','branch','b-1',NULL),
         ('t-1','l-oth','m-oth','product','p-elsewhere','stock_image','branch','b-other',NULL),
-        ('t-1','l-sec','m-sec','product','p-dj41','stock_image','branch','b-1',NULL);
+        ('t-1','l-sec','m-sec','product','p-dj41','stock_image','branch','b-1',NULL),
+        ('t-1','l-cid','m-cust-id','customer','cust-1','identity_document','branch','b-1',NULL),
+        ('t-1','l-sid','m-supp-id','supplier','sup-1','identity_document','branch','b-1',NULL),
+        ('t-1','l-cint','m-cust-int','customer','cust-other','identity_document','branch','b-1',NULL);
     ").unwrap();
     db
 }
@@ -332,36 +353,113 @@ fn grant_fixture() -> std::path::PathBuf {
 #[test]
 fn media_read_grant_serves_the_owners_branch_only() {
     let db = grant_fixture();
-    let g = media_read_grant(&db, "t-1", "b-1", &key("a")).expect("the product image of my branch");
+    let g = grant(&db, "t-1", "b-1", &key("a")).expect("the product image of my branch");
     assert_eq!((g.hash.as_str(), g.byte_size, g.ext.as_str()), ("a".repeat(64).as_str(), 10, "jpg"));
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("b")).is_some(), "its active thumbnail too");
+    assert!(grant(&db, "t-1", "b-1", &key("b")).is_some(), "its active thumbnail too");
     // wrong branch
-    assert!(media_read_grant(&db, "t-1", "b-other", &key("a")).is_none(), "another branch may not read it");
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("d")).is_none(), "a product image of another branch");
+    assert!(grant(&db, "t-1", "b-other", &key("a")).is_none(), "another branch may not read it");
+    assert!(grant(&db, "t-1", "b-1", &key("d")).is_none(), "a product image of another branch");
     // wrong tenant
-    assert!(media_read_grant(&db, "t-other", "b-1", &key("a")).is_none(), "keys are tenant-scoped");
+    assert!(grant(&db, "t-other", "b-1", &key("a")).is_none(), "keys are tenant-scoped");
     // wrong owner / no owner
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("c")).is_some(), "a repair of this branch is served too (MEDIA-REPAIR)");
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("f")).is_none(), "an unlinked object is served to nobody");
-    // class
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("e")).is_none(), "sensitive media never travel this route");
+    assert!(grant(&db, "t-1", "b-1", &key("c")).is_some(), "a repair of this branch is served too (MEDIA-REPAIR)");
+    assert!(grant(&db, "t-1", "b-1", &key("f")).is_none(), "an unlinked object is served to nobody");
+    // class — ein `sensitive` ARTIKELBILD bleibt draussen; nur ein Ausweisdokument darf diese Klasse haben
+    assert!(grant(&db, "t-1", "b-1", &key("e")).is_none(), "a sensitive product image never travels this route");
     // unknown
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("9")).is_none());
+    assert!(grant(&db, "t-1", "b-1", &key("9")).is_none());
+}
+
+// ── MEDIA-IDENTITY §1 — das Ausweisdokument: Besitzer, Rolle, Klasse, Filiale, Rolle des Lesers ──
+#[test]
+fn media_read_grant_serves_identity_documents_under_their_own_rule() {
+    let db = grant_fixture();
+    // Der Inhaber sieht beide.
+    assert!(grant(&db, "t-1", "b-1", &key("3")).is_some(), "the customer ID of my branch");
+    assert!(grant(&db, "t-1", "b-1", &key("4")).is_some(), "the supplier ID of my branch");
+    // Eine andere Filiale, ein anderer Mandant: nichts.
+    assert!(grant(&db, "t-1", "b-other", &key("3")).is_none(), "another branch may not read it");
+    assert!(grant(&db, "t-other", "b-1", &key("3")).is_none(), "keys stay tenant-scoped");
+    // Der Kunde liegt in einer anderen Filiale als die Verknuepfung behauptet — kein Nachweis.
+    assert!(grant(&db, "t-1", "b-1", &key("5")).is_none(), "the owner is not in this branch");
+    // Die Klasse gehoert zur Regel: ein Ausweisdokument, das als `internal` angelegt waere, faellt
+    // aus dem Zweig heraus — es gibt keinen stillen Auf- oder Abstieg.
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("UPDATE media_objects SET security_class = 'internal' WHERE media_id = 'm-cust-id'", []).unwrap();
+    assert!(grant(&db, "t-1", "b-1", &key("3")).is_none(), "an ID document must be `sensitive`");
+    // Entfernt heisst entfernt.
+    let db = grant_fixture();
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("UPDATE media_links SET deleted_at = 'x' WHERE link_id = 'l-cid'", []).unwrap();
+    assert!(grant(&db, "t-1", "b-1", &key("3")).is_none(), "a removed ID document is no longer served");
+    // Und ohne Datensatz gibt es nichts, wozu das Dokument gehoeren koennte.
+    let db = grant_fixture();
+    let conn = Connection::open(&db).unwrap();
+    conn.execute("DELETE FROM suppliers WHERE id = 'sup-1'", []).unwrap();
+    assert!(grant(&db, "t-1", "b-1", &key("4")).is_none(), "an owner that is gone grants nothing");
+}
+
+// ── MEDIA-IDENTITY §7 — der alte Beleg zeigt die DAMALIGE Fassung, nicht die heutige ──────────
+#[test]
+fn a_purchase_snapshot_keeps_its_own_version_readable() {
+    let db = grant_fixture();
+    let conn = Connection::open(&db).unwrap();
+    // Der Kunde tauscht sein Dokument aus: die eingefrorene Fassung ist nicht mehr die aktuelle.
+    conn.execute("UPDATE media_blobs SET current_generation_no = 2 WHERE blob_id = 'b-cust-id'", []).unwrap();
+    assert!(grant(&db, "t-1", "b-1", &key("3")).is_none(), "the old version is no longer the live one");
+
+    // Ein Einkauf dieser Filiale hat genau diese Fassung als Nachweis festgehalten.
+    let snap = format!(
+        "{{\"name\":\"S\",\"snapshotAt\":\"x\",\"identity\":{{\"mediaId\":\"m-cust-id\",\"generationNo\":1,\"blobHash\":\"{}\",\"byteSize\":10,\"storageKey\":\"{}\",\"extension\":\"jpg\",\"ownerType\":\"customer\",\"ownerId\":\"cust-1\"}}}}",
+        "3".repeat(64), key("3"),
+    );
+    conn.execute("INSERT INTO purchases VALUES ('pur-1','b-1',?1)", rusqlite::params![snap]).unwrap();
+    assert!(grant(&db, "t-1", "b-1", &key("3")).is_some(), "the frozen version stays readable for that purchase");
+
+    // Aber nur fuer die Filiale des Belegs, nur mit der passenden Rolle, und nur fuer GENAU diese
+    // Fassung: ein Beleg, der eine andere Fassungsnummer nennt, oeffnet nichts.
+    assert!(grant(&db, "t-1", "b-other", &key("3")).is_none(), "another branch has no such purchase");
+    assert!(media_read_grant(&db, "t-1", "b-1", "root", &key("3")).is_none(), "an unknown role gets nothing");
+    conn.execute("UPDATE purchases SET supplier_snapshot = replace(supplier_snapshot,'\"generationNo\":1','\"generationNo\":7')", []).unwrap();
+    assert!(grant(&db, "t-1", "b-1", &key("3")).is_none(), "a snapshot naming another version opens nothing");
+}
+
+#[test]
+fn an_identity_document_is_served_by_role() {
+    let db = grant_fixture();
+    let g = |role: &str, k: &str| media_read_grant(&db, "t-1", "b-1", role, &key(k)).is_some();
+    // Jede bekannte Rolle darf einen Kunden sehen; den Lieferanten sieht der Verkauf nicht.
+    for role in ["owner", "ADMIN", "manager", "MANAGER", "backoffice", "ACCOUNTANT", "sales", "SALES", "viewer"] {
+        assert!(g(role, "3"), "{role} may see a customer ID");
+    }
+    for role in ["owner", "ADMIN", "manager", "MANAGER", "backoffice", "ACCOUNTANT"] {
+        assert!(g(role, "4"), "{role} may see a supplier ID");
+    }
+    for role in ["sales", "SALES", "viewer"] {
+        assert!(!g(role, "4"), "{role} has no supplier permission, so no supplier ID either");
+    }
+    // Eine Rolle, die wir nicht kennen, bekommt kein Ausweisdokument — aber das Artikelbild, das
+    // jede angemeldete Person dieser Filiale ohnehin sieht, bleibt unberuehrt.
+    for role in ["", "root", "Admin ", "superuser"] {
+        assert!(!g(role, "3"), "unknown role {role:?} gets no customer ID");
+        assert!(!g(role, "4"), "unknown role {role:?} gets no supplier ID");
+    }
+    assert!(g("root", "a"), "a product image is not gated on the role");
 }
 
 // ── MEDIA-REPAIR — die Reparatur ist ein Besitzer wie der Artikel, mit IHRER Rolle ──────────────
 #[test]
 fn media_read_grant_serves_repair_photos_of_this_branch_only() {
     let db = grant_fixture();
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("c")).is_some(), "the photo of a repair in my branch");
-    assert!(media_read_grant(&db, "t-1", "b-other", &key("c")).is_none(), "another branch may not read it");
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("1")).is_none(), "a repair of another branch");
-    assert!(media_read_grant(&db, "t-other", "b-1", &key("c")).is_none(), "keys stay tenant-scoped");
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("0")).is_none(), "a repair that does not exist grants nothing");
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("2")).is_none(), "a repair link under the product role is refused");
+    assert!(grant(&db, "t-1", "b-1", &key("c")).is_some(), "the photo of a repair in my branch");
+    assert!(grant(&db, "t-1", "b-other", &key("c")).is_none(), "another branch may not read it");
+    assert!(grant(&db, "t-1", "b-1", &key("1")).is_none(), "a repair of another branch");
+    assert!(grant(&db, "t-other", "b-1", &key("c")).is_none(), "keys stay tenant-scoped");
+    assert!(grant(&db, "t-1", "b-1", &key("0")).is_none(), "a repair that does not exist grants nothing");
+    assert!(grant(&db, "t-1", "b-1", &key("2")).is_none(), "a repair link under the product role is refused");
     let conn = Connection::open(&db).unwrap();
     conn.execute("UPDATE media_links SET deleted_at = 'x' WHERE link_id = 'l-rep'", []).unwrap();
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("c")).is_none(), "a removed repair photo is no longer served");
+    assert!(grant(&db, "t-1", "b-1", &key("c")).is_none(), "a removed repair photo is no longer served");
 }
 
 #[test]
@@ -369,18 +467,18 @@ fn media_read_grant_follows_the_live_state() {
     let db = grant_fixture();
     let conn = Connection::open(&db).unwrap();
     conn.execute("UPDATE media_links SET deleted_at = 'x' WHERE link_id = 'l-1'", []).unwrap();
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("a")).is_none(), "a removed image is no longer served");
+    assert!(grant(&db, "t-1", "b-1", &key("a")).is_none(), "a removed image is no longer served");
     conn.execute("UPDATE media_links SET deleted_at = NULL WHERE link_id = 'l-1'", []).unwrap();
     conn.execute("DELETE FROM products WHERE id = 'p-dj41'", []).unwrap();
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("a")).is_none(), "an owner that is gone grants nothing");
+    assert!(grant(&db, "t-1", "b-1", &key("a")).is_none(), "an owner that is gone grants nothing");
     let db = grant_fixture();
     let conn = Connection::open(&db).unwrap();
     conn.execute("UPDATE media_blobs SET current_generation_no = 2 WHERE blob_id = 'b-main'", []).unwrap();
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("a")).is_none(), "a superseded generation is not offered");
+    assert!(grant(&db, "t-1", "b-1", &key("a")).is_none(), "a superseded generation is not offered");
     let db = grant_fixture();
     let conn = Connection::open(&db).unwrap();
     conn.execute("UPDATE media_blob_generations SET gen_status = 'deleted' WHERE blob_id = 'b-main'", []).unwrap();
-    assert!(media_read_grant(&db, "t-1", "b-1", &key("a")).is_none(), "a deleted generation is not offered");
+    assert!(grant(&db, "t-1", "b-1", &key("a")).is_none(), "a deleted generation is not offered");
 }
 
 #[test]

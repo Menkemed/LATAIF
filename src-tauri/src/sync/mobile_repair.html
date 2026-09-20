@@ -56,6 +56,12 @@
         <input id="rpCustomerFirst" type="text" placeholder="First name" />
         <input id="rpCustomerLast" type="text" placeholder="Last name" />
         <input id="rpCustomerPhone" type="text" placeholder="Phone (optional)" />
+        <!-- MEDIA-IDENTITY §5 — das Ausweisfoto ist OPTIONAL und hat denselben Weg wie jedes andere
+             Foto am Telefon: aufnehmen oder aus der Galerie, verkleinern, in die Ablage des
+             Primary. Im Auftrag steht nur seine Inhaltskennung, nie Bytes. -->
+        <label class="hint" for="rpCustomerIdPhoto" style="margin-top:6px;">ID / CPR photo (optional)</label>
+        <input id="rpCustomerIdPhoto" type="file" accept="image/*" capture="environment" />
+        <img id="rpCustomerIdPreview" class="hidden" alt="ID photo" style="max-width:160px;max-height:110px;border-radius:6px;object-fit:contain;background:#18181B;margin-top:6px;" />
       </div>
       <button id="rpCustomerCreateBtn" class="secondary">Create customer</button>
     </div>

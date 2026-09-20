@@ -44,6 +44,14 @@ export interface PurchasePdfOptions {
   products: Product[];
   categories: Category[];
   branchName?: string;
+  /**
+   * MEDIA-IDENTITY §7 — der Ausweisnachweis DIESES Belegs, schon aufgelöst.
+   *
+   * Er kommt als Daten-URL herein, weil ein PDF keine Objekt-URL einbetten kann — geholt hat ihn
+   * der Aufrufer über den geprüften Leser, aus der Fassung, die der Beleg benennt. Fehlt er,
+   * bleibt der Altbestand: die Bytes im Beleg selbst, sonst der alte Abzug des Lieferanten.
+   */
+  identityDataUrl?: string | null;
 }
 
 function specsHtml(multiLine: string): string {
@@ -73,7 +81,7 @@ export function generatePurchasePdfHtml(opts: PurchasePdfOptions): string {
   const sEmail = snap?.email ?? supplier?.email;
   const sAddress = snap?.address ?? supplier?.address;
   const sCpr = snap?.cpr ?? supplier?.cpr;
-  const sCprImage = snap?.cprImage ?? supplier?.cprImage;
+  const sCprImage = opts.identityDataUrl ?? snap?.cprImage ?? supplier?.cprImage;
 
   const linesHtml = purchase.lines.map((l, i) => {
     const product = products.find(p => p.id === l.productId);

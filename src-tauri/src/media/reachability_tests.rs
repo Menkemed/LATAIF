@@ -59,6 +59,63 @@ fn key(h: &str) -> String {
     format!("t1/{}/{}.jpg", &h[0..2], h)
 }
 
+// ── MEDIA-IDENTITY §8 — der Einkaufs-Nachweis ist eine ECHTE Referenz ─────────────────────────
+//
+// Das ist die eine Stelle, an der REQUIRED nicht aus einer lebenden Verknuepfung folgt. Ein
+// Einkauf haelt fest, welche Ausweisfassung beim Kauf galt; wird das Dokument spaeter
+// ausgetauscht oder entfernt, zeigt auf diese Fassung nichts Lebendes mehr — und trotzdem muss
+// sie in jede Sicherung und jeden Umzug, sonst verliert der alte Beleg lautlos seinen Nachweis.
+const HIST: &str = "dd44444444444444444444444444444444444444444444444444444444444444";
+
+fn add_purchase_snapshot_media(c: &Connection) {
+    c.execute_batch("CREATE TABLE purchases (id TEXT, branch_id TEXT, supplier_snapshot TEXT);").unwrap();
+    c.execute("INSERT INTO media_objects VALUES ('t1','m-id','b-id',NULL)", []).unwrap();
+    // Fassung 1 ist die eingefrorene; aktuell gilt laengst Fassung 2.
+    c.execute("INSERT INTO media_blobs VALUES ('t1','b-id','present',2,NULL)", []).unwrap();
+    add_generation(c, "b-id", 1, HIST, "available");
+    add_generation(c, "b-id", 2, H2, "available");
+    let snap = format!(
+        "{{\"name\":\"S\",\"snapshotAt\":\"x\",\"identity\":{{\"mediaId\":\"m-id\",\"generationNo\":1,\"blobHash\":\"{}\",\"storageKey\":\"{}\",\"extension\":\"jpg\",\"ownerType\":\"customer\",\"ownerId\":\"c1\"}}}}",
+        HIST, key(HIST),
+    );
+    c.execute("INSERT INTO purchases VALUES ('pur-1','b-1',?1)", rusqlite::params![snap]).unwrap();
+}
+
+#[test]
+fn a_purchase_snapshot_makes_its_frozen_version_required() {
+    let c = db();
+    add_linked_media(&c);
+    add_purchase_snapshot_media(&c);
+    let req = required_keys(&c).unwrap();
+    assert!(req.contains(&key(HIST)), "the version the purchase froze is required");
+    // Es ist ausdruecklich NICHT die aktuelle Fassung, die gefordert wird: die haengt an keiner
+    // Verknuepfung und gehoert zu keinem Beleg.
+    assert!(!req.contains(&key("ee5555555555555555555555555555555555555555555555555555555555555555"[0..64].as_ref())), "nothing invented");
+}
+
+#[test]
+fn a_snapshot_that_names_a_version_we_do_not_have_requires_nothing() {
+    let c = db();
+    add_linked_media(&c);
+    add_purchase_snapshot_media(&c);
+    // Hash und Fassungsnummer muessen ZUSAMMEN passen. Ein Beleg, dessen Angaben nicht auf eine
+    // Zeile passen, darf keine beliebige andere Datei fordern — eine falsche Datei als Nachweis
+    // waere schlimmer als gar keine.
+    c.execute("UPDATE purchases SET supplier_snapshot = replace(supplier_snapshot,'\"generationNo\":1','\"generationNo\":9')", []).unwrap();
+    let req = required_keys(&c).unwrap();
+    assert!(!req.contains(&key(HIST)), "a mismatched snapshot requires nothing");
+    assert!(req.contains(&key(H1)), "the live product image is unaffected");
+}
+
+#[test]
+fn a_database_without_purchases_still_answers() {
+    let c = db();
+    add_linked_media(&c);
+    // Kein `purchases`: das ist die Antwort "kein Beleg hat einen Ausweis eingefroren", kein Fehler.
+    let req = required_keys(&c).unwrap();
+    assert!(req.contains(&key(H1)) && req.contains(&key(H2)));
+}
+
 #[test]
 fn required_is_what_a_business_consumer_can_reach() {
     let c = db();

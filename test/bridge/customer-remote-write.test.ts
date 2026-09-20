@@ -171,9 +171,13 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
     ok(threw !== null, `AUTHORITY ${what} wird abgewiesen (${threw})`);
   }
 
-  const clean = parseCustomerCreate({ ...WISH, preferences: ['gold'], vipLevel: 2, notes: null });
+  // MEDIA-IDENTITY §2 — der gepruefte Wunsch hat jetzt zwei Teile: die Felder und das, was mit dem
+  // Ausweisdokument geschehen soll. Ohne Angabe: nichts.
+  const { fields: clean, photo } = parseCustomerCreate({ ...WISH, preferences: ['gold'], vipLevel: 2, notes: null });
   ok(clean.firstName === 'Ali' && Array.isArray(clean.preferences) && clean.vipLevel === 2 && clean.notes === null,
     `AUTHORITY der erlaubte Wunsch kommt unveraendert durch (${JSON.stringify(clean)})`);
+  ok(photo.remove === false && photo.stagingId === undefined,
+    'AUTHORITY …und ohne Ausweisfoto im Rumpf passiert damit nichts');
 
   // Aendern: eine Kennung, mindestens ein Feld, und nichts Verbotenes.
   let noId: string | null = null;

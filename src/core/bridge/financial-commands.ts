@@ -143,7 +143,10 @@ export function expectedRevisionOf(v: unknown): number {
 
 /** Der Fassungsvergleich, INNERHALB der Transaktion, gegen die Zeile selbst. */
 export type RevisionedTable =
-  'invoices' | 'orders' | 'consignments' | 'agent_transfers' | 'repairs' | 'sales_returns';
+  'invoices' | 'orders' | 'consignments' | 'agent_transfers' | 'repairs' | 'sales_returns'
+  // MEDIA-IDENTITY §9 — Kunde und Lieferant haben jetzt eine Fassung, weil ihr Ausweisdokument
+  // von zwei Bildschirmen aus getauscht werden kann.
+  | 'customers' | 'suppliers';
 
 export function assertRevision(
   table: RevisionedTable,

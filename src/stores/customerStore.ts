@@ -1,3 +1,4 @@
+import { identityDocumentsFor } from '@/core/identity/identity-media';
 import { create } from 'zustand';
 import { v4 as uuid } from 'uuid';
 import type { Customer, SalesStage, VIPLevel, CustomerType } from '@/core/models/types';
@@ -50,6 +51,7 @@ interface CustomerStore {
 
 function rowToCustomer(row: Record<string, unknown>): Customer {
   return {
+    revision: Number(row.revision ?? 1),
     id: row.id as string,
     firstName: row.first_name as string,
     lastName: row.last_name as string,
@@ -396,5 +398,10 @@ export function loadCustomersFor(ctx: BusinessReadContext): { customers: Custome
     `SELECT * FROM customers WHERE branch_id = ? AND id NOT LIKE 'sys-%' ORDER BY updated_at DESC`,
     [ctx.branchId],
   );
-  return { customers: rows.map(rowToCustomer) };
+  const customers = rows.map(rowToCustomer);
+  // MEDIA-IDENTITY §10 — die Ausweisdokumente in EINER Abfrage dazu, als Referenzen. Eine Liste
+  // bleibt damit eine Liste: keine Bytes, keine Daten-URLs, keine Abfrage je Kunde.
+  const docs = identityDocumentsFor('customer', customers.map((c) => c.id), ctx.branchId);
+  for (const c of customers) c.identity = docs.get(c.id) ?? null;
+  return { customers };
 }

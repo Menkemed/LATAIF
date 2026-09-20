@@ -60,6 +60,8 @@ class El {
   }
   appendChild(child: El) { this.children.push(child); return child; }
   setAttribute(k: string, v: string) { this.attrs[k] = v; }
+  removeAttribute(k: string) { delete this.attrs[k]; if (k === 'src') this.src = ''; }
+  src = '';
   getAttribute(k: string) { return this.attrs[k] ?? null; }
   /** Die Maske holt den Blick zu einer Meldung — der Ersatz merkt sich nur, DASS sie es tut. */
   scrolls = 0;

@@ -220,9 +220,14 @@ setClientToken('test-token');
 // ════════════════════════════════════════════════════════════════════════════
 // §4 — die vier Aktionen, und nur vorhandene Namen
 // ════════════════════════════════════════════════════════════════════════════
-const MIGRIERT: Array<[string, string, string, string]> = [
-  ['src/pages/customers/CustomerList.tsx', 'customers.create', 'createCustomer', 'handleCreate'],
-  ['src/pages/customers/CustomerDetail.tsx', 'customers.update', 'updateCustomer', 'handleSave'],
+// Das fünfte Feld nennt die Datei, in der die ZWEI ANSCHLÜSSE stehen. Bei den meisten Masken ist
+// das die Maske selbst; wo eine Absicht mehr ist als ein Formular (MEDIA-IDENTITY §2: Felder UND
+// Ausweisdokument, mit Stand und Reihenfolge), steht sie in einer gemeinsamen Speicherfolge —
+// dreimal dasselbe zu schreiben hieße, es dreimal zu können. Der Vertrag bleibt derselbe: der
+// Primary-Anschluss ruft die vorhandene Hausfunktion, und nur dort.
+const MIGRIERT: Array<[string, string, string, string, string?]> = [
+  ['src/pages/customers/CustomerList.tsx', 'customers.create', 'createCustomer', 'saveCustomerCreate', 'src/core/customers/customer-save.ts'],
+  ['src/pages/customers/CustomerDetail.tsx', 'customers.update', 'updateCustomer', 'saveCustomerUpdate', 'src/core/customers/customer-save.ts'],
   ['src/pages/watches/ProductDetail.tsx', 'products.update', 'editProductTextDurably', 'handleSave'],
   // R6E — der Primary-Anschluss ist die Hausfolge (Rechnung + Zahlung in EINER Transaktion).
   ['src/pages/invoices/InvoiceCreate.tsx', 'invoices.create', 'createInvoiceOnPrimary', 'performSave'],
@@ -237,16 +242,19 @@ function rumpfVon(s: string, name: string): string {
 }
 {
   const erlaubt = src('src/core/bridge/command-registry.ts');
-  for (const [datei, op, lokal, fn] of MIGRIERT) {
+  for (const [datei, op, lokal, fn, anschlussDatei] of MIGRIERT) {
     const s = codeOf(src(datei));
     // R4C — dieselbe Absicht darf auch über die Mehrfach-Weiche laufen (`w.ok('op', …)`).
-    ok(new RegExp(`(useSharedWrite<[^>]*>\\(|\\w+\\.ok\\()\\s*'${op.replace('.', '\\.')}'`).test(s),
+    ok(new RegExp(`(useSharedWrite<[^>]*>\\(|\\w+\\.(ok|save)\\()\\s*'${op.replace('.', '\\.')}'`).test(s),
       `4 ${datei.split('/').pop()} speichert ueber die gemeinsame Weiche (${op})`);
     ok(erlaubt.includes(`'${op}'`), `4 …und ${op} ist eine BEREITS freigegebene Buchung`);
-    const rumpf = rumpfVon(s, fn);
+    const rumpf = rumpfVon(anschlussDatei ? codeOf(src(anschlussDatei)) : s, fn);
     ok(rumpf.length > 100, `4 …der Speicherweg ${fn}() ist auffindbar (${rumpf.length})`);
     // Der lokale Anschluss ruft weiterhin die vorhandene Domaenenfunktion — nicht eine Kopie.
-    ok(new RegExp(`local: (?:async )?\\(\\) =>[\\s\\S]{0,260}${lokal}\\(`).test(rumpf),
+    // Das Fenster ist gewachsen (260 -> 460): im Kunden-Anschluss stehen vor dem Aufruf die
+    // Fassungspruefung und das Setzen des Ausweisdokuments - echte Schritte derselben Klammer,
+    // keine zweite Kundenlogik.
+    ok(new RegExp(`local: (?:async )?\\(\\) =>[\\s\\S]{0,460}${lokal}\\(`).test(rumpf),
       `4 …und der Primary-Anschluss ruft weiterhin ${lokal}()`);
     // Und sie steht NUR dort: ohne den Anschluss kommt sie im ganzen Speicherweg nicht mehr vor.
     const ohneAnschluss = rumpf.replace(/local: [\s\S]*?(?=\n\s*remote:)/g, '');

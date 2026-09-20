@@ -20,8 +20,8 @@ import { fetchFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
 import { runOnPrimary } from '@/core/data/primary-action';
 import type { WriteAdapters, WriteOutcome } from '@/core/data/shared-write';
 import { updatePayload } from '@/core/data/write-payloads';
-import { stageRecordDataUrls } from '@/core/bridge/client-staging-upload';
-import { normalizeRecordImage } from '@/core/media/record-image';
+import { applyIdentityDocument, assertIdentityOwnerRevision } from '@/core/identity/identity-media';
+import { intentOf, prepareIdentityPhoto, SUPPLIER_PHOTO_KEYS } from '@/core/identity/identity-save';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { usePartnerStore } from '@/stores/partnerStore';
@@ -51,23 +51,9 @@ function absage<T>(e: unknown): WriteOutcome<T> {
 
 const unveraendert = <T>(value: T): WriteOutcome<T> => ({ kind: 'ok', value, replayed: false });
 
-/** Das Ausweisfoto in die Ablage des Primary — dieselbe Zwischenablage wie beim Artikel (R5B). */
-async function stagePhoto(dataUrl: string): Promise<{ id: string } | { fail: WriteOutcome<never> }> {
-  try {
-    // POST-PARITY R7B PP-12 — PC2 rechnet das Foto vorher durch den Normalisierer (≤ 100 000 B).
-    const [id] = await stageRecordDataUrls([dataUrl]);
-    return { id };
-  } catch (e) {
-    const code = (e as { code?: unknown })?.code;
-    return {
-      fail: {
-        kind: 'not_executed',
-        code: typeof code === 'string' && code ? code : 'STAGING_FAILED',
-        message: `The ID-card photo could not be sent to the main computer (${e instanceof Error ? e.message : String(e)}). Nothing was saved.`,
-      },
-    };
-  }
-}
+// Ein Nein des Ausweisvertrags braucht hier KEINE eigene Behandlung: `useSharedWrite` macht aus
+// einer geworfenen Ausnahme der lokalen Domäne bereits ein fachliches Nein mit IHREM Code — genau
+// so, wie der Fernbefehl eines bewertet. Zwei Übersetzungen wären zwei Antworten auf eine Frage.
 
 /** Nach einem Erfolg auf PC2: den Bestand frisch vom Primary holen, BEVOR die Maske weitermacht —
  *  so ist ein neuer Lieferant sofort in der Auswahl und kann gleich ausgewählt werden. Am Primary
@@ -98,18 +84,21 @@ export async function saveSupplierCreate(
   try { input = supplierCreateInput(form as Record<string, unknown>); } catch (e) { return absage(e); }
   const body: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(input)) if (k !== 'cprImage') body[k] = v;
-  if (write.remote && input.cprImage) {
-    const s = await stagePhoto(input.cprImage);
-    if ('fail' in s) return s.fail;
-    body.cprImageStagingId = s.id;
-  }
+  // MEDIA-IDENTITY §3 — das Ausweisfoto wird ein MEDIUM: am Primary hier aufgenommen, auf PC2 in
+  // die Zwischenablage gelegt. In die Lieferantenzeile geht es nicht mehr.
+  const foto = await prepareIdentityPhoto(
+    write.remote, 'supplier', intentOf(input.cprImage ?? undefined), SUPPLIER_PHOTO_KEYS,
+  );
+  if (foto.kind === 'fail') return foto.outcome;
+  if (foto.kind === 'ready') Object.assign(body, foto.body);
+  const mediaId = foto.kind === 'ready' ? foto.mediaId : null;
   const r = await write.save({
-    // POST-PARITY R7B PP-12 — das Ausweisfoto durch den EINEN Normalisierer (≤ 100 000 B), wie fern —
-    // vor der Klammer, damit das Umrechnen die Schreibreihenfolge nicht aufhält.
-    local: async () => {
-      const ready = input.cprImage ? { ...input, cprImage: await normalizeRecordImage(input.cprImage) } : input;
-      return runOnPrimary(() => ({ supplierId: useSupplierStore.getState().createSupplier(ready).id }), suppliersHier);
-    },
+    local: () => runOnPrimary(() => {
+      const s = useSupplierStore.getState().createSupplier({ ...input, cprImage: undefined });
+      // Die Zeile ist gerade entstanden — das Anlegen IST die Änderung, keine zweite Fassung.
+      if (mediaId) applyIdentityDocument('supplier', s.id, mediaId, { bumpOwner: false });
+      return { supplierId: s.id };
+    }, suppliersHier),
     remote: () => body,
     shape: (v) => ({ supplierId: String(v.supplierId ?? '') }),
   });
@@ -170,22 +159,39 @@ export async function saveSupplierUpdate(
   write: MasterdataWrite<Saved>, base: Supplier, form: Partial<Supplier>,
 ): Promise<WriteOutcome<Saved>> {
   const diff = updatePayload(base as unknown as Record<string, unknown>, form as Record<string, unknown>, SUPPLIER_UPDATE_FIELDS);
-  if (Object.keys(diff).length === 0) return unveraendert({ id: base.id });
+  // MEDIA-IDENTITY §3 — der Wunsch zum Dokument ZUERST: ein Entfernen steht nicht im Vergleich mit
+  // der Zeile (die Spalte ist leer, seit das Dokument ein Medium ist), und ein Abbruch auf „nichts
+  // geändert“ hätte es lautlos verschluckt.
+  const wunschVorab = intentOf((form as { cprImage?: string | null }).cprImage);
+  if (Object.keys(diff).length === 0 && wunschVorab.kind === 'unchanged') return unveraendert({ id: base.id });
   try { supplierUpdateInput(diff); } catch (e) { return absage(e); }
-  const body: Record<string, unknown> = { id: base.id, ...diff };
-  if (write.remote && typeof diff.cprImage === 'string') {
-    const s = await stagePhoto(diff.cprImage);
-    if ('fail' in s) return s.fail;
-    delete body.cprImage;
-    body.cprImageStagingId = s.id;
+  // MEDIA-IDENTITY §3/§9 — der Wunsch zum Ausweisdokument kommt aus dem FORMULAR, nicht aus dem
+  // Vergleich mit der Zeile. Der Vergleich kann ihn gar nicht sehen: die Spalte ist leer, seit das
+  // Dokument ein Medium ist, und „leer gegen entfernt" gilt dort als unveraendert. Ein Entfernen
+  // waere damit lautlos verschwunden.
+  const wunsch = wunschVorab;
+  const zeilenFelder = { ...diff }; delete zeilenFelder.cprImage;
+  const body: Record<string, unknown> = { id: base.id, ...zeilenFelder };
+  const foto = await prepareIdentityPhoto(write.remote, 'supplier', wunsch, SUPPLIER_PHOTO_KEYS, base.id);
+  if (foto.kind === 'fail') return foto.outcome;
+  if (foto.kind === 'ready') {
+    Object.assign(body, foto.body);
+    // Der Stand, den der Bildschirm gesehen hat — ohne ihn nimmt der Primary die Änderung nicht an.
+    body.expectedRevision = base.revision ?? 1;
   }
+  const mediaId = foto.kind === 'ready' ? foto.mediaId : null;
+  const aendertDokument = foto.kind === 'ready';
   const r = await write.save({
-    local: async () => {
-      // POST-PARITY R7B PP-12 — ein NEUES Ausweisfoto durch den Normalisierer (vor der Klammer); das gespeicherte bleibt.
-      const d = typeof diff.cprImage === 'string' && diff.cprImage
-        ? { ...diff, cprImage: await normalizeRecordImage(diff.cprImage, base.cprImage) } : diff;
-      return runOnPrimary(() => { useSupplierStore.getState().updateSupplier(base.id, d as Partial<Supplier>); return { id: base.id }; }, suppliersHier);
-    },
+    local: () => runOnPrimary(() => {
+      if (aendertDokument) {
+        assertIdentityOwnerRevision('supplier', base.id, base.revision ?? 1);
+        applyIdentityDocument('supplier', base.id, mediaId, { bumpOwner: Object.keys(zeilenFelder).length === 0 });
+      }
+      if (Object.keys(zeilenFelder).length > 0) {
+        useSupplierStore.getState().updateSupplier(base.id, zeilenFelder as Partial<Supplier>);
+      }
+      return { id: base.id };
+    }, suppliersHier),
     remote: () => body,
     shape: () => ({ id: base.id }),
   });
@@ -195,7 +201,10 @@ export async function saveSupplierUpdate(
 
 /** „Deactivate / Reactivate Supplier" — der ZIELWERT, kein Umschalter. */
 export function saveSupplierActive(write: MasterdataWrite<Saved>, supplier: Supplier, active: boolean): Promise<WriteOutcome<Saved>> {
-  return saveSupplierUpdate(write, supplier, { ...supplier, active });
+  // MEDIA-IDENTITY §3 — `cprImage` ausdruecklich NICHT mitgeben: im Formular heisst das Feld „das
+  // neue Ausweisfoto", und der Altbestand eines Lieferanten steht genau dort. Wer ihn mitschickte,
+  // liesse jedes Aktivieren sein altes Bild erneut aufnehmen und verknuepfen.
+  return saveSupplierUpdate(write, supplier, { ...supplier, cprImage: undefined, active });
 }
 
 // ── Agent ──────────────────────────────────────────────────────────────────
