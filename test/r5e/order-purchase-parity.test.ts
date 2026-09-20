@@ -379,7 +379,11 @@ for (const [was, input] of FAELLE) {
     ok(meta.customerGoldWeight === 12.5 && meta.customerGoldKarat === '21K' && meta.customerStones === '2x 0.5ct'
       && Array.isArray(meta.diamondDetails) && (meta.diamondDetails as unknown[]).length === 1, 'CREATE custom: das Kundenmaterial und die Diamanten stehen im Auftrag');
     const spec = JSON.parse(String(k.custom_product_spec)) as Record<string, unknown>;
-    ok(S(spec.images) === S([foto(2)]) && spec.categoryId === 'cat-w', 'CREATE custom: die Spec des fertigen Stuecks mit Foto');
+    // MEDIA-BUSINESS — die Vorlage des Sonderstuecks ist seither ein Medium; die Spalte traegt
+    // ihre Bytes nicht mehr. Der uebrige Entwurf steht unveraendert da, und dass das Bild als
+    // Verknuepfung am Auftrag haengt, beweist test/media-business/orders-and-scrap §1.
+    ok(S(spec.images ?? []) === S([]) && spec.categoryId === 'cat-w',
+      `CREATE custom: die Spec des fertigen Stuecks — ohne Bytes (${S(spec.images)})`);
     ok(k.goldsmith_supplier_id === 'sup-1' && Number(k.labor_cost) === 80 && Number(k.extra_gold_value) === 120, 'CREATE custom: Goldschmied und Kosten am Kopf');
   } else {
     ok(k.type === 'mixed' && Number(k.agreed_price) === 850 && Number(k.fully_paid) === 1 && Number(k.deposit_amount) === 850,
