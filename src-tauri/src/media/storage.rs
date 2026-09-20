@@ -520,3 +520,80 @@ pub fn publish_original(
     }
     publish_impl(root, tenant_scope, bytes, &hash, ext, true, || {})
 }
+
+/// MEDIA-DOCUMENTS §3 — what a stored ORIGINAL is, proven WITHOUT holding it in memory.
+///
+/// The business command needs to know that a document really lies in the store, byte for byte, and
+/// how big it is — not the bytes themselves. Reading a 25 MiB PDF into RAM only to throw it away
+/// would be the very allocation this path exists to avoid, so the file is hashed in 64 KiB chunks
+/// and only its description comes back.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OriginalStat {
+    pub storage_key: String,
+    pub byte_size: u64,
+    pub mime_type: String,
+    pub content_kind: String,
+    pub extension: String,
+}
+
+/// Verify a stored original in place: it lies under the root, it is a listed ORIGINAL kind, it is
+/// within that kind's limit, its leading bytes are that container, and it still hashes to `hash`.
+pub fn stat_verified_original(
+    root: &Path,
+    tenant_scope: &str,
+    hash: &str,
+    ext: &str,
+) -> Result<OriginalStat, MediaError> {
+    use std::io::Read;
+    let kind = stored_kind(ext).ok_or(MediaError::InvalidExtension)?;
+    if !kind.original {
+        return Err(MediaError::InvalidExtension);
+    }
+    let canon_root = canonical_root_existing(root)?;
+    let path = derive_storage_path(&canon_root, tenant_scope, hash, ext)?;
+    assert_no_reparse_under_root(&canon_root, &path)?;
+    let md = match fs::metadata(&path) {
+        Ok(md) => md,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Err(MediaError::FileMissing),
+        Err(e) => return Err(MediaError::Io(safe_io(&e))),
+    };
+    if !md.is_file() || md.len() == 0 || md.len() > kind.max_bytes {
+        return Err(MediaError::FileTooLarge);
+    }
+    let mut f = File::open(&path).map_err(|e| MediaError::Io(safe_io(&e)))?;
+    let mut hasher = Sha256::new();
+    let mut buf = vec![0u8; 64 * 1024];
+    let mut head: Vec<u8> = Vec::with_capacity(16);
+    let mut total: u64 = 0;
+    loop {
+        let n = f.read(&mut buf).map_err(|e| MediaError::Io(safe_io(&e)))?;
+        if n == 0 {
+            break;
+        }
+        total += n as u64;
+        // A file that grew since the metadata read must not be hashed without bound.
+        if total > kind.max_bytes {
+            return Err(MediaError::FileTooLarge);
+        }
+        if head.len() < 16 {
+            head.extend_from_slice(&buf[..n.min(16 - head.len())]);
+        }
+        hasher.update(&buf[..n]);
+    }
+    if total != md.len() {
+        return Err(MediaError::FileHashMismatch);
+    }
+    if !bytes_match_kind(kind, &head) {
+        return Err(MediaError::InvalidExtension);
+    }
+    if format!("{:x}", hasher.finalize()) != hash {
+        return Err(MediaError::FileHashMismatch);
+    }
+    Ok(OriginalStat {
+        storage_key: format!("{}/{}/{}.{}", tenant_scope, &hash[0..2], hash, ext),
+        byte_size: total,
+        mime_type: kind.mime.to_string(),
+        content_kind: kind.content_kind.to_string(),
+        extension: ext.to_string(),
+    })
+}

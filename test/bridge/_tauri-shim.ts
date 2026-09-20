@@ -94,9 +94,15 @@ function rend(scope: string, input: Uint8Array): Rend {
   return r;
 }
 
-export async function invoke<T = unknown>(cmd: string, args?: Record<string, unknown>): Promise<T> {
+export async function invoke<T = unknown>(
+  cmd: string, args?: Record<string, unknown> | Uint8Array, options?: { headers?: Record<string, string> },
+): Promise<T> {
   tauriState.calls.push(cmd);
-  const a = (args ?? {}) as Record<string, unknown>;
+  // MEDIA-DOCUMENTS — ein ORIGINAL reist als ROHER Rumpf: das Argument IST die Bytefolge, die
+  // Angaben stehen in Kopfzeilen. Genau so traegt Tauri es, und genau so wird es hier gelesen.
+  const roh = args instanceof Uint8Array ? args : null;
+  const kopf = options?.headers ?? {};
+  const a = (roh ? {} : (args ?? {})) as Record<string, unknown>;
   switch (cmd) {
     case 'staging_media_read': {
       if (tauriState.readShouldThrow) throw new Error('STAGING_IO');
@@ -172,6 +178,39 @@ export async function invoke<T = unknown>(cmd: string, args?: Record<string, unk
       const f = files.get(`${String(a.tenantScope)}::${String(a.hash)}`);
       if (!f) throw new Error('MEDIA_FILE_MISSING');
       return { bytes: Array.from(f.bytes), hash: String(a.hash), byte_size: f.bytes.length, mime_type: f.mime, extension: f.ext } as T;
+    }
+    // MEDIA-DOCUMENTS — der Rohweg fuer ORIGINALE (PDF). Derselbe Vertrag wie in Rust: Endung,
+    // Groesse, fuehrende Bytes, Inhalt-Hash — und der Speicher ist inhaltsadressiert.
+    case 'media_publish_original': {
+      const bytes = roh as Uint8Array;
+      if (!(bytes instanceof Uint8Array) || bytes.length === 0) throw new Error('MEDIA_FILE_TOO_LARGE');
+      if (bytes.length > 25 * 1024 * 1024) throw new Error('MEDIA_FILE_TOO_LARGE');
+      const ext = String(kopf['x-lataif-extension'] ?? 'pdf');
+      if (ext !== 'pdf') throw new Error('MEDIA_INVALID_EXTENSION');
+      const istPdf = bytes.length >= 5 && bytes[0] === 0x25 && bytes[1] === 0x50 && bytes[2] === 0x44 && bytes[3] === 0x46 && bytes[4] === 0x2d;
+      if (!istPdf) throw new Error('MEDIA_INVALID_EXTENSION');
+      const scope = String(kopf['x-lataif-tenant-scope'] ?? 'tenant-1');
+      const h = sha(bytes);
+      const key = `${scope}/${h.slice(0, 2)}/${h}.pdf`;
+      const reused = files.has(`${scope}::${h}`);
+      if (!reused) files.set(`${scope}::${h}`, { bytes, mime: 'application/pdf', ext: 'pdf' });
+      return { storage_key: key, hash: h, byte_size: bytes.length, mime_type: 'application/pdf', extension: 'pdf', content_kind: 'pdf', reused } as T;
+    }
+    case 'media_stat_original': {
+      const scope = String(a.tenantScope);
+      const f = files.get(`${scope}::${String(a.hash)}`);
+      if (!f) throw new Error('MEDIA_FILE_MISSING');
+      if (sha(f.bytes) !== String(a.hash)) throw new Error('MEDIA_FILE_HASH_MISMATCH');
+      return {
+        storage_key: `${scope}/${String(a.hash).slice(0, 2)}/${String(a.hash)}.pdf`,
+        byte_size: f.bytes.length, mime_type: f.mime, content_kind: 'pdf', extension: f.ext,
+      } as T;
+    }
+    case 'media_read_verified_raw': {
+      const f = files.get(`${String(a.tenantScope)}::${String(a.hash)}`);
+      if (!f) throw new Error('MEDIA_FILE_MISSING');
+      if (sha(f.bytes) !== String(a.hash)) throw new Error('MEDIA_FILE_HASH_MISMATCH');
+      return f.bytes as unknown as T;
     }
     case 'media_recover_ingests':
       return [] as unknown as T;

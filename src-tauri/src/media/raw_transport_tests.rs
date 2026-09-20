@@ -185,3 +185,65 @@ fn the_old_json_read_serves_renditions_only() {
     let body = &lib[at..at + 700];
     assert!(body.contains("media::raw_transport::json_read_allowed(&extension)"), "the JSON command checks first");
 }
+
+// ── MEDIA-DOCUMENTS — the nachweis without the bytes ─────────────────────────────────────────
+
+#[test]
+fn a_stored_document_is_proven_in_place_without_reading_it_whole() {
+    use crate::media::storage::{publish_original, stat_verified_original};
+    let root = tmp_dir();
+    let bytes = pdf(300_000);
+    let p = publish_original(&root, "tenant-1", &bytes, "pdf", None).unwrap();
+
+    // The stat says exactly what the generation row must record — and nothing else.
+    let s = stat_verified_original(&root, "tenant-1", &p.hash, "pdf").unwrap();
+    assert_eq!(s.byte_size, bytes.len() as u64);
+    assert_eq!(s.mime_type, "application/pdf");
+    assert_eq!(s.content_kind, "pdf");
+    assert_eq!(s.extension, "pdf");
+    assert_eq!(s.storage_key, format!("tenant-1/{}/{}.pdf", &p.hash[0..2], p.hash));
+    // The storage key is RELATIVE: moving the data root changes the root, never the key.
+    let moved = tmp_dir();
+    let dest = moved.join("tenant-1").join(&p.hash[0..2]);
+    std::fs::create_dir_all(&dest).unwrap();
+    std::fs::copy(&p.path, dest.join(format!("{}.pdf", p.hash))).unwrap();
+    let after = stat_verified_original(&moved, "tenant-1", &p.hash, "pdf").unwrap();
+    assert_eq!(after, s, "the same file under a new root describes itself identically");
+    assert_eq!(read_verified_media(&moved, "tenant-1", &p.hash, "pdf").unwrap(), bytes, "byte for byte");
+
+    // A file that no longer matches its name is refused — fail-closed, never "probably fine".
+    let mut tampered = bytes.clone();
+    let last = tampered.len() - 1;
+    tampered[last] ^= 0xFF;
+    std::fs::write(&p.path, &tampered).unwrap();
+    assert!(matches!(stat_verified_original(&root, "tenant-1", &p.hash, "pdf"), Err(MediaError::FileHashMismatch)));
+
+    // Neither is a file whose leading bytes are not a PDF any more — that one is refused for what
+    // it is, before the hash is even compared.
+    let mut fake = b"MZ\x90\x00".to_vec();
+    fake.resize(bytes.len(), 0);
+    std::fs::write(&p.path, &fake).unwrap();
+    assert!(matches!(stat_verified_original(&root, "tenant-1", &p.hash, "pdf"), Err(MediaError::InvalidExtension)));
+
+    // Missing, and a rendition kind that has no business on this path.
+    assert!(matches!(stat_verified_original(&root, "tenant-1", &"0".repeat(64), "pdf"), Err(MediaError::FileMissing)));
+    assert!(matches!(stat_verified_original(&root, "tenant-1", &p.hash, "jpg"), Err(MediaError::InvalidExtension)));
+    assert!(matches!(stat_verified_original(&root, "tenant-1", &p.hash, "png"), Err(MediaError::InvalidExtension)));
+}
+
+#[test]
+fn the_document_ceiling_is_twenty_five_mebibytes_on_every_leg() {
+    use crate::media::storage::publish_original;
+    assert_eq!(DOCUMENT_MAX_BYTES, 25 * 1024 * 1024);
+    assert_eq!(max_raw_transport_bytes(), DOCUMENT_MAX_BYTES, "the transport ceiling IS the largest original kind");
+    let root = tmp_dir();
+    // One byte over: refused at the store, before any file is touched.
+    let over = pdf(DOCUMENT_MAX_BYTES as usize + 1);
+    assert!(matches!(publish_original(&root, "tenant-1", &over, "pdf", None), Err(MediaError::FileTooLarge)));
+    // And the parse refuses it even earlier — before hashing, before the filesystem.
+    let h = sha256_hex(&over);
+    assert_eq!(
+        parse_original_upload(hdr(&[(H_TENANT_SCOPE, "tenant-1"), (H_EXTENSION, "pdf"), (H_SHA256, &h)]), Some(&over)).err(),
+        Some("MEDIA_ORIGINAL_TOO_LARGE"),
+    );
+}

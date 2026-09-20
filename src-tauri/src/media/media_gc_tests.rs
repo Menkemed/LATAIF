@@ -381,3 +381,48 @@ fn quarantine_run_junction_is_not_followed() {
     finalize(&base, &cfg, "t").unwrap();
     assert!(sentinel.join("keep.txt").exists(), "a junction run dir is never followed/deleted");
 }
+
+// ── MEDIA-DOCUMENTS — eine verknüpfte PDF ist Pflichtbestand, kein Fundstück ─────────────────
+
+fn put_document(root: &std::path::Path, scope: &str, bytes: &[u8]) -> (String, String, u64) {
+    let hash = super::super::storage::sha256_hex(bytes);
+    let rel = format!("{}/{}/{}.pdf", scope, &hash[0..2], hash);
+    let abs = root.join(&rel);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, bytes).unwrap();
+    (rel.replace('\\', "/"), hash, bytes.len() as u64)
+}
+
+/// A lataif.db that tracks generations WITH their real extension — a document is a `pdf` row.
+fn make_front_mixed(base: &std::path::Path, entries: &[(&str, &str)]) {
+    let conn = rusqlite::Connection::open(base.join("lataif.db")).unwrap();
+    conn.execute_batch(
+        "CREATE TABLE IF NOT EXISTS media_blob_generations(tenant_id,blob_id,generation_no,gen_status,storage_key,stored_blob_hash,byte_size,extension,current_generation_no,deleted_at);
+         DELETE FROM media_blob_generations;",
+    ).unwrap();
+    for (i, (key, ext)) in entries.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO media_blob_generations VALUES('t','b',?1,'available',?2,'h',10,?3,1,NULL)",
+            rusqlite::params![i as i64 + 1, key, ext],
+        ).unwrap();
+    }
+}
+
+#[test]
+fn a_tracked_document_pdf_is_never_an_orphan() {
+    let base = tmp();
+    let root = root_of(&base);
+    let (doc_rel, _, _) = put_document(&root, "tenant-1", b"%PDF-1.7\nthe invoice of record");
+    let (img_rel, _, _) = put_media(&root, "tenant-1", b"A-PRODUCT-IMAGE");
+    // A PDF that nobody's row names — the same file kind, the opposite verdict.
+    let (loose_rel, _, loose_size) = put_document(&root, "tenant-1", b"%PDF-1.7\nnobody links me");
+    make_front_mixed(&base, &[(&doc_rel, "pdf"), (&img_rel, "jpg")]);
+
+    let rep = plan(&base).unwrap();
+    ok_eq(rep.referenced_count, 2, "the document counts as referenced, exactly like the image");
+    ok_eq(rep.orphan_count, 1, "only the file no row names is an orphan");
+    assert_eq!(rep.orphans[0].rel_path, loose_rel, "and it is the loose one, never the linked document");
+    assert_eq!(rep.orphans[0].byte_size, loose_size);
+    // The tracked document is still on disk, untouched: a plan decides nothing by itself.
+    assert!(root.join(doc_rel.replace('/', std::path::MAIN_SEPARATOR_STR)).exists());
+}

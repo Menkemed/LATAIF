@@ -16,6 +16,14 @@ import type { DocumentClass, LinkedEntityType } from '@/core/models/types';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { DOCUMENT_MAX_FILE_BYTES, documentUploadBody, type DocumentOcrDone } from '@/core/office/document-house';
+// MEDIA-DOCUMENTS — eine PDF geht byte-genau in den Medienspeicher (25 MiB), alles andere bleibt
+// vorerst auf dem alten Weg. Die Maske entscheidet das an den Bytes, nicht am Namen.
+import {
+  DOCUMENT_MAX_BYTES, DOCUMENT_MIME, documentMediaScope, isPdfBytes, sendDocumentFile,
+} from '@/core/office/document-media';
+import { clientConfig } from '@/core/bridge/client-mode';
+import { readsFromPrimary } from '@/core/data/primary-source';
+import { loadVerifiedMedia, revokeVerifiedMedia } from '@/core/media/verified-view';
 
 const DOC_CLASSES: DocumentClass[] = ['invoice', 'receipt', 'certificate', 'warranty', 'photo', 'note', 'other'];
 const ENTITY_TYPES: LinkedEntityType[] = ['customer', 'product', 'offer', 'invoice', 'repair', 'consignment', 'agent_transfer', 'order'];
@@ -86,8 +94,27 @@ export function DocumentList() {
   // allen Inhalten zu schicken wären je Aufruf viele Megabyte für Bilder, die niemand geöffnet
   // hat. Am Primary steht der Inhalt ohnehin schon in der Zeile — dann tut das hier nichts.
   // R7B PP-12 — eine Vorschau, die nicht kam, ist auf PC2 ein Satz mit „Try again" — kein leeres Feld.
+  // MEDIA-DOCUMENTS — eine PDF liegt im Medienspeicher: ihre Bytes kommen über den geprüften Weg
+  // (Primary: Rohweg mit Hash-Prüfung; PC2: `/api/media` mit Ausweis) und werden zu einer Objekt-URL,
+  // die mit dem Fenster wieder verschwindet. Keine Daten-URL, kein nackter Speicherpfad.
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  const pdfRef = showPreview?.file ?? null;
+  const pdfKey = pdfRef?.key ?? '';
+  const pdfHash = pdfRef?.hash ?? '';
+  const pdfExt = pdfRef?.extension ?? '';
   useEffect(() => {
-    if (!showPreview || showPreview.filePath) return;
+    setPdfUrl(null);
+    if (!pdfKey) return;
+    let lebt = true;
+    let sicht: { url: string; revocable: boolean } | null = null;
+    void loadVerifiedMedia({ key: pdfKey, hash: pdfHash, extension: pdfExt }, fetch, 'DOCUMENT_FILE_UNAVAILABLE')
+      .then((v) => { if (!lebt) { revokeVerifiedMedia(v); return; } sicht = v; setPdfUrl(v.url); })
+      .catch((e) => { if (lebt) setPreviewError(`The file could not be opened: ${e instanceof Error ? e.message : String(e)}`); });
+    return () => { lebt = false; revokeVerifiedMedia(sicht); };
+  }, [pdfKey, pdfHash, pdfExt, previewTick]);
+
+  useEffect(() => {
+    if (!showPreview || showPreview.filePath || showPreview.file) return;
     const id = showPreview.id;
     let alive = true;
     setPreviewError('');
@@ -114,18 +141,35 @@ export function DocumentList() {
     if (!uploadFile) return;
     setUploadError('');
     w.clear();
-    if (uploadFile.size > DOCUMENT_MAX_FILE_BYTES) {
-      setUploadError(`This file is too large (${formatBytes(uploadFile.size)}). A document must stay below `
-        + `${formatBytes(DOCUMENT_MAX_FILE_BYTES)} so it can sync to the other computers.`);
+    // Die Bytes entscheiden, welcher Weg gilt — und damit auch, welche Grenze.
+    const rohbytes = new Uint8Array(await uploadFile.arrayBuffer());
+    const istPdf = isPdfBytes(rohbytes);
+    const grenze = istPdf ? DOCUMENT_MAX_BYTES : DOCUMENT_MAX_FILE_BYTES;
+    if (rohbytes.byteLength > grenze) {
+      setUploadError(istPdf
+        ? `This PDF is too large (${formatBytes(rohbytes.byteLength)}). A document file must stay at or below ${formatBytes(grenze)}.`
+        : `This file is too large (${formatBytes(rohbytes.byteLength)}). A document must stay below `
+          + `${formatBytes(grenze)} so it can sync to the other computers.`);
       return;
     }
     setUploading(true);
     try {
-      const content = await readFileAsDataUrl(uploadFile);
+      // MEDIA-DOCUMENTS — die PDF reist ZUERST als Rumpf in den Speicher; im Auftrag steht danach
+      // nur ihre Inhaltskennung. Scheitert das, geht gar nichts hinaus: kein halber Beleg.
+      const fern = readsFromPrimary();
+      const media = istPdf
+        ? await sendDocumentFile(rohbytes, {
+          // Fern bestimmt der Primary den Mandanten aus dem Ausweis; hier zählt er nur lokal.
+          remote: fern, tenantScope: fern ? '' : documentMediaScope().tenantId, client: clientConfig(),
+        })
+        : null;
       const body = documentUploadBody({
-        fileName: uploadFile.name, content, docClass: uploadClass,
+        fileName: uploadFile.name,
+        content: istPdf ? '' : await readFileAsDataUrl(uploadFile),
+        docClass: uploadClass,
         linkedEntityType: uploadEntityType || null, linkedEntityId: uploadEntityId || null,
       });
+      if (media) { delete body.content; body.media = media; }
       if (!await w.ok('documents.upload', {
         local: () => uploadDocumentOnPrimary(body),
         remote: () => body,
@@ -459,7 +503,18 @@ export function DocumentList() {
                 <div className="text-center" style={{ padding: 40 }} data-document-preview-loading>
                   <p style={{ fontSize: 13, color: '#6B7280' }}>Loading the file from the main computer…</p>
                 </div>
-              ) : showPreview.fileType === 'application/pdf' ? (
+              ) : showPreview.fileType === DOCUMENT_MIME && pdfUrl ? (
+                <iframe
+                  src={pdfUrl}
+                  title={showPreview.fileName}
+                  style={{ width: '100%', height: 500, border: 'none', background: '#FFFFFF' }}
+                  data-document-pdf-preview
+                />
+              ) : showPreview.fileType === DOCUMENT_MIME && showPreview.file ? (
+                <div className="text-center" style={{ padding: 40 }} data-document-preview-loading>
+                  <p style={{ fontSize: 13, color: '#6B7280' }}>Opening the file…</p>
+                </div>
+              ) : showPreview.fileType === DOCUMENT_MIME ? (
                 <div className="text-center" style={{ padding: 40 }}>
                   <FileText size={48} strokeWidth={1} style={{ margin: '0 auto 16px', color: '#AA6E6E' }} />
                   <p style={{ fontSize: 14, color: '#6B7280' }}>PDF preview not available</p>

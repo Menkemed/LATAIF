@@ -2271,6 +2271,30 @@ fn media_publish_original(
     media::raw_transport::store_original(svc.media_root(), &up).map_err(|e| e.code().to_string())
 }
 
+/// MEDIA-DOCUMENTS §3 — „liegt dieses Dokument wirklich so im Speicher?"
+///
+/// Der Geschaeftsbefehl braucht den Nachweis, nicht die Bytes. Die Datei wird in Stuecken gelesen
+/// und geprueft (Groesse, fuehrende Bytes, Inhalt-Hash); zurueck kommt nur ihre Beschreibung. Ein
+/// vollstaendiges Einlesen waere genau die Belegung, die dieser Weg vermeiden soll.
+#[tauri::command]
+fn media_stat_original(
+    state: tauri::State<'_, AppHandleState>,
+    tenant_scope: String,
+    hash: String,
+    extension: String,
+) -> Result<serde_json::Value, String> {
+    let svc = media_ingest_service(&state);
+    let s = media::storage::stat_verified_original(svc.media_root(), &tenant_scope, &hash, &extension)
+        .map_err(|e| e.code().to_string())?;
+    Ok(serde_json::json!({
+        "storage_key": s.storage_key,
+        "byte_size": s.byte_size,
+        "mime_type": s.mime_type,
+        "content_kind": s.content_kind,
+        "extension": s.extension,
+    }))
+}
+
 #[tauri::command]
 fn media_recover_ingests(
     state: tauri::State<'_, AppHandleState>,
@@ -3386,6 +3410,7 @@ pub fn run() {
             media_read_verified,
             media_read_verified_raw,
             media_publish_original,
+            media_stat_original,
             media_recover_ingests,
             // MOBILE-04B2A6-I1 — the internal mobile-upload claim/handoff commands are now REGISTERED,
             // but activation is scope-gated: every wrapper's first act (after opening the config DB and

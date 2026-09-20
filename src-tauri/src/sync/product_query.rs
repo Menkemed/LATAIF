@@ -650,6 +650,14 @@ fn live_media_grant(
                  AND EXISTS (SELECT 1 FROM purchase_inbox pi
                               WHERE pi.id = l.entity_id AND pi.branch_id = l.branch_id))
               OR
+              -- MEDIA-DOCUMENTS — die hochgeladene Datei EINES Belegs der Dokumentenmappe. Der
+              -- zweite Rechner zeigt dieselbe Mappe, also muss er sie auch oeffnen duerfen. Eine
+              -- Rolle, die Filiale des Belegs, Klasse wie eine interne Unterlage — nie `sensitive`.
+              (o.security_class IN ('public', 'internal')
+                 AND l.entity_type = 'document' AND l.media_role = 'file'
+                 AND EXISTS (SELECT 1 FROM documents dc
+                              WHERE dc.id = l.entity_id AND dc.branch_id = l.branch_id))
+              OR
               (o.security_class = 'sensitive' AND ?4 = 1
                  AND l.entity_type = 'customer' AND l.media_role = 'identity_document'
                  AND EXISTS (SELECT 1 FROM customers c WHERE c.id = l.entity_id AND c.branch_id = l.branch_id))

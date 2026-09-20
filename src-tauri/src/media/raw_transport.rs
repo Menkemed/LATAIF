@@ -7,12 +7,23 @@
 //! (`InvokeBody::Raw`), with the metadata in request headers, and hands raw bytes back with
 //! `tauri::ipc::Response` (an `ArrayBuffer` in JS). No JSON array, no Base64 copy on either leg.
 //!
-//! RESIDUAL RISK (documented, NOT solved): Tauri hands the command the raw body only once it is
-//! fully received — the renderer→IPC transfer has already allocated it. The 25 MiB check below
-//! therefore protects hashing, the file and publication, but not that upstream allocation; the
-//! only earlier guard is the client-side check in `OriginalMediaTransport` (`ORIGINAL_MAX_BYTES`).
-//! No visible document writer exists. Before large document uploads are activated (S5), decide
-//! whether an upstream transport limit is possible and needed.
+//! RESIDUAL RISK — the S5 decision, made and written down rather than glossed over:
+//!
+//!   • LAN leg (PC2 → Primary, `POST /api/documents/raw`): BOUNDED. That route carries its own
+//!     `DefaultBodyLimit::max(DOCUMENT_MAX_BYTES)` inside the 50 MiB limit of every /api route.
+//!     axum answers 413 from the body extractor — before the handler runs and before more than the
+//!     limit is buffered. There the ceiling really does sit in front of the allocation.
+//!
+//!   • Tauri leg (the Primary's own window → `media_publish_original`): NOT solved, and it cannot
+//!     be solved from here. Tauri 2 hands the command `InvokeBody::Raw` only once the body is
+//!     complete, and this version offers no configuration that bounds an IPC body before the
+//!     command is called. The guards are therefore: the client checks the size BEFORE sending
+//!     (`ORIGINAL_MAX_BYTES`, the same 25 MiB) and `parse_original_upload` refuses anything larger
+//!     before parsing, hashing or touching a file. What remains is one allocation of the
+//!     transferred bytes inside the app's own process, caused by a file the operator picked
+//!     themselves on their own machine.
+//!
+//! This is NOT streaming and is not described as such. 25 MiB is not raised to compensate.
 //!
 //! This module holds everything about that path that does not need a live webview: parsing and
 //! bounding the request, and storing the original through the storage contract. The two thin

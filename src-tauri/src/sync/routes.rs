@@ -72,6 +72,17 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // ausdruecklich NICHT `/mobile/upload`: die ist ein Produkt-Eingang und wuerde einen zweiten
         // Weg oeffnen, auf dem ein Produkt an `runRemoteCommand` vorbei entsteht.
         .route("/staging/media", post(staging_media_put))
+        // MEDIA-DOCUMENTS §3/§9 — der Rohweg EINES Dokuments von PC2. Die Bytes reisen als Rumpf,
+        // nicht als Base64 in JSON: ein 25-MiB-PDF waere als JSON-Zeichenkette ein Drittel groesser
+        // und laege doppelt im Speicher. Und er traegt seine EIGENE Koerpergrenze (`DOCUMENT_MAX_BYTES`)
+        // INNERHALB der 50-MiB-Grenze aller /api-Routen: axum weist einen groesseren Rumpf mit 413 ab,
+        // BEVOR der Handler laeuft — hier gibt es die Grenze also wirklich vor der Materialisierung.
+        .route(
+            "/documents/raw",
+            post(document_raw_put).layer(DefaultBodyLimit::max(
+                crate::media::storage::DOCUMENT_MAX_BYTES as usize,
+            )),
+        )
         // CENTRAL-C1 — der EINZIGE Weg fuer einen Auftrag von einem anderen Rechner. Feste
         // Namensliste, keine SQL-Uebergabe, kein generisches Ausfuehren; hinter derselben Anmeldung.
         .route("/command", post(command_execute))
@@ -131,6 +142,53 @@ struct StagingMediaRequest {
     mime: String,
     #[serde(rename = "dataBase64")]
     data_base64: String,
+}
+
+/// MEDIA-DOCUMENTS §3 — ein Dokument von PC2 in den Speicher des Primary legen.
+///
+/// Nur ablegen: es entsteht KEINE Geschaeftszeile und keine Verknuepfung. Zurueck kommt die
+/// Beschreibung der Datei (Inhalt-Hash und Groesse); den Rest entscheidet der benannte Befehl
+/// `documents.upload`, der den Hash nennt. Eine abgelegte, nie verknuepfte Datei bleibt
+/// unerreichbar und wird von der Medien-Aufraeumung eingesammelt — wie jede andere auch.
+async fn document_raw_put(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<(StatusCode, Json<serde_json::Value>), StatusCode> {
+    if !state.primary_state.may_write_sync() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if claims.role.trim().is_empty() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // Der Mandant kommt AUSSCHLIESSLICH aus dem geprueften Ausweis; der Aufrufer hat kein Feld dafuer.
+    let expected = headers
+        .get(crate::media::raw_transport::H_SHA256)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.to_string());
+    let root = state.data_root.media_root();
+    match crate::media::storage::publish_original(
+        &root,
+        &claims.tenant_id,
+        &body,
+        "pdf",
+        expected.as_deref(),
+    ) {
+        Ok(p) => Ok((
+            StatusCode::CREATED,
+            Json(serde_json::json!({
+                "hash": p.hash,
+                "byteSize": p.byte_size,
+                "extension": "pdf",
+                "reused": p.reused,
+            })),
+        )),
+        Err(e) => Ok((
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({ "error": e.code() })),
+        )),
+    }
 }
 
 async fn staging_media_put(

@@ -596,10 +596,13 @@ const docRow = (db: Db, id?: string): Record<string, unknown> =>
   const oct = await up('230', upBody({ fileName: 'scan', content: dataUrl('application/octet-stream', PNG) }));
   const txt = await up('231', upBody({ fileName: 'note.txt', content: dataUrl('text/plain', new TextEncoder().encode('BMW report 2026')) }));
   const ai = await up('232', upBody({ fileName: 'logo.ai', content: dataUrl('application/postscript', PDF) }));
+  // MEDIA-DOCUMENTS — eine PDF geht seither NICHT mehr als Data-URL durch diese Tuer: sie gehoert
+  // byte-genau in den Medienspeicher, und der Rumpf nennt nur ihre Kennung. Beweise in
+  // test/media-documents/document-pdf.
   const pdf = await up('233', upBody({ fileName: 'cert.pdf', content: dataUrl('application/pdf', PDF), docClass: 'certificate' }));
   ok(oct.ok && oct.value.fileType === 'image/png' && txt.ok && txt.value.fileType === 'text/plain' && ai.ok && ai.value.fileType === 'application/postscript'
-    && pdf.ok && pdf.value.fileType === 'application/pdf',
-  `TYPE unbekannter Typ mit Bildinhalt wird Bild; Text, Illustrator, PDF bleiben (${S([oct.value.fileType, txt.value.fileType, ai.value.fileType, pdf.value.fileType])})`);
+    && pdf.thrown && pdf.code === 'DOCUMENT_CONTENT_INVALID',
+  `TYPE unbekannter Typ mit Bildinhalt wird Bild; Text und Illustrator bleiben; eine PDF gehoert in den Medienspeicher (${S([oct.value.fileType, txt.value.fileType, ai.value.fileType, pdf.code])})`);
 
   // Kein Pfad, kein kaputter Inhalt.
   for (const content of ['C:\\docs\\x.pdf', 'file:///etc/passwd', '/etc/passwd', 'data:image/png,rawbytes', 'data:image/png;base64,@@@@', 'data:image/png;base64,abc', 42]) {
@@ -920,8 +923,10 @@ function stub(result: unknown = { text: ' Rolex Daytona 116500 \n', confidence: 
     'AUTHORITY kein Client-Ergebnis erreicht die Zeile — und keine Erkennung lief dafür');
 
   // Nur ein Bild mit Inhalt.
-  const pdfUp = await fern(() => office.runDocumentUpload(deps(dbR), identity('320', 'documents.upload'), upBody({ fileName: 'c.pdf', content: dataUrl('application/pdf', PDF) })));
-  const nonImg = await fern(() => office.runDocumentOcr(deps(dbR), identity('321', 'documents.set_ocr'), { documentId: String(pdfUp.value.documentId), expectedRevision: 1 }, eR.engine));
+  // MEDIA-DOCUMENTS — eine PDF kommt nicht mehr als Data-URL herein; fuer diese Wache genuegt eine
+  // Zeile, die wie eine gespeicherte PDF aussieht: keine Bytes in der Spalte, Typ .
+  insert(dbR, 'documents', { id: 'd-pdf', branch_id: 'branch-main', file_name: 'c.pdf', file_path: '', file_type: 'application/pdf', created_at: NOW });
+  const nonImg = await fern(() => office.runDocumentOcr(deps(dbR), identity('321', 'documents.set_ocr'), { documentId: 'd-pdf', expectedRevision: 1 }, eR.engine));
   insert(dbR, 'documents', { id: 'd-legacy', branch_id: 'branch-main', file_name: 'old.png', file_path: 'C:\\scans\\old.png', file_type: 'image/png', created_at: NOW });
   const legacy = await fern(() => office.runDocumentOcr(deps(dbR), identity('322', 'documents.set_ocr'), { documentId: 'd-legacy', expectedRevision: 1 }, eR.engine));
   insert(dbR, 'documents', { id: 'd-x', branch_id: 'branch-other', file_name: 'x.png', file_path: PNG_URL, file_type: 'image/png', created_at: NOW });
@@ -930,7 +935,7 @@ function stub(result: unknown = { text: ' Rolex Daytona 116500 \n', confidence: 
     && eR.seen.length === 1 && one(dbR, "SELECT ocr_text FROM documents WHERE id = 'd-x'") === null,
   `GUARD PDF / alter Pfad-Eintrag / fremde Filiale → nein, ohne Erkennung (${S([nonImg.code, legacy.code, fremd.code])})`);
   // Über die Registry (mit der ECHTEN Erkennung — die hier gar nicht erst geladen wird, weil vorher geprüft wird).
-  const viaOcr = await registry.executeCommand('documents.set_ocr', { documentId: String(pdfUp.value.documentId), expectedRevision: 1 },
+  const viaOcr = await registry.executeCommand('documents.set_ocr', { documentId: 'd-pdf', expectedRevision: 1 },
     { commandId: ID('324'), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-pc2', payloadHash: 'h324', role: 'SALES' } as never) as { kind: string; code?: string };
   ok(viaOcr.kind === 'business_error' && viaOcr.code === 'DOCUMENT_OCR_UNSUPPORTED', `REGISTRY documents.set_ocr: das Urteil des Hauses (${S(viaOcr)})`);
 
@@ -1015,7 +1020,11 @@ await imClient(async (touched, calls) => {
     && /w\.save<DocumentOcrDone>\('documents\.set_ocr', \{\s*local: \(\) => extractOcrOnPrimary\(body\),\s*remote: \(\) => body/.test(dl),
   'UI DocumentList: „Extract Text" nennt nur Dokument und gesehene Fassung');
   ok(!/\b(uploadDocument|extractOcr)\(/.test(dl), 'UI DocumentList: keine Store-Aktion mehr direkt');
-  ok(/uploadFile\.size > DOCUMENT_MAX_FILE_BYTES/.test(dl), 'UI DocumentList: die Vorprüfung nutzt dieselbe abgeleitete Grenze');
+  // MEDIA-DOCUMENTS — zwei Wege, zwei abgeleitete Grenzen: die Abgleich-Grenze fuer den alten Weg,
+  // die Speichergrenze (25 MiB) fuer eine PDF. Erfunden ist keine davon.
+  ok(/const grenze = istPdf \? DOCUMENT_MAX_BYTES : DOCUMENT_MAX_FILE_BYTES;/.test(dl)
+    && /rohbytes\.byteLength > grenze/.test(dl),
+  'UI DocumentList: die Vorprüfung nutzt dieselbe abgeleitete Grenze — je Weg die seine');
   for (const h of ['data-document-upload', 'data-document-file', 'data-document-class', 'data-document-link-id', 'data-document-upload-confirm', 'data-document-ocr']) {
     ok(dl.includes(h), `UI DocumentList: ${h}`);
   }

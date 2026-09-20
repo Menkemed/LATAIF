@@ -287,6 +287,7 @@ CREATE TABLE suppliers (id TEXT, branch_id TEXT);
 CREATE TABLE purchases (id TEXT, branch_id TEXT, supplier_snapshot TEXT);
 CREATE TABLE scrap_trade_lines (id TEXT, scrap_trade_id TEXT, line_key TEXT, branch_id TEXT);
 CREATE TABLE purchase_inbox (id TEXT, branch_id TEXT);
+CREATE TABLE documents (id TEXT, branch_id TEXT);
 "#;
 
 /// MEDIA-IDENTITY — die Rolle gehoert zum Tor. Wo ein Test sie nicht prueft, steht die staerkste
@@ -296,6 +297,8 @@ fn grant(db: &std::path::Path, tenant: &str, branch: &str, key: &str) -> Option<
 }
 
 fn key(n: &str) -> String { format!("t-1/{}/{}.jpg", &n.repeat(64)[0..2], n.repeat(64)) }
+/// MEDIA-DOCUMENTS — derselbe Schluessel, andere Endung: ein Beleg ist ein Original.
+fn pkey(n: &str) -> String { format!("t-1/{}/{}.pdf", &n.repeat(64)[0..2], n.repeat(64)) }
 
 /// One product image (master + thumbnail) of p-dj41 in b-1, plus deliberately wrong neighbours.
 fn grant_fixture() -> std::path::PathBuf {
@@ -324,6 +327,15 @@ fn grant_fixture() -> std::path::PathBuf {
     // MEDIA-SCRAP — ein Belegfoto einer Position (Kauf-Seite) und eines in fremder Filiale.
     blob("b-scrap", "6", "available");
     blob("b-scrap-other", "7", "available");
+    // MEDIA-DOCUMENTS — die PDF eines Belegs: hier und in fremder Filiale. Ein Beleg ist ein
+    // ORIGINAL: sein Schluessel endet auf `.pdf`, nicht auf `.jpg`.
+    let pdfblob = |id: &str, n: &str| {
+        conn.execute("INSERT INTO media_blob_generations VALUES ('t-1',?1,1,?2,?3,10,'pdf','available',NULL)",
+            rusqlite::params![id, pkey(n), n.repeat(64)]).unwrap();
+        conn.execute("INSERT INTO media_blobs VALUES ('t-1',?1,'present',1)", rusqlite::params![id]).unwrap();
+    };
+    pdfblob("b-doc", "8");
+    pdfblob("b-doc-other", "9");
     conn.execute_batch("
       INSERT INTO media_objects VALUES ('t-1','m-1','b-main','internal',NULL),
                                        ('t-1','m-rep','b-repair','internal',NULL),
@@ -337,11 +349,14 @@ fn grant_fixture() -> std::path::PathBuf {
                                        ('t-1','m-supp-id','b-supp-id','sensitive',NULL),
                                        ('t-1','m-cust-int','b-cust-internal','internal',NULL),
                                        ('t-1','m-scrap','b-scrap','internal',NULL),
-                                       ('t-1','m-scrap-oth','b-scrap-other','internal',NULL);
+                                       ('t-1','m-scrap-oth','b-scrap-other','internal',NULL),
+                                       ('t-1','m-doc','b-doc','internal',NULL),
+                                       ('t-1','m-doc-oth','b-doc-other','internal',NULL);
       INSERT INTO media_variants VALUES ('t-1','m-1','thumbnail','b-thumb',NULL);
       INSERT INTO repairs (id, branch_id) VALUES ('rep-1','b-1'), ('rep-other','b-other');
       INSERT INTO customers (id, branch_id) VALUES ('cust-1','b-1'), ('cust-other','b-other');
       INSERT INTO suppliers (id, branch_id) VALUES ('sup-1','b-1');
+      INSERT INTO documents (id, branch_id) VALUES ('doc-1','b-1'), ('doc-other','b-other');
       INSERT INTO scrap_trade_lines (id, scrap_trade_id, line_key, branch_id)
         VALUES ('row-1','tr-1','lk-1','b-1'), ('row-2','tr-2','lk-other','b-other');
       INSERT INTO media_links VALUES
@@ -356,7 +371,9 @@ fn grant_fixture() -> std::path::PathBuf {
         ('t-1','l-sid','m-supp-id','supplier','sup-1','identity_document','branch','b-1',NULL),
         ('t-1','l-cint','m-cust-int','customer','cust-other','identity_document','branch','b-1',NULL),
         ('t-1','l-scrap','m-scrap','scrap_trade_line','lk-1','purchase_photo','branch','b-1',NULL),
-        ('t-1','l-scrap-oth','m-scrap-oth','scrap_trade_line','lk-other','sale_photo','branch','b-other',NULL);
+        ('t-1','l-scrap-oth','m-scrap-oth','scrap_trade_line','lk-other','sale_photo','branch','b-other',NULL),
+        ('t-1','l-doc','m-doc','document','doc-1','file','branch','b-1',NULL),
+        ('t-1','l-doc-oth','m-doc-oth','document','doc-other','file','branch','b-other',NULL);
     ").unwrap();
     db
 }
@@ -379,6 +396,43 @@ fn media_read_grant_serves_the_owners_branch_only() {
     assert!(grant(&db, "t-1", "b-1", &key("e")).is_none(), "a sensitive product image never travels this route");
     // unknown
     assert!(grant(&db, "t-1", "b-1", &key("9")).is_none());
+}
+
+// ── MEDIA-DOCUMENTS — die hochgeladene PDF eines Belegs: eine Rolle, eine Filiale, eine Klasse ──
+#[test]
+fn media_read_grant_serves_document_files_of_this_branch_only() {
+    let db = grant_fixture();
+    assert!(grant(&db, "t-1", "b-1", &pkey("8")).is_some(), "the file of a document in my branch");
+    assert!(grant(&db, "t-1", "b-other", &pkey("8")).is_none(), "another branch may not read it");
+    assert!(grant(&db, "t-1", "b-1", &pkey("9")).is_none(), "a document of another branch");
+    assert!(grant(&db, "t-other", "b-1", &pkey("8")).is_none(), "keys stay tenant-scoped");
+    // Every role may read a business document — it is not an ID paper. What decides is the branch.
+    for role in ["owner", "admin", "manager", "sales", ""] {
+        assert_eq!(
+            media_read_grant(&db, "t-1", "b-1", role, &pkey("8")).is_some(),
+            true,
+            "a document is internal, not sensitive: {role}",
+        );
+    }
+    let conn = Connection::open(&db).unwrap();
+    // A document that is gone grants nothing — the file may still lie there, but nobody reaches it.
+    conn.execute("DELETE FROM documents WHERE id = 'doc-1'", []).unwrap();
+    assert!(grant(&db, "t-1", "b-1", &pkey("8")).is_none(), "a document that is gone grants nothing");
+    // Neither does a retired link.
+    let db2 = grant_fixture();
+    let c2 = Connection::open(&db2).unwrap();
+    c2.execute("UPDATE media_links SET deleted_at = '2026-01-01' WHERE link_id = 'l-doc'", []).unwrap();
+    assert!(grant(&db2, "t-1", "b-1", &pkey("8")).is_none(), "a retired link grants nothing");
+    // A foreign role under this owner is not served either.
+    let db3 = grant_fixture();
+    let c3 = Connection::open(&db3).unwrap();
+    c3.execute("UPDATE media_links SET media_role = 'stock_image' WHERE link_id = 'l-doc'", []).unwrap();
+    assert!(grant(&db3, "t-1", "b-1", &pkey("8")).is_none(), "only the role 'file' belongs to a document");
+    // And a document object may not claim the identity class.
+    let db4 = grant_fixture();
+    let c4 = Connection::open(&db4).unwrap();
+    c4.execute("UPDATE media_objects SET security_class = 'sensitive' WHERE media_id = 'm-doc'", []).unwrap();
+    assert!(grant(&db4, "t-1", "b-1", &pkey("8")).is_none(), "a document is never served under the ID rule");
 }
 
 // ── MEDIA-SCRAP — das Belegfoto einer POSITION: eigene Kennung, eigene Rollen, eigene Filiale ──

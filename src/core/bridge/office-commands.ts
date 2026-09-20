@@ -38,6 +38,9 @@ import {
   OcrEngineFailed, defaultOcrEngine, documentOcrInput, documentUploadInput, setDocumentOcrInHouse, uploadDocumentInHouse,
   type DocumentOcrInput, type DocumentUploadInput, type OcrEngine,
 } from '@/core/office/document-house';
+// MEDIA-DOCUMENTS — die Datei eines Belegs lebt im Medienkern; hier wird sie nachgewiesen und
+// als Medienobjekt angemeldet, BEVOR die Geschaeftsklammer aufgeht.
+import { resolveDocumentMedia, statDocumentOriginal, type DocumentOriginal } from '@/core/office/document-media';
 
 export const OP_TASKS_CREATE = 'tasks.create';
 export const OP_TASKS_UPDATE = 'tasks.update';
@@ -126,7 +129,9 @@ export function parseTaskUpdate(raw: unknown): TaskUpdateInput & { expectedRevis
 }
 
 export function parseDocumentUpload(raw: unknown): DocumentUploadInput {
-  const r = strict(raw, ['fileName', 'content', 'docClass', 'linkedEntityType', 'linkedEntityId'], OFFICE_COMPUTED.document);
+  // MEDIA-DOCUMENTS — `media` nennt eine PDF, die schon byte-genau im Speicher des Primary liegt
+  // (Rohweg `/api/documents/raw`). Bytes stehen NIE in diesem Rumpf.
+  const r = strict(raw, ['fileName', 'content', 'media', 'docClass', 'linkedEntityType', 'linkedEntityId'], OFFICE_COMPUTED.document);
   return rule(() => documentUploadInput(r));
 }
 
@@ -167,9 +172,43 @@ export function runTaskUpdate(deps: EngineDeps, identity: CommandIdentity, raw: 
   });
 }
 
-export function runDocumentUpload(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
-  const input = parseDocumentUpload(raw);
+/**
+ * MEDIA-DOCUMENTS §5 — die Datei nachweisen, BEVOR die Klammer aufgeht.
+ *
+ * Der Rumpf nennt einen Inhalt-Hash. Der Primary glaubt ihn nicht: er prüft die Datei an ihrem
+ * Platz (Größe, führende Bytes, Hash — in Stücken gelesen, nie ganz im Speicher) und schreibt erst
+ * dann die Medienzeilen. Ein Nein wird mitgenommen statt geworfen, damit die Wiederholung desselben
+ * Auftrags die eingefrorene Antwort bekommt.
+ */
+async function vorbereiteteDatei(
+  input: DocumentUploadInput, identity: CommandIdentity, stat?: DocumentOriginalStat,
+): Promise<{ input: DocumentUploadInput; fehler: unknown }> {
+  try {
+    const resolved = await resolveDocumentMedia(
+      input as unknown as Record<string, unknown>,
+      { tenantId: identity.tenantId, branchId: identity.branchId },
+      stat ?? statDocumentOriginal,
+    );
+    return { input: resolved as unknown as DocumentUploadInput, fehler: null };
+  } catch (e) {
+    return { input, fehler: e };
+  }
+}
+
+/** Nur für Tests: die Prüfung der abgelegten Datei ohne Tauri. */
+export type DocumentOriginalStat = (tenantScope: string, hash: string) => Promise<DocumentOriginal>;
+
+export async function runDocumentUpload(
+  deps: EngineDeps, identity: CommandIdentity, raw: unknown, stat?: DocumentOriginalStat,
+): Promise<CommandOutcome> {
+  // Erst die Form prüfen (unbekannte Felder, Name, Klasse, Verknüpfung) — ein unbrauchbarer Rumpf
+  // soll abgewiesen werden, bevor irgendetwas im Speicher gesucht wird.
+  parseDocumentUpload(raw);
+  // Aufgelöst wird der RUMPF, nicht das Geprüfte: der Inhalt-Hash steht dort, und das Haus prüft
+  // danach ohnehin noch einmal alles.
+  const { input, fehler } = await vorbereiteteDatei(raw as DocumentUploadInput, identity, stat);
   return runRemoteCommand(deps, identity, () => {
+    if (fehler) throw fehler;
     assertHouseBranch(identity);
     const r = urteil(() => uploadDocumentInHouse(input, ctxOf(identity)));
     // Klein: nie der Inhalt — der kommt über `documents.content.get`, wenn jemand ihn öffnet.

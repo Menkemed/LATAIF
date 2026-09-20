@@ -15,6 +15,8 @@ import { localReadContext, type BusinessReadContext } from '@/core/data/read-con
 // fuer PC2 (`documents.upload`/`documents.set_ocr`). Kein eigenes SQL mehr fuer diese zwei.
 import { runOnPrimary } from '@/core/data/primary-action';
 import { localOfficeCtx, officeAction } from '@/core/office/office-rules';
+// MEDIA-DOCUMENTS — die PDF eines Belegs lebt im Medienkern, nicht in seiner Zeile.
+import { applyDocumentFile, documentFileRefsFor, documentMediaScope, resolveDocumentMedia } from '@/core/office/document-media';
 import {
   assertDocumentsHere, setDocumentOcrInHouse, uploadDocumentInHouse,
   type DocumentOcrDone, type DocumentOcrInput, type DocumentUploadInput, type DocumentUploaded, type OcrEngine,
@@ -26,6 +28,12 @@ export interface DocumentRow extends Document {
   fileSize: number;
   /** R6F — die Fassung: wer die Texterkennung anstößt, nennt, welchen Stand er gesehen hat. */
   revision: number;
+  /**
+   * MEDIA-DOCUMENTS — die Datei als REFERENZ, wenn sie im Medienspeicher liegt (PDF): genug zum
+   * Öffnen, nie Bytes. Für Belege des alten Weges bleibt sie leer und `filePath` trägt weiter
+   * die Daten-URL.
+   */
+  file?: { mediaId: string; key: string; hash: string; extension: string; byteSize: number };
 }
 
 interface DocumentStore {
@@ -127,6 +135,11 @@ export const useDocumentStore = create<DocumentStore>((set, get) => ({
 
   deleteDocument: (id) => {
     const db = getDatabase();
+    // MEDIA-DOCUMENTS §8 — „Entfernen" legt die Verknüpfung STILL, es löscht keine Datei. Ob die
+    // Bytes je verschwinden, entscheidet später die Medien-Aufräumung — und nur, wenn niemand sonst
+    // sie noch braucht. Zuerst die Verknüpfung, dann die Zeile: eine Verknüpfung auf einen Beleg,
+    // den es nicht mehr gibt, wäre für immer erreichbar und nie mehr lesbar.
+    try { applyDocumentFile(id, [], { bumpOwner: false }); } catch { /* kein Medienkern, keine Verknüpfung */ }
     db.run('DELETE FROM documents WHERE id = ?', [id]);
     saveDatabase();
     trackDelete('documents', id);
@@ -181,9 +194,12 @@ function reloadDocuments(): void {
 }
 
 /** „Upload" am Primary. */
-export function uploadDocumentOnPrimary(input: Record<string, unknown>): Promise<DocumentUploaded> {
-  try { assertDocumentsHere(); } catch (e) { return Promise.reject(e); }
-  return runOnPrimary(() => uploadDocumentInHouse(input as unknown as DocumentUploadInput, localOfficeCtx()), reloadDocuments);
+export async function uploadDocumentOnPrimary(input: Record<string, unknown>): Promise<DocumentUploaded> {
+  assertDocumentsHere();
+  // MEDIA-DOCUMENTS — dieselbe Auflösung wie beim Fernbefehl, dieselbe Stelle: die abgelegte Datei
+  // wird nachgewiesen und als Medienobjekt angemeldet, BEVOR die Geschäftsklammer aufgeht.
+  const resolved = await resolveDocumentMedia(input, documentMediaScope());
+  return runOnPrimary(() => uploadDocumentInHouse(resolved as unknown as DocumentUploadInput, localOfficeCtx()), reloadDocuments);
 }
 
 /** „Extract Text (OCR)" am Primary — die Erkennung läuft auf dem gespeicherten Inhalt, im Haus. */
@@ -235,5 +251,11 @@ export function loadDocumentsFor(
   const rows = query('SELECT * FROM documents WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
   const documents = rows.map(rowToDocument);
   if (opts?.withContent === false) for (const d of documents) d.filePath = '';
+  // MEDIA-DOCUMENTS — die Dateien als Referenzen dazu, in EINER Abfrage. Die Mappe bleibt eine Liste.
+  const refs = documentFileRefsFor(documents.map((d) => d.id), ctx.branchId);
+  for (const d of documents) {
+    const r = refs.get(d.id)?.[0];
+    if (r) d.file = { mediaId: r.mediaId, key: r.main.storageKey, hash: r.main.hash, extension: r.main.extension, byteSize: r.main.byteSize };
+  }
   return { documents };
 }

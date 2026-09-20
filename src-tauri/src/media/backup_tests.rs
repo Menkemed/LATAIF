@@ -780,3 +780,60 @@ fn old_utc_named_and_new_local_named_snapshots_live_side_by_side() {
         crate::media::restore::validate_snapshot(&dir).unwrap();
     }
 }
+
+// ── MEDIA-DOCUMENTS — eine PDF gehört byte-genau in die Sicherung ────────────────────────────
+
+/// Write a content-addressed PDF under the media root and return (hash, byte_size).
+fn put_document(root: &std::path::Path, scope: &str, bytes: &[u8]) -> (String, u64) {
+    let hash = sha256_hex(bytes);
+    let rel = format!("{}/{}/{}.pdf", scope, &hash[0..2], hash);
+    let abs = root.join(&rel);
+    std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+    std::fs::write(&abs, bytes).unwrap();
+    (hash, bytes.len() as u64)
+}
+
+#[test]
+fn a_document_pdf_is_backed_up_byte_exactly_next_to_the_images() {
+    let l = layout();
+    let scope = "tenant-1";
+    // A PDF whose bytes include a NUL and a high byte: nothing here may be text-encoded.
+    let mut pdf = b"%PDF-1.7\n".to_vec();
+    pdf.extend_from_slice(&[0x00, 0xFF, 0x0D, 0x0A, 0x80]);
+    pdf.extend(std::iter::repeat(b'z').take(50_000));
+    let (ph, ps) = put_document(&l.root, scope, &pdf);
+    let (mh, ms) = put_media(&l.root, scope, b"MASTER-IMAGE-BYTES");
+
+    let doc = MediaSelection {
+        scope: scope.into(), hash: ph.clone(), extension: "pdf".into(), byte_size: ps,
+        media_id: "media-doc".into(), generation_no: 1, variant_type: None, role: "file".into(),
+    };
+    let selection = vec![doc, sel(scope, &mh, ms, None)];
+    let m = snapshot(&input(&l, &selection)).expect("snapshot ok");
+
+    assert_eq!(m.status, "complete");
+    assert_eq!(m.file_count, 2, "the document travels next to the image, not instead of it");
+    let f = m.files.iter().find(|f| f.rel_path.ends_with(".pdf")).expect("the pdf is in the manifest");
+    assert_eq!(f.hash, ph, "the manifest records the content address, unchanged");
+    assert_eq!(f.byte_size, ps);
+    let published = l.out.join(&f.rel_path);
+    assert_eq!(std::fs::read(&published).unwrap(), pdf, "byte for byte — no re-encoding, no truncation");
+    assert_eq!(sha256_hex(&std::fs::read(&published).unwrap()), ph, "and the hash is the same hash");
+}
+
+#[test]
+fn a_corrupted_document_pdf_fails_the_backup_closed() {
+    let l = layout();
+    let scope = "tenant-1";
+    let pdf = b"%PDF-1.7\nreal".to_vec();
+    let (ph, ps) = put_document(&l.root, scope, &pdf);
+    // The file changed after its hash was recorded: a backup that copied it anyway would be a lie.
+    let rel = format!("{}/{}/{}.pdf", scope, &ph[0..2], ph);
+    std::fs::write(l.root.join(&rel), b"%PDF-1.7\nsomething else entirely").unwrap();
+    let selection = vec![MediaSelection {
+        scope: scope.into(), hash: ph.clone(), extension: "pdf".into(), byte_size: ps,
+        media_id: "media-doc".into(), generation_no: 1, variant_type: None, role: "file".into(),
+    }];
+    assert!(snapshot(&input(&l, &selection)).is_err(), "a document that no longer matches its hash stops the backup");
+    assert!(!l.out.exists(), "and nothing is published");
+}
