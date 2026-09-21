@@ -148,7 +148,11 @@ const ch = (table_name: string, record_id: string, action: string, data: Record<
   ok(/applyChange: \(change\) => \{\s*const photo = prepared\.rejected\.get\(change\);\s*if \(photo\) \{\s*throw new SyncPoisonError\(SYNC_RECORD_IMAGE_REJECTED/.test(pullBody),
     'ABHOLEN ein abgelehntes Foto wird VOR `applySyncChange` zum Quarantänefall (onPoison derselben Transaktion)');
   const mod = code(src('src/core/sync/pulled-record-images.ts'));
-  ok(/normalizeRecordImages\(inc\.list, \{ keep \}\)/.test(mod) && !/documents/.test(mod.replace(/\/\/.*$/gm, '')), 'MODUL derselbe Normalisierer mit `keep`; kein Dokument in der Liste');
+  // MEDIA-LEGACY-SYNC — das Modul NENNT seither `documents`, aber nur, um die Datei eines vom
+  // Medienkern geführten Belegs vor dem Überschreiben zu schützen. Durch den Normalisierer geht ein
+  // Dokument weiterhin nie: in der Liste der normalisierten Bildspalten steht es nicht.
+  ok(/normalizeRecordImages\(inc\.list, \{ keep \}\)/.test(mod) && !('documents' in pull.PULLED_RECORD_IMAGE_COLUMNS),
+    'MODUL derselbe Normalisierer mit `keep`; kein Dokument in der Liste');
 }
 
 // ══ §7 — R7B-Review: ungültige Bildformen. Die Übernahme dahinter prüft nur die Transportform

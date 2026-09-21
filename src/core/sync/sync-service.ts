@@ -12,7 +12,7 @@ import { commitPulledBatch, applyChangesAtomic } from './durable-cursor';
 // the applySyncChange dispatcher) lives in the node-safe `apply-change.ts` so the behavioral gate
 // can drive the REAL functions against a real sql.js database. Same implementation, one home.
 import { applySyncChange, assertSyncIdentifier, SyncPoisonError } from './apply-change';
-import { prepareRecordImages, SYNC_RECORD_IMAGE_REJECTED } from './pulled-record-images';
+import { prepareRecordImages, syncMediaGovernance, SYNC_RECORD_IMAGE_REJECTED } from './pulled-record-images';
 import { planPush, pushBody } from './push-batch';
 // M6-B3A §9/§11 — the client's durable quarantine writer + status reader (node-safe, driven by the
 // b3a gate too).
@@ -367,8 +367,13 @@ async function pullChanges(): Promise<number> {
     assertSyncIdentifier('column', column);
     const r = db.exec(`SELECT ${column} FROM ${table} WHERE id = ?`, [id]);
     return r[0]?.values?.[0]?.[0];
-  });
+  }, syncMediaGovernance(db));
   changes = prepared.changes;
+  // MEDIA-LEGACY-SYNC — ein Rechner, dessen Altbilder hier nicht mehr durchkommen, ist veraltet.
+  // Das gehört gesagt, nicht verschwiegen; übernommen wird trotzdem alles andere seiner Änderungen.
+  if (prepared.ignoredLegacy > 0) {
+    console.warn(`[sync] ${prepared.ignoredLegacy} legacy photo value(s) from an out-of-date computer were not applied — those records are kept by the media store`);
+  }
 
   // Apply remote changes to local DB
   // Plan §Sync-Duplicate-Detection: track IDs of products freshly inserted
