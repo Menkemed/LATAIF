@@ -339,7 +339,10 @@ const gegenparteien = (db: Db): string => all(db,
     .map((p) => p.slice(resolvePath(repo, 'src').length + 1).replace(/\\/g, '/')).sort();
   const erlaubt = ['components/suppliers/UseCustomerAsSupplier.tsx', 'core/bridge/masterdata-commands.ts', 'core/db/database.ts', 'core/masterdata/masterdata-rules.ts', 'core/masterdata/masterdata-save.ts',
     'core/models/types.ts', 'pages/customers/CustomerDetail.tsx', 'pages/suppliers/SupplierDetail.tsx', 'stores/consignmentStore.ts',
-    'stores/customerStore.ts', 'stores/supplierStore.ts'];
+    'stores/customerStore.ts', 'stores/supplierStore.ts',
+    // MEDIA-IDENTITY — der verknuepfte Lieferant zeigt den Ausweis SEINES Kunden (keine Spiegelkopie).
+    // Gelesen wird nur, WESSEN Dokument gilt — kein Betrag, kein Saldo, keine Verrechnung.
+    'core/identity/identity-media.ts'];
   ok(leser.every((p) => erlaubt.includes(p)), `ACCOUNTING kein Ledger-/Rechnungs-/Einkaufscode liest die Verknüpfung (${S(leser)})`);
   ok(!/linked_customer_id/.test(src('src/core/ledger/posting.ts')) && !/linked_customer_id/.test(src('src/core/ledger/queries.ts')), 'ACCOUNTING Buchung und Saldo kennen nur Art + Kennung');
   const ui = src('src/components/suppliers/UseCustomerAsSupplier.tsx');
@@ -416,7 +419,9 @@ const gegenparteien = (db: Db): string => all(db,
   ok(link.kind === 'ok' && link.value?.supplierId === 'sL', `V2 der eindeutige bestehende Lieferant wird ausdrücklich verknüpft (${S(link)})`);
   const nachLink = row(db, 'SELECT * FROM suppliers WHERE id = ?', ['sL']);
   const geaendert = Object.keys(nachLink).filter((k) => S(nachLink[k]) !== S(vorLink[k])).sort();
-  ok(S(geaendert) === S(['linked_customer_id', 'updated_at']), `V2 …nur die Verknüpfung ändert sich (${S(geaendert)})`);
+  // MEDIA-IDENTITY — seither traegt der Lieferant eine Fassung, und JEDE Aenderung erhoeht sie um eins
+  // (Ausloeser `trg_suppliers_revision`). Geld- oder Stammdatenfelder bleiben weiterhin unberuehrt.
+  ok(S(geaendert) === S(['linked_customer_id', 'revision', 'updated_at']) && Number(nachLink.revision) === Number(vorLink.revision) + 1, `V2 …nur die Verknüpfung ändert sich (${S(geaendert)})`);
   ok(one(db, 'SELECT supplier_id FROM purchases WHERE id = ?', [pAlt]) === 'sL' && Math.abs(supplierBalance('sL', 'branch-main') - apAlt) < 0.001,
     'V2 historische Einkäufe/Verbindlichkeiten bleiben auf derselben Lieferanten-Kennung');
   ok(imHaus(() => cons.findOrCreateSupplierForConsignor('cL')) === 'sL', 'V2 danach nimmt die Kommissions-Auszahlung genau diese Rolle');
