@@ -6,7 +6,7 @@
 //   1 Los-Artikel (Einkaufslos 3): qty 1 / qty 2, Storno, Löschen, Ändern 2→1
 //   2 Artikel ohne Los (Menge 3): Verbrauch beim Verkauf, STOCK_UNAVAILABLE, FINAL ohne Abzug,
 //     Zahlung löschen + erneut FINAL, Storno unbezahlt, Einzelstück reserved → sold
-//   3 Altzeile (stock_taken NULL): genau EIN Abzug bei mehrfachem FINAL, dann stock_taken 1
+//   3 Übergang Altzeilen: A pending → genau ein Abzug; B deducted → keiner mehr; C qty>1 → nie qty
 //   4 Reparatur-Serviceprodukt svc-repair-*: stock_taken 0, Menge unberührt
 //   5 Auftrags-Einzelstück (Menge 1, ohne Los, 'reserved') — über createDirectInvoice simuliert
 //   6 Kommission: recordSale (Auto-Einkauf → Los → Rechnung)
@@ -92,6 +92,7 @@ const { cancelInvoiceInHouse } = await import('../../src/core/invoices/invoice-c
 const { convertTransferInHouse, undoTransferConversionInHouse } = await import('../../src/core/agents/transfer-house.ts');
 const { createProductionInHouse } = await import('../../src/core/production/production-house.ts');
 const { STOCK_UNAVAILABLE_MESSAGE } = await import('../../src/core/lots/lot-availability.ts');
+const { classifyLegacyInvoiceLines } = await import('../../src/core/lots/stock-contract.ts');
 
 let PASS = 0; const fails: string[] = [];
 const ok = (c: unknown, m: string): void => { if (c) PASS++; else { fails.push(m); console.log('  x ' + m); } };
@@ -327,26 +328,107 @@ function zustand(db: Db): string {
   ok(qty(db, 'p1') === 0 && st(db, 'p1') === 'sold', `2 …FINAL → sold, Menge 0 (${qty(db, 'p1')}/${st(db, 'p1')})`);
 }
 
-// ══ 3 — Altzeile (stock_taken NULL), Artikel ohne Los ═══════════════════════════
+// ══ 3 — Übergang: Rechnungszeilen von VOR dem Bestandsvertrag (ohne Los) ════════════
+// Alt-Vertrag: beim Anlegen nichts, beim Übergang auf FINAL genau 1 Stück (egal welche Menge).
+// Die Einordnung beim Start (`classifyLegacyInvoiceLines`) setzt den Merker `legacy_stock`.
+const legacyStock = (db: Db, invId: string): unknown => one(db, 'SELECT legacy_stock FROM invoice_lines WHERE invoice_id = ?', [invId]);
+/** Eine Altzeile simulieren: Nachweis weg, Bestand wie der alte Vertrag ihn hinterlassen hätte. */
+function altRechnung(db: Db, pid: string, lineQty: number, qtyNachAltvertrag: number, status?: string): string {
+  const inv = rechnung([LINE(pid, lineQty)]);
+  db.run('UPDATE invoice_lines SET stock_taken = NULL, legacy_stock = NULL WHERE invoice_id = ?', [inv]);
+  db.run('UPDATE products SET quantity = ?, stock_status = ? WHERE id = ?', [qtyNachAltvertrag, 'in_stock', pid]);
+  if (status) db.run('UPDATE invoices SET status = ? WHERE id = ?', [status, inv]);
+  reload();
+  return inv;
+}
 {
+  // A — alte UNBEZAHLTE Rechnung (qty 2): der alte Abzug steht noch aus.
   const db = neu();
-  product(db, 'pLeg', null, 2); reload();
-  const inv = rechnung([LINE('pLeg', 1)]);
-  // Zeile von vor dem Vertrag simulieren: kein Nachweis, Bestand noch unberührt.
-  db.run('UPDATE invoice_lines SET stock_taken = NULL WHERE invoice_id = ?', [inv]);
-  db.run("UPDATE products SET quantity = 2 WHERE id = 'pLeg'");
-  ok(taken(db, inv) === null && qty(db, 'pLeg') === 2, '3 SETUP Altzeile ohne Nachweis, Menge 2');
+  product(db, 'pA', null, 3); reload();
+  const inv = altRechnung(db, 'pA', 2, 3);
+  classifyLegacyInvoiceLines(db as never);
+  ok(legacyStock(db, inv) === 'pending' && taken(db, inv) === null && qty(db, 'pA') === 3,
+    `3A Einordnung: pending, kein Nachweis, Menge 3 (${S(legacyStock(db, inv))})`);
+  classifyLegacyInvoiceLines(db as never);
+  ok(legacyStock(db, inv) === 'pending', '3A …zweiter Start ordnet nicht neu ein (idempotent)');
   imHaus(() => useInvoiceStore.getState().updateInvoice(inv, { status: 'FINAL' }));
   await tick();
-  ok(qty(db, 'pLeg') === 1 && taken(db, inv) === 1, `3 erstes FINAL: genau ein Abzug 2→1, stock_taken 1 (${qty(db, 'pLeg')}/${S(taken(db, inv))})`);
+  ok(qty(db, 'pA') === 2 && legacyStock(db, inv) === 'deducted' && taken(db, inv) === null,
+    `3A erstes FINAL: alter Vertrag genau EINMAL (1 Stück trotz qty 2), Merker deducted (${qty(db, 'pA')}/${S(legacyStock(db, inv))})`);
   imHaus(() => useInvoiceStore.getState().updateInvoice(inv, { status: 'PARTIAL' }));
   imHaus(() => useInvoiceStore.getState().updateInvoice(inv, { status: 'FINAL' }));
   await tick();
   imHaus(() => { void eventBus.emit('invoice.paid', 'invoice', inv, {}); });
   await tick();
-  ok(qty(db, 'pLeg') === 1 && taken(db, inv) === 1, `3 zweites FINAL + direktes invoice.paid: kein weiterer Abzug (${qty(db, 'pLeg')})`);
-  imHaus(() => useInvoiceStore.getState().updateInvoice(inv, { status: 'CANCELLED' }));
-  ok(qty(db, 'pLeg') === 2, `3 späterer Storno gibt genau dieses eine Stück zurück (${qty(db, 'pLeg')})`);
+  ok(qty(db, 'pA') === 2, `3A erneutes FINAL + direktes invoice.paid: kein weiterer Abzug (${qty(db, 'pA')})`);
+
+  // A' — alte unbezahlte Rechnung wird storniert, BEVOR sie je FINAL war: es war nichts genommen.
+  product(db, 'pA2', null, 3); reload();
+  const inv2 = altRechnung(db, 'pA2', 2, 3);
+  classifyLegacyInvoiceLines(db as never);
+  const c = meldung(() => imHaus(() => cancelInvoiceInHouse({ invoiceId: inv2, refundMethod: 'cash' }, 'branch-main')));
+  reload();
+  ok(c === '' && qty(db, 'pA2') === 3, `3A' Storno ohne früheren Abzug: Menge bleibt 3 (früher +1 → 4) (${c} ${qty(db, 'pA2')})`);
+}
+{
+  // B — alte, bereits FINALe Rechnung: der alte Abzug lief schon (3→2).
+  const db = neu();
+  product(db, 'pB', null, 3); reload();
+  const inv = altRechnung(db, 'pB', 2, 2, 'FINAL');
+  classifyLegacyInvoiceLines(db as never);
+  ok(legacyStock(db, inv) === 'deducted', `3B Einordnung FINAL: deducted (${S(legacyStock(db, inv))})`);
+  imHaus(() => useInvoiceStore.getState().updateInvoice(inv, { status: 'PARTIAL' }));
+  imHaus(() => useInvoiceStore.getState().updateInvoice(inv, { status: 'FINAL' }));
+  await tick();
+  imHaus(() => { void eventBus.emit('invoice.paid', 'invoice', inv, {}); });
+  await tick();
+  ok(qty(db, 'pB') === 2, `3B erneutes Speichern/FINAL/invoice.paid: KEIN zweiter Abzug (${qty(db, 'pB')})`);
+
+  // B' — heute PARTIAL, aber das Protokoll zeigt einen früheren Übergang auf FINAL.
+  product(db, 'pB2', null, 3); reload();
+  const inv2 = altRechnung(db, 'pB2', 1, 2, 'PARTIAL');
+  db.run(`INSERT INTO audit_log (id, module, entity_type, entity_id, action_type, field_name, old_value, new_value, changed_at)
+    VALUES ('a-b2','Sales','invoices',?,'STATUS_CHANGE','status','PARTIAL','FINAL',?)`, [inv2, NOW]);
+  classifyLegacyInvoiceLines(db as never);
+  ok(legacyStock(db, inv2) === 'deducted', `3B' Protokoll zeigt früheres FINAL: deducted (${S(legacyStock(db, inv2))})`);
+  imHaus(() => useInvoiceStore.getState().updateInvoice(inv2, { status: 'FINAL' }));
+  await tick();
+  ok(qty(db, 'pB2') === 2, `3B' FINAL danach: kein zweiter Abzug (${qty(db, 'pB2')})`);
+  imHaus(() => useInvoiceStore.getState().updateInvoice(inv2, { status: 'PARTIAL' }));
+  const c = meldung(() => imHaus(() => useInvoiceStore.getState().updateInvoice(inv2, { status: 'CANCELLED' })));
+  ok(c === '' && qty(db, 'pB2') === 3 && legacyStock(db, inv2) === 'released',
+    `3B' Storno gibt genau den EINEN alten Abzug zurück (2→3), Merker released (${qty(db, 'pB2')}/${S(legacyStock(db, inv2))})`);
+}
+{
+  // C — alte Zeile qty 3, alter Abzug nur 1 (5→4). Nichts darf so tun, als wären 3 genommen.
+  const db = neu();
+  product(db, 'pC', null, 5); reload();
+  const inv = altRechnung(db, 'pC', 3, 4, 'FINAL');
+  classifyLegacyInvoiceLines(db as never);
+  ok(legacyStock(db, inv) === 'deducted' && qty(db, 'pC') === 4, '3C SETUP deducted, Menge 4');
+  // Retoure IN_STOCK der 3 Stück: Alt-Semantik (Status), KEIN Zurückbuchen von 3.
+  const lineId = s(db, 'SELECT id FROM invoice_lines WHERE invoice_id = ?', [inv]);
+  useSalesReturnStore.getState().loadReturns();
+  const r = meldung(() => imHaus(() => useSalesReturnStore.getState().createReturn({
+    invoiceId: inv, refundMethod: 'cash', productDisposition: 'IN_STOCK', notes: 'C',
+    lines: [{ invoiceLineId: lineId, productId: 'pC', quantity: 3, unitPrice: 1000, vatAmount: 300 }],
+  } as never)));
+  reload();
+  ok(r === '' && qty(db, 'pC') === 4, `3C Retoure qty 3: Menge bleibt 4 (kein +3 für nie Genommenes) (${r} ${qty(db, 'pC')})`);
+  // Ändern: fail-closed, nichts geändert.
+  product(db, 'pC2', null, 5); reload();
+  const inv2 = altRechnung(db, 'pC2', 3, 5);
+  classifyLegacyInvoiceLines(db as never);
+  const vor = zustand(db);
+  const m = meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(inv2, { lines: [LINE('pC2', 1)] as never, reason: 'x' })));
+  ok(/LEGACY_STOCK_LINES/.test(m) && zustand(db) === vor, `3C Ändern einer Altzeile: fail-closed, nichts geändert (${m.slice(0, 60)})`);
+  // Löschen einer FINALen Altzeile (qty 3): genau 1 zurück, nicht 3.
+  product(db, 'pC3', null, 5); reload();
+  const inv3 = altRechnung(db, 'pC3', 3, 4, 'FINAL');
+  classifyLegacyInvoiceLines(db as never);
+  const d = meldung(() => imHaus(() => useInvoiceStore.getState().deleteInvoice(inv3)));
+  reload();
+  ok(d === '' && qty(db, 'pC3') === 5, `3C Löschen: genau der eine alte Abzug zurück (4→5), nicht 3 (${d} ${qty(db, 'pC3')})`);
 }
 
 // ══ 4 — Reparatur-Serviceprodukt ═══════════════════════════════════════════════
@@ -368,6 +450,20 @@ function zustand(db: Db): string {
     `4 …FINAL: Menge ${qty(db, 'svc-repair-branch-main')}, Status ${st(db, 'svc-repair-branch-main')}`);
   imHaus(() => useInvoiceStore.getState().updateInvoice(inv2, { status: 'CANCELLED' }));
   ok(qty(db, 'svc-repair-branch-main') === q0, '4 …Storno gibt nichts zurück');
+  const lineId = s(db, 'SELECT id FROM invoice_lines WHERE invoice_id = ?', [inv]);
+  useSalesReturnStore.getState().loadReturns();
+  const r = meldung(() => imHaus(() => useSalesReturnStore.getState().createReturn({
+    invoiceId: inv, refundMethod: 'cash', productDisposition: 'IN_STOCK', notes: 'svc',
+    lines: [{ invoiceLineId: lineId, productId: 'svc-repair-branch-main', quantity: 1, unitPrice: 1000, vatAmount: 100 }],
+  } as never)));
+  reload();
+  ok(r === '' && qty(db, 'svc-repair-branch-main') === q0, `4 …Retoure: Menge unberührt (${r} ${qty(db, 'svc-repair-branch-main')})`);
+  ok(n(db, "SELECT COUNT(*) FROM stock_lots WHERE product_id = 'svc-repair-branch-main'") === 0,
+    '4 …über Rechnung, Zahlung, Storno und Retoure kein einziges Los entstanden');
+  // „Neue Artikel mindestens Menge 1“ ändert nichts: die Ausnahme hängt an der Kennung, nicht an der Menge.
+  db.run("UPDATE products SET quantity = 7 WHERE id = 'svc-repair-branch-main'");
+  const inv3 = rechnung([LINE('svc-repair-branch-main', 2)]);
+  ok(taken(db, inv3) === 0 && qty(db, 'svc-repair-branch-main') === 7, '4 …auch mit Menge 7: kein Lagerartikel, nichts genommen');
 }
 
 // ══ 5 — Auftrags-Einzelstück (Menge 1, ohne Los, 'reserved') ═══════════════════
@@ -521,6 +617,28 @@ const tr = (db: Db, id: string, col: string): unknown => one(db, `SELECT ${col} 
     `8 FINAL: kein Abzug, Menge 0 (nicht negativ), sold (${qty(db, 'pAL')})`);
   ok(le(db, 'INVOICE', conv.invoiceId) === invLe && le(db, 'AGENT_TRANSFER_SOLD', t) === 2 * soldLe,
     '10 FINAL nach Umwandlung: INVOICE und AGENT_TRANSFER_SOLD unverändert');
+  const cogs = (mod: string, id: string): number => n(db,
+    "SELECT COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0) FROM ledger_entries WHERE account = 'COGS' AND source_module = ? AND source_id = ? AND reverses_entry_id IS NULL", [mod, id]);
+  ok(cogs('AGENT_TRANSFER_SOLD', t) === 100, `8 Einstand Agentenverkauf ohne Los = purchase_price 100 (${cogs('AGENT_TRANSFER_SOLD', t)})`);
+  ok(cogs('INVOICE', conv.invoiceId) === 100, `8 …Einstand der umgewandelten Rechnung ebenfalls 100 (${cogs('INVOICE', conv.invoiceId)})`);
+}
+{
+  // 8b — ohne Los: Undo gibt nichts zurück (der Verkauf hält), Löschen danach genau 1.
+  const db = neu();
+  product(db, 'pAU', null, 2); reload();
+  const t = transfer('pAU');
+  imHaus(() => useAgentStore.getState().markTransferSold(t, 1000));
+  reload();
+  ok(qty(db, 'pAU') === 1, `8b Verkauf: Menge 2→1 (${qty(db, 'pAU')})`);
+  imHaus(() => convertTransferInHouse(t, { customerId: 'cust-2' }, 'branch-main'));
+  reload();
+  ok(qty(db, 'pAU') === 1, `8b Umwandlung: kein zweiter Abzug (${qty(db, 'pAU')})`);
+  imHaus(() => undoTransferConversionInHouse(t, 'branch-main'));
+  reload(); useAgentStore.getState().loadTransfers();
+  ok(qty(db, 'pAU') === 1 && tr(db, t, 'stock_taken') === 1, `8b Undo: Menge bleibt 1, der Verkauf hält das Stück (${qty(db, 'pAU')})`);
+  imHaus(() => useAgentStore.getState().deleteTransfer(t));
+  reload();
+  ok(qty(db, 'pAU') === 2 && st(db, 'pAU') === 'in_stock', `8b Löschen: genau 1 zurück 1→2, in_stock (${qty(db, 'pAU')}/${st(db, 'pAU')})`);
 }
 
 // ══ 9 — Produktion ═════════════════════════════════════════════════════════════

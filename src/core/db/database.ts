@@ -4,6 +4,7 @@
 // ═══════════════════════════════════════════════════════════
 
 import initSqlJs, { type Database } from 'sql.js';
+import { classifyLegacyInvoiceLines } from '@/core/lots/stock-contract';
 import wasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 import { v4 as uuid } from 'uuid';
 import { DEFAULT_CATEGORIES } from '../models/default-categories';
@@ -2341,6 +2342,8 @@ function runMigrations(database: Database): void {
     `ALTER TABLE agent_transfers ADD COLUMN stock_lot_id TEXT`,
     `ALTER TABLE agent_transfers ADD COLUMN stock_taken REAL`,
     `ALTER TABLE production_inputs ADD COLUMN lot_consumption TEXT`,
+    // Übergang: Merker für Rechnungszeilen ohne Los von VOR dem Vertrag (pending/deducted/released).
+    `ALTER TABLE invoice_lines ADD COLUMN legacy_stock TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {
@@ -2350,6 +2353,9 @@ function runMigrations(database: Database): void {
       }
     }
   }
+
+  // STOCK-LOT-INTEGRITY — Altzeilen ohne Los einmalig einordnen (nur Zeilen ohne Merker; idempotent).
+  try { classifyLegacyInvoiceLines(database); } catch (err) { console.warn('Legacy stock classification skipped:', err); }
 
   // MEDIA-03A — additive inactive core media schema. Runs AFTER the migration
   // loop so every entity table the media_links scope triggers reference already

@@ -571,6 +571,7 @@
         "description",
         "id",
         "invoice_id",
+        "legacy_stock",
         "line_total",
         "lot_id",
         "position",

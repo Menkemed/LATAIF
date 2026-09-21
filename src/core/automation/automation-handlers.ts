@@ -239,7 +239,7 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
 
   // Mark all invoice line products as "sold" — quantity-aware.
   // Bei Produkten mit quantity > 1 wird pro Line 1 Stück abgezogen; erst bei Bestand = 0 status='sold'.
-  const invoiceLines = query(`SELECT id, product_id, unit_price, stock_taken FROM invoice_lines WHERE invoice_id = ?`, [event.entityId]);
+  const invoiceLines = query(`SELECT id, product_id, unit_price, stock_taken, legacy_stock FROM invoice_lines WHERE invoice_id = ?`, [event.entityId]);
   for (const line of invoiceLines) {
     const pid = line.product_id;
     // STOCK-LOT-INTEGRITY — eine Zeile mit Nachweis hat ihren Bestand schon beim VERKAUF genommen
@@ -262,7 +262,9 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
       `SELECT COUNT(*) c FROM stock_lots WHERE product_id = ? AND status != 'CANCELLED'`,
       [pid]
     )[0]?.c) || 0) > 0;
-    if (hasLots) {
+    // Altzeile, deren alter Abzug schon lief (Merker aus der Übergangs-Einordnung oder aus einem
+    // früheren FINAL): KEIN zweiter Abzug — nur der Status.
+    if (hasLots || line.legacy_stock === 'deducted' || line.legacy_stock === 'released') {
       // Nur Status ableiten: 'sold' wenn kein Lot-Bestand mehr, sonst unveraendert.
       db.run(
         `UPDATE products SET
@@ -272,10 +274,11 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
       );
       trackProductRow(pid as string);   // LAN-Sync Phase 1b
     } else {
-      // Altzeile (vor dem Bestandsvertrag) eines Produkts ohne Lots: der alte Abzug EINMAL — und
-      // als Nachweis festgehalten, damit ein erneutes FINAL nicht ein zweites Mal abzieht und ein
-      // späterer Storno genau dieses eine Stück zurückgibt.
-      db.run(`UPDATE invoice_lines SET stock_taken = 1 WHERE id = ?`, [line.id]);
+      // Altzeile (vor dem Bestandsvertrag) eines Produkts ohne Lots, alter Abzug noch offen: der
+      // alte Vertrag EINMAL (1 Stück, unabhängig von der Zeilenmenge) — und als Merker festgehalten,
+      // damit ein erneutes FINAL nicht noch einmal abzieht. `stock_taken` bleibt NULL: die Zeile
+      // behält ihre Alt-Semantik (Retoure/Storno tun nicht so, als wären `quantity` Stück genommen).
+      db.run(`UPDATE invoice_lines SET legacy_stock = 'deducted' WHERE id = ?`, [line.id]);
       db.run(
         `UPDATE products SET
            quantity = CASE WHEN COALESCE(quantity,1) > 1 THEN COALESCE(quantity,1) - 1 ELSE 0 END,

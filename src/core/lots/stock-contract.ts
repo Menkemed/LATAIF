@@ -130,3 +130,46 @@ export function invoiceStockLines(invoiceId: string): Array<{ id: string; produc
       stockTaken: r.stock_taken === null || r.stock_taken === undefined ? null : Number(r.stock_taken),
     }));
 }
+
+// ── Übergang: Rechnungszeilen von VOR diesem Vertrag (stock_taken NULL, ohne Los) ─────────────
+//
+// Der alte Vertrag zog beim Übergang auf FINAL genau 1 Stück ab (egal welche Zeilenmenge).
+// `legacy_stock` hält fest, was davon bekannt ist:
+//   'pending'  — noch nie FINAL: der alte Abzug kommt beim ersten FINAL, einmal;
+//   'deducted' — der alte Abzug lief (jetzt FINAL oder im Protokoll ein Übergang auf FINAL);
+//   'released' — dieser eine Abzug wurde beim Storno/Löschen zurückgegeben.
+// Eingeordnet wird beim Start (`classifyLegacyInvoiceLines`), nur Zeilen ohne Merker.
+
+/** Einmal je Start, idempotent: ordnet Altzeilen ohne Los nach Beleg (Status + Protokoll) ein. */
+export function classifyLegacyInvoiceLines(db: { run: (sql: string, p?: unknown[]) => unknown }): void {
+  const lotLess = `il.stock_taken IS NULL AND il.legacy_stock IS NULL AND il.lot_id IS NULL
+      AND il.product_id IS NOT NULL AND il.product_id NOT LIKE 'svc-repair-%'
+      AND NOT EXISTS (SELECT 1 FROM stock_lots sl WHERE sl.product_id = il.product_id)
+      AND i.status != 'CANCELLED'`;
+  const wasFinal = `(i.status = 'FINAL' OR EXISTS (SELECT 1 FROM audit_log a
+      WHERE a.entity_type = 'invoices' AND a.entity_id = i.id AND a.field_name = 'status'
+        AND a.new_value IN ('FINAL', '"FINAL"')))`;
+  db.run(`UPDATE invoice_lines SET legacy_stock = 'deducted' WHERE id IN (
+    SELECT il.id FROM invoice_lines il JOIN invoices i ON i.id = il.invoice_id WHERE ${lotLess} AND ${wasFinal})`);
+  db.run(`UPDATE invoice_lines SET legacy_stock = 'pending' WHERE id IN (
+    SELECT il.id FROM invoice_lines il JOIN invoices i ON i.id = il.invoice_id WHERE ${lotLess} AND NOT ${wasFinal})`);
+}
+
+/** Ändern einer Rechnung mit Altzeilen ohne Los: fail-closed (die Altmenge ist nicht bekannt). */
+export function assertNoLegacyLotLessLines(invoiceId: string): void {
+  const legacy = query(
+    `SELECT 1 FROM invoice_lines WHERE invoice_id = ? AND stock_taken IS NULL AND lot_id IS NULL AND legacy_stock IS NOT NULL LIMIT 1`,
+    [invoiceId],
+  );
+  if (legacy.length > 0) {
+    throw new Error('LEGACY_STOCK_LINES: this invoice predates exact stock tracking — its lines cannot be edited. Cancel it and create a new one.');
+  }
+}
+
+/** Storno/Löschen einer Altzeile ohne Los: genau den EINEN alten Abzug zurück, falls er lief — einmal. */
+export function releaseLegacyDeduction(lineId: string, productId: string | null, now: string): void {
+  const row = query('SELECT legacy_stock FROM invoice_lines WHERE id = ?', [lineId])[0];
+  if (!row || row.legacy_stock !== 'deducted' || !productId) return;
+  giveBackStock(productId, null, 1, now);
+  getDatabase().run(`UPDATE invoice_lines SET legacy_stock = 'released' WHERE id = ?`, [lineId]);
+}

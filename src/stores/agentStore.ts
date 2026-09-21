@@ -451,7 +451,10 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // DR COGS / CR INVENTORY bucht. fifoCost = Cost des aeltesten aktiven Lots
       // (Agent-Sale ist 1 Stueck). Kein Lot → 0 → COGS-Guard ueberspringt.
       // STOCK-LOT-INTEGRITY — der Einstand des Loses, das dieser Verkauf verbraucht hat.
-      const soldCost = heldLot ? Number(heldLot.unit_cost) || 0 : 0;
+      // Ohne Los: der Einstand des Artikels (wie jede Rechnungszeile eines Artikels ohne Los).
+      const soldCost = heldLot
+        ? Number(heldLot.unit_cost) || 0
+        : Number(query('SELECT purchase_price FROM products WHERE id = ?', [transfer.productId])[0]?.purchase_price ?? 0) || 0;
       safePost(`postAgentTransferSold(${id})`, () => {
         if (hasLedgerEntries('AGENT_TRANSFER_SOLD', id)) return;
         postAgentTransferSold({ transferId: id, amount: settlement, soldAt: now, cost: soldCost }, customerId);
