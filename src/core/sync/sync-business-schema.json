@@ -321,6 +321,7 @@
         "phone",
         "preferences",
         "purchase_count",
+        "revision",
         "sales_stage",
         "sync_status",
         "total_profit",
@@ -1445,6 +1446,7 @@
         "name",
         "notes",
         "phone",
+        "revision",
         "updated_at"
       ],
       "required_fields": [],

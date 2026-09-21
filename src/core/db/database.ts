@@ -2931,6 +2931,13 @@ function backfillConsumedProducts(database: Database): void {
   }
 }
 
+// Der Schema-TEXT, nicht PRAGMA schema_version: einige Trigger werden bei jedem Start neu angelegt
+// (gleicher Text, neue Versionsnummer) — das ist keine Aenderung, die gespeichert werden muesste.
+function schemaSignatureOf(d: Database): string {
+  const r = d.exec("SELECT group_concat(type || ':' || name || ':' || COALESCE(sql, ''), char(10)) FROM (SELECT type, name, sql FROM sqlite_master ORDER BY type, name)");
+  return String(r[0]?.values?.[0]?.[0] ?? '');
+}
+
 export async function initDatabase(): Promise<Database> {
   if (db) return db;
 
@@ -2947,6 +2954,7 @@ export async function initDatabase(): Promise<Database> {
   if (saved.kind === 'bytes') {
     try {
       db = new SQL.Database(saved.data);
+      const schemaBefore = schemaSignatureOf(db);
       db.run(SCHEMA);
       runMigrations(db);
       migrateCategoriesToV2(db);
@@ -2954,6 +2962,13 @@ export async function initDatabase(): Promise<Database> {
       backfillStockLots(db);
       reconcileProductQuantities(db);
       backfillConsumedProducts(db);
+      // Die Migrationen aendern nur den Stand im Speicher. Der Primary-Server (Rust) liest aber die
+      // DATEI — bis zum ersten fachlichen Speichern fehlten ihm neue Spalten (z. B. line_key), und
+      // seine Medienfreigabe antwortete fuer ALLE Bilder 404. Hat sich das Schema geaendert, den
+      // migrierten Stand einmal zurueckschreiben (dieselbe Datei, die gerade geladen wurde).
+      if (schemaSignatureOf(db) !== schemaBefore) {
+        void saveDatabase().catch((err) => console.warn('[DB] saving the migrated schema failed:', err));
+      }
     } catch (err) {
       // Die Bytes sind da, lassen sich aber nicht oeffnen oder wandern. Frueher wurde hier eine
       // frische Datenbank angelegt und weitergearbeitet — das ist genau der Weg, auf dem der
