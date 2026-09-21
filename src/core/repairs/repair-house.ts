@@ -99,14 +99,6 @@ export async function createRepairOnPrimary(form: Partial<Repair>): Promise<Repa
   });
 }
 
-/** Die gespeicherten Fotos einer Reparatur — sie bleiben beim Ändern, wie sie sind. */
-function gespeicherteFotos(id: string): string[] {
-  try {
-    const list = JSON.parse(String(query('SELECT images FROM repairs WHERE id = ?', [id])[0]?.images ?? '[]'));
-    return Array.isArray(list) ? list.filter((x): x is string => typeof x === 'string') : [];
-  } catch { return []; }
-}
-
 /**
  * Die Fassung, die die Maske beim Eintritt ins Bearbeiten gelesen hat — derselbe Vertrag wie der
  * Fernbefehl (`assertRevision` in `service-commands`: gleicher Code, gleicher Wortlaut), INNERHALB

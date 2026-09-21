@@ -13,7 +13,6 @@ import { findSimilarContacts } from '@/core/contacts/duplicate-check';
 import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
-import { createPayload, CUSTOMER_EDITABLE } from '@/core/data/write-payloads';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Customer, VIPLevel } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
@@ -27,7 +26,7 @@ const BRANDS = ['Rolex', 'Patek Philippe', 'Audemars Piguet', 'Richard Mille', '
 export function CustomerList() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { customers, loadCustomers, createCustomer, searchQuery, setSearchQuery, getCustomerStats } = useCustomerStore();
+  const { customers, loadCustomers, searchQuery, setSearchQuery, getCustomerStats } = useCustomerStore();
   const [showNew, setShowNew] = useState(false);
   const [saveError, setSaveError] = useState('');
   const anlegen = useSharedWrite<{ customerId: string }>('customers.create');

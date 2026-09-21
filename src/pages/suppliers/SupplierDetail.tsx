@@ -12,7 +12,6 @@ import { Bhd } from '@/components/ui/Bhd';
 import { KPICard } from '@/components/ui/KPICard';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
-import { ImageUpload } from '@/components/ui/ImageUpload';
 import { SoftWarn } from '@/components/ui/SoftWarn';
 import { PhoneInput } from '@/components/ui/PhoneInput';
 import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';

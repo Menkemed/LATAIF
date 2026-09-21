@@ -13,7 +13,7 @@ import { useSupplierStore } from '@/stores/supplierStore';
 import { useProductStore } from '@/stores/productStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
-import type { PurchaseStatus } from '@/core/models/types';
+import type { PurchaseIdentityReference, PurchaseStatus } from '@/core/models/types';
 import { getProductSpecs } from '@/core/utils/product-format';
 import { printPurchasePdf } from '@/core/pdf/purchase-pdf';
 // CENTRAL-UI-PARITY R6D — „Add Payment" (bar/Bank/Benefit) und der Credit-Modus sind je EINE
@@ -72,6 +72,26 @@ export function PurchaseDetail() {
 
   const purchase = useMemo(() => purchases.find(p => p.id === id), [purchases, id]);
   const supplier = useMemo(() => purchase ? suppliers.find(s => s.id === purchase.supplierId) : undefined, [purchase, suppliers]);
+
+  // MEDIA-IDENTITY §7 — der Ausweis, wie er BEIM KAUF galt: die eingefrorene Referenz des Belegs,
+  // über den geprüften Leser (Primary: Hash-Prüfung; PC2: `/api/media` mit Ausweis und eigener
+  // Regel für historische Fassungen) als Objekt-URL, die mit der Seite wieder verschwindet. Die
+  // Referenz reist als Text in die Abhängigkeit: dieselbe Fassung lädt nicht bei jedem Neuzeichnen neu.
+  const idReferenz = JSON.stringify(purchase?.supplierSnapshot?.identity ?? null);
+  const [idAnsicht, setIdAnsicht] = useState<{ key: string; view: IdentityPhotoView | null; fehler: string } | null>(null);
+  useEffect(() => {
+    const ref = JSON.parse(idReferenz) as PurchaseIdentityReference | null;
+    if (!ref) return;
+    let lebt = true;
+    let sicht: IdentityPhotoView | null = null;
+    void loadPurchaseIdentityPhoto(ref)
+      .then((v) => { if (!lebt) { revokeIdentityPhoto(v); return; } sicht = v; setIdAnsicht({ key: idReferenz, view: v, fehler: '' }); })
+      .catch((e) => { if (lebt) setIdAnsicht({ key: idReferenz, view: null, fehler: e instanceof Error ? e.message : String(e) }); });
+    return () => { lebt = false; revokeIdentityPhoto(sicht); };
+  }, [idReferenz]);
+  // Nur die Ansicht DIESER Referenz zählt — eine ältere eines anderen Belegs nie.
+  const idAktuell = idAnsicht && idAnsicht.key === idReferenz ? idAnsicht : null;
+  const idPhotoUrl = idAktuell?.view?.url ?? null;
   // Das offene Guthaben DIESES Lieferanten in DIESER Filiale — dieselbe Zahl, gegen die das Haus beim
   // Einloesen prueft (vorher: getLedger ueber alle Filialen, auf PC2 immer 0). `v` holt nach einer
   // Buchung auf PC2 frisch nach.
@@ -248,7 +268,11 @@ export function PurchaseDetail() {
           const sCpr = snap?.cpr ?? supplier?.cpr;
           // MEDIA-IDENTITY §7 — die Fassung, die BEIM KAUF galt (asynchron über den geprüften
           // Leser geholt). Nur wenn der Beleg keine Referenz trägt, gilt der Altbestand.
-          const sCprImage = idPhotoUrl ?? snap?.cprImage ?? supplier?.cprImage;
+          // Trägt der Beleg eine Referenz, gilt NUR sie — nie der heutige Ausweis des Lieferanten,
+          // der inzwischen ein anderer sein kann. Ohne Referenz: der Altbestand wie bisher.
+          const hatReferenz = !!snap?.identity;
+          const sCprImage = hatReferenz ? idPhotoUrl : (snap?.cprImage ?? supplier?.cprImage);
+          const idFehler = hatReferenz ? (idAktuell?.fehler ?? '') : '';
           const drifted = !!snap && !!supplier && (
             snap.name !== supplier.name ||
             snap.phone !== supplier.phone ||
@@ -294,8 +318,14 @@ export function PurchaseDetail() {
                   <img
                     src={sCprImage}
                     alt="CPR / ID Card"
+                    data-purchase-identity-photo
                     style={{ maxWidth: 140, maxHeight: 90, border: '1px solid #E5E9EE', borderRadius: 4, objectFit: 'contain', background: '#F2F7FA' }}
                   />
+                )}
+                {idFehler && (
+                  <div data-purchase-identity-error style={{ maxWidth: 160, fontSize: 11, color: '#AA6E6E' }}>
+                    The ID document of this purchase could not be loaded ({idFehler}).
+                  </div>
                 )}
               </div>
             </Card>

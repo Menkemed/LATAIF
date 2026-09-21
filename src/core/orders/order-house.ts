@@ -17,7 +17,7 @@ import { useOrderStore } from '@/stores/orderStore';
 import { useProductStore } from '@/stores/productStore';
 import { useGoldStore } from '@/stores/goldStore';
 import { useCustomerStore } from '@/stores/customerStore';
-import type { Order } from '@/core/models/types';
+import type { Order, Product } from '@/core/models/types';
 import { normalizeSpecImages } from '@/core/media/record-image';
 import { OrderActionRejected, planOrderCreate, type OrderCreateInput, type OrderCreatePort } from './order-create';
 import { planOrderEdit, orderEditInput, type OrderEditInput } from './order-edit';

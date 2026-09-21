@@ -283,6 +283,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
               onPatch={updater => patchLine(idx, updater)}
               onRemove={() => removeLine(idx)}
               disabled={disabled}
+              fotoUrls={fotoUrls}
             />
           ))}
         </div>
@@ -614,7 +615,7 @@ function SplitPaymentEditor({
 }
 
 function LineEditor({
-  line, index, canRemove, onPatch, onRemove, disabled,
+  line, index, canRemove, onPatch, onRemove, disabled, fotoUrls,
 }: {
   line: ScrapTradeLineInput;
   index: number;
@@ -622,6 +623,12 @@ function LineEditor({
   onPatch: (updater: (line: ScrapTradeLineInput) => ScrapTradeLineInput) => void;
   onRemove: () => void;
   disabled: boolean;
+  /**
+   * MEDIA-SCRAP — die geprüften Objekt-URLs des GANZEN Geschäfts, nach Medienkennung. Welche davon
+   * diese Position zeigt, bestimmen allein IHRE Kennungen (`imagesPurchase`/`imagesSale`), die über
+   * ihren bleibenden `lineKey` geladen wurden — nie die Stelle in der Liste.
+   */
+  fotoUrls: ScrapPhotoUrls;
 }) {
   const [karatCustom, setKaratCustom] = useState(!!line.karat && !KARAT_OPTIONS.includes(line.karat));
   const purchase = Number(line.purchasePrice) || 0;

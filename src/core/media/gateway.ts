@@ -206,7 +206,8 @@ export class OriginalMediaTransport {
   constructor(invoker?: RawInvoker) {
     this.invoker = invoker ?? (async <T>(cmd: string, args?: unknown, options?: { headers?: Record<string, string> }): Promise<T> => {
       const mod = await import('@tauri-apps/api/core');
-      return mod.invoke<T>(cmd, args as never, options);
+      // Tauri verlangt `headers`, sobald Optionen übergeben werden — ohne Kopfzeilen gar keine.
+      return mod.invoke<T>(cmd, args as never, options?.headers ? { headers: options.headers } : undefined);
     });
   }
 

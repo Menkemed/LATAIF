@@ -32,7 +32,9 @@ import type { IdentityDocumentRef } from '@/core/models/types';
 import type { StockMediaOrchestrator } from '@/core/media/orchestrator';
 
 export const IDENTITY_MEDIA_ROLE = 'identity_document';
-export const IDENTITY_MEDIA_CLASS: MediaSecurityClass = 'sensitive';
+// Genau `sensitive` — nicht irgendeine Klasse: eine Aufnahme kennt `highly_sensitive` nicht (S1:
+// ohne Verschlüsselung darf es sie gar nicht geben), und der Typ soll das auch sagen.
+export const IDENTITY_MEDIA_CLASS = 'sensitive' as const satisfies MediaSecurityClass;
 
 /** Wer ein Ausweisdokument haben kann. Beides filialgebunden. */
 export type IdentityOwnerType = 'customer' | 'supplier';

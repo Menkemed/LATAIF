@@ -136,7 +136,8 @@ export async function sendDocumentFile(
   wege: {
     remote: boolean;
     tenantScope: string;
-    client?: { serverUrl: string; token: string } | null;
+    /** Die Verbindung zum Primary, wie `clientConfig()` sie liefert — ohne Token kein Versand. */
+    client?: { serverUrl: string; token: string | null } | null;
     fetchFn?: typeof fetch;
     transport?: OriginalMediaTransport;
   },

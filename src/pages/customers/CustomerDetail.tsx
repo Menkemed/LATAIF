@@ -18,7 +18,6 @@ import { MessagePreviewModal } from '@/components/ai/MessagePreviewModal';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSharedWrites } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
-import { updatePayload, CUSTOMER_EDITABLE } from '@/core/data/write-payloads';
 import { useGoldStore } from '@/stores/goldStore';
 import { SettleGoldModal, type SettleGoldMode } from '@/components/repairs/SettleGoldModal';
 import type { CustomerGoldCredit } from '@/core/models/types';
@@ -212,7 +211,8 @@ export function CustomerDetail() {
   }
 
   async function handleSave() {
-    if (!id) return;
+    // Die Verengung von oben gilt in einer inneren Funktion nicht — der Kunde wird hier erneut geprüft.
+    if (!id || !customer) return;
     const errs: Record<string, string> = {};
     if (!form.firstName?.trim()) errs.firstName = 'Required';
     if (!form.lastName?.trim()) errs.lastName = 'Required';
