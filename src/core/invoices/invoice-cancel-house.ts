@@ -57,6 +57,21 @@ export function cancelInvoiceInHouse(input: InvoiceCancelInput, branchId: string
   if (!inv) throw new InvoiceActionRejected('INVOICE_NOT_FOUND', 'no such invoice in this branch');
   const blocker = invoiceCancelBlocker(String(inv.status));
   if (blocker) throw new InvoiceActionRejected(blocker.code, blocker.message);
+  // Ohne Geld läuft der Storno NICHT über eine Retoure: er gibt je Zeile ein Stück frei und setzt
+  // CANCELLED. Eine schon wirksame Teil-Retoure/Gutschrift hätte dann ihre Ware ein zweites Mal im
+  // Bestand und die Rechnung (Forderung + Erlös des Rests) bliebe gebucht, weil updateInvoice bei
+  // aktiver Gutschrift nicht mehr reversiert. Deshalb hier ablehnen — der Rest geht als Retoure.
+  if (!(Number(inv.paid_amount ?? 0) > 0)) {
+    const aktiv = query(
+      `SELECT (SELECT COUNT(*) FROM sales_returns WHERE invoice_id = ? AND status != 'REJECTED')
+            + (SELECT COUNT(*) FROM credit_notes WHERE invoice_id = ? AND status != 'CANCELLED') AS c`,
+      [input.invoiceId, input.invoiceId],
+    )[0];
+    if (Number(aktiv?.c ?? 0) > 0) {
+      throw new InvoiceActionRejected('INVOICE_HAS_RETURNS',
+        'this invoice already has a return or credit note — return the remaining items instead of cancelling');
+    }
+  }
   beforeWrite?.();
 
   const buchung = watchLedgerPosts('invoice cancel');

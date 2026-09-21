@@ -1053,6 +1053,15 @@ export function backfillConsignmentPayouts(branchId: string): BackfillResult {
     const synthId = `cp-${consignmentId}`;
     // Skip, sobald JE ledgerisiert (auch reversiert).
     if (hasAnyLedgerEntries('CONSIGNMENT_PAYOUT', synthId)) { res.skipped++; continue; }
+    // Live-Auszahlungen buchen unter einer frischen uuid (nicht `cp-…`), tragen aber die
+    // consignmentId in metadata_json — wie reverseConsignmentPayouts sie findet. Ist das
+    // Consignment so schon (auch reversiert) im Ledger, waere ein Backfill eine Doppelbuchung.
+    const livePayout = query(
+      `SELECT 1 FROM ledger_entries
+        WHERE source_module = 'CONSIGNMENT_PAYOUT' AND metadata_json LIKE ? LIMIT 1`,
+      [`%"consignmentId":"${consignmentId}"%`]
+    );
+    if (livePayout.length > 0) { res.skipped++; continue; }
     const amount = Number(r.payout_paid_amount || 0);
     if (amount <= 0) { res.skipped++; continue; }
     const method = String(r.payout_method || 'bank').toLowerCase() === 'cash' ? 'cash' : 'bank';

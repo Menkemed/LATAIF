@@ -6,7 +6,7 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
-import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, assertLotsConsumable, assertProductsSellable } from '@/core/lots/lot-queries';
+import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, assertLotsConsumable, assertLotTrackedLinesResolved, assertProductsSellable } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
@@ -304,6 +304,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       assertProductsSellable(resolvedLines.map(l => l.productId));
     }
     assertLotsConsumable(resolvedLines.map(l => ({ lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) })));
+    assertLotTrackedLinesResolved(resolvedLines.map(l => ({ productId: l.productId, lotId: l._resolvedLotId })));
 
     let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
     for (const l of resolvedLines) {
@@ -626,6 +627,21 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
     const deltaAmount = deltaPayment && deltaPayment.amount > 0.005 ? deltaPayment.amount : 0;
 
+    // ── Kundenwechsel nur ohne Geldfluss. Der Edit bucht nur die INVOICE-Quelle um; die
+    // PAYMENT-Beine (CR AR des alten Kunden) und die Delta-Zahlung (recordPayment liest den
+    // Kunden aus dem noch alten Store-Stand) blieben beim alten Kunden → Forderung auf zwei
+    // Kunden verteilt. Deshalb: bei vorhandenen Zahlungen oder Delta-Zahlung hart ablehnen.
+    if (customerId !== undefined && customerId !== inv0.customerId) {
+      const paymentCount = Number(query(
+        `SELECT COUNT(*) AS c FROM payments WHERE invoice_id = ?`, [id]
+      )[0]?.c || 0);
+      if (paymentCount > 0 || deltaAmount > 0) {
+        throw new Error(
+          'Cannot change the customer of an invoice that has payments. Delete the payments first, or save the customer change without a new payment.'
+        );
+      }
+    }
+
     // ── Slice 3b: paid_amount IST per Invariante SUM(payments). Wird das Brutto unter den
     // bereits gezahlten Betrag reduziert (oder per Delta ueberzahlt), wird der Ueberschuss
     // NICHT mehr blockiert, sondern in Step 8b als Store-Guthaben umgebucht (DR AR /
@@ -731,6 +747,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // sein (der InvoiceDetail-Picker filtert stock_status nicht). Wirft in der Tx → Rollback.
       assertProductsSellable(resolvedLines.map(l => l.productId));
       assertLotsConsumable(resolvedLines.map(l => ({ lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) })));
+      assertLotTrackedLinesResolved(resolvedLines.map(l => ({ productId: l.productId, lotId: l._resolvedLotId })));
 
       let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
       const stmt = db.prepare(
@@ -1221,6 +1238,21 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
   deleteInvoice: (id) => {
     const db = getDatabase();
+    // Bestandsschutz VOR jedem Write: eine stornierte Rechnung hat ihre Lose schon zurueckgegeben,
+    // eine Retoure/Gutschrift hat Ware schon zurueckgebucht — der Lot-Restore unten gaebe dasselbe
+    // Stueck ein zweites Mal frei (Phantom-Bestand, erneut verkaufbar).
+    const delRow = query(`SELECT status FROM invoices WHERE id = ?`, [id])[0];
+    if (delRow && String(delRow.status) === 'CANCELLED') {
+      throw new Error('Cannot delete a cancelled invoice — its stock was already returned when it was cancelled.');
+    }
+    const delLinked = Number(query(
+      `SELECT (SELECT COUNT(*) FROM sales_returns WHERE invoice_id = ? AND status != 'REJECTED')
+            + (SELECT COUNT(*) FROM credit_notes WHERE invoice_id = ? AND status != 'CANCELLED') AS c`,
+      [id, id]
+    )[0]?.c || 0);
+    if (delLinked > 0) {
+      throw new Error('Cannot delete an invoice with a return or credit note. Cancel the return / credit note first.');
+    }
     // Vor dem Cancel die Auto-Expenses fuer Reverse-Posting einsammeln.
     const linkedExpenses = query(
       `SELECT id, expense_number, branch_id, category, amount, paid_amount, payment_method,
@@ -1452,6 +1484,18 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       );
       if (editCreditRows.length > 0) {
         throw new Error('This invoice has store credit from a previous edit overpayment. Re-edit the invoice to adjust its total, or cancel it — do not edit individual payments.');
+      }
+      // Dasselbe fuer das beim Zahlen ERZEUGTE Ueberzahlungs-Guthaben (source_type='overpayment',
+      // source_id = irgendeine Zahlung dieser Rechnung): der Repost unten splittet nicht neu —
+      // AR bliebe offen und das Guthaben einloesbar. Korrektur: Zahlung loeschen + neu erfassen.
+      const overpayCreditRows = query(
+        `SELECT 1 FROM customer_credits
+          WHERE source_type = 'overpayment'
+            AND source_id IN (SELECT id FROM payments WHERE invoice_id = ?) LIMIT 1`,
+        [invoiceId]
+      );
+      if (overpayCreditRows.length > 0) {
+        throw new Error('This invoice has store credit from an overpayment. Delete the overpaying payment and record it again instead of editing payment amounts.');
       }
     }
 

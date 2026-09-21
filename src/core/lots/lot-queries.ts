@@ -154,6 +154,19 @@ export function assertLotsConsumable(picks: { lotId: string | null; qty: number 
   if (bad) throw new Error(STOCK_UNAVAILABLE_MESSAGE);
 }
 
+// Gegenstueck zu assertLotsConsumable fuer Lines OHNE aufgeloestes Lot: wird das Produkt ueber
+// Lose gefuehrt (irgendein stock_lots-Eintrag), muss eines offen sein — sonst entstuenden
+// Revenue/COGS ohne Bestandsabzug. Dieselbe Regel wie der Fernbefehl (`invoice-command`).
+// Produkte ganz ohne Lose (Service, Kommission vor dem Auto-Einkauf) bleiben unberuehrt.
+export function assertLotTrackedLinesResolved(picks: { productId?: string | null; lotId: string | null }[]): void {
+  const db = getDatabase();
+  for (const p of picks) {
+    if (p.lotId || !p.productId) continue;
+    const tracked = db.exec('SELECT 1 FROM stock_lots WHERE product_id = ? LIMIT 1', [p.productId]);
+    if ((tracked[0]?.values?.length ?? 0) > 0) throw new Error(STOCK_UNAVAILABLE_MESSAGE);
+  }
+}
+
 // B5 — With-Agent-Guard fuer den Invoice-Pfad. Liest stock_status FRISCH aus der DB (nicht
 // aus dem Store-Cache) — analog assertLotsConsumable / assertOrderLinesBillable — und wirft,
 // wenn eines der zu fakturierenden Produkte beim Agenten ist (with_agent). VOR den Domain-

@@ -594,6 +594,12 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
       throw new Error("Store credit can only be granted when the return is created with refund method 'Store Credit'.");
     }
 
+    // Teil-Erstattungen: die Gutschrift wird mit EINEM Konto (refund_method) neu gebucht — ein
+    // Methodenwechsel zoege frühere Teilbeträge still auf das neue Konto (Kasse/Bank verfälscht).
+    if ((r.refundPaidAmount || 0) > 0.005 && r.refundMethod && method !== r.refundMethod) {
+      throw new Error(`This return was already partly refunded by ${r.refundMethod}. Refund the rest by ${r.refundMethod} as well.`);
+    }
+
     const remaining = Math.max(0, r.totalAmount - (r.refundPaidAmount || 0));
     if (remaining <= 0.005) { console.warn('[Return] nothing left to refund'); return; }
 

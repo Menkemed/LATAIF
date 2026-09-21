@@ -352,10 +352,11 @@ const zaehler = (db: Db) => S({
     ok(registry.knownCommands().includes(op), `SCOPE ${op} ist registriert`);
     ok(perms.OPERATION_PERMISSIONS[op] === null, `SCOPE ${op} ohne Rollen-Tor (wie die Knöpfe der Maske)`);
   }
-  ok(S([...cmds.PURCHASE_LIFECYCLE_OPS].sort()) === S([OP_CANCEL, OP_INBOX, OP_RET].sort()), 'SCOPE die Befehlsdatei kennt genau diese drei');
+  // MEDIA-INBOX (b8aba6f) — der Posteingang des Telefons kam als vierter Befehl derselben Datei dazu.
+  ok(S([...cmds.PURCHASE_LIFECYCLE_OPS].sort()) === S([OP_CANCEL, OP_INBOX, OP_RET, 'purchase_inbox.create'].sort()), 'SCOPE die Befehlsdatei kennt genau diese vier');
   const reg = codeOf(src('src/core/bridge/purchase-lifecycle-commands.ts'));
-  ok((reg.match(/registerCommand\(/g) || []).length === 3 && !/for \(|forEach/.test(reg.slice(reg.indexOf('registerCommand('))),
-    'SCOPE drei ausdrückliche Anmeldungen, keine Schleife');
+  ok((reg.match(/registerCommand\(/g) || []).length === 4 && !/for \(|forEach/.test(reg.slice(reg.indexOf('registerCommand('))),
+    'SCOPE vier ausdrückliche Anmeldungen, keine Schleife');
 }
 marker('CENTRAL_UI_R6F_PURCHASE_SCOPE_PROVED');
 

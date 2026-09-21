@@ -707,6 +707,28 @@ export function cancelPurchaseInHouse(purchaseId: string, branchId: string, opts
     }
   }
 
+  // Sperre 3 — Ware aus diesem Einkauf steht schon auf einer wirksamen Rechnung. Der Storno
+  // setzte alle Lose CANCELLED und reversierte den vollen Lagerzugang, obwohl ein Teil schon
+  // als COGS abgeflossen ist; ein späterer Kunden-Rückläufer fände kein Los mehr (restoreLot
+  // → false). Erst die Rechnung klären (Retoure/Storno), dann den Einkauf.
+  //    Eine schon zurückgenommene Zeile (wirksame Kunden-Retoure) zählt nicht — z. B. „Return to
+  //    Owner" einer Kommission storniert danach genau diesen Auto-Einkauf.
+  const verkauft = query(
+    `SELECT 1 FROM invoice_lines il JOIN invoices i ON i.id = il.invoice_id
+      WHERE i.status != 'CANCELLED'
+        AND il.lot_id IN (SELECT id FROM stock_lots WHERE purchase_id = ?)
+        AND COALESCE(il.quantity, 1) - COALESCE((
+              SELECT SUM(srl.quantity) FROM sales_return_lines srl
+                JOIN sales_returns r ON r.id = srl.return_id
+               WHERE srl.invoice_line_id = il.id AND r.status != 'REJECTED'), 0) > 0.0005
+      LIMIT 1`,
+    [purchaseId],
+  )[0];
+  if (verkauft) {
+    throw nein('PURCHASE_STOCK_SOLD',
+      'Cannot cancel this purchase: items from it are already on an invoice. Return or cancel that sale first.');
+  }
+
   const db = getDatabase();
   const now = opts.now ?? new Date().toISOString();
 

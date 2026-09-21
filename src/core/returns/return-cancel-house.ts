@@ -59,6 +59,7 @@ export const RETURN_ALREADY_CANCELLED = 'RETURN_ALREADY_CANCELLED';
 export const RETURN_REFUND_PAID_OUT = 'RETURN_REFUND_PAID_OUT';
 export const RETURN_CREDIT_USED = 'RETURN_CREDIT_USED';
 export const RECORD_CHANGED = 'RECORD_CHANGED';
+export const RETURN_STOCK_RESOLD = 'RETURN_STOCK_RESOLD';
 
 /** Wer storniert: fern der geprüfte Absender, am Primary die Sitzung. */
 export interface ReturnCancelActor {
@@ -270,6 +271,22 @@ export function cancelReturnInHouse(
       quantity: Number(l.quantity ?? 1) || 1,
       invoiceLineId: (l.invoice_line_id as string | null) || undefined,
     }));
+  // Sperre 3 — die zurückgenommene Ware wurde schon wieder verkauft: das Los deckt die Menge
+  // nicht mehr. Der Re-Konsum unten würde still bei 0 kappen (ein Stück auf zwei Rechnungen,
+  // COGS doppelt). Erst die spätere Rechnung klären, dann stornieren.
+  if (disposition === 'IN_STOCK') {
+    for (const line of lines) {
+      if (!line.invoiceLineId) continue;
+      const lot = query(
+        `SELECT sl.qty_remaining FROM invoice_lines il JOIN stock_lots sl ON sl.id = il.lot_id WHERE il.id = ?`,
+        [line.invoiceLineId],
+      )[0];
+      if (lot && Number(lot.qty_remaining ?? 0) < Math.max(1, line.quantity || 1) - 0.0005) {
+        throw new ReturnCancelRejected(RETURN_STOCK_RESOLD,
+          'Cannot cancel this return: the returned item has already been sold again. Resolve the later sale first.');
+      }
+    }
+  }
   const oldSnapshot = {
     status,
     refundStatus: String(r.refund_status ?? ''),

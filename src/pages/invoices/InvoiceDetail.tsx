@@ -263,7 +263,14 @@ export function InvoiceDetail() {
     if (!id) return;
     // R6B — Löschen bleibt am Primary (eigener Referenzvertrag, bewusst nie fern).
     if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
-    deleteInvoice(id);
+    try {
+      deleteInvoice(id);
+    } catch (e) {
+      // Die Sperren des Stores (Storno, Retoure/Gutschrift, eingelöstes Guthaben) sind ein Nein, kein Absturz.
+      setConfirmDelete(false);
+      alert(e instanceof Error ? e.message : String(e));
+      return;
+    }
     navigate('/invoices');
   }
 
