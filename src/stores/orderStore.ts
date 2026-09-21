@@ -12,6 +12,7 @@ import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — purchase_lines FK-Entkopplung
 import { trackProductRow } from '@/core/lots/lot-queries';
+import { adoptOrderPhotosToProduct } from '@/core/orders/order-media';
 import { GRAM_EPS, assertGoldPayablesRemovable } from '@/core/gold/gold-settle';
 import { useProductStore } from '@/stores/productStore';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
@@ -1475,6 +1476,9 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
           notes: (spec.notes ? spec.notes + '\n\n' : '')
             + `From cancelled custom order — capitalized costs ${customCostBasis.toFixed(3)} BHD.`,
         });
+        // Wie beim Umwandeln: dieselben Vorlage-Medien werden Artikelbilder (MEDIA-ORDER §7) — sonst
+        // stuende das Stueck ohne Fotos im Bestand (spec.images ist seit dem Medienkern leer).
+        adoptOrderPhotosToProduct(id, newProduct.id);
         effects.stockProductId = newProduct.id;
       }
     }

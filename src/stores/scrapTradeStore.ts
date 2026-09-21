@@ -61,25 +61,28 @@ function backfillTradeData(): void {
   // 1. Lines
   const lineOrphans = query(
     `SELECT st.id, st.weight_grams, st.karat, st.purchase_price, st.sale_price, st.profit,
-            st.images_purchase, st.images_sale, st.created_at
+            st.images_purchase, st.images_sale, st.created_at, st.branch_id
        FROM scrap_trades st
       WHERE NOT EXISTS (
         SELECT 1 FROM scrap_trade_lines stl WHERE stl.scrap_trade_id = st.id
       )`
   );
   for (const o of lineOrphans) {
+    // line_key = id (wie die Migration) und branch_id der Handlung — sonst passt die Zeile bis zum
+    // naechsten Start auf keine Medienverknuepfung.
+    const lineId = uuid();
     db.run(
       `INSERT INTO scrap_trade_lines (
         id, scrap_trade_id, position, weight_grams, karat,
         purchase_price, sale_price, profit, notes,
-        images_purchase, images_sale, created_at
-      ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, NULL, ?, ?, ?)`,
+        images_purchase, images_sale, created_at, line_key, branch_id
+      ) VALUES (?, ?, 1, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?, ?)`,
       [
-        uuid(), o.id, o.weight_grams, o.karat,
+        lineId, o.id, o.weight_grams, o.karat,
         o.purchase_price, o.sale_price, o.profit,
         o.images_purchase || '[]',
         o.images_sale || '[]',
-        o.created_at,
+        o.created_at, lineId, o.branch_id ?? null,
       ]
     );
   }

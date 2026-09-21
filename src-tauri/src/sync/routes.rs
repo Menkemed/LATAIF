@@ -641,6 +641,13 @@ fn is_pdf_content_type(headers: &HeaderMap) -> bool {
     text.split(';').next().unwrap_or("").trim().to_ascii_lowercase() == "application/pdf"
 }
 
+/// `products.edit` nach `ROLE_PERMISSIONS` (`src/core/auth/role-permissions.ts`) über `canonicalRole`:
+/// ADMIN, MANAGER und SALES haben es (unbekannte Namen fallen dort auf SALES); nur ACCOUNTANT
+/// (Altname `backoffice`) nicht. Eine leere Rolle ist schon vorher abgewiesen.
+fn role_may_edit_products(role: &str) -> bool {
+    !matches!(role.trim(), "ACCOUNTANT" | "backoffice")
+}
+
 async fn sync_push(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
@@ -967,6 +974,11 @@ async fn mobile_upload_ingress(
     }
     // Fail-closed role check: a verified JWT always carries a role; an empty one is refused.
     if claims.role.trim().is_empty() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    // Same right as `products.create` / `products.update` over `/api/command` (`products.edit`):
+    // the finance role has it nowhere, so it may not create or re-price items from the phone either.
+    if !role_may_edit_products(&claims.role) {
         return Err(StatusCode::FORBIDDEN);
     }
     // JSON content-type contract (same as /sync/push): a non-JSON body is 415 before it is parsed.
@@ -3584,5 +3596,20 @@ mod command_reply_tests {
         let (s, b) = command_reply_parts(crate::bridge::Reply::InfrastructureError { code: "X".into() });
         assert_eq!(s, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(b.get("outcome").is_none());
+    }
+}
+
+#[cfg(test)]
+mod mobile_upload_role_tests {
+    use super::role_may_edit_products;
+
+    #[test]
+    fn only_the_finance_role_may_not_upload_items_from_the_phone() {
+        for r in ["ADMIN", "owner", "MANAGER", "manager", "SALES", "sales", "viewer"] {
+            assert!(role_may_edit_products(r), "{r} has products.edit");
+        }
+        for r in ["ACCOUNTANT", "backoffice", " backoffice "] {
+            assert!(!role_may_edit_products(r), "{r} has no products.edit");
+        }
     }
 }

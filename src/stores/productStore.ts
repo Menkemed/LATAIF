@@ -30,6 +30,7 @@ import { validateEphemeralImage, selectDurablePrimary, validateDurableBytes, isO
 import { runStartupMediaRecovery, type CompletedProductScope } from '@/core/media/startup-recovery';
 import { findProductsNeedingEmbedding } from '@/core/media/embedding-reconcile';
 import { TauriMediaGateway } from '@/core/media/gateway';
+import { mergeProductGallery } from '@/core/media/product-gallery-merge';
 import { isSyncConfigured } from '@/core/sync/sync-service';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
@@ -1307,6 +1308,10 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       ? [sourceImages[0]]
       : targetImages;
     const imagesChanged = mergedImages.length !== targetImages.length;
+
+    // Die Galerie lebt in media_links — VOR jedem Write umhaengen, sonst gehen die Fotos der
+    // Quelle mit ihrer Zeile verloren (gleiche Regel wie die Bildspalte: nur wenn das Ziel keine hat).
+    mergeProductGallery(sourceId, targetId);
 
     if (imagesChanged) {
       db.run(`UPDATE products SET quantity = ?, images = ?, updated_at = ? WHERE id = ?`,
