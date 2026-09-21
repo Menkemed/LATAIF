@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import { CircleDollarSign } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { KPICard } from '@/components/ui/KPICard';
@@ -78,6 +79,16 @@ export function MetalList() {
     loadMetals();
     loadSuppliers();
   }, [loadMetals, loadSuppliers]);
+
+  // Der Hinweis der Altgold-Maske („Add Precious Metal") kommt mit `?new=1` — dann direkt die leere
+  // Maske öffnen und den Parameter entfernen, damit Zurück/Neuladen sie nicht erneut öffnet.
+  const [params, setParams] = useSearchParams();
+  useEffect(() => {
+    if (params.get('new') !== '1') return;
+    openNew();
+    setParams({}, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- nur beim Eintreffen des Parameters
+  }, [params]);
 
   function getSpotForType(type: MetalType): number {
     return spots[type] || 0;

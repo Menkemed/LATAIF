@@ -15,6 +15,7 @@
 
 import { emptyScrapPhotoUrls, loadScrapPhotos, revokeScrapPhotos, toModel, toView, type ScrapPhotoUrls } from '@/core/metals/scrap-photo-view';
 import { useEffect, useMemo, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { TrendingUp, TrendingDown, Link2, Plus, X } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -67,6 +68,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
 
   // MEDIA-SCRAP — die gespeicherten Fotos einmal holen (geprüft) und als Objekt-URLs zeigen; beim
   // Verlassen wieder freigeben. Gespeichert wird weiterhin die Medienkennung.
+  const navigate = useNavigate();
   const [fotoUrls, setFotoUrls] = useState<ScrapPhotoUrls>(() => emptyScrapPhotoUrls());
   useEffect(() => {
     let weg = false;
@@ -197,25 +199,30 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
   return (
     <div style={{ maxWidth: 1100, margin: '0 auto', display: 'grid', gap: 16 }}>
       {/* v0.1.46 — Hint fuer Behalt-Workflow: Scrap-Trade ist NUR fuer Buy-and-immediately-sell.
-          Wenn das Gold im Bestand bleiben soll → /metals "New Metal" mit Supplier-Picker. */}
+          Wenn das Gold im Bestand bleiben soll → Precious Metals, Maske „New" oeffnet direkt. */}
       {!initial && (
-        <div className="rounded" style={{
+        <div className="rounded" data-scrap-keep-hint style={{
           padding: '12px 16px', fontSize: 13, color: '#475569',
           background: '#F8FAFC', border: '1px solid #E2E8F0',
-          display: 'flex', alignItems: 'center', gap: 12,
+          display: 'flex', alignItems: 'center', gap: 16,
         }}>
-          <span style={{ fontWeight: 600 }}>ℹ Behalten statt direkt verkaufen?</span>
-          <span>Scrap-Trade ist fuer Buy-and-immediately-sell. Wenn das Gold im Bestand bleibt → </span>
-          <a href="/metals" style={{ color: '#3D7FFF', textDecoration: 'underline', fontWeight: 600 }}>
-            /metals · New Metal
-          </a>
-          <span>(Supplier-Picker bucht automatisch A/P-Schuld).</span>
+          <div style={{ flex: 1 }}>
+            <div style={{ fontWeight: 600, color: '#0F0F10' }}>Keeping the gold instead of selling it right away?</div>
+            <div>
+              Scrap trades are for buying and immediately selling. To keep the gold in stock, add it as a
+              precious metal item — choosing a supplier there books the payable automatically.
+            </div>
+          </div>
+          <Button type="button" variant="secondary" icon={<Plus size={14} />} onClick={() => navigate('/metals?new=1')}
+            data-scrap-keep-new-metal style={{ flexShrink: 0 }}>
+            Add Precious Metal
+          </Button>
         </div>
       )}
 
       {/* A. Seller Section */}
       <Card>
-        <SectionHeader title="A. Seller" subtitle="Wer verkauft uns das Gold?" />
+        <SectionHeader title="A. Seller" subtitle="Who is selling us the gold?" />
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
           <Input
             label="Seller / Customer"
@@ -298,7 +305,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
 
       {/* C. Buyer Section */}
       <Card>
-        <SectionHeader title="C. Buyer" subtitle="An wen verkaufen wir das Gold weiter?" />
+        <SectionHeader title="C. Buyer" subtitle="Who are we reselling the gold to?" />
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 16 }}>
           <Input
             label="Buyer / Dealer"
@@ -401,7 +408,7 @@ export function ScrapTradeForm({ initial, submitLabel, onSubmit, onCancel, disab
 
       {/* E. Trade Notes */}
       <Card>
-        <SectionHeader title="E. Notes (optional)" subtitle="Anmerkungen zum gesamten Trade (item-spezifisch siehe pro Item)." />
+        <SectionHeader title="E. Notes (optional)" subtitle="Notes for the whole trade (item-specific notes go on each item)." />
         <textarea
           data-scrap-notes
           value={v.notes || ''}
