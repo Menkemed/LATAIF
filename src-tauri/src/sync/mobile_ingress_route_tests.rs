@@ -253,9 +253,10 @@ async fn malformed_inputs_rejected() {
     assert_eq!(inbox_count(&st).await, 0);
 }
 
-// /sync/push is UNTOUCHED: still auth-gated (401 without a token) and still applies a valid empty push.
+// LEGACY-SYNC-RETIRED: /sync/push stays auth-gated (401 without a token), and a phone/login token no longer
+// unlocks it — even a valid empty push is 403 LEGACY_SYNC_DISABLED. The phone writes through /mobile/upload.
 #[tokio::test]
-async fn sync_push_unchanged() {
+async fn sync_push_is_retired_for_login_tokens() {
     let stg = Stg::new();
     let st = state(&stg);
     let no_tok = Request::builder().method("POST").uri("/api/sync/push").header("content-type", "application/json").body(Body::from(r#"{"changes":[]}"#)).unwrap();
@@ -263,5 +264,5 @@ async fn sync_push_unchanged() {
     assert_eq!(c1, StatusCode::UNAUTHORIZED, "/sync/push still requires auth");
     let ok = Request::builder().method("POST").uri("/api/sync/push").header("authorization", format!("Bearer {}", token("tenant-1", "branch-main", "owner"))).header("content-type", "application/json").body(Body::from(r#"{"changes":[]}"#)).unwrap();
     let (c2, _) = send(&st, ok).await;
-    assert_eq!(c2, StatusCode::OK, "/sync/push still applies a valid (empty) push");
+    assert_eq!(c2, StatusCode::FORBIDDEN, "/sync/push refuses a login token (LEGACY_SYNC_DISABLED)");
 }

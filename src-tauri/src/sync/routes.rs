@@ -648,7 +648,62 @@ fn role_may_edit_products(role: &str) -> bool {
     !matches!(role.trim(), "ACCOUNTANT" | "backoffice")
 }
 
+// LEGACY-SYNC-RETIRED — der generische Zeilen-Abgleich (`/sync/push`, `/sync/pull`) ist kein
+// Fernweg mehr. PC2 und Handy schreiben ausschliesslich ueber die geprueften Geschaeftsbefehle
+// (`/api/command`, `/api/mobile/upload`, …). Ein normales Anmelde-Token — gleich welcher Rolle —
+// schaltet diese Routen NICHT frei: sie antworten fail-closed 403 `LEGACY_SYNC_DISABLED`, bevor
+// irgendetwas gelesen oder geschrieben wird. Einzig der eigene Prozess dieses Primary (das von
+// DIESEM Serverlauf ausgestellte Selbst-Token, nie von aussen erlangbar) spiegelt weiter in seinen
+// eigenen Server — das ist kein Fernweg. Es wird nichts geloescht.
+pub const ERR_LEGACY_SYNC_DISABLED: &str = "LEGACY_SYNC_DISABLED";
+
+/// Ist der Absender der eigene Prozess dieses Servers? Die Entscheidung fiel schon in der
+/// Middleware (`reauthorize`): der Selbst-Absender kommt dort NUR mit dem von diesem Serverlauf
+/// ausgestellten Token durch; ein fremdes Token mit demselben Namen ist bereits 401. Jedes normale
+/// Anmelde-Token hat einen echten Benutzer als `sub` und fällt hier durch.
+fn legacy_sync_caller_is_self(claims: &Claims) -> bool {
+    claims.sub == super::reauthorize::SELF_PRINCIPAL_ID
+}
+
+fn legacy_sync_disabled() -> axum::response::Response {
+    use axum::response::IntoResponse;
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": ERR_LEGACY_SYNC_DISABLED,
+            "message": "The legacy row sync is retired. Update this device; it writes through the main computer's commands.",
+        })),
+    )
+        .into_response()
+}
+
 async fn sync_push(
+    state: State<Arc<AppState>>,
+    claims: Extension<Claims>,
+    headers: HeaderMap,
+    body: axum::body::Bytes,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !legacy_sync_caller_is_self(&claims) {
+        eprintln!("[sync] push refused: {ERR_LEGACY_SYNC_DISABLED} (not this primary's own process)");
+        return legacy_sync_disabled();
+    }
+    sync_push_apply(state, claims, headers, body).await.into_response()
+}
+
+async fn sync_pull(
+    state: State<Arc<AppState>>,
+    claims: Extension<Claims>,
+    params: Query<PullParams>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    if !legacy_sync_caller_is_self(&claims) {
+        return legacy_sync_disabled();
+    }
+    sync_pull_read(state, claims, params).await.into_response()
+}
+
+async fn sync_push_apply(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     // M6-B3A4 §3 — the request headers, read ONLY to enforce the JSON content-type contract below. A
@@ -1104,7 +1159,7 @@ async fn mobile_upload_ingress(
     }
 }
 
-async fn sync_pull(
+async fn sync_pull_read(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
     Query(params): Query<PullParams>,
@@ -2912,9 +2967,9 @@ mod legacy_push_tests {
             Arc::new(AppState {
                 db: Mutex::new(db_q()), // sync_changelog + sync_cutover_state + sync_change_quarantine
                 jwt_secret: SECRET.to_string(),
-        // Diese Testfundamente stellen kein Selbst-Token aus — der interne Bypass ist hier also
-        // schlicht nicht erreichbar, und genau so soll es sein.
-        self_token: None,
+        // LEGACY-SYNC-RETIRED — das Selbst-Token dieses Serverlaufs: nur mit ihm spiegelt der eigene
+        // Prozess noch; jedes normale Anmelde-Token bekommt LEGACY_SYNC_DISABLED.
+        self_token: Some(self_token()),
                 frontend_db_path: std::path::PathBuf::from("runtime-test-frontend.db"),
                 data_root: crate::data_root::DataRoot::for_test(std::env::temp_dir().join("lataif-routes-test-root")),
                 primary_state: primary,
@@ -2932,6 +2987,13 @@ mod legacy_push_tests {
         }
         fn token() -> String {
             auth::create_token("u", "tenant-1", "branch-main", "owner", SECRET).unwrap()
+        }
+        // LEGACY-SYNC-RETIRED — nur der eigene Prozess des Primary darf noch spiegeln: das Selbst-Token
+        // DIESES Serverlaufs (einmal gemuenzt, im Zustand hinterlegt). Die Vertragsmatrix unten laeuft
+        // deshalb mit ihm; ein normales Anmelde-Token (`token()`) ist `LEGACY_SYNC_DISABLED`.
+        fn self_token() -> String {
+            static T: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+            T.get_or_init(|| auth::create_token(crate::sync::reauthorize::SELF_PRINCIPAL_ID, "tenant-1", "branch-main", "owner", SECRET).unwrap()).clone()
         }
         fn req(token: Option<&str>, content_type: Option<&str>, body: Vec<u8>) -> Request<Body> {
             let mut b = Request::builder().method("POST").uri("/api/sync/push");
@@ -2979,9 +3041,9 @@ mod legacy_push_tests {
             Arc::new(AppState {
                 db: Mutex::new(conn),
                 jwt_secret: SECRET.to_string(),
-        // Diese Testfundamente stellen kein Selbst-Token aus — der interne Bypass ist hier also
-        // schlicht nicht erreichbar, und genau so soll es sein.
-        self_token: None,
+        // LEGACY-SYNC-RETIRED — das Selbst-Token dieses Serverlaufs: nur mit ihm spiegelt der eigene
+        // Prozess noch; jedes normale Anmelde-Token bekommt LEGACY_SYNC_DISABLED.
+        self_token: Some(self_token()),
                 frontend_db_path: std::path::PathBuf::from("runtime-test-frontend.db"),
                 data_root: crate::data_root::DataRoot::for_test(std::env::temp_dir().join("lataif-routes-test-root")),
                 primary_state: primary,
@@ -3052,7 +3114,7 @@ mod legacy_push_tests {
             // R1 — just under the limit → accepted.
             let s1 = state(primary::State::Primary);
             let r1 = router(s1.clone(), LIMIT)
-                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(LIMIT - 1)))
+                .oneshot(req(Some(&self_token()), Some("application/json"), valid_push_of_size(LIMIT - 1)))
                 .await
                 .unwrap();
             assert_eq!(r1.status().as_u16(), 200, "R1 under-limit valid push is accepted");
@@ -3061,7 +3123,7 @@ mod legacy_push_tests {
             // R2 — exactly at the limit → accepted (DefaultBodyLimit rejects only when EXCEEDED).
             let s2 = state(primary::State::Primary);
             let r2 = router(s2.clone(), LIMIT)
-                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(LIMIT)))
+                .oneshot(req(Some(&self_token()), Some("application/json"), valid_push_of_size(LIMIT)))
                 .await
                 .unwrap();
             assert_eq!(r2.status().as_u16(), 200, "R2 exactly-at-limit valid push is accepted");
@@ -3070,7 +3132,7 @@ mod legacy_push_tests {
             // R3 — one byte over → 413, and NOTHING happened server-side.
             let s3 = state(primary::State::Primary);
             let r3 = router(s3.clone(), LIMIT)
-                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(LIMIT + 1)))
+                .oneshot(req(Some(&self_token()), Some("application/json"), valid_push_of_size(LIMIT + 1)))
                 .await
                 .unwrap();
             assert_eq!(r3.status().as_u16(), 413, "R3 over-limit → 413 Payload Too Large");
@@ -3090,7 +3152,7 @@ mod legacy_push_tests {
             let s = state(primary::State::Primary);
             // 200 bytes of body → far over the 64-byte limit → 413 while reading.
             let r = router(s.clone(), LIMIT)
-                .oneshot(req(Some(&token()), Some("application/json"), vec![b'a'; 200]))
+                .oneshot(req(Some(&self_token()), Some("application/json"), vec![b'a'; 200]))
                 .await
                 .unwrap();
             assert_eq!(r.status().as_u16(), 413, "an over-limit body is rejected as it streams in");
@@ -3220,7 +3282,7 @@ mod legacy_push_tests {
                 let s = state(primary::State::Primary);
                 let before = snapshot(&s).await;
                 let r = router(s.clone(), MAX)
-                    .oneshot(command_req(Some(&token()), op))
+                    .oneshot(command_req(Some(&self_token()), op))
                     .await
                     .unwrap();
                 assert_ne!(r.status().as_u16(), 200, "{op:?} never succeeds without a renderer");
@@ -3275,12 +3337,55 @@ mod legacy_push_tests {
                 let s = state(primary::State::ReadOnly);
                 let before = snapshot(&s).await;
                 let r = router(s.clone(), 1024)
-                    .oneshot(req(Some(&token()), Some("application/json"), body.clone()))
+                    .oneshot(req(Some(&self_token()), Some("application/json"), body.clone()))
                     .await
                     .unwrap();
                 assert_eq!(r.status().as_u16(), 403, "{label} on read-only → 403 (gate before dup parse)");
                 assert_eq!(snapshot(&s).await, before, "{label}: DB untouched");
             }
+        }
+
+        // LEGACY-SYNC-RETIRED — ein normales Anmelde-Token (jede Rolle, auch owner) schaltet den alten
+        // Zeilen-Abgleich nicht mehr frei: push UND pull antworten 403 LEGACY_SYNC_DISABLED, und die
+        // Datenbank bleibt byte-gleich (auch eine gueltige Geschaefts-/Buchungszeile kommt nicht hinein).
+        #[tokio::test]
+        async fn legacy_sync_is_disabled_for_every_normal_login() {
+            for role in ["owner", "ADMIN", "MANAGER", "SALES", "ACCOUNTANT"] {
+                let user = auth::create_token("u", "tenant-1", "branch-main", role, SECRET).unwrap();
+                let s = state(primary::State::Primary);
+                let before = snapshot(&s).await;
+                let r = router(s.clone(), 1024)
+                    .oneshot(req(Some(&user), Some("application/json"), valid_push_of_size(300)))
+                    .await
+                    .unwrap();
+                assert_eq!(r.status().as_u16(), 403, "{role}: push refused");
+                let body = axum::body::to_bytes(r.into_body(), 4096).await.unwrap();
+                let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                assert_eq!(v["error"], "LEGACY_SYNC_DISABLED", "{role}: fail-closed code");
+                assert_eq!(snapshot(&s).await, before, "{role}: nothing written");
+                let pull = Request::builder()
+                    .method("GET")
+                    .uri("/api/sync/pull?since=0")
+                    .header("authorization", format!("Bearer {user}"))
+                    .body(Body::empty())
+                    .unwrap();
+                let r = router(s.clone(), 1024).oneshot(pull).await.unwrap();
+                assert_eq!(r.status().as_u16(), 403, "{role}: pull refused");
+            }
+            // Ein altes Push-Paket mit Buchungszeilen — vom normalen Token ebenso abgewiesen.
+            let user = token();
+            let s = state(primary::State::Primary);
+            let before = snapshot(&s).await;
+            let ledger = br#"{"changes":[{"table_name":"ledger_entries","record_id":"l1","action":"insert","data":"{\"id\":\"l1\"}"}]}"#.to_vec();
+            let r = router(s.clone(), 1024).oneshot(req(Some(&user), Some("application/json"), ledger)).await.unwrap();
+            assert_eq!(r.status().as_u16(), 403, "old ledger push refused");
+            assert_eq!(snapshot(&s).await, before, "old ledger push wrote nothing");
+            // Der eigene Prozess dieses Primary spiegelt weiter (kein Fernweg).
+            let r = router(s.clone(), 1024)
+                .oneshot(req(Some(&self_token()), Some("application/json"), valid_push_of_size(300)))
+                .await
+                .unwrap();
+            assert_eq!(r.status().as_u16(), 200, "the primary's own process still mirrors");
         }
 
         // §8 — one full, legitimate desktop push through the whole router (valid auth, active primary,
@@ -3293,7 +3398,7 @@ mod legacy_push_tests {
             // non-attested primary → 200, one changelog row, no quarantine, NO activity mark.
             let s = state(primary::State::Primary);
             let r = router(s.clone(), MAX)
-                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(300)))
+                .oneshot(req(Some(&self_token()), Some("application/json"), valid_push_of_size(300)))
                 .await
                 .unwrap();
             assert_eq!(r.status().as_u16(), 200, "valid desktop push → 200");
@@ -3304,7 +3409,7 @@ mod legacy_push_tests {
             // armed primary → the same push lands AND invalidates readiness together.
             let a = armed_state();
             let ra = router(a.clone(), MAX)
-                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(300)))
+                .oneshot(req(Some(&self_token()), Some("application/json"), valid_push_of_size(300)))
                 .await
                 .unwrap();
             assert_eq!(ra.status().as_u16(), 200, "valid desktop push on armed cutover → 200");
@@ -3329,7 +3434,7 @@ mod legacy_push_tests {
             ] {
                 let s = state(primary::State::Primary);
                 let r = router(s.clone(), MAX)
-                    .oneshot(req(Some(&token()), Some(ct), good.clone()))
+                    .oneshot(req(Some(&self_token()), Some(ct), good.clone()))
                     .await
                     .unwrap();
                 assert_eq!(r.status().as_u16(), 200, "{label} → accepted");
@@ -3343,7 +3448,7 @@ mod legacy_push_tests {
                 let s = state(primary::State::Primary);
                 let before = snapshot(&s).await;
                 let r = router(s.clone(), MAX)
-                    .oneshot(req(Some(&token()), *ct, good.clone()))
+                    .oneshot(req(Some(&self_token()), *ct, good.clone()))
                     .await
                     .unwrap();
                 assert_eq!(r.status().as_u16(), 415, "{label} → 415 Unsupported Media Type");
@@ -3361,7 +3466,7 @@ mod legacy_push_tests {
             // J1 — the positive control: a valid push is accepted.
             let s1 = state(primary::State::Primary);
             let r1 = router(s1.clone(), MAX)
-                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(300)))
+                .oneshot(req(Some(&self_token()), Some("application/json"), valid_push_of_size(300)))
                 .await
                 .unwrap();
             assert_eq!(r1.status().as_u16(), 200, "J1 valid push → 200");
@@ -3386,7 +3491,7 @@ mod legacy_push_tests {
                 let s = state(primary::State::Primary);
                 let before = snapshot(&s).await;
                 let r = router(s.clone(), MAX)
-                    .oneshot(req(Some(&token()), Some("application/json"), body.clone()))
+                    .oneshot(req(Some(&self_token()), Some("application/json"), body.clone()))
                     .await
                     .unwrap();
                 assert_eq!(r.status().as_u16(), 400, "{label} → 400, whole request rejected");
@@ -3414,7 +3519,7 @@ mod legacy_push_tests {
                 })
                 .to_string();
                 let r = router(s.clone(), MAX)
-                    .oneshot(req(Some(&token()), Some("application/json"), body.into_bytes()))
+                    .oneshot(req(Some(&self_token()), Some("application/json"), body.into_bytes()))
                     .await
                     .unwrap();
                 assert_eq!(r.status().as_u16(), 200, "{label}: released mobile payload accepted (not SYNC_OPERATION_NOT_ALLOWED)");
@@ -3483,7 +3588,7 @@ mod legacy_push_tests {
                 assert_eq!(before.cutover, armed_precondition, "{label}: armed precondition (attested + ready)");
                 let real_tok: Option<String> = match *tok {
                     None => None,
-                    Some("T") => Some(token()),
+                    Some("T") => Some(self_token()),
                     Some(other) => Some(other.to_string()),
                 };
                 let r = router(s.clone(), *limit)
@@ -3515,7 +3620,7 @@ mod legacy_push_tests {
             // positive — a valid push blocks activation together with the changelog row.
             let s = armed_state();
             let r = router(s.clone(), MAX)
-                .oneshot(req(Some(&token()), Some("application/json"), valid_push_of_size(300)))
+                .oneshot(req(Some(&self_token()), Some("application/json"), valid_push_of_size(300)))
                 .await
                 .unwrap();
             assert_eq!(r.status().as_u16(), 200, "attested valid push → 200");
@@ -3539,7 +3644,7 @@ mod legacy_push_tests {
                 let s = armed_state();
                 let before = snapshot(&s).await;
                 let r = router(s.clone(), MAX)
-                    .oneshot(req(Some(&token()), Some("application/json"), body.clone()))
+                    .oneshot(req(Some(&self_token()), Some("application/json"), body.clone()))
                     .await
                     .unwrap();
                 assert!(r.status().as_u16() >= 400, "{label}: rejected");

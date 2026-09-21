@@ -964,9 +964,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
 
   // ── MOBILE-EDIT-S2 — Textedit eines bestehenden Artikels ────────────────────
   //
-  // Der Save laeuft ueber denselben `/api/sync/push`, den die Repair- und Purchase-Formulare seit
-  // jeher benutzen — ein vollstaendig konsumierter Weg, kein neuer Job, kein Inbox-Eintrag, nichts
-  // was liegenbleiben koennte. Entscheidend fuer die Sicherheit ist die Nutzlast: der Desktop
+  // Der Save laeuft ueber die durable Warteschlange → `/api/mobile/upload` → Drain am Desktop (der
+  // alte Zeilen-Abgleich `/api/sync/push` ist fuer Anmelde-Tokens gesperrt, LEGACY_SYNC_DISABLED).
+  // Entscheidend fuer die Sicherheit ist die Nutzlast: der Desktop
   // schreibt beim Anwenden GENAU die mitgeschickten Spalten. Was der Benutzer nicht geaendert hat,
   // steht nicht drin und bleibt darum unberuehrt — `media_links`, `images`, SKU und Preise fasst
   // dieser Weg nie an.

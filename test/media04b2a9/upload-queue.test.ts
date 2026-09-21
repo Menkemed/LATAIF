@@ -160,9 +160,11 @@ await (async () => {
     'the repair surface writes only through the command client, never via /sync/push');
   ok(/\/api\/command/.test(repairCmds) && /\/api\/staging\/media/.test(repairCmds),
     'the command client posts to /api/command and stages photos first');
-  // purchase submit handler still pushes its record via /sync/push (unchanged path).
+  // MEDIA-INBOX / LEGACY-SYNC-RETIRED — der Einkauf schreibt über den Geschäftsbefehl
+  // `purchase_inbox.create`, nicht mehr über /sync/push (das für Anmelde-Tokens gesperrt ist).
   const purchase = page.slice(page.indexOf("bSaveBtn').onclick"), page.indexOf("bSaveBtn').onclick") + 2000);
-  ok(/pushChanges\(/.test(purchase) && /purchase_inbox/.test(purchase), 'purchase still uses pushChanges (/sync/push) — unchanged');
+  ok(!/pushChanges\(/.test(purchase) && /purchase_inbox\.create/.test(purchase),
+    'purchase writes through purchase_inbox.create, never via /sync/push');
   // the collection handler must NOT push a products record anymore (it goes through the queue).
   const collection = page.slice(page.indexOf("cSaveBtn').onclick"), page.indexOf("bSaveBtn').onclick"));
   ok(/uploadQueue\.(enqueue|drainEntry)/.test(collection) && !/pushChanges\(/.test(collection), 'collection handler uses the queue, not pushChanges');
