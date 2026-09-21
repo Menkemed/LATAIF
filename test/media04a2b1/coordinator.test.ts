@@ -63,7 +63,7 @@ function seedEntityStubs(db: any): void {
   db.run(`CREATE TABLE users    (id TEXT PRIMARY KEY, tenant_id TEXT)`);
   for (const t of Object.values(MEDIA_ENTITY_SCOPE)) {
     // idempotent: some entities share tables — CREATE only once each
-    db.run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT)`);
+    db.run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT${t.idCol === 'id' ? '' : `, ${t.idCol} TEXT`})`);
   }
   db.run(`INSERT INTO tenants  (id) VALUES ('t1'),('t2')`);
   db.run(`INSERT INTO branches (id, tenant_id) VALUES ('b1','t1'),('b2','t1'),('bx','t2')`);

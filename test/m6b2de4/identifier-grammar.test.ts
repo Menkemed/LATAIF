@@ -60,8 +60,11 @@ for (const c of columns) check(isValidSyncIdentifier(c), `frontend column ${JSON
 // SYNC-SAFETY-A1: the +1 column is `seq_year` on document_sequences — the year a document counter
 // belongs to, so transfer numbers keep restarting per year while the counter can never be pulled
 // back down inside a year.
-check(tables.size === 49, `frontend table count is 49 (got ${tables.size})`);
-check(columns.size === 193, `frontend distinct column count is 193 (got ${columns.size})`);
+// v0.8.58: +1 table `repair_gold_usage_history` with 8 previously-unseen column identifiers
+// (received_grams, used_grams, remainder_grams, leftover, shop_kept_grams, gold_payable_id,
+// gold_credit_id, recorded_by) — all canonical, checked above.
+check(tables.size === 50, `frontend table count is 50 (got ${tables.size})`);
+check(columns.size === 201, `frontend distinct column count is 201 (got ${columns.size})`);
 
 console.log(
   `M6-B2DE4 identifier-grammar: ${pass}/${pass + fails.length} checks passed ` +

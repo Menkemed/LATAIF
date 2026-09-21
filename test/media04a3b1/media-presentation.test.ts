@@ -100,7 +100,7 @@ function seedEntityStubs(db: any): void {
   db.run(`CREATE TABLE branches (id TEXT PRIMARY KEY, tenant_id TEXT)`);
   db.run(`CREATE TABLE users    (id TEXT PRIMARY KEY, tenant_id TEXT)`);
   for (const t of Object.values(MEDIA_ENTITY_SCOPE)) {
-    db.run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT)`);
+    db.run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT${t.idCol === 'id' ? '' : `, ${t.idCol} TEXT`})`);
   }
   db.run(`ALTER TABLE products ADD COLUMN images TEXT DEFAULT '[]'`);
   db.run(`INSERT INTO tenants  (id) VALUES ('t1'),('t2')`);
