@@ -15,7 +15,7 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { trackDelete } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — Ein-/Ausgangszeilen
-import { completeProductionInHouse, type ProductionCompleteInput, type ProductionCompleted } from '@/core/production/production-house';
+import { completeProductionInHouse, type ProductionCompleteInput, type ProductionCompleted, type ProductionInputConsumption } from '@/core/production/production-house';
 import { reverseSource, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
 import { restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 // CENTRAL-UI-PARITY R6F — das Anlegen ist EINE Hausfolge für Primary und PC2 (production-house),
@@ -121,7 +121,19 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
   deleteRecord: (id) => {
     const db = getDatabase();
     const now = new Date().toISOString();
-    const rec = get().getRecord(id);
+    // STOCK-LOT-INTEGRITY — VOR jedem Schreiben: jeder Eingang braucht seinen Verbrauchsnachweis.
+    // Eine Produktion von vor diesem Vertrag hat keinen; welche Lose sie geleert hat, ist nicht
+    // bekannt. Statt zu raten (früher: ALLE Lose des Artikels aufgefüllt) wird das Löschen abgewiesen.
+    const consumption = new Map<string, ProductionInputConsumption>();
+    for (const r of query('SELECT product_id, lot_consumption FROM production_inputs WHERE record_id = ?', [id])) {
+      const raw = r.lot_consumption;
+      if (raw === null || raw === undefined || raw === '') {
+        throw new Error('PRODUCTION_LEGACY_NO_CONSUMPTION: this production was recorded before exact stock tracking — it cannot be deleted automatically (the consumed lots are not known).');
+      }
+      consumption.set(String(r.product_id), JSON.parse(String(raw)) as ProductionInputConsumption);
+    }
+    // Nicht geladen heisst nicht „gibt es nicht": einmal frisch lesen, sonst ginge der Rueckweg verloren.
+    const rec = get().getRecord(id) ?? (get().loadRecords(), get().getRecord(id));
     // Kein Record geladen → reiner Row-Delete (Alt-Verhalten, nichts zu spiegeln).
     if (!rec) {
       db.run('DELETE FROM production_records WHERE id = ?', [id]);
@@ -143,21 +155,16 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
       }
     }
 
-    // 1. Inputs zurueck: Produkt wieder in_stock + geleerte Lots auffuellen (createRecord
-    //    hatte sie via consumeLot geleert). restoreLot cappt bei qty_total.
+    // 1. Inputs zurueck — STOCK-LOT-INTEGRITY: GENAU der aufgezeichnete Verbrauch (diese Lose mit
+    //    dieser Menge, ohne Los die genommene Menge) und der Status davor. Nie „alle Lose".
     for (const inp of rec.inputs) {
       if (!inp.productId) continue;
-      db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`, [now, inp.productId]);
+      const c = consumption.get(inp.productId);
+      if (!c) continue;
+      for (const l of c.lots) restoreLot(l.lotId, l.qty);
+      if (c.qty > 0) db.run('UPDATE products SET quantity = COALESCE(quantity, 0) + ? WHERE id = ?', [c.qty, inp.productId]);
+      db.run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ?`, [c.prevStatus || 'in_stock', now, inp.productId]);
       trackProductRow(inp.productId);   // LAN-Sync Phase 1b
-      const lots = query(
-        `SELECT id, qty_total, qty_remaining FROM stock_lots WHERE product_id = ? AND status != 'CANCELLED'`,
-        [inp.productId]
-      );
-      for (const l of lots) {
-        const total = Number(l.qty_total) || 0;
-        const rem = Number(l.qty_remaining) || 0;
-        if (rem < total) restoreLot(l.id as string, total - rem);
-      }
       syncProductQuantity(inp.productId);
     }
 

@@ -589,7 +589,7 @@ export function TransferDetail() {
           <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
           <Button variant="danger" onClick={() => {
             if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
-            deleteTransfer(transfer.id);
+            try { deleteTransfer(transfer.id); } catch (e) { setConfirmDelete(false); alert(e instanceof Error ? e.message : String(e)); return; }
             setConfirmDelete(false);
             goBack();
           }}>Delete</Button>

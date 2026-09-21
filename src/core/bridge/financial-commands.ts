@@ -38,6 +38,7 @@
 //     gewinnen.
 
 import { getDatabase, saveDatabaseDurably } from '@/core/db/database';
+import { STOCK_UNAVAILABLE_MESSAGE } from '@/core/lots/lot-availability';
 import { query } from '@/core/db/helpers';
 import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
@@ -696,6 +697,8 @@ export function runMarkSold(deps: EngineDeps, identity: CommandIdentity, raw: un
       );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
+      // STOCK-LOT-INTEGRITY — das Stück ist nicht mehr da: ein fachliches Nein, eingefroren.
+      if (msg === STOCK_UNAVAILABLE_MESSAGE) throw new CommandRejected('STOCK_UNAVAILABLE', msg);
       if (/below Our Price/i.test(msg)) {
         // Ein Urteil über GENAU diese Anfrage: sie will unter Preis verkaufen, ohne es zu sagen.
         // Wer es doch will, schickt einen NEUEN Auftrag mit der Bestätigung.

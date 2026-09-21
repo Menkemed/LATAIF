@@ -40,6 +40,14 @@ import { reverseSource, hasLedgerEntries, hasReversalFor } from '@/core/ledger/p
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { trackChange } from '@/core/sync/sync-service';
 import { syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+import { hasLotHistory, isServiceProduct, retakeLotLessStock } from '@/core/lots/stock-contract';
+
+/** Zeile mit Bestandsnachweis eines Artikels ohne Los (die Retoure gab `products.quantity` zurück). */
+function lotLessContractLine(invoiceLineId: string, productId: string): boolean {
+  const il = query('SELECT lot_id, stock_taken FROM invoice_lines WHERE id = ?', [invoiceLineId])[0];
+  return !!il && !il.lot_id && il.stock_taken !== null && il.stock_taken !== undefined
+    && !isServiceProduct(productId) && !hasLotHistory(productId);
+}
 
 /** Ein fachliches Nein des Stornos — am Primary eine Absage der Maske, fern ein eingefrorenes Urteil. */
 export class ReturnCancelRejected extends Error {
@@ -157,6 +165,11 @@ function revertDisposition(
           );
           trackLotRow(lotId, 'update');
         }
+      }
+      // STOCK-LOT-INTEGRITY — Artikel ohne Los: genau die zurückgegebene Menge wieder nehmen
+      // (die Sperre oben hat geprüft, dass sie da ist).
+      if (line.invoiceLineId && lotLessContractLine(line.invoiceLineId, line.productId)) {
+        retakeLotLessStock(line.productId, qty, now);
       }
       // Phase 7 Sync — products.quantity aus Lots ableiten (ersetzt manuelles Decrement).
       syncProductQuantity(line.productId);
@@ -281,7 +294,12 @@ export function cancelReturnInHouse(
         `SELECT sl.qty_remaining FROM invoice_lines il JOIN stock_lots sl ON sl.id = il.lot_id WHERE il.id = ?`,
         [line.invoiceLineId],
       )[0];
-      if (lot && Number(lot.qty_remaining ?? 0) < Math.max(1, line.quantity || 1) - 0.0005) {
+      // STOCK-LOT-INTEGRITY — Artikel ohne Los (Zeile mit Nachweis): der Bestand ist `products.quantity`.
+      const ohneLos = !lot && line.productId && lotLessContractLine(line.invoiceLineId, line.productId)
+        ? query('SELECT COALESCE(quantity, 0) AS qty_remaining FROM products WHERE id = ?', [line.productId])[0]
+        : undefined;
+      const stand = lot ?? ohneLos;
+      if (stand && Number(stand.qty_remaining ?? 0) < Math.max(1, line.quantity || 1) - 0.0005) {
         throw new ReturnCancelRejected(RETURN_STOCK_RESOLD,
           'Cannot cancel this return: the returned item has already been sold again. Resolve the later sale first.');
       }

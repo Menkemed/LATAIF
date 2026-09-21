@@ -358,7 +358,7 @@ export function ProductionPage() {
         </p>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmDelete(null)}>Cancel</Button>
-          <Button variant="danger" onClick={() => { if (blockDeleteOnClient()) { setConfirmDelete(null); return; } if (confirmDelete) { deleteRecord(confirmDelete); setConfirmDelete(null); } }}>Delete</Button>
+          <Button variant="danger" onClick={() => { if (blockDeleteOnClient()) { setConfirmDelete(null); return; } if (confirmDelete) { try { deleteRecord(confirmDelete); } catch (e) { alert(e instanceof Error ? e.message : String(e)); } setConfirmDelete(null); } }}>Delete</Button>
         </div>
       </Modal>
     </PageLayout>

@@ -71,6 +71,8 @@
         "sold_at",
         "staff_id",
         "status",
+        "stock_lot_id",
+        "stock_taken",
         "sync_status",
         "transfer_number",
         "transferred_at",
@@ -575,6 +577,7 @@
         "product_id",
         "purchase_price_snapshot",
         "quantity",
+        "stock_taken",
         "tax_scheme",
         "unit_price",
         "vat_amount",
@@ -955,6 +958,7 @@
       "allowed_fields": [
         "id",
         "input_value",
+        "lot_consumption",
         "product_id",
         "product_snapshot",
         "record_id"

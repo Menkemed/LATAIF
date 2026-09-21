@@ -257,7 +257,7 @@ export function ProductionDetail() {
           <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
           <Button variant="danger" onClick={() => {
             if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
-            if (record) deleteRecord(record.id);
+            try { if (record) deleteRecord(record.id); } catch (e) { setConfirmDelete(false); alert(e instanceof Error ? e.message : String(e)); return; }
             navigate('/production');
           }}>Delete</Button>
         </div>

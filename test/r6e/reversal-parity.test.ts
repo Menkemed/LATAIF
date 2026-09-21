@@ -765,7 +765,8 @@ for (const weg of ['primary', 'fern'] as const) {
       ? await primary(() => house.undoTransferConversionOnPrimary(tid, trev(db, tid)))
       : await fern(() => rev.runTransferUndo(deps(db), identity(x, 'transfers.undo_convert'), house.transferUndoBody({ id: tid, revision: trev(db, tid) })));
   } finally { useAgentStore.setState({ updateTransfer: echt }); }
-  ok(imFehler === S(['CANCELLED', '1']), `ATOMIC ${weg}: im Fehler war die Rechnung schon storniert und das Los zurück (${imFehler})`);
+  // STOCK-LOT-INTEGRITY — das Los hält der Agentenverkauf, nicht die Rechnung: ihr Storno gibt nichts zurück.
+  ok(imFehler === S(['CANCELLED', '0']), `ATOMIC ${weg}: im Fehler war die Rechnung schon storniert, das Los bleibt beim Verkauf (${imFehler})`);
   ok(!aus.ok && stand() === vor, `ATOMIC ${weg}: Rechnung nicht storniert, Lose, Buchungen, Abgleich, Transfer unverändert (${aus.code.slice(0, 50)})`);
   if (weg === 'fern') ok(lookupCommand(db as never, identity(x, 'transfers.undo_convert')).kind === 'fresh', 'ATOMIC fern: die Kennung bleibt frei');
   const heil = weg === 'primary'

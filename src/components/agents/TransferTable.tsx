@@ -615,7 +615,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
             <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => {
               if (blockDeleteOnClient()) return;
               if (editTransfer && window.confirm(`Delete transfer ${editTransfer.transferNumber}?`)) {
-                deleteTransfer(editTransfer.id);
+                try { deleteTransfer(editTransfer.id); } catch (e) { alert(e instanceof Error ? e.message : String(e)); return; }
                 setEditTransfer(null);
               }
             }}>Delete</Button>

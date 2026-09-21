@@ -239,9 +239,22 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
 
   // Mark all invoice line products as "sold" — quantity-aware.
   // Bei Produkten mit quantity > 1 wird pro Line 1 Stück abgezogen; erst bei Bestand = 0 status='sold'.
-  const invoiceLines = query(`SELECT product_id, unit_price FROM invoice_lines WHERE invoice_id = ?`, [event.entityId]);
+  const invoiceLines = query(`SELECT id, product_id, unit_price, stock_taken FROM invoice_lines WHERE invoice_id = ?`, [event.entityId]);
   for (const line of invoiceLines) {
     const pid = line.product_id;
+    // STOCK-LOT-INTEGRITY — eine Zeile mit Nachweis hat ihren Bestand schon beim VERKAUF genommen
+    // (auch 0: Leistung oder vom Agentenverkauf gehalten). Bezahlen nimmt nichts mehr — nur der
+    // Status folgt: kein Bestand mehr → 'sold'.
+    if (line.stock_taken !== null && line.stock_taken !== undefined) {
+      db.run(
+        `UPDATE products SET
+           stock_status = CASE WHEN COALESCE(quantity,0) <= 0 AND stock_status IN ('reserved','consignment_reserved','in_stock','offered','consignment') THEN 'sold' ELSE stock_status END,
+           last_sale_price = ?, updated_at = ? WHERE id = ?`,
+        [line.unit_price, now, pid]
+      );
+      trackProductRow(pid as string);
+      continue;
+    }
     // M-06 — Lot-getrackte Produkte: quantity wird bereits von consumeLot +
     // syncProductQuantity beim Sale verwaltet. Hier NICHT nochmal abziehen, sonst
     // Doppelreduktion bei qty>1 (und nicht-idempotent gegen mehrfaches invoice.paid).
@@ -259,7 +272,10 @@ eventBus.on('invoice.paid', (event: DomainEvent) => {
       );
       trackProductRow(pid as string);   // LAN-Sync Phase 1b
     } else {
-      // Legacy-Produkte ohne Lots: altes quantity-aware Verhalten unveraendert.
+      // Altzeile (vor dem Bestandsvertrag) eines Produkts ohne Lots: der alte Abzug EINMAL — und
+      // als Nachweis festgehalten, damit ein erneutes FINAL nicht ein zweites Mal abzieht und ein
+      // späterer Storno genau dieses eine Stück zurückgibt.
+      db.run(`UPDATE invoice_lines SET stock_taken = 1 WHERE id = ?`, [line.id]);
       db.run(
         `UPDATE products SET
            quantity = CASE WHEN COALESCE(quantity,1) > 1 THEN COALESCE(quantity,1) - 1 ELSE 0 END,

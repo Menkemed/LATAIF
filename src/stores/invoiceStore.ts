@@ -6,6 +6,7 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
+import { assertLotLessStockAvailable, giveBackStock, invoiceStockLines, isServiceProduct, takeStock } from '@/core/lots/stock-contract';
 import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, assertLotsConsumable, assertLotTrackedLinesResolved, assertProductsSellable } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { issuedAtIso } from '@/core/invoices/issued-at';
@@ -127,7 +128,7 @@ interface InvoiceStore {
   loadInvoices: () => void;
   getInvoice: (id: string) => Invoice | undefined;
   createInvoiceFromOffer: (offerId: string, perLineSchemes?: Record<string, TaxScheme>, staffId?: string, specialMark?: boolean) => Invoice;
-  createDirectInvoice: (customerId: string, lines: { productId: string; lotId?: string; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string, numbering?: 'sales' | 'repair', staffId?: string, specialMark?: boolean, opts?: { allowWithAgent?: boolean; offerId?: string }) => Invoice;
+  createDirectInvoice: (customerId: string, lines: { productId: string; lotId?: string; stockPreTaken?: boolean; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string, numbering?: 'sales' | 'repair', staffId?: string, specialMark?: boolean, opts?: { allowWithAgent?: boolean; offerId?: string }) => Invoice;
   updateInvoice: (id: string, data: Partial<Invoice>) => void;
   // Atomarer Gesamt-Edit einer gebuchten Rechnung (Header + Zeilen + Inventory +
   // Ledger-Reverse+Repost + optionale Delta-Zahlung + Status) in EINER SQL-Transaktion
@@ -276,6 +277,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const resolvedLines: ResolvedLine[] = lines.map(l => {
       let lotId = l.lotId || null;
       let cost = l.purchasePrice;
+      if (l.stockPreTaken) {
+        // STOCK-LOT-INTEGRITY — das Stück hält der Agentenverkauf: kein zweiter Verbrauch, der
+        // Einstand ist der des Loses, das er verbraucht hat (falls es eines gibt).
+        const held = lotId ? query('SELECT unit_cost FROM stock_lots WHERE id = ?', [lotId])[0] : undefined;
+        if (held) cost = Number(held.unit_cost) || cost;
+        return { ...l, _id: uuid(), _resolvedLotId: lotId, _resolvedCost: cost };
+      }
       if (!lotId && l.productId) {
         const r = db.exec(
           `SELECT id, unit_cost FROM stock_lots
@@ -303,8 +311,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     if (!opts?.allowWithAgent) {
       assertProductsSellable(resolvedLines.map(l => l.productId));
     }
-    assertLotsConsumable(resolvedLines.map(l => ({ lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) })));
-    assertLotTrackedLinesResolved(resolvedLines.map(l => ({ productId: l.productId, lotId: l._resolvedLotId })));
+    const toTake = resolvedLines.filter(l => !l.stockPreTaken);
+    assertLotsConsumable(toTake.map(l => ({ lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) })));
+    assertLotTrackedLinesResolved(toTake.map(l => ({ productId: l.productId, lotId: l._resolvedLotId })));
+    assertLotLessStockAvailable(resolvedLines.map(l => ({ productId: l.productId, lotId: l._resolvedLotId, qty: l.quantity || 1, preTaken: l.stockPreTaken })));
 
     let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
     for (const l of resolvedLines) {
@@ -338,12 +348,14 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
     const lineStmt = db.prepare(
       `INSERT INTO invoice_lines (id, invoice_id, product_id, quantity, unit_price, purchase_price_snapshot,
-        vat_rate, tax_scheme, vat_amount, line_total, position, lot_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        vat_rate, tax_scheme, vat_amount, line_total, position, lot_id, stock_taken)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     resolvedLines.forEach((l, i) => {
       const qty = Math.max(1, l.quantity || 1);
-      lineStmt.run([l._id, id, l.productId, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId]);
+      // STOCK-LOT-INTEGRITY — Verbrauch beim Verkauf, mit Nachweis (Los: unten consumeLot).
+      const taken = takeStock({ productId: l.productId, lotId: l._resolvedLotId, qty, preTaken: l.stockPreTaken }, now);
+      lineStmt.run([l._id, id, l.productId, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId, taken]);
     });
     lineStmt.free();
 
@@ -353,7 +365,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Phase 7 Sync: products.quantity nach Konsumption nachziehen.
     const directProductsToSync = new Set<string>();
     resolvedLines.forEach(l => {
-      if (l._resolvedLotId) {
+      if (l._resolvedLotId && !l.stockPreTaken) {
         const qty = Math.max(1, l.quantity || 1);
         consumeLot(l._resolvedLotId, qty);
       }
@@ -452,17 +464,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // Phase 3 — Stock-Lots restoren: jede invoice_line gibt ihren Bestand zurueck.
       // Phase 7 Sync: products.quantity nach Restore nachziehen.
       if (!reversedByReturn) {
-        const lotLines = db.exec(
-          `SELECT lot_id, product_id, quantity FROM invoice_lines WHERE invoice_id = ? AND lot_id IS NOT NULL`,
-          [id]
-        );
         const cancelProductsToSync = new Set<string>();
-        if (lotLines.length > 0) {
-          for (const row of lotLines[0].values) {
-            const [lotId, productId, qty] = row as [string | null, string | null, number];
-            if (lotId) restoreLot(lotId, Math.max(1, Number(qty) || 1));
-            if (productId) cancelProductsToSync.add(productId);
-          }
+        for (const line of invoiceStockLines(id)) {
+          // STOCK-LOT-INTEGRITY — was die Zeile genommen hat, kommt zurück (0 = nichts, etwa weil
+          // der Agentenverkauf das Stück hält). Altzeile (NULL): wie bisher nur ihr Los.
+          if (line.stockTaken !== null) giveBackStock(line.productId, line.lotId, line.stockTaken, now);
+          else if (line.lotId) restoreLot(line.lotId, line.qty);
+          if (line.productId) cancelProductsToSync.add(line.productId);
         }
         for (const pid of cancelProductsToSync) {
           syncProductQuantity(pid);
@@ -627,6 +635,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
     const deltaAmount = deltaPayment && deltaPayment.amount > 0.005 ? deltaPayment.amount : 0;
 
+    // STOCK-LOT-INTEGRITY — eine aus Agentenverkäufen umgewandelte Rechnung: ihre Zeilen nehmen
+    // keinen Bestand (den hält der Verkauf). Ein Neuschreiben der Zeilen würde ihn ein zweites Mal
+    // nehmen — Änderung nur über „Undo conversion" und neu umwandeln.
+    if (query('SELECT 1 FROM agent_transfers WHERE invoice_id = ? LIMIT 1', [id]).length > 0) {
+      throw new Error('This invoice was converted from agent sales. Undo the conversion to change it.');
+    }
+
     // ── Kundenwechsel nur ohne Geldfluss. Der Edit bucht nur die INVOICE-Quelle um; die
     // PAYMENT-Beine (CR AR des alten Kunden) und die Delta-Zahlung (recordPayment liest den
     // Kunden aus dem noch alten Store-Stand) blieben beim alten Kunden → Forderung auf zwei
@@ -695,19 +710,18 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       }
       const effCustomerId = customerId !== undefined ? customerId : inv0.customerId;
 
-      // 3. Domain: alte Lots restoren (Bestand zurueck), dann Lines loeschen.
-      {
-        const oldLines = db.exec(
-          `SELECT lot_id, product_id, quantity FROM invoice_lines WHERE invoice_id = ? AND lot_id IS NOT NULL`,
-          [id]
-        );
-        if (oldLines.length > 0) {
-          for (const row of oldLines[0].values) {
-            const [lotId, productId, qty] = row as [string | null, string | null, number];
-            if (lotId) restoreLot(lotId, Math.max(1, Number(qty) || 1));
-            if (productId) productsToSync.add(productId);
-          }
+      // 3. Domain: alte Zeilen geben ihren Bestand zurueck, dann Lines loeschen.
+      //    STOCK-LOT-INTEGRITY — mit Nachweis exakt dieser; Altzeile mit Los wie bisher ihr Los.
+      //    Altzeile OHNE Los (NULL): ob der alte Bezahl-Abzug schon lief, ist nicht bekannt — ihre
+      //    Menge wird deshalb unverändert als Altbestand mitgeführt (`legacyCarry`), nicht geraten.
+      const legacyCarry = new Map<string, number>();
+      for (const line of invoiceStockLines(id)) {
+        if (line.stockTaken !== null) giveBackStock(line.productId, line.lotId, line.stockTaken, now);
+        else if (line.lotId) restoreLot(line.lotId, line.qty);
+        else if (line.productId && !isServiceProduct(line.productId)) {
+          legacyCarry.set(line.productId, (legacyCarry.get(line.productId) ?? 0) + line.qty);
         }
+        if (line.productId) productsToSync.add(line.productId);
       }
       // Sync (Scope A): alte Line-IDs VOR dem DELETE erfassen — Geraet B muss exakt
       // dieselben Zeilen entfernen. trackChange('delete') braucht nur die id (keinen
@@ -748,16 +762,31 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       assertProductsSellable(resolvedLines.map(l => l.productId));
       assertLotsConsumable(resolvedLines.map(l => ({ lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) })));
       assertLotTrackedLinesResolved(resolvedLines.map(l => ({ productId: l.productId, lotId: l._resolvedLotId })));
+      // Was eine Altzeile ohne Los schon abdeckt, bleibt Altbestand (NULL); nur der Rest wird genommen.
+      const carryLeft = new Map(legacyCarry);
+      const legacyPart = resolvedLines.map(l => {
+        if (l._resolvedLotId || !l.productId) return 0;
+        const have = carryLeft.get(l.productId) ?? 0;
+        const part = Math.min(have, Math.max(1, l.quantity || 1));
+        if (part > 0) carryLeft.set(l.productId, have - part);
+        return part;
+      });
+      assertLotLessStockAvailable(resolvedLines.map((l, i) => ({ productId: l.productId, lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) - legacyPart[i], preTaken: Math.max(1, l.quantity || 1) - legacyPart[i] <= 0 })));
 
       let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
       const stmt = db.prepare(
         `INSERT INTO invoice_lines (id, invoice_id, product_id, description, quantity, unit_price, purchase_price_snapshot,
-          vat_rate, tax_scheme, vat_amount, line_total, position, lot_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          vat_rate, tax_scheme, vat_amount, line_total, position, lot_id, stock_taken)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       resolvedLines.forEach((l, i) => {
         const qty = Math.max(1, l.quantity || 1);
-        stmt.run([l._id, id, l.productId, l.description || null, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId]);
+        const rest = qty - legacyPart[i];
+        // Ganz Altbestand → NULL wie vorher; sonst genau der jetzt genommene Teil.
+        const taken = legacyPart[i] > 0 && rest <= 0
+          ? null
+          : takeStock({ productId: l.productId, lotId: l._resolvedLotId, qty: rest }, now);
+        stmt.run([l._id, id, l.productId, l.description || null, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId, taken]);
         netAmount += l.unitPrice * qty;
         totalVat += l.vatAmount;   // L-17: vatAmount ist pro Line (createDirect-Konvention), kein ×qty
         totalPurchase += l._resolvedCost * qty;
@@ -1238,6 +1267,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
   deleteInvoice: (id) => {
     const db = getDatabase();
+    const now = new Date().toISOString();
     // Bestandsschutz VOR jedem Write: eine stornierte Rechnung hat ihre Lose schon zurueckgegeben,
     // eine Retoure/Gutschrift hat Ware schon zurueckgebucht — der Lot-Restore unten gaebe dasselbe
     // Stueck ein zweites Mal frei (Phantom-Bestand, erneut verkaufbar).
@@ -1290,18 +1320,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Phase 3 — Stock-Lots restoren bevor invoice_lines weg sind.
     // Phase 7 Sync: betroffene Produkte sammeln, am Ende sync.
     const deleteProductsToSync = new Set<string>();
-    {
-      const lotLines = db.exec(
-        `SELECT lot_id, product_id, quantity FROM invoice_lines WHERE invoice_id = ? AND lot_id IS NOT NULL`,
-        [id]
-      );
-      if (lotLines.length > 0) {
-        for (const row of lotLines[0].values) {
-          const [lotId, productId, qty] = row as [string | null, string | null, number];
-          if (lotId) restoreLot(lotId, Math.max(1, Number(qty) || 1));
-          if (productId) deleteProductsToSync.add(productId);
-        }
-      }
+    for (const line of invoiceStockLines(id)) {
+      // STOCK-LOT-INTEGRITY — mit Nachweis exakt dieser Bestand; Altzeile wie bisher nur ihr Los.
+      if (line.stockTaken !== null) giveBackStock(line.productId, line.lotId, line.stockTaken, now);
+      else if (line.lotId) restoreLot(line.lotId, line.qty);
+      if (line.productId) deleteProductsToSync.add(line.productId);
     }
     db.run(`DELETE FROM invoice_lines WHERE invoice_id = ?`, [id]);
     for (const pid of deleteProductsToSync) {

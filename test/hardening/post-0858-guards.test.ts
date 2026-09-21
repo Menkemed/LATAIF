@@ -368,6 +368,8 @@ const lotRem = (db: Db, lot: string): number => n(db, 'SELECT qty_remaining FROM
   product(db, 'p-storno', 1);
   db.run("UPDATE stock_lots SET status = 'CANCELLED' WHERE id = 'lot-p-storno'");
   product(db, 'p-service', null);
+  // STOCK-LOT-INTEGRITY — ohne Los ist products.quantity der Bestand: ein Stück muss da sein.
+  db.run("UPDATE products SET quantity = 1 WHERE id = 'p-service'");
   reload();
   for (const pid of ['p-leer', 'p-storno']) {
     const vorInv = n(db, 'SELECT COUNT(*) FROM invoices');

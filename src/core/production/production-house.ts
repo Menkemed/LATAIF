@@ -44,6 +44,18 @@ import { createPayload } from '@/core/data/write-payloads';
 import { TAX_SCHEMES, type Product } from '@/core/models/types';
 import type { MediaSource } from '@/core/media/product-media-create';
 import { createExpenseInHouse, PayablesRejected } from '@/core/payables/payables-house';
+import { hasLotHistory } from '@/core/lots/stock-contract';
+
+/** STOCK-LOT-INTEGRITY — der dauerhafte Verbrauchsnachweis eines Produktionseingangs (`production_inputs.lot_consumption`). */
+export interface ProductionInputConsumption {
+  /** Genau diese Lose mit genau dieser Menge. */
+  lots: Array<{ lotId: string; qty: number }>;
+  /** Ohne Los: so viel wurde von `products.quantity` genommen. */
+  qty: number;
+  /** Der Status des Eingangs davor — Löschen stellt ihn wieder her. */
+  prevStatus: string;
+}
+
 
 /**
  * Die Felder, die ein Ausgang aus der Maske mitbringt — genau die, die `createRecord` bisher in die
@@ -295,16 +307,27 @@ export async function createProductionInHouse(input: ProductionCreateInput, ctx:
   // (H-04: sonst Phantom-Bestand und doppelt gezählter Wert), Menge aus den Losen.
   for (const p of inputs) {
     const inputRowId = uuid();
+    // STOCK-LOT-INTEGRITY — der exakte Verbrauch dieses Eingangs, dauerhaft an seiner Zeile: welche
+    // Lose mit welcher Menge, ohne Los die genommene Menge, und der Status davor. Löschen gibt GENAU
+    // das zurück — nie „alle Lose des Artikels".
+    const lots = getActiveLots(p.id).map((l) => ({ lotId: l.id, qty: l.qtyRemaining }));
+    const lotLess = lots.length === 0 && !hasLotHistory(p.id);
+    const qtyTaken = lotLess
+      ? Math.max(0, Number(query('SELECT COALESCE(quantity, 0) AS q FROM products WHERE id = ?', [p.id])[0]?.q ?? 0))
+      : 0;
+    const prevStatus = String(query('SELECT stock_status FROM products WHERE id = ?', [p.id])[0]?.stock_status ?? 'in_stock');
+    const consumption: ProductionInputConsumption = { lots, qty: qtyTaken, prevStatus };
     db.run(
-      `INSERT INTO production_inputs (id, record_id, product_id, product_snapshot, input_value) VALUES (?, ?, ?, ?, ?)`,
-      [inputRowId, id, p.id, JSON.stringify(p.snapshot), bhd(fils(p.purchasePrice))],
+      `INSERT INTO production_inputs (id, record_id, product_id, product_snapshot, input_value, lot_consumption) VALUES (?, ?, ?, ?, ?, ?)`,
+      [inputRowId, id, p.id, JSON.stringify(p.snapshot), bhd(fils(p.purchasePrice)), JSON.stringify(consumption)],
     );
     // POST-PARITY R7A (PP-10) — die Eingangszeile reist mit dem Beleg (vorher nur `production_records`:
     // ein anderer Datenbank-Rechner sah einen Beleg ohne Ein- und Ausgänge).
     trackChange('production_inputs', inputRowId, 'insert', {});
     db.run(`UPDATE products SET stock_status = 'consumed', updated_at = ? WHERE id = ?`, [now, p.id]);
-    trackProductRow(p.id);   // LAN-Sync Phase 1b — Legacy-Input ohne Lose; für Lot-Inputs überschreibt syncProductQuantity
-    for (const lot of getActiveLots(p.id)) consumeLot(lot.id, lot.qtyRemaining);
+    if (qtyTaken > 0) db.run('UPDATE products SET quantity = COALESCE(quantity, 0) - ? WHERE id = ?', [qtyTaken, p.id]);
+    trackProductRow(p.id);   // LAN-Sync Phase 1b — für Lot-Inputs überschreibt syncProductQuantity
+    for (const l of lots) consumeLot(l.lotId, l.qty);
     syncProductQuantity(p.id);
   }
 

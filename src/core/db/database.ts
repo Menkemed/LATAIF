@@ -2328,6 +2328,19 @@ function runMigrations(database: Database): void {
        BEGIN
          UPDATE suppliers SET revision = OLD.revision + 1 WHERE id = NEW.id;
        END`,
+
+    // ── STOCK-LOT-INTEGRITY — der Bestandsnachweis je Verbrauch ────────────────
+    //
+    // `invoice_lines.stock_taken`: so viele Stück hat DIESE Zeile beim Verkauf aus dem Bestand
+    // genommen (aus ihrem Los oder, ohne Los, aus `products.quantity`); 0 = nichts (Dienstleistung,
+    // oder der Agentenverkauf hielt das Stück schon). NULL = Zeile von vor diesem Vertrag.
+    // `agent_transfers.stock_lot_id` / `stock_taken`: was der Agentenverkauf verbraucht hat.
+    // `production_inputs.lot_consumption`: JSON des exakten Verbrauchs je Eingang (Los + Menge bzw.
+    // Menge ohne Los). NULL = Produktion von vor diesem Vertrag → Löschen gesperrt.
+    `ALTER TABLE invoice_lines ADD COLUMN stock_taken REAL`,
+    `ALTER TABLE agent_transfers ADD COLUMN stock_lot_id TEXT`,
+    `ALTER TABLE agent_transfers ADD COLUMN stock_taken REAL`,
+    `ALTER TABLE production_inputs ADD COLUMN lot_consumption TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

@@ -6,7 +6,43 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { ensureTransferSequence, TRANSFER_DOC_TYPE } from '@/core/agents/transfer-sequence';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
-import { trackProductRow } from '@/core/lots/lot-queries';
+import { consumeLot, syncProductQuantity, trackProductRow } from '@/core/lots/lot-queries';
+import { assertLotLessStockAvailable, giveBackStock, hasLotHistory } from '@/core/lots/stock-contract';
+import { STOCK_UNAVAILABLE_MESSAGE } from '@/core/lots/lot-availability';
+import { trackChange } from '@/core/sync/sync-service';
+
+/**
+ * STOCK-LOT-INTEGRITY — was die Rechnungszeile eines Agentenvorgangs NICHT noch einmal nehmen darf.
+ * Mit Nachweis (`stock_taken`): das Stück hält der Verkauf, samt seinem Los. Ohne Nachweis und ohne
+ * Los (Altvorgang): der alte Verkauf zog `quantity` schon ab — ebenfalls gehalten. Altvorgang MIT
+ * Los: wie bisher verbraucht erst die Rechnung das Los.
+ */
+function agentHeldStock(transferId: string, productId: string): { stockPreTaken?: boolean; lotId?: string } {
+  const t = query('SELECT stock_lot_id, stock_taken FROM agent_transfers WHERE id = ?', [transferId])[0];
+  const taken = t?.stock_taken;
+  if (taken !== null && taken !== undefined) {
+    return { stockPreTaken: true, ...(t?.stock_lot_id ? { lotId: String(t.stock_lot_id) } : {}) };
+  }
+  return hasLotHistory(productId) ? {} : { stockPreTaken: true };
+}
+
+/** Gibt genau den Verbrauch eines (verkauften, nicht umgewandelten) Agentenvorgangs zurück — einmal. */
+function giveBackAgentStock(transferId: string, productId: string, now: string): void {
+  const t = query('SELECT stock_lot_id, stock_taken, invoice_id FROM agent_transfers WHERE id = ?', [transferId])[0];
+  const taken = Number(t?.stock_taken ?? 0);
+  if (!t || !(taken > 0) || String(t.invoice_id ?? '') !== '') return;
+  const lotId = t.stock_lot_id ? String(t.stock_lot_id) : null;
+  giveBackStock(productId, lotId, taken, now);
+  if (lotId) syncProductQuantity(productId);
+  // Das Stück ist wieder da: verkaufbar, nicht mehr „sold"/„with_agent" (ohne Los stellt giveBackStock das selbst um).
+  getDatabase().run(
+    `UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ? AND COALESCE(quantity, 0) > 0 AND stock_status IN ('sold', 'with_agent', 'reserved')`,
+    [now, productId],
+  );
+  trackProductRow(productId);
+  getDatabase().run('UPDATE agent_transfers SET stock_taken = 0 WHERE id = ?', [transferId]);
+  trackChange('agent_transfers', transferId, 'update', {});
+}
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { vatEngine } from '@/core/tax/vat-engine';
@@ -19,7 +55,6 @@ import {
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
-import { deriveProductCostFromLots } from '@/core/lots/lot-queries';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
@@ -345,6 +380,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   markTransferSold: (id, actualPrice, buyerInfo, acknowledgeBelowPrice) => {
     const transfer = get().getTransfer(id);
     if (!transfer) return;
+    // STOCK-LOT-INTEGRITY — nur ein Vorgang, der noch draußen ist, wird verkauft: ein zweiter
+    // Aufruf (Doppelklick, Wiederholung) verbraucht nichts ein zweites Mal. Aus der DATENBANK.
+    const liveStatus = String(query('SELECT status FROM agent_transfers WHERE id = ?', [id])[0]?.status ?? '');
+    if (liveStatus !== 'transferred') {
+      throw new Error(`TRANSFER_NOT_OPEN: this transfer is "${liveStatus}" — only one that is still out can be sold`);
+    }
     // v0.7.22 — SSOT-Economics (core/agent/economics.ts):
     //  'full'  → settlement = actualPrice (altes Verhalten, kein Split)
     //  'split' → settlement = Our Price + Shop-Anteil am Überschuss; Kunde behält Rest.
@@ -359,6 +400,16 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }
     const settlement = econ.ourSettlement;
     const now = new Date().toISOString();
+    // STOCK-LOT-INTEGRITY — VOR jedem Schreiben: ist das Stück da? Mit Los: ein offenes Los
+    // (ältestes zuerst); ohne Los: `products.quantity` ≥ 1. Sonst kein Verkauf.
+    const lotTracked = hasLotHistory(transfer.productId);
+    const heldLot = lotTracked
+      ? (query(
+          `SELECT id, unit_cost FROM stock_lots WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining >= 1
+            ORDER BY acquired_at ASC, id ASC LIMIT 1`, [transfer.productId])[0] ?? null)
+      : null;
+    if (lotTracked && !heldLot) throw new Error(STOCK_UNAVAILABLE_MESSAGE);
+    if (!lotTracked) assertLotLessStockAvailable([{ productId: transfer.productId, lotId: null, qty: 1 }]);
 
     get().updateTransfer(id, {
       status: 'sold', actualSalePrice: actualPrice, buyerInfo,
@@ -370,16 +421,23 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       commissionAmount: 0, settlementAmount: settlement, soldAt: now,
     });
 
-    // Update product
+    // Update product — STOCK-LOT-INTEGRITY: der Verkauf verbraucht GENAU ein Stück, mit Nachweis
+    // am Vorgang (`stock_lot_id`/`stock_taken`). Die spätere Rechnung nimmt es nicht noch einmal.
     const db = getDatabase();
-    // Quantity-aware: dekrementiere Stück; erst wenn Bestand = 0 → stock_status='sold'.
+    if (heldLot) {
+      consumeLot(String(heldLot.id), 1);
+      syncProductQuantity(transfer.productId);
+    } else {
+      db.run(`UPDATE products SET quantity = COALESCE(quantity, 0) - 1 WHERE id = ?`, [transfer.productId]);
+    }
     db.run(
       `UPDATE products SET
-         quantity = CASE WHEN COALESCE(quantity,1) > 1 THEN COALESCE(quantity,1) - 1 ELSE 0 END,
-         stock_status = CASE WHEN COALESCE(quantity,1) > 1 THEN stock_status ELSE 'sold' END,
+         stock_status = CASE WHEN COALESCE(quantity,0) > 0 THEN stock_status ELSE 'sold' END,
          last_sale_price = ?, updated_at = ? WHERE id = ?`,
       [actualPrice, now, transfer.productId]);
     trackProductRow(transfer.productId);   // LAN-Sync Phase 1b
+    db.run('UPDATE agent_transfers SET stock_lot_id = ?, stock_taken = 1 WHERE id = ?', [heldLot ? String(heldLot.id) : null, id]);
+    trackChange('agent_transfers', id, 'update', {});
     saveDatabase();
 
     // ZIEL.md §3a — Sold-Forderung ans zentrale Ledger.
@@ -392,7 +450,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       // H-01-Geschwister: Wareneinsatz (Lot-Cost) mitgeben, damit der Sold-Post
       // DR COGS / CR INVENTORY bucht. fifoCost = Cost des aeltesten aktiven Lots
       // (Agent-Sale ist 1 Stueck). Kein Lot → 0 → COGS-Guard ueberspringt.
-      const soldCost = deriveProductCostFromLots(transfer.productId)?.fifoCost ?? 0;
+      // STOCK-LOT-INTEGRITY — der Einstand des Loses, das dieser Verkauf verbraucht hat.
+      const soldCost = heldLot ? Number(heldLot.unit_cost) || 0 : 0;
       safePost(`postAgentTransferSold(${id})`, () => {
         if (hasLedgerEntries('AGENT_TRANSFER_SOLD', id)) return;
         postAgentTransferSold({ transferId: id, amount: settlement, soldAt: now, cost: soldCost }, customerId);
@@ -406,6 +465,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const transfer = get().getTransfer(id);
     if (!transfer) return;
     const now = new Date().toISOString();
+    giveBackAgentStock(id, transfer.productId, now);
     get().updateTransfer(id, { status: 'returned', returnedAt: now });
     const db = getDatabase();
     // Plan §Product §5: zurück zu OWN wenn Ware vom Agent zurückkommt
@@ -513,6 +573,12 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const transfer = get().getTransfer(id);
     const now = new Date().toISOString();
 
+    // STOCK-LOT-INTEGRITY — ein umgewandelter Vorgang hängt an seiner Rechnung: erst die Umwandlung
+    // rückgängig machen. Ein verkaufter gibt genau seinen Nachweis zurück.
+    if (transfer && String(query('SELECT invoice_id FROM agent_transfers WHERE id = ?', [id])[0]?.invoice_id ?? '') !== '') {
+      throw new Error('This transfer is on an invoice — undo the conversion first, then delete it.');
+    }
+    if (transfer) giveBackAgentStock(id, transfer.productId, now);
     // Produkt zurück in Stock wenn nur transferred war.
     if (transfer && transfer.status === 'transferred') {
       db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
@@ -588,6 +654,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       customerId,
       [{
         productId: transfer.productId,
+        ...agentHeldStock(transferId, transfer.productId),
         unitPrice: calc.netAmount,
         purchasePrice,
         taxScheme: scheme,
@@ -703,6 +770,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
       const persistedVat = calc.internalVatAmount ?? calc.vatAmount;
       return {
         productId: t.productId,
+        ...agentHeldStock(t.id, t.productId),
         unitPrice: calc.netAmount,
         purchasePrice,
         taxScheme: scheme,

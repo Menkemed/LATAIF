@@ -32,6 +32,7 @@ import {
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
+import { giveBackStock, hasLotHistory, isServiceProduct } from '@/core/lots/stock-contract';
 import { restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 // CENTRAL-UI-PARITY R6E — der Storno ist EINE Hausfolge (Primary und PC2); der Store ist nur Anschluss.
 import { runOnPrimary } from '@/core/data/primary-action';
@@ -159,9 +160,15 @@ function applyDisposition(
       // So bleibt Cost-Provenance erhalten: Wenn die Ware spaeter neu verkauft
       // wird, kommt der korrekte alte Cost-Snapshot raus.
       if (line.invoiceLineId) {
-        const ilRows = query(`SELECT lot_id FROM invoice_lines WHERE id = ?`, [line.invoiceLineId]);
+        const ilRows = query(`SELECT lot_id, stock_taken FROM invoice_lines WHERE id = ?`, [line.invoiceLineId]);
         const lotId = (ilRows[0]?.lot_id as string | null) || null;
         if (lotId) restoreLot(lotId, qty);
+        // STOCK-LOT-INTEGRITY — Artikel ohne Los: das zurückgenommene Stück kommt in
+        // `products.quantity` zurück (nur Zeilen mit Nachweis; Altzeilen wie bisher nur Status).
+        else if (ilRows[0]?.stock_taken !== null && ilRows[0]?.stock_taken !== undefined
+          && !isServiceProduct(line.productId) && !hasLotHistory(line.productId)) {
+          giveBackStock(line.productId, null, qty, now);
+        }
       }
       // Phase 7 Sync — products.quantity = Σ qty_remaining; ersetzt das frueher manuelle Increment.
       syncProductQuantity(line.productId);

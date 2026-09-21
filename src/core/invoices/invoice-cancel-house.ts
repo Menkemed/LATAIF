@@ -16,6 +16,7 @@
 // darin storniert nicht mehr trotzdem.
 // ════════════════════════════════════════════════════════════════════════════
 import { query, currentBranchId } from '@/core/db/helpers';
+import { hasLotHistory, isServiceProduct } from '@/core/lots/stock-contract';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { watchLedgerPosts } from '@/core/ledger/posting';
 import { returnLineAmounts } from '@/core/returns/return-lines';
@@ -45,7 +46,7 @@ export interface InvoiceCancelled { invoiceId: string; returnId?: string }
 
 /**
  * „Cancel Invoice": mit erhaltenem Geld Retoure (Restmengen, Rechnungspreis) + Freigabe + Erstattung
- * im gewählten Weg; ohne Geld je Zeile ein Stück zurück in den Bestand (wie der Bildschirm) — dann
+ * im gewählten Weg; ohne Geld gibt der Storno genau den Bestandsnachweis jeder Zeile zurück — dann
  * der Status CANCELLED. `beforeWrite` ist der letzte Wächter vor dem ersten Schreiben (fern: Fassung).
  */
 export function cancelInvoiceInHouse(input: InvoiceCancelInput, branchId: string, beforeWrite?: () => void): InvoiceCancelled {
@@ -57,7 +58,7 @@ export function cancelInvoiceInHouse(input: InvoiceCancelInput, branchId: string
   if (!inv) throw new InvoiceActionRejected('INVOICE_NOT_FOUND', 'no such invoice in this branch');
   const blocker = invoiceCancelBlocker(String(inv.status));
   if (blocker) throw new InvoiceActionRejected(blocker.code, blocker.message);
-  // Ohne Geld läuft der Storno NICHT über eine Retoure: er gibt je Zeile ein Stück frei und setzt
+  // Ohne Geld läuft der Storno NICHT über eine Retoure: er gibt die Ware der Zeilen frei und setzt
   // CANCELLED. Eine schon wirksame Teil-Retoure/Gutschrift hätte dann ihre Ware ein zweites Mal im
   // Bestand und die Rechnung (Forderung + Erlös des Rests) bliebe gebucht, weil updateInvoice bei
   // aktiver Gutschrift nicht mehr reversiert. Deshalb hier ablehnen — der Rest geht als Retoure.
@@ -111,11 +112,23 @@ export function cancelInvoiceInHouse(input: InvoiceCancelInput, branchId: string
         useSalesReturnStore.getState().refundReturn(returnId);
       }
     } else {
-      // Kein Geld erhalten → nur die Ware freigeben, je Zeile ein Stück (wie der Bildschirm).
+      // Kein Geld erhalten → die Ware gibt der Storno selbst frei (`updateInvoice` CANCELLED):
+      // STOCK-LOT-INTEGRITY — genau den Nachweis der Zeile bzw. ihr Los. Das frühere „je Zeile ein
+      // Stück dazu" zählte doppelt (Los-Artikel) oder gab zurück, was nie genommen war (Altzeile
+      // ohne Los, unbezahlt: der alte Abzug lief erst beim Bezahlen). Für eine solche Altzeile
+      // bleibt nur der Status wie vorher auf 'in_stock'.
       useProductStore.getState().loadProducts();
-      for (const l of query('SELECT product_id FROM invoice_lines WHERE invoice_id = ? ORDER BY rowid', [input.invoiceId])) {
-        const p = useProductStore.getState().getProduct(String(l.product_id ?? ''));
-        if (p) useProductStore.getState().updateProduct(p.id, { quantity: (p.quantity || 0) + 1, stockStatus: 'in_stock' });
+      for (const l of query(
+        `SELECT il.product_id FROM invoice_lines il
+          WHERE il.invoice_id = ? AND il.stock_taken IS NULL AND il.lot_id IS NULL AND il.product_id IS NOT NULL`,
+        [input.invoiceId],
+      )) {
+        const pid = String(l.product_id);
+        if (isServiceProduct(pid) || hasLotHistory(pid)) continue;
+        const p = useProductStore.getState().getProduct(pid);
+        if (p && (p.stockStatus === 'reserved' || p.stockStatus === 'sold')) {
+          useProductStore.getState().updateProduct(p.id, { stockStatus: 'in_stock' });
+        }
       }
     }
     useInvoiceStore.getState().loadInvoices();
