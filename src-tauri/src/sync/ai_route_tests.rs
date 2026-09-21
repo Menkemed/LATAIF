@@ -515,7 +515,8 @@ fn key_present_follows_the_key_file_and_nothing_else() {
 
 #[test]
 fn the_status_route_returns_one_boolean_and_never_the_key() {
-    let src = include_str!("routes.rs");
+    // Zeilenenden vereinheitlichen: ein Windows-Checkout (autocrlf) liefert CRLF, sonst fände "\n}\n" nie ein Ende.
+    let src = include_str!("routes.rs").replace("\r\n", "\n");
     let i = src.find("async fn ai_status_route").expect("the status handler exists");
     let end = i + src[i..].find("\n}\n").expect("handler end");
     let body = &src[i..end];
