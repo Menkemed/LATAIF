@@ -161,9 +161,12 @@ export function classifyLegacyInvoiceLines(db: { run: (sql: string, p?: unknown[
  */
 export const LEGACY_STOCK_LINES = 'LEGACY_STOCK_LINES';
 /** Was die Maske zeigt: der Grund und der Weg, in normalen Worten. */
+// Der einzige Weg hierher ist `editInvoice`. Ob die Rechnung STORNIERT werden kann, entscheidet ein
+// anderer Vertrag (Retouren, Gutschriften, eingelöstes Guthaben sperren das Storno) — die Meldung
+// verspricht deshalb kein Storno, sondern nennt es als Weg, WENN er offen ist.
 export const LEGACY_STOCK_LINES_MESSAGE =
-  'This invoice was created before the current stock tracking, so its items cannot be changed — '
-  + 'how much stock they took back then is not recorded. Cancel this invoice and create a new one instead.';
+  'This invoice was created before the current stock tracking, so its items cannot be changed. '
+  + 'If cancellation is available, cancel it and create a new invoice. Otherwise, contact the administrator.';
 
 /** Ein fachliches Nein mit interner Kennung; die Oberfläche zeigt nur den Satz. */
 class LegacyStockLinesRejected extends Error {

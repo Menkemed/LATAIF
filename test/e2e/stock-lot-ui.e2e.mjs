@@ -560,7 +560,7 @@ try {
     const errL = await fehlerText(c);
     MSG.push('4h Ändern Altrechnung: ' + (errL || '(keine Meldung: ' + m + ')'));
     ok(S(dbQ("SELECT * FROM invoice_lines WHERE invoice_id = 'leg-inv'")) === vorL && qty('lg-a') === 3, `4h Ändern der Altrechnung: nichts geändert, Bestand 3 (${m})`);
-    ok(/created before the current stock tracking/i.test(errL) && /cancel this invoice/i.test(errL) && !/LEGACY_STOCK_LINES/.test(errL),
+    ok(/created before the current stock tracking/i.test(errL) && /if cancellation is available/i.test(errL) && !/LEGACY_STOCK_LINES/.test(errL),
       `4h …verständliche Meldung ohne Fehlercode: „${errL.slice(0, 180)}"`);
     m = await listeVollZahlen(c, 'leg-inv');
     ok(await warteAuf(() => one("SELECT status FROM invoices WHERE id = 'leg-inv'").status === 'FINAL'), `4i Altrechnung voll bezahlt → FINAL (${m}; ${await fehlerText(c)})`);

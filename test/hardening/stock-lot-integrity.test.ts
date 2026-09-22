@@ -424,7 +424,7 @@ function altRechnung(db: Db, pid: string, lineQty: number, qtyNachAltvertrag: nu
   ok(/^LEGACY_STOCK_LINES\|/.test(m) && zustand(db) === vor, `3C Ändern einer Altzeile: fail-closed, nichts geändert (${m.slice(0, 60)})`);
   // Die Kennung bleibt INTERN (Urteil/Protokoll); der Satz, den ein Mensch liest, trägt sie nicht.
   ok(m.split('|').slice(1).join('|') === LEGACY_STOCK_LINES_MESSAGE && !/LEGACY_STOCK_LINES/.test(LEGACY_STOCK_LINES_MESSAGE)
-    && /cancel this invoice/i.test(LEGACY_STOCK_LINES_MESSAGE),
+    && /if cancellation is available/i.test(LEGACY_STOCK_LINES_MESSAGE),
     `3C …die Meldung erklärt es in normalen Worten, ohne Fehlercode (${LEGACY_STOCK_LINES_MESSAGE.slice(0, 60)}…)`);
   // Löschen einer FINALen Altzeile (qty 3): genau 1 zurück, nicht 3.
   product(db, 'pC3', null, 5); reload();
