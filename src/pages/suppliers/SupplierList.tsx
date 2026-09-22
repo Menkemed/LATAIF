@@ -105,7 +105,7 @@ export function SupplierList() {
             display: 'grid', gridTemplateColumns: '2fr 1.5fr 1fr 1fr 1fr 0.9fr 0.9fr',
             gap: 16, padding: '14px 18px', borderBottom: '1px solid #E5E9EE',
           }}>
-            {['NAME', 'CONTACT', 'TOTAL PURCHASES', 'PAID', 'OUTSTANDING', 'CREDIT', 'STATUS'].map(h => (
+            {['NAME', 'CONTACT', 'PURCHASES + EXPENSES', 'PAID', 'OUTSTANDING', 'CREDIT', 'STATUS'].map(h => (
               <span key={h} className="text-overline">{h}</span>
             ))}
           </div>

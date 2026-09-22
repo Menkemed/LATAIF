@@ -518,7 +518,7 @@ export function BusinessReportsPage() {
         ]};
       case 'payables':
         return { title: 'Payables Report', rows: [
-          ['Supplier', 'Total Purchases', 'Paid', 'Outstanding'],
+          ['Supplier', 'Purchases + Expenses', 'Paid', 'Outstanding'],
           ...payablesReport.bySupplier.map(s => [s.name, s.totalPurchases.toFixed(2), s.totalPaid.toFixed(2), s.outstanding.toFixed(2)]),
           ['', '', '', ''],
           ['Total outstanding', '', '', payablesReport.total.toFixed(2)],
@@ -811,7 +811,7 @@ export function BusinessReportsPage() {
                 <div key={s.name} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
                   <span style={{ color: '#0F0F10' }}>{s.name}</span>
                   <div className="flex gap-6">
-                    <span style={{ color: '#6B7280' }}>of <Bhd v={s.totalPurchases}/> total</span>
+                    <span style={{ color: '#6B7280' }}>of <Bhd v={s.totalPurchases}/> purchases + expenses</span>
                     <span className="font-mono" style={{ color: '#DC2626' }}>− <Bhd v={s.outstanding}/> BHD</span>
                   </div>
                 </div>
