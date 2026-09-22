@@ -155,6 +155,25 @@ export function classifyLegacyInvoiceLines(db: { run: (sql: string, p?: unknown[
     SELECT il.id FROM invoice_lines il JOIN invoices i ON i.id = il.invoice_id WHERE ${lotLess} AND NOT ${wasFinal})`);
 }
 
+/**
+ * Die Kennung des Neins — intern (Fern-Urteil, Protokoll, Tests). Sie steht NICHT mehr am Anfang
+ * des Satzes, den ein Mensch liest: der Code erklärt niemandem, was zu tun ist.
+ */
+export const LEGACY_STOCK_LINES = 'LEGACY_STOCK_LINES';
+/** Was die Maske zeigt: der Grund und der Weg, in normalen Worten. */
+export const LEGACY_STOCK_LINES_MESSAGE =
+  'This invoice was created before the current stock tracking, so its items cannot be changed — '
+  + 'how much stock they took back then is not recorded. Cancel this invoice and create a new one instead.';
+
+/** Ein fachliches Nein mit interner Kennung; die Oberfläche zeigt nur den Satz. */
+class LegacyStockLinesRejected extends Error {
+  readonly code = LEGACY_STOCK_LINES;
+  constructor() {
+    super(LEGACY_STOCK_LINES_MESSAGE);
+    this.name = 'LegacyStockLinesRejected';
+  }
+}
+
 /** Ändern einer Rechnung mit Altzeilen ohne Los: fail-closed (die Altmenge ist nicht bekannt). */
 export function assertNoLegacyLotLessLines(invoiceId: string): void {
   const legacy = query(
@@ -162,7 +181,7 @@ export function assertNoLegacyLotLessLines(invoiceId: string): void {
     [invoiceId],
   );
   if (legacy.length > 0) {
-    throw new Error('LEGACY_STOCK_LINES: this invoice predates exact stock tracking — its lines cannot be edited. Cancel it and create a new one.');
+    throw new LegacyStockLinesRejected();
   }
 }
 

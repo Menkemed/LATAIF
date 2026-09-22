@@ -92,7 +92,7 @@ const { cancelInvoiceInHouse } = await import('../../src/core/invoices/invoice-c
 const { convertTransferInHouse, undoTransferConversionInHouse } = await import('../../src/core/agents/transfer-house.ts');
 const { createProductionInHouse } = await import('../../src/core/production/production-house.ts');
 const { STOCK_UNAVAILABLE_MESSAGE } = await import('../../src/core/lots/lot-availability.ts');
-const { classifyLegacyInvoiceLines } = await import('../../src/core/lots/stock-contract.ts');
+const { classifyLegacyInvoiceLines, LEGACY_STOCK_LINES_MESSAGE } = await import('../../src/core/lots/stock-contract.ts');
 
 let PASS = 0; const fails: string[] = [];
 const ok = (c: unknown, m: string): void => { if (c) PASS++; else { fails.push(m); console.log('  x ' + m); } };
@@ -421,7 +421,11 @@ function altRechnung(db: Db, pid: string, lineQty: number, qtyNachAltvertrag: nu
   classifyLegacyInvoiceLines(db as never);
   const vor = zustand(db);
   const m = meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(inv2, { lines: [LINE('pC2', 1)] as never, reason: 'x' })));
-  ok(/LEGACY_STOCK_LINES/.test(m) && zustand(db) === vor, `3C Ändern einer Altzeile: fail-closed, nichts geändert (${m.slice(0, 60)})`);
+  ok(/^LEGACY_STOCK_LINES\|/.test(m) && zustand(db) === vor, `3C Ändern einer Altzeile: fail-closed, nichts geändert (${m.slice(0, 60)})`);
+  // Die Kennung bleibt INTERN (Urteil/Protokoll); der Satz, den ein Mensch liest, trägt sie nicht.
+  ok(m.split('|').slice(1).join('|') === LEGACY_STOCK_LINES_MESSAGE && !/LEGACY_STOCK_LINES/.test(LEGACY_STOCK_LINES_MESSAGE)
+    && /cancel this invoice/i.test(LEGACY_STOCK_LINES_MESSAGE),
+    `3C …die Meldung erklärt es in normalen Worten, ohne Fehlercode (${LEGACY_STOCK_LINES_MESSAGE.slice(0, 60)}…)`);
   // Löschen einer FINALen Altzeile (qty 3): genau 1 zurück, nicht 3.
   product(db, 'pC3', null, 5); reload();
   const inv3 = altRechnung(db, 'pC3', 3, 4, 'FINAL');

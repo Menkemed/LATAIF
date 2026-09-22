@@ -354,7 +354,9 @@ export function ProductionPage() {
 
       <Modal open={!!confirmDelete} onClose={() => setConfirmDelete(null)} title="Delete Production Record" width={380}>
         <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 20 }}>
-          Delete this record? This removes only the log entry — previously created output products remain in inventory.
+          Delete this record? The consumed input products go back to stock exactly as they were taken, the output
+          products created here are removed from inventory, and any labor/overhead expense booked on completion is
+          reversed. This is refused if an output product has already left stock (sold, consumed or with an agent).
         </p>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmDelete(null)}>Cancel</Button>
