@@ -108,8 +108,9 @@ export function CustomerDetail() {
   // v0.7.12 — Cross-Link Customer ↔ Supplier: wenn der Customer parallel als
   // Supplier auch existiert (z.B. weil er Consignment-Ware verkauft hat),
   // zeigen wir hier seine Supplier-Sicht (was wir IHM schulden).
-  const { suppliers, loadSuppliers } = useSupplierStore();
-  const { purchases, loadPurchases } = usePurchaseStore();
+  const { suppliers, loadSuppliers, getLedger: getSupplierLedger } = useSupplierStore();
+  // Ohne Selektor: die Seite rendert neu, wenn sich Einkäufe ändern — der Rollen-Saldo liest dann frisch.
+  const { loadPurchases } = usePurchaseStore();
   const [settleModal, setSettleModal] = useState<{ open: boolean; mode: SettleGoldMode; credit?: CustomerGoldCredit }>({ open: false, mode: 'return_customer' });
   const [editing, setEditing] = useState(false);
   // CENTRAL-UI-PARITY R4B — dieselbe Maske, zwei Anschluesse hinter dem Speichern.
@@ -136,12 +137,15 @@ export function CustomerDetail() {
   // v0.7.12 — Match auf Supplier-Mirror via Phone (primaer) + Name (Fallback).
   // Gleiche Logik wie findOrCreateSupplierForConsignor im consignmentStore.
   // Wenn gefunden → 'Also as Supplier' Card mit offenen Payables-Summe + Link.
-  const linkedSupplier = useMemo(() => {
-    if (!customer) return undefined;
-    // CUSTOMER-SUPPLIER-ROLE-LINK — die ausdrückliche Lieferanten-Rolle zuerst; der alte Abgleich
-    // über Telefon/Name nur unter Lieferanten, die mit KEINEM Kunden verknüpft sind (nur Anzeige).
-    const rolle = suppliers.find(s => s.linkedCustomerId === customer.id);
-    if (rolle) return rolle;
+  // CUSTOMER-SUPPLIER-ROLE-LINK — bestätigt ist NUR die ausdrückliche Verknüpfung
+  // (`suppliers.linked_customer_id`). Ein Treffer über Telefon/Name ist höchstens ein möglicher
+  // Treffer: ohne Saldo, ohne automatische Verknüpfung.
+  const linkedSupplier = useMemo(
+    () => (customer ? suppliers.find(s => s.linkedCustomerId === customer.id) : undefined),
+    [customer, suppliers],
+  );
+  const possibleSupplier = useMemo(() => {
+    if (!customer || linkedSupplier) return undefined;
     const frei = suppliers.filter(s => !s.linkedCustomerId);
     const norm = (s?: string) => (s || '').replace(/\s+/g, '').toLowerCase();
     const phoneA = norm(customer.phone);
@@ -150,24 +154,12 @@ export function CustomerDetail() {
       if (byPhone) return byPhone;
     }
     const fullName = `${customer.firstName} ${customer.lastName}`.trim().toLowerCase();
-    if (fullName) {
-      return frei.find(s => (s.name || '').trim().toLowerCase() === fullName);
-    }
-    return undefined;
-  }, [customer, suppliers]);
+    return fullName ? frei.find(s => (s.name || '').trim().toLowerCase() === fullName) : undefined;
+  }, [customer, suppliers, linkedSupplier]);
 
-  // Offene Payables-Summe aus Purchases dieses Supplier-Mirrors.
-  const linkedSupplierOutstanding = useMemo(() => {
-    if (!linkedSupplier) return { amount: 0, openCount: 0 };
-    const ours = purchases.filter(p =>
-      p.supplierId === linkedSupplier.id &&
-      p.status !== 'PAID' && p.status !== 'CANCELLED'
-    );
-    return {
-      amount: ours.reduce((s, p) => s + (p.remainingAmount || 0), 0),
-      openCount: ours.length,
-    };
-  }, [linkedSupplier, purchases]);
+  // Der Saldo der Lieferantenrolle aus DERSELBEN Funktion wie die Lieferanten-Detailseite
+  // (`getLedger`: Outstanding, Total Paid) — keine eigene Summe, keine Verrechnung mit diesem Kunden.
+  const linkedSupplierLedger = linkedSupplier ? getSupplierLedger(linkedSupplier.id) : null;
 
   // Plan repair-multi-supplier — Gold-Credits dieses Kunden
   const goldCreditSummary = useMemo(() => id ? getGoldCreditByCustomer(id) : [], [id, getGoldCreditByCustomer, allGoldCredits]);
@@ -411,11 +403,10 @@ export function CustomerDetail() {
           </Card>
         ) : null}
 
-        {/* v0.7.12 \u2014 Cross-Link: Also as Supplier. Sichtbar wenn der Customer
-            parallel als Supplier existiert (typisch nach Consignment-Sale). Klick
-            navigiert zur Supplier-Sicht damit man die A/P-Sicht behandeln kann. */}
-        {!editing && linkedSupplier && (
-          <div style={{ marginTop: 16 }}>
+        {/* CUSTOMER-SUPPLIER-ROLE-LINK — die Lieferantenrolle DIESER Person (bestätigte Verknüpfung).
+            Eigenes Konto: der Saldo steht hier nur daneben, nie verrechnet. */}
+        {!editing && linkedSupplier && linkedSupplierLedger && (
+          <div style={{ marginTop: 16 }} data-supplier-role-card>
             <button
               onClick={() => navigate(`/suppliers/${linkedSupplier.id}`)}
               className="cursor-pointer w-full text-left"
@@ -438,21 +429,46 @@ export function CustomerDetail() {
                 </div>
                 <div>
                   <div style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500 }}>
-                    Also as Supplier {'\u00b7'} {linkedSupplier.name}
+                    Supplier Role {'\u00b7'} {linkedSupplier.name}
                   </div>
                   <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
-                    {linkedSupplierOutstanding.openCount > 0
-                      ? `We owe ${linkedSupplierOutstanding.openCount} unpaid amount${linkedSupplierOutstanding.openCount === 1 ? '' : 's'} (Consignor payouts, Workshop fees, etc.)`
-                      : 'No outstanding payables to this person right now.'}
+                    Separate supplier account {'\u2014'} not netted with this client's balance.
                   </div>
                 </div>
               </div>
-              <div style={{ textAlign: 'right' }}>
-                <div className="font-mono" style={{ fontSize: 16, color: linkedSupplierOutstanding.amount > 0 ? '#DC2626' : '#6B7280', fontWeight: 600 }}>
-                  <Bhd v={linkedSupplierOutstanding.amount}/> BHD
+              <div style={{ display: 'flex', alignItems: 'center', gap: 24, textAlign: 'right' }}>
+                <div>
+                  <div className="text-overline">Supplier Paid</div>
+                  <div className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }} data-supplier-role-paid>
+                    <Bhd v={linkedSupplierLedger.totalPaid}/> BHD
+                  </div>
                 </div>
-                <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>open payables {'\u00b7'} click to open {'\u2197'}</div>
+                <div>
+                  <div className="text-overline">Supplier Payable {'\u00b7'} Open</div>
+                  <div className="font-mono" style={{ fontSize: 16, color: linkedSupplierLedger.outstandingBalance > 0 ? '#DC2626' : '#6B7280', fontWeight: 600 }} data-supplier-role-open>
+                    <Bhd v={linkedSupplierLedger.outstandingBalance}/> BHD
+                  </div>
+                  <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>View Supplier {'\u2197'}</div>
+                </div>
               </div>
+            </button>
+          </div>
+        )}
+        {!editing && !linkedSupplier && possibleSupplier && (
+          <div style={{ marginTop: 16 }} data-supplier-possible-match>
+            <button
+              onClick={() => navigate(`/suppliers/${possibleSupplier.id}`)}
+              className="cursor-pointer w-full text-left"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '10px 18px', borderRadius: 12, border: '1px dashed #D5D9DE', background: '#FAFBFC', gap: 16,
+              }}
+              title="Same phone or name — not linked. Link the two roles on the supplier to see the balance here."
+            >
+              <div style={{ fontSize: 12, color: '#6B7280' }}>
+                Possible match {'\u00b7'} supplier {'\u201c'}{possibleSupplier.name}{'\u201d'} (same phone or name, not linked {'\u2014'} no balance shown)
+              </div>
+              <div style={{ fontSize: 11, color: '#9CA3AF' }}>View Supplier {'\u2197'}</div>
             </button>
           </div>
         )}

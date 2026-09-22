@@ -77,8 +77,9 @@ export function SupplierDetail() {
   const [showPaySupplierModal, setShowPaySupplierModal] = useState(false);
   // v0.7.12 — Cross-Link Supplier → Customer-Mirror. Spiegel-Logik zur
   // CustomerDetail-Seite (Phone primaer, Name Fallback).
-  const { customers, loadCustomers } = useCustomerStore();
-  const { invoices, loadInvoices } = useInvoiceStore();
+  const { customers, loadCustomers, getCustomerStats } = useCustomerStore();
+  // Ohne Selektor: die Seite rendert neu, wenn sich Rechnungen ändern — der Rollen-Saldo liest dann frisch.
+  const { loadInvoices } = useInvoiceStore();
   // v0.4.4 — KEIN useGoldStore() ohne Selector: das ganze Store-Objekt aendert
   // bei jeder Mutation seine Referenz. In einer useEffect-Dependency + loadAll()
   // im Effect → Endlos-Loop (SupplierDetail fror beim Oeffnen ein, zeigte
@@ -139,11 +140,14 @@ export function SupplierDetail() {
   // zu CustomerDetail (Phone primaer, Name Fallback). Wenn Supplier auch als
   // Customer existiert (typisch bei Consignor-Auto-Mirror), zeigen wir eine
   // Card mit offenen Receivables + Link zum Customer-Profil.
-  const linkedCustomer = useMemo(() => {
-    if (!supplier) return undefined;
-    // CUSTOMER-SUPPLIER-ROLE-LINK — die ausdrückliche Verknüpfung zuerst; der alte Abgleich über
-    // Telefon/Name nur für Lieferanten OHNE Verknüpfung (nur Anzeige, nie eine Buchung).
-    if (supplier.linkedCustomerId) return customers.find(c => c.id === supplier.linkedCustomerId);
+  // CUSTOMER-SUPPLIER-ROLE-LINK — bestätigt ist NUR `linked_customer_id`; ein Telefon-/Namens-
+  // treffer ist höchstens ein möglicher Treffer (ohne Saldo, ohne automatische Verknüpfung).
+  const linkedCustomer = useMemo(
+    () => (supplier?.linkedCustomerId ? customers.find(c => c.id === supplier.linkedCustomerId) : undefined),
+    [supplier, customers],
+  );
+  const possibleCustomer = useMemo(() => {
+    if (!supplier || supplier.linkedCustomerId) return undefined;
     const norm = (s?: string) => (s || '').replace(/\s+/g, '').toLowerCase();
     const phoneA = norm(supplier.phone);
     if (phoneA) {
@@ -151,28 +155,12 @@ export function SupplierDetail() {
       if (byPhone) return byPhone;
     }
     const fullName = (supplier.name || '').trim().toLowerCase();
-    if (fullName) {
-      return customers.find(c => `${c.firstName} ${c.lastName}`.trim().toLowerCase() === fullName);
-    }
-    return undefined;
+    return fullName ? customers.find(c => `${c.firstName} ${c.lastName}`.trim().toLowerCase() === fullName) : undefined;
   }, [supplier, customers]);
 
-  // Offene Receivables aus Invoices dieses Customer-Mirrors.
-  const linkedCustomerReceivable = useMemo(() => {
-    if (!linkedCustomer) return { amount: 0, openCount: 0 };
-    // Invoice hat kein PAID-status; "voll bezahlt" = paidAmount >= grossAmount.
-    const ours = invoices.filter(i => {
-      if (i.customerId !== linkedCustomer.id) return false;
-      if (i.status === 'CANCELLED') return false;
-      const gross = i.grossAmount || 0;
-      const paid = i.paidAmount || 0;
-      return gross > 0 && paid < gross - 0.005;
-    });
-    return {
-      amount: ours.reduce((s, i) => s + Math.max(0, (i.grossAmount || 0) - (i.paidAmount || 0)), 0),
-      openCount: ours.length,
-    };
-  }, [linkedCustomer, invoices]);
+  // Der Saldo der Kundenrolle aus DERSELBEN Funktion wie die Kunden-Detailseite (`getCustomerStats`:
+  // Total Receivable, offene Rechnungen) — keine eigene Summe, keine Verrechnung mit diesem Lieferanten.
+  const linkedCustomerStats = linkedCustomer ? getCustomerStats(linkedCustomer.id) : null;
 
   // Bestehende Formular-Synchronisierung (R6C). Die Regel meldet sie erst, seit R6D das
   // try/finally der Rueckbuchung entfernt hat (vorher uebersprang der Compiler die ganze Komponente).
@@ -393,8 +381,8 @@ export function SupplierDetail() {
         {/* v0.7.12 — Cross-Link Supplier → Customer-Mirror. Sichtbar wenn
             dieselbe Person auch als Customer existiert. Zeigt offene
             Receivables-Summe + Link zum Customer-Profil. */}
-        {linkedCustomer && (
-          <div style={{ marginBottom: 16 }}>
+        {linkedCustomer && linkedCustomerStats && (
+          <div style={{ marginBottom: 16 }} data-linked-client-card>
             <button
               onClick={() => navigate(`/clients/${linkedCustomer.id}`)}
               className="cursor-pointer w-full text-left"
@@ -405,7 +393,7 @@ export function SupplierDetail() {
                 background: 'rgba(61,127,255,0.05)',
                 gap: 16,
               }}
-              title="Open the customer view to see invoices, receivables, and gold credits"
+              title="Open the client view to see invoices, receivables, and gold credits"
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 12 }}>
                 <div style={{
@@ -417,21 +405,46 @@ export function SupplierDetail() {
                 </div>
                 <div>
                   <div style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500 }}>
-                    Also as Customer {'·'} {linkedCustomer.firstName} {linkedCustomer.lastName}
+                    Linked Client {'·'} {linkedCustomer.firstName} {linkedCustomer.lastName}
                   </div>
                   <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
-                    {linkedCustomerReceivable.openCount > 0
-                      ? `${linkedCustomerReceivable.openCount} unpaid invoice${linkedCustomerReceivable.openCount === 1 ? '' : 's'} on the customer side.`
-                      : 'No outstanding receivables from this person right now.'}
+                    Separate client account {'—'} not netted with this supplier's balance.
                   </div>
                 </div>
               </div>
-              <div style={{ textAlign: 'right' }}>
-                <div className="font-mono" style={{ fontSize: 16, color: linkedCustomerReceivable.amount > 0 ? '#3D7FFF' : '#6B7280', fontWeight: 600 }}>
-                  <Bhd v={linkedCustomerReceivable.amount}/> BHD
+              <div style={{ display: 'flex', alignItems: 'center', gap: 24, textAlign: 'right' }}>
+                <div>
+                  <div className="text-overline">Open Invoices</div>
+                  <div className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }} data-linked-client-open-count>
+                    {linkedCustomerStats.openInvoiceCount}
+                  </div>
                 </div>
-                <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>open receivables {'·'} click to open {'↗'}</div>
+                <div>
+                  <div className="text-overline">Client Receivable {'·'} Open</div>
+                  <div className="font-mono" style={{ fontSize: 16, color: linkedCustomerStats.outstanding > 0 ? '#3D7FFF' : '#6B7280', fontWeight: 600 }} data-linked-client-open>
+                    <Bhd v={linkedCustomerStats.outstanding}/> BHD
+                  </div>
+                  <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>View Client {'↗'}</div>
+                </div>
               </div>
+            </button>
+          </div>
+        )}
+        {!linkedCustomer && possibleCustomer && (
+          <div style={{ marginBottom: 16 }} data-client-possible-match>
+            <button
+              onClick={() => navigate(`/clients/${possibleCustomer.id}`)}
+              className="cursor-pointer w-full text-left"
+              style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+                padding: '10px 18px', borderRadius: 12, border: '1px dashed #D5D9DE', background: '#FAFBFC', gap: 16,
+              }}
+              title="Same phone or name — not linked. Link the two roles to see the balance here."
+            >
+              <div style={{ fontSize: 12, color: '#6B7280' }}>
+                Possible match {'·'} client {'“'}{possibleCustomer.firstName} {possibleCustomer.lastName}{'”'} (same phone or name, not linked {'—'} no balance shown)
+              </div>
+              <div style={{ fontSize: 11, color: '#9CA3AF' }}>View Client {'↗'}</div>
             </button>
           </div>
         )}
