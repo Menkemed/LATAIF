@@ -546,11 +546,13 @@ function cashAccountFor(method: PaymentMethod | 'credit'): LedgerAccount {
 // vergleicht deshalb nur den source_module-INVOICE/CN-Anteil; Steuer-Export
 // (nbr-export) nutzt eine dritte Regel: Periode = Tag der Vollzahlung.
 
-export function postInvoiceIssued(invoice: Invoice): PostingResult {
+// INVOICE-EDIT S3 — `opts.occurredAt`: Buchungsdatum einer KORREKTUR (Kundenwechsel). Standard
+// bleibt das Rechnungsdatum; die Rechnung selbst (issued_at) ändert sich dadurch nicht.
+export function postInvoiceIssued(invoice: Invoice, opts: { occurredAt?: string } = {}): PostingResult {
   if (!invoice.lines || invoice.lines.length === 0) {
     throw new Error(`postInvoiceIssued: invoice ${invoice.id} has no lines`);
   }
-  const occurredAt = invoice.issuedAt ?? invoice.createdAt;
+  const occurredAt = opts.occurredAt ?? invoice.issuedAt ?? invoice.createdAt;
   const entries: LedgerEntryInput[] = [];
   for (const line of invoice.lines) {
     const gross = ROUND(line.lineTotal);
@@ -744,10 +746,13 @@ export function postSalesReturnCogs(
 // (postInvoicePayment, invoiceStore.recordPayment) nichts aendert — EINE Quelle bleibt EINE.
 export { computePaymentSplit };
 
+// INVOICE-EDIT S3 — `opts.occurredAt`: Buchungsdatum einer KORREKTUR (Kundenwechsel). Standard
+// bleibt das Zahlungsdatum; die Zahlung selbst (received_at) ändert sich dadurch nicht.
 export function postInvoicePayment(
   payment: Payment,
   customerId: string,
-  openRemainder?: number
+  openRemainder?: number,
+  opts: { occurredAt?: string } = {}
 ): PostingResult {
   const amount = ROUND(payment.amount);
   if (amount <= 0) {
@@ -787,7 +792,7 @@ export function postInvoicePayment(
     });
   }
   return postEntries(entries, {
-    occurredAt: payment.receivedAt,
+    occurredAt: opts.occurredAt ?? payment.receivedAt,
     sourceModule: 'PAYMENT',
     sourceId: payment.id,
   });

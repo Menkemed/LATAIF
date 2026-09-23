@@ -703,8 +703,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         db.run(`UPDATE invoices SET ${hSets.join(', ')}, updated_at = ? WHERE id = ?`, hVals);
       }
       const effCustomerId = customerId !== undefined ? customerId : inv0.customerId;
-      // INVOICE-EDIT S3 — Zahlungen beim alten Kunden aus-, beim neuen einbuchen (jede auf ihr Datum).
-      const movedPaymentIds = customerPlan ? moveInvoicePayments(customerPlan) : [];
+      // INVOICE-EDIT S3 — Zahlungen beim alten Kunden aus-, beim neuen einbuchen. Wie die Rechnung
+      // unten auf das Korrekturdatum `now`: nichts wird zurückdatiert, Stichtage davor bleiben.
+      const movedPaymentIds = customerPlan ? moveInvoicePayments(customerPlan, now) : [];
 
       // 3. Domain: alte Zeilen geben ihren Bestand zurueck, dann Lines loeschen.
       //    STOCK-LOT-INTEGRITY — mit Nachweis exakt dieser; Altzeile mit Los wie bisher ihr Los.
@@ -892,7 +893,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           })),
           createdAt: inv0.createdAt, createdBy: inv0.createdBy,
         };
-        postInvoiceIssued(fresh);
+        // INVOICE-EDIT S3 — beim Kundenwechsel bucht die Rechnung auf das Korrekturdatum (wie ihre
+        // Zahlungen), nicht zurück auf das Rechnungsdatum: der neue Kunde hatte die Forderung vorher
+        // nicht. Ohne Kundenwechsel bleibt alles wie bisher.
+        postInvoiceIssued(fresh, customerPlan ? { occurredAt: now } : {});
       }
 
       // 7. Optionale Delta-Zahlung — innerhalb der Transaktion. recordPayment macht

@@ -242,6 +242,17 @@ function kundenkontenOk(db: Db): string {
   const bad = [...a.arByCustomer.rows, ...a.customerCreditByCustomer.rows].filter((r) => r.status !== 'ok');
   return bad.map((r) => `${r.account}:${r.id} ${r.diffFils}`).join(', ') + (a.issues.length ? ` issues:${a.issues.map((i) => i.kind).join('/')}` : '');
 }
+/** Konten (außer Forderung), die ab `t0` netto nicht 0 sind — beim reinen Kundenwechsel: keine. */
+const korrektur = (db: Db, t0: string): string => all(db,
+  `SELECT account, ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 3) AS v FROM ledger_entries
+    WHERE occurred_at >= ? AND account != 'ACCOUNTS_RECEIVABLE' GROUP BY account HAVING ABS(v) > 0.0005`, [t0]).replace(/^\[\]$/, '');
+/** Forderung eines Kunden zum Stichtag (Buchungen bis einschließlich `bis`). */
+const arStichtag = (db: Db, cust: string, bis: string): number => n(db,
+  `SELECT COALESCE(ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 3), 0) FROM ledger_entries
+    WHERE account = 'ACCOUNTS_RECEIVABLE' AND counterparty_id = ? AND occurred_at <= ?`, [cust, bis]);
+const kontoStichtag = (db: Db, acc: string, bis: string): number => n(db,
+  `SELECT COALESCE(ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 3), 0) FROM ledger_entries
+    WHERE account = ? AND occurred_at <= ?`, [acc, bis]);
 /** Die Zahlungszeilen, wie sie gespeichert sind — der Nachweis darf sich nicht ändern. */
 const zahlungen = (db: Db, inv: string): string =>
   all(db, 'SELECT id, amount, method, reference, received_at, notes, created_at, created_by, card_brand FROM payments WHERE invoice_id = ? ORDER BY id', [inv]);
@@ -281,6 +292,13 @@ function wechsel(inv: string, z: string, kunde: string, opts: { confirm?: boolea
   reload();
   return m;
 }
+function aendernNotiz(inv: string, z: string): string {
+  const m = meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(inv, {
+    lines: [ZEILE(z)] as never, notes: 'nur Notiz', reason: 'Notiz',
+  } as never)));
+  reload();
+  return m;
+}
 const kunde = (db: Db, inv: string): string => s(db, 'SELECT customer_id FROM invoices WHERE id = ?', [inv]);
 const nummer = (db: Db, inv: string): string => s(db, 'SELECT invoice_number FROM invoices WHERE id = ?', [inv]);
 
@@ -307,14 +325,15 @@ const nummer = (db: Db, inv: string): string => s(db, 'SELECT invoice_number FRO
   ok(m0.startsWith(CUSTOMER_CHANGE_NEEDS_CONFIRMATION + '|') && zustand(db) === vor && /Ali Hassan to Nora Hassan/.test(m0),
     `2 ohne Bestätigung: abgewiesen, nichts geändert (${m0.split('|')[1]?.slice(0, 80)})`);
   const lot = n(db, "SELECT qty_remaining FROM stock_lots WHERE id = 'lot-pA'");
+  const t0 = new Date().toISOString();
   const m = wechsel(inv, z, 'cust-2', { confirm: true });
   ok(m === '' && kunde(db, inv) === 'cust-2' && nummer(db, inv) === nr && s(db, 'SELECT status FROM invoices WHERE id = ?', [inv]) === 'PARTIAL',
     `2 bestätigt: Kunde Nora, Nummer ${nr} bleibt, Status PARTIAL (${m})`);
   ok(zahlungen(db, inv) === nachweis, '2 …Zahlungsnachweis unverändert (ID, Betrag, Art, Referenz, Datum, Notiz)');
   ok(arBuch(db, 'cust-1') === 0 && arBuch(db, 'cust-2') === 700 && arRechnung(db, 'cust-2') === 700 && arRechnung(db, 'cust-1') === 0,
     `2 …Forderung: Ali 0, Nora 700 in Buch und Rechnung (${arBuch(db, 'cust-1')}/${arBuch(db, 'cust-2')})`);
-  ok(konto(db, 'CASH') === 400 && n(db, "SELECT COUNT(*) FROM ledger_entries WHERE account = 'CASH' AND occurred_at != ?", [empfangen]) === 0,
-    `2 …Kasse 400, alle Kassenbuchungen auf dem Zahlungsdatum (keine Doppel-Kasse zwischendurch) (${konto(db, 'CASH')})`);
+  ok(konto(db, 'CASH') === 400 && s(db, 'SELECT received_at FROM payments WHERE id = ?', [pid]) === empfangen && korrektur(db, t0) === '',
+    `2 …Kasse 400; am Korrekturtag heben sich alle Konten außer der Forderung auf (${korrektur(db, t0) || 'ok'})`);
   ok(n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'PAYMENT' AND source_id = ? AND reverses_entry_id IS NULL AND counterparty_id = 'cust-2'", [pid]) === 2,
     '2 …die Zahlung ist beim neuen Kunden gebucht (Storno beim alten bleibt als Spur)');
   ok(kundenkontenOk(db) === '' && ausgeglichen(db) && n(db, "SELECT qty_remaining FROM stock_lots WHERE id = 'lot-pA'") === lot,
@@ -330,6 +349,50 @@ const nummer = (db: Db, inv: string): string => s(db, 'SELECT invoice_number FRO
     `2 …Zahlung danach gelöscht: Nora wieder 1100, Ali bleibt 0 (${arBuch(db, 'cust-1')}/${arBuch(db, 'cust-2')})`);
 }
 
+// 2b) Stichtage — Rechnung im Januar, Zahlung im Februar, Kundenwechsel heute (nach März).
+{
+  const db = neu();
+  product(db, 'pA', 1);
+  reload();
+  const inv = imHaus(() => useInvoiceStore.getState().createDirectInvoice('cust-1',
+    [{ ...LINE('pA', 1, 1000), lotId: 'lot-pA' }] as never, 'S3 Stichtag', '2026-01-15').id);
+  reload();
+  const z = s(db, 'SELECT id FROM invoice_lines WHERE invoice_id = ?', [inv]);
+  const pid = zahle(inv, 400, 'cash');
+  // Die Zahlung ging im Februar ein: Zahlung und ihre Buchung auf den 10.02. legen (Testaufbau).
+  db.run("UPDATE payments SET received_at = '2026-02-10T09:00:00.000Z' WHERE id = ?", [pid]);
+  db.run("UPDATE ledger_entries SET occurred_at = '2026-02-10T09:00:00.000Z' WHERE source_module = 'PAYMENT' AND source_id = ?", [pid]);
+  reload();
+  const ausgestellt = s(db, 'SELECT issued_at FROM invoices WHERE id = ?', [inv]);
+  const FEB = '2026-02-28T23:59:59.999Z'; const JAN = '2026-01-31T23:59:59.999Z';
+  const vorher = { ali: arStichtag(db, 'cust-1', FEB), kasse: kontoStichtag(db, 'CASH', FEB), vat: kontoStichtag(db, 'VAT_OUTPUT', JAN) };
+  const t0 = new Date().toISOString();
+  const m = wechsel(inv, z, 'cust-2', { confirm: true });
+  ok(m === '' && t0 > '2026-03-01' && vorher.ali === 700 && vorher.kasse === 400 && vorher.vat === -100,
+    `2b SETUP Rechnung 15.01., Zahlung 10.02., Wechsel ${t0.slice(0, 10)} (${m})`);
+  ok(arStichtag(db, 'cust-1', FEB) === 700 && arStichtag(db, 'cust-2', FEB) === 0,
+    `2b Stichtag 28.02. unverändert: Ali 700, Nora 0 (${arStichtag(db, 'cust-1', FEB)}/${arStichtag(db, 'cust-2', FEB)})`);
+  ok(kontoStichtag(db, 'CASH', FEB) === 400 && kontoStichtag(db, 'VAT_OUTPUT', JAN) === -100,
+    `2b …Kasse zum 28.02. 400, VAT zum 31.01. 100 — nichts zurückdatiert (${kontoStichtag(db, 'CASH', FEB)}/${kontoStichtag(db, 'VAT_OUTPUT', JAN)})`);
+  ok(n(db, "SELECT COUNT(*) FROM ledger_entries WHERE occurred_at > '2026-02-10T09:00:00.000Z' AND occurred_at < ?", [t0]) === 0
+    && n(db, 'SELECT COUNT(*) FROM ledger_entries WHERE occurred_at >= ?', [t0]) > 0,
+    '2b …alle Umbuchungen tragen das Korrekturdatum, keine liegt dazwischen');
+  ok(korrektur(db, t0) === '' && n(db,
+    `SELECT COALESCE(ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 3), 0) FROM ledger_entries
+      WHERE occurred_at >= ? AND account = 'ACCOUNTS_RECEIVABLE' AND counterparty_id = 'cust-2'`, [t0]) === 700,
+    `2b …am Korrekturtag: nur die Forderung wandert (700 zu Nora), sonst alles netto 0 (${korrektur(db, t0) || 'ok'})`);
+  ok(arBuch(db, 'cust-1') === 0 && arBuch(db, 'cust-2') === 700 && kundenkontenOk(db) === '' && ausgeglichen(db),
+    `2b …heute: Ali 0, Nora 700 ${kundenkontenOk(db)}`);
+  ok(s(db, 'SELECT issued_at FROM invoices WHERE id = ?', [inv]) === ausgestellt && ausgestellt.startsWith('2026-01-15')
+    && s(db, 'SELECT received_at FROM payments WHERE id = ?', [pid]) === '2026-02-10T09:00:00.000Z',
+    '2b …Rechnungsdatum und Zahlungsdatum bleiben');
+  // Ohne Kundenwechsel bleibt die Rechnung beim Neubuchen auf ihrem Datum (bisheriges Verhalten).
+  const t1 = new Date().toISOString();
+  const m2 = aendernNotiz(inv, z);
+  ok(m2 === '' && n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'INVOICE' AND source_id = ? AND occurred_at >= ? AND reverses_entry_id IS NULL", [inv, t1]) === 0,
+    `2b …ein Edit OHNE Kundenwechsel bucht die Rechnung weiter auf ihr Rechnungsdatum (${m2})`);
+}
+
 // 3) Voll bezahlt per Bank (plus Karte) — Endnummer bleibt, Kartengebühr unberührt.
 {
   const { db, inv, z } = welt();
@@ -339,7 +402,9 @@ const nummer = (db: Db, inv: string): string => s(db, 'SELECT invoice_number FRO
   const gebuehr = all(db, "SELECT id, amount, status FROM expenses WHERE category = 'CardFees' ORDER BY id");
   const nachweis = zahlungen(db, inv);
   const bank = konto(db, 'BANK'); const karte = konto(db, 'CARD_CLEARING');
+  const t0 = new Date().toISOString();
   const m = wechsel(inv, z, 'cust-2', { confirm: true });
+  ok(korrektur(db, t0) === '', `3 …am Korrekturtag: Bank, Karte, Umsatz, VAT, Wareneinsatz je netto 0 (${korrektur(db, t0) || 'ok'})`);
   ok(m === '' && kunde(db, inv) === 'cust-2' && nummer(db, inv) === nr && s(db, 'SELECT status FROM invoices WHERE id = ?', [inv]) === 'FINAL',
     `3 voll bezahlt: Nora, Endnummer ${nr} bleibt, FINAL (${m})`);
   ok(zahlungen(db, inv) === nachweis && all(db, "SELECT id, amount, status FROM expenses WHERE category = 'CardFees' ORDER BY id") === gebuehr,
@@ -480,7 +545,8 @@ const nummer = (db: Db, inv: string): string => s(db, 'SELECT invoice_number FRO
     'Q …und reicht die Bestätigung an Primary und PC2 weiter');
   ok(/save the customer change first, then record the payment/.test(m), 'Q …neue Zahlung im selben Speichern wird vorher gemeldet');
   const store = src('src/stores/invoiceStore.ts');
-  ok(!/Cannot change the customer of an invoice that has payments/.test(store) && /moveInvoicePayments\(customerPlan\)/.test(store),
+  ok(!/Cannot change the customer of an invoice that has payments/.test(store) && /moveInvoicePayments\(customerPlan, now\)/.test(store)
+    && /postInvoiceIssued\(fresh, customerPlan \? \{ occurredAt: now \} : \{\}\)/.test(store),
     'Q die alte Pauschalsperre ist ersetzt; Umbuchen läuft in der Edit-Transaktion');
 }
 void current;

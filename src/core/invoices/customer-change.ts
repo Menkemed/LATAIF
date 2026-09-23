@@ -7,10 +7,13 @@
 //
 // Jetzt ziehen die Zahlungsbeine mit: jede Zahlung wird mit dem vorhandenen Storno
 // (`reverseSource('PAYMENT')`) beim alten Kunden ausgebucht und mit der vorhandenen Zahlungsbuchung
-// (`postInvoicePayment`) beim neuen Kunden neu gebucht — beides auf ihr EIGENES Datum, damit die
-// Kasse zu keinem Zeitpunkt doppelt oder gar nicht dasteht. Die Zahlungszeilen selbst (ID, Betrag,
-// Art, Referenz, Notiz, Datum) bleiben unberührt; Nummer, Zeilen, Bestand und Retourenverweise
-// sowieso. Alles in der Transaktion von `editInvoice`.
+// (`postInvoicePayment`) beim neuen Kunden neu gebucht. Storno und Neubuchung — der Zahlungen UND
+// der Rechnung (`editInvoice`) — tragen EIN gemeinsames Korrekturdatum: den Tag des Wechsels. So
+// bleiben Stichtagsauszüge vor dem Wechsel wie sie waren (die Rechnung und ihre Zahlungen stehen
+// dort beim alten Kunden), nichts wird zurückdatiert, und Kasse/Bank/Umsatz/VAT heben sich am
+// Korrekturtag auf — nur die Forderung wandert. Die Zahlungszeilen selbst (ID, Betrag, Art,
+// Referenz, Notiz, Datum) und das Rechnungsdatum bleiben unberührt; Nummer, Zeilen, Bestand und
+// Retourenverweise sowieso. Alles in der Transaktion von `editInvoice`.
 //
 // Gesperrt bleibt, was einem Kunden GEHÖRT und sich nicht sicher übertragen lässt:
 //   • Guthaben aus dieser Rechnung (Überzahlung beim Zahlen oder aus einem früheren Edit),
@@ -168,18 +171,19 @@ export function planCustomerChange(
 
 /**
  * Bucht die Zahlungen beim alten Kunden aus und beim neuen ein — mit den vorhandenen Buchungen,
- * jede auf ihr eigenes Datum. Nur innerhalb der offenen Transaktion von `editInvoice` aufrufen.
- * Prüft danach, dass jede Zahlung Konto für Konto dieselben Beträge trägt (sonst Rollback).
+ * beides auf das Korrekturdatum `at` (dasselbe, auf das `editInvoice` die Rechnung umbucht).
+ * Nur innerhalb der offenen Transaktion von `editInvoice` aufrufen. Prüft danach, dass jede
+ * Zahlung Konto für Konto dieselben Beträge trägt (sonst Rollback).
  */
-export function moveInvoicePayments(plan: CustomerChangePlan): string[] {
+export function moveInvoicePayments(plan: CustomerChangePlan, at: string): string[] {
   const moved: string[] = [];
   for (const p of plan.payments) {
     if (!p.booked) continue;
-    reverseSource('PAYMENT', p.id, p.receivedAt);
+    reverseSource('PAYMENT', p.id, at);
     postInvoicePayment({
       id: p.id, invoiceId: p.invoiceId, amount: p.amount, method: p.method as PaymentMethod,
       receivedAt: p.receivedAt, notes: p.notes ?? undefined, createdAt: p.createdAt,
-    }, plan.to);
+    }, plan.to, undefined, { occurredAt: at });
     const after = activeLegs('PAYMENT', p.id);
     if (signatureOf(after) !== p.signature || after.some((l) => l.cpId !== plan.to)) {
       throw new Error(`moveInvoicePayments: payment ${p.id} would change its booking — nothing was moved.`);
