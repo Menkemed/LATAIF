@@ -288,6 +288,8 @@ export interface InvoiceLine {
   vatAmount: number;
   lineTotal: number;
   position: number;
+  /** INVOICE-EDIT S2 — das Los, aus dem die Zeile verkauft wurde (die Maske zeigt es beim Ändern). */
+  lotId?: string | null;
   product?: Product;
 }
 

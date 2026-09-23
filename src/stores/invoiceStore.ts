@@ -11,7 +11,7 @@ import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, 
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
-import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, creditNoteReceivableCancel, frozenReturnedLineAmounts } from '@/core/invoices/edit-lines';
+import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts } from '@/core/invoices/edit-lines';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import {
@@ -207,6 +207,7 @@ function rowToLine(row: Record<string, unknown>): InvoiceLine {
     vatAmount: (row.vat_amount as number) || 0,
     lineTotal: (row.line_total as number) || 0,
     position: (row.position as number) || 1,
+    lotId: (row.lot_id as string | null) || null,
   };
 }
 
@@ -780,18 +781,24 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // B5 — With-Agent-Guard: eine neu hinzugefuegte Edit-Line darf kein with_agent-Stueck
       // sein (der InvoiceDetail-Picker filtert stock_status nicht). Wirft in der Tx → Rollback.
       assertProductsSellable(resolvedLines.map(l => l.productId));
+      // INVOICE-EDIT S2 — eine fortgesetzte Zeile bleibt auf ihrem Los: ihr Mehr muss DIESES Los
+      // haben. Eigener, verständlicher Satz statt „nicht mehr auf Lager" (die Maske zeigt denselben).
+      assertKeptLinesStock(needing.filter(l => l._delta).map(l => ({ productId: l.productId, lotId: l._resolvedLotId, extra: need(l) })));
       assertLotsConsumable(needing.map(l => ({ lotId: l._resolvedLotId, qty: need(l) })));
       assertLotTrackedLinesResolved(resolvedLines.map(l => ({ productId: l.productId, lotId: l._resolvedLotId })));
       assertLotLessStockAvailable(needing.map(l => ({ productId: l.productId, lotId: l._resolvedLotId, qty: need(l) })));
 
-      // INVOICE-EDIT S2 — eine Zeile MIT Retoure behält ihre Beträge pro Stück exakt so, wie die
-      // Gutschrift sie kennt (Preis/Steuerart sind oben geprüft; hier zählt auch die Rundung).
+      // INVOICE-EDIT S2 — die Beträge einer fortgesetzten Zeile rechnet das Haus aus dem Einstand,
+      // den die Zeile wirklich hält (bei MARGIN hängt die Steuer daran), nicht aus dem, was Maske
+      // oder PC2 mitschicken. Retournierte Zeile: pro Stück wie gespeichert; fachlich unveränderte
+      // Zeile: gespeicherte Beträge bleiben.
       for (const l of resolvedLines) {
         const b = l._kept ? baseById.get(l._id) : undefined;
-        if (!b || !(b.returnedQty > 0.0005)) continue;
-        const f = frozenReturnedLineAmounts(b, Math.max(1, l.quantity || 1));
-        l.vatAmount = f.vatAmount;
-        l.lineTotal = f.lineTotal;
+        if (!b) continue;
+        const a = keptLineAmounts(b, l, l._resolvedCost);
+        l.unitPrice = a.unitPrice;
+        l.vatAmount = a.vatAmount;
+        l.lineTotal = a.lineTotal;
       }
 
       let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;

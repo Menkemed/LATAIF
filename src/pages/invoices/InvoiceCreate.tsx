@@ -24,6 +24,7 @@ import { formatLotLabel, type StockLot } from '@/core/lots/lot-queries';
 import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
 import { checkEditReason, EDIT_REASON_REQUIRED_MESSAGE } from '@/core/invoices/edit-reason';
+import { keptLineLotShortMessage } from '@/core/invoices/edit-lines';
 import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-write';
 import { lotAggregatesFor, productLotsBatchFor, LEERE_LOSE } from '@/core/data/domain-reads';
@@ -40,6 +41,14 @@ interface DraftLine {
   quantity: number;
   unitPrice: number; // Netto pro Stück
   lotId?: string;    // Phase 3 — explizite Lot-Auswahl pro Line; auto bei Pick.
+  /** INVOICE-EDIT S2 — was die gespeicherte Zeile hält: Artikel, Los, Einstand, Menge. Solange der
+   *  Artikel bleibt, bleibt die Zeile auf diesem Los (kein Loswechsel beim Ändern). */
+  kept?: { productId: string; lotId: string | null; cost: number; qty: number };
+}
+
+/** INVOICE-EDIT S2 — die Zeile setzt eine gespeicherte fort (gleicher Artikel) → ihr Los steht fest. */
+function keptOf(l: DraftLine): DraftLine['kept'] | null {
+  return l.lineId && l.kept && l.kept.productId === l.productId ? l.kept : null;
 }
 
 function fmt(v: number): string {
@@ -122,6 +131,7 @@ export function InvoiceCreate() {
       const unitNet = qty > 0 ? (l.unitPrice || 0) : 0;
       return {
         lineId: l.id,
+        kept: { productId: l.productId || '', lotId: l.lotId ?? null, cost: l.purchasePriceSnapshot || 0, qty },
         productId: l.productId || '',
         scheme: (matchesProduct ? 'auto' : (stored || 'auto')) as Scheme,
         quantity: qty,
@@ -210,16 +220,29 @@ export function InvoiceCreate() {
     if (!product) {
       return { product: undefined, lots: [] as Array<StockLot & { purchaseNumber: string | null }>,
         selectedLot: null as (StockLot & { purchaseNumber: string | null }) | null,
+        kept: null as DraftLine['kept'] | null, lotIdOut: undefined as string | undefined, costBasis: 0,
+        keptShort: null as string | null,
         scheme: 'VAT_10' as const, vatRate: 10, net: 0, vat: 0, internalVat: 0, gross: 0 };
     }
     const lots = loseJeArtikel.get(product.id)?.lots ?? [];
-    const selectedLot = lots.find(lot => lot.id === l.lotId) || lots[0] || null;
-    const costBasis = selectedLot ? selectedLot.unitCost : (product.purchasePrice || 0);
+    // INVOICE-EDIT S2 — eine fortgesetzte Zeile rechnet mit IHREM Los und Einstand (das Haus tut
+    // es beim Speichern genauso); ein offenes Los ist hier keine Wahl. Braucht sie mehr, als ihr Los
+    // noch hat, sagt die Maske das vor dem Speichern — mit demselben Satz wie das Haus.
+    const kept = keptOf(l);
+    const selectedLot = kept
+      ? (lots.find(lot => lot.id === kept.lotId) || null)
+      : (lots.find(lot => lot.id === l.lotId) || lots[0] || null);
+    const costBasis = kept ? kept.cost : (selectedLot ? selectedLot.unitCost : (product.purchasePrice || 0));
+    const lotIdOut = kept ? (kept.lotId ?? undefined) : selectedLot?.id;
+    const keptRest = selectedLot ? selectedLot.qtyRemaining : 0;
+    const keptShort = kept && kept.lotId && l.quantity - kept.qty > keptRest + 0.0005
+      ? keptLineLotShortMessage([product.brand, product.name].filter(Boolean).join(' ') || product.sku || 'this item', keptRest)
+      : null;
     const resolved = (l.scheme === 'auto' ? (product.taxScheme as 'VAT_10' | 'ZERO' | 'MARGIN') : l.scheme);
     const vatRate = resolved === 'ZERO' ? 0 : 10;
     const calc = calcLine(l.unitPrice, l.quantity, costBasis, resolved, vatRate);
     return {
-      product, lots, selectedLot, scheme: resolved, vatRate,
+      product, lots, selectedLot, kept, lotIdOut, costBasis, keptShort, scheme: resolved, vatRate,
       net: calc.netAmount, vat: calc.vatAmount,
       internalVat: calc.internalVatAmount || 0, // MARGIN: VAT auf Profit (intern, nicht customer-sichtbar)
       gross: calc.grossAmount,
@@ -263,6 +286,8 @@ export function InvoiceCreate() {
     if (lines.length === 0) return 'Please add at least one product';
     const bad = lines.findIndex(l => !l.productId || l.quantity <= 0 || l.unitPrice < 0);
     if (bad !== -1) return `Line ${bad + 1}: pick a product, set qty > 0, price ≥ 0`;
+    const short = computed.findIndex(c => c.keptShort);
+    if (short !== -1) return `Line ${short + 1}: ${computed[short].keptShort}`;
     if (paidAmount < 0) return 'Paid amount cannot be negative';
     // Überzahlung: Im EDIT-Modus erlaubt — editInvoice (S3b) verbucht den Überschuss
     // (Reduktion des Totals unter den bereits bezahlten Betrag ODER Delta-Überzahlung)
@@ -305,10 +330,10 @@ export function InvoiceCreate() {
       const c = computed[i];
       return { ...toInvoiceLine({
         productId: l.productId,
-        lotId: c.selectedLot?.id,
+        lotId: c.lotIdOut,
         quantity: l.quantity,
         unitPrice: l.unitPrice,
-        costBasis: c.selectedLot ? c.selectedLot.unitCost : (c.product?.purchasePrice || 0),
+        costBasis: c.costBasis,
         scheme: c.scheme,
       }), ...(l.lineId ? { lineId: l.lineId } : {}) };
     });
@@ -361,7 +386,7 @@ export function InvoiceCreate() {
           lines: lines.map((l, i) => ({
             ...(l.lineId ? { lineId: l.lineId } : {}),
             productId: l.productId,
-            lotId: computed[i]?.selectedLot?.id ?? null,
+            lotId: computed[i]?.lotIdOut ?? null,
             quantity: l.quantity,
             unitPrice: l.unitPrice,
             scheme: l.scheme,
@@ -550,7 +575,18 @@ export function InvoiceCreate() {
                       />
                       {/* Phase 3 — Lot-Picker wenn mehrere ACTIVE Lots fuer das Produkt
                           existieren. Single-Lot bleibt unsichtbar (UX wie bisher). */}
-                      {c.lots.length > 1 && (
+                      {c.kept && (
+                        <div title="This line keeps the stock lot it was sold from. To sell from another lot, add a new line."
+                          style={{ marginTop: 4, fontSize: 10, color: '#9CA3AF' }}>
+                          Lot · {c.selectedLot
+                            ? formatLotLabel(c.selectedLot, c.selectedLot.purchaseNumber || undefined)
+                            : `as sold · ${c.kept.cost.toLocaleString('en-US', { maximumFractionDigits: 0 })} BHD cost`} · fixed
+                        </div>
+                      )}
+                      {c.keptShort && (
+                        <div style={{ marginTop: 4, fontSize: 11, color: '#DC2626' }}>{c.keptShort}</div>
+                      )}
+                      {!c.kept && c.lots.length > 1 && (
                         <select
                           value={l.lotId || c.selectedLot?.id || ''}
                           onChange={e => updateLine(idx, { lotId: e.target.value })}
@@ -568,7 +604,7 @@ export function InvoiceCreate() {
                           ))}
                         </select>
                       )}
-                      {c.lots.length === 1 && c.selectedLot && (
+                      {!c.kept && c.lots.length === 1 && c.selectedLot && (
                         <div style={{ marginTop: 4, fontSize: 10, color: '#9CA3AF' }}>
                           Lot · {c.selectedLot.unitCost.toLocaleString('en-US', { maximumFractionDigits: 0 })} BHD cost
                         </div>

@@ -21,6 +21,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { query } from '@/core/db/helpers';
 import { hasLotHistory } from '@/core/lots/stock-contract';
+import { calcInvoiceLine, vatRateFor, type LineScheme } from '@/core/invoices/line-derivation';
 
 export interface EditBaseLine {
   id: string;
@@ -58,6 +59,7 @@ export const EDIT_BELOW_CREDIT_NOTES = 'INVOICE_BELOW_CREDIT_NOTES';
 export const EDIT_LINE_ID_INVALID = 'INVOICE_EDIT_LINE_ID_INVALID';
 export const EDIT_AMBIGUOUS_RETURNED_LINE = 'INVOICE_EDIT_AMBIGUOUS_RETURNED_LINE';
 export const EDIT_RETURNED_LINE_LOT_UNKNOWN = 'INVOICE_RETURNED_LINE_LOT_UNKNOWN';
+export const EDIT_KEPT_LINE_LOT_SHORT = 'INVOICE_KEPT_LINE_LOT_SHORT';
 
 export class InvoiceEditLineRejected extends Error {
   readonly code: string;
@@ -215,6 +217,60 @@ const round3 = (v: number): number => Math.round(v * 1000) / 1000;
  */
 export function frozenReturnedLineAmounts(b: EditBaseLine, qty: number): { vatAmount: number; lineTotal: number } {
   return { vatAmount: round3(b.vatAmount / b.qty * qty), lineTotal: round3(b.lineTotal / b.qty * qty) };
+}
+
+/**
+ * INVOICE-EDIT S2 (Marge) — die Beträge einer FORTGESETZTEN Zeile rechnet das Haus, nicht die
+ * Gegenstelle. Bei MARGIN hängt die Steuer am Einstand; rechnete die Maske mit einem anderen Los
+ * als dem, das die Zeile hält, verschöbe schon eine reine Notizänderung die Steuer, während der
+ * Einstand der Zeile bleibt. Maske und PC2 laufen beide hier durch — eine Rechnung, eine Regel.
+ *   • Zeile mit Retoure → pro Stück genau wie gespeichert (`frozenReturnedLineAmounts`).
+ *   • fachlich unverändert (Menge, Nettopreis, Steuerart, Satz) → die gespeicherten Beträge
+ *     bleiben, auch wenn eine heutige Rechnung anders ergäbe — nichts wird still überschrieben.
+ *   • sonst → neu aus dem Einstand, den die Zeile wirklich hält (`costBasis`).
+ */
+export function keptLineAmounts(
+  b: EditBaseLine,
+  n: { quantity?: number; unitPrice: number; taxScheme: string; vatRate?: number },
+  costBasis: number,
+): { unitPrice: number; vatAmount: number; lineTotal: number } {
+  const qty = Math.max(1, n.quantity || 1);
+  if (b.returnedQty > 0.0005) return { unitPrice: b.unitPrice, ...frozenReturnedLineAmounts(b, qty) };
+  const rate = Number.isFinite(n.vatRate) ? Number(n.vatRate) : vatRateFor(n.taxScheme as LineScheme);
+  const unchanged = Math.abs(qty - b.qty) < 0.0005 && samePrice(n.unitPrice, b.unitPrice)
+    && n.taxScheme === b.taxScheme && Math.abs(rate - b.vatRate) < 0.0005;
+  if (unchanged) return { unitPrice: b.unitPrice, vatAmount: b.vatAmount, lineTotal: b.lineTotal };
+  const calc = calcInvoiceLine(n.unitPrice, qty, costBasis, n.taxScheme as LineScheme, rate);
+  return { unitPrice: n.unitPrice, vatAmount: calc.internalVatAmount || calc.vatAmount, lineTotal: calc.grossAmount };
+}
+
+/** Der Satz, wenn eine fortgesetzte Zeile mehr braucht, als ihr eigenes Los noch hat (Maske und Haus). */
+export function keptLineLotShortMessage(label: string, rest: number): string {
+  return rest > 0.0005
+    ? `Only ${fmtQty(rest)} more of ${label} left in the stock lot this line was sold from. `
+      + 'Lower the quantity, or add the extra pieces as a new line.'
+    : `The stock lot this line of ${label} was sold from has nothing left. `
+      + 'Keep the quantity, or add the extra pieces as a new line.';
+}
+
+/**
+ * Eine fortgesetzte Zeile bleibt auf ihrem Los; braucht sie mehr, muss DIESES Los es haben.
+ * Wirft mit verständlichem Satz statt des allgemeinen „nicht mehr auf Lager".
+ */
+export function assertKeptLinesStock(picks: ReadonlyArray<{ productId: string; lotId: string | null; extra: number }>): void {
+  const want = new Map<string, { productId: string; extra: number }>();
+  for (const p of picks) {
+    if (!p.lotId || !(p.extra > 0.0005)) continue;
+    const w = want.get(p.lotId);
+    want.set(p.lotId, { productId: p.productId, extra: (w?.extra ?? 0) + p.extra });
+  }
+  for (const [lotId, w] of want) {
+    const r = query('SELECT qty_remaining, status FROM stock_lots WHERE id = ?', [lotId])[0];
+    const rest = r && r.status !== 'CANCELLED' ? Math.max(0, Number(r.qty_remaining ?? 0)) : 0;
+    if (w.extra > rest + 0.0005) {
+      throw new InvoiceEditLineRejected(EDIT_KEPT_LINE_LOT_SHORT, keptLineLotShortMessage(productLabel(w.productId), rest));
+    }
+  }
 }
 
 /** Was wirksame Gutschriften von der Forderung dieser Rechnung schon abgezogen haben. */

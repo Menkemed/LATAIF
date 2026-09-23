@@ -44,7 +44,7 @@ import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { recordInvoicePaymentInHouse } from '@/core/invoices/invoice-payment-house';
 import {
   EDIT_LINE_HAS_RETURN, EDIT_BELOW_RETURNED_QTY, EDIT_RETURNED_LINE_PRICE_LOCKED, EDIT_BELOW_CREDIT_NOTES,
-  EDIT_LINE_ID_INVALID, EDIT_AMBIGUOUS_RETURNED_LINE, EDIT_RETURNED_LINE_LOT_UNKNOWN,
+  EDIT_LINE_ID_INVALID, EDIT_AMBIGUOUS_RETURNED_LINE, EDIT_RETURNED_LINE_LOT_UNKNOWN, EDIT_KEPT_LINE_LOT_SHORT,
 } from '@/core/invoices/edit-lines';
 import { LEGACY_STOCK_LINES } from '@/core/lots/stock-contract';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
@@ -122,7 +122,7 @@ const EDIT_VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
  */
 const EDIT_CODE_VERDICTS: ReadonlySet<string> = new Set([
   EDIT_LINE_HAS_RETURN, EDIT_BELOW_RETURNED_QTY, EDIT_RETURNED_LINE_PRICE_LOCKED, EDIT_BELOW_CREDIT_NOTES,
-  EDIT_LINE_ID_INVALID, EDIT_AMBIGUOUS_RETURNED_LINE, EDIT_RETURNED_LINE_LOT_UNKNOWN,
+  EDIT_LINE_ID_INVALID, EDIT_AMBIGUOUS_RETURNED_LINE, EDIT_RETURNED_LINE_LOT_UNKNOWN, EDIT_KEPT_LINE_LOT_SHORT,
   LEGACY_STOCK_LINES,
 ]);
 
@@ -215,17 +215,21 @@ export function runInvoiceUpdate(deps: EngineDeps, identity: CommandIdentity, ra
     //
     // Es ist keine zweite Zuteilungsregel: WELCHES Los, sagt hier die Rechnung selbst; OB es
     // reicht, entscheidet weiterhin die Domäne beim Verbrauchen.
+    // INVOICE-EDIT S2 — ALLE Lose, die diese Rechnung hält, zählen mit (nicht nur das erste je
+    // Artikel): steht derselbe Artikel auf zwei Losen, schickt die Maske für jede Zeile ihr eigenes.
     const held = new Map<string, string>();
+    const heldLots = new Set<string>();
     for (const l of query(
       'SELECT product_id, lot_id FROM invoice_lines WHERE invoice_id = ? ORDER BY position ASC', [req.id],
     ) as Array<{ product_id?: unknown; lot_id?: unknown }>) {
       const pid = String(l.product_id ?? '');
       const lot = String(l.lot_id ?? '');
+      if (lot) heldLots.add(lot);
       if (pid && lot && !held.has(pid)) held.set(pid, lot);
     }
     const lines = buildInvoiceLines(req.body.lines.map((l) => (
       l.lotId || !held.has(l.productId) ? l : { ...l, lotId: held.get(l.productId)! }
-    )), { alsoConsumable: [...held.values()] });
+    )), { alsoConsumable: [...heldLots] });
     try {
       useInvoiceStore.getState().editInvoice(req.id, {
         lines,
