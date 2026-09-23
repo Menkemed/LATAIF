@@ -42,6 +42,8 @@ import {
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { recordInvoicePaymentInHouse } from '@/core/invoices/invoice-payment-house';
+import { EDIT_LINE_HAS_RETURN, EDIT_BELOW_RETURNED_QTY, EDIT_RETURNED_LINE_PRICE_LOCKED, EDIT_BELOW_CREDIT_NOTES } from '@/core/invoices/edit-lines';
+import { LEGACY_STOCK_LINES } from '@/core/lots/stock-contract';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
@@ -104,17 +106,29 @@ const EDIT_VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/^Cannot edit a cancelled invoice\.$/, 'INVOICE_CANCELLED'],
   [/^Invoice must have at least one line\.$/, 'INVOICE_NEEDS_A_LINE'],
   [/^An edit reason is required\.$/, 'EDIT_REASON_REQUIRED'],
-  [/^Cannot edit invoice lines — /, 'INVOICE_HAS_RETURNS_OR_CREDIT_NOTES'],
+  // STOCK-LOT-INTEGRITY — eine aus Agentenverkäufen umgewandelte Rechnung wird über „Undo conversion" geändert.
+  [/^This invoice was converted from agent sales\. Undo the conversion to change it\.$/, 'INVOICE_FROM_AGENT_SALES'],
   [/store credit .* has already been used/i, 'EDIT_CREDIT_ALREADY_USED'],
   [/^Cannot edit: this would shrink an existing overpayment store credit/, 'EDIT_WOULD_SHRINK_CREDIT'],
   [/^Cannot edit: the overpayment store credit from a payment has already been used/, 'EDIT_CREDIT_ALREADY_USED'],
 ];
+
+/**
+ * Neins, die ihre Kennung selbst tragen (`err.code`) — als LISTE, damit nur diese eingefroren werden.
+ * INVOICE-EDIT S2: die gezielten Retouren-Grenzen; STOCK-LOT-INTEGRITY: Altzeilen ohne Nachweis.
+ */
+const EDIT_CODE_VERDICTS: ReadonlySet<string> = new Set([
+  EDIT_LINE_HAS_RETURN, EDIT_BELOW_RETURNED_QTY, EDIT_RETURNED_LINE_PRICE_LOCKED, EDIT_BELOW_CREDIT_NOTES,
+  LEGACY_STOCK_LINES,
+]);
 
 function asEditVerdict(err: unknown): CommandRejected | null {
   // Zuerst die beiden Urteile, die schon der Anlegeweg kennt (Bestand, Ware beim Vertreter).
   const shared = asDomainVerdict(err);
   if (shared) return shared;
   const msg = err instanceof Error ? err.message : String(err);
+  const code = (err as { code?: unknown } | null)?.code;
+  if (typeof code === 'string' && EDIT_CODE_VERDICTS.has(code)) return new CommandRejected(code, msg);
   for (const [pattern, code] of EDIT_VERDICTS) {
     if (pattern.test(msg)) return new CommandRejected(code, msg);
   }

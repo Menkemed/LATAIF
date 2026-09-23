@@ -215,11 +215,17 @@ async function stornoMaske(c, invId) {
   await sleep(1500);
   return alleOk(r);
 }
-async function aendernMaske(c, invId) {
+async function aendernMaske(c, invId, bruttoErsteZeile) {
   await gehFrisch(c, `/invoices/${invId}/edit`);
   if (!(await warteBis(c, q('[data-invoice-save]'), 20000))) return 'KEINE-MASKE';
   await sleep(1200);
-  const r = [await setVal(c, 'textarea[placeholder^="Explain why this invoice"]', 'E2E Änderungsversuch')];
+  const r = [];
+  // INVOICE-EDIT S2 — optional den Zeilenbetrag (brutto) der ersten Zeile ändern.
+  if (bruttoErsteZeile !== undefined) {
+    r.push(await c.ev(`const e=document.querySelectorAll('input[inputmode="decimal"]')[0]; if(!e) return 'NO-PREIS'; Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e, ${S(String(bruttoErsteZeile))}); e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); e.dispatchEvent(new Event('blur',{bubbles:true})); return 'OK';`));
+    await sleep(400);
+  }
+  r.push(await setVal(c, 'textarea[placeholder^="Explain why this invoice"]', 'E2E Änderungsversuch'));
   r.push(await klick(c, '[data-invoice-save]'));
   await sleep(1500);
   return alleOk(r);
@@ -517,6 +523,24 @@ try {
     }
     ok(await warteAuf(() => !!one('SELECT id FROM sales_returns WHERE invoice_id = ?', [invR]).id), `4b Retoure angelegt (${alleOk(r)}; ${await fehlerText(c)})`);
     ok(await warteAuf(() => qty('rt-a') === 1), `4b …Back to Stock: Bestand 0→1 (${qty('rt-a')}/${st('rt-a')})`);
+
+    // INVOICE-EDIT S2 — eine Rechnung MIT Retoure ist nicht mehr pauschal gesperrt.
+    const zeileVor = one('SELECT id, unit_price FROM invoice_lines WHERE invoice_id = ?', [invR]);
+    const editsVor = Number(one('SELECT COUNT(*) n FROM invoice_edits WHERE invoice_id = ?', [invR]).n);
+    m = await aendernMaske(c, invR);
+    const errE = await fehlerText(c);
+    ok(await warteAuf(() => Number(one('SELECT COUNT(*) n FROM invoice_edits WHERE invoice_id = ?', [invR]).n) === editsVor + 1),
+      `4b2 Rechnung mit Retoure öffnen und speichern: geht durch (${m}; ${errE.slice(0, 120)})`);
+    ok(one('SELECT id FROM invoice_lines WHERE invoice_id = ?', [invR]).id === zeileVor.id && qty('rt-a') === 1
+      && one('SELECT invoice_line_id FROM sales_return_lines srl JOIN sales_returns sr ON sr.id = srl.return_id WHERE sr.invoice_id = ?', [invR]).invoice_line_id === zeileVor.id,
+      `4b2 …die Zeile behält ihre ID, die Retoure zeigt weiter darauf, Bestand 1 (${qty('rt-a')})`);
+    m = await aendernMaske(c, invR, 1500);
+    const errP = await fehlerText(c);
+    MSG.push('4b3 Preis der retournierten Zeile: ' + (errP || '(keine Meldung: ' + m + ')'));
+    ok(Number(one('SELECT unit_price FROM invoice_lines WHERE invoice_id = ?', [invR]).unit_price) === Number(zeileVor.unit_price),
+      `4b3 Preis der retournierten Zeile ändern: nichts geändert (${m})`);
+    ok(/cannot be changed — it has a return/.test(errP) && !/INVOICE_|Cannot edit invoice lines/.test(errP),
+      `4b3 …verständliche Meldung ohne Code: „${errP.slice(0, 160)}"`);
 
     // Rechnung mit Retoure stornieren → gesperrt.
     const vorS = one('SELECT status FROM invoices WHERE id = ?', [invR]).status;

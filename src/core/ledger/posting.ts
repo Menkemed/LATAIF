@@ -679,12 +679,17 @@ export function postInvoiceCogsBackfill(invoice: Invoice): PostingResult | null 
 // spiegelt ueber reverseSource('SALES_RETURN_COGS', returnId).
 
 // Summe der nicht-reversierten Original-COGS einer Invoice-Line.
+// INVOICE-EDIT S2 — "nicht reversiert" heißt: weder selbst eine Gegenbuchung NOCH eine schon
+// gegengebuchte Originalbuchung. Seit ein Edit die Zeilen-ID behält, stehen unter derselben ID
+// die alte (gegengebuchte) und die neue COGS-Buchung; ohne den zweiten Ausschluss zählte eine
+// spätere Retoure den Wareneinsatz doppelt.
 function getInvoiceLineCogs(invoiceLineId: string): number {
   const row = query(
-    `SELECT COALESCE(SUM(amount), 0) AS cogs
-       FROM ledger_entries
-      WHERE source_module = 'INVOICE' AND account = 'COGS'
-        AND source_line_id = ? AND reverses_entry_id IS NULL`,
+    `SELECT COALESCE(SUM(e1.amount), 0) AS cogs
+       FROM ledger_entries e1
+      WHERE e1.source_module = 'INVOICE' AND e1.account = 'COGS'
+        AND e1.source_line_id = ? AND e1.reverses_entry_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id)`,
     [invoiceLineId]
   )[0];
   return Number(row?.cogs || 0);

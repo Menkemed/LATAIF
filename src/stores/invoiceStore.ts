@@ -6,11 +6,12 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
-import { assertLotLessStockAvailable, assertNoLegacyLotLessLines, giveBackStock, invoiceStockLines, releaseLegacyDeduction, takeStock } from '@/core/lots/stock-contract';
+import { assertLotLessStockAvailable, assertNoLegacyLotLessLines, giveBackStock, hasLotHistory, invoiceStockLines, releaseLegacyDeduction, takeStock } from '@/core/lots/stock-contract';
 import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, assertLotsConsumable, assertLotTrackedLinesResolved, assertProductsSellable } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
+import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, creditNoteReceivableCancel } from '@/core/invoices/edit-lines';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import {
@@ -600,27 +601,16 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const reasonTrim = (reason || '').trim();
     if (!reasonTrim) throw new Error('An edit reason is required.');
 
-    // ── Guard B (Regel 2) — aktive Returns / Credit Notes blockieren den Line-Edit.
-    // editInvoice vergibt neue invoice_lines-IDs (DELETE+INSERT); bestehende
-    // sales_return_lines.invoice_line_id und der per source_line_id verankerte
-    // Original-COGS wuerden sonst verwaisen (Doppel-Return-Schutz + COGS-Reversal
-    // kaputt). Daher hart blocken: CN ueber CreditNotes-Detail loeschbar, Return
-    // ueber den Return-Storno — DANN ist der Line-Edit wieder frei.
-    const activeReturns = Number(query(
-      `SELECT COUNT(*) AS c FROM sales_returns WHERE invoice_id = ? AND status != 'REJECTED'`, [id]
-    )[0]?.c || 0);
-    // R6E-CN — eine stornierte Gutschrift (ihre Retoure ist REJECTED) sperrt nicht mehr.
-    const activeCreditNotes = Number(query(
-      `SELECT COUNT(*) AS c FROM credit_notes WHERE invoice_id = ? AND status != 'CANCELLED'`, [id]
-    )[0]?.c || 0);
-    if (activeReturns > 0 || activeCreditNotes > 0) {
-      const parts: string[] = [];
-      if (activeReturns > 0) parts.push(`${activeReturns} return${activeReturns > 1 ? 's' : ''}`);
-      if (activeCreditNotes > 0) parts.push(`${activeCreditNotes} credit note${activeCreditNotes > 1 ? 's' : ''}`);
-      throw new Error(
-        `Cannot edit invoice lines — ${parts.join(' and ')} linked to this invoice. Delete the linked credit note / return first, then edit.`
-      );
-    }
+    // ── INVOICE-EDIT S2 — Zeilen abgleichen statt wegwerfen. Früher sperrte jede Retoure/Gutschrift
+    // die ganze Rechnung, weil der Edit alle Zeilen mit neuen IDs neu anlegte (Retourenzeilen und
+    // Wareneinsatz hängen an der Zeilen-ID). Jetzt behält eine fortgesetzte Zeile ID, Los und
+    // Einstand; gesperrt wird nur, was eine Retoure oder Gutschrift wirklich verletzen würde
+    // (Zeile entfernen/ersetzen, Menge unter die Retourenmenge, Preis der retournierten Zeile,
+    // Summe unter die Gutschriften). Geprüft VOR jedem Schreiben.
+    const baseLines = loadEditBaseLines(id);
+    const lineMatch = matchEditLines(baseLines, lines);
+    assertEditKeepsReturns(id, baseLines, lines, lineMatch);
+    const baseById = new Map(baseLines.map(b => [b.id, b]));
 
     // ── Slice 3b — Re-Edit-Guard: wurde die Ueberzahlungs-Gutschrift eines FRUEHEREN Edits
     // (source_type='invoice_edit', source_id=id) bereits (teil-)eingeloest, darf nicht erneut
@@ -720,26 +710,48 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // 3. Domain: alte Zeilen geben ihren Bestand zurueck, dann Lines loeschen.
       //    STOCK-LOT-INTEGRITY — mit Nachweis exakt dieser; Altzeile mit Los wie bisher ihr Los.
       //    Altzeile OHNE Los ist oben schon abgewiesen (assertNoLegacyLotLessLines).
+      //    INVOICE-EDIT S2 — eine fortgesetzte Zeile mit ihrem Los (oder ohne Los) bewegt unten NUR
+      //    die Mengendifferenz. „Alles zurück, alles neu" wäre bei Losen nicht neutral: restoreLot
+      //    deckelt bei der Losgröße, und liegt ein retourniertes Stück schon wieder im Los, ginge
+      //    beim Zurückgeben eines verloren. Nur wegfallende Zeilen (und Altzeilen ohne Los auf einem
+      //    Los-Artikel) geben hier ihren ganzen Bestand zurück.
+      const keptLineIds = new Set(lineMatch.filter((x): x is string => !!x));
+      const deltaLineIds = new Set(baseLines
+        .filter(b => keptLineIds.has(b.id) && (b.lotId !== null || !b.productId || !hasLotHistory(b.productId)))
+        .map(b => b.id));
       for (const line of invoiceStockLines(id)) {
+        if (line.productId) productsToSync.add(line.productId);
+        if (deltaLineIds.has(line.id)) continue;
         if (line.stockTaken !== null) giveBackStock(line.productId, line.lotId, line.stockTaken, now);
         else if (line.lotId) restoreLot(line.lotId, line.qty);
-        if (line.productId) productsToSync.add(line.productId);
       }
-      // Sync (Scope A): alte Line-IDs VOR dem DELETE erfassen — Geraet B muss exakt
-      // dieselben Zeilen entfernen. trackChange('delete') braucht nur die id (keinen
-      // Row-Snapshot), daher genuegt das Tracking direkt nach dem SQL-DELETE. Beides
-      // innerhalb der offenen Tx → atomar; Rollback verwirft die Changelog-Zeilen.
-      const oldLineIds = query(`SELECT id FROM invoice_lines WHERE invoice_id = ?`, [id]).map(r => r.id as string);
-      db.run(`DELETE FROM invoice_lines WHERE invoice_id = ?`, [id]);
-      for (const oldId of oldLineIds) trackChange('invoice_lines', oldId, 'delete', {});
+      // INVOICE-EDIT S2 — nur Zeilen löschen, die wirklich wegfallen; fortgesetzte Zeilen werden
+      // unten aktualisiert und behalten ihre ID.
+      // Sync (Scope A): trackChange('delete') braucht nur die id; innerhalb der offenen Tx → atomar.
+      for (const b of baseLines) {
+        if (keptLineIds.has(b.id)) continue;
+        db.run(`DELETE FROM invoice_lines WHERE id = ?`, [b.id]);
+        trackChange('invoice_lines', b.id, 'delete', {});
+      }
 
       // 4. Neue Lines — Auto-FIFO Lot-Pick wie createDirectInvoice. WICHTIG: Line-ID
       //    EINMAL erzeugen (_id) und fuer DB-INSERT UND Repost-Objekt nutzen → COGS-
       //    source_line_id == invoice_lines.id (ein spaeterer Return findet den Cost).
-      type ResolvedRewriteLine = typeof lines[number] & { _id: string; _resolvedLotId: string | null; _resolvedCost: number };
-      const resolvedLines: ResolvedRewriteLine[] = lines.map(l => {
-        let lotId = l.lotId || null;
-        let cost = l.purchasePrice;
+      //    INVOICE-EDIT S2 — eine fortgesetzte Zeile behält ihre ID, ihr Los und ihren Einstand
+      //    (sonst stimmte der Wareneinsatz einer Retoure nicht mehr mit der Rechnung überein).
+      type ResolvedRewriteLine = typeof lines[number] & {
+        _id: string; _resolvedLotId: string | null; _resolvedCost: number; _kept: boolean;
+        /** Differenz-Modus: die Zeile hält ihren Bestand und bewegt nur qty − _oldTaken. */
+        _delta: boolean; _oldTaken: number;
+      };
+      const resolvedLines: ResolvedRewriteLine[] = lines.map((l, i) => {
+        const kept = lineMatch[i] ? baseById.get(lineMatch[i] as string) : undefined;
+        if (kept && deltaLineIds.has(kept.id)) {
+          return { ...l, _id: kept.id, _resolvedLotId: kept.lotId, _resolvedCost: kept.purchasePrice, _kept: true,
+            _delta: true, _oldTaken: kept.stockTaken ?? kept.qty };
+        }
+        let lotId = kept ? null : (l.lotId || null);
+        let cost = kept ? kept.purchasePrice : l.purchasePrice;
         if (!lotId && l.productId) {
           const r = db.exec(
             `SELECT id, unit_cost FROM stock_lots
@@ -753,8 +765,14 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
             cost = Number(row[1]) || cost;
           }
         }
-        return { ...l, _id: uuid(), _resolvedLotId: lotId, _resolvedCost: cost };
+        return { ...l, _id: kept ? kept.id : uuid(), _resolvedLotId: lotId, _resolvedCost: cost, _kept: !!kept, _delta: false, _oldTaken: 0 };
       });
+      // Was eine Zeile JETZT zusätzlich braucht: im Differenz-Modus nur das Mehr, sonst alles.
+      const need = (l: ResolvedRewriteLine): number => {
+        const q = Math.max(1, l.quantity || 1);
+        return l._delta ? Math.max(0, q - l._oldTaken) : q;
+      };
+      const needing = resolvedLines.filter(l => need(l) > 0);
 
       // F1 — Lot-Verfuegbarkeit VOR den neuen Line-Inserts pruefen (aggregiert pro Lot).
       // Wirft innerhalb der offenen beginLedgerTransaction → voller Rollback (Reverse +
@@ -762,9 +780,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // B5 — With-Agent-Guard: eine neu hinzugefuegte Edit-Line darf kein with_agent-Stueck
       // sein (der InvoiceDetail-Picker filtert stock_status nicht). Wirft in der Tx → Rollback.
       assertProductsSellable(resolvedLines.map(l => l.productId));
-      assertLotsConsumable(resolvedLines.map(l => ({ lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) })));
+      assertLotsConsumable(needing.map(l => ({ lotId: l._resolvedLotId, qty: need(l) })));
       assertLotTrackedLinesResolved(resolvedLines.map(l => ({ productId: l.productId, lotId: l._resolvedLotId })));
-      assertLotLessStockAvailable(resolvedLines.map(l => ({ productId: l.productId, lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) })));
+      assertLotLessStockAvailable(needing.map(l => ({ productId: l.productId, lotId: l._resolvedLotId, qty: need(l) })));
 
       let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
       const stmt = db.prepare(
@@ -774,8 +792,32 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       );
       resolvedLines.forEach((l, i) => {
         const qty = Math.max(1, l.quantity || 1);
-        const taken = takeStock({ productId: l.productId, lotId: l._resolvedLotId, qty }, now);
-        stmt.run([l._id, id, l.productId, l.description || null, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId, taken]);
+        let taken: number;
+        if (l._delta) {
+          // INVOICE-EDIT S2 — nur die Differenz: mehr → nehmen (Los: verbrauchen), weniger → zurück.
+          const d = qty - l._oldTaken;
+          if (d > 0) {
+            const t = takeStock({ productId: l.productId, lotId: l._resolvedLotId, qty: d }, now);
+            if (l._resolvedLotId && t > 0) consumeLot(l._resolvedLotId, t);
+            taken = l._oldTaken + t;
+          } else {
+            if (d < 0) giveBackStock(l.productId, l._resolvedLotId, -d, now);
+            taken = l._oldTaken + d;
+          }
+        } else {
+          taken = takeStock({ productId: l.productId, lotId: l._resolvedLotId, qty }, now);
+        }
+        if (l._kept) {
+          db.run(
+            `UPDATE invoice_lines SET product_id = ?, description = ?, quantity = ?, unit_price = ?, purchase_price_snapshot = ?,
+               vat_rate = ?, tax_scheme = ?, vat_amount = ?, line_total = ?, position = ?, lot_id = ?, stock_taken = ?,
+               legacy_stock = NULL
+             WHERE id = ?`,
+            [l.productId, l.description || null, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId, taken, l._id],
+          );
+        } else {
+          stmt.run([l._id, id, l.productId, l.description || null, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId, taken]);
+        }
         netAmount += l.unitPrice * qty;
         totalVat += l.vatAmount;   // L-17: vatAmount ist pro Line (createDirect-Konvention), kein ×qty
         totalPurchase += l._resolvedCost * qty;
@@ -790,11 +832,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // sind hier bereits eingefuegt; trackChange liest sie in derselben offenen Tx.
       // Repost-Ledger (postInvoiceIssued, COGS.source_line_id == _id) folgt danach →
       // auf B existieren die Lines vor den referenzierenden Ledger-Entries.
-      resolvedLines.forEach(l => trackChange('invoice_lines', l._id, 'insert', {}));
+      resolvedLines.forEach(l => trackChange('invoice_lines', l._id, l._kept ? 'update' : 'insert', {}));
 
       // Neue Lots konsumieren.
       resolvedLines.forEach(l => {
-        if (l._resolvedLotId) {
+        if (l._resolvedLotId && !l._delta) {
           const qty = Math.max(1, l.quantity || 1);
           consumeLot(l._resolvedLotId, qty);
         }
@@ -855,9 +897,16 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       const newPaid = Number(paidRow?.paid || 0);
       // Slice 3b — der Ueberschuss (newPaid > newGross) wird unten als Store-Guthaben gebucht,
       // NICHT mehr als tip. tip_amount = 0 (Scope A: tip retired), sonst Doppel-Count.
-      const overpay = Math.max(0, newPaid - grossAmount);
+      // INVOICE-EDIT S2 — eine wirksame Gutschrift hat die Forderung schon gemindert
+      // (receivable_cancel). Sie zählt zur Begleichung: sonst fiele eine per Retoure erledigte
+      // Rechnung auf PARTIAL zurück, und eine Preissenkung ergäbe keine Gutschrift, obwohl die
+      // Forderung im Hauptbuch negativ würde. Ohne Gutschrift ist cnCancel 0 — alles wie bisher.
+      const cnCancel = creditNoteReceivableCancel(id);
+      const settled = newPaid + cnCancel;
+      const overpay = Math.max(0, settled - grossAmount);
       const tip = 0;
       const newStatus: InvoiceStatus = newPaid >= grossAmount - 0.005 ? 'FINAL'
+        : (cnCancel > 0.005 && settled >= grossAmount - 0.005) ? 'RETURNED'
         : newPaid > 0.005 ? 'PARTIAL'
         : (inv0.status === 'DRAFT' ? 'DRAFT' : 'PARTIAL');
       db.run(
@@ -877,7 +926,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // 9. Produkt-Reservierung nachziehen (nach finalem Status): erst sync, dann
       //    unreserve, dann reserve (nur solange nicht FINAL).
       for (const pid of productsToSync) syncProductQuantity(pid);
-      const isStillUnpaid = newStatus !== 'FINAL';
+      const isStillUnpaid = newStatus !== 'FINAL' && newStatus !== 'RETURNED';
       for (const pid of productsToSync) {
         unreserveProductIfRestored(pid);
         if (isStillUnpaid) reserveProductIfDepleted(pid);
@@ -891,7 +940,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         overpaymentCredit: overpay > 0.005 ? overpay : 0,
         issuedAt: issuedAt ?? inv0.issuedAt, notes: notes ?? inv0.notes ?? null,
         lines: resolvedLines.map(l => ({
-          productId: l.productId, qty: Math.max(1, l.quantity || 1), unitPrice: l.unitPrice,
+          id: l._id, productId: l.productId, qty: Math.max(1, l.quantity || 1), unitPrice: l.unitPrice,
           vat: l.vatAmount, lineTotal: l.lineTotal, taxScheme: l.taxScheme,
         })),
       });
@@ -920,7 +969,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       ) as { id: string; amount: number; used_amount: number }[]).map(r => ({
         id: r.id, amount: Number(r.amount) || 0, usedAmount: Number(r.used_amount) || 0,
       }));
-      const overpayPlan = planEditOverpayment({ newPaid, newGross: grossAmount, existingOverpaymentCredits: existingOverpay });
+      const overpayPlan = planEditOverpayment({ newPaid: settled, newGross: grossAmount, existingOverpaymentCredits: existingOverpay });
       if (overpayPlan.blocked) {
         throw new Error(overpayPlan.reason === 'OVERPAYMENT_CREDIT_WOULD_SHRINK'
           ? 'Cannot edit: this would shrink an existing overpayment store credit below its amount. Refund or apply that credit first, then edit.'

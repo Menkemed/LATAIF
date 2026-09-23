@@ -590,10 +590,10 @@ marker('CENTRAL_UI_R6E_CREDIT_NOTE_ATOMICITY_PROVED');
     && all(w2.db, "SELECT qty_remaining, status FROM stock_lots WHERE id = 'lot-p2'") === S([[1, 'ACTIVE']]) && balanced(w2.db),
   `INVOICE-CANCEL nach Retourenstorno: nicht gesperrt, Forderung 0, Ware zurück (${inv || 'ok'}, AR ${arKunde})`);
 
-  // (c) Guard B von editInvoice: die stornierte Gutschrift sperrt die Zeilenbearbeitung nicht mehr —
-  //     eine wirksame schon (Kontrolle, damit der Test die Sperre wirklich erreicht).
+  // (c) editInvoice: eine wirksame Retoure/Gutschrift sperrt den PREIS der retournierten Zeile
+  //     (INVOICE-EDIT S2 — früher die ganze Rechnung); nach dem Retourenstorno ist er wieder frei.
   const edit = (x: Welt): string => meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(x.invId, {
-    lines: [{ productId: 'p2', unitPrice: 1000, purchasePrice: 100, taxScheme: 'VAT_10', vatRate: 10, vatAmount: 100, lineTotal: 1100 }],
+    lines: [{ productId: 'p2', unitPrice: 900, purchasePrice: 100, taxScheme: 'VAT_10', vatRate: 10, vatAmount: 90, lineTotal: 990 }],
     reason: 'Korrektur',
   })));
   const wk = welt('unbezahlt-bar');
@@ -601,8 +601,8 @@ marker('CENTRAL_UI_R6E_CREDIT_NOTE_ATOMICITY_PROVED');
   const w3 = welt('unbezahlt-bar');
   await fern(() => rev.runReturnCancel(deps(w3.db), identity(nx()), rumpf(w3)));
   const nachStorno = edit(w3);
-  ok(/Cannot edit invoice lines/.test(kontrolle) && !/Cannot edit invoice lines/.test(nachStorno),
-    `EDIT Guard B: wirksame Gutschrift sperrt (Kontrolle), stornierte nicht mehr (${nachStorno || 'ok'})`);
+  ok(/cannot be changed — it has a return/.test(kontrolle) && !/it has a return/.test(nachStorno),
+    `EDIT wirksame Retoure sperrt den Preis der Zeile (Kontrolle), nach dem Storno nicht mehr (${nachStorno || 'ok'})`);
 
   // (d) Löschen: eine stornierte Gutschrift ist die Spur ihres Stornos.
   const w4 = welt('guthaben');
@@ -698,6 +698,7 @@ marker('CENTRAL_UI_R6E_PAID_REFUND_CANCEL_CONTRACT_PINNED');
     'src/core/data/page-reads.ts': 'Summen/Zählungen ohne CANCELLED',
     'src/core/finance/receivables.ts': 'Summen ohne CANCELLED',
     'src/core/invoices/invoice-cancel-house.ts': 'Storno-Sperre bei wirksamer Gutschrift ohne CANCELLED',
+    'src/core/invoices/edit-lines.ts': 'Edit-Grenzen (INVOICE-EDIT S2): Gutschriften-Deckel und Forderungsminderung ohne CANCELLED',
     'src/core/invoices/invoice-reversal.ts': 'requireNoReturns ohne CANCELLED',
     'src/core/ledger/backfill.ts': 'Nachbuchung überspringt CANCELLED',
     'src/core/ledger/counterpartyAudit.ts': 'Gegenpartei-Prüfung ohne CANCELLED',
@@ -708,7 +709,7 @@ marker('CENTRAL_UI_R6E_PAID_REFUND_CANCEL_CONTRACT_PINNED');
     'src/stores/bankingStore.ts': 'Verweis; Retouren REJECTED und Guthaben-Erstattung ausgeschlossen',
     'src/stores/creditNoteStore.ts': 'Liste (mit Status) und Löschsperre',
     'src/stores/customerStore.ts': 'Kundensaldo/-kennzahlen ohne CANCELLED',
-    'src/stores/invoiceStore.ts': 'M-04, Guard B, Deckel ohne CANCELLED',
+    'src/stores/invoiceStore.ts': 'M-04, Deckel ohne CANCELLED (Guard B ist seit INVOICE-EDIT S2 gezielt in edit-lines.ts)',
     'src/stores/payablesStore.ts': 'Verweis; nur APPROVED/REFUNDED-Retouren',
     'src/stores/salesReturnStore.ts': 'RETURNED-Prüfung, Riegel, Nachziehen ohne CANCELLED',
   };
