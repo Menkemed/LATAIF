@@ -11,7 +11,7 @@ import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, 
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
-import { planCustomerChange, moveInvoicePayments, customerDisplayName } from '@/core/invoices/customer-change';
+import { planCustomerChange, moveInvoicePayments, moveLastPurchase, customerDisplayName } from '@/core/invoices/customer-change';
 import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts } from '@/core/invoices/edit-lines';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
@@ -212,6 +212,22 @@ function rowToLine(row: Record<string, unknown>): InvoiceLine {
     position: (row.position as number) || 1,
     lotId: (row.lot_id as string | null) || null,
   };
+}
+
+/**
+ * INVOICE-EDIT S4 — der Stand der Rechnung aus der DATENBANK, nicht aus dem Store. `recordPayment`
+ * rechnete Status, Endnummer und `invoice.paid` gegen den Store; in `editInvoice` (Delta-Zahlung)
+ * war das noch der ALTE Stand — eine erhöhte Rechnung galt als voll bezahlt, bekam ihre Endnummer
+ * und löste `invoice.paid` aus, obwohl sie danach PARTIAL war.
+ */
+function freshInvoice(id: string): Invoice | undefined {
+  const r = query('SELECT * FROM invoices WHERE id = ?', [id])[0];
+  return r ? rowToInvoice(r) : undefined;
+}
+
+/** Wie oft `invoice.paid` für diese Rechnung schon ausgelöst wurde (Protokoll des Ereignisbusses). */
+function paidEventCount(id: string): number {
+  return eventBus.getLog().filter(e => e.type === 'invoice.paid' && e.entityId === id).length;
 }
 
 export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
@@ -677,6 +693,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // → kein persistierter Zwischenstand (saveDatabase erst beim COMMIT). Store-State
     // wird erst NACH COMMIT bzw. im Fehlerfall nach ROLLBACK re-synchronisiert.
     const productsToSync = new Set<string>();
+    // INVOICE-EDIT S4 — wird die Rechnung durch diesen Edit voll bezahlt (Preissenkung, Delta-Zahlung),
+    // ist das derselbe Übergang wie beim Zahlen: `invoice.paid` (Produkt „sold", Erinnerung erledigt,
+    // Auftrag/Reparatur abgeschlossen, letzter Kauf). Löst ihn die Delta-Zahlung schon aus, nicht zweimal.
+    const paidEventsBefore = paidEventCount(id);
+    let finalStatus: InvoiceStatus = inv0.status;
     beginLedgerTransaction();
     try {
       // 1. (Regel 1) Bestehende INVOICE-Buchung reversen (AR/REVENUE/VAT/COGS/INVENTORY).
@@ -928,6 +949,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         : (cnCancel > 0.005 && settled >= grossAmount - 0.005) ? 'RETURNED'
         : newPaid > 0.005 ? 'PARTIAL'
         : (inv0.status === 'DRAFT' ? 'DRAFT' : 'PARTIAL');
+      finalStatus = newStatus;
       db.run(
         `UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
         [newPaid, tip, newStatus, now, id]
@@ -936,6 +958,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // INVOICE-NUMBER-FREEZE — deckt der Edit die Rechnung (wieder) voll, bekommt sie ihre Endnummer,
       // falls sie noch keine hat; eine schon vergebene bleibt. Innerhalb der Tx → Rollback nimmt sie mit.
       if (newStatus === 'FINAL') ensureFinalInvoiceNumber(id, now);
+      // INVOICE-EDIT S4 — Kundenwechsel an einer bezahlten Rechnung: „letzter Kauf" zieht mit um.
+      if (customerPlan) {
+        for (const cid of moveLastPurchase(customerPlan, id, inv0.status === 'FINAL', newStatus === 'FINAL', now)) {
+          trackChange('customers', cid, 'update', {});
+        }
+      }
       // Sync (Scope A): GENAU EIN Full-Row-Snapshot der invoices-Zeile, NACHDEM
       // Header, Totale, Status, paid_amount und tip_amount final sind. trackChange
       // (nicht trackUpdate) → kein Audit-Doppel; invoice_edits + Audit-History bleiben
@@ -1041,6 +1069,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       throw e;
     }
 
+    // INVOICE-EDIT S4 — nach dem Commit, wie beim Zahlen: nur beim echten Übergang auf FINAL und nur,
+    // wenn die Delta-Zahlung ihn nicht schon gemeldet hat.
+    if (inv0.status !== 'FINAL' && finalStatus === 'FINAL' && paidEventCount(id) === paidEventsBefore) {
+      eventBus.emit('invoice.paid', 'invoice', id, {});
+    }
+
     // Erfolg: Store-State NACH COMMIT synchronisieren (Invoice + Produkte/Reservierung).
     get().loadInvoices();
     try { useProductStore.getState().loadProducts(); } catch { /* noop */ }
@@ -1066,7 +1100,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // der Teil darueber wird Store-Guthaben (CR CUSTOMER_CREDIT + customer_credits-Row) statt
     // negativem AR / tip. overpayExcess via SSOT-Helper, damit die Domain-Row exakt dem
     // Ledger-Bein entspricht (Rounding). method='credit' (Guthaben-Einloesung) splittet nie.
-    const inv0 = get().getInvoice(invoiceId);
+    const inv0 = freshInvoice(invoiceId);
     // Slice 3b — suppressOverpayCredit (editInvoice-Delta): kein 3a-Split, voller Betrag auf
     // AR; der Gesamt-Ueberschuss wird in editInvoice Step 8b zentral umgebucht. openRemainder
     // = undefined → computePaymentSplit liefert arCredit=Betrag/creditCredit=0, und
@@ -1099,7 +1133,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Finalisierung fest, damit die danach erzeugte Card-Fee-Expense dieselbe
     // Nummer traegt wie die Bank-Zeile (No: 000009 statt veraltetem PINV-…).
     let finalInvoiceLabel = '';
-    const inv = get().getInvoice(invoiceId);
+    const inv = freshInvoice(invoiceId);
     if (inv) {
       const newPaid = inv.paidAmount + amount;
       // Slice 3 — der Ueberschuss (overpayExcess) wird unten als customer_credits gebucht,
@@ -1177,7 +1211,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     trackPayment('invoices', invoiceId, amount, method);
 
     // ZIEL.md §3a — Ledger-Posting für Customer-Zahlung.
-    const invForLedger = get().getInvoice(invoiceId);
+    const invForLedger = freshInvoice(invoiceId);
     if (invForLedger) {
       const doPost = () => {
         if (hasLedgerEntries('PAYMENT', paymentId)) return;
@@ -1590,8 +1624,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
     const branchId = currentBranchId();
     const userId = currentUserId();
-    const inv = get().getInvoice(invoiceId);
+    const inv = freshInvoice(invoiceId);
     const customerId = inv?.customerId;
+    // INVOICE-EDIT S4 — macht die geänderte Zahlung die Rechnung voll bezahlt, ist das der Übergang
+    // auf FINAL wie beim Zahlen: `invoice.paid` nach dem Commit (vorher fehlte er hier ganz).
+    let becameFinal = false;
 
     // D3-Guard: zwei Karten-Fees mit IDENTISCHEM created_at koennte das
     // bankingStore-Netting (keyt auf created_at, nicht payment_id) nicht
@@ -1643,6 +1680,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
           [newPaid, tip, newStatus, now, invoiceId]);
         if (newStatus !== inv.status) trackStatusChange('invoices', invoiceId, inv.status, newStatus);
+        becameFinal = newStatus === 'FINAL' && inv.status !== 'FINAL';
         // INVOICE-NUMBER-FREEZE — voll bezahlt nach der Änderung: Endnummer höchstens einmal.
         if (newStatus === 'FINAL') ensureFinalInvoiceNumber(invoiceId, now);
         // LAN-Sync (Gruppe 3): paid_amount/status/tip nach Recompute → EIN Full-Row-Snapshot.
@@ -1689,6 +1727,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       throw e;
     }
 
+    if (becameFinal) eventBus.emit('invoice.paid', 'invoice', invoiceId, {});
     get().loadInvoices();
   },
 

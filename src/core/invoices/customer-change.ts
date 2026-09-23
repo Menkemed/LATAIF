@@ -24,6 +24,7 @@
 // Bestätigung; eine neue Zahlung im selben Speichern ist nicht erlaubt (sie würde beim alten
 // Kunden gebucht).
 // ════════════════════════════════════════════════════════════════════════════
+import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { postInvoicePayment, reverseSource } from '@/core/ledger/posting';
@@ -191,6 +192,51 @@ export function moveInvoicePayments(plan: CustomerChangePlan, at: string): strin
     moved.push(p.id);
   }
   return moved;
+}
+
+/**
+ * INVOICE-EDIT S4 — „letzter Kauf" folgt der Rechnung. `invoice.paid` setzt `last_purchase_at` (und
+ * die Verkaufsstufe) beim Kunden, der die Rechnung beim Bezahlen hatte. Wechselt eine BEZAHLTE
+ * Rechnung den Kunden, bliebe der Kauf beim alten Kunden stehen und fehlte beim neuen.
+ *   • neuer Kunde (Rechnung bleibt FINAL): letzter Kauf = spätestens der Abschluss dieser Rechnung,
+ *     Verkaufsstufe „active" — wie `invoice.paid`. Wird sie erst durch diesen Edit FINAL, meldet das
+ *     `invoice.paid` selbst (nach dem Commit).
+ *   • alter Kunde (Rechnung war FINAL): war sie sein letzter Kauf, gilt wieder sein vorletzter
+ *     (Abschluss seiner übrigen bezahlten Rechnungen, sonst leer). Hat er einen späteren Kauf, bleibt
+ *     alles, wie es ist. Die Verkaufsstufe bleibt (sie ist ein Vertriebsstand, kein Zähler).
+ * Umsatz- und Kaufkennzahlen rechnet das Haus aus den Rechnungen (`computeSalesMetrics`) — die folgen
+ * dem Kunden der Rechnung von selbst.
+ */
+export function moveLastPurchase(
+  plan: CustomerChangePlan, invoiceId: string, wasFinal: boolean, isFinal: boolean, now: string,
+): string[] {
+  const touched: string[] = [];
+  const doneAt = String(query(
+    'SELECT COALESCE(number_finalized_at, issued_at, created_at) AS t FROM invoices WHERE id = ?', [invoiceId],
+  )[0]?.t ?? now);
+  if (wasFinal) {
+    const old = query('SELECT last_purchase_at FROM customers WHERE id = ?', [plan.from])[0];
+    const current = (old?.last_purchase_at as string | null) ?? null;
+    const others = (query(
+      `SELECT MAX(COALESCE(number_finalized_at, issued_at, created_at)) AS t FROM invoices
+        WHERE customer_id = ? AND status = 'FINAL' AND id != ?`, [plan.from, invoiceId],
+    )[0]?.t as string | null) ?? null;
+    if (current !== null && (others === null || others < doneAt)) {
+      getDatabase().run('UPDATE customers SET last_purchase_at = ?, updated_at = ? WHERE id = ?', [others, now, plan.from]);
+      touched.push(plan.from);
+    }
+  }
+  if (wasFinal && isFinal) {
+    getDatabase().run(
+      `UPDATE customers SET
+         last_purchase_at = CASE WHEN last_purchase_at IS NULL OR last_purchase_at < ? THEN ? ELSE last_purchase_at END,
+         sales_stage = 'active', updated_at = ?
+       WHERE id = ?`,
+      [doneAt, doneAt, now, plan.to],
+    );
+    touched.push(plan.to);
+  }
+  return touched;
 }
 
 export { customerName as customerDisplayName };
