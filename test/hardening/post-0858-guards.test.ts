@@ -243,7 +243,8 @@ const lotRem = (db: Db, lot: string): number => n(db, 'SELECT qty_remaining FROM
   const zeilen = () => [{ ...LINE('p2'), lotId: s(db, 'SELECT lot_id FROM invoice_lines WHERE invoice_id = ?', [inv]) || undefined }];
   const vor = zustand(db);
   const m = meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(inv, { lines: zeilen() as never, customerId: 'cust-2', reason: 'test' })));
-  ok(/Cannot change the customer of an invoice that has payments/.test(m), `1 bezahlte Rechnung: Kundenwechsel abgelehnt (${m})`);
+  // INVOICE-EDIT S3 — mit Zahlungen nicht mehr pauschal gesperrt, aber nie ohne ausdrückliche Bestätigung.
+  ok(/^This invoice has payments\. Confirm that the invoice and its payments move/.test(m), `1 bezahlte Rechnung: Kundenwechsel ohne Bestätigung abgelehnt (${m})`);
   ok(zustand(db) === vor, '1 …Rechnung, Zahlungen, Hauptbuch unverändert');
   ok(s(db, 'SELECT customer_id FROM invoices WHERE id = ?', [inv]) === 'cust-1', '1 …Kunde bleibt cust-1');
 
@@ -254,7 +255,7 @@ const lotRem = (db: Db, lot: string): number => n(db, 'SELECT qty_remaining FROM
   const m2 = meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(inv2, {
     lines: zeilen2 as never, customerId: 'cust-2', reason: 'test', deltaPayment: { amount: 100, method: 'cash' as never },
   })));
-  ok(/Cannot change the customer of an invoice that has payments/.test(m2), `1 unbezahlt + Delta-Zahlung: abgelehnt (${m2})`);
+  ok(/save the customer change first, then record the payment/.test(m2), `1 unbezahlt + Delta-Zahlung: abgelehnt (${m2})`);
   ok(zustand(db2) === vor2, '1 …nichts geändert');
 
   // Negativkontrolle: unbezahlt, ohne Delta → Wechsel läuft.

@@ -11,6 +11,7 @@ import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, 
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
+import { planCustomerChange, moveInvoicePayments, customerDisplayName } from '@/core/invoices/customer-change';
 import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts } from '@/core/invoices/edit-lines';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
@@ -144,6 +145,8 @@ interface InvoiceStore {
     staffId?: string;
     deltaPayment?: { amount: number; method: PaymentMethod; cardBrand?: CardBrand };
     reason: string;
+    /** INVOICE-EDIT S3 — ausdrückliche Bestätigung: Rechnung MIT Zahlungen wechselt den Kunden. */
+    confirmCustomerChange?: boolean;
   }) => void;
   recordPayment: (invoiceId: string, amount: number, method: string, notes?: string, specialMarkOnFinal?: boolean, cardBrand?: CardBrand, paymentIdOverride?: string, suppressOverpayCredit?: boolean) => string;
   // Credit-Modell Slice 3 — Store-Guthaben des Kunden gegen eine Invoice einlösen.
@@ -640,20 +643,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       throw new Error('This invoice was converted from agent sales. Undo the conversion to change it.');
     }
 
-    // ── Kundenwechsel nur ohne Geldfluss. Der Edit bucht nur die INVOICE-Quelle um; die
-    // PAYMENT-Beine (CR AR des alten Kunden) und die Delta-Zahlung (recordPayment liest den
-    // Kunden aus dem noch alten Store-Stand) blieben beim alten Kunden → Forderung auf zwei
-    // Kunden verteilt. Deshalb: bei vorhandenen Zahlungen oder Delta-Zahlung hart ablehnen.
-    if (customerId !== undefined && customerId !== inv0.customerId) {
-      const paymentCount = Number(query(
-        `SELECT COUNT(*) AS c FROM payments WHERE invoice_id = ?`, [id]
-      )[0]?.c || 0);
-      if (paymentCount > 0 || deltaAmount > 0) {
-        throw new Error(
-          'Cannot change the customer of an invoice that has payments. Delete the payments first, or save the customer change without a new payment.'
-        );
-      }
-    }
+    // ── INVOICE-EDIT S3 — Kundenwechsel, auch mit Zahlungen. Früher hart abgelehnt, weil nur die
+    // INVOICE-Quelle umgebucht wurde. Jetzt ziehen die Zahlungsbeine unten in derselben Transaktion
+    // mit (`moveInvoicePayments`). Gesperrt bleibt, was einem Kunden gehört (Guthaben, Retouren/
+    // Gutschriften, Auftrags-Anzahlung); mit Zahlungen nur nach ausdrücklicher Bestätigung; eine
+    // Delta-Zahlung im selben Speichern nie (recordPayment liest den Kunden aus dem alten Stand).
+    const customerPlan = planCustomerChange(id, inv0.customerId, customerId,
+      { confirmed: input.confirmCustomerChange === true, newPayment: deltaAmount > 0 });
 
     // ── Slice 3b: paid_amount IST per Invariante SUM(payments). Wird das Brutto unter den
     // bereits gezahlten Betrag reduziert (oder per Delta ueberzahlt), wird der Ueberschuss
@@ -707,6 +703,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         db.run(`UPDATE invoices SET ${hSets.join(', ')}, updated_at = ? WHERE id = ?`, hVals);
       }
       const effCustomerId = customerId !== undefined ? customerId : inv0.customerId;
+      // INVOICE-EDIT S3 — Zahlungen beim alten Kunden aus-, beim neuen einbuchen (jede auf ihr Datum).
+      const movedPaymentIds = customerPlan ? moveInvoicePayments(customerPlan) : [];
 
       // 3. Domain: alte Zeilen geben ihren Bestand zurueck, dann Lines loeschen.
       //    STOCK-LOT-INTEGRITY — mit Nachweis exakt dieser; Altzeile mit Los wie bisher ihr Los.
@@ -955,6 +953,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         customerId: effCustomerId, status: newStatus,
         netAmount, vatAmount: totalVat, grossAmount, paidAmount: newPaid, taxScheme,
         overpaymentCredit: overpay > 0.005 ? overpay : 0,
+        ...(customerPlan ? { customerChange: { from: customerPlan.from, to: customerPlan.to, paymentsMoved: movedPaymentIds } } : {}),
         issuedAt: issuedAt ?? inv0.issuedAt, notes: notes ?? inv0.notes ?? null,
         lines: resolvedLines.map(l => ({
           id: l._id, productId: l.productId, qty: Math.max(1, l.quantity || 1), unitPrice: l.unitPrice,
@@ -1018,6 +1017,14 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         oldValue: `${inv0.grossAmount.toFixed(3)} BHD · ${inv0.status} · ${reasonTrim}`,
         newValue: `${grossAmount.toFixed(3)} BHD · ${newStatus}`,
       });
+      if (customerPlan) {
+        logAudit({
+          module: 'Sales', entityType: 'invoices', entityId: id, action: 'UPDATE',
+          field: `customer (rev ${revision})`,
+          oldValue: customerDisplayName(customerPlan.from),
+          newValue: `${customerDisplayName(customerPlan.to)} · ${movedPaymentIds.length} payment(s) moved`,
+        });
+      }
 
       commitLedgerTransaction();
     } catch (e) {

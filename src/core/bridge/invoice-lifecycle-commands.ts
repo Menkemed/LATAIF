@@ -47,6 +47,7 @@ import {
   EDIT_LINE_ID_INVALID, EDIT_AMBIGUOUS_RETURNED_LINE, EDIT_RETURNED_LINE_LOT_UNKNOWN, EDIT_KEPT_LINE_LOT_SHORT,
 } from '@/core/invoices/edit-lines';
 import { LEGACY_STOCK_LINES } from '@/core/lots/stock-contract';
+import { CUSTOMER_CHANGE_VERDICTS } from '@/core/invoices/customer-change';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
@@ -72,13 +73,15 @@ export interface InvoiceUpdateRequest {
   /** Die Fassung, die der Mensch gesehen hat. Ohne sie kein Ändern. */
   expectedRevision: number;
   reason: string;
+  /** INVOICE-EDIT S3 — der Mensch hat bestätigt, dass eine Rechnung MIT Zahlungen den Kunden wechselt. */
+  confirmCustomerChange: boolean;
   body: ReturnType<typeof parseInvoicePayload>;
 }
 
 export function parseInvoiceUpdate(raw: unknown): InvoiceUpdateRequest {
   if (!isPlain(raw)) throw new InvoicePayloadError('payload must be an object');
-  const { id, expectedRevision, reason, ...rest } = raw as {
-    id?: unknown; expectedRevision?: unknown; reason?: unknown;
+  const { id, expectedRevision, reason, confirmCustomerChange, ...rest } = raw as {
+    id?: unknown; expectedRevision?: unknown; reason?: unknown; confirmCustomerChange?: unknown;
   };
   if (typeof id !== 'string' || !id.trim()) throw new InvoicePayloadError('id is required');
   if (typeof expectedRevision !== 'number' || !Number.isInteger(expectedRevision) || expectedRevision < 1) {
@@ -95,9 +98,13 @@ export function parseInvoiceUpdate(raw: unknown): InvoiceUpdateRequest {
   if ('deltaPayment' in rest) {
     throw new InvoicePayloadError('a payment is its own command, not a field of an edit');
   }
+  // INVOICE-EDIT S3 — die Bestätigung eines Kundenwechsels gehört nur zum Ändern, nicht zum Rumpf.
+  if (confirmCustomerChange !== undefined && typeof confirmCustomerChange !== 'boolean') {
+    throw new InvoicePayloadError('confirmCustomerChange must be true or false');
+  }
   // Alles Übrige ist derselbe Rumpf wie beim Anlegen — inklusive seiner Verbotsliste.
   const body = parseInvoicePayload(rest);
-  return { id, expectedRevision, reason: reason.trim(), body };
+  return { id, expectedRevision, reason: reason.trim(), confirmCustomerChange: confirmCustomerChange === true, body };
 }
 
 /**
@@ -124,6 +131,8 @@ const EDIT_CODE_VERDICTS: ReadonlySet<string> = new Set([
   EDIT_LINE_HAS_RETURN, EDIT_BELOW_RETURNED_QTY, EDIT_RETURNED_LINE_PRICE_LOCKED, EDIT_BELOW_CREDIT_NOTES,
   EDIT_LINE_ID_INVALID, EDIT_AMBIGUOUS_RETURNED_LINE, EDIT_RETURNED_LINE_LOT_UNKNOWN, EDIT_KEPT_LINE_LOT_SHORT,
   LEGACY_STOCK_LINES,
+  // INVOICE-EDIT S3 — Kundenwechsel: Bestätigung fehlt, Guthaben/Retoure/Auftrag, unbekannter Kunde.
+  ...CUSTOMER_CHANGE_VERDICTS,
 ]);
 
 function asEditVerdict(err: unknown): CommandRejected | null {
@@ -238,6 +247,7 @@ export function runInvoiceUpdate(deps: EngineDeps, identity: CommandIdentity, ra
         issuedAt: req.body.issuedDate,
         staffId: req.body.staffId,
         reason: req.reason,
+        confirmCustomerChange: req.confirmCustomerChange,
       });
     } catch (err) {
       const verdict = asEditVerdict(err);

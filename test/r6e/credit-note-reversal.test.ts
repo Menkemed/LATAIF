@@ -699,6 +699,7 @@ marker('CENTRAL_UI_R6E_PAID_REFUND_CANCEL_CONTRACT_PINNED');
     'src/core/finance/receivables.ts': 'Summen ohne CANCELLED',
     'src/core/invoices/invoice-cancel-house.ts': 'Storno-Sperre bei wirksamer Gutschrift ohne CANCELLED',
     'src/core/invoices/edit-lines.ts': 'Edit-Grenzen (INVOICE-EDIT S2): Gutschriften-Deckel und Forderungsminderung ohne CANCELLED',
+    'src/core/invoices/customer-change.ts': 'Kundenwechsel (INVOICE-EDIT S3): wirksame Gutschrift (ohne CANCELLED) sperrt den Wechsel',
     'src/core/invoices/invoice-reversal.ts': 'requireNoReturns ohne CANCELLED',
     'src/core/ledger/backfill.ts': 'Nachbuchung überspringt CANCELLED',
     'src/core/ledger/counterpartyAudit.ts': 'Gegenpartei-Prüfung ohne CANCELLED',

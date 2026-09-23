@@ -364,6 +364,27 @@ export function InvoiceCreate() {
       if (aendernRechnung.remote && !fassung) {
         setError(fehlertext(nichtAmClient('editing this invoice (no revision loaded)'))); return;
       }
+      // INVOICE-EDIT S3 — Kundenwechsel an einer Rechnung MIT Zahlungen: die Zahlungen ziehen mit
+      // um. Das bestätigt der Mensch ausdrücklich; das Haus verlangt die Bestätigung ebenfalls.
+      // Eine neue Zahlung im selben Speichern lehnt das Haus ab (sie ginge an den alten Kunden).
+      const customerChanges = customerId !== editInvoice.customerId;
+      let confirmCustomerChange = false;
+      if (customerChanges && originalPaid > 0.005) {
+        if (deltaPayment) {
+          setError('Change the customer and record the new payment in two steps: save the customer change first, then record the payment.');
+          return;
+        }
+        const nameOf = (id: string) => {
+          const c = customers.find(x => x.id === id);
+          return c ? `${c.firstName} ${c.lastName}`.trim() || c.company || id : id;
+        };
+        if (!window.confirm(
+          `This invoice already has payments of ${fmt(originalPaid)} BHD.\n\n`
+          + `Move the invoice and its payments from ${nameOf(editInvoice.customerId)} to ${nameOf(customerId)}? `
+          + 'The receivable and the payments leave the old customer; the invoice number stays.',
+        )) return;
+        confirmCustomerChange = true;
+      }
       const invId = editInvoice.id;
       const r = await aendernRechnung.save({
         local: () => {
@@ -375,6 +396,7 @@ export function InvoiceCreate() {
             staffId: staffId || undefined,
             deltaPayment,
             reason,
+            ...(confirmCustomerChange ? { confirmCustomerChange } : {}),
           });
           return {};
         },
@@ -394,6 +416,7 @@ export function InvoiceCreate() {
           ...(notes ? { notes } : {}),
           ...(issuedDate ? { issuedDate } : {}),
           ...(staffId ? { staffId } : {}),
+          ...(confirmCustomerChange ? { confirmCustomerChange } : {}),
         }),
       });
       if (r.kind !== 'ok') { setError(fehlertext(r)); return; }
