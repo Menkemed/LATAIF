@@ -277,7 +277,7 @@ export function InvoiceCreate() {
     //   Create:  paidAmount >= total
     //   Edit:    bisher nicht final + neues paid >= total
     const goingFinal = total > 0 && paidAmount >= total - 0.005 && (
-      !isEditMode || (editInvoice && editInvoice.status !== 'FINAL')
+      !isEditMode || (editInvoice && editInvoice.status !== 'FINAL' && !editInvoice.numberFinalizedAt)
     );
     if (goingFinal) {
       setNumberDialog({ thenPrint });

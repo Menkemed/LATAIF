@@ -609,6 +609,7 @@
         "margin_snapshot",
         "net_amount",
         "notes",
+        "number_finalized_at",
         "offer_id",
         "paid_amount",
         "purchase_price_snapshot",

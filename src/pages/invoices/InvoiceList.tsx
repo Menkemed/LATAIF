@@ -251,7 +251,8 @@ export function InvoiceList() {
     if (!showPayment || payAmount <= 0) return;
     const inv = invoices.find(i => i.id === showPayment);
     if (!inv) return;
-    const willGoFinal = inv.status !== 'FINAL' && (inv.paidAmount + payAmount) >= inv.grossAmount - 0.005;
+    // INVOICE-NUMBER-FREEZE — der Dialog „normal oder Sonder" nur, solange noch keine Endnummer vergeben ist.
+    const willGoFinal = inv.status !== 'FINAL' && !inv.numberFinalizedAt && (inv.paidAmount + payAmount) >= inv.grossAmount - 0.005;
     if (willGoFinal) {
       setPendingFinalPayment({ invoiceId: showPayment, amount: payAmount, method: payMethod });
       return;

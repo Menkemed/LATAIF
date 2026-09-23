@@ -271,7 +271,7 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
   // selbst anzeigt (No: 000009 / PINV-… ), nicht das rohe DB-Format.
   const payments = safeQuery('payments',
     `SELECT p.id, p.amount, p.method, p.received_at, p.invoice_id, p.created_at,
-            i.invoice_number, i.status AS inv_status, i.special_mark AS inv_special,
+            i.invoice_number, i.status AS inv_status, i.special_mark AS inv_special, i.number_finalized_at AS inv_final_at,
             (SELECT COALESCE(SUM(e.amount), 0) FROM expenses e
                WHERE e.category = 'CardFees' AND e.related_module = 'invoice'
                  AND e.related_entity_id = p.invoice_id
@@ -290,6 +290,7 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
       invoiceNumber: (p.invoice_number as string) || '',
       status: (p.inv_status as string) || undefined,
       specialMark: Number(p.inv_special) === 1,
+      numberFinalizedAt: (p.inv_final_at as string | null) || undefined,
     });
     txs.push({
       id: `pay-${p.id}`,

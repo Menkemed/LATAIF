@@ -329,7 +329,8 @@ export function InvoiceDetail() {
     const amount = parseFloat(paymentAmount);
     if (isNaN(amount) || amount <= 0) return;
     // Wird die Invoice mit dieser Zahlung final? → Number-Type-Dialog vorher.
-    const willGoFinal = invoice.status !== 'FINAL' && (invoice.paidAmount + amount) >= invoice.grossAmount - 0.005;
+    // INVOICE-NUMBER-FREEZE — der Dialog „normal oder Sonder" nur, solange noch keine Endnummer vergeben ist.
+    const willGoFinal = invoice.status !== 'FINAL' && !invoice.numberFinalizedAt && (invoice.paidAmount + amount) >= invoice.grossAmount - 0.005;
     if (willGoFinal) {
       setPendingFinalPayment({ amount, method: paymentMethod, cardBrand: paymentMethod === 'card' ? cardBrand : undefined });
       return;

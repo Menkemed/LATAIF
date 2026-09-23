@@ -206,7 +206,8 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
     'SCOPE lokal gibt es KEINE Stale-Sicherung — deshalb baut der Fernauftrag eine eigene');
 
   const pay = inv.slice(payAt, inv.indexOf('  applyCreditToInvoice: (invoiceId', payAt));
-  ok(/getNextDocumentNumber\(/.test(pay), 'SCOPE eine Vollzahlung vergibt eine NEUE Belegnummer');
+  ok(/ensureFinalInvoiceNumber\(/.test(pay) && !/getNextDocumentNumber\(/.test(pay),
+    'SCOPE eine Vollzahlung stellt die Endnummer sicher — hoechstens einmal im Leben der Rechnung (INVOICE-NUMBER-FREEZE)');
   ok(/computePaymentSplit\(/.test(pay), 'SCOPE eine Ueberzahlung wird aufgeteilt (Guthaben statt negativem AR)');
   ok(/inLedgerTransaction\(\)/.test(pay), 'SCOPE …und sie fuegt sich in eine laufende Transaktion ein');
 }

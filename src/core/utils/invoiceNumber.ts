@@ -21,6 +21,8 @@ export type InvoiceNumberLike = {
   invoiceNumber: string;
   status?: string;
   specialMark?: boolean;
+  /** INVOICE-NUMBER-FREEZE — gesetzt, sobald die Endnummer vergeben ist (`invoices.number_finalized_at`). */
+  numberFinalizedAt?: string | null;
 };
 
 /**
@@ -32,7 +34,10 @@ export type InvoiceNumberLike = {
 export function formatInvoiceDisplay(inv: InvoiceNumberLike | null | undefined): string {
   if (!inv) return '';
   const num = inv.invoiceNumber || '';
-  const isFinal = inv.status === 'FINAL';
+  // INVOICE-NUMBER-FREEZE — die Endform zeigt jede Rechnung, die ihre Endnummer HAT, nicht nur die
+  // gerade voll bezahlte. Sonst änderte eine Preiserhöhung (FINAL → PARTIAL) schon die Anzeige der
+  // Nummer (`No: 000009` → `INV-2026-000009`), obwohl die Nummer dieselbe bleibt.
+  const isFinal = inv.status === 'FINAL' || !!inv.numberFinalizedAt;
   const dot = inv.specialMark ? '.' : '';
 
   if (!isFinal) return num; // Partial bleibt wie heute (PINV / RPINV)

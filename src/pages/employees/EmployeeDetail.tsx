@@ -343,7 +343,7 @@ export function EmployeeDetail() {
                     gap: 12, padding: '12px 16px', alignItems: 'center',
                     borderBottom: '1px solid rgba(229,225,214,0.6)',
                   }}>
-                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{formatInvoiceDisplayShort({ invoiceNumber: row.invoiceNumber, status: row.status, specialMark: row.specialMark })}</span>
+                  <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{formatInvoiceDisplayShort({ invoiceNumber: row.invoiceNumber, status: row.status, specialMark: row.specialMark, numberFinalizedAt: row.numberFinalizedAt })}</span>
                   <span style={{ fontSize: 12, color: '#4B5563' }}>{fmtDate(row.issuedAt)}</span>
                   <span
                     onClick={ev => { ev.stopPropagation(); navigate(`/clients/${row.customerId}`); }}
@@ -609,7 +609,7 @@ export function EmployeeDetail() {
                       style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {row.customerName}
                     </span>
-                    <span className="font-mono" style={{ fontSize: 12, color: '#4B5563' }}>{row.invoiceNumber ? formatInvoiceDisplayShort({ invoiceNumber: row.invoiceNumber, status: row.invoiceStatus, specialMark: row.invoiceSpecialMark }) : '—'}</span>
+                    <span className="font-mono" style={{ fontSize: 12, color: '#4B5563' }}>{row.invoiceNumber ? formatInvoiceDisplayShort({ invoiceNumber: row.invoiceNumber, status: row.invoiceStatus, specialMark: row.invoiceSpecialMark, numberFinalizedAt: row.invoiceNumberFinalizedAt }) : '—'}</span>
                     <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={row.totalAmount}/></span>
                     <span className="font-mono" style={{ fontSize: 13, color: row.refundAmount > 0 ? '#16A34A' : '#9CA3AF' }}><Bhd v={row.refundAmount}/></span>
                     <span style={{

@@ -5,6 +5,7 @@
 
 import initSqlJs, { type Database } from 'sql.js';
 import { classifyLegacyInvoiceLines } from '@/core/lots/stock-contract';
+import { backfillInvoiceNumberFinalized } from '@/core/invoices/final-number';
 import wasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 import { v4 as uuid } from 'uuid';
 import { DEFAULT_CATEGORIES } from '../models/default-categories';
@@ -2344,6 +2345,11 @@ function runMigrations(database: Database): void {
     `ALTER TABLE production_inputs ADD COLUMN lot_consumption TEXT`,
     // Übergang: Merker für Rechnungszeilen ohne Los von VOR dem Vertrag (pending/deducted/released).
     `ALTER TABLE invoice_lines ADD COLUMN legacy_stock TEXT`,
+
+    // ── INVOICE-NUMBER-FREEZE — die Endnummer wird genau einmal vergeben ─────────
+    // Gesetzt, sobald die Rechnung ihre Endnummer (INV/SINV/RINV/SRINV) bekommen hat. Danach
+    // bleiben Nummer und Sonder-Kennzeichen, auch wenn der Status zurückfällt. NULL = vorläufig.
+    `ALTER TABLE invoices ADD COLUMN number_finalized_at TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {
@@ -2356,6 +2362,8 @@ function runMigrations(database: Database): void {
 
   // STOCK-LOT-INTEGRITY — Altzeilen ohne Los einmalig einordnen (nur Zeilen ohne Merker; idempotent).
   try { classifyLegacyInvoiceLines(database); } catch (err) { console.warn('Legacy stock classification skipped:', err); }
+  // INVOICE-NUMBER-FREEZE — schon vergebene Endnummern einmalig kennzeichnen (idempotent, nur NULL).
+  try { backfillInvoiceNumberFinalized(database); } catch (err) { console.warn('Invoice number backfill skipped:', err); }
 
   // MEDIA-03A — additive inactive core media schema. Runs AFTER the migration
   // loop so every entity table the media_links scope triggers reference already

@@ -55,8 +55,8 @@ const TYPES: { value: CustomerType; label: string }[] = [
 ];
 
 type PaymentEntry =
-  | { type: 'payment'; id: string; amount: number; method: string; receivedAt: string; notes?: string; invoiceNumber: string; invoiceStatus: string; invoiceSpecialMark: boolean; invoiceId: string }
-  | { type: 'refund'; id: string; amount: number; method: string; receivedAt: string; returnNumber: string; invoiceId: string; invoiceNumber: string; invoiceStatus: string; invoiceSpecialMark: boolean; creditNoteId?: string };
+  | { type: 'payment'; id: string; amount: number; method: string; receivedAt: string; notes?: string; invoiceNumber: string; invoiceStatus: string; invoiceSpecialMark: boolean; invoiceId: string; invoiceNumberFinalizedAt?: string }
+  | { type: 'refund'; id: string; amount: number; method: string; receivedAt: string; returnNumber: string; invoiceId: string; invoiceNumber: string; invoiceStatus: string; invoiceSpecialMark: boolean; invoiceNumberFinalizedAt?: string; creditNoteId?: string };
 
 // CENTRAL-UI-PARITY R2D — Zahlungen, Erstattungen und zurueckgebuchte Forderungen kommen aus
 // EINER gemeinsamen Ladefunktion. Sie traegt die Filiale des Anfragenden mit: eine
@@ -942,7 +942,7 @@ export function CustomerDetail() {
                       </span>
                       {p.type === 'payment' ? (
                         <Link to={`/invoices/${p.invoiceId}`} style={{ fontSize: 13, color: '#0F0F10', textDecoration: 'none' }}>
-                          Invoice <span className="font-mono" style={{ color: '#3D7FFF' }}>{formatInvoiceDisplayShort({ invoiceNumber: p.invoiceNumber, status: p.invoiceStatus, specialMark: p.invoiceSpecialMark })}</span>
+                          Invoice <span className="font-mono" style={{ color: '#3D7FFF' }}>{formatInvoiceDisplayShort({ invoiceNumber: p.invoiceNumber, status: p.invoiceStatus, specialMark: p.invoiceSpecialMark, numberFinalizedAt: p.invoiceNumberFinalizedAt })}</span>
                         </Link>
                       ) : (
                         <Link to={`/invoices/${p.invoiceId}`} style={{ fontSize: 13, color: '#0F0F10', textDecoration: 'none' }}>

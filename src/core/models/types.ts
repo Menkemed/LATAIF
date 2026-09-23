@@ -321,6 +321,9 @@ export interface Invoice {
   // 2026-05-16 — Optischer Marker fuer Final-Invoices ("Special" vs "Normal").
   // true = Display mit Punkt-Praefix (`.000021` / `.Repair-000021`); false/undef = ohne.
   specialMark?: boolean;
+  // INVOICE-NUMBER-FREEZE — wann die Endnummer vergeben wurde; gesetzt = Nummer und Sonder-
+  // Kennzeichen stehen für immer fest, auch wenn der Status später zurückfällt.
+  numberFinalizedAt?: string;
   createdAt: string;
   createdBy?: UUID;
   customer?: Customer;

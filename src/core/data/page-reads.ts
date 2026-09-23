@@ -142,10 +142,12 @@ export interface CustomerDetailReads {
   payments: Array<{
     id: string; amount: number; method: string; receivedAt: string; notes?: string;
     invoiceNumber: string; invoiceStatus: string; invoiceSpecialMark: boolean; invoiceId: string;
+    invoiceNumberFinalizedAt?: string;
   }>;
   refunds: Array<{
     id: string; amount: number; method: string; receivedAt: string; returnNumber: string;
     invoiceId: string; invoiceNumber: string; invoiceStatus: string; invoiceSpecialMark: boolean;
+    invoiceNumberFinalizedAt?: string;
     creditNoteId?: string;
   }>;
   creditNoteCancels: Record<string, number>;
@@ -153,7 +155,7 @@ export interface CustomerDetailReads {
 
 export function customerDetailReadsFor(ctx: BusinessReadContext, customerId: string): CustomerDetailReads {
   const payRows = query(
-    `SELECT p.id, p.amount, p.method, p.received_at, p.notes, i.invoice_number, i.status, i.special_mark, i.id AS invoice_id
+    `SELECT p.id, p.amount, p.method, p.received_at, p.notes, i.invoice_number, i.status, i.special_mark, i.number_finalized_at, i.id AS invoice_id
        FROM payments p JOIN invoices i ON i.id = p.invoice_id
       WHERE i.customer_id = ? AND i.branch_id = ?
       ORDER BY p.received_at DESC`,
@@ -161,7 +163,7 @@ export function customerDetailReadsFor(ctx: BusinessReadContext, customerId: str
   );
   const refundRows = query(
     `SELECT sr.id, sr.return_number, sr.refund_paid_amount, sr.refund_method,
-            sr.refund_paid_date, sr.invoice_id, i.invoice_number, i.status, i.special_mark,
+            sr.refund_paid_date, sr.invoice_id, i.invoice_number, i.status, i.special_mark, i.number_finalized_at,
             cn.id AS cn_id
        FROM sales_returns sr
        JOIN invoices i ON i.id = sr.invoice_id
@@ -188,12 +190,14 @@ export function customerDetailReadsFor(ctx: BusinessReadContext, customerId: str
       notes: (r.notes as string | null) || undefined,
       invoiceNumber: s(r.invoice_number), invoiceStatus: s(r.status),
       invoiceSpecialMark: Number(r.special_mark) === 1, invoiceId: s(r.invoice_id),
+      invoiceNumberFinalizedAt: (r.number_finalized_at as string | null) || undefined,
     })),
     refunds: refundRows.map((r) => ({
       id: s(r.id), amount: n(r.refund_paid_amount), method: s(r.refund_method) || 'cash',
       receivedAt: s(r.refund_paid_date), returnNumber: s(r.return_number),
       invoiceId: s(r.invoice_id), invoiceNumber: s(r.invoice_number), invoiceStatus: s(r.status),
       invoiceSpecialMark: Number(r.special_mark) === 1,
+      invoiceNumberFinalizedAt: (r.number_finalized_at as string | null) || undefined,
       creditNoteId: (r.cn_id as string | null) || undefined,
     })),
     creditNoteCancels,
@@ -281,6 +285,7 @@ export function supplierDetailReadsFor(ctx: BusinessReadContext, supplierId: str
 export interface ProductDetailReads {
   sales: Array<{
     invoiceId: string; invoiceNumber: string; status: string; specialMark: boolean;
+    numberFinalizedAt?: string;
     issuedAt: string; customerName: string; unitPrice: number; quantity: number; lineTotal: number;
   }>;
   purchases: Array<{
@@ -304,7 +309,7 @@ export function productDetailReadsFor(ctx: BusinessReadContext, productId: strin
   if (own.length === 0) return LEER_PRODUCT_DETAIL;
 
   const saleRows = query(
-    `SELECT i.id AS inv_id, i.invoice_number, i.status, i.special_mark, i.issued_at,
+    `SELECT i.id AS inv_id, i.invoice_number, i.status, i.special_mark, i.number_finalized_at, i.issued_at,
             c.first_name, c.last_name,
             il.unit_price, il.quantity, il.line_total
        FROM invoice_lines il
@@ -406,6 +411,7 @@ export function productDetailReadsFor(ctx: BusinessReadContext, productId: strin
     sales: saleRows.map((r) => ({
       invoiceId: s(r.inv_id), invoiceNumber: s(r.invoice_number), status: s(r.status),
       specialMark: Number(r.special_mark) === 1, issuedAt: s(r.issued_at),
+      numberFinalizedAt: (r.number_finalized_at as string | null) || undefined,
       customerName: [r.first_name, r.last_name].filter(Boolean).join(' ').trim() || '—',
       unitPrice: n(r.unit_price), quantity: n(r.quantity) || 1, lineTotal: n(r.line_total),
     })),

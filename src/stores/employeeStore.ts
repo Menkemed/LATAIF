@@ -34,6 +34,7 @@ export interface SalesHistoryRow {
   invoiceId: string;
   invoiceNumber: string;
   specialMark: boolean;
+  numberFinalizedAt?: string;
   issuedAt: string;
   customerId: string;
   customerName: string;
@@ -98,6 +99,7 @@ export interface ReturnsHandledRow {
   invoiceNumber: string;
   invoiceStatus: string;
   invoiceSpecialMark: boolean;
+  invoiceNumberFinalizedAt?: string;
   totalAmount: number;
   refundAmount: number;
   status: string;
@@ -313,7 +315,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
   getSalesHistory: (employeeId) => {
     try {
       const rows = query(
-        `SELECT i.id, i.invoice_number, i.issued_at, i.customer_id, i.special_mark,
+        `SELECT i.id, i.invoice_number, i.issued_at, i.customer_id, i.special_mark, i.number_finalized_at,
                 c.first_name, c.last_name, c.company,
                 i.gross_amount, i.paid_amount, i.status, i.margin_snapshot
            FROM invoices i
@@ -326,6 +328,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
         invoiceId:     r.id as string,
         invoiceNumber: r.invoice_number as string,
         specialMark:   Number(r.special_mark) === 1,
+        numberFinalizedAt: (r.number_finalized_at as string | null) || undefined,
         issuedAt:      (r.issued_at as string) || '',
         customerId:    r.customer_id as string,
         customerName:  `${(r.first_name as string) || ''} ${(r.last_name as string) || ''}`.trim()
@@ -507,7 +510,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
       const rows = query(
         `SELECT sr.id, sr.return_number, sr.return_date, sr.customer_id,
                 c.first_name, c.last_name, c.company,
-                sr.invoice_id, i.invoice_number, i.status AS invoice_status, i.special_mark,
+                sr.invoice_id, i.invoice_number, i.status AS invoice_status, i.special_mark, i.number_finalized_at,
                 COALESCE(sr.total_amount,  0) AS total_amount,
                 COALESCE(sr.refund_amount, 0) AS refund_amount,
                 sr.status
@@ -529,6 +532,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
         invoiceNumber: (r.invoice_number as string) || '',
         invoiceStatus: (r.invoice_status as string) || '',
         invoiceSpecialMark: Number(r.special_mark) === 1,
+        invoiceNumberFinalizedAt: (r.number_finalized_at as string | null) || undefined,
         totalAmount:   Number(r.total_amount  || 0),
         refundAmount:  Number(r.refund_amount || 0),
         status:        (r.status as string) || 'REQUESTED',

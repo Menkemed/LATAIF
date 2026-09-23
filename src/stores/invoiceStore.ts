@@ -10,6 +10,7 @@ import { assertLotLessStockAvailable, assertNoLegacyLotLessLines, giveBackStock,
 import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, assertLotsConsumable, assertLotTrackedLinesResolved, assertProductsSellable } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { issuedAtIso } from '@/core/invoices/issued-at';
+import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import {
@@ -185,6 +186,7 @@ function rowToInvoice(row: Record<string, unknown>): Invoice {
     lines: [],
     staffId: (row.staff_id as string) || undefined,
     specialMark: Number(row.special_mark) === 1,
+    numberFinalizedAt: (row.number_finalized_at as string | null) || undefined,
     createdAt: row.created_at as string,
     createdBy: row.created_by as string | undefined,
   };
@@ -424,7 +426,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const values: unknown[] = [];
 
     const map: Record<string, string> = {
-      invoiceNumber: 'invoice_number', status: 'status', notes: 'notes',
+      status: 'status', notes: 'notes',
       issuedAt: 'issued_at', dueAt: 'due_at', customerId: 'customer_id',
       netAmount: 'net_amount', vatAmount: 'vat_amount', grossAmount: 'gross_amount',
       paidAmount: 'paid_amount', vatRateSnapshot: 'vat_rate_snapshot',
@@ -863,6 +865,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         [newPaid, tip, newStatus, now, id]
       );
       if (newStatus !== inv0.status) trackStatusChange('invoices', id, inv0.status, newStatus);
+      // INVOICE-NUMBER-FREEZE — deckt der Edit die Rechnung (wieder) voll, bekommt sie ihre Endnummer,
+      // falls sie noch keine hat; eine schon vergebene bleibt. Innerhalb der Tx → Rollback nimmt sie mit.
+      if (newStatus === 'FINAL') ensureFinalInvoiceNumber(id, now);
       // Sync (Scope A): GENAU EIN Full-Row-Snapshot der invoices-Zeile, NACHDEM
       // Header, Totale, Status, paid_amount und tip_amount final sind. trackChange
       // (nicht trackUpdate) → kein Audit-Doppel; invoice_edits + Audit-History bleiben
@@ -1028,49 +1033,23 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       const prevStatus = inv.status;
       const newStatus: InvoiceStatus = wasFullyPaid ? 'FINAL' : 'PARTIAL';
 
-      // Wenn Konvertierung PARTIAL → FINAL: neue Nummer in der jeweiligen Serie zuweisen.
-      //   Sales:  PINV  → INV
-      //   Repair: RPINV → RINV
-      // So bleiben Repair-Rechnungen sauber in eigener Serie, parallel zur Sales-Logik.
-      // 2026-05-16 — Special-Mark wird beim Final-werden gesetzt; bestehende
-      // Partial-Marke bleibt sonst unangetastet.
-      const useSpecial = wasFullyPaid && inv.status !== 'FINAL'
-        ? (typeof specialMarkOnFinal === 'boolean' ? specialMarkOnFinal : !!inv.specialMark)
-        : !!inv.specialMark;
-      const nextSpecial = useSpecial ? 1 : 0;
+      db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
+        [newPaid, tip, newStatus, now, invoiceId]);
+      if (prevStatus !== newStatus) trackStatusChange('invoices', invoiceId, prevStatus, newStatus);
 
-      // Beim Konvertieren PARTIAL → FINAL: neue Nummer aus dem passenden Zaehler.
-      //   Sales Normal:   INV-YYYY-NNNNNN
-      //   Sales Special:  SINV-YYYY-NNNNNN  (eigener Zaehler — laeuft 1,2,3,... parallel)
-      //   Repair Normal:  RINV-YYYY-NNNNNN
-      //   Repair Special: SRINV-YYYY-NNNNNN (eigener Zaehler)
-      let newInvoiceNumber = inv.invoiceNumber;
-      if (wasFullyPaid && inv.status !== 'FINAL') {
-        const isRepair = inv.invoiceNumber.startsWith('RPINV-');
-        if (isRepair) {
-          newInvoiceNumber = getNextDocumentNumber(useSpecial ? 'SRINV' : 'RINV');
-        } else {
-          newInvoiceNumber = getNextDocumentNumber(useSpecial ? 'SINV' : 'INV');
-        }
-      }
+      // INVOICE-NUMBER-FREEZE — voll bezahlt: Endnummer sicherstellen, HÖCHSTENS einmal im Leben
+      // der Rechnung (Kreise PINV → INV/SINV, RPINV → RINV/SRINV; Sonder-Wahl nur beim ersten Mal).
+      // Früher hing das am Status: eine zurückgefallene und erneut bezahlte Rechnung zog eine
+      // zweite Nummer. Die Vergabe protokolliert sich selbst (Feld invoice_number).
+      const fin = wasFullyPaid ? ensureFinalInvoiceNumber(invoiceId, now, specialMarkOnFinal) : null;
       // v0.3.2 — Display-Nummer fuer die danach erzeugte Card-Fee-Beschreibung
       // festhalten (nutzt die finale Nummer + Status, nicht den Pre-Payment-Stand).
       finalInvoiceLabel = formatInvoiceDisplay({
-        invoiceNumber: newInvoiceNumber, status: newStatus, specialMark: useSpecial,
+        invoiceNumber: fin ? fin.invoiceNumber : inv.invoiceNumber,
+        status: newStatus,
+        specialMark: fin ? fin.specialMark : !!inv.specialMark,
+        numberFinalizedAt: fin ? now : inv.numberFinalizedAt,
       });
-
-      db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, invoice_number = ?, special_mark = ?, updated_at = ? WHERE id = ?`,
-        [newPaid, tip, newStatus, newInvoiceNumber, nextSpecial, now, invoiceId]);
-
-      if (prevStatus !== newStatus) {
-        trackStatusChange('invoices', invoiceId, prevStatus, newStatus);
-        if (wasFullyPaid) {
-          // Konvertierung loggen (Plan §12) — reines Audit; der LAN-Sync laeuft unten ueber
-          // den EINEN finalen trackChange (kein zweiter Invoice-Snapshot → keine Doppel-Emitter).
-          logAudit({ module: 'Sales', entityType: 'invoices', entityId: invoiceId, action: 'UPDATE',
-            field: 'invoice_number', oldValue: inv.invoiceNumber, newValue: newInvoiceNumber });
-        }
-      }
       // LAN-Sync (Gruppe 3): recordPayment war nur bei Voll-Zahlung gesynct → Teilzahlung / gleicher
       // Status liess paid_amount/status/invoice_number auf B stale. EIN autoritativer Invoice-Full-Row-
       // Snapshot nach dem finalen UPDATE (paid_amount/tip/status/invoice_number/special_mark).
@@ -1243,6 +1222,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   },
 
   setSpecialMark: (invoiceId, special) => {
+    // INVOICE-NUMBER-FREEZE — mit der Endnummer steht auch das Sonder-Kennzeichen fest (es ist Teil
+    // der angezeigten Nummer); danach ist es nicht mehr umstellbar.
+    if (query('SELECT 1 FROM invoices WHERE id = ? AND number_finalized_at IS NOT NULL', [invoiceId]).length > 0) {
+      throw new Error('The invoice number is final — its normal/special marking can no longer be changed.');
+    }
     const db = getDatabase();
     const now = new Date().toISOString();
     db.run(`UPDATE invoices SET special_mark = ?, updated_at = ? WHERE id = ?`,
@@ -1582,6 +1566,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
           [newPaid, tip, newStatus, now, invoiceId]);
         if (newStatus !== inv.status) trackStatusChange('invoices', invoiceId, inv.status, newStatus);
+        // INVOICE-NUMBER-FREEZE — voll bezahlt nach der Änderung: Endnummer höchstens einmal.
+        if (newStatus === 'FINAL') ensureFinalInvoiceNumber(invoiceId, now);
         // LAN-Sync (Gruppe 3): paid_amount/status/tip nach Recompute → EIN Full-Row-Snapshot.
         trackChange('invoices', invoiceId, 'update', {});
       }
@@ -1666,6 +1652,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
         [newPaid, tip, newStatus, now, invoiceId]);
       if (newStatus !== inv.status) trackStatusChange('invoices', invoiceId, inv.status, newStatus);
+      // INVOICE-NUMBER-FREEZE — voll bezahlt nach dem Löschen (Überzahlung): Endnummer höchstens einmal.
+      if (newStatus === 'FINAL') ensureFinalInvoiceNumber(invoiceId, now);
       // LAN-Sync (Gruppe 3): paid_amount/status/tip nach Recompute waren ungetrackt → B stale.
       trackChange('invoices', invoiceId, 'update', {});
     }
