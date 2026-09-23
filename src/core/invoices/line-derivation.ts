@@ -46,6 +46,8 @@ export function calcInvoiceLine(
 
 /** Genau die Form, die `createDirectInvoice` erwartet. */
 export interface InvoiceLineInput {
+  /** INVOICE-EDIT S2 — beim Ändern: die gespeicherte Zeile, die diese fortsetzt. */
+  lineId?: string;
   productId: string;
   lotId?: string;
   quantity: number;

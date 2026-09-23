@@ -33,6 +33,8 @@ type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 type Method = 'cash' | 'bank_transfer' | 'card' | 'benefit';
 
 interface DraftLine {
+  /** INVOICE-EDIT S2 — beim Ändern: die gespeicherte Rechnungszeile, die diese Zeile fortsetzt. */
+  lineId?: string;
   productId: string;
   scheme: Scheme;
   quantity: number;
@@ -110,6 +112,8 @@ export function InvoiceCreate() {
     setNotes(editInvoice.notes || '');
     setStaffId(editInvoice.staffId || '');
     if (editInvoice.issuedAt) setIssuedDate(editInvoice.issuedAt.slice(0, 10));
+    // INVOICE-EDIT S2 — die ID der gespeicherten Zeile reist mit, damit der Speichern-Vorgang
+    // nicht raten muss, welche Zeile fortgesetzt wird (zwei gleiche Artikel, einer retourniert).
     const invLines = (editInvoice.lines || []).map(l => {
       const p = products.find(pp => pp.id === l.productId);
       const stored = (l.taxScheme as Scheme | undefined);
@@ -117,6 +121,7 @@ export function InvoiceCreate() {
       const qty = l.quantity || 1;
       const unitNet = qty > 0 ? (l.unitPrice || 0) : 0;
       return {
+        lineId: l.id,
         productId: l.productId || '',
         scheme: (matchesProduct ? 'auto' : (stored || 'auto')) as Scheme,
         quantity: qty,
@@ -298,14 +303,14 @@ export function InvoiceCreate() {
     // (internalVat persistieren) stecken jetzt in `toInvoiceLine` — eine Stelle, zwei Aufrufer.
     const payload = lines.map((l, i) => {
       const c = computed[i];
-      return toInvoiceLine({
+      return { ...toInvoiceLine({
         productId: l.productId,
         lotId: c.selectedLot?.id,
         quantity: l.quantity,
         unitPrice: l.unitPrice,
         costBasis: c.selectedLot ? c.selectedLot.unitCost : (c.product?.purchasePrice || 0),
         scheme: c.scheme,
-      });
+      }), ...(l.lineId ? { lineId: l.lineId } : {}) };
     });
 
     if (isEditMode && editInvoice) {
@@ -354,6 +359,7 @@ export function InvoiceCreate() {
           reason,
           customerId,
           lines: lines.map((l, i) => ({
+            ...(l.lineId ? { lineId: l.lineId } : {}),
             productId: l.productId,
             lotId: computed[i]?.selectedLot?.id ?? null,
             quantity: l.quantity,

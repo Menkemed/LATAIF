@@ -48,6 +48,8 @@ export const OP_INVOICES_CREATE = 'invoices.create';
 
 /** Was ein Mensch am Bildschirm wählt — mehr nicht. */
 interface RemoteLine {
+  /** INVOICE-EDIT S2 — die gespeicherte Zeile, die diese fortsetzt (nur beim Ändern; beim Anlegen leer). */
+  lineId?: string;
   productId: string;
   lotId?: string | null;
   quantity?: number;
@@ -55,7 +57,7 @@ interface RemoteLine {
   scheme?: RequestedScheme;
 }
 
-const LINE_KEYS = new Set(['productId', 'lotId', 'quantity', 'unitPrice', 'scheme']);
+const LINE_KEYS = new Set(['lineId', 'productId', 'lotId', 'quantity', 'unitPrice', 'scheme']);
 const TOP_KEYS = new Set(['customerId', 'lines', 'notes', 'issuedDate', 'staffId', 'specialMark']);
 
 /**
@@ -122,7 +124,13 @@ export function parseInvoicePayload(raw: unknown): {
     if (l.lotId !== undefined && l.lotId !== null && typeof l.lotId !== 'string') {
       throw new InvoicePayloadError(`line ${i + 1}: lotId must be a string`);
     }
-    return { productId: l.productId, lotId: (l.lotId as string | null) ?? null, quantity: qty, unitPrice, scheme: scheme as RequestedScheme };
+    if (l.lineId !== undefined && (typeof l.lineId !== 'string' || !l.lineId.trim())) {
+      throw new InvoicePayloadError(`line ${i + 1}: lineId must be a string`);
+    }
+    return {
+      ...(l.lineId ? { lineId: String(l.lineId) } : {}),
+      productId: l.productId, lotId: (l.lotId as string | null) ?? null, quantity: qty, unitPrice, scheme: scheme as RequestedScheme,
+    };
   });
 
   if (raw.notes !== undefined && typeof raw.notes !== 'string') throw new InvoicePayloadError('notes must be a string');
@@ -252,14 +260,14 @@ export function buildInvoiceLines(
     // Ware ohne Lose (Reparaturleistung, Kommission vor dem Auto-Einkauf) bleibt wie bisher:
     // kein Los, keine Bestandsprüfung, Einstandskosten aus dem Produkt.
 
-    return toInvoiceLine({
+    return { ...toInvoiceLine({
       productId: l.productId,
       lotId,
       quantity: l.quantity ?? 1,
       unitPrice: l.unitPrice,
       costBasis,
       scheme: resolveLineScheme(l.scheme, product.tax_scheme as string | undefined),
-    });
+    }), ...(l.lineId ? { lineId: l.lineId } : {}) };
   });
 }
 
@@ -316,7 +324,9 @@ export function invoiceEngineDeps(): EngineDeps {
 export function runInvoiceCreate(deps: EngineDeps, identity: CommandIdentity, rawPayload: unknown): Promise<CommandOutcome> {
   const wish = parseInvoiceCreatePayload(rawPayload);
   return runRemoteCommand(deps, identity, () => {
-    const lines = buildInvoiceLines(wish.lines);
+    // Beim ANLEGEN gibt es keine gespeicherte Zeile: eine mitgeschickte `lineId` wird verworfen,
+    // damit sie keine fremde Zeile übernehmen kann.
+    const lines = buildInvoiceLines(wish.lines.map((l) => ({ ...l, lineId: undefined })));
     try {
       // R6E — DIESELBE Hausfolge wie die Maske am Primary: der normale Verkaufskreis (nie der
       // Reparaturkreis), kein Agenten-Sonderweg, und die Zahlung in derselben Transaktion.

@@ -42,7 +42,10 @@ import {
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { recordInvoicePaymentInHouse } from '@/core/invoices/invoice-payment-house';
-import { EDIT_LINE_HAS_RETURN, EDIT_BELOW_RETURNED_QTY, EDIT_RETURNED_LINE_PRICE_LOCKED, EDIT_BELOW_CREDIT_NOTES } from '@/core/invoices/edit-lines';
+import {
+  EDIT_LINE_HAS_RETURN, EDIT_BELOW_RETURNED_QTY, EDIT_RETURNED_LINE_PRICE_LOCKED, EDIT_BELOW_CREDIT_NOTES,
+  EDIT_LINE_ID_INVALID, EDIT_AMBIGUOUS_RETURNED_LINE, EDIT_RETURNED_LINE_LOT_UNKNOWN,
+} from '@/core/invoices/edit-lines';
 import { LEGACY_STOCK_LINES } from '@/core/lots/stock-contract';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
@@ -119,6 +122,7 @@ const EDIT_VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
  */
 const EDIT_CODE_VERDICTS: ReadonlySet<string> = new Set([
   EDIT_LINE_HAS_RETURN, EDIT_BELOW_RETURNED_QTY, EDIT_RETURNED_LINE_PRICE_LOCKED, EDIT_BELOW_CREDIT_NOTES,
+  EDIT_LINE_ID_INVALID, EDIT_AMBIGUOUS_RETURNED_LINE, EDIT_RETURNED_LINE_LOT_UNKNOWN,
   LEGACY_STOCK_LINES,
 ]);
 

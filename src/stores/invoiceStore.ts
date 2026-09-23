@@ -11,7 +11,7 @@ import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, 
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
-import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, creditNoteReceivableCancel } from '@/core/invoices/edit-lines';
+import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, creditNoteReceivableCancel, frozenReturnedLineAmounts } from '@/core/invoices/edit-lines';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import {
@@ -137,7 +137,7 @@ interface InvoiceStore {
   // mit Pflicht-Aenderungsgrund (Audit). Reduktion unter den bereits gezahlten Betrag
   // wird (vorerst) blockiert — Ueberzahlung→Store-Guthaben kommt als eigener Slice.
   editInvoice: (id: string, input: {
-    lines: { productId: string; lotId?: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number }[];
+    lines: { lineId?: string; productId: string; lotId?: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number }[];
     customerId?: string;
     notes?: string;
     issuedAt?: string;
@@ -783,6 +783,16 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       assertLotsConsumable(needing.map(l => ({ lotId: l._resolvedLotId, qty: need(l) })));
       assertLotTrackedLinesResolved(resolvedLines.map(l => ({ productId: l.productId, lotId: l._resolvedLotId })));
       assertLotLessStockAvailable(needing.map(l => ({ productId: l.productId, lotId: l._resolvedLotId, qty: need(l) })));
+
+      // INVOICE-EDIT S2 — eine Zeile MIT Retoure behält ihre Beträge pro Stück exakt so, wie die
+      // Gutschrift sie kennt (Preis/Steuerart sind oben geprüft; hier zählt auch die Rundung).
+      for (const l of resolvedLines) {
+        const b = l._kept ? baseById.get(l._id) : undefined;
+        if (!b || !(b.returnedQty > 0.0005)) continue;
+        const f = frozenReturnedLineAmounts(b, Math.max(1, l.quantity || 1));
+        l.vatAmount = f.vatAmount;
+        l.lineTotal = f.lineTotal;
+      }
 
       let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
       const stmt = db.prepare(

@@ -13,8 +13,14 @@
 //   • ihre Menge darf nicht unter die schon zurückgenommene Menge fallen,
 //   • Preis und Steuerart bleiben, wie sie sind (die Gutschrift wurde zu diesem Preis ausgestellt).
 // Und die Rechnung darf nicht unter die Summe ihrer wirksamen Gutschriften fallen.
+//
+// Welche gespeicherte Zeile eine neue fortsetzt, sagt die ZEILEN-ID (`lineId`), die Maske und PC2
+// für jede geladene Zeile mitschicken. Nur eine Gegenstelle ohne IDs wird über Artikel/Preis
+// zugeordnet — und auch das nur, wo es eindeutig ist: steht derselbe Artikel mehrfach auf der
+// Rechnung und hat eine dieser Zeilen eine Retoure, wird nicht geraten, sondern abgelehnt.
 // ════════════════════════════════════════════════════════════════════════════
 import { query } from '@/core/db/helpers';
+import { hasLotHistory } from '@/core/lots/stock-contract';
 
 export interface EditBaseLine {
   id: string;
@@ -24,6 +30,9 @@ export interface EditBaseLine {
   unitPrice: number;
   taxScheme: string;
   purchasePrice: number;
+  vatRate: number;
+  vatAmount: number;
+  lineTotal: number;
   /** Was die Zeile aus dem Bestand genommen hat (NULL = Zeile von vor dem Bestandsvertrag). */
   stockTaken: number | null;
   /** Menge, die aus wirksamen Retouren (nicht REJECTED) von dieser Zeile schon zurückgenommen ist. */
@@ -31,10 +40,13 @@ export interface EditBaseLine {
 }
 
 export interface EditInputLine {
+  /** Die ID der gespeicherten Zeile, die diese Zeile fortsetzt (fehlt bei neuen Zeilen). */
+  lineId?: string;
   productId: string;
   quantity?: number;
   unitPrice: number;
   taxScheme: string;
+  vatRate?: number;
   lineTotal: number;
 }
 
@@ -43,6 +55,9 @@ export const EDIT_LINE_HAS_RETURN = 'INVOICE_LINE_HAS_RETURN';
 export const EDIT_BELOW_RETURNED_QTY = 'INVOICE_LINE_BELOW_RETURNED_QTY';
 export const EDIT_RETURNED_LINE_PRICE_LOCKED = 'INVOICE_RETURNED_LINE_PRICE_LOCKED';
 export const EDIT_BELOW_CREDIT_NOTES = 'INVOICE_BELOW_CREDIT_NOTES';
+export const EDIT_LINE_ID_INVALID = 'INVOICE_EDIT_LINE_ID_INVALID';
+export const EDIT_AMBIGUOUS_RETURNED_LINE = 'INVOICE_EDIT_AMBIGUOUS_RETURNED_LINE';
+export const EDIT_RETURNED_LINE_LOT_UNKNOWN = 'INVOICE_RETURNED_LINE_LOT_UNKNOWN';
 
 export class InvoiceEditLineRejected extends Error {
   readonly code: string;
@@ -57,6 +72,7 @@ export class InvoiceEditLineRejected extends Error {
 export function loadEditBaseLines(invoiceId: string): EditBaseLine[] {
   return query(
     `SELECT il.id, il.product_id, il.lot_id, il.quantity, il.unit_price, il.tax_scheme, il.purchase_price_snapshot, il.stock_taken,
+            il.vat_rate, il.vat_amount, il.line_total,
             COALESCE((SELECT SUM(srl.quantity) FROM sales_return_lines srl
                         JOIN sales_returns sr ON sr.id = srl.return_id
                        WHERE srl.invoice_line_id = il.id AND sr.status != 'REJECTED'), 0) AS returned_qty
@@ -72,6 +88,9 @@ export function loadEditBaseLines(invoiceId: string): EditBaseLine[] {
     unitPrice: Number(r.unit_price ?? 0),
     taxScheme: String(r.tax_scheme ?? ''),
     purchasePrice: Number(r.purchase_price_snapshot ?? 0),
+    vatRate: Number(r.vat_rate ?? 0),
+    vatAmount: Number(r.vat_amount ?? 0),
+    lineTotal: Number(r.line_total ?? 0),
     stockTaken: r.stock_taken === null || r.stock_taken === undefined ? null : Number(r.stock_taken),
     returnedQty: Number(r.returned_qty ?? 0),
   }));
@@ -79,15 +98,41 @@ export function loadEditBaseLines(invoiceId: string): EditBaseLine[] {
 
 const samePrice = (a: number, b: number): boolean => Math.abs(a - b) < 0.0005;
 
+const RELOAD = 'The invoice has changed since it was opened — reload it and edit it again.';
+
 /**
  * Welche gespeicherte Zeile entspricht welcher neuen? Ergebnis: je neue Zeile die ID der
- * gespeicherten Zeile, die sie fortsetzt, oder `null` (neu). Maßgeblich ist der Artikel; gibt es
- * denselben Artikel mehrmals, gewinnt zuerst die Zeile mit gleichem Preis und gleicher Steuerart,
- * dann die Reihenfolge. Jede gespeicherte Zeile wird höchstens einmal fortgesetzt.
+ * gespeicherten Zeile, die sie fortsetzt, oder `null` (neu).
+ *
+ * • Trägt die Anfrage Zeilen-IDs, gelten NUR sie: jede ID muss zu dieser Rechnung gehören und darf
+ *   höchstens einmal vorkommen; eine Zeile ohne ID ist neu. Wechselt unter einer ID der Artikel,
+ *   ist das ein Ersetzen: die alte Zeile fällt weg, die neue bekommt eine neue ID.
+ * • Ohne IDs (ältere Gegenstelle): Zuordnung über Artikel (zuerst mit gleichem Preis und gleicher
+ *   Steuerart, dann Reihenfolge) — aber nicht, wo eine retournierte Zeile verwechselt werden
+ *   könnte: steht ihr Artikel mehrfach auf der Rechnung, wird abgelehnt.
  */
 export function matchEditLines(base: readonly EditBaseLine[], next: readonly EditInputLine[]): Array<string | null> {
   const used = new Set<string>();
   const out: Array<string | null> = next.map(() => null);
+  if (next.some((n) => !!n.lineId)) {
+    const byId = new Map(base.map((b) => [b.id, b]));
+    next.forEach((n, i) => {
+      if (!n.lineId) return;
+      const b = byId.get(n.lineId);
+      if (!b || used.has(n.lineId)) throw new InvoiceEditLineRejected(EDIT_LINE_ID_INVALID, RELOAD);
+      used.add(n.lineId);
+      if (b.productId === n.productId) out[i] = n.lineId;   // anderer Artikel = ersetzen → neue Zeile
+    });
+    return out;
+  }
+  for (const b of base) {
+    if (!(b.returnedQty > 0.0005) || !b.productId) continue;
+    if (base.filter((x) => x.productId === b.productId).length > 1) {
+      throw new InvoiceEditLineRejected(EDIT_AMBIGUOUS_RETURNED_LINE,
+        `${productLabel(b.productId)} is on this invoice more than once and one of the lines has a return — `
+        + 'reload the invoice and edit it again, so each line keeps its own return.');
+    }
+  }
   // Zwei Durchgänge: erst exakte Treffer (Artikel + Preis + Steuerart), dann nur Artikel.
   for (const exact of [true, false]) {
     next.forEach((n, i) => {
@@ -133,9 +178,21 @@ export function assertEditKeepsReturns(
       throw new InvoiceEditLineRejected(EDIT_BELOW_RETURNED_QTY,
         `The quantity of ${label} cannot go below ${fmtQty(b.returnedQty)} — that many were already returned.`);
     }
-    if (!samePrice(n.unitPrice, b.unitPrice) || n.taxScheme !== b.taxScheme) {
+    // Preis, Steuerart, Steuersatz und Betrag PRO STÜCK (ein Rabatt ist hier eine Preisänderung).
+    const unitTotalNew = (Number(n.lineTotal) || 0) / qty;
+    const unitTotalOld = b.lineTotal / b.qty;
+    const rateChanged = n.vatRate !== undefined && Math.abs(Number(n.vatRate) - b.vatRate) > 0.0005;
+    if (!samePrice(n.unitPrice, b.unitPrice) || n.taxScheme !== b.taxScheme || rateChanged
+      || Math.abs(unitTotalNew - unitTotalOld) > 0.005) {
       throw new InvoiceEditLineRejected(EDIT_RETURNED_LINE_PRICE_LOCKED,
         `The price of ${label} cannot be changed — it has a return, and its credit note was issued at the current price.`);
+    }
+    // Das Los einer retournierten Zeile bleibt, was es war. Kennt die Zeile ihr Los nicht (von vor
+    // dem Bestandsvertrag, Artikel mit Losen), müsste es neu gewählt werden — das würde den
+    // Wareneinsatz der Retoure verschieben.
+    if (b.lotId === null && b.productId && hasLotHistory(b.productId)) {
+      throw new InvoiceEditLineRejected(EDIT_RETURNED_LINE_LOT_UNKNOWN,
+        `${label} has a return but its stock lot is not recorded on this invoice — it cannot be edited automatically.`);
     }
   }
   const cn = Number(query(
@@ -147,6 +204,17 @@ export function assertEditKeepsReturns(
     throw new InvoiceEditLineRejected(EDIT_BELOW_CREDIT_NOTES,
       `The invoice total cannot go below its credit notes (${cn.toFixed(3)} BHD).`);
   }
+}
+
+const round3 = (v: number): number => Math.round(v * 1000) / 1000;
+
+/**
+ * Die Beträge einer retournierten Zeile für die neue Menge — pro Stück genau wie gespeichert.
+ * Preis und Steuerart sind oben schon festgehalten; so kann auch ein anders gerechneter
+ * Einstand (Marge) auf der Gegenseite die Steuer der Zeile nicht verschieben.
+ */
+export function frozenReturnedLineAmounts(b: EditBaseLine, qty: number): { vatAmount: number; lineTotal: number } {
+  return { vatAmount: round3(b.vatAmount / b.qty * qty), lineTotal: round3(b.lineTotal / b.qty * qty) };
 }
 
 /** Was wirksame Gutschriften von der Forderung dieser Rechnung schon abgezogen haben. */
