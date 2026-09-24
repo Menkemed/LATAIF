@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type { Product, Category, StockStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
+import { assertProductVatLabelUnchanged, productVatLabelRefusal, VAT_PERIOD_FILED } from '@/core/tax/vat-period-lock';
 import { getStockAggregates, computeStockValuation, isOwnStockAsset , type LotAggregate } from '@/core/lots/lot-queries';
 // CENTRAL-C2 — mehrphasige Geschaeftsschreibvorgaenge laufen in derselben Spur wie die
 // Fernauftraege: ein Lesen vom zweiten Rechner darf keinen Zwischenzustand sehen.
@@ -92,7 +93,7 @@ export type EditProductResult =
   | { status: 'edited'; batchId: string }
   | { status: 'edit_incomplete'; errorCode: string; batchId?: string }
   | { status: 'edit_conflict'; errorCode: string }
-  | { status: 'blocked'; errorCode: string }
+  | { status: 'blocked'; errorCode: string; message?: string }
   /** Legacy product cut over durably — the UI must reload + retry the edit. */
   | { status: 'cutover_reload' };
 
@@ -1088,6 +1089,9 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     const textDiff = diffProductText(buildProductEditColumns(cur, data));
 
     if (!editHasChanges(textDiff.set, galleryChanged)) return { status: 'edited', batchId: '' };
+    // VAT-PERIOD-LOCK — Marke/Name eines gemeldeten Artikels; vor jedem Staging, ein fachliches Nein.
+    const vatNein = productVatLabelRefusal(id, Object.fromEntries(textDiff.set));
+    if (vatNein) return { status: 'blocked', errorCode: VAT_PERIOD_FILED, message: vatNein };
 
     const productEdit: ProductEditIntent = {
       set: textDiff.set, baseline: textDiff.baseline,
@@ -1156,6 +1160,9 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     const textDiff = diffProductText(buildProductEditColumns(cur, data));
     // Nothing changed → a durable no-op (the editor still closes cleanly).
     if (textDiff.set.length === 0) return { status: 'edited', batchId: '' };
+    // VAT-PERIOD-LOCK — Marke/Name eines gemeldeten Artikels (Desktop, PC2 `products.update`, Handy).
+    const vatNein = productVatLabelRefusal(id, Object.fromEntries(textDiff.set));
+    if (vatNein) return { status: 'blocked', errorCode: VAT_PERIOD_FILED, message: vatNein };
 
     const productEdit = {
       set: textDiff.set, baseline: textDiff.baseline,
@@ -1186,6 +1193,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   }),
 
   updateProduct: (id, data) => {
+    // VAT-PERIOD-LOCK — auch der direkte Weg: Marke/Name eines gemeldeten Artikels bleiben stehen.
+    assertProductVatLabelUnchanged(id, data as Record<string, unknown>);
     const db = getDatabase();
     const now = new Date().toISOString();
     const fields: string[] = [];

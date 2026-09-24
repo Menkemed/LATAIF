@@ -202,6 +202,50 @@ export function assertCustomerVatIdentityUnchanged(customerId: string, data: Rec
   }
 }
 
+// ── Artikelstamm ───────────────────────────────────────────────────────────────────────────
+
+const artikelLabel = (brand: unknown, name: unknown): string =>
+  [brand, name].map((v) => String(v ?? '')).filter(Boolean).join(' ');
+
+/**
+ * Der Export zeigt den Artikel als „Marke Name" (`productLabel`), gelesen aus dem Artikelstamm.
+ * Eine Umbenennung schriebe eine schon gemeldete Rechnung um — gesperrt ist genau das, und nur,
+ * wenn der Artikel auf einer Rechnung eines zugemachten Quartals steht. Preis, Zustand, Lagerort,
+ * Notizen, Bilder usw. bleiben frei. `change` trägt Marke/Name unter `brand`/`name` (Feld- und
+ * Spaltenname sind gleich).
+ */
+export function assertProductVatLabelUnchanged(productId: string, change: Record<string, unknown>): void {
+  if (!('brand' in change) && !('name' in change)) return;
+  const row = query('SELECT brand, name FROM products WHERE id = ?', [productId])[0];
+  if (!row) return;
+  const nachher = artikelLabel('brand' in change ? change.brand : row.brand, 'name' in change ? change.name : row.name);
+  if (artikelLabel(row.brand, row.name) === nachher) return;
+  const jeFiliale = new Map<string, Map<string, FiledQuarter>>();
+  for (const r of query(
+    `SELECT DISTINCT i.id, i.branch_id FROM invoice_lines l JOIN invoices i ON i.id = l.invoice_id
+      WHERE l.product_id = ? AND i.status = 'FINAL'`, [productId],
+  )) {
+    const b = String(r.branch_id ?? '');
+    if (!jeFiliale.has(b)) jeFiliale.set(b, closedVatQuarters(b));
+    const closed = jeFiliale.get(b)!;
+    if (closed.size === 0) continue;
+    const q = vatFingerprint(String(r.id))?.quarter;
+    if (!q || !closed.has(q)) continue;
+    throw new VatPeriodFiled(
+      `This article is on an invoice in the VAT return for ${quarterLabel(q)}, which is already ${closed.get(q)!.filedAt ? 'filed' : 'paid'}. `
+      + 'Brand and name appear in that return and can no longer be changed — price, condition, notes and photos still can.',
+    );
+  }
+}
+
+/** Dasselbe als Antwort statt Wurf — für die Speicherwege, die ein Ergebnis zurückgeben. */
+export function productVatLabelRefusal(productId: string, change: Record<string, unknown>): string | null {
+  try { assertProductVatLabelUnchanged(productId, change); return null; } catch (e) {
+    if (e instanceof VatPeriodFiled) return e.message;
+    throw e;
+  }
+}
+
 // ── Einreichen ─────────────────────────────────────────────────────────────────────────────
 
 export const VAT_QUARTER_ALREADY_FILED = 'VAT_QUARTER_ALREADY_FILED';

@@ -433,7 +433,7 @@ export function ProductDetail() {
         return;
       }
       if (lokal.status === 'cutover_reload') { setMediaReloadNonce(n => n + 1); return; }
-      setErrors(e => ({ ...e, _media: lokal.errorCode }));
+      setErrors(e => ({ ...e, _media: ('message' in lokal && lokal.message) || lokal.errorCode }));
       return;
     }
 
@@ -508,7 +508,7 @@ export function ProductDetail() {
     // blocked / incomplete / conflict → NO refresh; editor stays OPEN, draft
     // intact, and a retry reuses the SAME frozen batch (typed conflict if the
     // draft changed under the same batch id).
-    setErrors(e => ({ ...e, _media: res.errorCode }));
+    setErrors(e => ({ ...e, _media: ('message' in res && res.message) || res.errorCode }));
   }
 
   function labelFor(key: string): string {

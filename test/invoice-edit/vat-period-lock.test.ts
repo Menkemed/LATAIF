@@ -504,5 +504,40 @@ const code = (m: string): string => m.split('|')[0];
   DB.run("DELETE FROM tax_payments WHERE id = 'tp-lauf'");
 }
 
+// ══ 11) Artikelstamm — Marke/Name eines gemeldeten Artikels ══
+{
+  const { useProductStore: ps } = await import('../../src/stores/productStore.ts');
+  const { runProductUpdate } = await import('../../src/core/bridge/product-commands.ts');
+  const art = (id: string): string => all(DB, 'SELECT brand, name, planned_sale_price, notes FROM products WHERE id = ?', [id]);
+  const fpA = fp(A.inv); const vor = art('pA');
+  const upd = (id: string, data: Record<string, unknown>): string => { const m = meldung(() => ps.getState().updateProduct(id, data as never)); reload(); return m; };
+  const mName = upd('pA', { name: 'Submariner Neu' });
+  const mMarke = upd('pA', { brand: 'Tudor' });
+  ok(code(mName) === VAT_PERIOD_FILED && code(mMarke) === VAT_PERIOD_FILED && art('pA') === vor && fp(A.inv) === fpA,
+    `11 Artikel von A (Q2 eingereicht): Name/Marke umbenennen abgewiesen, Stamm und Export unverändert — „${mName.split('|')[1]?.slice(0, 70)}…"`);
+  const dur = await ps.getState().editProductTextDurably('pA', { name: 'Submariner Neu' } as never);
+  ok(dur.status === 'blocked' && (dur as { errorCode?: string }).errorCode === VAT_PERIOD_FILED && /Brand and name appear/.test(String((dur as { message?: string }).message)) && art('pA') === vor,
+    `11 …der durable Desktop-/Handy-Textweg: ebenso abgewiesen, mit lesbarer Meldung (${dur.status})`);
+  const mFrei = upd('pA', { plannedSalePrice: 1999, notes: 'Box nachgeliefert' });
+  const mGleich = upd('pA', { brand: 'Rolex', name: 'M pA' });
+  ok(mFrei === '' && mGleich === '' && n(DB, "SELECT planned_sale_price FROM products WHERE id = 'pA'") === 1999 && fp(A.inv) === fpA,
+    `11 …Preis/Notiz ändern und unveränderte Bezeichnung mitschicken: erlaubt, Export unverändert (${mFrei}|${mGleich})`);
+  const mOffen = upd('pB', { name: 'Datejust' });
+  ok(mOffen === '' && s(DB, "SELECT name FROM products WHERE id = 'pB'") === 'Datejust',
+    `11 Artikel nur im offenen Q3 verkauft: umbenennen geht (${mOffen})`);
+  const d = {
+    db: DB as never, begin: posting.beginLedgerTransaction, commit: posting.commitLedgerTransaction,
+    rollback: posting.rollbackLedgerTransaction, durableSave: async () => { /* test */ }, now: () => NOW,
+  };
+  const ID = (x: string): string => `${x.padStart(8, '0')}-0000-4000-8000-000000000000`;
+  const ident = (x: string, op: string) => ({ commandId: ID(x), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', role: 'ADMIN', op, payloadKind: 'x', payloadHash: 'h' + x });
+  const r = await runProductUpdate(d as never, ident('p1', 'products.update') as never, { id: 'pA', name: 'Submariner PC2' }) as { kind: string; code?: string; frozen?: boolean; message?: string };
+  reload();
+  ok(r.kind === 'rejected' && r.code === VAT_PERIOD_FILED && r.frozen === true && /Brand and name appear/.test(String(r.message)),
+    `11 PC2 products.update Umbenennung: endgültig abgewiesen mit Meldung (${r.kind}:${r.code})`);
+  ok(s(DB, "SELECT name FROM products WHERE id = 'pA'") === 'M pA' && /productVatLabelRefusal\(plan\.productId/.test(src('src/core/media/mobile-upload-wiring.ts')),
+    '11 …Name bleibt „M pA"; der Handy-Galerieweg prüft dieselbe Regel');
+}
+
 console.log(`\nvat-period-lock: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);

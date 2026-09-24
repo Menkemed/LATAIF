@@ -27,6 +27,7 @@ import type { ProductEditIntent } from '@/core/media/coordinator';
 import type { CurrentProductState } from '@/core/media/mobile-product-patch';
 import { evaluatePriceEligibility } from '@/core/products/price-eligibility';
 import { useProductStore, buildProductEditColumns } from '@/stores/productStore';
+import { productVatLabelRefusal, VAT_PERIOD_FILED } from '@/core/tax/vat-period-lock';
 import {
   createTauriMobileUploadBridge, triggerMobileUploadDrainSafe, canonicalProductMetadataHash, MaterializeError,
   type ClaimGrant, type MobileDrainDeps, type ReadyVerdict, type DurableReceipt, type PreparedMediaItem, type BoundBatchJob, type GallerySlot, type DrainScope,
@@ -306,6 +307,8 @@ async function applyGalleryEdit(
   if (plan.patch) {
     const cur = query('SELECT * FROM products WHERE id = ?', [plan.productId])[0] as Record<string, unknown> | undefined;
     const diff = diffProductText(buildProductEditColumns(cur, plan.patch as Record<string, never>));
+    // VAT-PERIOD-LOCK — derselbe Riegel wie im Desktop-Textweg, vor dem Umschlag.
+    if (productVatLabelRefusal(plan.productId, Object.fromEntries(diff.set))) return { ok: false, errorCode: VAT_PERIOD_FILED };
     if (diff.set.length > 0) {
       productEdit = {
         set: diff.set, baseline: diff.baseline,

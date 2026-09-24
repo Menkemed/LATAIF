@@ -530,7 +530,7 @@ export async function runProductUpdate(
       // Ein Urteil der Domäne über DIESE Anfrage — die Preissperre ist der Hauptfall. Es wird
       // eingefroren: der Client soll nicht ewig dasselbe erneut schicken, sondern etwas anderes
       // entscheiden.
-      throw new CommandRejected(result.errorCode, 'this product may not be changed that way');
+      throw new CommandRejected(result.errorCode, result.message ?? 'this product may not be changed that way');
     }
     if (result.status !== 'edited') {
       // Konflikt, unvollständig, oder ein Altbestand, der erst umgezogen werden muss: KEIN Urteil.
