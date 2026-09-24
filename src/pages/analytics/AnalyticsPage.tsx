@@ -785,7 +785,7 @@ export function AnalyticsPage() {
                             style={{ fontSize: 10, color: '#4B5563', padding: '2px 8px', borderRadius: 999, background: 'rgba(15,15,16,0.06)', border: '1px solid #D5D9DE' }}>
                             VAT filed {q.filedAt.slice(0, 10)}
                           </span>
-                        ) : can('tax.record_payment') && (
+                        ) : can('tax.record_payment') && new Date() >= new Date(q.year, q.quarter * 3, 1) && (
                           <button data-vat-file-open={`${q.year}-Q${q.quarter}`}
                             onClick={() => { void markVatFiled(q.year, q.quarter); }}
                             className="cursor-pointer"

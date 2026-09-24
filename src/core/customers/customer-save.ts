@@ -14,6 +14,7 @@ import type { WriteOutcome } from '@/core/data/shared-write';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { createPayload, updatePayload, CUSTOMER_EDITABLE } from '@/core/data/write-payloads';
 import { useCustomerStore } from '@/stores/customerStore';
+import { assertCustomerVatIdentityUnchanged } from '@/core/tax/vat-period-lock';
 import { applyIdentityDocument, assertIdentityOwnerRevision } from '@/core/identity/identity-media';
 import { CUSTOMER_PHOTO_KEYS, prepareIdentityPhoto, type IdentityPhotoIntent } from '@/core/identity/identity-save';
 
@@ -78,6 +79,8 @@ export async function saveCustomerUpdate(
   const aendertDokument = foto.kind === 'ready';
   return write.save({
     local: () => runOnPrimary(() => {
+      // VAT-PERIOD-LOCK — vor dem Ausweisdokument, damit ein Nein nichts halb geschrieben zurücklässt.
+      assertCustomerVatIdentityUnchanged(base.id, diff);
       if (aendertDokument) {
         assertIdentityOwnerRevision('customer', base.id, base.revision ?? 1);
         applyIdentityDocument('customer', base.id, mediaId, { bumpOwner: Object.keys(diff).length === 0 });

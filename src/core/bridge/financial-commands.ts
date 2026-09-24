@@ -562,9 +562,15 @@ export function runConvertOrder(deps: EngineDeps, identity: CommandIdentity, raw
       const gezahlt = Number(query(
         'SELECT COALESCE(SUM(amount), 0) AS s FROM order_payments WHERE order_id = ?', [req.orderId],
       )[0]?.s ?? 0);
-      carryOverOrderPaymentsToInvoice(
-        created.id, req.orderId, String(order.order_number ?? ''), gross, gezahlt,
-      );
+      try {
+        carryOverOrderPaymentsToInvoice(
+          created.id, req.orderId, String(order.order_number ?? ''), gross, gezahlt,
+        );
+      } catch (err) {
+        // VAT-PERIOD-LOCK — ein Nein des Periodenschutzes ist ein Urteil, keine Störung.
+        if (err instanceof VatPeriodFiled) throw new CommandRejected(VAT_PERIOD_FILED, err.message);
+        throw err;
+      }
     }
 
     useOrderStore.getState().loadOrders();

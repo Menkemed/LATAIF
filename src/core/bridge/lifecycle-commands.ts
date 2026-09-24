@@ -33,6 +33,7 @@ import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
 import { RepairActionRejected, isRepairTaxScheme, repairInvoiceBlocker } from '@/core/repairs/repair-rules';
 import { TransferActionRejected, transferConvertBlocker, type TransferBillTo } from '@/core/agents/transfer-rules';
 import { convertTransferInHouse, convertTransfersInHouse, type TransferConversion } from '@/core/agents/transfer-house';
+import { VatPeriodFiled } from '@/core/tax/vat-period-lock';
 import { assertHouseBranch } from './remote-create-support';
 import { ConsignmentActionRejected } from '@/core/consignment/consignment-finance';
 import { recordConsignmentSaleInHouse, type ConsignmentSold } from '@/core/consignment/consignment-finance-house';
@@ -1000,6 +1001,8 @@ function assertConvertible(t: TransferRef, branchId: string, combined: boolean):
 /** Ein Nein der geteilten Folge — oder eines der Hausfunktion — ist ein eingefrorenes Urteil. */
 function alsUrteil(err: unknown): unknown {
   if (err instanceof TransferActionRejected) return new CommandRejected(err.code, err.message);
+  // VAT-PERIOD-LOCK — die Settle-Zahlungen schlössen die Rechnung in einem zugemachten Quartal ab.
+  if (err instanceof VatPeriodFiled) return new CommandRejected(err.code, err.message);
   return asVerdict(err, CONVERT_VERDICTS) ?? err;
 }
 

@@ -1776,6 +1776,17 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // VAT-PERIOD-LOCK — eine Zahlung einer gemeldeten FINAL-Rechnung zu löschen nähme sie aus dem
     // eingereichten Quartal (oder verschöbe ihren Monat).
     assertInvoiceNotInClosedVatQuarter(invoiceId);
+    // …und umgekehrt: bleibt die Rechnung ohne diese Zahlung voll bezahlt (Überzahlung), rückt ihr
+    // Abschlusstag auf die bisher vorletzte Zahlung — die darf nicht in einem zugemachten Quartal liegen.
+    {
+      const rest = query('SELECT amount, received_at FROM payments WHERE invoice_id = ? AND id != ?', [invoiceId, paymentId]);
+      const kopf = query('SELECT branch_id, gross_amount FROM invoices WHERE id = ?', [invoiceId])[0];
+      const summe = rest.reduce((s, p) => s + Number(p.amount || 0), 0);
+      if (kopf && rest.length > 0 && summe >= Number(kopf.gross_amount || 0) - 0.005) {
+        const letzte = rest.map((p) => String(p.received_at)).sort().pop()!;
+        assertNotFinalizingIntoClosedVatQuarter(String(kopf.branch_id ?? ''), letzte);
+      }
+    }
     // Slice 1 (Symmetrie zu updatePayment): method + created_at VOR dem DELETE
     // erfassen, um danach die Auto-Card-Fee dieser Zahlung mit-zu-reversieren.
     const delRows = query(`SELECT method, created_at FROM payments WHERE id = ?`, [paymentId]);

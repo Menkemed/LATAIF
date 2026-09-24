@@ -70,6 +70,17 @@ export interface VatFingerprint {
   row: Record<string, unknown>;
 }
 
+/** Wie der Export den Kunden zeigt (`customerLabel` + VAT-Konto + Personal-ID in `nbr-export`). */
+function customerIdentity(c: Record<string, unknown> | undefined): { name: string; vatAccountNumber: string; personalId: string } {
+  const base = `${String(c?.first_name ?? '')} ${String(c?.last_name ?? '')}`.trim();
+  const company = String(c?.company ?? '');
+  return {
+    name: c ? (company ? `${base} (${company})` : base) : '',
+    vatAccountNumber: String(c?.vat_account_number ?? '') || '',
+    personalId: String(c?.personal_id ?? '') || '',
+  };
+}
+
 /** Was der NBR-Export von dieser Rechnung zeigt; `null`, wenn sie dort nicht steht (nicht FINAL). */
 export function vatFingerprint(invoiceId: string): VatFingerprint | null {
   const inv = query(
@@ -83,14 +94,23 @@ export function vatFingerprint(invoiceId: string): VatFingerprint | null {
   );
   const q = nbrQuarterOfDate(iso);
   if (!q) return null;
+  // Die Artikelbezeichnung steht im Export (`productLabel`: Marke + Name) — sie gehört in das
+  // Festgehaltene, damit die Einreichung auch dann nachvollziehbar bleibt, wenn der Artikel später
+  // umbenannt wird.
   const lines = query(
-    `SELECT product_id, tax_scheme, quantity, line_total, vat_amount, purchase_price_snapshot, vat_rate
-       FROM invoice_lines WHERE invoice_id = ? ORDER BY position, id`, [invoiceId],
+    `SELECT l.product_id, l.tax_scheme, l.quantity, l.line_total, l.vat_amount, l.purchase_price_snapshot, l.vat_rate,
+            TRIM(COALESCE(p.brand, '') || ' ' || COALESCE(p.name, '')) AS label
+       FROM invoice_lines l LEFT JOIN products p ON p.id = l.product_id
+      WHERE l.invoice_id = ? ORDER BY l.position, l.id`, [invoiceId],
   ).map((l) => [String(l.product_id), String(l.tax_scheme), Number(l.quantity) || 1, r3(l.line_total), r3(l.vat_amount),
-    r3(l.purchase_price_snapshot), Number(l.vat_rate) || 0]);
+    r3(l.purchase_price_snapshot), Number(l.vat_rate) || 0, String(l.label ?? '')]);
+  const kunde = query(
+    'SELECT first_name, last_name, company, vat_account_number, personal_id FROM customers WHERE id = ?', [String(inv.customer_id)],
+  )[0];
   const row = {
     invoiceId, number: String(inv.invoice_number), month: q.month, finalizedAt: iso,
-    customerId: String(inv.customer_id), issuedAt: String(inv.issued_at ?? inv.created_at ?? ''), lines, payments: pays,
+    customerId: String(inv.customer_id), customer: customerIdentity(kunde),
+    issuedAt: String(inv.issued_at ?? inv.created_at ?? ''), lines, payments: pays,
   };
   return { quarter: q.key, month: q.month, data: JSON.stringify(row), row };
 }
@@ -135,9 +155,57 @@ export function assertNotFinalizingIntoClosedVatQuarter(branchId: string, iso: s
   );
 }
 
+/**
+ * Ein Umwandlungsweg, der erst die Rechnung und DANACH die mitgehenden Zahlungen schreibt (Agent,
+ * Auftrag): schließen die Zahlungen die Rechnung heute ab, wird das VORHER geprüft. Sonst lehnte
+ * `recordPayment` erst ab, wenn Rechnung und Gegenbuchungen schon stehen — halb umgewandelt.
+ */
+export function assertMayFinalizeNow(branchId: string, gross: number, paid: number): void {
+  if (paid > 0.005 && paid >= gross - 0.005) assertNotFinalizingIntoClosedVatQuarter(branchId, new Date().toISOString());
+}
+
+// ── Kundenstamm ────────────────────────────────────────────────────────────────────────────
+
+const KUNDE_IM_EXPORT: Record<string, string> = {
+  firstName: 'first_name', lastName: 'last_name', company: 'company',
+  vatAccountNumber: 'vat_account_number', personalId: 'personal_id',
+};
+
+/**
+ * Der Export liest Name, Firma, VAT-Konto und Personal-ID aus dem Kundenstamm, nicht aus der
+ * Rechnung. Eine spätere Änderung daran schriebe also eine schon gemeldete Rechnung um. Gesperrt
+ * ist genau das — und nur, wenn der Kunde auf einer Rechnung eines zugemachten Quartals steht.
+ * Telefon, E-Mail, Adresse, Notizen usw. bleiben frei. Verglichen wird das, was der Export zeigt:
+ * „Anna" + „Maria Weber" → „Anna Maria" + „Weber" ist keine Änderung.
+ */
+export function assertCustomerVatIdentityUnchanged(customerId: string, data: Record<string, unknown>): void {
+  if (!Object.keys(KUNDE_IM_EXPORT).some((k) => k in data)) return;
+  const row = query(
+    'SELECT first_name, last_name, company, vat_account_number, personal_id FROM customers WHERE id = ?', [customerId],
+  )[0];
+  if (!row) return;
+  const nachher: Record<string, unknown> = { ...row };
+  for (const [key, col] of Object.entries(KUNDE_IM_EXPORT)) if (key in data) nachher[col] = data[key] ?? null;
+  if (JSON.stringify(customerIdentity(row)) === JSON.stringify(customerIdentity(nachher))) return;
+  const jeFiliale = new Map<string, Map<string, FiledQuarter>>();
+  for (const r of query("SELECT id, branch_id FROM invoices WHERE customer_id = ? AND status = 'FINAL'", [customerId])) {
+    const b = String(r.branch_id ?? '');
+    if (!jeFiliale.has(b)) jeFiliale.set(b, closedVatQuarters(b));
+    const closed = jeFiliale.get(b)!;
+    if (closed.size === 0) continue;
+    const q = vatFingerprint(String(r.id))?.quarter;
+    if (!q || !closed.has(q)) continue;
+    throw new VatPeriodFiled(
+      `This customer is on an invoice in the VAT return for ${quarterLabel(q)}, which is already ${closed.get(q)!.filedAt ? 'filed' : 'paid'}. `
+      + 'Name, company, VAT account number and personal ID appear in that return and can no longer be changed — phone, email, address and notes still can.',
+    );
+  }
+}
+
 // ── Einreichen ─────────────────────────────────────────────────────────────────────────────
 
 export const VAT_QUARTER_ALREADY_FILED = 'VAT_QUARTER_ALREADY_FILED';
+export const VAT_QUARTER_NOT_OVER = 'VAT_QUARTER_NOT_OVER';
 
 export interface VatFilingResult {
   id: string; year: number; quarter: number; filedAt: string; invoiceCount: number;
@@ -157,6 +225,13 @@ export function markVatQuarterFiled(
   if (query('SELECT 1 FROM vat_filings WHERE branch_id = ? AND year = ? AND quarter = ?', [branchId, year, quarter]).length > 0) {
     const e = new Error(`Q${quarter}/${year} is already marked as filed.`) as Error & { code?: string };
     e.code = VAT_QUARTER_ALREADY_FILED;
+    throw e;
+  }
+  // Eingereicht wird nach dem Quartal. Ein laufendes Quartal zuzumachen sperrte jede Zahlung, die
+  // heute eine Rechnung abschließt — also den normalen Verkauf.
+  if (new Date() < new Date(year, quarter * 3, 1)) {
+    const e = new Error(`Q${quarter}/${year} is not over yet — it can be marked as filed once the quarter has ended.`) as Error & { code?: string };
+    e.code = VAT_QUARTER_NOT_OVER;
     throw e;
   }
   const key = `${year}-Q${quarter}`;

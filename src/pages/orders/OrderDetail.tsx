@@ -30,7 +30,7 @@ import { computeExpenseSettlement } from '@/core/finance/expenseSettlement';
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
 import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction } from '@/core/ledger/posting';
 import { convertOrderLinesToInvoiceTx } from '@/core/orders/order-invoice-tx';
-import { carryOverOrderPaymentsToInvoice } from '@/core/orders/order-payment-carryover';
+import { carryOverOrderPaymentsToInvoice, assertOrderCarryOverMayFinalize } from '@/core/orders/order-payment-carryover';
 import { buildOrderInvoiceLines, orderCustomCostBasis, markConvertedLinesDelivered } from '@/core/orders/order-invoice-lines';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { vatEngine } from '@/core/tax/vat-engine';
@@ -733,6 +733,8 @@ export function OrderDetail() {
     // erzeugt keine zweite Invoice. assertOrderLinesBillable liest FRISCH aus der DB.
     let invoice: Invoice;
     try {
+      // VAT-PERIOD-LOCK — die Anzahlung wird erst nach dem Anlegen angerechnet; ein Nein muss davor fallen.
+      assertOrderCarryOverMayFinalize(id, invoiceLineInputs.reduce((s, l) => s + l.lineTotal, 0), totalPaid);
       invoice = convertOrderToInvoiceAtomic(
         order.customerId,
         billableLines.map(l => l.id),
@@ -790,6 +792,7 @@ export function OrderDetail() {
     // der Legacy-Order (Voll-Konvertierung ueber agreedPrice, keine Teil-Konvertierung).
     let invoice: Invoice;
     try {
+      assertOrderCarryOverMayFinalize(id, calc.grossAmount, totalPaid);
       invoice = convertOrderToInvoiceAtomic(
         order.customerId,
         getBillableLines(id).map(l => l.id),

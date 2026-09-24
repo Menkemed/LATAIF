@@ -208,6 +208,8 @@ const { runInvoiceUpdate, runInvoicePayment } = await import('../../src/core/bri
 const { runUpdatePayment, runDeletePayment } = await import('../../src/core/bridge/financial-commands.ts');
 const { reverseInvoiceInHouse } = await import('../../src/core/invoices/invoice-reversal.ts');
 const { CUSTOMER_CHANGE_VAT_FILED } = await import('../../src/core/invoices/customer-change.ts');
+const { runCustomerUpdate } = await import('../../src/core/bridge/customer-commands.ts');
+const { carryOverOrderPaymentsToInvoice, assertOrderCarryOverMayFinalize } = await import('../../src/core/orders/order-payment-carryover.ts');
 
 void OWNER_ACTOR; void imHausAsync; void tick; void useConsignmentStore; void useProductionStore; void useAgentStore;
 void cancelReturnHouse; void cancelInvoiceInHouse; void convertTransferInHouse; void undoTransferConversionInHouse;
@@ -385,6 +387,121 @@ const code = (m: string): string => m.split('|')[0];
   reload();
   ok(notiz.kind === 'ok' && s(DB, 'SELECT notes FROM invoices WHERE id = ?', [A.inv]) === 'PC2 Notiz',
     `6 …PC2 reine Notiz: erlaubt (${notiz.kind})`);
+}
+
+// ══ 7) Kundenstamm — Name/Firma/VAT-Konto/Personal-ID einer gemeldeten Rechnung ══
+{
+  const snap = JSON.parse(s(DB, 'SELECT snapshot_json FROM vat_filings WHERE year = 2026 AND quarter = 2'));
+  const g = snap.invoices?.[0];
+  ok(g?.customer?.name === 'Ali Hassan' && g?.customer?.vatAccountNumber === '' && g?.lines?.[0]?.[7] === 'Rolex M pA',
+    `7 der Filing-Snapshot hält Kundenname, VAT-Konto und Artikelbezeichnung fest (${g?.customer?.name} / ${g?.lines?.[0]?.[7]})`);
+  const kunde = (id: string): string => all(DB, 'SELECT first_name, last_name, company, vat_account_number, personal_id, phone FROM customers WHERE id = ?', [id]);
+  const upd = (id: string, data: Record<string, unknown>): string => { const m = meldung(() => useCustomerStore.getState().updateCustomer(id, data as never)); reload(); return m; };
+  const fpA = fp(A.inv); const vorK = kunde('cust-1');
+  for (const [was, data] of [
+    ['VAT-Nummer', { vatAccountNumber: 'VAT-200' }], ['Nachname', { lastName: 'Haddad' }],
+    ['Firma', { company: 'Hassan Trading' }], ['Personal-ID', { personalId: '880101234' }],
+  ] as Array<[string, Record<string, unknown>]>) {
+    const m = upd('cust-1', data);
+    ok(code(m) === VAT_PERIOD_FILED && kunde('cust-1') === vorK && fp(A.inv) === fpA,
+      `7 Kunde von A (Q2 eingereicht): ${was} ändern abgewiesen, Stamm und Export unverändert — „${m.split('|')[1]?.slice(0, 70)}…"`);
+  }
+  const mTel = upd('cust-1', { phone: '+973 3300 1122', email: 'ali@example.com', notes: 'Stammkunde' });
+  ok(mTel === '' && s(DB, 'SELECT phone FROM customers WHERE id = ?', ['cust-1']) === '+973 3300 1122' && fp(A.inv) === fpA,
+    `7 …Telefon, E-Mail, Notiz: erlaubt, Export unverändert (${mTel})`);
+  const mGanz = upd('cust-1', { firstName: 'Ali', lastName: 'Hassan', company: '', vatAccountNumber: '', personalId: '', phone: '+973 3300 1123' });
+  ok(mGanz === '' && fp(A.inv) === fpA, `7 …ganze Maske mit unveränderten Namensfeldern (wie die Desktop-Maske sie schickt): erlaubt (${mGanz})`);
+  const mOffen = upd('cust-2', { vatAccountNumber: 'VAT-777', lastName: 'Saleh' });
+  ok(mOffen === '' && s(DB, 'SELECT vat_account_number FROM customers WHERE id = ?', ['cust-2']) === 'VAT-777',
+    `7 Kunde nur mit Rechnungen im offenen Q3: VAT-Nummer und Name ändern geht (${mOffen})`);
+
+  const d = {
+    db: DB as never, begin: posting.beginLedgerTransaction, commit: posting.commitLedgerTransaction,
+    rollback: posting.rollbackLedgerTransaction, durableSave: async () => { /* test */ }, now: () => NOW,
+  };
+  const ID = (x: string): string => `${x.padStart(8, '0')}-0000-4000-8000-000000000000`;
+  const ident = (x: string, op: string) => ({ commandId: ID(x), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', role: 'ADMIN', op, payloadKind: 'x', payloadHash: 'h' + x });
+  const vorPc2 = kunde('cust-1');
+  const r1 = await runCustomerUpdate(d as never, ident('c1', 'customers.update') as never, { id: 'cust-1', vatAccountNumber: 'VAT-PC2' }) as { kind: string; code?: string; frozen?: boolean };
+  const r2 = await runCustomerUpdate(d as never, ident('c2', 'customers.update') as never, { id: 'cust-1', phone: '+973 1111' }) as { kind: string };
+  reload();
+  ok(r1.kind === 'rejected' && r1.code === VAT_PERIOD_FILED && r1.frozen === true && r2.kind === 'ok'
+    && s(DB, 'SELECT vat_account_number FROM customers WHERE id = ?', ['cust-1']) === ''
+    && s(DB, 'SELECT phone FROM customers WHERE id = ?', ['cust-1']) === '+973 1111' && vorPc2 !== '',
+    `7 PC2 customers.update: VAT-Nummer endgültig abgewiesen, Telefon geht (${r1.kind}:${r1.code}, ${r2.kind})`);
+}
+
+// ══ 8) Einreichen erst nach dem Quartal ══
+{
+  const jetzt = new Date();
+  const lq = Math.ceil((jetzt.getMonth() + 1) / 3);
+  const vorN = n(DB, 'SELECT COUNT(*) FROM vat_filings');
+  const m1 = meldung(() => imHaus(() => markVatQuarterFiled({ branchId: 'branch-main', year: jetzt.getFullYear(), quarter: lq })));
+  const m2 = meldung(() => imHaus(() => markVatQuarterFiled({ branchId: 'branch-main', year: 2099, quarter: 1 })));
+  ok(code(m1) === lock.VAT_QUARTER_NOT_OVER && code(m2) === lock.VAT_QUARTER_NOT_OVER && n(DB, 'SELECT COUNT(*) FROM vat_filings') === vorN,
+    `8 laufendes Quartal (Q${lq}/${jetzt.getFullYear()}) und künftiges: nicht einreichbar (${code(m1)})`);
+  ok(/new Date\(\) >= new Date\(q\.year, q\.quarter \* 3, 1\)/.test(src('src/pages/analytics/AnalyticsPage.tsx')),
+    '8 …der Knopf „Mark VAT filed" erscheint erst nach Quartalsende');
+}
+
+// ══ 9) Zahlung löschen: der Abschlusstag rückt nicht still in ein eingereichtes Quartal ══
+{
+  product(DB, 'pE', 1); reload();
+  const E = bezahlt('pE', '2026-06-01', '2026-06-10T12:00:00.000Z');   // voll bezahlt im Juni …
+  DB.run(`INSERT INTO payments (id, branch_id, invoice_id, amount, method, received_at, created_at)
+          VALUES ('pay-e2','branch-main',?,5,'cash','2026-07-22T12:00:00.000Z',?)`, [E.inv, NOW]);   // … und eine Überzahlung im Juli
+  reload();
+  const vorE = stand(E.inv);
+  ok(vatFingerprint(E.inv)?.quarter === '2026-Q3', `SETUP E steht wegen der Juli-Zahlung in Q3 (${vatFingerprint(E.inv)?.month})`);
+  const m = meldung(() => imHaus(() => useInvoiceStore.getState().deletePayment('pay-e2', E.inv)));
+  reload();
+  ok(code(m) === VAT_PERIOD_FILED && stand(E.inv) === vorE && vatFingerprint(E.inv)?.quarter === '2026-Q3',
+    `9 Juli-Zahlung löschen würde E in den eingereichten Juni schieben: abgewiesen, E unverändert (${code(m)})`);
+}
+
+// ══ 10) Umwandlungen, die heute abschließen, wenn das laufende Quartal zu ist (VAT schon bezahlt) ══
+{
+  const jetzt = new Date();
+  const lq = Math.ceil((jetzt.getMonth() + 1) / 3);
+  DB.run("INSERT INTO tax_payments (id, branch_id, year, quarter, amount, source, paid_at, created_at) VALUES ('tp-lauf','branch-main',?,?,1,'bank',?,?)",
+    [jetzt.getFullYear(), lq, NOW, NOW]);
+  product(DB, 'pF', 1); product(DB, 'pG', 1); reload();
+
+  // Agent: Settle-Zahlungen decken die ganze Abrechnung → die neue Rechnung wäre heute FINAL.
+  insert(DB, 'agents', { id: 'ag-1', branch_id: 'branch-main', name: 'Agent Eins', created_at: NOW, updated_at: NOW });
+  insert(DB, 'agent_transfers', { id: 'tr-1', branch_id: 'branch-main', transfer_number: 'T-1', agent_id: 'ag-1', product_id: 'pF',
+    agent_price: 1100, commission_rate: 0, status: 'sold', transferred_at: NOW, sold_at: NOW, actual_sale_price: 1100, settlement_amount: 1100 });
+  DB.run("INSERT INTO agent_settlement_payments (id, transfer_id, amount, method, paid_at, created_at) VALUES ('asp-1','tr-1',1100,'cash','2026-09-01',?)", [NOW]);
+  reload();
+  const zaehl = (): string => S([n(DB, 'SELECT COUNT(*) FROM invoices'), n(DB, 'SELECT COUNT(*) FROM agent_settlement_payments'),
+    n(DB, 'SELECT COUNT(*) FROM ledger_entries'), s(DB, "SELECT COALESCE(invoice_id, '') FROM agent_transfers WHERE id = 'tr-1'")]);
+  const vorAg = zaehl();
+  const mAg = meldung(() => imHaus(() => useAgentStore.getState().convertTransferToInvoice('tr-1', 'cust-1')));
+  reload();
+  ok(code(mAg) === VAT_PERIOD_FILED && zaehl() === vorAg,
+    `10 Agent-Convert (eine Transaktion): abgewiesen und ganz zurückgerollt — keine Rechnung, Settle-Zahlungen und Buchungen unverändert (${code(mAg)})`);
+  let teil = '';
+  try { lock.assertMayFinalizeNow('branch-main', 1100, 500); } catch (e) { teil = (e as Error).message; }
+  ok(teil === '', '10 …eine Teilzahlung, die nicht abschließt, bleibt erlaubt');
+
+  // Auftrag: die Anzahlung deckt die Rechnung → Anrechnung würde heute abschließen.
+  const inv = rechnung([{ ...LINE('pG', 1, 1000), lotId: 'lot-pG' } as never]);
+  insert(DB, 'orders', { id: 'ord-1', branch_id: 'branch-main', customer_id: 'cust-1', order_number: 'O-1', agreed_price: 1100, created_at: NOW, updated_at: NOW });
+  DB.run("INSERT INTO order_payments (id, order_id, amount, paid_at, method, created_at) VALUES ('op-1','ord-1',1100,'2026-09-01','cash',?)", [NOW]);
+  const zOrd = (): string => S([n(DB, 'SELECT COUNT(*) FROM payments WHERE invoice_id = ?', [inv]),
+    n(DB, "SELECT COALESCE(converted_to_invoice, 0) FROM order_payments WHERE id = 'op-1'"), n(DB, 'SELECT COUNT(*) FROM ledger_entries')]);
+  const vorOrd = zOrd();
+  const mPre = meldung(() => assertOrderCarryOverMayFinalize('ord-1', 1100, 1100));
+  const mOrd = meldung(() => imHaus(() => carryOverOrderPaymentsToInvoice(inv, 'ord-1', 'O-1', 1100, 1100)));
+  reload();
+  ok(code(mPre) === VAT_PERIOD_FILED && code(mOrd) === VAT_PERIOD_FILED && zOrd() === vorOrd,
+    `10 Auftrag → Rechnung: Anrechnung der Anzahlung abgewiesen, bevor sie umgebucht wird (${code(mOrd)})`);
+  ok(/assertOrderCarryOverMayFinalize\(id, invoiceLineInputs/.test(src('src/pages/orders/OrderDetail.tsx'))
+    && /assertOrderCarryOverMayFinalize\(id, calc\.grossAmount/.test(src('src/pages/orders/OrderDetail.tsx'))
+    && /VatPeriodFiled\) return new CommandRejected/.test(src('src/core/bridge/lifecycle-commands.ts'))
+    && /VatPeriodFiled\) throw new CommandRejected\(VAT_PERIOD_FILED/.test(src('src/core/bridge/financial-commands.ts')),
+    '10 …Auftragsansicht fragt vor dem Anlegen; PC2-Umwandlungen (Agent, Auftrag) geben das Nein als endgültiges Urteil weiter');
+  DB.run("DELETE FROM tax_payments WHERE id = 'tp-lauf'");
 }
 
 console.log(`\nvat-period-lock: ${PASS} passed, ${fails.length} failed`);

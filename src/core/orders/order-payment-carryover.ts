@@ -21,9 +21,22 @@
 //      (daraus entsteht genau eine einloesbare Gutschrift), der Rest bleibt Anzahlung fuer die
 //      naechste Teilrechnung.
 // ════════════════════════════════════════════════════════════════════════════
-import { query } from '@/core/db/helpers';
+import { query, currentBranchId } from '@/core/db/helpers';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
+import { assertMayFinalizeNow } from '@/core/tax/vat-period-lock';
+
+/**
+ * VAT-PERIOD-LOCK — schlösse die mitgehende Anzahlung die Rechnung heute in einem zugemachten
+ * Quartal ab? Nur lesend. Die Auftragsansicht fragt VOR dem Anlegen; die Anrechnung selbst fragt
+ * vor ihrem ersten Schreiben — sonst wäre die Anzahlung schon umgebucht, wenn `recordPayment` ablehnt.
+ */
+export function assertOrderCarryOverMayFinalize(orderId: string, invoiceTotal: number, totalPaid: number): void {
+  const poolRows = query('SELECT amount FROM order_payments WHERE order_id = ? AND converted_to_invoice = 0', [orderId]);
+  const pool = poolRows.reduce((s, r) => s + Number(r.amount || 0), 0);
+  const kommt = pool > 0.005 ? Math.min(pool, invoiceTotal) : (poolRows.length === 0 ? Math.min(totalPaid, invoiceTotal) : 0);
+  assertMayFinalizeNow(currentBranchId(), invoiceTotal, kommt);
+}
 
 /**
  * `totalPaid` ist die Summe ALLER Zahlungen des Auftrags. Sie wird nur fuer den Altbestand
@@ -33,6 +46,7 @@ import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 export function carryOverOrderPaymentsToInvoice(
   invoiceId: string, orderId: string, orderNumber: string, invoiceTotal: number, totalPaid: number,
 ): void {
+  assertOrderCarryOverMayFinalize(orderId, invoiceTotal, totalPaid);
   const inv = useInvoiceStore.getState();
   const poolRows = query(
     `SELECT id, amount, method, card_brand FROM order_payments

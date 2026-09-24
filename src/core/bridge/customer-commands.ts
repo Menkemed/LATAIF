@@ -33,6 +33,7 @@ import {
   readStagedAsRecordImages, stagingOwnerOf, type StagedMediaDiscard, type StagedMediaReader,
 } from './remote-create-support';
 import { applyIdentityDocument, ingestIdentityPhoto, IdentityMediaError } from '@/core/identity/identity-media';
+import { assertCustomerVatIdentityUnchanged, VatPeriodFiled } from '@/core/tax/vat-period-lock';
 
 export const OP_CUSTOMERS_CREATE = 'customers.create';
 export const OP_CUSTOMERS_UPDATE = 'customers.update';
@@ -267,6 +268,11 @@ export async function runCustomerUpdate(
     const rows = query('SELECT id, first_name, last_name FROM customers WHERE id = ?', [id]);
     if (rows.length === 0) throw new CommandRejected('CUSTOMER_NOT_FOUND', 'no such customer');
     if (expectedRevision !== undefined) assertRevision('customers', id, expectedRevision, 'CUSTOMER_NOT_FOUND');
+    // VAT-PERIOD-LOCK — dieselbe Regel wie am Primary, vor jedem Schreiben; ein Nein ist endgültig.
+    try { assertCustomerVatIdentityUnchanged(id, fields); } catch (e) {
+      if (e instanceof VatPeriodFiled) throw new CommandRejected(e.code, e.message);
+      throw e;
+    }
     // Schreibt dieser Auftrag die Zeile ohnehin, ist IHR Trigger die eine Fassung; ändert sich nur
     // das Dokument, zählt die Verknüpfung selbst — ein Tausch ist genau EINE Fassung.
     if (changesPhoto) {

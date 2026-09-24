@@ -14,6 +14,7 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+import { assertCustomerVatIdentityUnchanged } from '@/core/tax/vat-period-lock';
 
 interface CustomerStore {
   customers: Customer[];
@@ -160,6 +161,9 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
   },
 
   updateCustomer: (id, data) => {
+    // VAT-PERIOD-LOCK — Name/Firma/VAT-Konto/Personal-ID stehen im NBR-Export; nach der Einreichung
+    // nicht mehr änderbar, wenn der Kunde auf einer gemeldeten Rechnung steht. Vor jedem Schreiben.
+    assertCustomerVatIdentityUnchanged(id, data as Record<string, unknown>);
     const db = getDatabase();
     const now = new Date().toISOString();
     const fields: string[] = [];
