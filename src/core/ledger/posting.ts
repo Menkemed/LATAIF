@@ -860,7 +860,9 @@ export function postInvoicePaymentReversed(paymentId: string, occurredAt?: strin
 //   CREDIT ACCOUNTS_RECEIVABLE  by receivableCancelAmount
 //   CREDIT CASH/BANK    by cashRefundAmount
 
-export function postCreditNote(cn: CreditNote): PostingResult {
+// INVOICE-EDIT S5 — `opts.occurredAt`: Buchungsdatum einer KORREKTUR (Kundenwechsel). Standard
+// bleibt das Gutschriftsdatum; die Gutschrift selbst (issued_at) ändert sich dadurch nicht.
+export function postCreditNote(cn: CreditNote, opts: { occurredAt?: string } = {}): PostingResult {
   const total = ROUND(cn.totalAmount);
   const vat = ROUND(cn.vatAmount);
   const net = ROUND(total - vat);
@@ -955,7 +957,7 @@ export function postCreditNote(cn: CreditNote): PostingResult {
   }
 
   return postEntries(entries, {
-    occurredAt: cn.issuedAt,
+    occurredAt: opts.occurredAt ?? cn.issuedAt,
     sourceModule: 'CREDIT_NOTE',
     sourceId: cn.id,
   });

@@ -208,8 +208,8 @@ function voll(invId: string): string {
 const { runInvoiceUpdate } = await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
 const { runCounterpartyAudit } = await import('../../src/core/ledger/counterpartyAudit.ts');
 const {
-  CUSTOMER_CHANGE_NEEDS_CONFIRMATION, CUSTOMER_CHANGE_WITH_NEW_PAYMENT, CUSTOMER_CHANGE_HAS_CREDIT,
-  CUSTOMER_CHANGE_HAS_RETURN, CUSTOMER_CHANGE_FROM_ORDER, CUSTOMER_NOT_FOUND,
+  CUSTOMER_CHANGE_NEEDS_CONFIRMATION, CUSTOMER_CHANGE_WITH_NEW_PAYMENT, CUSTOMER_CHANGE_FOREIGN_CREDIT,
+  CUSTOMER_CHANGE_VAT_FILED, CUSTOMER_CHANGE_FROM_ORDER, CUSTOMER_NOT_FOUND,
 } = await import('../../src/core/invoices/customer-change.ts');
 const { EDIT_KEPT_LINE_LOT_SHORT } = await import('../../src/core/invoices/edit-lines.ts');
 
@@ -419,15 +419,15 @@ const nummer = (db: Db, inv: string): string => s(db, 'SELECT invoice_number FRO
     `3 …und zurück zu Ali: zweiter Zyklus sauber (${m2})`);
 }
 
-// 4) Sperren — jeweils nichts geändert.
+// 4) Guthaben/Retoure ziehen mit (S5, Details: full-correction.test.ts) · Sperren ändern nichts.
 {
-  // a) Überzahlungsguthaben aus dieser Rechnung.
+  // a) Überzahlungsguthaben aus dieser Rechnung — zieht mit.
   const { db, inv, z } = welt();
   zahle(inv, 1300, 'cash');
-  const vor = zustand(db);
   const m = wechsel(inv, z, 'cust-2', { confirm: true });
-  ok(m.startsWith(CUSTOMER_CHANGE_HAS_CREDIT + '|') && zustand(db) === vor,
-    `4a Überzahlungsguthaben: abgewiesen, nichts geändert (${m.split('|')[1]?.slice(0, 70)})`);
+  ok(m === '' && s(db, "SELECT customer_id FROM customer_credits WHERE source_type = 'overpayment'") === 'cust-2'
+    && kundenkontenOk(db) === '' && ausgeglichen(db),
+    `4a Überzahlungsguthaben aus dieser Rechnung: zieht mit zu Nora (${m}) ${kundenkontenOk(db)}`);
 }
 {
   // b) Rate mit Kundenguthaben bezahlt (Guthaben des alten Kunden, als Zahlungszeile 'credit').
@@ -441,11 +441,11 @@ const nummer = (db: Db, inv: string): string => s(db, 'SELECT invoice_number FRO
   reload();
   const vor = zustand(db2);
   const m = wechsel(b.inv, b.z, 'cust-2', { confirm: true });
-  ok(m.startsWith(CUSTOMER_CHANGE_HAS_CREDIT + '|') && zustand(db2) === vor,
-    `4b mit Guthaben bezahlte Rate: abgewiesen, nichts geändert (${m.slice(0, 50)})`);
+  ok(m.startsWith(CUSTOMER_CHANGE_FOREIGN_CREDIT + '|') && zustand(db2) === vor,
+    `4b mit UNABHÄNGIGEM Guthaben des alten Kunden bezahlte Rate: abgewiesen, nichts geändert (${m.slice(0, 50)})`);
 }
 {
-  // c) Retoure/Gutschrift — auch ohne weitere Prüfung der Zahlungen gesperrt.
+  // c) Retoure/Gutschrift — ziehen mit.
   const { db, inv, z } = welt(2);
   zahle(inv, 1100, 'cash');
   imHaus(() => {
@@ -459,10 +459,10 @@ const nummer = (db: Db, inv: string): string => s(db, 'SELECT invoice_number FRO
     useSalesReturnStore.getState().approveReturn(id);
   });
   reload();
-  const vor = zustand(db);
   const m = wechsel(inv, z, 'cust-2', { confirm: true });
-  ok(m.startsWith(CUSTOMER_CHANGE_HAS_RETURN + '|') && zustand(db) === vor,
-    `4c Retoure/Gutschrift: abgewiesen, nichts geändert (${m.split('|')[1]?.slice(0, 70)})`);
+  ok(m === '' && s(db, 'SELECT customer_id FROM credit_notes WHERE invoice_id = ?', [inv]) === 'cust-2'
+    && s(db, 'SELECT customer_id FROM sales_returns WHERE invoice_id = ?', [inv]) === 'cust-2' && kundenkontenOk(db) === '' && ausgeglichen(db),
+    `4c Retoure/Gutschrift: ziehen mit zu Nora (${m}) ${kundenkontenOk(db)}`);
 }
 {
   // d) Neue Zahlung im selben Speichern · e) fremder / unbekannter Kunde · f) Rechnung aus Auftrag.
@@ -523,9 +523,12 @@ const nummer = (db: Db, inv: string): string => s(db, 'SELECT invoice_number FRO
   ok(b.kind === 'ok' && kunde(db, inv) === 'cust-2' && arBuch(db, 'cust-1') === 0 && arBuch(db, 'cust-2') === 700
     && kundenkontenOk(db) === '' && ausgeglichen(db),
     `6 PC2 mit Bestätigung: wie am Primary (Ali ${arBuch(db, 'cust-1')}, Nora ${arBuch(db, 'cust-2')}) (${b.kind})`);
-  // Guthaben-Sperre über PC2.
+  // Sperre über PC2: VAT des Quartals schon bezahlt (= gemeldet).
   const w = welt();
-  zahle(w.inv, 1300, 'cash');
+  zahle(w.inv, 1100, 'cash');
+  const jetzt = new Date();
+  w.db.run("INSERT INTO tax_payments (id, branch_id, year, quarter, amount, source, paid_at, created_at) VALUES ('tp-1','branch-main',?,?,100,'VAT',?,?)",
+    [jetzt.getUTCFullYear(), Math.ceil((jetzt.getUTCMonth() + 1) / 3), NOW, NOW]);
   const d2 = { ...d, db: w.db as never };
   const vor2 = zustand(w.db);
   const c = await runInvoiceUpdate(d2 as never, ident('64') as never, {
@@ -533,19 +536,19 @@ const nummer = (db: Db, inv: string): string => s(db, 'SELECT invoice_number FRO
     confirmCustomerChange: true, lines: [{ lineId: w.z, productId: 'pA', lotId: 'lot-pA', quantity: 1, unitPrice: 1000 }],
   });
   reload();
-  ok(c.kind === 'rejected' && (c as { code: string }).code === CUSTOMER_CHANGE_HAS_CREDIT && (c as { frozen: boolean }).frozen === true
-    && zustand(w.db) === vor2, `6 PC2 mit Guthaben: endgültige Absage (${(c as { code?: string }).code})`);
+  ok(c.kind === 'rejected' && (c as { code: string }).code === CUSTOMER_CHANGE_VAT_FILED && (c as { frozen: boolean }).frozen === true
+    && zustand(w.db) === vor2, `6 PC2 in gemeldetem VAT-Quartal: endgültige Absage (${(c as { code?: string }).code})`);
 }
 
 // 7) Maske — Bestätigung vor dem Speichern, dieselbe Absicht an beide Anschlüsse.
 {
   const m = src('src/pages/invoices/InvoiceCreate.tsx');
-  ok(/customerChanges && originalPaid > 0\.005/.test(m) && /window\.confirm\(/.test(m), 'Q Maske fragt bei Zahlungen ausdrücklich nach');
+  ok(/if \(customerChanges\) \{/.test(m) && /window\.confirm\(/.test(m), 'Q Maske fragt bei jedem Kundenwechsel einmal ausdrücklich nach');
   ok((m.match(/\.\.\.\(confirmCustomerChange \? \{ confirmCustomerChange \} : \{\}\)/g) ?? []).length === 2,
     'Q …und reicht die Bestätigung an Primary und PC2 weiter');
   ok(/save the customer change first, then record the payment/.test(m), 'Q …neue Zahlung im selben Speichern wird vorher gemeldet');
   const store = src('src/stores/invoiceStore.ts');
-  ok(!/Cannot change the customer of an invoice that has payments/.test(store) && /moveInvoicePayments\(customerPlan, now\)/.test(store)
+  ok(!/Cannot change the customer of an invoice that has payments/.test(store) && /moveInvoiceBookings\(customerPlan, now\)/.test(store)
     && /postInvoiceIssued\(fresh, customerPlan \? \{ occurredAt: now \} : \{\}\)/.test(store),
     'Q die alte Pauschalsperre ist ersetzt; Umbuchen läuft in der Edit-Transaktion');
 }

@@ -364,12 +364,13 @@ export function InvoiceCreate() {
       if (aendernRechnung.remote && !fassung) {
         setError(fehlertext(nichtAmClient('editing this invoice (no revision loaded)'))); return;
       }
-      // INVOICE-EDIT S3 — Kundenwechsel an einer Rechnung MIT Zahlungen: die Zahlungen ziehen mit
-      // um. Das bestätigt der Mensch ausdrücklich; das Haus verlangt die Bestätigung ebenfalls.
-      // Eine neue Zahlung im selben Speichern lehnt das Haus ab (sie ginge an den alten Kunden).
+      // INVOICE-EDIT S3/S5 — Kundenwechsel = Korrektur einer falschen Zuordnung: Zahlungen, Retouren,
+      // Gutschriften und das Guthaben aus dieser Rechnung ziehen mit um. Das bestätigt der Mensch
+      // EINMAL ausdrücklich; das Haus verlangt die Bestätigung bei Geldfluss ebenfalls. Eine neue
+      // Zahlung im selben Speichern lehnt das Haus ab (sie ginge an den alten Kunden).
       const customerChanges = customerId !== editInvoice.customerId;
       let confirmCustomerChange = false;
-      if (customerChanges && originalPaid > 0.005) {
+      if (customerChanges) {
         if (deltaPayment) {
           setError('Change the customer and record the new payment in two steps: save the customer change first, then record the payment.');
           return;
@@ -379,9 +380,10 @@ export function InvoiceCreate() {
           return c ? `${c.firstName} ${c.lastName}`.trim() || c.company || id : id;
         };
         if (!window.confirm(
-          `This invoice already has payments of ${fmt(originalPaid)} BHD.\n\n`
-          + `Move the invoice and its payments from ${nameOf(editInvoice.customerId)} to ${nameOf(customerId)}? `
-          + 'The receivable and the payments leave the old customer; the invoice number stays.',
+          `Correct the customer of this invoice from ${nameOf(editInvoice.customerId)} to ${nameOf(customerId)}?\n\n`
+          + (originalPaid > 0.005 ? `Payments so far: ${fmt(originalPaid)} BHD.\n` : '')
+          + 'Everything booked on this invoice moves with it: receivable, payments, returns, credit notes, refunds '
+          + 'and store credit from this invoice. The invoice number and all documents stay.',
         )) return;
         confirmCustomerChange = true;
       }

@@ -11,7 +11,7 @@ import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, 
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
-import { planCustomerChange, moveInvoicePayments, moveLastPurchase, customerDisplayName } from '@/core/invoices/customer-change';
+import { planCustomerChange, moveInvoiceBookings, moveLastPurchase, customerDisplayName } from '@/core/invoices/customer-change';
 import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts } from '@/core/invoices/edit-lines';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
@@ -632,6 +632,18 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     assertEditKeepsReturns(id, baseLines, lines, lineMatch);
     const baseById = new Map(baseLines.map(b => [b.id, b]));
 
+    const deltaAmount = deltaPayment && deltaPayment.amount > 0.005 ? deltaPayment.amount : 0;
+
+    // ── INVOICE-EDIT S3/S5 — Korrektur eines falsch gewählten Kunden. Früher hart abgelehnt, weil nur
+    // die INVOICE-Quelle umgebucht wurde. Jetzt ziehen Zahlungen, Gutschriften/Erstattungen, Retouren
+    // und das Guthaben aus dieser Rechnung unten in derselben Transaktion mit (`moveInvoiceBookings`).
+    // Gesperrt bleibt, was fremdes Eigentum oder gemeldete VAT berührt (siehe customer-change.ts); mit
+    // Geldfluss nur nach ausdrücklicher Bestätigung; eine Delta-Zahlung im selben Speichern nie
+    // (recordPayment würde sie beim alten Kunden buchen). Vor den allgemeinen Guthaben-Sperren, damit
+    // ein Kundenwechsel seinen eigenen, genaueren Satz bekommt.
+    const customerPlan = planCustomerChange(id, inv0.customerId, customerId,
+      { confirmed: input.confirmCustomerChange === true, newPayment: deltaAmount > 0 });
+
     // ── Slice 3b — Re-Edit-Guard: wurde die Ueberzahlungs-Gutschrift eines FRUEHEREN Edits
     // (source_type='invoice_edit', source_id=id) bereits (teil-)eingeloest, darf nicht erneut
     // editiert werden — der Re-Edit loest sie via reverseSource+clawback auf (= zerstoertes
@@ -646,8 +658,6 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       assertOverpaymentCreditUnused(p.id);
     }
 
-    const deltaAmount = deltaPayment && deltaPayment.amount > 0.005 ? deltaPayment.amount : 0;
-
     // STOCK-LOT-INTEGRITY — Altzeilen ohne Los (vor dem Bestandsvertrag): wie viel der alte
     // Bezahl-Abzug genommen hat, ist nur als Merker bekannt, nicht als Zeilenmenge. Ein Neuschreiben
     // der Zeilen müsste es raten — deshalb fail-closed.
@@ -658,14 +668,6 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     if (query('SELECT 1 FROM agent_transfers WHERE invoice_id = ? LIMIT 1', [id]).length > 0) {
       throw new Error('This invoice was converted from agent sales. Undo the conversion to change it.');
     }
-
-    // ── INVOICE-EDIT S3 — Kundenwechsel, auch mit Zahlungen. Früher hart abgelehnt, weil nur die
-    // INVOICE-Quelle umgebucht wurde. Jetzt ziehen die Zahlungsbeine unten in derselben Transaktion
-    // mit (`moveInvoicePayments`). Gesperrt bleibt, was einem Kunden gehört (Guthaben, Retouren/
-    // Gutschriften, Auftrags-Anzahlung); mit Zahlungen nur nach ausdrücklicher Bestätigung; eine
-    // Delta-Zahlung im selben Speichern nie (recordPayment liest den Kunden aus dem alten Stand).
-    const customerPlan = planCustomerChange(id, inv0.customerId, customerId,
-      { confirmed: input.confirmCustomerChange === true, newPayment: deltaAmount > 0 });
 
     // ── Slice 3b: paid_amount IST per Invariante SUM(payments). Wird das Brutto unter den
     // bereits gezahlten Betrag reduziert (oder per Delta ueberzahlt), wird der Ueberschuss
@@ -724,9 +726,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         db.run(`UPDATE invoices SET ${hSets.join(', ')}, updated_at = ? WHERE id = ?`, hVals);
       }
       const effCustomerId = customerId !== undefined ? customerId : inv0.customerId;
-      // INVOICE-EDIT S3 — Zahlungen beim alten Kunden aus-, beim neuen einbuchen. Wie die Rechnung
+      // INVOICE-EDIT S3/S5 — Zahlungen, Gutschriften und Belege beim alten Kunden aus-, beim neuen einbuchen. Wie die Rechnung
       // unten auf das Korrekturdatum `now`: nichts wird zurückdatiert, Stichtage davor bleiben.
-      const movedPaymentIds = customerPlan ? moveInvoicePayments(customerPlan, now) : [];
+      const moved = customerPlan ? moveInvoiceBookings(customerPlan, now) : { payments: [], creditNotes: [] };
 
       // 3. Domain: alte Zeilen geben ihren Bestand zurueck, dann Lines loeschen.
       //    STOCK-LOT-INTEGRITY — mit Nachweis exakt dieser; Altzeile mit Los wie bisher ihr Los.
@@ -985,7 +987,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         customerId: effCustomerId, status: newStatus,
         netAmount, vatAmount: totalVat, grossAmount, paidAmount: newPaid, taxScheme,
         overpaymentCredit: overpay > 0.005 ? overpay : 0,
-        ...(customerPlan ? { customerChange: { from: customerPlan.from, to: customerPlan.to, paymentsMoved: movedPaymentIds } } : {}),
+        ...(customerPlan ? { customerChange: {
+          from: customerPlan.from, to: customerPlan.to, paymentsMoved: moved.payments, creditNotesMoved: moved.creditNotes,
+          returns: customerPlan.returnIds, credits: customerPlan.creditIds, offers: customerPlan.offerIds,
+        } } : {}),
         issuedAt: issuedAt ?? inv0.issuedAt, notes: notes ?? inv0.notes ?? null,
         lines: resolvedLines.map(l => ({
           id: l._id, productId: l.productId, qty: Math.max(1, l.quantity || 1), unitPrice: l.unitPrice,
@@ -1054,7 +1059,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           module: 'Sales', entityType: 'invoices', entityId: id, action: 'UPDATE',
           field: `customer (rev ${revision})`,
           oldValue: customerDisplayName(customerPlan.from),
-          newValue: `${customerDisplayName(customerPlan.to)} · ${movedPaymentIds.length} payment(s) moved`,
+          newValue: `${customerDisplayName(customerPlan.to)} · ${moved.payments.length} payment(s), `
+            + `${customerPlan.creditNoteIds.length} credit note(s), ${customerPlan.returnIds.length} return(s), `
+            + `${customerPlan.creditIds.length} credit(s) moved`,
         });
       }
 

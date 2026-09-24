@@ -244,7 +244,7 @@ const lotRem = (db: Db, lot: string): number => n(db, 'SELECT qty_remaining FROM
   const vor = zustand(db);
   const m = meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(inv, { lines: zeilen() as never, customerId: 'cust-2', reason: 'test' })));
   // INVOICE-EDIT S3 — mit Zahlungen nicht mehr pauschal gesperrt, aber nie ohne ausdrückliche Bestätigung.
-  ok(/^This invoice has payments\. Confirm that the invoice and its payments move/.test(m), `1 bezahlte Rechnung: Kundenwechsel ohne Bestätigung abgelehnt (${m})`);
+  ok(/^This invoice has payments, returns or credit\. Confirm that the invoice and everything booked on it move/.test(m), `1 bezahlte Rechnung: Kundenwechsel ohne Bestätigung abgelehnt (${m})`);
   ok(zustand(db) === vor, '1 …Rechnung, Zahlungen, Hauptbuch unverändert');
   ok(s(db, 'SELECT customer_id FROM invoices WHERE id = ?', [inv]) === 'cust-1', '1 …Kunde bleibt cust-1');
 
