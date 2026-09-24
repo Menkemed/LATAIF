@@ -728,7 +728,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       const effCustomerId = customerId !== undefined ? customerId : inv0.customerId;
       // INVOICE-EDIT S3/S5 — Zahlungen, Gutschriften und Belege beim alten Kunden aus-, beim neuen einbuchen. Wie die Rechnung
       // unten auf das Korrekturdatum `now`: nichts wird zurückdatiert, Stichtage davor bleiben.
-      const moved = customerPlan ? moveInvoiceBookings(customerPlan, now) : { payments: [], creditNotes: [] };
+      const moved = customerPlan ? moveInvoiceBookings(customerPlan, now) : null;
 
       // 3. Domain: alte Zeilen geben ihren Bestand zurueck, dann Lines loeschen.
       //    STOCK-LOT-INTEGRITY — mit Nachweis exakt dieser; Altzeile mit Los wie bisher ihr Los.
@@ -987,9 +987,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         customerId: effCustomerId, status: newStatus,
         netAmount, vatAmount: totalVat, grossAmount, paidAmount: newPaid, taxScheme,
         overpaymentCredit: overpay > 0.005 ? overpay : 0,
-        ...(customerPlan ? { customerChange: {
+        ...(customerPlan && moved ? { customerChange: {
           from: customerPlan.from, to: customerPlan.to, paymentsMoved: moved.payments, creditNotesMoved: moved.creditNotes,
           returns: customerPlan.returnIds, credits: customerPlan.creditIds, offers: customerPlan.offerIds,
+          // Zahler und Empfänger, wie sie vor der Korrektur gebucht waren.
+          recorded: moved.recorded,
         } } : {}),
         issuedAt: issuedAt ?? inv0.issuedAt, notes: notes ?? inv0.notes ?? null,
         lines: resolvedLines.map(l => ({
@@ -1054,7 +1056,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         oldValue: `${inv0.grossAmount.toFixed(3)} BHD · ${inv0.status} · ${reasonTrim}`,
         newValue: `${grossAmount.toFixed(3)} BHD · ${newStatus}`,
       });
-      if (customerPlan) {
+      if (customerPlan && moved) {
         logAudit({
           module: 'Sales', entityType: 'invoices', entityId: id, action: 'UPDATE',
           field: `customer (rev ${revision})`,

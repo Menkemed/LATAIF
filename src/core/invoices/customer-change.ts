@@ -30,6 +30,7 @@ import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { trackChange } from '@/core/sync/sync-service';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { postCreditNote, postInvoicePayment, reverseSource } from '@/core/ledger/posting';
 import type { CreditNote, PaymentMethod } from '@/core/models/types';
 
@@ -181,8 +182,12 @@ export function planCustomerChange(
       'The customer cannot be changed here: this invoice belongs to a repair with its own customer bookings. Correct the repair first.');
   }
 
-  // Gemeldete VAT: ein bezahltes (= gemeldetes) Quartal, in dem diese Rechnung oder eine ihrer
-  // Gutschriften steht. Der NBR-Export zeigt dort den Käufer — ein anderer Käufer braucht einen Beleg.
+  // Gemeldete VAT: ein bezahltes Quartal, in dem diese Rechnung oder eine ihrer Gutschriften steht.
+  // Der NBR-Export zeigt dort den Käufer — ein anderer Käufer braucht einen Beleg.
+  // BEKANNTE LÜCKE (nicht erledigt): erkannt wird nur ein Quartal, dessen VAT schon BEZAHLT ist
+  // (`tax_payments`). Eine eingereichte, aber noch unbezahlte Periode (und eine Erstattungsperiode)
+  // ist hier NICHT geschützt — das Haus kennt „eingereicht" noch nicht. Das leistet erst das eigene
+  // VAT-Perioden-Paket („VAT gemeldet bis"); es bleibt Release-Blocker.
   const filed = new Set(query('SELECT DISTINCT year, quarter FROM tax_payments WHERE branch_id = ?', [inv.branch_id])
     .map((r) => `${Number(r.year)}-Q${Number(r.quarter)}`));
   if (filed.size > 0) {
@@ -276,8 +281,12 @@ export function planCustomerChange(
  * Rechnung umbucht), dann den Kunden der Belege korrigieren. Nur innerhalb der offenen Transaktion
  * von `editInvoice` aufrufen; jede Abweichung wirft und rollt alles zurück.
  */
-export function moveInvoiceBookings(plan: CustomerChangePlan, at: string): { payments: string[]; creditNotes: string[] } {
-  const moved = { payments: [] as string[], creditNotes: [] as string[] };
+export function moveInvoiceBookings(plan: CustomerChangePlan, at: string): { payments: string[]; creditNotes: string[]; recorded: CorrectionTrail } {
+  // Wer hat laut Beleg bezahlt / Geld erhalten? VOR dem Umbuchen festhalten — die Belege selbst
+  // bleiben unverändert, aber ihr Kunde ist danach der richtige. Die Spur steht in der Revision und
+  // im Verlauf JEDES Belegs, damit nie unklar ist, wem eine Auszahlung damals zugeordnet war.
+  const recorded = recordTrail(plan);
+  const moved = { payments: [] as string[], creditNotes: [] as string[], recorded };
   for (const p of plan.payments) {
     if (!p.booked) continue;
     reverseSource('PAYMENT', p.id, at);
@@ -311,7 +320,58 @@ export function moveInvoiceBookings(plan: CustomerChangePlan, at: string): { pay
   relink('sales_returns', plan.returnIds);
   relink('customer_credits', plan.creditIds);
   relink('offers', plan.offerIds);
+  writeTrailToHistory(plan, recorded);
   return moved;
+}
+
+/** Die Geldflüsse, wie sie VOR der Korrektur gebucht waren: Zahler und Empfänger laut Beleg. */
+export interface CorrectionTrail {
+  payments: Array<{ id: string; amount: number; method: string; receivedAt: string; recordedPayer: string }>;
+  refunds: Array<{ returnId: string; returnNumber: string; paid: number; method: string; date: string; recordedRecipient: string }>;
+  creditNotes: Array<{ id: string; number: string; cashRefund: number; refundMethod: string; recordedRecipient: string }>;
+}
+
+function recordTrail(plan: CustomerChangePlan): CorrectionTrail {
+  const inList = (list: string[]): string => list.map(() => '?').join(',') || 'NULL';
+  return {
+    payments: plan.payments.map((p) => ({
+      id: p.id, amount: p.amount, method: p.method, receivedAt: p.receivedAt, recordedPayer: plan.from,
+    })),
+    refunds: query(
+      `SELECT id, return_number, refund_paid_amount, refund_method, refund_paid_date, customer_id FROM sales_returns
+        WHERE id IN (${inList(plan.returnIds)}) AND COALESCE(refund_paid_amount, 0) > 0`, plan.returnIds,
+    ).map((r) => ({
+      returnId: String(r.id), returnNumber: String(r.return_number ?? ''), paid: Number(r.refund_paid_amount) || 0,
+      method: String(r.refund_method ?? ''), date: String(r.refund_paid_date ?? ''), recordedRecipient: String(r.customer_id),
+    })),
+    creditNotes: query(
+      `SELECT id, credit_note_number, cash_refund_amount, refund_method, customer_id FROM credit_notes
+        WHERE id IN (${inList(plan.creditNoteIds)})`, plan.creditNoteIds,
+    ).map((r) => ({
+      id: String(r.id), number: String(r.credit_note_number), cashRefund: Number(r.cash_refund_amount) || 0,
+      refundMethod: String(r.refund_method ?? ''), recordedRecipient: String(r.customer_id),
+    })),
+  };
+}
+
+/** Je Beleg ein Verlaufseintrag: alter Kunde samt der damals gebuchten Zahlung/Auszahlung → neuer Kunde. */
+function writeTrailToHistory(plan: CustomerChangePlan, t: CorrectionTrail): void {
+  const from = customerName(plan.from); const to = customerName(plan.to);
+  const entry = (entityType: string, entityId: string, oldValue: string): void => logAuditOrThrow({
+    module: 'Sales', entityType, entityId, action: 'UPDATE', field: 'customer (correction)', oldValue, newValue: to,
+  });
+  for (const p of t.payments) {
+    entry('payments', p.id, `${from} — recorded payer of ${p.amount.toFixed(3)} BHD ${p.method} on ${p.receivedAt.slice(0, 10)}`);
+  }
+  for (const r of t.refunds) {
+    entry('sales_returns', r.returnId, `${customerName(r.recordedRecipient)} — recorded recipient of refund ${r.paid.toFixed(3)} BHD ${r.method} on ${r.date.slice(0, 10)}`);
+  }
+  for (const c of t.creditNotes) {
+    entry('credit_notes', c.id, c.cashRefund > 0.0005
+      ? `${customerName(c.recordedRecipient)} — recorded recipient of ${c.cashRefund.toFixed(3)} BHD (${c.refundMethod})`
+      : customerName(c.recordedRecipient));
+  }
+  for (const id of plan.creditIds) entry('customer_credits', id, from);
 }
 
 /**

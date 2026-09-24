@@ -303,8 +303,11 @@ function welt(): { db: Db; inv: string; z: string; eigen: string; rCash: string;
   zahle(eigen, 1200, 'cash');
   const rCash = retoure(inv, z, 'cash');
   const rCredit = retoure(inv, z, 'credit');
+  // Die Bar-Erstattung wurde damals tatsächlich ausgezahlt.
+  imHaus(() => useSalesReturnStore.getState().recordRefundPayment(rCash, 1100, 'cash'));
+  reload();
   // Alles Bisherige liegt Monate zurück.
-  for (const [t, c] of [['ledger_entries', 'occurred_at'], ['payments', 'received_at'], ['credit_notes', 'issued_at'], ['sales_returns', 'return_date']]) {
+  for (const [t, c] of [['ledger_entries', 'occurred_at'], ['payments', 'received_at'], ['credit_notes', 'issued_at'], ['sales_returns', 'return_date'], ['sales_returns', 'refund_paid_date']]) {
     db.run(`UPDATE ${t} SET ${c} = ? WHERE ${c} >= '2026-09-01'`, [HIST]);
   }
   reload();
@@ -381,6 +384,21 @@ const W = welt();
     && cc.returns.length === 2 && cc.credits.length === 2
     && /2 payment\(s\), 2 credit note\(s\), 2 return\(s\), 2 credit\(s\) moved/.test(s(db, "SELECT new_value FROM audit_log WHERE entity_id = ? AND field_name LIKE 'customer (rev %'", [inv])),
     '2 …Spur: Revision und Verlauf nennen alten/neuen Kunden und jeden umgebuchten Beleg');
+  // Wer hat damals bezahlt / die Erstattung erhalten? Bleibt nachvollziehbar — in der Revision und
+  // im Verlauf JEDES Belegs; die Nachweise selbst (Zahlung, Auszahlung, REFUND-Protokoll) bleiben.
+  const rec = cc.recorded as { payments: Array<{ recordedPayer: string }>; refunds: Array<{ returnId: string; paid: number; method: string; recordedRecipient: string }> };
+  ok(rec.payments.length === 2 && rec.payments.every((p) => p.recordedPayer === 'cust-1')
+    && rec.refunds.length === 1 && rec.refunds[0].returnId === W.rCash && rec.refunds[0].paid === 1100
+    && rec.refunds[0].method === 'cash' && rec.refunds[0].recordedRecipient === 'cust-1',
+    `2 …Revision hält Zahler (2 Zahlungen) und Empfänger der bar ausgezahlten Erstattung (Ali, 1100) fest`);
+  const verlauf = (id: string): string => s(db, "SELECT old_value || ' → ' || new_value FROM audit_log WHERE entity_id = ? AND field_name = 'customer (correction)'", [id]);
+  ok(/^Ali Hassan — recorded recipient of refund 1100\.000 BHD cash on 2026-06-15 → Nora Hassan$/.test(verlauf(W.rCash))
+    && n(db, "SELECT COUNT(*) FROM audit_log WHERE entity_type = 'payments' AND field_name = 'customer (correction)' AND old_value LIKE 'Ali Hassan — recorded payer of %'") === 2
+    && n(db, "SELECT COUNT(*) FROM audit_log WHERE entity_type = 'credit_notes' AND field_name = 'customer (correction)'") === 2
+    && n(db, "SELECT COUNT(*) FROM audit_log WHERE entity_type = 'customer_credits' AND field_name = 'customer (correction)'") === 2,
+    `2 …Verlauf je Beleg: „${verlauf(W.rCash)}"; ebenso beide Zahlungen, Gutschriften, Guthaben`);
+  ok(n(db, "SELECT COUNT(*) FROM audit_log WHERE entity_id = ? AND action_type = 'REFUND'", [W.rCash]) === 1,
+    '2 …das ursprüngliche Auszahlungs-Protokoll (REFUND) steht unverändert');
   ok(n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module IN ('PAYMENT','CREDIT_NOTE') AND counterparty_id = 'cust-1' AND occurred_at = ? AND reverses_entry_id IS NULL", [HIST]) > 0,
     '2 …die ursprünglichen Buchungen beim alten Kunden stehen weiter (mit Storno am Korrekturtag)');
   // Danach wirkt alles bei Nora: ihr Guthaben ist einlösbar.
@@ -412,6 +430,8 @@ const W = welt();
   const m = korrigiere(inv, z, { confirm: true, qty: 9 });
   ok(m.startsWith(EDIT_KEPT_LINE_LOT_SHORT + '|') && zustand(db) === vor && belege(db, inv) === vorBelege && kundenkontenOk(db) === '',
     `4 Fehler nach dem Umbuchen: voller Rollback (Kunde, Zahlungen, Gutschriften, Guthaben, Buchungen) (${m.slice(0, 40)})`);
+  ok(n(db, "SELECT COUNT(*) FROM audit_log WHERE field_name = 'customer (correction)'") === 0,
+    '4 …auch keine Verlaufseinträge einer nicht erfolgten Korrektur');
 }
 
 // 5) Gemeldete VAT: das Quartal der Rechnung ist bezahlt → Korrekturbeleg nötig, nichts geändert.
