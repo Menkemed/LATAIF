@@ -48,6 +48,7 @@ import {
 } from '@/core/invoices/edit-lines';
 import { LEGACY_STOCK_LINES } from '@/core/lots/stock-contract';
 import { CUSTOMER_CHANGE_VERDICTS } from '@/core/invoices/customer-change';
+import { VAT_PERIOD_FILED } from '@/core/tax/vat-period-lock';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
@@ -133,6 +134,8 @@ const EDIT_CODE_VERDICTS: ReadonlySet<string> = new Set([
   LEGACY_STOCK_LINES,
   // INVOICE-EDIT S3 — Kundenwechsel: Bestätigung fehlt, Guthaben/Retoure/Auftrag, unbekannter Kunde.
   ...CUSTOMER_CHANGE_VERDICTS,
+  // VAT-PERIOD-LOCK — die Änderung träfe ein eingereichtes (oder bezahltes) VAT-Quartal.
+  VAT_PERIOD_FILED,
 ]);
 
 function asEditVerdict(err: unknown): CommandRejected | null {

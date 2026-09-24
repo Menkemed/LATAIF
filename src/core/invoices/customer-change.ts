@@ -21,8 +21,8 @@
 //   • eine Rate, bezahlt mit UNABHÄNGIGEM Guthaben des alten Kunden (dessen Guthaben bleibt seins),
 //   • eine Rechnung aus einem Auftrag oder einer Reparatur mit Geldfluss (die haben eigene Kunden-
 //     buchungen),
-//   • eine Rechnung oder Gutschrift in einem Quartal, für das die VAT schon bezahlt (also gemeldet)
-//     ist — dort stünde im NBR-Export ein anderer Käufer; das braucht einen Korrekturbeleg.
+//   • eine Rechnung oder Gutschrift in einem Quartal, das als VAT eingereicht markiert oder schon
+//     bezahlt ist — dort stünde im NBR-Export ein anderer Käufer; das braucht einen Korrekturbeleg.
 // Mit Geldfluss braucht die Korrektur eine ausdrückliche Bestätigung; eine neue Zahlung im selben
 // Speichern ist nicht erlaubt (sie würde beim alten Kunden gebucht).
 // ════════════════════════════════════════════════════════════════════════════
@@ -31,6 +31,7 @@ import { query } from '@/core/db/helpers';
 import { trackChange } from '@/core/sync/sync-service';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
+import { closedVatQuarters, nbrQuarterOfDate } from '@/core/tax/vat-period-lock';
 import { postCreditNote, postInvoicePayment, reverseSource } from '@/core/ledger/posting';
 import type { CreditNote, PaymentMethod } from '@/core/models/types';
 
@@ -114,10 +115,6 @@ function customerName(id: string): string {
 }
 
 const ids = (rows: Array<Record<string, unknown>>): string[] => rows.map((r) => String(r.id));
-const quarterOf = (iso: string): string => {
-  const y = Number(iso.slice(0, 4)); const m = Number(iso.slice(5, 7));
-  return y > 0 && m > 0 ? `${y}-Q${Math.ceil(m / 3)}` : '';
-};
 const unclear = (): InvoiceActionRejected => new InvoiceActionRejected(CUSTOMER_CHANGE_PAYMENT_UNCLEAR,
   'The customer cannot be changed automatically: a booking of this invoice is not in its usual form. Check its payments and credit notes first.');
 
@@ -182,26 +179,24 @@ export function planCustomerChange(
       'The customer cannot be changed here: this invoice belongs to a repair with its own customer bookings. Correct the repair first.');
   }
 
-  // Gemeldete VAT: ein bezahltes Quartal, in dem diese Rechnung oder eine ihrer Gutschriften steht.
-  // Der NBR-Export zeigt dort den Käufer — ein anderer Käufer braucht einen Beleg.
-  // BEKANNTE LÜCKE (nicht erledigt): erkannt wird nur ein Quartal, dessen VAT schon BEZAHLT ist
-  // (`tax_payments`). Eine eingereichte, aber noch unbezahlte Periode (und eine Erstattungsperiode)
-  // ist hier NICHT geschützt — das Haus kennt „eingereicht" noch nicht. Das leistet erst das eigene
-  // VAT-Perioden-Paket („VAT gemeldet bis"); es bleibt Release-Blocker.
-  const filed = new Set(query('SELECT DISTINCT year, quarter FROM tax_payments WHERE branch_id = ?', [inv.branch_id])
-    .map((r) => `${Number(r.year)}-Q${Number(r.quarter)}`));
-  if (filed.size > 0) {
+  // Gemeldete VAT: ein zugemachtes Quartal (eingereicht ODER bezahlt, `closedVatQuarters`), in dem
+  // diese Rechnung oder eine ihrer Gutschriften steht. Der NBR-Export zeigt dort den Käufer — ein
+  // anderer Käufer braucht einen Korrekturbeleg. Monat/Quartal nach derselben Regel wie der Export.
+  // (Der allgemeine Periodenschutz in `editInvoice` fängt es ebenfalls; hier kommt der genauere Satz.)
+  const closed = closedVatQuarters(String(inv.branch_id));
+  if (closed.size > 0) {
     const status = String(inv.status);
     const lastPay = payRows.reduce((m, r) => (String(r.received_at) > m ? String(r.received_at) : m), '');
     const invDate = lastPay || String(inv.issued_at ?? inv.created_at ?? '');
     const quarters = [
-      ...(status === 'FINAL' || status === 'RETURNED' ? [quarterOf(invDate)] : []),
-      ...activeCn.map((r) => quarterOf(String(r.issued_at ?? ''))),
-    ].filter((q) => filed.has(q));
+      ...(status === 'FINAL' || status === 'RETURNED' ? [nbrQuarterOfDate(invDate)?.key ?? ''] : []),
+      ...activeCn.map((r) => nbrQuarterOfDate(String(r.issued_at ?? ''))?.key ?? ''),
+    ].filter((q) => closed.has(q));
     if (quarters.length > 0) {
+      const state = [...new Set(quarters)].map((q) => `${q} (${closed.get(q)!.filedAt ? 'filed' : 'paid'})`).join(', ');
       throw new InvoiceActionRejected(CUSTOMER_CHANGE_VAT_FILED,
-        `The customer cannot be changed: the VAT for ${[...new Set(quarters)].join(', ')} is already paid, and this invoice `
-        + 'is part of it. A different buyer on a filed return needs a tax correction document — handle it separately.');
+        `The customer cannot be changed: the VAT return for ${state} already contains this invoice. `
+        + 'A different buyer on a filed return needs a tax correction document — handle it separately.');
     }
   }
 

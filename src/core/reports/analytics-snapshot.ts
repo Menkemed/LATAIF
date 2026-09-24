@@ -686,7 +686,7 @@ export function financeFor(ctx: BusinessReadContext) {
     // vat = Output-VAT (aus Sales), inputVat = Vorsteuer (aus Purchases),
     // netVat = max(0, vat − inputVat) = was effektiv an NBR gezahlt werden muss,
     // refund = max(0, inputVat − vat) = was die NBR uns erstatten muss.
-    type QuarterRow = { year: number; quarter: number; vat: number; inputVat: number; netVat: number; refund: number; paid: number };
+    type QuarterRow = { year: number; quarter: number; vat: number; inputVat: number; netVat: number; refund: number; paid: number; filedAt: string | null };
     const fyStartRow = qry(
       `SELECT value FROM settings WHERE branch_id = ? AND key = 'finance.fiscal_year_start_month'`,
       [branchId]
@@ -750,9 +750,15 @@ export function financeFor(ctx: BusinessReadContext) {
     }
     // Gemeinsame Key-Menge — auch Quartale, in denen es nur Purchases ohne Sales gab
     // (z.B. erstes Lager-Aufbau), sollen sichtbar sein.
+    // VAT-PERIOD-LOCK — als eingereicht markierte Quartale (mit Zeitpunkt), auch ohne eigene Zeile oben.
+    const filedAtByKey: Record<string, string> = {};
+    for (const f of qry('SELECT year, quarter, filed_at FROM vat_filings WHERE branch_id = ?', [branchId])) {
+      filedAtByKey[`${f.year}-Q${f.quarter}`] = String(f.filed_at);
+    }
     const allQuarterKeys = new Set<string>([
       ...Object.keys(quarterlyVatOwed),
       ...Object.keys(quarterlyInputVat),
+      ...Object.keys(filedAtByKey),
     ]);
     const quarterly: QuarterRow[] = Array.from(allQuarterKeys)
       .sort((a, b) => b.localeCompare(a))
@@ -769,6 +775,7 @@ export function financeFor(ctx: BusinessReadContext) {
           netVat: Math.max(0, balance),
           refund: Math.max(0, -balance),
           paid: quarterlyVatPaid[k] || 0,
+          filedAt: filedAtByKey[k] ?? null,
         };
       });
 

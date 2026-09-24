@@ -2350,6 +2350,24 @@ function runMigrations(database: Database): void {
     // Gesetzt, sobald die Rechnung ihre Endnummer (INV/SINV/RINV/SRINV) bekommen hat. Danach
     // bleiben Nummer und Sonder-Kennzeichen, auch wenn der Status zurückfällt. NULL = vorläufig.
     `ALTER TABLE invoices ADD COLUMN number_finalized_at TEXT`,
+
+    // ── VAT-PERIOD-LOCK — ein Quartal ausdrücklich als „VAT eingereicht" markieren ────────────
+    // Eine Zeile je Filiale und Quartal (Kalenderquartal der NBR-Monate). `snapshot_json` hält die
+    // zum Einreichungszeitpunkt gemeldeten Daten (je Rechnung: Monat, Nummer, Kunde, Zeilenbeträge).
+    // Wie `tax_payments` nicht im Abgleichsvertrag: der Primary ist die Quelle, PC2 liest dort.
+    `CREATE TABLE IF NOT EXISTS vat_filings (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      year INTEGER NOT NULL,
+      quarter INTEGER NOT NULL,
+      filed_at TEXT NOT NULL,
+      filed_by TEXT,
+      note TEXT,
+      invoice_count INTEGER NOT NULL DEFAULT 0,
+      snapshot_json TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      UNIQUE (branch_id, year, quarter)
+    )`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

@@ -19,6 +19,8 @@ import { num, safeDiv } from '@/core/reports/analytics-snapshot';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { saveTaxPayment } from '@/core/finance/money-save';
 import { vatQuarterState } from '@/core/finance/money-house';
+import { saveVatFiling } from '@/core/tax/vat-filing-save';
+import { usePermission } from '@/hooks/usePermission';
 import { exportCsv } from '@/core/utils/export-file';
 
 // ── Helpers ──
@@ -181,6 +183,23 @@ export function AnalyticsPage() {
       setTaxPayFehler('');
     }
   }, [taxPayQuarter]);
+
+  // VAT-PERIOD-LOCK — ein Quartal ausdrücklich als eingereicht markieren (nur am Primary). Ein Export
+  // allein gilt nicht als eingereicht.
+  const [vatFileFehler, setVatFileFehler] = useState('');
+  const { can } = usePermission();
+  async function markVatFiled(year: number, quarter: number) {
+    setVatFileFehler('');
+    if (!window.confirm(
+      `Mark ${year} Q${quarter} as VAT filed?\n\n`
+      + 'The invoices reported for this quarter are recorded now, with the time and your name. '
+      + 'After this, changes that would alter what was filed (customer, amounts, dates, payments) are blocked; '
+      + 'notes stay editable. Only do this after the return was actually submitted — an export alone is not a filing.',
+    )) return;
+    const r = await saveVatFiling(year, quarter, () => setRefreshTick(t => t + 1));
+    if (r.kind !== 'ok') { setVatFileFehler(`Could not mark ${year} Q${quarter} as filed: ${fehlertext(r)}`); return; }
+    setRefreshTick(t => t + 1);
+  }
 
   async function confirmTaxPayment() {
     if (!taxPayQuarter) return;
@@ -734,6 +753,9 @@ export function AnalyticsPage() {
               <h2 className="font-display" style={{ fontSize: 20, color: '#0F0F10', marginBottom: 16 }}>Quarterly VAT</h2>
               <Card>
                 <SectionLabel>VAT PER QUARTER — FROM NON-BUTTERFLY INVOICES</SectionLabel>
+                {vatFileFehler && (
+                  <p style={{ padding: '8px 0', fontSize: 12, color: '#DC2626' }}>{vatFileFehler}</p>
+                )}
                 {finance.quarterly.length === 0 && (
                   <p style={{ padding: 24, textAlign: 'center', fontSize: 13, color: '#6B7280' }}>No VAT-relevant invoices yet.</p>
                 )}
@@ -755,6 +777,21 @@ export function AnalyticsPage() {
                           <span style={{ fontSize: 10, color: '#3D7FFF', padding: '2px 8px', borderRadius: 999, background: 'rgba(61,127,255,0.10)', border: '1px solid rgba(61,127,255,0.3)' }}>
                             Refund Due
                           </span>
+                        )}
+                        {/* VAT-PERIOD-LOCK — eingereicht: Zeitpunkt; sonst der Knopf (nur mit dem VAT-Recht). */}
+                        {q.filedAt ? (
+                          <span data-vat-filed={`${q.year}-Q${q.quarter}`}
+                            title="Changes that would alter the filed data are blocked for this quarter."
+                            style={{ fontSize: 10, color: '#4B5563', padding: '2px 8px', borderRadius: 999, background: 'rgba(15,15,16,0.06)', border: '1px solid #D5D9DE' }}>
+                            VAT filed {q.filedAt.slice(0, 10)}
+                          </span>
+                        ) : can('tax.record_payment') && (
+                          <button data-vat-file-open={`${q.year}-Q${q.quarter}`}
+                            onClick={() => { void markVatFiled(q.year, q.quarter); }}
+                            className="cursor-pointer"
+                            title="Mark this quarter as submitted to the NBR. An export alone is not a filing."
+                            style={{ padding: '2px 10px', fontSize: 10, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 999, color: '#4B5563' }}
+                          >Mark VAT filed</button>
                         )}
                       </div>
                       <div className="flex items-center gap-6">

@@ -26,6 +26,7 @@ import { query } from '@/core/db/helpers';
 import { watchLedgerPosts } from '@/core/ledger/posting';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { InvoiceActionRejected, invoiceCancelBlocker } from './invoice-cancel';
+import { assertInvoiceNotInClosedVatQuarter } from '@/core/tax/vat-period-lock';
 
 /** Ein Nein mit Code und Worten — der Aufrufer nennt, was SEINE Maske dazu sagt. */
 export interface ReversalVerdict { code: string; message: string }
@@ -77,6 +78,8 @@ export function reverseInvoiceInHouse(invoiceId: string, branchId: string, opts:
   if (previousStatus === 'CANCELLED') {
     throw new InvoiceActionRejected('INVOICE_CANCELLED', 'this invoice is already cancelled');
   }
+  // VAT-PERIOD-LOCK — eine gemeldete Rechnung wird nicht aus einem eingereichten Quartal storniert.
+  assertInvoiceNotInClosedVatQuarter(invoiceId);
   if (opts.requireUnpaid && Number(inv.paid_amount ?? 0) > 0.005) {
     throw new InvoiceActionRejected(opts.requireUnpaid.code, opts.requireUnpaid.message);
   }

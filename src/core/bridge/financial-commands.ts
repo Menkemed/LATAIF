@@ -61,6 +61,7 @@ import {
 } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
+import { VAT_PERIOD_FILED, VatPeriodFiled } from '@/core/tax/vat-period-lock';
 
 export const OP_INVOICES_APPLY_CREDIT = 'invoices.apply_credit';
 export const OP_INVOICES_UPDATE_PAYMENT = 'invoices.update_payment';
@@ -314,12 +315,18 @@ export function runUpdatePayment(deps: EngineDeps, identity: CommandIdentity, ra
     useInvoiceStore.getState().loadInvoices();
     // Der Weg des Hauses: alte Buchung zurücknehmen, Kartengebühr netten, neu buchen, Stand und
     // Status neu ableiten. Nichts davon wird hier gerechnet.
-    useInvoiceStore.getState().updatePayment(req.paymentId, req.invoiceId, {
-      amount: req.amount,
-      method: req.method,
-      notes: req.notes,
-      receivedAt: req.receivedAt,
-    });
+    try {
+      useInvoiceStore.getState().updatePayment(req.paymentId, req.invoiceId, {
+        amount: req.amount,
+        method: req.method,
+        notes: req.notes,
+        receivedAt: req.receivedAt,
+      });
+    } catch (err) {
+      // VAT-PERIOD-LOCK — ein eingereichtes/bezahltes Quartal ist ein endgültiges fachliches Nein.
+      if (err instanceof VatPeriodFiled) throw new CommandRejected(VAT_PERIOD_FILED, err.message);
+      throw err;
+    }
     return { ...invoiceState(req.invoiceId), paymentId: req.paymentId } as unknown as Record<string, unknown>;
   });
 }
@@ -355,6 +362,8 @@ const DELETE_VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
 
 function asDeleteVerdict(err: unknown): CommandRejected | null {
   const msg = err instanceof Error ? err.message : String(err);
+  // VAT-PERIOD-LOCK — das Nein trägt seine Kennung selbst (eingereichtes/bezahltes Quartal).
+  if (err instanceof VatPeriodFiled) return new CommandRejected(VAT_PERIOD_FILED, msg);
   for (const [pattern, code] of DELETE_VERDICTS) {
     if (pattern.test(msg)) return new CommandRejected(code, msg);
   }

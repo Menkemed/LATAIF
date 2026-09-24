@@ -11,6 +11,7 @@ import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, 
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
+import { assertInvoiceNotInClosedVatQuarter, assertNotFinalizingIntoClosedVatQuarter, assertVatUnchanged, vatFingerprint } from '@/core/tax/vat-period-lock';
 import { planCustomerChange, moveInvoiceBookings, moveLastPurchase, customerDisplayName } from '@/core/invoices/customer-change';
 import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts } from '@/core/invoices/edit-lines';
 import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
@@ -443,6 +444,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const prevStatusBeforeUpdate = data.status === 'FINAL'
       ? ((query('SELECT status FROM invoices WHERE id = ?', [id])[0]?.status as string) || null)
       : null;
+    // VAT-PERIOD-LOCK — Rückfallnetz für diesen alten Direktweg: an einer gemeldeten Rechnung sind nur
+    // Felder ohne Exportwirkung frei (Notiz, Fälligkeit, Mitarbeiter, Butterfly).
+    if (Object.keys(data).some(k => !['notes', 'dueAt', 'staffId', 'butterfly'].includes(k))) {
+      assertInvoiceNotInClosedVatQuarter(id);
+    }
     const fields: string[] = [];
     const values: unknown[] = [];
 
@@ -700,6 +706,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Auftrag/Reparatur abgeschlossen, letzter Kauf). Löst ihn die Delta-Zahlung schon aus, nicht zweimal.
     const paidEventsBefore = paidEventCount(id);
     let finalStatus: InvoiceStatus = inv0.status;
+    // VAT-PERIOD-LOCK — was der NBR-Export von dieser Rechnung zeigt, VOR dem Edit; verglichen wird
+    // unten vor dem Commit (eingereichtes Quartal → nur Änderungen ohne Exportwirkung, z. B. Notiz).
+    const vatBefore = vatFingerprint(id);
     beginLedgerTransaction();
     try {
       // 1. (Regel 1) Bestehende INVOICE-Buchung reversen (AR/REVENUE/VAT/COGS/INVENTORY).
@@ -1067,6 +1076,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         });
       }
 
+      // VAT-PERIOD-LOCK — ändert der Edit, was ein eingereichtes (oder bezahltes) Quartal zeigt
+      // (Kunde, Beträge, Datum, Zahlungen, Monat), wirft das hier → voller Rollback.
+      assertVatUnchanged(String(query('SELECT branch_id FROM invoices WHERE id = ?', [id])[0]?.branch_id ?? ''),
+        vatBefore, vatFingerprint(id));
+
       commitLedgerTransaction();
     } catch (e) {
       // Punkt 2 / Regel 5: vollstaendiger Rollback. Stores danach auf den
@@ -1110,6 +1124,15 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // negativem AR / tip. overpayExcess via SSOT-Helper, damit die Domain-Row exakt dem
     // Ledger-Bein entspricht (Rounding). method='credit' (Guthaben-Einloesung) splittet nie.
     const inv0 = freshInvoice(invoiceId);
+    // VAT-PERIOD-LOCK — VOR jedem Schreiben: eine weitere Zahlung auf eine gemeldete FINAL-Rechnung
+    // verschöbe ihren Exportmonat (Tag der Vollzahlung) und die Zahlungsnotiz; eine Zahlung, die eine
+    // Rechnung HEUTE voll bezahlt, fügte sie einem heute schon zugemachten Quartal hinzu.
+    if (inv0) {
+      if (inv0.status === 'FINAL') assertInvoiceNotInClosedVatQuarter(invoiceId);
+      else if (inv0.paidAmount + amount >= inv0.grossAmount - 0.005) {
+        assertNotFinalizingIntoClosedVatQuarter(String(query('SELECT branch_id FROM invoices WHERE id = ?', [invoiceId])[0]?.branch_id ?? ''), now);
+      }
+    }
     // Slice 3b — suppressOverpayCredit (editInvoice-Delta): kein 3a-Split, voller Betrag auf
     // AR; der Gesamt-Ueberschuss wird in editInvoice Step 8b zentral umgebucht. openRemainder
     // = undefined → computePaymentSplit liefert arCredit=Betrag/creditCredit=0, und
@@ -1359,6 +1382,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   deleteInvoice: (id) => {
     const db = getDatabase();
     const now = new Date().toISOString();
+    // VAT-PERIOD-LOCK — eine gemeldete Rechnung verschwindet nicht aus einem eingereichten Quartal.
+    assertInvoiceNotInClosedVatQuarter(id);
     // Bestandsschutz VOR jedem Write: eine stornierte Rechnung hat ihre Lose schon zurueckgegeben,
     // eine Retoure/Gutschrift hat Ware schon zurueckgebucht — der Lot-Restore unten gaebe dasselbe
     // Stueck ein zweites Mal frei (Phantom-Bestand, erneut verkaufbar).
@@ -1656,6 +1681,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       console.warn(`[updatePayment] card-fee created_at collision on invoice ${invoiceId} — skipping card-fee re-book for payment ${paymentId}`);
     }
 
+    // VAT-PERIOD-LOCK — Betrag, Art oder Datum einer Zahlung ändern, was der Export zeigt (Monat,
+    // Zahlungsnotiz, FINAL oder nicht). Verglichen wird vor dem Commit.
+    const vatBefore = vatFingerprint(invoiceId);
     beginLedgerTransaction();
     try {
       // STEP A — Card-Fee reversieren, wenn sie sich aendert. Unbedingtes Reverse-
@@ -1729,6 +1757,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
       saveDatabase();                    // deferred bis zum aeusseren COMMIT
       trackUpdate('payments', paymentId, data);
+      assertVatUnchanged(branchId, vatBefore, vatFingerprint(invoiceId));
       commitLedgerTransaction();
     } catch (e) {
       rollbackLedgerTransaction();
@@ -1744,6 +1773,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   deletePayment: (paymentId, invoiceId) => {
     const db = getDatabase();
     const now = new Date().toISOString();
+    // VAT-PERIOD-LOCK — eine Zahlung einer gemeldeten FINAL-Rechnung zu löschen nähme sie aus dem
+    // eingereichten Quartal (oder verschöbe ihren Monat).
+    assertInvoiceNotInClosedVatQuarter(invoiceId);
     // Slice 1 (Symmetrie zu updatePayment): method + created_at VOR dem DELETE
     // erfassen, um danach die Auto-Card-Fee dieser Zahlung mit-zu-reversieren.
     const delRows = query(`SELECT method, created_at FROM payments WHERE id = ?`, [paymentId]);

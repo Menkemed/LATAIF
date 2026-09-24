@@ -18,6 +18,7 @@
 import { query, currentBranchId } from '@/core/db/helpers';
 import { hasLotHistory, isServiceProduct } from '@/core/lots/stock-contract';
 import { runOnPrimary } from '@/core/data/primary-action';
+import { assertInvoiceNotInClosedVatQuarter } from '@/core/tax/vat-period-lock';
 import { watchLedgerPosts } from '@/core/ledger/posting';
 import { returnLineAmounts } from '@/core/returns/return-lines';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
@@ -58,6 +59,8 @@ export function cancelInvoiceInHouse(input: InvoiceCancelInput, branchId: string
   if (!inv) throw new InvoiceActionRejected('INVOICE_NOT_FOUND', 'no such invoice in this branch');
   const blocker = invoiceCancelBlocker(String(inv.status));
   if (blocker) throw new InvoiceActionRejected(blocker.code, blocker.message);
+  // VAT-PERIOD-LOCK — eine gemeldete Rechnung wird nicht aus einem eingereichten Quartal storniert.
+  assertInvoiceNotInClosedVatQuarter(input.invoiceId);
   // Ohne Geld läuft der Storno NICHT über eine Retoure: er gibt die Ware der Zeilen frei und setzt
   // CANCELLED. Eine schon wirksame Teil-Retoure/Gutschrift hätte dann ihre Ware ein zweites Mal im
   // Bestand und die Rechnung (Forderung + Erlös des Rests) bliebe gebucht, weil updateInvoice bei

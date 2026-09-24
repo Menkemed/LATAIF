@@ -212,7 +212,9 @@ marker('CENTRAL_UI_R6D_SSOT_UPDATED');
   const dateien = walk('src').filter((p) => /tax_payments/.test(codeOf(src(p))));
   ok(!dateien.some((p) => /track(Insert|Update|Delete|Change)\(\s*'tax_payments'/.test(src(p))), 'SYNC kein Schreibweg meldet tax_payments an den Sync');
   const erlaubt = ['src/core/finance/money-house.ts', 'src/core/reports/analytics-snapshot.ts', 'src/core/reports/context.ts',
-    'src/core/reports/reconciliation-snapshot.ts', 'src/core/ledger/backfill.ts', 'src/core/db/database.ts', 'src/core/sync/track.ts'];
+    'src/core/reports/reconciliation-snapshot.ts', 'src/core/ledger/backfill.ts', 'src/core/db/database.ts', 'src/core/sync/track.ts',
+    // VAT-PERIOD-LOCK — der Periodenschutz liest „bezahlt = zu" am Primary (Hausprüfung jeder Rechnungsänderung).
+    'src/core/tax/vat-period-lock.ts'];
   ok(dateien.every((p) => erlaubt.includes(p)),
     `SYNC jeder Leser und Schreiber sitzt am Primary (Hausfolge, Auswertung, Abgleich, Nachbuchung, Schema) (${dateien.filter((p) => !erlaubt.includes(p)).join(', ') || 'keine anderen'})`);
   ok(readOps.STORE_READ_OPS.includes('store.analytics.get') && !/tax_payments/.test(codeOf(src('src/pages/analytics/AnalyticsPage.tsx'))),
