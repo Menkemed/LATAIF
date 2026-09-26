@@ -47,6 +47,12 @@ expenses, credit notes, transfers, agents, partners and gold items, undoing conv
 steps, the database reset on the login screen and others went ahead whatever you clicked. All
 prompts now wait for your answer, and "Cancel" changes nothing.
 
+## Second computer (PC2)
+
+Saves on the second computer that are still waiting for an answer from the main computer are kept
+in the same folder as before; the folder is now provided by the app itself. Nothing changes for
+you — open saves from before the update are found and can be clarified as usual.
+
 ## Upgrading
 
 No manual step is needed. The update adds one table for VAT filings; existing data is not
