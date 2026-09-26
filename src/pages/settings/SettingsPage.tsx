@@ -368,6 +368,7 @@ function TaxTab() {
                 <option key={m} value={String(i + 1)}>{m}</option>
               ))}
             </select>
+            <span style={{ fontSize: 12, color: '#6B7280', marginLeft: 10 }}>VAT quarters always follow the NBR calendar quarters.</span>
           </FieldRow>
 
           <div style={{ borderTop: '1px solid #E5E9EE', margin: '16px 0 8px', paddingTop: 14 }}>
@@ -1582,8 +1583,8 @@ function CountryCodesTab() {
     closeForm();
   }
 
-  function handleDelete(iso: string) {
-    if (!confirm(`Remove "${iso}"? Existing phone numbers stored with this code will still be readable but displayed under the default country.`)) return;
+  async function handleDelete(iso: string) {
+    if (!(await window.confirm(`Remove "${iso}"? Existing phone numbers stored with this code will still be readable but displayed under the default country.`))) return;
     removeCountry(iso);
   }
 

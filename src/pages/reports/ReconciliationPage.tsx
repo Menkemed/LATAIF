@@ -250,10 +250,10 @@ export function ReconciliationPage() {
                 steht — auf einem Rechner ohne Datenbank gibt es ihn nicht, statt ihn anzubieten
                 und dann still zu scheitern. Die AUSKUNFT oben ist auf beiden Rechnern dieselbe. */}
             {!readsFromPrimary() && <Button
-              onClick={() => {
+              onClick={async () => {
                 // R7B PP-6 — der Riegel im Handler, nicht nur das Ausblenden: der Storno schreibt ins Hauptbuch.
                 if (blockPrimaryOnlyOnClient('Cancelling orphan postings')) return;
-                if (!confirm(`Storniert alle ${data.orphans.length} Orphan-Buchungen via reverseSource (Ledger bleibt immutable). Fortfahren?`)) return;
+                if (!(await window.confirm(`Storniert alle ${data.orphans.length} Orphan-Buchungen via reverseSource (Ledger bleibt immutable). Fortfahren?`))) return;
                 let ok = 0, skipped = 0, failed = 0;
                 for (const o of data.orphans) {
                   try {

@@ -226,7 +226,7 @@ export function InvoiceDetail() {
     const rest = pickupNotReady.length
       ? `\n\nNot ready yet — they stay as they are: ${pickupNotReady.map(r => r.repairNumber).join(', ')}`
       : '';
-    if (!window.confirm(frage + rest)) return;
+    if (!(await window.confirm(frage + rest))) return;
     for (const r of pickupReady) {
       const fassung = r.revision;
       if (w.remote && !fassung) {
@@ -1199,7 +1199,7 @@ export function InvoiceDetail() {
                     <input defaultValue={p.notes || ''}
                       onBlur={e => { if (id) void zahlungBerichtigen(p.id, { notes: e.target.value }); }}
                       placeholder="Notes" style={{ padding: '4px 6px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4 }} />
-                    <button onClick={() => { if (window.confirm('Delete this payment? Status wird neu berechnet.')) { if (id) void zahlungLoeschen(p.id); } }}
+                    <button onClick={async () => { if (await window.confirm('Delete this payment? Status wird neu berechnet.')) { if (id) void zahlungLoeschen(p.id); } }}
                       className="cursor-pointer" style={{ padding: '4px 8px', fontSize: 12, background: 'none', border: '1px solid #D5D9DE', borderRadius: 4, color: '#AA6E6E' }}>×</button>
                   </div>
                 ))}

@@ -405,7 +405,7 @@ export function MetalList() {
               )}
               <button
                 {...primaryOnlyDeleteProps()}
-                onClick={() => { if (blockDeleteOnClient()) return; if (confirm('Delete this item?')) deleteMetal(metal.id); }}
+                onClick={async () => { if (blockDeleteOnClient()) return; if (await window.confirm('Delete this item?')) deleteMetal(metal.id); }}
                 className="cursor-pointer transition-all duration-200"
                 style={{ padding: '5px 10px', fontSize: 11, borderRadius: 999, border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}
                 onMouseEnter={e => { e.currentTarget.style.borderColor = '#AA6E6E'; e.currentTarget.style.color = '#AA6E6E'; }}

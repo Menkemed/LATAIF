@@ -289,9 +289,9 @@ export function PartnersPage() {
               style={{ width: '100%', background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
           </div>
           <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => {
+            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={async () => {
               if (blockDeleteOnClient()) return;
-              if (editPartner && window.confirm(`Delete partner "${editPartner.name}"?`)) {
+              if (editPartner && await window.confirm(`Delete partner "${editPartner.name}"?`)) {
                 try {
                   deletePartner(editPartner.id);
                   setEditPartner(null);

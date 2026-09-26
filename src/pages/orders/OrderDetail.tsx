@@ -1504,8 +1504,8 @@ export function OrderDetail() {
                           <button
                             data-order-cost-remove={l.id}
                             disabled={w.busy}
-                            onClick={() => {
-                              if (!window.confirm('Diese Kostenposition löschen? Eine gebuchte A/P-Schuld wird storniert.')) return;
+                            onClick={async () => {
+                              if (!(await window.confirm('Diese Kostenposition löschen? Eine gebuchte A/P-Schuld wird storniert.'))) return;
                               void kostenzeileEntfernen(l.id);
                             }}
                             className="cursor-pointer"
@@ -1581,9 +1581,9 @@ export function OrderDetail() {
                               In Geld
                             </button>
                             <button type="button"
-                              onClick={() => {
+                              onClick={async () => {
                                 if (blockDeleteOnClient()) return;
-                                if (!window.confirm('Gold-Verbindlichkeit löschen? Nur nutzen wenn sie versehentlich/verwaist ist — die Kostenzeile selbst bleibt unberührt.')) return;
+                                if (!(await window.confirm('Gold-Verbindlichkeit löschen? Nur nutzen wenn sie versehentlich/verwaist ist — die Kostenzeile selbst bleibt unberührt.'))) return;
                                 try { deleteGoldPayable(gp.id); }
                                 catch (e) { alert(e instanceof Error ? e.message : String(e)); }
                               }}

@@ -91,10 +91,10 @@ export function CreditNoteDetail() {
     });
   }
 
-  function handleDelete() {
+  async function handleDelete() {
     if (!cn) return;
     if (blockDeleteOnClient()) return;
-    if (!confirm(`Delete credit note ${cn.creditNoteNumber}? This is destructive — only do this if it was created by mistake.`)) return;
+    if (!(await window.confirm(`Delete credit note ${cn.creditNoteNumber}? This is destructive — only do this if it was created by mistake.`))) return;
     deleteCreditNote(cn.id);
     navigate('/credit-notes');
   }

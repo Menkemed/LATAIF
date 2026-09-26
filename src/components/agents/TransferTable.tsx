@@ -112,7 +112,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
   /** R6E — „Undo": die Rechnung wird STORNIERT (nicht mehr geloescht), jeder Transfer dieser Rechnung
    *  steht wieder ohne Rechnung und die Verkaufsforderung wieder da. Am Primary dieselbe Hausfolge. */
   async function umwandlungZuruecknehmen(transferId: string) {
-    if (!window.confirm('Undo convert? The invoice will be cancelled and the transfer reset to "Sold".')) return;
+    if (!(await window.confirm('Undo convert? The invoice will be cancelled and the transfer reset to "Sold".'))) return;
     const fassung = fassungVon(transferId, 'undoing this conversion');
     if (fassung === null) return;
     if (!await w.ok('transfers.undo_convert', {
@@ -612,9 +612,9 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
               style={{ width: '100%', background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
           </div>
           <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => {
+            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={async () => {
               if (blockDeleteOnClient()) return;
-              if (editTransfer && window.confirm(`Delete transfer ${editTransfer.transferNumber}?`)) {
+              if (editTransfer && await window.confirm(`Delete transfer ${editTransfer.transferNumber}?`)) {
                 try { deleteTransfer(editTransfer.id); } catch (e) { alert(e instanceof Error ? e.message : String(e)); return; }
                 setEditTransfer(null);
               }

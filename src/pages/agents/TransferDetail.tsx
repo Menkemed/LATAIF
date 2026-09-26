@@ -193,7 +193,7 @@ export function TransferDetail() {
   /** R6E — „Undo Convert": dieselbe Buchung wie die Zeile der Liste; die Rechnung wird storniert. */
   async function umwandlungZuruecknehmen() {
     const t = transfer!;
-    if (!window.confirm('Undo convert? The invoice will be cancelled and the transfer reset to "Sold".')) return;
+    if (!(await window.confirm('Undo convert? The invoice will be cancelled and the transfer reset to "Sold".'))) return;
     const fassung = fassungVon('undoing this conversion');
     if (fassung === null) return;
     if (!await w.ok('transfers.undo_convert', {

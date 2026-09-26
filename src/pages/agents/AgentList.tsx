@@ -537,9 +537,9 @@ export function AgentList() {
               style={{ width: '100%', background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6, padding: '8px 10px', fontSize: 13, color: '#0F0F10' }} />
           </div>
           <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => {
+            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={async () => {
               if (blockDeleteOnClient()) return;
-              if (editAgent && window.confirm(`Delete approval "${editAgent.name}"?`)) {
+              if (editAgent && await window.confirm(`Delete approval "${editAgent.name}"?`)) {
                 try {
                   deleteAgent(editAgent.id);
                   setEditAgent(null);

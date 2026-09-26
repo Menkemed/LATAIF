@@ -917,9 +917,9 @@ export function ExpenseList() {
             value={editForm.description || ''} onChange={e => setEditForm({ ...editForm, description: e.target.value })} data-expense-edit-description />
           <WriteError text={fehler} />
           <div className="flex justify-between gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={() => {
+            <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={async () => {
               if (blockDeleteOnClient()) return;
-              if (editId && window.confirm('Delete this expense?')) {
+              if (editId && await window.confirm('Delete this expense?')) {
                 try { deleteExpense(editId); } catch (e) { alert((e as Error).message); return; }
                 setEditId(null);
               }

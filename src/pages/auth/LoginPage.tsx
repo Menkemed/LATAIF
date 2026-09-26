@@ -25,7 +25,7 @@ export function LoginPage() {
   // ohne Resurrection-Guard, und vor jeder Anmeldung erreichbar.
   async function handleReset() {
     if (resetBusy) return;
-    if (!confirm('Reset database? This wipes all data on this device.')) return;
+    if (!(await window.confirm('Reset database? This wipes all data on this device.'))) return;
     setResetBusy(true);
     setResetMsg('');
     try {

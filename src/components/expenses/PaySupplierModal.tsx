@@ -309,11 +309,11 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
     // (→ PURCHASE_OVERPAY-Guthaben); sonst entsteht ein Standalone-Guthaben. Letzteres bestaetigt
     // der Mensch hier — der Primary entscheidet dieselbe Frage mit demselben Planer.
     if (!overrideMode && fifoPlan.excessF > 0 && !fifoPlan.overflowPurchaseId) {
-      if (!window.confirm(
+      if (!(await window.confirm(
         `You're paying ${fmt(totalAmount)} but only ${fmt(allocatedSum)} can be allocated ` +
         `(${fmt(fromFils(fifoPlan.excessF))} excess). The excess will be credited to ${supplierName || 'this supplier'} ` +
         `as redeemable supplier credit. Continue?`
-      )) return;
+      ))) return;
     }
     const allocations = overrideMode
       ? openItems

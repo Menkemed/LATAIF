@@ -532,7 +532,7 @@ export function RepairDetail() {
     setEditing(false);
   }
 
-  function handleStatusAdvance() {
+  async function handleStatusAdvance() {
     if (!id || !nextStatus || !repair) return;
     // v0.7.4 — Warnung wenn External/Hybrid auf 'sent_to_workshop' oder 'ready'
     // flippt ohne Workshop UND ohne Work-Lines. Workshop kann ueber Hauptfeld
@@ -543,7 +543,7 @@ export function RepairDetail() {
     const hasNoWorkshop = !repair.workshopSupplierId && thisRepairLines.filter(l => l.status === 'OPEN').length === 0;
     if (needsWorkshopCheck && hasNoWorkshop) {
       const statusLabel = nextStatus === 'sent_to_workshop' ? '"Sent to Workshop"' : '"Ready"';
-      const confirmed = window.confirm(
+      const confirmed = await window.confirm(
         `You're about to move this repair to ${statusLabel}, but no workshop is set yet.\n\n` +
         `If you continue now, no A/P will be booked against a supplier — you'll need to add it manually later via "+ Add Work Line".\n\n` +
         `Continue anyway?`
@@ -650,9 +650,9 @@ export function RepairDetail() {
                     nicht relevant — eigenes Inventar wird nicht "zurückgegeben". */}
                 {perm.canManageRepairs && repair.repairScope !== 'OWN' && repair.status !== 'picked_up' && repair.status !== 'returned'
                   && repair.status !== 'cancelled' && repair.status !== 'CANCELLED' && repair.status !== 'DELIVERED' && (
-                  <Button variant="secondary" onClick={() => {
+                  <Button variant="secondary" onClick={async () => {
                     if (!id) return;
-                    if (!window.confirm(`Mark repair ${repair.repairNumber} as returned to customer (no repair performed)?`)) return;
+                    if (!(await window.confirm(`Mark repair ${repair.repairNumber} as returned to customer (no repair performed)?`))) return;
                     void statusSetzen('returned');
                   }}>
                     <RotateCcw size={14} /> Mark as Returned
@@ -1367,8 +1367,8 @@ export function RepairDetail() {
                         </span>
                         <button
                           data-cancel-repair-line
-                          onClick={() => {
-                            if (!confirm('Remove this entry? Any linked gold liability + supplier expense will also be removed.')) return;
+                          onClick={async () => {
+                            if (!(await window.confirm('Remove this entry? Any linked gold liability + supplier expense will also be removed.'))) return;
                             void zeileStornieren(l.id);
                           }}
                           className="cursor-pointer"
