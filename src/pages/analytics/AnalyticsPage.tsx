@@ -797,11 +797,28 @@ export function AnalyticsPage() {
                             style={{ padding: '2px 10px', fontSize: 10, background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 999, color: '#4B5563' }}
                           >Mark VAT filed</button>
                         )}
+                        {/* VAT-QUARTALSÜBERSICHT — eingereicht: die festgehaltenen Zahlen; weicht die heutige
+                            Rechnung ab, steht es daneben (nie still neu gerechnet). */}
+                        {q.basis === 'filed' && Math.abs(q.liveVat - q.vat) > 0.005 && (
+                          <span data-vat-filed-differs={`${q.year}-Q${q.quarter}`}
+                            style={{ fontSize: 10, color: '#B45309', padding: '2px 8px', borderRadius: 999, background: 'rgba(217,119,6,0.08)', border: '1px solid rgba(217,119,6,0.35)' }}>
+                            Filed figures shown · current calculation {fmtDec(q.liveVat, 2)}
+                          </span>
+                        )}
+                        {/* Bezahlt, aber ohne Einreichungs-Snapshot: keine erfundenen Altzahlen — die heutige
+                            Exportrechnung, und wenn die erfasste Zahlung davon abweicht, sichtbar. */}
+                        {q.basis === 'live' && q.paid > 0.005 && Math.abs(q.paid - q.netVat) > 0.005 && (
+                          <span data-vat-paid-differs={`${q.year}-Q${q.quarter}`}
+                            title="No filing snapshot for this quarter. The figures are today's NBR-export calculation; the recorded VAT payment differs."
+                            style={{ fontSize: 10, color: '#B45309', padding: '2px 8px', borderRadius: 999, background: 'rgba(217,119,6,0.08)', border: '1px solid rgba(217,119,6,0.35)' }}>
+                            No filing snapshot · paid {fmtDec(q.paid, 2)} ≠ current net {fmtDec(q.netVat, 2)}
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-6">
                         <div className="text-right">
-                          <span style={{ fontSize: 11, color: '#6B7280', display: 'block' }}>OUTPUT VAT</span>
-                          <span className="font-mono" style={{ fontSize: 14, color: '#4B5563' }}>{fmtDec(q.vat, 2)}</span>
+                          <span style={{ fontSize: 11, color: '#6B7280', display: 'block' }}>{q.basis === 'filed' ? 'OUTPUT VAT · FILED' : 'OUTPUT VAT'}</span>
+                          <span className="font-mono" data-vat-output={`${q.year}-Q${q.quarter}`} style={{ fontSize: 14, color: '#4B5563' }}>{fmtDec(q.vat, 2)}</span>
                         </div>
                         <div className="text-right">
                           <span style={{ fontSize: 11, color: '#6B7280', display: 'block' }}>INPUT VAT</span>
@@ -837,6 +854,22 @@ export function AnalyticsPage() {
                     </div>
                   );
                 })}
+                {/* Teilbezahlt: in keinem Quartal, nicht im NBR-Export — und nicht im Betrag oben. */}
+                {finance.vatPartial && finance.vatPartial.count > 0 && (
+                  <div data-vat-partial className="flex items-center justify-between"
+                    style={{ padding: '12px 0 4px', gap: 16, fontSize: 12, color: '#6B7280' }}>
+                    <span>
+                      Partly paid – not in the current NBR export: <strong style={{ color: '#4B5563' }}>{finance.vatPartial.count}</strong> invoice{finance.vatPartial.count === 1 ? '' : 's'}
+                      {' '}· open <span className="font-mono">{fmtDec(finance.vatPartial.open, 2)}</span> BHD
+                    </span>
+                    <span title="VAT these invoices carry once fully paid — counted in the quarter of full payment, not before.">
+                      VAT once fully paid <span className="font-mono" data-vat-partial-vat>{fmtDec(finance.vatPartial.pendingVat, 2)}</span>
+                    </span>
+                  </div>
+                )}
+                <p style={{ paddingTop: 8, fontSize: 11, color: '#9CA3AF' }}>
+                  Same basis as the NBR export: fully paid invoices, in the calendar quarter of full payment.
+                </p>
               </Card>
             </div>
 

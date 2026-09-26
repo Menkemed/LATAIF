@@ -25,6 +25,7 @@ import { computeSalesMetricsByCustomer } from '@/core/reports/sales-metrics';
 import { loadSalesData } from '@/core/reports/sales-metrics-loader';
 import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
 import type { BusinessReadContext } from '@/core/data/read-context';
+import { liveVatQuarters, partialVatSummary, filedVatFigures } from '@/core/tax/vat-quarter-overview';
 
 export function safeDiv(a: number, b: number): number {
   return b === 0 ? 0 : a / b;
@@ -686,40 +687,26 @@ export function financeFor(ctx: BusinessReadContext) {
     // vat = Output-VAT (aus Sales), inputVat = Vorsteuer (aus Purchases),
     // netVat = max(0, vat − inputVat) = was effektiv an NBR gezahlt werden muss,
     // refund = max(0, inputVat − vat) = was die NBR uns erstatten muss.
-    type QuarterRow = { year: number; quarter: number; vat: number; inputVat: number; netVat: number; refund: number; paid: number; filedAt: string | null };
+    // basis: 'filed' = Zahlen der Einreichung (festgehalten), 'live' = heutige Exportrechnung.
+    // liveVat: die heutige Exportrechnung, auch bei 'filed' — zum Vergleich.
+    type QuarterRow = {
+      year: number; quarter: number; vat: number; inputVat: number; netVat: number; refund: number; paid: number; filedAt: string | null;
+      basis: 'filed' | 'live'; liveVat: number; invoiceCount: number;
+    };
     // VAT-PERIOD-LOCK — die NBR-Meldeperioden sind KALENDERquartale (Q1 Jan–Mär … Q4 Okt–Dez).
     // Übersicht, „Mark paid"/„Mark VAT filed" und die Periodensperre verwenden dieselben — der
     // eingestellte Geschäftsjahresbeginn verschiebt sie nicht (vorher tat er es, und ein „Q2" der
     // Übersicht wäre als Kalender-Q2 eingereicht worden).
     const calendarQuarter = (month: number): number => Math.ceil(month / 3);
 
-    // Quarterly VAT: per-invoice effective VAT = stored vat_amount (VAT_10/ZERO-Anteile)
-    // PLUS per-line MARGIN-VAT-Subselect (für mixed-Scheme-Invoices ist das essentiell —
-    // dort enthält der invoice-level vat_amount nur den VAT_10-Anteil, MARGIN-Anteil fehlt).
-    const vatByInv = qry(
-      `SELECT COALESCE(i.issued_at, i.created_at) as d,
-              i.vat_amount + COALESCE((
-                SELECT SUM(
-                  CASE WHEN il.tax_scheme = 'MARGIN' AND il.unit_price > il.purchase_price_snapshot
-                    THEN COALESCE(il.quantity, 1) * (il.unit_price - il.purchase_price_snapshot)
-                         * il.vat_rate / (100 + il.vat_rate)
-                  ELSE 0 END
-                )
-                FROM invoice_lines il WHERE il.invoice_id = i.id
-              ), 0) AS effective_vat
-         FROM invoices i
-        WHERE i.branch_id = ? AND i.status != 'CANCELLED' AND i.status != 'DRAFT'
-          AND COALESCE(i.butterfly,0) = 0`,
-      [branchId]
-    );
+    // VAT-QUARTALSÜBERSICHT — Ausgangs-VAT auf der Grundlage des NBR-Exports: nur FINAL (ohne
+    // Butterfly), Kalenderquartal des Tages der Vollzahlung, dieselbe Zeilenrechnung wie die
+    // Tabellenblätter (`vat-quarter-overview` → `nbrMonthTotals`). Vorher: Rechnungsdatum und auch
+    // teilbezahlte Rechnungen — eine andere Zahl als die Erklärung. Teilbezahlte stehen jetzt getrennt.
+    const liveVat = liveVatQuarters(branchId);
     const quarterlyVatOwed: Record<string, number> = {};
-    for (const row of vatByInv) {
-      const d = new Date((row.d as string) || Date.now());
-      const year = d.getFullYear();
-      const month = d.getMonth() + 1; // 1-12
-      const key = `${year}-Q${calendarQuarter(month)}`;
-      quarterlyVatOwed[key] = (quarterlyVatOwed[key] || 0) + ((row.effective_vat as number) || 0);
-    }
+    for (const [key, q] of liveVat) quarterlyVatOwed[key] = q.vat;
+    const vatPartial = partialVatSummary(branchId);
     const quarterlyVatPaid: Record<string, number> = {};
     for (const t of taxPaidRows) {
       const key = `${t.year}-Q${t.quarter}`;
@@ -746,19 +733,28 @@ export function financeFor(ctx: BusinessReadContext) {
     // (z.B. erstes Lager-Aufbau), sollen sichtbar sein.
     // VAT-PERIOD-LOCK — als eingereicht markierte Quartale (mit Zeitpunkt), auch ohne eigene Zeile oben.
     const filedAtByKey: Record<string, string> = {};
-    for (const f of qry('SELECT year, quarter, filed_at FROM vat_filings WHERE branch_id = ?', [branchId])) {
-      filedAtByKey[`${f.year}-Q${f.quarter}`] = String(f.filed_at);
+    // Eingereicht: die festgehaltenen Zahlen, nicht die heutige Rechnung.
+    const filedVatByKey: Record<string, number> = {};
+    for (const f of qry('SELECT year, quarter, filed_at, snapshot_json FROM vat_filings WHERE branch_id = ?', [branchId])) {
+      const key = `${f.year}-Q${f.quarter}`;
+      filedAtByKey[key] = String(f.filed_at);
+      const fig = filedVatFigures(key, f.snapshot_json as string);
+      if (fig) filedVatByKey[key] = fig.vat;
     }
     const allQuarterKeys = new Set<string>([
       ...Object.keys(quarterlyVatOwed),
       ...Object.keys(quarterlyInputVat),
       ...Object.keys(filedAtByKey),
+      // Ein bezahltes Quartal bleibt sichtbar, auch wenn nach heutiger Rechnung nichts darin liegt.
+      ...Object.keys(quarterlyVatPaid),
     ]);
     const quarterly: QuarterRow[] = Array.from(allQuarterKeys)
       .sort((a, b) => b.localeCompare(a))
       .map(k => {
         const [yearStr, qStr] = k.split('-Q');
-        const owed = quarterlyVatOwed[k] || 0;
+        const live = quarterlyVatOwed[k] || 0;
+        const filed = filedVatByKey[k];
+        const owed = filed ?? live;
         const input = quarterlyInputVat[k] || 0;
         const balance = owed - input;
         return {
@@ -770,6 +766,9 @@ export function financeFor(ctx: BusinessReadContext) {
           refund: Math.max(0, -balance),
           paid: quarterlyVatPaid[k] || 0,
           filedAt: filedAtByKey[k] ?? null,
+          basis: filed !== undefined ? 'filed' as const : 'live' as const,
+          liveVat: live,
+          invoiceCount: liveVat.get(k)?.invoiceCount ?? 0,
         };
       });
 
@@ -801,6 +800,8 @@ export function financeFor(ctx: BusinessReadContext) {
       // Tax
       taxPaidTotal, taxPaidFromCash, taxPaidFromBank,
       quarterly,
+      // Teilbezahlte Rechnungen: in keinem Quartal, nicht im NBR-Export (getrennt angezeigt).
+      vatPartial,
     };
 }
 

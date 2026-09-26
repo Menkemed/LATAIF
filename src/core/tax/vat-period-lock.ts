@@ -22,6 +22,7 @@ import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { invoiceFinalizationDate } from '@/core/tax/nbr-export';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
+import { liveVatQuarters } from '@/core/tax/vat-quarter-overview';
 import type { Invoice } from '@/core/models/types';
 
 export const VAT_PERIOD_FILED = 'VAT_PERIOD_FILED';
@@ -279,7 +280,10 @@ export function markVatQuarterFiled(
     throw e;
   }
   const key = `${year}-Q${quarter}`;
-  const rows = query("SELECT id FROM invoices WHERE branch_id = ? AND status = 'FINAL'", [branchId])
+  // Gemeldet ist, was der Export zeigt: FINAL ohne Butterfly (dessen Vorauswahl). Die Summen hält die
+  // Einreichung mit fest — die Übersicht zeigt sie danach, statt neu zu rechnen.
+  const totals = liveVatQuarters(branchId).get(key) ?? { key, standardVat: 0, marginVat: 0, zeroRated: 0, vat: 0, invoiceCount: 0 };
+  const rows = query("SELECT id FROM invoices WHERE branch_id = ? AND status = 'FINAL' AND COALESCE(butterfly, 0) = 0", [branchId])
     .map((r) => vatFingerprint(String(r.id)))
     .filter((f): f is VatFingerprint => !!f && f.quarter === key)
     .sort((a, b) => (a.row.finalizedAt as string).localeCompare(b.row.finalizedAt as string))
@@ -290,7 +294,7 @@ export function markVatQuarterFiled(
     `INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, filed_by, note, invoice_count, snapshot_json, created_at)
      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     [id, branchId, year, quarter, now, input.userId ?? null, input.note ?? null, rows.length,
-      JSON.stringify({ rule: 'NBR export: FINAL invoices, month of full payment', invoices: rows }), now],
+      JSON.stringify({ rule: 'NBR export: FINAL invoices (no butterfly), month of full payment', totals, invoices: rows }), now],
   );
   return { id, year, quarter, filedAt: now, invoiceCount: rows.length };
 }

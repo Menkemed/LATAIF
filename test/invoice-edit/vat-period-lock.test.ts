@@ -539,21 +539,88 @@ const code = (m: string): string => m.split('|')[0];
     '11 …Name bleibt „M pA"; der Handy-Galerieweg prüft dieselbe Regel');
 }
 
-// ══ 12) Quartalsübersicht = Kalenderquartale, auch bei abweichendem Geschäftsjahresbeginn ══
+// ══ 12/13) VAT-Übersicht — dieselbe Grundlage wie der NBR-Export ══
 {
   const { financeFor } = await import('../../src/core/reports/analytics-snapshot.ts');
   const { localReadContext } = await import('../../src/core/data/read-context.ts');
+  const { recordTaxPaymentInHouse, TAX_OVERPAYMENT } = await import('../../src/core/finance/money-house.ts') as unknown as {
+    recordTaxPaymentInHouse: (raw: unknown, ctx: unknown) => unknown; TAX_OVERPAYMENT: string };
+  type Q = { year: number; quarter: number; vat: number; netVat: number; paid: number; filedAt: string | null; basis: string; liveVat: number };
+  type F = { quarterly: Q[]; vatPartial: { count: number; gross: number; open: number; pendingVat: number } };
+  const fin = (): F => financeFor(localReadContext()) as unknown as F;
+  const zeile = (y: number, q: number): Q | undefined => fin().quarterly.find((r) => r.year === y && r.quarter === q);
+  /** Unabhängig nachgerechnet (alle Testzeilen VAT_10): Zeilen-VAT der FINAL-Rechnungen ohne Butterfly,
+   *  deren Vollzahlung (spätestes Zahlungsdatum, sonst Rechnungsdatum) im Zeitraum liegt. */
+  const exportVat = (von: string, bis: string): number => n(DB, `
+    SELECT COALESCE(SUM(l.vat_amount), 0) FROM invoice_lines l JOIN invoices i ON i.id = l.invoice_id
+     WHERE i.branch_id = 'branch-main' AND i.status = 'FINAL' AND COALESCE(i.butterfly, 0) = 0 AND l.tax_scheme = 'VAT_10'
+       AND COALESCE((SELECT MAX(received_at) FROM payments p WHERE p.invoice_id = i.id), i.issued_at) >= ?
+       AND COALESCE((SELECT MAX(received_at) FROM payments p WHERE p.invoice_id = i.id), i.issued_at) < ?`, [von, bis]);
+
+  // Juni-Rechnung, erst im Juli voll bezahlt → Q3 (vorher stand sie nach Rechnungsdatum in Q2).
+  product(DB, 'pJ', 1); reload();
+  const J = bezahlt('pJ', '2026-06-20', '2026-07-03T12:00:00.000Z');
+  const jVat = n(DB, 'SELECT SUM(vat_amount) FROM invoice_lines WHERE invoice_id = ?', [J.inv]);
+  const snapQ2 = JSON.parse(s(DB, 'SELECT snapshot_json FROM vat_filings WHERE year = 2026 AND quarter = 2'));
+  const q3 = zeile(2026, 3); const q2 = zeile(2026, 2);
+  ok(!!q3 && q3.basis === 'live' && Math.abs(q3.vat - exportVat('2026-07-01', '2026-10-01')) < 0.001 && jVat > 0,
+    `13a Juni-Rechnung, im Juli voll bezahlt: steht in Q3 (Q3 ${q3?.vat.toFixed(3)} = Exportrechnung ${exportVat('2026-07-01', '2026-10-01').toFixed(3)}, J trägt ${jVat})`);
+  ok(!!q2 && Math.abs(q2.vat - Number(snapQ2.totals?.vat)) < 0.001 && !snapQ2.invoices.some((r: { invoiceId: string }) => r.invoiceId === J.inv),
+    `13a …und nicht in Q2 (Q2 ${q2?.vat.toFixed(3)})`);
+
+  // Teilbezahlte Rechnung: getrennt, nicht im Betrag.
+  const teil = JSON.parse(all(DB, "SELECT id FROM invoices WHERE status = 'PARTIAL' AND COALESCE(butterfly, 0) = 0"));
+  const teilVat = n(DB, "SELECT COALESCE(SUM(l.vat_amount), 0) FROM invoice_lines l JOIN invoices i ON i.id = l.invoice_id WHERE i.status = 'PARTIAL' AND COALESCE(i.butterfly, 0) = 0");
+  const p = fin().vatPartial;
+  const summeQuartale = fin().quarterly.filter((r) => r.basis === 'live').reduce((s2, r) => s2 + r.vat, 0);
+  const summeExport = exportVat('2000-01-01', '2100-01-01') - Number(snapQ2.totals?.vat ?? 0);
+  ok(p.count === teil.length && p.count >= 1 && Math.abs(p.pendingVat - teilVat) < 0.001,
+    `13b teilbezahlt: ${p.count} Rechnung(en) getrennt ausgewiesen, VAT bei Vollzahlung ${p.pendingVat.toFixed(3)}, offen ${p.open.toFixed(3)}`);
+  ok(Math.abs(summeQuartale - summeExport) < 0.001,
+    `13b …und in keinem Quartalsbetrag (Summe der offenen Quartale ${summeQuartale.toFixed(3)} = Exportrechnung ohne Q2 ${summeExport.toFixed(3)})`);
+
+  // Eingereichtes Quartal: festgehaltene Zahlen, auch wenn die Datenbank (am Schutz vorbei) abweicht.
+  ok(Number(snapQ2.totals?.vat) > 0 && snapQ2.totals.invoiceCount === snapQ2.invoices.length,
+    `13c die Einreichung hält die Summen fest (VAT ${snapQ2.totals?.vat}, ${snapQ2.totals?.invoiceCount} Rechnung)`);
+  const vorLine = n(DB, 'SELECT vat_amount FROM invoice_lines WHERE id = ?', [A.z]);
+  DB.run('UPDATE invoice_lines SET vat_amount = vat_amount + 50 WHERE id = ?', [A.z]);
+  const q2b = zeile(2026, 2);
+  ok(!!q2b && q2b.basis === 'filed' && Math.abs(q2b.vat - Number(snapQ2.totals.vat)) < 0.001 && Math.abs(q2b.liveVat - (Number(snapQ2.totals.vat) + 50)) < 0.001,
+    `13c eingereichtes Q2: zeigt weiter ${q2b?.vat.toFixed(3)} (festgehalten), die heutige Rechnung ${q2b?.liveVat.toFixed(3)} steht daneben`);
+  DB.run('UPDATE invoice_lines SET vat_amount = ? WHERE id = ?', [vorLine, A.z]);
+  ok(/data-vat-filed-differs/.test(src('src/pages/analytics/AnalyticsPage.tsx')), '13c …die Übersicht zeigt eine Abweichung sichtbar an');
+
+  // Bezahltes Altquartal ohne Snapshot: keine erfundenen Zahlen, Abweichung sichtbar.
+  DB.run("INSERT INTO tax_payments (id, branch_id, year, quarter, amount, source, paid_at, created_at) VALUES ('tp-2025q4','branch-main',2025,4,50,'bank',?,?)", [NOW, NOW]);
+  const q4alt = zeile(2025, 4); const q1 = zeile(2026, 1);
+  ok(!!q4alt && q4alt.basis === 'live' && q4alt.vat === 0 && q4alt.paid === 50 && !q4alt.filedAt,
+    '13d bezahltes Altquartal 2025 Q4 ohne Rechnungen/Snapshot: sichtbar mit VAT 0 und bezahlt 50 — keine erfundenen Zahlen');
+  ok(!!q1 && q1.basis === 'live' && Math.abs(q1.vat - exportVat('2026-01-01', '2026-04-01')) < 0.001 && q1.paid === 100,
+    `13d Q1/2026 (bezahlt, kein Snapshot): heutige Exportrechnung ${q1?.vat.toFixed(3)}, bezahlt ${q1?.paid}`);
+  ok(/data-vat-paid-differs/.test(src('src/pages/analytics/AnalyticsPage.tsx')), '13d …eine abweichende Zahlung wird angezeigt');
+  DB.run("DELETE FROM tax_payments WHERE id = 'tp-2025q4'");
+
+  // Geschäftsjahr ab April: weiter Kalenderquartale.
   DB.run("DELETE FROM settings WHERE branch_id = 'branch-main' AND key = 'finance.fiscal_year_start_month'");
   DB.run("INSERT INTO settings (branch_id, key, value, category, updated_at) VALUES ('branch-main','finance.fiscal_year_start_month','4','finance',?)", [NOW]);
-  const f = financeFor(localReadContext()) as unknown as { quarterly: Array<{ year: number; quarter: number; vat: number; filedAt: string | null }> };
-  const q2 = f.quarterly.find((q) => q.year === 2026 && q.quarter === 2);
-  const erwartet = n(DB, `SELECT COALESCE(SUM(vat_amount), 0) FROM invoices WHERE branch_id = 'branch-main' AND status NOT IN ('CANCELLED','DRAFT')
-    AND COALESCE(butterfly, 0) = 0 AND issued_at >= '2026-04-01' AND issued_at < '2026-07-01'`);
-  ok(!!q2 && Math.abs(q2.vat - erwartet) < 0.01 && !!q2.filedAt,
-    `12 Geschäftsjahr ab April: „2026 Q2" der Übersicht ist weiter April–Juni (VAT ${q2?.vat.toFixed(3)} = ${erwartet.toFixed(3)}) und trägt die Einreichung`);
-  ok(/Jan–Mar', 'Apr–Jun', 'Jul–Sep', 'Oct–Dec'/.test(src('src/pages/analytics/AnalyticsPage.tsx')) && /CALENDAR QUARTER \(NBR PERIODS\)/.test(src('src/pages/analytics/AnalyticsPage.tsx')),
-    '12 …die Übersicht beschriftet die Kalendermonate je Quartal');
+  const q3a = zeile(2026, 3);
+  ok(!!q3a && Math.abs(q3a.vat - exportVat('2026-07-01', '2026-10-01')) < 0.001 && !!zeile(2026, 2)?.filedAt,
+    `13e Geschäftsjahr ab April: Q3 bleibt Juli–September (${q3a?.vat.toFixed(3)}), Q2 trägt die Einreichung`);
+  ok(/Jan–Mar', 'Apr–Jun', 'Jul–Sep', 'Oct–Dec'/.test(src('src/pages/analytics/AnalyticsPage.tsx')), '13e …Kalendermonate je Quartal beschriftet');
   DB.run("DELETE FROM settings WHERE branch_id = 'branch-main' AND key = 'finance.fiscal_year_start_month'");
+
+  // „Mark paid": offen ist genau NET OWED der neuen Grundlage.
+  const q3p = zeile(2026, 3)!;
+  const offen = Math.round((q3p.netVat - q3p.paid) * 1000) / 1000;
+  const ctx = { branchId: 'branch-main', userId: 'user-test', tenantId: 'tenant-1' };
+  const vorPay = n(DB, 'SELECT COUNT(*) FROM tax_payments');
+  const mZuviel = meldung(() => imHaus(() => recordTaxPaymentInHouse({ year: 2026, quarter: 3, amount: offen + 1, source: 'bank', paidAt: '2026-10-10' }, ctx)));
+  ok(code(mZuviel) === TAX_OVERPAYMENT && n(DB, 'SELECT COUNT(*) FROM tax_payments') === vorPay,
+    `13f „Mark paid" Q3: mehr als NET OWED (${offen.toFixed(3)}) der Exportgrundlage abgewiesen (${code(mZuviel)})`);
+  ok(/vatQuarterState\(q\)/.test(src('src/pages/analytics/AnalyticsPage.tsx')) && /financeFor\(/.test(src('src/core/finance/money-house.ts')),
+    '13f …Anzeige und Buchung lesen dieselbe Quartalszeile (financeFor → vatQuarterState)');
+  ok(!/vat-quarter-overview|nbrMonthTotals/.test(src('src/core/ledger/posting.ts')) && /export function nbrMonthTotals/.test(src('src/core/tax/nbr-export.ts')),
+    '13g Hauptbuch unberührt; die Übersicht liest die Summen aus dem Export (nbrMonthTotals), keine zweite Steuerlogik');
 }
 
 console.log(`\nvat-period-lock: ${PASS} passed, ${fails.length} failed`);

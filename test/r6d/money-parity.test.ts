@@ -133,6 +133,9 @@ function freshDb(): Db {
   insert(db, 'employees', { id: 'e2', branch_id: 'branch-other', name: 'Erik', employment_status: 'active', created_at: NOW, updated_at: NOW });
   // Umsatzsteuer: Q2/2026 schuldet 100 BHD (eine Rechnung), Q3/2026 ist ein Erstattungsquartal (nur Vorsteuer).
   insert(db, 'invoices', { id: 'inv1', branch_id: 'branch-main', invoice_number: 'INV-1', customer_id: 'c1', status: 'FINAL', vat_amount: 100, gross_amount: 1100, net_amount: 1000, issued_at: '2026-05-15T12:00:00.000Z', butterfly: 0, created_at: NOW, updated_at: NOW });
+  // VAT-QUARTALSÜBERSICHT — die Quartalsrechnung liest wie der NBR-Export die ZEILEN (vorher den
+  // Rechnungskopf); ohne Zeile trüge diese Rechnung im Export keine VAT.
+  insert(db, 'invoice_lines', { id: 'inv1-l1', invoice_id: 'inv1', product_id: 'p-tax', quantity: 1, unit_price: 1000, vat_rate: 10, tax_scheme: 'VAT_10', vat_amount: 100, line_total: 1100, created_at: NOW });
   insert(db, 'purchases', { id: 'pu1', branch_id: 'branch-main', purchase_number: 'PUR-1', status: 'RECEIVED', purchase_date: '2026-08-15T12:00:00.000Z', created_at: NOW, updated_at: NOW });
   insert(db, 'purchase_lines', { id: 'pl1', purchase_id: 'pu1', vat_amount: 50, created_at: NOW });
   setTestDatabase(db as never);

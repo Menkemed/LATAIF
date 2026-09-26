@@ -399,3 +399,47 @@ export function exportNbrVatReport(year: number, invoices: Invoice[], customers:
     },
   };
 }
+
+// ── VAT-ÜBERSICHT ─────────────────────────────────────────────────────────────────────────────
+// Die Quartalsübersicht (Analytics) und die Einreichung („Mark VAT filed") zeigen dieselben Beträge
+// wie dieses Tabellenblatt — nicht nachgerechnet, sondern abgelesen: dieselbe Auswahl
+// (`groupByMonth`: nur FINAL, Monat der Vollzahlung) und dieselbe Zeilenrechnung
+// (`buildMonthSheet`), dann die Summenzeilen der drei Abschnitte. Der Export selbst bleibt unberührt.
+
+export interface NbrMonthTotals {
+  /** YYYY-MM des Tabellenblatts (Monat der Vollzahlung). */
+  month: string;
+  standardVat: number;
+  marginVat: number;
+  zeroRated: number;
+  invoiceIds: string[];
+}
+
+function summenZeile(rows: AOA, label: string): (string | number | null)[] | undefined {
+  return rows.find((r) => r[0] === label && r.length > 1);
+}
+
+/** Die Summen je Monat, wie die Tabellenblätter sie ausweisen. `invoices` wie für den Export. */
+export function nbrMonthTotals(invoices: Invoice[], paymentsByInvoice?: PaymentsByInvoice): NbrMonthTotals[] {
+  const years = new Set<number>();
+  for (const inv of invoices) {
+    if (inv.status !== 'FINAL') continue;
+    const d = new Date(invoiceFinalizationDate(inv, paymentsByInvoice?.get(inv.id)));
+    if (!isNaN(d.getTime())) years.add(d.getFullYear());
+  }
+  const out: NbrMonthTotals[] = [];
+  for (const year of [...years].sort()) {
+    for (const bucket of groupByMonth(year, invoices, undefined, paymentsByInvoice)) {
+      if (bucket.invoices.length === 0) continue;
+      const rows = buildMonthSheet(bucket, [], [], paymentsByInvoice);
+      out.push({
+        month: `${year}-${String(bucket.month + 1).padStart(2, '0')}`,
+        standardVat: Number(summenZeile(rows, 'Standard Rated Sales (Line 1 of the VAT Return)')?.[8] ?? 0),
+        marginVat: Number(summenZeile(rows, 'Profit Margin Scheme Sales (Line 1 of the VAT Return)')?.[10] ?? 0),
+        zeroRated: Number(summenZeile(rows, 'Zero-Rated Domestic Sales (Line 4 of the VAT Return)')?.[7] ?? 0),
+        invoiceIds: bucket.invoices.map((i) => i.id),
+      });
+    }
+  }
+  return out;
+}
