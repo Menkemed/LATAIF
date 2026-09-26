@@ -1,10 +1,15 @@
 # LATAIF v0.8.60
 
-This release makes invoices correctable at any time — and protects what has already been
-reported to the NBR. On top of that, every confirmation prompt in the app now really waits for
-your answer.
+This release makes invoices correctable after they were issued and paid — as long as their VAT
+quarter is still open — and protects what has already been reported to the NBR. On top of that,
+every confirmation prompt in the app now really waits for your answer.
 
-## Invoices can be corrected at any time
+## Correcting invoices
+
+Everything in this section applies to invoices in an **open** VAT quarter. Once a quarter is
+marked as VAT filed or its VAT is paid, the invoices in it are protected (see "VAT periods"
+below): only internal notes can still be changed. A return remains possible — it belongs to
+the period in which it happens.
 
 - **The final number stays.** Once an invoice has its final number, it keeps it for good — also
   when it is edited, becomes partly paid again and is paid in full a second time.
@@ -13,7 +18,7 @@ your answer.
 - **Edited lines keep their stock lot and their margin VAT.** A line is recognised by itself,
   not by its price, and shows the lot it was sold from ("fixed"). Asking for more pieces than the
   lot still has is refused with the reason on the screen.
-- **A wrongly chosen customer can be corrected — also on a paid invoice.** After one explicit
+- **A wrongly chosen customer can be corrected — also on a paid invoice in an open quarter.** After one explicit
   confirmation, everything booked on the invoice moves with it: receivable, payments, returns,
   credit notes, refunds and store credit. The correction is booked on the day it is made, and it
   stays traceable who paid and who received a refund.
