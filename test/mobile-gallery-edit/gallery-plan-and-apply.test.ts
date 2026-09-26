@@ -107,7 +107,7 @@ function newDb(SQL: { Database: new () => never }): never {
   applyMediaSchema({ run: (sql: string) => run(sql) });
   run(`CREATE TABLE tenants  (id TEXT PRIMARY KEY)`);
   run(`CREATE TABLE branches (id TEXT PRIMARY KEY, tenant_id TEXT)`);
-  for (const t of Object.values(MEDIA_ENTITY_SCOPE)) run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT)`);
+  for (const t of Object.values(MEDIA_ENTITY_SCOPE)) run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT${t.idCol === 'id' ? '' : `, ${t.idCol} TEXT`})`);
   run(`ALTER TABLE products ADD COLUMN images TEXT DEFAULT '[]'`);
   for (const c of ['brand', 'name', 'category_id', 'sku', 'attributes', 'updated_at', 'image_hash', 'image_description', 'image_embedding', 'scope_of_delivery', 'source_type']) run(`ALTER TABLE products ADD COLUMN ${c} TEXT`);
   run(`CREATE TABLE sync_changelog (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, record_id TEXT, action TEXT)`);

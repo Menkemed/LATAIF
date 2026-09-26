@@ -127,7 +127,7 @@ function seed(db: AnyDb): void {
   db.run(`CREATE TABLE branches (id TEXT PRIMARY KEY, tenant_id TEXT)`);
   db.run(`CREATE TABLE users    (id TEXT PRIMARY KEY, tenant_id TEXT)`);
   for (const t of Object.values(MEDIA_ENTITY_SCOPE)) {
-    db.run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT)`);
+    db.run(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT, tenant_id TEXT${t.idCol === 'id' ? '' : `, ${t.idCol} TEXT`})`);
   }
   // The product columns §20 protects, mirroring the real schema's shape.
   for (const col of ['images TEXT DEFAULT \'[]\'', 'sku TEXT', 'brand TEXT', 'name TEXT', 'category_id TEXT',

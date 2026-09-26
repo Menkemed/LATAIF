@@ -69,7 +69,7 @@ function buildFixture(path, { products, variant }) {
   // not define (runtime migrations create them) get a minimal stand-in so the
   // REAL media DDL applies unchanged.
   for (const t of Object.values(MEDIA_ENTITY_SCOPE)) {
-    db.exec(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT)`);
+    db.exec(`CREATE TABLE IF NOT EXISTS ${t.table} (id TEXT PRIMARY KEY, branch_id TEXT${t.idCol === 'id' ? '' : `, ${t.idCol} TEXT`})`);
   }
   // The REAL media DDL (same statements the app applies at startup).
   applyMediaSchema({ run: (sql) => db.exec(sql) });
