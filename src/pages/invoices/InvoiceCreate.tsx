@@ -379,12 +379,14 @@ export function InvoiceCreate() {
           const c = customers.find(x => x.id === id);
           return c ? `${c.firstName} ${c.lastName}`.trim() || c.company || id : id;
         };
-        if (!window.confirm(
+        // `await`: in der App ersetzt das Tauri-Dialog-Plugin `window.confirm` durch eine async
+        // Fassung — ohne `await` wäre das Versprechen immer „ja", ein Abbrechen wirkungslos.
+        if (!(await window.confirm(
           `Correct the customer of this invoice from ${nameOf(editInvoice.customerId)} to ${nameOf(customerId)}?\n\n`
           + (originalPaid > 0.005 ? `Payments so far: ${fmt(originalPaid)} BHD.\n` : '')
           + 'Everything booked on this invoice moves with it: receivable, payments, returns, credit notes, refunds '
           + 'and store credit from this invoice. The invoice number and all documents stay.',
-        )) return;
+        ))) return;
         confirmCustomerChange = true;
       }
       const invId = editInvoice.id;

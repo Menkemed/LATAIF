@@ -190,12 +190,13 @@ export function AnalyticsPage() {
   const { can } = usePermission();
   async function markVatFiled(year: number, quarter: number) {
     setVatFileFehler('');
-    if (!window.confirm(
+    // `await`: das Tauri-Dialog-Plugin macht `window.confirm` async — ohne `await` zählte jede Antwort als „ja".
+    if (!(await window.confirm(
       `Mark ${year} Q${quarter} as VAT filed?\n\n`
       + 'The invoices reported for this quarter are recorded now, with the time and your name. '
       + 'After this, changes that would alter what was filed (customer, amounts, dates, payments) are blocked; '
       + 'notes stay editable. Only do this after the return was actually submitted — an export alone is not a filing.',
-    )) return;
+    ))) return;
     const r = await saveVatFiling(year, quarter, () => setRefreshTick(t => t + 1));
     if (r.kind !== 'ok') { setVatFileFehler(`Could not mark ${year} Q${quarter} as filed: ${fehlertext(r)}`); return; }
     setRefreshTick(t => t + 1);
