@@ -32,6 +32,8 @@ import './masterdata-commands';
 import './inventory-commands';
 // CENTRAL-UI-PARITY R6D — Steuer, Bank, Gesellschafter, Darlehen.
 import './money-commands';
+// PARTNER-ITEMS — Geld gemeinsam gekaufter Artikel (Beitrag, Auszahlung, Abrechnung, Verrechnung, Storno).
+import './partner-item-commands';
 // CENTRAL-UI-PARITY R6D — Ausgaben, Vorlagen, Einkaufszahlung, Lieferant bezahlen/Guthaben.
 import './payables-commands';
 // CENTRAL-UI-PARITY R6D — Gold: Abrechnung, Verbrauch, Material, Kostenzeilen.

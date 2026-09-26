@@ -258,8 +258,8 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
     assert!(REMOTE_OPS.contains(&OP_PROBE), "die Probe steht auf der Liste");
     assert_eq!(
         REMOTE_OPS.len(),
-        177,
-        "Probe, zweiundsiebzig Lesevorgaenge und hundertvier Buchungen (R6C: sieben Stammdaten, vier Inventur, zwei Inventur-Auskuenfte; R6D: achtundzwanzig Geld/Steuer/Gold/Metall, drei Auskuenfte; R6E: acht Angebot/Rechnung/Retoure/Transfer/Nachricht; R6F: vierzehn Einkauf/Auftrag/Kommission/Produktion/Buero; R7A: der Fertigungsabschluss; PRE-G5: die Duplikatsauskunft; MEDIA-INBOX: der Posteingang des Telefons)"
+        181,
+        "Probe, zweiundsiebzig Lesevorgaenge und hundertacht Buchungen (R6C: sieben Stammdaten, vier Inventur, zwei Inventur-Auskuenfte; R6D: achtundzwanzig Geld/Steuer/Gold/Metall, drei Auskuenfte; R6E: acht Angebot/Rechnung/Retoure/Transfer/Nachricht; R6F: vierzehn Einkauf/Auftrag/Kommission/Produktion/Buero; R7A: der Fertigungsabschluss; PRE-G5: die Duplikatsauskunft; MEDIA-INBOX: der Posteingang des Telefons; PARTNER-ITEMS: vier Geldhandlungen gemeinsam gekaufter Artikel)"
     );
     for op in [
         OP_INVOICES_CREATE,
@@ -365,6 +365,10 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
         OP_DOCUMENTS_UPLOAD,
         OP_DOCUMENTS_SET_OCR,
         OP_PRODUCTION_COMPLETE,
+        OP_PARTNER_ITEMS_RECORD_MOVEMENT,
+        OP_PARTNER_ITEMS_SETTLE_SALE,
+        OP_PARTNER_ITEMS_OFFSET,
+        OP_PARTNER_ITEMS_CANCEL_MOVEMENT,
     ] {
         assert!(REMOTE_OPS.contains(&op), "die freigegebene Buchung {op} fehlt");
     }
@@ -490,8 +494,13 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
             // MEDIA-INBOX — der Posteingang des Telefons: eine benannte Buchung statt eines
             // allgemeinen Abgleich-Pushes mit Bildbytes in der Zeile.
             &OP_PURCHASE_INBOX_CREATE,
+            // PARTNER-ITEMS — Geld gemeinsam gekaufter Artikel, gebucht am Primary.
+            &OP_PARTNER_ITEMS_RECORD_MOVEMENT,
+            &OP_PARTNER_ITEMS_SETTLE_SALE,
+            &OP_PARTNER_ITEMS_OFFSET,
+            &OP_PARTNER_ITEMS_CANCEL_MOVEMENT,
         ],
-        "und NUR diese hundertvier veraendern etwas — kein Loeschen von aussen, kein Storno mit Geld
+        "und NUR diese hundertacht veraendern etwas — kein Loeschen von aussen, kein Storno mit Geld
          ausser den ausdruecklich freigegebenen (R6E: Retourenstorno nur fuer den Eigentuemer,
          Umwandlung zuruecknehmen als Rechnungsstorno statt Loeschen)"
     );
@@ -884,9 +893,9 @@ fn the_route_takes_a_client_command_id_and_reports_the_outcome_class() {
     let registry = registry.as_str();
     assert!(
         allow_listed_names(registry).contains(
-            "export const ALLOWED_MUTATIONS: readonly string[] = [\n  'invoices.create',\n  'customers.create', 'customers.update',\n  'products.create', 'products.update',\n  'invoices.update', 'invoices.record_payment',\n  'purchases.create',\n  'consignments.create', 'consignments.update',\n  'orders.create', 'orders.update',\n  'repairs.create', 'repairs.update',\n  'transfers.create', 'transfers.update', 'transfers.mark_returned',\n  'invoices.apply_credit', 'invoices.update_payment', 'invoices.delete_payment',\n  'orders.convert_to_invoice',\n  'consignments.record_payout',\n  'transfers.mark_sold', 'transfers.mark_settled',\n  'returns.create', 'returns.approve', 'returns.refund', 'returns.record_refund_payment',\n  'orders.update_status', 'orders.add_payment', 'orders.delete_payment',\n  'consignments.record_sale', 'consignments.mark_returned',\n  'repairs.update_status', 'repairs.create_invoice',\n  'repairs.add_line', 'repairs.update_line', 'repairs.cancel_line',\n  'transfers.convert_to_invoice', 'transfers.convert_many_to_invoice',\n  'invoices.cancel',\n  'suppliers.create', 'suppliers.update', 'agents.update',\n  'partners.create', 'partners.update', 'employees.create', 'employees.update',\n  'inventory.start', 'inventory.save', 'inventory.finish', 'inventory.record_check',\n  'tax.record_payment', 'banking.transfer', 'partners.record_tx',\n  'debts.create', 'debts.update', 'debts.record_payment',\n  'expenses.create', 'expenses.update', 'expenses.record_payment',\n  'expenses.template_create', 'expenses.template_update',\n  'purchases.record_payment', 'purchases.apply_credit',\n  'suppliers.pay', 'suppliers.apply_credit', 'suppliers.refund_credit',\n  'gold.payables.settle', 'gold.customer_credits.settle',\n  'repairs.record_gold_usage', 'repairs.add_material',\n  'orders.add_cost', 'orders.remove_cost',\n  'metals.create', 'metals.update_status', 'metals.set_spot_price',\n  'scrap_trades.create', 'scrap_trades.update', 'scrap_trades.cancel',\n  'offers.create', 'offers.update', 'offers.set_status', 'offers.convert_to_invoice',\n  'invoices.set_butterfly', 'returns.cancel', 'transfers.undo_convert', 'customers.log_message',\n  'purchases.return_to_supplier', 'purchases.cancel', 'purchases.dismiss_inbox',\n  'orders.cancel', 'orders.update_line_status', 'orders.mark_line_ordered', 'orders.update_line',\n  'consignments.return_after_sale', 'consignments.cancel_sale',\n  'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr',\n  'production.complete',\n  'purchase_inbox.create',\n];"
+            "export const ALLOWED_MUTATIONS: readonly string[] = [\n  'invoices.create',\n  'customers.create', 'customers.update',\n  'products.create', 'products.update',\n  'invoices.update', 'invoices.record_payment',\n  'purchases.create',\n  'consignments.create', 'consignments.update',\n  'orders.create', 'orders.update',\n  'repairs.create', 'repairs.update',\n  'transfers.create', 'transfers.update', 'transfers.mark_returned',\n  'invoices.apply_credit', 'invoices.update_payment', 'invoices.delete_payment',\n  'orders.convert_to_invoice',\n  'consignments.record_payout',\n  'transfers.mark_sold', 'transfers.mark_settled',\n  'returns.create', 'returns.approve', 'returns.refund', 'returns.record_refund_payment',\n  'orders.update_status', 'orders.add_payment', 'orders.delete_payment',\n  'consignments.record_sale', 'consignments.mark_returned',\n  'repairs.update_status', 'repairs.create_invoice',\n  'repairs.add_line', 'repairs.update_line', 'repairs.cancel_line',\n  'transfers.convert_to_invoice', 'transfers.convert_many_to_invoice',\n  'invoices.cancel',\n  'suppliers.create', 'suppliers.update', 'agents.update',\n  'partners.create', 'partners.update', 'employees.create', 'employees.update',\n  'inventory.start', 'inventory.save', 'inventory.finish', 'inventory.record_check',\n  'tax.record_payment', 'banking.transfer', 'partners.record_tx',\n  'debts.create', 'debts.update', 'debts.record_payment',\n  'expenses.create', 'expenses.update', 'expenses.record_payment',\n  'expenses.template_create', 'expenses.template_update',\n  'purchases.record_payment', 'purchases.apply_credit',\n  'suppliers.pay', 'suppliers.apply_credit', 'suppliers.refund_credit',\n  'gold.payables.settle', 'gold.customer_credits.settle',\n  'repairs.record_gold_usage', 'repairs.add_material',\n  'orders.add_cost', 'orders.remove_cost',\n  'metals.create', 'metals.update_status', 'metals.set_spot_price',\n  'scrap_trades.create', 'scrap_trades.update', 'scrap_trades.cancel',\n  'offers.create', 'offers.update', 'offers.set_status', 'offers.convert_to_invoice',\n  'invoices.set_butterfly', 'returns.cancel', 'transfers.undo_convert', 'customers.log_message',\n  'purchases.return_to_supplier', 'purchases.cancel', 'purchases.dismiss_inbox',\n  'orders.cancel', 'orders.update_line_status', 'orders.mark_line_ordered', 'orders.update_line',\n  'consignments.return_after_sale', 'consignments.cancel_sale',\n  'production.create', 'tasks.create', 'tasks.update', 'documents.upload', 'documents.set_ocr',\n  'production.complete',\n  'purchase_inbox.create',\n  'partner_items.record_movement', 'partner_items.settle_sale', 'partner_items.offset', 'partner_items.cancel_movement',\n];"
         ),
-        "genau diese hundertvier veraendernden Namen sind freigegeben — und keiner mehr (R6C: sieben Stammdaten, vier Inventur; R6D: achtundzwanzig Geld/Steuer/Gold/Metall; R6E: acht; R6F: vierzehn; R7A: eins)"
+        "genau diese hundertacht veraendernden Namen sind freigegeben — und keiner mehr (R6C: sieben Stammdaten, vier Inventur; R6D: achtundzwanzig Geld/Steuer/Gold/Metall; R6E: acht; R6F: vierzehn; R7A: eins)"
     );
     assert!(
         registry.contains("if (spec.kind === 'mutation' && !ALLOWED_MUTATIONS.includes(op))"),

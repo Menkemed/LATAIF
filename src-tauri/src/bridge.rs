@@ -294,6 +294,12 @@ pub const OP_PRODUCTION_COMPLETE: &str = "production.complete";
 // statt eines allgemeinen Abgleich-Pushes: geprüfter Absender, Filiale, Auftragskennung, und das
 // Foto reist als Ablagekennung, nie als Bytes.
 pub const OP_PURCHASE_INBOX_CREATE: &str = "purchase_inbox.create";
+// PARTNER-ITEMS — Geld gemeinsam gekaufter Artikel: Beitrag/Auszahlung, (Nach-)Abrechnung eines
+// Verkaufs, Verrechnung zweier Artikel, Storno einer Partnerbuchung. Gebucht wird am Primary.
+pub const OP_PARTNER_ITEMS_RECORD_MOVEMENT: &str = "partner_items.record_movement";
+pub const OP_PARTNER_ITEMS_SETTLE_SALE: &str = "partner_items.settle_sale";
+pub const OP_PARTNER_ITEMS_OFFSET: &str = "partner_items.offset";
+pub const OP_PARTNER_ITEMS_CANCEL_MOVEMENT: &str = "partner_items.cancel_movement";
 
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
 // Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
@@ -480,6 +486,11 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_PRODUCTS_DUPLICATES_GET,
     // MEDIA-BUSINESS — der Posteingang des Telefons als Geschäftsauftrag.
     OP_PURCHASE_INBOX_CREATE,
+    // PARTNER-ITEMS — Geld gemeinsam gekaufter Artikel.
+    OP_PARTNER_ITEMS_RECORD_MOVEMENT,
+    OP_PARTNER_ITEMS_SETTLE_SALE,
+    OP_PARTNER_ITEMS_OFFSET,
+    OP_PARTNER_ITEMS_CANCEL_MOVEMENT,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

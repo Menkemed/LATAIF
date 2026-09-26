@@ -229,6 +229,11 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'tasks.update': null,
   'documents.upload': null,
   'documents.set_ocr': null,
+  // PARTNER-ITEMS — die Partnerseite fragt `usePermission` nicht (wie `partners.record_tx`).
+  'partner_items.record_movement': null,
+  'partner_items.settle_sale': null,
+  'partner_items.offset': null,
+  'partner_items.cancel_movement': null,
 };
 
 /**

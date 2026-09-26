@@ -90,6 +90,8 @@ await import('../../src/core/bridge/masterdata-commands.ts');
 await import('../../src/core/bridge/inventory-commands.ts');
 // R6D — Steuer/Geld, Verbindlichkeiten, Gold, Metall.
 await import('../../src/core/bridge/money-commands.ts');
+
+await import('../../src/core/bridge/partner-item-commands.ts');
 await import('../../src/core/bridge/payables-commands.ts');
 await import('../../src/core/bridge/gold-commands.ts');
 await import('../../src/core/bridge/metal-commands.ts');
@@ -215,11 +217,11 @@ const ACT = (over: Record<string, unknown> = {}) => ({
 // ── 1) Alle 59 Operationen sind namentlich gegen Rechte geprüft ──────────
 {
   const known = knownCommands();
-  ok(known.length === 177, `COVER die Registrierung zaehlt 177 Namen (PRE-G5) (${known.length})`);
+  ok(known.length === 181, `COVER die Registrierung zaehlt 181 Namen (PRE-G5 + PARTNER-ITEMS) (${known.length})`);
   const probes = known.filter((o) => o === 'bridge.probe');
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = known.filter((o) => !probes.includes(o) && !reads.includes(o));
-  ok(probes.length === 1 && reads.length === 72 && mutations.length === 104,
+  ok(probes.length === 1 && reads.length === 72 && mutations.length === 108,
     `COVER 1 Probe + 23 Auskuenfte (18 + 27 typisierte) + 40 Buchungen (${probes.length}/${reads.length}/${mutations.length})`);
 
   // JEDE Auskunft und JEDE Buchung ist bedacht. Die Probe braucht es nicht: sie liest nichts.

@@ -3967,3 +3967,21 @@ offen, nicht akzeptiert: G5
 Registry 175 → 175
 Version 0.8.54 · kein Push/Tag/Release
 ```
+
+## PARTNER-ITEMS — Geld gemeinsam gekaufter Artikel vom zweiten Rechner (26.09.2026)
+
+Gemeinsamer Einkauf mit Partnern (LATAIF + Partner je Einkaufszeile, eigenes Ausgleichskonto `PARTNER_ITEM_BALANCE`, Gewinnanteil-Aufwand `PARTNER_ITEM_PROFIT_SHARE`). Die Beteiligung reist beim Anlegen mit `purchases.create` (Feld `partnerShares` je Zeile). Die Geldhandlungen der Partnerseite sind vier neue benannte Fernbuchungen — jede ruft dieselbe Hausfolge wie die Maske des Primary (`core/partners/item-participation-house.ts`), in der Transaktion des Auftrags, mit Nachweis der Auftragskennung (Wiederholung = gespeichertes Ergebnis, eingefrorenes Nein), im exklusiven Platz der Schreibreihenfolge; offene Beträge werden INNERHALB der Transaktion geprüft.
+
+| Name | Wirkung | Recht |
+|---|---|---|
+| `partner_items.record_movement` | Beitrag/Rückzahlung (Partner → LATAIF) oder Auszahlung (LATAIF → Partner) über Kasse/Bank/Benefit; Auszahlung ≤ offen und nicht bei ausstehender Nachabrechnung | wie `partners.record_tx` (Partnerseite ohne `usePermission`) |
+| `partner_items.settle_sale` | Erstabrechnung eines voll bezahlten Verkaufs bzw. Nachabrechnung der Differenz nach Retoure/Storno/zulässiger Änderung | dito |
+| `partner_items.offset` | Verrechnung zweier Artikel desselben Partners, ohne Geld, paarweise | dito |
+| `partner_items.cancel_movement` | Storno einer Partnerbuchung als Erfassungsfehler (nur, wenn danach nichts gebucht wurde) | dito |
+
+Beweise: `test/partner-items/partner-purchase.test.ts`, `test/partner-items/partner-corrections.test.ts` (PC2: Wiederholung, Konflikt, fremde Filiale, Rumpf, gleichzeitige Aufträge Primary + PC2).
+
+```
+Registry 177 → 181 (Buchungen 104 → 108)
+kein Push/Tag/Release
+```

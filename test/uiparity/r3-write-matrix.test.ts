@@ -157,11 +157,16 @@ const MATRIX: Record<string, Zeile> = {
   // MEDIA-INBOX — das Telefon: ein Foto in den Einkaufs-Posteingang. Am Bildschirm gibt es dafuer
   // keine eigene Maske; die sichtbare Handlung ist der Knopf des Telefons.
   'purchase_inbox.create': { ui: 'Mobile — Purchase: Send photo to inbox', gleich: true },
+  // PARTNER-ITEMS — die Partnerseite, Bereich „Jointly bought items"; Beweise in test/partner-items.
+  'partner_items.record_movement': { ui: 'PartnersPage — Jointly bought items: Record contribution / Pay out', gleich: true },
+  'partner_items.settle_sale': { ui: 'PartnersPage — Jointly bought items: Settle sale / Correct settlement', gleich: true },
+  'partner_items.offset': { ui: 'PartnersPage — Jointly bought items: Offset items', gleich: true },
+  'partner_items.cancel_movement': { ui: 'PartnersPage — Jointly bought items: reverse (entry error)', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 104, `A 104 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete)) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 108, `A 108 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + vier PARTNER-ITEMS) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

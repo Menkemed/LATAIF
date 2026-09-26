@@ -452,7 +452,7 @@ for (const [weg, muster] of [['P', /UPDATE production_records SET status = 'COMP
 // ══ PP-2 §7 — Registry, Rust, Oberfläche ═════════════════════════════════════
 {
   // (Die Gesamtzahl 175 prüfen die Final-Gates mit ALLEN Befehlsmodulen; hier ist nur production-commands geladen.)
-  ok(registry.ALLOWED_MUTATIONS.at(-2) === 'production.complete' && registry.ALLOWED_MUTATIONS.length === 104
+  ok(registry.ALLOWED_MUTATIONS.at(-6) === 'production.complete' && registry.ALLOWED_MUTATIONS.length === 108
     && registry.knownCommands().includes('production.complete') && registry.knownCommands().includes('production.create'),
   `REGISTRY production.complete registriert: 103 Buchungen, angemeldet neben production.create (${registry.ALLOWED_MUTATIONS.length})`);
   ok('production.complete' in perms.OPERATION_PERMISSIONS && (perms.OPERATION_PERMISSIONS as Record<string, unknown>)['production.complete'] === null,

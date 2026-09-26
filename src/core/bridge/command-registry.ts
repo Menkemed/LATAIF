@@ -158,6 +158,10 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // eine benannte Handlung mit geprüftem Absender, Filiale, Auftragskennung und Medienreferenz.
   // Sie steht am ENDE: die Liste wächst chronologisch, und ihre Reihenfolge ist Vertrag.
   'purchase_inbox.create',
+  // PARTNER-ITEMS — Geld gemeinsam gekaufter Artikel vom zweiten Rechner: Beitrag/Auszahlung,
+  // (Nach-)Abrechnung eines Verkaufs, Verrechnung zweier Artikel, Storno einer Partnerbuchung. Alle
+  // buchen am Primary in der Transaktion des Auftrags (partner-item-commands.ts).
+  'partner_items.record_movement', 'partner_items.settle_sale', 'partner_items.offset', 'partner_items.cancel_movement',
 ];
 
 export interface CommandSpec {

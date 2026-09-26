@@ -89,6 +89,8 @@ await import('../../src/core/bridge/masterdata-commands.ts');
 await import('../../src/core/bridge/inventory-commands.ts');
 // R6D — Steuer/Geld, Verbindlichkeiten, Gold, Metall.
 await import('../../src/core/bridge/money-commands.ts');
+
+await import('../../src/core/bridge/partner-item-commands.ts');
 await import('../../src/core/bridge/payables-commands.ts');
 await import('../../src/core/bridge/gold-commands.ts');
 await import('../../src/core/bridge/metal-commands.ts');
@@ -216,14 +218,14 @@ const ACT = (over: Record<string, unknown> = {}) => ({
   const list = ALLOWED_MUTATIONS as readonly string[];
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(list.length === 104, `SCOPE genau 104 Mutationen (R6C: +7 Stammdaten, +4 Inventur; R6D: +28; R6E: +8; R6F: +14; R7A: +1 production.complete) (${list.length})`);
+  ok(list.length === 108, `SCOPE genau 108 Mutationen (R6C: +7 Stammdaten, +4 Inventur; R6D: +28; R6E: +8; R6F: +14; R7A: +1 production.complete; MEDIA-INBOX: +1; PARTNER-ITEMS: +4) (${list.length})`);
   // CENTRAL-UI-PARITY R1: dazu 48 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
   const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get', 'page.dashboard.get', 'page.invoice_list.get', 'page.order_list.get', 'page.customer_detail.get', 'page.order_detail.get', 'page.supplier_detail.get', 'page.product_detail.get', 'page.purchase_create.get', 'refs.numbers.get', 'metals.stock_by_karat.get', 'search.global.get', 'page.reconciliation.get', 'ledger.balances.get', 'finance.receivables.get', 'inventory.lot_aggregates.get', 'product.lots.get', 'product.lots.batch.get', 'expenses.credit_paid.get', 'inventory.session.get', 'inventory.checks.get', 'metals.spot_prices.get', 'debts.payments.get', 'suppliers.credits.get'].includes(o));
-  ok(known.length === 177 && reads.length === 72 && parityReads.length === 53,
-    `SCOPE 1 Probe + 19 Auskuenfte + 53 typisierte Auskuenfte + 103 Buchungen = 176 (PRE-G5) (${known.length}/${reads.length}/${parityReads.length})`);
+  ok(known.length === 181 && reads.length === 72 && parityReads.length === 53,
+    `SCOPE 1 Probe + 19 Auskuenfte + 53 typisierte Auskuenfte + 108 Buchungen = 181 (PRE-G5 + PARTNER-ITEMS) (${known.length}/${reads.length}/${parityReads.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rl = rust.slice(rust.indexOf('pub const REMOTE_OPS'), rust.indexOf('];', rust.indexOf('pub const REMOTE_OPS')));
-  ok((rl.match(/OP_[A-Z_]+/g) ?? []).length === 177, 'SCOPE Rust kennt dieselben 176 (PRE-G5)');
+  ok((rl.match(/OP_[A-Z_]+/g) ?? []).length === 181, 'SCOPE Rust kennt dieselben 181 (PRE-G5 + PARTNER-ITEMS)');
   // C4 hat NICHTS registriert.
   const mine = codeOf('src/core/bridge/command-permissions.ts') + codeOf('src/core/auth/role-permissions.ts');
   ok(!/registerCommand\(/.test(mine), 'SCOPE C4 registriert keine einzige Operation');
