@@ -445,9 +445,14 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       ? ((query('SELECT status FROM invoices WHERE id = ?', [id])[0]?.status as string) || null)
       : null;
     // VAT-PERIOD-LOCK — Rückfallnetz für diesen alten Direktweg: an einer gemeldeten Rechnung sind nur
-    // Felder ohne Exportwirkung frei (Notiz, Fälligkeit, Mitarbeiter, Butterfly).
+    // Felder ohne Exportwirkung frei (Notiz, Fälligkeit, Mitarbeiter). Butterfly entscheidet über die
+    // Export-Zugehörigkeit: dieselbe Vorher/Nachher-Prüfung wie der Schalter (`setInvoiceButterflyInHouse`).
     if (Object.keys(data).some(k => !['notes', 'dueAt', 'staffId', 'butterfly'].includes(k))) {
       assertInvoiceNotInClosedVatQuarter(id);
+    }
+    if (typeof data.butterfly === 'boolean') {
+      assertVatUnchanged(String(query('SELECT branch_id FROM invoices WHERE id = ?', [id])[0]?.branch_id ?? ''),
+        vatFingerprint(id), vatFingerprint(id, { butterfly: data.butterfly }));
     }
     const fields: string[] = [];
     const values: unknown[] = [];

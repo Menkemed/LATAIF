@@ -82,12 +82,18 @@ function customerIdentity(c: Record<string, unknown> | undefined): { name: strin
   };
 }
 
-/** Was der NBR-Export von dieser Rechnung zeigt; `null`, wenn sie dort nicht steht (nicht FINAL). */
-export function vatFingerprint(invoiceId: string): VatFingerprint | null {
+/**
+ * Was der NBR-Export von dieser Rechnung zeigt; `null`, wenn sie dort nicht steht (nicht FINAL, oder
+ * Butterfly — die fällt aus der Export-Vorauswahl). `opts.butterfly` fragt „und wenn die Marke SO
+ * stünde?" — damit prüft das Umschalten die Export-Zugehörigkeit vorher/nachher, bevor es schreibt.
+ */
+export function vatFingerprint(invoiceId: string, opts?: { butterfly?: boolean }): VatFingerprint | null {
   const inv = query(
-    'SELECT id, invoice_number, customer_id, status, issued_at, created_at FROM invoices WHERE id = ?', [invoiceId],
+    'SELECT id, invoice_number, customer_id, status, issued_at, created_at, butterfly FROM invoices WHERE id = ?', [invoiceId],
   )[0];
   if (!inv || String(inv.status) !== 'FINAL') return null;
+  const butterfly = opts?.butterfly ?? Number(inv.butterfly ?? 0) === 1;
+  if (butterfly) return null;
   const pays = query('SELECT amount, method, received_at FROM payments WHERE invoice_id = ? ORDER BY received_at, id', [invoiceId])
     .map((p) => ({ amount: r3(p.amount), method: String(p.method), receivedAt: String(p.received_at) }));
   const iso = invoiceFinalizationDate(

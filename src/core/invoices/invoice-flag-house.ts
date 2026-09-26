@@ -18,6 +18,7 @@ import { trackUpdate } from '@/core/sync/track';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { InvoiceActionRejected } from './invoice-cancel';
 import { assertInvoiceHouse, localInvoiceBranch } from './invoice-house-guards';
+import { assertVatUnchanged, vatFingerprint } from '@/core/tax/vat-period-lock';
 
 export interface InvoiceButterflySet {
   invoiceId: string;
@@ -49,6 +50,11 @@ export function setInvoiceButterflyInHouse(
   if ((Number(inv.butterfly ?? 0) === 1) === butterfly) {
     return { invoiceId, butterfly, revision: seen, changed: false };
   }
+  // VAT-PERIOD-LOCK — Butterfly entscheidet, ob die Rechnung im NBR-Export steht. In einem
+  // eingereichten oder VAT-bezahlten Quartal darf sie weder hinein- noch herausfallen; im offenen
+  // Quartal bleibt der Schalter frei. Geprüft wird die Export-Zugehörigkeit vorher/nachher, vor dem
+  // Schreiben (`VatPeriodFiled` ist ein `InvoiceActionRejected` → PC2 friert das Nein ein).
+  assertVatUnchanged(branchId, vatFingerprint(invoiceId), vatFingerprint(invoiceId, { butterfly }));
   getDatabase().run('UPDATE invoices SET butterfly = ?, updated_at = ? WHERE id = ?',
     [butterfly ? 1 : 0, new Date().toISOString(), invoiceId]);
   trackUpdate('invoices', invoiceId, { butterfly });

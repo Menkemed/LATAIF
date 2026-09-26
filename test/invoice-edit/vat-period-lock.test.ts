@@ -623,5 +623,58 @@ const code = (m: string): string => m.split('|')[0];
     '13g Hauptbuch unberührt; die Übersicht liest die Summen aus dem Export (nbrMonthTotals), keine zweite Steuerlogik');
 }
 
+// ══ 14) Butterfly — die Export-Zugehörigkeit einer gemeldeten Rechnung bleibt ══
+{
+  const { setInvoiceButterflyInHouse } = await import('../../src/core/invoices/invoice-flag-house.ts');
+  const { runSetButterfly } = await import('../../src/core/bridge/invoice-flag-commands.ts');
+  const bf = (id: string): number => n(DB, 'SELECT COALESCE(butterfly, 0) FROM invoices WHERE id = ?', [id]);
+  const setzen = (id: string, an: boolean): string => { const m = meldung(() => imHaus(() => setInvoiceButterflyInHouse(id, an, 'branch-main'))); reload(); return m; };
+
+  const vorA = stand(A.inv); const fpA = fp(A.inv);
+  const mA = setzen(A.inv, true);
+  ok(code(mA) === VAT_PERIOD_FILED && bf(A.inv) === 0 && stand(A.inv) === vorA && fp(A.inv) === fpA,
+    `14a eingereichtes Q2: Butterfly AN nähme A aus dem Export — abgewiesen, Marke bleibt aus (${code(mA)})`);
+  const mD = setzen(D.inv, true);
+  ok(code(mD) === VAT_PERIOD_FILED && bf(D.inv) === 0 && /already paid/.test(mD),
+    `14b VAT-bezahltes Q1: Butterfly AN abgewiesen („…already paid…")`);
+
+  // Eine Rechnung, die schon Butterfly war (nie gemeldet), in Q2 voll bezahlt: AUS brächte sie HINEIN.
+  product(DB, 'pK', 1); reload();
+  const K = bezahlt('pK', '2026-05-02', '2026-05-20T12:00:00.000Z');
+  DB.run('UPDATE invoices SET butterfly = 1 WHERE id = ?', [K.inv]); reload();
+  ok(vatFingerprint(K.inv) === null && vatFingerprint(K.inv, { butterfly: false })?.quarter === '2026-Q2',
+    'SETUP K: Butterfly, in Q2 voll bezahlt — steht nicht im Export (kein Fingerabdruck)');
+  const mK = setzen(K.inv, false);
+  ok(code(mK) === VAT_PERIOD_FILED && bf(K.inv) === 1,
+    `14c eingereichtes Q2: Butterfly AUS brächte K in den Export — abgewiesen, Marke bleibt an (${code(mK)})`);
+
+  // Offenes Quartal: frei in beide Richtungen.
+  const m1 = setzen(B.inv, true); const an = bf(B.inv);
+  const m2 = setzen(B.inv, false);
+  ok(m1 === '' && an === 1 && m2 === '' && bf(B.inv) === 0, `14d offenes Q3: Butterfly an und wieder aus — erlaubt (${m1}|${m2})`);
+
+  // Der alte Store-Weg prüft dasselbe.
+  const mU = meldung(() => imHaus(() => useInvoiceStore.getState().updateInvoice(A.inv, { butterfly: true } as never)));
+  reload();
+  ok(code(mU) === VAT_PERIOD_FILED && bf(A.inv) === 0, `14e updateInvoice({ butterfly }) an A: ebenso abgewiesen (${code(mU)})`);
+
+  // PC2: endgültiges Nein.
+  const d = {
+    db: DB as never, begin: posting.beginLedgerTransaction, commit: posting.commitLedgerTransaction,
+    rollback: posting.rollbackLedgerTransaction, durableSave: async () => { /* test */ }, now: () => NOW,
+  };
+  const ID = (x: string): string => `${x.padStart(8, '0')}-0000-4000-8000-000000000000`;
+  const ident = (x: string, op: string) => ({ commandId: ID(x), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', role: 'ADMIN', op, payloadKind: 'x', payloadHash: 'h' + x });
+  const rev = n(DB, 'SELECT revision FROM invoices WHERE id = ?', [A.inv]);
+  const r = await runSetButterfly(d as never, ident('b1', 'invoices.set_butterfly') as never, { invoiceId: A.inv, expectedRevision: rev, butterfly: true }) as { kind: string; code?: string; frozen?: boolean };
+  const revB = n(DB, 'SELECT revision FROM invoices WHERE id = ?', [B.inv]);
+  const rOk = await runSetButterfly(d as never, ident('b2', 'invoices.set_butterfly') as never, { invoiceId: B.inv, expectedRevision: revB, butterfly: true }) as { kind: string };
+  reload();
+  ok(r.kind === 'rejected' && r.code === VAT_PERIOD_FILED && r.frozen === true && bf(A.inv) === 0 && rOk.kind === 'ok' && bf(B.inv) === 1,
+    `14f PC2 invoices.set_butterfly: an A endgültig abgewiesen (${r.kind}:${r.code}), an B (offen) erlaubt (${rOk.kind})`);
+  const snapQ2 = JSON.parse(s(DB, 'SELECT snapshot_json FROM vat_filings WHERE year = 2026 AND quarter = 2'));
+  ok(!snapQ2.invoices.some((x: { invoiceId: string }) => x.invoiceId === K.inv), '14g …der Q2-Snapshot enthält die Butterfly-Rechnung K nicht (wie der Export)');
+}
+
 console.log(`\nvat-period-lock: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);
