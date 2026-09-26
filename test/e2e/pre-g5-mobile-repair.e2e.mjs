@@ -75,13 +75,8 @@ const RV = { create: false, edit: false, lostAnswer: false, staleEdit: false, bo
 let edgeProc = null;
 const aufraeumen = () => {
   try { killOwnChild(edgeProc); } catch { /* schon weg */ }
-  // Liegengebliebene Test-Browser DIESER Testreihe (erkennbar am eigenen Profilverzeichnis) — ein
-  // fremder Edge wird nie angefasst.
-  try {
-    execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
-      'Get-CimInstance Win32_Process -Filter "Name=\'msedge.exe\'" | Where-Object { $_.CommandLine -match "lataif-preg5" } | ForEach-Object { try { Stop-Process -Id $_.ProcessId -Force -ErrorAction Stop } catch {} }'],
-    { encoding: 'utf8', windowsHide: true, timeout: 30000 });
-  } catch { /* kein Test-Browser da */ }
+  // Nur der EIGENE Test-Browser (PID + Startpfad geprüft, samt Prozessbaum) — nie nach Name oder
+  // Befehlszeile: jeder Lauf hat ein eigenes Profil unter RUN, ein Rest eines früheren Laufs stört nicht.
   killStarted(); killTestImage('lataif.exe'); killTestImage('lataif-e2e-client.exe');
 };
 const WACHHUND = setTimeout(() => {

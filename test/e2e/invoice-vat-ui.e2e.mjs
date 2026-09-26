@@ -9,7 +9,7 @@ import { DatabaseSync } from 'node:sqlite';
 
 const REPO = process.cwd();
 import { e2ePreflight } from './_e2e-preflight.mjs';
-import { killTestImage, spawnTracked, testProcesses } from "./_e2e-process.mjs";
+import { killTestImage, spawnTracked, testProcesses } from './_e2e-process.mjs';
 
 const APP = join(REPO, 'src-tauri/target/debug/lataif.exe');
 const SEED = join(REPO, 'src-tauri/target/debug/examples/e2e_scope_seed.exe');
