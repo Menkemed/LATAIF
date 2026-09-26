@@ -67,6 +67,8 @@ const LEGACY_LOCAL_NON_SYNC = new Set<string>([
   'user_branches', 'users',
   // VAT-PERIOD-LOCK — the explicit "VAT filed" record: written on the primary only, like tax_payments; never synced.
   'vat_filings',
+  // PARTNER-ITEMS — joint-purchase shares and partner item money: primary-only like vat_filings; never synced.
+  'item_participations', 'item_partner_movements',
   // MOBILE-04B2A2 — local cross-DB source binding for the mobile upload drain worker; never synced.
   'mobile_upload_receipts',
 ]);
@@ -101,7 +103,7 @@ for (let i = 0; i < names.length; i++) for (let j = i + 1; j < names.length; j++
 // §1 — semantic contracts, from independent sources
 ok(LEGACY_SYNC_APPLY.size === 53, `legacy_sync_apply = 53 sync allowlist tables (got ${LEGACY_SYNC_APPLY.size})`);
 for (const t of LEGACY_SYNC_APPLY) ok(actualLegacy.has(t), `sync_apply table ${t} is present in the legacy DDL`);
-ok(LEGACY_LOCAL_NON_SYNC.size === 24, `legacy_local_non_sync = 24 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
+ok(LEGACY_LOCAL_NON_SYNC.size === 26, `legacy_local_non_sync = 26 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
 ok(DEPRECATED_OR_UNREACHABLE_DDL.size === 0, 'deprecated_or_unreachable_ddl is empty (nothing unreachable)');
 
 // media: scanner sees them (anti-hiding), they equal MEDIA_TABLES, none is synced

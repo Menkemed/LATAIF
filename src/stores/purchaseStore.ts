@@ -25,6 +25,9 @@ import {
   hasLedgerEntries,
 } from '@/core/ledger/posting';
 import { atomar, localHouseCtx, recordPurchasePaymentInHouse } from '@/core/payables/payables-house';
+// PARTNER-ITEMS — gemeinsamer Einkauf: Beteiligung je Einkaufszeile.
+import { insertLineParticipations, participationsOfPurchase } from '@/core/partners/item-participation-house';
+import type { PartnerShareInput } from '@/core/partners/item-participation';
 // CENTRAL-UI-PARITY R6F — Retoure (Anlage + Wirkung), Storno, Retouren-Umkehr, Inbox-Verwerfen und
 // der Auftrags-Rollup wohnen jetzt in der Hausfolge des Einkaufs-Lebenszyklus (ohne Store-Import);
 // die Store-Aktionen hier sind nur noch ihre Altanschluesse — EINE Implementierung.
@@ -82,6 +85,8 @@ interface PurchaseInput {
     vatRate?: number;          // 0 oder 10
     // Back-to-Back: verknuepft diese Zeile mit der Order-Zeile, die sie ausgeloest hat.
     sourceOrderLineId?: string;
+    // PARTNER-ITEMS — gemeinsam gekauft: die Partner und ihre Anteile (LATAIF haelt den Rest).
+    partnerShares?: PartnerShareInput[];
   }>;
   initialPayment?: { amount: number; method: 'cash' | 'bank' | 'benefit'; reference?: string };
   // Back-to-Back: Order, deren Posten dieser Einkauf (mit-)beschafft.
@@ -358,6 +363,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       qty: number; unitPrice: number; lineTotal: number; position: number;
       taxScheme: 'ZERO' | 'VAT_10'; vatRate: number; vatAmount: number;
       sourceOrderLineId: string | null;
+      partnerShares?: PartnerShareInput[];
     }> = [];
     let total = 0;
     // Bestehende (nicht in diesem Purchase neu angelegte) Produkte — fuer die
@@ -408,6 +414,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
         qty, unitPrice, lineTotal, position: idx + 1,
         taxScheme: scheme, vatRate: rate, vatAmount,
         sourceOrderLineId: ln.sourceOrderLineId ?? null,
+        partnerShares: ln.partnerShares,
       });
     });
 
@@ -480,6 +487,12 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       lineStmt.run([l.id, id, l.productId, l.description, l.qty, l.unitPrice, l.lineTotal, l.position, l.taxScheme, l.vatRate, l.vatAmount, l.sourceOrderLineId]);
     }
     lineStmt.free();
+
+    // PARTNER-ITEMS — Beteiligung je gemeinsam gekaufter Zeile, in derselben Klammer wie Beleg und
+    // Zeilen (scheitert sie, gibt es den Einkauf nicht). Zeilen ohne Partner: nichts, wie bisher.
+    insertLineParticipations({ branchId, userId, now }, id, lineRecords.map((l) => ({
+      lineId: l.id, productId: l.productId || null, lineTotal: l.lineTotal, quantity: l.qty, partnerShares: l.partnerShares,
+    })));
 
     // Phase 2 — Stock-Lots: Pro Purchase-Line ein Lot mit dem TATSAECHLICHEN
     // Einkaufspreis dieser Charge. Existing-Item-Purchase legt einen frischen
@@ -697,6 +710,9 @@ export function loadPurchasesFor(ctx: BusinessReadContext): { purchases: Purchas
     const p = rowToPurchase(r);
     p.lines = query('SELECT * FROM purchase_lines WHERE purchase_id = ? ORDER BY position', [p.id]).map(rowToLine);
     p.payments = query('SELECT * FROM purchase_payments WHERE purchase_id = ? ORDER BY paid_at ASC, created_at ASC', [p.id]).map(rowToPayment);
+    // PARTNER-ITEMS — die Beteiligten gemeinsam gekaufter Zeilen (fehlt, wenn allein gekauft).
+    const parts = participationsOfPurchase(p.id, ctx.branchId);
+    if (parts.length > 0) p.participations = parts;
     return p;
   });
   return { purchases };

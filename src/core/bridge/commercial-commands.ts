@@ -273,6 +273,21 @@ function oneOf<T extends string>(v: unknown, list: readonly T[], fallback: T, na
   return s as T;
 }
 
+/** PARTNER-ITEMS — je Zeile die Partner und ihre Anteile; die Anteilsregel prüft danach die Vorbereitung. */
+function parsePartnerShares(v: unknown, i: number): Array<{ partnerId: string; sharePct: number }> | undefined {
+  if (v === undefined || v === null) return undefined;
+  if (!Array.isArray(v)) throw new CommercialPayloadError(`line ${i + 1}: partnerShares must be a list`);
+  if (v.length > 20) throw new CommercialPayloadError(`line ${i + 1}: too many partners`);
+  return v.map((s, k) => {
+    if (!isPlain(s)) throw new CommercialPayloadError(`line ${i + 1}: partner share ${k + 1} must be an object`);
+    onlyKnownFields(s, ['partnerId', 'sharePct']);
+    if (typeof s.sharePct !== 'number' || !Number.isFinite(s.sharePct)) {
+      throw new CommercialPayloadError(`line ${i + 1}: partner share ${k + 1} needs a number`);
+    }
+    return { partnerId: reqString(s.partnerId, `line ${i + 1}: partnerId`), sharePct: s.sharePct };
+  });
+}
+
 export interface PurchaseCreateRequest extends PurchaseCreateInput {
   /** Je Zeile der Entwurf mit den Kennungen seiner Fotos. */
   specs: Array<{ spec: Partial<Product>; stagingIds?: string[] } | undefined>;
@@ -299,7 +314,7 @@ export function parsePurchaseCreate(raw: unknown): PurchaseCreateRequest {
   const specs: PurchaseCreateRequest['specs'] = [];
   const lines = raw.lines.map((l, i) => {
     if (!isPlain(l)) throw new CommercialPayloadError(`line ${i + 1} must be an object`);
-    onlyKnownFields(l, ['mode', 'productId', 'newProduct', 'brand', 'name', 'sku', 'categoryId', 'quantity', 'unitPrice', 'sourceOrderLineId']);
+    onlyKnownFields(l, ['mode', 'productId', 'newProduct', 'brand', 'name', 'sku', 'categoryId', 'quantity', 'unitPrice', 'sourceOrderLineId', 'partnerShares']);
     const productId = optString(l.productId, `line ${i + 1}: productId`);
     const spec = parseSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS, `line ${i + 1}: newProduct`);
     specs.push(spec);
@@ -315,6 +330,7 @@ export function parsePurchaseCreate(raw: unknown): PurchaseCreateRequest {
       // Ein Einkaufspreis von 0 ist eine gültige Aussage (Geschenk, Beigabe) — negativ nicht.
       unitPrice: money(l.unitPrice, `line ${i + 1}: unitPrice`),
       sourceOrderLineId: optString(l.sourceOrderLineId, `line ${i + 1}: sourceOrderLineId`),
+      partnerShares: parsePartnerShares(l.partnerShares, i),
     };
   });
   // Die Anzahlung: der Rumpf der Maske (`paymentAmount`/`paymentMethod`) oder der alte (`initialPayment`).

@@ -62,6 +62,7 @@ const ALL_ACCOUNTS: LedgerAccount[] = [
   'PARTNER_EQUITY', 'EXPENSES_OPERATING',
   'TAX_PAID', 'INTERNAL_TRANSFER',
   'CANCELLATION_FEE_INCOME',
+  'PARTNER_ITEM_BALANCE', 'PARTNER_ITEM_PROFIT_SHARE',
 ];
 
 const fmt = (n: number) => n.toFixed(3);

@@ -89,7 +89,14 @@ export type LedgerAccount =
   // M-12 Phase 1 — Eigenkapital-Gegenkonto fuer Opening-Balances (Geschaeftsstart-
   // Bestand auf CASH/BANK/BENEFIT). CREDIT-natur (Equity); wird NIE als Cash-Konto
   // gelesen, dient nur als Gegenbuchung damit balanceOf('CASH'/...) das Opening enthaelt.
-  | 'OPENING_BALANCE_EQUITY';
+  | 'OPENING_BALANCE_EQUITY'
+  // PARTNER-ITEMS — Artikelbeteiligung eines Partners (gemeinsamer Einkauf). CREDIT-natur: positiv =
+  // die Firma schuldet dem Partner (Beitrag + Gewinnanteil − Auszahlung). Getrennt vom
+  // Gesellschafterkapital (PARTNER_EQUITY), das unberuehrt bleibt.
+  | 'PARTNER_ITEM_BALANCE'
+  // PARTNER-ITEMS — der Gewinnanteil des Partners an einem abgerechneten Verkauf (Aufwand, DEBIT-natur;
+  // ein Verlustanteil steht im Haben). Der Artikelgewinn selbst bleibt nach den Regeln des ERP gebucht.
+  | 'PARTNER_ITEM_PROFIT_SHARE';
 
 export type LedgerDirection = 'DEBIT' | 'CREDIT';
 
@@ -113,6 +120,8 @@ export type SourceModule =
   | 'METAL_PAYMENT'
   | 'BANK_TRANSFER'
   | 'PARTNER_TX'
+  // PARTNER-ITEMS — Beitrag, Auszahlung, Gewinnanteil einer Artikelbeteiligung (item_partner_movements.id).
+  | 'PARTNER_ITEM'
   | 'TAX_PAYMENT'
   | 'STOCK_ADJUST'
   | 'SCRAP_TRADE'
@@ -2139,6 +2148,53 @@ export function postPartnerTransaction(tx: PartnerTxLike): PostingResult {
 
 export function postPartnerTransactionReversed(txId: string): PostingResult {
   return reverseSource('PARTNER_TX', txId, new Date().toISOString());
+}
+
+// ── Artikelbeteiligung eines Partners (PARTNER-ITEMS) ─────────
+//
+//   CONTRIBUTION : DEBIT cash/bank/benefit   / CREDIT PARTNER_ITEM_BALANCE   (Partner gibt der Firma Geld)
+//   PAYOUT       : DEBIT PARTNER_ITEM_BALANCE / CREDIT cash/bank/benefit     (Firma zahlt dem Partner aus)
+//   PROFIT_SHARE : Gewinn  DEBIT PARTNER_ITEM_PROFIT_SHARE / CREDIT PARTNER_ITEM_BALANCE
+//                  Verlust DEBIT PARTNER_ITEM_BALANCE      / CREDIT PARTNER_ITEM_PROFIT_SHARE
+//   PROFIT_CORRECTION : wie PROFIT_SHARE, nur die Differenz einer Nachabrechnung (am Tag der Korrektur)
+//   OFFSET       : keine Buchung — Verrechnung zweier Artikel DESSELBEN Partners auf demselben Konto
+//
+// Einkauf, Lieferantenschuld, Umsatz, VAT und Wareneinsatz bleiben unveraendert — der Partner steht
+// nur auf seinem eigenen Ausgleichskonto. Ein Gewinnanteil von 0 bucht nichts.
+
+export interface ItemPartnerMovementLike {
+  id: string;
+  partnerId: string;
+  kind: 'CONTRIBUTION' | 'PAYOUT' | 'PROFIT_SHARE' | 'PROFIT_CORRECTION';
+  /** CONTRIBUTION/PAYOUT: > 0. PROFIT_SHARE: vorzeichenbehaftet (Verlust < 0). */
+  amount: number;
+  method?: 'cash' | 'bank' | 'benefit' | null;
+  occurredAt: string;
+  purchaseLineId: string;
+  invoiceLineId?: string | null;
+}
+
+export function postItemPartnerMovement(m: ItemPartnerMovementLike): PostingResult | null {
+  const amount = ROUND(Math.abs(m.amount));
+  const meta = { kind: m.kind, purchaseLineId: m.purchaseLineId, invoiceLineId: m.invoiceLineId ?? undefined };
+  const leg = (account: LedgerAccount, direction: LedgerDirection): LedgerEntryInput => ({
+    account, direction, amount, counterpartyType: 'PARTNER', counterpartyId: m.partnerId, metadata: meta,
+  });
+  let entries: LedgerEntryInput[];
+  if (m.kind === 'PROFIT_SHARE' || m.kind === 'PROFIT_CORRECTION') {
+    if (amount === 0) return null;
+    entries = m.amount > 0
+      ? [leg('PARTNER_ITEM_PROFIT_SHARE', 'DEBIT'), leg('PARTNER_ITEM_BALANCE', 'CREDIT')]
+      : [leg('PARTNER_ITEM_BALANCE', 'DEBIT'), leg('PARTNER_ITEM_PROFIT_SHARE', 'CREDIT')];
+  } else {
+    if (amount <= 0 || m.amount <= 0) throw new Error(`postItemPartnerMovement: amount must be > 0 (got ${m.amount})`);
+    const cashAcc: LedgerAccount | null = m.method === 'cash' ? 'CASH' : m.method === 'benefit' ? 'BENEFIT' : m.method === 'bank' ? 'BANK' : null;
+    if (!cashAcc) throw new Error(`postItemPartnerMovement: ${m.kind} needs a cash source (got ${String(m.method)})`);
+    entries = m.kind === 'CONTRIBUTION'
+      ? [leg(cashAcc, 'DEBIT'), leg('PARTNER_ITEM_BALANCE', 'CREDIT')]
+      : [leg('PARTNER_ITEM_BALANCE', 'DEBIT'), leg(cashAcc, 'CREDIT')];
+  }
+  return postEntries(entries, { occurredAt: m.occurredAt, sourceModule: 'PARTNER_ITEM', sourceId: m.id });
 }
 
 // ── Repair Payment (Customer-Charge ohne Invoice) ────────────

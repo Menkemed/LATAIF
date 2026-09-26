@@ -1292,6 +1292,14 @@ export interface Purchase {
   supplier?: Supplier;
   // Back-to-Back Beschaffung: Order, deren Posten dieser Einkauf (mit-)beschafft.
   sourceOrderId?: UUID;
+  // PARTNER-ITEMS — gemeinsam gekaufte Zeilen: LATAIF + Partner mit Anteil und Kostenanteil (leer = allein).
+  participations?: PurchaseLineParticipation[];
+}
+
+/** PARTNER-ITEMS — die Beteiligten einer gemeinsam gekauften Einkaufszeile. */
+export interface PurchaseLineParticipation {
+  purchaseLineId: UUID;
+  parties: Array<{ party: 'HOUSE' | 'PARTNER'; partnerId: UUID | null; name: string; active: boolean; sharePct: number; costShare: number }>;
 }
 
 // Purchase Return (Plan §Purchase Returns §17)

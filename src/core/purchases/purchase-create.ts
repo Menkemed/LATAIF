@@ -9,6 +9,7 @@
 // Verbindlichkeit, Buchung bleiben dort. Der Anschluss ans Haus steht in `purchase-house`.
 // ════════════════════════════════════════════════════════════════════════════
 import type { Product } from '@/core/models/types';
+import { F, PartnerItemRejected, planLineParticipation, type PartnerShareInput } from '@/core/partners/item-participation';
 import {
   EMBEDDED_PRODUCT_FIELDS, checkEmbeddedProduct, pickProductSpec, stageSpecImages, type EmbeddedProductPort,
 } from '@/core/products/embedded-product';
@@ -38,6 +39,8 @@ export interface PurchaseDraftLine {
   /** Brutto pro Stück — was an den Lieferanten gezahlt wird. */
   unitPrice: number;
   sourceOrderLineId?: string;
+  /** PARTNER-ITEMS — gemeinsam gekauft: Partner und Anteile; LATAIF hält den Rest. Leer = allein. */
+  partnerShares?: PartnerShareInput[];
 }
 
 /** Die EINGABEN der Anlegemaske. */
@@ -68,6 +71,15 @@ export function purchaseCreateIssue(input: PurchaseCreateInput): { code: string;
   if (bad !== -1) {
     return { code: 'LINE_INVALID', message: `Line ${bad + 1}: Brand+Name (oder Product) + Qty > 0 + Price ≥ 0 erforderlich` };
   }
+  for (let i = 0; i < input.lines.length; i++) {
+    const l = input.lines[i];
+    if (!l.partnerShares || l.partnerShares.length === 0) continue;
+    try { planLineParticipation(l.partnerShares, F((l.quantity || 0) * (l.unitPrice || 0))); }
+    catch (e) {
+      if (e instanceof PartnerItemRejected) return { code: e.code, message: `Line ${i + 1}: ${e.message}` };
+      throw e;
+    }
+  }
   const total = purchaseTotal(input.lines);
   if (input.paymentAmount < 0) return { code: 'PAYMENT_NEGATIVE', message: 'Payment cannot be negative' };
   if (input.paymentAmount > total) {
@@ -91,6 +103,8 @@ export interface PurchaseCreatePort extends EmbeddedProductPort {
   orderExists(id: string): boolean;
   orderLineOf(lineId: string): string | undefined;
   inboxExists(id: string): boolean;
+  /** PARTNER-ITEMS — ein aktiver Partner dieser Filiale (nur aktive bekommen eine neue Beteiligung). */
+  partnerActive(id: string): boolean;
 }
 
 /**
@@ -125,13 +139,19 @@ export function planPurchaseCreate(input: PurchaseCreateInput, port: PurchaseCre
         throw new PurchaseActionRejected('ORDER_LINE_NOT_ON_ORDER', 'this order line does not belong to the order');
       }
     }
+    for (const s of l.partnerShares ?? []) {
+      if (!port.partnerActive(s.partnerId)) throw new PurchaseActionRejected('PARTNER_NOT_ACTIVE', 'this partner is not an active partner of this branch');
+    }
+    const partnerShares = l.partnerShares && l.partnerShares.length > 0
+      ? l.partnerShares.map((s) => ({ partnerId: s.partnerId, sharePct: s.sharePct }))
+      : undefined;
     if (l.mode === 'existing') {
       if (!l.productId || !port.productPickable(l.productId)) {
         throw new PurchaseActionRejected('PRODUCT_NOT_FOUND', `no such product in this branch: ${l.productId ?? ''}`);
       }
       return {
         productId: l.productId, quantity: l.quantity, unitPrice: l.unitPrice,
-        taxScheme: input.taxScheme, vatRate: inputVatRate, sourceOrderLineId: l.sourceOrderLineId,
+        taxScheme: input.taxScheme, vatRate: inputVatRate, sourceOrderLineId: l.sourceOrderLineId, partnerShares,
       };
     }
     const picked = pickProductSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS);
@@ -150,6 +170,7 @@ export function planPurchaseCreate(input: PurchaseCreateInput, port: PurchaseCre
       taxScheme: input.taxScheme,
       vatRate: inputVatRate,
       sourceOrderLineId: l.sourceOrderLineId,
+      partnerShares,
     };
   });
   return {
@@ -176,6 +197,9 @@ export async function purchaseCreateBody(
     if (l.productId) line.productId = l.productId;
     if (l.newProduct) line.newProduct = await stageSpecImages(pickProductSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS), stage);
     if (l.sourceOrderLineId) line.sourceOrderLineId = l.sourceOrderLineId;
+    if (l.partnerShares && l.partnerShares.length > 0) {
+      line.partnerShares = l.partnerShares.map((s) => ({ partnerId: s.partnerId, sharePct: s.sharePct }));
+    }
     lines.push(line);
   }
   const body: Record<string, unknown> = {

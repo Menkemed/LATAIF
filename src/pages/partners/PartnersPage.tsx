@@ -20,6 +20,8 @@ import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { savePartnerCreate, savePartnerUpdate } from '@/core/masterdata/masterdata-save';
 import { savePartnerTx } from '@/core/finance/money-save';
+// PARTNER-ITEMS — Beteiligungen an gemeinsam gekauften Artikeln (eigenes Ausgleichskonto).
+import { PartnerItemsPanel, openText } from '@/components/partners/PartnerItemsPanel';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -28,7 +30,7 @@ function fmt(v: number): string {
 type TxKind = 'INVESTMENT' | 'WITHDRAWAL' | 'PROFIT_DISTRIBUTION';
 
 export function PartnersPage() {
-  const { partners, transactions, loadPartners, loadTransactions, deletePartner, deleteTransaction } = usePartnerStore();
+  const { partners, itemOverview, transactions, loadPartners, loadTransactions, deletePartner, deleteTransaction } = usePartnerStore();
   // CENTRAL-UI-PARITY R6C — Partner anlegen/ändern: am Primary die Hausfunktion, auf PC2
   // `partners.create` / `partners.update`. R6D — die Partnerbewegungen (Einlage, Entnahme,
   // Gewinnausschüttung) ebenso: am Primary die Hausfolge, auf PC2 `partners.record_tx`.
@@ -159,6 +161,17 @@ export function PartnersPage() {
                 </div>
               </div>
 
+              {/* PARTNER-ITEMS — Gesamtsaldo der Artikelbeteiligungen (getrennt vom Kapital oben). */}
+              {(() => {
+                const items = itemOverview.find(o => o.partnerId === p.id);
+                if (!items) return null;
+                return (
+                  <div style={{ fontSize: 12, color: items.openTotal >= 0 ? '#7B4AAA' : '#DC2626', marginBottom: 12 }} data-partner-card-items={p.id}>
+                    Jointly bought items ({items.items.length}): {openText(items.openTotal, p.name)}
+                  </div>
+                );
+              })()}
+
               <div className="flex gap-2" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE', flexWrap: 'wrap' }}>
                 <Button variant="secondary" onClick={() => openTx(p.id, 'INVESTMENT')} data-partner-tx-open="INVESTMENT"><TrendingUp size={12} /> Invest</Button>
                 <Button variant="secondary" onClick={() => openTx(p.id, 'WITHDRAWAL')} data-partner-tx-open="WITHDRAWAL"><TrendingDown size={12} /> Withdraw</Button>
@@ -191,6 +204,8 @@ export function PartnersPage() {
           ))}
         </div>
       )}
+
+      <PartnerItemsPanel overview={itemOverview} />
 
       {/* New Partner */}
       <Modal open={showNewPartner} onClose={() => setShowNewPartner(false)} title="New Partner" width={460}>

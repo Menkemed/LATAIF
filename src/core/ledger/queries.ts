@@ -50,6 +50,8 @@ const NATURAL_DEBIT: Set<LedgerAccount> = new Set([
   // Gold-Credit-Clearing: Bruecke Buch B (Gold-Gewicht) → Buch A (BHD). Asset/DEBIT-natur.
   // DR beim Konvertieren eines Gold-Credits in BHD-Store-Guthaben (Gegenseite CR CUSTOMER_CREDIT).
   'GOLD_CREDIT_CLEARING',
+  // PARTNER-ITEMS — Gewinnanteil eines Partners an einem abgerechneten Verkauf (Aufwand).
+  'PARTNER_ITEM_PROFIT_SHARE',
 ]);
 
 function naturalSign(account: LedgerAccount): 1 | -1 {

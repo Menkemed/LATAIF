@@ -144,7 +144,7 @@ export function BusinessReportsPage() {
   const { expenses, loadExpenses, getTotalsByCategory } = useExpenseStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
   const { customers, loadCustomers } = useCustomerStore();
-  const { partners, loadPartners } = usePartnerStore();
+  const { partners, itemOverview, loadPartners } = usePartnerStore();
   const { purchases, loadPurchases } = usePurchaseStore();
   const { returns: salesReturns, loadReturns: loadSalesReturns } = useSalesReturnStore();
   const { employees, loadEmployees } = useEmployeeStore();
@@ -233,6 +233,24 @@ export function BusinessReportsPage() {
     const margin = salesReport.gross > 0 ? (profit / salesReport.gross) * 100 : 0;
     return { profit, cost, margin };
   }, [filteredInvoices, salesReport.gross, categoryFilter, products, salesReturns, periodRange]);
+
+  // PARTNER-ITEMS — gemeinsam gekaufte Artikel in derselben Realisierungsregel (voll bezahlte
+  // Rechnungen, Rechnungsdatum in der Periode). „Total Profit" oben behält seine Bedeutung und
+  // enthält den VOLLEN Artikelgewinn; die Partneranteile werden hier einmal ausgewiesen — aus der
+  // Verkaufsgrundlage, NICHT zusätzlich aus dem gebuchten Partneraufwand (kein Bericht liest das
+  // Aufwandskonto der Partner-Gewinnanteile), damit nichts doppelt abgezogen wird.
+  const jointProfit = useMemo(() => {
+    const profitByLine = new Map<string, number>();
+    let partnerShares = 0, released = 0;
+    for (const p of itemOverview) for (const it of p.items) for (const s of it.sales) {
+      if (s.invoiceStatus !== 'FINAL' || !s.issuedAt || s.issuedAt < periodRange.from || s.issuedAt > periodRange.to) continue;
+      profitByLine.set(s.invoiceLineId, s.profit);
+      partnerShares += s.partnerShare;
+      released += s.released;
+    }
+    const itemProfit = [...profitByLine.values()].reduce((a, v) => a + v, 0);
+    return { sales: profitByLine.size, itemProfit, partnerShares, lataifShare: itemProfit - partnerShares, released };
+  }, [itemOverview, periodRange]);
 
   // ── Scrap Gold Spread (Plan §Reports §B+): zählt nur completed Trades im Zeitraum.
   // Spread (sale - purchase) wird als zusätzliches Income/Profit gezählt — niemals
@@ -491,6 +509,10 @@ export function BusinessReportsPage() {
           ['Total Cost (Purchase)', profitReport.cost.toFixed(2)],
           ['Total Profit', profitReport.profit.toFixed(2)],
           ['Margin %', profitReport.margin.toFixed(2)],
+          ['Jointly bought items — item profit', jointProfit.itemProfit.toFixed(2)],
+          ['Jointly bought items — partner shares', jointProfit.partnerShares.toFixed(2)],
+          ['Jointly bought items — LATAIF share', jointProfit.lataifShare.toFixed(2)],
+          ['Total Profit after partner shares', (profitReport.profit - jointProfit.partnerShares).toFixed(2)],
         ]};
       case 'tax':
         return { title: 'Tax Report (VAT)', rows: [
@@ -697,6 +719,39 @@ export function BusinessReportsPage() {
             <MetricCard label="INVOICES COST" value={`${fmt(profitReport.cost)} BHD`} />
             <MetricCard label="MARGIN %" value={profitReport.margin.toFixed(1)} unit="%" />
           </div>
+
+          {jointProfit.sales > 0 && (
+            <Card>
+              <span className="text-overline" style={{ marginBottom: 12, display: 'block' }} data-report-joint-profit>
+                JOINTLY BOUGHT ITEMS · {jointProfit.sales} sale{jointProfit.sales === 1 ? '' : 's'}
+              </span>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, fontSize: 12 }}>
+                <div>
+                  <div style={{ color: '#6B7280', marginBottom: 4 }}>Item profit (100 %)</div>
+                  <div style={{ fontWeight: 600 }} data-report-joint-item-profit={jointProfit.itemProfit.toFixed(3)}><Bhd v={jointProfit.itemProfit} /> BHD</div>
+                </div>
+                <div>
+                  <div style={{ color: '#6B7280', marginBottom: 4 }}>Partner shares (agreed)</div>
+                  <div style={{ fontWeight: 600 }} data-report-joint-partner-share={jointProfit.partnerShares.toFixed(3)}><Bhd v={jointProfit.partnerShares} /> BHD</div>
+                  <div style={{ color: '#9CA3AF', fontSize: 11 }}>released <Bhd v={jointProfit.released} /></div>
+                </div>
+                <div>
+                  <div style={{ color: '#6B7280', marginBottom: 4 }}>LATAIF share</div>
+                  <div style={{ fontWeight: 600 }}><Bhd v={jointProfit.lataifShare} /> BHD</div>
+                </div>
+                <div>
+                  <div style={{ color: '#6B7280', marginBottom: 4 }}>Total profit after partner shares</div>
+                  <div style={{ fontWeight: 600 }} data-report-profit-after-partners={(profitReport.profit - jointProfit.partnerShares).toFixed(3)}>
+                    <Bhd v={profitReport.profit - jointProfit.partnerShares} /> BHD
+                  </div>
+                </div>
+              </div>
+              <div style={{ fontSize: 11, color: '#6B7280', marginTop: 10, fontStyle: 'italic' }}>
+                „Total Profit" above includes the full profit of jointly bought items. Partner shares are deducted only here, once.
+                {categoryFilter ? ' The category filter does not apply to this block.' : ''}
+              </div>
+            </Card>
+          )}
 
           {scrapReport.count > 0 && (
             <Card>

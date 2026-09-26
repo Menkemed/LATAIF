@@ -2368,6 +2368,64 @@ function runMigrations(database: Database): void {
       created_at TEXT NOT NULL,
       UNIQUE (branch_id, year, quarter)
     )`,
+
+    // ── PARTNER-ITEMS — gemeinsamer Einkauf: Beteiligung je Einkaufszeile ─────────────────────
+    // Je Beteiligtem eine Zeile: LATAIF selbst (party 'HOUSE', partner_id NULL) und jeder Partner.
+    // share_bp = Eigentums- und Gewinnanteil in Basispunkten (Summe je Zeile genau 10000);
+    // cost_share = vereinbarter Kostenanteil in BHD (aus line_total, Rest-Fils bei LATAIF). Getrennt
+    // davon die tatsaechlichen Zahlungen in item_partner_movements. Wie vat_filings nicht im
+    // Abgleichsvertrag: der Primary ist die Quelle, PC2 liest dort.
+    `CREATE TABLE IF NOT EXISTS item_participations (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      purchase_id TEXT NOT NULL,
+      purchase_line_id TEXT NOT NULL,
+      product_id TEXT,
+      party TEXT NOT NULL CHECK (party IN ('HOUSE','PARTNER')),
+      partner_id TEXT,
+      share_bp INTEGER NOT NULL CHECK (share_bp >= 0 AND share_bp <= 10000),
+      cost_share REAL NOT NULL DEFAULT 0,
+      line_total REAL NOT NULL DEFAULT 0,
+      quantity REAL NOT NULL DEFAULT 1,
+      created_at TEXT NOT NULL,
+      created_by TEXT,
+      CHECK ((party = 'HOUSE' AND partner_id IS NULL) OR (party = 'PARTNER' AND partner_id IS NOT NULL))
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_item_participations_party ON item_participations(purchase_line_id, COALESCE(partner_id, 'HOUSE'))`,
+    `CREATE INDEX IF NOT EXISTS idx_item_participations_partner ON item_participations(partner_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_item_participations_purchase ON item_participations(purchase_id)`,
+    // Geld zwischen Firma und Partner zu genau einer beteiligten Einkaufszeile: CONTRIBUTION (Partner
+    // → Firma, auch Rueckzahlung), PAYOUT (Firma → Partner), PROFIT_SHARE (Gewinn-/Verlustanteil eines
+    // abgerechneten Verkaufs, vorzeichenbehaftet, basis_json = Grundlage), PROFIT_CORRECTION
+    // (Nachabrechnung nach Retoure/Storno/Aenderung: nur die Differenz, neue Grundlage), OFFSET
+    // (Verrechnung zwischen zwei Artikeln desselben Partners, ohne Geld, paarweise). group_id haelt
+    // zusammen, was EINE Handlung war. Storno setzt cancelled_at und bucht gegen; die Zeile bleibt als
+    // Verlauf. Ein Verkauf wird je Partner hoechstens EINMAL erstabgerechnet.
+    `CREATE TABLE IF NOT EXISTS item_partner_movements (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      purchase_id TEXT NOT NULL,
+      purchase_line_id TEXT NOT NULL,
+      partner_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('CONTRIBUTION','PAYOUT','PROFIT_SHARE','PROFIT_CORRECTION','OFFSET')),
+      amount REAL NOT NULL,
+      method TEXT,
+      occurred_at TEXT NOT NULL,
+      invoice_id TEXT,
+      invoice_line_id TEXT,
+      basis_json TEXT,
+      group_id TEXT,
+      note TEXT,
+      created_at TEXT NOT NULL,
+      created_by TEXT,
+      cancelled_at TEXT,
+      cancelled_by TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_item_partner_movements_line ON item_partner_movements(purchase_line_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_item_partner_movements_partner ON item_partner_movements(partner_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_item_partner_movements_invoice_line ON item_partner_movements(invoice_line_id)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_item_partner_profit_share ON item_partner_movements(invoice_line_id, partner_id)
+       WHERE kind = 'PROFIT_SHARE' AND cancelled_at IS NULL`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

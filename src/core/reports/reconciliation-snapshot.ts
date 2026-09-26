@@ -295,6 +295,17 @@ function domainPartnerEquity(branchId: string): number {
   return invest - withdraw - profit;
 }
 
+// PARTNER-ITEMS — was die Firma den Partnern an gemeinsam gekauften Artikeln schuldet:
+// Beiträge − Auszahlungen + Gewinnanteile (nicht stornierte Bewegungen).
+function domainPartnerItemBalance(branchId: string): number {
+  const r = query(
+    `SELECT COALESCE(SUM(CASE kind WHEN 'PAYOUT' THEN -amount ELSE amount END), 0) AS t
+       FROM item_partner_movements WHERE branch_id = ? AND cancelled_at IS NULL`,
+    [branchId]
+  )[0];
+  return Number(r?.t || 0);
+}
+
 // Orphans: Ledger-Einträge, deren source_id keine Domain-Row mehr hat.
 // Typische Ursache: LedgerDebugPage-Tests, manuelle DB-Eingriffe, oder
 // gelöschte Domain-Records. Verschmutzen Account-Salden ohne Domain-Match.
@@ -318,6 +329,7 @@ const SOURCE_TABLE_MAP: Record<string, string> = {
   LOAN: 'debts',
   LOAN_PAYMENT: 'debt_payments',
   PARTNER_TX: 'partner_transactions',
+  PARTNER_ITEM: 'item_partner_movements',
   TAX_PAYMENT: 'tax_payments',
   BANK_TRANSFER: 'bank_transfers',
   // Customer-Credit: sourceId = customer_credits-Row-id (Slice 4b).
@@ -430,6 +442,8 @@ export function reconciliationSnapshotFor(ctx: BusinessReadContext): Reconciliat
         note: 'Domain = Σ geliehen − Σ zurückgezahlt (we_borrow / MONEY_RECEIVED).' },
       { label: 'Partner Equity',         account: 'PARTNER_EQUITY',      ledger: balanceOf('PARTNER_EQUITY'),      domain: domainPartnerEquity(branchId),
         note: 'Domain = Σ Investments − Σ Withdrawals − Σ Profit-Distributions.' },
+      { label: 'Partner Item Balance',   account: 'PARTNER_ITEM_BALANCE', ledger: balanceOf('PARTNER_ITEM_BALANCE'), domain: domainPartnerItemBalance(branchId),
+        note: 'Domain = Σ Beiträge − Σ Auszahlungen + Σ Gewinnanteile gemeinsam gekaufter Artikel (ohne Storno).' },
     ];
 
     // M-01: Residual = REVENUE-Anteile ohne Invoice-Pendant (REPAIR_PAYMENT,

@@ -35,6 +35,10 @@ import { purchaseCreateBody, validatePurchaseCreate, type PurchaseCreateInput } 
 import { createPurchaseOnPrimary } from '@/core/purchases/purchase-house';
 import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
 import { UseCustomerAsSupplier } from '@/components/suppliers/UseCustomerAsSupplier';
+// PARTNER-ITEMS — gemeinsamer Einkauf (optional, nur mit aktiven Partnern sichtbar).
+import { usePartnerStore } from '@/stores/partnerStore';
+import { PurchasePartnerSection } from '@/components/purchases/PurchasePartnerSection';
+import type { PartnerShareInput } from '@/core/partners/item-participation';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -57,6 +61,8 @@ interface DraftLine {
   unitPrice: number;
   // Back-to-Back: gesetzt fuer aus einer Order vorbefuellte Zeilen.
   sourceOrderLineId?: string;
+  // PARTNER-ITEMS — gemeinsam gekauft: Partner und Anteile (LATAIF haelt den Rest). Leer = allein.
+  partnerShares?: PartnerShareInput[];
 }
 
 export function PurchaseCreate() {
@@ -70,7 +76,8 @@ export function PurchaseCreate() {
   const { products, loadProducts, categories, loadCategories } = useProductStore();
   const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
 
-  useEffect(() => { loadSuppliers(); loadProducts(); loadCategories(); }, [loadSuppliers, loadProducts, loadCategories]);
+  const { partners, loadPartners } = usePartnerStore();
+  useEffect(() => { loadSuppliers(); loadProducts(); loadCategories(); loadPartners(); }, [loadSuppliers, loadProducts, loadCategories, loadPartners]);
 
   // v0.4.0 — Mit ?inbox=<id> aufgerufen (Klick auf ein Purchase-Inbox-Foto):
   // das Mobile-Capture-Foto in die erste "New Item"-Zeile laden und den
@@ -320,6 +327,7 @@ export function PurchaseCreate() {
         mode: l.mode, productId: l.productId, newProduct: l.newProduct, brand: l.brand, name: l.name,
         sku: l.sku, categoryId: l.categoryId, quantity: l.quantity, unitPrice: l.unitPrice,
         sourceOrderLineId: l.sourceOrderLineId,
+        partnerShares: l.partnerShares && l.partnerShares.length > 0 ? l.partnerShares : undefined,
       })),
       paymentAmount, paymentMethod, notes, staffId,
       sourceOrderId: sourceOrderId || undefined,
@@ -639,6 +647,17 @@ export function PurchaseCreate() {
             </p>
           </Card>
         </div>
+
+        {/* PARTNER-ITEMS — optional, geschlossen; ohne aktive Partner gar nicht sichtbar. */}
+        <PurchasePartnerSection
+          partners={partners}
+          lines={lines.map((l) => ({
+            label: [l.brand, l.name].filter(Boolean).join(' '),
+            lineTotal: (l.quantity || 0) * (l.unitPrice || 0),
+            partnerShares: l.partnerShares,
+          }))}
+          onApply={(idx, shares) => setLines((prev) => prev.map((l, i) => (idx.includes(i) ? { ...l, partnerShares: shares } : l)))}
+        />
 
         {/* 3. PRICING — inkl. Vorsteuer-Scheme (Plan §Purchase §Tax) */}
         <div style={{ marginTop: 16 }}>

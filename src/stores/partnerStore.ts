@@ -22,6 +22,8 @@ import {
 } from '@/core/ledger/posting';
 // CENTRAL-UI-PARITY R6D — Einlage, Entnahme und Gewinnausschüttung sind EINE Hausfolge.
 import { moneyAction, recordPartnerTxInHouse } from '@/core/finance/money-house';
+// PARTNER-ITEMS — Beteiligungen an gemeinsam gekauften Artikeln (eigenes Ausgleichskonto).
+import { partnerItemsOverview, type PartnerItemsOfPartner } from '@/core/partners/item-participation-house';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -32,6 +34,7 @@ function safePost(label: string, fn: () => void): void {
 
 interface PartnerStore {
   partners: Partner[];
+  itemOverview: PartnerItemsOfPartner[];
   transactions: PartnerTransaction[];
   loading: boolean;
   loadPartners: () => void;
@@ -85,6 +88,7 @@ function rowToTx(row: Record<string, unknown>): PartnerTransaction {
 
 export const usePartnerStore = create<PartnerStore>((set, get) => ({
   partners: [],
+  itemOverview: [],
   transactions: [],
   loading: false,
 
@@ -92,7 +96,7 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
     if (hydrateFromPrimary('store.partners.get', (d) => set(d as never))) return;
     try {
       set({ ...loadPartnersFor(localReadContext()), loading: false });
-    } catch { set({ partners: [], loading: false }); }
+    } catch { set({ partners: [], itemOverview: [], loading: false }); }
   },
 
   loadTransactions: () => {
@@ -157,6 +161,11 @@ export const usePartnerStore = create<PartnerStore>((set, get) => ({
     const txCount = Number(query('SELECT COUNT(*) AS c FROM partner_transactions WHERE partner_id = ?', [id])[0]?.c || 0);
     if (txCount > 0) {
       throw new Error(`Cannot delete partner — ${txCount} transaction${txCount === 1 ? '' : 's'} reference this partner. Mark as inactive instead.`);
+    }
+    // PARTNER-ITEMS — ein Partner mit Artikelbeteiligung bleibt (historisch) bestehen: deaktivieren.
+    const itemCount = Number(query('SELECT COUNT(*) AS c FROM item_participations WHERE partner_id = ?', [id])[0]?.c || 0);
+    if (itemCount > 0) {
+      throw new Error(`Cannot delete partner — they hold a share in ${itemCount} jointly bought item${itemCount === 1 ? '' : 's'}. Mark as inactive instead.`);
     }
     const db = getDatabase();
     db.run('DELETE FROM partners WHERE id = ?', [id]);
@@ -234,11 +243,14 @@ function recordTx(
 
 
 /** CENTRAL-UI-PARITY R2B — die Gesellschafter einer Filiale samt ihren Salden, zustandsfrei. */
-export function loadPartnersFor(ctx: BusinessReadContext): { partners: Partner[] } {
+export function loadPartnersFor(ctx: BusinessReadContext): { partners: Partner[]; itemOverview: PartnerItemsOfPartner[] } {
   const rows = query('SELECT * FROM partners WHERE branch_id = ? ORDER BY name', [ctx.branchId]);
   const partners = rows.map(rowToPartner);
   for (const p of partners) Object.assign(p, partnerLedgerFor(p.id));
-  return { partners };
+  // PARTNER-ITEMS — die Artikelbeteiligungen (auch deaktivierter Partner) mit offenem Ausgleich.
+  let itemOverview: PartnerItemsOfPartner[] = [];
+  try { itemOverview = partnerItemsOverview(ctx.branchId); } catch { itemOverview = []; }
+  return { partners, itemOverview };
 }
 
 /** CENTRAL-UI-PARITY R2B — die Bewegungen der Gesellschafter einer Filiale, zustandsfrei. */

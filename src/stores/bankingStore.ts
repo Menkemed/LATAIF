@@ -434,6 +434,34 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
     });
   }
 
+  // PARTNER-ITEMS — Geld zwischen Firma und Partner zu einem gemeinsam gekauften Artikel: Beitrag
+  // (Partner → Firma) als „Partner In", Auszahlung als „Partner Out". Gewinnanteile bewegen kein Geld;
+  // stornierte Bewegungen sind gegengebucht und fehlen hier wie eine gelöschte Partnerbewegung.
+  const itemMoves = safeQuery('item_partner_movements',
+    `SELECT m.id, m.kind, m.amount, m.method, m.occurred_at, m.partner_id, m.created_at, pr.name, p.purchase_number
+       FROM item_partner_movements m
+       LEFT JOIN partners pr ON pr.id = m.partner_id
+       LEFT JOIN purchases p ON p.id = m.purchase_id
+      WHERE m.branch_id = ? AND m.kind IN ('CONTRIBUTION', 'PAYOUT') AND m.cancelled_at IS NULL`,
+    [branchId]
+  );
+  for (const m of itemMoves) {
+    const isIn = m.kind === 'CONTRIBUTION';
+    const date = (m.occurred_at as string) || '';
+    txs.push({
+      id: `ipm-${m.id}`,
+      date,
+      createdAt: (m.created_at as string) || date,
+      type: isIn ? 'PARTNER_INVESTMENT_IN' : 'PARTNER_WITHDRAWAL_OUT',
+      account: accountFor(m.method as string),
+      amount: (m.amount as number) || 0,
+      flow: isIn ? 'in' : 'out',
+      relatedModule: 'partner',
+      relatedEntityId: m.partner_id as string,
+      description: `${isIn ? 'Item contribution' : 'Item payout'} · ${m.purchase_number || ''} · ${m.name || ''}`,
+    });
+  }
+
   // TRANSFER: cash ↔ bank ↔ benefit (two legs so they balance)
   for (const t of transfers) {
     const tCreated = t.createdAt || t.transferDate;

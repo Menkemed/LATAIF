@@ -364,6 +364,16 @@ export function PurchaseDetail() {
                         ))}
                       </div>
                     )}
+                    {/* PARTNER-ITEMS — gemeinsam gekauft: wer welchen Anteil und Kostenanteil hält. */}
+                    {(() => {
+                      const part = purchase.participations?.find(pp => pp.purchaseLineId === l.id);
+                      if (!part) return null;
+                      return (
+                        <div style={{ marginTop: 6, fontSize: 11, color: '#7B4AAA' }} data-purchase-line-partners={l.id}>
+                          Bought jointly: {part.parties.map(pt => `${pt.name}${pt.active ? '' : ' (inactive)'} ${pt.sharePct} % · ${pt.costShare.toFixed(3)} BHD`).join(' · ')}
+                        </div>
+                      );
+                    })()}
                   </div>
                   <span style={{ fontSize: 12, color: '#6B7280' }}>{l.description || '—'}</span>
                   <span className="font-mono" style={{ fontSize: 12, color: '#4B5563' }}>{l.quantity}</span>

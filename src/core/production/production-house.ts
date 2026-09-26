@@ -45,6 +45,8 @@ import { TAX_SCHEMES, type Product } from '@/core/models/types';
 import type { MediaSource } from '@/core/media/product-media-create';
 import { createExpenseInHouse, PayablesRejected } from '@/core/payables/payables-house';
 import { hasLotHistory } from '@/core/lots/stock-contract';
+// PARTNER-ITEMS — ein gemeinsam gekauftes Stück verschwindet nicht still in einer Fertigung.
+import { isJointLot, JOINT_BLOCK } from '@/core/partners/item-participation-house';
 
 /** STOCK-LOT-INTEGRITY — der dauerhafte Verbrauchsnachweis eines Produktionseingangs (`production_inputs.lot_consumption`). */
 export interface ProductionInputConsumption {
@@ -277,6 +279,9 @@ export async function createProductionInHouse(input: ProductionCreateInput, ctx:
 
   // ── 1. Prüfen ──
   const inputs = checkInputs(input.inputProductIds, ctx.branchId);
+  for (const p of inputs) {
+    if (getActiveLots(p.id).some((l) => isJointLot(l.id))) throw new ProductionRejected(JOINT_BLOCK.code, JOINT_BLOCK.production);
+  }
   const outputs = checkOutputs(input.outputs);
   const laborFils = fils(money(input.laborCost ?? 0, 'Labor cost'));
   const overheadFils = fils(money(input.overheadCost ?? 0, 'Overhead cost'));

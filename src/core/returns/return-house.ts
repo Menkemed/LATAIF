@@ -20,6 +20,8 @@ import { useProductStore } from '@/stores/productStore';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { returnLineAmounts } from './return-lines';
+// PARTNER-ITEMS — eine Retoure gemeinsam gekaufter Ware: zurück ins Lager oder abgeschrieben.
+import { jointInvoiceLines, JOINT_BLOCK } from '@/core/partners/item-participation-house';
 import {
   CONSIGNMENT_DISPOSITIONS, ReturnActionRejected, assertReturnCreateValues, refundsImmediately,
   type ReturnCreateInput,
@@ -96,6 +98,10 @@ export function createReturnInHouse(input: ReturnCreateInput, branchId: string, 
     && !lines.some((l) => !!l.productId && istKommissionsware(l.productId))) {
     throw new ReturnActionRejected('DISPOSITION_NOT_ALLOWED',
       'return to owner / keep as own is offered only when a consignment item comes back');
+  }
+  if (input.productDisposition !== 'IN_STOCK' && input.productDisposition !== 'WRITE_OFF'
+    && jointInvoiceLines(lines.map((l) => l.invoiceLineId)).length > 0) {
+    throw new ReturnActionRejected(JOINT_BLOCK.code, JOINT_BLOCK.salesReturnDisposition);
   }
   beforeWrite?.();
 

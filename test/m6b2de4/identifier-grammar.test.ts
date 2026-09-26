@@ -65,8 +65,10 @@ for (const c of columns) check(isValidSyncIdentifier(c), `frontend column ${JSON
 // gold_credit_id, recorded_by) — all canonical, checked above.
 // VAT-PERIOD-LOCK: +1 local table `vat_filings` (the explicit "VAT filed" record, primary-only, not synced)
 // with 4 previously-unseen column identifiers (filed_at, filed_by, invoice_count, snapshot_json) — canonical.
-check(tables.size === 51, `frontend table count is 51 (got ${tables.size})`);
-check(columns.size === 205, `frontend distinct column count is 205 (got ${columns.size})`);
+// PARTNER-ITEMS: +2 local tables `item_participations`, `item_partner_movements` (primary-only, not synced) with 7
+// previously-unseen column identifiers (party, share_bp, cost_share, basis_json, cancelled_at, cancelled_by, group_id) — canonical.
+check(tables.size === 53, `frontend table count is 53 (got ${tables.size})`);
+check(columns.size === 212, `frontend distinct column count is 212 (got ${columns.size})`);
 
 console.log(
   `M6-B2DE4 identifier-grammar: ${pass}/${pass + fails.length} checks passed ` +

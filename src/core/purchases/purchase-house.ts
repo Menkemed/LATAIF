@@ -49,6 +49,7 @@ export function housePurchasePort(branchId: string): PurchaseCreatePort {
       return r ? String(r.order_id) : undefined;
     },
     inboxExists: (id) => has('SELECT id FROM purchase_inbox WHERE id = ? AND branch_id = ?', [id, branchId]),
+    partnerActive: (id) => has('SELECT id FROM partners WHERE id = ? AND branch_id = ? AND active = 1', [id, branchId]),
     category: (id) => useProductStore.getState().categories.find((c) => c.id === id && !c.id.startsWith('cat-repair-service')),
     isSkuTaken: (sku) => useProductStore.getState().isSkuTaken(sku),
   };
