@@ -233,10 +233,20 @@ fn pending_data_root_move(app_handle: tauri::AppHandle) -> Result<Option<serde_j
 /// Settings display needs it before anyone has typed a password).
 #[tauri::command]
 fn get_runtime_paths(
+    app: tauri::AppHandle,
     state: tauri::State<'_, AppHandleState>,
 ) -> Result<serde_json::Value, String> {
     let r = &state.data_root;
+    // POST-PARITY R7C — die offenen Speichervorgänge von PC2 gehören diesem RECHNER, nicht dem
+    // Datenordner (auf PC2 gibt es keinen Geschäftsbestand). Derselbe Ort wie bisher
+    // (`<AppLocalData>/pending-saves`), nur jetzt hier aufgelöst statt im Renderer.
+    let pending_saves_root = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("app local data dir: {e}"))?
+        .join("pending-saves");
     Ok(serde_json::json!({
+        "pendingSavesRoot": pending_saves_root.to_string_lossy(),
         "dataRoot": r.path().to_string_lossy(),
         "rootId": r.root_id(),
         "businessDb": r.business_db().to_string_lossy(),

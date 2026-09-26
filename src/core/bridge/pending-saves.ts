@@ -70,9 +70,11 @@ export function memoryPendingBackend(): PendingBackend & { readonly files: Map<s
 /** Eine Datei je Vorgang; geschrieben über eine Temp-Datei + Umbenennen (kein halber Stand). */
 function tauriPendingBackend(): PendingBackend {
   let dirP: Promise<string> | null = null;
+  // Der Ordner kommt vom nativen Resolver (`get_runtime_paths`) — der Renderer löst keinen
+  // Datenpfad selbst auf. Derselbe Ort wie bisher: `<AppLocalData>/pending-saves`.
   const dir = (): Promise<string> => (dirP ??= (async () => {
-    const { appLocalDataDir, join } = await import('@tauri-apps/api/path');
-    return join(await appLocalDataDir(), 'pending-saves');
+    const { getRuntimePaths } = await import('@/core/runtime/runtime-paths');
+    return (await getRuntimePaths()).pendingSavesRoot;
   })());
   const file = async (id: string): Promise<string> => {
     const { join } = await import('@tauri-apps/api/path');

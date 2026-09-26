@@ -404,8 +404,12 @@ const onDisk = (id: string) => (disk.files.has(id) ? JSON.parse(disk.files.get(i
   const app = src('src/App.tsx');
   ok(/\{clientMode && <PendingSavesBar \/>\}/.test(app), 'WIRE die Leiste steht im Fenster des Clients (PC2)');
   const ps = src('src/core/bridge/pending-saves.ts');
-  ok(/join\(await appLocalDataDir\(\), 'pending-saves'\)/.test(ps) && /await fs\.writeTextFile\(tmp, text\);\s*\n\s*await fs\.rename\(tmp, p\);/.test(ps),
-    'WIRE Ablage = eine Datei je Vorgang unter AppLocalData, über Temp-Datei + Umbenennen');
+  // Der Ordner kommt vom nativen Resolver (runtime-paths-Vertrag) — derselbe Ort wie seit R7C.
+  const rs = src('src-tauri/src/lib.rs');
+  ok(/\(await getRuntimePaths\(\)\)\.pendingSavesRoot/.test(ps) && !/appLocalDataDir/.test(ps.replace(/\/\/.*$/gm, ''))
+    && /app_local_data_dir\(\)[\s\S]{0,120}\.join\("pending-saves"\)/.test(rs) && /"pendingSavesRoot": pending_saves_root/.test(rs)
+    && /await fs\.writeTextFile\(tmp, text\);\s*\n\s*await fs\.rename\(tmp, p\);/.test(ps),
+    'WIRE Ablage = eine Datei je Vorgang unter AppLocalData (vom nativen Resolver), über Temp-Datei + Umbenennen');
   const cs = src('src/core/bridge/client-command-save.ts');
   ok(cs.indexOf('await persistPending(rec);') > 0 && cs.indexOf('await persistPending(rec);') < cs.indexOf('const out = await this.transmit('),
     'WIRE gesichert wird VOR dem Versand');

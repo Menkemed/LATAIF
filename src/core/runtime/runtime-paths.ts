@@ -34,6 +34,11 @@ export interface RuntimePaths {
    * change never rewrites it.
    */
   backupsRoot: string;
+  /**
+   * POST-PARITY R7C — die offenen Speichervorgänge dieses Rechners (PC2). Gehört dem Gerät, NICHT
+   * dem Datenordner (`<AppLocalData>/pending-saves`, wie seit R7C).
+   */
+  pendingSavesRoot: string;
 }
 
 let cached: RuntimePaths | null = null;
