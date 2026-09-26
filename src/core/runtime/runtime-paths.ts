@@ -34,11 +34,17 @@ export interface RuntimePaths {
    * change never rewrites it.
    */
   backupsRoot: string;
-  /**
-   * POST-PARITY R7C — die offenen Speichervorgänge dieses Rechners (PC2). Gehört dem Gerät, NICHT
-   * dem Datenordner (`<AppLocalData>/pending-saves`, wie seit R7C).
-   */
-  pendingSavesRoot: string;
+}
+
+/**
+ * POST-PARITY R7C — der Ordner der offenen Speichervorgänge dieses Rechners (PC2): gehört dem Gerät,
+ * nicht dem Datenordner (`<AppLocalData>/pending-saves`, wie seit R7C). Ein EIGENER nativer Befehl:
+ * PC2 hat keinen Geschäftsbestand, dort antwortet `get_runtime_paths` nicht.
+ */
+export async function getPendingSavesRoot(): Promise<string> {
+  if (!isTauri()) throw new Error('Runtime paths are only available inside the desktop app.');
+  const { invoke } = await import('@tauri-apps/api/core');
+  return String(await invoke('get_pending_saves_root'));
 }
 
 let cached: RuntimePaths | null = null;

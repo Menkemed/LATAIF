@@ -233,20 +233,10 @@ fn pending_data_root_move(app_handle: tauri::AppHandle) -> Result<Option<serde_j
 /// Settings display needs it before anyone has typed a password).
 #[tauri::command]
 fn get_runtime_paths(
-    app: tauri::AppHandle,
     state: tauri::State<'_, AppHandleState>,
 ) -> Result<serde_json::Value, String> {
     let r = &state.data_root;
-    // POST-PARITY R7C — die offenen Speichervorgänge von PC2 gehören diesem RECHNER, nicht dem
-    // Datenordner (auf PC2 gibt es keinen Geschäftsbestand). Derselbe Ort wie bisher
-    // (`<AppLocalData>/pending-saves`), nur jetzt hier aufgelöst statt im Renderer.
-    let pending_saves_root = app
-        .path()
-        .app_local_data_dir()
-        .map_err(|e| format!("app local data dir: {e}"))?
-        .join("pending-saves");
     Ok(serde_json::json!({
-        "pendingSavesRoot": pending_saves_root.to_string_lossy(),
         "dataRoot": r.path().to_string_lossy(),
         "rootId": r.root_id(),
         "businessDb": r.business_db().to_string_lossy(),
@@ -258,6 +248,20 @@ fn get_runtime_paths(
         // data-root change must never rewrite that choice.
         "backupsRoot": media::backup_location::resolve_root(r.path()).to_string_lossy(),
     }))
+}
+
+/// POST-PARITY R7C — der Ordner der offenen Speichervorgänge von PC2. Er gehört diesem RECHNER, nicht
+/// dem Datenordner, und muss auch dort antworten, wo es keinen Geschäftsbestand gibt: PC2 legt
+/// `AppHandleState` gar nicht an (`get_runtime_paths` scheitert dort mit „state not managed").
+/// Derselbe Ort wie seit R7C: `<AppLocalData>/pending-saves` — nur hier aufgelöst statt im Renderer.
+#[tauri::command]
+fn get_pending_saves_root(app: tauri::AppHandle) -> Result<String, String> {
+    let dir = app
+        .path()
+        .app_local_data_dir()
+        .map_err(|e| format!("app local data dir: {e}"))?
+        .join("pending-saves");
+    Ok(dir.to_string_lossy().into_owned())
 }
 
 const SYNC_PORT: u16 = 3001;
@@ -3346,6 +3350,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             // DATA-ROOT-I1 — the renderer's only way to learn where anything lives.
             get_runtime_paths,
+            // R7C — der Ordner der offenen PC2-Speichervorgänge (auch ohne Geschäftsbestand).
+            get_pending_saves_root,
             // DATA-ROOT-I1 / B2 — move the data root (preflight → schedule → boot-time move).
             preflight_data_root_move,
             schedule_data_root_move,

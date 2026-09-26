@@ -37,7 +37,6 @@ const FAKE = {
   mobileStagingRoot: 'E:\\LATAIF\\Data\\mobile-upload-staging',
   openaiKey: 'E:\\LATAIF\\Data\\openai.key',
   backupsRoot: 'E:\\LATAIF\\Backups',
-  pendingSavesRoot: 'C:\\Users\\x\\AppData\\Local\\com.lataif.app\\pending-saves',
 };
 
 const g = globalThis as unknown as Record<string, unknown>;
