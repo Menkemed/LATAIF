@@ -73,8 +73,11 @@ const S = (v: unknown): string => JSON.stringify(v);
   ok(/if \(corePathImport\.slice\(-2\) === 'js'\) \{\s*corePathImportFile = corePathImport;/.test(getCore),
     'OPTIONS ein Kernpfad auf .js lädt genau diese Datei (keine Auswahl im CDN-Verzeichnis)');
   const code = codeOf(src('src/core/ai/ocr-service.ts'));
-  ok(/tesseract\.recognize\(input as never, OCR_LANGS\.join\('\+'\), ocrWorkerOptions\(\)\)/.test(code) && !/cdn|jsdelivr|https?:/i.test(code),
-    'OPTIONS runOcr erkennt mit genau diesen Optionen und den ausgelieferten Sprachen');
+  // R7B — das Bild wird vorher begrenzt (`boundedOcrInput`, bei einem Fehler das Original); erkannt
+  // wird weiterhin mit genau diesen Optionen und den ausgelieferten Sprachen.
+  ok(/const bounded = await boundedOcrInput\(input\)\.catch\(\(\) => input\);/.test(code)
+    && /tesseract\.recognize\(bounded as never, OCR_LANGS\.join\('\+'\), ocrWorkerOptions\(\)\)/.test(code) && !/cdn|jsdelivr|https?:/i.test(code),
+    'OPTIONS runOcr erkennt mit genau diesen Optionen und den ausgelieferten Sprachen (begrenztes Bild, sonst das Original)');
   const dh = codeOf(src('src/core/office/document-house.ts'));
   ok(/defaultOcrEngine: OcrEngine = async \(dataUrl\) => \(await import\('@\/core\/ai\/ocr-service'\)\)\.runOcr\(dataUrl\)/.test(dh),
     'OPTIONS documents.set_ocr (Primary und PC2) erkennt über diesen Weg — am Primary');

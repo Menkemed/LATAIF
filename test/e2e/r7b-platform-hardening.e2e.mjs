@@ -33,7 +33,7 @@ import { OCR_FILES } from '../../src/core/ai/ocr-assets.ts';
 const IDENT = 'com.lataif.app.e2e';
 const CLIENT_IDENT = 'com.lataif.app.e2e.client';
 const APP_CDP = 9223, CLIENT_CDP = 9224, PORT = 3011;
-// R7B — die KI des e2e-Builds ist ein Mock an einem eigenen Port (nie 3001/3443, nie OpenAI).
+// R7B — die KI des e2e-Builds ist ein Mock an einem eigenen Port (nie die Produktionsports 3001/3443, nie OpenAI).
 const MOCK_PORT = 3014;
 let MOCK = null;
 let R7B_STATE = {}, ZEITEN_STATE = {};

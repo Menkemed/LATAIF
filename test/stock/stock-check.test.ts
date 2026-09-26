@@ -7,7 +7,30 @@
 // against the database; asserting them here keeps the two from drifting silently apart.
 // ════════════════════════════════════════════════════════════════════════════
 
-import {
+import { registerHooks } from 'node:module';
+import { existsSync } from 'node:fs';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { dirname, resolve as resolvePath } from 'node:path';
+import type { StockCheck } from '../../src/core/stock/stock-check.ts';
+
+// Das Modul fragt seit R6B `isClientMode` ab; dessen Kette importiert ohne Endung ('../auth/client-session')
+// und mit `@/` — wie in den übrigen Tests löst ein Hook beides auf, bevor das Modul geladen wird.
+const repo = resolvePath(dirname(fileURLToPath(import.meta.url)), '..', '..');
+registerHooks({
+  resolve(specifier: string, context: { parentURL?: string }, nextResolve: (s: string, c: unknown) => unknown) {
+    if (specifier.startsWith('@/')) {
+      const p = resolvePath(repo, 'src', specifier.slice(2));
+      return { url: pathToFileURL(existsSync(p) ? p : p + '.ts').href, shortCircuit: true };
+    }
+    if (specifier.startsWith('.') && context.parentURL) {
+      const p = resolvePath(dirname(fileURLToPath(context.parentURL)), specifier);
+      if (!existsSync(p) && existsSync(p + '.ts')) return { url: pathToFileURL(p + '.ts').href, shortCircuit: true };
+    }
+    return nextResolve(specifier, context);
+  },
+} as never);
+
+const {
   isStockCheckStatus,
   prepareNotes,
   sortNewestFirst,
@@ -15,8 +38,7 @@ import {
   stockCheckLabel,
   MAX_STOCK_CHECK_NOTES,
   STOCK_CHECK_STATUSES,
-  type StockCheck,
-} from '../../src/core/stock/stock-check.ts';
+} = await import('../../src/core/stock/stock-check.ts');
 
 let PASS = 0, FAIL = 0;
 const failures: string[] = [];

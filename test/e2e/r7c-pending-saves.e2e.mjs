@@ -25,7 +25,7 @@
 // PROZESS-ISOLATION (dauerhafte Regel): gestartet wird nur über `spawnTracked`; beendet wird nur, was dieser
 // Lauf gestartet hat — regulär nur nach Prüfung von PID UND exaktem Test-Pfad, hart nur über den Helfer
 // (`killTestPid` mit eigener PID + exaktem Test-Pfad). Die installierte Produktions-App wird nie beendet, nie
-// benutzt; E:\LATAIF\Data und die Ports 3001/3443 bleiben tabu.
+// benutzt; E:\LATAIF\Data und die Produktionsports 3001/3443 bleiben tabu.
 // ════════════════════════════════════════════════════════════════════════════
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
 import { killStarted, killTestImage, killTestPid, spawnTracked, waitTestImageGone, foreignProcesses, pathOfPid, startedPids, waitPidGone } from './_e2e-process.mjs';

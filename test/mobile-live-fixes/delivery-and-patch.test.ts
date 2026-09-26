@@ -369,10 +369,13 @@ for (const label of ['Location', 'Condition', 'SKU', 'Category', 'Min Sale Price
   const from = page.indexOf('window.__MOBILE_FIELD_SCHEMA__ = ');
   const to = page.indexOf('</script>', from);
   ok(from > 0 && to > from, 'PARSE the served script block was located');
+  // Jede Nahtstelle `"##, include_str!("…"), r##"` wird durch den ECHTEN Dateiinhalt ersetzt — so
+  // parst die Prüfung genau das, was ausgeliefert wird, auch jede neu eingebundene Datei
+  // (vorher waren nur zwei Nahtstellen bekannt; die PRE-G5-Dateien brachen den Test).
   const js = page
     .slice(from, to)
-    .split('"##, include_str!("mobile_field_schema.json"), r##"').join('{}')
-    .split('"##, include_str!("mobile_upload_queue.js"), r##"').join('\n/* queue */\n');
+    .replace(/"##, include_str!\("([^"]+)"\), r##"/g, (_m, file: string) =>
+      readFileSync(join(repo, 'src-tauri/src/sync', file), 'utf8'));
   ok(js.length > 50_000, `PARSE …and it is the whole page script (${js.length} chars)`);
   let err = '';
   try { new Function(js); } catch (e) { err = String((e as Error).message); }
