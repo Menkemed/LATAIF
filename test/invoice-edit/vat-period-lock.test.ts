@@ -539,5 +539,22 @@ const code = (m: string): string => m.split('|')[0];
     '11 …Name bleibt „M pA"; der Handy-Galerieweg prüft dieselbe Regel');
 }
 
+// ══ 12) Quartalsübersicht = Kalenderquartale, auch bei abweichendem Geschäftsjahresbeginn ══
+{
+  const { financeFor } = await import('../../src/core/reports/analytics-snapshot.ts');
+  const { localReadContext } = await import('../../src/core/data/read-context.ts');
+  DB.run("DELETE FROM settings WHERE branch_id = 'branch-main' AND key = 'finance.fiscal_year_start_month'");
+  DB.run("INSERT INTO settings (branch_id, key, value, category, updated_at) VALUES ('branch-main','finance.fiscal_year_start_month','4','finance',?)", [NOW]);
+  const f = financeFor(localReadContext()) as unknown as { quarterly: Array<{ year: number; quarter: number; vat: number; filedAt: string | null }> };
+  const q2 = f.quarterly.find((q) => q.year === 2026 && q.quarter === 2);
+  const erwartet = n(DB, `SELECT COALESCE(SUM(vat_amount), 0) FROM invoices WHERE branch_id = 'branch-main' AND status NOT IN ('CANCELLED','DRAFT')
+    AND COALESCE(butterfly, 0) = 0 AND issued_at >= '2026-04-01' AND issued_at < '2026-07-01'`);
+  ok(!!q2 && Math.abs(q2.vat - erwartet) < 0.01 && !!q2.filedAt,
+    `12 Geschäftsjahr ab April: „2026 Q2" der Übersicht ist weiter April–Juni (VAT ${q2?.vat.toFixed(3)} = ${erwartet.toFixed(3)}) und trägt die Einreichung`);
+  ok(/Jan–Mar', 'Apr–Jun', 'Jul–Sep', 'Oct–Dec'/.test(src('src/pages/analytics/AnalyticsPage.tsx')) && /CALENDAR QUARTER \(NBR PERIODS\)/.test(src('src/pages/analytics/AnalyticsPage.tsx')),
+    '12 …die Übersicht beschriftet die Kalendermonate je Quartal');
+  DB.run("DELETE FROM settings WHERE branch_id = 'branch-main' AND key = 'finance.fiscal_year_start_month'");
+}
+
 console.log(`\nvat-period-lock: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);

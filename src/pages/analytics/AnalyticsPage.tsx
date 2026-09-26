@@ -753,7 +753,7 @@ export function AnalyticsPage() {
             <div style={{ marginTop: 32 }}>
               <h2 className="font-display" style={{ fontSize: 20, color: '#0F0F10', marginBottom: 16 }}>Quarterly VAT</h2>
               <Card>
-                <SectionLabel>VAT PER QUARTER — FROM NON-BUTTERFLY INVOICES</SectionLabel>
+                <SectionLabel>VAT PER CALENDAR QUARTER (NBR PERIODS) — FROM NON-BUTTERFLY INVOICES</SectionLabel>
                 {vatFileFehler && (
                   <p style={{ padding: '8px 0', fontSize: 12, color: '#DC2626' }}>{vatFileFehler}</p>
                 )}
@@ -773,7 +773,10 @@ export function AnalyticsPage() {
                         {isRefund ? <CheckCircle2 size={16} style={{ color: '#3D7FFF' }} />
                           : isSettled ? <CheckCircle2 size={16} style={{ color: '#7EAA6E' }} />
                           : <Clock size={16} style={{ color: '#AA956E' }} />}
-                        <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}>{q.year} · Q{q.quarter}</span>
+                        <span className="font-mono" data-vat-quarter={`${q.year}-Q${q.quarter}`} style={{ fontSize: 14, color: '#0F0F10' }}>
+                          {q.year} · Q{q.quarter}{' '}
+                          <span style={{ fontSize: 11, color: '#6B7280' }}>{['Jan–Mar', 'Apr–Jun', 'Jul–Sep', 'Oct–Dec'][q.quarter - 1]}</span>
+                        </span>
                         {isRefund && (
                           <span style={{ fontSize: 10, color: '#3D7FFF', padding: '2px 8px', borderRadius: 999, background: 'rgba(61,127,255,0.10)', border: '1px solid rgba(61,127,255,0.3)' }}>
                             Refund Due

@@ -687,11 +687,11 @@ export function financeFor(ctx: BusinessReadContext) {
     // netVat = max(0, vat − inputVat) = was effektiv an NBR gezahlt werden muss,
     // refund = max(0, inputVat − vat) = was die NBR uns erstatten muss.
     type QuarterRow = { year: number; quarter: number; vat: number; inputVat: number; netVat: number; refund: number; paid: number; filedAt: string | null };
-    const fyStartRow = qry(
-      `SELECT value FROM settings WHERE branch_id = ? AND key = 'finance.fiscal_year_start_month'`,
-      [branchId]
-    );
-    const fyStartMonth = parseInt((fyStartRow[0]?.value as string) || '1') || 1; // 1-12
+    // VAT-PERIOD-LOCK — die NBR-Meldeperioden sind KALENDERquartale (Q1 Jan–Mär … Q4 Okt–Dez).
+    // Übersicht, „Mark paid"/„Mark VAT filed" und die Periodensperre verwenden dieselben — der
+    // eingestellte Geschäftsjahresbeginn verschiebt sie nicht (vorher tat er es, und ein „Q2" der
+    // Übersicht wäre als Kalender-Q2 eingereicht worden).
+    const calendarQuarter = (month: number): number => Math.ceil(month / 3);
 
     // Quarterly VAT: per-invoice effective VAT = stored vat_amount (VAT_10/ZERO-Anteile)
     // PLUS per-line MARGIN-VAT-Subselect (für mixed-Scheme-Invoices ist das essentiell —
@@ -717,11 +717,7 @@ export function financeFor(ctx: BusinessReadContext) {
       const d = new Date((row.d as string) || Date.now());
       const year = d.getFullYear();
       const month = d.getMonth() + 1; // 1-12
-      // Map calendar month to fiscal quarter (1-4)
-      const fyOffset = ((month - fyStartMonth + 12) % 12); // 0-11 within fy
-      const q = Math.floor(fyOffset / 3) + 1;
-      // Fiscal year label: the calendar year of the quarter's start month
-      const key = `${year}-Q${q}`;
+      const key = `${year}-Q${calendarQuarter(month)}`;
       quarterlyVatOwed[key] = (quarterlyVatOwed[key] || 0) + ((row.effective_vat as number) || 0);
     }
     const quarterlyVatPaid: Record<string, number> = {};
@@ -743,9 +739,7 @@ export function financeFor(ctx: BusinessReadContext) {
       const d = new Date((row.d as string) || Date.now());
       const year = d.getFullYear();
       const month = d.getMonth() + 1;
-      const fyOffset = ((month - fyStartMonth + 12) % 12);
-      const q = Math.floor(fyOffset / 3) + 1;
-      const key = `${year}-Q${q}`;
+      const key = `${year}-Q${calendarQuarter(month)}`;
       quarterlyInputVat[key] = (quarterlyInputVat[key] || 0) + ((row.input_vat as number) || 0);
     }
     // Gemeinsame Key-Menge — auch Quartale, in denen es nur Purchases ohne Sales gab
