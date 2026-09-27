@@ -24,12 +24,32 @@ interface Props {
 
 const pct = (v: number): string => `${Number(v.toFixed(2))} %`;
 
+/** Betrag → Anteil in Prozent, auf 0,01 % gerundet (die Beteiligung rechnet in Basispunkten). */
+const pctOfAmount = (amount: number, total: number): string =>
+  total > 0 && Number.isFinite(amount) ? String(Math.round((amount / total) * 10000) / 100) : '';
+
+type Row = { partnerId: string; sharePct: string; amount?: string };
+
 export function PurchasePartnerSection({ partners, lines, onApply }: Props) {
   const active = useMemo(() => partners.filter((p) => p.active), [partners]);
   const [open, setOpen] = useState(false);
-  const [rows, setRows] = useState<Array<{ partnerId: string; sharePct: string }>>([]);
+  const [rows, setRows] = useState<Row[]>([]);
   const [selected, setSelected] = useState<Record<number, boolean>>({});
   const [error, setError] = useState('');
+
+  // Ein Betrag bezieht sich auf die Summe der ausgewählten Artikel.
+  const totalOf = (sel: Record<number, boolean>): number =>
+    lines.reduce((s, l, i) => s + (sel[i] ? (Number(l.lineTotal) || 0) : 0), 0);
+  const selectedTotal = totalOf(selected);
+  const amountShown = (r: Row): string => r.amount ?? (selectedTotal > 0 && r.sharePct !== ''
+    ? (Math.round(selectedTotal * (parseFloat(r.sharePct) || 0) * 10) / 1000).toFixed(3) : '');
+
+  function select(next: Record<number, boolean>) {
+    setSelected(next);
+    // Eingetippte Beträge bleiben; ihr Anteil folgt der neuen Auswahl.
+    const t = totalOf(next);
+    setRows(rows.map((r) => (r.amount !== undefined ? { ...r, sharePct: pctOfAmount(parseFloat(r.amount), t) || r.sharePct } : r)));
+  }
 
   const nameOf = (id: string | null): string =>
     id ? (partners.find((p) => p.id === id)?.name ?? id) : 'LATAIF';
@@ -49,9 +69,9 @@ export function PurchasePartnerSection({ partners, lines, onApply }: Props) {
 
   function addRow() {
     // Vorschlag: alle Beteiligten zu gleichen Teilen (LATAIF eingeschlossen).
-    const next = [...rows, { partnerId: '', sharePct: '0' }];
+    const next: Row[] = [...rows, { partnerId: '', sharePct: '0' }];
     const s = suggestedPartnerPcts(next.length);
-    setRows(next.map((r, i) => ({ ...r, sharePct: String(s[i]) })));
+    setRows(next.map((r, i) => ({ partnerId: r.partnerId, sharePct: String(s[i]) })));
   }
 
   function shares(): PartnerShareInput[] | null {
@@ -108,9 +128,17 @@ export function PurchasePartnerSection({ partners, lines, onApply }: Props) {
                   {active.map((p) => <option key={p.id} value={p.id}>{p.name}</option>)}
                 </select>
                 <input type="number" step="0.01" min="0" max="100" value={r.sharePct} data-purchase-partner-share={i}
-                  onChange={(e) => setRows(rows.map((x, k) => (k === i ? { ...x, sharePct: e.target.value } : x)))}
+                  onChange={(e) => setRows(rows.map((x, k) => (k === i ? { partnerId: x.partnerId, sharePct: e.target.value } : x)))}
                   style={{ width: 90, padding: '8px 6px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 6 }} />
                 <span style={{ fontSize: 12, color: '#6B7280' }}>%</span>
+                <span style={{ fontSize: 12, color: '#9CA3AF' }}>or</span>
+                <input type="number" step="0.001" min="0" value={amountShown(r)} data-purchase-partner-amount={i}
+                  disabled={selectedTotal <= 0} title={selectedTotal > 0 ? `of ${selectedTotal.toFixed(3)} BHD (selected items)` : 'Enter the prices of the selected items first'}
+                  onChange={(e) => setRows(rows.map((x, k) => (k === i
+                    ? { ...x, amount: e.target.value, sharePct: pctOfAmount(parseFloat(e.target.value), selectedTotal) || x.sharePct }
+                    : x)))}
+                  style={{ width: 110, padding: '8px 6px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 6 }} />
+                <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
                 <button type="button" onClick={() => setRows(rows.filter((_, k) => k !== i))} className="cursor-pointer"
                   style={{ background: 'none', border: 'none', color: '#9CA3AF' }} disabled={rows.length === 1}>
                   <Trash2 size={13} />
@@ -132,10 +160,14 @@ export function PurchasePartnerSection({ partners, lines, onApply }: Props) {
             {lines.map((l, i) => (
               <label key={i} className="flex items-center gap-2" style={{ fontSize: 13, marginBottom: 4 }}>
                 <input type="checkbox" checked={!!selected[i]} data-purchase-partner-line={i}
-                  onChange={(e) => setSelected({ ...selected, [i]: e.target.checked })} />
+                  onChange={(e) => select({ ...selected, [i]: e.target.checked })} />
                 Line {i + 1} · {l.label || 'Item'}
               </label>
             ))}
+            <p style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }} data-purchase-partner-amount-hint>
+              A BHD amount is the partner&apos;s part of the selected items ({selectedTotal.toFixed(3)} BHD) and is turned into a
+              share rounded to 0.01 %. The exact cost share per item is shown after applying.
+            </p>
             {error && <p style={{ fontSize: 12, color: '#DC2626', marginTop: 6 }} data-purchase-partner-error>{error}</p>}
             <div className="flex justify-end" style={{ marginTop: 10 }}>
               <Button variant="secondary" onClick={apply} data-purchase-partner-apply>Apply to selected items</Button>

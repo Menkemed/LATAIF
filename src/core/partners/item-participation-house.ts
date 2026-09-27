@@ -238,9 +238,43 @@ export interface SaleBasis {
   qty: number;
   netF: number;
   costF: number;
+  /** Anteil der Kartengebühr der Rechnung an dieser Zeile (siehe `cardFeeOfLineF`). */
+  feeF: number;
+  /** netF − costF − feeF. */
   profitF: number;
   /** Eine angelegte, noch nicht entschiedene Retoure (REQUESTED) auf der Zeile. */
   pendingReturn: boolean;
+}
+
+/**
+ * Kartengebühr einer Rechnung, anteilig auf eine Zeile. Gebühr = die aktiven CardFees-Ausgaben der
+ * Rechnung (nach Rückholung bei Erstattungen, wie im Hauptbuch). Verteilt nach dem Bruttowert der
+ * Zeilen nach wirksamen Retouren, kumuliert gerundet — die Anteile aller Zeilen ergeben genau die
+ * Gebühr. Eine ganz zurückgegebene Zeile trägt nichts.
+ */
+function cardFeeOfLineF(invoiceId: string, invoiceLineId: string): number {
+  const feeF = F(query(
+    `SELECT COALESCE(SUM(amount), 0) AS t FROM expenses
+      WHERE category = 'CardFees' AND related_module = 'invoice' AND related_entity_id = ? AND status != 'CANCELLED'`,
+    [invoiceId],
+  )[0]?.t);
+  if (feeF <= 0) return 0;
+  const lines = query(
+    `SELECT il.id, il.line_total,
+            (SELECT COALESCE(SUM(srl.line_total), 0) FROM sales_return_lines srl JOIN sales_returns sr ON sr.id = srl.return_id
+              WHERE srl.invoice_line_id = il.id AND sr.status IN ${EFFECTIVE_RETURN}) AS ret
+       FROM invoice_lines il WHERE il.invoice_id = ? ORDER BY il.rowid`,
+    [invoiceId],
+  ).map((r) => ({ id: String(r.id), grossF: Math.max(0, F(r.line_total) - F(r.ret)) }));
+  const totalF = lines.reduce((s, l) => s + l.grossF, 0);
+  if (totalF <= 0) return 0;
+  let cum = 0;
+  for (const l of lines) {
+    const before = Math.round((feeF * cum) / totalF);
+    cum += l.grossF;
+    if (l.id === invoiceLineId) return Math.round((feeF * cum) / totalF) - before;
+  }
+  return 0;
 }
 
 function ledgerCogsF(invoiceLineId: string, sourceModule: 'INVOICE' | 'SALES_RETURN_COGS', direction: 'DEBIT' | 'CREDIT'): { f: number; rows: number } {
@@ -265,7 +299,7 @@ export function saleBasisOf(invoiceLineId: string, branchId: string): SaleBasis 
       WHERE il.id = ? AND i.branch_id = ?`,
     [invoiceLineId, branchId],
   )[0];
-  const zero = { qty: 0, netF: 0, costF: 0, profitF: 0 };
+  const zero = { qty: 0, netF: 0, costF: 0, feeF: 0, profitF: 0 };
   if (!r) {
     return { invoiceLineId, exists: false, rowid: 0, invoiceId: '', invoiceNumber: '', invoiceStatus: 'MISSING', issuedAt: '',
       purchaseLineId: null, pendingReturn: false, ...zero };
@@ -292,12 +326,13 @@ export function saleBasisOf(invoiceLineId: string, branchId: string): SaleBasis 
   const back = ledgerCogsF(invoiceLineId, 'SALES_RETURN_COGS', 'CREDIT');
   // Ohne Wareneinsatz im Hauptbuch (Altzeile) gilt der Einstand der Zeile für die verkaufte Menge.
   const costF = inv.rows > 0 ? inv.f - back.f : F((Number(r.purchase_price_snapshot) || 0) * qty);
-  return { ...base, pendingReturn: Number(ret?.pending) > 0, qty, netF, costF, profitF: netF - costF };
+  const feeF = cardFeeOfLineF(base.invoiceId, invoiceLineId);
+  return { ...base, pendingReturn: Number(ret?.pending) > 0, qty, netF, costF, feeF, profitF: netF - costF - feeF };
 }
 
 interface BookedSale {
   bookedF: number;
-  latest: { qty: number; netF: number; costF: number } | null;
+  latest: { qty: number; netF: number; costF: number; feeF: number } | null;
 }
 
 /** Was für diesen Verkauf und Partner gebucht ist (Erstabrechnung + Nachabrechnungen). */
@@ -314,14 +349,14 @@ function bookedOf(invoiceLineId: string, partnerId: string): BookedSale {
     bookedF += F(r.amount);
     try {
       const b = JSON.parse(String(r.basis_json || '{}'));
-      latest = { qty: Number(b.qty) || 0, netF: F(b.net), costF: F(b.cost) };
+      latest = { qty: Number(b.qty) || 0, netF: F(b.net), costF: F(b.cost), feeF: F(b.fee) };
     } catch { /* ohne Grundlage */ }
   }
-  return { bookedF, latest: rows.length > 0 ? latest ?? { qty: 0, netF: 0, costF: 0 } : null };
+  return { bookedF, latest: rows.length > 0 ? latest ?? { qty: 0, netF: 0, costF: 0, feeF: 0 } : null };
 }
 
-const sameBasis = (a: { qty: number; netF: number; costF: number }, b: SaleBasis): boolean =>
-  a.qty === b.qty && a.netF === b.netF && a.costF === b.costF;
+const sameBasis = (a: { qty: number; netF: number; costF: number; feeF: number }, b: SaleBasis): boolean =>
+  a.qty === b.qty && a.netF === b.netF && a.costF === b.costF && a.feeF === b.feeF;
 
 /** Die Verkaufszeilen EINES Abschnitts — über Los und Zeilennummer, und abgerechnete, die es nicht mehr gibt. */
 function saleLinesOfEpoch(e: Epoch, branchId: string): string[] {
@@ -718,7 +753,7 @@ export function settleSaleLineInHouse(invoiceLineId: string, ctx: PartnerItemCtx
       invoiceId: basis.invoiceId || null, invoiceLineId, groupId, epochId: e.key,
       basis: {
         invoiceNumber: basis.invoiceNumber, invoiceStatus: basis.invoiceStatus, qty: basis.qty, net: B(basis.netF),
-        cost: B(basis.costF), profit: B(basis.profitF), shareBp: p.shareBp, target: B(targetF), previous: B(booked[i].bookedF),
+        cost: B(basis.costF), fee: B(basis.feeF), profit: B(basis.profitF), shareBp: p.shareBp, target: B(targetF), previous: B(booked[i].bookedF),
       },
     });
     postItemPartnerMovement({ id, partnerId: p.partnerId, kind, amount: B(deltaF), occurredAt, purchaseLineId: e.purchaseLineId, invoiceLineId });
@@ -1070,8 +1105,14 @@ export interface PartnerItemSale {
   invoiceStatus: string;
   issuedAt: string;
   quantity: number;
-  /** Gewinn des Verkaufs heute (ERP-Regel, nach Retouren). */
+  /** Gewinn des Verkaufs heute (ERP-Regel, nach Retouren und anteiliger Kartengebühr). */
   profit: number;
+  /** Netto-Erlös nach Retouren, Wareneinsatz, anteilige Kartengebühr. */
+  net: number;
+  cost: number;
+  cardFee: number;
+  /** Was LATAIF von diesem Gewinn bleibt (Gewinn − Anteile aller Partner des Abschnitts). */
+  lataifShare: number;
   /** Rechnerischer Anteil DIESES Partners heute. */
   partnerShare: number;
   /** Zur Abrechnung freigegeben (gebucht: Abrechnung + Nachabrechnungen). */
@@ -1262,7 +1303,10 @@ function salesView(e: Epoch, partnerId: string, branchId: string): PartnerItemSa
     out.push({
       invoiceLineId: il, invoiceId: basis.invoiceId, invoiceNumber: basis.invoiceNumber, invoiceStatus: basis.invoiceStatus,
       issuedAt: basis.issuedAt, quantity: basis.qty, profit: B(basis.profitF),
-      partnerShare: B(profitShareF(basis.profitF, party.shareBp)), released: B(booked.bookedF),
+      net: B(basis.netF), cost: B(basis.costF), cardFee: B(basis.feeF),
+      partnerShare: B(profitShareF(basis.profitF, party.shareBp)),
+      lataifShare: B(basis.profitF - e.parties.reduce((t, p) => t + profitShareF(basis.profitF, p.shareBp), 0)),
+      released: B(booked.bookedF),
       state, settled, settlementId: first ? String(first.id) : undefined,
       settleable: state !== 'SETTLED' && !blocker && !unsettledNothing, blocker: blocker?.message, changedAfterSettlement,
     });

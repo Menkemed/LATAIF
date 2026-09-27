@@ -12,6 +12,10 @@ import '@fontsource/jetbrains-mono/400.css'
 import '@fontsource/jetbrains-mono/500.css'
 import '@/styles/globals.css'
 import App from './App.tsx'
+import { installNativeConfirm } from '@/core/platform/native-confirm'
+
+// Rückfragen (`await window.confirm`) auf den unterstützten Dialog legen — vor dem ersten Render.
+installNativeConfirm();
 
 // Auto-Update Test: minor change to trigger new release v0.1.2
 console.log('LATAIF starting…');

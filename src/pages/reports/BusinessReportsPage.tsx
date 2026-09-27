@@ -727,7 +727,7 @@ export function BusinessReportsPage() {
               </span>
               <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, fontSize: 12 }}>
                 <div>
-                  <div style={{ color: '#6B7280', marginBottom: 4 }}>Item profit (100 %)</div>
+                  <div style={{ color: '#6B7280', marginBottom: 4 }}>Item profit (100 %, after card fees)</div>
                   <div style={{ fontWeight: 600 }} data-report-joint-item-profit={jointProfit.itemProfit.toFixed(3)}><Bhd v={jointProfit.itemProfit} /> BHD</div>
                 </div>
                 <div>

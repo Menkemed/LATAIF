@@ -398,6 +398,53 @@ const L2 = lineOf(DB, P2, 'pw3');
   ok(/jointly bought/.test(loeschen) && n(DB, "SELECT COUNT(*) FROM partners WHERE id = 'pa-c'") === 1, 'LÖSCHEN ein Partner mit Beteiligung wird nicht gelöscht');
 }
 
+// ── Kartengebühr: anteilig vom Gewinn, bevor geteilt wird ───────────────────
+{
+  for (const pid of ['pf1', 'pf2']) {
+    DB.run(`INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition,
+        scope_of_delivery, purchase_price, purchase_currency, planned_sale_price, stock_status,
+        tax_scheme, days_in_stock, images, attributes, source_type, created_at, updated_at)
+      VALUES (?,'branch-main','cat-w','Rolex',?,?,0,'Pre-Owned','[]',0,'BHD',1300,'sold','ZERO',0,'[]','{}','OWN',?,?)`,
+    [pid, 'Sub ' + pid, 'SKU-' + pid, NOW, NOW]);
+  }
+  const PF = (await purchaseHouse.createPurchaseOnPrimary(EINKAUF([
+    ZEILE('pf1', 1000, [{ partnerId: 'pa-b', sharePct: 40 }]), ZEILE('pf2', 500, [{ partnerId: 'pa-b', sharePct: 40 }]),
+  ]))).id;
+  const LF1 = lineOf(DB, PF, 'pf1'), LF2 = lineOf(DB, PF, 'pf2');
+  // EINE Rechnung über beide Stücke (1500 + 1000), voll per Karte bezahlt: Gebühr 2,2 % = 55.
+  const inv = imHaus(() => useInvoiceStore.getState().createDirectInvoice('cust-1', [
+    { productId: 'pf1', quantity: 1, unitPrice: 1500, purchasePrice: 1000, taxScheme: 'ZERO', vatRate: 0, vatAmount: 0, lineTotal: 1500, lotId: lotOf(DB, LF1) },
+    { productId: 'pf2', quantity: 1, unitPrice: 1000, purchasePrice: 500, taxScheme: 'ZERO', vatRate: 0, vatAmount: 0, lineTotal: 1000, lotId: lotOf(DB, LF2) },
+  ] as never, 'P').id);
+  reload();
+  imHaus(() => useInvoiceStore.getState().recordPayment(inv, 2500, 'card', undefined, undefined, 'normal'));
+  reload();
+  const fee = n(DB, "SELECT COALESCE(SUM(amount),0) FROM expenses WHERE category = 'CardFees' AND related_entity_id = ? AND status != 'CANCELLED'", [inv]);
+  const il1 = s(DB, 'SELECT id FROM invoice_lines WHERE invoice_id = ? AND product_id = ?', [inv, 'pf1']);
+  const il2 = s(DB, 'SELECT id FROM invoice_lines WHERE invoice_id = ? AND product_id = ?', [inv, 'pf2']);
+  const b1 = house.saleBasisOf(il1, 'branch-main'), b2 = house.saleBasisOf(il2, 'branch-main');
+  ok(fee === 55 && b1.feeF === 33000 && b2.feeF === 22000 && b1.feeF + b2.feeF === 55000, `GEBÜHR nach Zeilenwert verteilt, Summe = Gebühr (${fee}: ${b1.feeF}/${b2.feeF})`);
+  ok(b1.profitF === 1500000 - 1000000 - 33000, `GEWINN = netto − Einstand − Gebühr (${b1.profitF})`);
+  const sale = () => loadPartnersFor({ branchId: 'branch-main' } as never).itemOverview.find((p) => p.partnerId === 'pa-b')!
+    .items.find((i) => i.purchaseLineId === LF1)!.sales[0];
+  const v = sale();
+  ok(v.net === 1500 && v.cost === 1000 && v.cardFee === 33 && v.profit === 467 && v.partnerShare === 186.8 && v.lataifShare === 280.2,
+    `ANSICHT netto/Einstand/Gebühr/Gewinn, Partner- und LATAIF-Anteil (${S(v)})`);
+  const r = await save.settleSaleOnPrimary(il1);
+  ok(r.shares[0].amount === 186.8, `ABRECHNUNG mit Gebühr: 40 % von 467 = 186.8 (${S(r.shares)})`);
+  const basis = JSON.parse(s(DB, "SELECT basis_json FROM item_partner_movements WHERE invoice_line_id = ? AND kind = 'PROFIT_SHARE'", [il1]));
+  ok(basis.fee === 33, `GRUNDLAGE hält die Gebühr fest (${S(basis)})`);
+  ok(sale().state === 'SETTLED', 'ABGERECHNET und unverändert');
+  // Gebühr ändert sich (anteilige Rückholung bei einer Erstattung) → Nachabrechnung nötig, nur die Differenz.
+  const { refundCardFeePortion } = await import('../../src/core/finance/card-fee-booking.ts');
+  imHaus(() => refundCardFeePortion({ branchId: 'branch-main', userId: 'user-test', invoiceId: inv, feeAmount: 11, debitAccount: 'CARD_CLEARING', sourceId: 'rf-test', occurredAt: NOW }));
+  reload();
+  const v2 = sale();
+  ok(v2.state === 'NEEDS_CORRECTION' && v2.cardFee === 26.4, `GEBÜHR geändert → Nachabrechnung fällig (${v2.state}, ${v2.cardFee})`);
+  const k = await save.settleSaleOnPrimary(il1);
+  ok(k.mode === 'CORRECTION' && k.shares[0].amount === 2.64 && k.shares[0].total === 189.44, `NACHABRECHNUNG nur die Differenz (${S(k.shares)})`);
+}
+
 // ── Quelltext: die Maske ────────────────────────────────────────────────────
 {
   const sec = src('src/components/purchases/PurchasePartnerSection.tsx');
@@ -405,6 +452,13 @@ const L2 = lineOf(DB, P2, 'pw3');
   ok(/useState\(false\)/.test(sec) && /Add partner/.test(sec), 'MASKE „Add partner" ist standardmäßig geschlossen');
   const panel = src('src/components/partners/PartnerItemsPanel.tsx');
   ok(!/[^t] window\.confirm\(/.test(panel.replace(/await window\.confirm\(/g, '')), 'MASKE jede Rückfrage wird abgewartet');
+  // Die Rückfrage öffnet in der Desktop-App ein Fenster (Plugin 2.7 kennt `plugin:dialog|confirm` nicht mehr).
+  const main = src('src/main.tsx'), nc = src('src/core/platform/native-confirm.ts');
+  ok(main.indexOf('installNativeConfirm();') > 0 && main.indexOf('installNativeConfirm();') < main.indexOf('createRoot('),
+    'RÜCKFRAGE window.confirm wird vor dem ersten Render auf den unterstützten Dialog gelegt');
+  ok(/import \{ confirm as nativeConfirm \} from '@tauri-apps\/plugin-dialog'/.test(nc) && !/plugin:dialog\|confirm/.test(nc.replace(/^\/\/.*$/gm, '')) && /return false;/.test(nc),
+    'RÜCKFRAGE über die Plugin-Funktion confirm (message mit OK/Cancel); Fehler gilt als Cancel');
+  ok(/data-purchase-partner-amount=/.test(sec) && /pctOfAmount/.test(sec), 'MASKE Anteil auch als Betrag (BHD) eingebbar');
 }
 
 console.log(`\npartner-purchase: ${PASS} passed, ${fails.length} failed`);

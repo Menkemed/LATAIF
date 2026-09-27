@@ -105,8 +105,10 @@ export function PartnerItemsPanel({ overview, partners = [] }: { overview: Partn
         `${partnerName}'s share today ${fmt(s.partnerShare)} BHD, settled so far ${fmt(s.released)} BHD.\n` +
         `Only the difference (${fmt(s.partnerShare - s.released)} BHD) is booked today. Earlier settlements and payouts stay as they are — ` +
         `if the partner was paid too much, the item shows what they owe back (repayment or offset).`
-      : `Settle the sale on ${s.invoiceNumber}?\n\nProfit of this item (ERP rule: net sale − cost): ${fmt(s.profit)} BHD.\n` +
-        `Each partner gets their share of it on their item balance; LATAIF keeps its own share.\nNo money moves yet — pay out afterwards with "Pay out".`;
+      : `Settle the sale on ${s.invoiceNumber}?\n\nNet sale ${fmt(s.net)} − cost ${fmt(s.cost)}` +
+        `${s.cardFee ? ` − card fee ${fmt(s.cardFee)}` : ''} = profit ${fmt(s.profit)} BHD.\n` +
+        `${partnerName}'s share ${fmt(s.partnerShare)} BHD · LATAIF's share ${fmt(s.lataifShare)} BHD.\n` +
+        `The partner's share goes on their item balance. No money moves yet — pay out afterwards with "Pay out".`;
     if (!(await window.confirm(text))) return;
     setBusy(true); setFehler('');
     const r = await saveSettleSale(w, s.invoiceLineId);
@@ -219,7 +221,9 @@ export function PartnerItemsPanel({ overview, partners = [] }: { overview: Partn
                       {it.sales.map((s) => (
                         <div key={s.invoiceLineId} className="flex items-center justify-between" style={{ padding: '4px 0' }} data-partner-item-sale={s.invoiceLineId} data-sale-state={s.state}>
                           <span>
-                            {s.invoiceNumber || '(deleted line)'} · {s.invoiceStatus} · qty {s.quantity} · profit <Bhd v={s.profit} /> · {p.name}&apos;s share <Bhd v={s.partnerShare} />
+                            {s.invoiceNumber || '(deleted line)'} · {s.invoiceStatus} · qty {s.quantity} · net <Bhd v={s.net} /> − cost <Bhd v={s.cost} />
+                            {s.cardFee !== 0 && <> − card fee <Bhd v={s.cardFee} /></>} = profit <Bhd v={s.profit} /> · {p.name}&apos;s share <Bhd v={s.partnerShare} />
+                            {' · '}LATAIF&apos;s share <span data-partner-item-lataif-share={s.lataifShare.toFixed(3)}><Bhd v={s.lataifShare} /></span>
                             {s.settled && <> · released <Bhd v={s.released} /></>}
                             {s.state === 'SETTLED' && <span style={{ color: '#16A34A', marginLeft: 6 }}>settled</span>}
                             {s.state === 'NEEDS_CORRECTION' && <span style={{ color: '#B45309', marginLeft: 6 }}>{s.changedAfterSettlement}</span>}
