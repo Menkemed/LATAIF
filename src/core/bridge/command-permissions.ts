@@ -234,6 +234,8 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'partner_items.settle_sale': null,
   'partner_items.offset': null,
   'partner_items.cancel_movement': null,
+  'partner_items.take_over': null,
+  'partner_items.change_partners': null,
 };
 
 /**

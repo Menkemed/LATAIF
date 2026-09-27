@@ -217,11 +217,11 @@ const ACT = (over: Record<string, unknown> = {}) => ({
 // ── 1) Alle 59 Operationen sind namentlich gegen Rechte geprüft ──────────
 {
   const known = knownCommands();
-  ok(known.length === 181, `COVER die Registrierung zaehlt 181 Namen (PRE-G5 + PARTNER-ITEMS) (${known.length})`);
+  ok(known.length === 183, `COVER die Registrierung zaehlt 181 Namen (PRE-G5 + PARTNER-ITEMS) (${known.length})`);
   const probes = known.filter((o) => o === 'bridge.probe');
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = known.filter((o) => !probes.includes(o) && !reads.includes(o));
-  ok(probes.length === 1 && reads.length === 72 && mutations.length === 108,
+  ok(probes.length === 1 && reads.length === 72 && mutations.length === 110,
     `COVER 1 Probe + 23 Auskuenfte (18 + 27 typisierte) + 40 Buchungen (${probes.length}/${reads.length}/${mutations.length})`);
 
   // JEDE Auskunft und JEDE Buchung ist bedacht. Die Probe braucht es nicht: sie liest nichts.

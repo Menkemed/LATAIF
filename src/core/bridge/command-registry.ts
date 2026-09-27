@@ -162,6 +162,9 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // (Nach-)Abrechnung eines Verkaufs, Verrechnung zweier Artikel, Storno einer Partnerbuchung. Alle
   // buchen am Primary in der Transaktion des Auftrags (partner-item-commands.ts).
   'partner_items.record_movement', 'partner_items.settle_sale', 'partner_items.offset', 'partner_items.cancel_movement',
+  // PARTNER-ITEMS — Übernahme durch LATAIF und Partnerwechsel der unverkauften Stücke (zum aktuellen
+  // Lager-Einstand, ohne Geldbewegung). Die Lieferantenrückgabe nutzt `purchases.return_to_supplier`.
+  'partner_items.take_over', 'partner_items.change_partners',
 ];
 
 export interface CommandSpec {

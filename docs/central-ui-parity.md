@@ -3978,10 +3978,14 @@ Gemeinsamer Einkauf mit Partnern (LATAIF + Partner je Einkaufszeile, eigenes Aus
 | `partner_items.settle_sale` | Erstabrechnung eines voll bezahlten Verkaufs bzw. Nachabrechnung der Differenz nach Retoure/Storno/zulässiger Änderung | dito |
 | `partner_items.offset` | Verrechnung zweier Artikel desselben Partners, ohne Geld, paarweise | dito |
 | `partner_items.cancel_movement` | Storno einer Partnerbuchung als Erfassungsfehler (nur, wenn danach nichts gebucht wurde) | dito |
+| `partner_items.take_over` | Übernahme aller unverkauften Stücke einer Zeile durch LATAIF, nur zum aktuellen Lager-Einstand (angezeigter Wert wird am Primary geprüft), ohne Geldbewegung | dito |
+| `partner_items.change_partners` | Neue Partner/Anteile für die unverkauften Stücke (auch allein gekauft), zum aktuellen Lager-Einstand, ohne Geldbewegung | dito |
 
-Beweise: `test/partner-items/partner-purchase.test.ts`, `test/partner-items/partner-corrections.test.ts` (PC2: Wiederholung, Konflikt, fremde Filiale, Rumpf, gleichzeitige Aufträge Primary + PC2).
+Die Rückgabe an den Lieferanten nutzt den bestehenden Befehl `purchases.return_to_supplier`; der Partneranteil wird in derselben Transaktion am Primary gebucht (kein neuer Befehl).
+
+Beweise: `test/partner-items/partner-purchase.test.ts`, `test/partner-items/partner-corrections.test.ts`, `test/partner-items/partner-ownership.test.ts` (PC2: Wiederholung, Konflikt, fremde Filiale, Rumpf, gleichzeitige Aufträge Primary + PC2).
 
 ```
-Registry 177 → 181 (Buchungen 104 → 108)
+Registry 177 → 183 (Buchungen 104 → 110)
 kein Push/Tag/Release
 ```

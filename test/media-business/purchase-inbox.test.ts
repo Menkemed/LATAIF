@@ -389,7 +389,7 @@ const J = (v: unknown): string => JSON.stringify(v ?? null);
 
 // ── §10 Verdrahtung ─────────────────────────────────────────────────────────────────────────
 {
-  ok(registry.ALLOWED_MUTATIONS.includes('purchase_inbox.create') && registry.ALLOWED_MUTATIONS.length === 108,
+  ok(registry.ALLOWED_MUTATIONS.includes('purchase_inbox.create') && registry.ALLOWED_MUTATIONS.length === 110,
     `§10 die Buchung steht namentlich in der Zulassungsliste (${registry.ALLOWED_MUTATIONS.length})`);
   ok(registry.knownCommands().includes('purchase_inbox.create'), '§10 …und sie ist angemeldet');
   ok('purchase_inbox.create' in perms.OPERATION_PERMISSIONS
@@ -400,7 +400,7 @@ const J = (v: unknown): string => JSON.stringify(v ?? null);
     // PARTNER-ITEMS: seither stehen vier weitere Buchungen dahinter — geprüft wird die Zulassung selbst.
     && (/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').includes('OP_PURCHASE_INBOX_CREATE,'),
     '§10 Rust kennt denselben Namen und lässt ihn durch');
-  ok((/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1].match(/OP_[A-Z_]+/g) ?? []).length === 181,
+  ok((/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1].match(/OP_[A-Z_]+/g) ?? []).length === 183,
     '§10 die Registry steht bei 177');
 
   // Das Telefon: kein Tabellen-Push mehr, sondern Ablage + benannter Auftrag mit Kennung.

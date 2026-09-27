@@ -82,7 +82,7 @@ const R6F_MUT = ['purchases.return_to_supplier', 'purchases.cancel', 'purchases.
 const R7A_MUT = ['production.complete'];
 // MEDIA-INBOX — die eine Buchung dieses Bundles: der Posteingang des Telefons.
 // PARTNER-ITEMS: vier Geldhandlungen gemeinsam gekaufter Artikel, hinter dem Posteingang.
-const PREG5_MUT = ['purchase_inbox.create', 'partner_items.record_movement', 'partner_items.settle_sale', 'partner_items.offset', 'partner_items.cancel_movement'];
+const PREG5_MUT = ['purchase_inbox.create', 'partner_items.record_movement', 'partner_items.settle_sale', 'partner_items.offset', 'partner_items.cancel_movement', 'partner_items.take_over', 'partner_items.change_partners'];
 const MODULES: Record<string, number> = {
   'purchase-lifecycle-commands': 4, 'order-lifecycle-commands': 4, 'consignment-lifecycle-commands': 2,
   'production-commands': 2, 'office-commands': 4,
@@ -98,7 +98,7 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   const list = (t: string): string[] => [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const vorher = list(vor('src/core/bridge/command-registry.ts'));
   const jetzt = [...registry.ALLOWED_MUTATIONS];
-  ok(vorher.length === 88 && jetzt.length === 108 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6F_MUT, ...R7A_MUT, ...PREG5_MUT]) && vorher.every((o) => jetzt.includes(o)),
+  ok(vorher.length === 88 && jetzt.length === 110 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6F_MUT, ...R7A_MUT, ...PREG5_MUT]) && vorher.every((o) => jetzt.includes(o)),
     `REGISTRY Buchungen 88 → 102 (R6F) → 103 (R7A): GENAU die vierzehn R6F-Namen + eins aus R7A (production.complete), in dieser Reihenfolge, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
   ok(S([...readOps.STORE_READ_OPS]) === S(catalogue(vor('src/core/bridge/store-read-ops.ts'))),
@@ -109,10 +109,10 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 160 && rJetzt.length === 181 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT]),
+  ok(rVor.length === 160 && rJetzt.length === 183 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT]),
     `REGISTRY Rust 160 → 174 (R6F) → 175 (R7A) → 176 (PRE-G5): GENAU diese vierzehn + eins aus R7A (production.complete), in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 181 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 181 Namen (PRE-G5 + PARTNER-ITEMS), die Rust durchlässt (${known.length})`);
+  ok(known.length === 183 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 181 Namen (PRE-G5 + PARTNER-ITEMS), die Rust durchlässt (${known.length})`);
   for (const op of R6F_MUT) {
     const rule = (perms.OPERATION_PERMISSIONS as Record<string, { kind?: string } | null>)[op];
     const soll = ADMIN_OPS.includes(op) ? 'isAdmin' : null;

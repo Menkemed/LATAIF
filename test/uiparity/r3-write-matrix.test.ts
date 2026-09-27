@@ -162,11 +162,13 @@ const MATRIX: Record<string, Zeile> = {
   'partner_items.settle_sale': { ui: 'PartnersPage — Jointly bought items: Settle sale / Correct settlement', gleich: true },
   'partner_items.offset': { ui: 'PartnersPage — Jointly bought items: Offset items', gleich: true },
   'partner_items.cancel_movement': { ui: 'PartnersPage — Jointly bought items: reverse (entry error)', gleich: true },
+  'partner_items.take_over': { ui: 'PartnersPage / PurchaseDetail — Take over (LATAIF alone)', gleich: true },
+  'partner_items.change_partners': { ui: 'PartnersPage / PurchaseDetail — Change partners / Add partners to unsold pieces', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 108, `A 108 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + vier PARTNER-ITEMS) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 110, `A 108 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + vier PARTNER-ITEMS) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

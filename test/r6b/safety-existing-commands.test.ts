@@ -389,12 +389,12 @@ marker('CENTRAL_UI_R6B_UNSUPPORTED_DELETES_FAIL_CLOSED');
 // ══ §8 — Registry und Matrix ══════════════════════════════════════════════════
 {
   // R6C — R6B selbst fügte keine Buchung hinzu; seither nur die elf aus R6C (hinter invoices.cancel).
-  ok(ALLOWED_MUTATIONS.length === 108 && ALLOWED_MUTATIONS[40] === 'invoices.cancel' && ALLOWED_MUTATIONS.at(-6) === 'production.complete' && ALLOWED_MUTATIONS.at(-5) === 'purchase_inbox.create' && ALLOWED_MUTATIONS.at(-1) === 'partner_items.cancel_movement',
+  ok(ALLOWED_MUTATIONS.length === 110 && ALLOWED_MUTATIONS[40] === 'invoices.cancel' && ALLOWED_MUTATIONS.at(-8) === 'production.complete' && ALLOWED_MUTATIONS.at(-7) === 'purchase_inbox.create' && ALLOWED_MUTATIONS.at(-1) === 'partner_items.change_partners',
     `REGISTRY 41 Buchungen bis invoices.cancel, dahinter nur die elf aus R6C, die achtundzwanzig aus R6D, die acht aus R6E und die vierzehn aus R6F + eins aus R7A (production.complete) (${ALLOWED_MUTATIONS.length})`);
   const rs = src('src-tauri/src/bridge.rs');
   const block = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
   const n = (block.match(/^\s+OP_[A-Z0-9_]+,/gm) ?? []).length;
-  ok(n === 181, `REGISTRY Rust REMOTE_OPS = 181 (PRE-G5 + PARTNER-ITEMS) (${n})`);
+  ok(n === 183, `REGISTRY Rust REMOTE_OPS = 181 (PRE-G5 + PARTNER-ITEMS) (${n})`);
   const exakt = R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && z.verdrahtet).length;
   const keineUi = R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length;
   const enger = R4C_MATRIX.filter((z) => z.paritaet === 'enger').length;

@@ -19,20 +19,24 @@ import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import { assertHouseBranch } from './remote-create-support';
 import {
-  PartnerItemRejected, itemMovementInput, itemOffsetInput, requiredId,
-  type ItemMovementInput, type ItemOffsetInput,
+  PartnerItemRejected, itemMovementInput, itemOffsetInput, ownershipChangeInput, requiredId,
+  type ItemMovementInput, type ItemOffsetInput, type OwnershipChangeInput,
 } from '@/core/partners/item-participation';
 import {
-  cancelItemMovementInHouse, offsetItemsInHouse, recordItemMovementInHouse, settleSaleLineInHouse, type PartnerItemCtx,
+  cancelItemMovementInHouse, changePartnersInHouse, offsetItemsInHouse, recordItemMovementInHouse, settleSaleLineInHouse,
+  takeOverInHouse, type PartnerItemCtx,
 } from '@/core/partners/item-participation-house';
 
 export const OP_PARTNER_ITEMS_RECORD_MOVEMENT = 'partner_items.record_movement';
 export const OP_PARTNER_ITEMS_SETTLE_SALE = 'partner_items.settle_sale';
 export const OP_PARTNER_ITEMS_OFFSET = 'partner_items.offset';
 export const OP_PARTNER_ITEMS_CANCEL_MOVEMENT = 'partner_items.cancel_movement';
+export const OP_PARTNER_ITEMS_TAKE_OVER = 'partner_items.take_over';
+export const OP_PARTNER_ITEMS_CHANGE_PARTNERS = 'partner_items.change_partners';
 
 export const PARTNER_ITEM_OPS = [
   OP_PARTNER_ITEMS_RECORD_MOVEMENT, OP_PARTNER_ITEMS_SETTLE_SALE, OP_PARTNER_ITEMS_OFFSET, OP_PARTNER_ITEMS_CANCEL_MOVEMENT,
+  OP_PARTNER_ITEMS_TAKE_OVER, OP_PARTNER_ITEMS_CHANGE_PARTNERS,
 ] as const;
 
 /** Ein unbrauchbarer Rumpf — eine Antwort, keine Störung. Der Client korrigiert und schickt neu. */
@@ -98,6 +102,15 @@ export function parseCancelMovement(raw: unknown): { movementId: string } {
   return { movementId: rule(() => requiredId(r.movementId, 'movementId')) };
 }
 
+export function parseTakeOver(raw: unknown): OwnershipChangeInput {
+  const r = strict(raw, ['purchaseLineId', 'expectedValue']);
+  return rule(() => ownershipChangeInput(r, false));
+}
+export function parseChangePartners(raw: unknown): OwnershipChangeInput {
+  const r = strict(raw, ['purchaseLineId', 'expectedValue', 'partnerShares']);
+  return rule(() => ownershipChangeInput(r, true));
+}
+
 // ── Die Läufe ───────────────────────────────────────────────────────────────
 
 export function partnerItemDeps(): EngineDeps {
@@ -147,6 +160,24 @@ export function runCancelMovement(deps: EngineDeps, identity: CommandIdentity, r
   });
 }
 
+export function runTakeOver(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const input = parseTakeOver(raw);
+  return runRemoteCommand(deps, identity, () => {
+    assertHouseBranch(identity);
+    const r = urteil(() => takeOverInHouse(input, ctxOf(identity)));
+    return { purchaseLineId: r.purchaseLineId, mode: r.mode, qty: r.qty, value: r.value, released: r.released };
+  });
+}
+
+export function runChangePartners(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const input = parseChangePartners(raw);
+  return runRemoteCommand(deps, identity, () => {
+    assertHouseBranch(identity);
+    const r = urteil(() => changePartnersInHouse(input, ctxOf(identity)));
+    return { purchaseLineId: r.purchaseLineId, mode: r.mode, qty: r.qty, value: r.value, epochId: r.epochId, released: r.released };
+  });
+}
+
 // ── Die Anmeldung ─────────────────────────────────────────────────────────
 
 type Run = (deps: EngineDeps, identity: CommandIdentity, raw: unknown) => Promise<CommandOutcome>;
@@ -172,3 +203,5 @@ registerCommand(OP_PARTNER_ITEMS_RECORD_MOVEMENT, { kind: 'mutation', handler: (
 registerCommand(OP_PARTNER_ITEMS_SETTLE_SALE, { kind: 'mutation', handler: (p, a) => execute(runSettleSale, OP_PARTNER_ITEMS_SETTLE_SALE, p, a) });
 registerCommand(OP_PARTNER_ITEMS_OFFSET, { kind: 'mutation', handler: (p, a) => execute(runItemOffset, OP_PARTNER_ITEMS_OFFSET, p, a) });
 registerCommand(OP_PARTNER_ITEMS_CANCEL_MOVEMENT, { kind: 'mutation', handler: (p, a) => execute(runCancelMovement, OP_PARTNER_ITEMS_CANCEL_MOVEMENT, p, a) });
+registerCommand(OP_PARTNER_ITEMS_TAKE_OVER, { kind: 'mutation', handler: (p, a) => execute(runTakeOver, OP_PARTNER_ITEMS_TAKE_OVER, p, a) });
+registerCommand(OP_PARTNER_ITEMS_CHANGE_PARTNERS, { kind: 'mutation', handler: (p, a) => execute(runChangePartners, OP_PARTNER_ITEMS_CHANGE_PARTNERS, p, a) });

@@ -300,6 +300,9 @@ pub const OP_PARTNER_ITEMS_RECORD_MOVEMENT: &str = "partner_items.record_movemen
 pub const OP_PARTNER_ITEMS_SETTLE_SALE: &str = "partner_items.settle_sale";
 pub const OP_PARTNER_ITEMS_OFFSET: &str = "partner_items.offset";
 pub const OP_PARTNER_ITEMS_CANCEL_MOVEMENT: &str = "partner_items.cancel_movement";
+// PARTNER-ITEMS — Übernahme durch LATAIF und Partnerwechsel der unverkauften Stücke.
+pub const OP_PARTNER_ITEMS_TAKE_OVER: &str = "partner_items.take_over";
+pub const OP_PARTNER_ITEMS_CHANGE_PARTNERS: &str = "partner_items.change_partners";
 
 // CENTRAL-UI-PARITY — die Store-Auskuenfte. Der zweite Rechner nennt einen STORE, keine
 // Abfrage: die Liste hier ist die Erlaubnis, und sie deckt sich Zeichen fuer Zeichen mit
@@ -491,6 +494,8 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_PARTNER_ITEMS_SETTLE_SALE,
     OP_PARTNER_ITEMS_OFFSET,
     OP_PARTNER_ITEMS_CANCEL_MOVEMENT,
+    OP_PARTNER_ITEMS_TAKE_OVER,
+    OP_PARTNER_ITEMS_CHANGE_PARTNERS,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.
