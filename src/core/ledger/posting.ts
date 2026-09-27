@@ -2157,6 +2157,8 @@ export function postPartnerTransactionReversed(txId: string): PostingResult {
 //   PROFIT_SHARE : Gewinn  DEBIT PARTNER_ITEM_PROFIT_SHARE / CREDIT PARTNER_ITEM_BALANCE
 //                  Verlust DEBIT PARTNER_ITEM_BALANCE      / CREDIT PARTNER_ITEM_PROFIT_SHARE
 //   PROFIT_CORRECTION : wie PROFIT_SHARE, nur die Differenz einer Nachabrechnung (am Tag der Korrektur)
+//   SUPPLIER_RETURN   : wie PROFIT_SHARE — Anteil an Gewinn/Verlust einer Rückgabe an den Lieferanten
+//                       (Erstattungswert − Einstand); die Rückgabe selbst bucht der Einkaufsrückgabeweg
 //   OFFSET       : keine Buchung — Verrechnung zweier Artikel DESSELBEN Partners auf demselben Konto
 //
 // Einkauf, Lieferantenschuld, Umsatz, VAT und Wareneinsatz bleiben unveraendert — der Partner steht
@@ -2165,7 +2167,7 @@ export function postPartnerTransactionReversed(txId: string): PostingResult {
 export interface ItemPartnerMovementLike {
   id: string;
   partnerId: string;
-  kind: 'CONTRIBUTION' | 'PAYOUT' | 'PROFIT_SHARE' | 'PROFIT_CORRECTION';
+  kind: 'CONTRIBUTION' | 'PAYOUT' | 'PROFIT_SHARE' | 'PROFIT_CORRECTION' | 'SUPPLIER_RETURN';
   /** CONTRIBUTION/PAYOUT: > 0. PROFIT_SHARE: vorzeichenbehaftet (Verlust < 0). */
   amount: number;
   method?: 'cash' | 'bank' | 'benefit' | null;
@@ -2181,7 +2183,7 @@ export function postItemPartnerMovement(m: ItemPartnerMovementLike): PostingResu
     account, direction, amount, counterpartyType: 'PARTNER', counterpartyId: m.partnerId, metadata: meta,
   });
   let entries: LedgerEntryInput[];
-  if (m.kind === 'PROFIT_SHARE' || m.kind === 'PROFIT_CORRECTION') {
+  if (m.kind === 'PROFIT_SHARE' || m.kind === 'PROFIT_CORRECTION' || m.kind === 'SUPPLIER_RETURN') {
     if (amount === 0) return null;
     entries = m.amount > 0
       ? [leg('PARTNER_ITEM_PROFIT_SHARE', 'DEBIT'), leg('PARTNER_ITEM_BALANCE', 'CREDIT')]

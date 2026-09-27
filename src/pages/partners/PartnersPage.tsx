@@ -205,7 +205,7 @@ export function PartnersPage() {
         </div>
       )}
 
-      <PartnerItemsPanel overview={itemOverview} />
+      <PartnerItemsPanel overview={itemOverview} partners={partners} />
 
       {/* New Partner */}
       <Modal open={showNewPartner} onClose={() => setShowNewPartner(false)} title="New Partner" width={460}>

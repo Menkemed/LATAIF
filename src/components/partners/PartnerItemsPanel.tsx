@@ -13,6 +13,8 @@ import { WriteError } from '@/components/shared/WriteError';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import type { PartnerItemSale, PartnerItemView, PartnerItemsOfPartner } from '@/core/partners/item-participation-house';
 import { saveCancelMovement, saveItemMovement, saveItemOffset, saveSettleSale } from '@/core/partners/item-participation-save';
+import type { Partner } from '@/core/models/types';
+import { OwnershipChangeModal, type OwnershipTarget } from './OwnershipChangeModal';
 
 const fmt = (v: number): string => v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 
@@ -28,13 +30,16 @@ const KIND_LABEL: Record<string, string> = {
   PROFIT_SHARE: 'Profit share settled',
   PROFIT_CORRECTION: 'Settlement correction',
   OFFSET: 'Offset with another item',
+  SUPPLIER_RETURN: 'Returned to supplier — share of gain/loss',
+  TAKEOVER: 'Pieces left the partnership',
 };
 
 interface MoveForm { item: PartnerItemView; partnerId: string; partnerName: string; kind: 'CONTRIBUTION' | 'PAYOUT' }
 interface OffsetForm { partner: PartnerItemsOfPartner; from: string; to: string }
 
-export function PartnerItemsPanel({ overview }: { overview: PartnerItemsOfPartner[] }) {
+export function PartnerItemsPanel({ overview, partners = [] }: { overview: PartnerItemsOfPartner[]; partners?: Partner[] }) {
   const w = useSharedWrites();
+  const [own, setOwn] = useState<{ mode: 'TAKEOVER' | 'CHANGE'; target: OwnershipTarget } | null>(null);
   const [openRows, setOpenRows] = useState<Record<string, boolean>>({});
   const [form, setForm] = useState<MoveForm | null>(null);
   const [offset, setOffset] = useState<OffsetForm | null>(null);
@@ -46,6 +51,12 @@ export function PartnerItemsPanel({ overview }: { overview: PartnerItemsOfPartne
   const [busy, setBusy] = useState(false);
 
   if (overview.length === 0) return null;
+
+  function ownTarget(it: PartnerItemView): OwnershipTarget {
+    const current = overview.flatMap((p) => p.items.filter((x) => x.purchaseLineId === it.purchaseLineId && x.participating)
+      .map((x) => ({ partnerId: p.partnerId, sharePct: x.sharePct })));
+    return { purchaseLineId: it.purchaseLineId, label: `${it.productLabel} · ${it.purchaseNumber}`, qty: it.ownership.qty, value: it.ownership.value, current };
+  }
   const today = () => new Date().toISOString().split('T')[0];
 
   function openForm(item: PartnerItemView, partnerId: string, partnerName: string, kind: MoveForm['kind']) {
@@ -182,11 +193,27 @@ export function PartnerItemsPanel({ overview }: { overview: PartnerItemsOfPartne
                           onClick={() => openForm(it, p.partnerId, p.name, 'CONTRIBUTION')} data-partner-item-contribute={it.purchaseLineId}>
                           {it.open < 0 ? 'Record contribution / repayment' : 'Record contribution'}
                         </Button>
-                        <Button variant="secondary" disabled={busy || it.open <= 0 || it.correctionPending}
+                        <Button variant="secondary" disabled={busy || it.open <= 0 || it.correctionPending || it.refundPending}
                           onClick={() => openForm(it, p.partnerId, p.name, 'PAYOUT')} data-partner-item-payout={it.purchaseLineId}>
                           Pay out
                         </Button>
+                        {it.ownership.canTakeOver && (
+                          <Button variant="ghost" disabled={busy} onClick={() => setOwn({ mode: 'TAKEOVER', target: ownTarget(it) })}
+                            data-partner-item-takeover={it.purchaseLineId}>Take over (LATAIF alone)</Button>
+                        )}
+                        {it.ownership.canChange && it.participating && (
+                          <Button variant="ghost" disabled={busy} onClick={() => setOwn({ mode: 'CHANGE', target: ownTarget(it) })}
+                            data-partner-item-change={it.purchaseLineId}>Change partners</Button>
+                        )}
                       </div>
+                      {!it.participating && (
+                        <div style={{ color: '#6B7280', marginBottom: 6 }} data-partner-item-ended>
+                          No longer a partner on this item ({it.endedReason === 'CHANGE' ? 'partners changed' : 'taken over by LATAIF'}) — history below.
+                        </div>
+                      )}
+                      {it.ownership.blocker && (it.ownership.mode === 'ACTIVE' || it.ownership.mode === 'RETURNED_AFTER_END') && (
+                        <div style={{ color: '#9CA3AF', fontSize: 11, marginBottom: 6 }}>Take over / change: {it.ownership.blocker}</div>
+                      )}
                       <span className="text-overline" style={{ fontSize: 10 }}>SALES</span>
                       {it.sales.length === 0 && <div style={{ color: '#9CA3AF', margin: '4px 0 8px' }}>Not sold yet.</div>}
                       {it.sales.map((s) => (
@@ -211,9 +238,9 @@ export function PartnerItemsPanel({ overview }: { overview: PartnerItemsOfPartne
                           data-partner-item-movement={m.kind}>
                           <span>
                             {m.occurredAt} · {KIND_LABEL[m.kind] ?? m.kind}{m.invoiceNumber ? ` ${m.invoiceNumber}` : ''}
-                            {m.method ? ` · ${m.method}` : ''} · <Bhd v={m.amount} /> BHD{m.note ? ` · ${m.note}` : ''}
+                            {m.method ? ` · ${m.method}` : ''} · <Bhd v={m.amount} /> BHD{m.detail ? ` · ${m.detail}` : ''}{m.note ? ` · ${m.note}` : ''}
                           </span>
-                          {!m.cancelled && (
+                          {!m.cancelled && m.kind !== 'SUPPLIER_RETURN' && m.kind !== 'TAKEOVER' && (
                             <button type="button" disabled={busy} onClick={() => void cancelMove(it, m.id, m.kind)} className="cursor-pointer"
                               style={{ background: 'none', border: 'none', color: '#9CA3AF', fontSize: 11 }} data-partner-item-cancel={m.id}>reverse (entry error)</button>
                           )}
@@ -227,6 +254,8 @@ export function PartnerItemsPanel({ overview }: { overview: PartnerItemsOfPartne
           </Card>
         ))}
       </div>
+
+      <OwnershipChangeModal mode={own?.mode ?? null} target={own?.target ?? null} partners={partners} onClose={() => setOwn(null)} />
 
       <Modal open={!!form} onClose={() => setForm(null)} width={460}
         title={form?.kind === 'CONTRIBUTION' ? `Contribution from ${form?.partnerName ?? ''}` : `Pay out to ${form?.partnerName ?? ''}`}>

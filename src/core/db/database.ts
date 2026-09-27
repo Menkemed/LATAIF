@@ -2391,14 +2391,27 @@ function runMigrations(database: Database): void {
       created_by TEXT,
       CHECK ((party = 'HOUSE' AND partner_id IS NULL) OR (party = 'PARTNER' AND partner_id IS NOT NULL))
     )`,
-    `CREATE UNIQUE INDEX IF NOT EXISTS uq_item_participations_party ON item_participations(purchase_line_id, COALESCE(partner_id, 'HOUSE'))`,
+    // Beteiligungsabschnitte (Epochen): eine Übernahme durch LATAIF oder ein Partnerwechsel beendet den
+    // Abschnitt (ended_at) und beginnt ggf. einen neuen — für die dann noch unverkauften Stücke, zum
+    // aktuellen Lager-Einstand (unit_cost). Verkäufe gehören über die Zeilennummer der Rechnungszeile
+    // (invoice_lines.rowid) zu genau einem Abschnitt: from_il_rowid < rowid ≤ to_il_rowid.
+    `ALTER TABLE item_participations ADD COLUMN epoch_id TEXT`,
+    `ALTER TABLE item_participations ADD COLUMN from_il_rowid INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE item_participations ADD COLUMN to_il_rowid INTEGER`,
+    `ALTER TABLE item_participations ADD COLUMN ended_at TEXT`,
+    `ALTER TABLE item_participations ADD COLUMN ended_reason TEXT`,
+    `ALTER TABLE item_participations ADD COLUMN unit_cost REAL`,
+    `DROP INDEX IF EXISTS uq_item_participations_party`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_item_participations_epoch_party ON item_participations(purchase_line_id, COALESCE(epoch_id, purchase_line_id), COALESCE(partner_id, 'HOUSE'))`,
     `CREATE INDEX IF NOT EXISTS idx_item_participations_partner ON item_participations(partner_id)`,
     `CREATE INDEX IF NOT EXISTS idx_item_participations_purchase ON item_participations(purchase_id)`,
     // Geld zwischen Firma und Partner zu genau einer beteiligten Einkaufszeile: CONTRIBUTION (Partner
     // → Firma, auch Rueckzahlung), PAYOUT (Firma → Partner), PROFIT_SHARE (Gewinn-/Verlustanteil eines
     // abgerechneten Verkaufs, vorzeichenbehaftet, basis_json = Grundlage), PROFIT_CORRECTION
     // (Nachabrechnung nach Retoure/Storno/Aenderung: nur die Differenz, neue Grundlage), OFFSET
-    // (Verrechnung zwischen zwei Artikeln desselben Partners, ohne Geld, paarweise). group_id haelt
+    // (Verrechnung zwischen zwei Artikeln desselben Partners, ohne Geld, paarweise), SUPPLIER_RETURN
+    // (Anteil an Gewinn/Verlust einer Rückgabe an den Lieferanten), TAKEOVER (Stücke verlassen den
+    // Abschnitt zum aktuellen Einstand: Übernahme durch LATAIF oder Partnerwechsel). group_id haelt
     // zusammen, was EINE Handlung war. Storno setzt cancelled_at und bucht gegen; die Zeile bleibt als
     // Verlauf. Ein Verkauf wird je Partner hoechstens EINMAL erstabgerechnet.
     `CREATE TABLE IF NOT EXISTS item_partner_movements (
@@ -2407,7 +2420,7 @@ function runMigrations(database: Database): void {
       purchase_id TEXT NOT NULL,
       purchase_line_id TEXT NOT NULL,
       partner_id TEXT NOT NULL,
-      kind TEXT NOT NULL CHECK (kind IN ('CONTRIBUTION','PAYOUT','PROFIT_SHARE','PROFIT_CORRECTION','OFFSET')),
+      kind TEXT NOT NULL CHECK (kind IN ('CONTRIBUTION','PAYOUT','PROFIT_SHARE','PROFIT_CORRECTION','OFFSET','SUPPLIER_RETURN','TAKEOVER')),
       amount REAL NOT NULL,
       method TEXT,
       occurred_at TEXT NOT NULL,
@@ -2424,6 +2437,9 @@ function runMigrations(database: Database): void {
     `CREATE INDEX IF NOT EXISTS idx_item_partner_movements_line ON item_partner_movements(purchase_line_id)`,
     `CREATE INDEX IF NOT EXISTS idx_item_partner_movements_partner ON item_partner_movements(partner_id)`,
     `CREATE INDEX IF NOT EXISTS idx_item_partner_movements_invoice_line ON item_partner_movements(invoice_line_id)`,
+    // Abschnitt und Lieferantenrückgabe einer Partnerbuchung (SUPPLIER_RETURN, TAKEOVER, Abrechnungen).
+    `ALTER TABLE item_partner_movements ADD COLUMN epoch_id TEXT`,
+    `ALTER TABLE item_partner_movements ADD COLUMN purchase_return_id TEXT`,
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_item_partner_profit_share ON item_partner_movements(invoice_line_id, partner_id)
        WHERE kind = 'PROFIT_SHARE' AND cancelled_at IS NULL`,
   ];

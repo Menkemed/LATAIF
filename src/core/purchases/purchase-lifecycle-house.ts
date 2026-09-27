@@ -47,8 +47,17 @@ import {
   assertSupplierOverpayMutable, reconcilePurchaseOverpayCredit, teardownSupplierOverpayCredit, OverpayCreditRedeemed,
 } from '@/core/payables/purchase-overpay';
 import { restoreSupplierCreditUsage } from '@/core/finance/supplierCreditRestore';
-// PARTNER-ITEMS — eine Rückgabe gemeinsam gekaufter Ware an den Lieferanten ist gesperrt.
-import { isJointPurchaseLine, JOINT_BLOCK } from '@/core/partners/item-participation-house';
+// PARTNER-ITEMS — die Rückgabe gemeinsam gekaufter Ware: der Partneranteil in derselben Transaktion.
+import { reverseSupplierReturnForPartners, settleSupplierReturnForPartners } from '@/core/partners/item-participation-house';
+import { PartnerItemRejected } from '@/core/partners/item-participation';
+
+/** Ein Nein der Partnerabrechnung als Nein der Rückgabe (derselbe Code, dieselbe Meldung). */
+function partnerUrteil<T>(fn: () => T): T {
+  try { return fn(); } catch (e) {
+    if (e instanceof PartnerItemRejected) throw new PurchaseLifecycleRejected(e.code, e.message);
+    throw e;
+  }
+}
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import type { HouseCtx } from '@/core/payables/payables-house';
 
@@ -252,7 +261,6 @@ export function createPurchaseReturnDraftInHouse(input: PurchaseReturnDraftInput
   const id = uuid();
   const returnNumber = getNextDocumentNumber('PRET');
   const returnDate = input.returnDate || dayOf(ctx.now);
-  for (const l of input.lines) if (isJointPurchaseLine(l.purchaseLineId)) throw nein(JOINT_BLOCK.code, JOINT_BLOCK.purchaseReturn);
   // Der Artikel einer Zeile ist der der EINKAUFSZEILE — nicht, was ein Aufrufer dazu nennt.
   const lines = input.lines.map((l) => {
     const pl = query('SELECT product_id FROM purchase_lines WHERE id = ? AND purchase_id = ?', [l.purchaseLineId, input.purchaseId])[0];
@@ -311,14 +319,19 @@ export function confirmPurchaseReturnInHouse(returnId: string, ctx: HouseCtx): P
   const returnNumber = String(ret.return_number ?? '');
   const method = (ret.refund_method as string | null) || null;
   const lines = query('SELECT * FROM purchase_return_lines WHERE return_id = ?', [returnId]);
-  for (const l of lines) {
-    if (isJointPurchaseLine(l.purchase_line_id ? String(l.purchase_line_id) : null)) throw nein(JOINT_BLOCK.code, JOINT_BLOCK.purchaseReturn);
-  }
   const totalRetF = F(ret.total_amount);
   const plan = planReturn(p, totalRetF);
   // Slice 4b — Pre-Check VOR dem Total-UPDATE: der Return aendert total/paid → den Ueberschuss.
   // Ist die Overpay-Gutschrift schon eingeloest und wuerde sich aendern → BLOCK (fail-fast).
   liveOrRedeemed(() => assertSupplierOverpayMutable(purchaseId, B(plan.newPaidF), B(plan.newTotalF)));
+
+  // PARTNER-ITEMS — VOR dem Lagerabgang (der Einstand der Stücke gilt noch): je gemeinsam gekaufter
+  // Zeile der Partneranteil an (Erstattungswert − Einstand). Scheitert das, gibt es die Rückgabe nicht.
+  partnerUrteil(() => settleSupplierReturnForPartners(returnId, returnNumber, lines.map((l) => ({
+    purchaseLineId: (l.purchase_line_id as string | null) || null,
+    quantity: Number(l.quantity) || 0,
+    unitPrice: Number(l.unit_price) || 0,
+  })), ctx));
 
   const db = getDatabase();
   const now = ctx.now;
@@ -578,6 +591,9 @@ export function reverseConfirmedPurchaseReturnInHouse(returnId: string, now: str
         'This supplier return cannot be reversed: the supplier credit from it has already been (partly) used. Reverse that credit usage first.');
     }
   }
+
+  // 1b. PARTNER-ITEMS — die Partnerbuchungen dieser Rückgabe gegenbuchen (Nein, wenn danach gebucht wurde).
+  partnerUrteil(() => reverseSupplierReturnForPartners(returnId, now));
 
   // 2. Ledger-Storno (INVENTORY/AP/Cash der PURCHASE_RETURN-Buchung). Guarded + idempotent, STRIKT.
   if (hasLedgerEntries('PURCHASE_RETURN', returnId) && !hasReversalFor('PURCHASE_RETURN', returnId)) {

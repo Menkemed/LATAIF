@@ -14,11 +14,13 @@ import { usePartnerStore } from '@/stores/partnerStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useBankingStore } from '@/stores/bankingStore';
 import {
-  PartnerItemRejected, itemMovementInput, itemOffsetInput, requiredId, type ItemMovementInput, type ItemOffsetInput,
+  PartnerItemRejected, itemMovementInput, itemOffsetInput, ownershipChangeInput, requiredId,
+  type ItemMovementInput, type ItemOffsetInput, type OwnershipChangeInput,
 } from './item-participation';
 import {
-  cancelItemMovementInHouse, offsetItemsInHouse, recordItemMovementInHouse, settleSaleLineInHouse,
-  type ItemMovementRecorded, type ItemOffsetRecorded, type PartnerItemCtx, type SaleSettled,
+  cancelItemMovementInHouse, changePartnersInHouse, offsetItemsInHouse, recordItemMovementInHouse, settleSaleLineInHouse,
+  takeOverInHouse,
+  type ItemMovementRecorded, type ItemOffsetRecorded, type OwnershipChanged, type PartnerItemCtx, type SaleSettled,
 } from './item-participation-house';
 
 // Die Namen der geprüften Fernbefehle (`bridge/partner-item-commands.ts`) — als Wert: die Oberfläche
@@ -27,6 +29,8 @@ const OP_RECORD_MOVEMENT = 'partner_items.record_movement';
 const OP_SETTLE_SALE = 'partner_items.settle_sale';
 const OP_OFFSET = 'partner_items.offset';
 const OP_CANCEL_MOVEMENT = 'partner_items.cancel_movement';
+const OP_TAKE_OVER = 'partner_items.take_over';
+const OP_CHANGE_PARTNERS = 'partner_items.change_partners';
 
 /** Was eine Maske von ihrer Schreibweiche braucht — `useSharedWrites()` passt. */
 export interface ItemWrite {
@@ -79,6 +83,12 @@ export function offsetItemsOnPrimary(input: ItemOffsetInput): Promise<ItemOffset
 export function cancelItemMovementOnPrimary(movementId: string): Promise<{ cancelled: string[] }> {
   return runOnPrimary(() => cancelItemMovementInHouse(movementId, localCtx()), neuLesen);
 }
+export function takeOverOnPrimary(input: OwnershipChangeInput): Promise<OwnershipChanged> {
+  return runOnPrimary(() => takeOverInHouse(input, localCtx()), neuLesen);
+}
+export function changePartnersOnPrimary(input: OwnershipChangeInput): Promise<OwnershipChanged> {
+  return runOnPrimary(() => changePartnersInHouse(input, localCtx()), neuLesen);
+}
 
 // ── Die Masken ──────────────────────────────────────────────────────────────
 
@@ -129,6 +139,32 @@ export async function saveCancelMovement(w: ItemWrite, movementId: string): Prom
     local: async () => cancelItemMovementOnPrimary(id),
     remote: () => ({ movementId: id }),
     shape: (v) => ({ cancelled: Array.isArray(v.cancelled) ? v.cancelled.map(String) : [] }),
+  });
+  if (r.kind === 'ok' && w.remote) neuLesen();
+  return r;
+}
+
+/** „Take over (LATAIF alone)" — nur zum angezeigten aktuellen Lager-Einstand. */
+export async function saveTakeOver(w: ItemWrite, raw: Record<string, unknown>): Promise<WriteOutcome<{ qty: number; value: number }>> {
+  let input: OwnershipChangeInput;
+  try { input = ownershipChangeInput(raw, false); } catch (e) { return absage(e); }
+  const r = await w.save<{ qty: number; value: number }>(OP_TAKE_OVER, {
+    local: async () => { const o = await takeOverOnPrimary(input); return { qty: o.qty, value: o.value }; },
+    remote: () => ({ purchaseLineId: input.purchaseLineId, expectedValue: input.expectedValue }),
+    shape: (v) => ({ qty: Number(v.qty) || 0, value: Number(v.value) || 0 }),
+  });
+  if (r.kind === 'ok' && w.remote) neuLesen();
+  return r;
+}
+
+/** „Change partners" — neue Anteile für die unverkauften Stücke, zum angezeigten aktuellen Lager-Einstand. */
+export async function saveChangePartners(w: ItemWrite, raw: Record<string, unknown>): Promise<WriteOutcome<{ qty: number; value: number }>> {
+  let input: OwnershipChangeInput;
+  try { input = ownershipChangeInput(raw, true); } catch (e) { return absage(e); }
+  const r = await w.save<{ qty: number; value: number }>(OP_CHANGE_PARTNERS, {
+    local: async () => { const o = await changePartnersOnPrimary(input); return { qty: o.qty, value: o.value }; },
+    remote: () => ({ purchaseLineId: input.purchaseLineId, expectedValue: input.expectedValue, partnerShares: input.partnerShares ?? [] }),
+    shape: (v) => ({ qty: Number(v.qty) || 0, value: Number(v.value) || 0 }),
   });
   if (r.kind === 'ok' && w.remote) neuLesen();
   return r;

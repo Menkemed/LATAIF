@@ -1665,6 +1665,14 @@ export function InvoiceDetail() {
                           }}>{d.label}</button>
                       );
                     })}
+                    {/* PARTNER-ITEMS — „Under Repair" nähme ein gemeinsam gekauftes Stück aus der Beteiligung. */}
+                    {returnDisposition === 'UNDER_REPAIR' && (
+                      <div style={{ fontSize: 11, color: '#6B7280', width: '100%', marginTop: 4 }} data-return-under-repair-hint>
+                        Items bought jointly with a partner cannot use „Under Repair": choose „Back to Stock" and, if needed,
+                        send the item to repair as own stock — or „Write Off" (the partner shares the loss). A customer who only
+                        brings the watch in for repair is a Repair job, not a return.
+                      </div>
+                    )}
                   </div>
                 );
               })()}

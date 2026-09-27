@@ -26,7 +26,7 @@ import {
 } from '@/core/ledger/posting';
 import { atomar, localHouseCtx, recordPurchasePaymentInHouse } from '@/core/payables/payables-house';
 // PARTNER-ITEMS — gemeinsamer Einkauf: Beteiligung je Einkaufszeile.
-import { insertLineParticipations, participationsOfPurchase } from '@/core/partners/item-participation-house';
+import { insertLineParticipations, ownershipViewOf, participationsOfPurchase } from '@/core/partners/item-participation-house';
 import type { PartnerShareInput } from '@/core/partners/item-participation';
 // CENTRAL-UI-PARITY R6F — Retoure (Anlage + Wirkung), Storno, Retouren-Umkehr, Inbox-Verwerfen und
 // der Auftrags-Rollup wohnen jetzt in der Hausfolge des Einkaufs-Lebenszyklus (ohne Store-Import);
@@ -713,6 +713,15 @@ export function loadPurchasesFor(ctx: BusinessReadContext): { purchases: Purchas
     // PARTNER-ITEMS — die Beteiligten gemeinsam gekaufter Zeilen (fehlt, wenn allein gekauft).
     const parts = participationsOfPurchase(p.id, ctx.branchId);
     if (parts.length > 0) p.participations = parts;
+    // PARTNER-ITEMS — Übernahme / Partnerwechsel je Zeile mit unverkauften Stücken oder Beteiligung.
+    if (p.status !== 'CANCELLED') {
+      const lineIds = query(
+        `SELECT DISTINCT pl.id FROM purchase_lines pl
+           LEFT JOIN stock_lots sl ON sl.purchase_line_id = pl.id AND sl.status != 'CANCELLED' AND sl.qty_remaining > 0
+          WHERE pl.purchase_id = ? AND (sl.id IS NOT NULL OR EXISTS (SELECT 1 FROM item_participations ip WHERE ip.purchase_line_id = pl.id))`,
+        [p.id]).map((r) => String(r.id));
+      if (lineIds.length > 0) p.ownership = lineIds.map((id) => ownershipViewOf(id, ctx.branchId));
+    }
     return p;
   });
   return { purchases };

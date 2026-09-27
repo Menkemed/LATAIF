@@ -55,6 +55,36 @@ export const PARTNER_SALE_PENDING = 'PARTNER_SALE_PENDING';
 export const PARTNER_SALE_NEEDS_CORRECTION = 'PARTNER_SALE_NEEDS_CORRECTION';
 export const PARTNER_ITEM_OFFSET_INVALID = 'PARTNER_ITEM_OFFSET_INVALID';
 export const PARTNER_ITEM_JOINT_BLOCKED = 'PARTNER_ITEM_JOINT_BLOCKED';
+export const PARTNER_SUPPLIER_REFUND_PENDING = 'PARTNER_SUPPLIER_REFUND_PENDING';
+export const PARTNER_OWNERSHIP_BLOCKED = 'PARTNER_OWNERSHIP_BLOCKED';
+export const PARTNER_OWNERSHIP_VALUE_MISMATCH = 'PARTNER_OWNERSHIP_VALUE_MISMATCH';
+export const PARTNER_OWNERSHIP_UNCHANGED = 'PARTNER_OWNERSHIP_UNCHANGED';
+export const PARTNER_SALE_OUTSIDE_PARTNERSHIP = 'PARTNER_SALE_OUTSIDE_PARTNERSHIP';
+
+/** „Take over" / „Change partners": die Zeile und der Wert, den die Maske angezeigt hat. */
+export interface OwnershipChangeInput {
+  purchaseLineId: string;
+  /** Der angezeigte aktuelle Lager-Einstand der betroffenen Stücke — muss dem des Hauses entsprechen. */
+  expectedValue: number;
+  /** Nur „Change partners": die neuen Partner und Anteile (LATAIF hält den Rest). */
+  partnerShares?: PartnerShareInput[];
+}
+
+export function ownershipChangeInput(raw: Record<string, unknown>, withShares: boolean): OwnershipChangeInput {
+  const v = raw.expectedValue;
+  if (typeof v !== 'number' || !Number.isFinite(v) || F(v) < 0) {
+    throw nein(PARTNER_ITEM_AMOUNT_INVALID, 'expectedValue must be the shown stock value');
+  }
+  const out: OwnershipChangeInput = { purchaseLineId: idOf(raw.purchaseLineId, 'purchaseLineId'), expectedValue: B(F(v)) };
+  if (withShares) {
+    if (!Array.isArray(raw.partnerShares)) throw nein(PARTNER_SHARES_INVALID, 'partnerShares must be a list');
+    out.partnerShares = raw.partnerShares.map((s) => {
+      const r = (s ?? {}) as Record<string, unknown>;
+      return { partnerId: typeof r.partnerId === 'string' ? r.partnerId : '', sharePct: r.sharePct as number };
+    });
+  }
+  return out;
+}
 
 /** BHD in Fils — verglichen wird immer ganzzahlig, wie überall im Haus. */
 export const F = (v: unknown): number => Math.round((Number(v) || 0) * 1000);

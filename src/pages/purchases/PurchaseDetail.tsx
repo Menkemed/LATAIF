@@ -12,6 +12,9 @@ import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useProductStore } from '@/stores/productStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
+// PARTNER-ITEMS — Beteiligung je Zeile, Übernahme durch LATAIF und Partnerwechsel der unverkauften Stücke.
+import { usePartnerStore } from '@/stores/partnerStore';
+import { OwnershipChangeModal, type OwnershipTarget } from '@/components/partners/OwnershipChangeModal';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { PurchaseIdentityReference, PurchaseStatus } from '@/core/models/types';
 import { getProductSpecs } from '@/core/utils/product-format';
@@ -69,6 +72,9 @@ export function PurchaseDetail() {
   const [cancelFehler, setCancelFehler] = useState('');
 
   useEffect(() => { loadPurchases(); loadSuppliers(); loadReturns(); loadProducts(); loadCategories(); loadEmployees(); }, [loadPurchases, loadSuppliers, loadReturns, loadProducts, loadCategories, loadEmployees]);
+  const { partners, loadPartners } = usePartnerStore();
+  useEffect(() => { loadPartners(); }, [loadPartners]);
+  const [own, setOwn] = useState<{ mode: 'TAKEOVER' | 'CHANGE'; target: OwnershipTarget } | null>(null);
 
   const purchase = useMemo(() => purchases.find(p => p.id === id), [purchases, id]);
   const supplier = useMemo(() => purchase ? suppliers.find(s => s.id === purchase.supplierId) : undefined, [purchase, suppliers]);
@@ -367,11 +373,39 @@ export function PurchaseDetail() {
                     {/* PARTNER-ITEMS — gemeinsam gekauft: wer welchen Anteil und Kostenanteil hält. */}
                     {(() => {
                       const part = purchase.participations?.find(pp => pp.purchaseLineId === l.id);
-                      if (!part) return null;
+                      const os = purchase.ownership?.find(o => o.purchaseLineId === l.id);
+                      const hasPartners = partners.some(p => p.active);
+                      const current = part && !part.ended ? part.parties.filter(pt => pt.partnerId).map(pt => ({ partnerId: pt.partnerId as string, sharePct: pt.sharePct })) : [];
+                      const target: OwnershipTarget | null = os ? {
+                        purchaseLineId: l.id, label: getProductName(l.productId), qty: os.qty, value: os.value, current,
+                      } : null;
                       return (
-                        <div style={{ marginTop: 6, fontSize: 11, color: '#7B4AAA' }} data-purchase-line-partners={l.id}>
-                          Bought jointly: {part.parties.map(pt => `${pt.name}${pt.active ? '' : ' (inactive)'} ${pt.sharePct} % · ${pt.costShare.toFixed(3)} BHD`).join(' · ')}
-                        </div>
+                        <>
+                          {part && (
+                            <div style={{ marginTop: 6, fontSize: 11, color: '#7B4AAA' }} data-purchase-line-partners={l.id}>
+                              {part.ended
+                                ? <>Partnership ended ({part.ended.reason === 'CHANGE' ? 'partners changed' : 'taken over by LATAIF'}) — last: </>
+                                : <>Bought jointly: </>}
+                              {part.parties.map(pt => `${pt.name}${pt.active ? '' : ' (inactive)'} ${pt.sharePct} % · ${pt.costShare.toFixed(3)} BHD`).join(' · ')}
+                              {(part.history ?? []).length > 0 && (
+                                <div style={{ color: '#9CA3AF' }}>Earlier: {(part.history ?? []).map(h => `${h.parties} (${h.reason === 'CHANGE' ? 'changed' : 'taken over'})`).join(' → ')}</div>
+                              )}
+                            </div>
+                          )}
+                          {target && os && (os.canTakeOver || (os.canChange && hasPartners) || (os.blocker && part)) && (
+                            <div className="flex gap-2" style={{ marginTop: 6, flexWrap: 'wrap', alignItems: 'center' }} data-purchase-line-ownership={l.id}>
+                              {os.canTakeOver && (
+                                <Button variant="ghost" onClick={() => setOwn({ mode: 'TAKEOVER', target })} data-purchase-line-takeover={l.id}>Take over (LATAIF alone)</Button>
+                              )}
+                              {os.canChange && hasPartners && (
+                                <Button variant="ghost" onClick={() => setOwn({ mode: 'CHANGE', target })} data-purchase-line-change={l.id}>
+                                  {current.length > 0 ? 'Change partners' : 'Add partners to unsold pieces'}
+                                </Button>
+                              )}
+                              {os.blocker && part && <span style={{ fontSize: 11, color: '#9CA3AF' }}>{os.blocker}</span>}
+                            </div>
+                          )}
+                        </>
                       );
                     })()}
                   </div>
@@ -582,6 +616,8 @@ export function PurchaseDetail() {
           </Button>
         </div>
       </Modal>
+
+      <OwnershipChangeModal mode={own?.mode ?? null} target={own?.target ?? null} partners={partners} onClose={() => setOwn(null)} />
 
       <HistoryDrawer
         open={showHistory}

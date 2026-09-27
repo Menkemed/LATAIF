@@ -1294,12 +1294,20 @@ export interface Purchase {
   sourceOrderId?: UUID;
   // PARTNER-ITEMS — gemeinsam gekaufte Zeilen: LATAIF + Partner mit Anteil und Kostenanteil (leer = allein).
   participations?: PurchaseLineParticipation[];
+  /** PARTNER-ITEMS — je Zeile mit unverkauften Stücken: Übernahme / Partnerwechsel (auch allein gekauft). */
+  ownership?: Array<{ purchaseLineId: UUID; mode: string; qty: number; value: number; blocker: string | null; canTakeOver: boolean; canChange: boolean }>;
 }
 
 /** PARTNER-ITEMS — die Beteiligten einer gemeinsam gekauften Einkaufszeile. */
 export interface PurchaseLineParticipation {
   purchaseLineId: UUID;
   parties: Array<{ party: 'HOUSE' | 'PARTNER'; partnerId: UUID | null; name: string; active: boolean; sharePct: number; costShare: number }>;
+  /** Die Beteiligung ist beendet (Übernahme durch LATAIF / Partnerwechsel) — `parties` ist dann die letzte. */
+  ended?: { at: string; reason: string };
+  /** Frühere Beteiligungsabschnitte (Verlauf). */
+  history?: Array<{ at: string; reason: string; parties: string }>;
+  /** Übernahme / Partnerwechsel: was heute ginge. */
+  ownership?: { mode: string; qty: number; value: number; blocker: string | null; canTakeOver: boolean; canChange: boolean };
 }
 
 // Purchase Return (Plan §Purchase Returns §17)

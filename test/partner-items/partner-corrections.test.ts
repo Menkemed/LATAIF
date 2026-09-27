@@ -358,10 +358,13 @@ let EX = { line: '', inv: '', il: '' };
 {
   const a = await kauf('pw7', 800, [{ partnerId: 'pa-b', sharePct: 50 }], 1, 800);
   const pr = await code(() => imHaus(() => returnToSupplierInHouse({ purchaseId: a.id, refundMethod: 'cash' as never, lines: [{ purchaseLineId: a.line, quantity: 1, unitPrice: 800 }] }, localHouseCtx())));
-  ok(pr === 'PARTNER_ITEM_JOINT_BLOCKED', `SPERRE Rückgabe an den Lieferanten (${pr})`);
+  // Seit PARTNER-ITEMS Rückgaben: die Rückgabe an den Lieferanten geht und rechnet den Partneranteil ab.
+  ok(pr === '' && n(DB, "SELECT COUNT(*) FROM item_partner_movements WHERE kind = 'SUPPLIER_RETURN' AND purchase_line_id = ?", [a.line]) === 1,
+    `RÜCKGABE an den Lieferanten mit Partnerabrechnung (${pr || 'ok'})`);
+  const a2 = await kauf('pw7', 800, [{ partnerId: 'pa-b', sharePct: 50 }], 1, 800);
   const prod = await code(() => createProductionInHouse({ inputProductIds: ['pw7'], outputs: [] } as never, { branchId: 'branch-main', userId: 'user-test' }));
   ok(prod === 'PARTNER_ITEM_JOINT_BLOCKED', `SPERRE Verbrauch in der Fertigung (${prod})`);
-  const v = verkauf(DB, 'pw7', lotOf(DB, a.line), 900, 'full');
+  const v = verkauf(DB, 'pw7', lotOf(DB, a2.line), 900, 'full');
   const ret = await code(() => retoure(v.inv, v.il, 'UNDER_REPAIR'));
   ok(ret === 'PARTNER_ITEM_JOINT_BLOCKED', `SPERRE Retoure „Under repair" nähme das Stück aus der Beteiligung (${ret})`);
   const pending = retoure(v.inv, v.il, 'WRITE_OFF', false);
