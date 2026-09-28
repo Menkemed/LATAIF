@@ -210,9 +210,9 @@ function seed() {
 }
 const movements = (line) => dbQ(`SELECT kind, amount FROM item_partner_movements WHERE purchase_line_id = ? AND cancelled_at IS NULL ORDER BY rowid`, [line]);
 async function aufklappen(c, line) {
-  if (await exists(c, `[data-partner-item-contribute="${line}"]`)) return;
+  if (await exists(c, `[data-partner-item-expanded="${line}"]`)) return;
   await click(c, `[data-partner-item-toggle="${line}"]`);
-  await waitFor(c, `[data-partner-item-contribute="${line}"]`, 10000);
+  await waitFor(c, `[data-partner-item-expanded="${line}"]`, 10000);
 }
 async function shot(name) {
   if (!process.env.E2E_SHOTS || !c) return;
@@ -267,6 +267,9 @@ try {
   await gehFrisch(c, '/partners');
   await waitFor(c, '[data-partner-items]', 60000);
   await aufklappen(c, P('pl-A'));
+  const knopf = await c.ev(`return document.querySelector('[data-partner-item-contribute="${P('pl-A')}"]')?.textContent.trim() || '';`);
+  ok(knopf === 'Partner pays in' && !(await exists(c, `[data-partner-item-payout="${P('pl-A')}"]`)),
+    `GELDHANDLUNG Partner schuldet seinen Kostenanteil → nur „Partner pays in" (${knopf})`);
   await click(c, `[data-partner-item-contribute="${P('pl-A')}"]`);
   await waitFor(c, '[data-partner-item-save]', 10000);
   await setVal(c, '[data-partner-item-amount]', '400');
@@ -315,6 +318,28 @@ try {
   const pib = dbQ(`SELECT ROUND(SUM(CASE WHEN direction='CREDIT' THEN amount ELSE -amount END), 3) AS s FROM ledger_entries WHERE account = 'PARTNER_ITEM_BALANCE'`)[0]?.s;
   const unbal = dbQ(`SELECT COUNT(*) AS n FROM (SELECT transaction_id, SUM(CASE WHEN direction='DEBIT' THEN amount ELSE -amount END) AS d FROM ledger_entries GROUP BY transaction_id HAVING ABS(d) > 0.0005)`)[0]?.n;
   ok(pib === 568.618 && unbal === 0, `HAUPTBUCH Partner-Ausgleichskonto 568,618, alles ausgeglichen (${pib}, ${unbal})`);
+
+  // ── Geldhandlung folgt dem Stand: Guthaben → nur „Pay out"; danach erledigt, kein Beitrag mehr ──
+  ok(!(await exists(c, `[data-partner-item-contribute="${P('pl-A')}"]`)) && await exists(c, `[data-partner-item-payout="${P('pl-A')}"]`),
+    'GELDHANDLUNG LATAIF schuldet dem Partner → nur „Pay out", kein Beitrag');
+  await click(c, `[data-partner-item-payout="${P('pl-A')}"]`);
+  await waitFor(c, '[data-partner-item-save]', 10000);
+  const vorschlag = await c.ev("return document.querySelector('[data-partner-item-amount] input, input[data-partner-item-amount]')?.value || document.querySelector('[data-partner-item-amount]')?.value || '';");
+  const maxText = await c.ev("return document.querySelector('[data-partner-item-max]')?.textContent || '';");
+  await click(c, '[data-partner-item-method="cash"]');
+  await click(c, '[data-partner-item-save]');
+  for (let i = 0; i < 40 && (await exists(c, '[data-partner-item-save]')); i++) await sleep(300);
+  await spuelen(c);
+  ok(vorschlag === '568.618' && /568\.618/.test(maxText) && movements(P('pl-A')).map((m) => m.kind).join() === 'CONTRIBUTION,PROFIT_SHARE,PAYOUT',
+    `AUSZAHLUNG 568,618 vorgeschlagen und gebucht (${vorschlag}, ${maxText})`);
+  await sleep(600);
+  ok(await attr(c, `[data-partner-item="${P('pl-A')}"] [data-partner-item-money-status]`, 'data-partner-item-money-status') === 'SETTLED'
+    && !(await exists(c, `[data-partner-item-contribute="${P('pl-A')}"]`)) && !(await exists(c, `[data-partner-item-payout="${P('pl-A')}"]`)),
+    'ERLEDIGT „Settled — nothing open", keine Geldhandlung mehr');
+  await c.ev(`document.querySelector('[data-partner-item="${P('pl-A')}"]')?.scrollIntoView({ block: 'center' }); return 1;`);
+  await sleep(300);
+  await shot('partner-settled');
+
 
   // ── Mehrere Artikel auf einer Rechnung: Gebührenanteile = exakt die Gebühr ──
   await aufklappen(c, P('pl-C')); await aufklappen(c, P('pl-D'));

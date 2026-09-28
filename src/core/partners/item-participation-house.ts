@@ -41,7 +41,7 @@ import { hasLedgerEntries, hasReversalFor, postItemPartnerMovement, reverseSourc
 import {
   B, F, FULL_BP, PartnerItemRejected, itemMovementInput, itemOffsetInput, openBalanceF, owedCostF, ownershipChangeInput,
   planLineParticipation, profitShareF,
-  PARTNER_ITEM_JOINT_BLOCKED, PARTNER_ITEM_NOT_FOUND, PARTNER_ITEM_OFFSET_INVALID, PARTNER_ITEM_OVERFUNDED,
+  PARTNER_ITEM_JOINT_BLOCKED, PARTNER_ITEM_NOT_FOUND, PARTNER_ITEM_OFFSET_INVALID, PARTNER_ITEM_OVERFUNDED, PARTNER_ITEM_NOTHING_OWED,
   PARTNER_ITEM_PAYOUT_EXCEEDS_OPEN, PARTNER_ITEM_PRIMARY_ONLY, PARTNER_ITEM_PURCHASE_CANCELLED, PARTNER_MOVEMENT_CANCELLED,
   PARTNER_MOVEMENT_NOT_FOUND, PARTNER_NOT_ACTIVE, PARTNER_OWNERSHIP_BLOCKED, PARTNER_OWNERSHIP_UNCHANGED,
   PARTNER_OWNERSHIP_VALUE_MISMATCH, PARTNER_SALE_ALREADY_SETTLED, PARTNER_SALE_NEEDS_CORRECTION, PARTNER_SALE_NOT_FOUND,
@@ -588,9 +588,6 @@ function insertMovement(ctx: PartnerItemCtx, m: {
   return id;
 }
 
-const lineTotalsF = (plId: string, branchId: string): number =>
-  epochsOf(plId, branchId).reduce((a, e) => a + e.valueF, 0);
-
 // ── Beitrag und Auszahlung ──────────────────────────────────────────────────
 
 export interface ItemMovementRecorded {
@@ -628,20 +625,20 @@ export function recordItemMovementInHouse(raw: ItemMovementInput, ctx: PartnerIt
   const st = lineStateOf(v.purchaseLineId, v.partnerId, ctx.branchId);
   const amountF = F(v.amount);
   if (v.kind === 'CONTRIBUTION') {
-    const funded = query(
-      `SELECT COALESCE(SUM(CASE WHEN kind = 'CONTRIBUTION' THEN amount WHEN kind = 'PAYOUT' THEN -amount ELSE 0 END), 0) AS t
-         FROM item_partner_movements WHERE purchase_line_id = ? AND cancelled_at IS NULL`,
-      [v.purchaseLineId],
-    )[0];
-    const cancelled = purchaseCancelled(purchaseId);
-    const baseF = lineTotalsF(v.purchaseLineId, ctx.branchId) + Math.max(0, st.extraUnsettledF);
-    const capF = cancelled ? 0 : baseF - F(funded?.t);
-    const allowedF = Math.max(capF, -st.openF);
-    if (amountF > allowedF) {
-      if (cancelled && st.openF >= 0) {
+    // Ein Beitrag bezahlt, was der Partner an DIESEM Artikel schuldet — seinen offenen Kostenanteil oder
+    // eine Rückforderung — und nie mehr. Schuldet er nichts (erledigt, von LATAIF übernommen, oder LATAIF
+    // schuldet ihm), wird nichts gebucht: sonst entstünde aus dem Nichts ein neues Guthaben.
+    const owedF = Math.max(0, -st.openF);
+    if (owedF === 0) {
+      if (purchaseCancelled(purchaseId)) {
         throw nein(PARTNER_ITEM_PURCHASE_CANCELLED, 'this purchase is cancelled — no contribution can be booked on it');
       }
-      throw nein(PARTNER_ITEM_OVERFUNDED, `at most ${bhd(Math.max(0, allowedF))} BHD can be contributed on this item (its cost is ${bhd(baseF)} BHD)`);
+      throw nein(PARTNER_ITEM_NOTHING_OWED, st.openF > 0
+        ? `the partner owes LATAIF nothing on this item — LATAIF owes the partner ${bhd(st.openF)} BHD (use "Pay out")`
+        : 'the partner owes LATAIF nothing on this item — it is settled');
+    }
+    if (amountF > owedF) {
+      throw nein(PARTNER_ITEM_OVERFUNDED, `the partner owes ${bhd(owedF)} BHD on this item — at most that can be paid in`);
     }
   } else {
     const b = payoutBlocker(st);
@@ -1098,6 +1095,16 @@ export function ownershipViewOf(purchaseLineId: string, branchId: string): Owner
 
 // ── Lesen: Partner-Modul und Berichte ───────────────────────────────────────
 
+/** Welche Geldhandlung passt, und wie „nichts offen" heißt — Anzeige zur Regel in recordItemMovementInHouse. */
+function moneyStateOf(st: LineState, participating: boolean, endedReason: string | null, sales: PartnerItemSale[], qty: number)
+  : Pick<PartnerItemView, 'moneyAction' | 'moneyStatus'> {
+  if (st.openF < 0) return { moneyAction: participating && st.owedCostF > 0 ? 'PAYS_IN' : 'REPAYS', moneyStatus: 'OPEN' };
+  if (st.openF > 0) return { moneyAction: 'PAY_OUT', moneyStatus: 'OPEN' };
+  if (!participating) return { moneyAction: 'NONE', moneyStatus: endedReason === 'TAKEOVER' ? 'TAKEN_OVER_SETTLED' : 'SETTLED' };
+  const running = st.correctionPending || st.settledQty < qty || sales.some((x) => x.state !== 'SETTLED');
+  return { moneyAction: 'NONE', moneyStatus: running ? 'NOTHING_OPEN' : 'SETTLED' };
+}
+
 export interface PartnerItemSale {
   invoiceLineId: string;
   invoiceId: string;
@@ -1167,6 +1174,14 @@ export interface PartnerItemView {
   correctionPending: boolean;
   refundPending: boolean;
   ownership: OwnershipView;
+  /**
+   * Die EINE Geldhandlung, die zum offenen Stand passt (dieselbe Regel wie beim Buchen):
+   * PAYS_IN — Partner schuldet noch Kostenanteil unverkaufter Stücke; REPAYS — Partner schuldet eine
+   * Rückforderung; PAY_OUT — LATAIF schuldet dem Partner; NONE — nichts offen.
+   */
+  moneyAction: 'PAYS_IN' | 'REPAYS' | 'PAY_OUT' | 'NONE';
+  /** Bei nichts offen: SETTLED (erledigt), TAKEN_OVER_SETTLED (von LATAIF übernommen, erledigt), NOTHING_OPEN (läuft noch). */
+  moneyStatus: 'OPEN' | 'SETTLED' | 'TAKEN_OVER_SETTLED' | 'NOTHING_OPEN';
   sales: PartnerItemSale[];
   movements: PartnerItemMovementView[];
   warnings: string[];
@@ -1259,7 +1274,9 @@ export function partnerItemsOverview(branchId: string, onlyPartnerId?: string): 
       contributed: B(st.contributedF), paidOut: B(st.paidOutF), offsets: B(st.offsetF),
       profitComputed: B(computedF), profitShare: B(st.profitShareF), settledQty: st.settledQty, owedCost: B(st.owedCostF),
       open: B(st.openF), correctionPending: st.correctionPending, refundPending: st.refundPending,
-      ownership: ownershipViewOf(purchaseLineId, branchId), sales, movements, warnings,
+      ownership: ownershipViewOf(purchaseLineId, branchId),
+      ...moneyStateOf(st, !!current, current ? null : (last?.endedReason ?? null), sales, last?.qty ?? 0),
+      sales, movements, warnings,
     };
     const agg = byPartner.get(partnerId)!;
     agg.items.push(item);

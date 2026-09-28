@@ -168,21 +168,33 @@ export function PartnerItemsPanel({ overview, partners = [] }: { overview: Partn
                     </div>
                   )}
                   {expanded && (
-                    <div style={{ padding: '4px 0 12px 18px', fontSize: 12 }}>
-                      <div style={{ color: '#6B7280', marginBottom: 6 }}>
+                    <div style={{ padding: '4px 0 12px 18px', fontSize: 12 }} data-partner-item-expanded={it.purchaseLineId}>
+                      {it.moneyAction !== 'NONE' && (<div style={{ color: '#6B7280', marginBottom: 6 }}>
                         {openText(it.open, p.name)}
                         {it.owedCost > 0 && <> · still to fund for unsold pieces: <Bhd v={it.owedCost} /> BHD</>}
                         {it.offsets !== 0 && <> · offsets <Bhd v={it.offsets} /></>}
-                      </div>
+                      </div>)}
                       <div className="flex gap-2" style={{ marginBottom: 10 }}>
-                        <Button variant="secondary" disabled={busy}
-                          onClick={() => openForm(it, p.partnerId, p.name, 'CONTRIBUTION')} data-partner-item-contribute={it.purchaseLineId}>
-                          {it.open < 0 ? 'Record contribution / repayment' : 'Record contribution'}
-                        </Button>
-                        <Button variant="secondary" disabled={busy || it.open <= 0 || it.correctionPending || it.refundPending}
-                          onClick={() => openForm(it, p.partnerId, p.name, 'PAYOUT')} data-partner-item-payout={it.purchaseLineId}>
-                          Pay out
-                        </Button>
+                        {/* Genau die Geldhandlung, die zum offenen Stand passt — dieselbe Regel prüft der Hauptrechner beim Buchen. */}
+                        {(it.moneyAction === 'PAYS_IN' || it.moneyAction === 'REPAYS') && (
+                          <Button variant="secondary" disabled={busy}
+                            onClick={() => openForm(it, p.partnerId, p.name, 'CONTRIBUTION')} data-partner-item-contribute={it.purchaseLineId}>
+                            {it.moneyAction === 'PAYS_IN' ? 'Partner pays in' : 'Partner repays'}
+                          </Button>
+                        )}
+                        {it.moneyAction === 'PAY_OUT' && (
+                          <Button variant="secondary" disabled={busy || it.correctionPending || it.refundPending}
+                            onClick={() => openForm(it, p.partnerId, p.name, 'PAYOUT')} data-partner-item-payout={it.purchaseLineId}>
+                            Pay out
+                          </Button>
+                        )}
+                        {it.moneyAction === 'NONE' && (
+                          <span className="flex items-center" style={{ fontSize: 12, color: it.moneyStatus === 'NOTHING_OPEN' ? '#6B7280' : '#16A34A' }}
+                            data-partner-item-money-status={it.moneyStatus}>
+                            {it.moneyStatus === 'TAKEN_OVER_SETTLED' ? '● Taken over by LATAIF — settled'
+                              : it.moneyStatus === 'SETTLED' ? '● Settled — nothing open' : 'Nothing open'}
+                          </span>
+                        )}
                         {it.ownership.canTakeOver && (
                           <Button variant="ghost" disabled={busy} onClick={() => setOwn({ mode: 'TAKEOVER', target: ownTarget(it) })}
                             data-partner-item-takeover={it.purchaseLineId}>Take over (LATAIF alone)</Button>
@@ -262,17 +274,23 @@ export function PartnerItemsPanel({ overview, partners = [] }: { overview: Partn
       <OwnershipChangeModal mode={own?.mode ?? null} target={own?.target ?? null} partners={partners} onClose={() => setOwn(null)} />
 
       <Modal open={!!form} onClose={() => setForm(null)} width={460}
-        title={form?.kind === 'CONTRIBUTION' ? `Contribution from ${form?.partnerName ?? ''}` : `Pay out to ${form?.partnerName ?? ''}`}>
+        title={form?.kind === 'PAYOUT' ? `Pay out to ${form?.partnerName ?? ''}`
+          : `${form?.item.moneyAction === 'REPAYS' ? 'Repayment' : 'Payment'} from ${form?.partnerName ?? ''}`}>
         {form && (
           <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
             <WriteError text={fehler} />
             <p style={{ fontSize: 12, color: '#6B7280' }}>
               {form.item.productLabel} · {form.item.purchaseNumber} — {openText(form.item.open, form.partnerName)}.{' '}
               {form.kind === 'CONTRIBUTION'
-                ? 'Money the partner pays into LATAIF’s cash or bank for this item (also a repayment). It is not a supplier payment — LATAIF pays the supplier once, on the purchase.'
+                ? (form.item.moneyAction === 'REPAYS'
+                  ? 'Money the partner pays back to LATAIF on this item — at most what they owe.'
+                  : 'The partner pays in their share of the cost of this item — at most what is still open. It is not a supplier payment — LATAIF pays the supplier once, on the purchase.')
                 : 'Money LATAIF pays the partner from this item — at most what LATAIF owes on it.'}
             </p>
             <Input required label="AMOUNT (BHD)" type="number" step="0.001" value={amount} onChange={(e) => setAmount(e.target.value)} data-partner-item-amount />
+            <p style={{ fontSize: 11, color: '#9CA3AF', marginTop: -8 }} data-partner-item-max>
+              At most {fmt(Math.abs(form.item.open))} BHD
+            </p>
             <Input required label="DATE" type="date" value={date} onChange={(e) => setDate(e.target.value)} />
             <div>
               <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>

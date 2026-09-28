@@ -342,16 +342,19 @@ let EX = { line: '', inv: '', il: '' };
 // ── F Verrechnung zwischen zwei Artikeln (ohne Geld) ────────────────────────
 {
   const x = await kauf('pw5', 1000, [{ partnerId: 'pa-b', sharePct: 50 }], 1, 1000);
-  await move(x.line, 'CONTRIBUTION', 600);
+  await move(x.line, 'CONTRIBUTION', 500);
+  const vx = verkauf(DB, 'pw5', lotOf(DB, x.line), 1200, 'full');
+  await save.settleSaleOnPrimary(vx.il);
+  ok(open(x.line) === 600, `VERRECHNUNG x verkauft und abgerechnet: LATAIF schuldet 500 + 100 (${open(x.line)})`);
   const y = await kauf('pw6', 400, [{ partnerId: 'pa-b', sharePct: 50 }], 1, 400);
   const le = n(DB, 'SELECT COUNT(*) FROM ledger_entries');
-  ok(await code(() => save.offsetItemsOnPrimary({ partnerId: 'pa-b', fromPurchaseLineId: x.line, toPurchaseLineId: y.line, amount: 100.001, date: '2026-09-26' }))
-    === rules.PARTNER_ITEM_OFFSET_INVALID, 'VERRECHNUNG nicht mehr als offen');
+  ok(await code(() => save.offsetItemsOnPrimary({ partnerId: 'pa-b', fromPurchaseLineId: x.line, toPurchaseLineId: y.line, amount: 200.001, date: '2026-09-26' }))
+    === rules.PARTNER_ITEM_OFFSET_INVALID, 'VERRECHNUNG nicht mehr als am zweiten Artikel offen');
   const o = await save.offsetItemsOnPrimary({ partnerId: 'pa-b', fromPurchaseLineId: x.line, toPurchaseLineId: y.line, amount: 100, date: '2026-09-26' });
-  ok(open(x.line) === 0 && open(y.line) === -100 && n(DB, 'SELECT COUNT(*) FROM ledger_entries') === le, `VERRECHNUNG 100: beide Artikel angepasst, kein Geld, keine Buchung (${o.openFrom}/${o.openTo})`);
+  ok(open(x.line) === 500 && open(y.line) === -100 && n(DB, 'SELECT COUNT(*) FROM ledger_entries') === le, `VERRECHNUNG 100: beide Artikel angepasst, kein Geld, keine Buchung (${o.openFrom}/${o.openTo})`);
   const offId = s(DB, "SELECT id FROM item_partner_movements WHERE kind = 'OFFSET' AND purchase_line_id = ?", [x.line]);
   await save.cancelItemMovementOnPrimary(offId);
-  ok(open(x.line) === 100 && open(y.line) === -200, 'VERRECHNUNG Storno nimmt das Paar gemeinsam zurück');
+  ok(open(x.line) === 600 && open(y.line) === -200, 'VERRECHNUNG Storno nimmt das Paar gemeinsam zurück');
 }
 
 // ── G Sperren: was ein gemeinsames Stück ohne Verkauf aus der Beteiligung nähme ──
@@ -387,13 +390,20 @@ let EX = { line: '', inv: '', il: '' };
   const identity = (x: string, op: string, hash = 'h' + x) => ({ commandId: ID(x), ...ACTOR, op, payloadHash: hash });
   const deps = () => ({ db: DB as never, begin: posting.beginLedgerTransaction, commit: posting.commitLedgerTransaction,
     rollback: posting.rollbackLedgerTransaction, durableSave: async () => {}, now: () => NOW });
-  const body = { purchaseLineId: a.line, partnerId: 'pa-b', kind: 'CONTRIBUTION', amount: 700, method: 'bank', date: '2026-09-26' };
+  const zuViel = await cmd2.runItemMovement(deps(), identity('10', 'partner_items.record_movement'),
+    { purchaseLineId: a.line, partnerId: 'pa-b', kind: 'CONTRIBUTION', amount: 700, method: 'bank', date: '2026-09-26' });
+  ok(zuViel.kind === 'rejected' && (zuViel as { code?: string }).code === rules.PARTNER_ITEM_OVERFUNDED && open(a.line) === -500,
+    `PC2 Beitrag 700 auf Kostenanteil 500 → Nein, nichts gebucht (${S(zuViel)})`);
+  const body = { purchaseLineId: a.line, partnerId: 'pa-b', kind: 'CONTRIBUTION', amount: 500, method: 'bank', date: '2026-09-26' };
   const o1 = await cmd2.runItemMovement(deps(), identity('1', 'partner_items.record_movement'), body);
   const o2 = await cmd2.runItemMovement(deps(), identity('1', 'partner_items.record_movement'), body);
   ok(o1.kind === 'ok' && o2.kind === 'ok' && o2.replayed === true
     && n(DB, "SELECT COUNT(*) FROM item_partner_movements WHERE purchase_line_id = ? AND kind = 'CONTRIBUTION'", [a.line]) === 1,
     'PC2 Beitrag; Wiederholung derselben Kennung bucht NICHT ein zweites Mal');
-  ok(open(a.line) === 200, `PC2 Beitrag 700 auf Kostenanteil 500 → LATAIF schuldet 200 (${open(a.line)})`);
+  ok(open(a.line) === 0, `PC2 Beitrag 500 = Kostenanteil → nichts offen (${open(a.line)})`);
+  const nochmal = await cmd2.runItemMovement(deps(), identity('11', 'partner_items.record_movement'), { ...body, amount: 1 });
+  ok(nochmal.kind === 'rejected' && (nochmal as { code?: string }).code === rules.PARTNER_ITEM_NOTHING_OWED && open(a.line) === 0,
+    `PC2 weiterer Beitrag auf ausgeglichenen Artikel → Nein (${S(nochmal)})`);
   const conflictOut = await cmd2.runItemMovement(deps(), identity('1', 'partner_items.record_movement', 'anders'), { ...body, amount: 1 }).catch((e) => ({ kind: 'thrown', code: (e as { code?: string }).code }));
   const conflict = String((conflictOut as { code?: string }).code ?? '');
   ok(conflict === 'COMMAND_ID_CONFLICT', `PC2 dieselbe Kennung mit anderem Inhalt → Konflikt (${conflict})`);
@@ -404,20 +414,6 @@ let EX = { line: '', inv: '', il: '' };
   let unbekannt = '';
   try { cmd2.parseItemMovement({ ...body, supplierPayment: true }); } catch (e) { unbekannt = String((e as Error).message); }
   ok(/primary decides open/.test(felder) && /unknown field/.test(unbekannt), 'PC2 berechnete und unbekannte Felder werden abgewiesen');
-  const pay = { purchaseLineId: a.line, partnerId: 'pa-b', kind: 'PAYOUT', amount: 200, method: 'cash', date: '2026-09-26' };
-  const [p1, p2, p3] = await Promise.all([
-    // Wie an der Route: jeder Fernauftrag läuft im exklusiven Platz der Schreibreihenfolge.
-    runExclusive(() => cmd2.runItemMovement(deps(), identity('3', 'partner_items.record_movement'), pay)),
-    runExclusive(() => cmd2.runItemMovement(deps(), identity('4', 'partner_items.record_movement'), pay)),
-    code(() => save.recordItemMovementOnPrimary(pay as never)),
-  ]);
-  const okCount = [p1.kind === 'ok', p2.kind === 'ok', p3 === ''].filter(Boolean).length;
-  ok(okCount === 1 && open(a.line) === 0 && n(DB, "SELECT COUNT(*) FROM item_partner_movements WHERE purchase_line_id = ? AND kind = 'PAYOUT' AND cancelled_at IS NULL", [a.line]) === 1,
-    `GLEICHZEITIG genau eine von drei Auszahlungen verbraucht die 200 (${S([p1.kind, p2.kind, p3 || 'ok'])})`);
-  const rej = p1.kind === 'rejected' ? '3' : '4';
-  const again = await cmd2.runItemMovement(deps(), identity(rej, 'partner_items.record_movement'), pay);
-  ok(again.kind === 'rejected' && (again as { code?: string }).code === rules.PARTNER_ITEM_PAYOUT_EXCEEDS_OPEN,
-    'PC2 das eingefrorene Nein kommt bei Wiederholung genauso zurück (Buchungsstatus eindeutig)');
   const v = verkauf(DB, 'pw9', lotOf(DB, a.line), 1100, 'full');
   const st = await cmd2.runSettleSale(deps(), identity('5', 'partner_items.settle_sale'), { invoiceLineId: v.il });
   const st2 = await cmd2.runSettleSale(deps(), identity('5', 'partner_items.settle_sale'), { invoiceLineId: v.il });
@@ -429,6 +425,28 @@ let EX = { line: '', inv: '', il: '' };
   const c1 = await cmd2.runCancelMovement(deps(), identity('7', 'partner_items.cancel_movement'), { movementId: settleId });
   ok(c1.kind === 'ok' && n(DB, "SELECT COUNT(*) FROM item_partner_movements WHERE invoice_line_id = ? AND cancelled_at IS NULL", [v.il]) === 0,
     'PC2 Storno einer Abrechnung (Erfassungsfehler, nichts danach gebucht)');
+  const st4 = await cmd2.runSettleSale(deps(), identity('9', 'partner_items.settle_sale'), { invoiceLineId: v.il });
+  ok(st4.kind === 'ok' && open(a.line) === 550, `PC2 neu abgerechnet: B 500 zurück + 50 % von 100 → LATAIF schuldet 550 (${open(a.line)})`);
+  const beitragBeiGuthaben = await cmd2.runItemMovement(deps(), identity('12', 'partner_items.record_movement'), { ...body, amount: 1 });
+  ok(beitragBeiGuthaben.kind === 'rejected' && (beitragBeiGuthaben as { code?: string }).code === rules.PARTNER_ITEM_NOTHING_OWED,
+    'PC2 LATAIF schuldet dem Partner → kein Beitrag, nur Auszahlung');
+  const pay = { purchaseLineId: a.line, partnerId: 'pa-b', kind: 'PAYOUT', amount: 550, method: 'cash', date: '2026-09-26' };
+  const [p1, p2, p3] = await Promise.all([
+    // Wie an der Route: jeder Fernauftrag läuft im exklusiven Platz der Schreibreihenfolge.
+    runExclusive(() => cmd2.runItemMovement(deps(), identity('3', 'partner_items.record_movement'), pay)),
+    runExclusive(() => cmd2.runItemMovement(deps(), identity('4', 'partner_items.record_movement'), pay)),
+    code(() => save.recordItemMovementOnPrimary(pay as never)),
+  ]);
+  const okCount = [p1.kind === 'ok', p2.kind === 'ok', p3 === ''].filter(Boolean).length;
+  ok(okCount === 1 && open(a.line) === 0 && n(DB, "SELECT COUNT(*) FROM item_partner_movements WHERE purchase_line_id = ? AND kind = 'PAYOUT' AND cancelled_at IS NULL", [a.line]) === 1,
+    `GLEICHZEITIG genau eine von drei Auszahlungen verbraucht die 550 (${S([p1.kind, p2.kind, p3 || 'ok'])})`);
+  const rej = p1.kind === 'rejected' ? '3' : '4';
+  const again = await cmd2.runItemMovement(deps(), identity(rej, 'partner_items.record_movement'), pay);
+  ok(again.kind === 'rejected' && (again as { code?: string }).code === rules.PARTNER_ITEM_PAYOUT_EXCEEDS_OPEN,
+    'PC2 das eingefrorene Nein kommt bei Wiederholung genauso zurück (Buchungsstatus eindeutig)');
+  const erledigt = await cmd2.runItemMovement(deps(), identity('13', 'partner_items.record_movement'), { ...body, amount: 1 });
+  ok(erledigt.kind === 'rejected' && (erledigt as { code?: string }).code === rules.PARTNER_ITEM_NOTHING_OWED,
+    'PC2 verkauft, abgerechnet, ausgezahlt (OPEN 0) → kein weiterer Beitrag');
   const off = await cmd2.runItemOffset(deps(), identity('8', 'partner_items.offset'), { partnerId: 'pa-b', fromPurchaseLineId: a.line, toPurchaseLineId: EX.line, amount: 1, date: '2026-09-26' });
   ok(off.kind === 'rejected' && (off as { code?: string }).code === rules.PARTNER_ITEM_OFFSET_INVALID, `PC2 Verrechnung prüft am Primary (${S(off)})`);
 }

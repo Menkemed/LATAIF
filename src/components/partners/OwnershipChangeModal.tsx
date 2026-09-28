@@ -1,7 +1,7 @@
 // PARTNER-ITEMS — „Take over (LATAIF alone)" und „Change partners" für die unverkauften Stücke einer
 // Einkaufszeile. Beides nur zum aktuellen Lager-Einstand (angezeigt, vom Haus geprüft), ohne
 // Geldbewegung: Ansprüche und Verpflichtungen stehen danach auf dem Ausgleichskonto, gezahlt wird
-// über „Record contribution" / „Pay out". Am Hauptrechner direkt, auf PC2 als geprüfter Befehl.
+// über „Partner pays in" / „Pay out". Am Hauptrechner direkt, auf PC2 als geprüfter Befehl.
 import { useMemo, useState } from 'react';
 import { Plus, Trash2 } from 'lucide-react';
 import { Modal } from '@/components/ui/Modal';
@@ -76,7 +76,7 @@ export function OwnershipChangeModal({ mode, target, partners, onClose }: Props)
           <p style={{ fontSize: 12, color: '#6B7280' }}>
             {mode === 'TAKEOVER'
               ? 'LATAIF holds these pieces alone from now on, at their current stock cost (no other value). Each partner keeps what they paid in, less payouts, plus settled profit, on their item balance — pay it out with "Pay out". No stock entry, no purchase, no revaluation.'
-              : 'New shares for these pieces at their current stock cost. Leaving partners keep their claim on their item balance; new partners owe their cost share — money moves only with "Record contribution" / "Pay out". Settled sales stay as they are.'}
+              : 'New shares for these pieces at their current stock cost. Leaving partners keep their claim on their item balance; new partners owe their cost share — money moves only with "Partner pays in" / "Pay out". Settled sales stay as they are.'}
           </p>
           {mode === 'CHANGE' && (
             <div>

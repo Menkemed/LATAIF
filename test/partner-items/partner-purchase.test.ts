@@ -260,20 +260,20 @@ const L1 = lineOf(DB, P1, 'pw2');
     && bal('PARTNER_ITEM_BALANCE') === 400, 'BUCHUNG Bank +400 / Partner-Ausgleichskonto 400 (Firma schuldet B den Beitrag)');
   ok(bal('PARTNER_EQUITY') === 0, 'TRENNUNG das Gesellschafterkapital bleibt unberührt');
   ok(await code(() => move(L1, 'PAYOUT', 1)) === rules.PARTNER_ITEM_PAYOUT_EXCEEDS_OPEN, 'AUSZAHLUNG solange B schuldet, wird nichts ausgezahlt');
-  ok(await code(() => move(L1, 'CONTRIBUTION', 600.001)) === rules.PARTNER_ITEM_OVERFUNDED, 'BEITRAG über den Einkaufsbetrag hinaus → Nein');
+  ok(await code(() => move(L1, 'CONTRIBUTION', 600.001)) === rules.PARTNER_ITEM_OVERFUNDED, 'BEITRAG über den offenen Kostenanteil (100) hinaus → Nein');
   const bank = bankTransactionsFor({ branchId: 'branch-main' } as never, []).filter((t) => t.id.startsWith('ipm-'));
   ok(bank.length === 1 && bank[0].flow === 'in' && bank[0].amount === 400 && bank[0].account === 'bank', `BANK der Beitrag erscheint als Geldeingang (${S(bank)})`);
 }
-// Einkauf 2: pw3 für 1000, 50/50; B zahlt 600 → LATAIF schuldet B 100; Auszahlung ≤ offen.
+// Einkauf 2: pw3 für 1000, 50/50; B kann nur seinen Kostenanteil 500 einzahlen, nicht mehr.
 const P2 = (await purchaseHouse.createPurchaseOnPrimary(EINKAUF([ZEILE('pw3', 1000, [{ partnerId: 'pa-b', sharePct: 50 }])]))).id;
 const L2 = lineOf(DB, P2, 'pw3');
 {
-  await move(L2, 'CONTRIBUTION', 600, 'pa-b', 'cash');
-  ok(open(L2) === 100, `AUSGLEICH B zahlt 600 von 1000 → LATAIF schuldet B 100 (${open(L2)})`);
-  ok(await code(() => move(L2, 'PAYOUT', 100.001)) === rules.PARTNER_ITEM_PAYOUT_EXCEEDS_OPEN, 'AUSZAHLUNG nicht mehr als offen');
-  await move(L2, 'PAYOUT', 100, 'pa-b', 'cash');
-  ok(open(L2) === 0, 'AUSZAHLUNG 100 → ausgeglichen');
-  ok(await code(() => move(L2, 'PAYOUT', 0.001)) === rules.PARTNER_ITEM_PAYOUT_EXCEEDS_OPEN, 'AUSZAHLUNG kein zweites Mal');
+  ok(await code(() => move(L2, 'CONTRIBUTION', 600, 'pa-b', 'cash')) === rules.PARTNER_ITEM_OVERFUNDED && open(L2) === -500,
+    'BEITRAG höchstens der offene Kostenanteil: 600 statt 500 → Nein, nichts gebucht');
+  await move(L2, 'CONTRIBUTION', 500, 'pa-b', 'cash');
+  ok(open(L2) === 0, `AUSGLEICH B zahlt seinen Kostenanteil 500 → nichts offen (${open(L2)})`);
+  ok(await code(() => move(L2, 'CONTRIBUTION', 0.001, 'pa-b', 'cash')) === rules.PARTNER_ITEM_NOTHING_OWED, 'BEITRAG nichts mehr offen → Nein');
+  ok(await code(() => move(L2, 'PAYOUT', 0.001)) === rules.PARTNER_ITEM_PAYOUT_EXCEEDS_OPEN, 'AUSZAHLUNG nichts offen → Nein');
 }
 
 // ── §4 Verkauf und Gewinnverteilung ─────────────────────────────────────────
@@ -466,6 +466,9 @@ const L2 = lineOf(DB, P2, 'pw3');
   ok(!/window\.confirm/.test(settleModal) && /data-settle-confirm/.test(settleModal) && /saveSettleSale/.test(settleModal) && /setSettleFor\(/.test(panel) && !/saveSettleSale/.test(panel),
     'SETTLE eigener Dialog der App mit Aufstellung; gebucht erst mit „Settle"');
   ok(/data-purchase-partner-amount=/.test(sec) && /pctOfAmount/.test(sec), 'MASKE Anteil auch als Betrag (BHD) eingebbar');
+  ok(!/Record contribution/.test(panel) && /'Partner pays in'/.test(panel) && /'Partner repays'/.test(panel)
+    && /Settled — nothing open/.test(panel) && /Taken over by LATAIF — settled/.test(panel) && /it\.moneyAction === 'PAY_OUT'/.test(panel),
+    'MASKE nur die passende Geldhandlung (pays in / repays / pay out), sonst Status');
 }
 
 // ── Rückfrage: Dialog der App, Rückfall aufs Plugin, Dialogfehler (der installierte window.confirm) ─────

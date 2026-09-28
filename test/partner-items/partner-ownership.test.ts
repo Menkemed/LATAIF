@@ -312,6 +312,29 @@ const PB = [{ partnerId: 'pa-b', sharePct: 50 }];
   ok(await code(() => save.settleSaleOnPrimary(v.il)) === rules.PARTNER_SALE_NOT_FOUND, 'ÜBERNAHME Weiterverkauf: keine Partnerabrechnung mehr');
   await move(a.line, 'PAYOUT', 400);
   ok(open(a.line) === 0, 'ÜBERNAHME Anspruch ausgezahlt');
+  ok(view(a.line)?.moneyAction === 'NONE' && view(a.line)?.moneyStatus === 'TAKEN_OVER_SETTLED', `ÜBERNAHME + OPEN 0: keine Geldaktion, Status „Taken over by LATAIF — settled" (${view(a.line)?.moneyStatus})`);
+  ok(await code(() => move(a.line, 'CONTRIBUTION', 1)) === rules.PARTNER_ITEM_NOTHING_OWED, 'ÜBERNAHME + OPEN 0: Beitrag → Nein');
+}
+
+// ── 5b Beitragsregeln: Beteiligung beendet mit Restschuld, Guthaben, erledigt ──
+{
+  // Übernommen, LATAIF schuldet dem Partner seinen Beitrag → nur Auszahlung, kein Beitrag.
+  const t = await kauf('pw21', 1000, PB, 1, 1000);
+  ok(view(t.line)?.moneyAction === 'PAYS_IN', `AKTIV Partner schuldet seinen Kostenanteil → „Partner pays in" (${view(t.line)?.moneyAction})`);
+  await move(t.line, 'CONTRIBUTION', 500);
+  await takeOver(t.line, 1000);
+  ok(open(t.line) === 500 && view(t.line)?.moneyAction === 'PAY_OUT', `BEENDET LATAIF schuldet 500 → nur „Pay out" (${view(t.line)?.moneyAction})`);
+  ok(await code(() => move(t.line, 'CONTRIBUTION', 1)) === rules.PARTNER_ITEM_NOTHING_OWED, 'BEENDET Guthaben des Partners → kein Beitrag');
+  await move(t.line, 'PAYOUT', 500);
+  ok(await code(() => move(t.line, 'CONTRIBUTION', 1)) === rules.PARTNER_ITEM_NOTHING_OWED && view(t.line)?.moneyAction === 'NONE', 'BEENDET ausgezahlt → nichts mehr buchbar');
+  // Ganz an den Lieferanten zurückgegeben mit Verlust, Partner hatte nichts eingezahlt → er schuldet seinen Verlustanteil.
+  const r = await kauf('pw22', 1000, PB, 1, 1000);
+  ret(r.id, r.line, 1, 800, 'bank');
+  ok(open(r.line) === -100 && view(r.line)?.moneyAction === 'REPAYS', `BEENDET mit Restschuld: B schuldet 100 → „Partner repays" (${open(r.line)}, ${view(r.line)?.moneyAction})`);
+  ok(await code(() => move(r.line, 'CONTRIBUTION', 100.001)) === rules.PARTNER_ITEM_OVERFUNDED, 'BEENDET Rückzahlung höchstens die Restschuld');
+  await move(r.line, 'CONTRIBUTION', 100, 'pa-b', 'cash');
+  ok(open(r.line) === 0 && view(r.line)?.moneyStatus === 'SETTLED', `BEENDET Restschuld bezahlt → „Settled — nothing open" (${view(r.line)?.moneyStatus})`);
+  ok(await code(() => move(r.line, 'CONTRIBUTION', 0.001)) === rules.PARTNER_ITEM_NOTHING_OWED, 'BEENDET danach kein weiterer Beitrag');
 }
 
 // ── 6 Übernahme gesperrt bei offenem Verkauf, aktivierte Kosten im Wert ─────

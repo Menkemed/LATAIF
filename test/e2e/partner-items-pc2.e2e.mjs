@@ -356,9 +356,9 @@ async function partnerSeite(route = '/partners') {
   await waitFor(client, '[data-partner-items]', 60000);
 }
 async function aufklappen(line) {
-  if (await exists(client, `[data-partner-item-contribute="${line}"]`)) return;
+  if (await exists(client, `[data-partner-item-expanded="${line}"]`)) return;
   await click(client, `[data-partner-item-toggle="${line}"]`);
-  await waitFor(client, `[data-partner-item-contribute="${line}"]`, 10000);
+  await waitFor(client, `[data-partner-item-expanded="${line}"]`, 10000);
 }
 async function beitragMaske(line, kind, betrag, methode) {
   await aufklappen(line);

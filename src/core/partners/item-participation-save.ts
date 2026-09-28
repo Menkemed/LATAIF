@@ -92,7 +92,7 @@ export function changePartnersOnPrimary(input: OwnershipChangeInput): Promise<Ow
 
 // ── Die Masken ──────────────────────────────────────────────────────────────
 
-/** „Record contribution" / „Pay out". */
+/** „Partner pays in" / „Partner repays" / „Pay out". */
 export async function saveItemMovement(w: ItemWrite, raw: Record<string, unknown>): Promise<WriteOutcome<{ movementId: string }>> {
   let input: ItemMovementInput;
   try { input = itemMovementInput(raw); } catch (e) { return absage(e); }
