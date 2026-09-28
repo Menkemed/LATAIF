@@ -245,7 +245,7 @@
       h += '<div class="mp-row" style="margin-top:12px;"><label>Category *</label><select data-mp-field="item:' + it.uid + ':categoryId">' + cats + '</select></div>'
         + '<div class="mp-row"><label>Brand *</label><input id="mpb' + it.uid + '" data-mp-field="item:' + it.uid + ':brand" value="' + mpH(it.brand) + '" /></div>'
         + '<div class="mp-row"><label>Model / Name *</label><input id="mpn' + it.uid + '" data-mp-field="item:' + it.uid + ':name" value="' + mpH(it.name) + '" /></div>'
-        + '<div class="mp-row"><label>SKU / Reference</label><input id="mps' + it.uid + '" data-mp-field="item:' + it.uid + ':sku" placeholder="optional" value="' + mpH(it.sku) + '" /></div>'
+        + '<div class="mp-row"><label>SKU / Reference</label><input id="mps' + it.uid + '" data-mp-field="item:' + it.uid + ':sku" placeholder="automatic if empty" value="' + mpH(it.sku) + '" /></div>'
         + '<div class="mp-row"><label>Condition</label><select id="mpc' + it.uid + '" data-mp-field="item:' + it.uid + ':condition"></select></div>'
         + '<div id="mpAttrs' + it.uid + '" data-mp-attrs="' + it.uid + '"></div>'
         + '<div class="mp-row hidden" id="mpScopeRow' + it.uid + '"><label>Included</label><div class="chips" id="mpScope' + it.uid + '"></div></div>';

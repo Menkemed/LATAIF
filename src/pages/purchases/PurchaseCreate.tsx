@@ -558,7 +558,7 @@ export function PurchaseCreate() {
                     </div>
                   )}
 
-                  <input placeholder="SKU" value={l.sku}
+                  <input placeholder="SKU (auto)" value={l.sku}
                     onChange={e => updateLine(idx, { sku: e.target.value })}
                     disabled={l.mode === 'existing'}
                     className="font-mono"

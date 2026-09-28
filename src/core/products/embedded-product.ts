@@ -45,8 +45,9 @@ export interface EmbeddedProductPort {
 
 /**
  * Die Prüfung der Maske (Pflichtfelder der Kategorie dependsOn-bewusst, veraltete Merkmale
- * gestrichen, eine schon vergebene SKU abgewiesen). Vergeben wird KEINE SKU: Auftrag und Einkauf
- * legten den Artikel schon immer ohne an, wenn keine eingetippt war.
+ * gestrichen, eine schon vergebene SKU abgewiesen). Vergeben wird HIER keine SKU: der Auftrag legt
+ * den Artikel ohne an, wenn keine eingetippt war; der Einkauf vergibt sie danach selbst (SKU-ALLOC,
+ * `withAllocatedSkus` in purchase-house.ts) — erst wenn die ganze Eingabe geprüft ist.
  */
 export function checkEmbeddedProduct(spec: Partial<Product>, port: EmbeddedProductPort): Partial<Product> {
   const plan = planProductCreate(spec, {

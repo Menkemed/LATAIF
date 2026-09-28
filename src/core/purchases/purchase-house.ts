@@ -97,6 +97,27 @@ function resolveSupplier(input: PurchaseCreateInput): { supplierId: string; cust
   });
 }
 
+/**
+ * SKU-ALLOC — ein neuer Artikel ohne eingetippte SKU bekommt eine aus DEMSELBEN durablen Zähler wie
+ * Collection, Kommission und Handy-Upload (`allocateSkuOnCreate`), am PC wie vom Telefon. Erst nach
+ * der Planung — eine abgewiesene Eingabe verbraucht keine Nummer — und innerhalb der Klammer des
+ * Einkaufs: scheitert er, fällt auch die Nummer zurück. Eine eingetippte SKU bleibt, wie sie ist.
+ */
+function withAllocatedSkus(payload: Record<string, unknown>): Record<string, unknown> {
+  const allocate = useProductStore.getState().allocateSkuOnCreate;
+  const lines = (payload.lines as Array<Record<string, unknown>>).map((l) => {
+    if (l.productId) return l;
+    const np = l.newProduct as Record<string, unknown> | undefined;
+    if (np) {
+      return np.sku ? l : { ...l, newProduct: { ...np, sku: allocate(undefined, np.brand as string | undefined, np.categoryId as string | undefined) } };
+    }
+    return l.newProductSku ? l : {
+      ...l, newProductSku: allocate(undefined, l.newProductBrand as string | undefined, l.newProductCategoryId as string | undefined),
+    };
+  });
+  return { ...payload, lines };
+}
+
 /** „Save Purchase": der Einkauf — und, wenn er aus einem Inbox-Foto kam, das Foto „erledigt". */
 export function createPurchaseInHouse(input: PurchaseCreateInput, branchId: string, userId = ''): Purchase {
   return createPurchaseDetailedInHouse(input, branchId, userId).purchase;
@@ -111,7 +132,7 @@ export function createPurchaseDetailedInHouse(input: PurchaseCreateInput, branch
   if (issue) throw new PurchaseActionRejected(issue.code, issue.message);
   const supplier = resolveSupplier(input);
   const resolved: PurchaseCreateInput = { ...input, supplierId: supplier.supplierId, supplierFromCustomer: undefined, newSupplierPerson: undefined };
-  const payload = planPurchaseCreate(resolved, housePurchasePort(branchId));
+  const payload = withAllocatedSkus(planPurchaseCreate(resolved, housePurchasePort(branchId)));
   const store = usePurchaseStore.getState();
   const purchase0 = store.createPurchase(payload as never);
   // MOBILE-PURCHASE — mehrere Zahlungen: jede über denselben Weg wie „Record Payment" (eigene Zeile,

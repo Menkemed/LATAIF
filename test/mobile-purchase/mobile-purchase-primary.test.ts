@@ -438,6 +438,40 @@ const ZEILE = (name: string, qty: number, price: number, extra: Record<string, u
     'TELEFON-RUMPF neue Person, Partner, drei Zahlungen, Hauptbuch ausgeglichen');
 }
 
+// ── 9 SKU-ALLOC — ein neuer Artikel ohne SKU bekommt eine aus dem durablen Zähler, am Telefon wie am Rechner ──
+{
+  const db = freshDb(); seedMobile(db);
+  const seq = (): string => S(rows(db, 'SELECT stem, next_number FROM sku_sequences ORDER BY stem'));
+  const skuVon = (pid: string): unknown[] => rows(db,
+    'SELECT pr.sku FROM purchase_lines l JOIN products pr ON pr.id = l.product_id WHERE l.purchase_id = ? ORDER BY l.position', [pid]).map((x) => x.sku);
+  const body = {
+    supplierId: 'sup-1', purchaseDate: '2026-09-20', taxScheme: 'ZERO', lines: [
+      ZEILE('Sku A', 1, 100), ZEILE('Sku B', 2, 50),
+      ZEILE('Sku C', 1, 70, { newProduct: NEU('Sku C', { sku: 'MY-SKU-1' }) }),
+      { mode: 'existing', productId: 'p1', brand: '', name: '', sku: '', categoryId: '', quantity: 1, unitPrice: 10 },
+    ],
+  };
+  const r = await run(db, 40, body);
+  const skus = skuVon(String(r.value?.purchaseId ?? ''));
+  ok(r.ok && typeof skus[0] === 'string' && typeof skus[1] === 'string' && String(skus[0]).length > 0 && skus[0] !== skus[1]
+    && skus[2] === 'MY-SKU-1' && skus[3] === 'SKU-p1',
+    `SKU zwei neue Artikel ohne Eingabe bekommen je eine eigene, eingetippte bleibt, bestehender Artikel unverändert (${S(skus)})`);
+  const stand = seq();
+  const again = await run(db, 40, body);
+  ok(again.ok && again.replayed === true && seq() === stand, 'SKU Wiederholung vergibt keine zweite Nummer');
+  const nein = await run(db, 41, { ...body, lines: [ZEILE('Sku D', 1, 100)], payments: [{ amount: 999, method: 'cash' }] });
+  ok(!nein.ok && seq() === stand, `SKU ein abgewiesener Einkauf verbraucht keine Nummer (${nein.code})`);
+  const vergeben = await run(db, 42, { ...body, lines: [ZEILE('Sku E', 1, 100, { newProduct: NEU('Sku E', { sku: String(skus[0]) }) })] });
+  ok(!vergeben.ok && vergeben.code === 'SKU_TAKEN' && seq() === stand, `SKU eine schon vergebene wird weiter abgewiesen (${vergeben.code})`);
+  const desk = await primary(() => purchaseHouse.createPurchaseOnPrimary({
+    supplierId: 'sup-1', purchaseDate: '2026-09-20', taxScheme: 'ZERO', paymentAmount: 0, paymentMethod: 'cash', notes: '', staffId: '',
+    lines: [{ mode: 'new', brand: 'Rolex', name: 'Desk', sku: '', categoryId: 'cat-w', quantity: 1, unitPrice: 20, newProduct: NEU('Desk') }],
+  }));
+  const deskSku = skuVon(String(desk.value?.id ?? ''))[0];
+  ok(desk.ok && typeof deskSku === 'string' && String(deskSku).length > 0 && !skus.includes(deskSku),
+    `SKU auch der Einkauf am Rechner vergibt sie, aus demselben Zähler (${desk.code || S(deskSku)})`);
+}
+
 console.log(`\nmobile-purchase primary: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
 console.log('MOBILE_PURCHASE_PRIMARY_PROVED');
