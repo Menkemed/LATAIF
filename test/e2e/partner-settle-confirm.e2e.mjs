@@ -322,7 +322,20 @@ try {
   // ── Geldhandlung folgt dem Stand: Guthaben → nur „Pay out"; danach erledigt, kein Beitrag mehr ──
   ok(!(await exists(c, `[data-partner-item-contribute="${P('pl-A')}"]`)) && await exists(c, `[data-partner-item-payout="${P('pl-A')}"]`),
     'GELDHANDLUNG LATAIF schuldet dem Partner → nur „Pay out", kein Beitrag');
-  await click(c, `[data-partner-item-payout="${P('pl-A')}"]`);
+  // ── Partnerkarte: Summen, laufende Artikel mit ihrer Handlung ──
+  const karte = await c.ev(`const k = document.querySelector('[data-partner-card-items="sc-pa"]'); if (!k) return 'null';
+    const g = (a) => k.querySelector('[' + a + ']')?.getAttribute(a);
+    const rows = [...k.querySelectorAll('[data-partner-card-item]')].map((r) => r.getAttribute('data-partner-card-item') + ':' + (r.querySelector('[data-partner-card-action]')?.getAttribute('data-partner-card-action') || '-') + ':' + r.querySelector('[data-partner-card-item-open]')?.getAttribute('data-partner-card-item-open'));
+    return JSON.stringify({ status: k.querySelector('[data-partner-card-status]')?.textContent, paidIn: g('data-partner-card-paid-in'), profit: g('data-partner-card-profit'),
+      paidOut: g('data-partner-card-paid-out'), open: g('data-partner-card-open'), rows: rows.sort() });`).then(JSON.parse);
+  ok(karte.status === 'SC Partner owes LATAIF 111.382' && karte.paidIn === '400.000' && karte.profit === '168.618' && karte.paidOut === '0.000' && karte.open === '-111.382'
+    && S(karte.rows) === S(['sc-pl-A:PAY_OUT:568.618', 'sc-pl-C:SETTLE:-400.000', 'sc-pl-D:SETTLE:-280.000']),
+    `KARTE Summen 400 / 168,618 / 0 / −111,382, laufend A Pay out +568,618, C und D abrechnen (${S(karte)})`);
+  await c.ev("document.querySelector('[data-partner-card-items=\"sc-pa\"]')?.scrollIntoView({ block: 'center' }); return 1;");
+  await sleep(300);
+  await shot('partner-card-running');
+  // Die Handlung in der Karte öffnet denselben Auszahlungsdialog.
+  await click(c, `[data-partner-card-item="${P('pl-A')}"] [data-partner-card-action="PAY_OUT"]`);
   await waitFor(c, '[data-partner-item-save]', 10000);
   const vorschlag = await c.ev("return document.querySelector('[data-partner-item-amount] input, input[data-partner-item-amount]')?.value || document.querySelector('[data-partner-item-amount]')?.value || '';");
   const maxText = await c.ev("return document.querySelector('[data-partner-item-max]')?.textContent || '';");
@@ -339,6 +352,15 @@ try {
   await c.ev(`document.querySelector('[data-partner-item="${P('pl-A')}"]')?.scrollIntoView({ block: 'center' }); return 1;`);
   await sleep(300);
   await shot('partner-settled');
+  const karte2 = await c.ev(`const k = document.querySelector('[data-partner-card-items="sc-pa"]');
+    return JSON.stringify({ status: k?.querySelector('[data-partner-card-status]')?.textContent, paidOut: k?.querySelector('[data-partner-card-paid-out]')?.getAttribute('data-partner-card-paid-out'),
+      running: k?.querySelectorAll('[data-partner-card-item]').length, done: k?.querySelector('[data-partner-card-done]')?.textContent });`).then(JSON.parse);
+  ok(karte2.status === 'SC Partner owes LATAIF 680.000' && karte2.paidOut === '568.618' && karte2.running === 2 && /DONE · 1 settled/.test(karte2.done || ''),
+    `KARTE nach Auszahlung: A erledigt (DONE), 2 laufend, Paid out 568,618 (${S(karte2)})`);
+  await c.ev("document.querySelector('[data-partner-card-items=\"sc-pa\"]')?.scrollIntoView({ block: 'center' }); return 1;");
+  await c.ev("document.querySelector('[data-partner-card-done-toggle]')?.click(); return 1;");
+  await sleep(400);
+  await shot('partner-card-done');
 
 
   // ── Mehrere Artikel auf einer Rechnung: Gebührenanteile = exakt die Gebühr ──

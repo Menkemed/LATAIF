@@ -21,7 +21,8 @@ import { WriteError } from '@/components/shared/WriteError';
 import { savePartnerCreate, savePartnerUpdate } from '@/core/masterdata/masterdata-save';
 import { savePartnerTx } from '@/core/finance/money-save';
 // PARTNER-ITEMS — Beteiligungen an gemeinsam gekauften Artikeln (eigenes Ausgleichskonto).
-import { PartnerItemsPanel, openText } from '@/components/partners/PartnerItemsPanel';
+import { PartnerItemsPanel } from '@/components/partners/PartnerItemsPanel';
+import { PartnerCardItems, type PartnerItemAction } from '@/components/partners/PartnerCardItems';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -50,6 +51,8 @@ export function PartnersPage() {
   const [historyId, setHistoryId] = useState<string | null>(null);
   const [editPartner, setEditPartner] = useState<Partner | null>(null);
   const [editForm, setEditForm] = useState<Partial<Partner>>({});
+  // Handlung aus dem Block in der Partnerkarte — geöffnet wird der Dialog der Artikeltabelle.
+  const [itemAction, setItemAction] = useState<PartnerItemAction | null>(null);
 
   useEffect(() => { loadPartners(); loadTransactions(); }, [loadPartners, loadTransactions]);
 
@@ -161,15 +164,10 @@ export function PartnersPage() {
                 </div>
               </div>
 
-              {/* PARTNER-ITEMS — Gesamtsaldo der Artikelbeteiligungen (getrennt vom Kapital oben). */}
+              {/* PARTNER-ITEMS — gemeinsam gekaufte Artikel dieses Partners (getrennt vom Kapital oben). */}
               {(() => {
                 const items = itemOverview.find(o => o.partnerId === p.id);
-                if (!items) return null;
-                return (
-                  <div style={{ fontSize: 12, color: items.openTotal >= 0 ? '#7B4AAA' : '#DC2626', marginBottom: 12 }} data-partner-card-items={p.id}>
-                    Jointly bought items ({items.items.length}): {openText(items.openTotal, p.name)}
-                  </div>
-                );
+                return items ? <PartnerCardItems data={items} partnerName={p.name} onAction={setItemAction} /> : null;
               })()}
 
               <div className="flex gap-2" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE', flexWrap: 'wrap' }}>
@@ -205,7 +203,7 @@ export function PartnersPage() {
         </div>
       )}
 
-      <PartnerItemsPanel overview={itemOverview} partners={partners} />
+      <PartnerItemsPanel overview={itemOverview} partners={partners} action={itemAction} onActionDone={() => setItemAction(null)} />
 
       {/* New Partner */}
       <Modal open={showNewPartner} onClose={() => setShowNewPartner(false)} title="New Partner" width={460}>

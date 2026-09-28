@@ -2,7 +2,7 @@
 // nachträglich aktivierter Kosten), Beiträge, Auszahlungen, Gewinn (rechnerisch / freigegeben) und der
 // offene Ausgleich; darüber die Summen je Partner. Alle Handlungen gehen am Hauptrechner direkt, auf
 // PC2 als geprüfter Befehl — gebucht wird immer am Hauptrechner.
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { ChevronDown, ChevronRight } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { Button } from '@/components/ui/Button';
@@ -16,6 +16,7 @@ import { saveCancelMovement, saveItemMovement, saveItemOffset } from '@/core/par
 import type { Partner } from '@/core/models/types';
 import { OwnershipChangeModal, type OwnershipTarget } from './OwnershipChangeModal';
 import { SettleSaleModal, type SettleTarget } from './SettleSaleModal';
+import type { PartnerItemAction } from './PartnerCardItems';
 
 const fmt = (v: number): string => v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 
@@ -38,7 +39,11 @@ const KIND_LABEL: Record<string, string> = {
 interface MoveForm { item: PartnerItemView; partnerId: string; partnerName: string; kind: 'CONTRIBUTION' | 'PAYOUT' }
 interface OffsetForm { partner: PartnerItemsOfPartner; from: string; to: string }
 
-export function PartnerItemsPanel({ overview, partners = [] }: { overview: PartnerItemsOfPartner[]; partners?: Partner[] }) {
+export function PartnerItemsPanel({ overview, partners = [], action = null, onActionDone }: {
+  overview: PartnerItemsOfPartner[]; partners?: Partner[];
+  /** Eine Handlung aus der Partnerkarte: öffnet hier denselben Dialog wie der Knopf in der Tabelle. */
+  action?: PartnerItemAction | null; onActionDone?: () => void;
+}) {
   const w = useSharedWrites();
   const [own, setOwn] = useState<{ mode: 'TAKEOVER' | 'CHANGE'; target: OwnershipTarget } | null>(null);
   const [openRows, setOpenRows] = useState<Record<string, boolean>>({});
@@ -51,6 +56,22 @@ export function PartnerItemsPanel({ overview, partners = [] }: { overview: Partn
   const [fehler, setFehler] = useState('');
   const [busy, setBusy] = useState(false);
   const [settleFor, setSettleFor] = useState<SettleTarget | null>(null);
+
+  useEffect(() => {
+    if (!action) return;
+    const p = overview.find((x) => x.partnerId === action.partnerId);
+    const it = p?.items.find((x) => x.purchaseLineId === action.purchaseLineId);
+    if (p && it) {
+      if (action.kind === 'SETTLE') {
+        const sale = it.sales.find((x) => x.invoiceLineId === action.invoiceLineId);
+        if (sale) setSettleFor({ sale, itemLabel: it.productLabel, partnerName: p.name, sharePct: it.sharePct });
+      } else {
+        openForm(it, p.partnerId, p.name, action.kind === 'PAY_OUT' ? 'PAYOUT' : 'CONTRIBUTION');
+      }
+    }
+    onActionDone?.();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [action]);
 
   if (overview.length === 0) return null;
 
