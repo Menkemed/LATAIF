@@ -43,9 +43,37 @@ export interface PurchaseDraftLine {
   partnerShares?: PartnerShareInput[];
 }
 
+/** MOBILE-PURCHASE — eine von mehreren Zahlungen, die zusammen mit dem Einkauf erfasst werden. */
+export interface PurchasePaymentInput {
+  amount: number;
+  method: typeof PURCHASE_PAYMENT_METHODS[number];
+  reference?: string;
+}
+
+/**
+ * MOBILE-PURCHASE — der Lieferant, wenn er erst MIT dem Einkauf entsteht: aus einem bestehenden Kunden
+ * (dieselbe Person, Lieferantenrolle über `linked_customer_id`) oder als neue Person (erst Kunde, dann
+ * die verknüpfte Lieferantenrolle). Dieselben Hausfunktionen wie „New Supplier → Use existing customer".
+ */
+export interface PurchaseSupplierFromCustomer {
+  customerId: string;
+  /** Der Stand des Kunden, den der Mensch gesehen hat (`updated_at`). */
+  seenCustomerUpdatedAt: string;
+  createDespiteExistingSuppliers?: boolean;
+}
+export interface PurchaseNewSupplierPerson {
+  /** Die Kundenfelder, geprüft wie `customers.create`. */
+  fields: Record<string, unknown>;
+  createDespiteExistingSuppliers?: boolean;
+}
+
 /** Die EINGABEN der Anlegemaske. */
 export interface PurchaseCreateInput {
   supplierId: string;
+  supplierFromCustomer?: PurchaseSupplierFromCustomer;
+  newSupplierPerson?: PurchaseNewSupplierPerson;
+  /** Mehrere Zahlungen statt der einen Anzahlung (`paymentAmount` ist dann 0). */
+  payments?: PurchasePaymentInput[];
   purchaseDate: string;
   taxScheme: typeof PURCHASE_TAX_SCHEMES[number];
   lines: PurchaseDraftLine[];
@@ -63,7 +91,9 @@ export const purchaseTotal = (lines: readonly PurchaseDraftLine[]): number =>
 
 /** Die Prüfung der Maske — wortgleich; der Code sagt dem Fernweg, WAS nicht stimmt. */
 export function purchaseCreateIssue(input: PurchaseCreateInput): { code: string; message: string } | null {
-  if (!input.supplierId) return { code: 'SUPPLIER_REQUIRED', message: 'Please select a supplier' };
+  const supplierWays = [!!input.supplierId, !!input.supplierFromCustomer, !!input.newSupplierPerson].filter(Boolean).length;
+  if (supplierWays === 0) return { code: 'SUPPLIER_REQUIRED', message: 'Please select a supplier' };
+  if (supplierWays > 1) return { code: 'SUPPLIER_AMBIGUOUS', message: 'Name the supplier one way only' };
   if (input.lines.length === 0) return { code: 'LINES_REQUIRED', message: 'Please add at least one line' };
   const bad = input.lines.findIndex((l) =>
     l.quantity <= 0 || l.unitPrice < 0
@@ -84,6 +114,25 @@ export function purchaseCreateIssue(input: PurchaseCreateInput): { code: string;
   if (input.paymentAmount < 0) return { code: 'PAYMENT_NEGATIVE', message: 'Payment cannot be negative' };
   if (input.paymentAmount > total) {
     return { code: 'PAYMENT_EXCEEDS_TOTAL', message: `Payment (${fmt(input.paymentAmount)}) exceeds total (${fmt(total)})` };
+  }
+  if (input.payments && input.payments.length > 0) {
+    if (input.paymentAmount > 0) return { code: 'PAYMENT_AMBIGUOUS', message: 'Either one payment or a list of payments, not both' };
+    let sumF = 0;
+    for (let i = 0; i < input.payments.length; i++) {
+      const p = input.payments[i];
+      if (typeof p.amount !== 'number' || !Number.isFinite(p.amount) || F(p.amount) <= 0) {
+        return { code: 'PAYMENT_AMOUNT_INVALID', message: `Payment ${i + 1}: amount must be greater than zero` };
+      }
+      if (!(PURCHASE_PAYMENT_METHODS as readonly string[]).includes(p.method)) {
+        return { code: 'PAYMENT_METHOD_INVALID', message: `Payment ${i + 1}: unknown payment method` };
+      }
+      sumF += F(p.amount);
+    }
+    // Filsgenau: Summe der Zahlungen gegen die Summe der Zeilen (je Zeile Menge × Stückpreis).
+    const totalF = input.lines.reduce((a, l) => a + F((l.quantity || 0) * (l.unitPrice || 0)), 0);
+    if (sumF > totalF) {
+      return { code: 'PAYMENT_EXCEEDS_TOTAL', message: `Payments (${fmt(sumF / 1000)}) exceed total (${fmt(totalF / 1000)})` };
+    }
   }
   return null;
 }
@@ -121,6 +170,7 @@ export function planPurchaseCreate(input: PurchaseCreateInput, port: PurchaseCre
   if (!(PURCHASE_PAYMENT_METHODS as readonly string[]).includes(input.paymentMethod)) {
     throw new PurchaseActionRejected('INVALID_INPUT', `unknown payment method: ${input.paymentMethod}`);
   }
+  if (!input.supplierId) throw new PurchaseActionRejected('SUPPLIER_REQUIRED', 'Please select a supplier');
   if (!port.supplierActive(input.supplierId)) throw new PurchaseActionRejected('SUPPLIER_NOT_FOUND', 'no such supplier in this branch');
   if (input.staffId && !port.employeeActive(input.staffId)) {
     throw new PurchaseActionRejected('EMPLOYEE_NOT_FOUND', 'no such active employee in this branch');

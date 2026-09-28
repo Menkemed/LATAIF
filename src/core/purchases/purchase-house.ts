@@ -15,10 +15,12 @@ import { useSupplierStore } from '@/stores/supplierStore';
 import type { Purchase } from '@/core/models/types';
 import type { WriteAdapters, WriteOutcome } from '@/core/data/shared-write';
 import { isClientMode } from '@/core/bridge/client-mode';
-import { localHouseCtx } from '@/core/payables/payables-house';
+import { localHouseCtx, recordPurchasePaymentInHouse, PayablesRejected } from '@/core/payables/payables-house';
+import { useCustomerStore } from '@/stores/customerStore';
+import { MasterdataInputError } from '@/core/masterdata/masterdata-rules';
 import { normalizeSpecImages } from '@/core/media/record-image';
 import { adoptInboxPhotosToProduct } from './inbox-media';
-import { planPurchaseCreate, type PurchaseCreateInput, type PurchaseCreatePort } from './purchase-create';
+import { PurchaseActionRejected, planPurchaseCreate, purchaseCreateIssue, type PurchaseCreateInput, type PurchaseCreatePort } from './purchase-create';
 import {
   PURCHASE_PRIMARY_ONLY, PurchaseLifecycleRejected,
   returnToSupplierInHouse, cancelPurchaseInHouse, dismissPurchaseInboxInHouse,
@@ -61,11 +63,68 @@ function frischLesen(): void {
   useOrderStore.getState().loadOrders();
 }
 
+/** Ein Nein der Stammdaten oder der Zahlungen als Nein des Einkaufs — derselbe Code, dieselben Worte. */
+function alsEinkaufsNein<T>(fn: () => T): T {
+  try { return fn(); } catch (e) {
+    if (e instanceof MasterdataInputError || e instanceof PayablesRejected) {
+      throw new PurchaseActionRejected((e as { code: string }).code, e.message);
+    }
+    throw e;
+  }
+}
+
+/**
+ * MOBILE-PURCHASE — der Lieferant, der erst mit dem Einkauf entsteht. Dieselben Hausfunktionen wie
+ * „New Supplier → Use existing customer": ein schon verknüpfter Lieferant wird wiederverwendet, ein
+ * möglicher unverknüpfter Lieferant derselben Person fragt nach (`SUPPLIER_CANDIDATES_EXIST`), eine neue
+ * Person wird zuerst normaler Kunde. Alles in der Transaktion des Einkaufs — scheitert er, bleibt nichts.
+ */
+function resolveSupplier(input: PurchaseCreateInput): { supplierId: string; customerId?: string } {
+  if (input.supplierId) return { supplierId: input.supplierId };
+  return alsEinkaufsNein(() => {
+    if (input.supplierFromCustomer) {
+      const fc = input.supplierFromCustomer;
+      const r = useSupplierStore.getState().createSupplierFromCustomer(fc.customerId,
+        { createDespiteExistingSuppliers: fc.createDespiteExistingSuppliers === true }, fc.seenCustomerUpdatedAt);
+      return { supplierId: r.supplier.id, customerId: fc.customerId };
+    }
+    const np = input.newSupplierPerson!;
+    const customer = useCustomerStore.getState().createCustomer(np.fields as never);
+    const fresh = query('SELECT updated_at FROM customers WHERE id = ?', [customer.id])[0];
+    const r = useSupplierStore.getState().createSupplierFromCustomer(customer.id,
+      { createDespiteExistingSuppliers: np.createDespiteExistingSuppliers === true }, fresh ? String(fresh.updated_at) : undefined);
+    return { supplierId: r.supplier.id, customerId: customer.id };
+  });
+}
+
 /** „Save Purchase": der Einkauf — und, wenn er aus einem Inbox-Foto kam, das Foto „erledigt". */
-export function createPurchaseInHouse(input: PurchaseCreateInput, branchId: string): Purchase {
-  const payload = planPurchaseCreate(input, housePurchasePort(branchId));
+export function createPurchaseInHouse(input: PurchaseCreateInput, branchId: string, userId = ''): Purchase {
+  return createPurchaseDetailedInHouse(input, branchId, userId).purchase;
+}
+
+/** Wie `createPurchaseInHouse`, dazu der aufgelöste Lieferant und ein neu angelegter Kunde. */
+export function createPurchaseDetailedInHouse(input: PurchaseCreateInput, branchId: string, userId = '')
+  : { purchase: Purchase; supplierId: string; customerId?: string } {
+  // Erst die Eingaben prüfen (mit einem Platzhalter-Lieferanten, falls er erst entsteht), dann den
+  // Lieferanten auflösen — so legt eine ungültige Zeile keinen Kunden oder Lieferanten an.
+  const issue = purchaseCreateIssue(input);
+  if (issue) throw new PurchaseActionRejected(issue.code, issue.message);
+  const supplier = resolveSupplier(input);
+  const resolved: PurchaseCreateInput = { ...input, supplierId: supplier.supplierId, supplierFromCustomer: undefined, newSupplierPerson: undefined };
+  const payload = planPurchaseCreate(resolved, housePurchasePort(branchId));
   const store = usePurchaseStore.getState();
-  const purchase = store.createPurchase(payload as never);
+  const purchase0 = store.createPurchase(payload as never);
+  // MOBILE-PURCHASE — mehrere Zahlungen: jede über denselben Weg wie „Record Payment" (eigene Zeile,
+  // eigene Buchung, Status neu gerechnet), mit dem Datum des Einkaufs. Keine Sammelbuchung.
+  if (input.payments && input.payments.length > 0) {
+    const ctx = { branchId, userId, now: new Date().toISOString() };
+    for (const p of input.payments) {
+      alsEinkaufsNein(() => recordPurchasePaymentInHouse(purchase0.id, p.amount, p.method, ctx,
+        { reference: p.reference || undefined, paidAt: input.purchaseDate }));
+    }
+    store.loadPurchases();
+  }
+  const purchase = store.getPurchase(purchase0.id) ?? purchase0;
   if (input.inboxId) {
     // MEDIA-INBOX §6 — aus dem Posteingangsfoto wird das Bild des neuen Artikels: DASSELBE
     // Medienobjekt, neue Verknüpfung (`stock_image`, Klasse unverändert `internal`). Erst ab
@@ -77,7 +136,7 @@ export function createPurchaseInHouse(input: PurchaseCreateInput, branchId: stri
     if (productId) adoptInboxPhotosToProduct(input.inboxId, productId);
     usePurchaseStore.getState().markPurchaseInboxDone(input.inboxId);
   }
-  return purchase;
+  return { purchase, supplierId: supplier.supplierId, customerId: supplier.customerId };
 }
 
 /** „Save Purchase" am Primary. */

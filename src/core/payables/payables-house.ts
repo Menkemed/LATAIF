@@ -803,7 +803,7 @@ export interface PurchasePaid {
  */
 export function recordPurchasePaymentInHouse(
   purchaseId: string, amount: number, method: string, ctx: HouseCtx,
-  opts: { expectedRevision?: number; reference?: string; note?: string } = {},
+  opts: { expectedRevision?: number; reference?: string; note?: string; paidAt?: string } = {},
 ): PurchasePaid {
   assertHouseBooks();
   if (typeof amount !== 'number' || !Number.isFinite(amount) || F(amount) <= 0) {
@@ -829,7 +829,9 @@ export function recordPurchasePaymentInHouse(
   const settledF = cashF + payF + creditF;
   const remaining = B(Math.max(0, totalF - settledF));
   const status = purchaseStatusOf(totalF, settledF);
-  const paidAt = dayOf(ctx.now);
+  // MOBILE-PURCHASE — Zahlungen, die mit dem Einkauf zusammen erfasst werden, tragen dessen Datum
+  // (wie die Anzahlung am Rechner); sonst gilt der Tag der Buchung.
+  const paidAt = opts.paidAt ? isoDateOf(opts.paidAt, 'PAYMENT_DATE_INVALID', 'the payment date') : dayOf(ctx.now);
   const paymentId = uuid();
   const db = getDatabase();
   db.run(

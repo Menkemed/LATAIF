@@ -62,7 +62,8 @@ import { createOrderInHouse, updateOrderInHouse } from '@/core/orders/order-hous
 import {
   PURCHASE_PAYMENT_METHODS, PURCHASE_TAX_SCHEMES, PurchaseActionRejected, type PurchaseCreateInput,
 } from '@/core/purchases/purchase-create';
-import { createPurchaseInHouse } from '@/core/purchases/purchase-house';
+import { createPurchaseDetailedInHouse } from '@/core/purchases/purchase-house';
+import { parseCustomerCreate } from './customer-commands';
 import { EMBEDDED_PRODUCT_FIELDS, FINAL_PRODUCT_FIELDS, EmbeddedProductRejected } from '@/core/products/embedded-product';
 import { payoutModelLock, PayoutPatchError } from '@/core/consignment/payout-edit';
 import { rowToConsignment } from '@/stores/consignmentStore';
@@ -306,6 +307,8 @@ export function parsePurchaseCreate(raw: unknown): PurchaseCreateRequest {
   onlyKnownFields(raw, [
     'supplierId', 'purchaseDate', 'taxScheme', 'lines', 'paymentAmount', 'paymentMethod',
     'initialPayment', 'notes', 'staffId', 'sourceOrderId', 'inboxId',
+    // MOBILE-PURCHASE — der Lieferant entsteht mit dem Einkauf; mehrere Zahlungen.
+    'supplierFromCustomer', 'newSupplierPerson', 'payments',
   ]);
   if (!Array.isArray(raw.lines) || raw.lines.length === 0) {
     throw new CommercialPayloadError('a purchase needs at least one line');
@@ -343,8 +346,62 @@ export function parsePurchaseCreate(raw: unknown): PurchaseCreateRequest {
     paymentAmount = money(raw.initialPayment.amount, 'initialPayment.amount', { min: 0.001 });
     paymentMethod = oneOf(raw.initialPayment.method, PURCHASE_PAYMENT_METHODS, 'bank', 'payment method');
   }
+  // MOBILE-PURCHASE — genau EIN Weg zum Lieferanten: bestehend, aus einem Kunden, oder neue Person.
+  const wege = ['supplierId', 'supplierFromCustomer', 'newSupplierPerson'].filter((k) => raw[k] !== undefined && raw[k] !== null);
+  if (wege.length !== 1) throw new CommercialPayloadError('name the supplier exactly one way: supplierId, supplierFromCustomer or newSupplierPerson');
+  let supplierFromCustomer: PurchaseCreateRequest['supplierFromCustomer'];
+  if (raw.supplierFromCustomer !== undefined && raw.supplierFromCustomer !== null) {
+    const fc = raw.supplierFromCustomer;
+    if (!isPlain(fc)) throw new CommercialPayloadError('supplierFromCustomer must be an object');
+    onlyKnownFields(fc, ['customerId', 'seenCustomerUpdatedAt', 'createDespiteExistingSuppliers']);
+    if (fc.createDespiteExistingSuppliers !== undefined && typeof fc.createDespiteExistingSuppliers !== 'boolean') {
+      throw new CommercialPayloadError('createDespiteExistingSuppliers must be true or false');
+    }
+    supplierFromCustomer = {
+      customerId: reqString(fc.customerId, 'supplierFromCustomer.customerId'),
+      seenCustomerUpdatedAt: reqString(fc.seenCustomerUpdatedAt, 'supplierFromCustomer.seenCustomerUpdatedAt'),
+      createDespiteExistingSuppliers: fc.createDespiteExistingSuppliers === true,
+    };
+  }
+  let newSupplierPerson: PurchaseCreateRequest['newSupplierPerson'];
+  if (raw.newSupplierPerson !== undefined && raw.newSupplierPerson !== null) {
+    const np = raw.newSupplierPerson;
+    if (!isPlain(np)) throw new CommercialPayloadError('newSupplierPerson must be an object');
+    const { createDespiteExistingSuppliers, ...personRaw } = np as Record<string, unknown>;
+    if (createDespiteExistingSuppliers !== undefined && typeof createDespiteExistingSuppliers !== 'boolean') {
+      throw new CommercialPayloadError('createDespiteExistingSuppliers must be true or false');
+    }
+    // Dieselben Kundenfelder und -regeln wie `customers.create` — nur ohne Ausweisfoto in diesem Schritt.
+    let parsed: ReturnType<typeof parseCustomerCreate>;
+    try { parsed = parseCustomerCreate(personRaw); } catch (e) { throw new CommercialPayloadError(`newSupplierPerson: ${(e as Error).message}`); }
+    if (parsed.photo.stagingId !== undefined) throw new CommercialPayloadError('newSupplierPerson: no ID photo in this step');
+    newSupplierPerson = { fields: parsed.fields, createDespiteExistingSuppliers: createDespiteExistingSuppliers === true };
+  }
+  let payments: PurchaseCreateRequest['payments'];
+  if (raw.payments !== undefined && raw.payments !== null) {
+    if (!Array.isArray(raw.payments)) throw new CommercialPayloadError('payments must be a list');
+    if (raw.payments.length > 10) throw new CommercialPayloadError('too many payments');
+    if (raw.paymentAmount !== undefined || raw.initialPayment !== undefined) {
+      throw new CommercialPayloadError('either paymentAmount/initialPayment or payments, not both');
+    }
+    payments = raw.payments.map((p, i) => {
+      if (!isPlain(p)) throw new CommercialPayloadError(`payment ${i + 1} must be an object`);
+      onlyKnownFields(p, ['amount', 'method', 'reference']);
+      const reference = text0(p.reference, `payment ${i + 1}: reference`);
+      return {
+        amount: money(p.amount, `payment ${i + 1}: amount`, { min: 0.001 }),
+        method: p.method === undefined || p.method === null
+          ? (() => { throw new CommercialPayloadError(`payment ${i + 1}: method is required`); })()
+          : oneOf(p.method, PURCHASE_PAYMENT_METHODS, 'bank', `payment ${i + 1} method`),
+        ...(reference ? { reference } : {}),
+      };
+    });
+  }
   const out: PurchaseCreateRequest = {
-    supplierId: reqString(raw.supplierId, 'supplierId'),
+    supplierId: raw.supplierId === undefined || raw.supplierId === null ? '' : reqString(raw.supplierId, 'supplierId'),
+    ...(supplierFromCustomer ? { supplierFromCustomer } : {}),
+    ...(newSupplierPerson ? { newSupplierPerson } : {}),
+    ...(payments && payments.length > 0 ? { payments } : {}),
     purchaseDate: optString(raw.purchaseDate, 'purchaseDate') ?? new Date().toISOString().split('T')[0],
     taxScheme: oneOf(raw.taxScheme, PURCHASE_TAX_SCHEMES, 'ZERO', 'tax scheme'),
     lines,
@@ -380,9 +437,13 @@ export async function runPurchaseCreate(
     // Entwürfe, Mitarbeiter, Auftrag und Inbox geprüft — dann die Hausfunktion: Belegnummer aus dem
     // durablen Zähler, ein Los je Zeile mit dem TATSÄCHLICHEN Einstand, neue Artikel, Menge,
     // Statusregel, Vorsteuer, Verbindlichkeit, Buchung, Auftragspositionen auf „Arrived".
-    const purchase = urteil(() => createPurchaseInHouse({ ...req, lines }, identity.branchId));
+    const done = urteil(() => createPurchaseDetailedInHouse({ ...req, lines }, identity.branchId, identity.userId));
+    const purchase = done.purchase;
     const value: CommercialResult = {
       purchaseId: purchase.id,
+      supplierId: done.supplierId,
+      ...(done.customerId ? { customerId: done.customerId } : {}),
+      payments: (purchase.payments ?? []).length,
       purchaseNumber: purchase.purchaseNumber,
       status: purchase.status,
       totalAmount: purchase.totalAmount,

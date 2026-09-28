@@ -726,7 +726,7 @@ const emitBruch = (name: string) => () => {
     'DOMAIN die Auftragsseite rechnet Marge und Rest nicht mehr selbst');
   ok(!/\bcreatePurchase\(|markPurchaseInboxDone\(/.test(pc) && /createPurchaseOnPrimary\(/.test(pc) && /purchaseCreateBody\(/.test(pc),
     'DOMAIN die Einkaufsmaske ruft die geteilte Vorbereitung');
-  ok(/createOrderInHouse\(/.test(cc) && /updateOrderInHouse\(/.test(cc) && /createPurchaseInHouse\(/.test(cc), 'DOMAIN die Fernbefehle rufen dieselbe Folge');
+  ok(/createOrderInHouse\(/.test(cc) && /updateOrderInHouse\(/.test(cc) && /createPurchase(Detailed)?InHouse\(/.test(cc), 'DOMAIN die Fernbefehle rufen dieselbe Folge');
   ok(!/vatEngine|getNextDocumentNumber|INSERT INTO|createGoldPayable\(|remainingAmount = |expectedMargin = /.test(cc),
     'DOMAIN …und rechnen weder Steuer noch Nummer noch Marge, schreiben nichts selbst');
   const oh = codeOf(src('src/core/orders/order-house.ts'));
