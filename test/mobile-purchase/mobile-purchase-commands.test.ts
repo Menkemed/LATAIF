@@ -131,7 +131,7 @@ function item(uid: string, extra: Record<string, unknown> = {}) {
   const ui = src('src-tauri/src/sync/mobile_purchase_ui.js');
   ok(/include_str!\("mobile_purchase_commands\.js"\)/.test(seite) && /include_str!\("mobile_purchase_ui\.js"\)/.test(seite) && /include_str!\("mobile_purchase\.html"\)/.test(seite)
     && seite.indexOf('mobile_purchase_commands.js') > seite.indexOf('mobile_repair_commands.js'), 'SEITE die drei Dateien sind eingebettet, nach dem Auftraggeber');
-  ok(/'mpHome', 'formMPurchase'/.test(seite) && /mode === 'mpurchase'\) mpHomeOpen\(\)/.test(seite) && /data-mode="purchase"/.test(seite), 'SEITE eigener Modus; die Purchase Inbox bleibt');
+  ok(/'mpHome', 'formMPurchase'/.test(seite) && /mode === 'mpurchase'\) mpHomeOpen\(\)/.test(seite) && !/data-mode="purchase"/.test(seite) && !/formPurchase/.test(seite), 'SEITE eigener Modus; er ersetzt „Purchase Photo"');
   ok(/MobileRepair\.createClient\(/.test(ui) && /'purchases\.create'/.test(ui) && !/\/api\/sync\/push/.test(ui) && !/purchase_inbox\.create/.test(ui),
     'UI derselbe durable Auftraggeber, EIN Auftrag purchases.create, kein Tabellen-Push');
   ok(/indexedDB\.open\(MP_DB/.test(ui) && /stagePhoto\(p\.dataUrl\)/.test(ui) && /clarify: true/.test(ui), 'UI Entwurf samt Fotos in IndexedDB; Fotos in die Ablage; Klärung unter derselben Kennung');

@@ -403,17 +403,16 @@ const J = (v: unknown): string => JSON.stringify(v ?? null);
   ok((/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1].match(/OP_[A-Z_]+/g) ?? []).length === 183,
     '§10 die Registry steht bei 177');
 
-  // Das Telefon: kein Tabellen-Push mehr, sondern Ablage + benannter Auftrag mit Kennung.
+  // Das Telefon: kein Tabellen-Push. MOBILE-PURCHASE ersetzt den Modus „Purchase Photo" — der Einkauf
+  // entsteht auf dem Telefon vollständig und geht als `purchases.create`; der Posteingang bleibt am
+  // Desktop (Altbestand), der Auftrag `purchase_inbox.create` bleibt zugelassen (siehe oben).
   const seite = src('src-tauri/src/sync/mobile_page.rs');
   ok(!/pushChanges/.test(seite), '§10 die Handy-Seite kennt den allgemeinen Abgleich-Push gar nicht mehr');
   ok(!/table_name: 'purchase_inbox'/.test(seite), '§10 …und schreibt die Tabelle nirgends direkt');
-  ok(/client\.stagePhoto\(photos\.purchase\)/.test(seite) && /'purchase_inbox\.create'/.test(seite),
-    '§10 sie legt die Bytes ab und stellt danach den benannten Auftrag');
-  ok(/piIntentKey = null;/.test(seite) && /if \(!piIntentKey\) piIntentKey = 'inbox:' \+ uuid\(\)/.test(seite),
-    '§10 …mit einer Kennung, die den offenen Ausgang überlebt und erst beim Ergebnis fällt');
-  const offen = seite.slice(seite.indexOf("$('bSaveBtn').onclick"));
-  ok(/r\.kind === 'ok'/.test(offen) && /r\.kind === 'rejected'/.test(offen) && /unauthorized/.test(offen),
-    '§10 …und beantwortet alle Ausgänge, nicht nur den guten');
+  ok(!/data-mode="purchase"/.test(seite) && !/formPurchase/.test(seite) && !/bSaveBtn/.test(seite),
+    '§10 der Modus „Purchase Photo" ist vom Telefon entfernt — „New Purchase" ersetzt ihn');
+  ok(/data-mode="mpurchase"/.test(seite) && /include_str!\("mobile_purchase_ui\.js"\)/.test(seite),
+    '§10 …der vollständige Einkauf vom Telefon ist da');
   ok(!/images: JSON\.stringify/.test(seite), '§10 nirgends mehr Bildbytes in einem Rumpf');
 
   // Der Kern: derselbe Aufnahmeweg, dieselbe Klasse, und Aufnahme VOR der Klammer.

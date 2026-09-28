@@ -453,9 +453,10 @@ group('§3 AI-Leitplanken');
   const altReste = ['repair_number', 'REP-MOB-', 'voucher_code'].filter((s) => page.includes(s));
   ok(altReste.length === 0,
     `§4 keine Spur der alten Telefon-Schreibseite mehr in mobile_page.rs (gefunden: ${altReste.join(', ') || 'nichts'})`);
-  const slots = /const photos = \{([^}]*)\}/.exec(page)?.[1] ?? 'FEHLT';
-  ok(!/repair/.test(slots) && /collection/.test(slots) && /purchase/.test(slots),
-    `§4 der alte Einzelbild-Halter hat keinen `+ '`repair`' + `-Platz mehr (${slots.trim()}) — Reparaturbilder leben nur noch in RP.slots`);
+  // MOBILE-PURCHASE — mit „Purchase Photo" ist der Einzelbild-Halter ganz entfallen.
+  const slots = /const photos = \{([^}]*)\}/.exec(page)?.[1];
+  ok(slots === undefined || !/repair/.test(slots),
+    `§4 der alte Einzelbild-Halter hat keinen `+ '`repair`' + `-Platz mehr (${slots === undefined ? 'Halter entfernt' : slots.trim()}) — Reparaturbilder leben nur noch in RP.slots`);
 }
 
 {

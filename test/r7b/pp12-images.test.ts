@@ -47,7 +47,8 @@ const cap = await import('../../src/core/media/capture-profile.ts');
     && S(cap.captureSize(640, 480)) === S({ width: 640, height: 480 }), 'PROFIL längste Seite ≤ 800, nie vergrößert');
   const mp = src('src-tauri/src/sync/mobile_page.rs');
   const uses = (mp.match(/resizePhoto\([^)]*\)/g) ?? []).filter((c) => !/maxDim/.test(c));
-  ok(uses.length === 3 && uses.every((c) => /, 1600, 0\.85\)$/.test(c)), `PROFIL das Handy nimmt bewusst größer auf (KI-Vorlage, keine Brückenfrist) (${S(uses)})`);
+  // MOBILE-PURCHASE — der Einzelfoto-Modus „Purchase Photo" ist entfernt; es bleiben die zwei Aufnahmewege.
+  ok(uses.length === 2 && uses.every((c) => /, 1600, 0\.85\)$/.test(c)), `PROFIL das Handy nimmt bewusst größer auf (KI-Vorlage, keine Brückenfrist) (${S(uses)})`);
   const iu = code(src('src/components/ui/ImageUpload.tsx'));
   ok(/import \{ captureImage \} from '@\/core\/media\/capture-profile'/.test(iu) && /await captureImage\(file\)/.test(iu) && !/compressImage|toDataURL/.test(iu),
     'PROFIL die EINE Auswahl des Desktops rechnet nicht selbst, sie nutzt das Profil');

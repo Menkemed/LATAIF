@@ -4,10 +4,11 @@
 // v0.4.0 — Vorfilter: nach dem Login waehlt der User EINEN von drei Modi:
 //   • Collection — New Item  → legt ein Produkt an (products-Insert).
 //   • Repair — New Intake    → legt Customer + Repair an (received).
-//   • Purchase — Photo        → legt nur ein Foto in die purchase_inbox.
-//                               Die echte Purchase macht der Owner am Desktop.
-//   • Purchase — Full (MOBILE-PURCHASE) → der vollstaendige Einkauf als Entwurf auf dem Telefon,
+//   • Purchase (MOBILE-PURCHASE) → der vollstaendige Einkauf als Entwurf auf dem Telefon,
 //                               gebucht ueber `purchases.create` am Primary (mobile_purchase_*.js).
+//                               Er ersetzt den frueheren Modus „Purchase Photo" (nur ein Foto in die
+//                               purchase_inbox) — der ist vom Telefon entfernt. Der Posteingang am
+//                               Desktop und der Auftrag `purchase_inbox.create` bleiben fuer Altbestand.
 
 // MOBILE-04B2A9-I1 — the durable collection-upload queue module is included verbatim into the page,
 // right after <script>, so it defines `window.MobileUploadQueue` before the page IIFE uses it.
@@ -123,7 +124,6 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
     <button class="mode-btn" data-mode="repair">🔧&nbsp; New Repair Intake<span>Customer item handed in for repair</span></button>
     <button class="mode-btn" data-mode="consign">🤝&nbsp; New Consignment Intake<span>An item left with us to sell</span></button>
     <button class="mode-btn" data-mode="mpurchase">🧾&nbsp; New Purchase<span>Supplier, items, photos, partners, payments</span></button>
-    <button class="mode-btn" data-mode="purchase">🛒&nbsp; Purchase Photo<span>Snap the item — finish the purchase on desktop</span></button>
     <button class="mode-btn" data-mode="scan">🔍&nbsp; Check Item<span>Scan a tag — see full product details</span></button>
   </div>
   <a href="#" class="logout" id="logoutLink">Sign out</a>
@@ -227,44 +227,6 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
 "##, include_str!("mobile_consignment.html"), r##"
 "##, include_str!("mobile_purchase.html"), r##"
 
-<!-- ─────────── Purchase — Photo to Inbox ─────────── -->
-<div id="formPurchase" class="hidden">
-  <button class="back" data-back>‹ Back</button>
-  <div class="brand" style="margin-top: 4px;">
-    <h1>LATAIF</h1>
-    <p>Purchase Photo</p>
-  </div>
-
-  <div id="bError" class="error hidden"></div>
-  <div id="bSuccess" class="success hidden"></div>
-
-  <div class="card">
-    <div class="header-row">
-      <span style="font-size: 13px; color: #A1A1AA;">Item Photo *</span>
-      <span id="bPhotoStatus" class="badge hidden">Captured</span>
-    </div>
-    <label for="bPhotoInput" class="photo-area" id="bPhotoArea">
-      <div class="icon">📷</div>
-      <div>Tap to take photo</div>
-      <div class="hint">snap the item you bought</div>
-    </label>
-    <input id="bPhotoInput" class="hidden" type="file" accept="image/*" capture="environment" />
-  </div>
-
-  <div class="card">
-    <div class="row">
-      <label>Note</label>
-      <textarea id="bNote" rows="3" placeholder="Supplier, price, anything to remember (optional)"></textarea>
-    </div>
-    <p style="color: #6B6B73; font-size: 12px; margin-top: 12px; line-height: 1.5;">
-      The photo lands in the <strong style="color:#A1A1AA;">Purchase Inbox</strong> on the desktop.
-      Open it there to create the purchase — supplier, items, payment — with AI&nbsp;identify.
-    </p>
-  </div>
-
-  <button id="bSaveBtn">Send to Purchase Inbox</button>
-</div>
-
 <!-- ─────────── Live Barcode Scanner (Test) ─────────── -->
 <div id="scanScreen" class="hidden">
   <button class="back" data-back>‹ Back</button>
@@ -326,11 +288,8 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   const hide = (id) => $(id).classList.add('hidden');
   const setText = (id, t) => { const el = $(id); el.textContent = t; if (t) el.classList.remove('hidden'); else el.classList.add('hidden'); };
 
-  const SCREENS = ['login', 'modePicker', 'formCollection', 'repairHome', 'formRepair', 'consignHome', 'formConsign', 'formPurchase', 'mpHome', 'formMPurchase', 'scanScreen'];
+  const SCREENS = ['login', 'modePicker', 'formCollection', 'repairHome', 'formRepair', 'consignHome', 'formConsign', 'mpHome', 'formMPurchase', 'scanScreen'];
   function screen(id) { SCREENS.forEach(s => hide(s)); show(id); window.scrollTo({ top: 0 }); }
-
-  // Foto-State pro Modus.
-  const photos = { collection: null, purchase: null };
 
   // Secure UUID v4 for upload/entity ids. crypto.randomUUID exists on secure origins (HTTPS, and localhost);
   // on a plain-HTTP LAN origin (phone → http://<ip>:3001/mobile) it is undefined, so we fall back to
@@ -453,7 +412,6 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       if (mode === 'collection') screen('formCollection');
       else if (mode === 'repair') rpHomeOpen();
       else if (mode === 'consign') cnHomeOpen();
-      else if (mode === 'purchase') screen('formPurchase');
       else if (mode === 'mpurchase') mpHomeOpen();
       else if (mode === 'scan') { screen('scanScreen'); findMode('scan'); }
     };
@@ -1695,32 +1653,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     });
   }
 
-  // Generischer Foto-Input-Handler. resetEl = das innere HTML der leeren Area.
-  function bindPhoto(mode, areaId, inputId, statusId, errId, emptyHtml) {
-    $(inputId).onchange = async (e) => {
-      const file = e.target.files && e.target.files[0];
-      if (!file) return;
-      try {
-        photos[mode] = await resizePhoto(file, 1600, 0.85);
-        const area = $(areaId);
-        area.innerHTML = '';
-        area.classList.add('has-image');
-        const img = document.createElement('img');
-        img.src = photos[mode];
-        area.appendChild(img);
-        if (statusId) $(statusId).classList.remove('hidden');
-      } catch (err) {
-        setText(errId, 'Photo could not be loaded');
-      } finally {
-        // MOBILE-I1H — capture, selection and replacement all end here, so this is the one place a
-        // new photo becomes visible to the rest of the form. In `finally` on purpose: a failed
-        // decode must leave the button agreeing with whatever `photos` actually holds.
-        syncAiButtonState();
-      }
-    };
-  }
   const EMPTY_C = '<div class="icon">📷</div><div>Tap to take photos</div><div class="hint">or choose from gallery — several at once</div>';
-  const EMPTY_B = '<div class="icon">📷</div><div>Tap to take photo</div><div class="hint">snap the item you bought</div>';
 
   // ── MOBILE-MULTI-IMAGE §3 — the collection form keeps an ORDERED LIST of photos ─────────────
   //
@@ -1894,60 +1827,6 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       $('cAiBtn').textContent = '✨  AI Identify';
     }
   };
-  bindPhoto('purchase', 'bPhotoArea', 'bPhotoInput', 'bPhotoStatus', 'bError', EMPTY_B);
-
-  function clearPhoto(mode, areaId, inputId, statusId, emptyHtml) {
-    photos[mode] = null;
-    $(inputId).value = '';
-    const area = $(areaId);
-    area.classList.remove('has-image');
-    area.innerHTML = emptyHtml;
-    if (statusId) $(statusId).classList.add('hidden');
-    // MOBILE-I1H — removal and the post-upload form reset both run through here.
-    syncAiButtonState();
-  }
-
-  // MEDIA-INBOX — der Posteingang des Einkaufs ist ein GESCHÄFTSAUFTRAG, kein Tabellen-Push.
-  //
-  // Vorher schrieb dieser Reiter eine Zeile samt Daten-URL über `/api/sync/push` — an jeder
-  // Geschäftsregel vorbei, ohne Auftragskennung: blieb die Antwort aus, wusste niemand, ob der
-  // Eintrag entstanden war, und ein zweiter Versuch legte einen zweiten an. Jetzt geht das Foto
-  // zuerst in die Ablage des Primary und danach ein benannter Auftrag mit seiner Kennung — derselbe
-  // durable Weg wie bei Reparatur und Kommission.
-  const PI_DB = 'lataif-inbox-intents'; const PI_STORE = 'intents';
-  function piIdbOpen() {
-    return new Promise((resolve, reject) => {
-      const r = indexedDB.open(PI_DB, 1);
-      r.onupgradeneeded = () => {
-        const db = r.result;
-        if (!db.objectStoreNames.contains(PI_STORE)) db.createObjectStore(PI_STORE, { keyPath: 'key' });
-      };
-      r.onsuccess = () => resolve(r.result);
-      r.onerror = () => reject(r.error);
-    });
-  }
-  const piStore = {
-    async get(k) { const db = await piIdbOpen(); return idbReq(db.transaction(PI_STORE, 'readonly').objectStore(PI_STORE).get(k)); },
-    async put(e) { const db = await piIdbOpen(); return idbReq(db.transaction(PI_STORE, 'readwrite').objectStore(PI_STORE).put(e)); },
-    async delete(k) { const db = await piIdbOpen(); return idbReq(db.transaction(PI_STORE, 'readwrite').objectStore(PI_STORE).delete(k)); },
-    async getAll() { const db = await piIdbOpen(); return idbReq(db.transaction(PI_STORE, 'readonly').objectStore(PI_STORE).getAll()); },
-  };
-  let piClient = null;
-  function inboxClient() {
-    if (!piClient) {
-      piClient = MobileRepair.createClient({
-        fetchFn: (u, o) => fetch(u, o),
-        store: piStore,
-        genId: uuid,
-        token: () => localStorage.getItem(TOKEN_KEY) || '',
-      });
-    }
-    return piClient;
-  }
-  // Die Kennung DIESER Aufnahme. Sie entsteht mit dem Foto und bleibt, bis der Auftrag durch ist:
-  // ein zweiter Versuch schickt damit denselben Auftrag und legt keine zweite Zeile an.
-  let piIntentKey = null;
-
   // MEDIA-INBOX — der allgemeine Abgleich-Push ist FORT. Das Telefon schrieb damit als einziger
   // Weg eine Geschäftszeile (`purchase_inbox`) samt Daten-URL direkt in die Tabelle; seit der
   // Posteingang ein benannter Auftrag ist, gibt es dafür keinen Aufrufer mehr — und die Funktion
@@ -2199,51 +2078,6 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // Initial render for the default (first) category.
   renderCollectionFields($('cCategory').value);
 
-
-  // ── Purchase — Photo to Inbox ──
-  $('bSaveBtn').onclick = async () => {
-    setText('bError', ''); setText('bSuccess', '');
-    if (!photos.purchase) return setText('bError', 'Take a photo of the item first.');
-    $('bSaveBtn').disabled = true;
-    try {
-      const client = inboxClient();
-      // Erst die Bytes in die Ablage des Primary — im Auftrag steht nur ihre Inhaltskennung.
-      // Scheitert das (kein Netz, kein Primary), geht GAR NICHTS hinaus: das Foto bleibt in der
-      // Maske, und derselbe Knopf schickt es später erneut. Genau wie bisher.
-      const staged = await client.stagePhoto(photos.purchase);
-      if (!staged.ok) {
-        setText('bError', 'The photo could not be sent (' + staged.code + '). Nothing was filed — try again.');
-        $('bSaveBtn').disabled = false;
-        return;
-      }
-      if (!piIntentKey) piIntentKey = 'inbox:' + uuid();
-      const note = $('bNote').value.trim();
-      const body = { photos: [{ stagingId: staged.stagingId }] };
-      if (note) body.note = note;
-      const r = await client.mutate(piIntentKey, 'purchase_inbox.create', body);
-      if (r.kind === 'ok') {
-        setText('bSuccess', 'Photo sent to the Purchase Inbox. Open it on the desktop to create the purchase.');
-        $('bNote').value = '';
-        piIntentKey = null;
-        clearPhoto('purchase', 'bPhotoArea', 'bPhotoInput', 'bPhotoStatus', EMPTY_B);
-        window.scrollTo({ top: 0, behavior: 'smooth' });
-      } else if (r.kind === 'rejected') {
-        piIntentKey = null;
-        setText('bError', 'The photo was not filed: ' + (r.code || 'refused by the main computer') + '.');
-      } else if (r.kind === 'unauthorized') {
-        localStorage.removeItem(TOKEN_KEY); init();
-        setText('loginError', 'Session expired. Please sign in again.');
-      } else {
-        // Offener Ausgang (kein Netz, kein Fenster am Primary): die Kennung BLEIBT. Derselbe Knopf
-        // schickt denselben Auftrag noch einmal — und der Primary antwortet dann mit seinem
-        // eingefrorenen Ergebnis statt eine zweite Zeile anzulegen.
-        setText('bError', 'The main computer did not answer (' + (r.code || 'no answer') + '). Tap Save again — the same entry is retried, never a second one.');
-      }
-    } catch (e) {
-      if (e.message !== 'Session expired') setText('bError', e.message || 'Save failed');
-    }
-    $('bSaveBtn').disabled = false;
-  };
 
 "##, include_str!("mobile_repair_ui.js"), r##"
 "##, include_str!("mobile_consignment_ui.js"), r##"
