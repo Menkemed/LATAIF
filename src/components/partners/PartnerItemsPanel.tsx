@@ -219,7 +219,8 @@ export function PartnerItemsPanel({ overview, partners = [] }: { overview: Partn
                       <span className="text-overline" style={{ fontSize: 10 }}>SALES</span>
                       {it.sales.length === 0 && <div style={{ color: '#9CA3AF', margin: '4px 0 8px' }}>Not sold yet.</div>}
                       {it.sales.map((s) => (
-                        <div key={s.invoiceLineId} className="flex items-center justify-between" style={{ padding: '4px 0' }} data-partner-item-sale={s.invoiceLineId} data-sale-state={s.state}>
+                        <div key={s.invoiceLineId} className="flex items-center justify-between" style={{ padding: '4px 0' }} data-partner-item-sale={s.invoiceLineId} data-sale-state={s.state}
+                          data-sale-fee={s.cardFee.toFixed(3)} data-sale-profit={s.profit.toFixed(3)} data-sale-partner-share={s.partnerShare.toFixed(3)}>
                           <span>
                             {s.invoiceNumber || '(deleted line)'} · {s.invoiceStatus} · qty {s.quantity} · net <Bhd v={s.net} /> − cost <Bhd v={s.cost} />
                             {s.cardFee !== 0 && <> − card fee <Bhd v={s.cardFee} /></>} = profit <Bhd v={s.profit} /> · {p.name}&apos;s share <Bhd v={s.partnerShare} />

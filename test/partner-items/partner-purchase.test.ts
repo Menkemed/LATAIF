@@ -19,6 +19,9 @@ import { dirname, resolve as resolvePath } from 'node:path';
 const repo = resolvePath(dirname(fileURLToPath(import.meta.url)), '..', '..');
 registerHooks({
   resolve(specifier: string, context: { parentURL?: string }, nextResolve: (s: string, c: unknown) => unknown) {
+    if (specifier === '@tauri-apps/plugin-dialog') {
+      return { url: 'data:text/javascript,export const confirm = (...a) => globalThis.__dialogConfirm(...a);', shortCircuit: true };
+    }
     if (specifier === '@tauri-apps/api/core') {
       return { url: pathToFileURL(resolvePath(repo, 'test/bridge/_tauri-shim.ts')).href, shortCircuit: true };
     }
@@ -459,6 +462,33 @@ const L2 = lineOf(DB, P2, 'pw3');
   ok(/import \{ confirm as nativeConfirm \} from '@tauri-apps\/plugin-dialog'/.test(nc) && !/plugin:dialog\|confirm/.test(nc.replace(/^\/\/.*$/gm, '')) && /return false;/.test(nc),
     'RÜCKFRAGE über die Plugin-Funktion confirm (message mit OK/Cancel); Fehler gilt als Cancel');
   ok(/data-purchase-partner-amount=/.test(sec) && /pctOfAmount/.test(sec), 'MASKE Anteil auch als Betrag (BHD) eingebbar');
+}
+
+// ── Rückfrage: OK / Cancel / Dialogfehler (der installierte window.confirm) ─────
+{
+  const w = globalThis.window as unknown as { __TAURI_INTERNALS__?: unknown; confirm?: (m?: string) => Promise<boolean> };
+  const vorher = w.confirm;
+  const { installNativeConfirm } = await import('../../src/core/platform/native-confirm.ts');
+  installNativeConfirm();
+  ok(w.confirm === vorher, 'RÜCKFRAGE ohne Desktop-App bleibt window.confirm unverändert');
+  w.__TAURI_INTERNALS__ = {};
+  installNativeConfirm();
+  const g = globalThis as unknown as { __dialogConfirm: (m: string, o: unknown) => Promise<boolean> };
+  let gefragt: unknown[] = [];
+  g.__dialogConfirm = async (m, o) => { gefragt = [m, o]; return true; };
+  const ja = await w.confirm!('Settle?');
+  g.__dialogConfirm = async () => false;
+  const nein = await w.confirm!('Settle?');
+  const oe = console.error; console.error = () => {};
+  g.__dialogConfirm = async () => { throw new Error('dialog.confirm not allowed. Command not found'); };
+  const fehler = await w.confirm!('Settle?');
+  console.error = oe;
+  ok(ja === true && nein === false && S(gefragt) === S(['Settle?', { title: 'LATAIF', kind: 'warning' }]), 'RÜCKFRAGE OK → true, Cancel → false, Titel LATAIF');
+  ok(fehler === false, 'RÜCKFRAGE-FEHLER ein scheiternder Dialog gilt als Cancel (keine Aktion)');
+  // Die Abrechnung bucht nur nach „true": ohne Zustimmung bleibt es bei der Rückfrage.
+  const panel = src('src/components/partners/PartnerItemsPanel.tsx');
+  ok(/if \(!\(await window\.confirm\(text\)\)\) return;\s*setBusy\(true\); setFehler\(''\);\s*const r = await saveSettleSale/.test(panel), 'RÜCKFRAGE „Settle sale" bucht erst nach Zustimmung');
+  delete w.__TAURI_INTERNALS__; w.confirm = vorher;
 }
 
 console.log(`\npartner-purchase: ${PASS} passed, ${fails.length} failed`);

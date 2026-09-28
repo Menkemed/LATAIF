@@ -737,7 +737,7 @@ export function BusinessReportsPage() {
                 </div>
                 <div>
                   <div style={{ color: '#6B7280', marginBottom: 4 }}>LATAIF share</div>
-                  <div style={{ fontWeight: 600 }}><Bhd v={jointProfit.lataifShare} /> BHD</div>
+                  <div style={{ fontWeight: 600 }} data-report-joint-lataif-share={jointProfit.lataifShare.toFixed(3)}><Bhd v={jointProfit.lataifShare} /> BHD</div>
                 </div>
                 <div>
                   <div style={{ color: '#6B7280', marginBottom: 4 }}>Total profit after partner shares</div>
