@@ -6,6 +6,8 @@
 //   • Repair — New Intake    → legt Customer + Repair an (received).
 //   • Purchase — Photo        → legt nur ein Foto in die purchase_inbox.
 //                               Die echte Purchase macht der Owner am Desktop.
+//   • Purchase — Full (MOBILE-PURCHASE) → der vollstaendige Einkauf als Entwurf auf dem Telefon,
+//                               gebucht ueber `purchases.create` am Primary (mobile_purchase_*.js).
 
 // MOBILE-04B2A9-I1 — the durable collection-upload queue module is included verbatim into the page,
 // right after <script>, so it defines `window.MobileUploadQueue` before the page IIFE uses it.
@@ -120,6 +122,7 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
     <button class="mode-btn" data-mode="collection">📦&nbsp; New Collection Item<span>Add a product to inventory</span></button>
     <button class="mode-btn" data-mode="repair">🔧&nbsp; New Repair Intake<span>Customer item handed in for repair</span></button>
     <button class="mode-btn" data-mode="consign">🤝&nbsp; New Consignment Intake<span>An item left with us to sell</span></button>
+    <button class="mode-btn" data-mode="mpurchase">🧾&nbsp; New Purchase<span>Supplier, items, photos, partners, payments</span></button>
     <button class="mode-btn" data-mode="purchase">🛒&nbsp; Purchase Photo<span>Snap the item — finish the purchase on desktop</span></button>
     <button class="mode-btn" data-mode="scan">🔍&nbsp; Check Item<span>Scan a tag — see full product details</span></button>
   </div>
@@ -222,6 +225,7 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
 
 "##, include_str!("mobile_repair.html"), r##"
 "##, include_str!("mobile_consignment.html"), r##"
+"##, include_str!("mobile_purchase.html"), r##"
 
 <!-- ─────────── Purchase — Photo to Inbox ─────────── -->
 <div id="formPurchase" class="hidden">
@@ -311,6 +315,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
 "##, include_str!("mobile_upload_queue.js"), r##"
 "##, include_str!("mobile_repair_commands.js"), r##"
 "##, include_str!("mobile_consignment_commands.js"), r##"
+"##, include_str!("mobile_purchase_commands.js"), r##"
 (function () {
   const TOKEN_KEY = 'lataif_mobile_token';
   const BRANCH_KEY = 'lataif_mobile_branch';
@@ -321,7 +326,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   const hide = (id) => $(id).classList.add('hidden');
   const setText = (id, t) => { const el = $(id); el.textContent = t; if (t) el.classList.remove('hidden'); else el.classList.add('hidden'); };
 
-  const SCREENS = ['login', 'modePicker', 'formCollection', 'repairHome', 'formRepair', 'consignHome', 'formConsign', 'formPurchase', 'scanScreen'];
+  const SCREENS = ['login', 'modePicker', 'formCollection', 'repairHome', 'formRepair', 'consignHome', 'formConsign', 'formPurchase', 'mpHome', 'formMPurchase', 'scanScreen'];
   function screen(id) { SCREENS.forEach(s => hide(s)); show(id); window.scrollTo({ top: 0 }); }
 
   // Foto-State pro Modus.
@@ -449,6 +454,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       else if (mode === 'repair') rpHomeOpen();
       else if (mode === 'consign') cnHomeOpen();
       else if (mode === 'purchase') screen('formPurchase');
+      else if (mode === 'mpurchase') mpHomeOpen();
       else if (mode === 'scan') { screen('scanScreen'); findMode('scan'); }
     };
   });
@@ -2241,6 +2247,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
 
 "##, include_str!("mobile_repair_ui.js"), r##"
 "##, include_str!("mobile_consignment_ui.js"), r##"
+"##, include_str!("mobile_purchase_ui.js"), r##"
   init();
 })();
 </script>

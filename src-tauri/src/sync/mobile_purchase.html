@@ -1,0 +1,66 @@
+
+<!-- ─────────── MOBILE-PURCHASE — Uebersicht der Einkaeufe dieses Telefons ─────────── -->
+<style>
+  .mp-sec { background: #121216; border: 1px solid #1A1A1F; border-radius: 10px; margin-bottom: 10px; overflow: hidden; }
+  .mp-sec.open { border-color: #2A2A32; }
+  .mp-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; width: 100%;
+    background: transparent; border: none; color: #EAEAEA; padding: 14px 14px; text-align: left; font-weight: 600;
+    font-size: 14px; letter-spacing: 0.02em; border-radius: 0; }
+  .mp-head .mp-sum { flex: 1; min-width: 0; text-align: right; color: #8A8A93; font-weight: 400; font-size: 12px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .mp-head .caret { color: #C6A36D; font-size: 12px; transition: transform .15s ease; }
+  .mp-sec.open > .mp-head .caret { transform: rotate(90deg); }
+  .mp-body { padding: 0 14px 14px; }
+  .mp-sub { background: #0D0D10; border: 1px solid #1A1A1F; border-radius: 8px; margin-top: 10px; }
+  .mp-sub > .mp-head { padding: 12px; font-size: 13px; }
+  .mp-sub > .mp-body { padding: 0 12px 12px; }
+  .mp-tabs { display: flex; gap: 6px; margin-bottom: 12px; }
+  .mp-tabs button { flex: 1; padding: 9px 6px; font-size: 12px; background: #08080A; color: #A1A1AA; border: 1px solid #2A2A32; }
+  .mp-tabs button.on { border-color: #C6A36D; color: #EAEAEA; background: rgba(198,163,109,0.12); }
+  .mp-small { width: auto; padding: 8px 12px; font-size: 13px; }
+  .mp-ghost { background: transparent; color: #A1A1AA; border: 1px solid #2A2A32; }
+  .mp-danger { background: transparent; color: #AA6E6E; border: 1px solid #3A2A2A; }
+  .mp-pick { display: block; width: 100%; text-align: left; background: #08080A; color: #EAEAEA; border: 1px solid #2A2A32;
+    padding: 11px 12px; font-weight: 400; font-size: 14px; margin-top: 6px; }
+  .mp-pick span { color: #8A8A93; font-size: 12px; }
+  .mp-badge { display: inline-block; font-size: 11px; padding: 3px 9px; border-radius: 999px; background: rgba(126,170,110,0.1); color: #7EAA6E; }
+  .mp-badge.wait { background: rgba(198,163,109,0.12); color: #C6A36D; }
+  .mp-badge.draft { background: #1A1A1F; color: #A1A1AA; }
+  .mp-two { display: flex; gap: 8px; }
+  .mp-two > * { flex: 1; min-width: 0; }
+  .mp-note { color: #8A8A93; font-size: 12px; line-height: 1.5; margin-top: 8px; }
+  .mp-total { display: flex; justify-content: space-between; font-size: 13px; color: #A1A1AA; margin-top: 10px; }
+  .mp-total b { color: #EAEAEA; font-weight: 600; }
+  .mp-row + .mp-row { margin-top: 12px; }
+  .mp-list-item { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .mp-issues { margin: 0 0 10px 16px; font-size: 13px; line-height: 1.6; }
+</style>
+
+<div id="mpHome" class="hidden">
+  <button class="back" data-back>‹ Back</button>
+  <div class="brand" style="margin-top: 4px;">
+    <h1>LATAIF</h1>
+    <p>Purchases</p>
+  </div>
+  <div id="mpHomeMsg" class="error hidden"></div>
+  <button id="mpNewBtn">＋&nbsp; New Purchase</button>
+  <p class="mp-note" style="margin: 8px 2px 14px;">Supplier, items with photos, partners and payments. Saved on this phone as a draft; booked only when the main computer confirms.</p>
+  <div id="mpDraftList"></div>
+</div>
+
+<!-- ─────────── MOBILE-PURCHASE — Erfassen ─────────── -->
+<div id="formMPurchase" class="hidden">
+  <button class="back" id="mpBackBtn">‹ Purchases</button>
+  <div class="brand" style="margin-top: 4px; margin-bottom: 14px;">
+    <h1>LATAIF</h1>
+    <p id="mpSubline">New Purchase</p>
+  </div>
+  <div id="mpStatusBar" class="card hidden" style="padding: 12px 14px;"></div>
+  <div id="mpError" class="error hidden"></div>
+  <div id="mpSuccess" class="success hidden"></div>
+  <div id="mpSections"></div>
+  <div id="mpActions" style="margin-top: 14px;">
+    <button id="mpSubmitBtn">Book purchase</button>
+    <button id="mpSaveBtn" class="ghost" style="margin-top: 10px;">Save draft</button>
+  </div>
+</div>

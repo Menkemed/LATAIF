@@ -408,6 +408,36 @@ const ZEILE = (name: string, qty: number, price: number, extra: Record<string, u
   ok(desk.ok && zahl(db, 'SELECT COUNT(*) FROM purchase_payments') === 2, `RECHNER „Save Purchase" mit Anzahlung wie bisher (${desk.code || 'ok'})`);
 }
 
+// ── 8 der Rumpf, den das Telefon baut, bucht der Primary genau so ──
+{
+  const db = freshDb(); seedMobile(db);
+  const sandbox: Record<string, unknown> = {};
+  new Function('self', src('src-tauri/src/sync/mobile_repair_commands.js'))(sandbox);
+  new Function('self', src('src-tauri/src/sync/mobile_purchase_commands.js'))(sandbox);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const MPX = sandbox.MobilePurchase as any;
+  const d = MPX.newDraft('draft-1', '2026-09-21');
+  d.supplier = { mode: 'person', person: { firstName: 'Samir', lastName: 'Telefon', phone: '+973 3600 0777', email: '' }, createDespite: false };
+  const a = Object.assign(MPX.newItem('a', 'cat-w'), { brand: 'Rolex', name: 'Datejust', quantity: '1', unitPrice: '1000',
+    photos: [{ id: 'f1', dataUrl: foto(11) }, { id: 'f2', dataUrl: foto(12) }], partners: [{ partnerId: 'pa-1', sharePct: '40' }] });
+  const b = Object.assign(MPX.newItem('b', 'cat-w'), { brand: 'Gold', name: 'Chain', quantity: '3', unitPrice: '166.667' });
+  d.items.push(a, b);
+  d.payments.push({ method: 'cash', amount: '500', reference: '' }, { method: 'benefit', amount: '400', reference: '' }, { method: 'bank', amount: '200', reference: '' });
+  const staged = new Map<string, string>();
+  for (const it of [a]) for (const p of it.photos) staged.set(p.id, (await stage([p.dataUrl]))[0]);
+  const built = MPX.buildBody(d, (it: { photos: Array<{ id: string }> }) => it.photos.map((p) => staged.get(p.id)));
+  const r = await run(db, 30, built.body);
+  const pid = String(r.value?.purchaseId ?? '');
+  const kopf = row(db, 'SELECT total_amount, paid_amount, remaining_amount, status FROM purchases WHERE id = ?', [pid]);
+  ok(built.ok && r.ok && S([kopf.total_amount, kopf.paid_amount, kopf.remaining_amount, kopf.status]) === S([1500.001, 1100, 400.001, 'PARTIALLY_PAID'])
+    && Number(r.value?.openAmount) === 400.001, `TELEFON-RUMPF gebucht: 1000 + 3 × 166,667 = 1500,001; 1100 bezahlt, 400,001 offen (${r.code || S(kopf)})`);
+  ok(MPX.totals(d).totalF === MPX.F(Number(kopf.total_amount)) && MPX.totals(d).openF === MPX.F(Number(kopf.remaining_amount)),
+    'TELEFON-SUMMEN die Anzeige des Telefons entspricht dem, was der Primary gebucht hat (filsgenau)');
+  ok(zahl(db, 'SELECT COUNT(*) FROM item_participations WHERE purchase_id = ?', [pid]) === 2 && zahl(db, 'SELECT COUNT(*) FROM purchase_payments WHERE purchase_id = ?', [pid]) === 3
+    && s(db, 'SELECT first_name FROM customers WHERE id = ?', [String(r.value?.customerId)]) === 'Samir' && unbalanced(db) === 0,
+    'TELEFON-RUMPF neue Person, Partner, drei Zahlungen, Hauptbuch ausgeglichen');
+}
+
 console.log(`\nmobile-purchase primary: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
 console.log('MOBILE_PURCHASE_PRIMARY_PROVED');
