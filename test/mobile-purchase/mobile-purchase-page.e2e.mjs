@@ -280,6 +280,11 @@ try {
   await c.ev('await window.__mpHomeOpen(); await new Promise((r) => setTimeout(r, 300)); return 1;');
   ok(await c.ev("return /PUR-2026-000042/.test(document.getElementById('mpDraftList').textContent) && /Booked/.test(document.getElementById('mpDraftList').textContent);"),
     '§4 die Liste zeigt den gebuchten Einkauf');
+  // Wieder geöffnet: nur ansehen — kein „New purchase" im Einkauf (das steht in der Liste), keine Knöpfe.
+  await c.ev("document.querySelector('#mpDraftList [data-mp-open]').click(); await new Promise((r) => setTimeout(r, 400)); return 1;");
+  ok(await c.ev("return /Booked/.test(document.getElementById('mpStatusBar').textContent) && !document.querySelector('[data-mp-action=\"new-purchase\"]') && document.getElementById('mpActions').classList.contains('hidden');"),
+    '§4 ein gebuchter Einkauf öffnet nur zum Ansehen — ohne „New purchase" und ohne Buchungsknöpfe');
+  await c.ev('await window.__mpHomeOpen(); await new Promise((r) => setTimeout(r, 300)); return 1;');
   const vorResend = gesehen.filter((g) => g.body && g.body.op === 'purchases.create').length;
   await sleep(300);
   ok(gesehen.filter((g) => g.body && g.body.op === 'purchases.create').length === vorResend, '§4 ein bestätigter Einkauf wird nie erneut geschickt');

@@ -429,7 +429,10 @@ try {
         try { await phone.send('Fetch.failRequest', { requestId: p.requestId, errorReason: 'ConnectionAborted' }, 15000); } catch { /* egal */ }
       } else { try { await phone.send('Fetch.continueRequest', { requestId: p.requestId }, 15000); } catch { /* egal */ } }
     };
-    await klick(phone, '[data-mp-action="new-purchase"]');
+    // Ein gebuchter Einkauf hat keinen eigenen „New purchase"-Knopf — zurück zur Liste, dort neu.
+    await klick(phone, '#mpBackBtn');
+    await sleep(300);
+    await klick(phone, '#mpNewBtn');
     await sleep(500);
     await klick(phone, '[data-mp-action="supplier-mode"][data-mode="existing"]');
     await tippe('#mpSupSearch', 'E2E');
@@ -462,7 +465,9 @@ try {
     const vorher = einkaeufe();
     await phone.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/staging/media', requestStage: 'Request' }] }, 15000);
     phone.paused = async (p) => { try { await phone.send('Fetch.failRequest', { requestId: p.requestId, errorReason: 'InternetDisconnected' }, 15000); } catch { /* egal */ } };
-    await klick(phone, '[data-mp-action="new-purchase"]');
+    await klick(phone, '#mpBackBtn');
+    await sleep(300);
+    await klick(phone, '#mpNewBtn');
     await sleep(500);
     await klick(phone, '[data-mp-action="supplier-mode"][data-mode="person"]');
     await tippe('[data-mp-field="person.firstName"]', 'Mona');

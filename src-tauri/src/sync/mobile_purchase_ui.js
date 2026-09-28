@@ -400,8 +400,7 @@
       + '<div style="font-size:15px;margin-top:8px;">' + mpH(r.purchaseNumber || 'Purchase') + '</div>'
       + '<div class="mp-total"><span>Total</span><b>' + MPX.fmt(MPX.F(r.totalAmount || 0)) + ' BHD</b></div>'
       + '<div class="mp-total"><span>Paid</span><b>' + MPX.fmt(MPX.F(r.paidAmount || 0)) + ' BHD</b></div>'
-      + '<div class="mp-total"><span>Open with the supplier</span><b>' + MPX.fmt(MPX.F(r.openAmount || 0)) + ' BHD</b></div>'
-      + '<button type="button" class="mp-small" style="margin-top:12px;" data-mp-action="new-purchase">New purchase</button>';
+      + '<div class="mp-total"><span>Open with the supplier</span><b>' + MPX.fmt(MPX.F(r.openAmount || 0)) + ' BHD</b></div>';
   }
 
   /** Nur die Zusammenfassungen und Summen nachziehen — ohne neu zu zeichnen (der Fokus bleibt). */
@@ -520,7 +519,6 @@
     const k = Number(b.getAttribute('data-k'));
     if (a === 'resend') { await mpSend(d, { manual: true }); return; }
     if (a === 'edit-again') { if (!d.sent) { d.status = 'draft'; d.lastError = ''; await mpPersist(); mpRender(); } return; }
-    if (a === 'new-purchase') { await mpNew(); return; }
     if (mpLocked()) return;
     ev.preventDefault();
     if (a === 'supplier-mode') {
