@@ -138,7 +138,8 @@ async function shot(c, name) {
 // Ein Wert in ein Feld der Maske — wie getippt (input + change).
 const tippe = (sel, v) => `(function(){ const e = document.querySelector(${S(sel)}); if (!e) throw new Error('kein Feld ' + ${S(sel)}); e.value = ${S(v)}; e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); })();`;
 const klick = (sel) => `(function(){ const e = document.querySelector(${S(sel)}); if (!e) throw new Error('kein Knopf ' + ${S(sel)}); e.click(); })();`;
-const fotos = (uid, n) => `
+/** Fotos in das Feld einer Position (oder, mit `feld`, in ein anderes Fotofeld) legen. */
+const fotos = (uid, n, feld) => `
   const dt = new DataTransfer();
   for (let i = 0; i < ${n}; i++) {
     const c2 = document.createElement('canvas'); c2.width = 40; c2.height = 30;
@@ -146,7 +147,7 @@ const fotos = (uid, n) => `
     const blob = await (await fetch(c2.toDataURL('image/jpeg', 0.9))).blob();
     dt.items.add(new File([blob], 'f' + i + '.jpg', { type: 'image/jpeg' }));
   }
-  const inp = document.getElementById('mpf' + ${S(uid)}); inp.files = dt.files; inp.dispatchEvent(new Event('change', { bubbles: true }));
+  const inp = document.getElementById(${feld ? S(feld) : "'mpf' + " + S(uid)}); inp.files = dt.files; inp.dispatchEvent(new Event('change', { bubbles: true }));
   await new Promise((r) => setTimeout(r, 400));`;
 /** Die Pflichtmerkmale einer Position füllen, die noch leer sind (erste Auswahl, "X", 1). */
 const pflicht = (uid) => `
@@ -290,6 +291,13 @@ try {
   await c.ev(klick('#mpNewBtn') + ' await new Promise((r) => setTimeout(r, 300)); return 1;');
   await c.ev(klick('[data-mp-action="supplier-mode"][data-mode="person"]') + ' return 1;');
   await c.ev(tippe('[data-mp-field="person.firstName"]', 'Karim') + tippe('[data-mp-field="person.lastName"]', 'Saleh') + ' return 1;');
+  // Das Ausweisfoto der neuen Person (optional) — dieselbe Aufnahme wie die Positionsfotos.
+  ok(await c.ev("return !!document.querySelector('#mpIdPhoto[data-mp-id-photo]') && /ID \\/ CPR photo \\(optional\\)/.test(document.getElementById('mpSections').textContent);"),
+    '§5 „New person" bietet ein optionales Ausweisfoto an');
+  await c.ev(fotos('', 1, 'mpIdPhoto') + ' return 1;');
+  ok(await c.ev("return !!(window.__MP.draft.supplier.person.idPhoto && window.__MP.draft.supplier.person.idPhoto.dataUrl) && /Captured/.test(document.getElementById('mpSections').textContent) && /ID photo/.test(document.getElementById('mpSections').textContent);"),
+    '§5 Ausweisfoto aufgenommen, in der Maske und in der Zusammenfassung');
+  await shot(c, 'mp-id-photo');
   const uid3 = await c.ev('return window.__MP.draft.items[0].uid;');
   await c.ev(tippe(`[data-mp-field="item:${uid3}:brand"]`, 'Cartier') + tippe(`[data-mp-field="item:${uid3}:name"]`, 'Tank') + tippe(`[data-mp-field="item:${uid3}:unitPrice"]`, '10') + ' return 1;');
   await c.ev(pflicht(uid3) + ' return 1;');
@@ -301,6 +309,9 @@ try {
   const k = gesehen.filter((g) => g.body && g.body.op === 'purchases.create').slice(-2);
   ok(k[0].body.commandId !== k[1].body.commandId && k[1].body.payload.newSupplierPerson.createDespiteExistingSuppliers === true && await c.ev("return window.__MP.draft.status === 'confirmed';"),
     '§5 die bewusste Entscheidung ist ein NEUER Auftrag (eigene Kennung) und wird gebucht');
+  ok(/^[0-9a-f]{64}$/.test(String(k[1].body.payload.newSupplierPerson.idPhotoStagingId)) && !JSON.stringify(k[1].body.payload).includes('base64')
+    && await c.ev("return !window.__MP.draft.supplier.person.idPhoto.dataUrl && !!window.__MP.draft.supplier.person.idPhoto.stagingId;"),
+    '§5 das Ausweisfoto reist nur als Ablagekennung; nach der Buchung keine Ausweisbytes mehr auf dem Telefon');
 
   // ── §6 ohne aktive Partner gar kein Partnerbereich ──
   partnerListe = [{ id: 'pa-x', name: 'Old', active: false }];

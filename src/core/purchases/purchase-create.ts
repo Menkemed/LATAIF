@@ -65,6 +65,8 @@ export interface PurchaseNewSupplierPerson {
   /** Die Kundenfelder, geprüft wie `customers.create`. */
   fields: Record<string, unknown>;
   createDespiteExistingSuppliers?: boolean;
+  /** Das Ausweisfoto als schon aufgenommenes Medium — setzt nur der Befehl (vor der Klammer), nie der Rumpf. */
+  idMediaId?: string;
 }
 
 /** Die EINGABEN der Anlegemaske. */

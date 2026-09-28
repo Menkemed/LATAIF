@@ -20,6 +20,7 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { MasterdataInputError } from '@/core/masterdata/masterdata-rules';
 import { normalizeSpecImages } from '@/core/media/record-image';
 import { adoptInboxPhotosToProduct } from './inbox-media';
+import { applyIdentityDocument, IdentityMediaError } from '@/core/identity/identity-media';
 import { PurchaseActionRejected, planPurchaseCreate, purchaseCreateIssue, type PurchaseCreateInput, type PurchaseCreatePort } from './purchase-create';
 import {
   PURCHASE_PRIMARY_ONLY, PurchaseLifecycleRejected,
@@ -90,6 +91,14 @@ function resolveSupplier(input: PurchaseCreateInput): { supplierId: string; cust
     }
     const np = input.newSupplierPerson!;
     const customer = useCustomerStore.getState().createCustomer(np.fields as never);
+    // MOBILE-PURCHASE — das Ausweisfoto der neuen Person, wie bei `customers.create`: die Zeile ist
+    // gerade entstanden, das Anlegen IST die Änderung, also keine zweite Fassung. In der Klammer.
+    if (np.idMediaId) {
+      try { applyIdentityDocument('customer', customer.id, np.idMediaId, { bumpOwner: false }); } catch (e) {
+        if (e instanceof IdentityMediaError) throw new PurchaseActionRejected(e.code, e.message);
+        throw e;
+      }
+    }
     const fresh = query('SELECT updated_at FROM customers WHERE id = ?', [customer.id])[0];
     const r = useSupplierStore.getState().createSupplierFromCustomer(customer.id,
       { createDespiteExistingSuppliers: np.createDespiteExistingSuppliers === true }, fresh ? String(fresh.updated_at) : undefined);

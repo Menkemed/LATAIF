@@ -188,6 +188,16 @@
         + '<div class="mp-row"><label>Last name</label><input data-mp-field="person.lastName" value="' + mpH(p.lastName) + '" /></div>'
         + '<div class="mp-row"><label>Phone</label><input data-mp-field="person.phone" inputmode="tel" value="' + mpH(p.phone) + '" /></div>'
         + '<div class="mp-row"><label>Email</label><input data-mp-field="person.email" type="email" value="' + mpH(p.email) + '" /></div>'
+        // Das Ausweisfoto ist OPTIONAL — derselbe Weg wie bei Reparatur und Kommission: aufnehmen,
+        // verkleinern, vor dem Auftrag in die Ablage; im Auftrag nur die Kennung.
+        + '<div class="header-row" style="margin:8px 0 6px;"><span style="font-size:13px;color:#A1A1AA;">ID / CPR photo (optional)</span>'
+        + (p.idPhoto ? '<span class="badge">Captured</span>' : '') + '</div>'
+        + (p.idPhoto
+          ? '<div class="photo-strip"><div class="photo-thumb">'
+            + (p.idPhoto.dataUrl ? '<img src="' + p.idPhoto.dataUrl + '" alt="ID photo" />' : '<div style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px;color:#8A8A93;text-align:center;">stored ✓</div>')
+            + '<button type="button" class="rm" data-mp-action="id-photo-remove">✕</button></div></div>'
+          : '<label for="mpIdPhoto" class="photo-area" style="min-height:70px;padding:12px;"><div>🪪 Take ID photo</div><div class="hint">passport or CPR card</div></label>')
+        + '<input id="mpIdPhoto" class="hidden" type="file" accept="image/*" capture="environment" data-mp-id-photo="1" />'
         + '<p class="mp-note">Search the client list first — a new person is created as a client with a linked supplier role.</p>';
     }
     if (s.candidates || s.createDespite) {
@@ -467,6 +477,17 @@
 
   // Fotos je Position.
   $('mpSections').addEventListener('change', async (ev) => {
+    // Das Ausweisfoto der neuen Person.
+    if (ev.target && ev.target.getAttribute && ev.target.getAttribute('data-mp-id-photo') && MP.draft && !mpLocked()) {
+      const f = ev.target.files && ev.target.files[0];
+      ev.target.value = '';
+      if (!f) return;
+      for (const it of MP.draft.items) mpReadItemDom(it);
+      try { MP.draft.supplier.person.idPhoto = { dataUrl: await resizePhoto(f, 1600, 0.85) }; } catch (e) { mpSay('mpError', 'That ID photo could not be read.'); return; }
+      mpRender();
+      await mpPersist();
+      return;
+    }
     const uid = ev.target && ev.target.getAttribute ? ev.target.getAttribute('data-mp-photo-input') : null;
     if (!uid || mpLocked()) return;
     const it = mpItem(uid);
@@ -549,6 +570,9 @@
       }
     } else if (a === 'remove-payment') {
       d.payments.splice(k, 1);
+    } else if (a === 'id-photo-remove') {
+      ev.stopPropagation();
+      d.supplier.person.idPhoto = null;
     } else if (a === 'photo-remove') {
       ev.stopPropagation();
       mpItem(uid).photos.splice(k, 1);
@@ -648,23 +672,25 @@
     MP.sending = true;
     const zeige = () => { if (MP.draft && MP.draft.id === d.id) mpRender(); };
     try {
-      for (const it of d.items) {
-        if (it.mode !== 'new') continue;
-        for (const p of it.photos) {
-          if (p.stagingId) continue;
-          const r = await mpClient.stagePhoto(p.dataUrl);
-          if (!r.ok) {
-            const offline = /^HTTP_(0|5\d\d)$/.test(String(r.code));
-            if (offline) {
-              d.lastError = 'Not connected to the main computer — nothing was sent yet. It is sent when the main computer is reachable.';
-              await mpPersist(d); zeige(); return;
-            }
-            d.status = 'draft'; d.lastError = 'A photo could not be uploaded (' + r.code + '). Nothing was booked.';
+      // Erst das Ausweisfoto der neuen Person, dann die Fotos der Positionen — alles in die Ablage,
+      // bevor der eine Auftrag hinausgeht.
+      const person = d.supplier.mode === 'person' ? d.supplier.person : null;
+      const fotos = (person && person.idPhoto ? [person.idPhoto] : [])
+        .concat(...d.items.filter((it) => it.mode === 'new').map((it) => it.photos));
+      for (const p of fotos) {
+        if (p.stagingId) continue;
+        const r = await mpClient.stagePhoto(p.dataUrl);
+        if (!r.ok) {
+          const offline = /^HTTP_(0|5\d\d)$/.test(String(r.code));
+          if (offline) {
+            d.lastError = 'Not connected to the main computer — nothing was sent yet. It is sent when the main computer is reachable.';
             await mpPersist(d); zeige(); return;
           }
-          p.stagingId = r.stagingId;
-          await mpPersist(d);
+          d.status = 'draft'; d.lastError = 'A photo could not be uploaded (' + r.code + '). Nothing was booked.';
+          await mpPersist(d); zeige(); return;
         }
+        p.stagingId = r.stagingId;
+        await mpPersist(d);
       }
       const built = MPX.buildBody(mpCleanDraft(d), (it) => it.photos.map((p) => p.stagingId).filter(Boolean));
       if (!built.ok) { d.status = 'draft'; d.lastError = built.issues[0].message; await mpPersist(d); zeige(); return; }
@@ -679,6 +705,7 @@
         d.result = { purchaseId: v.purchaseId, purchaseNumber: v.purchaseNumber, totalAmount: v.totalAmount, paidAmount: v.paidAmount, openAmount: v.openAmount, confirmedAt: new Date().toISOString() };
         // Gebucht: die Fotobytes liegen jetzt am Primary; hier bleibt nur die Anzahl.
         for (const it of d.items) it.photos = it.photos.map((p) => ({ id: p.id, stagingId: p.stagingId }));
+        if (d.supplier.person && d.supplier.person.idPhoto) d.supplier.person.idPhoto = { stagingId: d.supplier.person.idPhoto.stagingId };
         // Gebucht: nur noch die Zusammenfassungen zeigen — die Einzelheiten stehen am Rechner.
         if (MP.draft && MP.draft.id === d.id) MP.open.clear();
         await mpPersist(d); zeige();

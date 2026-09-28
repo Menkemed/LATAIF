@@ -472,6 +472,35 @@ const ZEILE = (name: string, qty: number, price: number, extra: Record<string, u
     `SKU auch der Einkauf am Rechner vergibt sie, aus demselben Zähler (${desk.code || S(deskSku)})`);
 }
 
+// ── 10 das Ausweisfoto der neuen Person — im selben Auftrag, wie bei `customers.create` ──
+{
+  const db = freshDb(); seedMobile(db);
+  const ausweise = (id: string): number => zahl(db,
+    "SELECT COUNT(*) FROM media_links WHERE entity_type = 'customer' AND entity_id = ? AND media_role = 'identity_document' AND deleted_at IS NULL", [id]);
+  const sensibel = (): number => zahl(db, "SELECT COUNT(*) FROM media_objects WHERE security_class = 'sensitive'");
+  const [st] = await stage([foto(21)]);
+  const body = {
+    newSupplierPerson: { firstName: 'Ida', lastName: 'Ausweis', phone: '+973 3600 0333', idPhotoStagingId: st },
+    purchaseDate: '2026-09-22', taxScheme: 'ZERO', lines: [ZEILE('Mit Ausweis', 1, 100)],
+  };
+  const r = await run(db, 50, body);
+  const cust = String(r.value?.customerId ?? '');
+  ok(r.ok && ausweise(cust) === 1 && sensibel() === 1 && s(db, 'SELECT linked_customer_id FROM suppliers WHERE id = ?', [String(r.value?.supplierId)]) === cust,
+    `AUSWEIS die neue Person bekommt ihr Ausweisfoto als geschütztes Medium, Lieferant verknüpft (${r.code || 'ok'})`);
+  const vorher = counts(db);
+  const again = await run(db, 50, body);
+  ok(again.ok && again.replayed === true && counts(db) === vorher && ausweise(cust) === 1 && sensibel() === 1,
+    'AUSWEIS Wiederholung: kein zweites Foto, keine zweite Person');
+  const [st2] = await stage([foto(22)]);
+  const nein = await run(db, 51, {
+    ...body, newSupplierPerson: { ...body.newSupplierPerson, firstName: 'Nein', idPhotoStagingId: st2 }, payments: [{ amount: 999, method: 'cash' }],
+  });
+  ok(!nein.ok && zahl(db, "SELECT COUNT(*) FROM customers WHERE first_name = 'Nein'") === 0 && sensibel() === 1,
+    `AUSWEIS ein abgewiesener Einkauf legt weder Person noch Foto an (${nein.code})`);
+  const ohne = await run(db, 52, { ...body, newSupplierPerson: { firstName: 'Ohne', lastName: 'Foto' } });
+  ok(ohne.ok && ausweise(String(ohne.value?.customerId ?? '')) === 0, 'AUSWEIS ohne Foto bleibt es optional');
+}
+
 console.log(`\nmobile-purchase primary: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
 console.log('MOBILE_PURCHASE_PRIMARY_PROVED');

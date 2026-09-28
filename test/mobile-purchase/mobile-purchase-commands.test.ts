@@ -121,6 +121,14 @@ function item(uid: string, extra: Record<string, unknown> = {}) {
   const p = draft(); p.supplier = { mode: 'person', person: { firstName: ' Mona ', lastName: 'Haddad', phone: '', email: '' }, createDespite: true }; p.items.push(item('a'));
   const pb = MP.buildBody(p, () => []).body;
   ok(S(pb.newSupplierPerson) === S({ firstName: 'Mona', lastName: 'Haddad', createDespiteExistingSuppliers: true }) && !('supplierId' in pb), 'RUMPF neue Person, bewusst trotz Doppelgänger');
+  // Das Ausweisfoto: im Rumpf nur die Ablagekennung, nie Bytes; ohne Kennung gar nichts.
+  p.supplier.person.idPhoto = { dataUrl: 'data:image/jpeg;base64,AAAA', stagingId: 'a'.repeat(64) };
+  const ib = MP.buildBody(p, () => []).body;
+  ok(ib.newSupplierPerson.idPhotoStagingId === 'a'.repeat(64) && !JSON.stringify(ib).includes('base64'),
+    'RUMPF Ausweisfoto der neuen Person nur als Ablagekennung');
+  ok(MP.supplierSummary(p) === 'New · Mona Haddad · ID photo', `ZUSAMMENFASSUNG nennt das Ausweisfoto (${MP.supplierSummary(p)})`);
+  p.supplier.person.idPhoto = { dataUrl: 'data:image/jpeg;base64,AAAA' };
+  ok(!('idPhotoStagingId' in MP.buildBody(p, () => []).body.newSupplierPerson), 'RUMPF ein noch nicht abgelegtes Foto reist nicht mit');
   const bad = draft();
   ok(MP.buildBody(bad, () => []).ok === false, 'RUMPF ungültiger Entwurf ergibt keinen Rumpf');
 }

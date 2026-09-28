@@ -60,10 +60,10 @@ import {
 import { ORDER_EDIT_FIELDS, type OrderEditInput } from '@/core/orders/order-edit';
 import { createOrderInHouse, updateOrderInHouse } from '@/core/orders/order-house';
 import {
-  PURCHASE_PAYMENT_METHODS, PURCHASE_TAX_SCHEMES, PurchaseActionRejected, type PurchaseCreateInput,
+  PURCHASE_PAYMENT_METHODS, PURCHASE_TAX_SCHEMES, PurchaseActionRejected, purchaseCreateIssue, type PurchaseCreateInput,
 } from '@/core/purchases/purchase-create';
 import { createPurchaseDetailedInHouse } from '@/core/purchases/purchase-house';
-import { parseCustomerCreate } from './customer-commands';
+import { parseCustomerCreate, ingestStagedIdentity } from './customer-commands';
 import { EMBEDDED_PRODUCT_FIELDS, FINAL_PRODUCT_FIELDS, EmbeddedProductRejected } from '@/core/products/embedded-product';
 import { payoutModelLock, PayoutPatchError } from '@/core/consignment/payout-edit';
 import { rowToConsignment } from '@/stores/consignmentStore';
@@ -294,6 +294,8 @@ export interface PurchaseCreateRequest extends PurchaseCreateInput {
   specs: Array<{ spec: Partial<Product>; stagingIds?: string[] } | undefined>;
   /** Die Anzahlung, wie `createPurchase` sie kennt (auch der Name des alten Rumpfs). */
   initialPayment?: { amount: number; method: typeof PURCHASE_PAYMENT_METHODS[number] };
+  /** MOBILE-PURCHASE — das Ausweisfoto der neuen Person, benannt nach seinem Inhalt (in der Ablage). */
+  newSupplierPersonIdPhotoStagingId?: string;
 }
 
 /**
@@ -364,6 +366,7 @@ export function parsePurchaseCreate(raw: unknown): PurchaseCreateRequest {
     };
   }
   let newSupplierPerson: PurchaseCreateRequest['newSupplierPerson'];
+  let idPhotoStagingId: string | undefined;
   if (raw.newSupplierPerson !== undefined && raw.newSupplierPerson !== null) {
     const np = raw.newSupplierPerson;
     if (!isPlain(np)) throw new CommercialPayloadError('newSupplierPerson must be an object');
@@ -371,11 +374,12 @@ export function parsePurchaseCreate(raw: unknown): PurchaseCreateRequest {
     if (createDespiteExistingSuppliers !== undefined && typeof createDespiteExistingSuppliers !== 'boolean') {
       throw new CommercialPayloadError('createDespiteExistingSuppliers must be true or false');
     }
-    // Dieselben Kundenfelder und -regeln wie `customers.create` — nur ohne Ausweisfoto in diesem Schritt.
+    // Dieselben Kundenfelder und -regeln wie `customers.create`, samt optionalem Ausweisfoto
+    // (`idPhotoStagingId`, nur als Inhaltskennung aus der Ablage — nie Bytes im Rumpf).
     let parsed: ReturnType<typeof parseCustomerCreate>;
     try { parsed = parseCustomerCreate(personRaw); } catch (e) { throw new CommercialPayloadError(`newSupplierPerson: ${(e as Error).message}`); }
-    if (parsed.photo.stagingId !== undefined) throw new CommercialPayloadError('newSupplierPerson: no ID photo in this step');
     newSupplierPerson = { fields: parsed.fields, createDespiteExistingSuppliers: createDespiteExistingSuppliers === true };
+    idPhotoStagingId = parsed.photo.stagingId;
   }
   let payments: PurchaseCreateRequest['payments'];
   if (raw.payments !== undefined && raw.payments !== null) {
@@ -401,6 +405,7 @@ export function parsePurchaseCreate(raw: unknown): PurchaseCreateRequest {
     supplierId: raw.supplierId === undefined || raw.supplierId === null ? '' : reqString(raw.supplierId, 'supplierId'),
     ...(supplierFromCustomer ? { supplierFromCustomer } : {}),
     ...(newSupplierPerson ? { newSupplierPerson } : {}),
+    ...(idPhotoStagingId ? { newSupplierPersonIdPhotoStagingId: idPhotoStagingId } : {}),
     ...(payments && payments.length > 0 ? { payments } : {}),
     purchaseDate: optString(raw.purchaseDate, 'purchaseDate') ?? new Date().toISOString().split('T')[0],
     taxScheme: oneOf(raw.taxScheme, PURCHASE_TAX_SCHEMES, 'ZERO', 'tax scheme'),
@@ -426,7 +431,17 @@ export async function runPurchaseCreate(
   const owner = stagingOwnerOf(identity);
   const read = extras.readStaged ?? invokeReadStagedRecord;
   const staged = req.specs.flatMap((s) => s?.stagingIds ?? []);
+  // MOBILE-PURCHASE — das Ausweisfoto der neuen Person wird VOR der Klammer aufgenommen (der Ingest hat
+  // eigene durable Haltepunkte), genau wie bei `customers.create`; ein Nein wird mitgenommen und in
+  // der Klammer geworfen, damit eine Wiederholung die eingefrorene Antwort bekommt. Eine Eingabe, die
+  // ohnehin abgewiesen wird, nimmt kein Foto auf (kein verwaistes Medium).
+  const idStaging = req.newSupplierPersonIdPhotoStagingId;
+  const ausweis = idStaging && !purchaseCreateIssue(req)
+    ? await ingestStagedIdentity({ stagingId: idStaging, remove: false }, identity, { readStaged: read })
+    : { mediaId: null, error: null };
+  if (idStaging) staged.push(idStaging);
   const outcome = await runRemoteCommand(deps, identity, async () => {
+    if (ausweis.error) throw ausweis.error;
     // R5E — in die Bücher DIESER Filiale, oder gar nicht.
     assertHouseBranch(identity);
     const lines: Array<(typeof req.lines)[number]> = [];
@@ -437,7 +452,8 @@ export async function runPurchaseCreate(
     // Entwürfe, Mitarbeiter, Auftrag und Inbox geprüft — dann die Hausfunktion: Belegnummer aus dem
     // durablen Zähler, ein Los je Zeile mit dem TATSÄCHLICHEN Einstand, neue Artikel, Menge,
     // Statusregel, Vorsteuer, Verbindlichkeit, Buchung, Auftragspositionen auf „Arrived".
-    const done = urteil(() => createPurchaseDetailedInHouse({ ...req, lines }, identity.branchId, identity.userId));
+    const person = req.newSupplierPerson && ausweis.mediaId ? { ...req.newSupplierPerson, idMediaId: ausweis.mediaId } : req.newSupplierPerson;
+    const done = urteil(() => createPurchaseDetailedInHouse({ ...req, lines, newSupplierPerson: person }, identity.branchId, identity.userId));
     const purchase = done.purchase;
     const value: CommercialResult = {
       purchaseId: purchase.id,

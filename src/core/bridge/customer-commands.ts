@@ -217,7 +217,7 @@ function ausweis<T>(fn: () => T): T {
  * Geschäftstransaktion sitzen. Ein Nein wird mitgenommen statt geworfen, damit eine Wiederholung
  * desselben Auftrags die eingefrorene Antwort bekommt und nicht einen neuen Fehler.
  */
-async function ingestStagedIdentity(
+export async function ingestStagedIdentity(
   photo: CustomerIdentityPlan, identity: CommandIdentity, extras: CustomerMediaExtras, customerId?: string,
 ): Promise<{ mediaId: string | null; error: unknown }> {
   if (!photo.stagingId) return { mediaId: null, error: null };

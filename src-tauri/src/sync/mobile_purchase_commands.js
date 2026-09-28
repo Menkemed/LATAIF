@@ -197,6 +197,8 @@
       const person = {};
       for (const k of ['firstName', 'lastName', 'phone', 'email']) { const v = textOrNull(p[k]); if (v !== null) person[k] = v; }
       if (s.createDespite) person.createDespiteExistingSuppliers = true;
+      // Das Ausweisfoto (optional) liegt schon in der Ablage des Primary — im Rumpf nur seine Kennung.
+      if (p.idPhoto && p.idPhoto.stagingId) person.idPhotoStagingId = p.idPhoto.stagingId;
       body.newSupplierPerson = person;
     }
     body.lines = draft.items.map(function (it) {
@@ -241,7 +243,7 @@
     if (s.mode === 'person') {
       const p = s.person || {};
       const name = [textOrNull(p.firstName), textOrNull(p.lastName)].filter(Boolean).join(' ');
-      return name ? 'New · ' + name : 'not chosen';
+      return name ? 'New · ' + name + (p.idPhoto ? ' · ID photo' : '') : 'not chosen';
     }
     return textOrNull(s.name) || 'not chosen';
   }
