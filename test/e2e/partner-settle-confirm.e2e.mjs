@@ -2,10 +2,11 @@
 // v0.8.62 — Rückfrage + Partnerabrechnung mit Kartengebühr in der ECHTEN, isolierten Desktop-App.
 // Run: node test/e2e/partner-settle-confirm.e2e.mjs
 //
-//   Kein Stub für `window.confirm`: das echte Windows-Fenster erscheint und wird über UI Automation
-//   bedient — NUR Fenster des hier gestarteten Prozesses (Prozess-ID). Geprüft:
-//   • „Settle sale": Cancel → keine Buchung; OK → genau eine (Dialogfehler = Cancel: Node-Test).
-//   • weitere bestehende Rückfrage (Partner löschen): Cancel lässt ihn stehen, OK löscht.
+//   Kein Stub für `window.confirm`. UI Automation prüft, dass KEIN Windows-Fenster erscheint — nur
+//   Fenster des hier gestarteten Prozesses (Prozess-ID). Geprüft:
+//   • „Settle sale": Dialog der App mit Aufstellung (kein Windows-Fenster); Cancel → keine Buchung;
+//     Settle → genau eine (Dialogfehler = Cancel: Node-Test).
+//   • weitere bestehende Rückfrage (Partner löschen) im Dialog der App: Esc lässt ihn stehen, OK löscht.
 //   • Artikel A wie im Live-Test: 1.500 Margin-VAT, Einstand 1.000, Kartengebühr 33, 40 % Partner,
 //     Beitrag 400 → Partnergewinn 168,618, Anspruch 568,618.
 //   • Rechnung mit zwei Artikeln und Gebühr 48,401: Anteile 28,601 + 19,800 = exakt die Gebühr.
@@ -213,6 +214,11 @@ async function aufklappen(c, line) {
   await click(c, `[data-partner-item-toggle="${line}"]`);
   await waitFor(c, `[data-partner-item-contribute="${line}"]`, 10000);
 }
+async function shot(name) {
+  if (!process.env.E2E_SHOTS || !c) return;
+  const r = await c.send('Page.captureScreenshot', { format: 'png' });
+  writeFileSync(join(process.env.E2E_SHOTS, name + '.png'), Buffer.from(r.data, 'base64'));
+}
 const attr = (c, sel, a) => c.ev(`return document.querySelector(${S(sel)})?.getAttribute(${S(a)}) ?? null;`);
 
 const WACHHUND = setTimeout(() => { console.log('  x ABBRUCH: Zeitgrenze'); killStarted(); process.exit(1); }, 20 * 60 * 1000);
@@ -279,27 +285,29 @@ try {
   `ANSICHT A: Gebühr 33, Gewinn 421,545, Partner 168,618 (${await attr(c, saleA, 'data-sale-fee')}/${await attr(c, saleA, 'data-sale-profit')}/${await attr(c, saleA, 'data-sale-partner-share')})`);
   ok(await attr(c, `${saleA} [data-partner-item-lataif-share]`, 'data-partner-item-lataif-share') === '252.927', 'ANSICHT A: LATAIF-Anteil 252,927');
 
-  // ── „Settle sale" — 1. Cancel: Fenster erscheint mit der Aufstellung, keine Buchung ──
+  // ── „Settle sale" — Dialog der App (kein Windows-Fenster). 1. Cancel: Aufstellung, keine Buchung ──
   const settleBtn = `[data-partner-item-settle="${P('il-A')}"]`;
   await click(c, settleBtn);
-  const d1 = dialog('Cancel');
-  console.log('  dialog 1 →', d1.slice(0, 260));
-  ok(/^CLICKED\|LATAIF\|/.test(d1) && /card fee 33\.000/.test(d1) && /profit 421\.545/.test(d1) && /share 168\.618/.test(d1),
-    'CANCEL echtes Fenster „LATAIF" mit netto − Einstand − Kartengebühr = Gewinn und Anteilen');
-  await sleep(1500); await spuelen(c);
-  ok(movements(P('pl-A')).length === 1 && await exists(c, settleBtn), `CANCEL keine Buchung (${S(movements(P('pl-A')))})`);
+  await waitFor(c, '[data-settle-modal]', 10000);
+  const mod = await c.ev(`const g=(a)=>document.querySelector('['+a+']')?.getAttribute(a); return JSON.stringify({ fee: g('data-settle-fee'), profit: g('data-settle-profit'), partner: g('data-settle-partner-share'), lataif: g('data-settle-lataif-share') });`).then(JSON.parse);
+  ok(mod.fee === '33.000' && mod.profit === '421.545' && mod.partner === '168.618' && mod.lataif === '252.927',
+    `DIALOG der App: netto − Einstand − Kartengebühr = Gewinn, Partner- und LATAIF-Anteil (${S(mod)})`);
+  ok(dialog('', 1500) === 'NO-DIALOG', 'DIALOG kein Windows-Fenster');
+  await shot('settle-modal');
+  await click(c, '[data-settle-cancel]');
+  await sleep(1200); await spuelen(c);
+  ok(!(await exists(c, '[data-settle-modal]')) && movements(P('pl-A')).length === 1 && await exists(c, settleBtn), `CANCEL keine Buchung (${S(movements(P('pl-A')))})`);
 
-  // ── 2. Dialogfehler: in der echten App nicht einspritzbar (die IPC-Schnittstelle ist gesperrt). Dass ein
-  //    scheiternder Dialog als Cancel gilt, prüft test/partner-items/partner-purchase.test.ts (RÜCKFRAGE-FEHLER);
-  //    dass Cancel keine Buchung auslöst, prüft Schritt 1 hier im echten Fenster.
+  // ── 2. Dialogfehler: die Rückfrage-Schicht wertet einen Fehler als Cancel — Node-Test
+  //    (test/partner-items/partner-purchase.test.ts, RÜCKFRAGE-FEHLER); Cancel bucht nichts: Schritt 1.
 
-  // ── 3. OK: genau eine Abrechnung 168,618, Anspruch 568,618 ──
+  // ── 3. Settle: genau eine Abrechnung 168,618, Anspruch 568,618 ──
   await click(c, settleBtn);
-  const d3 = dialog('OK');
-  ok(/^CLICKED\|LATAIF\|/.test(d3), `OK Fenster bestätigt (${d3.slice(0, 80)})`);
+  await waitFor(c, '[data-settle-confirm]', 10000);
+  await click(c, '[data-settle-confirm]');
   for (let i = 0; i < 30 && movements(P('pl-A')).length < 2; i++) { await sleep(400); await spuelen(c); }
   const mA = movements(P('pl-A'));
-  ok(mA.map((m) => `${m.kind}:${m.amount}`).join() === 'CONTRIBUTION:400,PROFIT_SHARE:168.618', `OK genau eine Abrechnung 168,618 (${S(mA)})`);
+  ok(mA.map((m) => `${m.kind}:${m.amount}`).join() === 'CONTRIBUTION:400,PROFIT_SHARE:168.618' && !(await exists(c, '[data-settle-modal]')), `SETTLE genau eine Abrechnung 168,618 (${S(mA)})`);
   const basis = JSON.parse(dbQ(`SELECT basis_json FROM item_partner_movements WHERE purchase_line_id = ? AND kind = 'PROFIT_SHARE'`, [P('pl-A')])[0]?.basis_json || '{}');
   ok(basis.fee === 33 && basis.net === 1454.545 && basis.cost === 1000 && basis.profit === 421.545, `GRUNDLAGE gespeichert (${S(basis)})`);
   await sleep(800);
@@ -324,21 +332,33 @@ try {
   ok(rep.item === '873.144' && rep.partner === '349.258' && rep.lataif === '523.886',
     `BERICHT Artikelgewinn 421,545 + 271,399 + 180,2 (Gebühr einmal), Partner 168,618 + 108,560 + 72,080, LATAIF Rest (${S(rep)})`);
 
-  // ── Weitere bestehende Rückfrage: Partner löschen ──
+  // ── Weitere bestehende Rückfrage (Partner löschen): Dialog der App statt Windows-Fenster ──
   await gehFrisch(c, '/partners');
   await waitFor(c, '[data-partner-items]', 30000);
+  await aufklappen(c, P('pl-A'));
+  await c.ev(`document.querySelector('[data-partner-item-sale="${P('il-A')}"]')?.scrollIntoView({ block: 'center' }); return 1;`);
+  await sleep(300);
+  await shot('partner-sales-row');
   const editDel = `const b=[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()==='Edit').find(x=>{let p=x;for(let i=0;i<8&&p;i++){p=p.parentElement;if(p&&(p.innerText||'').includes('SC Delete Me')&&!(p.innerText||'').includes('SC Partner'))return true;}return false;}); if(!b) return 'NO'; b.click(); return 'OK';`;
   ok(await c.ev(editDel) === 'OK', 'LÖSCHEN Bearbeiten geöffnet');
   await sleep(600);
   ok(await clickText(c, 'Delete') === 'OK', 'LÖSCHEN Knopf');
-  const d4 = dialog('Cancel');
-  await sleep(1200); await spuelen(c);
-  ok(/^CLICKED\|LATAIF\|.*Delete partner "SC Delete Me"/.test(d4) && dbQ("SELECT COUNT(*) AS n FROM partners WHERE id = 'sc-del'")[0].n === 1,
-    `LÖSCHEN Cancel: Fenster erschien, Partner bleibt (${d4.slice(0, 90)})`);
+  await waitFor(c, '[data-app-confirm]', 10000);
+  const frage = await c.ev("return document.querySelector('[data-app-confirm-text]')?.textContent || '';");
+  ok(/Delete partner "SC Delete Me"?/.test(frage) && dialog('', 1500) === 'NO-DIALOG', `RÜCKFRAGE im Dialog der App, kein Windows-Fenster (${frage})`);
+  await shot('app-confirm');
+  // Esc = Cancel und schließt NUR die Rückfrage, nicht den Bearbeiten-Dialog darunter.
+  // Echte Taste über CDP (wie auf der Tastatur), nicht als synthetisches Ereignis.
+  await c.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+  await c.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'Escape', code: 'Escape', windowsVirtualKeyCode: 27, nativeVirtualKeyCode: 27 });
+  await sleep(1000); await spuelen(c);
+  ok(!(await exists(c, '[data-app-confirm]')) && dbQ("SELECT COUNT(*) AS n FROM partners WHERE id = 'sc-del'")[0].n === 1
+    && await c.ev("return [...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='Delete');"), 'LÖSCHEN Esc/Cancel: Partner bleibt, Bearbeiten bleibt offen');
   ok(await clickText(c, 'Delete') === 'OK', 'LÖSCHEN Knopf erneut');
-  const d5 = dialog('OK');
+  await waitFor(c, '[data-app-confirm-ok]', 10000);
+  await click(c, '[data-app-confirm-ok]');
   for (let i = 0; i < 20 && dbQ("SELECT COUNT(*) AS n FROM partners WHERE id = 'sc-del'")[0].n === 1; i++) { await sleep(400); await spuelen(c); }
-  ok(/^CLICKED/.test(d5) && dbQ("SELECT COUNT(*) AS n FROM partners WHERE id = 'sc-del'")[0].n === 0, `LÖSCHEN OK: Partner gelöscht (${d5.slice(0, 60)})`);
+  ok(dbQ("SELECT COUNT(*) AS n FROM partners WHERE id = 'sc-del'")[0].n === 0, 'LÖSCHEN OK: Partner gelöscht');
 
   // ── Einkauf: Anteil als BHD-Betrag ──
   await gehFrisch(c, '/purchases/new');

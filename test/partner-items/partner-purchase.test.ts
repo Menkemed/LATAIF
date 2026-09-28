@@ -455,25 +455,28 @@ const L2 = lineOf(DB, P2, 'pw3');
   ok(/useState\(false\)/.test(sec) && /Add partner/.test(sec), 'MASKE „Add partner" ist standardmäßig geschlossen');
   const panel = src('src/components/partners/PartnerItemsPanel.tsx');
   ok(!/[^t] window\.confirm\(/.test(panel.replace(/await window\.confirm\(/g, '')), 'MASKE jede Rückfrage wird abgewartet');
-  // Die Rückfrage öffnet in der Desktop-App ein Fenster (Plugin 2.7 kennt `plugin:dialog|confirm` nicht mehr).
-  const main = src('src/main.tsx'), nc = src('src/core/platform/native-confirm.ts');
-  ok(main.indexOf('installNativeConfirm();') > 0 && main.indexOf('installNativeConfirm();') < main.indexOf('createRoot('),
-    'RÜCKFRAGE window.confirm wird vor dem ersten Render auf den unterstützten Dialog gelegt');
+  // Rückfragen im Dialog der App (ConfirmHost); vor dessen Render das Plugin (2.7 kennt `plugin:dialog|confirm` nicht mehr).
+  const main = src('src/main.tsx'), nc = src('src/core/platform/native-confirm.ts'), host = src('src/components/shared/ConfirmHost.tsx');
+  ok(main.indexOf('installNativeConfirm();') > 0 && main.indexOf('installNativeConfirm();') < main.indexOf('createRoot(') && /<ConfirmHost \/>/.test(main),
+    'RÜCKFRAGE window.confirm vor dem ersten Render ersetzt, Dialog der App eingehängt');
   ok(/import \{ confirm as nativeConfirm \} from '@tauri-apps\/plugin-dialog'/.test(nc) && !/plugin:dialog\|confirm/.test(nc.replace(/^\/\/.*$/gm, '')) && /return false;/.test(nc),
-    'RÜCKFRAGE über die Plugin-Funktion confirm (message mit OK/Cancel); Fehler gilt als Cancel');
+    'RÜCKFRAGE Rückfall über die Plugin-Funktion confirm; Fehler gilt als Cancel');
+  ok(/registerConfirmHost\(/.test(host) && /data-app-confirm-ok/.test(host) && /stopImmediatePropagation/.test(host), 'RÜCKFRAGE Dialog der App mit OK / Cancel, Esc nur für die Rückfrage');
+  const settleModal = src('src/components/partners/SettleSaleModal.tsx');
+  ok(!/window\.confirm/.test(settleModal) && /data-settle-confirm/.test(settleModal) && /saveSettleSale/.test(settleModal) && /setSettleFor\(/.test(panel) && !/saveSettleSale/.test(panel),
+    'SETTLE eigener Dialog der App mit Aufstellung; gebucht erst mit „Settle"');
   ok(/data-purchase-partner-amount=/.test(sec) && /pctOfAmount/.test(sec), 'MASKE Anteil auch als Betrag (BHD) eingebbar');
 }
 
-// ── Rückfrage: OK / Cancel / Dialogfehler (der installierte window.confirm) ─────
+// ── Rückfrage: Dialog der App, Rückfall aufs Plugin, Dialogfehler (der installierte window.confirm) ─────
 {
   const w = globalThis.window as unknown as { __TAURI_INTERNALS__?: unknown; confirm?: (m?: string) => Promise<boolean> };
   const vorher = w.confirm;
-  const { installNativeConfirm } = await import('../../src/core/platform/native-confirm.ts');
-  installNativeConfirm();
-  ok(w.confirm === vorher, 'RÜCKFRAGE ohne Desktop-App bleibt window.confirm unverändert');
+  const nc = await import('../../src/core/platform/native-confirm.ts');
   w.__TAURI_INTERNALS__ = {};
-  installNativeConfirm();
+  nc.installNativeConfirm();
   const g = globalThis as unknown as { __dialogConfirm: (m: string, o: unknown) => Promise<boolean> };
+  // Ohne Dialog der App (vor dessen Render): das Plugin.
   let gefragt: unknown[] = [];
   g.__dialogConfirm = async (m, o) => { gefragt = [m, o]; return true; };
   const ja = await w.confirm!('Settle?');
@@ -482,12 +485,17 @@ const L2 = lineOf(DB, P2, 'pw3');
   const oe = console.error; console.error = () => {};
   g.__dialogConfirm = async () => { throw new Error('dialog.confirm not allowed. Command not found'); };
   const fehler = await w.confirm!('Settle?');
-  console.error = oe;
-  ok(ja === true && nein === false && S(gefragt) === S(['Settle?', { title: 'LATAIF', kind: 'warning' }]), 'RÜCKFRAGE OK → true, Cancel → false, Titel LATAIF');
+  ok(ja === true && nein === false && S(gefragt) === S(['Settle?', { title: 'LATAIF', kind: 'warning' }]), 'RÜCKFALL Plugin: OK → true, Cancel → false');
   ok(fehler === false, 'RÜCKFRAGE-FEHLER ein scheiternder Dialog gilt als Cancel (keine Aktion)');
-  // Die Abrechnung bucht nur nach „true": ohne Zustimmung bleibt es bei der Rückfrage.
-  const panel = src('src/components/partners/PartnerItemsPanel.tsx');
-  ok(/if \(!\(await window\.confirm\(text\)\)\) return;\s*setBusy\(true\); setFehler\(''\);\s*const r = await saveSettleSale/.test(panel), 'RÜCKFRAGE „Settle sale" bucht erst nach Zustimmung');
+  // Mit Dialog der App: dessen Antwort zählt; ein Fehler dort ebenfalls als Cancel.
+  let host = '';
+  nc.registerConfirmHost(async (t) => { host = t; return true; });
+  const hJa = await w.confirm!('Delete partner?');
+  nc.registerConfirmHost(async () => { throw new Error('host broken'); });
+  const hFehler = await w.confirm!('Delete partner?');
+  nc.registerConfirmHost(null);
+  console.error = oe;
+  ok(hJa === true && host === 'Delete partner?' && hFehler === false, 'DIALOG DER APP beantwortet die Rückfrage; Fehler = Cancel');
   delete w.__TAURI_INTERNALS__; w.confirm = vorher;
 }
 

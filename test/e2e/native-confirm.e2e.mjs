@@ -5,8 +5,8 @@
 //   Das Dialog-Plugin legt `window.confirm` auf den Befehl `plugin:dialog|confirm`, den es in 2.7
 //   nicht mehr gibt — jede Rückfrage wurde sofort abgelehnt und der Knopf tat nichts (z. B.
 //   „Settle sale"). Alle anderen E2E-Läufe ersetzen `window.confirm` selbst und sahen das nie.
-//   Hier wird NICHT ersetzt: die Rückfrage muss offen stehen (Fenster wartet auf den Benutzer),
-//   statt abgelehnt zu werden.
+//   Hier wird NICHT ersetzt: die Rückfrage muss offen stehen (Dialog der App wartet auf den
+//   Benutzer), statt abgelehnt zu werden; Cancel antwortet „Nein".
 //
 // PROZESS-ISOLATION: gestartet nur über `spawnTracked`, beendet nur, was dieser Lauf gestartet hat.
 // Port 3011, CDP 9223, Datenordner com.lataif.app.e2e.
@@ -78,6 +78,7 @@ try {
   // Ohne Stub: die echte Rückfrage. Offen = Fenster wartet; abgelehnt = der alte Fehler.
   const r = await c.ev(`
     const p = window.confirm('LATAIF E2E — confirm check (the test closes this window)');
+    window.__e2eConfirm = p;
     if (!(p instanceof Promise)) return 'sync:' + String(p);
     return await Promise.race([
       p.then((v) => 'resolved:' + v, (e) => 'rejected:' + String(e)),
@@ -85,6 +86,11 @@ try {
     ]);`);
   console.log('  confirm →', r);
   ok(r === 'pending', `RÜCKFRAGE öffnet ein Fenster und wartet auf den Benutzer statt abzulehnen (${r})`);
+  // Die Rückfrage steht im Dialog der App; Cancel beantwortet sie mit „Nein".
+  const imDialog = await c.ev("return !!document.querySelector('[data-app-confirm]') && (document.querySelector('[data-app-confirm-text]')?.textContent || '').includes('confirm check');");
+  await c.ev("document.querySelector('[data-app-confirm-cancel]')?.click(); return 1;");
+  const antwort = await c.ev('return String(await window.__e2eConfirm);');
+  ok(imDialog && antwort === 'false', `RÜCKFRAGE im Dialog der App, Cancel → false (${imDialog}, ${antwort})`);
   ok(foreignProcesses('lataif.exe').map((p) => p.pid).sort().join() === fremd.join(), 'ISOLATION fremde lataif.exe unberührt');
 } catch (e) {
   fails.push('THROWN ' + String(e?.stack || e)); console.log('  x', e);

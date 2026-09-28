@@ -11,10 +11,11 @@ import { Input } from '@/components/ui/Input';
 import { Bhd } from '@/components/ui/Bhd';
 import { WriteError } from '@/components/shared/WriteError';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
-import type { PartnerItemSale, PartnerItemView, PartnerItemsOfPartner } from '@/core/partners/item-participation-house';
-import { saveCancelMovement, saveItemMovement, saveItemOffset, saveSettleSale } from '@/core/partners/item-participation-save';
+import type { PartnerItemView, PartnerItemsOfPartner } from '@/core/partners/item-participation-house';
+import { saveCancelMovement, saveItemMovement, saveItemOffset } from '@/core/partners/item-participation-save';
 import type { Partner } from '@/core/models/types';
 import { OwnershipChangeModal, type OwnershipTarget } from './OwnershipChangeModal';
+import { SettleSaleModal, type SettleTarget } from './SettleSaleModal';
 
 const fmt = (v: number): string => v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 
@@ -49,6 +50,7 @@ export function PartnerItemsPanel({ overview, partners = [] }: { overview: Partn
   const [note, setNote] = useState('');
   const [fehler, setFehler] = useState('');
   const [busy, setBusy] = useState(false);
+  const [settleFor, setSettleFor] = useState<SettleTarget | null>(null);
 
   if (overview.length === 0) return null;
 
@@ -96,24 +98,6 @@ export function PartnerItemsPanel({ overview, partners = [] }: { overview: Partn
     setBusy(false);
     if (r.kind !== 'ok') { setFehler(fehlertext(r)); return; }
     setOffset(null);
-  }
-
-  async function settle(item: PartnerItemView, s: PartnerItemSale, partnerName: string) {
-    const correction = s.state === 'NEEDS_CORRECTION';
-    const text = correction
-      ? `Correct the settlement of ${s.invoiceNumber || 'this sale'}?\n\nThe sale changed after it was settled. Profit today (ERP rule): ${fmt(s.profit)} BHD; ` +
-        `${partnerName}'s share today ${fmt(s.partnerShare)} BHD, settled so far ${fmt(s.released)} BHD.\n` +
-        `Only the difference (${fmt(s.partnerShare - s.released)} BHD) is booked today. Earlier settlements and payouts stay as they are — ` +
-        `if the partner was paid too much, the item shows what they owe back (repayment or offset).`
-      : `Settle the sale on ${s.invoiceNumber}?\n\nNet sale ${fmt(s.net)} − cost ${fmt(s.cost)}` +
-        `${s.cardFee ? ` − card fee ${fmt(s.cardFee)}` : ''} = profit ${fmt(s.profit)} BHD.\n` +
-        `${partnerName}'s share ${fmt(s.partnerShare)} BHD · LATAIF's share ${fmt(s.lataifShare)} BHD.\n` +
-        `The partner's share goes on their item balance. No money moves yet — pay out afterwards with "Pay out".`;
-    if (!(await window.confirm(text))) return;
-    setBusy(true); setFehler('');
-    const r = await saveSettleSale(w, s.invoiceLineId);
-    setBusy(false);
-    if (r.kind !== 'ok') setFehler(`${item.productLabel}: ${fehlertext(r)}`);
   }
 
   async function cancelMove(item: PartnerItemView, movementId: string, kind: string) {
@@ -219,21 +203,35 @@ export function PartnerItemsPanel({ overview, partners = [] }: { overview: Partn
                       <span className="text-overline" style={{ fontSize: 10 }}>SALES</span>
                       {it.sales.length === 0 && <div style={{ color: '#9CA3AF', margin: '4px 0 8px' }}>Not sold yet.</div>}
                       {it.sales.map((s) => (
-                        <div key={s.invoiceLineId} className="flex items-center justify-between" style={{ padding: '4px 0' }} data-partner-item-sale={s.invoiceLineId} data-sale-state={s.state}
+                        <div key={s.invoiceLineId} style={{ padding: '8px 0', borderBottom: '1px solid #F0F1F3' }} data-partner-item-sale={s.invoiceLineId} data-sale-state={s.state}
                           data-sale-fee={s.cardFee.toFixed(3)} data-sale-profit={s.profit.toFixed(3)} data-sale-partner-share={s.partnerShare.toFixed(3)}>
-                          <span>
-                            {s.invoiceNumber || '(deleted line)'} · {s.invoiceStatus} · qty {s.quantity} · net <Bhd v={s.net} /> − cost <Bhd v={s.cost} />
-                            {s.cardFee !== 0 && <> − card fee <Bhd v={s.cardFee} /></>} = profit <Bhd v={s.profit} /> · {p.name}&apos;s share <Bhd v={s.partnerShare} />
-                            {' · '}LATAIF&apos;s share <span data-partner-item-lataif-share={s.lataifShare.toFixed(3)}><Bhd v={s.lataifShare} /></span>
-                            {s.settled && <> · released <Bhd v={s.released} /></>}
-                            {s.state === 'SETTLED' && <span style={{ color: '#16A34A', marginLeft: 6 }}>settled</span>}
-                            {s.state === 'NEEDS_CORRECTION' && <span style={{ color: '#B45309', marginLeft: 6 }}>{s.changedAfterSettlement}</span>}
-                            {s.blocker && <span style={{ color: '#9CA3AF', marginLeft: 6 }}>— {s.blocker}</span>}
-                          </span>
-                          {s.settleable && (
-                            <Button variant="primary" disabled={busy} onClick={() => void settle(it, s, p.name)}
-                              data-partner-item-settle={s.invoiceLineId}>{s.state === 'NEEDS_CORRECTION' ? 'Correct settlement' : 'Settle sale'}</Button>
-                          )}
+                          <div className="flex items-center justify-between" style={{ marginBottom: 6 }}>
+                            <span style={{ fontSize: 12 }}>
+                              <strong style={{ fontWeight: 500 }}>{s.invoiceNumber || '(deleted line)'}</strong>
+                              <span style={{ color: '#9CA3AF' }}> · {s.invoiceStatus} · qty {s.quantity}</span>
+                              {s.state === 'SETTLED' && <span style={{ color: '#16A34A', marginLeft: 8 }}>● settled</span>}
+                              {s.state === 'UNSETTLED' && !s.blocker && <span style={{ color: '#B45309', marginLeft: 8 }}>● not settled yet</span>}
+                              {s.state === 'NEEDS_CORRECTION' && <span style={{ color: '#B45309', marginLeft: 8 }}>● {s.changedAfterSettlement}</span>}
+                              {s.blocker && <span style={{ color: '#9CA3AF', marginLeft: 8 }}>— {s.blocker}</span>}
+                            </span>
+                            {s.settleable && (
+                              <Button variant="primary" disabled={busy} onClick={() => setSettleFor({ sale: s, itemLabel: it.productLabel, partnerName: p.name, sharePct: it.sharePct })}
+                                data-partner-item-settle={s.invoiceLineId}>{s.state === 'NEEDS_CORRECTION' ? 'Correct settlement' : 'Settle sale'}</Button>
+                            )}
+                          </div>
+                          <div style={{ display: 'grid', gridTemplateColumns: `repeat(${s.settled ? 7 : 6}, 1fr)`, gap: 8, fontSize: 12 }}>
+                            {([
+                              ['Net sale', s.net], ['Cost', s.cost], ['Card fee', s.cardFee], ['Profit', s.profit],
+                              [`${p.name} ${it.sharePct} %`, s.partnerShare], ['LATAIF', s.lataifShare],
+                              ...(s.settled ? [['Released', s.released] as [string, number]] : []),
+                            ] as Array<[string, number]>).map(([label, v]) => (
+                              <div key={label}>
+                                <div style={{ color: '#9CA3AF', fontSize: 10, textTransform: 'uppercase', letterSpacing: 0.4, marginBottom: 2 }}>{label}</div>
+                                <div className="font-mono" style={{ fontWeight: label === 'Profit' ? 600 : 400 }}
+                                  {...(label === 'LATAIF' ? { 'data-partner-item-lataif-share': s.lataifShare.toFixed(3) } : {})}><Bhd v={v} /></div>
+                              </div>
+                            ))}
+                          </div>
                         </div>
                       ))}
                       <span className="text-overline" style={{ fontSize: 10, marginTop: 8, display: 'block' }}>BOOKINGS</span>
@@ -260,6 +258,7 @@ export function PartnerItemsPanel({ overview, partners = [] }: { overview: Partn
         ))}
       </div>
 
+      <SettleSaleModal target={settleFor} onClose={() => setSettleFor(null)} />
       <OwnershipChangeModal mode={own?.mode ?? null} target={own?.target ?? null} partners={partners} onClose={() => setOwn(null)} />
 
       <Modal open={!!form} onClose={() => setForm(null)} width={460}

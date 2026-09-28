@@ -13,8 +13,9 @@ import '@fontsource/jetbrains-mono/500.css'
 import '@/styles/globals.css'
 import App from './App.tsx'
 import { installNativeConfirm } from '@/core/platform/native-confirm'
+import { ConfirmHost } from '@/components/shared/ConfirmHost'
 
-// Rückfragen (`await window.confirm`) auf den unterstützten Dialog legen — vor dem ersten Render.
+// Rückfragen (`await window.confirm`) im Dialog der App (ConfirmHost) — vor dem ersten Render.
 installNativeConfirm();
 
 // Auto-Update Test: minor change to trigger new release v0.1.2
@@ -23,5 +24,6 @@ console.log('LATAIF starting…');
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <App />
+    <ConfirmHost />
   </StrictMode>,
 )
