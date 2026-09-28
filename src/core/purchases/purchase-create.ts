@@ -52,7 +52,7 @@ export interface PurchasePaymentInput {
 
 /**
  * MOBILE-PURCHASE — der Lieferant, wenn er erst MIT dem Einkauf entsteht: aus einem bestehenden Kunden
- * (dieselbe Person, Lieferantenrolle über `linked_customer_id`) oder als neue Person (erst Kunde, dann
+ * (dieselbe Person, verknüpfte Lieferantenrolle der Stammdaten) oder als neue Person (erst Kunde, dann
  * die verknüpfte Lieferantenrolle). Dieselben Hausfunktionen wie „New Supplier → Use existing customer".
  */
 export interface PurchaseSupplierFromCustomer {
