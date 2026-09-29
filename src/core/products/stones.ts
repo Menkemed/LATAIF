@@ -325,6 +325,33 @@ export function stonesFromAi(raw0: unknown): StoneRow[] {
   return out;
 }
 
+/** Bezeichnung oder Schlüssel („Cubic Zirconia", „cubic_zirconia", „vs1", „Round") → Schlüssel der Liste, sonst null. */
+function optionKey(list: readonly StoneOption[], v: unknown): string | null {
+  const s = text(v).toLowerCase();
+  if (!s) return null;
+  const hit = list.find((o) => o.key.toLowerCase() === s || o.label.toLowerCase() === s || o.key === s.replace(/[\s-]+/g, '_'));
+  return hit ? hit.key : null;
+}
+
+/**
+ * Zeilen, wie ein Mensch sie in eine Tabelle schreibt (Excel-Import): Steinart, Farbe, Reinheit und
+ * Form auch als Bezeichnung, groß/klein egal („Diamond", „Cubic Zirconia", „vs1", „Round").
+ * Übersetzt wird nur die Schreibweise — geprüft wird mit derselben `parseStones` wie am Rechner und
+ * am Telefon. Was nicht passt, bleibt stehen und wird dort benannt; nichts wird erfunden.
+ */
+export function stonesFromLabels(raw: ReadonlyArray<Record<string, unknown>>): { rows: StoneRow[]; issues: StoneIssue[] } {
+  return parseStones(raw.map((r) => {
+    const z: Record<string, unknown> = { ...r };
+    const typ = optionKey(STONE_TYPES, r.type);
+    if (typ) z.type = typ;
+    for (const k of DIAMOND_ONLY) {
+      const key = optionKey(k === 'color' ? DIAMOND_COLORS : k === 'clarity' ? DIAMOND_CLARITIES : DIAMOND_SHAPES, r[k]);
+      if (key) z[k] = key;
+    }
+    return z;
+  }));
+}
+
 /** Ein Nein der Steinprüfung beim Schreiben — mit dem Code, den die Befehle weiterreichen. */
 export class StonesRejected extends Error {
   readonly code = 'STONES_INVALID';

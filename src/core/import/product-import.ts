@@ -11,6 +11,12 @@
 // (was ist gültig / Duplikat / welche Zahl / welches VAT-Scheme) fallen HIER und sind getestet.
 
 import type { TaxScheme } from '@/core/models/types';
+// STONES — Bedeutung und Prüfung der Steinzeilen kommen aus der EINEN Steinregel (Rechner/Telefon/Primary).
+// Relativer Pfad: dieser Baustein läuft auch headless ohne Alias-Auflösung (test/x3).
+import {
+  stonesFromLabels, normalizeStoneAttributes, caratThousandths, fmtCarat, MAX_STONE_ROWS,
+  STONE_TYPES, DIAMOND_COLORS, DIAMOND_CLARITIES, DIAMOND_SHAPES, type StoneRow,
+} from '../products/stones.ts';
 
 // SSOT-Werte (identisch mit TaxSchemeCanonical in core/models/types) — NICHT neu erfunden.
 export const VAT_SCHEMES: readonly TaxScheme[] = ['VAT_10', 'ZERO', 'MARGIN'];
@@ -40,6 +46,35 @@ export function getCol(row: RawRow, ...names: string[]): string | number | undef
 function norm(val: unknown): string {
   if (val === undefined || val === null) return '';
   return String(val).toLowerCase().trim();
+}
+
+// ── Steinspalten der Tabelle ──
+// Je Stein eine Spaltengruppe: „Stone 1 Type", „Stone 1 Qty", „Stone 1 Carat", „Stone 1 Color",
+// „Stone 1 Clarity", „Stone 1 Shape", „Stone 1 Name" — für weitere Steine Stone 2 …, Stone 3 … usw.
+// Hier wird NUR die Tabelle gelesen; was eine gültige Steinzeile ist, entscheidet core/products/stones.ts.
+const STONE_COLUMN = /^stone\s*(\d{1,3})\s*[-_:]?\s*(type|qty|quantity|total\s*carat|total\s*ct|carat|ct|colou?r|clarity|shape|name)$/i;
+const STONE_FIELD: Record<string, string> = {
+  type: 'type', qty: 'qty', quantity: 'qty', totalcarat: 'carat', totalct: 'carat', carat: 'carat', ct: 'carat',
+  color: 'color', colour: 'color', clarity: 'clarity', shape: 'shape', name: 'name',
+};
+
+/** Die Steingruppen einer Zeile in Nummernfolge; Lücken bleiben leer (die Meldung „Stone 3: …" passt zur Spalte). */
+export function readStoneColumns(row: RawRow): Array<Record<string, unknown>> {
+  const gruppen = new Map<number, Record<string, unknown>>();
+  for (const [k, v] of Object.entries(row)) {
+    const m = STONE_COLUMN.exec(k.trim());
+    if (!m) continue;
+    const wert = typeof v === 'string' ? v.trim() : v;
+    if (wert === undefined || wert === null || wert === '') continue;
+    const n = Number(m[1]);
+    if (n < 1) continue;
+    const g = gruppen.get(n) || {};
+    g[STONE_FIELD[m[2].toLowerCase().replace(/\s+/g, '')]] = wert;
+    gruppen.set(n, g);
+  }
+  if (!gruppen.size) return [];
+  const bis = Math.max(...gruppen.keys());
+  return Array.from({ length: bis }, (_, i) => gruppen.get(i + 1) || {});
 }
 
 // ─────────────────────────────────────────────────────────────
@@ -193,6 +228,8 @@ export interface ClassifiedRow {
   description1: string; description2: string; description3: string;
   size: string; material: string; markup: string;
   weight: number | null; carat: number | null; diamondWeight: number | null;
+  /** Geprüfte, normalisierte Steinzeilen (wie am Rechner/Telefon) — leer ohne Steinspalten. */
+  stones: StoneRow[];
   purchasePrice: number; plannedSalePrice: number | undefined;
   quantity: number; isSold: boolean;
   taxScheme: TaxScheme | null; vatFromDefault: boolean;
@@ -273,7 +310,33 @@ function classifyRow(row: RawRow, idx: number, opts: ClassifyOptions, runningInd
   };
   const weight = optNum(weightP, 'Weight');
   const carat = optNum(caratP, 'Carat');
-  const diamondWeight = optNum(diaP, 'Diamond weight');
+  let diamondWeight = optNum(diaP, 'Diamond weight');
+
+  // STONES — Steinspalten mit derselben Regel wie Rechner und Telefon. Eine falsche Steinzeile macht die
+  // Zeile ungültig (nichts wird still verbessert). Mit Diamant-Karat ist deren Summe das Diamond Weight;
+  // ein altes Diamond Weight ohne Steinspalten bleibt, wie es ist — daraus entstehen keine Steinzeilen.
+  let stones: StoneRow[] = [];
+  const steinEntwurf = readStoneColumns(row);
+  if (steinEntwurf.length) {
+    const p = stonesFromLabels(steinEntwurf);
+    const n = p.issues.length ? p : normalizeStoneAttributes(cat.id, {
+      stones: p.rows, ...(diamondWeight != null ? { diamond_weight: diamondWeight } : {}),
+    });
+    if (n.issues.length) {
+      for (const i of n.issues) errors.push('Stones — ' + i.message);
+    } else if ('attributes' in n) {
+      stones = (n.attributes.stones as StoneRow[] | undefined) || [];
+      const dw = n.attributes.diamond_weight;
+      if (typeof dw === 'number') {
+        const alt = diamondWeight != null ? caratThousandths(Math.round(diamondWeight * 1000) / 1000) : null;
+        const neu = caratThousandths(dw);
+        if (alt !== null && neu !== null && alt !== neu) {
+          warnings.push(`Diamond Weight ${diamondWeight} replaced by the diamond rows (${fmtCarat(neu as number)} ct)`);
+        }
+        diamondWeight = dw;
+      }
+    }
+  }
 
   // VAT: nie still MARGIN
   const rawVat = cleanStr(getCol(row, 'VAT', 'VAT Scheme', 'Tax', 'Tax Scheme', 'Scheme'));
@@ -298,7 +361,7 @@ function classifyRow(row: RawRow, idx: number, opts: ClassifyOptions, runningInd
     index: idx, status, errors, warnings,
     sku, categoryId: cat.id, categoryName: cat.name, categoryMatched: cat.matched,
     brand, name, referenceNo, serialNo, description1, description2, description3,
-    size, material, markup, weight, carat, diamondWeight,
+    size, material, markup, weight, carat, diamondWeight, stones,
     purchasePrice, plannedSalePrice, quantity, isSold,
     taxScheme: vat.scheme, vatFromDefault: vat.fromDefault, duplicateReason,
   };
@@ -349,6 +412,50 @@ export function canStartImport(s: ImportGateState): boolean {
 // Nur die tatsächlich zu importierenden Zeilen (new/warning) — invalid/duplicate werden geblockt.
 export function importableRows(rows: ClassifiedRow[]): ClassifiedRow[] {
   return rows.filter((r) => isImportable(r.status));
+}
+
+// ─────────────────────────────────────────────────────────────
+// 5b. Die angebotene Vorlage (Download auf der Import-Seite)
+// ─────────────────────────────────────────────────────────────
+// Kopfzeile + Beispielzeilen, die genau so wieder eingelesen werden (Test: Vorlage → Import), und ein
+// Blatt „How to" mit den erlaubten Werten aus der Steinregel.
+const VORLAGE_STEINE = 3;
+const STEIN_SPALTEN = ['Type', 'Qty', 'Carat', 'Color', 'Clarity', 'Shape', 'Name'];
+
+export function importTemplate(): { items: Array<Array<string | number>>; help: string[][] } {
+  const kopf = ['Category', 'SKU', 'Brand', 'Model', 'Serial', 'Description 1', 'Description 2', 'Size', 'Material',
+    'Cost', 'Tag Price', 'Qty', 'VAT', 'Weight', 'Diamond Weight'];
+  for (let n = 1; n <= VORLAGE_STEINE; n++) for (const s of STEIN_SPALTEN) kopf.push(`Stone ${n} ${s}`);
+  kopf.push('Sold');
+  const zeile = (werte: Record<string, string | number>) => kopf.map((h) => werte[h] ?? '');
+  const items = [
+    kopf,
+    zeile({ Category: 'Watch', Brand: 'Rolex', Model: '126610LN', 'Description 1': 'Submariner Date', Cost: 9500, 'Tag Price': 11500, Qty: 1, VAT: 'MARGIN' }),
+    zeile({ Category: 'Gold-Diamond Jewellery', 'Description 1': 'Diamond Ring', Cost: 450, 'Tag Price': 690, Qty: 1, VAT: 'VAT_10', Weight: 6.4,
+      'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 12, 'Stone 1 Carat': 0.8, 'Stone 1 Color': 'G', 'Stone 1 Clarity': 'VS1', 'Stone 1 Shape': 'Round',
+      'Stone 2 Type': 'Emerald', 'Stone 2 Qty': 2, 'Stone 2 Carat': 0.45,
+      'Stone 3 Type': 'Other', 'Stone 3 Qty': 6, 'Stone 3 Name': 'Tsavorite' }),
+    zeile({ Category: 'Gold-Diamond Jewellery', 'Description 1': 'Halo Pendant', Cost: 380, Qty: 1, VAT: 'VAT_10', Weight: 3.1,
+      'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 1, 'Stone 1 Carat': 0.5, 'Stone 1 Color': 'F', 'Stone 1 Clarity': 'VVS2', 'Stone 1 Shape': 'Oval',
+      'Stone 2 Type': 'Diamond', 'Stone 2 Qty': 20, 'Stone 2 Carat': 0.3 }),
+    zeile({ Category: 'Gold-Diamond Jewellery', 'Description 1': 'Diamond Bangle', Cost: 700, Qty: 1, VAT: 'VAT_10', Weight: 15, 'Diamond Weight': 1.2 }),
+  ];
+  const liste = (l: readonly { label: string }[]) => l.map((o) => o.label).join(', ');
+  const help = [
+    ['LATAIF — product import'],
+    ['One row = one item. Column names are not case-sensitive; unused columns can be left empty or removed.'],
+    [''],
+    ['Stones (Gold-Diamond Jewellery only)'],
+    ['Each stone has its own column group: Stone 1 Type, Stone 1 Qty, Stone 1 Carat, Stone 1 Color, Stone 1 Clarity, Stone 1 Shape, Stone 1 Name.'],
+    [`For more stones add the same columns with the next number (Stone 4 Type, Stone 4 Qty, …) — up to ${MAX_STONE_ROWS} stones per item.`],
+    ['Type — ' + liste(STONE_TYPES) + '.'],
+    ['Qty — whole number of stones in that row (required). Carat — total carat of that row (optional, up to 3 decimals).'],
+    ['Color, Clarity, Shape — only for Diamond (optional). Color: ' + liste(DIAMOND_COLORS) + '. Clarity: ' + liste(DIAMOND_CLARITIES) + '. Shape: ' + liste(DIAMOND_SHAPES) + '.'],
+    ['Name — only for Other, and required there (e.g. Tsavorite).'],
+    ['Diamond Weight is calculated from the diamond rows with carat. Older files with only a Diamond Weight column still import; no stone rows are created from it.'],
+    ['A row with an invalid stone is shown as invalid in the preview and is not imported.'],
+  ];
+  return { items, help };
 }
 
 // ─────────────────────────────────────────────────────────────

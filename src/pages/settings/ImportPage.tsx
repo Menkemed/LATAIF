@@ -2,7 +2,7 @@ import { useState, useCallback, useMemo, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { ArrowLeft, Upload, FileSpreadsheet, Check, AlertTriangle, X } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
-import { read, utils } from 'xlsx';
+import { read, utils, write } from 'xlsx';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
@@ -11,10 +11,12 @@ import { createPreDestructiveBackup } from '@/core/settings/pre-destructive-back
 import { primaryOnlyLocked, primaryOnlyText } from '@/core/data/primary-only';
 import {
   classifyRows, summarize, canStartImport, runProductImport, buildExistingIndex, cleanStr, getCol,
-  VAT_SCHEMES,
+  VAT_SCHEMES, importTemplate,
   type RawRow, type ClassifiedRow, type ImportRowStatus,
 } from '@/core/import/product-import';
-import type { TaxScheme } from '@/core/models/types';
+import type { TaxScheme, Product } from '@/core/models/types';
+import { stonesSummary } from '@/core/products/stones';
+import { exportFile } from '@/core/utils/export-file';
 
 const VAT_LABEL: Record<TaxScheme, string> = {
   VAT_10: 'Standard 10% (VAT_10)',
@@ -165,7 +167,7 @@ export function ImportPage() {
 
   // Eine importierbare Zeile → createProduct. Attribute + Preisbänder werden hier gemappt.
   const createFromRow = useCallback((item: ClassifiedRow) => {
-    const attrs: Record<string, string | number> = {};
+    const attrs: Product['attributes'] = {};
     if (item.referenceNo) attrs.reference_no = item.referenceNo;
     if (item.serialNo) attrs.serial_no = item.serialNo;
     if (item.description1) attrs.description_1 = item.description1;
@@ -177,6 +179,8 @@ export function ImportPage() {
     if (item.weight != null) attrs.weight = item.weight;
     if (item.carat != null) attrs.carat = item.carat;
     if (item.diamondWeight != null) attrs.diamond_weight = item.diamondWeight;
+    // STONES — die geprüften Steinzeilen (dieselbe Regel wie Rechner/Telefon; createProduct prüft erneut).
+    if (item.stones.length) attrs.stones = item.stones;
 
     const notes = [item.description2, item.description3].filter(Boolean).join(' / ') || undefined;
     const minSale = item.plannedSalePrice ? Math.round(item.plannedSalePrice * 0.85) : undefined;
@@ -229,6 +233,20 @@ export function ImportPage() {
     setFailedCount(res.failed);
     setStep('done');
     loadProducts();
+  }
+
+  // Die Vorlage: Beispielzeilen (auch mehrere Steine je Artikel) + Blatt „How to" — beides aus product-import.
+  async function downloadTemplate() {
+    const t = importTemplate();
+    const wb = utils.book_new();
+    const items = utils.aoa_to_sheet(t.items);
+    items['!cols'] = t.items[0].map((h) => ({ wch: Math.max(10, String(h).length + 2) }));
+    utils.book_append_sheet(wb, items, 'Items');
+    const help = utils.aoa_to_sheet(t.help);
+    help['!cols'] = [{ wch: 140 }];
+    utils.book_append_sheet(wb, help, 'How to');
+    const bytes = write(wb, { type: 'array', bookType: 'xlsx' }) as ArrayBuffer;
+    await exportFile('LATAIF_Import_Template.xlsx', new Uint8Array(bytes), 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
   }
 
   function handleDrop(e: React.DragEvent) {
@@ -289,9 +307,19 @@ export function ImportPage() {
             <input id="file-input" type="file" accept=".xlsx,.xls,.csv" style={{ display: 'none' }} onChange={handleFileInput} />
 
             <div style={{ marginTop: 24, padding: '16px 20px', background: '#FFFFFF', borderRadius: 8, border: '1px solid #E5E9EE' }}>
-              <span className="text-overline" style={{ marginBottom: 8 }}>EXPECTED COLUMNS</span>
+              <div className="flex items-center justify-between" style={{ gap: 12 }}>
+                <span className="text-overline" style={{ marginBottom: 8 }}>EXPECTED COLUMNS</span>
+                <button type="button" data-import-template onClick={downloadTemplate} className="cursor-pointer flex items-center gap-1"
+                  style={{ fontSize: 12, color: '#0F0F10', background: 'none', border: '1px solid #D5D9DE', borderRadius: 6, padding: '4px 10px' }}>
+                  <FileSpreadsheet size={13} /> Download template
+                </button>
+              </div>
               <p style={{ fontSize: 12, color: '#6B7280', marginTop: 8, lineHeight: 1.8 }}>
                 Category, Serial Tag / SKU, Brand, Model / Reference, Serial, Description 1-3, Size, Metal / Material, Cost / Purchase Price, Tag Price / Sale Price, <strong style={{ color: '#AA956E' }}>Qty / Quantity</strong>, <strong style={{ color: '#AA956E' }}>VAT / Tax Scheme</strong>, Weight, Carat, Diamond Weight, Sold / Status
+              </p>
+              <p style={{ fontSize: 12, color: '#6B7280', marginTop: 4, lineHeight: 1.8 }}>
+                <strong style={{ color: '#0F0F10' }}>Stones</strong> (Gold-Diamond Jewellery): one column group per stone — Stone 1 Type, Stone 1 Qty, Stone 1 Carat, Stone 1 Color, Stone 1 Clarity, Stone 1 Shape, Stone 1 Name; then Stone 2 …, Stone 3 … for more stones.
+                Color / Clarity / Shape only for Diamond, Name only (and required) for Other. Diamond Weight is calculated from the diamond rows; an old Diamond Weight column alone still imports.
               </p>
               <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
                 Numbers accept both formats (1,234.50 and 1.234,50). Missing VAT scheme → pick a default in the preview. Column names are case-insensitive.
@@ -416,8 +444,8 @@ export function ImportPage() {
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid #E5E9EE' }}>
-                    {['Status', 'Category', 'SKU', 'Brand', 'Name', 'Ref', 'Serial', 'Qty', 'Cost', 'Tag Price', 'VAT', 'Note'].map(h => (
-                      <th key={h} className="text-overline" style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 500 }}>{h}</th>
+                    {['Status', 'Category', 'SKU', 'Brand', 'Name', 'Ref', 'Serial', 'Qty', 'Cost', 'Tag Price', 'VAT', 'Stones', 'Note'].map(h => (
+                      <th key={h} className="text-overline" style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 500, display: 'table-cell' }}>{h}</th>
                     ))}
                   </tr>
                 </thead>
@@ -443,6 +471,7 @@ export function ImportPage() {
                       <td className="font-mono" style={{ padding: '8px 10px', color: '#4B5563' }}>{fmt(m.purchasePrice)}</td>
                       <td className="font-mono" style={{ padding: '8px 10px', color: '#0F0F10' }}>{m.plannedSalePrice != null ? fmt(m.plannedSalePrice) : '—'}</td>
                       <td style={{ padding: '8px 10px', color: '#6B7280', fontSize: 11 }}>{m.taxScheme || '—'}</td>
+                      <td data-import-stones style={{ padding: '8px 10px', color: '#4B5563', fontSize: 11 }}>{m.stones.length ? stonesSummary(m.stones) : (m.diamondWeight != null ? 'Diamond weight ' + m.diamondWeight + ' ct' : '—')}</td>
                       <td style={{ padding: '8px 10px', color: m.status === 'invalid' ? '#AA6E6E' : m.status === 'duplicate' ? '#6B7280' : '#AA956E', fontSize: 11 }}>
                         {m.status === 'invalid' ? m.errors.join(', ')
                           : m.status === 'duplicate' ? m.duplicateReason

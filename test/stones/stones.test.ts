@@ -239,6 +239,77 @@ ok(/<div class="stone-f"><span>Qty<\/span>/.test(seite) && /<div class="stone-f"
   'TELEFON feste Beschriftung über Qty und Total ct');
 ok(!/Total ct \(optional\)/.test(seite) && /placeholder="Total ct"/.test(seite), 'TELEFON Platzhalter nur „Total ct" (wird bei 360 px nicht abgeschnitten)');
 
+// ── EXCEL-IMPORT — dieselbe Steinregel, alte Dateien bleiben lesbar, Vorlage → Import ────────────
+const imp = await import('../../src/core/import/product-import.ts');
+const XLSX = await import('xlsx');
+const katVon = (n: string) => {
+  const c = DEFAULT_CATEGORIES.find((k) => k.name.toLowerCase() === n.toLowerCase());
+  return c ? { id: c.id, name: c.name, matched: true } : { id: 'cat-watch', name: 'Watch', matched: false };
+};
+const impOpts = { resolveCategory: katVon, defaultVatScheme: 'VAT_10' as const, existingIndex: imp.buildExistingIndex([]) };
+const zeileImp = (extra: Record<string, string | number>, kat = 'Gold-Diamond Jewellery') =>
+  imp.classifyRows([{ Category: kat, 'Description 1': 'Ring', Cost: 100, ...extra }], impOpts)[0];
+const altDatei = zeileImp({ 'Diamond Weight': 1.2 });
+ok(altDatei.status === 'new' && altDatei.stones.length === 0 && altDatei.diamondWeight === 1.2, `IMPORT alte Datei nur mit Diamond Weight: importierbar, keine erfundenen Steine (${S({ s: altDatei.status, st: altDatei.stones, dw: altDatei.diamondWeight })})`);
+const einer = zeileImp({ 'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 12, 'Stone 1 Carat': 0.8, 'Stone 1 Color': 'g', 'Stone 1 Clarity': 'vs1', 'Stone 1 Shape': 'Round' });
+ok(einer.status === 'new' && S(einer.stones) === S([{ type: 'diamond', qty: 12, carat: 0.8, color: 'G', clarity: 'VS1', shape: 'round' }]) && einer.diamondWeight === 0.8,
+  `IMPORT eine Diamant-Zeile (Bezeichnungen groß/klein egal) → Diamond Weight 0.80 (${S(einer.stones)})`);
+const mehrere = zeileImp({ 'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 1, 'Stone 1 Carat': '0.50', 'Stone 1 Shape': 'Oval', 'Stone 2 Type': 'diamond', 'Stone 2 Qty': '20', 'Stone 2 Carat': '0,30' });
+ok(mehrere.status === 'new' && mehrere.stones.length === 2 && mehrere.diamondWeight === 0.8, `IMPORT mehrere Diamanten → Summe 0.80 ct (${S(mehrere.stones)})`);
+const gemischt = zeileImp({
+  'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 12, 'Stone 1 Carat': 0.8, 'Stone 1 Color': 'G', 'Stone 1 Clarity': 'VS1', 'Stone 1 Shape': 'Round',
+  'Stone 2 Type': 'Emerald', 'Stone 2 Qty': 2, 'Stone 2 Carat': 0.45, 'Stone 3 Type': 'Other', 'Stone 3 Qty': 6, 'Stone 3 Name': 'Tsavorite',
+});
+// Dieselben Zeilen, wie die Rechner-Maske (StonesEditor) und das Telefon sie liefern: Schlüssel, Zahlen als Text.
+const maske = [{ type: 'diamond', qty: '12', carat: '0.80', color: 'G', clarity: 'VS1', shape: 'round' }, { type: 'emerald', qty: '2', carat: '0.45' }, { type: 'other', name: 'Tsavorite', qty: '6' }];
+const rechner = st.stonesOrThrow(GOLD, { stones: maske } as Record<string, unknown>);
+const telefon = js.parseStones(maske);
+ok(gemischt.status === 'new' && S(gemischt.stones) === S(rechner.stones) && S(gemischt.stones) === S(telefon.rows) && gemischt.diamondWeight === rechner.diamond_weight,
+  `IMPORT Diamond + Emerald + Other → dieselben attributes.stones wie Rechner und Telefon (${S(gemischt.stones)})`);
+const geschrieben = st.stonesOrThrow(GOLD, { stones: gemischt.stones, diamond_weight: gemischt.diamondWeight } as Record<string, unknown>);
+ok(S(geschrieben.stones) === S(gemischt.stones) && geschrieben.diamond_weight === 0.8, 'IMPORT die Schreibstelle (createProduct) nimmt die Import-Zeilen unverändert an');
+const ohneName = zeileImp({ 'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 1, 'Stone 3 Type': 'Other', 'Stone 3 Qty': 2 });
+ok(ohneName.status === 'invalid' && ohneName.errors.some((e: string) => e === 'Stones — Stone 3: enter the stone name for "Other".'),
+  `IMPORT Other ohne Namen → abgelehnt, Meldung nennt die Spaltengruppe (${S(ohneName.errors)})`);
+for (const [feld, wert, text] of [
+  ['Stone 1 Qty', '2.5', 'quantity must be a whole number'], ['Stone 1 Qty', 0, 'quantity must be a whole number'], ['Stone 1 Qty', '', 'quantity must be a whole number'],
+  ['Stone 1 Carat', 'abc', 'total carat must be a positive number'], ['Stone 1 Carat', 1.2345, 'total carat must be a positive number'], ['Stone 1 Carat', '-1', 'total carat must be a positive number'],
+] as Array<[string, string | number, string]>) {
+  const r = zeileImp({ 'Stone 1 Type': 'Emerald', 'Stone 1 Qty': 3, [feld]: wert });
+  ok(r.status === 'invalid' && r.errors.some((e: string) => e.includes('Stone 1: ' + text)), `IMPORT ${feld} = ${S(wert)} → sauber abgelehnt (${S(r.errors)})`);
+}
+const fremd = zeileImp({ 'Stone 1 Type': 'Spinel', 'Stone 1 Qty': 1 });
+ok(fremd.status === 'invalid' && fremd.errors.some((e: string) => /unknown stone type "Spinel"/.test(e)), 'IMPORT unbekannte Steinart → abgelehnt (dafür gibt es Other + Name)');
+const nurDiamant = zeileImp({ 'Stone 1 Type': 'Emerald', 'Stone 1 Qty': 1, 'Stone 1 Color': 'G' });
+ok(nurDiamant.status === 'invalid' && nurDiamant.errors.some((e: string) => /color belongs only to diamonds/.test(e)), 'IMPORT Farbe nur bei Diamant');
+const beides = zeileImp({ 'Diamond Weight': 2, 'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 1, 'Stone 1 Carat': 0.5 });
+ok(beides.status === 'warning' && beides.diamondWeight === 0.5 && beides.warnings.some((w: string) => /replaced by the diamond rows \(0\.50 ct\)/.test(w)),
+  `IMPORT alte Spalte + Diamant-Zeilen: die Summe der Zeilen gilt, mit Hinweis (${S(beides.warnings)})`);
+const ohneKarat = zeileImp({ 'Diamond Weight': 1.1, 'Stone 1 Type': 'Emerald', 'Stone 1 Qty': 2 });
+ok(ohneKarat.status === 'new' && ohneKarat.diamondWeight === 1.1 && ohneKarat.stones.length === 1, 'IMPORT Steine ohne Diamant-Karat: das alte Diamond Weight bleibt');
+const uhr = zeileImp({ 'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 1 }, 'Watch');
+ok(uhr.status === 'invalid' && uhr.errors.some((e: string) => /only recorded for Gold-Diamond Jewellery/.test(e)), 'IMPORT Steine bei einer Uhr → abgelehnt');
+const altUhr = zeileImp({}, 'Watch');
+ok(altUhr.status === 'new' && altUhr.stones.length === 0, 'IMPORT Zeilen ohne Steinspalten unverändert');
+// Vorlage → echte .xlsx → derselbe Lesepfad wie die Import-Seite (sheet_to_json, defval '').
+const vorlage = imp.importTemplate();
+const mappe = XLSX.utils.book_new();
+XLSX.utils.book_append_sheet(mappe, XLSX.utils.aoa_to_sheet(vorlage.items), 'Items');
+XLSX.utils.book_append_sheet(mappe, XLSX.utils.aoa_to_sheet(vorlage.help), 'How to');
+const gelesen = XLSX.read(XLSX.write(mappe, { type: 'array', bookType: 'xlsx' }), { type: 'array' });
+const vRows = imp.classifyRows(XLSX.utils.sheet_to_json(gelesen.Sheets[gelesen.SheetNames[0]], { defval: '' }), impOpts);
+ok(vRows.length === 4 && vRows.every((r: { status: string }) => r.status === 'new'), `VORLAGE alle Beispielzeilen importierbar (${S(vRows.map((r: { status: string; errors: string[] }) => [r.status, r.errors]))})`);
+ok(S(vRows[1].stones) === S(rechner.stones) && vRows[1].diamondWeight === 0.8, 'VORLAGE Diamond + Emerald + Other wie am Rechner');
+ok(vRows[2].stones.length === 2 && vRows[2].diamondWeight === 0.8 && vRows[3].stones.length === 0 && vRows[3].diamondWeight === 1.2,
+  'VORLAGE mehrere Diamanten (Summe) und eine alte Zeile nur mit Diamond Weight');
+ok(gelesen.SheetNames[1] === 'How to' && vorlage.help.some((z: string[]) => /Stone 4 Type/.test(z[0])) && vorlage.help.some((z: string[]) => /Cubic Zirconia/.test(z[0])),
+  'VORLAGE Blatt „How to" erklärt mehrere Steine und die erlaubten Werte');
+const importSeite = src('src/pages/settings/ImportPage.tsx');
+ok(/if \(item\.stones\.length\) attrs\.stones = item\.stones;/.test(importSeite) && /data-import-template onClick=\{downloadTemplate\}/.test(importSeite) && /importTemplate\(\)/.test(importSeite),
+  'IMPORT-SEITE legt die Steine an und bietet die Vorlage an');
+ok(/stonesFromLabels, normalizeStoneAttributes/.test(src('src/core/import/product-import.ts')) && !/STONE_TYPES\.some|DIAMOND_COLORS\.some/.test(src('src/core/import/product-import.ts')),
+  'IMPORT keine eigene Steinprüfung — nur die zentrale Regel');
+
 console.log(`\nstones: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
 console.log('STONES_PROVED');
