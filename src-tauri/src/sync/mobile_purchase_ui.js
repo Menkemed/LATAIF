@@ -80,9 +80,10 @@
     if (!a.dependsOn) return true;
     return a.dependsOn.valueIncludes.indexOf(attrs[a.dependsOn.key]) !== -1;
   }
-  function mpWriteAttr(a, pre, v) {
+  function mpWriteAttr(a, pre, v, attrs) {
     const e = $(pre + a.key);
     if (!e || v === undefined || v === null) return;
+    if (a.type === 'stones') { writeStones(e, v, attrs); return; }   // STONES — der Entwurf der Zeilen
     if (a.type === 'multiselect') { for (const c of e.children) c.classList.toggle('on', Array.isArray(v) && v.indexOf(c.textContent) !== -1); return; }
     if (a.type === 'boolean') { for (const c of e.children) c.classList.toggle('on', c.dataset.val === String(v)); return; }
     e.value = String(v);
@@ -121,6 +122,8 @@
         if (!mpDependsOk(a, it.attributes || {})) continue;
         if (it.badNumbers && it.badNumbers[a.key]) { out.push(a.label + ' must be a valid number ≥ 0.'); continue; }
         const v = (it.attributes || {})[a.key];
+        // STONES — dieselbe Prüfung wie am Rechner/Primary.
+        if (a.type === 'stones') { const st = stonesOf(v); if (st.error) out.push(st.error); continue; }
         const leer = v === undefined || v === '' || v === null || (Array.isArray(v) && v.length === 0);
         if (leer && a.required) out.push(a.label + ' is required.');
       }
@@ -135,6 +138,11 @@
       if (!cat) { it.attributes = {}; continue; }
       const keep = {};
       for (const a of cat.attributes) if (mpDependsOk(a, it.attributes || {}) && it.attributes[a.key] !== undefined) keep[a.key] = it.attributes[a.key];
+      // STONES — in den Auftrag nur die geprüften, normalisierten Zeilen (leere Zeilen fallen weg).
+      if (keep.stones !== undefined) {
+        const st = stonesOf(keep.stones);
+        if (st.rows.length) keep.stones = st.rows; else delete keep.stones;
+      }
       it.attributes = keep;
     }
     return copy;
@@ -347,7 +355,7 @@
     const host = $('mpAttrs' + it.uid);
     host.innerHTML = '';
     if (cat) {
-      for (const a of cat.attributes) {
+      for (const a of editableAttrs(cat)) {
         const row = document.createElement('div');
         row.className = 'row'; row.id = mpRowPre(it) + a.key;
         const lbl = document.createElement('label');
@@ -356,7 +364,7 @@
         row.appendChild(makeControl(a, pre));
         host.appendChild(row);
       }
-      for (const a of cat.attributes) mpWriteAttr(a, pre, (it.attributes || {})[a.key]);
+      for (const a of cat.attributes) mpWriteAttr(a, pre, (it.attributes || {})[a.key], it.attributes || {});
       for (const a of cat.attributes) {
         if (!a.dependsOn) continue;
         const dep = $(pre + a.dependsOn.key);

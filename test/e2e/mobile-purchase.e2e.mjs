@@ -371,6 +371,18 @@ try {
     // DISPLAY-NAME — bei Gold-Diamond Jewellery gibt es keine Felder für Marke/Modell.
     await tippe(`[data-mp-field="item:${u2}:quantity"]`, '3');
     await tippe(`[data-mp-field="item:${u2}:unitPrice"]`, '120.5');
+    // STONES — die Steinliste der Gold-Position am echten Telefon; gebucht am echten Primary.
+    const ST = `[id="mpa${u2}_stones"]`;
+    await klick(phone, `${ST} [data-st="toggle"]`);
+    await klick(phone, `${ST} [data-st="add"]`); await klick(phone, `${ST} [data-st="add"]`);
+    await tippe(`${ST} [data-st="type"][data-i="0"]`, 'diamond');
+    await tippe(`${ST} [data-st="qty"][data-i="0"]`, '1');
+    await tippe(`${ST} [data-st="carat"][data-i="0"]`, '0.50');
+    await tippe(`${ST} [data-st="clarity"][data-i="0"]`, 'VS1');
+    await tippe(`${ST} [data-st="type"][data-i="1"]`, 'emerald');
+    await tippe(`${ST} [data-st="qty"][data-i="1"]`, '3');
+    await tippe(`${ST} [data-st="carat"][data-i="1"]`, '0.45');
+    const steinKopf = await text(phone, `${ST} [data-st-sum]`);
     await klick(phone, '[data-mp-toggle="payments"]');
     await klick(phone, '[data-mp-action="add-payment"]'); await sleep(150);
     await tippe('[data-mp-field="pay:0:amount"]', '500');
@@ -412,6 +424,11 @@ try {
     ok(String(lieferant.linked_customer_id) === 'mp-cust', 'M1 Kunde → verknüpfte Lieferantenrolle (dieselbe Person)');
     ok(S(teile) === S(['HOUSE:6000:600', 'PARTNER:4000:400']), `M1 Partner 40 % aus 400 BHD, LATAIF 60 % (${S(teile)})`);
     ok(bilder === 2 && ablageLeer(), `M1 genau zwei Fotos am neuen Artikel (Zeile oder Medienspeicher, nie doppelt), Ablage leer (${bilder})`);
+    let kAttr = {};
+    try { kAttr = JSON.parse(String(kette.attributes || '{}')); } catch { kAttr = {}; }
+    ok(steinKopf === 'Stones · 2 rows · Diamond 0.50 ct · Emerald 0.45 ct'
+      && S(kAttr.stones) === S([{ type: 'diamond', qty: 1, carat: 0.5, clarity: 'VS1' }, { type: 'emerald', qty: 3, carat: 0.45 }]) && kAttr.diamond_weight === 0.5,
+      `M1 STONES Steinliste vom Telefon am Primary: normalisiert, Diamond Weight 0.50 aus den Diamant-Zeilen (${steinKopf} | ${S(kAttr.stones)} | ${kAttr.diamond_weight})`);
     RV.m1 = gebucht && /^PUR-/.test(PUR_NR) && bilder === 2 && S(zahlungen) === S(['cash:500', 'benefit:400']);
   }
 

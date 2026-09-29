@@ -16,7 +16,7 @@ import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/
 import { buildBatchTagsZpl } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
 import { useProductStore } from '@/stores/productStore';
-import { validateProductFields, blockingIssues, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
+import { validateProductFields, blockingIssues, editableAttributes, isBrandRequired } from '@/core/products/field-contract';
 import { buildSkuSeed, skuIsEmpty } from '@/core/products/sku-allocation';
 import { useAuthStore } from '@/stores/authStore';
 import { currentBranchId } from '@/core/db/helpers';
@@ -41,6 +41,8 @@ import { lotAggregatesFor } from '@/core/data/domain-reads';
 import { useSharedRead } from '@/core/data/shared-read';
 import { useAiIdentifyGate } from '@/core/ai/ai-availability';
 import { productDisplayName, productDisplayLines, nameFromAttributes, brandModelHidden } from '@/core/products/display-name';
+import { StonesEditor } from '@/components/products/StonesEditor';
+import { mergeAiAttributes } from '@/core/products/stones';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -338,7 +340,7 @@ export function WatchList() {
     for (const i of blockingIssues(validateProductFields(selectedCat ?? undefined, {
       categoryId: form.categoryId, brand: form.brand, name: form.name, attributes: form.attributes,
     }))) {
-      errs[selectedCat?.attributes.some(a => a.key === i.field) ? `attr_${i.field}` : i.field] = 'Required';
+      errs[selectedCat?.attributes.some(a => a.key === i.field) ? `attr_${i.field}` : i.field] = i.message || 'Required';
     }
     return errs;
   }
@@ -837,7 +839,12 @@ export function WatchList() {
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12 }}>
                 {/* DESKTOP-CONTRACT: visibility from the shared contract (dependsOn-aware) —
                     one rule for create, edit and mobile. */}
-                {visibleAttributes(selectedCat, form.attributes).map(attr => {
+                {editableAttributes(selectedCat, form.attributes).map(attr => {
+                // STONES — die EINE Steinliste; Diamond Weight steht dort, nicht als eigenes Feld.
+                if (attr.type === 'stones') {
+                  return <StonesEditor key={attr.key} value={form.attributes?.stones} attributes={form.attributes as Record<string, unknown>}
+                    onChange={(rows) => setForm(p => ({ ...p, attributes: { ...(p.attributes || {}), stones: rows as never } }))} />;
+                }
                   const errKey = `attr_${attr.key}`;
                   const hasErr = !!errors[errKey];
                   // Selects mit vielen Chips (≥8) bekommen volle Grid-Breite,
@@ -1022,12 +1029,8 @@ export function WatchList() {
                           updated.scopeOfDelivery = result.scopeOfDelivery;
                         }
                         // Kategorie-Attribute — Merge, Skalare/Booleans direkt übernehmen
-                        const attrs = { ...(f.attributes || {}) };
-                        for (const [k, v] of Object.entries(result.attributes || {})) {
-                          if (v === null || v === undefined || v === '') continue;
-                          attrs[k] = v as string | number | boolean | string[];
-                        }
-                        updated.attributes = attrs;
+                        // STONES — die KI schlägt vor; eine schon erfasste Steinliste bleibt.
+                        updated.attributes = mergeAiAttributes(f.attributes, result.attributes) as Product['attributes'];
                         return updated;
                       });
                       // Sofortige Duplicate-Detection mit den frisch extrahierten

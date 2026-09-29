@@ -39,6 +39,9 @@ import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-
 import { createConsignmentOnPrimary, consignmentCreateRequest, type ConsignmentCreateInput } from '@/core/consignment/consignment-create';
 import { useAiIdentifyGate } from '@/core/ai/ai-availability';
 import { productDisplayName, brandModelHidden } from '@/core/products/display-name';
+import { StonesEditor } from '@/components/products/StonesEditor';
+import { editableAttributes } from '@/core/products/field-contract';
+import { normalizeStoneAttributes, mergeAiAttributes } from '@/core/products/stones';
 
 // SQLite gibt fehlende REAL-Spalten als JS-`null` zurück, nicht `undefined`.
 // fmt darf nicht crashen — sonst killt eine NULL-Spalte den ganzen Render.
@@ -315,6 +318,9 @@ export function ConsignmentList() {
       alert('Please select a category first.');
       return;
     }
+    // STONES — dieselbe Prüfung wie beim Speichern am Primary (src/core/products/stones.ts).
+    const steinFehler = normalizeStoneAttributes(productForm.categoryId, productForm.attributes as Record<string, unknown>).issues[0];
+    if (steinFehler) { alert(steinFehler.message); return; }
     const missing: string[] = [];
     // v0.7.16 — Brand/Name nur bei branded-Kategorien Pflicht.
     // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
@@ -876,7 +882,12 @@ export function ConsignmentList() {
               <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 16, marginTop: 16 }}>
                 <span className="text-overline" style={{ marginBottom: 12 }}>{selectedCat.name.toUpperCase()} DETAILS</span>
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12 }}>
-                  {selectedCat.attributes.map(attr => {
+                  {editableAttributes(selectedCat, productForm.attributes).map(attr => {
+                // STONES — die EINE Steinliste; Diamond Weight steht dort, nicht als eigenes Feld.
+                if (attr.type === 'stones') {
+                  return <StonesEditor key={attr.key} value={productForm.attributes?.stones} attributes={productForm.attributes as Record<string, unknown>}
+                    onChange={(rows) => setProductForm(p => ({ ...p, attributes: { ...(p.attributes || {}), stones: rows as never } }))} />;
+                }
                     if (attr.dependsOn) {
                       const dep = productForm.attributes?.[attr.dependsOn.key];
                       if (!dep || !attr.dependsOn.valueIncludes.includes(String(dep))) return null;
@@ -1054,12 +1065,8 @@ export function ConsignmentList() {
                           if (Array.isArray(result.scopeOfDelivery) && result.scopeOfDelivery.length > 0 && (!f.scopeOfDelivery || f.scopeOfDelivery.length === 0)) {
                             updated.scopeOfDelivery = result.scopeOfDelivery;
                           }
-                          const attrs = { ...(f.attributes || {}) };
-                          for (const [k, v] of Object.entries(result.attributes || {})) {
-                            if (v === null || v === undefined || v === '') continue;
-                            attrs[k] = v as string | number | boolean | string[];
-                          }
-                          updated.attributes = attrs;
+                          // STONES — die KI schlägt vor; eine schon erfasste Steinliste bleibt.
+                          updated.attributes = mergeAiAttributes(f.attributes, result.attributes) as Product['attributes'];
                           return updated;
                         });
                         // AI-Schätzung schreibt in den Consignment-Agreed-Price-Vorschlag,

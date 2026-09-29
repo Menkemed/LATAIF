@@ -66,7 +66,10 @@ import {
 } from '@/core/gold/gold-house';
 import { KARAT_PURITY } from '@/core/gold/purity';
 import type { MaterialLineInput } from '@/components/work-orders/AddMaterialModal';
-import { productDisplayName } from '@/core/products/display-name';
+import { productDisplayName, brandModelHidden } from '@/core/products/display-name';
+import { repairItemDisplayName } from '@/core/products/display-name';
+import { StonesEditor } from '@/components/products/StonesEditor';
+import { readStones, stonesApply } from '@/core/products/stones';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -574,7 +577,7 @@ export function RepairDetail() {
     const linkedProduct = repair.productId ? products.find(p => p.id === repair.productId) : undefined;
     const itemDesc = linkedProduct
       ? formatProductMultiLine(linkedProduct, categories)
-      : `${repair.itemBrand || ''} ${repair.itemModel || ''}`.trim() || 'Item';
+      : repairItemDisplayName(repair) || 'Item';
     downloadPdf({
       title: `Repair Voucher ${repair.repairNumber}`,
       number: repair.repairNumber,
@@ -813,7 +816,7 @@ export function RepairDetail() {
           <div>
             <span className="text-overline">{repair.repairNumber}</span>
             <h1 className="font-display" style={{ fontSize: 28, color: '#0F0F10', marginTop: 4, lineHeight: 1.2 }}>
-              {repair.itemBrand ? `${repair.itemBrand} ${repair.itemModel || ''}`.trim() : 'Repair Service'}
+              {repairItemDisplayName(repair) || 'Repair Service'}
             </h1>
             {repair.itemReference && (
               <span className="font-mono" style={{ fontSize: 13, color: '#4B5563', display: 'block', marginTop: 8 }}>
@@ -1126,6 +1129,9 @@ export function RepairDetail() {
                       .map(f => {
                         const v = repair.itemAttributes?.[f.key];
                         if (v === undefined || v === null || v === '') return null;
+                        if (f.type === 'stones') {
+                          return readStones(v).length ? <div key={f.key} style={{ gridColumn: '1 / -1' }}><StonesEditor value={v} attributes={repair.itemAttributes as Record<string, unknown>} readOnly /></div> : null;
+                        }
                         // v0.7.15 — dependsOn beim Display respektieren: wenn
                         // Parent-Wert nicht passt, Feld nicht anzeigen.
                         if (f.dependsOn) {
@@ -1554,7 +1560,7 @@ export function RepairDetail() {
           customerPhone={customer.phone}
           customerWhatsapp={customer.whatsapp}
           productImage={fotos[0]?.url || product?.images?.[0]}
-          productLabel={repair.itemBrand ? `${repair.itemBrand} ${repair.itemModel || ''}`.trim() : (product ? productDisplayName(product) : undefined)}
+          productLabel={repairItemDisplayName(repair) || (product ? productDisplayName(product) : undefined)}
           details={`Voucher code: ${repair.voucherCode}. Repair: ${repair.repairNumber}.${repair.chargeToCustomer ? ` Amount due: ${repair.chargeToCustomer} BHD.` : ''}`}
           linkedEntityType="repair"
           linkedEntityId={repair.id}
@@ -1869,6 +1875,13 @@ function RepairItemEditor({ form, setForm, categories }: RepairItemEditorProps) 
             if (field.dependsOn) {
               const depVal = form.itemAttributes?.[field.dependsOn.key];
               if (!depVal || !field.dependsOn.valueIncludes.includes(String(depVal))) return null;
+            }
+            if (field.key === 'diamond_weight' && stonesApply(form.itemCategoryId)) return null;
+            // DISPLAY-NAME — bei Gold-Diamond Jewellery keine Marke/kein Modell (ein gespeicherter Wert bleibt sichtbar).
+            if ((field.coreField === 'itemBrand' || field.coreField === 'itemModel') && brandModelHidden(form.itemCategoryId) && !form.itemBrand && !form.itemModel) return null;
+            if (field.type === 'stones') {
+              return <StonesEditor key={field.key} value={form.itemAttributes?.stones} attributes={form.itemAttributes as Record<string, unknown>}
+                onChange={(rows) => setForm({ ...form, itemAttributes: { ...(form.itemAttributes || {}), stones: rows as never } })} />;
             }
             const value = field.coreField
               ? (form[field.coreField] as string | undefined) || ''

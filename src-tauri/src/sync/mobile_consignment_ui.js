@@ -102,7 +102,7 @@
     const host = $('cnAttrs');
     host.innerHTML = '';
     if (cat) {
-      for (const a of cat.attributes) {
+      for (const a of editableAttrs(cat)) {
         const row = el('div', { class: 'row', id: 'cnrow_' + a.key });
         const lbl = el('label');
         lbl.innerHTML = a.label + (a.unit ? ' (' + a.unit + ')' : '') + (a.required ? ' <span class="req">*</span>' : '');
@@ -143,6 +143,8 @@
     for (const a of cat.attributes) {
       if (!dependsSatisfied(a, CN_ATTR_PREFIX)) continue;   // verdeckte Felder reisen nie mit
       const v = readAttr(a, CN_ATTR_PREFIX);
+      // STONES — dieselbe Prüfung wie am Rechner/Primary; gespeichert werden die normalisierten Zeilen.
+      if (a.type === 'stones') { const st = stonesOf(v); if (st.error) fehler.push(st.error); else if (st.rows.length) attributes[a.key] = st.rows; continue; }
       if (a.type === 'number' && Number.isNaN(v)) { fehler.push(a.label + ' must be a valid number ≥ 0.'); continue; }
       const leer = v === undefined || v === '' || v === null || (Array.isArray(v) && v.length === 0);
       if (leer) { if (a.required) fehler.push(a.label + ' is required.'); continue; }
@@ -707,6 +709,7 @@
       const e = $(CN_ATTR_PREFIX + key);
       if (!e) continue;
       const wert = werte.attributes[key];
+      if (e._render) { writeStones(e, wert); continue; }   // STONES — die Steinliste als Zeilen
       if (e.tagName === 'SELECT') {
         const o = Array.from(e.options).find((x) => x.value && String(x.value).toLowerCase() === String(wert).toLowerCase());
         if (o) e.value = o.value;

@@ -29,6 +29,13 @@ const S = (v) => JSON.stringify(v);
 const html = readFileSync(join(repo, 'src-tauri/src/sync/mobile_consignment.html'), 'utf8');
 const befehleRepair = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_commands.js'), 'utf8');
 const anzeigeName = readFileSync(join(repo, 'src-tauri/src/sync/mobile_display_name.js'), 'utf8');
+const steine = readFileSync(join(repo, 'src-tauri/src/sync/mobile_stones.js'), 'utf8');
+// STONES — dieselben Stile wie die echte Seite (für die Sichtprüfung bei 360 px).
+const STEIN_CSS = (() => {
+  const pg = readFileSync(join(repo, 'src-tauri/src/sync/mobile_page.rs'), 'utf8').split(String.fromCharCode(13)).join('');
+  const i = pg.indexOf('/* STONES — kompakter Steinbereich */');
+  return pg.slice(i, pg.indexOf(String.fromCharCode(10), pg.indexOf('.stones-foot', i)));
+})();
 const befehle = readFileSync(join(repo, 'src-tauri/src/sync/mobile_consignment_commands.js'), 'utf8');
 const ui = readFileSync(join(repo, 'src-tauri/src/sync/mobile_consignment_ui.js'), 'utf8');
 const schema = readFileSync(join(repo, 'src-tauri/src/sync/mobile_field_schema.json'), 'utf8');
@@ -60,6 +67,8 @@ const helfer = [
   ausSeite('function dependsSatisfied(attr, pre) {'),
   zeileAusSeite(/const ROW_PREFIX = \{[^}]*\};/),
   ausSeite('function applyDependencies(cat, pre) {'),
+  ausSeite('function esc(s) {'), ausSeite('function editableAttrs(cat) {'), ausSeite('function makeStonesControl(id) {'),
+  ausSeite('function writeStones(e, rows, attrs) {'), ausSeite('function stonesOf(v) {'),
   ausSeite('function makeControl(a, pre) {'),
   ausSeite('function normNumber(raw) {'),
   ausSeite('function readAttr(a, pre) {'),
@@ -84,7 +93,7 @@ const UI_DATEI = `(function () {\n${ui}\n  window.__cnHomeOpen = cnHomeOpen;\n  
 
 const SEITE = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>consignment page test</title></head><body>
 ${html}
-<script src="/display-name.js"></script><script src="/repair-commands.js"></script>
+<script src="/display-name.js"></script><script src="/stones.js"></script><script src="/repair-commands.js"></script>
 <script src="/commands.js"></script>
 <script src="/shim.js"></script>
 <script src="/ui.js"></script>
@@ -104,7 +113,7 @@ const medienAbrufe = [];
 const server = createServer((req, res) => {
   if (req.method === 'GET') {
     const js = {
-      '/display-name.js': anzeigeName, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI,
+      '/display-name.js': anzeigeName, '/stones.js': steine, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI,
     }[req.url.split('?')[0]];
     if (js !== undefined) {
       res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });

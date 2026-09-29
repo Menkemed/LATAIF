@@ -37,7 +37,10 @@ import { WriteError } from '@/components/shared/WriteError';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { quickRepairNext } from '@/core/repairs/repair-status-flow';
 import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
-import { productDisplayName } from '@/core/products/display-name';
+import { productDisplayName, brandModelHidden } from '@/core/products/display-name';
+import { repairItemDisplayName } from '@/core/products/display-name';
+import { StonesEditor } from '@/components/products/StonesEditor';
+import { normalizeStoneAttributes, stonesApply } from '@/core/products/stones';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -312,6 +315,8 @@ export function RepairList() {
         alert(`Please fill in the required fields:\n• ${missing.join('\n• ')}`);
         return;
       }
+      const steinFehler = normalizeStoneAttributes(form.itemCategoryId, form.itemAttributes as Record<string, unknown> | undefined).issues[0];
+      if (steinFehler) { alert(steinFehler.message); return; }
     }
     // v0.7.4 — Workshop optional bei Create. Discovery-Over-Time-Pattern:
     // beim Annehmen weiss man oft Workshop+Cost noch nicht, das traegt man
@@ -504,7 +509,7 @@ export function RepairList() {
 
       {filtered.map(rep => {
         const next = quickRepairNext(rep.status, rep.repairScope);
-        const itemLabel = [rep.itemBrand, rep.itemModel].filter(Boolean).join(' ');
+        const itemLabel = repairItemDisplayName(rep);
         const eligible = isEligibleForBulk(rep);
         // Create Invoice Shortcut bleibt auch nach Pick-up sichtbar, solange noch
         // keine Invoice verknuepft ist und ein Charge anfaellt — Kunde kann nach
@@ -769,6 +774,14 @@ export function RepairList() {
                       if (field.dependsOn) {
                         const depVal = form.itemAttributes?.[field.dependsOn.key];
                         if (!depVal || !field.dependsOn.valueIncludes.includes(String(depVal))) return null;
+                      }
+                      // STONES — die EINE Steinliste; Diamond Weight kein eigenes Feld.
+                      if (field.key === 'diamond_weight' && stonesApply(form.itemCategoryId)) return null;
+                      // DISPLAY-NAME — bei Gold-Diamond Jewellery keine Marke/kein Modell.
+                      if ((field.coreField === 'itemBrand' || field.coreField === 'itemModel') && brandModelHidden(form.itemCategoryId) && !form.itemBrand && !form.itemModel) return null;
+                      if (field.type === 'stones') {
+                        return <StonesEditor key={field.key} value={form.itemAttributes?.stones} attributes={form.itemAttributes as Record<string, unknown>}
+                          onChange={(rows) => setForm(f => ({ ...f, itemAttributes: { ...(f.itemAttributes || {}), stones: rows as never } }))} />;
                       }
                       const value = field.coreField
                         ? (form[field.coreField] as string | undefined) || ''
@@ -1237,7 +1250,7 @@ export function RepairList() {
                     }}>
                       <span className="font-mono" style={{ color: '#4B5563', fontSize: 11 }}>{r.repairNumber}</span>
                       <span style={{ color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                        {[r.itemBrand, r.itemModel].filter(Boolean).join(' ') || r.issueDescription || '—'}
+                        {repairItemDisplayName(r) || r.issueDescription || '—'}
                       </span>
                       <span className="font-mono" style={{ color: '#0F0F10' }}>
                         {(r.chargeToCustomer || 0).toLocaleString('en-US', { maximumFractionDigits: 2 })} BHD

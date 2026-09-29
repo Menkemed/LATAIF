@@ -52,6 +52,21 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
   .chips { display: flex; flex-wrap: wrap; gap: 8px; }
   .chip { width: auto; flex: 0 0 auto; background: #08080A; border: 1px solid #2A2A32; color: #A1A1AA; padding: 9px 13px; border-radius: 999px; font-size: 14px; font-weight: 500; }
   .chip.on { background: rgba(198,163,109,0.16); border-color: #C6A36D; color: #EAEAEA; }
+  /* STONES — kompakter Steinbereich */
+  .stones { border: 1px solid #2A2A32; border-radius: 8px; padding: 2px 10px 10px; background: #0E0E11; }
+  .stones-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; background: none; border: none; color: #EAEAEA; font-size: 14px; font-weight: 500; padding: 10px 0 6px; text-align: left; letter-spacing: 0; }
+  .stone-row { border-top: 1px solid #1F1F25; padding-top: 10px; margin-top: 8px; display: grid; gap: 8px; }
+  .stone-top { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+  .stone-two { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .stone-three { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
+  .stone-row input, .stone-row select { padding: 10px; font-size: 15px; min-width: 0; }
+  .stone-three select { padding: 10px 4px; font-size: 14px; }
+  .stone-x { width: auto; background: transparent; color: #8A8A93; border: 1px solid #2A2A32; padding: 0 14px; font-size: 14px; }
+  .stones-add { width: auto; margin-top: 10px; background: transparent; color: #C6A36D; border: 1px solid #2A2A32; padding: 9px 14px; font-size: 14px; }
+  .stones-err { color: #E07A7A; font-size: 12px; margin-top: 8px; }
+  .stones-err:empty { display: none; }
+  .stones-foot { color: #8A8A93; font-size: 12px; margin-top: 8px; }
+  .stones-foot:empty { display: none; }
   .req { color: #C6A36D; }
   .fielderr { color: #AA6E6E; font-size: 12px; margin-top: 6px; }
   #cAttrs .row:first-child { margin-top: 14px; }
@@ -275,6 +290,7 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
 <script>
 window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), r##";
 "##, include_str!("mobile_display_name.js"), r##"
+"##, include_str!("mobile_stones.js"), r##"
 "##, include_str!("mobile_upload_queue.js"), r##"
 "##, include_str!("mobile_repair_commands.js"), r##"
 "##, include_str!("mobile_consignment_commands.js"), r##"
@@ -635,7 +651,11 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     for (const k of ATTR_ORDER) if (k !== 'description' && keys.indexOf(k) !== -1) ordered.push(k);
     for (const k of keys) if (k !== 'description' && ATTR_ORDER.indexOf(k) === -1) ordered.push(k);
     if (keys.indexOf('description') !== -1) ordered.push('description');
-    ordered.forEach(k => { let v = attrs[k]; if (typeof v === 'boolean') v = v ? 'Yes' : 'No'; add(prettyAttr(k), v); });
+    ordered.forEach(k => {
+      // STONES — jede Steinzeile ausgeschrieben („Diamond · Qty 1 · 0.50 ct · G · VS1 · Oval").
+      if (k === 'stones') { MobileStones.readStones(attrs[k]).forEach((r, i) => add(i ? '' : 'Stones', MobileStones.stoneRowLabel(r))); return; }
+      let v = attrs[k]; if (typeof v === 'boolean') v = v ? 'Yes' : 'No'; add(prettyAttr(k), v);
+    });
     add('Notes', p.notes);
     html += rows.join('');
 
@@ -1126,7 +1146,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         if (p.condition && (!cat || cat.conditionOptions.indexOf(p.condition) === -1)) cs.appendChild(el('option', { value: p.condition }, p.condition));
       }
       const host = $('peAttrs'); if (host) { host.innerHTML = '';
-        if (cat) for (const a2 of cat.attributes) {
+        if (cat) for (const a2 of editableAttrs(cat)) {
           const row = el('div', { class: 'row', id: 'perow_' + a2.key });
           const lbl = el('label'); lbl.innerHTML = a2.label + (a2.unit ? ' (' + a2.unit + ')' : '');
           row.appendChild(lbl); row.appendChild(makeControl(a2, 'pea_')); host.appendChild(row);
@@ -1167,6 +1187,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       if (cat) for (const a2 of cat.attributes) {
         const e = $('pea_' + a2.key); if (!e) continue;
         const v = origAttrs[a2.key];
+        if (a2.type === 'stones') { writeStones(e, v, origAttrs); continue; }
         if (a2.type === 'multiselect') { for (const c of e.children) c.classList.toggle('on', Array.isArray(v) && v.indexOf(c.textContent) !== -1); }
         else if (a2.type === 'boolean') { for (const c of e.children) c.classList.toggle('on', v !== undefined && String(v) === c.dataset.val); }
         else e.value = (v === undefined || v === null) ? '' : String(v);
@@ -1317,6 +1338,13 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         if (!dependsSatisfied(a2, 'pea_')) continue;
         const v = readAttr(a2, 'pea_');
         if (v === undefined) continue;
+        if (a2.type === 'stones') {
+          const st = stonesOf(v);
+          if (st.error) return setText('peMsg', st.error);
+          if (JSON.stringify(st.rows) === JSON.stringify(MobileStones.readStones(origAttrs[a2.key]))) continue;
+          attrPatch[a2.key] = st.rows.length ? st.rows : null;
+          continue;
+        }
         if (typeof v === 'number' && Number.isNaN(v)) return setText('peMsg', 'Please check the number in "' + a2.label + '".');
         const change = attrChange(v, origAttrs[a2.key]);
         if (change === undefined) continue;      // unveraendert → gar nicht erst mitschicken
@@ -1770,6 +1798,13 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     for (const key of Object.keys(attrs)) {
       const el = $(T.attrPrefix + key);
       if (!el) continue;                        // not a field of the chosen category → dropped
+      // STONES — nur geprüfte Zeilen, und nie über eine schon erfasste Steinliste.
+      if (el._render) {
+        if ((el._rows || []).length) continue;
+        const rows = MobileStones.stonesFromAi(attrs[key]);
+        if (rows.length) { writeStones(el, rows, {}); filled++; }
+        continue;
+      }
       if (el.tagName === 'SELECT') {
         if (String(el.value || '').trim() !== '') continue;
         const opt = Array.from(el.options).find(o => o.value && o.value.toLowerCase() === String(attrs[key]).toLowerCase());
@@ -1902,8 +1937,106 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const rowPre = ROW_PREFIX[p] || 'row_';
     for (const a of cat.attributes) { if (!a.dependsOn) continue; const row = $(rowPre + a.key); if (row) row.classList.toggle('hidden', !dependsSatisfied(a, p)); }
   }
+  // ── STONES — die EINE Steinliste am Telefon (MobileStones = src/core/products/stones.ts) ──────
+  // Ein Merkmal vom Typ 'stones' ist ein kompakter Abschnitt: geschlossen nur die Zusammenfassung
+  // („3 rows · Diamond 0.80 ct · Emerald 0.45 ct"), offen je Zeile Steinart (Auswahlliste), bei
+  // Other der Name, Menge, Gesamt-Karat und nur bei Diamanten Farbe/Reinheit/Form. Die Zeilen
+  // stehen als Entwurf am Element (`_rows`); geprüft und normalisiert wird beim Speichern.
+  function editableAttrs(cat) {
+    // Diamond Weight ist bei der Steinliste die Summe der Diamant-Zeilen — kein eigenes Eingabefeld.
+    return cat.attributes.filter((a) => !(a.key === 'diamond_weight' && MobileStones.stonesApply(cat.id)));
+  }
+  function makeStonesControl(id) {
+    const MS = MobileStones;
+    const box = el('div', { id: id, class: 'stones' });
+    box._rows = []; box._open = false; box._attrs = {};
+    const opt = (list, cur, leer) => '<option value="">' + leer + '</option>'
+      + list.map((o) => '<option value="' + esc(o.key) + '"' + (o.key === cur ? ' selected' : '') + '>' + esc(o.label) + '</option>').join('');
+    const kopf = () => {
+      const s = MS.stonesSectionSummary(MS.readStones(box._rows));
+      return (s === 'none' ? (box._rows.length ? 'Stones — not complete yet' : 'No stones') : 'Stones · ' + s);
+    };
+    const fehler = () => { const p = MS.parseStones(box._rows); return p.issues.length ? p.issues[0].message : ''; };
+    const fuss = () => {
+      const dw = MS.diamondWeightInfo(Object.assign({}, box._attrs, { stones: MS.readStones(box._rows) }));
+      if (dw.source === 'none') return '';
+      return 'Diamond weight ' + MS.fmtCarat(dw.thousandths) + ' ct — '
+        + (dw.source === 'stones' ? 'from the diamond rows' : 'recorded before the stone list; diamond rows with carat replace it');
+    };
+    box._render = function () {
+      let h = '<button type="button" class="stones-head" data-st="toggle"><span data-st-sum>' + esc(kopf()) + '</span><span>' + (box._open ? '▾' : '▸') + '</span></button>';
+      if (box._open) {
+        box._rows.forEach(function (r, i) {
+          h += '<div class="stone-row" data-st-row="' + i + '">'
+            + '<div class="stone-top"><select data-st="type" data-i="' + i + '" aria-label="Stone type">' + opt(MS.STONE_TYPES, r.type, 'Stone type…') + '</select>'
+            + '<button type="button" class="stone-x" data-st="remove" data-i="' + i + '" aria-label="Remove stone">✕</button></div>'
+            + (r.type === 'other' ? '<input data-st="name" data-i="' + i + '" placeholder="Stone name" maxlength="60" value="' + esc(r.name || '') + '" />' : '')
+            + '<div class="stone-two"><input data-st="qty" data-i="' + i + '" inputmode="numeric" placeholder="Qty" value="' + esc(r.qty == null ? '' : r.qty) + '" />'
+            + '<input data-st="carat" data-i="' + i + '" inputmode="decimal" placeholder="Total ct (optional)" value="' + esc(r.carat == null ? '' : r.carat) + '" /></div>'
+            + (r.type === 'diamond'
+              ? '<div class="stone-three"><select data-st="color" data-i="' + i + '" aria-label="Color">' + opt(MS.DIAMOND_COLORS, r.color, 'Color') + '</select>'
+                + '<select data-st="clarity" data-i="' + i + '" aria-label="Clarity">' + opt(MS.DIAMOND_CLARITIES, r.clarity, 'Clarity') + '</select>'
+                + '<select data-st="shape" data-i="' + i + '" aria-label="Shape">' + opt(MS.DIAMOND_SHAPES, r.shape, 'Shape') + '</select></div>'
+              : '')
+            + '</div>';
+        });
+        if (box._rows.length < MS.MAX_STONE_ROWS) h += '<button type="button" class="stones-add" data-st="add">＋ Add stone</button>';
+        h += '<div class="stones-err" data-st-err>' + esc(fehler()) + '</div>';
+      }
+      h += '<div class="stones-foot" data-st-foot>' + esc(fuss()) + '</div>';
+      box.innerHTML = h;
+    };
+    box.addEventListener('click', function (ev) {
+      const t = ev.target.closest ? ev.target.closest('[data-st]') : null;
+      if (!t || t.tagName === 'SELECT' || t.tagName === 'INPUT') return;
+      const k = t.getAttribute('data-st'), i = Number(t.getAttribute('data-i'));
+      if (k === 'toggle') box._open = !box._open;
+      else if (k === 'add') { box._rows.push({ type: '', qty: '' }); box._open = true; }
+      else if (k === 'remove') box._rows.splice(i, 1);
+      else return;
+      box._render();
+      box.dispatchEvent(new Event('change', { bubbles: true }));
+    });
+    box.addEventListener('change', function (ev) {
+      const t = ev.target; const k = t && t.getAttribute ? t.getAttribute('data-st') : null;
+      if (!k || t.tagName !== 'SELECT') return;
+      const r = box._rows[Number(t.getAttribute('data-i'))]; if (!r) return;
+      if (k === 'type') {
+        r.type = t.value;
+        // Nur Diamanten tragen Farbe/Reinheit/Form, nur „Other" einen Namen.
+        if (r.type !== 'diamond') { delete r.color; delete r.clarity; delete r.shape; }
+        if (r.type !== 'other') delete r.name;
+      } else if (t.value) r[k] = t.value; else delete r[k];
+      box._render();
+    });
+    box.addEventListener('input', function (ev) {
+      const t = ev.target; const k = t && t.getAttribute ? t.getAttribute('data-st') : null;
+      if (!k || t.tagName !== 'INPUT') return;
+      const r = box._rows[Number(t.getAttribute('data-i'))]; if (!r) return;
+      r[k] = t.value;
+      // Nicht neu zeichnen (der Fokus bleibt) — nur Zusammenfassung, Hinweis und Diamond Weight nachziehen.
+      const sum = box.querySelector('[data-st-sum]'); if (sum) sum.textContent = kopf();
+      const err = box.querySelector('[data-st-err]'); if (err) err.textContent = fehler();
+      const ft = box.querySelector('[data-st-foot]'); if (ft) ft.textContent = fuss();
+    });
+    box._render();
+    return box;
+  }
+  /** Gespeicherte Zeilen (oder Entwurf) in das Steinfeld legen; `attrs` für die Diamond-Weight-Anzeige. */
+  function writeStones(e, rows, attrs) {
+    if (!e || !e._render) return;
+    e._rows = (Array.isArray(rows) ? rows : MobileStones.readStones(rows)).map((r) => Object.assign({}, r));
+    e._attrs = attrs || {};
+    e._render();
+  }
+  /** Der Entwurf eines Steinfelds prüfen: { rows (normalisiert), error }. */
+  function stonesOf(v) {
+    const p = MobileStones.parseStones(v || []);
+    return { rows: p.rows, error: p.issues.length ? p.issues[0].message : '' };
+  }
   function makeControl(a, pre) {
     const idOf = (k) => (pre || 'attr_') + k;
+    if (a.type === 'stones') return makeStonesControl(idOf(a.key));
     if (a.type === 'select') {
       const s = el('select', { id: idOf(a.key) }); s.appendChild(el('option', { value: '' }, '— Select —'));
       for (const o of (a.options || [])) s.appendChild(el('option', { value: o }, o)); return s;
@@ -1936,7 +2069,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const cs = $('cCondition'); cs.innerHTML = ''; cs.appendChild(el('option', { value: '' }, '— Select —'));
     for (const o of (cat ? cat.conditionOptions : [])) cs.appendChild(el('option', { value: o }, o));
     const host = $('cAttrs'); host.innerHTML = '';
-    if (cat) for (const a of cat.attributes) {
+    if (cat) for (const a of editableAttrs(cat)) {
       const row = el('div', { class: 'row', id: 'row_' + a.key });
       const lbl = el('label'); lbl.innerHTML = a.label + (a.unit ? ' (' + a.unit + ')' : '') + (a.required ? ' <span class="req">*</span>' : '');
       row.appendChild(lbl); row.appendChild(makeControl(a)); host.appendChild(row);
@@ -1987,6 +2120,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
 
   function readAttr(a, pre) {
     const e = $((pre || 'attr_') + a.key); if (!e) return undefined;
+    if (a.type === 'stones') return (e._rows || []).map((r) => Object.assign({}, r));
     if (a.type === 'multiselect') { const out = []; for (const c of e.children) if (c.classList.contains('on')) out.push(c.textContent); return out; }
     if (a.type === 'boolean') { for (const c of e.children) if (c.classList.contains('on')) return c.dataset.val === 'true'; return undefined; }
     if (a.type === 'number') return normNumber(e.value);
@@ -2026,6 +2160,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       for (const a of cat.attributes) {
         if (!dependsSatisfied(a)) continue; // never send hidden fields, and never other categories' fields
         const v = readAttr(a);
+        if (a.type === 'stones') { const st = stonesOf(v); if (st.error) errors.push(st.error); else if (st.rows.length) attributes[a.key] = st.rows; continue; }
         if (a.type === 'number' && Number.isNaN(v)) { errors.push(a.label + ' must be a valid number ≥ 0.'); continue; }
         const empty = v === undefined || v === '' || v === null || (Array.isArray(v) && v.length === 0);
         if (empty) { if (a.required) errors.push(a.label + ' is required.'); continue; }

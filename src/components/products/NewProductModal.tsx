@@ -20,8 +20,10 @@ import { useProductStore } from '@/stores/productStore';
 import type { Product, Category } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 import { useAiIdentifyGate } from '@/core/ai/ai-availability';
-import { validateProductFields, blockingIssues, stripStaleAttributes, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
+import { validateProductFields, blockingIssues, stripStaleAttributes, editableAttributes, isBrandRequired } from '@/core/products/field-contract';
 import { nameFromAttributes, brandModelHidden } from '@/core/products/display-name';
+import { StonesEditor } from '@/components/products/StonesEditor';
+import { mergeAiAttributes } from '@/core/products/stones';
 
 export interface NewProductModalProps {
   open: boolean;
@@ -114,7 +116,7 @@ export function NewProductModal({
     // Condition stays optional (2026-05-17); pricing has no rule on any surface.
     return blockingIssues(validateProductFields(selectedCat, {
       categoryId: form.categoryId, brand: form.brand, name: form.name, attributes: form.attributes,
-    })).map(i => i.label);
+    })).map(i => (i.message ? i.label + ' — ' + i.message : i.label));
   }
 
   function handleSubmit() {
@@ -225,7 +227,12 @@ export function NewProductModal({
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12 }}>
               {/* DESKTOP-CONTRACT: visibility comes from the shared contract (dependsOn-aware),
                   identical to ProductDetail and the mobile form — no second copy of the rule. */}
-              {visibleAttributes(selectedCat, form.attributes).map(attr => {
+              {editableAttributes(selectedCat, form.attributes).map(attr => {
+                // STONES — die EINE Steinliste; Diamond Weight steht dort, nicht als eigenes Feld.
+                if (attr.type === 'stones') {
+                  return <StonesEditor key={attr.key} value={form.attributes?.stones} attributes={form.attributes as Record<string, unknown>}
+                    onChange={(rows) => setForm(p => ({ ...p, attributes: { ...(p.attributes || {}), stones: rows as never } }))} />;
+                }
                 const isWide = attr.type === 'select' && (attr.options?.length || 0) >= 8;
                 if (attr.type === 'select' && attr.options) {
                   return (
@@ -406,12 +413,8 @@ export function NewProductModal({
                       if (Array.isArray(result.scopeOfDelivery) && result.scopeOfDelivery.length > 0 && (!f.scopeOfDelivery || f.scopeOfDelivery.length === 0)) {
                         updated.scopeOfDelivery = result.scopeOfDelivery;
                       }
-                      const attrs = { ...(f.attributes || {}) };
-                      for (const [k, v] of Object.entries(result.attributes || {})) {
-                        if (v === null || v === undefined || v === '') continue;
-                        attrs[k] = v as string | number | boolean | string[];
-                      }
-                      updated.attributes = attrs;
+                      // STONES — die KI schlägt vor; eine schon erfasste Steinliste bleibt.
+                      updated.attributes = mergeAiAttributes(f.attributes, result.attributes) as Product['attributes'];
                       // AI-Learning: Snapshot speichern damit Editing-Korrekturen
                       // spaeter erkannt werden (Diff in ProductDetail-Save).
                       updated.aiIdentifiedSnapshot = JSON.stringify({

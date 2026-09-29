@@ -29,14 +29,14 @@ import { useAuthStore } from '@/stores/authStore';
 import { useProductMediaPresentation } from '@/hooks/useProductMediaPresentation';
 import { presentationSrcs, isResolvingMedia } from '@/core/media/presentation';
 import { presentationToResolverStatus, editSaveFailsClosed, type ResolverStatus } from '@/core/media/product-edit-draft';
-import { validateProductFields, blockingIssues, stripStaleAttributes, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
+import { validateProductFields, blockingIssues, stripStaleAttributes, isBrandRequired, editableAttributes } from '@/core/products/field-contract';
 import { identifyProductFromResolvedInput } from '@/core/ai/identify-adapter';
 import { buildAiAttributePatch, buildAiFormPatch, type FormLike } from '@/core/ai/edit-merge';
 import { applyChoiceSelection } from '@/core/products/choice-value';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { StockCheckPanel } from '@/components/products/StockCheckPanel';
-import type { Product, TaxScheme, StockStatus } from '@/core/models/types';
+import type { Product, TaxScheme, StockStatus, AttributeValue } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 // CENTRAL-UI-PARITY R2D — Mandant und Artikelhistorie ohne eigene Abfrage in der Seite.
 import { useSharedRead, sessionTenantId } from '@/core/data/shared-read';
@@ -44,6 +44,8 @@ import { productDetailReadsFor } from '@/core/data/page-reads';
 import { productLotsFor } from '@/core/data/domain-reads';
 import { useAiIdentifyGate, aiTextLocked, AI_TEXT_ON_PRIMARY } from '@/core/ai/ai-availability';
 import { productDisplayName, productDisplayLines, brandModelHidden } from '@/core/products/display-name';
+import { StonesEditor } from '@/components/products/StonesEditor';
+import { diamondWeightInfo, readStones } from '@/core/products/stones';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -106,7 +108,7 @@ export function ProductDetail() {
   // unreachable there, so this counter never changes).
   const [e2eSeedTick, setE2eSeedTick] = useState(0);
   aiImgRef.current = form.images?.[0]; // R1: mirror current picked image for the stale guard
-  const [formAttrs, setFormAttrs] = useState<Record<string, string | number | boolean | string[]>>({});
+  const [formAttrs, setFormAttrs] = useState<Record<string, AttributeValue>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiBusy, setAiBusy] = useState(false);
@@ -331,7 +333,7 @@ export function ProductDetail() {
     const e: Record<string, string> = {};
     for (const i of blockingIssues(issues)) {
       // attribute findings keep the `attr_` prefix the field anchors/labels use
-      e[category?.attributes.some(a => a.key === i.field) ? `attr_${i.field}` : i.field] = 'Required';
+      e[category?.attributes.some(a => a.key === i.field) ? `attr_${i.field}` : i.field] = i.message || 'Required';
     }
     return e;
   }
@@ -728,7 +730,7 @@ export function ProductDetail() {
                           // product silently overwrote its real cost). Nothing media-related is touched,
                           // and a field the model did not recognise leaves the existing value alone.
                           setForm(f => ({ ...f, ...buildAiFormPatch(result, f as FormLike, { mode: 'edit' }) } as typeof f));
-                          setFormAttrs(a => ({ ...a, ...buildAiAttributePatch(result, (category?.attributes ?? []).map(x => x.key)) }));
+                          setFormAttrs(a => ({ ...a, ...buildAiAttributePatch(result, (category?.attributes ?? []).map(x => x.key), a as Record<string, unknown>) }));
                         } catch (e) { alert(String(e)); }
                         finally { setAiBusy(false); }
                       }}
@@ -1377,8 +1379,20 @@ export function ProductDetail() {
                 {/* DESKTOP-CONTRACT: render exactly the attributes the contract declares VISIBLE for
                     the current values (dependsOn-aware, same as the create dialog and the mobile
                     form). A hidden attribute is neither shown nor required nor persisted. */}
-                {visibleAttributes(category, editing ? formAttrs : product.attributes).map(attr => {
+                {editableAttributes(category, editing ? formAttrs : product.attributes).map(attr => {
                   const val = editing ? formAttrs[attr.key] : product.attributes[attr.key];
+
+                  // STONES — die EINE Steinliste (src/core/products/stones.ts); Diamond Weight steht dort, nicht als eigenes Feld.
+                  if (attr.type === 'stones') {
+                    const attrsNow = (editing ? formAttrs : product.attributes) as Record<string, unknown>;
+                    if (!editing && diamondWeightInfo(attrsNow).source === 'none' && !readStones(attrsNow.stones).length) return null;
+                    return (
+                      <div key={attr.key} id={'field-attr_' + attr.key} style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE' }}>
+                        <StonesEditor value={attrsNow.stones} attributes={attrsNow} readOnly={!editing}
+                          onChange={(rows) => { setFormAttrs(a => ({ ...a, stones: rows as never })); if (errors.attr_stones) setErrors({ ...errors, attr_stones: '' }); }} />
+                      </div>
+                    );
+                  }
 
                   if (editing) {
                     const errKey = `attr_${attr.key}`;

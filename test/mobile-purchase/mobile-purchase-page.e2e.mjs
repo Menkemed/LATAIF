@@ -33,6 +33,13 @@ const S = (v) => JSON.stringify(v);
 const html = readFileSync(join(repo, 'src-tauri/src/sync/mobile_purchase.html'), 'utf8');
 const befehleRepair = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_commands.js'), 'utf8');
 const anzeigeName = readFileSync(join(repo, 'src-tauri/src/sync/mobile_display_name.js'), 'utf8');
+const steine = readFileSync(join(repo, 'src-tauri/src/sync/mobile_stones.js'), 'utf8');
+// STONES — dieselben Stile wie die echte Seite (für die Sichtprüfung bei 360 px).
+const STEIN_CSS = (() => {
+  const pg = readFileSync(join(repo, 'src-tauri/src/sync/mobile_page.rs'), 'utf8').split(String.fromCharCode(13)).join('');
+  const i = pg.indexOf('/* STONES — kompakter Steinbereich */');
+  return pg.slice(i, pg.indexOf(String.fromCharCode(10), pg.indexOf('.stones-foot', i)));
+})();
 const befehle = readFileSync(join(repo, 'src-tauri/src/sync/mobile_purchase_commands.js'), 'utf8');
 const ui = readFileSync(join(repo, 'src-tauri/src/sync/mobile_purchase_ui.js'), 'utf8');
 const schema = readFileSync(join(repo, 'src-tauri/src/sync/mobile_field_schema.json'), 'utf8');
@@ -53,6 +60,8 @@ const zeile = (m) => { const x = m.exec(page); if (!x) throw new Error('Zeile ni
 const helfer = [
   ausSeite('function el(tag, attrs, text) {'), ausSeite('function uuid() {'), ausSeite('function resizePhoto(file, maxDim, quality) {'),
   ausSeite('function dependsSatisfied(attr, pre) {'), zeile(/const ROW_PREFIX = \{[^}]*\};/), ausSeite('function applyDependencies(cat, pre) {'),
+  ausSeite('function esc(s) {'), ausSeite('function editableAttrs(cat) {'), ausSeite('function makeStonesControl(id) {'),
+  ausSeite('function writeStones(e, rows, attrs) {'), ausSeite('function stonesOf(v) {'),
   ausSeite('function makeControl(a, pre) {'), ausSeite('function normNumber(raw) {'), ausSeite('function readAttr(a, pre) {'),
   ausSeite('function aiApplyToForm(result, ids) {'),
 ].join('\n');
@@ -78,10 +87,11 @@ const SEITE = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="view
 label { display: block; font-size: 11px; margin-bottom: 8px; } input, textarea, select { width: 100%; padding: 12px; font-size: 16px; }
 button { width: 100%; padding: 14px; } .photo-strip { display: flex; gap: 8px; overflow-x: auto; } .photo-thumb { position: relative; width: 78px; height: 78px; flex: 0 0 auto; }
 .photo-thumb img { width: 100%; height: 100%; object-fit: cover; } .chips { display: flex; flex-wrap: wrap; gap: 8px; } .chip { width: auto; }
-.row + .row { margin-top: 14px; } .error, .success { padding: 10px; } .header-row { display: flex; justify-content: space-between; } .photo-area { display: flex; flex-direction: column; }</style>
+.row + .row { margin-top: 14px; } .error, .success { padding: 10px; } .header-row { display: flex; justify-content: space-between; } .photo-area { display: flex; flex-direction: column; }
+${STEIN_CSS}</style>
 </head><body>
 ${html}
-<script src="/display-name.js"></script><script src="/repair-commands.js"></script><script src="/commands.js"></script><script src="/shim.js"></script><script src="/ui.js"></script>
+<script src="/display-name.js"></script><script src="/stones.js"></script><script src="/repair-commands.js"></script><script src="/commands.js"></script><script src="/shim.js"></script><script src="/ui.js"></script>
 </body></html>`;
 
 // ── Attrappen-Primary ─────────────────────────────────────────────────────────────────────────
@@ -90,7 +100,7 @@ let partnerListe = [{ id: 'pa-1', name: 'Bashir', active: true }, { id: 'pa-2', 
 let einkauf = () => ({ status: 200, body: { ok: true, value: { purchaseId: 'pur-1', purchaseNumber: 'PUR-2026-000042', totalAmount: 1361.5, paidAmount: 700, openAmount: 661.5 } } });
 const server = createServer((req, res) => {
   if (req.method === 'GET') {
-    const js = { '/display-name.js': anzeigeName, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI }[req.url.split('?')[0]];
+    const js = { '/display-name.js': anzeigeName, '/stones.js': steine, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI }[req.url.split('?')[0]];
     if (js !== undefined) { res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' }); res.end(js); return; }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(SEITE); return;
   }
@@ -130,6 +140,13 @@ class CDP {
     return r.result?.value;
   }
   close() { try { this.ws.close(); } catch { /* zu */ } }
+}
+/** Eine Aufnahme nur eines Elements (Sichtprüfung eines Bereichs). */
+async function shotEl(c, name, sel) {
+  if (!process.env.E2E_SHOTS) return;
+  const r = await c.ev(`const b = document.querySelector(${JSON.stringify(sel)}).getBoundingClientRect(); return [b.left + window.scrollX, b.top + window.scrollY, b.width, b.height];`);
+  const shot = await c.send('Page.captureScreenshot', { format: 'png', captureBeyondViewport: true, clip: { x: r[0], y: r[1], width: r[2], height: r[3], scale: 1 } });
+  writeFileSync(join(process.env.E2E_SHOTS, name + '.png'), Buffer.from(shot.data, 'base64'));
 }
 async function shot(c, name) {
   if (!process.env.E2E_SHOTS) return;
@@ -221,6 +238,25 @@ try {
     '§1 Gold-Diamond Jewellery: keine Felder für Marke/Modell');
   await c.ev(tippe(`[data-mp-field="item:${uid2}:quantity"]`, '3') + tippe(`[data-mp-field="item:${uid2}:unitPrice"]`, '120.5') + ' return 1;');
   await c.ev(pflicht(uid2) + ' return 1;');
+  // STONES — die Steinliste der Gold-Position: kompakt, aufklappbar, dieselbe Prüfung wie am Primary.
+  const stein = (sel) => `document.querySelector('[id="mpa${uid2}_stones"] ${sel}')`;
+  const setze = (sel, v, ev) => `(function(){ const e = ${stein(sel)}; e.value = ${S(v)}; e.dispatchEvent(new Event('${ev}', { bubbles: true })); })();`;
+  ok(await c.ev(`return !!document.querySelector('[id="mpa${uid2}_stones"]') && !document.querySelector('[id="mpa${uid2}_diamond_weight"]') && /No stones/.test(${stein('.stones-head')}.textContent);`),
+    '§1 STONES Gold-Position: Steinbereich geschlossen („No stones"), kein eigenes Diamond-Weight-Feld');
+  await c.ev(`${stein('[data-st="toggle"]')}.click(); ${stein('[data-st="add"]')}.click(); ${stein('[data-st="add"]')}.click(); ${stein('[data-st="add"]')}.click(); return 1;`);
+  await c.ev(setze('[data-st="type"][data-i="0"]', 'diamond', 'change') + setze('[data-st="qty"][data-i="0"]', '1', 'input') + setze('[data-st="carat"][data-i="0"]', '0.50', 'input')
+    + setze('[data-st="color"][data-i="0"]', 'G', 'change') + setze('[data-st="clarity"][data-i="0"]', 'VS1', 'change') + setze('[data-st="shape"][data-i="0"]', 'oval', 'change')
+    + setze('[data-st="type"][data-i="1"]', 'diamond', 'change') + setze('[data-st="qty"][data-i="1"]', '20', 'input') + setze('[data-st="carat"][data-i="1"]', '0.30', 'input')
+    + setze('[data-st="type"][data-i="2"]', 'other', 'change') + setze('[data-st="qty"][data-i="2"]', '3', 'input') + ' return 1;');
+  ok(await c.ev(`return /Stone 3: enter the stone name/.test(${stein('[data-st-err]')}?.textContent || '') && !${stein('[data-st="color"][data-i="2"]')};`),
+    '§1 STONES Other ohne Namen wird benannt; Diamant-Felder nur bei Diamant');
+  await c.ev(setze('[data-st="name"][data-i="2"]', 'Spinel', 'input') + setze('[data-st="carat"][data-i="2"]', '0.45', 'input') + ' return 1;');
+  await c.ev(`${stein('[data-st="toggle"]')}.click(); ${stein('[data-st="toggle"]')}.click(); return 1;`);
+  ok(await c.ev(`return ${stein('.stones-head')}.textContent.includes('3 rows · Diamond 0.80 ct · Spinel 0.45 ct') && /Diamond weight 0\\.80 ct — from the diamond rows/.test(${stein('.stones-foot')}.textContent);`),
+    `§1 STONES Zusammenfassung „3 rows · Diamond 0.80 ct · Spinel 0.45 ct", Diamond weight aus den Zeilen (${await c.ev(`return ${stein('.stones-head')}.textContent;`)})`);
+  ok(await c.ev('return document.documentElement.scrollWidth <= document.documentElement.clientWidth;'), '§1 STONES bei 360 px kein waagerechtes Scrollen');
+  await shot(c, 'mp-stones');
+  await shotEl(c, 'mp-stones-el', `[id="mpa${uid2}_stones"]`);
   ok(await c.ev(summe('items')) === '2 positions · 4 pcs · 1,361.500 BHD', `§1 Positionen 1 + Menge 3 = 4 Stück, 1000 + 361,5 (${await c.ev(summe('items'))})`);
   // Zahlungen: bar 500, Bank 200.
   await c.ev(klick('[data-mp-toggle="payments"]') + ' return 1;');
@@ -269,6 +305,12 @@ try {
     && p.lines[1].quantity === 3 && p.lines[0].newProduct.stagingIds.length === 2 && S(p.lines[0].partnerShares) === S([{ partnerId: 'pa-1', sharePct: 40 }])
     && S(p.payments) === S([{ amount: 500, method: 'cash' }, { amount: 200, method: 'bank' }]),
   `§3 Rumpf: Kunde → Lieferant, zwei Positionen, Menge 3, Fotos, Partner 40 %, zwei Zahlungen (${S(p).slice(0, 200)}…)`);
+  ok(S(p.lines[1].newProduct.attributes.stones) === S([
+    { type: 'diamond', qty: 1, carat: 0.5, color: 'G', clarity: 'VS1', shape: 'oval' },
+    { type: 'diamond', qty: 20, carat: 0.3 },
+    { type: 'other', qty: 3, carat: 0.45, name: 'Spinel' },
+  ]) && !('diamond_weight' in p.lines[1].newProduct.attributes),
+    `§3 STONES im Auftrag die geprüften, normalisierten Zeilen — kein Diamond Weight vom Telefon (${S(p.lines[1].newProduct.attributes.stones)})`);
   ok(p.lines[1].brand === '' && p.lines[1].name === '' && p.lines[1].newProduct.brand === null && p.lines[1].newProduct.categoryId === 'cat-gold-jewelry',
     `§3 die Gold-Position reist ohne Marke/Modell (${S(p.lines[1]).slice(0, 160)})`);
 
