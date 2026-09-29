@@ -248,7 +248,8 @@ const katVon = (n: string) => {
 };
 const impOpts = { resolveCategory: katVon, defaultVatScheme: 'VAT_10' as const, existingIndex: imp.buildExistingIndex([]) };
 const zeileImp = (extra: Record<string, string | number>, kat = 'Gold-Diamond Jewellery') =>
-  imp.classifyRows([{ Category: kat, 'Description 1': 'Ring', Cost: 100, ...extra }], impOpts)[0];
+  imp.classifyRows([{ Category: kat, 'Description 1': 'Ring', Cost: 100,
+    ...(kat === 'Gold-Diamond Jewellery' ? { 'Item Type': 'Ring', 'Karat & Color': '18K Yellow', Weight: 5 } : {}), ...extra }], impOpts)[0];
 const altDatei = zeileImp({ 'Diamond Weight': 1.2 });
 ok(altDatei.status === 'new' && altDatei.stones.length === 0 && altDatei.diamondWeight === 1.2, `IMPORT alte Datei nur mit Diamond Weight: importierbar, keine erfundenen Steine (${S({ s: altDatei.status, st: altDatei.stones, dw: altDatei.diamondWeight })})`);
 const einer = zeileImp({ 'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 12, 'Stone 1 Carat': 0.8, 'Stone 1 Color': 'g', 'Stone 1 Clarity': 'vs1', 'Stone 1 Shape': 'Round' });
@@ -305,8 +306,59 @@ ok(vRows[2].stones.length === 2 && vRows[2].diamondWeight === 0.8 && vRows[3].st
 ok(gelesen.SheetNames[1] === 'How to' && vorlage.help.some((z: string[]) => /Stone 4 Type/.test(z[0])) && vorlage.help.some((z: string[]) => /Cubic Zirconia/.test(z[0])),
   'VORLAGE Blatt „How to" erklärt mehrere Steine und die erlaubten Werte');
 const importSeite = src('src/pages/settings/ImportPage.tsx');
-ok(/if \(item\.stones\.length\) attrs\.stones = item\.stones;/.test(importSeite) && /data-import-template onClick=\{downloadTemplate\}/.test(importSeite) && /importTemplate\(\)/.test(importSeite),
+ok(/const attrs = item\.attributes as Product\['attributes'\];/.test(importSeite) && /if \(stones\.length\) attributes\.stones = stones;/.test(src('src/core/import/product-import.ts')) && /data-import-template onClick=\{downloadTemplate\}/.test(importSeite) && /importTemplate\(\)/.test(importSeite),
   'IMPORT-SEITE legt die Steine an und bietet die Vorlage an');
+// ── GOLD-IMPORT — dieselben Merkmale wie die Maske; andere Kategorien unverändert ───────────────
+const sortiert = (o: Record<string, unknown>) => S(Object.keys(o).sort().map((k) => [k, o[k]]));
+const goldKey = new Set(kat.attributes.map((a) => a.key));
+const neuGold = imp.classifyRows([{
+  Category: 'Gold-Diamond Jewellery', 'Item Type': 'Ring', 'Karat & Color': '18K Yellow', Weight: 6.4, 'Description 1': 'Solitaire', Cost: 450, VAT: 'VAT_10',
+  'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 1, 'Stone 1 Carat': 0.5, 'Stone 1 Color': 'F', 'Stone 1 Clarity': 'VVS2', 'Stone 1 Shape': 'Round',
+  'Stone 2 Type': 'Emerald', 'Stone 2 Qty': 2, 'Stone 2 Carat': 0.45,
+}], impOpts)[0];
+// Derselbe Artikel von Hand am Rechner (WatchList: Zahl als Zahl, Auswahl als Text, Steine als Entwurf).
+const vonHand = st.stonesOrThrow(GOLD, { weight: 6.4, item_type: 'Ring', karat: '18K Yellow', description: 'Solitaire',
+  stones: [{ type: 'diamond', qty: '1', carat: '0.50', color: 'F', clarity: 'VVS2', shape: 'round' }, { type: 'emerald', qty: '2', carat: '0.45' }] } as Record<string, unknown>);
+const angelegt = st.stonesOrThrow(GOLD, neuGold.attributes);   // = createProduct
+ok(neuGold.status === 'new' && sortiert(angelegt) === sortiert(vonHand),
+  `GOLD-IMPORT Ring · 18K Yellow + Steine → exakt dieselben attributes wie von Hand (${sortiert(angelegt)})`);
+ok(Object.keys(neuGold.attributes).every((k) => goldKey.has(k)) && fc.blockingIssues(fc.validateProductFields(kat as never, { categoryId: GOLD, brand: '', name: '', attributes: angelegt } as never)).length === 0,
+  'GOLD-IMPORT nur Felder der Kategorie, und die Maske hätte nichts zu beanstanden');
+ok(neuGold.name === '' && neuGold.brand === '' && neuGold.displayName === 'Ring · Solitaire · 18K Yellow · 6.40 g',
+  `GOLD-IMPORT ohne Marke/Modell, Name aus den Merkmalen („${neuGold.displayName}")`);
+const schreibweise = zeileImp({ 'Item Type': 'rings', 'Karat & Color': '18k yellow' });
+ok(schreibweise.attributes.item_type === 'Ring' && schreibweise.attributes.karat === '18K Yellow', 'GOLD-IMPORT Schreibweise egal („rings", „18k yellow")');
+const nurTyp = imp.classifyRows([{ Category: 'Gold-Diamond Jewellery', 'Item Type': 'Bangle', 'Karat & Color': '21K Yellow', Weight: 12, Cost: 300 }], impOpts)[0];
+ok(nurTyp.status === 'new' && nurTyp.displayName === 'Bangle · 21K Yellow · 12 g', `GOLD-IMPORT Marke/Modell nicht verlangt — Schmuckart genügt (${nurTyp.status} ${S(nurTyp.errors)})`);
+// Alte Dateien: Karat/Carat (+ Metall als Farbe), keine Item-Type-Spalte.
+const legacy = (extra: Record<string, string | number>) => imp.classifyRows([{ Category: 'Gold-Diamond Jewellery', 'Description 1': 'LADIES RING', Weight: 4.2, Cost: 200, ...extra }], impOpts)[0];
+const l1 = legacy({ Carat: 18, Metal: 'White Gold', Serial: 'S-77', Size: '54', Markup: '2.2', 'Description 2': 'box' });
+ok(l1.status === 'warning' && l1.attributes.karat === '18K White' && !('item_type' in l1.attributes) && Object.keys(l1.attributes).every((k) => goldKey.has(k))
+  && l1.notes === 'box / Serial: S-77 / Size: 54 / Markup: 2.2' && l1.warnings.includes('Item Type not set'),
+  `GOLD-IMPORT alte Datei: Carat 18 + Metal White Gold → 18K White; nichts in Alt-Feldern, Rest in der Notiz (${S({ a: l1.attributes, n: l1.notes, w: l1.warnings })})`);
+ok(legacy({ Karat: 21 }).attributes.karat === '21K Yellow' && legacy({ Metal: '18K Rose Gold' }).attributes.karat === '18K Rose' && legacy({ Carat: '750', Metal: 'yellow' }).attributes.karat === '18K Yellow',
+  'GOLD-IMPORT alte Werte: Karat 21 → 21K Yellow, Metal „18K Rose Gold", Feingehalt 750 + yellow');
+const l2 = legacy({ Carat: 18 });
+ok(!('karat' in l2.attributes) && l2.notes === 'Karat: 18' && l2.warnings.some((w: string) => /Karat & Color "18" not recognised/.test(w)), `GOLD-IMPORT „18" ohne Farbe wird nicht geraten (${S({ n: l2.notes, w: l2.warnings })})`);
+const l3 = legacy({ Carat: 0.18, Metal: 'Yellow Gold' });
+ok(!('karat' in l3.attributes) && /Karat: 0\.18/.test(l3.notes || '') && /Metal: Yellow Gold/.test(l3.notes || ''), 'GOLD-IMPORT 0.18 (Diamant-Karat) wird nie zu 18K');
+const l4 = legacy({ Material: 'Ring' });
+ok(!('item_type' in l4.attributes) && /Metal: Ring/.test(l4.notes || ''), 'GOLD-IMPORT „Material" wird nie zu Item Type');
+const l5 = zeileImp({ 'Item Type': 'Chain' });
+ok(!('item_type' in l5.attributes) && /Item type: Chain/.test(l5.notes || '') && l5.warnings.some((w: string) => /Item Type "Chain" not recognised/.test(w)), 'GOLD-IMPORT unbekannte Schmuckart → Hinweis + Notiz, nichts erfunden');
+// Uhr und andere Kategorien: genau die bisherige Zuordnung.
+const uhrAlt = imp.classifyRows([{ Category: 'Watch', Brand: 'Rolex', Model: '126610LN', Serial: 'Z1', 'Description 1': 'Submariner', 'Description 2': 'full set', Size: '41', Material: 'Steel', Markup: '1.3', Carat: 18, Weight: 150, 'Item Type': 'Ring', 'Karat & Color': '18K Yellow', Cost: 9000 }], impOpts)[0];
+ok(sortiert(uhrAlt.attributes) === sortiert({ reference_no: '126610LN', serial_no: 'Z1', description_1: 'Submariner', description_2: 'full set', size: '41', metal: 'Steel', markup: '1.3', weight: 150, carat: 18 })
+  && uhrAlt.name === 'Submariner' && uhrAlt.notes === 'full set' && uhrAlt.brand === 'Rolex',
+  `GOLD-IMPORT Uhr unverändert (Material, Size, Brand/Model …; Item Type/Karat & Color ignoriert) (${sortiert(uhrAlt.attributes)})`);
+const branded = imp.classifyRows([{ Category: 'Branded Gold Jewelry', Brand: 'Cartier', 'Description 1': 'Love', Material: 'Ring', Size: '17', Cost: 3000 }], impOpts)[0];
+ok(branded.attributes.metal === 'Ring' && !('item_type' in branded.attributes) && branded.attributes.size === '17',
+  'GOLD-IMPORT außerhalb Gold-Diamond Jewellery keine Material→Item-Type-Zuordnung');
+ok(vRows.slice(1).every((r: { attributes: Record<string, unknown> }) => r.attributes.item_type && r.attributes.karat) && S(vorlage.items[0]).includes('"Item Type","Karat & Color"')
+  && vorlage.help.some((z: string[]) => /^Karat & Color — 24K Yellow/.test(z[0])) && vorlage.help.some((z: string[]) => /Material is never used as Item Type/.test(z[0])),
+  'VORLAGE Gold mit Item Type und Karat & Color, „How to" nennt die Werte');
+ok(/Item Type · Karat & Color/.test(importSeite) && /Gold-Diamond Jewellery<\/strong>: Item Type, Karat &amp; Color/.test(importSeite) && /categoryAttributes: \(id: string\)/.test(importSeite),
+  'IMPORT-SEITE Vorschau und Spaltenhinweis zeigen die Gold-Felder; Kategorien aus der Datenbank');
 ok(/stonesFromLabels, normalizeStoneAttributes/.test(src('src/core/import/product-import.ts')) && !/STONE_TYPES\.some|DIAMOND_COLORS\.some/.test(src('src/core/import/product-import.ts')),
   'IMPORT keine eigene Steinprüfung — nur die zentrale Regel');
 

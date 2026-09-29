@@ -10,7 +10,9 @@
 // Backup, createProduct) und rendert das Ergebnis. Alle riskanten Entscheidungen
 // (was ist gültig / Duplikat / welche Zahl / welches VAT-Scheme) fallen HIER und sind getestet.
 
-import type { TaxScheme } from '@/core/models/types';
+import type { TaxScheme, CategoryAttribute } from '@/core/models/types';
+import { DEFAULT_CATEGORIES } from '../models/default-categories.ts';
+import { productDisplayName } from '../products/display-name.ts';
 // STONES — Bedeutung und Prüfung der Steinzeilen kommen aus der EINEN Steinregel (Rechner/Telefon/Primary).
 // Relativer Pfad: dieser Baustein läuft auch headless ohne Alias-Auflösung (test/x3).
 import {
@@ -230,6 +232,14 @@ export interface ClassifiedRow {
   weight: number | null; carat: number | null; diamondWeight: number | null;
   /** Geprüfte, normalisierte Steinzeilen (wie am Rechner/Telefon) — leer ohne Steinspalten. */
   stones: StoneRow[];
+  /** Gold-Diamond Jewellery: erkannte Auswahlwerte (leer = nicht gesetzt/nicht erkannt). */
+  itemType: string; karatColor: string;
+  /** Die Merkmale, mit denen der Artikel angelegt wird (bei Gold genau die Felder der Maske). */
+  attributes: Record<string, unknown>;
+  /** Notiz des Artikels (Description 2/3; bei Gold auch Werte ohne eigenes Feld). */
+  notes?: string;
+  /** Der Anzeigename des künftigen Artikels (Vorschau). */
+  displayName: string;
   purchasePrice: number; plannedSalePrice: number | undefined;
   quantity: number; isSold: boolean;
   taxScheme: TaxScheme | null; vatFromDefault: boolean;
@@ -240,6 +250,51 @@ export interface ClassifyOptions {
   resolveCategory: (rawName: string, rowIndex: number) => { id: string; name: string; matched: boolean };
   defaultVatScheme: TaxScheme | null;
   existingIndex: ExistingProductIndex;
+  /** Die Merkmale einer Kategorie (aus der Datenbank); ohne Angabe die Standard-Kategorien. */
+  categoryAttributes?: (categoryId: string) => readonly CategoryAttribute[] | undefined;
+}
+
+// ── Gold-Diamond Jewellery: dieselben Felder wie die Maske am Rechner/Telefon ──
+// Nur diese Kategorie wird kanonisch angelegt (item_type, karat, weight, description, stones,
+// diamond_weight). Alle anderen Kategorien behalten die bisherige Zuordnung unverändert.
+export const GOLD_IMPORT_CATEGORY = 'cat-gold-jewelry';
+const ITEM_TYPE_COLUMNS = ['Item Type', 'Piece Type', 'Jewellery Type', 'Jewelry Type'];
+const KARAT_COLOR_COLUMNS = ['Karat & Color', 'Karat & Colour', 'Karat and Color', 'Karat and Colour', 'Karat/Color', 'Karat Color'];
+
+function optionsOf(attrs: readonly CategoryAttribute[], key: string): string[] {
+  return attrs.find((a) => a.key === key)?.options || [];
+}
+
+/** „Rings", „earring", „RING" → die Auswahl der Kategorie („Ring", „Earrings"); sonst null. */
+export function itemTypeOption(raw: string, options: readonly string[]): string | null {
+  const s = raw.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  return options.find((o) => { const l = o.toLowerCase(); return l === s || l === s.replace(/s$/, '') || l === s + 's'; }) ?? null;
+}
+
+/**
+ * Karat & Color aus dem, was eine Tabelle dazu hergibt: der Wert selbst („18K Yellow"), oder alte
+ * Spalten zusammen („18" + „White Gold" → „18K White"; „750 rose" → „18K Rose"). 24K/22K/21K gibt es
+ * nur in Gelb. Nichts wird geraten: ohne eindeutige Farbe (z. B. nur „18") → null.
+ */
+export function karatColorOption(raw: string, options: readonly string[]): string | null {
+  const s = raw.toLowerCase().replace(/\s+/g, ' ').trim();
+  if (!s) return null;
+  const genau = options.find((o) => o.toLowerCase() === s);
+  if (genau) return genau;
+  // Eine Zahl zählt nur für sich — nie als Teil einer Dezimalzahl („0.18" ist kein 18K).
+  const fuer = (muster: string) => new RegExp('(?<![\\d.,])(' + muster + ')(?!\\d|[.,]\\d)').exec(s);
+  if (/\bsilver\b|\bsterling\b/.test(s) || fuer('925')) return options.find((o) => o.toLowerCase() === 'silver') ?? null;
+  const FEIN: Record<string, number> = { '999': 24, '916': 22, '875': 21, '750': 18, '585': 14, '375': 9 };
+  const fein = fuer('999|916|875|750|585|375');
+  const zahl = fuer('24|22|21|18|14|9');
+  const k: number | null = fein ? FEIN[fein[1]] : zahl ? Number(zahl[1]) : null;
+  let farbe = /yellow/.test(s) ? 'Yellow' : /rose|pink|red/.test(s) ? 'Rose' : /white/.test(s) ? 'White'
+    : /\bmix|two[\s-]?tone|bi[\s-]?colou?r|tri[\s-]?colou?r/.test(s) ? 'Mix' : '';
+  if (k !== null && !farbe && (k === 24 || k === 22 || k === 21)) farbe = 'Yellow';
+  if (k === null || !farbe) return null;
+  const wunsch = `${k}K ${farbe}`.toLowerCase();
+  return options.find((o) => o.toLowerCase() === wunsch) ?? null;
 }
 
 export function isImportable(status: ImportRowStatus): boolean {
@@ -262,7 +317,19 @@ function classifyRow(row: RawRow, idx: number, opts: ClassifyOptions, runningInd
   const size = cleanStr(getCol(row, 'Size'));
   const material = cleanStr(getCol(row, 'Metal', 'Material'));
   const markup = cleanStr(getCol(row, 'Markup'));
-  const name = description1 || referenceNo || brand || 'Unknown';
+  // GOLD — Item Type und Karat & Color wie in der Maske. Alte Spalten bleiben lesbar: „Karat"/„Carat"
+  // (auch zusammen mit der Farbe aus „Metal"/„Material"). „Material" wird NIE zu Item Type — im alten
+  // Import war es immer das Metall.
+  const gold = cat.id === GOLD_IMPORT_CATEGORY;
+  const katAttrs = (opts.categoryAttributes?.(cat.id) ?? DEFAULT_CATEGORIES.find((c) => c.id === cat.id)?.attributes) || [];
+  const itemTypeRaw = gold ? cleanStr(getCol(row, ...ITEM_TYPE_COLUMNS)) : '';
+  const karatColorRaw = gold ? cleanStr(getCol(row, ...KARAT_COLOR_COLUMNS)) : '';
+  const karatAltRaw = gold ? cleanStr(getCol(row, 'Karat', 'Carat')) : '';
+  const itemType = itemTypeRaw ? itemTypeOption(itemTypeRaw, optionsOf(katAttrs, 'item_type')) || '' : '';
+  const karatQuelle = karatColorRaw || [karatAltRaw, material].filter(Boolean).join(' ');
+  const karatColor = gold && karatQuelle ? karatColorOption(karatQuelle, optionsOf(katAttrs, 'karat')) || '' : '';
+  // Bei Gold kein erfundener Name: ohne Marke/Modell benennen die Merkmale den Artikel (wie in der Maske).
+  const name = gold ? referenceNo : (description1 || referenceNo || brand || 'Unknown');
 
   // ── Zahlen ──
   const costP = parseNumber(getCol(row, 'Cost', 'Purchase Price', 'Cost Price'));
@@ -272,8 +339,8 @@ function classifyRow(row: RawRow, idx: number, opts: ClassifyOptions, runningInd
   const caratP = parseNumber(getCol(row, 'Carat', 'Karat'));
   const diaP = parseNumber(getCol(row, 'Diamond Weight', 'Diamond Carat', 'Diamond'));
 
-  // Pflicht: Identität
-  if (!brand && !description1 && !referenceNo) errors.push('No brand or name');
+  // Pflicht: Identität (bei Gold genügt die Schmuckart — Marke/Modell werden dort nicht verlangt)
+  if (!brand && !description1 && !referenceNo && !itemTypeRaw) errors.push(gold ? 'No item type or description' : 'No brand or name');
 
   // Pflicht: Cost > 0, sauber geparst
   if (costP.empty) errors.push('No cost');
@@ -338,6 +405,49 @@ function classifyRow(row: RawRow, idx: number, opts: ClassifyOptions, runningInd
     }
   }
 
+  // ── Merkmale + Notiz, mit denen angelegt wird ──
+  const attributes: Record<string, unknown> = {};
+  let notizTeile: string[] = [description2, description3];
+  if (gold) {
+    // Genau die Felder der Maske. Was dort kein Feld hat, geht nicht verloren, sondern in die Notiz.
+    if (weight != null) attributes.weight = weight;
+    if (diamondWeight != null) attributes.diamond_weight = diamondWeight;
+    if (stones.length) attributes.stones = stones;
+    if (itemType) attributes.item_type = itemType;
+    if (karatColor) attributes.karat = karatColor;
+    if (description1) attributes.description = description1;
+    if (itemTypeRaw && !itemType) warnings.push(`Item Type "${itemTypeRaw}" not recognised → left empty (kept in notes)`);
+    else if (!itemTypeRaw) warnings.push('Item Type not set');
+    if (karatQuelle && !karatColor) warnings.push(`Karat & Color "${karatQuelle}" not recognised → left empty (kept in notes)`);
+    else if (!karatQuelle) warnings.push('Karat & Color not set');
+    if (weight == null) warnings.push('Weight not set');
+    // Die Metall-Spalte ist nur dann „aufgebraucht“, wenn erst sie die Farbe zu Karat & Color geliefert hat.
+    const metallVerbraucht = !karatColorRaw && !!karatColor && !karatColorOption(karatAltRaw, optionsOf(katAttrs, 'karat'));
+    notizTeile = notizTeile.concat([
+      itemTypeRaw && !itemType ? `Item type: ${itemTypeRaw}` : '',
+      karatColorRaw && !karatColor ? `Karat & Color: ${karatColorRaw}` : '',
+      !karatColorRaw && karatAltRaw && !karatColor ? `Karat: ${karatAltRaw}` : '',
+      material && !metallVerbraucht ? `Metal: ${material}` : '',
+      serialNo ? `Serial: ${serialNo}` : '', size ? `Size: ${size}` : '', markup ? `Markup: ${markup}` : '',
+    ]);
+  } else {
+    // Alle anderen Kategorien: die bisherige Zuordnung, unverändert.
+    if (referenceNo) attributes.reference_no = referenceNo;
+    if (serialNo) attributes.serial_no = serialNo;
+    if (description1) attributes.description_1 = description1;
+    if (description2) attributes.description_2 = description2;
+    if (description3) attributes.description_3 = description3;
+    if (size) attributes.size = size;
+    if (material) attributes.metal = material;
+    if (markup) attributes.markup = markup;
+    if (weight != null) attributes.weight = weight;
+    if (carat != null) attributes.carat = carat;
+    if (diamondWeight != null) attributes.diamond_weight = diamondWeight;
+    if (stones.length) attributes.stones = stones;
+  }
+  const notes = notizTeile.filter(Boolean).join(' / ') || undefined;
+  const displayName = productDisplayName({ brand, name, categoryId: cat.id, attributes: attributes as never }) || name;
+
   // VAT: nie still MARGIN
   const rawVat = cleanStr(getCol(row, 'VAT', 'VAT Scheme', 'Tax', 'Tax Scheme', 'Scheme'));
   const vat = parseVatScheme(rawVat, opts.defaultVatScheme);
@@ -361,7 +471,7 @@ function classifyRow(row: RawRow, idx: number, opts: ClassifyOptions, runningInd
     index: idx, status, errors, warnings,
     sku, categoryId: cat.id, categoryName: cat.name, categoryMatched: cat.matched,
     brand, name, referenceNo, serialNo, description1, description2, description3,
-    size, material, markup, weight, carat, diamondWeight, stones,
+    size, material, markup, weight, carat, diamondWeight, stones, itemType, karatColor, attributes, notes, displayName,
     purchasePrice, plannedSalePrice, quantity, isSold,
     taxScheme: vat.scheme, vatFromDefault: vat.fromDefault, duplicateReason,
   };
@@ -424,26 +534,36 @@ const STEIN_SPALTEN = ['Type', 'Qty', 'Carat', 'Color', 'Clarity', 'Shape', 'Nam
 
 export function importTemplate(): { items: Array<Array<string | number>>; help: string[][] } {
   const kopf = ['Category', 'SKU', 'Brand', 'Model', 'Serial', 'Description 1', 'Description 2', 'Size', 'Material',
-    'Cost', 'Tag Price', 'Qty', 'VAT', 'Weight', 'Diamond Weight'];
+    'Item Type', 'Karat & Color', 'Weight', 'Diamond Weight', 'Cost', 'Tag Price', 'Qty', 'VAT'];
   for (let n = 1; n <= VORLAGE_STEINE; n++) for (const s of STEIN_SPALTEN) kopf.push(`Stone ${n} ${s}`);
   kopf.push('Sold');
   const zeile = (werte: Record<string, string | number>) => kopf.map((h) => werte[h] ?? '');
   const items = [
     kopf,
     zeile({ Category: 'Watch', Brand: 'Rolex', Model: '126610LN', 'Description 1': 'Submariner Date', Cost: 9500, 'Tag Price': 11500, Qty: 1, VAT: 'MARGIN' }),
-    zeile({ Category: 'Gold-Diamond Jewellery', 'Description 1': 'Diamond Ring', Cost: 450, 'Tag Price': 690, Qty: 1, VAT: 'VAT_10', Weight: 6.4,
+    zeile({ Category: 'Gold-Diamond Jewellery', 'Item Type': 'Ring', 'Karat & Color': '18K Yellow', Weight: 6.4, 'Description 1': 'Diamond Ring', Cost: 450, 'Tag Price': 690, Qty: 1, VAT: 'VAT_10',
       'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 12, 'Stone 1 Carat': 0.8, 'Stone 1 Color': 'G', 'Stone 1 Clarity': 'VS1', 'Stone 1 Shape': 'Round',
       'Stone 2 Type': 'Emerald', 'Stone 2 Qty': 2, 'Stone 2 Carat': 0.45,
       'Stone 3 Type': 'Other', 'Stone 3 Qty': 6, 'Stone 3 Name': 'Tsavorite' }),
-    zeile({ Category: 'Gold-Diamond Jewellery', 'Description 1': 'Halo Pendant', Cost: 380, Qty: 1, VAT: 'VAT_10', Weight: 3.1,
+    zeile({ Category: 'Gold-Diamond Jewellery', 'Item Type': 'Pendant', 'Karat & Color': '18K White', Weight: 3.1, 'Description 1': 'Halo', Cost: 380, Qty: 1, VAT: 'VAT_10',
       'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 1, 'Stone 1 Carat': 0.5, 'Stone 1 Color': 'F', 'Stone 1 Clarity': 'VVS2', 'Stone 1 Shape': 'Oval',
       'Stone 2 Type': 'Diamond', 'Stone 2 Qty': 20, 'Stone 2 Carat': 0.3 }),
-    zeile({ Category: 'Gold-Diamond Jewellery', 'Description 1': 'Diamond Bangle', Cost: 700, Qty: 1, VAT: 'VAT_10', Weight: 15, 'Diamond Weight': 1.2 }),
+    zeile({ Category: 'Gold-Diamond Jewellery', 'Item Type': 'Bangle', 'Karat & Color': '21K Yellow', Weight: 15, 'Diamond Weight': 1.2, Cost: 700, Qty: 1, VAT: 'VAT_10' }),
   ];
   const liste = (l: readonly { label: string }[]) => l.map((o) => o.label).join(', ');
+  const goldAttrs = DEFAULT_CATEGORIES.find((c) => c.id === GOLD_IMPORT_CATEGORY)?.attributes || [];
   const help = [
     ['LATAIF — product import'],
     ['One row = one item. Column names are not case-sensitive; unused columns can be left empty or removed.'],
+    [''],
+    ['Gold-Diamond Jewellery'],
+    ['Brand and Model are not needed — the item is named from its details (e.g. Ring · Diamond Ring · 18K Yellow · 6.40 g).'],
+    ['Item Type — ' + optionsOf(goldAttrs, 'item_type').join(', ') + '.'],
+    ['Karat & Color — ' + optionsOf(goldAttrs, 'karat').join(', ') + '.'],
+    ['Weight — in grams. Description 1 — a short description (e.g. SOLITAIRE). Description 2/3, Serial, Size and Markup are kept in the item notes.'],
+    ['Older files still import: Karat / Carat (e.g. 18) together with Metal / Material (e.g. White Gold) become Karat & Color (18K White); 21, 22 and 24 are always Yellow.'],
+    ['Without a clear value nothing is guessed — the preview warns and the value is kept in the notes. Material is never used as Item Type.'],
+    ['Watches and all other categories: the columns work as before.'],
     [''],
     ['Stones (Gold-Diamond Jewellery only)'],
     ['Each stone has its own column group: Stone 1 Type, Stone 1 Qty, Stone 1 Carat, Stone 1 Color, Stone 1 Clarity, Stone 1 Shape, Stone 1 Name.'],

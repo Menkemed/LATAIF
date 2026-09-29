@@ -11,11 +11,12 @@ import { createPreDestructiveBackup } from '@/core/settings/pre-destructive-back
 import { primaryOnlyLocked, primaryOnlyText } from '@/core/data/primary-only';
 import {
   classifyRows, summarize, canStartImport, runProductImport, buildExistingIndex, cleanStr, getCol,
-  VAT_SCHEMES, importTemplate,
+  VAT_SCHEMES, importTemplate, GOLD_IMPORT_CATEGORY,
   type RawRow, type ClassifiedRow, type ImportRowStatus,
 } from '@/core/import/product-import';
 import type { TaxScheme, Product } from '@/core/models/types';
 import { stonesSummary } from '@/core/products/stones';
+import { formatGrams } from '@/core/products/display-name';
 import { exportFile } from '@/core/utils/export-file';
 
 const VAT_LABEL: Record<TaxScheme, string> = {
@@ -132,8 +133,11 @@ export function ImportPage() {
   const existingIndex = useMemo(() => buildExistingIndex(products), [products]);
 
   const classified: ClassifiedRow[] = useMemo(
-    () => classifyRows(rawRows, { resolveCategory, defaultVatScheme, existingIndex }),
-    [rawRows, resolveCategory, defaultVatScheme, existingIndex],
+    () => classifyRows(rawRows, {
+      resolveCategory, defaultVatScheme, existingIndex,
+      categoryAttributes: (id: string) => categories.find(c => c.id === id)?.attributes,
+    }),
+    [rawRows, resolveCategory, defaultVatScheme, existingIndex, categories],
   );
   const summary = useMemo(() => summarize(classified), [classified]);
   const vatSelected = defaultVatScheme !== null;
@@ -156,7 +160,8 @@ export function ImportPage() {
         const d1 = cleanStr(getCol(row, 'Description 1'));
         const ref = cleanStr(getCol(row, 'Model', 'Reference'));
         const sku = cleanStr(getCol(row, 'Serial Tag', 'SKU'));
-        return (brand || d1 || ref || sku).length > 0;
+        const itemType = cleanStr(getCol(row, 'Item Type'));
+        return (brand || d1 || ref || sku || itemType).length > 0;
       });
       setRowCategoryOverride({});
       setRawRows(nonEmpty);
@@ -167,22 +172,10 @@ export function ImportPage() {
 
   // Eine importierbare Zeile → createProduct. Attribute + Preisbänder werden hier gemappt.
   const createFromRow = useCallback((item: ClassifiedRow) => {
-    const attrs: Product['attributes'] = {};
-    if (item.referenceNo) attrs.reference_no = item.referenceNo;
-    if (item.serialNo) attrs.serial_no = item.serialNo;
-    if (item.description1) attrs.description_1 = item.description1;
-    if (item.description2) attrs.description_2 = item.description2;
-    if (item.description3) attrs.description_3 = item.description3;
-    if (item.size) attrs.size = item.size;
-    if (item.material) attrs.metal = item.material;
-    if (item.markup) attrs.markup = item.markup;
-    if (item.weight != null) attrs.weight = item.weight;
-    if (item.carat != null) attrs.carat = item.carat;
-    if (item.diamondWeight != null) attrs.diamond_weight = item.diamondWeight;
-    // STONES — die geprüften Steinzeilen (dieselbe Regel wie Rechner/Telefon; createProduct prüft erneut).
-    if (item.stones.length) attrs.stones = item.stones;
-
-    const notes = [item.description2, item.description3].filter(Boolean).join(' / ') || undefined;
+    // Merkmale und Notiz kommen fertig aus product-import (bei Gold-Diamond Jewellery genau die Felder der
+    // Maske; alle anderen Kategorien wie bisher). createProduct prüft die Steine erneut.
+    const attrs = item.attributes as Product['attributes'];
+    const notes = item.notes;
     const minSale = item.plannedSalePrice ? Math.round(item.plannedSalePrice * 0.85) : undefined;
     const maxSale = item.plannedSalePrice ? Math.round(item.plannedSalePrice * 1.15) : undefined;
 
@@ -318,6 +311,10 @@ export function ImportPage() {
                 Category, Serial Tag / SKU, Brand, Model / Reference, Serial, Description 1-3, Size, Metal / Material, Cost / Purchase Price, Tag Price / Sale Price, <strong style={{ color: '#AA956E' }}>Qty / Quantity</strong>, <strong style={{ color: '#AA956E' }}>VAT / Tax Scheme</strong>, Weight, Carat, Diamond Weight, Sold / Status
               </p>
               <p style={{ fontSize: 12, color: '#6B7280', marginTop: 4, lineHeight: 1.8 }}>
+                <strong style={{ color: '#0F0F10' }}>Gold-Diamond Jewellery</strong>: Item Type, Karat &amp; Color, Weight, Description 1 — the same fields as in the item form; Brand / Model are not needed.
+                Older files still import: Karat / Carat with Metal / Material (e.g. 18 + White Gold) become Karat &amp; Color.
+              </p>
+              <p style={{ fontSize: 12, color: '#6B7280', marginTop: 4, lineHeight: 1.8 }}>
                 <strong style={{ color: '#0F0F10' }}>Stones</strong> (Gold-Diamond Jewellery): one column group per stone — Stone 1 Type, Stone 1 Qty, Stone 1 Carat, Stone 1 Color, Stone 1 Clarity, Stone 1 Shape, Stone 1 Name; then Stone 2 …, Stone 3 … for more stones.
                 Color / Clarity / Shape only for Diamond, Name only (and required) for Other. Diamond Weight is calculated from the diamond rows; an old Diamond Weight column alone still imports.
               </p>
@@ -444,7 +441,7 @@ export function ImportPage() {
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid #E5E9EE' }}>
-                    {['Status', 'Category', 'SKU', 'Brand', 'Name', 'Ref', 'Serial', 'Qty', 'Cost', 'Tag Price', 'VAT', 'Stones', 'Note'].map(h => (
+                    {['Status', 'Category', 'SKU', 'Brand', 'Name', 'Ref', 'Serial', 'Item Type · Karat & Color', 'Qty', 'Cost', 'Tag Price', 'VAT', 'Stones', 'Note'].map(h => (
                       <th key={h} className="text-overline" style={{ padding: '8px 10px', textAlign: 'left', fontWeight: 500, display: 'table-cell' }}>{h}</th>
                     ))}
                   </tr>
@@ -464,9 +461,13 @@ export function ImportPage() {
                       </td>
                       <td style={{ padding: '8px 10px', color: '#6B7280', fontSize: 11 }}>{m.sku}</td>
                       <td style={{ padding: '8px 10px', color: '#0F0F10' }}>{m.brand}</td>
-                      <td style={{ padding: '8px 10px', color: '#0F0F10' }}>{m.name}</td>
+                      <td data-import-name style={{ padding: '8px 10px', color: '#0F0F10' }}>{m.displayName}</td>
                       <td className="font-mono" style={{ padding: '8px 10px', color: '#4B5563', fontSize: 11 }}>{m.referenceNo}</td>
                       <td className="font-mono" style={{ padding: '8px 10px', color: '#4B5563', fontSize: 11 }}>{m.serialNo}</td>
+                      {/* GOLD — die Felder der Maske (Item Type, Karat & Color, Gewicht); andere Kategorien: — */}
+                      <td data-import-gold style={{ padding: '8px 10px', color: '#4B5563', fontSize: 11 }}>{m.categoryId === GOLD_IMPORT_CATEGORY
+                        ? [m.itemType || 'Item Type —', m.karatColor || 'Karat & Color —', m.weight != null ? formatGrams(m.weight) : ''].filter(Boolean).join(' · ')
+                        : '—'}</td>
                       <td className="font-mono" style={{ padding: '8px 10px', color: (m.quantity || 1) > 1 ? '#AA956E' : '#6B7280', fontSize: 11 }}>{m.quantity || 1}</td>
                       <td className="font-mono" style={{ padding: '8px 10px', color: '#4B5563' }}>{fmt(m.purchasePrice)}</td>
                       <td className="font-mono" style={{ padding: '8px 10px', color: '#0F0F10' }}>{m.plannedSalePrice != null ? fmt(m.plannedSalePrice) : '—'}</td>
@@ -537,7 +538,7 @@ export function ImportPage() {
           <div style={{ maxHeight: 400, overflowY: 'auto' }}>
             {invalidRows.map((m, i) => (
               <div key={i} style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE', fontSize: 12 }}>
-                <span style={{ color: '#0F0F10' }}>{m.sku || m.brand || m.name || `Row ${m.index + 1}`}</span>
+                <span style={{ color: '#0F0F10' }}>{m.sku || m.brand || m.displayName || `Row ${m.index + 1}`}</span>
                 <span style={{ color: '#AA6E6E', marginLeft: 12 }}>{m.errors.join(', ')}</span>
               </div>
             ))}
