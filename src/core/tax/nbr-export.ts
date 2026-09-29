@@ -12,6 +12,7 @@
 
 import * as XLSX from 'xlsx';
 import type { Invoice, Customer, Product } from '@/core/models/types';
+import { productDisplayName } from '../products/display-name.ts';
 
 type AOA = (string | number | null)[][];
 
@@ -39,7 +40,7 @@ function fmtDate(iso?: string): string {
 function productLabel(products: Product[], productId: string): string {
   const p = products.find(pp => pp.id === productId);
   if (!p) return '';
-  return [p.brand, p.name].filter(Boolean).join(' ');
+  return productDisplayName(p);
 }
 
 function customerLabel(c: Customer | undefined): string {

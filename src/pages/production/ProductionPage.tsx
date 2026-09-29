@@ -24,6 +24,7 @@ import type { Product, Category } from '@/core/models/types';
 import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { productionCreateRequest, productionOutputBodies, type ProductionCreateInput } from '@/core/production/production-house';
+import { productDisplayName } from '@/core/products/display-name';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -210,7 +211,7 @@ export function ProductionPage() {
                   ? ` · 🔒 ${res.qty} reserviert (${res.orderNumbers.slice(0, 2).join(', ')}${res.orderNumbers.length > 2 ? '…' : ''})`
                   : '';
                 return {
-                  id: p.id, label: `${p.brand} ${p.name}`,
+                  id: p.id, label: productDisplayName(p),
                   subtitle: `${fmt(p.purchasePrice)} BHD${resHint}`,
                   meta: p.sku,
                 };
@@ -423,7 +424,7 @@ function OutputCard({
   onAutofill: () => void;
 }) {
   const cat = categories.find(c => c.id === draft.spec.categoryId);
-  const headerLine = `${draft.spec.brand || ''} ${draft.spec.name || ''}`.trim() || '(unnamed)';
+  const headerLine = productDisplayName(draft.spec) || '(unnamed)';
   // Specs als Pills — kategorie-spezifische Attribute aus dem dyn. Schema.
   const specs = useMemo(() => {
     // We need a fake Product because getProductSpecs expects Product — Partial works

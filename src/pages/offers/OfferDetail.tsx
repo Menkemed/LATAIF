@@ -31,6 +31,7 @@ import {
 } from '@/core/offers/offer-actions';
 import type { OfferTargetStatus } from '@/core/offers/offer-rules';
 import { aiTextLocked, AI_TEXT_ON_PRIMARY } from '@/core/ai/ai-availability';
+import { productDisplayName } from '@/core/products/display-name';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -260,7 +261,7 @@ export function OfferDetail() {
                 {(offer.status === 'draft' || offer.status === 'sent') && customer?.whatsapp && (
                   <Button variant="ghost" onClick={() => {
                     const num = (customer.whatsapp || customer.phone || '').replace(/[^0-9+]/g, '').replace(/^\+/, '');
-                    const items = offer.lines.map(l => { const p = products.find(pr => pr.id === l.productId); return p ? `${p.brand} ${p.name}: ${fmt(l.lineTotal)} BHD` : ''; }).filter(Boolean).join('%0A');
+                    const items = offer.lines.map(l => { const p = products.find(pr => pr.id === l.productId); return p ? `${productDisplayName(p)}: ${fmt(l.lineTotal)} BHD` : ''; }).filter(Boolean).join('%0A');
                     const text = `Hi ${customer.firstName},%0A%0AHere is your offer ${offer.offerNumber}:%0A${items}%0A%0ATotal: ${fmt(offer.total)} BHD%0A%0APlease let us know if you are interested.`;
                     window.open(`https://wa.me/${num}?text=${text}`, '_blank');
                   }}>WhatsApp</Button>
@@ -347,7 +348,7 @@ export function OfferDetail() {
                 <div key={line.key} data-offer-line={line.productId} style={{ display: 'grid', gridTemplateColumns: lineCols, gap: 12, padding: '12px 0', borderBottom: '1px solid rgba(229,225,214,0.6)', alignItems: 'center' }}>
                   <div>
                     <span style={{ fontSize: 13, color: '#0F0F10', display: 'block' }}>
-                      {product ? `${product.brand} ${product.name}` : 'Unknown Product'}
+                      {product ? productDisplayName(product) : 'Unknown Product'}
                     </span>
                     {(() => {
                       // Plan §Print — Specs als 2-Spalten-Grid (kompakt + ästhetisch, auch im Print-View).
@@ -517,7 +518,7 @@ export function OfferDetail() {
         const firstProduct = firstLine ? products.find(p => p.id === firstLine.productId) : undefined;
         const itemList = offer.lines.map(l => {
           const p = products.find(pr => pr.id === l.productId);
-          return p ? `${p.brand} ${p.name}` : '';
+          return p ? productDisplayName(p) : '';
         }).filter(Boolean).join(', ');
         return (
           <MessagePreviewModal
@@ -544,7 +545,7 @@ export function OfferDetail() {
           const p = products.find(pr => pr.id === l.productId);
           return {
             id: l.id,
-            label: p ? `${p.brand} ${p.name}` : 'Product',
+            label: p ? productDisplayName(p) : 'Product',
             currentScheme: (l.taxScheme as TaxScheme) || 'MARGIN',
           };
         })}
@@ -585,7 +586,7 @@ export function OfferDetail() {
             >
               <div className="flex justify-between items-center">
                 <div>
-                  <span style={{ fontSize: 13, color: '#0F0F10' }}>{p.brand} {p.name}</span>
+                  <span style={{ fontSize: 13, color: '#0F0F10' }}>{productDisplayName(p)}</span>
                   {p.sku && <span className="font-mono" style={{ fontSize: 11, color: '#6B7280', marginLeft: 8 }}>{p.sku}</span>}
                 </div>
                 <span className="font-mono" style={{ fontSize: 13, color: '#4B5563' }}><Bhd v={p.plannedSalePrice || p.purchasePrice}/> BHD</span>

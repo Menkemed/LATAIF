@@ -26,6 +26,8 @@ function ok(cond: unknown, msg: string): void {
 }
 
 const RELEASED = 'ff038ad';
+/** DISPLAY-NAME — der Zusatz in den Gold-Hinweisen, wörtlich (siehe §2). */
+const GOLD_NO_BRAND_NOTE = ' brand and name: this category is unbranded jewellery — return brand = null and name = null. NEVER put the piece type (Ring, Pendant, Necklace, …) or a stone into brand or name; the piece type goes into item_type, the short summary into description.';
 
 /** Rebuild the prompt the way the released file built it, straight from that file's text. */
 function releasedPrompts(): Record<string, { system: string; userPlain: string; userHints: string }> {
@@ -87,9 +89,15 @@ for (const id of knownCategoryIds()) {
   if (!ref) continue;
 
   const sys = buildSystemPrompt(id);
-  ok(sys === ref.system,
+  // DISPLAY-NAME (v0.8.67) — die EINE bewusste Abweichung vom Freigabestand: bei Gold-Diamond Jewellery
+  // gibt die KI keine Marke/kein Modell mehr (die Schmuckart gehört nach item_type). Alles andere bleibt
+  // zeichengleich.
+  const soll = id === 'cat-gold-jewelry'
+    ? ref.system.replace('longer text gets cut off.', 'longer text gets cut off.' + GOLD_NO_BRAND_NOTE)
+    : ref.system;
+  ok(sys === soll,
     `§2 ${id}: system prompt is character-identical to ${RELEASED}` +
-    (sys === ref.system ? '' : ` (len ${sys.length} vs ${ref.system.length})`));
+    (sys === soll ? '' : ` (len ${sys.length} vs ${soll.length})`));
 
   ok(buildUserPrompt(id, '') === ref.userPlain, `§2 ${id}: user prompt without hints is identical`);
   ok(buildUserPrompt(id, 'brand: Rolex') === ref.userHints, `§2 ${id}: user prompt with hints is identical`);
@@ -194,7 +202,8 @@ for (const id of knownCategoryIds()) {
   // The SAME value `EXPECTED_FINGERPRINT` pins in src-tauri/src/sync/ai_identify_tests.rs. If one
   // language's assembly drifts — a category prompt, or now a repair prompt — exactly one of the two
   // gates goes red and names the side that moved.
-  const EXPECTED_FINGERPRINT = '0c33a03188de4b83';
+  // DISPLAY-NAME — war 0c33a03188de4b83; der Gold-Hinweis (keine Marke) hat ihn einmal und bewusst bewegt.
+  const EXPECTED_FINGERPRINT = '99b2eeedc75bb347';
   ok(contractFingerprint() === EXPECTED_FINGERPRINT,
     `the TypeScript fingerprint matches the Rust EXPECTED_FINGERPRINT (got ${contractFingerprint()})`);
   ok(/^[0-9a-f]{16}$/.test(contractFingerprint()), 'the contract fingerprint is a 16-hex-digit value');

@@ -17,6 +17,7 @@
 //     Datum und Betrag — dieselben Felder, die die Trefferliste auch am Primary anzeigt.
 import { query } from '@/core/db/helpers';
 import type { BusinessReadContext } from '@/core/data/read-context';
+import { productDisplayName } from '../products/display-name.ts';
 
 export type ResultType =
   | 'product' | 'customer' | 'offer' | 'invoice' | 'repair' | 'order'
@@ -191,7 +192,7 @@ export function globalSearchFor(
             items.push({
               type: 'product',
               id: p.id as string,
-              title: `${p.brand} ${p.name}`,
+              title: productDisplayName(p),
               subtitle: `Sold · ${s.invoice_number} · ${customerName}`,
               link: `/invoices/${s.inv_id}`,
               date: s.issued_at as string,
@@ -200,7 +201,7 @@ export function globalSearchFor(
             items.push({
               type: 'product',
               id: p.id as string,
-              title: `${p.brand} ${p.name}`,
+              title: productDisplayName(p),
               subtitle: (p.sku as string) || (p.stock_status as string) || '',
               link: `/collection/${p.id}`,
             });

@@ -43,6 +43,7 @@ import { useSharedRead, sessionTenantId } from '@/core/data/shared-read';
 import { productDetailReadsFor } from '@/core/data/page-reads';
 import { productLotsFor } from '@/core/data/domain-reads';
 import { useAiIdentifyGate, aiTextLocked, AI_TEXT_ON_PRIMARY } from '@/core/ai/ai-availability';
+import { productDisplayName, productDisplayLines, brandModelHidden } from '@/core/products/display-name';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -783,7 +784,7 @@ export function ProductDetail() {
                 images={galleryImages}
                 index={lightboxIdx}
                 onClose={() => setLightboxIdx(null)}
-                alt={`${product.brand || ''} ${product.name || ''}`.trim()}
+                alt={productDisplayName(product)}
               />
             )}
           </div>
@@ -832,6 +833,8 @@ export function ProductDetail() {
                   // v0.7.16 — Brand/Name optional bei unbranded Gold-Schmuck.
                   // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
     const brandedRequired = isBrandRequired(form.categoryId || '');
+    // DISPLAY-NAME — bei Gold-Diamond Jewellery nicht gezeigt; ein schon gespeicherter Wert bleibt sichtbar (und leerbar).
+    if (brandModelHidden(form.categoryId) && !form.brand && !form.name) return null;
                   return (
                     <>
                       <div id="field-brand">
@@ -868,8 +871,8 @@ export function ProductDetail() {
               </>
             ) : (
               <>
-                <span className="text-overline">{product.brand}</span>
-                <h1 className="font-display" style={{ fontSize: 32, color: '#0F0F10', marginTop: 4, lineHeight: 1.2 }}>{product.name}</h1>
+                <span className="text-overline">{productDisplayLines(product).overline}</span>
+                <h1 className="font-display" style={{ fontSize: 32, color: '#0F0F10', marginTop: 4, lineHeight: 1.2 }}>{productDisplayLines(product).title}</h1>
                 {product.sku && <span className="font-mono" style={{ fontSize: 13, color: '#4B5563', display: 'block', marginTop: 8 }}>{product.sku}</span>}
                 <div className="flex items-center gap-4" style={{ marginTop: 12, flexWrap: 'wrap' }}>
                   <StatusDot status={product.stockStatus} />
@@ -1651,7 +1654,7 @@ export function ProductDetail() {
               background: '#FFF7ED', border: '1px solid #FED7AA',
               color: '#9A6B3F', fontSize: 13, lineHeight: 1.5,
             }}>
-              <strong style={{ color: '#0F0F10' }}>{product.brand} {product.name}</strong> is linked to
+              <strong style={{ color: '#0F0F10' }}>{productDisplayName(product)}</strong> is linked to
               existing records and <strong>cannot be deleted</strong>:
               <div style={{ marginTop: 8, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
                 {deleteLinks.map((l, i) => (
@@ -1672,7 +1675,7 @@ export function ProductDetail() {
         ) : (
           <>
             <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 20 }}>
-              Delete <strong style={{ color: '#0F0F10' }}>{product.brand} {product.name}</strong>? This cannot be undone.
+              Delete <strong style={{ color: '#0F0F10' }}>{productDisplayName(product)}</strong>? This cannot be undone.
             </p>
             <div className="flex justify-end gap-3">
               <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
@@ -1687,7 +1690,7 @@ export function ProductDetail() {
         onClose={() => setShowHistory(false)}
         entityType="products"
         entityId={product.id}
-        title={`History · ${product.brand} ${product.name}`}
+        title={`History · ${productDisplayName(product)}`}
       />
     </div>
   );

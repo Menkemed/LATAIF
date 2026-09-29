@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { ArrowLeft, Edit3, XCircle, CreditCard, Printer, Download, Table, ExternalLink, ChevronDown } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
+import { productDisplayName } from '@/core/products/display-name';
 
 // Butterfly icon as inline SVG — renders reliably in all webviews (no emoji font dependency).
 const Butterfly = ({ size = 14, style }: { size?: number; style?: React.CSSProperties }) => (
@@ -529,7 +530,7 @@ export function InvoiceDetail() {
   function getProductName(productId: string): string {
     const p = products.find(pr => pr.id === productId);
     if (!p) return productId;
-    return p.brand ? `${p.brand} ${p.name}` : p.name;
+    return productDisplayName(p);
   }
 
   function renderField(label: string, value: React.ReactNode) {
@@ -1051,7 +1052,7 @@ export function InvoiceDetail() {
                     const outstanding = sum.outstandingRefund <= 0.01 ? 0 : ownedTotal;
                     const lineProductNames = r.lines.map(l => {
                       const p = products.find(pp => pp.id === l.productId);
-                      return p ? `${l.quantity}× ${p.brand} ${p.name}` : `${l.quantity}× —`;
+                      return p ? `${l.quantity}× ${productDisplayName(p)}` : `${l.quantity}× —`;
                     }).join(', ');
                     const linkedCN = creditNotes.find(cn => cn.salesReturnId === r.id);
                     return (

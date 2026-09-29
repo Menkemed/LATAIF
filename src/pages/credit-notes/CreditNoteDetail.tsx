@@ -16,6 +16,7 @@ import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { formatProductMultiLine, getProductSpecs } from '@/core/utils/product-format';
 import { Bhd } from '@/components/ui/Bhd';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
+import { productDisplayName } from '@/core/products/display-name';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -185,7 +186,7 @@ export function CreditNoteDetail() {
                       <div key={rl.id} className="flex justify-between items-start" style={{ padding: '12px 0', borderBottom: '1px solid #E5E9EE' }}>
                         <div style={{ minWidth: 0, flex: 1 }}>
                           <div style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                            {p ? `${p.brand} ${p.name}` : 'Item'}
+                            {p ? productDisplayName(p) : 'Item'}
                           </div>
                           {specs.length > 0 && (
                             <div style={{

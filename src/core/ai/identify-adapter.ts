@@ -22,6 +22,7 @@ import { identifyProduct, type AiCategoryId, type AiProductIdentification } from
 import { resolveAiImageInput } from '@/stores/productStore';
 import { runIdentifyFromResolvedInput, type IdentifyHints, type IdentifyResult, type ResolvedAiInput } from './identify-adapter-core';
 import { isClientMode } from '@/core/bridge/client-mode';
+import { aiResultForCategory } from '@/core/products/display-name';
 import { identifyViaPrimary } from './primary-ai';
 import { loadRemoteGallery } from '@/core/media/client-media-source';
 import { validateDurableBytes } from '@/core/media/ai-image-source';
@@ -77,7 +78,8 @@ export async function identifyProductFromResolvedInput(params: {
       resolved,
       (p) => {
         if (!p.imageBase64) throw new Error(AI_PC2_NEEDS_PHOTO);
-        return identifyViaPrimary({ categoryId: p.categoryId, imageDataUrl: p.imageBase64, hints: { ...p.hints } });
+        return identifyViaPrimary({ categoryId: p.categoryId, imageDataUrl: p.imageBase64, hints: { ...p.hints } })
+          .then((r) => aiResultForCategory(r, p.categoryId));
       },
     );
   }
@@ -85,6 +87,7 @@ export async function identifyProductFromResolvedInput(params: {
   return runIdentifyFromResolvedInput(
     { categoryId: params.categoryId, hints: params.hints, recentCorrections: params.recentCorrections },
     resolved,
-    (p) => identifyProduct({ ...p, categoryId: p.categoryId as AiCategoryId }),
+    // DISPLAY-NAME — bei Gold-Diamond Jewellery keine Marke/kein Modell aus der KI (eine Stelle für alle Masken).
+    (p) => identifyProduct({ ...p, categoryId: p.categoryId as AiCategoryId }).then((r) => aiResultForCategory(r, p.categoryId)),
   );
 }

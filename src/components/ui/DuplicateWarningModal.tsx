@@ -15,6 +15,7 @@ import { Bhd } from './Bhd';
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
 import { useMediaScope } from '@/hooks/useMediaScope';
 import type { Product } from '@/core/models/types';
+import { productDisplayLines } from '@/core/products/display-name';
 
 export interface DuplicateMatch {
   product: Product;
@@ -158,9 +159,9 @@ export function DuplicateWarningModal({ open, matches, candidate, onCancel, onCr
             <span className="text-overline" style={{ color: '#AA956E' }}>YOUR NEW ITEM</span>
             <ItemImage src={candidate?.images?.[0]} />
             <div style={{ marginTop: 4 }}>
-              <div style={{ fontSize: 11, color: '#6B7280' }}>{candidate?.brand || '—'}</div>
+              <div style={{ fontSize: 11, color: '#6B7280' }}>{(candidate && productDisplayLines(candidate).overline) || '—'}</div>
               <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500, lineHeight: 1.3 }}>
-                {candidate?.name || 'Untitled'}
+                {(candidate && productDisplayLines(candidate).title) || 'Untitled'}
               </div>
               <SpecGrid specs={candidateSpecs} />
             </div>
@@ -250,8 +251,8 @@ export function DuplicateWarningModal({ open, matches, candidate, onCancel, onCr
                   >
                     <ItemImage product={p} tenantId={mediaTenantId} branchId={mediaBranchId} size={48} />
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ fontSize: 10, color: '#6B7280' }}>{p.brand}</div>
-                      <div style={{ fontSize: 12, color: '#0F0F10', fontWeight: 500, lineHeight: 1.2 }}>{p.name}</div>
+                      <div style={{ fontSize: 10, color: '#6B7280' }}>{productDisplayLines(p).overline}</div>
+                      <div style={{ fontSize: 12, color: '#0F0F10', fontWeight: 500, lineHeight: 1.2 }}>{productDisplayLines(p).title}</div>
                       <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginTop: 4 }}>
                         <span style={{
                           fontSize: 9, padding: '1px 6px', borderRadius: 999,

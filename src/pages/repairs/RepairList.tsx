@@ -37,6 +37,7 @@ import { WriteError } from '@/components/shared/WriteError';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { quickRepairNext } from '@/core/repairs/repair-status-flow';
 import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
+import { productDisplayName } from '@/core/products/display-name';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -156,7 +157,7 @@ export function RepairList() {
         : '';
       return {
         id: p.id,
-        label: `${p.brand || ''} ${p.name || ''}`.trim() || p.id,
+        label: productDisplayName(p) || p.id,
         subtitle: (p.sku || '') + resHint,
         meta: `${p.purchasePrice.toLocaleString('en-US')} BHD`,
         searchText: productSearchText(p),
@@ -897,7 +898,7 @@ export function RepairList() {
                 return (
                   <>
                     <div style={{ marginTop: 10, padding: '10px 12px', background: '#F2F7FA', borderRadius: 6, border: '1px solid #E5E9EE', fontSize: 12 }}>
-                      <div style={{ color: '#0F0F10' }}>{p.brand} {p.name}</div>
+                      <div style={{ color: '#0F0F10' }}>{productDisplayName(p)}</div>
                       <div className="font-mono" style={{ color: '#6B7280', marginTop: 2 }}>
                         Current cost: {p.purchasePrice.toLocaleString('en-US', { maximumFractionDigits: 0 })} BHD
                         {p.sku ? ` · ${p.sku}` : ''}

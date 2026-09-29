@@ -9,10 +9,10 @@
 // Der durable Auftraggeber wird NICHT noch einmal gebaut: `MobileRepair.createClient` (Kennung vor
 // dem Senden abgelegt, Wiederholung unter derselben Kennung, Klaerung) — wie bei der Kommission.
 (function (root, factory) {
-  const api = factory(root && root.MobileRepair);
+  const api = factory(root && root.MobileRepair, root && root.MobileDisplayName);
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MobilePurchase = api;
-}(typeof self !== 'undefined' ? self : this, function (MR) {
+}(typeof self !== 'undefined' ? self : this, function (MR, MDN) {
   'use strict';
 
   const textOrNull = MR.textOrNull;
@@ -27,6 +27,18 @@
   const PAYMENT_METHODS = ['cash', 'bank', 'benefit'];
   const TAX_SCHEMES = ['ZERO', 'VAT_10'];
   const FULL_BP = 10000;
+  /** Wie `isBrandRequired` am Rechner: bei Gold-Diamond Jewellery und Zubehör sind Marke und Modell freiwillig. */
+  const BRAND_OPTIONAL_CATEGORIES = ['cat-gold-jewelry', 'cat-accessory'];
+  function brandRequired(categoryId) { return BRAND_OPTIONAL_CATEGORIES.indexOf(String(categoryId || '')) < 0; }
+  /** DISPLAY-NAME — bei Gold-Diamond Jewellery fragt die Maske nicht nach Marke/Modell (und schickt keine). */
+  function brandHidden(categoryId) { return !!(MDN && MDN.brandModelHidden(categoryId)); }
+  /** Der Name einer neuen Position: Marke/Modell, sonst aus den Merkmalen — wie am Rechner. */
+  function newItemName(it) {
+    const marke = brandHidden(it.categoryId) ? '' : it.brand;
+    const modell = brandHidden(it.categoryId) ? '' : it.name;
+    if (MDN) return MDN.displayName({ brand: marke, name: modell, attributes: it.attributes });
+    return [textOrNull(marke), textOrNull(modell)].filter(Boolean).join(' ');
+  }
 
   /** Fils (1/1000 BHD) — ganzzahlig, wie `F()` am Primary. */
   function F(v) { return Math.round(Number(v) * 1000); }
@@ -147,7 +159,7 @@
         if (!textOrNull(it.productId)) out.push(issue('PRODUCT_REQUIRED', n + 'choose the existing item.', 'item:' + i));
       } else {
         if (!textOrNull(it.categoryId)) out.push(issue('CATEGORY_REQUIRED', n + 'choose a category.', 'item:' + i));
-        if (!textOrNull(it.brand) || !textOrNull(it.name)) out.push(issue('LINE_INVALID', n + 'brand and name are needed.', 'item:' + i));
+        if (brandRequired(it.categoryId) && (!textOrNull(it.brand) || !textOrNull(it.name))) out.push(issue('LINE_INVALID', n + 'brand and name are needed.', 'item:' + i));
         if (it.photos.length > MAX_PHOTOS) out.push(issue('TOO_MANY_PHOTOS', n + 'at most ' + MAX_PHOTOS + ' photos.', 'item:' + i));
         for (const f of (o.fieldErrors && o.fieldErrors[i]) || []) out.push(issue('FIELD_INVALID', n + f, 'item:' + i));
       }
@@ -204,8 +216,8 @@
     body.lines = draft.items.map(function (it) {
       const line = {
         mode: it.mode,
-        brand: it.mode === 'new' ? (textOrNull(it.brand) || '') : '',
-        name: it.mode === 'new' ? (textOrNull(it.name) || '') : '',
+        brand: it.mode === 'new' && !brandHidden(it.categoryId) ? (textOrNull(it.brand) || '') : '',
+        name: it.mode === 'new' && !brandHidden(it.categoryId) ? (textOrNull(it.name) || '') : '',
         sku: it.mode === 'new' ? (textOrNull(it.sku) || '') : '',
         categoryId: it.mode === 'new' ? (textOrNull(it.categoryId) || '') : '',
         quantity: qtyOrNull(it.quantity),
@@ -213,7 +225,9 @@
       };
       if (it.mode === 'existing') line.productId = it.productId;
       else {
-        const np = { categoryId: it.categoryId, brand: textOrNull(it.brand), name: textOrNull(it.name) };
+        const np = brandHidden(it.categoryId)
+          ? { categoryId: it.categoryId, brand: null, name: null }
+          : { categoryId: it.categoryId, brand: textOrNull(it.brand), name: textOrNull(it.name) };
         const sku = textOrNull(it.sku); if (sku !== null) np.sku = sku;
         const cond = textOrNull(it.condition); if (cond !== null) np.condition = cond;
         if (it.attributes && Object.keys(it.attributes).length) np.attributes = it.attributes;
@@ -253,7 +267,7 @@
     return t.positions + ' position' + (t.positions === 1 ? '' : 's') + ' · ' + t.pieces + ' pc' + (t.pieces === 1 ? '' : 's') + ' · ' + fmt(t.totalF) + ' BHD';
   }
   function itemSummary(item) {
-    const name = item.mode === 'existing' ? (item.productLabel || 'existing item') : ([textOrNull(item.brand), textOrNull(item.name)].filter(Boolean).join(' ') || 'new item');
+    const name = item.mode === 'existing' ? (item.productLabel || 'existing item') : (newItemName(item) || 'new item');
     const q = qtyOrNull(item.quantity) || 0;
     return name + ' · ' + q + ' × ' + (moneyOrNull(item.unitPrice) === null ? '—' : fmt(F(moneyOrNull(item.unitPrice)))) + (item.partners.length ? ' · partner' : '');
   }
@@ -279,7 +293,7 @@
     F: F, B: B, fmt: fmt, qtyOrNull: qtyOrNull,
     newDraft: newDraft, newItem: newItem, newPayment: newPayment,
     lineTotalF: lineTotalF, totals: totals, pctOfAmount: pctOfAmount, shareBreakdown: shareBreakdown,
-    validate: validate, buildBody: buildBody,
+    validate: validate, buildBody: buildBody, brandRequired: brandRequired, brandHidden: brandHidden,
     supplierSummary: supplierSummary, itemsSummary: itemsSummary, itemSummary: itemSummary,
     partnerSummary: partnerSummary, paymentsSummary: paymentsSummary, statusLabel: statusLabel,
   };

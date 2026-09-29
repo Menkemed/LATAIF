@@ -274,6 +274,7 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
 
 <script>
 window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), r##";
+"##, include_str!("mobile_display_name.js"), r##"
 "##, include_str!("mobile_upload_queue.js"), r##"
 "##, include_str!("mobile_repair_commands.js"), r##"
 "##, include_str!("mobile_consignment_commands.js"), r##"
@@ -606,9 +607,10 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     } else if (/^(data:|https?:)/.test(img0)) {
       html += '<img src="' + esc(img0) + '" onerror="this.style.display=\'none\'" style="width:100%; border-radius:8px; margin-bottom:14px;" />';
     }
-    // 2) Marke + Name
-    if (p.brand) html += '<div style="font-size:11px; color:#6B6B73; letter-spacing:.08em; text-transform:uppercase;">' + esc(p.brand) + '</div>';
-    html += '<div style="font-size:20px; font-weight:600; color:#EAEAEA; margin:2px 0;">' + esc(p.name || '—') + '</div>';
+    // 2) Marke + Name — DISPLAY-NAME: ohne Marke/Modell der Name aus den Merkmalen (wie am Rechner).
+    const dl = MobileDisplayName.displayLines(p, (catById(p.category_id) || {}).name);
+    if (dl.overline) html += '<div style="font-size:11px; color:#6B6B73; letter-spacing:.08em; text-transform:uppercase;">' + esc(dl.overline) + '</div>';
+    html += '<div style="font-size:20px; font-weight:600; color:#EAEAEA; margin:2px 0;">' + esc(dl.title || '—') + '</div>';
     // 3) Sale Price (prominent)
     const sale = fmtPrice(p.planned_sale_price);
     if (sale) html += '<div style="font-size:11px; color:#6B6B73; letter-spacing:.06em; text-transform:uppercase;">Sale Price</div><div style="font-size:22px; font-weight:600; color:#C6A36D; margin-bottom:8px;">' + sale + '</div>';
@@ -661,13 +663,16 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         + '</div>';
     }
     if (editable) {
+      // DISPLAY-NAME — bei Gold-Diamond Jewellery ohne gespeicherte Marke/Modell stehen die Felder nicht da
+      // (sie bleiben leer, also schickt der Save sie nie); ein älterer Wert bleibt sichtbar und leerbar.
+      const peOhneMarke = MobileDisplayName.brandModelHidden(p.category_id) && !String(p.name || '').trim() && !String(p.brand || '').trim();
       html += ''
         + '<div style="margin-top:18px; padding-top:14px; border-top:1px solid #2A2A32;">'
         + '<div style="font-size:11px; color:#6B6B73; letter-spacing:.08em; text-transform:uppercase; margin-bottom:8px;">Edit</div>'
         + '<button id="pdEditBtn" class="ghost" style="width:100%;">Edit item</button>'
         + '<div id="pdEditForm" class="hidden" style="margin-top:12px;">'
-        +   '<div class="row"><label>Model / Name</label><input id="peName" type="text" maxlength="200" /></div>'
-        +   '<div class="row"><label>Brand</label><input id="peBrand" type="text" maxlength="120" /></div>'
+        +   '<div class="row' + (peOhneMarke ? ' hidden' : '') + '"><label>Model / Name</label><input id="peName" type="text" maxlength="200" /></div>'
+        +   '<div class="row' + (peOhneMarke ? ' hidden' : '') + '"><label>Brand</label><input id="peBrand" type="text" maxlength="120" /></div>'
         +   '<div class="row"><label>Condition</label><select id="peCondition"></select></div>'
         +   '<div class="row"><label>Location</label><input id="peLocation" type="text" maxlength="120" /></div>'
         +   '<div class="row"><label>Notes</label><input id="peNotes" type="text" maxlength="500" /></div>'
@@ -1510,11 +1515,12 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       let attrs = {};
       try { attrs = typeof h.attributes === 'string' ? JSON.parse(h.attributes) : (h.attributes || {}); } catch (_) {}
       const ident = [h.sku, attrs.reference_number, attrs.serial_number].filter(Boolean).map(esc).join(' &middot; ');
+      const hl = MobileDisplayName.displayLines({ brand: h.brand, name: h.name, attributes: attrs }, (catById(h.category_id) || {}).name);
       return '<div class="card hit" data-hit="' + i + '" style="display:flex; gap:12px; align-items:center; cursor:pointer; padding:10px;">'
         + '<img id="hitImg' + i + '" alt="" style="width:52px; height:52px; border-radius:6px; object-fit:cover; background:#1A1A1F; display:none; flex:0 0 auto;" />'
         + '<div style="min-width:0;">'
-        +   (h.brand ? '<div style="font-size:11px; color:#6B6B73; text-transform:uppercase; letter-spacing:.06em;">' + esc(h.brand) + '</div>' : '')
-        +   '<div style="color:#EAEAEA; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + esc(h.name || '—') + '</div>'
+        +   (hl.overline ? '<div style="font-size:11px; color:#6B6B73; text-transform:uppercase; letter-spacing:.06em;">' + esc(hl.overline) + '</div>' : '')
+        +   '<div style="color:#EAEAEA; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + esc(hl.title || '—') + '</div>'
         +   (ident ? '<div style="font-size:12px; color:#6B6B73; font-family:monospace; overflow:hidden; text-overflow:ellipsis; white-space:nowrap;">' + ident + '</div>' : '')
         + '</div></div>';
     }).join('');
@@ -1734,11 +1740,17 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   // has to remember to avoid them — but the merge below only ever touches named identity fields
   // anyway, which is the second line of the same defence.
   function aiApplyToForm(result, ids) {
-    const T = ids || { brand: 'cBrand', name: 'cName', condition: 'cCondition', attrPrefix: 'attr_' };
+    const T = ids || { brand: 'cBrand', name: 'cName', condition: 'cCondition', attrPrefix: 'attr_', categoryId: $('cCategory').value };
     let filled = 0;
+    // DISPLAY-NAME — bei Gold-Diamond Jewellery keine Marke/kein Modell aus der KI (gleiche Regel wie am Rechner).
+    if (T.categoryId) {
+      const tc = catById(T.categoryId);
+      const it = tc ? tc.attributes.find((a) => a.key === 'item_type') : null;
+      result = MobileDisplayName.aiResultForCategory(result, T.categoryId, it && it.options ? it.options : []);
+    }
     const setIfEmpty = (id, value) => {
       const el = $(id);
-      if (!el || value == null || value === '') return;
+      if (!el || el.disabled || value == null || value === '') return;   // ein ausgeblendetes Feld bleibt leer
       if (String(el.value || '').trim() !== '') return;   // an operator decision always wins
       el.value = value;
       filled++;
@@ -1916,6 +1928,11 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const brandReq = cat ? !!cat.brandRequired : false;
     $('cBrandLabel').innerHTML = 'Brand' + (brandReq ? ' <span class="req">*</span>' : '');
     $('cNameLabel').innerHTML = 'Model / Name' + (brandReq ? ' <span class="req">*</span>' : '');
+    // DISPLAY-NAME — bei Gold-Diamond Jewellery sagen die Merkmale, was der Artikel ist.
+    const ohneMarke = MobileDisplayName.brandModelHidden(catId);
+    for (const id of ['cBrand', 'cName']) { $(id).disabled = ohneMarke; if (ohneMarke) $(id).value = ''; }
+    $('cBrandRow').classList.toggle('hidden', ohneMarke);
+    $('cNameRow').classList.toggle('hidden', ohneMarke);
     const cs = $('cCondition'); cs.innerHTML = ''; cs.appendChild(el('option', { value: '' }, '— Select —'));
     for (const o of (cat ? cat.conditionOptions : [])) cs.appendChild(el('option', { value: o }, o));
     const host = $('cAttrs'); host.innerHTML = '';
@@ -2031,7 +2048,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const qty = readQuantity();
     if (Number.isNaN(qty)) errors.push('Quantity must be a whole number of at least 1.');
     else if (qty !== null) metadata.quantity = qty;
-    return { metadata, errors, label: (brand + ' ' + name).trim() || sku || 'Item' };
+    return { metadata, errors, label: MobileDisplayName.displayName({ brand: brand, name: name, attributes: attributes }) || sku || 'Item' };
   }
 
   function clearCollectionForm() {

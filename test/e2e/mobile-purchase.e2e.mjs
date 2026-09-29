@@ -368,8 +368,7 @@ try {
     await sleep(300);
     const u2 = await uidVon(1);
     await pflicht(u2, 'cat-gold-jewelry');
-    await tippe(`[data-mp-field="item:${u2}:brand"]`, 'Gold ' + STEMPEL);
-    await tippe(`[data-mp-field="item:${u2}:name"]`, 'Chain ' + STEMPEL);
+    // DISPLAY-NAME — bei Gold-Diamond Jewellery gibt es keine Felder für Marke/Modell.
     await tippe(`[data-mp-field="item:${u2}:quantity"]`, '3');
     await tippe(`[data-mp-field="item:${u2}:unitPrice"]`, '120.5');
     await klick(phone, '[data-mp-toggle="payments"]');
@@ -441,8 +440,6 @@ try {
     await klick(phone, '[data-mp-action="pick-supplier"]');
     const u = await uidVon(0);
     await pflicht(u, 'cat-gold-jewelry');
-    await tippe(`[data-mp-field="item:${u}:brand"]`, 'Ring ' + STEMPEL);
-    await tippe(`[data-mp-field="item:${u}:name"]`, 'Band ' + STEMPEL);
     await tippe(`[data-mp-field="item:${u}:quantity"]`, '2');
     await tippe(`[data-mp-field="item:${u}:unitPrice"]`, '75');
     await klick(phone, '#mpSubmitBtn');
@@ -475,8 +472,6 @@ try {
     const u = await uidVon(0);
     await fotosLegen(u, 1);
     await pflicht(u, 'cat-gold-jewelry');
-    await tippe(`[data-mp-field="item:${u}:brand"]`, 'Pendant ' + STEMPEL);
-    await tippe(`[data-mp-field="item:${u}:name"]`, 'Heart ' + STEMPEL);
     await tippe(`[data-mp-field="item:${u}:unitPrice"]`, '55');
     await klick(phone, '#mpSubmitBtn');
     const wartet = await warteBis(phone, `/Not connected to the main computer/.test(document.getElementById('mpStatusBar').textContent)`, 60000);

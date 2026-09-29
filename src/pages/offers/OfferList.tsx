@@ -25,6 +25,7 @@ import { WriteError } from '@/components/shared/WriteError';
 import { saveOfferCreate, saveOfferStatus } from '@/core/offers/offer-actions';
 import type { OfferTargetStatus } from '@/core/offers/offer-rules';
 import type { Offer } from '@/core/models/types';
+import { productDisplayName } from '@/core/products/display-name';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -95,7 +96,7 @@ export function OfferList() {
       ? ` · 🔒 ${res.qty} reserviert (${res.orderNumbers.slice(0, 2).join(', ')}${res.orderNumbers.length > 2 ? '…' : ''})`
       : '';
     return {
-      id: p.id, label: `${p.brand} ${p.name}`,
+      id: p.id, label: productDisplayName(p),
       subtitle: `${fmt(p.plannedSalePrice || p.purchasePrice)} BHD${resHint}`,
       meta: p.sku,
     };
@@ -301,7 +302,7 @@ export function OfferList() {
                   return (
                     <div key={id} className="flex items-center justify-between gap-3" style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE' }}>
                       <div className="flex-1" style={{ minWidth: 0 }}>
-                        <span style={{ fontSize: 13, color: '#0F0F10' }}>{p.brand} {p.name}</span>
+                        <span style={{ fontSize: 13, color: '#0F0F10' }}>{productDisplayName(p)}</span>
                         {p.minSalePrice && p.minSalePrice > 0 && (
                           <span style={{ fontSize: 10, color: '#6B7280', display: 'block' }}>
                             Min: <Bhd v={p.minSalePrice}/> BHD{upperLimit ? ` · List: ${fmt(upperLimit)} BHD` : ''}

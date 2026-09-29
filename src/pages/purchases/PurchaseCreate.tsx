@@ -39,6 +39,7 @@ import { UseCustomerAsSupplier } from '@/components/suppliers/UseCustomerAsSuppl
 import { usePartnerStore } from '@/stores/partnerStore';
 import { PurchasePartnerSection } from '@/components/purchases/PurchasePartnerSection';
 import type { PartnerShareInput } from '@/core/partners/item-participation';
+import { productDisplayName, productDisplayLines } from '@/core/products/display-name';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -228,7 +229,7 @@ export function PurchaseCreate() {
       .filter(p => !(p.categoryId || '').startsWith('cat-repair-service'))
       .map(p => ({
         id: p.id,
-        label: `${p.brand} ${p.name}`,
+        label: productDisplayName(p),
         subtitle: p.sku || undefined,
         meta: `${fmt(p.purchasePrice || 0)} BHD`,
         searchText: productSearchText(p),
@@ -527,7 +528,7 @@ export function PurchaseCreate() {
                     </div>
                   ) : (
                     <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
-                      {l.brand || l.name ? (
+                      {l.newProduct || l.brand || l.name ? (
                         <div className="flex items-center justify-between" style={{
                           flex: 1, minWidth: 0, padding: '7px 10px',
                           background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 4,
@@ -535,7 +536,7 @@ export function PurchaseCreate() {
                           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
                         }}>
                           <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                            {l.brand} <span style={{ color: '#4B5563' }}>{l.name}</span>
+                            {productDisplayLines(l.newProduct ?? l).overline} <span style={{ color: '#4B5563' }}>{productDisplayLines(l.newProduct ?? l).title}</span>
                           </span>
                           <button onClick={() => openNewItemModal(idx)} title="Edit item details"
                             className="cursor-pointer flex items-center gap-1"
@@ -652,7 +653,7 @@ export function PurchaseCreate() {
         <PurchasePartnerSection
           partners={partners}
           lines={lines.map((l) => ({
-            label: [l.brand, l.name].filter(Boolean).join(' '),
+            label: productDisplayName(l),
             lineTotal: (l.quantity || 0) * (l.unitPrice || 0),
             partnerShares: l.partnerShares,
           }))}

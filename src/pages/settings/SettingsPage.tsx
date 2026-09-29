@@ -33,6 +33,7 @@ import { useCountryCodesStore } from '@/core/contacts/country-codes-store';
 import type { Category, CategoryAttribute, AttributeType, UserRole } from '@/core/models/types';
 import { PrimaryOnlyNotice } from '@/components/shared/PrimaryOnlyNotice';
 import { primaryOnlyLocked, assertPrimaryOnly } from '@/core/data/primary-only';
+import { productDisplayName, productDisplayLines } from '@/core/products/display-name';
 
 // ── Constants ──
 
@@ -2641,7 +2642,7 @@ function DuplicatesTab() {
     }
     setActionMsg({
       text: failed === 0
-        ? `${merged} Items in „${master.brand} ${master.name}" zusammengeführt.`
+        ? `${merged} Items in „${productDisplayName(master)}" zusammengeführt.`
         : `${merged} zusammengeführt, ${failed} fehlgeschlagen (verknüpfte Datensätze).`,
       ok: failed === 0,
     });
@@ -2872,7 +2873,7 @@ function DuplicateGroupCard({
               onMakeMaster={() => setOverrideMaster(m.id)}
               onRemoveFromGroup={() => setRemovedFromGroup(s => new Set(s).add(m.id))}
               onOpen={() => onOpen(m.id)}
-              onDelete={() => onDelete(m.id, `${m.brand} ${m.name}`)}
+              onDelete={() => onDelete(m.id, productDisplayName(m))}
             />
           );
         })}
@@ -2883,7 +2884,7 @@ function DuplicateGroupCard({
         paddingTop: 10, borderTop: '1px solid rgba(0,0,0,0.06)', flexWrap: 'wrap', gap: 8,
       }}>
         <div style={{ fontSize: 11, color: '#6B7280' }}>
-          Hauptprodukt: <strong style={{ color: '#0F0F10' }}>{masterProduct.brand} {masterProduct.name}</strong>
+          Hauptprodukt: <strong style={{ color: '#0F0F10' }}>{productDisplayName(masterProduct)}</strong>
         </div>
         <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
           <Button variant="ghost" onClick={onIgnoreGroup}>Gruppe ignorieren</Button>
@@ -2965,9 +2966,9 @@ function DuplicateMemberRow({
               background: 'rgba(170,149,110,0.15)', color: '#AA956E', border: '1px solid rgba(170,149,110,0.35)',
             }}>Empfohlen</span>
           )}
-          <span style={{ fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 0.5 }}>{product.brand}</span>
+          <span style={{ fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: 0.5 }}>{productDisplayLines(product).overline}</span>
         </div>
-        <div style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500, lineHeight: 1.3 }}>{product.name || '—'}</div>
+        <div style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500, lineHeight: 1.3 }}>{productDisplayLines(product).title || '—'}</div>
         <div className="flex items-center" style={{ gap: 10, marginTop: 4, fontSize: 11, color: '#4B5563', flexWrap: 'wrap' }}>
           {product.sku && <span className="font-mono">{product.sku}</span>}
           <span style={{

@@ -9,6 +9,7 @@ import {
   type ItemListGroup,
   type ItemListRow,
 } from '@/core/pdf/itemListPdf';
+import { productDisplayName } from '../products/display-name.ts';
 
 /** Baut eine kompakte "Steel · 40mm · Black Dial · Pre-Owned"-Zeile aus
  *  allen ausgefuellten Kategorie-Attributen + Condition (ohne SKU, weil SKU
@@ -71,7 +72,7 @@ export function buildAgentPrintGroup({ agent, transfers, invoices, products, cat
           (product.attributes as Record<string, unknown> | undefined)?.['serial_number'],
         ].filter(Boolean).map(String).join(' · ') || undefined
       : undefined;
-    const itemLabel = product ? `${product.brand} ${product.name}`.trim() : '(product not found)';
+    const itemLabel = product ? productDisplayName(product) : '(product not found)';
     const specsLine = buildSpecsLine(product, categories);
     const amount = linkedInvoice
       ? linkedInvoice.grossAmount

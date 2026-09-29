@@ -28,6 +28,7 @@ const S = (v) => JSON.stringify(v);
 
 const html = readFileSync(join(repo, 'src-tauri/src/sync/mobile_consignment.html'), 'utf8');
 const befehleRepair = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_commands.js'), 'utf8');
+const anzeigeName = readFileSync(join(repo, 'src-tauri/src/sync/mobile_display_name.js'), 'utf8');
 const befehle = readFileSync(join(repo, 'src-tauri/src/sync/mobile_consignment_commands.js'), 'utf8');
 const ui = readFileSync(join(repo, 'src-tauri/src/sync/mobile_consignment_ui.js'), 'utf8');
 const schema = readFileSync(join(repo, 'src-tauri/src/sync/mobile_field_schema.json'), 'utf8');
@@ -83,7 +84,7 @@ const UI_DATEI = `(function () {\n${ui}\n  window.__cnHomeOpen = cnHomeOpen;\n  
 
 const SEITE = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>consignment page test</title></head><body>
 ${html}
-<script src="/repair-commands.js"></script>
+<script src="/display-name.js"></script><script src="/repair-commands.js"></script>
 <script src="/commands.js"></script>
 <script src="/shim.js"></script>
 <script src="/ui.js"></script>
@@ -103,7 +104,7 @@ const medienAbrufe = [];
 const server = createServer((req, res) => {
   if (req.method === 'GET') {
     const js = {
-      '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI,
+      '/display-name.js': anzeigeName, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI,
     }[req.url.split('?')[0]];
     if (js !== undefined) {
       res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });

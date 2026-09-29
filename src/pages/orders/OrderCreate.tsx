@@ -34,6 +34,7 @@ import { WriteError } from '@/components/shared/WriteError';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { ORDER_CREATE_STATUSES, orderCreateBody, orderCreateInput, validateOrderCreate } from '@/core/orders/order-create';
 import { createOrderOnPrimary } from '@/core/orders/order-house';
+import { productDisplayName } from '@/core/products/display-name';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 
@@ -177,7 +178,7 @@ export function OrderCreate() {
       : '';
     return {
       id: p.id,
-      label: `${p.brand} ${p.name}${p.sku ? ' · ' + p.sku : ''}`,
+      label: `${productDisplayName(p)}${p.sku ? ' · ' + p.sku : ''}`,
       subtitle: `${fmt(p.plannedSalePrice ?? p.purchasePrice ?? 0)} BHD${resHint}`,
       searchText: productSearchText(p),
     };
@@ -245,7 +246,7 @@ export function OrderCreate() {
     updateLine(idx, {
       productId,
       newProduct: undefined,
-      description: `${p.brand} ${p.name}`,
+      description: productDisplayName(p),
       unitPrice: p.plannedSalePrice ?? p.purchasePrice ?? 0,
     });
   }
@@ -267,7 +268,7 @@ export function OrderCreate() {
 
   function handleModalSave(prod: Partial<Product>) {
     if (newItemModalIdx == null) return;
-    const label = `${prod.brand || ''} ${prod.name || ''}`.trim();
+    const label = productDisplayName(prod);
     updateLine(newItemModalIdx, {
       newProduct: prod,
       productId: undefined,
@@ -703,7 +704,7 @@ export function OrderCreate() {
                               </div>
                             )}
                             <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>
-                              {customProductSpec.brand || ''} {customProductSpec.name || ''}
+                              {productDisplayName(customProductSpec)}
                             </div>
                             {attrEntries.length > 0 && (
                               <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', marginTop: 6 }}>
@@ -1241,7 +1242,7 @@ export function OrderCreate() {
         onSubmit={(spec) => {
           setCustomProductSpec(spec);
           if (!finalProductDescription.trim()) {
-            const auto = `${spec.brand || ''} ${spec.name || ''}`.trim();
+            const auto = productDisplayName(spec);
             if (auto) setFinalProductDescription(auto);
           }
           setShowCustomProductModal(false);

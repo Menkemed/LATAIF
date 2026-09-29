@@ -10,6 +10,7 @@ import type { Employee, EmploymentStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { productDisplayName } from '@/core/products/display-name';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
@@ -445,7 +446,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
       const rows = query(
         `SELECT t.id, t.transfer_number, t.transferred_at, t.agent_id,
                 a.name AS agent_name,
-                p.brand AS p_brand, p.name AS p_name,
+                p.brand AS p_brand, p.name AS p_name, p.category_id AS p_category_id, p.attributes AS p_attributes,
                 COALESCE(t.agent_price, 0) AS agent_price,
                 t.status
            FROM agent_transfers t
@@ -464,7 +465,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
           transferredAt:  (r.transferred_at as string) || '',
           agentId:        r.agent_id as string,
           agentName:      (r.agent_name as string) || '—',
-          productLabel:   `${brand} ${name}`.trim() || '—',
+          productLabel:   productDisplayName({ brand, name, categoryId: r.p_category_id as string, attributes: r.p_attributes as string }) || '—',
           agentPrice:     Number(r.agent_price || 0),
           status:         (r.status as string) || 'transferred',
         };
@@ -477,7 +478,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
       const rows = query(
         `SELECT cn.id, cn.consignment_number, cn.agreement_date, cn.consignor_id,
                 c.first_name, c.last_name, c.company,
-                p.brand AS p_brand, p.name AS p_name,
+                p.brand AS p_brand, p.name AS p_name, p.category_id AS p_category_id, p.attributes AS p_attributes,
                 COALESCE(cn.agreed_price, 0) AS agreed_price,
                 cn.status
            FROM consignments cn
@@ -497,7 +498,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
           consignorId:       r.consignor_id as string,
           consignorName:     `${(r.first_name as string) || ''} ${(r.last_name as string) || ''}`.trim()
                              || (r.company as string) || '—',
-          productLabel:      `${brand} ${name}`.trim() || '—',
+          productLabel:      productDisplayName({ brand, name, categoryId: r.p_category_id as string, attributes: r.p_attributes as string }) || '—',
           agreedPrice:       Number(r.agreed_price || 0),
           status:            (r.status as string) || 'active',
         };

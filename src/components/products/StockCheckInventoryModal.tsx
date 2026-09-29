@@ -37,6 +37,7 @@ import {
 } from '@/core/stock/stock-check';
 import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import type { Product, Category } from '@/core/models/types';
+import { productDisplayLines } from '@/core/products/display-name';
 
 interface DraftEntry { status: StockCheckStatus; notes: string }
 
@@ -371,7 +372,7 @@ export function StockCheckInventoryModal({ open, onClose, products, categories }
           <div style={{ minWidth: 0 }}>
             <div className="text-xs" style={{ fontFamily: 'monospace', color: '#8A8A93' }}>{p.sku || '—'}</div>
             <div className="text-sm" style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              <span className="text-gray-400">{p.brand}</span> {p.name}
+              <span className="text-gray-400">{productDisplayLines(p).overline}</span> {productDisplayLines(p).title}
             </div>
             {/* §C9 — the last check is context, not a classification: a product checked yesterday
                 is still offered for checking today. */}

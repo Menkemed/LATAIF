@@ -3,6 +3,7 @@
 // aus Brand, Name, SKU, Condition + allen Kategorie-Attributen.
 import type { Product, Category, CategoryAttribute } from '@/core/models/types';
 import { lookupCategory } from './category-lookup.ts';
+import { productDisplayName } from '../products/display-name.ts';
 
 function formatAttrValue(attr: CategoryAttribute, value: unknown): string | null {
   if (value === undefined || value === null || value === '') return null;
@@ -62,7 +63,7 @@ export function formatProductOneLine(
   opts: FormatOptions = { prominentOnly: true, includeSku: false, includeCondition: false }
 ): string {
   if (!product) return '';
-  const head = `${product.brand || ''} ${product.name || ''}`.trim();
+  const head = productDisplayName(product);
   const specs = getProductSpecs(product, categories, opts);
   if (specs.length === 0) return head;
   return `${head} · ${specs.map(s => s.value).join(' · ')}`;
@@ -226,7 +227,7 @@ export function formatProductMultiLine(
   opts: FormatOptions = { prominentOnly: false }
 ): string {
   if (!product) return '';
-  const head = `${product.brand || ''} ${product.name || ''}`.trim();
+  const head = productDisplayName(product);
   const specs = getProductSpecs(product, categories, opts);
   if (specs.length === 0) return head;
   return [head, ...specs.map(s => `${s.label}: ${s.value}`)].join('\n');

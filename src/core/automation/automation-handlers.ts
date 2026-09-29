@@ -10,6 +10,7 @@ import { query, currentBranchId, currentUserId } from '../db/helpers';
 import { trackProductRow } from '../lots/lot-queries';
 import { trackChange } from '../sync/sync-service';   // sync-only (kein Audit) — Auto-Completion-Side-Effects (Orders/Repairs)
 import type { DomainEvent, TaskType, TaskPriority } from '../models/types';
+import { productDisplayName } from '../products/display-name.ts';
 
 function getBranchId(): string {
   try { return currentBranchId(); } catch { return 'branch-main'; }
@@ -62,7 +63,7 @@ eventBus.on('product.created', (event: DomainEvent) => {
   if (!plannedSalePrice) {
     insertTask({
       title: 'Review pricing for new product',
-      description: `Product "${event.payload.brand || ''} ${event.payload.name || ''}" was added without a planned sale price. Set pricing to enable margin tracking.`,
+      description: `Product "${productDisplayName(event.payload)}" was added without a planned sale price. Set pricing to enable margin tracking.`,
       type: 'price_check',
       priority: 'high',
       dueAt: addDays(1),

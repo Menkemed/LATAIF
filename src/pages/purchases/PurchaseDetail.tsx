@@ -34,6 +34,7 @@ import { savePurchaseCredit, savePurchasePayment, viaWrites } from '@/core/payab
 import { PURCHASE_LIFECYCLE_OP } from '@/core/purchases/purchase-lifecycle-house';
 import { savePurchaseCancel, savePurchaseReturn } from '@/core/purchases/purchase-house';
 import { loadPurchaseIdentityPhoto, purchaseIdentityDataUrl, revokeIdentityPhoto, type IdentityPhotoView } from '@/core/identity/identity-photo-view';
+import { productDisplayName } from '@/core/products/display-name';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -202,7 +203,7 @@ export function PurchaseDetail() {
   const getProductName = (pid?: string) => {
     if (!pid) return '—';
     const p = products.find(pr => pr.id === pid);
-    return p ? `${p.brand} ${p.name}` : pid.slice(0, 8);
+    return p ? productDisplayName(p) : pid.slice(0, 8);
   };
 
   return (

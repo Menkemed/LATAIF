@@ -83,6 +83,7 @@ import {
 import { CONSIGNMENT_PRODUCT_FIELDS } from '@/core/data/write-payloads';
 // Die Schemata des Hauses — nicht die engere Einkaufsliste weiter unten (Einkauf kennt kein MARGIN).
 import { TAX_SCHEMES as HOUSE_TAX_SCHEMES } from '@/core/models/types';
+import { productDisplayName } from '../products/display-name.ts';
 
 export const OP_PURCHASES_CREATE = 'purchases.create';
 export const OP_CONSIGNMENTS_CREATE = 'consignments.create';
@@ -615,7 +616,7 @@ export async function runConsignmentCreate(
         throw new CommandRejected(
           'POSSIBLE_DUPLICATE',
           `this looks like an item we already have: ${hits.slice(0, 3)
-            .map((h) => `${h.product.brand} ${h.product.name} (${h.product.sku || h.product.id})`).join(', ')}`,
+            .map((h) => `${productDisplayName(h.product)} (${h.product.sku || h.product.id})`).join(', ')}`,
         );
       }
     }

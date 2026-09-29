@@ -38,6 +38,7 @@ import { customerDetailReadsFor, type CustomerDetailReads } from '@/core/data/pa
 import { IdentityPhotoField } from '@/components/identity/IdentityPhotoField';
 import { saveCustomerUpdate } from '@/core/customers/customer-save';
 import { intentOf } from '@/core/identity/identity-save';
+import { productDisplayLines } from '@/core/products/display-name';
 
 function fmtDate(iso?: string | null): string {
   if (!iso) return '\u2014';
@@ -1022,8 +1023,8 @@ export function CustomerDetail() {
                           onMouseEnter={e => (e.currentTarget.style.background = 'rgba(15,15,16,0.02)')}
                           onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}>
                           <div>
-                            <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{p.brand}</span>
-                            <div style={{ fontSize: 13, color: '#0F0F10' }}>{p.name}</div>
+                            <span style={{ fontSize: 11, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em' }}>{productDisplayLines(p).overline}</span>
+                            <div style={{ fontSize: 13, color: '#0F0F10' }}>{productDisplayLines(p).title}</div>
                           </div>
                           <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={p.plannedSalePrice || p.purchasePrice}/> BHD</span>
                         </div>

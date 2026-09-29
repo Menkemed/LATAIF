@@ -19,6 +19,7 @@ import { useProductionStore, completeProductionOnPrimary } from '@/stores/produc
 import { useProductStore } from '@/stores/productStore';
 import { getProductSpecs } from '@/core/utils/product-format';
 import type { Category, Product, ProductionInputSnapshot } from '@/core/models/types';
+import { productDisplayName } from '@/core/products/display-name';
 
 function fmtDate(iso: string | undefined): string {
   if (!iso) return '—';
@@ -311,7 +312,7 @@ function ProductDisplayCard({
 }) {
   const cat = snapshot?.categoryId ? categories.find(c => c.id === snapshot.categoryId) : undefined;
   const hasImages = (snapshot?.images || []).length > 0;
-  const headerLine = `${snapshot?.brand || ''} ${snapshot?.name || ''}`.trim() || '(unnamed)';
+  const headerLine = productDisplayName(snapshot) || '(unnamed)';
   const specs = useMemo(() => {
     if (!snapshot) return [];
     // Adapter: getProductSpecs erwartet Product, wir füttern ein passendes Subset

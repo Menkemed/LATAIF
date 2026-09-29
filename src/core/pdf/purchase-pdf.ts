@@ -7,6 +7,7 @@
 import logoUrl from '@/assets/logo.png';
 import type { Purchase, Supplier, Product, Category } from '@/core/models/types';
 import { formatProductMultiLine } from '@/core/utils/product-format';
+import { productDisplayName } from '../products/display-name.ts';
 
 let logoDataUrl: string = logoUrl;
 fetch(logoUrl)
@@ -85,7 +86,7 @@ export function generatePurchasePdfHtml(opts: PurchasePdfOptions): string {
 
   const linesHtml = purchase.lines.map((l, i) => {
     const product = products.find(p => p.id === l.productId);
-    const head = product ? `${product.brand || ''} ${product.name || ''}`.trim() : (l.description || '—');
+    const head = product ? productDisplayName(product) : (l.description || '—');
     const multi = product ? formatProductMultiLine(product, categories) : '';
     const detail = specsHtml(multi);
     return `<tr style="border-bottom:1px solid #eee;page-break-inside:avoid">

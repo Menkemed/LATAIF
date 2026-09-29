@@ -9,6 +9,7 @@ import {
   type ItemListGroup,
   type ItemListRow,
 } from '@/core/pdf/itemListPdf';
+import { productDisplayName } from '../products/display-name.ts';
 
 /** Baut eine kompakte Specs-Zeile aus allen ausgefuellten Kategorie-Attributen. */
 function buildSpecsLine(product: Product | undefined, categories: Category[]): string | undefined {
@@ -70,7 +71,7 @@ export function buildConsignorPrintGroup({ consignor, consignments, products, ca
           (product.attributes as Record<string, unknown> | undefined)?.['serial_number'],
         ].filter(Boolean).map(String).join(' · ') || undefined
       : undefined;
-    const itemLabel = product ? `${product.brand} ${product.name}`.trim() : '(product not found)';
+    const itemLabel = product ? productDisplayName(product) : '(product not found)';
     const specsLine = buildSpecsLine(product, categories);
     return {
       date: (c.createdAt || '').split('T')[0],

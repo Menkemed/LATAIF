@@ -29,6 +29,7 @@ import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-write';
 import { lotAggregatesFor, productLotsBatchFor, LEERE_LOSE } from '@/core/data/domain-reads';
 import { createInvoiceOnPrimary, invoiceCreatePaymentBody, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
+import { productDisplayName } from '@/core/products/display-name';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 type Method = 'cash' | 'bank_transfer' | 'card' | 'benefit';
@@ -203,7 +204,7 @@ export function InvoiceCreate() {
         : '';
       return {
         id: p.id,
-        label: `${p.brand} ${p.name}`,
+        label: productDisplayName(p),
         subtitle: `${fmt(p.plannedSalePrice ?? p.purchasePrice ?? 0)} BHD · stock ${stock}${resHint}`,
         meta: p.sku,
         searchText: productSearchText(p),
@@ -236,7 +237,7 @@ export function InvoiceCreate() {
     const lotIdOut = kept ? (kept.lotId ?? undefined) : selectedLot?.id;
     const keptRest = selectedLot ? selectedLot.qtyRemaining : 0;
     const keptShort = kept && kept.lotId && l.quantity - kept.qty > keptRest + 0.0005
-      ? keptLineLotShortMessage([product.brand, product.name].filter(Boolean).join(' ') || product.sku || 'this item', keptRest)
+      ? keptLineLotShortMessage(productDisplayName(product) || product.sku || 'this item', keptRest)
       : null;
     const resolved = (l.scheme === 'auto' ? (product.taxScheme as 'VAT_10' | 'ZERO' | 'MARGIN') : l.scheme);
     const vatRate = resolved === 'ZERO' ? 0 : 10;

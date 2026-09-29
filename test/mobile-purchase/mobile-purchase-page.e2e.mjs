@@ -32,6 +32,7 @@ const S = (v) => JSON.stringify(v);
 
 const html = readFileSync(join(repo, 'src-tauri/src/sync/mobile_purchase.html'), 'utf8');
 const befehleRepair = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_commands.js'), 'utf8');
+const anzeigeName = readFileSync(join(repo, 'src-tauri/src/sync/mobile_display_name.js'), 'utf8');
 const befehle = readFileSync(join(repo, 'src-tauri/src/sync/mobile_purchase_commands.js'), 'utf8');
 const ui = readFileSync(join(repo, 'src-tauri/src/sync/mobile_purchase_ui.js'), 'utf8');
 const schema = readFileSync(join(repo, 'src-tauri/src/sync/mobile_field_schema.json'), 'utf8');
@@ -80,7 +81,7 @@ button { width: 100%; padding: 14px; } .photo-strip { display: flex; gap: 8px; o
 .row + .row { margin-top: 14px; } .error, .success { padding: 10px; } .header-row { display: flex; justify-content: space-between; } .photo-area { display: flex; flex-direction: column; }</style>
 </head><body>
 ${html}
-<script src="/repair-commands.js"></script><script src="/commands.js"></script><script src="/shim.js"></script><script src="/ui.js"></script>
+<script src="/display-name.js"></script><script src="/repair-commands.js"></script><script src="/commands.js"></script><script src="/shim.js"></script><script src="/ui.js"></script>
 </body></html>`;
 
 // ── Attrappen-Primary ─────────────────────────────────────────────────────────────────────────
@@ -89,7 +90,7 @@ let partnerListe = [{ id: 'pa-1', name: 'Bashir', active: true }, { id: 'pa-2', 
 let einkauf = () => ({ status: 200, body: { ok: true, value: { purchaseId: 'pur-1', purchaseNumber: 'PUR-2026-000042', totalAmount: 1361.5, paidAmount: 700, openAmount: 661.5 } } });
 const server = createServer((req, res) => {
   if (req.method === 'GET') {
-    const js = { '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI }[req.url.split('?')[0]];
+    const js = { '/display-name.js': anzeigeName, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI }[req.url.split('?')[0]];
     if (js !== undefined) { res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' }); res.end(js); return; }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(SEITE); return;
   }
@@ -215,8 +216,10 @@ try {
   await c.ev(klick('[data-mp-action="add-item"]') + ' await new Promise((r) => setTimeout(r, 200)); return 1;');
   const uid2 = await c.ev('return window.__MP.draft.items[1].uid;');
   await c.ev(tippe(`[data-mp-field="item:${uid2}:categoryId"]`, 'cat-gold-jewelry') + ' await new Promise((r) => setTimeout(r, 150)); return 1;');
-  await c.ev(tippe(`[data-mp-field="item:${uid2}:brand"]`, 'Gold') + tippe(`[data-mp-field="item:${uid2}:name"]`, 'Chain 21K')
-    + tippe(`[data-mp-field="item:${uid2}:quantity"]`, '3') + tippe(`[data-mp-field="item:${uid2}:unitPrice"]`, '120.5') + ' return 1;');
+  // DISPLAY-NAME — Gold-Diamond Jewellery fragt nicht nach Marke/Modell; die Merkmale benennen den Artikel.
+  ok(await c.ev(`return !document.querySelector('[data-mp-field="item:${uid2}:brand"]') && !document.querySelector('[data-mp-field="item:${uid2}:name"]');`),
+    '§1 Gold-Diamond Jewellery: keine Felder für Marke/Modell');
+  await c.ev(tippe(`[data-mp-field="item:${uid2}:quantity"]`, '3') + tippe(`[data-mp-field="item:${uid2}:unitPrice"]`, '120.5') + ' return 1;');
   await c.ev(pflicht(uid2) + ' return 1;');
   ok(await c.ev(summe('items')) === '2 positions · 4 pcs · 1,361.500 BHD', `§1 Positionen 1 + Menge 3 = 4 Stück, 1000 + 361,5 (${await c.ev(summe('items'))})`);
   // Zahlungen: bar 500, Bank 200.
@@ -266,6 +269,8 @@ try {
     && p.lines[1].quantity === 3 && p.lines[0].newProduct.stagingIds.length === 2 && S(p.lines[0].partnerShares) === S([{ partnerId: 'pa-1', sharePct: 40 }])
     && S(p.payments) === S([{ amount: 500, method: 'cash' }, { amount: 200, method: 'bank' }]),
   `§3 Rumpf: Kunde → Lieferant, zwei Positionen, Menge 3, Fotos, Partner 40 %, zwei Zahlungen (${S(p).slice(0, 200)}…)`);
+  ok(p.lines[1].brand === '' && p.lines[1].name === '' && p.lines[1].newProduct.brand === null && p.lines[1].newProduct.categoryId === 'cat-gold-jewelry',
+    `§3 die Gold-Position reist ohne Marke/Modell (${S(p.lines[1]).slice(0, 160)})`);
 
   // ── §4 erneut senden: DIESELBE Kennung, derselbe Rumpf → gebucht ──
   einkauf = () => ({ status: 200, body: { ok: true, value: { purchaseId: 'pur-1', purchaseNumber: 'PUR-2026-000042', totalAmount: 1361.5, paidAmount: 700, openAmount: 661.5, replayed: true } } });

@@ -38,6 +38,7 @@ import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+import { productDisplayName } from '../core/products/display-name.ts';
 
 // ── SSOT: alle Tabellen die ein Produkt via product_id referenzieren ──
 // Hat EINE davon einen Treffer, gilt das Produkt als "verknuepft" und darf
@@ -522,7 +523,7 @@ export function getRecentCorrectionsAsPrompt(brand?: string, categoryId?: string
       try {
         const corrections = JSON.parse(r.ai_corrections as string) as Array<{ field: string; aiSaid: unknown; userChanged: unknown }>;
         if (!Array.isArray(corrections) || corrections.length === 0) continue;
-        const itemLabel = `${r.brand} ${r.name || ''}`.trim() || '(item)';
+        const itemLabel = productDisplayName(r) || '(item)';
         for (const c of corrections) {
           const aiVal = c.aiSaid === null || c.aiSaid === undefined ? '(empty)' : String(c.aiSaid);
           const userVal = c.userChanged === null || c.userChanged === undefined ? '(empty)' : String(c.userChanged);
@@ -559,7 +560,7 @@ export function getRecentCorrectionsAsPrompt(brand?: string, categoryId?: string
         } catch { return undefined; }
       })();
       const refLabel = refAttr ? ` ref=${refAttr}` : '';
-      lines.push(`  - "${r.brand} ${r.name || ''}".trim()" CONFIRMED CORRECT by user (sku=${r.sku || '?'}${refLabel})`);
+      lines.push(`  - "${productDisplayName(r)}" CONFIRMED CORRECT by user (sku=${r.sku || '?'}${refLabel})`);
     }
     if (lines.length > 0) {
       sections.push(`CONFIRMED CORRECT IDENTIFICATIONS (positive examples — when you see similar items, use these as known-good references):\n${lines.slice(0, 8).join('\n')}`);

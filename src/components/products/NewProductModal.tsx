@@ -21,6 +21,7 @@ import type { Product, Category } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 import { useAiIdentifyGate } from '@/core/ai/ai-availability';
 import { validateProductFields, blockingIssues, stripStaleAttributes, visibleAttributes, isBrandRequired } from '@/core/products/field-contract';
+import { nameFromAttributes, brandModelHidden } from '@/core/products/display-name';
 
 export interface NewProductModalProps {
   open: boolean;
@@ -71,7 +72,7 @@ export function NewProductModal({
   useEffect(() => {
     if (!open) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; return; }
     if (duplicateMatches.length > 0) return;
-    if (!form.brand?.trim() && !form.name?.trim() && !form.sku?.trim()) return;
+    if (!form.brand?.trim() && !form.name?.trim() && !form.sku?.trim() && !nameFromAttributes(form.attributes)) return;
     if (fp === lastCheckedFp.current) return;
     if (fp === lastDismissedFp.current) return;
     const t = setTimeout(() => {
@@ -190,6 +191,9 @@ export function NewProductModal({
     // mit vielen no-name Stuecken). Rest = branded (Watch, Original Gold,
     // Branded Gold, Spare Part) -> Brand+Name Pflicht.
     const brandedRequired = isBrandRequired(selectedCat?.id || '');
+    // DISPLAY-NAME — bei Gold-Diamond Jewellery sagen die Merkmale, was der Artikel ist: Marke und
+    // Modell werden nicht verlangt und nicht gezeigt (ein schon gespeicherter Wert bleibt sichtbar).
+    if (brandModelHidden(selectedCat?.id) && !form.brand && !form.name) return null;
           return (
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
               <Input required={brandedRequired} label={brandedRequired ? 'BRAND' : 'BRAND (OPTIONAL)'}

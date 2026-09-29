@@ -38,6 +38,7 @@ import { WriteError } from '@/components/shared/WriteError';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { createConsignmentOnPrimary, consignmentCreateRequest, type ConsignmentCreateInput } from '@/core/consignment/consignment-create';
 import { useAiIdentifyGate } from '@/core/ai/ai-availability';
+import { productDisplayName, brandModelHidden } from '@/core/products/display-name';
 
 // SQLite gibt fehlende REAL-Spalten als JS-`null` zurück, nicht `undefined`.
 // fmt darf nicht crashen — sonst killt eine NULL-Spalte den ganzen Render.
@@ -651,7 +652,7 @@ export function ConsignmentList() {
                 const cust = getCustomer(con.consignorId);
                 const prod = getProduct(con.productId);
                 const custName = cust ? `${cust.firstName} ${cust.lastName}` : '\u2014';
-                const prodLabel = prod ? `${prod.brand} ${prod.name}` : '\u2014';
+                const prodLabel = prod ? productDisplayName(prod) : '\u2014';
 
                 return (
                   <tr key={con.id}
@@ -847,6 +848,8 @@ export function ConsignmentList() {
             {(() => {
               // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
     const brandedRequired = !(productForm.categoryId === 'cat-gold-jewelry' || productForm.categoryId === 'cat-accessory');
+    // DISPLAY-NAME — bei Gold-Diamond Jewellery nicht verlangt und nicht gezeigt.
+    if (brandModelHidden(productForm.categoryId) && !productForm.brand && !productForm.name) return null;
               return (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
                   <Input required={brandedRequired}

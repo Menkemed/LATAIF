@@ -12,7 +12,9 @@ use super::*;
 /// REPAIR-INTAKE §5 — was `0b50cba3b834d514` while the contract knew only product categories; the
 /// repair form's three prompt lines are now part of the same input, appended after the category
 /// lines, so the value moved once and deliberately.
-const EXPECTED_FINGERPRINT: &str = "0c33a03188de4b83";
+/// DISPLAY-NAME — was `0c33a03188de4b83`; the gold-jewellery note (no brand/model from the AI) moved it
+/// once and deliberately.
+const EXPECTED_FINGERPRINT: &str = "99b2eeedc75bb347";
 
 #[test]
 fn rust_and_typescript_assemble_the_identical_prompts() {

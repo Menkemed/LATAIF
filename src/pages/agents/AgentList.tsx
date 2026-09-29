@@ -34,6 +34,7 @@ import { WriteError } from '@/components/shared/WriteError';
 import { clampTransferSplitPct, isTransferableStock, transferCreateBody } from '@/core/agents/transfer-rules';
 import { createTransferOnPrimary } from '@/core/agents/transfer-house';
 import { saveAgentUpdate } from '@/core/masterdata/masterdata-save';
+import { productDisplayName } from '@/core/products/display-name';
 
 
 interface NewTransferForm {
@@ -374,7 +375,7 @@ export function AgentList() {
                     <div className="flex justify-between items-center">
                       <div style={{ minWidth: 0, flex: 1, paddingRight: 8 }}>
                         <div style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {p.brand} {p.name}
+                          {productDisplayName(p)}
                         </div>
                         {p.sku && (
                           <div className="font-mono" style={{ fontSize: 10, color: '#9CA3AF', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>

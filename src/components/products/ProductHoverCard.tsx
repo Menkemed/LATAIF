@@ -10,6 +10,7 @@ import { getProductSpecs } from '@/core/utils/product-format';
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
 import { useMediaScope } from '@/hooks/useMediaScope';
 import type { Product, Category } from '@/core/models/types';
+import { productDisplayName } from '@/core/products/display-name';
 
 interface ProductHoverCardProps {
   product: Product | undefined;
@@ -24,7 +25,7 @@ export function ProductHoverCard({ product, categories }: ProductHoverCardProps)
   const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
   if (!product) return null;
   const cat = categories.find(c => c.id === product.categoryId);
-  const titleLine = `${product.brand || ''} ${product.name || ''}`.trim() || '(unnamed)';
+  const titleLine = productDisplayName(product) || '(unnamed)';
 
   return (
     <div

@@ -17,6 +17,7 @@ import {
   EMBEDDED_PRODUCT_FIELDS, FINAL_PRODUCT_FIELDS, checkEmbeddedProduct, pickProductSpec, stageSpecImages,
   type EmbeddedProductPort,
 } from '@/core/products/embedded-product';
+import { productDisplayName } from '../products/display-name.ts';
 
 /** Ein Nein der geteilten Regeln — am Primary eine Absage der Maske, fern ein eingefrorenes Urteil. */
 export class OrderActionRejected extends Error {
@@ -258,8 +259,8 @@ export function planOrderCreate(input: OrderCreateInput, port: OrderCreatePort):
     // Die Angebotszeile — die einzige kundenseitige Position des Sonderteils, IMMER brutto.
     if (input.quotedPrice > 0) {
       const desc = (spec?.brand && spec?.name)
-        ? `${spec.brand} ${spec.name}`.trim()
-        : (input.finalProductDescription.trim() || 'Custom Order');
+        ? productDisplayName(spec)
+        : (input.finalProductDescription.trim() || productDisplayName(spec) || 'Custom Order');
       customLines.push({
         description: desc, quantity: 1, unitPrice: input.quotedPrice,
         taxScheme: input.customTaxScheme, vatRate: input.customTaxScheme === 'ZERO' ? 0 : 10,

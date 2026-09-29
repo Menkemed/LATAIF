@@ -14,6 +14,7 @@ import { usePurchaseStore } from '@/stores/purchaseStore';
 import { canonicalStockStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
 import { computeStockValuation, summarizeInventory, isOwnStockAsset } from '@/core/lots/lot-queries';
 import type { Invoice, Customer, Product } from '@/core/models/types';
+import { productDisplayName } from '../products/display-name.ts';
 
 // ── Renderable block types (return shape) ───────────────────
 
@@ -206,7 +207,7 @@ function toolInventoryAtRisk(args: { min_days_idle?: number; min_value?: number;
       .map(p => {
         const days = p.daysInStock || (p.purchaseDate ? Math.floor((Date.now() - new Date(p.purchaseDate).getTime()) / 86_400_000) : 0);
         return [
-          { text: `${p.brand} ${p.name}`.trim(), link: `/collection/${p.id}` },
+          { text: productDisplayName(p), link: `/collection/${p.id}` },
           p.sku || '—',
           days,
           fmt(p.purchasePrice || 0),

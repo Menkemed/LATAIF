@@ -27,6 +27,7 @@ import {
 import {
   canUndoTransferConvert, convertTransferOnPrimary, convertTransfersOnPrimary, transferUndoBody, undoTransferConversionOnPrimary,
 } from '@/core/agents/transfer-house';
+import { productDisplayName } from '@/core/products/display-name';
 
 
 // Display-Status (User-Spec: Transfer ↔ Invoice synchron). Wenn der Transfer
@@ -435,7 +436,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
               <span style={{ fontSize: 12, color: '#0F0F10' }}>{agent?.name || '—'}</span>
             )}
             <span style={{ fontSize: 12, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {product ? `${product.brand} ${product.name}` : '—'}
+              {product ? productDisplayName(product) : '—'}
             </span>
             <span className="font-mono" style={{ fontSize: 12, color: '#4B5563' }} title="Originally agreed price (Our Price)"><Bhd v={t.agentPrice || 0}/></span>
             <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}><Bhd v={amount}/></span>
@@ -667,7 +668,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
                       }}>
                         <span className="font-mono" style={{ color: '#4B5563', fontSize: 11 }}>{t.transferNumber}</span>
                         <span style={{ color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                          {product ? `${product.brand} ${product.name}` : '—'}
+                          {product ? productDisplayName(product) : '—'}
                         </span>
                         <span className="font-mono" style={{ color: '#0F0F10' }}>
                           <Bhd v={t.settlementAmount || 0}/> BHD

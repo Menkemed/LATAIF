@@ -19,6 +19,7 @@
 import { inboxGalleryMediaIds } from '@/core/purchases/inbox-media';
 import { query } from '@/core/db/helpers';
 import type { BusinessReadContext } from '@/core/data/read-context';
+import { productDisplayName } from '../products/display-name.ts';
 
 const s = (v: unknown): string => (v as string) ?? '';
 const n = (v: unknown): number => Number(v ?? 0) || 0;
@@ -345,7 +346,7 @@ export function productDetailReadsFor(ctx: BusinessReadContext, productId: strin
   for (const r of inputRows) {
     const recId = s(r.record_id);
     const counter = query(
-      `SELECT po.product_id, po.output_value, p.brand, p.name
+      `SELECT po.product_id, po.output_value, p.brand, p.name, p.category_id AS categoryId, p.attributes
          FROM production_outputs po
          LEFT JOIN products p ON p.id = po.product_id
         WHERE po.record_id = ?`,
@@ -356,7 +357,7 @@ export function productDetailReadsFor(ctx: BusinessReadContext, productId: strin
       direction: 'input', value: n(r.input_value),
       counterpart: counter.map((cr) => ({
         productId: s(cr.product_id),
-        label: [cr.brand, cr.name].filter(Boolean).join(' ').trim() || '(deleted)',
+        label: productDisplayName(cr) || '(deleted)',
         value: n(cr.output_value),
       })),
     });
@@ -372,7 +373,7 @@ export function productDetailReadsFor(ctx: BusinessReadContext, productId: strin
   for (const r of outputRows) {
     const recId = s(r.record_id);
     const counter = query(
-      `SELECT pi.product_id, pi.input_value, pi.product_snapshot, p.brand, p.name
+      `SELECT pi.product_id, pi.input_value, pi.product_snapshot, p.brand, p.name, p.category_id AS categoryId, p.attributes
          FROM production_inputs pi
          LEFT JOIN products p ON p.id = pi.product_id
         WHERE pi.record_id = ?`,
@@ -382,12 +383,12 @@ export function productDetailReadsFor(ctx: BusinessReadContext, productId: strin
       recordId: recId, recordNumber: s(r.record_number) || '—', productionDate: s(r.production_date),
       direction: 'output', value: n(r.output_value),
       counterpart: counter.map((cr) => {
-        let label = [cr.brand, cr.name].filter(Boolean).join(' ').trim();
+        let label = productDisplayName(cr);
         if (!label) {
           // Der Schnappschuss hält fest, was der Posten WAR — auch wenn der Artikel weg ist.
           try {
             const snap = JSON.parse(s(cr.product_snapshot) || '{}') as { brand?: string; name?: string };
-            label = [snap.brand, snap.name].filter(Boolean).join(' ').trim();
+            label = productDisplayName(snap);
           } catch { /* kein Schnappschuss */ }
         }
         return { productId: s(cr.product_id), label: label || '(deleted)', value: n(cr.input_value) };

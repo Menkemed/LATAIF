@@ -15,6 +15,7 @@ import { NewProductModal } from '@/components/products/NewProductModal';
 import { WriteError } from '@/components/shared/WriteError';
 import { useProductStore } from '@/stores/productStore';
 import type { OrderLine, Product } from '@/core/models/types';
+import { productDisplayName, productDisplayLines } from '@/core/products/display-name';
 
 export interface OrderLineEditPatch {
   productId?: string;
@@ -61,7 +62,7 @@ export function OrderLineEditModal({ open, line, productLocked, busy = false, su
 
   const productOptions = useMemo(() => products.map(p => ({
     id: p.id,
-    label: `${p.brand} ${p.name}${p.sku ? ' · ' + p.sku : ''}`,
+    label: `${productDisplayName(p)}${p.sku ? ' · ' + p.sku : ''}`,
     subtitle: (p.quantity ?? 0) > 0 ? `${p.quantity} auf Lager` : 'ausverkauft',
     searchText: productSearchText(p),
   })), [products]);
@@ -70,13 +71,13 @@ export function OrderLineEditModal({ open, line, productLocked, busy = false, su
     const p = products.find(pp => pp.id === pid);
     setProductId(pid);
     setNewProduct(undefined);
-    if (p) setDescription(`${p.brand} ${p.name}`);
+    if (p) setDescription(productDisplayName(p));
   }
 
   function handleNewProductSaved(prod: Partial<Product>) {
     setNewProduct(prod);
     setProductId('');
-    setDescription(`${prod.brand || ''} ${prod.name || ''}`.trim());
+    setDescription(productDisplayName(prod));
     setShowNewProductModal(false);
   }
 
@@ -154,7 +155,7 @@ export function OrderLineEditModal({ open, line, productLocked, busy = false, su
                   padding: '8px 12px', background: '#F2F7FA', border: '1px solid #E5E9EE',
                   borderRadius: 6, fontSize: 13, color: '#0F0F10',
                 }}>
-                  <span>{newProduct.brand} <span style={{ color: '#4B5563' }}>{newProduct.name}</span></span>
+                  <span>{productDisplayLines(newProduct).overline} <span style={{ color: '#4B5563' }}>{productDisplayLines(newProduct).title}</span></span>
                   <button onClick={() => setShowNewProductModal(true)} title="Produkt-Details bearbeiten"
                     className="cursor-pointer flex items-center gap-1"
                     style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 11 }}>

@@ -88,6 +88,13 @@
     const pflicht = cat ? !!cat.brandRequired : false;
     $('cnBrandLabel').innerHTML = 'Brand' + (pflicht ? ' <span class="req">*</span>' : '');
     $('cnNameLabel').innerHTML = 'Model / Name' + (pflicht ? ' <span class="req">*</span>' : '');
+    // DISPLAY-NAME — bei Gold-Diamond Jewellery sagen die Merkmale, was der Artikel ist.
+    const ohneMarke = MobileDisplayName.brandModelHidden(catId);
+    for (const id of ['cnBrand', 'cnName']) {
+      $(id).disabled = ohneMarke;
+      if (ohneMarke) $(id).value = '';
+      $(id).closest('.row').classList.toggle('hidden', ohneMarke);
+    }
     const cs = $('cnCondition');
     cs.innerHTML = '';
     cs.appendChild(el('option', { value: '' }, '— Select —'));
@@ -327,7 +334,7 @@
       if (offen) cnSay('cnSuccess', 'Your unsaved entries are still here — press "Save Changes" to store them.');
     }
     $('cnHeadline').textContent = con.consignmentNumber || 'Consignment';
-    $('cnSubline').textContent = (CN.product ? ((CN.product.brand || '') + ' ' + (CN.product.name || '')).trim() : '') || 'Consigned item';
+    $('cnSubline').textContent = (CN.product ? MobileDisplayName.displayName(CN.product, (catById(CN.product.categoryId || CN.product.category_id) || {}).name) : '') || 'Consigned item';
     $('cnConsignorCard').classList.add('hidden');
     $('cnItemCard').classList.add('hidden');       // die Ware selbst wird am Rechner geaendert
     $('cnDuplicateCard').classList.add('hidden');
@@ -574,7 +581,7 @@
     const form = {
       consignorId: CN.consignor ? CN.consignor.id : '',
       categoryId: $('cnCategory').value,
-      brand: $('cnBrand').value, name: $('cnName').value,
+      brand: $('cnBrand').disabled ? '' : $('cnBrand').value, name: $('cnName').disabled ? '' : $('cnName').value,
       condition: $('cnCondition').value, sku: $('cnSku').value,
       taxScheme: $('cnTaxScheme').value, itemNotes: $('cnItemNotes').value,
       // Kein Feld, sondern das, was „Copy details" uebernommen hat (sonst gar nichts).
@@ -676,7 +683,7 @@
     items.forEach((m) => {
       const zeile = el('div', { class: 'row' });
       zeile.appendChild(el('div', { class: 'hint' },
-        [m.brand, m.name, m.sku ? '(' + m.sku + ')' : '', m.matchClass ? '· ' + m.matchClass : ''].filter(Boolean).join(' ')));
+        [MobileDisplayName.displayName(m), m.sku ? '(' + m.sku + ')' : '', m.matchClass ? '· ' + m.matchClass : ''].filter(Boolean).join(' ')));
       const b = el('button', { type: 'button', class: 'secondary', 'data-copy-details': m.id }, 'Copy details');
       b.onclick = () => { void cnUebernehmen(m); };
       zeile.appendChild(b);
@@ -690,8 +697,8 @@
       $('cnCategory').value = werte.categoryId;
       cnRenderFields(werte.categoryId);
     }
-    $('cnBrand').value = werte.brand;
-    $('cnName').value = werte.name;
+    if (!$('cnBrand').disabled) $('cnBrand').value = werte.brand;
+    if (!$('cnName').disabled) $('cnName').value = werte.name;
     const cond = $('cnCondition');
     const treffer = Array.from(cond.options).find((o) => o.value && o.value.toLowerCase() === werte.condition.toLowerCase());
     cond.value = treffer ? treffer.value : '';
@@ -909,7 +916,7 @@
         cnSay('cnAiMsg', data.error ? String(data.error) : ('Identify failed (' + res.status + ').'), false);
       } else {
         const gefuellt = aiApplyToForm(data.result || {}, {
-          brand: 'cnBrand', name: 'cnName', condition: 'cnCondition', attrPrefix: CN_ATTR_PREFIX,
+          brand: 'cnBrand', name: 'cnName', condition: 'cnCondition', attrPrefix: CN_ATTR_PREFIX, categoryId: $('cnCategory').value,
         });
         cnSay('cnAiMsg', gefuellt
           ? ('Filled ' + gefuellt + ' empty field' + (gefuellt === 1 ? '' : 's') + ' — please check before saving.')

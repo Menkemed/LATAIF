@@ -32,6 +32,7 @@ import { dashboardExtrasFor } from '@/core/data/page-reads';
 // CENTRAL-UI-PARITY R4A — Salden und Forderungen ueber die gemeinsamen Kernauskuenfte.
 import { ledgerBalancesFor, receivableRowsFor, LEERE_SALDEN } from '@/core/data/domain-reads';
 import { lotAggregatesFor } from '@/core/data/domain-reads';
+import { productDisplayName, productDisplayLines } from '@/core/products/display-name';
 
 function getGreeting(): string {
   const h = new Date().getHours();
@@ -395,7 +396,7 @@ export function Dashboard() {
         const cat = categories.find(c => c.id === p.categoryId);
         return {
           id: p.id,
-          name: `${p.brand || ''} ${p.name}`.trim(),
+          name: productDisplayName(p),
           subtitle: cat ? `${cat.name}${agg.units > 1 ? ` · ${agg.units}× sold` : ''}` : `${agg.units}× sold`,
           price: agg.revenue,
           product: { id: p.id, images: p.images || [] },
@@ -919,8 +920,8 @@ export function Dashboard() {
                       )}
                     </div>
                     <div style={{ padding: '16px 20px 20px' }}>
-                      <span className="text-overline">{p.brand}</span>
-                      <h3 className="font-display" style={{ fontSize: 17, color: '#0F0F10', marginTop: 4, lineHeight: 1.3 }}>{p.name}</h3>
+                      <span className="text-overline">{productDisplayLines(p).overline}</span>
+                      <h3 className="font-display" style={{ fontSize: 17, color: '#0F0F10', marginTop: 4, lineHeight: 1.3 }}>{productDisplayLines(p).title}</h3>
                       <div className="flex items-center justify-between" style={{ marginTop: 14 }}>
                         <span>
                           <span className="font-display" style={{ fontSize: 17, color: '#0F0F10' }}>{fmt(p.plannedSalePrice || p.purchasePrice)}</span>

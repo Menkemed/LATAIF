@@ -66,6 +66,7 @@ import {
 } from '@/core/gold/gold-house';
 import { KARAT_PURITY } from '@/core/gold/purity';
 import type { MaterialLineInput } from '@/components/work-orders/AddMaterialModal';
+import { productDisplayName } from '@/core/products/display-name';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -831,7 +832,7 @@ export function RepairDetail() {
               <div style={{ marginTop: 20, borderTop: '1px solid #E5E9EE', paddingTop: 16 }}>
                 <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>OWN INVENTORY ITEM</span>
                 <span style={{ fontSize: 15, color: '#0F0F10' }}>
-                  {product ? `${product.brand} ${product.name}` : 'Linked product'}
+                  {product ? productDisplayName(product) : 'Linked product'}
                 </span>
                 {product && (
                   <button onClick={() => navigate(`/collection/${product.id}`)}
@@ -1211,7 +1212,7 @@ export function RepairDetail() {
                   <div className="flex items-center justify-between">
                     <div>
                       <span style={{ fontSize: 11, color: '#6B7280', display: 'block', marginBottom: 4 }}>Linked Product</span>
-                      <span style={{ fontSize: 14, color: '#0F0F10' }}>{product.brand} {product.name}</span>
+                      <span style={{ fontSize: 14, color: '#0F0F10' }}>{productDisplayName(product)}</span>
                       {product.sku && <span className="font-mono" style={{ fontSize: 12, color: '#6B7280', display: 'block', marginTop: 2 }}>{product.sku}</span>}
                     </div>
                     <button
@@ -1553,7 +1554,7 @@ export function RepairDetail() {
           customerPhone={customer.phone}
           customerWhatsapp={customer.whatsapp}
           productImage={fotos[0]?.url || product?.images?.[0]}
-          productLabel={repair.itemBrand ? `${repair.itemBrand} ${repair.itemModel || ''}`.trim() : (product ? `${product.brand} ${product.name}` : undefined)}
+          productLabel={repair.itemBrand ? `${repair.itemBrand} ${repair.itemModel || ''}`.trim() : (product ? productDisplayName(product) : undefined)}
           details={`Voucher code: ${repair.voucherCode}. Repair: ${repair.repairNumber}.${repair.chargeToCustomer ? ` Amount due: ${repair.chargeToCustomer} BHD.` : ''}`}
           linkedEntityType="repair"
           linkedEntityId={repair.id}

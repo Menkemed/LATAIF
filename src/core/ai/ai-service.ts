@@ -6,6 +6,7 @@
 import { buildSystemPrompt, buildUserPrompt, categorySpec, AI_MODEL_PARAMS } from './identify-prompt.ts';
 import { getRuntimePaths } from '../runtime/runtime-paths';
 import { isClientMode } from '../bridge/client-mode';
+import { productDisplayName } from '../products/display-name.ts';
 
 const STORAGE_KEY = 'lataif_openai_key';
 const MODEL_KEY = 'lataif_openai_model';
@@ -425,7 +426,7 @@ export async function generateOfferText(params: {
   total: number;
   language?: string;
 }): Promise<string> {
-  const itemList = params.items.map(i => `- ${i.brand} ${i.name}: ${i.price} BHD`).join('\n');
+  const itemList = params.items.map(i => `- ${productDisplayName(i)}: ${i.price} BHD`).join('\n');
 
   const response = await callOpenAI([
     {
@@ -504,13 +505,13 @@ function compactContextForPrompt(ctx: ReportContext): string {
   lines.push(`CASHFLOW: cash ${fmtMoney(ctx.cashflow.cashReceived, cur)}, bank ${fmtMoney(ctx.cashflow.bankReceived, cur)}, card ${fmtMoney(ctx.cashflow.cardReceived, cur)} (fees -${fmtMoney(ctx.cashflow.cardFeesLost, cur)}), tax paid ${fmtMoney(ctx.cashflow.taxPaid, cur)}, net inflow ${fmtMoney(ctx.cashflow.netInflow, cur)}`);
   lines.push(`STOCK: ${ctx.stock.totalItems} items, Einkaufswert ${fmtMoney(ctx.stock.totalPurchaseValue, cur)}, geplanter VK ${fmtMoney(ctx.stock.totalPlannedSaleValue, cur)}, Ø ${ctx.stock.avgDaysInStock.toFixed(0)} days in stock`);
   if (ctx.stock.slowMovers.length > 0) {
-    lines.push(`SLOW-MOVERS (>180 Tage): ${ctx.stock.slowMovers.slice(0, 5).map(s => `${s.brand} ${s.name} (${s.daysInStock}d, EK ${fmtMoney(s.purchasePrice, cur)})`).join('; ')}`);
+    lines.push(`SLOW-MOVERS (>180 Tage): ${ctx.stock.slowMovers.slice(0, 5).map(s => `${productDisplayName(s)} (${s.daysInStock}d, EK ${fmtMoney(s.purchasePrice, cur)})`).join('; ')}`);
   }
   if (ctx.sales.byBrand.length > 0) {
     lines.push(`TOP-MARKEN: ${ctx.sales.byBrand.slice(0, 5).map(b => `${b.brand} ${b.units}u/${fmtMoney(b.revenue, cur)}/profit ${fmtMoney(b.profit, cur)}`).join('; ')}`);
   }
   if (ctx.sales.topProducts.length > 0) {
-    lines.push(`TOP-PRODUKTE: ${ctx.sales.topProducts.map(p => `${p.brand} ${p.name} VK ${fmtMoney(p.salePrice, cur)} profit ${fmtMoney(p.profit, cur)}`).join('; ')}`);
+    lines.push(`TOP-PRODUKTE: ${ctx.sales.topProducts.map(p => `${productDisplayName(p)} VK ${fmtMoney(p.salePrice, cur)} profit ${fmtMoney(p.profit, cur)}`).join('; ')}`);
   }
   lines.push(`KUNDEN: ${ctx.customers.active} active, ${ctx.customers.dormant} dormant, ${ctx.customers.newInPeriod} neu in Periode`);
   if (ctx.customers.topByRevenue.length > 0) {

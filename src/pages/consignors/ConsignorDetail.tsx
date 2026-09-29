@@ -21,6 +21,7 @@ import { useSupplierStore } from '@/stores/supplierStore';
 import { commissionModelLabel } from '@/core/consignment/economics';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { assertConsignmentReturnable, consignmentReturnBody } from '@/core/consignment/consignment-return';
+import { productDisplayName } from '@/core/products/display-name';
 
 export function ConsignorDetail() {
   const { id } = useParams<{ id: string }>();
@@ -216,7 +217,7 @@ export function ConsignorDetail() {
                     .sort((a, b) => (b.createdAt || '').localeCompare(a.createdAt || ''))
                     .map(con => {
                       const prod = products.find(p => p.id === con.productId);
-                      const prodLabel = prod ? `${prod.brand} ${prod.name}` : '—';
+                      const prodLabel = prod ? productDisplayName(prod) : '—';
                       const saleValue = con.salePrice ?? null;
                       const payoutValue = con.payoutAmount ?? null;
                       return (

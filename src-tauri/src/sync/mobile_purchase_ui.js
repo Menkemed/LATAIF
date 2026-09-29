@@ -89,9 +89,10 @@
   }
   /** Die Merkmale einer AUFGEKLAPPTEN Position aus den Feldern lesen (unlesbare Zahlen merken). */
   function mpReadItemDom(it) {
-    if (it.mode !== 'new' || !$('mpb' + it.uid)) return;
-    it.brand = $('mpb' + it.uid).value;
-    it.name = $('mpn' + it.uid).value;
+    if (it.mode !== 'new' || !$('mps' + it.uid)) return;
+    // Bei Gold-Diamond Jewellery gibt es kein Marken-/Modellfeld — dann bleibt beides leer.
+    it.brand = $('mpb' + it.uid) ? $('mpb' + it.uid).value : '';
+    it.name = $('mpn' + it.uid) ? $('mpn' + it.uid).value : '';
     it.sku = $('mps' + it.uid).value;
     it.condition = $('mpc' + it.uid).value;
     const cat = catById(it.categoryId);
@@ -253,8 +254,10 @@
       }
       const cats = SCHEMA.categories.map((c) => '<option value="' + mpH(c.id) + '"' + (c.id === it.categoryId ? ' selected' : '') + '>' + mpH(c.name) + '</option>').join('');
       h += '<div class="mp-row" style="margin-top:12px;"><label>Category *</label><select data-mp-field="item:' + it.uid + ':categoryId">' + cats + '</select></div>'
-        + '<div class="mp-row"><label>Brand *</label><input id="mpb' + it.uid + '" data-mp-field="item:' + it.uid + ':brand" value="' + mpH(it.brand) + '" /></div>'
-        + '<div class="mp-row"><label>Model / Name *</label><input id="mpn' + it.uid + '" data-mp-field="item:' + it.uid + ':name" value="' + mpH(it.name) + '" /></div>'
+        // DISPLAY-NAME — bei Gold-Diamond Jewellery keine Marke/kein Modell: die Merkmale benennen den Artikel.
+        + (MPX.brandHidden(it.categoryId) ? ''
+          : '<div class="mp-row"><label>Brand' + (MPX.brandRequired(it.categoryId) ? ' *' : ' (optional)') + '</label><input id="mpb' + it.uid + '" data-mp-field="item:' + it.uid + ':brand" value="' + mpH(it.brand) + '" /></div>'
+          + '<div class="mp-row"><label>Model / Name' + (MPX.brandRequired(it.categoryId) ? ' *' : ' (optional)') + '</label><input id="mpn' + it.uid + '" data-mp-field="item:' + it.uid + ':name" value="' + mpH(it.name) + '" /></div>')
         + '<div class="mp-row"><label>SKU / Reference</label><input id="mps' + it.uid + '" data-mp-field="item:' + it.uid + ':sku" placeholder="automatic if empty" value="' + mpH(it.sku) + '" /></div>'
         + '<div class="mp-row"><label>Condition</label><select id="mpc' + it.uid + '" data-mp-field="item:' + it.uid + ':condition"></select></div>'
         + '<div id="mpAttrs' + it.uid + '" data-mp-attrs="' + it.uid + '"></div>'
@@ -264,7 +267,7 @@
         + '<button type="button" class="mp-small mp-ghost" style="flex:0 0 auto;" data-mp-action="search-product" data-uid="' + it.uid + '">Search</button></div>';
       if (it.productId) h += '<div class="mp-note">Chosen: <span class="mp-badge">' + mpH(it.productLabel) + '</span></div>';
       for (const r of (MP.results.product[it.uid] || [])) {
-        const label = [r.brand, r.name].filter(Boolean).join(' ') + (r.sku ? ' (' + r.sku + ')' : '');
+        const label = MobileDisplayName.displayName(r, (catById(r.categoryId || r.category_id) || {}).name) + (r.sku ? ' (' + r.sku + ')' : '');
         h += '<button type="button" class="mp-pick" data-mp-action="pick-product" data-uid="' + it.uid + '" data-id="' + mpH(r.id) + '" data-name="' + mpH(label) + '">'
           + mpH(label) + ' <span>in stock ' + mpH(r.quantity) + '</span></button>';
       }
@@ -605,7 +608,7 @@
       } else {
         // Preise, Mengen, Partner und Zahlungen kann die AI nicht setzen: sie fuellt nur Marke, Modell,
         // Zustand und Merkmale — und nur, wo noch nichts steht.
-        const n = aiApplyToForm(data.result || {}, { brand: 'mpb' + it.uid, name: 'mpn' + it.uid, condition: 'mpc' + it.uid, attrPrefix: mpPre(it) });
+        const n = aiApplyToForm(data.result || {}, { brand: 'mpb' + it.uid, name: 'mpn' + it.uid, condition: 'mpc' + it.uid, attrPrefix: mpPre(it), categoryId: it.categoryId });
         mpReadItemDom(it);
         await mpPersist();
         mpUpdateSummaries();

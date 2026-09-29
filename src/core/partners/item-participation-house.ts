@@ -38,6 +38,7 @@ import { query } from '@/core/db/helpers';
 import { isClientMode } from '@/core/bridge/client-mode';
 import type { PurchaseLineParticipation } from '@/core/models/types';
 import { hasLedgerEntries, hasReversalFor, postItemPartnerMovement, reverseSource } from '@/core/ledger/posting';
+import { productDisplayName } from '../products/display-name.ts';
 import {
   B, F, FULL_BP, PartnerItemRejected, itemMovementInput, itemOffsetInput, openBalanceF, owedCostF, ownershipChangeInput,
   planLineParticipation, profitShareF,
@@ -1206,7 +1207,7 @@ export function partnerItemsOverview(branchId: string, onlyPartnerId?: string): 
   const pairs = query(
     `SELECT DISTINCT ip.purchase_line_id, ip.partner_id, pr.name AS partner_name, pr.active AS partner_active,
             p.purchase_number, p.purchase_date, COALESCE(p.status, '') AS purchase_status, ip.purchase_id, ip.product_id,
-            pd.brand, pd.name AS product_name, pd.sku
+            pd.brand, pd.name AS product_name, pd.sku, pd.category_id AS product_category_id, pd.attributes AS product_attributes
        FROM item_participations ip
        LEFT JOIN partners pr ON pr.id = ip.partner_id
        LEFT JOIN purchases p ON p.id = ip.purchase_id
@@ -1266,7 +1267,7 @@ export function partnerItemsOverview(branchId: string, onlyPartnerId?: string): 
       purchaseLineId, purchaseId: String(r.purchase_id), purchaseNumber: String(r.purchase_number ?? ''),
       purchaseDate: String(r.purchase_date ?? ''), purchaseStatus: String(r.purchase_status ?? ''),
       productId: r.product_id ? String(r.product_id) : null,
-      productLabel: [r.brand, r.product_name].filter(Boolean).join(' ') || 'Item',
+      productLabel: productDisplayName({ brand: r.brand as string, name: r.product_name as string, categoryId: r.product_category_id as string, attributes: r.product_attributes as string }) || 'Item',
       sku: String(r.sku ?? ''), quantity: last?.qty ?? 0, lineTotal: B(last?.valueF ?? 0), sharePct: (party?.shareBp ?? 0) / 100,
       costShare: B(party?.costShareF ?? 0), participating: !!current,
       endedReason: current ? undefined : (last?.endedReason ?? undefined),

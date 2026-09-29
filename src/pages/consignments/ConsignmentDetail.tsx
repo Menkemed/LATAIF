@@ -40,6 +40,7 @@ import {
   type ConsignmentReturnAfterSaleInput, type PostSaleDisposition,
 } from '@/core/consignment/consignment-reversal';
 import type { ReturnRefundMethod } from '@/core/returns/return-create';
+import { productDisplayName } from '@/core/products/display-name';
 
 const REFUND_LABEL: Record<ReturnRefundMethod, string> = {
   cash: 'Cash', bank: 'Bank Transfer', card: 'Card', benefit: 'Benefit', credit: 'Store Credit', other: 'Other',
@@ -384,7 +385,7 @@ export function ConsignmentDetail() {
     : '\u2014';
 
   const productLabel = product
-    ? `${product.brand} ${product.name}`
+    ? productDisplayName(product)
     : '\u2014';
 
   // 2026-05-18: Layout neu im Transfer-Detail-Stil (KPI-Strip / Action-Bar /

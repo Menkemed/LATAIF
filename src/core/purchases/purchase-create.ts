@@ -13,6 +13,7 @@ import { F, PartnerItemRejected, planLineParticipation, type PartnerShareInput }
 import {
   EMBEDDED_PRODUCT_FIELDS, checkEmbeddedProduct, pickProductSpec, stageSpecImages, type EmbeddedProductPort,
 } from '@/core/products/embedded-product';
+import { isBrandRequired } from '@/core/products/field-contract';
 
 export class PurchaseActionRejected extends Error {
   readonly code: string;
@@ -97,9 +98,13 @@ export function purchaseCreateIssue(input: PurchaseCreateInput): { code: string;
   if (supplierWays === 0) return { code: 'SUPPLIER_REQUIRED', message: 'Please select a supplier' };
   if (supplierWays > 1) return { code: 'SUPPLIER_AMBIGUOUS', message: 'Name the supplier one way only' };
   if (input.lines.length === 0) return { code: 'LINES_REQUIRED', message: 'Please add at least one line' };
+  // DISPLAY-NAME — Marke und Modell sind nur dort Pflicht, wo die Kategorie sie verlangt; bei
+  // Gold-Diamond Jewellery und Zubehör benennen die Merkmale den Artikel (wie beim Anlegen).
   const bad = input.lines.findIndex((l) =>
     l.quantity <= 0 || l.unitPrice < 0
-    || (l.mode === 'new' ? (!l.brand || !l.name) : !l.productId));
+    || (l.mode === 'new'
+      ? (isBrandRequired(String(l.newProduct?.categoryId ?? l.categoryId ?? '')) && (!l.brand || !l.name))
+      : !l.productId));
   if (bad !== -1) {
     return { code: 'LINE_INVALID', message: `Line ${bad + 1}: Brand+Name (oder Product) + Qty > 0 + Price ≥ 0 erforderlich` };
   }

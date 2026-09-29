@@ -63,6 +63,7 @@ import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-st
 import { WriteError } from '@/components/shared/WriteError';
 import { orderDetailReadsFor } from '@/core/data/page-reads';
 import { creditPaidFor } from '@/core/data/domain-reads';
+import { productDisplayName } from '@/core/products/display-name';
 
 function fmt(v: number | undefined | null): string {
   if (v === undefined || v === null) return '0.000';
@@ -1908,7 +1909,7 @@ export function OrderDetail() {
         open={showInvoiceVatConfirm}
         lines={productForConvert ? [{
           id: productForConvert.id,
-          label: `${productForConvert.brand || ''} ${productForConvert.name || ''}`.trim() || 'Custom Item',
+          label: productDisplayName(productForConvert) || 'Custom Item',
           currentScheme: (productForConvert.taxScheme as TaxScheme) || 'MARGIN',
         }] : []}
         onCancel={() => setShowInvoiceVatConfirm(false)}

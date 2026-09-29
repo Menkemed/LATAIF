@@ -40,6 +40,7 @@ import { sessionTenantId } from '@/core/data/shared-read';
 import { lotAggregatesFor } from '@/core/data/domain-reads';
 import { useSharedRead } from '@/core/data/shared-read';
 import { useAiIdentifyGate } from '@/core/ai/ai-availability';
+import { productDisplayName, productDisplayLines, nameFromAttributes, brandModelHidden } from '@/core/products/display-name';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -259,7 +260,7 @@ export function WatchList() {
   useEffect(() => {
     if (!showNew) { lastCheckedFp.current = ''; lastDismissedFp.current = ''; return; }
     if (duplicateMatches.length > 0) return;
-    if (!form.brand?.trim() && !form.name?.trim() && !form.sku?.trim()) return;
+    if (!form.brand?.trim() && !form.name?.trim() && !form.sku?.trim() && !nameFromAttributes(form.attributes)) return;
     if (fp === lastCheckedFp.current) return;
     if (fp === lastDismissedFp.current) return;
     const t = setTimeout(() => {
@@ -720,8 +721,8 @@ export function WatchList() {
                   }}>{p.taxScheme === 'MARGIN' ? 'Margin' : p.taxScheme === 'VAT_10' ? 'Standard VAT' : 'Exempt'}</span>
                 </div>
                 <div style={{ padding: '18px 22px 22px' }}>
-                  <span className="text-overline">{p.brand}</span>
-                  <h3 className="font-display" style={{ fontSize: 18, color: '#0F0F10', marginTop: 4, lineHeight: 1.25 }}>{p.name}</h3>
+                  <span className="text-overline">{productDisplayLines(p).overline}</span>
+                  <h3 className="font-display" style={{ fontSize: 18, color: '#0F0F10', marginTop: 4, lineHeight: 1.25 }}>{productDisplayLines(p).title}</h3>
                   {p.sku && <span className="font-mono" style={{ fontSize: 11, color: '#4B5563', display: 'block', marginTop: 3 }}>{p.sku}</span>}
                   {attrText && <span style={{ fontSize: 11, color: '#6B7280', display: 'block', marginTop: 4 }}>{attrText}</span>}
                   <div className="flex items-center justify-between" style={{ marginTop: 16, gap: 8 }}>
@@ -801,6 +802,8 @@ export function WatchList() {
           {(() => {
             // v0.7.16 — unbranded: cat-gold-jewelry + cat-accessory.
     const brandedRequired = isBrandRequired(selectedCat?.id || '');
+    // DISPLAY-NAME — bei Gold-Diamond Jewellery nicht verlangt und nicht gezeigt.
+    if (brandModelHidden(selectedCat?.id) && !form.brand && !form.name) return null;
             return (
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
                 <div id="new-field-brand">
@@ -1236,7 +1239,7 @@ export function WatchList() {
                   </div>
                   <div style={{ minWidth: 0 }}>
                     <div style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {`${p.brand || ''} ${p.name || ''}`.trim() || '(unnamed)'}
+                      {productDisplayName(p) || '(unnamed)'}
                     </div>
                     {p.sku && <div className="font-mono" style={{ fontSize: 11, color: '#6B7280' }}>{p.sku}</div>}
                   </div>
