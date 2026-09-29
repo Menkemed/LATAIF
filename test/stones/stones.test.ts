@@ -224,6 +224,21 @@ ok(seite.indexOf('include_str!("mobile_stones.js")') > 0 && /if \(a\.type === 's
 ok(/stonesOf\(v\)/.test(src('src-tauri/src/sync/mobile_consignment_ui.js')) && /stonesOf\(keep\.stones\)/.test(src('src-tauri/src/sync/mobile_purchase_ui.js')),
   'TELEFON Kommission und Einkauf prüfen/normalisieren mit derselben Regel');
 
+// ── ANZEIGE — feste Beschriftung Qty / Total ct, Karte mit Einheiten ─────────────────────────
+const goldKat = DEFAULT_CATEGORIES.find((c) => c.id === GOLD) as never;
+ok(pf.cardAttributeText(goldKat, { weight: 6.4, diamond_weight: 0.8, item_type: 'Ring', karat: '18K Yellow', stones: [{ type: 'diamond', qty: 12, carat: 0.8 }] })
+  === '6.40 g · 0.80 ct · Ring · 18K Yellow', 'KARTE „6.40 g · 0.80 ct · Ring · 18K Yellow" statt „6.4 · 0.8 · Ring · 18K Yellow"');
+ok(pf.cardAttributeText(goldKat, { weight: 5, diamond_weight: '1.2', item_type: 'Bangle', karat: '21K Yellow' }) === '5 g · 1.20 ct · Bangle · 21K Yellow',
+  'KARTE ganzes Gewicht „5 g", alter Text-Wert Diamond Weight „1.20 ct"');
+ok(pf.cardAttributeText(goldKat, { weight: 3.1, diamond_weight: 0, item_type: 'Ring', karat: '' }) === '3.10 g · Ring', 'KARTE leere Werte und 0 fallen weg (wie bisher)');
+ok(pf.cardAttributeText(DEFAULT_CATEGORIES.find((c) => c.id === 'cat-watch') as never, { case_diameter_mm: 40 }).includes('40 mm'), 'KARTE andere Zahlen mit Einheit (40 mm)');
+ok(/cardAttributeText\(cat, p\.attributes/.test(src('src/pages/watches/WatchList.tsx')), 'KARTE die Collection nutzt die eine Kartenzeile');
+const editor = src('src/components/products/StonesEditor.tsx');
+ok(/<span style=\{beschriftung\}>Qty<\/span>/.test(editor) && /<span style=\{beschriftung\}>Total ct<\/span>/.test(editor), 'RECHNER feste Beschriftung über Qty und Total ct');
+ok(/<div class="stone-f"><span>Qty<\/span>/.test(seite) && /<div class="stone-f"><span>Total ct<\/span>/.test(seite) && /\.stone-f span \{/.test(seite),
+  'TELEFON feste Beschriftung über Qty und Total ct');
+ok(!/Total ct \(optional\)/.test(seite) && /placeholder="Total ct"/.test(seite), 'TELEFON Platzhalter nur „Total ct" (wird bei 360 px nicht abgeschnitten)');
+
 console.log(`\nstones: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
 console.log('STONES_PROVED');

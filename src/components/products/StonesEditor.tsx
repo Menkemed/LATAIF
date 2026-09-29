@@ -25,6 +25,9 @@ const feld: React.CSSProperties = {
   background: '#FFFFFF', color: '#0F0F10', minWidth: 0, height: 30,
 };
 
+const beschriftet: React.CSSProperties = { display: 'grid', gap: 2, margin: 0 };
+const beschriftung: React.CSSProperties = { fontSize: 10, lineHeight: '12px', color: '#6B7280', paddingLeft: 2 };
+
 function Auswahl({ value, options, leer, onChange, label, width }: {
   value: string | undefined; options: readonly StoneOption[]; leer: string; label: string; width: number;
   onChange: (v: string) => void;
@@ -92,19 +95,26 @@ export function StonesEditor({ value, attributes, onChange, readOnly }: {
           <div style={{ marginTop: 8, display: 'grid', gap: 6 }}>
             {rows.map((r, i) => (
               <div key={i} data-stone-row={i} style={{ display: 'grid', gap: 4, paddingBottom: 6, borderBottom: i < rows.length - 1 ? '1px solid #EEF1F4' : 'none' }}>
-                {/* Oben: Stein, (Name), Menge, Gesamt-Karat, Entfernen — darunter nur bei Diamanten Farbe/Reinheit/Form. */}
-                <div className="flex items-center" style={{ gap: 6 }}>
+                {/* Oben: Stein, (Name), Menge, Gesamt-Karat, Entfernen — darunter nur bei Diamanten Farbe/Reinheit/Form.
+                    Menge und Karat tragen eine feste Beschriftung: auch ausgefüllt sieht man, was was ist. */}
+                <div className="flex items-end" style={{ gap: 6 }}>
                   <Auswahl label="Stone type" value={r.type} options={STONE_TYPES} leer="Stone…" width={132} onChange={(v) => aendere(i, { type: v })} />
                   {r.type === 'other' && (
                     <input aria-label="Stone name" placeholder="Stone name" value={r.name || ''} maxLength={60}
                       onChange={(e) => aendere(i, { name: e.target.value })} style={{ ...feld, width: 120 }} />
                   )}
-                  <input aria-label="Quantity" placeholder="Qty" inputMode="numeric" value={r.qty ?? ''}
-                    onChange={(e) => aendere(i, { qty: e.target.value })} style={{ ...feld, width: 56 }} />
-                  <input aria-label="Total carat" placeholder="Total ct" inputMode="decimal" value={r.carat ?? ''}
-                    onChange={(e) => aendere(i, { carat: e.target.value })} style={{ ...feld, width: 76 }} />
+                  <label style={beschriftet}>
+                    <span style={beschriftung}>Qty</span>
+                    <input aria-label="Quantity" placeholder="Qty" inputMode="numeric" value={r.qty ?? ''}
+                      onChange={(e) => aendere(i, { qty: e.target.value })} style={{ ...feld, width: 56 }} />
+                  </label>
+                  <label style={beschriftet}>
+                    <span style={beschriftung}>Total ct</span>
+                    <input aria-label="Total carat" placeholder="Total ct" inputMode="decimal" value={r.carat ?? ''}
+                      onChange={(e) => aendere(i, { carat: e.target.value })} style={{ ...feld, width: 76 }} />
+                  </label>
                   <button type="button" aria-label="Remove stone" data-stones-remove={i} onClick={() => setze(rows.filter((_, k) => k !== i))}
-                    className="cursor-pointer" style={{ background: 'none', border: 'none', color: '#9CA3AF', padding: 2, marginLeft: 'auto' }}>
+                    className="cursor-pointer" style={{ background: 'none', border: 'none', color: '#9CA3AF', padding: 2, marginLeft: 'auto', marginBottom: 6 }}>
                     <X size={14} />
                   </button>
                 </div>

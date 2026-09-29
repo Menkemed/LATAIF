@@ -4,7 +4,7 @@
 import type { Product, Category, CategoryAttribute } from '@/core/models/types';
 import { lookupCategory } from './category-lookup.ts';
 import { STONES_KEY, stonesSearchText, stonesSummary, caratThousandths, fmtCarat } from '../products/stones.ts';
-import { productDisplayName } from '../products/display-name.ts';
+import { productDisplayName, formatGrams } from '../products/display-name.ts';
 
 function formatAttrValue(attr: CategoryAttribute, value: unknown): string | null {
   if (value === undefined || value === null || value === '') return null;
@@ -61,6 +61,20 @@ export function getProductSpecs(
     }
   }
   return out;
+}
+
+/**
+ * Die Merkmalzeile der Collection-Karte: „6.40 g · 0.80 ct · Ring · 18K Yellow".
+ * Nur die Merkmale mit `showInList`; Zahlen mit ihrer Einheit (Gewicht wie im Anzeigenamen, Karat
+ * mit zwei Stellen), leere Werte und 0 fallen weg — wie bisher.
+ */
+export function cardAttributeText(category: Category | undefined, attributes: Record<string, unknown> | undefined): string {
+  const values = attributes || {};
+  return (category?.attributes || [])
+    .filter(a => a.showInList && values[a.key])
+    .map(a => (a.type === 'number' && a.unit === 'g' ? formatGrams(values[a.key]) : formatAttrValue(a, values[a.key])) || '')
+    .filter(Boolean)
+    .join(' · ');
 }
 
 /** Einzeilige kompakte Beschreibung für Print-Lines: "Brand Name · Ref X · 40mm · Steel". */

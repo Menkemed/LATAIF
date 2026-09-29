@@ -61,6 +61,8 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
   .stone-three { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 8px; }
   .stone-row input, .stone-row select { padding: 10px; font-size: 15px; min-width: 0; }
   .stone-three select { padding: 10px 4px; font-size: 14px; }
+  .stone-f { min-width: 0; }
+  .stone-f span { display: block; font-size: 11px; color: #6B6B73; margin: 0 0 4px 2px; }
   .stone-x { width: auto; background: transparent; color: #8A8A93; border: 1px solid #2A2A32; padding: 0 14px; font-size: 14px; }
   .stones-add { width: auto; margin-top: 10px; background: transparent; color: #C6A36D; border: 1px solid #2A2A32; padding: 9px 14px; font-size: 14px; }
   .stones-err { color: #E07A7A; font-size: 12px; margin-top: 8px; }
@@ -1971,8 +1973,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
             + '<div class="stone-top"><select data-st="type" data-i="' + i + '" aria-label="Stone type">' + opt(MS.STONE_TYPES, r.type, 'Stone type…') + '</select>'
             + '<button type="button" class="stone-x" data-st="remove" data-i="' + i + '" aria-label="Remove stone">✕</button></div>'
             + (r.type === 'other' ? '<input data-st="name" data-i="' + i + '" placeholder="Stone name" maxlength="60" value="' + esc(r.name || '') + '" />' : '')
-            + '<div class="stone-two"><input data-st="qty" data-i="' + i + '" inputmode="numeric" placeholder="Qty" value="' + esc(r.qty == null ? '' : r.qty) + '" />'
-            + '<input data-st="carat" data-i="' + i + '" inputmode="decimal" placeholder="Total ct (optional)" value="' + esc(r.carat == null ? '' : r.carat) + '" /></div>'
+            // Feste Beschriftung über Menge und Karat — auch wenn Werte drinstehen, sieht man, was was ist.
+            + '<div class="stone-two"><div class="stone-f"><span>Qty</span><input data-st="qty" data-i="' + i + '" inputmode="numeric" aria-label="Quantity" placeholder="Qty" value="' + esc(r.qty == null ? '' : r.qty) + '" /></div>'
+            + '<div class="stone-f"><span>Total ct</span><input data-st="carat" data-i="' + i + '" inputmode="decimal" aria-label="Total carat" placeholder="Total ct" value="' + esc(r.carat == null ? '' : r.carat) + '" /></div></div>'
             + (r.type === 'diamond'
               ? '<div class="stone-three"><select data-st="color" data-i="' + i + '" aria-label="Color">' + opt(MS.DIAMOND_COLORS, r.color, 'Color') + '</select>'
                 + '<select data-st="clarity" data-i="' + i + '" aria-label="Clarity">' + opt(MS.DIAMOND_CLARITIES, r.clarity, 'Clarity') + '</select>'

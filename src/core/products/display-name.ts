@@ -56,6 +56,8 @@ function gewicht(v: unknown): string {
   if (!Number.isFinite(n) || n <= 0) return '';
   return (Number.isInteger(n) ? String(n) : n.toFixed(2)) + ' g';
 }
+/** Dieselbe Gewichtsschreibweise für andere Anzeigen (z. B. die Collection-Karte). */
+export const formatGrams = gewicht;
 
 /** Der Name aus den Merkmalen allein (ohne Marke/Modell) — leer, wenn es keine gibt. */
 export function nameFromAttributes(attributes: DisplayNameSource['attributes']): string {

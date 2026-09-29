@@ -30,6 +30,7 @@ import { primaryOnlyDeleteProps, blockDeleteOnClient, primaryOnlyLocked, primary
 import { WriteError } from '@/components/shared/WriteError';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { matchesDeep } from '@/core/utils/deep-search';
+import { cardAttributeText } from '@/core/utils/product-format';
 import { getStockAggregates, summarizeInventory, isOwnStockAsset, type LotAggregate } from '@/core/lots/lot-queries';
 import { exportFile } from '@/core/utils/export-file';
 import type { Product, TaxScheme, StockStatus, Category } from '@/core/models/types';
@@ -635,11 +636,8 @@ export function WatchList() {
           {filtered.map(p => {
             const cat = getCat(p.categoryId);
             // Show some dynamic attributes in the card
-            const showAttrs = cat?.attributes.filter(a => a.showInList) || [];
-            const attrText = showAttrs
-              .map(a => p.attributes[a.key])
-              .filter(Boolean)
-              .join(' \u00b7 ');
+            // Zahlen mit Einheit (\u201e6.40 g \u00b7 0.80 ct \u00b7 Ring \u00b7 18K Yellow"), nicht roh.
+            const attrText = cardAttributeText(cat, p.attributes as Record<string, unknown>);
 
             // v0.7.20 — Select-Modus: Karte selektierbar (saubere Produkte) oder
             // als verknuepft markiert (nicht loeschbar). Klick toggelt Auswahl
