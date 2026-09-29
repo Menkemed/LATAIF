@@ -650,6 +650,17 @@ try {
     `§2d …sie fasst keinen Preis an und sagt, was sie getan hat (${S(nachAi.meldung.slice(0, 50))})`);
   ok(gesehen.filter((g) => g.body?.op === 'consignments.create').length === 3,
     '§2d …und sie speichert nichts');
+  // §2e Material mit Goldanteil aus der KI → „Karat & Color" erscheint, gefüllt (Schlüssel alphabetisch
+  // wie vom Primary: karat_color VOR material).
+  const karatVorher = await c.ev("return document.getElementById('cnrow_karat_color').classList.contains('hidden');");
+  antwortGeber = (u) => (/ai\/identify/.test(u)
+    ? { status: 200, body: { result: { attributes: { karat_color: '18K Yellow', material: 'Two-Tone Steel/Gold' } } } }
+    : { status: 200, body: { ok: true, value: { items: [] } } });
+  await c.ev("document.getElementById('cnAiBtn').click(); await new Promise((r) => setTimeout(r, 800)); return 1;");
+  const karat = await c.ev(`return { verdeckt: document.getElementById('cnrow_karat_color').classList.contains('hidden'),
+    material: document.getElementById('cna_material').value, karat: document.getElementById('cna_karat_color').value };`);
+  ok(karatVorher && !karat.verdeckt && karat.material === 'Two-Tone Steel/Gold' && karat.karat === '18K Yellow',
+    `§2e KI: Two-Tone → „Karat & Color" wird sichtbar und ist gefüllt (${S(karat)})`);
 
   // ── §4 Verkauf mit Fehlbetrag: erst das Nein des Primary, dann die Bestaetigung ──────────────
   let verkaufVersuche = 0;

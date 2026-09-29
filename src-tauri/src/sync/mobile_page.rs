@@ -1817,6 +1817,10 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         filled++;
       }
     }
+    // Abhängige Felder neu zeigen: die Werte wurden ohne change-Ereignis gesetzt. Sonst bleibt z. B.
+    // „Karat & Color" bei Material „Two-Tone Steel/Gold" verdeckt, obwohl die KI es gefüllt hat.
+    const depCat = T.categoryId ? catById(T.categoryId) : null;
+    if (depCat) applyDependencies(depCat, T.attrPrefix);
     return filled;
   }
 

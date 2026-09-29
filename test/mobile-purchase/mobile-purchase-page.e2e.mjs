@@ -97,6 +97,7 @@ ${html}
 // ── Attrappen-Primary ─────────────────────────────────────────────────────────────────────────
 const gesehen = [];
 let partnerListe = [{ id: 'pa-1', name: 'Bashir', active: true }, { id: 'pa-2', name: 'Chalid', active: true }, { id: 'pa-x', name: 'Old', active: false }];
+let aiErgebnis = {};
 let einkauf = () => ({ status: 200, body: { ok: true, value: { purchaseId: 'pur-1', purchaseNumber: 'PUR-2026-000042', totalAmount: 1361.5, paidAmount: 700, openAmount: 661.5 } } });
 const server = createServer((req, res) => {
   if (req.method === 'GET') {
@@ -111,6 +112,7 @@ const server = createServer((req, res) => {
     gesehen.push({ url: req.url, body });
     let a;
     if (/staging/.test(req.url)) a = { status: 201, body: { stagingId: createHash('sha256').update(String(body && body.dataBase64)).digest('hex') } };
+    else if (/ai\/identify/.test(req.url)) a = { status: 200, body: { result: aiErgebnis } };
     else {
       const op = body && body.op;
       if (op === 'store.partners.get') a = { status: 200, body: { ok: true, value: { data: { partners: partnerListe } } } };
@@ -371,6 +373,17 @@ try {
   await c.ev(klick('#mpNewBtn') + ' await new Promise((r) => setTimeout(r, 300)); return 1;');
   ok(await c.ev("return !document.querySelector('[data-mp-action=\"add-partner\"]') && !/Partner participation/.test(document.getElementById('mpSections').textContent);"),
     '§6 keine aktiven Partner → kein „Add partner", kein Partnerbereich');
+  // §6b KI an einer Uhr-Position: Material mit Goldanteil → „Karat & Color" erscheint, gefüllt, im Entwurf.
+  const uid6 = await c.ev('return window.__MP.draft.items[0].uid;');
+  await c.ev(tippe(`[data-mp-field="item:${uid6}:categoryId"]`, 'cat-watch') + ' await new Promise((r) => setTimeout(r, 150)); return 1;');
+  await c.ev(fotos(uid6, 1) + ' return 1;');
+  const karatVorher = await c.ev(`return document.getElementById('mpr${uid6}_karat_color').classList.contains('hidden');`);
+  aiErgebnis = { attributes: { karat_color: '18K Rose', material: 'Two-Tone Steel/Gold' } };
+  await c.ev(klick(`[data-mp-action="ai"][data-uid="${uid6}"]`) + ' await new Promise((r) => setTimeout(r, 600)); return 1;');
+  const karat = await c.ev(`return { verdeckt: document.getElementById('mpr${uid6}_karat_color').classList.contains('hidden'),
+    wert: document.getElementById('mpa${uid6}_karat_color').value, entwurf: window.__MP.draft.items[0].attributes };`);
+  ok(karatVorher && !karat.verdeckt && karat.wert === '18K Rose' && karat.entwurf.karat_color === '18K Rose' && karat.entwurf.material === 'Two-Tone Steel/Gold',
+    `§6b KI: Two-Tone → „Karat & Color" sichtbar, gefüllt und im Entwurf (${S(karat)})`);
 
   const protokoll = await c.ev('return window.__P;');
   ok(!protokoll.length, `§7 keine Skriptfehler im Browser (${S(protokoll).slice(0, 300)})`);
