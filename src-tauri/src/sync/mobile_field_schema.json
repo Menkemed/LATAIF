@@ -150,6 +150,12 @@
           "unit": "ct"
         },
         {
+          "key": "stones",
+          "label": "Stones",
+          "type": "stones",
+          "required": false
+        },
+        {
           "key": "item_type",
           "label": "Item Type",
           "type": "select",

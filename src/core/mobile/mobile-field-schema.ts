@@ -14,7 +14,8 @@
 // in the generator + tests without a bundler.
 // ════════════════════════════════════════════════════════════════════════════
 import { DEFAULT_CATEGORIES } from '../models/default-categories.ts';
-import type { Category, CategoryAttribute, AttributeType } from '../models/types.ts';
+import type { Category, CategoryAttribute, AttributeType, StoneRowValue } from '../models/types.ts';
+import { parseStones } from '../products/stones.ts';
 
 export const SCHEMA_VERSION = 1;
 
@@ -106,7 +107,7 @@ export function buildMobileFieldSchema(categories: readonly Omit<Category, 'crea
   };
 }
 
-export type MobileAttrValue = string | number | boolean | string[];
+export type MobileAttrValue = string | number | boolean | string[] | StoneRowValue[];
 export interface MobileMetadata {
   categoryId: string;
   brand?: string;
@@ -243,6 +244,11 @@ function validateAttrValue(def: MobileFieldAttr, v: unknown, errs: FieldValidati
     case 'multiselect': {
       if (!Array.isArray(v)) { errs.push({ code: 'BAD_TYPE', field: def.key, message: `${def.label} must be an array` }); return; }
       for (const s of v) if (typeof s !== 'string' || !(def.options || []).includes(s)) errs.push({ code: 'BAD_ENUM', field: def.key, message: `invalid ${def.label} "${String(s)}"` });
+      break;
+    }
+    case 'stones': {
+      // STONES — dieselbe Prüfung wie am Rechner/Primary (src/core/products/stones.ts).
+      for (const i of parseStones(v).issues) errs.push({ code: i.code, field: def.key, message: i.message });
       break;
     }
     case 'boolean': {

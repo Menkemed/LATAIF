@@ -58,7 +58,10 @@ const WATCH_ATTRIBUTES: CategoryAttribute[] = [
 // Bar + Coin als item_type für Investitions-Gold/Münzen. Diamond Weight direkt neben Weight.
 const GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'weight', label: 'Weight', type: 'number', unit: 'g', required: true, showInList: true },
+  // STONES (v0.8.68) — Diamond Weight ist kein eigenes Eingabefeld mehr: die Summe der Diamant-Zeilen
+  // der Steinliste (ein Wert von vor der Liste bleibt stehen). Siehe src/core/products/stones.ts.
   { key: 'diamond_weight', label: 'Diamond Weight', type: 'number', unit: 'ct', required: false, showInList: true },
+  { key: 'stones', label: 'Stones', type: 'stones', required: false, showInList: false },
   { key: 'item_type', label: 'Item Type', type: 'select',
     options: ['Ring', 'Bangle', 'Bracelet', 'Necklace', 'Pendant', 'Earrings', 'Brooch', 'Bar', 'Coin'],
     required: true, showInList: true },

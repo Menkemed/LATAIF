@@ -291,6 +291,9 @@ pub fn filter_for_mobile(raw: &serde_json::Value, category_id: &str) -> AiIdenti
                     serde_json::Value::String(s) => s.trim().to_string(),
                     serde_json::Value::Number(n) => n.to_string(),
                     serde_json::Value::Bool(b) => b.to_string(),
+                    // STONES (v0.8.68) — die Steinliste reist als JSON-Text; geprüft und übernommen wird
+                    // sie am Telefon/Rechner mit der EINEN Steinprüfung (nur gültige Zeilen, nichts erfunden).
+                    serde_json::Value::Array(a) if k == "stones" && !a.is_empty() => serde_json::to_string(v).unwrap_or_default(),
                     _ => String::new(),
                 };
                 if rendered.is_empty()

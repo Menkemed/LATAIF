@@ -12,7 +12,8 @@
 // Kunde nicht alle Specs kennt. Nur Brand (bei Branded-Kategorien) wird
 // erzwungen, damit wir das Ticket einer Marke zuordnen koennen.
 
-export type RepairFieldType = 'text' | 'number' | 'select' | 'boolean';
+// STONES — 'stones' ist die EINE Steinliste (src/core/products/stones.ts), wie beim Artikel.
+export type RepairFieldType = 'text' | 'number' | 'select' | 'boolean' | 'stones';
 
 export interface RepairFieldDef {
   key: string;
@@ -82,6 +83,8 @@ export const REPAIR_FIELDS: Record<string, RepairFieldDef[]> = {
       required: true },
     { key: 'weight', label: 'Weight', type: 'number', unit: 'g' },
     { key: 'diamond_weight', label: 'Diamond Weight', type: 'number', unit: 'ct' },
+    // STONES (v0.8.68) — Diamond Weight ist die Summe der Diamant-Zeilen, kein eigenes Eingabefeld mehr.
+    { key: 'stones', label: 'Stones', type: 'stones' },
     { key: 'karat', label: 'Karat & Color', type: 'select',
       options: [
         '24K Yellow', '22K Yellow', '21K Yellow',

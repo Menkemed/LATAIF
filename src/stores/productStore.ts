@@ -39,6 +39,7 @@ import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 import { productDisplayName } from '../core/products/display-name.ts';
+import { stonesOrThrow } from '../core/products/stones.ts';
 
 // ── SSOT: alle Tabellen die ein Produkt via product_id referenzieren ──
 // Hat EINE davon einen Treffer, gilt das Produkt als "verknuepft" und darf
@@ -783,7 +784,9 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       sourceType: data.sourceType || 'OWN',
       notes: data.notes,
       images: data.images || [],
-      attributes: data.attributes || {},
+      // STONES — die EINE Übernahme der Steinliste für jeden Weg, der hier anlegt: normalisiert,
+      // Diamond Weight abgeleitet; eine ungültige Liste wird nie geschrieben.
+      attributes: stonesOrThrow(data.categoryId, (data.attributes || {}) as Record<string, unknown>) as Product['attributes'],
       createdAt: now,
       updatedAt: now,
     };
@@ -1218,7 +1221,16 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       if (col) { fields.push(`${col} = ?`); values.push(val ?? null); }
     }
     if (data.scopeOfDelivery) { fields.push('scope_of_delivery = ?'); values.push(JSON.stringify(data.scopeOfDelivery)); }
-    if (data.attributes) { fields.push('attributes = ?'); values.push(JSON.stringify(data.attributes)); }
+    if (data.attributes) {
+      // STONES — beim Ändern gegen den gespeicherten Stand (ein abgeleitetes Diamond Weight fällt mit
+      // seinen Diamant-Zeilen, ein Wert von vor der Steinliste bleibt); ungültig wird nie geschrieben.
+      const zeile = query('SELECT category_id, attributes FROM products WHERE id = ?', [id])[0];
+      let vorher: Record<string, unknown> | undefined;
+      try { vorher = zeile?.attributes ? JSON.parse(String(zeile.attributes)) : undefined; } catch { vorher = undefined; }
+      const kat = data.categoryId ?? (zeile?.category_id as string | undefined);
+      data = { ...data, attributes: stonesOrThrow(kat, data.attributes as Record<string, unknown>, vorher) as Product['attributes'] };
+      fields.push('attributes = ?'); values.push(JSON.stringify(data.attributes));
+    }
     if (data.images) { fields.push('images = ?'); values.push(JSON.stringify(data.images)); }
     // 2026-05-18 AI-Learning: Snapshot + Corrections durchreichen.
     if ((data as { aiIdentifiedSnapshot?: string }).aiIdentifiedSnapshot !== undefined) {

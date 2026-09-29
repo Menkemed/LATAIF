@@ -9,6 +9,7 @@ import { backfillInvoiceNumberFinalized } from '@/core/invoices/final-number';
 import wasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 import { v4 as uuid } from 'uuid';
 import { DEFAULT_CATEGORIES } from '../models/default-categories';
+import { migrateCategoryStonesV1 } from './category-stones-migration';
 import SCHEMA from './schema.sql?raw';
 // MEDIA-03A — additive, INACTIVE core media schema (content-addressed store).
 // Applied idempotently at the end of runMigrations(); creates empty tables +
@@ -3078,6 +3079,7 @@ export async function initDatabase(): Promise<Database> {
       runMigrations(db);
       migrateCategoriesToV2(db);
       migrateCategoriesToV3(db);
+      migrateCategoryStonesV1(db);
       backfillStockLots(db);
       reconcileProductQuantities(db);
       backfillConsumedProducts(db);
@@ -3103,6 +3105,7 @@ export async function initDatabase(): Promise<Database> {
       await seedFreshDatabase(db);
       migrateCategoriesToV2(db);
       migrateCategoriesToV3(db);
+      migrateCategoryStonesV1(db);
       backfillStockLots(db);
       reconcileProductQuantities(db);
       backfillConsumedProducts(db);
@@ -3118,6 +3121,7 @@ export async function initDatabase(): Promise<Database> {
       await seedFreshDatabase(db);
     }
     migrateCategoriesToV2(db);
+    migrateCategoryStonesV1(db);
     backfillStockLots(db);
     reconcileProductQuantities(db);
     backfillConsumedProducts(db);

@@ -33,7 +33,11 @@ export function canonicalTaxScheme(s: string | undefined | null): TaxSchemeCanon
 
 // ── Category System ──
 
-export type AttributeType = 'text' | 'number' | 'select' | 'multiselect' | 'boolean';
+// STONES — 'stones' ist die EINE Steinliste (src/core/products/stones.ts), nur bei Gold-Diamond Jewellery.
+export type AttributeType = 'text' | 'number' | 'select' | 'multiselect' | 'boolean' | 'stones';
+/** Eine Steinzeile (kanonische Schlüssel) — siehe src/core/products/stones.ts. */
+export interface StoneRowValue { type: string; qty: number; carat?: number; name?: string; color?: string; clarity?: string; shape?: string }
+export type AttributeValue = string | number | boolean | string[] | StoneRowValue[];
 
 export interface CategoryAttribute {
   key: string;           // e.g. "movement", "carat", "material"
@@ -142,7 +146,7 @@ export interface Product {
    *  naechsten Identifies als POSITIVE Few-Shot-Examples mitgegeben. */
   aiConfirmedAt?: string;
   // Dynamic attributes (category-specific)
-  attributes: Record<string, string | number | boolean | string[]>;
+  attributes: Record<string, AttributeValue>;
   createdAt: string;
   updatedAt: string;
   createdBy?: UUID;

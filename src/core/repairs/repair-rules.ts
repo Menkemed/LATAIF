@@ -24,6 +24,7 @@ import {
 import { CARD_BRANDS } from '@/core/finance/card-fees';
 import { REPAIR_FIELDS } from '@/core/models/repair-fields';
 import { internalCostOnCreate, internalCostOnEdit, repairMargin } from './repair-cost';
+import { normalizeStoneAttributes } from '@/core/products/stones';
 
 /** Höchstens so viele Fotos je Reparatur — dieselbe Zahl, die die Bildauswahl beider Masken zeigt. */
 export const REPAIR_MAX_PHOTOS = 6;
@@ -97,7 +98,7 @@ export function missingRepairItemFields(
   if (!form.itemCategoryId) return [];
   const missing: string[] = [];
   for (const f of REPAIR_FIELDS[form.itemCategoryId] || []) {
-    if (!f.required) continue;
+    if (!f.required || f.type === 'stones') continue;
     // dependsOn beachten — wenn Parent nicht passt, Feld nicht required.
     if (f.dependsOn) {
       const dep = form.itemAttributes?.[f.dependsOn.key];
@@ -247,6 +248,9 @@ export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort
     if (missing.length > 0) {
       throw new RepairActionRejected('REQUIRED_FIELDS_MISSING', `Please fill in the required fields: ${missing.join(', ')}`);
     }
+    // STONES — dieselbe Prüfung wie beim Artikel.
+    const stein = normalizeStoneAttributes(input.itemCategoryId, input.itemAttributes as Record<string, unknown> | undefined).issues[0];
+    if (stein) throw new RepairActionRejected('STONES_INVALID', stein.message);
     customerId = input.customerId;
     item = {
       itemCategoryId: input.itemCategoryId, itemAttributes: input.itemAttributes,

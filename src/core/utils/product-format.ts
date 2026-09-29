@@ -3,10 +3,17 @@
 // aus Brand, Name, SKU, Condition + allen Kategorie-Attributen.
 import type { Product, Category, CategoryAttribute } from '@/core/models/types';
 import { lookupCategory } from './category-lookup.ts';
+import { STONES_KEY, stonesSearchText, stonesSummary, caratThousandths, fmtCarat } from '../products/stones.ts';
 import { productDisplayName } from '../products/display-name.ts';
 
 function formatAttrValue(attr: CategoryAttribute, value: unknown): string | null {
   if (value === undefined || value === null || value === '') return null;
+  // STONES — die Kurzform („Diamond 0.80 ct · Emerald 0.45 ct"); die Zeilen zeigt die Detailansicht.
+  if (attr.type === 'stones') return stonesSummary(value) || null;
+  if (attr.type === 'number' && attr.unit === 'ct') {
+    const t = caratThousandths(typeof value === 'number' ? Math.round(value * 1000) / 1000 : value);
+    if (t !== null && !Number.isNaN(t)) return fmtCarat(t) + ' ct';
+  }
   if (attr.type === 'boolean') return value ? 'Yes' : 'No';
   if (Array.isArray(value)) return value.join(', ');
   if (attr.type === 'number') {
@@ -111,6 +118,8 @@ export function productAttributeSearchValues(product: Product, category?: Catego
     typeof v === 'string' || typeof v === 'number' || typeof v === 'boolean';
   for (const [key, value] of Object.entries(attrs)) {
     if (!defined.has(key)) continue;
+    // STONES — Steinarten, Other-Namen und Diamant-Merkmale (nicht das rohe Objekt).
+    if (key === STONES_KEY) { const t = stonesSearchText(value); if (t) out.push(t); continue; }
     if (Array.isArray(value)) { for (const v of value) if (primitive(v)) out.push(String(v)); continue; }
     if (primitive(value)) out.push(String(value));
   }

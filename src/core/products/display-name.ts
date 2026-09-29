@@ -16,6 +16,7 @@
 // (`mobile_page.rs`, `displayName`) — ein Paritätstest hält beide gleich.
 // ════════════════════════════════════════════════════════════════════════════
 import { lookupCategory } from '../utils/category-lookup.ts';
+import { stonesApply, stonesFromAi } from './stones.ts';
 
 /** Bei dieser Kategorie stehen Marke und Modell nicht in den Eingabemasken — die Merkmale sagen es schon. */
 export const BRAND_MODEL_HIDDEN_CATEGORIES: readonly string[] = ['cat-gold-jewelry'];
@@ -93,6 +94,12 @@ export function aiResultForCategory<T extends { brand?: string | null; name?: st
       if (treffer) { attributes.item_type = treffer; break; }
     }
   }
+  // STONES — nur geprüfte Steinzeilen (nichts erfunden); Diamond Weight kommt aus den Zeilen, nie von der KI.
+  if (stonesApply(categoryId)) {
+    const zeilen = stonesFromAi(attributes.stones);
+    if (zeilen.length) attributes.stones = zeilen; else delete attributes.stones;
+    delete attributes.diamond_weight;
+  }
   const { brand: _b, name: _n, ...rest } = result;
   return { ...rest, attributes } as unknown as T;
 }
@@ -108,4 +115,15 @@ export function productDisplayLines(p: DisplayNameSource | null | undefined): { 
   if (marke && modell) return { overline: marke, title: modell };
   if (marke || modell) return { overline: '', title: marke || modell };
   return { overline: '', title: productDisplayName(p) };
+}
+
+/** Der Anzeigename eines Reparatur-Gegenstands (Kundenstück) — derselbe Algorithmus wie beim Artikel. */
+export function repairItemDisplayName(r: {
+  itemBrand?: string | null; itemModel?: string | null; itemCategoryId?: string | null; itemAttributes?: Record<string, unknown> | string | null;
+} | null | undefined): string {
+  if (!r) return '';
+  const marke = text(r.itemBrand);
+  const modell = text(r.itemModel);
+  if (marke || modell) return [marke, modell].filter(Boolean).join(' ');
+  return nameFromAttributes(r.itemAttributes ?? null);
 }

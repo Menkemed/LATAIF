@@ -501,6 +501,72 @@ const ZEILE = (name: string, qty: number, price: number, extra: Record<string, u
   ok(ohne.ok && ausweise(String(ohne.value?.customerId ?? '')) === 0, 'AUSWEIS ohne Foto bleibt es optional');
 }
 
+// ── 11 STONES — die EINE Steinliste am Primary: Einkauf vom Telefon, Kommission, Ändern, Reparatur ──
+{
+  const db = freshDb(); seedMobile(db);
+  const { DEFAULT_CATEGORIES } = await import('../../src/core/models/default-categories.ts');
+  const gold = DEFAULT_CATEGORIES.find((c) => c.id === 'cat-gold-jewelry')!;
+  db.run(`INSERT INTO categories (id, branch_id, name, icon, color, attributes, scope_options, condition_options, created_at, updated_at)
+    VALUES (?, 'branch-main', ?, 'g', '#000', ?, ?, ?, ?, ?)`,
+    [gold.id, gold.name, JSON.stringify(gold.attributes), JSON.stringify(gold.scopeOptions), JSON.stringify(gold.conditionOptions), NOW, NOW]);
+  reload();
+  const attrsOf = (pid: string) => JSON.parse(s(db, 'SELECT attributes FROM products WHERE id = ?', [pid]) || '{}') as Record<string, unknown>;
+  // Wie das Telefon ihn baut: Menge/Karat noch als Text, eine leere Zeile — der Primary prüft und normalisiert.
+  const steine = [
+    { type: 'diamond', qty: '1', carat: '0.50', color: 'G', clarity: 'VS1', shape: 'oval' },
+    { type: 'diamond', qty: '20', carat: '0.30', color: 'G', clarity: 'VS', shape: 'round' },
+    { type: 'emerald', qty: '3', carat: '0.45' },
+    { type: '', qty: '' },
+  ];
+  const zeile = (stones: unknown) => ({
+    mode: 'new', brand: '', name: '', sku: '', categoryId: 'cat-gold-jewelry', quantity: 1, unitPrice: 800,
+    newProduct: { categoryId: 'cat-gold-jewelry', brand: null, name: null, attributes: { weight: 5.2, item_type: 'Necklace', karat: '18K White', description: 'EMERALD CLUSTER', stones } },
+  });
+  const r = await run(db, 60, { supplierId: 'sup-1', purchaseDate: '2026-09-29', taxScheme: 'ZERO', lines: [zeile(steine)] });
+  const pid = s(db, 'SELECT product_id FROM purchase_lines WHERE purchase_id = ?', [String(r.value?.purchaseId ?? '')]);
+  const a = attrsOf(pid);
+  ok(r.ok && S(a.stones) === S([
+    { type: 'diamond', qty: 1, carat: 0.5, color: 'G', clarity: 'VS1', shape: 'oval' },
+    { type: 'diamond', qty: 20, carat: 0.3, color: 'G', clarity: 'VS', shape: 'round' },
+    { type: 'emerald', qty: 3, carat: 0.45 },
+  ]) && a.diamond_weight === 0.8, `STONES Einkauf vom Telefon: Zeilen normalisiert, leere weg, Diamond Weight 0.80 (${r.code || S(a).slice(0, 160)})`);
+  const vorher = counts(db);
+  const nein = await run(db, 61, { supplierId: 'sup-1', purchaseDate: '2026-09-29', taxScheme: 'ZERO', lines: [zeile([{ type: 'other', qty: 1 }])] });
+  ok(!nein.ok && /STONES_INVALID/.test(nein.code) && counts(db) === vorher, `STONES eine falsche Liste → Nein, nichts gebucht (${nein.code})`);
+  const falsch = await run(db, 62, { supplierId: 'sup-1', purchaseDate: '2026-09-29', taxScheme: 'ZERO',
+    lines: [zeile([{ type: 'emerald', qty: 1, color: 'G' }])] });
+  ok(!falsch.ok && counts(db) === vorher, `STONES keine versteckten Diamant-Felder an anderen Steinen (${falsch.code})`);
+
+  // Kommission mit Steinen (derselbe Artikel-Weg des Hauses).
+  const k = await fern(() => cmd.runConsignmentCreate(deps(db), { commandId: t(63), ...ACTOR, op: 'consignments.create', payloadHash: 'h63' }, {
+    consignorId: 'cust-1', agreedPrice: 500, payout: { model: 'percent', commissionRate: 20 },
+    product: { categoryId: 'cat-gold-jewelry', attributes: { weight: 3, item_type: 'Ring', karat: '18K Yellow', stones: [{ type: 'other', qty: 2, name: 'Spinel' }, { type: 'diamond', qty: 1, carat: 0.25 }] } },
+  }));
+  const kp = s(db, 'SELECT product_id FROM consignments ORDER BY created_at DESC LIMIT 1');
+  ok(k.ok && attrsOf(kp).diamond_weight === 0.25 && S((attrsOf(kp).stones as unknown[]).map((x) => (x as { type: string }).type)) === S(['other', 'diamond']),
+    `STONES Kommission: dieselbe Liste, Summe abgeleitet (${k.code || 'ok'})`);
+
+  // Ändern: die abgeleitete Summe fällt mit ihren Diamant-Zeilen; ein Altwert ohne Liste bleibt.
+  const { useProductStore } = await import('../../src/stores/productStore.ts');
+  useProductStore.getState().updateProduct(pid, { attributes: { ...a, stones: [{ type: 'emerald', qty: 3, carat: 0.45 }] } as never });
+  ok(!('diamond_weight' in attrsOf(pid)) && (attrsOf(pid).stones as unknown[]).length === 1, 'STONES Ändern: ohne Diamant-Zeilen keine abgeleitete Summe mehr');
+  db.run("INSERT INTO products (id, branch_id, category_id, brand, name, purchase_price, attributes, created_at, updated_at) VALUES ('alt-1', 'branch-main', 'cat-gold-jewelry', '', '', 0, ?, ?, ?)",
+    [JSON.stringify({ weight: 2, item_type: 'Ring', karat: '18K White', diamond_weight: 0.6 }), NOW, NOW]);
+  useProductStore.getState().updateProduct('alt-1', { attributes: { weight: 2.1, item_type: 'Ring', karat: '18K White', diamond_weight: 0.6 } as never });
+  ok(attrsOf('alt-1').diamond_weight === 0.6 && !('stones' in attrsOf('alt-1')), 'STONES Altbestand: ein Diamond Weight ohne Liste bleibt beim Ändern');
+  let wurf = '';
+  try { useProductStore.getState().updateProduct('alt-1', { attributes: { stones: [{ type: 'other', qty: 1 }] } as never }); } catch (e) { wurf = (e as { code?: string }).code ?? ''; }
+  ok(wurf === 'STONES_INVALID' && attrsOf('alt-1').diamond_weight === 0.6, 'STONES eine falsche Liste wird an der Schreibstelle nie geschrieben');
+
+  // Reparatur: dieselbe Liste im Kundenstück.
+  const { useRepairStore } = await import('../../src/stores/repairStore.ts');
+  const rep = useRepairStore.getState().createRepair({ customerId: 'cust-1', repairScope: 'CUSTOMER', itemCategoryId: 'cat-gold-jewelry', issueDescription: 'clasp',
+    itemAttributes: { item_type: 'Necklace', stones: [{ type: 'diamond', qty: '2', carat: '0.10' }] } } as never);
+  const ra = JSON.parse(s(db, 'SELECT item_attributes FROM repairs WHERE id = ?', [rep.id]) || '{}');
+  ok(S(ra.stones) === S([{ type: 'diamond', qty: 2, carat: 0.1 }]) && ra.diamond_weight === 0.1, `STONES Reparatur: dieselbe Liste, Summe abgeleitet (${S(ra)})`);
+  ok(unbalanced(db) === 0, 'STONES keine Buchung berührt (Hauptbuch ausgeglichen)');
+}
+
 console.log(`\nmobile-purchase primary: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
 console.log('MOBILE_PURCHASE_PRIMARY_PROVED');

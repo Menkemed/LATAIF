@@ -28,6 +28,7 @@
 // similar-looking call sites to drift apart.
 
 import type { AiProductIdentification } from './ai-service.ts';
+import { hasStoneRows } from '../products/stones.ts';
 
 export type AiMergeMode = 'create' | 'edit';
 
@@ -158,11 +159,14 @@ export function buildAiFormPatch(
 export function buildAiAttributePatch(
   result: AiProductIdentification | null | undefined,
   knownKeys: readonly string[],
+  /** STONES — die Merkmale der Maske: eine schon erfasste Steinliste überschreibt die KI nie. */
+  current?: Record<string, unknown>,
 ): Record<string, string | number | boolean | string[]> {
   const patch: Record<string, string | number | boolean | string[]> = {};
   const known = new Set(knownKeys);
   for (const [k, v] of Object.entries(result?.attributes ?? {})) {
     if (!known.has(k)) continue;
+    if (k === 'stones' && hasStoneRows(current?.stones)) continue;
     if (!isRecognised(v)) continue;
     patch[k] = v;
   }

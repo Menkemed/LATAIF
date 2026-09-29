@@ -81,6 +81,8 @@
         if (treffer) { attributes.item_type = treffer; break; }
       }
     }
+    // STONES — Diamond Weight kommt aus den Diamant-Zeilen, nie von der KI (die Zeilen prüft aiApplyToForm).
+    delete attributes.diamond_weight;
     const out = Object.assign({}, result, { attributes: attributes });
     delete out.brand;
     delete out.name;

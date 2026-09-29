@@ -25,6 +25,7 @@ import type { Category, CategoryAttribute } from '../models/types.ts';
 // The brand/name rule already has exactly one implementation (mirrored into the
 // mobile schema); it is re-exported here so every surface reads it from one place.
 import { isBrandRequired } from '../mobile/mobile-field-schema.ts';
+import { normalizeStoneAttributes, stonesApply, DIAMOND_WEIGHT_KEY } from './stones.ts';
 
 export { isBrandRequired };
 
@@ -36,8 +37,10 @@ export interface FieldIssue {
   field: string;
   /** Human label for the UI. */
   label: string;
-  code: 'REQUIRED' | 'UNKNOWN_CATEGORY';
+  code: 'REQUIRED' | 'UNKNOWN_CATEGORY' | 'STONES_INVALID';
   blocking: boolean;
+  /** STONES — der Satz der Steinprüfung (bei REQUIRED leer). */
+  message?: string;
 }
 
 /** True when the attribute's `dependsOn` condition is satisfied by `attrs`
@@ -51,6 +54,16 @@ export function isAttributeVisible(attr: CategoryAttribute, attrs: AttrValues | 
 /** The attributes a surface must render for the CURRENT values — in SSOT order. */
 export function visibleAttributes(category: Pick<Category, 'attributes'> | null | undefined, attrs: AttrValues | undefined): CategoryAttribute[] {
   return (category?.attributes ?? []).filter((a) => isAttributeVisible(a, attrs));
+}
+
+/**
+ * STONES — was eine EINGABE-Maske zeichnet: die sichtbaren Merkmale ohne die abgeleiteten. Bei
+ * Gold-Diamond Jewellery ist Diamond Weight die Summe der Diamant-Zeilen (bzw. ein Wert von vor der
+ * Steinliste) und wird im Steinbereich angezeigt, nicht als zweites Eingabefeld.
+ */
+export function editableAttributes(category: Pick<Category, 'id' | 'attributes'> | null | undefined, attrs: AttrValues | undefined): CategoryAttribute[] {
+  const mitSteinen = stonesApply(category?.id);
+  return visibleAttributes(category, attrs).filter((a) => !(mitSteinen && a.key === DIAMOND_WEIGHT_KEY));
 }
 
 /** The attribute keys that are required RIGHT NOW: required in the SSOT *and*
@@ -136,6 +149,10 @@ export function validateProductFields(category: Category | null | undefined, for
       issues.push({ field: attr.key, label: attr.label, code: 'REQUIRED', blocking: true });
     }
   }
+  // STONES — dieselbe Prüfung wie beim Speichern (src/core/products/stones.ts); ein Fehler blockiert.
+  for (const i of normalizeStoneAttributes(category.id, attrs).issues) {
+    issues.push({ field: 'stones', label: 'Stones', code: 'STONES_INVALID', blocking: true, message: i.message });
+  }
   return issues;
 }
 
@@ -147,6 +164,6 @@ export function blockingIssues(issues: FieldIssue[]): FieldIssue[] {
 /** Convenience for the UIs: `{ [field]: message }`, blocking findings only. */
 export function issueMap(issues: FieldIssue[]): Record<string, string> {
   const out: Record<string, string> = {};
-  for (const i of blockingIssues(issues)) out[i.field] = 'Required';
+  for (const i of blockingIssues(issues)) if (!(i.field in out)) out[i.field] = i.message || 'Required';
   return out;
 }

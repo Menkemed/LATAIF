@@ -295,6 +295,7 @@ fn validate_attr_value(def: &SchemaAttr, val: &Value) -> Result<(), MetadataErro
         "boolean" => {
             if val.is_boolean() { Ok(()) } else { Err(MetadataError::new("BAD_TYPE", def.key.clone(), format!("{} must be true/false", def.key))) }
         }
+        "stones" => validate_stones(&def.key, val),
         _ => {
             // text
             let s = val.as_str().ok_or_else(|| MetadataError::new("BAD_TYPE", def.key.clone(), format!("{} must be text", def.key)))?;
@@ -304,6 +305,90 @@ fn validate_attr_value(def: &SchemaAttr, val: &Value) -> Result<(), MetadataErro
             Ok(())
         }
     }
+}
+
+// STONES (v0.8.68) — dieselben Regeln wie `src/core/products/stones.ts` (die verbindliche Prüfung macht
+// der Primary beim Übernehmen noch einmal): eine geordnete Liste von Zeilen
+// { type, qty, carat?, name?, color?, clarity?, shape? } mit kanonischen Schlüsseln.
+const STONE_TYPES: &[&str] = &[
+    "diamond", "emerald", "sapphire", "ruby", "pearl", "moissanite", "cubic_zirconia", "amethyst",
+    "aquamarine", "topaz", "tourmaline", "opal", "garnet", "onyx", "turquoise", "other",
+];
+const DIAMOND_COLORS: &[&str] = &["D", "E", "F", "G", "H", "I", "J", "K", "L", "M", "N-Z", "Fancy"];
+const DIAMOND_CLARITIES: &[&str] = &["FL", "IF", "VVS1", "VVS2", "VVS", "VS1", "VS2", "VS", "SI1", "SI2", "SI", "I1", "I2", "I3"];
+const DIAMOND_SHAPES: &[&str] = &[
+    "round", "princess", "oval", "cushion", "emerald", "pear", "marquise", "radiant", "asscher", "heart", "baguette", "trillion",
+];
+const STONE_ROW_KEYS: &[&str] = &["type", "qty", "carat", "name", "color", "clarity", "shape"];
+const MAX_STONE_ROWS: usize = 50;
+const MAX_STONE_QTY: i64 = 100_000;
+const MAX_CARAT_THOUSANDTHS: u64 = 10_000_000;
+const MAX_STONE_NAME: usize = 60;
+
+fn stone_text(v: Option<&Value>) -> String {
+    match v {
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(s)) => s.trim().to_string(),
+        Some(other) => other.to_string(),
+    }
+}
+
+/// Karat → Tausendstel, ohne Float-Arithmetik (der Text wird zerlegt). None = leer.
+fn carat_thousandths(v: Option<&Value>) -> Result<Option<u64>, ()> {
+    let s = match v {
+        None | Some(Value::Null) => return Ok(None),
+        Some(Value::String(s)) if s.trim().is_empty() => return Ok(None),
+        Some(Value::String(s)) => s.trim().replace(',', "."),
+        Some(Value::Number(n)) => n.to_string(),
+        _ => return Err(()),
+    };
+    let (ganz, bruch) = match s.split_once('.') { Some((g, b)) => (g, b), None => (s.as_str(), "") };
+    if ganz.is_empty() || ganz.len() > 6 || !ganz.bytes().all(|b| b.is_ascii_digit()) { return Err(()); }
+    if bruch.len() > 3 || !bruch.bytes().all(|b| b.is_ascii_digit()) || (s.contains('.') && bruch.is_empty()) { return Err(()); }
+    let t = ganz.parse::<u64>().map_err(|_| ())? * 1000 + format!("{bruch:0<3}").parse::<u64>().map_err(|_| ())?;
+    if t == 0 || t > MAX_CARAT_THOUSANDTHS { return Err(()); }
+    Ok(Some(t))
+}
+
+fn validate_stones(key: &str, val: &Value) -> Result<(), MetadataError> {
+    let bad = |code: &'static str, msg: String| Err(MetadataError::new(code, key.to_string(), msg));
+    let arr = match val.as_array() { Some(a) => a, None => return bad("STONES_INVALID", "stones must be a list".into()) };
+    if arr.len() > MAX_STONE_ROWS { return bad("STONES_TOO_MANY", format!("at most {MAX_STONE_ROWS} stone rows")); }
+    for (i, row) in arr.iter().enumerate() {
+        let n = i + 1;
+        let obj = match row.as_object() { Some(o) => o, None => return bad("STONE_ROW_INVALID", format!("stone {n}: not a stone row")) };
+        if STONE_ROW_KEYS.iter().all(|k| stone_text(obj.get(*k)).is_empty()) { continue; } // leere Zeile
+        if let Some(k) = obj.keys().find(|k| !STONE_ROW_KEYS.contains(&k.as_str())) {
+            return bad("STONE_FIELD_UNKNOWN", format!("stone {n}: unknown field \"{k}\""));
+        }
+        let typ = stone_text(obj.get("type"));
+        if typ.is_empty() { return bad("STONE_TYPE_REQUIRED", format!("stone {n}: stone type is required")); }
+        if !STONE_TYPES.contains(&typ.as_str()) { return bad("STONE_TYPE_INVALID", format!("stone {n}: unknown stone type \"{typ}\"")); }
+        let qty_ok = match obj.get("qty") {
+            Some(Value::Number(q)) => q.as_i64().map(|q| (1..=MAX_STONE_QTY).contains(&q)).unwrap_or(false),
+            Some(Value::String(s)) => s.trim().parse::<i64>().map(|q| (1..=MAX_STONE_QTY).contains(&q)).unwrap_or(false)
+                && s.trim().bytes().all(|b| b.is_ascii_digit()),
+            _ => false,
+        };
+        if !qty_ok { return bad("STONE_QTY_INVALID", format!("stone {n}: quantity must be a whole number of at least 1")); }
+        if carat_thousandths(obj.get("carat")).is_err() {
+            return bad("STONE_CARAT_INVALID", format!("stone {n}: total carat must be a positive number with at most 3 decimals"));
+        }
+        let name = stone_text(obj.get("name"));
+        if typ == "other" {
+            if name.is_empty() { return bad("STONE_NAME_REQUIRED", format!("stone {n}: a stone name is required for Other")); }
+            if name.chars().count() > MAX_STONE_NAME { return bad("STONE_NAME_TOO_LONG", format!("stone {n}: stone name is too long")); }
+        } else if !name.is_empty() {
+            return bad("STONE_NAME_ONLY_OTHER", format!("stone {n}: a stone name belongs only to Other"));
+        }
+        for (field, list) in [("color", DIAMOND_COLORS), ("clarity", DIAMOND_CLARITIES), ("shape", DIAMOND_SHAPES)] {
+            let v = stone_text(obj.get(field));
+            if v.is_empty() { continue; }
+            if typ != "diamond" { return bad("STONE_DIAMOND_ONLY", format!("stone {n}: {field} belongs only to diamonds")); }
+            if !list.contains(&v.as_str()) { return bad("BAD_ENUM", format!("stone {n}: unknown {field} \"{v}\"")); }
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -566,5 +651,27 @@ mod tests {
             json!({ "categoryId": "cat-spare-part", "brand": "X", "name": "Y", "attributes": { "part_type": "Dial", "material": "Steel", "original_or_copy": "Original", "description": "d" } }),
         ];
         for c in cases { assert_eq!(validate_metadata(&c, 2), Ok(()), "v2 required set unsatisfiable for {}", c["categoryId"]); }
+    }
+
+    #[test]
+    fn stones_follow_the_one_stone_contract() {
+        let gold = |stones: Value| json!({ "categoryId": "cat-gold-jewelry", "attributes": { "weight": 5.2, "item_type": "Necklace", "karat": "18K White", "stones": stones } });
+        let ok = gold(json!([
+            { "type": "diamond", "qty": 1, "carat": 0.5, "color": "G", "clarity": "VS1", "shape": "oval" },
+            { "type": "diamond", "qty": 20, "carat": 0.3 },
+            { "type": "emerald", "qty": 3, "carat": "0.45" },
+            { "type": "other", "qty": 2, "name": "Spinel" },
+            { "type": "", "qty": null }
+        ]));
+        assert_eq!(validate_metadata(&ok, 2), Ok(()));
+        let code = |v: Value| validate_metadata(&v, 2).unwrap_err().code;
+        assert_eq!(code(gold(json!([{ "type": "other", "qty": 1 }]))), "STONE_NAME_REQUIRED");
+        assert_eq!(code(gold(json!([{ "type": "emerald", "qty": 1, "color": "G" }]))), "STONE_DIAMOND_ONLY");
+        assert_eq!(code(gold(json!([{ "type": "diamond", "qty": 0 }]))), "STONE_QTY_INVALID");
+        assert_eq!(code(gold(json!([{ "type": "diamond", "qty": 1.5 }]))), "STONE_QTY_INVALID");
+        assert_eq!(code(gold(json!([{ "type": "diamond", "qty": 1, "carat": 0.1234 }]))), "STONE_CARAT_INVALID");
+        assert_eq!(code(gold(json!([{ "type": "Diamond", "qty": 1 }]))), "STONE_TYPE_INVALID");
+        assert_eq!(code(gold(json!([{ "type": "diamond", "qty": 1, "size_mm": 3 }]))), "STONE_FIELD_UNKNOWN");
+        assert_eq!(code(json!({ "categoryId": "cat-branded-gold-jewelry", "brand": "C", "name": "L", "attributes": { "item_type": "Ring", "karat": "18K Yellow", "stones": [] } })), "UNKNOWN_FIELD");
     }
 }

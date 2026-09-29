@@ -40,6 +40,7 @@ import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import { normalizeCardBrand } from '@/core/finance/card-fees';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
+import { stonesOrThrow } from '@/core/products/stones';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
@@ -674,7 +675,8 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         notes, images, repair_scope, staff_id, created_at, updated_at, created_by)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, repairNumber, effectiveCustomerId, data.productId || null, data.lotId || null,
-       data.itemCategoryId || null, JSON.stringify(data.itemAttributes || {}), data.taxScheme || 'VAT_10',
+       // STONES — die Steinliste normalisiert, Diamond Weight abgeleitet (wie beim Artikel).
+       data.itemCategoryId || null, JSON.stringify(stonesOrThrow(data.itemCategoryId, (data.itemAttributes || {}) as Record<string, unknown>)), data.taxScheme || 'VAT_10',
        data.itemBrand || null, data.itemModel || null, data.itemReference || null,
        data.itemSerial || null, data.itemDescription || null,
        data.issueDescription || '', data.diagnosis || null,
@@ -778,7 +780,12 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       if (col) { fields.push(`${col} = ?`); values.push(v ?? null); }
     }
     if (data.itemAttributes !== undefined) {
-      fields.push('item_attributes = ?'); values.push(JSON.stringify(data.itemAttributes));
+      // STONES — gegen den gespeicherten Stand (ein abgeleitetes Diamond Weight fällt mit seinen Zeilen).
+      const alt = query('SELECT item_category_id, item_attributes FROM repairs WHERE id = ?', [id])[0];
+      let vorher: Record<string, unknown> | undefined;
+      try { vorher = alt?.item_attributes ? JSON.parse(String(alt.item_attributes)) : undefined; } catch { vorher = undefined; }
+      const kat = data.itemCategoryId ?? (alt?.item_category_id as string | undefined);
+      fields.push('item_attributes = ?'); values.push(JSON.stringify(stonesOrThrow(kat, (data.itemAttributes || {}) as Record<string, unknown>, vorher)));
     }
     if (data.images !== undefined) {
       fields.push('images = ?'); values.push(JSON.stringify(data.images || []));

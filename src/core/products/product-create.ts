@@ -12,6 +12,7 @@
 // eine schon vergebene SKU, dieselbe Vergabe aus dem durablen Zähler, dasselbe Streichen.
 // ════════════════════════════════════════════════════════════════════════════
 import { validateProductFields, blockingIssues, stripStaleAttributes } from './field-contract';
+import { normalizeStoneAttributes } from './stones';
 import { skuIsEmpty } from './sku-allocation';
 import { PRODUCT_CREATE_FIELDS, createPayload } from '@/core/data/write-payloads';
 import type { Category, Product } from '@/core/models/types';
@@ -25,7 +26,7 @@ export interface ProductCreatePort {
   allocateSku: (brand: string | undefined, categoryId: string | undefined) => string;
 }
 
-export interface ProductCreateIssue { field: string; label: string; code: string }
+export interface ProductCreateIssue { field: string; label: string; code: string; message?: string }
 
 export type ProductCreatePlan =
   | { kind: 'ok'; data: Partial<Product> & { sku: string }; allocated: boolean }
@@ -45,7 +46,7 @@ export function planProductCreate(input: Partial<Product>, port: ProductCreatePo
     categoryId: input.categoryId, brand: input.brand, name: input.name, attributes: input.attributes,
   }));
   if (issues.length > 0) {
-    return { kind: 'invalid', issues: issues.map((i) => ({ field: i.field, label: i.label, code: i.code })) };
+    return { kind: 'invalid', issues: issues.map((i) => ({ field: i.field, label: i.label, code: i.code, ...(i.message ? { message: i.message } : {}) })) };
   }
   const typed = skuIsEmpty(input.sku) ? '' : String(input.sku).trim();
   if (typed && port.isSkuTaken(typed)) return { kind: 'sku_taken', sku: typed };
@@ -58,7 +59,8 @@ export function planProductCreate(input: Partial<Product>, port: ProductCreatePo
       sku,
       // Ein Attribut, dessen Bedingung nicht mehr erfüllt ist, wird nie gespeichert (eine
       // Stahluhr trägt keine Goldfarbe) — dieselbe Regel wie beim Ändern und am Handy.
-      attributes: stripStaleAttributes(port.category ?? undefined, input.attributes) as Product['attributes'],
+      // STONES — die Steinliste normalisiert, Diamond Weight daraus abgeleitet (geprüft oben).
+      attributes: normalizeStoneAttributes(input.categoryId, stripStaleAttributes(port.category ?? undefined, input.attributes)).attributes as Product['attributes'],
     },
   };
 }
@@ -67,6 +69,8 @@ export function planProductCreate(input: Partial<Product>, port: ProductCreatePo
 export function productCreateRefusal(plan: Exclude<ProductCreatePlan, { kind: 'ok' }>): { code: string; message: string } {
   if (plan.kind === 'sku_taken') return { code: 'SKU_TAKEN', message: `The SKU / reference ${plan.sku} is already in use.` };
   if (plan.issues.some((i) => i.code === 'UNKNOWN_CATEGORY')) return { code: 'CATEGORY_NOT_FOUND', message: 'No such category.' };
+  const stein = plan.issues.find((i) => i.code === 'STONES_INVALID');
+  if (stein) return { code: 'STONES_INVALID', message: stein.message || 'The stone list is not valid.' };
   return { code: 'PRODUCT_FIELDS_REQUIRED', message: `Required: ${plan.issues.map((i) => i.label).join(', ')}` };
 }
 

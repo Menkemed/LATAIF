@@ -7,6 +7,7 @@ import { buildSystemPrompt, buildUserPrompt, categorySpec, AI_MODEL_PARAMS } fro
 import { getRuntimePaths } from '../runtime/runtime-paths';
 import { isClientMode } from '../bridge/client-mode';
 import { productDisplayName } from '../products/display-name.ts';
+import { stonesSummary } from '../products/stones.ts';
 
 const STORAGE_KEY = 'lataif_openai_key';
 const MODEL_KEY = 'lataif_openai_model';
@@ -458,7 +459,8 @@ export async function suggestPrice(params: {
   maxPrice: number;
   reasoning: string;
 }> {
-  const attrs = params.attributes ? Object.entries(params.attributes).map(([k, v]) => `${k}: ${v}`).join(', ') : '';
+  // STONES — die Steinliste als Kurzform, nicht als rohes Objekt.
+  const attrs = params.attributes ? Object.entries(params.attributes).map(([k, v]) => `${k}: ${k === 'stones' ? stonesSummary(v) : v}`).join(', ') : '';
 
   const response = await callOpenAI([
     {

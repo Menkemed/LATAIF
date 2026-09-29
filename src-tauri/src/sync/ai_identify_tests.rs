@@ -14,7 +14,8 @@ use super::*;
 /// lines, so the value moved once and deliberately.
 /// DISPLAY-NAME — was `0c33a03188de4b83`; the gold-jewellery note (no brand/model from the AI) moved it
 /// once and deliberately.
-const EXPECTED_FINGERPRINT: &str = "99b2eeedc75bb347";
+/// STONES — was `99b2eeedc75bb347`; the stone list instead of diamond_weight moved it once and deliberately.
+const EXPECTED_FINGERPRINT: &str = "ba9af9c515fa5ce1";
 
 #[test]
 fn rust_and_typescript_assemble_the_identical_prompts() {
