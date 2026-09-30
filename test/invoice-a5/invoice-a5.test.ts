@@ -95,6 +95,9 @@ ok(ohneMargin.title === 'PROFORMA INVOICE' && !ohneMargin.marginNotice && ohneMa
     .every((t) => h.includes(t)), 'HTML alle Teile der Vorlage: Spalten, Kunde/Rechnung, Worte, Summen, Hinweis, Bedingungen, Unterschriften');
   ok(h.includes('LATAIF JEWELLERY <small>W.L.L.</small>') && h.includes('مجوهرات لطائف ذ.م.م') && h.includes('<bdi dir="ltr">137216-1</bdi>')
     && h.includes('<bdi dir="ltr">220015625500002</bdi>') && h.includes('lataifwll@gmail.com'), 'HTML Kopf Englisch/Arabisch, Nummern im arabischen Teil nicht gespiegelt, Fußzeile');
+  ok(h.includes('<b>CR No.:</b> 137216-1') && h.includes('<b>VAT No.:</b> 220015625500002')
+    && h.includes('<b>س.ت:</b> <bdi dir="ltr">137216-1</bdi>') && h.includes('<b>الرقم الضريبي:</b> <bdi dir="ltr">220015625500002</bdi>'),
+    'HTML CR/VAT: auf beiden Seiten die Bezeichnung fett, die Nummer normal');
   ok(/<thead>/.test(h) && /table\.items thead \{ display: table-header-group; \}/.test(h) && /break-inside: avoid/.test(h), 'HTML lange Rechnung: Tabellenkopf wiederholt sich, Zeilen brechen nicht');
   ok(h.includes('<td class="num">4,500.000</td>') && h.includes('<td class="c-qty">2 pcs</td>'), 'HTML Beträge mit drei Nachkommastellen, Menge in Stück');
   const boese = invoiceA5Html(buildInvoiceA5Data({ ...basis, customer: { firstName: '<img src=x onerror=alert(1)>', lastName: '&' },

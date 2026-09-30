@@ -361,7 +361,7 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
     ${d.logos.emblem ? `<img class="emblem-img" src="${esc(d.logos.emblem)}" alt="" />` : EMBLEM}
     <div class="co-ar" dir="rtl" lang="ar">
       ${d.logos.nameAr ? `<img class="name-img" src="${esc(d.logos.nameAr)}" alt="${esc(c.nameAr)}" />` : `<div class="name">${esc(c.nameAr)}</div>`}
-      <div class="ids">س.ت: <bdi dir="ltr">${esc(c.crNumber)}</bdi> &nbsp;|&nbsp; الرقم الضريبي: <bdi dir="ltr">${esc(c.vatNumber)}</bdi></div>
+      <div class="ids"><b>س.ت:</b> <bdi dir="ltr">${esc(c.crNumber)}</bdi> &nbsp;|&nbsp; <b>الرقم الضريبي:</b> <bdi dir="ltr">${esc(c.vatNumber)}</bdi></div>
     </div>
   </header>
   <div class="title"><span class="line"></span><h1>${esc(d.title)}</h1><span class="line"></span></div>
