@@ -301,6 +301,8 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   .name-img { display: block; height: auto; }
   /* Beide Schriftzüge füllen ihre Spalte: gleicher Abstand zum Emblem links und rechts (Seitenverhältnis bleibt). */
   .co-en .name-img, .co-ar .name-img { width: 100%; }
+  /* Gleich hohe Felder für beide Schriftzüge (mittig): die CR/VAT-Zeile steht links und rechts auf derselben Höhe. */
+  .name-box { height: 8.4mm; display: flex; align-items: center; }
   .title { display: flex; align-items: center; justify-content: center; gap: 4mm; margin: 2.2mm 0 2.2mm; }
   .title .line { flex: 0 0 18mm; border-top: 0.5pt solid ${GOLD}; }
   .title h1 { font-family: Georgia, 'Times New Roman', serif; font-size: 13.5pt; letter-spacing: 1pt; color: #1b2433; font-weight: 700; }
@@ -355,12 +357,12 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
 <body><div class="doc">
   <header class="head">
     <div class="co-en">
-      ${d.logos.nameEn ? `<img class="name-img" src="${esc(d.logos.nameEn)}" alt="${esc(c.nameEn)}" />` : `<div class="name">${nameMitRechtsform(c.nameEn)}</div>`}
+      ${d.logos.nameEn ? `<div class="name-box"><img class="name-img" src="${esc(d.logos.nameEn)}" alt="${esc(c.nameEn)}" /></div>` : `<div class="name">${nameMitRechtsform(c.nameEn)}</div>`}
       <div class="ids"><b>CR No.:</b> ${esc(c.crNumber)} &nbsp;|&nbsp; <b>VAT No.:</b> ${esc(c.vatNumber)}</div>
     </div>
     ${d.logos.emblem ? `<img class="emblem-img" src="${esc(d.logos.emblem)}" alt="" />` : EMBLEM}
     <div class="co-ar" dir="rtl" lang="ar">
-      ${d.logos.nameAr ? `<img class="name-img" src="${esc(d.logos.nameAr)}" alt="${esc(c.nameAr)}" />` : `<div class="name">${esc(c.nameAr)}</div>`}
+      ${d.logos.nameAr ? `<div class="name-box"><img class="name-img" src="${esc(d.logos.nameAr)}" alt="${esc(c.nameAr)}" /></div>` : `<div class="name">${esc(c.nameAr)}</div>`}
       <div class="ids"><b>س.ت:</b> <bdi dir="ltr">${esc(c.crNumber)}</bdi> &nbsp;|&nbsp; <b>الرقم الضريبي:</b> <bdi dir="ltr">${esc(c.vatNumber)}</bdi></div>
     </div>
   </header>
