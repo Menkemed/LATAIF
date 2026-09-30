@@ -101,6 +101,11 @@ ok(ohneMargin.title === 'PROFORMA INVOICE' && !ohneMargin.marginNotice && ohneMa
     invoice: { number: 'B"1', status: 'FINAL', issuedAt: '2026-09-01', grossAmount: 1, paidAmount: 0, lines: [{ productId: 'x', description: '<b>Service</b>', quantity: 1, taxScheme: 'ZERO', vatRate: 0, vatAmount: 0, lineTotal: 1 }] } }));
   ok(!boese.includes('<img src=x') && boese.includes('&lt;img src=x onerror=alert(1)&gt; &amp;') && boese.includes('&lt;b&gt;Service&lt;/b&gt;') && boese.includes('B&quot;1'),
     'HTML alles Eingegebene wird maskiert (Name, Beschreibung, Nummer)');
+  const mitBildern = invoiceA5Html({ ...margin, logos: { emblem: 'data:image/png;base64,EMB', nameEn: 'data:image/png;base64,EN', nameAr: 'data:image/png;base64,AR' } });
+  ok(mitBildern.includes('<img class="emblem-img" src="data:image/png;base64,EMB"') && mitBildern.includes('<img class="name-img" src="data:image/png;base64,EN" alt="LATAIF JEWELLERY W.L.L."')
+    && mitBildern.includes('<img class="name-img" src="data:image/png;base64,AR" alt="مجوهرات لطائف ذ.م.م"') && !mitBildern.includes('<svg class="emblem"')
+    && mitBildern.indexOf('base64,EN') < mitBildern.indexOf('base64,EMB') && mitBildern.indexOf('base64,EMB') < mitBildern.indexOf('base64,AR'),
+    'KOPF mit Bildern: links Englisch, Mitte Emblem, rechts Arabisch; ohne Bilder Text und gezeichnetes Emblem');
   ok(!invoiceA5Html(ohneMargin).includes('PROFIT MARGIN SCHEME') && invoiceA5Html(storniert).includes('<div class="stamp">CANCELLED</div>'), 'HTML Hinweis nur mit Margin-Zeile; Stempel bei Storno');
 }
 
@@ -113,8 +118,11 @@ ok(ohneMargin.title === 'PROFORMA INVOICE' && !ohneMargin.marginNotice && ohneMa
     'SEITE „Save & Print" druckt ebenfalls den A5-Beleg — mit geladenen Artikeln');
   ok(/company: invoiceCompany\(\(key\) => getSetting\(key\)\)/.test(seite) && /paymentMethods: getInvoicePayments\(invoice\.id\)/.test(seite), 'SEITE Firma aus den Einstellungen, Zahlungswege aus den Zahlungen');
   const einst = src('src/pages/settings/SettingsPage.tsx');
-  ok(/\['nameEn', 'Legal Name \(Invoice\)'\], \['nameAr', 'Legal Name \(Arabic\)'\], \['crNumber', 'CR No\.'\], \['vatNumber', 'VAT No\.'\], \['terms', 'Invoice Terms'\]/.test(einst)
-    && /setSetting\(branchId, INVOICE_COMPANY_KEYS\[k\]/.test(einst), 'EINSTELLUNGEN Name (EN/AR), CR, VAT und Bedingungen sind unter Company Information änderbar');
+  ok(/\['crNumber', 'CR No\.'\], \['vatNumber', 'VAT No\.'\], \['terms', 'Invoice Terms'\]/.test(einst)
+    && /setSetting\(branchId, INVOICE_COMPANY_KEYS\[k\]/.test(einst), 'EINSTELLUNGEN CR, VAT und Bedingungen sind unter Company Information änderbar');
+  const logos = src('src/core/pdf/invoice-a5-logos.ts');
+  ok(/logos: invoiceA5Logos\(\),/.test(seite) && /import emblemUrl from '@\/assets\/invoice-emblem\.png';/.test(logos)
+    && /invoice-name-en\.png/.test(logos) && /invoice-name-ar\.png/.test(logos), 'SEITE der Kopf druckt Emblem und Schriftzüge der Firma');
 }
 
 console.log(`\ninvoice-a5: ${PASS} passed, ${fails.length} failed`);

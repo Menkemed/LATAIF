@@ -114,8 +114,12 @@ export function paymentModeText(methods: readonly string[], paid: number, balanc
 
 // ── Daten des Belegs ───────────────────────────────────────────────────────────────────────────
 export interface InvoiceA5Line { description: string; details: string[]; qty: number; rate: number; vatPct: number; vatAmount: number; amount: number }
+/** Die Bilder des Kopfes (Adressen oder Daten-URLs): Emblem in der Mitte, Schriftzug links Englisch, rechts Arabisch. */
+export interface InvoiceA5Logos { emblem?: string; nameEn?: string; nameAr?: string }
+
 export interface InvoiceA5Data {
   company: InvoiceA5Company;
+  logos: InvoiceA5Logos;
   title: string;
   stamp: string;
   customer: Array<[string, string]>;
@@ -140,6 +144,7 @@ export interface InvoiceA5Input {
   paymentMethods: readonly string[];
   salesperson?: string;
   branch?: string;
+  logos?: InvoiceA5Logos;
 }
 
 const text = (v: unknown): string => (v === null || v === undefined ? '' : String(v).trim());
@@ -204,6 +209,7 @@ export function buildInvoiceA5Data(input: InvoiceA5Input): InvoiceA5Data {
 
   return {
     company: input.company,
+    logos: input.logos ?? {},
     title: invoice.status === 'DRAFT' ? 'PROFORMA INVOICE' : 'TAX INVOICE',
     stamp: invoice.status === 'CANCELLED' ? 'CANCELLED' : '',
     customer: kunde,
@@ -283,7 +289,7 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
     -webkit-print-color-adjust: exact; print-color-adjust: exact; }
   .doc { width: 132mm; min-height: 190mm; margin: 0 auto; display: flex; flex-direction: column; position: relative; }
   .gold { color: ${GOLD}; }
-  .head { display: grid; grid-template-columns: 1fr 18mm 1fr; align-items: center; column-gap: 3mm; padding-bottom: 1.6mm; border-bottom: 0.5pt solid ${GOLD}; }
+  .head { display: grid; grid-template-columns: 1fr 22mm 1fr; align-items: center; column-gap: 3mm; padding-bottom: 1.6mm; border-bottom: 0.5pt solid ${GOLD}; }
   .co-en .name { font-family: Georgia, 'Times New Roman', serif; font-weight: 700; font-size: 11.2pt; color: ${GOLD}; letter-spacing: 0.1pt; white-space: nowrap; }
   .co-en .name small { font-size: 7.4pt; letter-spacing: 0; }
   .co-ar { text-align: right; }
@@ -291,6 +297,10 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   .ids { font-size: 6.2pt; color: #333; margin-top: 1mm; white-space: nowrap; }
   .ids b { font-weight: 700; color: #1f2328; }
   .emblem { width: 18mm; height: 19mm; display: block; }
+  .emblem-img { width: 21mm; height: auto; display: block; justify-self: center; }
+  .name-img { display: block; height: auto; }
+  .co-en .name-img { width: 52mm; max-width: 100%; }
+  .co-ar .name-img { width: 45mm; max-width: 100%; }
   .title { display: flex; align-items: center; justify-content: center; gap: 4mm; margin: 2.2mm 0 2.2mm; }
   .title .line { flex: 0 0 18mm; border-top: 0.5pt solid ${GOLD}; }
   .title h1 { font-family: Georgia, 'Times New Roman', serif; font-size: 13.5pt; letter-spacing: 1pt; color: #1b2433; font-weight: 700; }
@@ -331,11 +341,11 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   .terms { padding: 1.4mm 0 1.4mm; border-bottom: 0.5pt solid ${GOLD}; font-size: 6.4pt; }
   .terms .bullet { color: ${GOLD}; font-size: 8pt; margin: 0 1.4mm 0 0.6mm; }
   .terms b { font-weight: 700; }
-  .spacer { flex: 1 1 auto; min-height: 4mm; }
+  .spacer { flex: 1 1 auto; min-height: 3mm; }
   .sign { display: flex; justify-content: space-between; align-items: flex-end; gap: 8mm; break-inside: avoid; }
   .sign div { width: 48mm; font-size: 7.6pt; }
-  .sign .sl { display: block; border-bottom: 0.6pt solid #1f2328; height: 7mm; }
-  .foot { margin-top: 3mm; border-top: 0.6pt solid ${GOLD}; padding-top: 2mm; display: flex; align-items: center; justify-content: space-between; font-size: 6.3pt; break-inside: avoid; }
+  .sign .sl { display: block; border-bottom: 0.6pt solid #1f2328; height: 6mm; }
+  .foot { margin-top: 2.4mm; border-top: 0.6pt solid ${GOLD}; padding-top: 2mm; display: flex; align-items: center; justify-content: space-between; font-size: 6.3pt; break-inside: avoid; }
   .foot .it { display: flex; align-items: center; gap: 1.6mm; }
   .foot .it.addr { max-width: 58mm; }
   .foot .sep { width: 0.5pt; align-self: stretch; background: ${GOLD}; }
@@ -345,12 +355,12 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
 <body><div class="doc">
   <header class="head">
     <div class="co-en">
-      <div class="name">${nameMitRechtsform(c.nameEn)}</div>
+      ${d.logos.nameEn ? `<img class="name-img" src="${esc(d.logos.nameEn)}" alt="${esc(c.nameEn)}" />` : `<div class="name">${nameMitRechtsform(c.nameEn)}</div>`}
       <div class="ids"><b>CR No.:</b> ${esc(c.crNumber)} &nbsp;|&nbsp; <b>VAT No.:</b> ${esc(c.vatNumber)}</div>
     </div>
-    ${EMBLEM}
+    ${d.logos.emblem ? `<img class="emblem-img" src="${esc(d.logos.emblem)}" alt="" />` : EMBLEM}
     <div class="co-ar" dir="rtl" lang="ar">
-      <div class="name">${esc(c.nameAr)}</div>
+      ${d.logos.nameAr ? `<img class="name-img" src="${esc(d.logos.nameAr)}" alt="${esc(c.nameAr)}" />` : `<div class="name">${esc(c.nameAr)}</div>`}
       <div class="ids">س.ت: <bdi dir="ltr">${esc(c.crNumber)}</bdi> &nbsp;|&nbsp; الرقم الضريبي: <bdi dir="ltr">${esc(c.vatNumber)}</bdi></div>
     </div>
   </header>
@@ -407,8 +417,11 @@ export function printInvoiceA5(d: InvoiceA5Data): void {
   doc.open();
   doc.write(invoiceA5Html(d));
   doc.close();
-  setTimeout(() => {
+  // Erst drucken, wenn Emblem und Schriftzüge geladen sind (höchstens 3 s warten).
+  const bilder = Array.from(doc.images).map((img) => (img.complete ? Promise.resolve() : new Promise<void>((r) => { img.onload = () => r(); img.onerror = () => r(); })));
+  const bereit = Promise.race([Promise.all(bilder), new Promise((r) => setTimeout(r, 3000))]);
+  void bereit.then(() => setTimeout(() => {
     iframe.contentWindow?.print();
     setTimeout(() => iframe.remove(), 2000);
-  }, 350);
+  }, 150));
 }

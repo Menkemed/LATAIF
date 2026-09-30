@@ -147,9 +147,10 @@ function SuccessBanner({ message, onDone }: { message: string; onDone: () => voi
 // COMPANY TAB
 // ═══════════════════════════════════════════════════════════
 
-/** INVOICE-A5 — was der Rechnungskopf zusätzlich braucht (leer = der grau gezeigte Wert gilt). */
+/** INVOICE-A5 — was der Rechnungskopf zusätzlich braucht (leer = der grau gezeigte Wert gilt). Der Firmenname
+ *  steht als Schriftzug (Englisch/Arabisch) im Kopf — ein Bild, keine Einstellung. */
 const INVOICE_FIELDS: ReadonlyArray<[keyof InvoiceA5Company, string]> = [
-  ['nameEn', 'Legal Name (Invoice)'], ['nameAr', 'Legal Name (Arabic)'], ['crNumber', 'CR No.'], ['vatNumber', 'VAT No.'], ['terms', 'Invoice Terms'],
+  ['crNumber', 'CR No.'], ['vatNumber', 'VAT No.'], ['terms', 'Invoice Terms'],
 ];
 
 function CompanyTab() {
@@ -201,7 +202,7 @@ function CompanyTab() {
           </FieldRow>
           {INVOICE_FIELDS.map(([k, label]) => (
             <FieldRow key={k} label={label}>
-              <Input data-invoice-setting={k} value={invoiceFields[k] ?? ''} dir={k === 'nameAr' ? 'rtl' : undefined}
+              <Input data-invoice-setting={k} value={invoiceFields[k] ?? ''}
                 onChange={e => { const v = e.target.value; setInvoiceFields(f => ({ ...f, [k]: v })); }} placeholder={INVOICE_COMPANY_DEFAULTS[k]} />
             </FieldRow>
           ))}
