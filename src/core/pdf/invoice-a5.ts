@@ -299,8 +299,8 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   .emblem { width: 18mm; height: 19mm; display: block; }
   .emblem-img { width: 21mm; height: auto; display: block; justify-self: center; }
   .name-img { display: block; height: auto; }
-  .co-en .name-img { width: 52mm; max-width: 100%; }
-  .co-ar .name-img { width: 45mm; max-width: 100%; }
+  /* Beide Schriftzüge füllen ihre Spalte: gleicher Abstand zum Emblem links und rechts (Seitenverhältnis bleibt). */
+  .co-en .name-img, .co-ar .name-img { width: 100%; }
   .title { display: flex; align-items: center; justify-content: center; gap: 4mm; margin: 2.2mm 0 2.2mm; }
   .title .line { flex: 0 0 18mm; border-top: 0.5pt solid ${GOLD}; }
   .title h1 { font-family: Georgia, 'Times New Roman', serif; font-size: 13.5pt; letter-spacing: 1pt; color: #1b2433; font-weight: 700; }
