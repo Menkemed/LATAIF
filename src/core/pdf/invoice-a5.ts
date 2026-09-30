@@ -139,11 +139,10 @@ export interface InvoiceA5Input {
     grossAmount: number; paidAmount: number;
     lines: Array<{ productId?: string; description?: string | null; quantity: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }>;
   };
-  customer?: { firstName?: string; lastName?: string; company?: string; personalId?: string; phone?: string; vatAccountNumber?: string; address?: string } | null;
+  customer?: { firstName?: string; lastName?: string; company?: string; personalId?: string; phone?: string; vatAccountNumber?: string } | null;
   products: ReadonlyArray<{ id: string; brand?: string | null; name?: string | null; categoryId?: string | null; condition?: string | null; attributes?: Record<string, unknown> | string | null }>;
   paymentMethods: readonly string[];
   salesperson?: string;
-  branch?: string;
   logos?: InvoiceA5Logos;
 }
 
@@ -195,7 +194,6 @@ export function buildInvoiceA5Data(input: InvoiceA5Input): InvoiceA5Data {
   kunde.push(['Name', name || '—']);
   if (text(customer?.company)) kunde.push(['Company', text(customer?.company)]);
   if (text(customer?.personalId)) kunde.push(['ID/CR', text(customer?.personalId)]);
-  if (text(customer?.address)) kunde.push(['Address', text(customer?.address)]);
   if (text(customer?.phone)) kunde.push(['Mobile', text(customer?.phone)]);
   if (text(customer?.vatAccountNumber)) kunde.push(['TRN', text(customer?.vatAccountNumber)]);
 
@@ -205,7 +203,6 @@ export function buildInvoiceA5Data(input: InvoiceA5Input): InvoiceA5Data {
     ['Payment Mode', paymentModeText(input.paymentMethods, paid, balance)],
     ['Salesperson', text(input.salesperson) || '—'],
   ];
-  if (text(input.branch)) beleg.push(['Branch', text(input.branch)]);
 
   return {
     company: input.company,
@@ -344,9 +341,9 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   .terms .bullet { color: ${GOLD}; font-size: 8pt; margin: 0 1.4mm 0 0.6mm; }
   .terms b { font-weight: 700; }
   .spacer { flex: 1 1 auto; min-height: 3mm; }
-  .sign { display: flex; justify-content: space-between; align-items: flex-end; gap: 8mm; break-inside: avoid; }
-  .sign div { width: 48mm; font-size: 7.6pt; }
-  .sign .sl { display: block; border-bottom: 0.6pt solid #1f2328; height: 6mm; }
+  .sign { display: flex; justify-content: space-between; align-items: flex-start; gap: 8mm; break-inside: avoid; }
+  .sign div { width: 48mm; font-size: 7.6pt; text-align: center; }
+  .sign .sl { display: block; border-bottom: 0.6pt solid #1f2328; height: 7mm; margin-bottom: 1mm; }
   .foot { margin-top: 2.4mm; border-top: 0.6pt solid ${GOLD}; padding-top: 2mm; display: flex; align-items: center; justify-content: space-between; font-size: 6.3pt; break-inside: avoid; }
   .foot .it { display: flex; align-items: center; gap: 1.6mm; }
   .foot .it.addr { max-width: 58mm; }
@@ -393,8 +390,8 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   <div class="terms"${d.marginNotice ? '' : ' style="border-top:0.5pt solid ' + GOLD + ';margin-top:2.6mm"'}><span class="bullet">●</span><b>Terms &amp; Conditions:</b> ${esc(c.terms)}</div>
   <div class="spacer"></div>
   <section class="sign">
-    <div>Customer’s Signature<span class="sl"></span></div>
-    <div>Authorised Signatory<span class="sl"></span></div>
+    <div><span class="sl"></span>Customer’s Signature</div>
+    <div><span class="sl"></span>Authorised Signatory</div>
   </section>
   <footer class="foot">
     <div class="it addr">${ICON_PIN}<span>${esc(c.address)}</span></div>

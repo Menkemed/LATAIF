@@ -26,7 +26,6 @@ import { useRepairStore } from '@/stores/repairStore';
 import type { PaymentMethod } from '@/core/models/types';
 import { buildInvoiceA5Data, invoiceCompany, printInvoiceA5 } from '@/core/pdf/invoice-a5';
 import { invoiceA5Logos } from '@/core/pdf/invoice-a5-logos';
-import { useAuthStore } from '@/stores/authStore';
 import { getProductSpecs } from '@/core/utils/product-format';
 import { usePermission } from '@/hooks/usePermission';
 import logoUrl from '@/assets/logo.png';
@@ -463,7 +462,6 @@ export function InvoiceDetail() {
       products,
       paymentMethods: getInvoicePayments(invoice.id).map((p) => p.method),
       salesperson: employees.find((e) => e.id === invoice.staffId)?.name,
-      branch: useAuthStore.getState().session?.branch.name,
       logos: invoiceA5Logos(),
     }));
   }

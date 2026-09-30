@@ -51,7 +51,7 @@ ok(S(lineDetails(products[0])) === S(['Ref: 16233', 'Serial: W123456', 'Conditio
 
 const firma = invoiceCompany(() => '');
 const basis = {
-  company: firma, products, paymentMethods: [] as string[], salesperson: 'Sara', branch: 'Manama',
+  company: firma, products, paymentMethods: [] as string[], salesperson: 'Sara',
   customer: { firstName: 'Ali', lastName: 'Hassan', personalId: '880101234', phone: '+973 3600 0101', vatAccountNumber: '', company: '' },
 };
 const margin = buildInvoiceA5Data({ ...basis, invoice: { number: 'B0712', status: 'FINAL', issuedAt: '2026-08-31', grossAmount: 9500, paidAmount: 0,
@@ -66,7 +66,7 @@ ok(margin.subtotal === 9500 && margin.vatTotal === 0 && margin.grandTotal === 95
   && margin.amountInWords === 'Bahrain Dinars Nine Thousand Five Hundred Only', 'MARGIN Summen wie die Vorlage: Subtotal = Grand Total, VAT (0%)');
 ok(margin.lines[1].description === 'Ring · 18K White · 4.20 g', `MARGIN Gold ohne Marke/Modell: der eine Anzeigename (${margin.lines[1].description})`);
 ok(S(margin.customer) === S([['Name', 'Ali Hassan'], ['ID/CR', '880101234'], ['Mobile', '+973 3600 0101']])
-  && S(margin.invoice) === S([['Invoice No.', 'B0712'], ['Date', '31-Aug-26'], ['Payment Mode', 'Credit'], ['Salesperson', 'Sara'], ['Branch', 'Manama']]),
+  && S(margin.invoice) === S([['Invoice No.', 'B0712'], ['Date', '31-Aug-26'], ['Payment Mode', 'Credit'], ['Salesperson', 'Sara']]) && !S(margin).includes('Branch') && !S(margin).includes('Address'),
   `KOPF Kunde nur mit vorhandenen Angaben; Rechnungsangaben vollständig (${S(margin.customer)})`);
 
 const gemischt = buildInvoiceA5Data({ ...basis, paymentMethods: ['cash'], invoice: { number: 'B0713', status: 'PARTIAL', issuedAt: '2026-09-30', grossAmount: 6600.5, paidAmount: 2000,
@@ -93,6 +93,8 @@ ok(ohneMargin.title === 'PROFORMA INVOICE' && !ohneMargin.marginNotice && ohneMa
   ok(['Item Description', 'Qty', 'Rate<span>(BHD)</span>', 'VAT<span>%</span>', 'VAT Amount<span>(BHD)</span>', 'Amount<span>(BHD)</span>', 'Customer Details', 'Invoice Details',
     'Amount in Words :', 'Subtotal', 'Grand Total', 'VAT HAS BEEN IMPOSED USING THE PROFIT MARGIN SCHEME', 'Terms &amp; Conditions:', 'Customer’s Signature', 'Authorised Signatory']
     .every((t) => h.includes(t)), 'HTML alle Teile der Vorlage: Spalten, Kunde/Rechnung, Worte, Summen, Hinweis, Bedingungen, Unterschriften');
+  ok(h.includes('<div><span class="sl"></span>Customer’s Signature</div>') && h.includes('<div><span class="sl"></span>Authorised Signatory</div>'),
+    'HTML Unterschriften: erst der Strich, darunter die Beschriftung');
   ok(h.includes('LATAIF JEWELLERY <small>W.L.L.</small>') && h.includes('مجوهرات لطائف ذ.م.م') && h.includes('<bdi dir="ltr">137216-1</bdi>')
     && h.includes('<bdi dir="ltr">220015625500002</bdi>') && h.includes('lataifwll@gmail.com'), 'HTML Kopf Englisch/Arabisch, Nummern im arabischen Teil nicht gespiegelt, Fußzeile');
   ok(h.includes('<b>CR No.:</b> 137216-1') && h.includes('<b>VAT No.:</b> 220015625500002')
