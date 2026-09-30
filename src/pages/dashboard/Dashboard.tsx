@@ -703,7 +703,8 @@ export function Dashboard() {
             <KPICard label="CASH" value={fmt(accountBalances.cash)} unit="BHD" icon={<Wallet size={16} />} accent="green" onClick={() => navigate('/banking')} />
             <KPICard label="BANK" value={fmt(accountBalances.bank)} unit="BHD" icon={<Landmark size={16} />} accent="blue" onClick={() => navigate('/banking')} />
             <KPICard label="BENEFIT" value={fmt(accountBalances.benefit)} unit="BHD" icon={<Smartphone size={16} />} accent="orange" onClick={() => navigate('/banking')} />
-            <KPICard label="RECEIVABLES"
+            {/* Die Hauptzahl ist die KUNDENforderung (Hauptbuch); Reparaturen und Partner stehen getrennt daneben. */}
+            <KPICard label="CUSTOMER RECEIVABLES"
               value={fmt(customerReceivables)}
               unit={'BHD · invoices & approvals'
                 + (repairsOpen > 0 ? ` · +${fmt(repairsOpen)} repairs` : '')
