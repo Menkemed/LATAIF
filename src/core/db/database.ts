@@ -2441,6 +2441,9 @@ function runMigrations(database: Database): void {
     // Abschnitt und Lieferantenrückgabe einer Partnerbuchung (SUPPLIER_RETURN, TAKEOVER, Abrechnungen).
     `ALTER TABLE item_partner_movements ADD COLUMN epoch_id TEXT`,
     `ALTER TABLE item_partner_movements ADD COLUMN purchase_return_id TEXT`,
+    // ORDER-DATE — das Datum des Auftrags (JJJJ-MM-TT), in der Maske wählbar. Leer bei alten Aufträgen:
+    // dort gilt weiter der Tag der Erfassung (`created_at`).
+    `ALTER TABLE orders ADD COLUMN order_date TEXT`,
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_item_partner_profit_share ON item_partner_movements(invoice_line_id, partner_id)
        WHERE kind = 'PROFIT_SHARE' AND cancelled_at IS NULL`,
   ];

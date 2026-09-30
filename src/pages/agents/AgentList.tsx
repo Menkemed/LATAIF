@@ -7,6 +7,7 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { todayIso, latestBusinessDate } from '@/core/utils/business-date';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { PhoneInput } from '@/components/ui/PhoneInput';
 import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBanner';
@@ -42,6 +43,8 @@ interface NewTransferForm {
   productId?: string;
   ourPrice?: number;
   returnBy?: string;
+  /** BUSINESS-DATE — Tag der Übergabe (leer = heute). */
+  transferredAt?: string;
   notes?: string;
   staffId?: string;
   // v0.7.22 — Abrechnungsmodell: 'full' (Kunde schuldet vollen Betrag) vs.
@@ -441,6 +444,12 @@ export function AgentList() {
               </div>
             </div>
           )}
+
+          {/* BUSINESS-DATE — der Tag der Übergabe ist wählbar (nachträglich erfasst); vorbelegt mit heute. */}
+          <div data-transfer-date>
+            <Input label="TRANSFER DATE" type="date" value={transferForm.transferredAt || todayIso()} max={latestBusinessDate()}
+              onChange={e => setTransferForm({ ...transferForm, transferredAt: e.target.value || undefined })} />
+          </div>
 
           <Input label="RETURN BY (DATE)" type="date" value={transferForm.returnBy || ''} onChange={e => setTransferForm({ ...transferForm, returnBy: e.target.value })} />
 

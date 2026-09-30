@@ -54,6 +54,16 @@
   function rpFillForm(v) {
     for (const k in RP_INPUTS) $(RP_INPUTS[k]).value = (v && v[k] !== null && v[k] !== undefined) ? String(v[k]) : '';
   }
+  /**
+   * BUSINESS-DATE — der Tag der Annahme. Beim Erfassen heute vorbelegt und waehlbar (rueckdatierbar,
+   * nicht in der Zukunft); an einer bestehenden Reparatur nur Auskunft — geaendert wird er nicht.
+   */
+  function rpReceivedDate(wert, waehlbar) {
+    const feld = $('rpReceivedDate');
+    feld.max = MobileBusinessDate.latestBusinessDate();
+    feld.value = waehlbar ? MobileBusinessDate.todayIso() : String(wert || '').slice(0, 10);
+    feld.disabled = !waehlbar;
+  }
   function rpSay(id, text, good) {
     const el2 = $(id);
     // Eine Meldung, die ins Leere geht, waere die schlimmste Sorte Fehler: der Benutzer haelt ein
@@ -314,6 +324,7 @@
     if (!RP.slots.length) RP.slots = (rep.images || []).map((src) => ({ keep: '', src: src, legacy: true }));
     void rpMalGespeicherteBilder();
     rpFillForm(rep);
+    rpReceivedDate(rep.receivedAt, false);
     if (getippt) {
       // Nur die Felder zurueckholen, die gegenueber dem ZULETZT GELESENEN Stand getippt waren — der
       // Rest kommt frisch vom Primary (er hat vielleicht gerechnet, etwa Kosten und Marge).
@@ -574,6 +585,7 @@
     RP.draftKey = uuid();
     rpSetCustomer(null, '');
     rpFillForm({});
+    rpReceivedDate('', true);
     $('rpHeadline').textContent = 'New Repair Intake';
     $('rpSubline').textContent = 'Customer item handed in for repair';
     $('rpCustomerCard').classList.remove('hidden');
@@ -613,6 +625,9 @@
     const form = rpFormValues();
     if (!MobileRepair.textOrNull(form.issueDescription)) { rpSay('rpError', 'Please describe the issue.'); return; }
     if (RP.mode === 'create' && !RP.customer) { rpSay('rpError', 'Please choose or create a customer.'); return; }
+    // BUSINESS-DATE — dieselbe Regel wie am Primary; ein leeres Feld heisst heute, und der Tag steht im Auftrag.
+    const annahme = RP.mode === 'create' ? MobileBusinessDate.pickDate($('rpReceivedDate').value, 'Received date') : null;
+    if (annahme && !annahme.ok) { rpSay('rpError', annahme.message + '.'); return; }
     RP.busy = true;
     $('rpSaveBtn').disabled = true;
     $('rpSaveBtn').textContent = 'Saving…';
@@ -622,7 +637,7 @@
       let r;
       if (RP.mode === 'create') {
         const body = MobileRepair.createBody(
-          Object.assign({}, form, { customerId: RP.customer.id }),
+          Object.assign({}, form, { customerId: RP.customer.id, receivedAt: annahme.date }),
           RP.slots.map((s) => s.stagingId).filter(Boolean),
         );
         r = await rpClient.mutate('create:' + RP.draftKey, 'repairs.create', body);

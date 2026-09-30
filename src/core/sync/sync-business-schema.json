@@ -819,6 +819,7 @@
         "invoice_id",
         "labor_cost",
         "notes",
+        "order_date",
         "order_number",
         "payment_method",
         "product_id",

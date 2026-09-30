@@ -293,6 +293,7 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
 window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), r##";
 "##, include_str!("mobile_display_name.js"), r##"
 "##, include_str!("mobile_stones.js"), r##"
+"##, include_str!("mobile_business_date.js"), r##"
 "##, include_str!("mobile_upload_queue.js"), r##"
 "##, include_str!("mobile_repair_commands.js"), r##"
 "##, include_str!("mobile_consignment_commands.js"), r##"

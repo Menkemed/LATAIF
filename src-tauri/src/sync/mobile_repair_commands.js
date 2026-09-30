@@ -32,6 +32,9 @@
   const CREATE_FIELDS = [
     'customerId', 'itemBrand', 'itemModel', 'itemReference', 'itemSerial', 'itemDescription',
     'issueDescription', 'notes', 'estimatedCost', 'chargeToCustomer', 'estimatedReady',
+    // BUSINESS-DATE — der Tag der Annahme (JJJJ-MM-TT). Die Maske schreibt ihn IMMER aus, auch „heute":
+    // der Rumpf liegt mit seiner Kennung in der Ablage, eine Wiederholung traegt also denselben Tag.
+    'receivedAt',
   ];
 
   // Und die Felder einer Aenderung (Teilmenge von REPAIR_EDIT_INPUTS). Der Primary mischt sie

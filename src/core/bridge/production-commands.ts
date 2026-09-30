@@ -57,9 +57,9 @@ const FORBIDDEN = [
   'id', 'branchId', 'tenantId', 'userId', 'createdBy', 'created_by', 'actor', 'createdAt', 'updatedAt',
   'revision', 'status',
 ];
-/** Was das Haus rechnet oder vergibt — Beleg, Datum, Summen, Buchung. */
+/** Was das Haus rechnet oder vergibt — Beleg, Summen, Buchung. (Das Datum der Fertigung wählt der Mensch.) */
 const COMPUTED = [
-  'recordId', 'recordNumber', 'productionDate', 'totalValue', 'totalCost', 'inputValue', 'inputValues',
+  'recordId', 'recordNumber', 'totalValue', 'totalCost', 'inputValue', 'inputValues',
   'outputValue', 'inputs', 'completedAt', 'ledger', 'entries', 'account', 'debit', 'credit', 'expenseId',
 ];
 /** Was je Ausgang der Vorgang festlegt — die Maske bietet es nicht an. */
@@ -96,7 +96,7 @@ export interface ProductionCreateRequest {
 
 export function parseProductionCreate(raw: unknown): ProductionCreateRequest {
   if (!isPlain(raw)) throw new ProductionPayloadError('payload must be an object');
-  strict(raw, ['inputProductIds', 'outputs', 'laborCost', 'overheadCost', 'notes'], [...FORBIDDEN, ...COMPUTED], '');
+  strict(raw, ['inputProductIds', 'outputs', 'laborCost', 'overheadCost', 'notes', 'productionDate'], [...FORBIDDEN, ...COMPUTED], '');
 
   const ids = raw.inputProductIds;
   if (!Array.isArray(ids) || ids.length === 0) throw new ProductionPayloadError('inputProductIds: select at least one input product');
@@ -145,6 +145,10 @@ export function parseProductionCreate(raw: unknown): ProductionCreateRequest {
   if (raw.notes !== undefined && raw.notes !== null && typeof raw.notes !== 'string') {
     throw new ProductionPayloadError('notes must be text');
   }
+  // BUSINESS-DATE — der Tag der Fertigung; ob er gilt (echter Tag, nicht künftig), prüft das Haus.
+  if (raw.productionDate !== undefined && raw.productionDate !== null && typeof raw.productionDate !== 'string') {
+    throw new ProductionPayloadError('productionDate must be text');
+  }
   return {
     input: {
       inputProductIds: ids as string[],
@@ -152,6 +156,7 @@ export function parseProductionCreate(raw: unknown): ProductionCreateRequest {
       laborCost: amount(raw.laborCost, 'laborCost'),
       overheadCost: amount(raw.overheadCost, 'overheadCost'),
       notes: (raw.notes as string | undefined) || undefined,
+      productionDate: (raw.productionDate as string | undefined) || undefined,
     },
     staging,
   };

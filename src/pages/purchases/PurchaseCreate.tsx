@@ -25,6 +25,7 @@ import { useProductStore } from '@/stores/productStore';
 import { StaffSelect } from '@/components/employees/StaffSelect';
 import type { Product, Supplier } from '@/core/models/types';
 import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
+import { latestBusinessDate } from '@/core/utils/business-date';
 // CENTRAL-UI-PARITY R2D — die Vorlage kommt aus der gemeinsamen Ladefunktion.
 import { useSharedRead } from '@/core/data/shared-read';
 import { purchaseCreatePrefillFor, type PurchaseCreatePrefill } from '@/core/data/page-reads';
@@ -427,7 +428,7 @@ export function PurchaseCreate() {
                 onChange={setSupplierId}
               />
             </div>
-            <Input required label="PURCHASE DATE" type="date"
+            <Input required label="PURCHASE DATE" type="date" max={latestBusinessDate()}
               value={purchaseDate} onChange={e => setPurchaseDate(e.target.value)} />
           </div>
           {supplier && (

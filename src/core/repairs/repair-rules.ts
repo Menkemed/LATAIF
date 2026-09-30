@@ -25,6 +25,7 @@ import { CARD_BRANDS } from '@/core/finance/card-fees';
 import { REPAIR_FIELDS } from '@/core/models/repair-fields';
 import { internalCostOnCreate, internalCostOnEdit, repairMargin } from './repair-cost';
 import { normalizeStoneAttributes } from '@/core/products/stones';
+import { businessDateIssue } from '@/core/utils/business-date';
 
 /** Höchstens so viele Fotos je Reparatur — dieselbe Zahl, die die Bildauswahl beider Masken zeigt. */
 export const REPAIR_MAX_PHOTOS = 6;
@@ -147,6 +148,8 @@ export interface RepairCreateInput {
   chargeToCustomer?: number;
   taxScheme: RepairTaxScheme;
   estimatedReady?: string;
+  /** BUSINESS-DATE — der Tag der Annahme (JJJJ-MM-TT), in der Maske wählbar; ohne Angabe heute. */
+  receivedAt?: string;
   staffId?: string;
   notes?: string;
 }
@@ -172,6 +175,9 @@ export function normalizeRepairCreate(form: Partial<Repair>): RepairCreateInput 
     taxScheme = form.taxScheme;
   }
   const item = (v: unknown): string | undefined => (own ? undefined : repairText(v));
+  const receivedAt = repairText(form.receivedAt);
+  const datum = businessDateIssue(receivedAt, 'Received date');
+  if (datum) throw new RepairActionRejected('INVALID_DATE', datum);
   return {
     repairScope: own ? 'OWN' : 'CUSTOMER',
     customerId: own ? undefined : repairText(form.customerId),
@@ -192,6 +198,7 @@ export function normalizeRepairCreate(form: Partial<Repair>): RepairCreateInput 
     chargeToCustomer: own ? undefined : (money(form.chargeToCustomer, 'chargeToCustomer') || undefined),
     taxScheme,
     estimatedReady: repairText(form.estimatedReady),
+    receivedAt,
     staffId: repairText(form.staffId),
     notes: repairText(form.notes),
   };
@@ -282,6 +289,7 @@ export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort
       : internalCostOnCreate(input),
     chargeToCustomer: input.chargeToCustomer,
     estimatedReady: input.estimatedReady,
+    receivedAt: input.receivedAt,
     staffId: input.staffId,
     notes: input.notes,
   };
@@ -297,7 +305,7 @@ export function repairCreateBody(form: Partial<Repair>, stagingIds: readonly str
   for (const k of [
     'customerId', 'productId', 'lotId', 'itemCategoryId', 'itemBrand', 'itemModel', 'itemReference',
     'itemSerial', 'itemDescription', 'workshopSupplierId', 'estimatedCost', 'internalCost',
-    'chargeToCustomer', 'estimatedReady', 'staffId', 'notes',
+    'chargeToCustomer', 'estimatedReady', 'receivedAt', 'staffId', 'notes',
   ] as const) {
     if (i[k] !== undefined) body[k] = i[k];
   }

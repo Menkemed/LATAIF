@@ -329,7 +329,7 @@ export function globalSearchFor(
 
         // Orders
         const ordrs = query(
-          `SELECT id, order_number, agreed_price, created_at, status FROM orders
+          `SELECT id, order_number, agreed_price, created_at, order_date, status FROM orders
            WHERE branch_id = ? AND order_number LIKE ?${dateFilter('created_at').where} LIMIT 3`,
           [branchId, term, ...dateFilter('created_at').args]
         );
@@ -341,7 +341,8 @@ export function globalSearchFor(
             subtitle: `Order · ${o.status || ''}`,
             link: `/orders/${o.id}`,
             amount: o.agreed_price as number,
-            date: o.created_at as string,
+            // ORDER-DATE — das gewählte Auftragsdatum, bei alten Aufträgen der Tag der Erfassung.
+            date: (o.order_date as string) || (o.created_at as string),
           });
         }
       }

@@ -18,6 +18,7 @@ import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { orderPaidTotalsFor } from '@/core/data/page-reads';
+import { orderDateOf } from '@/core/orders/order-edit';
 
 function fmtDate(iso?: string): string {
   if (!iso) return '—';
@@ -245,7 +246,7 @@ export function OrderList() {
           >
             {/* Date */}
             <span style={{ fontSize: 12, color: '#4B5563', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-              {fmtDate(order.createdAt)}
+              {fmtDate(orderDateOf(order))}
             </span>
 
             {/* Order Number + v0.6.9 Need-to-Order Indikator */}

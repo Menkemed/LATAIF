@@ -9,10 +9,10 @@
 // Der durable Auftraggeber wird NICHT noch einmal gebaut: `MobileRepair.createClient` (Kennung vor
 // dem Senden abgelegt, Wiederholung unter derselben Kennung, Klaerung) — wie bei der Kommission.
 (function (root, factory) {
-  const api = factory(root && root.MobileRepair, root && root.MobileDisplayName);
+  const api = factory(root && root.MobileRepair, root && root.MobileDisplayName, root && root.MobileBusinessDate);
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
   else root.MobilePurchase = api;
-}(typeof self !== 'undefined' ? self : this, function (MR, MDN) {
+}(typeof self !== 'undefined' ? self : this, function (MR, MDN, MBD) {
   'use strict';
 
   const textOrNull = MR.textOrNull;
@@ -146,7 +146,14 @@
       const p = s.person || {};
       if (!textOrNull(p.firstName) && !textOrNull(p.lastName)) out.push(issue('SUPPLIER_REQUIRED', 'A new person needs a name.', 'supplier'));
     }
-    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(draft.purchaseDate || ''))) out.push(issue('DATE_REQUIRED', 'Enter the purchase date.', 'details'));
+    // BUSINESS-DATE — dieselbe Regel wie am Primary: ein echter Tag, nicht in der Zukunft. Der Entwurf
+    // traegt IMMER einen ausgeschriebenen Tag — „heute" wird beim Anlegen des Entwurfs gesetzt, nie erst
+    // beim Senden.
+    if (!textOrNull(draft.purchaseDate)) out.push(issue('DATE_REQUIRED', 'Enter the purchase date.', 'details'));
+    else {
+      const datum = MBD.businessDateIssue(draft.purchaseDate, 'Purchase date', o.nowMs);
+      if (datum) out.push(issue('DATE_INVALID', datum + '.', 'details'));
+    }
     if (TAX_SCHEMES.indexOf(draft.taxScheme) < 0) out.push(issue('TAX_SCHEME_INVALID', 'Choose the input VAT.', 'details'));
     if (!draft.items.length) out.push(issue('LINES_REQUIRED', 'Add at least one item.', 'items'));
     if (draft.items.length > MAX_ITEMS) out.push(issue('TOO_MANY_LINES', 'At most ' + MAX_ITEMS + ' items per purchase.', 'items'));
@@ -195,8 +202,8 @@
    * Primary gerechnet) — dieselben Bytes ergeben dieselbe Kennung, also denselben Rumpf bei jeder
    * Wiederholung. Bytes reisen nie im Auftrag.
    */
-  function buildBody(draft, stagingIdsFor) {
-    const probleme = validate(draft);
+  function buildBody(draft, stagingIdsFor, opts) {
+    const probleme = validate(draft, opts);
     if (probleme.length) return { ok: false, code: probleme[0].code, issues: probleme };
     const s = draft.supplier;
     const body = { purchaseDate: draft.purchaseDate, taxScheme: draft.taxScheme };

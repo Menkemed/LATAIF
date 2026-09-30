@@ -942,5 +942,58 @@ marker('CENTRAL_UI_R6F_CONSIGNMENT_CLIENT_PROVED');
 marker('CENTRAL_UI_R6F_CONSIGNMENT_UI_PROVED');
 marker('CENTRAL_UI_R6F_CONSIGNMENT_CANCEL_SALE_ATOMIC_PROVED');
 
+// ── BUSINESS-DATE — der Tag der Vereinbarung ist wählbar (nachträglich erfasste Kommission) ──
+{
+  const heute = new Date().toISOString().split('T')[0];
+  const db = freshDb();
+  const mit = await kommission(db, { ...CONSIGN, agreementDate: '2026-08-15' });
+  ok(s(db, 'SELECT agreement_date FROM consignments WHERE id = ?', [mit]) === '2026-08-15', 'DATUM Kommission rückwirkend: Vereinbarung am gewählten Tag');
+  const ohne = await kommission(db, { ...CONSIGN, product: { ...CONSIGN.product, name: 'Aquanaut' } });
+  ok(s(db, 'SELECT agreement_date FROM consignments WHERE id = ?', [ohne]) === heute, 'DATUM ohne Wahl: Vereinbarung heute (wie bisher)');
+  const vor = n(db, 'SELECT COUNT(*) FROM consignments');
+  const zukunft = await fern(() => cmd.runConsignmentCreate(deps(db), identity(nx(), 'consignments.create'),
+    { ...CONSIGN, product: { ...CONSIGN.product, name: 'Calatrava' }, agreementDate: '2099-01-01' }));
+  ok(!zukunft.ok && zukunft.code === 'INVALID_DATE' && n(db, 'SELECT COUNT(*) FROM consignments') === vor
+    && n(db, "SELECT COUNT(*) FROM products WHERE name = 'Calatrava'") === 0, `DATUM Zukunft → abgewiesen, weder Kommission noch Artikel (${zukunft.code})`);
+  const createSrc = src('src/core/consignment/consignment-create.ts');
+  ok(/if \(input\.agreementDate\) body\.agreementDate = input\.agreementDate;/.test(createSrc)
+    && /label="AGREEMENT DATE" type="date"/.test(src('src/pages/consignments/ConsignmentList.tsx')), 'DATUM Maske und Rumpf: „Agreement date" ist wählbar und reist mit');
+}
+
+// ── BUSINESS-DATE (Telefon) — der Rumpf, den das Telefon baut, legt die Vereinbarung am gewählten Tag an ──
+{
+  const telefon: Record<string, unknown> = {};
+  for (const f of ['mobile_business_date.js', 'mobile_repair_commands.js', 'mobile_consignment_commands.js']) new Function('self', src('src-tauri/src/sync/' + f))(telefon);
+  const MBD = telefon.MobileBusinessDate as { pickDate(v: unknown, label: string, nowMs?: number): { ok: boolean; date?: string; message?: string } };
+  const MC = telefon.MobileConsignment as { createBody(f: Record<string, unknown>, ids?: string[]): { ok: boolean; body: Record<string, unknown> } };
+  const heute = new Date().toISOString().split('T')[0];
+  const form = (name: string) => ({ consignorId: 'cust-1', categoryId: 'cat-w', brand: 'Patek', name, agreedPrice: '1000', payoutModel: 'percent', commissionRate: '20' });
+  const db = freshDb();
+
+  const alt = MC.createBody({ ...form('Telefon A'), agreementDate: MBD.pickDate('2026-08-15', 'Agreement date').date });
+  const kennung = nx();
+  const a = await fern(() => cmd.runConsignmentCreate(deps(db), identity(kennung, 'consignments.create'), alt.body));
+  ok(alt.ok && alt.body.agreementDate === '2026-08-15' && a.ok && s(db, 'SELECT agreement_date FROM consignments WHERE id = ?', [String(a.value.consignmentId)]) === '2026-08-15',
+    `DATUM Telefon rückdatiert: die Vereinbarung steht am Primary am gewählten Tag (${a.code || 'ok'})`);
+  // Dieselbe Kennung noch einmal (Klärung nach verlorener Antwort): keine zweite Kommission, derselbe Tag.
+  const vor = n(db, 'SELECT COUNT(*) FROM consignments');
+  const nochmal = await fern(() => cmd.runConsignmentCreate(deps(db), identity(kennung, 'consignments.create'), alt.body));
+  ok(nochmal.ok && nochmal.replayed && n(db, 'SELECT COUNT(*) FROM consignments') === vor
+    && s(db, 'SELECT agreement_date FROM consignments WHERE id = ?', [String(a.value.consignmentId)]) === '2026-08-15',
+    'DATUM Telefon Wiederholung unter derselben Kennung: eine Kommission, das Datum bleibt');
+
+  const jetzt = MC.createBody({ ...form('Telefon B'), agreementDate: MBD.pickDate('', 'Agreement date').date });
+  const h = await fern(() => cmd.runConsignmentCreate(deps(db), identity(nx(), 'consignments.create'), jetzt.body));
+  ok(jetzt.body.agreementDate === heute && h.ok && s(db, 'SELECT agreement_date FROM consignments WHERE id = ?', [String(h.value.consignmentId)]) === heute,
+    `DATUM Telefon Vorgabe heute: ausgeschrieben im Auftrag, Vereinbarung heute (${h.code || 'ok'})`);
+
+  const stand = n(db, 'SELECT COUNT(*) FROM consignments');
+  const zukunft = await fern(() => cmd.runConsignmentCreate(deps(db), identity(nx(), 'consignments.create'),
+    MC.createBody({ ...form('Telefon C'), agreementDate: '2099-01-01' }).body));
+  ok(MBD.pickDate('2099-01-01', 'Agreement date').ok === false && !zukunft.ok && zukunft.code === 'INVALID_DATE'
+    && n(db, 'SELECT COUNT(*) FROM consignments') === stand && n(db, "SELECT COUNT(*) FROM products WHERE name = 'Telefon C'") === 0,
+    `DATUM Telefon Zukunft: die Maske schickt nichts, und der Primary weist es trotzdem ab (${zukunft.code})`);
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r6f consignment after the sale: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }

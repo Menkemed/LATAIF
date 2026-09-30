@@ -18,6 +18,7 @@ import {
   type EmbeddedProductPort,
 } from '@/core/products/embedded-product';
 import { productDisplayName } from '../products/display-name.ts';
+import { businessDateIssue } from '../utils/business-date.ts';
 
 /** Ein Nein der geteilten Regeln — am Primary eine Absage der Maske, fern ein eingefrorenes Urteil. */
 export class OrderActionRejected extends Error {
@@ -91,6 +92,8 @@ export interface OrderCreateInput {
   cardBrand: string;
   fullyPaid: boolean;
   expectedDelivery: string;
+  /** Datum des Auftrags (JJJJ-MM-TT). Leer/fehlend = heute — so bleibt ein älterer zweiter Rechner gültig. */
+  orderDate?: string;
   status: OrderStatus;
   notes: string;
 }
@@ -139,9 +142,15 @@ export function orderCreateInput(f: OrderCreateFormState): OrderCreateInput {
     cardBrand: f.cardBrand,
     fullyPaid: f.fullyPaid,
     expectedDelivery: f.expectedDelivery,
+    orderDate: f.orderDate || undefined,
     status: f.status,
     notes: f.notes,
   };
+}
+
+/** ORDER-DATE — das Auftragsdatum der Maske: die EINE Regel für fachliche Daten (core/utils/business-date). */
+export function orderDateIssue(value: string | undefined | null, nowMs: number = Date.now()): string | null {
+  return businessDateIssue(value, 'Order date', nowMs);
 }
 
 const wants = (t: OrderType) => ({ product: t === 'normal' || t === 'mixed', custom: t === 'custom' || t === 'mixed' });
@@ -150,6 +159,8 @@ const hatProdukt = (l: OrderDraftLine): boolean => !!(l.productId || l.newProduc
 /** Die Prüfung der Maske — wortgleich, damit beide Rechner dasselbe sagen. */
 export function validateOrderCreate(input: OrderCreateInput): string | null {
   if (!input.customerId) return 'Please select a customer';
+  const datum = orderDateIssue(input.orderDate);
+  if (datum) return datum;
   const w = wants(input.orderType);
   const quote = input.quotedPrice;
   const spec = input.customProductSpec;
@@ -353,7 +364,9 @@ export function planOrderCreate(input: OrderCreateInput, port: OrderCreatePort):
     taxAmount: totalVat,
     depositAmount: deposit,
     depositPaid: paid,
-    depositDate: paid ? today() : undefined,
+    // ORDER-DATE — der Auftrag trägt sein gewähltes Datum; die Anzahlung beim Anlegen gehört zu diesem Tag.
+    orderDate: input.orderDate || today(),
+    depositDate: paid ? (input.orderDate || today()) : undefined,
     paymentMethod: input.paymentMethod,
     cardBrand: input.paymentMethod === 'card' ? input.cardBrand : undefined,
     fullyPaid: input.fullyPaid,
@@ -375,6 +388,8 @@ export function assertOrderCreateValues(input: OrderCreateInput): void {
   if (!(ORDER_PAYMENT_METHODS as readonly string[]).includes(input.paymentMethod)) bad(`unknown payment method: ${input.paymentMethod}`);
   if (!(CARD_BRANDS as readonly string[]).includes(input.cardBrand)) bad(`unknown card brand: ${input.cardBrand}`);
   if (!(ORDER_QUOTE_SCHEMES as readonly string[]).includes(input.customTaxScheme)) bad(`unknown tax scheme: ${input.customTaxScheme}`);
+  const datum = orderDateIssue(input.orderDate);
+  if (datum) bad(datum);
   for (const k of [input.customerGoldKarat, input.extraGoldKarat]) {
     if (!(GOLD_KARATS as readonly string[]).includes(k)) bad(`unknown karat: ${k}`);
   }

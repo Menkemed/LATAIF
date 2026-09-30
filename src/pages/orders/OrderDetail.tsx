@@ -50,7 +50,8 @@ import {
   addOrderCostOnPrimary, materialRowsFromModal, orderCostBody, orderCostRemoveBody, removeOrderCostOnPrimary,
   type OrderCostRemoveRequest, type OrderCostRequest,
 } from '@/core/gold/gold-house';
-import { orderEditBody } from '@/core/orders/order-edit';
+import { orderEditBody, orderDateOf } from '@/core/orders/order-edit';
+import { latestBusinessDate } from '@/core/utils/business-date';
 // CENTRAL-UI-PARITY R6F — Stornieren, Positionsstatus, „beim Supplier bestellt" und Positionsdialog:
 // dieselbe Hausfolge wie der Fernbefehl (am Primary in EINER Klammer, auf PC2 als Befehl).
 import {
@@ -335,7 +336,7 @@ export function OrderDetail() {
     downloadPdf({
       title: `Order Receipt — ${order.orderNumber}`,
       number: order.orderNumber,
-      date: order.createdAt?.split('T')[0] || new Date().toISOString().split('T')[0],
+      date: orderDateOf(order) || new Date().toISOString().split('T')[0],
       subtitle: 'Order confirmation / quotation',
       customer: customer
         ? { name: `${customer.firstName} ${customer.lastName}`, company: customer.company, phone: customer.phone }
@@ -1151,6 +1152,11 @@ export function OrderDetail() {
             <div style={{ marginTop: 16 }}>
               {editing ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
+                  {/* ORDER-DATE — das Datum des Auftrags ist korrigierbar; Zahlungen behalten ihr eigenes Datum. */}
+                  <div data-order-date-edit>
+                    <Input label="ORDER DATE" type="date" value={form.orderDate || orderDateOf(order)} max={latestBusinessDate()}
+                      onChange={e => setForm({ ...form, orderDate: e.target.value || undefined })} />
+                  </div>
                   <Input label="EXPECTED DELIVERY" type="date" value={form.expectedDelivery || ''} onChange={e => setForm({ ...form, expectedDelivery: e.target.value })} />
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>NOTES</span>
@@ -1165,6 +1171,7 @@ export function OrderDetail() {
                 </div>
               ) : (
                 <>
+                  {renderField('Order Date', orderDateOf(order))}
                   {renderField('Expected Delivery', order.expectedDelivery)}
                   {renderField('Actual Delivery', order.actualDelivery)}
                   {renderField('Deposit Date', order.depositDate)}

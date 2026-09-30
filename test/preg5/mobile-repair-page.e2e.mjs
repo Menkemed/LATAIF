@@ -31,6 +31,7 @@ const S = (v) => JSON.stringify(v);
 // ── Die Seite: dieselben drei Dateien, dazu die Helfer, die die echte Seite ihnen gibt ──────────
 const html = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair.html'), 'utf8');
 const commands = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_commands.js'), 'utf8');
+const datumRegel = readFileSync(join(repo, 'src-tauri/src/sync/mobile_business_date.js'), 'utf8');
 const ui = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_ui.js'), 'utf8');
 // Die Helfer sind WOERTLICH die der Seite (`mobile_page.rs`) — wer sie hier nachbaut, testet seine
 // Nachbildung. Deshalb werden sie aus der Seite geschnitten.
@@ -80,6 +81,7 @@ const UI_DATEI = `(function () {\n${ui}\n  window.__rpHomeOpen = rpHomeOpen;\n})
 
 const SEITE = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>repair page test</title></head><body>
 ${html}
+<script src="/business-date.js"></script>
 <script src="/commands.js"></script>
 <script src="/shim.js"></script>
 <script src="/ui.js"></script>
@@ -98,7 +100,7 @@ let antwortGeber = () => ({ status: 200, body: { ok: true, value: {} } });
 const gesehen = [];
 const server = createServer((req, res) => {
   if (req.method === 'GET') {
-    const js = { '/commands.js': commands, '/shim.js': SHIM, '/ui.js': UI_DATEI }[req.url];
+    const js = { '/business-date.js': datumRegel, '/commands.js': commands, '/shim.js': SHIM, '/ui.js': UI_DATEI }[req.url];
     if (js !== undefined) {
       res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
       res.end(js);
@@ -188,7 +190,7 @@ try {
     if (op === 'customers.create') return { status: 200, body: { ok: true, value: { customerId: 'c1', name: 'Mo Kunde' } } };
     if (op === 'repairs.create') return { status: 200, body: { ok: true, value: { repairId: 'rep-1', repairNumber: 'REP-2026-00042' } } };
     if (op === 'repairs.get') {
-      return { status: 200, body: { ok: true, value: { id: 'rep-1', repairNumber: 'REP-2026-00042', revision: 1, status: 'received', issueDescription: 'Krone lose', notes: '', repairType: 'internal', actualCost: null, chargeToCustomer: null, images: [], lines: [], openLineTotal: 0, allowedStatusTargets: ['diagnosed'] } } };
+      return { status: 200, body: { ok: true, value: { id: 'rep-1', repairNumber: 'REP-2026-00042', revision: 1, status: 'received', issueDescription: 'Krone lose', notes: '', repairType: 'internal', actualCost: null, chargeToCustomer: null, receivedAt: '2026-08-15T12:00:00.000Z', images: [], lines: [], openLineTotal: 0, allowedStatusTargets: ['diagnosed'] } } };
     }
     return { status: 200, body: { ok: true, value: { items: [] } } };
   };
@@ -198,6 +200,17 @@ try {
   await sleep(800);
   const kundeOk = await c.ev("return !document.getElementById('rpCustomerPicked').classList.contains('hidden');");
   ok(kundeOk, 'der Kunde wird angelegt und gewaehlt');
+
+  // BUSINESS-DATE — „Received Date": heute vorbelegt, Zukunft geht nicht hinaus, rückdatiert reist mit.
+  const heute = new Date().toISOString().split('T')[0];
+  const morgen = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+  const annahme = await c.ev("const e = document.getElementById('rpReceivedDate'); return { value: e.value, max: e.max, disabled: e.disabled, sichtbar: e.offsetParent !== null };");
+  ok(annahme.value === heute && annahme.max === morgen && !annahme.disabled && annahme.sichtbar,
+    `§1 DATUM „Received Date" heute vorbelegt, spaetester Tag morgen, waehlbar (${S(annahme)})`);
+  await c.ev("document.getElementById('rpIssue').value='Krone lose'; document.getElementById('rpReceivedDate').value='2099-01-01'; document.getElementById('rpSaveBtn').click(); await new Promise((r) => setTimeout(r, 500)); return 1;");
+  ok(/Received date cannot be in the future/.test(await c.ev("return document.getElementById('rpError').textContent;"))
+    && gesehen.filter((g) => g.body && g.body.op === 'repairs.create').length === 0, '§1 DATUM Zukunft: kein Auftrag, Grund in Worten');
+  await c.ev("document.getElementById('rpReceivedDate').value='2026-08-15'; return 1;");
 
   await c.ev("document.getElementById('rpIssue').value='Krone lose'; document.getElementById('rpSaveBtn').click(); return 1;");
   for (let i = 0; i < 40; i++) {
@@ -223,6 +236,9 @@ try {
   const create = gesehen.filter((g) => g.body && g.body.op === 'repairs.create');
   ok(create.length === 1, `§1 genau EIN Anlagebefehl (${create.length})`);
   ok(create[0] && !/data:/.test(JSON.stringify(create[0].body)), '§1 im Befehl reisen KEINE Bildbytes');
+  ok(create[0] && create[0].body.payload.receivedAt === '2026-08-15', `§1 DATUM der Auftrag traegt den gewaehlten Tag (${create[0] && create[0].body.payload.receivedAt})`);
+  const annahmeDanach = await c.ev("const e = document.getElementById('rpReceivedDate'); return { value: e.value, disabled: e.disabled };");
+  ok(annahmeDanach.value === '2026-08-15' && annahmeDanach.disabled === true, `§1 DATUM an der gespeicherten Reparatur nur Auskunft (${S(annahmeDanach)})`);
 
   // ── §2 Aendern: Rueckmeldung und Fassung ─────────────────────────────────────────────────────
   gesehen.length = 0;
@@ -310,8 +326,12 @@ try {
   ok(z3.sichtbar, `§3 die Aenderung mit Foto wird bestaetigt (${S(z3.erfolg)} / Fehler ${S(z3.fehler)})`);
   ok(up3.length === 1 && !("repairType" in up3[0].body.payload) && !("actualCost" in up3[0].body.payload) && !("chargeToCustomer" in up3[0].body.payload),
     `§3 kein Feld im Rumpf, das die Maske nicht zeigt (${S(up3[0] && Object.keys(up3[0].body.payload))})`);
-  ok(up3.length === 1 && S(up3[0].body.payload.photos) === S([{ keep: 0 }, { stagingId: 'c'.repeat(64) }]),
-    `§3 der Bildplan ist {keep:0} + neue Kennung (${S(up3[0] && up3[0].body.payload.photos)})`);
+  // Das gespeicherte Bild dieser Auskunft ist ALTBESTAND (nur `images`, keine Medienkennung): seit
+  // MEDIA-REPAIR wird es beim ersten Speichern mit in die Ablage genommen, statt als `{keep:0}` auf
+  // die alte Bildspalte zu zeigen. Der Plan traegt also zwei Ablagekennungen, in der Reihenfolge der Maske.
+  ok(up3.length === 1 && S(up3[0].body.payload.photos) === S([{ stagingId: 'c'.repeat(64) }, { stagingId: 'c'.repeat(64) }])
+    && gesehen.filter((g) => /staging/.test(g.url)).length === 2,
+    `§3 der Bildplan: das Altbestandsfoto wird uebernommen, das neue haengt dahinter — zwei Ablagekennungen (${S(up3[0] && up3[0].body.payload.photos)})`);
   if (!z3.sichtbar) console.log('      (Diagnose §3) ' + S(z3.protokoll) + ' | ' + c.konsole.slice(-10).join(' ~ '));
 
   // ── §4 Werkstattwege: Arbeitszeile, Storno, Material, Gold, Rechnung ─────────────────────────

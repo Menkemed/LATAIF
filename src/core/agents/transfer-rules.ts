@@ -14,6 +14,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import type { AgentTransfer } from '@/core/models/types';
 import { DEFAULT_AGENT_SPLIT_PCT } from '@/core/agent/economics';
+import { businessDateIssue } from '@/core/utils/business-date';
 
 /** Ein Nein der geteilten Regeln — am Primary eine Absage der Maske, fern ein eingefrorenes Urteil. */
 export class TransferActionRejected extends Error {
@@ -74,6 +75,8 @@ export interface TransferCreateForm {
   productId?: string;
   ourPrice?: number;
   returnBy?: string;
+  /** BUSINESS-DATE — der Tag der Übergabe (JJJJ-MM-TT), in der Maske wählbar; ohne Angabe heute. */
+  transferredAt?: string;
   notes?: string;
   staffId?: string;
   settlementModel?: string;
@@ -87,6 +90,7 @@ export interface TransferCreateInput {
   settlementModel: TransferSettlementModel;
   excessSplitPct?: number;
   returnBy?: string;
+  transferredAt?: string;
   notes?: string;
   staffId?: string;
 }
@@ -111,9 +115,12 @@ export function normalizeTransferCreate(form: TransferCreateForm): TransferCreat
   if (!(TRANSFER_SETTLEMENT_MODELS as readonly string[]).includes(model)) {
     throw new TransferActionRejected('INVALID_SETTLEMENT_MODEL', `unknown settlement model: ${model || '(none)'}`);
   }
+  const transferredAt = text(form.transferredAt);
+  const datum = businessDateIssue(transferredAt, 'Transfer date');
+  if (datum) throw new TransferActionRejected('INVALID_DATE', datum);
   const out: TransferCreateInput = {
     customerId, productId, ourPrice: price, settlementModel: model as TransferSettlementModel,
-    returnBy: text(form.returnBy), notes: text(form.notes), staffId: text(form.staffId),
+    returnBy: text(form.returnBy), transferredAt, notes: text(form.notes), staffId: text(form.staffId),
   };
   if (model === 'split') {
     const pct = form.excessSplitPct ?? DEFAULT_AGENT_SPLIT_PCT;
@@ -168,6 +175,7 @@ export function transferCreateBody(form: TransferCreateForm): Record<string, unk
   };
   if (input.excessSplitPct !== undefined) body.excessSplitPct = input.excessSplitPct;
   if (input.returnBy) body.returnBy = input.returnBy;
+  if (input.transferredAt) body.transferredAt = input.transferredAt;
   if (input.notes) body.notes = input.notes;
   if (input.staffId) body.staffId = input.staffId;
   return body;

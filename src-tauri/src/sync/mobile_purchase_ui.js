@@ -47,7 +47,8 @@
     partners: null, results: { supplier: [], customer: [], product: {} }, issues: [],
   };
   const mpH = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
-  const mpToday = () => new Date().toISOString().split('T')[0];
+  // BUSINESS-DATE — heute als Vorgabe, dieselbe Regel wie am Rechner/Primary.
+  const mpToday = () => MobileBusinessDate.todayIso();
   const mpShort = () => uuid().replace(/-/g, '').slice(0, 10);
   const mpLocked = () => !!MP.draft && MP.draft.status !== 'draft';
 
@@ -217,7 +218,7 @@
   }
 
   function mpDetailsBody(d) {
-    return '<div class="mp-row"><label>Purchase date *</label><input type="date" data-mp-field="purchaseDate" value="' + mpH(d.purchaseDate) + '" /></div>'
+    return '<div class="mp-row"><label>Purchase date *</label><input type="date" data-mp-field="purchaseDate" max="' + MobileBusinessDate.latestBusinessDate() + '" value="' + mpH(d.purchaseDate) + '" /></div>'
       + '<div class="mp-row"><label>Input VAT</label><select data-mp-field="taxScheme">'
       + '<option value="ZERO"' + (d.taxScheme === 'ZERO' ? ' selected' : '') + '>0 % (no input VAT)</option>'
       + '<option value="VAT_10"' + (d.taxScheme === 'VAT_10' ? ' selected' : '') + '>10 % (input VAT included)</option></select>'

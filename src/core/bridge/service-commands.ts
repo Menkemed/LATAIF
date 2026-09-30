@@ -249,7 +249,7 @@ export function parseRepairCreate(raw: unknown): RepairCreateRequest {
     'repairScope', 'customerId', 'productId', 'lotId', 'itemCategoryId', 'itemAttributes',
     'itemBrand', 'itemModel', 'itemReference', 'itemSerial', 'itemDescription', 'issueDescription',
     'repairType', 'workshopSupplierId', 'estimatedCost', 'internalCost', 'chargeToCustomer',
-    'estimatedReady', 'taxScheme', 'staffId', 'notes', 'photos',
+    'estimatedReady', 'taxScheme', 'staffId', 'notes', 'photos', 'receivedAt',
   ]);
   const scope = raw.repairScope === undefined ? 'CUSTOMER' : String(raw.repairScope);
   if (scope !== 'CUSTOMER' && scope !== 'OWN') throw new ServicePayloadError(`unknown repair scope: ${scope || '(none)'}`);
@@ -277,7 +277,7 @@ export function parseRepairCreate(raw: unknown): RepairCreateRequest {
     if (raw[k] !== undefined && raw[k] !== null) money(raw[k], k);
   }
   for (const k of ['customerId', 'productId', 'lotId', 'itemCategoryId', 'itemBrand', 'itemModel',
-    'itemReference', 'itemSerial', 'itemDescription', 'workshopSupplierId', 'estimatedReady', 'staffId', 'notes'] as const) {
+    'itemReference', 'itemSerial', 'itemDescription', 'workshopSupplierId', 'estimatedReady', 'staffId', 'notes', 'receivedAt'] as const) {
     optString(raw[k], k);
   }
   if (raw.itemAttributes !== undefined) plainAttributes(raw.itemAttributes, 'itemAttributes');
@@ -503,6 +503,8 @@ export interface TransferCreateRequest {
   settlementModel: typeof TRANSFER_SETTLEMENT_MODELS[number];
   excessSplitPct?: number;
   returnBy?: string;
+  /** BUSINESS-DATE — der Tag der Übergabe; fehlt bei einem älteren zweiten Rechner: heute. */
+  transferredAt?: string;
   notes?: string;
   /** R5D — wer das Stück übergeben hat (die Mitarbeiterauswahl der Maske). */
   staffId?: string;
@@ -518,7 +520,7 @@ export interface TransferCreateRequest {
  */
 export function parseTransferCreate(raw: unknown): TransferCreateRequest {
   if (!isPlain(raw)) throw new ServicePayloadError('payload must be an object');
-  onlyKnownFields(raw, ['customerId', 'productId', 'agentPrice', 'settlementModel', 'excessSplitPct', 'returnBy', 'notes', 'staffId']);
+  onlyKnownFields(raw, ['customerId', 'productId', 'agentPrice', 'settlementModel', 'excessSplitPct', 'returnBy', 'notes', 'staffId', 'transferredAt']);
   const model = raw.settlementModel === undefined ? 'full' : String(raw.settlementModel);
   const price = raw.agentPrice;
   if (typeof price !== 'number' || !Number.isFinite(price) || price <= 0) {
@@ -539,13 +541,14 @@ export function parseTransferCreate(raw: unknown): TransferCreateRequest {
       settlementModel: model,
       excessSplitPct: raw.excessSplitPct as number | undefined,
       returnBy: optString(raw.returnBy, 'returnBy'),
+      transferredAt: optString(raw.transferredAt, 'transferredAt'),
       notes: optString(raw.notes, 'notes'),
       staffId: optString(raw.staffId, 'staffId'),
     });
     return {
       customerId: input.customerId, productId: input.productId, agentPrice: input.ourPrice,
       settlementModel: input.settlementModel, excessSplitPct: input.excessSplitPct,
-      returnBy: input.returnBy, notes: input.notes, staffId: input.staffId,
+      returnBy: input.returnBy, transferredAt: input.transferredAt, notes: input.notes, staffId: input.staffId,
     };
   } catch (e) {
     if (e instanceof TransferActionRejected) throw new ServicePayloadError(e.message);
@@ -592,6 +595,7 @@ export function runTransferCreate(deps: EngineDeps, identity: CommandIdentity, r
       productId: req.productId,
       ourPrice: req.agentPrice,
       returnBy: req.returnBy,
+      transferredAt: req.transferredAt,
       notes: req.notes,
       staffId: req.staffId,
       settlementModel: req.settlementModel,

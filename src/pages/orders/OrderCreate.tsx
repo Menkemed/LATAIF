@@ -33,6 +33,7 @@ import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { ORDER_CREATE_STATUSES, orderCreateBody, orderCreateInput, validateOrderCreate } from '@/core/orders/order-create';
+import { todayIso, latestBusinessDate } from '@/core/utils/business-date';
 import { createOrderOnPrimary } from '@/core/orders/order-house';
 import { productDisplayName } from '@/core/products/display-name';
 
@@ -158,6 +159,8 @@ export function OrderCreate() {
   const [cardBrand, setCardBrand] = useState<'normal' | 'amex'>('normal');
   const [fullyPaid, setFullyPaid] = useState(false);
   const [expectedDelivery, setExpectedDelivery] = useState('');
+  // ORDER-DATE — das Datum des Auftrags, vorbelegt mit heute; eine Anzahlung beim Anlegen trägt dasselbe Datum.
+  const [orderDate, setOrderDate] = useState(() => todayIso());
   const [status, setStatus] = useState<OrderStatus>('pending');
   const [notes, setNotes] = useState('');
   const [error, setError] = useState('');
@@ -329,7 +332,7 @@ export function OrderCreate() {
       goldsmithSupplierId, laborCost,
       extraGoldGrams, extraGoldKarat, extraGoldCost, extraGoldSupplierId,
       materialLines,
-      depositAmount, paymentMethod, cardBrand, fullyPaid, expectedDelivery, status, notes,
+      depositAmount, paymentMethod, cardBrand, fullyPaid, expectedDelivery, orderDate, status, notes,
     });
   }
 
@@ -377,7 +380,7 @@ export function OrderCreate() {
 
         {/* 1. CUSTOMER SECTION */}
         <Card>
-          <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>1 · CUSTOMER</span>
+          <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>1 · CUSTOMER &amp; ORDER DATE</span>
           <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 16, marginTop: 12 }}>
             <div>
               <SearchSelect
@@ -404,6 +407,16 @@ export function OrderCreate() {
                 )}
               </div>
             )}
+          </div>
+          {/* ORDER-DATE — wählbar (auch rückwirkend); eine Anzahlung in dieser Maske wird auf diesen Tag gebucht. */}
+          <div style={{ display: 'grid', gridTemplateColumns: '220px 1fr', gap: 16, marginTop: 16, alignItems: 'end' }}>
+            <div data-order-date>
+              <Input label="ORDER DATE" type="date" value={orderDate} max={latestBusinessDate()}
+                onChange={e => setOrderDate(e.target.value || todayIso())} />
+            </div>
+            <span style={{ fontSize: 11, color: '#6B7280', paddingBottom: 10 }}>
+              Today by default. A deposit entered below is booked on this date.
+            </span>
           </div>
         </Card>
 

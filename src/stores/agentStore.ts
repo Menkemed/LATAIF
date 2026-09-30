@@ -65,6 +65,7 @@ import { agentUpdateInput } from '@/core/masterdata/masterdata-rules';
 // CENTRAL-UI-PARITY R6E — „Undo convert" storniert die Rechnung über die geteilte Grundlage.
 import { reverseInvoiceInHouse } from '@/core/invoices/invoice-reversal';
 import { TransferActionRejected } from '@/core/agents/transfer-rules';
+import { businessTimestamp, isBusinessDate } from '@/core/utils/business-date';
 
 /** Was „Undo convert" bewirkt hat — die Antwort der Hausfunktion. */
 export interface TransferConvertUndone {
@@ -135,7 +136,7 @@ interface AgentStore {
   findOrCreateAgentForCustomer: (customerId: string) => Agent;
   // Zentrale Transfer-Erzeugung aus Customer-Sicht: legt bei Bedarf den Agent
   // an, dann den Transfer (ohne Commission). Nutzt unter der Haube createTransfer.
-  createTransferForCustomer: (data: { customerId: string; productId: string; ourPrice: number; returnBy?: string; notes?: string; staffId?: string; settlementModel?: 'full' | 'split'; excessSplitPct?: number }) => AgentTransfer;
+  createTransferForCustomer: (data: { customerId: string; productId: string; ourPrice: number; returnBy?: string; transferredAt?: string; notes?: string; staffId?: string; settlementModel?: 'full' | 'split'; excessSplitPct?: number }) => AgentTransfer;
   markTransferReturned: (id: string) => void;
   // Plan §Agent §4: Teilzahlungen. Wenn amount < settlementAmount → status='partial'.
   markTransferSettled: (id: string, amount?: number, method?: 'cash' | 'bank') => void;
@@ -327,7 +328,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
        // v0.7.22 — split nur explizit; excess_split_pct nur bei 'split' (sonst NULL).
        data.settlementModel || 'full',
        data.settlementModel === 'split' ? (data.excessSplitPct ?? 50) : null,
-       now, data.returnBy || null, data.notes || null, data.staffId || null, now, now, userId]
+       // BUSINESS-DATE — der gewählte Tag der Übergabe (nachträglich erfasst); ohne Angabe jetzt.
+       businessTimestamp(isBusinessDate(data.transferredAt) ? data.transferredAt : undefined, now),
+       data.returnBy || null, data.notes || null, data.staffId || null, now, now, userId]
     );
     saveDatabase();
     trackInsert('agent_transfers', id, { agentId: data.agentId, productId: data.productId });
@@ -885,13 +888,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     });
   },
 
-  createTransferForCustomer: ({ customerId, productId, ourPrice, returnBy, notes, staffId, settlementModel, excessSplitPct }) => {
+  createTransferForCustomer: ({ customerId, productId, ourPrice, returnBy, transferredAt, notes, staffId, settlementModel, excessSplitPct }) => {
     const agent = get().findOrCreateAgentForCustomer(customerId);
     return get().createTransfer({
       agentId: agent.id,
       productId,
       agentPrice: ourPrice,
       returnBy,
+      transferredAt,
       notes,
       staffId,
       // v0.7.22 — Abrechnungsmodell durchreichen (default 'full').

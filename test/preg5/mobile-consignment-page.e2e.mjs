@@ -38,6 +38,7 @@ const STEIN_CSS = (() => {
 })();
 const befehle = readFileSync(join(repo, 'src-tauri/src/sync/mobile_consignment_commands.js'), 'utf8');
 const ui = readFileSync(join(repo, 'src-tauri/src/sync/mobile_consignment_ui.js'), 'utf8');
+const datumRegel = readFileSync(join(repo, 'src-tauri/src/sync/mobile_business_date.js'), 'utf8');
 const schema = readFileSync(join(repo, 'src-tauri/src/sync/mobile_field_schema.json'), 'utf8');
 const page = readFileSync(join(repo, 'src-tauri/src/sync/mobile_page.rs'), 'utf8');
 
@@ -93,7 +94,7 @@ const UI_DATEI = `(function () {\n${ui}\n  window.__cnHomeOpen = cnHomeOpen;\n  
 
 const SEITE = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>consignment page test</title></head><body>
 ${html}
-<script src="/display-name.js"></script><script src="/stones.js"></script><script src="/repair-commands.js"></script>
+<script src="/display-name.js"></script><script src="/stones.js"></script><script src="/business-date.js"></script><script src="/repair-commands.js"></script>
 <script src="/commands.js"></script>
 <script src="/shim.js"></script>
 <script src="/ui.js"></script>
@@ -113,7 +114,7 @@ const medienAbrufe = [];
 const server = createServer((req, res) => {
   if (req.method === 'GET') {
     const js = {
-      '/display-name.js': anzeigeName, '/stones.js': steine, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI,
+      '/display-name.js': anzeigeName, '/stones.js': steine, '/business-date.js': datumRegel, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI,
     }[req.url.split('?')[0]];
     if (js !== undefined) {
       res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
@@ -184,7 +185,7 @@ class CDP {
 
 const KOMMISSION = (rev, extra) => Object.assign({
   id: 'con-1', consignmentNumber: 'CON-2026-0007', consignorId: 'cust-1', productId: 'prod-1',
-  agreedPrice: 500, minimumPrice: 450, expiryDate: '2026-12-31', notes: 'Karton dabei',
+  agreedPrice: 500, minimumPrice: 450, agreementDate: '2026-08-15', expiryDate: '2026-12-31', notes: 'Karton dabei',
   payoutModel: 'percent', commissionRate: 20, excessSplitPct: null, payoutLocked: false,
   status: 'active', payoutStatus: 'pending', payoutAmount: null, payoutPaidAmount: 0, payoutOpenAmount: 0,
   salePrice: null, commissionAmount: null, invoiceId: '', revision: rev,
@@ -291,6 +292,28 @@ try {
   ok(/is required/.test(ohnePflicht.fehler) && !ohnePflicht.gesendet,
     `§1 die Pflichtmerkmale der Kategorie werden VOR dem Senden verlangt (${S(ohnePflicht.fehler.slice(0, 60))})`);
 
+  // BUSINESS-DATE — „Agreement date": heute vorbelegt; Zukunft geht nicht hinaus; rückdatiert reist mit.
+  const heuteTag = new Date().toISOString().split('T')[0];
+  const morgenTag = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+  const vereinbart = await c.ev("const e = document.getElementById('cnAgreementDate'); return { value: e.value, max: e.max, disabled: e.disabled, sichtbar: e.offsetParent !== null };");
+  ok(vereinbart.value === heuteTag && vereinbart.max === morgenTag && !vereinbart.disabled && vereinbart.sichtbar,
+    `§1 DATUM „Agreement date" heute vorbelegt, spaetester Tag morgen, waehlbar (${S(vereinbart)})`);
+  const zukunftFehler = await c.ev(`
+    document.getElementById('cna_dial').value = 'Black';
+    const m0 = document.getElementById('cna_material');
+    m0.value = 'Steel';
+    m0.dispatchEvent(new Event('change'));
+    await new Promise((r) => setTimeout(r, 60));
+    document.getElementById('cnAgreementDate').value = '2099-01-01';
+    document.getElementById('cnSaveBtn').click();
+    await new Promise((r) => setTimeout(r, 500));
+    const fehler = document.getElementById('cnError').textContent;
+    document.getElementById('cnAgreementDate').value = '2026-08-15';
+    return fehler;`);
+  ok(/Agreement date cannot be in the future/.test(zukunftFehler) && gesehen.filter((g) => g.body?.op === 'consignments.create').length === 0,
+    `§1 DATUM Zukunft: kein Auftrag, Grund in Worten (${S(zukunftFehler.slice(0, 60))})`);
+
+
   await c.ev(`
     document.getElementById('cna_dial').value = 'Black';
     const mat = document.getElementById('cna_material');
@@ -316,6 +339,7 @@ try {
     `§1 der Rumpf traegt Artikel, Preis, Modell und Bildkennung (${S(rumpf.payout)})`);
   ok(!('purchasePrice' in rumpf.product) && !('stockStatus' in rumpf.product) && !('sourceType' in rumpf.product),
     '§1 …und nichts, was der Primary selbst setzt');
+  ok(rumpf.agreementDate === '2026-08-15', `§1 DATUM der Auftrag traegt den gewaehlten Tag (${rumpf.agreementDate})`);
 
   // „Copy details": die Treffer und was uebernommen wird, kommen aus der AUTORITAET.
   const vorherGeber = antwortGeber;
@@ -405,6 +429,10 @@ try {
     `§1 „Create anyway" ist ein eigener Auftrag mit eigener Kennung (${zweite.length}/${bestaetigte.length})`);
   ok(await c.ev("return /Saved as CON-2026-0007/.test(document.getElementById('cnSuccess').textContent);"),
     '§1 der Mensch sieht die Nummer des Primary');
+  ok(zweite.every((g) => g.body.payload.agreementDate === '2026-08-15'),
+    `§1 DATUM jeder Versuch — auch „Create anyway" — traegt denselben gewaehlten Tag (${S(zweite.map((g) => g.body.payload.agreementDate))})`);
+  const vereinbartDanach = await c.ev("const e = document.getElementById('cnAgreementDate'); return { value: e.value, disabled: e.disabled };");
+  ok(vereinbartDanach.value === '2026-08-15' && vereinbartDanach.disabled === true, `§1 DATUM an der gespeicherten Kommission nur Auskunft (${S(vereinbartDanach)})`);
   // §1c — und die uebernommenen Verkaufsvorstellungen reisen mit, obwohl sie kein Feld haben.
   const angelegt = bestaetigte[0].body.payload.product;
   ok(angelegt.plannedSalePrice === 900 && angelegt.minSalePrice === 800 && angelegt.maxSalePrice === 1000,

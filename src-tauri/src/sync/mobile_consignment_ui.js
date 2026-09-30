@@ -347,6 +347,16 @@
     screen('formConsign');
   }
 
+  /**
+   * BUSINESS-DATE — der Tag der Vereinbarung. Beim Erfassen heute vorbelegt und waehlbar
+   * (rueckdatierbar, nicht in der Zukunft); an einer bestehenden Kommission nur Auskunft.
+   */
+  function cnAgreementDate(wert, waehlbar) {
+    const feld = $('cnAgreementDate');
+    feld.max = MobileBusinessDate.latestBusinessDate();
+    feld.value = waehlbar ? MobileBusinessDate.todayIso() : String(wert || '').slice(0, 10);
+    feld.disabled = !waehlbar;
+  }
   function cnFormValues() {
     const f = {};
     for (const k in CN_INPUTS) f[k] = $(CN_INPUTS[k]).value;
@@ -357,6 +367,7 @@
       const v = con ? con[k] : null;
       $(CN_INPUTS[k]).value = (v === null || v === undefined) ? '' : String(v);
     }
+    cnAgreementDate(con ? con.agreementDate : '', false);
     $('cnPayoutModel').value = (con && con.payoutModel) || 'percent';
     $('cnCommissionRate').value = con && con.commissionRate !== undefined && con.commissionRate !== null ? String(con.commissionRate) : '';
     $('cnExcessSplitPct').value = con && con.excessSplitPct !== undefined && con.excessSplitPct !== null ? String(con.excessSplitPct) : '';
@@ -554,6 +565,7 @@
     CN.buyer = null;
     cnSetConsignor(null, '');
     for (const k in CN_INPUTS) $(CN_INPUTS[k]).value = '';
+    cnAgreementDate('', true);
     $('cnSku').value = ''; $('cnBrand').value = ''; $('cnName').value = '';
     $('cnTaxScheme').value = ''; $('cnItemNotes').value = '';
     CN.preise = {};
@@ -596,6 +608,10 @@
       payoutModel: $('cnPayoutModel').value,
       commissionRate: $('cnCommissionRate').value, excessSplitPct: $('cnExcessSplitPct').value,
     };
+    // BUSINESS-DATE — dieselbe Regel wie am Primary; ein leeres Feld heisst heute, und der Tag steht im Auftrag.
+    const vereinbart = MobileBusinessDate.pickDate($('cnAgreementDate').value, 'Agreement date');
+    if (!vereinbart.ok) return { form: form, fehler: merkmale.fehler.concat([vereinbart.message + '.']) };
+    form.agreementDate = vereinbart.date;
     return { form: form, fehler: merkmale.fehler };
   }
 

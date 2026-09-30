@@ -16,6 +16,7 @@ const S = (v: unknown): string => JSON.stringify(v);
 // Beide Dateien woertlich — so, wie die Handy-Seite sie einbettet.
 const sandbox: Record<string, unknown> = {};
 new Function('self', src('src-tauri/src/sync/mobile_repair_commands.js'))(sandbox);
+new Function('self', src('src-tauri/src/sync/mobile_business_date.js'))(sandbox);
 new Function('self', src('src-tauri/src/sync/mobile_purchase_commands.js'))(sandbox);
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const MP = sandbox.MobilePurchase as any;
@@ -131,6 +132,75 @@ function item(uid: string, extra: Record<string, unknown> = {}) {
   ok(!('idPhotoStagingId' in MP.buildBody(p, () => []).body.newSupplierPerson), 'RUMPF ein noch nicht abgelegtes Foto reist nicht mit');
   const bad = draft();
   ok(MP.buildBody(bad, () => []).ok === false, 'RUMPF ungültiger Entwurf ergibt keinen Rumpf');
+}
+
+// ── BUSINESS-DATE — das Einkaufsdatum: heute vorbelegt, rückdatierbar, nie in der Zukunft ──
+{
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const MBD = sandbox.MobileBusinessDate as any;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const MR = sandbox.MobileRepair as any;
+  const JETZT = Date.parse('2026-09-30T10:00:00.000Z'), TAG = 86400000;
+  const codes = (d: unknown, nowMs = JETZT): string[] => MP.validate(d, { nowMs }).map((x: { code: string; message: string }) => x.code + ':' + x.message);
+  const neu = (datum: string, id = 'd-date') => {
+    const d = MP.newDraft(id, datum);
+    d.supplier.mode = 'existing'; d.supplier.supplierId = 'sup-1'; d.supplier.name = 'Test Supplier';
+    d.items.push(item('a'));
+    return d;
+  };
+  const heute = neu(MBD.todayIso(JETZT), 'd-heute');
+  ok(heute.purchaseDate === '2026-09-30' && codes(heute).length === 0 && MP.buildBody(heute, () => [], { nowMs: JETZT }).body.purchaseDate === '2026-09-30',
+    'DATUM Vorgabe: der neue Entwurf trägt heute — ausgeschrieben, auch im Rumpf');
+  const frueher = neu('2026-08-15', 'd-frueher');
+  ok(codes(frueher).length === 0 && MP.buildBody(frueher, () => [], { nowMs: JETZT }).body.purchaseDate === '2026-08-15',
+    'DATUM rückdatiert: ein früherer Tag geht genau so in den Auftrag');
+  ok(codes(neu('2026-10-01')).length === 0, 'DATUM morgen ist erlaubt (ein Tag Spielraum für die Zeitzone, wie am Primary)');
+  ok(S(codes(neu('2026-10-02'))) === S(['DATE_INVALID:Purchase date cannot be in the future.']) && MP.buildBody(neu('2099-01-01'), () => [], { nowMs: JETZT }).ok === false,
+    `DATUM Zukunft → kein Auftrag (${S(codes(neu('2026-10-02')))})`);
+  ok(S(codes(neu('2026-02-31'))) === S(['DATE_INVALID:Purchase date is not a valid date.']) && S(codes(neu('15.08.2026'))) === S(['DATE_INVALID:Purchase date is not a valid date.'])
+    && S(codes(neu(''))) === S(['DATE_REQUIRED:Enter the purchase date.']), 'DATUM kein Kalendertag oder leer → kein Auftrag');
+  ok(MP.validate(neu('2099-01-01'), { nowMs: JETZT })[0].where === 'details', 'DATUM der Fehler führt in „Purchase details"');
+
+  // Entwurf in der Ablage des Telefons (IndexedDB = strukturierte Kopie): das gewählte Datum übersteht den Neustart.
+  const abgelegt = JSON.parse(JSON.stringify(frueher));
+  ok(abgelegt.purchaseDate === '2026-08-15' && S(MP.buildBody(abgelegt, () => [], { nowMs: JETZT })) === S(MP.buildBody(frueher, () => [], { nowMs: JETZT })),
+    'ENTWURF nach dem Neuladen dasselbe Datum, derselbe Rumpf');
+
+  // Offline → warten → erneut senden an einem SPÄTEREN Tag: dieselbe Kennung, dasselbe Datum.
+  const speicher = new Map<string, Record<string, unknown>>();
+  const store = {
+    async get(k: string) { return speicher.get(k) ?? null; },
+    async put(e: { key: string }) { speicher.set(e.key, JSON.parse(JSON.stringify(e))); },
+    async delete(k: string) { speicher.delete(k); },
+    async getAll() { return [...speicher.values()]; },
+  };
+  const gesendet: Array<{ commandId: string; payload: { purchaseDate: string } }> = [];
+  let netz = false, zaehler = 0;
+  const client = MR.createClient({
+    store, genId: () => 'cmd-' + (++zaehler), token: () => 't',
+    fetchFn: async (_u: string, o: { body: string }) => {
+      gesendet.push(JSON.parse(o.body));
+      if (!netz) throw new Error('offline');
+      return { status: 200, json: async () => ({ ok: true, value: { purchaseId: 'pur-1', purchaseNumber: 'PUR-1' } }) };
+    },
+  });
+  for (const [name, entwurf] of [['heute', heute], ['rückdatiert', frueher]] as Array<[string, { id: string; purchaseDate: string }]>) {
+    gesendet.length = 0; netz = false;
+    const key = 'purchase:' + entwurf.id;
+    const erst = await client.mutate(key, 'purchases.create', MP.buildBody(entwurf, () => [], { nowMs: JETZT }).body);
+    const wartet = speicher.get(key) as { payload: { purchaseDate: string } } | undefined;
+    // Drei Tage später, nach einem Neustart: der Entwurf kommt aus der Ablage, der Rumpf wird neu gebaut.
+    netz = true;
+    const spaeter = JSON.parse(JSON.stringify(entwurf));
+    const zweit = await client.mutate(key, 'purchases.create', MP.buildBody(spaeter, () => [], { nowMs: JETZT + 3 * TAG }).body);
+    ok(erst.kind === 'unresolved' && wartet?.payload.purchaseDate === entwurf.purchaseDate && zweit.kind === 'ok' && gesendet.length === 2
+      && gesendet[0].commandId === gesendet[1].commandId && gesendet[0].payload.purchaseDate === entwurf.purchaseDate && gesendet[1].payload.purchaseDate === entwurf.purchaseDate,
+      `WIEDERHOLUNG (${name}) drei Tage später: dieselbe Kennung, dasselbe Datum ${entwurf.purchaseDate} — nie das „heute" des späteren Tages (${S(gesendet.map((g) => g.payload.purchaseDate))})`);
+  }
+  const ui = src('src-tauri/src/sync/mobile_purchase_ui.js');
+  ok(/MPX\.newDraft\(uuid\(\), mpToday\(\)\)/.test(ui) && /const mpToday = \(\) => MobileBusinessDate\.todayIso\(\);/.test(ui)
+    && /data-mp-field="purchaseDate" max="' \+ MobileBusinessDate\.latestBusinessDate\(\) \+ '"/.test(ui) && /f === 'purchaseDate' \|\| f === 'taxScheme'/.test(ui),
+    'UI Datumsfeld in „Purchase details": heute vorbelegt, spätester Tag morgen, die Wahl geht in den Entwurf');
 }
 
 // ── Verdrahtung ──

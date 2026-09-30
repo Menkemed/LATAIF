@@ -5,6 +5,7 @@ import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { todayIso, latestBusinessDate } from '@/core/utils/business-date';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
@@ -1127,6 +1128,13 @@ export function RepairList() {
                 )}
               </>
             )}
+          </div>
+
+          {/* BUSINESS-DATE — der Tag der Annahme ist wählbar (nachträglich erfasste Reparatur); vorbelegt mit heute. */}
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }} data-repair-received-date>
+            <Input label="RECEIVED DATE" type="date" value={form.receivedAt || todayIso()} max={latestBusinessDate()}
+              onChange={e => setForm({ ...form, receivedAt: e.target.value || undefined })} />
+            <span style={{ fontSize: 11, color: '#6B7280', alignSelf: 'end', paddingBottom: 10 }}>Today by default — change it when the repair was taken in earlier.</span>
           </div>
 
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>

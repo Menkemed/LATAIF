@@ -755,6 +755,57 @@ const emitBruch = (name: string) => () => {
   ok(conv.ok, `NACHBAR …und seine Umwandlung in eine Rechnung (${conv.code || 'ok'})`);
 }
 
+// ── BUSINESS-DATE — das Auftragsdatum ist wählbar (auch rückwirkend), auf beiden Wegen gleich ──
+{
+  const MIT: OI = {
+    ...LEER, lines: [{ mode: 'existing', productId: 'p1', description: 'x', scheme: 'auto', quantity: 1, unitPrice: 600 }],
+    depositAmount: 100, paymentMethod: 'cash', orderDate: '2026-08-15',
+  };
+  const heute = new Date().toISOString().split('T')[0];
+  const bild = (db: Db, oid: string) => ({
+    ...row(db, 'SELECT order_date, deposit_date FROM orders WHERE id = ?', [oid]),
+    paid: rows(db, 'SELECT paid_at, amount FROM order_payments WHERE order_id = ?', [oid]),
+  });
+  let db = freshDb();
+  const p = await primary(() => orderHouse.createOrderOnPrimary(MIT));
+  const bp = bild(db, String((p.value as { order?: { id?: string } })?.order?.id));
+  db = freshDb();
+  const r = await fern(async () => cmd.runOrderCreate(deps(db), identity('960', 'orders.create'), await orderRules.orderCreateBody(MIT, stage)));
+  const br = bild(db, String(r.value?.orderId));
+  ok(p.ok && r.ok && S(bp) === S(br), `DATUM Auftrag rückwirkend: lokal == fern (${S(br)})`);
+  ok(br.order_date === '2026-08-15' && br.deposit_date === '2026-08-15' && S(br.paid) === S([{ paid_at: '2026-08-15', amount: 100 }]),
+    'DATUM der Auftrag trägt das gewählte Datum; die Anzahlung beim Anlegen gehört zu diesem Tag');
+  // Ohne Angabe (z. B. älterer zweiter Rechner): heute.
+  db = freshDb();
+  const ohneDatum = { ...(await orderRules.orderCreateBody({ ...MIT, orderDate: undefined }, stage)) };
+  ok(!('orderDate' in ohneDatum) || ohneDatum.orderDate === undefined, 'DATUM ohne Wahl reist kein Datum mit');
+  const o = await fern(() => cmd.runOrderCreate(deps(db), identity('961', 'orders.create'), ohneDatum));
+  ok(o.ok && row(db, 'SELECT order_date FROM orders WHERE id = ?', [String(o.value?.orderId)]).order_date === heute, 'DATUM ohne Angabe gilt der heutige Tag');
+  // Zukunft und Unsinn: abgewiesen, auf beiden Wegen, nichts entsteht.
+  for (const [was, datum] of [['Zukunft', '2099-01-01'], ['kein Kalendertag', '2026-02-31'], ['kein Datum', 'gestern']] as Array<[string, string]>) {
+    db = freshDb();
+    const a = await primary(() => orderHouse.createOrderOnPrimary({ ...MIT, orderDate: datum }));
+    const b = await fern(async () => cmd.runOrderCreate(deps(db), identity('962', 'orders.create'), await orderRules.orderCreateBody({ ...MIT, orderDate: datum }, stage)));
+    ok(!a.ok && !b.ok && n(db, 'SELECT COUNT(*) FROM orders') === 0, `DATUM ${was} (${datum}) → abgewiesen, nichts angelegt (${a.code} / ${b.code})`);
+  }
+  // Ändern: das Datum ist korrigierbar; ohne Angabe bleibt es; Zahlungen behalten ihr Datum.
+  const a1 = await aenderWelt('primary', false, { orderDate: '2026-07-01' });
+  const a2 = await aenderWelt('fern', false, { orderDate: '2026-07-01' });
+  ok(a1.aus.ok && a2.aus.ok && a1.kopf.order_date === '2026-07-01' && a2.kopf.order_date === '2026-07-01',
+    `DATUM ändern: beide Wege schreiben das neue Auftragsdatum (${a1.aus.code || 'ok'} / ${a2.aus.code || 'ok'})`);
+  ok(row(a2.db, 'SELECT paid_at FROM order_payments WHERE order_id = ?', [a2.oid]).paid_at === heute, 'DATUM ändern: die Anzahlung behält ihr eigenes Datum');
+  const a3 = await aenderWelt('fern', false, { notes: 'nur Notiz' });
+  ok(a3.aus.ok && a3.kopf.order_date === heute, 'DATUM eine Änderung ohne Datum lässt das Auftragsdatum stehen');
+  const a4 = await aenderWelt('fern', false, { orderDate: '2099-01-01' });
+  const a5 = await aenderWelt('primary', false, { orderDate: '2099-01-01' });
+  ok(!a4.aus.ok && !a5.aus.ok && a4.kopf.order_date === heute, `DATUM ändern in die Zukunft → abgewiesen (${a4.aus.code} / ${a5.aus.code})`);
+  ok(orderEdit.orderDateOf({ orderDate: '2026-07-01', createdAt: '2026-09-30T10:00:00.000Z' }) === '2026-07-01'
+    && orderEdit.orderDateOf({ createdAt: '2026-09-30T10:00:00.000Z' }) === '2026-09-30', 'DATUM Anzeige: das gewählte Datum, bei alten Aufträgen der Tag der Erfassung');
+  const seite = src('src/pages/orders/OrderCreate.tsx') + src('src/pages/orders/OrderDetail.tsx') + src('src/pages/orders/OrderList.tsx');
+  ok(/label="ORDER DATE" type="date"/.test(seite) && /data-order-date-edit/.test(seite) && /fmtDate\(orderDateOf\(order\)\)/.test(seite),
+    'DATUM Masken: wählbar beim Anlegen, korrigierbar in der Auftragsseite, angezeigt in der Liste');
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r5e order/purchase parity: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
 console.log('CENTRAL_UI_R5E_SCOPE_FROZEN');

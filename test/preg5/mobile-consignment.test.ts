@@ -405,6 +405,44 @@ group('§7 Verdrahtung und Vokabeln');
 group('§8 Copy-Details-Paritaet');
 
 // ══════════════════════════════════════════════════════════════════════════════
+// ══════════════════════════════════════════════════════════════════════════════
+// §9 — BUSINESS-DATE: der Tag der Vereinbarung reist im Auftrag, ausgeschrieben
+// ══════════════════════════════════════════════════════════════════════════════
+{
+  const telefon: Record<string, unknown> = {};
+  new Function('self', src('src-tauri/src/sync/mobile_business_date.js'))(telefon);
+  const MBD = telefon.MobileBusinessDate as { pickDate(v: unknown, label: string, nowMs?: number): { ok: boolean; date?: string; message?: string } };
+  const JETZT = Date.parse('2026-09-30T10:00:00.000Z');
+  const form = {
+    consignorId: 'cust-1', categoryId: 'cat-watch', brand: 'Rolex', name: 'Datejust 36',
+    agreedPrice: '500', payoutModel: 'percent', commissionRate: '20',
+  };
+  const frueher = M.createBody({ ...form, agreementDate: MBD.pickDate('2026-08-15', 'Agreement date', JETZT).date }) as Required<Ergebnis>;
+  ok(frueher.ok && frueher.body.agreementDate === '2026-08-15', `§9 der gewaehlte Tag reist beim Anlegen mit (${J(frueher.body.agreementDate)})`);
+  const heute = M.createBody({ ...form, agreementDate: MBD.pickDate('', 'Agreement date', JETZT).date }) as Required<Ergebnis>;
+  ok(heute.body.agreementDate === '2026-09-30', '§9 ohne Wahl schreibt die Maske „heute" aus — der Auftrag traegt den Tag');
+  const trotzdem = M.createBody({ ...form, agreementDate: '2026-08-15' }, [], { acknowledgeDuplicate: true }) as Required<Ergebnis>;
+  ok(trotzdem.body.agreementDate === '2026-08-15' && trotzdem.body.acknowledgeDuplicate === true, '§9 „Create anyway" traegt denselben Tag wie der abgewiesene Versuch');
+  ok(!M.EDIT_FIELDS.includes('agreementDate')
+    && !('agreementDate' in ((M.editBody({ ...KOMMISSION, agreementDate: '2026-08-15' }, { agreedPrice: '560', agreementDate: '2026-01-01' }) as Required<Ergebnis>).body)),
+    '§9 eine Aenderung traegt das Vereinbarungsdatum nie — es wird nur beim Erfassen gewaehlt');
+  const zukunft = MBD.pickDate('2099-01-01', 'Agreement date', JETZT);
+  ok(!zukunft.ok && zukunft.message === 'Agreement date cannot be in the future', '§9 ein Tag in der Zukunft ergibt keinen Auftrag');
+
+  // Der Primary nimmt das Feld beim ANLEGEN an — aus seinem Quelltext gelesen.
+  const erlaubt = /export function parseConsignmentCreate[\s\S]*?onlyKnownFields\(raw, \[([\s\S]*?)\]\);/.exec(src('src/core/bridge/commercial-commands.ts'))?.[1] ?? '';
+  ok(/'agreementDate'/.test(erlaubt), '§9 `consignments.create` am Primary kennt `agreementDate`');
+
+  const ui = src('src-tauri/src/sync/mobile_consignment_ui.js'), html = src('src-tauri/src/sync/mobile_consignment.html');
+  ok(/<label>Agreement date<\/label>\s*<input id="cnAgreementDate" type="date" \/>/.test(html), '§9 die Maske hat das Feld „Agreement date"');
+  ok(/cnNewIntake\(\)[\s\S]*?cnAgreementDate\('', true\)/.test(ui) && /feld\.value = waehlbar \? MobileBusinessDate\.todayIso\(\)/.test(ui)
+    && /feld\.max = MobileBusinessDate\.latestBusinessDate\(\)/.test(ui), '§9 beim Erfassen heute vorbelegt, spaetester Tag morgen');
+  ok(/MobileBusinessDate\.pickDate\(\$\('cnAgreementDate'\)\.value, 'Agreement date'\)/.test(ui) && /form\.agreementDate = vereinbart\.date/.test(ui)
+    && /cnAgreementDate\(con \? con\.agreementDate : '', false\)/.test(ui) && /feld\.disabled = !waehlbar/.test(ui),
+    '§9 gespeichert wird mit der gemeinsamen Regel; an einer bestehenden Kommission ist das Feld nur Auskunft');
+}
+group('§9 Vereinbarungsdatum');
+
 for (const [name, n] of groups) console.log(`  ${name}: ${n}`);
 if (fails.length > 0) {
   console.log(`\nFAIL — preg5 mobile consignment: ${PASS} passed, ${fails.length} failed`);

@@ -29,6 +29,7 @@ import { runExclusive } from '@/core/bridge/command-scheduler';
 import { buildPayoutPatch, PayoutPatchError } from './payout-edit';
 import { planProductCreate, productCreateRefusal } from '@/core/products/product-create';
 import { skuIsEmpty } from '@/core/products/sku-allocation';
+import { businessDateIssue } from '@/core/utils/business-date';
 import { CONSIGNMENT_PRODUCT_FIELDS, createPayload } from '@/core/data/write-payloads';
 import { useProductStore } from '@/stores/productStore';
 import { useConsignmentStore } from '@/stores/consignmentStore';
@@ -62,6 +63,8 @@ export interface ConsignmentCreateInput {
   minimumPrice?: number;
   payout: { model: unknown; commissionRate?: unknown; excessSplitPct?: unknown };
   expiryDate?: string;
+  /** BUSINESS-DATE — der Tag der Vereinbarung (JJJJ-MM-TT), in der Maske wählbar; ohne Angabe heute. */
+  agreementDate?: string;
   notes?: string;
   staffId?: string;
 }
@@ -91,6 +94,8 @@ export async function createConsignmentWithProduct(
   if (!(Number(input.agreedPrice) > 0)) {
     throw new ConsignmentCreateRejected('AGREED_PRICE_REQUIRED', 'a consignment needs an agreed price');
   }
+  const datum = businessDateIssue(input.agreementDate, 'Agreement date');
+  if (datum) throw new ConsignmentCreateRejected('INVALID_DATE', datum);
   // Das Modell baut die SSOT, nicht die Maske: Prozentbereich, Shop-Anteil zwischen 1 und 99, und
   // die Parameter FREMDER Modelle ausdrücklich leer — dieselbe Regel wie beim Ändern.
   let patch;
@@ -135,6 +140,7 @@ export async function createConsignmentWithProduct(
     commissionRate: patch.commissionType === 'percent' ? patch.commissionRate : 0,
     excessSplitPct: patch.excessSplitPct ?? undefined,
     expiryDate: input.expiryDate || undefined,
+    agreementDate: input.agreementDate || undefined,
     notes: input.notes || undefined,
     staffId: input.staffId || undefined,
   });
@@ -209,6 +215,7 @@ export function consignmentCreateRequest(input: ConsignmentCreateInput, stagingI
   };
   if (input.minimumPrice !== undefined) body.minimumPrice = input.minimumPrice;
   if (input.expiryDate) body.expiryDate = input.expiryDate;
+  if (input.agreementDate) body.agreementDate = input.agreementDate;
   if (input.notes) body.notes = input.notes;
   if (input.staffId) body.staffId = input.staffId;
   if (stagingIds.length > 0) body.stagingIds = [...stagingIds];

@@ -143,12 +143,16 @@ function baueUmgebung(antworten: (url: string, body: unknown) => Antwort) {
 function starteOberflaeche(antworten: (url: string, body: unknown) => Antwort) {
   const { document, nach } = baueDom(join(repo, 'src-tauri/src/sync/mobile_repair.html'));
   const MobileRepair = ladeModul(join(repo, 'src-tauri/src/sync/mobile_repair_commands.js'));
+  // BUSINESS-DATE — die Datumsregel der Seite, woertlich (dieselbe Datei, die `mobile_page.rs` einbettet).
+  const datumSand: Record<string, unknown> = {};
+  new Function('self', readFileSync(join(repo, 'src-tauri/src/sync/mobile_business_date.js'), 'utf8'))(datumSand);
+  const MobileBusinessDate = datumSand.MobileBusinessDate;
   const umgebung = baueUmgebung(antworten);
   const schirme: string[] = [];
   const src = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_ui.js'), 'utf8');
   const fn = new Function(
     '$', 'show', 'hide', 'setText', 'screen', 'el', 'uuid', 'resizePhoto', 'TOKEN_KEY',
-    'idbReq', 'MobileRepair', 'indexedDB', 'fetch', 'localStorage', 'document',
+    'idbReq', 'MobileRepair', 'indexedDB', 'fetch', 'localStorage', 'document', 'MobileBusinessDate',
     src + '\n; return { rpHomeOpen };',
   );
   let nr = 0;
@@ -167,7 +171,7 @@ function starteOberflaeche(antworten: (url: string, body: unknown) => Antwort) {
     'lataif_mobile_token',
     umgebung.idbReq, MobileRepair, umgebung.indexedDB, umgebung.fetchFn,
     { getItem: () => 'token-xyz', setItem: () => {}, removeItem: () => {} },
-    document,
+    document, MobileBusinessDate,
   );
   return { document, nach, MobileRepair, schirme, api, ...umgebung };
 }
@@ -517,6 +521,76 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
     '§7 die Kostensumme ist unveraendert — es wurde nichts umgerechnet');
   ok(!/repair-line-view/.test(readFileSync(join(repo, 'src/core/repairs/repair-cost.ts'), 'utf8')),
     '§7 …und die Rechnung des Hauses weiss von dieser Beschriftung nichts');
+}
+
+// ── §8 BUSINESS-DATE: „Received Date" — heute vorbelegt, rueckdatierbar, Zukunft geht nicht hinaus ──
+{
+  let repairsGet: Record<string, unknown> = {};
+  const antworten = (url: string, body: unknown): Antwort => {
+    const b = body as { op?: string } | null;
+    if (b?.op === 'customers.create') return { status: 200, body: { ok: true, value: { customerId: 'cust-1', name: 'Mo Kunde' } } };
+    if (b?.op === 'repairs.create') return { status: 200, body: { ok: true, value: { repairId: 'rep-8', repairNumber: 'REP-2026-00008' } } };
+    if (b?.op === 'repairs.get') return { status: 200, body: { ok: true, value: repairsGet } };
+    if (b?.op === 'repairs.list') return { status: 200, body: { ok: true, value: { items: [] } } };
+    return { status: 200, body: { ok: true, value: {} } };
+  };
+  const t = starteOberflaeche(antworten);
+  const $ = (id: string) => t.document.getElementById(id)!;
+  const heute = new Date().toISOString().split('T')[0];
+  const morgen = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+  const feld = $('rpReceivedDate') as unknown as { value: string; max: string; disabled: boolean };
+  const anlagen = () => t.gerufen.filter((g) => (g.body as { op?: string })?.op === 'repairs.create');
+
+  $('rpNewBtn').click();
+  await warte();
+  ok(feld.value === heute && feld.max === morgen && feld.disabled === false, `§8 neue Annahme: heute vorbelegt, spaetester Tag morgen, waehlbar (${feld.value} / ${feld.max})`);
+  $('rpCustomerFirst').value = 'Mo';
+  $('rpCustomerLast').value = 'Kunde';
+  await $('rpCustomerCreateBtn').onclick!();
+  await warte();
+  $('rpIssue').value = 'Krone lose';
+
+  // Zukunft: nichts geht hinaus, der Mensch liest den Grund.
+  feld.value = '2099-01-01';
+  await $('rpSaveBtn').onclick!();
+  await warte();
+  ok(anlagen().length === 0 && /Received date cannot be in the future/.test($('rpError').textContent) && !$('rpError').classList.contains('hidden'),
+    `§8 ein Tag in der Zukunft: kein Auftrag, Meldung sichtbar (${$('rpError').textContent})`);
+
+  // Zurueckdatiert: der Auftrag traegt genau diesen Tag; danach steht das Feld zur Auskunft.
+  repairsGet = { id: 'rep-8', repairNumber: 'REP-2026-00008', revision: 1, status: 'received', issueDescription: 'Krone lose',
+    receivedAt: '2026-08-15T12:00:00.000Z', images: [], lines: [], openLineTotal: 0, allowedStatusTargets: ['diagnosed'] };
+  feld.value = '2026-08-15';
+  await $('rpSaveBtn').onclick!();
+  await warte();
+  const gesendet = anlagen();
+  ok(gesendet.length === 1 && (gesendet[0].body as { payload: { receivedAt?: string } }).payload.receivedAt === '2026-08-15',
+    `§8 zurueckdatiert: der Auftrag traegt den gewaehlten Tag (${JSON.stringify((gesendet[0]?.body as { payload?: unknown })?.payload)})`);
+  ok(/REP-2026-00008/.test($('rpSuccess').textContent) && feld.value === '2026-08-15' && feld.disabled === true,
+    `§8 an der gespeicherten Reparatur steht der Tag zur Auskunft — nicht aenderbar (${feld.value}, gesperrt ${feld.disabled})`);
+
+  // Eine Aenderung schickt das Annahmedatum nie mit.
+  $('rpNotes').value = 'nachgetragen';
+  await $('rpSaveBtn').onclick!();
+  await warte();
+  const aenderung = t.gerufen.filter((g) => (g.body as { op?: string })?.op === 'repairs.update');
+  ok(aenderung.length === 1 && !('receivedAt' in (aenderung[0].body as { payload: Record<string, unknown> }).payload), '§8 eine Aenderung traegt kein Annahmedatum');
+
+  // Ein geleertes Feld heisst heute — ausgeschrieben im Auftrag.
+  $('rpNewBtn').click();
+  await warte();
+  ok(feld.value === heute && feld.disabled === false, '§8 die naechste Annahme beginnt wieder mit heute, waehlbar');
+  $('rpCustomerFirst').value = 'Mo';
+  $('rpCustomerLast').value = 'Zwei';
+  await $('rpCustomerCreateBtn').onclick!();
+  await warte();
+  $('rpIssue').value = 'Band gerissen';
+  feld.value = '';
+  await $('rpSaveBtn').onclick!();
+  await warte();
+  const zweite = anlagen();
+  ok(zweite.length === 2 && (zweite[1].body as { payload: { receivedAt?: string } }).payload.receivedAt === heute,
+    `§8 leeres Feld: der Auftrag traegt heute, ausgeschrieben (${(zweite[1]?.body as { payload?: { receivedAt?: string } })?.payload?.receivedAt})`);
 }
 
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — preg5 mobile repair ui: ${PASS} passed, ${FAIL} failed`);

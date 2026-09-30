@@ -1071,6 +1071,72 @@ for (const weg of ['fern', 'lokal'] as const) {
     'STALE repair-house: die Fassung wird ZUERST in der Klammer geprueft');
 }
 
+// ── BUSINESS-DATE — der Tag der Annahme ist wählbar (nachträglich erfasste Reparatur) ──
+{
+  const heute = new Date().toISOString().split('T')[0];
+  const tag = (db: Db, id: string): string => String(db.exec('SELECT received_at FROM repairs WHERE id = ?', [id])[0]?.values?.[0]?.[0] ?? '');
+  const zahl = (db: Db): number => Number(db.exec('SELECT COUNT(*) FROM repairs')[0]?.values?.[0]?.[0] ?? 0);
+  let db = freshDb();
+  const lokal = await house.createRepairOnPrimary({ ...FORM_KUNDE, receivedAt: '2026-08-15' } as never);
+  const tLokal = tag(db, lokal.id);
+  db = freshDb();
+  const body = rules.repairCreateBody({ ...FORM_KUNDE, receivedAt: '2026-08-15' } as never, []);
+  const out = await cmd.runRepairCreate(deps(db), identity('901', 'repairs.create'), body);
+  const tFern = out.kind === 'ok' ? tag(db, val<{ repairId: string }>(out).repairId) : '';
+  ok(body.receivedAt === '2026-08-15' && out.kind === 'ok' && tLokal === '2026-08-15T12:00:00.000Z' && tFern === tLokal,
+    `DATUM Reparatur rückwirkend: Annahme am gewählten Tag, lokal == fern (${tLokal} / ${tFern})`);
+  db = freshDb();
+  const ohne = await house.createRepairOnPrimary(FORM_KUNDE);
+  ok(!('receivedAt' in rules.repairCreateBody(FORM_KUNDE, [])) && tag(db, ohne.id).startsWith(heute), 'DATUM ohne Wahl: kein Datum im Rumpf, Annahme heute (wie bisher)');
+  db = freshDb();
+  let lokalNein = '';
+  try { await house.createRepairOnPrimary({ ...FORM_KUNDE, receivedAt: '2099-01-01' } as never); } catch (e) { lokalNein = String((e as { code?: string }).code ?? e); }
+  let fernNein = '';
+  try { cmd.parseRepairCreate({ ...rules.repairCreateBody(FORM_KUNDE, []), receivedAt: '2099-01-01' }); } catch (e) { fernNein = String((e as Error).message); }
+  ok(lokalNein === 'INVALID_DATE' && /cannot be in the future/.test(fernNein) && zahl(db) === 0, `DATUM Zukunft → abgewiesen, nichts angelegt (${lokalNein} / ${fernNein})`);
+  let unsinn = '';
+  try { cmd.parseRepairCreate({ ...rules.repairCreateBody(FORM_KUNDE, []), receivedAt: '2026-13-40' }); } catch (e) { unsinn = String((e as Error).message); }
+  ok(/not a valid date/.test(unsinn), `DATUM kein Kalendertag → abgewiesen (${unsinn})`);
+  ok(/label="RECEIVED DATE" type="date"/.test(readFileSync(resolvePath(repo, 'src/pages/repairs/RepairList.tsx'), 'utf8')), 'DATUM Maske: „Received date" ist wählbar');
+}
+
+// ── BUSINESS-DATE (Telefon) — der Rumpf, den das Telefon baut, legt die Annahme am gewählten Tag an ──
+{
+  const telefon: Record<string, unknown> = {};
+  for (const f of ['mobile_business_date.js', 'mobile_repair_commands.js']) new Function('self', src('src-tauri/src/sync/' + f))(telefon);
+  const MBD = telefon.MobileBusinessDate as { pickDate(v: unknown, label: string, nowMs?: number): { ok: boolean; date?: string; message?: string } };
+  const MR = telefon.MobileRepair as { createBody(f: Record<string, unknown>, ids?: string[]): Record<string, unknown> };
+  const heute = new Date().toISOString().split('T')[0];
+  const tag = (db: Db, id: string): string => String(db.exec('SELECT received_at FROM repairs WHERE id = ?', [id])[0]?.values?.[0]?.[0] ?? '');
+  const zahl = (db: Db): number => Number(db.exec('SELECT COUNT(*) FROM repairs')[0]?.values?.[0]?.[0] ?? 0);
+  const form = { customerId: 'cust-1', issueDescription: 'Krone klemmt', itemBrand: 'Rolex', itemModel: 'Submariner' };
+
+  let db = freshDb();
+  const alt = MR.createBody({ ...form, receivedAt: MBD.pickDate('2026-08-15', 'Received date').date });
+  const a = await cmd.runRepairCreate(deps(db), identity('911', 'repairs.create'), alt);
+  const idA = a.kind === 'ok' ? val<{ repairId: string }>(a).repairId : '';
+  ok(alt.receivedAt === '2026-08-15' && a.kind === 'ok' && tag(db, idA) === '2026-08-15T12:00:00.000Z',
+    `DATUM Telefon rückdatiert: die Annahme steht am Primary am gewählten Tag (${tag(db, idA)})`);
+  // Dieselbe Kennung noch einmal (Klärung nach verlorener Antwort): keine zweite Reparatur, derselbe Tag.
+  const nochmal = await cmd.runRepairCreate(deps(db), identity('911', 'repairs.create'), alt);
+  ok(nochmal.kind === 'ok' && zahl(db) === 1 && tag(db, idA) === '2026-08-15T12:00:00.000Z', 'DATUM Telefon Wiederholung unter derselben Kennung: eine Reparatur, das Datum bleibt');
+
+  db = freshDb();
+  const jetzt = MR.createBody({ ...form, receivedAt: MBD.pickDate('', 'Received date').date });
+  const h = await cmd.runRepairCreate(deps(db), identity('912', 'repairs.create'), jetzt);
+  ok(jetzt.receivedAt === heute && h.kind === 'ok' && tag(db, val<{ repairId: string }>(h).repairId).startsWith(heute),
+    `DATUM Telefon Vorgabe heute: ausgeschrieben im Auftrag, Annahme heute (${String(jetzt.receivedAt)})`);
+
+  db = freshDb();
+  let nein = '';
+  try { await cmd.runRepairCreate(deps(db), identity('913', 'repairs.create'), MR.createBody({ ...form, receivedAt: '2099-01-01' })); }
+  catch (e) { nein = String((e as { code?: string }).code ?? (e as Error).message); }
+  let geparst = '';
+  try { cmd.parseRepairCreate(MR.createBody({ ...form, receivedAt: '2099-01-01' })); } catch (e) { geparst = String((e as Error).message); }
+  ok(MBD.pickDate('2099-01-01', 'Received date').ok === false && /cannot be in the future/.test(geparst) && zahl(db) === 0,
+    `DATUM Telefon Zukunft: die Maske schickt nichts, und der Primary weist es trotzdem ab (${geparst} / ${nein})`);
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r5c: repair create/update/invoice parity: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
 console.log('CENTRAL_UI_R5C_REPAIR_SCOPE_FROZEN');

@@ -413,6 +413,7 @@ const ZEILE = (name: string, qty: number, price: number, extra: Record<string, u
   const db = freshDb(); seedMobile(db);
   const sandbox: Record<string, unknown> = {};
   new Function('self', src('src-tauri/src/sync/mobile_repair_commands.js'))(sandbox);
+  new Function('self', src('src-tauri/src/sync/mobile_business_date.js'))(sandbox);
   new Function('self', src('src-tauri/src/sync/mobile_purchase_commands.js'))(sandbox);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const MPX = sandbox.MobilePurchase as any;
@@ -565,6 +566,65 @@ const ZEILE = (name: string, qty: number, price: number, extra: Record<string, u
   const ra = JSON.parse(s(db, 'SELECT item_attributes FROM repairs WHERE id = ?', [rep.id]) || '{}');
   ok(S(ra.stones) === S([{ type: 'diamond', qty: 2, carat: 0.1 }]) && ra.diamond_weight === 0.1, `STONES Reparatur: dieselbe Liste, Summe abgeleitet (${S(ra)})`);
   ok(unbalanced(db) === 0, 'STONES keine Buchung berührt (Hauptbuch ausgeglichen)');
+}
+
+// ── 9 BUSINESS-DATE — das Einkaufsdatum vom Telefon steht am Primary genau so; Zukunft wird abgewiesen ──
+{
+  const db = freshDb(); seedMobile(db);
+  const sandbox: Record<string, unknown> = {};
+  for (const f of ['mobile_business_date.js', 'mobile_repair_commands.js', 'mobile_purchase_commands.js']) new Function('self', src('src-tauri/src/sync/' + f))(sandbox);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const MPX = sandbox.MobilePurchase as any;
+  const heute = new Date().toISOString().split('T')[0];
+  const entwurf = (id: string, datum: string, name: string) => {
+    const d = MPX.newDraft(id, datum);
+    d.supplier.mode = 'existing'; d.supplier.supplierId = 'sup-1';
+    d.items.push(Object.assign(MPX.newItem('a', 'cat-w'), { brand: 'Rolex', name, quantity: '1', unitPrice: '1000' }));
+    d.payments.push({ method: 'cash', amount: '300', reference: '' });
+    return d;
+  };
+  const tage = (pid: string): string => S([
+    s(db, 'SELECT purchase_date FROM purchases WHERE id = ?', [pid]),
+    rows(db, 'SELECT paid_at FROM purchase_payments WHERE purchase_id = ?', [pid]).map((p) => String(p.paid_at).slice(0, 10)),
+    rows(db, 'SELECT acquired_at FROM stock_lots WHERE purchase_id = ?', [pid]).map((l) => String(l.acquired_at).slice(0, 10)),
+  ]);
+  // Rückdatiert.
+  const alt = MPX.buildBody(entwurf('draft-alt', '2026-08-15', 'Date A'), () => []);
+  const r = await run(db, 40, alt.body);
+  const pid = String(r.value?.purchaseId ?? '');
+  ok(alt.ok && alt.body.purchaseDate === '2026-08-15' && r.ok && tage(pid) === S(['2026-08-15', ['2026-08-15'], ['2026-08-15']]),
+    `DATUM rückdatiert: Einkauf, Zahlung beim Anlegen und Los am gewählten Tag (${r.code || tage(pid)})`);
+  ok(s(db, "SELECT purchase_date FROM products WHERE name = 'Date A'") === '2026-08-15' && unbalanced(db) === 0,
+    'DATUM …auch der neue Artikel trägt ihn als Einkaufsdatum; Hauptbuch ausgeglichen');
+  // Dieselbe Kennung noch einmal (Wiederholung nach verlorener Antwort): dasselbe Ergebnis, dasselbe Datum.
+  const vorher = counts(db);
+  const again = await run(db, 40, alt.body);
+  ok(again.ok && again.replayed === true && again.value?.purchaseId === pid && counts(db) === vorher && tage(pid) === S(['2026-08-15', ['2026-08-15'], ['2026-08-15']]),
+    'DATUM Wiederholung unter derselben Kennung: kein zweiter Einkauf, das Datum bleibt');
+  // Heute (die Vorgabe der Maske — das Telefon schreibt den Tag aus).
+  const jetzt = MPX.buildBody(entwurf('draft-heute', heute, 'Date B'), () => []);
+  const h = await run(db, 41, jetzt.body);
+  ok(jetzt.body.purchaseDate === heute && h.ok && tage(String(h.value?.purchaseId)) === S([heute, [heute], [heute]]), `DATUM Vorgabe heute: gebucht am heutigen Tag (${h.code || 'ok'})`);
+  // Zukunft und Unsinn: der Primary weist ab — auch wenn ein Telefon es trotzdem schickt. Nichts entsteht.
+  const stand = counts(db);
+  const zukunft = await run(db, 42, { supplierId: 'sup-1', purchaseDate: '2099-01-01', taxScheme: 'ZERO', lines: [ZEILE('Date C', 1, 10)] });
+  const unsinn = await run(db, 43, { supplierId: 'sup-1', purchaseDate: '2026-02-31', taxScheme: 'ZERO', lines: [ZEILE('Date D', 1, 10)] });
+  ok(!zukunft.ok && zukunft.code === 'INVALID_DATE' && !unsinn.ok && unsinn.code === 'INVALID_DATE' && counts(db) === stand,
+    `DATUM Zukunft / kein Kalendertag → abgewiesen, nichts angelegt (${zukunft.code} / ${unsinn.code})`);
+  // Ein älteres Telefon ohne Datum im Rumpf bleibt gültig: heute.
+  const ohne = await run(db, 44, { supplierId: 'sup-1', taxScheme: 'ZERO', lines: [ZEILE('Date E', 1, 10)] });
+  ok(ohne.ok && s(db, 'SELECT purchase_date FROM purchases WHERE id = ?', [String(ohne.value?.purchaseId)]) === heute, `DATUM ohne Angabe: heute, wie bisher (${ohne.code || 'ok'})`);
+  // Der Rechner („Save Purchase") folgt derselben Regel.
+  const maske = {
+    supplierId: 'sup-1', purchaseDate: '2099-01-01', taxScheme: 'ZERO', lines: [{ mode: 'existing', productId: 'p2', brand: '', name: '', sku: '', categoryId: '', quantity: 1, unitPrice: 10 }],
+    paymentAmount: 0, paymentMethod: 'cash', notes: '', staffId: '',
+  };
+  const vorRechner = counts(db);
+  const desk = await primary(() => purchaseHouse.createPurchaseOnPrimary(maske as never));
+  ok(!desk.ok && desk.code === 'INVALID_DATE' && counts(db) === vorRechner
+    && purchaseRules.validatePurchaseCreate(maske as never) === 'Purchase date cannot be in the future'
+    && purchaseRules.validatePurchaseCreate({ ...maske, purchaseDate: '2026-08-15' } as never) === null,
+    `DATUM Rechner: dieselbe Regel in Maske und Haus, rückdatiert bleibt erlaubt (${desk.code})`);
 }
 
 console.log(`\nmobile-purchase primary: ${PASS} passed, ${fails.length} failed`);

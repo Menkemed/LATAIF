@@ -1,18 +1,23 @@
 // ════════════════════════════════════════════════════════════════════════════
 // CENTRAL-UI-PARITY R5E — einen Auftrag ändern („Save" der Auftragsseite): EINE Ableitung.
 //
-// Die Maske schreibt sechs Eingaben — Lieferant, Einkaufspreis, vereinbarter Preis, Anzahlung,
-// Liefertermin, Notiz — und leitet zwei Zahlen daraus ab: die erwartete Marge (Preis − Einkauf) und
+// Die Maske schreibt sieben Eingaben — Lieferant, Einkaufspreis, vereinbarter Preis, Anzahlung,
+// Liefertermin, Notiz, Auftragsdatum — und leitet zwei Zahlen daraus ab: die erwartete Marge (Preis − Einkauf) und
 // den Rest (Preis − Anzahlung). Beim Sonderauftrag trägt die ANGEBOTSZEILE den Preis: dann wird ihr
 // Preis gezogen (der Kopfpreis folgt aus den Zeilen) und der Kopfpreis selbst nicht geschrieben.
 // Der Client schickt nur die Eingaben; die beiden Zahlen rechnet das Haus.
 // ════════════════════════════════════════════════════════════════════════════
 import type { Order } from '@/core/models/types';
-import { OrderActionRejected } from './order-create';
+import { OrderActionRejected, orderDateIssue } from './order-create';
+
+/** ORDER-DATE — das Datum eines Auftrags für jede Anzeige: das gewählte, bei alten Aufträgen der Tag der Erfassung. */
+export function orderDateOf(o: { orderDate?: string | null; createdAt?: string | null } | null | undefined): string {
+  return o?.orderDate || (o?.createdAt ? String(o.createdAt).split('T')[0] : '');
+}
 
 /** Die Eingaben der Maske — genau die, die „Save" schreibt. */
 export const ORDER_EDIT_FIELDS = [
-  'agreedPrice', 'depositAmount', 'supplierName', 'supplierPrice', 'expectedDelivery', 'notes',
+  'agreedPrice', 'depositAmount', 'supplierName', 'supplierPrice', 'expectedDelivery', 'notes', 'orderDate',
 ] as const;
 export type OrderEditField = typeof ORDER_EDIT_FIELDS[number];
 
@@ -23,9 +28,11 @@ export interface OrderEditInput {
   supplierPrice: number | null;
   expectedDelivery: string | null;
   notes: string | null;
+  /** ORDER-DATE — fehlt (älterer zweiter Rechner) oder `null`: das Auftragsdatum bleibt, wie es ist. */
+  orderDate?: string | null;
 }
 
-/** Die sechs Werte des Formulars — ein geleertes Feld heißt „keins" (die Maske schrieb `null`). */
+/** Die sieben Werte des Formulars — ein geleertes Feld heißt „keins" (die Maske schrieb `null`). */
 export function orderEditInput(form: Partial<Order>): OrderEditInput {
   return {
     agreedPrice: form.agreedPrice ?? null,
@@ -34,6 +41,7 @@ export function orderEditInput(form: Partial<Order>): OrderEditInput {
     supplierPrice: form.supplierPrice ?? null,
     expectedDelivery: form.expectedDelivery ?? null,
     notes: form.notes ?? null,
+    orderDate: form.orderDate ?? null,
   };
 }
 
@@ -45,6 +53,8 @@ export function assertOrderEditValues(input: OrderEditInput): void {
       throw new OrderActionRejected('INVALID_AMOUNT', `${k} must be a number of at least 0`);
     }
   }
+  const datum = orderDateIssue(input.orderDate);
+  if (datum) throw new OrderActionRejected('INVALID_INPUT', datum);
 }
 
 export interface OrderEditPlan {
@@ -75,11 +85,13 @@ export function planOrderEdit(input: OrderEditInput, quoteLine?: { id: string; u
     expectedDelivery: input.expectedDelivery,
     remainingAmount: (agreed || 0) - (input.depositAmount || 0),
     notes: input.notes,
+    // ORDER-DATE — nur ein gesetztes Datum wird geschrieben; ein Auftrag verliert sein Datum nicht.
+    ...(input.orderDate ? { orderDate: input.orderDate } : {}),
   };
   return plan;
 }
 
-/** Der Rumpf von `orders.update`: die gesehene Fassung und die sechs Eingaben (geleert = `null`). */
+/** Der Rumpf von `orders.update`: die gesehene Fassung und die sieben Eingaben (geleert = `null`). */
 export function orderEditBody(id: string, revision: number | undefined, form: Partial<Order>): Record<string, unknown> {
   return { id, expectedRevision: revision, ...orderEditInput(form) };
 }

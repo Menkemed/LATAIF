@@ -34,6 +34,7 @@ const html = readFileSync(join(repo, 'src-tauri/src/sync/mobile_purchase.html'),
 const befehleRepair = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_commands.js'), 'utf8');
 const anzeigeName = readFileSync(join(repo, 'src-tauri/src/sync/mobile_display_name.js'), 'utf8');
 const steine = readFileSync(join(repo, 'src-tauri/src/sync/mobile_stones.js'), 'utf8');
+const datumRegel = readFileSync(join(repo, 'src-tauri/src/sync/mobile_business_date.js'), 'utf8');
 // STONES — dieselben Stile wie die echte Seite (für die Sichtprüfung bei 360 px).
 const STEIN_CSS = (() => {
   const pg = readFileSync(join(repo, 'src-tauri/src/sync/mobile_page.rs'), 'utf8').split(String.fromCharCode(13)).join('');
@@ -91,7 +92,7 @@ button { width: 100%; padding: 14px; } .photo-strip { display: flex; gap: 8px; o
 ${STEIN_CSS}</style>
 </head><body>
 ${html}
-<script src="/display-name.js"></script><script src="/stones.js"></script><script src="/repair-commands.js"></script><script src="/commands.js"></script><script src="/shim.js"></script><script src="/ui.js"></script>
+<script src="/display-name.js"></script><script src="/stones.js"></script><script src="/business-date.js"></script><script src="/repair-commands.js"></script><script src="/commands.js"></script><script src="/shim.js"></script><script src="/ui.js"></script>
 </body></html>`;
 
 // ── Attrappen-Primary ─────────────────────────────────────────────────────────────────────────
@@ -101,7 +102,7 @@ let aiErgebnis = {};
 let einkauf = () => ({ status: 200, body: { ok: true, value: { purchaseId: 'pur-1', purchaseNumber: 'PUR-2026-000042', totalAmount: 1361.5, paidAmount: 700, openAmount: 661.5 } } });
 const server = createServer((req, res) => {
   if (req.method === 'GET') {
-    const js = { '/display-name.js': anzeigeName, '/stones.js': steine, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI }[req.url.split('?')[0]];
+    const js = { '/display-name.js': anzeigeName, '/stones.js': steine, '/business-date.js': datumRegel, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI }[req.url.split('?')[0]];
     if (js !== undefined) { res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' }); res.end(js); return; }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(SEITE); return;
   }
@@ -275,6 +276,23 @@ try {
   ok(breite[0] <= breite[1], `§1 keine waagerechte Rollleiste bei 360 px (${S(breite)})`);
   await shot(c, 'mp-form');
 
+  // BUSINESS-DATE — „Purchase date": heute vorbelegt, rückdatierbar, Zukunft geht nicht hinaus.
+  const heute = new Date().toISOString().split('T')[0];
+  const morgen = new Date(Date.now() + 86400000).toISOString().split('T')[0];
+  const GEWAEHLT = '2026-08-15';
+  const einkaeufe = () => gesehen.filter((g) => g.body && g.body.op === 'purchases.create');
+  await c.ev(klick('[data-mp-toggle="details"]') + ' await new Promise((r) => setTimeout(r, 100)); return 1;');
+  const datumFeld = await c.ev(`const e = document.querySelector('[data-mp-field="purchaseDate"]'); return { value: e.value, max: e.max, entwurf: window.__MP.draft.purchaseDate };`);
+  ok(datumFeld.value === heute && datumFeld.entwurf === heute && datumFeld.max === morgen, `§1 DATUM „Purchase date" heute vorbelegt, spätester Tag morgen (${S(datumFeld)})`);
+  await c.ev(tippe('[data-mp-field="purchaseDate"]', '2099-01-01') + ' return 1;');
+  await c.ev(klick('#mpSubmitBtn') + ' await new Promise((r) => setTimeout(r, 500)); return 1;');
+  ok(await c.ev("return window.__MP.draft.status === 'draft' && /Purchase date cannot be in the future/.test(document.getElementById('mpError').textContent);") && einkaeufe().length === 0,
+    `§1 DATUM Zukunft: kein Auftrag, der Entwurf bleibt, Grund in Worten (${einkaeufe().length})`);
+  await c.ev(tippe('[data-mp-field="purchaseDate"]', GEWAEHLT) + ' await new Promise((r) => setTimeout(r, 100)); return 1;');
+  ok((await c.ev(summe('details'))).startsWith(GEWAEHLT) && await c.ev('return window.__MP.draft.purchaseDate;') === GEWAEHLT,
+    `§1 DATUM rückdatiert: im Entwurf und in der Zusammenfassung (${await c.ev(summe('details'))})`);
+  await shot(c, 'mp-date');
+
   // ── §2 Entwurf übersteht Neuladen ──
   await c.ev("await new Promise((r) => setTimeout(r, 900)); location.reload(); return 1;").catch(() => null);
   await sleep(1500);
@@ -289,6 +307,8 @@ try {
   const zurueck = await c.ev(`const d = window.__MP.draft; return { sup: d.supplier.name, n: d.items.length, fotos: d.items[0].photos.length, pct: d.items[0].partners[0].sharePct, q: d.items[1].quantity, pays: d.payments.map((p) => p.method + ':' + p.amount), attr: Object.values(d.items[0].attributes) };`);
   ok(zurueck.sup === 'Ali Hassan' && zurueck.n === 2 && zurueck.fotos === 2 && zurueck.pct === '40' && zurueck.q === '3' && S(zurueck.pays) === S(['cash:500', 'bank:200']) && zurueck.attr.includes('REF-123'),
     `§2 alles wieder da: Lieferant, Positionen, Fotos, Merkmal, Partner, Zahlungen (${S(zurueck)})`);
+
+  ok(await c.ev('return window.__MP.draft.purchaseDate;') === GEWAEHLT, '§2 DATUM das gewählte Datum übersteht das Neuladen');
 
   // ── §3 kein Netz zum Primary: wartet, gesperrt, keine Buchung ──
   einkauf = () => ({ status: 503, body: { ok: false, error: 'PRIMARY_WINDOW_UNAVAILABLE' } });
@@ -316,12 +336,15 @@ try {
   ok(p.lines[1].brand === '' && p.lines[1].name === '' && p.lines[1].newProduct.brand === null && p.lines[1].newProduct.categoryId === 'cat-gold-jewelry',
     `§3 die Gold-Position reist ohne Marke/Modell (${S(p.lines[1]).slice(0, 160)})`);
 
+  ok(p.purchaseDate === GEWAEHLT && await c.ev('return window.__MP.draft.purchaseDate;') === GEWAEHLT, `§3 DATUM wartend: der Auftrag trägt das gewählte Datum, der Entwurf behält es (${p.purchaseDate})`);
+
   // ── §4 erneut senden: DIESELBE Kennung, derselbe Rumpf → gebucht ──
   einkauf = () => ({ status: 200, body: { ok: true, value: { purchaseId: 'pur-1', purchaseNumber: 'PUR-2026-000042', totalAmount: 1361.5, paidAmount: 700, openAmount: 661.5, replayed: true } } });
   await c.ev(klick('[data-mp-action="resend"]') + ' await new Promise((r) => setTimeout(r, 1200)); return 1;');
   const alle = gesehen.filter((g) => g.body && g.body.op === 'purchases.create');
   ok(alle.length === 2 && alle[0].body.commandId === alle[1].body.commandId && S(alle[0].body.payload) === S(alle[1].body.payload),
     '§4 zweiter Versuch unter derselben Kennung mit demselben Rumpf (der Primary bucht nie zweimal)');
+  ok(alle[1].body.payload.purchaseDate === GEWAEHLT, '§4 DATUM die Wiederholung trägt dasselbe Datum — nicht „heute"');
   ok(await c.ev("return window.__MP.draft.status === 'confirmed' && /Booked/.test(document.getElementById('mpStatusBar').textContent) && /PUR-2026-000042/.test(document.getElementById('mpStatusBar').textContent);"),
     '§4 bestätigt: „Booked" mit der Belegnummer des Primary');
   ok(await c.ev("return window.__MP.draft.items[0].photos.every((p) => !p.dataUrl && p.stagingId);"), '§4 nach der Buchung keine Fotobytes mehr auf dem Telefon');
@@ -384,6 +407,47 @@ try {
     wert: document.getElementById('mpa${uid6}_karat_color').value, entwurf: window.__MP.draft.items[0].attributes };`);
   ok(karatVorher && !karat.verdeckt && karat.wert === '18K Rose' && karat.entwurf.karat_color === '18K Rose' && karat.entwurf.material === 'Two-Tone Steel/Gold',
     `§6b KI: Two-Tone → „Karat & Color" sichtbar, gefüllt und im Entwurf (${S(karat)})`);
+
+  // ── §8 BUSINESS-DATE: wartend über einen Neustart der Seite — dieselbe Kennung, dasselbe Datum ──
+  const SPAETER = '2026-07-04';
+  const mitDatum = () => gesehen.filter((g) => g.body && g.body.op === 'purchases.create' && g.body.payload.purchaseDate === SPAETER);
+  /** Der Entwurf, wie er in der Ablage des Telefons liegt (IndexedDB) — unabhängig von der offenen Maske. */
+  const ausAblage = (id) => `
+    const db = await new Promise((res, rej) => { const r = indexedDB.open('lataif_mobile_purchase', 1); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const alle = await new Promise((res, rej) => { const r = db.transaction('drafts', 'readonly').objectStore('drafts').getAll(); r.onsuccess = () => res(r.result); r.onerror = () => rej(r.error); });
+    const x = alle.find((e) => e.id === ${S(id)});
+    return x ? { status: x.status, datum: x.purchaseDate, nummer: (x.result && x.result.purchaseNumber) || '' } : null;`;
+  einkauf = () => ({ status: 503, body: { ok: false, error: 'PRIMARY_WINDOW_UNAVAILABLE' } });
+  await c.ev('await window.__mpHomeOpen(); await new Promise((r) => setTimeout(r, 200)); return 1;');
+  await c.ev(klick('#mpNewBtn') + ' await new Promise((r) => setTimeout(r, 300)); return 1;');
+  const idDatum = await c.ev('return window.__MP.draft.id;');
+  await c.ev(tippe('#mpSupSearch', 'Test') + klick('[data-mp-action="search-supplier"]') + ' await new Promise((r) => setTimeout(r, 300)); return 1;');
+  await c.ev(klick('[data-mp-action="pick-supplier"]') + ' await new Promise((r) => setTimeout(r, 200)); return 1;');
+  const uid8 = await c.ev('return window.__MP.draft.items[0].uid;');
+  await c.ev(tippe(`[data-mp-field="item:${uid8}:brand"]`, 'Omega') + tippe(`[data-mp-field="item:${uid8}:name"]`, 'Seamaster') + tippe(`[data-mp-field="item:${uid8}:unitPrice"]`, '25') + ' return 1;');
+  await c.ev(pflicht(uid8) + ' return 1;');
+  await c.ev(klick('[data-mp-toggle="details"]') + ' await new Promise((r) => setTimeout(r, 100)); return 1;');
+  await c.ev(tippe('[data-mp-field="purchaseDate"]', SPAETER) + ' return 1;');
+  await c.ev(klick('#mpSubmitBtn') + ' await new Promise((r) => setTimeout(r, 1200)); return 1;');
+  ok(mitDatum().length === 1 && await c.ev(`return window.__MP.draft.status === 'pending' && window.__MP.draft.purchaseDate === ${S(SPAETER)};`),
+    `§8 DATUM ohne Antwort: wartend, der Auftrag trägt ${SPAETER} (${mitDatum().length})`);
+  // Die Seite startet neu (App geschlossen, Telefon neu gestartet) — der wartende Einkauf liegt in der Ablage.
+  await c.ev("await new Promise((r) => setTimeout(r, 300)); location.reload(); return 1;").catch(() => null);
+  await sleep(1500);
+  c.close();
+  const l8 = await (await fetch('http://127.0.0.1:' + CDP_PORT + '/json/list')).json();
+  c = new CDP(l8.find((t) => t.type === 'page' && /127\.0\.0\.1/.test(t.url)).webSocketDebuggerUrl);
+  await c.send('Runtime.enable'); await c.send('Page.enable');
+  const abgelegt = await c.ev(ausAblage(idDatum));
+  ok(abgelegt && abgelegt.status === 'pending' && abgelegt.datum === SPAETER, `§8 DATUM nach dem Neustart: wartend in der Ablage, mit dem gewählten Datum (${S(abgelegt)})`);
+  // Der Primary ist wieder da: beim Öffnen wird erneut gesendet — dieselbe Kennung, derselbe Rumpf.
+  einkauf = () => ({ status: 200, body: { ok: true, value: { purchaseId: 'pur-8', purchaseNumber: 'PUR-2026-000048', totalAmount: 25, paidAmount: 0, openAmount: 25 } } });
+  await c.ev('await window.__mpHomeOpen(); await new Promise((r) => setTimeout(r, 1500)); return 1;');
+  const beide = mitDatum();
+  ok(beide.length === 2 && beide[0].body.commandId === beide[1].body.commandId && S(beide[0].body.payload) === S(beide[1].body.payload),
+    `§8 DATUM erneut gesendet nach dem Neustart: dieselbe Kennung, derselbe Rumpf, Datum ${SPAETER} — nicht „heute" (${beide.length})`);
+  const gebucht = await c.ev(ausAblage(idDatum));
+  ok(gebucht && gebucht.status === 'confirmed' && gebucht.datum === SPAETER && gebucht.nummer === 'PUR-2026-000048', `§8 DATUM gebucht: der Einkauf behält sein Datum (${S(gebucht)})`);
 
   const protokoll = await c.ev('return window.__P;');
   ok(!protokoll.length, `§7 keine Skriptfehler im Browser (${S(protokoll).slice(0, 300)})`);

@@ -500,6 +500,8 @@ export interface ConsignmentCreateRequest {
   minimumPrice?: number;
   payout: { model: string; commissionRate?: unknown; excessSplitPct?: unknown };
   expiryDate?: string;
+  /** BUSINESS-DATE — der Tag der Vereinbarung; fehlt bei einem älteren zweiten Rechner oder am Telefon: heute. */
+  agreementDate?: string;
   notes?: string;
   /** R5B — wer den Artikel angenommen hat (die Mitarbeiterauswahl der Maske). */
   staffId?: string;
@@ -524,7 +526,7 @@ export function parseConsignmentCreate(raw: unknown): ConsignmentCreateRequest {
   if (!isPlain(raw)) throw new CommercialPayloadError('payload must be an object');
   onlyKnownFields(raw, [
     'consignorId', 'product', 'agreedPrice', 'minimumPrice', 'payout',
-    'expiryDate', 'notes', 'staffId', 'stagingIds', 'acknowledgeDuplicate',
+    'expiryDate', 'notes', 'staffId', 'stagingIds', 'acknowledgeDuplicate', 'agreementDate',
   ]);
   if (!isPlain(raw.product)) throw new CommercialPayloadError('product is required');
   onlyKnownFields(raw.product, [...CONSIGNMENT_PRODUCT_FIELDS, 'sku']);
@@ -574,6 +576,7 @@ export function parseConsignmentCreate(raw: unknown): ConsignmentCreateRequest {
       ? undefined : money(raw.minimumPrice, 'minimumPrice'),
     payout: { model, commissionRate: raw.payout.commissionRate, excessSplitPct: raw.payout.excessSplitPct },
     expiryDate: optString(raw.expiryDate, 'expiryDate'),
+    agreementDate: optString(raw.agreementDate, 'agreementDate'),
     notes: optString(raw.notes, 'notes'),
     staffId: optString(raw.staffId, 'staffId'),
     stagingIds: parseStagingIds(raw.stagingIds, (m) => new CommercialPayloadError(m)),
@@ -628,6 +631,7 @@ export async function runConsignmentCreate(
       minimumPrice: req.minimumPrice,
       payout: req.payout,
       expiryDate: req.expiryDate,
+      agreementDate: req.agreementDate,
       notes: req.notes,
       staffId: req.staffId,
     };
@@ -801,7 +805,7 @@ export function parseOrderCreate(raw: unknown): OrderCreateRequest {
     'customerId', 'orderType', 'lines', 'quotedPrice', 'customTaxScheme', 'finalProductDescription',
     'customProductSpec', 'customerGoldGrams', 'customerGoldKarat', 'customerStones', 'goldsmithSupplierId',
     'laborCost', 'extraGoldGrams', 'extraGoldKarat', 'extraGoldCost', 'extraGoldSupplierId', 'materials',
-    'depositAmount', 'paymentMethod', 'cardBrand', 'fullyPaid', 'expectedDelivery', 'status', 'notes',
+    'depositAmount', 'paymentMethod', 'cardBrand', 'fullyPaid', 'expectedDelivery', 'status', 'notes', 'orderDate',
   ]);
   if (!Array.isArray(raw.lines)) throw new CommercialPayloadError('lines must be a list');
   if (raw.lines.length > MAX_DOC_LINES) throw new CommercialPayloadError('too many lines');
@@ -872,6 +876,8 @@ export function parseOrderCreate(raw: unknown): OrderCreateRequest {
     cardBrand: oneOf(raw.cardBrand, ['normal', 'amex'] as const, 'normal', 'card brand'),
     fullyPaid: raw.fullyPaid === true,
     expectedDelivery: text0(raw.expectedDelivery, 'expectedDelivery'),
+    // ORDER-DATE — fehlt bei einem älteren zweiten Rechner: dann gilt der heutige Tag.
+    orderDate: text0(raw.orderDate, 'orderDate') || undefined,
     status: oneOf(raw.status, ORDER_CREATE_STATUSES as readonly OrderStatus[], 'pending', 'initial status'),
     notes: text0(raw.notes, 'notes'),
     specs,
@@ -978,7 +984,7 @@ export function parseOrderUpdate(raw: unknown): OrderUpdateRequest {
   for (const k of ['agreedPrice', 'depositAmount', 'supplierPrice'] as const) {
     if (raw[k] !== undefined) out[k] = raw[k] === null ? null : money(raw[k], k);
   }
-  for (const k of ['supplierName', 'expectedDelivery', 'notes'] as const) {
+  for (const k of ['supplierName', 'expectedDelivery', 'notes', 'orderDate'] as const) {
     if (raw[k] !== undefined) out[k] = raw[k] === null ? null : text0(raw[k], k);
   }
   if (!ORDER_EDIT_FIELDS.some((k) => out[k] !== undefined)) {
@@ -994,7 +1000,7 @@ export function runOrderUpdate(
   return runRemoteCommand(deps, identity, () => {
     assertHouseBranch(identity);
     const live = query(
-      'SELECT agreed_price, deposit_amount, supplier_name, supplier_price, expected_delivery, notes '
+      'SELECT agreed_price, deposit_amount, supplier_name, supplier_price, expected_delivery, notes, order_date '
       + 'FROM orders WHERE id = ? AND branch_id = ?', [req.id, identity.branchId],
     )[0];
     if (!live) throw new CommandRejected('ORDER_NOT_FOUND', 'no such order in this branch');
@@ -1010,6 +1016,7 @@ export function runOrderUpdate(
       supplierPrice: req.supplierPrice !== undefined ? req.supplierPrice : n(live.supplier_price),
       expectedDelivery: req.expectedDelivery !== undefined ? req.expectedDelivery : t(live.expected_delivery),
       notes: req.notes !== undefined ? req.notes : t(live.notes),
+      orderDate: req.orderDate !== undefined ? req.orderDate : t(live.order_date),
     };
     // Dieselbe Folge wie „Save" am Primary (`updateOrderOnPrimary`).
     urteil(() => updateOrderInHouse(req.id, effective, identity.branchId));

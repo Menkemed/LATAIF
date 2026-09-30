@@ -9,6 +9,8 @@
 //   M3  Offline     Die Ablage ist nicht erreichbar: der Einkauf wartet, nichts gebucht; nach Neustart
 //                   der Seite wird er automatisch gesendet und gebucht (neue Person + Lieferantenrolle).
 //   M4  Grenzen     kein /api/sync/push, keine verwaiste Ablage, Hauptbuch ausgeglichen.
+//   M5  Datum       BUSINESS-DATE: M1–M3 buchen rückdatiert (am Primary steht genau der gewählte Tag,
+//                   auch nach verlorener Antwort und nach Neustart); Zukunft weist der Primary ab.
 //
 // PROZESS-ISOLATION (dauerhafte Regel): gestartet wird nur ueber `spawnTracked`; beendet wird nur,
 // was dieser Lauf gestartet hat. Edge ist ein EIGENES Kind dieses Laufs (`killOwnChild`).
@@ -59,7 +61,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const S = (v) => JSON.stringify(v);
 const T0 = Date.now();
 const MESS = {};
-const RV = { m1: false, m2: false, m3: false, m4: false };
+const RV = { m1: false, m2: false, m3: false, m4: false, m5: false };
 
 let edgeProc = null;
 const aufraeumen = () => {
@@ -338,6 +340,20 @@ try {
     FROM ledger_entries GROUP BY transaction_id HAVING ABS(d) > 0.0005)`)[0]?.n ?? -1);
   const ablageLeer = () => !existsSync(STAGING_ROOT) || readdirSync(STAGING_ROOT, { recursive: true }).filter((f) => /\.(bin|jpe?g|png|webp|blob)$/i.test(String(f))).length === 0;
 
+  // BUSINESS-DATE — das Einkaufsdatum je Abschnitt: rückdatiert, und am Primary muss GENAU dieser Tag stehen.
+  const HEUTE = new Date().toISOString().split('T')[0];
+  const DATUM = { m1: '2026-08-15', m2: '2026-07-04', m3: '2026-06-20' };
+  const datumWaehlen = async (tag) => {
+    if (!(await exists(phone, '[data-mp-field="purchaseDate"]'))) { await klick(phone, '[data-mp-toggle="details"]'); await sleep(200); }
+    return tippe('[data-mp-field="purchaseDate"]', tag);
+  };
+  const tageVon = (purchaseId) => ({
+    einkauf: String((dbQ(BIZ_DB, 'SELECT purchase_date FROM purchases WHERE id = ?', [purchaseId])[0] || {}).purchase_date || ''),
+    zahlungen: dbQ(BIZ_DB, 'SELECT paid_at FROM purchase_payments WHERE purchase_id = ? ORDER BY rowid', [purchaseId]).map((r) => String(r.paid_at).slice(0, 10)),
+    lose: dbQ(BIZ_DB, 'SELECT acquired_at FROM stock_lots WHERE purchase_id = ? ORDER BY rowid', [purchaseId]).map((r) => String(r.acquired_at).slice(0, 10)),
+  });
+  const letzterEinkauf = () => String((dbQ(BIZ_DB, 'SELECT id FROM purchases ORDER BY rowid DESC LIMIT 1')[0] || {}).id || '');
+
   // ══ M1 — Einkauf vom Telefon: Kunde → Lieferant, zwei Positionen, Fotos, Partner, zwei Zahlungen ══
   let PUR_NR = '';
   {
@@ -392,6 +408,14 @@ try {
     const summen = await phone.ev(`return ['items', 'payments', 'partner:' + ${S(u1)}].map((k) => (document.querySelector('[data-mp-sum="' + k + '"]') || {}).textContent);`);
     const breite = await phone.ev('return [document.documentElement.scrollWidth, window.innerWidth];');
     ok(breite[0] <= breite[1], `M1 keine waagerechte Rollleiste bei 360 px (${S(breite)})`);
+    // BUSINESS-DATE — heute vorbelegt; ein Tag in der Zukunft geht nicht hinaus; rückdatiert wird gebucht.
+    await klick(phone, '[data-mp-toggle="details"]'); await sleep(200);
+    const datumVor = await phone.ev(`const e = document.querySelector('[data-mp-field="purchaseDate"]'); return e ? { value: e.value, max: e.max } : null;`);
+    await datumWaehlen('2099-01-01');
+    await klick(phone, '#mpSubmitBtn');
+    const zukunftNein = await warteBis(phone, `/Purchase date cannot be in the future/.test(document.getElementById('mpError').textContent)`, 15000);
+    const zukunftUnberuehrt = einkaeufe() === vorher && nachweisFuer('purchases.create') === 0;
+    await datumWaehlen(DATUM.m1);
     await shot('real-form');
     await klick(phone, '#mpSubmitBtn');
     const gebucht = await warteBis(phone, `/Booked/.test(document.getElementById('mpStatusBar').textContent)`, 120000);
@@ -429,7 +453,13 @@ try {
     ok(steinKopf === 'Stones · 2 rows · Diamond 0.50 ct · Emerald 0.45 ct'
       && S(kAttr.stones) === S([{ type: 'diamond', qty: 1, carat: 0.5, clarity: 'VS1' }, { type: 'emerald', qty: 3, carat: 0.45 }]) && kAttr.diamond_weight === 0.5,
       `M1 STONES Steinliste vom Telefon am Primary: normalisiert, Diamond Weight 0.50 aus den Diamant-Zeilen (${steinKopf} | ${S(kAttr.stones)} | ${kAttr.diamond_weight})`);
-    RV.m1 = gebucht && /^PUR-/.test(PUR_NR) && bilder === 2 && S(zahlungen) === S(['cash:500', 'benefit:400']);
+    const tage = tageVon(kopf.id);
+    MESS.m1.datum = { vor: datumVor, tage };
+    ok(!!datumVor && datumVor.value === HEUTE && datumVor.max > HEUTE, `M1 DATUM „Purchase date" am Telefon heute vorbelegt, spätester Tag morgen (${S(datumVor)})`);
+    ok(zukunftNein && zukunftUnberuehrt, 'M1 DATUM ein Tag in der Zukunft: kein Auftrag, nichts gebucht, Grund in Worten');
+    ok(tage.einkauf === DATUM.m1 && S(tage.zahlungen) === S([DATUM.m1, DATUM.m1]) && S(tage.lose) === S([DATUM.m1, DATUM.m1]),
+      `M1 DATUM am PRIMARY steht genau der gewählte Tag — Einkauf, beide Zahlungen, beide Lose (${S(tage)})`);
+    RV.m1 = gebucht && /^PUR-/.test(PUR_NR) && bilder === 2 && S(zahlungen) === S(['cash:500', 'benefit:400']) && tage.einkauf === DATUM.m1;
   }
 
   // ══ M2 — Verlorene Antwort: „Send again" unter DERSELBEN Kennung, keine zweite Buchung ═══════════
@@ -459,6 +489,7 @@ try {
     await pflicht(u, 'cat-gold-jewelry');
     await tippe(`[data-mp-field="item:${u}:quantity"]`, '2');
     await tippe(`[data-mp-field="item:${u}:unitPrice"]`, '75');
+    await datumWaehlen(DATUM.m2);
     await klick(phone, '#mpSubmitBtn');
     const wartet = await warteBis(phone, `/Waiting for main computer/.test(document.getElementById('mpStatusBar').textContent) && /No answer/.test(document.getElementById('mpStatusBar').textContent)`, 120000);
     const nachErstem = einkaeufe();
@@ -471,7 +502,12 @@ try {
     MESS.m2 = { verworfen, wartet, nachErstem: nachErstem - vorher, nachKlaerung: nachKlaerung - vorher, nachweis: nachweisFuer('purchases.create'), ledger: ledgerNach - ledgerVor };
     ok(verworfen === 1 && wartet && nachErstem === vorher + 1, `M2 Antwort verloren: der Primary HAT gebucht, das Telefon wartet ehrlich (${S(MESS.m2)})`);
     ok(gebucht && nachKlaerung === nachErstem && nachweisFuer('purchases.create') === 2, `M2 „Send again" liefert das bekannte Ergebnis — kein zweiter Einkauf (${S(MESS.m2)})`);
-    RV.m2 = verworfen === 1 && wartet && gebucht && nachKlaerung === nachErstem;
+    const tage = tageVon(letzterEinkauf());
+    const amTelefon = await text(phone, '[data-mp-sum="details"]');
+    MESS.m2.datum = { tage, amTelefon };
+    ok(tage.einkauf === DATUM.m2 && S(tage.lose) === S([DATUM.m2]) && amTelefon.startsWith(DATUM.m2),
+      `M2 DATUM nach verlorener Antwort und „Send again": am Primary und am Telefon der gewählte Tag — nicht „heute" (${S(MESS.m2.datum)})`);
+    RV.m2 = verworfen === 1 && wartet && gebucht && nachKlaerung === nachErstem && tage.einkauf === DATUM.m2;
   }
 
   // ══ M3 — Kein Netz vor dem Senden: Entwurf bleibt, nichts gebucht; danach gebucht ══════════════
@@ -490,6 +526,7 @@ try {
     await fotosLegen(u, 1);
     await pflicht(u, 'cat-gold-jewelry');
     await tippe(`[data-mp-field="item:${u}:unitPrice"]`, '55');
+    await datumWaehlen(DATUM.m3);
     await klick(phone, '#mpSubmitBtn');
     const wartet = await warteBis(phone, `/Not connected to the main computer/.test(document.getElementById('mpStatusBar').textContent)`, 60000);
     const unberuehrt = einkaeufe() === vorher;
@@ -513,7 +550,34 @@ try {
     MESS.m3 = { wartet, unberuehrt, gebucht, person: !!person, pendantBilder };
     ok(wartet && unberuehrt, `M3 ohne Netz: „Waiting", nichts gesendet, nichts gebucht (${S(MESS.m3)})`);
     ok(gebucht && !!person && liste && pendantBilder === 1, `M3 nach Neustart automatisch gesendet und gebucht, neue Person + verknüpfter Lieferant (${S(MESS.m3)})`);
-    RV.m3 = wartet && unberuehrt && gebucht && !!person;
+    const tage = tageVon(letzterEinkauf());
+    MESS.m3.datum = tage;
+    ok(tage.einkauf === DATUM.m3 && S(tage.lose) === S([DATUM.m3]),
+      `M3 DATUM wartend ohne Netz, Seite neu gestartet, automatisch gesendet: am Primary der gewählte Tag — nicht „heute" (${S(tage)})`);
+    RV.m3 = wartet && unberuehrt && gebucht && !!person && tage.einkauf === DATUM.m3;
+  }
+
+  // ══ M5 — Der PRIMARY weist ein Datum in der Zukunft ab, auch wenn ein Telefon es trotzdem schickt ══
+  {
+    const vorher = einkaeufe();
+    const artikel = String((dbQ(BIZ_DB, 'SELECT product_id FROM purchase_lines ORDER BY rowid LIMIT 1')[0] || {}).product_id || '');
+    const senden = (tag) => phone.ev(`
+      const r = await fetch('/api/command', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + (localStorage.getItem('lataif_mobile_token') || '') },
+        body: JSON.stringify({ op: 'purchases.create', commandId: crypto.randomUUID(), payload: {
+          supplierId: 'mp-sup', purchaseDate: ${S(tag)}, taxScheme: 'ZERO',
+          lines: [{ mode: 'existing', productId: ${S(artikel)}, brand: '', name: '', sku: '', categoryId: '', quantity: 1, unitPrice: 1 }],
+        } }),
+      });
+      const b = await r.json().catch(() => ({}));
+      return { status: r.status, error: String(b.error || ''), message: String(b.message || '') };`);
+    const zukunft = await senden('2099-01-01');
+    const unsinn = await senden('2026-02-31');
+    MESS.m5 = { zukunft, unsinn, neu: einkaeufe() - vorher };
+    ok(zukunft.status >= 400 && zukunft.status < 500 && zukunft.error === 'INVALID_DATE' && unsinn.error === 'INVALID_DATE' && einkaeufe() === vorher && unbalanced() === 0,
+      `M5 DATUM der Primary weist Zukunft und einen Tag, den es nicht gibt, ab — nichts gebucht (${S(MESS.m5)})`);
+    RV.m5 = zukunft.error === 'INVALID_DATE' && einkaeufe() === vorher;
   }
 
   // ══ M4 — Grenzen: kein Abgleichkanal, Ablage leer, Hauptbuch ausgeglichen ═════════════════════

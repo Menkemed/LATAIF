@@ -9,6 +9,7 @@ import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { todayIso, latestBusinessDate } from '@/core/utils/business-date';
 import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
@@ -97,6 +98,8 @@ export function ConsignmentList() {
   const [paidRef, setPaidRef] = useState('');
 
   // New consignment form (Consignor + Konditionen — Produktdaten kommen aus productForm).
+  // BUSINESS-DATE — der Tag der Vereinbarung (wählbar); nach jeder Anlage wieder heute.
+  const [agreementDate, setAgreementDate] = useState(() => todayIso());
   const [form, setForm] = useState({
     consignorId: '',
     agreedPrice: '',
@@ -392,6 +395,7 @@ export function ConsignmentList() {
           excessSplitPct: Number(excessSplitPct) || 50,
         },
         expiryDate: form.expiryDate || undefined,
+        agreementDate: agreementDate || undefined,
         notes: form.notes || undefined,
         staffId: form.staffId || undefined,
       };
@@ -413,6 +417,7 @@ export function ConsignmentList() {
       // derselbe Klick wiederholt DIESELBE Absicht.
       if (!geklappt) return;
       setShowNew(false);
+      setAgreementDate(todayIso());
       setDuplicateMatches([]);
       setForm({
         consignorId: '', agreedPrice: '', minimumPrice: '',
@@ -1244,7 +1249,13 @@ export function ConsignmentList() {
           </div>
 
           {/* Expiry & Notes */}
-          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+          {/* BUSINESS-DATE — der Tag der Vereinbarung ist wählbar (nachträglich erfasste Kommission); vorbelegt mit heute. */}
+          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }} data-consignment-agreement-date>
+            <Input label="AGREEMENT DATE" type="date" value={agreementDate} max={latestBusinessDate()}
+              onChange={e => setAgreementDate(e.target.value || todayIso())} />
+            <span style={{ fontSize: 11, color: '#6B7280', alignSelf: 'end', paddingBottom: 10 }}>Today by default — change it when the item was taken in earlier.</span>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <Input label="EXPIRY DATE" type="date"
               value={form.expiryDate}
               onChange={e => setForm({ ...form, expiryDate: e.target.value })} />

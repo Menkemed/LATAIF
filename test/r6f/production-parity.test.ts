@@ -494,7 +494,7 @@ marker('CENTRAL_UI_R6F_PRODUCTION_ATOMICITY_PROVED');
     ['id', { ...B, id: 'x' }], ['branchId', { ...B, branchId: 'branch-other' }], ['userId', { ...B, userId: 'boss' }],
     ['createdBy', { ...B, createdBy: 'boss' }], ['created_by', { ...B, created_by: 'boss' }], ['actor', { ...B, actor: 'boss' }],
     ['status', { ...B, status: 'COMPLETED' }], ['recordNumber', { ...B, recordNumber: 'PRD-1' }], ['totalValue', { ...B, totalValue: 1 }],
-    ['totalCost', { ...B, totalCost: 1 }], ['productionDate', { ...B, productionDate: '2020-01-01' }], ['ledger', { ...B, ledger: [] }],
+    ['totalCost', { ...B, totalCost: 1 }], ['productionDate als Zahl', { ...B, productionDate: 20200101 }], ['ledger', { ...B, ledger: [] }],
     ['revision', { ...B, revision: 3 }],
     ['spec.purchasePrice', { ...B, outputs: [OUT(100, { purchasePrice: 1 })] }], ['spec.stockStatus', { ...B, outputs: [OUT(100, { stockStatus: 'sold' })] }],
     ['spec.sourceType', { ...B, outputs: [OUT(100, { sourceType: 'CONSIGNMENT' })] }], ['spec.quantity', { ...B, outputs: [OUT(100, { quantity: 5 })] }],
@@ -616,6 +616,33 @@ marker('CENTRAL_UI_R6F_PRODUCTION_CLIENT_PROVED');
     'HOUSE öffnet und schließt keine Transaktion, speichert nicht; das Protokoll gehört zum Vorgang');
 }
 marker('CENTRAL_UI_R6F_PRODUCTION_UI_PROVED');
+
+// ══ BUSINESS-DATE — der Tag der Fertigung ist wählbar (nachträglich erfasst) ══════════════════
+{
+  const heute = new Date().toISOString().split('T')[0];
+  const MIT = { ...INPUT(), productionDate: '2026-08-15' };
+  const dbA = freshDb();
+  await createProductionOnPrimary(MIT);
+  const tA = s(dbA, 'SELECT production_date FROM production_records');
+  const losA = s(dbA, 'SELECT acquired_at FROM stock_lots WHERE product_id IN (SELECT product_id FROM production_outputs) LIMIT 1');
+  const dbB = freshDb();
+  const body = await remoteBody(MIT);
+  const b = await cmd.runProductionCreate(deps(dbB) as never, identity('901'), body);
+  const tB = s(dbB, 'SELECT production_date FROM production_records');
+  ok(body.productionDate === '2026-08-15' && b.kind === 'ok' && tA === '2026-08-15' && tB === tA && losA === '2026-08-15',
+    `DATUM Fertigung rückwirkend: Beleg und Los am gewählten Tag, lokal == fern (${tA} / ${tB} / Los ${losA})`);
+  const dbC = freshDb();
+  const ohne = await remoteBody(INPUT());
+  await cmd.runProductionCreate(deps(dbC) as never, identity('902'), ohne);
+  ok(!('productionDate' in ohne) && s(dbC, 'SELECT production_date FROM production_records') === heute, 'DATUM ohne Wahl: kein Datum im Rumpf, Fertigung heute (wie bisher)');
+  const dbD = freshDb();
+  const zP = await wirftAsync(() => createProductionOnPrimary({ ...INPUT(), productionDate: '2099-01-01' }));
+  const zR = await cmd.runProductionCreate(deps(dbD) as never, identity('903'), await remoteBody({ ...INPUT(), productionDate: '2099-01-01' }))
+    .catch((e: unknown) => ({ kind: 'thrown', code: String((e as { code?: string }).code ?? ''), message: String((e as Error).message ?? e) })) as { kind: string; code?: string };
+  ok(zP.code === 'PRODUCTION_DATE_INVALID' && zR.kind !== 'ok' && zR.code === 'PRODUCTION_DATE_INVALID' && n(dbD, 'SELECT COUNT(*) FROM production_records') === 0,
+    `DATUM Zukunft → abgewiesen, nichts angelegt (${zP.code} / ${zR.code})`);
+  ok(/label="Production date" type="date"/.test(src('src/pages/production/ProductionPage.tsx')), 'DATUM Maske: „Production date" ist wählbar');
+}
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — R6F production parity: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('   - ' + f); process.exit(1); }

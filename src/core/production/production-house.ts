@@ -45,6 +45,7 @@ import { TAX_SCHEMES, type Product } from '@/core/models/types';
 import type { MediaSource } from '@/core/media/product-media-create';
 import { createExpenseInHouse, PayablesRejected } from '@/core/payables/payables-house';
 import { hasLotHistory } from '@/core/lots/stock-contract';
+import { businessDateIssue } from '@/core/utils/business-date';
 // PARTNER-ITEMS — ein gemeinsam gekauftes Stück verschwindet nicht still in einer Fertigung.
 import { isJointLot, JOINT_BLOCK } from '@/core/partners/item-participation-house';
 
@@ -82,7 +83,7 @@ export interface ProductionOutputInput {
 }
 
 export interface ProductionCreateInput {
-  /** Nur der alte Store-Vertrag kennt ein Datum; die Maske schickt keins, fern gibt es keins. */
+  /** BUSINESS-DATE — der Tag der Fertigung (JJJJ-MM-TT), in der Maske wählbar; ohne Angabe heute. */
   productionDate?: string;
   notes?: string;
   inputProductIds: string[];
@@ -291,6 +292,8 @@ export async function createProductionInHouse(input: ProductionCreateInput, ctx:
     throw new ProductionRejected('PRODUCTION_VALUE_MISMATCH',
       `Value mismatch — Input ${bhd(totalInputFils).toFixed(2)} ≠ Output ${bhd(totalOutputFils).toFixed(2)}`);
   }
+  const datum = businessDateIssue(input.productionDate, 'Production date');
+  if (datum) throw new ProductionRejected('PRODUCTION_DATE_INVALID', datum);
 
   // ── 2. Schreiben ──
   const db = getDatabase();
@@ -523,5 +526,6 @@ export function productionCreateRequest(
   if (input.laborCost !== undefined && input.laborCost > 0) body.laborCost = input.laborCost;
   if (input.overheadCost !== undefined && input.overheadCost > 0) body.overheadCost = input.overheadCost;
   if (input.notes) body.notes = input.notes;
+  if (input.productionDate) body.productionDate = input.productionDate;
   return body;
 }

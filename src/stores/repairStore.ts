@@ -41,6 +41,7 @@ import { normalizeCardBrand } from '@/core/finance/card-fees';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
 import { stonesOrThrow } from '@/core/products/stones';
+import { businessTimestamp, isBusinessDate } from '@/core/utils/business-date';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
@@ -682,7 +683,8 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
        data.issueDescription || '', data.diagnosis || null,
        data.repairType || 'internal', data.externalVendor || null, data.workshopSupplierId || null,
        data.estimatedCost || null, data.internalCost || 0, effectiveCharge,
-       now, data.estimatedReady || null, voucherCode,
+       // BUSINESS-DATE — der gewählte Tag der Annahme (nachträglich erfasst); ohne Angabe jetzt.
+       businessTimestamp(isBusinessDate(data.receivedAt) ? data.receivedAt : undefined, now), data.estimatedReady || null, voucherCode,
        data.notes || null, JSON.stringify(data.images || []), scope, data.staffId || null, now, now, userId]
     );
 

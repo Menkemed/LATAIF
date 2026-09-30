@@ -1067,6 +1067,8 @@ export interface Order {
   depositAmount: number;
   depositPaid: boolean;
   depositDate?: string;
+  /** Datum des Auftrags (JJJJ-MM-TT), in der Maske gewählt; alte Aufträge: leer → Tag der Erfassung. */
+  orderDate?: string;
   remainingAmount?: number;
   paymentMethod?: 'cash' | 'bank' | 'card' | 'benefit';
   cardBrand?: 'normal' | 'amex';   // v0.7.26 — Deposit-Karten-Brand (nur bei paymentMethod 'card')

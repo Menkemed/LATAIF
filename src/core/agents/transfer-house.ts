@@ -74,6 +74,7 @@ export function createTransferInHouse(form: TransferCreateForm, branchId: string
     productId: input.productId,
     ourPrice: input.ourPrice,
     returnBy: input.returnBy,
+    transferredAt: input.transferredAt,
     notes: input.notes,
     staffId: input.staffId,
     settlementModel: input.settlementModel,

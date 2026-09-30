@@ -768,6 +768,49 @@ group('§7 Vokabeln des Hauses');
 }
 group('§9 Anlagebetrag und Zeilenbeschriftung');
 
+// ══════════════════════════════════════════════════════════════════════════════
+// §10 — BUSINESS-DATE: der Tag der Annahme reist im Auftrag, ausgeschrieben
+//
+// Eine Reparatur wird manchmal erst nachtraeglich erfasst. Die Maske belegt „Received Date" mit
+// heute vor und laesst zurueckdatieren; in den Auftrag geht IMMER der ausgeschriebene Tag — sonst
+// fiele eine Wiederholung an einem spaeteren Tag auf das dann gueltige „heute" des Primary.
+// ══════════════════════════════════════════════════════════════════════════════
+{
+  const telefon: Record<string, unknown> = {};
+  new Function('self', src('src-tauri/src/sync/mobile_business_date.js'))(telefon);
+  const MBD = telefon.MobileBusinessDate as { pickDate(v: unknown, label: string, nowMs?: number): { ok: boolean; date?: string; message?: string } };
+  const JETZT = Date.parse('2026-09-30T10:00:00.000Z');
+  const heute = MBD.pickDate('', 'Received date', JETZT), frueher = MBD.pickDate('2026-08-15', 'Received date', JETZT);
+  const rumpf = M.createBody({ customerId: 'cust-1', issueDescription: 'Krone klemmt', receivedAt: frueher.date });
+  ok(rumpf.receivedAt === '2026-08-15' && M.CREATE_FIELDS.includes('receivedAt'), `§10 der gewaehlte Tag reist beim Anlegen mit (${J(rumpf)})`);
+  ok(M.createBody({ customerId: 'cust-1', issueDescription: 'x', receivedAt: heute.date }).receivedAt === '2026-09-30',
+    '§10 ohne Wahl schreibt die Maske „heute" aus — der Auftrag traegt den Tag');
+  ok(!M.EDIT_FIELDS.includes('receivedAt'), '§10 eine Aenderung traegt das Annahmedatum nie — es wird nur beim Erfassen gewaehlt');
+  const zukunft = MBD.pickDate('2099-01-01', 'Received date', JETZT);
+  ok(!zukunft.ok && zukunft.message === 'Received date cannot be in the future', '§10 ein Tag in der Zukunft ergibt keinen Auftrag');
+
+  // Verlorene Antwort → „Clarify now" an einem spaeteren Tag: dieselbe Kennung, derselbe Tag.
+  const store = frischerSpeicher();
+  const f1 = fakeFetch([{ throws: true, status: 0 }]);
+  const erst = await frischerClient(store, f1).mutate('create:draft-date', 'repairs.create', rumpf);
+  const liegt = store.m.get('create:draft-date')!;
+  const f2 = fakeFetch([OK200]);
+  const zweit = await frischerClient(store, f2).mutate(liegt.key, liegt.op, liegt.payload, { clarify: true });
+  ok(erst.kind === 'unresolved' && zweit.kind === 'ok' && zweit.commandId === erst.commandId
+    && (f1.calls[0].body.payload as { receivedAt: string }).receivedAt === '2026-08-15'
+    && (f2.calls[0].body.payload as { receivedAt: string }).receivedAt === '2026-08-15' && f2.calls[0].body.commandId === f1.calls[0].body.commandId,
+    '§10 verlorene Antwort → die Klaerung schickt dieselbe Kennung mit demselben Tag');
+
+  const ui = src('src-tauri/src/sync/mobile_repair_ui.js'), html = src('src-tauri/src/sync/mobile_repair.html');
+  ok(/<label>Received Date<\/label>\s*<input id="rpReceivedDate" type="date" \/>/.test(html), '§10 die Maske hat das Feld „Received Date"');
+  ok(/rpNewIntake\(\)[\s\S]*?rpReceivedDate\('', true\)/.test(ui) && /feld\.value = waehlbar \? MobileBusinessDate\.todayIso\(\)/.test(ui)
+    && /feld\.max = MobileBusinessDate\.latestBusinessDate\(\)/.test(ui), '§10 beim Erfassen heute vorbelegt, spaetester Tag morgen');
+  ok(/MobileBusinessDate\.pickDate\(\$\('rpReceivedDate'\)\.value, 'Received date'\)/.test(ui) && /receivedAt: annahme\.date/.test(ui)
+    && /rpReceivedDate\(rep\.receivedAt, false\)/.test(ui) && /feld\.disabled = !waehlbar/.test(ui),
+    '§10 gespeichert wird mit der gemeinsamen Regel; an einer bestehenden Reparatur ist das Feld nur Auskunft');
+}
+group('§10 Annahmedatum');
+
 for (const [name, n] of groups) console.log(`  ${name}: ${n}`);
 if (fails.length > 0) {
   console.log(`\nFAIL — preg5 mobile repair: ${PASS} passed, ${fails.length} failed`);

@@ -904,6 +904,32 @@ const economics = await import('../../src/core/agent/economics.ts');
   ok(t.ok, `CLIENT …und sofort als Empfaenger eines Transfers waehlbar (${t.code || 'ok'})`);
 }
 
+// ── BUSINESS-DATE — der Tag der Übergabe ist wählbar (nachträglich erfasstes Approval) ──
+{
+  const heute = new Date().toISOString().split('T')[0];
+  const tag = (db: Db): string => String(db.exec('SELECT transferred_at FROM agent_transfers')[0]?.values?.[0]?.[0] ?? '');
+  const zahl = (db: Db): number => Number(db.exec('SELECT COUNT(*) FROM agent_transfers')[0]?.values?.[0]?.[0] ?? 0);
+  const MIT = { ...FORM, transferredAt: '2026-08-15' };
+  ok(rules.transferCreateBody(MIT).transferredAt === '2026-08-15' && !('transferredAt' in rules.transferCreateBody(FORM)),
+    'DATUM der Rumpf trägt das gewählte Datum — ohne Wahl keins');
+  let db = freshDb();
+  const p = await primary(() => house.createTransferOnPrimary(MIT));
+  const tP = tag(db);
+  db = freshDb();
+  const r = await fern(() => cmd.runTransferCreate(deps(db), identity('901', 'transfers.create'), rules.transferCreateBody(MIT)));
+  const tR = tag(db);
+  ok(p.ok && r.ok && tP === '2026-08-15T12:00:00.000Z' && tR === tP, `DATUM Übergabe rückwirkend: lokal == fern (${tP} / ${tR})`);
+  db = freshDb();
+  const o = await primary(() => house.createTransferOnPrimary(FORM));
+  ok(o.ok && tag(db).startsWith(heute), 'DATUM ohne Wahl: Übergabe heute (wie bisher)');
+  db = freshDb();
+  const zP = await primary(() => house.createTransferOnPrimary({ ...FORM, transferredAt: '2099-01-01' }));
+  let zR = '';
+  try { cmd.parseTransferCreate({ ...rules.transferCreateBody(FORM), transferredAt: '2099-01-01' }); } catch (e) { zR = String((e as Error).message); }
+  ok(!zP.ok && zP.code === 'INVALID_DATE' && /cannot be in the future/.test(zR) && zahl(db) === 0, `DATUM Zukunft → abgewiesen, nichts angelegt (${zP.code} / ${zR})`);
+  ok(/label="TRANSFER DATE" type="date"/.test(readFileSync(resolvePath(repo, 'src/pages/agents/AgentList.tsx'), 'utf8')), 'DATUM Maske: „Transfer date" ist wählbar');
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r5d transfer parity: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
 console.log('CENTRAL_UI_R5D_TRANSFER_SCOPE_FROZEN');

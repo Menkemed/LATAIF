@@ -110,6 +110,10 @@
     if (min !== null) body.minimumPrice = min;
     const ablauf = textOrNull(form.expiryDate);
     if (ablauf !== null) body.expiryDate = ablauf;
+    // BUSINESS-DATE — der Tag der Vereinbarung (JJJJ-MM-TT). Die Maske schreibt ihn IMMER aus, auch
+    // „heute": der Rumpf liegt mit seiner Kennung in der Ablage, eine Wiederholung traegt denselben Tag.
+    const vereinbart = textOrNull(form.agreementDate);
+    if (vereinbart !== null) body.agreementDate = vereinbart;
     const notiz = textOrNull(form.notes);
     if (notiz !== null) body.notes = notiz;
     const ids = (stagingIds || []).slice(0, MAX_PHOTOS);

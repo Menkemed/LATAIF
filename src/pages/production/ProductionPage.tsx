@@ -10,6 +10,7 @@ import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary
 import { Card } from '@/components/ui/Card';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
+import { todayIso, latestBusinessDate } from '@/core/utils/business-date';
 import { SearchMultiSelect } from '@/components/ui/SearchSelect';
 import { NewProductModal } from '@/components/products/NewProductModal';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
@@ -52,6 +53,8 @@ export function ProductionPage() {
   const [selectedInputIds, setSelectedInputIds] = useState<string[]>([]);
   const [outputs, setOutputs] = useState<OutputDraft[]>([]);
   const [notes, setNotes] = useState('');
+  // BUSINESS-DATE — der Tag der Fertigung (wählbar, vorbelegt mit heute).
+  const [productionDate, setProductionDate] = useState(() => todayIso());
   const [laborCost, setLaborCost] = useState<number>(0);
   const [overheadCost, setOverheadCost] = useState<number>(0);
   const [error, setError] = useState('');
@@ -79,6 +82,7 @@ export function ProductionPage() {
     setSelectedInputIds([]);
     setOutputs([]);
     setNotes('');
+    setProductionDate(todayIso());
     setLaborCost(0);
     setOverheadCost(0);
     setError('');
@@ -130,6 +134,7 @@ export function ProductionPage() {
     }
     const input: ProductionCreateInput = {
       notes: notes || undefined,
+      productionDate: productionDate || undefined,
       inputProductIds: selectedInputIds,
       outputs: outputs.map(o => ({ spec: o.spec, value: o.value })),
       laborCost: laborCost > 0 ? laborCost : undefined,
@@ -282,6 +287,12 @@ export function ProductionPage() {
               onChange={e => setOverheadCost(Number(e.target.value) || 0)}
               data-production-overhead
             />
+          </div>
+
+          {/* BUSINESS-DATE — der Tag der Fertigung ist wählbar (nachträglich erfasst). */}
+          <div style={{ maxWidth: 240 }} data-production-date>
+            <Input label="Production date" type="date" value={productionDate} max={latestBusinessDate()}
+              onChange={e => setProductionDate(e.target.value || todayIso())} />
           </div>
 
           <Input label="Notes" placeholder="Optional" value={notes} onChange={e => setNotes(e.target.value)} data-production-notes />

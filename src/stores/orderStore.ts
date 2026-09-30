@@ -312,6 +312,7 @@ function rowToOrder(row: Record<string, unknown>): Order {
     depositAmount: (row.deposit_amount as number) || 0,
     depositPaid: row.deposit_paid === 1,
     depositDate: row.deposit_date as string | undefined,
+    orderDate: (row.order_date as string | null) || undefined,
     remainingAmount: row.remaining_amount as number | undefined,
     supplierName: row.supplier_name as string | undefined,
     supplierPrice: row.supplier_price as number | undefined,
@@ -460,8 +461,8 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         supplier_name, supplier_price, expected_margin, expected_delivery,
         status, notes, created_at, updated_at, created_by,
         type, custom_meta, goldsmith_supplier_id, labor_cost, extra_gold_value,
-        custom_product_spec)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        custom_product_spec, order_date)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, orderNumber, data.customerId,
        data.categoryId || null, JSON.stringify(data.attributes || {}),
        data.condition || null, data.serialNumber || null, data.existingProductId || null,
@@ -475,7 +476,9 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
        data.expectedDelivery || null, initialStatus, data.notes || null, now, now, userId,
        orderType, customMetaJson, data.goldsmithSupplierId || null,
        data.laborCost || 0, data.extraGoldValue || 0,
-       customProductSpecJson]
+       customProductSpecJson,
+       // ORDER-DATE — das gewählte Auftragsdatum; ohne Angabe der heutige Tag.
+       data.orderDate || now.split('T')[0]]
     );
 
     // Order Lines persistieren falls übergeben — inkl. Tax-Scheme-Snapshot,
@@ -611,7 +614,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
       requestedModel: 'requested_model', requestedReference: 'requested_reference',
       requestedDetails: 'requested_details', agreedPrice: 'agreed_price',
       taxAmount: 'tax_amount', paymentMethod: 'payment_method',
-      depositAmount: 'deposit_amount', depositDate: 'deposit_date',
+      depositAmount: 'deposit_amount', depositDate: 'deposit_date', orderDate: 'order_date',
       remainingAmount: 'remaining_amount', supplierName: 'supplier_name',
       supplierPrice: 'supplier_price', expectedMargin: 'expected_margin',
       expectedDelivery: 'expected_delivery', actualDelivery: 'actual_delivery',
@@ -1610,7 +1613,8 @@ export function rowToOrderLine(r: Record<string, unknown>): OrderLine {
 }
 
 export function loadOrdersFor(ctx: BusinessReadContext): { orders: Order[]; orderLines: OrderLine[] } {
-  const rows = query('SELECT * FROM orders WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  // ORDER-DATE — nach dem Auftragsdatum (alte Aufträge: Tag der Erfassung), bei gleichem Tag die jüngste Erfassung zuerst.
+  const rows = query('SELECT * FROM orders WHERE branch_id = ? ORDER BY COALESCE(order_date, substr(created_at, 1, 10)) DESC, created_at DESC', [ctx.branchId]);
   // R5A.1 — die Positionen reisen mit. Ohne sie hat ein Auftrag auf dem zweiten Rechner keine
   // Zeilen, und jede Handlung, die an ihnen haengt (abrechnen, umwandeln), ist dort tot.
   const zeilen = query(
