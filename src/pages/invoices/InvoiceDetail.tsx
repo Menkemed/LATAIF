@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { ArrowLeft, Edit3, XCircle, CreditCard, Printer, Download, Table, ExternalLink, ChevronDown } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
@@ -24,8 +24,9 @@ import { StaffSelect } from '@/components/employees/StaffSelect';
 import { useProductStore } from '@/stores/productStore';
 import { useRepairStore } from '@/stores/repairStore';
 import type { PaymentMethod } from '@/core/models/types';
-import { downloadPdf } from '@/core/pdf/pdf-generator';
-import { formatProductMultiLine, getProductSpecs } from '@/core/utils/product-format';
+import { buildInvoiceA5Data, invoiceCompany, printInvoiceA5 } from '@/core/pdf/invoice-a5';
+import { useAuthStore } from '@/stores/authStore';
+import { getProductSpecs } from '@/core/utils/product-format';
 import { usePermission } from '@/hooks/usePermission';
 import logoUrl from '@/assets/logo.png';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
@@ -43,15 +44,11 @@ import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary
 import { WriteError } from '@/components/shared/WriteError';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
 import { computeCardFee } from '@/core/finance/card-fees';
-import { currentBranchId } from '@/core/db/helpers';
+import { currentBranchId, getSetting } from '@/core/db/helpers';
 import { exportCsv } from '@/core/utils/export-file';
 import type { ProductDisposition } from '@/core/models/types';
 import { RotateCcw } from 'lucide-react';
 import { Bhd } from '@/components/ui/Bhd';
-
-function fmt(v: number): string {
-  return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
-}
 
 function fmtDate(iso?: string): string {
   if (!iso) return '\u2014';
@@ -148,14 +145,16 @@ export function InvoiceDetail() {
 
   const invoice = useMemo(() => invoices.find(i => i.id === id), [invoices, id]);
 
-  // Plan §Sales — Save & Print: Detail-Page lädt, dann Print-Dialog automatisch öffnen.
+  // Plan §Sales — Save & Print: Detail-Page lädt, dann der A5-Beleg in den Druckdialog. Gedruckt wird
+  // mit dem Stand beim Auslösen (Artikel und Kunde geladen), nicht mit dem des ersten Zeichnens.
+  const druckRef = useRef<() => void>(() => {});
   useEffect(() => {
-    if (invoice && searchParams.get('print') === '1') {
+    if (invoice && searchParams.get('print') === '1' && (invoice.lines.length === 0 || products.length > 0)) {
       setSearchParams({}, { replace: true });
-      const t = setTimeout(() => window.print(), 400);
+      const t = setTimeout(() => druckRef.current(), 400);
       return () => clearTimeout(t);
     }
-  }, [invoice, searchParams, setSearchParams]);
+  }, [invoice, searchParams, setSearchParams, products.length]);
   const customer = useMemo(() => invoice ? customers.find(c => c.id === invoice.customerId) : null, [invoice, customers]);
 
   // 2026-05-17: Hero-Linksspalte zeigt Produkt-Bilder (Mosaic-Grid) statt
@@ -449,44 +448,24 @@ export function InvoiceDetail() {
     setRefundDeductFee(false);
   }
 
-  // Customer-facing PDF — no margin VAT visible
-  function handleDownloadPdf() {
+  // INVOICE-A5 — der Beleg zum Drucken (A5, „Tax Invoice"). „PDF" und „Print" öffnen denselben
+  // Druckdialog (dort „Als PDF speichern"). Margin-Steuer steht wie bisher nicht auf dem Beleg.
+  function printInvoice() {
     if (!invoice) return;
-    const stdLines = invoice.lines.filter(l => l.taxScheme === 'VAT_10');
-    const stdVat = stdLines.reduce((s, l) => s + l.vatAmount, 0);
-
-    // Plan §Print — Volle Specs (Brand+Name+alle Attribute) statt nur Name.
-    const lines = invoice.lines.map(l => {
-      const product = products.find(p => p.id === l.productId);
-      const fullDesc = formatProductMultiLine(product, categories);
-      const headWithVat = l.taxScheme === 'MARGIN'
-        ? fullDesc
-        : `${fullDesc}\n(incl. VAT ${fmt(l.vatAmount)} BHD)`;
-      return { label: headWithVat || getProductName(l.productId), value: `${fmt(l.lineTotal)} BHD` };
-    });
-
-    const summaryLines: { label: string; value: string; bold?: boolean }[] = [];
-    if (stdVat > 0) {
-      summaryLines.push({ label: 'VAT (10%)', value: `${fmt(stdVat)} BHD` });
-    }
-    summaryLines.push({ label: 'Total', value: `${fmt(invoice.grossAmount)} BHD`, bold: true });
-    if (invoice.paidAmount > 0) summaryLines.push({ label: 'Paid', value: `${fmt(invoice.paidAmount)} BHD` });
-    if (remaining > 0) summaryLines.push({ label: 'Due', value: `${fmt(remaining)} BHD`, bold: true });
-
-    downloadPdf({
-      title: formatInvoiceDisplayShort(invoice),
-      number: formatInvoiceDisplayShort(invoice),
-      date: fmtDate(invoice.issuedAt || invoice.createdAt),
-      subtitle: `Due: ${fmtDate(invoice.dueAt)}`,
-      customer: customer ? { name: `${customer.firstName} ${customer.lastName}`, company: customer.company, phone: customer.phone } : undefined,
-      type: 'invoice',
-      sections: [
-        { title: 'Items', lines },
-        { title: 'Summary', lines: summaryLines },
-      ],
-      footer: 'Thank you for your business.',
-    });
+    printInvoiceA5(buildInvoiceA5Data({
+      company: invoiceCompany((key) => getSetting(key)),
+      invoice: {
+        number: formatInvoiceDisplayShort(invoice), status: invoice.status, issuedAt: invoice.issuedAt, createdAt: invoice.createdAt,
+        grossAmount: invoice.grossAmount, paidAmount: invoice.paidAmount, lines: invoice.lines,
+      },
+      customer,
+      products,
+      paymentMethods: getInvoicePayments(invoice.id).map((p) => p.method),
+      salesperson: employees.find((e) => e.id === invoice.staffId)?.name,
+      branch: useAuthStore.getState().session?.branch.name,
+    }));
   }
+  druckRef.current = printInvoice;
 
   // Internal VAT export as CSV (for NBR tax reporting)
   function handleExportVat() {
@@ -573,8 +552,8 @@ export function InvoiceDetail() {
                     <Butterfly size={14} /> Butterfly{invoice.butterfly ? ' ✓' : ''}
                   </Button>
                 )}
-                <Button variant="secondary" onClick={handleDownloadPdf}><Download size={14} /> PDF</Button>
-                <Button variant="secondary" onClick={() => window.print()} className="no-print"><Printer size={14} /> Print</Button>
+                <Button variant="secondary" onClick={printInvoice}><Download size={14} /> PDF</Button>
+                <Button variant="secondary" onClick={printInvoice} className="no-print"><Printer size={14} /> Print</Button>
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
                 {perm.canExportData && <Button variant="ghost" onClick={handleExportVat}><Table size={14} /> VAT Export</Button>}
                 {canRecordPayment && perm.canRecordPayments && <Button variant="primary" onClick={openPaymentModal}><CreditCard size={14} /> Record Payment</Button>}

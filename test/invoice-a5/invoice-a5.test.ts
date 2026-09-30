@@ -1,0 +1,122 @@
+// ════════════════════════════════════════════════════════════════════════════
+// INVOICE-A5 — der Druckbeleg der Rechnung (A5): Firma aus den Einstellungen, Zeilen mit Steuer,
+// Summen, Betrag in Worten, Margin-Hinweis, und dass „PDF" und „Print" genau diesen Beleg drucken.
+// Run: node test/invoice-a5/invoice-a5.test.ts
+// ════════════════════════════════════════════════════════════════════════════
+import { readFileSync } from 'node:fs';
+import { dirname, resolve as resolvePath } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  INVOICE_COMPANY_DEFAULTS, INVOICE_COMPANY_KEYS, amountInWordsBhd, buildInvoiceA5Data, invoiceA5Html, invoiceCompany,
+  invoiceDateText, lineDetails, paymentModeText,
+} from '../../src/core/pdf/invoice-a5.ts';
+
+const repo = resolvePath(dirname(fileURLToPath(import.meta.url)), '..', '..');
+const src = (p: string): string => readFileSync(resolvePath(repo, p), 'utf8');
+let PASS = 0; const fails: string[] = [];
+const ok = (c: unknown, m: string): void => { if (c) PASS++; else { fails.push(m); console.log('  x ' + m); } };
+const S = (v: unknown): string => JSON.stringify(v);
+
+// ── Firma: Einstellungen vor Vorgabe, leer heißt Vorgabe ──
+{
+  const leer = invoiceCompany(() => '');
+  ok(S(leer) === S(INVOICE_COMPANY_DEFAULTS) && leer.nameEn === 'LATAIF JEWELLERY W.L.L.' && leer.crNumber === '137216-1' && leer.vatNumber === '220015625500002',
+    'FIRMA ohne Einstellungen: der Kopf der Vorlage (Name, CR, VAT, Adresse, Telefon, E-Mail)');
+  const gesetzt = invoiceCompany((k) => ({ [INVOICE_COMPANY_KEYS.vatNumber]: ' 999 ', [INVOICE_COMPANY_KEYS.phone]: '+973 1700 0000', [INVOICE_COMPANY_KEYS.nameAr]: '   ' } as Record<string, string>)[k] ?? '');
+  ok(gesetzt.vatNumber === '999' && gesetzt.phone === '+973 1700 0000' && gesetzt.nameAr === INVOICE_COMPANY_DEFAULTS.nameAr,
+    'FIRMA eine gesetzte Einstellung gilt (getrimmt), ein leerer Wert fällt auf die Vorgabe');
+  ok(invoiceCompany(() => { throw new Error('keine Datenbank'); }).nameEn === INVOICE_COMPANY_DEFAULTS.nameEn, 'FIRMA ohne lesbare Einstellungen (z. B. zweiter Rechner) druckt trotzdem');
+}
+
+// ── Schreibweisen ──
+ok(amountInWordsBhd(16100) === 'Bahrain Dinars Sixteen Thousand One Hundred Only', `WORTE 16.100 (${amountInWordsBhd(16100)})`);
+ok(amountInWordsBhd(6600.5) === 'Bahrain Dinars Six Thousand Six Hundred and Five Hundred Fils Only'
+  && amountInWordsBhd(0.25) === 'Bahrain Dinars Zero and Two Hundred Fifty Fils Only'
+  && amountInWordsBhd(1000001) === 'Bahrain Dinars One Million One Only'
+  && amountInWordsBhd(115.075) === 'Bahrain Dinars One Hundred Fifteen and Seventy Five Fils Only', 'WORTE mit Fils, null Dinar, Millionen');
+ok(invoiceDateText('2026-08-31') === '31-Aug-26' && invoiceDateText('2026-01-05T09:00:00.000Z') === '05-Jan-26' && invoiceDateText('') === '—', 'DATUM „31-Aug-26"');
+ok(paymentModeText([], 0, 100) === 'Credit' && paymentModeText(['cash'], 100, 0) === 'Cash'
+  && paymentModeText(['cash', 'card', 'cash'], 50, 50) === 'Cash / Card / Credit' && paymentModeText(['bank_transfer', 'benefit'], 10, 0) === 'Bank Transfer / Benefit'
+  && paymentModeText([], 100, 0) === 'Paid' && paymentModeText([], 40, 60) === 'Partially Paid', 'ZAHLUNG „Credit" ohne Zahlung, sonst die Wege; unbekannte Wege werden nicht erfunden');
+
+// ── Zeilen ──
+const products = [
+  { id: 'w', brand: 'Rolex', name: 'Datejust 36', categoryId: 'cat-watch', condition: 'Used', attributes: { reference_number: '16233', serial_number: 'W123456' } },
+  { id: 'c', brand: 'Cartier', name: 'Love Bracelet', categoryId: 'cat-branded-gold-jewelry', condition: 'Used', attributes: JSON.stringify({ model_number: 'B6035517', size: '17' }) },
+  { id: 'g', brand: '', name: '', categoryId: 'cat-gold-jewelry', condition: 'Excellent', attributes: { item_type: 'Ring', karat: '18K White', weight: 4.2, size: '54', stones: [{ type: 'diamond', qty: 1, carat: 0.5 }] } },
+];
+ok(S(lineDetails(products[0])) === S(['Ref: 16233', 'Serial: W123456', 'Condition: Used'])
+  && S(lineDetails(products[1])) === S(['Ref: B6035517', 'Size: 17', 'Condition: Used'])
+  && S(lineDetails(products[2])) === S(['Size: 54', 'Diamond 0.50 ct', 'Condition: Excellent']), `ZEILE Kurzangaben Ref · Serial · Size · Steine · Condition (${S(lineDetails(products[2]))})`);
+
+const firma = invoiceCompany(() => '');
+const basis = {
+  company: firma, products, paymentMethods: [] as string[], salesperson: 'Sara', branch: 'Manama',
+  customer: { firstName: 'Ali', lastName: 'Hassan', personalId: '880101234', phone: '+973 3600 0101', vatAccountNumber: '', company: '' },
+};
+const margin = buildInvoiceA5Data({ ...basis, invoice: { number: 'B0712', status: 'FINAL', issuedAt: '2026-08-31', grossAmount: 9500, paidAmount: 0,
+  lines: [
+    { productId: 'w', quantity: 1, taxScheme: 'MARGIN', vatRate: 10, vatAmount: 180, lineTotal: 4500 },
+    { productId: 'g', quantity: 2, taxScheme: 'MARGIN', vatRate: 10, vatAmount: 90, lineTotal: 5000 },
+  ] } });
+ok(margin.title === 'TAX INVOICE' && margin.marginNotice && margin.lines.every((l) => l.vatPct === 0 && l.vatAmount === 0)
+  && margin.lines[1].rate === 2500 && margin.lines[1].qty === 2 && margin.lines[0].rate === 4500,
+  'MARGIN keine Steuer auf dem Beleg (0 %, 0.000), Preis inklusive, Stückpreis je Menge — und der Margin-Hinweis');
+ok(margin.subtotal === 9500 && margin.vatTotal === 0 && margin.grandTotal === 9500 && margin.vatLabel === 'VAT Amount (0%)'
+  && margin.amountInWords === 'Bahrain Dinars Nine Thousand Five Hundred Only', 'MARGIN Summen wie die Vorlage: Subtotal = Grand Total, VAT (0%)');
+ok(margin.lines[1].description === 'Ring · 18K White · 4.20 g', `MARGIN Gold ohne Marke/Modell: der eine Anzeigename (${margin.lines[1].description})`);
+ok(S(margin.customer) === S([['Name', 'Ali Hassan'], ['ID/CR', '880101234'], ['Mobile', '+973 3600 0101']])
+  && S(margin.invoice) === S([['Invoice No.', 'B0712'], ['Date', '31-Aug-26'], ['Payment Mode', 'Credit'], ['Salesperson', 'Sara'], ['Branch', 'Manama']]),
+  `KOPF Kunde nur mit vorhandenen Angaben; Rechnungsangaben vollständig (${S(margin.customer)})`);
+
+const gemischt = buildInvoiceA5Data({ ...basis, paymentMethods: ['cash'], invoice: { number: 'B0713', status: 'PARTIAL', issuedAt: '2026-09-30', grossAmount: 6600.5, paidAmount: 2000,
+  lines: [
+    { productId: 'w', quantity: 1, taxScheme: 'MARGIN', vatRate: 10, vatAmount: 50, lineTotal: 5500.5 },
+    { productId: 'c', quantity: 1, taxScheme: 'VAT_10', vatRate: 10, vatAmount: 100, lineTotal: 1100 },
+  ] } });
+const z = gemischt.lines[1];
+ok(z.rate === 1000 && z.vatPct === 10 && z.vatAmount === 100 && z.amount === 1100, `10 % netto 1000 + VAT 100 = 1100 (${S(z)})`);
+ok(gemischt.subtotal === 6500.5 && gemischt.vatTotal === 100 && gemischt.grandTotal === 6600.5 && gemischt.vatLabel === 'VAT Amount (10%)'
+  && gemischt.paid === 2000 && gemischt.balance === 4600.5 && gemischt.invoice[2][1] === 'Cash / Credit', 'GEMISCHT Subtotal + VAT = Grand Total; bezahlt und offen');
+
+const ohneMargin = buildInvoiceA5Data({ ...basis, invoice: { number: 'P-1', status: 'DRAFT', issuedAt: null, createdAt: '2026-09-01', grossAmount: 1100, paidAmount: 0,
+  lines: [{ productId: 'c', quantity: 1, taxScheme: 'VAT_10', vatRate: 10, vatAmount: 100, lineTotal: 1100 }] } });
+const storniert = buildInvoiceA5Data({ ...basis, invoice: { number: 'B0714', status: 'CANCELLED', issuedAt: '2026-09-01', grossAmount: 1100, paidAmount: 0,
+  lines: [{ productId: 'c', quantity: 1, taxScheme: 'VAT_10', vatRate: 10, vatAmount: 100, lineTotal: 1100 }] } });
+ok(ohneMargin.title === 'PROFORMA INVOICE' && !ohneMargin.marginNotice && ohneMargin.invoice[1][1] === '01-Sep-26' && storniert.stamp === 'CANCELLED' && storniert.title === 'TAX INVOICE',
+  'STATUS Entwurf = Proforma, storniert = Stempel, ohne Margin-Zeile kein Hinweis');
+
+// ── HTML ──
+{
+  const h = invoiceA5Html(margin);
+  ok(/@page \{ size: A5 portrait;/.test(h) && /<h1>TAX INVOICE<\/h1>/.test(h), 'HTML Seitenformat A5 hoch, Titel „TAX INVOICE"');
+  ok(['Item Description', 'Qty', 'Rate<span>(BHD)</span>', 'VAT<span>%</span>', 'VAT Amount<span>(BHD)</span>', 'Amount<span>(BHD)</span>', 'Customer Details', 'Invoice Details',
+    'Amount in Words :', 'Subtotal', 'Grand Total', 'VAT HAS BEEN IMPOSED USING THE PROFIT MARGIN SCHEME', 'Terms &amp; Conditions:', 'Customer’s Signature', 'Authorised Signatory']
+    .every((t) => h.includes(t)), 'HTML alle Teile der Vorlage: Spalten, Kunde/Rechnung, Worte, Summen, Hinweis, Bedingungen, Unterschriften');
+  ok(h.includes('LATAIF JEWELLERY <small>W.L.L.</small>') && h.includes('مجوهرات لطائف ذ.م.م') && h.includes('<bdi dir="ltr">137216-1</bdi>')
+    && h.includes('<bdi dir="ltr">220015625500002</bdi>') && h.includes('lataifwll@gmail.com'), 'HTML Kopf Englisch/Arabisch, Nummern im arabischen Teil nicht gespiegelt, Fußzeile');
+  ok(/<thead>/.test(h) && /table\.items thead \{ display: table-header-group; \}/.test(h) && /break-inside: avoid/.test(h), 'HTML lange Rechnung: Tabellenkopf wiederholt sich, Zeilen brechen nicht');
+  ok(h.includes('<td class="num">4,500.000</td>') && h.includes('<td class="c-qty">2 pcs</td>'), 'HTML Beträge mit drei Nachkommastellen, Menge in Stück');
+  const boese = invoiceA5Html(buildInvoiceA5Data({ ...basis, customer: { firstName: '<img src=x onerror=alert(1)>', lastName: '&' },
+    invoice: { number: 'B"1', status: 'FINAL', issuedAt: '2026-09-01', grossAmount: 1, paidAmount: 0, lines: [{ productId: 'x', description: '<b>Service</b>', quantity: 1, taxScheme: 'ZERO', vatRate: 0, vatAmount: 0, lineTotal: 1 }] } }));
+  ok(!boese.includes('<img src=x') && boese.includes('&lt;img src=x onerror=alert(1)&gt; &amp;') && boese.includes('&lt;b&gt;Service&lt;/b&gt;') && boese.includes('B&quot;1'),
+    'HTML alles Eingegebene wird maskiert (Name, Beschreibung, Nummer)');
+  ok(!invoiceA5Html(ohneMargin).includes('PROFIT MARGIN SCHEME') && invoiceA5Html(storniert).includes('<div class="stamp">CANCELLED</div>'), 'HTML Hinweis nur mit Margin-Zeile; Stempel bei Storno');
+}
+
+// ── Verdrahtung ──
+{
+  const seite = src('src/pages/invoices/InvoiceDetail.tsx');
+  ok(/onClick=\{printInvoice\}><Download size=\{14\} \/> PDF<\/Button>/.test(seite) && /onClick=\{printInvoice\} className="no-print"><Printer size=\{14\} \/> Print<\/Button>/.test(seite),
+    'SEITE „PDF" und „Print" drucken den A5-Beleg');
+  ok(/const t = setTimeout\(\(\) => druckRef\.current\(\), 400\);/.test(seite) && /druckRef\.current = printInvoice;/.test(seite) && !/handleDownloadPdf/.test(seite),
+    'SEITE „Save & Print" druckt ebenfalls den A5-Beleg — mit geladenen Artikeln');
+  ok(/company: invoiceCompany\(\(key\) => getSetting\(key\)\)/.test(seite) && /paymentMethods: getInvoicePayments\(invoice\.id\)/.test(seite), 'SEITE Firma aus den Einstellungen, Zahlungswege aus den Zahlungen');
+  const einst = src('src/pages/settings/SettingsPage.tsx');
+  ok(/\['nameEn', 'Legal Name \(Invoice\)'\], \['nameAr', 'Legal Name \(Arabic\)'\], \['crNumber', 'CR No\.'\], \['vatNumber', 'VAT No\.'\], \['terms', 'Invoice Terms'\]/.test(einst)
+    && /setSetting\(branchId, INVOICE_COMPANY_KEYS\[k\]/.test(einst), 'EINSTELLUNGEN Name (EN/AR), CR, VAT und Bedingungen sind unter Company Information änderbar');
+}
+
+console.log(`\ninvoice-a5: ${PASS} passed, ${fails.length} failed`);
+if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
+console.log('INVOICE_A5_PROVED');

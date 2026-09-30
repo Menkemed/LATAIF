@@ -34,6 +34,7 @@ import type { Category, CategoryAttribute, AttributeType, UserRole } from '@/cor
 import { PrimaryOnlyNotice } from '@/components/shared/PrimaryOnlyNotice';
 import { primaryOnlyLocked, assertPrimaryOnly } from '@/core/data/primary-only';
 import { productDisplayName, productDisplayLines } from '@/core/products/display-name';
+import { INVOICE_COMPANY_DEFAULTS, INVOICE_COMPANY_KEYS, type InvoiceA5Company } from '@/core/pdf/invoice-a5';
 
 // ── Constants ──
 
@@ -146,8 +147,14 @@ function SuccessBanner({ message, onDone }: { message: string; onDone: () => voi
 // COMPANY TAB
 // ═══════════════════════════════════════════════════════════
 
+/** INVOICE-A5 — was der Rechnungskopf zusätzlich braucht (leer = der grau gezeigte Wert gilt). */
+const INVOICE_FIELDS: ReadonlyArray<[keyof InvoiceA5Company, string]> = [
+  ['nameEn', 'Legal Name (Invoice)'], ['nameAr', 'Legal Name (Arabic)'], ['crNumber', 'CR No.'], ['vatNumber', 'VAT No.'], ['terms', 'Invoice Terms'],
+];
+
 function CompanyTab() {
   const branchId = currentBranchId();
+  const [invoiceFields, setInvoiceFields] = useState<Partial<Record<keyof InvoiceA5Company, string>>>({});
   const [companyName, setCompanyName] = useState('');
   const [address, setAddress] = useState('');
   const [phone, setPhone] = useState('');
@@ -161,6 +168,7 @@ function CompanyTab() {
     setPhone(getSetting(branchId, 'company.phone'));
     setEmail(getSetting(branchId, 'company.email'));
     setLogo(getSetting(branchId, 'company.logo'));
+    setInvoiceFields(Object.fromEntries(INVOICE_FIELDS.map(([k]) => [k, getSetting(branchId, INVOICE_COMPANY_KEYS[k])])));
   }, [branchId]);
 
   function save() {
@@ -169,6 +177,7 @@ function CompanyTab() {
     setSetting(branchId, 'company.phone', phone, 'company');
     setSetting(branchId, 'company.email', email, 'company');
     setSetting(branchId, 'company.logo', logo, 'company');
+    for (const [k] of INVOICE_FIELDS) setSetting(branchId, INVOICE_COMPANY_KEYS[k], (invoiceFields[k] ?? '').trim(), 'company');
     setSaved('Company settings saved.');
   }
 
@@ -182,14 +191,21 @@ function CompanyTab() {
             <Input value={companyName} onChange={e => setCompanyName(e.target.value)} placeholder="Your company name" />
           </FieldRow>
           <FieldRow label="Address">
-            <Input value={address} onChange={e => setAddress(e.target.value)} placeholder="Street, City, Country" />
+            <Input value={address} onChange={e => setAddress(e.target.value)} placeholder={INVOICE_COMPANY_DEFAULTS.address} />
           </FieldRow>
           <FieldRow label="Phone">
-            <Input value={phone} onChange={e => setPhone(e.target.value)} placeholder="+973 XXXX XXXX" />
+            <Input value={phone} onChange={e => setPhone(e.target.value)} placeholder={INVOICE_COMPANY_DEFAULTS.phone} />
           </FieldRow>
           <FieldRow label="Email">
-            <Input value={email} onChange={e => setEmail(e.target.value)} placeholder="info@company.com" type="email" />
+            <Input value={email} onChange={e => setEmail(e.target.value)} placeholder={INVOICE_COMPANY_DEFAULTS.email} type="email" />
           </FieldRow>
+          {INVOICE_FIELDS.map(([k, label]) => (
+            <FieldRow key={k} label={label}>
+              <Input data-invoice-setting={k} value={invoiceFields[k] ?? ''} dir={k === 'nameAr' ? 'rtl' : undefined}
+                onChange={e => { const v = e.target.value; setInvoiceFields(f => ({ ...f, [k]: v })); }} placeholder={INVOICE_COMPANY_DEFAULTS[k]} />
+            </FieldRow>
+          ))}
+          <p style={{ fontSize: 12, color: '#6B7280', margin: '4px 0 0' }}>Used on the A5 invoice. An empty field prints the value shown in grey (also for address, phone and email, which appear in the invoice footer).</p>
           <FieldRow label="Logo URL">
             <Input value={logo} onChange={e => setLogo(e.target.value)} placeholder="Path or URL to logo" />
           </FieldRow>
