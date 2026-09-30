@@ -260,7 +260,8 @@ const QUELLEN: Array<[string, string, string]> = [
   // zu dreissig werden. Genau das tat `|| 30`.
   ok(!pay.includes(", 10) || 30"),
     'G und eine Karenz von null Tagen wird nicht mehr auf dreissig zurueckgedreht');
-  ok(anzahl(pay, 'ctx.branchId') === 6, `G alle sechs Abfragen der Verbindlichkeiten nennen den Ausweis (${anzahl(pay, 'ctx.branchId')})`);
+  // Sieben: die sechs Abfragen und die Partner-Salden (PARTNER-ITEMS), die ebenfalls nur die Filiale des Ausweises lesen.
+  ok(anzahl(pay, 'ctx.branchId') === 7, `G alle sieben Lesestellen der Verbindlichkeiten nennen den Ausweis (${anzahl(pay, 'ctx.branchId')})`);
   ok(anzahl(scrap, 'ctx.branchId') === 1, `G und das Altgold ebenso (${anzahl(scrap, 'ctx.branchId')})`);
   ok(!/currentBranchId\(\)/.test(pay.slice(pay.indexOf('export function loadPayablesFor'))),
     'G in der gemeinsamen Ladefunktion steht keine Primary-Sitzung mehr');

@@ -1,7 +1,9 @@
 // ═══════════════════════════════════════════════════════════
 // LATAIF — Receivables Breakdown
 // Pro offene Forderung eine Zeile mit Source, Referenz, Open, Due, Aging.
-// 4 kommerzielle Sources: INVOICE, CONSIGNMENT, APPROVAL, REPAIR.
+// 4 kommerzielle Sources: INVOICE, CONSIGNMENT, APPROVAL, REPAIR — und PARTNER: was ein Partner
+// LATAIF aus gemeinsam gekauften Artikeln schuldet (offener Kostenanteil, Rückforderung). Die
+// Partnerzeilen sind der offene Stand der Partnerlogik, gelesen — hier wird nichts neu gerechnet.
 // Private Bargeld-Loans (debts/we_lend) sind bewusst NICHT enthalten — die haben
 // eine eigene Dashboard-Section "Private Loans" + die /debts Seite. Mischen wuerde
 // dort doppelt zaehlen.
@@ -9,15 +11,19 @@
 // ═══════════════════════════════════════════════════════════
 
 import { query } from '@/core/db/helpers';
+import { partnerItemsOverview } from '@/core/partners/item-participation-house';
+import { partnerOpenRows, PARTNER_ORIGIN_LABEL } from '@/core/partners/partner-open-balances';
 
-export type ReceivableSource = 'INVOICE' | 'CONSIGNMENT' | 'APPROVAL' | 'REPAIR';
+export type ReceivableSource = 'INVOICE' | 'CONSIGNMENT' | 'APPROVAL' | 'REPAIR' | 'PARTNER';
 
 export type ReceivableAgeBucket = 'current' | '1-30' | '31-60' | '60+';
 
 export interface ReceivableRow {
   id: string;                      // unique key (source + sourceId)
-  customerId: string;
-  customerName: string;
+  customerId: string;              // leer bei PARTNER — ein Partner ist kein Kunde
+  customerName: string;            // bei PARTNER der Name des Partners
+  partnerId?: string;              // nur PARTNER
+  counterpartyHref?: string;       // nur PARTNER: die Stelle im Partner-Modul
   source: ReceivableSource;
   sourceId: string;                // invoice_id / consignment_id / agent_transfer_id / repair_id
   reference: string;               // invoice_number / consignment_number / transfer_number / repair_number
@@ -268,6 +274,37 @@ export function receivablesBreakdown(branchId?: string): ReceivableRow[] {
     });
   }
 
+  // ── 5. Partner — offener Kostenanteil / Rückforderung ────────
+  // Der offene Stand je Partner und Artikel aus der Partnerlogik (dieselbe Zahl wie „Partner pays in" /
+  // „Partner repays" auf der Partnerseite). Kein Fälligkeitsdatum: der Betrag kann sich auch durch
+  // Verkauf, Abrechnung oder Verrechnung erledigen — er altert nicht und gilt nie als überfällig.
+  if (branchId) {
+    let partnerZeilen: ReturnType<typeof partnerOpenRows> = [];
+    try { partnerZeilen = partnerOpenRows(partnerItemsOverview(branchId)).filter((r) => r.side === 'RECEIVABLE'); }
+    catch (e) { console.warn('[receivables] partner balances unavailable:', e); }
+    for (const r of partnerZeilen) {
+      rows.push({
+        id:           `PARTNER-${r.partnerId}-${r.purchaseLineId}`,
+        customerId:   '',
+        customerName: r.partnerName,
+        partnerId:    r.partnerId,
+        counterpartyHref: r.href,
+        source:       'PARTNER',
+        sourceId:     r.purchaseLineId,
+        reference:    r.purchaseNumber || r.purchaseLineId,
+        detailLabel:  `${PARTNER_ORIGIN_LABEL[r.origin]} · ${r.productLabel}`,
+        invoiceId:    null,
+        totalAmount:  r.total,
+        paidAmount:   r.covered,
+        open:         r.open,
+        issuedAt:     r.date,
+        dueAt:        null,
+        daysOverdue:  0,
+        navigateTo:   r.href,
+      });
+    }
+  }
+
   // (frueher Sektion 5: Loans we_lend/MONEY_GIVEN) — ENTFERNT.
   // Grund: Loans sind Bargeld-Darlehen ausserhalb des Handels und haben jetzt ihre
   // eigene Dashboard-Section "Private Loans" + die /debts Seite. Inkludierung hier
@@ -315,6 +352,13 @@ export function receivablesTotal(rows: ReceivableRow[]): number {
   return rows.reduce((s, r) => s + r.open, 0);
 }
 
+/** Kunden- und Partnerforderungen getrennt — jede Zeile zählt genau in einer der beiden Summen. */
+export function receivablesSplit(rows: ReceivableRow[]): { customers: number; partners: number; total: number } {
+  let customers = 0, partners = 0;
+  for (const r of rows) { if (r.source === 'PARTNER') partners += r.open; else customers += r.open; }
+  return { customers, partners, total: customers + partners };
+}
+
 // ── Summary für Dashboard ─────────────────────────────────────
 
 export interface ReceivableSummary {
@@ -328,7 +372,7 @@ export function receivablesSummary(): ReceivableSummary {
   const rows = receivablesBreakdown();
   const total = rows.reduce((s, r) => s + r.open, 0);
   const clientSet = new Set(rows.map(r => r.customerId).filter(Boolean));
-  const counts: Record<ReceivableSource, number> = { INVOICE: 0, CONSIGNMENT: 0, APPROVAL: 0, REPAIR: 0 };
+  const counts: Record<ReceivableSource, number> = { INVOICE: 0, CONSIGNMENT: 0, APPROVAL: 0, REPAIR: 0, PARTNER: 0 };
   for (const r of rows) counts[r.source]++;
   const sources = (Object.keys(counts) as ReceivableSource[])
     .filter(s => counts[s] > 0)
@@ -343,6 +387,7 @@ export const RECEIVABLE_SOURCE_LABELS: Record<ReceivableSource, string> = {
   CONSIGNMENT: 'Consignment',
   APPROVAL:    'Approval',
   REPAIR:      'Repair',
+  PARTNER:     'Partner',
 };
 
 export const RECEIVABLE_SOURCE_COLORS: Record<ReceivableSource, { fg: string; bg: string }> = {
@@ -350,4 +395,5 @@ export const RECEIVABLE_SOURCE_COLORS: Record<ReceivableSource, { fg: string; bg
   CONSIGNMENT: { fg: '#7C3AED', bg: 'rgba(124,58,237,0.10)' },
   APPROVAL:    { fg: '#FF8730', bg: 'rgba(255,135,48,0.10)' },
   REPAIR:      { fg: '#16A34A', bg: 'rgba(22,163,74,0.10)' },
+  PARTNER:     { fg: '#B45309', bg: 'rgba(180,83,9,0.10)' },
 };

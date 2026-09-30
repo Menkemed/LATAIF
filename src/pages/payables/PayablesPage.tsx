@@ -18,7 +18,7 @@ function fmtDate(iso?: string): string {
   return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
-const ALL_TYPES: PayableType[] = ['refund', 'supplier', 'agent', 'consignor', 'expense', 'loan'];
+const ALL_TYPES: PayableType[] = ['refund', 'supplier', 'agent', 'consignor', 'expense', 'loan', 'partner'];
 
 const BUCKET_META: Record<AgeBucket, { label: string; fg: string; bg: string; ring: string }> = {
   'current': { label: 'Current',         fg: '#16A34A', bg: 'rgba(22,163,74,0.08)',  ring: 'rgba(22,163,74,0.18)' },
@@ -103,6 +103,8 @@ export function PayablesPage() {
   }, [payables, activeTypes, overdueOnly, search]);
 
   const total = payablesTotal(payables);
+  // Partner sind in der Gesamtsumme genau einmal enthalten; hier nur zusätzlich ausgewiesen.
+  const partnerTotal = payablesTotal(payables.filter(r => r.type === 'partner'));
   const overdueN = overdueCount(payables);
   const buckets = bucketTotals(payables);
 
@@ -113,7 +115,8 @@ export function PayablesPage() {
   return (
     <PageLayout
       title="Payables"
-      subtitle={`${payables.length} open · ${overdueN} overdue · ${fmt(total)} BHD total`}
+      subtitle={`${payables.length} open · ${overdueN} overdue · ${fmt(total)} BHD total`
+        + (partnerTotal > 0 ? ` · of which partners ${fmt(partnerTotal)}` : '')}
       showSearch onSearch={setSearch} searchPlaceholder="Search reference or counterparty..."
       actions={
         <button
@@ -233,10 +236,13 @@ export function PayablesPage() {
 
       {filtered.map(row => {
         const colors = PAYABLE_TYPE_COLORS[row.type];
-        const age = ageLabel(row.daysOverdue);
+        // PARTNER — kein Fälligkeitsdatum: offen, bis ausgezahlt, verrechnet oder nachabgerechnet ist.
+        const partner = row.type === 'partner';
+        const age = partner ? { text: 'Open', color: '#6B7280' } : ageLabel(row.daysOverdue);
         return (
           <div
             key={row.id}
+            data-payable-type={row.type}
             className="cursor-pointer transition-colors"
             style={{
               display: 'grid',
@@ -256,7 +262,7 @@ export function PayablesPage() {
                 {age.text}
               </div>
               <div className="flex items-center gap-1" style={{ fontSize: 10, color: '#6B7280', marginTop: 2 }}>
-                <Calendar size={10} /> {row.dueAt ? fmtDate(row.dueAt) : `${fmtDate(row.issuedAt)} + grace`}
+                <Calendar size={10} /> {partner ? '—' : row.dueAt ? fmtDate(row.dueAt) : `${fmtDate(row.issuedAt)} + grace`}
               </div>
             </div>
 
@@ -269,7 +275,7 @@ export function PayablesPage() {
               }}>
                 {PAYABLE_TYPE_LABELS[row.type]}
               </span>
-              <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <div title={row.detailLabel} style={{ fontSize: 10, color: '#9CA3AF', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {row.detailLabel}
               </div>
             </div>

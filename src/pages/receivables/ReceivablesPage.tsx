@@ -5,7 +5,7 @@ import { PageLayout } from '@/components/layout/PageLayout';
 import { Card } from '@/components/ui/Card';
 import { Bhd } from '@/components/ui/Bhd';
 import {
-  bucketTotals, overdueCount, receivablesTotal,
+  bucketTotals, overdueCount, receivablesSplit,
   RECEIVABLE_SOURCE_LABELS, RECEIVABLE_SOURCE_COLORS,
   type ReceivableSource, type ReceivableAgeBucket, type ReceivableRow,
 } from '@/core/finance/receivables';
@@ -14,6 +14,7 @@ import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useAgentStore } from '@/stores/agentStore';
 import { useRepairStore } from '@/stores/repairStore';
 import { useDebtStore } from '@/stores/debtStore';
+import { usePartnerStore } from '@/stores/partnerStore';
 import { useSharedRead } from '@/core/data/shared-read';
 import { receivableRowsFor } from '@/core/data/domain-reads';
 
@@ -25,7 +26,7 @@ function fmtDate(iso?: string | null): string {
   return new Date(iso).toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: 'numeric' });
 }
 
-const ALL_SOURCES: ReceivableSource[] = ['INVOICE', 'CONSIGNMENT', 'APPROVAL', 'REPAIR'];
+const ALL_SOURCES: ReceivableSource[] = ['INVOICE', 'CONSIGNMENT', 'APPROVAL', 'REPAIR', 'PARTNER'];
 
 const BUCKET_META: Record<ReceivableAgeBucket, { label: string; fg: string; bg: string; ring: string }> = {
   'current': { label: 'Current',         fg: '#16A34A', bg: 'rgba(22,163,74,0.08)',  ring: 'rgba(22,163,74,0.18)' },
@@ -41,7 +42,7 @@ function ageLabel(daysOverdue: number, hasDue: boolean): { text: string; color: 
 }
 
 function downloadCsv(rows: ReceivableRow[]) {
-  const header = ['Source', 'Reference', 'Client', 'Issued', 'Due', 'Days Overdue', 'Amount (BHD)', 'Paid (BHD)', 'Outstanding (BHD)'];
+  const header = ['Source', 'Reference', 'Client / Partner', 'Issued', 'Due', 'Days Overdue', 'Amount (BHD)', 'Paid (BHD)', 'Outstanding (BHD)'];
   const lines = [header.join(',')];
   for (const r of rows) {
     const cells = [
@@ -75,6 +76,8 @@ export function ReceivablesPage() {
   const { transfers, loadTransfers } = useAgentStore();
   const { repairs, loadRepairs } = useRepairStore();
   const { debts, loadDebts } = useDebtStore();
+  // PARTNER — der offene Stand der Partner gehört zur Aufstellung; ändert er sich, wird neu gelesen.
+  const { itemOverview, loadPartners } = usePartnerStore();
 
   const initialSourceParam = searchParams.get('source') || searchParams.get('type');
   const initialOverdue = searchParams.get('overdue') === '1';
@@ -88,8 +91,8 @@ export function ReceivablesPage() {
   const [overdueOnly, setOverdueOnly] = useState(initialOverdue);
 
   useEffect(() => {
-    loadInvoices(); loadConsignments(); loadTransfers(); loadRepairs(); loadDebts();
-  }, [loadInvoices, loadConsignments, loadTransfers, loadRepairs, loadDebts]);
+    loadInvoices(); loadConsignments(); loadTransfers(); loadRepairs(); loadDebts(); loadPartners();
+  }, [loadInvoices, loadConsignments, loadTransfers, loadRepairs, loadDebts, loadPartners]);
 
   // URL-Sync (source/overdue) — Dashboard-Klicks können deep-linken.
   useEffect(() => {
@@ -104,7 +107,7 @@ export function ReceivablesPage() {
   // CENTRAL-UI-PARITY R4A — die Aufstellung kommt aus der gemeinsamen Kernauskunft; die
   // Auswertung darauf (Faecher, Summen, Ueberfaellige) bleibt hier, sie rechnet nur.
   const forderungen = useSharedRead('finance.receivables.get', {}, receivableRowsFor, { rows: [] },
-    [invoices, consignments, transfers, repairs, debts]);
+    [invoices, consignments, transfers, repairs, debts, itemOverview]);
   const allRows = forderungen.rows;
 
   const filtered = useMemo(() => {
@@ -122,7 +125,9 @@ export function ReceivablesPage() {
     return r;
   }, [allRows, activeSources, overdueOnly, search]);
 
-  const total = receivablesTotal(allRows);
+  // Kunden und Partner getrennt ausgewiesen; jede Zeile zählt genau einmal in der Gesamtsumme.
+  const summen = receivablesSplit(allRows);
+  const total = summen.total;
   const overdueN = overdueCount(allRows);
   const buckets = bucketTotals(allRows);
 
@@ -133,8 +138,9 @@ export function ReceivablesPage() {
   return (
     <PageLayout
       title="Receivables"
-      subtitle={`${allRows.length} open · ${overdueN} overdue · ${fmt(total)} BHD total`}
-      showSearch onSearch={setSearch} searchPlaceholder="Search reference or client..."
+      subtitle={`${allRows.length} open · ${overdueN} overdue · ${fmt(total)} BHD total`
+        + (summen.partners > 0 ? ` · customers ${fmt(summen.customers)} · partners ${fmt(summen.partners)}` : '')}
+      showSearch onSearch={setSearch} searchPlaceholder="Search reference, client or partner..."
       actions={
         <button
           onClick={() => downloadCsv(filtered)}
@@ -236,7 +242,7 @@ export function ReceivablesPage() {
         <span className="text-overline">DUE / AGE</span>
         <span className="text-overline">SOURCE</span>
         <span className="text-overline">REFERENCE</span>
-        <span className="text-overline">CLIENT</span>
+        <span className="text-overline">CLIENT / PARTNER</span>
         <span className="text-overline">ISSUED</span>
         <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>AMOUNT</span>
         <span className="text-overline" style={{ display: 'block', textAlign: 'right' }}>OUTSTANDING</span>
@@ -253,10 +259,13 @@ export function ReceivablesPage() {
 
       {filtered.map(row => {
         const colors = RECEIVABLE_SOURCE_COLORS[row.source];
-        const age = ageLabel(row.daysOverdue, !!row.dueAt);
+        // PARTNER — kein Fälligkeitsdatum: der Betrag kann sich auch durch Verkauf/Abrechnung erledigen.
+        const partner = row.source === 'PARTNER';
+        const age = partner ? { text: 'Open', color: '#6B7280' } : ageLabel(row.daysOverdue, !!row.dueAt);
         return (
           <div
             key={row.id}
+            data-receivable-source={row.source}
             className="cursor-pointer transition-colors"
             style={{
               display: 'grid',
@@ -289,7 +298,7 @@ export function ReceivablesPage() {
               }}>
                 {RECEIVABLE_SOURCE_LABELS[row.source]}
               </span>
-              <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              <div title={row.detailLabel} style={{ fontSize: 10, color: '#9CA3AF', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {row.detailLabel}
               </div>
             </div>
@@ -315,7 +324,21 @@ export function ReceivablesPage() {
                 ExternalLink-Icon analog zur Reference-Spalte). Klick navigiert
                 zum Client-Detail. */}
             <div style={{ minWidth: 0 }}>
-              {row.customerId ? (
+              {partner ? (
+                <span
+                  onClick={(e) => { e.stopPropagation(); navigate(row.counterpartyHref || '/partners'); }}
+                  className="cursor-pointer"
+                  style={{
+                    fontSize: 14, color: '#0F0F10', textDecoration: 'underline', textUnderlineOffset: 3,
+                    textDecorationColor: 'rgba(15,15,16,0.20)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+                    display: 'inline-flex', alignItems: 'center', gap: 4,
+                  }}
+                  title={`Open partner ${row.customerName}`}
+                >
+                  {row.customerName}
+                  <ExternalLink size={11} style={{ opacity: 0.5, flexShrink: 0 }} />
+                </span>
+              ) : row.customerId ? (
                 <span
                   onClick={(e) => { e.stopPropagation(); navigate(`/clients/${row.customerId}`); }}
                   className="cursor-pointer"

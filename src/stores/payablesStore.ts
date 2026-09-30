@@ -1,6 +1,8 @@
 // Unified Payables-View über alle „wir schulden noch"-Töpfe.
 // Aggregiert: Supplier-Purchases, Refunds, Agent-Settlements, Consignor-Payouts,
-// Pending-Expenses, We-Borrow-Loans. Live-Berechnung pro loadPayables()-Call.
+// Pending-Expenses, We-Borrow-Loans — und Partner: was LATAIF einem Partner aus gemeinsam gekauften
+// Artikeln schuldet („Pay out"), gelesen aus dem offenen Stand der Partnerlogik.
+// Live-Berechnung pro loadPayables()-Call.
 import { create } from 'zustand';
 import { query } from '@/core/db/helpers';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
@@ -8,8 +10,10 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+import { partnerItemsOverview } from '@/core/partners/item-participation-house';
+import { partnerOpenRows, PARTNER_ORIGIN_LABEL } from '@/core/partners/partner-open-balances';
 
-export type PayableType = 'refund' | 'supplier' | 'agent' | 'consignor' | 'expense' | 'loan';
+export type PayableType = 'refund' | 'supplier' | 'agent' | 'consignor' | 'expense' | 'loan' | 'partner';
 export type AgeBucket = 'current' | '1-30' | '31-60' | '60+';
 
 export interface PayableRow {
@@ -140,6 +144,7 @@ export const PAYABLE_TYPE_LABELS: Record<PayableType, string> = {
   consignor: 'Consignor',
   expense:   'Expense',
   loan:      'Loan',
+  partner:   'Partner',
 };
 
 export const PAYABLE_TYPE_COLORS: Record<PayableType, { fg: string; bg: string }> = {
@@ -149,6 +154,7 @@ export const PAYABLE_TYPE_COLORS: Record<PayableType, { fg: string; bg: string }
   consignor: { fg: '#EC4899', bg: 'rgba(236,72,153,0.10)'  },
   expense:   { fg: '#0EA5C5', bg: 'rgba(14,165,197,0.10)'  },
   loan:      { fg: '#DC2626', bg: 'rgba(220,38,38,0.10)'   },
+  partner:   { fg: '#B45309', bg: 'rgba(180,83,9,0.10)'    },
 };
 
 /**
@@ -343,6 +349,33 @@ export function loadPayablesFor(ctx: BusinessReadContext): { payables: PayableRo
       navigateTo: '/debts',
       detailLabel: 'Borrowed loan',
     }, today, gracePeriodDays));
+  }
+
+  // 7) Partner — offene Auszahlung aus gemeinsam gekauften Artikeln („Pay out" der Partnerseite).
+  //    Der offene Stand je Partner und Artikel kommt aus der Partnerlogik; hier wird nichts gerechnet
+  //    und nichts gebucht. Kein Fälligkeitsdatum → altert nicht, gilt nie als überfällig.
+  let partnerZeilen: ReturnType<typeof partnerOpenRows> = [];
+  try { partnerZeilen = partnerOpenRows(partnerItemsOverview(ctx.branchId)).filter((r) => r.side === 'PAYABLE'); }
+  catch (e) { console.warn('[payablesStore] partner balances unavailable:', e); }
+  for (const r of partnerZeilen) {
+    rows.push({
+      id: `partner:${r.partnerId}:${r.purchaseLineId}`,
+      type: 'partner',
+      sourceTable: 'item_participations',
+      sourceId: r.purchaseLineId,
+      counterpartyId: r.partnerId,
+      counterpartyName: r.partnerName,
+      counterpartyHref: r.href,
+      referenceNumber: r.purchaseNumber || r.purchaseLineId.slice(0, 8),
+      issuedAt: r.date,
+      totalAmount: r.total,
+      paidAmount: r.covered,
+      outstanding: r.open,
+      daysOverdue: 0,
+      ageBucket: 'current',
+      navigateTo: r.href,
+      detailLabel: `${PARTNER_ORIGIN_LABEL[r.origin]}${r.onHold ? ' (on hold)' : ''} · ${r.productLabel}`,
+    });
   }
 
   // Sortierung: am ältesten zuerst, dann größter offener Betrag.

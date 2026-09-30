@@ -39,8 +39,10 @@ const KIND_LABEL: Record<string, string> = {
 interface MoveForm { item: PartnerItemView; partnerId: string; partnerName: string; kind: 'CONTRIBUTION' | 'PAYOUT' }
 interface OffsetForm { partner: PartnerItemsOfPartner; from: string; to: string }
 
-export function PartnerItemsPanel({ overview, partners = [], action = null, onActionDone }: {
+export function PartnerItemsPanel({ overview, partners = [], action = null, onActionDone, focus = null }: {
   overview: PartnerItemsOfPartner[]; partners?: Partner[];
+  /** Aus Receivables/Payables: diese Zeile aufklappen und zeigen. */
+  focus?: { partnerId: string; purchaseLineId: string } | null;
   /** Eine Handlung aus der Partnerkarte: öffnet hier denselben Dialog wie der Knopf in der Tabelle. */
   action?: PartnerItemAction | null; onActionDone?: () => void;
 }) {
@@ -72,6 +74,18 @@ export function PartnerItemsPanel({ overview, partners = [], action = null, onAc
     onActionDone?.();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [action]);
+
+  // Sprung aus Receivables/Payables: die Zeile des Partners aufklappen und in Sicht holen.
+  const focusKey = focus ? `${focus.partnerId}:${focus.purchaseLineId}` : '';
+  const focusDa = !!focus && overview.some((p) => p.partnerId === focus.partnerId && p.items.some((i) => i.purchaseLineId === focus.purchaseLineId));
+  useEffect(() => {
+    if (!focusKey || !focusDa) return;
+    setOpenRows((r) => ({ ...r, [focusKey]: true }));
+    const t = setTimeout(() => {
+      document.querySelector(`[data-partner-item-key="${focusKey}"]`)?.scrollIntoView({ block: 'center', behavior: 'smooth' });
+    }, 60);
+    return () => clearTimeout(t);
+  }, [focusKey, focusDa]);
 
   if (overview.length === 0) return null;
 
@@ -167,7 +181,7 @@ export function PartnerItemsPanel({ overview, partners = [], action = null, onAc
               const key = `${p.partnerId}:${it.purchaseLineId}`;
               const expanded = !!openRows[key];
               return (
-                <div key={key} style={{ borderBottom: '1px solid #F0F1F3' }} data-partner-item={it.purchaseLineId}>
+                <div key={key} style={{ borderBottom: '1px solid #F0F1F3', background: key === focusKey ? 'rgba(180,83,9,0.05)' : undefined }} data-partner-item={it.purchaseLineId} data-partner-item-key={key}>
                   <div style={{ display: 'grid', gridTemplateColumns: grid, gap: 8, fontSize: 12, padding: '8px 0', alignItems: 'center' }}>
                     <button type="button" onClick={() => setOpenRows({ ...openRows, [key]: !expanded })} className="cursor-pointer flex items-center gap-1"
                       style={{ background: 'none', border: 'none', textAlign: 'left', color: '#0F0F10', padding: 0 }} data-partner-item-toggle={it.purchaseLineId}>

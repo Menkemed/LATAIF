@@ -56,6 +56,14 @@ export function PartnersPage() {
 
   useEffect(() => { loadPartners(); loadTransactions(); }, [loadPartners, loadTransactions]);
 
+  // Sprung aus Receivables/Payables: /partners?partner=…&item=… zeigt genau diese Artikelzeile.
+  const focusPartner = searchParams.get('partner') || '';
+  const focusItem = searchParams.get('item') || '';
+  const itemFocus = useMemo(
+    () => (focusPartner && focusItem ? { partnerId: focusPartner, purchaseLineId: focusItem } : null),
+    [focusPartner, focusItem],
+  );
+
   // Dashboard-Shortcut „New Partner" → /partners?new=1 öffnet direkt das New-Partner-Modal.
   useEffect(() => {
     if (searchParams.get('new') === '1') {
@@ -203,7 +211,7 @@ export function PartnersPage() {
         </div>
       )}
 
-      <PartnerItemsPanel overview={itemOverview} partners={partners} action={itemAction} onActionDone={() => setItemAction(null)} />
+      <PartnerItemsPanel overview={itemOverview} partners={partners} action={itemAction} onActionDone={() => setItemAction(null)} focus={itemFocus} />
 
       {/* New Partner */}
       <Modal open={showNewPartner} onClose={() => setShowNewPartner(false)} title="New Partner" width={460}>

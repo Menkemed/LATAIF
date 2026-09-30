@@ -272,9 +272,15 @@ export function Dashboard() {
   // (REPAIR-Zeilen) — beschreibend neben der Ledger-Zahl, nie addiert.
   // Dieselbe Aufstellung, die auch die Forderungsseite zeigt — eine Quelle, kein Nachbau.
   const forderungen = useSharedRead('finance.receivables.get', {}, receivableRowsFor, { rows: [] },
-    [invoices, salesReturns]);
+    [invoices, salesReturns, partners]);
   const repairsOpen = useMemo(
     () => forderungen.rows.filter((r) => r.source === 'REPAIR').reduce((s, r) => s + r.open, 0),
+    [forderungen],
+  );
+  // PARTNER — was Partner aus gemeinsam gekauften Artikeln schulden: wie die Reparaturen eine getrennte
+  // Info-Position neben der Ledger-Zahl der Kundenforderungen, nie addiert (kein Doppelzählen).
+  const partnersOwe = useMemo(
+    () => forderungen.rows.filter((r) => r.source === 'PARTNER').reduce((s, r) => s + r.open, 0),
     [forderungen],
   );
 
@@ -699,9 +705,9 @@ export function Dashboard() {
             <KPICard label="BENEFIT" value={fmt(accountBalances.benefit)} unit="BHD" icon={<Smartphone size={16} />} accent="orange" onClick={() => navigate('/banking')} />
             <KPICard label="RECEIVABLES"
               value={fmt(customerReceivables)}
-              unit={repairsOpen > 0
-                ? `BHD · invoices & approvals · +${fmt(repairsOpen)} repairs`
-                : 'BHD · invoices & approvals'}
+              unit={'BHD · invoices & approvals'
+                + (repairsOpen > 0 ? ` · +${fmt(repairsOpen)} repairs` : '')
+                + (partnersOwe > 0 ? ` · +${fmt(partnersOwe)} partners` : '')}
               icon={<FileText size={16} />} accent="orange"
               onClick={() => navigate('/receivables')} />
             <KPICard label="SUPPLIER PAYABLES" value={fmt(supplierPayables)} unit="BHD · purchases & supplier expenses" icon={<ShoppingCart size={16} />} accent="orange" onClick={() => navigate('/suppliers')} />

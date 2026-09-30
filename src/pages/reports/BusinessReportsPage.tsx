@@ -27,6 +27,7 @@ import { useScrapTradeStore } from '@/stores/scrapTradeStore';
 // CENTRAL-UI-PARITY R4A — Bestand und Forderungen ueber die gemeinsamen Kernauskuenfte.
 import { useSharedRead } from '@/core/data/shared-read';
 import { receivableRowsFor, lotAggregatesFor } from '@/core/data/domain-reads';
+import { partnerOpenRows } from '@/core/partners/partner-open-balances';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -341,8 +342,18 @@ export function BusinessReportsPage() {
       outstanding: s.outstandingBalance || 0,
     })).filter(s => s.outstanding > 0);
     const total = bySupplier.reduce((s, x) => s + x.outstanding, 0);
-    return { total, bySupplier };
-  }, [suppliers]);
+    // PARTNER — offene Auszahlungen aus gemeinsam gekauften Artikeln: der offene Stand der Partnerlogik,
+    // getrennt von den Lieferanten ausgewiesen (die Lieferantensumme bleibt, wie sie war).
+    const byPartner: Record<string, { name: string; outstanding: number; count: number }> = {};
+    for (const r of partnerOpenRows(itemOverview)) {
+      if (r.side !== 'PAYABLE') continue;
+      const e = byPartner[r.partnerId] || { name: r.partnerName, outstanding: 0, count: 0 };
+      e.outstanding += r.open; e.count += 1;
+      byPartner[r.partnerId] = e;
+    }
+    const partners = Object.values(byPartner);
+    return { total, bySupplier, byPartner: partners, partnerTotal: partners.reduce((s, x) => s + x.outstanding, 0) };
+  }, [suppliers, itemOverview]);
 
   // ── Receivables Report (Plan §Reports §G)
   // SSOT: receivablesBreakdown() deckt ALLE Forderungsquellen ab (Invoice,
@@ -350,7 +361,9 @@ export function BusinessReportsPage() {
   // bereinigt und damit identisch zur Dashboard-RECEIVABLES-KPI. Die alte
   // Variante zählte nur PARTIAL-Invoices und unterschlug Approval/Consignment/Repair.
   const receivablesReport = useMemo(() => {
-    const rows = forderungen.rows;
+    // PARTNER — die Aufstellung enthält auch, was Partner schulden. Jede Zeile zählt genau einmal:
+    // Kunden in der Kundensumme (unverändert), Partner getrennt darunter.
+    const rows = forderungen.rows.filter((r) => r.source !== 'PARTNER');
     const byCustomer: Record<string, { name: string; outstanding: number; count: number }> = {};
     for (const r of rows) {
       const e = byCustomer[r.customerId] || { name: r.customerName, outstanding: 0, count: 0 };
@@ -358,8 +371,17 @@ export function BusinessReportsPage() {
       byCustomer[r.customerId] = e;
     }
     const total = rows.reduce((s, r) => s + r.open, 0);
-    return { total, byCustomer: Object.values(byCustomer) };
-  }, [invoices, customers, repairs, transfers, consignments]);
+    const byPartner: Record<string, { name: string; outstanding: number; count: number }> = {};
+    for (const r of forderungen.rows) {
+      if (r.source !== 'PARTNER') continue;
+      const key = r.partnerId || r.customerName;
+      const e = byPartner[key] || { name: r.customerName, outstanding: 0, count: 0 };
+      e.outstanding += r.open; e.count += 1;
+      byPartner[key] = e;
+    }
+    const partners = Object.values(byPartner);
+    return { total, byCustomer: Object.values(byCustomer), byPartner: partners, partnerTotal: partners.reduce((s, x) => s + x.outstanding, 0) };
+  }, [forderungen, invoices, customers, repairs, transfers, consignments]);
 
   // ── Partner Report (Plan §Reports §H)
   const partnerReport = useMemo(() => {
@@ -544,6 +566,12 @@ export function BusinessReportsPage() {
           ...payablesReport.bySupplier.map(s => [s.name, s.totalPurchases.toFixed(2), s.totalPaid.toFixed(2), s.outstanding.toFixed(2)]),
           ['', '', '', ''],
           ['Total outstanding', '', '', payablesReport.total.toFixed(2)],
+          ...(payablesReport.byPartner.length ? [
+            ['', '', '', ''],
+            ['Partner (jointly bought items)', 'Open items', '', 'Outstanding'],
+            ...payablesReport.byPartner.map(p => [p.name, String(p.count), '', p.outstanding.toFixed(2)]),
+            ['Total owed to partners', '', '', payablesReport.partnerTotal.toFixed(2)],
+          ] : []),
         ]};
       case 'receivables':
         return { title: 'Receivables Report', rows: [
@@ -551,6 +579,12 @@ export function BusinessReportsPage() {
           ...receivablesReport.byCustomer.map(c => [c.name, String(c.count), c.outstanding.toFixed(2)]),
           ['', '', ''],
           ['Total outstanding', '', receivablesReport.total.toFixed(2)],
+          ...(receivablesReport.byPartner.length ? [
+            ['', '', ''],
+            ['Partner (jointly bought items)', 'Open items', 'Outstanding'],
+            ...receivablesReport.byPartner.map(p => [p.name, String(p.count), p.outstanding.toFixed(2)]),
+            ['Total owed by partners', '', receivablesReport.partnerTotal.toFixed(2)],
+          ] : []),
         ]};
       case 'partner':
         return { title: 'Partner Report', rows: [
@@ -872,6 +906,20 @@ export function BusinessReportsPage() {
                 </div>
               ))}
           </Card>
+          {payablesReport.byPartner.length > 0 && (<>
+            <MetricCard label="OWED TO PARTNERS — JOINTLY BOUGHT ITEMS" value={`${fmt(payablesReport.partnerTotal)} BHD`} />
+            <Card>
+              {payablesReport.byPartner.map(p => (
+                <div key={p.name} data-report-partner-payable className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
+                  <span style={{ color: '#0F0F10' }}>{p.name}</span>
+                  <div className="flex gap-6">
+                    <span style={{ color: '#6B7280' }}>{p.count} open</span>
+                    <span className="font-mono" style={{ color: '#DC2626' }}>− <Bhd v={p.outstanding}/> BHD</span>
+                  </div>
+                </div>
+              ))}
+            </Card>
+          </>)}
         </div>
       )}
 
@@ -891,6 +939,20 @@ export function BusinessReportsPage() {
                 </div>
               ))}
           </Card>
+          {receivablesReport.byPartner.length > 0 && (<>
+            <MetricCard label="OWED BY PARTNERS — JOINTLY BOUGHT ITEMS" value={`${fmt(receivablesReport.partnerTotal)} BHD`} />
+            <Card>
+              {receivablesReport.byPartner.map(p => (
+                <div key={p.name} data-report-partner-receivable className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
+                  <span style={{ color: '#0F0F10' }}>{p.name}</span>
+                  <div className="flex gap-6">
+                    <span style={{ color: '#6B7280' }}>{p.count} open</span>
+                    <span className="font-mono" style={{ color: '#16A34A' }}><Bhd v={p.outstanding}/> BHD</span>
+                  </div>
+                </div>
+              ))}
+            </Card>
+          </>)}
         </div>
       )}
 

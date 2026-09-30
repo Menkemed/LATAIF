@@ -322,6 +322,24 @@ try {
   // ── Geldhandlung folgt dem Stand: Guthaben → nur „Pay out"; danach erledigt, kein Beitrag mehr ──
   ok(!(await exists(c, `[data-partner-item-contribute="${P('pl-A')}"]`)) && await exists(c, `[data-partner-item-payout="${P('pl-A')}"]`),
     'GELDHANDLUNG LATAIF schuldet dem Partner → nur „Pay out", kein Beitrag');
+
+  // ── PARTNER PAYABLES: derselbe offene Stand steht in Payables (Art „Partner"), der Klick führt zur Artikelzeile ──
+  await gehFrisch(c, '/payables');
+  await waitFor(c, '[data-payable-type="partner"]', 30000);
+  const payZeilen = await c.ev(`return JSON.stringify([...document.querySelectorAll('[data-payable-type="partner"]')].map((r) => r.innerText.replace(/\\s+/g, ' ')));`).then(JSON.parse);
+  ok(payZeilen.length === 1 && /Open/.test(payZeilen[0]) && /Partner/.test(payZeilen[0]) && /Pay out · /.test(payZeilen[0]) && /SC-PUR-A/.test(payZeilen[0])
+    && /SC Partner/.test(payZeilen[0]) && /568\.618/.test(payZeilen[0]) && !/overdue/.test(payZeilen[0]),
+    `PAYABLES eine Partnerzeile: SC Partner · SC-PUR-A · Pay out · 568,618 — offen, nie überfällig (${S(payZeilen)})`);
+  ok(/of which partners 568\.618/.test(await c.ev("return document.body.innerText;")), 'PAYABLES Kopfzeile weist den Partneranteil aus');
+  await shot('payables-partner');
+  await click(c, '[data-payable-type="partner"]');
+  await waitFor(c, `[data-partner-item-expanded="${P('pl-A')}"]`, 30000);
+  ok(await c.ev("return location.pathname + location.search;") === `/partners?partner=sc-pa&item=${P('pl-A')}`
+    && await exists(c, `[data-partner-item-payout="${P('pl-A')}"]`), 'PAYABLES Klick öffnet die Artikelzeile im Partner-Modul (aufgeklappt, „Pay out")');
+  await gehFrisch(c, '/partners');
+  await waitFor(c, '[data-partner-items]', 30000);
+  await aufklappen(c, P('pl-A'));
+
   // ── Partnerkarte: Summen, laufende Artikel mit ihrer Handlung ──
   const karte = await c.ev(`const k = document.querySelector('[data-partner-card-items="sc-pa"]'); if (!k) return 'null';
     const g = (a) => k.querySelector('[' + a + ']')?.getAttribute(a);
@@ -378,6 +396,30 @@ try {
   const rep = await c.ev(`const g=(a)=>document.querySelector('['+a+']')?.getAttribute(a); return JSON.stringify({ item: g('data-report-joint-item-profit'), partner: g('data-report-joint-partner-share'), lataif: g('data-report-joint-lataif-share') });`).then(JSON.parse);
   ok(rep.item === '873.144' && rep.partner === '349.258' && rep.lataif === '523.886',
     `BERICHT Artikelgewinn 421,545 + 271,399 + 180,2 (Gebühr einmal), Partner 168,618 + 108,560 + 72,080, LATAIF Rest (${S(rep)})`);
+
+  // ── PARTNER RECEIVABLES: C und D sind verkauft, nicht abgerechnet, der Partner hat nichts eingezahlt ──
+  // → er schuldet seine Kostenanteile 400 + 280. A ist ausgezahlt (OPEN = 0) und erscheint nirgends mehr.
+  await gehFrisch(c, '/receivables');
+  await waitFor(c, '[data-receivable-source="PARTNER"]', 30000);
+  const recZeilen = await c.ev(`return JSON.stringify([...document.querySelectorAll('[data-receivable-source="PARTNER"]')].map((r) => r.innerText.replace(/\\s+/g, ' ')));`).then(JSON.parse);
+  ok(recZeilen.length === 2 && recZeilen.every((z) => /Open/.test(z) && /Cost share · /.test(z) && /SC Partner/.test(z) && !/overdue/.test(z))
+    && recZeilen.some((z) => /SC-PUR-C/.test(z) && /400\.000/.test(z)) && recZeilen.some((z) => /SC-PUR-D/.test(z) && /280\.000/.test(z)) && !recZeilen.some((z) => /SC-PUR-A/.test(z)),
+    `RECEIVABLES zwei Partnerzeilen (C 400, D 280), A nicht mehr — offen, nie überfällig (${S(recZeilen)})`);
+  ok(/partners 680\.000/.test(await c.ev("return document.body.innerText;")), 'RECEIVABLES Kopfzeile: Kunden und Partner getrennt, Partner 680,000');
+  await shot('receivables-partner');
+  await gehFrisch(c, '/payables');
+  await sleep(1500);
+  ok(!(await exists(c, '[data-payable-type="partner"]')), 'PAYABLES nach der Auszahlung keine Partnerzeile mehr (OPEN = 0)');
+  await gehFrisch(c, '/business-reports');
+  await c.ev("[...document.querySelectorAll('button')].find(b=>b.textContent.trim()==='Receivables')?.click(); return 1;");
+  await waitFor(c, '[data-report-partner-receivable]', 20000);
+  const repR = await c.ev("return [...document.querySelectorAll('[data-report-partner-receivable]')].map((r) => r.innerText.replace(/\\s+/g, ' ')).join(' | ') + ' ## ' + document.body.innerText.replace(/\\s+/g, ' ');");
+  ok(/SC Partner 2 open 680/.test(repR) && /OWED BY PARTNERS/.test(repR) && /TOTAL OUTSTANDING FROM CUSTOMERS 0/.test(repR),
+    `BERICHT Partner getrennt (680), Kundensumme unverändert 0 (${repR.split(' ## ')[0]})`);
+  await gehFrisch(c, '/');
+  await sleep(2500);
+  const dashR = await c.ev("return document.body.innerText.replace(/\\s+/g, ' ');");
+  ok(/\+680(\.000)? partners/.test(dashR), `ÜBERSICHT Receivables-Karte nennt die Partner getrennt (+680 partners) (${(dashR.match(/RECEIVABLES.{0,90}/) || [''])[0]})`);
 
   // ── Weitere bestehende Rückfrage (Partner löschen): Dialog der App statt Windows-Fenster ──
   await gehFrisch(c, '/partners');
