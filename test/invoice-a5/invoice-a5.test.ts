@@ -104,7 +104,7 @@ ok(gemischt.title === 'ADVANCE PAYMENT INVOICE' && margin.title === 'TAX INVOICE
   ok(['Item Description', 'Qty', 'Rate<span>(BHD)</span>', 'VAT<span>%</span>', 'VAT Amount<span>(BHD)</span>', 'Amount<span>(BHD)</span>', 'Customer Details', 'Invoice Details',
     'Amount in Words :', 'Subtotal', 'Grand Total', 'VAT HAS BEEN IMPOSED USING THE PROFIT MARGIN SCHEME', 'Terms &amp; Conditions:', 'Customer’s Signature', 'Authorised Signatory']
     .every((t) => h.includes(t)), 'HTML alle Teile der Vorlage: Spalten, Kunde/Rechnung, Worte, Summen, Hinweis, Bedingungen, Unterschriften');
-  ok(h.includes('<div class="d-title">Rolex Datejust 36 <span class="d-sku">SKU: LAT-W-0042</span></div>') && !h.includes('<span class="d-it">SKU:'), 'HTML die SKU steht klein neben dem Namen, nicht in den Angaben');
+  ok(h.includes('<div class="d-title"><span>Rolex Datejust 36</span><span class="d-sku">SKU: LAT-W-0042</span></div>') && !h.includes('<span class="d-it">SKU:'), 'HTML die SKU steht klein neben dem Namen, nicht in den Angaben');
   ok(h.includes('<div><span class="sl"></span>Customer’s Signature</div>') && h.includes('<div><span class="sl"></span>Authorised Signatory</div>'),
     'HTML Unterschriften: erst der Strich, darunter die Beschriftung');
   ok(h.indexOf('+973 36211681') < h.indexOf('lataifwll@gmail.com') && h.indexOf('lataifwll@gmail.com') < h.indexOf('<span>@rahmatbahrain</span>')

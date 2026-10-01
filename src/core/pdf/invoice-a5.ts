@@ -300,7 +300,7 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   const c = d.company;
   const rows = d.lines.map((l, i) => `<tr>
       <td class="c-no">${i + 1}</td>
-      <td class="c-desc"><div class="d-title">${esc(l.description)}${l.sku ? ` <span class="d-sku">SKU: ${esc(l.sku)}</span>` : ''}</div>${l.details.length ? `<div class="d-sub">${l.details.map((x) => `<span class="d-it">${esc(x)}</span>`).join('&nbsp;<span class="dot">·</span> ')}</div>` : ''}</td>
+      <td class="c-desc"><div class="d-title"><span>${esc(l.description)}</span>${l.sku ? `<span class="d-sku">SKU: ${esc(l.sku)}</span>` : ''}</div>${l.details.length ? `<div class="d-sub">${l.details.map((x) => `<span class="d-it">${esc(x)}</span>`).join('&nbsp;<span class="dot">·</span> ')}</div>` : ''}</td>
       <td class="c-qty">${l.qty} pcs</td>
       <td class="num">${bhd(l.rate)}</td>
       <td class="c-vat">${l.vatPct} %</td>
@@ -358,9 +358,10 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   .c-no { text-align: center; }
   .c-qty, .c-vat { text-align: center; white-space: nowrap; }
   .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
-  .d-title { font-weight: 600; font-size: 7.4pt; }
+  /* Name und SKU nebeneinander; passt die SKU nicht mehr dazu, beginnt sie die nächste Zeile bündig links. */
+  .d-title { font-weight: 600; font-size: 7.4pt; display: flex; flex-wrap: wrap; align-items: baseline; column-gap: 1.2mm; }
   /* Die SKU klein neben dem Namen, wie die Angaben darunter. */
-  .d-sku { font-weight: 400; font-style: italic; font-size: 6pt; color: #444; margin-left: 1.2mm; white-space: nowrap; }
+  .d-sku { font-weight: 400; font-style: italic; font-size: 6pt; color: #444; white-space: nowrap; }
   .d-sub { font-style: italic; font-size: 6pt; color: #444; margin-top: 0.2mm; line-height: 1.22; }
   /* Eine Angabe bricht nie in sich um („Case Diameter: 36 mm" bleibt beisammen) — nur zwischen den Angaben. */
   .d-sub .d-it { white-space: nowrap; }
