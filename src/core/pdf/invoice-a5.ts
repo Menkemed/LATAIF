@@ -164,13 +164,18 @@ const GOLD_CATEGORIES: readonly string[] = ['cat-gold-jewelry', 'cat-branded-gol
 
 /**
  * Die Kurzangaben unter dem Artikelnamen (die SKU steht klein neben dem Namen). Bezeichnung nur bei Ref, Serial
- * und Size; sonst nur der Wert. Uhren: Ref · Serial · Gehäuse … (ohne Condition). Gold: Ref · Serial · Size ·
- * Karat · Gewicht · Diamanten · Condition — Karat und Gewicht nur, wenn sie nicht schon im Namen stehen.
+ * und Size; sonst nur der Wert; keine Condition. Uhren: Ref · Serial · Gehäuse … Schmuck: Art · Ref · Serial ·
+ * Size · Karat · Gewicht · Diamanten — Art, Karat und Gewicht nur, wenn sie nicht schon im Namen stehen.
  */
 export function lineDetails(p: InvoiceA5Input['products'][number] | undefined): string[] {
   if (!p) return [];
   const a = attrsOf(p.attributes);
   const out: string[] = [];
+  const schmuck = GOLD_CATEGORIES.includes(String(p.categoryId ?? ''));
+  const name = productDisplayName(p).toLowerCase();
+  // Schmuck: zuerst die Art (Ring, Bangle, Bracelet …) — außer sie steht schon im Namen.
+  const art = schmuck ? text(a.item_type) : '';
+  if (art && art.toLowerCase() !== 'other' && !name.includes(art.toLowerCase())) out.push(art);
   const ref = text(a.reference_number) || text(a.model_number);
   if (ref) out.push('Ref: ' + ref);
   if (text(a.serial_number)) out.push('Serial: ' + text(a.serial_number));
@@ -183,8 +188,7 @@ export function lineDetails(p: InvoiceA5Input['products'][number] | undefined): 
   }
   if (text(a.size)) out.push('Size: ' + text(a.size));
   const steine = a.stones ? stonesSummary(a.stones) : '';
-  if (GOLD_CATEGORIES.includes(String(p.categoryId ?? ''))) {
-    const name = productDisplayName(p).toLowerCase();
+  if (schmuck) {
     const karat = text(a.karat);
     if (karat && !name.includes(karat.toLowerCase())) out.push(karat);
     const gramm = formatGrams(a.weight);
@@ -194,7 +198,6 @@ export function lineDetails(p: InvoiceA5Input['products'][number] | undefined): 
     if (dw !== null && !Number.isNaN(dw) && dw > 0) out.push('Diamond ' + fmtCarat(dw) + ' ct');
   }
   if (steine) out.push(steine);
-  if (text(p.condition)) out.push(text(p.condition));
   return out;
 }
 

@@ -47,13 +47,16 @@ const products = [
 ];
 ok(S(lineDetails(products[0])) === S(['Ref: 16233', 'Serial: W123456', '36 mm', 'Champagne', 'Fluted', 'Two-Tone Steel/Gold', '18K Yellow', 'Jubilee'])
   && S(lineDetails({ id: 'w2', categoryId: 'cat-watch', condition: 'New', attributes: { reference_number: '5711', case_diameter_mm: '40.5 mm', dial: '' } })) === S(['Ref: 5711', '40.5 mm'])
-  && S(lineDetails(products[1])) === S(['Ref: B6035517', 'Size: 17', 'Used'])
-  && S(lineDetails(products[2])) === S(['Size: 54', 'Diamond 0.50 ct', 'Excellent'])
+  && S(lineDetails(products[1])) === S(['Ref: B6035517', 'Size: 17'])
+  && S(lineDetails(products[2])) === S(['Size: 54', 'Diamond 0.50 ct'])
   && S(lineDetails({ id: 'g2', brand: '', name: 'Baguette Diamond Ring', categoryId: 'cat-gold-jewelry', condition: 'Pre-Owned', attributes: { karat: '18K White', weight: 3.1, diamond_weight: 0.6 } }))
-    === S(['18K White', '3.10 g', 'Diamond 0.60 ct', 'Pre-Owned'])
-  && S(lineDetails({ id: 'o1', brand: 'Cartier', name: 'Love', categoryId: 'cat-original-gold-jewelry', condition: 'Pre-Owned', attributes: { karat: '18K Yellow', serial_number: 'WZY157', size: '16', weight: 8.5, year: 2024 } }))
-    === S(['Serial: WZY157', 'Size: 16', '18K Yellow', '8.50 g', 'Pre-Owned']),
-  `ZEILE Kurzangaben: Bezeichnung nur bei Ref, Serial, Size; Gold mit Karat, Gewicht, Diamanten (nicht doppelt zum Namen); Uhr ohne Condition (${S(lineDetails(products[0]))})`);
+    === S(['18K White', '3.10 g', 'Diamond 0.60 ct'])
+  && S(lineDetails({ id: 'o1', brand: 'Cartier', name: 'Love', categoryId: 'cat-original-gold-jewelry', condition: 'Pre-Owned', attributes: { item_type: 'Bangle', karat: '18K Yellow', serial_number: 'WZY157', size: '16', weight: 8.5, year: 2024 } }))
+    === S(['Bangle', 'Serial: WZY157', 'Size: 16', '18K Yellow', '8.50 g'])
+  && S(lineDetails({ id: 'o2', brand: 'Cartier', name: 'Love Bracelet', categoryId: 'cat-original-gold-jewelry', condition: 'Pre-Owned', attributes: { item_type: 'Bracelet', karat: '18K Yellow', serial_number: 'GJI904' } }))
+    === S(['Serial: GJI904', '18K Yellow'])
+  && S(lineDetails({ id: 'a1', brand: 'Hermès', name: 'Clic H', categoryId: 'cat-accessory', condition: 'Pre-Owned', attributes: { item_type: 'Other', serial_number: 'DF0254' } })) === S(['Serial: DF0254']),
+  `ZEILE Kurzangaben: keine Condition; Bezeichnung nur bei Ref, Serial, Size; Schmuck mit Art, Karat, Gewicht, Diamanten (nicht doppelt zum Namen) (${S(lineDetails(products[0]))})`);
 
 const firma = invoiceCompany(() => '');
 const basis = {
