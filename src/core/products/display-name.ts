@@ -65,7 +65,10 @@ export function nameFromAttributes(attributes: DisplayNameSource['attributes']):
   const art = text(a.item_type);
   let beschreibung = sanfteSchreibweise(text(a.description));
   if (beschreibung && art && beschreibung.toLowerCase() === art.toLowerCase()) beschreibung = '';
-  return [art, beschreibung, text(a.karat), gewicht(a.weight)].filter(Boolean).join(' · ');
+  // Nennt die Beschreibung die Schmuckart schon („Double Ring"), steht sie nicht noch einmal davor.
+  const woerter = (s: string): string => ' ' + s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() + ' ';
+  const ohneArt = !!beschreibung && !!art && woerter(beschreibung).includes(woerter(art));
+  return [ohneArt ? '' : art, beschreibung, text(a.karat), gewicht(a.weight)].filter(Boolean).join(' · ');
 }
 
 /** Der Anzeigename. Leer nur, wenn wirklich nichts da ist. */

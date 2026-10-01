@@ -69,6 +69,9 @@ const faelle: Array<[string, Record<string, unknown>, string]> = [
   ['Merkmale als JSON-Text (SQL-Zeile)', { categoryId: GOLD, attributes: '{"item_type":"Ring","karat":"18K White","weight":2.92}' }, 'Ring · 18K White · 2.92 g'],
   ['Beschreibung gleich Schmuckart nicht doppelt', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'RING', weight: 1 } }, 'Ring · 1 g'],
   ['gemischte Schreibweise bleibt', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'Love Knot' } }, 'Ring · Love Knot'],
+  ['Schmuckart steckt in der Beschreibung: nicht doppelt', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'DOUBLE RING', karat: '18K White', weight: 2.92 } }, 'Double Ring · 18K White · 2.92 g'],
+  ['…auch mitten im Text', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'Diamond Ring Main 0.59ct', karat: '18K White', weight: 16.1 } }, 'Diamond Ring Main 0.59ct · 18K White · 16.10 g'],
+  ['…aber nur als ganzes Wort', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'Earrings Set', weight: 2 } }, 'Ring · Earrings Set · 2 g'],
   ['gar nichts → Kategoriename', { categoryId: GOLD, attributes: {} }, 'Gold-Diamond Jewellery'],
   ['ein älterer Wert bei Gold bleibt sichtbar', { brand: 'Pendant', name: 'Emerald Pendant Necklace', categoryId: GOLD, attributes: { item_type: 'Necklace' } }, 'Pendant Emerald Pendant Necklace'],
 ];

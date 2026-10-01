@@ -44,7 +44,10 @@
     const art = text(a.item_type);
     let beschreibung = sanfteSchreibweise(text(a.description));
     if (beschreibung && art && beschreibung.toLowerCase() === art.toLowerCase()) beschreibung = '';
-    return [art, beschreibung, text(a.karat), gewicht(a.weight)].filter(Boolean).join(' · ');
+    // Nennt die Beschreibung die Schmuckart schon („Double Ring"), steht sie nicht noch einmal davor.
+    const woerter = function (s) { return ' ' + s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() + ' '; };
+    const ohneArt = !!beschreibung && !!art && woerter(beschreibung).includes(woerter(art));
+    return [ohneArt ? '' : art, beschreibung, text(a.karat), gewicht(a.weight)].filter(Boolean).join(' · ');
   }
 
   /** `categoryName` optional — der Name der Kategorie als letzte Rückfalllösung. */
