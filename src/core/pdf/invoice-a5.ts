@@ -312,13 +312,13 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   .ids { font-size: 6.2pt; color: #333; margin-top: 1mm; white-space: nowrap; }
   .ids b { font-weight: 700; color: #1f2328; }
   .emblem { width: 18mm; height: 19mm; display: block; }
-  .emblem-img { width: 21mm; height: auto; display: block; justify-self: center; }
+  .emblem-img { width: 19mm; height: auto; display: block; justify-self: center; }
   .name-img { display: block; height: auto; }
   /* Beide Schriftzüge füllen ihre Spalte: gleicher Abstand zum Emblem links und rechts (Seitenverhältnis bleibt). */
   .co-en .name-img, .co-ar .name-img { width: 100%; }
   /* Gleich hohe Felder für beide Schriftzüge (mittig): die CR/VAT-Zeile steht links und rechts auf derselben Höhe. */
   .name-box { height: 8.4mm; display: flex; align-items: center; }
-  .title { display: flex; align-items: center; justify-content: center; gap: 4mm; margin: 2.2mm 0 2.2mm; }
+  .title { display: flex; align-items: center; justify-content: center; gap: 4mm; margin: 1.6mm 0 1.6mm; }
   .title .line { flex: 0 0 18mm; border-top: 0.5pt solid ${GOLD}; }
   .title h1 { font-family: Georgia, 'Times New Roman', serif; font-size: 13.5pt; letter-spacing: 1pt; color: #1b2433; font-weight: 700; }
   .stamp { position: absolute; top: 38mm; right: 4mm; transform: rotate(-12deg); border: 1.2pt solid #B42318; color: #B42318; font-weight: 800; font-size: 11pt; letter-spacing: 2pt; padding: 1mm 3mm; border-radius: 1.5mm; opacity: 0.85; }
@@ -336,36 +336,36 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   table.items th span { display: block; font-weight: 400; color: #444; }
   table.items th.h-desc { text-align: left; vertical-align: middle; }
   table.items th.h-no { vertical-align: middle; }
-  table.items td { padding: 1.2mm 1mm; border-bottom: 0.4pt solid #E9E2D4; vertical-align: middle; }
+  table.items td { padding: 0.9mm 1mm; border-bottom: 0.4pt solid #E9E2D4; vertical-align: middle; }
   table.items tr { break-inside: avoid; page-break-inside: avoid; }
   table.items td + td, table.items th + th { border-left: 0.4pt solid #EFE6D6; }
   .c-no { text-align: center; }
   .c-qty, .c-vat { text-align: center; white-space: nowrap; }
   .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .d-title { font-weight: 600; font-size: 7.4pt; }
-  .d-sub { font-style: italic; font-size: 6pt; color: #444; margin-top: 0.3mm; line-height: 1.3; }
+  .d-sub { font-style: italic; font-size: 6pt; color: #444; margin-top: 0.2mm; line-height: 1.22; }
   /* Eine Angabe bricht nie in sich um („Case Diameter: 36 mm" bleibt beisammen) — nur zwischen den Angaben. */
   .d-sub .d-it { white-space: nowrap; }
   .d-sub .dot { padding: 0 0.3mm; font-style: normal; }
-  .sum { display: grid; grid-template-columns: 1fr 58mm; column-gap: 4mm; align-items: center; margin-top: 2.4mm; break-inside: avoid; }
+  .sum { display: grid; grid-template-columns: 1fr 58mm; column-gap: 4mm; align-items: center; margin-top: 2mm; break-inside: avoid; }
   .words b { font-weight: 700; margin-right: 1mm; }
   table.totals { width: 100%; border-collapse: collapse; }
-  table.totals td { padding: 0.8mm 1.4mm; border-bottom: 0.4pt solid #EFE6D6; }
+  table.totals td { padding: 0.55mm 1.4mm; border-bottom: 0.4pt solid #EFE6D6; }
   table.totals td:first-child { font-weight: 600; }
   table.totals .cur { color: #444; width: 9mm; }
   table.totals .num { font-weight: 700; font-size: 8pt; }
-  table.totals tr.grand td { background: #F3E7CF; font-size: 9pt; font-weight: 700; padding: 1.4mm 1.4mm; border-bottom: none; }
+  table.totals tr.grand td { background: #F3E7CF; font-size: 9pt; font-weight: 700; padding: 1mm 1.4mm; border-bottom: none; }
   table.totals tr.grand .num { font-size: 9.6pt; }
-  .notice { margin-top: 2.6mm; border-top: 0.5pt solid ${GOLD}; border-bottom: 0.5pt solid ${GOLD}; text-align: center; padding: 1.1mm 0; font-size: 6.8pt; letter-spacing: 0.2pt; }
-  .terms { padding: 1.4mm 0 1.4mm; border-bottom: 0.5pt solid ${GOLD}; font-size: 6.4pt; }
+  .notice { margin-top: 2mm; border-top: 0.5pt solid ${GOLD}; border-bottom: 0.5pt solid ${GOLD}; text-align: center; padding: 0.8mm 0; font-size: 6.8pt; letter-spacing: 0.2pt; }
+  .terms { padding: 1mm 0 1mm; border-bottom: 0.5pt solid ${GOLD}; font-size: 6.4pt; }
   .terms .bullet { color: ${GOLD}; font-size: 8pt; margin: 0 1.4mm 0 0.6mm; }
   .terms b { font-weight: 700; }
-  .spacer { flex: 1 1 auto; min-height: 3mm; }
+  .spacer { flex: 1 1 auto; min-height: 2mm; }
   .sign { display: flex; justify-content: space-between; align-items: flex-start; gap: 8mm; break-inside: avoid; }
   .sign div { width: 48mm; font-size: 7.6pt; text-align: center; }
-  .sign .sl { display: block; border-bottom: 0.6pt solid #1f2328; height: 7mm; margin-bottom: 1mm; }
+  .sign .sl { display: block; border-bottom: 0.6pt solid #1f2328; height: 5.5mm; margin-bottom: 0.8mm; }
   /* Fußzeile in EINER Zeile: Adresse · Telefon · E-Mail · Instagram. Nur eine längere Adresse darf umbrechen. */
-  .foot { margin-top: 2.4mm; border-top: 0.6pt solid ${GOLD}; padding-top: 1.8mm; display: flex; align-items: center; justify-content: space-between; gap: 1.5mm; font-size: 5.2pt; break-inside: avoid; }
+  .foot { margin-top: 2mm; border-top: 0.6pt solid ${GOLD}; padding-top: 1.8mm; display: flex; align-items: center; justify-content: space-between; gap: 1.5mm; font-size: 5.2pt; break-inside: avoid; }
   .foot .it { display: flex; align-items: center; gap: 1mm; white-space: nowrap; }
   .foot .it.addr { white-space: normal; min-width: 0; }
   .foot .sep { width: 0.5pt; height: 3mm; background: ${GOLD}; flex: 0 0 auto; }
@@ -408,7 +408,7 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
     </table>
   </section>
   ${d.marginNotice ? '<div class="notice">VAT HAS BEEN IMPOSED USING THE PROFIT MARGIN SCHEME</div>' : ''}
-  <div class="terms"${d.marginNotice ? '' : ' style="border-top:0.5pt solid ' + GOLD + ';margin-top:2.6mm"'}><span class="bullet">●</span><b>Terms &amp; Conditions:</b> ${esc(c.terms)}</div>
+  <div class="terms"${d.marginNotice ? '' : ' style="border-top:0.5pt solid ' + GOLD + ';margin-top:2mm"'}><span class="bullet">●</span><b>Terms &amp; Conditions:</b> ${esc(c.terms)}</div>
   <div class="spacer"></div>
   <section class="sign">
     <div><span class="sl"></span>Customer’s Signature</div>
