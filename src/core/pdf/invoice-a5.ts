@@ -346,12 +346,12 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   .sign { display: flex; justify-content: space-between; align-items: flex-start; gap: 8mm; break-inside: avoid; }
   .sign div { width: 48mm; font-size: 7.6pt; text-align: center; }
   .sign .sl { display: block; border-bottom: 0.6pt solid #1f2328; height: 7mm; margin-bottom: 1mm; }
-  /* Fußzeile: oben die Adresse (eine Zeile), darunter Telefon · E-Mail · Instagram — beides mittig. */
-  .foot { margin-top: 2.4mm; border-top: 0.6pt solid ${GOLD}; padding-top: 1.8mm; display: flex; flex-direction: column; align-items: center; gap: 1.3mm; font-size: 6.3pt; break-inside: avoid; }
-  .foot .row { display: flex; align-items: center; justify-content: center; gap: 3.5mm; }
-  .foot .it { display: flex; align-items: center; gap: 1.4mm; white-space: nowrap; }
-  .foot .sep { width: 0.5pt; height: 3.4mm; background: ${GOLD}; }
-  .ico { width: 3.4mm; height: 3.4mm; flex: 0 0 auto; }
+  /* Fußzeile in EINER Zeile: Adresse · Telefon · E-Mail · Instagram. Nur eine längere Adresse darf umbrechen. */
+  .foot { margin-top: 2.4mm; border-top: 0.6pt solid ${GOLD}; padding-top: 1.8mm; display: flex; align-items: center; justify-content: space-between; gap: 1.5mm; font-size: 5.2pt; break-inside: avoid; }
+  .foot .it { display: flex; align-items: center; gap: 1mm; white-space: nowrap; }
+  .foot .it.addr { white-space: normal; min-width: 0; }
+  .foot .sep { width: 0.5pt; height: 3mm; background: ${GOLD}; flex: 0 0 auto; }
+  .ico { width: 2.6mm; height: 2.6mm; flex: 0 0 auto; }
   @media screen { body { background: #eee; padding: 10mm 0; } .doc { background: #fff; padding: 8mm; width: 148mm; min-height: 210mm; box-shadow: 0 1px 6px rgba(0,0,0,.15); } }
 </style></head>
 <body><div class="doc">
@@ -397,14 +397,13 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
     <div><span class="sl"></span>Authorised Signatory</div>
   </section>
   <footer class="foot">
-    <div class="row"><div class="it addr">${ICON_PIN}<span>${esc(c.address)}</span></div></div>
-    <div class="row">
-      <div class="it">${ICON_TEL}<span>${esc(c.phone)}</span></div>
-      <div class="sep"></div>
-      <div class="it">${ICON_MAIL}<span>${esc(c.email)}</span></div>
-      ${c.instagram ? `<div class="sep"></div>
-      <div class="it">${ICON_INSTA}<span>@${esc(c.instagram.replace(/^@+/, ''))}</span></div>` : ''}
-    </div>
+    <div class="it addr">${ICON_PIN}<span>${esc(c.address)}</span></div>
+    <div class="sep"></div>
+    <div class="it">${ICON_TEL}<span>${esc(c.phone)}</span></div>
+    <div class="sep"></div>
+    <div class="it">${ICON_MAIL}<span>${esc(c.email)}</span></div>
+    ${c.instagram ? `<div class="sep"></div>
+    <div class="it">${ICON_INSTA}<span>@${esc(c.instagram.replace(/^@+/, ''))}</span></div>` : ''}
   </footer>
 </div></body></html>`;
 }
