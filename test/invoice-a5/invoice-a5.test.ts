@@ -41,14 +41,15 @@ ok(paymentModeText([], 0, 100) === 'Credit' && paymentModeText(['cash'], 100, 0)
 
 // ── Zeilen ──
 const products = [
-  { id: 'w', brand: 'Rolex', name: 'Datejust 36', categoryId: 'cat-watch', condition: 'Used', attributes: { reference_number: '16233', serial_number: 'W123456', case_diameter_mm: 36, dial: 'Champagne', bezel: 'Fluted', material: 'Two-Tone Steel/Gold', karat_color: '18K Yellow', strap_type: 'Jubilee', year: 2019, description: 'Box' } },
+  { id: 'w', brand: 'Rolex', name: 'Datejust 36', sku: 'LAT-W-0042', categoryId: 'cat-watch', condition: 'Used', attributes: { reference_number: '16233', serial_number: 'W123456', case_diameter_mm: 36, dial: 'Champagne', bezel: 'Fluted', material: 'Two-Tone Steel/Gold', karat_color: '18K Yellow', strap_type: 'Jubilee', year: 2019, description: 'Box' } },
   { id: 'c', brand: 'Cartier', name: 'Love Bracelet', categoryId: 'cat-branded-gold-jewelry', condition: 'Used', attributes: JSON.stringify({ model_number: 'B6035517', size: '17' }) },
   { id: 'g', brand: '', name: '', categoryId: 'cat-gold-jewelry', condition: 'Excellent', attributes: { item_type: 'Ring', karat: '18K White', weight: 4.2, size: '54', stones: [{ type: 'diamond', qty: 1, carat: 0.5 }] } },
 ];
-ok(S(lineDetails(products[0])) === S(['Ref: 16233', 'Serial: W123456', 'Case Diameter: 36 mm', 'Dial: Champagne', 'Bezel: Fluted', 'Material: Two-Tone Steel/Gold', 'Karat & Color: 18K Yellow', 'Strap Type: Jubilee'])
-  && S(lineDetails({ id: 'w2', categoryId: 'cat-watch', condition: 'New', attributes: { reference_number: '5711', case_diameter_mm: '40.5 mm', dial: '' } })) === S(['Ref: 5711', 'Case Diameter: 40.5 mm'])
-  && S(lineDetails(products[1])) === S(['Ref: B6035517', 'Size: 17', 'Condition: Used'])
-  && S(lineDetails(products[2])) === S(['Size: 54', 'Diamond 0.50 ct', 'Condition: Excellent']), `ZEILE Kurzangaben Ref · Serial · Size · Steine · Condition (${S(lineDetails(products[2]))})`);
+ok(S(lineDetails(products[0])) === S(['Ref: 16233', 'Serial: W123456', 'SKU: LAT-W-0042', '36 mm', 'Champagne', 'Fluted', 'Two-Tone Steel/Gold', '18K Yellow', 'Jubilee'])
+  && S(lineDetails({ id: 'w2', categoryId: 'cat-watch', condition: 'New', attributes: { reference_number: '5711', case_diameter_mm: '40.5 mm', dial: '' } })) === S(['Ref: 5711', '40.5 mm'])
+  && S(lineDetails(products[1])) === S(['Ref: B6035517', '17', 'Used'])
+  && S(lineDetails(products[2])) === S(['54', 'Diamond 0.50 ct', 'Excellent']),
+  `ZEILE Kurzangaben: nur Ref, Serial und SKU mit Bezeichnung, sonst nur der Wert; Uhr ohne Condition (${S(lineDetails(products[0]))})`);
 
 const firma = invoiceCompany(() => '');
 const basis = {

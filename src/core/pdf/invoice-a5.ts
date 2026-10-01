@@ -141,7 +141,7 @@ export interface InvoiceA5Input {
     lines: Array<{ productId?: string; description?: string | null; quantity: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }>;
   };
   customer?: { firstName?: string; lastName?: string; company?: string; personalId?: string; phone?: string; vatAccountNumber?: string } | null;
-  products: ReadonlyArray<{ id: string; brand?: string | null; name?: string | null; categoryId?: string | null; condition?: string | null; attributes?: Record<string, unknown> | string | null }>;
+  products: ReadonlyArray<{ id: string; brand?: string | null; name?: string | null; sku?: string | null; categoryId?: string | null; condition?: string | null; attributes?: Record<string, unknown> | string | null }>;
   paymentMethods: readonly string[];
   salesperson?: string;
   logos?: InvoiceA5Logos;
@@ -155,14 +155,14 @@ function attrsOf(a: unknown): Record<string, unknown> {
 }
 const r3 = (v: number): number => Math.round(v * 1000) / 1000;
 
-/** Uhren: nach Ref und Serial die Merkmale des Gehäuses — ohne Condition. */
-const WATCH_DETAILS: ReadonlyArray<[string, string]> = [
-  ['case_diameter_mm', 'Case Diameter'], ['dial', 'Dial'], ['bezel', 'Bezel'], ['material', 'Material'],
-  ['karat_color', 'Karat & Color'], ['strap_type', 'Strap Type'],
-];
+/** Uhren: nach Ref, Serial und SKU die Merkmale des Gehäuses — ohne Condition. */
+const WATCH_DETAILS: readonly string[] = ['case_diameter_mm', 'dial', 'bezel', 'material', 'karat_color', 'strap_type'];
 const merkmal = (v: unknown): string => (Array.isArray(v) ? v.map(text).filter(Boolean).join(', ') : text(v));
 
-/** Die Kurzangaben unter dem Artikelnamen: Ref · Serial · Size · Steine · Condition (Uhren: Ref · Serial · Gehäuse …). */
+/**
+ * Die Kurzangaben unter dem Artikelnamen. Nur Ref, Serial und SKU tragen ihre Bezeichnung; sonst steht
+ * nur der Wert. Uhren: Ref · Serial · SKU · Gehäuse … Andere: Ref · Serial · SKU · Size · Steine · Condition.
+ */
 export function lineDetails(p: InvoiceA5Input['products'][number] | undefined): string[] {
   if (!p) return [];
   const a = attrsOf(p.attributes);
@@ -170,17 +170,18 @@ export function lineDetails(p: InvoiceA5Input['products'][number] | undefined): 
   const ref = text(a.reference_number) || text(a.model_number);
   if (ref) out.push('Ref: ' + ref);
   if (text(a.serial_number)) out.push('Serial: ' + text(a.serial_number));
+  if (text(p.sku)) out.push('SKU: ' + text(p.sku));
   if (p.categoryId === 'cat-watch') {
-    for (const [key, label] of WATCH_DETAILS) {
+    for (const key of WATCH_DETAILS) {
       const v = merkmal(a[key]);
-      if (v) out.push(label + ': ' + (key === 'case_diameter_mm' && /^[0-9]+([.,][0-9]+)?$/.test(v) ? v + ' mm' : v));
+      if (v) out.push(key === 'case_diameter_mm' && /^[0-9]+([.,][0-9]+)?$/.test(v) ? v + ' mm' : v);
     }
     return out;
   }
-  if (text(a.size)) out.push('Size: ' + text(a.size));
+  if (text(a.size)) out.push(text(a.size));
   const steine = a.stones ? stonesSummary(a.stones) : '';
   if (steine) out.push(steine);
-  if (text(p.condition)) out.push('Condition: ' + text(p.condition));
+  if (text(p.condition)) out.push(text(p.condition));
   return out;
 }
 
