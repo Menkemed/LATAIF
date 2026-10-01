@@ -27,6 +27,7 @@ import type { PaymentMethod } from '@/core/models/types';
 import { buildInvoiceA5Data, printInvoiceA5 } from '@/core/pdf/invoice-a5';
 import { invoicePrintFor, type InvoicePrintExtras } from '@/core/data/page-reads';
 import { fetchFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
+import { useSharedRead } from '@/core/data/shared-read';
 import { localReadContext } from '@/core/data/read-context';
 import { invoiceA5Logos } from '@/core/pdf/invoice-a5-logos';
 import { getProductSpecs } from '@/core/utils/product-format';
@@ -70,7 +71,7 @@ export function InvoiceDetail() {
   const navigate = useNavigate();
   const goBack = useGoBack('/invoices');
   const [searchParams, setSearchParams] = useSearchParams();
-  const { invoices, loadInvoices, recordPayment, applyCreditToInvoice, getInvoicePayments, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
+  const { invoices, loadInvoices, recordPayment, applyCreditToInvoice, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
   // CENTRAL-UI-PARITY R4C — dieselben Masken, zwei Anschluesse hinter jeder Geldhandlung.
   // Ein Waechter je Buchung; eine Anzeige fuer den Ausgang.
   const w = useSharedWrites();
@@ -147,6 +148,14 @@ export function InvoiceDetail() {
   }
 
   const invoice = useMemo(() => invoices.find(i => i.id === id), [invoices, id]);
+
+  // Die Zahlungen dieser Rechnung (PAID aufklappen, „Manage payments") — aus derselben Auskunft wie
+  // der Druck: am Primary aus seiner Datenbank, auf PC2 vom Primary. `stand` ist nur der Schlüssel:
+  // nach einer Zahlung oder Berichtigung (neue Fassung der Rechnung) fragt PC2 neu.
+  const zahlungen = useSharedRead<InvoicePrintExtras | null>(
+    'page.invoice_print.get', { invoiceId: id ?? '', stand: `${invoice?.revision ?? 0}|${invoice?.paidAmount ?? 0}` },
+    (ctx) => invoicePrintFor(ctx, id ?? ''), null, [id, invoices],
+  )?.payments ?? [];
 
   // Plan §Sales — Save & Print: Detail-Page lädt, dann der A5-Beleg in den Druckdialog. Gedruckt wird
   // mit dem Stand beim Auslösen (Artikel und Kunde geladen), nicht mit dem des ersten Zeichnens.
@@ -734,7 +743,7 @@ export function InvoiceDetail() {
                   </div>
                 )}
                 {(() => {
-                  const payList = id ? getInvoicePayments(id) : [];
+                  const payList = zahlungen;
                   const hasPayments = payList.length > 0;
                   return (
                     <div style={{ marginBottom: 6 }}>
@@ -1161,7 +1170,7 @@ export function InvoiceDetail() {
       {/* Manage Payments Modal */}
       <Modal open={paymentsModal} onClose={() => setPaymentsModal(false)} title={`Payments — ${formatInvoiceDisplayShort(invoice)}`} width={680}>
         {(() => {
-          const list = id ? getInvoicePayments(id) : [];
+          const list = zahlungen;
           if (list.length === 0) {
             return <p style={{ fontSize: 13, color: '#6B7280', padding: '20px 0' }}>No payments recorded yet.</p>;
           }

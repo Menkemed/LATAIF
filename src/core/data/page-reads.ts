@@ -30,7 +30,13 @@ const n = (v: unknown): number => Number(v ?? 0) || 0;
 // Die Firmendaten (CR, VAT, Telefon, E-Mail, Instagram, Bedingungen …) stehen in den Einstellungen
 // des Primary, die Zahlungswege in seinen Zahlungen. PC2 hat beides nicht und hält auch keine Kopie:
 // er fragt bei JEDEM Druck hier nach — eine Änderung in Settings gilt damit sofort an beiden Rechnern.
-export interface InvoicePrintExtras { company: InvoiceA5Company; paymentMethods: string[] }
+// Dieselbe Auskunft liefert auch die Zahlungsliste der Rechnungsseite (PAID aufklappen, „Manage payments").
+export interface InvoicePrintExtras {
+  company: InvoiceA5Company;
+  paymentMethods: string[];
+  /** Die Zahlungen dieser Rechnung, älteste zuerst — genau die Zeilen, die die Rechnungsseite listet. */
+  payments: Array<{ id: string; amount: number; method: string; receivedAt: string; notes?: string }>;
+}
 
 export function invoicePrintFor(ctx: BusinessReadContext, invoiceId: string): InvoicePrintExtras {
   const keys = Object.values(INVOICE_COMPANY_KEYS);
@@ -39,12 +45,12 @@ export function invoicePrintFor(ctx: BusinessReadContext, invoiceId: string): In
     [ctx.branchId, ...keys],
   ).map((r) => [s(r.key), s(r.value)] as const));
   // `payments` hat keine eigene Filiale — die Grenze kommt über die Rechnung.
-  const paymentMethods = query(
-    `SELECT p.method FROM payments p JOIN invoices i ON i.id = p.invoice_id
+  const payments = query(
+    `SELECT p.id, p.amount, p.method, p.received_at, p.notes FROM payments p JOIN invoices i ON i.id = p.invoice_id
       WHERE p.invoice_id = ? AND i.branch_id = ? ORDER BY p.received_at ASC, p.created_at ASC`,
     [invoiceId, ctx.branchId],
-  ).map((r) => s(r.method));
-  return { company: invoiceCompany((k) => werte.get(k)), paymentMethods };
+  ).map((r) => ({ id: s(r.id), amount: n(r.amount), method: s(r.method), receivedAt: s(r.received_at), notes: (r.notes as string | null) || undefined }));
+  return { company: invoiceCompany((k) => werte.get(k)), paymentMethods: payments.map((p) => p.method), payments };
 }
 
 // ── Übersicht: das Monatsziel ─────────────────────────────────────────────

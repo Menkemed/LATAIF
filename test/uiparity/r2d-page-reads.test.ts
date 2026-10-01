@@ -380,6 +380,21 @@ const OPS: Array<[string, Record<string, unknown>]> = [
   ok(/readsFromPrimary\(\)\s*\? \(await fetchFromPrimary\('page\.invoice_print\.get', \{ invoiceId: invoice\.id \}\)\)/.test(seite)
     && /: invoicePrintFor\(localReadContext\(\), invoice\.id\);/.test(seite) && !/getSetting\(/.test(seite),
     'G die Rechnungsseite druckt mit genau diesem Lader — PC2 bei jedem Druck vom Primary, keine eigene Einstellung');
+
+  // Die Zahlungsliste der Rechnungsseite kommt aus DERSELBEN Auskunft (PC2 hat keine Datenbank).
+  db.run(`UPDATE payments SET notes = 'Anzahlung' WHERE id = 'pay-a'`);
+  db.run(`INSERT INTO payments (id, branch_id, invoice_id, amount, method, received_at, created_at) VALUES ('pay-b2','branch-b','inv-b',99,'bank',?,?)`, [NOW, NOW]);
+  const z = await daten('page.invoice_print.get', { invoiceId: 'inv-a', stand: '7|40' }, 'branch-a');
+  ok(JSON.stringify(z.payments) === JSON.stringify([
+    { id: 'pay-a', amount: 30, method: 'cash', receivedAt: NOW, notes: 'Anzahlung' },
+    { id: 'pay-a2', amount: 10, method: 'card', receivedAt: new Date(Date.parse(NOW) + 60000).toISOString() },
+  ]), `G die Zahlungen dieser Rechnung, älteste zuerst, mit Kennung und Notiz — keine fremden (${JSON.stringify(z.payments)})`);
+  ok(((await daten('page.invoice_print.get', { invoiceId: 'inv-a' }, 'branch-b')).payments as unknown[]).length === 0,
+    'G eine fremde Rechnungskennung liefert keine Zahlungen');
+  ok(/useSharedRead<InvoicePrintExtras \| null>\(\s*'page\.invoice_print\.get', \{ invoiceId: id \?\? '', stand: /.test(seite)
+    && /\(ctx\) => invoicePrintFor\(ctx, id \?\? ''\), null, \[id, invoices\],/.test(seite)
+    && /const payList = zahlungen;/.test(seite) && /const list = zahlungen;/.test(seite) && !/getInvoicePayments/.test(seite),
+    'G die Rechnungsseite listet ihre Zahlungen über diese Auskunft (Primary lokal, PC2 vom Primary), nie aus einer lokalen Quelle');
 }
 
 // ── F — kein Fernlesen fasst den Bildschirm des Primary an ───────────────
