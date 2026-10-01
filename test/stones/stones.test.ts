@@ -114,7 +114,7 @@ ok(pf.productAttributeSearchValues({ ...ring, attributes: { stones: [{ type: 'ot
 const spec = pf.getProductSpecs(ring as never, DEFAULT_CATEGORIES as never);
 ok(spec.some((x) => x.label === 'Stones' && x.value === 'Diamond 0.80 ct · Emerald 0.45 ct · Sapphire ×2') && spec.some((x) => x.label === 'Diamond Weight' && x.value === '0.80 ct'),
   `DOKUMENTE Specs mit Steinen und Diamond Weight (${S(spec.map((x) => x.label + '=' + x.value))})`);
-ok(dn.productDisplayName(ring as never) === 'Ring · Cluster · 18K White · 3.10 g', 'NAME Steine stehen NICHT im Titel');
+ok(dn.productDisplayName(ring as never) === 'Ring · Cluster · 18K White Gold · 3.10 g', 'NAME Steine stehen NICHT im Titel');
 
 // ── 4 Prüfung der Masken (Rechner) und Anlage ──
 const kat = DEFAULT_CATEGORIES.find((c) => c.id === GOLD)!;
@@ -206,7 +206,7 @@ ok(rep.some((f) => f.key === 'stones' && f.type === 'stones') && !rep.some((f) =
   && ['src/pages/repairs/RepairList.tsx', 'src/pages/repairs/RepairDetail.tsx'].every((p) => src(p).includes("field.coreField === 'itemModel') && brandModelHidden(form.itemCategoryId)")),
   'REPARATUR Gold: Steinliste, Marke/Modell weder verlangt noch gezeigt');
 ok(rr.missingRepairItemFields({ itemCategoryId: GOLD, itemAttributes: { item_type: 'Ring' } }).length === 0, 'REPARATUR die Steinliste ist nie Pflicht');
-ok(dn.repairItemDisplayName({ itemCategoryId: GOLD, itemAttributes: { item_type: 'Ring', description: 'SOLITAIRE', karat: '18K White', weight: 2 } }) === 'Ring · Solitaire · 18K White · 2 g'
+ok(dn.repairItemDisplayName({ itemCategoryId: GOLD, itemAttributes: { item_type: 'Ring', description: 'SOLITAIRE', karat: '18K White', weight: 2 } }) === 'Ring · Solitaire · 18K White Gold · 2 g'
   && dn.repairItemDisplayName({ itemBrand: 'Rolex', itemModel: 'Datejust' }) === 'Rolex Datejust', 'REPARATUR zentraler Anzeigename');
 ok(/normalizeStoneAttributes\(input\.itemCategoryId/.test(src('src/core/repairs/repair-rules.ts')) && /stonesOrThrow\(/.test(src('src/stores/repairStore.ts')),
   'REPARATUR dieselbe Prüfung am Eingang und an der Schreibstelle');
@@ -324,12 +324,12 @@ ok(neuGold.status === 'new' && sortiert(angelegt) === sortiert(vonHand),
   `GOLD-IMPORT Ring · 18K Yellow + Steine → exakt dieselben attributes wie von Hand (${sortiert(angelegt)})`);
 ok(Object.keys(neuGold.attributes).every((k) => goldKey.has(k)) && fc.blockingIssues(fc.validateProductFields(kat as never, { categoryId: GOLD, brand: '', name: '', attributes: angelegt } as never)).length === 0,
   'GOLD-IMPORT nur Felder der Kategorie, und die Maske hätte nichts zu beanstanden');
-ok(neuGold.name === '' && neuGold.brand === '' && neuGold.displayName === 'Ring · Solitaire · 18K Yellow · 6.40 g',
+ok(neuGold.name === '' && neuGold.brand === '' && neuGold.displayName === 'Ring · Solitaire · 18K Yellow Gold · 6.40 g',
   `GOLD-IMPORT ohne Marke/Modell, Name aus den Merkmalen („${neuGold.displayName}")`);
 const schreibweise = zeileImp({ 'Item Type': 'rings', 'Karat & Color': '18k yellow' });
 ok(schreibweise.attributes.item_type === 'Ring' && schreibweise.attributes.karat === '18K Yellow', 'GOLD-IMPORT Schreibweise egal („rings", „18k yellow")');
 const nurTyp = imp.classifyRows([{ Category: 'Gold-Diamond Jewellery', 'Item Type': 'Bangle', 'Karat & Color': '21K Yellow', Weight: 12, Cost: 300 }], impOpts)[0];
-ok(nurTyp.status === 'new' && nurTyp.displayName === 'Bangle · 21K Yellow · 12 g', `GOLD-IMPORT Marke/Modell nicht verlangt — Schmuckart genügt (${nurTyp.status} ${S(nurTyp.errors)})`);
+ok(nurTyp.status === 'new' && nurTyp.displayName === 'Bangle · 21K Yellow Gold · 12 g', `GOLD-IMPORT Marke/Modell nicht verlangt — Schmuckart genügt (${nurTyp.status} ${S(nurTyp.errors)})`);
 // Alte Dateien: Karat/Carat (+ Metall als Farbe), keine Item-Type-Spalte.
 const legacy = (extra: Record<string, string | number>) => imp.classifyRows([{ Category: 'Gold-Diamond Jewellery', 'Description 1': 'LADIES RING', Weight: 4.2, Cost: 200, ...extra }], impOpts)[0];
 const l1 = legacy({ Carat: 18, Metal: 'White Gold', Serial: 'S-77', Size: '54', Markup: '2.2', 'Description 2': 'box' });

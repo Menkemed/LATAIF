@@ -13,7 +13,7 @@
 // (0 %, Betrag inklusive), dafür der Hinweis „VAT has been imposed using the profit margin scheme";
 // bei 10 % steht der Nettopreis, die Steuer und der Bruttobetrag.
 // ════════════════════════════════════════════════════════════════════════════
-import { formatGrams, productDisplayName } from '../products/display-name.ts';
+import { formatGrams, karatText, productDisplayName } from '../products/display-name.ts';
 import { caratThousandths, fmtCarat, stonesSummary } from '../products/stones.ts';
 
 // ── Firma ──────────────────────────────────────────────────────────────────────────────────────
@@ -181,7 +181,7 @@ export function lineDetails(p: InvoiceA5Input['products'][number] | undefined): 
   if (text(a.serial_number)) out.push('Serial: ' + text(a.serial_number));
   if (p.categoryId === 'cat-watch') {
     for (const key of WATCH_DETAILS) {
-      const v = merkmal(a[key]);
+      const v = key === 'karat_color' ? karatText(merkmal(a[key])) : merkmal(a[key]);
       if (v) out.push(key === 'case_diameter_mm' && /^[0-9]+([.,][0-9]+)?$/.test(v) ? v + ' mm' : v);
     }
     return out;
@@ -189,7 +189,7 @@ export function lineDetails(p: InvoiceA5Input['products'][number] | undefined): 
   if (text(a.size)) out.push('Size: ' + text(a.size));
   const steine = a.stones ? stonesSummary(a.stones) : '';
   if (schmuck) {
-    const karat = text(a.karat);
+    const karat = karatText(a.karat);
     if (karat && !name.includes(karat.toLowerCase())) out.push(karat);
     const gramm = formatGrams(a.weight);
     if (gramm && !name.includes(gramm.toLowerCase())) out.push(gramm);
@@ -292,6 +292,11 @@ function nameMitRechtsform(name: string): string {
   return m ? `${esc(m[1])} <small>${esc(m[2])}</small>` : esc(name);
 }
 
+/** Der Artikelname: kurze Teile („18K White Gold", „16.10 g") brechen nicht in sich um — nur zwischen den Teilen. */
+function titelHtml(name: string): string {
+  return name.split(' · ').map((t) => (t.length <= 24 ? `<span class="nw">${esc(t)}</span>` : esc(t))).join('&nbsp;· ');
+}
+
 function kvRows(rows: Array<[string, string]>): string {
   return rows.map(([k, v]) => `<tr><th>${esc(k)}</th><td class="colon">:</td><td>${esc(v)}</td></tr>`).join('');
 }
@@ -300,7 +305,7 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   const c = d.company;
   const rows = d.lines.map((l, i) => `<tr>
       <td class="c-no">${i + 1}</td>
-      <td class="c-desc"><div class="d-title"><span>${esc(l.description)}</span>${l.sku ? `<span class="d-sku">SKU: ${esc(l.sku)}</span>` : ''}</div>${l.details.length ? `<div class="d-sub">${l.details.map((x) => `<span class="d-it">${esc(x)}</span>`).join('&nbsp;<span class="dot">·</span> ')}</div>` : ''}</td>
+      <td class="c-desc"><div class="d-title"><span>${titelHtml(l.description)}</span>${l.sku ? `<span class="d-sku">SKU: ${esc(l.sku)}</span>` : ''}</div>${l.details.length ? `<div class="d-sub">${l.details.map((x) => `<span class="d-it">${esc(x)}</span>`).join('&nbsp;<span class="dot">·</span> ')}</div>` : ''}</td>
       <td class="c-qty">${l.qty} pcs</td>
       <td class="num">${bhd(l.rate)}</td>
       <td class="c-vat">${l.vatPct} %</td>
@@ -364,7 +369,7 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   .d-sku { font-weight: 400; font-style: italic; font-size: 6pt; color: #444; white-space: nowrap; }
   .d-sub { font-style: italic; font-size: 6pt; color: #444; margin-top: 0.2mm; line-height: 1.22; }
   /* Eine Angabe bricht nie in sich um („Case Diameter: 36 mm" bleibt beisammen) — nur zwischen den Angaben. */
-  .d-sub .d-it { white-space: nowrap; }
+  .d-sub .d-it, .d-title .nw { white-space: nowrap; }
   .d-sub .dot { padding: 0 0.3mm; font-style: normal; }
   .sum { display: grid; grid-template-columns: 1fr 58mm; column-gap: 4mm; align-items: center; margin-top: 2mm; break-inside: avoid; }
   .words b { font-weight: 700; margin-right: 1mm; }

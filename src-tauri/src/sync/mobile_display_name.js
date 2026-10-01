@@ -2,7 +2,7 @@
 //
 // Derselbe Algorithmus wie `src/core/products/display-name.ts` am Rechner (ein Paritätstest hält
 // beide gleich): Marke/Modell, wenn vorhanden; sonst aus den Merkmalen „Schmuckart · Beschreibung ·
-// Karat · Gewicht", z. B. „Ring · Baguette Diamond · 18K White · 3.10 g"; sonst der Kategoriename.
+// Karat · Gewicht", z. B. „Ring · Baguette Diamond · 18K White Gold · 3.10 g"; sonst der Kategoriename.
 // Gespeichert wird hier nichts.
 (function (root, factory) {
   const api = factory();
@@ -39,6 +39,12 @@
     return (Number.isInteger(n) ? String(n) : n.toFixed(2)) + ' g';
   }
 
+  /** „18K White" → „18K White Gold", „21K" → „21K Gold"; „Silver" und ein Wert mit „Gold" bleiben. */
+  function karatText(v) {
+    const s = text(v);
+    return /^[0-9]+\s*KT?\b/i.test(s) && !/gold/i.test(s) ? s + ' Gold' : s;
+  }
+
   function nameFromAttributes(attributes) {
     const a = attrsOf(attributes);
     const art = text(a.item_type);
@@ -47,7 +53,7 @@
     // Nennt die Beschreibung die Schmuckart schon („Double Ring"), steht sie nicht noch einmal davor.
     const woerter = function (s) { return ' ' + s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() + ' '; };
     const ohneArt = !!beschreibung && !!art && woerter(beschreibung).includes(woerter(art));
-    return [ohneArt ? '' : art, beschreibung, text(a.karat), gewicht(a.weight)].filter(Boolean).join(' · ');
+    return [ohneArt ? '' : art, beschreibung, karatText(a.karat), gewicht(a.weight)].filter(Boolean).join(' · ');
   }
 
   /** `categoryName` optional — der Name der Kategorie als letzte Rückfalllösung. */

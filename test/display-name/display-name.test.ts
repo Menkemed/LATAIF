@@ -63,18 +63,22 @@ const GOLD = 'cat-gold-jewelry';
 const faelle: Array<[string, Record<string, unknown>, string]> = [
   ['Marke + Modell wie bisher', { brand: 'Rolex', name: 'Datejust 36', categoryId: 'cat-watch' }, 'Rolex Datejust 36'],
   ['nur Modell', { brand: '', name: 'Tank', categoryId: 'cat-watch' }, 'Tank'],
-  ['Gold ohne Marke: aus den Merkmalen', { brand: '', name: '', categoryId: GOLD, attributes: { item_type: 'Necklace', description: 'EMERALD PENDANT', karat: '18K White', weight: 5 } }, 'Necklace · Emerald Pendant · 18K White · 5 g'],
-  ['Gewicht mit zwei Stellen', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'BAGUETTE DIAMOND', karat: '18K Yellow', weight: 3.1 } }, 'Ring · Baguette Diamond · 18K Yellow · 3.10 g'],
+  ['Gold ohne Marke: aus den Merkmalen', { brand: '', name: '', categoryId: GOLD, attributes: { item_type: 'Necklace', description: 'EMERALD PENDANT', karat: '18K White', weight: 5 } }, 'Necklace · Emerald Pendant · 18K White Gold · 5 g'],
+  ['Gewicht mit zwei Stellen', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'BAGUETTE DIAMOND', karat: '18K Yellow', weight: 3.1 } }, 'Ring · Baguette Diamond · 18K Yellow Gold · 3.10 g'],
   ['Silber', { categoryId: GOLD, attributes: { item_type: 'Pendant', description: 'GREEN STONE', karat: 'Silver', weight: 4 } }, 'Pendant · Green Stone · Silver · 4 g'],
-  ['Merkmale als JSON-Text (SQL-Zeile)', { categoryId: GOLD, attributes: '{"item_type":"Ring","karat":"18K White","weight":2.92}' }, 'Ring · 18K White · 2.92 g'],
+  ['Merkmale als JSON-Text (SQL-Zeile)', { categoryId: GOLD, attributes: '{"item_type":"Ring","karat":"18K White","weight":2.92}' }, 'Ring · 18K White Gold · 2.92 g'],
   ['Beschreibung gleich Schmuckart nicht doppelt', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'RING', weight: 1 } }, 'Ring · 1 g'],
   ['gemischte Schreibweise bleibt', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'Love Knot' } }, 'Ring · Love Knot'],
-  ['Schmuckart steckt in der Beschreibung: nicht doppelt', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'DOUBLE RING', karat: '18K White', weight: 2.92 } }, 'Double Ring · 18K White · 2.92 g'],
-  ['…auch mitten im Text', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'Diamond Ring Main 0.59ct', karat: '18K White', weight: 16.1 } }, 'Diamond Ring Main 0.59ct · 18K White · 16.10 g'],
+  ['Schmuckart steckt in der Beschreibung: nicht doppelt', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'DOUBLE RING', karat: '18K White', weight: 2.92 } }, 'Double Ring · 18K White Gold · 2.92 g'],
+  ['…auch mitten im Text', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'Diamond Ring Main 0.59ct', karat: '18K White', weight: 16.1 } }, 'Diamond Ring Main 0.59ct · 18K White Gold · 16.10 g'],
   ['…aber nur als ganzes Wort', { categoryId: GOLD, attributes: { item_type: 'Ring', description: 'Earrings Set', weight: 2 } }, 'Ring · Earrings Set · 2 g'],
+  ['Karat mit „Gold" (Mix, nur Karat)', { categoryId: GOLD, attributes: { item_type: 'Bangle', karat: '14K Mix' } }, 'Bangle · 14K Mix Gold'],
+  ['…„Gold" steht schon da: nicht doppelt', { categoryId: GOLD, attributes: { item_type: 'Bangle', karat: '18K Rose Gold' } }, 'Bangle · 18K Rose Gold'],
   ['gar nichts → Kategoriename', { categoryId: GOLD, attributes: {} }, 'Gold-Diamond Jewellery'],
   ['ein älterer Wert bei Gold bleibt sichtbar', { brand: 'Pendant', name: 'Emerald Pendant Necklace', categoryId: GOLD, attributes: { item_type: 'Necklace' } }, 'Pendant Emerald Pendant Necklace'],
 ];
+ok(['18K White', '21K', '18k yellow', '22KT Yellow', 'Silver', '18K Rose Gold', '', 'Platinum'].map(dn.karatText).join('|')
+  === '18K White Gold|21K Gold|18k yellow Gold|22KT Yellow Gold|Silver|18K Rose Gold||Platinum', 'KARAT „Gold" nur hinter einem Karatwert');
 for (const [was, p, soll] of faelle) {
   ok(dn.productDisplayName(p as never) === soll, `NAME ${was}: „${dn.productDisplayName(p as never)}" soll „${soll}"`);
   ok(js.displayName(p, (DEFAULT_CATEGORIES.find((c) => c.id === p.categoryId) || {}).name) === soll, `PARITÄT Telefon ${was}: „${js.displayName(p)}"`);
@@ -115,7 +119,7 @@ ok(MPX.validate(d).length === 0, `TELEFON Gold ohne Pflicht zu Marke/Modell ist 
 const body = MPX.buildBody(d, () => []).body;
 ok(body.lines[0].brand === '' && body.lines[0].name === '' && body.lines[0].newProduct.brand === null && body.lines[0].newProduct.name === null,
   'TELEFON bei Gold reisen keine Marke/kein Modell mit (auch nicht aus einer früheren Eingabe)');
-ok(/^Necklace · Solitaire · 18K White · 2\.50 g · 1 ×/.test(MPX.itemSummary(g)), `TELEFON Zusammenfassung mit dem erzeugten Namen (${MPX.itemSummary(g)})`);
+ok(/^Necklace · Solitaire · 18K White Gold · 2\.50 g · 1 ×/.test(MPX.itemSummary(g)), `TELEFON Zusammenfassung mit dem erzeugten Namen (${MPX.itemSummary(g)})`);
 const w = Object.assign(MPX.newItem('w', 'cat-watch'), { quantity: '1', unitPrice: '100' });
 d.items = [w];
 ok(MPX.validate(d).some((x: { code: string }) => x.code === 'LINE_INVALID'), 'TELEFON eine Uhr ohne Marke bleibt ungültig');

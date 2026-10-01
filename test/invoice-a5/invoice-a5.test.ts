@@ -45,16 +45,16 @@ const products = [
   { id: 'c', brand: 'Cartier', name: 'Love Bracelet', categoryId: 'cat-branded-gold-jewelry', condition: 'Used', attributes: JSON.stringify({ model_number: 'B6035517', size: '17' }) },
   { id: 'g', brand: '', name: '', categoryId: 'cat-gold-jewelry', condition: 'Excellent', attributes: { item_type: 'Ring', karat: '18K White', weight: 4.2, size: '54', stones: [{ type: 'diamond', qty: 1, carat: 0.5 }] } },
 ];
-ok(S(lineDetails(products[0])) === S(['Ref: 16233', 'Serial: W123456', '36 mm', 'Champagne', 'Fluted', 'Two-Tone Steel/Gold', '18K Yellow', 'Jubilee'])
+ok(S(lineDetails(products[0])) === S(['Ref: 16233', 'Serial: W123456', '36 mm', 'Champagne', 'Fluted', 'Two-Tone Steel/Gold', '18K Yellow Gold', 'Jubilee'])
   && S(lineDetails({ id: 'w2', categoryId: 'cat-watch', condition: 'New', attributes: { reference_number: '5711', case_diameter_mm: '40.5 mm', dial: '' } })) === S(['Ref: 5711', '40.5 mm'])
   && S(lineDetails(products[1])) === S(['Ref: B6035517', 'Size: 17'])
   && S(lineDetails(products[2])) === S(['Size: 54', 'Diamond 0.50 ct'])
   && S(lineDetails({ id: 'g2', brand: '', name: 'Baguette Diamond Ring', categoryId: 'cat-gold-jewelry', condition: 'Pre-Owned', attributes: { karat: '18K White', weight: 3.1, diamond_weight: 0.6 } }))
-    === S(['18K White', '3.10 g', 'Diamond 0.60 ct'])
+    === S(['18K White Gold', '3.10 g', 'Diamond 0.60 ct'])
   && S(lineDetails({ id: 'o1', brand: 'Cartier', name: 'Love', categoryId: 'cat-original-gold-jewelry', condition: 'Pre-Owned', attributes: { item_type: 'Bangle', karat: '18K Yellow', serial_number: 'WZY157', size: '16', weight: 8.5, year: 2024 } }))
-    === S(['Bangle', 'Serial: WZY157', 'Size: 16', '18K Yellow', '8.50 g'])
+    === S(['Bangle', 'Serial: WZY157', 'Size: 16', '18K Yellow Gold', '8.50 g'])
   && S(lineDetails({ id: 'o2', brand: 'Cartier', name: 'Love Bracelet', categoryId: 'cat-original-gold-jewelry', condition: 'Pre-Owned', attributes: { item_type: 'Bracelet', karat: '18K Yellow', serial_number: 'GJI904' } }))
-    === S(['Serial: GJI904', '18K Yellow'])
+    === S(['Serial: GJI904', '18K Yellow Gold'])
   && S(lineDetails({ id: 'a1', brand: 'Hermès', name: 'Clic H', categoryId: 'cat-accessory', condition: 'Pre-Owned', attributes: { item_type: 'Other', serial_number: 'DF0254' } })) === S(['Serial: DF0254']),
   `ZEILE Kurzangaben: keine Condition; Bezeichnung nur bei Ref, Serial, Size; Schmuck mit Art, Karat, Gewicht, Diamanten (nicht doppelt zum Namen) (${S(lineDetails(products[0]))})`);
 
@@ -73,7 +73,7 @@ ok(margin.title === 'TAX INVOICE' && margin.marginNotice && margin.lines.every((
   'MARGIN keine Steuer auf dem Beleg (0 %, 0.000), Preis inklusive, Stückpreis je Menge — und der Margin-Hinweis');
 ok(margin.subtotal === 9500 && margin.vatTotal === 0 && margin.grandTotal === 9500 && margin.vatLabel === 'VAT Amount (0%)'
   && margin.amountInWords === 'Bahrain Dinars Nine Thousand Five Hundred Only', 'MARGIN Summen wie die Vorlage: Subtotal = Grand Total, VAT (0%)');
-ok(margin.lines[1].description === 'Ring · 18K White · 4.20 g', `MARGIN Gold ohne Marke/Modell: der eine Anzeigename (${margin.lines[1].description})`);
+ok(margin.lines[1].description === 'Ring · 18K White Gold · 4.20 g', `MARGIN Gold ohne Marke/Modell: der eine Anzeigename (${margin.lines[1].description})`);
 ok(S(margin.customer) === S([['Name', 'Ali Hassan'], ['ID/CR', '880101234'], ['Mobile', '+973 3600 0101']])
   && S(margin.invoice) === S([['Invoice No.', 'B0712'], ['Date', '31-Aug-26'], ['Payment Mode', 'Credit'], ['Salesperson', 'Sara']]) && !S(margin).includes('Branch') && !S(margin).includes('Address'),
   `KOPF Kunde nur mit vorhandenen Angaben; Rechnungsangaben vollständig (${S(margin.customer)})`);
@@ -104,7 +104,9 @@ ok(gemischt.title === 'ADVANCE PAYMENT INVOICE' && margin.title === 'TAX INVOICE
   ok(['Item Description', 'Qty', 'Rate<span>(BHD)</span>', 'VAT<span>%</span>', 'VAT Amount<span>(BHD)</span>', 'Amount<span>(BHD)</span>', 'Customer Details', 'Invoice Details',
     'Amount in Words :', 'Subtotal', 'Grand Total', 'VAT HAS BEEN IMPOSED USING THE PROFIT MARGIN SCHEME', 'Terms &amp; Conditions:', 'Customer’s Signature', 'Authorised Signatory']
     .every((t) => h.includes(t)), 'HTML alle Teile der Vorlage: Spalten, Kunde/Rechnung, Worte, Summen, Hinweis, Bedingungen, Unterschriften');
-  ok(h.includes('<div class="d-title"><span>Rolex Datejust 36</span><span class="d-sku">SKU: LAT-W-0042</span></div>') && !h.includes('<span class="d-it">SKU:'), 'HTML die SKU steht klein neben dem Namen, nicht in den Angaben');
+  ok(h.includes('<div class="d-title"><span><span class="nw">Rolex Datejust 36</span></span><span class="d-sku">SKU: LAT-W-0042</span></div>') && !h.includes('<span class="d-it">SKU:'), 'HTML die SKU steht klein neben dem Namen, nicht in den Angaben');
+  ok(h.includes('<span><span class="nw">Ring</span>&nbsp;· <span class="nw">18K White Gold</span>&nbsp;· <span class="nw">4.20 g</span></span>'),
+    'HTML Name: „18K White Gold" und „4.20 g" brechen nicht in sich um, nur zwischen den Teilen');
   ok(h.includes('<div><span class="sl"></span>Customer’s Signature</div>') && h.includes('<div><span class="sl"></span>Authorised Signatory</div>'),
     'HTML Unterschriften: erst der Strich, darunter die Beschriftung');
   ok(h.indexOf('+973 36211681') < h.indexOf('lataifwll@gmail.com') && h.indexOf('lataifwll@gmail.com') < h.indexOf('<span>@rahmatbahrain</span>')

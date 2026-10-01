@@ -8,7 +8,7 @@
 // Regel:
 //   • Hat der Artikel Marke oder Modell → genau die (wie bisher: „Rolex Datejust 36").
 //   • Sonst entsteht der Name aus den Merkmalen: Schmuckart · Beschreibung · Karat · Gewicht,
-//     z. B. „Ring · Baguette Diamond · 18K White · 3.10 g".
+//     z. B. „Ring · Baguette Diamond · 18K White Gold · 3.10 g".
 //   • Sonst der Kategoriename; sonst leer (der Aufrufer entscheidet über „(unnamed)").
 //
 // Gespeichert wird hier NICHTS: Marke und Modell bleiben, wie sie sind (auch ältere Werte bei
@@ -59,6 +59,12 @@ function gewicht(v: unknown): string {
 /** Dieselbe Gewichtsschreibweise für andere Anzeigen (z. B. die Collection-Karte). */
 export const formatGrams = gewicht;
 
+/** „18K White" → „18K White Gold", „21K" → „21K Gold" — sonst weiß man nicht, was die Farbe ist. „Silver" und ein Wert mit „Gold" bleiben. */
+export function karatText(v: unknown): string {
+  const s = text(v);
+  return /^[0-9]+\s*KT?\b/i.test(s) && !/gold/i.test(s) ? s + ' Gold' : s;
+}
+
 /** Der Name aus den Merkmalen allein (ohne Marke/Modell) — leer, wenn es keine gibt. */
 export function nameFromAttributes(attributes: DisplayNameSource['attributes']): string {
   const a = attrsOf(attributes);
@@ -68,7 +74,7 @@ export function nameFromAttributes(attributes: DisplayNameSource['attributes']):
   // Nennt die Beschreibung die Schmuckart schon („Double Ring"), steht sie nicht noch einmal davor.
   const woerter = (s: string): string => ' ' + s.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim() + ' ';
   const ohneArt = !!beschreibung && !!art && woerter(beschreibung).includes(woerter(art));
-  return [ohneArt ? '' : art, beschreibung, text(a.karat), gewicht(a.weight)].filter(Boolean).join(' · ');
+  return [ohneArt ? '' : art, beschreibung, karatText(a.karat), gewicht(a.weight)].filter(Boolean).join(' · ');
 }
 
 /** Der Anzeigename. Leer nur, wenn wirklich nichts da ist. */
