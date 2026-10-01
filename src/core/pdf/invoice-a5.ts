@@ -13,8 +13,8 @@
 // (0 %, Betrag inklusive), dafür der Hinweis „VAT has been imposed using the profit margin scheme";
 // bei 10 % steht der Nettopreis, die Steuer und der Bruttobetrag.
 // ════════════════════════════════════════════════════════════════════════════
-import { productDisplayName } from '../products/display-name.ts';
-import { stonesSummary } from '../products/stones.ts';
+import { formatGrams, productDisplayName } from '../products/display-name.ts';
+import { caratThousandths, fmtCarat, stonesSummary } from '../products/stones.ts';
 
 // ── Firma ──────────────────────────────────────────────────────────────────────────────────────
 export interface InvoiceA5Company {
@@ -114,7 +114,7 @@ export function paymentModeText(methods: readonly string[], paid: number, balanc
 }
 
 // ── Daten des Belegs ───────────────────────────────────────────────────────────────────────────
-export interface InvoiceA5Line { description: string; details: string[]; qty: number; rate: number; vatPct: number; vatAmount: number; amount: number }
+export interface InvoiceA5Line { description: string; sku: string; details: string[]; qty: number; rate: number; vatPct: number; vatAmount: number; amount: number }
 /** Die Bilder des Kopfes (Adressen oder Daten-URLs): Emblem in der Mitte, Schriftzug links Englisch, rechts Arabisch. */
 export interface InvoiceA5Logos { emblem?: string; nameEn?: string; nameAr?: string }
 
@@ -159,9 +159,13 @@ const r3 = (v: number): number => Math.round(v * 1000) / 1000;
 const WATCH_DETAILS: readonly string[] = ['case_diameter_mm', 'dial', 'bezel', 'material', 'karat_color', 'strap_type'];
 const merkmal = (v: unknown): string => (Array.isArray(v) ? v.map(text).filter(Boolean).join(', ') : text(v));
 
+/** Gold-Kategorien: Karat, Gewicht und Diamanten gehören auf den Beleg. */
+const GOLD_CATEGORIES: readonly string[] = ['cat-gold-jewelry', 'cat-branded-gold-jewelry', 'cat-original-gold-jewelry'];
+
 /**
- * Die Kurzangaben unter dem Artikelnamen. Nur Ref, Serial und SKU tragen ihre Bezeichnung; sonst steht
- * nur der Wert. Uhren: Ref · Serial · SKU · Gehäuse … Andere: Ref · Serial · SKU · Size · Steine · Condition.
+ * Die Kurzangaben unter dem Artikelnamen (die SKU steht klein neben dem Namen). Bezeichnung nur bei Ref, Serial
+ * und Size; sonst nur der Wert. Uhren: Ref · Serial · Gehäuse … (ohne Condition). Gold: Ref · Serial · Size ·
+ * Karat · Gewicht · Diamanten · Condition — Karat und Gewicht nur, wenn sie nicht schon im Namen stehen.
  */
 export function lineDetails(p: InvoiceA5Input['products'][number] | undefined): string[] {
   if (!p) return [];
@@ -170,7 +174,6 @@ export function lineDetails(p: InvoiceA5Input['products'][number] | undefined): 
   const ref = text(a.reference_number) || text(a.model_number);
   if (ref) out.push('Ref: ' + ref);
   if (text(a.serial_number)) out.push('Serial: ' + text(a.serial_number));
-  if (text(p.sku)) out.push('SKU: ' + text(p.sku));
   if (p.categoryId === 'cat-watch') {
     for (const key of WATCH_DETAILS) {
       const v = merkmal(a[key]);
@@ -178,8 +181,18 @@ export function lineDetails(p: InvoiceA5Input['products'][number] | undefined): 
     }
     return out;
   }
-  if (text(a.size)) out.push(text(a.size));
+  if (text(a.size)) out.push('Size: ' + text(a.size));
   const steine = a.stones ? stonesSummary(a.stones) : '';
+  if (GOLD_CATEGORIES.includes(String(p.categoryId ?? ''))) {
+    const name = productDisplayName(p).toLowerCase();
+    const karat = text(a.karat);
+    if (karat && !name.includes(karat.toLowerCase())) out.push(karat);
+    const gramm = formatGrams(a.weight);
+    if (gramm && !name.includes(gramm.toLowerCase())) out.push(gramm);
+    // Diamanten: die Steinliste, sonst das einzelne Diamantgewicht (ältere Artikel).
+    const dw = steine ? null : caratThousandths(a.diamond_weight);
+    if (dw !== null && !Number.isNaN(dw) && dw > 0) out.push('Diamond ' + fmtCarat(dw) + ' ct');
+  }
   if (steine) out.push(steine);
   if (text(p.condition)) out.push(text(p.condition));
   return out;
@@ -197,7 +210,7 @@ export function buildInvoiceA5Data(input: InvoiceA5Input): InvoiceA5Data {
     const title = productDisplayName(p) || text(l.description) || '—';
     const details = lineDetails(p);
     if (text(l.description) && text(l.description) !== title) details.unshift(text(l.description));
-    return { description: title, details, qty, rate: r3((amount - vatAmount) / qty), vatPct: zeigtSteuer ? Number(l.vatRate) || 10 : 0, vatAmount, amount };
+    return { description: title, sku: text(p?.sku), details, qty, rate: r3((amount - vatAmount) / qty), vatPct: zeigtSteuer ? Number(l.vatRate) || 10 : 0, vatAmount, amount };
   });
   const grandTotal = r3(Number(invoice.grossAmount) || lines.reduce((s, l) => s + l.amount, 0));
   const vatTotal = r3(lines.reduce((s, l) => s + l.vatAmount, 0));
@@ -284,7 +297,7 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   const c = d.company;
   const rows = d.lines.map((l, i) => `<tr>
       <td class="c-no">${i + 1}</td>
-      <td class="c-desc"><div class="d-title">${esc(l.description)}</div>${l.details.length ? `<div class="d-sub">${l.details.map((x) => `<span class="d-it">${esc(x)}</span>`).join('&nbsp;<span class="dot">·</span> ')}</div>` : ''}</td>
+      <td class="c-desc"><div class="d-title">${esc(l.description)}${l.sku ? ` <span class="d-sku">SKU: ${esc(l.sku)}</span>` : ''}</div>${l.details.length ? `<div class="d-sub">${l.details.map((x) => `<span class="d-it">${esc(x)}</span>`).join('&nbsp;<span class="dot">·</span> ')}</div>` : ''}</td>
       <td class="c-qty">${l.qty} pcs</td>
       <td class="num">${bhd(l.rate)}</td>
       <td class="c-vat">${l.vatPct} %</td>
@@ -343,6 +356,8 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   .c-qty, .c-vat { text-align: center; white-space: nowrap; }
   .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .d-title { font-weight: 600; font-size: 7.4pt; }
+  /* Die SKU klein neben dem Namen, wie die Angaben darunter. */
+  .d-sku { font-weight: 400; font-style: italic; font-size: 6pt; color: #444; margin-left: 1.2mm; white-space: nowrap; }
   .d-sub { font-style: italic; font-size: 6pt; color: #444; margin-top: 0.2mm; line-height: 1.22; }
   /* Eine Angabe bricht nie in sich um („Case Diameter: 36 mm" bleibt beisammen) — nur zwischen den Angaben. */
   .d-sub .d-it { white-space: nowrap; }
