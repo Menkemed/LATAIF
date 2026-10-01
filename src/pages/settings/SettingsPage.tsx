@@ -150,7 +150,7 @@ function SuccessBanner({ message, onDone }: { message: string; onDone: () => voi
 /** INVOICE-A5 — was der Rechnungskopf zusätzlich braucht (leer = der grau gezeigte Wert gilt). Der Firmenname
  *  steht als Schriftzug (Englisch/Arabisch) im Kopf — ein Bild, keine Einstellung. */
 const INVOICE_FIELDS: ReadonlyArray<[keyof InvoiceA5Company, string]> = [
-  ['crNumber', 'CR No.'], ['vatNumber', 'VAT No.'], ['terms', 'Invoice Terms'],
+  ['crNumber', 'CR No.'], ['vatNumber', 'VAT No.'], ['instagram', 'Instagram'], ['terms', 'Invoice Terms'],
 ];
 
 function CompanyTab() {

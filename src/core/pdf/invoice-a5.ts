@@ -19,13 +19,13 @@ import { stonesSummary } from '../products/stones.ts';
 // ── Firma ──────────────────────────────────────────────────────────────────────────────────────
 export interface InvoiceA5Company {
   nameEn: string; nameAr: string; crNumber: string; vatNumber: string;
-  address: string; phone: string; email: string; terms: string;
+  address: string; phone: string; email: string; instagram: string; terms: string;
 }
 
 /** Die Einstellungen, aus denen der Kopf kommt (Settings → Company Information). */
 export const INVOICE_COMPANY_KEYS: Readonly<Record<keyof InvoiceA5Company, string>> = {
   nameEn: 'company.legal_name', nameAr: 'company.legal_name_ar', crNumber: 'company.cr_number', vatNumber: 'company.vat_number',
-  address: 'company.address', phone: 'company.phone', email: 'company.email', terms: 'invoice.terms',
+  address: 'company.address', phone: 'company.phone', email: 'company.email', instagram: 'company.instagram', terms: 'invoice.terms',
 };
 
 /** Was gilt, solange in den Einstellungen nichts steht. */
@@ -37,6 +37,7 @@ export const INVOICE_COMPANY_DEFAULTS: Readonly<InvoiceA5Company> = {
   address: 'Shop 156, Building 203, Road 383, Block 304, Manama, Kingdom of Bahrain',
   phone: '+973 36211681',
   email: 'lataifwll@gmail.com',
+  instagram: 'rahmatbahrain',
   terms: 'Goods remain our property until full payment is received. For any enquiry regarding this invoice, please contact us within 14 days.',
 };
 
@@ -250,6 +251,7 @@ const EMBLEM = `<svg class="emblem" viewBox="0 0 120 126" xmlns="http://www.w3.o
 
 const ICON_PIN = `<svg viewBox="0 0 24 24" class="ico"><path fill="${GOLD}" d="M12 2a7 7 0 0 0-7 7c0 5.2 7 13 7 13s7-7.8 7-13a7 7 0 0 0-7-7zm0 9.6A2.6 2.6 0 1 1 12 6.4a2.6 2.6 0 0 1 0 5.2z"/></svg>`;
 const ICON_TEL = `<svg viewBox="0 0 24 24" class="ico"><path fill="${GOLD}" d="M6.6 10.8a15.1 15.1 0 0 0 6.6 6.6l2.2-2.2a1 1 0 0 1 1-.25 11.4 11.4 0 0 0 3.6.57 1 1 0 0 1 1 1V20a1 1 0 0 1-1 1A17 17 0 0 1 3 4a1 1 0 0 1 1-1h3.5a1 1 0 0 1 1 1c0 1.25.2 2.45.57 3.57a1 1 0 0 1-.25 1z"/></svg>`;
+const ICON_INSTA = `<svg viewBox="0 0 24 24" class="ico"><rect x="3.5" y="3.5" width="17" height="17" rx="5" fill="none" stroke="${GOLD}" stroke-width="1.8"/><circle cx="12" cy="12" r="4" fill="none" stroke="${GOLD}" stroke-width="1.8"/><circle cx="17.2" cy="6.8" r="1.2" fill="${GOLD}"/></svg>`;
 const ICON_MAIL = `<svg viewBox="0 0 24 24" class="ico"><rect x="3" y="5.5" width="18" height="13" rx="1.5" fill="none" stroke="${GOLD}" stroke-width="1.8"/><path d="M3.5 6.5 12 13l8.5-6.5" fill="none" stroke="${GOLD}" stroke-width="1.8"/></svg>`;
 
 /** Der Firmenname mit kleiner gesetzter Rechtsform („LATAIF JEWELLERY" + „W.L.L."). */
@@ -344,10 +346,11 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   .sign { display: flex; justify-content: space-between; align-items: flex-start; gap: 8mm; break-inside: avoid; }
   .sign div { width: 48mm; font-size: 7.6pt; text-align: center; }
   .sign .sl { display: block; border-bottom: 0.6pt solid #1f2328; height: 7mm; margin-bottom: 1mm; }
-  .foot { margin-top: 2.4mm; border-top: 0.6pt solid ${GOLD}; padding-top: 2mm; display: flex; align-items: center; justify-content: space-between; font-size: 6.3pt; break-inside: avoid; }
-  .foot .it { display: flex; align-items: center; gap: 1.6mm; }
-  .foot .it.addr { max-width: 58mm; }
-  .foot .sep { width: 0.5pt; align-self: stretch; background: ${GOLD}; }
+  /* Fußzeile: oben die Adresse (eine Zeile), darunter Telefon · E-Mail · Instagram — beides mittig. */
+  .foot { margin-top: 2.4mm; border-top: 0.6pt solid ${GOLD}; padding-top: 1.8mm; display: flex; flex-direction: column; align-items: center; gap: 1.3mm; font-size: 6.3pt; break-inside: avoid; }
+  .foot .row { display: flex; align-items: center; justify-content: center; gap: 3.5mm; }
+  .foot .it { display: flex; align-items: center; gap: 1.4mm; white-space: nowrap; }
+  .foot .sep { width: 0.5pt; height: 3.4mm; background: ${GOLD}; }
   .ico { width: 3.4mm; height: 3.4mm; flex: 0 0 auto; }
   @media screen { body { background: #eee; padding: 10mm 0; } .doc { background: #fff; padding: 8mm; width: 148mm; min-height: 210mm; box-shadow: 0 1px 6px rgba(0,0,0,.15); } }
 </style></head>
@@ -394,11 +397,14 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
     <div><span class="sl"></span>Authorised Signatory</div>
   </section>
   <footer class="foot">
-    <div class="it addr">${ICON_PIN}<span>${esc(c.address)}</span></div>
-    <div class="sep"></div>
-    <div class="it">${ICON_TEL}<span>${esc(c.phone)}</span></div>
-    <div class="sep"></div>
-    <div class="it">${ICON_MAIL}<span>${esc(c.email)}</span></div>
+    <div class="row"><div class="it addr">${ICON_PIN}<span>${esc(c.address)}</span></div></div>
+    <div class="row">
+      <div class="it">${ICON_TEL}<span>${esc(c.phone)}</span></div>
+      <div class="sep"></div>
+      <div class="it">${ICON_MAIL}<span>${esc(c.email)}</span></div>
+      ${c.instagram ? `<div class="sep"></div>
+      <div class="it">${ICON_INSTA}<span>@${esc(c.instagram.replace(/^@+/, ''))}</span></div>` : ''}
+    </div>
   </footer>
 </div></body></html>`;
 }

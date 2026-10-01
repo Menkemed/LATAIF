@@ -95,6 +95,10 @@ ok(ohneMargin.title === 'PROFORMA INVOICE' && !ohneMargin.marginNotice && ohneMa
     .every((t) => h.includes(t)), 'HTML alle Teile der Vorlage: Spalten, Kunde/Rechnung, Worte, Summen, Hinweis, Bedingungen, Unterschriften');
   ok(h.includes('<div><span class="sl"></span>Customer’s Signature</div>') && h.includes('<div><span class="sl"></span>Authorised Signatory</div>'),
     'HTML Unterschriften: erst der Strich, darunter die Beschriftung');
+  ok(h.indexOf('+973 36211681') < h.indexOf('lataifwll@gmail.com') && h.indexOf('lataifwll@gmail.com') < h.indexOf('<span>@rahmatbahrain</span>')
+    && invoiceA5Html({ ...margin, company: { ...margin.company, instagram: '@lataif' } }).includes('<span>@lataif</span>')
+    && !invoiceA5Html({ ...margin, company: { ...margin.company, instagram: '' } }).includes('<span>@'),
+    'FUSSZEILE Instagram nach Telefon und E-Mail (ein @, auch wenn eingetragen); leer = keins');
   ok(h.includes('LATAIF JEWELLERY <small>W.L.L.</small>') && h.includes('مجوهرات لطائف ذ.م.م') && h.includes('<bdi dir="ltr">137216-1</bdi>')
     && h.includes('<bdi dir="ltr">220015625500002</bdi>') && h.includes('lataifwll@gmail.com'), 'HTML Kopf Englisch/Arabisch, Nummern im arabischen Teil nicht gespiegelt, Fußzeile');
   ok(h.includes('<b>CR No.:</b> 137216-1') && h.includes('<b>VAT No.:</b> 220015625500002')
@@ -123,7 +127,7 @@ ok(ohneMargin.title === 'PROFORMA INVOICE' && !ohneMargin.marginNotice && ohneMa
     'SEITE „Save & Print" druckt ebenfalls den A5-Beleg — mit geladenen Artikeln');
   ok(/company: invoiceCompany\(\(key\) => getSetting\(key\)\)/.test(seite) && /paymentMethods: getInvoicePayments\(invoice\.id\)/.test(seite), 'SEITE Firma aus den Einstellungen, Zahlungswege aus den Zahlungen');
   const einst = src('src/pages/settings/SettingsPage.tsx');
-  ok(/\['crNumber', 'CR No\.'\], \['vatNumber', 'VAT No\.'\], \['terms', 'Invoice Terms'\]/.test(einst)
+  ok(/\['crNumber', 'CR No\.'\], \['vatNumber', 'VAT No\.'\], \['instagram', 'Instagram'\], \['terms', 'Invoice Terms'\]/.test(einst)
     && /setSetting\(branchId, INVOICE_COMPANY_KEYS\[k\]/.test(einst), 'EINSTELLUNGEN CR, VAT und Bedingungen sind unter Company Information änderbar');
   const logos = src('src/core/pdf/invoice-a5-logos.ts');
   ok(/logos: invoiceA5Logos\(\),/.test(seite) && /import emblemUrl from '@\/assets\/invoice-emblem\.png';/.test(logos)
