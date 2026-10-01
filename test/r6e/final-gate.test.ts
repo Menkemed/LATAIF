@@ -99,17 +99,17 @@ const PREG5_MUT = ['purchase_inbox.create', 'partner_items.record_movement', 'pa
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
   const readsVor = catalogue(vor('src/core/bridge/store-read-ops.ts'));
   const readsJetzt = [...readOps.STORE_READ_OPS];
-  ok(S(readsJetzt) === S(readsVor), `REGISTRY Auskünfte unverändert — die Stornierbarkeit reist in store.sales_returns.get (${readsJetzt.length})`);
+  ok(S(readsJetzt) === S([...readsVor, 'page.invoice_print.get']), `REGISTRY Auskünfte unverändert bis auf die A5-Druckauskunft — die Stornierbarkeit reist in store.sales_returns.get (${readsJetzt.length})`);
   const rustOps = (t: string): string[] => {
     const l = /pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(t)?.[1] ?? '';
     return (l.match(/OP_[A-Z_]+/g) ?? []).map((c) => new RegExp(`pub const ${c}: &str = "([^"]+)"`).exec(t)?.[1] ?? c);
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 152 && rJetzt.length === 183 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6E_MUT, ...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT]),
+  ok(rVor.length === 152 && rJetzt.length === 184 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6E_MUT, ...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get']),
     `REGISTRY Rust 152 → 160 (R6E) → 174 (R6F) → 175 (R7A) → 176 (PRE-G5): GENAU diese acht und vierzehn + eins aus R7A (production.complete), in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 183 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 181 Namen (PRE-G5 + PARTNER-ITEMS), die Rust durchlässt (${known.length})`);
+  ok(known.length === 184 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 181 Namen (PRE-G5 + PARTNER-ITEMS), die Rust durchlässt (${known.length})`);
   const soll: Record<string, string | null> = {
     'offers.create': null, 'offers.update': 'permission:offers.edit', 'offers.set_status': null, 'offers.convert_to_invoice': null,
     'invoices.set_butterfly': 'isAdmin', 'returns.cancel': 'isOwner', 'transfers.undo_convert': null, 'customers.log_message': null,

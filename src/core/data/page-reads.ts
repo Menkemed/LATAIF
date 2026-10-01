@@ -20,9 +20,32 @@ import { inboxGalleryMediaIds } from '@/core/purchases/inbox-media';
 import { query } from '@/core/db/helpers';
 import type { BusinessReadContext } from '@/core/data/read-context';
 import { productDisplayName } from '../products/display-name.ts';
+import { INVOICE_COMPANY_KEYS, invoiceCompany, type InvoiceA5Company } from '@/core/pdf/invoice-a5';
 
 const s = (v: unknown): string => (v as string) ?? '';
 const n = (v: unknown): number => Number(v ?? 0) || 0;
+
+// ── INVOICE-A5 — was der Beleg beim Drucken vom Primary braucht ───────────
+//
+// Die Firmendaten (CR, VAT, Telefon, E-Mail, Instagram, Bedingungen …) stehen in den Einstellungen
+// des Primary, die Zahlungswege in seinen Zahlungen. PC2 hat beides nicht und hält auch keine Kopie:
+// er fragt bei JEDEM Druck hier nach — eine Änderung in Settings gilt damit sofort an beiden Rechnern.
+export interface InvoicePrintExtras { company: InvoiceA5Company; paymentMethods: string[] }
+
+export function invoicePrintFor(ctx: BusinessReadContext, invoiceId: string): InvoicePrintExtras {
+  const keys = Object.values(INVOICE_COMPANY_KEYS);
+  const werte = new Map(query(
+    `SELECT key, value FROM settings WHERE branch_id = ? AND key IN (${keys.map(() => '?').join(', ')})`,
+    [ctx.branchId, ...keys],
+  ).map((r) => [s(r.key), s(r.value)] as const));
+  // `payments` hat keine eigene Filiale — die Grenze kommt über die Rechnung.
+  const paymentMethods = query(
+    `SELECT p.method FROM payments p JOIN invoices i ON i.id = p.invoice_id
+      WHERE p.invoice_id = ? AND i.branch_id = ? ORDER BY p.received_at ASC, p.created_at ASC`,
+    [invoiceId, ctx.branchId],
+  ).map((r) => s(r.method));
+  return { company: invoiceCompany((k) => werte.get(k)), paymentMethods };
+}
 
 // ── Übersicht: das Monatsziel ─────────────────────────────────────────────
 export interface DashboardExtras { monthlyTarget: string }

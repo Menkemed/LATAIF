@@ -107,7 +107,7 @@ export function paymentModeText(methods: readonly string[], paid: number, balanc
   const wege: string[] = [];
   for (const m of methods) { const w = ZAHLWEG[m] ?? (m ? m.charAt(0).toUpperCase() + m.slice(1) : ''); if (w && !wege.includes(w)) wege.push(w); }
   if (!(paid > 0.0005)) return 'Credit';
-  // Bezahlt, aber die Zahlungswege sind hier nicht bekannt (z. B. am zweiten Rechner): nichts erfinden.
+  // Bezahlt, aber ohne bekannte Zahlungswege: nichts erfinden.
   if (!wege.length) return balance > 0.0005 ? 'Partially Paid' : 'Paid';
   if (balance > 0.0005) wege.push('Credit');
   return wege.join(' / ');
@@ -342,7 +342,8 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   .title { display: flex; align-items: center; justify-content: center; gap: 4mm; margin: 1.6mm 0 1.6mm; }
   .title .line { flex: 0 0 18mm; border-top: 0.5pt solid ${GOLD}; }
   .title h1 { font-family: Georgia, 'Times New Roman', serif; font-size: 13.5pt; letter-spacing: 1pt; color: #1b2433; font-weight: 700; }
-  .stamp { position: absolute; top: 38mm; right: 4mm; transform: rotate(-12deg); border: 1.2pt solid #B42318; color: #B42318; font-weight: 800; font-size: 11pt; letter-spacing: 2pt; padding: 1mm 3mm; border-radius: 1.5mm; opacity: 0.85; }
+  /* Der Stempel liegt auf der rechten Titellinie — er verdeckt weder Datum noch Zahlungsart. */
+  .stamp { position: absolute; top: 27.5mm; right: 1.5mm; transform: rotate(-12deg); border: 1.2pt solid #B42318; color: #B42318; font-weight: 800; font-size: 11pt; letter-spacing: 2pt; padding: 1mm 3mm; border-radius: 1.5mm; opacity: 0.85; }
   .parties { display: grid; grid-template-columns: 1fr 0.5pt 0.92fr; column-gap: 4mm; margin-bottom: 2.4mm; }
   .parties .divider { background: ${GOLD}; }
   .parties h2 { font-size: 8pt; font-weight: 700; margin-bottom: 0.8mm; }

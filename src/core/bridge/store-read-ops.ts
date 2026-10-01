@@ -94,6 +94,10 @@ export const OP_METALS_SPOT_PRICES_GET = 'metals.spot_prices.get';
 export const OP_DEBTS_PAYMENTS_GET = 'debts.payments.get';
 export const OP_SUPPLIERS_CREDITS_GET = 'suppliers.credits.get';
 
+// INVOICE-A5 — der Druck einer Rechnung: die aktuellen Firmendaten des Primary und die Zahlungswege
+// dieser Rechnung. PC2 fragt bei jedem Druck neu — er hat keine eigene Firmen-Konfiguration.
+export const OP_PAGE_INVOICE_PRINT_GET = 'page.invoice_print.get';
+
 /**
  * Die Liste IST die Erlaubnis. Ein Name, der hier fehlt, existiert fuer das Netz nicht — genau
  * wie bei den Buchungen. Dieselbe Liste kennt auch Rust.
@@ -152,6 +156,7 @@ export const STORE_READ_OPS: readonly string[] = [
   OP_METALS_SPOT_PRICES_GET,
   OP_DEBTS_PAYMENTS_GET,
   OP_SUPPLIERS_CREDITS_GET,
+  OP_PAGE_INVOICE_PRINT_GET,
 ];
 
 // Nicht hier — und damit fern nicht aufrufbar — sind nur noch drei Arten von Zugriffen, und keine

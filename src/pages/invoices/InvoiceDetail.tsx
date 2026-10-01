@@ -24,7 +24,10 @@ import { StaffSelect } from '@/components/employees/StaffSelect';
 import { useProductStore } from '@/stores/productStore';
 import { useRepairStore } from '@/stores/repairStore';
 import type { PaymentMethod } from '@/core/models/types';
-import { buildInvoiceA5Data, invoiceCompany, printInvoiceA5 } from '@/core/pdf/invoice-a5';
+import { buildInvoiceA5Data, printInvoiceA5 } from '@/core/pdf/invoice-a5';
+import { invoicePrintFor, type InvoicePrintExtras } from '@/core/data/page-reads';
+import { fetchFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
+import { localReadContext } from '@/core/data/read-context';
 import { invoiceA5Logos } from '@/core/pdf/invoice-a5-logos';
 import { getProductSpecs } from '@/core/utils/product-format';
 import { usePermission } from '@/hooks/usePermission';
@@ -44,7 +47,7 @@ import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary
 import { WriteError } from '@/components/shared/WriteError';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
 import { computeCardFee } from '@/core/finance/card-fees';
-import { currentBranchId, getSetting } from '@/core/db/helpers';
+import { currentBranchId } from '@/core/db/helpers';
 import { exportCsv } from '@/core/utils/export-file';
 import type { ProductDisposition } from '@/core/models/types';
 import { RotateCcw } from 'lucide-react';
@@ -147,12 +150,16 @@ export function InvoiceDetail() {
 
   // Plan §Sales — Save & Print: Detail-Page lädt, dann der A5-Beleg in den Druckdialog. Gedruckt wird
   // mit dem Stand beim Auslösen (Artikel und Kunde geladen), nicht mit dem des ersten Zeichnens.
-  const druckRef = useRef<() => void>(() => {});
+  // Das Entfernen von `?print=1` löst diesen Effekt sofort noch einmal aus — der geplante Druck darf
+  // daran NICHT hängen (sonst bräche ihn das Aufräumen ab). Er wird nur beim Verlassen der Seite verworfen.
+  const druckRef = useRef<() => unknown>(() => {});
+  const druckTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => () => { if (druckTimer.current) clearTimeout(druckTimer.current); }, []);
   useEffect(() => {
     if (invoice && searchParams.get('print') === '1' && (invoice.lines.length === 0 || products.length > 0)) {
       setSearchParams({}, { replace: true });
-      const t = setTimeout(() => druckRef.current(), 400);
-      return () => clearTimeout(t);
+      if (druckTimer.current) clearTimeout(druckTimer.current);
+      druckTimer.current = setTimeout(() => { druckTimer.current = null; void druckRef.current(); }, 400);
     }
   }, [invoice, searchParams, setSearchParams, products.length]);
   const customer = useMemo(() => invoice ? customers.find(c => c.id === invoice.customerId) : null, [invoice, customers]);
@@ -450,17 +457,26 @@ export function InvoiceDetail() {
 
   // INVOICE-A5 — der Beleg zum Drucken (A5, „Tax Invoice"). „PDF" und „Print" öffnen denselben
   // Druckdialog (dort „Als PDF speichern"). Margin-Steuer steht wie bisher nicht auf dem Beleg.
-  function printInvoice() {
+  // Firmendaten und Zahlungswege kommen aus EINEM Lader: am Primary aus seiner Datenbank, auf PC2 bei
+  // jedem Druck frisch vom Primary — PC2 hält keine eigene Firmen-Konfiguration.
+  async function printInvoice() {
     if (!invoice) return;
+    const extras = readsFromPrimary()
+      ? (await fetchFromPrimary('page.invoice_print.get', { invoiceId: invoice.id })) as InvoicePrintExtras | null
+      : invoicePrintFor(localReadContext(), invoice.id);
+    if (!extras?.company) {
+      alert('The invoice was not printed: the company information could not be loaded from the main computer. Please try again.');
+      return;
+    }
     printInvoiceA5(buildInvoiceA5Data({
-      company: invoiceCompany((key) => getSetting(key)),
+      company: extras.company,
       invoice: {
         number: formatInvoiceDisplayShort(invoice), status: invoice.status, issuedAt: invoice.issuedAt, createdAt: invoice.createdAt,
         grossAmount: invoice.grossAmount, paidAmount: invoice.paidAmount, lines: invoice.lines,
       },
       customer,
       products,
-      paymentMethods: getInvoicePayments(invoice.id).map((p) => p.method),
+      paymentMethods: extras.paymentMethods,
       salesperson: employees.find((e) => e.id === invoice.staffId)?.name,
       logos: invoiceA5Logos(),
     }));
@@ -552,8 +568,8 @@ export function InvoiceDetail() {
                     <Butterfly size={14} /> Butterfly{invoice.butterfly ? ' ✓' : ''}
                   </Button>
                 )}
-                <Button variant="secondary" onClick={printInvoice}><Download size={14} /> PDF</Button>
-                <Button variant="secondary" onClick={printInvoice} className="no-print"><Printer size={14} /> Print</Button>
+                <Button variant="secondary" onClick={() => { void printInvoice(); }}><Download size={14} /> PDF</Button>
+                <Button variant="secondary" onClick={() => { void printInvoice(); }} className="no-print"><Printer size={14} /> Print</Button>
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
                 {perm.canExportData && <Button variant="ghost" onClick={handleExportVat}><Table size={14} /> VAT Export</Button>}
                 {canRecordPayment && perm.canRecordPayments && <Button variant="primary" onClick={openPaymentModal}><CreditCard size={14} /> Record Payment</Button>}

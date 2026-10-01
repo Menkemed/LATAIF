@@ -427,7 +427,7 @@ async function hochladen(db: Db, nr: string, bytes: Uint8Array, extra: Record<st
     && !registry.ALLOWED_MUTATIONS.includes('documents.replace'),
   `§18 kein neuer Fernbefehl — der Beleg nutzt die vorhandene Buchung (${registry.ALLOWED_MUTATIONS.length})`);
   const rl = src('src-tauri/src/bridge.rs');
-  ok((/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rl)?.[1].match(/OP_[A-Z_]+/g) ?? []).length === 183,
+  ok((/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rl)?.[1].match(/OP_[A-Z_]+/g) ?? []).length === 184,
     '§18 …und die Registry steht unverändert bei 177');
 
   // §3 Der Rohweg von PC2 trägt seine EIGENE Grenze — vor dem Handler.

@@ -258,8 +258,8 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
     assert!(REMOTE_OPS.contains(&OP_PROBE), "die Probe steht auf der Liste");
     assert_eq!(
         REMOTE_OPS.len(),
-        183,
-        "Probe, zweiundsiebzig Lesevorgaenge und hundertzehn Buchungen (R6C: sieben Stammdaten, vier Inventur, zwei Inventur-Auskuenfte; R6D: achtundzwanzig Geld/Steuer/Gold/Metall, drei Auskuenfte; R6E: acht Angebot/Rechnung/Retoure/Transfer/Nachricht; R6F: vierzehn Einkauf/Auftrag/Kommission/Produktion/Buero; R7A: der Fertigungsabschluss; PRE-G5: die Duplikatsauskunft; MEDIA-INBOX: der Posteingang des Telefons; PARTNER-ITEMS: sechs Handlungen gemeinsam gekaufter Artikel)"
+        184,
+        "Probe, dreiundsiebzig Lesevorgaenge und hundertzehn Buchungen (R6C: sieben Stammdaten, vier Inventur, zwei Inventur-Auskuenfte; R6D: achtundzwanzig Geld/Steuer/Gold/Metall, drei Auskuenfte; R6E: acht Angebot/Rechnung/Retoure/Transfer/Nachricht; R6F: vierzehn Einkauf/Auftrag/Kommission/Produktion/Buero; R7A: der Fertigungsabschluss; PRE-G5: die Duplikatsauskunft; MEDIA-INBOX: der Posteingang des Telefons; PARTNER-ITEMS: sechs Handlungen gemeinsam gekaufter Artikel; INVOICE-A5: die Druckauskunft)"
     );
     for op in [
         OP_INVOICES_CREATE,
@@ -380,6 +380,7 @@ async fn a_name_that_is_not_allow_listed_never_reaches_the_renderer() {
         OP_METALS_SPOT_PRICES_GET,
         OP_DEBTS_PAYMENTS_GET,
         OP_SUPPLIERS_CREDITS_GET,
+        OP_PAGE_INVOICE_PRINT_GET,
     ] {
         assert!(REMOTE_OPS.contains(&op), "die Auskunft {op} fehlt");
     }

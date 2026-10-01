@@ -400,7 +400,7 @@ const J = (v: unknown): string => JSON.stringify(v ?? null);
     // PARTNER-ITEMS: seither stehen vier weitere Buchungen dahinter — geprüft wird die Zulassung selbst.
     && (/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').includes('OP_PURCHASE_INBOX_CREATE,'),
     '§10 Rust kennt denselben Namen und lässt ihn durch');
-  ok((/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1].match(/OP_[A-Z_]+/g) ?? []).length === 183,
+  ok((/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1].match(/OP_[A-Z_]+/g) ?? []).length === 184,
     '§10 die Registry steht bei 177');
 
   // Das Telefon: kein Tabellen-Push. MOBILE-PURCHASE ersetzt den Modus „Purchase Photo" — der Einkauf

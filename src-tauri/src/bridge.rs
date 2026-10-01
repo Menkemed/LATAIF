@@ -264,6 +264,8 @@ pub const OP_SCRAP_TRADES_CANCEL: &str = "scrap_trades.cancel";
 pub const OP_METALS_SPOT_PRICES_GET: &str = "metals.spot_prices.get";
 pub const OP_DEBTS_PAYMENTS_GET: &str = "debts.payments.get";
 pub const OP_SUPPLIERS_CREDITS_GET: &str = "suppliers.credits.get";
+// INVOICE-A5 — der Rechnungsdruck: aktuelle Firmendaten des Primary + Zahlungswege der Rechnung.
+pub const OP_PAGE_INVOICE_PRINT_GET: &str = "page.invoice_print.get";
 // CENTRAL-UI-PARITY R6E — Angebot, Rechnungs-Lebenszyklus, Nachrichtenprotokoll.
 pub const OP_OFFERS_CREATE: &str = "offers.create";
 pub const OP_OFFERS_UPDATE: &str = "offers.update";
@@ -496,6 +498,8 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_PARTNER_ITEMS_CANCEL_MOVEMENT,
     OP_PARTNER_ITEMS_TAKE_OVER,
     OP_PARTNER_ITEMS_CHANGE_PARTNERS,
+    // INVOICE-A5 — der Rechnungsdruck auf PC2: Firmendaten und Zahlungswege vom Primary.
+    OP_PAGE_INVOICE_PRINT_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

@@ -336,7 +336,7 @@ function bildDesStornos(db: Db, inv: string) {
   ok(ALLOWED_MUTATIONS.length === 110 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `DECISION invoices.cancel bleibt die eine R5F.1-Buchung an Platz 41; seither nur die elf aus R6C, die achtundzwanzig aus R6D, die acht aus R6E und die vierzehn aus R6F + eins aus R7A (production.complete) (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 183 &&/pub const OP_INVOICES_CANCEL: &str = "invoices\.cancel";/.test(rust), `DECISION Rust laesst genau diese eine mehr durch (${rustOps})`);
+  ok(rustOps === 184 &&/pub const OP_INVOICES_CANCEL: &str = "invoices\.cancel";/.test(rust), `DECISION Rust laesst genau diese eine mehr durch (${rustOps})`);
   ok(!!(OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.cancel']
     && S((OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.cancel']) === S((OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.update']),
   'DECISION dasselbe Recht wie am Primary („Cancel" nur mit canEditInvoices)');
@@ -666,7 +666,7 @@ for (const weg of ['primary', 'fern'] as const) {
   const R7A_RUST = ['OP_PRODUCTION_COMPLETE'];
   // PRE-G5 — die Duplikatsauskunft (Copy details am Telefon aus der Autoritaet).
   const PREG5_RUST = ['OP_PRODUCTS_DUPLICATES_GET', 'OP_PURCHASE_INBOX_CREATE', 'OP_PARTNER_ITEMS_RECORD_MOVEMENT', 'OP_PARTNER_ITEMS_SETTLE_SALE', 'OP_PARTNER_ITEMS_OFFSET', 'OP_PARTNER_ITEMS_CANCEL_MOVEMENT', 'OP_PARTNER_ITEMS_TAKE_OVER', 'OP_PARTNER_ITEMS_CHANGE_PARTNERS'];
-  ok(zaehle(rustVorher) === 107 && zaehle(rustJetzt) === 183 && S(neuRust) === S(['OP_INVOICES_CANCEL', ...R6C_RUST, ...R6D_RUST, ...R6E_RUST, ...R6F_RUST, ...R7A_RUST, ...PREG5_RUST]),
+  ok(zaehle(rustVorher) === 107 && zaehle(rustJetzt) === 184 && S(neuRust) === S(['OP_INVOICES_CANCEL', ...R6C_RUST, ...R6D_RUST, ...R6E_RUST, ...R6F_RUST, ...R7A_RUST, ...PREG5_RUST, 'OP_PAGE_INVOICE_PRINT_GET']),
     `REGISTRY Rust 107 → 108 (R5F.1: OP_INVOICES_CANCEL) → 121 (R6C: 13 namentlich) → 152 (R6D: 31 namentlich) → 160 (R6E: 8 namentlich) → 174 (R6F: 14 namentlich) → 175 (R7A: OP_PRODUCTION_COMPLETE) → 176 (PRE-G5: OP_PRODUCTS_DUPLICATES_GET) (${S(neuRust)})`);
   let zu = '';
   try { reg5.registerCommand('invoices.delete', { kind: 'mutation', handler: () => ({}) } as never); } catch (e) { zu = String(e); }

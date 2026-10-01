@@ -672,3 +672,16 @@ registerCommand('suppliers.credits.get', {
     return { data: (await import('@/stores/supplierStore')).supplierCreditsFor(ctx, supplierId) };
   },
 });
+
+// ── Rechnungsdruck (INVOICE-A5) ─────────────────────────────────────────────
+// Die aktuellen Firmendaten der Filiale des ANFRAGENDEN und die Zahlungswege EINER Rechnung — PC2
+// fragt bei jedem Druck, statt eine eigene Firmen-Konfiguration zu halten. Die Rechnungskennung ist
+// Auswahl: eine fremde liefert keine Zahlungswege (die Firmendaten sind die der eigenen Filiale).
+registerCommand('page.invoice_print.get', {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = contextOf(payload, actor);
+    const invoiceId = requiredId(payload, 'invoiceId');
+    return { data: { ...(await import('@/core/data/page-reads')).invoicePrintFor(ctx, invoiceId) } };
+  },
+});

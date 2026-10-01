@@ -135,11 +135,13 @@ ok(gemischt.title === 'ADVANCE PAYMENT INVOICE' && margin.title === 'TAX INVOICE
 // ── Verdrahtung ──
 {
   const seite = src('src/pages/invoices/InvoiceDetail.tsx');
-  ok(/onClick=\{printInvoice\}><Download size=\{14\} \/> PDF<\/Button>/.test(seite) && /onClick=\{printInvoice\} className="no-print"><Printer size=\{14\} \/> Print<\/Button>/.test(seite),
+  ok(/onClick=\{\(\) => \{ void printInvoice\(\); \}\}><Download size=\{14\} \/> PDF<\/Button>/.test(seite) && /onClick=\{\(\) => \{ void printInvoice\(\); \}\} className="no-print"><Printer size=\{14\} \/> Print<\/Button>/.test(seite),
     'SEITE „PDF" und „Print" drucken den A5-Beleg');
-  ok(/const t = setTimeout\(\(\) => druckRef\.current\(\), 400\);/.test(seite) && /druckRef\.current = printInvoice;/.test(seite) && !/handleDownloadPdf/.test(seite),
-    'SEITE „Save & Print" druckt ebenfalls den A5-Beleg — mit geladenen Artikeln');
-  ok(/company: invoiceCompany\(\(key\) => getSetting\(key\)\)/.test(seite) && /paymentMethods: getInvoicePayments\(invoice\.id\)/.test(seite), 'SEITE Firma aus den Einstellungen, Zahlungswege aus den Zahlungen');
+  ok(/druckTimer\.current = setTimeout\(\(\) => \{ druckTimer\.current = null; void druckRef\.current\(\); \}, 400\);/.test(seite) && /druckRef\.current = printInvoice;/.test(seite) && !/handleDownloadPdf/.test(seite)
+    && !/return \(\) => clearTimeout\(t\);/.test(seite) && /useEffect\(\(\) => \(\) => \{ if \(druckTimer\.current\) clearTimeout\(druckTimer\.current\); \}, \[\]\);/.test(seite),
+    'SEITE „Save & Print" druckt den A5-Beleg — mit geladenen Artikeln; das Entfernen von ?print=1 bricht den Druck nicht ab');
+  ok(/company: extras\.company,/.test(seite) && /paymentMethods: extras\.paymentMethods,/.test(seite) && /if \(!extras\?\.company\) \{/.test(seite),
+    'SEITE Firma und Zahlungswege aus der Druckauskunft (Primary: eigene Datenbank, PC2: frisch vom Primary); ohne Antwort kein Druck mit alten Werten');
   const einst = src('src/pages/settings/SettingsPage.tsx');
   ok(/\['crNumber', 'CR No\.'\], \['vatNumber', 'VAT No\.'\], \['instagram', 'Instagram'\], \['terms', 'Invoice Terms'\]/.test(einst)
     && /setSetting\(branchId, INVOICE_COMPANY_KEYS\[k\]/.test(einst), 'EINSTELLUNGEN CR, VAT und Bedingungen sind unter Company Information änderbar');

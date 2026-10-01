@@ -348,6 +348,40 @@ const OPS: Array<[string, Record<string, unknown>]> = [
   ok(geschluckt.length === 0, `E keine einzige Abfrage der Suche ist still gescheitert (${geschluckt.join(' | ') || 'keine'})`);
 }
 
+// ── G — INVOICE-A5: der Rechnungsdruck holt Firmendaten und Zahlungswege vom Primary ──
+{
+  const { getDatabase } = await import('@/core/db/database');
+  const db = getDatabase() as unknown as { run(sql: string, p?: unknown[]): void };
+  const setze = (b: string, key: string, value: string) => db.run(
+    `INSERT INTO settings (branch_id, key, value, category, updated_at) VALUES (?, ?, ?, 'company', ?)
+     ON CONFLICT(branch_id, key) DO UPDATE SET value = excluded.value`, [b, key, value, NOW]);
+  setze('branch-a', 'company.cr_number', '111-A'); setze('branch-a', 'company.instagram', 'shop_a');
+  setze('branch-b', 'company.cr_number', '222-B');
+  db.run(`INSERT INTO payments (id, branch_id, invoice_id, amount, method, received_at, created_at) VALUES ('pay-a2','branch-a','inv-a',10,'card',?,?)`,
+    [new Date(Date.parse(NOW) + 60000).toISOString(), NOW]);
+
+  const a = await daten('page.invoice_print.get', { invoiceId: 'inv-a' }, 'branch-a');
+  const ca = a.company as Record<string, string>;
+  ok(ca.crNumber === '111-A' && ca.instagram === 'shop_a' && ca.vatNumber === '220015625500002' && ca.phone === '+973 36211681',
+    `G Firmendaten der eigenen Filiale, leere Felder mit dem Vorgabewert (${ca.crNumber}/${ca.instagram}/${ca.vatNumber})`);
+  ok(JSON.stringify(a.paymentMethods) === '["cash","card"]', `G die Zahlungswege dieser Rechnung in Reihenfolge (${JSON.stringify(a.paymentMethods)})`);
+
+  // Eine Änderung in Settings gilt beim NÄCHSTEN Druck — keine zweite, alte Kopie.
+  setze('branch-a', 'company.cr_number', '333-A-neu');
+  const a2 = await daten('page.invoice_print.get', { invoiceId: 'inv-a' }, 'branch-a');
+  ok((a2.company as Record<string, string>).crNumber === '333-A-neu', 'G eine geänderte Einstellung gilt sofort beim nächsten Druck');
+
+  const fremd = await daten('page.invoice_print.get', { invoiceId: 'inv-a' }, 'branch-b');
+  ok((fremd.company as Record<string, string>).crNumber === '222-B' && (fremd.paymentMethods as unknown[]).length === 0,
+    'G eine fremde Rechnungskennung liefert keine Zahlungswege, die Firmendaten sind die eigenen');
+  const ohne = await remoteRead('page.invoice_print.get', {}, 'branch-a');
+  ok(ohne.kind !== 'ok', `G ohne Rechnungskennung keine Antwort (${ohne.kind})`);
+  const seite = src('src/pages/invoices/InvoiceDetail.tsx');
+  ok(/readsFromPrimary\(\)\s*\? \(await fetchFromPrimary\('page\.invoice_print\.get', \{ invoiceId: invoice\.id \}\)\)/.test(seite)
+    && /: invoicePrintFor\(localReadContext\(\), invoice\.id\);/.test(seite) && !/getSetting\(/.test(seite),
+    'G die Rechnungsseite druckt mit genau diesem Lader — PC2 bei jedem Druck vom Primary, keine eigene Einstellung');
+}
+
 // ── F — kein Fernlesen fasst den Bildschirm des Primary an ───────────────
 {
   const module = await Promise.all([

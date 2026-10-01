@@ -206,12 +206,12 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
 {
   const ops = src('src/core/bridge/store-read-ops.ts');
   const parity = [...ops.matchAll(/export const OP_[A-Z_]+ = '([^']+)'/g)].length;
-  ok(parity === 53, `10 dreiundfuenfzig typisierte Auskuenfte (R6C: +2 Inventur; R6D: +3) (${parity})`);
+  ok(parity === 54, `10 dreiundfuenfzig typisierte Auskuenfte (R6C: +2 Inventur; R6D: +3) (${parity})`);
   ok(erlaubt.length === 110, `10 vierzig Buchungen plus die eine aus R5F.1 plus elf aus R6C plus achtundzwanzig aus R6D plus acht aus R6E plus vierzehn aus R6F plus eins aus R7A (production.complete) (${erlaubt.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '')
     .matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 183, `10 und Rust laesst dieselben 181 Namen durch (PRE-G5 + PARTNER-ITEMS) (${rustOps})`);
+  ok(rustOps === 184, `10 und Rust laesst dieselben 181 Namen durch (PRE-G5 + PARTNER-ITEMS) (${rustOps})`);
 }
 
 // ── R5A — Auftrag → Rechnung: EINE Handlung, EINE Buchung ───────────────
