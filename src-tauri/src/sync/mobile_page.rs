@@ -47,6 +47,11 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
   .photo-thumb .rm { position: absolute; top: 2px; right: 2px; width: 22px; height: 22px; line-height: 20px; padding: 0; border-radius: 999px; background: rgba(0,0,0,.72); border: 1px solid #2A2A32; color: #EAEAEA; font-size: 13px; text-align: center; }
   .photo-thumb .cover { position: absolute; left: 0; right: 0; bottom: 0; background: rgba(198,163,109,.92); color: #14140F; font-size: 10px; letter-spacing: .06em; text-align: center; padding: 2px 0; }
   .photo-area .icon { font-size: 36px; }
+  .photo-pick { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .photo-btn { margin: 0; border: 2px dashed #2A2A32; border-radius: 8px; min-height: 76px; padding: 10px 6px; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; cursor: pointer; text-align: center; text-transform: none; letter-spacing: normal; font-size: 14px; color: #EAEAEA; }
+  .photo-btn .icon { font-size: 24px; line-height: 1; }
+  .photo-btn.is-full { opacity: .4; pointer-events: none; }
+  .photo-count { color: #6B6B73; font-size: 12px; margin-top: 8px; }
   .hidden { display: none; }
   /* MOBILE-FIELDS — dynamic per-category fields */
   .chips { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -166,16 +171,20 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
          desktop ingest have always accepted an ordered batch (slots 0..N-1, primary = slot 0); only
          this capture UI held it to one. The strip below IS that order: the first thumbnail is the
          cover, and tapping another one promotes it. -->
-    <label for="cPhotoInput" class="photo-area" id="cPhotoArea">
-      <div class="icon">📷</div>
-      <div>Tap to take photos</div>
-      <div class="hint">or choose from gallery — several at once</div>
-    </label>
+    <!-- MOBILE-GALLERY — two ways in, ONE list: the camera (`capture`) and the gallery (no `capture`,
+         several at once). Both inputs feed the same handler, so a gallery photo is exactly what a
+         camera photo is — same resize, same strip, same upload entry, same AI input. -->
+    <div class="photo-pick" id="cPhotoArea">
+      <label for="cPhotoInput" class="photo-btn" id="cTakePhoto"><span class="icon">📷</span><span>Take photo</span></label>
+      <label for="cGalleryInput" class="photo-btn" id="cChooseGallery"><span class="icon">🖼️</span><span>Choose from gallery</span></label>
+    </div>
+    <div id="cPhotoCount" class="photo-count"></div>
     <div id="cPhotoStrip" class="photo-strip hidden"></div>
     <div id="cPhotoHint" class="hidden" style="color:#6B6B73; font-size:12px; margin-top:8px; line-height:1.5;">
       First photo is the cover. Tap a photo to make it the cover, ✕ to remove it.
     </div>
     <input id="cPhotoInput" class="hidden" type="file" accept="image/*" capture="environment" multiple />
+    <input id="cGalleryInput" class="hidden" type="file" accept="image/*" multiple />
     <!-- MOBILE-I1C §4 — identification is a SUGGESTION step. It fills empty fields from the photo
          and is only offered once a photo exists; the photo, the quantity and anything already typed
          are never touched by it. -->
@@ -1690,8 +1699,6 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     });
   }
 
-  const EMPTY_C = '<div class="icon">📷</div><div>Tap to take photos</div><div class="hint">or choose from gallery — several at once</div>';
-
   // ── MOBILE-MULTI-IMAGE §3 — the collection form keeps an ORDERED LIST of photos ─────────────
   //
   // `collectionPhotos[0]` is the cover, exactly as the upload contract defines it (primary = slot 0),
@@ -1702,19 +1709,20 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   const collectionPhotos = [];
 
   function renderCollectionPhotos() {
-    const strip = $('cPhotoStrip'), area = $('cPhotoArea'), hint = $('cPhotoHint');
+    const strip = $('cPhotoStrip'), hint = $('cPhotoHint');
     strip.innerHTML = '';
     const has = collectionPhotos.length > 0;
     strip.classList.toggle('hidden', !has);
     hint.classList.toggle('hidden', !has);
     $('cPhotoStatus').classList.toggle('hidden', !has);
     if (has) $('cPhotoStatus').textContent = collectionPhotos.length + (collectionPhotos.length === 1 ? ' photo' : ' photos');
-    // Die Aufnahmeflaeche bleibt IMMER sichtbar — sonst gaebe es keinen Weg, ein zweites Foto
-    // hinzuzufuegen, ohne das erste zu verlieren.
-    area.classList.remove('has-image');
-    area.innerHTML = has
-      ? '<div class="icon">📷</div><div>Add more photos</div><div class="hint">' + collectionPhotos.length + ' of ' + MAX_PHOTOS + ' selected</div>'
-      : EMPTY_C;
+    // Beide Wege bleiben sichtbar, solange noch Platz ist — ein weiteres Foto kommt immer DAZU.
+    const voll = collectionPhotos.length >= MAX_PHOTOS;
+    for (const id of ['cTakePhoto', 'cChooseGallery']) $(id).classList.toggle('is-full', voll);
+    $('cPhotoInput').disabled = voll; $('cGalleryInput').disabled = voll;
+    $('cPhotoCount').textContent = voll
+      ? MAX_PHOTOS + ' of ' + MAX_PHOTOS + ' photos — remove one to add another.'
+      : (has ? collectionPhotos.length + ' of ' + MAX_PHOTOS + ' photos' : 'Up to ' + MAX_PHOTOS + ' photos — several at once from the gallery.');
     collectionPhotos.forEach(function (src, i) {
       const t = el('div', { class: 'photo-thumb' + (i === 0 ? ' is-primary' : '') });
       const im = el('img'); im.src = src; t.appendChild(im);
@@ -1735,10 +1743,12 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
   }
   function clearCollectionPhotos() {
     collectionPhotos.length = 0;
-    $('cPhotoInput').value = '';
+    $('cPhotoInput').value = ''; $('cGalleryInput').value = '';
     renderCollectionPhotos();
   }
-  $('cPhotoInput').onchange = async (e) => {
+  // Kamera UND Galerie: derselbe Handler, dieselbe Liste. Eine abgebrochene Auswahl liefert keine
+  // Dateien — dann bleibt alles, wie es war.
+  async function addCollectionFiles(e) {
     const files = Array.from((e.target && e.target.files) || []);
     if (!files.length) return;
     let rejected = 0;
@@ -1755,7 +1765,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     e.target.value = '';
     renderCollectionPhotos();
     if (rejected > 0) setText('cError', 'At most ' + MAX_PHOTOS + ' photos per item — ' + rejected + ' not added.');
-  };
+  }
+  $('cPhotoInput').onchange = addCollectionFiles;
+  $('cGalleryInput').onchange = addCollectionFiles;
   renderCollectionPhotos();
 
   // ── MOBILE-I1C §4 — AI Identify on the capture form ────────────────────────
