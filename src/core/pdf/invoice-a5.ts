@@ -155,7 +155,14 @@ function attrsOf(a: unknown): Record<string, unknown> {
 }
 const r3 = (v: number): number => Math.round(v * 1000) / 1000;
 
-/** Die Kurzangaben unter dem Artikelnamen: Ref · Serial · Size · Steine · Condition. */
+/** Uhren: nach Ref und Serial die Merkmale des Gehäuses — ohne Condition. */
+const WATCH_DETAILS: ReadonlyArray<[string, string]> = [
+  ['case_diameter_mm', 'Case Diameter'], ['dial', 'Dial'], ['bezel', 'Bezel'], ['material', 'Material'],
+  ['karat_color', 'Karat & Color'], ['strap_type', 'Strap Type'],
+];
+const merkmal = (v: unknown): string => (Array.isArray(v) ? v.map(text).filter(Boolean).join(', ') : text(v));
+
+/** Die Kurzangaben unter dem Artikelnamen: Ref · Serial · Size · Steine · Condition (Uhren: Ref · Serial · Gehäuse …). */
 export function lineDetails(p: InvoiceA5Input['products'][number] | undefined): string[] {
   if (!p) return [];
   const a = attrsOf(p.attributes);
@@ -163,6 +170,13 @@ export function lineDetails(p: InvoiceA5Input['products'][number] | undefined): 
   const ref = text(a.reference_number) || text(a.model_number);
   if (ref) out.push('Ref: ' + ref);
   if (text(a.serial_number)) out.push('Serial: ' + text(a.serial_number));
+  if (p.categoryId === 'cat-watch') {
+    for (const [key, label] of WATCH_DETAILS) {
+      const v = merkmal(a[key]);
+      if (v) out.push(label + ': ' + (key === 'case_diameter_mm' && /^[0-9]+([.,][0-9]+)?$/.test(v) ? v + ' mm' : v));
+    }
+    return out;
+  }
   if (text(a.size)) out.push('Size: ' + text(a.size));
   const steine = a.stones ? stonesSummary(a.stones) : '';
   if (steine) out.push(steine);
@@ -269,7 +283,7 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   const c = d.company;
   const rows = d.lines.map((l, i) => `<tr>
       <td class="c-no">${i + 1}</td>
-      <td class="c-desc"><div class="d-title">${esc(l.description)}</div>${l.details.length ? `<div class="d-sub">${l.details.map(esc).join('<span class="dot">·</span>')}</div>` : ''}</td>
+      <td class="c-desc"><div class="d-title">${esc(l.description)}</div>${l.details.length ? `<div class="d-sub">${l.details.map((x) => `<span class="d-it">${esc(x)}</span>`).join('&nbsp;<span class="dot">·</span> ')}</div>` : ''}</td>
       <td class="c-qty">${l.qty} pcs</td>
       <td class="num">${bhd(l.rate)}</td>
       <td class="c-vat">${l.vatPct} %</td>
@@ -328,8 +342,10 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
   .c-qty, .c-vat { text-align: center; white-space: nowrap; }
   .num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
   .d-title { font-weight: 600; font-size: 7.4pt; }
-  .d-sub { font-style: italic; font-size: 6.2pt; color: #444; margin-top: 0.3mm; }
-  .d-sub .dot { padding: 0 1.1mm; font-style: normal; }
+  .d-sub { font-style: italic; font-size: 6pt; color: #444; margin-top: 0.3mm; line-height: 1.3; }
+  /* Eine Angabe bricht nie in sich um („Case Diameter: 36 mm" bleibt beisammen) — nur zwischen den Angaben. */
+  .d-sub .d-it { white-space: nowrap; }
+  .d-sub .dot { padding: 0 0.3mm; font-style: normal; }
   .sum { display: grid; grid-template-columns: 1fr 58mm; column-gap: 4mm; align-items: center; margin-top: 2.4mm; break-inside: avoid; }
   .words b { font-weight: 700; margin-right: 1mm; }
   table.totals { width: 100%; border-collapse: collapse; }
@@ -375,7 +391,7 @@ export function invoiceA5Html(d: InvoiceA5Data): string {
     <div><h2>Invoice Details</h2><table class="kv">${kvRows(d.invoice)}</table></div>
   </section>
   <table class="items">
-    <colgroup><col style="width:5%"><col style="width:43%"><col style="width:8%"><col style="width:12.5%"><col style="width:6.5%"><col style="width:12%"><col style="width:13%"></colgroup>
+    <colgroup><col style="width:4.5%"><col style="width:47%"><col style="width:7%"><col style="width:12%"><col style="width:6%"><col style="width:11%"><col style="width:12.5%"></colgroup>
     <thead><tr>
       <th class="h-no">#</th><th class="h-desc">Item Description</th><th>Qty</th><th>Rate<span>(BHD)</span></th><th>VAT<span>%</span></th><th>VAT Amount<span>(BHD)</span></th><th>Amount<span>(BHD)</span></th>
     </tr></thead>
