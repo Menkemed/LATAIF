@@ -208,7 +208,8 @@ export function buildInvoiceA5Data(input: InvoiceA5Input): InvoiceA5Data {
   return {
     company: input.company,
     logos: input.logos ?? {},
-    title: invoice.status === 'DRAFT' ? 'PROFORMA INVOICE' : 'TAX INVOICE',
+    // FINAL (voll bezahlt) = Tax Invoice; PARTIAL (angezahlt) = Advance Payment Invoice; Entwurf = Proforma.
+    title: invoice.status === 'PARTIAL' ? 'ADVANCE PAYMENT INVOICE' : invoice.status === 'DRAFT' ? 'PROFORMA INVOICE' : 'TAX INVOICE',
     stamp: invoice.status === 'CANCELLED' ? 'CANCELLED' : '',
     customer: kunde,
     invoice: beleg,

@@ -85,6 +85,8 @@ const storniert = buildInvoiceA5Data({ ...basis, invoice: { number: 'B0714', sta
   lines: [{ productId: 'c', quantity: 1, taxScheme: 'VAT_10', vatRate: 10, vatAmount: 100, lineTotal: 1100 }] } });
 ok(ohneMargin.title === 'PROFORMA INVOICE' && !ohneMargin.marginNotice && ohneMargin.invoice[1][1] === '01-Sep-26' && storniert.stamp === 'CANCELLED' && storniert.title === 'TAX INVOICE',
   'STATUS Entwurf = Proforma, storniert = Stempel, ohne Margin-Zeile kein Hinweis');
+ok(gemischt.title === 'ADVANCE PAYMENT INVOICE' && margin.title === 'TAX INVOICE' && invoiceA5Html(gemischt).includes('<h1>ADVANCE PAYMENT INVOICE</h1>'),
+  'STATUS angezahlt (PARTIAL) = „Advance Payment Invoice", final = „Tax Invoice"');
 
 // ── HTML ──
 {
