@@ -730,10 +730,16 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         +   '<div id="peGalleryError" class="hidden" style="color:#AA6E6E; font-size:12px; line-height:1.5; margin-bottom:8px;"></div>'
         +   '<div id="peGalleryBox">'
         +     '<div id="peStrip" class="photo-strip"></div>'
-        +     '<label for="peAddInput" class="photo-area" id="peAddArea" style="margin-top:8px;">'
-        +       '<div class="icon">📷</div><div>Add photos</div><div class="hint" id="peAddHint"></div>'
-        +     '</label>'
+        // MOBILE-GALLERY — dieselben zwei Wege wie bei New Collection: Kamera (`capture`) und Galerie
+        // (ohne `capture`, mehrere auf einmal). Beide fuellen dieselbe Liste ueber denselben Handler —
+        // ein Galeriebild ist genau ein neues Bild wie ein Kamerabild, derselbe gallery_edit-Auftrag.
+        +     '<div class="photo-pick" id="peAddArea" style="margin-top:8px;">'
+        +       '<label for="peAddInput" class="photo-btn" id="peTakePhoto"><span class="icon">📷</span><span>Take photo</span></label>'
+        +       '<label for="peGalleryInput" class="photo-btn" id="peChooseGallery"><span class="icon">🖼️</span><span>Choose from gallery</span></label>'
+        +     '</div>'
+        +     '<div class="photo-count" id="peAddHint"></div>'
         +     '<input id="peAddInput" class="hidden" type="file" accept="image/*" capture="environment" multiple />'
+        +     '<input id="peGalleryInput" class="hidden" type="file" accept="image/*" multiple />'
         +     '<div style="color:#6B6B73; font-size:12px; margin-top:6px; line-height:1.5;">First photo is the cover. Tap a photo to make it the cover, ‹ moves it left, ✕ removes it.</div>'
         +   '</div>'
         +   '<div style="display:flex; gap:8px; margin-top:12px;">'
@@ -1232,6 +1238,10 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const galleryOk = p.gallery_ok === true && Array.isArray(p.gallery) && typeof p.gallery_baseline === 'string';
     let peItems = [];
     let gallerySaved = false;   // nach einem erfolgreichen Galerie-Save ist der Baseline ueberholt
+    // Ein Galerie-Auftrag, dessen Antwort nicht ankam (verloren, offline). Er liegt durabel in der Queue —
+    // ein erneutes Save mit DERSELBEN Auswahl schickt genau ihn noch einmal (gleiche Kennung → Replay),
+    // statt einen zweiten Auftrag anzulegen.
+    let galleryUnconfirmed = null;  // { id, sig }
     const resetGallery = () => {
       peItems = galleryOk ? p.gallery.map(function (g) {
         return { kind: 'existing', linkId: g.link_id, mediaId: g.media_id, key: g.thumb_key || g.image_key, removed: false };
@@ -1301,9 +1311,17 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
         strip.appendChild(t);
       });
       const hint = $('peAddHint');
-      if (hint) hint.textContent = kept.length + ' of ' + MAX_PHOTOS + ' — ' + (MAX_PHOTOS - kept.length) + ' more possible';
+      const voll = kept.length >= MAX_PHOTOS;
+      if (hint) hint.textContent = voll
+        ? MAX_PHOTOS + ' of ' + MAX_PHOTOS + ' photos — remove one to add another.'
+        : kept.length + ' of ' + MAX_PHOTOS + ' — ' + (MAX_PHOTOS - kept.length) + ' more possible';
+      // Beide Wege bleiben sichtbar, solange noch Platz ist — ein weiteres Foto kommt immer DAZU.
+      for (const id of ['peTakePhoto', 'peChooseGallery']) { const b = $(id); if (b) b.classList.toggle('is-full', voll); }
+      for (const id of ['peAddInput', 'peGalleryInput']) { const i = $(id); if (i) i.disabled = voll; }
     }
-    if ($('peAddInput')) $('peAddInput').onchange = async function (e) {
+    // Kamera UND Galerie: derselbe Handler, dieselbe Liste. Eine abgebrochene Auswahl liefert keine
+    // Dateien — dann bleibt alles, wie es war.
+    const addPeFiles = async function (e) {
       const files = Array.from((e.target && e.target.files) || []);
       if (!files.length) return;
       let rejected = 0;
@@ -1320,6 +1338,8 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       renderPeStrip();
       if (rejected > 0 && msg) { msg.style.color = '#AA6E6E'; msg.textContent = 'At most ' + MAX_PHOTOS + ' photos per item — ' + rejected + ' not added.'; }
     };
+    if ($('peAddInput')) $('peAddInput').onchange = addPeFiles;
+    if ($('peGalleryInput')) $('peGalleryInput').onchange = addPeFiles;
     resetGallery();
 
     btn.onclick = () => { fill(); resetGallery(); if (msg) msg.textContent = ''; form.classList.remove('hidden'); };
@@ -1439,18 +1459,31 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
           // Eigener durabler Job mit eigenem Vertrag. Der mitgeschickte `galleryBaseline` ist genau
           // der, den dieser Bildschirm beim Laden bekommen hat — hat sich die Galerie inzwischen
           // geaendert, wird der Job als Konflikt abgewiesen und NICHTS angewandt.
-          const gEntry = await uploadQueue.enqueue({
-            metadata: {
-              kind: 'gallery_edit', productId: p.id, galleryBaseline: p.gallery_baseline,
-              order: galleryPlan.order, remove: galleryPlan.remove,
-              // §17 — Feldaenderungen reisen im SELBEN Job mit und werden in derselben Transaktion
-              // angewandt. Sonst koennte "Preis gespeichert, Bild verloren" entstehen.
-              ...(Object.keys(changed).length ? { patch: changed } : {}),
-            },
-            images: galleryPlan.images,
-            protocolVersion: 2,
-          });
-          const gr = await uploadQueue.drainEntry(gEntry.uploadEventId, localStorage.getItem(TOKEN_KEY));
+          const sig = JSON.stringify([galleryPlan.order, galleryPlan.remove, galleryPlan.images, changed]);
+          let gId = galleryUnconfirmed && galleryUnconfirmed.sig === sig ? galleryUnconfirmed.id : null;
+          if (!gId) {
+            const gEntry = await uploadQueue.enqueue({
+              metadata: {
+                kind: 'gallery_edit', productId: p.id, galleryBaseline: p.gallery_baseline,
+                order: galleryPlan.order, remove: galleryPlan.remove,
+                // §17 — Feldaenderungen reisen im SELBEN Job mit und werden in derselben Transaktion
+                // angewandt. Sonst koennte "Preis gespeichert, Bild verloren" entstehen.
+                ...(Object.keys(changed).length ? { patch: changed } : {}),
+              },
+              images: galleryPlan.images,
+              protocolVersion: 2,
+            });
+            gId = gEntry.uploadEventId;
+          }
+          const gr = await uploadQueue.drainEntry(gId, localStorage.getItem(TOKEN_KEY));
+          if (gr && (gr.outcome === 'retryable' || gr.outcome === 'busy')) {
+            // Nicht bestaetigt heisst nicht gescheitert: der Server kann ihn schon haben.
+            galleryUnconfirmed = { id: gId, sig: sig };
+            if (!viewGone() && msg) { msg.style.color = '#C8A96A'; msg.textContent = 'Not confirmed yet — the photos are kept on this phone. Press Save again to retry; nothing is added twice.'; }
+            saving = false; $('peSave').disabled = false;
+            return;
+          }
+          galleryUnconfirmed = null;
           if (gr && gr.outcome && gr.outcome !== 'done') throw new Error('Photos ' + gr.outcome);
           if (viewGone()) return;      // der Auftrag liegt durabel, die Ansicht dazu gibt es nicht mehr
           // Der Baseline dieses Bildschirms beschreibt jetzt einen ueberholten Stand. Statt den
