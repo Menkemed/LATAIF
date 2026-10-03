@@ -866,6 +866,18 @@ fn quarantine(conn: &Connection, t: &TrustedUploadContext, event: &str, code: &s
     Ok(())
 }
 
+// ── MOBILE-GALLERY-CONFLICT — der Zustand EINES eigenen Auftrags (nur lesen) ───────────────────────
+/// `(state, error_code)` des Auftrags im Scope des Aufrufers — Mandant, Filiale UND Benutzer aus dem JWT.
+/// Ein fremder und ein unbekannter Auftrag sind beide `None`: von aussen nicht zu unterscheiden.
+pub fn job_status(conn: &Connection, t: &TrustedUploadContext, event: &str) -> rusqlite::Result<Option<(String, Option<String>)>> {
+    conn.query_row(
+        "SELECT state, error_code FROM mobile_upload_inbox
+          WHERE tenant_id = ?1 AND branch_id = ?2 AND authenticated_user_id = ?3 AND upload_event_id = ?4",
+        params![t.tenant_id, t.branch_id, t.authenticated_user_id, event],
+        |r| Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?)),
+    ).optional()
+}
+
 // ── shared-blob lifecycle guard ───────────────────────────────────────────────
 /// True iff any NON-terminal / ready inbox job still references this staged blob (by storage_key).
 /// A job-local cleanup must consult this before deleting a shared content-addressed blob; orphan-GC

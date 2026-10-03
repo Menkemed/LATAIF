@@ -67,6 +67,9 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // MOBILE-04B2A8-I1 — authenticated mobile upload ingress. Separate route; `/sync/push` above is
         // untouched. Same JWT auth layer + the same 50 MB body limit (build_api_router) as every /api route.
         .route("/mobile/upload", post(mobile_upload_ingress))
+        // MOBILE-GALLERY-CONFLICT — READ ONLY: Zustand und Fehlercode EINES eigenen Auftrags, damit das
+        // Telefon einen echten Konflikt (BASELINE_CHANGED) von „noch nicht angewandt" unterscheiden kann.
+        .route("/mobile/upload/{id}", get(mobile_upload_status))
         // CENTRAL-C3C — die neutrale Zwischenablage. Sie nimmt Bytes und gibt eine Kennung zurueck,
         // sonst nichts: keine Geschaeftstabelle, kein Produkt, kein Pfad vom Aufrufer. Sie ist
         // ausdruecklich NICHT `/mobile/upload`: die ist ein Produkt-Eingang und wuerde einen zweiten
@@ -1159,6 +1162,39 @@ async fn mobile_upload_ingress(
     }
 }
 
+/// MOBILE-GALLERY-CONFLICT — der Zustand EINES eigenen Handy-Auftrags. Liest nur.
+///
+/// Nach dem Speichern wartet das Telefon auf den angewandten Stand. Ohne diese Auskunft konnte es einen
+/// echten Konflikt (Auftrag mit `MOBILE_GALLERY_BASELINE_CHANGED` beiseitegelegt) nicht von „noch nicht
+/// angewandt" unterscheiden. Scope ausschliesslich aus dem JWT (Mandant, Filiale, Benutzer); ein fremder
+/// oder unbekannter Auftrag ist 404. Nur der Primary fuehrt die Inbox — derselbe Riegel wie beim Hochladen.
+async fn mobile_upload_status(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Path(id): Path<String>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    if !state.primary_state.may_write_sync() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if claims.role.trim().is_empty() {
+        return Err(StatusCode::FORBIDDEN);
+    }
+    if id.trim().is_empty() || id.len() > 200 {
+        return Err(StatusCode::BAD_REQUEST);
+    }
+    let trusted = super::mobile_upload::TrustedUploadContext {
+        authenticated_user_id: claims.sub.clone(),
+        tenant_id: claims.tenant_id.clone(),
+        branch_id: claims.branch_id.clone(),
+    };
+    let db = state.db.lock().await;
+    match super::mobile_upload::job_status(&db, &trusted, &id) {
+        Ok(Some((job_state, error_code))) => Ok(Json(serde_json::json!({ "state": job_state, "errorCode": error_code }))),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(_) => Err(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
 async fn sync_pull_read(
     State(state): State<Arc<AppState>>,
     Extension(claims): Extension<Claims>,
@@ -1835,6 +1871,11 @@ mod legacy_push_tests {
                 // the key file the identify route reads anyway. Nothing to gate.
                 "/ai/status",
                 "/mobile/upload",
+                // MOBILE-GALLERY-CONFLICT — /mobile/upload/{id}: GET, READ ONLY. Zustand + Fehlercode EINES
+                // eigenen Auftrags (Scope Mandant/Filiale/Benutzer aus dem JWT, fremd = 404). Er liest die
+                // Inbox mit einem einzigen SELECT (`mobile_upload::job_status`) und schreibt nichts — W5 prueft
+                // den Handler; hinter demselben `may_write_sync()`-Riegel wie das Hochladen.
+                "/mobile/upload/{id}",
                 // CENTRAL-C3C — /staging/media: die zweite Stelle, an der Bytes hereinkommen, und
                 // die einzige, die NICHTS entscheidet. Sie liegt in derselben JWT-geschuetzten
                 // Gruppe, hinter demselben `may_write_sync()`-Riegel wie /mobile/upload — und sie
@@ -1886,6 +1927,7 @@ mod legacy_push_tests {
             "async fn products_search",
             "async fn media_blob",
             "async fn stock_check_list",
+            "async fn mobile_upload_status",
             "async fn health",
         ] {
             let start = src.find(handler).unwrap_or_else(|| panic!("{handler} nicht gefunden"));

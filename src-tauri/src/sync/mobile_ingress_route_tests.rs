@@ -187,6 +187,36 @@ async fn duplicate_same_content_replays() {
     assert_eq!(inbox_count(&st).await, 1, "no second job on retry");
 }
 
+// MOBILE-GALLERY-CONFLICT — der Zustand des EIGENEN Auftrags ist lesbar (inkl. Fehlercode eines
+// Konflikts); ein fremder Benutzer und ein unbekannter Auftrag sehen nichts; ohne Token 401; Lesen schreibt nichts.
+#[tokio::test]
+async fn own_job_status_is_readable_and_scoped() {
+    let stg = Stg::new();
+    let st = state(&stg);
+    let tk = token("tenant-1", "branch-main", "clerk");
+    let (c1, _) = send(&st, upload_req(Some(&tk), CT, body_with("ev-s", vec![jpeg_b64()], 1, "collection", META))).await;
+    assert_eq!(c1, StatusCode::CREATED);
+    let get = |t: Option<&str>, id: &str| {
+        let mut b = Request::builder().method("GET").uri(format!("/api/mobile/upload/{id}"));
+        if let Some(t) = t { b = b.header("authorization", format!("Bearer {t}")); }
+        b.body(Body::empty()).unwrap()
+    };
+    let (c, b) = send(&st, get(Some(&tk), "ev-s")).await;
+    assert_eq!(c, StatusCode::OK, "body={b}");
+    assert!(b.contains("\"state\":\"accepted\"") && b.contains("\"errorCode\":null"), "{b}");
+    st.db.lock().await.execute(
+        "UPDATE mobile_upload_inbox SET state = 'quarantined', error_code = 'MOBILE_GALLERY_BASELINE_CHANGED' WHERE upload_event_id = 'ev-s'", [],
+    ).unwrap();
+    let (c2, b2) = send(&st, get(Some(&tk), "ev-s")).await;
+    assert_eq!(c2, StatusCode::OK);
+    assert!(b2.contains("\"state\":\"quarantined\"") && b2.contains("\"errorCode\":\"MOBILE_GALLERY_BASELINE_CHANGED\""), "{b2}");
+    let other = auth::create_token("user-other", "tenant-1", "branch-main", "clerk", SECRET).unwrap();
+    assert_ne!(send(&st, get(Some(&other), "ev-s")).await.0, StatusCode::OK, "another user's job is not visible");
+    assert_eq!(send(&st, get(Some(&tk), "ev-unknown")).await.0, StatusCode::NOT_FOUND);
+    assert_eq!(send(&st, get(None, "ev-s")).await.0, StatusCode::UNAUTHORIZED);
+    assert_eq!(inbox_count(&st).await, 1, "reading the status writes nothing");
+}
+
 // Same event + DIFFERENT content → 409 conflict, no mutation.
 #[tokio::test]
 async fn same_event_different_content_conflicts() {

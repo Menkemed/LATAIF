@@ -838,6 +838,21 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     } catch (_) { return null; }
   }
 
+  /** MOBILE-GALLERY-CONFLICT — Zustand + Fehlercode EINES eigenen Auftrags. `null`, wenn unbekannt/nicht lesbar. */
+  async function fetchUploadStatus(uploadEventId) {
+    if (!uploadEventId) return null;
+    try {
+      const token = localStorage.getItem(TOKEN_KEY);
+      const res = await fetch('/api/mobile/upload/' + encodeURIComponent(uploadEventId), { cache: 'no-store', headers: { Authorization: 'Bearer ' + token } });
+      if (!res.ok) return null;
+      const data = await res.json();
+      return (data && typeof data.state === 'string') ? data : null;
+    } catch (_) { return null; }
+  }
+  // Ein echter Galerie-Konflikt: der Artikel hat sich geaendert, seit dieser Bildschirm ihn gelesen hat.
+  const GALLERY_CONFLICT_CODES = ['MOBILE_GALLERY_BASELINE_CHANGED', 'MEDIA_EDIT_PLAN_CONFLICT'];
+  const GALLERY_CONFLICT_TEXT = 'Item changed on another device. Reload before saving your photo changes.';
+
   // v0.8.48 — ein zwischengespeicherter Suchtreffer ist NICHT der bearbeitbare Zustand.
   //
   // Die Trefferliste bleibt beim Zurueckgehen bewusst erhalten (keine zweite Abfrage, keine
@@ -1113,6 +1128,22 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       // galt. Kommt er zurueck, nachdem der Benutzer weitergegangen ist oder erneut gespeichert
       // wurde, darf er NICHTS mehr tun — nicht zeichnen, nichts melden, nicht weiterlaufen.
       if (cancelled()) return false;
+      if (!patchApplied(fresh, expected) && opts && opts.uploadEventId) {
+        // MOBILE-GALLERY-CONFLICT — der Server sagt eindeutig, dass der Auftrag NICHT angewandt wird:
+        // beiseitegelegt. Ein Konflikt wird als Konflikt gemeldet, nichts wird wiederholt oder ueberschrieben.
+        const st = await fetchUploadStatus(opts.uploadEventId);
+        if (cancelled()) return false;
+        if (st && st.state === 'quarantined') {
+          const conflict = GALLERY_CONFLICT_CODES.indexOf(String(st.errorCode || '')) !== -1;
+          if (msg) {
+            msg.style.color = '#AA6E6E';
+            msg.textContent = conflict ? GALLERY_CONFLICT_TEXT
+              : 'Not applied — the desktop refused this change (' + (st.errorCode || 'unknown') + '). Reload the item and try again.';
+          }
+          if (opts.onRefused) opts.onRefused(conflict, st.errorCode || '');
+          return false;
+        }
+      }
       if (patchApplied(fresh, expected)) {
         showProduct(fresh, currentOrigin, 'fresh');
         const host = $('scanDetails');
@@ -1242,6 +1273,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     // ein erneutes Save mit DERSELBEN Auswahl schickt genau ihn noch einmal (gleiche Kennung → Replay),
     // statt einen zweiten Auftrag anzulegen.
     let galleryUnconfirmed = null;  // { id, sig }
+    let galleryRefusedText = '';    // MOBILE-GALLERY-CONFLICT — der gespeicherte Auftrag wurde beiseitegelegt
     const resetGallery = () => {
       peItems = galleryOk ? p.gallery.map(function (g) {
         return { kind: 'existing', linkId: g.link_id, mediaId: g.media_id, key: g.thumb_key || g.image_key, removed: false };
@@ -1261,8 +1293,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       box.classList.remove('hidden');
       if (gallerySaved) {
         err.classList.remove('hidden');
-        err.style.color = '#6B6B73';
-        err.textContent = 'Photos saved. Reload the item to edit them again.';
+        // Die Auswahl bleibt stehen; bearbeitet wird erst nach dem Neuladen — beim Konflikt wie nach einem Erfolg.
+        err.style.color = galleryRefusedText ? '#AA6E6E' : '#6B6B73';
+        err.textContent = galleryRefusedText || 'Photos saved. Reload the item to edit them again.';
       } else { err.classList.add('hidden'); err.style.color = '#AA6E6E'; }
       strip.innerHTML = '';
       const kept = peKept();
@@ -1521,6 +1554,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       const viewGone = () => pageGen.view !== viewAtSave;
       $('peSave').disabled = true;
       if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saving…'; }
+      let galleryJobId = null;
       try {
         if (galleryPlan) {
           // Eigener durabler Job mit eigenem Vertrag. Der mitgeschickte `galleryBaseline` ist genau
@@ -1584,6 +1618,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
           // naechsten Save garantiert in einen Konflikt laufen zu lassen, wird die Galerie hier
           // gesperrt, bis der Artikel neu geladen ist.
           gallerySaved = true;
+          galleryJobId = gId;
           renderPeStrip();
         }
       } catch (e) {
@@ -1607,7 +1642,13 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
           if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saved — waiting for the desktop…'; }
           for (const k of Object.keys(changed)) { if (KEY_OF_INV[k]) { original[KEY_OF_INV[k]] = changed[k]; p[KEY_OF_INV[k]] = changed[k]; } }
           saving = false; $('peSave').disabled = false;
-          showSavedState(p.id, expected, msg);
+          showSavedState(p.id, expected, msg, galleryJobId ? {
+            uploadEventId: galleryJobId,
+            onRefused: function (conflict, code) {
+              galleryRefusedText = conflict ? GALLERY_CONFLICT_TEXT : 'Photos not applied (' + code + '). Reload the item and try again.';
+              renderPeStrip();
+            },
+          } : undefined);
           return;
         }
         // Derselbe durable Weg wie ein neuer Artikel: Queue → /api/mobile/upload → Inbox → Drain.

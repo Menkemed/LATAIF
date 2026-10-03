@@ -95,8 +95,12 @@ ok(/if \(patchApplied\(fresh, expected\)\) \{/.test(page),
   'SAVED it confirms on CONTENT — a newer timestamp alone is not proof');
 ok(/showProduct\(fresh, currentOrigin, 'fresh'\)/.test(page),
   'SAVED …and then draws exactly that state');
-ok((page.match(/showSavedState\(p\.id, expected, msg\);/g) || []).length === 2,
+// Der Galerie-Weg gibt zusätzlich die Kennung seines Auftrags mit (MOBILE-GALLERY-CONFLICT: ein
+// beiseitegelegter Auftrag wird als solcher gemeldet, nicht als „noch nicht angewandt").
+ok((page.match(/showSavedState\(p\.id, expected, msg[,)]/g) || []).length === 2,
   'SAVED both success paths use it — the plain edit and the one that rides along with the gallery');
+ok(/showSavedState\(p\.id, expected, msg, galleryJobId \? \{\s*uploadEventId: galleryJobId,/.test(page),
+  'SAVED …the gallery path names its job, so a refused job is reported as refused');
 ok(/accepted, but the desktop has not applied it yet/.test(page),
   'SAVED …and if it never arrives, the page says accepted — not saved');
 ok(/Saved — waiting for the desktop/.test(page),

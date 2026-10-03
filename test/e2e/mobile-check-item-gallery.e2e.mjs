@@ -195,6 +195,18 @@ async function waitStrip(c, n, ms = 15000) { const end = Date.now() + ms; while 
 const tiles = (e) => e.ev(`return [...document.querySelectorAll('#peStrip .photo-thumb')].map(function(t){ const l=t.getAttribute('data-link')||''; const s=(t.querySelector('img')||{}).src||''; return l ? 'L:'+l : 'N:'+(s.split(',')[1]||'').slice(-24); });`);
 const tapRemove = (e, i) => e.ev(`const t=document.querySelectorAll('#peStrip .photo-thumb')[${i}]; if(!t) return 'NO'; const b=[...t.querySelectorAll('button.rm')].find(x=>x.textContent==='✕'||x.textContent==='↺'); if(!b) return 'NOBTN'; b.click(); return 'OK';`);
 const msgOf = (e) => textE(e, '#peMsg');
+const KONFLIKT = 'Item changed on another device';
+const seiteText = (e) => e.ev('return document.body.innerText;');
+const desktopLogout = async (app) => { await app.ev("localStorage.removeItem('lataif_session'); location.reload(); return 1;").catch(() => {}); await sleep(3500); };
+async function desktopSignIn(app) {
+  const end = Date.now() + 90000;
+  while (Date.now() < end) { if (await existsApp(app, 'a[href="/settings"]')) return; if (await existsApp(app, 'input[type="password"]')) break; await sleep(400); }
+  if (await existsApp(app, 'a[href="/settings"]')) return;
+  if (await existsApp(app, 'input[type="email"]')) await setValApp(app, 'input[type="email"]', OWNER_EMAIL);
+  await setValApp(app, 'input[type="password"]', ONBOARD_PW);
+  await app.ev("const b=document.querySelector('button[type=submit]') || [...document.querySelectorAll('button')].find(x=>/sign in|log ?in|anmelden/i.test(x.textContent)); if(b) b.click(); return 1;");
+  await waitApp(app, 'a[href="/settings"]', 60000);
+}
 async function waehle(e, sel, paths, soll) { await setFiles(e, sel, paths); return waitStrip(e, soll, 15000); }
 
 // ════════════════════════════════════════════════════════════════════════════
@@ -343,6 +355,9 @@ async function main() {
       '§8 the two existing photos keep their links, order and cover');
     ok(inboxRows().filter((x) => x.upload_event_id === u.upload_event_id).length === 1 && inboxRows().every((x) => x.state !== 'quarantined'),
       `§8 one inbox row for the job, nothing quarantined (${S(inboxRows())})`);
+    { const end2 = Date.now() + 45000; while (Date.now() < end2 && !/Saved — the photos above/.test(await seiteText(edge))) await sleep(500); }
+    const t8 = await seiteText(edge);
+    ok(/Saved — the photos above/.test(t8) && !t8.includes(KONFLIKT), '§8 after the successful retry the phone confirms the save — no false conflict message');
   }
 
   // ── 9 echter Konflikt: die Galerie ändert sich, während der Editor offen ist ──
@@ -369,8 +384,14 @@ async function main() {
     const job = await waitTerminal(mine.upload_event_id, 120000);
     ok(job?.state === 'quarantined' && job?.error_code === 'MOBILE_GALLERY_BASELINE_CHANGED', `§9 the phone's job ends as a conflict (${job?.state}/${job?.error_code})`);
     ok(same(linkRows(pid.id), nachAnderem) && activeLinks(pid.id).length === 4, '§9 nothing of it was applied — the other change stands, no photo added');
-    await sleep(2000);
-    console.log('  · §9 phone message: ' + (await msgOf(edge)));
+    { const end2 = Date.now() + 50000; while (Date.now() < end2 && !(await msgOf(edge)).includes(KONFLIKT)) await sleep(500); }
+    const m9 = await msgOf(edge);
+    ok(m9 === 'Item changed on another device. Reload before saving your photo changes.', `§9 the phone shows the clear conflict message (${m9})`);
+    ok(!/not applied yet/.test(await seiteText(edge)), '§9 …not the neutral „accepted, but not applied yet"');
+    ok((await textE(edge, '#peGalleryError')).includes(KONFLIKT) && await stripCount(edge) === 5, `§9 the photo area says the same and keeps the selection on screen (${await stripCount(edge)} tiles)`);
+    await sleep(3000);
+    ok(inboxRows().filter((x) => x.upload_event_id === mine.upload_event_id).length === 1 && uploads.filter((x) => x.upload_event_id === mine.upload_event_id).length === 1,
+      '§9 the conflict is not retried automatically (one send, one inbox row)');
   }
 
   // ── 10/11 verlorene Antwort, DANN die Auswahl ändern, dann Save ──────────────
@@ -409,6 +430,8 @@ async function main() {
     const jobA = inboxRows().find((r) => r.upload_event_id === A.upload_event_id), jobB = B ? inboxRows().find((r) => r.upload_event_id === B.upload_event_id) : null;
     ok(jobA?.state === 'ready' && jobB?.state === 'ready', `${label} both jobs applied, neither quarantined (A ${jobA?.state}/${jobA?.error_code}, B ${jobB?.state}/${jobB?.error_code})`);
     ok(sends.length >= 2 && uploads.length > vorZweit, `${label} …sends after the change: ${sends.length - 1}`);
+    { const end2 = Date.now() + 45000; while (Date.now() < end2 && !/Saved — the photos above/.test(await seiteText(edge))) await sleep(500); }
+    ok(!(await seiteText(edge)).includes(KONFLIKT), `${label} no false conflict message`);
     return { A, B, start, nachher };
   };
   {
@@ -432,6 +455,27 @@ async function main() {
       { done: (links, start) => links.length === start.length - 1 && !links.some((l) => l.link_id === start[1].link_id) });
     ok(!r.nachher.some((l) => l.link_id === r.start[1].link_id) && r.nachher.every((l) => r.start.some((s) => s.link_id === l.link_id)),
       `§11 the removed existing photo is gone and Z did not stay (${r.nachher.length} photos)`);
+  }
+
+  {
+    await openFixture(edge, 'Check Gallery');
+    const start = activeLinks(pid.id);
+    await desktopLogout(app);                          // der Desktop holt nichts ab → der Auftrag bleibt angenommen
+    ok(await waehle(edge, '#peGalleryInput', [paths[5]], start.length + 1), '§12 one gallery photo added while the desktop is away');
+    const vorUp = uploads.length;
+    await clickE(edge, '#peSave');
+    let end = Date.now() + 30000; while (Date.now() < end && uploads.length === vorUp) await sleep(200);
+    const job = uploads[uploads.length - 1];
+    end = Date.now() + 55000; while (Date.now() < end && !/not applied yet/.test(await msgOf(edge))) await sleep(500);
+    const m12 = await msgOf(edge);
+    ok(m12 === 'Saved — accepted, but the desktop has not applied it yet.', `§12 a normal pending job keeps the waiting message (${m12})`);
+    ok(!(await seiteText(edge)).includes(KONFLIKT), '§12 …and no conflict message');
+    const tok = await edge.ev("return localStorage.getItem('lataif_mobile_token');");
+    const st = await (await fetch(`${BASE}/api/mobile/upload/${encodeURIComponent(job.upload_event_id)}`, { headers: { Authorization: 'Bearer ' + tok } })).json().catch(() => null);
+    ok(st && st.state === 'accepted' && st.errorCode === null, `§12 the status read says accepted, no error (${S(st)})`);
+    await desktopSignIn(app);
+    const fin = await waitTerminal(job.upload_event_id, 120000);
+    ok(fin?.state === 'ready' && activeLinks(pid.id).length === start.length + 1, `§12 once the desktop is back the job is applied (${fin?.state})`);
   }
 
   ok(consoleErrors.length === 0, `no uncaught page exception (${consoleErrors.slice(0, 2).join(' | ')})`);
