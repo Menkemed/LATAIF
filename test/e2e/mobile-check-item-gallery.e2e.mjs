@@ -373,6 +373,67 @@ async function main() {
     console.log('  · §9 phone message: ' + (await msgOf(edge)));
   }
 
+  // ── 10/11 verlorene Antwort, DANN die Auswahl ändern, dann Save ──────────────
+  // Der alte Auftrag darf nie mit neuem Inhalt unter seiner Kennung gehen; die neue Änderung darf nicht
+  // verloren gehen (ein neuer Auftrag auf der alten Baseline liefe hinter dem alten in einen Konflikt).
+  const nachAenderung = async (label, vorher, aendern, erwarte) => {
+    await openFixture(edge, 'Check Gallery');
+    const start = activeLinks(pid.id);
+    ok(await waitStrip(edge, start.length), `${label} the editor shows the current ${start.length} photos`);
+    await vorher();
+    await edge.send('Fetch.enable', { patterns: [{ urlPattern: '*/api/mobile/upload', requestStage: 'Response' }] });
+    verloren.getroffen = 0; verloren.an = true;
+    const vorUp = uploads.length;
+    await clickE(edge, '#peSave');
+    let end = Date.now() + 30000; while (Date.now() < end && verloren.getroffen === 0) await sleep(200);
+    end = Date.now() + 15000; while (Date.now() < end && !/Not confirmed/.test(await msgOf(edge))) await sleep(200);
+    await edge.send('Fetch.disable');
+    const A = uploads[uploads.length - 1];
+    ok(verloren.getroffen === 1 && uploads.length === vorUp + 1 && /Not confirmed yet/.test(await msgOf(edge)), `${label} first save reached the server, answer lost, phone says „not confirmed" (${await msgOf(edge)})`);
+    await aendern();                                   // die Auswahl ändert sich VOR dem zweiten Save
+    const vorZweit = uploads.length;
+    await clickE(edge, '#peSave');
+    // Auf den Endzustand warten: die neue Auswahl muss angewandt sein (oder die Zeit läuft ab).
+    end = Date.now() + 150000;
+    while (Date.now() < end) { if (erwarte.done(activeLinks(pid.id), start)) break; await sleep(1500); }
+    await sleep(3000);
+    const sends = uploads.slice(vorUp);
+    const unterA = sends.filter((u) => u.upload_event_id === A.upload_event_id);
+    ok(unterA.every((u) => S(u.metadata) === S(A.metadata) && S(u.images) === S(A.images)),
+      `${label} the old id only ever carried the OLD payload (${unterA.length} send(s) under it, all identical)`);
+    const B = sends.filter((u) => u.upload_event_id !== A.upload_event_id).pop();
+    ok(!!B && B.metadata?.kind === 'gallery_edit', `${label} the changed selection went out as a NEW job (${B ? B.upload_event_id.slice(0, 8) : 'none'})`);
+    const nachher = activeLinks(pid.id);
+    ok(erwarte.done(nachher, start), `${label} the NEW selection is applied — the user's change is not lost (${nachher.length} photos)`);
+    ok(new Set(nachher.map((l) => l.media_id)).size === nachher.length, `${label} no duplicate media (${nachher.length} links, ${new Set(nachher.map((l) => l.media_id)).size} media)`);
+    const jobA = inboxRows().find((r) => r.upload_event_id === A.upload_event_id), jobB = B ? inboxRows().find((r) => r.upload_event_id === B.upload_event_id) : null;
+    ok(jobA?.state === 'ready' && jobB?.state === 'ready', `${label} both jobs applied, neither quarantined (A ${jobA?.state}/${jobA?.error_code}, B ${jobB?.state}/${jobB?.error_code})`);
+    ok(sends.length >= 2 && uploads.length > vorZweit, `${label} …sends after the change: ${sends.length - 1}`);
+    return { A, B, start, nachher };
+  };
+  {
+    let X;
+    const r = await nachAenderung('§10',
+      async () => { ok(await waehle(edge, '#peGalleryInput', [paths[7]], activeLinks(pid.id).length + 1), '§10 one gallery photo X added'); X = sha((await edge.ev(`return [...document.querySelectorAll('#peStrip .photo-thumb img')].pop().src.split(',')[1];`))); },
+      async () => { const n = await stripCount(edge); ok(await waehle(edge, '#peGalleryInput', [paths[8]], n + 1), '§10 …then, before the second save, another gallery photo Y'); },
+      { done: (links, start) => links.length === start.length + 2 });
+    ok(r.B && (r.B.images || []).length === 1 && r.B.metadata.order.filter((o) => o.keep).length === r.start.length + 1,
+      `§10 the new job keeps X (now a stored photo) and uploads only Y (${S(r.B?.metadata?.order)})`);
+    ok(same(r.nachher.slice(0, r.start.length).map((l) => l.link_id), r.start.map((l) => l.link_id)), '§10 the earlier photos keep their links and order');
+    void X;
+  }
+  {
+    const r = await nachAenderung('§11',
+      async () => { ok(await waehle(edge, '#peGalleryInput', [paths[9]], activeLinks(pid.id).length + 1), '§11 one gallery photo Z added'); },
+      async () => {
+        const n = await stripCount(edge);
+        ok(await tapRemove(edge, n - 1) === 'OK' && await tapRemove(edge, 1) === 'OK', '§11 …then, before the second save, Z is removed again and one existing photo too');
+      },
+      { done: (links, start) => links.length === start.length - 1 && !links.some((l) => l.link_id === start[1].link_id) });
+    ok(!r.nachher.some((l) => l.link_id === r.start[1].link_id) && r.nachher.every((l) => r.start.some((s) => s.link_id === l.link_id)),
+      `§11 the removed existing photo is gone and Z did not stay (${r.nachher.length} photos)`);
+  }
+
   ok(consoleErrors.length === 0, `no uncaught page exception (${consoleErrors.slice(0, 2).join(' | ')})`);
   edge.closeWs(); killEdge(); app.closeWs(); killApp();
 }

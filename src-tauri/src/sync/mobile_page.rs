@@ -1347,6 +1347,73 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     // zurueckgesetzt, kein einziger Request.
     $('peCancel').onclick = () => { fill(); resetGallery(); if (msg) msg.textContent = ''; form.classList.add('hidden'); };
 
+    /**
+     * Ein Galerie-Auftrag ist unbestaetigt, und der Benutzer hat die Auswahl seitdem geaendert.
+     *  1. Den alten klaeren: DIESELBE Kennung mit DEMSELBEN Inhalt (aus der Queue) noch einmal senden.
+     *  2. Auf sein Ergebnis warten: angewandt (die Galerie zeigt seinen Endzustand) oder eine fremde
+     *     Aenderung (dann ist der Artikel ein anderer — neu laden).
+     *  3. Die aktuelle Auswahl auf den bestaetigten Stand uebertragen: was der alte schon hochgeladen hat,
+     *     wird BEHALTEN statt erneut hochgeladen (keine Duplikate); der Rest wird ein neuer Plan mit der
+     *     frischen Baseline. Ergebnis: { ok, plan|null, baseline } oder { ok:false, text }.
+     */
+    async function rebaseOnUnconfirmed(u, viewGone) {
+      const keep = 'Your current photo selection is kept on this phone.';
+      const r0 = await uploadQueue.drainEntry(u.id, localStorage.getItem(TOKEN_KEY));
+      if (r0 && (r0.outcome === 'retryable' || r0.outcome === 'busy')) {
+        return { ok: false, text: 'The earlier photo save is still not confirmed — check the connection and press Save again. ' + keep };
+      }
+      if (r0 && (r0.outcome === 'conflict' || r0.outcome === 'rejected')) {
+        // Der alte wurde endgueltig abgewiesen und wird nie angewandt: die neue Auswahl gilt gegen den Ausgangsstand.
+        return { ok: true, plan: currentPlan(null, null), baseline: u.baseline };
+      }
+      if (r0 && r0.outcome === 'reauth') return { ok: false, text: 'Please sign in again, then press Save. ' + keep };
+      const deadline = Date.now() + 45000;
+      let fresh = null;
+      while (Date.now() < deadline) {
+        fresh = await fetchProductById(p.id);
+        if (viewGone()) return { ok: false, text: '' };
+        if (fresh && fresh.gallery_ok === true && Array.isArray(fresh.gallery)) {
+          if (patchApplied(fresh, { gallery: { order: u.order, remove: u.remove } })) break;
+          if (fresh.gallery_baseline !== u.baseline) return { ok: false, text: 'Item changed. Reload before saving. ' + keep };
+        }
+        fresh = null;
+        await new Promise((r) => setTimeout(r, 1500));
+      }
+      if (!fresh) return { ok: false, text: 'The earlier photo save is accepted but not applied yet — wait a moment and press Save again. ' + keep };
+      // Neue Bilder des alten Auftrags haben jetzt eine Identitaet: Position k seines Plans = Position k der Galerie.
+      const linkOfNew = {};
+      u.order.forEach(function (o, k) { if (o && o.new !== undefined && fresh.gallery[k]) linkOfNew[o.new] = String(fresh.gallery[k].link_id); });
+      const plan = currentPlan(fresh.gallery.map(function (g) { return String(g.link_id); }), function (src, used) {
+        for (let i = 0; i < u.srcs.length; i++) if (!used[i] && u.srcs[i] === src && linkOfNew[i]) { used[i] = true; return linkOfNew[i]; }
+        return null;
+      });
+      if (plan === false) return { ok: false, text: 'Item changed. Reload before saving. ' + keep };
+      return { ok: true, plan: plan, baseline: fresh.gallery_baseline };
+    }
+    /**
+     * Die aktuelle Auswahl als Plan. Ohne `active` gegen den Ausgangsstand dieses Bildschirms; mit
+     * `active` (den Links des bestaetigten Stands) und `storedAs` (neues Bild → schon gespeicherter Link)
+     * gegen ihn. `null` = keine Aenderung, `false` = ein behaltenes Bild gibt es dort nicht mehr.
+     */
+    function currentPlan(active, storedAs) {
+      const order = [], images = [], used = {};
+      for (const it of peKept()) {
+        if (it.kind === 'existing') {
+          if (active && active.indexOf(it.linkId) === -1) return false;
+          order.push({ keep: it.linkId });
+        } else {
+          const link = storedAs ? storedAs(it.src, used) : null;
+          if (link) order.push({ keep: link });
+          else { order.push({ new: images.length }); images.push(it.src); }
+        }
+      }
+      const kept = order.filter(function (o) { return o.keep; }).map(function (o) { return o.keep; });
+      const base = active || p.gallery.map(function (g) { return g.link_id; });
+      const remove = base.filter(function (id) { return kept.indexOf(id) === -1; });
+      const same = images.length === 0 && remove.length === 0 && kept.join(',') === base.join(',');
+      return same ? null : { order: order, images: images, remove: remove };
+    }
+
     let saving = false;
     $('peSave').onclick = async () => {
       if (saving) return;                     // Doppeltipp: genau eine Mutation
@@ -1459,12 +1526,37 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
           // Eigener durabler Job mit eigenem Vertrag. Der mitgeschickte `galleryBaseline` ist genau
           // der, den dieser Bildschirm beim Laden bekommen hat — hat sich die Galerie inzwischen
           // geaendert, wird der Job als Konflikt abgewiesen und NICHTS angewandt.
-          const sig = JSON.stringify([galleryPlan.order, galleryPlan.remove, galleryPlan.images, changed]);
+          let sig = JSON.stringify([galleryPlan.order, galleryPlan.remove, galleryPlan.images, changed]);
+          let baseline = p.gallery_baseline;
+          // Dieselbe Kennung NUR fuer denselben Inhalt. Hat sich die Auswahl seit dem unbestaetigten
+          // Auftrag geaendert, wird er erst geklaert und die neue Auswahl auf den bestaetigten Stand
+          // uebertragen — ein neuer Auftrag auf der alten Baseline liefe hinter ihm in einen Konflikt.
+          if (galleryUnconfirmed && galleryUnconfirmed.sig !== sig) {
+            if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Confirming the earlier photo save first…'; }
+            const rb = await rebaseOnUnconfirmed(galleryUnconfirmed, viewGone);
+            if (viewGone()) { saving = false; $('peSave').disabled = false; return; }
+            if (!rb.ok) {
+              if (msg) { msg.style.color = '#AA6E6E'; msg.textContent = rb.text; }
+              saving = false; $('peSave').disabled = false;
+              return;
+            }
+            galleryUnconfirmed = null;
+            if (!rb.plan) {
+              // Die neue Auswahl IST schon der bestaetigte Stand — es gibt nichts mehr zu senden.
+              gallerySaved = true; renderPeStrip();
+              if (msg) { msg.style.color = '#6B6B73'; msg.textContent = 'Saved.'; }
+              saving = false; $('peSave').disabled = false;
+              return;
+            }
+            galleryPlan = rb.plan; baseline = rb.baseline;
+            expected.gallery = { order: galleryPlan.order, remove: galleryPlan.remove };
+            sig = JSON.stringify([galleryPlan.order, galleryPlan.remove, galleryPlan.images, changed]);
+          }
           let gId = galleryUnconfirmed && galleryUnconfirmed.sig === sig ? galleryUnconfirmed.id : null;
           if (!gId) {
             const gEntry = await uploadQueue.enqueue({
               metadata: {
-                kind: 'gallery_edit', productId: p.id, galleryBaseline: p.gallery_baseline,
+                kind: 'gallery_edit', productId: p.id, galleryBaseline: baseline,
                 order: galleryPlan.order, remove: galleryPlan.remove,
                 // §17 — Feldaenderungen reisen im SELBEN Job mit und werden in derselben Transaktion
                 // angewandt. Sonst koennte "Preis gespeichert, Bild verloren" entstehen.
@@ -1478,13 +1570,15 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
           const gr = await uploadQueue.drainEntry(gId, localStorage.getItem(TOKEN_KEY));
           if (gr && (gr.outcome === 'retryable' || gr.outcome === 'busy')) {
             // Nicht bestaetigt heisst nicht gescheitert: der Server kann ihn schon haben.
-            galleryUnconfirmed = { id: gId, sig: sig };
+            galleryUnconfirmed = { id: gId, sig: sig, order: galleryPlan.order, remove: galleryPlan.remove, srcs: galleryPlan.images, baseline: baseline };
             if (!viewGone() && msg) { msg.style.color = '#C8A96A'; msg.textContent = 'Not confirmed yet — the photos are kept on this phone. Press Save again to retry; nothing is added twice.'; }
             saving = false; $('peSave').disabled = false;
             return;
           }
           galleryUnconfirmed = null;
-          if (gr && gr.outcome && gr.outcome !== 'done') throw new Error('Photos ' + gr.outcome);
+          // `skip`: der wiederholte Eintrag liegt nicht mehr in der Queue — er ist schon angekommen
+          // (oder endgueltig beantwortet). Das Warten auf den bestaetigten Stand zeigt, was gilt.
+          if (gr && gr.outcome && gr.outcome !== 'done' && gr.outcome !== 'skip') throw new Error('Photos ' + gr.outcome);
           if (viewGone()) return;      // der Auftrag liegt durabel, die Ansicht dazu gibt es nicht mehr
           // Der Baseline dieses Bildschirms beschreibt jetzt einen ueberholten Stand. Statt den
           // naechsten Save garantiert in einen Konflikt laufen zu lassen, wird die Galerie hier

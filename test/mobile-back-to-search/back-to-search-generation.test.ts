@@ -379,7 +379,12 @@ ok(/const viewAtSave = pageGen\.view;\r?\n\s*const viewGone = \(\) => pageGen\.v
 // Detailansicht, die man verlassen koennte — er gehoert nicht zu diesem Lebenszyklus.
 const editSrc = cut(page, 'wireProductEdit');
 const drains = editSrc.match(/await uploadQueue\.drainEntry\([^\n]*\)/g) || [];
-ok(drains.length === 2, 'SAVE both durable paths of the edit are covered (' + drains.length + ')');
+// Drei Wartepunkte: Fotos, Felder — und das Klären eines unbestätigten Galerie-Auftrags. Der dritte
+// schreibt selbst nichts; erst der Aufrufer meldet, und zwar nach seiner eigenen Prüfung der Ansicht.
+ok(drains.length === 3, 'SAVE all durable paths of the edit are covered (' + drains.length + ')');
+ok(/const rb = await rebaseOnUnconfirmed\(galleryUnconfirmed, viewGone\);\r?\n\s*if \(viewGone\(\)\) \{ saving = false; \$\('peSave'\)\.disabled = false; return; \}/.test(page)
+  && !/async function rebaseOnUnconfirmed[\s\S]*?msg\.textContent[\s\S]*?\n    function currentPlan/.test(page),
+  'SAVE …the clarification of an unconfirmed photo job writes nothing itself and is checked against the view by its caller');
 for (const [what, re] of [
   ['photos', /throw new Error\('Photos ' \+ gr\.outcome\);\r?\n\s*if \(viewGone\(\)\) return;/],
   ['fields', /throw new Error\('Upload ' \+ r\.outcome\);\r?\n\s*if \(viewGone\(\)\) return;/],
