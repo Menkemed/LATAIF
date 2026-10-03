@@ -393,7 +393,7 @@ async function eigeneMaske(c, productId, lotId, issue) {
   const r = [
     await waehleIn(c, 'Auto (oldest active lot', lotId),
     await setVal(c, 'textarea[placeholder="Describe the issue or requested repair..."]', issue),
-    await setByLabel(c, 'INTERNAL COST (BHD, OPTIONAL)', '15'),
+    await setByLabel(c, 'ADDITIONAL IN-HOUSE COST (BHD, OPTIONAL)', '15'),
     await waehleIn(c, 'Unassigned', 'r5c-emp'),
   ];
   const schlecht = r.filter((x) => x !== 'OK');

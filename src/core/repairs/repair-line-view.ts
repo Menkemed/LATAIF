@@ -108,3 +108,26 @@ export function showsInternalCostRow(repairType: string | undefined, internalCos
   if (repairType !== 'internal' && repairType !== 'hybrid') return false;
   return Number(internalCost) > 0;
 }
+
+// ── Eigene Kosten: nur, was NICHT schon über Payroll oder Expenses läuft ─────────────────
+// Die eigenen Kosten (Kopf „Internal Cost", Zeile „🏠 In-house", Material ohne Lieferant) werden aus
+// den Betriebskosten in die Reparatur umgebucht — der Gesamtgewinn bleibt, aber die Repair-Marge sinkt,
+// während Gehalt und schon als Ausgabe gekauftes Material in den Ausgaben voll stehen bleiben. Wer dort
+// das normale Gehalt oder Verbrauchsmaterial einträgt, liest dieselben Kosten an zwei Stellen. Darum
+// heißt das Feld „Additional In-house Cost" und die Maske sagt es ausdrücklich.
+
+/** Die Beschriftung der eigenen Kosten im Kopf der Reparatur. */
+export const IN_HOUSE_COST_LABEL = 'ADDITIONAL IN-HOUSE COST';
+
+/** Der Hinweis unter den eigenen Kosten. */
+export const IN_HOUSE_COST_HINT =
+  'Only enter extra costs for this job that are not already recorded in Payroll or Expenses. Leave blank for regular salaried staff.';
+
+/** Bei einer Arbeit im eigenen Haus zählen Estimated/Actual Cost ebenfalls als eigene Kosten (`internalCostOnEdit`). */
+export const IN_HOUSE_ESTIMATE_HINT = 'On an internal repair, Estimated and Actual Cost count as in-house cost too.';
+
+/** Was unter „🏠 In-house / Own work" in der Auswahl steht. */
+export const IN_HOUSE_LINE_SUBTITLE = 'No supplier — only costs not already in Payroll or Expenses';
+
+/** Was unter einer Zeile ohne Lieferant (eigene Arbeit, Material aus eigenem Bestand) steht. */
+export const IN_HOUSE_LINE_NOTE = 'Only enter costs not already recorded in Payroll or Expenses.';

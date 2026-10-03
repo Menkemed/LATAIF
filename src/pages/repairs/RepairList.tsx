@@ -41,6 +41,7 @@ import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
 import { productDisplayName, brandModelHidden } from '@/core/products/display-name';
 import { repairItemDisplayName } from '@/core/products/display-name';
 import { StonesEditor } from '@/components/products/StonesEditor';
+import { IN_HOUSE_COST_LABEL, IN_HOUSE_COST_HINT, IN_HOUSE_LINE_SUBTITLE } from '@/core/repairs/repair-line-view';
 import { normalizeStoneAttributes, stonesApply } from '@/core/products/stones';
 
 function fmt(v: number): string {
@@ -131,7 +132,7 @@ export function RepairList() {
 
   // v0.7.6 — In-house Sentinel als erste Option (consistent mit RepairDetail).
   const supplierOptions = useMemo(() => [
-    { id: '__INHOUSE__', label: '🏠 In-house / Own work', subtitle: 'No supplier — own labor / own stock', meta: '' },
+    { id: '__INHOUSE__', label: '🏠 In-house / Own work', subtitle: IN_HOUSE_LINE_SUBTITLE, meta: '' },
     ...suppliers.filter(s => s.active).map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '' })),
   ], [suppliers]);
 
@@ -1044,7 +1045,7 @@ export function RepairList() {
             <span className="text-overline" style={{ marginBottom: 12 }}>COSTS</span>
             {form.repairType === 'hybrid' ? (
               <div style={{ display: 'grid', gridTemplateColumns: form.repairScope === 'OWN' ? '1fr 1fr' : '1fr 1fr 1fr', gap: 16, marginTop: 12 }}>
-                <Input label="INTERNAL COST (BHD)" type="number" placeholder="0"
+                <Input label={`${IN_HOUSE_COST_LABEL} (BHD)`} type="number" placeholder="0"
                   value={form.internalCost || ''}
                   onChange={e => setForm({ ...form, internalCost: Number(e.target.value) || undefined })} />
                 <Input label="WORKSHOP FEE (BHD)" type="number" placeholder="0"
@@ -1058,8 +1059,8 @@ export function RepairList() {
               </div>
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: form.repairScope === 'OWN' ? '1fr' : '1fr 1fr', gap: 20, marginTop: 12 }}>
-                <Input label={form.repairType === 'internal' ? (form.repairScope === 'OWN' ? 'INTERNAL COST (BHD, OPTIONAL)' : 'ESTIMATED COST (BHD, OPTIONAL)') : 'WORKSHOP FEE (BHD, OPTIONAL)'}
-                  type="number" placeholder="enter later"
+                <Input label={form.repairType === 'internal' ? `${IN_HOUSE_COST_LABEL} (BHD, OPTIONAL)` : 'WORKSHOP FEE (BHD, OPTIONAL)'}
+                  type="number" placeholder={form.repairType === 'internal' ? 'blank = no extra cost' : 'enter later'}
                   value={form.estimatedCost || ''}
                   onChange={e => setForm({ ...form, estimatedCost: Number(e.target.value) || undefined })} />
                 {form.repairScope !== 'OWN' && (
@@ -1068,6 +1069,9 @@ export function RepairList() {
                     onChange={e => setForm({ ...form, chargeToCustomer: Number(e.target.value) || undefined })} />
                 )}
               </div>
+            )}
+            {form.repairType !== 'external' && (
+              <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>{IN_HOUSE_COST_HINT}</p>
             )}
 
             {form.repairScope !== 'OWN' && (

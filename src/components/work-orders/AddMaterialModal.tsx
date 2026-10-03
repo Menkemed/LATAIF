@@ -55,6 +55,8 @@ interface AddMaterialModalProps {
   submitError?: string;
   showCustomerPrice?: boolean;  // Custom-Order: ja; Repair: nein
   allowLabor?: boolean;         // v0.5.0 — Labor-Kostenposition zulassen (OrderDetail)
+  /** Zusatz unter „From own stock" — die Reparatur sagt hier, dass schon Bezahltes nicht noch einmal zählt. */
+  ownStockNote?: string;
 }
 
 const KARAT_OPTIONS = ['24K', '22K', '21K', '18K', '14K', '9K'];
@@ -73,7 +75,7 @@ function round3(n: number): string {
 }
 
 export function AddMaterialModal({
-  open, onClose, onSubmit, onSubmitAll, busy = false, submitError, showCustomerPrice = false, allowLabor = false,
+  open, onClose, onSubmit, onSubmitAll, busy = false, submitError, showCustomerPrice = false, allowLabor = false, ownStockNote,
 }: AddMaterialModalProps) {
   const { suppliers, loadSuppliers } = useSupplierStore();
   const [kind, setKind] = useState<Kind>('diamond');
@@ -485,7 +487,7 @@ export function AddMaterialModal({
           </div>
           {supplierId === '__INHOUSE__' && (
             <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
-              ℹ️ From own stock — no A/P booking.
+              ℹ️ From own stock — no A/P booking.{ownStockNote ? ` ${ownStockNote}` : ''}
             </p>
           )}
           {supplierId && supplierId !== '__INHOUSE__' && (
