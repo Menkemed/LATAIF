@@ -123,8 +123,11 @@ export const IN_HOUSE_COST_LABEL = 'ADDITIONAL IN-HOUSE COST';
 export const IN_HOUSE_COST_HINT =
   'Only enter extra costs for this job that are not already recorded in Payroll or Expenses. Leave blank for regular salaried staff.';
 
-/** Bei einer Arbeit im eigenen Haus zählen Estimated/Actual Cost ebenfalls als eigene Kosten (`internalCostOnEdit`). */
-export const IN_HOUSE_ESTIMATE_HINT = 'On an internal repair, Estimated and Actual Cost count as in-house cost too.';
+/** Bei einer Arbeit im eigenen Haus zählt Actual Cost als eigene Kosten, Estimated nie (`internalCostOnEdit`). */
+export const IN_HOUSE_ESTIMATE_HINT = 'On an internal repair, Actual Cost counts as in-house cost too; Estimated is for information only.';
+
+/** Beim Anlegen einer Arbeit im eigenen Haus ist der Betrag nur eine Schätzung. */
+export const IN_HOUSE_CREATE_ESTIMATE_NOTE = 'The estimate is for information only — enter the actual extra cost on the repair later.';
 
 /** Was unter „🏠 In-house / Own work" in der Auswahl steht. */
 export const IN_HOUSE_LINE_SUBTITLE = 'No supplier — only costs not already in Payroll or Expenses';

@@ -19,11 +19,12 @@
 //
 //  • **Bei der Aufnahme** weiß man den tatsächlichen Aufwand noch nicht. Ein Voranschlag für eine
 //    Fremdarbeit IST hier die interne Kostenerwartung — deshalb der Rückfall auf `estimatedCost`,
-//    aber nur bei `external`/`hybrid`. Bei einer Arbeit im eigenen Haus gibt es keinen Grund, den
-//    Voranschlag als eigene Kosten zu verbuchen.
-//  • **Beim Ändern** ist der tatsächliche Aufwand oft bekannt. Dann gewinnt `actualCost`, sonst
-//    der Voranschlag — und `hybrid` zählt beide Teile getrennt, weil `estimatedCost` dort die
-//    Werkstattgebühr ist und NICHT die eigene Arbeit.
+//    aber nur bei `external` (ein Spiegel, den `repairCostParts` nie als eigene Arbeit bucht).
+//    Bei `hybrid` ist `estimatedCost` die Werkstattgebühr, bei eigener Arbeit nur eine Schätzung —
+//    in beiden Fällen zählt nur, was ausdrücklich als eigene Zusatzkosten eingetragen ist.
+//  • **Beim Ändern** ist der tatsächliche Aufwand oft bekannt. Dann gewinnt `actualCost`; einen
+//    Rückfall auf den Voranschlag gibt es nur noch bei `external`. Bei eigener Arbeit ist
+//    „Estimated" Information, keine Buchung — `hybrid` zählt nur die eigene Arbeit.
 
 /** Was für eine Reparatur es ist. Andere Werte verhalten sich wie `internal`. */
 export type RepairType = 'internal' | 'external' | 'hybrid' | string | undefined | null;
@@ -44,14 +45,14 @@ const num = (v: number | null | undefined): number | null =>
 /**
  * Die eigenen Kosten BEI DER AUFNAHME — wortgleich zu `RepairList.handleCreate`.
  *
- * Bei einer Fremd- oder Mischarbeit gilt der Voranschlag als Erwartung, wenn niemand etwas
- * anderes eingetragen hat. Bei einer Arbeit im eigenen Haus zählt nur, was eingetragen wurde.
+ * Bei einer Fremdarbeit gilt der Voranschlag als Erwartung, wenn niemand etwas anderes eingetragen
+ * hat. Bei Hybrid und bei einer Arbeit im eigenen Haus zählt nur, was als eigene Kosten eingetragen
+ * wurde: bei Hybrid ist der Voranschlag die Werkstattgebühr — sie trägt schon die Werkstattzeile, ein
+ * Spiegel in die eigenen Kosten buchte sie bei „ready" ein zweites Mal als eigene Arbeit.
  */
 export function internalCostOnCreate(input: RepairCostInput): number {
   const own = num(input.internalCost) ?? 0;
-  const estimated = num(input.estimatedCost) ?? 0;
-  const t = input.repairType;
-  if (t === 'external' || t === 'hybrid') return own || estimated || 0;
+  if (input.repairType === 'external') return own || num(input.estimatedCost) || 0;
   return own || 0;
 }
 
@@ -72,8 +73,11 @@ export function internalCostOnEdit(input: RepairCostInput, openLineTotal = 0): n
   // Feldbefund: Zeilen 125, „Save" → `internal_cost` 125, Einstand 250, Marge −100. Eigene Arbeit
   // gibt es dann nur, wenn jemand sie ausdruecklich eintraegt (oben: `own`).
   if (Number.isFinite(openLineTotal) && openLineTotal > 0) return 0;
-  // Ohne Zeilen bleibt es beim alten Vertrag: dort ist `actualCost` der tatsaechliche Aufwand.
-  return num(input.actualCost) ?? num(input.estimatedCost) ?? 0;
+  // Ohne Zeilen ist `actualCost` der tatsaechliche Aufwand. Den Rueckfall auf den Voranschlag gibt es
+  // nur bei Fremdarbeit (der Spiegel, s. o.): bei eigener Arbeit ist „Estimated" eine Schaetzung — sie
+  // wurde bisher erst durch ein beliebiges „Save" zu gebuchten Kosten, ohne „Save" nie.
+  if (input.repairType === 'external') return num(input.actualCost) ?? num(input.estimatedCost) ?? 0;
+  return num(input.actualCost) ?? 0;
 }
 
 /** Die Gesamtkosten, gegen die die Marge gerechnet wird. Bei `hybrid` beide Teile. */

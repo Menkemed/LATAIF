@@ -1259,9 +1259,8 @@ export function RepairDetail() {
               In-house Pseudo-Row + alle expliziten Lines + Footer (Total + Margin). */}
           {(() => {
             const explicitLines = thisRepairLines.filter(l => l.status !== 'CANCELLED');
-            const inHouseCost = (repair.internalCost
-              ?? (repair.repairType === 'internal' ? repair.estimatedCost : 0)
-              ?? 0);
+            // Nur die gebuchten eigenen Kosten — ein Voranschlag ist bei eigener Arbeit Information, keine Buchung.
+            const inHouseCost = repair.internalCost ?? 0;
             const showInHouseRow = showsInternalCostRow(repair.repairType, inHouseCost);
             const totalLineCount = explicitLines.length + (showInHouseRow ? 1 : 0);
             const totalCost = explicitLines.reduce((s, l) => s + (l.costAmount || 0), 0) + inHouseCost;

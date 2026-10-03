@@ -443,8 +443,9 @@ const TRANSFER = { customerId: 'cust-1', productId: 'p1', agentPrice: 500 };
   ok(edited.kind === 'ok', `REPAIR-EDIT die Aenderung geht durch (${JSON.stringify(edited)})`);
   const ev = val<{ chargeToCustomer: number; internalCost: number; margin: number; revision: number }>(edited);
   ok(ev.chargeToCustomer === 150, 'REPAIR-EDIT der neue Preis steht');
-  ok(ev.internalCost === 40, `REPAIR-EDIT die internen Kosten leiten sich aus dem Voranschlag ab (${ev.internalCost})`);
-  ok(ev.margin === 110, `REPAIR-EDIT die Marge ist NEU gerechnet (150 − 40 = ${ev.margin})`);
+  // Additional In-house Cost — bei eigener Arbeit ist der Voranschlag Information, keine Buchung.
+  ok(ev.internalCost === 0, `REPAIR-EDIT ein Voranschlag wird bei eigener Arbeit keine eigene Kosten (${ev.internalCost})`);
+  ok(ev.margin === 150, `REPAIR-EDIT die Marge ist NEU gerechnet (150 − 0 = ${ev.margin})`);
   ok(ev.revision > base, `REPAIR-EDIT die Fassung ist gestiegen (${base} → ${ev.revision})`);
   ok(s(db, 'SELECT diagnosis FROM repairs WHERE id = ?', [rid]) === 'Krone ersetzt',
     'REPAIR-EDIT …und die Diagnose steht in der Zeile');

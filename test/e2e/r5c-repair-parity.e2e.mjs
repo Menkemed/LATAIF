@@ -209,6 +209,8 @@ async function fotoWaehlen(c, file) {
 }
 const SHELL = 'a[href="/settings"]';
 const JPEGS = "[...document.querySelectorAll('img')].filter(i=>/^data:image\\/jpeg/.test(i.src)).length";
+/** Vorschaubilder samt gespeicherter Fotos — die kommen seit MEDIA-REPAIR als Objekt-URL aus dem Medienkern. */
+const BILDER = "[...document.querySelectorAll('img')].filter(i=>/^(data:image\\/jpeg|blob:)/.test(i.src)).length";
 
 const BEOBACHTER = `
   if (window.__r4bInstalliert) { /* schon da */ } else {
@@ -268,7 +270,8 @@ function insert(db, tabelle, werte) {
     .run(...nutzbar.map((k) => daten[k]));
 }
 
-/** Fertige Reparaturen für die Rechnungsfälle — je Fall ein eigenes Paar, und ein Zwilling für den Primary. */
+/** Fertige Reparaturen für die Rechnungsfälle — je Fall ein eigenes Paar, und ein Zwilling für den Primary.
+ *  Ohne eigene Kosten: eingetragene, aber nie gebuchte Kopfkosten lehnt das Abrechnen seit PP-13 ab. */
 const FERTIG = [
   ['r5c-rep-1', 'R5C-0001', 'r5c-kunde', 90, 'VAT_10'], ['r5c-rep-2', 'R5C-0002', 'r5c-kunde', 60, 'ZERO'],
   ['r5c-rep-3', 'R5C-0003', 'r5c-kunde2', 40, 'VAT_10'], ['r5c-rep-4', 'R5C-0004', 'r5c-kunde2', 30, 'VAT_10'],
@@ -301,7 +304,7 @@ function seed() {
       }
     }
     for (const [id, nr, cust, charge, tax] of FERTIG) {
-      insert(db, 'repairs', { id, branch_id, repair_number: nr, customer_id: cust, item_brand: 'Tudor', item_model: 'Black Bay', issue_description: 'Service ' + nr, repair_type: 'internal', internal_cost: 20, charge_to_customer: charge, margin: charge - 20, tax_scheme: tax, status: 'ready', received_at: now, completed_at: now, voucher_code: 'V' + nr.replace(/\D/g, '').padStart(7, '0'), images: '[]', item_attributes: '{}', repair_scope: 'CUSTOMER', revision: 1, created_at: now, updated_at: now });
+      insert(db, 'repairs', { id, branch_id, repair_number: nr, customer_id: cust, item_brand: 'Tudor', item_model: 'Black Bay', issue_description: 'Service ' + nr, repair_type: 'internal', internal_cost: 0, charge_to_customer: charge, margin: charge, tax_scheme: tax, status: 'ready', received_at: now, completed_at: now, voucher_code: 'V' + nr.replace(/\D/g, '').padStart(7, '0'), images: '[]', item_attributes: '{}', repair_scope: 'CUSTOMER', revision: 1, created_at: now, updated_at: now });
     }
   } finally { try { db.close(); } catch { /* zu */ } }
 }
@@ -424,7 +427,7 @@ async function bearbeiten(c) {
   r.push(await setByLabel(c, 'ITEM DESCRIPTION (OPTIONAL)', 'Glas neu'));
   r.push(await setUnterUeberschrift(c, 'DIAGNOSIS', 'Glas gesprungen'));
   if (await fotoWaehlen(c, PHOTO2) !== 'OK') r.push('KEIN-FOTOFELD');
-  if (!(await warteBis(c, `${JPEGS} >= 2`, 15000))) r.push('KEIN-ZWEITES-BILD');
+  if (!(await warteBis(c, `${BILDER} >= 2`, 15000))) r.push('KEIN-ZWEITES-BILD');
   const schlecht = r.filter((x) => x !== 'OK');
   return schlecht.length ? 'FELD:' + schlecht.join(',') : 'OK';
 }
@@ -521,6 +524,12 @@ try {
   killAll(); await waitGone('lataif.exe'); await waitGone('lataif-e2e-client.exe');
   for (const d of [RUN, CLIENT_APPDATA, join(CLIENT_HOME, 'Local'), join(CLIENT_HOME, 'tmp'), join(RUN, 'tmp')]) mkdirSync(d, { recursive: true });
   if (existsSync(APP_DATA_DIR)) rmSync(APP_DATA_DIR, { recursive: true, force: true });
+  // Die ungeklärten Speichervorgänge des Test-Clients liegen im FESTEN <LocalAppData> (Tauri fragt den
+  // Systemordner, nicht das umgelenkte LOCALAPPDATA des Laufs) — ein Rest eines früheren Laufs sperrte
+  // sonst das Abrechnen („An earlier save of this kind … is still unresolved").
+  if (CLIENT_IDENT.endsWith('.e2e.client')) {
+    rmSync(join(process.env.LOCALAPPDATA || join(os.homedir(), 'AppData', 'Local'), CLIENT_IDENT, 'pending-saves'), { recursive: true, force: true });
+  }
   writePhoto(PHOTO, 140);
   writePhoto(PHOTO2, 30);
   console.log(e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: appEnv() }));
@@ -750,7 +759,7 @@ try {
       `EDIT Fassung, Zahlwege, Kartenart, Kosten, Referenz und Diagnose reisen mit (${Object.keys(p).join(',')})`);
     ok(!('margin' in p) && !('internalCost' in p) && !('customerPaidAmount' in p) && !('taxScheme' in p) && !S(p).includes('base64'),
       'EDIT …keine Marge, keine abgeleiteten Kosten, kein Zahlbetrag, keine Steuer, keine Bildbytes');
-    ok(S(p.photos?.map((x) => Object.keys(x)[0])) === S(['keep', 'stagingId']) && p.photos?.[0]?.keep === 0,
+    ok(S(p.photos?.map((x) => Object.keys(x)[0])) === S(['keep', 'stagingId']) && typeof p.photos?.[0]?.keep === 'string' && p.photos[0].keep.length > 0,
       `EDIT das vorhandene Foto nach seiner Stelle, das neue als Ablagekennung (${S(p.photos)})`);
     await spuelen(primary);
     const z = dbQ(BIZ_DB, 'SELECT * FROM repairs WHERE id = ?', [pc2Kunde?.id])[0] || {};
@@ -920,7 +929,14 @@ try {
     client = await lade(client, '/repairs');
     await warteBis(client, "document.body.innerText.includes('R5C-0006')", 30000);
     ok(await inZeile(client, 'R5C-0006', 'invoice') === 'OK', 'WIEDERHOLT dasselbe Kuerzel noch einmal');
-    ok(await warteBis(client, "/^\\/invoices\\//.test(location.pathname)", 45000), 'WIEDERHOLT jetzt entsteht die Rechnung');
+    // R7C — der gescheiterte Versuch steht unter „Unresolved saves": der erste Klick sagt es, der zweite
+    // ist die Entscheidung „das ist ein neuer, eigener Vorgang". Nie still.
+    await warteBis(client, "/^\\/invoices\\//.test(location.pathname) || /still unresolved/i.test(document.querySelector('[data-save-error]')?.textContent || '')", 45000);
+    if (!/^\/invoices\//.test(String(await client.ev('return location.pathname;')))) {
+      ok(/still unresolved/i.test(String(await fehlerAnzeige(client))), `WIEDERHOLT der offene frühere Versuch wird genannt (${String(await fehlerAnzeige(client)).slice(0, 120)})`);
+      ok(await inZeile(client, 'R5C-0006', 'invoice') === 'OK', 'WIEDERHOLT bewusst noch einmal: ein neuer Vorgang');
+    }
+    ok(await warteBis(client, "/^\\/invoices\\//.test(location.pathname)", 45000), `WIEDERHOLT jetzt entsteht die Rechnung (${String(await fehlerAnzeige(client)).slice(0, 160) || 'kein Hinweis'})`);
     await spuelen(primary);
     const r6 = rechnungVon('r5c-rep-6');
     ok(!!r6 && Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM invoices')[0]?.n) === invVorher + 1, 'WIEDERHOLT genau EINE Rechnung');

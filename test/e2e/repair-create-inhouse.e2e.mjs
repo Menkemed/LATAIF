@@ -254,9 +254,13 @@ try {
   a = await anlegen(app);
   const hyb = dbQ("SELECT id FROM repairs WHERE issue_description = 'Hybrid neu'");
   ok(a.zu && a.nachher === a.vorher + 1 && hyb.length === 1 && a.pfad === `/repairs/${hyb[0]?.id}`, `HYBRID genau eine Reparatur, Detailseite offen (${a.vorher}→${a.nachher}, ${a.pfad}; ${a.hinweis})`);
-  ok(kopf(hyb[0]?.id).repair_type === 'hybrid' && Number(kopf(hyb[0]?.id).estimated_cost) === 20, `HYBRID Art und Gebühr 20 gespeichert (${S(kopf(hyb[0]?.id))})`);
-  // Zur Kenntnis (Buchungslogik unverändert): die Aufnahme spiegelt bei Hybrid-Kundenreparaturen die Gebühr in `internal_cost`.
-  info(`HYBRID eigene Kosten nach der Aufnahme: ${kopf(hyb[0]?.id).internal_cost} (Gebühr ${kopf(hyb[0]?.id).estimated_cost})`);
+  const hId = hyb[0]?.id;
+  ok(kopf(hId).repair_type === 'hybrid' && Number(kopf(hId).estimated_cost) === 20 && Number(kopf(hId).internal_cost || 0) === 0,
+    `HYBRID Gebühr 20, die Werkstattgebühr steht NICHT in den eigenen Kosten (${S(kopf(hId))})`);
+  ok(await bisReady(app, hId) === 'OK', 'HYBRID bis Ready');
+  await spuelen(app);
+  ok(eigeneArbeit(hId) === 0 && Math.abs(ausgaben(hId) - 20) < 0.0005 && Number(kopf(hId).internal_cost || 0) === 0,
+    `HYBRID Ready: die Gebühr genau einmal (Werkstatt 20), keine eigene Arbeit (${S(kopf(hId))}, Eigenleistung ${eigeneArbeit(hId)}, Ausgaben ${ausgaben(hId)})`);
 
   // ── 5 Internal leer → Save / Edit / Ready → 0 ──
   await geh(app, '/repairs/' + iId); await sleep(1500);
@@ -280,15 +284,18 @@ try {
   ok(Number(kopf(zId).internal_cost) === 10 && Math.abs(eigeneArbeit(zId) - 10) < 0.0005 && ausgaben(zId) === 0,
     `ZEHN genau 10 BHD eigene Arbeit, keine Ausgabe/Zahlung (${S(kopf(zId))}, Eigenleistung ${eigeneArbeit(zId)}, Ausgaben ${ausgaben(zId)})`);
 
-  // ── 7 Zur Kenntnis: 10 nur beim Anlegen geschätzt, ohne Edit direkt auf Ready ──
+  // ── 7 Eine Schätzung ist Information: weder ohne noch mit Edit → Save wird sie gebucht ──
   ok(await neueMaske(app) === 'OK' && await ausfuellen(app, { issue: 'Internal geschaetzt' }) === 'OK'
     && await setByLabel(app, 'ESTIMATED ADDITIONAL IN-HOUSE COST (BHD, OPTIONAL)', '10') === 'OK', 'SCHAETZUNG Maske mit geschätzten 10');
   a = await anlegen(app);
   const sId = dbQ("SELECT id FROM repairs WHERE issue_description = 'Internal geschaetzt'")[0]?.id;
   ok(!!sId && a.pfad === `/repairs/${sId}`, `SCHAETZUNG angelegt, Detailseite offen (${a.pfad})`);
-  ok(await bisReady(app, sId) === 'OK', 'SCHAETZUNG bis Ready (ohne Edit)');
+  ok(await bearbeitenSpeichern(app) === 'OK', 'SCHAETZUNG Edit → Save ohne Änderung');
   await spuelen(app);
-  info(`SCHAETZUNG nach Ready ohne Edit: ${S(kopf(sId))}, Eigenleistung ${eigeneArbeit(sId)}, Ausgaben ${ausgaben(sId)}`);
+  ok(Number(kopf(sId).estimated_cost) === 10 && Number(kopf(sId).internal_cost || 0) === 0, `SCHAETZUNG nach Save: Schätzung 10 bleibt Information, 0 eigene Kosten (${S(kopf(sId))})`);
+  ok(await bisReady(app, sId) === 'OK', 'SCHAETZUNG bis Ready');
+  await spuelen(app);
+  ok(eigeneArbeit(sId) === 0 && ausgaben(sId) === 0, `SCHAETZUNG Ready: nichts gebucht (Eigenleistung ${eigeneArbeit(sId)}, Ausgaben ${ausgaben(sId)})`);
 } catch (e) {
   FAIL++; fails.push('harness: ' + (e?.message ?? e)); console.error(e);
 } finally {

@@ -41,7 +41,7 @@ import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
 import { productDisplayName, brandModelHidden } from '@/core/products/display-name';
 import { repairItemDisplayName } from '@/core/products/display-name';
 import { StonesEditor } from '@/components/products/StonesEditor';
-import { IN_HOUSE_COST_LABEL, IN_HOUSE_COST_HINT, IN_HOUSE_LINE_SUBTITLE, IN_HOUSE_COST_PLACEHOLDER, repairCostLabels } from '@/core/repairs/repair-line-view';
+import { IN_HOUSE_COST_LABEL, IN_HOUSE_COST_HINT, IN_HOUSE_LINE_SUBTITLE, IN_HOUSE_COST_PLACEHOLDER, IN_HOUSE_CREATE_ESTIMATE_NOTE, repairCostLabels } from '@/core/repairs/repair-line-view';
 import { normalizeStoneAttributes, stonesApply } from '@/core/products/stones';
 
 function fmt(v: number): string {
@@ -1079,7 +1079,9 @@ export function RepairList() {
               </div>
             )}
             {form.repairType !== 'external' && (
-              <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>{IN_HOUSE_COST_HINT}</p>
+              <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
+                {IN_HOUSE_COST_HINT}{form.repairType === 'internal' ? ` ${IN_HOUSE_CREATE_ESTIMATE_NOTE}` : ''}
+              </p>
             )}
 
             {form.repairScope !== 'OWN' && (

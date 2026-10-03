@@ -281,12 +281,10 @@ export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort
     workshopSupplierId: input.workshopSupplierId,
     estimatedCost: input.estimatedCost,
     // CENTRAL-C3F FINAL — die eigenen Kosten bei der Aufnahme, aus der geteilten Ableitung.
-    // POST-PARITY PP-13 — bei EIGENER Ware und „hybrid" trägt die Werkstattzeile den Voranschlag
-    // (`createRepair`); ihn zusätzlich in die eigenen Kosten zu spiegeln, kapitalisierte ihn doppelt —
-    // dieselbe Regel wie beim Ändern (`internalCostOnEdit`): nur die eigene Arbeit.
-    internalCost: input.repairScope === 'OWN' && input.repairType === 'hybrid'
-      ? (input.internalCost ?? 0)
-      : internalCostOnCreate(input),
+    // POST-PARITY PP-13 — bei „hybrid" trägt die Werkstattzeile den Voranschlag (`createRepair`); ihn
+    // zusätzlich in die eigenen Kosten zu spiegeln, buchte ihn doppelt — an eigener Ware wie an Kundenware
+    // (`internalCostOnCreate`): nur die eigene Arbeit, dieselbe Regel wie beim Ändern.
+    internalCost: internalCostOnCreate(input),
     chargeToCustomer: input.chargeToCustomer,
     estimatedReady: input.estimatedReady,
     receivedAt: input.receivedAt,

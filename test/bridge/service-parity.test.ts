@@ -188,7 +188,7 @@ const REPAIR_COMPARE = [
   // ruft dieselben.
   const rules = codeOf('src/core/repairs/repair-rules.ts');
   const service = codeOf('src/core/bridge/service-commands.ts');
-  ok(/createRepairOnPrimary\(form\)/.test(list) && /internalCost: input\.repairScope === 'OWN' && input\.repairType === 'hybrid'\s*\?\s*\(input\.internalCost \?\? 0\)\s*:\s*internalCostOnCreate\(input\)/.test(rules),
+  ok(/createRepairOnPrimary\(form\)/.test(list) && /internalCost: internalCostOnCreate\(input\),/.test(rules),
     'CALLPATH die Aufnahme leitet die eigenen Kosten mit der GETEILTEN Primitive ab');
   ok(/updateRepairOnPrimary\(id, form, fassung\)/.test(detail) && /internalCost: internalCostOnEdit\(cost, openLineTotal\)/.test(rules)
     && /repairMargin\(cost\)/.test(rules),
@@ -325,6 +325,18 @@ const REPAIR_COMPARE = [
     'COST bei Mischarbeit unveraendert: nur die eingetragene eigene Arbeit');
   ok(costs.internalCostOnEdit(both as never) === 55 && costs.internalCostOnEdit(both as never, 0) === 55,
     'COST ohne Zeilen bleibt der alte Vertrag: der eingetragene Aufwand ist die eigene Arbeit');
+  // Additional In-house Cost — „Estimated" ist bei eigener Arbeit Information, keine Buchung; Hybrid
+  // spiegelt die Werkstattgebühr nicht in die eigenen Kosten (sonst bucht „ready" sie zweimal).
+  ok(costs.internalCostOnEdit({ repairType: 'internal', estimatedCost: 40 } as never) === 0,
+    'ESTIMATE bei eigener Arbeit wird ein Voranschlag beim Ändern NICHT zu eigenen Kosten (0, nicht 40)');
+  ok(costs.internalCostOnEdit({ repairType: 'external', estimatedCost: 40 } as never) === 40,
+    'ESTIMATE …bei Fremdarbeit bleibt der Spiegel (nie als eigene Arbeit gebucht)');
+  ok(costs.internalCostOnCreate({ repairType: 'hybrid', estimatedCost: 20 } as never) === 0
+    && costs.internalCostOnCreate({ repairType: 'hybrid', estimatedCost: 20, internalCost: 5 } as never) === 5,
+    'HYBRID die Aufnahme zählt nur die eingetragene eigene Arbeit, nicht die Werkstattgebühr');
+  ok(costs.repairCostParts({ repairType: 'hybrid', workshopSupplierId: 'w', estimatedCost: 20,
+    internalCost: costs.internalCostOnCreate({ repairType: 'hybrid', estimatedCost: 20 } as never) }, 20).total === 20,
+    'HYBRID …die Werkstattzeile trägt die Gebühr genau einmal (20, nicht 40)');
   // Beide Anschluesse reichen die offenen Zeilen durch — am Primary und aus der Ferne.
   ok(/buildRepairEditPatch\(form, sumOpenRepairLineCosts\(id\)\)/.test(codeOf('src/core/repairs/repair-house.ts'))
     && /buildRepairEditPatch\(effective, sumOpenRepairLineCosts\(req\.id\)\)/.test(codeOf('src/core/bridge/service-commands.ts')),
@@ -448,8 +460,8 @@ const REPAIR_COMPARE = [
   const okEdit = await cmd.runRepairUpdate(d, identity('42', 'repairs.update'),
     { id: rid, expectedRevision: fresh, chargeToCustomer: 150 });
   ok(okEdit.kind === 'ok', `TERMINAL-REPAIR mit der frischen Fassung geht es (${JSON.stringify(okEdit)})`);
-  ok(n(db, 'SELECT margin FROM repairs WHERE id = ?', [rid]) === 110,
-    'TERMINAL-REPAIR …und die Marge kommt aus der geteilten Ableitung (150 − 40)');
+  ok(n(db, 'SELECT margin FROM repairs WHERE id = ?', [rid]) === 150,
+    'TERMINAL-REPAIR …und die Marge kommt aus der geteilten Ableitung (150 − 0: der Voranschlag eigener Arbeit ist keine Buchung)');
 }
 
 // ── 7) Umfang und Registry unveraendert ──────────────────────────────────
