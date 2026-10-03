@@ -251,6 +251,11 @@ async function main() {
     `§0 compact on 360 px: side by side, each ≥ 120 px wide, ≤ 100 px high (${S([aufbau.take, aufbau.gallery])})`);
   ok(aufbau.scroll <= aufbau.vw, `§0 no horizontal scrolling at ${aufbau.vw} px (${aufbau.scroll})`);
   ok(/2 of 8/.test(aufbau.hint || ''), `§0 the counter shows 2 of 8 (${aufbau.hint})`);
+  {
+    await edge.ev(`document.querySelector('#peStrip').scrollIntoView({ block: 'start' }); return 1;`); await sleep(400);
+    const shot = await edge.send('Page.captureScreenshot', { format: 'png' });
+    writeFileSync(join(OUT, 'check-item-edit-photos-360px.png'), Buffer.from(shot.data, 'base64'));
+  }
 
   // ── 1 ein Galeriebild, die bestehenden bleiben ───────────────────────────
   const L = base2.map((l) => 'L:' + l.link_id);
@@ -286,6 +291,7 @@ async function main() {
     ok(/At most 8 photos per item — 1 not added/.test(await msgOf(edge)), `§6 …and the operator is told (${await msgOf(edge)})`);
     const voll = JSON.parse(await edge.ev(`return JSON.stringify({ t: document.querySelector('#peTakePhoto').classList.contains('is-full'), g: document.querySelector('#peChooseGallery').classList.contains('is-full'), ci: document.querySelector('#peAddInput').disabled, gi: document.querySelector('#peGalleryInput').disabled, txt: document.querySelector('#peAddHint').textContent });`));
     ok(voll.t && voll.g && voll.ci && voll.gi && /8 of 8/.test(voll.txt), `§6 at 8 both choices are disabled (${S(voll)})`);
+    await edge.ev(`document.querySelector('#peStrip').scrollIntoView({ block: 'start' }); return 1;`); await sleep(400);
     const shot = await edge.send('Page.captureScreenshot', { format: 'png' });
     writeFileSync(join(OUT, 'check-item-edit-photos-360px-full.png'), Buffer.from(shot.data, 'base64'));
     await tapRemove(edge, 7);
