@@ -23,7 +23,7 @@ import { canonicalRequestHash } from '@/core/media/product-media-cutover';
 import { buildMobileGalleryEnvelope, type MobileGalleryPlan } from '@/core/media/mobile-gallery-edit';
 import { diffProductText } from '@/core/media/product-edit-draft';
 import { isSyncConfigured } from '@/core/sync/sync-service';
-import type { ProductEditIntent } from '@/core/media/coordinator';
+import { editRequestId, type ProductEditIntent } from '@/core/media/coordinator';
 import type { CurrentProductState } from '@/core/media/mobile-product-patch';
 import { evaluatePriceEligibility } from '@/core/products/price-eligibility';
 import { useProductStore, buildProductEditColumns } from '@/stores/productStore';
@@ -242,6 +242,7 @@ export function buildMobileUploadDrainDeps(): MobileDrainDeps {
         : { ok: false, errorCode: (res as { errorCode?: string }).errorCode ?? res.status };
     },
     applyGalleryEdit,
+    galleryEditApplied,
     readProductState,
     // Dieselbe Kategorie-Definition, aus der auch die Seite ihre Felder rendert und der Rust-
     // Validator seine Regeln nimmt. Eine dritte Quelle waere genau die Drift, die wir vermeiden.
@@ -291,6 +292,28 @@ function priceEditAllowed(productId: string): boolean {
  * Die Batch-Id ist aus dem `uploadEventId` abgeleitet und damit ueber Neustarts hinweg stabil: ein
  * wiederaufgenommener Job landet auf demselben Plan, und ein bereits angewandter ist ein No-op.
  */
+/** Der Batch eines Galerie-Auftrags vom Handy — aus dem uploadEventId abgeleitet, also ueber
+ *  Neustarts und Wiederholungen hinweg derselbe. */
+function mobileGalleryBatchId(scope: { tenantId: string; branchId: string }, productId: string, uploadEventId: string): string {
+  return `gallery-edit:${scope.tenantId}:${scope.branchId}:${productId}:${ROLE}:${uploadEventId}`;
+}
+
+/**
+ * Wurde GENAU dieser Galerie-Auftrag schon angewandt? Beleg ist allein sein Journal-Eintrag im Zustand
+ * `ready` — der Koordinator setzt ihn in derselben Transaktion wie den Bildwechsel (und eventuelle
+ * Feldaenderungen). Ging danach nur die Bestaetigung verloren, ist die Wiederholung damit erledigt.
+ * Ein anderer Auftrag oder ein bloss aehnlicher Galerie-Stand zaehlt nicht.
+ */
+function galleryEditApplied(grant: ClaimGrant, productId: string): boolean {
+  const scope = currentScope();
+  if (!scope) return false;
+  const rows = query(
+    'SELECT state FROM media_ingest_jobs WHERE tenant_id = ? AND ingest_request_id = ?',
+    [scope.tenantId, editRequestId(mobileGalleryBatchId(scope, productId, grant.uploadEventId))],
+  );
+  return rows.length > 0 && (rows[0] as { state?: unknown }).state === 'ready';
+}
+
 async function applyGalleryEdit(
   grant: ClaimGrant,
   prepared: PreparedMediaItem[],
@@ -299,7 +322,7 @@ async function applyGalleryEdit(
   const scope = currentScope();
   if (!scope) return { ok: false, errorCode: 'MEDIA_EDIT_SCOPE_REQUIRED' };
   const preparedBySlot = new Map(prepared.map((p) => [p.slot, { requestId: p.ingestRequestId, prepared: p.prepared }]));
-  const batchId = `gallery-edit:${scope.tenantId}:${scope.branchId}:${plan.productId}:${ROLE}:${grant.uploadEventId}`;
+  const batchId = mobileGalleryBatchId(scope, plan.productId, grant.uploadEventId);
   // §17 — Feldaenderungen aus demselben Save reisen als `productEdit` MIT in den Umschlag und
   // werden dadurch in derselben Transaktion angewandt wie der Bildwechsel. Der Diff entsteht ueber
   // genau dieselben Helfer wie auf dem Desktop, damit beide Wege identisch vergleichen.

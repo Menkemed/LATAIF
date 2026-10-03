@@ -21,7 +21,7 @@ import { buildEditPlanEnvelope, type EditDesiredSlot } from './product-media-edi
 import { galleryBaselineFingerprint } from './gallery-baseline.ts';
 import type { EditBaselineLink, EditPlanEnvelope, ProductEditIntent } from './coordinator.ts';
 import type { PrepareResult } from './gateway.ts';
-import { parseMobileProductPatch } from './mobile-product-patch.ts';
+import { ERR_PURCHASE_PRICE_REQUIRED, parseMobileProductPatch } from './mobile-product-patch.ts';
 
 /** Hoechstzahl Bilder in der fertigen Galerie — derselbe Wert wie `MAX_UPLOAD_IMAGES` in Rust. */
 export const MOBILE_GALLERY_MAX = 8;
@@ -54,7 +54,7 @@ const isKeep = (e: MobileGalleryOrderEntry): e is { keep: string } => typeof (e 
  * Den Plan aus der Job-Metadata lesen. Fail closed und in derselben Strenge wie die Rust-Seite:
  * beides prueft, damit sich weder Server noch Desktop auf den anderen verlaesst.
  */
-export function parseMobileGalleryPlan(metadataJson: string): { ok: true; plan: MobileGalleryPlan } | { ok: false } {
+export function parseMobileGalleryPlan(metadataJson: string): { ok: true; plan: MobileGalleryPlan } | { ok: false; code?: string } {
   let meta: unknown;
   try { meta = JSON.parse(metadataJson); } catch { return { ok: false }; }
   const m = meta as Record<string, unknown> | null;
@@ -98,7 +98,8 @@ export function parseMobileGalleryPlan(metadataJson: string): { ok: true; plan: 
   let patch: Record<string, unknown> | undefined;
   if (m.patch !== undefined) {
     const parsed = parseMobileProductPatch(m.patch);
-    if (!parsed.ok) return { ok: false };
+    // Der leere Einkaufspreis behaelt seinen sprechenden Code — er ist ein Bedienfehler, kein kaputter Plan.
+    if (!parsed.ok) return parsed.code === ERR_PURCHASE_PRICE_REQUIRED ? { ok: false, code: parsed.code } : { ok: false };
     patch = parsed.patch as Record<string, unknown>;
   }
   return { ok: true, plan: { productId, galleryBaseline, order, remove, ...(patch ? { patch } : {}) } };

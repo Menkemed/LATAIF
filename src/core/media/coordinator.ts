@@ -1387,6 +1387,12 @@ export class MediaDbCoordinator {
    *  structurally (the media edit path), and the product-text-only path
    *  (`applyProductTextEditDurably`) hands in the same three fields directly. */
   private applyProductEditInTx(ctx: { entityId: string; branchId: string | null; batchId: string }, pe: ProductEditIntent, now: string): void {
+    // Der Einkaufspreis ist Pflicht (products.purchase_price NOT NULL; „kein Einkaufspreis" ist 0).
+    // Ein geleerter Wert wird HIER mit festem Code abgewiesen statt erst an der Datenbank — innerhalb
+    // der Transaktion, also ohne dass Bilder oder andere Felder teilweise uebernommen werden.
+    if (pe.set.some(([c, v]) => c === 'purchase_price' && (v === null || v === undefined))) {
+      throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MOBILE_EDIT_PURCHASE_PRICE_REQUIRED');
+    }
     // v0.8.48 §6 — die verbindliche Preisberechtigung. Sie wird HIER geprueft, in derselben
     // Transaktion, in der der UPDATE laeuft: zwischen einer frueheren Pruefung und dem Schreiben
     // koennte sonst ein Verkauf, ein Einkauf oder ein Lot entstehen, und der Preis wuerde an einem
@@ -2593,7 +2599,7 @@ function recoverySortKey(row: Record<string, unknown>): number {
 }
 
 /** The synthetic ingest_request_id an edit plan is stored under. */
-function editRequestId(batchId: string): string {
+export function editRequestId(batchId: string): string {
   return `edit:${batchId}`;
 }
 

@@ -976,8 +976,28 @@ fn the_wider_patch_accepts_every_field_the_edit_screen_offers() {
 
 #[test]
 fn a_price_may_be_cleared_but_never_be_nonsense() {
-    assert!(validate_text_edit_metadata(&patch_meta(serde_json::json!({ "purchasePrice": null }))).is_ok());
+    // Verkaufs- und Mindestpreis duerfen leer sein; der Einkaufspreis nicht (Pflicht, ohne Wert gilt 0).
+    assert!(validate_text_edit_metadata(&patch_meta(serde_json::json!({ "plannedSalePrice": null, "minSalePrice": null }))).is_ok());
     assert!(validate_text_edit_metadata(&patch_meta(serde_json::json!({ "purchasePrice": 0 }))).is_ok());
+    assert_eq!(
+        validate_text_edit_metadata(&patch_meta(serde_json::json!({ "purchasePrice": null, "attributes": { "year": null } }))).unwrap_err(),
+        ERR_EDIT_PURCHASE_PRICE_REQUIRED,
+        "a cleared purchase price is refused with its own code"
+    );
+    // Derselbe Fall im Galerie-Auftrag (Bild aendern + Jahr und Einkaufspreis leeren): eigener Code,
+    // nicht „Plan ungueltig" — und das Jahr allein darf leer werden.
+    let g = serde_json::json!({
+        "kind": "gallery_edit", "productId": "p-1", "galleryBaseline": "d".repeat(64),
+        "order": [{"new": 0}], "remove": ["lnk-1"],
+        "patch": { "attributes": { "year": null }, "purchasePrice": null }
+    });
+    assert_eq!(validate_gallery_edit_metadata(&g, 1).unwrap_err(), ERR_EDIT_PURCHASE_PRICE_REQUIRED);
+    let g_ok = serde_json::json!({
+        "kind": "gallery_edit", "productId": "p-1", "galleryBaseline": "d".repeat(64),
+        "order": [{"new": 0}], "remove": ["lnk-1"],
+        "patch": { "attributes": { "year": null }, "purchasePrice": 0 }
+    });
+    assert!(validate_gallery_edit_metadata(&g_ok, 1).is_ok());
     for bad in [
         serde_json::json!({ "purchasePrice": -1 }),
         serde_json::json!({ "purchasePrice": "110" }),

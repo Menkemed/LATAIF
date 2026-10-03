@@ -36,6 +36,9 @@ export const ERR_PATCH_IMMUTABLE = 'MOBILE_EDIT_IMMUTABLE_FIELD';
 export const ERR_PATCH_ATTR_INVALID = 'MOBILE_EDIT_ATTRIBUTE_INVALID';
 export const ERR_PATCH_SCOPE_INVALID = 'MOBILE_EDIT_SCOPE_INVALID';
 export const ERR_PRICE_NOT_ELIGIBLE = 'MOBILE_EDIT_PRICE_NOT_ELIGIBLE';
+/** Der Einkaufspreis laesst sich nicht leeren: die Spalte ist Pflicht, „kein Einkaufspreis" ist 0.
+ *  Spiegel von `ERR_EDIT_PURCHASE_PRICE_REQUIRED` in Rust. */
+export const ERR_PURCHASE_PRICE_REQUIRED = 'MOBILE_EDIT_PURCHASE_PRICE_REQUIRED';
 
 export type MobilePatchValue = string | number | boolean | null | string[] | Record<string, unknown>;
 export type MobileProductPatch = Record<string, MobilePatchValue>;
@@ -71,6 +74,9 @@ export function parseMobileProductPatch(raw: unknown): PatchCheck {
       patch[k] = v as string | null;
     } else if (MOBILE_PATCH_PRICE_FIELDS.has(k)) {
       if (!isPrice(v)) return { ok: false, code: ERR_PATCH_INVALID };
+      // Verkaufs- und Mindestpreis duerfen leer sein; der Einkaufspreis nicht (products.purchase_price
+      // ist NOT NULL). Abgewiesen wird hier, VOR jeder Mutation — nicht erst an der Datenbank.
+      if (k === 'purchasePrice' && v === null) return { ok: false, code: ERR_PURCHASE_PRICE_REQUIRED };
       patch[k] = v as number | null;
     } else if (k === 'scopeOfDelivery') {
       if (!Array.isArray(v) || v.some((x) => typeof x !== 'string' || x === '')) return { ok: false, code: ERR_PATCH_INVALID };

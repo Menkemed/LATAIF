@@ -1089,7 +1089,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
    */
   async function showSavedState(productId, expected, msg, opts) {
     const every = (opts && opts.intervalMs) || 1200;
-    const within = (opts && opts.timeoutMs) || 20000;
+    // Der Desktop holt Handy-Auftraege alle 15 s ab, dazu kommt das Verarbeiten der Bilder. Mit 20 s
+    // meldete die Seite oft "noch nicht angewandt", obwohl der Auftrag Sekunden spaeter durchlief.
+    const within = (opts && opts.timeoutMs) || 40000;
     const seq = ++pageGen.view;
     const mine = ++pageGen.save;
     // Wann dieses Warten gegenstandslos ist: der Benutzer ist woanders, oder es wurde erneut
@@ -1378,7 +1380,12 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
           const raw = (e.value || '').trim();
           const before = (p[col] === null || p[col] === undefined) ? '' : String(p[col]);
           if (raw === before) continue;
-          if (raw === '') { changed[key] = null; continue; }   // leeren heisst "kein Preis", nicht 0
+          if (raw === '') {
+            // Der Einkaufspreis ist Pflicht — ohne Einkaufspreis gilt 0. Verkaufs- und Mindestpreis
+            // duerfen leer sein ("kein Preis", nicht 0). Abgelehnt wird VOR dem Senden.
+            if (key === 'purchasePrice') return setText('peMsg', 'Purchase price cannot be empty — enter 0 if there is no cost.');
+            changed[key] = null; continue;
+          }
           const n = normNumber(raw);
           if (n === null || Number.isNaN(n)) return setText('peMsg', 'Please check the price fields.');
           changed[key] = n;

@@ -22,7 +22,7 @@ import { dirname, join } from 'node:path';
 import { createHash } from 'node:crypto';
 import initSqlJs from 'sql.js';
 import { applyMediaSchema, MEDIA_ENTITY_SCOPE } from '../../src/core/db/media-schema.ts';
-import { MediaDbCoordinator, type EditBaselineLink, type EditPlanEnvelope } from '../../src/core/media/coordinator.ts';
+import { MediaDbCoordinator, editRequestId, type EditBaselineLink, type EditPlanEnvelope } from '../../src/core/media/coordinator.ts';
 import type {
   AbortInput, AbortResult, CommitInput, CommitResult, MediaBytes,
   MediaCommandGateway, PrepareInput, PrepareResult, ReadVerifiedInput, RecoveryOutcome,
@@ -667,6 +667,94 @@ async function main(): Promise<void> {
     ok(String(nameNow[0].values[0][0]) === 'Neuer Name', 'TEXT-ONLY the text edit really landed');
     ok(sameRows(allLinks(db as never), snapshot), 'TEXT-ONLY a text edit leaves every media_links row byte-identical');
     ok(activeLinks(db as never).length === 4, 'TEXT-ONLY still four images');
+  }
+
+  // ── STUCK-COMMAND — der Fall aus dem Echtbetrieb (CAR-OGJ-001) ───────────
+  //
+  // Bild ersetzen + Jahr leeren + Einkaufspreis leeren. Der Koordinator weist den leeren Einkaufspreis
+  // unmittelbar vor dem UPDATE mit festem Code ab — in DERSELBEN Transaktion wie der Bildwechsel:
+  // weder das neue Bild noch das geleerte Jahr noch der Preis werden uebernommen.
+  {
+    const { db, gw, co, baseline, fp } = await fixture();
+    const run = (s: string, p?: unknown[]) => (db as unknown as { run: (s: string, p?: unknown[]) => void }).run(s, p);
+    run(`UPDATE products SET purchase_price = 1650, attributes = ? WHERE id = ?`, ['{"year":2024,"karat":"18K Yellow"}', PRODUCT]);
+    const snapshot = allLinks(db as never);
+    const prepared = new Map([await prepareNew(gw, 'NEU', 0)]);
+    let thrown: unknown = null;
+    try {
+      const env = await buildMobileGalleryEnvelope({
+        plan: planFor(fp, [{ new: 0 }], baseline.map((b) => b.linkId)),
+        baseline: co.readGalleryBaseline(SCOPE), preparedBySlot: prepared, batchId: 'gallery-edit:stuck-price',
+        tenantId: TENANT, branchId: BRANCH, entityId: PRODUCT, role: ROLE, digestHex,
+        productEdit: {
+          set: [['purchase_price', null], ['attributes', '{"karat":"18K Yellow"}']], baseline: [1650, '{"year":2024,"karat":"18K Yellow"}'],
+          invalidateImageDerived: true, withSync: false, priceEligibilityRequired: true,
+          audit: { module: 'Product', changedBy: null, newValueJson: '{}' },
+        },
+      });
+      co.registerEditPlan(env);
+      await co.applyEditBatch(env);
+    } catch (e) { thrown = e; }
+    ok((thrown as { message?: string })?.message === 'MOBILE_EDIT_PURCHASE_PRICE_REQUIRED',
+      `STUCK a cleared purchase price is refused with its own code before the UPDATE (${(thrown as { message?: string })?.message})`);
+    ok(sameRows(allLinks(db as never), snapshot), 'STUCK …the gallery did not move: no new image, the old one not retired');
+    const row = (db as unknown as { exec: (s: string, p?: unknown[]) => Array<{ values: unknown[][] }> }).exec(`SELECT purchase_price, attributes FROM products WHERE id=?`, [PRODUCT])[0].values[0];
+    ok(Number(row[0]) === 1650 && String(row[1]).includes('"year":2024'), `STUCK …and neither price nor year changed (${row[0]} / ${row[1]})`);
+    const job = (db as unknown as { exec: (s: string, p?: unknown[]) => Array<{ values: unknown[][] }> }).exec(
+      `SELECT state FROM media_ingest_jobs WHERE tenant_id=? AND ingest_request_id=?`, [TENANT, editRequestId('gallery-edit:stuck-price')]);
+    ok(job.length > 0 && String(job[0].values[0][0]) !== 'ready', 'STUCK …the job is not marked applied');
+  }
+
+  // ── REPLAY — angewandt, nur die Bestaetigung ging verloren (CAR-OGJ-007) ─
+  //
+  // Der erste Versuch wendet den Plan an (Journal `ready`). Danach scheitert etwas, der Auftrag kommt
+  // erneut. Der Galerie-Stand des Handys ist jetzt veraltet — ein Neubau des Umschlags endet zwingend
+  // im Konflikt. Deshalb fragt die Verdrahtung VORHER den Journal-Eintrag GENAU dieses Auftrags ab
+  // (dieselbe Abfrage wie `galleryEditApplied`): er ist `ready`, also ist der Auftrag erledigt — und
+  // der Koordinator bestaetigt es: ein erneutes Anwenden ist ein reines No-op, genau EIN Endzustand.
+  {
+    const { db, gw, co, baseline, fp } = await fixture();
+    const prepared = new Map([await prepareNew(gw, 'R', 0)]);
+    const batchId = 'gallery-edit:t1:b1:p-1:stock_image:ev-replay';
+    const env = await applyPlan(co, planFor(fp, [{ new: 0 }], baseline.map((b) => b.linkId)), prepared, batchId);
+    const final = allLinks(db as never);
+    const jobState = (db as unknown as { exec: (s: string, p?: unknown[]) => Array<{ values: unknown[][] }> }).exec(
+      'SELECT state FROM media_ingest_jobs WHERE tenant_id = ? AND ingest_request_id = ?', [TENANT, editRequestId(batchId)]);
+    ok(jobState.length === 1 && String(jobState[0].values[0][0]) === 'ready', 'REPLAY the journal entry of exactly this command is ready after the first apply');
+    let rebuilt: unknown = null;
+    try {
+      await buildMobileGalleryEnvelope({
+        plan: planFor(fp, [{ new: 0 }], baseline.map((b) => b.linkId)), baseline: co.readGalleryBaseline(SCOPE), preparedBySlot: prepared, batchId,
+        tenantId: TENANT, branchId: BRANCH, entityId: PRODUCT, role: ROLE, digestHex,
+      });
+    } catch (e) { rebuilt = e; }
+    ok((rebuilt as { code?: string })?.code === ERR_GALLERY_BASELINE_CHANGED,
+      'REPLAY without the journal check the stale phone baseline would report a (false) conflict — that is why the check comes first');
+    const again = await co.applyEditBatch(env);
+    ok(again.status === 'noop_already_applied', `REPLAY applying the same command again is a pure no-op (${again.status})`);
+    ok(sameRows(allLinks(db as never), final) && activeLinks(db as never).length === 1, 'REPLAY exactly one final media state — nothing added, nothing retired twice');
+    const other = (db as unknown as { exec: (s: string, p?: unknown[]) => Array<{ values: unknown[][] }> }).exec(
+      'SELECT COUNT(*) FROM media_ingest_jobs WHERE tenant_id = ? AND ingest_request_id = ? AND state = ?', [TENANT, editRequestId('gallery-edit:t1:b1:p-1:stock_image:ev-other'), 'ready']);
+    ok(Number(other[0].values[0][0]) === 0, 'REPLAY a DIFFERENT command id has no such entry — the shortcut never applies to another command');
+  }
+
+  // ── ECHTER KONFLIKT — eine fremde Bildaenderung dazwischen bleibt Konflikt ─
+  {
+    const { db, gw, co, baseline, fp } = await fixture();
+    // Ein anderer Auftrag (z. B. vom Desktop) aendert die Galerie zuerst …
+    await applyPlan(co, planFor(fp, [baseline[1], baseline[0], baseline[2], baseline[3]].map((b) => ({ keep: b.linkId }))), new Map(), 'gallery-edit:foreign');
+    const afterForeign = allLinks(db as never);
+    // … dann kommt der Handy-Auftrag mit dem ALTEN Stand. Sein eigener Journal-Eintrag existiert nicht.
+    const mine = 'gallery-edit:t1:b1:p-1:stock_image:ev-mine';
+    const mineState = (db as unknown as { exec: (s: string, p?: unknown[]) => Array<{ values: unknown[][] }> }).exec(
+      'SELECT state FROM media_ingest_jobs WHERE tenant_id = ? AND ingest_request_id = ?', [TENANT, editRequestId(mine)]);
+    ok(mineState.length === 0, 'CONFLICT the phone command was never applied — no journal entry, no shortcut');
+    let thrown: unknown = null;
+    try {
+      await applyPlan(co, planFor(fp, [{ new: 0 }], baseline.map((b) => b.linkId)), new Map([await prepareNew(gw, 'M', 0)]), mine);
+    } catch (e) { thrown = e; }
+    ok((thrown as { code?: string })?.code === ERR_GALLERY_BASELINE_CHANGED, `CONFLICT a real concurrent change stays a conflict (${(thrown as { code?: string })?.code})`);
+    ok(sameRows(allLinks(db as never), afterForeign), 'CONFLICT …and the foreign change is untouched');
   }
 }
 

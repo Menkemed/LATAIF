@@ -21,7 +21,7 @@ import { buildSkuSeed, skuIsEmpty } from '../products/sku-allocation.ts';
 import { parseMobileGalleryPlan, ERR_GALLERY_PLAN_INVALID, type MobileGalleryPlan } from './mobile-gallery-edit.ts';
 import {
   parseMobileProductPatch, resolveMobileProductPatch, patchTouchesPrices,
-  ERR_PRICE_NOT_ELIGIBLE,
+  ERR_PRICE_NOT_ELIGIBLE, ERR_PURCHASE_PRICE_REQUIRED,
   type MobileProductPatch, type CurrentProductState,
 } from './mobile-product-patch.ts';
 import type { MobileFieldSchema } from '../mobile/mobile-field-schema.ts';
@@ -177,6 +177,11 @@ export interface MobileDrainDeps {
    *  Fehlt die Abhaengigkeit, wird ein Galerie-Job NICHT verarbeitet und auch nicht terminal
    *  markiert — er bleibt fuer einen spaeteren, vollstaendig verdrahteten Lauf liegen. */
   applyGalleryEdit?: (grant: ClaimGrant, prepared: PreparedMediaItem[], plan: MobileGalleryPlan) => Promise<{ ok: boolean; errorCode?: string }>;
+  /** Wurde GENAU dieser Galerie-Auftrag (derselbe uploadEventId) schon angewandt? Belegt nur durch
+   *  den Journal-Eintrag des Auftrags im Zustand `ready` — er entsteht in derselben Transaktion wie
+   *  der Bildwechsel. Ein aehnlicher Stand oder ein fremder Auftrag zaehlt nicht. Fehlt die
+   *  Abhaengigkeit, gibt es keine Abkuerzung: der Auftrag laeuft den normalen Weg. */
+  galleryEditApplied?: (grant: ClaimGrant, productId: string) => boolean;
   /** v0.8.48 — der aktuelle Stand des Artikels, gelesen unter der Sperre: Kategorie, gespeicherte
    *  Attribute und Lieferumfang. Grundlage fuer den Merge und fuer die Schema-Pruefung. */
   readProductState?: (productId: string) => CurrentProductState | null;
@@ -599,11 +604,17 @@ async function processEditClaim(grant: ClaimGrant, deps: MobileDrainDeps, sc: Dr
   try {
     applied = await deps.applyTextEdit(parsed.productId, resolvedEdit.resolved);
   } catch (e) {
-    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc); // nichts durabel → spaeter erneut
-    return { code: 'deferred', detail: (e as { message?: string })?.message ?? 'edit_failed' };
+    applied = { ok: false, errorCode: (e as { message?: string })?.message ?? 'edit_failed' };
   }
   if (!applied.ok) {
-    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+    // Nur klar erkennbare, deterministische Faelle werden endgueltig: der leere Einkaufspreis und ein
+    // Regelverstoss der Datenbank. Alles andere bleibt wiederholbar — nichts wurde durabel.
+    if (textEditFailureIsTerminal(applied.errorCode)) {
+      const code = terminalEditCode(applied.errorCode, ERR_EDIT_PATCH_INVALID);
+      await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, code, sc);
+      return { code: 'manifest_invalid', detail: code };
+    }
+    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc); // nichts durabel → spaeter erneut
     return { code: 'deferred', detail: applied.errorCode ?? 'edit_failed' };
   }
   if (await claimFenced(deps, entryRevision)) {
@@ -639,11 +650,37 @@ const GALLERY_TERMINAL_CODES = [
   'MEDIA_EDIT_DUPLICATE_MEDIA',
   'MEDIA_EDIT_NEW_NOT_PREPARED',
   'MEDIA_EDIT_RENDITION_DIVERGED',
+  // Der leere Einkaufspreis — vom Koordinator unmittelbar vor dem UPDATE abgewiesen.
+  ERR_PURCHASE_PRICE_REQUIRED,
 ] as const;
 
 export function galleryFailureIsTerminal(errorCode: string | undefined): boolean {
   if (!errorCode) return false;
-  return GALLERY_TERMINAL_CODES.some((c) => errorCode.includes(c));
+  return GALLERY_TERMINAL_CODES.some((c) => errorCode.includes(c)) || dbConstraintViolation(errorCode);
+}
+
+/** Text-Edit: endgueltig nur der leere Einkaufspreis und ein Regelverstoss der Datenbank. */
+export function textEditFailureIsTerminal(errorCode: string | undefined): boolean {
+  return !!errorCode && (errorCode.includes(ERR_PURCHASE_PRICE_REQUIRED) || dbConstraintViolation(errorCode));
+}
+
+/** Gespeicherter Code fuer einen Regelverstoss der Datenbank selbst (Absicherung hinter der Validierung). */
+export const ERR_EDIT_DB_CONSTRAINT = 'MOBILE_EDIT_DB_CONSTRAINT';
+
+/**
+ * Ein Regelverstoss der Datenbank (NOT NULL / CHECK) ist eine Eigenschaft des Auftrags: derselbe
+ * Auftrag scheitert bei jeder Wiederholung gleich. Er wird deshalb endgueltig — sonst blockierte er
+ * als aeltester Auftrag die ganze Warteschlange. Bewusst NUR diese beiden klar erkennbaren Faelle:
+ * eine gesperrte Datenbank, ein Dateifehler oder etwas Unbekanntes bleibt wiederholbar.
+ */
+export function dbConstraintViolation(errorCode: string | undefined): boolean {
+  return !!errorCode && /\b(NOT NULL|CHECK) constraint failed\b/i.test(errorCode);
+}
+
+/** Der Code, unter dem ein endgueltig gescheiterter Edit abgelegt wird — nie die rohe Fehlermeldung. */
+function terminalEditCode(errorCode: string | undefined, fallback: string): string {
+  if (dbConstraintViolation(errorCode)) return ERR_EDIT_DB_CONSTRAINT;
+  return errorCode ?? fallback;
 }
 
 /**
@@ -673,12 +710,27 @@ async function processGalleryEditClaim(grant: ClaimGrant, deps: MobileDrainDeps,
   }
   const parsed = parseMobileGalleryPlan(grant.metadataJson);
   if (!parsed.ok) {
-    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_GALLERY_PLAN_INVALID, sc);
-    return { code: 'manifest_invalid', detail: ERR_GALLERY_PLAN_INVALID };
+    // Ein leerer Einkaufspreis behaelt seinen sprechenden Code; alles andere ist ein ungueltiger Plan.
+    const code = parsed.code ?? ERR_GALLERY_PLAN_INVALID;
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, code, sc);
+    return { code: 'manifest_invalid', detail: code };
   }
   if (!deps.productExists(parsed.plan.productId)) {
     await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_TARGET_CONFLICT, sc);
     return { code: 'target_conflict' };
+  }
+  // Wiederholung nach erfolgreichem Anwenden (die Bestaetigung ging verloren, z. B. die Sicherung
+  // danach schlug fehl): der Journal-Eintrag GENAU dieses Auftrags ist `ready`. Dann ist nichts mehr
+  // zu tun — der veraltete Galerie-Stand des Handys darf hier keinen Konflikt mehr ausloesen.
+  if (deps.galleryEditApplied?.(grant, parsed.plan.productId)) {
+    if (await claimFenced(deps, entryRevision)) {
+      await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+      return { code: 'deferred', detail: 'scope_fenced' };
+    }
+    const done = await deps.bridge.markReady(
+      u, grant.uploadEventId, grant.claimToken, grant.entityId, grant.payloadHash, parsed.plan.productId, sc,
+    );
+    return done === 'rejected' ? { code: 'ready_rejected' } : { code: 'ready', detail: 'already_applied' };
   }
   // Jedes hochgeladene Bild braucht seinen Platz im Plan — sonst gehoeren Plan und Batch nicht
   // zusammen. Rust prueft das schon beim Annehmen; hier steht es noch einmal, weil der Drain sich
@@ -735,7 +787,7 @@ async function processGalleryEditClaim(grant: ClaimGrant, deps: MobileDrainDeps,
   }
   if (!applied.ok) {
     if (galleryFailureIsTerminal(applied.errorCode)) {
-      const code = applied.errorCode ?? ERR_GALLERY_PLAN_INVALID;
+      const code = terminalEditCode(applied.errorCode, ERR_GALLERY_PLAN_INVALID);
       await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, code, sc);
       return { code: 'operation_conflict', detail: code };
     }

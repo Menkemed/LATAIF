@@ -239,6 +239,10 @@ pub const MOBILE_TEXT_EDIT_FIELDS: [&str; 5] = ["name", "brand", "condition", "s
 /// `salePrice`) — eine zweite Vokabel nur fuers Handy waere genau die Drift, die wir vermeiden.
 pub const MOBILE_PRICE_FIELDS: [&str; 3] = ["purchasePrice", "plannedSalePrice", "minSalePrice"];
 pub const ERR_EDIT_PATCH_INVALID: &str = "MOBILE_EDIT_PATCH_INVALID";
+/// Der Einkaufspreis laesst sich nicht leeren: `products.purchase_price` ist Pflicht, „kein
+/// Einkaufspreis" ist 0. Abgewiesen wird schon beim Annehmen — so kommt ein solcher Auftrag gar nicht
+/// erst in die Warteschlange. Spiegel von `ERR_PURCHASE_PRICE_REQUIRED` im Renderer.
+pub const ERR_EDIT_PURCHASE_PRICE_REQUIRED: &str = "MOBILE_EDIT_PURCHASE_PRICE_REQUIRED";
 /// Laengengrenze je Textfeld — dieselbe Groessenordnung wie die Eingabefelder auf der Seite.
 const MAX_EDIT_FIELD_LEN: usize = 500;
 /// Obergrenze fuer einen einzelnen Attributwert und fuer die Zahl der Attribute in einem Patch.
@@ -326,6 +330,8 @@ pub fn validate_product_patch(patch: &serde_json::Map<String, Value>) -> Result<
             }
             _ if MOBILE_PRICE_FIELDS.contains(&k.as_str()) => {
                 if !valid_price(v) { return Err(ERR_EDIT_PATCH_INVALID); }
+                // Verkaufs- und Mindestpreis duerfen leer sein, der Einkaufspreis nicht.
+                if k == "purchasePrice" && v.is_null() { return Err(ERR_EDIT_PURCHASE_PRICE_REQUIRED); }
             }
             _ if MOBILE_TEXT_EDIT_FIELDS.contains(&k.as_str()) => match v {
                 Value::Null => {}
@@ -447,7 +453,8 @@ pub fn validate_gallery_edit_metadata(meta: &Value, image_count: usize) -> Resul
     // "Preis gespeichert, Bild verloren" kann so gar nicht entstehen. Der Patch ist optional.
     if let Some(p) = meta.get("patch") {
         let obj = p.as_object().ok_or(ERR_GALLERY_PLAN_INVALID)?;
-        validate_product_patch(obj).map_err(|_| ERR_GALLERY_PLAN_INVALID)?;
+        // Der leere Einkaufspreis behaelt seinen sprechenden Code — er ist ein Bedienfehler, kein kaputter Plan.
+        validate_product_patch(obj).map_err(|e| if e == ERR_EDIT_PURCHASE_PRICE_REQUIRED { e } else { ERR_GALLERY_PLAN_INVALID })?;
     }
     Ok(())
 }
