@@ -250,6 +250,9 @@ const BEOBACHTER = `
   }
 `;
 
+/** Aktive Medienverknüpfungen einer Reparatur (MEDIA-REPAIR). */
+const fotos = (rid) => Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM media_links WHERE entity_id = ? AND deleted_at IS NULL', [rid ?? ''])[0]?.n || 0);
+
 function insert(db, tabelle, werte) {
   const spalten = db.prepare(`PRAGMA table_info(${tabelle})`).all();
   const namen = spalten.map((r) => r.name);
@@ -336,6 +339,12 @@ async function primaryNeustart(aendern) {
   try { aendern(db); } finally { try { db.close(); } catch { /* zu */ } }
   primary = await attach(APP_CDP, APP, appEnv());
   await waitInvoke(primary);
+  await waitFor(primary, SHELL + ', input[type="password"]', 90000);
+  if (!(await exists(primary, SHELL))) {
+    await setVal(primary, 'input[type="email"]', OWNER_EMAIL);
+    await setVal(primary, 'input[type="password"]', ONBOARD_PW);
+    await primary.ev("document.querySelector('button[type=submit]')?.click(); return 1;");
+  }
   await waitFor(primary, SHELL, 90000);
   await primary.ev('return await window.__TAURI_INTERNALS__.invoke("sync_server_start", {}).catch((e)=>String(e));').catch(() => null);
   const end = Date.now() + 60000;
@@ -393,7 +402,7 @@ async function eigeneMaske(c, productId, lotId, issue) {
   const r = [
     await waehleIn(c, 'Auto (oldest active lot', lotId),
     await setVal(c, 'textarea[placeholder="Describe the issue or requested repair..."]', issue),
-    await setByLabel(c, 'ADDITIONAL IN-HOUSE COST (BHD, OPTIONAL)', '15'),
+    await setByLabel(c, 'ESTIMATED ADDITIONAL IN-HOUSE COST (BHD, OPTIONAL)', '15'),
     await waehleIn(c, 'Unassigned', 'r5c-emp'),
   ];
   const schlecht = r.filter((x) => x !== 'OK');
@@ -543,6 +552,13 @@ try {
 
   primary = await attach(APP_CDP, APP, appEnv());
   await waitInvoke(primary);
+  // Wie in den übrigen Zwei-App-Läufen: nach dem Säen kann die gespeicherte Sitzung fremd sein — dann anmelden.
+  await waitFor(primary, SHELL + ', input[type="password"]', 90000);
+  if (!(await exists(primary, SHELL))) {
+    await setVal(primary, 'input[type="email"]', OWNER_EMAIL);
+    await setVal(primary, 'input[type="password"]', ONBOARD_PW);
+    await primary.ev("document.querySelector('button[type=submit]')?.click(); return 1;");
+  }
   await waitFor(primary, SHELL, 90000);
   await primary.ev('return await window.__TAURI_INTERNALS__.invoke("sync_server_start", {}).catch((e)=>String(e));').catch(() => null);
   {
@@ -608,8 +624,8 @@ try {
       && pc2Kunde?.item_serial === 'Z12345' && pc2Kunde?.item_description === 'Kratzer am Glas' && pc2Kunde?.staff_id === 'r5c-emp'
       && Number(pc2Kunde?.charge_to_customer) === 90 && Number(pc2Kunde?.internal_cost) === 30 && pc2Kunde?.tax_scheme === 'ZERO',
       'CREATE jede Eingabe der Maske steht in der Zeile — die eigenen Kosten aus der geteilten Ableitung');
-    const bilder = JSON.parse(String(pc2Kunde?.images || '[]'));
-    ok(bilder.length === 1 && /^data:image\/jpeg;base64,/.test(bilder[0]), 'CREATE das Foto steht in der Reparatur, wie die Maske es verkleinert hat');
+    // MEDIA-REPAIR (20.09.) — das Foto liegt im Medienkern, verknüpft mit der Reparatur; die alte Spalte bleibt leer.
+    ok(JSON.parse(String(pc2Kunde?.images || '[]')).length === 0 && fotos(pc2Kunde?.id) === 1, `CREATE das Foto hängt an der Reparatur (Medienkern: ${fotos(pc2Kunde?.id)})`);
     const zeilen = dbQ(BIZ_DB, 'SELECT supplier_id, cost_amount FROM repair_lines WHERE repair_id = ?', [pc2Kunde?.id]);
     ok(zeilen.length === 1 && zeilen[0].supplier_id === 'r5c-werkstatt' && Number(zeilen[0].cost_amount) === 30,
       `CREATE die erste Arbeitszeile legt das Haus an (${S(zeilen)})`);
@@ -681,6 +697,8 @@ try {
 
     // R5C FINAL — sichtbar gesetzte Werte, dann ein anderer Modus, dann speichern: auf BEIDEN Rechnern.
     for (const [c, wer, pid, issue] of [[client, 'PC2', 'r5c-own-a', 'R5C PC2 Umschalten'], [primary, 'Primary', 'r5c-own-b', 'R5C Primary Umschalten']]) {
+      // Nach dem Anlegen öffnet die Maske die neue Reparatur — für die nächste Anlage zurück zur Liste.
+      await geh(c, '/repairs'); await sleep(800);
       const m = await umschaltMaske(c, pid, issue);
       ok(m === 'OK', `HIDDEN (${wer}) Kundenreparatur mit Werten, dann „Own Item" und „Internal" (${m})`);
       await click(c, '[data-create-repair]');
@@ -741,7 +759,7 @@ try {
     ok(z.customer_payment_status === 'PAID' && Number(z.customer_paid_amount) === 150 && !!z.customer_payment_ledger_id,
       `EDIT die Kundenzahlung ist vom Haus gebucht (${z.customer_payment_status}/${z.customer_paid_amount})`);
     ok(Math.abs(Number(z.margin) - (150 - Number(z.internal_cost))) < 0.001, `EDIT die Marge rechnet der Primary (${z.margin})`);
-    ok(JSON.parse(String(z.images || '[]')).length === 2 && z.item_reference === '116500' && z.item_description === 'Glas neu' && z.diagnosis === 'Glas gesprungen',
+    ok(fotos(z.id) === 2 && z.item_reference === '116500' && z.item_description === 'Glas neu' && z.diagnosis === 'Glas gesprungen',
       'EDIT Foto, Referenz, Beschreibung und Diagnose stehen in der Zeile');
     ok(/CardFee|card/i.test(ausgaben(pc2Kunde?.id)), `EDIT die Kartengebuehr ist gebucht (${ausgaben(pc2Kunde?.id)})`);
 

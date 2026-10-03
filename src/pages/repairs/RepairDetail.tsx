@@ -56,7 +56,8 @@ import { goldUsageLine } from '@/core/gold/gold-usage-view';
 import {
   isOwnWorkLine, ownWorkDescription, materialDescription, showsInternalCostRow,
   OWN_WORK_KIND, OWN_WORK_SOURCE,
-  IN_HOUSE_COST_LABEL, IN_HOUSE_COST_HINT, IN_HOUSE_ESTIMATE_HINT, IN_HOUSE_LINE_SUBTITLE, IN_HOUSE_LINE_NOTE,
+  IN_HOUSE_COST_HINT, IN_HOUSE_ESTIMATE_HINT, IN_HOUSE_LINE_SUBTITLE, IN_HOUSE_LINE_NOTE,
+  IN_HOUSE_COST_PLACEHOLDER, repairCostLabels,
 } from '@/core/repairs/repair-line-view';
 import { useSharedRead } from '@/core/data/shared-read';
 import { creditPaidFor } from '@/core/data/domain-reads';
@@ -862,9 +863,9 @@ export function RepairDetail() {
             <div style={{ marginTop: 20, borderTop: '1px solid #E5E9EE', paddingTop: 16 }}>
               {editing ? (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                  <Input label={form.repairType === 'hybrid' ? 'WORKSHOP FEE (BHD)' : 'ESTIMATED COST (BHD)'} type="number" value={form.estimatedCost ?? ''} onChange={e => setForm({ ...form, estimatedCost: e.target.value ? Number(e.target.value) : undefined })} />
-                  <Input label="ACTUAL COST (BHD)" type="number" value={form.actualCost ?? ''} onChange={e => setForm({ ...form, actualCost: e.target.value ? Number(e.target.value) : undefined })} />
-                  <Input label={`${IN_HOUSE_COST_LABEL} (BHD)`} type="number" value={form.internalCost ?? 0} onChange={e => setForm({ ...form, internalCost: Number(e.target.value) })} />
+                  <Input label={`${repairCostLabels(form.repairType).estimated} (BHD)`} type="number" placeholder={form.repairType !== 'external' && form.repairType !== 'hybrid' ? IN_HOUSE_COST_PLACEHOLDER : undefined} value={form.estimatedCost ?? ''} onChange={e => setForm({ ...form, estimatedCost: e.target.value ? Number(e.target.value) : undefined })} />
+                  <Input label={`${repairCostLabels(form.repairType).actual} (BHD)`} type="number" placeholder={form.repairType !== 'external' && form.repairType !== 'hybrid' ? IN_HOUSE_COST_PLACEHOLDER : undefined} value={form.actualCost ?? ''} onChange={e => setForm({ ...form, actualCost: e.target.value ? Number(e.target.value) : undefined })} />
+                  <Input label={`${repairCostLabels(form.repairType).own} (BHD)`} type="number" placeholder={form.repairType !== 'external' ? IN_HOUSE_COST_PLACEHOLDER : undefined} value={form.internalCost || ''} onChange={e => setForm({ ...form, internalCost: Number(e.target.value) })} />
                   <Input label="CHARGE TO CUSTOMER (BHD)" type="number" value={form.chargeToCustomer ?? ''} onChange={e => setForm({ ...form, chargeToCustomer: e.target.value ? Number(e.target.value) : undefined })} />
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>INTERNAL PAID FROM</span>
@@ -917,28 +918,30 @@ export function RepairDetail() {
                       </div>
                     )}
                   </div>
-                  <p style={{ gridColumn: '1 / -1', fontSize: 11, color: '#6B7280', margin: 0 }}>
-                    {IN_HOUSE_COST_HINT}{form.repairType === 'internal' ? ` ${IN_HOUSE_ESTIMATE_HINT}` : ''}
-                  </p>
+                  {form.repairType !== 'external' && (
+                    <p style={{ gridColumn: '1 / -1', fontSize: 11, color: '#6B7280', margin: 0 }}>
+                      {IN_HOUSE_COST_HINT}{form.repairType !== 'hybrid' ? ` ${IN_HOUSE_ESTIMATE_HINT}` : ''}
+                    </p>
+                  )}
                 </div>
               ) : (
                 <>
                   {repair.estimatedCost != null && (
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                       <span className="text-overline">
-                        {repair.repairType === 'hybrid' ? 'WORKSHOP FEE / EXTERNAL COST' : 'ESTIMATED COST'}
+                        {repair.repairType === 'hybrid' ? 'WORKSHOP FEE / EXTERNAL COST' : repairCostLabels(repair.repairType).estimated}
                       </span>
                       <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}><Bhd v={repair.estimatedCost}/> BHD</span>
                     </div>
                   )}
                   {repair.actualCost != null && (
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
-                      <span className="text-overline">ACTUAL COST</span>
+                      <span className="text-overline">{repairCostLabels(repair.repairType).actual}</span>
                       <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}><Bhd v={repair.actualCost}/> BHD</span>
                     </div>
                   )}
                   <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
-                    <span className="text-overline">{IN_HOUSE_COST_LABEL}</span>
+                    <span className="text-overline">{repairCostLabels(repair.repairType).own}</span>
                     <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}><Bhd v={repair.internalCost}/> BHD</span>
                   </div>
                   {repair.chargeToCustomer != null && (

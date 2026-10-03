@@ -41,7 +41,7 @@ import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
 import { productDisplayName, brandModelHidden } from '@/core/products/display-name';
 import { repairItemDisplayName } from '@/core/products/display-name';
 import { StonesEditor } from '@/components/products/StonesEditor';
-import { IN_HOUSE_COST_LABEL, IN_HOUSE_COST_HINT, IN_HOUSE_LINE_SUBTITLE } from '@/core/repairs/repair-line-view';
+import { IN_HOUSE_COST_LABEL, IN_HOUSE_COST_HINT, IN_HOUSE_LINE_SUBTITLE, IN_HOUSE_COST_PLACEHOLDER, repairCostLabels } from '@/core/repairs/repair-line-view';
 import { normalizeStoneAttributes, stonesApply } from '@/core/products/stones';
 
 function fmt(v: number): string {
@@ -96,6 +96,8 @@ export function RepairList() {
   const { invoices, loadInvoices } = useInvoiceStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
   const [showNew, setShowNew] = useState(false);
+  // Was beim Anlegen noch fehlt — in der Maske, nicht als stiller Abbruch (Feldbefund: „Create Repair tut nichts").
+  const [createHinweis, setCreateHinweis] = useState('');
   const [filterStatus, setFilterStatus] = useState<RepairStatus | ''>('');
   const [filterCustomerId, setFilterCustomerId] = useState<string>('');
   const [filterStaffId, setFilterStaffId] = useState<string>('');
@@ -288,6 +290,7 @@ export function RepairList() {
 
   function openNew() {
     setForm({ repairScope: 'CUSTOMER', repairType: 'internal', taxScheme: 'VAT_10', itemAttributes: {} });
+    setCreateHinweis('');
     setShowNew(true);
   }
 
@@ -300,26 +303,27 @@ export function RepairList() {
   }
 
   async function handleCreate() {
-    if (!form.issueDescription) return;
-    if (form.repairScope === 'OWN') {
-      if (!form.productId) return;
-    } else {
-      if (!form.customerId) return;
-    }
+    // Ohne Kunde (bzw. eigenen Artikel) oder Problem brach der Knopf bisher STILL ab — er „tat nichts".
+    // Jetzt sagt die Maske, was fehlt, an derselben Stelle wie jeder andere Fehler des Anlegens.
     // v0.7.15 — Erzwinge die `required: true` Flags aus REPAIR_FIELDS.
     // Vorher war die rote * nur visuell, Submit ging trotzdem durch ohne
     // Brand/Name/etc. — fuer OWN-Scope skip wir die Validierung (Produkt
     // ist schon ausgewaehlt, seine Daten sind komplett).
     // R5C — die Regel steht jetzt in `repair-rules` und gilt genauso am Eingang des Fernbefehls.
-    if (form.repairScope !== 'OWN') {
-      const missing = missingRepairItemFields(form);
-      if (missing.length > 0) {
-        alert(`Please fill in the required fields:\n• ${missing.join('\n• ')}`);
-        return;
-      }
-      const steinFehler = normalizeStoneAttributes(form.itemCategoryId, form.itemAttributes as Record<string, unknown> | undefined).issues[0];
-      if (steinFehler) { alert(steinFehler.message); return; }
+    const missing = [
+      ...(form.repairScope === 'OWN' ? (form.productId ? [] : ['Own item']) : (form.customerId ? [] : ['Client'])),
+      ...(form.repairScope !== 'OWN' ? missingRepairItemFields(form) : []),
+      ...(form.issueDescription?.trim() ? [] : ['Issue']),
+    ];
+    if (missing.length > 0) {
+      setCreateHinweis(`Please fill in the required fields: ${missing.join(', ')}`);
+      return;
     }
+    if (form.repairScope !== 'OWN') {
+      const steinFehler = normalizeStoneAttributes(form.itemCategoryId, form.itemAttributes as Record<string, unknown> | undefined).issues[0];
+      if (steinFehler) { setCreateHinweis(steinFehler.message); return; }
+    }
+    setCreateHinweis('');
     // v0.7.4 — Workshop optional bei Create. Discovery-Over-Time-Pattern:
     // beim Annehmen weiss man oft Workshop+Cost noch nicht, das traegt man
     // auf der Detail-Seite via "Add Work Line" ein wenn die Werkstatt
@@ -345,6 +349,10 @@ export function RepairList() {
     if (r.kind !== 'ok') return;
     loadRepairs();
     setShowNew(false);
+    // Die neue Reparatur gleich öffnen — am Primary kommt sie als Datensatz, am zweiten Rechner als Antwort des Befehls.
+    const neu = r.value as { id?: string; repairId?: string };
+    const neuId = neu.repairId ?? neu.id;
+    if (neuId) navigate(`/repairs/${neuId}`);
   }
 
   async function handleQuickStatus(e: React.MouseEvent, rep: Repair, newStatus: RepairStatus) {
@@ -734,7 +742,7 @@ export function RepairList() {
             <div style={{ display: 'flex', flexDirection: 'column', gap: 20 }}>
               <div>
                 <SearchSelect
-                  label="CLIENT"
+                  label="CLIENT *"
                   placeholder="Search clients by name, company, phone..."
                   options={customerOptions}
                   value={form.customerId || ''}
@@ -965,7 +973,7 @@ export function RepairList() {
           )}
 
           <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
-            <span className="text-overline" style={{ marginBottom: 8 }}>ISSUE</span>
+            <span className="text-overline" style={{ marginBottom: 8 }}>ISSUE *</span>
             <textarea
               style={{
                 width: '100%', marginTop: 8, background: 'transparent',
@@ -1059,8 +1067,8 @@ export function RepairList() {
               </div>
             ) : (
               <div style={{ display: 'grid', gridTemplateColumns: form.repairScope === 'OWN' ? '1fr' : '1fr 1fr', gap: 20, marginTop: 12 }}>
-                <Input label={form.repairType === 'internal' ? `${IN_HOUSE_COST_LABEL} (BHD, OPTIONAL)` : 'WORKSHOP FEE (BHD, OPTIONAL)'}
-                  type="number" placeholder={form.repairType === 'internal' ? 'blank = no extra cost' : 'enter later'}
+                <Input label={form.repairType === 'internal' ? `${repairCostLabels('internal').estimated} (BHD, OPTIONAL)` : 'WORKSHOP FEE (BHD, OPTIONAL)'}
+                  type="number" placeholder={form.repairType === 'internal' ? IN_HOUSE_COST_PLACEHOLDER : 'enter later'}
                   value={form.estimatedCost || ''}
                   onChange={e => setForm({ ...form, estimatedCost: Number(e.target.value) || undefined })} />
                 {form.repairScope !== 'OWN' && (
@@ -1187,7 +1195,7 @@ export function RepairList() {
           </div>
 
           {/* R5C — der Ausgang des Anlegens, auf beiden Rechnern an derselben Stelle. */}
-          <WriteError text={w.fehler} />
+          <WriteError text={createHinweis || w.fehler} />
           <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button

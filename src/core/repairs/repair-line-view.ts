@@ -131,3 +131,18 @@ export const IN_HOUSE_LINE_SUBTITLE = 'No supplier — only costs not already in
 
 /** Was unter einer Zeile ohne Lieferant (eigene Arbeit, Material aus eigenem Bestand) steht. */
 export const IN_HOUSE_LINE_NOTE = 'Only enter costs not already recorded in Payroll or Expenses.';
+
+/**
+ * Die Beschriftung der drei Kostenfelder einer Reparatur, nach Art. Nur bei der Arbeit im eigenen Haus
+ * wirken Estimated/Actual Cost als eigene Kosten (`internalCostOnEdit`); bei `hybrid` ist Estimated die
+ * Werkstattgebühr, bei `external` ist `internalCost` der gespiegelte Voranschlag (nie eigene Arbeit) —
+ * dort bleiben die alten Namen.
+ */
+export function repairCostLabels(repairType: string | null | undefined): { estimated: string; actual: string; own: string } {
+  if (repairType === 'external') return { estimated: 'ESTIMATED COST', actual: 'ACTUAL COST', own: 'INTERNAL COST' };
+  if (repairType === 'hybrid') return { estimated: 'WORKSHOP FEE', actual: 'ACTUAL COST', own: IN_HOUSE_COST_LABEL };
+  return { estimated: 'ESTIMATED ' + IN_HOUSE_COST_LABEL, actual: 'ACTUAL ' + IN_HOUSE_COST_LABEL, own: IN_HOUSE_COST_LABEL };
+}
+
+/** Platzhalter der eigenen Kostenfelder: leer heißt keine Zusatzkosten. */
+export const IN_HOUSE_COST_PLACEHOLDER = 'blank = no extra cost';
