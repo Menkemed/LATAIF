@@ -83,6 +83,11 @@ export interface MobileUploadBridge {
   prepareImage(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, slot: number, tenantScope: string, scope: DrainScope): Promise<PrepareResult>;
   renew(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, claimantInstanceId: string, leaseSeconds: number, scope: DrainScope): Promise<boolean>;
   release(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, scope: DrainScope): Promise<boolean>;
+  /** MOBILE-QUEUE — eine WIEDERHOLBARE Panne des Auftrags selbst: zurueck auf `accepted`, Zaehler +1,
+   *  letzter Code, naechster Versuch erst nach der Wartezeit (Host-Uhr). Bis dahin liefert der Claim
+   *  unabhaengige spaetere Auftraege — Auftraege desselben Artikels bleiben dahinter. Neutrale
+   *  Rueckgaben (Scope-Fence, fremder Bereich, nicht verdrahtet) gehen weiter ueber `release`. */
+  defer?(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, errorCode: string, scope: DrainScope): Promise<boolean>;
   markQuarantined(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, code: string, scope: DrainScope): Promise<boolean>;
   markReady(originAuthenticatedUserId: string, uploadEventId: string, claimToken: string, entityId: string, payloadHash: string, productId: string, scope: DrainScope): Promise<ReadyResult>;
 }
@@ -106,6 +111,8 @@ export function createTauriMobileUploadBridge(
       invoke<boolean>('mobile_upload_renew', { originAuthenticatedUserId, uploadEventId, claimToken, claimantInstanceId, leaseSeconds, ...scope }),
     release: (originAuthenticatedUserId, uploadEventId, claimToken, scope) =>
       invoke<boolean>('mobile_upload_release', { originAuthenticatedUserId, uploadEventId, claimToken, ...scope }),
+    defer: (originAuthenticatedUserId, uploadEventId, claimToken, errorCode, scope) =>
+      invoke<boolean>('mobile_upload_defer', { originAuthenticatedUserId, uploadEventId, claimToken, errorCode, ...scope }),
     markQuarantined: (originAuthenticatedUserId, uploadEventId, claimToken, code, scope) =>
       invoke<boolean>('mobile_upload_mark_quarantined', { originAuthenticatedUserId, uploadEventId, claimToken, code, ...scope }),
     markReady: (originAuthenticatedUserId, uploadEventId, claimToken, entityId, payloadHash, productId, scope) =>
@@ -216,6 +223,17 @@ async function freshScope(deps: MobileDrainDeps): Promise<{ available: boolean; 
     revision,
     scope: available && cur ? { expectedBindingRevision: revision, expectedTenantId: cur.tenantId, expectedBranchId: cur.branchId } : null,
   };
+}
+
+/**
+ * MOBILE-QUEUE — eine wiederholbare Panne DIESES Auftrags: zurueckstellen mit Wartezeit, statt ihn
+ * sofort wieder als aeltesten Auftrag zu bekommen. Ein Bridge ohne `defer` (aeltere Test-Doubles)
+ * faellt auf die bisherige Rueckgabe zurueck — der Ablauf bleibt derselbe, nur ohne Wartezeit.
+ */
+async function deferJob(deps: MobileDrainDeps, grant: ClaimGrant, sc: DrainScope, code: string): Promise<void> {
+  const u = grant.authenticatedUserId;
+  if (deps.bridge.defer) await deps.bridge.defer(u, grant.uploadEventId, grant.claimToken, code, sc);
+  else await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
 }
 
 /** A running claim is fenced when the scope is no longer available OR the binding revision moved away
@@ -437,7 +455,7 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
       await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_MANIFEST, sc);
       return { code: 'manifest_invalid' };
     }
-    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc); // token lost / transient → retry
+    await deferJob(deps, grant, sc, 'prepare_unavailable'); // transient → retry after the backoff
     return { code: 'deferred', detail: 'prepare_unavailable' };
   }
   // A3 fence (fresh read) immediately before the durable product+receipt checkpoint.
@@ -461,7 +479,7 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
     preparedManifestHash: manifestHash,
   });
   if (result.status === 'product_save_failed') {
-    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc); // nothing durable → retry later
+    await deferJob(deps, grant, sc, result.errorCode ?? 'product_save_failed'); // nothing durable → retry after the backoff
     return { code: 'deferred', detail: result.errorCode };
   }
   // 'created' or 'media_incomplete' → product durable. Verify before marking ready.
@@ -614,7 +632,7 @@ async function processEditClaim(grant: ClaimGrant, deps: MobileDrainDeps, sc: Dr
       await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, code, sc);
       return { code: 'manifest_invalid', detail: code };
     }
-    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc); // nichts durabel → spaeter erneut
+    await deferJob(deps, grant, sc, applied.errorCode ?? 'edit_failed'); // nichts durabel → nach der Wartezeit erneut
     return { code: 'deferred', detail: applied.errorCode ?? 'edit_failed' };
   }
   if (await claimFenced(deps, entryRevision)) {
@@ -756,7 +774,7 @@ async function processGalleryEditClaim(grant: ClaimGrant, deps: MobileDrainDeps,
         await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_MANIFEST, sc);
         return { code: 'manifest_invalid' };
       }
-      await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+      await deferJob(deps, grant, sc, 'prepare_unavailable'); // transient → retry after the backoff
       return { code: 'deferred', detail: 'prepare_unavailable' };
     }
   }
@@ -791,7 +809,7 @@ async function processGalleryEditClaim(grant: ClaimGrant, deps: MobileDrainDeps,
       await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, code, sc);
       return { code: 'operation_conflict', detail: code };
     }
-    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+    await deferJob(deps, grant, sc, applied.errorCode ?? 'gallery_edit_failed'); // nothing applied → retry after the backoff
     return { code: 'deferred', detail: applied.errorCode ?? 'gallery_edit_failed' };
   }
   if (await claimFenced(deps, entryRevision)) {
@@ -818,7 +836,7 @@ async function finishReady(grant: ClaimGrant, deps: MobileDrainDeps, successCode
   if (verdict === 'pending') {
     // durable product, media still finishing (startup recovery converges it) → release for a later
     // resume rather than hold the lease or mark a half-ready job.
-    await deps.bridge.release(u, grant.uploadEventId, grant.claimToken, sc);
+    await deferJob(deps, grant, sc, 'media_pending');
     return { code: 'deferred', detail: 'pending' };
   }
   // Stored product must match the receipt-bound canonical projection over ALL written fields (not

@@ -67,6 +67,74 @@ pub const ERR_TARGET_CONFLICT: &str = "MOBILE_UPLOAD_TARGET_CONFLICT";
 pub const ERR_INTEGRITY_FAILURE: &str = "MOBILE_UPLOAD_INTEGRITY_FAILURE";
 pub const ERR_MANIFEST_INVALID: &str = "MOBILE_UPLOAD_MANIFEST_INVALID";
 pub const ERR_CLAIM_INVALID: &str = "MOBILE_UPLOAD_CLAIM_INVALID";
+/// MOBILE-QUEUE — die zwischengespeicherte Bilddatei ist gerade von einem ANDEREN Prozess gesperrt
+/// (Sicherung, Virenscanner). Das ist voruebergehend: der Auftrag wird zurueckgestellt, nicht
+/// quarantaeniert. Fehlt die Datei, ist sie zu kurz oder stimmt der Hash nicht, bleibt es
+/// `ERR_INTEGRITY_FAILURE` und damit endgueltig.
+pub const ERR_STAGING_BUSY: &str = "MOBILE_UPLOAD_STAGING_BUSY";
+
+/// Ein Lesefehler an einer zwischengespeicherten Datei: NUR die Windows-Sperrverletzungen
+/// (ERROR_SHARING_VIOLATION 32, ERROR_LOCK_VIOLATION 33) sind voruebergehend — alles andere
+/// (fehlt, kein Zugriff, kaputt) bleibt ein Integritaetsfehler wie bisher.
+fn staged_io_error(e: &std::io::Error) -> &'static str {
+    match e.raw_os_error() {
+        Some(32) | Some(33) => ERR_STAGING_BUSY,
+        _ => ERR_INTEGRITY_FAILURE,
+    }
+}
+
+/// MOBILE-QUEUE — die Wartezeit vor dem n-ten Wiederholungsversuch (n = Zahl der bisherigen
+/// Fehlversuche): 30 s, 1 min, 2 min, 5 min, 15 min, danach hoechstens 30 min. Kein Endzustand —
+/// ein wiederholbarer Auftrag bleibt wiederholbar, egal wie oft er scheiterte.
+pub const RETRY_BACKOFF_SECONDS: [i64; 6] = [30, 60, 120, 300, 900, 1800];
+
+pub fn retry_backoff_seconds(attempt: i64) -> i64 {
+    let i = (attempt.max(1) - 1) as usize;
+    RETRY_BACKOFF_SECONDS[i.min(RETRY_BACKOFF_SECONDS.len() - 1)]
+}
+
+/// Einen Fehlversuch festhalten: Zaehler +1, letzter Code, fruehester naechster Versuch nach der
+/// Host-Uhr (`now`, RFC 3339 — nie die Uhr des Handys). Laeuft in der Transaktion des Aufrufers.
+/// Gibt den neuen Zeitpunkt zurueck.
+fn record_retry(conn: &Connection, t: &TrustedUploadContext, event: &str, code: &str, now: &str) -> Result<String, UploadError> {
+    let prev: i64 = conn.query_row(
+        "SELECT attempt_count FROM mobile_upload_retry
+          WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4",
+        params![t.tenant_id, t.branch_id, t.authenticated_user_id, event],
+        |r| r.get(0),
+    ).optional().map_err(map_db)?.unwrap_or(0);
+    let attempt = prev + 1;
+    let base = chrono::DateTime::parse_from_rfc3339(now).map_err(|_| reject(ERR_PAYLOAD_INVALID))?;
+    let next = (base + chrono::Duration::seconds(retry_backoff_seconds(attempt))).to_rfc3339();
+    let code: String = code.chars().take(200).collect();
+    conn.execute(
+        "INSERT INTO mobile_upload_retry
+           (tenant_id, branch_id, authenticated_user_id, upload_event_id, attempt_count, next_attempt_at, last_error_code, updated_at)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8)
+         ON CONFLICT (tenant_id, branch_id, authenticated_user_id, upload_event_id)
+         DO UPDATE SET attempt_count=excluded.attempt_count, next_attempt_at=excluded.next_attempt_at,
+                       last_error_code=excluded.last_error_code, updated_at=excluded.updated_at",
+        params![t.tenant_id, t.branch_id, t.authenticated_user_id, event, attempt, next, code, now],
+    ).map_err(map_db)?;
+    Ok(next)
+}
+
+/// Das fachliche Aggregat eines Auftrags — wer darf wen NICHT ueberholen. Alle Auftraege dieser
+/// Inbox betreffen genau einen Artikel: ein Anlegen den neuen Artikel (`entity_id` IST seine
+/// Produkt-Id), ein Feld- oder Galerie-Edit den Artikel in `productId`. Zwei Auftraege mit demselben
+/// Schluessel bleiben in Eingangsreihenfolge (auch Anlegen → Edit desselben neuen Artikels).
+/// Unbekannte Art oder unlesbare Metadata → `None`: Abhaengigkeiten sind dann nicht beweisbar.
+fn aggregate_key(meta_json: &str, entity_id: &str) -> Option<String> {
+    let meta: Value = serde_json::from_str(meta_json).ok()?;
+    match mobile_job_kind(&meta) {
+        MobileJobKind::Create => (!entity_id.is_empty()).then(|| format!("product:{entity_id}")),
+        MobileJobKind::TextEdit | MobileJobKind::GalleryEdit => meta.get("productId")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .map(|p| format!("product:{p}")),
+        MobileJobKind::Unknown => None,
+    }
+}
 /// MOBILE-04B2A4 — the runtime binding moved (owner rebind) between claim and this mutation.
 pub const ERR_SCOPE_REVISION_CONFLICT: &str = "MOBILE_RUNTIME_SCOPE_REVISION_CONFLICT";
 
@@ -683,9 +751,10 @@ fn verify_and_load_manifest(conn: &Connection, staging_root: &Path, t: &TrustedU
     for (slot, prim, mime, w, h, size, hash, key) in rows {
         let target = resolve_within_root(&canon, &key).map_err(|_| ERR_PATH_UNSAFE)?;
         if assert_no_reparse(&canon, &target).is_err() { return Err(ERR_PATH_UNSAFE); }
-        let md = fs::metadata(&target).map_err(|_| ERR_INTEGRITY_FAILURE)?; // missing → fail closed
+        // missing → fail closed; nur eine Sperre durch einen anderen Prozess ist voruebergehend
+        let md = fs::metadata(&target).map_err(|e| staged_io_error(&e))?;
         if md.len() as i64 != size { return Err(ERR_INTEGRITY_FAILURE); }
-        let bytes = fs::read(&target).map_err(|_| ERR_INTEGRITY_FAILURE)?;
+        let bytes = fs::read(&target).map_err(|e| staged_io_error(&e))?;
         if sha256_hex(&bytes) != hash { return Err(ERR_INTEGRITY_FAILURE); }
         out.push(ClaimedImage {
             slot: slot as usize, primary: prim == 1, mime, width: w as u32, height: h as u32,
@@ -763,7 +832,7 @@ pub fn claimed_image_for_prepare(
     let canon = fs::canonicalize(staging_root).map_err(|_| reject(ERR_INTEGRITY_FAILURE))?;
     let target = resolve_within_root(&canon, &storage_key).map_err(|_| reject(ERR_PATH_UNSAFE))?;
     assert_no_reparse(&canon, &target)?;
-    let bytes = fs::read(&target).map_err(|_| reject(ERR_INTEGRITY_FAILURE))?;
+    let bytes = fs::read(&target).map_err(|e| reject(staged_io_error(&e)))?;
     if bytes.len() as i64 != byte_size || sha256_hex(&bytes) != content_hash {
         return Err(reject(ERR_INTEGRITY_FAILURE));
     }
@@ -1011,6 +1080,9 @@ fn replay_or_conflict(
     }
     if matches!(state.as_str(), "accepted" | "processing" | "ready") {
         if let Err(code) = verify_job_integrity(conn, staging_root, trusted, &sub.upload_event_id) {
+            // MOBILE-QUEUE — a staged file locked by another process is transient: the phone retries
+            // later (503), the job is neither quarantined nor counted as a drain attempt.
+            if code == ERR_STAGING_BUSY { return Err(UploadError::Retryable); }
             quarantine(conn, trusted, &sub.upload_event_id, code, now)?;
             return Err(reject(code)); // fail closed — never a stored-status replay over a broken job
         }
@@ -1116,23 +1188,53 @@ fn claim_next_job_impl(
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(map_db)?;
         // §1 — fence FIRST, under the IMMEDIATE write lock, before reading/writing any job state.
         fence_scope(&tx, scope)?;
-        // Oldest claimable job in the (tenant, branch) scope, across ALL origin users: `accepted`
-        // (no claim row) OR `processing` whose claim lease has expired. The desktop worker leases as
-        // itself (claimantInstanceId); the job's ORIGIN user is read from the row, never assumed to
-        // be the worker. The whole pick→verify→claim runs under the IMMEDIATE write lock.
-        let cand: Option<(String, String, String, String, String)> = tx.query_row(
-            "SELECT i.authenticated_user_id, i.upload_event_id, i.entity_id, i.payload_hash, i.metadata_json
-               FROM mobile_upload_inbox i
-               LEFT JOIN mobile_upload_claim c
-                 ON c.tenant_id=i.tenant_id AND c.branch_id=i.branch_id
-                AND c.authenticated_user_id=i.authenticated_user_id AND c.upload_event_id=i.upload_event_id
-              WHERE i.tenant_id=?1 AND i.branch_id=?2
-                AND ( i.state='accepted'
-                      OR (i.state='processing' AND c.lease_until IS NOT NULL AND c.lease_until < ?3) )
-              ORDER BY i.created_at, i.upload_event_id LIMIT 1",
-            params![tenant_id, branch_id, now],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-        ).optional().map_err(map_db)?;
+        // MOBILE-QUEUE — the oldest CURRENTLY ELIGIBLE job in the (tenant, branch) scope, across ALL
+        // origin users. Eligible = `accepted` whose retry wait has passed (no retry row ⇒ immediately,
+        // exactly as before this version) OR `processing` whose claim lease has expired. A job that is
+        // NOT eligible (waiting for its retry, or in flight) still holds its aggregate: no LATER job for
+        // the same article may overtake it. A pending job whose aggregate cannot be determined blocks
+        // every later job — independence that cannot be proven is not assumed. The desktop worker
+        // leases as itself (claimantInstanceId); the job's ORIGIN user is read from the row, never
+        // assumed to be the worker. The whole pick→verify→claim runs under the IMMEDIATE write lock.
+        let now_at = chrono::DateTime::parse_from_rfc3339(now).map_err(|_| reject(ERR_PAYLOAD_INVALID))?;
+        let pending: Vec<(String, String, String, String, String, bool, Option<String>)> = {
+            let mut st = tx.prepare(
+                "SELECT i.authenticated_user_id, i.upload_event_id, i.entity_id, i.payload_hash, i.metadata_json,
+                        CASE WHEN i.state='accepted'
+                               OR (i.state='processing' AND c.lease_until IS NOT NULL AND c.lease_until < ?3)
+                             THEN 1 ELSE 0 END AS claimable,
+                        r.next_attempt_at
+                   FROM mobile_upload_inbox i
+                   LEFT JOIN mobile_upload_claim c
+                     ON c.tenant_id=i.tenant_id AND c.branch_id=i.branch_id
+                    AND c.authenticated_user_id=i.authenticated_user_id AND c.upload_event_id=i.upload_event_id
+                   LEFT JOIN mobile_upload_retry r
+                     ON r.tenant_id=i.tenant_id AND r.branch_id=i.branch_id
+                    AND r.authenticated_user_id=i.authenticated_user_id AND r.upload_event_id=i.upload_event_id
+                  WHERE i.tenant_id=?1 AND i.branch_id=?2 AND i.state IN ('accepted', 'processing')
+                  ORDER BY i.created_at, i.upload_event_id",
+            ).map_err(map_db)?;
+            let rows = st.query_map(params![tenant_id, branch_id, now], |r| Ok((
+                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get::<_, i64>(5)? == 1, r.get(6)?,
+            ))).map_err(map_db)?;
+            rows.collect::<Result<_, _>>().map_err(map_db)?
+        };
+        let mut held: std::collections::HashSet<String> = std::collections::HashSet::new();
+        let mut cand: Option<(String, String, String, String, String)> = None;
+        for (u, ev, ent, ph, meta, claimable, next_at) in pending {
+            let key = aggregate_key(&meta, &ent);
+            if let Some(k) = &key { if held.contains(k) { continue; } } // an older job of this article is pending
+            // A retry wait that cannot be read is treated as "not yet" — never as "go".
+            let waiting = match &next_at {
+                None => false,
+                Some(s) => chrono::DateTime::parse_from_rfc3339(s).map(|t| t > now_at).unwrap_or(true),
+            };
+            if claimable && !waiting { cand = Some((u, ev, ent, ph, meta)); break; }
+            match key {
+                Some(k) => { held.insert(k); }
+                None => break, // dependencies unknown → nothing later may run ahead of it
+            }
+        }
         let (origin_user, event, entity, ph, meta) = match cand {
             Some(x) => x,
             None => { let _ = tx.commit(); return Ok(None); }
@@ -1171,6 +1273,14 @@ fn claim_next_job_impl(
                     claim_token: claim_token.to_string(), claimant_instance_id: claimant_instance_id.to_string(),
                     lease_until: lease_until.to_string(), images,
                 }));
+            }
+            Err(code) if code == ERR_STAGING_BUSY => {
+                // MOBILE-QUEUE — a staged file locked by another process (backup, virus scanner) is
+                // transient: the job stays `accepted`, waits its backoff, and the next eligible job
+                // is tried right away. Nothing is quarantined, no claim is created.
+                record_retry(&tx, &job, &event, code, now)?;
+                tx.commit().map_err(map_db)?;
+                continue;
             }
             Err(code) => {
                 quarantine(&tx, &job, &event, code, now)?; // fail closed
@@ -1237,6 +1347,50 @@ pub fn mark_retryable_fenced(
     trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str, now: &str,
 ) -> Result<bool, UploadError> {
     release_claimed(conn, Some(scope), trusted, upload_event_id, claim_token, "accepted", None, now)
+}
+
+/// MOBILE-QUEUE — release a claim after a RETRYABLE failure of the job itself: back to `accepted`,
+/// attempt counter +1, last error code kept for diagnosis, and the next attempt not before the
+/// backoff (host clock). The same token/state guard as a plain release: a stale or foreign claim
+/// changes nothing and returns false — a lost answer or a replay can never count twice. The job never
+/// becomes terminal here, however often it failed.
+pub fn mark_deferred(
+    conn: &mut Connection, trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str, error_code: &str, now: &str,
+) -> Result<bool, UploadError> {
+    defer_claimed(conn, None, trusted, upload_event_id, claim_token, error_code, now)
+}
+
+/// MOBILE-QUEUE — the deferral with the transactional scope fence coupled inside the tx.
+pub fn mark_deferred_fenced(
+    conn: &mut Connection, scope: &super::mobile_runtime_scope::RuntimeScopeExpectation,
+    trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str, error_code: &str, now: &str,
+) -> Result<bool, UploadError> {
+    defer_claimed(conn, Some(scope), trusted, upload_event_id, claim_token, error_code, now)
+}
+
+fn defer_claimed(
+    conn: &mut Connection, scope: Option<&super::mobile_runtime_scope::RuntimeScopeExpectation>,
+    trusted: &TrustedUploadContext, upload_event_id: &str, claim_token: &str, error_code: &str, now: &str,
+) -> Result<bool, UploadError> {
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).map_err(map_db)?;
+    fence_scope(&tx, scope)?; // §1 — under the write lock, before any state change
+    let n = tx.execute(
+        &format!(
+            "UPDATE mobile_upload_inbox SET state='accepted', error_code=NULL, updated_at=?5
+              WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4
+                AND state='processing'
+                AND EXISTS (SELECT 1 FROM mobile_upload_claim c WHERE {CLAIM_PK_MATCH} AND c.claim_token=?6)"),
+        params![trusted.tenant_id, trusted.branch_id, trusted.authenticated_user_id, upload_event_id, now, claim_token],
+    ).map_err(map_db)?;
+    if n != 1 { let _ = tx.commit(); return Ok(false); }
+    tx.execute(
+        "DELETE FROM mobile_upload_claim
+          WHERE tenant_id=?1 AND branch_id=?2 AND authenticated_user_id=?3 AND upload_event_id=?4",
+        params![trusted.tenant_id, trusted.branch_id, trusted.authenticated_user_id, upload_event_id],
+    ).map_err(map_db)?;
+    record_retry(&tx, trusted, upload_event_id, error_code, now)?;
+    tx.commit().map_err(map_db)?;
+    Ok(true)
 }
 
 /// Quarantine a claimed job (manifest/file mismatch discovered by the JS verify). Matching-token +

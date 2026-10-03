@@ -715,7 +715,7 @@ fn v0012_migration_partial_failure_and_rerun() {
     }
     // clean retry with the real list → v0012 (+v0013,v0014) applies; re-run idempotent.
     let rep = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-    assert_eq!(rep.applied, vec![12, 13, 14, 15, 16, 17, 18, 19]);
+    assert_eq!(rep.applied, vec![12, 13, 14, 15, 16, 17, 18, 19, 20]);
     let again = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
     assert!(again.applied.is_empty());
     for t in ["mobile_upload_inbox", "mobile_upload_image"] {
@@ -1062,4 +1062,238 @@ fn a_gallery_edit_may_carry_the_same_patch_in_one_save() {
         "patch": { "sku": "X-1" }
     });
     assert_eq!(validate_gallery_edit_metadata(&bad, 0).unwrap_err(), ERR_GALLERY_PLAN_INVALID);
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// MOBILE-QUEUE — Wartezeit fuer wiederholbare Auftraege + nicht blockierende Auswahl
+// ════════════════════════════════════════════════════════════════════════════
+
+const Q0: &str = "2026-10-03T10:00:00Z";
+fn at(secs: i64) -> String {
+    (chrono::DateTime::parse_from_rfc3339(Q0).unwrap() + chrono::Duration::seconds(secs)).to_rfc3339()
+}
+fn sub_on(event: &str, entity: &str, images: Vec<RawUploadImage>, meta: &str) -> UploadSubmission {
+    UploadSubmission {
+        protocol_version: MOBILE_UPLOAD_PROTOCOL_VERSION, upload_event_id: event.into(),
+        entity_id: entity.into(), mode: "collection".into(), metadata_json: meta.into(), images,
+    }
+}
+fn create_on(c: &mut Connection, s: &Path, event: &str, product: &str, salt: u8, created: &str) {
+    accept_upload(c, s, &trusted(), &sub_on(event, product, vec![img_jpeg(jpeg(160, 120, salt))], META), created).unwrap();
+}
+fn edit_on(c: &mut Connection, s: &Path, event: &str, product: &str, created: &str) {
+    let meta = format!(r#"{{"kind":"text_edit","productId":"{product}","patch":{{"notes":"edit {event}"}}}}"#);
+    accept_upload(c, s, &trusted(), &sub_on(event, &format!("job-{event}"), vec![], &meta), created).unwrap();
+}
+fn claim_at(c: &mut Connection, s: &Path, tok: &str, now: &str) -> Option<ClaimGrant> {
+    let lease = (chrono::DateTime::parse_from_rfc3339(now).unwrap() + chrono::Duration::seconds(120)).to_rfc3339();
+    claim_next_job(c, s, T, B, "inst-1", tok, &lease, now).unwrap()
+}
+fn retry_row(c: &Connection, event: &str) -> Option<(i64, Option<String>, Option<String>)> {
+    c.query_row(
+        "SELECT attempt_count, next_attempt_at, last_error_code FROM mobile_upload_retry WHERE upload_event_id=?1",
+        [event], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+    ).optional().unwrap()
+}
+fn done(c: &mut Connection, g: &ClaimGrant, product: &str, now: &str) {
+    assert_eq!(mark_ready(c, &trusted(), &g.upload_event_id, &g.claim_token, &g.entity_id, &g.payload_hash, product, now).unwrap(), ReadyOutcome::MarkedReady);
+}
+fn same_instant(a: &str, b: &str) -> bool {
+    chrono::DateTime::parse_from_rfc3339(a).unwrap() == chrono::DateTime::parse_from_rfc3339(b).unwrap()
+}
+
+#[test]
+fn retry_backoff_follows_the_staircase_and_stays_capped() {
+    let got: Vec<i64> = (1..=9).map(retry_backoff_seconds).collect();
+    assert_eq!(got, vec![30, 60, 120, 300, 900, 1800, 1800, 1800, 1800], "30 s, 1, 2, 5, 15 min, then at most 30 min");
+    assert_eq!(retry_backoff_seconds(0), 30, "a nonsense attempt number never yields a zero wait");
+}
+
+#[test]
+fn aggregate_key_is_the_article_and_unknown_is_not_independent() {
+    assert_eq!(aggregate_key(META, "prod-A").as_deref(), Some("product:prod-A"), "a create belongs to the article it creates");
+    assert_eq!(aggregate_key(r#"{"kind":"text_edit","productId":"prod-A","patch":{"notes":"x"}}"#, "job-1").as_deref(), Some("product:prod-A"));
+    assert_eq!(aggregate_key(r#"{"kind":"gallery_edit","productId":"prod-A"}"#, "job-2").as_deref(), Some("product:prod-A"));
+    assert_eq!(aggregate_key(r#"{"kind":"something_new"}"#, "job-3"), None, "unknown kind → dependencies unknown");
+    assert_eq!(aggregate_key("{not json", "job-4"), None, "unreadable metadata → dependencies unknown");
+    assert_eq!(aggregate_key(r#"{"kind":"text_edit","productId":""}"#, "job-5"), None);
+}
+
+#[test]
+fn a_deferred_job_waits_its_backoff_then_is_retried_and_finishes_normally() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    create_on(&mut c, s.path(), "ev-A", "prod-A", 3, &at(0));
+    let g = claim_at(&mut c, s.path(), "tok-1", &at(1)).expect("A is claimable (no retry row = immediately)");
+    assert!(mark_deferred(&mut c, &trusted(), "ev-A", "tok-1", "prepare_unavailable", &at(2)).unwrap());
+    assert_eq!(state_of(&c, "ev-A"), "accepted", "a retryable failure keeps the job retryable");
+    let (n, next, code) = retry_row(&c, "ev-A").expect("a retry row exists");
+    assert_eq!(n, 1);
+    assert!(same_instant(next.as_deref().unwrap(), &at(32)), "next attempt = failure time + 30 s (got {next:?})");
+    assert_eq!(code.as_deref(), Some("prepare_unavailable"), "the last error is kept for diagnosis");
+    let claims: i64 = c.query_row("SELECT COUNT(*) FROM mobile_upload_claim", [], |r| r.get(0)).unwrap();
+    assert_eq!(claims, 0, "the claim is released");
+    // Polling before the wait is over does NOT try A again.
+    assert!(claim_at(&mut c, s.path(), "tok-2", &at(10)).is_none());
+    assert!(claim_at(&mut c, s.path(), "tok-3", &at(31)).is_none());
+    // After it, A is tried again and finishes normally.
+    let g2 = claim_at(&mut c, s.path(), "tok-4", &at(33)).expect("after the backoff A is claimed again");
+    assert_eq!(g2.upload_event_id, "ev-A");
+    done(&mut c, &g2, "prod-A", &at(34));
+    assert_eq!(state_of(&c, "ev-A"), "ready");
+    assert!(claim_at(&mut c, s.path(), "tok-5", &at(9999)).is_none(), "a finished job is never claimed again");
+    let _ = g;
+}
+
+#[test]
+fn an_independent_job_runs_while_a_waits_and_the_same_article_stays_behind() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    create_on(&mut c, s.path(), "ev-A", "prod-A", 3, &at(0));   // create of article A
+    edit_on(&mut c, s.path(), "ev-A2", "prod-A", &at(1));        // a later edit of the SAME article A
+    create_on(&mut c, s.path(), "ev-B", "prod-B", 5, &at(2));   // an independent article B
+    let g = claim_at(&mut c, s.path(), "tok-1", &at(3)).unwrap();
+    assert_eq!(g.upload_event_id, "ev-A");
+    assert!(mark_deferred(&mut c, &trusted(), "ev-A", "tok-1", "product_save_failed", &at(4)).unwrap());
+    // Same pass: the next eligible job is B — NOT A2 (it must not overtake A), and not A (waiting).
+    let gb = claim_at(&mut c, s.path(), "tok-2", &at(5)).expect("the independent job runs while A waits");
+    assert_eq!(gb.upload_event_id, "ev-B");
+    done(&mut c, &gb, "prod-B", &at(6));
+    assert!(claim_at(&mut c, s.path(), "tok-3", &at(10)).is_none(), "the edit of A stays behind A — nothing else to do");
+    // A's wait is over: A first, then A2 — the order of the article is kept.
+    let ga = claim_at(&mut c, s.path(), "tok-4", &at(40)).unwrap();
+    assert_eq!(ga.upload_event_id, "ev-A");
+    assert!(claim_at(&mut c, s.path(), "tok-5", &at(41)).is_none(), "while A is in flight, A2 still waits");
+    done(&mut c, &ga, "prod-A", &at(42));
+    let ga2 = claim_at(&mut c, s.path(), "tok-6", &at(43)).expect("A2 runs after A");
+    assert_eq!(ga2.upload_event_id, "ev-A2");
+    done(&mut c, &ga2, "prod-A", &at(44));
+}
+
+#[test]
+fn the_backoff_grows_by_the_staircase_and_never_becomes_terminal() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    create_on(&mut c, s.path(), "ev-A", "prod-A", 3, &at(0));
+    let mut now = 1i64;
+    let mut waits = Vec::new();
+    for i in 0..8 {
+        let tok = format!("tok-{i}");
+        let g = claim_at(&mut c, s.path(), &tok, &at(now)).expect("the job stays claimable after every wait");
+        assert!(mark_deferred(&mut c, &trusted(), &g.upload_event_id, &tok, "database is locked", &at(now)).unwrap());
+        let (n, next, _) = retry_row(&c, "ev-A").unwrap();
+        assert_eq!(n, i + 1);
+        let wait = (chrono::DateTime::parse_from_rfc3339(next.as_deref().unwrap()).unwrap()
+            - chrono::DateTime::parse_from_rfc3339(&at(now)).unwrap()).num_seconds();
+        waits.push(wait);
+        assert_eq!(state_of(&c, "ev-A"), "accepted", "many failures never make it terminal");
+        assert!(claim_at(&mut c, s.path(), "tok-early", &at(now + wait - 1)).is_none(), "never earlier than the wait");
+        now += wait + 1;
+    }
+    assert_eq!(waits, vec![30, 60, 120, 300, 900, 1800, 1800, 1800]);
+}
+
+#[test]
+fn a_terminal_job_does_not_block_its_article_and_quarantine_is_unchanged() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    create_on(&mut c, s.path(), "ev-A", "prod-A", 3, &at(0));
+    edit_on(&mut c, s.path(), "ev-A2", "prod-A", &at(1));
+    let g = claim_at(&mut c, s.path(), "tok-1", &at(2)).unwrap();
+    assert!(mark_quarantined_claimed(&mut c, &trusted(), "ev-A", "tok-1", "MOBILE_EDIT_PURCHASE_PRICE_REQUIRED", &at(3)).unwrap());
+    assert_eq!(state_of(&c, "ev-A"), "quarantined");
+    assert!(retry_row(&c, "ev-A").is_none(), "a terminal verdict is no retry");
+    let g2 = claim_at(&mut c, s.path(), "tok-2", &at(4)).expect("a terminal job holds nothing — the next job of the article runs");
+    assert_eq!(g2.upload_event_id, "ev-A2");
+    let _ = g;
+}
+
+#[test]
+fn a_lost_answer_or_replay_never_counts_twice() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    let submission = sub_on("ev-A", "prod-A", vec![img_jpeg(jpeg(160, 120, 3))], META);
+    accept_upload(&mut c, s.path(), &trusted(), &submission, &at(0)).unwrap();
+    let _g = claim_at(&mut c, s.path(), "tok-1", &at(1)).unwrap();
+    assert!(mark_deferred(&mut c, &trusted(), "ev-A", "tok-1", "prepare_unavailable", &at(2)).unwrap());
+    // the same deferral again (answer lost, retried) and a stale token: nothing changes
+    assert!(!mark_deferred(&mut c, &trusted(), "ev-A", "tok-1", "prepare_unavailable", &at(3)).unwrap());
+    assert!(!mark_deferred(&mut c, &trusted(), "ev-A", "tok-stale", "prepare_unavailable", &at(3)).unwrap());
+    assert!(!mark_retryable(&mut c, &trusted(), "ev-A", "tok-1", &at(3)).unwrap());
+    let (n, next, _) = retry_row(&c, "ev-A").unwrap();
+    assert_eq!(n, 1, "exactly one attempt counted");
+    // the phone resends the same upload: idempotent replay, the wait is untouched
+    match accept_upload(&mut c, s.path(), &trusted(), &submission, &at(4)).unwrap() {
+        UploadOutcome::Replay { state, .. } => assert_eq!(state, "accepted"),
+        o => panic!("expected an idempotent replay, got {o:?}"),
+    }
+    assert_eq!(retry_row(&c, "ev-A").unwrap(), (1, next, Some("prepare_unavailable".into())), "replay keeps counter and wait");
+    assert_eq!(inbox_count(&c), 1, "no second job");
+}
+
+#[test]
+fn counter_and_wait_survive_a_restart() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    {
+        let mut c = init_db(d.path());
+        create_on(&mut c, s.path(), "ev-A", "prod-A", 3, &at(0));
+        create_on(&mut c, s.path(), "ev-B", "prod-B", 5, &at(1));
+        let _g = claim_at(&mut c, s.path(), "tok-1", &at(2)).unwrap();
+        assert!(mark_deferred(&mut c, &trusted(), "ev-A", "tok-1", "MEDIA_ORCH_DB_PERSIST_FAILED", &at(3)).unwrap());
+    } // connection closed — app/server restart
+    let mut c = open_db(d.path());
+    run_migrations(&c, EMBEDDED_MIGRATIONS).unwrap(); // the restart re-runs migrations: a no-op
+    let (n, next, code) = retry_row(&c, "ev-A").expect("the retry row survived the restart");
+    assert_eq!((n, code.as_deref()), (1, Some("MEDIA_ORCH_DB_PERSIST_FAILED")));
+    assert!(same_instant(next.as_deref().unwrap(), &at(33)));
+    let g = claim_at(&mut c, s.path(), "tok-2", &at(10)).unwrap();
+    assert_eq!(g.upload_event_id, "ev-B", "after the restart A still waits, B runs");
+}
+
+#[test]
+fn old_queue_rows_without_retry_data_are_eligible_at_once() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    create_on(&mut c, s.path(), "ev-old", "prod-O", 3, &at(0));
+    assert!(retry_row(&c, "ev-old").is_none(), "a job from before this version has no retry row");
+    let g = claim_at(&mut c, s.path(), "tok-1", &at(0)).expect("no retry row = immediately eligible");
+    assert_eq!(g.upload_event_id, "ev-old");
+}
+
+#[test]
+fn a_pending_job_with_unknown_dependencies_blocks_later_jobs() {
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    create_on(&mut c, s.path(), "ev-X", "prod-X", 3, &at(0));
+    create_on(&mut c, s.path(), "ev-B", "prod-B", 5, &at(1));
+    let _g = claim_at(&mut c, s.path(), "tok-1", &at(2)).unwrap();
+    assert!(mark_deferred(&mut c, &trusted(), "ev-X", "tok-1", "prepare_unavailable", &at(3)).unwrap());
+    // pretend X's metadata no longer says which article it touches
+    c.execute("UPDATE mobile_upload_inbox SET metadata_json='{\"kind\":\"from_the_future\"}' WHERE upload_event_id='ev-X'", []).unwrap();
+    assert!(claim_at(&mut c, s.path(), "tok-2", &at(10)).is_none(), "independence that cannot be proven is not assumed");
+}
+
+#[cfg(windows)]
+#[test]
+fn a_staged_file_locked_by_another_process_is_retried_not_quarantined() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let d = Temp::new("db"); let s = Temp::new("stg");
+    let mut c = init_db(d.path());
+    create_on(&mut c, s.path(), "ev-A", "prod-A", 3, &at(0));
+    create_on(&mut c, s.path(), "ev-B", "prod-B", 5, &at(1));
+    let key: String = c.query_row("SELECT storage_key FROM mobile_upload_image WHERE upload_event_id='ev-A'", [], |r| r.get(0)).unwrap();
+    let path = resolve_within_root(&std::fs::canonicalize(s.path()).unwrap(), &key).unwrap();
+    let lock = std::fs::OpenOptions::new().read(true).share_mode(0).open(&path).unwrap(); // backup/virus scanner
+    let g = claim_at(&mut c, s.path(), "tok-1", &at(2)).expect("the next eligible job is claimed instead");
+    assert_eq!(g.upload_event_id, "ev-B");
+    assert_eq!(state_of(&c, "ev-A"), "accepted", "a locked file is transient — not quarantined");
+    let (n, _, code) = retry_row(&c, "ev-A").unwrap();
+    assert_eq!((n, code.as_deref()), (1, Some(ERR_STAGING_BUSY)));
+    // the phone's replay during the lock: 503-style retryable, still not quarantined
+    let replay = accept_upload(&mut c, s.path(), &trusted(), &sub_on("ev-A", "prod-A", vec![img_jpeg(jpeg(160, 120, 3))], META), &at(3));
+    assert!(matches!(replay, Err(UploadError::Retryable)), "a replay during the lock is retryable");
+    assert_eq!(state_of(&c, "ev-A"), "accepted");
+    drop(lock);
+    let ga = claim_at(&mut c, s.path(), "tok-2", &at(40)).expect("lock gone, wait over → A runs");
+    assert_eq!(ga.upload_event_id, "ev-A");
 }

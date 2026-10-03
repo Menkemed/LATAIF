@@ -61,7 +61,40 @@ pub const EMBEDDED_MIGRATIONS: &[Migration] = &[
     V0017_BACKUP_RETENTION_CONFIG,
     V0018_MEDIA_GC_RUNS,
     V0019_STOCK_CHECKS,
+    V0020_MOBILE_UPLOAD_RETRY,
 ];
+
+/// MOBILE-QUEUE — die Wartezeit eines wiederholbaren Handy-Auftrags.
+///
+/// Eine EIGENE Tabelle statt neuer Spalten an `mobile_upload_inbox`: rein additiv (kein ALTER an der
+/// eingefrorenen Inbox), und rueckwaertskompatibel per Konstruktion — ein Auftrag ohne Zeile hier ist
+/// sofort verarbeitbar, genau wie jeder Auftrag vor dieser Version. Pro Auftrag hoechstens eine Zeile:
+/// Zahl der Fehlversuche, der naechste fruehest moegliche Versuch (Host-Uhr des Servers, RFC 3339) und
+/// der letzte Fehlercode zur Diagnose. Ein Auftrag wird NIE terminal, nur weil er oft scheiterte.
+pub const V0020_MOBILE_UPLOAD_RETRY: Migration = Migration {
+    version: 20,
+    name: "mobile_upload_retry",
+    up_sql: V0020_SQL,
+    reference_sql: V0020_SQL,
+};
+const V0020_SQL: &str = r#"
+CREATE TABLE IF NOT EXISTS mobile_upload_retry (
+    tenant_id             TEXT NOT NULL,
+    branch_id             TEXT NOT NULL,
+    authenticated_user_id TEXT NOT NULL,
+    upload_event_id       TEXT NOT NULL,
+    attempt_count         INTEGER NOT NULL DEFAULT 0,
+    next_attempt_at       TEXT,
+    last_error_code       TEXT,
+    updated_at            TEXT NOT NULL,
+    PRIMARY KEY (tenant_id, branch_id, authenticated_user_id, upload_event_id),
+    FOREIGN KEY (tenant_id, branch_id, authenticated_user_id, upload_event_id)
+        REFERENCES mobile_upload_inbox (tenant_id, branch_id, authenticated_user_id, upload_event_id)
+        ON DELETE CASCADE,
+    CHECK (attempt_count >= 0),
+    CHECK (last_error_code IS NULL OR LENGTH(last_error_code) <= 200)
+);
+"#;
 
 /// M6-B2E — the legacy device inventory and cutover readiness.
 ///
@@ -1480,7 +1513,7 @@ mod tests {
     fn migration_applies_and_creates_the_two_new_tables() {
         let conn = base_db();
         let report = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
-        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
+        assert_eq!(report.applied, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
         assert!(report.already_current.is_empty());
         // MOBILE-04B2A3 — the canonical runtime-scope binding SSOT (v0014).
         assert!(table_exists(&conn, "mobile_runtime_scope"));
@@ -1516,7 +1549,7 @@ mod tests {
             let rest = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
             assert_eq!(
                 rest.applied,
-                ((stop_at as i64 + 1)..=19).collect::<Vec<_>>(),
+                ((stop_at as i64 + 1)..=20).collect::<Vec<_>>(),
                 "a DB at v000{stop_at} must apply exactly the missing versions"
             );
             assert_eq!(rest.already_current, (1..=stop_at as i64).collect::<Vec<_>>());
@@ -1529,7 +1562,7 @@ mod tests {
     #[test]
     fn migration_versions_are_unique_and_ascending() {
         let versions: Vec<i64> = EMBEDDED_MIGRATIONS.iter().map(|m| m.version).collect();
-        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
+        assert_eq!(versions, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
         let mut sorted = versions.clone();
         sorted.sort_unstable();
         sorted.dedup();
@@ -1765,6 +1798,17 @@ mod tests {
 
     // ── MOBILE-I1 — v0019 declares its structure exactly as it applies it ────
     #[test]
+    fn v0020_reference_equals_up_and_only_creates() {
+        // MOBILE-QUEUE — die Wartezeiten liegen in einer EIGENEN Tabelle; die Inbox bleibt unberuehrt.
+        assert_eq!(V0020_MOBILE_UPLOAD_RETRY.up_sql, V0020_MOBILE_UPLOAD_RETRY.reference_sql);
+        let up = V0020_SQL.to_uppercase();
+        assert!(up.contains("CREATE TABLE IF NOT EXISTS MOBILE_UPLOAD_RETRY"));
+        assert!(!up.contains("ALTER TABLE"), "v0020 must not touch the frozen inbox table");
+        assert!(!up.contains("DROP "));
+        assert!(!up.contains("INSERT INTO"), "a migration never seeds data");
+    }
+
+    #[test]
     fn v0019_reference_equals_up_and_only_creates() {
         assert_eq!(V0019_STOCK_CHECKS.up_sql, V0019_STOCK_CHECKS.reference_sql);
         let up = V0019_SQL.to_uppercase();
@@ -1828,7 +1872,7 @@ mod tests {
         run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         let second = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(second.applied.is_empty(), "second run must apply nothing");
-        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
+        assert_eq!(second.already_current, vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20]);
         // and a third, to be sure the ALTERs are not retried
         let third = run_migrations(&conn, EMBEDDED_MIGRATIONS).unwrap();
         assert!(third.applied.is_empty());

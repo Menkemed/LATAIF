@@ -2600,6 +2600,28 @@ fn mobile_upload_release(
         .map_err(|e| e.code().to_string())
 }
 
+/// MOBILE-QUEUE — a RETRYABLE failure of the job itself: back to `accepted` with attempt +1, the last
+/// error code, and a next attempt not before the backoff. The time is the host clock — never the
+/// phone's. Same claim-token/scope guard as `mobile_upload_release` (a stale claim changes nothing).
+#[allow(dead_code)]
+#[tauri::command]
+fn mobile_upload_defer(
+    state: tauri::State<'_, AppHandleState>,
+    origin_authenticated_user_id: String,
+    upload_event_id: String,
+    claim_token: String,
+    error_code: String,
+    expected_binding_revision: i64,
+    expected_tenant_id: String,
+    expected_branch_id: String,
+) -> Result<bool, String> {
+    let (mut conn, install_id) = open_config_db(&state.server)?;
+    let scope = mobile_scope_expectation(install_id, expected_binding_revision, expected_tenant_id, expected_branch_id);
+    mobile_runtime_gate(&conn, &scope)?;
+    sync::mobile_upload::mark_deferred_fenced(&mut conn, &scope, &mobile_job_trusted(&origin_authenticated_user_id), &upload_event_id, &claim_token, &error_code, &chrono::Utc::now().to_rfc3339())
+        .map_err(|e| e.code().to_string())
+}
+
 #[allow(dead_code)]
 #[tauri::command]
 fn mobile_upload_mark_quarantined(
@@ -3439,6 +3461,7 @@ pub fn run() {
             mobile_upload_prepare_image,
             mobile_upload_renew,
             mobile_upload_release,
+            mobile_upload_defer,
             mobile_upload_mark_quarantined,
             mobile_upload_mark_ready,
             //
