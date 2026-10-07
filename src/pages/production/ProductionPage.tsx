@@ -26,6 +26,11 @@ import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { productionCreateRequest, productionOutputBodies, type ProductionCreateInput } from '@/core/production/production-house';
 import { productDisplayName } from '@/core/products/display-name';
+// LOT-VAT-COST — die Maske zeigt und vergleicht denselben Eingangswert, den die Hausfolge prüft:
+// Restwert der aktiven Lose, ohne Los der Einkaufspreis. Auf PC2 über dieselbe Fernauskunft.
+import { useSharedRead } from '@/core/data/shared-read';
+import { lotAggregatesFor } from '@/core/data/domain-reads';
+import { inventoryCostBasis } from '@/core/lots/lot-cost';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -70,10 +75,14 @@ export function ProductionPage() {
 
   const availableProducts = useMemo(() => products.filter(p => p.stockStatus === 'in_stock'), [products]);
 
+  const bestand = useSharedRead('inventory.lot_aggregates.get', {}, lotAggregatesFor, { paare: [], fifo: [] }, [products]);
+  const lotAgg = useMemo(() => new Map(bestand.paare), [bestand]);
+  const inputValueOf = (p: Product): number => inventoryCostBasis(p.purchasePrice, lotAgg.get(p.id)?.totalValue);
+
   const inputTotal = useMemo(() => {
     const sel = new Set(selectedInputIds);
-    return products.filter(p => sel.has(p.id)).reduce((s, p) => s + p.purchasePrice, 0);
-  }, [products, selectedInputIds]);
+    return products.filter(p => sel.has(p.id)).reduce((s, p) => s + inventoryCostBasis(p.purchasePrice, lotAgg.get(p.id)?.totalValue), 0);
+  }, [products, selectedInputIds, lotAgg]);
 
   const outputTotal = useMemo(() => outputs.reduce((s, o) => s + (Number(o.value) || 0), 0), [outputs]);
   const balanced = Math.abs(inputTotal - outputTotal) <= 0.01;
@@ -217,7 +226,7 @@ export function ProductionPage() {
                   : '';
                 return {
                   id: p.id, label: productDisplayName(p),
-                  subtitle: `${fmt(p.purchasePrice)} BHD${resHint}`,
+                  subtitle: `${fmt(inputValueOf(p))} BHD${resHint}`,
                   meta: p.sku,
                 };
               })}

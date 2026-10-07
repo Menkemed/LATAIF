@@ -35,7 +35,8 @@ import { getDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackChange } from '@/core/sync/sync-service';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
-import { getActiveLots, consumeLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+import { getActiveLots, consumeLot, syncProductQuantity, trackLotRow, trackProductRow, getStockAggregates } from '@/core/lots/lot-queries';
+import { inventoryCostBasis } from '@/core/lots/lot-cost';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { useProductStore } from '@/stores/productStore';
 import { checkEmbeddedProduct, EmbeddedProductRejected, pickProductSpec } from '@/core/products/embedded-product';
@@ -152,6 +153,8 @@ const bhd = (f: number): number => f / 1000;
 interface CheckedInput {
   id: string;
   purchasePrice: number;
+  /** LOT-VAT-COST — der Wert, den INVENTORY für diesen Eingang hält (aktive Lose, sonst Einkaufspreis). */
+  costBasis: number;
   snapshot: Record<string, unknown>;
 }
 
@@ -208,10 +211,14 @@ function checkInputs(ids: readonly string[], branchId: string): CheckedInput[] {
         `${String(r.brand ?? '')} ${String(r.name ?? '')} holds ${pieces} pieces — a production consumes the whole item at one piece's value`.trim());
     }
     const purchasePrice = Number(r.purchase_price) || 0;
+    // LOT-VAT-COST — bewertet wird mit dem, was die Lose tragen (= INVENTORY), nicht mit dem Einkaufspreis
+    // des Artikels: der ist bei 10 % Vorsteuer brutto und ohne aktivierte Reparaturkosten. Ohne Los wie bisher.
+    const costBasis = inventoryCostBasis(purchasePrice, getStockAggregates([id]).get(id)?.totalValue);
     // Der Schnappschuss bleibt der Prüfpfad des Verbrauchs (Detailansicht) — dieselben Felder wie bisher.
     out.push({
       id,
       purchasePrice,
+      costBasis,
       snapshot: {
         categoryId: r.category_id as string,
         brand: r.brand as string,
@@ -286,7 +293,7 @@ export async function createProductionInHouse(input: ProductionCreateInput, ctx:
   const outputs = checkOutputs(input.outputs);
   const laborFils = fils(money(input.laborCost ?? 0, 'Labor cost'));
   const overheadFils = fils(money(input.overheadCost ?? 0, 'Overhead cost'));
-  const totalInputFils = inputs.reduce((s, p) => s + fils(p.purchasePrice), 0);
+  const totalInputFils = inputs.reduce((s, p) => s + fils(p.costBasis), 0);
   const totalOutputFils = outputs.reduce((s, o) => s + o.valueFils, 0);
   if (Math.abs(totalInputFils - totalOutputFils) > TOLERANCE_FILS) {
     throw new ProductionRejected('PRODUCTION_VALUE_MISMATCH',
@@ -327,7 +334,7 @@ export async function createProductionInHouse(input: ProductionCreateInput, ctx:
     const consumption: ProductionInputConsumption = { lots, qty: qtyTaken, prevStatus };
     db.run(
       `INSERT INTO production_inputs (id, record_id, product_id, product_snapshot, input_value, lot_consumption) VALUES (?, ?, ?, ?, ?, ?)`,
-      [inputRowId, id, p.id, JSON.stringify(p.snapshot), bhd(fils(p.purchasePrice)), JSON.stringify(consumption)],
+      [inputRowId, id, p.id, JSON.stringify(p.snapshot), bhd(fils(p.costBasis)), JSON.stringify(consumption)],
     );
     // POST-PARITY R7A (PP-10) — die Eingangszeile reist mit dem Beleg (vorher nur `production_records`:
     // ein anderer Datenbank-Rechner sah einen Beleg ohne Ein- und Ausgänge).

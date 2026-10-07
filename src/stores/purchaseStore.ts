@@ -18,6 +18,7 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — Line-Tabellen
 import { getAvailableStock, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+import { purchaseLotUnitCost } from '@/core/lots/lot-cost';
 import { useProductStore } from '@/stores/productStore';
 import {
   postPurchaseReceived,
@@ -508,12 +509,12 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     const createdLotIds: string[] = [];   // LAN-Sync Phase 1a
     for (const l of lineRecords) {
       if (!l.productId || l.qty <= 0) continue;
-      // unit_cost = GROSS pro Stueck (Cash-Out an Supplier). Identische Basis wie
-      // products.purchase_price heute, damit Phase 4 (Cost-Snapshot aus Lot) das
-      // bestehende Margin-Verhalten 1:1 abloest, nur eben pro-Lot statt global.
+      // LOT-VAT-COST — unit_cost = der auf INVENTORY aktivierte Einstand je Stueck: ohne Vorsteuer
+      // der Stueckpreis (wie bisher), mit 10 % die Zeile ohne den als VAT_INPUT gebuchten Anteil —
+      // dieselbe gerundete Zahl wie `postPurchaseReceived`. products.purchase_price bleibt brutto (Anzeige).
       const lotId = uuid();
       lotStmt.run([lotId, branchId, l.productId, id, l.id,
-        l.unitPrice, l.qty, l.qty, purchaseDate, now]);
+        purchaseLotUnitCost(l), l.qty, l.qty, purchaseDate, now]);
       createdLotIds.push(lotId);
       affectedProductIds.add(l.productId);
     }

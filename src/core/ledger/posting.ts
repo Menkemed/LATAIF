@@ -30,6 +30,7 @@ import {
 } from '@/core/db/transaction-context';
 import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment, CanonicalLoanDirection, CashSource, ScrapPaymentMethod } from '@/core/models/types';
 import { canonicalLoanDirection, repairCostAccount } from '@/core/models/types';
+import { capitalizedLineCost } from '@/core/lots/lot-cost';
 
 /** POST-PARITY PP-14 — die Zeile einer Reparaturrechnung (Artikel `svc-repair-<Filiale>`): ihre Kosten sind
  * bereits als Dienstleistungs-Einstand gebucht (Soll COGS bei der Kostenentstehung) — kein zweiter Wareneinsatz,
@@ -1252,7 +1253,8 @@ export function postPurchaseReceived(purchase: Purchase): PostingResult {
   for (const line of purchase.lines) {
     const gross = ROUND(line.lineTotal);
     const vat = ROUND(line.vatAmount ?? 0);
-    const net = ROUND(gross - vat);
+    // LOT-VAT-COST — dieselbe Zahl, die das Los als Einstand trägt (`purchaseLotUnitCost`).
+    const net = capitalizedLineCost(line.lineTotal, line.vatAmount);
 
     if (net > 0) {
       entries.push({
