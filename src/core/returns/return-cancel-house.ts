@@ -39,7 +39,7 @@ import { canonicalRole, type ProductDisposition } from '@/core/models/types';
 import { reverseSource, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { trackChange } from '@/core/sync/sync-service';
-import { syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+import { syncProductQuantity, trackLotRow, trackProductRow, reconcileSaleStatus } from '@/core/lots/lot-queries';
 import { hasLotHistory, isServiceProduct, retakeLotLessStock } from '@/core/lots/stock-contract';
 
 /** Zeile mit Bestandsnachweis eines Artikels ohne Los (die Retoure gab `products.quantity` zurück). */
@@ -144,11 +144,10 @@ function revertDisposition(
     if (!line.productId) continue;
     const qty = Math.max(1, line.quantity || 1);
 
+    // RETURN-CANCEL-STATUS — hier wird NUR der Bestand zurückgenommen. Den Status leitet die Hausfolge
+    // danach aus Restbestand + Rechnungszustand ab (`reconcileSaleStatus`) — vorher stand hier in jedem
+    // Zweig ein pauschales 'sold', auch wenn noch 9 von 10 Stück da waren.
     if (disposition === 'IN_STOCK') {
-      db.run(
-        `UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`,
-        [now, line.productId]
-      );
       // Phase 5 — den per applyDisposition restored Lot wieder konsumieren.
       // Lot.qty_remaining wird um qty reduziert; bei 0 → EXHAUSTED. Spiegelt
       // die Sale-Konsumption der Original-Invoice-Line.
@@ -174,7 +173,7 @@ function revertDisposition(
       // Phase 7 Sync — products.quantity aus Lots ableiten (ersetzt manuelles Decrement).
       syncProductQuantity(line.productId);
     } else if (disposition === 'UNDER_REPAIR' || disposition === 'WRITE_OFF') {
-      db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
+      // Kein Bestand bewegt (die Retoure gab keinen zurück) — nur der Status, siehe oben.
     } else if (disposition === 'KEEP_AS_OWN') {
       // Phase 5 — den per applyDisposition synthetisch erzeugten Lot cancellen (jüngster passender,
       // unangebrochener Lot ohne Einkauf — sonst würden bereits konsumierte Spuren ausgelöscht).
@@ -190,12 +189,10 @@ function revertDisposition(
         trackLotRow(keepCancelId, 'update');
       }
       console.warn(`[Return] reverted KEEP_AS_OWN for product ${line.productId} — purchase_price/source_type still need manual cleanup`);
-      db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
       syncProductQuantity(line.productId);
     } else if (disposition === 'RETURN_TO_OWNER') {
       // Nicht voll reversibel (Consignment-Status zurueck war auf RETURNED_TO_OWNER).
       console.warn(`[Return] cannot fully revert ${disposition} disposition for product ${line.productId} — manual cleanup may be needed`);
-      db.run(`UPDATE products SET stock_status = 'sold', updated_at = ? WHERE id = ?`, [now, line.productId]);
     }
     trackProductRow(line.productId);
   }
@@ -410,6 +407,21 @@ export function cancelReturnInHouse(
       invoiceStatus = 'PARTIAL';
       invoiceTouched = true;
     }
+  }
+
+  // 6b. RETURN-CANCEL-STATUS — der Verkaufsstatus aus dem Bestand, NACHDEM Bestand und Rechnungsstatus
+  //     zurück sind: Rest > 0 → verkaufbar; Rest 0 → 'sold' an einer abgeschlossenen Rechnung
+  //     (FINAL/RETURNED), sonst 'reserved'. Den Sonderstatus, den DIESE Retoure gesetzt hat
+  //     (in_repair/write_off/returned), nimmt sie dabei zurück — ein 'in_repair' aber nur, wenn seither
+  //     keine Reparatur für den Artikel angelegt wurde (deren Status gehört der Reparatur).
+  const saleSettled = invoiceStatus === 'FINAL' || invoiceStatus === 'RETURNED';
+  const ownStatus = disposition === 'UNDER_REPAIR' ? 'in_repair'
+    : disposition === 'WRITE_OFF' ? 'write_off'
+    : disposition === 'RETURN_TO_OWNER' ? 'returned' : null;
+  for (const pid of new Set(lines.map((l) => l.productId).filter((p): p is string => !!p))) {
+    const repairSince = ownStatus === 'in_repair'
+      && query('SELECT 1 FROM repairs WHERE product_id = ? AND created_at >= ? LIMIT 1', [pid, String(r.created_at ?? '')]).length > 0;
+    reconcileSaleStatus(pid, saleSettled, ownStatus && !repairSince ? [ownStatus] : []);
   }
 
   // 7. Return auf REJECTED — Row + Lines bleiben erhalten (Historie, keine Orphans).

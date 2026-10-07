@@ -7,7 +7,7 @@ import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
 import { assertLotLessStockAvailable, assertNoLegacyLotLessLines, giveBackStock, hasLotHistory, invoiceStockLines, releaseLegacyDeduction, takeStock } from '@/core/lots/stock-contract';
-import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, assertLotsConsumable, assertLotTrackedLinesResolved, assertProductsSellable } from '@/core/lots/lot-queries';
+import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, reconcileSaleStatus, assertLotsConsumable, assertLotTrackedLinesResolved, assertProductsSellable } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
@@ -986,14 +986,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // unveraendert. Innerhalb der Tx → atomar mit Lines + Ledger; Rollback verwirft.
       trackChange('invoices', id, 'update', {});
 
-      // 9. Produkt-Reservierung nachziehen (nach finalem Status): erst sync, dann
-      //    unreserve, dann reserve (nur solange nicht FINAL).
+      // 9. Verkaufsstatus nachziehen (nach finalem Status): erst sync, dann aus dem Bestand ableiten.
+      //    RETURN-CANCEL-STATUS — zurückgegebener Bestand macht den Artikel wieder verkaufbar (auch ein
+      //    'sold' der bezahlten Rechnung); ein neu aufgebrauchter wird an einer FINAL-Rechnung 'sold',
+      //    sonst 'reserved'.
       for (const pid of productsToSync) syncProductQuantity(pid);
       const isStillUnpaid = newStatus !== 'FINAL' && newStatus !== 'RETURNED';
-      for (const pid of productsToSync) {
-        unreserveProductIfRestored(pid);
-        if (isStillUnpaid) reserveProductIfDepleted(pid);
-      }
+      for (const pid of productsToSync) reconcileSaleStatus(pid, !isStillUnpaid);
 
       // 10. Audit (Punkt 3): invoice_edits-Revision mit vollem Vorher/Nachher-Snapshot
       //     + audit_log-Eintrag (im History-Drawer sichtbar).

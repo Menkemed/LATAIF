@@ -287,12 +287,12 @@ export function reserveProductIfDepleted(productId: string): void {
 }
 
 // Umkehrung: wird ein Sale storniert oder Lines neu geschrieben und gibt
-// Bestand wieder frei, ruecksetzen wir
-//   'reserved'              → 'in_stock'
+// Bestand wieder frei, wird der Artikel wieder verkaufbar:
+//   'reserved' / 'sold'     → 'in_stock'
 //   'consignment_reserved'  → 'consignment'
-// Andere Stati (sold, in_repair, ...) bleiben unangetastet.
+// (RETURN-CANCEL-STATUS: auch ein 'sold' — Löschen/Ändern einer bezahlten Rechnung gibt Bestand
+// zurück.) Sonderstatus (in_repair, with_agent, ...) bleiben unangetastet.
 export function unreserveProductIfRestored(productId: string): void {
-  const db = getDatabase();
   const lotRows = query(
     `SELECT COALESCE(SUM(CASE WHEN status != 'CANCELLED' AND qty_remaining > 0 THEN qty_remaining ELSE 0 END), 0) AS active_qty
        FROM stock_lots WHERE product_id = ?`,
@@ -300,16 +300,49 @@ export function unreserveProductIfRestored(productId: string): void {
   );
   const activeQty = Number(lotRows[0]?.active_qty) || 0;
   if (activeQty <= 0) return;
+  reconcileSaleStatus(productId, true);   // Bestand > 0: der Rechnungszustand spielt keine Rolle
+}
 
-  const prodRows = query(`SELECT stock_status FROM products WHERE id = ?`, [productId]);
-  if (prodRows.length === 0) return;
-  const status = String(prodRows[0].stock_status || '');
-  let nextStatus: string | null = null;
-  if (status === 'reserved') nextStatus = 'in_stock';
-  else if (status === 'consignment_reserved') nextStatus = 'consignment';
-  if (!nextStatus) return;
-  db.run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ?`,
-    [nextStatus, new Date().toISOString(), productId]);
+// ── RETURN-CANCEL-STATUS — der Verkaufsstatus folgt dem Bestand ────────────────
+//
+// Bestand ist die Wahrheit (Restmenge der Lose; ohne Los `products.quantity`), der Verkaufsstatus ist
+// daraus abgeleitet:
+//   Bestand > 0  → verkaufbar: 'in_stock' (Kommission 'consignment'; 'offered' bleibt 'offered');
+//   Bestand = 0  → 'sold', wenn der Verkauf, der das Stück hält, abgeschlossen ist (FINAL/RETURNED),
+//                  sonst 'reserved' (Kommission 'consignment_reserved').
+// Bewusst eng: abgeleitet werden NUR die Verkaufsstatus. with_agent, consumed, in_repair, write_off,
+// returned … bleiben stehen — außer der Aufrufer nennt einen davon in `ownStatuses`, weil er ihn
+// SELBST gesetzt hat und gerade zurücknimmt (der Retourenstorno für die Folge seiner eigenen Retoure).
+// Das Reparatur-Serviceprodukt (`svc-repair-*`) ist kein Lagerartikel und wird nie angefasst.
+const SALE_STATUSES: readonly string[] = ['in_stock', 'offered', 'reserved', 'sold', 'consignment', 'consignment_reserved'];
+
+export function reconcileSaleStatus(productId: string, saleSettled: boolean, ownStatuses: readonly string[] = []): void {
+  if (!productId || productId.startsWith('svc-repair-')) return;
+  const p = query(`SELECT stock_status, source_type, quantity FROM products WHERE id = ?`, [productId])[0];
+  if (!p) return;
+  const status = String(p.stock_status || '');
+  if (!SALE_STATUSES.includes(status) && !ownStatuses.includes(status)) return;
+  const lots = query(
+    `SELECT COUNT(*) AS total_lots,
+            COALESCE(SUM(CASE WHEN status != 'CANCELLED' AND qty_remaining > 0 THEN qty_remaining ELSE 0 END), 0) AS active_qty
+       FROM stock_lots WHERE product_id = ?`,
+    [productId]
+  )[0];
+  const remaining = Number(lots?.total_lots) > 0
+    ? Number(lots?.active_qty) || 0
+    : pieceCount(p.quantity as number | null | undefined);
+  const consignment = String(p.source_type || '') === 'CONSIGNMENT' || status === 'consignment' || status === 'consignment_reserved';
+  let next: string;
+  if (remaining > 0) {
+    next = status === 'in_stock' || status === 'offered' || status === 'consignment'
+      ? status
+      : (consignment ? 'consignment' : 'in_stock');
+  } else {
+    next = saleSettled ? 'sold' : (consignment ? 'consignment_reserved' : 'reserved');
+  }
+  if (next === status) return;
+  getDatabase().run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ?`,
+    [next, new Date().toISOString(), productId]);
   trackProductRow(productId);   // LAN-Sync Phase 1b
 }
 
