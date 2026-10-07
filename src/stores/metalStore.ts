@@ -12,6 +12,7 @@ import {
   MetalRejected, changeMetalStatusInHouse, createMetalInHouse, inOneTransaction, localHouseBranch,
   metalFromRow, setSpotPriceInHouse, spotPriceOf, type MetalRecord,
 } from '@/core/metals/metal-house';
+import { metalPurity } from '@/core/gold/purity';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
@@ -96,6 +97,16 @@ export const useMetalStore = create<MetalStore>((set, get) => ({
       }, localHouseBranch()));
       get().loadMetals();
       return;
+    }
+    // PURITY-METAL-DOMAIN — Metallart und Feinheit gehören zusammen (dieselbe Regel wie die Anlage):
+    // ein Gold-Posten trägt kein „925", ein Silber-Posten kein „24K".
+    if (data.metalType !== undefined || data.karat !== undefined) {
+      const cur = query('SELECT metal_type, karat FROM precious_metals WHERE id = ?', [id])[0];
+      const type = String(data.metalType ?? cur?.metal_type ?? '');
+      const karat = data.karat ?? (cur?.karat as string | null | undefined);
+      if (karat && metalPurity(type, karat) === null) {
+        throw new MetalRejected('METAL_KARAT_INVALID', `${String(karat)} is not a purity of ${type}`);
+      }
     }
 
     const db = getDatabase();

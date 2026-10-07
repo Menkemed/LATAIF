@@ -35,6 +35,7 @@ import type { BusinessReadContext } from '@/core/data/read-context';
 import { useGoldStore } from '@/stores/goldStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import type { MetalKarat, MetalStatus, MetalType, PreciousMetal } from '@/core/models/types';
+import { METAL_GRADES, metalPurity } from '@/core/gold/purity';
 
 /** Ein fachliches Nein des Metallhauses — eingefroren, wenn es aus einem Fernauftrag kommt. */
 export class MetalRejected extends Error {
@@ -48,23 +49,25 @@ export class MetalRejected extends Error {
 
 export const METAL_TYPES: readonly MetalType[] = ['gold', 'silver', 'platinum'];
 
-/** Die Feinheiten je Metall — genau die Auswahl der Maske, jetzt an EINER Stelle. */
+/**
+ * Die Feinheiten je Metall — genau die Auswahl der Maske. PURITY-METAL-DOMAIN: Liste UND Zahlen kommen
+ * aus der EINEN Tabelle `core/gold/purity` (vorher eine eigene Kopie mit 24K = 1,0, während Ausgleich,
+ * Reparatur und Auftrag mit 0,999 rechneten).
+ */
 export const METAL_KARATS: Record<MetalType, readonly MetalKarat[]> = {
-  gold: ['24K', '22K', '21K', '18K', '14K', '9K'],
-  silver: ['999', '925'],
-  platinum: ['950', '999'],
+  gold: METAL_GRADES.gold as MetalKarat[],
+  silver: METAL_GRADES.silver as MetalKarat[],
+  platinum: METAL_GRADES.platinum as MetalKarat[],
 };
 
-export const METAL_PURITY: Record<string, number> = {
-  '24K': 1.0, '22K': 0.916, '21K': 0.875, '18K': 0.75,
-  '14K': 0.585, '9K': 0.375, '999': 0.999, '925': 0.925, '950': 0.95,
-};
-
-/** Dieselbe Formel wie bisher in der Maske: ohne Feinheit oder Spotpreis kein Schmelzwert. */
-export function meltValueOf(weight: number, karat: string | undefined, spotPrice: number): number {
+/**
+ * Schmelzwert = Gewicht × Feinheit (im Kontext des Metalls) × Spotpreis. Ohne Feinheit, ohne Spotpreis
+ * oder mit einer Feinheit, die das Metall nicht hat, gibt es keinen Schmelzwert (0) — nie ein stilles 1,0.
+ */
+export function meltValueOf(weight: number, metalType: string | undefined, karat: string | undefined, spotPrice: number): number {
   if (!karat || !spotPrice) return 0;
-  const purity = METAL_PURITY[karat] ?? 1;
-  return weight * purity * spotPrice;
+  const purity = metalPurity(metalType, karat);
+  return purity === null ? 0 : weight * purity * spotPrice;
 }
 
 export type MetalRecord = PreciousMetal & { revision: number };
@@ -277,7 +280,7 @@ export function createMetalInHouse(raw: Partial<Record<keyof MetalCreateInput, u
   // Spot und Schmelzwert: aus der Einstellung des HAUSES. Ein unbekannter Spot (0) bleibt, wie
   // bisher, leer statt 0 in der Zeile.
   const spot = spotPriceOf(branchId, input.metalType);
-  const melt = meltValueOf(input.weightGrams, input.karat, spot);
+  const melt = meltValueOf(input.weightGrams, input.metalType, input.karat, spot);
 
   const id = uuid();
   const now = new Date().toISOString();
@@ -434,7 +437,7 @@ export function changeMetalStatusInHouse(req: MetalStatusChange, branchId: strin
       throw new MetalRejected('METAL_SALE_PRICE_INVALID', 'melting takes no sale price');
     }
     const spot = spotPriceOf(branchId, String(live.metal_type));
-    const melt = meltValueOf(Number(live.weight_grams) || 0, (live.karat as string | null) ?? undefined, spot);
+    const melt = meltValueOf(Number(live.weight_grams) || 0, String(live.metal_type), (live.karat as string | null) ?? undefined, spot);
     db.run('UPDATE precious_metals SET status = ?, current_spot_price = ?, melt_value = ?, updated_at = ? WHERE id = ?',
       ['melted', spot, melt, now, req.metalId]);
     trackUpdate('precious_metals', req.metalId, { status: 'melted', currentSpotPrice: spot, meltValue: melt });

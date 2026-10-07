@@ -56,7 +56,10 @@ export function isKnownKarat(k: unknown): k is string {
   return typeof k === 'string' && Object.prototype.hasOwnProperty.call(KARAT_PURITY, k);
 }
 
-/** Ein Karat, dessen Reinheit das Haus kennt — sonst gäbe es keine Umrechnung (kein stilles `?? 1.0`). */
+/**
+ * Ein Karat, dessen Reinheit das Haus kennt — sonst gäbe es keine Umrechnung (kein stilles `?? 1.0`).
+ * PURITY-METAL-DOMAIN — NUR Gold-Karate: eine Silber- oder Platinfeinheit (925, 950, 999) ist hier kein Karat.
+ */
 export function assertKnownKarat(k: unknown, what = 'karat'): string {
   if (!isKnownKarat(k)) {
     throw new GoldRejected('GOLD_KARAT_UNKNOWN', `${what} must be one of ${Object.keys(KARAT_PURITY).join(', ')} (got ${String(k)})`);
@@ -139,6 +142,7 @@ export function recordGoldMovement(args: {
   relatedRepairId?: string;
   notes?: string;
 }): string {
+  assertKnownKarat(args.karat);   // PURITY-METAL-DOMAIN — eine Goldbewegung trägt ein Gold-Karat
   const db = getDatabase();
   const id = uuid();
   db.run(
@@ -186,6 +190,7 @@ export function adjustPreciousMetals(args: {
   sourceLabel: string;
   createdBy: string;
 }): void {
+  assertKnownKarat(args.karat);   // PURITY-METAL-DOMAIN — der Gold-Bestand führt nur Gold-Karate
   const db = getDatabase();
   const now = nowIso();
   const rows = query(

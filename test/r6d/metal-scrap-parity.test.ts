@@ -471,7 +471,8 @@ marker('CENTRAL_UI_R6D_METAL_STATUS_PROVED');
 
   // Die Anlage danach benutzt den Preis des Hauses
   const m = await fern(() => mc.runMetalCreate(deps(db), identity(nextId(), 'metals.create'), { metalType: 'gold', karat: '24K', weightGrams: 2 }));
-  ok(Number(m.value.spotPriceAtPurchase) === 42.5 && Math.abs(Number(m.value.meltValue) - 85) < 1e-9, 'SPOT die nächste Anlage leitet aus dem NEUEN Preis ab');
+  // PURITY-METAL-DOMAIN — 24K = 0,999 (eine Tabelle für Gold): 2 g × 0,999 × 42,5 = 84,915 (vorher × 1,0 = 85).
+  ok(Number(m.value.spotPriceAtPurchase) === 42.5 && Math.abs(Number(m.value.meltValue) - 84.915) < 1e-9, 'SPOT die nächste Anlage leitet aus dem NEUEN Preis ab');
 
   // Parität
   const dbP = freshDb(); await actions.setSpotPriceOnPrimary('platinum', 12.25);

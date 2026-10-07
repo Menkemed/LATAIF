@@ -18,7 +18,7 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { getSpotPrices } from '@/core/market/spot-prices';
-import { purityOf } from '@/core/gold/purity';
+import { goldPurity } from '@/core/gold/purity';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
 import type { OrderStatus, OrderType, Product } from '@/core/models/types';
@@ -283,8 +283,9 @@ export function OrderCreate() {
   // v0.6.4 — Extra-Gold Live-Bewertung: Gramm × Reinheit(Karat) × Goldpreis(pure).
   const autoGoldValue = useMemo(() => {
     const g = parseFloat(extraGoldGrams) || 0;
-    return g > 0 && goldRate > 0
-      ? Math.round(g * purityOf(extraGoldKarat) * goldRate * 1000) / 1000
+    const p = goldPurity(extraGoldKarat);   // PURITY-METAL-DOMAIN — kein Gold-Karat → keine Bewertung
+    return g > 0 && goldRate > 0 && p !== null
+      ? Math.round(g * p * goldRate * 1000) / 1000
       : 0;
   }, [extraGoldGrams, extraGoldKarat, goldRate]);
   // Solange der User das Cost-Feld nicht selbst angefasst hat → automatisch mit
@@ -636,7 +637,7 @@ export function OrderCreate() {
                       </span>
                     ) : autoGoldValue > 0 ? (
                       <span style={{ color: '#16A34A' }}>
-                        Auto-valuation: {(parseFloat(extraGoldGrams) || 0).toFixed(3)} g × {purityOf(extraGoldKarat).toFixed(3)} × {goldRate.toFixed(3)} BHD/g = {autoGoldValue.toFixed(3)} BHD (live spot).
+                        Auto-valuation: {(parseFloat(extraGoldGrams) || 0).toFixed(3)} g × {(goldPurity(extraGoldKarat) ?? 0).toFixed(3)} × {goldRate.toFixed(3)} BHD/g = {autoGoldValue.toFixed(3)} BHD (live spot).
                       </span>
                     ) : (
                       <span style={{ color: '#DC2626' }}>

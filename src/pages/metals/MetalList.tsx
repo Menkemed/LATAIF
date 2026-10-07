@@ -20,9 +20,10 @@ import { WriteError } from '@/components/shared/WriteError';
 import { useSharedWrites, fehlertext, nichtAmClient } from '@/core/data/shared-write';
 import { useSharedRead } from '@/core/data/shared-read';
 import {
-  METAL_KARATS, METAL_PURITY, METAL_TYPES, meltValueOf, spotPricesFor,
+  METAL_KARATS, METAL_TYPES, meltValueOf, spotPricesFor,
   type MetalCreateInput, type MetalRecord, type SpotPrices,
 } from '@/core/metals/metal-house';
+import { metalPurity } from '@/core/gold/purity';
 import {
   changeMetalStatusOnPrimary, createMetalOnPrimary, metalCreateBody, metalStatusBody,
   setSpotPriceOnPrimary, spotPriceBody,
@@ -124,13 +125,13 @@ export function MetalList() {
   // KPI calculations (in_stock only)
   const inStock = metals.filter(m => m.status === 'in_stock');
   const totalWeight = inStock.reduce((s, m) => s + m.weightGrams, 0);
-  const totalMeltValue = inStock.reduce((s, m) => s + meltValueOf(m.weightGrams, m.karat, getSpotForType(m.metalType)), 0);
+  const totalMeltValue = inStock.reduce((s, m) => s + meltValueOf(m.weightGrams, m.metalType, m.karat, getSpotForType(m.metalType)), 0);
   const totalPurchaseCost = inStock.reduce((s, m) => s + (m.purchaseTotal || 0), 0);
   const profitPotential = totalMeltValue - totalPurchaseCost;
 
   // Form melt value preview
   const formMeltValue = form.weightGrams && form.karat
-    ? meltValueOf(form.weightGrams, form.karat, getSpotForType(form.metalType || 'gold'))
+    ? meltValueOf(form.weightGrams, form.metalType || 'gold', form.karat, getSpotForType(form.metalType || 'gold'))
     : 0;
 
   function openNew() {
@@ -163,7 +164,7 @@ export function MetalList() {
 
   function openSell(m: MetalRecord) {
     w.clear();
-    const melt = meltValueOf(m.weightGrams, m.karat, getSpotForType(m.metalType));
+    const melt = meltValueOf(m.weightGrams, m.metalType, m.karat, getSpotForType(m.metalType));
     setSellTarget(m);
     setSellPrice(melt > 0 ? melt.toFixed(2) : '');
   }
@@ -311,7 +312,7 @@ export function MetalList() {
       )}
 
       {filtered.map(metal => {
-        const melt = meltValueOf(metal.weightGrams, metal.karat, getSpotForType(metal.metalType));
+        const melt = meltValueOf(metal.weightGrams, metal.metalType, metal.karat, getSpotForType(metal.metalType));
         const purchase = metal.purchaseTotal || 0;
         const diff = melt - purchase;
 
@@ -454,7 +455,7 @@ export function MetalList() {
                     color: form.karat === k ? '#0F0F10' : '#6B7280',
                     background: form.karat === k ? 'rgba(15,15,16,0.06)' : 'transparent',
                   }}>
-                  {k} <span style={{ fontSize: 10, color: '#6B7280', marginLeft: 4 }}>({(METAL_PURITY[k] * 100).toFixed(1)}%)</span>
+                  {k} <span style={{ fontSize: 10, color: '#6B7280', marginLeft: 4 }}>({((metalPurity(form.metalType || 'gold', k) ?? 0) * 100).toFixed(1)}%)</span>
                 </button>
               ))}
             </div>
@@ -585,7 +586,7 @@ export function MetalList() {
                 {sellTarget.metalType} {sellTarget.karat || ''} · {fmtWeight(sellTarget.weightGrams)}g
               </div>
               <div className="font-mono" style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
-                Melt value: <Bhd v={meltValueOf(sellTarget.weightGrams, sellTarget.karat, getSpotForType(sellTarget.metalType))}/> BHD
+                Melt value: <Bhd v={meltValueOf(sellTarget.weightGrams, sellTarget.metalType, sellTarget.karat, getSpotForType(sellTarget.metalType))}/> BHD
                 {sellTarget.purchaseTotal ? ` · Purchase: ${fmt(sellTarget.purchaseTotal)} BHD` : ''}
               </div>
             </div>
@@ -633,7 +634,7 @@ export function MetalList() {
                 {meltTarget.metalType} {meltTarget.karat || ''} · {fmtWeight(meltTarget.weightGrams)}g
               </div>
               <div className="font-mono" style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
-                Current melt value: <Bhd v={meltValueOf(meltTarget.weightGrams, meltTarget.karat, getSpotForType(meltTarget.metalType))}/> BHD
+                Current melt value: <Bhd v={meltValueOf(meltTarget.weightGrams, meltTarget.metalType, meltTarget.karat, getSpotForType(meltTarget.metalType))}/> BHD
               </div>
             </div>
             <p style={{ fontSize: 13, color: '#4B5563' }}>

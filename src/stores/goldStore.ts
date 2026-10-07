@@ -35,6 +35,7 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+import { goldPurity } from '@/core/gold/purity';
 
 function nowIso(): string { return new Date().toISOString(); }
 
@@ -668,9 +669,6 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
            ORDER BY open_grams DESC`
       );
       // Aggregate by supplier (sum pure-au across karats)
-      const PURITY: Record<string, number> = {
-        '24K': 0.999, '22K': 0.916, '21K': 0.875, '18K': 0.75, '14K': 0.585, '9K': 0.375,
-      };
       const map: Record<string, { supplierId: string; supplierName: string;
         breakdown: Array<{ karat: string; grams: number }>; pureAuGrams: number }> = {};
       for (const r of rows) {
@@ -678,7 +676,9 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
         const name = (r.supplier_name as string) || sid.slice(0, 8);
         const karat = r.karat as string;
         const grams = (r.open_grams as number) || 0;
-        const pure = grams * (PURITY[karat] ?? 1);
+        // PURITY-METAL-DOMAIN — die Reinheit aus der EINEN Tabelle; ein Wert, der kein Gold-Karat ist,
+        // zählt nicht als Feingold (vorher still × 1,0).
+        const pure = grams * (goldPurity(karat) ?? 0);
         if (!map[sid]) map[sid] = { supplierId: sid, supplierName: name, breakdown: [], pureAuGrams: 0 };
         map[sid].breakdown.push({ karat, grams });
         map[sid].pureAuGrams += pure;
@@ -702,9 +702,6 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
            HAVING open_grams > 0
            ORDER BY open_grams DESC`
       );
-      const PURITY: Record<string, number> = {
-        '24K': 0.999, '22K': 0.916, '21K': 0.875, '18K': 0.75, '14K': 0.585, '9K': 0.375,
-      };
       const map: Record<string, { customerId: string; customerName: string;
         breakdown: Array<{ karat: string; grams: number }>; pureAuGrams: number }> = {};
       for (const r of rows) {
@@ -712,7 +709,9 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
         const name = (r.customer_name as string) || cid.slice(0, 8);
         const karat = r.karat as string;
         const grams = (r.open_grams as number) || 0;
-        const pure = grams * (PURITY[karat] ?? 1);
+        // PURITY-METAL-DOMAIN — die Reinheit aus der EINEN Tabelle; ein Wert, der kein Gold-Karat ist,
+        // zählt nicht als Feingold (vorher still × 1,0).
+        const pure = grams * (goldPurity(karat) ?? 0);
         if (!map[cid]) map[cid] = { customerId: cid, customerName: name.trim(), breakdown: [], pureAuGrams: 0 };
         map[cid].breakdown.push({ karat, grams });
         map[cid].pureAuGrams += pure;
@@ -770,20 +769,19 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
   getPureGoldTotal: () => {
     try {
       const rows = query(
+        // PURITY-METAL-DOMAIN — NUR Gold. Vorher zählten Silber (925, 999) und Platin (950) mit
+        // Faktor 1,0 als Feingold mit, weil ihre Feinheit in der Gold-Tabelle fehlte.
         `SELECT karat, COALESCE(SUM(weight_grams), 0) AS total
            FROM precious_metals
-           WHERE status = 'in_stock' AND karat IS NOT NULL AND weight_grams > 0
+           WHERE status = 'in_stock' AND metal_type = 'gold' AND karat IS NOT NULL AND weight_grams > 0
            GROUP BY karat`
       );
-      const PURITY: Record<string, number> = {
-        '24K': 0.999, '22K': 0.916, '21K': 0.875, '18K': 0.75, '14K': 0.585, '9K': 0.375,
-      };
       let totalGrams = 0, pureAu = 0;
       const perKarat: Array<{ karat: string; grams: number; pureAu: number }> = [];
       for (const r of rows) {
         const k = r.karat as string;
         const g = (r.total as number) || 0;
-        const p = g * (PURITY[k] ?? 1);
+        const p = g * (goldPurity(k) ?? 0);
         totalGrams += g;
         pureAu += p;
         perKarat.push({ karat: k, grams: g, pureAu: p });

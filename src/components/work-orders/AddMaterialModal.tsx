@@ -23,7 +23,7 @@ import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { getSpotPrices } from '@/core/market/spot-prices';
-import { purityOf } from '@/core/gold/purity';
+import { goldPurity } from '@/core/gold/purity';
 
 export interface MaterialLineInput {
   materialKind: 'labor' | 'diamond' | 'stone' | 'gold';
@@ -156,8 +156,9 @@ export function AddMaterialModal({
   // v0.6.5 — Gold-Piece: Live-Bewertung Gramm × Reinheit(Karat) × Goldpreis(pure).
   const autoGoldCost = useMemo(() => {
     const g = parseFloat(grams) || 0;
-    return kind === 'gold' && g > 0 && goldRate > 0
-      ? Math.round(g * purityOf(karat) * goldRate * 1000) / 1000
+    const p = goldPurity(karat);   // PURITY-METAL-DOMAIN — kein Gold-Karat → keine Bewertung (nie still × 1,0)
+    return kind === 'gold' && g > 0 && goldRate > 0 && p !== null
+      ? Math.round(g * p * goldRate * 1000) / 1000
       : 0;
   }, [kind, grams, karat, goldRate]);
   // Cost-Feld automatisch mit der Live-Bewertung fuellen, solange der User es
@@ -428,7 +429,7 @@ export function AddMaterialModal({
                     )}
                   </>
                 ) : autoGoldCost > 0
-                  ? `Auto: ${(parseFloat(grams) || 0).toFixed(3)} g × ${purityOf(karat).toFixed(3)} × ${goldRate.toFixed(3)} BHD/g = ${autoGoldCost.toFixed(3)} BHD (live spot).`
+                  ? `Auto: ${(parseFloat(grams) || 0).toFixed(3)} g × ${(goldPurity(karat) ?? 0).toFixed(3)} × ${goldRate.toFixed(3)} BHD/g = ${autoGoldCost.toFixed(3)} BHD (live spot).`
                   : 'Gold price unavailable — please enter the cost manually.'}
               </p>
             )}
