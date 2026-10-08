@@ -22,7 +22,7 @@ import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { useSupplierStore } from '@/stores/supplierStore';
-import { getSpotPrices } from '@/core/market/spot-prices';
+import { getSpotPrices, bhdPerGramFine, marketValuePerGram } from '@/core/market/spot-prices';
 import { goldPurity } from '@/core/gold/purity';
 
 export interface MaterialLineInput {
@@ -136,7 +136,7 @@ export function AddMaterialModal({
       setRows([]);
       setError('');
       loadSuppliers();
-      getSpotPrices().then(r => { if (r.gold) setGoldRate(r.gold.bhdPerGram); }).catch(() => {});
+      getSpotPrices().then(r => { if (r.gold) setGoldRate(bhdPerGramFine(r.gold.usdPerOunce)); }).catch(() => {});
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, allowLabor, loadSuppliers]);
@@ -158,7 +158,7 @@ export function AddMaterialModal({
     const g = parseFloat(grams) || 0;
     const p = goldPurity(karat);   // PURITY-METAL-DOMAIN — kein Gold-Karat → keine Bewertung (nie still × 1,0)
     return kind === 'gold' && g > 0 && goldRate > 0 && p !== null
-      ? Math.round(g * p * goldRate * 1000) / 1000
+      ? Math.round(g * marketValuePerGram(goldRate, p) * 1000) / 1000
       : 0;
   }, [kind, grams, karat, goldRate]);
   // Cost-Feld automatisch mit der Live-Bewertung fuellen, solange der User es
@@ -429,7 +429,7 @@ export function AddMaterialModal({
                     )}
                   </>
                 ) : autoGoldCost > 0
-                  ? `Auto: ${(parseFloat(grams) || 0).toFixed(3)} g × ${(goldPurity(karat) ?? 0).toFixed(3)} × ${goldRate.toFixed(3)} BHD/g = ${autoGoldCost.toFixed(3)} BHD (live spot).`
+                  ? `Auto: ${(parseFloat(grams) || 0).toFixed(3)} g × ${(goldPurity(karat) ?? 0).toFixed(3)} × ${goldRate.toFixed(3)} BHD/g fine = ${autoGoldCost.toFixed(3)} BHD (live spot).`
                   : 'Gold price unavailable — please enter the cost manually.'}
               </p>
             )}

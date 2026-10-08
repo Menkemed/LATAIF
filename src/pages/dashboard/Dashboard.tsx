@@ -25,7 +25,7 @@ import { TopProductsList, type TopProductItem } from '@/components/charts/TopPro
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
 import { useMediaScope } from '@/hooks/useMediaScope';
 import { isLoanGiven, canonicalLoanStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
-import { getSpotPrices, type SpotPrice } from '@/core/market/spot-prices';
+import { getSpotPrices, bhdPerGramFine, type SpotPrice } from '@/core/market/spot-prices';
 import { computeSalesMetrics, computeSalesMetricsByCustomer } from '@/core/reports/sales-metrics';
 import { useSharedRead } from '@/core/data/shared-read';
 import { dashboardExtrasFor } from '@/core/data/page-reads';
@@ -575,7 +575,7 @@ export function Dashboard() {
                   fontSize: 28, fontWeight: 700, color: '#FFFFFF',
                   letterSpacing: '-0.025em', lineHeight: 1.1,
                 }}>
-                  {(spotGold.usdPerOunce * 1.417 / 116.64).toFixed(3)} <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', fontWeight: 500 }}>BHD/g</span>
+                  {bhdPerGramFine(spotGold.usdPerOunce).toFixed(3)} <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', fontWeight: 500 }}>BHD/g fine</span>
                 </div>
                 <div className="font-mono" style={{ fontSize: 11, color: 'rgba(255,255,255,0.55)', marginTop: 6 }}>
                   ${spotGold.usdPerOunce.toFixed(2)} /oz · ${spotGold.usdPerGram.toFixed(2)} /g
@@ -603,7 +603,7 @@ export function Dashboard() {
                   fontSize: 28, fontWeight: 700, color: '#FFFFFF',
                   letterSpacing: '-0.025em', lineHeight: 1.1,
                 }}>
-                  {(spotSilver.usdPerOunce * 1.417 / 116.64).toFixed(3)} <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', fontWeight: 500 }}>BHD/g</span>
+                  {bhdPerGramFine(spotSilver.usdPerOunce).toFixed(3)} <span style={{ fontSize: 13, color: 'rgba(255,255,255,0.65)', fontWeight: 500 }}>BHD/g fine</span>
                 </div>
                 <div className="font-mono" style={{ fontSize: 11, color: 'rgba(255,255,255,0.55)', marginTop: 6 }}>
                   ${spotSilver.usdPerOunce.toFixed(2)} /oz · ${spotSilver.usdPerGram.toFixed(2)} /g

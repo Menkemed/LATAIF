@@ -17,7 +17,7 @@ import { useOrderStore } from '@/stores/orderStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useSupplierStore } from '@/stores/supplierStore';
-import { getSpotPrices } from '@/core/market/spot-prices';
+import { getSpotPrices, bhdPerGramFine, marketValuePerGram } from '@/core/market/spot-prices';
 import { goldPurity } from '@/core/gold/purity';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
@@ -93,7 +93,7 @@ export function OrderCreate() {
   // v0.6.0 — Live-Goldpreis fuer die provisorische COGS-Bewertung von
   // Goldschmied-Gold (wenn nur Gewicht, kein Cost eingegeben wird).
   useEffect(() => {
-    getSpotPrices().then(r => { if (r.gold) setGoldRate(r.gold.bhdPerGram); }).catch(() => {});
+    getSpotPrices().then(r => { if (r.gold) setGoldRate(bhdPerGramFine(r.gold.usdPerOunce)); }).catch(() => {});
   }, []);
 
   const [searchParams] = useSearchParams();
@@ -285,7 +285,7 @@ export function OrderCreate() {
     const g = parseFloat(extraGoldGrams) || 0;
     const p = goldPurity(extraGoldKarat);   // PURITY-METAL-DOMAIN — kein Gold-Karat → keine Bewertung
     return g > 0 && goldRate > 0 && p !== null
-      ? Math.round(g * p * goldRate * 1000) / 1000
+      ? Math.round(g * marketValuePerGram(goldRate, p) * 1000) / 1000
       : 0;
   }, [extraGoldGrams, extraGoldKarat, goldRate]);
   // Solange der User das Cost-Feld nicht selbst angefasst hat → automatisch mit
@@ -637,7 +637,7 @@ export function OrderCreate() {
                       </span>
                     ) : autoGoldValue > 0 ? (
                       <span style={{ color: '#16A34A' }}>
-                        Auto-valuation: {(parseFloat(extraGoldGrams) || 0).toFixed(3)} g × {(goldPurity(extraGoldKarat) ?? 0).toFixed(3)} × {goldRate.toFixed(3)} BHD/g = {autoGoldValue.toFixed(3)} BHD (live spot).
+                        Auto-valuation: {(parseFloat(extraGoldGrams) || 0).toFixed(3)} g × {(goldPurity(extraGoldKarat) ?? 0).toFixed(3)} × {goldRate.toFixed(3)} BHD/g fine = {autoGoldValue.toFixed(3)} BHD (live spot).
                       </span>
                     ) : (
                       <span style={{ color: '#DC2626' }}>

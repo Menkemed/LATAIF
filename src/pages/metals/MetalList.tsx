@@ -24,6 +24,7 @@ import {
   type MetalCreateInput, type MetalRecord, type SpotPrices,
 } from '@/core/metals/metal-house';
 import { metalPurity } from '@/core/gold/purity';
+import { getSpotPrices, bhdPerGramFine } from '@/core/market/spot-prices';
 import {
   changeMetalStatusOnPrimary, createMetalOnPrimary, metalCreateBody, metalStatusBody,
   setSpotPriceOnPrimary, spotPriceBody,
@@ -75,6 +76,21 @@ export function MetalList() {
   const [uebernommen, setUebernommen] = useState<Partial<SpotPrices>>({});
   const [entwurf, setEntwurf] = useState<Partial<Record<MetalType, string>>>({});
   const spots: SpotPrices = { ...gelesen, ...uebernommen };
+  // METAL-SPOT-SSOT — der Hauspreis oben ist von Hand gesetzt und bleibt es. Daneben steht nur zur
+  // Orientierung der Live-Weltmarktwert (dieselbe Umrechnung wie Übersicht, Add Material, Auftrag);
+  // er ersetzt den Hauspreis nicht und ändert keinen gespeicherten Wert. Für Platin gibt es keine Quelle.
+  const [live, setLive] = useState<Partial<Record<MetalType, number>>>({});
+  useEffect(() => {
+    let weg = false;
+    getSpotPrices().then(r => {
+      if (weg) return;
+      setLive({
+        ...(r.gold ? { gold: bhdPerGramFine(r.gold.usdPerOunce) } : {}),
+        ...(r.silver ? { silver: bhdPerGramFine(r.silver.usdPerOunce) } : {}),
+      });
+    }).catch(() => {});
+    return () => { weg = true; };
+  }, []);
 
   useEffect(() => {
     loadMetals();
@@ -249,13 +265,14 @@ export function MetalList() {
         }}
       >
         {METAL_TYPES.map(type => (
-          <div key={type} className="flex items-center gap-3">
+          <div key={type} data-metal-spot={type}>
+          <div className="flex items-center gap-3">
             <div
               className="rounded-full"
               style={{ width: 8, height: 8, background: metalColor(type), flexShrink: 0 }}
             />
             <span style={{ fontSize: 12, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.06em', minWidth: 72 }}>
-              {type} / g
+              {type}
             </span>
             <input
               type="number"
@@ -276,7 +293,11 @@ export function MetalList() {
               onFocus={e => (e.currentTarget.style.borderBottomColor = '#0F0F10')}
               onBlur={e => { e.currentTarget.style.borderBottomColor = '#D5D9DE'; void commitSpot(type); }}
             />
-            <span style={{ fontSize: 11, color: '#6B7280' }}>BHD</span>
+            <span style={{ fontSize: 11, color: '#6B7280' }}>BHD per g fine · house price</span>
+          </div>
+          <div data-metal-live-reference={type} style={{ fontSize: 11, color: '#9CA3AF', marginTop: 6, paddingLeft: 20 }}>
+            {live[type] !== undefined ? `Live reference: ${live[type]!.toFixed(3)} BHD/g fine` : 'Live reference: —'}
+          </div>
           </div>
         ))}
       </div>
@@ -499,7 +520,7 @@ export function MetalList() {
               padding: 14, background: '#F2F7FA', border: '1px solid #E5E9EE',
               fontSize: 13, display: 'flex', justifyContent: 'space-between',
             }}>
-              <span style={{ color: '#6B7280' }}>Melt Value (at current spot)</span>
+              <span style={{ color: '#6B7280' }}>Melt value (at the house price)</span>
               <span style={{ color: '#0F0F10' }}><Bhd v={formMeltValue}/> BHD</span>
             </div>
           )}
