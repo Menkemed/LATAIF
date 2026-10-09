@@ -200,9 +200,9 @@ const SALES = { sub: 'user-staff', tenant_id: 'tenant-1', branch_id: 'branch-mai
   const erlaubt = [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/
     .exec(src('src/core/bridge/command-registry.ts'))?.[1] ?? '').matchAll(/'([^']+)'/g)].length;
   // R7A-Triage: die 41 war der Stand R5F.1 (vierzig + invoices.cancel). R6A–R6F haben die Registry
-  // auf 102 Buchungen gebracht, R7A auf 103 (`production.complete`) — kanonisch 175 = 1 + 71 + 103.
+  // auf 102 Buchungen gebracht, R7A auf 103 (`production.complete`) — kanonisch 175 = 1 + 71 + 103. MEDIA-INBOX, PARTNER-ITEMS und BULK METAL V1 brachten sie auf 114 (192 = 1 + 77 + 114).
   // Der Rollenvertrag bleibt davon unberuehrt; die Zahl steht hier nur, damit sie niemand still verschiebt.
-  ok(erlaubt === 110, `8 alle Buchungen der Registry: die vierzig des Kerns, invoices.cancel und die seither registrierten (${erlaubt})`);
+  ok(erlaubt === 114, `8 alle Buchungen der Registry: die vierzig des Kerns, invoices.cancel und die seither registrierten (bis BULK METAL V1: 114) (${erlaubt})`);
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r4c.1: role authority parity: ${PASS} passed, ${fails.length} failed`);
