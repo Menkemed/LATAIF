@@ -34,6 +34,8 @@ import {
 } from '@/core/ledger/posting';
 import { STOCK_UNAVAILABLE_MESSAGE } from '@/core/lots/lot-availability';
 import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
+import { checkBulkIntent, type BulkLineIntent } from '@/core/bulk/bulk-invoice';
+import { getBulkLot } from '@/core/bulk/bulk-lot-house';
 import { WITH_AGENT_INVOICE_BLOCKED_MESSAGE } from '@/core/products/product-sellability';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import {
@@ -55,9 +57,13 @@ interface RemoteLine {
   quantity?: number;
   unitPrice: number;
   scheme?: RequestedScheme;
+  /** BULK METAL V1 — eine Bulk-Zeile: nur die Absicht. */
+  bulkIntent?: BulkLineIntent;
 }
 
 const LINE_KEYS = new Set(['lineId', 'productId', 'lotId', 'quantity', 'unitPrice', 'scheme']);
+/** BULK METAL V1 — eine Bulk-Zeile schickt nur die Absicht; Einstand, Steuerart, Menge rechnet der Primary. */
+const BULK_LINE_KEYS = new Set(['kind', 'lineId', 'bulkLotId', 'weightMg', 'bulkType', 'unitPriceFils', 'description']);
 const TOP_KEYS = new Set(['customerId', 'lines', 'notes', 'issuedDate', 'staffId', 'specialMark']);
 
 /**
@@ -108,6 +114,23 @@ export function parseInvoicePayload(raw: unknown): {
 
   const lines: RemoteLine[] = raw.lines.map((l, i) => {
     if (!isPlain(l)) throw new InvoicePayloadError(`line ${i + 1} must be an object`);
+    if (l.kind !== undefined) {
+      if (l.kind !== 'bulk') throw new InvoicePayloadError(`line ${i + 1}: unknown line kind`);
+      for (const k of Object.keys(l)) {
+        if (FORBIDDEN.includes(k)) throw new InvoicePayloadError(`the primary decides ${k}, not the client (line ${i + 1})`);
+        if (!BULK_LINE_KEYS.has(k)) throw new InvoicePayloadError(`unknown field in bulk line ${i + 1}: ${k}`);
+      }
+      if (l.lineId !== undefined && (typeof l.lineId !== 'string' || !l.lineId.trim())) {
+        throw new InvoicePayloadError(`line ${i + 1}: lineId must be a string`);
+      }
+      let bulkIntent: BulkLineIntent;
+      try {
+        bulkIntent = checkBulkIntent({ lotId: l.bulkLotId, weightMg: l.weightMg, bulkType: l.bulkType, unitPriceFils: l.unitPriceFils, description: l.description }, `line ${i + 1}`);
+      } catch (e) {
+        throw new InvoicePayloadError(e instanceof Error ? e.message : String(e));
+      }
+      return { ...(l.lineId ? { lineId: String(l.lineId) } : {}), productId: '', lotId: null, quantity: 1, unitPrice: 0, scheme: undefined as never, bulkIntent };
+    }
     for (const k of Object.keys(l)) {
       if (FORBIDDEN.includes(k)) throw new InvoicePayloadError(`the primary decides ${k}, not the client (line ${i + 1})`);
       if (!LINE_KEYS.has(k)) throw new InvoicePayloadError(`unknown field in line ${i + 1}: ${k}`);
@@ -205,6 +228,14 @@ export function buildInvoiceLines(
 ): InvoiceLineInput[] {
   const alsoOk = new Set(opts.alsoConsumable ?? []);
   return lines.map((l, i) => {
+    // BULK METAL V1 — die Absicht reist weiter; die Hausfolge (createInvoiceInHouse / editInvoice) teilt zu.
+    if (l.bulkIntent) {
+      const lot = getBulkLot(l.bulkIntent.lotId);
+      return {
+        productId: lot?.productId ?? '', quantity: 1, unitPrice: 0, purchasePrice: 0, taxScheme: lot?.saleTaxScheme ?? 'MARGIN',
+        vatRate: 0, vatAmount: 0, lineTotal: 0, bulkIntent: l.bulkIntent, ...(l.lineId ? { lineId: l.lineId } : {}),
+      };
+    }
     const rows = query('SELECT id, tax_scheme, purchase_price FROM products WHERE id = ?', [l.productId]);
     const product = rows[0];
     if (!product) throw new InvoicePayloadError(`line ${i + 1}: unknown product`);

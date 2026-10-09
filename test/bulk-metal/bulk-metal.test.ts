@@ -371,6 +371,239 @@ const newAction = (): string => `action-${++aid}-xxxxxxxx`;
   ok(no2 === 'BM-0001', 'F5 andere Filiale beginnt bei BM-0001');
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// BULK METAL V1 — Teil 2: Verkauf, Ändern, Storno, Löschen, Retoure, Retoure-Storno, Beispiel 15.
+// ════════════════════════════════════════════════════════════════════════════
+const { createInvoiceInHouse } = await import('../../src/core/invoices/invoice-create-house.ts');
+const { cancelInvoiceInHouse } = await import('../../src/core/invoices/invoice-cancel-house.ts');
+
+interface Sale { lotId: string; weight: string; type?: string; price: string; description?: string }
+const intent = (x: Sale) => ({
+  bulkIntent: { lotId: x.lotId, weightMg: bm.parseGramsToMg(x.weight), bulkType: x.type ?? 'RING', unitPriceFils: bm.parseBhdToFils(x.price, true), ...(x.description ? { description: x.description } : {}) },
+});
+function verkauf(sales: Sale[]): string {
+  const r = imHaus(() => createInvoiceInHouse({ customerId: 'cust-1', lines: sales.map(intent) as never, specialMark: false }, 'branch-main'));
+  reload();
+  return r.invoiceId;
+}
+function zahlen(db: Db, invId: string, amount?: number): void {
+  const offen = amount ?? n(db, 'SELECT gross_amount - paid_amount FROM invoices WHERE id = ?', [invId]);
+  imHaus(() => useInvoiceStore.getState().recordPayment(invId, offen, 'cash'));
+  reload();
+}
+function retoureBulk(db: Db, invId: string, lineId: string, qty = 1, disposition = 'IN_STOCK'): string {
+  const lt = n(db, 'SELECT line_total FROM invoice_lines WHERE id = ?', [lineId]);
+  const vat = n(db, 'SELECT vat_amount FROM invoice_lines WHERE id = ?', [lineId]);
+  const pid = s(db, 'SELECT product_id FROM invoice_lines WHERE id = ?', [lineId]);
+  const id = imHaus(() => {
+    const rs = useSalesReturnStore.getState();
+    rs.loadReturns();
+    const rid = rs.createReturn({ invoiceId: invId, refundMethod: 'cash', productDisposition: disposition as never, reason: 'zurück',
+      lines: [{ invoiceLineId: lineId, productId: pid, quantity: qty, unitPrice: lt, vatAmount: vat }] }).id;
+    useSalesReturnStore.getState().loadReturns();
+    useSalesReturnStore.getState().approveReturn(rid);
+    return rid;
+  });
+  reload();
+  return id;
+}
+const lineOf = (db: Db, invId: string, pos = 1): string => s(db, 'SELECT id FROM invoice_lines WHERE invoice_id = ? AND position = ?', [invId, pos]);
+const lineRow = (db: Db, lineId: string): Record<string, unknown> => {
+  const r = db.exec('SELECT * FROM invoice_lines WHERE id = ?', [lineId])[0];
+  return Object.fromEntries(r.columns.map((c, i) => [c, r.values[0][i]]));
+};
+const ledgerOf = (db: Db, module: string, sourceId: string, account: string): number =>
+  r3(n(db, `SELECT COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0) FROM ledger_entries
+             WHERE source_module = ? AND source_id = ? AND account = ?`, [module, sourceId, account]));
+const balancedInventory = (db: Db): boolean => {
+  const ok0 = Math.abs(inventory(db) - bulkValueFils(db) / 1000) < 0.0005;
+  if (!ok0) console.log(`    INVENTORY ${inventory(db)} vs Σ Restwert ${bulkValueFils(db) / 1000}`);
+  return ok0;
+};
+
+// ══ G — Verkauf MARGIN: Spec 15, Schritt 0–2, und zwei Zeilen aus demselben Lot ══
+{
+  const db = neu();
+  const pid = bulkKauf({ weight: '500', cost: '1000', composition: COMP });
+  const id = lotOfPurchase(db, pid);
+  const inv1 = verkauf([{ lotId: id, weight: '7', type: 'RING', price: '25' }]);
+  const l1 = lineRow(db, lineOf(db, inv1));
+  ok(Number(l1.quantity) === 1 && Number(l1.unit_price) === 25 && l1.tax_scheme === 'MARGIN' && Number(l1.vat_amount) === 1
+    && Number(l1.line_total) === 25 && Number(l1.purchase_price_snapshot) === 14 && l1.lot_id === id
+    && Number(l1.bulk_weight_mg) === 7000 && Number(l1.bulk_cogs_fils) === 14000 && l1.bulk_type === 'RING' && Number(l1.stock_taken) === 1,
+  `G1 Zeile Ring: Menge 1, 25.000, MARGIN, MwSt intern 1.000, Snapshot 14.000 (${S([l1.unit_price, l1.vat_amount, l1.purchase_price_snapshot])})`);
+  ok(l1.description === 'Ring · Silver 925 · 7.000 g' && l1.bulk_metal === 'silver' && l1.bulk_fineness === '925', `G1 Beschreibung „${String(l1.description)}"`);
+  ok(ledgerOf(db, 'INVOICE', inv1, 'ACCOUNTS_RECEIVABLE') === 25 && ledgerOf(db, 'INVOICE', inv1, 'REVENUE') === -24
+    && ledgerOf(db, 'INVOICE', inv1, 'MARGIN_VAT') === -1 && ledgerOf(db, 'INVOICE', inv1, 'COGS') === 14 && ledgerOf(db, 'INVOICE', inv1, 'INVENTORY') === -14,
+  'G1 Hauptbuch: AR 25 / REVENUE 24 / MARGIN_VAT 1 / COGS 14 / INVENTORY −14');
+  ok(lot(id).remainingWeightMg === 493000 && lot(id).remainingValueFils === 986000 && lot(id).status === 'ACTIVE', 'G1 Lot 493.000 g / 986.000');
+  const inv2 = verkauf([{ lotId: id, weight: '21.5', type: 'NECKLACE_CHAIN', price: '70' }]);
+  const l2 = lineRow(db, lineOf(db, inv2));
+  ok(Number(l2.bulk_cogs_fils) === 43000 && Number(l2.vat_amount) === 2.455 && Number(l2.line_total) === 70, `G2 Necklace: COGS 43.000, MwSt 2.455 (${S([l2.bulk_cogs_fils, l2.vat_amount])})`);
+  ok(ledgerOf(db, 'INVOICE', inv2, 'REVENUE') === -67.545, 'G2 REVENUE 67.545');
+  ok(lot(id).remainingWeightMg === 471500 && lot(id).remainingValueFils === 943000, 'G2 Lot 471.500 g / 943.000');
+  ok(balancedInventory(db) && invOk(id), 'G3 INVENTORY = Σ Restwert, Invarianten');
+  ok(s(db, "SELECT stock_status FROM products WHERE id = 'bulk-silver-925-branch-main'") === 'in_stock'
+    && n(db, "SELECT quantity FROM products WHERE id = 'bulk-silver-925-branch-main'") === 0, 'G3 Systemartikel bleibt in_stock / Menge 0');
+  // Zwei Zeilen aus demselben Lot in einer Rechnung, Rundung: 3 g / 10 BHD
+  const p3 = bulkKauf({ metal: 'gold', fineness: '21K', weight: '3', cost: '10' });
+  const g = lotOfPurchase(db, p3);
+  const inv3 = verkauf([{ lotId: g, weight: '1', price: '5', type: 'PENDANT' }, { lotId: g, weight: '1', price: '5', type: 'EARRINGS' }]);
+  ok(Number(lineRow(db, lineOf(db, inv3, 1)).bulk_cogs_fils) === 3333 && Number(lineRow(db, lineOf(db, inv3, 2)).bulk_cogs_fils) === 3334, 'G4 zwei Zeilen eines Lots: 3.333 dann 3.334 (half-up)');
+  const inv4 = verkauf([{ lotId: g, weight: '1', price: '5', type: 'OTHER' }]);
+  ok(Number(lineRow(db, lineOf(db, inv4)).bulk_cogs_fils) === 3333 && lot(g).status === 'EXHAUSTED' && lot(g).remainingValueFils === 0, 'G4 letzter Verbrauch nimmt exakt den Rest 3.333 → EXHAUSTED, 0/0');
+  ok(balancedInventory(db) && invOk(g), 'G4 INVENTORY = Σ Restwert');
+  // Abweisungen
+  ok(meldung(() => verkauf([{ lotId: g, weight: '0.001', price: '1' }])).includes('BULK_LOT_NOT_ACTIVE'), 'G5 erschöpftes Lot → Nein');
+  ok(meldung(() => verkauf([{ lotId: id, weight: '471.501', price: '1' }])).includes('BULK_WEIGHT_EXCEEDS_REMAINING'), 'G5 mehr als Rest → Nein');
+  ok(meldung(() => verkauf([{ lotId: id, weight: '1', price: '1', type: 'BRACELET' }])).includes('BULK_TYPE_INVALID'), 'G5 Typ ungültig → Nein');
+  ok(meldung(() => imHaus(() => createInvoiceInHouse({ customerId: 'cust-1', lines: [{ productId: 'bulk-silver-925-branch-main', quantity: 1, unitPrice: 5, purchasePrice: 0, taxScheme: 'MARGIN', vatRate: 10, vatAmount: 0, lineTotal: 5 }] as never, specialMark: false }, 'branch-main'))).includes('BULK_PRODUCT_DIRECT_SALE'), 'G5 Systemartikel als Stückzeile → Nein');
+  ok(n(db, "SELECT COUNT(*) FROM stock_lots WHERE product_id LIKE 'bulk-%' AND unit = 'pcs'") === 0, 'G6 kein Phantom-Stück-Los');
+}
+
+// ══ H — Verkauf VAT_10 und ZERO ══════════════════════════════════════════════
+{
+  const db = neu();
+  const p = bulkKauf({ weight: '500', cost: '1100', vat: true });
+  const id = lotOfPurchase(db, p);
+  const inv = verkauf([{ lotId: id, weight: '7', price: '25' }]);
+  const l = lineRow(db, lineOf(db, inv));
+  ok(l.tax_scheme === 'VAT_10' && Number(l.unit_price) === 25 && Number(l.vat_amount) === 2.5 && Number(l.line_total) === 27.5 && Number(l.purchase_price_snapshot) === 14,
+    `H1 VAT_10: netto 25.000, MwSt 2.500, Kunde 27.500, COGS 14.000 (${S([l.vat_amount, l.line_total])})`);
+  ok(ledgerOf(db, 'INVOICE', inv, 'ACCOUNTS_RECEIVABLE') === 27.5 && ledgerOf(db, 'INVOICE', inv, 'REVENUE') === -25 && ledgerOf(db, 'INVOICE', inv, 'VAT_OUTPUT') === -2.5,
+    'H1 Hauptbuch AR 27.5 / REVENUE 25 / VAT_OUTPUT 2.5');
+  // dieselbe Zeile wie eine normale VAT_10-Zeile mit gleichem Preis und Einstand
+  const { toInvoiceLine } = await import('../../src/core/invoices/line-derivation.ts');
+  const normal = toInvoiceLine({ productId: 'x', quantity: 1, unitPrice: 25, costBasis: 14, scheme: 'VAT_10' });
+  ok(normal.vatAmount === Number(l.vat_amount) && normal.lineTotal === Number(l.line_total) && normal.unitPrice === Number(l.unit_price), 'H2 identisch zu einer normalen VAT_10-Zeile');
+  const pz = bulkKauf({ metal: 'gold', fineness: '24K', weight: '10', cost: '400', saleTax: 'ZERO' });
+  const z = lotOfPurchase(db, pz);
+  const invz = verkauf([{ lotId: z, weight: '10', type: 'BY_WEIGHT', price: '450' }]);
+  const lz = lineRow(db, lineOf(db, invz));
+  ok(lz.tax_scheme === 'ZERO' && Number(lz.vat_amount) === 0 && Number(lz.line_total) === 450 && Number(lz.bulk_cogs_fils) === 400000 && lot(z).status === 'EXHAUSTED',
+    'H3 ZERO: keine MwSt, Kunde 450.000, COGS = ganzer Rest 400.000');
+  ok(balancedInventory(db), 'H4 INVENTORY = Σ Restwert');
+}
+
+// ══ I — Ändern ════════════════════════════════════════════════════════════════
+{
+  const db = neu();
+  const p = bulkKauf({ weight: '10', cost: '20' });
+  const id = lotOfPurchase(db, p);
+  const inv = verkauf([{ lotId: id, weight: '10', price: '30' }]);   // ganzer Lot → EXHAUSTED
+  const lineId = lineOf(db, inv);
+  ok(lot(id).status === 'EXHAUSTED', 'I0 Lot erschöpft');
+  const rev = (): number => n(db, 'SELECT revision FROM invoices WHERE id = ?', [inv]);
+  void rev;
+  // Preis/Typ/Beschreibung ändern: COGS bleibt, Lot unberührt
+  imHaus(() => useInvoiceStore.getState().editInvoice(inv, { reason: 'Preis', lines: [{ lineId, productId: 'bulk-silver-925-branch-main', unitPrice: 0, purchasePrice: 0, taxScheme: 'MARGIN', vatRate: 10, vatAmount: 0, lineTotal: 0,
+    bulkIntent: { lotId: id, weightMg: 10000, bulkType: 'SET', unitPriceFils: 35000, description: 'Set · Silver 925 · 10.000 g' } }] as never }));
+  reload();
+  const e1 = lineRow(db, lineId);
+  ok(Number(e1.unit_price) === 35 && Number(e1.purchase_price_snapshot) === 20 && Number(e1.bulk_cogs_fils) === 20000 && e1.bulk_type === 'SET' && Number(e1.vat_amount) === r3(15 * 10 / 110),
+    `I1 Preis 35, Typ SET, COGS unverändert 20.000, MwSt neu (${S([e1.unit_price, e1.vat_amount, e1.bulk_type])})`);
+  ok(lot(id).remainingWeightMg === 0 && moves(id).length === 2 && ledgerOf(db, 'INVOICE', inv, 'COGS') === 20, 'I1 Lot unberührt, COGS-Saldo 20');
+  // Lot/Gewicht ändern → gesperrt
+  ok(meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(inv, { reason: 'x', lines: [{ lineId, productId: 'bulk-silver-925-branch-main', unitPrice: 0, purchasePrice: 0, taxScheme: 'MARGIN', vatRate: 10, vatAmount: 0, lineTotal: 0,
+    bulkIntent: { lotId: id, weightMg: 9000, bulkType: 'SET', unitPriceFils: 35000 } }] as never }))).includes('BULK_LINE_FIELDS_LOCKED'), 'I2 Gewicht einer bestehenden Bulk-Zeile → gesperrt');
+  // Entfernen + neu im selben Edit aus dem gerade erschöpften Lot (9 g)
+  imHaus(() => useInvoiceStore.getState().editInvoice(inv, { reason: 'Gewicht korrigiert', lines: [{ productId: '', unitPrice: 0, purchasePrice: 0, taxScheme: 'MARGIN', vatRate: 10, vatAmount: 0, lineTotal: 0,
+    bulkIntent: { lotId: id, weightMg: 9000, bulkType: 'RING', unitPriceFils: 30000 } }] as never }));
+  reload();
+  const lines2 = db.exec('SELECT id, bulk_weight_mg, bulk_cogs_fils FROM invoice_lines WHERE invoice_id = ?', [inv])[0].values;
+  ok(lines2.length === 1 && lines2[0][0] !== lineId && Number(lines2[0][1]) === 9000 && Number(lines2[0][2]) === 18000, `I3 alte Zeile zurück, neue 9 g = 18.000 (${S(lines2)})`);
+  ok(lot(id).remainingWeightMg === 1000 && lot(id).remainingValueFils === 2000 && lot(id).status === 'ACTIVE', 'I3 Lot 1.000 g / 2.000 ACTIVE');
+  const kinds = moves(id).map((m) => m.kind);
+  ok(S(kinds) === S(['PURCHASE', 'SALE', 'SALE_REVERSAL', 'SALE']), `I3 Bewegungen ${S(kinds)}`);
+  ok(balancedInventory(db) && invOk(id), 'I4 INVENTORY = Σ Restwert, Invarianten');
+}
+
+// ══ J — Storno ohne/mit Zahlung, Löschen ═════════════════════════════════════
+{
+  const db = neu();
+  const p = bulkKauf({ weight: '100', cost: '200' });
+  const id = lotOfPurchase(db, p);
+  const inv = verkauf([{ lotId: id, weight: '10', price: '50' }]);
+  imHaus(() => cancelInvoiceInHouse({ invoiceId: inv, refundMethod: 'cash' }, 'branch-main'));
+  reload();
+  ok(lot(id).remainingWeightMg === 100000 && lot(id).remainingValueFils === 200000 && moves(id).at(-1)?.kind === 'SALE_REVERSAL', 'J1 Storno ohne Zahlung: exakt zurück (SALE_REVERSAL)');
+  ok(ledgerOf(db, 'INVOICE', inv, 'COGS') === 0 && balancedInventory(db), 'J1 COGS gespiegelt, INVENTORY = Σ Restwert');
+  const inv2 = verkauf([{ lotId: id, weight: '10', price: '50' }]);
+  zahlen(db, inv2, 20);   // Teilzahlung → PARTIAL mit Geld
+  imHaus(() => cancelInvoiceInHouse({ invoiceId: inv2, refundMethod: 'cash' }, 'branch-main'));
+  reload();
+  const k2 = moves(id).map((m) => m.kind);
+  ok(lot(id).remainingWeightMg === 100000 && k2.at(-1) === 'RETURN' && k2.filter((k) => k === 'RETURN' || k === 'SALE_REVERSAL').length === 2,
+    `J2 Storno mit Zahlung: über die Retoure genau einmal zurück (${S(k2)})`);
+  ok(inventory(db) === 200 && balancedInventory(db) && invOk(id), 'J2 kein doppelter INVENTORY-Effekt');
+  const inv3 = verkauf([{ lotId: id, weight: '30', price: '90' }]);
+  imHaus(() => useInvoiceStore.getState().deleteInvoice(inv3));
+  reload();
+  const last = moves(id).at(-1)!;
+  ok(lot(id).remainingWeightMg === 100000 && last.kind === 'SALE_REVERSAL' && last.sourceId === inv3 && !!last.sourceLineId, 'J3 Löschen: exakt zurück, Bewegung behält Rechnungs- und Zeilen-Id');
+  ok(balancedInventory(db) && invOk(id), 'J3 INVENTORY = Σ Restwert');
+}
+
+// ══ K — Retoure und Retoure-Storno ═══════════════════════════════════════════
+{
+  const db = neu();
+  const p = bulkKauf({ weight: '10', cost: '20' });
+  const id = lotOfPurchase(db, p);
+  const inv = verkauf([{ lotId: id, weight: '10', price: '30' }]);
+  zahlen(db, inv);
+  const line = lineOf(db, inv);
+  ok(meldung(() => retoureBulk(db, inv, line, 0.5)).includes('BULK_RETURN_WHOLE_LINE_ONLY'), 'K1 Teilmenge 0.5 → Nein');
+  ok(meldung(() => retoureBulk(db, inv, line, 1, 'WRITE_OFF')).includes('BULK_RETURN_DISPOSITION'), 'K1 Disposition WRITE_OFF → Nein');
+  // Lot schließen ist nicht möglich (Rest 0) — Retoure in ein erschöpftes Lot
+  const rid = retoureBulk(db, inv, line);
+  ok(lot(id).remainingWeightMg === 10000 && lot(id).remainingValueFils === 20000 && lot(id).status === 'ACTIVE', 'K2 Retoure: exakt 10 g / 20.000 zurück, EXHAUSTED → ACTIVE');
+  ok(ledgerOf(db, 'SALES_RETURN_COGS', rid, 'INVENTORY') === 20 && ledgerOf(db, 'SALES_RETURN_COGS', rid, 'COGS') === -20, 'K2 COGS-Rückbuchung = bulk_cogs_fils');
+  ok(balancedInventory(db) && invOk(id), 'K2 INVENTORY = Σ Restwert');
+  // Retoure-Storno
+  imHaus(() => cancelReturnHouse.cancelReturnInHouse(rid, 'Irrtum', OWNER_ACTOR, 'branch-main'));
+  reload();
+  ok(lot(id).remainingWeightMg === 0 && lot(id).status === 'EXHAUSTED' && moves(id).at(-1)?.kind === 'RETURN_CANCEL', 'K3 Retoure-Storno: wieder heraus (RETURN_CANCEL), EXHAUSTED');
+  ok(balancedInventory(db) && invOk(id), 'K3 INVENTORY = Σ Restwert');
+  // Retoure → Ware wieder verkauft → Retoure-Storno = RESOLD
+  const rid2 = retoureBulk(db, inv, line);
+  verkauf([{ lotId: id, weight: '4', price: '10' }]);
+  ok(meldung(() => imHaus(() => cancelReturnHouse.cancelReturnInHouse(rid2, 'x', OWNER_ACTOR, 'branch-main'))).includes('RETURN_STOCK_RESOLD'), 'K4 nach Weiterverkauf → RETURN_STOCK_RESOLD');
+  // Retoure in ein GESCHLOSSENES Lot reaktiviert es
+  const db2 = neu();
+  const p2 = bulkKauf({ weight: '10', cost: '20' });
+  const id2 = lotOfPurchase(db2, p2);
+  const invB = verkauf([{ lotId: id2, weight: '4', price: '10' }]);
+  zahlen(db2, invB);
+  imHaus(() => lh.closeLotInHouse({ actionId: newAction(), lotId: id2, expectedRevision: lot(id2).revision, confirmWeightMg: 6000, confirmValueFils: 12000, reason: 'Rest' }, CTXB));
+  ok(lot(id2).status === 'CLOSED', 'K5 Lot geschlossen');
+  retoureBulk(db2, invB, lineOf(db2, invB));
+  ok(lot(id2).status === 'ACTIVE' && lot(id2).closedAt === null && lot(id2).remainingWeightMg === 4000 && lot(id2).remainingValueFils === 8000, 'K5 Retoure in CLOSED-Lot → ACTIVE, closed_at leer, 4 g / 8.000');
+  ok(balancedInventory(db2) && invOk(id2), 'K5 INVENTORY = Σ Restwert');
+}
+
+// ══ L — Spec 15 komplett: Einkauf, Ring, Necklace, Schwund, Retoure Ring, Händler, Close ══
+{
+  const db = neu();
+  const p = bulkKauf({ weight: '500', cost: '1000', composition: COMP });
+  const id = lotOfPurchase(db, p);
+  const ring = verkauf([{ lotId: id, weight: '7', type: 'RING', price: '25' }]);
+  zahlen(db, ring);
+  verkauf([{ lotId: id, weight: '21.5', type: 'NECKLACE_CHAIN', price: '70' }]);
+  imHaus(() => lh.writeOffInHouse({ actionId: newAction(), lotId: id, expectedRevision: lot(id).revision, weightMg: 1200, reason: 'Nachwiegen, Waagendifferenz' }, CTXB));
+  ok(lot(id).remainingWeightMg === 470300 && lot(id).remainingValueFils === 940600, 'L3 nach Schwund 470.300 g / 940.600');
+  const rr = retoureBulk(db, ring, lineOf(db, ring));
+  ok(lot(id).remainingWeightMg === 477300 && lot(id).remainingValueFils === 954600 && ledgerOf(db, 'SALES_RETURN_COGS', rr, 'INVENTORY') === 14, 'L4 Retoure Ring: 477.300 g / 954.600, COGS 14 zurück');
+  const dealer = verkauf([{ lotId: id, weight: '475', type: 'BY_WEIGHT', price: '1000' }]);
+  const ld = lineRow(db, lineOf(db, dealer));
+  ok(Number(ld.bulk_cogs_fils) === 950000 && Number(ld.vat_amount) === 4.545 && ledgerOf(db, 'INVOICE', dealer, 'REVENUE') === -995.455, 'L5 Händler 475 g: COGS 950.000, MwSt 4.545, REVENUE 995.455');
+  imHaus(() => lh.closeLotInHouse({ actionId: newAction(), lotId: id, expectedRevision: lot(id).revision, confirmWeightMg: 2300, confirmValueFils: 4600, reason: 'Rest Abrieb' }, CTXB));
+  ok(lot(id).status === 'CLOSED' && lot(id).remainingWeightMg === 0 && lot(id).remainingValueFils === 0, 'L6 Close: 0/0, CLOSED');
+  ok(inventory(db) === 0 && accountBal(db, 'INVENTORY_LOSS') === 7 && accountBal(db, 'COGS') === 993, `L7 Abstimmung: INVENTORY 0, Verlust 7.000, COGS 993.000 (${accountBal(db, 'COGS')})`);
+  const seq = moves(id).map((m) => `${m.seq}:${m.kind}`);
+  ok(S(seq) === S(['1:PURCHASE', '2:SALE', '3:SALE', '4:WRITE_OFF', '5:RETURN', '6:SALE', '7:CLOSE']), `L7 Bewegungen ${S(seq)}`);
+  ok(invOk(id), 'L7 Invarianten');
+}
+
 console.log(`
 bulk-metal: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);

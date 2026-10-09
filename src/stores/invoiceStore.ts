@@ -9,6 +9,21 @@ import { trackChange } from '@/core/sync/sync-service';
 import { assertLotLessStockAvailable, assertNoLegacyLotLessLines, giveBackStock, hasLotHistory, invoiceStockLines, releaseLegacyDeduction, takeStock } from '@/core/lots/stock-contract';
 import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, reconcileSaleStatus, assertLotsConsumable, assertLotTrackedLinesResolved, assertProductsSellable } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
+// BULK METAL V1 — Bulk-Zeilen: Absicht → Zeile über den bestehenden Zeilenvertrag; Gewicht/COGS exakt zurück.
+import {
+  assertBulkLineMatchesLot, buildBulkInvoiceLines, resolveBulkIntents, restoreBulkInvoiceLines, storedBulkLines,
+  type BulkLineIntent, type BulkLineMeta,
+} from '@/core/bulk/bulk-invoice';
+import { consumeBulk, type BulkCtx } from '@/core/bulk/bulk-lot-house';
+import { BulkRejected, filsToBhd } from '@/core/bulk/bulk-math';
+
+/** BULK METAL V1 — Wer/wo/wann für die Bulk-Hausfolge einer Rechnung (Filiale der Rechnung). */
+function bulkCtxOfInvoice(invoiceId: string, now: string): BulkCtx {
+  let userId = '';
+  try { userId = currentUserId(); } catch { /* ohne Sitzung */ }
+  const branchId = String(query('SELECT branch_id FROM invoices WHERE id = ?', [invoiceId])[0]?.branch_id ?? '');
+  return { branchId, userId, now };
+}
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
 import { assertInvoiceNotInClosedVatQuarter, assertNotFinalizingIntoClosedVatQuarter, assertVatUnchanged, vatFingerprint } from '@/core/tax/vat-period-lock';
@@ -132,14 +147,14 @@ interface InvoiceStore {
   loadInvoices: () => void;
   getInvoice: (id: string) => Invoice | undefined;
   createInvoiceFromOffer: (offerId: string, perLineSchemes?: Record<string, TaxScheme>, staffId?: string, specialMark?: boolean) => Invoice;
-  createDirectInvoice: (customerId: string, lines: { productId: string; lotId?: string; stockPreTaken?: boolean; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }[], notes?: string, issuedAtOverride?: string, numbering?: 'sales' | 'repair', staffId?: string, specialMark?: boolean, opts?: { allowWithAgent?: boolean; offerId?: string }) => Invoice;
+  createDirectInvoice: (customerId: string, lines: { productId: string; lotId?: string; stockPreTaken?: boolean; quantity?: number; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; bulk?: BulkLineMeta; bulkIntent?: BulkLineIntent }[], notes?: string, issuedAtOverride?: string, numbering?: 'sales' | 'repair', staffId?: string, specialMark?: boolean, opts?: { allowWithAgent?: boolean; offerId?: string }) => Invoice;
   updateInvoice: (id: string, data: Partial<Invoice>) => void;
   // Atomarer Gesamt-Edit einer gebuchten Rechnung (Header + Zeilen + Inventory +
   // Ledger-Reverse+Repost + optionale Delta-Zahlung + Status) in EINER SQL-Transaktion
   // mit Pflicht-Aenderungsgrund (Audit). Reduktion unter den bereits gezahlten Betrag
   // wird (vorerst) blockiert — Ueberzahlung→Store-Guthaben kommt als eigener Slice.
   editInvoice: (id: string, input: {
-    lines: { lineId?: string; productId: string; lotId?: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number }[];
+    lines: { lineId?: string; productId: string; lotId?: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number; bulk?: BulkLineMeta; bulkIntent?: BulkLineIntent }[];
     customerId?: string;
     notes?: string;
     issuedAt?: string;
@@ -269,6 +284,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     let branchId: string, userId: string;
     try { branchId = currentBranchId(); userId = currentUserId(); }
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
+    // BULK METAL V1 — Bulk-Absichten werden hier (falls noch nicht geschehen) zu Zeilen; ein Bulk-
+    // Systemartikel ohne Bulk-Angaben (Angebot, Auftrag, Kommission …) wird abgewiesen.
+    lines = resolveBulkIntents(lines, branchId);
 
     // Repair-Invoices haben eine eigene Nummernserie analog zum Sales-Flow:
     //   RPINV-YYYY-NNNNNN  während PARTIAL
@@ -299,6 +317,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Gleiches Muster wie editInvoice; kein zweiter uuid() pro Line mehr.
     type ResolvedLine = typeof lines[number] & { _id: string; _resolvedLotId: string | null; _resolvedCost: number };
     const resolvedLines: ResolvedLine[] = lines.map(l => {
+      if (l.bulk) {
+        // BULK METAL V1 — Lot und Einstand (= zugeteilter COGS) stehen fest; kein FIFO, kein Stückpfad.
+        assertBulkLineMatchesLot(l as never, branchId);
+        return { ...l, _id: uuid(), _resolvedLotId: l.bulk.lotId, _resolvedCost: l.purchasePrice };
+      }
       let lotId = l.lotId || null;
       let cost = l.purchasePrice;
       if (l.stockPreTaken) {
@@ -335,10 +358,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     if (!opts?.allowWithAgent) {
       assertProductsSellable(resolvedLines.map(l => l.productId));
     }
-    const toTake = resolvedLines.filter(l => !l.stockPreTaken);
+    const toTake = resolvedLines.filter(l => !l.stockPreTaken && !l.bulk);
     assertLotsConsumable(toTake.map(l => ({ lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) })));
     assertLotTrackedLinesResolved(toTake.map(l => ({ productId: l.productId, lotId: l._resolvedLotId })));
-    assertLotLessStockAvailable(resolvedLines.map(l => ({ productId: l.productId, lotId: l._resolvedLotId, qty: l.quantity || 1, preTaken: l.stockPreTaken })));
+    assertLotLessStockAvailable(resolvedLines.filter(l => !l.bulk).map(l => ({ productId: l.productId, lotId: l._resolvedLotId, qty: l.quantity || 1, preTaken: l.stockPreTaken })));
 
     let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
     for (const l of resolvedLines) {
@@ -372,14 +395,18 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
     const lineStmt = db.prepare(
       `INSERT INTO invoice_lines (id, invoice_id, product_id, quantity, unit_price, purchase_price_snapshot,
-        vat_rate, tax_scheme, vat_amount, line_total, position, lot_id, stock_taken)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+        vat_rate, tax_scheme, vat_amount, line_total, position, lot_id, stock_taken,
+        description, bulk_weight_mg, bulk_cogs_fils, bulk_type, bulk_metal, bulk_fineness)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     resolvedLines.forEach((l, i) => {
       const qty = Math.max(1, l.quantity || 1);
       // STOCK-LOT-INTEGRITY — Verbrauch beim Verkauf, mit Nachweis (Los: unten consumeLot).
-      const taken = takeStock({ productId: l.productId, lotId: l._resolvedLotId, qty, preTaken: l.stockPreTaken }, now);
-      lineStmt.run([l._id, id, l.productId, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId, taken]);
+      // BULK METAL V1 — eine Bulk-Zeile nimmt „1" (die Ware); das Gewicht nimmt unten consumeBulk.
+      const taken = l.bulk ? 1 : takeStock({ productId: l.productId, lotId: l._resolvedLotId, qty, preTaken: l.stockPreTaken }, now);
+      const b = l.bulk;
+      lineStmt.run([l._id, id, l.productId, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId, taken,
+        b ? (l.description || null) : null, b ? b.weightMg : null, b ? b.cogsFils : null, b ? b.bulkType : null, b ? b.metal : null, b ? b.fineness : null]);
     });
     lineStmt.free();
 
@@ -389,7 +416,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Phase 7 Sync: products.quantity nach Konsumption nachziehen.
     const directProductsToSync = new Set<string>();
     resolvedLines.forEach(l => {
-      if (l._resolvedLotId && !l.stockPreTaken) {
+      if (l.bulk) {
+        // BULK METAL V1 — Gewicht aus dem Lot; der Snapshot der Zeile MUSS die Zuteilung sein.
+        consumeBulk({ lotId: l.bulk.lotId, weightMg: l.bulk.weightMg, bulkType: l.bulk.bulkType, expectedCogsFils: l.bulk.cogsFils,
+          source: { module: 'INVOICE', id, lineId: l._id }, businessDate: issuedAt.slice(0, 10) }, { branchId, userId, now });
+      } else if (l._resolvedLotId && !l.stockPreTaken) {
         const qty = Math.max(1, l.quantity || 1);
         consumeLot(l._resolvedLotId, qty);
       }
@@ -512,6 +543,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           // Stornierung: 'reserved' → 'in_stock' (war ja noch nicht 'sold').
           unreserveProductIfRestored(pid);
         }
+        // BULK METAL V1 — Bulk-Zeilen: exakt die gespeicherten mg/Fils zurück ins Lot.
+        restoreBulkInvoiceLines(id, bulkCtxOfInvoice(id, now));
       }
 
       // Vor dem UPDATE Auto-Expenses fuer Reverse-Posting einsammeln (sonst sind sie nach
@@ -617,7 +650,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   editInvoice: (id, input) => {
     const db = getDatabase();
     const now = new Date().toISOString();
-    const { lines, customerId, notes, staffId, deltaPayment, reason } = input;
+    const { customerId, notes, staffId, deltaPayment, reason } = input;
+    let lines = input.lines;
     // CENTRAL-UI-PARITY R6B — dasselbe Datum, egal wer es schickt. Die Maske gab `…T00:00:00.000Z`,
     // der Fernauftrag `YYYY-MM-DD`: in der Rechnung stand je nach Rechner ein anderer Wert. Die Regel
     // ist die des Anlegens (`createDirectInvoice`): ein reines Datum wird Mitternacht UTC.
@@ -640,8 +674,32 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Summe unter die Gutschriften). Geprüft VOR jedem Schreiben.
     const baseLines = loadEditBaseLines(id);
     const lineMatch = matchEditLines(baseLines, lines);
-    assertEditKeepsReturns(id, baseLines, lines, lineMatch);
     const baseById = new Map(baseLines.map(b => [b.id, b]));
+    // BULK METAL V1 — eine bestehende Bulk-Zeile behält Lot, Gewicht und COGS (gesperrt); Preis, Typ und
+    // Beschreibung bleiben änderbar. Korrektur von Lot/Gewicht: Zeile entfernen und neu anlegen.
+    const bulkBase = new Map(storedBulkLines(id).map(b => [b.id, b]));
+    const keptBulkType = new Map<string, string>();
+    lines = lines.map((l, i) => {
+      const b = lineMatch[i] ? bulkBase.get(lineMatch[i] as string) : undefined;
+      if (!b) {
+        if (!l.bulkIntent && String(l.productId || '').startsWith('bulk-')) {
+          throw new BulkRejected('BULK_PRODUCT_DIRECT_SALE', 'bulk metal is sold with “Add bulk metal” — choose a lot and a weight');
+        }
+        return l;
+      }
+      const it = l.bulkIntent;
+      if (!it || it.lotId !== b.lotId || it.weightMg !== b.weightMg) {
+        throw new BulkRejected('BULK_LINE_FIELDS_LOCKED', 'lot and weight of a bulk line cannot be changed — remove the line and add it again');
+      }
+      const base = baseById.get(b.id)!;
+      if (it.bulkType) keptBulkType.set(b.id, it.bulkType);
+      const { bulkIntent: _drop, ...rest } = l;
+      void _drop;
+      return { ...rest, productId: b.productId, lotId: b.lotId, quantity: 1, taxScheme: base.taxScheme, vatRate: base.vatRate,
+        purchasePrice: base.purchasePrice, unitPrice: filsToBhd(it.unitPriceFils),
+        description: it.description || String(query('SELECT description FROM invoice_lines WHERE id = ?', [b.id])[0]?.description ?? '') };
+    });
+    assertEditKeepsReturns(id, baseLines, lines, lineMatch);
 
     const deltaAmount = deltaPayment && deltaPayment.amount > 0.005 ? deltaPayment.amount : 0;
 
@@ -762,6 +820,23 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         if (line.stockTaken !== null) giveBackStock(line.productId, line.lotId, line.stockTaken, now);
         else if (line.lotId) restoreLot(line.lotId, line.qty);
       }
+      // BULK METAL V1 — erst wegfallende Bulk-Zeilen exakt zurück, DANN neue Bulk-Absichten zuteilen
+      // (so lässt sich dieselbe Ware aus einem gerade erschöpften Lot neu erfassen).
+      const bulkCtx = bulkCtxOfInvoice(id, now);
+      restoreBulkInvoiceLines(id, bulkCtx, new Set([...bulkBase.keys()].filter(bid => !keptLineIds.has(bid))));
+      {
+        const newIntents = lines.filter(l => l.bulkIntent).map(l => l.bulkIntent!);
+        if (newIntents.length > 0) {
+          const built = buildBulkInvoiceLines(newIntents, bulkCtx.branchId);
+          let k = 0;
+          lines = lines.map(l => {
+            if (!l.bulkIntent) return l;
+            const { bulkIntent: _d, lineId: _l, ...rest } = l;
+            void _d; void _l;
+            return { ...rest, ...built[k++] };
+          });
+        }
+      }
       // INVOICE-EDIT S2 — nur Zeilen löschen, die wirklich wegfallen; fortgesetzte Zeilen werden
       // unten aktualisiert und behalten ihre ID.
       // Sync (Scope A): trackChange('delete') braucht nur die id; innerhalb der offenen Tx → atomar.
@@ -819,10 +894,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       assertProductsSellable(resolvedLines.map(l => l.productId));
       // INVOICE-EDIT S2 — eine fortgesetzte Zeile bleibt auf ihrem Los: ihr Mehr muss DIESES Los
       // haben. Eigener, verständlicher Satz statt „nicht mehr auf Lager" (die Maske zeigt denselben).
-      assertKeptLinesStock(needing.filter(l => l._delta).map(l => ({ productId: l.productId, lotId: l._resolvedLotId, extra: need(l) })));
-      assertLotsConsumable(needing.map(l => ({ lotId: l._resolvedLotId, qty: need(l) })));
+      const needingPieces = needing.filter(l => !l.bulk);   // BULK METAL V1 — Bulk prüft consumeBulk
+      assertKeptLinesStock(needingPieces.filter(l => l._delta).map(l => ({ productId: l.productId, lotId: l._resolvedLotId, extra: need(l) })));
+      assertLotsConsumable(needingPieces.map(l => ({ lotId: l._resolvedLotId, qty: need(l) })));
       assertLotTrackedLinesResolved(resolvedLines.map(l => ({ productId: l.productId, lotId: l._resolvedLotId })));
-      assertLotLessStockAvailable(needing.map(l => ({ productId: l.productId, lotId: l._resolvedLotId, qty: need(l) })));
+      assertLotLessStockAvailable(needingPieces.map(l => ({ productId: l.productId, lotId: l._resolvedLotId, qty: need(l) })));
+      for (const l of resolvedLines) if (l.bulk) assertBulkLineMatchesLot(l as never, bulkCtx.branchId);
 
       // INVOICE-EDIT S2 — die Beträge einer fortgesetzten Zeile rechnet das Haus aus dem Einstand,
       // den die Zeile wirklich hält (bei MARGIN hängt die Steuer daran), nicht aus dem, was Maske
@@ -840,8 +917,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       let netAmount = 0, totalVat = 0, totalPurchase = 0, grossAmount = 0;
       const stmt = db.prepare(
         `INSERT INTO invoice_lines (id, invoice_id, product_id, description, quantity, unit_price, purchase_price_snapshot,
-          vat_rate, tax_scheme, vat_amount, line_total, position, lot_id, stock_taken)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+          vat_rate, tax_scheme, vat_amount, line_total, position, lot_id, stock_taken,
+          bulk_weight_mg, bulk_cogs_fils, bulk_type, bulk_metal, bulk_fineness)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
       );
       resolvedLines.forEach((l, i) => {
         const qty = Math.max(1, l.quantity || 1);
@@ -858,7 +936,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
             taken = l._oldTaken + d;
           }
         } else {
-          taken = takeStock({ productId: l.productId, lotId: l._resolvedLotId, qty }, now);
+          taken = l.bulk ? 1 : takeStock({ productId: l.productId, lotId: l._resolvedLotId, qty }, now);
         }
         if (l._kept) {
           db.run(
@@ -868,8 +946,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
              WHERE id = ?`,
             [l.productId, l.description || null, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId, taken, l._id],
           );
+          // BULK METAL V1 — Typ einer bestehenden Bulk-Zeile ist änderbar (wirkt auf „Sold as").
+          const bt = keptBulkType.get(l._id);
+          if (bt) db.run(`UPDATE invoice_lines SET bulk_type = ? WHERE id = ? AND bulk_weight_mg IS NOT NULL`, [bt, l._id]);
         } else {
-          stmt.run([l._id, id, l.productId, l.description || null, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId, taken]);
+          const b = l.bulk;
+          stmt.run([l._id, id, l.productId, l.description || null, qty, l.unitPrice, l._resolvedCost, l.vatRate, l.taxScheme, l.vatAmount, l.lineTotal, i + 1, l._resolvedLotId, taken,
+            b ? b.weightMg : null, b ? b.cogsFils : null, b ? b.bulkType : null, b ? b.metal : null, b ? b.fineness : null]);
         }
         netAmount += l.unitPrice * qty;
         totalVat += l.vatAmount;   // L-17: vatAmount ist pro Line (createDirect-Konvention), kein ×qty
@@ -889,7 +972,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
       // Neue Lots konsumieren.
       resolvedLines.forEach(l => {
-        if (l._resolvedLotId && !l._delta) {
+        if (l.bulk) {
+          consumeBulk({ lotId: l.bulk.lotId, weightMg: l.bulk.weightMg, bulkType: l.bulk.bulkType, expectedCogsFils: l.bulk.cogsFils,
+            source: { module: 'INVOICE', id, lineId: l._id } }, bulkCtx);
+        } else if (l._resolvedLotId && !l._delta) {
           const qty = Math.max(1, l.quantity || 1);
           consumeLot(l._resolvedLotId, qty);
         }
@@ -1447,6 +1533,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       else releaseLegacyDeduction(line.id, line.productId, now);
       if (line.productId) deleteProductsToSync.add(line.productId);
     }
+    // BULK METAL V1 — Bulk-Zeilen: exakt zurück, bevor die Zeilen verschwinden (die Bewegung behält die Kennungen).
+    restoreBulkInvoiceLines(id, bulkCtxOfInvoice(id, now));
     db.run(`DELETE FROM invoice_lines WHERE invoice_id = ?`, [id]);
     for (const pid of deleteProductsToSync) {
       syncProductQuantity(pid);

@@ -27,6 +27,8 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useProductStore } from '@/stores/productStore';
 import { InvoiceActionRejected } from './invoice-cancel';
 import { assertInvoiceHouse, localInvoiceBranch } from './invoice-house-guards';
+// BULK METAL V1 — Bulk-Absichten werden hier zu Zeilen (Zuteilung in DIESER Transaktion).
+import { resolveBulkIntents } from '@/core/bulk/bulk-invoice';
 
 /** Die Zahlarten der Maske („4 · PAYMENT": Cash, Bank, Card, Benefit) — keine weitere. */
 export const INVOICE_CREATE_PAYMENT_METHODS = ['cash', 'bank_transfer', 'card', 'benefit'] as const;
@@ -139,6 +141,7 @@ export function createInvoiceInHouse(input: InvoiceCreateInput, branchId: string
   if (!Array.isArray(input.lines) || input.lines.length === 0) {
     throw new InvoiceActionRejected(INVOICE_NEEDS_A_LINE, 'an invoice needs at least one line');
   }
+  input = { ...input, lines: resolveBulkIntents(input.lines, branchId) };
   for (const l of input.lines) {
     if (!query('SELECT id FROM products WHERE id = ? AND branch_id = ?', [l.productId, branchId])[0]) {
       throw new InvoiceActionRejected(PRODUCT_NOT_FOUND, 'no such article in this branch');

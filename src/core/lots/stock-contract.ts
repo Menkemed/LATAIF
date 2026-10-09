@@ -121,7 +121,8 @@ export function retakeLotLessStock(productId: string, qty: number, now: string):
 
 /** Die Zeilen einer Rechnung mit ihrem Nachweis — für Storno/Löschen/Ändern. */
 export function invoiceStockLines(invoiceId: string): Array<{ id: string; productId: string | null; lotId: string | null; qty: number; stockTaken: number | null }> {
-  return query('SELECT id, product_id, lot_id, quantity, stock_taken FROM invoice_lines WHERE invoice_id = ?', [invoiceId])
+  // BULK METAL V1 — Bulk-Zeilen geben ihr Gewicht über restoreBulkInvoiceLines zurück, nie über Stückpfade.
+  return query('SELECT id, product_id, lot_id, quantity, stock_taken FROM invoice_lines WHERE invoice_id = ? AND bulk_weight_mg IS NULL', [invoiceId])
     .map((r) => ({
       id: String(r.id),
       productId: (r.product_id as string | null) ?? null,

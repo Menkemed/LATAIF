@@ -41,6 +41,9 @@ import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { trackChange } from '@/core/sync/sync-service';
 import { syncProductQuantity, trackLotRow, trackProductRow, reconcileSaleStatus } from '@/core/lots/lot-queries';
 import { hasLotHistory, isServiceProduct, retakeLotLessStock } from '@/core/lots/stock-contract';
+// BULK METAL V1 — Retoure-Storno einer Bulk-Zeile: exakt dieselben mg/Fils wieder heraus, sonst RESOLD.
+import { storedBulkLine } from '@/core/bulk/bulk-invoice';
+import { bulkRetakeIssue, retakeBulk } from '@/core/bulk/bulk-lot-house';
 
 /** Zeile mit Bestandsnachweis eines Artikels ohne Los (die Retoure gab `products.quantity` zurück). */
 function lotLessContractLine(invoiceLineId: string, productId: string): boolean {
@@ -139,10 +142,18 @@ function revertDisposition(
   lines: RueckLine[],
   disposition: ProductDisposition,
   now: string,
+  bulk: { returnId: string; branchId: string; userId: string },
 ): void {
   for (const line of lines) {
     if (!line.productId) continue;
     const qty = Math.max(1, line.quantity || 1);
+    const bulkLine = disposition === 'IN_STOCK' && line.invoiceLineId ? storedBulkLine(line.invoiceLineId) : null;
+    if (bulkLine) {
+      retakeBulk({ lotId: bulkLine.lotId, weightMg: bulkLine.weightMg, valueFils: bulkLine.cogsFils,
+        source: { module: 'SALES_RETURN', id: bulk.returnId, lineId: bulkLine.id }, bulkType: bulkLine.bulkType },
+      { branchId: bulk.branchId, userId: bulk.userId, now });
+      continue;
+    }
 
     // RETURN-CANCEL-STATUS — hier wird NUR der Bestand zurückgenommen. Den Status leitet die Hausfolge
     // danach aus Restbestand + Rechnungszustand ab (`reconcileSaleStatus`) — vorher stand hier in jedem
@@ -287,6 +298,15 @@ export function cancelReturnInHouse(
   if (disposition === 'IN_STOCK') {
     for (const line of lines) {
       if (!line.invoiceLineId) continue;
+      const bl = storedBulkLine(line.invoiceLineId);
+      if (bl) {
+        const issue = bulkRetakeIssue(bl.lotId, bl.weightMg, bl.cogsFils);
+        if (issue) {
+          throw new ReturnCancelRejected(RETURN_STOCK_RESOLD,
+            `Cannot cancel this return: ${issue}. Resolve the later sale first.`);
+        }
+        continue;
+      }
       const lot = query(
         `SELECT sl.qty_remaining FROM invoice_lines il JOIN stock_lots sl ON sl.id = il.lot_id WHERE il.id = ?`,
         [line.invoiceLineId],
@@ -320,7 +340,7 @@ export function cancelReturnInHouse(
   let invoiceTouched = false;
 
   // 1. Inventory/Disposition zurück (best-effort bei KEEP_AS_OWN/RETURN_TO_OWNER).
-  revertDisposition(db, lines, disposition, now);
+  revertDisposition(db, lines, disposition, now, { returnId, branchId, userId: String(actor.userId ?? '') });
 
   // 2. VAT auf der Invoice wiederherstellen (nur wenn Approve sie reduziert hatte).
   if (wasApproved && vatCorrected > 0) {

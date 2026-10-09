@@ -34,6 +34,10 @@ import {
 } from '@/core/ledger/posting';
 import { giveBackStock, hasLotHistory, isServiceProduct } from '@/core/lots/stock-contract';
 import { restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+// BULK METAL V1 — Bulk-Zeile: nur ganz, nur IN_STOCK; exakt dasselbe Gewicht und derselbe COGS zurück ins Lot.
+import { storedBulkLine } from '@/core/bulk/bulk-invoice';
+import { restoreBulk } from '@/core/bulk/bulk-lot-house';
+import { BulkRejected } from '@/core/bulk/bulk-math';
 // CENTRAL-UI-PARITY R6E — der Storno ist EINE Hausfolge (Primary und PC2); der Store ist nur Anschluss.
 import { runOnPrimary } from '@/core/data/primary-action';
 import { isClientMode } from '@/core/bridge/client-mode';
@@ -109,10 +113,20 @@ function applyDisposition(
   disposition: ProductDisposition,
   now: string,
   branchId: string,
+  returnId: string,
+  userId: string,
 ): void {
   for (const line of lines) {
     if (!line.productId) continue;
     const qty = Math.max(1, line.quantity || 1);
+    const bulkLine = line.invoiceLineId ? storedBulkLine(line.invoiceLineId) : null;
+    if (bulkLine) {
+      // BULK METAL V1 — exakt die gespeicherten mg/Fils ins Ursprungs-Lot (erschöpft/geschlossen → ACTIVE).
+      restoreBulk({ lotId: bulkLine.lotId, weightMg: bulkLine.weightMg, valueFils: bulkLine.cogsFils, kind: 'RETURN',
+        source: { module: 'SALES_RETURN', id: returnId, lineId: bulkLine.id }, bulkType: bulkLine.bulkType },
+      { branchId, userId, now });
+      continue;
+    }
 
     if (disposition === 'RETURN_TO_OWNER') {
       // Plan §Commission §13 A — Ware verlässt System, Consignment auf RETURNED_TO_OWNER.
@@ -348,6 +362,14 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     const invRows = query('SELECT customer_id FROM invoices WHERE id = ?', [input.invoiceId]);
     const customerId = invRows[0]?.customer_id as string;
 
+    // BULK METAL V1 — eine Bulk-Zeile geht nur GANZ zurück und nur in den Bestand (IN_STOCK).
+    for (const l of input.lines) {
+      if (!l.invoiceLineId || !storedBulkLine(l.invoiceLineId)) continue;
+      if (l.quantity !== 1) throw new BulkRejected('BULK_RETURN_WHOLE_LINE_ONLY', 'a bulk metal line is returned as a whole (quantity 1)');
+      if ((input.productDisposition || 'IN_STOCK') !== 'IN_STOCK') {
+        throw new BulkRejected('BULK_RETURN_DISPOSITION', 'returned bulk metal goes back into its lot (In stock) — write it off afterwards if needed');
+      }
+    }
     // Per-Line Cap & Validierung.
     for (const l of input.lines) {
       if (!Number.isFinite(l.quantity) || l.quantity < 0) {
@@ -406,7 +428,7 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     stmt.free();
 
     // Plan 2026-05 §C: Disposition beim Anlegen anwenden — Ware ist physisch retour.
-    applyDisposition(db, input.lines, disposition, now, branchId);
+    applyDisposition(db, input.lines, disposition, now, branchId, id, userId);
 
     // Slice 2 — Wareneinsatz (COGS) zurueckdrehen, NUR wenn die Ware real wieder
     // Verkaufsbestand wird (IN_STOCK). Bei KEEP_AS_OWN/WRITE_OFF/RETURN_TO_OWNER

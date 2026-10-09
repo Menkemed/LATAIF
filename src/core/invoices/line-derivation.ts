@@ -13,6 +13,7 @@
 
 import { vatEngine } from '@/core/tax/vat-engine';
 import type { TaxCalculation } from '@/core/tax/vat-engine';
+import type { BulkLineIntent, BulkLineMeta } from '@/core/bulk/bulk-invoice';
 
 export type LineScheme = 'VAT_10' | 'ZERO' | 'MARGIN';
 
@@ -57,6 +58,11 @@ export interface InvoiceLineInput {
   vatRate: number;
   vatAmount: number;
   lineTotal: number;
+  /** BULK METAL V1 — Absicht einer Bulk-Zeile (die Hausfolge rechnet daraus die Zeile). */
+  bulkIntent?: BulkLineIntent;
+  /** BULK METAL V1 — die gerechnete Bulk-Zeile (Lot, Gewicht, COGS, Typ). */
+  bulk?: BulkLineMeta;
+  description?: string;
 }
 
 /**

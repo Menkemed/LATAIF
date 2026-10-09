@@ -436,8 +436,9 @@ const invariant = (db: Db, tag: string): void => {
     }
   };
   walk(resolvePath(repo, 'src'));
-  ok(S(writers.sort()) === S(['src/core/db/database.ts', 'src/core/production/production-house.ts', 'src/stores/purchaseStore.ts', 'src/stores/salesReturnStore.ts']),
-    `9 Los-Anlage nur in Backfill, Production, Einkauf, Retoure (${S(writers)})`);
+  // BULK METAL V1 — das Bulk-Lot des Einkaufs legt bulk-lot-house an (Wert = aktiviertes INVENTORY-Soll).
+  ok(S(writers.sort()) === S(['src/core/bulk/bulk-lot-house.ts', 'src/core/db/database.ts', 'src/core/production/production-house.ts', 'src/stores/purchaseStore.ts', 'src/stores/salesReturnStore.ts']),
+    `9 Los-Anlage nur in Backfill, Production, Einkauf (auch Bulk), Retoure (${S(writers)})`);
   const cc = src('src/core/bridge/commercial-commands.ts');
   ok(/createPurchaseDetailedInHouse|runPurchaseCreate/.test(cc) && !/INSERT INTO stock_lots/.test(cc), '9 PC2/Handy (purchases.create) laufen über createPurchase');
 }

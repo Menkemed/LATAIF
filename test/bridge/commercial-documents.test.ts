@@ -238,8 +238,10 @@ const PURCHASE_BODY = {
     'PURCHASE ein Los je Position');
   ok(n(db, 'SELECT qty_remaining FROM stock_lots WHERE purchase_id = ?', [v.purchaseId]) === 2,
     'PURCHASE …mit der eingekauften Menge');
-  ok(n(db, 'SELECT unit_cost FROM stock_lots WHERE purchase_id = ?', [v.purchaseId]) === 100,
-    'PURCHASE …und dem tatsaechlichen Stueckpreis dieser Charge');
+  // LOT-VAT-COST (v0.8.79) — der Einstand ist der auf INVENTORY aktivierte Nettowert: 2 × 100 brutto,
+  // davon 18,182 Vorsteuer → 181,818 / 2 = 90,909 je Stück.
+  ok(Math.abs(n(db, 'SELECT unit_cost FROM stock_lots WHERE purchase_id = ?', [v.purchaseId]) - 90.909) < 0.0005,
+    'PURCHASE …und dem tatsaechlichen (netto aktivierten) Einstand dieser Charge');
   ok(n(db, "SELECT quantity FROM products WHERE id = 'p1'") === 2,
     'PURCHASE die Artikelmenge folgt den Losen (nicht der Nutzlast)');
 

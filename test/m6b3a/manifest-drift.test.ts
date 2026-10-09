@@ -182,7 +182,8 @@ for (const t of manifestTables) {
 // (insert beim Anlegen, delete beim Löschen) → 50/36/35 → 52/36/37.
 // PRE-G5 — der Fachverlauf der Goldeinsaetze (`repair_gold_usage_history`) reist wie sein Nachbar
 // `gold_movements`: nur `insert`, nie `update`, nie `delete` → 52/36/37 → 53/36/37.
-check(iC === 53 && uC === 36 && dC === 37, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 53/36/37 — incl. the mobile purchase_inbox insert, the R7A production child rows and the PRE-G5 gold usage history)`);
+// BULK METAL V1 — `bulk_lot_movements`: nur `insert` (eine Bewegung wird nie geändert oder gelöscht) → 54/36/37.
+check(iC === 54 && uC === 36 && dC === 37, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 54/36/37 — incl. the mobile purchase_inbox insert, the R7A production child rows, the PRE-G5 gold usage history and the bulk lot movements)`);
 
 // ── 5. Rust/TS semantic parity: the SAME shared fixture the Rust test runs. Both sides must map
 //    each vector to the same verdict → transitively, Rust and TS agree byte-for-byte. ──
