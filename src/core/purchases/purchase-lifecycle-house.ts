@@ -268,6 +268,9 @@ export function createPurchaseReturnDraftInHouse(input: PurchaseReturnDraftInput
   // Der Artikel einer Zeile ist der der EINKAUFSZEILE — nicht, was ein Aufrufer dazu nennt.
   const lines = input.lines.map((l) => {
     const pl = query('SELECT product_id FROM purchase_lines WHERE id = ? AND purchase_id = ?', [l.purchaseLineId, input.purchaseId])[0];
+    if (isBulkMetalProduct(pl?.product_id as string | undefined)) {
+      throw nein('BULK_NOT_SUPPORTED_HERE', 'bulk metal cannot be returned to the supplier in this version — write it off or cancel the unused purchase');
+    }
     return {
       id: uuid(),
       purchaseLineId: l.purchaseLineId,

@@ -78,6 +78,13 @@ export function BulkMetalsPage() {
   }, [page, live]);
 
   const reload = (): void => setRefresh((r) => r + 1);
+  if (!perm.can('bulk_metals.view')) {
+    return (
+      <PageLayout title="Bulk Metals">
+        <p data-bulk-no-access style={{ fontSize: 14, color: '#6B7280' }}>You do not have access to Bulk Metals.</p>
+      </PageLayout>
+    );
+  }
   const open = (kind: Dialog['kind'], lot: BulkLotRow): void => { w.clear(); setDialog({ kind, lot, actionId: newBulkActionId() } as Dialog); };
 
   return (

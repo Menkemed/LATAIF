@@ -408,7 +408,7 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const lotTracked = hasLotHistory(transfer.productId);
     const heldLot = lotTracked
       ? (query(
-          `SELECT id, unit_cost FROM stock_lots WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining >= 1
+          `SELECT id, unit_cost FROM stock_lots WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining >= 1 AND unit = 'pcs'
             ORDER BY acquired_at ASC, id ASC LIMIT 1`, [transfer.productId])[0] ?? null)
       : null;
     if (lotTracked && !heldLot) throw new Error(STOCK_UNAVAILABLE_MESSAGE);

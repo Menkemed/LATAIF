@@ -338,7 +338,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       if (!lotId && l.productId) {
         const r = db.exec(
           `SELECT id, unit_cost FROM stock_lots
-            WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
+            WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining > 0 AND unit = 'pcs'
             ORDER BY acquired_at ASC, id ASC LIMIT 1`,
           [l.productId]
         );
@@ -871,7 +871,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         if (!lotId && l.productId) {
           const r = db.exec(
             `SELECT id, unit_cost FROM stock_lots
-              WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining > 0
+              WHERE product_id = ? AND status != 'CANCELLED' AND qty_remaining > 0 AND unit = 'pcs'
               ORDER BY acquired_at ASC, id ASC LIMIT 1`,
             [l.productId]
           );

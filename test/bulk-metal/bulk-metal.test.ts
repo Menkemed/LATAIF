@@ -869,6 +869,18 @@ function projection(db: Db): string {
   ok(remoteOps.length === 192, `X4 REMOTE_OPS = 192 (${remoteOps.length})`);
 }
 
+// ══ S — Schutzwände nachgezogen: Retouren-Entwurf, FIFO nur Stück-Lose, Seitenrecht ══
+{
+  const db = neu();
+  const p = bulkKauf({ weight: '10', cost: '20' });
+  const plId = s(db, 'SELECT id FROM purchase_lines WHERE purchase_id = ?', [p]);
+  ok(meldung(() => imHaus(() => life.createPurchaseReturnDraftInHouse({ purchaseId: p, lines: [{ purchaseLineId: plId, quantity: 1, unitPrice: 1 }] }, CTX))).includes('BULK_NOT_SUPPORTED_HERE'),
+    'E4 Retouren-Entwurf an den Lieferanten mit Bulk-Zeile → Nein');
+  ok((src('src/stores/invoiceStore.ts').match(/qty_remaining > 0 AND unit = 'pcs'/g) ?? []).length === 2 && /qty_remaining >= 1 AND unit = 'pcs'/.test(src('src/stores/agentStore.ts')),
+    'S5 FIFO-Abfragen (Anlegen, Ändern, Agent) zusätzlich nur Stück-Lose');
+  ok(/perm\.can\('bulk_metals\.view'\)/.test(src('src/pages/bulk-metals/BulkMetalsPage.tsx')), 'X3 Seite „Bulk Metals" nur mit bulk_metals.view');
+}
+
 console.log(`
 bulk-metal: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);
