@@ -33,6 +33,10 @@ import { deriveOrderStatusFromLines } from '@/core/models/types';
 import { getDatabase } from '@/core/db/database';
 import { query, getNextDocumentNumber } from '@/core/db/helpers';
 import { currentUserId } from '@/core/db/helpers';
+// BULK METAL V1 — Bulk-Lots: Storno nur unbenutzt, keine Lieferantenrückgabe; der Systemartikel bleibt in_stock.
+import { assertBulkLotsOfPurchaseUnused, cancelBulkLotsOfPurchase } from '@/core/bulk/bulk-lot-house';
+import { isBulkMetalProduct } from '@/core/bulk/bulk-product';
+const bulkActor = (): string => { try { return currentUserId(); } catch { return ''; } };
 import { applyInboxGallery } from '@/core/purchases/inbox-media';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { trackInsert, trackUpdate, trackRefund, trackDelete } from '@/core/sync/track';
@@ -506,8 +510,11 @@ export function returnToSupplierInHouse(req: PurchaseReturnRequest, ctx: HouseCt
   for (const l of req.lines) {
     if (seen.has(l.purchaseLineId)) throw nein('PURCHASE_RETURN_LINE_DUPLICATE', 'the same purchase line twice is not a return');
     seen.add(l.purchaseLineId);
-    const pl = query('SELECT id, quantity FROM purchase_lines WHERE id = ? AND purchase_id = ?', [l.purchaseLineId, req.purchaseId])[0];
+    const pl = query('SELECT id, quantity, product_id FROM purchase_lines WHERE id = ? AND purchase_id = ?', [l.purchaseLineId, req.purchaseId])[0];
     if (!pl) throw nein('PURCHASE_RETURN_LINE_UNKNOWN', 'an item to return is not a line of this purchase');
+    if (isBulkMetalProduct(pl.product_id as string)) {
+      throw nein('BULK_NOT_SUPPORTED_HERE', 'bulk metal cannot be returned to the supplier in this version — write it off or cancel the unused purchase');
+    }
     const lineQty = Number(pl.quantity) || 0;
     if (typeof l.quantity !== 'number' || !Number.isFinite(l.quantity) || l.quantity <= 0 || l.quantity > lineQty) {
       throw nein('PURCHASE_RETURN_QTY_INVALID', `the quantity to return must be more than 0 and at most ${lineQty}`);
@@ -750,6 +757,8 @@ export function cancelPurchaseInHouse(purchaseId: string, branchId: string, opts
     throw nein('PURCHASE_STOCK_SOLD',
       'Cannot cancel this purchase: items from it are already on an invoice. Return or cancel that sale first.');
   }
+  // BULK METAL V1 — ein Bulk-Lot darf nur unbenutzt mit dem Einkauf storniert werden (6.5).
+  assertBulkLotsOfPurchaseUnused(purchaseId);
 
   const db = getDatabase();
   const now = opts.now ?? new Date().toISOString();
@@ -778,11 +787,14 @@ export function cancelPurchaseInHouse(purchaseId: string, branchId: string, opts
   const affectedProductIds = query(`SELECT DISTINCT product_id FROM stock_lots WHERE purchase_id = ?`, [purchaseId])
     .map(r => r.product_id as string);
   db.run(`UPDATE purchases SET status = 'CANCELLED', updated_at = ? WHERE id = ?`, [now, purchaseId]);
+  // BULK METAL V1 — Bulk-Lots: Bewegung PURCHASE_CANCEL, Rest 0, CANCELLED (die Buchung spiegelt unten postPurchaseCancelled).
+  cancelBulkLotsOfPurchase(purchaseId, { branchId, userId: bulkActor(), now });
   const cancelledLotIds = query(`SELECT id FROM stock_lots WHERE purchase_id = ? AND status != 'CANCELLED'`, [purchaseId])
     .map(r => r.id as string);
   db.run(`UPDATE stock_lots SET status = 'CANCELLED' WHERE purchase_id = ?`, [purchaseId]);
   for (const lid of cancelledLotIds) trackLotRow(lid, 'update');
   for (const pid of affectedProductIds) {
+    if (isBulkMetalProduct(pid)) continue;   // BULK METAL V1 — der Systemartikel bleibt in_stock
     syncProductQuantity(pid);
     // F-PRC-01 — sonst bliebe stock_status='in_stock' bei 0 Lots stehen (Phantom). Nur in_stock
     // anfassen, damit sold/consumed/returned nicht ueberschrieben werden.

@@ -130,6 +130,37 @@
       "required_fields": [],
       "immutable_fields": []
     },
+    "bulk_lot_movements": {
+      "allowed_operations": [
+        "insert"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "action_id",
+        "branch_id",
+        "bulk_type",
+        "business_date",
+        "created_at",
+        "created_by",
+        "id",
+        "kind",
+        "lot_id",
+        "payload_hash",
+        "reason",
+        "result_json",
+        "reverses_movement_id",
+        "seq",
+        "source_id",
+        "source_line_id",
+        "source_module",
+        "value_after_fils",
+        "value_fils",
+        "weight_after_mg",
+        "weight_mg"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
     "consignments": {
       "allowed_operations": [
         "insert",
@@ -568,6 +599,11 @@
       ],
       "record_id_field": "id",
       "allowed_fields": [
+        "bulk_cogs_fils",
+        "bulk_fineness",
+        "bulk_metal",
+        "bulk_type",
+        "bulk_weight_mg",
         "description",
         "id",
         "invoice_id",
@@ -1396,15 +1432,28 @@
       "allowed_fields": [
         "acquired_at",
         "branch_id",
+        "closed_at",
+        "composition_json",
         "created_at",
+        "fineness",
         "id",
+        "lot_no",
+        "metal_type",
+        "original_value_fils",
+        "original_weight_mg",
         "product_id",
         "purchase_id",
         "purchase_line_id",
         "qty_remaining",
         "qty_total",
+        "remaining_value_fils",
+        "remaining_weight_mg",
+        "revision",
+        "sale_tax_scheme",
         "status",
-        "unit_cost"
+        "unit",
+        "unit_cost",
+        "updated_at"
       ],
       "required_fields": [],
       "immutable_fields": []

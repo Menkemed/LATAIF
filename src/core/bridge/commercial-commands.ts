@@ -320,12 +320,21 @@ export function parsePurchaseCreate(raw: unknown): PurchaseCreateRequest {
   const specs: PurchaseCreateRequest['specs'] = [];
   const lines = raw.lines.map((l, i) => {
     if (!isPlain(l)) throw new CommercialPayloadError(`line ${i + 1} must be an object`);
-    onlyKnownFields(l, ['mode', 'productId', 'newProduct', 'brand', 'name', 'sku', 'categoryId', 'quantity', 'unitPrice', 'sourceOrderLineId', 'partnerShares']);
+    onlyKnownFields(l, ['mode', 'productId', 'newProduct', 'brand', 'name', 'sku', 'categoryId', 'quantity', 'unitPrice', 'sourceOrderLineId', 'partnerShares', 'bulk']);
     const productId = optString(l.productId, `line ${i + 1}: productId`);
+    // BULK METAL V1 — eine Bulk-Zeile: nur die Absicht (Metall, Feinheit, mg, Fils, Steuerart, Composition);
+    // Lot-Wert, Lot-Nummer und Vorsteuer rechnet das Haus. Die fachliche Prüfung macht purchaseCreateIssue.
+    let bulk: Record<string, unknown> | undefined;
+    if (l.bulk !== undefined && l.bulk !== null) {
+      if (!isPlain(l.bulk)) throw new CommercialPayloadError(`line ${i + 1}: bulk must be an object`);
+      onlyKnownFields(l.bulk, ['metal', 'fineness', 'weightMg', 'lineTotalFils', 'saleTaxScheme', 'composition']);
+      bulk = { ...l.bulk };
+    }
     const spec = parseSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS, `line ${i + 1}: newProduct`);
     specs.push(spec);
     return {
-      mode: oneOf(l.mode, ['existing', 'new'] as const, productId ? 'existing' : 'new', `line ${i + 1} mode`),
+      mode: oneOf(l.mode, ['existing', 'new', 'bulk'] as const, bulk ? 'bulk' : productId ? 'existing' : 'new', `line ${i + 1} mode`),
+      ...(bulk ? { bulk: bulk as never } : {}),
       productId,
       newProduct: spec?.spec,
       brand: text0(l.brand, `line ${i + 1}: brand`),

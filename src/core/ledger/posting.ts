@@ -54,6 +54,8 @@ export type LedgerAccount =
   | 'REVENUE'
   | 'COGS'
   | 'INVENTORY'
+  // BULK METAL V1 — Bestandsverlust (Schwund, Close Lot): Aufwand, Soll-Natur. Kein COGS.
+  | 'INVENTORY_LOSS'
   | 'VAT_OUTPUT'
   | 'VAT_INPUT'
   | 'MARGIN_VAT'
@@ -742,6 +744,33 @@ export function postSalesReturnCogs(
     occurredAt,
     sourceModule: 'SALES_RETURN_COGS',
     sourceId: returnId,
+  });
+}
+
+// ── BULK METAL V1 — Schwund / Close Lot ───────────────────────
+//
+//   DEBIT  INVENTORY_LOSS  exakt der abgeschriebene Lot-Wert
+//   CREDIT INVENTORY       derselbe Betrag
+// Quelle STOCK_ADJUST / action_id der manuellen Aktion. Kein COGS, keine MwSt-Korrektur. Storno über
+// reverseSource('STOCK_ADJUST', action_id).
+export function postBulkWriteOff(input: {
+  actionId: string; lotId: string; lotNo: string; weightMg: number; valueFils: number; reason: string;
+  kind: 'WRITE_OFF' | 'CLOSE'; occurredAt: string; branchId?: string; userId?: string;
+}): PostingResult {
+  if (!Number.isSafeInteger(input.valueFils) || input.valueFils <= 0) {
+    throw new Error('postBulkWriteOff: value must be a positive whole number of fils');
+  }
+  const amount = Number((input.valueFils / 1000).toFixed(3));
+  const metadata = { lotId: input.lotId, lotNo: input.lotNo, weightMg: input.weightMg, reason: input.reason, kind: input.kind };
+  return postEntries([
+    { account: 'INVENTORY_LOSS', direction: 'DEBIT', amount, metadata },
+    { account: 'INVENTORY', direction: 'CREDIT', amount, metadata },
+  ], {
+    occurredAt: input.occurredAt,
+    sourceModule: 'STOCK_ADJUST',
+    sourceId: input.actionId,
+    branchId: input.branchId,
+    userId: input.userId,
   });
 }
 

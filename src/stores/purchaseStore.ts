@@ -19,6 +19,10 @@ import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment 
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — Line-Tabellen
 import { getAvailableStock, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 import { purchaseLotUnitCost } from '@/core/lots/lot-cost';
+// BULK METAL V1 — Bulk-Zeilen: Systemartikel, Bulk-Lot (mg/Fils), Bewegung PURCHASE; Buchung streng.
+import { ensureBulkProduct } from '@/core/bulk/bulk-product';
+import { bulkPurchaseAmounts, bulkPurchaseDescription, type BulkPurchaseLine } from '@/core/bulk/bulk-purchase';
+import { createBulkLotForPurchaseLine } from '@/core/bulk/bulk-lot-house';
 import { useProductStore } from '@/stores/productStore';
 import {
   postPurchaseReceived,
@@ -88,6 +92,8 @@ interface PurchaseInput {
     sourceOrderLineId?: string;
     // PARTNER-ITEMS — gemeinsam gekauft: die Partner und ihre Anteile (LATAIF haelt den Rest).
     partnerShares?: PartnerShareInput[];
+    // BULK METAL V1 — die geprüfte Bulk-Zeile (Menge 1, Betrag = lineTotalFils).
+    bulk?: BulkPurchaseLine;
   }>;
   initialPayment?: { amount: number; method: 'cash' | 'bank' | 'benefit'; reference?: string };
   // Back-to-Back: Order, deren Posten dieser Einkauf (mit-)beschafft.
@@ -365,12 +371,29 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       taxScheme: 'ZERO' | 'VAT_10'; vatRate: number; vatAmount: number;
       sourceOrderLineId: string | null;
       partnerShares?: PartnerShareInput[];
+      bulk?: BulkPurchaseLine; bulkLotValueFils?: number;
     }> = [];
     let total = 0;
     // Bestehende (nicht in diesem Purchase neu angelegte) Produkte — fuer die
     // Canonical-Receive-Statusregel weiter unten (neue Produkte setzt createProduct schon).
     const existingProductIds = new Set<string>();
     input.lines.forEach((ln, idx) => {
+      if (ln.bulk) {
+        // BULK METAL V1 — der Systemartikel je Metall/Feinheit; Betrag und Vorsteuer exakt in Fils (4.5).
+        const b = ln.bulk;
+        const scheme: 'ZERO' | 'VAT_10' = ln.taxScheme || 'ZERO';
+        const rate = ln.vatRate ?? (scheme === 'VAT_10' ? 10 : 0);
+        const amounts = bulkPurchaseAmounts(b.lineTotalFils, rate);
+        total += amounts.lineTotal;
+        lineRecords.push({
+          id: uuid(), productId: ensureBulkProduct(branchId, b.metal, b.fineness, userId, now),
+          description: bulkPurchaseDescription(b.metal, b.fineness, b.weightMg),
+          qty: 1, unitPrice: amounts.lineTotal, lineTotal: amounts.lineTotal, position: idx + 1,
+          taxScheme: scheme, vatRate: rate, vatAmount: amounts.vatAmount,
+          sourceOrderLineId: null, bulk: b, bulkLotValueFils: amounts.lotValueFils,
+        });
+        return;
+      }
       let productId = ln.productId;
       if (ln.productId) existingProductIds.add(ln.productId);
       if (!productId) {
@@ -509,6 +532,15 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     const createdLotIds: string[] = [];   // LAN-Sync Phase 1a
     for (const l of lineRecords) {
       if (!l.productId || l.qty <= 0) continue;
+      if (l.bulk) {
+        // BULK METAL V1 — Bulk-Lot statt Stück-Los: Wert = aktivierter Betrag (= INVENTORY-Soll), Nummer BM-xxxx.
+        createBulkLotForPurchaseLine({
+          productId: l.productId, purchaseId: id, purchaseLineId: l.id, acquiredAt: purchaseDate,
+          metal: l.bulk.metal, fineness: l.bulk.fineness, weightMg: l.bulk.weightMg, valueFils: l.bulkLotValueFils ?? 0,
+          saleTaxScheme: l.bulk.saleTaxScheme, composition: l.bulk.composition,
+        }, { branchId, userId, now });
+        continue;
+      }
       // LOT-VAT-COST — unit_cost = der auf INVENTORY aktivierte Einstand je Stueck: ohne Vorsteuer
       // der Stueckpreis (wie bisher), mit 10 % die Zeile ohne den als VAT_INPUT gebuchten Anteil —
       // dieselbe gerundete Zahl wie `postPurchaseReceived`. products.purchase_price bleibt brutto (Anzeige).
@@ -570,7 +602,15 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     get().loadPurchases();
 
     // ZIEL.md §3a — Ledger-Posting nach Domain-Insert.
-    safePost(`postPurchaseReceived(${id})`, () => {
+    // BULK METAL V1 — mit Bulk-Zeile darf ein Buchungsfehler NICHT verschluckt werden: der Lot-Wert
+    // ist genau das INVENTORY-Soll; ohne Buchung bricht die ganze Klammer ab.
+    if (lineRecords.some((l) => l.bulk)) {
+      if (!hasLedgerEntries('PURCHASE', id)) {
+        const fresh = get().getPurchase(id);
+        if (!fresh) throw new Error('the purchase with a bulk line was not created');
+        postPurchaseReceived(fresh);
+      }
+    } else safePost(`postPurchaseReceived(${id})`, () => {
       if (hasLedgerEntries('PURCHASE', id)) return;
       const fresh = get().getPurchase(id);
       if (fresh) postPurchaseReceived(fresh);

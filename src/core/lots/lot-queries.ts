@@ -14,6 +14,18 @@ import { firstUnavailableLot, STOCK_UNAVAILABLE_MESSAGE, type LotSnapshot } from
 import { pieceCount } from './stock-metrics';
 export { pieceCount, isOwnStockAsset } from './stock-metrics';
 import { firstProductWithAgent, WITH_AGENT_INVOICE_BLOCKED_MESSAGE } from '@/core/products/product-sellability';
+// BULK METAL V1 — Bulk-Lots (unit = 'mg') und der Bulk-Systemartikel gehören NICHT in die Stückpfade.
+import { isBulkMetalProduct } from '@/core/bulk/bulk-product';
+
+/** BULK METAL V1 — interner Schutz: eine Stückfunktion darf ein Bulk-Lot nie bewegen. */
+function assertPieceLot(lotId: string): void {
+  const r = query(`SELECT unit FROM stock_lots WHERE id = ?`, [lotId])[0];
+  if (r && String(r.unit ?? 'pcs') === 'mg') {
+    const err = new Error('BULK_LOT_PIECE_PATH: a bulk lot is moved only by the bulk metal functions') as Error & { code?: string };
+    err.code = 'BULK_LOT_PIECE_PATH';
+    throw err;
+  }
+}
 
 // LAN-Sync (Phase 1a): jede stock_lots-Mutation als Full-Row-Snapshot an Geraet B.
 // Sync-only — KEIN Audit, KEIN eigenes saveDatabase. trackChange liest die volle Zeile
@@ -72,6 +84,7 @@ export function getActiveLots(productId: string): StockLot[] {
       WHERE product_id = ?
         AND status != 'CANCELLED'
         AND qty_remaining > 0
+        AND unit = 'pcs'
       ORDER BY acquired_at ASC, id ASC`,
     [productId]
   );
@@ -105,7 +118,7 @@ export function getLotsWithPurchaseNumbers(productId: string, branchId?: string)
        LEFT JOIN suppliers s ON s.id = p.supplier_id
       WHERE sl.product_id = ?
         AND sl.status != 'CANCELLED'
-        AND sl.qty_remaining > 0${branchId ? ' AND sl.branch_id = ?' : ''}
+        AND sl.qty_remaining > 0 AND sl.unit = 'pcs'${branchId ? ' AND sl.branch_id = ?' : ''}
       ORDER BY sl.acquired_at ASC, sl.id ASC`,
     branchId ? [productId, branchId] : [productId]
   );
@@ -126,6 +139,7 @@ export function getLot(lotId: string): StockLot | null {
 // Wird vom InvoiceStore aufgerufen wenn eine invoice_line gespeichert wird.
 // Gibt true zurueck bei Erfolg, false wenn Lot nicht aktiv oder zu wenig Bestand.
 export function consumeLot(lotId: string, qty: number): boolean {
+  assertPieceLot(lotId);
   const db = getDatabase();
   const lot = getLot(lotId);
   if (!lot || lot.status === 'CANCELLED') return false;
@@ -185,6 +199,7 @@ export function assertProductsSellable(productIds: string[]): void {
 // Inverse von consumeLot — fuer Sales-Returns / Invoice-Cancel.
 // Setzt status zurueck auf ACTIVE wenn der Lot nicht CANCELLED ist.
 export function restoreLot(lotId: string, qty: number): boolean {
+  assertPieceLot(lotId);
   const db = getDatabase();
   const lot = getLot(lotId);
   if (!lot || lot.status === 'CANCELLED') return false;
@@ -205,7 +220,8 @@ export function getAvailableStock(productId: string): number {
        FROM stock_lots
       WHERE product_id = ?
         AND status != 'CANCELLED'
-        AND qty_remaining > 0`,
+        AND qty_remaining > 0
+        AND unit = 'pcs'`,
     [productId]
   );
   return Number(rows[0]?.qty) || 0;
@@ -217,6 +233,7 @@ export function getAvailableStock(productId: string): number {
 // Setzt KEINE Werte fuer Produkte ohne Lots (Legacy/Service-Produkte) — die behalten ihr
 // urspruengliches quantity-Feld.
 export function syncProductQuantity(productId: string): void {
+  if (isBulkMetalProduct(productId)) return;   // BULK METAL V1 — der Systemartikel hält keine Stückmenge
   const db = getDatabase();
   // Zwei Zaehlungen aus DERSELBEN bestehenden Aktiv-Regel — KEINE neue Statusregel:
   //   - active_qty : Σ qty_remaining der fachlich AKTIVEN Lots
@@ -262,6 +279,7 @@ export function syncProductQuantity(productId: string): void {
 // sold, returned) haben eigene Lebenszyklen und werden nicht angefasst.
 // Legacy-Produkte ohne Lots werden ebenfalls uebersprungen.
 export function reserveProductIfDepleted(productId: string): void {
+  if (isBulkMetalProduct(productId)) return;   // BULK METAL V1 — Status des Systemartikels bleibt in_stock
   const db = getDatabase();
   const lotRows = query(
     `SELECT COUNT(*) AS total_lots,
@@ -293,6 +311,7 @@ export function reserveProductIfDepleted(productId: string): void {
 // (RETURN-CANCEL-STATUS: auch ein 'sold' — Löschen/Ändern einer bezahlten Rechnung gibt Bestand
 // zurück.) Sonderstatus (in_repair, with_agent, ...) bleiben unangetastet.
 export function unreserveProductIfRestored(productId: string): void {
+  if (isBulkMetalProduct(productId)) return;
   const lotRows = query(
     `SELECT COALESCE(SUM(CASE WHEN status != 'CANCELLED' AND qty_remaining > 0 THEN qty_remaining ELSE 0 END), 0) AS active_qty
        FROM stock_lots WHERE product_id = ?`,
@@ -317,7 +336,7 @@ export function unreserveProductIfRestored(productId: string): void {
 const SALE_STATUSES: readonly string[] = ['in_stock', 'offered', 'reserved', 'sold', 'consignment', 'consignment_reserved'];
 
 export function reconcileSaleStatus(productId: string, saleSettled: boolean, ownStatuses: readonly string[] = []): void {
-  if (!productId || productId.startsWith('svc-repair-')) return;
+  if (!productId || productId.startsWith('svc-repair-') || isBulkMetalProduct(productId)) return;
   const p = query(`SELECT stock_status, source_type, quantity FROM products WHERE id = ?`, [productId])[0];
   if (!p) return;
   const status = String(p.stock_status || '');
@@ -381,7 +400,7 @@ export function deriveProductCostFromLots(productId: string, branchId?: string):
        FROM stock_lots
       WHERE product_id = ?
         AND status != 'CANCELLED'
-        AND qty_remaining > 0${branchId ? ' AND branch_id = ?' : ''}
+        AND qty_remaining > 0 AND unit = 'pcs'${branchId ? ' AND branch_id = ?' : ''}
       ORDER BY acquired_at ASC, id ASC`,
     branchId ? [productId, branchId] : [productId]
   );
@@ -420,7 +439,8 @@ export function getStockAggregates(productIds?: string[]): Map<string, LotAggreg
                     COUNT(*)                        AS lot_count
                FROM stock_lots
               WHERE status != 'CANCELLED'
-                AND qty_remaining > 0`;
+                AND qty_remaining > 0
+                AND unit = 'pcs'`;
   const params: unknown[] = [];
   if (productIds && productIds.length > 0) {
     // sql.js akzeptiert kein Array-Binding — Platzhalter inlinen, Werte gebunden.
@@ -470,6 +490,8 @@ export function computeStockValuation(
   const a = agg || getStockAggregates(items.map(i => i.id));
   let cost = 0, plannedSale = 0, count = 0;
   for (const p of items) {
+    // BULK METAL V1 — der Bulk-Systemartikel ist kein Stück: sein Wert kommt aus bulkInventoryValuation.
+    if (isBulkMetalProduct(p.id)) continue;
     const lot = a.get(p.id);
     // Wo Lots existieren, IST deren Restmenge die Stueckzahl — auch fuer den geplanten
     // Verkaufswert, damit beide Zahlen dieselben Stuecke meinen.

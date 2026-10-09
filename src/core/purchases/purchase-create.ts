@@ -15,6 +15,9 @@ import {
 } from '@/core/products/embedded-product';
 import { isBrandRequired } from '@/core/products/field-contract';
 import { businessDateIssue } from '@/core/utils/business-date';
+// BULK METAL V1 — die Bulk-Zeile: Gesamtgewicht (mg) + Gesamtkosten (Fils), Lot entsteht im Haus.
+import { BulkRejected, filsToBhd } from '@/core/bulk/bulk-math';
+import { checkBulkPurchaseLine, type BulkPurchaseLineInput } from '@/core/bulk/bulk-purchase';
 
 export class PurchaseActionRejected extends Error {
   readonly code: string;
@@ -30,7 +33,9 @@ export const PURCHASE_PAYMENT_METHODS = ['cash', 'bank', 'benefit'] as const;
 
 /** Eine Zeile der Maske. */
 export interface PurchaseDraftLine {
-  mode: 'existing' | 'new';
+  mode: 'existing' | 'new' | 'bulk';
+  /** BULK METAL V1 — nur bei mode 'bulk': Metall, Feinheit, Gewicht (mg), Betrag (Fils), Verkaufs-Steuerart, Composition. */
+  bulk?: BulkPurchaseLineInput;
   productId?: string;
   newProduct?: Partial<Product>;
   brand: string;
@@ -103,13 +108,30 @@ export function purchaseCreateIssue(input: PurchaseCreateInput): { code: string;
   // Tag und nicht in der Zukunft: dieselbe Regel für Rechner, zweiten Rechner und Telefon.
   const dateIssue = businessDateIssue(input.purchaseDate, 'Purchase date');
   if (dateIssue) return { code: 'INVALID_DATE', message: dateIssue };
+  // BULK METAL V1 — eine Bulk-Zeile ist Menge 1 zum Zeilenbetrag; Partner und Auftragsbezug gibt es dort nicht.
+  for (let i = 0; i < input.lines.length; i++) {
+    const l = input.lines[i];
+    if (l.mode !== 'bulk') continue;
+    try {
+      const b = checkBulkPurchaseLine(l.bulk);
+      if (l.quantity !== 1 || Math.round((l.unitPrice || 0) * 1000) !== b.lineTotalFils) {
+        return { code: 'BULK_LINE_INVALID', message: `Line ${i + 1}: a bulk line is quantity 1 at its total cost` };
+      }
+      if ((l.partnerShares && l.partnerShares.length > 0) || l.sourceOrderLineId) {
+        return { code: 'BULK_NOT_SUPPORTED_HERE', message: `Line ${i + 1}: partners and order links are not available for bulk metal` };
+      }
+    } catch (e) {
+      if (e instanceof BulkRejected) return { code: e.code, message: `Line ${i + 1}: ${e.message}` };
+      throw e;
+    }
+  }
   // DISPLAY-NAME — Marke und Modell sind nur dort Pflicht, wo die Kategorie sie verlangt; bei
   // Gold-Diamond Jewellery und Zubehör benennen die Merkmale den Artikel (wie beim Anlegen).
-  const bad = input.lines.findIndex((l) =>
+  const bad = input.lines.findIndex((l) => l.mode !== 'bulk' && (
     l.quantity <= 0 || l.unitPrice < 0
     || (l.mode === 'new'
       ? (isBrandRequired(String(l.newProduct?.categoryId ?? l.categoryId ?? '')) && (!l.brand || !l.name))
-      : !l.productId));
+      : !l.productId)));
   if (bad !== -1) {
     return { code: 'LINE_INVALID', message: `Line ${bad + 1}: Brand+Name (oder Product) + Qty > 0 + Price ≥ 0 erforderlich` };
   }
@@ -207,6 +229,10 @@ export function planPurchaseCreate(input: PurchaseCreateInput, port: PurchaseCre
     const partnerShares = l.partnerShares && l.partnerShares.length > 0
       ? l.partnerShares.map((s) => ({ partnerId: s.partnerId, sharePct: s.sharePct }))
       : undefined;
+    if (l.mode === 'bulk') {
+      const bulk = checkBulkPurchaseLine(l.bulk);
+      return { bulk, quantity: 1, unitPrice: filsToBhd(bulk.lineTotalFils), taxScheme: input.taxScheme, vatRate: inputVatRate };
+    }
     if (l.mode === 'existing') {
       if (!l.productId || !port.productPickable(l.productId)) {
         throw new PurchaseActionRejected('PRODUCT_NOT_FOUND', `no such product in this branch: ${l.productId ?? ''}`);
@@ -257,6 +283,7 @@ export async function purchaseCreateBody(
       quantity: l.quantity, unitPrice: l.unitPrice,
     };
     if (l.productId) line.productId = l.productId;
+    if (l.mode === 'bulk' && l.bulk) line.bulk = { ...l.bulk };
     if (l.newProduct) line.newProduct = await stageSpecImages(pickProductSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS), stage);
     if (l.sourceOrderLineId) line.sourceOrderLineId = l.sourceOrderLineId;
     if (l.partnerShares && l.partnerShares.length > 0) {

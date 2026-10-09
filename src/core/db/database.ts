@@ -2446,6 +2446,69 @@ function runMigrations(database: Database): void {
     `ALTER TABLE orders ADD COLUMN order_date TEXT`,
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_item_partner_profit_share ON item_partner_movements(invoice_line_id, partner_id)
        WHERE kind = 'PROFIT_SHARE' AND cancelled_at IS NULL`,
+
+    // ── BULK METAL V1 (docs/bulk-metal-v1-spec.md, Kapitel 2) ───────────────────
+    // Bulk-Lots sind stock_lots mit unit = 'mg': Bestand in ganzen Milligramm, Wert in ganzen Fils;
+    // qty_total = qty_remaining = unit_cost = 0, damit jeder Stückpfad sie als leer sieht.
+    `ALTER TABLE stock_lots ADD COLUMN unit TEXT NOT NULL DEFAULT 'pcs'`,
+    `ALTER TABLE stock_lots ADD COLUMN lot_no TEXT`,
+    `ALTER TABLE stock_lots ADD COLUMN metal_type TEXT`,
+    `ALTER TABLE stock_lots ADD COLUMN fineness TEXT`,
+    `ALTER TABLE stock_lots ADD COLUMN original_weight_mg INTEGER`,
+    `ALTER TABLE stock_lots ADD COLUMN remaining_weight_mg INTEGER`,
+    `ALTER TABLE stock_lots ADD COLUMN original_value_fils INTEGER`,
+    `ALTER TABLE stock_lots ADD COLUMN remaining_value_fils INTEGER`,
+    `ALTER TABLE stock_lots ADD COLUMN sale_tax_scheme TEXT`,
+    `ALTER TABLE stock_lots ADD COLUMN composition_json TEXT`,
+    `ALTER TABLE stock_lots ADD COLUMN closed_at TEXT`,
+    `ALTER TABLE stock_lots ADD COLUMN revision INTEGER NOT NULL DEFAULT 0`,
+    `ALTER TABLE stock_lots ADD COLUMN updated_at TEXT`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_stock_lots_lot_no ON stock_lots(branch_id, lot_no) WHERE lot_no IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_stock_lots_unit_status ON stock_lots(unit, status)`,
+    `CREATE TRIGGER IF NOT EXISTS trg_stock_lots_revision AFTER UPDATE ON stock_lots
+       WHEN NEW.revision = OLD.revision AND NEW.unit = 'mg'
+       BEGIN UPDATE stock_lots SET revision = OLD.revision + 1 WHERE id = NEW.id; END`,
+    // Die Bulk-Rechnungszeile bleibt Menge 1; Gewicht, zugeteilter COGS und Typ stehen daneben.
+    `ALTER TABLE invoice_lines ADD COLUMN bulk_weight_mg INTEGER`,
+    `ALTER TABLE invoice_lines ADD COLUMN bulk_cogs_fils INTEGER`,
+    `ALTER TABLE invoice_lines ADD COLUMN bulk_type TEXT`,
+    `ALTER TABLE invoice_lines ADD COLUMN bulk_metal TEXT`,
+    `ALTER TABLE invoice_lines ADD COLUMN bulk_fineness TEXT`,
+    // Jede Änderung an einem Bulk-Lot ist genau eine Bewegung (Audit, Idempotenz, Invarianten).
+    `CREATE TABLE IF NOT EXISTS bulk_lot_movements (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      lot_id TEXT NOT NULL REFERENCES stock_lots(id),
+      seq INTEGER NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('PURCHASE','WEIGHT_CORRECTION','PURCHASE_CANCEL','SALE','SALE_REVERSAL','RETURN','RETURN_CANCEL','WRITE_OFF','CLOSE','ADJUSTMENT_REVERSAL')),
+      weight_mg INTEGER NOT NULL,
+      value_fils INTEGER NOT NULL,
+      weight_after_mg INTEGER NOT NULL CHECK (weight_after_mg >= 0),
+      value_after_fils INTEGER NOT NULL CHECK (value_after_fils >= 0),
+      source_module TEXT NOT NULL,
+      source_id TEXT NOT NULL,
+      source_line_id TEXT,
+      action_id TEXT,
+      payload_hash TEXT,
+      result_json TEXT,
+      reverses_movement_id TEXT REFERENCES bulk_lot_movements(id),
+      bulk_type TEXT,
+      reason TEXT,
+      business_date TEXT NOT NULL,
+      created_by TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_bulk_mov_seq ON bulk_lot_movements(lot_id, seq)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_bulk_mov_source ON bulk_lot_movements(kind, source_id, IFNULL(source_line_id, ''))`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_bulk_mov_action ON bulk_lot_movements(branch_id, action_id) WHERE action_id IS NOT NULL`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_bulk_mov_reverses ON bulk_lot_movements(reverses_movement_id) WHERE reverses_movement_id IS NOT NULL`,
+    `CREATE INDEX IF NOT EXISTS idx_bulk_mov_lot ON bulk_lot_movements(lot_id, created_at)`,
+    // Eigener Zähler für BM-0001 … je Filiale (nicht sku_sequences — dessen Kollisionsprüfung gilt products.sku).
+    `CREATE TABLE IF NOT EXISTS bulk_lot_sequences (
+      branch_id TEXT PRIMARY KEY,
+      next_number INTEGER NOT NULL,
+      updated_at TEXT NOT NULL
+    )`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

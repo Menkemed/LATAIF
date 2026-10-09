@@ -52,6 +52,8 @@ const NATURAL_DEBIT: Set<LedgerAccount> = new Set([
   'GOLD_CREDIT_CLEARING',
   // PARTNER-ITEMS — Gewinnanteil eines Partners an einem abgerechneten Verkauf (Aufwand).
   'PARTNER_ITEM_PROFIT_SHARE',
+  // BULK METAL V1 — Bestandsverlust (Schwund, Close Lot): Aufwand.
+  'INVENTORY_LOSS',
 ]);
 
 function naturalSign(account: LedgerAccount): 1 | -1 {

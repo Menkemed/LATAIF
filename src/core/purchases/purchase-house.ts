@@ -39,7 +39,7 @@ export function housePurchasePort(branchId: string): PurchaseCreatePort {
     supplierActive: (id) => has('SELECT id FROM suppliers WHERE id = ? AND branch_id = ? AND COALESCE(active, 1) = 1', [id, branchId]),
     // Die Artikelauswahl der Maske: alles außer dem Reparatur-Service.
     productPickable: (id) => has(
-      "SELECT id FROM products WHERE id = ? AND branch_id = ? AND COALESCE(category_id, '') NOT LIKE 'cat-repair-service%'",
+      "SELECT id FROM products WHERE id = ? AND branch_id = ? AND COALESCE(category_id, '') NOT LIKE 'cat-repair-service%' AND COALESCE(category_id, '') NOT LIKE 'cat-bulk-metal%' AND id NOT LIKE 'bulk-%'",
       [id, branchId]),
     categoryExists: (id) => has('SELECT id FROM categories WHERE id = ? AND branch_id = ?', [id, branchId]),
     employeeActive: (id) => has(
@@ -53,7 +53,7 @@ export function housePurchasePort(branchId: string): PurchaseCreatePort {
     },
     inboxExists: (id) => has('SELECT id FROM purchase_inbox WHERE id = ? AND branch_id = ?', [id, branchId]),
     partnerActive: (id) => has('SELECT id FROM partners WHERE id = ? AND branch_id = ? AND active = 1', [id, branchId]),
-    category: (id) => useProductStore.getState().categories.find((c) => c.id === id && !c.id.startsWith('cat-repair-service')),
+    category: (id) => useProductStore.getState().categories.find((c) => c.id === id && !c.id.startsWith('cat-repair-service') && !c.id.startsWith('cat-bulk-metal')),
     isSkuTaken: (sku) => useProductStore.getState().isSkuTaken(sku),
   };
 }

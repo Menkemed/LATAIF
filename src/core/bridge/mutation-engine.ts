@@ -42,6 +42,8 @@ import { lookupCommand, recordCommand, type CommandIdentity, type CommandRecord 
 import { ensureDurable, requireDurable } from './durability-state';
 import { assertTransactionHealthy, markTransactionUnhealthy } from '../db/transaction-health';
 import { withActingUser } from '../auth/acting-user';
+// BULK METAL V1 — ein fachliches Nein der Bulk-Hausfolge ist ein Urteil wie jedes andere (eingefroren).
+import { BulkRejected } from '../bulk/bulk-math';
 
 /**
  * Das endgültige fachliche Nein der Domäne: die Operation wurde ausgewertet und beurteilt.
@@ -178,6 +180,7 @@ export async function runRemoteCommand(
       throw new Error(`could not undo a failed command: refusing to report on an unsound database (${String(err)})`);
     }
 
+    if (err instanceof BulkRejected) err = new CommandRejected(err.code, err.message);
     if (err instanceof CommandRejected) {
       // Ein Urteil. Es wird festgehalten — in einer EIGENEN Transaktion, weil die erste verworfen
       // wurde. Es beschreibt keine Wirkung, also braucht es keine.
