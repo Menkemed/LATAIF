@@ -71,6 +71,8 @@ const LEGACY_LOCAL_NON_SYNC = new Set<string>([
   'item_participations', 'item_partner_movements',
   // MOBILE-04B2A2 — local cross-DB source binding for the mobile upload drain worker; never synced.
   'mobile_upload_receipts',
+  // BULK METAL V1 — the BM lot-number counter per branch: primary-only like document_sequences; never synced.
+  'bulk_lot_sequences',
 ]);
 const LOCAL_INACTIVE_MEDIA = new Set<string>(MEDIA_TABLES);
 const DEPRECATED_OR_UNREACHABLE_DDL = new Set<string>(); // none; see §2 note below.
@@ -101,9 +103,10 @@ for (let i = 0; i < names.length; i++) for (let j = i + 1; j < names.length; j++
 }
 
 // §1 — semantic contracts, from independent sources
-ok(LEGACY_SYNC_APPLY.size === 53, `legacy_sync_apply = 53 sync allowlist tables (got ${LEGACY_SYNC_APPLY.size})`);
+// BULK METAL V1: +1 synced table bulk_lot_movements (travels with its lot) → 54.
+ok(LEGACY_SYNC_APPLY.size === 54, `legacy_sync_apply = 54 sync allowlist tables (got ${LEGACY_SYNC_APPLY.size})`);
 for (const t of LEGACY_SYNC_APPLY) ok(actualLegacy.has(t), `sync_apply table ${t} is present in the legacy DDL`);
-ok(LEGACY_LOCAL_NON_SYNC.size === 26, `legacy_local_non_sync = 26 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
+ok(LEGACY_LOCAL_NON_SYNC.size === 27, `legacy_local_non_sync = 27 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
 ok(DEPRECATED_OR_UNREACHABLE_DDL.size === 0, 'deprecated_or_unreachable_ddl is empty (nothing unreachable)');
 
 // media: scanner sees them (anti-hiding), they equal MEDIA_TABLES, none is synced

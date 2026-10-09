@@ -24,8 +24,7 @@ import {
 import { creditPaidByExpense } from '@/core/finance/expenseSettlement';
 import type { BusinessReadContext } from '@/core/data/read-context';
 // BULK METAL V1 — Bulk-Wert (Σ Restwert) und Bestandsverluste je Tag reisen mit den Lot-Zahlen.
-import { bulkInventoryValuation } from '@/core/bulk/bulk-reads';
-import { query as bulkQuery } from '@/core/db/helpers';
+import { bulkInventoryValuation, bulkLossByDay } from '@/core/bulk/bulk-reads';
 
 // ── Die Salden, die die Übersicht zeigt ──────────────────────────────────
 export interface LedgerBalances {
@@ -86,11 +85,7 @@ export function lotAggregatesFor(ctx: BusinessReadContext): LotAggregates {
     const f = deriveProductCostFromLots(productId);
     if (f) fifo.push([productId, f]);
   }
-  const bulkLossByDay = bulkQuery(
-    `SELECT business_date, -SUM(value_fils) AS v FROM bulk_lot_movements
-      WHERE branch_id = ? AND kind IN ('WRITE_OFF','CLOSE','ADJUSTMENT_REVERSAL') GROUP BY business_date`, [ctx.branchId],
-  ).map((r) => [String(r.business_date), Number(r.v) || 0] as [string, number]);
-  return { paare, fifo, bulkValueFils: bulkInventoryValuation(ctx.branchId).valueFils, bulkLossByDay };
+  return { paare, fifo, bulkValueFils: bulkInventoryValuation(ctx.branchId).valueFils, bulkLossByDay: bulkLossByDay(ctx.branchId) };
 }
 
 // ── Die Lose EINES Artikels ──────────────────────────────────────────────

@@ -225,6 +225,14 @@ export function bulkInventoryLossFils(branchId: string, from?: string, to?: stri
   return -int(query(`SELECT COALESCE(SUM(value_fils), 0) AS v FROM bulk_lot_movements WHERE ${conds.join(' AND ')}`, params)[0]?.v);
 }
 
+/** Derselbe Bestandsverlust je Geschäftstag (Fils) — reist mit den Lot-Zahlen zu PC2. */
+export function bulkLossByDay(branchId: string): Array<[string, number]> {
+  return query(
+    `SELECT business_date, -SUM(value_fils) AS v FROM bulk_lot_movements
+      WHERE branch_id = ? AND kind IN ('WRITE_OFF','CLOSE','ADJUSTMENT_REVERSAL') GROUP BY business_date`, [branchId],
+  ).map((r) => [String(r.business_date), int(r.v)] as [string, number]);
+}
+
 /**
  * Abstimmung (Invariante 11): Σ Restwert aller Bulk-Lots = Summe der INVENTORY-Buchungen, die an
  * Bulk-Quellen hängen (Einkaufszeile, Rechnungszeile, Retouren-COGS der Zeile, manuelle Aktion).

@@ -282,7 +282,8 @@ function toolMonthlyReview(args: { year?: number; month?: number }): AIBlock {
   // BULK METAL V1 — der Bulk-Bestand zählt im Wert genau einmal (am Primary aus den Lots; PC2 hat keine Bücher).
   let bulkValue = 0;
   try { if (!isClientMode()) bulkValue = bulkInventoryValuation(currentBranchId()).valueFils / 1000; } catch { bulkValue = 0; }
-  const inventoryValue = computeStockValuation(products.filter(isOwnStockAsset)).cost + bulkValue;
+  const inventoryValue = computeStockValuation(products.filter(isOwnStockAsset)).cost;
+  const stockValue = inventoryValue + bulkValue;
 
   // Top 3 customers by revenue this month
   const custAgg = new Map<string, number>();
@@ -305,7 +306,7 @@ function toolMonthlyReview(args: { year?: number; month?: number }): AIBlock {
     `**Invoices issued:** ${cur.length} · **New clients:** ${newClients}`,
     `**Offers / Orders:** ${offersCount} / ${ordersCount}`,
     `**Expenses:** ${fmt(expensesTotal)} BHD · **Purchases:** ${fmt(purchasesTotal)} BHD`,
-    `**Inventory value:** ${fmt(inventoryValue)} BHD`,
+    `**Inventory value:** ${fmt(stockValue)} BHD`,
     ``,
     top3.length ? `### Top 3 customers` : '',
     ...top3.map(([id, rev]) => {
@@ -324,7 +325,7 @@ function toolMonthlyReview(args: { year?: number; month?: number }): AIBlock {
       { label: 'Open AR', value: `${fmt(open)} BHD`, tone: open > revenue * 0.3 ? 'red' : 'neutral' },
       { label: 'Invoices', value: String(cur.length) },
       { label: 'New Clients', value: String(newClients) },
-      { label: 'Stock Value', value: `${fmt(inventoryValue)} BHD`, tone: 'blue' },
+      { label: 'Stock Value', value: `${fmt(stockValue)} BHD`, tone: 'blue' },
     ],
     recommendations,
   };

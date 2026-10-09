@@ -67,8 +67,11 @@ for (const c of columns) check(isValidSyncIdentifier(c), `frontend column ${JSON
 // with 4 previously-unseen column identifiers (filed_at, filed_by, invoice_count, snapshot_json) — canonical.
 // PARTNER-ITEMS: +2 local tables `item_participations`, `item_partner_movements` (primary-only, not synced) with 7
 // previously-unseen column identifiers (party, share_bp, cost_share, basis_json, cancelled_at, cancelled_by, group_id) — canonical.
-check(tables.size === 53, `frontend table count is 53 (got ${tables.size})`);
-check(columns.size === 212, `frontend distinct column count is 212 (got ${columns.size})`);
+// BULK METAL V1: +2 tables `bulk_lot_movements` (synced), `bulk_lot_sequences` (primary-only) with 10 previously-unseen
+// column identifiers (action_id, bulk_type, business_date, lot_id, reverses_movement_id, seq, value_after_fils,
+// value_fils, weight_after_mg, weight_mg) — canonical.
+check(tables.size === 55, `frontend table count is 55 (got ${tables.size})`);
+check(columns.size === 222, `frontend distinct column count is 222 (got ${columns.size})`);
 
 console.log(
   `M6-B2DE4 identifier-grammar: ${pass}/${pass + fails.length} checks passed ` +
