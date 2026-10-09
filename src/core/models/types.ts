@@ -298,6 +298,8 @@ export interface InvoiceLine {
   bulkWeightMg?: number | null;
   bulkCogsFils?: number | null;
   bulkType?: string | null;
+  /** BULK METAL V1 — die BM-Nummer des Lots, aus dem Lot am Primary gelesen (nur intern, nie auf dem Beleg). */
+  bulkLotNo?: string | null;
   product?: Product;
 }
 

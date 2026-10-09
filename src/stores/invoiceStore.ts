@@ -11,11 +11,11 @@ import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, 
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 // BULK METAL V1 — Bulk-Zeilen: Absicht → Zeile über den bestehenden Zeilenvertrag; Gewicht/COGS exakt zurück.
 import {
-  assertBulkLineMatchesLot, buildBulkInvoiceLines, resolveBulkIntents, restoreBulkInvoiceLines, storedBulkLines,
+  assertBulkLineMatchesLot, buildBulkInvoiceLines, bulkLineAmountsForEdit, resolveBulkIntents, restoreBulkInvoiceLines, storedBulkLines,
   type BulkLineIntent, type BulkLineMeta,
 } from '@/core/bulk/bulk-invoice';
 import { consumeBulk, type BulkCtx } from '@/core/bulk/bulk-lot-house';
-import { BulkRejected, filsToBhd } from '@/core/bulk/bulk-math';
+import { BulkRejected } from '@/core/bulk/bulk-math';
 
 /** BULK METAL V1 — Wer/wo/wann für die Bulk-Hausfolge einer Rechnung (Filiale der Rechnung). */
 function bulkCtxOfInvoice(invoiceId: string, now: string): BulkCtx {
@@ -231,6 +231,8 @@ function rowToLine(row: Record<string, unknown>): InvoiceLine {
     bulkWeightMg: row.bulk_weight_mg === null || row.bulk_weight_mg === undefined ? null : Number(row.bulk_weight_mg),
     bulkCogsFils: row.bulk_cogs_fils === null || row.bulk_cogs_fils === undefined ? null : Number(row.bulk_cogs_fils),
     bulkType: (row.bulk_type as string | null) ?? null,
+    bulkLotNo: row.bulk_weight_mg === null || row.bulk_weight_mg === undefined || !row.lot_id ? null
+      : ((query('SELECT lot_no FROM stock_lots WHERE id = ?', [row.lot_id])[0]?.lot_no as string | undefined) ?? null),
   };
 }
 
@@ -681,6 +683,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const baseById = new Map(baseLines.map(b => [b.id, b]));
     // BULK METAL V1 — eine bestehende Bulk-Zeile behält Lot, Gewicht und COGS (gesperrt); Preis, Typ und
     // Beschreibung bleiben änderbar. Korrektur von Lot/Gewicht: Zeile entfernen und neu anlegen.
+    // Beträge rechnet das Haus schon HIER (Zeilenvertrag), nicht erst bei der Zuteilung: die Absicht trägt
+    // 0, und die Prüfung unten (Retoure, Summe nicht unter die Gutschriften) muss die echten Beträge sehen.
     const bulkBase = new Map(storedBulkLines(id).map(b => [b.id, b]));
     const keptBulkType = new Map<string, string>();
     lines = lines.map((l, i) => {
@@ -689,7 +693,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         if (!l.bulkIntent && String(l.productId || '').startsWith('bulk-')) {
           throw new BulkRejected('BULK_PRODUCT_DIRECT_SALE', 'bulk metal is sold with “Add bulk metal” — choose a lot and a weight');
         }
-        return l;
+        const priced = l.bulkIntent ? bulkLineAmountsForEdit(l.bulkIntent) : null;
+        return priced ? { ...l, lineTotal: priced.lineTotal } : l;
       }
       const it = l.bulkIntent;
       if (!it || it.lotId !== b.lotId || it.weightMg !== b.weightMg) {
@@ -697,10 +702,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       }
       const base = baseById.get(b.id)!;
       if (it.bulkType) keptBulkType.set(b.id, it.bulkType);
+      const priced = bulkLineAmountsForEdit(it, { productId: b.productId, lotId: b.lotId, purchasePrice: base.purchasePrice, taxScheme: base.taxScheme })!;
       const { bulkIntent: _drop, ...rest } = l;
       void _drop;
       return { ...rest, productId: b.productId, lotId: b.lotId, quantity: 1, taxScheme: base.taxScheme, vatRate: base.vatRate,
-        purchasePrice: base.purchasePrice, unitPrice: filsToBhd(it.unitPriceFils),
+        purchasePrice: base.purchasePrice, unitPrice: priced.unitPrice, vatAmount: priced.vatAmount, lineTotal: priced.lineTotal,
         description: it.description || String(query('SELECT description FROM invoice_lines WHERE id = ?', [b.id])[0]?.description ?? '') };
     });
     assertEditKeepsReturns(id, baseLines, lines, lineMatch);

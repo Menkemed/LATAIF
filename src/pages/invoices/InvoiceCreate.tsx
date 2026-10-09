@@ -145,7 +145,7 @@ export function InvoiceCreate() {
         const bulk: BulkInvoiceDraft = {
           lotId: l.lotId || '', weightText: formatMg(l.bulkWeightMg), bulkType: (l.bulkType || 'OTHER') as BulkType,
           grossText: (l.lineTotal || 0).toFixed(3), description: l.description || '',
-          kept: { weightMg: l.bulkWeightMg, cogsFils: l.bulkCogsFils ?? 0, lotLabel: 'saved lot', scheme: String(l.taxScheme) },
+          kept: { weightMg: l.bulkWeightMg, cogsFils: l.bulkCogsFils ?? 0, lotLabel: l.bulkLotNo || '—', scheme: String(l.taxScheme) },
         };
         return { lineId: l.id, productId: l.productId || '', scheme: 'auto' as Scheme, quantity: 1, unitPrice: l.unitPrice || 0, bulk };
       }

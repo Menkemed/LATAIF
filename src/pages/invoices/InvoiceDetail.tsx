@@ -902,7 +902,7 @@ export function InvoiceDetail() {
                       {line.bulkWeightMg ? (
                         <span data-bulk-line-badge style={{ marginLeft: 8, padding: '2px 8px', borderRadius: 999, fontSize: 10, color: '#4B5563', background: '#F2F7FA', border: '1px solid #E5E9EE', cursor: 'pointer' }}
                           title="Bulk metal — open Bulk Metals" onClick={() => navigate('/bulk-metals')}>
-                          BULK · {(line.bulkWeightMg / 1000).toFixed(3)} g{perm.isAdmin && line.bulkCogsFils !== null && line.bulkCogsFils !== undefined ? ` · COGS ${(line.bulkCogsFils / 1000).toFixed(3)}` : ''}
+                          BULK · {line.bulkLotNo ? `${line.bulkLotNo} · ` : ''}{(line.bulkWeightMg / 1000).toFixed(3)} g{perm.isAdmin && line.bulkCogsFils !== null && line.bulkCogsFils !== undefined ? ` · COGS ${(line.bulkCogsFils / 1000).toFixed(3)}` : ''}
                         </span>
                       ) : null}
                       {/* Return-Markierung am Line-Item */}

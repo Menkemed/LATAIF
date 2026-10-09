@@ -7,7 +7,7 @@
 // laufen Margen-MwSt, NBR, COGS-Buchung und Auswertungen unverändert.
 // ════════════════════════════════════════════════════════════════════════════
 import { query } from '@/core/db/helpers';
-import { toInvoiceLine, type InvoiceLineInput } from '@/core/invoices/line-derivation';
+import { toInvoiceLine, type InvoiceLineInput, type LineScheme } from '@/core/invoices/line-derivation';
 import {
   BulkRejected, assertBulkType, assertFils, assertWeightMg, bulkLineDescription, filsOfStoredAmount, filsToBhd,
   type BulkType,
@@ -74,6 +74,29 @@ export function buildBulkInvoiceLines(intents: readonly BulkLineIntent[], branch
       bulk: { lotId: lot.id, weightMg: x.weightMg, cogsFils: cogs[i], bulkType: type, metal: lot.metal, fineness: lot.fineness },
     };
   });
+}
+
+/**
+ * Invoice-Edit: die Beträge einer Bulk-Zeile, BEVOR zugeteilt wird — damit die Prüfungen vor dem
+ * Schreiben (Retoure, Gutschriften-Summe) die echten Beträge sehen und nicht die 0 aus der Absicht.
+ *   • fortgesetzte Zeile: derselbe Zeilenvertrag mit dem gespeicherten Einstand und der gespeicherten Steuerart;
+ *   • neue Zeile: Brutto aus Preis und Steuerart des Lots — der Bruttobetrag hängt bei keinem Schema vom
+ *     Einstand ab (MARGIN: die MwSt steckt im Preis). Fehlt das Lot, bleibt die Zeile, wie sie ist; die
+ *     Zuteilung weist sie dann selbst ab.
+ */
+export function bulkLineAmountsForEdit(
+  intent: BulkLineIntent,
+  kept?: { productId: string; lotId: string; purchasePrice: number; taxScheme: string },
+): { unitPrice: number; vatAmount: number; lineTotal: number } | null {
+  const x = checkBulkIntent(intent);
+  const lot = kept ? null : getBulkLot(x.lotId);
+  if (!kept && !lot) return null;
+  const line = toInvoiceLine({
+    productId: kept?.productId ?? lot!.productId, lotId: kept?.lotId ?? lot!.id, quantity: 1,
+    unitPrice: filsToBhd(x.unitPriceFils), costBasis: kept?.purchasePrice ?? 0,
+    scheme: (kept?.taxScheme ?? lot!.saleTaxScheme) as LineScheme,
+  });
+  return { unitPrice: line.unitPrice, vatAmount: line.vatAmount, lineTotal: line.lineTotal };
 }
 
 /**
