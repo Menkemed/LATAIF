@@ -145,18 +145,68 @@ for (const t of manifestTables) {
 const wOps = new Map<string, Set<string>>();
 const addOp = (t: string, op: string) => { if (!wOps.has(t)) wOps.set(t, new Set()); wOps.get(t)!.add(op); };
 const stripLine = (s: string) => s.split('\n').map(l => { const i = l.indexOf('//'); return i >= 0 ? l.slice(0, i) : l; }).join('\n');
+// Alle `trackChange(`-Aufrufe mit ihren Argumenten (Klammern und Zeichenketten ausbalanciert). Kürzere
+// Treffer (z. B. der Name in einer Log-Meldung) und die Definition selbst zählen nicht.
+function trackChangeCalls(s: string): Array<{ args: string[] }> {
+  const out: Array<{ args: string[] }> = [];
+  for (const m of s.matchAll(/(?<![\w.])trackChange\(/g)) {
+    if (/function\s*$/.test(s.slice(Math.max(0, m.index! - 12), m.index))) continue;
+    const args: string[] = [];
+    let d = 0, cur = '', q: string | null = null;
+    for (let i = m.index! + m[0].length; i < s.length; i++) {
+      const c = s[i];
+      if (q) { cur += c; if (c === q && s[i - 1] !== '\\') q = null; continue; }
+      if (c === "'" || c === '"' || c === '`') { q = c; cur += c; continue; }
+      if ('([{'.includes(c)) { d++; cur += c; continue; }
+      if (')]}'.includes(c)) { if (d === 0) { args.push(cur.trim()); break; } d--; cur += c; continue; }
+      if (c === ',' && d === 0) { args.push(cur.trim()); cur = ''; continue; }
+      cur += c;
+    }
+    if (args.length >= 3) out.push({ args });
+  }
+  return out;
+}
+const dynamicTableCalls: string[] = [];
+const undeterminedOps: string[] = [];
 for (const rel of readdirSync(join(repo, 'src'), { recursive: true, encoding: 'utf8' })) {
   if (!rel.endsWith('.ts') && !rel.endsWith('.tsx')) continue;
   const s = stripLine(readFileSync(join(repo, 'src', rel), 'utf8'));
   for (const m of s.matchAll(/trackInsert\('([a-z_]+)'/g)) addOp(m[1], 'insert');
   for (const m of s.matchAll(/trackUpdate\('([a-z_]+)'/g)) addOp(m[1], 'update');
   for (const m of s.matchAll(/trackDelete\('([a-z_]+)'/g)) addOp(m[1], 'delete');
-  for (const m of s.matchAll(/trackChange\('([a-z_]+)',[^,]+,\s*'(insert|update|delete)'/g)) addOp(m[1], m[2]);
+  // `trackChange(table, id, op, …)` — die Operation steht nicht immer wörtlich da: seit INVOICE-EDIT S2
+  // schreibt der Rechnungs-Edit `l._kept ? 'update' : 'insert'`. Die alte Suche (nur ein Literal direkt
+  // nach der Id) sah das `update` nicht, die Allowlist blieb insert/delete, und der Server wies jeden
+  // Edit mit behaltener Zeile ab (400, Warteschlange blockiert). Deshalb wird das dritte Argument
+  // vollständig gelesen: jede darin genannte Operation zählt; steht gar keine darin, ist der Schreiber
+  // nicht prüfbar → Befund.
+  for (const call of trackChangeCalls(s)) {
+    const t = call.args[0]?.match(/^'([a-z_]+)'$/)?.[1];
+    if (!t) { dynamicTableCalls.push(`${rel}: ${call.args[0]}`); continue; }
+    const ops = [...(call.args[2] ?? '').matchAll(/'(insert|update|delete)'/g)].map((x) => x[1]);
+    if (ops.length === 0) undeterminedOps.push(`${rel}: trackChange('${t}', …, ${call.args[2] ?? '?'})`);
+    for (const op of ops) addOp(t, op);
+  }
+  // Kundenwechsel (INVOICE-EDIT S3/S5) hängt Belege um: `relink('<tabelle>', ids)` → `trackChange(table, id, 'update')`.
+  for (const m of s.matchAll(/\brelink\('([a-z_]+)'/g)) addOp(m[1], 'update');
   // R6F — Aufgaben und Dokumente schreiben über `trackOfficeWrite(table, id, op, …)`, das genau dieses `trackChange`
   // ruft (und prüft, dass der Eintrag entstand). Derselbe Schreiber, nur mit Beweis.
   for (const m of s.matchAll(/trackOfficeWrite\('([a-z_]+)',[^,]+,\s*'(insert|update|delete)'/g)) addOp(m[1], m[2]);
   for (const m of s.matchAll(/trackLotRow\([^,]+,\s*'(insert|update|delete)'/g)) addOp('stock_lots', m[1]);
   for (const m of s.matchAll(/trackProductRow\(([^,)]+)(?:,\s*'(insert|update|delete)')?/g)) addOp('products', m[2] || 'update');
+}
+// Ein Schreiber, dessen Tabelle oder Operation nicht im Aufruf steht, ist nur erlaubt, wenn er ein
+// bekannter Hüllaufruf ist, dessen Aufrufstellen oben einzeln gezählt werden — sonst bliebe er blind.
+{
+  const norm = (x: string) => x.replace(/\\/g, '/');
+  const DYNAMIC_TABLE_WRAPPERS = ['core/sync/track.ts', 'core/office/office-rules.ts', 'core/invoices/customer-change.ts'];
+  const OP_PARAM_WRAPPERS = ['core/lots/lot-queries.ts'];
+  check(dynamicTableCalls.length > 0 && dynamicTableCalls.every((x) => DYNAMIC_TABLE_WRAPPERS.some((w) => norm(x).startsWith(`${w}:`))),
+    `every trackChange with a non-literal table is a counted wrapper (${dynamicTableCalls.map(norm).join('; ')})`);
+  check(undeterminedOps.every((x) => OP_PARAM_WRAPPERS.some((w) => norm(x).startsWith(`${w}:`))),
+    `every other trackChange names its operation(s) in the call (${undeterminedOps.map(norm).join('; ') || 'none'})`);
+  check(wOps.get('invoice_lines')?.has('update') === true,
+    'the invoice edit (kept line: `l._kept ? \'update\' : \'insert\'`) counts as an invoice_lines update writer');
 }
 // M6-B3A2 §4 — the MOBILE picture uploader is a SECOND /sync/push producer (embedded JS in
 // mobile_page.rs builds change payloads directly). Its operations are part of the safe union — in
@@ -183,7 +233,8 @@ for (const t of manifestTables) {
 // PRE-G5 — der Fachverlauf der Goldeinsaetze (`repair_gold_usage_history`) reist wie sein Nachbar
 // `gold_movements`: nur `insert`, nie `update`, nie `delete` → 52/36/37 → 53/36/37.
 // BULK METAL V1 — `bulk_lot_movements`: nur `insert` (eine Bewegung wird nie geändert oder gelöscht) → 54/36/37.
-check(iC === 54 && uC === 36 && dC === 37, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 54/36/37 — incl. the mobile purchase_inbox insert, the R7A production child rows, the PRE-G5 gold usage history and the bulk lot movements)`);
+// INVOICE-LINES SYNC — der Rechnungs-Edit aktualisiert behaltene Zeilen (seit v0.8.60): `invoice_lines` + update → 54/37/37.
+check(iC === 54 && uC === 37 && dC === 37, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 54/37/37 — incl. the mobile purchase_inbox insert, the R7A production child rows, the PRE-G5 gold usage history, the bulk lot movements and the invoice_lines update of the invoice edit)`);
 
 // ── 5. Rust/TS semantic parity: the SAME shared fixture the Rust test runs. Both sides must map
 //    each vector to the same verdict → transitively, Rust and TS agree byte-for-byte. ──

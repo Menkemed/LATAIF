@@ -496,5 +496,41 @@ function welt(): { db: Db; inv: string; z1: string; z2: string; rid: string } {
 }
 void current;
 
+// ── 11 Sync-Vertrag: der Edit mit behaltener Zeile erzeugt `invoice_lines update` — und der Vertrag nimmt ihn an ──
+// Seit v0.8.60 aktualisiert der Edit eine behaltene Zeile an Ort und Stelle (`l._kept ? 'update' : 'insert'`). Die
+// Allowlist kannte für invoice_lines nur insert/delete; der eigene Server wies den Eintrag ab (400) und die ganze
+// Warteschlange stand. Hier der echte Edit, der echte Changelog-Eintrag, der echte Vertrag (= Rust, gemeinsame Vektoren).
+{
+  const { changeContractViolation, applySyncChange } = await import('../../src/core/sync/apply-change.ts');
+  const db = neu();
+  product(db, 'sy-a', 3);
+  product(db, 'sy-b', 2);
+  const inv = rechnung([LINE('sy-a', 1, 1000), LINE('sy-b', 1, 500)]);
+  const [z1, z2] = zeilen(db, inv);
+  const vorher = n(db, 'SELECT COALESCE(MAX(id), 0) FROM sync_changelog');
+  ok(aendern(inv, [L('sy-a', 2, 1000, z1.id), L('sy-b', 1, 500, z2.id)]) === '', '11 Edit: erste Zeile Menge 1 → 2 (behalten), zweite unverändert');
+  const neuE = (db.exec('SELECT table_name, record_id, action, data FROM sync_changelog WHERE id > ? ORDER BY id', [vorher])[0]?.values ?? [])
+    .map((v) => ({ table_name: String(v[0]), record_id: String(v[1]), action: String(v[2]), data: String(v[3]) }));
+  const zl = neuE.filter((e) => e.table_name === 'invoice_lines');
+  ok(zl.length === 2 && zl.every((e) => e.action === 'update') && S(zl.map((e) => e.record_id).sort()) === S([z1.id, z2.id].sort()),
+    `11 behaltene Zeilen → invoice_lines update unter ihrer eigenen ID (${S(zl.map((e) => [e.record_id.slice(0, 8), e.action]))})`);
+  const d1 = JSON.parse(zl.find((e) => e.record_id === z1.id)!.data) as Record<string, unknown>;
+  ok(d1.id === z1.id && Number(d1.quantity) === 2 && d1.invoice_id === inv, '11 der Eintrag trägt die ganze aktuelle Zeile (Menge 2)');
+  const urteile = neuE.map((e) => changeContractViolation(e.table_name, e.action, e.data));
+  ok(neuE.length > 2 && urteile.every((u) => u === null), `11 Sync-Vertrag nimmt JEDEN Eintrag dieses Edits an (${neuE.length}; abgewiesen: ${S(urteile.filter(Boolean))})`);
+  // Negativ-Kontrollen: der Vertrag bleibt fail-closed, nur diese eine Operation ist dazugekommen.
+  ok(changeContractViolation('invoice_lines', 'update', JSON.stringify({ id: z1.id, nicht_da: 1 })) === 'SYNC_FIELD_NOT_ALLOWED', '11 fremdes Feld in der Zeilen-Änderung → SYNC_FIELD_NOT_ALLOWED');
+  ok(changeContractViolation('ledger_entries', 'update', '{"id":"l1"}') === 'SYNC_OPERATION_NOT_ALLOWED', '11 ledger_entries update bleibt verboten');
+  ok(changeContractViolation('credit_applications', 'update', '{"id":"c1"}') === 'SYNC_OPERATION_NOT_ALLOWED', '11 credit_applications update bleibt verboten');
+  ok(changeContractViolation('item_participations', 'insert', '{"id":"x"}') === 'SYNC_TABLE_NOT_ALLOWED', '11 nur am Primary geführte Tabelle bleibt draußen');
+  ok(changeContractViolation('users', 'update', '{}') === 'SYNC_CONTROL_PLANE_TABLE_FORBIDDEN', '11 Steuertabelle bleibt verboten');
+  // Echo: der eigene Server spielt die Einträge zurück — nichts ändert sich, nichts doppelt, keine Fassung springt.
+  const stand = (): string => zustand(db) + all(db, 'SELECT id, revision, gross_amount FROM invoices ORDER BY id');
+  const vorEcho = stand();
+  for (const e of neuE) applySyncChange(db as never, e);
+  ok(stand() === vorEcho && n(db, 'SELECT COUNT(*) FROM invoice_lines WHERE invoice_id = ?', [inv]) === 2,
+    '11 Echo vom eigenen Server: keine Änderung, keine doppelte Zeile, keine neue Fassung');
+}
+
 console.log(`\ninvoice-edit-line-identity: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);

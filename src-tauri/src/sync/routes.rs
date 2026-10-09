@@ -2805,7 +2805,9 @@ mod legacy_push_tests {
             if contract.ops.contains("update") { upd += 1; }
             if contract.ops.contains("delete") { del += 1; }
         }
-        assert_eq!((ins, upd, del), (53, 36, 37), "insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
+        // BULK METAL V1: bulk_lot_movements insert only (53 → 54 insert). INVOICE-LINES SYNC: the invoice edit
+        // updates a kept line in place since v0.8.60 → invoice_lines gains update (36 → 37 update).
+        assert_eq!((ins, upd, del), (54, 37, 37), "insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
     }
 
     // O6 — a mixed batch with one disallowed operation writes NOTHING (all-or-nothing).
@@ -2888,10 +2890,12 @@ mod legacy_push_tests {
             assert_eq!(n, 1, "{t}/{op}");
             assert_eq!(rows(&conn), 1, "{t}/{op}");
         }
-        // representative non-uniform desktop cases (insert-only ledger, insert+delete invoice_lines).
+        // representative non-uniform desktop cases (insert-only ledger, invoice_lines insert/update/delete —
+        // the invoice edit updates a kept line in place since v0.8.60).
         let desktop: &[(&str, &str, &str)] = &[
             ("ledger_entries", "insert", r#"{"id":"l1","account":"CASH","amount":"5"}"#),
             ("invoice_lines", "insert", r#"{"id":"il1","invoice_id":"i1"}"#),
+            ("invoice_lines", "update", r#"{"id":"il1","invoice_id":"i1","quantity":2,"line_total":"50"}"#),
             ("invoice_lines", "delete", "{}"),
         ];
         for (t, op, data) in desktop {

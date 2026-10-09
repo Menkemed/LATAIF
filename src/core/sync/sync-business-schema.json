@@ -595,6 +595,7 @@
     "invoice_lines": {
       "allowed_operations": [
         "insert",
+        "update",
         "delete"
       ],
       "record_id_field": "id",
