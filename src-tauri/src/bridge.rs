@@ -266,6 +266,15 @@ pub const OP_DEBTS_PAYMENTS_GET: &str = "debts.payments.get";
 pub const OP_SUPPLIERS_CREDITS_GET: &str = "suppliers.credits.get";
 // INVOICE-A5 — der Rechnungsdruck: aktuelle Firmendaten des Primary + Zahlungswege der Rechnung.
 pub const OP_PAGE_INVOICE_PRINT_GET: &str = "page.invoice_print.get";
+// BULK METAL V1 — vier manuelle Lot-Aktionen und vier Lesebefehle der Seite „Bulk Metals".
+pub const OP_BULK_WRITE_OFF: &str = "bulk_metals.write_off";
+pub const OP_BULK_CLOSE_LOT: &str = "bulk_metals.close_lot";
+pub const OP_BULK_CORRECT_WEIGHT: &str = "bulk_metals.correct_weight";
+pub const OP_BULK_REVERSE_ADJUSTMENT: &str = "bulk_metals.reverse_adjustment";
+pub const OP_PAGE_BULK_METALS_GET: &str = "page.bulk_metals.get";
+pub const OP_BULK_LOTS_FOR_SALE_GET: &str = "bulk_metals.lots_for_sale.get";
+pub const OP_BULK_LOT_DETAIL_GET: &str = "bulk_metals.lot_detail.get";
+pub const OP_BULK_ALLOCATION_PREVIEW_GET: &str = "bulk_metals.allocation_preview.get";
 // CENTRAL-UI-PARITY R6E — Angebot, Rechnungs-Lebenszyklus, Nachrichtenprotokoll.
 pub const OP_OFFERS_CREATE: &str = "offers.create";
 pub const OP_OFFERS_UPDATE: &str = "offers.update";
@@ -500,6 +509,15 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_PARTNER_ITEMS_CHANGE_PARTNERS,
     // INVOICE-A5 — der Rechnungsdruck auf PC2: Firmendaten und Zahlungswege vom Primary.
     OP_PAGE_INVOICE_PRINT_GET,
+    // BULK METAL V1
+    OP_BULK_WRITE_OFF,
+    OP_BULK_CLOSE_LOT,
+    OP_BULK_CORRECT_WEIGHT,
+    OP_BULK_REVERSE_ADJUSTMENT,
+    OP_PAGE_BULK_METALS_GET,
+    OP_BULK_LOTS_FOR_SALE_GET,
+    OP_BULK_LOT_DETAIL_GET,
+    OP_BULK_ALLOCATION_PREVIEW_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

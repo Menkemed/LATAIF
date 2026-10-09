@@ -165,6 +165,9 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // PARTNER-ITEMS — Übernahme durch LATAIF und Partnerwechsel der unverkauften Stücke (zum aktuellen
   // Lager-Einstand, ohne Geldbewegung). Die Lieferantenrückgabe nutzt `purchases.return_to_supplier`.
   'partner_items.take_over', 'partner_items.change_partners',
+  // BULK METAL V1 — die manuellen Aktionen an einem Bulk-Lot (Hausfolge mit action_id-Replay): Lot
+  // korrigieren, Teil-Schwund abschreiben, Lot schließen, die letzte Abschreibung stornieren.
+  'bulk_metals.write_off', 'bulk_metals.close_lot', 'bulk_metals.correct_weight', 'bulk_metals.reverse_adjustment',
 ];
 
 export interface CommandSpec {

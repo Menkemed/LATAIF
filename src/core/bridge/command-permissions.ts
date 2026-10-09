@@ -185,6 +185,12 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'scrap_trades.create': null,
   'scrap_trades.update': null,
   'scrap_trades.cancel': null,
+  // BULK METAL V1 — Lot korrigieren, Write-off, Close: ADMIN oder MANAGER; Abschreibung stornieren: nur ADMIN.
+  // Die Hausfolge prüft dieselbe Rolle noch einmal (assertRole).
+  'bulk_metals.write_off': admin('BulkMetals: perm.isAdmin (Write off)'),
+  'bulk_metals.close_lot': admin('BulkMetals: perm.isAdmin (Close lot)'),
+  'bulk_metals.correct_weight': admin('BulkMetals: perm.isAdmin (Correct lot)'),
+  'bulk_metals.reverse_adjustment': owner('BulkMetals: perm.isOwner (Reverse write-off)'),
 
   // ── Angebot, Rechnungs-Lebenszyklus, Nachrichten (R6E) ──────────────────
   // BEFUND: `OfferList` („New Offer", „Send", „Accept", „Reject") fragt `usePermission` NICHT, und

@@ -98,6 +98,13 @@ export const OP_SUPPLIERS_CREDITS_GET = 'suppliers.credits.get';
 // dieser Rechnung. PC2 fragt bei jedem Druck neu — er hat keine eigene Firmen-Konfiguration.
 export const OP_PAGE_INVOICE_PRINT_GET = 'page.invoice_print.get';
 
+// BULK METAL V1 — die Seite „Bulk Metals", die Lot-Auswahl der Rechnung, das Lot-Detail und die
+// COGS-Vorschau: Zahlen vom Primary, PC2 rechnet nichts Fachliches.
+export const OP_PAGE_BULK_METALS_GET = 'page.bulk_metals.get';
+export const OP_BULK_LOTS_FOR_SALE_GET = 'bulk_metals.lots_for_sale.get';
+export const OP_BULK_LOT_DETAIL_GET = 'bulk_metals.lot_detail.get';
+export const OP_BULK_ALLOCATION_PREVIEW_GET = 'bulk_metals.allocation_preview.get';
+
 /**
  * Die Liste IST die Erlaubnis. Ein Name, der hier fehlt, existiert fuer das Netz nicht — genau
  * wie bei den Buchungen. Dieselbe Liste kennt auch Rust.
@@ -157,6 +164,10 @@ export const STORE_READ_OPS: readonly string[] = [
   OP_DEBTS_PAYMENTS_GET,
   OP_SUPPLIERS_CREDITS_GET,
   OP_PAGE_INVOICE_PRINT_GET,
+  OP_PAGE_BULK_METALS_GET,
+  OP_BULK_LOTS_FOR_SALE_GET,
+  OP_BULK_LOT_DETAIL_GET,
+  OP_BULK_ALLOCATION_PREVIEW_GET,
 ];
 
 // Nicht hier — und damit fern nicht aufrufbar — sind nur noch drei Arten von Zugriffen, und keine

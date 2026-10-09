@@ -164,11 +164,16 @@ const MATRIX: Record<string, Zeile> = {
   'partner_items.cancel_movement': { ui: 'PartnersPage — Jointly bought items: reverse (entry error)', gleich: true },
   'partner_items.take_over': { ui: 'PartnersPage / PurchaseDetail — Take over (LATAIF alone)', gleich: true },
   'partner_items.change_partners': { ui: 'PartnersPage / PurchaseDetail — Change partners / Add partners to unsold pieces', gleich: true },
+  // BULK METAL V1 — BulkMetalsPage, Lot-Detail: die manuellen Aktionen an einem Bulk-Lot.
+  'bulk_metals.write_off': { ui: 'BulkMetalsPage — Lot detail: Write off grams', gleich: true },
+  'bulk_metals.close_lot': { ui: 'BulkMetalsPage — Lot detail: Close lot', gleich: true },
+  'bulk_metals.correct_weight': { ui: 'BulkMetalsPage — Lot detail: Correct lot', gleich: true },
+  'bulk_metals.reverse_adjustment': { ui: 'BulkMetalsPage — Lot detail: Reverse last write-off / close', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 110, `A 108 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + vier PARTNER-ITEMS) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 114, `A 114 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

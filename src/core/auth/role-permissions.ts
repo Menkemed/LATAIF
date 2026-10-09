@@ -28,6 +28,8 @@ export const ROLE_PERMISSIONS: Record<CanonicalUserRole, readonly string[]> = {
     'orders.*', 'suppliers.*', 'purchases.*', 'expenses.*', 'banking.*',
     'partners.view', 'production.*', 'returns.*',
     'kpi.*', 'reports.*', 'settings.view', 'users.view',
+    // BULK METAL V1 — Seite sehen und Lots anpassen (Korrektur, Write-off, Close).
+    'bulk_metals.view', 'bulk_metals.adjust',
   ],
   // Plan §Users §4C: SALES — Sales erlaubt, keine sensiblen Daten
   SALES: [
@@ -47,6 +49,7 @@ export const ROLE_PERMISSIONS: Record<CanonicalUserRole, readonly string[]> = {
     'reports.*', 'kpi.*', 'tax.*',
     'partners.view', 'debts.*',
     'documents.view',
+    'bulk_metals.view',
   ],
 };
 

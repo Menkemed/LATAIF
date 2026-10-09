@@ -40,6 +40,7 @@ import './payables-commands';
 import './gold-commands';
 // CENTRAL-UI-PARITY R6D — Edelmetall und Schrotthandel.
 import './metal-commands';
+import './bulk-metal-commands';
 // CENTRAL-UI-PARITY R6E — das Angebot (anlegen, speichern, Zustand, Umwandlung über den Rechnungsweg).
 import './offer-commands';
 // R6E — Nachrichtenprotokoll am Kunden; das Butterfly-Kennzeichen der Rechnung.
