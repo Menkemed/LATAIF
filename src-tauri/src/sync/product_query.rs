@@ -251,7 +251,9 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// Tenancy: `products` has no tenant_id, so the binding is the join onto `branches` — identical to
 /// the legacy-media planner and the stock-check scope proof, so all three agree on what is in scope.
 const SCOPE_JOIN: &str = "FROM products p JOIN branches b ON b.id = p.branch_id AND b.tenant_id = ?1 \
-     WHERE p.branch_id = ?2";
+     WHERE p.branch_id = ?2 AND p.id NOT LIKE 'bulk-%'";
+// BULK METAL V1 — der Bulk-Systemartikel (Id-Präfix `bulk-`) ist für das Telefon nicht vorhanden
+// (Check Item, Suche, Detail): er hat keinen SKU, keine Stückmenge und wird nur am Rechner geführt.
 
 /// v0.8.48 — darf die Bedienoberflaeche die Preisfelder dieses Artikels FREIGEBEN, und wenn nicht: warum?
 ///

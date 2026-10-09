@@ -18,6 +18,8 @@ import { registerCommand, BusinessError, type CommandResult } from './command-re
 import { getDatabase } from '@/core/db/database';
 import { summarizeInventory, isOwnStockAsset, type LotAggregate } from '@/core/lots/lot-queries';
 import { getStockAggregates } from '@/core/lots/lot-queries';
+// BULK METAL V1 — Systemartikel nicht in Liste/Detail; ihr Wert zählt im Lagerkopf genau einmal.
+import { bulkInventoryValuation } from '@/core/bulk/bulk-reads';
 // Ob das Auszahlungsmodell einer Kommission noch geändert werden darf, ist eine Aussage der
 // DOMÄNE. Sie wird hier gelesen, damit der Client sie anzeigen kann — und beim Schreiben ein
 // zweites Mal gefragt. Zwei Fragen an dieselbe Funktion, nie eine Nachbildung.
@@ -209,14 +211,14 @@ registerCommand(OP_PRODUCTS_LIST, {
       ? rows(
         `SELECT ${PRODUCT_COLUMNS} FROM products
           WHERE branch_id = ?
-            AND category_id NOT LIKE 'cat-repair-service%'
+            AND category_id NOT LIKE 'cat-repair-service%' AND id NOT LIKE 'bulk-%'
             AND (LOWER(brand) LIKE ? OR LOWER(name) LIKE ? OR LOWER(COALESCE(sku, '')) LIKE ?)
           ORDER BY updated_at DESC LIMIT ?`,
         [branch, like, like, like, limitOf(p)],
       )
       : rows(
         `SELECT ${PRODUCT_COLUMNS} FROM products
-          WHERE branch_id = ? AND category_id NOT LIKE 'cat-repair-service%'
+          WHERE branch_id = ? AND category_id NOT LIKE 'cat-repair-service%' AND id NOT LIKE 'bulk-%'
           ORDER BY updated_at DESC LIMIT ?`,
         [branch, limitOf(p)],
       );
@@ -242,7 +244,7 @@ registerCommand(OP_PRODUCTS_LIST, {
     return {
       items: list.map(productDto),
       truncated: list.length >= limitOf(p),
-      stock: { records: summary.records, units: summary.units, cost: summary.cost },
+      stock: { records: summary.records, units: summary.units, cost: summary.cost + bulkInventoryValuation(branch).valueFils / 1000 },
     };
   },
 });
@@ -253,7 +255,7 @@ registerCommand(OP_PRODUCTS_GET, {
     const branch = actorBranch(p);
     const found = rows(
       `SELECT ${PRODUCT_COLUMNS}, attributes, notes, storage_location
-         FROM products WHERE id = ? AND branch_id = ?`,
+         FROM products WHERE id = ? AND branch_id = ? AND id NOT LIKE 'bulk-%'`,
       [idOf(p), branch],
     );
     if (found.length === 0) throw new BusinessError('NOT_FOUND', 'no such product in this branch');

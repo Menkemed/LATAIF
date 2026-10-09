@@ -13,6 +13,9 @@ import { useExpenseStore } from '@/stores/expenseStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { canonicalStockStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
 import { computeStockValuation, summarizeInventory, isOwnStockAsset } from '@/core/lots/lot-queries';
+import { bulkInventoryValuation } from '@/core/bulk/bulk-reads';
+import { isClientMode } from '@/core/bridge/client-mode';
+import { currentBranchId } from '@/core/db/helpers';
 import type { Invoice, Customer, Product } from '@/core/models/types';
 import { productDisplayName } from '../products/display-name.ts';
 
@@ -276,7 +279,10 @@ function toolMonthlyReview(args: { year?: number; month?: number }): AIBlock {
   // Bewertungsfilter benutzt, zaehlte er Kommissions- und angebotene Zeilen zum eigenen
   // Bestandswert — dieselbe Kennzahl, andere Regel als auf jeder anderen Oberflaeche. Also die
   // eine Vermoegensregel, die auch Dashboard, Collection, Analytics und Reports benutzen.
-  const inventoryValue = computeStockValuation(products.filter(isOwnStockAsset)).cost;
+  // BULK METAL V1 — der Bulk-Bestand zählt im Wert genau einmal (am Primary aus den Lots; PC2 hat keine Bücher).
+  let bulkValue = 0;
+  try { if (!isClientMode()) bulkValue = bulkInventoryValuation(currentBranchId()).valueFils / 1000; } catch { bulkValue = 0; }
+  const inventoryValue = computeStockValuation(products.filter(isOwnStockAsset)).cost + bulkValue;
 
   // Top 3 customers by revenue this month
   const custAgg = new Map<string, number>();

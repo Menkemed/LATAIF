@@ -99,7 +99,8 @@ export function productsOfBranch(db: InventorySessionDb, branchId: string, wante
   const found = new Set<string>();
   for (let i = 0; i < wanted.length; i += 400) {
     const chunk = wanted.slice(i, i + 400);
-    const r = db.exec(`SELECT id FROM products WHERE branch_id = ? AND id IN (${chunk.map(() => '?').join(',')})`, [branchId, ...chunk]);
+    // BULK METAL V1 — der Bulk-Systemartikel ist kein Inventurartikel (gilt als nicht in der Filiale).
+    const r = db.exec(`SELECT id FROM products WHERE branch_id = ? AND id NOT LIKE 'bulk-%' AND id IN (${chunk.map(() => '?').join(',')})`, [branchId, ...chunk]);
     for (const row of r[0]?.values ?? []) found.add(String(row[0]));
   }
   return found;

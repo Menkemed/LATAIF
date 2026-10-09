@@ -5,6 +5,8 @@ import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
 import { assertProductVatLabelUnchanged, productVatLabelRefusal, VAT_PERIOD_FILED } from '@/core/tax/vat-period-lock';
 import { getStockAggregates, computeStockValuation, isOwnStockAsset , type LotAggregate } from '@/core/lots/lot-queries';
+// BULK METAL V1 — Systemartikel: nie in Listen/Auswahlen, nie über die normalen Pfade bearbeitbar.
+import { assertNotBulkCategory, assertNotBulkSystemProduct, isBulkMetalProduct } from '@/core/bulk/bulk-product';
 // CENTRAL-C2 — mehrphasige Geschaeftsschreibvorgaenge laufen in derselben Spur wie die
 // Fernauftraege: ein Lesen vom zweiten Rechner darf keinen Zwischenzustand sehen.
 import { runExclusiveUnless } from '@/core/bridge/command-scheduler';
@@ -581,7 +583,8 @@ export function getRecentCorrectionsAsPrompt(brand?: string, categoryId?: string
  * das Lesen des einen den Bildschirm des anderen anfasst.
  */
 export function loadProductsFor(ctx: BusinessReadContext): { products: Product[] } {
-  const rows = query('SELECT * FROM products WHERE branch_id = ? ORDER BY updated_at DESC', [ctx.branchId]);
+  // BULK METAL V1 — die Bulk-Systemartikel gehören nicht in Collection, Auswahlen, Dubletten, Import oder KI.
+  const rows = query("SELECT * FROM products WHERE branch_id = ? AND id NOT LIKE 'bulk-%' ORDER BY updated_at DESC", [ctx.branchId]);
   return { products: rows.map(rowToProduct) };
 }
 
@@ -1197,6 +1200,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   }),
 
   updateProduct: (id, data) => {
+    assertNotBulkSystemProduct(id);
     // VAT-PERIOD-LOCK — auch der direkte Weg: Marke/Name eines gemeldeten Artikels bleiben stehen.
     assertProductVatLabelUnchanged(id, data as Record<string, unknown>);
     const db = getDatabase();
@@ -1267,6 +1271,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   },
 
   deleteProduct: (id) => {
+    assertNotBulkSystemProduct(id);
     // Referenz-Check ueber ALLE Link-Tabellen (SSOT: PRODUCT_LINK_TABLES).
     // Vorher wurden nur 6 von 12 geprueft → ein Produkt aus einem Purchase
     // (purchase_lines + stock_lots) konnte faelschlich geloescht werden und
@@ -1294,6 +1299,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     const deleted: string[] = [];
     const blocked: { id: string; reason: string }[] = [];
     for (const id of ids) {
+      if (isBulkMetalProduct(id)) { blocked.push({ id, reason: 'bulk metal system item' }); continue; }
       const links = linkMap.get(id) || [];
       if (links.length > 0) {
         blocked.push({ id, reason: links.map(l => l.label).join(', ') });
@@ -1395,6 +1401,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   },
 
   updateCategory: (id, data) => {
+    assertNotBulkCategory(id);
     const db = getDatabase();
     const fields: string[] = [];
     const values: unknown[] = [];

@@ -302,6 +302,10 @@ export function MetalList() {
         ))}
       </div>
       {!showNew && !sellTarget && !meltTarget && <WriteError text={w.fehler} />}
+      {/* BULK METAL V1 — Abgrenzung (Spec 12.2): kein physischer Bestand in beiden Modulen. */}
+      <div data-metal-bulk-notice style={{ padding: '8px 12px', background: '#F5F7FA', border: '1px solid #E5E9EE', borderRadius: 8, fontSize: 12, color: '#374151', marginTop: 12 }}>
+        Precious Metals holds bars and single metal items. Saleable stock by weight (e.g. mixed silver jewellery) belongs in Bulk Metals. Never record the same goods in both modules.
+      </div>
       <div style={{ marginBottom: 16 }} />
 
       {/* Table Header */}

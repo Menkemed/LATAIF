@@ -192,6 +192,8 @@ function checkInputs(ids: readonly string[], branchId: string): CheckedInput[] {
   }
   const out: CheckedInput[] = [];
   for (const id of ids) {
+    // BULK METAL V1 — Bulk als Materialverbrauch kommt später (nicht V1).
+    if (id.startsWith('bulk-')) throw new ProductionRejected('BULK_NOT_SUPPORTED_HERE', 'bulk metal cannot be used as a production input in this version');
     const r = query('SELECT * FROM products WHERE id = ? AND branch_id = ?', [id, branchId])[0];
     if (!r) throw new ProductionRejected('PRODUCTION_INPUT_NOT_FOUND', 'an input product does not exist in this branch');
     if (String(r.stock_status ?? '') !== 'in_stock') {

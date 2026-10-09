@@ -137,7 +137,8 @@ export function globalSearchFor(
         const effWeightMin = smartWeight !== null ? smartWeight * 0.9 : minWeight;
         const effWeightMax = smartWeight !== null ? smartWeight * 1.1 : maxWeight;
 
-        const whereParts: string[] = [`branch_id = ?`];
+        // BULK METAL V1 — der Bulk-Systemartikel erscheint nicht in der Suche.
+        const whereParts: string[] = [`branch_id = ?`, `id NOT LIKE 'bulk-%'`];
         const args: unknown[] = [branchId];
         // Text-Suche nur wenn kein reiner Zahlen-/Gewichts-Input
         if (asNumber === null && smartWeight === null) {

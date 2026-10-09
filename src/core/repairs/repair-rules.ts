@@ -123,7 +123,7 @@ export function missingRepairItemFields(
 
 /** Welche Artikel die Maske als „Own Item" anbietet — und der Fernbefehl annimmt. */
 export function isRepairableOwnProduct(p: { id: string; sourceType?: string | null }): boolean {
-  return p.sourceType === 'OWN' && !p.id.startsWith('svc-repair-');
+  return p.sourceType === 'OWN' && !p.id.startsWith('svc-repair-') && !p.id.startsWith('bulk-');
 }
 
 // ── Anlegen ──────────────────────────────────────────────────────────────

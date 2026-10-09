@@ -128,6 +128,8 @@ export function Dashboard() {
   // CENTRAL-UI-PARITY R4A — die Losezahlen kommen aus der gemeinsamen Kernauskunft und werden
   // durchgereicht; die Bewertung selbst rechnet unveraendert.
   const bestand = useSharedRead('inventory.lot_aggregates.get', {}, lotAggregatesFor, { paare: [], fifo: [] }, [products]);
+  // BULK METAL V1 — Bulk-Wert genau einmal im Lagerwert (nie als Stück).
+  const bulkValue = (bestand.bulkValueFils ?? 0) / 1000;
   const lotAgg = useMemo(() => new Map(bestand.paare), [bestand]);
   const stock = useMemo(() => getStockValue(lotAgg), [products, getStockValue, lotAgg]);
   const stockByCat = useMemo(() => getStockByCategory(lotAgg), [products, categories, getStockByCategory, lotAgg]);
@@ -191,6 +193,12 @@ export function Dashboard() {
   // M-15: nur Rechnungs-Umsatz/-Profit aus dem SSOT, KEIN Scrap (eigene Card unten).
   const totalRevenue = salesMetrics.gross;
   const totalProfit = salesMetrics.profit;
+  // BULK METAL V1 — Bestandsverlust (Schwund/Close) im Zeitraum: eigene Zeile, vom Gewinn abgezogen (kein COGS).
+  const bulkLossInPeriod = useMemo(() => {
+    const from = periodStart.slice(0, 10);
+    const to = periodEnd.slice(0, 10);
+    return (bestand.bulkLossByDay ?? []).filter(([d]) => d >= from && d <= to).reduce((s, [, v]) => s + v, 0) / 1000;
+  }, [bestand, periodStart, periodEnd]);
   // Plan §Dashboard §3.A+B: durchschnittlicher Verkauf + Margin %
   const avgSale = useMemo(() => finalInvoices.length > 0 ? totalRevenue / finalInvoices.length : 0, [finalInvoices, totalRevenue]);
   const marginPct = useMemo(() => totalRevenue > 0 ? (totalProfit / totalRevenue) * 100 : 0, [totalRevenue, totalProfit]);
@@ -683,13 +691,13 @@ export function Dashboard() {
         <DashSection title="Performance" subtitle="Revenue, profit and stock for the selected period">
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 20 }}>
             <KPICard label="REVENUE (FINAL)" value={fmt(totalRevenue)} unit={`BHD · ${finalInvoices.length} inv.`} icon={<TrendingUp size={16} />} accent="green" onClick={() => navigate('/invoices?filter=FINAL')} />
-            <KPICard label="PROFIT" value={fmt(totalProfit)} unit={`BHD · ${marginPct.toFixed(1)}% margin`} icon={<TrendingUp size={16} />} accent="purple" onClick={() => navigate('/business-reports')} />
+            <KPICard label="PROFIT" value={fmt(totalProfit - bulkLossInPeriod)} unit={`BHD · ${marginPct.toFixed(1)}% margin${bulkLossInPeriod > 0 ? ` · bulk loss −${fmt(bulkLossInPeriod)}` : ''}`} icon={<TrendingUp size={16} />} accent="purple" onClick={() => navigate('/business-reports')} />
             <KPICard label="SCRAP SPREAD" value={fmt(scrapSpreadInPeriod)} unit="BHD · gold trades" icon={<Coins size={16} />} accent="orange" onClick={() => navigate('/scrap-trades')} />
             <KPICard label="AVG SALE" value={fmt(avgSale)} unit="BHD per invoice" icon={<FileText size={16} />} onClick={() => navigate('/invoices')} />
             <KPICard
               label="STOCK VALUE"
-              value={fmt(stock.purchaseTotal)}
-              unit={`BHD · ${stock.count} items`}
+              value={fmt(stock.purchaseTotal + bulkValue)}
+              unit={`BHD · ${stock.count} items${bulkValue > 0 ? ` · incl. bulk metal ${fmt(bulkValue)}` : ''}`}
               icon={<Package size={16} />}
               accent="blue"
               onClick={() => navigate('/collection')}

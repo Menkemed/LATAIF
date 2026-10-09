@@ -34,7 +34,8 @@ export function houseRepairPort(branchId: string): RepairHousePort {
       "SELECT id FROM customers WHERE id = ? AND branch_id = ? AND id NOT LIKE 'sys-%'", [id, branchId],
     )[0],
     product: (id) => {
-      const r = query('SELECT id, source_type, brand, name, sku, category_id FROM products WHERE id = ? AND branch_id = ?',
+      // BULK METAL V1 — keine Reparatur am Bulk-Systemartikel.
+      const r = query("SELECT id, source_type, brand, name, sku, category_id FROM products WHERE id = ? AND branch_id = ? AND id NOT LIKE 'bulk-%'",
         [id, branchId])[0];
       if (!r) return undefined;
       return {
@@ -51,7 +52,7 @@ export function houseRepairPort(branchId: string): RepairHousePort {
       [id, branchId],
     )[0],
     // Dieselbe Menge wie die Kategorie-Chips der Masken: die aktiven der Filiale, ohne „Repair Service".
-    categoryExists: (id) => !id.startsWith('cat-repair-service')
+    categoryExists: (id) => !id.startsWith('cat-repair-service') && !id.startsWith('cat-bulk-metal')
       && !!query('SELECT id FROM categories WHERE id = ? AND branch_id = ? AND COALESCE(active, 1) = 1', [id, branchId])[0],
   };
 }

@@ -204,7 +204,8 @@ export function lineDetails(p: InvoiceA5Input['products'][number] | undefined): 
 export function buildInvoiceA5Data(input: InvoiceA5Input): InvoiceA5Data {
   const { invoice, customer } = input;
   const lines: InvoiceA5Line[] = invoice.lines.map((l) => {
-    const p = input.products.find((x) => x.id === l.productId);
+    // BULK METAL V1 — Bulk-Zeile: Beschreibung (mit Gewicht), kein Systemartikel, keine SKU, nie Lot/COGS.
+    const p = String(l.productId ?? '').startsWith('bulk-') ? undefined : input.products.find((x) => x.id === l.productId);
     const qty = Number(l.quantity) > 0 ? Number(l.quantity) : 1;
     const amount = r3(Number(l.lineTotal) || 0);
     // Nur die 10-%-Steuer steht auf dem Beleg; die Margin-Steuer bleibt im Betrag (wie bisher).

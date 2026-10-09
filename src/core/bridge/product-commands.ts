@@ -485,6 +485,8 @@ export async function runProductUpdate(
     if (query('SELECT id FROM products WHERE id = ? AND branch_id = ?', [id, identity.branchId]).length === 0) {
       throw new CommandRejected('PRODUCT_NOT_FOUND', 'no such product');
     }
+    // BULK METAL V1 — der Bulk-Systemartikel ist über diesen Weg nicht bearbeitbar (wie lokal).
+    if (id.startsWith('bulk-')) throw new CommandRejected('BULK_SYSTEM_PRODUCT_LOCKED', 'this is a bulk metal system item — it is managed in Bulk Metals only');
 
     // R6B — die Bestätigung der KI-Identifikation: dieselbe Hausfunktion wie am Primary-Knopf.
     if (confirmAi) {

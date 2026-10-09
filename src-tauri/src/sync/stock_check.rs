@@ -175,7 +175,7 @@ pub fn product_exists_in_scope(
         .query_row(
             "SELECT 1 FROM products p
                JOIN branches b ON b.id = p.branch_id AND b.tenant_id = ?1
-              WHERE p.id = ?2 AND p.branch_id = ?3
+              WHERE p.id = ?2 AND p.branch_id = ?3 AND p.id NOT LIKE 'bulk-%'
               LIMIT 1",
             rusqlite::params![tenant_id, product_id, branch_id],
             |r| r.get(0),

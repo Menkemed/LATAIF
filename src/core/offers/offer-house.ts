@@ -144,6 +144,8 @@ function assertCustomer(customerId: string, branchId: string): void {
 }
 
 function productIn(productId: string, branchId: string): Record<string, unknown> {
+  // BULK METAL V1 — Bulk wird in V1 nur über die Rechnung verkauft.
+  if (productId.startsWith('bulk-')) throw new OfferRejected('BULK_NOT_SUPPORTED_HERE', 'bulk metal is sold by invoice only in this version');
   const p = query('SELECT id, tax_scheme, purchase_price FROM products WHERE id = ? AND branch_id = ?', [productId, branchId])[0];
   if (!p) throw new OfferRejected(PRODUCT_NOT_FOUND, 'no such article in this branch');
   return p;

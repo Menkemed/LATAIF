@@ -118,6 +118,15 @@ export function allocateFils(remainingValueFils: number, remainingWeightMg: numb
   return Number(divHalfUp(BigInt(remainingValueFils) * BigInt(takeMg), BigInt(remainingWeightMg)));
 }
 
+/**
+ * Rechnungsmaske: der Kunde nennt den Gesamtbetrag. Der bestehende Zeilenvertrag rechnet mit dem
+ * Netto-Stückpreis — bei VAT_10 netto = round_half_up(brutto · 100 / 110) in Fils, sonst = brutto.
+ */
+export function netFilsFromGross(grossFils: number, scheme: string): number {
+  if (scheme !== 'VAT_10') return grossFils;
+  return Number(divHalfUp(BigInt(grossFils) * 100n, 110n));
+}
+
 /** Vorsteuer in Fils aus einem Brutto-Betrag in Fils (4.5): round_half_up(L · r / (100 + r)). */
 export function vatFilsOfGross(grossFils: number, ratePct: number): number {
   if (ratePct <= 0) return 0;

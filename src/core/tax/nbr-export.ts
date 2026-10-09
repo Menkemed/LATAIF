@@ -37,7 +37,9 @@ function fmtDate(iso?: string): string {
   return `${dd}.${mm}.${yy}`;
 }
 
-function productLabel(products: Product[], productId: string): string {
+function productLabel(products: Product[], productId: string, line?: { description?: string; bulkWeightMg?: number | null }): string {
+  // BULK METAL V1 — eine Bulk-Zeile heißt wie ihre Beschreibung („Ring · Silver 925 · 7.000 g"); nie Lot/COGS/SKU.
+  if (line?.bulkWeightMg) return line.description || 'Bulk metal';
   const p = products.find(pp => pp.id === productId);
   if (!p) return '';
   return productDisplayName(p);
@@ -128,7 +130,8 @@ function groupByMonth(year: number, invoices: Invoice[], selectedIds?: Set<strin
   return result;
 }
 
-function buildMonthSheet(
+/** Exportiert für Prüfungen (BULK METAL V1 — N1/N2): die Zeilen EINES Monatsblatts. */
+export function buildMonthSheet(
   bucket: MonthInvoices,
   customers: Customer[],
   products: Product[],
@@ -183,7 +186,7 @@ function buildMonthSheet(
         vatAcc,
         personalId,
         name,
-        productLabel(products, line.productId),
+        productLabel(products, line.productId, line),
         net,
         vat,
         gross,
@@ -251,7 +254,7 @@ function buildMonthSheet(
         vatAcc,
         personalId,
         name,
-        productLabel(products, line.productId),
+        productLabel(products, line.productId, line),
         purchase,
         selling,
         profit,
@@ -314,7 +317,7 @@ function buildMonthSheet(
         vatAcc,
         personalId,
         name,
-        productLabel(products, line.productId),
+        productLabel(products, line.productId, line),
         amount,
       ], note));
       zTotal += amount;

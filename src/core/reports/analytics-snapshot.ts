@@ -24,6 +24,8 @@ import { balanceOf } from '@/core/ledger/queries';
 import { computeSalesMetricsByCustomer } from '@/core/reports/sales-metrics';
 import { loadSalesData } from '@/core/reports/sales-metrics-loader';
 import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
+// BULK METAL V1 — Bulk-Wert als eigene Zeile im Lagerwert; Bestandsverlust als eigene Zeile beim Gewinn.
+import { bulkInventoryLossFils, bulkInventoryValuation } from '@/core/bulk/bulk-reads';
 import type { BusinessReadContext } from '@/core/data/read-context';
 import { liveVatQuarters, partialVatSummary, filedVatFigures } from '@/core/tax/vat-quarter-overview';
 
@@ -90,6 +92,9 @@ export function salesFor(ctx: BusinessReadContext) {
     const netRevenue   = netInvoiced   - refundNet;
     const totalProfit  = profitInvoiced - refundProfit;
     const marginPct = safeDiv(totalProfit, netRevenue) * 100;
+    // BULK METAL V1 — Schwund/Close (INVENTORY_LOSS) mindert den Gewinn, ist aber kein COGS.
+    const bulkInventoryLoss = bulkInventoryLossFils(branchId) / 1000;
+    const profitAfterInventoryLoss = totalProfit - bulkInventoryLoss;
     const avgSaleValue = safeDiv(grossRevenue, invoiceCount);
 
     // Offers
@@ -130,7 +135,7 @@ export function salesFor(ctx: BusinessReadContext) {
     );
 
     return {
-      grossRevenue, netRevenue, totalProfit, marginPct,
+      grossRevenue, netRevenue, totalProfit, marginPct, bulkInventoryLoss, profitAfterInventoryLoss,
       invoiceCount, offerCount, closeRate, avgSaleValue,
       revByCat, topBrands,
     };
@@ -150,7 +155,7 @@ export function stockFor(ctx: BusinessReadContext) {
               COALESCE(c.name, 'Uncategorized') AS cat_name, COALESCE(c.color, '#0F0F10') AS cat_color
          FROM products p
          LEFT JOIN categories c ON c.id = p.category_id
-        WHERE p.branch_id = ? AND p.stock_status = 'in_stock' AND p.source_type = 'OWN'`,
+        WHERE p.branch_id = ? AND p.stock_status = 'in_stock' AND p.source_type = 'OWN' AND p.id NOT LIKE 'bulk-%'`,
       [branchId]
     ).map(r => ({
       id: r.id as string,
@@ -164,7 +169,10 @@ export function stockFor(ctx: BusinessReadContext) {
     const stockAgg = getStockAggregates(stockItems.map(i => i.id));
     const totalVal = computeStockValuation(stockItems, stockAgg);
     const totalItems = totalVal.count;
-    const totalEK = totalVal.cost;
+    // BULK METAL V1 — der Bulk-Bestand zählt im Wert genau einmal (Σ Restwert), nie als Stück.
+    const bulk = bulkInventoryValuation(branchId);
+    const bulkValue = bulk.valueFils / 1000;
+    const totalEK = totalVal.cost + bulkValue;
     const totalVK = totalVal.plannedSale;
 
     // Items by category — gleiche Hybrid-Regel, EIN agg fuer alle.
@@ -177,12 +185,14 @@ export function stockFor(ctx: BusinessReadContext) {
     const byCat = [...catGroups.values()].map(g => {
       const v = computeStockValuation(g.items, stockAgg);
       return { name: g.name, color: g.color, cnt: v.count, value: v.cost };
-    }).sort((a, b) => b.value - a.value);
+    });
+    if (bulkValue > 0) byCat.push({ name: 'Bulk metal (by weight)', color: '#8C8C8C', cnt: 0, value: bulkValue });
+    byCat.sort((a, b) => b.value - a.value);
 
     // Slow movers (> 90 days in stock)
     const slow = qry(
       `SELECT COUNT(*) as cnt FROM products
-       WHERE branch_id = ? AND stock_status = 'in_stock' AND days_in_stock > 90`,
+       WHERE branch_id = ? AND stock_status = 'in_stock' AND days_in_stock > 90 AND id NOT LIKE 'bulk-%'`,
       [branchId]
     );
     const slowCount = num(slow[0] || {}, 'cnt');
@@ -190,7 +200,7 @@ export function stockFor(ctx: BusinessReadContext) {
     // Average days in stock
     const avgDays = qry(
       `SELECT COALESCE(AVG(days_in_stock),0) as avg_days
-       FROM products WHERE branch_id = ? AND stock_status = 'in_stock'`,
+       FROM products WHERE branch_id = ? AND stock_status = 'in_stock' AND id NOT LIKE 'bulk-%'`,
       [branchId]
     );
     const avgDaysInStock = num(avgDays[0] || {}, 'avg_days');
@@ -198,12 +208,12 @@ export function stockFor(ctx: BusinessReadContext) {
     // Status breakdown (all products, not just in_stock)
     const byStatus = qry(
       `SELECT stock_status, COUNT(*) as cnt
-       FROM products WHERE branch_id = ?
+       FROM products WHERE branch_id = ? AND id NOT LIKE 'bulk-%'
        GROUP BY stock_status ORDER BY cnt DESC`,
       [branchId]
     );
 
-    return { totalItems, totalEK, totalVK, byCat, slowCount, avgDaysInStock, byStatus };
+    return { totalItems, totalEK, totalVK, byCat, slowCount, avgDaysInStock, byStatus, bulkValue };
 }
 
 /** Finanzen: Erlöse, Steuern, Zahlungswege, Salden, Quartale. */

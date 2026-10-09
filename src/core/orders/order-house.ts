@@ -34,7 +34,8 @@ export function houseOrderPort(branchId: string): OrderCreatePort {
       "SELECT id FROM customers WHERE id = ? AND branch_id = ? AND id NOT LIKE 'sys-%'", [id, branchId],
     )[0],
     product: (id) => {
-      const r = query('SELECT id, brand, name, sku, category_id, attributes, condition, tax_scheme FROM products WHERE id = ? AND branch_id = ?',
+      // BULK METAL V1 — kein Auftrag über den Bulk-Systemartikel (nur Rechnung in V1).
+      const r = query("SELECT id, brand, name, sku, category_id, attributes, condition, tax_scheme FROM products WHERE id = ? AND branch_id = ? AND id NOT LIKE 'bulk-%'",
         [id, branchId])[0];
       if (!r) return undefined;
       let attributes: Record<string, unknown> = {};
@@ -49,7 +50,7 @@ export function houseOrderPort(branchId: string): OrderCreatePort {
       const r = query('SELECT name FROM suppliers WHERE id = ? AND branch_id = ? AND COALESCE(active, 1) = 1', [id, branchId])[0];
       return r ? { name: String(r.name ?? '') } : undefined;
     },
-    category: (id) => useProductStore.getState().categories.find((c) => c.id === id && !c.id.startsWith('cat-repair-service')),
+    category: (id) => useProductStore.getState().categories.find((c) => c.id === id && !c.id.startsWith('cat-repair-service') && !c.id.startsWith('cat-bulk-metal')),
     isSkuTaken: (sku) => useProductStore.getState().isSkuTaken(sku),
   };
 }

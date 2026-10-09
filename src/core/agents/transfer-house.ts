@@ -36,7 +36,8 @@ export function houseTransferPort(branchId: string): TransferHousePort {
       "SELECT id FROM customers WHERE id = ? AND branch_id = ? AND id NOT LIKE 'sys-%'", [id, branchId],
     )[0],
     productStock: (id) => {
-      const r = query('SELECT stock_status FROM products WHERE id = ? AND branch_id = ?', [id, branchId])[0];
+      // BULK METAL V1 — kein Bulk an Agenten (nicht V1): der Systemartikel gilt hier als nicht vorhanden.
+      const r = query("SELECT stock_status FROM products WHERE id = ? AND branch_id = ? AND id NOT LIKE 'bulk-%'", [id, branchId])[0];
       return r ? String(r.stock_status ?? '') : undefined;
     },
     productOut: (id) => !!query(

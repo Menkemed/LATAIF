@@ -351,7 +351,7 @@ export function AnalyticsPage() {
               <KPICard
                 label="TOTAL PROFIT"
                 value={fmt(sales.totalProfit)}
-                unit="BHD"
+                unit={sales.bulkInventoryLoss ? `BHD · after bulk inventory loss ${fmt(sales.profitAfterInventoryLoss)}` : 'BHD'}
                 icon={<TrendingUp size={16} />}
               />
               <KPICard
@@ -459,7 +459,7 @@ export function AnalyticsPage() {
               <KPICard
                 label="STOCK VALUE (EK)"
                 value={fmt(stock.totalEK)}
-                unit="BHD purchase cost"
+                unit={stock.bulkValue ? `BHD purchase cost · incl. bulk metal ${fmt(stock.bulkValue)}` : 'BHD purchase cost'}
                 icon={<Package size={16} />}
               />
               <KPICard

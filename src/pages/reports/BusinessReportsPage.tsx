@@ -294,8 +294,9 @@ export function BusinessReportsPage() {
   // statt single product.purchase_price. Bei Multi-Lot-Produkten ist das die
   // einzige korrekte Bewertung. Count zaehlt jetzt auch Stueck (qty), nicht Produkte.
   const inventoryReport = useMemo(() => {
+    // BULK METAL V1 — der Bulk-Systemartikel ist kein Stück; sein Wert kommt als eigene Zeile dazu.
     const inStock = products.filter(p =>
-      (p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK') && p.sourceType === 'OWN'
+      (p.stockStatus === 'in_stock' || p.stockStatus === 'IN_STOCK') && p.sourceType === 'OWN' && !p.id.startsWith('bulk-')
     );
     const agg = new Map(bestand.paare);
     let totalCount = 0, totalValue = 0;
@@ -312,8 +313,14 @@ export function BusinessReportsPage() {
       e.count += qty; e.value += val; e.name = name;
       byCat[p.categoryId] = e;
     }
-    return { count: totalCount, value: totalValue, byCat: Object.values(byCat) };
-  }, [products, categories]);
+    const bulkValue = (bestand.bulkValueFils ?? 0) / 1000;
+    const rows = Object.values(byCat);
+    if (bulkValue > 0) rows.push({ count: 0, value: bulkValue, name: 'Bulk metal (by weight)' });
+    const from = periodRange.from.slice(0, 10);
+    const to = periodRange.to.slice(0, 10);
+    const bulkLoss = (bestand.bulkLossByDay ?? []).filter(([d]) => d >= from && d <= to).reduce((s, [, v]) => s + v, 0) / 1000;
+    return { count: totalCount, value: totalValue + bulkValue, byCat: rows, bulkLoss };
+  }, [products, categories, bestand, periodRange]);
 
   // ── Expense Report (Plan §Reports §E)
   const expenseReport = useMemo(() => {
@@ -854,6 +861,9 @@ export function BusinessReportsPage() {
             <MetricCard label="ITEMS IN STOCK" value={String(inventoryReport.count)} />
             <MetricCard label="STOCK VALUE (COST)" value={`${fmt(inventoryReport.value)} BHD`} />
           </div>
+          {inventoryReport.bulkLoss > 0 && (
+            <MetricCard label="INVENTORY LOSS (BULK METAL) IN PERIOD" value={`−${fmt(inventoryReport.bulkLoss)} BHD`} />
+          )}
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>STOCK BY CATEGORY</span>
             {inventoryReport.byCat.map(c => (

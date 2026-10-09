@@ -32,7 +32,9 @@ export function pieceCount(q: number | null | undefined): number {
 // Ausdruecklich NICHT `canonicalStockStatus`: das ist ein Status-Normalisierer, der `in_stock`,
 // `consignment` und `offered` zusammenfasst, weil sie fuer Verkauf und Suche dasselbe bedeuten. Als
 // Vermoegensregel benutzt, zaehlt er fremde und angebotene Ware zum eigenen Bestandswert.
-export function isOwnStockAsset(p: { stockStatus?: string | null; sourceType?: string | null }): boolean {
+export function isOwnStockAsset(p: { id?: string | null; stockStatus?: string | null; sourceType?: string | null }): boolean {
+  // BULK METAL V1 — der Bulk-Systemartikel ist kein Stück: sein Wert zählt über bulkInventoryValuation.
+  if (String(p.id ?? '').startsWith('bulk-')) return false;
   const s = p.stockStatus || '';
   return (s === 'in_stock' || s === 'IN_STOCK') && p.sourceType === 'OWN';
 }
