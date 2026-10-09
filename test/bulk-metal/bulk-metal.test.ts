@@ -627,6 +627,7 @@ const cmdB = await import('../../src/core/bridge/bulk-metal-commands.ts');
 const registry = await import('../../src/core/bridge/command-registry.ts');
 const perms = await import('../../src/core/bridge/command-permissions.ts');
 const readOps = await import('../../src/core/bridge/store-read-ops.ts');
+const vatLock = await import('../../src/core/tax/vat-period-lock.ts');
 
 const RCTX = { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', role: 'ADMIN' };
 const reconOk = (): boolean => {
@@ -867,6 +868,23 @@ function projection(db: Db): string {
   ok(ops.every((x) => rust.includes(`"${x}"`)), 'X4 Rust kennt alle acht');
   const remoteOps = (rust.split('pub const REMOTE_OPS')[1] ?? '').split('];')[0].match(/OP_[A-Z0-9_]+/g) ?? [];
   ok(remoteOps.length === 192, `X4 REMOTE_OPS = 192 (${remoteOps.length})`);
+  // Registry-Arithmetik am ausgelieferten Zustand: genau die Befehlsmodule, die bridge-listener.ts lädt.
+  for (const m of src('src/core/bridge/bridge-listener.ts').matchAll(/^import '\.\/([a-z0-9-]+)';/gm)) {
+    await import(`../../src/core/bridge/${m[1]}.ts`);
+  }
+  const known = registry.knownCommands();
+  const probes = known.filter((o) => o === 'bridge.probe');
+  const readsK = known.filter((o) => o.endsWith('.get') || o.endsWith('.list'));
+  const mutsK = known.filter((o) => !probes.includes(o) && !readsK.includes(o));
+  console.log(`  REGISTRY Probe ${probes.length} / Mutations ${mutsK.length} / Reads ${readsK.length} / Total ${known.length}`);
+  ok(probes.length === 1 && mutsK.length === 114 && readsK.length === 77 && known.length === 192 && probes.length + mutsK.length + readsK.length === known.length,
+    `X5 Registry 1 Probe + 114 Mutations + 77 Reads = 192 (${probes.length}/${mutsK.length}/${readsK.length}/${known.length})`);
+  ok(S([...mutsK].sort()) === S([...am].sort()), 'X5 die registrierten Mutationen sind genau ALLOWED_MUTATIONS');
+  const rustName = new Map([...rust.matchAll(/pub const (OP_[A-Z0-9_]+): &str = "([^"]+)";/g)].map((m) => [m[1], m[2]]));
+  const rustNames = remoteOps.map((o) => rustName.get(o) ?? `?${o}`);
+  ok(rustNames.every((x) => !x.startsWith('?')) && new Set(rustNames).size === 192 && S([...rustNames].sort()) === S([...known].sort()),
+    `X5 TS = Rust: dieselben 192 Namen (nur TS: ${known.filter((x) => !rustNames.includes(x)).join(',') || '—'}; nur Rust: ${rustNames.filter((x) => !known.includes(x)).join(',') || '—'})`);
+  ok(ops.every((x) => known.includes(x) && perms.isOperationCovered(x)), 'X5 alle acht Bulk-Befehle registriert und mit Recht bedacht');
 }
 
 // ══ S — Schutzwände nachgezogen: Retouren-Entwurf, FIFO nur Stück-Lose, Seitenrecht ══
@@ -879,6 +897,102 @@ function projection(db: Db): string {
   ok((src('src/stores/invoiceStore.ts').match(/qty_remaining > 0 AND unit = 'pcs'/g) ?? []).length === 2 && /qty_remaining >= 1 AND unit = 'pcs'/.test(src('src/stores/agentStore.ts')),
     'S5 FIFO-Abfragen (Anlegen, Ändern, Agent) zusätzlich nur Stück-Lose');
   ok(/perm\.can\('bulk_metals\.view'\)/.test(src('src/pages/bulk-metals/BulkMetalsPage.tsx')), 'X3 Seite „Bulk Metals" nur mit bulk_metals.view');
+}
+
+// ══ T — Ändern einer Rechnung mit Retoure/Gutschrift: neue Bulk-Zeile, Nachbar-Sperren, Atomarität, VAT ══
+{
+  const db = neu();
+  const d = dps(db);
+  const p = bulkKauf({ weight: '100', cost: '200' });
+  const id = lotOfPurchase(db, p);
+  const inv = verkauf([{ lotId: id, weight: '10', type: 'RING', price: '30' }, { lotId: id, weight: '5', type: 'PENDANT', price: '20' }]);
+  zahlen(db, inv);
+  const l1 = lineOf(db, inv, 1);
+  const l2 = lineOf(db, inv, 2);
+  retoureBulk(db, inv, l1);
+  const cnOf = (): number => n(db, "SELECT COALESCE(SUM(total_amount), 0) FROM credit_notes WHERE invoice_id = ? AND status != 'CANCELLED'", [inv]);
+  ok(cnOf() === 30 && lot(id).remainingWeightMg === 95000, `T0 Rechnung Ring 30 + Anhänger 20, Ring retourniert, Gutschrift 30 (${cnOf()})`);
+  const rev = (): number => n(db, 'SELECT revision FROM invoices WHERE id = ?', [inv]);
+  const kept1 = { kind: 'bulk', lineId: l1, bulkLotId: id, weightMg: 10000, bulkType: 'RING', unitPriceFils: 30000 };
+  const kept2 = { kind: 'bulk', lineId: l2, bulkLotId: id, weightMg: 5000, bulkType: 'PENDANT', unitPriceFils: 20000 };
+  const upd = (x: string, lines: unknown[], extra: Record<string, unknown> = {}) =>
+    cmdIL.runInvoiceUpdate(d, ident(x, 'invoices.update'), { id: inv, expectedRevision: rev(), reason: 'Zeile dazu', customerId: 'cust-1', lines, ...extra });
+  const code = (r: unknown): string => String((r as { code?: string }).code ?? S(r));
+  const snap = (dbx: Db, invx: string): string => S({
+    lots: dbx.exec("SELECT id, remaining_weight_mg, remaining_value_fils, status, revision FROM stock_lots WHERE unit = 'mg' ORDER BY id")[0].values,
+    moves: n(dbx, 'SELECT COUNT(*) FROM bulk_lot_movements'),
+    lines: dbx.exec('SELECT id, lot_id, bulk_weight_mg, bulk_cogs_fils, unit_price, line_total, vat_amount FROM invoice_lines WHERE invoice_id = ? ORDER BY position', [invx])[0].values,
+    ledger: n(dbx, 'SELECT COUNT(*) FROM ledger_entries'),
+    cn: dbx.exec('SELECT id, total_amount, status FROM credit_notes ORDER BY id')[0]?.values ?? [],
+    inv: dbx.exec('SELECT revision, gross_amount, paid_amount, status, notes FROM invoices WHERE id = ?', [invx])[0].values,
+  });
+  const l1Before = lineRow(db, l1);
+  // Negativ-Nachbarn: jede Abweisung lässt alles, wie es war.
+  const p2 = bulkKauf({ weight: '50', cost: '100' });
+  const id2 = lotOfPurchase(db, p2);
+  const s0 = snap(db, inv);
+  const nPrice = await upd('201', [{ ...kept1, unitPriceFils: 35000 }, kept2]);
+  ok(nPrice.kind === 'rejected' && code(nPrice) === 'INVOICE_RETURNED_LINE_PRICE_LOCKED', `T1 Preis der retournierten Bulk-Zeile → gesperrt (${code(nPrice)})`);
+  const nDrop = await upd('202', [kept2, { kind: 'bulk', bulkLotId: id, weightMg: 8000, bulkType: 'EARRINGS', unitPriceFils: 25000 }]);
+  ok(nDrop.kind === 'rejected' && code(nDrop) === 'INVOICE_LINE_HAS_RETURN', `T1 retournierte Bulk-Zeile entfernen (mit neuer Zeile) → gesperrt (${code(nDrop)})`);
+  const nWeight = await upd('203', [{ ...kept1, weightMg: 9000 }, kept2]);
+  ok(nWeight.kind === 'rejected' && code(nWeight) === 'BULK_LINE_FIELDS_LOCKED', `T1 Gewicht der retournierten Zeile → gesperrt (${code(nWeight)})`);
+  const nLot = await upd('204', [{ ...kept1, bulkLotId: id2 }, kept2]);
+  ok(nLot.kind === 'rejected' && code(nLot) === 'BULK_LINE_FIELDS_LOCKED', `T1 Lot der retournierten Zeile → gesperrt (${code(nLot)})`);
+  const nMuch = await upd('205', [kept1, kept2, { kind: 'bulk', bulkLotId: id, weightMg: 95001, bulkType: 'RING', unitPriceFils: 1000 }]);
+  ok(nMuch.kind === 'rejected' && code(nMuch) === 'BULK_WEIGHT_EXCEEDS_REMAINING', `T1 neue Zeile über dem Rest → Nein (${code(nMuch)})`);
+  ok(snap(db, inv) === s0, 'T1 nach allen Abweisungen: Lots, Bewegungen, Zeilen, Hauptbuch, Gutschrift, Rechnung unverändert (atomar)');
+  // Positiv: PC2 schickt nur Absichten (Beträge 0) — bestehende Gutschrift, neue gültige Bulk-Zeile.
+  const okUp = await upd('206', [kept1, kept2, { kind: 'bulk', bulkLotId: id, weightMg: 8000, bulkType: 'EARRINGS', unitPriceFils: 25000 }]);
+  ok(okUp.kind === 'ok', `T2 Rechnung mit Gutschrift + neue Bulk-Zeile fern → angenommen (${S(okUp)})`);
+  reload();
+  const rows = db.exec('SELECT id, bulk_weight_mg, bulk_cogs_fils, line_total, bulk_type FROM invoice_lines WHERE invoice_id = ? ORDER BY position', [inv])[0].values;
+  const added = rows.find((r) => r[0] !== l1 && r[0] !== l2);
+  ok(rows.length === 3 && !!added && Number(added[1]) === 8000 && Number(added[2]) === 16000 && Number(added[3]) === 25 && added[4] === 'EARRINGS',
+    `T2 neue Zeile 8 g, COGS 16.000, 25.000, EARRINGS (${S(rows)})`);
+  const l1After = lineRow(db, l1);
+  ok(['lot_id', 'bulk_weight_mg', 'bulk_cogs_fils', 'unit_price', 'line_total', 'vat_amount', 'purchase_price_snapshot', 'tax_scheme', 'bulk_type']
+    .every((k) => S(l1After[k]) === S(l1Before[k])), 'T2 retournierte Zeile unverändert (Lot, Gewicht, COGS, Preis, Beträge, Typ)');
+  ok(cnOf() === 30 && n(db, 'SELECT gross_amount FROM invoices WHERE id = ?', [inv]) === 75, `T2 Gutschrift 30 unverändert, Rechnung 30 + 20 + 25 = 75`);
+  ok(lot(id).remainingWeightMg === 87000 && lot(id).remainingValueFils === 174000 && moves(id).at(-1)?.kind === 'SALE', 'T2 Lot 95 − 8 = 87 g / 174.000, Bewegung SALE');
+  ok(balancedInventory(db) && invOk(id) && invOk(id2), 'T2 INVENTORY = Σ Restwert, Invarianten');
+  // Dasselbe über die Maske (Store, Beträge 0): nur Notiz, retournierte Zeile bleibt — kein falsches Nein.
+  imHaus(() => useInvoiceStore.getState().editInvoice(inv, { reason: 'Notiz', notes: 'Kundin holt Ohrringe ab', lines: rows.map((r) => ({
+    lineId: r[0], productId: 'bulk-silver-925-branch-main', unitPrice: 0, purchasePrice: 0, taxScheme: 'MARGIN', vatRate: 10, vatAmount: 0, lineTotal: 0,
+    bulkIntent: { lotId: id, weightMg: Number(r[1]), bulkType: String(r[4]), unitPriceFils: Number(r[3]) * 1000 } })) as never }));
+  reload();
+  ok(s(db, 'SELECT notes FROM invoices WHERE id = ?', [inv]) === 'Kundin holt Ohrringe ab' && lot(id).remainingWeightMg === 87000 && cnOf() === 30
+    && S(lineRow(db, l1).line_total) === S(l1Before.line_total), 'T3 Notiz-Edit lokal mit retournierter Bulk-Zeile → angenommen, nichts verschoben');
+  // Lot-Anzeige beim Ändern: die BM-Nummer kommt aus dem Rechnungs-Read des Primary (auch für PC2: store.invoices.get).
+  const { loadInvoicesFor } = await import('../../src/stores/invoiceStore.ts');
+  const shown = loadInvoicesFor({ branchId: 'branch-main' } as never).invoices.find((x) => x.id === inv)!.lines!;
+  ok(shown.every((x) => x.bulkLotNo === lot(id).lotNo) && /lotLabel: l\.bulkLotNo \|\| '—'/.test(src('src/pages/invoices/InvoiceCreate.tsx'))
+    && !src('src/pages/invoices/InvoiceCreate.tsx').includes("'saved lot'"), `T4 Edit zeigt die echte Lot-Nummer ${lot(id).lotNo} statt „saved lot"`);
+
+  // VAT-Sperre unverändert: gemeldetes Quartal → neue Bulk-Zeile abgewiesen, Notiz geht.
+  const dbV = neu();
+  const dV = dps(dbV);
+  const pV = bulkKauf({ weight: '20', cost: '40' });
+  const idV = lotOfPurchase(dbV, pV);
+  const invV = verkauf([{ lotId: idV, weight: '5', type: 'RING', price: '15' }]);
+  zahlen(dbV, invV);
+  const lV = lineOf(dbV, invV);
+  retoureBulk(dbV, invV, lV);
+  const fp = vatLock.vatFingerprint(invV)!;
+  const [yy, qq] = fp.quarter.split('-Q').map(Number);
+  // Fixture: derselbe Datensatz, den „Mark VAT filed" schreibt (das Quartal ist nach der Testuhr noch offen).
+  dbV.run(`INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, filed_by, note, invoice_count, snapshot_json, created_at)
+           VALUES ('vf-1', 'branch-main', ?, ?, ?, 'user-test', NULL, 1, '[]', ?)`, [yy, qq, NOW, NOW]);
+  const revV = (): number => n(dbV, 'SELECT revision FROM invoices WHERE id = ?', [invV]);
+  const keptV = { kind: 'bulk', lineId: lV, bulkLotId: idV, weightMg: 5000, bulkType: 'RING', unitPriceFils: 15000 };
+  const sV = snap(dbV, invV);
+  const vAdd = await cmdIL.runInvoiceUpdate(dV, ident('301', 'invoices.update'), { id: invV, expectedRevision: revV(), reason: 'Zeile dazu', customerId: 'cust-1',
+    lines: [keptV, { kind: 'bulk', bulkLotId: idV, weightMg: 2000, bulkType: 'PENDANT', unitPriceFils: 9000 }] });
+  ok(vAdd.kind === 'rejected' && code(vAdd) === 'VAT_PERIOD_FILED', `T5 gemeldetes Quartal: neue Bulk-Zeile → VAT_PERIOD_FILED (${code(vAdd)})`);
+  ok(snap(dbV, invV) === sV, 'T5 …und nichts verändert (Lot, Bewegungen, Zeilen, Hauptbuch, Gutschrift, Rechnung)');
+  const vNote = await cmdIL.runInvoiceUpdate(dV, ident('302', 'invoices.update'), { id: invV, expectedRevision: revV(), reason: 'Notiz', customerId: 'cust-1', notes: 'nur Notiz', lines: [keptV] });
+  ok(vNote.kind === 'ok' && s(dbV, 'SELECT notes FROM invoices WHERE id = ?', [invV]) === 'nur Notiz' && invOk(idV),
+    `T5 gemeldetes Quartal: Notiz mit retournierter Bulk-Zeile fern → angenommen, Export unverändert (${S(vNote)})`);
 }
 
 console.log(`
