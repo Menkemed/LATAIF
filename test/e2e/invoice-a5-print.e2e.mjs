@@ -15,8 +15,8 @@
 //
 // PROZESS-ISOLATION: gestartet nur über `spawnTracked`, beendet nur, was dieser Lauf gestartet hat
 // oder was am EXAKTEN Test-Pfad läuft. Ports 3011/9223/9224 (+ 9231 für den Kopflos-Browser),
-// Datenordner com.lataif.app.e2e(.client). Die installierte Produktions-App, E:\LATAIF\Data und die
-// Ports 3001/3443 werden nie berührt.
+// Datenordner com.lataif.app.e2e(.client). Die installierte Produktions-App und E:\LATAIF\Data
+// werden nie berührt, ebenso die Produktions-Ports 3001/3443.
 // ════════════════════════════════════════════════════════════════════════════
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
 import { killOwnChild, killStarted, killTestImage, spawnTracked, waitTestImageGone } from './_e2e-process.mjs';
