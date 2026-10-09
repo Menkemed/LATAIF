@@ -294,6 +294,10 @@ export interface InvoiceLine {
   position: number;
   /** INVOICE-EDIT S2 — das Los, aus dem die Zeile verkauft wurde (die Maske zeigt es beim Ändern). */
   lotId?: string | null;
+  /** BULK METAL V1 — Bulk-Zeile: verbrauchtes Gewicht (mg), zugeteilter COGS (Fils), Typ. */
+  bulkWeightMg?: number | null;
+  bulkCogsFils?: number | null;
+  bulkType?: string | null;
   product?: Product;
 }
 

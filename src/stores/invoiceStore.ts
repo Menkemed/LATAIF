@@ -227,6 +227,10 @@ function rowToLine(row: Record<string, unknown>): InvoiceLine {
     lineTotal: (row.line_total as number) || 0,
     position: (row.position as number) || 1,
     lotId: (row.lot_id as string | null) || null,
+    // BULK METAL V1 — Bulk-Zeile (sonst null).
+    bulkWeightMg: row.bulk_weight_mg === null || row.bulk_weight_mg === undefined ? null : Number(row.bulk_weight_mg),
+    bulkCogsFils: row.bulk_cogs_fils === null || row.bulk_cogs_fils === undefined ? null : Number(row.bulk_cogs_fils),
+    bulkType: (row.bulk_type as string | null) ?? null,
   };
 }
 

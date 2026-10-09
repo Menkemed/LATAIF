@@ -41,13 +41,17 @@ import { usePartnerStore } from '@/stores/partnerStore';
 import { PurchasePartnerSection } from '@/components/purchases/PurchasePartnerSection';
 import type { PartnerShareInput } from '@/core/partners/item-participation';
 import { productDisplayName, productDisplayLines } from '@/core/products/display-name';
+// BULK METAL V1 — Bulk-Zeile: Gesamtgewicht + Gesamtkosten; Lot, Lot-Nummer und Wert rechnet das Haus.
+import { BulkPurchaseLineEditor, bulkDraftToInput, newBulkDraft, type BulkDraft } from '@/components/bulk/BulkPurchaseLineEditor';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
 }
 
 interface DraftLine {
-  mode: 'existing' | 'new';
+  mode: 'existing' | 'new' | 'bulk';
+  /** BULK METAL V1 — Eingaben der Bulk-Zeile (Text; exakt in mg/Fils umgerechnet beim Speichern). */
+  bulk?: BulkDraft;
   productId?: string;
   // Plan §Purchase §New-Item: für Source='new' wird die Ware mit voller
   // Collection-Spec über Modal erfasst (Kategorie + dyn. Attribute + Photos
@@ -258,6 +262,11 @@ export function PurchaseCreate() {
     setLines(prev => [...prev, { mode: 'new', brand: '', name: '', sku: '', categoryId: categories[0]?.id || '', quantity: 1, unitPrice: 0 }]);
   }
 
+  // BULK METAL V1 — eine Bulk-Zeile (Menge 1 zum Gesamtbetrag).
+  function addBulkLine() {
+    setLines(prev => [...prev, { mode: 'bulk', brand: '', name: '', sku: '', categoryId: '', quantity: 1, unitPrice: 0, bulk: newBulkDraft(purchaseTaxScheme) }]);
+  }
+
   function removeLine(idx: number) {
     setLines(prev => prev.length === 1 ? prev : prev.filter((_, i) => i !== idx));
   }
@@ -325,7 +334,10 @@ export function PurchaseCreate() {
   function formInput(): PurchaseCreateInput {
     return {
       supplierId, purchaseDate, taxScheme: purchaseTaxScheme,
-      lines: lines.map(l => ({
+      lines: lines.map(l => l.mode === 'bulk' && l.bulk ? (() => {
+        const b = bulkDraftToInput(l.bulk);
+        return { mode: 'bulk' as const, bulk: b, brand: '', name: '', sku: '', categoryId: '', quantity: 1, unitPrice: b.lineTotalFils / 1000 };
+      })() : ({
         mode: l.mode, productId: l.productId, newProduct: l.newProduct, brand: l.brand, name: l.name,
         sku: l.sku, categoryId: l.categoryId, quantity: l.quantity, unitPrice: l.unitPrice,
         sourceOrderLineId: l.sourceOrderLineId,
@@ -339,7 +351,8 @@ export function PurchaseCreate() {
 
   async function handleSave(continueEditing: boolean) {
     setError('');
-    const input = formInput();
+    let input: PurchaseCreateInput;
+    try { input = formInput(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); return; }
     const v = validatePurchaseCreate(input);
     if (v) { setError(v); return; }
     // Auf dem zweiten Rechner reisen die Fotos der neuen Artikel vorab in die Zwischenablage; der
@@ -457,6 +470,7 @@ export function PurchaseCreate() {
             <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
               <span className="text-overline">2 · ITEMS</span>
               <Button variant="secondary" onClick={addLine}><Plus size={12} /> Add Item</Button>
+              <Button variant="secondary" onClick={addBulkLine} data-bulk-add-purchase-line><Plus size={12} /> Add bulk metal</Button>
             </div>
             <div style={{ border: '1px solid #E5E9EE', borderRadius: 8 }}>
               <div style={{
@@ -475,6 +489,16 @@ export function PurchaseCreate() {
                 <span></span>
               </div>
               {lines.map((l, idx) => {
+                if (l.mode === 'bulk' && l.bulk) {
+                  const bulk = l.bulk;
+                  return (
+                    <div key={idx} style={{ borderBottom: '1px solid #E5E9EE' }}>
+                      <BulkPurchaseLineEditor draft={bulk} purchaseTaxScheme={purchaseTaxScheme} removable={lines.length > 1}
+                        onRemove={() => removeLine(idx)}
+                        onChange={(d) => updateLine(idx, { bulk: d, quantity: 1, unitPrice: Number(d.costText) || 0 })} />
+                    </div>
+                  );
+                }
                 const lineProduct = l.mode === 'existing' && l.productId ? products.find(p => p.id === l.productId) : undefined;
                 const lineSpecs = lineProduct ? getProductSpecs(lineProduct, categories) : [];
                 const expanded = !!expandedLines[idx];
@@ -504,13 +528,15 @@ export function PurchaseCreate() {
                   {/* Source toggle — bei „New Item" öffnet sich automatisch das Modal */}
                   <select value={l.mode}
                     onChange={e => {
-                      const newMode = e.target.value as 'existing' | 'new';
+                      const newMode = e.target.value as 'existing' | 'new' | 'bulk';
+                      if (newMode === 'bulk') { updateLine(idx, { mode: 'bulk', productId: undefined, quantity: 1, unitPrice: 0, bulk: newBulkDraft(purchaseTaxScheme) }); return; }
                       updateLine(idx, { mode: newMode, productId: undefined });
                       if (newMode === 'new') openNewItemModal(idx);
                     }}
                     style={{ padding: '7px 8px', fontSize: 11, border: '1px solid #D5D9DE', borderRadius: 4, background: '#FFFFFF', minWidth: 0, width: '100%' }}>
                     <option value="new">New Item</option>
                     <option value="existing">Existing</option>
+                    <option value="bulk">Bulk metal</option>
                   </select>
 
                   {/* Product picker (existing) oder Item-Card mit Edit-Button (new) */}

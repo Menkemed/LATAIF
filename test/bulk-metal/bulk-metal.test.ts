@@ -604,6 +604,271 @@ const balancedInventory = (db: Db): boolean => {
   ok(invOk(id), 'L7 Invarianten');
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// BULK METAL V1 — Teil 3: Auskünfte, „Sold as", Abstimmung, Lagerwert, Ausblendungen, Sperren,
+// Druck/NBR, PC2-Fernbefehle (Parität, verbotene Felder, Replay), Registry.
+// ════════════════════════════════════════════════════════════════════════════
+const reads = await import('../../src/core/bulk/bulk-reads.ts');
+const { lotAggregatesFor } = await import('../../src/core/data/domain-reads.ts');
+const analytics = await import('../../src/core/reports/analytics-snapshot.ts');
+const { loadProductsFor } = await import('../../src/stores/productStore.ts');
+const { isOwnStockAsset } = await import('../../src/core/lots/stock-metrics.ts');
+const { isRepairableOwnProduct } = await import('../../src/core/repairs/repair-rules.ts');
+const { assertProductsInBranch } = await import('../../src/core/stock/inventory-house.ts');
+const { globalSearchFor } = await import('../../src/core/search/global-search.ts');
+const { buildInvoiceA5Data } = await import('../../src/core/pdf/invoice-a5.ts');
+const { buildMonthSheet } = await import('../../src/core/tax/nbr-export.ts');
+const cmdC = await import('../../src/core/bridge/commercial-commands.ts');
+const cmdI = await import('../../src/core/bridge/invoice-command.ts');
+const cmdIL = await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
+const cmdR = await import('../../src/core/bridge/return-commands.ts');
+const cmdSR = await import('../../src/core/bridge/sales-reversal-commands.ts');
+const cmdB = await import('../../src/core/bridge/bulk-metal-commands.ts');
+const registry = await import('../../src/core/bridge/command-registry.ts');
+const perms = await import('../../src/core/bridge/command-permissions.ts');
+const readOps = await import('../../src/core/bridge/store-read-ops.ts');
+
+const RCTX = { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', role: 'ADMIN' };
+const reconOk = (): boolean => {
+  const r = reads.bulkLedgerReconciliation('branch-main');
+  if (!r.ok) console.log(`    Abstimmung: Lots ${r.lotsValueFils} vs Hauptbuch ${r.ledgerValueFils}`);
+  return r.ok;
+};
+
+// ══ M — Auskünfte, „Sold as", Abstimmung nach jedem Schritt ══════════════════
+{
+  const db = neu();
+  const p = bulkKauf({ weight: '500', cost: '1000', composition: COMP });
+  const id = lotOfPurchase(db, p);
+  let allOk = reconOk();
+  const ring = verkauf([{ lotId: id, weight: '7', type: 'RING', price: '25' }]); allOk = allOk && reconOk();
+  zahlen(db, ring);
+  const neck = verkauf([{ lotId: id, weight: '21.5', type: 'NECKLACE_CHAIN', price: '70' }]); allOk = allOk && reconOk();
+  const sold = (): Record<string, number> => Object.fromEntries(reads.soldAsFor(id).map((x) => [x.bulkType, x.soldMg]));
+  ok(S(sold()) === S({ NECKLACE_CHAIN: 21500, RING: 7000 }), `M1 Sold as nach zwei Verkäufen ${S(sold())}`);
+  const rr = retoureBulk(db, ring, lineOf(db, ring)); allOk = allOk && reconOk();
+  ok(S(sold()) === S({ NECKLACE_CHAIN: 21500 }), 'M2 retournierter Ring zählt nicht');
+  imHaus(() => cancelReturnHouse.cancelReturnInHouse(rr, 'Irrtum', OWNER_ACTOR, 'branch-main')); reload(); allOk = allOk && reconOk();
+  ok(S(sold()) === S({ NECKLACE_CHAIN: 21500, RING: 7000 }), 'M3 Retoure storniert → Ring wieder in der Statistik');
+  imHaus(() => useInvoiceStore.getState().editInvoice(neck, { reason: 'Typ', lines: [{ lineId: lineOf(db, neck), productId: 'bulk-silver-925-branch-main', unitPrice: 0, purchasePrice: 0, taxScheme: 'MARGIN', vatRate: 10, vatAmount: 0, lineTotal: 0,
+    bulkIntent: { lotId: id, weightMg: 21500, bulkType: 'PENDANT', unitPriceFils: 70000 } }] as never })); reload(); allOk = allOk && reconOk();
+  ok(S(sold()) === S({ PENDANT: 21500, RING: 7000 }), 'M4 Typänderung wirkt rückwirkend auf Sold as');
+  imHaus(() => cancelInvoiceInHouse({ invoiceId: neck, refundMethod: 'cash' }, 'branch-main')); reload(); allOk = allOk && reconOk();
+  ok(S(sold()) === S({ RING: 7000 }), 'M5 stornierte Rechnung zählt nicht');
+  const del = verkauf([{ lotId: id, weight: '3', type: 'EARRINGS', price: '9' }]); allOk = allOk && reconOk();
+  imHaus(() => useInvoiceStore.getState().deleteInvoice(del)); reload(); allOk = allOk && reconOk();
+  ok(S(sold()) === S({ RING: 7000 }), 'M6 gelöschte Rechnung zählt nicht');
+  const net = -moves(id).filter((m) => ['SALE', 'SALE_REVERSAL', 'RETURN', 'RETURN_CANCEL'].includes(m.kind)).reduce((s0, m) => s0 + m.weightMg, 0);
+  ok(net === 7000, `M7 Invariante 9: Σ Sold as = Netto-Verkauf aus Bewegungen (${net})`);
+  imHaus(() => lh.writeOffInHouse({ actionId: newAction(), lotId: id, expectedRevision: lot(id).revision, weightMg: 1200, reason: 'x' }, CTXB)); allOk = allOk && reconOk();
+  imHaus(() => lh.reverseAdjustmentInHouse({ actionId: newAction(), lotId: id, expectedRevision: lot(id).revision, movementId: moves(id).at(-1)!.id, reason: 'x' }, CTXB)); allOk = allOk && reconOk();
+  const p2 = bulkKauf({ metal: 'gold', fineness: '18K', weight: '50', cost: '1500', vat: true }); allOk = allOk && reconOk();
+  imHaus(() => life.cancelPurchaseInHouse(p2, 'branch-main')); allOk = allOk && reconOk();
+  ok(allOk, 'M8 Abstimmung Σ Restwert = Bulk-INVENTORY nach JEDEM Schritt (Verkauf, Retoure, Storno, Edit, Löschen, Write-off, Stornierung, VAT_10-Einkauf, Einkaufsstorno)');
+  const page = reads.bulkMetalsPageFor(RCTX);
+  ok(page.articles.length === 2 && page.totalValueFils === bulkValueFils(db) && page.reconciliation.ok, `M9 Seite: 2 Artikel, Gesamtwert = Σ Restwert (${page.totalValueFils})`);
+  const detail = reads.bulkLotDetailFor(RCTX, id)!;
+  ok(detail.movements.length === moves(id).length && detail.sales.length === 2 && detail.lot.composition.length === 5, 'M10 Lot-Detail: Verlauf, Verkäufe, Composition');
+  ok(detail.movements.some((m) => m.document === 'deleted invoice'), 'M10 …gelöschte Rechnung im Verlauf benannt');
+  const forSale = reads.bulkLotsForSaleFor(RCTX);
+  ok(forSale.length === 1 && forSale[0].lotId === id, 'M11 Lot-Auswahl: nur aktive Lots mit Rest');
+  const prev = reads.bulkAllocationPreviewFor(RCTX, id, 5000);
+  ok(prev.cogsFils === bm.allocateFils(lot(id).remainingValueFils, lot(id).remainingWeightMg, 5000), 'M12 Vorschau = Zuteilung');
+  ok(reads.bulkInventoryValuation('branch-main').valueFils === bulkValueFils(db), 'M13 Bewertung = Σ Restwert');
+}
+
+// ══ N — Lagerwert genau einmal, nie als Stück; Verlustzeile ══════════════════
+{
+  const db = neu();
+  product(db, 'p-w', 300, 2);   // zwei Stück ohne Los zu 300
+  const p = bulkKauf({ weight: '100', cost: '200' });
+  const id = lotOfPurchase(db, p);
+  imHaus(() => lh.writeOffInHouse({ actionId: newAction(), lotId: id, expectedRevision: lot(id).revision, weightMg: 10000, reason: 'Schwund' }, CTXB));
+  const st = analytics.stockFor(RCTX)!;
+  ok(r3(st.totalEK) === r3(600 + 180) && st.totalItems === 2 && r3(st.bulkValue) === 180, `N1 Analytics: Wert 600 + Bulk 180, Stück 2 (${st.totalEK}/${st.totalItems})`);
+  ok(st.byCat.some((c) => c.name.startsWith('Bulk metal') && r3(c.value) === 180 && c.cnt === 0), 'N1 eigene Zeile „Bulk metal", 0 Stück');
+  const sa = analytics.salesFor(RCTX)!;
+  ok(r3(sa.bulkInventoryLoss) === 20 && r3(sa.profitAfterInventoryLoss) === r3(sa.totalProfit - 20), 'N2 Verlustzeile 20.000, Gewinn danach abgezogen');
+  const agg = lotAggregatesFor(RCTX);
+  ok(agg.bulkValueFils === 180000 && (agg.bulkLossByDay ?? []).reduce((s0, [, v]) => s0 + v, 0) === 20000, 'N3 Lot-Zahlen tragen Bulk-Wert und Tagesverluste (Dashboard/Reports, auch PC2)');
+  ok(!agg.paare.some(([pid]) => pid.startsWith('bulk-')), 'N3 keine Bulk-Paare in den Stück-Aggregaten');
+  ok(loadProductsFor(RCTX).products.every((x) => !x.id.startsWith('bulk-')), 'N4 Artikelliste (Collection, Auswahlen, Dubletten, Import, KI) ohne Systemartikel');
+  ok(!isOwnStockAsset({ id: 'bulk-silver-925-branch-main', stockStatus: 'in_stock', sourceType: 'OWN' }), 'N4 Systemartikel ist kein Stück-Asset');
+}
+
+// ══ O — Ausblenden und Sperren ═══════════════════════════════════════════════
+{
+  const db = neu();
+  bulkKauf({ weight: '10', cost: '20' });
+  const BID = 'bulk-silver-925-branch-main';
+  ok(meldung(() => useProductStore.getState().updateProduct(BID, { name: 'x' } as never)).startsWith('BULK_SYSTEM_PRODUCT_LOCKED'), 'O1 updateProduct gesperrt');
+  ok(meldung(() => useProductStore.getState().deleteProduct(BID)).startsWith('BULK_SYSTEM_PRODUCT_LOCKED'), 'O1 deleteProduct gesperrt');
+  ok(useProductStore.getState().deleteProducts([BID]).blocked.some((b) => b.id === BID), 'O1 deleteProducts blockiert');
+  ok(meldung(() => useProductStore.getState().updateCategory('cat-bulk-metal-branch-main', { name: 'x' } as never)).startsWith('BULK_SYSTEM_PRODUCT_LOCKED'), 'O1 Kategorie gesperrt');
+  ok(n(db, `SELECT COUNT(*) FROM products WHERE id = ? AND sku IS NULL`, [BID]) === 1, 'O2 sku = NULL');
+  ok(!isRepairableOwnProduct({ id: BID, sourceType: 'OWN' }), 'O3 keine Reparatur am Systemartikel');
+  ok(meldung(() => assertProductsInBranch(db as never, 'branch-main', [BID])).includes('not an item of this branch'), 'O3 Inventur weist den Systemartikel ab');
+  const gs = globalSearchFor(RCTX as never, { q: 'Silver' } as never);
+  ok(!S(gs).includes(BID), 'O3 globale Suche ohne Systemartikel');
+  ok((await meldungAsync(() => imHausAsync(() => createProductionInHouse({ inputProductIds: [BID], outputs: [] } as never, CTX as never)))).includes('BULK_NOT_SUPPORTED_HERE'), 'O3 Produktion mit Bulk → BULK_NOT_SUPPORTED_HERE');
+  const files: Array<[string, RegExp]> = [
+    ['src/core/offers/offer-house.ts', /bulk-'\)\) throw new OfferRejected\('BULK_NOT_SUPPORTED_HERE'/],
+    ['src/core/orders/order-house.ts', /id NOT LIKE 'bulk-%'/],
+    ['src/core/agents/transfer-house.ts', /id NOT LIKE 'bulk-%'/],
+    ['src/core/repairs/repair-house.ts', /id NOT LIKE 'bulk-%'/],
+    ['src/core/production/production-house.ts', /BULK_NOT_SUPPORTED_HERE/],
+    ['src/core/bridge/read-commands.ts', /id NOT LIKE 'bulk-%'[\s\S]*id NOT LIKE 'bulk-%'[\s\S]*id NOT LIKE 'bulk-%'/],
+    ['src/core/bridge/product-commands.ts', /BULK_SYSTEM_PRODUCT_LOCKED/],
+    ['src-tauri/src/sync/product_query.rs', /WHERE p\.branch_id = \?2 AND p\.id NOT LIKE 'bulk-%'/],
+    ['src-tauri/src/sync/stock_check.rs', /AND p\.id NOT LIKE 'bulk-%'/],
+    ['src/core/purchases/purchase-house.ts', /NOT LIKE 'cat-bulk-metal%' AND id NOT LIKE 'bulk-%'/],
+  ];
+  for (const [f, re] of files) ok(re.test(src(f)), `O4 Ausschluss/Gate in ${f}`);
+}
+
+// ══ P — Druck und NBR: Beschreibung mit Gewicht, nie Lot/COGS/SKU ════════════
+{
+  const db = neu();
+  const pm = bulkKauf({ weight: '100', cost: '200' });
+  const pv = bulkKauf({ metal: 'silver', fineness: '999', weight: '100', cost: '220', vat: true });
+  const invM = verkauf([{ lotId: lotOfPurchase(db, pm), weight: '7', price: '25' }]);
+  const invV = verkauf([{ lotId: lotOfPurchase(db, pv), weight: '7', price: '25' }]);
+  zahlen(db, invM); zahlen(db, invV);
+  const inv = useInvoiceStore.getState().invoices.find((i) => i.id === invM)!;
+  const a5 = buildInvoiceA5Data({ company: {} as never, invoice: { number: inv.invoiceNumber, status: inv.status, issuedAt: inv.issuedAt, grossAmount: inv.grossAmount, paidAmount: inv.paidAmount, lines: inv.lines }, customer: null, products: useProductStore.getState().products, paymentMethods: [] } as never);
+  const out = S(a5);
+  ok(a5.lines[0].description === 'Ring · Silver 925 · 7.000 g' && a5.lines[0].sku === '' && a5.lines[0].qty === 1, `D1 A5: Beschreibung, keine SKU, 1 pcs (${S(a5.lines[0])})`);
+  ok(!/BM-\d/.test(out) && !out.includes('14000') && !out.includes('bulk-'), 'D1 A5 enthält weder Lot-Nummer noch COGS noch Systemartikel');
+  const invoices = useInvoiceStore.getState().invoices.filter((i) => i.id === invM || i.id === invV);
+  const sheet = buildMonthSheet({ year: 2026, month: new Date(invoices[0].issuedAt ?? NOW).getMonth(), invoices } as never, useCustomerStore.getState().customers, useProductStore.getState().products);
+  const rows = sheet.filter((r) => Array.isArray(r) && r.includes('Ring · Silver 999 · 7.000 g'));
+  ok(rows.length === 1 && rows[0].includes(25) && rows[0].includes(2.5) && rows[0].includes(27.5), `N2 NBR VAT_10: netto 25 / MwSt 2.5 / brutto 27.5 (${S(rows[0])})`);
+  ok(!/BM-\d|bulk-|14\.000|14000/.test(S(sheet)), 'N2 NBR ohne Lot/COGS/Systemartikel');
+  // NBR-Margenblatt (bestehendes Format): Einkauf = zugeteilter COGS der Zeile, Verkauf, Marge, MwSt auf Marge.
+  const mRow = sheet.find((r) => Array.isArray(r) && r.includes('Ring · Silver 925 · 7.000 g')) as Array<unknown> | undefined;
+  ok(!!mRow && mRow[7] === 14 && mRow[8] === 25 && mRow[9] === 11 && mRow[10] === 1 && mRow[11] === 10,
+    `N1 NBR MARGIN: Einkauf 14 / Verkauf 25 / Marge 11 / MwSt 1 / exkl. 10 (${S(mRow)})`);
+}
+
+// ══ Q — PC2: Fernbefehle, Parität, verbotene Felder, Replay ══════════════════
+const XID = (x: string): string => `${x.padStart(8, '0')}-0000-4000-8000-0000000000bb`;
+const ident = (x: string, op: string, role = 'ADMIN', hash = 'h' + x) => ({ commandId: XID(x), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', role, op, payloadHash: hash });
+const dps = (db: Db) => ({ db: db as never, begin: posting.beginLedgerTransaction, commit: posting.commitLedgerTransaction, rollback: posting.rollbackLedgerTransaction, durableSave: async () => {}, now: () => NOW });
+const okv = <T>(o: unknown): T => (o as { value: T }).value;
+
+/** Projektion für die Paritätsprüfung (ohne Kennungen/Zeiten). */
+function projection(db: Db): string {
+  const q = (sql: string) => db.exec(sql)[0]?.values ?? [];
+  return S({
+    lots: q(`SELECT lot_no, metal_type, fineness, original_weight_mg, remaining_weight_mg, original_value_fils, remaining_value_fils, sale_tax_scheme, status, composition_json FROM stock_lots WHERE unit = 'mg' ORDER BY lot_no`),
+    moves: q(`SELECT l.lot_no, m.seq, m.kind, m.weight_mg, m.value_fils, m.weight_after_mg, m.value_after_fils, m.bulk_type, m.reason FROM bulk_lot_movements m JOIN stock_lots l ON l.id = m.lot_id ORDER BY l.lot_no, m.seq`),
+    lines: q(`SELECT quantity, unit_price, purchase_price_snapshot, tax_scheme, vat_amount, line_total, bulk_weight_mg, bulk_cogs_fils, bulk_type, description FROM invoice_lines WHERE bulk_weight_mg IS NOT NULL ORDER BY bulk_weight_mg, unit_price`),
+    ledger: q(`SELECT account, ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 3) FROM ledger_entries GROUP BY account ORDER BY account`),
+  });
+}
+
+{
+  // — lokal —
+  const dbL = neu();
+  const pL = bulkKauf({ weight: '500', cost: '1000', composition: COMP });
+  const lotL = lotOfPurchase(dbL, pL);
+  const iL = verkauf([{ lotId: lotL, weight: '7', type: 'RING', price: '25' }]);
+  imHaus(() => useInvoiceStore.getState().editInvoice(iL, { reason: 'Preis', lines: [{ lineId: lineOf(dbL, iL), productId: 'bulk-silver-925-branch-main', unitPrice: 0, purchasePrice: 0, taxScheme: 'MARGIN', vatRate: 10, vatAmount: 0, lineTotal: 0,
+    bulkIntent: { lotId: lotL, weightMg: 7000, bulkType: 'RING', unitPriceFils: 30000 } }] as never })); reload();
+  zahlen(dbL, iL);
+  const rL = retoureBulk(dbL, iL, lineOf(dbL, iL));
+  imHaus(() => cancelReturnHouse.cancelReturnInHouse(rL, 'Irrtum', OWNER_ACTOR, 'branch-main')); reload();
+  imHaus(() => lh.writeOffInHouse({ actionId: 'local-wo-1-xxxx', lotId: lotL, expectedRevision: lot(lotL).revision, weightMg: 1200, reason: 'Waage' }, CTXB));
+  imHaus(() => lh.closeLotInHouse({ actionId: 'local-cl-1-xxxx', lotId: lotL, expectedRevision: lot(lotL).revision, confirmWeightMg: lot(lotL).remainingWeightMg, confirmValueFils: lot(lotL).remainingValueFils, reason: 'Rest' }, CTXB));
+  imHaus(() => lh.reverseAdjustmentInHouse({ actionId: 'local-rv-1-xxxx', lotId: lotL, expectedRevision: lot(lotL).revision, movementId: moves(lotL).at(-1)!.id, reason: 'falsch' }, CTXB));
+  const projL = projection(dbL);
+
+  // — fern —
+  const dbR = neu();
+  const d = dps(dbR);
+  const pr = await cmdC.runPurchaseCreate(d, ident('1', 'purchases.create'), { ...bulkKaufInput([{ weight: '500', cost: '1000', composition: COMP }]), purchaseDate: PDATE });
+  ok(pr.kind === 'ok', `Q1 Einkauf fern (${S(pr)})`);
+  reload();
+  const lotR = s(dbR, "SELECT id FROM stock_lots WHERE unit = 'mg'");
+  const tryRun = async (f: () => Promise<unknown>): Promise<unknown> => { try { return await f(); } catch (e) { return e; } };
+  const bad = await tryRun(() => cmdI.runInvoiceCreate(d, ident('2', 'invoices.create'), { customerId: 'cust-1', lines: [{ kind: 'bulk', bulkLotId: lotR, weightMg: 7000, bulkType: 'RING', unitPriceFils: 25000, taxScheme: 'ZERO' }] }));
+  ok(String((bad as Error).message ?? S(bad)).includes('the primary decides taxScheme'), 'Q2 verbotenes Feld taxScheme in der Bulk-Zeile → Nein');
+  const bad2 = await tryRun(() => cmdI.runInvoiceCreate(d, ident('3', 'invoices.create'), { customerId: 'cust-1', lines: [{ kind: 'bulk', bulkLotId: lotR, weightMg: 7000, bulkType: 'RING', unitPriceFils: 25000, bulkCogsFils: 1 }] }));
+  ok(String((bad2 as Error).message ?? S(bad2)).includes('unknown field in bulk line'), 'Q2 bulkCogsFils vom Client → Nein');
+  const bad3 = await tryRun(() => cmdI.runInvoiceCreate(d, ident('4', 'invoices.create'), { customerId: 'cust-1', lines: [{ kind: 'bulk', bulkLotId: lotR, weightMg: 7.5, bulkType: 'RING', unitPriceFils: 25000 }] }));
+  ok(String((bad3 as Error).message ?? S(bad3)).includes('whole number of milligrams'), 'Q2 Gewicht keine ganze mg-Zahl → Nein');
+  const ir = await cmdI.runInvoiceCreate(d, ident('5', 'invoices.create'), { customerId: 'cust-1', lines: [{ kind: 'bulk', bulkLotId: lotR, weightMg: 7000, bulkType: 'RING', unitPriceFils: 25000 }] });
+  ok(ir.kind === 'ok', `Q3 Verkauf fern (${S(ir)})`);
+  reload();
+  const iR = okv<{ invoiceId: string }>(ir).invoiceId;
+  const rev = (id0: string): number => n(dbR, 'SELECT revision FROM invoices WHERE id = ?', [id0]);
+  const lockErr = await cmdIL.runInvoiceUpdate(d, ident('6', 'invoices.update'), { id: iR, expectedRevision: rev(iR), reason: 'x',
+    customerId: 'cust-1', lines: [{ kind: 'bulk', lineId: lineOf(dbR, iR), bulkLotId: lotR, weightMg: 6000, bulkType: 'RING', unitPriceFils: 25000 }] });
+  ok(lockErr.kind === 'rejected' && (lockErr as { code: string }).code === 'BULK_LINE_FIELDS_LOCKED', `Q4 Gewicht ändern fern → gesperrt (${S(lockErr)})`);
+  const up = await cmdIL.runInvoiceUpdate(d, ident('7', 'invoices.update'), { id: iR, expectedRevision: rev(iR), reason: 'Preis',
+    customerId: 'cust-1', lines: [{ kind: 'bulk', lineId: lineOf(dbR, iR), bulkLotId: lotR, weightMg: 7000, bulkType: 'RING', unitPriceFils: 30000 }] });
+  ok(up.kind === 'ok', `Q4 Preis ändern fern (${S(up)})`);
+  reload();
+  zahlen(dbR, iR);
+  const half = await cmdR.runCreateReturn(d, ident('8', 'returns.create'), { invoiceId: iR, expectedRevision: rev(iR), lines: [{ invoiceLineId: lineOf(dbR, iR), quantity: 0.5 }], refundMethod: 'cash', refundNow: true });
+  ok(half.kind === 'rejected' && (half as { code: string }).code === 'BULK_RETURN_WHOLE_LINE_ONLY', `Q5 Teil-Retoure fern → Nein (${S(half)})`);
+  const rr = await cmdR.runCreateReturn(d, ident('9', 'returns.create'), { invoiceId: iR, expectedRevision: rev(iR), lines: [{ invoiceLineId: lineOf(dbR, iR), quantity: 1 }], refundMethod: 'cash', refundNow: false });
+  ok(rr.kind === 'ok', `Q5 Retoure fern (${S(rr)})`);
+  reload();
+  const rid = s(dbR, 'SELECT id FROM sales_returns ORDER BY created_at DESC LIMIT 1');
+  const rc = await cmdSR.runReturnCancel(d, ident('10', 'returns.cancel'), { returnId: rid, reason: 'Irrtum', expectedRevision: n(dbR, 'SELECT revision FROM sales_returns WHERE id = ?', [rid]) });
+  ok(rc.kind === 'ok', `Q6 Retoure-Storno fern (${S(rc)})`);
+  reload();
+  // manuelle Aktionen fern
+  const wbBad = await tryRun(() => cmdB.runBulkAction(lh.writeOffInHouse as never, ['actionId', 'lotId', 'expectedRevision', 'weightMg', 'reason', 'businessDate'], d,
+    ident('11', 'bulk_metals.write_off'), 'ADMIN', { actionId: 'local-wo-1-xxxx', lotId: lotR, expectedRevision: lot(lotR).revision, weightMg: 1200, reason: 'Waage', valueFils: 1 }));
+  ok(String((wbBad as Error).message).includes('unknown field: valueFils'), 'Q7 valueFils vom Client → Nein');
+  const sales = await cmdB.runBulkAction(lh.writeOffInHouse as never, ['actionId', 'lotId', 'expectedRevision', 'weightMg', 'reason', 'businessDate'], d,
+    ident('12', 'bulk_metals.write_off'), 'SALES', { actionId: 'sales-wo-1-xxxx', lotId: lotR, expectedRevision: lot(lotR).revision, weightMg: 1200, reason: 'Waage' });
+  ok(sales.kind === 'rejected' && (sales as { code: string }).code === 'PERMISSION_DENIED', 'Q7 SALES darf nicht abschreiben');
+  const WO = ['actionId', 'lotId', 'expectedRevision', 'weightMg', 'reason', 'businessDate'];
+  const body = { actionId: 'local-wo-1-xxxx', lotId: lotR, expectedRevision: lot(lotR).revision, weightMg: 1200, reason: 'Waage' };
+  const w1 = await cmdB.runBulkAction(lh.writeOffInHouse as never, WO, d, ident('13', 'bulk_metals.write_off'), 'ADMIN', body);
+  const w2 = await cmdB.runBulkAction(lh.writeOffInHouse as never, WO, d, ident('13', 'bulk_metals.write_off'), 'ADMIN', body);
+  const w3 = await cmdB.runBulkAction(lh.writeOffInHouse as never, WO, d, ident('14', 'bulk_metals.write_off'), 'ADMIN', body);
+  ok(w1.kind === 'ok' && w2.kind === 'ok' && (w2 as { replayed: boolean }).replayed && S(okv(w1)) === S(okv(w2)), 'Q8 gleiche command_id → eingefrorene Antwort (replayed)');
+  ok(w3.kind === 'ok' && S(okv(w1)) === S(okv(w3)) && moves(lotR).filter((m) => m.kind === 'WRITE_OFF').length === 1, 'Q8 neue command_id + gleiche action_id → identische Antwort, eine Bewegung');
+  const CL = ['actionId', 'lotId', 'expectedRevision', 'confirmWeightMg', 'confirmValueFils', 'reason', 'businessDate'];
+  const c1 = await cmdB.runBulkAction(lh.closeLotInHouse as never, CL, d, ident('15', 'bulk_metals.close_lot'), 'MANAGER',
+    { actionId: 'local-cl-1-xxxx', lotId: lotR, expectedRevision: lot(lotR).revision, confirmWeightMg: lot(lotR).remainingWeightMg, confirmValueFils: lot(lotR).remainingValueFils, reason: 'Rest' });
+  ok(c1.kind === 'ok', `Q9 Close fern (MANAGER) (${S(c1)})`);
+  const RV = ['actionId', 'lotId', 'expectedRevision', 'movementId', 'reason'];
+  const rvM = await cmdB.runBulkAction(lh.reverseAdjustmentInHouse as never, RV, d, ident('16', 'bulk_metals.reverse_adjustment'), 'MANAGER',
+    { actionId: 'mgr-rv-1-xxxxxx', lotId: lotR, expectedRevision: lot(lotR).revision, movementId: moves(lotR).at(-1)!.id, reason: 'falsch' });
+  ok(rvM.kind === 'rejected' && (rvM as { code: string }).code === 'PERMISSION_DENIED', 'Q9 MANAGER darf nicht stornieren');
+  const rv = await cmdB.runBulkAction(lh.reverseAdjustmentInHouse as never, RV, d, ident('17', 'bulk_metals.reverse_adjustment'), 'ADMIN',
+    { actionId: 'local-rv-1-xxxx', lotId: lotR, expectedRevision: lot(lotR).revision, movementId: moves(lotR).at(-1)!.id, reason: 'falsch' });
+  ok(rv.kind === 'ok', `Q9 Stornieren fern (ADMIN) (${S(rv)})`);
+  const projR = projection(dbR);
+  ok(projR === projL, 'X1 Parität: Einkauf, Verkauf, Edit, Retoure, Retoure-Storno, Write-off, Close, Stornieren fern = lokal (Lots, Bewegungen, Zeilen, Hauptbuch)');
+  if (projR !== projL) { console.log('    lokal:', projL.slice(0, 600)); console.log('    fern: ', projR.slice(0, 600)); }
+  ok(reconOk() && invOk(lotR), 'X1 Abstimmung und Invarianten nach dem Fernlauf');
+  // Lot-Nummern: erster Einkauf fern, zweiter am Primary → BM-0001, BM-0002
+  bulkKauf({ weight: '1', cost: '1' });
+  const nos = dbR.exec("SELECT lot_no FROM stock_lots WHERE unit = 'mg' ORDER BY lot_no")[0].values.map((v) => v[0]);
+  ok(S(nos) === S(['BM-0001', 'BM-0002']), `B1 Nummern PC2 dann Primary: ${S(nos)}`);
+}
+
+// ══ R — Registry, Rechte, Lesebefehle ═══════════════════════════════════════
+{
+  const am = registry.ALLOWED_MUTATIONS;
+  ok(S(am.slice(-4)) === S(['bulk_metals.write_off', 'bulk_metals.close_lot', 'bulk_metals.correct_weight', 'bulk_metals.reverse_adjustment']), 'X4 vier Mutationen am Ende der Liste');
+  ok(perms.OPERATION_PERMISSIONS['bulk_metals.write_off']?.kind === 'isAdmin' && perms.OPERATION_PERMISSIONS['bulk_metals.close_lot']?.kind === 'isAdmin'
+    && perms.OPERATION_PERMISSIONS['bulk_metals.correct_weight']?.kind === 'isAdmin' && perms.OPERATION_PERMISSIONS['bulk_metals.reverse_adjustment']?.kind === 'isOwner', 'X3 Rechte: isAdmin ×3, isOwner ×1');
+  const ro = readOps.STORE_READ_OPS;
+  ok(['page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bulk_metals.lot_detail.get', 'bulk_metals.allocation_preview.get'].every((x) => ro.includes(x)), 'X4 vier Lesebefehle freigegeben');
+  const rust = src('src-tauri/src/bridge.rs');
+  const ops = [...am.slice(-4), 'page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bulk_metals.lot_detail.get', 'bulk_metals.allocation_preview.get'];
+  ok(ops.every((x) => rust.includes(`"${x}"`)), 'X4 Rust kennt alle acht');
+  const remoteOps = (rust.split('pub const REMOTE_OPS')[1] ?? '').split('];')[0].match(/OP_[A-Z0-9_]+/g) ?? [];
+  ok(remoteOps.length === 192, `X4 REMOTE_OPS = 192 (${remoteOps.length})`);
+}
+
 console.log(`
 bulk-metal: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);

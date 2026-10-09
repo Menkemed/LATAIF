@@ -501,7 +501,7 @@ export function InvoiceDetail() {
       return [
         invoice.invoiceNumber,
         fmtDate(invoice.issuedAt || invoice.createdAt),
-        getProductName(l.productId).replace(/,/g, ' '),
+        lineName(l).replace(/,/g, ' '),
         l.taxScheme,
         l.unitPrice.toFixed(3),
         l.purchasePriceSnapshot.toFixed(3),
@@ -529,6 +529,11 @@ export function InvoiceDetail() {
   function openPaymentModal() {
     setPaymentAmount(String(remaining > 0 ? remaining.toFixed(2) : ''));
     setPaymentOpen(true);
+  }
+
+  /** BULK METAL V1 — eine Bulk-Zeile heißt wie ihre Beschreibung (der Systemartikel ist nicht in der Liste). */
+  function lineName(l: { productId: string; description?: string; bulkWeightMg?: number | null }): string {
+    return l.bulkWeightMg ? (l.description || 'Bulk metal') : getProductName(l.productId);
   }
 
   function getProductName(productId: string): string {
@@ -891,8 +896,15 @@ export function InvoiceDetail() {
                             border: '1px solid rgba(170,149,110,0.3)',
                           }}>{line.quantity}×</span>
                         )}
-                        {getProductName(line.productId)}
+                        {line.bulkWeightMg ? (line.description || 'Bulk metal') : getProductName(line.productId)}
                       </span>
+                      {/* BULK METAL V1 — nur intern: Gewicht, Lot, COGS (nie auf dem Beleg). */}
+                      {line.bulkWeightMg ? (
+                        <span data-bulk-line-badge style={{ marginLeft: 8, padding: '2px 8px', borderRadius: 999, fontSize: 10, color: '#4B5563', background: '#F2F7FA', border: '1px solid #E5E9EE', cursor: 'pointer' }}
+                          title="Bulk metal — open Bulk Metals" onClick={() => navigate('/bulk-metals')}>
+                          BULK · {(line.bulkWeightMg / 1000).toFixed(3)} g{perm.isAdmin && line.bulkCogsFils !== null && line.bulkCogsFils !== undefined ? ` · COGS ${(line.bulkCogsFils / 1000).toFixed(3)}` : ''}
+                        </span>
+                      ) : null}
                       {/* Return-Markierung am Line-Item */}
                       {returnedQty > 0 && (
                         <span style={{
@@ -905,7 +917,7 @@ export function InvoiceDetail() {
                           {fullyReturned ? `RETURNED (${returnedQty}/${lineQty})` : `${returnedQty}/${lineQty} RETURNED`}
                         </span>
                       )}
-                      {line.description && <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginTop: 2 }}>{line.description}</span>}
+                      {line.description && !line.bulkWeightMg && <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginTop: 2 }}>{line.description}</span>}
                       {/* Produkt-Specs (Brand/Model/SKU/Color/Karat/Size/...) — dass der
                           User sofort sieht WAS verkauft wurde, nicht nur den Namen. */}
                       {lineSpecs.length > 0 && (
@@ -1376,7 +1388,7 @@ export function InvoiceDetail() {
               return (
                 <div key={line.id} className="receipt-line" style={{ flexDirection: 'column' }}>
                   <div style={{ display: 'flex', justifyContent: 'space-between' }}>
-                    <span className="receipt-line-name">{getProductName(line.productId)}</span>
+                    <span className="receipt-line-name">{lineName(line)}</span>
                     <span><Bhd v={line.lineTotal}/> BHD</span>
                   </div>
                   {SpecsGrid}
@@ -1585,7 +1597,7 @@ export function InvoiceDetail() {
                   <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '32px minmax(0,2fr) minmax(0,0.8fr) minmax(0,1fr) minmax(0,1fr)', gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center', background: '#F8FAFC', opacity: 0.6 }}>
                     <input type="checkbox" checked={false} disabled style={{ cursor: 'not-allowed' }} />
                     <span style={{ fontSize: 12, color: '#6B7280', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                      {getProductName(l.productId)}
+                      {lineName(l)}
                       <span style={{ marginLeft: 8, fontSize: 10, color: '#16A34A', fontWeight: 500 }}>✓ already returned</span>
                     </span>
                     <span className="font-mono" style={{ fontSize: 11, color: '#9CA3AF' }}>{alreadyReturned} / {l.quantity}</span>
@@ -1598,7 +1610,7 @@ export function InvoiceDetail() {
                 <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '32px minmax(0,2fr) minmax(0,0.8fr) minmax(0,1fr) minmax(0,1fr)', gap: 10, padding: '10px 12px', borderBottom: '1px solid #E5E9EE', alignItems: 'center' }}>
                   <input type="checkbox" checked={r.include} onChange={e => setReturnLines({ ...returnLines, [l.id]: { ...r, include: e.target.checked } })} />
                   <span style={{ fontSize: 12, color: '#0F0F10', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                    {getProductName(l.productId)}
+                    {lineName(l)}
                     {alreadyReturned > 0 && (
                       <span style={{ marginLeft: 8, fontSize: 10, color: '#FF8730' }}>({alreadyReturned} of {l.quantity} returned)</span>
                     )}

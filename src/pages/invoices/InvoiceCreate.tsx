@@ -30,6 +30,10 @@ import { useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-wr
 import { lotAggregatesFor, productLotsBatchFor, LEERE_LOSE } from '@/core/data/domain-reads';
 import { createInvoiceOnPrimary, invoiceCreatePaymentBody, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
 import { productDisplayName } from '@/core/products/display-name';
+// BULK METAL V1 — Bulk-Zeile: Absicht (Lot, Gewicht, Typ, Preis); Zeile rechnet das Haus mit dem Zeilenvertrag.
+import { BulkInvoiceLineRow, previewBulkCogs, type BulkInvoiceDraft } from '@/components/bulk/BulkInvoiceLineRow';
+import { bulkLotsForSaleFor, type BulkLotForSale } from '@/core/bulk/bulk-reads';
+import { formatMg, netFilsFromGross, parseBhdToFils, parseGramsToMg, type BulkType } from '@/core/bulk/bulk-math';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 type Method = 'cash' | 'bank_transfer' | 'card' | 'benefit';
@@ -45,6 +49,18 @@ interface DraftLine {
   /** INVOICE-EDIT S2 — was die gespeicherte Zeile hält: Artikel, Los, Einstand, Menge. Solange der
    *  Artikel bleibt, bleibt die Zeile auf diesem Los (kein Loswechsel beim Ändern). */
   kept?: { productId: string; lotId: string | null; cost: number; qty: number };
+  /** BULK METAL V1 — eine Bulk-Zeile (Menge fest 1). */
+  bulk?: BulkInvoiceDraft;
+}
+
+/** BULK METAL V1 — Gewicht und Preis einer Bulk-Zeile exakt in mg/Fils (Text → Integer). */
+function bulkIntentOf(b: BulkInvoiceDraft, scheme: string) {
+  const weightMg = b.kept ? b.kept.weightMg : parseGramsToMg(b.weightText.trim());
+  const grossFils = parseBhdToFils(b.grossText.trim(), true);
+  return {
+    lotId: b.lotId, weightMg, bulkType: b.bulkType, unitPriceFils: netFilsFromGross(grossFils, scheme),
+    ...(b.description.trim() ? { description: b.description.trim() } : {}),
+  };
 }
 
 /** INVOICE-EDIT S2 — die Zeile setzt eine gespeicherte fort (gleicher Artikel) → ihr Los steht fest. */
@@ -125,6 +141,14 @@ export function InvoiceCreate() {
     // INVOICE-EDIT S2 — die ID der gespeicherten Zeile reist mit, damit der Speichern-Vorgang
     // nicht raten muss, welche Zeile fortgesetzt wird (zwei gleiche Artikel, einer retourniert).
     const invLines = (editInvoice.lines || []).map(l => {
+      if (l.bulkWeightMg) {
+        const bulk: BulkInvoiceDraft = {
+          lotId: l.lotId || '', weightText: formatMg(l.bulkWeightMg), bulkType: (l.bulkType || 'OTHER') as BulkType,
+          grossText: (l.lineTotal || 0).toFixed(3), description: l.description || '',
+          kept: { weightMg: l.bulkWeightMg, cogsFils: l.bulkCogsFils ?? 0, lotLabel: 'saved lot', scheme: String(l.taxScheme) },
+        };
+        return { lineId: l.id, productId: l.productId || '', scheme: 'auto' as Scheme, quantity: 1, unitPrice: l.unitPrice || 0, bulk };
+      }
       const p = products.find(pp => pp.id === l.productId);
       const stored = (l.taxScheme as Scheme | undefined);
       const matchesProduct = stored && p && stored === p.taxScheme;
@@ -216,7 +240,38 @@ export function InvoiceCreate() {
   // Phase 3 — Cost-Snapshot kommt aus dem ausgewaehlten Lot statt aus
   // products.purchase_price. Wenn kein Lot existiert (Legacy-Produkte vor
   // Backfill / direkt erstellt) faellt es auf product.purchasePrice zurueck.
+  const bulkLots = useSharedRead('bulk_metals.lots_for_sale.get', {}, (ctx) => ({ lots: bulkLotsForSaleFor(ctx) }),
+    { lots: [] as BulkLotForSale[] }, [lines.length]).lots;
+  // BULK METAL V1 — COGS-Vorschau je offener Bulk-Zeile (nur Anzeige; gespeichert wird die Zuteilung des Hauses).
+  const bulkPreviewKey = lines.map((l) => l.bulk && !l.bulk.kept ? `${l.bulk.lotId}:${l.bulk.weightText}` : '').join('|');
+  useEffect(() => {
+    lines.forEach((l, idx) => {
+      const b = l.bulk;
+      if (!b || b.kept || !b.lotId || b.previewCogsFils !== undefined) return;
+      let mg: number;
+      try { mg = parseGramsToMg(b.weightText.trim()); } catch { return; }
+      void previewBulkCogs(b.lotId, mg).then((cogs) => setLines((prev) => prev.map((x, i) => (
+        i === idx && x.bulk && x.bulk.lotId === b.lotId && x.bulk.weightText === b.weightText ? { ...x, bulk: { ...x.bulk, previewCogsFils: cogs } } : x
+      ))));
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [bulkPreviewKey]);
   const computed = lines.map(l => {
+    if (l.bulk) {
+      const b = l.bulk;
+      const lot = bulkLots.find((x) => x.lotId === b.lotId);
+      const scheme = (b.kept?.scheme || lot?.saleTaxScheme || 'MARGIN') as 'VAT_10' | 'ZERO' | 'MARGIN';
+      const vatRate = scheme === 'ZERO' ? 0 : 10;
+      const cogs = b.kept ? b.kept.cogsFils : (b.previewCogsFils ?? 0);
+      let unitNet = 0;
+      try { unitNet = netFilsFromGross(parseBhdToFils(b.grossText.trim(), true), scheme) / 1000; } catch { unitNet = 0; }
+      const calc = calcLine(unitNet, 1, cogs / 1000, scheme, vatRate);
+      return { product: undefined, lots: [] as Array<StockLot & { purchaseNumber: string | null }>,
+        selectedLot: null as (StockLot & { purchaseNumber: string | null }) | null,
+        kept: null as DraftLine['kept'] | null, lotIdOut: b.lotId as string | undefined, costBasis: cogs / 1000,
+        keptShort: null as string | null, scheme, vatRate,
+        net: calc.netAmount, vat: calc.vatAmount, internalVat: calc.internalVatAmount || 0, gross: calc.grossAmount };
+    }
     const product = products.find(p => p.id === l.productId);
     if (!product) {
       return { product: undefined, lots: [] as Array<StockLot & { purchaseNumber: string | null }>,
@@ -278,6 +333,12 @@ export function InvoiceCreate() {
     setLines(prev => [...prev, { productId: '', scheme: 'auto', quantity: 1, unitPrice: 0 }]);
   }
 
+  // BULK METAL V1 — eine Bulk-Zeile (Lot manuell wählen).
+  function addBulkLine() {
+    setLines(prev => [...prev, { productId: '', scheme: 'auto', quantity: 1, unitPrice: 0,
+      bulk: { lotId: '', weightText: '', bulkType: 'RING', grossText: '', description: '' } }]);
+  }
+
   function removeLine(idx: number) {
     setLines(prev => prev.length === 1 ? prev : prev.filter((_, i) => i !== idx));
   }
@@ -327,8 +388,16 @@ export function InvoiceCreate() {
     // CENTRAL-C3B — dieselbe Ableitung, die der Fernauftrag benutzt. Phase 3 (Cost-Snapshot aus
     // dem gewaehlten Lot, Fallback auf products.purchase_price) und die v0.7.1-Regel fuer MARGIN
     // (internalVat persistieren) stecken jetzt in `toInvoiceLine` — eine Stelle, zwei Aufrufer.
+    let bulkIntents: Array<ReturnType<typeof bulkIntentOf> | null>;
+    try { bulkIntents = lines.map((l, i) => (l.bulk ? bulkIntentOf(l.bulk, computed[i].scheme) : null)); }
+    catch (e) { setError(e instanceof Error ? e.message : String(e)); return; }
     const payload = lines.map((l, i) => {
       const c = computed[i];
+      const bi = bulkIntents[i];
+      if (bi) {
+        return { productId: l.productId, quantity: 1, unitPrice: 0, purchasePrice: 0, taxScheme: c.scheme, vatRate: c.vatRate,
+          vatAmount: 0, lineTotal: c.gross, bulkIntent: bi, ...(l.lineId ? { lineId: l.lineId } : {}) };
+      }
       return { ...toInvoiceLine({
         productId: l.productId,
         lotId: c.lotIdOut,
@@ -410,7 +479,11 @@ export function InvoiceCreate() {
           expectedRevision: fassung,
           reason,
           customerId,
-          lines: lines.map((l, i) => ({
+          lines: lines.map((l, i) => bulkIntents[i] ? ({
+            kind: 'bulk', ...(l.lineId ? { lineId: l.lineId } : {}), bulkLotId: bulkIntents[i]!.lotId, weightMg: bulkIntents[i]!.weightMg,
+            bulkType: bulkIntents[i]!.bulkType, unitPriceFils: bulkIntents[i]!.unitPriceFils,
+            ...(bulkIntents[i]!.description ? { description: bulkIntents[i]!.description } : {}),
+          }) : ({
             ...(l.lineId ? { lineId: l.lineId } : {}),
             productId: l.productId,
             lotId: computed[i]?.lotIdOut ?? null,
@@ -447,7 +520,11 @@ export function InvoiceCreate() {
       },
       remote: () => ({
         customerId,
-        lines: lines.map((l, i) => ({
+        lines: lines.map((l, i) => bulkIntents[i] ? ({
+          kind: 'bulk', bulkLotId: bulkIntents[i]!.lotId, weightMg: bulkIntents[i]!.weightMg,
+          bulkType: bulkIntents[i]!.bulkType, unitPriceFils: bulkIntents[i]!.unitPriceFils,
+          ...(bulkIntents[i]!.description ? { description: bulkIntents[i]!.description } : {}),
+        }) : ({
           productId: l.productId,
           lotId: computed[i]?.selectedLot?.id ?? null,
           quantity: l.quantity,
@@ -543,7 +620,10 @@ export function InvoiceCreate() {
           <Card>
             <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
               <span className="text-overline">2 · PRODUCTS</span>
-              <Button variant="secondary" onClick={addLine}><Plus size={12} /> Add Product</Button>
+              <div className="flex gap-2">
+                <Button variant="secondary" onClick={addLine}><Plus size={12} /> Add Product</Button>
+                <Button variant="secondary" onClick={addBulkLine} data-bulk-add-invoice-line><Plus size={12} /> Add bulk metal</Button>
+              </div>
             </div>
             <div style={{ border: '1px solid #E5E9EE', borderRadius: 8, overflow: 'hidden' }}>
               <div style={{
@@ -564,6 +644,18 @@ export function InvoiceCreate() {
               </div>
               {lines.map((l, idx) => {
                 const c = computed[idx];
+                if (l.bulk) {
+                  const b = l.bulk;
+                  return (
+                    <BulkInvoiceLineRow key={idx} draft={b} lots={bulkLots} scheme={c.scheme}
+                      cogsFils={b.kept ? b.kept.cogsFils : (b.previewCogsFils ?? null)} vat={c.vat} internalVat={c.internalVat}
+                      removable={lines.length > 1} onRemove={() => removeLine(idx)}
+                      onChange={(d) => {
+                        const lot = bulkLots.find((x) => x.lotId === d.lotId);
+                        updateLine(idx, { bulk: d, productId: d.kept ? l.productId : (lot?.productId ?? ''), quantity: 1 });
+                      }} />
+                  );
+                }
                 const cat = c.product ? categories.find(cc => cc.id === c.product?.categoryId) : undefined;
                 const lineSpecs = c.product ? getProductSpecs(c.product, categories) : [];
                 const expanded = !!expandedLines[idx];

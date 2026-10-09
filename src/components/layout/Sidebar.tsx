@@ -6,7 +6,7 @@ import {
   Wrench, Handshake, UserCheck, ShoppingCart, FolderOpen,
   HandCoins, Sparkles, Truck, Wallet, Landmark, UserPlus, Factory, FileMinus, CreditCard, Coins,
 } from 'lucide-react';
-import { ChevronDown, ChevronsDownUp, ChevronsUpDown } from 'lucide-react';
+import { ChevronDown, ChevronsDownUp, ChevronsUpDown, Scale } from 'lucide-react';
 import { useAuthStore } from '@/stores/authStore';
 import { useOrderStore } from '@/stores/orderStore';
 import { useProductStore } from '@/stores/productStore';
@@ -32,7 +32,11 @@ const navGroups: NavGroup[] = [
       { to: '/consignments', label: 'Consignment', icon: Handshake, tone: 'pink' },
     ],
   },
-  { label: 'INVENTORY', items: [{ to: '/collection', label: 'Collection', icon: Package, tone: 'blue' }] },
+  { label: 'INVENTORY', items: [
+    { to: '/collection', label: 'Collection', icon: Package, tone: 'blue' },
+    // BULK METAL V1 — verkaufsfähige Ware nach Gewicht (Lots in mg/Fils).
+    { to: '/bulk-metals', label: 'Bulk Metals', icon: Scale, tone: 'cyan' },
+  ] },
   {
     label: 'PROCUREMENT',
     items: [

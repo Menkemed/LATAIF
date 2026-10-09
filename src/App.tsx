@@ -25,6 +25,7 @@ import { AgentList } from '@/pages/agents/AgentList';
 import { AgentDetail } from '@/pages/agents/AgentDetail';
 import { TransferDetail } from '@/pages/agents/TransferDetail';
 import { MetalList } from '@/pages/metals/MetalList';
+import { BulkMetalsPage } from '@/pages/bulk-metals/BulkMetalsPage';
 import { OrderList } from '@/pages/orders/OrderList';
 import { OrderCreate } from '@/pages/orders/OrderCreate';
 import { OrderDetail } from '@/pages/orders/OrderDetail';
@@ -458,6 +459,7 @@ export default function App() {
           <Route path="/agents/:id" element={<AgentDetail />} />
           <Route path="/transfers/:id" element={<TransferDetail />} />
           <Route path="/metals" element={<MetalList />} />
+          <Route path="/bulk-metals" element={<BulkMetalsPage />} />
           <Route path="/orders" element={<OrderList />} />
           <Route path="/orders/new" element={<OrderCreate />} />
           <Route path="/orders/:id" element={<OrderDetail />} />
