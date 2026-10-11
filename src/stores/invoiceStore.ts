@@ -6,7 +6,8 @@ import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
-import { assertLotLessStockAvailable, assertNoLegacyLotLessLines, giveBackStock, hasLotHistory, invoiceStockLines, releaseLegacyDeduction, takeStock } from '@/core/lots/stock-contract';
+import { assertLotLessStockAvailable, assertNoLegacyLotLessLines, giveBackStock, hasLotHistory, invoiceStockLines, isWholePieceQuantity, movesPieceStock, PIECE_QUANTITY_NOT_WHOLE, releaseLegacyDeduction, takeStock } from '@/core/lots/stock-contract';
+import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, reconcileSaleStatus, assertLotsConsumable, assertLotTrackedLinesResolved, assertProductsSellable } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 // BULK METAL V1 — Bulk-Zeilen: Absicht → Zeile über den bestehenden Zeilenvertrag; Gewicht/COGS exakt zurück.
@@ -248,6 +249,21 @@ function freshInvoice(id: string): Invoice | undefined {
 }
 
 /** Wie oft `invoice.paid` für diese Rechnung schon ausgelöst wurde (Protokoll des Ereignisbusses). */
+/**
+ * Stückware zählt ganze Stücke — für jeden Weg, der Rechnungszeilen schreibt (Anlegen, Ändern, Angebot,
+ * Auftrag, Kommission, Agent, Reparatur). Bulk-Zeilen (Gewicht) und Dienstleistungen bleiben, wie sie sind;
+ * eine fehlende Menge ist wie bisher 1. Vor jedem Schreiben, ohne Runden.
+ */
+function assertWholePieceLines(lines: ReadonlyArray<{ productId?: string; quantity?: number; bulk?: unknown; bulkIntent?: unknown }>): void {
+  for (const l of lines) {
+    if (l.bulk || l.bulkIntent || !movesPieceStock(l.productId) || l.quantity === undefined) continue;
+    if (!isWholePieceQuantity(l.quantity)) {
+      throw new InvoiceActionRejected(PIECE_QUANTITY_NOT_WHOLE,
+        `the quantity of an item is a whole number of pieces (got ${l.quantity})`);
+    }
+  }
+}
+
 function paidEventCount(id: string): number {
   return eventBus.getLog().filter(e => e.type === 'invoice.paid' && e.entityId === id).length;
 }
@@ -293,6 +309,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // BULK METAL V1 — Bulk-Absichten werden hier (falls noch nicht geschehen) zu Zeilen; ein Bulk-
     // Systemartikel ohne Bulk-Angaben (Angebot, Auftrag, Kommission …) wird abgewiesen.
     lines = resolveBulkIntents(lines, branchId);
+    assertWholePieceLines(lines);
 
     // Repair-Invoices haben eine eigene Nummernserie analog zum Sales-Flow:
     //   RPINV-YYYY-NNNNNN  während PARTIAL
@@ -679,6 +696,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // (Zeile entfernen/ersetzen, Menge unter die Retourenmenge, Preis der retournierten Zeile,
     // Summe unter die Gutschriften). Geprüft VOR jedem Schreiben.
     const baseLines = loadEditBaseLines(id);
+    assertWholePieceLines(lines);
     const lineMatch = matchEditLines(baseLines, lines);
     const baseById = new Map(baseLines.map(b => [b.id, b]));
     // BULK METAL V1 — eine bestehende Bulk-Zeile behält Lot, Gewicht und COGS (gesperrt); Preis, Typ und

@@ -17,10 +17,28 @@ import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { restoreLot, trackProductRow } from './lot-queries';
 import { STOCK_UNAVAILABLE_MESSAGE } from './lot-availability';
+import { isBulkMetalProduct } from '@/core/bulk/bulk-product';
 
 /** Das Reparatur-Serviceprodukt ist eine Leistung, kein Lagerartikel. */
 export function isServiceProduct(productId: string | null | undefined): boolean {
   return String(productId ?? '').startsWith('svc-repair-');
+}
+
+// ── Stückware zählt ganze Stücke ──────────────────────────────────────────────────────────────
+// Lose, Artikelmenge und Inventur führen ganze Stücke. Eine Bruchmenge auf einer Zeile mit Stückbestand
+// zog Bestand und Wareneinsatz auseinander (Verkauf 0,5 → 1 Stück, 1,5 → 1,5 Stück aus dem Los; Retoure
+// 0,5 → ein ganzes Stück zurück, COGS nur halb). Sie wird jetzt vor jedem Schreiben abgewiesen — kein Runden.
+export const PIECE_QUANTITY_NOT_WHOLE = 'PIECE_QUANTITY_NOT_WHOLE';
+
+/** Bewegt eine Zeile mit diesem Artikel Stückbestand? Alles außer Dienstleistung und Bulk-Metall (eigener Gewichtspfad). */
+export function movesPieceStock(productId: string | null | undefined): boolean {
+  return !!productId && !isServiceProduct(productId) && !isBulkMetalProduct(productId);
+}
+
+/** Eine Stückmenge: ganze Zahl ≥ 1. */
+export function isWholePieceQuantity(qty: unknown): boolean {
+  const q = Number(qty);
+  return Number.isInteger(q) && q >= 1;
 }
 
 /** Wird der Artikel über Lose geführt (gibt es irgendeine Los-Zeile)? */

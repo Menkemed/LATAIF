@@ -32,7 +32,8 @@ import {
   hasLedgerEntries,
   hasReversalFor,
 } from '@/core/ledger/posting';
-import { giveBackStock, hasLotHistory, isServiceProduct } from '@/core/lots/stock-contract';
+import { giveBackStock, hasLotHistory, isServiceProduct, isWholePieceQuantity, movesPieceStock, PIECE_QUANTITY_NOT_WHOLE } from '@/core/lots/stock-contract';
+import { ReturnActionRejected } from '@/core/returns/return-create';
 import { remainingSellableStock, restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 // BULK METAL V1 — Bulk-Zeile: nur ganz, nur IN_STOCK; exakt dasselbe Gewicht und derselbe COGS zurück ins Lot.
 import { storedBulkLine } from '@/core/bulk/bulk-invoice';
@@ -380,6 +381,14 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     for (const l of input.lines) {
       if (!Number.isFinite(l.quantity) || l.quantity < 0) {
         throw new Error('Return quantity must be a non-negative number.');
+      }
+      // Stückware zählt ganze Stücke: eine Bruchmenge gab früher ein ganzes Stück ins Los zurück, buchte
+      // aber nur den anteiligen Wareneinsatz zurück. Abgewiesen, bevor etwas geschrieben wird.
+      if (l.quantity > 0 && !isWholePieceQuantity(l.quantity)) {
+        const pid = query('SELECT product_id FROM invoice_lines WHERE id = ?', [l.invoiceLineId])[0]?.product_id as string | undefined;
+        if (movesPieceStock(pid)) {
+          throw new ReturnActionRejected(PIECE_QUANTITY_NOT_WHOLE, `an item is returned in whole pieces (got ${l.quantity})`);
+        }
       }
       if (!Number.isFinite(l.unitPrice) || l.unitPrice < 0) {
         throw new Error('Return unit price must be non-negative.');

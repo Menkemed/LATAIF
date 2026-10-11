@@ -53,6 +53,7 @@ import { exportCsv } from '@/core/utils/export-file';
 import type { ProductDisposition } from '@/core/models/types';
 import { RotateCcw } from 'lucide-react';
 import { Bhd } from '@/components/ui/Bhd';
+import { movesPieceStock } from '@/core/lots/stock-contract';
 
 function fmtDate(iso?: string): string {
   if (!iso) return '\u2014';
@@ -1615,7 +1616,7 @@ export function InvoiceDetail() {
                       <span style={{ marginLeft: 8, fontSize: 10, color: '#FF8730' }}>({alreadyReturned} of {l.quantity} returned)</span>
                     )}
                   </span>
-                  <input type="number" value={r.quantity} min={0} max={remainingQty} step="0.01"
+                  <input type="number" value={r.quantity} min={0} max={remainingQty} step={movesPieceStock(l.productId) ? 1 : 0.01}
                     onChange={e => {
                       const v = Math.max(0, Math.min(remainingQty, parseFloat(e.target.value) || 0));
                       setReturnLines({ ...returnLines, [l.id]: { ...r, quantity: v } });

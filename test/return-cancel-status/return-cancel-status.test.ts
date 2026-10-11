@@ -498,6 +498,46 @@ function kommission(db: Db, pid: string, cid: string): { invoiceId: string; purc
   }
 }
 
+// ══ 13 — Stückware zählt ganze Stücke: Bruchmengen werden abgewiesen, nichts verschoben ═══════════════
+{
+  const db = neu(); product(db, 'pF', 100); reload();
+  const lot = lotOf(db, kauf('pF', 10, 100, false));
+  const fp = (): string => S([lotRem(db, lot), qty(db, 'pF'), st(db, 'pF'), n(db, 'SELECT COUNT(*) FROM invoices'),
+    n(db, 'SELECT COUNT(*) FROM invoice_lines'), n(db, 'SELECT COUNT(*) FROM ledger_entries'), n(db, 'SELECT COUNT(*) FROM sales_returns')]);
+  const vor = fp();
+  for (const q of [0.5, 1.5]) {
+    const m = meldung(() => rechnung([LINE('pF', q)]));
+    ok(m.startsWith('PIECE_QUANTITY_NOT_WHOLE'), `13 Verkauf ${q} Stück aus Stück-Los → abgewiesen (${m.slice(0, 60)})`);
+  }
+  ok(fp() === vor, `13 …nach den Abweisungen: Los, Menge, Status, Rechnungen, Hauptbuch unverändert (${fp()})`);
+  const inv = rechnung([LINE('pF', 2)]); voll(db, inv);
+  stand(db, 'pF', lot, { status: 'in_stock', rest: 8 }, '13 Ganzstück-Verkauf 2 unverändert');
+  const lineId = s(db, 'SELECT id FROM invoice_lines WHERE invoice_id = ?', [inv]);
+  const cogsVor = n(db, "SELECT COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0) FROM ledger_entries WHERE account = 'COGS'");
+  const vorRet = fp();
+  const mr = meldung(() => ret(db, inv, 'pF', 0.5));
+  ok(mr.startsWith('PIECE_QUANTITY_NOT_WHOLE'), `13 Retoure 0.5 einer Stück-Los-Zeile → abgewiesen (${mr.slice(0, 60)})`);
+  ok(fp() === vorRet && n(db, "SELECT COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0) FROM ledger_entries WHERE account = 'COGS'") === cogsVor,
+    '13 …kein Stück zurück ins Los, kein COGS zurückgebucht');
+  const rid = ret(db, inv, 'pF', 1);
+  stand(db, 'pF', lot, { status: 'in_stock', rest: 9 }, '13 Ganzstück-Retoure 1 unverändert');
+  ok(storno(rid) === '', '13 …und ihr Storno');
+  stand(db, 'pF', lot, { status: 'in_stock', rest: 8 }, '13 …zurück auf den Stand nach dem Verkauf');
+  // Ändern einer Rechnung: dieselbe Regel.
+  const me = meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(inv, { reason: 'x', lines: [{ lineId, ...LINE('pF', 1.5) }] } as never)));
+  ok(me.startsWith('PIECE_QUANTITY_NOT_WHOLE'), `13 Ändern auf 1.5 Stück → abgewiesen (${me.slice(0, 60)})`);
+  // Ohne Stückbestand (Dienstleistung) bleibt eine Bruchmenge, wie sie war: kein neues Nein.
+  db.run(`INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition, scope_of_delivery, purchase_price,
+      purchase_currency, planned_sale_price, stock_status, tax_scheme, days_in_stock, images, attributes, source_type, created_at, updated_at)
+    VALUES ('svc-repair-frac','branch-main','cat-w','Service','Polish','SVC-F',0,'New','[]',0,'BHD',0,'in_stock','VAT_10',0,'[]','{}','OWN',?,?)`, [NOW, NOW]);
+  reload();
+  const ms = meldung(() => rechnung([LINE('svc-repair-frac', 0.5, 20)]));
+  ok(!ms.startsWith('PIECE_QUANTITY_NOT_WHOLE'), `13 Dienstleistungszeile mit 0.5 wird nicht von der Stück-Regel abgewiesen (${ms || 'angelegt'})`);
+  const svc = src('src/stores/salesReturnStore.ts') + src('src/stores/invoiceStore.ts');
+  ok((svc.match(/movesPieceStock\(/g) ?? []).length >= 2 && /assertWholePieceLines\(lines\);\s*\n\s*const lineMatch/.test(src('src/stores/invoiceStore.ts')),
+    '13 Quelltext: die Regel sitzt in Anlegen, Ändern und Retoure (jeder Weg, auch PC2, läuft hier durch)');
+}
+
 // ══ 11 — Ein Weg für Primary und PC2 ═════════════════════════════════════════════
 {
   const rc = src('src/core/returns/return-cancel-house.ts');
