@@ -11,6 +11,14 @@ import { CollectionProductThumb } from '@/components/products/CollectionProductT
 import { useMediaScope } from '@/hooks/useMediaScope';
 import type { Product, Category } from '@/core/models/types';
 import { productDisplayName } from '@/core/products/display-name';
+// Der Einstand kommt aus den Losen — dieselbe Kernauskunft wie die Artikelseite (`product.lots.get`),
+// am Primary lokal, an PC2 vom Primary. `fifoCost` ist der Wert, den ein Verkauf als Einstand bucht.
+import { useSharedRead } from '@/core/data/shared-read';
+import { productLotsFor, type ProductLots } from '@/core/data/domain-reads';
+import { hoverCardCost } from '@/core/products/hover-cost';
+
+/** „Noch nicht da" (nur an PC2, solange die Antwort des Primary aussteht) — nie ein Einstand. */
+const LOSE_LADEN: ProductLots = { lots: [], fifo: null };
 
 interface ProductHoverCardProps {
   product: Product | undefined;
@@ -23,7 +31,11 @@ export function ProductHoverCard({ product, categories }: ProductHoverCardProps)
     [product, categories]
   );
   const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
+  const productId = product?.id ?? '';
+  const lose = useSharedRead('product.lots.get', { productId }, (ctx) => productLotsFor(ctx, productId), LOSE_LADEN, [productId]);
   if (!product) return null;
+  const laedt = lose === LOSE_LADEN;
+  const cost = hoverCardCost(product.purchasePrice, laedt ? null : lose.fifo);
   const cat = categories.find(c => c.id === product.categoryId);
   const titleLine = productDisplayName(product) || '(unnamed)';
 
@@ -115,10 +127,15 @@ export function ProductHoverCard({ product, categories }: ProductHoverCardProps)
           <span style={{ fontSize: 10, color: '#6B7280', textTransform: 'uppercase', letterSpacing: '0.04em' }}>
             Cost
           </span>
-          <span className="font-mono" style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>
-            <Bhd v={product.purchasePrice} /> BHD
+          <span data-hover-cost={laedt ? 'loading' : cost.source} className="font-mono" style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>
+            {laedt ? '…' : <><Bhd v={cost.value} /> BHD</>}
           </span>
         </div>
+        {!laedt && cost.lots && (
+          <div data-hover-cost-lots style={{ fontSize: 10, color: '#6B7280', textAlign: 'right', marginTop: 2 }}>
+            avg <Bhd v={cost.avg ?? 0} /> BHD · {cost.lots} lots
+          </div>
+        )}
 
         {/* Storage Location (falls vorhanden) */}
         {product.storageLocation && (

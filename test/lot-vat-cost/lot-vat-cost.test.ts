@@ -443,5 +443,39 @@ const invariant = (db: Db, tag: string): void => {
   ok(/createPurchaseDetailedInHouse|runPurchaseCreate/.test(cc) && !/INSERT INTO stock_lots/.test(cc), '9 PC2/Handy (purchases.create) laufen über createPurchase');
 }
 
+// ══ 10 — Hover-Karte zeigt den Lot-Einstand, nicht products.purchase_price ═════════════
+{
+  const { productLotsFor } = await import('../../src/core/data/domain-reads.ts');
+  const { hoverCardCost } = await import('../../src/core/products/hover-cost.ts');
+  const ctx = { branchId: 'branch-main', tenantId: 'tenant-1' } as never;
+  const db = neu();
+  product(db, 'pH', 999);                            // Einkaufspreis des Artikels absichtlich ≠ den Losen
+  const l1 = lotOf(db, kauf('pH', 2, 100, true));    // Los 1: 2 Stück, mit Vorsteuer (Los netto)
+  const l2 = lotOf(db, kauf('pH', 1, 130, false));   // Los 2: 1 Stück
+  const pp = n(db, 'SELECT purchase_price FROM products WHERE id = ?', ['pH']);
+  const karte = () => hoverCardCost(pp, productLotsFor(ctx, 'pH').fifo);
+  const c1 = karte();
+  ok(c1.source === 'lot' && eq(c1.value, unitCost(db, l1)) && !eq(c1.value, pp),
+    `10 Hover: Einstand = ältestes offenes Los ${unitCost(db, l1)}, nicht purchase_price ${pp} (${S(c1)})`);
+  ok(c1.lots === 2 && eq(c1.avg ?? -1, (2 * unitCost(db, l1) + unitCost(db, l2)) / 3), `10 …mit Durchschnitt und Anzahl der offenen Lose (${S(c1)})`);
+  voll(db, rechnung([LINE('pH', 1, 300)]));          // 1 Stück aus Los 1 verkauft
+  const c2 = karte();
+  ok(eq(c2.value, unitCost(db, l1)) && lotRem(db, l1) === 1 && eq(c2.avg ?? -1, (unitCost(db, l1) + unitCost(db, l2)) / 2),
+    `10 teilweise verbrauchtes Los bleibt der nächste Einstand (${S(c2)})`);
+  voll(db, rechnung([LINE('pH', 1, 300)]));          // Los 1 leer
+  const c3 = karte();
+  ok(c3.source === 'lot' && eq(c3.value, unitCost(db, l2)) && c3.lots === undefined, `10 Los 1 leer → nächstes Los, kein Mehrfach-Hinweis (${S(c3)})`);
+  const inv = rechnung([LINE('pH', 1, 300)]);
+  ok(eq(n(db, 'SELECT purchase_price_snapshot FROM invoice_lines WHERE invoice_id = ?', [inv]), c3.value),
+    '10 …genau der Einstand, den der Verkauf danach bucht');
+  product(db, 'pOhneLos', 77, 1);
+  const c4 = hoverCardCost(77, productLotsFor(ctx, 'pOhneLos').fifo);
+  ok(c4.source === 'product' && c4.value === 77, '10 Artikel ohne Los: Einkaufspreis des Artikels (wie beim Verkauf)');
+  const karteSrc = src('src/components/products/ProductHoverCard.tsx');
+  ok(/useSharedRead\('product\.lots\.get'/.test(karteSrc) && /productLotsFor\(ctx, productId\)/.test(karteSrc)
+    && /hoverCardCost\(product\.purchasePrice/.test(karteSrc) && !/<Bhd v=\{product\.purchasePrice\}/.test(karteSrc),
+  '10 Quelltext: die Karte liest product.lots.get (Primary und PC2) und zeigt hoverCardCost — nie purchase_price direkt');
+}
+
 console.log(`\nlot-vat-cost: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);
