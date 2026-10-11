@@ -33,7 +33,7 @@ import {
   hasReversalFor,
 } from '@/core/ledger/posting';
 import { giveBackStock, hasLotHistory, isServiceProduct } from '@/core/lots/stock-contract';
-import { restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+import { remainingSellableStock, restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 // BULK METAL V1 — Bulk-Zeile: nur ganz, nur IN_STOCK; exakt dasselbe Gewicht und derselbe COGS zurück ins Lot.
 import { storedBulkLine } from '@/core/bulk/bulk-invoice';
 import { restoreBulk } from '@/core/bulk/bulk-lot-house';
@@ -190,7 +190,13 @@ function applyDisposition(
       const newStatus = disposition === 'UNDER_REPAIR' ? 'in_repair'
         : disposition === 'WRITE_OFF' ? 'write_off'
         : 'in_stock';
-      db.run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ?`, [newStatus, now, line.productId]);
+      // Das retournierte Stück geht in Reparatur bzw. wird abgeschrieben — es kehrt NICHT in den Bestand
+      // zurück. Der Status gilt aber für den ganzen Artikel: gesetzt wird er nur, wenn danach kein
+      // verkäuflicher Bestand mehr bleibt. Bei einer Teil-Retoure mit Ware am Lager bleibt der Artikel
+      // verkäuflich (der Status folgt dem Restbestand, wie seit v0.8.79 beim Verkauf und beim Storno).
+      if (newStatus === 'in_stock' || remainingSellableStock(line.productId) <= 0) {
+        db.run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ?`, [newStatus, now, line.productId]);
+      }
     }
     trackProductRow(line.productId);   // LAN-Sync Phase 1b: finaler Product-Snapshot je Line
   }

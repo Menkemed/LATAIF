@@ -335,21 +335,29 @@ export function unreserveProductIfRestored(productId: string): void {
 // Das Reparatur-Serviceprodukt (`svc-repair-*`) ist kein Lagerartikel und wird nie angefasst.
 const SALE_STATUSES: readonly string[] = ['in_stock', 'offered', 'reserved', 'sold', 'consignment', 'consignment_reserved'];
 
-export function reconcileSaleStatus(productId: string, saleSettled: boolean, ownStatuses: readonly string[] = []): void {
-  if (!productId || productId.startsWith('svc-repair-') || isBulkMetalProduct(productId)) return;
-  const p = query(`SELECT stock_status, source_type, quantity FROM products WHERE id = ?`, [productId])[0];
-  if (!p) return;
-  const status = String(p.stock_status || '');
-  if (!SALE_STATUSES.includes(status) && !ownStatuses.includes(status)) return;
+/**
+ * Der verkäufliche Restbestand eines Artikels: Summe der offenen Lose; ein Artikel ganz ohne Los-Zeile
+ * zählt seine Stückzahl. Die eine Regel, nach der der Status dem Restbestand folgt (Verkauf, Retoure, Storno).
+ */
+export function remainingSellableStock(productId: string, quantity?: number | null): number {
   const lots = query(
     `SELECT COUNT(*) AS total_lots,
             COALESCE(SUM(CASE WHEN status != 'CANCELLED' AND qty_remaining > 0 THEN qty_remaining ELSE 0 END), 0) AS active_qty
        FROM stock_lots WHERE product_id = ?`,
     [productId]
   )[0];
-  const remaining = Number(lots?.total_lots) > 0
-    ? Number(lots?.active_qty) || 0
-    : pieceCount(p.quantity as number | null | undefined);
+  if (Number(lots?.total_lots) > 0) return Number(lots?.active_qty) || 0;
+  const q = quantity !== undefined ? quantity : (query('SELECT quantity FROM products WHERE id = ?', [productId])[0]?.quantity as number | null | undefined);
+  return pieceCount(q);
+}
+
+export function reconcileSaleStatus(productId: string, saleSettled: boolean, ownStatuses: readonly string[] = []): void {
+  if (!productId || productId.startsWith('svc-repair-') || isBulkMetalProduct(productId)) return;
+  const p = query(`SELECT stock_status, source_type, quantity FROM products WHERE id = ?`, [productId])[0];
+  if (!p) return;
+  const status = String(p.stock_status || '');
+  if (!SALE_STATUSES.includes(status) && !ownStatuses.includes(status)) return;
+  const remaining = remainingSellableStock(productId, (p.quantity as number | null | undefined) ?? null);
   const consignment = String(p.source_type || '') === 'CONSIGNMENT' || status === 'consignment' || status === 'consignment_reserved';
   let next: string;
   if (remaining > 0) {

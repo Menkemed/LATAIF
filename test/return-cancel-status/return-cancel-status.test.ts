@@ -437,18 +437,65 @@ function kommission(db: Db, pid: string, cid: string): { invoiceId: string; purc
   db.run("UPDATE products SET stock_status = 'with_agent' WHERE id = 'pW'"); reload();
   ok(storno(rid) === '', '10 Storno läuft, während der Artikel beim Agenten ist');
   ok(st(db, 'pW') === 'with_agent' && lotRem(db, lot) === 9, `10 …with_agent bleibt, Bestand 9 (${st(db, 'pW')}/${lotRem(db, lot)})`);
-  // UNDER_REPAIR-Retoure: ihr eigenes in_repair wird zurückgenommen …
+  // UNDER_REPAIR-Retoure eines EINZELSTÜCKS (kein Bestand mehr am Lager): ihr eigenes in_repair wird zurückgenommen …
   const db2 = neu(); product(db2, 'pR', 100); reload();
-  const lot2 = lotOf(db2, kauf('pR', 10, 100, false));
+  const lot2 = lotOf(db2, kauf('pR', 1, 100, false));
   const inv2 = rechnung([LINE('pR', 1)]); voll(db2, inv2);
   const rr = ret(db2, inv2, 'pR', 1, 'UNDER_REPAIR');
-  ok(st(db2, 'pR') === 'in_repair', '10 UNDER_REPAIR-Retoure setzt in_repair (unverändert, eigener späterer Punkt)');
+  ok(st(db2, 'pR') === 'in_repair', '10 UNDER_REPAIR-Retoure des Einzelstücks setzt in_repair');
   ok(storno(rr) === '', '10 Storno der UNDER_REPAIR-Retoure läuft');
-  stand(db2, 'pR', lot2, { status: 'in_stock', rest: 9 }, '10 …eigenes in_repair zurückgenommen (vorher: sold)');
+  stand(db2, 'pR', lot2, { status: 'sold', rest: 0 }, '10 …eigenes in_repair zurückgenommen (vorher: sold)');
   // … aber nicht, wenn seither eine echte Reparatur angelegt wurde.
   const rr2 = ret(db2, inv2, 'pR', 1, 'UNDER_REPAIR');
   insert(db2, 'repairs', { id: 'rep-1', branch_id: 'branch-main', product_id: 'pR', status: 'received', created_at: '2999-01-01T00:00:00.000Z', updated_at: NOW });
   ok(storno(rr2) === '' && st(db2, 'pR') === 'in_repair', `10 …mit Reparatur seit der Retoure bleibt in_repair (${st(db2, 'pR')})`);
+}
+
+// ══ 12 — Teil-Retoure mit Disposition: der Status folgt dem Restbestand ═════════════
+// Ein Stück in Reparatur oder abgeschrieben kehrt nicht ins Lager zurück. Bleibt danach Ware am Lager,
+// bleibt der Artikel verkäuflich — der Status gilt für den ganzen Artikel. Nur wenn nichts mehr am Lager
+// ist, steht er auf in_repair / write_off (wie bisher beim Einzelstück).
+{
+  const welt = (pid: string, lager = 10, menge = 3) => {
+    const db = neu(); product(db, pid, 100); reload();
+    const lot = lotOf(db, kauf(pid, lager, 100, false));
+    const inv = rechnung([LINE(pid, menge)]); voll(db, inv);
+    return { db, lot, inv };
+  };
+  { // a) Teilmenge IN_STOCK
+    const { db, lot, inv } = welt('pT1');
+    const rid = ret(db, inv, 'pT1', 1);
+    stand(db, 'pT1', lot, { status: 'in_stock', rest: 8 }, '12a Teil-Retoure IN_STOCK (1 von 3): Stück zurück ins Lager');
+    ok(storno(rid) === '', '12a Storno läuft');
+    stand(db, 'pT1', lot, { status: 'in_stock', rest: 7 }, '12a …nach Storno');
+  }
+  for (const [pid, disp] of [['pT2', 'UNDER_REPAIR'], ['pT3', 'WRITE_OFF']] as const) { // b/c) Teilmenge UNDER_REPAIR / WRITE_OFF
+    const { db, lot, inv } = welt(pid);
+    const rid = ret(db, inv, pid, 1, disp);
+    stand(db, pid, lot, { status: 'in_stock', rest: 7 }, `12 Teil-Retoure ${disp} (1 von 3): Artikel bleibt verkäuflich, das Stück geht nicht ins Lager`);
+    ok(storno(rid) === '', `12 Storno der ${disp}-Teil-Retoure läuft`);
+    stand(db, pid, lot, { status: 'in_stock', rest: 7 }, `12 …nach Storno unverändert verkäuflich`);
+  }
+  { // d) volle Zeilenmenge, aber noch Ware am Lager
+    const { db, lot, inv } = welt('pT4');
+    ret(db, inv, 'pT4', 3, 'UNDER_REPAIR');
+    stand(db, 'pT4', lot, { status: 'in_stock', rest: 7 }, '12d volle Zeile (3 von 3) UNDER_REPAIR, 7 am Lager: bleibt verkäuflich');
+  }
+  for (const [pid, disp, want] of [['pT5', 'UNDER_REPAIR', 'in_repair'], ['pT6', 'WRITE_OFF', 'write_off']] as const) { // e) nichts mehr am Lager
+    const { db, lot, inv } = welt(pid, 3, 3);
+    const rid = ret(db, inv, pid, 1, disp);
+    ok(st(db, pid) === want && lotRem(db, lot) === 0, `12e alles verkauft, 1 zurück als ${disp}: ${want} wie bisher (${st(db, pid)})`);
+    ok(storno(rid) === '', `12e Storno der ${disp}-Retoure läuft`);
+    stand(db, pid, lot, { status: 'sold', rest: 0 }, `12e …${want} zurückgenommen, wieder verkauft`);
+  }
+  { // f) gemischt — eine Disposition je Retoure: dieselbe Zeile, 1 IN_STOCK und 1 UNDER_REPAIR
+    const { db, lot, inv } = welt('pT7');
+    const r1 = ret(db, inv, 'pT7', 1);
+    const r2 = ret(db, inv, 'pT7', 1, 'UNDER_REPAIR');
+    stand(db, 'pT7', lot, { status: 'in_stock', rest: 8 }, '12f gemischt: 1 ins Lager, 1 in Reparatur — verkäuflich, Rest 8');
+    ok(storno(r2) === '' && storno(r1) === '', '12f beide Stornos laufen');
+    stand(db, 'pT7', lot, { status: 'in_stock', rest: 7 }, '12f …zurück auf den Stand nach dem Verkauf');
+  }
 }
 
 // ══ 11 — Ein Weg für Primary und PC2 ═════════════════════════════════════════════

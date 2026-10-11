@@ -391,8 +391,9 @@ for (const [was, bezahlt, bau] of RFAELLE) {
     ok(k.refund_status === 'REFUNDED' && bildF.guthaben.length === 1 && Number(bildF.guthaben[0].amount) === 440,
       `RETURN Guthaben: sofort, als einloesbares Guthaben 440 (${S(bildF.guthaben)})`);
   } else {
-    ok(bildF.bestand[1].stock_status === 'in_repair' && k.status === 'REFUNDED' && Number(k.refund_paid_amount) === 0,
-      `RETURN Under Repair: Ware in Reparatur, kein Geld zurueck (Kunde schuldet noch) — die Gutschrift kuerzt die Forderung (${S([bildF.bestand[1], k.status, k.refund_paid_amount])})`);
+    // Teil-Retoure (1 von 2, ein Stück noch am Lager): das Stück geht in Reparatur, der Artikel bleibt verkäuflich.
+    ok(bildF.bestand[1].stock_status === 'in_stock' && k.status === 'REFUNDED' && Number(k.refund_paid_amount) === 0,
+      `RETURN Under Repair: Stück in Reparatur, Artikel mit Restbestand bleibt verkaeuflich, kein Geld zurueck (Kunde schuldet noch) — die Gutschrift kuerzt die Forderung (${S([bildF.bestand[1], k.status, k.refund_paid_amount])})`);
   }
 }
 
