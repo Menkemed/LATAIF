@@ -99,6 +99,12 @@ export function createReturnInHouse(input: ReturnCreateInput, branchId: string, 
     throw new ReturnActionRejected('DISPOSITION_NOT_ALLOWED',
       'return to owner / keep as own is offered only when a consignment item comes back');
   }
+  // „Keep (→ OWN)" gilt JEDER Zeile der Retoure. Eigene Ware darauf bekäme ein neues Los zum Verkaufspreis
+  // und diesen Preis als Einstand, ohne Wareneinsatz-Rückbuchung — also nur, wenn jede Zeile Kommissionsware ist.
+  if (input.productDisposition === 'KEEP_AS_OWN' && lines.some((l) => !l.productId || !istKommissionsware(l.productId))) {
+    throw new ReturnActionRejected('KEEP_ONLY_FOR_CONSIGNMENT',
+      'keep as own applies to every returned line — use it only when all returned lines are consignment items');
+  }
   if (input.productDisposition !== 'IN_STOCK' && input.productDisposition !== 'WRITE_OFF'
     && jointInvoiceLines(lines.map((l) => l.invoiceLineId)).length > 0) {
     throw new ReturnActionRejected(JOINT_BLOCK.code, JOINT_BLOCK.salesReturnDisposition);

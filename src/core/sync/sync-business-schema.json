@@ -1381,6 +1381,12 @@
       "allowed_fields": [
         "id",
         "invoice_line_id",
+        "keep_lot_id",
+        "keep_prev_consignments",
+        "keep_prev_purchase_price",
+        "keep_prev_source_type",
+        "keep_prev_stock_status",
+        "keep_snapshot_at",
         "line_total",
         "product_id",
         "quantity",

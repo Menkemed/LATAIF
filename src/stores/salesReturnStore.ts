@@ -138,6 +138,13 @@ function applyDisposition(
         [now, line.productId]
       );
     } else if (disposition === 'KEEP_AS_OWN') {
+      // Was die Rücknahme braucht — VOR dem Überschreiben festgehalten (Storno stellt genau das wieder her).
+      const vorKeep = query('SELECT source_type, purchase_price, stock_status FROM products WHERE id = ?', [line.productId])[0];
+      const vorKommissionen = query(
+        `SELECT id, status FROM consignments WHERE product_id = ? AND status IN ('sold','SOLD','paid_out','active','IN_STOCK') ORDER BY id`,
+        [line.productId],
+      ).map((c) => ({ id: String(c.id), status: String(c.status) }));
+      let keepLotId: string | null = null;
       // Plan §Commission §13 B — bleibt im System als OWN, purchase_price = letzter Verkaufspreis.
       db.run(
         `UPDATE products SET stock_status = 'in_stock', source_type = 'OWN',
@@ -153,7 +160,7 @@ function applyDisposition(
       // Den alten (verkauften) Lot lassen wir EXHAUSTED — wirtschaftlich korrekt:
       // Die Ware war verkauft, jetzt haben wir sie zum unitPrice "zurueckgekauft".
       if (line.unitPrice && line.unitPrice > 0) {
-        const keepLotId = uuid();   // LAN-Sync Phase 1a
+        keepLotId = uuid();   // LAN-Sync Phase 1a
         db.run(
           `INSERT INTO stock_lots
              (id, branch_id, product_id, purchase_id, purchase_line_id,
@@ -163,6 +170,14 @@ function applyDisposition(
         );
         trackLotRow(keepLotId, 'insert');
       }
+      // Der Snapshot steht in der Retourenzeile (vor ihrer Sync-Erfassung — er reist mit dem insert).
+      db.run(
+        `UPDATE sales_return_lines SET keep_snapshot_at = ?, keep_prev_source_type = ?, keep_prev_purchase_price = ?,
+           keep_prev_stock_status = ?, keep_prev_consignments = ?, keep_lot_id = ?
+         WHERE return_id = ? AND invoice_line_id = ?`,
+        [now, (vorKeep?.source_type as string | null) ?? null, (vorKeep?.purchase_price as number | null) ?? null,
+          (vorKeep?.stock_status as string | null) ?? null, JSON.stringify(vorKommissionen), keepLotId, returnId, line.invoiceLineId],
+      );
       // Phase 7 Sync: products.quantity aus den jetzt korrekten Lots.
       syncProductQuantity(line.productId);
     } else if (disposition === 'IN_STOCK') {

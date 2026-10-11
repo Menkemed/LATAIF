@@ -538,6 +538,124 @@ function kommission(db: Db, pid: string, cid: string): { invoiceId: string; purc
     '13 Quelltext: die Regel sitzt in Anlegen, Ändern und Retoure (jeder Weg, auch PC2, läuft hier durch)');
 }
 
+// ══ 14 — „Keep as own": nur Kommissionsware, Snapshot beim Anlegen, exakter Storno, Altbestand gesperrt ═══
+{
+  const { createReturnInHouse } = await import('../../src/core/returns/return-house.ts');
+  const consRev = await import('../../src/core/consignment/consignment-reversal-house.ts');
+  const { changeContractViolation } = await import('../../src/core/sync/apply-change.ts');
+  const prod = (db: Db, pid: string): string =>
+    S(db.exec('SELECT source_type, purchase_price, stock_status, quantity FROM products WHERE id = ?', [pid])[0]?.values ?? []);
+  const consStatus = (db: Db, cid: string): string => s(db, 'SELECT status FROM consignments WHERE id = ?', [cid]);
+  const ausgeglichen = (db: Db): boolean => Math.abs(n(db, "SELECT COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0) FROM ledger_entries")) < 0.005;
+  const lineOfInv = (db: Db, inv: string, pid: string): string => s(db, 'SELECT id FROM invoice_lines WHERE invoice_id = ? AND product_id = ?', [inv, pid]);
+  const keepRet = (db: Db, inv: string, pids: string[]): string => {
+    const id = imHaus(() => createReturnInHouse({ invoiceId: inv, lines: pids.map((p) => ({ invoiceLineId: lineOfInv(db, inv, p), quantity: 1 })),
+      refundMethod: 'cash', productDisposition: 'KEEP_AS_OWN', reason: 'keep', refundNow: false } as never, 'branch-main').returnId);
+    reload();
+    return id;
+  };
+  const zaehler = (db: Db): string => S([n(db, 'SELECT COUNT(*) FROM stock_lots'), n(db, 'SELECT COUNT(*) FROM sales_returns'),
+    n(db, 'SELECT COUNT(*) FROM ledger_entries'), n(db, 'SELECT COUNT(*) FROM credit_notes')]);
+
+  { // a) eigene Ware + Keep → abgewiesen, ohne jede Wirkung (Gegenprobe: früher neues Los zum Verkaufspreis)
+    const db = neu(); product(db, 'pOwn', 100); reload();
+    const lot = lotOf(db, kauf('pOwn', 3, 100, false));
+    const inv = rechnung([LINE('pOwn', 1)]); voll(db, inv);
+    const vorP = prod(db, 'pOwn'); const vorZ = zaehler(db);
+    const m = meldung(() => keepRet(db, inv, ['pOwn']));
+    ok(m.startsWith('DISPOSITION_NOT_ALLOWED'), `14a nur eigene Ware + Keep → abgewiesen wie bisher (${m.slice(0, 60)})`);
+    ok(prod(db, 'pOwn') === vorP && zaehler(db) === vorZ && lotRem(db, lot) === 2, `14a …kein neues Los, Einstand/Quelle/Status unverändert, keine Retoure, keine Buchung (${prod(db, 'pOwn')})`);
+    // gemischt: Kommission + eigene Ware auf einer Rechnung → Keep für alle Zeilen → abgewiesen
+    kommission(db, 'pMixK', 'cons-mix');
+    const rMix = s(db, "SELECT invoice_id FROM consignments WHERE id = 'cons-mix'");
+    db.run(`INSERT INTO invoice_lines (id, invoice_id, product_id, quantity, unit_price, purchase_price_snapshot, vat_rate, vat_amount, line_total, tax_scheme, position)
+      SELECT 'il-mix-own', ?, 'pOwn', 1, 100, 100, 0, 0, 100, 'MARGIN', 9`, [rMix]);
+    // Der eigentliche Fund: EINE Kommissionszeile genügte, und Keep wirkte auf ALLE Zeilen — die eigene Ware bekam
+    // ein neues Los zum Verkaufspreis und diesen Preis als Einstand.
+    const vorZ2 = zaehler(db); const vorOwn = prod(db, 'pOwn'); const vorMixK = prod(db, 'pMixK');
+    const mm = meldung(() => keepRet(db, rMix, ['pMixK', 'pOwn']));
+    ok(mm.startsWith('KEEP_ONLY_FOR_CONSIGNMENT') && zaehler(db) === vorZ2 && prod(db, 'pOwn') === vorOwn && prod(db, 'pMixK') === vorMixK
+      && n(db, "SELECT COUNT(*) FROM stock_lots WHERE product_id = 'pOwn' AND purchase_id IS NULL") === 0,
+      `14a gemischt (Kommission + eigene Ware) → abgewiesen: kein Los zum Verkaufspreis, Einstand/Quelle beider Artikel unverändert (${mm.slice(0, 50)})`);
+  }
+
+  { // b) Kommission über die Rechnungsmaske (PC2 denselben Weg): Snapshot vollständig, Storno exakt
+    const db = neu();
+    const r = kommission(db, 'pKeep', 'cons-k1');
+    const vorP = prod(db, 'pKeep'); const vorC = consStatus(db, 'cons-k1');
+    const rid = keepRet(db, r.invoiceId, ['pKeep']);
+    const snap = db.exec('SELECT keep_snapshot_at, keep_prev_source_type, keep_prev_purchase_price, keep_prev_stock_status, keep_prev_consignments, keep_lot_id FROM sales_return_lines WHERE return_id = ?', [rid])[0].values[0];
+    const keepLot = String(snap[5] ?? '');
+    ok(!!snap[0] && snap[1] === 'CONSIGNMENT' && S(JSON.parse(String(snap[4]))) === S([{ id: 'cons-k1', status: vorC }]) && !!keepLot
+      && S([snap[1], snap[2], snap[3]]) === S(JSON.parse(vorP)[0].slice(0, 3)),
+      `14b Snapshot vollständig: Quelle, Einstand, Status vor dem Keep, Kommission mit Status, Keep-Los (${S(snap)})`);
+    ok(JSON.parse(prod(db, 'pKeep'))[0][0] === 'OWN' && consStatus(db, 'cons-k1') === 'RETURNED' && s(db, 'SELECT status FROM stock_lots WHERE id = ?', [keepLot]) === 'ACTIVE',
+      '14b Keep wirkt: OWN, Kommission RETURNED, Keep-Los aktiv');
+    const srl = db.exec("SELECT data FROM sync_changelog WHERE table_name = 'sales_return_lines' ORDER BY id DESC LIMIT 1")[0]?.values?.[0]?.[0];
+    ok(!!srl && /keep_snapshot_at/.test(String(srl)) && changeContractViolation('sales_return_lines', 'insert', String(srl)) === null,
+      '14b Sync-Feldvertrag: die Retourenzeile reist mit Snapshot und wird vom Vertrag angenommen');
+    ok(storno(rid) === '', '14b Storno des Keeps läuft');
+    ok(prod(db, 'pKeep') === vorP && consStatus(db, 'cons-k1') === vorC && s(db, 'SELECT status FROM stock_lots WHERE id = ?', [keepLot]) === 'CANCELLED',
+      `14b …exakt zurück: Quelle, Einstand, Status, Menge wie vor dem Keep, Kommission ${vorC}, Keep-Los storniert (${prod(db, 'pKeep')} / ${consStatus(db, 'cons-k1')})`);
+    ok(s(db, 'SELECT status FROM sales_returns WHERE id = ?', [rid]) === 'REJECTED' && ausgeglichen(db), '14b …Retoure REJECTED, Hauptbuch ausgeglichen');
+  }
+
+  { // c) weiterverkauft → Storno abgewiesen, nichts verändert
+    const db = neu();
+    const r = kommission(db, 'pKeep2', 'cons-k2');
+    const rid = keepRet(db, r.invoiceId, ['pKeep2']);
+    rechnung([LINE('pKeep2', 1)]);   // das behaltene Stück erneut verkauft
+    const vorP = prod(db, 'pKeep2'); const vorZ = zaehler(db);
+    const m = storno(rid);
+    ok(m.startsWith('RETURN_STOCK_RESOLD') && prod(db, 'pKeep2') === vorP && zaehler(db) === vorZ && consStatus(db, 'cons-k2') === 'RETURNED',
+      `14c Keep-Stück weiterverkauft → Storno abgewiesen, keine Doppelbelegung, nichts verändert (${m.slice(0, 50)})`);
+  }
+
+  { // d) Kommission seither verändert → abgewiesen
+    const db = neu();
+    const r = kommission(db, 'pKeep3', 'cons-k3');
+    const rid = keepRet(db, r.invoiceId, ['pKeep3']);
+    db.run("UPDATE consignments SET status = 'paid_out' WHERE id = 'cons-k3'");
+    const vorP = prod(db, 'pKeep3');
+    const m = storno(rid);
+    ok(m.startsWith('RETURN_KEEP_CONSIGNMENT_CHANGED') && prod(db, 'pKeep3') === vorP, `14d Kommission seither verändert → abgewiesen, nichts überschrieben (${m.slice(0, 50)})`);
+  }
+
+  { // e) Kommissionsmaske: Snapshot + Wareneinsatz + Einstand = Auszahlung; Storno exakt inkl. Wareneinsatz
+    const db = neu();
+    kommission(db, 'pKeepC', 'cons-k4');
+    const vorP = prod(db, 'pKeepC'); const vorC = consStatus(db, 'cons-k4');
+    const einkaeufe = n(db, "SELECT COUNT(*) FROM purchases WHERE status != 'CANCELLED'");
+    const out = imHaus(() => consRev.returnConsignmentAfterSaleInHouse('cons-k4', { disposition: 'KEEP_AS_OWN', refundMethod: 'cash' } as never, 'branch-main'));
+    reload();
+    const rid = out.returnId;
+    ok(consStatus(db, 'cons-k4') === 'returned' && JSON.parse(prod(db, 'pKeepC'))[0][0] === 'OWN' && n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'SALES_RETURN_COGS' AND source_id = ?", [rid]) > 0,
+      '14e Keep aus der Kommissionsmaske: OWN, Kommission returned, Wareneinsatz zurückgebucht');
+    ok(storno(rid) === '', '14e Storno läuft');
+    const cogsNetto = n(db, "SELECT COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0) FROM ledger_entries WHERE source_module = 'SALES_RETURN_COGS' AND source_id = ? AND account = 'COGS'", [rid]);
+    ok(prod(db, 'pKeepC') === vorP && consStatus(db, 'cons-k4') === vorC && Math.abs(cogsNetto) < 0.005
+      && n(db, "SELECT COUNT(*) FROM purchases WHERE status != 'CANCELLED'") === einkaeufe && ausgeglichen(db),
+      `14e …exakt zurück: Artikel, Kommission ${vorC}, Wareneinsatz netto 0, Einkauf beim Einlieferer unverändert, Hauptbuch ausgeglichen (${prod(db, 'pKeepC')})`);
+  }
+
+  { // f) Altbestand ohne Snapshot: Storno gesperrt — „Cancel Sale" räumt weiter auf
+    const db = neu();
+    kommission(db, 'pKeepL', 'cons-k5');
+    const out = imHaus(() => consRev.returnConsignmentAfterSaleInHouse('cons-k5', { disposition: 'KEEP_AS_OWN', refundMethod: 'cash' } as never, 'branch-main'));
+    reload();
+    db.run(`UPDATE sales_return_lines SET keep_snapshot_at = NULL, keep_prev_source_type = NULL, keep_prev_purchase_price = NULL,
+      keep_prev_stock_status = NULL, keep_prev_consignments = NULL, keep_lot_id = NULL WHERE return_id = ?`, [out.returnId]);   // wie vor dem Snapshot
+    const vorP = prod(db, 'pKeepL'); const vorZ = zaehler(db);
+    const m = storno(out.returnId);
+    ok(m.startsWith('RETURN_KEEP_NOT_RESTORABLE') && prod(db, 'pKeepL') === vorP && zaehler(db) === vorZ,
+      `14f Alt-Keep ohne Snapshot → nicht stornierbar, nichts geraten (${m.slice(0, 50)})`);
+    const c = meldung(() => imHaus(() => consRev.cancelConsignmentSaleInHouse('cons-k5', OWNER_ACTOR, 'branch-main')));
+    reload();
+    ok(c === '' && consStatus(db, 'cons-k5') === 'active' && JSON.parse(prod(db, 'pKeepL'))[0][0] === 'CONSIGNMENT' && ausgeglichen(db),
+      `14f …„Cancel Sale" der Kommission räumt den Alt-Keep weiter auf (${c || 'ok'})`);
+  }
+}
+
 // ══ 11 — Ein Weg für Primary und PC2 ═════════════════════════════════════════════
 {
   const rc = src('src/core/returns/return-cancel-house.ts');

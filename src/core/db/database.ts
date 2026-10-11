@@ -2509,6 +2509,15 @@ function runMigrations(database: Database): void {
       next_number INTEGER NOT NULL,
       updated_at TEXT NOT NULL
     )`,
+    // KEEP_AS_OWN — was eine Rücknahme exakt braucht, beim Anlegen der Retoure je Zeile festgehalten:
+    // Quelle, Einkaufspreis und Status des Artikels VOR dem Keep, die überschriebenen Kommissionen mit
+    // ihrem Status und das neu angelegte Los. Ohne diese Werte ist ein Keep nicht umkehrbar (Altbestand).
+    `ALTER TABLE sales_return_lines ADD COLUMN keep_snapshot_at TEXT`,
+    `ALTER TABLE sales_return_lines ADD COLUMN keep_prev_source_type TEXT`,
+    `ALTER TABLE sales_return_lines ADD COLUMN keep_prev_purchase_price REAL`,
+    `ALTER TABLE sales_return_lines ADD COLUMN keep_prev_stock_status TEXT`,
+    `ALTER TABLE sales_return_lines ADD COLUMN keep_prev_consignments TEXT`,
+    `ALTER TABLE sales_return_lines ADD COLUMN keep_lot_id TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

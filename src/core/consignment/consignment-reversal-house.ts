@@ -351,7 +351,8 @@ export function cancelConsignmentSaleInHouse(
   //    Wareneinsatz, Gutschrift (CANCELLED, bleibt mit Nummer stehen), unbenutztes Guthaben, Retoure
   //    REJECTED. Seine Sperren gelten auch hier (ausgezahlte Erstattung, verbrauchtes Guthaben, Owner).
   for (const returnId of eigene) {
-    cancelReturnInHouse(returnId, `Consignment sale cancelled (${consignmentNumber})`, actor, branchId);
+    cancelReturnInHouse(returnId, `Consignment sale cancelled (${consignmentNumber})`, actor, branchId, undefined,
+      { legacyKeepRestoredByCaller: true });
   }
 
   // 2. Die Käuferrechnung — über die Grundlage, nicht mehr direkt über `updateInvoice`. Keine offene

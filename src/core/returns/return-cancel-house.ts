@@ -71,6 +71,12 @@ export const RETURN_REFUND_PAID_OUT = 'RETURN_REFUND_PAID_OUT';
 export const RETURN_CREDIT_USED = 'RETURN_CREDIT_USED';
 export const RECORD_CHANGED = 'RECORD_CHANGED';
 export const RETURN_STOCK_RESOLD = 'RETURN_STOCK_RESOLD';
+/** Ein Keep von VOR dem Snapshot: Quelle, Einkaufspreis und Kommissionsstatus sind nicht exakt bekannt. */
+export const RETURN_KEEP_NOT_RESTORABLE = 'RETURN_KEEP_NOT_RESTORABLE';
+/** Die Kommission des Keeps wurde seither verändert (Storno, Auszahlung …) — nichts wird überschrieben. */
+export const RETURN_KEEP_CONSIGNMENT_CHANGED = 'RETURN_KEEP_CONSIGNMENT_CHANGED';
+/** Was ein Keep selbst in die Kommission schrieb (Retourenhaus bzw. Kommissionsmaske). */
+const KEEP_CONSIGNMENT_STATUSES = ['RETURNED', 'returned'];
 
 /** Wer storniert: fern der geprüfte Absender, am Primary die Sitzung. */
 export interface ReturnCancelActor {
@@ -133,7 +139,15 @@ export function returnCancelability(r: ReturnCancelView): ReturnCancelability {
 
 // ── Die Warenfolge zurücknehmen (unverändert aus dem Store übernommen) ─────
 
-interface RueckLine { productId?: string; quantity: number; invoiceLineId?: string }
+interface KeepSnapshot {
+  at: string;
+  sourceType: string | null;
+  purchasePrice: number | null;
+  stockStatus: string | null;
+  consignments: Array<{ id: string; status: string }>;
+  lotId: string | null;
+}
+interface RueckLine { productId?: string; quantity: number; invoiceLineId?: string; keep?: KeepSnapshot | null }
 
 // Best-effort Revert. KEEP_AS_OWN/RETURN_TO_OWNER nicht voll reversibel — Logwarnung statt
 // stillschweigend zerstören. Läuft in der Transaktion des Aufrufers → atomar mit dem Rest.
@@ -185,7 +199,24 @@ function revertDisposition(
       syncProductQuantity(line.productId);
     } else if (disposition === 'UNDER_REPAIR' || disposition === 'WRITE_OFF') {
       // Kein Bestand bewegt (die Retoure gab keinen zurück) — nur der Status, siehe oben.
+    } else if (disposition === 'KEEP_AS_OWN' && line.keep) {
+      // Exakt zurück, was das Keep schrieb (die Sperre oben hat geprüft, dass nichts davon seither benutzt
+      // wurde): das Keep-Los storniert, Quelle/Einkaufspreis/Status des Artikels und die Kommissionen wie davor.
+      const k = line.keep;
+      if (k.lotId) {
+        db.run(`UPDATE stock_lots SET status = 'CANCELLED' WHERE id = ?`, [k.lotId]);
+        trackLotRow(k.lotId, 'update');
+      }
+      db.run(`UPDATE products SET source_type = ?, purchase_price = ?, stock_status = ?, updated_at = ? WHERE id = ?`,
+        [k.sourceType, k.purchasePrice, k.stockStatus, now, line.productId]);
+      for (const c of k.consignments) {
+        db.run(`UPDATE consignments SET status = ?, updated_at = ? WHERE id = ?`, [c.status, now, c.id]);
+        trackChange('consignments', c.id, 'update', {});
+      }
+      syncProductQuantity(line.productId);
     } else if (disposition === 'KEEP_AS_OWN') {
+      // Altbestand ohne Snapshot — nur über „Cancel Sale" der Kommission erreichbar, das Artikel und
+      // Kommission danach vollständig selbst neu setzt. Bisheriges Verhalten: das Keep-Los storniert.
       // Phase 5 — den per applyDisposition synthetisch erzeugten Lot cancellen (jüngster passender,
       // unangebrochener Lot ohne Einkauf — sonst würden bereits konsumierte Spuren ausgelöscht).
       const keepCancelId = query(
@@ -241,6 +272,9 @@ export function cancelReturnInHouse(
   actor: ReturnCancelActor,
   branchId: string,
   expectedRevision?: number,
+  // Nur „Cancel Sale" der Kommission: setzt Artikel und Kommission danach selbst vollständig neu — darf
+  // deshalb auch ein Keep ohne Snapshot (Altbestand) zurücknehmen. Jeder andere Weg nicht.
+  opts: { legacyKeepRestoredByCaller?: boolean } = {},
 ): ReturnCancelled {
   if (isClientMode()) {
     throw new ReturnCancelRejected(RETURN_PRIMARY_ONLY, 'a return is cancelled on the main computer — this window has no business database');
@@ -286,12 +320,25 @@ export function cancelReturnInHouse(
   const disposition = (view.productDisposition || 'IN_STOCK') as ProductDisposition;
   const wasApproved = status === 'APPROVED' || status === 'REFUNDED' || status === 'CLOSED';
   const vatCorrected = Number(r.vat_corrected ?? 0);
-  const lines: RueckLine[] = query('SELECT product_id, quantity, invoice_line_id FROM sales_return_lines WHERE return_id = ?', [returnId])
+  const lines: RueckLine[] = query(
+    `SELECT product_id, quantity, invoice_line_id, keep_snapshot_at, keep_prev_source_type, keep_prev_purchase_price,
+            keep_prev_stock_status, keep_prev_consignments, keep_lot_id
+       FROM sales_return_lines WHERE return_id = ? ORDER BY rowid`, [returnId])
     .map((l) => ({
       productId: (l.product_id as string | null) || undefined,
       quantity: Number(l.quantity ?? 1) || 1,
       invoiceLineId: (l.invoice_line_id as string | null) || undefined,
-    }));
+      keep: l.keep_snapshot_at ? {
+        at: String(l.keep_snapshot_at),
+        sourceType: (l.keep_prev_source_type as string | null) ?? null,
+        purchasePrice: l.keep_prev_purchase_price === null || l.keep_prev_purchase_price === undefined ? null : Number(l.keep_prev_purchase_price),
+        stockStatus: (l.keep_prev_stock_status as string | null) ?? null,
+        consignments: JSON.parse(String(l.keep_prev_consignments ?? '[]')) as Array<{ id: string; status: string }>,
+        lotId: (l.keep_lot_id as string | null) ?? null,
+      } : null,
+    }))
+    // Rückwärts: hat dieselbe Retoure einen Artikel zweimal, stellt die erste Zeile den ältesten Stand her.
+    .reverse();
   // Sperre 3 — die zurückgenommene Ware wurde schon wieder verkauft: das Los deckt die Menge
   // nicht mehr. Der Re-Konsum unten würde still bei 0 kappen (ein Stück auf zwei Rechnungen,
   // COGS doppelt). Erst die spätere Rechnung klären, dann stornieren.
@@ -319,6 +366,39 @@ export function cancelReturnInHouse(
       if (stand && Number(stand.qty_remaining ?? 0) < Math.max(1, line.quantity || 1) - 0.0005) {
         throw new ReturnCancelRejected(RETURN_STOCK_RESOLD,
           'Cannot cancel this return: the returned item has already been sold again. Resolve the later sale first.');
+      }
+    }
+  }
+  // Sperre 4 — „Keep as own": nur mit vollständigem Snapshot exakt umkehrbar, und nur, solange nichts
+  // davon seither benutzt wurde. Ohne Snapshot (Altbestand) wird nichts geraten.
+  if (disposition === 'KEEP_AS_OWN') {
+    for (const line of lines) {
+      if (!line.productId) continue;
+      if (!line.keep) {
+        if (opts.legacyKeepRestoredByCaller) continue;
+        throw new ReturnCancelRejected(RETURN_KEEP_NOT_RESTORABLE,
+          'This keep-as-own return was recorded before its previous state was saved — it cannot be undone automatically. Use "Cancel Sale" on the consignment instead.');
+      }
+      const k = line.keep;
+      if (k.lotId) {
+        const lot = query('SELECT status, qty_total, qty_remaining FROM stock_lots WHERE id = ?', [k.lotId])[0];
+        if (!lot || String(lot.status) !== 'ACTIVE' || Math.abs(Number(lot.qty_remaining) - Number(lot.qty_total)) > 0.0005) {
+          throw new ReturnCancelRejected(RETURN_STOCK_RESOLD,
+            'Cannot cancel this return: the kept item has already been sold or used again. Resolve the later sale first.');
+        }
+      } else {
+        const st = String(query('SELECT stock_status FROM products WHERE id = ?', [line.productId])[0]?.stock_status ?? '');
+        if (st !== 'in_stock') {
+          throw new ReturnCancelRejected(RETURN_STOCK_RESOLD,
+            'Cannot cancel this return: the kept item is no longer in stock. Resolve the later sale first.');
+        }
+      }
+      for (const c of k.consignments) {
+        const jetzt = String(query('SELECT status FROM consignments WHERE id = ?', [c.id])[0]?.status ?? '');
+        if (!KEEP_CONSIGNMENT_STATUSES.includes(jetzt)) {
+          throw new ReturnCancelRejected(RETURN_KEEP_CONSIGNMENT_CHANGED,
+            `Cannot cancel this return: its consignment changed since (now "${jetzt || 'missing'}"). Nothing was changed.`);
+        }
       }
     }
   }
