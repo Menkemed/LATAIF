@@ -452,6 +452,8 @@ const invariant = (db: Db, tag: string): void => {
   product(db, 'pH', 999);                            // Einkaufspreis des Artikels absichtlich ≠ den Losen
   const l1 = lotOf(db, kauf('pH', 2, 100, true));    // Los 1: 2 Stück, mit Vorsteuer (Los netto)
   const l2 = lotOf(db, kauf('pH', 1, 130, false));   // Los 2: 1 Stück
+  // Eindeutige Reihenfolge: Los 2 einen Tag später (bei gleichem Tag entscheidet sonst die Los-Id).
+  db.run("UPDATE stock_lots SET acquired_at = date(acquired_at, '+1 day') WHERE id = ?", [l2]);
   const pp = n(db, 'SELECT purchase_price FROM products WHERE id = ?', ['pH']);
   const karte = () => hoverCardCost(pp, productLotsFor(ctx, 'pH').fifo);
   const c1 = karte();
