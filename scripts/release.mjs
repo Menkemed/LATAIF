@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Plan §Auto-Update — Release-Pipeline.
-// Schritte: Version bumpen (package.json + tauri.conf.json + Cargo.toml) → Tauri-Build →
-// Signatur-Check → latest.json generieren → an GitHub Releases hochladen.
+// Schritte: Rust-Tests (`cargo test --lib`, Gate) → Version bumpen (package.json + tauri.conf.json +
+// Cargo.toml) → Tauri-Build → Signatur-Check → latest.json generieren → an GitHub Releases hochladen.
 //
 // Voraussetzungen (einmalig):
 //   1. Signing-Key generiert: `npx tauri signer generate -w "$env:USERPROFILE/.tauri/lataif.key"`
@@ -73,6 +73,13 @@ async function main() {
   }
   const branch = shCapture('git rev-parse --abbrev-ref HEAD');
   log(`Branch: ${branch} (clean)`);
+
+  // 0b. Rust-Tests als Gate — VOR jeder Änderung. `cargo check` allein reicht nicht: bis v0.8.80
+  //     standen drei Rust-Tests unbemerkt auf Rot (seit v0.8.60, v0.8.76 und Bulk Metal), weil kein
+  //     Release sie lief. Schlägt ein Test fehl, wirft execSync → Abbruch, nichts gebumpt, nichts gebaut.
+  log('Rust-Tests laufen (cargo test --lib, ca. 5 Min)…');
+  sh('cargo test --lib', { cwd: join(ROOT, 'src-tauri') });
+  log('Rust-Tests grün.');
 
   const pkg = readJson(PKG);
   const tauriConf = readJson(TAURI_CONF);

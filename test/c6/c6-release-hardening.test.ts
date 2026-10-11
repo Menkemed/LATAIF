@@ -231,6 +231,10 @@ const read = (p: string) => readFileSync(join(repo, p), 'utf8');
   // Der Freigabeweg lädt genau die beiden Dateien hoch, die er baut.
   const rel = read('scripts/release.mjs');
   ok(/nsis/.test(rel) && !/\.msi/.test(rel), 'RELEASE das Freigabeskript kennt nur den NSIS-Installer');
+  // Rust-Tests sind Gate: sie laufen VOR dem Versionssprung und vor dem Build (bis v0.8.80 standen drei unbemerkt auf Rot).
+  const gate = rel.indexOf("sh('cargo test --lib'");
+  ok(gate > 0 && gate < rel.indexOf('pkg.version = newVersion') && gate < rel.indexOf("sh('npx tauri build')"),
+    'RELEASE cargo test --lib läuft vor Versionssprung und Build');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c6 release hardening: ${PASS} passed, ${fails.length} failed`);
