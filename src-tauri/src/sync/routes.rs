@@ -2122,7 +2122,8 @@ mod legacy_push_tests {
         assert_eq!(
             forbidden.len(),
             // MOBILE-I1 — +1: v0019 `stock_checks`, local-only like the rest of this list.
-            34,
+            // v0.8.76 — +1: v0020 `mobile_upload_retry`, the inbox's retry state (internal like the claim).
+            35,
             "control-plane + internal forbidden tables (incl. sync_change_quarantine, the v0010 CAS \
              tables, the v0011 operation-protocol changelog/audit sinks, the v0012/v0013 mobile-upload \
              inbox + claim tables, the v0014 mobile_runtime_scope binding, the v0015 \
