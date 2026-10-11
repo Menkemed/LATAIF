@@ -95,6 +95,12 @@ const FIRST_RUN_SAFE: &[&str] = &[
     // rechnet damit vor dem Ablegen am Primary (`stageRecordDataUrls` → `normalizeRecordImages`).
     // Wurzelgebunden gemacht, koennte PC2 kein Belegbild mehr senden. Gepinnt unten.
     "media_normalize_record_image",
+    // POST-PARITY R7C (078428f) — der Ordner der offenen Speichervorgaenge von PC2. Keine Eingabe, kein
+    // Zustand, keine Datei: nur der feste Pfad `<AppLocalData>/pending-saves` als Text (Tauris eigener
+    // App-Ordner, den der Renderer vorher selbst bildete). ABSICHTLICH ohne Wurzel erreichbar: PC2
+    // (Client-Modus, Erstlauf-Zweig) hat keinen `AppHandleState` — wurzelgebunden koennte PC2 keinen
+    // Speichervorgang vor dem Versand sichern (PENDING_STORE_FAILED). Gepinnt unten.
+    "get_pending_saves_root",
 ];
 
 #[test]
@@ -191,6 +197,23 @@ fn the_record_image_normalizer_stays_pure_bytes_in_bytes_out() {
         for forbidden in ["std::fs", "File::", "OpenOptions", "rusqlite", "PathBuf", "Path::"] {
             assert!(!src.contains(forbidden), "{name} must stay pure (found {forbidden})");
         }
+    }
+}
+
+#[test]
+fn the_pending_saves_root_only_names_the_fixed_app_folder() {
+    // Die Einordnung oben gilt nur, solange der Befehl nichts entgegennimmt und nichts anfasst. Nimmt er
+    // eine Eingabe (z. B. einen Pfad), braucht er einen Zustand oder beruehrt er das Dateisystem, faellt
+    // dieser Test um — dann gehoert er an die Wurzel oder braucht eine eigene Begruendung.
+    let p = params_of("get_pending_saves_root").expect("command exists");
+    assert_eq!(p, "app: tauri::AppHandle", "no input but the app handle: {p}");
+    let at = SRC.find("fn get_pending_saves_root(").unwrap();
+    let body = &SRC[at..];
+    let body = &body[..body.find("\n}").unwrap()];
+    assert!(body.contains(".app_local_data_dir()"), "Tauri's own per-app folder");
+    assert!(body.contains(".join(\"pending-saves\")"), "with the fixed sub-folder name");
+    for forbidden in ["State<", "try_state", "data_root_of(", "std::fs", "create_dir", "File::", "rusqlite", "open_config_db", "remove_"] {
+        assert!(!body.contains(forbidden), "the command must not use {forbidden}");
     }
 }
 
