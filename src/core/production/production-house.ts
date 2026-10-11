@@ -35,7 +35,8 @@ import { getDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackChange } from '@/core/sync/sync-service';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
-import { getActiveLots, consumeLot, syncProductQuantity, trackLotRow, trackProductRow, getStockAggregates } from '@/core/lots/lot-queries';
+import { getActiveLots, consumeLot, restoreLot, syncProductQuantity, trackLotRow, trackProductRow, getStockAggregates } from '@/core/lots/lot-queries';
+import { hasLedgerEntries, hasReversalFor, reverseSource } from '@/core/ledger/posting';
 import { inventoryCostBasis } from '@/core/lots/lot-cost';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { useProductStore } from '@/stores/productStore';
@@ -500,6 +501,133 @@ export function completeProductionInHouse(input: ProductionCompleteInput, ctx: P
     laborCost: bhd(laborFils), overheadCost: bhd(overheadFils), totalCost,
     expenseId: expense?.expenseId ?? null, expenseNumber: expense?.expenseNumber ?? null,
   };
+}
+
+// ── Löschen: atomar und streng ────────────────────────────────────────────
+
+export interface ProductionDeleted {
+  recordId: string;
+  recordNumber: string;
+  restoredInputs: number;
+  removedOutputs: number;
+  reversedExpenses: number;
+}
+
+/**
+ * „Delete" einer Fertigung — EIN Vorgang in der Transaktion des Aufrufers (`runOnPrimary`): erst alle
+ * Prüfungen, dann die Eingänge exakt zurück (aufgezeichnete Lose und Mengen, Status davor), die Ausgänge
+ * samt ihrem Fertigungs-Los entfernt, die Ausgabe für Lohn/Gemeinkosten strikt storniert, Zeilen und
+ * Vorgang gelöscht, das Protokoll geschrieben. Jeder Fehler wirft — der Aufrufer rollt ALLES zurück; nichts
+ * wird verschluckt (vorher: Stornos in `safePost`, kein Rahmen, ein halber Zustand möglich).
+ */
+export function deleteProductionInHouse(recordId: string, ctx: ProductionCtx): ProductionDeleted {
+  assertProductionHere();
+  if (!ctx.branchId) throw new ProductionRejected('PRODUCTION_NO_SESSION', 'no branch for this production');
+  const rec = query('SELECT * FROM production_records WHERE id = ? AND branch_id = ?', [recordId, ctx.branchId])[0];
+  // Ein zweiter Aufruf (Doppelklick, Wiederholung) findet nichts mehr — keine zweite Wirkung.
+  if (!rec) throw new ProductionRejected('PRODUCTION_NOT_FOUND', 'no such production record in this branch');
+  const recordNumber = String(rec.record_number ?? '');
+  const inputs = query('SELECT id, product_id, lot_consumption FROM production_inputs WHERE record_id = ? ORDER BY rowid', [recordId]);
+  const outputs = query('SELECT id, product_id FROM production_outputs WHERE record_id = ? ORDER BY rowid', [recordId]);
+
+  // ── Prüfen, bevor irgendetwas geschrieben wird ──
+  // Jeder Eingang braucht seinen Verbrauchsnachweis (Altstand vor dem Vertrag: welche Lose geleert wurden,
+  // ist nicht bekannt — nicht raten).
+  const consumption: Array<{ productId: string; c: ProductionInputConsumption }> = [];
+  for (const r of inputs) {
+    const raw = r.lot_consumption;
+    if (raw === null || raw === undefined || raw === '') {
+      throw new ProductionRejected('PRODUCTION_LEGACY_NO_CONSUMPTION',
+        'this production was recorded before exact stock tracking — it cannot be deleted automatically (the consumed lots are not known)');
+    }
+    consumption.push({ productId: String(r.product_id), c: JSON.parse(String(raw)) as ProductionInputConsumption });
+  }
+  // Jedes Los muss die aufgezeichnete Menge exakt zurücknehmen können (kein stilles Kappen, kein storniertes Los).
+  const back = new Map<string, number>();
+  for (const { c } of consumption) for (const l of c.lots) back.set(l.lotId, (back.get(l.lotId) ?? 0) + l.qty);
+  for (const [lotId, qty] of back) {
+    const lot = query('SELECT status, qty_total, qty_remaining FROM stock_lots WHERE id = ?', [lotId])[0];
+    if (!lot || String(lot.status) === 'CANCELLED' || Number(lot.qty_remaining) + qty > Number(lot.qty_total) + 0.0005) {
+      throw new ProductionRejected('PRODUCTION_DELETE_STOCK_CHANGED',
+        `the consumed stock lot ${lotId} cannot take back ${qty} piece(s) any more — the stock changed since this production; nothing was changed`);
+    }
+  }
+  // Ein Ausgang darf nicht still verschwinden: am Lager, sein Fertigungs-Los unberührt, und kein Beleg zeigt
+  // auf ihn (auch nicht nach Verkauf + Retoure wieder „in_stock").
+  for (const o of outputs) {
+    const pid = String(o.product_id ?? '');
+    if (!pid) continue;
+    const st = String(query('SELECT stock_status FROM products WHERE id = ?', [pid])[0]?.stock_status ?? '');
+    if (st && st !== 'in_stock') {
+      throw new ProductionRejected('PRODUCTION_OUTPUT_IN_USE',
+        `production ${recordNumber} cannot be deleted: an output item is already '${st}' (sold or used)`);
+    }
+    const used = query(`SELECT 1 FROM stock_lots WHERE product_id = ? AND purchase_id IS NULL
+                          AND (status != 'ACTIVE' OR ABS(qty_remaining - qty_total) > 0.0005) LIMIT 1`, [pid]).length > 0
+      || query('SELECT 1 FROM invoice_lines WHERE product_id = ? LIMIT 1', [pid]).length > 0
+      || query('SELECT 1 FROM sales_return_lines WHERE product_id = ? LIMIT 1', [pid]).length > 0;
+    if (used) {
+      throw new ProductionRejected('PRODUCTION_OUTPUT_IN_USE',
+        `production ${recordNumber} cannot be deleted: an output item already appears on an invoice or return`);
+    }
+  }
+
+  // ── Schreiben — jeder Schritt strikt; ein Fehler rollt den ganzen Vorgang zurück ──
+  const db = getDatabase();
+  const now = new Date().toISOString();
+  // 1. Eingänge exakt zurück.
+  for (const { productId, c } of consumption) {
+    for (const l of c.lots) {
+      if (!restoreLot(l.lotId, l.qty)) {
+        throw new ProductionRejected('PRODUCTION_DELETE_STOCK_CHANGED', `stock lot ${l.lotId} could not be restored`);
+      }
+    }
+    if (c.qty > 0) db.run('UPDATE products SET quantity = COALESCE(quantity, 0) + ? WHERE id = ?', [c.qty, productId]);
+    db.run('UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ?', [c.prevStatus || 'in_stock', now, productId]);
+    trackProductRow(productId);
+    syncProductQuantity(productId);
+  }
+  // 2. Ausgänge samt ihrem Fertigungs-Los (purchase_id NULL) entfernen.
+  for (const o of outputs) {
+    const pid = String(o.product_id ?? '');
+    if (!pid) continue;
+    const lotIds = query('SELECT id FROM stock_lots WHERE product_id = ? AND purchase_id IS NULL', [pid]).map((r) => String(r.id));
+    db.run('DELETE FROM stock_lots WHERE product_id = ? AND purchase_id IS NULL', [pid]);
+    for (const lid of lotIds) trackLotRow(lid, 'delete');
+    db.run('DELETE FROM products WHERE id = ?', [pid]);
+    trackChange('products', pid, 'delete', {});
+  }
+  // 3. Ausgabe für Lohn/Gemeinkosten (aus dem Abschluss): Buchungen strikt storniert, dann die Zeilen.
+  const expenses = query(`SELECT id FROM expenses WHERE related_module = 'production' AND related_entity_id = ?`, [recordId]).map((e) => String(e.id));
+  for (const expId of expenses) {
+    for (const p of query('SELECT id FROM expense_payments WHERE expense_id = ?', [expId])) {
+      const payId = String(p.id);
+      if (hasLedgerEntries('EXPENSE_PAYMENT', payId) && !hasReversalFor('EXPENSE_PAYMENT', payId)) reverseSource('EXPENSE_PAYMENT', payId, now);
+      db.run('DELETE FROM expense_payments WHERE id = ?', [payId]);
+      trackChange('expense_payments', payId, 'delete', {});
+    }
+    if (hasLedgerEntries('EXPENSE', expId) && !hasReversalFor('EXPENSE', expId)) reverseSource('EXPENSE', expId, now);
+    db.run('DELETE FROM expenses WHERE id = ?', [expId]);
+    trackChange('expenses', expId, 'delete', {});
+  }
+  // 4. Zeilen und Vorgang.
+  db.run('DELETE FROM production_inputs WHERE record_id = ?', [recordId]);
+  db.run('DELETE FROM production_outputs WHERE record_id = ?', [recordId]);
+  db.run('DELETE FROM production_records WHERE id = ? AND branch_id = ?', [recordId, ctx.branchId]);
+  for (const r of inputs) trackChange('production_inputs', String(r.id), 'delete', {});
+  for (const o of outputs) trackChange('production_outputs', String(o.id), 'delete', {});
+  trackChange('production_records', recordId, 'delete', {});
+  // 5. Protokoll — strikt, in derselben Transaktion.
+  logAuditOrThrow({
+    module: 'Production', entityType: 'production_records', entityId: recordId, action: 'DELETE',
+    oldValue: {
+      recordNumber, status: String(rec.status ?? ''), totalValue: Number(rec.total_value ?? 0),
+      inputs: consumption.map(({ productId, c }) => ({ productId, lots: c.lots, qty: c.qty, prevStatus: c.prevStatus })),
+      outputs: outputs.map((o) => String(o.product_id ?? '')), expenses,
+    },
+    actor: { userId: ctx.userId, branchId: ctx.branchId },
+  });
+  return { recordId, recordNumber, restoredInputs: consumption.length, removedOutputs: outputs.length, reversedExpenses: expenses.length };
 }
 
 // ── PC2: der Rumpf ────────────────────────────────────────────────────────

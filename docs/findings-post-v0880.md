@@ -17,7 +17,9 @@ Keine Lösung festgelegt, kein Gegenkonto erfunden.
 
 **Zu entscheiden (Buchhaltung):** a) Bestand ohne Los beim Übergang in ein Los aktivieren (Soll INVENTORY an ein festzulegendes Gegenkonto), b) Ausgangswert ohne den Anteil ohne Los, c) allgemeine Eröffnungsbuchung für Bestand ohne Los. Bis dahin bleibt das Verhalten wie beim Direktverkauf.
 
-## F2 — Produktion löschen ist nicht atomar (Datenintegrität, mittel bis hoch)
+## F2 — Produktion löschen ist nicht atomar (Datenintegrität, mittel bis hoch) — BEHOBEN
+
+> Behoben: `deleteProductionInHouse` über `runOnPrimary`. Eine Transaktion, strikte Stornos, exakte Los-Rückgabe mit Prüfung vorher, Ausgang auf Beleg gesperrt, Protokoll. Störungstests stehen in `test/r7a/pp2-pp10-production.test.ts` (F2).
 
 `useProductionStore.deleteRecord` (`src/stores/productionStore.ts`) läuft ohne Transaktion und ohne `runOnPrimary`:
 

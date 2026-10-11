@@ -11,32 +11,21 @@
 
 import { create } from 'zustand';
 import type { ProductionRecord, ProductionInput, ProductionOutput } from '@/core/models/types';
-import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
-import { trackDelete } from '@/core/sync/track';
-import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — Ein-/Ausgangszeilen
-import { completeProductionInHouse, type ProductionCompleteInput, type ProductionCompleted, type ProductionInputConsumption } from '@/core/production/production-house';
-import { reverseSource, hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
-import { restoreLot, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+import { completeProductionInHouse, type ProductionCompleteInput, type ProductionCompleted } from '@/core/production/production-house';
 // CENTRAL-UI-PARITY R6F — das Anlegen ist EINE Hausfolge für Primary und PC2 (production-house),
 // am Primary exklusiv in einer Transaktion (`runOnPrimary`), danach durabel.
 import { runOnPrimary } from '@/core/data/primary-action';
 import { useProductStore } from '@/stores/productStore';
 import {
-  assertProductionHere, createProductionInHouse, localProductionCtx,
-  type ProductionCreateInput, type ProductionCreated,
+  assertProductionHere, createProductionInHouse, deleteProductionInHouse, localProductionCtx,
+  type ProductionCreateInput, type ProductionCreated, type ProductionDeleted,
 } from '@/core/production/production-house';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
-
-function safePost(label: string, fn: () => void): void {
-  try { fn(); } catch (err) {
-    console.error(`[ledger] ${label} failed:`, err);
-  }
-}
 
 interface ProductionStore {
   records: ProductionRecord[];
@@ -50,7 +39,8 @@ interface ProductionStore {
   createRecord: (input: ProductionCreateInput) => Promise<ProductionRecord>;
   // Plan §8 #7 — der Abschluss (Kosten finalisieren + buchen) ist seit R7A die Hausfolge
   // `completeProductionInHouse` (am Primary: `completeProductionOnPrimary`, fern: `production.complete`).
-  deleteRecord: (id: string) => void;
+  // Löschen: die Hausfolge `deleteProductionInHouse` über `runOnPrimary` (atomar, nur am Primary).
+  deleteRecord: (id: string) => Promise<void>;
 }
 
 function rowToRecord(row: Record<string, unknown>): ProductionRecord {
@@ -118,100 +108,11 @@ export const useProductionStore = create<ProductionStore>((set, get) => ({
     return get().getRecord(made.recordId)!;
   },
 
-  deleteRecord: (id) => {
-    const db = getDatabase();
-    const now = new Date().toISOString();
-    // STOCK-LOT-INTEGRITY — VOR jedem Schreiben: jeder Eingang braucht seinen Verbrauchsnachweis.
-    // Eine Produktion von vor diesem Vertrag hat keinen; welche Lose sie geleert hat, ist nicht
-    // bekannt. Statt zu raten (früher: ALLE Lose des Artikels aufgefüllt) wird das Löschen abgewiesen.
-    const consumption = new Map<string, ProductionInputConsumption>();
-    for (const r of query('SELECT product_id, lot_consumption FROM production_inputs WHERE record_id = ?', [id])) {
-      const raw = r.lot_consumption;
-      if (raw === null || raw === undefined || raw === '') {
-        throw new Error('PRODUCTION_LEGACY_NO_CONSUMPTION: this production was recorded before exact stock tracking — it cannot be deleted automatically (the consumed lots are not known).');
-      }
-      consumption.set(String(r.product_id), JSON.parse(String(raw)) as ProductionInputConsumption);
-    }
-    // Nicht geladen heisst nicht „gibt es nicht": einmal frisch lesen, sonst ginge der Rueckweg verloren.
-    const rec = get().getRecord(id) ?? (get().loadRecords(), get().getRecord(id));
-    // Kein Record geladen → reiner Row-Delete (Alt-Verhalten, nichts zu spiegeln).
-    if (!rec) {
-      db.run('DELETE FROM production_records WHERE id = ?', [id]);
-      saveDatabase();
-      trackDelete('production_records', id);
-      get().loadRecords();
-      return;
-    }
-
-    // F-PRD-04 — Block-Guard: ein Output, der nicht mehr in_stock ist (verkauft/
-    // verbraucht/an Agent), darf nicht still verschwinden. "Verbrauchte blockieren".
-    for (const o of rec.outputs) {
-      if (!o.productId) continue;
-      const st = (query(`SELECT stock_status FROM products WHERE id = ?`, [o.productId])[0]?.stock_status as string) || '';
-      if (st && st !== 'in_stock') {
-        throw new Error(
-          `Production ${rec.recordNumber} kann nicht geloescht werden: Output-Produkt ist bereits '${st}' (verkauft/verbraucht).`
-        );
-      }
-    }
-
-    // 1. Inputs zurueck — STOCK-LOT-INTEGRITY: GENAU der aufgezeichnete Verbrauch (diese Lose mit
-    //    dieser Menge, ohne Los die genommene Menge) und der Status davor. Nie „alle Lose".
-    for (const inp of rec.inputs) {
-      if (!inp.productId) continue;
-      const c = consumption.get(inp.productId);
-      if (!c) continue;
-      for (const l of c.lots) restoreLot(l.lotId, l.qty);
-      if (c.qty > 0) db.run('UPDATE products SET quantity = COALESCE(quantity, 0) + ? WHERE id = ?', [c.qty, inp.productId]);
-      db.run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ?`, [c.prevStatus || 'in_stock', now, inp.productId]);
-      trackProductRow(inp.productId);   // LAN-Sync Phase 1b
-      syncProductQuantity(inp.productId);
-    }
-
-    // 2. Outputs entfernen: Produkt + dessen Production-Lot (purchase_id NULL) loeschen.
-    for (const o of rec.outputs) {
-      if (!o.productId) continue;
-      // LAN-Sync Phase 1a: Production-Output-Lots (purchase_id IS NULL) vor dem DELETE
-      // erfassen und als delete an Geraet B tracken (kein zurueckgelassener Lot auf B).
-      const delLotIds = query(`SELECT id FROM stock_lots WHERE product_id = ? AND purchase_id IS NULL`, [o.productId]).map(r => r.id as string);
-      db.run(`DELETE FROM stock_lots WHERE product_id = ? AND purchase_id IS NULL`, [o.productId]);
-      for (const lid of delLotIds) trackLotRow(lid, 'delete');
-      db.run(`DELETE FROM products WHERE id = ?`, [o.productId]);
-      trackDelete('products', o.productId);
-    }
-
-    // 3. Auto-Expense (Labor/Overhead) reversen, falls completeRecord eine erzeugt hat.
-    const expRows = query(`SELECT id FROM expenses WHERE related_module = 'production' AND related_entity_id = ?`, [id]);
-    for (const e of expRows) {
-      const expId = e.id as string;
-      for (const p of query(`SELECT id FROM expense_payments WHERE expense_id = ?`, [expId])) {
-        const payId = p.id as string;
-        if (hasLedgerEntries('EXPENSE_PAYMENT', payId) && !hasReversalFor('EXPENSE_PAYMENT', payId)) {
-          safePost(`reverse EXPENSE_PAYMENT(${payId})`, () => reverseSource('EXPENSE_PAYMENT', payId, now));
-        }
-        db.run(`DELETE FROM expense_payments WHERE id = ?`, [payId]);
-        trackDelete('expense_payments', payId);
-      }
-      if (hasLedgerEntries('EXPENSE', expId) && !hasReversalFor('EXPENSE', expId)) {
-        safePost(`reverse EXPENSE(${expId})`, () => reverseSource('EXPENSE', expId, now));
-      }
-      db.run(`DELETE FROM expenses WHERE id = ?`, [expId]);
-      trackDelete('expenses', expId);
-    }
-
-    // 4. Inputs/Outputs-Zeilen + Record loeschen.
-    // R7A (PP-10) — die Kindzeilen reisen mit (vorher still nur lokal geloescht; ohne Fremdschluessel-
-    // Erzwingung blieben sie auf einem anderen Datenbank-Rechner als Waisen stehen).
-    const inRowIds = query(`SELECT id FROM production_inputs WHERE record_id = ?`, [id]).map(r => r.id as string);
-    const outRowIds = query(`SELECT id FROM production_outputs WHERE record_id = ?`, [id]).map(r => r.id as string);
-    db.run(`DELETE FROM production_inputs WHERE record_id = ?`, [id]);
-    db.run(`DELETE FROM production_outputs WHERE record_id = ?`, [id]);
-    db.run('DELETE FROM production_records WHERE id = ?', [id]);
-    saveDatabase();
-    for (const rid of inRowIds) trackChange('production_inputs', rid, 'delete', {});
-    for (const rid of outRowIds) trackChange('production_outputs', rid, 'delete', {});
-    trackDelete('production_records', id);
-    get().loadRecords();
+  // PRODUCTION-DELETE-ATOMICITY — EIN Vorgang am Primary (`deleteProductionInHouse`): exklusiv, in einer
+  // Transaktion, jeder Fehler rollt alles zurück, danach durabel gespeichert. Vorher lief das Löschen hier
+  // ohne Rahmen, und die Buchungs-Stornos verschluckten Fehler (safePost) — ein halber Zustand war möglich.
+  deleteRecord: async (id) => {
+    await deleteProductionOnPrimary(id);
   },
 }));
 
@@ -250,6 +151,13 @@ export async function createProductionOnPrimary(input: ProductionCreateInput): P
  * `production.complete`, exklusiv in EINER Transaktion, erst danach durabel. Ohne Datenbank verweigert
  * der Riegel, BEVOR irgendetwas eine Datenbank anfasst.
  */
+/** PRODUCTION-DELETE-ATOMICITY — „Delete" am Primary: die Hausfolge exklusiv in EINER Transaktion, danach durabel. */
+export async function deleteProductionOnPrimary(recordId: string): Promise<ProductionDeleted> {
+  assertProductionHere();
+  const ctx = localProductionCtx();
+  return runOnPrimary(() => deleteProductionInHouse(recordId, ctx), nachFertigung);
+}
+
 export async function completeProductionOnPrimary(input: ProductionCompleteInput): Promise<ProductionCompleted> {
   assertProductionHere();
   const ctx = localProductionCtx();

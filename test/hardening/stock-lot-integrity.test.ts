@@ -666,7 +666,8 @@ const tr = (db: Db, id: string, col: string): unknown => one(db, `SELECT ${col} 
   ok(lotRem(db, 'lot-pIn-old') === 0, '9 …fremdes altes Los unberührt 0');
 
   useProductionStore.getState().loadRecords();
-  const md = meldung(() => imHaus(() => useProductionStore.getState().deleteRecord(made.recordId)));
+  // PRODUCTION-DELETE-ATOMICITY — Löschen läuft jetzt über runOnPrimary (eigene Transaktion, asynchron).
+  const md = await useProductionStore.getState().deleteRecord(made.recordId).then(() => '', (e: { code?: string; message?: string }) => `${e?.code ?? ''}|${e?.message ?? String(e)}`);
   reload();
   ok(md === '' && n(db, 'SELECT COUNT(*) FROM production_records WHERE id = ?', [made.recordId]) === 0, `9 Löschen läuft (${md})`);
   ok(lotRem(db, 'lot-pIn') === 1 && qty(db, 'pIn') === 1 && st(db, 'pIn') === 'in_stock',
@@ -682,7 +683,7 @@ const tr = (db: Db, id: string, col: string): unknown => one(db, `SELECT ${col} 
   db.run('UPDATE production_inputs SET lot_consumption = NULL WHERE record_id = ?', [made2.recordId]);
   useProductionStore.getState().loadRecords();
   const vor = zustand(db);
-  const ml = meldung(() => imHaus(() => useProductionStore.getState().deleteRecord(made2.recordId)));
+  const ml = await useProductionStore.getState().deleteRecord(made2.recordId).then(() => '', (e: { code?: string; message?: string }) => `${e?.code ?? ''}|${e?.message ?? String(e)}`);
   ok(/PRODUCTION_LEGACY_NO_CONSUMPTION/.test(ml) && zustand(db) === vor, `9 Altproduktion (NULL): Löschen abgelehnt, nichts geändert (${ml.slice(0, 60)})`);
   ok(lotRem(db, 'lot-pIn') === 0 && lotRem(db, 'lot-pIn-old') === 0, '9 …kein Los aufgefüllt');
 }

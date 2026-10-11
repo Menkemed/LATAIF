@@ -258,9 +258,10 @@ export function ProductionDetail() {
         </p>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
-          <Button variant="danger" onClick={() => {
+          <Button variant="danger" onClick={async () => {
             if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
-            try { if (record) deleteRecord(record.id); } catch (e) { setConfirmDelete(false); alert(e instanceof Error ? e.message : String(e)); return; }
+            // Atomar am Primary: scheitert ein Schritt, bleibt alles, wie es war — und die Meldung kommt an.
+            try { if (record) await deleteRecord(record.id); } catch (e) { setConfirmDelete(false); alert(e instanceof Error ? e.message : String(e)); return; }
             navigate('/production');
           }}>Delete</Button>
         </div>

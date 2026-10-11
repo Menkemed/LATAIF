@@ -421,6 +421,8 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
     'src/stores/documentStore.ts:getContent': 'liest den Inhalt genau eines Belegs',
     // R6F — ein Anschluss: die Hausfolge läuft über `createProductionOnPrimary` → `runOnPrimary` (Schreibspur).
     'src/stores/productionStore.ts:createRecord': 'Anschluss an createProductionOnPrimary (runOnPrimary)',
+    // PRODUCTION-DELETE-ATOMICITY — derselbe Anschluss: `deleteProductionOnPrimary` → `runOnPrimary` (nur am Primary).
+    'src/stores/productionStore.ts:deleteRecord': 'Anschluss an deleteProductionOnPrimary (runOnPrimary)',
   };
   const unbekannt = asyncActions.filter((a) => !(a.id in ERLAUBT)).map((a) => a.id);
   ok(unbekannt.length === 0,

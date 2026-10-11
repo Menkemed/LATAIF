@@ -443,7 +443,7 @@ for (const [weg, muster] of [['P', /UPDATE production_records SET status = 'COMP
 {
   nimm(dbA);
   useProductionStore.getState().loadRecords();
-  useProductionStore.getState().deleteRecord(recId(dbA));
+  await useProductionStore.getState().deleteRecord(recId(dbA));
   ok(zahl(dbA, 'production_records') === 0 && zahl(dbA, 'expenses') === 0 && zahl(dbA, 'expense_payments') === 0
     && balanced(dbA) && saldo(dbA, 'CASH') === 0 && saldo(dbA, 'EXPENSES_OPERATING') === 0,
   `DELETE der Abschluss hinterlässt keine verwaiste Ausgabe: Löschen nimmt sie samt Zahlung zurück, Kasse 0 (${saldo(dbA, 'CASH')})`);
@@ -509,7 +509,7 @@ marker('POST_PARITY_R7A_PP2_PRODUCTION_COMPLETION_FIXED');
   const bis = Number(strom[strom.length - 1]?.id ?? 0);
   nimm(dbS);
   useProductionStore.getState().loadRecords();
-  useProductionStore.getState().deleteRecord(recId(dbS));
+  await useProductionStore.getState().deleteRecord(recId(dbS));
   const neu = rows(dbS, 'SELECT id, table_name, record_id, action, data FROM sync_changelog WHERE id > ? ORDER BY id', [bis]);
   ok(neu.filter((c) => c.action === 'delete' && String(c.table_name).startsWith('production_')).length === 5,
     `WRITER Löschen führt Beleg + 2 Eingänge + 2 Ausgänge nach (${neu.map((c) => `${c.table_name}:${c.action}`).join(', ')})`);
@@ -577,6 +577,100 @@ marker('POST_PARITY_R7A_PP10_PRODUCTION_SYNC_FIXED');
     `MARGE Berichte 450 − Betriebsausgaben 200 = Hauptbuch ${gewinnBuch} = Erlös 700 − total_cost 450 — Arbeit/Gemeinkosten genau einmal`);
 }
 marker('POST_PARITY_R7A_PRODUCTION_ACCOUNTING_CONTRACT_PINNED');
+
+// ══ F2 — Produktion löschen: atomar und streng ═════════════════════════════════
+{
+  const { deleteProductionOnPrimary } = await import('../../src/stores/productionStore.ts');
+  /** Der ganze Stand, den ein Löschen berühren könnte — ohne Ausnahme. */
+  const stand = (db: Db): string => S({
+    rec: all(db, 'SELECT * FROM production_records ORDER BY id'), inp: all(db, 'SELECT * FROM production_inputs ORDER BY id'),
+    out: all(db, 'SELECT * FROM production_outputs ORDER BY id'),
+    prod: all(db, 'SELECT id, stock_status, quantity, purchase_price, source_type FROM products ORDER BY id'),
+    lots: all(db, 'SELECT id, product_id, qty_total, qty_remaining, status, unit_cost FROM stock_lots ORDER BY id'),
+    exp: all(db, 'SELECT * FROM expenses ORDER BY id'), pay: all(db, 'SELECT * FROM expense_payments ORDER BY id'),
+    led: all(db, "SELECT COUNT(*), ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 3) FROM ledger_entries"),
+    audit: zahl(db, 'audit_log'), sync: zahl(db, 'sync_changelog'),
+  });
+  const loeschen = async (db: Db, id: string): Promise<string> => {
+    nimm(db);
+    return deleteProductionOnPrimary(id).then(() => '', (e: { code?: string; message?: string }) => `${e?.code ?? ''}|${e?.message ?? String(e)}`);
+  };
+  // Abgeschlossene Fertigung: zwei Eingänge mit Los, zwei Ausgänge mit Fertigungs-Los, Ausgabe samt Zahlung im Hauptbuch.
+  const db = await angelegt('P');
+  await abschliessen(db, 'P', { recordId: recId(db) });
+  const rid = recId(db);
+  const outs = all(db, 'SELECT product_id FROM production_outputs').map((v) => String(v[0]));
+  ok(zahl(db, 'expenses') === 1 && zahl(db, 'expense_payments') === 1 && outs.length === 2 && s(db, "SELECT stock_status FROM products WHERE id = 'p1'") === 'consumed',
+    'F2 Ausgangslage: abgeschlossen, Ausgabe + Zahlung gebucht, 2 Ausgänge, Eingänge verbraucht');
+  const vor = stand(db);
+  // Pflicht-Gegenproben: jede Störung lässt den kompletten Vorzustand stehen.
+  const stoerungen: Array<[string, RegExp]> = [
+    ['Buchungs-Storno', /INSERT INTO ledger_entries/],
+    ['Los-Rückgabe', /UPDATE stock_lots SET qty_remaining = \?, status = 'ACTIVE'/],
+    ['Status-/Bestand-Rückgabe', /UPDATE products SET stock_status = \?, updated_at = \? WHERE id = \?/],
+    ['Ausgang entfernen', /DELETE FROM products WHERE id/],
+    ['kurz vor dem Ende (Vorgang löschen)', /DELETE FROM production_records/],
+    ['Protokoll', /INSERT INTO audit_log/],
+  ];
+  for (const [was, muster] of stoerungen) {
+    const raw = db.run.bind(db);
+    let getroffen = false;
+    (db as { run: Db['run'] }).run = (sql: string, p?: unknown[]) => { if (muster.test(sql)) { getroffen = true; throw new Error('F2: injected failure'); } return raw(sql, p); };
+    const m = await loeschen(db, rid);
+    (db as { run: Db['run'] }).run = raw;
+    ok(getroffen && m !== '' && stand(db) === vor, `F2 ATOMAR Störung bei ${was}: Löschen scheitert, kompletter Vorzustand unverändert (${m.slice(0, 70)})`);
+  }
+  // Gegenprobe: das frühere Löschen schluckte den Buchungsfehler (safePost) und löschte trotzdem weiter.
+  const altStore = codeOf(src('src/stores/productionStore.ts'));
+  ok(!/safePost/.test(altStore) && /deleteProductionOnPrimary\(id\)/.test(altStore) && /runOnPrimary\(\(\) => deleteProductionInHouse\(recordId, ctx\), nachFertigung\)/.test(altStore)
+    && !/safePost/.test(codeOf(src('src/core/production/production-house.ts'))),
+  'F2 Quelltext: kein safePost mehr; Löschen = Hausfolge in runOnPrimary (eine Transaktion, Rollback bei jedem Fehler)');
+  // Danach geht dasselbe Löschen genau einmal durch.
+  const ein = await loeschen(db, rid);
+  ok(ein === '' && zahl(db, 'production_records') === 0 && zahl(db, 'production_inputs') === 0 && zahl(db, 'production_outputs') === 0,
+    `F2 Löschen läuft: Vorgang, Ein- und Ausgänge weg (${ein})`);
+  ok(S(all(db, "SELECT id, stock_status, quantity FROM products WHERE id IN ('p1','p2') ORDER BY id")) === S([['p1', 'in_stock', 1], ['p2', 'in_stock', 1]])
+    && S(all(db, "SELECT qty_remaining, status FROM stock_lots WHERE product_id IN ('p1','p2') ORDER BY product_id")) === S([[1, 'ACTIVE'], [1, 'ACTIVE']]),
+  'F2 …Eingänge exakt zurück: Lose 1/ACTIVE, Menge 1, Status in_stock');
+  ok(outs.every((pid) => n(db, 'SELECT COUNT(*) FROM products WHERE id = ?', [pid]) === 0 && n(db, 'SELECT COUNT(*) FROM stock_lots WHERE product_id = ?', [pid]) === 0),
+    'F2 …Ausgänge samt Fertigungs-Los entfernt');
+  ok(zahl(db, 'expenses') === 0 && zahl(db, 'expense_payments') === 0 && balanced(db) && saldo(db, 'CASH') === 0 && saldo(db, 'EXPENSES_OPERATING') === 0 && saldo(db, 'ACCOUNTS_PAYABLE') === 0,
+    `F2 …Ausgabe storniert: Hauptbuch ausgeglichen, Kasse/Aufwand/Verbindlichkeit 0 (${saldo(db, 'CASH')}/${saldo(db, 'EXPENSES_OPERATING')})`);
+  ok(n(db, "SELECT COUNT(*) FROM audit_log WHERE entity_type = 'production_records' AND entity_id = ? AND action_type = 'DELETE'", [rid]) === 1,
+    'F2 …Protokoll: genau ein DELETE-Eintrag');
+  // Wiederholung und Doppelklick: keine zweite Wirkung.
+  const nach = stand(db);
+  const nochmal = await loeschen(db, rid);
+  ok(nochmal.startsWith('PRODUCTION_NOT_FOUND') && stand(db) === nach, `F2 Wiederholung → PRODUCTION_NOT_FOUND, nichts verändert (${nochmal.slice(0, 40)})`);
+  const db2 = await angelegt('P');
+  const rid2 = recId(db2);
+  const [d1, d2] = await Promise.all([loeschen(db2, rid2), loeschen(db2, rid2)]);
+  ok([d1, d2].filter((x) => x === '').length === 1 && [d1, d2].some((x) => x.startsWith('PRODUCTION_NOT_FOUND'))
+    && S(all(db2, "SELECT qty_remaining FROM stock_lots WHERE product_id IN ('p1','p2') ORDER BY product_id")) === S([[1], [1]]) && balanced(db2),
+  `F2 Doppelklick: genau ein Löschen wirkt, das zweite findet nichts — Lose nicht doppelt aufgefüllt (${S([d1.slice(0, 20), d2.slice(0, 20)])})`);
+  // Eingang ohne Los — nach dem heutigen Vertrag: genau die genommene Menge zurück.
+  const db3 = freshDb();
+  insert(db3, 'products', { id: 'pNoLot', branch_id: 'branch-main', category_id: 'cat-watch', brand: 'Old', name: 'Without lot', sku: 'SKU-NL',
+    quantity: 1, condition: 'Pre-Owned', scope_of_delivery: '[]', purchase_price: 40, purchase_currency: 'BHD', stock_status: 'in_stock',
+    tax_scheme: 'MARGIN', days_in_stock: 0, images: '[]', attributes: '{}', source_type: 'OWN', created_at: NOW, updated_at: NOW });
+  await createProductionOnPrimary({ inputProductIds: ['pNoLot'], outputs: [{ spec: { categoryId: 'cat-watch', brand: 'New', name: 'From old', images: [] }, value: 40 }] } as never);
+  const rid3 = recId(db3);
+  ok(n(db3, "SELECT quantity FROM products WHERE id = 'pNoLot'") === 0 && s(db3, "SELECT stock_status FROM products WHERE id = 'pNoLot'") === 'consumed', 'F2 Eingang ohne Los verbraucht (Menge 1 → 0)');
+  const led3 = zahl(db3, 'ledger_entries');
+  const e3 = await loeschen(db3, rid3);
+  ok(e3 === '' && n(db3, "SELECT quantity FROM products WHERE id = 'pNoLot'") === 1 && s(db3, "SELECT stock_status FROM products WHERE id = 'pNoLot'") === 'in_stock'
+    && zahl(db3, 'ledger_entries') === led3 && zahl(db3, 'production_records') === 0,
+  `F2 …gelöscht: Menge genau 1 zurück, in_stock, keine Buchung (Vertrag unverändert) (${e3})`);
+  // Ein Ausgang, der auf einem Beleg steht (auch nach Verkauf + Retoure wieder in_stock), sperrt.
+  const db4 = await angelegt('P');
+  const out4 = s(db4, 'SELECT product_id FROM production_outputs LIMIT 1');
+  db4.run(`INSERT INTO invoice_lines (id, invoice_id, product_id, quantity, unit_price, purchase_price_snapshot, vat_rate, vat_amount, line_total, tax_scheme, position)
+    VALUES ('il-f2', 'inv-f2', ?, 1, 200, 150, 0, 0, 200, 'MARGIN', 1)`, [out4]);
+  const vor4 = stand(db4);
+  const m4 = await loeschen(db4, recId(db4));
+  ok(m4.startsWith('PRODUCTION_OUTPUT_IN_USE') && stand(db4) === vor4, `F2 Ausgang auf einem Beleg → abgewiesen, nichts verändert (${m4.slice(0, 50)})`);
+}
+marker('PRODUCTION_DELETE_ATOMICITY_PROVED');
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — post-parity r7a pp-2/pp-10 production completion + sync: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
