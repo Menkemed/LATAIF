@@ -621,6 +621,11 @@ async function bruch(was: string, weg: 'primary' | 'fern', aufbau: () => Promise
   await beide('ein ausgeschiedener Mitarbeiter', (_db, r) => ({ ...basis(r), staffId: 'emp-gone' }), 'EMPLOYEE_NOT_FOUND');
   await beide('zweimal dieselbe Zeile (umginge den Deckel)', (_db, r) => ({ ...basis(r), lines: [{ invoiceLineId: r.l9, quantity: 2 }, { invoiceLineId: r.l9, quantity: 2 }] }), 'INVALID_INPUT');
   await beide('„Return to Owner" fuer eigene Ware', (_db, r) => ({ ...basis(r), productDisposition: 'RETURN_TO_OWNER' }), 'DISPOSITION_NOT_ALLOWED');
+  // F4 — gemischt (p1 Kommissionsware, p9 eigene Ware): „Return to Owner" gilt jeder Zeile → auf beiden Wegen dasselbe Nein.
+  await beide('„Return to Owner" fuer Kommission + eigene Ware', (db, r) => {
+    db.run("UPDATE products SET source_type = 'CONSIGNMENT' WHERE id = 'p1'");
+    return { ...basis(r), lines: [{ invoiceLineId: r.l1, quantity: 1 }, { invoiceLineId: r.l9, quantity: 1 }], productDisposition: 'RETURN_TO_OWNER' };
+  }, 'RETURN_TO_OWNER_ONLY_FOR_CONSIGNMENT');
   await beide('eine stornierte Rechnung', (db, r) => { db.run("UPDATE invoices SET status = 'CANCELLED' WHERE id = ?", [r.inv]); return basis(r); }, 'INVOICE_CANCELLED');
   await beide('eine Rechnung, die die Maske nicht anbietet (Entwurf)', (db, r) => { db.run("UPDATE invoices SET status = 'DRAFT' WHERE id = ?", [r.inv]); return basis(r); }, 'INVOICE_NOT_RETURNABLE');
   {

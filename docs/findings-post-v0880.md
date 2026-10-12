@@ -36,7 +36,9 @@ Keine Lösung festgelegt, kein Gegenkonto erfunden.
 
 Hover-Karte und Verkauf nutzen dieselbe Regel und zeigen deshalb denselben Wert. Bei unterschiedlichen Einständen am selben Tag ist aber nicht vorhersagbar, welcher zuerst gebucht wird. Möglicher Tie-Break: `created_at`.
 
-## F4 — „Return to Owner" wirkt wie früher „Keep" auf alle Zeilen (gering bis mittel)
+## F4 — „Return to Owner" wirkt wie früher „Keep" auf alle Zeilen (gering bis mittel) — BEHOBEN
+
+> Behoben: `createReturnInHouse` verlangt für `RETURN_TO_OWNER` jetzt, dass jede Zeile Kommissionsware ist (`RETURN_TO_OWNER_ONLY_FOR_CONSIGNMENT`), geprüft vor dem ersten Schreiben. Maske, PC2 `returns.create` und Kommissionsmaske laufen hier durch. Gemischt: Kommissionszeilen und eigene Ware als getrennte Retouren. Tests: `test/return-cancel-status/return-cancel-status.test.ts` §15, `test/r5f/returns-consignment-parity.test.ts` (beide Wege).
 
 `createReturnInHouse` verlangt für `RETURN_TO_OWNER` nur, dass **eine** Zeile Kommissionsware ist. `applyDisposition` setzt dann **jede** Zeile auf `returned` (Ware verlässt das System), auch eigene Ware auf derselben Rechnung.
 

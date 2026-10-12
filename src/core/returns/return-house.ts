@@ -105,6 +105,13 @@ export function createReturnInHouse(input: ReturnCreateInput, branchId: string, 
     throw new ReturnActionRejected('KEEP_ONLY_FOR_CONSIGNMENT',
       'keep as own applies to every returned line — use it only when all returned lines are consignment items');
   }
+  // „Return to Owner" gilt ebenso JEDER Zeile. Eigene Ware darauf würde 'returned' (verlässt das System: kein Los
+  // zurück, kein Wareneinsatz zurückgebucht, auch der Restbestand des Artikels gälte als weg) — also nur, wenn jede
+  // Zeile Kommissionsware ist. Gemischt: erst die Kommissionszeilen „Return to Owner", die eigene Ware getrennt.
+  if (input.productDisposition === 'RETURN_TO_OWNER' && lines.some((l) => !l.productId || !istKommissionsware(l.productId))) {
+    throw new ReturnActionRejected('RETURN_TO_OWNER_ONLY_FOR_CONSIGNMENT',
+      'return to owner applies to every returned line — use it only when all returned lines are consignment items');
+  }
   if (input.productDisposition !== 'IN_STOCK' && input.productDisposition !== 'WRITE_OFF'
     && jointInvoiceLines(lines.map((l) => l.invoiceLineId)).length > 0) {
     throw new ReturnActionRejected(JOINT_BLOCK.code, JOINT_BLOCK.salesReturnDisposition);

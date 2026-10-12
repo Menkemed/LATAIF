@@ -656,6 +656,97 @@ function kommission(db: Db, pid: string, cid: string): { invoiceId: string; purc
   }
 }
 
+// ══ 15 — „Return to Owner": nur Kommissionsware, gemischt atomar abgewiesen ═══════
+{
+  const { createReturnInHouse } = await import('../../src/core/returns/return-house.ts');
+  const prod = (db: Db, pid: string): string =>
+    S(db.exec('SELECT source_type, purchase_price, stock_status, quantity FROM products WHERE id = ?', [pid])[0]?.values ?? []);
+  const consStatus = (db: Db, cid: string): string => s(db, 'SELECT status FROM consignments WHERE id = ?', [cid]);
+  const ausgeglichen = (db: Db): boolean => Math.abs(n(db, "SELECT COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0) FROM ledger_entries")) < 0.005;
+  const lineOfInv = (db: Db, inv: string, pid: string): string => s(db, 'SELECT id FROM invoice_lines WHERE invoice_id = ? AND product_id = ?', [inv, pid]);
+  const rtoRet = (db: Db, inv: string, pids: string[], disposition = 'RETURN_TO_OWNER', refundNow = true): string => {
+    const id = imHaus(() => createReturnInHouse({ invoiceId: inv, lines: pids.map((p) => ({ invoiceLineId: lineOfInv(db, inv, p), quantity: 1 })),
+      refundMethod: 'cash', productDisposition: disposition, reason: 'rto', refundNow } as never, 'branch-main').returnId);
+    reload();
+    return id;
+  };
+  const alles = (db: Db): string => S([
+    n(db, 'SELECT COUNT(*) FROM stock_lots'), n(db, 'SELECT COUNT(*) FROM sales_returns'), n(db, 'SELECT COUNT(*) FROM sales_return_lines'),
+    n(db, 'SELECT COUNT(*) FROM ledger_entries'), n(db, 'SELECT COUNT(*) FROM credit_notes'), n(db, 'SELECT COUNT(*) FROM customer_credits'),
+    n(db, 'SELECT COUNT(*) FROM sync_changelog'), n(db, 'SELECT COUNT(*) FROM audit_log'),
+    db.exec('SELECT id, qty_remaining, status FROM stock_lots ORDER BY id')[0]?.values ?? [],
+    db.exec('SELECT id, status, payout_status FROM consignments ORDER BY id')[0]?.values ?? [],
+    db.exec('SELECT id, status, paid_amount FROM invoices ORDER BY id')[0]?.values ?? [],
+  ]);
+
+  // Eine Kommissionsrechnung, darauf auch eigene Ware (pOwnR, 3 Stück im Los, 1 verkauft).
+  const gemischt = (): { db: Db; inv: string; lot: string } => {
+    const db = neu(); product(db, 'pOwnR', 100); reload();
+    const lot = lotOf(db, kauf('pOwnR', 3, 100, false));
+    const r = kommission(db, 'pRK', 'cons-r1');
+    db.run(`INSERT INTO invoice_lines (id, invoice_id, product_id, quantity, unit_price, purchase_price_snapshot, vat_rate, vat_amount, line_total, tax_scheme, position, lot_id, stock_taken)
+      SELECT 'il-rto-own', ?, 'pOwnR', 1, 100, 100, 0, 0, 100, 'MARGIN', 9, ?, 1`, [r.invoiceId, lot]);
+    db.run("UPDATE stock_lots SET qty_remaining = qty_remaining - 1 WHERE id = ?", [lot]);
+    db.run("UPDATE invoices SET gross_amount = gross_amount + 100, net_amount = net_amount + 100 WHERE id = ?", [r.invoiceId]);
+    reload();
+    voll(db, r.invoiceId);
+    return { db, inv: r.invoiceId, lot };
+  };
+
+  { // a) DER FUND: Kommission + eigene Ware, „Return to Owner" für beide → abgewiesen, ohne jede Wirkung
+    const { db, inv, lot } = gemischt();
+    const vor = alles(db); const vorOwn = prod(db, 'pOwnR'); const vorK = prod(db, 'pRK'); const vorC = consStatus(db, 'cons-r1');
+    const m = meldung(() => rtoRet(db, inv, ['pRK', 'pOwnR']));
+    ok(m.startsWith('RETURN_TO_OWNER_ONLY_FOR_CONSIGNMENT'), `15a gemischt + Return to Owner → abgewiesen (${m.slice(0, 60)})`);
+    ok(alles(db) === vor && prod(db, 'pOwnR') === vorOwn && prod(db, 'pRK') === vorK && consStatus(db, 'cons-r1') === vorC && lotRem(db, lot) === 2,
+      `15a …nichts verändert: eigene Ware weiter am Lager (${prod(db, 'pOwnR')}), Los 2, Kommission ${consStatus(db, 'cons-r1')}, keine Retoure/Gutschrift/Erstattung/Buchung/Sync-Spur`);
+    // Dieselbe Ablehnung ohne sofortige Erstattung.
+    const m2 = meldung(() => rtoRet(db, inv, ['pOwnR', 'pRK'], 'RETURN_TO_OWNER', false));
+    ok(m2.startsWith('RETURN_TO_OWNER_ONLY_FOR_CONSIGNMENT') && alles(db) === vor, `15a …auch ohne Sofort-Erstattung und in anderer Zeilenfolge (${m2.slice(0, 40)})`);
+    // Nur die eigene Zeile: wie bisher die alte Regel.
+    const m3 = meldung(() => rtoRet(db, inv, ['pOwnR']));
+    ok(m3.startsWith('DISPOSITION_NOT_ALLOWED') && alles(db) === vor, `15a nur eigene Ware + Return to Owner → abgewiesen wie bisher (${m3.slice(0, 40)})`);
+  }
+
+  { // b) Auf derselben Rechnung getrennt: Kommissionszeile „Return to Owner", eigene Ware „Back to Stock" → beides wirkt
+    const { db, inv, lot } = gemischt();
+    const rid = rtoRet(db, inv, ['pRK']);
+    ok(!!rid && consStatus(db, 'cons-r1') === 'RETURNED_TO_OWNER' && JSON.parse(prod(db, 'pRK'))[0][2] === 'returned'
+      && JSON.parse(prod(db, 'pOwnR'))[0][2] === 'in_stock' && lotRem(db, lot) === 2,
+      `15b nur die Kommissionszeile → Return to Owner wirkt nur auf sie (Kommission ${consStatus(db, 'cons-r1')}, eigene Ware unberührt)`);
+    const rid2 = rtoRet(db, inv, ['pOwnR'], 'IN_STOCK');
+    ok(!!rid2 && lotRem(db, lot) === 3 && JSON.parse(prod(db, 'pOwnR'))[0][2] === 'in_stock' && ausgeglichen(db),
+      `15b …die eigene Ware danach „Back to Stock": Stück zurück ins Los (3), Hauptbuch ausgeglichen`);
+  }
+
+  { // c) reine Kommissionsretoure über die Rechnungsmaske: unverändert; ihr Storno unverändert
+    const db = neu();
+    const r = kommission(db, 'pRK2', 'cons-r2');
+    voll(db, r.invoiceId);
+    const rid = rtoRet(db, r.invoiceId, ['pRK2'], 'RETURN_TO_OWNER', false);   // ohne Auszahlung — eine ausgezahlte Erstattung sperrt jeden Storno
+    ok(consStatus(db, 'cons-r2') === 'RETURNED_TO_OWNER' && JSON.parse(prod(db, 'pRK2'))[0][2] === 'returned'
+      && s(db, 'SELECT product_disposition FROM sales_returns WHERE id = ?', [rid]) === 'RETURN_TO_OWNER' && ausgeglichen(db),
+      '15c nur Kommissionsware + Return to Owner → wirkt wie bisher (Artikel returned, Kommission RETURNED_TO_OWNER)');
+    const st = storno(rid);
+    ok(st === '' && s(db, 'SELECT status FROM sales_returns WHERE id = ?', [rid]) === 'REJECTED'
+      && JSON.parse(prod(db, 'pRK2'))[0][2] !== 'returned' && ausgeglichen(db),
+      `15c …Storno läuft wie bisher: Retoure REJECTED, Artikelstatus nicht mehr returned (${st.slice(0, 80) || 'ok'} / ${s(db, 'SELECT status FROM sales_returns WHERE id = ?', [rid])} / ${prod(db, 'pRK2')})`);
+  }
+
+  { // d) „Cancel Sale" der Kommission (Return to Owner aus der Kommissionsmaske) läuft unverändert durch das Haus
+    const consRev = await import('../../src/core/consignment/consignment-reversal-house.ts');
+    const db = neu();
+    kommission(db, 'pRK3', 'cons-r3');
+    const out = imHaus(() => consRev.returnConsignmentAfterSaleInHouse('cons-r3', { disposition: 'RETURN_TO_OWNER', refundMethod: 'cash' } as never, 'branch-main'));
+    reload();
+    ok(!!out.returnId && consStatus(db, 'cons-r3') === 'returned' && ausgeglichen(db), '15d Return to Owner aus der Kommissionsmaske läuft wie bisher');
+  }
+
+  const rh = src('src/core/returns/return-house.ts');
+  ok(/'RETURN_TO_OWNER' && lines\.some\(\(l\) => !l\.productId \|\| !istKommissionsware/.test(rh) && /beforeWrite\?\.\(\);/.test(rh.split('RETURN_TO_OWNER_ONLY_FOR_CONSIGNMENT')[1] ?? ''),
+    '15 Quelltext: die Regel steht im Retourenhaus vor dem ersten Schreiben (Maske, PC2 returns.create und Kommissionsmaske laufen hier durch)');
+}
+
 // ══ 11 — Ein Weg für Primary und PC2 ═════════════════════════════════════════════
 {
   const rc = src('src/core/returns/return-cancel-house.ts');
