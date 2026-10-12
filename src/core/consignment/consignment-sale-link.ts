@@ -75,7 +75,7 @@ export function withConsignmentSalePermit<T>(productId: string, fn: () => T): T 
 // Was „Record Sale" auf diese Rechnung schrieb (Artikel, Menge, Preis, Käufer), ist zugleich die Grundlage
 // von Provision, Auszahlung und Einkauf beim Einlieferer. Eine gewöhnliche Rechnungsänderung zöge davon
 // nichts nach — zwei widersprüchliche Wahrheiten. Also: diese Werte ändert nur „Cancel Sale" (+ neu
-// verkaufen); Kopf, Notiz, Datum, Mitarbeiter und Zahlungen bleiben nach den Regeln der Rechnung änderbar.
+// verkaufen) — samt Rechnungsdatum (= Verkaufsdatum). Notiz, Mitarbeiter und Zahlungen bleiben nach den Regeln der Rechnung änderbar.
 
 export const CONSIGNMENT_INVOICE_LOCKED = 'CONSIGNMENT_INVOICE_LOCKED';
 
@@ -111,10 +111,14 @@ export function assertConsignmentSaleInvoiceEdit(
   next: ReadonlyArray<{ productId?: string | null; quantity?: number; unitPrice: number; taxScheme: string; lineTotal: number }>,
   lineMatch: ReadonlyArray<string | null>,
   customerChanged: boolean,
+  // Das Rechnungsdatum ist das Datum des Verkaufs — der Einkauf beim Einlieferer und seine Buchungen tragen es mit.
+  // Verschöbe nur die Rechnung, lägen Verkauf und Einkauf an anderen Tagen (bis in eine andere VAT-Periode).
+  dateChanged = false,
 ): void {
   const c = boundSaleConsignment(invoiceId);
   if (!c) return;
   if (customerChanged) throw gesperrt(c, 'Its buyer belongs to the consignment.');
+  if (dateChanged) throw gesperrt(c, 'Its date is the date of the consignment sale (and of the consignor\'s purchase).');
   if (next.length !== base.length || lineMatch.some((m) => m === null)) {
     throw gesperrt(c, 'Its lines cannot be added, removed or replaced.');
   }

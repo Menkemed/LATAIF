@@ -768,6 +768,30 @@ for (const disp of ['RETURN_TO_OWNER', 'KEEP_AS_OWN']) {
     }
   }
 
+  { // I11 Rechnungsdatum = Verkaufsdatum: ein anderer Tag → abgewiesen (Primary + PC2); derselbe Tag, Mitarbeiter → erlaubt
+    const w = await welt();
+    const tag = s(w.db, 'SELECT issued_at FROM invoices WHERE id = ?', [w.invId]).slice(0, 10);
+    const anderer = tag === '2026-09-01' ? '2026-09-02' : '2026-09-01';
+    const vor = unberuehrt(w);
+    const d = aendern(w, [zeile(w)], { issuedAt: anderer });
+    ok(d === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor && s(w.db, 'SELECT issued_at FROM invoices WHERE id = ?', [w.invId]).slice(0, 10) === tag,
+      `I11 Rechnungsdatum auf einen anderen Tag → abgewiesen; Rechnung, Kommission, Einkauf, Buchungen, Sync, Protokoll unverändert (${d || 'GEÄNDERT'})`);
+    const b = basis(w);
+    const r = await fern(() => lc2.runInvoiceUpdate(deps(w.db), identity(nx(), 'invoices.update'), {
+      id: w.invId, expectedRevision: n(w.db, 'SELECT revision FROM invoices WHERE id = ?', [w.invId]), reason: 'Datum',
+      customerId: 'cust-2', specialMark: false, issuedDate: anderer,
+      lines: [{ lineId: String(b.id), productId: String(b.product_id), quantity: 1, unitPrice: Number(b.unit_price) }],
+    }));
+    ok(!r.ok && r.code === 'CONSIGNMENT_INVOICE_LOCKED' && !r.thrown && unberuehrt(w) === vor, `I11 PC2 invoices.update mit anderem Datum → dasselbe Nein (${r.code})`);
+    const gleicherTag = aendern(w, [zeile(w)], { issuedAt: tag, notes: 'gleicher Tag' });
+    ok(gleicherTag === '' && s(w.db, 'SELECT issued_at FROM invoices WHERE id = ?', [w.invId]).slice(0, 10) === tag && zweiWahrheiten(w) === '',
+      `I11 derselbe Kalendertag (wie ihn die Maske schickt) bleibt erlaubt (${gleicherTag || 'ok'})`);
+    insert(w.db, 'employees', { id: 'emp-i11', branch_id: 'branch-main', first_name: 'Sara', last_name: 'V', employment_status: 'active', created_at: NOW, updated_at: NOW });
+    const ma = aendern(w, [zeile(w)], { staffId: 'emp-i11' });
+    ok(ma === '' && s(w.db, 'SELECT staff_id FROM invoices WHERE id = ?', [w.invId]) === 'emp-i11' && zweiWahrheiten(w) === '' && kstatus(w.db, w.cid) === 'sold',
+      `I11 Mitarbeiter ändern → erlaubt, Kommission unberührt (${ma || 'ok'})`);
+  }
+
   { // I10 erlaubt bleibt: der Käufer zahlt; „Cancel Sale" danach wie bisher
     const w = await welt();
     nimm(w.db);

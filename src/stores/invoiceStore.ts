@@ -707,7 +707,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // ersetzte Zeile). Eine fortgesetzte Zeile behält ihren Artikel.
     assertNoConsignmentGoods(lines.filter((_, i) => lineMatch[i] === null));
     // CONSIGNMENT-INTEGRITY — die Verkaufsrechnung einer Kommission: Zeilen und Käufer gehören der Kommission.
-    assertConsignmentSaleInvoiceEdit(id, baseLines, lines, lineMatch, customerId !== undefined && customerId !== inv0.customerId);
+    // Datum: verglichen wird der Kalendertag (die Maske schickt nur ihn) — derselbe Tag bleibt erlaubt.
+    assertConsignmentSaleInvoiceEdit(id, baseLines, lines, lineMatch, customerId !== undefined && customerId !== inv0.customerId,
+      issuedAt !== undefined && issuedAt.slice(0, 10) !== String(inv0.issuedAt ?? '').slice(0, 10));
     const baseById = new Map(baseLines.map(b => [b.id, b]));
     // BULK METAL V1 — eine bestehende Bulk-Zeile behält Lot, Gewicht und COGS (gesperrt); Preis, Typ und
     // Beschreibung bleiben änderbar. Korrektur von Lot/Gewicht: Zeile entfernen und neu anlegen.

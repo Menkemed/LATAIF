@@ -72,6 +72,7 @@ Für `KEEP_AS_OWN` ist das im Cleanup geschlossen (jede Zeile muss Kommissionswa
   - Artikel, Menge, Preis, Steuerart und Summe der Zeilen ändern, Zeilen hinzufügen/entfernen/ersetzen und den Käufer wechseln → `CONSIGNMENT_INVOICE_LOCKED`.
   - Löschen oder Stornieren (Primary und PC2) → `CONSIGNMENT_INVOICE_LOCKED`.
   - Retoure der Kommissionsware ohne Kommissionsweg („Back to Stock", „Under Repair", „Write Off") → `CONSIGNMENT_RETURN_VIA_CONSIGNMENT`.
-- Weiter erlaubt: Notiz, Datum und Mitarbeiter (Rechnungsregeln) sowie Zahlungen des Käufers.
+- Ebenso gesperrt: das Rechnungsdatum (= Verkaufsdatum; der Einkauf beim Einlieferer trägt es mit) — derselbe Kalendertag bleibt erlaubt.
+- Weiter erlaubt: Notiz und Mitarbeiter (Rechnungsregeln) sowie Zahlungen des Käufers.
 - Der Weg für alles andere ist „Cancel Sale".
 - Tests: `consignment-integrity` §I (Gegenprobe: 12 rot, u. a. Rechnung 1500 ≠ Kommission 1200).
