@@ -11,6 +11,11 @@ mod data_root_adopt;
 mod bridge;
 mod media;
 mod sync;
+// INSTANCE-LOCK — höchstens ein LATAIF-Prozess je Anwendung und Benutzer (schließt die Lücke des Plugins).
+mod instance_lock;
+
+/// Hält die Sperre für die ganze Lebensdauer des Prozesses (Windows gibt sie beim Prozessende frei).
+struct InstanceLockState(#[allow(dead_code)] instance_lock::InstanceLock);
 
 // MOBILE-04B2A5-H1 — test-only surface for the isolated E2E seed/verify tool. Compiled out entirely
 // unless the `e2e` feature is enabled (only the e2e example/harness turns it on); production builds
@@ -106,6 +111,15 @@ fn data_root_of(app: &tauri::AppHandle) -> Result<std::path::PathBuf, String> {
 /// only writes to a console nobody sees, and "it opens and the data is gone" is precisely the
 /// impression this slice exists to avoid giving.
 fn show_fatal_data_root_error(message: &str) {
+    show_fatal_box("LATAIF — data location", message);
+}
+
+/// INSTANCE-LOCK — die Meldung an eine zweite Kopie, bevor sie sich beendet.
+const ALREADY_RUNNING_MESSAGE: &str = "LATAIF is already running on this computer.\n\n\
+Please use the LATAIF window that is already open (check the taskbar).\n\n\
+A second copy is not started, because two copies would overwrite each other's work.";
+
+fn show_fatal_box(caption: &str, message: &str) {
     // The automation build refuses just as hard, but silently: a modal message box would keep the
     // process alive waiting for a click, and a test that hangs proves nothing about a refusal.
     #[cfg(all(windows, not(feature = "e2e")))]
@@ -119,7 +133,7 @@ fn show_fatal_data_root_error(message: &str) {
             fn MessageBoxW(hwnd: isize, text: *const u16, caption: *const u16, utype: u32) -> i32;
         }
         let text = wide(message);
-        let caption = wide("LATAIF — data location");
+        let caption = wide(caption);
         const MB_OK: u32 = 0x0000_0000;
         const MB_ICONERROR: u32 = 0x0000_0010;
         const MB_SETFOREGROUND: u32 = 0x0001_0000;
@@ -129,7 +143,7 @@ fn show_fatal_data_root_error(message: &str) {
     }
     #[cfg(not(all(windows, not(feature = "e2e"))))]
     {
-        let _ = message;
+        let _ = (caption, message);
     }
 }
 
@@ -3187,6 +3201,27 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .setup(|app| {
+            // INSTANCE-LOCK — noch VOR dem Datenort: eine zweite Kopie darf nicht einmal entscheiden, wo die
+            // Daten liegen, geschweige denn eine Datenbank, einen Server oder einen Drain starten. Das Plugin
+            // oben lässt eine zweite Kopie weiterlaufen, wenn es das Fenster der ersten nicht findet (siehe
+            // instance_lock.rs) — diese Sperre nicht. Beim Neustart läuft die alte Kopie noch kurz aus: warten.
+            // Lässt sich die Sperrdatei gar nicht anlegen, ist das kein Beweis für eine zweite Kopie —
+            // dann startet LATAIF wie bisher (das Plugin bleibt die erste Linie) und meldet es im Log.
+            match app.path().app_local_data_dir() {
+                Ok(lock_dir) => match instance_lock::acquire_waiting(&lock_dir, instance_lock::RELAUNCH_WAIT, instance_lock::RETRY_STEP) {
+                    Ok(lock) => {
+                        app.manage(InstanceLockState(lock));
+                    }
+                    Err(instance_lock::LockError::HeldByAnotherProcess) => {
+                        eprintln!("[instance-lock] another LATAIF process holds the lock — this copy exits without opening anything");
+                        show_fatal_box("LATAIF — already running", ALREADY_RUNNING_MESSAGE);
+                        app.handle().cleanup_before_exit();
+                        std::process::exit(0);
+                    }
+                    Err(instance_lock::LockError::Io(e)) => eprintln!("[instance-lock] lock file unavailable ({e}) — starting without it"),
+                },
+                Err(e) => eprintln!("[instance-lock] local app data dir unavailable ({e}) — starting without the lock"),
+            }
             // DATA-ROOT-I1 — the FIRST thing that happens in the process, before recovery, before any
             // database or media file is opened, and before the window exists. `app_data_dir()` is used
             // here for one purpose only: to find the LOCATOR. It is no longer, by itself, an answer to
