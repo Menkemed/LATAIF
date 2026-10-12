@@ -865,7 +865,11 @@ const economics = await import('../../src/core/agent/economics.ts');
     let r = true; try { cmd.parseTransferCreate({ customerId: 'c', productId: 'p', agentPrice: 1, settlementModel: 'split', excessSplitPct: pct }); } catch { r = false; }
     ok(p === gut && r === gut, `SHARE ${pct} %: ${gut ? 'erlaubt' : 'abgewiesen'} — Primary und fern dieselbe Regel`);
   }
-  ok(!/consignment/i.test(src('src/core/agents/transfer-rules.ts').replace(/Kommission/g, '')), 'SHARE die Regel des Transfers leiht nichts von der Kommission');
+  // CONSIGNMENT-AGENT — die Regeln nennen die Kommission jetzt bewusst (Kommissionsware geht nicht an einen Agenten);
+  // geprüft wird die Absicht: die Split-Regel des Transfers importiert/rechnet nichts aus der Kommission.
+  const tr = codeOf(src('src/core/agents/transfer-rules.ts'));
+  ok(!/from ['"]@\/core\/consignment|computeConsignment|consignment\/economics|excess_split_pct/i.test(tr),
+    'SHARE die Regel des Transfers leiht nichts von der Kommission (kein Import, keine Kommissions-Ökonomie)');
 }
 
 // ── DETAIL: Edit, Sold, Return der Detailseite über die geteilten Buchungen ──

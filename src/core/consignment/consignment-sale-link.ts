@@ -34,6 +34,54 @@ export function isConsignmentGoods(productId: string | null | undefined): boolea
   ).length > 0;
 }
 
+// ── Eigentum ↔ Agent ─────────────────────────────────────────────────────────
+// `products.source_type` mischt Eigentum (OWN/CONSIGNMENT) und Aufenthaltsort (AGENT) — beim Agenten steht dort
+// `AGENT`, egal wem das Stück gehört. Die verlässliche Quelle für „gehört es einem Einlieferer?" ist deshalb die
+// Kommission selbst (`consignments`), nicht `source_type` allein.
+
+/** Status einer Kommission, deren Ware noch dem Einlieferer gehört und beim Händler liegt (auch abgelaufen). */
+const CONSIGNOR_HOLDS = ['active', 'IN_STOCK', 'expired'];
+/** Status einer Kommission, deren Verkauf gebucht ist (die Ware gehört dem Käufer). */
+const CONSIGNMENT_SOLD = ['sold', 'SOLD', 'paid_out'];
+/** Abgeschlossen: an den Einlieferer zurück oder als eigene Ware behalten. */
+const CONSIGNMENT_CLOSED = ['returned', 'RETURNED', 'RETURNED_TO_OWNER'];
+
+export const CONSIGNMENT_NOT_TRANSFERABLE = 'CONSIGNMENT_NOT_TRANSFERABLE';
+
+/** Gehört dieser Artikel zu einer (noch nicht abgeschlossenen) Kommission — unabhängig von `source_type`/Status? */
+export function belongsToConsignment(productId: string | null | undefined): boolean {
+  if (!productId) return false;
+  if (query("SELECT 1 FROM products WHERE id = ? AND source_type = 'CONSIGNMENT'", [productId]).length > 0) return true;
+  const offen = [...CONSIGNOR_HOLDS, ...CONSIGNMENT_SOLD];
+  return query(
+    `SELECT 1 FROM consignments WHERE product_id = ? AND status IN (${offen.map(() => '?').join(',')}) LIMIT 1`,
+    [productId, ...offen],
+  ).length > 0;
+}
+
+export type AgentReturnOwnership =
+  | { kind: 'own' }
+  | { kind: 'consignment'; consignmentId: string }
+  | { kind: 'unclear'; reason: string };
+
+/**
+ * Wem gehört ein Stück, das vom Agenten zurückkommt? Aus der Relation, nicht geraten:
+ *   keine nicht abgeschlossene Kommission → eigene Ware;
+ *   genau eine, deren Ware beim Einlieferer liegt → Kommissionsware;
+ *   mehrere, oder eine schon verkaufte → unklar (nichts wird geschrieben).
+ */
+export function ownershipAfterAgent(productId: string): AgentReturnOwnership {
+  const rows = query(
+    `SELECT id, status FROM consignments WHERE product_id = ? AND status NOT IN (${CONSIGNMENT_CLOSED.map(() => '?').join(',')})`,
+    [productId, ...CONSIGNMENT_CLOSED],
+  );
+  if (rows.length === 0) return { kind: 'own' };
+  if (rows.length > 1) return { kind: 'unclear', reason: `the item belongs to ${rows.length} open consignments` };
+  const st = String(rows[0].status ?? '');
+  if (CONSIGNOR_HOLDS.includes(st)) return { kind: 'consignment', consignmentId: String(rows[0].id) };
+  return { kind: 'unclear', reason: `its consignment is "${st}" (already sold through the consignment)` };
+}
+
 export type SaleConsignment =
   | { kind: 'none' }
   | { kind: 'one'; id: string; status: string; productId: string; invoiceId: string }

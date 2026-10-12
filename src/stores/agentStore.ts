@@ -10,6 +10,8 @@ import { consumeLot, syncProductQuantity, trackProductRow } from '@/core/lots/lo
 import { assertLotLessStockAvailable, giveBackStock, hasLotHistory } from '@/core/lots/stock-contract';
 import { STOCK_UNAVAILABLE_MESSAGE } from '@/core/lots/lot-availability';
 import { trackChange } from '@/core/sync/sync-service';
+// CONSIGNMENT-AGENT — Kommissionsware gehört nicht auf den Agentenweg; die Herkunft kommt aus der Kommission.
+import { CONSIGNMENT_NOT_TRANSFERABLE, belongsToConsignment, ownershipAfterAgent } from '@/core/consignment/consignment-sale-link';
 
 /**
  * STOCK-LOT-INTEGRITY — was die Rechnungszeile eines Agentenvorgangs NICHT noch einmal nehmen darf.
@@ -26,18 +28,47 @@ function agentHeldStock(transferId: string, productId: string): { stockPreTaken?
   return hasLotHistory(productId) ? {} : { stockPreTaken: true };
 }
 
+/** CONSIGNMENT-AGENT — Eigentum und Bestandsstatus eines Stücks, das vom Agenten zurückkommt. */
+interface AgentReturnTarget { sourceType: 'OWN' | 'CONSIGNMENT'; stockStatus: 'in_stock' | 'consignment' }
+
+/**
+ * CONSIGNMENT-AGENT — wem das Stück gehört, wenn es vom Agenten zurückkommt: aus der Kommission, nicht geraten
+ * (vorher pauschal `OWN` — Kommissionsware verlor so ihre Herkunft). Unklar → nichts wird geschrieben.
+ * VOR dem ersten Schreiben zu rufen.
+ */
+function agentReturnTarget(productId: string): AgentReturnTarget {
+  const o = ownershipAfterAgent(productId);
+  if (o.kind === 'unclear') {
+    throw new TransferActionRejected('AGENT_RETURN_OWNERSHIP_UNCLEAR',
+      `Cannot take this item back automatically: ${o.reason}. Nothing was changed.`);
+  }
+  return o.kind === 'consignment'
+    ? { sourceType: 'CONSIGNMENT', stockStatus: 'consignment' }
+    : { sourceType: 'OWN', stockStatus: 'in_stock' };
+}
+
+/** CONSIGNMENT-AGENT — Kommissionsware wird nicht über den Agenten verkauft oder abgerechnet (auch Altbestand). */
+function assertNotConsignmentAgentSale(productId: string, was: string): void {
+  if (belongsToConsignment(productId)) {
+    throw new TransferActionRejected(CONSIGNMENT_NOT_TRANSFERABLE,
+      `This item is consignment stock — it is not ${was} through an agent. Take it back from the agent and sell it with "Record Sale" on its consignment. Nothing was changed.`);
+  }
+}
+
 /** Gibt genau den Verbrauch eines (verkauften, nicht umgewandelten) Agentenvorgangs zurück — einmal. */
-function giveBackAgentStock(transferId: string, productId: string, now: string): void {
+function giveBackAgentStock(transferId: string, productId: string, now: string, target: AgentReturnTarget): void {
   const t = query('SELECT stock_lot_id, stock_taken, invoice_id FROM agent_transfers WHERE id = ?', [transferId])[0];
   const taken = Number(t?.stock_taken ?? 0);
   if (!t || !(taken > 0) || String(t.invoice_id ?? '') !== '') return;
   const lotId = t.stock_lot_id ? String(t.stock_lot_id) : null;
   giveBackStock(productId, lotId, taken, now);
   if (lotId) syncProductQuantity(productId);
-  // Das Stück ist wieder da: verkaufbar, nicht mehr „sold"/„with_agent" (ohne Los stellt giveBackStock das selbst um).
+  // Das Stück ist wieder da: verkaufbar, nicht mehr „sold"/„with_agent" (ohne Los stellt giveBackStock den Status
+  // selbst um). CONSIGNMENT-AGENT — Eigentum und Status nach der Kommission (Kommissionsware bleibt Kommissionsware).
   getDatabase().run(
-    `UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ? AND COALESCE(quantity, 0) > 0 AND stock_status IN ('sold', 'with_agent', 'reserved')`,
-    [now, productId],
+    `UPDATE products SET stock_status = ?, source_type = ?, updated_at = ? WHERE id = ? AND COALESCE(quantity, 0) > 0
+        AND stock_status IN ('sold', 'with_agent', 'reserved', 'in_stock', 'consignment', 'consignment_reserved')`,
+    [target.stockStatus, target.sourceType, now, productId],
   );
   trackProductRow(productId);
   getDatabase().run('UPDATE agent_transfers SET stock_taken = 0 WHERE id = ?', [transferId]);
@@ -389,6 +420,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     if (liveStatus !== 'transferred') {
       throw new Error(`TRANSFER_NOT_OPEN: this transfer is "${liveStatus}" — only one that is still out can be sold`);
     }
+    // CONSIGNMENT-AGENT — auch ein schon draußen liegender (Alt-)Vorgang verkauft keine Kommissionsware: kein Einkauf
+    // beim Einlieferer, keine Provision, Lager im Hauptbuch negativ, danach ein zweiter Verkauf über „Record Sale".
+    assertNotConsignmentAgentSale(transfer.productId, 'sold');
     // v0.7.22 — SSOT-Economics (core/agent/economics.ts):
     //  'full'  → settlement = actualPrice (altes Verhalten, kein Split)
     //  'split' → settlement = Our Price + Shop-Anteil am Überschuss; Kunde behält Rest.
@@ -471,11 +505,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     const transfer = get().getTransfer(id);
     if (!transfer) return;
     const now = new Date().toISOString();
-    giveBackAgentStock(id, transfer.productId, now);
+    // CONSIGNMENT-AGENT — wem das Stück gehört, VOR dem ersten Schreiben (unklar → nichts geschieht).
+    const target = agentReturnTarget(transfer.productId);
+    giveBackAgentStock(id, transfer.productId, now, target);
     get().updateTransfer(id, { status: 'returned', returnedAt: now });
     const db = getDatabase();
-    // Plan §Product §5: zurück zu OWN wenn Ware vom Agent zurückkommt
-    db.run(`UPDATE products SET stock_status = 'in_stock', source_type = 'OWN', updated_at = ? WHERE id = ?`, [now, transfer.productId]);
+    // Plan §Product §5: zurück, wenn Ware vom Agent zurückkommt — CONSIGNMENT-AGENT: zu ihrem Eigentum (vorher pauschal OWN).
+    db.run(`UPDATE products SET stock_status = ?, source_type = ?, updated_at = ? WHERE id = ?`,
+      [target.stockStatus, target.sourceType, now, transfer.productId]);
     trackProductRow(transfer.productId);   // LAN-Sync Phase 1b
     saveDatabase();
 
@@ -497,6 +534,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     }
     const t = get().getTransfer(id);
     if (!t) return;
+    // CONSIGNMENT-AGENT — ein (Alt-)Agentenverkauf von Kommissionsware wird nicht abgerechnet (kein Geld, keine Buchung).
+    assertNotConsignmentAgentSale(t.productId, 'settled');
     const db = getDatabase();
     const now = new Date().toISOString();
     const total = t.settlementAmount || 0;
@@ -584,11 +623,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     if (transfer && String(query('SELECT invoice_id FROM agent_transfers WHERE id = ?', [id])[0]?.invoice_id ?? '') !== '') {
       throw new Error('This transfer is on an invoice — undo the conversion first, then delete it.');
     }
-    if (transfer) giveBackAgentStock(id, transfer.productId, now);
-    // Produkt zurück in Stock wenn nur transferred war.
-    if (transfer && transfer.status === 'transferred') {
-      db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`,
-        [now, transfer.productId]);
+    // CONSIGNMENT-AGENT — wem das Stück gehört, VOR dem ersten Schreiben (unklar → nichts geschieht).
+    const target = transfer ? agentReturnTarget(transfer.productId) : null;
+    if (transfer && target) giveBackAgentStock(id, transfer.productId, now, target);
+    // Produkt zurück in Stock wenn nur transferred war — CONSIGNMENT-AGENT: samt Eigentum (vorher blieb `AGENT`
+    // stehen, auch bei eigener Ware).
+    if (transfer && target && transfer.status === 'transferred') {
+      db.run(`UPDATE products SET stock_status = ?, source_type = ?, updated_at = ? WHERE id = ?`,
+        [target.stockStatus, target.sourceType, now, transfer.productId]);
       trackProductRow(transfer.productId);   // LAN-Sync Phase 1b
     }
 

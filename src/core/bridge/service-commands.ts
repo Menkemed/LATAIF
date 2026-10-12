@@ -716,7 +716,8 @@ export function runTransferReturn(deps: EngineDeps, identity: CommandIdentity, r
     assertRevision('agent_transfers', req.id, req.expectedRevision, 'TRANSFER_NOT_FOUND');
     // Der Weg des Hauses: Status auf `returned`, Zeitpunkt gesetzt, der Artikel zurück auf
     // `in_stock`/`OWN`, und eine etwaige Forderung aus einem früheren Verkauf zurückgenommen.
-    useAgentStore.getState().markTransferReturned(req.id);
+    // CONSIGNMENT-AGENT — zurück zu seinem Eigentum (aus der Kommission); unklar → fachliches Nein, nichts geschrieben.
+    house(() => useAgentStore.getState().markTransferReturned(req.id));
     const after = transferState(req.id);
     if (after.status !== 'returned') {
       // Nie beobachtet — aber ein Ergebnis, das die Domäne nicht erreicht hat, wird nicht als

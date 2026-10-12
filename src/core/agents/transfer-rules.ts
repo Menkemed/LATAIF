@@ -136,6 +136,8 @@ export function normalizeTransferCreate(form: TransferCreateForm): TransferCreat
 export interface TransferHousePort {
   /** Ein Kunde der Kundenauswahl (ohne die Platzhalter `sys-…`). */
   customerExists(id: string): boolean;
+  /** CONSIGNMENT-AGENT — gehört das Stück zu einer nicht abgeschlossenen Kommission (aus der Relation)? */
+  consignmentOwned(id: string): boolean;
   /** Der Bestandsstatus des Stücks — `undefined`, wenn es das Stück in dieser Filiale nicht gibt. */
   productStock(id: string): string | undefined;
   /** Ist das Stück schon auf Kommission draußen? */
@@ -151,6 +153,13 @@ export function planTransferCreate(input: TransferCreateInput, port: TransferHou
   }
   const stock = port.productStock(input.productId);
   if (stock === undefined) throw new TransferActionRejected('PRODUCT_NOT_FOUND', 'no such product in this branch');
+  // CONSIGNMENT-AGENT — Kommissionsware geht nicht an einen Agenten: sein Verkauf kennt den Kommissionsvertrag nicht
+  // (Einkauf beim Einlieferer, Provision, Rückweg). Geprüft über die Kommission, VOR dem Bestandsstatus — ein von Hand
+  // auf „in stock" gesetzter Status umgeht die Regel nicht.
+  if (port.consignmentOwned(input.productId)) {
+    throw new TransferActionRejected('CONSIGNMENT_NOT_TRANSFERABLE',
+      'this item is consignment stock — it does not go out to an agent (sell it with "Record Sale" on its consignment)');
+  }
   // Die Artikelliste der Maske zeigt nur, was im Lager liegt. Ein Stück, das inzwischen verkauft,
   // in Reparatur oder schon draußen ist, geht nicht (noch einmal) hinaus.
   if (!isTransferableStock(stock)) {

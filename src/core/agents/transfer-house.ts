@@ -24,6 +24,7 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useProductStore } from '@/stores/productStore';
 import type { AgentTransfer } from '@/core/models/types';
+import { belongsToConsignment } from '@/core/consignment/consignment-sale-link';
 import {
   TransferActionRejected, agentAutoCustomer, normalizeTransferCreate, planTransferCreate, transferConvertBlocker,
   type TransferBillTo, type TransferCreateForm, type TransferHousePort,
@@ -35,6 +36,7 @@ export function houseTransferPort(branchId: string): TransferHousePort {
     customerExists: (id) => !!query(
       "SELECT id FROM customers WHERE id = ? AND branch_id = ? AND id NOT LIKE 'sys-%'", [id, branchId],
     )[0],
+    consignmentOwned: (id) => belongsToConsignment(id),
     productStock: (id) => {
       // BULK METAL V1 — kein Bulk an Agenten (nicht V1): der Systemartikel gilt hier als nicht vorhanden.
       const r = query("SELECT stock_status FROM products WHERE id = ? AND branch_id = ? AND id NOT LIKE 'bulk-%'", [id, branchId])[0];

@@ -49,6 +49,8 @@ import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 import { carryOverOrderPaymentsToInvoice } from '@/core/orders/order-payment-carryover';
 import { useProductStore } from '@/stores/productStore';
 import { useAgentStore } from '@/stores/agentStore';
+// CONSIGNMENT-AGENT — ein Nein der Agentenregeln (Kommissionsware) ist ein fachliches Nein, kein Fehler.
+import { TransferActionRejected } from '@/core/agents/transfer-rules';
 import { ACCEPTED_PAYOUT_METHODS, ConsignmentActionRejected } from '@/core/consignment/consignment-finance';
 import { payOutConsignmentInHouse } from '@/core/consignment/consignment-finance-house';
 import { convertOrderLinesToInvoiceTx } from '@/core/orders/order-invoice-tx';
@@ -711,6 +713,7 @@ export function runMarkSold(deps: EngineDeps, identity: CommandIdentity, raw: un
         req.transferId, req.salePrice, req.buyerInfo, req.acknowledgeBelowPrice,
       );
     } catch (err) {
+      if (err instanceof TransferActionRejected) throw new CommandRejected(err.code, err.message);
       const msg = err instanceof Error ? err.message : String(err);
       // STOCK-LOT-INTEGRITY — das Stück ist nicht mehr da: ein fachliches Nein, eingefroren.
       if (msg === STOCK_UNAVAILABLE_MESSAGE) throw new CommandRejected('STOCK_UNAVAILABLE', msg);
@@ -786,7 +789,12 @@ export function runMarkSettled(deps: EngineDeps, identity: CommandIdentity, raw:
     // Listen laden, nicht nur die Transfers.
     useAgentStore.getState().loadAgents();
     useAgentStore.getState().loadTransfers();
-    useAgentStore.getState().markTransferSettled(req.transferId, req.amount, req.method);
+    try {
+      useAgentStore.getState().markTransferSettled(req.transferId, req.amount, req.method);
+    } catch (err) {
+      if (err instanceof TransferActionRejected) throw new CommandRejected(err.code, err.message);
+      throw err;
+    }
 
     const after = query(
       'SELECT settlement_amount, settlement_paid_amount, settlement_status, status, revision FROM agent_transfers WHERE id = ?',

@@ -76,3 +76,30 @@ Für `KEEP_AS_OWN` ist das im Cleanup geschlossen (jede Zeile muss Kommissionswa
 - Weiter erlaubt: Notiz und Mitarbeiter (Rechnungsregeln) sowie Zahlungen des Käufers.
 - Der Weg für alles andere ist „Cancel Sale".
 - Tests: `consignment-integrity` §I (Gegenprobe: 12 rot, u. a. Rechnung 1500 ≠ Kommission 1200).
+
+## F8 — Kommissionsware beim Agenten (hoch) — BEHOBEN
+
+> Behoben im Agenten-Schritt. Tests: `test/consignment-integrity/agent-handoff.test.ts` (Gegenprobe gegen den alten Code: 17 von 26 rot).
+
+- `products.source_type` mischt Eigentum (OWN/CONSIGNMENT) und Aufenthaltsort (AGENT). Wem eine Ware gehört, entscheidet jetzt die Kommission (`consignments`), nicht `source_type` allein (`belongsToConsignment`, `ownershipAfterAgent`).
+- **Neue Übergabe** von Kommissionsware (offen oder verkauft, auch mit Status „in stock" von Hand) → `CONSIGNMENT_NOT_TRANSFERABLE`. Die Regel steht in `planTransferCreate`, also am Primary und über PC2 `transfers.create`.
+- **Altbestand schon beim Agenten:** Verkauf (`markTransferSold`, PC2 `transfers.mark_sold`) und Abrechnung (`markTransferSettled`, PC2 `transfers.mark_settled`) → `CONSIGNMENT_NOT_TRANSFERABLE`, vor jeder Buchung. Es wird nichts automatisch in einen Kommissionsverkauf umgewandelt.
+- **Rückwege** (`markTransferReturned`, `deleteTransfer`, `giveBackAgentStock`): Eigentum aus der Kommission.
+  - Genau eine offene Kommission → `CONSIGNMENT`/`consignment`.
+  - Keine → `OWN`/`in_stock`.
+  - Mehrere, oder eine schon verkaufte → `AGENT_RETURN_OWNERSHIP_UNCLEAR`, nichts geschrieben.
+  - Löschen einer Übergabe lässt auch bei eigener Ware kein `AGENT` mehr stehen.
+- Eigene Ware läuft unverändert `OWN → AGENT → OWN`. Eigentum und Aufenthaltsort grundsätzlich zu trennen ist ein eigenes Design-Thema.
+
+## F9 — Status-Knöpfe der Artikelmaske umgehen den Lebenslauf (hoch, offen)
+
+In „Edit" der Artikelseite (`src/pages/watches/ProductDetail.tsx`, Recht `canEditProducts`) lassen sich `stock_status` (in_stock, reserved, offered, sold, consignment) und die Menge frei setzen — ohne Los, Buchung, Verkauf, Retoure, Kommission oder Agentenvorgang.
+
+- **Folgen:**
+  - Ein verkauftes Stück wird wieder „in stock" (bei Artikeln ohne Los samt Menge auch wieder verkaufbar).
+  - Ein Stück verschwindet als „sold" ohne Verkauf.
+  - Eigene Ware erscheint als „consignment".
+  - Bis zu diesem Fix öffnete der Knopf auch Kommissionsware den Weg zum Agenten.
+- **Schweregrad hoch:** Er umgeht jede Lebenslauf-Regel für alle Warenarten. Nur gemildert dadurch, dass es eine bewusste Bearbeitung mit Bearbeitungsrecht braucht und die Bestandsprüfungen (Los, Menge) einen Teil der Folgeverkäufe noch abfangen.
+- Die Regeln zu Kommissionsware (F7, F8) hängen nicht vom Status ab.
+- Vorschlag (eigener Schritt): Status nur aus den Vorgängen ableiten, die Knöpfe entfernen oder auf neutrale Zustände beschränken; Menge nur über Inventur bzw. Einkauf.
