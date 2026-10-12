@@ -71,6 +71,63 @@ export function withConsignmentSalePermit<T>(productId: string, fn: () => T): T 
   }
 }
 
+// ── Die Verkaufsrechnung einer Kommission ────────────────────────────────────
+// Was „Record Sale" auf diese Rechnung schrieb (Artikel, Menge, Preis, Käufer), ist zugleich die Grundlage
+// von Provision, Auszahlung und Einkauf beim Einlieferer. Eine gewöhnliche Rechnungsänderung zöge davon
+// nichts nach — zwei widersprüchliche Wahrheiten. Also: diese Werte ändert nur „Cancel Sale" (+ neu
+// verkaufen); Kopf, Notiz, Datum, Mitarbeiter und Zahlungen bleiben nach den Regeln der Rechnung änderbar.
+
+export const CONSIGNMENT_INVOICE_LOCKED = 'CONSIGNMENT_INVOICE_LOCKED';
+
+export interface BoundSaleConsignment { id: string; number: string; productId: string; buyerId: string }
+
+/** Die Kommission, deren Verkaufsrechnung diese Rechnung ist (`consignments.invoice_id`) — oder null. */
+export function boundSaleConsignment(invoiceId: string): BoundSaleConsignment | null {
+  const r = query(
+    'SELECT id, consignment_number, product_id, buyer_id FROM consignments WHERE invoice_id = ? ORDER BY id LIMIT 1',
+    [invoiceId],
+  )[0];
+  return r ? { id: String(r.id), number: String(r.consignment_number ?? ''), productId: String(r.product_id ?? ''), buyerId: String(r.buyer_id ?? '') } : null;
+}
+
+const gesperrt = (c: BoundSaleConsignment, was: string): InvoiceActionRejected => new InvoiceActionRejected(CONSIGNMENT_INVOICE_LOCKED,
+  `This invoice is the sale of consignment ${c.number || c.id}. ${was} Use "Cancel Sale" on the consignment (and record the sale again if needed). Nothing was changed.`);
+
+/** Löschen / Stornieren der Verkaufsrechnung einer Kommission: nur über „Cancel Sale". */
+export function assertNotConsignmentSaleInvoice(invoiceId: string, was: string): void {
+  const c = boundSaleConsignment(invoiceId);
+  if (c) throw gesperrt(c, was);
+}
+
+const gleich = (a: number, b: number): boolean => Math.abs((Number(a) || 0) - (Number(b) || 0)) < 0.0005;
+
+/**
+ * Rechnung ändern: ist sie die Verkaufsrechnung einer Kommission, bleiben ihre Zeilen, wie „Record Sale" sie
+ * schrieb (Artikel, Menge, Preis, Steuerart, Summe; keine Zeile dazu, keine weg), und der Käufer bleibt.
+ */
+export function assertConsignmentSaleInvoiceEdit(
+  invoiceId: string,
+  base: ReadonlyArray<{ id: string; productId: string | null; qty: number; unitPrice: number; taxScheme: string; lineTotal: number }>,
+  next: ReadonlyArray<{ productId?: string | null; quantity?: number; unitPrice: number; taxScheme: string; lineTotal: number }>,
+  lineMatch: ReadonlyArray<string | null>,
+  customerChanged: boolean,
+): void {
+  const c = boundSaleConsignment(invoiceId);
+  if (!c) return;
+  if (customerChanged) throw gesperrt(c, 'Its buyer belongs to the consignment.');
+  if (next.length !== base.length || lineMatch.some((m) => m === null)) {
+    throw gesperrt(c, 'Its lines cannot be added, removed or replaced.');
+  }
+  const byId = new Map(base.map((b) => [b.id, b]));
+  next.forEach((n, i) => {
+    const b = byId.get(lineMatch[i] as string);
+    if (!b || (n.productId ?? null) !== b.productId || !gleich(n.quantity ?? 1, b.qty) || !gleich(n.unitPrice, b.unitPrice)
+      || String(n.taxScheme) !== String(b.taxScheme) || !gleich(n.lineTotal, b.lineTotal)) {
+      throw gesperrt(c, 'Its item, quantity and price belong to the consignment (commission, payout and the consignor\'s purchase).');
+    }
+  });
+}
+
 /** Wirft, wenn eine dieser Zeilen Kommissionsware am Kommissionsverkauf vorbei verkaufen würde. */
 export function assertNoConsignmentGoods(lines: ReadonlyArray<{ productId?: string | null }>): void {
   for (const l of lines) {

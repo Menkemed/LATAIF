@@ -52,6 +52,8 @@ import { VAT_PERIOD_FILED } from '@/core/tax/vat-period-lock';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
+// CONSIGNMENT-INTEGRITY — Kommissionsware/Kommissions-Verkaufsrechnung: dasselbe fachliche Nein wie am Primary.
+import { CONSIGNMENT_INVOICE_LOCKED, CONSIGNMENT_SELL_VIA_CONSIGNMENT } from '@/core/consignment/consignment-sale-link';
 import {
   InvoicePayloadError, asDomainVerdict, buildInvoiceLines, parseInvoicePayload,
 } from './invoice-command';
@@ -136,6 +138,8 @@ const EDIT_CODE_VERDICTS: ReadonlySet<string> = new Set([
   ...CUSTOMER_CHANGE_VERDICTS,
   // VAT-PERIOD-LOCK — die Änderung träfe ein eingereichtes (oder bezahltes) VAT-Quartal.
   VAT_PERIOD_FILED,
+  // CONSIGNMENT-INTEGRITY — keine Kommissionsware als neue Zeile; die Verkaufsrechnung einer Kommission bleibt, wie sie ist.
+  CONSIGNMENT_SELL_VIA_CONSIGNMENT, CONSIGNMENT_INVOICE_LOCKED,
 ]);
 
 function asEditVerdict(err: unknown): CommandRejected | null {

@@ -672,5 +672,111 @@ for (const disp of ['RETURN_TO_OWNER', 'KEEP_AS_OWN']) {
     `H ${disp}: zweite Datenbank hat denselben Kommissionsstatus (${hier} / ${dort}; Quarantäne: ${gift.join(', ') || 'keine'})`);
 }
 
+// ══ I — die Verkaufsrechnung einer Kommission (Lebenslauf) ═════════════════════
+{
+  const lc2 = await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
+  const ic = await import('../../src/core/bridge/invoice-cancel-command.ts');
+  const icRules = await import('../../src/core/invoices/invoice-cancel.ts');
+  const icHouse = await import('../../src/core/invoices/invoice-cancel-house.ts');
+  const basis = (w: Welt) => row(w.db, 'SELECT * FROM invoice_lines WHERE invoice_id = ?', [w.invId]);
+  /** Die Zeile, wie die Maske sie beim Ändern schickt — mit den gespeicherten Werten, optional verändert. */
+  const zeile = (w: Welt, over: Record<string, unknown> = {}) => {
+    const b = basis(w);
+    return { lineId: String(b.id), productId: String(b.product_id), lotId: (b.lot_id as string | null) ?? undefined, quantity: Number(b.quantity),
+      unitPrice: Number(b.unit_price), purchasePrice: Number(b.purchase_price_snapshot), taxScheme: String(b.tax_scheme),
+      vatRate: Number(b.vat_rate), vatAmount: Number(b.vat_amount), lineTotal: Number(b.line_total), ...over };
+  };
+  const aendern = (w: Welt, lines: unknown[], extra: Record<string, unknown> = {}): string => {
+    nimm(w.db);
+    const m = wirft(() => imHaus(() => useInvoiceStore.getState().editInvoice(w.invId, { reason: 'Korrektur', lines: lines as never, ...extra })));
+    reload();
+    return m;
+  };
+  /** Zwei Wahrheiten? Rechnungssumme gegen Verkaufspreis der Kommission (beide brutto). */
+  const zweiWahrheiten = (w: Welt): string => {
+    const g = n(w.db, 'SELECT gross_amount FROM invoices WHERE id = ?', [w.invId]);
+    const k = n(w.db, 'SELECT sale_price FROM consignments WHERE id = ?', [w.cid]);
+    return Math.abs(g - k) > 0.005 ? `Rechnung ${g} ≠ Kommission ${k}` : '';
+  };
+
+  { // I1–I5 am Primary
+    const w = await welt();
+    let vor = unberuehrt(w);
+    const p = aendern(w, [zeile(w, { unitPrice: 1500, lineTotal: 1500 })]);
+    ok(p === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor && zweiWahrheiten(w) === '',
+      `I1 Preis der Kommissionszeile ändern → abgewiesen, nichts verändert (${p || 'GEÄNDERT'}; ${zweiWahrheiten(w) || 'eine Wahrheit'})`);
+    const q = aendern(w, [zeile(w, { quantity: 2, lineTotal: Number(basis(w).line_total) * 2 })]);
+    ok(q === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor, `I2 Menge ändern → abgewiesen (${q || 'GEÄNDERT'})`);
+    eigenerArtikel(w.db, 'p-eigen-i');
+    vor = unberuehrt(w);
+    const ersetzt = aendern(w, [ZEILE('p-eigen-i', 1200)]);
+    ok(ersetzt === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor, `I3 Zeile ersetzen/entfernen → abgewiesen (${ersetzt || 'GEÄNDERT'})`);
+    const dazu = aendern(w, [zeile(w), ZEILE('p-eigen-i', 300)]);
+    ok(dazu === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor, `I3 Zeile hinzufügen → abgewiesen (${dazu || 'GEÄNDERT'})`);
+    insert(w.db, 'customers', { id: 'cust-3', branch_id: 'branch-main', first_name: 'Dritte', last_name: 'K', country: 'BH', language: 'en',
+      vip_level: 0, preferences: '[]', customer_type: 'collector', sales_stage: 'active', created_at: NOW, updated_at: NOW });
+    reload();
+    vor = unberuehrt(w);
+    const kunde = aendern(w, [zeile(w)], { customerId: 'cust-3', confirmCustomerChange: true });
+    ok(kunde === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor, `I4 Käufer wechseln → abgewiesen (Käufer gehört zur Kommission) (${kunde || 'GEÄNDERT'})`);
+    const notiz = aendern(w, [zeile(w)], { notes: 'Lieferung abgeholt' });
+    ok(notiz === '' && s(w.db, 'SELECT notes FROM invoices WHERE id = ?', [w.invId]) === 'Lieferung abgeholt' && zweiWahrheiten(w) === ''
+      && kstatus(w.db, w.cid) === 'sold', `I5 Notiz ändern (Zeile unverändert) → erlaubt, Kommission unberührt (${notiz || 'ok'})`);
+  }
+
+  { // I6 PC2 invoices.update — dasselbe Nein
+    const w = await welt();
+    const vor = unberuehrt(w);
+    const b = basis(w);
+    const r = await fern(() => lc2.runInvoiceUpdate(deps(w.db), identity(nx(), 'invoices.update'), {
+      id: w.invId, expectedRevision: n(w.db, 'SELECT revision FROM invoices WHERE id = ?', [w.invId]), reason: 'Korrektur',
+      customerId: 'cust-2', specialMark: false,
+      lines: [{ lineId: String(b.id), productId: String(b.product_id), quantity: 1, unitPrice: 1500 }],
+    }));
+    ok(!r.ok && r.code === 'CONSIGNMENT_INVOICE_LOCKED' && !r.thrown && unberuehrt(w) === vor,
+      `I6 PC2 invoices.update Preis → dasselbe fachliche Nein, nichts verändert (${r.code})`);
+  }
+
+  { // I7 Löschen, I8 Stornieren (Primary + PC2)
+    const w = await welt();
+    const vor = unberuehrt(w);
+    nimm(w.db);
+    const del = wirft(() => imHaus(() => useInvoiceStore.getState().deleteInvoice(w.invId)));
+    reload();
+    ok(del === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor && n(w.db, 'SELECT COUNT(*) FROM invoices WHERE id = ?', [w.invId]) === 1,
+      `I7 Rechnung löschen → abgewiesen (${del || 'GELÖSCHT'})`);
+  }
+  {
+    const w = await welt();   // eigene Welt — unabhängig vom Löschversuch oben
+    const vor = unberuehrt(w);
+    nimm(w.db);
+    const can = wirft(() => imHaus(() => icHouse.cancelInvoiceInHouse({ invoiceId: w.invId, refundMethod: 'cash' }, 'branch-main')));
+    reload();
+    ok(can === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor, `I8 Rechnung stornieren (Primary) → abgewiesen, „Cancel Sale" ist der Weg (${can || 'STORNIERT'})`);
+    const canF = await fern(() => ic.runCancelInvoice(deps(w.db), identity(nx(), 'invoices.cancel'),
+      icRules.invoiceCancelBody({ invoiceId: w.invId, refundMethod: 'cash' }, n(w.db, 'SELECT revision FROM invoices WHERE id = ?', [w.invId]))));
+    ok(!canF.ok && canF.code === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor, `I8 PC2 invoices.cancel → dasselbe Nein (${canF.code})`);
+  }
+
+  { // I9 Retoure ohne Kommissionsweg („Back to Stock", „Write Off")
+    for (const [weg, disp] of [['primary', 'IN_STOCK'], ['fern', 'WRITE_OFF'], ['primary', 'UNDER_REPAIR']] as Array<[Weg, string]>) {
+      const w = await welt({ bezahlt: 1200 });
+      const vor = unberuehrt(w);
+      const r = await viaRechnung(weg, w, rechnungsEingabe(w, disp));
+      ok(!r.ok && r.code === 'CONSIGNMENT_RETURN_VIA_CONSIGNMENT' && unberuehrt(w) === vor,
+        `I9 ${weg} Retoure „${disp}" auf der Kommissions-Verkaufsrechnung → abgewiesen, nichts verändert (${r.code || 'ANGELEGT'})`);
+    }
+  }
+
+  { // I10 erlaubt bleibt: der Käufer zahlt; „Cancel Sale" danach wie bisher
+    const w = await welt();
+    nimm(w.db);
+    const pay = wirft(() => imHaus(() => useInvoiceStore.getState().recordPayment(w.invId, 500, 'cash')));
+    reload();
+    ok(pay === '' && n(w.db, 'SELECT paid_amount FROM invoices WHERE id = ?', [w.invId]) === 500 && kstatus(w.db, w.cid) === 'sold',
+      `I10 Zahlung des Käufers auf die Kommissions-Verkaufsrechnung → wie bisher (${pay || 'ok'})`);
+  }
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — consignment sale/return integrity: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }

@@ -26,6 +26,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useProductStore } from '@/stores/productStore';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
 import { useCustomerStore } from '@/stores/customerStore';
+import { assertNotConsignmentSaleInvoice } from '@/core/consignment/consignment-sale-link';
 import {
   INVOICE_CANCEL_REFUND_METHODS, InvoiceActionRejected, invoiceCancelBlocker, type InvoiceCancelInput,
 } from './invoice-cancel';
@@ -57,6 +58,9 @@ export function cancelInvoiceInHouse(input: InvoiceCancelInput, branchId: string
   const inv = query('SELECT id, status, invoice_number, paid_amount FROM invoices WHERE id = ? AND branch_id = ?',
     [input.invoiceId, branchId])[0];
   if (!inv) throw new InvoiceActionRejected('INVOICE_NOT_FOUND', 'no such invoice in this branch');
+  // CONSIGNMENT-INTEGRITY — die Verkaufsrechnung einer Kommission storniert nur „Cancel Sale" (sonst bliebe
+  // die Kommission verkauft und der Einkauf beim Einlieferer offen). Vor jeder anderen Regel und jedem Schreiben.
+  assertNotConsignmentSaleInvoice(input.invoiceId, 'It cannot be cancelled on its own.');
   const blocker = invoiceCancelBlocker(String(inv.status));
   if (blocker) throw new InvoiceActionRejected(blocker.code, blocker.message);
   // VAT-PERIOD-LOCK — eine gemeldete Rechnung wird nicht aus einem eingereichten Quartal storniert.

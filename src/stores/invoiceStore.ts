@@ -9,7 +9,7 @@ import { trackChange } from '@/core/sync/sync-service';
 import { assertLotLessStockAvailable, assertNoLegacyLotLessLines, giveBackStock, hasLotHistory, invoiceStockLines, isWholePieceQuantity, movesPieceStock, PIECE_QUANTITY_NOT_WHOLE, releaseLegacyDeduction, takeStock } from '@/core/lots/stock-contract';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 // CONSIGNMENT-INTEGRITY F7 — Kommissionsware nur über „Record Sale“ (dessen Erlaubnis gilt nur für seinen Artikel).
-import { assertNoConsignmentGoods } from '@/core/consignment/consignment-sale-link';
+import { assertConsignmentSaleInvoiceEdit, assertNoConsignmentGoods, assertNotConsignmentSaleInvoice } from '@/core/consignment/consignment-sale-link';
 import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, reconcileSaleStatus, assertLotsConsumable, assertLotTrackedLinesResolved, assertProductsSellable } from '@/core/lots/lot-queries';
 import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 // BULK METAL V1 — Bulk-Zeilen: Absicht → Zeile über den bestehenden Zeilenvertrag; Gewicht/COGS exakt zurück.
@@ -706,6 +706,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // CONSIGNMENT-INTEGRITY F7 — auch beim Ändern kommt keine Kommissionsware NEU auf eine Rechnung (neue oder
     // ersetzte Zeile). Eine fortgesetzte Zeile behält ihren Artikel.
     assertNoConsignmentGoods(lines.filter((_, i) => lineMatch[i] === null));
+    // CONSIGNMENT-INTEGRITY — die Verkaufsrechnung einer Kommission: Zeilen und Käufer gehören der Kommission.
+    assertConsignmentSaleInvoiceEdit(id, baseLines, lines, lineMatch, customerId !== undefined && customerId !== inv0.customerId);
     const baseById = new Map(baseLines.map(b => [b.id, b]));
     // BULK METAL V1 — eine bestehende Bulk-Zeile behält Lot, Gewicht und COGS (gesperrt); Preis, Typ und
     // Beschreibung bleiben änderbar. Korrektur von Lot/Gewicht: Zeile entfernen und neu anlegen.
@@ -1508,6 +1510,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   deleteInvoice: (id) => {
     const db = getDatabase();
     const now = new Date().toISOString();
+    // CONSIGNMENT-INTEGRITY — die Verkaufsrechnung einer Kommission verschwindet nicht an „Cancel Sale" vorbei
+    // (Kommission bliebe verkauft, der Einkauf beim Einlieferer offen).
+    assertNotConsignmentSaleInvoice(id, 'It cannot be deleted on its own.');
     // VAT-PERIOD-LOCK — eine gemeldete Rechnung verschwindet nicht aus einem eingereichten Quartal.
     assertInvoiceNotInClosedVatQuarter(id);
     // Bestandsschutz VOR jedem Write: eine stornierte Rechnung hat ihre Lose schon zurueckgegeben,

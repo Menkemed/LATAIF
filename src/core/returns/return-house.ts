@@ -29,7 +29,7 @@ import {
 // CONSIGNMENT-INTEGRITY F6 — „Return to Owner“ / „Keep“ einer verkauften Kommission laufen über DEN einen
 // Kommissionsweg (Wareneinsatz zurück, Einkauf/Verlust beim Einlieferer storniert bzw. Einstand = Auszahlung,
 // Kommission „returned“) — egal ob von der Rechnung oder von der Kommission aus angestoßen.
-import { saleConsignmentOfLine } from '@/core/consignment/consignment-sale-link';
+import { boundSaleConsignment, saleConsignmentOfLine } from '@/core/consignment/consignment-sale-link';
 import { returnConsignmentAfterSaleInHouse } from '@/core/consignment/consignment-reversal-house';
 import { ConsignmentActionRejected } from '@/core/consignment/consignment-finance';
 import { ReturnCancelRejected } from './return-cancel-house';
@@ -132,6 +132,14 @@ export function createReturnInHouse(
   // CONSIGNMENT-INTEGRITY F6 — von der Rechnung aus: derselbe Vertrag wie „Buyer Returns the Item“.
   if (CONSIGNMENT_DISPOSITIONS.includes(input.productDisposition) && !internal) {
     return viaConsignment(input, lines, branchId, beforeWrite);
+  }
+  // Die Verkaufsrechnung einer Kommission: kommt die Ware zurück, gehört sie dem Einlieferer — „Back to Stock",
+  // „Under Repair" oder „Write Off" ließen die Kommission verkauft und seinen Einkauf offen. Nur die beiden
+  // Kommissions-Warenfolgen (oben, über den Kommissionsweg).
+  const gebunden = internal ? null : boundSaleConsignment(input.invoiceId);
+  if (gebunden && lines.some((l) => l.productId === gebunden.productId)) {
+    throw new ReturnActionRejected('CONSIGNMENT_RETURN_VIA_CONSIGNMENT',
+      'This item was sold for a consignment — when it comes back, choose "Return to Owner" or "Keep (→ OWN)". Nothing was changed.');
   }
   beforeWrite?.();
 

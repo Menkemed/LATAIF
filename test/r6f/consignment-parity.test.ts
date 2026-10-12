@@ -95,6 +95,7 @@ const revHouse = await import('../../src/core/consignment/consignment-reversal-h
 const rules = await import('../../src/core/consignment/consignment-reversal.ts');
 const returnHouse = await import('../../src/core/returns/return-house.ts');
 const invoiceCancelHouse = await import('../../src/core/invoices/invoice-cancel-house.ts');
+const invRev = await import('../../src/core/invoices/invoice-reversal.ts');
 const { runSharedWrite } = await import('../../src/core/data/shared-write.ts');
 const { CommandSaveController } = await import('../../src/core/bridge/client-command-save.ts');
 
@@ -357,6 +358,15 @@ async function welt(o: { body?: Record<string, unknown>; sale?: SI | null; bezah
   return { db, cid, pid, invId, vor };
 }
 const crev = (db: Db, id: string): number => n(db, 'SELECT revision FROM consignments WHERE id = ?', [id]);
+/** CONSIGNMENT-INTEGRITY — Altbestand: eine gewöhnliche Retoure auf der Kommissions-Verkaufsrechnung, wie es sie VOR der
+ *  Sperre geben konnte (heute weist das Retourenhaus sie ab). Über den Store, so wie das Haus damals schrieb. */
+function altRetoure(w: Welt): void {
+  nimm(w.db);
+  const l = row(w.db, 'SELECT id, product_id, quantity, line_total, vat_amount FROM invoice_lines WHERE invoice_id = ?', [w.invId]);
+  imHaus(() => { useSalesReturnStore.getState().loadReturns(); useSalesReturnStore.getState().createReturn({ invoiceId: w.invId, refundMethod: 'cash', productDisposition: 'IN_STOCK',
+    lines: [{ invoiceLineId: String(l.id), productId: String(l.product_id), quantity: 1, unitPrice: Number(l.line_total) / (Number(l.quantity) || 1), vatAmount: Number(l.vat_amount) }] } as never); });
+  reload();
+}
 
 /** Was eine Rücknahme im Haus hinterlässt — ohne Kennungen, Zeitpunkte und Urheber (die unterscheiden sich gewollt). */
 function bild(db: Db, cid: string) {
@@ -520,7 +530,10 @@ marker('CENTRAL_UI_R6F_CONSIGNMENT_RETURN_PARITY_PROVED');
   // Die Ware kam schon über eine gewöhnliche Retoure zurück.
   const w4 = await welt();
   const line = s(w4.db, 'SELECT id FROM invoice_lines WHERE invoice_id = ?', [w4.invId]);
-  const gen = await primary(() => returnHouse.createReturnOnPrimary({ invoiceId: w4.invId, lines: [{ invoiceLineId: line, quantity: 1 }], refundMethod: 'cash', productDisposition: 'IN_STOCK', refundNow: false }));
+  const heute = await primary(() => returnHouse.createReturnOnPrimary({ invoiceId: w4.invId, lines: [{ invoiceLineId: line, quantity: 1 }], refundMethod: 'cash', productDisposition: 'IN_STOCK', refundNow: false }));
+  ok(heute.code === 'CONSIGNMENT_RETURN_VIA_CONSIGNMENT', `STATE heute: eine gewöhnliche Retoure der Kommissionsware wird abgewiesen (${heute.code})`);
+  altRetoure(w4);   // Altbestand von vor der Sperre
+  const gen = { ok: true };
   const vor4 = stand(w4);
   const doppelt = await rueckgabe('fern', w4, { disposition: 'RETURN_TO_OWNER' });
   ok(gen.ok && doppelt.code === 'CONSIGNMENT_ALREADY_RETURNED' && stand(w4) === vor4,
@@ -691,7 +704,10 @@ marker('CENTRAL_UI_R6F_CONSIGNMENT_CANCEL_SALE_PARITY_PROVED');
   // Die Rechnung wurde vorher schon über „Cancel Invoice" storniert: sie wird nicht ein zweites Mal angefasst.
   for (const weg of ['primary', 'fern'] as const) {
     const w = await welt();
-    const c = await primary(() => invoiceCancelHouse.cancelInvoiceOnPrimary({ invoiceId: w.invId, refundMethod: 'cash' }));
+    const heute = await primary(() => invoiceCancelHouse.cancelInvoiceOnPrimary({ invoiceId: w.invId, refundMethod: 'cash' }));
+    ok(heute.code === 'CONSIGNMENT_INVOICE_LOCKED', `CANCEL heute (${weg}): „Cancel Invoice“ auf der Kommissions-Verkaufsrechnung → abgewiesen (${heute.code})`);
+    // Altbestand von vor der Sperre: dieselbe Grundlage, die „Cancel Invoice“ damals fuhr.
+    const c = await primary(() => imHaus(() => invRev.reverseInvoiceInHouse(w.invId, 'branch-main')));
     const umkehr = n(w.db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'INVOICE' AND reverses_entry_id IS NOT NULL");
     const aus = await storno(weg, w);
     ok(c.ok && aus.ok && aus.value.invoiceReversed !== true
@@ -738,7 +754,8 @@ marker('CENTRAL_UI_R6F_CONSIGNMENT_CANCEL_SALE_STATE_PROVED');
   // Eine fremde Retoure an der Rechnung sperrt — erst sie stornieren.
   const w4 = await welt();
   const line = s(w4.db, 'SELECT id FROM invoice_lines WHERE invoice_id = ?', [w4.invId]);
-  await primary(() => returnHouse.createReturnOnPrimary({ invoiceId: w4.invId, lines: [{ invoiceLineId: line, quantity: 1 }], refundMethod: 'cash', productDisposition: 'IN_STOCK', refundNow: false }));
+  void line;
+  altRetoure(w4);   // Altbestand: eine fremde (gewöhnliche) Retoure von vor der Sperre
   const vor4 = stand(w4);
   const f4 = await storno('fern', w4);
   const p4 = await storno('primary', w4);
