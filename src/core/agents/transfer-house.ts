@@ -125,6 +125,10 @@ function umwandeln(ids: readonly string[], billTo: TransferBillTo, branchId: str
   // Rechnung, Zahlungen, umgezogene Abrechnungszeilen, Vorgang), bricht die Umwandlung ab — der Aufrufer
   // (`amPrimary` bzw. der Fernbefehl) rollt dann ALLES zurück. Sonst wäre sie hier umgewandelt und auf dem Spiegel nicht.
   const abgleich = watchSyncTracks(combined ? 'convert transfers' : 'convert transfer');
+  // AGENT-CONVERSION-LEDGER — ebenso eine Buchung, die die Hausfunktionen in `safePost` abfangen: der Storno der
+  // alten Verkaufsforderung (je Vorgang) und der Abrechnungszahlungen (je Zeile), aber auch Rechnung und umgezogene
+  // Zahlungen. Ein gescheiterter Storno ließ sonst die alte Forderung NEBEN der neuen Rechnung stehen (doppelt).
+  const buchung = watchLedgerPosts(combined ? 'convert transfers' : 'convert transfer');
   let customerId: string;
   let customerCreated = false;
   if ('autoCustomer' in billTo) {
@@ -150,6 +154,7 @@ function umwandeln(ids: readonly string[], billTo: TransferBillTo, branchId: str
   const invoice = combined
     ? as.convertTransfersToInvoice([...ids], customerId)
     : as.convertTransferToInvoice(ids[0], customerId);
+  buchung();
   abgleich();
   return { invoiceId: invoice.id, customerId, customerCreated };
 }

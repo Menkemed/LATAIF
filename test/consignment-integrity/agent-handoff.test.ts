@@ -998,6 +998,15 @@ function umwBild(db: Db, L: KLage): string {
     buch: { zeilen: lc(db), konten: konten(db) },
   });
 }
+const SALDO = "ROUND(COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0), 3)";
+/** Alle Forderungen im Hauptbuch (die Testwelt hat sonst keine). */
+const arSaldo = (db: Db): number => n(db, `SELECT ${SALDO} FROM ledger_entries WHERE account = 'ACCOUNTS_RECEIVABLE'`);
+/** Die Forderung aus dem Agentenverkauf und den Abrechnungszahlungen dieser Vorgänge. */
+const altForderung = (db: Db, L: KLage): number => n(db,
+  `SELECT ${SALDO} FROM ledger_entries WHERE account = 'ACCOUNTS_RECEIVABLE' AND source_module IN ('AGENT_TRANSFER_SOLD', 'AGENT_SETTLEMENT')
+     AND source_id IN (${[...L.ts, ...L.payIds].map(() => '?').join(',')})`, [...L.ts, ...L.payIds]);
+const offenAufRechnung = (db: Db, L: KLage): number => n(db,
+  `SELECT ROUND(COALESCE(SUM(gross_amount - paid_amount), 0), 3) FROM invoices WHERE id IN (SELECT DISTINCT invoice_id FROM agent_transfers WHERE id IN (${L.ts.map(() => '?').join(',')}))`, L.ts);
 const vollK = (db: Db, L: KLage): string => S({ v: L.pids.map((p) => voll(db, p)), inv: all(db, 'SELECT * FROM invoices ORDER BY id'),
   pay: all(db, 'SELECT * FROM payments ORDER BY id'), lines: n(db, 'SELECT COUNT(*) FROM invoice_lines'), kunden: n(db, 'SELECT COUNT(*) FROM customers') });
 const WEGE: Array<{ name: string; pids: string[]; zahlungen: number[][]; umwandeln: (L: KLage) => Promise<Ausgang> }> = [
@@ -1024,6 +1033,10 @@ for (const w of WEGE) {
     && n(L.spiegel, 'SELECT COUNT(*) FROM agent_settlement_payments') === 0 && n(L.prim, 'SELECT COUNT(*) FROM agent_settlement_payments') === 0
     && n(L.prim, `SELECT COUNT(*) FROM payments WHERE invoice_id = (SELECT invoice_id FROM agent_transfers WHERE id = ?)`, [L.ts[0]]) > 0 && balanced(L.spiegel),
     `K ${w.name}: ${L.payIds.length} Abrechnungszeilen umgezogen → auf dem Spiegel keine verwaiste Zeile, Rechnung/Zahlungen/Vorgänge/Hauptbuch wie am Primary (${u.code || 'ok'}; ${[...s0.abgewiesen, ...s1.abgewiesen].join('; ') || 'keine Abweisung'}; Spiegel ${n(L.spiegel, 'SELECT COUNT(*) FROM agent_settlement_payments')} Zeilen)`);
+  // Forderungsumbuchung: die alte Verkaufsforderung und die Abrechnungszahlungen sind storniert, offen ist genau, was
+  // die Rechnung offen hat — keine doppelte Forderung.
+  ok(u.ok && altForderung(L.prim, L) === 0 && arSaldo(L.prim) === offenAufRechnung(L.prim, L),
+    `K ${w.name}: Forderung umgebucht — alte Agenten-Forderung netto 0, Forderungen gesamt ${arSaldo(L.prim)} = offen auf der Rechnung ${offenAufRechnung(L.prim, L)}`);
   // K2 — der Lösch-Eintrag einer Abrechnungszeile scheitert → die ganze Umwandlung geht zurück
   const L2 = await zumUmwandeln(w.pids, w.zahlungen);
   nimm(L2.prim);
@@ -1034,6 +1047,19 @@ for (const w of WEGE) {
   nimm(L2.prim);
   ok(!u2.ok && /sync change-log entry could not be written/.test(u2.code) && vollK(L2.prim, L2) === vor && balanced(L2.prim),
     `K ${w.name}: Abgleich-Eintrag einer umgezogenen Zeile scheitert → ganze Umwandlung zurück (Rechnung, Zahlungen, Abrechnungszeilen, Vorgänge, Konten, Changelog, Protokoll unverändert) (${u2.code || 'UMGEWANDELT'})`);
+  // K3 — ein Storno der Umwandlung scheitert (in `safePost` abgefangen) → die ganze Umwandlung geht zurück, keine doppelte Forderung
+  for (const [stelle, quelle] of [['Storno der alten Verkaufsforderung', 'AGENT_TRANSFER_SOLD'], ['Storno einer Abrechnungszahlung', 'AGENT_SETTLEMENT']]) {
+    const L3 = await zumUmwandeln(w.pids, w.zahlungen);
+    nimm(L3.prim);
+    const vor3 = vollK(L3.prim, L3);
+    const ar3 = arSaldo(L3.prim);
+    L3.prim.run(`CREATE TRIGGER k_led BEFORE INSERT ON ledger_entries WHEN NEW.source_module = '${quelle}' AND NEW.reverses_entry_id IS NOT NULL BEGIN SELECT RAISE(ABORT, 'INJECTED_LEDGER_FAILURE'); END`);
+    const u3 = await w.umwandeln(L3);
+    L3.prim.run('DROP TRIGGER IF EXISTS k_led');
+    nimm(L3.prim);
+    ok(!u3.ok && /a ledger posting failed inside this action/.test(u3.code) && vollK(L3.prim, L3) === vor3 && arSaldo(L3.prim) === ar3 && balanced(L3.prim),
+      `K ${w.name}: ${stelle} scheitert → ganze Umwandlung zurück, keine doppelte Forderung (Rechnung, Vorgänge, Zahlungen, Stück, Hauptbuch ${arSaldo(L3.prim)} = ${ar3}, Changelog, Protokoll unverändert) (${(u3.code || 'UMGEWANDELT').slice(0, 120)})`);
+  }
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — consignment agent handoff: ${PASS} passed, ${fails.length} failed`);
