@@ -225,15 +225,18 @@ export function returnConsignmentAfterSaleInHouse(
   // 1. Die Retoure — über das Retourenhaus: Preis und Steuer aus der Rechnung, Gutschrift, Erstattung im
   //    gewählten Weg (nur was der Käufer bezahlt hat, fließt zurück), Warenfolge, Nummer aus dem Zähler.
   //    Der Vermerk ist derselbe wie bisher — an ihm erkennt „Cancel Sale" die Retoure wieder.
+  //    CONSIGNMENT-INTEGRITY — GENAU diese Kommission (nicht jede Kommission des Artikels).
+  const extraNotes = typeof input.notes === 'string' ? input.notes.trim() : '';
   const { returnId } = createReturnInHouse({
     invoiceId,
     lines: [{ invoiceLineId: lineId, quantity: rest }],
     refundMethod,
     productDisposition: disposition,
     reason: reason || undefined,
-    notes: postSaleReturnMarker(consignmentNumber),
+    notes: postSaleReturnMarker(consignmentNumber) + (extraNotes ? ` — ${extraNotes}` : ''),
+    staffId: input.staffId || undefined,
     refundNow: true,
-  }, branchId);
+  }, branchId, undefined, { consignmentId: id });
 
   // 2. Der Wareneinsatz des Verkaufs zurück (DR INVENTORY / CR COGS, zum Einstand der Rechnungszeile).
   //    Das Retourenhaus tut das nur bei „In Stock"; hier gilt es für BEIDE Wege: bei „Return to Owner"
@@ -352,7 +355,7 @@ export function cancelConsignmentSaleInHouse(
   //    REJECTED. Seine Sperren gelten auch hier (ausgezahlte Erstattung, verbrauchtes Guthaben, Owner).
   for (const returnId of eigene) {
     cancelReturnInHouse(returnId, `Consignment sale cancelled (${consignmentNumber})`, actor, branchId, undefined,
-      { legacyKeepRestoredByCaller: true });
+      { viaConsignmentCancelSale: id });
   }
 
   // 2. Die Käuferrechnung — über die Grundlage, nicht mehr direkt über `updateInvoice`. Keine offene

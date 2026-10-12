@@ -43,3 +43,26 @@ Hover-Karte und Verkauf nutzen dieselbe Regel und zeigen deshalb denselben Wert.
 `createReturnInHouse` verlangt für `RETURN_TO_OWNER` nur, dass **eine** Zeile Kommissionsware ist. `applyDisposition` setzt dann **jede** Zeile auf `returned` (Ware verlässt das System), auch eigene Ware auf derselben Rechnung.
 
 Für `KEEP_AS_OWN` ist das im Cleanup geschlossen (jede Zeile muss Kommissionsware sein). Für `RETURN_TO_OWNER` ist es noch offen.
+
+## F5–F7 — Kommissionsware: Doppelverkauf, zwei Rückgabewege, Storno, Sync (hoch) — BEHOBEN
+
+> Behoben im Consignment-Integrity-Bundle. Tests: `test/consignment-integrity/consignment-integrity.test.ts` (Gegenprobe gegen den alten Code: 45 von 52 Prüfungen rot).
+
+- **Zuordnung:** Rechnungszeile → Kommission nur über Rechnung **und** Artikel (`saleConsignmentOfLine`, genau eine, sonst nichts). `consignments.invoice_id` setzt nur „Record Sale" (eigene Rechnung, eine Zeile) und löscht nur „Cancel Sale".
+- **F7 Doppelverkauf:** Kommissionsware auf einer gewöhnlichen Rechnung (Anlegen, Ändern als neue Zeile, PC2 `invoices.create`) → `CONSIGNMENT_SELL_VIA_CONSIGNMENT`. Nur „Record Sale" darf sie verkaufen (Erlaubnis nur für seinen Artikel). In der Maske „New Invoice" ist Kommissionsware nicht auswählbar.
+- **F6 zwei Rückgabewege:** „Return to Owner" / „Keep" von der Rechnung aus laufen über denselben Kommissionsweg wie „Buyer Returns the Item": gleicher Endzustand, gleiche Buchungen (Wareneinsatz zurück, Einkauf/Verlust beim Einlieferer storniert bzw. Einstand = Auszahlung). Nicht ausdrückbar und deshalb abgewiesen: mehrere Zeilen, Teilmenge, „später erstatten", keine oder mehrdeutige Zuordnung.
+- **Storno:**
+  - Eine Rückgabe an den Einlieferer wird nur mit „Cancel Sale" umgekehrt; „Cancel Return" → `RETURN_VIA_CANCEL_SALE`.
+  - Ohne Snapshot (Altbestand) → `RETURN_RTO_NOT_RESTORABLE`.
+  - Eine seither veränderte oder fremde Kommission → `RETURN_RTO_CONSIGNMENT_CHANGED`.
+- **Snapshot:** `sales_return_lines.rto_consignment_id`, `rto_prev_status` und `rto_snapshot_at` (Sync-Freigabe aufgenommen).
+- **Nur die zugeordnete Kommission:** `applyDisposition` ändert genau die eine Kommission (vorher jede passende Kommission des Artikels).
+- **Sync:** Jede Kommissionsänderung durch „Return to Owner" oder „Keep" wird gemeldet.
+
+**Bewusst nicht Teil:**
+- Den Status „vor der Rückgabe" (`sold`) stellt kein Storno wieder her. Der einzige Rückweg „Cancel Sale" nimmt den ganzen Verkauf zurück (→ `active`), weil die Rückgabe die Verbindlichkeit beim Einlieferer storniert hat und es dafür keinen Wiederherstellungsvertrag gibt.
+- Offen bleibt:
+  - Altfälle „Return to Owner" aus der Rechnungsmaske (Kommission `RETURNED_TO_OWNER`) lassen sich weder stornieren noch per „Cancel Sale" aufräumen.
+  - Ändern einer Kommissions-Verkaufsrechnung (Preis/Menge der Kommissionszeile) gleicht die Kommission nicht nach.
+  - Übergabe von Kommissionsware an einen Agenten.
+  - Angebot/Auftrag mit Kommissionsware scheitern erst beim Umwandeln.

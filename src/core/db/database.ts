@@ -2518,6 +2518,12 @@ function runMigrations(database: Database): void {
     `ALTER TABLE sales_return_lines ADD COLUMN keep_prev_stock_status TEXT`,
     `ALTER TABLE sales_return_lines ADD COLUMN keep_prev_consignments TEXT`,
     `ALTER TABLE sales_return_lines ADD COLUMN keep_lot_id TEXT`,
+    // CONSIGNMENT-INTEGRITY — „Return to Owner“: GENAU die Kommission dieses Verkaufs und ihr Status VOR der Rückgabe,
+    // beim Anlegen der Retoure je Zeile festgehalten. Die Kennung ist zugleich die strukturierte Herkunft („diese
+    // Retoure gehört zur Kommission X“) — ohne sie ist eine Rückgabe an den Einlieferer nicht exakt umkehrbar (Altbestand).
+    `ALTER TABLE sales_return_lines ADD COLUMN rto_snapshot_at TEXT`,
+    `ALTER TABLE sales_return_lines ADD COLUMN rto_consignment_id TEXT`,
+    `ALTER TABLE sales_return_lines ADD COLUMN rto_prev_status TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

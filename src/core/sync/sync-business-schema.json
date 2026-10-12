@@ -1391,6 +1391,9 @@
         "product_id",
         "quantity",
         "return_id",
+        "rto_consignment_id",
+        "rto_prev_status",
+        "rto_snapshot_at",
         "unit_price",
         "vat_amount"
       ],

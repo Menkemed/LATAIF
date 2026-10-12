@@ -213,7 +213,10 @@ export function InvoiceCreate() {
       p.stockStatus !== 'consignment_reserved' &&
       // with_agent = physisch beim Agenten, nicht im Laden → nicht direkt
       // verkaufbar (sonst Doppel-Verplanung). Erst Agent-Return → in_stock.
-      p.stockStatus !== 'with_agent'
+      p.stockStatus !== 'with_agent' &&
+      // CONSIGNMENT-INTEGRITY F7 — Kommissionsware verkauft nur „Record Sale“ auf der Kommission
+      // (Einlieferer-Verbindlichkeit, Provision, Verknüpfung). Das Haus weist sie hier ohnehin ab.
+      p.sourceType !== 'CONSIGNMENT' && p.stockStatus !== 'consignment'
     );
     // Phase 7: "stock N" zeigt Lot-Total (echte verfuegbare Stuecke) statt
     // legacy product.quantity. Eine Query fuer alle Produkte (Bulk).

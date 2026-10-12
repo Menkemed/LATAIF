@@ -26,6 +26,15 @@ import {
   CONSIGNMENT_DISPOSITIONS, ReturnActionRejected, assertReturnCreateValues, refundsImmediately,
   type ReturnCreateInput,
 } from './return-create';
+// CONSIGNMENT-INTEGRITY F6 — „Return to Owner“ / „Keep“ einer verkauften Kommission laufen über DEN einen
+// Kommissionsweg (Wareneinsatz zurück, Einkauf/Verlust beim Einlieferer storniert bzw. Einstand = Auszahlung,
+// Kommission „returned“) — egal ob von der Rechnung oder von der Kommission aus angestoßen.
+import { saleConsignmentOfLine } from '@/core/consignment/consignment-sale-link';
+import { returnConsignmentAfterSaleInHouse } from '@/core/consignment/consignment-reversal-house';
+import { ConsignmentActionRejected } from '@/core/consignment/consignment-finance';
+import { ReturnCancelRejected } from './return-cancel-house';
+import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
+import { PurchaseLifecycleRejected } from '@/core/purchases/purchase-lifecycle-house';
 
 /** Die Urteile, die die Store-Funktionen wirklich fällen — als Liste, nicht als „klingt fachlich". */
 const VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
@@ -60,7 +69,11 @@ export interface ReturnCreated { returnId: string }
  * Retoure nicht (vorher blieb sie ohne Erstattung stehen). `beforeWrite` ist der letzte Wächter vor
  * dem ersten Schreiben (fern: die gesehene Fassung).
  */
-export function createReturnInHouse(input: ReturnCreateInput, branchId: string, beforeWrite?: () => void): ReturnCreated {
+export function createReturnInHouse(
+  input: ReturnCreateInput, branchId: string, beforeWrite?: () => void,
+  // Nur der Kommissionsweg selbst: GENAU die Kommission dieses Verkaufs (kein Teil des Fernrumpfs).
+  internal?: { consignmentId: string },
+): ReturnCreated {
   assertReturnCreateValues(input);
   const inv = query('SELECT id, status FROM invoices WHERE id = ? AND branch_id = ?', [input.invoiceId, branchId])[0];
   if (!inv) throw new ReturnActionRejected('INVOICE_NOT_FOUND', 'no such invoice in this branch');
@@ -116,6 +129,10 @@ export function createReturnInHouse(input: ReturnCreateInput, branchId: string, 
     && jointInvoiceLines(lines.map((l) => l.invoiceLineId)).length > 0) {
     throw new ReturnActionRejected(JOINT_BLOCK.code, JOINT_BLOCK.salesReturnDisposition);
   }
+  // CONSIGNMENT-INTEGRITY F6 — von der Rechnung aus: derselbe Vertrag wie „Buyer Returns the Item“.
+  if (CONSIGNMENT_DISPOSITIONS.includes(input.productDisposition) && !internal) {
+    return viaConsignment(input, lines, branchId, beforeWrite);
+  }
   beforeWrite?.();
 
   const buchung = watchLedgerPosts('return');
@@ -130,6 +147,7 @@ export function createReturnInHouse(input: ReturnCreateInput, branchId: string, 
       reason: input.reason,
       notes: input.notes,
       staffId: input.staffId,
+      consignmentId: internal?.consignmentId,
       lines,
     }).id;
     if (refundsImmediately(input)) {
@@ -142,6 +160,63 @@ export function createReturnInHouse(input: ReturnCreateInput, branchId: string, 
   }
   buchung();
   return { returnId };
+}
+
+/**
+ * CONSIGNMENT-INTEGRITY F6 — „Return to Owner“ / „Keep“ von der Rechnung aus. Früher wirkten sie hier anders als
+ * von der Kommission aus: kein Wareneinsatz zurück, Einkauf und Verlust beim Einlieferer blieben offen (Return to
+ * Owner) bzw. das Los stand zum Verkaufspreis (Keep), und JEDE Kommission des Artikels wurde umgeschrieben.
+ * Jetzt: die autoritativ zugeordnete Kommission (Rechnung + Artikel, genau eine) und dann DIESELBE Hausfolge wie
+ * „Buyer Returns the Item“. Was diese Folge nicht ausdrücken kann, wird vor dem ersten Schreiben abgewiesen.
+ */
+function viaConsignment(
+  input: ReturnCreateInput,
+  lines: ReadonlyArray<{ invoiceLineId: string; quantity: number }>,
+  branchId: string,
+  beforeWrite?: () => void,
+): ReturnCreated {
+  const nein = (code: string, m: string): never => { throw new ReturnActionRejected(code, m); };
+  if (lines.length !== 1) {
+    nein('CONSIGNMENT_RETURN_ONE_ITEM', 'a consigned item comes back on its own — return it without other lines');
+  }
+  const link = saleConsignmentOfLine(lines[0].invoiceLineId, branchId);
+  if (link.kind === 'ambiguous') {
+    nein('CONSIGNMENT_RETURN_AMBIGUOUS', `this line belongs to ${link.count} consignments — nothing was changed`);
+  }
+  if (link.kind !== 'one') {
+    return nein('CONSIGNMENT_RETURN_NOT_LINKED',
+      'this sale is not linked to its consignment (it was not recorded with "Record Sale") — return to owner / keep as own are not possible here');
+  }
+  const rest = Number(query(
+    `SELECT il.quantity - COALESCE((SELECT SUM(srl.quantity) FROM sales_return_lines srl JOIN sales_returns r ON r.id = srl.return_id
+                                     WHERE srl.invoice_line_id = il.id AND r.status != 'REJECTED'), 0) AS rest
+       FROM invoice_lines il WHERE il.id = ?`,
+    [lines[0].invoiceLineId],
+  )[0]?.rest ?? 0);
+  if (Math.abs(lines[0].quantity - rest) > 0.005) {
+    nein('CONSIGNMENT_RETURN_WHOLE_ITEM', 'a consigned item comes back as a whole — return the full remaining quantity');
+  }
+  if (!refundsImmediately(input)) {
+    nein('CONSIGNMENT_RETURN_REFUNDS_NOW', 'a consigned item that comes back is refunded at once — choose "Refund now"');
+  }
+  beforeWrite?.();
+  try {
+    const out = returnConsignmentAfterSaleInHouse(link.id, {
+      disposition: input.productDisposition as 'RETURN_TO_OWNER' | 'KEEP_AS_OWN',
+      refundMethod: input.refundMethod,
+      reason: input.reason,
+      notes: input.notes,
+      staffId: input.staffId,
+    }, branchId);
+    return { returnId: out.returnId };
+  } catch (e) {
+    // Ein fachliches Nein des Kommissionswegs bleibt ein fachliches Nein — am Primary wie fern (`returns.create`).
+    if (e instanceof ConsignmentActionRejected || e instanceof ReturnCancelRejected
+      || e instanceof InvoiceActionRejected || e instanceof PurchaseLifecycleRejected) {
+      throw new ReturnActionRejected(e.code, e.message);
+    }
+    throw e;
+  }
 }
 
 /** Die Listen, die die Seite danach zeigt — auch nach einem Rollback. */

@@ -22,6 +22,10 @@ export interface ConsignmentReturnAfterSaleInput {
   disposition: PostSaleDisposition;
   refundMethod?: ReturnRefundMethod;
   reason?: string;
+  /** CONSIGNMENT-INTEGRITY F6 — nur wenn die Rückgabe von der Rechnung aus kommt: Notiz und Mitarbeiter der
+   *  Retourenmaske gehen nicht verloren. Kein Teil des Fernrumpfs `consignments.return_after_sale`. */
+  notes?: string;
+  staffId?: string;
 }
 
 /**

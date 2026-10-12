@@ -77,6 +77,14 @@ export const RETURN_KEEP_NOT_RESTORABLE = 'RETURN_KEEP_NOT_RESTORABLE';
 export const RETURN_KEEP_CONSIGNMENT_CHANGED = 'RETURN_KEEP_CONSIGNMENT_CHANGED';
 /** Was ein Keep selbst in die Kommission schrieb (Retourenhaus bzw. Kommissionsmaske). */
 const KEEP_CONSIGNMENT_STATUSES = ['RETURNED', 'returned'];
+/** CONSIGNMENT-INTEGRITY — eine Rückgabe an den Einlieferer läuft nur über „Cancel Sale" der Kommission. */
+export const RETURN_VIA_CANCEL_SALE = 'RETURN_VIA_CANCEL_SALE';
+/** „Return to Owner" von VOR dem Snapshot: welche Kommission betroffen war, ist nicht festgehalten. */
+export const RETURN_RTO_NOT_RESTORABLE = 'RETURN_RTO_NOT_RESTORABLE';
+/** Die Kommission der Rückgabe ist nicht mehr im Zustand danach (oder es ist eine andere). */
+export const RETURN_RTO_CONSIGNMENT_CHANGED = 'RETURN_RTO_CONSIGNMENT_CHANGED';
+/** Was eine Rückgabe an den Einlieferer in die Kommission schreibt (Retourenhaus, danach der Kommissionsweg). */
+const RTO_CONSIGNMENT_STATUSES = ['returned', 'RETURNED_TO_OWNER'];
 
 /** Wer storniert: fern der geprüfte Absender, am Primary die Sitzung. */
 export interface ReturnCancelActor {
@@ -134,6 +142,20 @@ export function returnCancelability(r: ReturnCancelView): ReturnCancelability {
   if (guthabenVerbraucht(r.id)) {
     return { canCancel: false, blockReason: 'The store credit from this return has already been used.', needsStockWarning: false };
   }
+  // CONSIGNMENT-INTEGRITY — dieselbe Sperre wie die Hausfolge (Sperre 3b), mit ihren Worten.
+  if (r.productDisposition === 'RETURN_TO_OWNER') {
+    const mitSnapshot = query(
+      'SELECT 1 FROM sales_return_lines WHERE return_id = ? AND rto_snapshot_at IS NOT NULL AND rto_consignment_id IS NOT NULL LIMIT 1',
+      [r.id],
+    ).length > 0;
+    return {
+      canCancel: false,
+      blockReason: mitSnapshot
+        ? 'This return sent a consignment item back to its owner — undo it with "Cancel Sale" on the consignment.'
+        : 'This return-to-owner was recorded before its consignment was saved with it — it cannot be undone automatically.',
+      needsStockWarning: false,
+    };
+  }
   return { canCancel: true, blockReason: null, needsStockWarning: unsichereWarenfolge(r.productDisposition || 'IN_STOCK') };
 }
 
@@ -147,7 +169,9 @@ interface KeepSnapshot {
   consignments: Array<{ id: string; status: string }>;
   lotId: string | null;
 }
-interface RueckLine { productId?: string; quantity: number; invoiceLineId?: string; keep?: KeepSnapshot | null }
+/** CONSIGNMENT-INTEGRITY — „Return to Owner": GENAU die Kommission dieses Verkaufs und ihr Status davor. */
+interface RtoSnapshot { at: string; consignmentId: string; prevStatus: string }
+interface RueckLine { productId?: string; quantity: number; invoiceLineId?: string; keep?: KeepSnapshot | null; rto?: RtoSnapshot | null }
 
 // Best-effort Revert. KEEP_AS_OWN/RETURN_TO_OWNER nicht voll reversibel — Logwarnung statt
 // stillschweigend zerstören. Läuft in der Transaktion des Aufrufers → atomar mit dem Rest.
@@ -233,8 +257,8 @@ function revertDisposition(
       console.warn(`[Return] reverted KEEP_AS_OWN for product ${line.productId} — purchase_price/source_type still need manual cleanup`);
       syncProductQuantity(line.productId);
     } else if (disposition === 'RETURN_TO_OWNER') {
-      // Nicht voll reversibel (Consignment-Status zurueck war auf RETURNED_TO_OWNER).
-      console.warn(`[Return] cannot fully revert ${disposition} disposition for product ${line.productId} — manual cleanup may be needed`);
+      // CONSIGNMENT-INTEGRITY — nur noch über „Cancel Sale" erreichbar (Sperre 3b): das setzt Artikel und
+      // Kommission danach selbst vollständig auf den Stand vor dem Verkauf. Hier gibt es nichts zu tun.
     }
     trackProductRow(line.productId);
   }
@@ -272,9 +296,10 @@ export function cancelReturnInHouse(
   actor: ReturnCancelActor,
   branchId: string,
   expectedRevision?: number,
-  // Nur „Cancel Sale" der Kommission: setzt Artikel und Kommission danach selbst vollständig neu — darf
-  // deshalb auch ein Keep ohne Snapshot (Altbestand) zurücknehmen. Jeder andere Weg nicht.
-  opts: { legacyKeepRestoredByCaller?: boolean } = {},
+  // Nur „Cancel Sale" der Kommission (mit IHRER Kennung): setzt Artikel und Kommission danach selbst vollständig
+  // neu — darf deshalb auch ein Keep ohne Snapshot (Altbestand) und eine Rückgabe an den Einlieferer zurücknehmen.
+  // Jeder andere Weg nicht.
+  opts: { viaConsignmentCancelSale?: string } = {},
 ): ReturnCancelled {
   if (isClientMode()) {
     throw new ReturnCancelRejected(RETURN_PRIMARY_ONLY, 'a return is cancelled on the main computer — this window has no business database');
@@ -322,7 +347,7 @@ export function cancelReturnInHouse(
   const vatCorrected = Number(r.vat_corrected ?? 0);
   const lines: RueckLine[] = query(
     `SELECT product_id, quantity, invoice_line_id, keep_snapshot_at, keep_prev_source_type, keep_prev_purchase_price,
-            keep_prev_stock_status, keep_prev_consignments, keep_lot_id
+            keep_prev_stock_status, keep_prev_consignments, keep_lot_id, rto_snapshot_at, rto_consignment_id, rto_prev_status
        FROM sales_return_lines WHERE return_id = ? ORDER BY rowid`, [returnId])
     .map((l) => ({
       productId: (l.product_id as string | null) || undefined,
@@ -335,6 +360,11 @@ export function cancelReturnInHouse(
         stockStatus: (l.keep_prev_stock_status as string | null) ?? null,
         consignments: JSON.parse(String(l.keep_prev_consignments ?? '[]')) as Array<{ id: string; status: string }>,
         lotId: (l.keep_lot_id as string | null) ?? null,
+      } : null,
+      rto: l.rto_snapshot_at && l.rto_consignment_id ? {
+        at: String(l.rto_snapshot_at),
+        consignmentId: String(l.rto_consignment_id),
+        prevStatus: String(l.rto_prev_status ?? ''),
       } : null,
     }))
     // Rückwärts: hat dieselbe Retoure einen Artikel zweimal, stellt die erste Zeile den ältesten Stand her.
@@ -369,13 +399,38 @@ export function cancelReturnInHouse(
       }
     }
   }
+  // Sperre 3b — CONSIGNMENT-INTEGRITY „Return to Owner": Die Rückgabe an den Einlieferer hat dessen Einkauf
+  // (Verbindlichkeit) und die Verlust-Ausgabe storniert und den Wareneinsatz zurückgebucht (eine Folge mit dem
+  // Kommissionsweg). Eine bloße Rücknahme der Retoure stellte davon nur die Retoure wieder her — Rechnung offen,
+  // Einkauf storniert, Lager im Hauptbuch negativ. Umgekehrt wird sie deshalb NUR mit „Cancel Sale" der Kommission,
+  // das den ganzen Verkauf zurücknimmt. Ohne Snapshot (Altbestand) ist nicht einmal sicher, welche Kommission betroffen
+  // war — dann wird nichts geraten.
+  if (disposition === 'RETURN_TO_OWNER') {
+    const rtoLines = lines.filter((l) => !!l.productId);
+    if (!opts.viaConsignmentCancelSale) {
+      if (rtoLines.some((l) => !!l.rto)) {
+        throw new ReturnCancelRejected(RETURN_VIA_CANCEL_SALE,
+          'This return sent a consignment item back to its owner. It is undone with "Cancel Sale" on the consignment, not here. Nothing was changed.');
+      }
+      throw new ReturnCancelRejected(RETURN_RTO_NOT_RESTORABLE,
+        'This return-to-owner was recorded before its consignment was saved with it — it cannot be undone automatically. Nothing was changed.');
+    }
+    for (const line of rtoLines) {
+      if (!line.rto) continue;   // Altbestand: „Cancel Sale" setzt Artikel und Kommission selbst vollständig neu
+      const jetzt = String(query('SELECT status FROM consignments WHERE id = ?', [line.rto.consignmentId])[0]?.status ?? '');
+      if (line.rto.consignmentId !== opts.viaConsignmentCancelSale || !RTO_CONSIGNMENT_STATUSES.includes(jetzt)) {
+        throw new ReturnCancelRejected(RETURN_RTO_CONSIGNMENT_CHANGED,
+          `Cannot cancel this return: its consignment changed since (now "${jetzt || 'missing'}"). Nothing was changed.`);
+      }
+    }
+  }
   // Sperre 4 — „Keep as own": nur mit vollständigem Snapshot exakt umkehrbar, und nur, solange nichts
   // davon seither benutzt wurde. Ohne Snapshot (Altbestand) wird nichts geraten.
   if (disposition === 'KEEP_AS_OWN') {
     for (const line of lines) {
       if (!line.productId) continue;
       if (!line.keep) {
-        if (opts.legacyKeepRestoredByCaller) continue;
+        if (opts.viaConsignmentCancelSale) continue;
         throw new ReturnCancelRejected(RETURN_KEEP_NOT_RESTORABLE,
           'This keep-as-own return was recorded before its previous state was saved — it cannot be undone automatically. Use "Cancel Sale" on the consignment instead.');
       }

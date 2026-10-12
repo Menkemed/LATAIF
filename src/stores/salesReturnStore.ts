@@ -100,6 +100,27 @@ function repostCreditNoteFromCnId(cnId: string, occurredAt: string): void {
 
 // ── Helpers ────────────────────────────────────────────────
 
+/** Status, aus denen eine verkaufte Kommission zurückkommt (dieselbe Liste wie bisher). */
+const SOLD_CONSIGNMENT = ['sold', 'SOLD', 'paid_out', 'active', 'IN_STOCK'];
+
+/**
+ * CONSIGNMENT-INTEGRITY — die eine Kommission, auf die „Return to Owner“ / „Keep“ wirken darf: vom Kommissionsweg
+ * genannt, zum Artikel der (einzigen) Zeile passend und in einem Verkaufsstatus. Sonst wird NICHTS geschrieben.
+ */
+function exactSaleConsignment(
+  consignmentId: string | undefined,
+  lines: ReadonlyArray<{ productId?: string }>,
+): { id: string; status: string } {
+  const nein = (m: string): never => { throw new ReturnActionRejected('CONSIGNMENT_RETURN_NOT_LINKED', m); };
+  if (!consignmentId) return nein('return to owner / keep as own runs only through the consignment of this sale');
+  const items = lines.filter((l) => !!l.productId);
+  if (items.length !== 1) return nein('a consignment return carries exactly the one consigned item');
+  const c = query('SELECT id, status, product_id FROM consignments WHERE id = ?', [consignmentId])[0];
+  if (!c || String(c.product_id) !== items[0].productId) return nein('this consignment does not belong to the returned item');
+  if (!SOLD_CONSIGNMENT.includes(String(c.status))) return nein(`this consignment is "${String(c.status)}" — it did not come back from a sale`);
+  return { id: String(c.id), status: String(c.status) };
+}
+
 // Disposition auf Produkt anwenden (Plan §Returns §6 + §Commission §13).
 // Wird in createReturn aufgerufen — Ware ist physisch zurück, Status muss reflektieren.
 //
@@ -116,7 +137,13 @@ function applyDisposition(
   branchId: string,
   returnId: string,
   userId: string,
+  consignmentId?: string,
 ): void {
+  // CONSIGNMENT-INTEGRITY — die beiden Kommissions-Warenfolgen wirken nur auf die EINE zugeordnete Kommission.
+  // Früher: jede Kommission des Artikels mit passendem Status (`WHERE product_id = ?`), auch eine fremde/alte.
+  const kommission = (disposition === 'RETURN_TO_OWNER' || disposition === 'KEEP_AS_OWN')
+    ? exactSaleConsignment(consignmentId, lines)
+    : null;
   for (const line of lines) {
     if (!line.productId) continue;
     const qty = Math.max(1, line.quantity || 1);
@@ -132,18 +159,21 @@ function applyDisposition(
     if (disposition === 'RETURN_TO_OWNER') {
       // Plan §Commission §13 A — Ware verlässt System, Consignment auf RETURNED_TO_OWNER.
       db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ?`, [now, line.productId]);
+      const k = kommission!;
+      // Der Snapshot steht in der Retourenzeile (vor ihrer Sync-Erfassung — er reist mit dem insert): GENAU diese
+      // Kommission und ihr Status davor. Er ist zugleich die strukturierte Herkunft der Retoure.
       db.run(
-        `UPDATE consignments SET status = 'RETURNED_TO_OWNER', updated_at = ?
-         WHERE product_id = ? AND status IN ('sold','SOLD','paid_out','active','IN_STOCK')`,
-        [now, line.productId]
+        `UPDATE sales_return_lines SET rto_snapshot_at = ?, rto_consignment_id = ?, rto_prev_status = ?
+         WHERE return_id = ? AND invoice_line_id = ?`,
+        [now, k.id, k.status, returnId, line.invoiceLineId],
       );
+      db.run(`UPDATE consignments SET status = 'RETURNED_TO_OWNER', updated_at = ? WHERE id = ?`, [now, k.id]);
+      trackChange('consignments', k.id, 'update', {});   // vorher nicht gemeldet: der Spiegel blieb auf „sold“
     } else if (disposition === 'KEEP_AS_OWN') {
       // Was die Rücknahme braucht — VOR dem Überschreiben festgehalten (Storno stellt genau das wieder her).
       const vorKeep = query('SELECT source_type, purchase_price, stock_status FROM products WHERE id = ?', [line.productId])[0];
-      const vorKommissionen = query(
-        `SELECT id, status FROM consignments WHERE product_id = ? AND status IN ('sold','SOLD','paid_out','active','IN_STOCK') ORDER BY id`,
-        [line.productId],
-      ).map((c) => ({ id: String(c.id), status: String(c.status) }));
+      const k = kommission!;
+      const vorKommissionen = [{ id: k.id, status: k.status }];
       let keepLotId: string | null = null;
       // Plan §Commission §13 B — bleibt im System als OWN, purchase_price = letzter Verkaufspreis.
       db.run(
@@ -151,11 +181,8 @@ function applyDisposition(
          purchase_price = COALESCE(?, purchase_price), updated_at = ? WHERE id = ?`,
         [line.unitPrice ?? null, now, line.productId]
       );
-      db.run(
-        `UPDATE consignments SET status = 'RETURNED', updated_at = ?
-         WHERE product_id = ? AND status IN ('sold','SOLD','paid_out','active','IN_STOCK')`,
-        [now, line.productId]
-      );
+      db.run(`UPDATE consignments SET status = 'RETURNED', updated_at = ? WHERE id = ?`, [now, k.id]);
+      trackChange('consignments', k.id, 'update', {});   // vorher nicht gemeldet
       // Phase 5 — neuer Lot an Sale-Preis als Acquisition-Cost.
       // Den alten (verkauften) Lot lassen wir EXHAUSTED — wirtschaftlich korrekt:
       // Die Ware war verkauft, jetzt haben wir sie zum unitPrice "zurueckgekauft".
@@ -275,6 +302,9 @@ interface SalesReturnStore {
     reason?: string;
     notes?: string;
     staffId?: string;
+    /** CONSIGNMENT-INTEGRITY — nur der Kommissionsweg (`returnConsignmentAfterSaleInHouse`): GENAU die Kommission
+     *  dieses Verkaufs. „Return to Owner“ / „Keep“ ändern nur sie — nie alle Kommissionen eines Artikels. */
+    consignmentId?: string;
     lines: Array<{
       invoiceLineId: string;
       productId?: string;
@@ -458,7 +488,7 @@ export const useSalesReturnStore = create<SalesReturnStore>((set, get) => ({
     stmt.free();
 
     // Plan 2026-05 §C: Disposition beim Anlegen anwenden — Ware ist physisch retour.
-    applyDisposition(db, input.lines, disposition, now, branchId, id, userId);
+    applyDisposition(db, input.lines, disposition, now, branchId, id, userId, input.consignmentId);
 
     // Slice 2 — Wareneinsatz (COGS) zurueckdrehen, NUR wenn die Ware real wieder
     // Verkaufsbestand wird (IN_STOCK). Bei KEEP_AS_OWN/WRITE_OFF/RETURN_TO_OWNER

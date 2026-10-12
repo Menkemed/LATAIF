@@ -550,7 +550,7 @@ function kommission(db: Db, pid: string, cid: string): { invoiceId: string; purc
   const lineOfInv = (db: Db, inv: string, pid: string): string => s(db, 'SELECT id FROM invoice_lines WHERE invoice_id = ? AND product_id = ?', [inv, pid]);
   const keepRet = (db: Db, inv: string, pids: string[]): string => {
     const id = imHaus(() => createReturnInHouse({ invoiceId: inv, lines: pids.map((p) => ({ invoiceLineId: lineOfInv(db, inv, p), quantity: 1 })),
-      refundMethod: 'cash', productDisposition: 'KEEP_AS_OWN', reason: 'keep', refundNow: false } as never, 'branch-main').returnId);
+      refundMethod: 'cash', productDisposition: 'KEEP_AS_OWN', reason: 'keep', refundNow: true } as never, 'branch-main').returnId);   // CONSIGNMENT-INTEGRITY: der Kommissionsweg erstattet sofort
     reload();
     return id;
   };
@@ -589,8 +589,8 @@ function kommission(db: Db, pid: string, cid: string): { invoiceId: string; purc
     ok(!!snap[0] && snap[1] === 'CONSIGNMENT' && S(JSON.parse(String(snap[4]))) === S([{ id: 'cons-k1', status: vorC }]) && !!keepLot
       && S([snap[1], snap[2], snap[3]]) === S(JSON.parse(vorP)[0].slice(0, 3)),
       `14b Snapshot vollständig: Quelle, Einstand, Status vor dem Keep, Kommission mit Status, Keep-Los (${S(snap)})`);
-    ok(JSON.parse(prod(db, 'pKeep'))[0][0] === 'OWN' && consStatus(db, 'cons-k1') === 'RETURNED' && s(db, 'SELECT status FROM stock_lots WHERE id = ?', [keepLot]) === 'ACTIVE',
-      '14b Keep wirkt: OWN, Kommission RETURNED, Keep-Los aktiv');
+    ok(JSON.parse(prod(db, 'pKeep'))[0][0] === 'OWN' && consStatus(db, 'cons-k1') === 'returned' && s(db, 'SELECT status FROM stock_lots WHERE id = ?', [keepLot]) === 'ACTIVE',
+      '14b Keep wirkt (von der Rechnung aus über den Kommissionsweg): OWN, Kommission returned, Keep-Los aktiv');
     const srl = db.exec("SELECT data FROM sync_changelog WHERE table_name = 'sales_return_lines' ORDER BY id DESC LIMIT 1")[0]?.values?.[0]?.[0];
     ok(!!srl && /keep_snapshot_at/.test(String(srl)) && changeContractViolation('sales_return_lines', 'insert', String(srl)) === null,
       '14b Sync-Feldvertrag: die Retourenzeile reist mit Snapshot und wird vom Vertrag angenommen');
@@ -607,7 +607,7 @@ function kommission(db: Db, pid: string, cid: string): { invoiceId: string; purc
     rechnung([LINE('pKeep2', 1)]);   // das behaltene Stück erneut verkauft
     const vorP = prod(db, 'pKeep2'); const vorZ = zaehler(db);
     const m = storno(rid);
-    ok(m.startsWith('RETURN_STOCK_RESOLD') && prod(db, 'pKeep2') === vorP && zaehler(db) === vorZ && consStatus(db, 'cons-k2') === 'RETURNED',
+    ok(m.startsWith('RETURN_STOCK_RESOLD') && prod(db, 'pKeep2') === vorP && zaehler(db) === vorZ && consStatus(db, 'cons-k2') === 'returned',
       `14c Keep-Stück weiterverkauft → Storno abgewiesen, keine Doppelbelegung, nichts verändert (${m.slice(0, 50)})`);
   }
 
@@ -711,7 +711,7 @@ function kommission(db: Db, pid: string, cid: string): { invoiceId: string; purc
   { // b) Auf derselben Rechnung getrennt: Kommissionszeile „Return to Owner", eigene Ware „Back to Stock" → beides wirkt
     const { db, inv, lot } = gemischt();
     const rid = rtoRet(db, inv, ['pRK']);
-    ok(!!rid && consStatus(db, 'cons-r1') === 'RETURNED_TO_OWNER' && JSON.parse(prod(db, 'pRK'))[0][2] === 'returned'
+    ok(!!rid && consStatus(db, 'cons-r1') === 'returned' && JSON.parse(prod(db, 'pRK'))[0][2] === 'returned'
       && JSON.parse(prod(db, 'pOwnR'))[0][2] === 'in_stock' && lotRem(db, lot) === 2,
       `15b nur die Kommissionszeile → Return to Owner wirkt nur auf sie (Kommission ${consStatus(db, 'cons-r1')}, eigene Ware unberührt)`);
     const rid2 = rtoRet(db, inv, ['pOwnR'], 'IN_STOCK');
@@ -719,18 +719,24 @@ function kommission(db: Db, pid: string, cid: string): { invoiceId: string; purc
       `15b …die eigene Ware danach „Back to Stock": Stück zurück ins Los (3), Hauptbuch ausgeglichen`);
   }
 
-  { // c) reine Kommissionsretoure über die Rechnungsmaske: unverändert; ihr Storno unverändert
+  { // c) reine Kommissionsretoure über die Rechnungsmaske: der Kommissionsweg; ihr Rückweg ist „Cancel Sale"
+    const consRev = await import('../../src/core/consignment/consignment-reversal-house.ts');
     const db = neu();
-    const r = kommission(db, 'pRK2', 'cons-r2');
-    voll(db, r.invoiceId);
-    const rid = rtoRet(db, r.invoiceId, ['pRK2'], 'RETURN_TO_OWNER', false);   // ohne Auszahlung — eine ausgezahlte Erstattung sperrt jeden Storno
-    ok(consStatus(db, 'cons-r2') === 'RETURNED_TO_OWNER' && JSON.parse(prod(db, 'pRK2'))[0][2] === 'returned'
+    const r = kommission(db, 'pRK2', 'cons-r2');   // unbezahlt: die Erstattung storniert nur die Forderung
+    const spaeter = meldung(() => rtoRet(db, r.invoiceId, ['pRK2'], 'RETURN_TO_OWNER', false));
+    ok(spaeter.startsWith('CONSIGNMENT_RETURN_REFUNDS_NOW'), `15c „später erstatten" gibt es für Kommissionsware nicht (${spaeter.slice(0, 40)})`);
+    const rid = rtoRet(db, r.invoiceId, ['pRK2']);
+    ok(consStatus(db, 'cons-r2') === 'returned' && JSON.parse(prod(db, 'pRK2'))[0][2] === 'returned'
       && s(db, 'SELECT product_disposition FROM sales_returns WHERE id = ?', [rid]) === 'RETURN_TO_OWNER' && ausgeglichen(db),
-      '15c nur Kommissionsware + Return to Owner → wirkt wie bisher (Artikel returned, Kommission RETURNED_TO_OWNER)');
+      '15c nur Kommissionsware + Return to Owner → Artikel returned, Kommission returned (Kommissionsweg)');
+    const vor = alles(db);
     const st = storno(rid);
-    ok(st === '' && s(db, 'SELECT status FROM sales_returns WHERE id = ?', [rid]) === 'REJECTED'
-      && JSON.parse(prod(db, 'pRK2'))[0][2] !== 'returned' && ausgeglichen(db),
-      `15c …Storno läuft wie bisher: Retoure REJECTED, Artikelstatus nicht mehr returned (${st.slice(0, 80) || 'ok'} / ${s(db, 'SELECT status FROM sales_returns WHERE id = ?', [rid])} / ${prod(db, 'pRK2')})`);
+    ok(st.startsWith('RETURN_VIA_CANCEL_SALE') && alles(db) === vor && s(db, 'SELECT status FROM sales_returns WHERE id = ?', [rid]) !== 'REJECTED',
+      `15c …direktes „Cancel Return" abgewiesen, nichts verändert (${st.slice(0, 40)})`);
+    const c = meldung(() => imHaus(() => consRev.cancelConsignmentSaleInHouse('cons-r2', OWNER_ACTOR, 'branch-main')));
+    reload();
+    ok(c === '' && consStatus(db, 'cons-r2') === 'active' && s(db, 'SELECT status FROM sales_returns WHERE id = ?', [rid]) === 'REJECTED' && ausgeglichen(db),
+      `15c …„Cancel Sale" nimmt Verkauf und Rückgabe zurück: Kommission active, Retoure REJECTED (${c || 'ok'})`);
   }
 
   { // d) „Cancel Sale" der Kommission (Return to Owner aus der Kommissionsmaske) läuft unverändert durch das Haus

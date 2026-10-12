@@ -24,6 +24,8 @@ import { usePurchaseStore } from './purchaseStore';
 import { useExpenseStore } from './expenseStore';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { computeConsignmentSale } from '@/core/consignment/economics';
+// CONSIGNMENT-INTEGRITY F7 — nur dieser Verkauf darf Kommissionsware auf eine Rechnung setzen.
+import { withConsignmentSalePermit } from '@/core/consignment/consignment-sale-link';
 import { payoutModelLock, buildPayoutPatch, PayoutPatchError, PAYOUT_EDITABLE_SQL, type PayoutInput } from '@/core/consignment/payout-edit';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
@@ -527,7 +529,7 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     // 3. Buyer-Invoice — auto-FIFO im createDirectInvoice findet den frisch
     // angelegten Lot aus Schritt 2 und konsumiert ihn.
     const inv = useInvoiceStore.getState();
-    const invoice = inv.createDirectInvoice(
+    const invoice = withConsignmentSalePermit(con.productId, () => inv.createDirectInvoice(
       params.buyerId,
       [{
         productId: con.productId,
@@ -543,7 +545,7 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       undefined,
       undefined,
       params.specialMark,
-    );
+    ));
 
     // 4. Bei Shortfall: Consignor-Loss-Expense (Variante B)
     let expenseId: string | undefined;
