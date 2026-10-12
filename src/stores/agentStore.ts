@@ -789,6 +789,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
         inv.recordPayment(invoice.id, sp.amount, invMethod, `Migrated from settlement (${sp.paidAt})`);
       }
       db.run('DELETE FROM agent_settlement_payments WHERE transfer_id = ?', [transferId]);
+      // AGENT-PAYMENT-SYNC — jede umgezogene (gelöschte) Abrechnungszeile reist mit; sonst blieb sie auf dem Spiegel
+      // neben den Rechnungszahlungen stehen.
+      for (const sp of existingSettlePayments) trackChange('agent_settlement_payments', sp.id, 'delete', {});
       saveDatabase();
       get().updateTransfer(transferId, {
         settlementPaidAmount: 0,
@@ -903,6 +906,8 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
           inv.recordPayment(invoice.id, sp.amount, invMethod, `Migrated from settlement ${t.transferNumber} (${sp.paidAt})`);
         }
         db.run('DELETE FROM agent_settlement_payments WHERE transfer_id = ?', [t.id]);
+        // AGENT-PAYMENT-SYNC — wie beim Einzel-Umwandeln: jede gelöschte Abrechnungszeile reist mit.
+        for (const sp of sps) trackChange('agent_settlement_payments', sp.id, 'delete', {});
         get().updateTransfer(t.id, {
           settlementPaidAmount: 0,
           settlementStatus: 'pending',

@@ -121,6 +121,10 @@ function umwandeln(ids: readonly string[], billTo: TransferBillTo, branchId: str
   const agent = query('SELECT id, name, company, phone, whatsapp, email FROM agents WHERE id = ?', [[...agentIds][0]])[0];
   if (!agent) throw new TransferActionRejected('AGENT_NOT_FOUND', 'the agent of this transfer is gone');
 
+  // AGENT-PAYMENT-SYNC — ab dem ersten Schreiben: ein Abgleich-Eintrag, der nicht geschrieben werden konnte (Kunde,
+  // Rechnung, Zahlungen, umgezogene Abrechnungszeilen, Vorgang), bricht die Umwandlung ab — der Aufrufer
+  // (`amPrimary` bzw. der Fernbefehl) rollt dann ALLES zurück. Sonst wäre sie hier umgewandelt und auf dem Spiegel nicht.
+  const abgleich = watchSyncTracks(combined ? 'convert transfers' : 'convert transfer');
   let customerId: string;
   let customerCreated = false;
   if ('autoCustomer' in billTo) {
@@ -146,6 +150,7 @@ function umwandeln(ids: readonly string[], billTo: TransferBillTo, branchId: str
   const invoice = combined
     ? as.convertTransfersToInvoice([...ids], customerId)
     : as.convertTransferToInvoice(ids[0], customerId);
+  abgleich();
   return { invoiceId: invoice.id, customerId, customerCreated };
 }
 

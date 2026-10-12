@@ -948,5 +948,93 @@ for (const [stelle, wann] of [
   ok(code === OPN, `S Spiegel wendet ein nicht erlaubtes update auf Zahlungszeilen nicht an (${code || 'ANGEWANDT'})`);
 }
 
+// ══ K — Umwandeln in eine Rechnung: die umgezogenen Abrechnungszeilen reisen mit ═════════════════
+//   Beide Stellen (Einzel- und Sammelrechnung), am Primary und als Fernbefehl. Spiegel wie in S. Verglichen:
+//   Abrechnungszeilen der Vorgänge, die Vorgänge (Status, Rechnung, gezahlt), die Rechnung (Status, gezahlt,
+//   Summe), ihre Zahlungen (Kennung, Betrag, Weg), Artikel und Lose, Hauptbuch (Zeilen, Salden).
+const lcm = await import('../../src/core/bridge/lifecycle-commands.ts');
+interface KLage { prim: Db; spiegel: Db; ab: number; ts: string[]; pids: string[]; payIds: string[] }
+/** Eigene Ware, je Artikel ein Agentenvorgang (DERSELBE Agent), verkauft und in Teilen abgerechnet; Spiegel zum Stichpunkt davor. */
+async function zumUmwandeln(pids: string[], zahlungen: number[][]): Promise<KLage> {
+  const prim = freshDb();
+  agentKunde(prim);
+  for (const pid of pids) {
+    insert(prim, 'products', { id: pid, branch_id: 'branch-main', category_id: 'cat-w', brand: 'Omega', name: 'Eigen Umw', sku: `SKU-${pid}`, quantity: 1,
+      condition: 'Pre-Owned', scope_of_delivery: '[]', purchase_price: 300, purchase_currency: 'BHD', planned_sale_price: 500,
+      stock_status: 'in_stock', tax_scheme: 'MARGIN', days_in_stock: 0, images: '[]', attributes: '{}', source_type: 'OWN', created_at: NOW, updated_at: NOW });
+    insert(prim, 'stock_lots', { id: `lot-${pid}`, branch_id: 'branch-main', product_id: pid, unit_cost: 300, qty_total: 1, qty_remaining: 1,
+      status: 'ACTIVE', acquired_at: NOW, created_at: NOW, unit: 'pcs' });
+  }
+  reload();
+  const ab = maxLog(prim);
+  const spiegel = new SQL.Database(prim.export()) as unknown as Db;
+  nimm(prim);
+  const ts: string[] = [];
+  for (let i = 0; i < pids.length; i++) {
+    const u = await uebergabe('primary', prim, pids[i]);
+    const t = tidOf(prim, pids[i]);
+    const v = await agentVerkauf('primary', prim, t);
+    for (const [k, betrag] of zahlungen[i].entries()) {
+      nimm(prim); useAgentStore.getState().loadAgents(); useAgentStore.getState().loadTransfers();
+      const a = await primary(() => imHaus(() => useAgentStore.getState().markTransferSettled(t, betrag, k % 2 === 0 ? 'cash' : 'bank')));
+      if (!a.ok) throw new Error(`K: Abrechnung ${betrag} scheiterte (${a.code})`);
+    }
+    if (!(u.ok && v.ok)) throw new Error(`K: Ausgangslage nicht herstellbar (${u.code}/${v.code})`);
+    ts.push(t);
+  }
+  const payIds = rows(prim, `SELECT id FROM agent_settlement_payments WHERE transfer_id IN (${ts.map(() => '?').join(',')}) ORDER BY id`, ts).map((r) => String(r.id));
+  return { prim, spiegel, ab, ts, pids, payIds };
+}
+function umwBild(db: Db, L: KLage): string {
+  const q = (xs: string[]) => xs.map(() => '?').join(',');
+  const inv = rows(db, `SELECT DISTINCT invoice_id FROM agent_transfers WHERE id IN (${q(L.ts)})`, L.ts).map((r) => String(r.invoice_id ?? ''));
+  return S({
+    abrechnung: all(db, `SELECT id FROM agent_settlement_payments WHERE id IN (${q(L.payIds)}) OR transfer_id IN (${q(L.ts)}) ORDER BY id`, [...L.payIds, ...L.ts]),
+    vorgaenge: all(db, `SELECT id, status, invoice_id, settlement_paid_amount FROM agent_transfers WHERE id IN (${q(L.ts)}) ORDER BY id`, L.ts),
+    rechnung: all(db, `SELECT id, status, paid_amount, gross_amount FROM invoices WHERE id IN (${q(inv)}) ORDER BY id`, inv),
+    zahlungen: all(db, `SELECT id, amount, method FROM payments WHERE invoice_id IN (${q(inv)}) ORDER BY id`, inv),
+    artikel: all(db, `SELECT id, stock_status, quantity FROM products WHERE id IN (${q(L.pids)}) ORDER BY id`, L.pids),
+    lose: all(db, `SELECT id, qty_remaining, status FROM stock_lots WHERE product_id IN (${q(L.pids)}) ORDER BY id`, L.pids),
+    buch: { zeilen: lc(db), konten: konten(db) },
+  });
+}
+const vollK = (db: Db, L: KLage): string => S({ v: L.pids.map((p) => voll(db, p)), inv: all(db, 'SELECT * FROM invoices ORDER BY id'),
+  pay: all(db, 'SELECT * FROM payments ORDER BY id'), lines: n(db, 'SELECT COUNT(*) FROM invoice_lines'), kunden: n(db, 'SELECT COUNT(*) FROM customers') });
+const WEGE: Array<{ name: string; pids: string[]; zahlungen: number[][]; umwandeln: (L: KLage) => Promise<Ausgang> }> = [
+  { name: 'Einzelrechnung am Primary', pids: ['p-k1'], zahlungen: [[500, 800]],
+    umwandeln: (L) => { nimm(L.prim); return primary(() => th.convertTransferOnPrimary(L.ts[0], { customerId: 'cust-agent' })); } },
+  // Eine Sammelrechnung nimmt nur verkaufte (nicht voll abgerechnete) Vorgänge — also Teilzahlungen.
+  { name: 'Sammelrechnung am Primary', pids: ['p-k2a', 'p-k2b'], zahlungen: [[500, 300], [400]],
+    umwandeln: (L) => { nimm(L.prim); return primary(() => th.convertTransfersOnPrimary(L.ts, { customerId: 'cust-agent' })); } },
+  { name: 'Einzelrechnung vom PC2', pids: ['p-k3'], zahlungen: [[500, 300]],
+    umwandeln: (L) => { nimm(L.prim); useAgentStore.getState().loadTransfers(); return fern(() => lcm.runConvertTransfer(deps(L.prim), identity(nx(), 'transfers.convert_to_invoice'), { transferId: L.ts[0], customerId: 'cust-agent', expectedRevision: trev(L.prim, L.ts[0]) })); } },
+  { name: 'Sammelrechnung vom PC2', pids: ['p-k4a', 'p-k4b'], zahlungen: [[500], [400, 200]],
+    umwandeln: (L) => { nimm(L.prim); useAgentStore.getState().loadTransfers(); return fern(() => lcm.runConvertTransfers(deps(L.prim), identity(nx(), 'transfers.convert_many_to_invoice'), { transfers: L.ts.map((t) => ({ id: t, expectedRevision: trev(L.prim, t) })), customerId: 'cust-agent' })); } },
+];
+for (const w of WEGE) {
+  // K1 — umwandeln, spiegeln: keine verwaiste Abrechnungszeile, alles andere wie am Primary
+  const L = await zumUmwandeln(w.pids, w.zahlungen);
+  const s0 = spiegeln(L.prim, L.spiegel, L.ab);
+  const vorher = n(L.spiegel, `SELECT COUNT(*) FROM agent_settlement_payments`);
+  const u = await w.umwandeln(L);
+  const s1 = spiegeln(L.prim, L.spiegel, s0.bis);
+  const p = umwBild(L.prim, L);
+  const m = umwBild(L.spiegel, L);
+  ok(u.ok && s0.abgewiesen.length === 0 && s1.abgewiesen.length === 0 && vorher === L.payIds.length && m === p
+    && n(L.spiegel, 'SELECT COUNT(*) FROM agent_settlement_payments') === 0 && n(L.prim, 'SELECT COUNT(*) FROM agent_settlement_payments') === 0
+    && n(L.prim, `SELECT COUNT(*) FROM payments WHERE invoice_id = (SELECT invoice_id FROM agent_transfers WHERE id = ?)`, [L.ts[0]]) > 0 && balanced(L.spiegel),
+    `K ${w.name}: ${L.payIds.length} Abrechnungszeilen umgezogen → auf dem Spiegel keine verwaiste Zeile, Rechnung/Zahlungen/Vorgänge/Hauptbuch wie am Primary (${u.code || 'ok'}; ${[...s0.abgewiesen, ...s1.abgewiesen].join('; ') || 'keine Abweisung'}; Spiegel ${n(L.spiegel, 'SELECT COUNT(*) FROM agent_settlement_payments')} Zeilen)`);
+  // K2 — der Lösch-Eintrag einer Abrechnungszeile scheitert → die ganze Umwandlung geht zurück
+  const L2 = await zumUmwandeln(w.pids, w.zahlungen);
+  nimm(L2.prim);
+  const vor = vollK(L2.prim, L2);
+  L2.prim.run("CREATE TRIGGER k_inj BEFORE INSERT ON sync_changelog WHEN NEW.table_name = 'agent_settlement_payments' AND NEW.action = 'delete' BEGIN SELECT RAISE(ABORT, 'INJECTED_SYNC_FAILURE'); END");
+  const u2 = await w.umwandeln(L2);
+  L2.prim.run('DROP TRIGGER IF EXISTS k_inj');
+  nimm(L2.prim);
+  ok(!u2.ok && /sync change-log entry could not be written/.test(u2.code) && vollK(L2.prim, L2) === vor && balanced(L2.prim),
+    `K ${w.name}: Abgleich-Eintrag einer umgezogenen Zeile scheitert → ganze Umwandlung zurück (Rechnung, Zahlungen, Abrechnungszeilen, Vorgänge, Konten, Changelog, Protokoll unverändert) (${u2.code || 'UMGEWANDELT'})`);
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — consignment agent handoff: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
