@@ -504,6 +504,14 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   markTransferReturned: (id) => {
     const transfer = get().getTransfer(id);
     if (!transfer) return;
+    // AGENT-HANDOFF FINAL — nur ein Vorgang, der noch draußen ist, kommt zurück (wie `transfers.mark_returned` am PC2).
+    // Ein verkaufter/abgerechneter/umgewandelter gäbe sonst das Stück zurück, während Zahlung oder Rechnung stehen
+    // bleiben. Aus der DATENBANK, nicht aus der geladenen Liste (eine veraltete Maske zeigt noch „transferred").
+    const liveStatus = String(query('SELECT status FROM agent_transfers WHERE id = ?', [id])[0]?.status ?? '');
+    if (liveStatus !== 'transferred') {
+      throw new TransferActionRejected(liveStatus === 'returned' ? 'TRANSFER_ALREADY_RETURNED' : 'TRANSFER_NOT_OPEN',
+        `This transfer is "${liveStatus}" — only one that is still out can come back. Nothing was changed.`);
+    }
     const now = new Date().toISOString();
     // CONSIGNMENT-AGENT — wem das Stück gehört, VOR dem ersten Schreiben (unklar → nichts geschieht).
     const target = agentReturnTarget(transfer.productId);
@@ -623,8 +631,11 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     if (transfer && String(query('SELECT invoice_id FROM agent_transfers WHERE id = ?', [id])[0]?.invoice_id ?? '') !== '') {
       throw new Error('This transfer is on an invoice — undo the conversion first, then delete it.');
     }
-    // CONSIGNMENT-AGENT — wem das Stück gehört, VOR dem ersten Schreiben (unklar → nichts geschieht).
-    const target = transfer ? agentReturnTarget(transfer.productId) : null;
+    // CONSIGNMENT-AGENT — wem das Stück gehört, VOR dem ersten Schreiben (unklar → nichts geschieht). AGENT-HANDOFF
+    // FINAL — nur, wenn wirklich ein Stück zurückkommt (Nachweis offen oder noch draußen); ein zurückgegebener
+    // Vorgang fasst das Stück nicht an und wird ohne diese Frage gelöscht.
+    const taken = Number(query('SELECT stock_taken FROM agent_transfers WHERE id = ?', [id])[0]?.stock_taken ?? 0) > 0;
+    const target = transfer && (taken || transfer.status === 'transferred') ? agentReturnTarget(transfer.productId) : null;
     if (transfer && target) giveBackAgentStock(id, transfer.productId, now, target);
     // Produkt zurück in Stock wenn nur transferred war — CONSIGNMENT-AGENT: samt Eigentum (vorher blieb `AGENT`
     // stehen, auch bei eigener Ware).

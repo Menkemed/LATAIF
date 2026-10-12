@@ -583,5 +583,110 @@ for (const weg of ['primary', 'fern'] as Weg[]) {
   ok(d === 'AGENT_RETURN_OWNERSHIP_UNCLEAR' && ruhe(w.db, w.pid) === vor, `U …Löschen ebenso (${d || 'GELÖSCHT'})`);
 }
 
+// ══ V — verkaufter Altbestand MIT seinen echten Folgen (Forderung, Wareneinsatz, Zahlung, Rechnung) ══════════
+//   Rückgabe: nur ein Vorgang, der noch draußen ist (Primary wie PC2) — sonst bliebe Zahlung/Rechnung stehen,
+//   während das Stück wieder verkaufbar wäre. Löschen: der ganze Verkauf geht zurück, oder (Rechnung) gar nichts.
+/** So verkaufte, rechnete ab und wandelte der ALTE Weg Kommissionsware über den Agenten — mit genau seinen
+ *  Buchungen. Die neue Sperre wird dafür kurz umgangen: die Kommission ist währenddessen „unsichtbar". */
+async function altVerkauf(w: Welt, t: string, o: { abrechnen?: boolean; umwandeln?: boolean } = {}): Promise<boolean> {
+  w.db.run("UPDATE consignments SET status = 'legacy' WHERE id = ?", [w.cid]);
+  const v = await agentVerkauf('primary', w.db, t);
+  const a = o.abrechnen ? await abrechnung('primary', w.db, t) : v;
+  let c = '';
+  if (o.umwandeln) { nimm(w.db); useAgentStore.getState().loadTransfers(); c = wirft(() => imHaus(() => useAgentStore.getState().convertTransferToInvoice(t, 'cust-agent'))); }
+  w.db.run("UPDATE consignments SET status = 'active' WHERE id = ?", [w.cid]);
+  nimm(w.db); useAgentStore.getState().loadTransfers();
+  return v.ok && a.ok && c === '';
+}
+/** Die Maske zeigt den Vorgang noch als „draußen" (veraltet) — so ruft der Primary die Rückgabe trotzdem. */
+async function rueckgabeVeraltet(db: Db, t: string): Promise<Ausgang> {
+  nimm(db); useAgentStore.getState().loadTransfers();
+  useAgentStore.setState({ transfers: useAgentStore.getState().transfers.map((x) => (x.id === t ? { ...x, status: 'transferred' } : x)) });
+  return primary(() => imHaus(() => useAgentStore.getState().markTransferReturned(t)));
+}
+for (const fall of [{ name: 'verkauft', abrechnen: false }, { name: 'abgerechnet', abrechnen: true }]) {
+  const w = await welt({ sale: null });
+  agentKunde(w.db); vonHand(w.db, w.pid);
+  const t = altUebergabe(w.db, w.pid);
+  const kontenVorher = S(konten(w.db));
+  const ok0 = await altVerkauf(w, t, { abrechnen: fall.abrechnen });
+  const zahl = n(w.db, 'SELECT COUNT(*) FROM agent_settlement_payments WHERE transfer_id = ?', [t]);
+  ok(ok0 && n(w.db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'AGENT_TRANSFER_SOLD' AND account = 'COGS'") > 0
+    && (fall.abrechnen ? zahl === 1 && (konten(w.db).CASH ?? 0) > 0 : zahl === 0) && prodS(w.db, w.pid) === S(['AGENT', 'sold', 0]),
+    `V ${fall.name} Ausgangslage: Alt-Agentenverkauf mit Forderung + Wareneinsatz${fall.abrechnen ? ' + Zahlung' : ''}, Stück weg (${prodS(w.db, w.pid)}; ${S(konten(w.db))})`);
+  // Rückgabe: Primary (auch mit veralteter Maske) und PC2 → abgewiesen, nichts geschrieben.
+  for (const weg of ['primary', 'fern'] as Weg[]) {
+    const vor = ruhe(w.db, w.pid);
+    const r = weg === 'primary' ? await rueckgabeVeraltet(w.db, t) : await rueckgabeVomAgenten('fern', w.db, t);
+    reload();
+    ok(!r.ok && r.code === 'TRANSFER_NOT_OPEN' && ruhe(w.db, w.pid) === vor,
+      `V ${fall.name} ${weg}: Rückgabe eines verkauften Vorgangs → abgewiesen, Stück bleibt weg, Forderung/Zahlung unberührt (${r.code || 'ZURÜCK'}; ${prodS(w.db, w.pid)}; ${S(konten(w.db))})`);
+  }
+  // Löschen: der GANZE Verkauf geht zurück — Stück, Forderung, Wareneinsatz, Zahlung —, dann genau ein Verkauf.
+  const d = loeschen(w.db, t);
+  ok(d === '' && prodS(w.db, w.pid) === S(['CONSIGNMENT', 'consignment', 1]) && kst(w.db, w.cid) === 'active'
+    && S(konten(w.db)) === kontenVorher && balanced(w.db)
+    && n(w.db, 'SELECT COUNT(*) FROM agent_transfers WHERE id = ?', [t]) === 0
+    && n(w.db, 'SELECT COUNT(*) FROM agent_settlement_payments WHERE transfer_id = ?', [t]) === 0,
+    `V ${fall.name}: Löschen nimmt den ganzen Verkauf zurück — Stück da, Konten wie vor dem Verkauf, keine Zahlung mehr (${d || 'ok'}; ${prodS(w.db, w.pid)}; ${S(konten(w.db))} vs ${kontenVorher})`);
+  const rs = await primary(() => conHouse.recordConsignmentSaleOnPrimary(w.cid, SALE));
+  ok(rs.ok && n(w.db, 'SELECT COUNT(DISTINCT invoice_id) FROM invoice_lines WHERE product_id = ?', [w.pid]) === 1
+    && n(w.db, 'SELECT COUNT(*) FROM agent_transfers WHERE product_id = ?', [w.pid]) === 0 && balanced(w.db),
+    `V ${fall.name}: danach genau EIN Verkauf über „Record Sale", kein Agentenverkauf mehr daneben (${rs.code || 'ok'})`);
+}
+{ // umgewandelt (Rechnung): weder Rückgabe noch Löschen
+  const w = await welt({ sale: null });
+  agentKunde(w.db); vonHand(w.db, w.pid);
+  const t = altUebergabe(w.db, w.pid);
+  const ok0 = await altVerkauf(w, t, { umwandeln: true });
+  ok(ok0 && s(w.db, 'SELECT invoice_id FROM agent_transfers WHERE id = ?', [t]) !== '', `V umgewandelt Ausgangslage: Alt-Agentenverkauf auf einer Rechnung (${prodS(w.db, w.pid)})`);
+  for (const weg of ['primary', 'fern'] as Weg[]) {
+    const vor = ruhe(w.db, w.pid);
+    const r = weg === 'primary' ? await rueckgabeVeraltet(w.db, t) : await rueckgabeVomAgenten('fern', w.db, t);
+    reload();
+    ok(!r.ok && r.code === 'TRANSFER_NOT_OPEN' && ruhe(w.db, w.pid) === vor,
+      `V umgewandelt ${weg}: Rückgabe → abgewiesen, Stück bleibt verkauft, Rechnung unberührt (${r.code || 'ZURÜCK'}; ${prodS(w.db, w.pid)})`);
+  }
+  const vor = ruhe(w.db, w.pid);
+  const d = loeschen(w.db, t);
+  ok(d !== '' && ruhe(w.db, w.pid) === vor, `V umgewandelt: Löschen → abgewiesen, nichts geschrieben (${d || 'GELÖSCHT'})`);
+}
+{ // eigene Ware, verkauft + abgerechnet: Rückgabe abgewiesen (wie am PC2), Löschen nimmt alles zurück → OWN/in_stock
+  const db = freshDb();
+  agentKunde(db);
+  insert(db, 'products', { id: 'p-own2', branch_id: 'branch-main', category_id: 'cat-w', brand: 'Omega', name: 'Eigen', sku: 'SKU-OWN2', quantity: 1,
+    condition: 'Pre-Owned', scope_of_delivery: '[]', purchase_price: 300, purchase_currency: 'BHD', planned_sale_price: 500,
+    stock_status: 'in_stock', tax_scheme: 'MARGIN', days_in_stock: 0, images: '[]', attributes: '{}', source_type: 'OWN', created_at: NOW, updated_at: NOW });
+  reload();
+  const kontenVorher = S(konten(db));
+  const u = await uebergabe('primary', db, 'p-own2');
+  const t = tidOf(db, 'p-own2');
+  const v = await agentVerkauf('primary', db, t);
+  const a = await abrechnung('primary', db, t);
+  const vor = ruhe(db, 'p-own2');
+  const r = await rueckgabeVeraltet(db, t);
+  reload();
+  ok(u.ok && v.ok && a.ok && !r.ok && r.code === 'TRANSFER_NOT_OPEN' && ruhe(db, 'p-own2') === vor,
+    `V eigene Ware abgerechnet: Rückgabe (veraltete Maske) → abgewiesen, Zahlung bleibt nicht als Kundenguthaben neben dem Stück stehen (${r.code || 'ZURÜCK'}; ${S(konten(db))})`);
+  const d = loeschen(db, t);
+  ok(d === '' && prodS(db, 'p-own2') === S(['OWN', 'in_stock', 1]) && S(konten(db)) === kontenVorher && balanced(db),
+    `V eigene Ware: Löschen nimmt Verkauf + Zahlung zurück → OWN/in_stock, Konten wie vorher (${d || 'ok'}; ${prodS(db, 'p-own2')})`);
+}
+{ // zurückgegebener Alt-Vorgang, Kommission danach verkauft: Löschen fasst das Stück nicht an (und ist erlaubt)
+  const w = await welt({ sale: null });
+  agentKunde(w.db); vonHand(w.db, w.pid);
+  const t = altUebergabe(w.db, w.pid);
+  const r = await rueckgabeVomAgenten('primary', w.db, t);
+  const rs = await primary(() => conHouse.recordConsignmentSaleOnPrimary(w.cid, SALE));
+  reload();
+  const p0 = prodS(w.db, w.pid);
+  const k0 = all(w.db, 'SELECT status, invoice_id FROM consignments ORDER BY id');
+  const l0 = S(konten(w.db));
+  const d = loeschen(w.db, t);
+  ok(r.ok && rs.ok && d === '' && prodS(w.db, w.pid) === p0 && all(w.db, 'SELECT status, invoice_id FROM consignments ORDER BY id') === k0
+    && S(konten(w.db)) === l0 && n(w.db, 'SELECT COUNT(*) FROM agent_transfers WHERE id = ?', [t]) === 0,
+    `V zurückgegebener Vorgang löschen (Kommission inzwischen verkauft) → erlaubt, Stück/Kommission/Konten unberührt (${d || 'ok'}; ${p0} → ${prodS(w.db, w.pid)})`);
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — consignment agent handoff: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
