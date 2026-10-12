@@ -30,7 +30,7 @@ import { useSharedWrites, fehlertext, nichtAmClient } from '@/core/data/shared-w
 import { canConvertTransfer, transferBillTo, transferConvertBody, transferEditPatch } from '@/core/agents/transfer-rules';
 import { WriteError } from '@/components/shared/WriteError';
 import {
-  canUndoTransferConvert, convertTransferOnPrimary, transferUndoBody, undoTransferConversionOnPrimary,
+  canUndoTransferConvert, convertTransferOnPrimary, deleteTransferOnPrimary, transferUndoBody, undoTransferConversionOnPrimary,
 } from '@/core/agents/transfer-house';
 
 type TransferDisplayStatus = 'transferred' | 'unpaid' | 'partial' | 'settled' | 'returned';
@@ -57,7 +57,7 @@ export function TransferDetail() {
   const {
     agents, transfers, loadAgents, loadTransfers,
     markTransferSold, markTransferReturned,
-    updateTransfer, deleteTransfer,
+    updateTransfer,
   } = useAgentStore();
   const { products, categories, loadProducts, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
@@ -587,9 +587,10 @@ export function TransferDetail() {
         </p>
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setConfirmDelete(false)}>Cancel</Button>
-          <Button variant="danger" onClick={() => {
+          <Button variant="danger" onClick={async () => {
             if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
-            try { deleteTransfer(transfer.id); } catch (e) { setConfirmDelete(false); alert(e instanceof Error ? e.message : String(e)); return; }
+            // AGENT-DELETE-ATOMICITY — EINE Klammer am Primary: Stück, Stornos, Zahlungen, Protokoll ganz oder gar nicht.
+            try { await deleteTransferOnPrimary(transfer.id, transfer.revision || undefined); } catch (e) { setConfirmDelete(false); alert(e instanceof Error ? e.message : String(e)); return; }
             setConfirmDelete(false);
             goBack();
           }}>Delete</Button>

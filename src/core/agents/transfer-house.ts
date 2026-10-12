@@ -231,6 +231,47 @@ export function undoTransferConversionInHouse(transferId: string, branchId: stri
   return { transferId, ...out };
 }
 
+// ── AGENT-DELETE-ATOMICITY — „Delete": ganz oder gar nicht ──────────────────────────────────
+
+export interface TransferDeleted {
+  transferId: string;
+  transferNumber: string;
+}
+
+/**
+ * „Delete" eines Transfers — EIN Vorgang in der Transaktion des Aufrufers: Stück zurück (samt Eigentum),
+ * Verkauf und Zahlungen streng storniert, Zeilen gelöscht, Protokoll und Sync. Vorher rief die Maske die
+ * Hausfunktion ohne Klammer, und die Stornos liefen in `safePost` — ein gescheiterter Storno ließ das Stück
+ * zurück und die Forderung stehen. Jetzt bricht jeder Fehler (auch eine abgefangene Buchung) die GANZE
+ * Handlung ab. Ein zweiter Aufruf (Doppelklick) findet den Vorgang nicht mehr — keine zweite Wirkung.
+ */
+export function deleteTransferInHouse(transferId: string, branchId: string, expectedRevision?: number): TransferDeleted {
+  if (isClientMode()) {
+    throw new TransferActionRejected('TRANSFER_PRIMARY_ONLY', 'a transfer is deleted on the main computer — this window has no business database');
+  }
+  const row = query('SELECT id, revision, transfer_number FROM agent_transfers WHERE id = ? AND branch_id = ?', [transferId, branchId])[0];
+  if (!row) throw new TransferActionRejected('TRANSFER_NOT_FOUND', 'no such transfer in this branch — it may already be deleted');
+  if (expectedRevision !== undefined && Number(row.revision ?? 0) !== expectedRevision) {
+    throw new TransferActionRejected('RECORD_CHANGED',
+      `this transfer changed since you opened it (you saw ${expectedRevision}, it is now ${Number(row.revision ?? 0)}) — reopen it`);
+  }
+  frischLesen();
+  const buchung = watchLedgerPosts('delete transfer');
+  useAgentStore.getState().deleteTransfer(transferId);
+  buchung();
+  return { transferId, transferNumber: String(row.transfer_number ?? '') };
+}
+
+/** „Delete" am Primary — exklusiv, EINE Klammer, erst danach durabel. */
+export function deleteTransferOnPrimary(transferId: string, expectedRevision?: number): Promise<TransferDeleted> {
+  if (isClientMode()) {
+    return Promise.reject(new TransferActionRejected('TRANSFER_PRIMARY_ONLY',
+      'a transfer is deleted on the main computer — this window has no business database'));
+  }
+  const branchId = currentBranchId();
+  return runOnPrimary(() => deleteTransferInHouse(transferId, branchId, expectedRevision), frischLesen);
+}
+
 /** „Undo convert" am Primary — dieselbe Folge, EINE Klammer, erst danach durabel. */
 export function undoTransferConversionOnPrimary(transferId: string, expectedRevision?: number): Promise<TransferConversionUndone> {
   if (isClientMode()) {

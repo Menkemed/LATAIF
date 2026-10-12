@@ -10,6 +10,7 @@ import { consumeLot, syncProductQuantity, trackProductRow } from '@/core/lots/lo
 import { assertLotLessStockAvailable, giveBackStock, hasLotHistory } from '@/core/lots/stock-contract';
 import { STOCK_UNAVAILABLE_MESSAGE } from '@/core/lots/lot-availability';
 import { trackChange } from '@/core/sync/sync-service';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
 // CONSIGNMENT-AGENT — Kommissionsware gehört nicht auf den Agentenweg; die Herkunft kommt aus der Kommission.
 import { CONSIGNMENT_NOT_TRANSFERABLE, belongsToConsignment, ownershipAfterAgent } from '@/core/consignment/consignment-sale-link';
 
@@ -61,6 +62,15 @@ function giveBackAgentStock(transferId: string, productId: string, now: string, 
   const taken = Number(t?.stock_taken ?? 0);
   if (!t || !(taken > 0) || String(t.invoice_id ?? '') !== '') return;
   const lotId = t.stock_lot_id ? String(t.stock_lot_id) : null;
+  // AGENT-DELETE-ATOMICITY — das Los muss das Stück GENAU zurücknehmen können: `restoreLot` übersprang ein
+  // storniertes Los und kappte still am Bestand — der Verkauf wäre storniert, das Stück aber nicht zurück.
+  if (lotId) {
+    const lot = query('SELECT status, qty_total, qty_remaining FROM stock_lots WHERE id = ?', [lotId])[0];
+    if (!lot || String(lot.status) === 'CANCELLED' || Number(lot.qty_remaining) + taken > Number(lot.qty_total) + 0.0005) {
+      throw new TransferActionRejected('TRANSFER_STOCK_CHANGED',
+        'The stock lot of this transfer cannot take the piece back any more — the stock changed since the sale. Nothing was changed.');
+    }
+  }
   giveBackStock(productId, lotId, taken, now);
   if (lotId) syncProductQuantity(productId);
   // Das Stück ist wieder da: verkaufbar, nicht mehr „sold"/„with_agent" (ohne Los stellt giveBackStock den Status
@@ -622,24 +632,30 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
   },
 
   deleteTransfer: (id) => {
+    // AGENT-DELETE-ATOMICITY — EIN Vorgang in der Transaktion des Aufrufers (`deleteTransferOnPrimary`): jeder
+    // Schritt streng, jeder Fehler wirft, der Aufrufer nimmt ALLES zurück (Stück, Buchungen, Zahlungen, Protokoll,
+    // Sync). Vorher liefen die Stornos in `safePost` ohne Klammer: ein gescheiterter Storno stand nur im Log, das
+    // Stück war trotzdem zurück.
     const db = getDatabase();
     const transfer = get().getTransfer(id);
+    // Ohne den Vorgang kein halbes Löschen (vorher: Stornos und DELETE liefen, das Stück kam nicht zurück).
+    if (!transfer) throw new TransferActionRejected('TRANSFER_NOT_FOUND', 'No such transfer — it may already be deleted. Nothing was changed.');
     const now = new Date().toISOString();
 
     // STOCK-LOT-INTEGRITY — ein umgewandelter Vorgang hängt an seiner Rechnung: erst die Umwandlung
     // rückgängig machen. Ein verkaufter gibt genau seinen Nachweis zurück.
-    if (transfer && String(query('SELECT invoice_id FROM agent_transfers WHERE id = ?', [id])[0]?.invoice_id ?? '') !== '') {
+    if (String(query('SELECT invoice_id FROM agent_transfers WHERE id = ?', [id])[0]?.invoice_id ?? '') !== '') {
       throw new Error('This transfer is on an invoice — undo the conversion first, then delete it.');
     }
     // CONSIGNMENT-AGENT — wem das Stück gehört, VOR dem ersten Schreiben (unklar → nichts geschieht). AGENT-HANDOFF
     // FINAL — nur, wenn wirklich ein Stück zurückkommt (Nachweis offen oder noch draußen); ein zurückgegebener
     // Vorgang fasst das Stück nicht an und wird ohne diese Frage gelöscht.
     const taken = Number(query('SELECT stock_taken FROM agent_transfers WHERE id = ?', [id])[0]?.stock_taken ?? 0) > 0;
-    const target = transfer && (taken || transfer.status === 'transferred') ? agentReturnTarget(transfer.productId) : null;
-    if (transfer && target) giveBackAgentStock(id, transfer.productId, now, target);
+    const target = taken || transfer.status === 'transferred' ? agentReturnTarget(transfer.productId) : null;
+    if (target) giveBackAgentStock(id, transfer.productId, now, target);
     // Produkt zurück in Stock wenn nur transferred war — CONSIGNMENT-AGENT: samt Eigentum (vorher blieb `AGENT`
     // stehen, auch bei eigener Ware).
-    if (transfer && target && transfer.status === 'transferred') {
+    if (target && transfer.status === 'transferred') {
       db.run(`UPDATE products SET stock_status = ?, source_type = ?, updated_at = ? WHERE id = ?`,
         [target.stockStatus, target.sourceType, now, transfer.productId]);
       trackProductRow(transfer.productId);   // LAN-Sync Phase 1b
@@ -648,27 +664,32 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
     // ZIEL.md §3a — Ledger-Buchungen aufräumen, sonst bleibt die AR-Forderung
     // (counterparty CUSTOMER) im Customer-Outstanding stehen obwohl der Transfer
     // weg ist. Reihenfolge unabhängig: Sold und Settlement sind separate sourceIds.
-    safePost(`postAgentTransferSoldReversed(${id}) [delete]`, () => {
-      if (!hasLedgerEntries('AGENT_TRANSFER_SOLD', id)) return;
-      if (hasReversalFor('AGENT_TRANSFER_SOLD', id)) return;
-      postAgentTransferSoldReversed(id, now);
-    });
+    // AGENT-DELETE-ATOMICITY — streng (kein `safePost`): ein lebender Zyklus wird storniert, sonst wirft es.
+    const saleReversed = hasLedgerEntries('AGENT_TRANSFER_SOLD', id);
+    if (saleReversed) postAgentTransferSoldReversed(id, now);
 
-    // Alle Settlement-Payments dieses Transfers reversen.
-    const settlePayments = get().getSettlementPayments(id);
-    for (const sp of settlePayments) {
-      safePost(`postAgentSettlementPaymentReversed(${sp.id}) [delete]`, () => {
-        if (!hasLedgerEntries('AGENT_SETTLEMENT', sp.id)) return;
-        if (hasReversalFor('AGENT_SETTLEMENT', sp.id)) return;
-        postAgentSettlementPaymentReversed(sp.id);
-      });
+    // Alle Settlement-Payments dieses Transfers reversen — aus der DATENBANK (die Leseliste schluckte Fehler).
+    const payIds = query('SELECT id FROM agent_settlement_payments WHERE transfer_id = ? ORDER BY rowid', [id]).map((r) => String(r.id));
+    let paymentsReversed = 0;
+    for (const payId of payIds) {
+      if (!hasLedgerEntries('AGENT_SETTLEMENT', payId)) continue;
+      postAgentSettlementPaymentReversed(payId);
+      paymentsReversed++;
     }
 
     // Settlement-Payment-Rows löschen, sonst würde ein Backfill sie wieder reposten.
     db.run(`DELETE FROM agent_settlement_payments WHERE transfer_id = ?`, [id]);
     db.run(`DELETE FROM agent_transfers WHERE id = ?`, [id]);
+    trackChange('agent_transfers', id, 'delete', {});
+    // Protokoll — streng, in derselben Transaktion (vorher `trackDelete`: ein Schreibfehler wurde verschluckt).
+    logAuditOrThrow({
+      module: 'Agent', entityType: 'agent_transfers', entityId: id, action: 'DELETE',
+      oldValue: {
+        transferNumber: transfer.transferNumber, status: transfer.status, productId: transfer.productId,
+        stockReturned: target !== null, saleReversed, settlementPayments: payIds.length, paymentsReversed,
+      },
+    });
     saveDatabase();
-    trackDelete('agent_transfers', id);
     get().loadTransfers();
   },
 

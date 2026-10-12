@@ -454,9 +454,13 @@ async function rueckgabeVomAgenten(weg: Weg, db: Db, t: string): Promise<Ausgang
     ? primary(() => imHaus(() => useAgentStore.getState().markTransferReturned(t)))
     : fern(() => svc.runTransferReturn(deps(db), identity(nx(), 'transfers.mark_returned'), { id: t, expectedRevision: trev(db, t) }));
 }
-function loeschen(db: Db, t: string): string {
+/** „Delete" so, wie die Maske es ruft: heute über die Klammer am Primary; im alten Code (Gegenprobe) direkt am Store. */
+async function loeschen(db: Db, t: string, rev?: number): Promise<string> {
   nimm(db); useAgentStore.getState().loadTransfers();
-  const m = wirft(() => imHaus(() => useAgentStore.getState().deleteTransfer(t)));
+  const amPrimary = (th as Record<string, unknown>).deleteTransferOnPrimary as ((id: string, r?: number) => Promise<unknown>) | undefined;
+  let m = '';
+  try { if (amPrimary) await amPrimary(t, rev); else useAgentStore.getState().deleteTransfer(t); }
+  catch (e) { m = String((e as { code?: unknown }).code ?? (e as Error).message); }
   reload();
   return m;
 }
@@ -528,7 +532,7 @@ for (const weg of ['primary', 'fern'] as Weg[]) {
     ok(!a.ok && a.code === 'CONSIGNMENT_NOT_TRANSFERABLE' && ruhe(w.db, w.pid) === vor,
       `L ${weg}: Abrechnung eines (Alt-)Agentenverkaufs von Kommissionsware → abgewiesen, kein Geld, keine Buchung (${a.code || 'ABGERECHNET'})`);
   }
-  const d = loeschen(w.db, t);
+  const d = await loeschen(w.db, t);
   ok(d === '' && JSON.parse(prodS(w.db, w.pid))[0] === 'CONSIGNMENT' && JSON.parse(prodS(w.db, w.pid))[1] === 'consignment' && JSON.parse(prodS(w.db, w.pid))[2] === 1,
     `L Löschen des (verkauften) Alt-Vorgangs → Stück zurück, CONSIGNMENT/consignment (${d || 'ok'}; ${prodS(w.db, w.pid)})`);
 }
@@ -536,7 +540,7 @@ for (const weg of ['primary', 'fern'] as Weg[]) {
   const w = await welt({ sale: null });
   agentKunde(w.db); vonHand(w.db, w.pid);
   const t = altUebergabe(w.db, w.pid);
-  const d = loeschen(w.db, t);
+  const d = await loeschen(w.db, t);
   ok(d === '' && JSON.parse(prodS(w.db, w.pid))[0] === 'CONSIGNMENT' && JSON.parse(prodS(w.db, w.pid))[1] === 'consignment',
     `L Löschen des Alt-Vorgangs (draußen) → CONSIGNMENT/consignment, kein AGENT mehr (${d || 'ok'}; ${prodS(w.db, w.pid)})`);
 }
@@ -557,7 +561,7 @@ for (const weg of ['primary', 'fern'] as Weg[]) {
   ok(r.ok && prodS(db, 'p-own') === S(['OWN', 'in_stock', 1]), `O ${weg}: Rückgabe → OWN/in_stock wie bisher (${prodS(db, 'p-own')})`);
   const u2 = await uebergabe(weg, db, 'p-own');
   const t2 = tidOf(db, 'p-own');
-  const d = loeschen(db, t2);
+  const d = await loeschen(db, t2);
   ok(u2.ok && d === '' && prodS(db, 'p-own') === S(['OWN', 'in_stock', 1]), `O ${weg}: Übergabe löschen → OWN/in_stock (vorher blieb AGENT) (${d || 'ok'}; ${prodS(db, 'p-own')})`);
   const u3 = await uebergabe(weg, db, 'p-own');
   const t3 = tidOf(db, 'p-own');
@@ -579,7 +583,7 @@ for (const weg of ['primary', 'fern'] as Weg[]) {
   const r = await rueckgabeVomAgenten('fern', w.db, t);
   ok(!r.ok && r.code === 'AGENT_RETURN_OWNERSHIP_UNCLEAR' && ruhe(w.db, w.pid) === vor,
     `U zwei offene Kommissionen zum Stück → Rückgabe abgewiesen, nichts geschrieben (${r.code || 'ZURÜCK'})`);
-  const d = loeschen(w.db, t);
+  const d = await loeschen(w.db, t);
   ok(d === 'AGENT_RETURN_OWNERSHIP_UNCLEAR' && ruhe(w.db, w.pid) === vor, `U …Löschen ebenso (${d || 'GELÖSCHT'})`);
 }
 
@@ -623,7 +627,7 @@ for (const fall of [{ name: 'verkauft', abrechnen: false }, { name: 'abgerechnet
       `V ${fall.name} ${weg}: Rückgabe eines verkauften Vorgangs → abgewiesen, Stück bleibt weg, Forderung/Zahlung unberührt (${r.code || 'ZURÜCK'}; ${prodS(w.db, w.pid)}; ${S(konten(w.db))})`);
   }
   // Löschen: der GANZE Verkauf geht zurück — Stück, Forderung, Wareneinsatz, Zahlung —, dann genau ein Verkauf.
-  const d = loeschen(w.db, t);
+  const d = await loeschen(w.db, t);
   ok(d === '' && prodS(w.db, w.pid) === S(['CONSIGNMENT', 'consignment', 1]) && kst(w.db, w.cid) === 'active'
     && S(konten(w.db)) === kontenVorher && balanced(w.db)
     && n(w.db, 'SELECT COUNT(*) FROM agent_transfers WHERE id = ?', [t]) === 0
@@ -648,7 +652,7 @@ for (const fall of [{ name: 'verkauft', abrechnen: false }, { name: 'abgerechnet
       `V umgewandelt ${weg}: Rückgabe → abgewiesen, Stück bleibt verkauft, Rechnung unberührt (${r.code || 'ZURÜCK'}; ${prodS(w.db, w.pid)})`);
   }
   const vor = ruhe(w.db, w.pid);
-  const d = loeschen(w.db, t);
+  const d = await loeschen(w.db, t);
   ok(d !== '' && ruhe(w.db, w.pid) === vor, `V umgewandelt: Löschen → abgewiesen, nichts geschrieben (${d || 'GELÖSCHT'})`);
 }
 { // eigene Ware, verkauft + abgerechnet: Rückgabe abgewiesen (wie am PC2), Löschen nimmt alles zurück → OWN/in_stock
@@ -668,7 +672,7 @@ for (const fall of [{ name: 'verkauft', abrechnen: false }, { name: 'abgerechnet
   reload();
   ok(u.ok && v.ok && a.ok && !r.ok && r.code === 'TRANSFER_NOT_OPEN' && ruhe(db, 'p-own2') === vor,
     `V eigene Ware abgerechnet: Rückgabe (veraltete Maske) → abgewiesen, Zahlung bleibt nicht als Kundenguthaben neben dem Stück stehen (${r.code || 'ZURÜCK'}; ${S(konten(db))})`);
-  const d = loeschen(db, t);
+  const d = await loeschen(db, t);
   ok(d === '' && prodS(db, 'p-own2') === S(['OWN', 'in_stock', 1]) && S(konten(db)) === kontenVorher && balanced(db),
     `V eigene Ware: Löschen nimmt Verkauf + Zahlung zurück → OWN/in_stock, Konten wie vorher (${d || 'ok'}; ${prodS(db, 'p-own2')})`);
 }
@@ -682,10 +686,149 @@ for (const fall of [{ name: 'verkauft', abrechnen: false }, { name: 'abgerechnet
   const p0 = prodS(w.db, w.pid);
   const k0 = all(w.db, 'SELECT status, invoice_id FROM consignments ORDER BY id');
   const l0 = S(konten(w.db));
-  const d = loeschen(w.db, t);
+  const d = await loeschen(w.db, t);
   ok(r.ok && rs.ok && d === '' && prodS(w.db, w.pid) === p0 && all(w.db, 'SELECT status, invoice_id FROM consignments ORDER BY id') === k0
     && S(konten(w.db)) === l0 && n(w.db, 'SELECT COUNT(*) FROM agent_transfers WHERE id = ?', [t]) === 0,
     `V zurückgegebener Vorgang löschen (Kommission inzwischen verkauft) → erlaubt, Stück/Kommission/Konten unberührt (${d || 'ok'}; ${p0} → ${prodS(w.db, w.pid)})`);
+}
+
+// ══ W — Löschen ist EIN Vorgang: ein Fehler mittendrin nimmt ALLES zurück ═════════════════════════
+//   Der Fehler wird in der Datenbank selbst eingespeist (Trigger), genau an der Stelle, die scheitern soll.
+//   Danach: Stück, Lose, Vorgang, Zahlungen, Kommission, Konten, Sync-Changelog und Protokoll wie vorher.
+/** Alles, was ein gescheitertes Löschen nicht verändern darf. */
+const voll = (db: Db, pid: string): string => S({
+  r: ruhe(db, pid), konten: konten(db),
+  p: all(db, 'SELECT * FROM products WHERE id = ?', [pid]),
+  lots: all(db, 'SELECT * FROM stock_lots WHERE product_id = ? ORDER BY id', [pid]),
+  t: all(db, 'SELECT * FROM agent_transfers ORDER BY id'),
+  pay: all(db, 'SELECT * FROM agent_settlement_payments ORDER BY id'),
+});
+const RAISE = "BEGIN SELECT RAISE(ABORT, 'INJECTED_FAILURE'); END";
+const einspeisen = (pid: string): Array<[string, string]> => [
+  ['Verkaufsstorno (Forderung)', `CREATE TRIGGER w_inj BEFORE INSERT ON ledger_entries WHEN NEW.source_module = 'AGENT_TRANSFER_SOLD' AND NEW.reverses_entry_id IS NOT NULL AND NEW.account = 'ACCOUNTS_RECEIVABLE' ${RAISE}`],
+  ['Wareneinsatz-Storno (COGS)', `CREATE TRIGGER w_inj BEFORE INSERT ON ledger_entries WHEN NEW.source_module = 'AGENT_TRANSFER_SOLD' AND NEW.reverses_entry_id IS NOT NULL AND NEW.account = 'COGS' ${RAISE}`],
+  ['Zahlungsstorno (Kasse/Forderung)', `CREATE TRIGGER w_inj BEFORE INSERT ON ledger_entries WHEN NEW.source_module = 'AGENT_SETTLEMENT' AND NEW.reverses_entry_id IS NOT NULL ${RAISE}`],
+  ['Stück zurück (Bestand)', `CREATE TRIGGER w_inj BEFORE UPDATE ON products WHEN NEW.id = '${pid}' AND COALESCE(NEW.quantity, 0) > COALESCE(OLD.quantity, 0) ${RAISE}`],
+  ['kurz vor dem endgültigen Löschen', `CREATE TRIGGER w_inj BEFORE DELETE ON agent_transfers ${RAISE}`],
+  ['Protokoll nach dem Löschen', `CREATE TRIGGER w_inj BEFORE INSERT ON audit_log WHEN NEW.entity_type = 'agent_transfers' AND NEW.action_type = 'DELETE' ${RAISE}`],
+];
+interface Lage { db: Db; pid: string; t: string; kontenVorher: string }
+/** Je Fehlerstelle eine FRISCHE Lage — so beweist jede Stelle für sich (auch gegen den alten Code). */
+async function fehlerProben(name: string, bauen: () => Promise<Lage>): Promise<Lage> {
+  let letzte: Lage | null = null;
+  for (let i = 0; i < 6; i++) {
+    const lage = await bauen();
+    const { db, pid, t } = lage;
+    const [stelle, ddl] = einspeisen(pid)[i];
+    nimm(db);
+    const vor = voll(db, pid);
+    db.run(ddl);
+    const d = await loeschen(db, t);
+    db.run('DROP TRIGGER IF EXISTS w_inj');
+    nimm(db); useAgentStore.getState().loadTransfers();
+    const sichtbar = useAgentStore.getState().transfers.some((x) => x.id === t);
+    ok(/INJECTED_FAILURE/.test(d) && voll(db, pid) === vor && sichtbar && balanced(db),
+      `W ${name}: Fehler beim ${stelle} → ganzer Vorgang zurück (Stück, Lose, Vorgang, Zahlungen, Konten, Changelog, Protokoll unverändert) (${d || 'GELÖSCHT'}; ${prodS(db, pid)}; ${S(konten(db))})`);
+    letzte = lage;
+  }
+  return letzte!;
+}
+{ // Kommissionsware, alter Agentenverkauf mit Forderung, Wareneinsatz und Zahlung
+  const lage = await fehlerProben('Kommission abgerechnet', async () => {
+    const w = await welt({ sale: null });
+    agentKunde(w.db); vonHand(w.db, w.pid);
+    const t = altUebergabe(w.db, w.pid);
+    const kontenVorher = S(konten(w.db));
+    const ok0 = await altVerkauf(w, t, { abrechnen: true });
+    if (!ok0) throw new Error('W Kommission: Ausgangslage nicht herstellbar');
+    return { db: w.db, pid: w.pid, t, kontenVorher };
+  });
+  const w = { db: lage.db, pid: lage.pid };
+  const { t, kontenVorher } = lage;
+  ok(n(w.db, "SELECT COUNT(*) FROM agent_settlement_payments WHERE transfer_id = ?", [t]) === 1, 'W Kommission Ausgangslage: Alt-Agentenverkauf abgerechnet');
+  const log0 = changelog(w.db);
+  const aud0 = n(w.db, "SELECT COUNT(*) FROM audit_log WHERE entity_type = 'agent_transfers' AND entity_id = ? AND action_type = 'DELETE'", [t]);
+  const d = await loeschen(w.db, t);
+  const protokoll = s(w.db, "SELECT old_value FROM audit_log WHERE entity_type = 'agent_transfers' AND entity_id = ? AND action_type = 'DELETE'", [t]);
+  ok(d === '' && prodS(w.db, w.pid) === S(['CONSIGNMENT', 'consignment', 1]) && S(konten(w.db)) === kontenVorher && balanced(w.db)
+    && n(w.db, 'SELECT COUNT(*) FROM agent_transfers WHERE id = ?', [t]) === 0
+    && n(w.db, 'SELECT COUNT(*) FROM agent_settlement_payments WHERE transfer_id = ?', [t]) === 0
+    && aud0 === 0 && /"saleReversed":true/.test(protokoll) && /"paymentsReversed":1/.test(protokoll) && changelog(w.db) > log0,
+    `W Kommission: danach ohne Fehler → ganzer Verkauf zurück, ein Protokolleintrag mit Nachweis (${d || 'ok'}; ${prodS(w.db, w.pid)}; ${protokoll})`);
+  // Doppelklick / Wiederholung: keine zweite Wirkung.
+  const vor = voll(w.db, w.pid);
+  const led0 = lc(w.db);
+  const d2 = await loeschen(w.db, t);
+  ok(d2 === 'TRANSFER_NOT_FOUND' && voll(w.db, w.pid) === vor && lc(w.db) === led0,
+    `W Kommission: zweites Löschen (Doppelklick) → abgewiesen, keine zweite Buchung, kein zweiter Protokoll-/Sync-Eintrag (${d2 || 'GELÖSCHT'})`);
+}
+{ // eigene Ware MIT Los, verkauft + abgerechnet: dieselben Fehlerproben, danach korrekt gelöscht
+  const lage = await fehlerProben('eigene Ware abgerechnet', async () => {
+    const db = freshDb();
+    agentKunde(db);
+    insert(db, 'products', { id: 'p-lot', branch_id: 'branch-main', category_id: 'cat-w', brand: 'Omega', name: 'Eigen Los', sku: 'SKU-LOT', quantity: 1,
+      condition: 'Pre-Owned', scope_of_delivery: '[]', purchase_price: 300, purchase_currency: 'BHD', planned_sale_price: 500,
+      stock_status: 'in_stock', tax_scheme: 'MARGIN', days_in_stock: 0, images: '[]', attributes: '{}', source_type: 'OWN', created_at: NOW, updated_at: NOW });
+    insert(db, 'stock_lots', { id: 'lot-p-lot', branch_id: 'branch-main', product_id: 'p-lot', unit_cost: 300, qty_total: 1, qty_remaining: 1,
+      status: 'ACTIVE', acquired_at: NOW, created_at: NOW, unit: 'pcs' });
+    reload();
+    const kontenVorher = S(konten(db));
+    const u = await uebergabe('primary', db, 'p-lot');
+    const t = tidOf(db, 'p-lot');
+    const v = await agentVerkauf('primary', db, t);
+    const a = await abrechnung('primary', db, t);
+    if (!(u.ok && v.ok && a.ok)) throw new Error('W eigene Ware: Ausgangslage nicht herstellbar');
+    return { db, pid: 'p-lot', t, kontenVorher };
+  });
+  const { db, t, kontenVorher } = lage;
+  ok(n(db, "SELECT qty_remaining FROM stock_lots WHERE id = 'lot-p-lot'") === 0 && s(db, 'SELECT status FROM agent_transfers WHERE id = ?', [t]) === 'settled',
+    `W eigene Ware Ausgangslage: verkauft + abgerechnet, Los leer (${prodS(db, 'p-lot')})`);
+  // Revision: eine veraltete Maske löscht nicht.
+  const rev = n(db, 'SELECT revision FROM agent_transfers WHERE id = ?', [t]);
+  db.run('UPDATE agent_transfers SET notes = ? WHERE id = ?', ['geändert', t]);
+  const vorRev = voll(db, 'p-lot');
+  const dr = await loeschen(db, t, rev);
+  ok(dr === 'RECORD_CHANGED' && voll(db, 'p-lot') === vorRev, `W eigene Ware: Löschen mit veralteter Fassung → abgewiesen, nichts geschrieben (${dr || 'GELÖSCHT'})`);
+  // Das Los kann das Stück nicht mehr genau zurücknehmen (storniert) → abgewiesen, nichts geschrieben.
+  const losStatus = s(db, "SELECT status FROM stock_lots WHERE id = 'lot-p-lot'");
+  db.run("UPDATE stock_lots SET status = 'CANCELLED' WHERE id = 'lot-p-lot'");
+  const vorLos = voll(db, 'p-lot');
+  const dl = await loeschen(db, t);
+  const nachLos = voll(db, 'p-lot');
+  db.run('UPDATE stock_lots SET status = ? WHERE id = ?', [losStatus, 'lot-p-lot']);
+  ok(dl === 'TRANSFER_STOCK_CHANGED' && nachLos === vorLos,
+    `W eigene Ware: Los inzwischen storniert → Löschen abgewiesen statt Verkauf storniert ohne Stück (${dl || 'GELÖSCHT'}; ${prodS(db, 'p-lot')})`);
+  const d = await loeschen(db, t);
+  ok(d === '' && prodS(db, 'p-lot') === S(['OWN', 'in_stock', 1]) && n(db, "SELECT qty_remaining FROM stock_lots WHERE id = 'lot-p-lot'") === 1
+    && S(konten(db)) === kontenVorher && balanced(db),
+    `W eigene Ware: Löschen → Los 0→1, OWN/in_stock, Konten wie vor dem Verkauf (${d || 'ok'}; ${prodS(db, 'p-lot')}; ${S(konten(db))})`);
+}
+{ // unverkaufter Transfer: wie bisher; umgewandelter: weiterhin gesperrt (V); Grenzen Primary/PC2
+  const db = freshDb();
+  agentKunde(db);
+  insert(db, 'products', { id: 'p-out', branch_id: 'branch-main', category_id: 'cat-w', brand: 'Omega', name: 'Eigen', sku: 'SKU-OUT', quantity: 1,
+    condition: 'Pre-Owned', scope_of_delivery: '[]', purchase_price: 300, purchase_currency: 'BHD', planned_sale_price: 500,
+    stock_status: 'in_stock', tax_scheme: 'MARGIN', days_in_stock: 0, images: '[]', attributes: '{}', source_type: 'OWN', created_at: NOW, updated_at: NOW });
+  reload();
+  const u = await uebergabe('primary', db, 'p-out');
+  const t = tidOf(db, 'p-out');
+  const led0 = lc(db);
+  // Zweiter Rechner: kein Löschen (Primary-only), und die Hausfunktion verweigert ohne eigene Bücher.
+  const cm = await import('../../src/core/bridge/client-mode.ts');
+  const vor = voll(db, 'p-out');
+  cm.enterClientMode('http://127.0.0.1:9');
+  let dc = '';
+  try { await th.deleteTransferOnPrimary(t); } catch (e) { dc = String((e as { code?: unknown }).code ?? (e as Error).message); }
+  cm.leaveClientMode();
+  ok(dc === 'TRANSFER_PRIMARY_ONLY' && voll(db, 'p-out') === vor, `W am zweiten Rechner: Löschen verweigert, nichts geschrieben (${dc || 'GELÖSCHT'})`);
+  const d = await loeschen(db, t);
+  ok(u.ok && d === '' && prodS(db, 'p-out') === S(['OWN', 'in_stock', 1]) && lc(db) === led0,
+    `W unverkaufter Transfer: Löschen wie bisher → OWN/in_stock, keine Buchung (${d || 'ok'}; ${prodS(db, 'p-out')})`);
+  const fin = src('src/core/bridge/financial-commands.ts');
+  const ui = src('src/pages/agents/TransferDetail.tsx') + src('src/components/agents/TransferTable.tsx');
+  ok(/C3G_PRIMARY_ONLY = \[[\s\S]*'transfers\.delete'/.test(fin) && !/useAgentStore\(\)[\s\S]{0,200}deleteTransfer\b/.test(ui)
+    && (ui.match(/deleteTransferOnPrimary\(/g) ?? []).length === 2 && (ui.match(/blockDeleteOnClient\(\)/g) ?? []).length >= 2,
+    'W Masken: Löschen nur noch über die Klammer am Primary (beide Stellen), PC2-Grenze unverändert (transfers.delete bleibt Primary-only)');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — consignment agent handoff: ${PASS} passed, ${fails.length} failed`);

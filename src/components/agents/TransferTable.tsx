@@ -25,7 +25,7 @@ import {
   canCombineTransfer, canConvertTransfer, transferBillTo, transferConvertBody, transferConvertManyBody, transferEditPatch,
 } from '@/core/agents/transfer-rules';
 import {
-  canUndoTransferConvert, convertTransferOnPrimary, convertTransfersOnPrimary, transferUndoBody, undoTransferConversionOnPrimary,
+  canUndoTransferConvert, convertTransferOnPrimary, convertTransfersOnPrimary, deleteTransferOnPrimary, transferUndoBody, undoTransferConversionOnPrimary,
 } from '@/core/agents/transfer-house';
 import { productDisplayName } from '@/core/products/display-name';
 
@@ -77,7 +77,7 @@ interface TransferTableProps {
 export function TransferTable({ transfers, showAgentColumn = true, emptyMessage }: TransferTableProps) {
   const navigate = useNavigate();
   const { agents, transfers: allTransfers, markTransferSold, markTransferReturned,
-    updateTransfer, deleteTransfer } = useAgentStore();
+    updateTransfer } = useAgentStore();
   // CENTRAL-UI-PARITY R4C.2 — dieselbe Tabelle, zwei Anschluesse hinter jeder Handlung.
   const { loadTransfers } = useAgentStore();
   const w = useSharedWrites();
@@ -616,7 +616,8 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
             <Button variant="danger" {...primaryOnlyDeleteProps()} onClick={async () => {
               if (blockDeleteOnClient()) return;
               if (editTransfer && await window.confirm(`Delete transfer ${editTransfer.transferNumber}?`)) {
-                try { deleteTransfer(editTransfer.id); } catch (e) { alert(e instanceof Error ? e.message : String(e)); return; }
+                // AGENT-DELETE-ATOMICITY — EINE Klammer am Primary: Stück, Stornos, Zahlungen, Protokoll ganz oder gar nicht.
+                try { await deleteTransferOnPrimary(editTransfer.id, editTransfer.revision || undefined); } catch (e) { alert(e instanceof Error ? e.message : String(e)); return; }
                 setEditTransfer(null);
               }
             }}>Delete</Button>
