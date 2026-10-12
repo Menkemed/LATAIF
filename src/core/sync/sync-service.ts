@@ -160,6 +160,22 @@ export function isSyncConfigured(): boolean {
 
 // ── Track changes locally ──
 
+// AGENT-DELETE-SYNC — gezählte Fehlschläge (Muster `watchLedgerPosts`). `trackChange` schluckt seine Fehler
+// weiterhin — für jeden bisherigen Aufrufer ändert sich nichts. Eine Hausfolge, die EINE Handlung ganz oder gar
+// nicht ausführen muss, fragt diesen Zähler über `watchSyncTracks` — und bricht dann ab. Ohne eingerichteten
+// Abgleich (oder im Client-Modus) entsteht kein Eintrag und kein Fehlschlag: dort ist keiner nötig.
+let trackFailures = 0;
+
+/** Ein Wächter über eine Handlung: der Rückruf wirft, wenn darin ein Abgleich-Eintrag nicht geschrieben werden konnte. */
+export function watchSyncTracks(what: string): () => void {
+  const vorher = trackFailures;
+  return () => {
+    if (trackFailures !== vorher) {
+      throw new Error(`${what}: a sync change-log entry could not be written inside this action — the whole action is undone`);
+    }
+  };
+}
+
 export function trackChange(tableName: string, recordId: string, action: 'insert' | 'update' | 'delete', data: Record<string, unknown>) {
   if (legacySyncRefused('trackChange')) return;
   if (!isSyncConfigured()) return;
@@ -194,6 +210,7 @@ export function trackChange(tableName: string, recordId: string, action: 'insert
     );
     saveDatabase();
   } catch (err) {
+    trackFailures++;
     console.warn('[Sync] Failed to track change:', err);
   }
 }

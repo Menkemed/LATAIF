@@ -19,7 +19,8 @@
   "tables": {
     "agent_settlement_payments": {
       "allowed_operations": [
-        "insert"
+        "insert",
+        "delete"
       ],
       "record_id_field": "id",
       "allowed_fields": [

@@ -234,7 +234,8 @@ for (const t of manifestTables) {
 // `gold_movements`: nur `insert`, nie `update`, nie `delete` → 52/36/37 → 53/36/37.
 // BULK METAL V1 — `bulk_lot_movements`: nur `insert` (eine Bewegung wird nie geändert oder gelöscht) → 54/36/37.
 // INVOICE-LINES SYNC — der Rechnungs-Edit aktualisiert behaltene Zeilen (seit v0.8.60): `invoice_lines` + update → 54/37/37.
-check(iC === 54 && uC === 37 && dC === 37, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 54/37/37 — incl. the mobile purchase_inbox insert, the R7A production child rows, the PRE-G5 gold usage history, the bulk lot movements and the invoice_lines update of the invoice edit)`);
+// AGENT-DELETE-SYNC — das Löschen eines Agentenvorgangs meldet seine gelöschten Zahlungszeilen: `agent_settlement_payments` + delete → 54/37/38.
+check(iC === 54 && uC === 37 && dC === 38, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 54/37/38 — incl. the mobile purchase_inbox insert, the R7A production child rows, the PRE-G5 gold usage history, the bulk lot movements, the invoice_lines update of the invoice edit and the agent settlement payment delete)`);
 
 // ── 5. Rust/TS semantic parity: the SAME shared fixture the Rust test runs. Both sides must map
 //    each vector to the same verdict → transitively, Rust and TS agree byte-for-byte. ──

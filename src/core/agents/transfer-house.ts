@@ -19,6 +19,7 @@ import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransact
 import { runExclusive } from '@/core/bridge/command-scheduler';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { isClientMode } from '@/core/bridge/client-mode';
+import { watchSyncTracks } from '@/core/sync/sync-service';
 import { useAgentStore, type TransferConvertUndone } from '@/stores/agentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
@@ -257,8 +258,12 @@ export function deleteTransferInHouse(transferId: string, branchId: string, expe
   }
   frischLesen();
   const buchung = watchLedgerPosts('delete transfer');
+  // AGENT-DELETE-SYNC — ein Abgleich-Eintrag (Stück, Los, Buchung, Zahlung, Vorgang), der nicht geschrieben werden
+  // konnte, bricht die Handlung ebenso ab: sonst wäre sie hier gelöscht und auf dem Spiegel nicht.
+  const abgleich = watchSyncTracks('delete transfer');
   useAgentStore.getState().deleteTransfer(transferId);
   buchung();
+  abgleich();
   return { transferId, transferNumber: String(row.transfer_number ?? '') };
 }
 

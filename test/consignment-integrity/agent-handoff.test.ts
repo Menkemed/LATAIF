@@ -831,5 +831,122 @@ async function fehlerProben(name: string, bauen: () => Promise<Lage>): Promise<L
     'W Masken: Löschen nur noch über die Klammer am Primary (beide Stellen), PC2-Grenze unverändert (transfers.delete bleibt Primary-only)');
 }
 
+// ══ S — Löschen und Abgleich: der Spiegel sieht danach dasselbe ═══════════════════════════════════
+//   Spiegel = eine zweite Testdatenbank: Kopie des Primary zu einem Stichpunkt, danach JEDER Abgleich-Eintrag des
+//   Primary seit diesem Stichpunkt in Reihenfolge über `applySyncChange` (derselbe Anwendeweg wie beim Abholen,
+//   samt Manifest-Prüfung). Ein abgewiesener Eintrag wird gezählt, nicht übergangen.
+//   Verglichen werden: der Vorgang (da/weg, Status), JEDE Zahlungszeile des Vorgangs (Kennungen), der Artikel
+//   (Herkunft, Status, Menge), das Los (Rest, Status), das Hauptbuch (Anzahl Zeilen, Salden je Konto) und alle
+//   Buchungszeilen des Vorgangs und seiner Zahlungen (Kennungen, Konto, Richtung, Betrag).
+const ap = await import('../../src/core/sync/apply-change.ts');
+function spiegeln(prim: Db, spiegel: Db, ab: number): { bis: number; abgewiesen: string[] } {
+  const r = prim.exec('SELECT id, table_name, record_id, action, data FROM sync_changelog WHERE id > ? ORDER BY id', [ab])[0];
+  const abgewiesen: string[] = [];
+  let bis = ab;
+  for (const v of r?.values ?? []) {
+    bis = Number(v[0]);
+    try { ap.applySyncChange(spiegel as never, { table_name: String(v[1]), record_id: String(v[2]), action: String(v[3]), data: String(v[4] ?? '{}') }); }
+    catch (e) { abgewiesen.push(`${String(v[1])}/${String(v[3])}: ${String((e as { code?: unknown }).code ?? (e as Error).message)}`); }
+  }
+  return { bis, abgewiesen };
+}
+const maxLog = (db: Db): number => n(db, 'SELECT COALESCE(MAX(id), 0) FROM sync_changelog');
+function spiegelBild(db: Db, pid: string, lotId: string, t: string, payIds: string[]): string {
+  const ids = [t, ...payIds];
+  return S({
+    transfer: all(db, 'SELECT id, status FROM agent_transfers WHERE id = ?', [t]),
+    zahlungen: all(db, `SELECT id, amount, method FROM agent_settlement_payments WHERE id IN (${payIds.map(() => '?').join(',') || "''"}) OR transfer_id = ? ORDER BY id`, [...payIds, t]),
+    artikel: all(db, 'SELECT source_type, stock_status, quantity FROM products WHERE id = ?', [pid]),
+    los: all(db, 'SELECT qty_remaining, status FROM stock_lots WHERE id = ?', [lotId]),
+    buch: { zeilen: lc(db), konten: konten(db) },
+    buchungen: all(db, `SELECT id, source_module, account, direction, amount FROM ledger_entries WHERE source_id IN (${ids.map(() => '?').join(',')}) ORDER BY id`, ids),
+  });
+}
+/** Eigene Ware mit Los, beim Agenten verkauft und in ZWEI Zahlungen abgerechnet; der Spiegel ist zum Stichpunkt davor kopiert. */
+async function zweiZahlungen(pid: string): Promise<{ prim: Db; spiegel: Db; ab: number; t: string; payIds: string[]; lotId: string; kontenVorher: string }> {
+  const prim = freshDb();
+  agentKunde(prim);
+  const lotId = `lot-${pid}`;
+  insert(prim, 'products', { id: pid, branch_id: 'branch-main', category_id: 'cat-w', brand: 'Omega', name: 'Eigen Sync', sku: `SKU-${pid}`, quantity: 1,
+    condition: 'Pre-Owned', scope_of_delivery: '[]', purchase_price: 300, purchase_currency: 'BHD', planned_sale_price: 500,
+    stock_status: 'in_stock', tax_scheme: 'MARGIN', days_in_stock: 0, images: '[]', attributes: '{}', source_type: 'OWN', created_at: NOW, updated_at: NOW });
+  insert(prim, 'stock_lots', { id: lotId, branch_id: 'branch-main', product_id: pid, unit_cost: 300, qty_total: 1, qty_remaining: 1,
+    status: 'ACTIVE', acquired_at: NOW, created_at: NOW, unit: 'pcs' });
+  reload();
+  const ab = maxLog(prim);
+  const spiegel = new SQL.Database(prim.export()) as unknown as Db;
+  nimm(prim);
+  const kontenVorher = S(konten(prim));
+  const u = await uebergabe('primary', prim, pid);
+  const t = tidOf(prim, pid);
+  const v = await agentVerkauf('primary', prim, t);
+  nimm(prim); useAgentStore.getState().loadAgents(); useAgentStore.getState().loadTransfers();
+  const a1 = await primary(() => imHaus(() => useAgentStore.getState().markTransferSettled(t, 500, 'cash')));
+  nimm(prim); useAgentStore.getState().loadAgents(); useAgentStore.getState().loadTransfers();
+  const a2 = await primary(() => imHaus(() => useAgentStore.getState().markTransferSettled(t, 800, 'bank')));
+  const payIds = rows(prim, 'SELECT id FROM agent_settlement_payments WHERE transfer_id = ? ORDER BY id', [t]).map((r) => String(r.id));
+  if (!(u.ok && v.ok && a1.ok && a2.ok && payIds.length === 2)) throw new Error(`S: Ausgangslage nicht herstellbar (${u.code}/${v.code}/${a1.code}/${a2.code}/${payIds.length})`);
+  return { prim, spiegel, ab, t, payIds, lotId, kontenVorher };
+}
+{ // S1 — zwei Zahlungen, Löschen, Spiegel: keine Zahlungszeile bleibt zurück, alles andere gleich
+  const L = await zweiZahlungen('p-sync');
+  const s1 = spiegeln(L.prim, L.spiegel, L.ab);
+  ok(s1.abgewiesen.length === 0 && spiegelBild(L.spiegel, 'p-sync', L.lotId, L.t, L.payIds) === spiegelBild(L.prim, 'p-sync', L.lotId, L.t, L.payIds)
+    && n(L.spiegel, 'SELECT COUNT(*) FROM agent_settlement_payments WHERE transfer_id = ?', [L.t]) === 2,
+    `S Spiegel vor dem Löschen: Vorgang, zwei Zahlungen, Artikel, Los und Buchungen gleich (${s1.abgewiesen.join('; ') || 'keine Abweisung'})`);
+  const d = await loeschen(L.prim, L.t);
+  const s2 = spiegeln(L.prim, L.spiegel, s1.bis);
+  const p = spiegelBild(L.prim, 'p-sync', L.lotId, L.t, L.payIds);
+  const m = spiegelBild(L.spiegel, 'p-sync', L.lotId, L.t, L.payIds);
+  ok(d === '' && s2.abgewiesen.length === 0 && m === p
+    && n(L.spiegel, 'SELECT COUNT(*) FROM agent_settlement_payments WHERE transfer_id = ? OR id IN (?, ?)', [L.t, ...L.payIds]) === 0
+    && n(L.spiegel, 'SELECT COUNT(*) FROM agent_transfers WHERE id = ?', [L.t]) === 0
+    && S(konten(L.spiegel)) === L.kontenVorher && balanced(L.spiegel),
+    `S Spiegel nach dem Löschen: keine Zahlungszeile zurück, Vorgang weg, Artikel/Los/Buchungen wie am Primary (${d || 'ok'}; ${s2.abgewiesen.join('; ') || 'keine Abweisung'}; Zahlungen Spiegel ${n(L.spiegel, 'SELECT COUNT(*) FROM agent_settlement_payments')})`);
+  // Wiederholtes Löschen: keine zweite Wirkung, kein weiterer Abgleich-Eintrag.
+  const log0 = maxLog(L.prim);
+  const d2 = await loeschen(L.prim, L.t);
+  ok(d2 === 'TRANSFER_NOT_FOUND' && maxLog(L.prim) === log0, `S zweites Löschen → abgewiesen, kein weiterer Abgleich-Eintrag (${d2 || 'GELÖSCHT'})`);
+}
+// S2 — ein Abgleich-Eintrag kann nicht geschrieben werden → der GANZE Vorgang geht zurück (auch der Changelog).
+for (const [stelle, wann] of [
+  ['Zahlungszeile gelöscht', "NEW.table_name = 'agent_settlement_payments' AND NEW.action = 'delete'"],
+  ['Vorgang gelöscht', "NEW.table_name = 'agent_transfers' AND NEW.action = 'delete'"],
+  ['Stück zurück (Artikel)', "NEW.table_name = 'products'"],
+  ['Storno-Buchung', "NEW.table_name = 'ledger_entries'"],
+] as Array<[string, string]>) {
+  const L = await zweiZahlungen('p-syncf');
+  nimm(L.prim);
+  const vor = voll(L.prim, 'p-syncf');
+  L.prim.run(`CREATE TRIGGER s_inj BEFORE INSERT ON sync_changelog WHEN ${wann} BEGIN SELECT RAISE(ABORT, 'INJECTED_SYNC_FAILURE'); END`);
+  const d = await loeschen(L.prim, L.t);
+  L.prim.run('DROP TRIGGER IF EXISTS s_inj');
+  ok(/sync change-log entry could not be written/.test(d) && voll(L.prim, 'p-syncf') === vor && balanced(L.prim),
+    `S Abgleich-Eintrag „${stelle}" scheitert → ganzer Vorgang zurück (Stück, Los, Vorgang, Zahlungen, Konten, Changelog, Protokoll unverändert) (${d || 'GELÖSCHT'})`);
+}
+{ // S3 — ohne eingerichteten Abgleich ist kein Eintrag nötig: Löschen wie gehabt, kein Changelog
+  const L = await zweiZahlungen('p-nosync');
+  const log0 = n(L.prim, 'SELECT COUNT(*) FROM sync_changelog');
+  store.delete('lataif_sync_url');
+  let d = '';
+  try { d = await loeschen(L.prim, L.t); } finally { store.set('lataif_sync_url', 'http://127.0.0.1:9/sync'); }
+  ok(d === '' && n(L.prim, 'SELECT COUNT(*) FROM sync_changelog') === log0 && S(konten(L.prim)) === L.kontenVorher
+    && prodS(L.prim, 'p-nosync') === S(['OWN', 'in_stock', 1]),
+    `S ohne Abgleich: Löschen geht, ganzer Rückbau, kein Changelog-Eintrag nötig (${d || 'ok'})`);
+}
+{ // S4 — nur diese eine Operation ist neu erlaubt; alles andere bleibt abgewiesen
+  const v = (t: string, op: string): string => ap.changeContractViolation(t, op, '{}') ?? 'erlaubt';
+  const OPN = ap.SYNC_OPERATION_NOT_ALLOWED;
+  ok(v('agent_settlement_payments', 'delete') === 'erlaubt' && v('agent_settlement_payments', 'update') === OPN
+    && v('ledger_entries', 'delete') === OPN && v('ledger_entries', 'update') === OPN && v('purchase_inbox', 'delete') === OPN
+    && v('purchase_payments', 'delete') === OPN && v('debt_payments', 'delete') === OPN,
+    `S Manifest: agent_settlement_payments/delete erlaubt; update dort und delete auf Hauptbuch/anderen Zahlungstabellen weiter abgewiesen`);
+  const sp = freshDb();
+  let code = '';
+  try { ap.applySyncChange(sp as never, { table_name: 'agent_settlement_payments', record_id: 'x', action: 'update', data: '{"id":"x"}' }); }
+  catch (e) { code = String((e as { code?: unknown }).code ?? ''); }
+  ok(code === OPN, `S Spiegel wendet ein nicht erlaubtes update auf Zahlungszeilen nicht an (${code || 'ANGEWANDT'})`);
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — consignment agent handoff: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }

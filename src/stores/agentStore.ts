@@ -679,6 +679,9 @@ export const useAgentStore = create<AgentStore>((set, get) => ({
 
     // Settlement-Payment-Rows löschen, sonst würde ein Backfill sie wieder reposten.
     db.run(`DELETE FROM agent_settlement_payments WHERE transfer_id = ?`, [id]);
+    // AGENT-DELETE-SYNC — jede gelöschte Zahlungszeile reist mit (vorher ohne Eintrag: auf dem Spiegel blieb sie
+    // neben dem gelöschten Vorgang stehen).
+    for (const payId of payIds) trackChange('agent_settlement_payments', payId, 'delete', {});
     db.run(`DELETE FROM agent_transfers WHERE id = ?`, [id]);
     trackChange('agent_transfers', id, 'delete', {});
     // Protokoll — streng, in derselben Transaktion (vorher `trackDelete`: ein Schreibfehler wurde verschluckt).

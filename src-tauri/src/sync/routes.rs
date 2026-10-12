@@ -2808,7 +2808,9 @@ mod legacy_push_tests {
         }
         // BULK METAL V1: bulk_lot_movements insert only (53 → 54 insert). INVOICE-LINES SYNC: the invoice edit
         // updates a kept line in place since v0.8.60 → invoice_lines gains update (36 → 37 update).
-        assert_eq!((ins, upd, del), (54, 37, 37), "insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
+        // AGENT-DELETE-SYNC: deleting an agent transfer reports its deleted settlement payment rows →
+        // agent_settlement_payments gains delete (37 → 38 delete).
+        assert_eq!((ins, upd, del), (54, 37, 38), "insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
     }
 
     // O6 — a mixed batch with one disallowed operation writes NOTHING (all-or-nothing).
