@@ -119,6 +119,16 @@ const ALREADY_RUNNING_MESSAGE: &str = "LATAIF is already running on this compute
 Please use the LATAIF window that is already open (check the taskbar).\n\n\
 A second copy is not started, because two copies would overwrite each other's work.";
 
+/// INSTANCE-LOCK — die Sperre ließ sich technisch nicht einrichten: kein Start, und das deutlich.
+fn lock_setup_failed_message(detail: &str) -> String {
+    format!(
+        "LATAIF could not set up its start-up safety lock, so it does not open your data.\n\n\
+         Without this lock LATAIF cannot rule out that a second copy is writing the same data.\n\n\
+         Please restart the computer and start LATAIF again. If this message comes back, contact support.\n\n\
+         Details: {detail}"
+    )
+}
+
 fn show_fatal_box(caption: &str, message: &str) {
     // The automation build refuses just as hard, but silently: a modal message box would keep the
     // process alive waiting for a click, and a test that hangs proves nothing about a refusal.
@@ -3205,22 +3215,32 @@ pub fn run() {
             // Daten liegen, geschweige denn eine Datenbank, einen Server oder einen Drain starten. Das Plugin
             // oben lässt eine zweite Kopie weiterlaufen, wenn es das Fenster der ersten nicht findet (siehe
             // instance_lock.rs) — diese Sperre nicht. Beim Neustart läuft die alte Kopie noch kurz aus: warten.
-            // Lässt sich die Sperrdatei gar nicht anlegen, ist das kein Beweis für eine zweite Kopie —
-            // dann startet LATAIF wie bisher (das Plugin bleibt die erste Linie) und meldet es im Log.
-            match app.path().app_local_data_dir() {
-                Ok(lock_dir) => match instance_lock::acquire_waiting(&lock_dir, instance_lock::RELAUNCH_WAIT, instance_lock::RETRY_STEP) {
-                    Ok(lock) => {
-                        app.manage(InstanceLockState(lock));
-                    }
-                    Err(instance_lock::LockError::HeldByAnotherProcess) => {
-                        eprintln!("[instance-lock] another LATAIF process holds the lock — this copy exits without opening anything");
-                        show_fatal_box("LATAIF — already running", ALREADY_RUNNING_MESSAGE);
-                        app.handle().cleanup_before_exit();
-                        std::process::exit(0);
-                    }
-                    Err(instance_lock::LockError::Io(e)) => eprintln!("[instance-lock] lock file unavailable ({e}) — starting without it"),
-                },
-                Err(e) => eprintln!("[instance-lock] local app data dir unavailable ({e}) — starting without the lock"),
+            // Fail-closed: lässt sich die Sperre technisch nicht einrichten, startet NICHTS — ohne Sperre
+            // wüsste niemand, ob gerade eine zweite Kopie dieselben Daten schreibt.
+            let lock = app
+                .path()
+                .app_local_data_dir()
+                .map_err(|e| instance_lock::LockError::Io(format!("local app data folder unavailable: {e}")))
+                .and_then(|lock_dir| {
+                    instance_lock::acquire_waiting(&lock_dir, instance_lock::RELAUNCH_WAIT, instance_lock::RETRY_STEP)
+                });
+            match lock {
+                // Für die ganze Lebensdauer des Prozesses: Tauri hält registrierten Zustand bis zum Ende.
+                Ok(lock) => {
+                    app.manage(InstanceLockState(lock));
+                }
+                Err(instance_lock::LockError::HeldByAnotherProcess) => {
+                    eprintln!("[instance-lock] another LATAIF process holds the lock — this copy exits without opening anything");
+                    show_fatal_box("LATAIF — already running", ALREADY_RUNNING_MESSAGE);
+                    app.handle().cleanup_before_exit();
+                    std::process::exit(0);
+                }
+                Err(instance_lock::LockError::Io(e)) => {
+                    eprintln!("[instance-lock] safety lock could not be set up ({e}) — not starting");
+                    show_fatal_box("LATAIF — start-up safety lock", &lock_setup_failed_message(&e));
+                    app.handle().cleanup_before_exit();
+                    std::process::exit(1);
+                }
             }
             // DATA-ROOT-I1 — the FIRST thing that happens in the process, before recovery, before any
             // database or media file is opened, and before the window exists. `app_data_dir()` is used
