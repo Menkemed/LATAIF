@@ -7,9 +7,12 @@ import { v4 as uuid } from 'uuid';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { currentBranchId, currentUserId } from '@/core/db/helpers';
 import { useAuthStore } from '@/stores/authStore';
+import { isClientMode } from '@/core/bridge/client-mode';
+import { BulkRejected } from './bulk-math';
 import {
-  closeLotInHouse, correctLotInHouse, reverseAdjustmentInHouse, writeOffInHouse,
-  type BulkActionResult, type BulkCtx, type CloseLotInput, type CorrectLotInput, type ReverseAdjustmentInput, type WriteOffInput,
+  closeLotInHouse, correctLotInHouse, reopenWronglyClosedLotInHouse, reverseAdjustmentInHouse, writeOffInHouse,
+  type BulkActionResult, type BulkCtx, type CloseLotInput, type CorrectLotInput, type ReopenLotInput, type ReopenLotResult,
+  type ReverseAdjustmentInput, type WriteOffInput,
 } from './bulk-lot-house';
 
 /** Eine neue stabile Kennung für EINE Dialog-Absicht (beim Öffnen erzeugen, bei Wiederholung behalten). */
@@ -28,3 +31,9 @@ export const correctLotOnPrimary = (input: CorrectLotInput, reload: () => void):
   runOnPrimary(() => correctLotInHouse(input, localBulkCtx()), reload);
 export const reverseAdjustmentOnPrimary = (input: ReverseAdjustmentInput, reload: () => void): Promise<BulkActionResult> =>
   runOnPrimary(() => reverseAdjustmentInHouse(input, localBulkCtx()), reload);
+
+/** F10 — ein fälschlich geschlossenes Lot wieder öffnen: nur am Primary (kein Fernbefehl), nur der Owner. */
+export const reopenWronglyClosedLotOnPrimary = (input: ReopenLotInput, reload: () => void): Promise<ReopenLotResult> =>
+  isClientMode()
+    ? Promise.reject(new BulkRejected('PRIMARY_ONLY', 'this repair runs on the main computer only'))
+    : runOnPrimary(() => reopenWronglyClosedLotInHouse(input, localBulkCtx()), reload);

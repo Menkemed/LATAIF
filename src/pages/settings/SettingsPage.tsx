@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import { useNavigate } from 'react-router-dom';
 import {
   Building2, Receipt, Tags, GitBranch, Users, Hash, AlertTriangle,
-  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe, Phone, Copy, ExternalLink,
+  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe, Phone, Copy, ExternalLink, Wrench,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
@@ -17,6 +17,7 @@ import { PrimaryAdoptDialog } from './PrimaryAdoptDialog';
 import { BackupRestorePanel } from './BackupRestorePanel';
 import { StorageMaintenancePanel } from './StorageMaintenancePanel';
 import { DataLocationPanel } from './DataLocationPanel';
+import { DataRepairsTab } from './DataRepairsTab';
 import type { Product } from '@/core/models/types';
 import { getDatabase, saveDatabase, resetDatabase, flushDatabase } from '@/core/db/database';
 import { query, currentBranchId } from '@/core/db/helpers';
@@ -38,7 +39,7 @@ import { INVOICE_COMPANY_DEFAULTS, INVOICE_COMPANY_KEYS, type InvoiceA5Company }
 
 // ── Constants ──
 
-type TabKey = 'company' | 'tax' | 'categories' | 'branch' | 'branches' | 'users' | 'numbering' | 'language' | 'phone' | 'ai' | 'sync' | 'updates' | 'duplicates' | 'danger';
+type TabKey = 'company' | 'tax' | 'categories' | 'branch' | 'branches' | 'users' | 'numbering' | 'language' | 'phone' | 'ai' | 'sync' | 'updates' | 'duplicates' | 'repairs' | 'danger';
 
 interface TabDef {
   key: TabKey;
@@ -60,6 +61,7 @@ const TABS: TabDef[] = [
   { key: 'sync', label: 'Sync / Server', icon: <Cloud size={16} /> },
   { key: 'updates', label: 'Updates', icon: <Cloud size={16} /> },
   { key: 'duplicates', label: 'Duplicates', icon: <Copy size={16} /> },
+  { key: 'repairs', label: 'Data Repairs', icon: <Wrench size={16} /> },
   { key: 'danger', label: 'Danger Zone', icon: <AlertTriangle size={16} /> },
 ];
 
@@ -3345,7 +3347,7 @@ function SettingsPageBody() {
   const initialTab = ((): TabKey => {
     try {
       const t = new URLSearchParams(window.location.search).get('tab');
-      const valid: TabKey[] = ['company', 'tax', 'categories', 'branch', 'branches', 'users', 'numbering', 'language', 'phone', 'ai', 'sync', 'updates', 'duplicates', 'danger'];
+      const valid: TabKey[] = ['company', 'tax', 'categories', 'branch', 'branches', 'users', 'numbering', 'language', 'phone', 'ai', 'sync', 'updates', 'duplicates', 'repairs', 'danger'];
       if (t && valid.includes(t as TabKey)) return t as TabKey;
     } catch { /* */ }
     return 'company';
@@ -3380,6 +3382,7 @@ function SettingsPageBody() {
       case 'sync': return <SyncTab />;
       case 'updates': return <UpdatesTab />;
       case 'duplicates': return <DuplicatesTab />;
+      case 'repairs': return <DataRepairsTab />;
       case 'danger': return <DangerZoneTab />;
     }
   };

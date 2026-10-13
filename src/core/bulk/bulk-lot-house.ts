@@ -12,7 +12,7 @@
 import { v4 as uuid } from 'uuid';
 import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
-import { trackChange } from '@/core/sync/sync-service';
+import { trackChange, watchSyncTracks } from '@/core/sync/sync-service';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { canonicalRole } from '@/core/models/types';
 import { businessDateIssue, businessTimestamp } from '@/core/utils/business-date';
@@ -605,6 +605,87 @@ export function reverseAdjustmentInHouse(raw: ReverseAdjustmentInput, ctx: BulkC
   if (last.valueFils !== 0) reverseSource('STOCK_ADJUST', last.sourceId, ctx.now);
   assertBulkLotInvariants(lot.id);
   return result;
+}
+
+// ── F10 — ein von der alten Start-Korrektur fälschlich geschlossenes Lot wieder öffnen ──────
+//
+// Bis v0.8.80 rechnete eine Start-Korrektur bei JEDEM Start `qty_remaining`/`status` aller Lose aus Rechnungszeilen
+// neu — auch der Bulk-Lots (Stückfelder 0) — und setzte sie so auf EXHAUSTED, obwohl Gewicht und Wert noch da
+// waren. Kein Vorgang dieses Moduls tut das: EXHAUSTED entsteht nur, wenn eine Entnahme das Restgewicht auf 0 bringt.
+// Ein EXHAUSTED-Lot mit Restgewicht, dessen Bewegungen genau diesen Rest ergeben, ist also nachweislich nur durch
+// diese Korrektur geschlossen. Nur so ein Lot wird wieder ACTIVE — Gewicht, Wert, Bewegungen und Hauptbuch bleiben
+// unberührt; es entsteht keine Bewegung (kein Bestand ändert sich), sondern ein strenger Protokolleintrag.
+
+/** Rein lesend: null = nachweislich fälschlich geschlossen; sonst der Grund, warum es kein Beweis ist. */
+export function wronglyClosedIssue(lotId: string): string | null {
+  const r = query(`SELECT * FROM stock_lots WHERE id = ? AND unit = 'mg'`, [lotId])[0];
+  if (!r) return 'no such bulk lot';
+  const lot = lotFromRow(r);
+  if (lot.status !== 'EXHAUSTED') return `the lot is ${lot.status}, not EXHAUSTED`;
+  if (lot.closedAt !== null) return 'the lot was closed by a Close action';
+  if (lot.remainingWeightMg <= 0 || lot.remainingValueFils <= 0) return 'the lot has no remaining weight or value — it is really used up';
+  if (int(r.qty_total) !== 0 || int(r.qty_remaining) !== 0 || Number(r.unit_cost) !== 0) return 'the piece fields of the lot are not 0';
+  if (!lot.purchaseId) return 'the lot has no purchase';
+  const kauf = query('SELECT status FROM purchases WHERE id = ?', [lot.purchaseId])[0];
+  if (!kauf) return 'the purchase of the lot does not exist';
+  if (String(kauf.status ?? '').toUpperCase() === 'CANCELLED') return 'the purchase of the lot is cancelled';
+  const moves = movementsOf(lot.id);
+  const first = moves[0];
+  if (!first || first.kind !== 'PURCHASE' || first.sourceId !== lot.purchaseId) return 'the first movement is not the purchase of this lot';
+  let w = 0, v = 0, corr = 0;
+  for (let i = 0; i < moves.length; i++) {
+    const m = moves[i];
+    if (m.seq !== i + 1) return 'the movement history has a gap';
+    if (m.kind === 'CLOSE' || m.kind === 'PURCHASE_CANCEL') return `the lot has a ${m.kind} movement`;
+    w += m.weightMg; v += m.valueFils;
+    if (m.weightAfterMg !== w || m.valueAfterFils !== v) return `movement ${m.seq} does not add up`;
+    if (m.kind === 'WEIGHT_CORRECTION') corr += m.weightMg;
+  }
+  if (w !== lot.remainingWeightMg || v !== lot.remainingValueFils) return 'the remaining weight or value differs from the movements';
+  if (first.valueFils !== lot.originalValueFils || first.weightMg + corr !== lot.originalWeightMg) return 'the original weight or value differs from the purchase';
+  return null;
+}
+
+export interface ReopenLotInput {
+  actionId: string; lotId: string; purchaseId: string; expectedRevision: number;
+  confirmWeightMg: number; confirmValueFils: number; reason: string;
+}
+export interface ReopenLotResult { lotId: string; lotNo: string; status: BulkLotStatus; remainingWeightMg: number; remainingValueFils: number; revision: number }
+
+/** In der Transaktion des Aufrufers: das genannte Lot (Los-ID UND Einkauf) mit Beweis wieder ACTIVE — sonst nichts. */
+export function reopenWronglyClosedLotInHouse(raw: ReopenLotInput, ctx: BulkCtx): ReopenLotResult {
+  const actionId = assertActionId(raw.actionId);
+  const reason = assertReason(raw.reason);
+  assertRole(ctx, 'owner');
+  const lot = lotInBranch(raw.lotId, ctx.branchId);
+  if (typeof raw.purchaseId !== 'string' || !raw.purchaseId || raw.purchaseId !== lot.purchaseId) {
+    throw new BulkRejected('BULK_REPAIR_MISMATCH', `bulk lot ${lot.lotNo} does not belong to this purchase — nothing was changed`);
+  }
+  if (lot.status === 'ACTIVE') throw new BulkRejected('BULK_LOT_ALREADY_ACTIVE', `bulk lot ${lot.lotNo} is already active — nothing was changed`);
+  assertRevision(lot, raw.expectedRevision);
+  if (raw.confirmWeightMg !== lot.remainingWeightMg || raw.confirmValueFils !== lot.remainingValueFils) {
+    throw new BulkRejected('BULK_REPAIR_STALE', `the remaining stock of lot ${lot.lotNo} is not what was shown — reload; nothing was changed`);
+  }
+  const issue = wronglyClosedIssue(lot.id);
+  if (issue) throw new BulkRejected('BULK_REPAIR_NOT_PROVEN', `bulk lot ${lot.lotNo} cannot be reopened: ${issue} — nothing was changed`);
+
+  const abgleich = watchSyncTracks('reopen bulk lot');
+  const db = getDatabase();
+  db.run(`UPDATE stock_lots SET status = 'ACTIVE', updated_at = ? WHERE id = ? AND unit = 'mg' AND status = 'EXHAUSTED'`, [ctx.now, lot.id]);
+  if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) throw new BulkRejected('BULK_LOT_REVISION_CHANGED', `bulk lot ${lot.lotNo} was changed meanwhile — nothing was changed`);
+  trackChange('stock_lots', lot.id, 'update', {});
+  logAuditOrThrow({
+    module: 'BulkMetals', entityType: 'stock_lots', entityId: lot.id, action: 'STATUS_CHANGE', field: 'status',
+    oldValue: 'EXHAUSTED',
+    newValue: { status: 'ACTIVE', repair: 'F10_REOPEN_WRONGLY_CLOSED_LOT', lotNo: lot.lotNo, purchaseId: lot.purchaseId,
+      remainingWeightMg: lot.remainingWeightMg, remainingValueFils: lot.remainingValueFils, reason, actionId },
+    actor: { userId: ctx.userId, branchId: ctx.branchId },
+  });
+  assertBulkLotInvariants(lot.id);
+  abgleich();
+  const nach = getBulkLot(lot.id)!;
+  return { lotId: nach.id, lotNo: nach.lotNo, status: nach.status, remainingWeightMg: nach.remainingWeightMg,
+    remainingValueFils: nach.remainingValueFils, revision: nach.revision };
 }
 
 // ── Invarianten (Kapitel 5) ─────────────────────────────────────────────────

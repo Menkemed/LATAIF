@@ -29,6 +29,7 @@ import {
 } from '../stock/inventory-session';
 import { getRuntimePaths } from '../runtime/runtime-paths';
 import { hasStockLotsTable, runLegacyStockRepairsOnce } from './legacy-stock-repair';
+import { goldCategoryAllowedNew, runGoldConditionMigrationOnce } from './legacy-gold-condition';
 import {
   atomicWrite,
   createSaveCoalescer,
@@ -284,6 +285,8 @@ function runMigrations(database: Database): void {
   // STARTUP-MIGRATION-INTEGRITY — VOR dem Block festhalten, ob die Datenbank die Lose schon kannte: dann liefen die
   // historischen Bestandskorrekturen dort bereits (s. legacy-stock-repair.ts). `SCHEMA` legt `stock_lots` nicht an.
   const hadStockLots = hasStockLotsTable(database);
+  // F10 — ebenso VOR dem Block: erlaubte Gold-Schmuck „New" schon (dann lief die historische Umstellung längst)?
+  const goldAllowedNew = goldCategoryAllowedNew(database);
   // Each migration wrapped: ignore "duplicate column" errors on re-run.
   const migrations: string[] = [
     `ALTER TABLE consignments ADD COLUMN commission_type TEXT DEFAULT 'percent'`,
@@ -445,8 +448,9 @@ function runMigrations(database: Database): void {
     )
     WHERE category_id = 'cat-gold-jewelry'
       AND json_extract(attributes, '$.karat') LIKE '9K %'`,
-    // Bestehende Produkte mit condition="New" auf "Pre-Owned" umstellen.
-    `UPDATE products SET condition = 'Pre-Owned' WHERE category_id = 'cat-gold-jewelry' AND condition = 'New'`,
+    // F10 — Die Umstellung bestehender Artikel „New" → „Pre-Owned" lief hier bei JEDEM Start und überschrieb seit
+    // v0.6.7 (wieder „New" erlaubt, s. unten) jeden vom Benutzer gesetzten Zustand. Sie läuft jetzt einmal je
+    // Datenbank, in `legacy-gold-condition.ts`.
     // Backfill: bestehende Produkte — alten karat (z.B. "18K") + color_type
     // (z.B. "Yellow Gold") zu einem Wert kombinieren ("18K Yellow"). Idempotent —
     // wirkt nur wenn karat noch im alten Format ohne Color-Suffix ist.
@@ -2393,6 +2397,8 @@ function runMigrations(database: Database): void {
 
   // STARTUP-MIGRATION-INTEGRITY — die historischen Bestandskorrekturen: einmal je Datenbank, nie bei jedem Start.
   try { runLegacyStockRepairsOnce(database, hadStockLots); } catch (err) { console.warn('Legacy stock repairs skipped:', err); }
+  // F10 — die historische Umstellung Gold-Schmuck „New" → „Pre-Owned": einmal je Datenbank, nie bei jedem Start.
+  try { runGoldConditionMigrationOnce(database, goldAllowedNew); } catch (err) { console.warn('Gold condition migration skipped:', err); }
 
   // STOCK-LOT-INTEGRITY — Altzeilen ohne Los einmalig einordnen (nur Zeilen ohne Merker; idempotent).
   try { classifyLegacyInvoiceLines(database); } catch (err) { console.warn('Legacy stock classification skipped:', err); }

@@ -7,7 +7,7 @@ import { query } from '@/core/db/helpers';
 import type { BusinessReadContext } from '@/core/data/read-context';
 import { allocateFils, assertWeightMg, BulkRejected } from './bulk-math';
 import { bulkProductName, type BulkMetal } from './bulk-product';
-import { getBulkLot, lotFromRow, movementFromRow, type BulkLot, type BulkMovementKind } from './bulk-lot-house';
+import { getBulkLot, lotFromRow, movementFromRow, wronglyClosedIssue, type BulkLot, type BulkMovementKind } from './bulk-lot-house';
 
 export interface BulkLotRow {
   id: string;
@@ -81,6 +81,11 @@ function lotRows(branchId: string, where = '', params: unknown[] = []): BulkLotR
       } : null,
     };
   });
+}
+
+/** F10 — die nachweislich von der alten Start-Korrektur geschlossenen Lots (Einstellungen → „Data Repairs"). */
+export function wronglyClosedBulkLotRows(branchId: string): BulkLotRow[] {
+  return lotRows(branchId, ` AND sl.status = 'EXHAUSTED'`).filter((l) => wronglyClosedIssue(l.id) === null);
 }
 
 /** Seite „Bulk Metals": je Artikel die Lots mit Rest, Wert, Status; dazu Gesamtwert und Abstimmung. */
