@@ -28,6 +28,7 @@ import {
   INVENTORY_BOOTSTRAP_DDL, INVENTORY_BOOTSTRAP_SEED,
 } from '../stock/inventory-session';
 import { getRuntimePaths } from '../runtime/runtime-paths';
+import { hasStockLotsTable, runLegacyStockRepairsOnce } from './legacy-stock-repair';
 import {
   atomicWrite,
   createSaveCoalescer,
@@ -280,6 +281,9 @@ export function categoryAttributesSql(categoryId: string): string {
 }
 
 function runMigrations(database: Database): void {
+  // STARTUP-MIGRATION-INTEGRITY — VOR dem Block festhalten, ob die Datenbank die Lose schon kannte: dann liefen die
+  // historischen Bestandskorrekturen dort bereits (s. legacy-stock-repair.ts). `SCHEMA` legt `stock_lots` nicht an.
+  const hadStockLots = hasStockLotsTable(database);
   // Each migration wrapped: ignore "duplicate column" errors on re-run.
   const migrations: string[] = [
     `ALTER TABLE consignments ADD COLUMN commission_type TEXT DEFAULT 'percent'`,
@@ -1031,14 +1035,8 @@ function runMigrations(database: Database): void {
 
     // ── Phase 3: Product-Struktur (Plan §Product §5 source_type) ──
     `ALTER TABLE products ADD COLUMN source_type TEXT NOT NULL DEFAULT 'OWN'`,
-
-    // Mark products attached to active consignments as CONSIGNMENT source
-    `UPDATE products SET source_type = 'CONSIGNMENT' WHERE id IN
-      (SELECT product_id FROM consignments WHERE status != 'returned')`,
-
-    // Mark products attached to active agent transfers as AGENT source
-    `UPDATE products SET source_type = 'AGENT' WHERE id IN
-      (SELECT product_id FROM agent_transfers WHERE status = 'transferred' OR status = 'sold')`,
+    // STARTUP-MIGRATION-INTEGRITY — die Herkunfts-Korrekturen (CONSIGNMENT/AGENT) laufen nicht mehr bei jedem Start:
+    // einmal je Datenbank, in `legacy-stock-repair.ts`.
 
     // ── Phase 7.B: Loan Module (Plan §Loan §4) — LOA-Prefix numbering ──
     `ALTER TABLE debts ADD COLUMN loan_number TEXT`,
@@ -1299,150 +1297,9 @@ function runMigrations(database: Database): void {
     // Buchungslogik aendert sich. User waehlt beim Convert/Finalize.
     `ALTER TABLE invoices ADD COLUMN special_mark INTEGER DEFAULT 0`,
 
-    // 2026-05-16 — Backfill stock_status fuer Consignment-Produkte die VOR dem
-    // Partial-Payment-Reservation-Fix verkauft wurden. Damals hat recordSale
-    // sofort 'sold' gesetzt, auch wenn die Invoice noch PARTIAL war. Jetzt:
-    // wenn die linked Invoice nicht FINAL ist (oder CANCELLED, RETURNED, ...),
-    // setzen wir das Produkt zurueck auf 'consignment_reserved' damit es im
-    // UI korrekt als "noch nicht voll bezahlt" angezeigt wird.
-    `UPDATE products SET stock_status = 'consignment_reserved'
-       WHERE source_type = 'CONSIGNMENT'
-         AND stock_status = 'sold'
-         AND EXISTS (
-           SELECT 1 FROM consignments c
-             JOIN invoices i ON i.id = c.invoice_id
-            WHERE c.product_id = products.id
-              AND i.status NOT IN ('FINAL', 'CANCELLED', 'RETURNED')
-         )`,
-    // Analog fuer OWN-Produkte: wenn aktuell 'sold', aber irgendeine Invoice-
-    // Line nicht-FINAL — zurueck auf 'reserved'. Greift nur fuer Produkte mit
-    // mind. einer Invoice (sonst ist 'sold' Legacy/Manual und bleibt).
-    `UPDATE products SET stock_status = 'reserved'
-       WHERE source_type != 'CONSIGNMENT'
-         AND stock_status = 'sold'
-         AND EXISTS (
-           SELECT 1 FROM invoice_lines il
-             JOIN invoices i ON i.id = il.invoice_id
-            WHERE il.product_id = products.id
-              AND i.status NOT IN ('FINAL', 'CANCELLED', 'RETURNED')
-         )
-         AND NOT EXISTS (
-           SELECT 1 FROM invoice_lines il2
-             JOIN invoices i2 ON i2.id = il2.invoice_id
-            WHERE il2.product_id = products.id
-              AND i2.status = 'FINAL'
-         )`,
-
-    // 2026-05-16 — Backfill Cost fuer Consignment-Produkte mit purchase_price=0.
-    // Reihenfolge (am genauesten zuerst):
-    //   1. stock_lot.unit_cost — vom Auto-Purchase gesetzt, gueltig auch nach
-    //      EXHAUSTED weil das LOT bestehen bleibt (nur qty_remaining = 0).
-    //   2. consignment.payout_amount — fuer SOLD/PAID_OUT Consignments wo der
-    //      tatsaechliche Payout bekannt ist.
-    //   3. agreed_price * (1 - commission_rate/100) — Estimate fuer ACTIVE
-    //      Consignments ohne Sale.
-    //   4. consignor_fixed → agreed_price (Garantie an Consignor).
-    // Greift nur bei aktuell 0, ueberschreibt nie echte Daten.
-    `UPDATE products SET purchase_price = COALESCE(
-       (SELECT sl.unit_cost FROM stock_lots sl
-          WHERE sl.product_id = products.id AND sl.status != 'CANCELLED'
-          ORDER BY sl.acquired_at DESC LIMIT 1),
-       (SELECT CASE
-          WHEN c.status IN ('sold', 'paid_out') AND COALESCE(c.payout_amount, 0) > 0 THEN c.payout_amount
-          WHEN COALESCE(c.commission_type, 'percent') = 'consignor_fixed' THEN c.agreed_price
-          ELSE c.agreed_price * (1.0 - COALESCE(c.commission_rate, 15) / 100.0)
-        END
-        FROM consignments c
-        WHERE c.product_id = products.id
-        ORDER BY c.created_at DESC LIMIT 1)
-     )
-     WHERE source_type = 'CONSIGNMENT'
-       AND COALESCE(purchase_price, 0) = 0
-       AND EXISTS (
-         SELECT 1 FROM consignments c2 WHERE c2.product_id = products.id
-       )`,
-
-    // ───────────────────────────────────────────────────────────────
-    // 2026-05-17 — Stock-Lot Reconciliation
-    // Bug-Symptom: Produkte mit stock_status='sold' zeigen stock_lots noch
-    // als ACTIVE/Available, weil ältere FINAL/PARTIAL invoice_lines kein
-    // lot_id Link hatten (entstanden vor Lot-System-Fertigstellung 2026-05-11).
-    //
-    // Schritt 1: Orphan invoice_lines (lot_id IS NULL) für FINAL/PARTIAL Invoices
-    // an den ersten verfügbaren Lot des Produkts hängen (FIFO).
-    // ───────────────────────────────────────────────────────────────
-    `UPDATE invoice_lines
-       SET lot_id = (
-         SELECT id FROM stock_lots
-         WHERE product_id = invoice_lines.product_id
-           AND status != 'CANCELLED'
-         ORDER BY acquired_at ASC, id ASC
-         LIMIT 1
-       )
-     WHERE lot_id IS NULL
-       AND EXISTS (
-         SELECT 1 FROM invoices i
-         WHERE i.id = invoice_lines.invoice_id
-           AND i.status IN ('FINAL', 'PARTIAL')
-       )
-       AND EXISTS (
-         SELECT 1 FROM stock_lots sl
-         WHERE sl.product_id = invoice_lines.product_id
-           AND sl.status != 'CANCELLED'
-       )`,
-
-    // Schritt 2: qty_remaining + status pro Lot aus der Wahrheit zurückrechnen.
-    //   consumed = SUM(invoice_lines.quantity)         (FINAL/PARTIAL)
-    //   returned = SUM(sales_return_lines.quantity)    (über invoice_lines.lot_id verlinkt)
-    //   qty_remaining = MAX(0, qty_total - consumed + returned)
-    //   status = EXHAUSTED falls qty_remaining = 0, sonst ACTIVE
-    // CANCELLED Lots bleiben CANCELLED.
-    `UPDATE stock_lots
-       SET qty_remaining = MAX(0,
-             qty_total
-             - COALESCE((
-                 SELECT SUM(il.quantity) FROM invoice_lines il
-                 JOIN invoices i ON i.id = il.invoice_id
-                 WHERE il.lot_id = stock_lots.id
-                   AND i.status IN ('FINAL', 'PARTIAL')
-               ), 0)
-             + COALESCE((
-                 SELECT SUM(srl.quantity) FROM sales_return_lines srl
-                 JOIN invoice_lines il2 ON il2.id = srl.invoice_line_id
-                 WHERE il2.lot_id = stock_lots.id
-               ), 0)
-           ),
-           status = CASE
-             WHEN qty_total
-                  - COALESCE((
-                      SELECT SUM(il.quantity) FROM invoice_lines il
-                      JOIN invoices i ON i.id = il.invoice_id
-                      WHERE il.lot_id = stock_lots.id
-                        AND i.status IN ('FINAL', 'PARTIAL')
-                    ), 0)
-                  + COALESCE((
-                      SELECT SUM(srl.quantity) FROM sales_return_lines srl
-                      JOIN invoice_lines il2 ON il2.id = srl.invoice_line_id
-                      WHERE il2.lot_id = stock_lots.id
-                    ), 0)
-                  <= 0 THEN 'EXHAUSTED'
-             ELSE 'ACTIVE'
-           END
-     WHERE status != 'CANCELLED'`,
-
-    // Schritt 3: products.quantity nachziehen (Phase 7 Sync).
-    `UPDATE products
-       SET quantity = COALESCE((
-         SELECT SUM(qty_remaining)
-         FROM stock_lots
-         WHERE product_id = products.id
-           AND status != 'CANCELLED'
-           AND qty_remaining > 0
-       ), products.quantity)
-     WHERE EXISTS (
-       SELECT 1 FROM stock_lots sl
-       WHERE sl.product_id = products.id
-     )`,
+    // STARTUP-MIGRATION-INTEGRITY — die Bestandskorrekturen vom 2026-05-16/17 (Status-, Einstand-Backfill der
+    // Kommission, Stock-Lot-Reconciliation Schritt 1–3) liefen hier bei JEDEM Start und rechneten Lose und Mengen aus
+    // Rechnungszeilen neu. Sie laufen jetzt einmal je Datenbank, in `legacy-stock-repair.ts`.
 
     // Plan §Image-Duplicate-Detection — 16-stelliger Hex pHash (64 bit DCT).
     // Befüllt von createProduct/updateProduct + Lazy-Backfill in loadProducts.
@@ -2533,6 +2390,9 @@ function runMigrations(database: Database): void {
       }
     }
   }
+
+  // STARTUP-MIGRATION-INTEGRITY — die historischen Bestandskorrekturen: einmal je Datenbank, nie bei jedem Start.
+  try { runLegacyStockRepairsOnce(database, hadStockLots); } catch (err) { console.warn('Legacy stock repairs skipped:', err); }
 
   // STOCK-LOT-INTEGRITY — Altzeilen ohne Los einmalig einordnen (nur Zeilen ohne Merker; idempotent).
   try { classifyLegacyInvoiceLines(database); } catch (err) { console.warn('Legacy stock classification skipped:', err); }

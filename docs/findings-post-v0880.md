@@ -103,3 +103,46 @@ In „Edit" der Artikelseite (`src/pages/watches/ProductDetail.tsx`, Recht `canE
 - **Schweregrad hoch:** Er umgeht jede Lebenslauf-Regel für alle Warenarten. Nur gemildert dadurch, dass es eine bewusste Bearbeitung mit Bearbeitungsrecht braucht und die Bestandsprüfungen (Los, Menge) einen Teil der Folgeverkäufe noch abfangen.
 - Die Regeln zu Kommissionsware (F7, F8) hängen nicht vom Status ab.
 - Vorschlag (eigener Schritt): Status nur aus den Vorgängen ableiten, die Knöpfe entfernen oder auf neutrale Zustände beschränken; Menge nur über Inventur bzw. Einkauf.
+
+## F10 — Start-Migration rechnete Lose und Mengen bei jedem Start neu (kritisch) — BEHOBEN (Folgeschäden offen)
+
+`runMigrations` (`src/core/db/database.ts`) läuft bei jedem Start einer vorhandenen Datenbank, auch beim Neuladen nach einer Wiederherstellung. Im Block standen 8 historische Datenkorrekturen aus `89cbcf4` (2026-05-17) bzw. dem ersten Commit:
+
+- Herkunft CONSIGNMENT/AGENT;
+- Status sold → (consignment_)reserved;
+- Einstand der Kommissionsware;
+- Losbezug der Rechnungszeilen;
+- Losreste aus Rechnungszeilen;
+- Menge aus den Losen.
+
+Bei jedem Start rechneten sie über alles hinweg, was seitdem geschah.
+
+- **Folgen (Testdaten, Gegenprobe auf `dae54bd`):**
+  - Ein Edelmetall-Los wird EXHAUSTED, danach `BULK_LOT_NOT_ACTIVE`.
+  - Agentenverkauf, Produktion und Lieferantenrückgabe: Die Entnahme kommt als Bestand zurück, der Artikel ist wieder verkaufbar.
+  - Retoure „Keep": Die Menge zählt doppelt.
+  - Die Änderungen entstehen im Speicher und werden mit dem nächsten Speichern dauerhaft.
+- **Fix:** `src/core/db/legacy-stock-repair.ts`.
+  - Die Korrekturen laufen einmal je Datenbank.
+  - Hatte die Datenbank `stock_lots` schon vor dem Start, liefen sie dort bereits: Es wird nur der Merker `migration.legacy_stock_repairs_once_v1` gesetzt.
+  - Neue und Alt-Datenbanken (vor den Losen) laufen sie einmal, zusammen mit dem Merker in einem Sicherungspunkt.
+  - Edelmetall-Lose sind ausgenommen.
+  - Test: `test/startup-migration/startup-migration-integrity.test.ts`.
+- **Bereits entstandene Schäden** (nicht automatisch repariert): betroffen sind Datenbanken, die mit v0.8.79/80 oder früher nach solchen Vorgängen neu gestartet wurden. Nur-Lese-Erkennung:
+  - Edelmetall-Los `unit = 'mg' AND status = 'EXHAUSTED' AND remaining_weight_mg > 0` ist eindeutig falsch. Die Bewegungen (`bulk_lot_movements`) belegen den Rest.
+  - `stock_lots.qty_remaining > qty_total` ist eindeutig falsch (Retoure doppelt gezählt).
+  - Ein Los, das ein Agentenvorgang verbraucht hat (`agent_transfers.stock_lot_id`, `stock_taken = 1`, Status sold/settled), steht wieder auf ACTIVE.
+  - Ein Los aus `production_inputs.lot_consumption` oder aus einer bestätigten Lieferantenrückgabe hat mehr Rest als Eingang minus aller Entnahmen.
+  - Artikel `sold`/`consumed`/`returned` mit aktivem Los (`qty_remaining > 0`).
+  - Rechnungszeilen, deren `lot_id` auf ein Los zeigt, das erst nach der Rechnung entstand (Schritt 1 hängte Zeilen ohne Los an das älteste Los).
+- **Für eine spätere sichere Wiederherstellung nötig:** alle Entnahmen je Los, nämlich:
+  - Rechnungszeilen mit `lot_id`;
+  - `agent_transfers.stock_lot_id`/`stock_taken`;
+  - `production_inputs.lot_consumption`;
+  - Lieferantenrückgaben;
+  - `sales_return_lines` samt Ausgang und `keep_lot_id`;
+  - `bulk_lot_movements`;
+  - dazu ältere Sicherungen als Vergleichsstand.
+
+  Die Migrationen schrieben weder Protokoll noch Changelog. Eine Rekonstruktion allein aus Rechnungszeilen wäre derselbe Fehler noch einmal.
+- **Nicht im Umfang, offen:** weitere wiederholte Daten-UPDATEs im Block an Stammdaten (Karat-/Zustands-/Namens-Normalisierung, z. B. Gold-Schmuck „New" → „Pre-Owned"), `expenses.paid_amount` bei PAID. Nicht reproduziert.
