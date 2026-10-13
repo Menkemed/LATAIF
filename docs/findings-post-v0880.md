@@ -177,3 +177,54 @@ Bei jedem Start rechneten sie über alles hinweg, was seitdem geschah.
   4. Das Update auf v0.8.81 gesondert freigeben. Bis dahin den Rechner möglichst nicht neu starten.
   5. Danach gegebenenfalls ein Vorher-/Nachher-Vergleich (Sicherung vor und nach dem Update). Eine Korrektur erfolgt nur als eigener, freigegebener Schritt, nie automatisch.
   - Die ältere Kopie der Datenbank des Freundes in `Downloads` wird nicht geöffnet.
+
+### F10 — Rechner des Freundes, geprüft am 13.10.2026
+
+- **Grundlage:** Der Nutzer hat `lataif.db` und `lataif_sync_server.db` vom Rechner des Freundes bereitgestellt.
+  - Geprüft wurde nur lesend, auf schreibgeschützten Kopien. Die Prüfsummen der Originale sind vorher und nachher gleich.
+  - Jede Zeile wurde mit ihrem letzten protokollierten Stand im `sync_changelog` des Servers verglichen. Die alten Start-Korrekturen protokollierten nicht; eine Abweichung zeigt also eine stille Änderung.
+- **Stand:** Der Merker `migration.legacy_stock_repairs_once_v1` wurde am 13.10. um 17:13Z gesetzt. Der Rechner läuft also schon auf v0.8.81, weitere F10-Schäden entstehen dort nicht.
+- **Der eine F10-Schaden:** Edelmetall-Los `BM-0001` (Silber 925, Einkauf `PUR-2026-000004` vom 11.10.).
+  - Protokolliert ACTIVE, heute EXHAUSTED.
+  - Restgewicht 2.477.000 mg und Restwert 870 BHD sind vollständig da. Die einzige Bewegung ist der Einkauf.
+  - Folgen: Das Silber ist nicht verkaufbar (`BULK_LOT_NOT_ACTIVE`), und der Lagerwert (nur ACTIVE) fehlt gegenüber dem Hauptbuch (INVENTORY 870).
+- **Sonst kein Bestandsschaden:** Menge, Status, Herkunft und Einstand aller 332 Artikel, die 3 Stück-Lose, der Losbezug der Rechnungszeilen und die 89 Kommissionen entsprechen ihrem protokollierten Stand.
+- **Nebenbefunde:**
+  - 7 Gold-Schmuck-Artikel wurden still von „New" auf „Pre-Owned" gesetzt. Ursache: `UPDATE products SET condition = 'Pre-Owned' … cat-gold-jewelry … 'New'` im Startblock lief bei jedem Start, obwohl „New" seit v0.6.7 wieder erlaubt ist.
+  - 48 Rechnungen: nur die Revisionsnummer ist um 1 gestiegen, der Inhalt ist gleich. Harmlos.
+  - Nicht weiter verfolgt (kein F10): 3 Artikel `reserved` bei FINAL-Rechnung; 2 Kommissionsartikel mit normaler Rechnungszeile (Altlast wie F7).
+
+### F10 — Reparaturen (gemeinsames Bündel, nur ausdrücklich ausgelöst)
+
+- **Gold-Umstellung einmal je Datenbank:** `src/core/db/legacy-gold-condition.ts`, Merker `migration.gold_condition_pre_owned_once_v1`.
+  - Erlaubte die Kategorie „New" schon vor dem Start, oder gibt es sie noch nicht, wird nur der Merker gesetzt.
+  - Nur eine Datenbank aus der Zeit ohne „New" (17.–23.05.) wird einmal umgestellt.
+  - Ein vom Benutzer gesetztes „New" bleibt über jeden Neustart.
+- **Silber-Los wieder öffnen:** `reopenWronglyClosedLotInHouse` in `src/core/bulk/bulk-lot-house.ts`.
+  - Voraussetzungen, alle zusammen:
+    - Los-ID und Einkauf stimmen;
+    - Owner (Admin), am Primary;
+    - Status EXHAUSTED ohne Close;
+    - Restgewicht und Restwert > 0 und gleich dem angezeigten Stand;
+    - Revision unverändert;
+    - die Bewegungen ergeben lückenlos genau diesen Rest, die erste ist der Einkauf, kein CLOSE oder Einkaufsstorno;
+    - der Einkauf ist nicht storniert.
+  - Wirkung: nur der Status wird ACTIVE. Gewicht, Wert, Stückfelder, Bewegungen und Hauptbuch bleiben gleich.
+  - Ein strenger Protokolleintrag (`STATUS_CHANGE`, mit Grund) und ein Sync-Eintrag. Danach prüft `assertBulkLotInvariants`; jeder Fehler rollt alles zurück.
+  - Ein zweiter Aufruf wird abgewiesen (`BULK_LOT_ALREADY_ACTIVE`).
+- **Gold „New" wiederherstellen:** `src/core/products/gold-condition-restore.ts`.
+  - Beweis aus der eigenen Datenbank: Der letzte protokollierte Stand (`sync_changelog`, volle Zeile) zeigt „New". Heute steht „Pre-Owned" da, mit gleichem `updated_at` und gleichen Spalten außer den abgeleiteten.
+  - Wird beim Auslösen ein Artikel ohne Beweis genannt, wird keiner geändert.
+  - Nur der Zustand (und `updated_at`) ändert sich: je Artikel ein strenger Protokolleintrag mit Beleg und ein Sync-Eintrag.
+  - Abgewiesen, solange der Merker der Gold-Umstellung fehlt; sonst nähme der nächste Start die Korrektur zurück.
+- **Bedienung:** Einstellungen → „Data Repairs", nur am Primary und nur für Admin.
+  - Die Seite listet ausschließlich bewiesene Fälle.
+  - Je Fall ein Grund (Pflicht), dann „Reopen lot" bzw. „Restore ‚New'" mit Rückfrage.
+  - Kein Start und kein Update löst eine Reparatur aus. PC2 wird abgewiesen.
+- **Nötige Version:** das Release mit diesem Bündel (v0.8.82).
+- **Ablauf beim Freund, jeder Schritt nur mit eigener Freigabe:**
+  1. Frische vollständige Sicherung über die App. Eine unveränderte Kopie außerhalb von `…\Backups` aufbewahren (die Aufbewahrung löscht die älteste).
+  2. Update auf v0.8.82. Beim ersten Start setzt die App nur den Gold-Merker.
+  3. „Data Repairs" öffnen. Erwartet werden das Los `BM-0001` mit 2.477 g und 870 BHD sowie die 7 Gold-Artikel. Weicht die Liste ab: abbrechen und prüfen.
+  4. Grund eintragen, „Reopen lot", dann „Restore ‚New'".
+  5. Danach eine Sicherung anlegen und gegen die vorherige vergleichen. Erwartet: nur der Los-Status, die 7 Zustände sowie neue Protokoll- und Sync-Einträge.
