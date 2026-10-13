@@ -647,4 +647,3 @@ for (const [name, disp] of [['K Keep', 'KEEP_AS_OWN'], ['R Return to Owner', 'RE
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — startup migration integrity: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
-
