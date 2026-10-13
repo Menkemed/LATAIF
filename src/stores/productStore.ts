@@ -34,7 +34,9 @@ import { runStartupMediaRecovery, type CompletedProductScope } from '@/core/medi
 import { findProductsNeedingEmbedding } from '@/core/media/embedding-reconcile';
 import { TauriMediaGateway } from '@/core/media/gateway';
 import { mergeProductGallery } from '@/core/media/product-gallery-merge';
-import { isSyncConfigured } from '@/core/sync/sync-service';
+import { isSyncConfigured, trackChange, watchSyncTracks } from '@/core/sync/sync-service';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
+import { runOnPrimary } from '@/core/data/primary-action';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
@@ -309,8 +311,11 @@ async function embedRecoveredProduct(scope: CompletedProductScope): Promise<void
  * count > 0). Leeres Array = nirgends referenziert = loeschbar. Labels werden
  * dedupliziert (z.B. production_inputs + production_outputs → 1x "Production").
  * Batched (100er) damit der IN(...)-Query bei vielen IDs nicht zu lang wird.
+ *
+ * F9 — `strict` für alles, was danach löscht oder zusammenführt: eine gescheiterte Abfrage ist dort nie
+ * „unverknüpft", sondern bricht ab (`PRODUCT_LINKS_UNKNOWN`). Die Anzeigen bleiben nachsichtig.
  */
-function queryProductLinks(ids: string[]): Map<string, ProductLink[]> {
+function queryProductLinks(ids: string[], strict = false): Map<string, ProductLink[]> {
   const result = new Map<string, ProductLink[]>();
   if (ids.length === 0) return result;
   const cols = PRODUCT_LINK_TABLES
@@ -337,6 +342,10 @@ function queryProductLinks(ids: string[]): Map<string, ProductLink[]> {
       }
     } catch (err) {
       console.warn('[queryProductLinks] batch query failed:', err);
+      if (strict) {
+        throw Object.assign(new Error(`The linked records (invoices, purchases, lots, consignments …) could not be checked (${err instanceof Error ? err.message : String(err)}) — nothing was changed.`),
+          { code: 'PRODUCT_LINKS_UNKNOWN' });
+      }
     }
   }
   return result;
@@ -460,6 +469,8 @@ interface ProductStore {
    * Item als Duplikat bestätigt — statt Neu-Anlage wird die Menge addiert.
    */
   mergeIntoExisting: (sourceProductId: string, targetProductId: string) => void;
+  /** F9 — „Zusammenführen" am Primary: exklusiv, EINE Transaktion (ganz oder gar nicht), erst danach durabel. */
+  mergeIntoExistingOnPrimary: (sourceProductId: string, targetProductId: string) => Promise<void>;
   /**
    * Plan §Duplicate-Groups: Liefert pro productId die Summe aller verknüpften
    * Datensätze (invoice_lines + consignments + agent_transfers + repairs +
@@ -1290,7 +1301,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // Vorher wurden nur 6 von 12 geprueft → ein Produkt aus einem Purchase
     // (purchase_lines + stock_lots) konnte faelschlich geloescht werden und
     // verwaiste diese Records. Jetzt vollstaendig.
-    const links = queryProductLinks([id]).get(id) || [];
+    const links = queryProductLinks([id], true).get(id) || [];
     if (links.length > 0) {
       const detail = links.map(l => `${l.count}× ${l.label}`).join(', ');
       throw new Error(`Cannot delete product with linked records: ${detail}.`);
@@ -1308,7 +1319,9 @@ export const useProductStore = create<ProductStore>((set, get) => ({
   },
 
   deleteProducts: (ids) => {
-    const linkMap = queryProductLinks(ids);
+    let linkMap: Map<string, ProductLink[]>;
+    try { linkMap = queryProductLinks(ids, true); }
+    catch { return { deleted: [], blocked: ids.map(id => ({ id, reason: 'linked records could not be checked' })) }; }
     const db = getDatabase();
     const deleted: string[] = [];
     const blocked: { id: string; reason: string }[] = [];
@@ -1343,7 +1356,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     //  • die Quelle hängt an keinem Beleg (Rechnung, Einkauf, Los, Kommission, Agent, Reparatur, Retoure, Angebot,
     //    Auftrag, Produktion) — sonst verwaiste mit ihr ein Beleg; umgehängt wird nichts automatisch;
     const nein = (code: string, msg: string): Error => Object.assign(new Error(`${msg} Nothing was changed.`), { code });
-    const links = queryProductLinks([sourceId]).get(sourceId) || [];
+    //    (eine gescheiterte Abfrage bricht ab — `strict`, nie „unverknüpft");
+    const links = queryProductLinks([sourceId], true).get(sourceId) || [];
     if (links.length > 0) {
       throw nein('MERGE_SOURCE_LINKED', `"${productDisplayName(source)}" has linked records (${links.map(l => `${l.count}× ${l.label}`).join(', ')}) — it cannot be merged into another item.`);
     }
@@ -1389,6 +1403,11 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       : targetImages;
     const imagesChanged = mergedImages.length !== targetImages.length;
 
+    // F9 — ab hier EIN Vorgang (in der Transaktion des Aufrufers, `mergeIntoExistingOnPrimary`): Galerie, Ziel,
+    // Löschen der Quelle, Sync-Einträge und Protokoll gelingen zusammen oder gar nicht. Ein nicht geschriebener
+    // Sync-Eintrag (`trackChange` schluckt ihn sonst) und ein nicht geschriebenes Protokoll brechen ab.
+    const abgleich = watchSyncTracks('merge duplicate');
+
     // Die Galerie lebt in media_links — VOR jedem Write umhaengen, sonst gehen die Fotos der
     // Quelle mit ihrer Zeile verloren (gleiche Regel wie die Bildspalte: nur wenn das Ziel keine hat).
     mergeProductGallery(sourceId, targetId);
@@ -1405,14 +1424,21 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     saveDatabase();
 
     // Sync-Tracking: andere Peers sollen Source ebenfalls droppen + Target-Qty sehen.
-    trackUpdate('products', targetId, imagesChanged
-      ? { quantity: newQty, images: mergedImages }
-      : { quantity: newQty });
-    trackDelete('products', sourceId);
+    const geaendert: Record<string, unknown> = imagesChanged ? { quantity: newQty, images: mergedImages } : { quantity: newQty };
+    trackChange('products', targetId, 'update', geaendert);
+    for (const [field, newValue] of Object.entries(geaendert)) {
+      logAuditOrThrow({ module: 'Product', entityType: 'products', entityId: targetId, action: 'UPDATE', field, newValue });
+    }
+    trackChange('products', sourceId, 'delete', {});
+    logAuditOrThrow({ module: 'Product', entityType: 'products', entityId: sourceId, action: 'DELETE' });
+    abgleich();
 
     eventBus.emit('product.updated', 'product', targetId, { quantity: newQty, mergedFrom: sourceId });
     get().loadProducts();
   },
+
+  mergeIntoExistingOnPrimary: (sourceId, targetId) =>
+    runOnPrimary(() => get().mergeIntoExisting(sourceId, targetId), () => get().loadProducts()),
 
   getLinkedRecordCounts: (productIds) => {
     // Reuse SSOT-Link-Check (alle 12 Tabellen) und summiere die counts pro

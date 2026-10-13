@@ -5,7 +5,7 @@
 // Score-Helper wie beim Live-Check beim Anlegen (productStore.findPossibleDuplicates).
 // Bei Treffer wird ein Side-by-Side-Modal angeboten:
 //
-//   • Bestätigen → mergeIntoExisting (qty++, Source löschen)
+//   • Bestätigen → mergeIntoExistingOnPrimary (qty++, Source löschen — eine Transaktion)
 //   • Ablehnen   → als eigenes Item behalten (no-op, dismiss)
 //
 // Mehrere Hits werden serialisiert: nach Entscheidung des aktuellen Items
@@ -209,7 +209,7 @@ function SpecGrid({ specs }: { specs: { label: string; value: string }[] }) {
 
 export function SyncDuplicateGuard() {
   const navigate = useNavigate();
-  const { products, mergeIntoExisting } = useProductStore();
+  const { products, mergeIntoExistingOnPrimary } = useProductStore();
   const [queue, setQueue] = useState<PendingReview[]>([]);
   const [actionBusy, setActionBusy] = useState(false);
 
@@ -374,11 +374,12 @@ export function SyncDuplicateGuard() {
     dequeue();
   }
 
-  function confirmMerge() {
+  async function confirmMerge() {
     if (!incoming || !existing) { dequeue(); return; }
     setActionBusy(true);
     try {
-      mergeIntoExisting(incoming.id, existing.id);
+      // F9 — EIN Vorgang am Primary: Ziel, Galerie, Löschen der Quelle, Sync und Protokoll ganz oder gar nicht.
+      await mergeIntoExistingOnPrimary(incoming.id, existing.id);
       // Learning-Signal: User hat confirmed dass beide Items dasselbe sind.
       // Das existing-Item wird die Canonical Reference — markieren als bestaetigt.
       if (!existing.aiConfirmedAt) {

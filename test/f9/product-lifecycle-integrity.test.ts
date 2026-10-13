@@ -607,6 +607,111 @@ for (const [name, mitLos, vorher, aenderung] of [
   const e10 = merge(db10, 'q10', 'z10');
   ok(e10 === '' && n(db10, "SELECT quantity FROM products WHERE id = 'z10'") === 2, `P9 Ziel ohne gespeicherte Menge (angezeigt 1) + 1 = 2 (${e10 || 'ok'}; ${zeile(db10, 'z10')})`);
 }
+// ══ T — Zusammenführen ganz oder gar nicht (Primary-Klammer), Verknüpfungsprüfung fail-closed ══════════
+{
+  /** Was die Masken rufen. Gegenprobe: der alte Code kennt die Klammer nicht — dort riefen sie den Store direkt. */
+  const mergeP = async (dbx: Db, a: string, b: string): Promise<string> => {
+    nimm(dbx);
+    const st = useProductStore.getState() as unknown as { mergeIntoExistingOnPrimary?: (a: string, b: string) => Promise<void>; mergeIntoExisting: (a: string, b: string) => void };
+    const r = await primary(st.mergeIntoExistingOnPrimary ? () => st.mergeIntoExistingOnPrimary!(a, b) : async () => st.mergeIntoExisting(a, b));
+    reload();
+    return r.ok ? '' : r.code;
+  };
+  /** Alles, was ein gescheitertes Zusammenführen nicht verändern darf: beide Artikel, ihre Galerien, Sync, Protokoll. */
+  const stand = (dbx: Db): string => S({
+    p: all(dbx, "SELECT * FROM products WHERE id IN ('tq','tz') ORDER BY id"),
+    m: all(dbx, "SELECT entity_id, media_id, deleted_at, sort_order, is_primary FROM media_links WHERE entity_id IN ('tq','tz') ORDER BY entity_id, media_id"),
+    log: changelog(dbx), audit: n(dbx, 'SELECT COUNT(*) FROM audit_log'),
+  });
+  /** Zwei freie eigene Artikel; die Quelle trägt ein Foto in ihrer Galerie (media_links), das Ziel keines. */
+  const paar = (): Db => {
+    const dbx = freshDb(); artikel(dbx, 'tq', false); artikel(dbx, 'tz', false);
+    dbx.run(`INSERT INTO media_blob_generations (tenant_id, blob_id, generation_no, storage_key, stored_blob_hash, byte_size, content_kind, mime_type, extension, is_encrypted, gen_status, created_at)
+             VALUES ('tenant-1','blob-tq',1,'tenant-1/aa/tq.jpg','${'b'.repeat(64)}',9,'raster_image','image/jpeg','jpg',0,'available',?)`, [NOW]);
+    dbx.run("INSERT INTO media_blobs (tenant_id, blob_id, dedup_token, current_generation_no, blob_status, created_at, updated_at) VALUES ('tenant-1','blob-tq','t-tq',1,'present',?,?)", [NOW, NOW]);
+    dbx.run("INSERT INTO media_objects (tenant_id, media_id, origin_branch_id, master_blob_id, master_kind, source_type, security_class, retention_class, ingest_status, created_at, updated_at) VALUES ('tenant-1','m-tq','branch-main','blob-tq','original','upload_desktop','internal','standard','ready',?,?)", [NOW, NOW]);
+    dbx.run("INSERT INTO media_links (tenant_id, link_id, scope_kind, branch_id, entity_type, entity_id, media_id, media_role, sort_order, is_primary, created_at) VALUES ('tenant-1','l-tq','branch','branch-main','product','tq','m-tq','stock_image',0,1,?)", [NOW]);
+    reload();
+    return dbx;
+  };
+  const galerie = (dbx: Db, pid: string): number => n(dbx, "SELECT COUNT(*) FROM media_links WHERE entity_id = ? AND deleted_at IS NULL", [pid]);
+
+  // T1 — eine Verknüpfungsabfrage scheitert (eine der 12 Tabellen fehlt) → nie „unverknüpft": kein Zusammenführen, kein Löschen
+  {
+    const db = paar(); const vor = stand(db);
+    db.run('ALTER TABLE repairs RENAME TO repairs_weg'); reload();
+    const e = await mergeP(db, 'tq', 'tz');
+    ok(/PRODUCT_LINKS_UNKNOWN/.test(e) && stand(db) === vor, `T1 Verknüpfungsabfrage scheitert: Zusammenführen abgebrochen, nichts verändert (${e.slice(0, 60) || 'ZUSAMMENGEFÜHRT ' + zeile(db, 'tz')})`);
+    nimm(db);
+    const d1 = wirft(() => useProductStore.getState().deleteProduct('tq'));
+    const d2 = useProductStore.getState().deleteProducts(['tq']);
+    reload();
+    ok(/PRODUCT_LINKS_UNKNOWN/.test(d1) && d2.deleted.length === 0 && d2.blocked.length === 1 && stand(db) === vor,
+      `T1 …ebenso Löschen (einzeln und Liste): abgewiesen, nichts gelöscht (${d1.slice(0, 40) || 'GELÖSCHT'}; ${d2.deleted.length}/${d2.blocked.length})`);
+    // T4 — dieselbe Welt mit wieder vorhandener Tabelle: das normale Zusammenführen freier eigener Artikel gelingt
+    db.run('ALTER TABLE repairs_weg RENAME TO repairs'); reload();
+    const ok4 = await mergeP(db, 'tq', 'tz');
+    ok(ok4 === '' && n(db, "SELECT COUNT(*) FROM products WHERE id = 'tq'") === 0 && n(db, "SELECT quantity FROM products WHERE id = 'tz'") === 2
+      && galerie(db, 'tz') === 1 && galerie(db, 'tq') === 0 && changelog(db) > JSON.parse(vor).log
+      && n(db, "SELECT COUNT(*) FROM sync_changelog WHERE table_name = 'products' AND record_id = 'tq' AND action = 'delete'") === 1
+      && n(db, "SELECT COUNT(*) FROM audit_log WHERE entity_id = 'tq' AND action_type = 'DELETE'") === 1
+      && n(db, "SELECT COUNT(*) FROM audit_log WHERE entity_id = 'tz' AND action_type = 'UPDATE' AND field_name = 'quantity'") === 1,
+      `T4 normales Zusammenführen: Menge 1 + 1 = 2, Foto übernommen, Quelle weg, Sync (update + delete) und Protokoll geschrieben (${ok4 || 'ok'}; ${zeile(db, 'tz')})`);
+  }
+  // T2 — die Zielmenge ist in der Transaktion schon erhöht, dann scheitert das Löschen der Quelle → alles zurück
+  {
+    const db = paar(); const vor = stand(db);
+    db.run("CREATE TRIGGER t_nein BEFORE DELETE ON products WHEN old.id = 'tq' BEGIN SELECT RAISE(ABORT, 'inject: delete source'); END");
+    const e = await mergeP(db, 'tq', 'tz');
+    ok(e !== '' && stand(db) === vor, `T2 Löschen der Quelle scheitert nach erhöhter Zielmenge: vollständig zurück — Ziel 1, Quelle da, Galerie, Sync, Protokoll unverändert (${e.slice(0, 50)}; ${zeile(db, 'tz')}, Quelle ${n(db, "SELECT COUNT(*) FROM products WHERE id = 'tq'")})`);
+  }
+  // T3 — Fehler bei Medien-/Metadatenübernahme: Galerie schon umgehängt, dann scheitert das Ziel (Bild/Menge), das Protokoll oder der Sync
+  for (const [name, trigger] of [
+    ['Ziel-Update (Menge/Bild) scheitert nach umgehängter Galerie', "CREATE TRIGGER t_nein BEFORE UPDATE ON products WHEN new.id = 'tz' BEGIN SELECT RAISE(ABORT, 'inject: target'); END"],
+    ['Galerie: Rückzug der Quell-Verknüpfung scheitert', "CREATE TRIGGER t_nein BEFORE UPDATE ON media_links WHEN old.entity_id = 'tq' BEGIN SELECT RAISE(ABORT, 'inject: media'); END"],
+    ['Protokoll scheitert', "CREATE TRIGGER t_nein BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'inject: audit'); END"],
+    ['Sync-Eintrag scheitert', "CREATE TRIGGER t_nein BEFORE INSERT ON sync_changelog BEGIN SELECT RAISE(ABORT, 'inject: sync'); END"],
+  ] as Array<[string, string]>) {
+    const db = paar(); const vor = stand(db);
+    db.run(trigger);
+    const e = await mergeP(db, 'tq', 'tz');
+    ok(e !== '' && stand(db) === vor, `T3 ${name}: kein Teilergebnis — Ziel, Quelle, Galerie, Sync, Protokoll unverändert (${e.slice(0, 60) || 'ZUSAMMENGEFÜHRT ' + zeile(db, 'tz') + ' Galerie ' + galerie(db, 'tz')})`);
+  }
+  // T5 — Kommission, Agent und verkauftes Ziel bleiben über die Klammer geschützt (dieselbe Prüfung, vor dem ersten Schreiben)
+  {
+    const db = paar(); await verkaufe(db, 'tz'); const vor = stand(db);
+    const e = await mergeP(db, 'tq', 'tz');
+    ok(/MERGE_STOCK_NOT_FREE/.test(e) && stand(db) === vor, `T5 verkauftes Ziel über die Klammer: abgewiesen, nichts verändert (${e || 'ZUSAMMENGEFÜHRT'})`);
+    const w = await welt({ sale: null }); artikel(w.db, 'tq', false);
+    const vorW = ruhig(w.db, w.pid);
+    const eW = await mergeP(w.db, 'tq', w.pid);
+    ok(/MERGE_STOCK_NOT_FREE/.test(eW) && ruhig(w.db, w.pid) === vorW && n(w.db, "SELECT COUNT(*) FROM products WHERE id = 'tq'") === 1,
+      `T5 Kommissionsware über die Klammer: abgewiesen, nichts verändert (${eW || 'ZUSAMMENGEFÜHRT'})`);
+    const dbA = paar();
+    dbA.run(`INSERT INTO customers (id, branch_id, first_name, last_name, country, language, vip_level, preferences, customer_type, sales_stage, created_at, updated_at)
+      VALUES ('cust-agent','branch-main','Agent','Ali','BH','en',0,'[]','collector','active',?,?)`, [NOW, NOW]);
+    nimm(dbA); useAgentStore.getState().loadAgents(); useAgentStore.getState().loadTransfers();
+    await primary(() => imHaus(() => th.createTransferInHouse({ customerId: 'cust-agent', productId: 'tz', ourPrice: 1100, settlementModel: 'full' }, 'branch-main')));
+    const vorA = stand(dbA);
+    const eA = await mergeP(dbA, 'tq', 'tz');
+    ok(/MERGE_STOCK_NOT_FREE/.test(eA) && stand(dbA) === vorA, `T5 Ziel beim Agenten über die Klammer: abgewiesen, nichts verändert (${eA || 'ZUSAMMENGEFÜHRT'})`);
+  }
+  // T6 — beide tatsächlichen Aufrufer gehen durch dieselbe Klammer; kein direkter Aufruf des Hauskerns außerhalb des Stores
+  {
+    const sp = src('src/pages/settings/SettingsPage.tsx');
+    const mergeFn = sp.slice(sp.indexOf('async function handleMergeAllIntoMaster'), sp.indexOf('function handleDeleteAllExceptMaster'));
+    const gd = src('src/components/sync/SyncDuplicateGuard.tsx');
+    const confirmFn = gd.slice(gd.indexOf('async function confirmMerge'), gd.indexOf('function copyDetailsFromExisting'));
+    const { readdirSync } = await import('node:fs');
+    const direkt: string[] = [];
+    for (const rel of readdirSync(resolvePath(repo, 'src'), { recursive: true, encoding: 'utf8' })) {
+      if (!/\.(ts|tsx)$/.test(rel) || /stores[\\/]productStore\.ts$/.test(rel)) continue;
+      if (/\bmergeIntoExisting\s*\(/.test(codeOf(src('src/' + rel.replace(/\\/g, '/'))))) direkt.push(rel);
+    }
+    ok(/await mergeIntoExistingOnPrimary\(m\.id, masterId\)/.test(mergeFn) && /await mergeIntoExistingOnPrimary\(incoming\.id, existing\.id\)/.test(confirmFn) && direkt.length === 0,
+      `T6 Duplikate-Seite und Handy-Duplikatfenster rufen beide die Primary-Klammer, niemand den Kern direkt (${direkt.join(', ') || 'keiner direkt'})`);
+  }
+}
 // ══ S — Stammdaten bleiben editierbar ════════════════════════════════════════
 {
   const db = freshDb(); artikel(db, 'ps', false);

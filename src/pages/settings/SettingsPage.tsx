@@ -2371,7 +2371,7 @@ function StatusCell({ label, value, sub, tone }: {
 }
 
 function DuplicatesTab() {
-  const { products, updateProduct, deleteProduct, mergeIntoExisting, getLinkedRecordCounts, loadProducts } = useProductStore();
+  const { products, updateProduct, deleteProduct, mergeIntoExistingOnPrimary, getLinkedRecordCounts, loadProducts } = useProductStore();
   const navigate = useNavigate();
   const [scanning, setScanning] = useState(false);
   const [scanProgress, setScanProgress] = useState<{ stage: string; current: number; total: number } | null>(null);
@@ -2645,7 +2645,7 @@ function DuplicatesTab() {
 
   // F9 — beide Sammelaktionen nehmen GENAU die sichtbaren Mitglieder der Karte (ein „aus der Gruppe entfernter"
   // Artikel bleibt unberührt) und den sichtbaren Master. Das Zusammenführen weist ein Mitglied mit Belegen ab
-  // (`mergeIntoExisting`), statt es samt Belegen zu löschen.
+  // (`mergeIntoExisting`), statt es samt Belegen zu löschen. Jedes Mitglied ist EIN Vorgang am Primary (ganz oder gar nicht).
   async function handleMergeAllIntoMaster(group: DuplicateGroup, masterId: string, memberIds: string[]) {
     const master = group.members.find(m => m.id === masterId);
     if (!master) return;
@@ -2656,7 +2656,7 @@ function DuplicatesTab() {
     const failed: string[] = [];
     for (const m of members) {
       try {
-        mergeIntoExisting(m.id, masterId);
+        await mergeIntoExistingOnPrimary(m.id, masterId);
         merged++;
       } catch (e) {
         failed.push(`${productDisplayName(m)}: ${e instanceof Error ? e.message : String(e)}`);
