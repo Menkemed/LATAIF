@@ -36,7 +36,7 @@ import { applyChoiceSelection } from '@/core/products/choice-value';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { StockCheckPanel } from '@/components/products/StockCheckPanel';
-import type { Product, TaxScheme, StockStatus, AttributeValue } from '@/core/models/types';
+import type { Product, TaxScheme, AttributeValue } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 // CENTRAL-UI-PARITY R2D — Mandant und Artikelhistorie ohne eigene Abfrage in der Seite.
 import { useSharedRead, sessionTenantId } from '@/core/data/shared-read';
@@ -393,8 +393,10 @@ export function ProductDetail() {
       } catch { /* snapshot parse error → no correction tracking */ }
     }
 
+    // F9 — Menge, Bestandsstatus und Herkunft folgen aus den Vorgängen: die Maske schickt sie nicht mit.
+    const { quantity: _menge, stockStatus: _status, sourceType: _herkunft, ...stammdaten } = form;
     const payload: Partial<Product> = {
-      ...form,
+      ...stammdaten,
       attributes: cleanAttrs,
       expectedMargin: margin,
       ...(updatedCorrections ? { aiCorrections: updatedCorrections } as Partial<Product> : {}),
@@ -853,21 +855,17 @@ export function ProductDetail() {
                   );
                 })()}
                 <SkuInput value={form.sku || ''} onChange={v => { setForm({ ...form, sku: v }); if (errors.sku) setErrors({ ...errors, sku: '' }); }} excludeProductId={id} />
-                <Input label="QUANTITY (UNITS)" type="number" min="0"
-                  value={form.quantity ?? 1}
-                  onChange={e => setForm({ ...form, quantity: Math.max(0, Number(e.target.value) || 0) })} />
+                {/* F9 — Menge und Status folgen aus den Vorgängen (Einkauf, Verkauf, Retoure, Kommission, Agent …):
+                    hier nur angezeigt, nicht gesetzt. Das Haus weist eine Änderung ohnehin ab (Primary und PC2). */}
                 <div>
-                  <span className="text-overline" style={{ marginBottom: 6 }}>STATUS</span>
-                  <div className="flex flex-wrap gap-1" style={{ marginTop: 6 }}>
-                    {(['in_stock', 'reserved', 'offered', 'sold', 'consignment'] as StockStatus[]).map(s => (
-                      <button key={s} onClick={() => setForm({ ...form, stockStatus: s })}
-                        className="cursor-pointer" style={{
-                          padding: '4px 10px', fontSize: 11, borderRadius: 4, border: 'none',
-                          background: form.stockStatus === s ? 'rgba(15,15,16,0.1)' : 'transparent',
-                          color: form.stockStatus === s ? '#0F0F10' : '#6B7280',
-                        }}>{s.replace('_', ' ')}</button>
-                    ))}
+                  <span className="text-overline" style={{ marginBottom: 6 }}>QUANTITY · STATUS</span>
+                  <div className="flex items-center gap-3" style={{ marginTop: 6 }}>
+                    <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{product.quantity}</span>
+                    <StatusDot status={product.stockStatus} />
                   </div>
+                  <span style={{ display: 'block', fontSize: 11, color: '#6B7280', marginTop: 4 }}>
+                    Set by purchases, sales, returns, consignment and agent transfers — not editable here.
+                  </span>
                 </div>
               </div>
               </>

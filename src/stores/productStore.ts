@@ -42,6 +42,8 @@ import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 import { productDisplayName } from '../core/products/display-name.ts';
 import { stonesOrThrow } from '../core/products/stones.ts';
+// F9 — Menge, Bestandsstatus und Herkunft folgen aus den Vorgängen, nicht aus der Artikelbearbeitung.
+import { PRODUCT_LIFECYCLE_LOCKED, lifecycleEditRefusal } from '@/core/products/lifecycle-fields';
 
 // ── SSOT: alle Tabellen die ein Produkt via product_id referenzieren ──
 // Hat EINE davon einen Treffer, gilt das Produkt als "verknuepft" und darf
@@ -113,12 +115,14 @@ export function buildProductEditColumns(
   data: Partial<Product>,
 ): Array<{ col: string; baseline: string | number | null; target: string | number | null }> {
   const cols: Array<{ col: string; baseline: string | number | null; target: string | number | null }> = [];
+  // F9 — `quantity`, `stock_status` und `source_type` stehen bewusst NICHT hier: sie folgen aus den Vorgängen
+  // (s. lifecycle-fields.ts). Keine Bearbeitung — Primary, PC2, Handy — kann sie über diese Spalten schreiben.
   const map: Record<string, string> = {
-    categoryId: 'category_id', brand: 'brand', name: 'name', sku: 'sku', quantity: 'quantity', condition: 'condition',
+    categoryId: 'category_id', brand: 'brand', name: 'name', sku: 'sku', condition: 'condition',
     storageLocation: 'storage_location', purchaseDate: 'purchase_date', purchasePrice: 'purchase_price',
     plannedSalePrice: 'planned_sale_price', minSalePrice: 'min_sale_price', maxSalePrice: 'max_sale_price',
-    stockStatus: 'stock_status', taxScheme: 'tax_scheme', expectedMargin: 'expected_margin',
-    supplierName: 'supplier_name', purchaseSource: 'purchase_source', paidFrom: 'paid_from', sourceType: 'source_type', notes: 'notes',
+    taxScheme: 'tax_scheme', expectedMargin: 'expected_margin',
+    supplierName: 'supplier_name', purchaseSource: 'purchase_source', paidFrom: 'paid_from', notes: 'notes',
   };
   const dd = data as Record<string, unknown>;
   for (const [k, c] of Object.entries(map)) {
@@ -606,7 +610,9 @@ function rowToProduct(row: Record<string, unknown>): Product {
     brand: row.brand as string,
     name: row.name as string,
     sku: row.sku as string | undefined,
-    quantity: Math.max(1, (row.quantity as number) || 1),
+    // F9 — die echte Menge: ein ausverkauftes Stück steht auf 0. Vorher „mindestens 1" — jedes Speichern der
+    // Artikelseite schrieb diese 1 zurück und machte ein verkauftes Stück wieder verkaufbar.
+    quantity: row.quantity === null || row.quantity === undefined ? 1 : Number(row.quantity),
     condition: (row.condition as string) || '',
     scopeOfDelivery: JSON.parse((row.scope_of_delivery as string) || '[]'),
     storageLocation: row.storage_location as string | undefined,
@@ -1050,6 +1056,10 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     const tRows = branchId ? query('SELECT tenant_id FROM branches WHERE id = ?', [branchId]) : [];
     const tenantId = tRows.length > 0 ? (tRows[0].tenant_id as string | null) : null;
     if (!branchId || !tenantId) return { status: 'blocked', errorCode: 'MEDIA_EDIT_SCOPE_REQUIRED' };
+    // F9 — Menge, Status und Herkunft folgen aus den Vorgängen: eine Änderung daran weist das Haus ab, vor allem anderen.
+    const lebenslauf = lifecycleEditRefusal(
+      query('SELECT * FROM products WHERE id = ?', [id])[0] as Record<string, unknown> | undefined, data as Record<string, unknown>);
+    if (lebenslauf) return { status: 'blocked', errorCode: PRODUCT_LIFECYCLE_LOCKED, message: lebenslauf };
     const role = 'stock_image';
     const scope: EditScope = { tenantId, scopeKind: 'branch', branchId, entityType: 'product', entityId: id, role };
     const orchestrator = await getStockMediaOrchestrator();
@@ -1164,6 +1174,9 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     if (!branchId || !tenantId) return { status: 'blocked', errorCode: 'MEDIA_EDIT_SCOPE_REQUIRED' };
 
     const cur = query('SELECT * FROM products WHERE id = ?', [id])[0] as Record<string, unknown> | undefined;
+    // F9 — Menge, Status und Herkunft folgen aus den Vorgängen: eine Änderung daran weist das Haus ab (Primary, PC2, Handy).
+    const lebenslauf = lifecycleEditRefusal(cur, data as Record<string, unknown>);
+    if (lebenslauf) return { status: 'blocked', errorCode: PRODUCT_LIFECYCLE_LOCKED, message: lebenslauf };
     const textDiff = diffProductText(buildProductEditColumns(cur, data));
     // Nothing changed → a durable no-op (the editor still closes cleanly).
     if (textDiff.set.length === 0) return { status: 'edited', batchId: '' };
@@ -1322,11 +1335,27 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     const target = products.find(p => p.id === targetId);
     if (!source || !target) throw new Error('Source or target product not found');
     if (sourceId === targetId) throw new Error('Cannot merge product into itself');
+    assertNotBulkSystemProduct(sourceId);
+    assertNotBulkSystemProduct(targetId);
+
+    // F9 — sicher zusammenführen oder gar nicht, VOR dem ersten Schreiben:
+    //  • die Quelle hängt an keinem Beleg (Rechnung, Einkauf, Los, Kommission, Agent, Reparatur, Retoure, Angebot,
+    //    Auftrag, Produktion) — sonst verwaiste mit ihr ein Beleg; umgehängt wird nichts automatisch;
+    const nein = (code: string, msg: string): Error => Object.assign(new Error(`${msg} Nothing was changed.`), { code });
+    const links = queryProductLinks([sourceId]).get(sourceId) || [];
+    if (links.length > 0) {
+      throw nein('MERGE_SOURCE_LINKED', `"${productDisplayName(source)}" has linked records (${links.map(l => `${l.count}× ${l.label}`).join(', ')}) — it cannot be merged into another item.`);
+    }
+    //  • es zählt die ECHTE Menge der Quelle (eine ausverkaufte bringt 0 — vorher „mindestens 1", ein Phantom-Stück);
+    const addQty = Math.max(0, Number(query('SELECT quantity FROM products WHERE id = ?', [sourceId])[0]?.quantity ?? 0) || 0);
+    //  • führt das Ziel Lose, kann keine Menge daneben stehen (der nächste Abgleich aus den Losen nähme sie wieder).
+    if (addQty > 0 && query('SELECT 1 FROM stock_lots WHERE product_id = ? LIMIT 1', [targetId]).length > 0) {
+      throw nein('MERGE_TARGET_LOT_TRACKED', `"${productDisplayName(target)}" keeps its stock in lots — a quantity cannot be added to it by merging.`);
+    }
 
     const db = getDatabase();
     const now = new Date().toISOString();
-    const addQty = Math.max(1, source.quantity || 1);
-    const newQty = (target.quantity || 1) + addQty;
+    const newQty = Math.max(0, Number(query('SELECT quantity FROM products WHERE id = ?', [targetId])[0]?.quantity ?? 0) || 0) + addQty;
 
     // Source-Bild ins Target übernehmen wenn Target noch keins hat — Foto vom
     // Handy soll nicht verloren gehen, nur weil wir das Source-Item löschen.

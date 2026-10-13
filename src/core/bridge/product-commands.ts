@@ -112,6 +112,9 @@ const FORBIDDEN = [
 const IMMUTABLE_ON_UPDATE: Record<string, string> = {
   categoryId: 'the category cannot be changed — it would re-base every attribute',
   quantity: 'quantity is a stock statement, not a product field',
+  // F9 — Bestandsstatus und Herkunft folgen aus den Vorgängen (Verkauf, Retoure, Kommission, Agent …), wie am Primary.
+  stockStatus: 'the stock status follows the business documents, not a product field',
+  sourceType: 'the source (own, consignment, agent) follows the consignment and agent records, not a product field',
 };
 
 export class ProductPayloadError extends Error {

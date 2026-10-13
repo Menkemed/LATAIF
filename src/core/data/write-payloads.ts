@@ -56,8 +56,9 @@ export const CONSIGNMENT_PRODUCT_FIELDS = [
 export const PRODUCT_UPDATE_FIELDS = [
   'brand', 'name', 'condition', 'scopeOfDelivery', 'storageLocation',
   'purchaseDate', 'purchasePrice', 'plannedSalePrice', 'minSalePrice', 'maxSalePrice',
-  'stockStatus', 'taxScheme', 'supplierName', 'purchaseSource', 'paidFrom',
-  'sourceType', 'notes', 'attributes',
+  // F9 — `stockStatus` und `sourceType` (wie `quantity`) folgen aus den Vorgängen und sind keine Bearbeitungsfelder.
+  'taxScheme', 'supplierName', 'purchaseSource', 'paidFrom',
+  'notes', 'attributes',
 ] as const;
 
 const leer = (v: unknown) => v === undefined || v === null || v === '';

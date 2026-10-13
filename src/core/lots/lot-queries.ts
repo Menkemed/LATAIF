@@ -194,6 +194,10 @@ export function assertProductsSellable(productIds: string[]): void {
   const rows = query(`SELECT id, stock_status FROM products WHERE id IN (${placeholders})`, ids);
   const bad = firstProductWithAgent(rows.map(r => ({ id: String(r.id), stockStatus: (r.stock_status as string) || null })));
   if (bad) throw new Error(WITH_AGENT_INVOICE_BLOCKED_MESSAGE);
+  // F9 — der Schutz hängt am VORGANG, nicht nur am Status: solange ein Agentenvorgang offen ist („transferred"), ist
+  // das Stück beim Agenten — auch wenn sein Status (Altbestand, früher von Hand gesetzt) etwas anderes sagt.
+  const offen = query(`SELECT 1 FROM agent_transfers WHERE status = 'transferred' AND product_id IN (${placeholders}) LIMIT 1`, ids);
+  if (offen.length > 0) throw new Error(WITH_AGENT_INVOICE_BLOCKED_MESSAGE);
 }
 
 // Inverse von consumeLot — fuer Sales-Returns / Invoice-Cancel.

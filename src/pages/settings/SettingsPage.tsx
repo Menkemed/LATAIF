@@ -2643,41 +2643,47 @@ function DuplicatesTab() {
     }
   }
 
-  function handleMergeAllIntoMaster(group: DuplicateGroup, masterId: string) {
+  // F9 — beide Sammelaktionen nehmen GENAU die sichtbaren Mitglieder der Karte (ein „aus der Gruppe entfernter"
+  // Artikel bleibt unberührt) und den sichtbaren Master. Das Zusammenführen weist ein Mitglied mit Belegen ab
+  // (`mergeIntoExisting`), statt es samt Belegen zu löschen.
+  async function handleMergeAllIntoMaster(group: DuplicateGroup, masterId: string, memberIds: string[]) {
     const master = group.members.find(m => m.id === masterId);
     if (!master) return;
-    let merged = 0, failed = 0;
-    for (const m of group.members) {
-      if (m.id === masterId) continue;
+    const members = group.members.filter(m => m.id !== masterId && memberIds.includes(m.id));
+    if (members.length === 0) return;
+    if (!(await window.confirm(`${members.length} Item(s) in „${productDisplayName(master)}" zusammenführen? Die zusammengeführten Items werden entfernt.`))) return;
+    let merged = 0;
+    const failed: string[] = [];
+    for (const m of members) {
       try {
         mergeIntoExisting(m.id, masterId);
         merged++;
       } catch (e) {
-        failed++;
-        console.warn('[duplicates] merge failed for', m.id, e);
+        failed.push(`${productDisplayName(m)}: ${e instanceof Error ? e.message : String(e)}`);
+        console.warn('[duplicates] merge refused for', m.id, e);
       }
     }
     setActionMsg({
-      text: failed === 0
+      text: failed.length === 0
         ? `${merged} Items in „${productDisplayName(master)}" zusammengeführt.`
-        : `${merged} zusammengeführt, ${failed} fehlgeschlagen (verknüpfte Datensätze).`,
-      ok: failed === 0,
+        : `${merged} zusammengeführt, ${failed.length} abgewiesen — ${failed.join(' · ')}`,
+      ok: failed.length === 0,
     });
     loadProducts();
-    setGroups(prev => prev?.filter(g => g.id !== group.id) || null);
+    if (failed.length === 0) setGroups(prev => prev?.filter(g => g.id !== group.id) || null);
   }
 
-  function handleDeleteAllExceptMaster(group: DuplicateGroup, masterId: string) {
+  function handleDeleteAllExceptMaster(group: DuplicateGroup, masterId: string, memberIds: string[]) {
     const safe: Product[] = [];
     const unsafe: Product[] = [];
-    for (const m of group.members) {
+    for (const m of group.members.filter(x => memberIds.includes(x.id))) {
       if (m.id === masterId) continue;
       if ((group.linkedCounts.get(m.id) || 0) > 0) unsafe.push(m);
       else safe.push(m);
     }
     if (unsafe.length > 0) {
       setActionMsg({
-        text: `${unsafe.length} Items haben verknüpfte Datensätze und können nicht gelöscht werden — nutze „Alle in Master mergen" statt dessen, oder wechsle das Master.`,
+        text: `${unsafe.length} Items haben verknüpfte Datensätze (Belege, Lose) und können weder gelöscht noch zusammengeführt werden — wechsle das Master oder lass sie bestehen.`,
         ok: false,
       });
       return;
@@ -2807,8 +2813,8 @@ function DuplicatesTab() {
                     group={group}
                     onOpen={pid => navigate(`/collection/${pid}`)}
                     onDelete={(pid, label) => handleDelete(pid, label)}
-                    onMergeAllIntoMaster={masterId => handleMergeAllIntoMaster(group, masterId)}
-                    onDeleteAllExceptMaster={masterId => handleDeleteAllExceptMaster(group, masterId)}
+                    onMergeAllIntoMaster={(masterId, memberIds) => void handleMergeAllIntoMaster(group, masterId, memberIds)}
+                    onDeleteAllExceptMaster={(masterId, memberIds) => handleDeleteAllExceptMaster(group, masterId, memberIds)}
                     onIgnoreGroup={() => ignoreGroup(group.id)}
                   />
                 ))}
@@ -2827,8 +2833,8 @@ function DuplicateGroupCard({
   group: DuplicateGroup;
   onOpen: (productId: string) => void;
   onDelete: (productId: string, label: string) => void;
-  onMergeAllIntoMaster: (masterId: string) => void;
-  onDeleteAllExceptMaster: (masterId: string) => void;
+  onMergeAllIntoMaster: (masterId: string, memberIds: string[]) => void;
+  onDeleteAllExceptMaster: (masterId: string, memberIds: string[]) => void;
   onIgnoreGroup: () => void;
 }) {
   const [overrideMaster, setOverrideMaster] = useState<string | null>(null);
@@ -2839,7 +2845,7 @@ function DuplicateGroupCard({
 
   const sev = severityFromScore(group.maxScore);
   const masterProduct = visibleMembers.find(m => m.id === masterId) || visibleMembers[0];
-  const nonMasterUnsafeCount = visibleMembers.filter(m => m.id !== masterId && (group.linkedCounts.get(m.id) || 0) > 0).length;
+  const nonMasterUnsafeCount = visibleMembers.filter(m => m.id !== masterProduct.id && (group.linkedCounts.get(m.id) || 0) > 0).length;
 
   return (
     <div style={{
@@ -2905,12 +2911,12 @@ function DuplicateGroupCard({
         </div>
         <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
           <Button variant="ghost" onClick={onIgnoreGroup}>Gruppe ignorieren</Button>
-          <Button variant="secondary" onClick={() => onMergeAllIntoMaster(masterId)}>
+          <Button variant="secondary" onClick={() => onMergeAllIntoMaster(masterProduct.id, visibleMembers.map(m => m.id))}>
             Alle in Master mergen ({visibleMembers.length - 1})
           </Button>
           <Button
             variant="secondary"
-            onClick={() => onDeleteAllExceptMaster(masterId)}
+            onClick={() => onDeleteAllExceptMaster(masterProduct.id, visibleMembers.map(m => m.id))}
             disabled={nonMasterUnsafeCount > 0}
             title={nonMasterUnsafeCount > 0 ? `${nonMasterUnsafeCount} mit linked records — nicht löschbar` : ''}
           >
