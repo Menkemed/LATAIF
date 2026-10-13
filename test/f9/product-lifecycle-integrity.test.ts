@@ -600,4 +600,3 @@ for (const [name, mitLos, vorher, aenderung] of [
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — f9 product lifecycle integrity: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
-
