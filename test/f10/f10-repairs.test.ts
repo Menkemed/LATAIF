@@ -441,6 +441,44 @@ const restore = async (ids: string[], reason = 'F10: set back by the start-up st
   ok(/STARTUP_FIX_NOT_ACTIVE/.test(e) && alles(db) === vor, `G7 Merker fehlt: abgewiesen, nichts verändert (${e})`);
 }
 
+// ══ Z — der Zustand bleibt frei bearbeitbar: New ↔ Pre-Owned, am Primary und vom PC2, über Speichern und Neustart ══
+{
+  const pc = await import('../../src/core/bridge/product-commands.ts');
+  await import('../../src/core/bridge/command-registry.ts');
+  await import('../../src/core/bridge/command-permissions.ts');
+  let nr = 7000;
+  const pc2 = async (db: Db, id: string, condition: string): Promise<string> => {
+    const x = String(++nr);
+    const deps = { db: db as never, begin: posting.beginLedgerTransaction, commit: posting.commitLedgerTransaction,
+      rollback: posting.rollbackLedgerTransaction, durableSave: async () => {}, now: () => NOW };
+    const identity = { commandId: `${x.padStart(8, '0')}-0000-4000-8000-000000000000`, tenantId: 'tenant-1', branchId: 'branch-main',
+      userId: 'user-pc2', role: 'ADMIN', op: 'products.update', payloadHash: 'h' + x };
+    try {
+      const o = await pc.runProductUpdate(deps as never, identity as never, { id, condition }) as { kind: string; code?: string };
+      reload();
+      return o.kind === 'ok' ? 'ok' : String(o.code);
+    } catch (e) { return 'THROWN:' + String((e as { code?: unknown }).code ?? (e as Error).message); }
+  };
+  const db = freshDb(); goldKategorie(db);
+  goldArtikel(db, 'z1', 'New'); goldArtikel(db, 'z2', 'Pre-Owned');
+  neustart(db);   // erster Start der neuen Fassung: nur der Merker
+  const schritte: string[] = [];
+  const pruef = (id: string, soll: string): boolean => { neustart(db); const ist = cond(db, id); schritte.push(`${id}:${soll}→${ist}`); return ist === soll; };
+  // Primary, Artikelseite (Hausfolge der Maske)
+  const a1 = await zustand('z1', 'Pre-Owned'); const p1 = cond(db, 'z1') === 'Pre-Owned' && pruef('z1', 'Pre-Owned');
+  const a2 = await zustand('z1', 'New'); const p2 = cond(db, 'z1') === 'New' && pruef('z1', 'New');
+  ok(a1 === 'edited' && a2 === 'edited' && p1 && p2,
+    `Z Primary: New → Pre-Owned → New gespeichert, jeder Stand übersteht einen Neustart (${a1}/${a2}; ${schritte.join(', ')})`);
+  // PC2, products.update (derselbe Hauskern am Primary)
+  const b1 = await pc2(db, 'z2', 'New'); const q1 = cond(db, 'z2') === 'New' && pruef('z2', 'New');
+  const b2 = await pc2(db, 'z2', 'Pre-Owned'); const q2 = cond(db, 'z2') === 'Pre-Owned' && pruef('z2', 'Pre-Owned');
+  const b3 = await pc2(db, 'z2', 'New'); const q3 = cond(db, 'z2') === 'New' && pruef('z2', 'New');
+  ok(b1 === 'ok' && b2 === 'ok' && b3 === 'ok' && q1 && q2 && q3,
+    `Z PC2: New ↔ Pre-Owned gespeichert, jeder Stand übersteht einen Neustart (${b1}/${b2}/${b3}; ${schritte.slice(2).join(', ')})`);
+  ok(goldMig?.runGoldConditionMigrationOnce(db, false) === 'already-done' && cond(db, 'z1') === 'New' && cond(db, 'z2') === 'New',
+    'Z die Gold-Umstellung läuft nach dem Merker nie wieder — selbst wenn die Kategorie „New" einmal nicht anböte');
+}
+
 // ══ P — Pins: nie automatisch, nur am Primary, der Startblock enthält die Umstellung nicht mehr ════════════════
 {
   ok(!MIGRATIONS.some((m) => /SET condition = 'Pre-Owned'/.test(m)), 'P Startblock: keine Gold-Umstellung mehr bei jedem Start');
