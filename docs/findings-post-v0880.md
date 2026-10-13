@@ -91,7 +91,7 @@ Für `KEEP_AS_OWN` ist das im Cleanup geschlossen (jede Zeile muss Kommissionswa
   - Löschen einer Übergabe lässt auch bei eigener Ware kein `AGENT` mehr stehen.
 - Eigene Ware läuft unverändert `OWN → AGENT → OWN`. Eigentum und Aufenthaltsort grundsätzlich zu trennen ist ein eigenes Design-Thema.
 
-## F9 — Status-Knöpfe der Artikelmaske umgehen den Lebenslauf (hoch, offen)
+## F9 — Status-Knöpfe der Artikelmaske umgehen den Lebenslauf (hoch) — BEHOBEN (Bestandskorrektur als Vertrag offen)
 
 In „Edit" der Artikelseite (`src/pages/watches/ProductDetail.tsx`, Recht `canEditProducts`) lassen sich `stock_status` (in_stock, reserved, offered, sold, consignment) und die Menge frei setzen — ohne Los, Buchung, Verkauf, Retoure, Kommission oder Agentenvorgang.
 
@@ -103,6 +103,16 @@ In „Edit" der Artikelseite (`src/pages/watches/ProductDetail.tsx`, Recht `canE
 - **Schweregrad hoch:** Er umgeht jede Lebenslauf-Regel für alle Warenarten. Nur gemildert dadurch, dass es eine bewusste Bearbeitung mit Bearbeitungsrecht braucht und die Bestandsprüfungen (Los, Menge) einen Teil der Folgeverkäufe noch abfangen.
 - Die Regeln zu Kommissionsware (F7, F8) hängen nicht vom Status ab.
 - Vorschlag (eigener Schritt): Status nur aus den Vorgängen ableiten, die Knöpfe entfernen oder auf neutrale Zustände beschränken; Menge nur über Inventur bzw. Einkauf.
+- **Behoben (F9-Bündel):**
+  - Menge, Bestandsstatus und Herkunft weist das Haus bei jeder Artikelbearbeitung ab (`PRODUCT_LIFECYCLE_LOCKED`, `src/core/products/lifecycle-fields.ts`). Das gilt für `editProductTextDurably` und `editProductWithMedia`, also für Primary, PC2 und Handy gleich, vor dem ersten Schreiben.
+  - Die drei Spalten stehen nicht mehr in der Bearbeitungs-Spaltenliste.
+  - PC2 `products.update` weist `stockStatus`/`sourceType` (wie `quantity`) mit Begründung ab, auch Fantasiewerte.
+  - Die Artikelseite zeigt Menge und Status nur an und schickt sie nicht mit.
+  - Die echte Menge statt „mindestens 1" beim Laden: Das Speichern einer Notiz machte ein ausverkauftes Stück wieder verkaufbar.
+  - Der Agentenschutz beim Verkauf hängt zusätzlich am offenen Agentenvorgang, nicht nur am Status. Das gilt für alle Verkaufswege (Rechnung, Angebot, Auftrag, Reparatur, Rechnungsänderung).
+  - Duplikate zusammenführen: Quelle mit Belegen, oder Menge in ein Ziel mit Losen, wird abgewiesen; es zählt die echte Menge. Die Einstellungen nehmen nur die sichtbaren Mitglieder und den sichtbaren Master und fragen vorher nach.
+  - Test: `test/f9/product-lifecycle-integrity.test.ts`.
+- **Offen:** der Vorgang „Bestandskorrektur" (Vertrag in `docs/stock-correction-contract.md`, mit offenen Fragen zu Gegenkonto, Bewertung, Anfangsbestand, Berechtigung). Menge und Status beim ANLEGEN (Import, Maske, Handy) bleiben wie bisher.
 
 ## F10 — Start-Migration rechnete Lose und Mengen bei jedem Start neu (kritisch) — BEHOBEN in v0.8.81 (Primary geprüft, Rechner des Freundes offen)
 
