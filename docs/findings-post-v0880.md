@@ -104,7 +104,7 @@ In „Edit" der Artikelseite (`src/pages/watches/ProductDetail.tsx`, Recht `canE
 - Die Regeln zu Kommissionsware (F7, F8) hängen nicht vom Status ab.
 - Vorschlag (eigener Schritt): Status nur aus den Vorgängen ableiten, die Knöpfe entfernen oder auf neutrale Zustände beschränken; Menge nur über Inventur bzw. Einkauf.
 
-## F10 — Start-Migration rechnete Lose und Mengen bei jedem Start neu (kritisch) — BEHOBEN (Folgeschäden offen)
+## F10 — Start-Migration rechnete Lose und Mengen bei jedem Start neu (kritisch) — BEHOBEN in v0.8.81 (Primary geprüft, Rechner des Freundes offen)
 
 `runMigrations` (`src/core/db/database.ts`) läuft bei jedem Start einer vorhandenen Datenbank, auch beim Neuladen nach einer Wiederherstellung. Im Block standen 8 historische Datenkorrekturen aus `89cbcf4` (2026-05-17) bzw. dem ersten Commit:
 
@@ -146,3 +146,24 @@ Bei jedem Start rechneten sie über alles hinweg, was seitdem geschah.
 
   Die Migrationen schrieben weder Protokoll noch Changelog. Eine Rekonstruktion allein aus Rechnungszeilen wäre derselbe Fehler noch einmal.
 - **Nicht im Umfang, offen:** weitere wiederholte Daten-UPDATEs im Block an Stammdaten (Karat-/Zustands-/Namens-Normalisierung, z. B. Gold-Schmuck „New" → „Pre-Owned"), `expenses.paid_amount` bei PAID. Nicht reproduziert.
+
+### F10 — Stand 13.10.2026
+
+- **v0.8.81 auf dem Primary** (seit 13.10. 18:07). Der Merker `migration.legacy_stock_repairs_once_v1` wurde beim ersten Start gesetzt, ohne Neuberechnung.
+- **Primary geprüft, mit Freigabe, nur lesend auf Kopien der Sicherungen:**
+  - Geprüft wurden die Sicherungen vom 06.10. (v0.8.78, 209 Artikel), 12.10. (v0.8.80, 326 Artikel) und 13.10. (v0.8.81, 326 Artikel).
+  - In keiner gibt es einen Vorgang: 0 Lose (auch Edelmetall), Rechnungen, Einkäufe, Agentenvorgänge, Produktionen, Retouren, Kommissionen, Aufträge, Reparaturen und Buchungen.
+  - Alle Artikel stehen auf `in_stock`/`OWN`. Zwischen den Sicherungen hat sich bei keinem Artikel Status, Menge, Herkunft oder Einstand geändert.
+  - **Ergebnis: In den drei untersuchten Sicherungen sind keine Schäden nachgewiesen; keine Reparatur nötig.** Ältere Stände (vor dem 06.10.) sind nicht mehr als Sicherung vorhanden.
+- **Aufbewahrung der Sicherungen (Belege):**
+  - Vor der Sicherung vom 13.10. 18:25 lagen 3 Sicherungen in `E:\LATAIF\Backups` (04.10., 06.10., 12.10.). Danach lagen wieder genau 3 vor (06.10., 12.10., 13.10.). Die vom 04.10. war gelöscht, nicht im Papierkorb.
+  - Code: Nach jeder fertigen Sicherung räumt `prune_after_publish` (`src-tauri/src/media/backup.rs`) über `backup_retention::prune` auf. Das greift nur, wenn der Owner die Aufbewahrung eingeschaltet hat (`backup_retention_config.enabled`), und behält die neuesten `keep_count`.
+  - Das beobachtete Verhalten passt zu „eingeschaltet, 3 behalten". Die Einstellung selbst wurde nicht gelesen (Steuerdatenbank); sichtbar ist sie unter Einstellungen → Backup & Restore.
+  - **Folge:** Jede neue Sicherung löscht die älteste. Was bleiben soll, vorher außerhalb von `E:\LATAIF\Backups` kopieren.
+- **Rechner des Freundes** (eigener Primary mit echten Vorgängen, noch v0.8.80; hier sind F10-Schäden möglich):
+  1. Mit seiner Zustimmung, und bevor eine neue Sicherung entsteht: die vorhandenen Sicherungen, die bleiben sollen, außerhalb der Aufbewahrungsrotation kopieren.
+  2. Eine aktuelle Sicherung über die App erstellen (Owner-Konto dort). Danach eine unveränderte Kopie getrennt aufbewahren.
+  3. Erst nach ausdrücklicher Freigabe: eine Kopie dieser Sicherung nur lesend auf F10 prüfen. Prüfpunkte siehe oben (Edelmetall EXHAUSTED mit Restgewicht, `qty_remaining > qty_total`, verbrauchte Lose wieder ACTIVE, Rechnungszeilen auf späteren Losen, Herkunft CONSIGNMENT/AGENT ohne offenen Vorgang).
+  4. Das Update auf v0.8.81 gesondert freigeben. Bis dahin den Rechner möglichst nicht neu starten.
+  5. Danach gegebenenfalls ein Vorher-/Nachher-Vergleich (Sicherung vor und nach dem Update). Eine Korrektur erfolgt nur als eigener, freigegebener Schritt, nie automatisch.
+  - Die ältere Kopie der Datenbank des Freundes in `Downloads` wird nicht geöffnet.
