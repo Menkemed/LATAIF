@@ -2688,14 +2688,25 @@ function DuplicatesTab() {
       });
       return;
     }
+    // Jedes Löschen prüft live noch einmal alle Verknüpfungen (`deleteProduct`); eine dort abgewiesene wird gemeldet,
+    // und die Gruppe bleibt stehen — nur ein vollständiger Lauf gilt als erledigt.
     let deleted = 0;
+    const failed: string[] = [];
     for (const m of safe) {
       try { deleteProduct(m.id); deleted++; }
-      catch (err) { console.warn('[duplicates] delete failed:', err); }
+      catch (err) {
+        failed.push(`${productDisplayName(m)}: ${err instanceof Error ? err.message : String(err)}`);
+        console.warn('[duplicates] delete failed:', err);
+      }
     }
-    setActionMsg({ text: `${deleted} Items gelöscht. Master behalten.`, ok: true });
+    setActionMsg({
+      text: failed.length === 0
+        ? `${deleted} Items gelöscht. Master behalten.`
+        : `${deleted} gelöscht, ${failed.length} abgewiesen — ${failed.join(' · ')}`,
+      ok: failed.length === 0,
+    });
     loadProducts();
-    setGroups(prev => prev?.filter(g => g.id !== group.id) || null);
+    if (failed.length === 0) setGroups(prev => prev?.filter(g => g.id !== group.id) || null);
   }
 
   const visibleGroups = (groups || []).filter(g => !ignoredGroups.has(g.id));

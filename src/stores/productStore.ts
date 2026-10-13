@@ -42,6 +42,7 @@ import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 import { productDisplayName } from '../core/products/display-name.ts';
 import { stonesOrThrow } from '../core/products/stones.ts';
+import { belongsToConsignment } from '@/core/consignment/consignment-sale-link';
 // F9 — Menge, Bestandsstatus und Herkunft folgen aus den Vorgängen, nicht aus der Artikelbearbeitung.
 import { PRODUCT_LIFECYCLE_LOCKED, lifecycleEditRefusal } from '@/core/products/lifecycle-fields';
 
@@ -1346,16 +1347,38 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     if (links.length > 0) {
       throw nein('MERGE_SOURCE_LINKED', `"${productDisplayName(source)}" has linked records (${links.map(l => `${l.count}× ${l.label}`).join(', ')}) — it cannot be merged into another item.`);
     }
-    //  • es zählt die ECHTE Menge der Quelle (eine ausverkaufte bringt 0 — vorher „mindestens 1", ein Phantom-Stück);
-    const addQty = Math.max(0, Number(query('SELECT quantity FROM products WHERE id = ?', [sourceId])[0]?.quantity ?? 0) || 0);
-    //  • führt das Ziel Lose, kann keine Menge daneben stehen (der nächste Abgleich aus den Losen nähme sie wieder).
+    //  • es zählt die ECHTE Menge der Quelle (eine ausverkaufte bringt 0 — vorher „mindestens 1", ein Phantom-Stück),
+    //    gelesen wie `rowToProduct` (fehlende Menge = 1 Stück), damit kein angezeigtes Stück verloren geht;
+    const roh = (id: string) => query('SELECT quantity, stock_status, source_type FROM products WHERE id = ?', [id])[0];
+    const q = roh(sourceId);
+    const z = roh(targetId);
+    if (!q || !z) throw new Error('Source or target product not found');
+    const menge = (r: Record<string, unknown>): number => (r.quantity === null || r.quantity === undefined ? 1 : Math.max(0, Number(r.quantity) || 0));
+    const addQty = menge(q);
+    //  • führt das Ziel Lose, kann keine Menge daneben stehen (der nächste Abgleich aus den Losen nähme sie wieder);
     if (addQty > 0 && query('SELECT 1 FROM stock_lots WHERE product_id = ? LIMIT 1', [targetId]).length > 0) {
       throw nein('MERGE_TARGET_LOT_TRACKED', `"${productDisplayName(target)}" keeps its stock in lots — a quantity cannot be added to it by merging.`);
+    }
+    //  • eine Menge geht nur von freier eigener Ware auf freie eigene Ware über — BEIDE Artikel: „in stock", eigene Ware
+    //    (keine Kommission, auch nicht über eine offene Kommission bei abweichender Herkunft), das Ziel nicht beim
+    //    Agenten. Sonst bekäme ein verkauftes Ziel Menge 1 bei Status „sold", ein Agentenstück ein Stück, das mit dem
+    //    Agentenverkauf verschwände, ein Einlieferer eigene Ware; eine nicht freie Quelle wäre eine Phantom-Menge.
+    if (addQty > 0) {
+      const frei = (r: Record<string, unknown>) => String(r.stock_status ?? 'in_stock').toLowerCase() === 'in_stock';
+      const eigen = (r: Record<string, unknown>, id: string) => String(r.source_type ?? 'OWN').toUpperCase() === 'OWN' && !belongsToConsignment(id);
+      const qn = productDisplayName(source), zn = productDisplayName(target);
+      const grund = !frei(q) ? `"${qn}" is not free stock (status ${String(q.stock_status)})`
+        : !eigen(q, sourceId) ? `"${qn}" is not own stock (${String(q.source_type)})`
+        : !frei(z) ? `"${zn}" is not in stock (status ${String(z.stock_status)})`
+        : !eigen(z, targetId) ? `"${zn}" is not own stock (${String(z.source_type)})`
+        : query("SELECT 1 FROM agent_transfers WHERE product_id = ? AND status = 'transferred' LIMIT 1", [targetId]).length > 0 ? `"${zn}" is with an agent`
+        : null;
+      if (grund) throw nein('MERGE_STOCK_NOT_FREE', `${grund} — the quantity cannot be merged.`);
     }
 
     const db = getDatabase();
     const now = new Date().toISOString();
-    const newQty = Math.max(0, Number(query('SELECT quantity FROM products WHERE id = ?', [targetId])[0]?.quantity ?? 0) || 0) + addQty;
+    const newQty = menge(z) + addQty;
 
     // Source-Bild ins Target übernehmen wenn Target noch keins hat — Foto vom
     // Handy soll nicht verloren gehen, nur weil wir das Source-Item löschen.

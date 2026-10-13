@@ -556,6 +556,56 @@ for (const [name, mitLos, vorher, aenderung] of [
   const e4 = merge(db4, 'q4', 'z4');
   ok(e4 === '' && n(db4, "SELECT COUNT(*) FROM products WHERE id = 'q4'") === 0 && n(db4, "SELECT quantity FROM products WHERE id = 'z4'") === 2,
     `P9 beide ohne Los und Beleg: wie bisher zusammengeführt, Menge 1 + 1 = 2 (${e4 || 'ok'})`);
+  // (e–i) BEIDE Artikel zählen: eine Menge geht nur von freier eigener Ware auf freie eigene Ware über.
+  /** Abgewiesen, Quelle bleibt, Ziel und Quelle unverändert. */
+  const abgewiesen = (dbx: Db, a: string, b: string, name: string): void => {
+    const vorQ = ruhig(dbx, a), vorZ = ruhig(dbx, b);
+    const e = merge(dbx, a, b);
+    ok(/MERGE_STOCK_NOT_FREE|not free stock|not in stock|not own stock|with an agent/.test(e) && ruhig(dbx, a) === vorQ && ruhig(dbx, b) === vorZ,
+      `P9 ${name}: abgewiesen, Quelle bleibt, nichts verändert (${e.slice(0, 80) || 'ZUSAMMENGEFÜHRT ' + zeile(dbx, b)})`);
+  };
+  // (e) Ziel verkauft (ohne Los, Menge 0, „sold") — vorher: Menge 1 bei Status „sold"
+  const db5 = freshDb(); artikel(db5, 'q5', false); artikel(db5, 'z5', false);
+  await verkaufe(db5, 'z5');
+  abgewiesen(db5, 'q5', 'z5', 'Ziel verkauft');
+  // … eine Quelle mit Menge 0 darf trotzdem in ein verkauftes Ziel aufgehen (es geht keine Menge über)
+  db5.run("UPDATE products SET quantity = 0 WHERE id = 'q5'"); reload();
+  const vor5 = zeile(db5, 'z5');
+  const e5b = merge(db5, 'q5', 'z5');
+  ok(e5b === '' && n(db5, "SELECT COUNT(*) FROM products WHERE id = 'q5'") === 0 && zeile(db5, 'z5') === vor5 && n(db5, "SELECT quantity FROM products WHERE id = 'z5'") === 0,
+    `P9 Quelle mit Menge 0 in verkauftes Ziel: zusammengeführt, Ziel unverändert mit Menge 0 (${e5b || 'ok'}; ${vor5} → ${zeile(db5, 'z5')})`);
+  // (f) Ziel beim Agenten (ohne Los) — vorher: Menge 2 „with_agent", der Agentenverkauf nähme das zweite Stück mit
+  const db6 = freshDb();
+  db6.run(`INSERT INTO customers (id, branch_id, first_name, last_name, country, language, vip_level, preferences, customer_type, sales_stage, created_at, updated_at)
+    VALUES ('cust-agent','branch-main','Agent','Ali','BH','en',0,'[]','collector','active',?,?)`, [NOW, NOW]);
+  artikel(db6, 'q6', false); artikel(db6, 'z6', false);
+  nimm(db6); useAgentStore.getState().loadAgents(); useAgentStore.getState().loadTransfers();
+  const u6 = await primary(() => imHaus(() => th.createTransferInHouse({ customerId: 'cust-agent', productId: 'z6', ourPrice: 1100, settlementModel: 'full' }, 'branch-main')));
+  ok(u6.ok, `P9 (Vorbereitung) Ziel an den Agenten übergeben (${u6.code || 'ok'})`);
+  abgewiesen(db6, 'q6', 'z6', 'Ziel beim Agenten');
+  // … auch wenn sein Status (Altbestand, von Hand) schon wieder „in stock"/OWN sagt, solange der Vorgang offen ist
+  db6.run("UPDATE products SET stock_status = 'in_stock', source_type = 'OWN' WHERE id = 'z6'"); reload();
+  abgewiesen(db6, 'q6', 'z6', 'Ziel beim Agenten mit Altbestand-Status „in stock"');
+  // (g) Ziel Kommissionsware — vorher: eigene Ware dem Einlieferer zugeschlagen
+  const w7 = await welt({ sale: null });
+  artikel(w7.db, 'q7', false);
+  abgewiesen(w7.db, 'q7', w7.pid, 'Ziel Kommissionsware');
+  // … auch wenn Status und Herkunft (Altbestand) „in stock"/OWN sagen, solange die Kommission offen ist
+  w7.db.run("UPDATE products SET stock_status = 'in_stock', source_type = 'OWN' WHERE id = ?", [w7.pid]); reload();
+  abgewiesen(w7.db, 'q7', w7.pid, 'Ziel mit offener Kommission, Status/Herkunft „in stock"/OWN');
+  // (h) Herkunft verschieden: Quelle CONSIGNMENT (ohne Beleg, z. B. Import) → eigenes Ziel
+  const db8 = freshDb(); artikel(db8, 'q8', false); artikel(db8, 'z8', false);
+  db8.run("UPDATE products SET source_type = 'CONSIGNMENT' WHERE id = 'q8'"); reload();
+  abgewiesen(db8, 'q8', 'z8', 'Quelle CONSIGNMENT → Ziel OWN');
+  // (i) Quelle nicht frei (früher von Hand „sold", Menge 1, ohne Beleg) — vorher: Phantom-Stück am Ziel
+  const db9 = freshDb(); artikel(db9, 'q9', false); artikel(db9, 'z9', false);
+  db9.run("UPDATE products SET stock_status = 'sold' WHERE id = 'q9'"); reload();
+  abgewiesen(db9, 'q9', 'z9', 'Quelle „sold" von Hand');
+  // (j) Ziel ohne gespeicherte Menge (NULL, angezeigt als 1) + Quelle 1 → 2, kein angezeigtes Stück geht verloren
+  const db10 = freshDb(); artikel(db10, 'q10', false); artikel(db10, 'z10', false);
+  db10.run("UPDATE products SET quantity = NULL WHERE id = 'z10'"); reload();
+  const e10 = merge(db10, 'q10', 'z10');
+  ok(e10 === '' && n(db10, "SELECT quantity FROM products WHERE id = 'z10'") === 2, `P9 Ziel ohne gespeicherte Menge (angezeigt 1) + 1 = 2 (${e10 || 'ok'}; ${zeile(db10, 'z10')})`);
 }
 // ══ S — Stammdaten bleiben editierbar ════════════════════════════════════════
 {
@@ -581,8 +631,10 @@ for (const [name, mitLos, vorher, aenderung] of [
   const mergeFn = sp.slice(sp.indexOf('function handleMergeAllIntoMaster'), sp.indexOf('function handleDeleteAllExceptMaster'));
   ok(!/for \(const m of group\.members\)/.test(mergeFn) && /memberIds\.includes\(m\.id\)/.test(mergeFn) && /window\.confirm/.test(mergeFn),
     'M Duplikate: „Alle in Master mergen" nimmt nur die sichtbaren Mitglieder und fragt vorher nach');
-  const delFn = sp.slice(sp.indexOf('function handleDeleteAllExceptMaster'), sp.indexOf('function handleDeleteAllExceptMaster') + 1500);
+  const delFn = sp.slice(sp.indexOf('function handleDeleteAllExceptMaster'), sp.indexOf('const visibleGroups', sp.indexOf('function handleDeleteAllExceptMaster')));
   ok(!/for \(const m of group\.members\)/.test(delFn) && /memberIds\.includes/.test(delFn), 'M Duplikate: „Alle außer Master löschen" nimmt nur die sichtbaren Mitglieder');
+  ok(/deleteProduct\(m\.id\)/.test(delFn) && /failed\.push/.test(delFn) && /if \(failed\.length === 0\) setGroups/.test(delFn),
+    'M Duplikate: „Alle außer Master löschen" läuft über die Löschprüfung des Stores und meldet Abgewiesene, statt die Gruppe als erledigt zu entfernen');
   ok(/onMergeAllIntoMaster\(masterProduct\.id, visibleMembers\.map/.test(sp) && /onDeleteAllExceptMaster\(masterProduct\.id, visibleMembers\.map/.test(sp),
     'M Duplikate: die Karte übergibt den sichtbaren Master und die sichtbaren Mitglieder');
   // Der direkte Store-Weg `updateProduct` (kein Fernbefehl): Menge/Status/Herkunft setzt dort nur ein Geschäftsvorgang
