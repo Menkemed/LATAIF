@@ -30,6 +30,7 @@ import {
 import { getRuntimePaths } from '../runtime/runtime-paths';
 import { hasStockLotsTable, runLegacyStockRepairsOnce } from './legacy-stock-repair';
 import { goldCategoryAllowedNew, runGoldConditionMigrationOnce } from './legacy-gold-condition';
+import { widenStockAdjustmentDirections } from './stock-adjustment-schema';
 import {
   atomicWrite,
   createSaveCoalescer,
@@ -2389,12 +2390,15 @@ function runMigrations(database: Database): void {
     // vorher/nachher, die entnommenen Lose (lots_json) mit ihrem Stand davor, der gebuchte Wert und die Buchungslage
     // (BOOKED = Bestandsverlust gebucht; ACCOUNTING_RECONCILIATION_PENDING = Artikel ohne Lagerbuchung, nur Menge).
     // Synchronisiert (insert/update — ein Storno ändert die Zeile, gelöscht wird nie).
+    // OLD STOCK — Richtung RECEIPT: zusätzlich erfasster Altbestand („Add Old Stock"), nur Menge, immer
+    // ACCOUNTING_RECONCILIATION_PENDING, historischer Einstand je Stück in purchase_price_hint. Ältere Tabellen mit
+    // der Regel „nur ISSUE" baut `stock-adjustment-schema.ts` einmal um.
     `CREATE TABLE IF NOT EXISTS stock_adjustments (
       id TEXT PRIMARY KEY,
       branch_id TEXT NOT NULL,
       adjustment_number TEXT NOT NULL,
       product_id TEXT NOT NULL,
-      direction TEXT NOT NULL CHECK (direction IN ('ISSUE')),
+      direction TEXT NOT NULL CHECK (direction IN ('ISSUE','RECEIPT')),
       quantity INTEGER NOT NULL CHECK (quantity > 0),
       qty_before REAL NOT NULL,
       qty_after REAL NOT NULL,
@@ -2429,6 +2433,9 @@ function runMigrations(database: Database): void {
       }
     }
   }
+
+  // STOCK CORRECTION — eine schon mit der alten Richtungsregel (nur ISSUE) angelegte Belegtabelle einmal umbauen.
+  try { widenStockAdjustmentDirections(database); } catch (err) { console.warn('Stock adjustment table not widened:', err); }
 
   // STARTUP-MIGRATION-INTEGRITY — die historischen Bestandskorrekturen: einmal je Datenbank, nie bei jedem Start.
   try { runLegacyStockRepairsOnce(database, hadStockLots); } catch (err) { console.warn('Legacy stock repairs skipped:', err); }

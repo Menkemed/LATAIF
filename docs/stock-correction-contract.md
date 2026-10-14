@@ -1,4 +1,25 @@
-# Bestandskorrektur — Vertrag (Phase 1 umgesetzt, Zugang und Anfangsbestand offen)
+# Bestandskorrektur — Vertrag (Phase 1 und die Grundlage von Phase 2+3 umgesetzt; Buchungen von Zugang und Anfangsbestand offen)
+
+## Bestätigte Owner-Regeln (14.10.2026, nicht offen)
+
+- **C1 Altbestand:** Desktop „Collection → New Item“, Handy „New Collection Item“ und der Excel-Import erfassen vorhandene eigene Ware.
+- **C2 Kein Geld:** Die Erfassung bucht keine Zahlung (Kasse, Bank, Benefit), keinen Einkauf, keine Lieferantenschuld. Der eingetragene Einkaufspreis ist der historische Einstand. Vor der Freigabe der Buchhalter-Regeln wird keine Eröffnung gebucht.
+- **C3 Neue Ware** nur über Purchase.
+- **C4 Verkauf vor der Eröffnung** ist erlaubt; die spätere Eröffnung bucht keinen Wareneinsatz doppelt.
+- **C5 Rechte:** Der Owner bucht Korrekturen und Eröffnungen am Primary und am PC2; der PC2 schreibt nie selbst, sondern über Fernbefehle am Primary. Keine Manager-Freigabe.
+- Die Buchhalter-Vorlage (D1–D6, D8: Gegenkonten, Bewertung, Stichtag, frühere Verkäufe, offene Abgänge, Wertunterschied, Mehrwertsteuer, Datum späterer Eröffnungen) ist die Grundlage aller noch offenen Buchungen.
+
+## Grundlage Phase 2+3 (umgesetzt, ohne neue Buchungen)
+
+- **„Paid from“ entfernt** (New Collection und Artikel bearbeiten); ein gespeicherter Wert bleibt unverändert. Die Auswertung zeigt keinen „Product purchases (EK paid out, manual)“-Abfluss mehr; die Salden kommen aus dem Hauptbuch.
+  - **Offener Befund:** Die übrigen Zeilen der Aufschlüsselung „Cash & Bank“ sind Tabellenaggregate, nicht das Hauptbuch. Eine Umstellung ist ein eigener Auftrag.
+- **PC2:** `stock_adjustments.issue`, `.cancel` und `.add_old_stock` sind namentlich freigegebene Fernbefehle (nur Owner, zentral geprüft und noch einmal in der Hausfolge), dazu die Auskünfte `stock_adjustments.product.get` (Karte am Artikel) und `page.old_stock.get` (Vorschau). Primary und PC2 müssen gemeinsam aktualisiert werden.
+- **„Add Old Stock“** (`addOldStockInHouse`): weitere Stücke Altbestand eines erfassten Artikels. Beleg `RECEIPT` mit Menge, historischem Einstand je Stück (`purchase_price_hint`), Grund, Geschäftsdatum, Protokoll und Sync; immer `ACCOUNTING_RECONCILIATION_PENDING`, Wert 0, keine Buchung. Storno nur, solange sich der Bestand seitdem nicht bewegt hat.
+  - Hat der Artikel offene Abgänge, muss der Owner bestätigen, dass es andere Stücke sind (das Protokoll hält es fest). Die Wiederherstellung eines ausgebuchten Stücks wartet auf D1c.
+  - Die Tabelle erlaubt dafür `direction IN ('ISSUE','RECEIPT')`; ältere Entwicklungsdatenbanken baut `stock-adjustment-schema.ts` einmal verlustfrei um.
+- **Eröffnungsvorschau** (`old-stock-reconciliation.ts`, Seite „Old stock“, nur lesen, nur Owner): je Artikel (a) gebuchter Wareneinsatz netto aus dem Hauptbuch, (b) offene Abgänge, (c) Bestand × historischer Einstand, dazu V1 und V2. Dieselbe Funktion (`oldStockRowsFor`/`planOldStockOpening`) ist die Rechengrundlage der späteren Buchung, die jeden Nachweis in ihrer Transaktion erneut prüft.
+  - Kandidat ist nur, was das Hauptbuch als nie aktiviert belegt. Prüffall mit Grund: INVENTORY-Sollbuchung unbekannter Herkunft, Einkauf ohne Los, Los ohne gebuchten Einkauf (Produktion, „Keep“), Menge ≠ Lose, aktivierte Reparaturkosten, Produktion, stornierter Sonderauftrag, Altzeilen mit mehreren Stücken, fehlender Einstand, gebuchter Wareneinsatz ≠ heutiger Einstand (Frage D4), Altbestands-Stücke mit anderem Einstand.
+- **BLOCKED** (fail-closed, bis die Buchhalter-Regeln vorliegen): jede Eröffnungs-, Fund-, Wiederherstellungs- und Wertunterschied-Buchung; Mehrwertsteuer auf Korrekturen; „Add Old Stock“ für Artikel mit Losen (gekauft, produziert oder eröffnet), für Artikel mit Lagerwert-Buchung oder bei unklarer Herkunft im Hauptbuch, und für ausverkaufte Artikel.
 
 ## Phase 1 — Bestandsabgang (umgesetzt, `src/core/stock/stock-adjustment.ts`)
 
@@ -22,7 +43,7 @@
 - **Menge 0 nach dem Abgang:** Status `write_off` (kein Verkauf).
 - **Storno:** exakt zurück (Lose, Menge, Status; bei Buchung `reverseSource`).
   - Nur solange seitdem nichts anderes am Bestand des Artikels geschah; sonst abgewiesen (`MOVED_SINCE`). Kein verkauftes Stück wird wieder verfügbar.
-- **Rechte und Ablauf:** nur Owner (Admin), nur am Primary (Karte „Stock corrections“ auf der Artikelseite); PC2 wird abgewiesen.
+- **Rechte und Ablauf:** nur Owner (Admin), Karte „Stock corrections“ auf der Artikelseite; seit der Grundlage Phase 2+3 auch am PC2 über die Fernbefehle (C5).
   - Eine Transaktion mit strengem Protokoll, Wächtern für Buchung und Sync, nie automatisch.
   - Ein Artikel mit Korrekturbeleg ist nicht mehr löschbar oder zusammenführbar.
 - **Wirkung:** erst mit dem nächsten Release, weil Manifest und Rust-Server zusammen ausgeliefert werden.

@@ -1154,7 +1154,7 @@ export function ProductDetail() {
         {/* STOCK CORRECTION — Bestandsabgang mit Korrekturbeleg und Storno: nur der Owner; am PC2 über den Primary
             (Fernbefehl, Rolle des geprüften Absenders), geschrieben wird nur dort. */}
         {!editing && perm.isOwner && (
-          <StockAdjustmentPanel productId={product.id} quantity={product.quantity} onChanged={() => loadProducts()} />
+          <StockAdjustmentPanel productId={product.id} quantity={product.quantity} purchasePrice={product.purchasePrice} onChanged={() => loadProducts()} />
         )}
 
         {/* Sales History — alle Invoices mit diesem Produkt, neueste zuerst.

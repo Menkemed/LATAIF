@@ -296,9 +296,9 @@ const valueOf = (o: unknown): Record<string, unknown> => ((o as { value?: Record
     && perms.roleMayRunOp('ADMIN', 'stock_adjustments.issue') && !perms.roleMayRunOp('MANAGER', 'stock_adjustments.issue')
     && !perms.roleMayRunOp('', 'stock_adjustments.cancel') && !perms.roleMayRunOp('SALES', 'stock_adjustments.cancel'),
     'D1 Fernbefehle verlangen den Owner (ADMIN); Manager, Verkauf und eine fehlende Rolle dürfen nicht');
-  ok(registry.ALLOWED_MUTATIONS.at(-2) === 'stock_adjustments.issue' && registry.ALLOWED_MUTATIONS.at(-1) === 'stock_adjustments.cancel'
+  ok(registry.ALLOWED_MUTATIONS.at(-3) === 'stock_adjustments.issue' && registry.ALLOWED_MUTATIONS.at(-2) === 'stock_adjustments.cancel'
     && readOps.STORE_READ_OPS.includes('stock_adjustments.product.get') && perms.isOperationCovered('stock_adjustments.product.get')
-    && /OP_STOCK_ISSUE,\s*OP_STOCK_CANCEL,\s*OP_STOCK_PRODUCT_GET,\s*\];/.test(src('src-tauri/src/bridge.rs'))
+    && /OP_STOCK_ISSUE,\s*OP_STOCK_CANCEL,\s*OP_OLD_STOCK_ADD,\s*OP_STOCK_PRODUCT_GET,\s*OP_PAGE_OLD_STOCK_GET,\s*\];/.test(src('src-tauri/src/bridge.rs'))
     && /import '\.\/stock-adjustment-commands';/.test(src('src/core/bridge/bridge-listener.ts')),
     'D1 namentlich freigegeben: zwei Buchungen, eine Auskunft — im Renderer und in Rust, am Primary angemeldet');
 
@@ -368,6 +368,269 @@ const valueOf = (o: unknown): Record<string, unknown> => ((o as { value?: Record
     'D9 die Karte: am Primary die Hausfolge lokal, am PC2 derselbe Rumpf als Fernbefehl; Lesen über die Auskunft; nur für den Owner');
   ok(/if \(isClientMode\(\)\) return nurPrimary\(\);\s*return runOnPrimary\(\(\) => issueStockInHouse/.test(src('src/core/stock/stock-adjustment.ts')),
     'D9 der lokale Anschluss schreibt am PC2 nie selbst (nur über den Primary)');
+}
+
+// ══ A — Altbestand: Erfassung ohne Geld, „Add Old Stock", schreibgeschützte Eröffnungsvorschau ═══════════════════
+const osr = await import('../../src/core/stock/old-stock-reconciliation.ts');
+const schema = await import('../../src/core/db/stock-adjustment-schema.ts');
+const ap = await import('../../src/core/sync/apply-change.ts');
+const RC = { branchId: 'branch-main' };
+const rowOf = (pid: string) => osr.oldStockRowsFor(RC).find((r) => r.productId === pid);
+async function altbestand(db: Db, pid: string, quantity: number, unitCost: number, over: Record<string, unknown> = {}): Promise<Aus> {
+  try {
+    const r = await sa!.addOldStockOnPrimary({ actionId: newAction(), productId: pid, quantity, expectedQuantity: qtyOf(db, pid),
+      unitCost, reason: 'found in the second safe (old stock)', ...over }, reload);
+    return { ok: true, code: '', r };
+  } catch (e) { return { ok: false, code: String((e as { code?: unknown }).code ?? (e as Error).message), r: {} }; }
+}
+/** Verkauf eines Artikels ohne Los zum Einstand wie an der Kasse (der Einstand der Zeile = historischer Einstand). */
+function verkaufZu(pid: string, qty: number, cost: number): string {
+  const id = imHaus(() => useInvoiceStore.getState().createDirectInvoice('cust-1', [{ productId: pid, quantity: qty, unitPrice: 500, purchasePrice: cost,
+    taxScheme: 'MARGIN', vatRate: 10, vatAmount: 0, lineTotal: 500 * qty }] as never, 'OLD').id);
+  reload();
+  return id;
+}
+const ledgerSnap = (db: Db): string => S(db.exec('SELECT * FROM ledger_entries ORDER BY id')[0]?.values ?? []);
+const balance = (db: Db, acc: string): number => r3(n(db, "SELECT COALESCE(SUM(CASE direction WHEN 'DEBIT' THEN amount ELSE -amount END), 0) FROM ledger_entries WHERE account = ?", [acc]));
+
+// A1 — die Erfassungswege des Altbestands bewegen kein Geld und buchen nichts (bestätigte Regel C1/C2).
+{
+  ok(!/post[A-Z]\w*\(|createPurchase|recordPayment/.test(src('src/pages/settings/ImportPage.tsx'))
+    && !/post[A-Z]\w*\(|createPurchase|recordPayment/.test(src('src/core/media/mobile-upload-wiring.ts'))
+    && !/\bpost[A-Z]\w*\(|createPurchase|recordPayment/.test(src('src/core/media/product-media-create.ts')),
+    'A1 Excel-Import, Handy-Erfassung und Anlage mit Medien rufen keine Buchung, keinen Einkauf und keine Zahlung');
+  const db = freshDb();
+  const l0 = ledgerSnap(db);
+  const desk = imHaus(() => useProductStore.getState().createProduct({ categoryId: 'cat-w', brand: 'Omega', name: 'Desktop old stock', quantity: 3, purchasePrice: 400 } as never));
+  product(db, 'import1', 250, 2); product(db, 'mobile1', 180, 1); reload();
+  const rows = osr.oldStockRowsFor(RC);
+  const cls = (id: string): string => rows.find((r) => r.productId === id)?.klass ?? 'FEHLT';
+  ok(ledgerSnap(db) === l0 && n(db, 'SELECT COUNT(*) FROM purchases') === 0 && n(db, 'SELECT COUNT(*) FROM payments') === 0
+    && cls(desk.id) === 'OPENING_CANDIDATE' && cls('import1') === 'OPENING_CANDIDATE' && cls('mobile1') === 'OPENING_CANDIDATE'
+    && rowOf(desk.id)?.shelfValue === 1200 && rowOf('import1')?.shelfValue === 500,
+    `A1 Desktop, Import und Handy: Altbestand ohne Buchung, ohne Einkauf, ohne Zahlung — in der Vorschau Eröffnungskandidaten mit Bestand × historischem Einstand (${cls(desk.id)}/${cls('import1')}/${cls('mobile1')})`);
+}
+
+// A2 — das Beispiel der Vorlage: 10 Uhren × 100 Altbestand, 4 verkauft, 1 fehlt (Abgang ohne Buchung), 5 im Regal.
+{
+  const db = freshDb();
+  product(db, 'w', 100, 10); reload();
+  verkaufZu('w', 4, 100);
+  const ab = await abgang(db, 'w', 1);
+  const vorher = alles(db);
+  const r = rowOf('w');
+  ok(!!r && r.klass === 'OPENING_CANDIDATE' && eq(r.soldCogs, 400) && r.pendingRemovalQty === 1 && eq(r.pendingRemovalValue, 100)
+    && r.shelfQty === 5 && eq(r.shelfValue, 500) && eq(r.v1, 1000) && eq(r.v2, 900) && eq(balance(db, 'INVENTORY'), -400),
+    `A2 Teil (a) 400 aus dem Hauptbuch, (b) 100 offener Abgang, (c) 500 im Regal: V1 1.000, V2 900; INVENTORY heute −400 (${S(r && { a: r.soldCogs, b: r.pendingRemovalValue, c: r.shelfValue, v1: r.v1, v2: r.v2 })}; Abgang ${ab.code || 'ok'})`);
+  const rec = osr.oldStockReconciliationFor(RC);
+  ok(alles(db) === vorher && S(osr.oldStockReconciliationFor(RC)) === S(rec) && S(osr.planOldStockOpening(RC, 'w')) === S(r),
+    'A2 die Vorschau schreibt nichts, rechnet zweimal gleich, und der Einzelweg (spätere Buchung) liefert dieselbe Zeile');
+  ok(rec.totals.candidates === 1 && eq(rec.totals.v1, 1000) && eq(rec.totals.v2, 900) && eq(rec.ledger.inventoryBalance, -400) && rec.ledger.unknownInventoryDebits === 0
+    && rec.notes.some((x) => /nothing is booked/.test(x)), 'A2 Summen, Hauptbuch-Lage und der Hinweis „nichts gebucht"');
+  // Verkauf vor der Eröffnung + Retoure eines Stücks: der gebuchte Wareneinsatz zählt netto, das zurückgenommene Stück einmal (im Regal).
+  const inv = s(db, "SELECT i.id FROM invoices i JOIN invoice_lines il ON il.invoice_id = i.id WHERE il.product_id = 'w' LIMIT 1");
+  const line = s(db, 'SELECT id FROM invoice_lines WHERE invoice_id = ?', [inv]);
+  const lt = n(db, 'SELECT line_total FROM invoice_lines WHERE id = ?', [line]);
+  const vat = n(db, 'SELECT vat_amount FROM invoice_lines WHERE id = ?', [line]);
+  imHaus(() => {
+    const rs = useSalesReturnStore.getState();
+    rs.loadReturns();
+    const rid = rs.createReturn({ invoiceId: inv, refundMethod: 'cash', productDisposition: 'IN_STOCK' as never, reason: 'customer brought one back',
+      lines: [{ invoiceLineId: line, productId: 'w', quantity: 1, unitPrice: lt / 4, vatAmount: vat / 4 }] }).id;
+    useSalesReturnStore.getState().loadReturns();
+    useSalesReturnStore.getState().approveReturn(rid);
+  });
+  reload();
+  const r2 = rowOf('w');
+  ok(!!r2 && eq(r2.soldCogs, 300) && r2.shelfQty === 6 && eq(r2.shelfValue, 600) && eq(r2.v2, 900) && eq(balance(db, 'INVENTORY'), -300),
+    `A2 Retoure eines verkauften Stücks vor der Eröffnung: (a) 400 → 300, Regal 5 → 6 (600), V2 bleibt 900 — kein Stück doppelt (${S(r2 && { a: r2.soldCogs, q: r2.shelfQty, c: r2.shelfValue, v2: r2.v2 })})`);
+}
+
+// A3 — Einkaufspreis korrigiert: gebuchter Wareneinsatz bleibt, die Vorschau zeigt den Unterschied als Prüffall (D4).
+{
+  const db = freshDb();
+  product(db, 'k', 100, 3); product(db, 'neu', 100, 2); reload();
+  verkaufZu('k', 1, 100);
+  const cogsVor = balance(db, 'COGS');
+  imHaus(() => useProductStore.getState().updateProduct('k', { purchasePrice: 120 } as never));
+  imHaus(() => useProductStore.getState().updateProduct('neu', { purchasePrice: 130 } as never));
+  const rk = rowOf('k'); const rn = rowOf('neu');
+  ok(eq(balance(db, 'COGS'), cogsVor) && eq(cogsVor, 100) && !!rk && eq(rk.soldCogs, 100) && eq(rk.shelfValue, 240)
+    && rk.klass === 'REVIEW' && rk.reasons.includes('COST_DIFFERS_FROM_BOOKED_COGS'),
+    `A3 nach dem Verkauf korrigiert: gebuchter Wareneinsatz 100 unverändert, Regal zum neuen Einstand, Prüffall „Wertunterschied" (${S(rk?.reasons)})`);
+  ok(!!rn && rn.klass === 'OPENING_CANDIDATE' && eq(rn.shelfValue, 260), 'A3 vor jedem Verkauf korrigiert: Kandidat zum neuen historischen Einstand');
+}
+
+// A4 — „Add Old Stock": weitere Stücke eines erfassten Artikels — Beleg, Menge, Protokoll, Sync; keine Buchung.
+{
+  const db = freshDb();
+  product(db, 'rolex', 900, 1); product(db, 'andere', 50, 4); reload();
+  const andere = S(db.exec("SELECT * FROM products WHERE id = 'andere'")[0]?.values);
+  const l0 = ledgerSnap(db); const a0 = audits(db); const c0 = changelog(db);
+  const a1 = await altbestand(db, 'rolex', 2, 900);
+  const d1 = a1.ok ? adj(db, String(a1.r.adjustmentId)) : {};
+  ok(a1.ok && qtyOf(db, 'rolex') === 3 && statusOf(db, 'rolex') === 'in_stock' && d1.direction === 'RECEIPT' && d1.accounting === 'ACCOUNTING_RECONCILIATION_PENDING'
+    && Number(d1.value_booked) === 0 && Number(d1.purchase_price_hint) === 900 && d1.reason_category === 'OLD_STOCK' && String(d1.adjustment_number).startsWith('ADJ-')
+    && a1.r.direction === 'RECEIPT' && a1.r.unitCostHint === 900,
+    `A4 Rolex 1 → 3: Beleg ${String(d1.adjustment_number)} RECEIPT, Eröffnung offen, Wert 0, historischer Einstand 900 (${a1.code || 'ok'})`);
+  ok(ledgerSnap(db) === l0 && n(db, 'SELECT COUNT(*) FROM purchases') === 0 && n(db, 'SELECT COUNT(*) FROM payments') === 0,
+    'A4 …keine Buchung, kein Einkauf, keine Zahlung, keine Lieferantenschuld');
+  ok(audits(db) === a0 + 2 && changelog(db) === c0 + 2 && S(db.exec("SELECT * FROM products WHERE id = 'andere'")[0]?.values) === andere,
+    'A4 …Protokoll (Beleg + Menge) und Sync (Beleg + Artikel); andere Artikel unberührt');
+  const r = rowOf('rolex');
+  ok(!!r && r.klass === 'OPENING_CANDIDATE' && r.oldStockReceipts === 1 && r.oldStockReceiptQty === 2 && eq(r.shelfValue, 2700),
+    `A4 …die Vorschau nimmt die drei Stücke auf (Regal 2.700), der Beleg ist als Altbestand vermerkt (${S(r && { k: r.klass, c: r.shelfValue })})`);
+  const nach = alles(db);
+  const again = await sa!.addOldStockOnPrimary({ actionId: String(adj(db, String(a1.r.adjustmentId)).action_id), productId: 'rolex', quantity: 2, expectedQuantity: 1, unitCost: 900, reason: 'found in the second safe (old stock)' }, reload).catch((e: Error) => e);
+  ok(!(again instanceof Error) && (again as Record<string, unknown>).adjustmentId === a1.r.adjustmentId && alles(db) === nach,
+    'A4 dieselbe Absicht noch einmal (Doppelklick, verlorene Antwort): derselbe Beleg, keine zweite Wirkung');
+  const st = await storno(String(a1.r.adjustmentId), 'counted twice');
+  ok(st.ok && qtyOf(db, 'rolex') === 1 && adj(db, String(a1.r.adjustmentId)).status === 'CANCELLED' && ledgerSnap(db) === l0,
+    `A4 Storno: wieder 1 Stück, Beleg storniert, keine Buchung (${st.code || 'ok'})`);
+  const a2 = await altbestand(db, 'rolex', 2, 950);
+  ok(a2.ok && rowOf('rolex')?.klass === 'REVIEW' && rowOf('rolex')!.reasons.includes('OLD_STOCK_COST_DIFFERS'),
+    'A4 anderer historischer Einstand (950 statt 900): erfasst, in der Vorschau als Prüffall');
+  verkauf('rolex', 1);
+  const st2 = await storno(String(a2.r.adjustmentId), 'wrong');
+  ok(!st2.ok && /MOVED_SINCE/.test(st2.code) && qtyOf(db, 'rolex') === 2, `A4 Storno nach einem Verkauf: abgewiesen (MOVED_SINCE), nichts verändert (${st2.code})`);
+}
+
+// A5 — Grenzen von „Add Old Stock" (fail-closed; BLOCKED bis zu den Eröffnungsregeln, wo nötig).
+{
+  const db = freshDb();
+  product(db, 'g1', 300, 2); product(db, 'kauf1', 300, 0); product(db, 'aus', 300, 1); product(db, 'weg', 300, 3); reload();
+  kauf('kauf1', 2, 300);
+  verkauf('aus', 1);
+  const vor = alles(db);
+  const codes: Record<string, string> = {};
+  codes.lots = (await altbestand(db, 'kauf1', 1, 300)).code;
+  codes.sold = (await altbestand(db, 'aus', 1, 300)).code;
+  codes.qty0 = (await altbestand(db, 'g1', 0, 300)).code;
+  codes.qtyFrac = (await altbestand(db, 'g1', 1.5, 300)).code;
+  codes.cost = (await altbestand(db, 'g1', 1, Number.NaN)).code;
+  codes.costNeg = (await altbestand(db, 'g1', 1, -1)).code;
+  codes.reason = (await altbestand(db, 'g1', 1, 300, { reason: '  ' })).code;
+  codes.date = (await altbestand(db, 'g1', 1, 300, { businessDate: '2999-01-01' })).code;
+  codes.seen = (await altbestand(db, 'g1', 1, 300, { expectedQuantity: 7 })).code;
+  rolle('MANAGER'); codes.role = (await altbestand(db, 'g1', 1, 300)).code; rolle('ADMIN');
+  ok(/BLOCKED_HAS_LOTS/.test(codes.lots) && /EXCLUDED_NOT_IN_STOCK/.test(codes.sold) && /QUANTITY_INVALID/.test(codes.qty0) && /QUANTITY_INVALID/.test(codes.qtyFrac)
+    && /COST_REQUIRED/.test(codes.cost) && /COST_REQUIRED/.test(codes.costNeg) && /REASON_REQUIRED/.test(codes.reason) && /INVALID_DATE/.test(codes.date)
+    && /STOCK_CHANGED/.test(codes.seen) && /PERMISSION_DENIED/.test(codes.role) && alles(db) === vor,
+    `A5 abgewiesen ohne Wirkung: Artikel mit Losen (BLOCKED), ausverkauft, Menge 0/Bruch, Einstand fehlt/negativ, kein Grund, Zukunftsdatum, veraltete Menge, kein Owner (${S(codes)})`);
+  const ab = await abgang(db, 'weg', 1);
+  const vor2 = alles(db);
+  const ohne = await altbestand(db, 'weg', 1, 300);
+  ok(ab.ok && /REMOVED_PIECE_CHECK/.test(ohne.code) && alles(db) === vor2,
+    `A5 Artikel mit offenem Abgang: ohne Bestätigung abgewiesen — ein wiedergefundenes Stück gehört zu seinem Abgang (${ohne.code.slice(0, 40)})`);
+  const mit = await altbestand(db, 'weg', 1, 300, { confirmNotRemovedPiece: true });
+  ok(mit.ok && qtyOf(db, 'weg') === 3 && n(db, "SELECT COUNT(*) FROM audit_log WHERE entity_id = ? AND new_value LIKE '%\"confirmedNotRemoved\":true%'", [String(mit.r.adjustmentId)]) === 1,
+    'A5 …mit ausdrücklicher Bestätigung „andere Stücke": erfasst, die Bestätigung steht im Protokoll');
+  insert(db, 'ledger_entries', { id: 'unk-1', branch_id: 'branch-main', entry_no: 99001, transaction_id: 'tx-unk', occurred_at: NOW, recorded_at: NOW, account: 'INVENTORY', direction: 'DEBIT', amount: 50, currency: 'BHD', source_module: 'MANUAL', source_id: 'x', created_at: NOW });
+  const vor3 = alles(db);
+  const unk = await altbestand(db, 'g1', 1, 300);
+  const rec = osr.oldStockReconciliationFor(RC);
+  ok(/VALUE_NOT_PROVEN/.test(unk.code) && alles(db) === vor3 && rec.ledger.unknownInventoryDebits === 1 && rec.totals.candidates === 0
+    && rowOf('g1')?.reasons.includes('LEDGER_UNKNOWN_INVENTORY_DEBIT') && rec.notes.some((x) => /cannot be traced/.test(x)),
+    `A5 eine nicht zuordenbare INVENTORY-Buchung im Hauptbuch: kein Zugang, kein Eröffnungskandidat, Hinweis in der Vorschau (${unk.code.slice(0, 30)})`);
+}
+
+// A6 — Parallelbetrieb mit Einkauf, Produktion und Reparatur: nur nachweislich nie aktivierte Ware wird Kandidat.
+{
+  const db = freshDb();
+  product(db, 'alt', 200, 2); product(db, 'gekauft', 300, 0); product(db, 'misch', 300, 0); reload();
+  kauf('gekauft', 2, 300);
+  kauf('misch', 1, 300);
+  db.run("UPDATE products SET quantity = 3 WHERE id = 'misch'");   // ein Stück ohne Los neben dem gekauften
+  insert(db, 'stock_lots', { id: 'lot-prod', branch_id: 'branch-main', product_id: 'alt', unit_cost: 150, qty_total: 1, qty_remaining: 1, status: 'ACTIVE', unit: 'pcs', acquired_at: NOW, created_at: NOW });
+  product(db, 'prod', 0, 1); product(db, 'custom', 400, 1); product(db, 'nul', 0, 1); reload();
+  db.run("UPDATE products SET notes = 'From cancelled custom order — capitalized costs 400.000 BHD.' WHERE id = 'custom'");
+  insert(db, 'production_records', { id: 'pr-1', branch_id: 'branch-main', created_at: NOW });
+  insert(db, 'production_outputs', { id: 'po-1', record_id: 'pr-1', product_id: 'prod', output_value: 120 });
+  const rows = osr.oldStockRowsFor(RC);
+  const z = (id: string) => rows.find((r) => r.productId === id);
+  ok(z('gekauft')?.klass === 'CAPITALISED' && z('gekauft')?.v1 === 0, `A6 gekaufte Ware: schon im Lagerwert — keine Eröffnung (${z('gekauft')?.klass})`);
+  ok(z('misch')?.klass === 'REVIEW' && z('misch')!.reasons.includes('QUANTITY_DIFFERS_FROM_LOTS'), `A6 gekauft + Stück ohne Los: Prüffall (${S(z('misch')?.reasons)})`);
+  ok(z('alt')?.klass === 'REVIEW' && z('alt')!.reasons.includes('LOT_NOT_FROM_BOOKED_PURCHASE'), `A6 Los ohne gebuchten Einkauf (Produktion/Keep): Prüffall, ein fehlendes Los ist nicht der Nachweis (${S(z('alt')?.reasons)})`);
+  ok(z('prod')?.reasons.includes('FROM_PRODUCTION') && z('custom')?.reasons.includes('FROM_CANCELLED_CUSTOM_ORDER') && z('nul')?.reasons.includes('NO_HISTORICAL_COST')
+    && z('prod')?.klass === 'REVIEW' && z('custom')?.klass === 'REVIEW' && z('nul')?.klass === 'REVIEW',
+    'A6 Produktion, stornierter Sonderauftrag (Kosten schon als Ausgabe) und Artikel ohne Einstand: Prüffälle mit Grund');
+}
+
+// A7 — Owner am PC2: „Add Old Stock" als Fernbefehl, Vorschau als Auskunft.
+{
+  const db = freshDb();
+  product(db, 'r2', 500, 1); reload();
+  const d = dps(db);
+  const body = { actionId: 'pc2-old-1-xxxxxx', productId: 'r2', quantity: 2, expectedQuantity: 1, unitCost: 500, reason: 'old stock from the shop safe' };
+  const m = await cmdS.runStockAction(sa!.addOldStockInHouse as never, cmdS.OLD_STOCK_KEYS, d, ident('21', 'stock_adjustments.add_old_stock'), 'MANAGER', body);
+  ok(m.kind === 'rejected' && (m as { code: string }).code === 'PERMISSION_DENIED' && qtyOf(db, 'r2') === 1
+    && perms.permissionForOp('stock_adjustments.add_old_stock')?.kind === 'isOwner' && registry.ALLOWED_MUTATIONS.at(-1) === 'stock_adjustments.add_old_stock',
+    'A7 Fernbefehl verlangt den Owner (Recht und Hausfolge), steht namentlich am Ende der Liste');
+  const ok1 = await cmdS.runStockAction(sa!.addOldStockInHouse as never, cmdS.OLD_STOCK_KEYS, d, ident('22', 'stock_adjustments.add_old_stock'), 'ADMIN', body);
+  const ok2 = await cmdS.runStockAction(sa!.addOldStockInHouse as never, cmdS.OLD_STOCK_KEYS, d, ident('22', 'stock_adjustments.add_old_stock'), 'ADMIN', body);
+  ok(ok1.kind === 'ok' && ok2.kind === 'ok' && (ok2 as { replayed: boolean }).replayed && qtyOf(db, 'r2') === 3 && adj(db, String(valueOf(ok1).adjustmentId)).created_by === 'user-pc2',
+    'A7 Owner vom PC2: 1 → 3 am Primary, Beleg des Absenders; dieselbe Kennung noch einmal ohne zweite Wirkung');
+  let bad = '';
+  try { await cmdS.runStockAction(sa!.addOldStockInHouse as never, cmdS.OLD_STOCK_KEYS, d, ident('23', 'stock_adjustments.add_old_stock'), 'ADMIN', { ...body, actionId: 'pc2-old-2-xxxxxx', accounting: 'BOOKED' }); }
+  catch (e) { bad = String((e as { code?: string }).code); }
+  ok(bad === 'STOCK_PAYLOAD_INVALID' && qtyOf(db, 'r2') === 3, `A7 ein Feld, das nur der Primary bestimmt (accounting), wird abgewiesen (${bad})`);
+  const fern = osr.oldStockReconciliationFor(remoteReadContext({ branchId: 'branch-main', userId: 'user-pc2', role: 'ADMIN' }));
+  const fremd = osr.oldStockReconciliationFor(remoteReadContext({ branchId: 'branch-other', userId: 'user-pc2', role: 'ADMIN' }));
+  ok(fern.rows.some((r) => r.productId === 'r2' && r.shelfQty === 3) && fremd.rows.length === 0 && readOps.STORE_READ_OPS.includes('page.old_stock.get'),
+    'A7 Auskunft „page.old_stock.get": die Filiale des Absenders, eine fremde Filiale sieht nichts');
+  const prev = sa!.stockCorrectionsFor(RC, { productId: 'r2', receiptQuantity: 1, receiptUnitCost: 500 });
+  ok(!!prev.receiptPreview?.plan && prev.receiptPreview.plan.qtyBefore === 3 && prev.issuePreview === null, 'A7 die Karte bekommt die Zugangs-Vorschau vom Primary');
+}
+
+// A8 — Sync: Altbestands-Beleg und Storno auf einer zweiten Datenbank gleich; Wiederholung ohne Doppelwirkung.
+{
+  const maxLog = (d: Db): number => n(d, 'SELECT COALESCE(MAX(id), 0) FROM sync_changelog');
+  function spiegeln(prim: Db, spiegel: Db, von: number): { bis: number; abgewiesen: string[] } {
+    const r = prim.exec('SELECT id, table_name, record_id, action, data FROM sync_changelog WHERE id > ? ORDER BY id', [von])[0];
+    const abgewiesen: string[] = []; let bis = von;
+    for (const v of r?.values ?? []) {
+      bis = Number(v[0]);
+      try { ap.applySyncChange(spiegel as never, { table_name: String(v[1]), record_id: String(v[2]), action: String(v[3]), data: String(v[4] ?? '{}') }); }
+      catch (e) { abgewiesen.push(`${String(v[1])}/${String(v[3])}: ${String((e as { code?: unknown }).code ?? (e as Error).message)}`); }
+    }
+    return { bis, abgewiesen };
+  }
+  const bild = (d: Db): string => S({ belege: d.exec('SELECT * FROM stock_adjustments ORDER BY id')[0]?.values ?? [], artikel: d.exec("SELECT id, quantity, stock_status FROM products WHERE id = 'sy'")[0]?.values, hb: n(d, 'SELECT COUNT(*) FROM ledger_entries') });
+  const prim = freshDb();
+  product(prim, 'sy', 700, 1); reload();
+  const ab = maxLog(prim);
+  const spiegel = new SQL.Database((prim as unknown as { export(): Uint8Array }).export()) as unknown as Db;
+  const a = await altbestand(prim, 'sy', 2, 700);
+  const s1 = spiegeln(prim, spiegel, ab);
+  const st = await storno(String(a.r.adjustmentId), 'counted twice');
+  const s2 = spiegeln(prim, spiegel, s1.bis);
+  const vorRepl = bild(spiegel);
+  const s3 = spiegeln(prim, spiegel, ab);
+  ok(a.ok && st.ok && s1.abgewiesen.length === 0 && s2.abgewiesen.length === 0 && s3.abgewiesen.length === 0 && bild(spiegel) === bild(prim) && vorRepl === bild(spiegel)
+    && n(spiegel, "SELECT COUNT(*) FROM stock_adjustments WHERE direction = 'RECEIPT' AND status = 'CANCELLED'") === 1 && qtyOf(spiegel, 'sy') === 1,
+    `A8 Spiegel: Zugang, Storno und Wiederholung des ganzen Abgleichs gleich, keine Doppelwirkung (abgewiesen: ${[...s1.abgewiesen, ...s2.abgewiesen, ...s3.abgewiesen].join('; ') || 'keiner'})`);
+}
+
+// A9 — die Belegtabelle einer älteren Entwicklungsdatenbank (nur ISSUE erlaubt) wird einmal verlustfrei umgebaut.
+{
+  const alt = new SQL.Database() as unknown as Db;
+  const ddl = MIGRATIONS.find((m) => m.includes('CREATE TABLE IF NOT EXISTS stock_adjustments'))!.replace("CHECK (direction IN ('ISSUE','RECEIPT'))", "CHECK (direction IN ('ISSUE'))");
+  alt.run(ddl);
+  for (const ix of schema.STOCK_ADJUSTMENT_INDEXES) alt.run(ix);
+  alt.run(`INSERT INTO stock_adjustments (id, branch_id, adjustment_number, product_id, direction, quantity, qty_before, qty_after, accounting, reason_category, reason, business_date, action_id, payload_hash, created_at)
+    VALUES ('x1','branch-main','ADJ-1','p','ISSUE',1,2,1,'ACCOUNTING_RECONCILIATION_PENDING','LOST','r','2026-10-01','act-x1','h',?)`, [NOW]);
+  let vorher = '';
+  try { alt.run(`INSERT INTO stock_adjustments (id, branch_id, adjustment_number, product_id, direction, quantity, qty_before, qty_after, accounting, reason_category, reason, business_date, action_id, payload_hash, created_at) VALUES ('x2','branch-main','ADJ-2','p','RECEIPT',1,1,2,'ACCOUNTING_RECONCILIATION_PENDING','OLD_STOCK','r','2026-10-01','act-x2','h',?)`, [NOW]); }
+  catch (e) { vorher = (e as Error).message; }
+  const zeile = S(alt.exec("SELECT * FROM stock_adjustments WHERE id = 'x1'")[0]?.values);
+  const umgebaut = schema.widenStockAdjustmentDirections(alt as never);
+  alt.run(`INSERT INTO stock_adjustments (id, branch_id, adjustment_number, product_id, direction, quantity, qty_before, qty_after, accounting, reason_category, reason, business_date, action_id, payload_hash, created_at) VALUES ('x2','branch-main','ADJ-2','p','RECEIPT',1,1,2,'ACCOUNTING_RECONCILIATION_PENDING','OLD_STOCK','r','2026-10-01','act-x2','h',?)`, [NOW]);
+  let doppelt = '';
+  try { alt.run(`INSERT INTO stock_adjustments (id, branch_id, adjustment_number, product_id, direction, quantity, qty_before, qty_after, accounting, reason_category, reason, business_date, action_id, payload_hash, created_at) VALUES ('x3','branch-main','ADJ-3','p','RECEIPT',1,1,2,'ACCOUNTING_RECONCILIATION_PENDING','OLD_STOCK','r','2026-10-01','act-x2','h',?)`, [NOW]); }
+  catch (e) { doppelt = (e as Error).message; }
+  ok(/CHECK/.test(vorher) && umgebaut && S(alt.exec("SELECT * FROM stock_adjustments WHERE id = 'x1'")[0]?.values) === zeile && /UNIQUE/.test(doppelt)
+    && schema.widenStockAdjustmentDirections(alt as never) === false && n(alt, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'stock_adjustments_widen'") === 0,
+    `A9 Umbau: alte Zeile unverändert, RECEIPT jetzt erlaubt, eindeutige action_id bleibt, zweiter Lauf tut nichts (${umgebaut})`);
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — old stock foundation: ${PASS} passed, ${fails.length} failed`);

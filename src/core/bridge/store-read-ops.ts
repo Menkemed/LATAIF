@@ -108,6 +108,8 @@ export const OP_BULK_ALLOCATION_PREVIEW_GET = 'bulk_metals.allocation_preview.ge
 // STOCK CORRECTION — die Karte „Stock corrections" am Artikel (Belege und Vorschau): der Owner sieht am PC2 dieselbe
 // Karte wie am Primary. Plan und Herkunft des Lagerwerts rechnet der Primary.
 export const OP_STOCK_PRODUCT_GET = 'stock_adjustments.product.get';
+// OLD STOCK — die schreibgeschützte Eröffnungsvorschau und Abstimmungsliste (Seite „Old stock").
+export const OP_OLD_STOCK_PAGE_GET = 'page.old_stock.get';
 
 /**
  * Die Liste IST die Erlaubnis. Ein Name, der hier fehlt, existiert fuer das Netz nicht — genau
@@ -173,6 +175,7 @@ export const STORE_READ_OPS: readonly string[] = [
   OP_BULK_LOT_DETAIL_GET,
   OP_BULK_ALLOCATION_PREVIEW_GET,
   OP_STOCK_PRODUCT_GET,
+  OP_OLD_STOCK_PAGE_GET,
 ];
 
 // Nicht hier — und damit fern nicht aufrufbar — sind nur noch drei Arten von Zugriffen, und keine

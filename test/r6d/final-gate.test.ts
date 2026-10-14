@@ -90,9 +90,9 @@ const R7A_MUT = ['production.complete'];
 const PREG5_MUT = ['purchase_inbox.create', 'partner_items.record_movement', 'partner_items.settle_sale', 'partner_items.offset', 'partner_items.cancel_movement', 'partner_items.take_over', 'partner_items.change_partners'];
 // BULK METAL V1 — vier manuelle Lot-Aktionen und vier Lesebefehle, ganz hinten.
 const BULK_MUT = ['bulk_metals.write_off', 'bulk_metals.close_lot', 'bulk_metals.correct_weight', 'bulk_metals.reverse_adjustment'];
-const STOCK_MUT = ['stock_adjustments.issue', 'stock_adjustments.cancel'];
+const STOCK_MUT = ['stock_adjustments.issue', 'stock_adjustments.cancel', 'stock_adjustments.add_old_stock'];
 const BULK_READ = ['page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bulk_metals.lot_detail.get', 'bulk_metals.allocation_preview.get'];
-const STOCK_READ = ['stock_adjustments.product.get'];
+const STOCK_READ = ['stock_adjustments.product.get', 'page.old_stock.get'];
 const MODULES: Record<string, number> = { 'money-commands': 6, 'payables-commands': 10, 'gold-commands': 6, 'metal-commands': 6 };
 
 // ══ §1 — Registry 121 → 152 ══════════════════════════════════════════════════
@@ -100,12 +100,12 @@ const MODULES: Record<string, number> = { 'money-commands': 6, 'payables-command
   const list = (t: string): string[] => [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const vorher = list(vor('src/core/bridge/command-registry.ts'));
   const jetzt = [...registry.ALLOWED_MUTATIONS];
-  ok(vorher.length === 52 && jetzt.length === 116 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6D_MUT, ...R6E_MUT, ...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT]) && vorher.every((o) => jetzt.includes(o)),
+  ok(vorher.length === 52 && jetzt.length === 117 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6D_MUT, ...R6E_MUT, ...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT]) && vorher.every((o) => jetzt.includes(o)),
     `REGISTRY Buchungen 52 → 80 (R6D) → 88 (R6E) → 102 (R6F) → 103 (R7A) → 110 (MEDIA-INBOX + PARTNER-ITEMS) → 114 (BULK METAL V1) → 116 (STOCK CORRECTION): GENAU die achtundzwanzig R6D-, acht R6E- und vierzehn R6F-Namen + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1, in dieser Reihenfolge, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).length})`);
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
   const readsVor = catalogue(vor('src/core/bridge/store-read-ops.ts'));
   const readsJetzt = [...readOps.STORE_READ_OPS];
-  ok(S(readsJetzt.filter((o) => !readsVor.includes(o))) === S([...R6D_READ, 'page.invoice_print.get', ...BULK_READ, ...STOCK_READ]) && readsJetzt.length === readsVor.length + 9,
+  ok(S(readsJetzt.filter((o) => !readsVor.includes(o))) === S([...R6D_READ, 'page.invoice_print.get', ...BULK_READ, ...STOCK_READ]) && readsJetzt.length === readsVor.length + 10,
     `REGISTRY Auskünfte: GENAU die drei R6D-Namen + die A5-Druckauskunft + vier BULK METAL V1 (${readsJetzt.filter((o) => !readsVor.includes(o)).join(',')})`);
   const rustOps = (t: string): string[] => {
     const l = /pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(t)?.[1] ?? '';
@@ -113,10 +113,10 @@ const MODULES: Record<string, number> = { 'money-commands': 6, 'payables-command
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 121 && rJetzt.length === 195 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6D_MUT, ...R6D_READ, ...R6E_MUT, ...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ]),
+  ok(rVor.length === 121 && rJetzt.length === 197 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6D_MUT, ...R6D_READ, ...R6E_MUT, ...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ]),
     `REGISTRY Rust 121 → 152 (R6D) → 160 (R6E) → 174 (R6F) → 175 (R7A) → 176 (PRE-G5) → 184 (MEDIA-INBOX, PARTNER-ITEMS, A5) → 192 (BULK METAL V1) → 195 (STOCK CORRECTION): GENAU diese einunddreißig, acht und vierzehn + eins aus R7A (production.complete) + acht BULK METAL V1, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).length})`);
   const known = registry.knownCommands();
-  ok(known.length === 195 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
+  ok(known.length === 197 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
   for (const op of R6D_MUT) {
     const rule = (perms.OPERATION_PERMISSIONS as Record<string, unknown>)[op];
     const soll = op === 'orders.add_cost' || op === 'orders.remove_cost';

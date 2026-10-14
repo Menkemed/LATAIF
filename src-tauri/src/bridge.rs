@@ -279,6 +279,9 @@ pub const OP_BULK_ALLOCATION_PREVIEW_GET: &str = "bulk_metals.allocation_preview
 pub const OP_STOCK_ISSUE: &str = "stock_adjustments.issue";
 pub const OP_STOCK_CANCEL: &str = "stock_adjustments.cancel";
 pub const OP_STOCK_PRODUCT_GET: &str = "stock_adjustments.product.get";
+// OLD STOCK — weitere Stücke Altbestand (nur Owner, keine Buchung) und die Eröffnungsvorschau (nur lesen).
+pub const OP_OLD_STOCK_ADD: &str = "stock_adjustments.add_old_stock";
+pub const OP_PAGE_OLD_STOCK_GET: &str = "page.old_stock.get";
 // CENTRAL-UI-PARITY R6E — Angebot, Rechnungs-Lebenszyklus, Nachrichtenprotokoll.
 pub const OP_OFFERS_CREATE: &str = "offers.create";
 pub const OP_OFFERS_UPDATE: &str = "offers.update";
@@ -522,10 +525,13 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_BULK_LOTS_FOR_SALE_GET,
     OP_BULK_LOT_DETAIL_GET,
     OP_BULK_ALLOCATION_PREVIEW_GET,
-    // STOCK CORRECTION
+    // STOCK CORRECTION + OLD STOCK — die Buchungen (Abgang, Storno, Altbestand dazu), dann die Auskünfte
+    // (Karte am Artikel, Eröffnungsvorschau).
     OP_STOCK_ISSUE,
     OP_STOCK_CANCEL,
+    OP_OLD_STOCK_ADD,
     OP_STOCK_PRODUCT_GET,
+    OP_PAGE_OLD_STOCK_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

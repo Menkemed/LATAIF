@@ -172,11 +172,13 @@ const MATRIX: Record<string, Zeile> = {
   // STOCK CORRECTION — ProductDetail, Karte „Stock corrections“ (nur Owner): Abgang und sein Storno.
   'stock_adjustments.issue': { ui: 'ProductDetail — Stock corrections: Remove from stock', gleich: true },
   'stock_adjustments.cancel': { ui: 'ProductDetail — Stock corrections: Cancel correction', gleich: true },
+  // OLD STOCK — dieselbe Karte: weitere Stücke Altbestand (nur Menge, keine Buchung).
+  'stock_adjustments.add_old_stock': { ui: 'ProductDetail — Stock corrections: Add old stock', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 116, `A 116 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 117, `A 116 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

@@ -5,6 +5,7 @@ import { Package, Trash2, X, Check, Link2, Tag } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { StockCheckInventoryModal } from '@/components/products/StockCheckInventoryModal';
 import { Button } from '@/components/ui/Button';
+import { usePermission } from '@/hooks/usePermission';
 import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
@@ -140,6 +141,7 @@ function CardPrice({ product, lot }: { product: Product; lot?: LotAggregate }) {
 
 export function WatchList() {
   const navigate = useNavigate();
+  const perm = usePermission();
   const {
     products, categories, loadProducts, loadCategories, createProductWithMedia,
     searchQuery, setSearchQuery, filterCategory, setFilterCategory,
@@ -552,6 +554,8 @@ export function WatchList() {
               <Button variant="ghost" {...primaryOnlyDeleteProps()} onClick={() => setSelectMode(true)}>
                 <Trash2 size={14} /> Select
               </Button>
+              {/* OLD STOCK — die Eröffnungsvorschau des Altbestands (nur lesen), nur für den Owner. */}
+              {perm.isOwner && <Button variant="ghost" onClick={() => navigate('/old-stock')} data-old-stock-link>Old stock</Button>}
               <Button variant="secondary"
                 disabled={primaryOnlyLocked()}
                 title={primaryOnlyLocked() ? primaryOnlyText('The Excel import') : undefined}

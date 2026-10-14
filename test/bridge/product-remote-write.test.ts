@@ -497,13 +497,13 @@ const links = (db: Db, pid: string): number =>
 
     // STOCK CORRECTION
 
-    + ',stock_adjustments.issue,stock_adjustments.cancel',
+    + ',stock_adjustments.issue,stock_adjustments.cancel,stock_adjustments.add_old_stock',
     `ALLOWLIST genau diese vierzig Mutationen (${mutations.join(', ')})`);
   // CENTRAL-UI-PARITY R1: dazu 48 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
   const parityReads = known.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get', 'page.dashboard.get', 'page.invoice_list.get', 'page.order_list.get', 'page.customer_detail.get', 'page.order_detail.get', 'page.supplier_detail.get', 'page.product_detail.get', 'page.purchase_create.get', 'refs.numbers.get', 'metals.stock_by_karat.get', 'search.global.get', 'page.reconciliation.get', 'ledger.balances.get', 'finance.receivables.get', 'inventory.lot_aggregates.get', 'product.lots.get', 'product.lots.batch.get', 'expenses.credit_paid.get', 'inventory.session.get', 'inventory.checks.get', 'metals.spot_prices.get', 'debts.payments.get', 'suppliers.credits.get', 'page.invoice_print.get',
     // BULK METAL V1
-    'page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bulk_metals.lot_detail.get', 'bulk_metals.allocation_preview.get', 'stock_adjustments.product.get'].includes(o));
-  ok(known.length === 195 && reads.length === 78 && parityReads.length === 59 && known.includes('bridge.probe'),
+    'page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bulk_metals.lot_detail.get', 'bulk_metals.allocation_preview.get', 'stock_adjustments.product.get', 'page.old_stock.get'].includes(o));
+  ok(known.length === 197 && reads.length === 79 && parityReads.length === 60 && known.includes('bridge.probe'),
     `ALLOWLIST 1 Probe + 19 Auskuenfte + 59 typisierte Auskuenfte + 116 Buchungen = 195 (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${known.length}/${reads.length}/${parityReads.length})`);
 
   for (const op of ['products.delete', 'customers.delete', 'invoice.delete', 'anything.write']) {
@@ -515,7 +515,7 @@ const links = (db: Db, pid: string): number =>
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 195, 'ALLOWLIST Rust kennt dieselben einhundertfünfundneunzig Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION)');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 197, 'ALLOWLIST Rust kennt dieselben einhundertfünfundneunzig Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION)');
   ok(/OP_PRODUCTS_CREATE: &str = "products.create"/.test(rs) && /OP_PRODUCTS_UPDATE: &str = "products.update"/.test(rs),
     'ALLOWLIST …namentlich, nicht generisch');
 }

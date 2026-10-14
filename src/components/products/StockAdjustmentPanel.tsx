@@ -4,6 +4,8 @@
 // Hausfolge lokal (`runOnPrimary`); am PC2 liest die Karte über `stock_adjustments.product.get` und schreibt über die
 // Fernbefehle `stock_adjustments.issue` / `.cancel` — der Primary prüft die Rolle des Absenders und fährt dieselbe
 // Hausfolge. Alle Regeln liegen im Haus (`core/stock/stock-adjustment`), die Maske zeigt nur, was es sagt.
+// OLD STOCK — „Add old stock": weitere Stücke Altbestand eines schon erfassten Artikels (nur Menge, historischer Einstand,
+// Beleg; keine Buchung — die Eröffnung wartet auf die Regeln des Buchhalters).
 // ════════════════════════════════════════════════════════════════════════════
 import { useState } from 'react';
 import { v4 as uuid } from 'uuid';
@@ -14,7 +16,7 @@ import { Modal } from '@/components/ui/Modal';
 import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import {
-  STOCK_ADJUSTMENT_REASONS, cancelStockAdjustmentOnPrimary, issueStockOnPrimary, stockCorrectionsFor,
+  STOCK_ADJUSTMENT_REASONS, addOldStockOnPrimary, cancelStockAdjustmentOnPrimary, issueStockOnPrimary, stockCorrectionsFor,
   type StockAdjustmentResult, type StockCorrectionsRead,
 } from '@/core/stock/stock-adjustment';
 
@@ -22,9 +24,9 @@ const REASON_LABEL: Record<string, string> = {
   LOST: 'Lost', STOLEN: 'Stolen', DAMAGED: 'Damaged beyond sale', COUNT_ERROR: 'Counting error', OTHER: 'Other',
 };
 const today = (): string => new Date().toISOString().slice(0, 10);
-const EMPTY: StockCorrectionsRead = { docs: [], issuePreview: null };
+const EMPTY: StockCorrectionsRead = { docs: [], issuePreview: null, receiptPreview: null };
 
-export function StockAdjustmentPanel({ productId, quantity, onChanged }: { productId: string; quantity: number; onChanged: () => void }) {
+export function StockAdjustmentPanel({ productId, quantity, purchasePrice, onChanged }: { productId: string; quantity: number; purchasePrice?: number | null; onChanged: () => void }) {
   const w = useSharedWrites();
   const [refresh, setRefresh] = useState(0);
   const [open, setOpen] = useState(false);
@@ -36,16 +38,52 @@ export function StockAdjustmentPanel({ productId, quantity, onChanged }: { produ
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const [storno, setStorno] = useState<{ id: string; number: string } | null>(null);
   const [stornoReason, setStornoReason] = useState('');
+  const [addOpen, setAddOpen] = useState(false);
+  const [addActionId, setAddActionId] = useState('');
+  const [addQty, setAddQty] = useState('1');
+  const [addCost, setAddCost] = useState('');
+  const [addReason, setAddReason] = useState('');
+  const [addDate, setAddDate] = useState(today());
+  const [addConfirm, setAddConfirm] = useState(false);
   const n = Number(qty);
   const issueQuantity = open && Number.isInteger(n) ? n : null;
+  const an = Number(addQty);
+  const receiptQuantity = addOpen && Number.isInteger(an) ? an : null;
+  const ac = addCost.trim() === '' ? NaN : Number(addCost);
+  const receiptUnitCost = addOpen && Number.isFinite(ac) ? ac : null;
   const data = useSharedRead<StockCorrectionsRead>(
-    'stock_adjustments.product.get', { productId, issueQuantity, r: refresh },
-    (ctx) => stockCorrectionsFor(ctx, { productId, issueQuantity }), EMPTY, [productId, issueQuantity, refresh],
+    'stock_adjustments.product.get', { productId, issueQuantity, receiptQuantity, receiptUnitCost, r: refresh },
+    (ctx) => stockCorrectionsFor(ctx, { productId, issueQuantity, receiptQuantity, receiptUnitCost }), EMPTY,
+    [productId, issueQuantity, receiptQuantity, receiptUnitCost, refresh],
   );
   const docs = data.docs;
   const preview = open ? data.issuePreview : null;
+  const addPreview = addOpen ? data.receiptPreview : null;
   const busy = w.busy;
   const reload = (): void => { setRefresh((r) => r + 1); onChanged(); };
+
+  function startAdd(): void {
+    w.clear(); setAddActionId(uuid()); setAddQty('1'); setAddCost(purchasePrice !== null && purchasePrice !== undefined ? String(purchasePrice) : '');
+    setAddReason(''); setAddDate(today()); setAddConfirm(false); setMsg(null); setAddOpen(true);
+  }
+
+  async function confirmAdd(): Promise<void> {
+    if (!addPreview?.plan) return;
+    const p = addPreview.plan;
+    if (!(await window.confirm(`Add ${p.quantity} piece(s) of old stock (${p.qtyBefore} → ${p.qtyBefore + p.quantity}) at a historical cost of ${p.unitCost.toFixed(3)} BHD each? No money and no booking: the opening of old stock is reconciled later.`))) return;
+    const input = {
+      actionId: addActionId, productId, quantity: p.quantity, expectedQuantity: p.qtyBefore, unitCost: p.unitCost,
+      reason: addReason, businessDate: addDate, ...(p.openRemovals.length > 0 ? { confirmNotRemovedPiece: addConfirm } : {}),
+    };
+    const out = await w.save<StockAdjustmentResult>('stock_adjustments.add_old_stock', {
+      local: () => addOldStockOnPrimary(input, reload),
+      remote: () => input,
+    });
+    if (out.kind !== 'ok') { setMsg({ text: fehlertext(out), ok: false }); return; }
+    setMsg({ text: `${out.value.adjustmentNumber}: ${out.value.qtyBefore} → ${out.value.qtyAfter} · old stock, opening pending`, ok: true });
+    setAddOpen(false);
+    reload();
+  }
 
   function start(): void {
     w.clear(); setActionId(uuid()); setQty('1'); setCategory('LOST'); setReason(''); setDate(today()); setMsg(null); setOpen(true);
@@ -73,7 +111,7 @@ export function StockAdjustmentPanel({ productId, quantity, onChanged }: { produ
   async function cancel(): Promise<void> {
     if (!storno || !stornoReason.trim()) return;
     const { id, number } = storno;
-    if (!(await window.confirm(`Cancel ${number}? The pieces come back exactly as before.`))) return;
+    if (!(await window.confirm(`Cancel ${number}? The stock goes back exactly as before.`))) return;
     const input = { adjustmentId: id, reason: stornoReason.trim() };
     const out = await w.save<StockAdjustmentResult>('stock_adjustments.cancel', {
       local: () => cancelStockAdjustmentOnPrimary(input, reload),
@@ -89,7 +127,10 @@ export function StockAdjustmentPanel({ productId, quantity, onChanged }: { produ
     <Card style={{ marginBottom: 32 }} data-stock-adjustments>
       <div className="flex justify-between items-center">
         <span style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>Stock corrections</span>
-        <Button variant="secondary" onClick={start} disabled={busy || !(quantity > 0)} data-stock-issue-open>Remove from stock</Button>
+        <div className="flex gap-2">
+          <Button variant="ghost" onClick={startAdd} disabled={busy} data-old-stock-open>Add old stock</Button>
+          <Button variant="secondary" onClick={start} disabled={busy || !(quantity > 0)} data-stock-issue-open>Remove from stock</Button>
+        </div>
       </div>
       {msg && (
         <div data-stock-msg style={{ marginTop: 10, padding: '8px 12px', borderRadius: 8, fontSize: 12,
@@ -100,8 +141,10 @@ export function StockAdjustmentPanel({ productId, quantity, onChanged }: { produ
         <div key={d.adjustmentId} data-stock-adjustment={d.adjustmentNumber} className="flex justify-between items-center"
           style={{ padding: '8px 0', borderTop: '1px solid #F1F3F5', fontSize: 12, opacity: d.status === 'CANCELLED' ? 0.55 : 1 }}>
           <span>
-            <b className="font-mono">{d.adjustmentNumber}</b> · −{d.quantity} ({d.qtyBefore} → {d.qtyAfter}) ·{' '}
-            {d.accounting === 'BOOKED' ? `inventory loss ${d.value.toFixed(3)} BHD` : 'accounting reconciliation pending'}
+            <b className="font-mono">{d.adjustmentNumber}</b> · {d.direction === 'RECEIPT' ? '+' : '−'}{d.quantity} ({d.qtyBefore} → {d.qtyAfter}) ·{' '}
+            {d.direction === 'RECEIPT'
+              ? `old stock${d.unitCostHint !== null ? ` at ${d.unitCostHint.toFixed(3)} BHD` : ''} · opening pending`
+              : d.accounting === 'BOOKED' ? `inventory loss ${d.value.toFixed(3)} BHD` : 'accounting reconciliation pending'}
             {d.status === 'CANCELLED' ? ' · cancelled' : ''}
           </span>
           {d.status === 'POSTED' && <Button variant="ghost" disabled={busy} onClick={() => { w.clear(); setStornoReason(''); setStorno({ id: d.adjustmentId, number: d.adjustmentNumber }); }} data-stock-adjustment-cancel>Cancel</Button>}
@@ -137,6 +180,38 @@ export function StockAdjustmentPanel({ productId, quantity, onChanged }: { produ
             <div className="flex justify-end gap-3">
               <Button variant="ghost" onClick={() => setOpen(false)}>Cancel</Button>
               <Button variant="primary" disabled={busy || !preview?.plan || !reason.trim()} onClick={() => void confirm()} data-stock-issue-submit>Confirm</Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {addOpen && (
+        <Modal open onClose={() => setAddOpen(false)} title="Add old stock" width={560}>
+          <div data-old-stock-dialog style={{ display: 'grid', gap: 12, fontSize: 13 }}>
+            <p style={{ color: '#4B5563' }}>For more pieces of this item that you already owned (old stock). No money is booked and nothing is purchased — buy new goods with a Purchase. The opening of old stock is reconciled later.</p>
+            <Input label="Pieces to add" value={addQty} onChange={(e) => setAddQty(e.target.value)} data-old-stock-qty />
+            <Input label="Historical cost per piece (BHD)" value={addCost} onChange={(e) => setAddCost(e.target.value)} data-old-stock-cost />
+            <Input label="Where do these pieces come from (required)" value={addReason} onChange={(e) => setAddReason(e.target.value)} data-old-stock-reason />
+            <Input label="Business date" type="date" value={addDate} max={today()} onChange={(e) => setAddDate(e.target.value)} />
+            {addPreview?.plan ? (
+              <div data-old-stock-preview style={{ padding: '10px 12px', borderRadius: 8, background: '#F5F7FA', fontSize: 12, color: '#374151' }}>
+                Stock {addPreview.plan.qtyBefore} → {addPreview.plan.qtyBefore + addPreview.plan.quantity}, historical cost {addPreview.plan.unitCost.toFixed(3)} BHD per piece
+                {addPreview.plan.itemCost !== null && Math.abs(addPreview.plan.itemCost - addPreview.plan.unitCost) > 0.0005 ? ` (the item shows ${addPreview.plan.itemCost.toFixed(3)} — this difference will be listed for review)` : ''}. No booking.
+              </div>
+            ) : (
+              <div data-old-stock-refused style={{ padding: '10px 12px', borderRadius: 8, background: 'rgba(170,110,110,0.10)', fontSize: 12, color: '#7A3535' }}>
+                {addPreview?.issue ?? 'Enter a whole number of pieces and the historical cost.'}
+              </div>
+            )}
+            {addPreview?.plan && addPreview.plan.openRemovals.length > 0 && (
+              <label data-old-stock-removals style={{ display: 'flex', gap: 8, alignItems: 'flex-start', fontSize: 12, color: '#7A5A1F' }}>
+                <input type="checkbox" checked={addConfirm} onChange={(e) => setAddConfirm(e.target.checked)} data-old-stock-confirm />
+                <span>This item has removals ({addPreview.plan.openRemovals.map((r) => r.adjustmentNumber).join(', ')}). A found piece that was removed belongs to its removal (cancel it if possible) — I confirm these are other pieces of old stock.</span>
+              </label>
+            )}
+            {msg && !msg.ok && <div data-stock-dialog-error style={{ fontSize: 12, color: '#7A3535' }}>{msg.text}</div>}
+            <div className="flex justify-end gap-3">
+              <Button variant="ghost" onClick={() => setAddOpen(false)}>Cancel</Button>
+              <Button variant="primary" disabled={busy || !addPreview?.plan || !addReason.trim() || (addPreview.plan.openRemovals.length > 0 && !addConfirm)} onClick={() => void confirmAdd()} data-old-stock-submit>Add old stock</Button>
             </div>
           </div>
         </Modal>

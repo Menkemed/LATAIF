@@ -26,6 +26,7 @@ import { AgentDetail } from '@/pages/agents/AgentDetail';
 import { TransferDetail } from '@/pages/agents/TransferDetail';
 import { MetalList } from '@/pages/metals/MetalList';
 import { BulkMetalsPage } from '@/pages/bulk-metals/BulkMetalsPage';
+import { OldStockPage } from '@/pages/stock/OldStockPage';
 import { OrderList } from '@/pages/orders/OrderList';
 import { OrderCreate } from '@/pages/orders/OrderCreate';
 import { OrderDetail } from '@/pages/orders/OrderDetail';
@@ -460,6 +461,8 @@ export default function App() {
           <Route path="/transfers/:id" element={<TransferDetail />} />
           <Route path="/metals" element={<MetalList />} />
           <Route path="/bulk-metals" element={<BulkMetalsPage />} />
+          {/* OLD STOCK — Eröffnungsvorschau und Abstimmungsliste (nur lesen, nur Owner; Primary und PC2). */}
+          <Route path="/old-stock" element={<OldStockPage />} />
           <Route path="/orders" element={<OrderList />} />
           <Route path="/orders/new" element={<OrderCreate />} />
           <Route path="/orders/:id" element={<OrderDetail />} />

@@ -82,7 +82,7 @@ export interface StockIssuePlan {
 // ── Herkunft des Lagerwerts ─────────────────────────────────────────────────
 
 /** Steht im ganzen Hauptbuch eine INVENTORY-Sollbuchung, die keinem bekannten Weg zuzuordnen ist? */
-function unknownInventoryDebits(): number {
+export function unknownInventoryDebits(): number {
   return Number(query(
     `SELECT COUNT(*) AS n FROM ledger_entries le
       WHERE le.account = 'INVENTORY' AND le.direction = 'DEBIT' AND le.reverses_entry_id IS NULL
@@ -132,10 +132,11 @@ function lotValueIssue(lot: Record<string, unknown>): string | null {
 
 // ── Plan (rein lesend; auch die Vorschau der Maske) ─────────────────────────
 
-export function planStockIssue(productId: string, quantity: unknown, branchId: string): StockIssuePlan {
-  if (typeof quantity !== 'number' || !Number.isInteger(quantity) || quantity <= 0) {
-    throw nein('QUANTITY_INVALID', 'the quantity must be a whole number of pieces above 0');
-  }
+/**
+ * Die Ausschlüsse, die für JEDE Korrektur gelten (Abgang und Altbestands-Zugang): nur eigene Stückware im Bestand, nicht
+ * bei einem Agenten, nicht in Reparatur, nicht an einen offenen Auftrag gebunden, keine Partnerware, kein Edelmetall.
+ */
+function correctableOwnItem(productId: string, branchId: string): { p: Record<string, unknown>; statusBefore: string } {
   const p = query('SELECT * FROM products WHERE id = ? AND branch_id = ?', [productId, branchId])[0];
   if (!p) throw nein('PRODUCT_NOT_FOUND', 'no such item in this branch');
   if (isBulkMetalProduct(productId)) throw nein('EXCLUDED_BULK_METAL', 'bulk metal is corrected with its own write-off');
@@ -159,6 +160,14 @@ export function planStockIssue(productId: string, quantity: unknown, branchId: s
   if (query("SELECT 1 FROM item_participations WHERE product_id = ? AND party = 'PARTNER' LIMIT 1", [productId]).length > 0) {
     throw nein('EXCLUDED_PARTNER', 'partner-owned goods are not corrected here');
   }
+  return { p, statusBefore };
+}
+
+export function planStockIssue(productId: string, quantity: unknown, branchId: string): StockIssuePlan {
+  if (typeof quantity !== 'number' || !Number.isInteger(quantity) || quantity <= 0) {
+    throw nein('QUANTITY_INVALID', 'the quantity must be a whole number of pieces above 0');
+  }
+  const { p, statusBefore } = correctableOwnItem(productId, branchId);
 
   const qtyBefore = Number(p.quantity);
   if (!Number.isFinite(qtyBefore) || p.quantity === null || p.quantity === undefined) throw nein('STOCK_INCONSISTENT', 'the quantity of the item is not set');
@@ -204,6 +213,12 @@ export interface StockIssueInput {
 export interface StockAdjustmentResult {
   adjustmentId: string; adjustmentNumber: string; productId: string; quantity: number;
   qtyBefore: number; qtyAfter: number; accounting: StockAdjustmentAccounting; value: number; status: 'POSTED' | 'CANCELLED';
+  /** ISSUE = Abgang; RECEIPT = zusätzlich erfasster Altbestand (nur Menge, Eröffnung offen). */
+  direction: 'ISSUE' | 'RECEIPT';
+  /** Abgang ohne Los: Einkaufspreis als Hinweis; Altbestand: der historische Einstand je Stück. */
+  unitCostHint: number | null;
+  reasonCategory: string;
+  businessDate: string;
 }
 export interface AdjustmentCtx { branchId: string; userId: string; now: string; role?: string }
 
@@ -217,6 +232,10 @@ function resultOf(row: Record<string, unknown>): StockAdjustmentResult {
     quantity: Number(row.quantity), qtyBefore: Number(row.qty_before), qtyAfter: Number(row.qty_after),
     accounting: String(row.accounting) as StockAdjustmentAccounting, value: Number(row.value_booked) || 0,
     status: String(row.status) as 'POSTED' | 'CANCELLED',
+    direction: String(row.direction) === 'RECEIPT' ? 'RECEIPT' : 'ISSUE',
+    unitCostHint: row.purchase_price_hint === null || row.purchase_price_hint === undefined ? null : Number(row.purchase_price_hint),
+    reasonCategory: String(row.reason_category ?? ''),
+    businessDate: String(row.business_date ?? ''),
   };
 }
 
@@ -346,7 +365,9 @@ export function cancelStockAdjustmentInHouse(input: StockAdjustmentCancelInput, 
     }
     syncProductQuantity(productId);
   } else {
-    db.run('UPDATE products SET quantity = quantity + ? WHERE id = ? AND quantity = ?', [qty, productId, Number(row.qty_after)]);
+    // Ein Abgang gibt die Stücke zurück; ein Altbestands-Zugang (RECEIPT) nimmt sie wieder heraus.
+    const delta = String(row.direction) === 'RECEIPT' ? -qty : qty;
+    db.run('UPDATE products SET quantity = quantity + ? WHERE id = ? AND quantity = ?', [delta, productId, Number(row.qty_after)]);
     if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) throw nein('MOVED_SINCE', 'the item changed meanwhile');
   }
   const qtyNow = Number(query('SELECT quantity FROM products WHERE id = ?', [productId])[0]?.quantity);
@@ -375,11 +396,145 @@ export function cancelStockAdjustmentInHouse(input: StockAdjustmentCancelInput, 
   return resultOf(query('SELECT * FROM stock_adjustments WHERE id = ?', [String(row.id)])[0]);
 }
 
+// ── Altbestand zusätzlich erfassen („Add Old Stock") ─────────────────────────
+//
+// Bestätigte Regel (Owner, 14.10.2026): New Collection, Handy und Excel-Import erfassen vorhandene eigene Ware
+// (Altbestand) — ohne Geld, ohne Einkauf, ohne Lieferantenschuld; der Einkaufspreis ist der historische Einstand.
+// Findet der Owner weitere Stücke eines schon erfassten Artikels, nimmt er sie hier auf: ein nummerierter Beleg
+// (RECEIPT) mit Menge, historischem Einstand je Stück, Grund und Protokoll — und KEINE Buchung. Der Beleg steht immer
+// auf ACCOUNTING_RECONCILIATION_PENDING: die einmalige Eröffnung (Phase 3) nimmt ihn später auf, nach den Regeln des
+// Buchhalters. Fail-closed, und deshalb hier NICHT erlaubt (BLOCKED bis zu den Eröffnungsregeln):
+//   • Artikel mit Losen (Einkauf, Produktion, „Keep", später Eröffnung): Lose und Menge müssen übereinstimmen; ein
+//     Stück ohne Los daneben hätte keinen belegten Wert, ein erfundenes Los wäre eine erfundene Aktivierung;
+//   • Artikel mit Lagerwert-Buchung (Einkaufszeile, aktivierte Reparaturkosten) oder ein Hauptbuch mit INVENTORY-
+//     Sollbuchungen unbekannter Herkunft — dieselbe Herkunftsregel wie beim Abgang ohne Los;
+//   • ausverkaufte oder nicht freie Artikel (dieselben Ausschlüsse wie beim Abgang).
+// Ein früher als verloren ausgebuchtes Stück ist KEIN Altbestand: hat der Artikel offene Abgänge, muss der Owner
+// ausdrücklich bestätigen, dass es andere Stücke sind (die Wiederherstellung eines Abgangs wartet auf D1c).
+
+export const OLD_STOCK_REASON = 'OLD_STOCK';
+const MAX_OLD_STOCK_PIECES = 100_000;
+
+export interface OldStockReceiptPlan {
+  productId: string;
+  quantity: number;
+  qtyBefore: number;
+  statusBefore: string;
+  unitCost: number;
+  itemCost: number | null;
+  /** Offene Abgänge dieses Artikels (nicht storniert) — ein wiedergefundenes Stück gehört dorthin, nicht hierher. */
+  openRemovals: Array<{ adjustmentNumber: string; quantity: number; accounting: StockAdjustmentAccounting }>;
+}
+
+export function planOldStockReceipt(productId: string, quantity: unknown, unitCost: unknown, branchId: string): OldStockReceiptPlan {
+  if (typeof quantity !== 'number' || !Number.isInteger(quantity) || quantity <= 0 || quantity > MAX_OLD_STOCK_PIECES) {
+    throw nein('QUANTITY_INVALID', 'the quantity must be a whole number of pieces above 0');
+  }
+  if (typeof unitCost !== 'number' || !Number.isFinite(unitCost) || unitCost < 0) {
+    throw nein('COST_REQUIRED', 'enter the historical cost per piece (0 or more)');
+  }
+  const { p, statusBefore } = correctableOwnItem(productId, branchId);
+  const qtyBefore = Number(p.quantity);
+  if (p.quantity === null || p.quantity === undefined || !Number.isInteger(qtyBefore) || qtyBefore < 0) {
+    throw nein('STOCK_INCONSISTENT', 'the quantity of the item is not a whole number');
+  }
+  if (query('SELECT 1 FROM stock_lots WHERE product_id = ? LIMIT 1', [productId]).length > 0) {
+    throw nein('BLOCKED_HAS_LOTS', 'the item has lots (purchase, production or opening) — adding old-stock pieces to it needs the opening rules of the accountant; record them as a new item through New Collection');
+  }
+  const issue = lotlessValueIssue(productId);
+  if (issue) throw nein('VALUE_NOT_PROVEN', `${issue} — old stock cannot be added to it without accounting rules`);
+  const openRemovals = query(
+    "SELECT adjustment_number, quantity, accounting FROM stock_adjustments WHERE product_id = ? AND branch_id = ? AND direction = 'ISSUE' AND status = 'POSTED' ORDER BY created_at",
+    [productId, branchId],
+  ).map((r) => ({ adjustmentNumber: String(r.adjustment_number), quantity: Number(r.quantity), accounting: String(r.accounting) as StockAdjustmentAccounting }));
+  const itemCost = p.purchase_price === null || p.purchase_price === undefined ? null : Number(p.purchase_price);
+  return { productId, quantity, qtyBefore, statusBefore, unitCost: round3(unitCost), itemCost, openRemovals };
+}
+
+export interface OldStockReceiptInput {
+  actionId: string; productId: string; quantity: number; expectedQuantity: number;
+  unitCost: number; reason: string; businessDate?: string;
+  /** Pflicht, wenn der Artikel offene Abgänge hat: „das sind andere Stücke, keins der ausgebuchten". */
+  confirmNotRemovedPiece?: boolean;
+}
+
+/** In der Transaktion des Aufrufers: Altbestand zusätzlich erfassen — nur Menge, Beleg, Protokoll, Sync; keine Buchung. */
+export function addOldStockInHouse(input: OldStockReceiptInput, ctx: AdjustmentCtx): StockAdjustmentResult {
+  assertOwner(ctx);
+  const actionId = typeof input.actionId === 'string' ? input.actionId.trim() : '';
+  if (actionId.length < 8 || actionId.length > 100) throw nein('ACTION_ID_REQUIRED', 'a stable action id is required');
+  const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
+  if (!reason) throw nein('REASON_REQUIRED', 'please describe where these pieces come from');
+  const businessDate = input.businessDate || ctx.now.slice(0, 10);
+  const dateIssue = businessDateIssue(businessDate, 'Business date');
+  if (dateIssue) throw nein('INVALID_DATE', dateIssue);
+  const confirmed = input.confirmNotRemovedPiece === true;
+  const hash = payloadHash({ op: 'old_stock_receipt', productId: input.productId, quantity: input.quantity, unitCost: input.unitCost, reason, businessDate, confirmed });
+
+  const schon = query('SELECT * FROM stock_adjustments WHERE branch_id = ? AND action_id = ?', [ctx.branchId, actionId])[0];
+  if (schon) {
+    if (String(schon.payload_hash) !== hash) throw nein('ACTION_ID_CONFLICT', 'this action id was already used for a different correction');
+    return resultOf(schon);
+  }
+
+  const plan = planOldStockReceipt(input.productId, input.quantity, input.unitCost, ctx.branchId);
+  if (input.expectedQuantity !== plan.qtyBefore) {
+    throw nein('STOCK_CHANGED', `the stock changed meanwhile (you saw ${input.expectedQuantity}, it is now ${plan.qtyBefore}) — reload`);
+  }
+  if (plan.openRemovals.length > 0 && !confirmed) {
+    throw nein('REMOVED_PIECE_CHECK', `this item has removals (${plan.openRemovals.map((r) => r.adjustmentNumber).join(', ')}): if a found piece is one of them, cancel that removal instead; confirm that these are other pieces of old stock`);
+  }
+
+  const buchung = watchLedgerPosts('old stock receipt');
+  const abgleich = watchSyncTracks('old stock receipt');
+  const db = getDatabase();
+  const id = uuid();
+  const number = getNextDocumentNumber('ADJ');
+  db.run('UPDATE products SET quantity = quantity + ?, updated_at = ? WHERE id = ? AND quantity = ?', [plan.quantity, ctx.now, input.productId, plan.qtyBefore]);
+  if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) throw nein('STOCK_CHANGED', 'the item changed meanwhile');
+  const qtyAfter = Number(query('SELECT quantity FROM products WHERE id = ?', [input.productId])[0]?.quantity);
+  if (qtyAfter !== plan.qtyBefore + plan.quantity) throw nein('STOCK_INCONSISTENT', `the stock is ${qtyAfter} instead of ${plan.qtyBefore + plan.quantity}`);
+  trackChange('products', input.productId, 'update', {});
+
+  db.run(
+    `INSERT INTO stock_adjustments (id, branch_id, adjustment_number, product_id, direction, quantity, qty_before, qty_after,
+       status_before, status_after, accounting, value_booked, purchase_price_hint, lots_json, reason_category, reason,
+       business_date, status, action_id, payload_hash, created_by, created_at, revision)
+     VALUES (?, ?, ?, ?, 'RECEIPT', ?, ?, ?, ?, ?, 'ACCOUNTING_RECONCILIATION_PENDING', 0, ?, '[]', ?, ?, ?, 'POSTED', ?, ?, ?, ?, 0)`,
+    [id, ctx.branchId, number, input.productId, plan.quantity, plan.qtyBefore, qtyAfter, plan.statusBefore, plan.statusBefore,
+      plan.unitCost, OLD_STOCK_REASON, reason, businessDate, actionId, hash, ctx.userId || null, ctx.now],
+  );
+  trackChange('stock_adjustments', id, 'insert', {});
+
+  const actor = { userId: ctx.userId, branchId: ctx.branchId };
+  logAuditOrThrow({
+    module: 'Stock', entityType: 'stock_adjustments', entityId: id, action: 'CREATE',
+    newValue: { adjustmentNumber: number, productId: input.productId, direction: 'RECEIPT', quantity: plan.quantity,
+      qtyBefore: plan.qtyBefore, qtyAfter, unitCost: plan.unitCost, itemCost: plan.itemCost, accounting: 'ACCOUNTING_RECONCILIATION_PENDING',
+      reasonCategory: OLD_STOCK_REASON, reason, businessDate,
+      openRemovals: plan.openRemovals.map((r) => r.adjustmentNumber), confirmedNotRemoved: plan.openRemovals.length > 0 ? confirmed : null },
+    actor,
+  });
+  logAuditOrThrow({
+    module: 'Product', entityType: 'products', entityId: input.productId, action: 'UPDATE', field: 'quantity',
+    oldValue: plan.qtyBefore, newValue: { quantity: qtyAfter, adjustmentNumber: number, oldStock: true, accounting: 'ACCOUNTING_RECONCILIATION_PENDING' }, actor,
+  });
+  buchung();
+  abgleich();
+  return resultOf(query('SELECT * FROM stock_adjustments WHERE id = ?', [id])[0]);
+}
+
 // ── Lesen (Karte am Primary und, als Fernauskunft `stock_adjustments.product.get`, am PC2) ──────────
 // Die Filiale kommt aus dem Kontext (am PC2: aus dem geprüften Absender), nie aus dem Rumpf.
 
 export interface StockIssuePreview { plan: StockIssuePlan | null; issue: string | null; code: string | null }
-export interface StockCorrectionsRead { docs: StockAdjustmentResult[]; issuePreview: StockIssuePreview | null }
+export interface OldStockReceiptPreview { plan: OldStockReceiptPlan | null; issue: string | null; code: string | null }
+export interface StockCorrectionsRead { docs: StockAdjustmentResult[]; issuePreview: StockIssuePreview | null; receiptPreview: OldStockReceiptPreview | null }
+
+export function oldStockReceiptPreviewFor(ctx: { branchId: string }, productId: string, quantity: unknown, unitCost: unknown): OldStockReceiptPreview {
+  try { return { plan: planOldStockReceipt(productId, quantity, unitCost, ctx.branchId), issue: null, code: null }; }
+  catch (e) { return { plan: null, issue: e instanceof Error ? e.message : String(e), code: (e as { code?: string }).code ?? null }; }
+}
 
 export function stockAdjustmentsFor(ctx: { branchId: string }, productId: string): StockAdjustmentResult[] {
   return query('SELECT * FROM stock_adjustments WHERE product_id = ? AND branch_id = ? ORDER BY created_at DESC', [productId, ctx.branchId]).map(resultOf);
@@ -392,10 +547,15 @@ export function stockIssuePreviewFor(ctx: { branchId: string }, productId: strin
 }
 
 /** Alles, was die Karte „Stock corrections" zeichnet: die Belege und — wenn eine Menge genannt ist — die Vorschau. */
-export function stockCorrectionsFor(ctx: { branchId: string }, input: { productId: string; issueQuantity?: unknown }): StockCorrectionsRead {
+export function stockCorrectionsFor(
+  ctx: { branchId: string },
+  input: { productId: string; issueQuantity?: unknown; receiptQuantity?: unknown; receiptUnitCost?: unknown },
+): StockCorrectionsRead {
+  const leer = (v: unknown): boolean => v === undefined || v === null;
   return {
     docs: stockAdjustmentsFor(ctx, input.productId),
-    issuePreview: input.issueQuantity === undefined || input.issueQuantity === null ? null : stockIssuePreviewFor(ctx, input.productId, input.issueQuantity),
+    issuePreview: leer(input.issueQuantity) ? null : stockIssuePreviewFor(ctx, input.productId, input.issueQuantity),
+    receiptPreview: leer(input.receiptQuantity) ? null : oldStockReceiptPreviewFor(ctx, input.productId, input.receiptQuantity, input.receiptUnitCost),
   };
 }
 
@@ -425,4 +585,8 @@ export function issueStockOnPrimary(input: StockIssueInput, reload: () => void):
 export function cancelStockAdjustmentOnPrimary(input: StockAdjustmentCancelInput, reload: () => void): Promise<StockAdjustmentResult> {
   if (isClientMode()) return nurPrimary();
   return runOnPrimary(() => cancelStockAdjustmentInHouse(input, localCtx()), reload);
+}
+export function addOldStockOnPrimary(input: OldStockReceiptInput, reload: () => void): Promise<StockAdjustmentResult> {
+  if (isClientMode()) return nurPrimary();
+  return runOnPrimary(() => addOldStockInHouse(input, localCtx()), reload);
 }

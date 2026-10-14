@@ -171,6 +171,8 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // STOCK CORRECTION — Bestandsabgang und sein Storno auch vom zweiten Rechner (nur Owner, C5): dieselbe Hausfolge am
   // Primary mit action_id-Replay, Herkunft des Lagerwerts aus dem Hauptbuch, Protokoll und Sync in der Transaktion.
   'stock_adjustments.issue', 'stock_adjustments.cancel',
+  // OLD STOCK — weitere Stücke Altbestand eines erfassten Artikels (nur Owner): Menge, Beleg, Protokoll, Sync, keine Buchung.
+  'stock_adjustments.add_old_stock',
 ];
 
 export interface CommandSpec {

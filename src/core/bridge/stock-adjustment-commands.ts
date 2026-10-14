@@ -14,15 +14,17 @@ import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOut
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor, type CommandResult } from './command-registry';
 import { assertHouseBranch } from './remote-create-support';
-import { OP_STOCK_PRODUCT_GET } from './store-read-ops';
+import { OP_OLD_STOCK_PAGE_GET, OP_STOCK_PRODUCT_GET } from './store-read-ops';
 import {
-  StockAdjustmentRejected, cancelStockAdjustmentInHouse, issueStockInHouse, stockCorrectionsFor,
+  StockAdjustmentRejected, addOldStockInHouse, cancelStockAdjustmentInHouse, issueStockInHouse, stockCorrectionsFor,
   type AdjustmentCtx, type StockAdjustmentResult,
 } from '@/core/stock/stock-adjustment';
+import { oldStockReconciliationFor } from '@/core/stock/old-stock-reconciliation';
 
 export const OP_STOCK_ISSUE = 'stock_adjustments.issue';
 export const OP_STOCK_CANCEL = 'stock_adjustments.cancel';
-export { OP_STOCK_PRODUCT_GET };
+export const OP_OLD_STOCK_ADD = 'stock_adjustments.add_old_stock';
+export { OP_OLD_STOCK_PAGE_GET, OP_STOCK_PRODUCT_GET };
 
 export class StockPayloadError extends Error {
   readonly code = 'STOCK_PAYLOAD_INVALID';
@@ -42,6 +44,7 @@ function only(raw: unknown, keys: readonly string[]): Record<string, unknown> {
 
 export const ISSUE_KEYS = ['actionId', 'productId', 'quantity', 'expectedQuantity', 'reasonCategory', 'reason', 'businessDate'] as const;
 export const CANCEL_KEYS = ['adjustmentId', 'reason'] as const;
+export const OLD_STOCK_KEYS = ['actionId', 'productId', 'quantity', 'expectedQuantity', 'unitCost', 'reason', 'businessDate', 'confirmNotRemovedPiece'] as const;
 
 type House = (input: never, ctx: AdjustmentCtx) => StockAdjustmentResult;
 
@@ -91,6 +94,8 @@ async function execute(house: House, keys: readonly string[], op: string, payloa
 
 registerCommand(OP_STOCK_ISSUE, { kind: 'mutation', handler: (p, a) => execute(issueStockInHouse as House, ISSUE_KEYS, OP_STOCK_ISSUE, p, a) });
 registerCommand(OP_STOCK_CANCEL, { kind: 'mutation', handler: (p, a) => execute(cancelStockAdjustmentInHouse as House, CANCEL_KEYS, OP_STOCK_CANCEL, p, a) });
+// OLD STOCK — weitere Stücke Altbestand eines schon erfassten Artikels: nur Menge, Beleg, Protokoll, Sync; keine Buchung.
+registerCommand(OP_OLD_STOCK_ADD, { kind: 'mutation', handler: (p, a) => execute(addOldStockInHouse as House, OLD_STOCK_KEYS, OP_OLD_STOCK_ADD, p, a) });
 
 // ── Lesebefehl der Karte „Stock corrections" ───────────────────────────────
 interface Envelope { readonly actor?: { tenantId?: string; branchId?: string; userId?: string; role?: string }; readonly input?: Record<string, unknown> }
@@ -102,6 +107,15 @@ registerCommand(OP_STOCK_PRODUCT_GET, {
     const input = (payload as Envelope | null)?.input ?? {};
     const productId = input.productId;
     if (typeof productId !== 'string' || productId.trim() === '') throw new BusinessError('INPUT_REQUIRED', 'productId is required');
-    return { data: { ...stockCorrectionsFor(ctx, { productId, issueQuantity: input.issueQuantity }) } };
+    return { data: { ...stockCorrectionsFor(ctx, { productId, issueQuantity: input.issueQuantity, receiptQuantity: input.receiptQuantity, receiptUnitCost: input.receiptUnitCost }) } };
+  },
+});
+
+// ── Lesebefehl der Seite „Old stock" (Eröffnungsvorschau, nur lesen) ────────
+registerCommand(OP_OLD_STOCK_PAGE_GET, {
+  kind: 'read',
+  handler: async (payload, actor): Promise<CommandResult> => {
+    const ctx = remoteReadContext(actor ?? (payload as Envelope | null)?.actor);
+    return { data: { ...oldStockReconciliationFor(ctx) } };
   },
 });

@@ -194,6 +194,7 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   // STOCK CORRECTION — die Karte „Stock corrections" steht nur für `perm.isOwner`; die Hausfolge prüft es noch einmal.
   'stock_adjustments.issue': owner('ProductDetail: perm.isOwner (Stock corrections)'),
   'stock_adjustments.cancel': owner('ProductDetail: perm.isOwner (Stock corrections)'),
+  'stock_adjustments.add_old_stock': owner('ProductDetail: perm.isOwner (Stock corrections — Add old stock)'),
 
   // ── Angebot, Rechnungs-Lebenszyklus, Nachrichten (R6E) ──────────────────
   // BEFUND: `OfferList` („New Offer", „Send", „Accept", „Reject") fragt `usePermission` NICHT, und
