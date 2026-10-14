@@ -774,6 +774,31 @@ export function postBulkWriteOff(input: {
   });
 }
 
+// ── STOCK-ADJUSTMENT Phase 1 — Bestandsabgang eigener Stückware mit BELEGTEM Lagerwert ──
+//
+//   DEBIT  INVENTORY_LOSS  Einstand der entnommenen Lose (deren Einkauf INVENTORY belastet hat)
+//   CREDIT INVENTORY       derselbe Betrag
+// Quelle STOCK_ADJUST / id des Korrekturbelegs (wie die Edelmetall-Abschreibung). Kein COGS, keine MwSt-Korrektur.
+// Storno über reverseSource('STOCK_ADJUST', id).
+export function postStockAdjustmentLoss(input: {
+  adjustmentId: string; adjustmentNumber: string; productId: string; amount: number; reason: string;
+  occurredAt: string; branchId?: string; userId?: string;
+}): PostingResult {
+  const amount = ROUND(input.amount);
+  if (!(amount > 0)) throw new Error('postStockAdjustmentLoss: amount must be > 0');
+  const metadata = { adjustmentNumber: input.adjustmentNumber, productId: input.productId, reason: input.reason, kind: 'stock_adjustment_issue' };
+  return postEntries([
+    { account: 'INVENTORY_LOSS', direction: 'DEBIT', amount, metadata },
+    { account: 'INVENTORY', direction: 'CREDIT', amount, metadata },
+  ], {
+    occurredAt: input.occurredAt,
+    sourceModule: 'STOCK_ADJUST',
+    sourceId: input.adjustmentId,
+    branchId: input.branchId,
+    userId: input.userId,
+  });
+}
+
 // ── Payment (Customer-Zahlung gegen Invoice) ──────────────────
 //
 //   DEBIT  CASH/BANK/CARD_CLEARING  by amount

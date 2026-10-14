@@ -67,6 +67,8 @@ const PRODUCT_LINK_TABLES: { table: string; label: string }[] = [
   { table: 'production_inputs', label: 'Production' },
   { table: 'production_outputs', label: 'Production' },
   { table: 'stock_lots', label: 'Stock Lot' },
+  // STOCK-ADJUSTMENT — ein Korrekturbeleg ist ein Geschäftsbeleg: der Artikel wird nicht gelöscht oder zusammengeführt.
+  { table: 'stock_adjustments', label: 'Stock Adjustment' },
 ];
 
 export interface ProductLink { label: string; count: number; }

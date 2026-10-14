@@ -2385,6 +2385,41 @@ function runMigrations(database: Database): void {
     `ALTER TABLE sales_return_lines ADD COLUMN rto_snapshot_at TEXT`,
     `ALTER TABLE sales_return_lines ADD COLUMN rto_consignment_id TEXT`,
     `ALTER TABLE sales_return_lines ADD COLUMN rto_prev_status TEXT`,
+    // STOCK-ADJUSTMENT Phase 1 — der Korrekturbeleg eines Bestandsabgangs (ein Artikel je Beleg): Menge und Status
+    // vorher/nachher, die entnommenen Lose (lots_json) mit ihrem Stand davor, der gebuchte Wert und die Buchungslage
+    // (BOOKED = Bestandsverlust gebucht; ACCOUNTING_RECONCILIATION_PENDING = Artikel ohne Lagerbuchung, nur Menge).
+    // Synchronisiert (insert/update — ein Storno ändert die Zeile, gelöscht wird nie).
+    `CREATE TABLE IF NOT EXISTS stock_adjustments (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      adjustment_number TEXT NOT NULL,
+      product_id TEXT NOT NULL,
+      direction TEXT NOT NULL CHECK (direction IN ('ISSUE')),
+      quantity INTEGER NOT NULL CHECK (quantity > 0),
+      qty_before REAL NOT NULL,
+      qty_after REAL NOT NULL,
+      status_before TEXT,
+      status_after TEXT,
+      accounting TEXT NOT NULL CHECK (accounting IN ('BOOKED','ACCOUNTING_RECONCILIATION_PENDING')),
+      value_booked REAL NOT NULL DEFAULT 0,
+      purchase_price_hint REAL,
+      lots_json TEXT NOT NULL DEFAULT '[]',
+      reason_category TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      business_date TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'POSTED' CHECK (status IN ('POSTED','CANCELLED')),
+      action_id TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      created_by TEXT,
+      created_at TEXT NOT NULL,
+      cancelled_at TEXT,
+      cancelled_by TEXT,
+      cancel_reason TEXT,
+      revision INTEGER NOT NULL DEFAULT 0
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_stock_adjustments_action ON stock_adjustments(branch_id, action_id)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_stock_adjustments_number ON stock_adjustments(branch_id, adjustment_number)`,
+    `CREATE INDEX IF NOT EXISTS idx_stock_adjustments_product ON stock_adjustments(product_id)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

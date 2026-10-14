@@ -1433,6 +1433,43 @@
       "required_fields": [],
       "immutable_fields": []
     },
+    "stock_adjustments": {
+      "allowed_operations": [
+        "insert",
+        "update"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "accounting",
+        "action_id",
+        "adjustment_number",
+        "branch_id",
+        "business_date",
+        "cancel_reason",
+        "cancelled_at",
+        "cancelled_by",
+        "created_at",
+        "created_by",
+        "direction",
+        "id",
+        "lots_json",
+        "payload_hash",
+        "product_id",
+        "purchase_price_hint",
+        "qty_after",
+        "qty_before",
+        "quantity",
+        "reason",
+        "reason_category",
+        "revision",
+        "status",
+        "status_after",
+        "status_before",
+        "value_booked"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
     "stock_lots": {
       "allowed_operations": [
         "insert",
