@@ -369,6 +369,34 @@ const valueOf = (o: unknown): Record<string, unknown> => ((o as { value?: Record
   ok(/if \(isClientMode\(\)\) return nurPrimary\(\);\s*return runOnPrimary\(\(\) => issueStockInHouse/.test(src('src/core/stock/stock-adjustment.ts')),
     'D9 der lokale Anschluss schreibt am PC2 nie selbst (nur über den Primary)');
 }
+// D10 — ein Bild über alle fünf neuen Fernnamen: freigegeben, berechtigt, angemeldet, in Rust bekannt; jede Buchung nur
+// für den Owner und nur über die Hausfolge am Primary (der lokale Anschluss weist am PC2 ab).
+{
+  const MUT = ['stock_adjustments.issue', 'stock_adjustments.cancel', 'stock_adjustments.add_old_stock'];
+  const READ = ['stock_adjustments.product.get', 'page.old_stock.get'];
+  const rs = src('src-tauri/src/bridge.rs');
+  const rustNames = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rs)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)]
+    .map((m) => new RegExp(`pub const ${m[0]}: &str = "([^"]+)"`).exec(rs)?.[1] ?? m[0]);
+  const known = registry.knownCommands();
+  const fehler: string[] = [];
+  for (const op of MUT) {
+    if (!registry.ALLOWED_MUTATIONS.includes(op)) fehler.push(`${op}: nicht freigegeben`);
+    if (perms.OPERATION_PERMISSIONS[op]?.kind !== 'isOwner') fehler.push(`${op}: nicht nur Owner`);
+    if (!known.includes(op)) fehler.push(`${op}: nicht angemeldet`);
+    if (!rustNames.includes(op)) fehler.push(`${op}: Rust kennt es nicht`);
+  }
+  for (const op of READ) {
+    if (!readOps.STORE_READ_OPS.includes(op) || !(op in perms.READ_PERMISSIONS)) fehler.push(`${op}: Auskunft nicht katalogisiert`);
+    if (!known.includes(op)) fehler.push(`${op}: nicht angemeldet`);
+    if (!rustNames.includes(op)) fehler.push(`${op}: Rust kennt es nicht`);
+  }
+  const sa2 = src('src/core/stock/stock-adjustment.ts');
+  for (const h of ['issueStockInHouse', 'cancelStockAdjustmentInHouse', 'addOldStockInHouse']) {
+    if (!new RegExp(`if \\(isClientMode\\(\\)\\) return nurPrimary\\(\\);\\s*return runOnPrimary\\(\\(\\) => ${h}`).test(sa2)) fehler.push(`${h}: lokaler Anschluss ohne PC2-Sperre`);
+  }
+  ok(fehler.length === 0 && rustNames.slice(-5).join(',') === [...MUT, ...READ].join(','),
+    `D10 drei Buchungen und zwei Auskünfte überall gleich (Freigabe, Owner-Recht, Anmeldung, Rust); lokale Anschlüsse sperren am PC2 (${fehler.join('; ') || 'konsistent'})`);
+}
 
 // ══ A — Altbestand: Erfassung ohne Geld, „Add Old Stock", schreibgeschützte Eröffnungsvorschau ═══════════════════
 const osr = await import('../../src/core/stock/old-stock-reconciliation.ts');
@@ -488,11 +516,46 @@ const balance = (db: Db, acc: string): number => r3(n(db, "SELECT COALESCE(SUM(C
   ok(st.ok && qtyOf(db, 'rolex') === 1 && adj(db, String(a1.r.adjustmentId)).status === 'CANCELLED' && ledgerSnap(db) === l0,
     `A4 Storno: wieder 1 Stück, Beleg storniert, keine Buchung (${st.code || 'ok'})`);
   const a2 = await altbestand(db, 'rolex', 2, 950);
-  ok(a2.ok && rowOf('rolex')?.klass === 'REVIEW' && rowOf('rolex')!.reasons.includes('OLD_STOCK_COST_DIFFERS'),
-    'A4 anderer historischer Einstand (950 statt 900): erfasst, in der Vorschau als Prüffall');
+  const m = rowOf('rolex');
+  ok(a2.ok && m?.klass === 'OPENING_CANDIDATE' && m.valueClear && eq(m.shelfValue, 900 + 2 * 950) && m.costLayers.length === 2,
+    `A4 anderer historischer Einstand (950 statt 900): erfasst, die Vorschau trennt die Wertblöcke (1 × 900 + 2 × 950) (${S(m?.costLayers)})`);
   verkauf('rolex', 1);
   const st2 = await storno(String(a2.r.adjustmentId), 'wrong');
   ok(!st2.ok && /MOVED_SINCE/.test(st2.code) && qtyOf(db, 'rolex') === 2, `A4 Storno nach einem Verkauf: abgewiesen (MOVED_SINCE), nichts verändert (${st2.code})`);
+}
+
+// A10 — gemischte historische Einstände (Review-Fall): 1 Stück à 250, dazu 2 Stück à 300 = 850 — nie 3 × 250, 3 × 300 oder
+// ein Durchschnitt. Nach einem Verkauf ist ohne Los nicht mehr bekannt, welche Stücke übrig sind: kein Wert, Prüffall.
+{
+  const db = freshDb();
+  product(db, 'mix', 250, 1); product(db, 'mix2', 250, 1); reload();
+  const add = await altbestand(db, 'mix', 2, 300);
+  const r = rowOf('mix');
+  const doc = add.ok ? String(adj(db, String(add.r.adjustmentId)).adjustment_number) : '';
+  ok(add.ok && !!r && r.klass === 'OPENING_CANDIDATE' && r.valueClear && r.shelfQty === 3 && eq(r.shelfValue, 850) && eq(r.v2, 850)
+    && S(r.costLayers) === S([{ qty: 1, unitCost: 250, source: 'ITEM' }, { qty: 2, unitCost: 300, source: doc }]),
+    `A10 1 × 250 (Artikel) + 2 × 300 (Beleg ${doc}) = 850, jeder Block mit Herkunft (${S(r && { c: r.shelfValue, layers: r.costLayers })})`);
+  const cogs0 = balance(db, 'COGS');
+  verkaufZu('mix', 1, 250);
+  const r2 = rowOf('mix');
+  const rec = osr.oldStockReconciliationFor(RC);
+  ok(eq(balance(db, 'COGS'), cogs0 + 250) && !!r2 && r2.klass === 'REVIEW' && r2.reasons.includes('MIXED_COST_NOT_TRACEABLE') && !r2.valueClear
+    && r2.v1 === 0 && r2.v2 === 0 && r2.costLayers.length === 0 && eq(r2.soldCogs, 250) && !rec.rows.some((x) => x.klass === 'OPENING_CANDIDATE' && x.productId === 'mix'),
+    `A10 …nach einem Verkauf: gebuchter Wareneinsatz 250 bleibt wie gebucht, der Restwert ist nicht nachvollziehbar — Prüffall ohne Wert, kein Kandidat (${S(r2 && { k: r2.klass, why: r2.reasons, clear: r2.valueClear })})`);
+  // Die Menge allein reicht nicht: Verkauf zwischen zwei Zugängen, danach stimmt die Menge wieder mit dem letzten Beleg —
+  // aber welches Stück verkauft wurde (250 oder 300), weiß niemand.
+  product(db, 'mix3', 250, 1); reload();
+  await altbestand(db, 'mix3', 2, 300);
+  verkaufZu('mix3', 1, 250);
+  const nach = await altbestand(db, 'mix3', 1, 250);
+  const r4 = rowOf('mix3');
+  ok(nach.ok && qtyOf(db, 'mix3') === 3 && !!r4 && r4.klass === 'REVIEW' && r4.reasons.includes('MIXED_COST_NOT_TRACEABLE') && !r4.valueClear,
+    `A10 Verkauf zwischen zwei Zugängen: Menge passt wieder, der Wert ist trotzdem nicht belegt — Prüffall (${S(r4 && { k: r4.klass, why: r4.reasons })})`);
+  const add2 = await altbestand(db, 'mix2', 2, 300);
+  const st = await storno(String(add2.r.adjustmentId), 'wrong cost');
+  const r3row = rowOf('mix2');
+  ok(add2.ok && st.ok && !!r3row && r3row.klass === 'OPENING_CANDIDATE' && eq(r3row.shelfValue, 250) && r3row.costLayers.length === 1,
+    'A10 ein stornierter Beleg mit anderem Einstand zählt nicht mehr: wieder 1 × 250');
 }
 
 // A5 — Grenzen von „Add Old Stock" (fail-closed; BLOCKED bis zu den Eröffnungsregeln, wo nötig).

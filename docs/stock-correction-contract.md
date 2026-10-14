@@ -18,8 +18,19 @@
   - Hat der Artikel offene Abgänge, muss der Owner bestätigen, dass es andere Stücke sind (das Protokoll hält es fest). Die Wiederherstellung eines ausgebuchten Stücks wartet auf D1c.
   - Die Tabelle erlaubt dafür `direction IN ('ISSUE','RECEIPT')`; ältere Entwicklungsdatenbanken baut `stock-adjustment-schema.ts` einmal verlustfrei um.
 - **Eröffnungsvorschau** (`old-stock-reconciliation.ts`, Seite „Old stock“, nur lesen, nur Owner): je Artikel (a) gebuchter Wareneinsatz netto aus dem Hauptbuch, (b) offene Abgänge, (c) Bestand × historischer Einstand, dazu V1 und V2. Dieselbe Funktion (`oldStockRowsFor`/`planOldStockOpening`) ist die Rechengrundlage der späteren Buchung, die jeden Nachweis in ihrer Transaktion erneut prüft.
-  - Kandidat ist nur, was das Hauptbuch als nie aktiviert belegt. Prüffall mit Grund: INVENTORY-Sollbuchung unbekannter Herkunft, Einkauf ohne Los, Los ohne gebuchten Einkauf (Produktion, „Keep“), Menge ≠ Lose, aktivierte Reparaturkosten, Produktion, stornierter Sonderauftrag, Altzeilen mit mehreren Stücken, fehlender Einstand, gebuchter Wareneinsatz ≠ heutiger Einstand (Frage D4), Altbestands-Stücke mit anderem Einstand.
-- **BLOCKED** (fail-closed, bis die Buchhalter-Regeln vorliegen): jede Eröffnungs-, Fund-, Wiederherstellungs- und Wertunterschied-Buchung; Mehrwertsteuer auf Korrekturen; „Add Old Stock“ für Artikel mit Losen (gekauft, produziert oder eröffnet), für Artikel mit Lagerwert-Buchung oder bei unklarer Herkunft im Hauptbuch, und für ausverkaufte Artikel.
+  - Kandidat ist nur, was das Hauptbuch als nie aktiviert belegt. Prüffall mit Grund: INVENTORY-Sollbuchung unbekannter Herkunft, Einkauf ohne Los, Los ohne gebuchten Einkauf (Produktion, „Keep“), Menge ≠ Lose, aktivierte Reparaturkosten, Produktion, stornierter Sonderauftrag, Altzeilen mit mehreren Stücken, fehlender Einstand, gebuchter Wareneinsatz ≠ heutiger Einstand (Frage D4), gemischte Einstände nach einer Bewegung.
+  - **Gemischte Einstände:** Teil (c) besteht aus Wertblöcken mit Herkunft — der Artikel-Einstand und jeder Altbestands-Beleg mit eigenem Einstand. Beispiel: 1 × 250 (Artikel) + 2 × 300 (Beleg ADJ-…) = 850, nie 3 × 250, 3 × 300 oder ein Durchschnitt.
+    - Belegt ist das nur, solange sich der Bestand seit dem ersten abweichenden Beleg nicht bewegt hat (kein Verkauf, Abgang, Agent, keine Retoure) und die Menge der nach dem letzten Beleg entspricht.
+    - Danach ist ohne Los nicht bekannt, welche Stücke übrig sind: Prüffall `MIXED_COST_NOT_TRACEABLE`, kein Wert, keine Summe.
+    - Schon gebuchter Wareneinsatz bleibt immer wie gebucht (Teil (a) aus dem Hauptbuch).
+- **Es gibt noch keine Eröffnungsbuchung.** Die Seite „Old stock“ ist eine Vorschau; sie bucht nichts und gibt keine Freigabe.
+- **BLOCKED** (fail-closed, bis die Buchhalter-Regeln vorliegen): jede Eröffnungs-, Fund-, Wiederherstellungs- und Wertunterschied-Buchung; Mehrwertsteuer auf Korrekturen.
+- **DEFERRED** (bewusst noch nicht gebaut, fail-closed abgewiesen):
+  - „Add Old Stock“ für Artikel mit Losen — gekauft, produziert, „Keep“ und künftig eröffnet. Weitere Altbestands-Stücke eines schon eröffneten Artikels brauchen eine spätere Eröffnung je Wertblock (Phase 3, nach D8).
+  - „Add Old Stock“ für Artikel mit Lagerwert-Buchung, bei Lagerbuchungen unbekannter Herkunft im Hauptbuch und für ausverkaufte Artikel; als Ausweg bleibt New Collection als neuer Artikel.
+  - Ein wiedergefundenes, früher ausgebuchtes Stück: nur das Storno des Abgangs, solange sich nichts bewegt hat; die Wiederherstellung danach wartet auf D1c.
+  - Der Wert gemischter Einstände nach einer Bewegung (siehe oben).
+  - Der echte Zwei-Rechner-Test (Primary + PC2) ist Release-Gate, nicht Teil dieser Grundlage.
 
 ## Phase 1 — Bestandsabgang (umgesetzt, `src/core/stock/stock-adjustment.ts`)
 

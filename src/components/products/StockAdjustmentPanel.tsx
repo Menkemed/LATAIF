@@ -195,7 +195,7 @@ export function StockAdjustmentPanel({ productId, quantity, purchasePrice, onCha
             {addPreview?.plan ? (
               <div data-old-stock-preview style={{ padding: '10px 12px', borderRadius: 8, background: '#F5F7FA', fontSize: 12, color: '#374151' }}>
                 Stock {addPreview.plan.qtyBefore} → {addPreview.plan.qtyBefore + addPreview.plan.quantity}, historical cost {addPreview.plan.unitCost.toFixed(3)} BHD per piece
-                {addPreview.plan.itemCost !== null && Math.abs(addPreview.plan.itemCost - addPreview.plan.unitCost) > 0.0005 ? ` (the item shows ${addPreview.plan.itemCost.toFixed(3)} — this difference will be listed for review)` : ''}. No booking.
+                {addPreview.plan.itemCost !== null && Math.abs(addPreview.plan.itemCost - addPreview.plan.unitCost) > 0.0005 ? ` (the item shows ${addPreview.plan.itemCost.toFixed(3)} — the opening preview keeps these pieces at their own cost while the stock does not move; after a sale or removal it can no longer tell which pieces are left and lists the item for review)` : ''}. No booking.
               </div>
             ) : (
               <div data-old-stock-refused style={{ padding: '10px 12px', borderRadius: 8, background: 'rgba(170,110,110,0.10)', fontSize: 12, color: '#7A3535' }}>

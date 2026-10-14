@@ -66,7 +66,7 @@ export function OldStockPage() {
         <Button variant="ghost" onClick={() => setRefresh((r) => r + 1)}>Refresh</Button>
       </div>
       <div style={{ fontSize: 12, color: '#6B7280', marginBottom: 8 }}>
-        (a) cost of sales already booked · (b) pending removals without a booking · (c) on hand × historical cost. Candidates: sold {b3(data.totals.soldCogs)} · missing {b3(data.totals.pendingRemovalValue)} · shelf {b3(data.totals.shelfValue)} BHD.
+        (a) cost of sales already booked · (b) pending removals without a booking · (c) on hand × historical cost (* = pieces with their own historical cost, hover for the blocks). Candidates: sold {b3(data.totals.soldCogs)} · missing {b3(data.totals.pendingRemovalValue)} · shelf {b3(data.totals.shelfValue)} BHD.
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: '0.9fr 2fr 0.7fr 0.6fr 0.8fr 0.9fr 0.9fr 0.9fr 0.9fr 0.9fr 2fr', gap: 8, padding: '6px 10px', fontSize: 11, color: '#6B7280' }}>
         <span>SKU</span><span>ITEM</span><span>STATUS</span><span style={{ textAlign: 'right' }}>ON HAND</span><span style={{ textAlign: 'right' }}>HIST. COST</span>
@@ -85,9 +85,12 @@ export function OldStockPage() {
           <span className="font-mono" style={{ textAlign: 'right' }}>{r.historicalCost === null ? '—' : b3(r.historicalCost)}</span>
           <span className="font-mono" style={{ textAlign: 'right' }}>{b3(r.soldCogs)}</span>
           <span className="font-mono" style={{ textAlign: 'right' }} title={r.pendingRemovalNumbers.join(', ')}>{r.pendingRemovalQty > 0 ? `${b3(r.pendingRemovalValue)} (${r.pendingRemovalQty})` : '—'}</span>
-          <span className="font-mono" style={{ textAlign: 'right' }}>{b3(r.shelfValue)}</span>
-          <span className="font-mono" style={{ textAlign: 'right' }}>{r.klass === 'CAPITALISED' ? '—' : b3(r.v1)}</span>
-          <span className="font-mono" style={{ textAlign: 'right' }}>{r.klass === 'CAPITALISED' ? '—' : b3(r.v2)}</span>
+          <span className="font-mono" style={{ textAlign: 'right' }} data-old-stock-layers
+            title={r.costLayers.map((l) => `${l.qty} × ${b3(l.unitCost)} (${l.source === 'ITEM' ? 'item cost' : l.source})`).join(' + ')}>
+            {r.valueClear ? b3(r.shelfValue) : '—'}{r.costLayers.length > 1 ? ' *' : ''}
+          </span>
+          <span className="font-mono" style={{ textAlign: 'right' }}>{r.klass === 'CAPITALISED' || !r.valueClear ? '—' : b3(r.v1)}</span>
+          <span className="font-mono" style={{ textAlign: 'right' }}>{r.klass === 'CAPITALISED' || !r.valueClear ? '—' : b3(r.v2)}</span>
           <span style={{ color: r.klass === 'REVIEW' ? '#7A3535' : '#374151' }}>
             {CLASS_LABEL[r.klass]}{r.reasons.length > 0 ? ': ' : ''}
             {r.reasons.map((k) => OLD_STOCK_REVIEW_REASONS[k] ?? k).join('; ')}

@@ -38,9 +38,12 @@ export const OLD_STOCK_REVIEW_REASONS: Record<string, string> = {
   LEGACY_SALE_LINES: 'it has sales from before the stock tracking with more than one piece — the quantity on hand is uncertain',
   NO_HISTORICAL_COST: 'no historical cost (purchase price missing or 0) — the value needs a decision (D2)',
   COST_DIFFERS_FROM_BOOKED_COGS: 'the cost booked on earlier sales differs from the current historical cost (value-difference question D4)',
-  OLD_STOCK_COST_DIFFERS: 'pieces added as old stock carry a different historical cost than the item',
+  MIXED_COST_NOT_TRACEABLE: 'pieces with different historical costs and the stock moved since — which pieces are left is not known, no value is shown',
   QUANTITY_INVALID: 'the quantity is not a whole number of pieces',
 };
+
+/** Ein Wertblock des Bestands: so viele Stücke zu diesem historischen Einstand, mit Herkunft. */
+export interface OldStockCostLayer { qty: number; unitCost: number; source: 'ITEM' | string }
 
 export interface OldStockRow {
   productId: string;
@@ -62,8 +65,12 @@ export interface OldStockRow {
   /** Altbestand, der über „Add Old Stock" dazukam (Belege, Stücke). */
   oldStockReceipts: number;
   oldStockReceiptQty: number;
-  /** (c) Bestand × historischer Einstand. */
+  /** (c) Bestand × historischer Einstand — je Wertblock (Artikel-Einstand und Altbestands-Belege mit anderem Einstand). */
   shelfValue: number;
+  /** Die Wertblöcke des Bestands; leer, wenn er nicht nachvollziehbar zusammengesetzt ist. */
+  costLayers: OldStockCostLayer[];
+  /** false = gemischte Einstände und seitdem bewegt: der Wert ist nicht bestimmbar (fail-closed, Prüffall, Anzeige „—"). */
+  valueClear: boolean;
   /** Vorschau der Eröffnung (nur für Kandidaten und Prüffälle; bei schon aktivierter Ware 0). */
   v1: number;
   v2: number;
@@ -155,15 +162,25 @@ export function oldStockRowsFor(ctx: { branchId: string }, onlyProductId?: strin
     e.qty += num(r.quantity); e.value += num(r.quantity) * num(r.purchase_price_hint); e.numbers.push(String(r.adjustment_number));
     removals.set(k, e);
   }
-  const receipts = new Map<string, { n: number; qty: number; costs: number[] }>();
+  const receipts = new Map<string, { n: number; qty: number; docs: Array<{ number: string; qty: number; cost: number; at: string; qtyAfter: number }> }>();
   for (const r of query(
-    `SELECT product_id, quantity, purchase_price_hint FROM stock_adjustments
-      WHERE branch_id = ? AND direction = 'RECEIPT' AND status = 'POSTED'`, [branchId])) {
+    `SELECT product_id, adjustment_number, quantity, purchase_price_hint, qty_after, created_at FROM stock_adjustments
+      WHERE branch_id = ? AND direction = 'RECEIPT' AND status = 'POSTED' ORDER BY created_at, id`, [branchId])) {
     const k = String(r.product_id);
-    const e = receipts.get(k) ?? { n: 0, qty: 0, costs: [] };
-    e.n += 1; e.qty += num(r.quantity); e.costs.push(num(r.purchase_price_hint));
+    const e = receipts.get(k) ?? { n: 0, qty: 0, docs: [] };
+    e.n += 1; e.qty += num(r.quantity);
+    e.docs.push({ number: String(r.adjustment_number), qty: num(r.quantity), cost: num(r.purchase_price_hint), at: String(r.created_at), qtyAfter: num(r.qty_after) });
     receipts.set(k, e);
   }
+  /**
+   * Hat sich der Bestand dieses Artikels seit `since` bewegt (Verkauf, Abgang, Agent, Retoure)? Dann ist bei gemischten
+   * Einständen nicht mehr bekannt, WELCHE Stücke noch da sind — ein Artikel ohne Los kennt keine Stückwerte.
+   */
+  const movedSince = (pid: string, since: string): boolean =>
+    query(`SELECT 1 FROM invoice_lines il JOIN invoices i ON i.id = il.invoice_id WHERE il.product_id = ? AND i.created_at >= ? LIMIT 1`, [pid, since]).length > 0
+    || query(`SELECT 1 FROM stock_adjustments WHERE product_id = ? AND direction = 'ISSUE' AND created_at >= ? LIMIT 1`, [pid, since]).length > 0
+    || query(`SELECT 1 FROM agent_transfers WHERE product_id = ? AND transferred_at >= ? LIMIT 1`, [pid, since]).length > 0
+    || query(`SELECT 1 FROM sales_return_lines l JOIN sales_returns r ON r.id = l.return_id WHERE l.product_id = ? AND r.created_at >= ? LIMIT 1`, [pid, since]).length > 0;
 
   const rows: OldStockRow[] = [];
   for (const p of products) {
@@ -177,7 +194,7 @@ export function oldStockRowsFor(ctx: { branchId: string }, onlyProductId?: strin
     const cost = p.purchase_price === null || p.purchase_price === undefined ? null : Number(p.purchase_price);
     const soldCogs = r3((cogsByLine.get(pid) ?? 0) + (cogsByAgent.get(pid) ?? 0));
     const rem = removals.get(pid) ?? { qty: 0, value: 0, numbers: [] };
-    const rec = receipts.get(pid) ?? { n: 0, qty: 0, costs: [] };
+    const rec = receipts.get(pid) ?? { n: 0, qty: 0, docs: [] };
     const lots = lotsBy.get(pid) ?? [];
     const hasPurchase = (purchaseLines.get(pid) ?? 0) > 0;
     const reasons: string[] = [];
@@ -204,10 +221,35 @@ export function oldStockRowsFor(ctx: { branchId: string }, onlyProductId?: strin
       if (!qtyOk) reasons.push('QUANTITY_INVALID');
       if (cost === null || !(cost > 0)) reasons.push('NO_HISTORICAL_COST');
       if (cost !== null && (snapshots.get(pid) ?? []).some((c) => Math.abs(c - cost) > 0.0005)) reasons.push('COST_DIFFERS_FROM_BOOKED_COGS');
-      if (cost !== null && rec.costs.some((c) => Math.abs(c - cost) > 0.0005)) reasons.push('OLD_STOCK_COST_DIFFERS');
       klass = reasons.length === 0 ? 'OPENING_CANDIDATE' : 'REVIEW';
     }
-    const shelfValue = klass === 'CAPITALISED' ? 0 : r3(shelfQty * (cost ?? 0));
+    // (c) als Wertblöcke: Altbestands-Belege mit eigenem Einstand zählen mit IHREM Einstand, der Rest des Bestands mit dem
+    // des Artikels. Das ist nur belegt, solange sich der Bestand seit dem ersten abweichenden Beleg nicht bewegt hat und
+    // die Menge noch genau die nach dem letzten Beleg ist — sonst fail-closed: kein Wert, Prüffall.
+    let costLayers: OldStockCostLayer[] = [];
+    let valueClear = true;
+    let shelfValue = 0;
+    if (klass !== 'CAPITALISED') {
+      const abweichend = cost === null ? [] : rec.docs.filter((d) => Math.abs(d.cost - cost) > 0.0005);
+      if (abweichend.length === 0) {
+        costLayers = shelfQty > 0 ? [{ qty: shelfQty, unitCost: cost ?? 0, source: 'ITEM' }] : [];
+      } else {
+        const rest = shelfQty - abweichend.reduce((s, d) => s + d.qty, 0);
+        const letzter = rec.docs[rec.docs.length - 1];
+        const nachvollziehbar = rest >= 0 && letzter !== undefined && letzter.qtyAfter === shelfQty && !movedSince(pid, abweichend[0].at);
+        if (nachvollziehbar) {
+          costLayers = [
+            ...(rest > 0 ? [{ qty: rest, unitCost: cost ?? 0, source: 'ITEM' }] : []),
+            ...abweichend.map((d) => ({ qty: d.qty, unitCost: d.cost, source: d.number })),
+          ];
+        } else {
+          valueClear = false;
+          reasons.push('MIXED_COST_NOT_TRACEABLE');
+          klass = 'REVIEW';
+        }
+      }
+      shelfValue = valueClear ? r3(costLayers.reduce((s, l) => s + l.qty * l.unitCost, 0)) : 0;
+    }
     const a = klass === 'CAPITALISED' ? 0 : soldCogs;
     const b = klass === 'CAPITALISED' ? 0 : r3(rem.value);
     rows.push({
@@ -227,8 +269,11 @@ export function oldStockRowsFor(ctx: { branchId: string }, onlyProductId?: strin
       oldStockReceipts: rec.n,
       oldStockReceiptQty: rec.qty,
       shelfValue,
-      v1: r3(a + b + shelfValue),
-      v2: r3(a + shelfValue),
+      costLayers,
+      valueClear,
+      // Ohne bestimmbaren Bestandswert gibt es keine Eröffnungssumme — 0 hier, „—" in der Anzeige; nie ein Durchschnitt.
+      v1: valueClear ? r3(a + b + shelfValue) : 0,
+      v2: valueClear ? r3(a + shelfValue) : 0,
     });
   }
   return rows;
