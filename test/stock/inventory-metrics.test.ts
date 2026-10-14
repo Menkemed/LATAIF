@@ -199,7 +199,10 @@ const NO_LOTS = new Map();
     'DOMAIN and the lot reconciliation writes a zero without touching the status');
   const schema = src('src/core/db/database.ts');
   ok(/quantity\s+INTEGER\s+DEFAULT 1/.test(schema), 'DOMAIN the column only defaults to one…');
-  ok(!/quantity\s+INTEGER[^,\n]*CHECK/.test(schema), 'DOMAIN …it does not constrain it, so a zero is reachable');
+  // Geprüft wird GENAU die Artikelspalte. Die Menge eines Korrekturbelegs (`stock_adjustments.quantity CHECK (quantity > 0)`,
+  // Bestandskorrektur Phase 1) ist eine andere Spalte und darf eine Prüfung tragen — sie machte diese Zeile vorher rot.
+  ok(/ALTER TABLE products ADD COLUMN quantity INTEGER DEFAULT 1`/.test(schema) && !/ALTER TABLE products ADD COLUMN quantity[^`]*CHECK/.test(schema),
+    'DOMAIN …it does not constrain it, so a zero is reachable');
 
   // Und die Oberflaechen-Eingabe erzwingt weiterhin mindestens eins — die Null kommt nie von Hand.
   const modal = src('src/components/products/NewProductModal.tsx');
