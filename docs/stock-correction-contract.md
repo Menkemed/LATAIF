@@ -1,4 +1,35 @@
-# Bestandskorrektur — künftiger Vertrag (Entwurf, NICHT umgesetzt)
+# Bestandskorrektur — Vertrag (Phase 1 umgesetzt, Zugang und Anfangsbestand offen)
+
+## Phase 1 — Bestandsabgang (umgesetzt, `src/core/stock/stock-adjustment.ts`)
+
+- **Beleg:** `stock_adjustments` (Nummer `ADJ-…`, ein Artikel je Beleg), synchronisiert (insert/update).
+  - Festgehalten werden Menge und Status vorher/nachher, die entnommenen Lose mit ihrem Stand davor, der gebuchte Wert und die Buchungslage.
+  - Dazu Grund (Kategorie Pflicht, Text Pflicht), Geschäftsdatum (keine Zukunft), Benutzer und Aktions-ID (eine Wiederholung erzeugt keinen zweiten Beleg).
+- **Herkunft des Lagerwerts, aus dem Hauptbuch bewiesen und nicht aus „Los ja/nein“:** INVENTORY wird im Soll nur an diesen Stellen bebucht.
+  - Einkauf (je Einkaufszeile);
+  - aktivierte Reparaturkosten am eigenen Artikel (Ausgabe „Inventory“ zur Reparatur, eigene Arbeit OWN), auch ohne Los;
+  - Retoure „In Stock“: nimmt nur einen Wareneinsatz zurück;
+  - Rücknahmen.
+  - Produktion und „Keep“ legen Lose an, buchen aber nichts. Ein Test pinnt diese Liste.
+- **Mit Los:** Entnahme nach der bestehenden Regel (ältestes zuerst).
+  - Jedes entnommene Los muss aus einer Einkaufszeile mit stehender INVENTORY-Buchung stammen (oder Einstand 0 haben).
+  - Gebucht wird dann Soll `INVENTORY_LOSS` an `INVENTORY` zum Einstand, Quelle `STOCK_ADJUST`. Sonst wird abgewiesen (`VALUE_NOT_PROVEN`).
+- **Ohne Los:** Nur wenn nachweislich nie Lagerwert gebucht wurde: keine Einkaufszeile, keine aktivierten Reparaturkosten, und im ganzen Hauptbuch keine INVENTORY-Sollbuchung unbekannter Herkunft.
+  - Dann wird nur die Menge reduziert, ohne Buchung.
+  - Der Beleg trägt `ACCOUNTING_RECONCILIATION_PENDING` und den Einkaufspreis als Bewertungshinweis.
+  - Diese Belege muss die spätere Anfangsbestands-Abstimmung einbeziehen. Sonst wird fail-closed abgewiesen.
+- **Ausgeschlossen:** Kommission (auch über eine offene Kommission), Agent, nicht „in stock“, offene Reparatur, offene Auftragsbindung, Partnerware, Edelmetall.
+- **Menge 0 nach dem Abgang:** Status `write_off` (kein Verkauf).
+- **Storno:** exakt zurück (Lose, Menge, Status; bei Buchung `reverseSource`).
+  - Nur solange seitdem nichts anderes am Bestand des Artikels geschah; sonst abgewiesen (`MOVED_SINCE`). Kein verkauftes Stück wird wieder verfügbar.
+- **Rechte und Ablauf:** nur Owner (Admin), nur am Primary (Karte „Stock corrections“ auf der Artikelseite); PC2 wird abgewiesen.
+  - Eine Transaktion mit strengem Protokoll, Wächtern für Buchung und Sync, nie automatisch.
+  - Ein Artikel mit Korrekturbeleg ist nicht mehr löschbar oder zusammenführbar.
+- **Wirkung:** erst mit dem nächsten Release, weil Manifest und Rust-Server zusammen ausgeliefert werden.
+
+---
+
+Der folgende Entwurf gilt weiter für Zugang, Anfangsbestand und alles noch Offene.
 
 Seit F9 lassen sich Menge, Bestandsstatus und Herkunft eines Artikels nicht mehr in der Artikelbearbeitung setzen
 (Primary, PC2, Handy). Für echte Korrekturen braucht es einen eigenen, kontrollierten Vorgang. Dieses Dokument legt
