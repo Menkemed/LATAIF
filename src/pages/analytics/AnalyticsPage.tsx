@@ -727,7 +727,6 @@ export function AnalyticsPage() {
                 <TableRow label={`Card processing fees (${fmtDec(finance.cardFeeRate, 2)}%)`} value={`- ${fmtDec(finance.cardFeeLost, 2)} BHD`} color="#AA6E6E" />
                 <TableRow label="Card → Bank (net)" value={`${fmtDec(finance.cardNetToBank, 2)} BHD`} color="#7EAA6E" />
                 {finance.benefitReceived > 0 && <TableRow label="Benefit received" value={`${fmtDec(finance.benefitReceived, 2)} BHD`} color="#4B5563" />}
-                {(finance.productEkCash + finance.productEkBank) > 0 && <TableRow label="Product purchases (EK paid out, manual)" value={`- ${fmtDec(finance.productEkCash + finance.productEkBank, 2)} BHD`} color="#AA6E6E" />}
                 {(finance.purchasePaidCash + finance.purchasePaidBank) > 0 && <TableRow label="Supplier payments (Purchases module)" value={`- ${fmtDec(finance.purchasePaidCash + finance.purchasePaidBank, 2)} BHD`} color="#AA6E6E" />}
                 {(finance.expenseCash + finance.expenseBank) > 0 && <TableRow label="Operating expenses" value={`- ${fmtDec(finance.expenseCash + finance.expenseBank, 2)} BHD`} color="#AA6E6E" />}
                 {(finance.purchaseRefundCash + finance.purchaseRefundBank) > 0 && <TableRow label="Supplier refunds (Purchase returns)" value={`+ ${fmtDec(finance.purchaseRefundCash + finance.purchaseRefundBank, 2)} BHD`} color="#7EAA6E" />}

@@ -1517,25 +1517,8 @@ export function ProductDetail() {
                   <Input label="STORAGE LOCATION" value={form.storageLocation || ''} onChange={e => setForm({ ...form, storageLocation: e.target.value })} />
                   <Input label="SUPPLIER" value={form.supplierName || ''} onChange={e => setForm({ ...form, supplierName: e.target.value })} />
                   <Input label="PURCHASE SOURCE" placeholder="Souq, Private seller, Auction..." value={form.purchaseSource || ''} onChange={e => setForm({ ...form, purchaseSource: e.target.value })} />
-                  <div>
-                    <span className="text-overline" style={{ marginBottom: 6 }}>PAID FROM</span>
-                    <div className="flex gap-2" style={{ marginTop: 6 }}>
-                      {([null, 'cash', 'bank', 'benefit'] as const).map(opt => {
-                        const active = (form.paidFrom ?? null) === opt;
-                        const label = opt === null ? 'None' : opt === 'cash' ? 'Cash' : opt === 'bank' ? 'Bank' : 'Benefit';
-                        return (
-                          <button key={String(opt)} type="button" onClick={() => setForm({ ...form, paidFrom: opt })}
-                            className="cursor-pointer rounded transition-all duration-200"
-                            style={{
-                              padding: '7px 14px', fontSize: 12,
-                              border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
-                              color: active ? '#0F0F10' : '#6B7280',
-                              background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                            }}>{label}</button>
-                        );
-                      })}
-                    </div>
-                  </div>
+                  {/* OLD STOCK — kein „Paid from" mehr: ein Artikel aus New Collection/Import ist Altbestand ohne Geldfluss.
+                      Ein früher gespeicherter Wert bleibt unverändert (die Änderungsabsicht enthält das Feld nie). */}
                   <Input label="PURCHASE DATE" type="date" value={form.purchaseDate || ''} onChange={e => setForm({ ...form, purchaseDate: e.target.value })} />
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>NOTES</span>

@@ -1110,37 +1110,15 @@ export function WatchList() {
             <Input label="SUPPLIER" placeholder="Supplier name" value={form.supplierName || ''} onChange={e => setForm({ ...form, supplierName: e.target.value })} />
           </div>
 
+          {/* OLD STOCK — „Collection → New Item" erfasst vorhandene eigene Ware (Altbestand): der Einkaufspreis ist der
+              historische Einstand, es fließt kein Geld. Neu gekaufte Ware geht über Purchase. Deshalb gibt es hier kein
+              „Paid from" mehr (es buchte nie etwas, behauptete aber einen Kassenabzug). */}
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20 }}>
             <Input label="PURCHASE SOURCE" placeholder="Souq, Private seller, Auction..." value={form.purchaseSource || ''} onChange={e => setForm({ ...form, purchaseSource: e.target.value })} />
-            <div>
-              <span className="text-overline" style={{ marginBottom: 8 }}>PAID FROM</span>
-              <div className="flex gap-2" style={{ marginTop: 8 }}>
-                {([null, 'cash', 'bank', 'benefit'] as const).map(opt => {
-                  const active = (form.paidFrom ?? null) === opt;
-                  const label = opt === null ? 'None' : opt === 'cash' ? 'Cash' : opt === 'bank' ? 'Bank' : 'Benefit';
-                  return (
-                    <button key={String(opt)} type="button" onClick={() => setForm({ ...form, paidFrom: opt })}
-                      className="cursor-pointer rounded transition-all duration-200"
-                      style={{
-                        padding: '7px 14px', fontSize: 12,
-                        border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
-                        color: active ? '#0F0F10' : '#6B7280',
-                        background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                      }}>{label}</button>
-                  );
-                })}
-              </div>
-            </div>
+            <p data-old-stock-note style={{ fontSize: 12, color: '#6B7280', alignSelf: 'end', margin: 0 }}>
+              Records stock you already own: the purchase price is its historical cost, no money is booked. Buy new goods with a Purchase.
+            </p>
           </div>
-          {form.paidFrom && form.purchasePrice ? (
-            <div className="rounded font-mono" style={{
-              padding: 12, background: '#F2F7FA', border: '1px solid #E5E9EE',
-              fontSize: 12, color: '#6B7280', display: 'flex', justifyContent: 'space-between',
-            }}>
-              <span>Will deduct from {form.paidFrom === 'cash' ? 'Cash' : 'Bank'}</span>
-              <span style={{ color: '#AA6E6E' }}>− <Bhd v={form.purchasePrice}/> BHD</span>
-            </div>
-          ) : null}
 
           {/* MEDIA-04A-3B2B — partial-create warning. The product exists but its
               images are not fully in place; the modal stays open so the user can

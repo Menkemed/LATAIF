@@ -423,20 +423,10 @@ export function financeFor(ctx: BusinessReadContext) {
       else if (r.key === 'finance.opening_bank') openingBank = v;
     }
 
-    // Product EK outflow (cash / bank)
-    let productEkCash = 0, productEkBank = 0;
-    try {
-      const ekRows = qry(
-        `SELECT paid_from, COALESCE(SUM(purchase_price),0) as total
-         FROM products WHERE branch_id = ? AND paid_from IS NOT NULL GROUP BY paid_from`,
-        [branchId]
-      );
-      for (const r of ekRows) {
-        const t = (r.total as number) || 0;
-        if (r.paid_from === 'cash') productEkCash += t;
-        else if (r.paid_from === 'bank') productEkBank += t;
-      }
-    } catch { /* columns not yet migrated */ }
+    // OLD STOCK — kein „Product EK outflow" mehr: `products.paid_from` stammt aus der Maske „New Collection", die
+    // vorhandene Ware (Altbestand) erfasst. Dort floss nie Geld, und das Hauptbuch buchte nie etwas; die Zeile
+    // „Product purchases (EK paid out, manual)" zeigte also einen erfundenen Abfluss. Echte Einkaufszahlungen
+    // stehen unter „Supplier payments"; die Salden (unten, `balanceOf`) kommen ohnehin aus dem Hauptbuch.
 
     // Repair cashflow
     let repairCashIn = 0, repairBankIn = 0, repairCashOut = 0, repairBankOut = 0;
@@ -792,7 +782,6 @@ export function financeFor(ctx: BusinessReadContext) {
       cardFeeRate, cardFeeLost, cardNetToBank,
       cashBalance, bankBalance, benefitBalance, totalLiquid,
       openingCash, openingBank,
-      productEkCash, productEkBank,
       purchasePaidCash, purchasePaidBank,
       expenseCash, expenseBank,
       purchaseRefundCash, purchaseRefundBank,
