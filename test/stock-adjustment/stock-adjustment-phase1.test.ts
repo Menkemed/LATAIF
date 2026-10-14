@@ -397,6 +397,105 @@ for (const [name, trigger, mitLos] of [
   let g = ''; try { useProductStore.getState().deleteProduct('f1'); } catch (e) { g = (e as Error).message; }
   ok(/Stock Adjustment/.test(g) && qtyOf(db, 'f1') === 2, `G Artikel mit Korrekturbeleg: Löschen abgewiesen (${g.slice(0, 70)})`);
 }
+// ══ M — gemischte Datenbank: die Herkunft wird je Artikel bewiesen, nicht über einen Kontosaldo ═══════════════
+//   A ohne Los, ohne Zugangsbuchung — aber mit eigenem Verkauf (Wareneinsatz) und Retoure (Rücknahme des Wareneinsatzes);
+//   B mit gekauftem Los (INVENTORY im Soll); C ohne Los, Reparaturkosten über eine AUSGABE „Inventory" aktiviert.
+{
+  const db = freshDb();
+  product(db, 'mA', 300, 3); product(db, 'mB', 300, 0); product(db, 'mC', 300, 2); reload();
+  kauf('mB', 2, 300);
+  const invA = imHaus(() => useInvoiceStore.getState().createDirectInvoice('cust-1', [{ productId: 'mA', quantity: 1, unitPrice: 500, purchasePrice: 300,
+    taxScheme: 'MARGIN', vatRate: 10, vatAmount: 0, lineTotal: 500 }] as never, 'ADJ').id);
+  const lineA = s(db, 'SELECT id FROM invoice_lines WHERE invoice_id = ?', [invA]);
+  imHaus(() => posting.postSalesReturnCogs('ret-mA', [{ invoiceLineId: lineA, productId: 'mA', quantity: 1 }], NOW));
+  db.run("UPDATE products SET quantity = 3, stock_status = 'in_stock' WHERE id = 'mA'");   // die Retoure legt das Stück zurück
+  insert(db, 'repairs', { id: 'rep-mC', branch_id: 'branch-main', repair_number: 'REP-MC', product_id: 'mC', status: 'picked_up', created_at: NOW, updated_at: NOW });
+  insert(db, 'expenses', { id: 'ex-mC', branch_id: 'branch-main', expense_number: 'EXP-MC', category: 'Inventory', amount: 40, payment_method: 'cash',
+    expense_date: '2026-10-07', related_module: 'repair', related_entity_id: 'rep-mC', created_at: NOW });
+  imHaus(() => posting.postEntries([
+    { account: 'INVENTORY', direction: 'DEBIT', amount: 40, metadata: {} },
+    { account: 'ACCOUNTS_PAYABLE', direction: 'CREDIT', amount: 40, metadata: {} },
+  ], { occurredAt: NOW, sourceModule: 'EXPENSE', sourceId: 'ex-mC' }));
+  reload();
+  const art = (src: string): number => n(db, "SELECT COUNT(*) FROM ledger_entries WHERE account = 'INVENTORY' AND source_module = ?", [src]);
+  ok(art('PURCHASE') > 0 && art('INVOICE') > 0 && art('SALES_RETURN_COGS') > 0 && art('EXPENSE') > 0,
+    `M (Vorbereitung) INVENTORY trägt Einkauf (B), Wareneinsatz und Retoure (A), aktivierte Reparaturausgabe (C)`);
+  const iA = sa?.lotlessValueIssue('mA'), iC = sa?.lotlessValueIssue('mC');
+  ok(iA === null && /repair costs/.test(String(iC)), `M Herkunft je Artikel: A ohne Zugangsbuchung (trotz B, C und eigenem Verkauf/Retoure), C mit aktivierten Reparaturkosten (${iA} · ${iC})`);
+  const vorC = alles(db);
+  const eC = await abgang(db, 'mC', 1);
+  ok(!eC.ok && /VALUE_NOT_PROVEN/.test(eC.code) && alles(db) === vorC, `M C (Reparaturausgabe aktiviert): abgewiesen, nichts verändert (${eC.code})`);
+  const eA = await abgang(db, 'mA', 1);
+  const eB = await abgang(db, 'mB', 1);
+  ok(eA.ok && eA.r.accounting === 'ACCOUNTING_RECONCILIATION_PENDING' && qtyOf(db, 'mA') === 2 && eB.ok && eB.r.accounting === 'BOOKED' && eB.r.value === 300,
+    `M A: nur Menge (3 → 2); B: Bestandsverlust 300 — die Buchung von B sperrt A nicht (${eA.code || 'ok'} · ${eB.code || 'ok'})`);
+  // Eine INVENTORY-Sollbuchung, die keinem Artikel zuzuordnen ist (Ausgabe ohne Reparaturbezug): fail-closed für Artikel ohne Los
+  insert(db, 'expenses', { id: 'ex-frei', branch_id: 'branch-main', expense_number: 'EXP-FREI', category: 'Inventory', amount: 15, payment_method: 'cash',
+    expense_date: '2026-10-07', created_at: NOW });
+  imHaus(() => posting.postEntries([
+    { account: 'INVENTORY', direction: 'DEBIT', amount: 15, metadata: {} },
+    { account: 'CASH', direction: 'CREDIT', amount: 15, metadata: {} },
+  ], { occurredAt: NOW, sourceModule: 'EXPENSE', sourceId: 'ex-frei' }));
+  reload();
+  const vorU = alles(db);
+  const eA2 = await abgang(db, 'mA', 1);
+  ok(!eA2.ok && /VALUE_NOT_PROVEN/.test(eA2.code) && /unknown origin/.test(String(sa?.lotlessValueIssue('mA'))) && alles(db) === vorU,
+    `M nicht zuordenbare INVENTORY-Buchung (Ausgabe ohne Reparatur): Artikel ohne Los fail-closed, nichts verändert (${eA2.code})`);
+  const eB2 = await abgang(db, 'mB', 1);
+  ok(eB2.ok && eB2.r.accounting === 'BOOKED', `M …der Artikel mit belegtem Los bleibt korrigierbar (sein Wert hängt an seiner Einkaufszeile) (${eB2.code || 'ok'})`);
+}
+// ══ Y — Sync-Parität: eine zweite Testdatenbank bekommt jeden Abgleich-Eintrag über denselben Anwendeweg wie beim Abholen ══
+//   Spiegel = Kopie des Primary zum Stichpunkt vor den Korrekturen; danach jeder Eintrag des Primary über `applySyncChange`
+//   (samt Manifest-Prüfung). Verglichen: alle Belegzeilen, Artikel (Menge, Status), Los (Rest, Status), Hauptbuch (Anzahl,
+//   Salden je Konto, die Buchungszeilen der Belege).
+{
+  const ap = await import('../../src/core/sync/apply-change.ts');
+  const maxLog = (d: Db): number => n(d, 'SELECT COALESCE(MAX(id), 0) FROM sync_changelog');
+  function spiegeln(prim: Db, spiegel: Db, ab: number): { bis: number; abgewiesen: string[] } {
+    const r = prim.exec('SELECT id, table_name, record_id, action, data FROM sync_changelog WHERE id > ? ORDER BY id', [ab])[0];
+    const abgewiesen: string[] = [];
+    let bis = ab;
+    for (const v of r?.values ?? []) {
+      bis = Number(v[0]);
+      try { ap.applySyncChange(spiegel as never, { table_name: String(v[1]), record_id: String(v[2]), action: String(v[3]), data: String(v[4] ?? '{}') }); }
+      catch (e) { abgewiesen.push(`${String(v[1])}/${String(v[3])}: ${String((e as { code?: unknown }).code ?? (e as Error).message)}`); }
+    }
+    return { bis, abgewiesen };
+  }
+  const bild = (d: Db): string => S({
+    belege: d.exec('SELECT * FROM stock_adjustments ORDER BY id')[0]?.values ?? [],
+    artikel: d.exec("SELECT id, quantity, stock_status FROM products WHERE id IN ('ya','yb') ORDER BY id")[0]?.values,
+    lose: d.exec("SELECT id, qty_remaining, status FROM stock_lots WHERE product_id = 'yb' ORDER BY id")[0]?.values,
+    hauptbuch: n(d, 'SELECT COUNT(*) FROM ledger_entries'),
+    salden: d.exec("SELECT account, ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 3) FROM ledger_entries GROUP BY account ORDER BY account")[0]?.values,
+    belegbuchungen: d.exec("SELECT id, account, direction, amount, reverses_entry_id FROM ledger_entries WHERE source_module = 'STOCK_ADJUST' ORDER BY id")[0]?.values ?? [],
+  });
+  const prim = freshDb();
+  product(prim, 'ya', 300, 3); product(prim, 'yb', 300, 0); reload();
+  kauf('yb', 2, 300);
+  const ab = maxLog(prim);
+  const spiegel = new SQL.Database((prim as unknown as { export(): Uint8Array }).export()) as unknown as Db;
+  const a = await abgang(prim, 'ya', 1);
+  const b = await abgang(prim, 'yb', 1);
+  const s1 = spiegeln(prim, spiegel, ab);
+  ok(a.ok && b.ok && s1.abgewiesen.length === 0 && bild(spiegel) === bild(prim) && n(spiegel, 'SELECT COUNT(*) FROM stock_adjustments') === 2,
+    `Y Anlegen: beide Belege, Artikelmengen, Los, Hauptbuch (inkl. Bestandsverlust) auf dem Spiegel gleich (abgewiesen: ${s1.abgewiesen.join('; ') || 'keiner'})`);
+  const c1 = await storno(a.r.adjustmentId);
+  const c2 = await storno(b.r.adjustmentId);
+  const s2 = spiegeln(prim, spiegel, s1.bis);
+  ok(c1.ok && c2.ok && s2.abgewiesen.length === 0 && bild(spiegel) === bild(prim)
+    && n(spiegel, "SELECT COUNT(*) FROM stock_adjustments WHERE status = 'CANCELLED'") === 2 && qtyOf(spiegel, 'ya') === 3 && qtyOf(spiegel, 'yb') === 2,
+    `Y Storno: beide Belege auf beiden Seiten CANCELLED, Mengen, Los und Hauptbuch (Rücknahme) gleich (abgewiesen: ${s2.abgewiesen.join('; ') || 'keiner'})`);
+  const vorRepl = bild(spiegel);
+  const s3 = spiegeln(prim, spiegel, ab);   // derselbe Abgleich noch einmal von vorn
+  ok(s3.abgewiesen.length === 0 && bild(spiegel) === vorRepl && bild(spiegel) === bild(prim),
+    `Y Wiederholung des ganzen Abgleichs: keine doppelte Anwendung (Belege, Mengen, Los, Hauptbuch unverändert)`);
+  let code = '';
+  try { ap.applySyncChange(spiegel as never, { table_name: 'stock_adjustments', record_id: String(a.r.adjustmentId), action: 'delete', data: '{}' }); }
+  catch (e) { code = String((e as { code?: unknown }).code ?? (e as Error).message); }
+  ok(code === ap.SYNC_OPERATION_NOT_ALLOWED && n(spiegel, 'SELECT COUNT(*) FROM stock_adjustments') === 2,
+    `Y nicht erlaubt: ein delete auf Korrekturbelegen wird nicht angewendet, der Beleg bleibt (${code || 'ANGEWANDT'})`);
+}
 // ══ P — Pins ════════════════════════════════════════════════════════════════════════════════════════════════
 {
   // Die Lagerwert-Herkunft (Kopf von stock-adjustment.ts) hängt an genau diesen INVENTORY-Sollbuchungen im Code:
