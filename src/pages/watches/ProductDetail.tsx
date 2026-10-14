@@ -19,7 +19,7 @@ import { planRemoteGallery, GalleryPlanError } from '@/core/products/gallery-pla
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import type { GallerySlot } from '@/core/bridge/product-commands';
 import { confirmAiIdentificationInHouse } from '@/core/products/ai-confirm';
-import { primaryOnlyDeleteProps, blockDeleteOnClient, primaryOnlyLocked } from '@/core/data/primary-only';
+import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { StockAdjustmentPanel } from '@/components/products/StockAdjustmentPanel';
 import { updatePayload, PRODUCT_UPDATE_FIELDS } from '@/core/data/write-payloads';
 import { useInvoiceStore } from '@/stores/invoiceStore';
@@ -1151,8 +1151,9 @@ export function ProductDetail() {
           </Card>
         )}
 
-        {/* STOCK-ADJUSTMENT Phase 1 — Bestandsabgang mit Korrekturbeleg und Storno: nur der Owner, nur am Primary. */}
-        {!editing && perm.isOwner && !primaryOnlyLocked() && (
+        {/* STOCK CORRECTION — Bestandsabgang mit Korrekturbeleg und Storno: nur der Owner; am PC2 über den Primary
+            (Fernbefehl, Rolle des geprüften Absenders), geschrieben wird nur dort. */}
+        {!editing && perm.isOwner && (
           <StockAdjustmentPanel productId={product.id} quantity={product.quantity} onChanged={() => loadProducts()} />
         )}
 

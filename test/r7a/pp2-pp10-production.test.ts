@@ -453,9 +453,9 @@ for (const [weg, muster] of [['P', /UPDATE production_records SET status = 'COMP
 {
   // (Die Gesamtzahl 175 prüfen die Final-Gates mit ALLEN Befehlsmodulen; hier ist nur production-commands geladen.)
   // BULK METAL V1 — seither vier weitere Buchungen ganz hinten: production.complete rückt auf -12.
-  ok(registry.ALLOWED_MUTATIONS.at(-12) === 'production.complete' && registry.ALLOWED_MUTATIONS.length === 114
+  ok(registry.ALLOWED_MUTATIONS.at(-14) === 'production.complete' && registry.ALLOWED_MUTATIONS.length === 116
     && registry.knownCommands().includes('production.complete') && registry.knownCommands().includes('production.create'),
-  `REGISTRY production.complete registriert: 114 Buchungen (+ Posteingang, PARTNER-ITEMS, BULK METAL V1), angemeldet neben production.create (${registry.ALLOWED_MUTATIONS.length})`);
+  `REGISTRY production.complete registriert: 116 Buchungen (+ Posteingang, PARTNER-ITEMS, BULK METAL V1 + STOCK CORRECTION), angemeldet neben production.create (${registry.ALLOWED_MUTATIONS.length})`);
   ok('production.complete' in perms.OPERATION_PERMISSIONS && (perms.OPERATION_PERMISSIONS as Record<string, unknown>)['production.complete'] === null,
     'RECHT wie das Anlegen: kein Tor (die Seite fragt usePermission nicht)');
   const rs = src('src-tauri/src/bridge.rs');

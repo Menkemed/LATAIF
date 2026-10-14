@@ -275,6 +275,10 @@ pub const OP_PAGE_BULK_METALS_GET: &str = "page.bulk_metals.get";
 pub const OP_BULK_LOTS_FOR_SALE_GET: &str = "bulk_metals.lots_for_sale.get";
 pub const OP_BULK_LOT_DETAIL_GET: &str = "bulk_metals.lot_detail.get";
 pub const OP_BULK_ALLOCATION_PREVIEW_GET: &str = "bulk_metals.allocation_preview.get";
+// STOCK CORRECTION — Bestandsabgang und Storno vom zweiten Rechner (nur Owner) und die Karte am Artikel.
+pub const OP_STOCK_ISSUE: &str = "stock_adjustments.issue";
+pub const OP_STOCK_CANCEL: &str = "stock_adjustments.cancel";
+pub const OP_STOCK_PRODUCT_GET: &str = "stock_adjustments.product.get";
 // CENTRAL-UI-PARITY R6E — Angebot, Rechnungs-Lebenszyklus, Nachrichtenprotokoll.
 pub const OP_OFFERS_CREATE: &str = "offers.create";
 pub const OP_OFFERS_UPDATE: &str = "offers.update";
@@ -518,6 +522,10 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_BULK_LOTS_FOR_SALE_GET,
     OP_BULK_LOT_DETAIL_GET,
     OP_BULK_ALLOCATION_PREVIEW_GET,
+    // STOCK CORRECTION
+    OP_STOCK_ISSUE,
+    OP_STOCK_CANCEL,
+    OP_STOCK_PRODUCT_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

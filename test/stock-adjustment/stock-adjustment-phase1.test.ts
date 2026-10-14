@@ -518,7 +518,9 @@ for (const [name, trigger, mitLos] of [
   ok(S(nutzer.sort()) === S(['components/products/StockAdjustmentPanel.tsx', 'core/stock/stock-adjustment.ts']),
     `P ausgelöst nur aus der Karte „Stock corrections" — kein Start, kein Update (${S(nutzer)})`);
   const pd = src('src/pages/watches/ProductDetail.tsx');
-  ok(/!editing && perm\.isOwner && !primaryOnlyLocked\(\) && \(\s*<StockAdjustmentPanel/.test(pd), 'P die Karte erscheint nur für den Owner und nur am Primary');
+  // C5 — der Owner korrigiert auch am PC2; geschrieben wird dort nie lokal, sondern über die Fernbefehle am Primary
+  // (test/old-stock/old-stock-foundation.test.ts, Abschnitt D).
+  ok(/!editing && perm\.isOwner && \(\s*<StockAdjustmentPanel/.test(pd), 'P die Karte erscheint nur für den Owner (am PC2 schreibt sie über den Primary)');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — stock adjustment phase 1: ${PASS} passed, ${fails.length} failed`);

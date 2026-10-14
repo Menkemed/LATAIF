@@ -25,7 +25,8 @@
 //                Anfangsbestands-Abstimmung ihn findet. Sonst: abgewiesen.
 //
 // Ausgeschlossen: Kommission, Agent, nicht „in stock" (reserviert, angeboten, verkauft, in Reparatur, verbraucht …),
-// offene Reparatur, offene Auftragsbindung, Partnerware, Edelmetall. Nur Owner (Admin), nur am Primary, nie automatisch.
+// offene Reparatur, offene Auftragsbindung, Partnerware, Edelmetall. Nur Owner (Admin), nie automatisch; geschrieben wird
+// nur am Primary — der PC2 schickt dieselbe Absicht als Fernbefehl, der Primary prüft die Rolle des Absenders.
 // ════════════════════════════════════════════════════════════════════════════
 import { v4 as uuid } from 'uuid';
 import { getDatabase } from '@/core/db/database';
@@ -374,25 +375,48 @@ export function cancelStockAdjustmentInHouse(input: StockAdjustmentCancelInput, 
   return resultOf(query('SELECT * FROM stock_adjustments WHERE id = ?', [String(row.id)])[0]);
 }
 
-// ── Lesen (Maske am Primary) ────────────────────────────────────────────────
+// ── Lesen (Karte am Primary und, als Fernauskunft `stock_adjustments.product.get`, am PC2) ──────────
+// Die Filiale kommt aus dem Kontext (am PC2: aus dem geprüften Absender), nie aus dem Rumpf.
 
-export function stockAdjustmentsOf(productId: string): StockAdjustmentResult[] {
-  return query('SELECT * FROM stock_adjustments WHERE product_id = ? ORDER BY created_at DESC', [productId]).map(resultOf);
+export interface StockIssuePreview { plan: StockIssuePlan | null; issue: string | null; code: string | null }
+export interface StockCorrectionsRead { docs: StockAdjustmentResult[]; issuePreview: StockIssuePreview | null }
+
+export function stockAdjustmentsFor(ctx: { branchId: string }, productId: string): StockAdjustmentResult[] {
+  return query('SELECT * FROM stock_adjustments WHERE product_id = ? AND branch_id = ? ORDER BY created_at DESC', [productId, ctx.branchId]).map(resultOf);
 }
 
 /** Die Vorschau der Maske: der Plan, oder der Grund, warum nicht. */
-export function previewStockIssue(productId: string, quantity: number): { plan: StockIssuePlan | null; issue: string | null; code: string | null } {
-  try { return { plan: planStockIssue(productId, quantity, currentBranchId()), issue: null, code: null }; }
+export function stockIssuePreviewFor(ctx: { branchId: string }, productId: string, quantity: unknown): StockIssuePreview {
+  try { return { plan: planStockIssue(productId, quantity, ctx.branchId), issue: null, code: null }; }
   catch (e) { return { plan: null, issue: e instanceof Error ? e.message : String(e), code: (e as { code?: string }).code ?? null }; }
 }
 
-// ── Anschlüsse: nur am Primary, exklusiv, EINE Transaktion, erst danach durabel ──────
+/** Alles, was die Karte „Stock corrections" zeichnet: die Belege und — wenn eine Menge genannt ist — die Vorschau. */
+export function stockCorrectionsFor(ctx: { branchId: string }, input: { productId: string; issueQuantity?: unknown }): StockCorrectionsRead {
+  return {
+    docs: stockAdjustmentsFor(ctx, input.productId),
+    issuePreview: input.issueQuantity === undefined || input.issueQuantity === null ? null : stockIssuePreviewFor(ctx, input.productId, input.issueQuantity),
+  };
+}
+
+export function stockAdjustmentsOf(productId: string): StockAdjustmentResult[] {
+  return stockAdjustmentsFor({ branchId: currentBranchId() }, productId);
+}
+
+export function previewStockIssue(productId: string, quantity: number): StockIssuePreview {
+  return stockIssuePreviewFor({ branchId: currentBranchId() }, productId, quantity);
+}
+
+// ── Anschlüsse am Primary: exklusiv, EINE Transaktion, erst danach durabel ──────
+// Der PC2 schreibt nie selbst: er schickt dieselbe Eingabe als Fernbefehl (`stock_adjustments.issue` /
+// `.cancel`, `core/bridge/stock-adjustment-commands.ts`); der Primary fährt dieselbe Hausfolge mit der Rolle des
+// geprüften Absenders. Diese lokalen Anschlüsse weisen am PC2 deshalb ab.
 
 function localCtx(): AdjustmentCtx {
   const session = useAuthStore.getState().session as { role?: string } | null | undefined;
   return { branchId: currentBranchId(), userId: currentUserId(), now: new Date().toISOString(), role: session?.role };
 }
-const nurPrimary = (): Promise<never> => Promise.reject(new StockAdjustmentRejected('PRIMARY_ONLY', 'stock is corrected on the main computer only'));
+const nurPrimary = (): Promise<never> => Promise.reject(new StockAdjustmentRejected('PRIMARY_ONLY', 'this computer writes stock corrections through the main computer'));
 
 export function issueStockOnPrimary(input: StockIssueInput, reload: () => void): Promise<StockAdjustmentResult> {
   if (isClientMode()) return nurPrimary();

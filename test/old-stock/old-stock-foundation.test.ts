@@ -276,6 +276,99 @@ const RCTX = { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test
     'C3 weder Seite noch Auswertung lesen products.paid_from als Geldabfluss');
 }
 
-console.log(`
-${fails.length === 0 ? "PASS" : "FAIL"} — old stock foundation: ${PASS} passed, ${fails.length} failed`);
-if (fails.length > 0) { for (const f of fails) console.log("  - " + f); process.exit(1); }
+// ══ D — Owner am PC2: dieselbe Hausfolge am Primary über Fernbefehle (Rolle des Absenders, Replay, Rollback) ═════
+const cmdS = await import('../../src/core/bridge/stock-adjustment-commands.ts');
+const registry = await import('../../src/core/bridge/command-registry.ts');
+const perms = await import('../../src/core/bridge/command-permissions.ts');
+const readOps = await import('../../src/core/bridge/store-read-ops.ts');
+const { remoteReadContext } = await import('../../src/core/data/read-context.ts');
+const XID = (x: string): string => `${x.padStart(8, '0')}-0000-4000-8000-0000000000cc`;
+const ident = (x: string, op: string, hash = 'h' + x) => ({ commandId: XID(x), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-pc2', op, payloadHash: hash });
+const dps = (db: Db) => ({ db: db as never, begin: posting.beginLedgerTransaction, commit: posting.commitLedgerTransaction, rollback: posting.rollbackLedgerTransaction, durableSave: async () => {}, now: () => NOW });
+const issueBody = (db: Db, pid: string, actionId: string, quantity = 1): Record<string, unknown> => ({
+  actionId, productId: pid, quantity, expectedQuantity: qtyOf(db, pid), reasonCategory: 'LOST', reason: 'missing at the count (PC2)', businessDate: '2026-10-07',
+});
+const ledgerRows = (db: Db, id: string): number => n(db, 'SELECT COUNT(*) FROM remote_command_ledger WHERE command_id = ?', [XID(id)]);
+const valueOf = (o: unknown): Record<string, unknown> => ((o as { value?: Record<string, unknown> }).value ?? {});
+{
+  // D1 Rechte: am Netz entscheidet dieselbe Owner-Regel wie an der Karte, und die Hausfolge prüft sie noch einmal.
+  ok(perms.permissionForOp('stock_adjustments.issue')?.kind === 'isOwner' && perms.permissionForOp('stock_adjustments.cancel')?.kind === 'isOwner'
+    && perms.roleMayRunOp('ADMIN', 'stock_adjustments.issue') && !perms.roleMayRunOp('MANAGER', 'stock_adjustments.issue')
+    && !perms.roleMayRunOp('', 'stock_adjustments.cancel') && !perms.roleMayRunOp('SALES', 'stock_adjustments.cancel'),
+    'D1 Fernbefehle verlangen den Owner (ADMIN); Manager, Verkauf und eine fehlende Rolle dürfen nicht');
+  ok(registry.ALLOWED_MUTATIONS.at(-2) === 'stock_adjustments.issue' && registry.ALLOWED_MUTATIONS.at(-1) === 'stock_adjustments.cancel'
+    && readOps.STORE_READ_OPS.includes('stock_adjustments.product.get') && perms.isOperationCovered('stock_adjustments.product.get')
+    && /OP_STOCK_ISSUE,\s*OP_STOCK_CANCEL,\s*OP_STOCK_PRODUCT_GET,\s*\];/.test(src('src-tauri/src/bridge.rs'))
+    && /import '\.\/stock-adjustment-commands';/.test(src('src/core/bridge/bridge-listener.ts')),
+    'D1 namentlich freigegeben: zwei Buchungen, eine Auskunft — im Renderer und in Rust, am Primary angemeldet');
+
+  const db = freshDb();
+  product(db, 'p1', 300, 3); product(db, 'andere', 200, 5); reload();
+  const andere = S(db.exec("SELECT * FROM products WHERE id = 'andere'")[0]?.values);
+  const d = dps(db);
+  const l0 = ledgerCount(db);
+  const vor = alles(db);
+  const m1 = await cmdS.runStockAction(sa!.issueStockInHouse as never, cmdS.ISSUE_KEYS, d, ident('1', 'stock_adjustments.issue'), 'MANAGER', issueBody(db, 'p1', 'pc2-act-1-xxxxxx'));
+  ok(m1.kind === 'rejected' && (m1 as { code: string }).code === 'PERMISSION_DENIED' && (m1 as { frozen: boolean }).frozen
+    && S({ ...JSON.parse(alles(db)), log: 0 }) === S({ ...JSON.parse(vor), log: 0 }),
+    `D2 MANAGER vom PC2: die Hausfolge weist ab (eingefroren), nichts verändert (${S(m1)})`);
+
+  const r1 = await cmdS.runStockAction(sa!.issueStockInHouse as never, cmdS.ISSUE_KEYS, d, ident('2', 'stock_adjustments.issue'), 'ADMIN', issueBody(db, 'p1', 'pc2-act-2-xxxxxx'));
+  const v1 = valueOf(r1);
+  const doc1 = adj(db, String(v1.adjustmentId));
+  ok(r1.kind === 'ok' && qtyOf(db, 'p1') === 2 && doc1.accounting === 'ACCOUNTING_RECONCILIATION_PENDING' && doc1.created_by === 'user-pc2'
+    && ledgerCount(db) === l0 && n(db, 'SELECT COUNT(*) FROM audit_log WHERE entity_id = ?', [String(v1.adjustmentId)]) === 1
+    && n(db, "SELECT COUNT(*) FROM sync_changelog WHERE table_name = 'stock_adjustments' AND record_id = ?", [String(v1.adjustmentId)]) === 1
+    && ledgerRows(db, '2') === 1,
+    `D3 Owner vom PC2: Abgang am Primary — Beleg ${String(v1.adjustmentNumber)} des Absenders, Menge 3 → 2, keine erfundene Buchung, Protokoll, Sync, Nachweis (${r1.kind})`);
+  const nach1 = alles(db);
+  const r1b = await cmdS.runStockAction(sa!.issueStockInHouse as never, cmdS.ISSUE_KEYS, d, ident('2', 'stock_adjustments.issue'), 'ADMIN', { ...issueBody(db, 'p1', 'pc2-act-2-xxxxxx'), expectedQuantity: 3 });
+  ok(r1b.kind === 'ok' && (r1b as { replayed: boolean }).replayed && alles(db) === nach1,
+    `D4 dieselbe Kennung noch einmal (verlorene Antwort): Wiederholung, keine zweite Wirkung (${S(r1b).slice(0, 80)})`);
+  const r1c = await cmdS.runStockAction(sa!.issueStockInHouse as never, cmdS.ISSUE_KEYS, d, ident('3', 'stock_adjustments.issue'), 'ADMIN', { ...issueBody(db, 'p1', 'pc2-act-2-xxxxxx'), expectedQuantity: 3 });
+  ok(r1c.kind === 'ok' && String(valueOf(r1c).adjustmentId) === String(v1.adjustmentId) && qtyOf(db, 'p1') === 2
+    && n(db, 'SELECT COUNT(*) FROM stock_adjustments') === 1 && ledgerCount(db) === l0,
+    'D4 neue Kennung, dieselbe action_id (zweiter Versuch derselben Absicht): derselbe Beleg, keine zweite Wirkung');
+
+  let payload = '';
+  try { await cmdS.runStockAction(sa!.issueStockInHouse as never, cmdS.ISSUE_KEYS, d, ident('4', 'stock_adjustments.issue'), 'ADMIN', { ...issueBody(db, 'p1', 'pc2-act-4-xxxxxx'), value: 0 }); }
+  catch (e) { payload = String((e as { code?: string }).code); }
+  ok(payload === 'STOCK_PAYLOAD_INVALID' && qtyOf(db, 'p1') === 2 && ledgerRows(db, '4') === 0, `D5 ein Feld, das nur der Primary bestimmt (value), wird abgewiesen, bevor etwas läuft (${payload})`);
+
+  // D6 Fehler mitten in der Transaktion: alles zurück, kein Nachweis — dieselbe Kennung läuft danach genau einmal.
+  db.run("CREATE TRIGGER inject_audit BEFORE INSERT ON audit_log BEGIN SELECT RAISE(ABORT, 'inject: audit'); END");
+  const vorFehler = alles(db);
+  let fehler = '';
+  try { await cmdS.runStockAction(sa!.issueStockInHouse as never, cmdS.ISSUE_KEYS, d, ident('5', 'stock_adjustments.issue'), 'ADMIN', issueBody(db, 'p1', 'pc2-act-5-xxxxxx')); }
+  catch (e) { fehler = (e as Error).message; }
+  ok(/inject: audit/.test(fehler) && alles(db) === vorFehler && ledgerRows(db, '5') === 0, `D6 Fehler beim Protokoll: Beleg, Menge, Nummer, Sync zurück, kein Nachweis (${fehler.slice(0, 60)})`);
+  db.run('DROP TRIGGER inject_audit');
+  const r5 = await cmdS.runStockAction(sa!.issueStockInHouse as never, cmdS.ISSUE_KEYS, d, ident('5', 'stock_adjustments.issue'), 'ADMIN', issueBody(db, 'p1', 'pc2-act-5-xxxxxx'));
+  ok(r5.kind === 'ok' && qtyOf(db, 'p1') === 1 && ledgerRows(db, '5') === 1, 'D6 …danach dieselbe Kennung: genau eine Wirkung (2 → 1)');
+
+  const id5 = String(valueOf(r5).adjustmentId);
+  const c1 = await cmdS.runStockAction(sa!.cancelStockAdjustmentInHouse as never, cmdS.CANCEL_KEYS, d, ident('6', 'stock_adjustments.cancel'), 'MANAGER', { adjustmentId: id5, reason: 'found again' });
+  ok(c1.kind === 'rejected' && (c1 as { code: string }).code === 'PERMISSION_DENIED' && qtyOf(db, 'p1') === 1, 'D7 Storno vom PC2 als MANAGER: abgewiesen');
+  const c2 = await cmdS.runStockAction(sa!.cancelStockAdjustmentInHouse as never, cmdS.CANCEL_KEYS, d, ident('7', 'stock_adjustments.cancel'), 'ADMIN', { adjustmentId: id5, reason: 'found again' });
+  ok(c2.kind === 'ok' && qtyOf(db, 'p1') === 2 && adj(db, id5).status === 'CANCELLED' && ledgerCount(db) === l0,
+    'D7 Storno vom PC2 als Owner: exakt zurück (1 → 2), keine Buchung');
+
+  // D8 Auskunft: die Filiale kommt aus dem geprüften Absender; die Karte bekommt Belege und Vorschau vom Primary.
+  const rd = sa!.stockCorrectionsFor(remoteReadContext({ branchId: 'branch-main', userId: 'user-pc2', role: 'ADMIN' }), { productId: 'p1', issueQuantity: 1 });
+  const fremd = sa!.stockCorrectionsFor(remoteReadContext({ branchId: 'branch-other', userId: 'user-pc2', role: 'ADMIN' }), { productId: 'p1', issueQuantity: null });
+  ok(rd.docs.length === 2 && rd.issuePreview?.plan?.path === 'LOTLESS' && rd.issuePreview.plan.qtyBefore === 2 && fremd.docs.length === 0 && fremd.issuePreview === null,
+    `D8 Fernauskunft: zwei Belege und die Vorschau der eigenen Filiale, eine fremde Filiale sieht nichts (${rd.docs.length}/${fremd.docs.length})`);
+  ok(S(db.exec("SELECT * FROM products WHERE id = 'andere'")[0]?.values) === andere, 'D8 andere Artikel unberührt');
+
+  const panel = src('src/components/products/StockAdjustmentPanel.tsx');
+  ok(/w\.save<StockAdjustmentResult>\('stock_adjustments\.issue', \{\s*local: \(\) => issueStockOnPrimary\(input, reload\),\s*remote: \(\) => input,/.test(panel)
+    && /w\.save<StockAdjustmentResult>\('stock_adjustments\.cancel', \{\s*local: \(\) => cancelStockAdjustmentOnPrimary\(input, reload\),\s*remote: \(\) => input,/.test(panel)
+    && /useSharedRead<StockCorrectionsRead>\(\s*'stock_adjustments\.product\.get'/.test(panel) && !/stockAdjustmentsOf\(|previewStockIssue\(/.test(panel)
+    && /!editing && perm\.isOwner && \(\s*<StockAdjustmentPanel/.test(src('src/pages/watches/ProductDetail.tsx')),
+    'D9 die Karte: am Primary die Hausfolge lokal, am PC2 derselbe Rumpf als Fernbefehl; Lesen über die Auskunft; nur für den Owner');
+  ok(/if \(isClientMode\(\)\) return nurPrimary\(\);\s*return runOnPrimary\(\(\) => issueStockInHouse/.test(src('src/core/stock/stock-adjustment.ts')),
+    'D9 der lokale Anschluss schreibt am PC2 nie selbst (nur über den Primary)');
+}
+
+console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — old stock foundation: ${PASS} passed, ${fails.length} failed`);
+if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }

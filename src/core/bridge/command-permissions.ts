@@ -191,6 +191,9 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'bulk_metals.close_lot': admin('BulkMetals: perm.isAdmin (Close lot)'),
   'bulk_metals.correct_weight': admin('BulkMetals: perm.isAdmin (Correct lot)'),
   'bulk_metals.reverse_adjustment': owner('BulkMetals: perm.isOwner (Reverse write-off)'),
+  // STOCK CORRECTION — die Karte „Stock corrections" steht nur für `perm.isOwner`; die Hausfolge prüft es noch einmal.
+  'stock_adjustments.issue': owner('ProductDetail: perm.isOwner (Stock corrections)'),
+  'stock_adjustments.cancel': owner('ProductDetail: perm.isOwner (Stock corrections)'),
 
   // ── Angebot, Rechnungs-Lebenszyklus, Nachrichten (R6E) ──────────────────
   // BEFUND: `OfferList` („New Offer", „Send", „Accept", „Reject") fragt `usePermission` NICHT, und

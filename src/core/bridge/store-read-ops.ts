@@ -105,6 +105,10 @@ export const OP_BULK_LOTS_FOR_SALE_GET = 'bulk_metals.lots_for_sale.get';
 export const OP_BULK_LOT_DETAIL_GET = 'bulk_metals.lot_detail.get';
 export const OP_BULK_ALLOCATION_PREVIEW_GET = 'bulk_metals.allocation_preview.get';
 
+// STOCK CORRECTION — die Karte „Stock corrections" am Artikel (Belege und Vorschau): der Owner sieht am PC2 dieselbe
+// Karte wie am Primary. Plan und Herkunft des Lagerwerts rechnet der Primary.
+export const OP_STOCK_PRODUCT_GET = 'stock_adjustments.product.get';
+
 /**
  * Die Liste IST die Erlaubnis. Ein Name, der hier fehlt, existiert fuer das Netz nicht — genau
  * wie bei den Buchungen. Dieselbe Liste kennt auch Rust.
@@ -168,6 +172,7 @@ export const STORE_READ_OPS: readonly string[] = [
   OP_BULK_LOTS_FOR_SALE_GET,
   OP_BULK_LOT_DETAIL_GET,
   OP_BULK_ALLOCATION_PREVIEW_GET,
+  OP_STOCK_PRODUCT_GET,
 ];
 
 // Nicht hier — und damit fern nicht aufrufbar — sind nur noch drei Arten von Zugriffen, und keine

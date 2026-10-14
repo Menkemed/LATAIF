@@ -858,16 +858,16 @@ function projection(db: Db): string {
 // ══ R — Registry, Rechte, Lesebefehle ═══════════════════════════════════════
 {
   const am = registry.ALLOWED_MUTATIONS;
-  ok(S(am.slice(-4)) === S(['bulk_metals.write_off', 'bulk_metals.close_lot', 'bulk_metals.correct_weight', 'bulk_metals.reverse_adjustment']), 'X4 vier Mutationen am Ende der Liste');
+  ok(S(am.slice(-6, -2)) === S(['bulk_metals.write_off', 'bulk_metals.close_lot', 'bulk_metals.correct_weight', 'bulk_metals.reverse_adjustment']), 'X4 vier Mutationen vor den zwei STOCK CORRECTION am Ende der Liste');
   ok(perms.OPERATION_PERMISSIONS['bulk_metals.write_off']?.kind === 'isAdmin' && perms.OPERATION_PERMISSIONS['bulk_metals.close_lot']?.kind === 'isAdmin'
     && perms.OPERATION_PERMISSIONS['bulk_metals.correct_weight']?.kind === 'isAdmin' && perms.OPERATION_PERMISSIONS['bulk_metals.reverse_adjustment']?.kind === 'isOwner', 'X3 Rechte: isAdmin ×3, isOwner ×1');
   const ro = readOps.STORE_READ_OPS;
   ok(['page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bulk_metals.lot_detail.get', 'bulk_metals.allocation_preview.get'].every((x) => ro.includes(x)), 'X4 vier Lesebefehle freigegeben');
   const rust = src('src-tauri/src/bridge.rs');
-  const ops = [...am.slice(-4), 'page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bulk_metals.lot_detail.get', 'bulk_metals.allocation_preview.get'];
+  const ops = [...am.slice(-6, -2), 'page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bulk_metals.lot_detail.get', 'bulk_metals.allocation_preview.get'];
   ok(ops.every((x) => rust.includes(`"${x}"`)), 'X4 Rust kennt alle acht');
   const remoteOps = (rust.split('pub const REMOTE_OPS')[1] ?? '').split('];')[0].match(/OP_[A-Z0-9_]+/g) ?? [];
-  ok(remoteOps.length === 192, `X4 REMOTE_OPS = 192 (${remoteOps.length})`);
+  ok(remoteOps.length === 195, `X4 REMOTE_OPS = 195 (${remoteOps.length})`);
   // Registry-Arithmetik am ausgelieferten Zustand: genau die Befehlsmodule, die bridge-listener.ts lädt.
   for (const m of src('src/core/bridge/bridge-listener.ts').matchAll(/^import '\.\/([a-z0-9-]+)';/gm)) {
     await import(`../../src/core/bridge/${m[1]}.ts`);
@@ -877,13 +877,13 @@ function projection(db: Db): string {
   const readsK = known.filter((o) => o.endsWith('.get') || o.endsWith('.list'));
   const mutsK = known.filter((o) => !probes.includes(o) && !readsK.includes(o));
   console.log(`  REGISTRY Probe ${probes.length} / Mutations ${mutsK.length} / Reads ${readsK.length} / Total ${known.length}`);
-  ok(probes.length === 1 && mutsK.length === 114 && readsK.length === 77 && known.length === 192 && probes.length + mutsK.length + readsK.length === known.length,
-    `X5 Registry 1 Probe + 114 Mutations + 77 Reads = 192 (${probes.length}/${mutsK.length}/${readsK.length}/${known.length})`);
+  ok(probes.length === 1 && mutsK.length === 116 && readsK.length === 78 && known.length === 195 && probes.length + mutsK.length + readsK.length === known.length,
+    `X5 Registry 1 Probe + 116 Mutations + 78 Reads = 195 (${probes.length}/${mutsK.length}/${readsK.length}/${known.length})`);
   ok(S([...mutsK].sort()) === S([...am].sort()), 'X5 die registrierten Mutationen sind genau ALLOWED_MUTATIONS');
   const rustName = new Map([...rust.matchAll(/pub const (OP_[A-Z0-9_]+): &str = "([^"]+)";/g)].map((m) => [m[1], m[2]]));
   const rustNames = remoteOps.map((o) => rustName.get(o) ?? `?${o}`);
-  ok(rustNames.every((x) => !x.startsWith('?')) && new Set(rustNames).size === 192 && S([...rustNames].sort()) === S([...known].sort()),
-    `X5 TS = Rust: dieselben 192 Namen (nur TS: ${known.filter((x) => !rustNames.includes(x)).join(',') || '—'}; nur Rust: ${rustNames.filter((x) => !known.includes(x)).join(',') || '—'})`);
+  ok(rustNames.every((x) => !x.startsWith('?')) && new Set(rustNames).size === 195 && S([...rustNames].sort()) === S([...known].sort()),
+    `X5 TS = Rust: dieselben 195 Namen (nur TS: ${known.filter((x) => !rustNames.includes(x)).join(',') || '—'}; nur Rust: ${rustNames.filter((x) => !known.includes(x)).join(',') || '—'})`);
   ok(ops.every((x) => known.includes(x) && perms.isOperationCovered(x)), 'X5 alle acht Bulk-Befehle registriert und mit Recht bedacht');
 }
 

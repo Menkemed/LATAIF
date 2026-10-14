@@ -51,7 +51,10 @@ const R6C = ['suppliers.create', 'suppliers.update', 'agents.update', 'partners.
   'partner_items.record_movement', 'partner_items.settle_sale', 'partner_items.offset', 'partner_items.cancel_movement', 'partner_items.take_over', 'partner_items.change_partners',
   // BULK METAL V1 — vier: die manuellen Lot-Aktionen (BulkMetalsPage — Lot detail: Write off, Close, Correct, Reverse),
   // am Primary ausgeführt mit action_id-Replay; Recht: isAdmin (Write off/Close/Correct), isOwner (Reverse).
-  'bulk_metals.write_off', 'bulk_metals.close_lot', 'bulk_metals.correct_weight', 'bulk_metals.reverse_adjustment'];
+  'bulk_metals.write_off', 'bulk_metals.close_lot', 'bulk_metals.correct_weight', 'bulk_metals.reverse_adjustment',
+  // STOCK CORRECTION — zwei: Bestandsabgang und Storno (ProductDetail — Stock corrections), am Primary mit action_id-Replay;
+  // Recht: isOwner; Beweise in test/old-stock und test/stock-adjustment.
+  'stock_adjustments.issue', 'stock_adjustments.cancel'];
 
 // ── §1 Die Matrix deckt sich mit der Freigabeliste ──────────────────────
 const registry = src('src/core/bridge/command-registry.ts');
@@ -209,12 +212,12 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
 {
   const ops = src('src/core/bridge/store-read-ops.ts');
   const parity = [...ops.matchAll(/export const OP_[A-Z_]+ = '([^']+)'/g)].length;
-  ok(parity === 58, `10 achtundfuenfzig typisierte Auskuenfte (R6C: +2 Inventur; R6D: +3; A5: +1; BULK METAL V1: +4) (${parity})`);
-  ok(erlaubt.length === 114, `10 vierzig Buchungen plus die eine aus R5F.1 plus elf aus R6C plus achtundzwanzig aus R6D plus acht aus R6E plus vierzehn aus R6F plus eins aus R7A (production.complete) plus Posteingang plus sechs PARTNER-ITEMS plus vier BULK METAL V1 (${erlaubt.length})`);
+  ok(parity === 59, `10 neunundfuenfzig typisierte Auskuenfte (R6C: +2 Inventur; R6D: +3; A5: +1; BULK METAL V1: +4; STOCK CORRECTION: +1) (${parity})`);
+  ok(erlaubt.length === 116, `10 vierzig Buchungen plus die eine aus R5F.1 plus elf aus R6C plus achtundzwanzig aus R6D plus acht aus R6E plus vierzehn aus R6F plus eins aus R7A (production.complete) plus Posteingang plus sechs PARTNER-ITEMS plus vier BULK METAL V1 plus zwei STOCK CORRECTION (${erlaubt.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '')
     .matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 192, `10 und Rust laesst dieselben 192 Namen durch (PRE-G5 + PARTNER-ITEMS + BULK METAL V1) (${rustOps})`);
+  ok(rustOps === 195, `10 und Rust laesst dieselben 195 Namen durch (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${rustOps})`);
 }
 
 // ── R5A — Auftrag → Rechnung: EINE Handlung, EINE Buchung ───────────────

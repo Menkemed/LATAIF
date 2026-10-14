@@ -168,6 +168,9 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // BULK METAL V1 — die manuellen Aktionen an einem Bulk-Lot (Hausfolge mit action_id-Replay): Lot
   // korrigieren, Teil-Schwund abschreiben, Lot schließen, die letzte Abschreibung stornieren.
   'bulk_metals.write_off', 'bulk_metals.close_lot', 'bulk_metals.correct_weight', 'bulk_metals.reverse_adjustment',
+  // STOCK CORRECTION — Bestandsabgang und sein Storno auch vom zweiten Rechner (nur Owner, C5): dieselbe Hausfolge am
+  // Primary mit action_id-Replay, Herkunft des Lagerwerts aus dem Hauptbuch, Protokoll und Sync in der Transaktion.
+  'stock_adjustments.issue', 'stock_adjustments.cancel',
 ];
 
 export interface CommandSpec {
