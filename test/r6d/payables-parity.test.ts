@@ -942,7 +942,9 @@ marker('CENTRAL_UI_R6D_PAYABLES_CLIENT_NO_LOCAL_WRITE_PROVED');
     && !/applySupplierCreditViaServer|recordExpensePayment\(|addPurchasePayment\(|grantStandaloneCredit\(|getOpenCredits\(/.test(ps)
     && /planSupplierPayment\(/.test(ps) && /data-supplier-pay-save/.test(ps) && /data-supplier-credit-save/.test(ps) && /data-supplier-pay-mode/.test(ps),
   'UI PaySupplierModal: Zahlung und Guthaben je EINE Buchung, Vorschau mit DEMSELBEN Planer wie das Haus, kein Alt-Sync-Server');
-  const houseSrc = codeOf(src('src/core/payables/payables-house.ts'));
+  // RELEASE 0.8.83 — Zeilenenden normalisieren: mit core.autocrlf steht die Datei in der Arbeitskopie als CRLF, das
+  // Herausschneiden von `atomar` (…\n}\n) griff dann nicht und der Check schlug fehl, obwohl der Code unverändert war.
+  const houseSrc = codeOf(src('src/core/payables/payables-house.ts').replace(/\r\n/g, '\n'));
   ok(!/safePost|'branch-main'|beginLedgerTransaction\(\);\s*try \{\s*const out/.test(houseSrc.replace(/export function atomar[\s\S]*?\n}\n/, '')), 'DOMAIN die Hausfolge bucht strikt, ohne stilles branch-main, ohne eigene Klammer (ausser `atomar` für Altaufrufer)');
   const stores = ['src/stores/expenseStore.ts', 'src/stores/purchaseStore.ts', 'src/stores/supplierStore.ts', 'src/stores/recurringExpenseStore.ts'].map((f) => codeOf(src(f))).join('\n');
   ok(/createExpenseInHouse\(/.test(stores) && /recordExpensePaymentInHouse\(/.test(stores) && /recordPurchasePaymentInHouse\(/.test(stores)
