@@ -42,6 +42,10 @@ export function OpeningBalancesPage() {
         <span>Old customer and supplier balances are recorded per customer or supplier (Edit Client / Supplier Edit → Opening balances).</span>
         <span>{data.booking.reason}</span>
         <span>Old stock: see the page “Old stock”. Cash, bank and Benefit: the existing opening from the settings stays as it is (booked on {data.cashOpening.bookedOn}) — it is not moved to {data.cutoffDate} without a decision.</span>
+        {/* B1 OPENING ACCOUNTING — die ganze Eröffnungsbilanz (Kasse gezählt, Darlehen, VAT, Saldenliste, Bilanzvorschau). */}
+        <button onClick={() => navigate('/settings?tab=opening')} className="text-left cursor-pointer" style={{ background: 'none', border: 'none', padding: 0, color: '#1F4E8C', fontSize: 13 }} data-opening-settings-link>
+          The complete opening balance sheet (cash count, loans, other balances, VAT, trial balance): Settings → Opening Balances
+        </button>
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20, marginBottom: 24 }}>
         {(['CUSTOMER_RECEIVABLE', 'CUSTOMER_ADVANCE', 'SUPPLIER_PAYABLE', 'SUPPLIER_ADVANCE'] as const).map((k) => (

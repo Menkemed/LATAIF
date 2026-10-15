@@ -3,7 +3,7 @@ import { v4 as uuid } from 'uuid';
 import { useNavigate } from 'react-router-dom';
 import {
   Building2, Receipt, Tags, GitBranch, Users, Hash, AlertTriangle,
-  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe, Phone, Copy, ExternalLink, Wrench,
+  Plus, Pencil, Trash2, Check, X, Power, Cloud, Sparkles, Globe, Phone, Copy, ExternalLink, Wrench, Scale,
 } from 'lucide-react';
 import { Button } from '@/components/ui/Button';
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
@@ -18,6 +18,8 @@ import { BackupRestorePanel } from './BackupRestorePanel';
 import { StorageMaintenancePanel } from './StorageMaintenancePanel';
 import { DataLocationPanel } from './DataLocationPanel';
 import { DataRepairsTab } from './DataRepairsTab';
+// B1 OPENING ACCOUNTING — Erfassung und Abstimmung der Eröffnungsbilanz (Owner; Primary und PC2).
+import { OpeningAccountingPanel } from '@/components/finance/OpeningAccountingPanel';
 import type { Product } from '@/core/models/types';
 import { getDatabase, saveDatabase, resetDatabase, flushDatabase } from '@/core/db/database';
 import { query, currentBranchId } from '@/core/db/helpers';
@@ -39,7 +41,7 @@ import { INVOICE_COMPANY_DEFAULTS, INVOICE_COMPANY_KEYS, type InvoiceA5Company }
 
 // ── Constants ──
 
-type TabKey = 'company' | 'tax' | 'categories' | 'branch' | 'branches' | 'users' | 'numbering' | 'language' | 'phone' | 'ai' | 'sync' | 'updates' | 'duplicates' | 'repairs' | 'danger';
+type TabKey = 'company' | 'tax' | 'opening' | 'categories' | 'branch' | 'branches' | 'users' | 'numbering' | 'language' | 'phone' | 'ai' | 'sync' | 'updates' | 'duplicates' | 'repairs' | 'danger';
 
 interface TabDef {
   key: TabKey;
@@ -50,6 +52,7 @@ interface TabDef {
 const TABS: TabDef[] = [
   { key: 'company', label: 'Company', icon: <Building2 size={16} /> },
   { key: 'tax', label: 'Tax / VAT', icon: <Receipt size={16} /> },
+  { key: 'opening', label: 'Opening Balances', icon: <Scale size={16} /> },
   { key: 'categories', label: 'Categories', icon: <Tags size={16} /> },
   { key: 'branch', label: 'Branch', icon: <GitBranch size={16} /> },
   { key: 'branches', label: 'Branches', icon: <GitBranch size={16} /> },
@@ -103,6 +106,10 @@ function setSetting(branchId: string, key: string, value: string, category: stri
   const r = role();
   if (r !== 'ADMIN' && r !== 'owner') {
     throw new Error('Only admin can modify settings.');
+  }
+  // B1 OPENING ACCOUNTING — die alte Eröffnung ist eingefroren: keine stille rückwirkende Änderung des 01.01.2000.
+  if (/^finance\.opening_(cash|bank|benefit)$/.test(key)) {
+    throw new Error('The earlier opening balances are frozen — record the balances as of the cutoff under Settings → Opening Balances.');
   }
   const db = getDatabase();
   const now = new Date().toISOString();
@@ -298,11 +305,8 @@ function TaxTab() {
     setSetting(branchId, 'partner.profit_share_default', partnerProfitShareDefault, 'partner');
     setSetting(branchId, 'partner.report_period', partnerReportPeriod, 'partner');
     setSetting(branchId, 'partner.warn_limit', partnerWarnLimit, 'partner');
-    if (isOwner) {
-      setSetting(branchId, 'finance.opening_cash', openingCash || '0', 'finance');
-      setSetting(branchId, 'finance.opening_bank', openingBank || '0', 'finance');
-      setSetting(branchId, 'finance.opening_benefit', openingBenefit || '0', 'finance');
-    }
+    // B1 OPENING ACCOUNTING — die alte Eröffnung (finance.opening_*) wird hier nicht mehr gespeichert: sie ist eingefroren
+    // (siehe Tab „Opening Balances"); `setSetting` weist eine Änderung zusätzlich ab.
     setSetting(branchId, 'finance.monthly_target', (monthlyTarget || '').trim(), 'finance');
     setSaved('Tax, payment & partner settings saved.');
   }
@@ -392,39 +396,22 @@ function TaxTab() {
           </FieldRow>
 
           <div style={{ borderTop: '1px solid #E5E9EE', margin: '16px 0 8px', paddingTop: 14 }}>
-            <span className="text-overline">OPENING BALANCES (STATUS QUO)</span>
-            <p style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }}>
+            <span className="text-overline">OPENING BALANCES (EARLIER SETTING — FROZEN)</span>
+            {/* B1 OPENING ACCOUNTING — nur noch Anzeige: der Stand am Stichtag wird im Tab „Opening Balances" erfasst. */}
+            <p style={{ fontSize: 12, color: '#6B7280', marginTop: 4 }} data-legacy-opening-frozen>
               {isOwner
-                ? 'Starting balance for cash, bank, and Benefit at the moment you begin using LATAIF. Used as the baseline for the cashflow calculation.'
-                : 'Only an Admin can edit opening balances.'}
+                ? 'Earlier starting balances (booked on 01.01.2000 only if the ledger backfill was run). They are kept as they are and can no longer be changed here — record the balances as of 15.10.2026 under “Opening Balances”.'
+                : 'Only the owner records opening balances (tab “Opening Balances”).'}
             </p>
           </div>
           <FieldRow label="Opening Cash">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Input
-                type="number" step="0.01" value={openingCash} onChange={e => setOpeningCash(e.target.value)}
-                placeholder="0" style={{ maxWidth: 160 }} disabled={!isOwner}
-              />
-              <span style={{ fontSize: 13, color: '#6B7280' }}>BHD on hand (cash)</span>
-            </div>
+            <span style={{ fontSize: 13, color: '#374151' }} className="font-mono">{Number(openingCash || 0).toFixed(3)} BHD (earlier setting, read-only)</span>
           </FieldRow>
           <FieldRow label="Opening Bank">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Input
-                type="number" step="0.01" value={openingBank} onChange={e => setOpeningBank(e.target.value)}
-                placeholder="0" style={{ maxWidth: 160 }} disabled={!isOwner}
-              />
-              <span style={{ fontSize: 13, color: '#6B7280' }}>BHD in bank accounts</span>
-            </div>
+            <span style={{ fontSize: 13, color: '#374151' }} className="font-mono">{Number(openingBank || 0).toFixed(3)} BHD (earlier setting, read-only)</span>
           </FieldRow>
           <FieldRow label="Opening Benefit">
-            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <Input
-                type="number" step="0.01" value={openingBenefit} onChange={e => setOpeningBenefit(e.target.value)}
-                placeholder="0" style={{ maxWidth: 160 }} disabled={!isOwner}
-              />
-              <span style={{ fontSize: 13, color: '#6B7280' }}>BHD in BenefitPay app balance</span>
-            </div>
+            <span style={{ fontSize: 13, color: '#374151' }} className="font-mono">{Number(openingBenefit || 0).toFixed(3)} BHD (earlier setting, read-only)</span>
           </FieldRow>
 
           {/* Sales Overview gauge target — overrides auto-logic when set. */}
@@ -3347,7 +3334,7 @@ function SettingsPageBody() {
   const initialTab = ((): TabKey => {
     try {
       const t = new URLSearchParams(window.location.search).get('tab');
-      const valid: TabKey[] = ['company', 'tax', 'categories', 'branch', 'branches', 'users', 'numbering', 'language', 'phone', 'ai', 'sync', 'updates', 'duplicates', 'repairs', 'danger'];
+      const valid: TabKey[] = ['company', 'tax', 'opening', 'categories', 'branch', 'branches', 'users', 'numbering', 'language', 'phone', 'ai', 'sync', 'updates', 'duplicates', 'repairs', 'danger'];
       if (t && valid.includes(t as TabKey)) return t as TabKey;
     } catch { /* */ }
     return 'company';
@@ -3371,6 +3358,7 @@ function SettingsPageBody() {
     switch (activeTab) {
       case 'company': return <CompanyTab />;
       case 'tax': return <TaxTab />;
+      case 'opening': return <OpeningAccountingPanel />;
       case 'categories': return <CategoriesTab />;
       case 'branch': return <BranchTab />;
       case 'branches': return <BranchesTab />;
