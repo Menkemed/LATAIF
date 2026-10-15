@@ -34,6 +34,9 @@ import { Bhd } from '@/components/ui/Bhd';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 // CENTRAL-UI-PARITY R2D — die Seite liest ueber die gemeinsame Ladefunktion.
 import { useSharedRead } from '@/core/data/shared-read';
+import { usePartyBalances } from '@/core/parties/use-party-balances';
+import { OpeningBalancesSection } from '@/components/parties/OpeningBalancesSection';
+import { CustomerSettlementModal } from '@/components/parties/CustomerSettlementModal';
 import { customerDetailReadsFor, type CustomerDetailReads } from '@/core/data/page-reads';
 import { IdentityPhotoField } from '@/components/identity/IdentityPhotoField';
 import { saveCustomerUpdate } from '@/core/customers/customer-save';
@@ -93,7 +96,7 @@ export function CustomerDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/clients');
-  const { customers, loadCustomers, updateCustomer, deleteCustomer, getCustomerStats, getAvailableCredit } = useCustomerStore();
+  const { customers, loadCustomers, updateCustomer, deleteCustomer } = useCustomerStore();
   const { loadReturns: loadSalesReturns, getCustomerRefundPayable } = useSalesReturnStore();
   const { products, loadProducts } = useProductStore();
   const { debts, loadDebts } = useDebtStore();
@@ -109,7 +112,7 @@ export function CustomerDetail() {
   // v0.7.12 — Cross-Link Customer ↔ Supplier: wenn der Customer parallel als
   // Supplier auch existiert (z.B. weil er Consignment-Ware verkauft hat),
   // zeigen wir hier seine Supplier-Sicht (was wir IHM schulden).
-  const { suppliers, loadSuppliers, getLedger: getSupplierLedger } = useSupplierStore();
+  const { suppliers, loadSuppliers } = useSupplierStore();
   // Ohne Selektor: die Seite rendert neu, wenn sich Einkäufe ändern — der Rollen-Saldo liest dann frisch.
   const { loadPurchases } = usePurchaseStore();
   const [settleModal, setSettleModal] = useState<{ open: boolean; mode: SettleGoldMode; credit?: CustomerGoldCredit }>({ open: false, mode: 'return_customer' });
@@ -125,6 +128,10 @@ export function CustomerDetail() {
   const [noteModal, setNoteModal] = useState(false);
   const [noteDraft, setNoteDraft] = useState('');
   const [editErrors, setEditErrors] = useState<Record<string, string>>({});
+  // OPENING BALANCES — eine noch nicht erfasste Eingabe im Bereich „Opening balances" (Schutz vor „Save").
+  const [openingDirty, setOpeningDirty] = useState(false);
+  // SETTLEMENT — „Receive Payment" über die offenen Rechnungen.
+  const [showSettle, setShowSettle] = useState(false);
   const perm = usePermission();
 
   useEffect(() => {
@@ -160,7 +167,14 @@ export function CustomerDetail() {
 
   // Der Saldo der Lieferantenrolle aus DERSELBEN Funktion wie die Lieferanten-Detailseite
   // (`getLedger`: Outstanding, Total Paid) — keine eigene Summe, keine Verrechnung mit diesem Kunden.
-  const linkedSupplierLedger = linkedSupplier ? getSupplierLedger(linkedSupplier.id) : null;
+  // PARTY-BALANCES S0 — Kunden- und Rollensaldo aus EINER Auskunft (`parties.balances.get`): am Primary lokal,
+  // am PC2 vom Primary. Ohne Antwort `null` → „n/a", nie 0,000.
+  const [balanceTick, setBalanceTick] = useState(0);
+  const balances = usePartyBalances(
+    { customerIds: id ? [id] : [], supplierIds: linkedSupplier ? [linkedSupplier.id] : [] },
+    [invoices, debts, allGoldCredits], balanceTick,
+  );
+  const linkedSupplierLedger = linkedSupplier ? balances.supplier(linkedSupplier.id) : null;
 
   // Plan repair-multi-supplier — Gold-Credits dieses Kunden
   const goldCreditSummary = useMemo(() => id ? getGoldCreditByCustomer(id) : [], [id, getGoldCreditByCustomer, allGoldCredits]);
@@ -210,6 +224,10 @@ export function CustomerDetail() {
     if (!form.firstName?.trim()) errs.firstName = 'Required';
     if (!form.lastName?.trim()) errs.lastName = 'Required';
     setEditErrors(errs);
+    // OPENING BALANCES — „Save" speichert nur die Kontaktdaten; eine begonnene Eröffnungsposition wird nie mitgespeichert.
+    if (Object.keys(errs).length === 0 && openingDirty && !(await window.confirm(
+      'The opening position below is not recorded yet. "Save" only saves the contact details — save them without it?',
+    ))) return;
     if (Object.keys(errs).length > 0) {
       setTimeout(() => {
         const firstKey = Object.keys(errs)[0];
@@ -254,10 +272,12 @@ export function CustomerDetail() {
   }
 
   const initials = `${(customer.firstName || '').charAt(0)}${(customer.lastName || '').charAt(0)}`.toUpperCase() || '?';
-  const stats = id ? getCustomerStats(id) : { revenue: 0, profit: 0, outstanding: 0, invoiceOutstanding: 0, loanOutstanding: 0, invoiceCount: 0, openInvoiceCount: 0, openLoanCount: 0, openTransferCount: 0 };
+  const knownStats = balances.customer(id);
+  const stats = knownStats ?? { revenue: 0, profit: 0, outstanding: 0, invoiceOutstanding: 0, loanOutstanding: 0, invoiceCount: 0, openInvoiceCount: 0, openLoanCount: 0, openTransferCount: 0, storeCredit: 0 };
+  const money = (v: number): number | null => (knownStats ? v : null);
   const refundPayable = id ? getCustomerRefundPayable(id) : 0;
   // Customer-Credit Punkt 7 — offenes Store-Guthaben (Spiegel SupplierDetail.creditBalance).
-  const storeCredit = id ? getAvailableCredit(id) : 0;
+  const storeCredit = knownStats?.storeCredit ?? 0;
   const marginPct = stats.revenue > 0 ? (stats.profit / stats.revenue) * 100 : 0;
   const lastOrderInvoice = customerInvoices[0];
 
@@ -291,7 +311,7 @@ export function CustomerDetail() {
 
   // —— Helper: KPI Card with right-side icon
   function KpiCard({ label, value, hint, icon, iconBg, valueColor }:
-    { label: string; value: number; hint?: string; icon: React.ReactNode; iconBg: string; valueColor?: string }) {
+    { label: string; value: number | null; hint?: string; icon: React.ReactNode; iconBg: string; valueColor?: string }) {
     return (
       <Card>
         <div className="flex items-start justify-between" style={{ marginBottom: 4 }}>
@@ -301,7 +321,9 @@ export function CustomerDetail() {
           </div>
         </div>
         <div className="font-display" style={{ fontSize: 26, color: valueColor || '#0F0F10', lineHeight: 1.1, marginTop: 4 }}>
-          <Bhd v={value}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span>
+          {value === null
+            ? <span title="Balance not available from the main computer" data-balance-unknown style={{ color: '#9CA3AF' }}>n/a</span>
+            : <><Bhd v={value}/> <span style={{ fontSize: 12, color: '#6B7280' }}>BHD</span></>}
         </div>
         {hint && <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>{hint}</div>}
       </Card>
@@ -397,7 +419,7 @@ export function CustomerDetail() {
               <div style={{ display: 'flex', flexDirection: 'column', gap: 10, fontSize: 13 }}>
                 <div className="flex justify-between"><span style={{ color: '#6B7280' }}>Client Since</span><span style={{ color: '#0F0F10' }}>{fmtDate(customer.createdAt)}</span></div>
                 <div className="flex justify-between"><span style={{ color: '#6B7280' }}>Client Type</span><span style={{ color: '#0F0F10', textTransform: 'capitalize' }}>{customer.customerType.replace('_', ' ')}</span></div>
-                <div className="flex justify-between"><span style={{ color: '#6B7280' }}>Total Orders</span><span style={{ color: '#0F0F10' }}>{stats.invoiceCount}</span></div>
+                <div className="flex justify-between"><span style={{ color: '#6B7280' }}>Total Orders</span><span style={{ color: '#0F0F10' }}>{knownStats ? stats.invoiceCount : 'n/a'}</span></div>
                 <div className="flex justify-between"><span style={{ color: '#6B7280' }}>Last Order</span><span style={{ color: '#0F0F10' }}>{fmtDate(lastOrderInvoice?.issuedAt || lastOrderInvoice?.createdAt) || '\u2014'}</span></div>
               </div>
             </div>
@@ -406,7 +428,7 @@ export function CustomerDetail() {
 
         {/* CUSTOMER-SUPPLIER-ROLE-LINK — die Lieferantenrolle DIESER Person (bestätigte Verknüpfung).
             Eigenes Konto: der Saldo steht hier nur daneben, nie verrechnet. */}
-        {!editing && linkedSupplier && linkedSupplierLedger && (
+        {!editing && linkedSupplier && (
           <div style={{ marginTop: 16 }} data-supplier-role-card>
             <button
               onClick={() => navigate(`/suppliers/${linkedSupplier.id}`)}
@@ -441,13 +463,13 @@ export function CustomerDetail() {
                 <div>
                   <div className="text-overline">Supplier Paid</div>
                   <div className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }} data-supplier-role-paid>
-                    <Bhd v={linkedSupplierLedger.totalPaid}/> BHD
+                    {linkedSupplierLedger ? <><Bhd v={linkedSupplierLedger.totalPaid}/> BHD</> : 'n/a'}
                   </div>
                 </div>
                 <div>
                   <div className="text-overline">Supplier Payable {'\u00b7'} Open</div>
-                  <div className="font-mono" style={{ fontSize: 16, color: linkedSupplierLedger.outstandingBalance > 0 ? '#DC2626' : '#6B7280', fontWeight: 600 }} data-supplier-role-open>
-                    <Bhd v={linkedSupplierLedger.outstandingBalance}/> BHD
+                  <div className="font-mono" style={{ fontSize: 16, color: (linkedSupplierLedger?.outstandingBalance ?? 0) > 0 ? '#DC2626' : '#6B7280', fontWeight: 600 }} data-supplier-role-open>
+                    {linkedSupplierLedger ? <><Bhd v={linkedSupplierLedger.outstandingBalance}/> BHD</> : 'n/a'}
                   </div>
                   <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>View Supplier {'\u2197'}</div>
                 </div>
@@ -632,6 +654,11 @@ export function CustomerDetail() {
           </Card>
         ) : null}
 
+        {/* OPENING BALANCES — eigener Bereich mit eigener Bestätigung (nur Owner); nicht Teil von „Save". */}
+        {editing && perm.isOwner && (
+          <OpeningBalancesSection partyType="CUSTOMER" partyId={customer.id} mode="edit" canRecord onDirtyChange={setOpeningDirty} />
+        )}
+
         {!editing && (
           <>
             {/* RECEIVABLE ROW — 3 Basis-Cards + konditional Refund-Payable/Store-Credit */}
@@ -640,7 +667,7 @@ export function CustomerDetail() {
               gridTemplateColumns: `repeat(${3 + (refundPayable > 0 ? 1 : 0) + (storeCredit > 0.005 ? 1 : 0)}, minmax(0, 1fr))`,
               gap: 16, marginTop: 24,
             }}>
-              <KpiCard label="Open Receivables" value={stats.invoiceOutstanding}
+              <KpiCard label="Open Receivables" value={money(stats.invoiceOutstanding)}
                 hint={(() => {
                   const parts: string[] = [];
                   if (stats.openInvoiceCount > 0) parts.push(`${stats.openInvoiceCount} ${stats.openInvoiceCount === 1 ? 'invoice' : 'invoices'}`);
@@ -649,11 +676,11 @@ export function CustomerDetail() {
                 })()}
                 icon={<Receipt size={18} style={{ color: '#DC2626' }} />} iconBg="rgba(220,38,38,0.10)"
                 valueColor={stats.invoiceOutstanding > 0 ? '#DC2626' : '#0F0F10'} />
-              <KpiCard label="Loans / Other Receivable" value={stats.loanOutstanding}
+              <KpiCard label="Loans / Other Receivable" value={money(stats.loanOutstanding)}
                 hint={`${stats.openLoanCount} ${stats.openLoanCount === 1 ? 'Loan' : 'Loans'}`}
                 icon={<FileMinus size={18} style={{ color: '#FF8730' }} />} iconBg="rgba(255,135,48,0.10)"
                 valueColor={stats.loanOutstanding > 0 ? '#FF8730' : '#0F0F10'} />
-              <KpiCard label="Total Receivable" value={stats.outstanding}
+              <KpiCard label="Total Receivable" value={money(stats.outstanding)}
                 hint="Total Outstanding"
                 icon={<Wallet size={18} style={{ color: '#3D7FFF' }} />} iconBg="rgba(61,127,255,0.10)"
                 valueColor={stats.outstanding > 0 ? '#3D7FFF' : '#0F0F10'} />
@@ -673,13 +700,16 @@ export function CustomerDetail() {
               )}
             </div>
 
+            {/* OPENING BALANCES — erfasste, noch nicht gebuchte Eröffnungsposten (nur lesen). */}
+            <OpeningBalancesSection partyType="CUSTOMER" partyId={customer.id} mode="summary" canRecord={false} />
+
             {/* REVENUE / PROFIT ROW */}
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, minmax(0, 1fr))', gap: 16, marginTop: 16 }}>
-              <KpiCard label="Total Revenue" value={stats.revenue}
+              <KpiCard label="Total Revenue" value={money(stats.revenue)}
                 hint="All time"
                 icon={<BarChart3 size={18} style={{ color: '#16A34A' }} />} iconBg="rgba(22,163,74,0.10)" />
-              <KpiCard label="Total Profit" value={stats.profit}
-                hint={`${marginPct.toFixed(1)}% Margin`}
+              <KpiCard label="Total Profit" value={money(stats.profit)}
+                hint={knownStats ? `${marginPct.toFixed(1)}% Margin` : undefined}
                 icon={<TrendingUp size={18} style={{ color: '#16A34A' }} />} iconBg="rgba(22,163,74,0.10)"
                 valueColor={stats.profit >= 0 ? '#0F0F10' : '#DC2626'} />
             </div>
@@ -689,6 +719,11 @@ export function CustomerDetail() {
               <Card>
                 <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
                   <h3 style={{ fontSize: 17, fontWeight: 600, color: '#0F0F10' }}>Invoices</h3>
+                  <div className="flex gap-2">
+                  {/* SETTLEMENT — eine Zahlung über die offenen Rechnungen (älteste zuerst oder selbst verteilt). */}
+                  {perm.canRecordPayments && knownStats && stats.invoiceOutstanding > 0.005 && (
+                    <Button variant="primary" onClick={() => setShowSettle(true)} data-settlement-open>Receive Payment</Button>
+                  )}
                   <button onClick={() => navigate(`/invoices?customer=${id}`)}
                     className="cursor-pointer transition-colors"
                     style={{ background: 'none', border: '1px solid #E5E9EE', borderRadius: 8, padding: '6px 14px', fontSize: 12, color: '#0F0F10' }}
@@ -696,6 +731,7 @@ export function CustomerDetail() {
                     onMouseLeave={e => (e.currentTarget.style.borderColor = '#E5E9EE')}>
                     View All Invoices
                   </button>
+                  </div>
                 </div>
                 {customerInvoices.length === 0 ? (
                   <p style={{ fontSize: 13, color: '#6B7280' }}>No invoices yet.</p>
@@ -1106,6 +1142,15 @@ export function CustomerDetail() {
           <Button variant="danger" onClick={handleDelete}>Delete</Button>
         </div>
       </Modal>
+
+      {showSettle && (
+        <CustomerSettlementModal
+          customerId={customer.id}
+          customerName={`${customer.firstName} ${customer.lastName}`.trim()}
+          onClose={() => setShowSettle(false)}
+          onDone={() => { setBalanceTick((v) => v + 1); loadInvoices(); loadCustomers(); }}
+        />
+      )}
 
       <SettleGoldModal
         open={settleModal.open}

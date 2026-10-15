@@ -28,6 +28,7 @@ import { buildInvoiceA5Data, printInvoiceA5 } from '@/core/pdf/invoice-a5';
 import { invoicePrintFor, type InvoicePrintExtras } from '@/core/data/page-reads';
 import { fetchFromPrimary, readsFromPrimary } from '@/core/data/primary-source';
 import { useSharedRead } from '@/core/data/shared-read';
+import { usePartyBalances } from '@/core/parties/use-party-balances';
 import { localReadContext } from '@/core/data/read-context';
 import { invoiceA5Logos } from '@/core/pdf/invoice-a5-logos';
 import { getProductSpecs } from '@/core/utils/product-format';
@@ -76,7 +77,7 @@ export function InvoiceDetail() {
   // CENTRAL-UI-PARITY R4C — dieselben Masken, zwei Anschluesse hinter jeder Geldhandlung.
   // Ein Waechter je Buchung; eine Anzeige fuer den Ausgang.
   const w = useSharedWrites();
-  const { customers, loadCustomers, getAvailableCredit } = useCustomerStore();
+  const { customers, loadCustomers } = useCustomerStore();
   const { employees, loadEmployees } = useEmployeeStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
   const { repairs, loadRepairs, updateStatus: updateRepairStatus } = useRepairStore();
@@ -199,6 +200,12 @@ export function InvoiceDetail() {
     () => linkedRepairs.filter(r => r.status !== 'picked_up' && r.status !== 'cancelled' && r.status !== 'returned' && r.status !== 'CANCELLED' && r.status !== 'DELIVERED'),
     [linkedRepairs],
   );
+  // PARTY-BALANCES S0 — das Store-Guthaben des Kunden aus `parties.balances.get` (am PC2 vom Primary; vorher
+  // dort still 0 → „Guthaben verrechnen" fehlte). Die Fassung der Rechnung frischt die Auskunft auf.
+  const creditBalances = usePartyBalances(
+    { customerIds: invoice?.customerId ? [invoice.customerId] : [] },
+    [invoice?.paidAmount, invoice?.status], `${invoice?.revision ?? ''}:${invoice?.paidAmount ?? ''}`,
+  );
 
   if (!invoice) {
     return (
@@ -216,7 +223,7 @@ export function InvoiceDetail() {
   const remaining = Math.max(0, effectiveGross - invoice.paidAmount);
   // Customer-Credit UI-Slice 1 — offenes Store-Guthaben des Kunden (Σ amount-used_amount,
   // OPEN). Plain const wie `remaining`: jeder Render liest frisch → nach Verrechnung aktuell.
-  const availableCredit = invoice.customerId ? getAvailableCredit(invoice.customerId) : 0;
+  const availableCredit = creditBalances.customer(invoice.customerId)?.storeCredit ?? 0;
   const isDraft = invoice.status === 'DRAFT';
   const isCancelled = invoice.status === 'CANCELLED';
   const isPaid = invoice.status === 'FINAL';

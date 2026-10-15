@@ -33,6 +33,7 @@ import { useSharedRead } from '@/core/data/shared-read';
 import { refNumbersFor } from '@/core/data/page-reads';
 import { creditPaidFor } from '@/core/data/domain-reads';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
+import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
 import { WriteError } from '@/components/shared/WriteError';
 import { PAYABLES_OP, planSupplierPayment, sortOpenItems, type SupplierOpenItem } from '@/core/payables/payables-house';
 import { saveSupplierCredit, saveSupplierPay, viaWrites } from '@/core/payables/payables-save';
@@ -306,13 +307,14 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
       return;
     }
     // Ueberschuss (nur FIFO): liegt ein Einkauf vor, der ihn tragen kann, wird er darauf gebucht
-    // (→ PURCHASE_OVERPAY-Guthaben); sonst entsteht ein Standalone-Guthaben. Letzteres bestaetigt
-    // der Mensch hier — der Primary entscheidet dieselbe Frage mit demselben Planer.
-    if (!overrideMode && fifoPlan.excessF > 0 && !fifoPlan.overflowPurchaseId) {
+    // (→ PURCHASE_OVERPAY-Guthaben); sonst entsteht ein Standalone-Guthaben. SETTLEMENT S2 — beides
+    // bestaetigt der Mensch hier ausdruecklich, und nur mit dieser Wahl nimmt der Primary den Rest an.
+    const excessConfirmed = !overrideMode && fifoPlan.excessF > 0;
+    if (excessConfirmed) {
       if (!(await window.confirm(
-        `You're paying ${fmt(totalAmount)} but only ${fmt(allocatedSum)} can be allocated ` +
-        `(${fmt(fromFils(fifoPlan.excessF))} excess). The excess will be credited to ${supplierName || 'this supplier'} ` +
-        `as redeemable supplier credit. Continue?`
+        `You're paying ${fmt(totalAmount)} but only ${fmt(allocatedSum)} is open ` +
+        `(${fmt(fromFils(fifoPlan.excessF))} excess). The excess will be kept as redeemable supplier credit with ` +
+        `${supplierName || 'this supplier'}${fifoPlan.overflowPurchaseId ? ' (overpayment of the newest purchase)' : ''}. Continue?`
       ))) return;
     }
     const allocations = overrideMode
@@ -322,6 +324,7 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
       : undefined;
     const r = await saveSupplierPay(viaWrites(w, PAYABLES_OP.SUPPLIERS_PAY), {
       supplierId, amount: totalAmount, method, mode: overrideMode ? 'manual' : 'fifo', allocations,
+      ...(excessConfirmed ? { confirmExcessAsCredit: true } : {}),
     });
     setRefreshTick(t => t + 1);
     if (r.kind !== 'ok') { setFehler(fehlertext(r)); return; }
@@ -610,6 +613,10 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
           </>
         )}
 
+        {/* OPENING BALANCES + WAIVER — sichtbar, aber gesperrt, bis der Buchhalter die Regeln bestätigt. */}
+        <p data-supplier-pay-locked style={{ fontSize: 11, color: '#9A6B00' }}>
+          Opening positions from before {OPENING_CUTOFF_DATE} are not booked yet and cannot be paid here. A debt waiver / write-off by the supplier is not available yet — both wait for the accountant.
+        </p>
         <WriteError text={fehler} />
         <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={onClose} disabled={busy}>Cancel</Button>

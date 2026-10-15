@@ -12,6 +12,7 @@ import { DuplicateWarningBanner } from '@/components/contacts/DuplicateWarningBa
 import { findSimilarContacts } from '@/core/contacts/duplicate-check';
 import { validateCpr, validatePhone } from '@/core/contacts/contact-validate';
 import { useCustomerStore } from '@/stores/customerStore';
+import { usePartyBalances } from '@/core/parties/use-party-balances';
 import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { matchesDeep } from '@/core/utils/deep-search';
 import type { Customer, VIPLevel } from '@/core/models/types';
@@ -26,7 +27,7 @@ const BRANDS = ['Rolex', 'Patek Philippe', 'Audemars Piguet', 'Richard Mille', '
 export function CustomerList() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { customers, loadCustomers, searchQuery, setSearchQuery, getCustomerStats } = useCustomerStore();
+  const { customers, loadCustomers, searchQuery, setSearchQuery } = useCustomerStore();
   const [showNew, setShowNew] = useState(false);
   const [saveError, setSaveError] = useState('');
   const anlegen = useSharedWrite<{ customerId: string }>('customers.create');
@@ -42,22 +43,19 @@ export function CustomerList() {
   // deren AR-Balance in die Dashboard-Summe einfliesst.
   const filterMode = searchParams.get('filter') || '';
 
-  // M-01 — Stats EINMAL pro Kunde berechnen (Batch-Map): Filter und Zeilen-Render
-  // lesen aus derselben Map statt getCustomerStats doppelt pro Kunde aufzurufen.
-  const statsById = useMemo(() => {
-    const m = new Map<string, ReturnType<typeof getCustomerStats>>();
-    for (const c of customers) m.set(c.id, getCustomerStats(c.id));
-    return m;
-  }, [customers, getCustomerStats]);
+  // M-01 — Stats EINMAL pro Kunde berechnen (Batch): Filter und Zeilen-Render lesen aus derselben
+  // Auskunft. PARTY-BALANCES S0 — vom Primary (`parties.balances.get`), am PC2 nicht mehr 0,000.
+  const customerIds = useMemo(() => customers.map(c => c.id), [customers]);
+  const balances = usePartyBalances({ customerIds }, [customers]);
 
   const filtered = useMemo(() => {
     let r = customers;
     if (searchQuery) r = r.filter(c => matchesDeep(c, searchQuery));
     if (filterMode === 'outstanding') {
-      r = r.filter(c => (statsById.get(c.id)?.invoiceOutstanding || 0) > 0.005);
+      r = r.filter(c => (balances.customer(c.id)?.invoiceOutstanding || 0) > 0.005);
     }
     return r;
-  }, [customers, searchQuery, filterMode, statsById]);
+  }, [customers, searchQuery, filterMode, balances]);
 
   function clearFilter() {
     const next = new URLSearchParams(searchParams);
@@ -147,7 +145,10 @@ export function CustomerList() {
       )}
 
       {filtered.map(c => {
-        const stats = statsById.get(c.id) ?? getCustomerStats(c.id);
+        const known = balances.customer(c.id);
+        const stats = known ?? { revenue: 0, profit: 0, outstanding: 0, invoiceCount: 0, openInvoiceCount: 0 };
+        // PARTY-BALANCES S0 — ohne Auskunft „n/a", nie 0,000.
+        const unknownBalance = <span title="Balance not available from the main computer" data-balance-unknown>n/a</span>;
         return (
           <div
             key={c.id}
@@ -182,19 +183,19 @@ export function CustomerList() {
               {(c.preferences || []).join(', ') || '\u2014'}
             </div>
             <div className="font-mono" style={{ textAlign: 'right', fontSize: 14, color: '#0F0F10', minWidth: 0, overflow: 'hidden' }}>
-              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={stats.revenue}/></div>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{known ? <Bhd v={stats.revenue}/> : unknownBalance}</div>
               <div style={{ fontSize: 10, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {stats.invoiceCount} invoice{stats.invoiceCount !== 1 ? 's' : ''}
+                {known ? `${stats.invoiceCount} invoice${stats.invoiceCount !== 1 ? 's' : ''}` : ''}
               </div>
             </div>
             <div className="font-mono" style={{ textAlign: 'right', fontSize: 14, color: stats.profit >= 0 ? '#7EAA6E' : '#AA6E6E', minWidth: 0, overflow: 'hidden' }}>
-              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}><Bhd v={stats.profit}/></div>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{known ? <Bhd v={stats.profit}/> : unknownBalance}</div>
               <div style={{ fontSize: 10, color: '#6B7280', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {stats.revenue > 0 ? `${((stats.profit / stats.revenue) * 100).toFixed(1)}% margin` : '—'}
               </div>
             </div>
             <div className="font-mono" style={{ textAlign: 'right', fontSize: 14, color: stats.outstanding > 0 ? '#AA6E6E' : '#6B7280', minWidth: 0, overflow: 'hidden' }}>
-              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{stats.outstanding > 0 ? <Bhd v={stats.outstanding}/> : '\u2014'}</div>
+              <div style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{!known ? unknownBalance : stats.outstanding > 0 ? <Bhd v={stats.outstanding}/> : '\u2014'}</div>
               {stats.openInvoiceCount > 0 && (
                 <div
                   onClick={e => { e.stopPropagation(); navigate(`/invoices?customer=${c.id}`); }}

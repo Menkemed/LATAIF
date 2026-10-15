@@ -28,6 +28,9 @@ import { computeExpenseSettlement } from '@/core/finance/expenseSettlement';
 import type { Supplier } from '@/core/models/types';
 // CENTRAL-UI-PARITY R2D — die Seite liest ueber gemeinsame Ladefunktionen.
 import { useSharedRead } from '@/core/data/shared-read';
+import { usePartyBalances } from '@/core/parties/use-party-balances';
+import { OpeningBalancesSection } from '@/components/parties/OpeningBalancesSection';
+import { usePermission } from '@/hooks/usePermission';
 import { refNumbersFor, supplierDetailReadsFor, type SupplierDetailReads } from '@/core/data/page-reads';
 import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
@@ -58,7 +61,7 @@ export function SupplierDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/suppliers');
-  const { suppliers, loadSuppliers, deleteSupplier, getLedger } = useSupplierStore();
+  const { suppliers, loadSuppliers, deleteSupplier } = useSupplierStore();
   // CENTRAL-UI-PARITY R6C — „Save" und „Deactivate/Reactivate" sind EINE Buchung (`suppliers.update`):
   // am Primary die Hausfunktion, auf PC2 die Fernbuchung. Nur das Geänderte reist; der Aktiv-
   // Schalter schickt den Zielwert, keinen Umschalter.
@@ -77,7 +80,7 @@ export function SupplierDetail() {
   const [showPaySupplierModal, setShowPaySupplierModal] = useState(false);
   // v0.7.12 — Cross-Link Supplier → Customer-Mirror. Spiegel-Logik zur
   // CustomerDetail-Seite (Phone primaer, Name Fallback).
-  const { customers, loadCustomers, getCustomerStats } = useCustomerStore();
+  const { customers, loadCustomers } = useCustomerStore();
   // Ohne Selektor: die Seite rendert neu, wenn sich Rechnungen ändern — der Rollen-Saldo liest dann frisch.
   const { loadInvoices } = useInvoiceStore();
   // v0.4.4 — KEIN useGoldStore() ohne Selector: das ganze Store-Objekt aendert
@@ -90,6 +93,9 @@ export function SupplierDetail() {
   const goldPayables = useGoldStore(s => s.goldPayables);
   const [settleModal, setSettleModal] = useState<{ open: boolean; mode: SettleGoldMode; payable?: GoldPayable }>({ open: false, mode: 'settle_supplier_return' });
   const [editing, setEditing] = useState(false);
+  // OPENING BALANCES — der Bereich „Opening balances" nur für den Owner; eine nicht erfasste Eingabe schützt „Save".
+  const perm = usePermission();
+  const [openingDirty, setOpeningDirty] = useState(false);
   const [form, setForm] = useState<Partial<Supplier>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -160,7 +166,13 @@ export function SupplierDetail() {
 
   // Der Saldo der Kundenrolle aus DERSELBEN Funktion wie die Kunden-Detailseite (`getCustomerStats`:
   // Total Receivable, offene Rechnungen) — keine eigene Summe, keine Verrechnung mit diesem Lieferanten.
-  const linkedCustomerStats = linkedCustomer ? getCustomerStats(linkedCustomer.id) : null;
+  // PARTY-BALANCES S0 — Lieferanten- und Rollensaldo aus EINER Auskunft (`parties.balances.get`): am Primary lokal,
+  // am PC2 vom Primary. Ohne Antwort `null` → „n/a", nie 0,000.
+  const balances = usePartyBalances(
+    { customerIds: linkedCustomer ? [linkedCustomer.id] : [], supplierIds: id ? [id] : [] },
+    [purchases, expenses], refreshKey,
+  );
+  const linkedCustomerStats = linkedCustomer ? balances.customer(linkedCustomer.id) : null;
 
   // Bestehende Formular-Synchronisierung (R6C). Die Regel meldet sie erst, seit R6D das
   // try/finally der Rueckbuchung entfernt hat (vorher uebersprang der Compiler die ganze Komponente).
@@ -178,7 +190,9 @@ export function SupplierDetail() {
   // ignoriert obwohl getLedger() sie summiert.
   // refreshKey-Dep: nach einem Refund (deleteStandaloneSupplierCredit) faellt die CREDIT BALANCE
   // sonst nicht neu — loadSuppliers() aktualisiert nur das suppliers-Array, nicht purchases/expenses.
-  const ledger = useMemo(() => id ? getLedger(id) : { totalPurchases: 0, totalPaid: 0, outstandingBalance: 0, creditBalance: 0 }, [id, getLedger, purchases, expenses, refreshKey]);
+  const knownLedger = balances.supplier(id);
+  const ledger = knownLedger ?? { totalPurchases: 0, totalPaid: 0, outstandingBalance: 0, creditBalance: 0 };
+  const kpi = (v: number): string => (knownLedger ? fmt(v) : 'n/a');
 
   // SUPPLIER-CREDITS-Card: alle offenen Credits typisiert. getSupplierCreditsForDisplay ist eine
   // reine DB-Query (an kein reaktives Store-Array gebunden), daher EXPLIZITE Deps:
@@ -228,6 +242,10 @@ export function SupplierDetail() {
   async function handleSave() {
     if (!id || !supplier) return;
     setAenderFehler('');
+    // OPENING BALANCES — „Save" speichert nur die Stammdaten; eine begonnene Eröffnungsposition wird nie mitgespeichert.
+    if (openingDirty && !(await window.confirm(
+      'The opening position below is not recorded yet. "Save" only saves the supplier details — save them without it?',
+    ))) return;
     const r = await saveSupplierUpdate(aendern, supplier, form);
     if (r.kind !== 'ok') { setAenderFehler(`Could not save the supplier: ${fehlertext(r)}`); return; }
     setEditing(false);
@@ -381,7 +399,7 @@ export function SupplierDetail() {
         {/* v0.7.12 — Cross-Link Supplier → Customer-Mirror. Sichtbar wenn
             dieselbe Person auch als Customer existiert. Zeigt offene
             Receivables-Summe + Link zum Customer-Profil. */}
-        {linkedCustomer && linkedCustomerStats && (
+        {linkedCustomer && (
           <div style={{ marginBottom: 16 }} data-linked-client-card>
             <button
               onClick={() => navigate(`/clients/${linkedCustomer.id}`)}
@@ -416,13 +434,13 @@ export function SupplierDetail() {
                 <div>
                   <div className="text-overline">Open Invoices</div>
                   <div className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }} data-linked-client-open-count>
-                    {linkedCustomerStats.openInvoiceCount}
+                    {linkedCustomerStats ? linkedCustomerStats.openInvoiceCount : 'n/a'}
                   </div>
                 </div>
                 <div>
                   <div className="text-overline">Client Receivable {'·'} Open</div>
-                  <div className="font-mono" style={{ fontSize: 16, color: linkedCustomerStats.outstanding > 0 ? '#3D7FFF' : '#6B7280', fontWeight: 600 }} data-linked-client-open>
-                    <Bhd v={linkedCustomerStats.outstanding}/> BHD
+                  <div className="font-mono" style={{ fontSize: 16, color: (linkedCustomerStats?.outstanding ?? 0) > 0 ? '#3D7FFF' : '#6B7280', fontWeight: 600 }} data-linked-client-open>
+                    {linkedCustomerStats ? <><Bhd v={linkedCustomerStats.outstanding}/> BHD</> : 'n/a'}
                   </div>
                   <div style={{ fontSize: 10, color: '#9CA3AF', marginTop: 2 }}>View Client {'↗'}</div>
                 </div>
@@ -451,11 +469,14 @@ export function SupplierDetail() {
 
         {/* Ledger KPIs (Plan §Supplier §3 + §4 + §10 + §Purchase Returns §8) */}
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 16, marginBottom: 16 }}>
-          <KPICard label="PURCHASES + EXPENSES" value={fmt(ledger.totalPurchases)} unit="BHD" />
-          <KPICard label="TOTAL PAID" value={fmt(ledger.totalPaid)} unit="BHD" />
-          <KPICard label="OUTSTANDING" value={fmt(ledger.outstandingBalance)} unit={`BHD · ${supplierPurchases.filter(p => p.status !== 'PAID' && p.status !== 'CANCELLED').length + workshopExpenses.filter(e => e.status !== 'PAID' && e.status !== 'CANCELLED').length} open`} />
-          <KPICard label="CREDIT BALANCE" value={fmt(ledger.creditBalance)} unit="BHD available" />
+          <KPICard label="PURCHASES + EXPENSES" value={kpi(ledger.totalPurchases)} unit={knownLedger ? 'BHD' : ''} />
+          <KPICard label="TOTAL PAID" value={kpi(ledger.totalPaid)} unit={knownLedger ? 'BHD' : ''} />
+          <KPICard label="OUTSTANDING" value={kpi(ledger.outstandingBalance)} unit={`${knownLedger ? 'BHD' : 'not available'} · ${supplierPurchases.filter(p => p.status !== 'PAID' && p.status !== 'CANCELLED').length + workshopExpenses.filter(e => e.status !== 'PAID' && e.status !== 'CANCELLED').length} open`} />
+          <KPICard label="CREDIT BALANCE" value={kpi(ledger.creditBalance)} unit={knownLedger ? 'BHD available' : ''} />
         </div>
+
+        {/* OPENING BALANCES — erfasste, noch nicht gebuchte Eröffnungsposten (nur lesen). */}
+        <OpeningBalancesSection partyType="SUPPLIER" partyId={supplier.id} mode="summary" canRecord={false} />
 
         {/* v0.7.12 — Bulk-Pay Action erweitert: sichtbar wenn IRGENDWAS offen
             ist (Workshop/Service-Expense, Consignor-Loss-Expense, Purchase).
@@ -755,6 +776,11 @@ export function SupplierDetail() {
             )}
           </Card>
         </div>
+
+        {/* OPENING BALANCES — eigener Bereich mit eigener Bestätigung (nur Owner); nicht Teil von „Save". */}
+        {editing && perm.isOwner && (
+          <OpeningBalancesSection partyType="SUPPLIER" partyId={supplier.id} mode="edit" canRecord onDirtyChange={setOpeningDirty} />
+        )}
 
         {/* Danger zone */}
         {editing && (
