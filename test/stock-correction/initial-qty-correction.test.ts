@@ -424,6 +424,50 @@ function verkauf(pid: string, qty = 1): void {
     'E1 vorhandene Tabelle (ISSUE/RECEIPT) wird einmal umgebaut: alte Zeilen unverändert, CORRECTION erlaubt, eindeutige Aktion bleibt, zweiter Lauf tut nichts');
   const live = freshDb();
   ok(/'ISSUE','RECEIPT','CORRECTION'/.test(s(live, "SELECT sql FROM sqlite_master WHERE name = 'stock_adjustments'")), 'E2 neue Datenbanken bekommen die Regel direkt');
+
+  // E2b — eine vollständige Datenbank mit der Regel VOR dieser Änderung (Phase 2/3: ISSUE/RECEIPT) und echten Belegen.
+  const iM = MIGRATIONS.findIndex((m) => m.includes('CREATE TABLE IF NOT EXISTS stock_adjustments'));
+  const origM = MIGRATIONS[iM];
+  MIGRATIONS[iM] = origM.replace(schema.DIRECTION_CHECK, schema.RECEIPT_DIRECTION_CHECK);
+  const voll = freshDb();
+  MIGRATIONS[iM] = origM;
+  const pr = neu(voll, 2, 100, 'Widen receipt');
+  await sa.addOldStockOnPrimary({ actionId: act(), productId: pr, quantity: 1, expectedQuantity: 2, unitCost: 100, reason: 'found' } as never, reload);
+  const pi = neu(voll, 4, 100, 'Widen issue');
+  await sa.issueStockOnPrimary({ actionId: act(), productId: pi, quantity: 1, expectedQuantity: 4, reasonCategory: 'LOST', reason: 'lost' } as never, reload);
+  const pk = neu(voll, 5, 100, 'Widen correction');
+  const bild = (db: Db): string => S({
+    rows: db.exec('SELECT * FROM stock_adjustments ORDER BY id')[0]?.values,
+    cols: db.exec('PRAGMA table_info(stock_adjustments)')[0]?.values,
+    idx: db.exec("SELECT name, sql FROM sqlite_master WHERE type = 'index' AND tbl_name = 'stock_adjustments' ORDER BY name")[0]?.values,
+    fk: db.exec('PRAGMA foreign_key_list(stock_adjustments)')[0]?.values ?? [],
+    trig: n(db, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'trigger' AND tbl_name = 'stock_adjustments'"),
+    refs: n(db, "SELECT COUNT(*) FROM sqlite_master WHERE sql LIKE '%REFERENCES stock_adjustments%'"),
+    log: n(db, 'SELECT COUNT(*) FROM sync_changelog'), audit: n(db, 'SELECT COUNT(*) FROM audit_log'),
+    p: db.exec('SELECT id, quantity, stock_status FROM products ORDER BY id')[0]?.values,
+  });
+  const vorAlt = alles(voll);
+  const zuFrueh = await korr(voll, pk, 3);
+  ok(!zuFrueh.ok && /CHECK/.test(zuFrueh.code) && alles(voll) === vorAlt && qtyOf(voll, pk) === 5,
+    `E2b vor dem Umbau scheitert eine Berichtigung an der alten Regel vollständig (Rollback: Menge, Beleg, Nummer, Protokoll, Sync) (${zuFrueh.code.slice(0, 40)})`);
+  const vorU = bild(voll);
+  const idxVor = n(voll, "SELECT COUNT(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'stock_adjustments'");
+  const umgebautV = schema.widenStockAdjustmentDirections(voll as never);
+  const regel = (spalte: string, wert: unknown): string => {
+    try {
+      voll.run(`INSERT INTO stock_adjustments (id, branch_id, adjustment_number, product_id, direction, quantity, qty_before, qty_after, accounting, reason_category, reason, business_date, status, action_id, payload_hash, created_at)
+        VALUES ('bad', 'branch-main', 'ADJ-bad', 'p', 'ISSUE', 1, 2, 1, 'BOOKED', 'X', 'r', '2026-10-01', 'POSTED', 'bad-action', 'h', ?)`, [NOW]);
+      voll.run(`UPDATE stock_adjustments SET ${spalte} = ? WHERE id = 'bad'`, [wert]);
+      voll.run("DELETE FROM stock_adjustments WHERE id = 'bad'");
+      return '';
+    } catch (e) { voll.run("DELETE FROM stock_adjustments WHERE id = 'bad'"); return (e as Error).message; }
+  };
+  const regeln = [regel('quantity', 0), regel('accounting', 'X'), regel('status', 'X'), regel('direction', 'X'), regel('reason', null)];
+  ok(umgebautV && bild(voll) === vorU && idxVor === 4 && n(voll, "SELECT COUNT(*) FROM sqlite_master WHERE name = 'stock_adjustments_widen'") === 0
+    && regeln.every((m) => /CHECK|NOT NULL/.test(m)) && schema.widenStockAdjustmentDirections(voll as never) === false,
+    `E2c Umbau einer echten Datenbank: Belege (Abgang, Altbestand) Feld für Feld gleich, dieselben Spalten, alle Indizes (eindeutige Aktion, eindeutige Nummer, Artikel, Primärschlüssel), keine Fremdschlüssel/Trigger/Verweise vorher wie nachher, kein neuer Sync- oder Protokolleintrag (kein Echo), alle übrigen Regeln (Menge > 0, Buchungslage, Status, Richtung, Pflichtfelder) greifen weiter, zweiter Lauf tut nichts (${regeln.map((m) => m.slice(0, 18)).join(' | ')})`);
+  const nachU = await korr(voll, pk, 3);
+  ok(nachU.ok && qtyOf(voll, pk) === 3 && n(voll, "SELECT COUNT(*) FROM stock_adjustments WHERE direction = 'CORRECTION'") === 1, `E2d nach dem Umbau ist die Berichtigung möglich (${nachU.code})`);
   const rs = src('src-tauri/src/bridge.rs');
   ok(registry.ALLOWED_MUTATIONS.at(-1) === 'stock_adjustments.correct_initial' && perms.permissionForOp('stock_adjustments.correct_initial')?.kind === 'isOwner'
     && perms.roleMayRunOp('ADMIN', 'stock_adjustments.correct_initial') && !perms.roleMayRunOp('MANAGER', 'stock_adjustments.correct_initial')
