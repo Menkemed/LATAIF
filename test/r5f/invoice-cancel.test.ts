@@ -333,10 +333,10 @@ function bildDesStornos(db: Db, inv: string) {
   ok(!vorher.includes("'invoices.cancel'"), 'DECISION vor R5F.1 gab es keine Buchung fuer den Storno');
   const upd = codeOf(src('src/core/bridge/invoice-lifecycle-commands.ts'));
   ok(!/status/.test((/onlyKnownFields\(raw, \[([^\]]*)\]\)/.exec(upd)?.[1]) ?? ''), 'DECISION invoices.update kennt keinen Status — es aendert Zeilen mit Grund');
-  ok(ALLOWED_MUTATIONS.length === 117 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `DECISION invoices.cancel bleibt die eine R5F.1-Buchung an Platz 41; seither nur die elf aus R6C, die achtundzwanzig aus R6D, die acht aus R6E und die vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 (${ALLOWED_MUTATIONS.length})`);
+  ok(ALLOWED_MUTATIONS.length === 120 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `DECISION invoices.cancel bleibt die eine R5F.1-Buchung an Platz 41; seither nur die elf aus R6C, die achtundzwanzig aus R6D, die acht aus R6E und die vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 197 &&/pub const OP_INVOICES_CANCEL: &str = "invoices\.cancel";/.test(rust), `DECISION Rust laesst genau diese eine mehr durch (${rustOps})`);
+  ok(rustOps === 203 &&/pub const OP_INVOICES_CANCEL: &str = "invoices\.cancel";/.test(rust), `DECISION Rust laesst genau diese eine mehr durch (${rustOps})`);
   ok(!!(OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.cancel']
     && S((OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.cancel']) === S((OPERATION_PERMISSIONS as Record<string, unknown>)['invoices.update']),
   'DECISION dasselbe Recht wie am Primary („Cancel" nur mit canEditInvoices)');
@@ -655,7 +655,9 @@ for (const weg of ['primary', 'fern'] as const) {
   const BULK_MUT = ['bulk_metals.write_off', 'bulk_metals.close_lot', 'bulk_metals.correct_weight', 'bulk_metals.reverse_adjustment'];
 
   const STOCK_MUT = ['stock_adjustments.issue', 'stock_adjustments.cancel', 'stock_adjustments.add_old_stock'];
-  ok(vorher.length === 40 && jetzt.length === 117 && S(jetzt.filter((o) => !vorher.includes(o))) === S(['invoices.cancel', ...R6C_MUT, ...R6D_MUT, ...R6E_MUT, ...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT]) && vorher.every((o) => jetzt.includes(o)),
+
+  const OB_MUT = ['opening_balances.create', 'opening_balances.cancel', 'customers.settle'];
+  ok(vorher.length === 40 && jetzt.length === 120 && S(jetzt.filter((o) => !vorher.includes(o))) === S(['invoices.cancel', ...R6C_MUT, ...R6D_MUT, ...R6E_MUT, ...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT, ...OB_MUT]) && vorher.every((o) => jetzt.includes(o)),
     `REGISTRY vorher 40, R5F.1 +invoices.cancel, R6C +11, R6D +28, R6E +8, R6F +14, R7A +1 (production.complete), MEDIA-INBOX +1, PARTNER-ITEMS +6, BULK METAL V1 +4 — keine faellt weg (${vorher.length} → ${jetzt.length})`);
   const zaehle = (t: string): number => [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
   const rustVorher = vor5f('src-tauri/src/bridge.rs');
@@ -674,7 +676,9 @@ for (const weg of ['primary', 'fern'] as const) {
   const BULK_RUST = ['OP_BULK_WRITE_OFF', 'OP_BULK_CLOSE_LOT', 'OP_BULK_CORRECT_WEIGHT', 'OP_BULK_REVERSE_ADJUSTMENT', 'OP_PAGE_BULK_METALS_GET', 'OP_BULK_LOTS_FOR_SALE_GET', 'OP_BULK_LOT_DETAIL_GET', 'OP_BULK_ALLOCATION_PREVIEW_GET'];
 
   const STOCK_RUST = ['OP_STOCK_ISSUE', 'OP_STOCK_CANCEL', 'OP_OLD_STOCK_ADD', 'OP_STOCK_PRODUCT_GET', 'OP_PAGE_OLD_STOCK_GET'];
-  ok(zaehle(rustVorher) === 107 && zaehle(rustJetzt) === 197 && S(neuRust) === S(['OP_INVOICES_CANCEL', ...R6C_RUST, ...R6D_RUST, ...R6E_RUST, ...R6F_RUST, ...R7A_RUST, ...PREG5_RUST, 'OP_PAGE_INVOICE_PRINT_GET', ...BULK_RUST, ...STOCK_RUST]),
+
+  const OB_RUST = ['OP_OPENING_CREATE', 'OP_OPENING_CANCEL', 'OP_CUSTOMERS_SETTLE', 'OP_PARTIES_BALANCES_GET', 'OP_PARTIES_ACCOUNT_GET', 'OP_PAGE_OPENING_BALANCES_GET'];
+  ok(zaehle(rustVorher) === 107 && zaehle(rustJetzt) === 203 && S(neuRust) === S(['OP_INVOICES_CANCEL', ...R6C_RUST, ...R6D_RUST, ...R6E_RUST, ...R6F_RUST, ...R7A_RUST, ...PREG5_RUST, 'OP_PAGE_INVOICE_PRINT_GET', ...BULK_RUST, ...STOCK_RUST, ...OB_RUST]),
     `REGISTRY Rust 107 → 108 (R5F.1: OP_INVOICES_CANCEL) → 121 (R6C: 13 namentlich) → 152 (R6D: 31 namentlich) → 160 (R6E: 8 namentlich) → 174 (R6F: 14 namentlich) → 175 (R7A: OP_PRODUCTION_COMPLETE) → 176 (PRE-G5: OP_PRODUCTS_DUPLICATES_GET) → 184 (MEDIA-INBOX, PARTNER-ITEMS, INVOICE-A5) → 192 (BULK METAL V1: 8 namentlich) (${S(neuRust)})`);
   let zu = '';
   try { reg5.registerCommand('invoices.delete', { kind: 'mutation', handler: () => ({}) } as never); } catch (e) { zu = String(e); }

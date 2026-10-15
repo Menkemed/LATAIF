@@ -189,8 +189,10 @@ export function parseSupplierRefund(raw: unknown): { creditId: string } {
 export function parseSupplierPay(raw: unknown): {
   supplierId: string; amount: number; method: string; mode: 'fifo' | 'manual';
   allocations?: Array<{ kind: 'expense' | 'purchase'; id: string; amount: number }>;
+  confirmExcessAsCredit?: boolean;
 } {
-  const r = strict(raw, ['supplierId', 'amount', 'method', 'mode', 'allocations']);
+  const r = strict(raw, ['supplierId', 'amount', 'method', 'mode', 'allocations', 'confirmExcessAsCredit']);
+  if (r.confirmExcessAsCredit !== undefined && typeof r.confirmExcessAsCredit !== 'boolean') throw new PayablesPayloadError('confirmExcessAsCredit is true or false');
   const mode = r.mode;
   if (mode !== 'fifo' && mode !== 'manual') throw new PayablesPayloadError('mode is fifo or manual');
   let allocations: Array<{ kind: 'expense' | 'purchase'; id: string; amount: number }> | undefined;
@@ -204,7 +206,10 @@ export function parseSupplierPay(raw: unknown): {
   }
   if (mode === 'fifo' && allocations) throw new PayablesPayloadError('FIFO: the primary decides the allocation');
   if (mode === 'manual' && !allocations?.length) throw new PayablesPayloadError('a manual payment names its allocations');
-  return { supplierId: idOf(r.supplierId, 'supplierId'), amount: numberOf(r.amount, 'amount'), method: idOf(r.method, 'method'), mode, allocations };
+  return {
+    supplierId: idOf(r.supplierId, 'supplierId'), amount: numberOf(r.amount, 'amount'), method: idOf(r.method, 'method'), mode, allocations,
+    ...(r.confirmExcessAsCredit === true ? { confirmExcessAsCredit: true } : {}),
+  };
 }
 
 export function parseSupplierCredit(raw: unknown): { supplierId: string; amount: number } {

@@ -1243,6 +1243,11 @@ export interface SupplierPayRequest {
   method: string;
   mode: 'fifo' | 'manual';
   allocations?: ReadonlyArray<{ kind: 'expense' | 'purchase'; id: string; amount: number }>;
+  /**
+   * SETTLEMENT S2 — ein Betrag über allem Offenen wird nie still überzahlt: nur mit dieser ausdrücklichen Wahl wird der
+   * Rest Guthaben (Überzahlung eines Einkaufs bzw. Vorauszahlung, die bestehenden Guthabenregeln).
+   */
+  confirmExcessAsCredit?: boolean;
 }
 export interface SupplierPaid {
   supplierId: string;
@@ -1270,6 +1275,9 @@ export function paySupplierInHouse(req: SupplierPayRequest, ctx: HouseCtx): Supp
   const manual = (req.allocations ?? []).map((a) => ({ kind: a.kind, id: a.id, amountF: F(a.amount) }));
   if (req.mode === 'fifo' && manual.length > 0) throw nein('ALLOCATION_INVALID', 'FIFO decides the allocation — send none');
   const plan = planSupplierPayment(items, amountF, req.mode, manual);
+  if (plan.excessF > 0 && req.confirmExcessAsCredit !== true) {
+    throw nein('PAYMENT_EXCEEDS_OPEN', `the payment is ${fmt(plan.excessF)} more than everything open — choose explicitly to keep the rest as supplier credit, or lower the amount`);
+  }
 
   const out: SupplierPaid = { supplierId: req.supplierId, amount: B(amountF), allocations: [], excessAmount: B(plan.excessF), excessTo: null, excessRef: null };
   for (const a of plan.allocations) {

@@ -771,6 +771,42 @@
       "required_fields": [],
       "immutable_fields": []
     },
+    "opening_balance_items": {
+      "allowed_operations": [
+        "insert",
+        "update"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "accounting",
+        "action_id",
+        "amount",
+        "branch_id",
+        "cancel_reason",
+        "cancelled_at",
+        "cancelled_by",
+        "created_at",
+        "created_by",
+        "cutoff_date",
+        "document_date",
+        "due_date",
+        "id",
+        "item_number",
+        "kind",
+        "note",
+        "party_id",
+        "party_type",
+        "payload_hash",
+        "prior_vat",
+        "reference",
+        "reference_key",
+        "revision",
+        "scope",
+        "status"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
     "order_lines": {
       "allowed_operations": [
         "insert",

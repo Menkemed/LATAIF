@@ -195,6 +195,12 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'stock_adjustments.issue': owner('ProductDetail: perm.isOwner (Stock corrections)'),
   'stock_adjustments.cancel': owner('ProductDetail: perm.isOwner (Stock corrections)'),
   'stock_adjustments.add_old_stock': owner('ProductDetail: perm.isOwner (Stock corrections — Add old stock)'),
+  // OPENING BALANCES — der Bereich „Opening balances" in Edit Client / Supplier Edit steht nur für `perm.isOwner`; die
+  // Hausfolge prüft es noch einmal (assertOwner).
+  'opening_balances.create': owner('CustomerDetail/SupplierDetail Edit: perm.isOwner (Opening balances)'),
+  'opening_balances.cancel': owner('CustomerDetail/SupplierDetail Edit: perm.isOwner (Opening balances)'),
+  // SETTLEMENT — „Receive Payment" am Kunden: dasselbe Recht wie „Record Payment" auf der Rechnung.
+  'customers.settle': RECORD_PAYMENTS,
 
   // ── Angebot, Rechnungs-Lebenszyklus, Nachrichten (R6E) ──────────────────
   // BEFUND: `OfferList` („New Offer", „Send", „Accept", „Reject") fragt `usePermission` NICHT, und

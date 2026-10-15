@@ -382,7 +382,8 @@ function overWelt(): OverWelt {
   // Leser: Auswahl/Karte nur OPEN; Salden summieren ALLE Zeilen (eine Storno-Zeile muesste dort gefiltert werden).
   const ss = codeOf(src('src/stores/supplierStore.ts'));
   ok(/FROM supplier_credits WHERE supplier_id = \? AND branch_id = \? AND status = 'OPEN'/.test(ss)
-    && /SUM\(amount - used_amount\), 0\) AS bal\s*FROM supplier_credits WHERE supplier_id = \?`/.test(ss),
+    // PARTY-BALANCES S0 — dieselbe Summe, jetzt an die Filiale gebunden (supplierLedgerStrict).
+    && /SUM\(amount - used_amount\), 0\) AS bal\s*FROM supplier_credits WHERE supplier_id = \? AND branch_id = \?`/.test(ss),
   'READER Karte/Auswahl lesen nur OPEN; die KPI summiert alle Zeilen');
   ok(/FROM supplier_credits\s*WHERE branch_id = \?/.test(codeOf(src('src/core/reports/reconciliation-snapshot.ts')))
     && /FROM supplier_credits WHERE branch_id=\? GROUP BY cid/.test(codeOf(src('src/core/ledger/counterpartyAudit.ts'))),

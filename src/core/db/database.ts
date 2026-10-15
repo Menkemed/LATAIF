@@ -2424,6 +2424,43 @@ function runMigrations(database: Database): void {
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_stock_adjustments_action ON stock_adjustments(branch_id, action_id)`,
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_stock_adjustments_number ON stock_adjustments(branch_id, adjustment_number)`,
     `CREATE INDEX IF NOT EXISTS idx_stock_adjustments_product ON stock_adjustments(product_id)`,
+    // OPENING BALANCES S1 — die Eröffnungsposten von Kunden und Lieferanten zum Stichtag 15.10.2026 (OB-…): alte offene
+    // Rechnung (DOCUMENT, mit Referenz) oder zusammengefasster Restbetrag (REMAINDER, höchstens einer je Partei und Art),
+    // Forderung/Verbindlichkeit oder Vorauszahlung. accounting bleibt PENDING, bis der Buchhalter Gegenkonto, Datum und
+    // VAT bestätigt: keine Buchung, nicht bezahlbar. Synchronisiert (insert/update — ein Storno ändert die Zeile, gelöscht
+    // wird nie). Die Teilindizes verhindern doppelte Referenzen und einen zweiten Restbetrag derselben Art.
+    `CREATE TABLE IF NOT EXISTS opening_balance_items (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      item_number TEXT NOT NULL,
+      party_type TEXT NOT NULL CHECK (party_type IN ('CUSTOMER','SUPPLIER')),
+      party_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('CUSTOMER_RECEIVABLE','CUSTOMER_ADVANCE','SUPPLIER_PAYABLE','SUPPLIER_ADVANCE')),
+      scope TEXT NOT NULL CHECK (scope IN ('DOCUMENT','REMAINDER')),
+      reference TEXT,
+      reference_key TEXT,
+      document_date TEXT,
+      due_date TEXT,
+      amount REAL NOT NULL CHECK (amount > 0),
+      cutoff_date TEXT NOT NULL,
+      prior_vat TEXT NOT NULL DEFAULT 'UNKNOWN' CHECK (prior_vat IN ('DECLARED_BEFORE','OUTSIDE_VAT','UNKNOWN')),
+      note TEXT,
+      status TEXT NOT NULL DEFAULT 'RECORDED' CHECK (status IN ('RECORDED','CANCELLED')),
+      accounting TEXT NOT NULL DEFAULT 'PENDING' CHECK (accounting IN ('PENDING','POSTED')),
+      action_id TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      created_by TEXT,
+      cancelled_at TEXT,
+      cancelled_by TEXT,
+      cancel_reason TEXT,
+      revision INTEGER NOT NULL DEFAULT 0
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_opening_items_action ON opening_balance_items(branch_id, action_id)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_opening_items_number ON opening_balance_items(branch_id, item_number)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_opening_items_document ON opening_balance_items(branch_id, party_type, party_id, kind, reference_key) WHERE scope = 'DOCUMENT' AND status = 'RECORDED'`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_opening_items_remainder ON opening_balance_items(branch_id, party_type, party_id, kind) WHERE scope = 'REMAINDER' AND status = 'RECORDED'`,
+    `CREATE INDEX IF NOT EXISTS idx_opening_items_party ON opening_balance_items(party_type, party_id)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

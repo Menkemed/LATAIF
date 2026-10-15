@@ -174,11 +174,16 @@ const MATRIX: Record<string, Zeile> = {
   'stock_adjustments.cancel': { ui: 'ProductDetail — Stock corrections: Cancel correction', gleich: true },
   // OLD STOCK — dieselbe Karte: weitere Stücke Altbestand (nur Menge, keine Buchung).
   'stock_adjustments.add_old_stock': { ui: 'ProductDetail — Stock corrections: Add old stock', gleich: true },
+  // OPENING BALANCES — Edit Client / Supplier Edit, Bereich „Opening balances“ (nur Owner): erfassen und stornieren.
+  'opening_balances.create': { ui: 'CustomerDetail/SupplierDetail Edit — Opening balances: Record opening position', gleich: true },
+  'opening_balances.cancel': { ui: 'CustomerDetail/SupplierDetail Edit — Opening balances: Cancel position', gleich: true },
+  // SETTLEMENT — CustomerDetail, Karte „Invoices“: eine Zahlung über die offenen Rechnungen.
+  'customers.settle': { ui: 'CustomerDetail — Receive Payment', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 117, `A 116 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 120, `A 116 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

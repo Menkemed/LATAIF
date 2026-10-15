@@ -105,7 +105,8 @@ for (let i = 0; i < names.length; i++) for (let j = i + 1; j < names.length; j++
 // §1 — semantic contracts, from independent sources
 // BULK METAL V1: +1 synced table bulk_lot_movements (travels with its lot) → 54.
 // STOCK-ADJUSTMENT Phase 1: +1 synced table stock_adjustments (the stock correction document) → 55.
-ok(LEGACY_SYNC_APPLY.size === 55, `legacy_sync_apply = 55 sync allowlist tables (got ${LEGACY_SYNC_APPLY.size})`);
+// OPENING BALANCES: +1 synced table opening_balance_items (the opening position document) → 56.
+ok(LEGACY_SYNC_APPLY.size === 56, `legacy_sync_apply = 56 sync allowlist tables (got ${LEGACY_SYNC_APPLY.size})`);
 for (const t of LEGACY_SYNC_APPLY) ok(actualLegacy.has(t), `sync_apply table ${t} is present in the legacy DDL`);
 ok(LEGACY_LOCAL_NON_SYNC.size === 27, `legacy_local_non_sync = 27 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
 ok(DEPRECATED_OR_UNREACHABLE_DDL.size === 0, 'deprecated_or_unreachable_ddl is empty (nothing unreachable)');

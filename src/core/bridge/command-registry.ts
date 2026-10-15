@@ -173,6 +173,10 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   'stock_adjustments.issue', 'stock_adjustments.cancel',
   // OLD STOCK — weitere Stücke Altbestand eines erfassten Artikels (nur Owner): Menge, Beleg, Protokoll, Sync, keine Buchung.
   'stock_adjustments.add_old_stock',
+  // OPENING BALANCES — Eröffnungsposten von Kunden/Lieferanten erfassen und stornieren (nur Owner; Beleg, keine Buchung).
+  'opening_balances.create', 'opening_balances.cancel',
+  // SETTLEMENT — „Receive Payment" über offene Rechnungen eines Kunden (der vorhandene Rechnungszahlungsweg, eine Transaktion).
+  'customers.settle',
 ];
 
 export interface CommandSpec {

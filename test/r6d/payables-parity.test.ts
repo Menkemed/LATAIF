@@ -720,11 +720,11 @@ marker('CENTRAL_UI_R6D_PAYABLES_REFUND_PROVED');
     return { db, e1 };
   };
   const P = setup();
-  const pr = primary(() => house.paySupplierInHouse({ supplierId: 'sup-1', amount: 150, method: 'cash', mode: 'fifo' }, CTX));
+  const pr = primary(() => house.paySupplierInHouse({ supplierId: 'sup-1', amount: 150, method: 'cash', mode: 'fifo', confirmExcessAsCredit: true }, CTX));
   const C = setup();
   const d = deps(C.db);
   const idS = nextId();
-  const r = await fern(() => cmds.runSupplierPay(d, identity(idS, 'suppliers.pay'), { supplierId: 'sup-1', amount: 150, method: 'cash', mode: 'fifo' }));
+  const r = await fern(() => cmds.runSupplierPay(d, identity(idS, 'suppliers.pay'), { supplierId: 'sup-1', amount: 150, method: 'cash', mode: 'fifo', confirmExcessAsCredit: true }));
   const snap = (db: Db) => ({ e: EXPENSES(db), ep: EXPENSE_PAYMENTS(db), p: PURCHASES(db), pp: PURCHASE_PAYMENTS(db), c: CREDITS(db), l: LEDGER(db) });
   ok(pr.ok && r.kind === 'ok' && S(snap(P.db)) === S(snap(C.db)), `PARITY Sammelzahlung gleich (${pr.code}/${r.code})`);
   const alloc = (r.value.allocations as Array<{ kind: string; amount: number }>).map((a) => `${a.kind}:${a.amount}`);
@@ -735,7 +735,7 @@ marker('CENTRAL_UI_R6D_PAYABLES_REFUND_PROVED');
   'PRIMARY-FIX der Überschuss geht nicht verloren: Einkauf überzahlt → 30 Lieferanten-Guthaben (vorher kappte die Zahlung still, 30 verschwanden)');
   const counts = (db: Db) => [n(db, 'SELECT COUNT(*) FROM expense_payments'), n(db, 'SELECT COUNT(*) FROM purchase_payments'), n(db, 'SELECT COUNT(*) FROM ledger_entries')].join('/');
   const before = counts(C.db);
-  const again = await fern(() => cmds.runSupplierPay(d, identity(idS, 'suppliers.pay'), { supplierId: 'sup-1', amount: 150, method: 'cash', mode: 'fifo' }));
+  const again = await fern(() => cmds.runSupplierPay(d, identity(idS, 'suppliers.pay'), { supplierId: 'sup-1', amount: 150, method: 'cash', mode: 'fifo', confirmExcessAsCredit: true }));
   ok(again.replayed && counts(C.db) === before, 'PRIMARY-FIX verlorene Antwort, dieselbe Kennung: nichts wird zweimal gezahlt (vorher zahlte ein Wiederholen die ersten Posten doppelt)');
   // Manuell
   const M = setup();
@@ -764,14 +764,17 @@ marker('CENTRAL_UI_R6D_PAYABLES_REFUND_PROVED');
   // Überschuss ohne Einkauf → Standalone-Guthaben
   const dbE = freshDb();
   makeExpense({ supplierId: 'sup-2', amount: 40 });
-  const ex = await fern(() => cmds.runSupplierPay(deps(dbE), identity(nextId(), 'suppliers.pay'), { supplierId: 'sup-2', amount: 50, method: 'cash', mode: 'fifo' }));
+  // SETTLEMENT S2 — ohne ausdrückliche Wahl wird nie still überzahlt: abgewiesen, nichts geschrieben.
+  const still = await fern(() => cmds.runSupplierPay(deps(dbE), identity(nextId(), 'suppliers.pay'), { supplierId: 'sup-2', amount: 50, method: 'cash', mode: 'fifo' }));
+  ok(still.code === 'PAYMENT_EXCEEDS_OPEN' && net(dbE, 'CASH') === 0, 'EXCESS ohne ausdrückliche Wahl: abgewiesen, keine Kassenbewegung');
+  const ex = await fern(() => cmds.runSupplierPay(deps(dbE), identity(nextId(), 'suppliers.pay'), { supplierId: 'sup-2', amount: 50, method: 'cash', mode: 'fifo', confirmExcessAsCredit: true }));
   ok(ex.kind === 'ok' && ex.value.excessTo === 'standalone_credit' && net(dbE, 'SUPPLIER_CREDIT', 'SUPPLIER_PREPAYMENT') === 10 && net(dbE, 'CASH') === -50,
     'EXCESS ohne tragfähigen Einkauf → 10 Standalone-Guthaben (DR SUPPLIER_CREDIT / CR Kasse, SUPPLIER_PREPAYMENT)');
   // Atomar: der Einkauf scheitert → auch die Ausgabenzahlung ist nicht da
   const F = setup();
   const fBefore = counts(F.db);
   const { db: bad } = failOn(F.db, /INSERT INTO purchase_payments/);
-  const f = await fern(() => cmds.runSupplierPay(deps(bad), identity(nextId(), 'suppliers.pay'), { supplierId: 'sup-1', amount: 150, method: 'cash', mode: 'fifo' }));
+  const f = await fern(() => cmds.runSupplierPay(deps(bad), identity(nextId(), 'suppliers.pay'), { supplierId: 'sup-1', amount: 150, method: 'cash', mode: 'fifo', confirmExcessAsCredit: true }));
   unfail();
   ok(f.kind === 'thrown' && counts(F.db) === fBefore && Number(one(F.db, 'SELECT paid_amount FROM expenses WHERE id = ?', [F.e1])) === 0,
     'ATOMIC scheitert der zweite Posten, ist auch der erste nicht bezahlt (vorher blieb er stehen)');

@@ -78,6 +78,8 @@ const SUPPLIER_LINK_TABLES: { table: string; column: string; label: string }[] =
   { table: 'orders',                      column: 'goldsmith_supplier_id', label: 'order' },
   { table: 'order_lines',                 column: 'supplier_id',           label: 'order' },
   { table: 'order_lines',                 column: 'ordered_supplier_id',   label: 'order' },
+  // OPENING BALANCES S1 — ein Eröffnungsposten (auch storniert: Belegkette) hängt am Lieferanten.
+  { table: 'opening_balance_items',       column: 'party_id',              label: 'opening balance' },
 ];
 
 /**
@@ -520,65 +522,76 @@ export function supplierCreditsFor(ctx: BusinessReadContext, supplierId: string)
  * koennen der Primary-Store UND die gemeinsame Ladefunktion sie benutzen, ohne einen
  * Zustandsspeicher anzufassen.
  */
-export function supplierLedgerFor(id: string): { totalPurchases: number; totalPaid: number; outstandingBalance: number; creditBalance: number } {
-    try {
-      const purchaseRows = query(
-        `SELECT p.total_amount AS total, p.paid_amount AS paid,
-                COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp
-                          WHERE pp.purchase_id = p.id AND pp.method = 'credit'), 0) AS credit_paid
-           FROM purchases p WHERE p.supplier_id = ? AND p.status != 'CANCELLED'`,
-        [id]
-      );
-      let purchasesTotal = 0, purchasesOutstanding = 0;
-      for (const r of purchaseRows) {
-        const total = (r.total as number) || 0;
-        const settled = ((r.paid as number) || 0) + ((r.credit_paid as number) || 0);
-        purchasesTotal += total;
-        purchasesOutstanding += Math.max(0, total - settled);
-      }
+export type SupplierLedger = { totalPurchases: number; totalPaid: number; outstandingBalance: number; creditBalance: number };
 
-      // Slice A — Settlement-SSOT: settled = paid_amount (cash) + Σ credit-Einloesungen. paid_amount
-      // bleibt cash-only; die credit-Begleichung kommt aus expense_payments(method='credit'). Eine
-      // gebuendelte Korrelations-Subquery (kein N+1). Ohne den credit-Anteil bliebe eine credit-
-      // beglichene Expense faelschlich im OUTSTANDING.
-      const expenseRows = query(
-        `SELECT e.amount AS total, e.paid_amount AS paid,
-                COALESCE((SELECT SUM(ep.amount) FROM expense_payments ep
-                          WHERE ep.expense_id = e.id AND ep.method = 'credit'), 0) AS credit_paid
-           FROM expenses e WHERE e.supplier_id = ? AND e.status != 'CANCELLED'`,
-        [id]
-      );
-      let expensesTotal = 0, expensesOutstanding = 0;
-      for (const r of expenseRows) {
-        const total = (r.total as number) || 0;
-        const settled = ((r.paid as number) || 0) + ((r.credit_paid as number) || 0);
-        expensesTotal += total;
-        expensesOutstanding += Math.max(0, total - settled);
-      }
+export function supplierLedgerFor(id: string): SupplierLedger {
+  try {
+    const branchId = query('SELECT branch_id FROM suppliers WHERE id = ?', [id])[0]?.branch_id as string | undefined;
+    return branchId ? supplierLedgerStrict(id, branchId) : { totalPurchases: 0, totalPaid: 0, outstandingBalance: 0, creditBalance: 0 };
+  } catch {
+    return { totalPurchases: 0, totalPaid: 0, outstandingBalance: 0, creditBalance: 0 };
+  }
+}
 
-      // totalObligations = Σ aller Supplier-Verpflichtungen (Purchases + Workshop-Expenses).
-      // Das IST die Bedeutung des zurueckgegebenen Felds `totalPurchases` (bestehende Konvention,
-      // KPI "TOTAL PURCHASES" zeigt Purchases + Workshop). Identitaet damit explizit:
-      //   totalPaid = (purchasesTotal + expensesTotal) − outstandingBalance
-      // wobei outstandingBalance Purchases- UND Expense-Outstanding enthaelt.
-      const totalObligations = purchasesTotal + expensesTotal;
-      const outstandingBalance = purchasesOutstanding + expensesOutstanding;
-      const totalPaid = totalObligations - outstandingBalance;
+/**
+ * PARTY-BALANCES S0 — dieselbe Rechnung OHNE verschluckten Fehler und an die Filiale gebunden: für die
+ * Fernauskunft `parties.balances.get` (PC2) und alle Anzeigen, die „unbekannt" von „null" trennen müssen.
+ */
+export function supplierLedgerStrict(id: string, branchId: string): SupplierLedger {
+  const purchaseRows = query(
+    `SELECT p.total_amount AS total, p.paid_amount AS paid,
+            COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp
+                      WHERE pp.purchase_id = p.id AND pp.method = 'credit'), 0) AS credit_paid
+       FROM purchases p WHERE p.supplier_id = ? AND p.branch_id = ? AND p.status != 'CANCELLED'`,
+    [id, branchId]
+  );
+  let purchasesTotal = 0, purchasesOutstanding = 0;
+  for (const r of purchaseRows) {
+    const total = (r.total as number) || 0;
+    const settled = ((r.paid as number) || 0) + ((r.credit_paid as number) || 0);
+    purchasesTotal += total;
+    purchasesOutstanding += Math.max(0, total - settled);
+  }
 
-      const credit = query(
-        `SELECT COALESCE(SUM(amount - used_amount), 0) AS bal
-           FROM supplier_credits WHERE supplier_id = ?`,
-        [id]
-      );
-      const creditBalance = Math.max(0, (credit[0]?.bal as number) || 0);
+  // Slice A — Settlement-SSOT: settled = paid_amount (cash) + Σ credit-Einloesungen. paid_amount
+  // bleibt cash-only; die credit-Begleichung kommt aus expense_payments(method='credit'). Eine
+  // gebuendelte Korrelations-Subquery (kein N+1). Ohne den credit-Anteil bliebe eine credit-
+  // beglichene Expense faelschlich im OUTSTANDING.
+  const expenseRows = query(
+    `SELECT e.amount AS total, e.paid_amount AS paid,
+            COALESCE((SELECT SUM(ep.amount) FROM expense_payments ep
+                      WHERE ep.expense_id = e.id AND ep.method = 'credit'), 0) AS credit_paid
+       FROM expenses e WHERE e.supplier_id = ? AND e.branch_id = ? AND e.status != 'CANCELLED'`,
+    [id, branchId]
+  );
+  let expensesTotal = 0, expensesOutstanding = 0;
+  for (const r of expenseRows) {
+    const total = (r.total as number) || 0;
+    const settled = ((r.paid as number) || 0) + ((r.credit_paid as number) || 0);
+    expensesTotal += total;
+    expensesOutstanding += Math.max(0, total - settled);
+  }
 
-      return {
-        totalPurchases: round3(totalObligations),
-        totalPaid: round3(totalPaid),
-        outstandingBalance: round3(outstandingBalance),
-        creditBalance: round3(creditBalance),
-      };
-    } catch {
-      return { totalPurchases: 0, totalPaid: 0, outstandingBalance: 0, creditBalance: 0 };
-    }
+  // totalObligations = Σ aller Supplier-Verpflichtungen (Purchases + Workshop-Expenses).
+  // Das IST die Bedeutung des zurueckgegebenen Felds `totalPurchases` (bestehende Konvention,
+  // KPI "TOTAL PURCHASES" zeigt Purchases + Workshop). Identitaet damit explizit:
+  //   totalPaid = (purchasesTotal + expensesTotal) − outstandingBalance
+  // wobei outstandingBalance Purchases- UND Expense-Outstanding enthaelt.
+  const totalObligations = purchasesTotal + expensesTotal;
+  const outstandingBalance = purchasesOutstanding + expensesOutstanding;
+  const totalPaid = totalObligations - outstandingBalance;
+
+  const credit = query(
+    `SELECT COALESCE(SUM(amount - used_amount), 0) AS bal
+       FROM supplier_credits WHERE supplier_id = ? AND branch_id = ?`,
+    [id, branchId]
+  );
+  const creditBalance = Math.max(0, (credit[0]?.bal as number) || 0);
+
+  return {
+    totalPurchases: round3(totalObligations),
+    totalPaid: round3(totalPaid),
+    outstandingBalance: round3(outstandingBalance),
+    creditBalance: round3(creditBalance),
+  };
 }

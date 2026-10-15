@@ -263,13 +263,18 @@ export interface SupplierPayForm {
   method: string;
   mode: 'fifo' | 'manual';
   allocations?: Array<{ kind: 'expense' | 'purchase'; id: string; amount: number }>;
+  /** SETTLEMENT S2 — der Rest über allem Offenen wird nur mit dieser Wahl Guthaben. */
+  confirmExcessAsCredit?: boolean;
 }
 
 /** „Pay Supplier — Bulk": EINE Buchung ueber alle Posten; FIFO rechnet der Primary. */
 export function saveSupplierPay(write: PayablesWrite<Result>, form: SupplierPayForm): Promise<WriteOutcome<Result>> {
   if (!(F(form.amount) > 0)) return Promise.resolve(absage({ code: 'PAYMENT_AMOUNT_INVALID', message: 'the payment amount must be positive' }));
   const allocations = form.mode === 'manual' ? (form.allocations ?? []).filter((a) => F(a.amount) > 0) : undefined;
-  const req = { supplierId: form.supplierId, amount: form.amount, method: form.method, mode: form.mode, ...(allocations ? { allocations } : {}) };
+  const req = {
+    supplierId: form.supplierId, amount: form.amount, method: form.method, mode: form.mode, ...(allocations ? { allocations } : {}),
+    ...(form.confirmExcessAsCredit === true ? { confirmExcessAsCredit: true } : {}),
+  };
   return speichern(write, {
     local: () => runOnPrimary(() => paySupplierInHouse(req, localHouseCtx()) as unknown as Result, supplierHier),
     remote: () => ({ ...req }),

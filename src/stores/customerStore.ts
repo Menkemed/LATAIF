@@ -216,11 +216,13 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
          (SELECT COUNT(*) FROM sales_returns  WHERE customer_id = ?) AS returns,
          (SELECT COUNT(*) FROM consignments   WHERE consignor_id = ?) AS consignments,
          (SELECT COUNT(*) FROM orders         WHERE customer_id = ?) AS orders,
-         (SELECT COUNT(*) FROM repairs        WHERE customer_id = ?) AS repairs`,
-      [id, id, id, id, id, id]
+         (SELECT COUNT(*) FROM repairs        WHERE customer_id = ?) AS repairs,
+         (SELECT COUNT(*) FROM opening_balance_items WHERE party_type = 'CUSTOMER' AND party_id = ?) AS "opening balances"`,
+      [id, id, id, id, id, id, id]
     );
     const r = refs[0] || {};
-    const linked = ['invoices', 'debts', 'returns', 'consignments', 'orders', 'repairs']
+    // OPENING BALANCES S1 — ein Eröffnungsposten (auch storniert: Belegkette) hängt am Kunden.
+    const linked = ['invoices', 'debts', 'returns', 'consignments', 'orders', 'repairs', 'opening balances']
       .map(k => ({ k, n: Number((r as Record<string, unknown>)[k] || 0) }))
       .filter(x => x.n > 0);
     if (linked.length > 0) {
@@ -283,14 +285,7 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
   // Liefert die einlösbare Summe für UI-Anzeige UND Backend-Cap in applyCreditToInvoice.
   getAvailableCredit: (customerId) => {
     try {
-      const branchId = currentBranchId();
-      const rows = query(
-        `SELECT COALESCE(SUM(amount - used_amount), 0) AS avail
-           FROM customer_credits
-          WHERE branch_id = ? AND customer_id = ? AND status = 'OPEN'`,
-        [branchId, customerId]
-      );
-      return Math.max(0, Number(rows[0]?.avail || 0));
+      return customerStoreCreditFor(localReadContext(), customerId);
     } catch {
       return 0;
     }
@@ -304,91 +299,135 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
   //  Outstanding = (gross − paid) der offenen Invoices + offene we_lend-Loans.
   getCustomerStats: (customerId) => {
     try {
-      const { invoices, salesReturns } = loadSalesData({ customerId });
-      const m = computeSalesMetrics(invoices, salesReturns);
-
-      // Outstanding aus Invoices — subtrahiert CN receivable_cancel für korrekte Netto-Schuld.
-      // open_cnt zählt nur Invoices mit tatsächlich offenen Beträgen (nach CN-Abzug).
-      const openRow = query(
-        `SELECT
-           COALESCE(SUM(MAX(0, i.gross_amount - i.paid_amount
-             - COALESCE(cn_totals.cancel_amount, 0))), 0) AS outstanding,
-           COALESCE(SUM(CASE WHEN (i.gross_amount - i.paid_amount
-             - COALESCE(cn_totals.cancel_amount, 0)) > 0.005 THEN 1 ELSE 0 END), 0) AS open_cnt
-         FROM invoices i
-         LEFT JOIN (
-           -- R6E-CN: eine stornierte Gutschrift befreit keine Forderung mehr.
-           SELECT invoice_id, SUM(receivable_cancel_amount) AS cancel_amount
-           FROM credit_notes WHERE status != 'CANCELLED' GROUP BY invoice_id
-         ) cn_totals ON cn_totals.invoice_id = i.id
-         WHERE i.customer_id = ? AND i.status IN ('PARTIAL', 'DRAFT')`,
-        [customerId]
-      );
-
-      // Anzahl aktiver Invoices (für UI "X invoices"-Hinweis) — ohne stornierte/draft.
-      const cntRow = query(
-        `SELECT COUNT(*) AS cnt
-         FROM invoices
-         WHERE customer_id = ? AND status NOT IN ('CANCELLED', 'DRAFT')`,
-        [customerId]
-      );
-
-      // Approval-Transfers: offene Sold-Forderungen ohne Invoice-Convert.
-      // Reduziert um bisherige Settle-Payments — wenn settlementPaidAmount < settlementAmount
-      // ist die Forderung noch offen.
-      const transferRow = query(
-        `SELECT COUNT(*) AS cnt
-         FROM agent_transfers at
-         JOIN agents ag ON ag.id = at.agent_id
-         WHERE ag.customer_id = ?
-           AND at.invoice_id IS NULL
-           AND at.status IN ('sold','settled')
-           AND COALESCE(at.settlement_amount, 0) - COALESCE(at.settlement_paid_amount, 0) > 0.005`,
-        [customerId]
-      );
-
-      // Loans: offene we_lend-Beträge — Raten leben in debt_payments (Subselect).
-      const loanRow = query(
-        `SELECT COALESCE(SUM(d.amount - COALESCE(p.total_paid, 0)), 0) AS open_lent,
-                COUNT(*) AS cnt
-         FROM debts d
-         LEFT JOIN (
-           SELECT debt_id, SUM(amount) AS total_paid
-           FROM debt_payments
-           GROUP BY debt_id
-         ) p ON p.debt_id = d.id
-         WHERE d.customer_id = ? AND d.direction = 'we_lend'
-           AND d.status NOT IN ('CANCELLED', 'REPAID', 'settled')`,
-        [customerId]
-      );
-
-      const o = openRow[0] || {};
-      // ZIEL.md §3a — invoiceOutstanding kommt aus dem zentralen Ledger.
-      // Domain-Aggregation bleibt nur als Fallback (catch-Block) und für openInvoiceCount.
-      const invoiceOutstanding = Math.max(0, customerBalance(customerId));
-      const loanOpen = Math.max(0, Number(loanRow[0]?.open_lent || 0));
-      const loanCount = Number(loanRow[0]?.cnt || 0);
-      const openTransferCount = Number(transferRow[0]?.cnt || 0);
-
-      return {
-        // User-Spec: Revenue darf negativ werden wenn Refunds > Rechnungssumme —
-        // Kunde hat mehr zurückbekommen als die Rechnung trug (Goodwill-Refund).
-        // KEIN Math.max(0,…)-Clamp, sonst wird der Refund unsichtbar (wie Sales-Report).
-        revenue: m.gross,
-        profit: m.profit,
-        outstanding: invoiceOutstanding + loanOpen,
-        invoiceOutstanding,
-        loanOutstanding: loanOpen,
-        invoiceCount: Number(cntRow[0]?.cnt || 0),
-        openInvoiceCount: Number(o.open_cnt || 0),
-        openLoanCount: loanCount,
-        openTransferCount,
-      };
+      return customerStatsFor(localReadContext(), customerId) ?? EMPTY_CUSTOMER_STATS;
     } catch {
-      return { revenue: 0, profit: 0, outstanding: 0, invoiceOutstanding: 0, loanOutstanding: 0, invoiceCount: 0, openInvoiceCount: 0, openLoanCount: 0, openTransferCount: 0 };
+      return EMPTY_CUSTOMER_STATS;
     }
   },
 }));
+
+/** Die Kennzahlen eines Kunden (Umsatz, Gewinn, offene Forderung). */
+export interface CustomerStats {
+  revenue: number;
+  profit: number;
+  outstanding: number;            // total receivable = invoices + loans + transfers
+  invoiceOutstanding: number;     // AR-Saldo aus dem Ledger (Invoice + Approval-Sold)
+  loanOutstanding: number;        // only from we_lend debts
+  invoiceCount: number;
+  openInvoiceCount: number;
+  openLoanCount: number;
+  openTransferCount: number;      // offene Approval-Sold-Transfers ohne Invoice-Convert
+}
+
+const EMPTY_CUSTOMER_STATS: CustomerStats = {
+  revenue: 0, profit: 0, outstanding: 0, invoiceOutstanding: 0, loanOutstanding: 0,
+  invoiceCount: 0, openInvoiceCount: 0, openLoanCount: 0, openTransferCount: 0,
+};
+
+/**
+ * PARTY-BALANCES S0 — die Kennzahlen EINES Kunden in der Filiale des Ausweises, zustandsfrei.
+ *
+ * Dieselbe Rechnung am Primary (Maske) und für die Fernauskunft `parties.balances.get` (PC2): vorher
+ * rechnete PC2 sie gegen eine Datenbank, die es dort nicht gibt, fing den Fehler ab und zeigte 0,000.
+ * Ein Kunde einer anderen Filiale ist hier nicht vorhanden (`null`). Fehler werden NICHT verschluckt —
+ * wer anzeigt, entscheidet, was „unbekannt" heißt.
+ */
+export function customerStatsFor(ctx: BusinessReadContext, customerId: string): CustomerStats | null {
+  if (!query('SELECT 1 FROM customers WHERE id = ? AND branch_id = ?', [customerId, ctx.branchId])[0]) return null;
+  const { invoices, salesReturns } = loadSalesData({ customerId, branchId: ctx.branchId });
+  const m = computeSalesMetrics(invoices, salesReturns);
+
+  // Outstanding aus Invoices — subtrahiert CN receivable_cancel für korrekte Netto-Schuld.
+  // open_cnt zählt nur Invoices mit tatsächlich offenen Beträgen (nach CN-Abzug).
+  const openRow = query(
+    `SELECT
+       COALESCE(SUM(MAX(0, i.gross_amount - i.paid_amount
+         - COALESCE(cn_totals.cancel_amount, 0))), 0) AS outstanding,
+       COALESCE(SUM(CASE WHEN (i.gross_amount - i.paid_amount
+         - COALESCE(cn_totals.cancel_amount, 0)) > 0.005 THEN 1 ELSE 0 END), 0) AS open_cnt
+     FROM invoices i
+     LEFT JOIN (
+       -- R6E-CN: eine stornierte Gutschrift befreit keine Forderung mehr.
+       SELECT invoice_id, SUM(receivable_cancel_amount) AS cancel_amount
+       FROM credit_notes WHERE status != 'CANCELLED' GROUP BY invoice_id
+     ) cn_totals ON cn_totals.invoice_id = i.id
+     WHERE i.customer_id = ? AND i.branch_id = ? AND i.status IN ('PARTIAL', 'DRAFT')`,
+    [customerId, ctx.branchId]
+  );
+
+  // Anzahl aktiver Invoices (für UI "X invoices"-Hinweis) — ohne stornierte/draft.
+  const cntRow = query(
+    `SELECT COUNT(*) AS cnt
+     FROM invoices
+     WHERE customer_id = ? AND branch_id = ? AND status NOT IN ('CANCELLED', 'DRAFT')`,
+    [customerId, ctx.branchId]
+  );
+
+  // Approval-Transfers: offene Sold-Forderungen ohne Invoice-Convert.
+  // Reduziert um bisherige Settle-Payments — wenn settlementPaidAmount < settlementAmount
+  // ist die Forderung noch offen.
+  const transferRow = query(
+    `SELECT COUNT(*) AS cnt
+     FROM agent_transfers at
+     JOIN agents ag ON ag.id = at.agent_id
+     WHERE ag.customer_id = ? AND at.branch_id = ?
+       AND at.invoice_id IS NULL
+       AND at.status IN ('sold','settled')
+       AND COALESCE(at.settlement_amount, 0) - COALESCE(at.settlement_paid_amount, 0) > 0.005`,
+    [customerId, ctx.branchId]
+  );
+
+  // Loans: offene we_lend-Beträge — Raten leben in debt_payments (Subselect).
+  const loanRow = query(
+    `SELECT COALESCE(SUM(d.amount - COALESCE(p.total_paid, 0)), 0) AS open_lent,
+            COUNT(*) AS cnt
+     FROM debts d
+     LEFT JOIN (
+       SELECT debt_id, SUM(amount) AS total_paid
+       FROM debt_payments
+       GROUP BY debt_id
+     ) p ON p.debt_id = d.id
+     WHERE d.customer_id = ? AND d.branch_id = ? AND d.direction = 'we_lend'
+       AND d.status NOT IN ('CANCELLED', 'REPAID', 'settled')`,
+    [customerId, ctx.branchId]
+  );
+
+  const o = openRow[0] || {};
+  // ZIEL.md §3a — invoiceOutstanding kommt aus dem zentralen Ledger.
+  const invoiceOutstanding = Math.max(0, customerBalance(customerId, ctx.branchId));
+  const loanOpen = Math.max(0, Number(loanRow[0]?.open_lent || 0));
+  const loanCount = Number(loanRow[0]?.cnt || 0);
+  const openTransferCount = Number(transferRow[0]?.cnt || 0);
+
+  return {
+    // User-Spec: Revenue darf negativ werden wenn Refunds > Rechnungssumme —
+    // Kunde hat mehr zurückbekommen als die Rechnung trug (Goodwill-Refund).
+    // KEIN Math.max(0,…)-Clamp, sonst wird der Refund unsichtbar (wie Sales-Report).
+    revenue: m.gross,
+    profit: m.profit,
+    outstanding: invoiceOutstanding + loanOpen,
+    invoiceOutstanding,
+    loanOutstanding: loanOpen,
+    invoiceCount: Number(cntRow[0]?.cnt || 0),
+    openInvoiceCount: Number(o.open_cnt || 0),
+    openLoanCount: loanCount,
+    openTransferCount,
+  };
+}
+
+/**
+ * Credit-Modell — verfügbares Store-Guthaben: Σ (amount − used_amount) über alle OPEN-customer_credits des
+ * Kunden in der Filiale des Ausweises. Dieselbe Summe für die Anzeige (auch am PC2) und den Deckel beim Einlösen.
+ */
+export function customerStoreCreditFor(ctx: BusinessReadContext, customerId: string): number {
+  const rows = query(
+    `SELECT COALESCE(SUM(amount - used_amount), 0) AS avail
+       FROM customer_credits
+      WHERE branch_id = ? AND customer_id = ? AND status = 'OPEN'`,
+    [ctx.branchId, customerId]
+  );
+  return Math.max(0, Number(rows[0]?.avail || 0));
+}
 
 /**
  * CENTRAL-UI-PARITY R1 — die gemeinsame Ladefunktion fuer Kunden.

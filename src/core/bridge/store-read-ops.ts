@@ -110,6 +110,11 @@ export const OP_BULK_ALLOCATION_PREVIEW_GET = 'bulk_metals.allocation_preview.ge
 export const OP_STOCK_PRODUCT_GET = 'stock_adjustments.product.get';
 // OLD STOCK — die schreibgeschützte Eröffnungsvorschau und Abstimmungsliste (Seite „Old stock").
 export const OP_OLD_STOCK_PAGE_GET = 'page.old_stock.get';
+// PARTY-BALANCES S0 — Salden von Kunden und Lieferanten vom Primary (am PC2 vorher still 0,000).
+export const OP_PARTIES_BALANCES_GET = 'parties.balances.get';
+// OPENING BALANCES + SETTLEMENT — Bereich „Opening balances" und „Receive Payment" einer Partei; die Abstimmungsliste.
+export const OP_PARTIES_ACCOUNT_GET = 'parties.account.get';
+export const OP_PAGE_OPENING_BALANCES_GET = 'page.opening_balances.get';
 
 /**
  * Die Liste IST die Erlaubnis. Ein Name, der hier fehlt, existiert fuer das Netz nicht — genau
@@ -176,6 +181,9 @@ export const STORE_READ_OPS: readonly string[] = [
   OP_BULK_ALLOCATION_PREVIEW_GET,
   OP_STOCK_PRODUCT_GET,
   OP_OLD_STOCK_PAGE_GET,
+  OP_PARTIES_BALANCES_GET,
+  OP_PARTIES_ACCOUNT_GET,
+  OP_PAGE_OPENING_BALANCES_GET,
 ];
 
 // Nicht hier — und damit fern nicht aufrufbar — sind nur noch drei Arten von Zugriffen, und keine
