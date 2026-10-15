@@ -65,12 +65,13 @@ type PaymentEntry =
 // CENTRAL-UI-PARITY R2D — Zahlungen, Erstattungen und zurueckgebuchte Forderungen kommen aus
 // EINER gemeinsamen Ladefunktion. Sie traegt die Filiale des Anfragenden mit: eine
 // Kundenkennung aus einer fremden Filiale liefert deshalb nichts statt fremder Zahlen.
-function useCustomerReads(customerId: string | undefined) {
+// SETTLEMENT — `v` frischt die Liste nach „Receive Payment" auf derselben Seite auf (vorher stand sie still).
+function useCustomerReads(customerId: string | undefined, v = 0) {
   return useSharedRead(
-    'page.customer_detail.get', { customerId: customerId ?? '' },
+    'page.customer_detail.get', { customerId: customerId ?? '', ...(v ? { v } : {}) },
     (ctx) => customerDetailReadsFor(ctx, customerId ?? ''),
     { payments: [], refunds: [], creditNoteCancels: {} } as CustomerDetailReads,
-    [customerId],
+    [customerId, v],
   );
 }
 
@@ -189,7 +190,7 @@ export function CustomerDetail() {
     [invoices, id]
   );
   const customerLoans = useMemo(() => id ? debts.filter(d => d.customerId === id) : [], [debts, id]);
-  const customerReads = useCustomerReads(id);
+  const customerReads = useCustomerReads(id, balanceTick);
   const customerPayments = useMemo(() => mergeCustomerPayments(customerReads), [customerReads]);
 
   // CN receivable_cancel per invoice — fuer korrekte "Remaining" Anzeige in der Invoice-Tabelle.

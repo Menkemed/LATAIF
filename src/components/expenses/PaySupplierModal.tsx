@@ -19,7 +19,7 @@
 //     er kam NIE an.
 // Die Verteilung rechnet jetzt DERSELBE Planer wie das Haus (`planSupplierPayment`); am Ende rechnet
 // der Primary sie frisch nach. Die Maske schliesst NUR bei Erfolg.
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { Button } from '@/components/ui/Button';
@@ -288,8 +288,22 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
     setManualAlloc(prev => ({ ...prev, [key]: capped }));
   }
 
+  // PUSH-GATE — ein Doppelklick darf nie zweimal zahlen: `busy` gilt erst während des Speicherns; ein zweiter Klick
+  // vor der Rückfrage oder vor dem nächsten Zeichnen löste eine zweite Zahlung aus. Eine Absicht, ein Vorgang.
+  const sending = useRef(false);
+
   async function handleSubmit() {
-    if (busy || !supplierId || totalAmount <= 0) return;
+    if (sending.current || busy || !supplierId || totalAmount <= 0) return;
+    sending.current = true;
+    try {
+      await handleSubmitOnce();
+    } finally {
+      sending.current = false;
+    }
+  }
+
+  async function handleSubmitOnce() {
+    if (!supplierId) return;
     setFehler('');
 
     // ── Guthaben-Modus: EINE Buchung, der atomare Schreiber des Hauses (FIFO dort, frisch). ──

@@ -6,7 +6,7 @@
 // Ein Betrag über allem Offenen wird nur mit ausdrücklicher Wahl Store-Guthaben. Eröffnungsposten und Erlass sind
 // sichtbar, aber gesperrt, bis der Buchhalter die Regeln bestätigt.
 // ════════════════════════════════════════════════════════════════════════════
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
@@ -15,7 +15,7 @@ import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { OP_PARTIES_ACCOUNT_GET, partyAccountReadFor, type PartyAccountRead } from '@/core/parties/party-account';
 import {
   planCustomerSettlement, previewPaymentAndWaiver, settleCustomerOnPrimary,
-  type CustomerSettled, type CustomerSettleRequest, type SettlementInvoice,
+  type CustomerSettled, type CustomerSettleRequest, type SettlementInvoice, type SettlementPlan,
 } from '@/core/parties/customer-settlement';
 import { INVOICE_PAYMENT_METHODS } from '@/core/invoices/invoice-payment-house';
 
@@ -61,8 +61,23 @@ export function CustomerSettlementModal({ customerId, customerName, onClose, onD
   const excessF = planOk?.excessF ?? 0;
   const waiverPreview = waiverF > 0 ? previewPaymentAndWaiver(openF, amountF, waiverF) : null;
 
+  // PUSH-GATE — ein Doppelklick darf nie zweimal zahlen: der zweite Klick kam vorher noch vor der Rückfrage durch
+  // (`busy` gilt erst während des Speicherns) und erzeugte eine zweite Zahlung. Eine Absicht, ein Vorgang.
+  const sending = useRef(false);
+
   async function submit(): Promise<void> {
-    if (!planOk || waiverF > 0) return;
+    if (sending.current || !planOk || waiverF > 0) return;
+    sending.current = true;
+    let done = false;
+    try {
+      done = await submitOnce(planOk);
+    } finally {
+      // Nach Erfolg schließt das Fenster — bis dahin bleibt es gesperrt.
+      if (!done) sending.current = false;
+    }
+  }
+
+  async function submitOnce(planOk: SettlementPlan): Promise<boolean> {
     const req: CustomerSettleRequest = {
       customerId, amount: amountF / 1000, method, mode: manual ? 'manual' : 'fifo',
       ...(method === 'card' ? { cardBrand } : {}), ...(notes.trim() ? { notes: notes.trim() } : {}),
@@ -70,14 +85,15 @@ export function CustomerSettlementModal({ customerId, customerName, onClose, onD
       ...(excessF > 0 && excessOk ? { confirmExcessAsCredit: true } : {}),
     };
     const lines = planOk.allocations.map((a) => `${invoices.find((i) => i.id === a.invoiceId)?.number}: ${fmt(a.amountF)}`).join('\n');
-    if (!(await window.confirm(`Receive ${fmt(amountF)} BHD (${METHOD_LABEL[method] ?? method}) from ${customerName}?\n\n${lines}${excessF > 0 ? `\nStore credit: ${fmt(excessF)}` : ''}`))) return;
+    if (!(await window.confirm(`Receive ${fmt(amountF)} BHD (${METHOD_LABEL[method] ?? method}) from ${customerName}?\n\n${lines}${excessF > 0 ? `\nStore credit: ${fmt(excessF)}` : ''}`))) return false;
     const out = await w.save<CustomerSettled>('customers.settle', {
       local: () => settleCustomerOnPrimary(req),
       remote: () => ({ ...req }),
     });
-    if (out.kind !== 'ok') { setMsg(fehlertext(out)); return; }
+    if (out.kind !== 'ok') { setMsg(fehlertext(out)); return false; }
     onDone();
     onClose();
+    return true;
   }
 
   return (

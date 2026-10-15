@@ -445,6 +445,52 @@ function obState(db: Db): string {
   ok(/accounting: 'PENDING'/.test(src('src/core/parties/opening-balances.ts')) && !/postEntries|postOpening|ACCOUNTS_RECEIVABLE', side: 'DEBIT'.*postEntries/.test(src('src/core/parties/opening-balances.ts').replace(/\/\/.*$/gm, '').replace(/proposedBookingOf[\s\S]*?\n}\n/, ''))
     && ob.OPENING_BOOKING.active === false,
     'S1-21 im Code gibt es keinen Weg, der einen Eröffnungsposten bucht (OPENING_BOOKING aus)');
+
+  // PUSH-GATE 1 — ein erfasster, nicht gebuchter Eröffnungsposten (hier: Forderung 3777,5, Kundenvorauszahlung 150,
+  // Lieferantenschuld 850, Lieferantenvorauszahlung 120) steht in KEINEM gebuchten Saldo und auf KEINEM Zahlungsweg.
+  const leser = new Set<string>();
+  for (const rel of readdirSync(resolvePath(repo, 'src'), { recursive: true, encoding: 'utf8' })) {
+    if (!/\.(ts|tsx)$/.test(rel)) continue;
+    const p = 'src/' + rel.replace(/\\/g, '/');
+    if (/\bopening_balance_items\b/.test(src(p).replace(/\/\/.*$/gm, ''))) leser.add(p);
+  }
+  ok(S([...leser].sort()) === S(['src/core/db/database.ts', 'src/core/parties/opening-balances.ts', 'src/stores/customerStore.ts', 'src/stores/supplierStore.ts']),
+    `G1-1 die Tabelle lesen nur: Schema, das Eröffnungsmodul, die Löschsperren von Kunde/Lieferant — kein Saldo, kein Zahlungsweg, kein Bericht (${S([...leser].sort())})`);
+  const obCode = src('src/core/parties/opening-balances.ts').replace(/\/\/.*$/gm, '');
+  ok(!/INSERT INTO (ledger_entries|payments|purchase_payments|expense_payments|customer_credits|supplier_credits|invoices|purchases|expenses|debts)\b/.test(obCode)
+    && !/\bpost[A-Z]\w*\(/.test(obCode) && !/\breverse(Source|Transaction)\(/.test(obCode),
+    'G1-2 das Eröffnungsmodul schreibt weder Hauptbuch noch Zahlung, Guthaben, Rechnung, Einkauf, Ausgabe oder Darlehen');
+  const gesamt = (t: { kind: string; amount: number }[], k: string): number => t.find((x) => x.kind === k)?.amount ?? 0;
+  const acc2 = pa.partyAccountReadFor({ branchId: 'branch-main' }, { partyType: 'CUSTOMER', partyId: 'cust-1' });
+  const accS = pa.partyAccountReadFor({ branchId: 'branch-main' }, { partyType: 'SUPPLIER', partyId: 'sup-1' });
+  ok(gesamt(acc2.totals, 'CUSTOMER_RECEIVABLE') > 0 && gesamt(acc2.totals, 'CUSTOMER_ADVANCE') > 0 && gesamt(accS.totals, 'SUPPLIER_PAYABLE') > 0 && gesamt(accS.totals, 'SUPPLIER_ADVANCE') > 0
+    && acc2.items.every((i) => i.accounting === 'PENDING') && accS.items.every((i) => i.accounting === 'PENDING'),
+    'G1-3 Ausgangslage: alle vier Arten erfasst, jeder Posten accounting = PENDING (ungebucht erkennbar)');
+  const bal = pb.partyBalancesFor({ tenantId: 'tenant-1', branchId: 'branch-main', userId: 'u', role: 'ADMIN' }, { customerIds: ['cust-1'], supplierIds: ['sup-1'] });
+  const cb = new Map(bal.customers).get('cust-1')!;
+  const sb = new Map(bal.suppliers).get('sup-1')!;
+  ok(eq(cb.invoiceOutstanding, ar(db)) && eq(cb.invoiceOutstanding, 250) && eq(cb.storeCredit, 0) && eq(sb.outstandingBalance, 0) && eq(sb.creditBalance, 0),
+    `G1-4 gebuchte Salden ohne Eröffnung: Kundenforderung = Hauptbuch 250 (nur die echte Rechnung), Guthaben 0, Lieferant offen 0, Lieferantenguthaben 0 (${S({ ar: cb.invoiceOutstanding, sc: cb.storeCredit, ap: sb.outstandingBalance, scr: sb.creditBalance })})`);
+  const { receivablesBreakdown } = await import('../../src/core/finance/receivables.ts');
+  const { loadPayablesFor } = await import('../../src/stores/payablesStore.ts');
+  const rec2 = receivablesBreakdown('branch-main');
+  const pay2 = loadPayablesFor({ tenantId: 'tenant-1', branchId: 'branch-main', userId: 'u', role: 'ADMIN' }).payables;
+  ok(rec2.length === 1 && rec2[0].source === 'INVOICE' && eq(rec2.reduce((x, r) => x + r.open, 0), 250) && pay2.every((r) => r.counterpartyId !== 'sup-1'),
+    `G1-5 Receivables zeigt nur die echte Rechnung (250), Payables nichts vom Lieferanten (${rec2.length}/${pay2.length})`);
+  ok(cs.customerSettlementInvoices('cust-1', 'branch-main').length === 1 && payHouse.openSupplierItems('sup-1', 'branch-main').length === 0,
+    'G1-6 „Receive Payment" bietet nur die echte Rechnung an, „Pay Supplier" hat nichts Offenes — Eröffnungsposten sind nicht bezahlbar');
+  let payCode = '';
+  try { imHaus(() => payHouse.paySupplierInHouse({ supplierId: 'sup-1', amount: 850, method: 'cash', mode: 'fifo', confirmExcessAsCredit: true }, { branchId: 'branch-main', userId: 'user-test', now: NOW } as never)); }
+  catch (e) { payCode = String((e as { code?: string }).code); }
+  let creditCode = '';
+  try { imHaus(() => payHouse.applySupplierCreditToExpensesInHouse('sup-1', 120, { branchId: 'branch-main', userId: 'user-test', now: NOW } as never)); }
+  catch (e) { creditCode = String((e as { code?: string }).code ?? (e as Error).message); }
+  const l9 = ledgerCount(db);
+  const custCredit = useCustomerStore.getState().getAvailableCredit('cust-1');
+  ok(payCode === 'SUPPLIER_NOTHING_OPEN' && creditCode !== '' && eq(custCredit, 0) && ledgerCount(db) === l9,
+    `G1-7 auch mit Gewalt nicht: Lieferantenzahlung 850 (${payCode}), Verrechnung der Vorauszahlung 120 (${creditCode.slice(0, 30)}), Kundenguthaben 0 — keine Buchung`);
+  ok(n(db, "SELECT COUNT(*) FROM ledger_entries WHERE account IN ('VAT_OUTPUT','VAT_INPUT','MARGIN_VAT','CASH','BANK','BENEFIT','OPENING_BALANCE_EQUITY') AND source_module NOT IN ('INVOICE','PAYMENT')") === 0,
+    'G1-8 keine VAT-, Kassen-, Bank-, Benefit- oder Eröffnungskonto-Zeile außer der echten Rechnung');
 }
 
 // ══ S1-PC2 — dieselbe Hausfolge über die Fernbefehle: Rolle des Absenders, Replay, Rollback ════════════════════
@@ -613,6 +659,17 @@ function obState(db: Db): string {
     'L3 der Rumpf trägt die Wahl als Ja/Nein');
   ok(/confirmExcessAsCredit: true/.test(src('src/components/expenses/PaySupplierModal.tsx')) && /data-supplier-pay-locked/.test(src('src/components/expenses/PaySupplierModal.tsx')),
     'L4 die Maske fragt bei jedem Überschuss ausdrücklich und zeigt: Eröffnungsposten und Erlass noch gesperrt');
+  // PUSH-GATE 2 — im Browser zahlte ein Doppelklick auf „Receive payment" zweimal (zwei Rückfragen, zwei Zahlungen).
+  // Beide Zahlmasken sperren jetzt VOR der Rückfrage: eine Absicht, ein Vorgang.
+  const csm = src('src/components/parties/CustomerSettlementModal.tsx');
+  const psm = src('src/components/expenses/PaySupplierModal.tsx');
+  ok(/if \(sending\.current \|\| !planOk \|\| waiverF > 0\) return;\s*sending\.current = true;/.test(csm) && /if \(!done\) sending\.current = false;/.test(csm)
+    && csm.indexOf('sending.current = true') < csm.indexOf('window.confirm(')
+    && /if \(sending\.current \|\| busy \|\| !supplierId \|\| totalAmount <= 0\) return;\s*sending\.current = true;/.test(psm)
+    && psm.indexOf('sending.current = true') < psm.indexOf('window.confirm('),
+    'L5 Doppelklick-Sperre in „Receive payment" und „Pay Supplier": gesperrt vor der Rückfrage, nach Erfolg bleibt sie zu');
+  ok(/useCustomerReads\(id, balanceTick\)/.test(src('src/pages/customers/CustomerDetail.tsx')),
+    'L6 nach „Receive Payment" lädt die Zahlungsliste der Kundenseite neu (vorher stand sie still)');
 }
 
 // ══ N — Namen überall gleich: Freigabe, Recht, Anmeldung, Katalog, Rust ═══════════════════════════════════════
