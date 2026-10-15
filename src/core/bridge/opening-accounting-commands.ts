@@ -18,7 +18,7 @@ import { BusinessError, registerCommand, type CommandActor, type CommandResult }
 import { assertHouseBranch } from './remote-create-support';
 import { OP_PAGE_OPENING_ACCOUNTING_GET } from './store-read-ops';
 import {
-  OpeningAccountRejected, cancelOpeningAccountItemInHouse, openingAccountingFor, recordOpeningAccountItemInHouse,
+  OpeningAccountRejected, cancelOpeningAccountItemInHouse, mayReadOpeningAccounting, openingAccountingFor, recordOpeningAccountItemInHouse,
   type OpeningAccountCtx, type OpeningAccountItem,
 } from '@/core/accounting/opening-accounting';
 import { LedgerStatementInputError } from '@/core/accounting/ledger-statements';
@@ -108,6 +108,8 @@ registerCommand(OP_PAGE_OPENING_ACCOUNTING_GET, {
   kind: 'read',
   handler: async (payload, actor): Promise<CommandResult> => {
     const ctx = remoteReadContext(actor ?? (payload as Envelope | null)?.actor);
+    // B1 FINAL GATE — nur der Owner liest die Eröffnungsbilanz (Rolle aus dem geprüften Absender, nicht aus dem Rumpf).
+    if (!mayReadOpeningAccounting(ctx.role)) throw new BusinessError('PERMISSION_DENIED', 'only the owner (admin) may see the opening balances');
     const input = (payload as Envelope | null)?.input ?? {};
     try {
       return { data: { ...openingAccountingFor(ctx, { asOfDate: input.asOfDate, view: input.view, txLimit: input.txLimit, preview: input.preview }) } };

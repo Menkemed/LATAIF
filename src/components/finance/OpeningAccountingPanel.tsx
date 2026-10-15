@@ -24,7 +24,7 @@ import {
 } from '@/core/accounting/opening-accounting';
 
 const b3 = (n: number | null | undefined): string => (n === null || n === undefined ? '—' : n.toFixed(3));
-const STATUS_COLOR: Record<string, string> = { RECONCILED: '#2F6B3A', BOOKED: '#374151', PROVISIONAL: '#8A5A00', MISSING: '#7A3535', EMPTY: '#9CA3AF' };
+const STATUS_COLOR: Record<string, string> = { RECONCILED: '#2F6B3A', BOOKED: '#374151', PROVISIONAL: '#8A5A00', MISSING: '#7A3535', NOT_VERIFIED: '#7A3535', EMPTY: '#9CA3AF' };
 const box = { padding: '10px 14px', background: '#F5F7FA', border: '1px solid #E5E9EE', borderRadius: 8, fontSize: 13, color: '#374151' } as const;
 const th = { textAlign: 'left' as const, padding: '6px 8px', fontSize: 11, color: '#6B7280', fontWeight: 600, borderBottom: '1px solid #E5E9EE' };
 const td = { padding: '6px 8px', fontSize: 12, borderBottom: '1px solid #F1F3F5', verticalAlign: 'top' as const };
@@ -61,7 +61,8 @@ export function OpeningAccountingPanel() {
   const input = { asOfDate, ...(showTx ? { view: 'transactions' } : {}), ...(preview ? { preview } : {}) };
   const data = useSharedRead<OpeningAccountingRead | null>(
     OP_PAGE_OPENING_ACCOUNTING_GET, { ...input, v: refresh },
-    (ctx) => openingAccountingFor(ctx, input),
+    // Am Primary rechnet die Maske nur für den Owner; am PC2 weist der Primary andere Rollen selbst ab.
+    (ctx) => (perm.isOwner ? openingAccountingFor(ctx, input) : null),
     null,
     [refresh, asOfDate, showTx, JSON.stringify(preview ?? null)],
   );
@@ -134,7 +135,7 @@ export function OpeningAccountingPanel() {
         {r.notes.map((n) => <div key={n} style={{ fontSize: 11, color: '#6B7280' }}>{n}</div>)}
       </td>
       <td style={{ ...td, textAlign: 'right' }} className="font-mono">{b3(r.booked)}</td>
-      <td style={{ ...td, textAlign: 'right' }} className="font-mono">{r.target !== null ? `${b3(r.target)} (counted)` : r.range ? `${b3(r.range.low)} – ${b3(r.range.high)}` : b3(r.draft)}</td>
+      <td style={{ ...td, textAlign: 'right' }} className="font-mono">{r.target !== null ? `${b3(r.target)} (counted)` : r.range ? `${r.valuation === 'CURRENT_NOT_VERIFIED' ? 'CURRENT ' : ''}${b3(r.range.low)} – ${b3(r.range.high)}${r.valuation === 'CURRENT_NOT_VERIFIED' ? ' (not verified at cutoff)' : ''}` : b3(r.draft)}</td>
       <td style={{ ...td, textAlign: 'right' }} className="font-mono">{b3(r.adjustment)}</td>
       <td style={{ ...td, color: STATUS_COLOR[r.status], fontWeight: 600 }} data-opening-row-status={r.status}>{r.status}</td>
     </tr>
@@ -171,7 +172,7 @@ export function OpeningAccountingPanel() {
           <span>Partner equity booked</span><span className="font-mono" style={{ textAlign: 'right' }}>{b3(data.equity.partnerBooked)}</span>
           <span>ERP result booked before the cutoff (income − expenses)</span><span className="font-mono" style={{ textAlign: 'right' }}>{b3(data.equity.resultBooked)}</span>
           <span style={{ fontWeight: 600 }}>Provisional opening equity — without old stock</span><span className="font-mono" style={{ textAlign: 'right', fontWeight: 600 }} data-opening-equity-provisional>{b3(data.equity.provisionalOpening.withoutOldStock)}</span>
-          <span style={{ fontWeight: 600 }}>— with old stock (V2 … V1)</span><span className="font-mono" style={{ textAlign: 'right', fontWeight: 600 }}>{b3(data.equity.provisionalOpening.withOldStockLow)} … {b3(data.equity.provisionalOpening.withOldStockHigh)}</span>
+          <span data-opening-equity-old-stock>Old stock — CURRENT value only, not verified as of {data.cutoffDate}; NOT included above (B5)</span><span className="font-mono" style={{ textAlign: 'right', color: '#7A3535' }}>{b3(data.equity.provisionalOpening.oldStock.low)} … {b3(data.equity.provisionalOpening.oldStock.high)}</span>
         </div>
         <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>Computed from what is booked and what is recorded — nothing is assumed for balances that are not recorded yet.</p>
       </Card>

@@ -234,6 +234,8 @@ const backfill = await import('../../src/core/ledger/backfill.ts');
 const ob = await import('../../src/core/parties/opening-balances.ts');
 const cs = await import('../../src/core/parties/customer-settlement.ts');
 const cmdO = await import('../../src/core/bridge/opening-accounting-commands.ts');
+// Die Eröffnungsliste der Parteiposten (`page.opening_balances.get`) — für die Lesesperre in H1.
+await import('../../src/core/bridge/party-commands.ts');
 const registry = await import('../../src/core/bridge/command-registry.ts');
 const perms = await import('../../src/core/bridge/command-permissions.ts');
 const readOps = await import('../../src/core/bridge/store-read-ops.ts');
@@ -443,8 +445,10 @@ const CASH = { kind: 'CASH_BALANCE', reference: 'Cash count 15.10.2026', reason:
   const stock = row(r, 'OLD_STOCK');
   ok(eq(recv.booked, 500) && eq(recv.draft!, 300) && eq(recv.adjustment!, 300) && recv.status === 'PROVISIONAL',
     'D1 Kundenforderungen: gebucht vor dem Stichtag nur die Rechnung vom 10.10. (500), die vom 20.10. nicht; Eröffnungsposten 300 getrennt als Entwurf');
-  ok(stock.range !== null && eq(stock.range.low, 200) && eq(stock.range.high, 200) && stock.status === 'PROVISIONAL' && r.oldStock.candidates === 1 && !!neu,
-    'D2 Altbestand aus Collection: Vorschauwert 2 × 100 = 200 (V2 … V1), nicht gebucht');
+  ok(stock.range !== null && eq(stock.range.low, 200) && eq(stock.range.high, 200) && stock.status === 'NOT_VERIFIED' && stock.valuation === 'CURRENT_NOT_VERIFIED'
+    && stock.adjustment === null && /^CURRENT value/.test(stock.notes[0]) && r.oldStock.valuation === 'CURRENT' && r.oldStock.asOfCutoff === 'PENDING_NOT_VERIFIED'
+    && r.oldStock.candidates === 1 && !!neu,
+    'D2 Altbestand aus Collection: heutiger Wert 2 × 100 = 200 (V2 … V1), als CURRENT gekennzeichnet, zum Stichtag NOT VERIFIED, nicht gebucht');
   const tx = r.transactions!;
   const invNr = s(db, 'SELECT invoice_number FROM invoices WHERE id = ?', [vorher]);
   const invNr2 = s(db, 'SELECT invoice_number FROM invoices WHERE id = ?', [nachher]);
@@ -590,6 +594,44 @@ const CASH = { kind: 'CASH_BALANCE', reference: 'Cash count 15.10.2026', reason:
   ok(!/postEntries|postOpening|reverseTransaction|reverseSource/.test(src('src/core/accounting/opening-accounting.ts').replace(/\/\/.*$/gm, ''))
     && !/postEntries|reverseTransaction|reverseSource|INSERT|UPDATE|DELETE/.test(src('src/core/accounting/ledger-statements.ts').replace(/\/\/.*$/gm, '')),
     'G3 die B1-Module enthalten keinen Buchungs- oder Storno-Aufruf; die Abschlüsse lesen nur');
+}
+
+// ══ H — B1 FINAL GATE: Lesen nur der Owner (am Primary geprüft), Altbestand nur CURRENT, Card Clearing offen ═══════
+{
+  freshDb();
+  altEroeffnung(1000);
+  rec({ ...CASH, amount: 1000 });
+  const pid = imHaus(() => useProductStore.getState().createProduct({ categoryId: 'cat-w', brand: 'Cartier', name: 'Old', quantity: 4, purchasePrice: 250 } as never)).id;
+  reload();
+  const lies = async (op: string, role: string) => registry.executeCommand(op, { actor: { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-pc2', role }, input: {} }, undefined) as Promise<{ kind: string; code?: string; value?: { data: Record<string, unknown> } }>;
+  const durch: string[] = [];
+  for (const op of ['page.opening_accounting.get', 'page.opening_balances.get']) {
+    for (const role of ['MANAGER', 'SALES', 'ACCOUNTANT', '', 'admin ']) {
+      const r = await lies(op, role);
+      if (r.kind !== 'business_error' || r.code !== 'PERMISSION_DENIED' || r.value) durch.push(`${op}/${role || '(none)'}: ${r.kind}`);
+    }
+  }
+  const owner = await lies('page.opening_accounting.get', 'ADMIN');
+  const owner2 = await lies('page.opening_balances.get', 'ADMIN');
+  ok(durch.length === 0 && owner.kind === 'ok' && owner2.kind === 'ok' && Array.isArray((owner.value?.data as { rows?: unknown[] }).rows),
+    `H1 Eröffnungsbilanz und Eröffnungsliste liest am PC2 nur der Owner: Manager, Verkauf, Buchhaltung, ohne Rolle — am Primary abgewiesen, keine Daten (${durch.join('; ') || 'alle zehn abgewiesen'})`);
+  ok(/if \(!mayReadOpeningAccounting\(ctx\.role\)\) throw new BusinessError\('PERMISSION_DENIED'/.test(src('src/core/bridge/opening-accounting-commands.ts'))
+    && /if \(!mayReadOpeningAccounting\(ctx\.role\)\) throw new BusinessError\('PERMISSION_DENIED'/.test(src('src/core/bridge/party-commands.ts'))
+    && /"role": claims\.role/.test(src('src-tauri/src/sync/routes.rs'))
+    && /perm\.isOwner \? openingAccountingFor\(ctx, input\) : null/.test(src('src/components/finance/OpeningAccountingPanel.tsx')),
+    'H2 die Rolle kommt aus dem geprüften Token (Rust setzt actor, nicht der Client); auch am Primary rechnet die Maske nur für den Owner');
+  const r = oa.openingAccountingFor({ branchId: 'branch-main' });
+  const stock = row(r, 'OLD_STOCK');
+  const sheet = ls.balanceSheetAt({ branchId: 'branch-main' }, CUT);
+  ok(eq(stock.range!.low, 1000) && stock.status === 'NOT_VERIFIED' && stock.adjustment === null
+    && eq(r.equity.provisionalOpening.withoutOldStock, r.equity.openingBooked + r.equity.draftNet) && r.equity.provisionalOpening.oldStock.included === false
+    && r.equity.provisionalOpening.oldStock.verifiedAtCutoff === false && eq(r.equity.provisionalOpening.oldStock.low, 1000)
+    && !('withOldStockLow' in r.equity.provisionalOpening) && eq(r.equity.assetsBooked, sheet.totals.assets)
+    && r.issues.some((x) => /only the CURRENT value .* NOT VERIFIED and not included in the opening equity/.test(x)) && !!pid,
+    'H3 der heutige Altbestandswert (1000) steht nur als CURRENT/NOT VERIFIED da: nicht im rechnerischen Eröffnungskapital, nicht in der Stichtagsbilanz, als offener Punkt gemeldet');
+  const card = row(r, 'CARD_CLEARING');
+  ok(card.status === 'NOT_VERIFIED' && card.adjustment === null && r.issues.some((x) => /^Card clearing: .* open reconciliation point/.test(x)),
+    'H4 Card Clearing ohne Abrechnungsstand zum Stichtag bleibt offener Abstimmungspunkt (NOT VERIFIED), nie abgestimmt');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — B1 opening accounting foundation: ${PASS} passed, ${fails.length} failed`);

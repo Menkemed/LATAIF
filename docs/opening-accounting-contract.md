@@ -64,8 +64,16 @@ Edit; Altbestand aus der Vorschau `/old-stock` als Spanne V2 … V1 (D4/D5 offen
 einer Zeile (Summen = Bilanzvorschau).
 
 Eigenkapital getrennt: gebuchte Eröffnung (OPENING_BALANCE_EQUITY), Partnerkapital, **gebuchtes Ergebnis vor dem
-Stichtag** (Ertrag − Aufwand) und das **rechnerische Eröffnungskapital** = gebuchte Eröffnung + Wirkung der Entwürfe
-(ohne Altbestand, mit Altbestand V2 … V1). Nichts wird für nicht erfasste Posten angenommen.
+Stichtag** (Ertrag − Aufwand) und das **rechnerische Eröffnungskapital** = gebuchte Eröffnung + Wirkung der Entwürfe.
+Nichts wird für nicht erfasste Posten angenommen.
+
+**Altbestand (B1 Final Gate):** die Vorschau kennt nur den **heutigen** Wert (V2 … V1). Er steht als `CURRENT` /
+Status `NOT_VERIFIED` da, der Wert zum 15.10.2026 ist `PENDING_NOT_VERIFIED` — er fließt in **keine** Stichtagssumme und
+**nicht** ins rechnerische Eröffnungskapital (`provisionalOpening.oldStock.included = false`). Die Bewertung zum
+Stichtag löst B5.
+
+**Card Clearing:** es gibt keinen erfassten Abrechnungsstand zum Stichtag → immer `NOT_VERIFIED` und offener
+Abstimmungspunkt.
 
 Hinweise (immer PROVISIONAL): fehlende Zählungen, Differenzen, ungebuchte Posten, Settings-Abweichungen,
 Altbestand-Prüffälle, unausgeglichenes Hauptbuch, Konten ohne Klasse, unerklärte Bilanzdifferenz.
@@ -82,8 +90,13 @@ Altbestand-Prüffälle, unausgeglichenes Hauptbuch, Konten ohne Klasse, unerklä
 ## Primary / PC2
 
 `opening_accounts.create` / `.cancel`: Owner (`owner(...)`), Hausfolge prüft den Owner erneut, Ausführung nur am Primary
-(Befehlsbuch: Replay, eingefrorene Ablehnung), strenger Rumpf (unbekannte Felder abgewiesen). PC2 liest dieselbe
-Übersicht. Registry 123 Buchungen, 83 Auskünfte, Rust `REMOTE_OPS` 207.
+(Befehlsbuch: Replay, eingefrorene Ablehnung), strenger Rumpf (unbekannte Felder abgewiesen). Registry 123 Buchungen,
+83 Auskünfte, Rust `REMOTE_OPS` 207.
+
+**Lesen nur der Owner (B1 Final Gate):** `page.opening_accounting.get` und die Eröffnungsliste `page.opening_balances.get`
+prüft der Primary selbst (`mayReadOpeningAccounting`): jede andere Rolle → `PERMISSION_DENIED`, keine Daten. Die Rolle
+kommt aus dem geprüften Token (Rust legt `actor` in die Anfrage, der Client nur `input`). Am Primary rechnet die Maske
+nur für den Owner.
 
 ## Gesperrt (B2–B5)
 

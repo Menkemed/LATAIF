@@ -148,6 +148,14 @@ function assertOwner(ctx: OpeningAccountCtx): void {
   if (canonicalRole(ctx.role) !== 'ADMIN') throw nein('PERMISSION_DENIED', 'only the owner (admin) may record opening balances');
 }
 
+/**
+ * B1 FINAL GATE — die Eröffnungsbilanz ist vertraulich: auch LESEN nur der Owner. Am Primary prüft das die Fernauskunft
+ * mit der Rolle aus dem geprüften Token (Rust legt sie in `actor`, der Client kann sie nicht setzen) — nicht nur die Maske.
+ */
+export function mayReadOpeningAccounting(role: string | null | undefined): boolean {
+  return canonicalRole(role ?? undefined) === 'ADMIN';
+}
+
 function text(v: unknown, what: string, max: number): string | undefined {
   if (v === undefined || v === null) return undefined;
   if (typeof v !== 'string') throw nein('INVALID_INPUT', `${what} must be text`);
@@ -405,7 +413,8 @@ export function legacyCashOpeningFor(branchId: string): LegacyCashOpening {
 
 // ── Die Eröffnungsübersicht ─────────────────────────────────────────────────
 
-export type OverviewStatus = 'EMPTY' | 'BOOKED' | 'PROVISIONAL' | 'MISSING' | 'RECONCILED';
+/** NOT_VERIFIED: kein nachgewiesener Stichtagswert (Altbestand: nur der heutige Wert; Card Clearing: kein Abrechnungsstand). */
+export type OverviewStatus = 'EMPTY' | 'BOOKED' | 'PROVISIONAL' | 'MISSING' | 'RECONCILED' | 'NOT_VERIFIED';
 
 export interface OverviewRow {
   key: string;
@@ -422,6 +431,8 @@ export interface OverviewRow {
   adjustment: number | null;
   /** Spanne statt Einzelwert (Altbestand: V2 … V1, D5 offen). */
   range: { low: number; high: number } | null;
+  /** CURRENT = der heutige Wert, NICHT der Wert zum Stichtag (nur Information, in keiner Stichtagssumme). */
+  valuation: 'CUTOFF' | 'CURRENT_NOT_VERIFIED';
   status: OverviewStatus;
   source: string;
   notes: string[];
@@ -441,14 +452,19 @@ export interface OpeningAccountingRead {
     liabilitiesBooked: number;
     /** Wirkung aller Entwürfe außer Altbestand (Aktiva − Passiva). */
     draftNet: number;
-    /** Rechnerisches Eröffnungskapital, wenn die Entwürfe so gebucht würden — nichts erfunden, nichts gebucht. */
-    provisionalOpening: { withoutOldStock: number; withOldStockLow: number; withOldStockHigh: number };
+    /**
+     * Rechnerisches Eröffnungskapital, wenn die Entwürfe so gebucht würden — nichts erfunden, nichts gebucht. Der
+     * Altbestand ist NICHT enthalten: es gibt nur seinen heutigen Wert, nicht den nachgewiesenen Wert zum Stichtag (B5).
+     */
+    provisionalOpening: { withoutOldStock: number; oldStock: { included: false; basis: 'CURRENT'; verifiedAtCutoff: false; low: number; high: number } };
   };
   issues: string[];
   legacyCash: LegacyCashOpening;
   items: OpeningAccountItem[];
   partyItems: { totals: OpeningKindTotal[]; pending: number; cancelled: number };
   oldStock: {
+    /** Der Wert ist der HEUTIGE; der Wert zum Stichtag ist offen (B5). */
+    valuation: 'CURRENT'; asOfCutoff: 'PENDING_NOT_VERIFIED';
     candidates: number; review: number; capitalised: number; soldCogs: number; pendingRemovalValue: number; shelfValue: number;
     v1: number; v2: number; unknownInventoryDebits: number; notes: string[];
   };
@@ -508,15 +524,23 @@ export function openingAccountingFor(ctx: { branchId: string }, input: OpeningAc
       status = d === 0 ? 'RECONCILED' : 'PROVISIONAL';
       if (d !== 0) issues.push(`${info.label}: counted ${count.amount.toFixed(3)} BHD, ledger ${bhd(b).toFixed(3)} BHD — difference ${bhd(d).toFixed(3)} BHD not booked (explain: missing ERP transaction or opening difference).`);
     }
-    rows.push({ key: kind, label: info.label, side: 'ASSET', accounts: [acc], booked: bhd(b), draft: null, target: count ? count.amount : null, adjustment, range: null, status, source: 'Ledger before the cutoff; count in Settings → Opening Balances', notes });
+    rows.push({ key: kind, label: info.label, side: 'ASSET', accounts: [acc], booked: bhd(b), draft: null, target: count ? count.amount : null, adjustment, range: null, valuation: 'CUTOFF', status, source: 'Ledger before the cutoff; count in Settings → Opening Balances', notes });
   }
   const plain = (key: string, label: string, side: 'ASSET' | 'LIABILITY', accounts: string[], draftF: number, source: string, notes: string[] = []): void => {
     const b = booked(accounts);
     const status: OverviewStatus = draftF !== 0 ? 'PROVISIONAL' : b !== 0 ? 'BOOKED' : 'EMPTY';
-    rows.push({ key, label, side, accounts, booked: bhd(b), draft: bhd(draftF), target: null, adjustment: bhd(draftF), range: null, status, source, notes });
+    rows.push({ key, label, side, accounts, booked: bhd(b), draft: bhd(draftF), target: null, adjustment: bhd(draftF), range: null, valuation: 'CUTOFF', status, source, notes });
   };
-  plain('CARD_CLEARING', 'Card clearing (money at the card processor)', 'ASSET', ['CARD_CLEARING'], 0, 'Ledger only',
-    ['No separate opening kind: card payments not yet settled are in the ledger.']);
+  // Card Clearing: es gibt keinen erfassten Abrechnungsstand zum Stichtag — offener Abstimmungspunkt, nie „abgestimmt".
+  {
+    const b = booked(['CARD_CLEARING']);
+    rows.push({
+      key: 'CARD_CLEARING', label: 'Card clearing (money at the card processor)', side: 'ASSET', accounts: ['CARD_CLEARING'], booked: bhd(b), draft: null, target: null,
+      adjustment: null, range: null, valuation: 'CUTOFF', status: 'NOT_VERIFIED', source: 'Ledger only',
+      notes: ['No statement balance of the card processor as of the cutoff is recorded — open reconciliation point.'],
+    });
+    issues.push(`Card clearing: ${bhd(b).toFixed(3)} BHD booked before the cutoff; no settlement statement as of ${OPENING_CUTOFF_DATE} recorded — open reconciliation point.`);
+  }
   plain('CUSTOMER_RECEIVABLES', 'Customer receivables', 'ASSET', ['ACCOUNTS_RECEIVABLE'], partyF('CUSTOMER_RECEIVABLE'), 'LATAIF invoices (ledger) + opening positions (Customer Edit)');
   plain('SUPPLIER_ADVANCES', 'Supplier advances / credits', 'ASSET', ['SUPPLIER_CREDIT'], partyF('SUPPLIER_ADVANCE'), 'Ledger + opening positions (Supplier Edit)');
   plain('LOANS_RECEIVABLE', 'Loans given', 'ASSET', ['LOAN_RECEIVABLE'], draftOf('LOAN_RECEIVABLE'), 'LATAIF loans (ledger) + opening documents');
@@ -524,20 +548,23 @@ export function openingAccountingFor(ctx: { branchId: string }, input: OpeningAc
     ['The NBR return is computed from invoices and purchase lines, not from this ledger balance (E3).']);
   plain('OTHER_ASSETS', 'Other assets', 'ASSET', ['GOLD_CREDIT_CLEARING', 'INTERNAL_TRANSFER'], draftOf('OTHER_ASSET'), 'Ledger + opening documents');
   // Altbestand: Regalwert + schon gebuchter Wareneinsatz (gleicht das negative INVENTORY aus) ± offene Abgänge — V2 … V1.
+  // B1 FINAL GATE: das ist der HEUTIGE Stand, nicht der Stand zum 15.10.2026 — nur Information (CURRENT, NOT VERIFIED), in
+  // keiner Stichtagssumme und nicht im rechnerischen Eröffnungskapital. Die Bewertung zum Stichtag löst B5.
   {
     const b = booked(['INVENTORY']);
     const notes = [
+      `CURRENT value (today), not the value as of ${OPENING_CUTOFF_DATE}: the value at the cutoff is PENDING / NOT VERIFIED (B5) and is not included in the opening equity.`,
       `Preview of the old stock as it is now (page “Old stock”): ${os.totals.candidates} candidate(s), ${os.totals.review} to review, ${os.totals.capitalised} already capitalised by purchases.`,
       `V2 = shelf value + cost of sales already booked = ${os.totals.v2.toFixed(3)} BHD; V1 = V2 + pending removals = ${os.totals.v1.toFixed(3)} BHD (D4/D5 open).`,
       ...os.notes,
     ];
-    const status: OverviewStatus = os.totals.candidates > 0 || os.totals.review > 0 ? 'PROVISIONAL' : b !== 0 ? 'BOOKED' : 'EMPTY';
+    const status: OverviewStatus = os.totals.candidates > 0 || os.totals.review > 0 ? 'NOT_VERIFIED' : b !== 0 ? 'BOOKED' : 'EMPTY';
     if (os.totals.review > 0) issues.push(`Old stock: ${os.totals.review} item(s) need a review before an opening value can be proposed.`);
     if (os.ledger.unknownInventoryDebits > 0) issues.push(`Old stock: ${os.ledger.unknownInventoryDebits} inventory booking(s) of unknown origin in the ledger.`);
-    if (os.totals.candidates > 0) issues.push(`Old stock: opening value ${os.totals.v2.toFixed(3)}–${os.totals.v1.toFixed(3)} BHD is a preview (D1–D6, D8).`);
+    if (os.totals.candidates > 0) issues.push(`Old stock: only the CURRENT value ${os.totals.v2.toFixed(3)}–${os.totals.v1.toFixed(3)} BHD is known — the value as of ${OPENING_CUTOFF_DATE} is NOT VERIFIED and not included in the opening equity (B5; D1–D6, D8).`);
     rows.push({
       key: 'OLD_STOCK', label: 'Inventory / old stock', side: 'ASSET', accounts: ['INVENTORY'], booked: bhd(b), draft: null, target: null, adjustment: null,
-      range: os.totals.candidates > 0 ? { low: os.totals.v2, high: os.totals.v1 } : null, status, source: 'Ledger + old-stock preview (Collection)', notes,
+      range: os.totals.candidates > 0 ? { low: os.totals.v2, high: os.totals.v1 } : null, valuation: 'CURRENT_NOT_VERIFIED', status, source: 'Ledger + CURRENT old-stock preview (Collection)', notes,
     });
   }
   plain('SUPPLIER_PAYABLES', 'Supplier payables', 'LIABILITY', ['ACCOUNTS_PAYABLE'], partyF('SUPPLIER_PAYABLE'), 'LATAIF purchases/expenses (ledger) + opening positions (Supplier Edit)');
@@ -580,13 +607,13 @@ export function openingAccountingFor(ctx: { branchId: string }, input: OpeningAc
       assetsBooked: bhd(assetsF), liabilitiesBooked: bhd(liabilitiesF), draftNet: bhd(draftNetF),
       provisionalOpening: {
         withoutOldStock: bhd(openingF + draftNetF),
-        withOldStockLow: bhd(openingF + draftNetF + toFils(os.totals.v2)),
-        withOldStockHigh: bhd(openingF + draftNetF + toFils(os.totals.v1)),
+        oldStock: { included: false, basis: 'CURRENT', verifiedAtCutoff: false, low: os.totals.v2, high: os.totals.v1 },
       },
     },
     issues, legacyCash, items,
     partyItems: { totals: partyTotals, pending: pendingParty, cancelled: partyRows.length - pendingParty },
     oldStock: {
+      valuation: 'CURRENT', asOfCutoff: 'PENDING_NOT_VERIFIED',
       candidates: os.totals.candidates, review: os.totals.review, capitalised: os.totals.capitalised, soldCogs: os.totals.soldCogs,
       pendingRemovalValue: os.totals.pendingRemovalValue, shelfValue: os.totals.shelfValue, v1: os.totals.v1, v2: os.totals.v2,
       unknownInventoryDebits: os.ledger.unknownInventoryDebits, notes: os.notes,

@@ -28,6 +28,7 @@ import {
   type OpeningCtx, type OpeningItem,
 } from '@/core/parties/opening-balances';
 import { settleCustomerInHouse, type CustomerSettleRequest } from '@/core/parties/customer-settlement';
+import { mayReadOpeningAccounting } from '@/core/accounting/opening-accounting';
 
 export const OP_OPENING_CREATE = 'opening_balances.create';
 export const OP_OPENING_CANCEL = 'opening_balances.cancel';
@@ -216,6 +217,8 @@ registerCommand(OP_PAGE_OPENING_BALANCES_GET, {
   kind: 'read',
   handler: async (payload, actor): Promise<CommandResult> => {
     const ctx = remoteReadContext(actor ?? (payload as Envelope | null)?.actor);
+    // B1 FINAL GATE — dieselbe vertrauliche Eröffnungsübersicht (alle Posten, Kassen-Anfangsbestand): nur der Owner.
+    if (!mayReadOpeningAccounting(ctx.role)) throw new BusinessError('PERMISSION_DENIED', 'only the owner (admin) may see the opening balances');
     return { data: { ...openingOverviewFor(ctx) } };
   },
 });
