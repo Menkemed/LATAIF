@@ -12,6 +12,10 @@ import { useSharedRead } from '@/core/data/shared-read';
 import { usePermission } from '@/hooks/usePermission';
 import { KIND_LABEL, openingOverviewFor, type OpeningOverview } from '@/core/parties/opening-balances';
 import { OP_PAGE_OPENING_BALANCES_GET } from '@/core/parties/party-account';
+// B1 OPENING ACCOUNTING — die ganze Eröffnungsbilanz auch hier: am PC2 gibt es keine Settings (nur am Hauptrechner), diese
+// Seite aber schon. Dieselbe Fläche wie Settings → Opening Balances (nur Owner; Lesen und Schreiben prüft der Primary).
+import { OpeningAccountingPanel } from '@/components/finance/OpeningAccountingPanel';
+import { isClientMode } from '@/core/bridge/client-mode';
 
 const b3 = (n: number): string => n.toFixed(3);
 
@@ -43,9 +47,9 @@ export function OpeningBalancesPage() {
         <span>{data.booking.reason}</span>
         <span>Old stock: see the page “Old stock”. Cash, bank and Benefit: the existing opening from the settings stays as it is (booked on {data.cashOpening.bookedOn}) — it is not moved to {data.cutoffDate} without a decision.</span>
         {/* B1 OPENING ACCOUNTING — die ganze Eröffnungsbilanz (Kasse gezählt, Darlehen, VAT, Saldenliste, Bilanzvorschau). */}
-        <button onClick={() => navigate('/settings?tab=opening')} className="text-left cursor-pointer" style={{ background: 'none', border: 'none', padding: 0, color: '#1F4E8C', fontSize: 13 }} data-opening-settings-link>
-          The complete opening balance sheet (cash count, loans, other balances, VAT, trial balance): Settings → Opening Balances
-        </button>
+        {!isClientMode() && <button onClick={() => navigate('/settings?tab=opening')} className="text-left cursor-pointer" style={{ background: 'none', border: 'none', padding: 0, color: '#1F4E8C', fontSize: 13 }} data-opening-settings-link>
+          The complete opening balance sheet (cash count, loans, other balances, VAT, trial balance) is below and under Settings → Opening Balances
+        </button>}
       </div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 20, marginBottom: 24 }}>
         {(['CUSTOMER_RECEIVABLE', 'CUSTOMER_ADVANCE', 'SUPPLIER_PAYABLE', 'SUPPLIER_ADVANCE'] as const).map((k) => (
@@ -69,6 +73,9 @@ export function OpeningBalancesPage() {
         ))}
       </div>
       {data.cancelledCount > 0 && <p style={{ marginTop: 10, fontSize: 12, color: '#9CA3AF' }}>{data.cancelledCount} cancelled position(s) are kept in the documents and the audit log.</p>}
+      <div style={{ marginTop: 28 }} data-opening-accounting-on-page>
+        <OpeningAccountingPanel />
+      </div>
     </PageLayout>
   );
 }

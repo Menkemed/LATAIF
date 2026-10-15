@@ -591,6 +591,12 @@ const CASH = { kind: 'CASH_BALANCE', reference: 'Cash count 15.10.2026', reason:
     && /sending\.current/.test(ui) && /data-opening-status/.test(ui) && /data-trial-balance/.test(ui) && /data-cutoff-transactions/.test(ui)
     && !/\bquery\(|getDatabase\(/.test(ui) && /navigate\('\/settings\?tab=opening'\)/.test(src('src/pages/finance/OpeningBalancesPage.tsx')),
     'G2 Oberfläche: nur Owner, Primary und PC2 über dieselben Befehle, Doppelklick-Sperre, PROVISIONAL sichtbar, keine direkte Datenbank');
+  // PRE-RELEASE GATE — am PC2 gibt es keine Settings (App.tsx: PrimaryOnlyNotice); die Eröffnungsbilanz steht deshalb auch
+  // auf der Seite „Opening balances", die beide Rechner öffnen; der Link zu den Settings nur am Primary.
+  const page = src('src/pages/finance/OpeningBalancesPage.tsx');
+  ok(/<OpeningAccountingPanel \/>/.test(page) && /\{!isClientMode\(\) && <button onClick=\{\(\) => navigate\('\/settings\?tab=opening'\)\}/.test(page)
+    && /path="\/settings" element=\{clientMode \? \(\s*<PrimaryOnlyNotice/.test(src('src/App.tsx')) && /path="\/opening-balances" element=\{<OpeningBalancesPage \/>\}/.test(src('src/App.tsx')),
+    'G2b PC2 erreicht die Eröffnungsbilanz über „Opening balances" (Settings gibt es dort nicht); der Settings-Link nur am Primary');
   ok(!/postEntries|postOpening|reverseTransaction|reverseSource/.test(src('src/core/accounting/opening-accounting.ts').replace(/\/\/.*$/gm, ''))
     && !/postEntries|reverseTransaction|reverseSource|INSERT|UPDATE|DELETE/.test(src('src/core/accounting/ledger-statements.ts').replace(/\/\/.*$/gm, '')),
     'G3 die B1-Module enthalten keinen Buchungs- oder Storno-Aufruf; die Abschlüsse lesen nur');
