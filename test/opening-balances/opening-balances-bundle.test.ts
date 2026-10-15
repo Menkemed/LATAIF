@@ -223,6 +223,9 @@ function failOn(db: Db, pattern: RegExp, nth = 1): Db {
   return proxy;
 }
 const unfail = (db: Db): void => { setTestDatabase(db as never); };
+/** PAYMENT FINAL VERIFICATION — der Stand, den eine Maske jetzt zeigen würde (Kunde bzw. Lieferant). */
+const cst = (cid = 'cust-1'): string => cs.customerOpenStamp(cs.customerSettlementInvoices(cid, 'branch-main'));
+const sst = (sid = 'sup-1'): string => payHouse.supplierOpenStamp(payHouse.openSupplierItems(sid, 'branch-main'));
 async function tryRun(fn: () => Promise<{ kind: string }>): Promise<{ kind: string }> { try { return await fn(); } catch (e) { return { kind: 'thrown:' + (e as Error).message }; } }
 
 const pb = await import('../../src/core/parties/party-balances.ts');
@@ -480,7 +483,7 @@ function obState(db: Db): string {
   ok(cs.customerSettlementInvoices('cust-1', 'branch-main').length === 1 && payHouse.openSupplierItems('sup-1', 'branch-main').length === 0,
     'G1-6 „Receive Payment" bietet nur die echte Rechnung an, „Pay Supplier" hat nichts Offenes — Eröffnungsposten sind nicht bezahlbar');
   let payCode = '';
-  try { imHaus(() => payHouse.paySupplierInHouse({ supplierId: 'sup-1', amount: 850, method: 'cash', mode: 'fifo', confirmExcessAsCredit: true }, { branchId: 'branch-main', userId: 'user-test', now: NOW } as never)); }
+  try { imHaus(() => payHouse.paySupplierInHouse({ supplierId: 'sup-1', expectedOpenStamp: sst(), amount: 850, method: 'cash', mode: 'fifo', confirmExcessAsCredit: true }, { branchId: 'branch-main', userId: 'user-test', now: NOW } as never)); }
   catch (e) { payCode = String((e as { code?: string }).code); }
   let creditCode = '';
   try { imHaus(() => payHouse.applySupplierCreditToExpensesInHouse('sup-1', 120, { branchId: 'branch-main', userId: 'user-test', now: NOW } as never)); }
@@ -548,7 +551,7 @@ function obState(db: Db): string {
   const plan = cs.planCustomerSettlement(items, 450_000, 'fifo');
   ok(S(plan.allocations.map((a) => [a.invoiceId === ia ? 'a' : a.invoiceId === ib ? 'b' : 'c', a.amountF])) === S([['a', 300000], ['b', 150000]]) && plan.excessF === 0,
     'S2-2 FIFO-Vorschau: 450 → Rechnung a voll (300), b teilweise (150)');
-  const r = await cs.settleCustomerOnPrimary({ customerId: 'cust-1', amount: 450, method: 'cash', mode: 'fifo' });
+  const r = await cs.settleCustomerOnPrimary({ customerId: 'cust-1', expectedOpenStamp: cst(), amount: 450, method: 'cash', mode: 'fifo' });
   reload();
   ok(r.allocations.length === 2 && inv(db, ia).status === 'FINAL' && eq(Number(inv(db, ia).paid_amount), 400) && inv(db, ib).status === 'PARTIAL'
     && eq(Number(inv(db, ib).paid_amount), 150) && eq(Number(inv(db, ic).paid_amount), 0) && n(db, 'SELECT COUNT(*) FROM payments') === 3,
@@ -566,22 +569,22 @@ function obState(db: Db): string {
     [[{ invoiceId: ia, amount: 10 }], 10, 'ALLOCATION_UNKNOWN_ITEM'],
     [[{ invoiceId: ic, amount: 10 }, { invoiceId: ic, amount: 10 }], 20, 'ALLOCATION_DUPLICATE'],
   ] as Array<[Array<{ invoiceId: string; amount: number }>, number, string]>) {
-    const code2 = await meldungAsync(() => cs.settleCustomerOnPrimary({ customerId: 'cust-1', amount, method: 'bank_transfer', mode: 'manual', allocations: allocs }));
+    const code2 = await meldungAsync(() => cs.settleCustomerOnPrimary({ customerId: 'cust-1', expectedOpenStamp: cst(), amount, method: 'bank_transfer', mode: 'manual', allocations: allocs }));
     if (!code2.startsWith(code + '|')) fehler.push(`${code}: ${code2.slice(0, 40)}`);
   }
   ok(fehler.length === 0 && S(db.exec('SELECT * FROM payments ORDER BY id')[0]?.values) === vorM, `S2-5 manuell: falsche Verteilungen abgewiesen, nichts gezahlt (${fehler.join('; ') || 'alle vier'})`);
-  const mok = await cs.settleCustomerOnPrimary({ customerId: 'cust-1', amount: 120, method: 'bank_transfer', mode: 'manual', allocations: [{ invoiceId: ic, amount: 100 }, { invoiceId: ib, amount: 20 }] });
+  const mok = await cs.settleCustomerOnPrimary({ customerId: 'cust-1', expectedOpenStamp: cst(), amount: 120, method: 'bank_transfer', mode: 'manual', allocations: [{ invoiceId: ic, amount: 100 }, { invoiceId: ib, amount: 20 }] });
   reload();
   ok(mok.allocations.length === 2 && eq(Number(inv(db, ic).paid_amount), 100) && eq(Number(inv(db, ib).paid_amount), 170),
     'S2-6 manuell: der Benutzer verteilt selbst (c 100, b 20) — Teilzahlungen, korrekte Reste');
   // Überzahlung: nie still
   const vorX = S(db.exec('SELECT * FROM payments ORDER BY id')[0]?.values);
   const offenJetzt = cs.customerSettlementInvoices('cust-1', 'branch-main').reduce((x, i) => x + i.openF, 0) / 1000;
-  const still = await meldungAsync(() => cs.settleCustomerOnPrimary({ customerId: 'cust-1', amount: offenJetzt + 25, method: 'cash', mode: 'fifo' }));
+  const still = await meldungAsync(() => cs.settleCustomerOnPrimary({ customerId: 'cust-1', expectedOpenStamp: cst(), amount: offenJetzt + 25, method: 'cash', mode: 'fifo' }));
   ok(still.startsWith('PAYMENT_EXCEEDS_OPEN|') && S(db.exec('SELECT * FROM payments ORDER BY id')[0]?.values) === vorX,
     `S2-7 mehr als alles Offene (${offenJetzt} + 25) ohne Wahl: abgewiesen, nichts gezahlt`);
   const cc0 = n(db, 'SELECT COUNT(*) FROM customer_credits');
-  const xr = await cs.settleCustomerOnPrimary({ customerId: 'cust-1', amount: offenJetzt + 25, method: 'cash', mode: 'fifo', confirmExcessAsCredit: true });
+  const xr = await cs.settleCustomerOnPrimary({ customerId: 'cust-1', expectedOpenStamp: cst(), amount: offenJetzt + 25, method: 'cash', mode: 'fifo', confirmExcessAsCredit: true });
   reload();
   ok(xr.excessTo === 'store_credit' && eq(xr.excessAmount, 25) && n(db, 'SELECT COUNT(*) FROM customer_credits') === cc0 + 1
     && eq(Number(one(db, "SELECT amount FROM customer_credits WHERE source_type = 'overpayment' ORDER BY created_at DESC LIMIT 1") ?? 0), 25)
@@ -590,7 +593,7 @@ function obState(db: Db): string {
   const audit = cpa.runCounterpartyAudit((sql, p) => { const r = db.exec(sql, p as never[])[0]; return r ? r.values.map((v) => Object.fromEntries(r.columns.map((c, i) => [c, v[i]]))) : []; }, 'branch-main');
   ok(audit.arByCustomer.ok && audit.customerCreditByCustomer.ok && audit.apBySupplier.ok && audit.supplierCreditBySupplier.ok,
     `S2-10 Abgleich Hauptbuch ↔ Belege je Kunde/Lieferant nach Sammelzahlung und Guthaben ohne Abweichung (${S([audit.arByCustomer.mismatches, audit.customerCreditByCustomer.mismatches, audit.apBySupplier.mismatches, audit.supplierCreditBySupplier.mismatches])})`);
-  const nichts = await meldungAsync(() => cs.settleCustomerOnPrimary({ customerId: 'cust-1', amount: 5, method: 'cash', mode: 'fifo' }));
+  const nichts = await meldungAsync(() => cs.settleCustomerOnPrimary({ customerId: 'cust-1', expectedOpenStamp: cst(), amount: 5, method: 'cash', mode: 'fifo' }));
   ok(nichts.startsWith('CUSTOMER_NOTHING_OPEN|'), 'S2-9 ohne offene Rechnung keine Zahlung (eine Vorauszahlung hat ihren eigenen Weg)');
 }
 
@@ -603,10 +606,11 @@ function obState(db: Db): string {
   const ib = verkauf('b', 100, '2026-09-02T10:00:00.000Z');
   const d = dps(db);
   const state = (): string => S({ p: db.exec('SELECT * FROM payments ORDER BY id')[0]?.values, i: db.exec('SELECT id, paid_amount, status, invoice_number FROM invoices ORDER BY id')[0]?.values, l: ledgerCount(db) });
-  const r1 = await cmdP.runCustomerSettle(d, ident('11', 'customers.settle'), { customerId: 'cust-1', amount: 150, method: 'cash', mode: 'fifo' });
+  const st11 = cst();
+  const r1 = await cmdP.runCustomerSettle(d, ident('11', 'customers.settle'), { customerId: 'cust-1', expectedOpenStamp: st11, amount: 150, method: 'cash', mode: 'fifo' });
   reload();
   const nach = state();
-  const r2 = await cmdP.runCustomerSettle(d, ident('11', 'customers.settle'), { customerId: 'cust-1', amount: 150, method: 'cash', mode: 'fifo' });
+  const r2 = await cmdP.runCustomerSettle(d, ident('11', 'customers.settle'), { customerId: 'cust-1', expectedOpenStamp: st11, amount: 150, method: 'cash', mode: 'fifo' });
   ok(r1.kind === 'ok' && (r2 as { replayed?: boolean }).replayed === true && state() === nach && eq(Number(inv(db, ia).paid_amount), 100) && eq(Number(inv(db, ib).paid_amount), 50),
     'Z1 PC2 „Receive Payment": dieselbe Verteilung am Primary; dieselbe Kennung noch einmal zahlt nichts doppelt');
   let waiver = '';
@@ -625,7 +629,7 @@ function obState(db: Db): string {
   verkauf('c', 100, '2026-09-03T10:00:00.000Z');
   const vor = state();
   const bad = failOn(db, /INSERT INTO payments/, 2);
-  const rb = await tryRun(() => cmdP.runCustomerSettle(dps(bad), ident('12', 'customers.settle'), { customerId: 'cust-1', amount: 100, method: 'cash', mode: 'fifo' }));
+  const rb = await tryRun(() => cmdP.runCustomerSettle(dps(bad), ident('12', 'customers.settle'), { customerId: 'cust-1', expectedOpenStamp: cst(), amount: 100, method: 'cash', mode: 'fifo' }));
   unfail(db);
   reload();
   ok(rb.kind !== 'ok' && state() === vor, `Z4 scheitert die zweite Teilzahlung, ist auch die erste nicht da (Rollback der ganzen Verteilung) (${rb.kind})`);
@@ -634,7 +638,7 @@ function obState(db: Db): string {
   const q = Math.floor(heute.getMonth() / 3) + 1;
   insert(db, 'vat_filings', { id: 'vf-1', branch_id: 'branch-main', year: heute.getFullYear(), quarter: q, filed_at: NOW, created_at: NOW });
   const vorV = state();
-  const vat = await cmdP.runCustomerSettle(d, ident('14', 'customers.settle'), { customerId: 'cust-1', amount: 50, method: 'cash', mode: 'fifo' });
+  const vat = await cmdP.runCustomerSettle(d, ident('14', 'customers.settle'), { customerId: 'cust-1', expectedOpenStamp: cst(), amount: 50, method: 'cash', mode: 'fifo' });
   reload();
   ok(vat.kind === 'rejected' && (vat as { code: string }).code === 'VAT_PERIOD_FILED' && state() === vorV,
     `Z5 VAT-Periodenschutz wie bei der Einzelzahlung: schließt die Zahlung eine Rechnung in ein gemeldetes Quartal, wird nichts gezahlt (${(vat as { code?: string }).code})`);
@@ -648,10 +652,10 @@ function obState(db: Db): string {
   reload();
   insert(db, 'expenses', { id: 'e1', branch_id: 'branch-main', expense_number: 'EXP-1', category: 'Repair', amount: 40, paid_amount: 0, status: 'PENDING', supplier_id: 'sup-1', expense_date: '2026-10-01', created_at: NOW });
   const vor = S({ e: db.exec('SELECT * FROM expenses')[0]?.values, l: ledgerCount(db), c: n(db, 'SELECT COUNT(*) FROM supplier_credits') });
-  const still = await (async () => { try { imHaus(() => payHouse.paySupplierInHouse({ supplierId: 'sup-1', amount: 50, method: 'cash', mode: 'fifo' }, { branchId: 'branch-main', userId: 'user-test', now: NOW } as never)); return ''; } catch (e) { return String((e as { code?: string }).code); } })();
+  const still = await (async () => { try { imHaus(() => payHouse.paySupplierInHouse({ supplierId: 'sup-1', expectedOpenStamp: sst(), amount: 50, method: 'cash', mode: 'fifo' }, { branchId: 'branch-main', userId: 'user-test', now: NOW } as never)); return ''; } catch (e) { return String((e as { code?: string }).code); } })();
   ok(still === 'PAYMENT_EXCEEDS_OPEN' && S({ e: db.exec('SELECT * FROM expenses')[0]?.values, l: ledgerCount(db), c: n(db, 'SELECT COUNT(*) FROM supplier_credits') }) === vor,
     'L1 Pay Supplier über allem Offenen ohne Wahl: abgewiesen, nichts gezahlt');
-  const okR = imHaus(() => payHouse.paySupplierInHouse({ supplierId: 'sup-1', amount: 50, method: 'cash', mode: 'fifo', confirmExcessAsCredit: true }, { branchId: 'branch-main', userId: 'user-test', now: NOW } as never));
+  const okR = imHaus(() => payHouse.paySupplierInHouse({ supplierId: 'sup-1', expectedOpenStamp: sst(), amount: 50, method: 'cash', mode: 'fifo', confirmExcessAsCredit: true }, { branchId: 'branch-main', userId: 'user-test', now: NOW } as never));
   ok(okR.excessTo === 'standalone_credit' && eq(okR.excessAmount, 10), 'L2 mit ausdrücklicher Wahl: Rest 10 wird Lieferantenguthaben (bestehende Regel)');
   let typ = '';
   try { payCmds.parseSupplierPay({ supplierId: 'sup-1', amount: 5, method: 'cash', mode: 'fifo', confirmExcessAsCredit: 'yes' }); } catch (e) { typ = (e as Error).message; }
@@ -670,6 +674,69 @@ function obState(db: Db): string {
     'L5 Doppelklick-Sperre in „Receive payment" und „Pay Supplier": gesperrt vor der Rückfrage, nach Erfolg bleibt sie zu');
   ok(/useCustomerReads\(id, balanceTick\)/.test(src('src/pages/customers/CustomerDetail.tsx')),
     'L6 nach „Receive Payment" lädt die Zahlungsliste der Kundenseite neu (vorher stand sie still)');
+}
+
+// ══ PAYMENT FINAL VERIFICATION — doppelte/wiederholte Zahlungsaufträge serverseitig sicher ═══════════════════════
+// Dieselbe Kennung (Netzwiederholung vom PC2) → Antwort aus dem durablen Nachweis (Z1, L-Replay). Eine NEUE Kennung oder der
+// Primary selbst (keine Kennung) mit DERSELBEN Absicht → der gesehene Stand passt nicht mehr → abgewiesen, nichts gezahlt.
+{
+  const db = freshDb();
+  for (const p of ['a', 'b']) product(db, p, 100, 1);
+  reload();
+  verkauf('a', 1980, '2026-09-01T10:00:00.000Z');
+  const ib = verkauf('b', 4620, '2026-09-02T10:00:00.000Z');
+  const zahlungen = (): number => n(db, 'SELECT COUNT(*) FROM payments');
+  const zustand = (): string => S({ p: db.exec('SELECT id, amount FROM payments ORDER BY id')[0]?.values, l: ledgerCount(db), i: db.exec('SELECT id, paid_amount FROM invoices ORDER BY id')[0]?.values });
+  // Primary: zweimal derselbe Auftrag (z. B. Doppelklick an der Sperre vorbei)
+  const st = cst();
+  const body = { customerId: 'cust-1', amount: 500, method: 'cash', mode: 'manual' as const, allocations: [{ invoiceId: ib, amount: 500 }], expectedOpenStamp: st };
+  await cs.settleCustomerOnPrimary(body);
+  const nach1 = zustand();
+  const zweit = await meldungAsync(() => cs.settleCustomerOnPrimary(body));
+  ok(zweit.startsWith('OPEN_ITEMS_CHANGED|') && zustand() === nach1 && zahlungen() === 1 && eq(Number(inv(db, ib).paid_amount), 500),
+    `X1 Primary: derselbe Auftrag ein zweites Mal → abgewiesen (OPEN_ITEMS_CHANGED), genau EINE Zahlung, B 500 bezahlt (${zweit.split('|')[0]})`);
+  const ohne = await meldungAsync(() => cs.settleCustomerOnPrimary({ ...body, expectedOpenStamp: undefined }));
+  ok(ohne.startsWith('OPEN_STAMP_REQUIRED|') && zustand() === nach1, 'X2 ohne gesehenen Stand keine Zahlung (OPEN_STAMP_REQUIRED)');
+  // PC2: zwei Fenster / zwei Kennungen mit derselben Absicht
+  const d = dps(db);
+  const st2 = cst();
+  const fern1 = await cmdP.runCustomerSettle(d, ident('31', 'customers.settle'), { customerId: 'cust-1', amount: 300, method: 'cash', mode: 'fifo', expectedOpenStamp: st2 });
+  reload();
+  const nachF = zustand();
+  const fern2 = await cmdP.runCustomerSettle(d, ident('32', 'customers.settle'), { customerId: 'cust-1', amount: 300, method: 'cash', mode: 'fifo', expectedOpenStamp: st2 });
+  const fern1b = await cmdP.runCustomerSettle(d, ident('31', 'customers.settle'), { customerId: 'cust-1', amount: 300, method: 'cash', mode: 'fifo', expectedOpenStamp: st2 });
+  reload();
+  ok(fern1.kind === 'ok' && fern2.kind === 'rejected' && (fern2 as { code: string }).code === 'OPEN_ITEMS_CHANGED' && (fern2 as { frozen: boolean }).frozen
+    && (fern1b as { replayed?: boolean }).replayed === true && zustand() === nachF && zahlungen() === 2,
+    'X3 PC2: zweite Kennung mit derselben Absicht abgewiesen (eingefroren); Wiederholung der ersten Kennung = Antwort aus dem Nachweis; insgesamt zwei Zahlungen (500 + 300)');
+  let lang = '';
+  try { cmdP.parseCustomerSettle({ customerId: 'cust-1', amount: 1, method: 'cash', mode: 'fifo', expectedOpenStamp: 'x'.repeat(65) }); } catch (e) { lang = (e as Error).message; }
+  ok(/expectedOpenStamp must be text/.test(lang), 'X4 der gesehene Stand ist ein kurzer Text');
+
+  // Lieferant: dieselben Fälle über „Pay Supplier — Bulk"
+  insert(db, 'expenses', { id: 'e1', branch_id: 'branch-main', expense_number: 'EXP-1', category: 'Repair', amount: 40, paid_amount: 0, status: 'PENDING', supplier_id: 'sup-1', expense_date: '2026-10-01', created_at: NOW });
+  insert(db, 'expenses', { id: 'e2', branch_id: 'branch-main', expense_number: 'EXP-2', category: 'Repair', amount: 60, paid_amount: 0, status: 'PENDING', supplier_id: 'sup-1', expense_date: '2026-10-02', created_at: NOW });
+  const HC = { branchId: 'branch-main', userId: 'user-test', now: NOW } as never;
+  const ss = sst();
+  const sb = { supplierId: 'sup-1', amount: 30, method: 'cash', mode: 'fifo' as const, expectedOpenStamp: ss };
+  imHaus(() => payHouse.paySupplierInHouse(sb, HC));
+  const ep = (): number => n(db, 'SELECT COUNT(*) FROM expense_payments');
+  let lz = '';
+  try { imHaus(() => payHouse.paySupplierInHouse(sb, HC)); } catch (e) { lz = String((e as { code?: string }).code); }
+  let lo = '';
+  try { imHaus(() => payHouse.paySupplierInHouse({ ...sb, expectedOpenStamp: undefined }, HC)); } catch (e) { lo = String((e as { code?: string }).code); }
+  ok(lz === 'OPEN_ITEMS_CHANGED' && lo === 'OPEN_STAMP_REQUIRED' && ep() === 1, `X5 Lieferant am Primary: derselbe Auftrag zweimal → eine Zahlung; ohne gesehenen Stand keine (${lz}/${lo}/${ep()})`);
+  const ss2 = sst();
+  const p1 = await payCmds.runSupplierPay(d, ident('41', 'suppliers.pay'), { supplierId: 'sup-1', amount: 20, method: 'cash', mode: 'fifo', expectedOpenStamp: ss2 });
+  const p2 = await payCmds.runSupplierPay(d, ident('42', 'suppliers.pay'), { supplierId: 'sup-1', amount: 20, method: 'cash', mode: 'fifo', expectedOpenStamp: ss2 });
+  const p1b = await payCmds.runSupplierPay(d, ident('41', 'suppliers.pay'), { supplierId: 'sup-1', amount: 20, method: 'cash', mode: 'fifo', expectedOpenStamp: ss2 });
+  ok(p1.kind === 'ok' && p2.kind === 'rejected' && (p2 as { code: string }).code === 'OPEN_ITEMS_CHANGED' && (p1b as { replayed?: boolean }).replayed === true && ep() === 3
+    && eq(Number(one(db, "SELECT paid_amount FROM expenses WHERE id = 'e1'")), 40) && eq(Number(one(db, "SELECT paid_amount FROM expenses WHERE id = 'e2'")), 10),
+    'X6 Lieferant am PC2: zweite Kennung abgewiesen, Wiederholung der ersten = Antwort aus dem Nachweis; nur 30 + 20 gezahlt (e1 40, e2 10; drei Zuordnungszeilen)');
+  ok(/expectedOpenStamp: supplierOpenStamp\(openItems\)/.test(src('src/components/expenses/PaySupplierModal.tsx'))
+    && /expectedOpenStamp: data\?\.settlement\?\.openStamp/.test(src('src/components/parties/CustomerSettlementModal.tsx')),
+    'X7 beide Masken schicken den Stand mit, den sie zeigen');
+  ok(Math.abs(imbalance(db)) < 0.0005, 'X8 Hauptbuch ausgeglichen');
 }
 
 // ══ N — Namen überall gleich: Freigabe, Recht, Anmeldung, Katalog, Rust ═══════════════════════════════════════

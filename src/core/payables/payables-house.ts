@@ -48,6 +48,7 @@ import {
   SUPPLIER_CREDIT_AMOUNT_LOCK_MESSAGE,
 } from '@/core/finance/expenseSettlement';
 import { planSupplierCreditExpenseAllocations } from '@/core/finance/expenseCreditAllocation';
+import { OPEN_ITEMS_CHANGED, OPEN_STAMP_REQUIRED, openItemsStamp } from '@/core/finance/open-items-stamp';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { assertSupplierOverpayMutable, reconcilePurchaseOverpayCredit, OverpayCreditRedeemed } from './purchase-overpay';
 
@@ -1248,6 +1249,17 @@ export interface SupplierPayRequest {
    * Rest Guthaben (Überzahlung eines Einkaufs bzw. Vorauszahlung, die bestehenden Guthabenregeln).
    */
   confirmExcessAsCredit?: boolean;
+  /**
+   * PAYMENT FINAL VERIFICATION — Pflicht: der Fingerabdruck der offenen Posten, die die Maske gezeigt hat
+   * (`supplierOpenStamp`). Hat eine andere Zahlung den Stand verändert (Doppelklick, zweites Fenster, zweiter
+   * Rechner), wird abgewiesen statt ein zweites Mal gezahlt.
+   */
+  expectedOpenStamp?: string;
+}
+
+/** Der Fingerabdruck der offenen Posten eines Lieferanten — derselbe, den „Pay Supplier — Bulk" mitschickt. */
+export function supplierOpenStamp(items: ReadonlyArray<Pick<SupplierOpenItem, 'kind' | 'id' | 'remainingF'>>): string {
+  return openItemsStamp(items.map((i) => ({ kind: i.kind, id: i.id, openF: i.remainingF })));
 }
 export interface SupplierPaid {
   supplierId: string;
@@ -1270,6 +1282,13 @@ export function paySupplierInHouse(req: SupplierPayRequest, ctx: HouseCtx): Supp
   const method = methodOf(req.method);
   if (req.mode !== 'fifo' && req.mode !== 'manual') throw nein('PAY_MODE_INVALID', 'mode is fifo or manual');
   const items = openSupplierItems(req.supplierId, ctx.branchId);
+  // PAYMENT FINAL VERIFICATION — nur gegen den Stand, den die Maske gesehen hat (in DIESER Transaktion verglichen).
+  if (typeof req.expectedOpenStamp !== 'string' || req.expectedOpenStamp === '') {
+    throw nein(OPEN_STAMP_REQUIRED, 'the payment must name the open items it was made for — reload the window');
+  }
+  if (supplierOpenStamp(items) !== req.expectedOpenStamp) {
+    throw nein(OPEN_ITEMS_CHANGED, 'the open items of this supplier changed since this window was opened (another payment or a change) — reload and check before paying again');
+  }
   // Die Maske bietet ohne offenen Posten gar keine Zahlung an („Nothing open for this supplier").
   if (items.length === 0) throw nein('SUPPLIER_NOTHING_OPEN', 'nothing is open for this supplier right now');
   const manual = (req.allocations ?? []).map((a) => ({ kind: a.kind, id: a.id, amountF: F(a.amount) }));

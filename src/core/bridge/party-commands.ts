@@ -61,7 +61,7 @@ export const OPENING_CREATE_KEYS = [
   'confirmNotInLataif', 'confirmNoOverlap',
 ] as const;
 export const OPENING_CANCEL_KEYS = ['itemId', 'reason'] as const;
-export const CUSTOMER_SETTLE_KEYS = ['customerId', 'amount', 'method', 'cardBrand', 'notes', 'mode', 'allocations', 'confirmExcessAsCredit'] as const;
+export const CUSTOMER_SETTLE_KEYS = ['customerId', 'amount', 'method', 'cardBrand', 'notes', 'mode', 'allocations', 'confirmExcessAsCredit', 'expectedOpenStamp'] as const;
 
 export function parseCustomerSettle(raw: unknown): CustomerSettleRequest {
   const r = only(raw, CUSTOMER_SETTLE_KEYS);
@@ -72,6 +72,7 @@ export function parseCustomerSettle(raw: unknown): CustomerSettleRequest {
   if (r.notes !== undefined && typeof r.notes !== 'string') throw new PartyPayloadError('notes must be text');
   if (r.cardBrand !== undefined && typeof r.cardBrand !== 'string') throw new PartyPayloadError('cardBrand must be text');
   if (r.confirmExcessAsCredit !== undefined && typeof r.confirmExcessAsCredit !== 'boolean') throw new PartyPayloadError('confirmExcessAsCredit is true or false');
+  if (r.expectedOpenStamp !== undefined && (typeof r.expectedOpenStamp !== 'string' || r.expectedOpenStamp.length > 64)) throw new PartyPayloadError('expectedOpenStamp must be text');
   let allocations: Array<{ invoiceId: string; amount: number }> | undefined;
   if (r.allocations !== undefined) {
     if (!Array.isArray(r.allocations) || r.allocations.length > 500) throw new PartyPayloadError('allocations must be a list');
@@ -88,6 +89,7 @@ export function parseCustomerSettle(raw: unknown): CustomerSettleRequest {
     customerId: r.customerId, amount: r.amount, method: r.method, mode: r.mode,
     ...(r.notes ? { notes: r.notes as string } : {}), ...(r.cardBrand ? { cardBrand: r.cardBrand as CustomerSettleRequest['cardBrand'] } : {}),
     ...(allocations ? { allocations } : {}), ...(r.confirmExcessAsCredit === true ? { confirmExcessAsCredit: true } : {}),
+    ...(typeof r.expectedOpenStamp === 'string' ? { expectedOpenStamp: r.expectedOpenStamp } : {}),
   };
 }
 

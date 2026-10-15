@@ -190,8 +190,10 @@ export function parseSupplierPay(raw: unknown): {
   supplierId: string; amount: number; method: string; mode: 'fifo' | 'manual';
   allocations?: Array<{ kind: 'expense' | 'purchase'; id: string; amount: number }>;
   confirmExcessAsCredit?: boolean;
+  expectedOpenStamp?: string;
 } {
-  const r = strict(raw, ['supplierId', 'amount', 'method', 'mode', 'allocations', 'confirmExcessAsCredit']);
+  const r = strict(raw, ['supplierId', 'amount', 'method', 'mode', 'allocations', 'confirmExcessAsCredit', 'expectedOpenStamp']);
+  if (r.expectedOpenStamp !== undefined && (typeof r.expectedOpenStamp !== 'string' || r.expectedOpenStamp.length > 64)) throw new PayablesPayloadError('expectedOpenStamp must be text');
   if (r.confirmExcessAsCredit !== undefined && typeof r.confirmExcessAsCredit !== 'boolean') throw new PayablesPayloadError('confirmExcessAsCredit is true or false');
   const mode = r.mode;
   if (mode !== 'fifo' && mode !== 'manual') throw new PayablesPayloadError('mode is fifo or manual');
@@ -209,6 +211,7 @@ export function parseSupplierPay(raw: unknown): {
   return {
     supplierId: idOf(r.supplierId, 'supplierId'), amount: numberOf(r.amount, 'amount'), method: idOf(r.method, 'method'), mode, allocations,
     ...(r.confirmExcessAsCredit === true ? { confirmExcessAsCredit: true } : {}),
+    ...(typeof r.expectedOpenStamp === 'string' ? { expectedOpenStamp: r.expectedOpenStamp } : {}),
   };
 }
 

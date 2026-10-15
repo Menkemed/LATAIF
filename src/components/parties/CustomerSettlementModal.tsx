@@ -83,6 +83,8 @@ export function CustomerSettlementModal({ customerId, customerName, onClose, onD
       ...(method === 'card' ? { cardBrand } : {}), ...(notes.trim() ? { notes: notes.trim() } : {}),
       ...(manual ? { allocations: planOk.allocations.map((a) => ({ invoiceId: a.invoiceId, amount: a.amountF / 1000 })) } : {}),
       ...(excessF > 0 && excessOk ? { confirmExcessAsCredit: true } : {}),
+      // PAYMENT FINAL VERIFICATION — der Stand, den dieses Fenster gezeigt hat (vom Primary berechnet).
+      expectedOpenStamp: data?.settlement?.openStamp ?? '',
     };
     const lines = planOk.allocations.map((a) => `${invoices.find((i) => i.id === a.invoiceId)?.number}: ${fmt(a.amountF)}`).join('\n');
     if (!(await window.confirm(`Receive ${fmt(amountF)} BHD (${METHOD_LABEL[method] ?? method}) from ${customerName}?\n\n${lines}${excessF > 0 ? `\nStore credit: ${fmt(excessF)}` : ''}`))) return false;

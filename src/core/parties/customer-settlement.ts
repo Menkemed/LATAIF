@@ -28,6 +28,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { openingItemsFor, type OpeningItem } from './opening-balances';
 import type { BusinessReadContext } from '@/core/data/read-context';
+import { OPEN_ITEMS_CHANGED, OPEN_STAMP_REQUIRED, openItemsStamp } from '@/core/finance/open-items-stamp';
 
 const nein = (code: string, msg: string): InvoiceActionRejected => new InvoiceActionRejected(code, `${msg} — nothing was paid`);
 const toFils = (n: number): number => Math.round(n * 1000);
@@ -61,6 +62,11 @@ export function customerSettlementInvoices(customerId: string, branchId: string)
     return { id: String(r.id), number: String(r.invoice_number ?? ''), date: String(r.d ?? '').slice(0, 10), totalF, cnCancelF,
       openF: totalF - toFils(Number(r.paid_amount) || 0) - cnCancelF };
   }).filter((i) => i.openF > 5);   // wie Receivables: unter 0,005 BHD ist nichts offen
+}
+
+/** Der Fingerabdruck der offenen Rechnungen eines Kunden — derselbe, den die Maske mitschickt. */
+export function customerOpenStamp(items: readonly SettlementInvoice[]): string {
+  return openItemsStamp(items.map((i) => ({ kind: 'invoice', id: i.id, openF: i.openF })));
 }
 
 export interface SettlementAllocation { invoiceId: string; amountF: number }
@@ -120,6 +126,11 @@ export interface CustomerSettleRequest {
   allocations?: ReadonlyArray<{ invoiceId: string; amount: number }>;
   /** Ausdrücklich: ein Betrag über dem Offenen wird Store-Guthaben (bestehende Überzahlungsregel). */
   confirmExcessAsCredit?: boolean;
+  /**
+   * Pflicht: der Fingerabdruck der offenen Rechnungen, die das Fenster gezeigt hat (`openStamp` der Auskunft). Hat eine
+   * andere Zahlung den Stand verändert (Doppelklick am Primary, zweites Fenster, zweiter Rechner), wird abgewiesen.
+   */
+  expectedOpenStamp?: string;
 }
 
 export interface CustomerSettled {
@@ -148,6 +159,13 @@ export function settleCustomerInHouse(req: CustomerSettleRequest, branchId: stri
   if (req.mode === 'fifo' && (req.allocations?.length ?? 0) > 0) throw nein('ALLOCATION_INVALID', 'FIFO decides the allocation — send none');
 
   const items = customerSettlementInvoices(req.customerId, branchId);
+  // PAYMENT FINAL VERIFICATION — nur gegen den Stand, den das Fenster gesehen hat (in DIESER Transaktion verglichen).
+  if (typeof req.expectedOpenStamp !== 'string' || req.expectedOpenStamp === '') {
+    throw nein(OPEN_STAMP_REQUIRED, 'the payment must name the open invoices it was made for — reload the window');
+  }
+  if (customerOpenStamp(items) !== req.expectedOpenStamp) {
+    throw nein(OPEN_ITEMS_CHANGED, 'the open invoices changed since this window was opened (another payment or a change) — reload and check before paying again');
+  }
   if (items.length === 0) throw nein('CUSTOMER_NOTHING_OPEN', 'this customer has no open invoice');
   const manual = (req.allocations ?? []).map((a) => ({ invoiceId: String(a.invoiceId), amountF: toFils(Number(a.amount)) }));
   const plan = planCustomerSettlement(items, amountF, req.mode, manual);
@@ -186,6 +204,8 @@ export function settleCustomerInHouse(req: CustomerSettleRequest, branchId: stri
 export interface CustomerSettlementRead {
   invoices: Array<{ id: string; number: string; date: string; total: number; open: number; hasCreditNote: boolean }>;
   openTotal: number;
+  /** Der Fingerabdruck dieser offenen Rechnungen — die Maske schickt ihn mit der Zahlung zurück. */
+  openStamp: string;
   /** Eröffnungsposten des Kunden: sichtbar, nicht bezahlbar (Buchung noch nicht freigeschaltet). */
   openingItems: OpeningItem[];
   waiver: typeof WAIVER_BOOKING;
@@ -197,6 +217,7 @@ export function customerSettlementFor(ctx: BusinessReadContext | { branchId: str
   return {
     invoices: items.map((i) => ({ id: i.id, number: i.number, date: i.date, total: B(i.totalF), open: B(i.openF), hasCreditNote: i.cnCancelF > 0 })),
     openTotal: B(items.reduce((s, i) => s + i.openF, 0)),
+    openStamp: customerOpenStamp(items),
     openingItems: openingItemsFor(ctx, 'CUSTOMER', customerId).filter((i) => i.status === 'RECORDED'),
     waiver: WAIVER_BOOKING,
   };

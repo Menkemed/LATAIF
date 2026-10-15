@@ -35,7 +35,7 @@ import { creditPaidFor } from '@/core/data/domain-reads';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
 import { WriteError } from '@/components/shared/WriteError';
-import { PAYABLES_OP, planSupplierPayment, sortOpenItems, type SupplierOpenItem } from '@/core/payables/payables-house';
+import { PAYABLES_OP, planSupplierPayment, sortOpenItems, supplierOpenStamp, type SupplierOpenItem } from '@/core/payables/payables-house';
 import { saveSupplierCredit, saveSupplierPay, viaWrites } from '@/core/payables/payables-save';
 
 interface PaySupplierModalProps {
@@ -339,6 +339,8 @@ export function PaySupplierModal({ supplierId, supplierName, onClose }: PaySuppl
     const r = await saveSupplierPay(viaWrites(w, PAYABLES_OP.SUPPLIERS_PAY), {
       supplierId, amount: totalAmount, method, mode: overrideMode ? 'manual' : 'fifo', allocations,
       ...(excessConfirmed ? { confirmExcessAsCredit: true } : {}),
+      // PAYMENT FINAL VERIFICATION — der Stand, den diese Maske gezeigt hat; der Primary vergleicht ihn in seiner Transaktion.
+      expectedOpenStamp: supplierOpenStamp(openItems),
     });
     setRefreshTick(t => t + 1);
     if (r.kind !== 'ok') { setFehler(fehlertext(r)); return; }

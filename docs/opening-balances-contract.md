@@ -105,5 +105,12 @@ Nach der Freigabe:
 - Kunden- und Lieferantenzahlung überzahlen nie still. Eine gescheiterte Teilzahlung nimmt die ganze Verteilung zurück.
 - Der VAT-Periodenschutz der Einzelzahlung gilt auch für die Sammelzahlung.
 - Ein Doppelklick zahlt nie zweimal: „Receive payment" und „Pay Supplier" sperren vor der Rückfrage (Fund aus dem Browser-Test am 15.10.2026, zwei Zahlungen à 1.000 in der lokalen Testdatenbank).
+- Doppelte oder wiederholte Zahlungsaufträge sind serverseitig abgesichert, auf zwei Arten:
+  - Gleiche Befehlskennung (Netzwiederholung vom PC2): Die Antwort kommt aus dem durablen Nachweis, es wird nicht noch einmal gezahlt.
+  - Jede andere Wiederholung (Primary ohne Kennung, zweites Fenster, zweiter Rechner):
+    - `customers.settle` und `suppliers.pay` verlangen `expectedOpenStamp`, den Fingerabdruck der offenen Posten, die die Maske gezeigt hat.
+    - Der Primary vergleicht ihn in seiner Transaktion; die Zahlungen laufen nacheinander.
+    - Hat sich der Stand geändert, lautet die Antwort `OPEN_ITEMS_CHANGED`.
+    - Fehlt der Fingerabdruck, lautet die Antwort `OPEN_STAMP_REQUIRED`.
 - Ein nicht gebuchter Eröffnungsposten wird nur vom Eröffnungsmodul und den Löschsperren gelesen. Er steht in keinem Saldo, in keiner Receivables-/Payables-Liste und auf keinem Zahlungs- oder Verrechnungsweg.
 - Primary und PC2 rechnen Salden mit derselben Funktion. Ohne Antwort steht „n/a".

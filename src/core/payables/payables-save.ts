@@ -265,6 +265,8 @@ export interface SupplierPayForm {
   allocations?: Array<{ kind: 'expense' | 'purchase'; id: string; amount: number }>;
   /** SETTLEMENT S2 — der Rest über allem Offenen wird nur mit dieser Wahl Guthaben. */
   confirmExcessAsCredit?: boolean;
+  /** PAYMENT FINAL VERIFICATION — der Fingerabdruck der offenen Posten, die die Maske gezeigt hat. */
+  expectedOpenStamp?: string;
 }
 
 /** „Pay Supplier — Bulk": EINE Buchung ueber alle Posten; FIFO rechnet der Primary. */
@@ -274,6 +276,7 @@ export function saveSupplierPay(write: PayablesWrite<Result>, form: SupplierPayF
   const req = {
     supplierId: form.supplierId, amount: form.amount, method: form.method, mode: form.mode, ...(allocations ? { allocations } : {}),
     ...(form.confirmExcessAsCredit === true ? { confirmExcessAsCredit: true } : {}),
+    ...(form.expectedOpenStamp ? { expectedOpenStamp: form.expectedOpenStamp } : {}),
   };
   return speichern(write, {
     local: () => runOnPrimary(() => paySupplierInHouse(req, localHouseCtx()) as unknown as Result, supplierHier),
