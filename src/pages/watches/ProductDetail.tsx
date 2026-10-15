@@ -866,6 +866,8 @@ export function ProductDetail() {
                   </div>
                   <span style={{ display: 'block', fontSize: 11, color: '#6B7280', marginTop: 4 }}>
                     Set by purchases, sales, returns, consignment and agent transfers — not editable here.
+                    {/* INITIAL QTY — eine falsch erfasste Menge berichtigt der Owner über die Karte „Stock corrections" (eigener Beleg). */}
+                    {perm.isOwner && <span data-initial-qty-hint>{' '}Entered wrongly? Save or cancel, then use “Correct initial qty” in Stock corrections.</span>}
                   </span>
                 </div>
               </div>

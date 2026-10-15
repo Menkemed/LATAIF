@@ -16,7 +16,7 @@ import { BusinessError, registerCommand, type CommandActor, type CommandResult }
 import { assertHouseBranch } from './remote-create-support';
 import { OP_OLD_STOCK_PAGE_GET, OP_STOCK_PRODUCT_GET } from './store-read-ops';
 import {
-  StockAdjustmentRejected, addOldStockInHouse, cancelStockAdjustmentInHouse, issueStockInHouse, stockCorrectionsFor,
+  StockAdjustmentRejected, addOldStockInHouse, cancelStockAdjustmentInHouse, correctInitialQtyInHouse, issueStockInHouse, stockCorrectionsFor,
   type AdjustmentCtx, type StockAdjustmentResult,
 } from '@/core/stock/stock-adjustment';
 import { oldStockReconciliationFor } from '@/core/stock/old-stock-reconciliation';
@@ -24,6 +24,8 @@ import { oldStockReconciliationFor } from '@/core/stock/old-stock-reconciliation
 export const OP_STOCK_ISSUE = 'stock_adjustments.issue';
 export const OP_STOCK_CANCEL = 'stock_adjustments.cancel';
 export const OP_OLD_STOCK_ADD = 'stock_adjustments.add_old_stock';
+/** INITIAL QTY — die erste Mengeneingabe eines unberührten Artikels berichtigen (nur Owner, keine Buchung). */
+export const OP_STOCK_CORRECT_INITIAL = 'stock_adjustments.correct_initial';
 export { OP_OLD_STOCK_PAGE_GET, OP_STOCK_PRODUCT_GET };
 
 export class StockPayloadError extends Error {
@@ -45,6 +47,7 @@ function only(raw: unknown, keys: readonly string[]): Record<string, unknown> {
 export const ISSUE_KEYS = ['actionId', 'productId', 'quantity', 'expectedQuantity', 'reasonCategory', 'reason', 'businessDate'] as const;
 export const CANCEL_KEYS = ['adjustmentId', 'reason'] as const;
 export const OLD_STOCK_KEYS = ['actionId', 'productId', 'quantity', 'expectedQuantity', 'unitCost', 'reason', 'businessDate', 'confirmNotRemovedPiece'] as const;
+export const INITIAL_QTY_KEYS = ['actionId', 'productId', 'newQuantity', 'expectedQuantity', 'reason'] as const;
 
 type House = (input: never, ctx: AdjustmentCtx) => StockAdjustmentResult;
 
@@ -96,6 +99,8 @@ registerCommand(OP_STOCK_ISSUE, { kind: 'mutation', handler: (p, a) => execute(i
 registerCommand(OP_STOCK_CANCEL, { kind: 'mutation', handler: (p, a) => execute(cancelStockAdjustmentInHouse as House, CANCEL_KEYS, OP_STOCK_CANCEL, p, a) });
 // OLD STOCK — weitere Stücke Altbestand eines schon erfassten Artikels: nur Menge, Beleg, Protokoll, Sync; keine Buchung.
 registerCommand(OP_OLD_STOCK_ADD, { kind: 'mutation', handler: (p, a) => execute(addOldStockInHouse as House, OLD_STOCK_KEYS, OP_OLD_STOCK_ADD, p, a) });
+// INITIAL QTY — die erste Mengeneingabe berichtigen: nur an einem unberührten Artikel, Beleg + Protokoll + Sync, keine Buchung.
+registerCommand(OP_STOCK_CORRECT_INITIAL, { kind: 'mutation', handler: (p, a) => execute(correctInitialQtyInHouse as House, INITIAL_QTY_KEYS, OP_STOCK_CORRECT_INITIAL, p, a) });
 
 // ── Lesebefehl der Karte „Stock corrections" ───────────────────────────────
 interface Envelope { readonly actor?: { tenantId?: string; branchId?: string; userId?: string; role?: string }; readonly input?: Record<string, unknown> }
@@ -107,7 +112,7 @@ registerCommand(OP_STOCK_PRODUCT_GET, {
     const input = (payload as Envelope | null)?.input ?? {};
     const productId = input.productId;
     if (typeof productId !== 'string' || productId.trim() === '') throw new BusinessError('INPUT_REQUIRED', 'productId is required');
-    return { data: { ...stockCorrectionsFor(ctx, { productId, issueQuantity: input.issueQuantity, receiptQuantity: input.receiptQuantity, receiptUnitCost: input.receiptUnitCost }) } };
+    return { data: { ...stockCorrectionsFor(ctx, { productId, issueQuantity: input.issueQuantity, receiptQuantity: input.receiptQuantity, receiptUnitCost: input.receiptUnitCost, correctionQuantity: input.correctionQuantity }) } };
   },
 });
 

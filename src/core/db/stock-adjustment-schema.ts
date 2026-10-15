@@ -14,7 +14,11 @@ interface SchemaDb {
 }
 
 export const OLD_DIRECTION_CHECK = "CHECK (direction IN ('ISSUE'))";
-export const DIRECTION_CHECK = "CHECK (direction IN ('ISSUE','RECEIPT'))";
+/** OLD STOCK — die Regel vor der Eingabekorrektur (ISSUE und RECEIPT). */
+export const RECEIPT_DIRECTION_CHECK = "CHECK (direction IN ('ISSUE','RECEIPT'))";
+/** INITIAL QTY — heute: Abgang, Altbestand, Berichtigung der ersten Mengeneingabe. */
+export const DIRECTION_CHECK = "CHECK (direction IN ('ISSUE','RECEIPT','CORRECTION'))";
+const FRUEHERE_REGELN = [OLD_DIRECTION_CHECK, RECEIPT_DIRECTION_CHECK];
 export const STOCK_ADJUSTMENT_INDEXES = [
   'CREATE UNIQUE INDEX IF NOT EXISTS uq_stock_adjustments_action ON stock_adjustments(branch_id, action_id)',
   'CREATE UNIQUE INDEX IF NOT EXISTS uq_stock_adjustments_number ON stock_adjustments(branch_id, adjustment_number)',
@@ -24,8 +28,9 @@ export const STOCK_ADJUSTMENT_INDEXES = [
 /** true = umgebaut; false = nichts zu tun (keine Tabelle oder schon die neue Regel). Wirft, wenn der Umbau scheitert. */
 export function widenStockAdjustmentDirections(db: SchemaDb): boolean {
   const sql = db.exec("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'stock_adjustments'")[0]?.values?.[0]?.[0];
-  if (typeof sql !== 'string' || !sql.includes(OLD_DIRECTION_CHECK)) return false;
-  const neu = sql.replace(OLD_DIRECTION_CHECK, DIRECTION_CHECK).replace(/^CREATE TABLE\s+(IF NOT EXISTS\s+)?"?stock_adjustments"?/i, 'CREATE TABLE stock_adjustments_widen');
+  const alt = typeof sql === 'string' ? FRUEHERE_REGELN.find((r) => sql.includes(r)) : undefined;
+  if (typeof sql !== 'string' || !alt) return false;
+  const neu = sql.replace(alt, DIRECTION_CHECK).replace(/^CREATE TABLE\s+(IF NOT EXISTS\s+)?"?stock_adjustments"?/i, 'CREATE TABLE stock_adjustments_widen');
   if (!neu.startsWith('CREATE TABLE stock_adjustments_widen')) throw new Error('stock_adjustments: unexpected table definition — not rebuilt');
   const vorher = Number(db.exec('SELECT COUNT(*) FROM stock_adjustments')[0]?.values?.[0]?.[0] ?? 0);
   db.run('SAVEPOINT widen_stock_adjustments');

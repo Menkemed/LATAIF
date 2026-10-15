@@ -6,6 +6,8 @@
 // Hausfolge. Alle Regeln liegen im Haus (`core/stock/stock-adjustment`), die Maske zeigt nur, was es sagt.
 // OLD STOCK — „Add old stock": weitere Stücke Altbestand eines schon erfassten Artikels (nur Menge, historischer Einstand,
 // Beleg; keine Buchung — die Eröffnung wartet auf die Regeln des Buchhalters).
+// INITIAL QTY — „Correct initial qty": die erste Mengeneingabe eines unberührten Artikels berichtigen (5 erfasst, 3 da) — Beleg
+// CORRECTION, Grund, Protokoll; keine Buchung, kein Lagerverlust, kein Altbestands-Zugang. Am PC2 `stock_adjustments.correct_initial`.
 // ════════════════════════════════════════════════════════════════════════════
 import { useState } from 'react';
 import { v4 as uuid } from 'uuid';
@@ -16,7 +18,7 @@ import { Modal } from '@/components/ui/Modal';
 import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import {
-  STOCK_ADJUSTMENT_REASONS, addOldStockOnPrimary, cancelStockAdjustmentOnPrimary, issueStockOnPrimary, stockCorrectionsFor,
+  STOCK_ADJUSTMENT_REASONS, addOldStockOnPrimary, cancelStockAdjustmentOnPrimary, correctInitialQtyOnPrimary, issueStockOnPrimary, stockCorrectionsFor,
   type StockAdjustmentResult, type StockCorrectionsRead,
 } from '@/core/stock/stock-adjustment';
 
@@ -45,16 +47,22 @@ export function StockAdjustmentPanel({ productId, quantity, purchasePrice, onCha
   const [addReason, setAddReason] = useState('');
   const [addDate, setAddDate] = useState(today());
   const [addConfirm, setAddConfirm] = useState(false);
+  const [fixOpen, setFixOpen] = useState(false);
+  const [fixActionId, setFixActionId] = useState('');
+  const [fixQty, setFixQty] = useState('');
+  const [fixReason, setFixReason] = useState('');
   const n = Number(qty);
   const issueQuantity = open && Number.isInteger(n) ? n : null;
   const an = Number(addQty);
   const receiptQuantity = addOpen && Number.isInteger(an) ? an : null;
   const ac = addCost.trim() === '' ? NaN : Number(addCost);
   const receiptUnitCost = addOpen && Number.isFinite(ac) ? ac : null;
+  const fn = Number(fixQty);
+  const correctionQuantity = fixOpen && fixQty.trim() !== '' && Number.isInteger(fn) ? fn : null;
   const data = useSharedRead<StockCorrectionsRead>(
-    'stock_adjustments.product.get', { productId, issueQuantity, receiptQuantity, receiptUnitCost, r: refresh },
-    (ctx) => stockCorrectionsFor(ctx, { productId, issueQuantity, receiptQuantity, receiptUnitCost }), EMPTY,
-    [productId, issueQuantity, receiptQuantity, receiptUnitCost, refresh],
+    'stock_adjustments.product.get', { productId, issueQuantity, receiptQuantity, receiptUnitCost, correctionQuantity, r: refresh },
+    (ctx) => stockCorrectionsFor(ctx, { productId, issueQuantity, receiptQuantity, receiptUnitCost, correctionQuantity }), EMPTY,
+    [productId, issueQuantity, receiptQuantity, receiptUnitCost, correctionQuantity, refresh],
   );
   const docs = data.docs;
   const preview = open ? data.issuePreview : null;
@@ -82,6 +90,25 @@ export function StockAdjustmentPanel({ productId, quantity, purchasePrice, onCha
     if (out.kind !== 'ok') { setMsg({ text: fehlertext(out), ok: false }); return; }
     setMsg({ text: `${out.value.adjustmentNumber}: ${out.value.qtyBefore} → ${out.value.qtyAfter} · old stock, opening pending`, ok: true });
     setAddOpen(false);
+    reload();
+  }
+
+  function startFix(): void {
+    w.clear(); setFixActionId(uuid()); setFixQty(String(quantity)); setFixReason(''); setMsg(null); setFixOpen(true);
+  }
+
+  async function confirmFix(): Promise<void> {
+    const p = fixOpen ? data.correctionPreview?.plan : null;
+    if (!p) return;
+    if (!(await window.confirm(`Correct the first quantity entry from ${p.qtyBefore} to ${p.qtyAfter}? This is an input correction: no booking, no stock loss and no old-stock receipt — the opening uses the corrected quantity.`))) return;
+    const input = { actionId: fixActionId, productId, newQuantity: p.qtyAfter, expectedQuantity: p.qtyBefore, reason: fixReason };
+    const out = await w.save<StockAdjustmentResult>('stock_adjustments.correct_initial', {
+      local: () => correctInitialQtyOnPrimary(input, reload),
+      remote: () => input,
+    });
+    if (out.kind !== 'ok') { setMsg({ text: fehlertext(out), ok: false }); return; }
+    setMsg({ text: `${out.value.adjustmentNumber}: first quantity entry corrected ${out.value.qtyBefore} → ${out.value.qtyAfter} · no booking`, ok: true });
+    setFixOpen(false);
     reload();
   }
 
@@ -128,6 +155,7 @@ export function StockAdjustmentPanel({ productId, quantity, purchasePrice, onCha
       <div className="flex justify-between items-center">
         <span style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>Stock corrections</span>
         <div className="flex gap-2">
+          <Button variant="ghost" onClick={startFix} disabled={busy} data-initial-qty-open>Correct initial qty</Button>
           <Button variant="ghost" onClick={startAdd} disabled={busy} data-old-stock-open>Add old stock</Button>
           <Button variant="secondary" onClick={start} disabled={busy || !(quantity > 0)} data-stock-issue-open>Remove from stock</Button>
         </div>
@@ -141,13 +169,15 @@ export function StockAdjustmentPanel({ productId, quantity, purchasePrice, onCha
         <div key={d.adjustmentId} data-stock-adjustment={d.adjustmentNumber} className="flex justify-between items-center"
           style={{ padding: '8px 0', borderTop: '1px solid #F1F3F5', fontSize: 12, opacity: d.status === 'CANCELLED' ? 0.55 : 1 }}>
           <span>
-            <b className="font-mono">{d.adjustmentNumber}</b> · {d.direction === 'RECEIPT' ? '+' : '−'}{d.quantity} ({d.qtyBefore} → {d.qtyAfter}) ·{' '}
-            {d.direction === 'RECEIPT'
+            <b className="font-mono">{d.adjustmentNumber}</b> · {d.direction === 'CORRECTION' ? '' : d.direction === 'RECEIPT' ? '+' : '−'}{d.direction === 'CORRECTION' ? 'first entry corrected' : d.quantity} ({d.qtyBefore} → {d.qtyAfter}) ·{' '}
+            {d.direction === 'CORRECTION'
+              ? 'input correction, no booking'
+              : d.direction === 'RECEIPT'
               ? `old stock${d.unitCostHint !== null ? ` at ${d.unitCostHint.toFixed(3)} BHD` : ''} · opening pending`
               : d.accounting === 'BOOKED' ? `inventory loss ${d.value.toFixed(3)} BHD` : 'accounting reconciliation pending'}
             {d.status === 'CANCELLED' ? ' · cancelled' : ''}
           </span>
-          {d.status === 'POSTED' && <Button variant="ghost" disabled={busy} onClick={() => { w.clear(); setStornoReason(''); setStorno({ id: d.adjustmentId, number: d.adjustmentNumber }); }} data-stock-adjustment-cancel>Cancel</Button>}
+          {d.status === 'POSTED' && d.direction !== 'CORRECTION' && <Button variant="ghost" disabled={busy} onClick={() => { w.clear(); setStornoReason(''); setStorno({ id: d.adjustmentId, number: d.adjustmentNumber }); }} data-stock-adjustment-cancel>Cancel</Button>}
         </div>
       ))}
 
@@ -212,6 +242,30 @@ export function StockAdjustmentPanel({ productId, quantity, purchasePrice, onCha
             <div className="flex justify-end gap-3">
               <Button variant="ghost" onClick={() => setAddOpen(false)}>Cancel</Button>
               <Button variant="primary" disabled={busy || !addPreview?.plan || !addReason.trim() || (addPreview.plan.openRemovals.length > 0 && !addConfirm)} onClick={() => void confirmAdd()} data-old-stock-submit>Add old stock</Button>
+            </div>
+          </div>
+        </Modal>
+      )}
+      {fixOpen && (
+        <Modal open onClose={() => setFixOpen(false)} title="Correct initial quantity" width={560}>
+          <div data-initial-qty-dialog style={{ display: 'grid', gap: 12, fontSize: 13 }}>
+            <p style={{ color: '#4B5563' }}>Only for a quantity that was entered wrongly when the item was recorded (for example 5 entered, 3 pieces exist). The item must be untouched: no sale, purchase, lot, offer, order, agent, repair, return or stock correction. No booking, no stock loss, no old-stock receipt.</p>
+            <Input label="Correct quantity (pieces)" value={fixQty} onChange={(e) => setFixQty(e.target.value)} data-initial-qty-qty />
+            <Input label="What was entered wrongly (required)" value={fixReason} onChange={(e) => setFixReason(e.target.value)} data-initial-qty-reason />
+            {data.correctionPreview?.plan ? (
+              <div data-initial-qty-preview style={{ padding: '10px 12px', borderRadius: 8, background: '#F5F7FA', fontSize: 12, color: '#374151' }}>
+                Quantity {data.correctionPreview.plan.qtyBefore} → {data.correctionPreview.plan.qtyAfter}
+                {data.correctionPreview.plan.itemCost !== null ? ` · opening value later ${data.correctionPreview.plan.qtyAfter} × ${data.correctionPreview.plan.itemCost.toFixed(3)} BHD` : ''}. Input correction only — nothing is booked.
+              </div>
+            ) : (
+              <div data-initial-qty-refused style={{ padding: '10px 12px', borderRadius: 8, background: 'rgba(170,110,110,0.10)', fontSize: 12, color: '#7A3535' }}>
+                {data.correctionPreview?.issue ?? 'Enter the correct whole number of pieces.'}
+              </div>
+            )}
+            {msg && !msg.ok && <div data-stock-dialog-error style={{ fontSize: 12, color: '#7A3535' }}>{msg.text}</div>}
+            <div className="flex justify-end gap-3">
+              <Button variant="ghost" onClick={() => setFixOpen(false)}>Cancel</Button>
+              <Button variant="primary" disabled={busy || !data.correctionPreview?.plan || !fixReason.trim()} onClick={() => void confirmFix()} data-initial-qty-submit>Correct quantity</Button>
             </div>
           </div>
         </Modal>

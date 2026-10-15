@@ -290,6 +290,8 @@ pub const OP_CUSTOMERS_SETTLE: &str = "customers.settle";
 pub const OP_PARTIES_BALANCES_GET: &str = "parties.balances.get";
 pub const OP_PARTIES_ACCOUNT_GET: &str = "parties.account.get";
 pub const OP_PAGE_OPENING_BALANCES_GET: &str = "page.opening_balances.get";
+// INITIAL QTY — die erste Mengeneingabe eines unberührten Artikels berichtigen (nur Owner, keine Buchung).
+pub const OP_STOCK_CORRECT_INITIAL: &str = "stock_adjustments.correct_initial";
 // CENTRAL-UI-PARITY R6E — Angebot, Rechnungs-Lebenszyklus, Nachrichtenprotokoll.
 pub const OP_OFFERS_CREATE: &str = "offers.create";
 pub const OP_OFFERS_UPDATE: &str = "offers.update";
@@ -548,6 +550,8 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_PARTIES_BALANCES_GET,
     OP_PARTIES_ACCOUNT_GET,
     OP_PAGE_OPENING_BALANCES_GET,
+    // INITIAL QTY — die Berichtigung der ersten Mengeneingabe (Buchung im Sinne der Brücke, ohne Hauptbuch).
+    OP_STOCK_CORRECT_INITIAL,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

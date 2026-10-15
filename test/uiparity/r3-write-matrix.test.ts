@@ -179,11 +179,13 @@ const MATRIX: Record<string, Zeile> = {
   'opening_balances.cancel': { ui: 'CustomerDetail/SupplierDetail Edit — Opening balances: Cancel position', gleich: true },
   // SETTLEMENT — CustomerDetail, Karte „Invoices“: eine Zahlung über die offenen Rechnungen.
   'customers.settle': { ui: 'CustomerDetail — Receive Payment', gleich: true },
+  // INITIAL QTY — ProductDetail, Karte „Stock corrections“: die erste Mengeneingabe berichtigen (nur Owner, keine Buchung).
+  'stock_adjustments.correct_initial': { ui: 'ProductDetail — Stock corrections: Correct initial qty', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 120, `A 116 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 121, `A 116 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

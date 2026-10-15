@@ -105,7 +105,7 @@ const OB_READ = ['parties.balances.get', 'parties.account.get', 'page.opening_ba
   const list = (t: string): string[] => [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const vorher = list(vor('src/core/bridge/command-registry.ts'));
   const jetzt = [...registry.ALLOWED_MUTATIONS];
-  ok(vorher.length === 80 && jetzt.length === 120 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6E_MUT, ...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT, ...OB_MUT]) && vorher.every((o) => jetzt.includes(o)),
+  ok(vorher.length === 80 && jetzt.length === 121 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6E_MUT, ...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT, ...OB_MUT, 'stock_adjustments.correct_initial']) && vorher.every((o) => jetzt.includes(o)),
     `REGISTRY Buchungen 80 → 88 (R6E) → 102 (R6F) → 103 (R7A) → 110 (MEDIA-INBOX + PARTNER-ITEMS) → 114 (BULK METAL V1) → 116 (STOCK CORRECTION): GENAU die acht R6E- und vierzehn R6F-Namen + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1, in dieser Reihenfolge, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
   const readsVor = catalogue(vor('src/core/bridge/store-read-ops.ts'));
@@ -117,10 +117,10 @@ const OB_READ = ['parties.balances.get', 'parties.account.get', 'page.opening_ba
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 152 && rJetzt.length === 203 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6E_MUT, ...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ]),
+  ok(rVor.length === 152 && rJetzt.length === 204 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6E_MUT, ...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial']),
     `REGISTRY Rust 152 → 160 (R6E) → 174 (R6F) → 175 (R7A) → 176 (PRE-G5) → 184 (MEDIA-INBOX, PARTNER-ITEMS, A5) → 192 (BULK METAL V1) → 195 (STOCK CORRECTION): GENAU diese acht und vierzehn + eins aus R7A (production.complete) + acht BULK METAL V1, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 203 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
+  ok(known.length === 204 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
   const soll: Record<string, string | null> = {
     'offers.create': null, 'offers.update': 'permission:offers.edit', 'offers.set_status': null, 'offers.convert_to_invoice': null,
     'invoices.set_butterfly': 'isAdmin', 'returns.cancel': 'isOwner', 'transfers.undo_convert': null, 'customers.log_message': null,

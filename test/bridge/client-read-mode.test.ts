@@ -254,7 +254,7 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
     + ',bulk_metals.write_off,bulk_metals.close_lot,bulk_metals.correct_weight,bulk_metals.reverse_adjustment'
     // STOCK CORRECTION
     + ',stock_adjustments.issue,stock_adjustments.cancel,stock_adjustments.add_old_stock'
-    + ',opening_balances.create,opening_balances.cancel,customers.settle',
+    + ',opening_balances.create,opening_balances.cancel,customers.settle,stock_adjustments.correct_initial',
     `READONLY vierundzwanzig namentlich freigegebene Mutationen (${ALLOWED_MUTATIONS.join(', ')})`);
   // Die Lesebefehle ziehen die ganze Datenschicht mit; hier zaehlt ihre Registrierung im Quelltext.
   const readSrc = code('src/core/bridge/read-commands.ts');
@@ -518,7 +518,7 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   const mutations = resolved.filter((o) => !probes.includes(o) && !reads.includes(o));
 
   // CENTRAL-UI-PARITY: dazu 47 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
-  ok(resolved.length === 203, `ALLOWLIST einhundertfünfundneunzig Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) insgesamt (${resolved.length})`);
+  ok(resolved.length === 204, `ALLOWLIST einhundertfünfundneunzig Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) insgesamt (${resolved.length})`);
   ok(probes.length === 1, `ALLOWLIST genau eine Probe (${probes.length})`);
   const storeReads = reads.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get', 'page.dashboard.get', 'page.invoice_list.get', 'page.order_list.get', 'page.customer_detail.get', 'page.order_detail.get', 'page.supplier_detail.get', 'page.product_detail.get', 'page.purchase_create.get', 'refs.numbers.get', 'metals.stock_by_karat.get', 'search.global.get', 'page.reconciliation.get', 'ledger.balances.get', 'finance.receivables.get', 'inventory.lot_aggregates.get', 'product.lots.get', 'product.lots.batch.get', 'expenses.credit_paid.get', 'inventory.session.get', 'inventory.checks.get', 'metals.spot_prices.get', 'debts.payments.get', 'suppliers.credits.get', 'page.invoice_print.get',
     // BULK METAL V1
@@ -532,7 +532,7 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
     + ',bulk_metals.write_off,bulk_metals.close_lot,bulk_metals.correct_weight,bulk_metals.reverse_adjustment'
     // STOCK CORRECTION
     + ',stock_adjustments.issue,stock_adjustments.cancel,stock_adjustments.add_old_stock'
-    + ',opening_balances.create,opening_balances.cancel,customers.settle',
+    + ',opening_balances.create,opening_balances.cancel,customers.settle,stock_adjustments.correct_initial',
     `ALLOWLIST und GENAU diese vierzig veraendernden (${mutations.join(', ') || 'keine'})`);
   // Loeschen steht auf KEINER Liste: es hat einen eigenen Referenz-Vertrag, und der ist von aussen
   // nicht durchdacht.
@@ -544,7 +544,7 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
     + ',page.bulk_metals.get,bulk_metals.lots_for_sale.get,bulk_metals.lot_detail.get,bulk_metals.allocation_preview.get'
     // STOCK CORRECTION
     + ',stock_adjustments.issue,stock_adjustments.cancel,stock_adjustments.add_old_stock,stock_adjustments.product.get,page.old_stock.get'
-    + ',opening_balances.create,opening_balances.cancel,customers.settle,parties.balances.get,parties.account.get,page.opening_balances.get',
+    + ',opening_balances.create,opening_balances.cancel,customers.settle,parties.balances.get,parties.account.get,page.opening_balances.get,stock_adjustments.correct_initial',
     `ALLOWLIST in dieser Reihenfolge (${resolved.join(',')})`);
   // Die Artikelsuche ist ein PARAMETER von `products.list` und bekommt keine eigene Operation.
   // Seit R2D gibt es GENAU EINE Suchoperation, und sie ist etwas anderes: die uebergreifende

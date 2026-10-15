@@ -43,6 +43,7 @@ import { belongsToConsignment } from '@/core/consignment/consignment-sale-link';
 import { isBulkMetalProduct } from '@/core/bulk/bulk-product';
 import { businessDateIssue, businessTimestamp } from '@/core/utils/business-date';
 import { payloadHash } from '@/core/bulk/bulk-math';
+import { PRODUCT_LINK_TABLES } from '@/stores/productStore';
 
 export class StockAdjustmentRejected extends Error {
   readonly code: string;
@@ -213,8 +214,11 @@ export interface StockIssueInput {
 export interface StockAdjustmentResult {
   adjustmentId: string; adjustmentNumber: string; productId: string; quantity: number;
   qtyBefore: number; qtyAfter: number; accounting: StockAdjustmentAccounting; value: number; status: 'POSTED' | 'CANCELLED';
-  /** ISSUE = Abgang; RECEIPT = zusätzlich erfasster Altbestand (nur Menge, Eröffnung offen). */
-  direction: 'ISSUE' | 'RECEIPT';
+  /**
+   * ISSUE = Abgang; RECEIPT = zusätzlich erfasster Altbestand (nur Menge, Eröffnung offen); CORRECTION = die erste Mengeneingabe
+   * eines unberührten Artikels war falsch („Correct initial qty") — keine Bewegung, keine Buchung.
+   */
+  direction: 'ISSUE' | 'RECEIPT' | 'CORRECTION';
   /** Abgang ohne Los: Einkaufspreis als Hinweis; Altbestand: der historische Einstand je Stück. */
   unitCostHint: number | null;
   reasonCategory: string;
@@ -232,7 +236,7 @@ function resultOf(row: Record<string, unknown>): StockAdjustmentResult {
     quantity: Number(row.quantity), qtyBefore: Number(row.qty_before), qtyAfter: Number(row.qty_after),
     accounting: String(row.accounting) as StockAdjustmentAccounting, value: Number(row.value_booked) || 0,
     status: String(row.status) as 'POSTED' | 'CANCELLED',
-    direction: String(row.direction) === 'RECEIPT' ? 'RECEIPT' : 'ISSUE',
+    direction: String(row.direction) === 'RECEIPT' ? 'RECEIPT' : String(row.direction) === 'CORRECTION' ? 'CORRECTION' : 'ISSUE',
     unitCostHint: row.purchase_price_hint === null || row.purchase_price_hint === undefined ? null : Number(row.purchase_price_hint),
     reasonCategory: String(row.reason_category ?? ''),
     businessDate: String(row.business_date ?? ''),
@@ -338,6 +342,11 @@ export function cancelStockAdjustmentInHouse(input: StockAdjustmentCancelInput, 
   const row = query('SELECT * FROM stock_adjustments WHERE id = ? AND branch_id = ?', [input.adjustmentId, ctx.branchId])[0];
   if (!row) throw nein('ADJUSTMENT_NOT_FOUND', 'no such stock adjustment in this branch');
   if (String(row.status) === 'CANCELLED') throw nein('ALREADY_CANCELLED', `stock adjustment ${String(row.adjustment_number)} is already cancelled`);
+  // INITIAL QTY — eine Eingabekorrektur ist kein Bestandsvorgang: sie wird nicht storniert, sondern (solange der Artikel
+  // unberührt ist) noch einmal korrigiert.
+  if (String(row.direction) === 'CORRECTION') {
+    throw nein('CORRECTION_NOT_CANCELLABLE', `${String(row.adjustment_number)} corrected the first quantity entry — correct the quantity again instead`);
+  }
   const productId = String(row.product_id);
   const qty = Number(row.quantity);
   const p = query('SELECT quantity, stock_status FROM products WHERE id = ?', [productId])[0];
@@ -524,12 +533,155 @@ export function addOldStockInHouse(input: OldStockReceiptInput, ctx: AdjustmentC
   return resultOf(query('SELECT * FROM stock_adjustments WHERE id = ?', [id])[0]);
 }
 
+// ── Anfangsmenge korrigieren („Correct initial qty") ─────────────────────────
+//
+// Owner-Entscheidung (15.10.2026): Eine falsch ERFASSTE Menge (5 eingegeben, 3 Stück da) wird korrigiert, ohne einen
+// künstlichen Lagerverlust oder Altbestands-Zugang zu erzeugen. Das ist keine Bestandsbewegung, sondern die Berichtigung
+// der ersten Eingabe — deshalb nur an einem nachweislich UNBERÜHRTEN Artikel (fail-closed):
+//   • dieselben Ausschlüsse wie jede Korrektur (eigene Stückware, frei, nicht bei Agent/Reparatur/Auftrag/Partner, kein
+//     Edelmetall) — `correctableOwnItem`;
+//   • keine Lose, keine Einkaufszeile, kein gebuchter Lagerwert, keine INVENTORY-Buchung unbekannter Herkunft
+//     (`lotlessValueIssue`) — der Wert des Artikels ist noch nirgends gebucht;
+//   • kein einziger Beleg am Artikel: Rechnung (auch Entwurf/storniert), Angebot, Auftrag, Kommission, Agent, Reparatur,
+//     Retoure, Produktion, Beteiligung, Bestandskorrektur (Abgang oder Altbestand, auch storniert) — Liste wie die
+//     Löschsperre (`PRODUCT_LINK_TABLES`); nur frühere Eingabekorrekturen desselben Artikels zählen nicht;
+//   • keine protokollierte Mengenänderung außerhalb dieser Korrektur (Zusammenführen, frühere freie Bearbeitung).
+// Gebucht wird nichts (kein Geld, kein Einkauf, keine VAT, kein Lagerverlust); der Beleg (Richtung CORRECTION) hält Menge
+// vorher/nachher, Grund, Zeit und Owner fest. Die Eröffnungsvorschau rechnet danach mit der berichtigten Menge (sie liest
+// die Artikelmenge; CORRECTION ist dort weder Zugang noch Abgang). Ein Storno gibt es nicht — nur eine weitere Korrektur.
+
+export const INITIAL_QTY_REASON = 'INITIAL_QTY';
+
+export interface InitialQtyPlan {
+  productId: string;
+  qtyBefore: number;
+  qtyAfter: number;
+  delta: number;
+  statusBefore: string;
+  itemCost: number | null;
+  /** Frühere Eingabekorrekturen dieses Artikels (dürfen sein). */
+  earlierCorrections: string[];
+}
+
+/** Hat dieser Artikel IRGENDEINE Vorgeschichte außer seiner Erfassung (und früheren Eingabekorrekturen)? null = nein. */
+function initialQtyHistoryIssue(productId: string): string | null {
+  const gefunden: string[] = [];
+  for (const t of PRODUCT_LINK_TABLES) {
+    const n = t.table === 'stock_adjustments'
+      ? Number(query("SELECT COUNT(*) AS n FROM stock_adjustments WHERE product_id = ? AND direction != 'CORRECTION'", [productId])[0]?.n) || 0
+      : Number(query(`SELECT COUNT(*) AS n FROM ${t.table} WHERE product_id = ?`, [productId])[0]?.n) || 0;
+    if (n > 0 && !gefunden.includes(t.label)) gefunden.push(t.label);
+  }
+  if (query('SELECT 1 FROM item_participations WHERE product_id = ? LIMIT 1', [productId]).length > 0) gefunden.push('Participation');
+  if (gefunden.length > 0) return `the item already has documents (${gefunden.join(', ')}) — its quantity is no longer just the first entry`;
+  // Protokollierte Mengenänderungen, die nicht aus dieser Korrektur stammen (Zusammenführen, freie Bearbeitung vor F9).
+  const fremd = query(
+    `SELECT COUNT(*) AS n FROM audit_log WHERE entity_type = 'products' AND entity_id = ? AND field_name = 'quantity'
+       AND action_type IN ('UPDATE', 'MERGE') AND COALESCE(new_value, '') NOT LIKE '%"initialQtyCorrection":true%'`,
+    [productId],
+  );
+  if ((Number(fremd[0]?.n) || 0) > 0) return 'the quantity of this item was changed before (merge or an earlier edit) — its history is not just the first entry';
+  return null;
+}
+
+export function planInitialQtyCorrection(productId: string, newQuantity: unknown, branchId: string): InitialQtyPlan {
+  if (typeof newQuantity !== 'number' || !Number.isInteger(newQuantity) || newQuantity < 1 || newQuantity > MAX_OLD_STOCK_PIECES) {
+    throw nein('QUANTITY_INVALID', 'the correct quantity is a whole number of pieces, at least 1 (an item that does not exist is deleted, not corrected)');
+  }
+  const { p, statusBefore } = correctableOwnItem(productId, branchId);
+  const qtyBefore = Number(p.quantity);
+  if (p.quantity === null || p.quantity === undefined || !Number.isInteger(qtyBefore) || qtyBefore < 1) {
+    throw nein('STOCK_INCONSISTENT', 'the quantity of the item is not a whole number of pieces');
+  }
+  if (newQuantity === qtyBefore) throw nein('QUANTITY_UNCHANGED', `the item already shows ${qtyBefore}`);
+  if (query('SELECT 1 FROM stock_lots WHERE product_id = ? LIMIT 1', [productId]).length > 0) {
+    throw nein('BLOCKED_HAS_LOTS', 'the item has lots (purchase, production or return) — its quantity follows those documents');
+  }
+  const history = initialQtyHistoryIssue(productId);
+  if (history) throw nein('HAS_HISTORY', `${history}; use Add old stock or Remove from stock instead`);
+  const value = lotlessValueIssue(productId);
+  if (value) throw nein('VALUE_NOT_PROVEN', `${value} — the first quantity entry cannot be corrected without accounting rules`);
+  const earlierCorrections = query(
+    "SELECT adjustment_number FROM stock_adjustments WHERE product_id = ? AND direction = 'CORRECTION' ORDER BY created_at", [productId],
+  ).map((r) => String(r.adjustment_number));
+  const itemCost = p.purchase_price === null || p.purchase_price === undefined ? null : Number(p.purchase_price);
+  return { productId, qtyBefore, qtyAfter: newQuantity, delta: newQuantity - qtyBefore, statusBefore, itemCost, earlierCorrections };
+}
+
+export interface InitialQtyInput {
+  actionId: string; productId: string; newQuantity: number; expectedQuantity: number; reason: string;
+}
+
+/** In der Transaktion des Aufrufers: die erste Mengeneingabe berichtigen — Menge, Beleg, Protokoll, Sync; KEINE Buchung. */
+export function correctInitialQtyInHouse(input: InitialQtyInput, ctx: AdjustmentCtx): StockAdjustmentResult {
+  assertOwner(ctx);
+  const actionId = typeof input.actionId === 'string' ? input.actionId.trim() : '';
+  if (actionId.length < 8 || actionId.length > 100) throw nein('ACTION_ID_REQUIRED', 'a stable action id is required');
+  const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
+  if (!reason) throw nein('REASON_REQUIRED', 'please describe what was entered wrongly');
+  if (reason.length > 500) throw nein('INVALID_INPUT', 'the reason is longer than 500 characters');
+  const hash = payloadHash({ op: 'initial_qty_correction', productId: input.productId, newQuantity: input.newQuantity, expectedQuantity: input.expectedQuantity, reason });
+
+  const schon = query('SELECT * FROM stock_adjustments WHERE branch_id = ? AND action_id = ?', [ctx.branchId, actionId])[0];
+  if (schon) {
+    if (String(schon.payload_hash) !== hash) throw nein('ACTION_ID_CONFLICT', 'this action id was already used for a different correction');
+    return resultOf(schon);
+  }
+
+  const plan = planInitialQtyCorrection(input.productId, input.newQuantity, ctx.branchId);
+  // Der Stand, den die Maske gesehen hat — sonst korrigierte ein veraltetes Fenster (PC2) eine inzwischen andere Menge.
+  if (input.expectedQuantity !== plan.qtyBefore) {
+    throw nein('STOCK_CHANGED', `the quantity changed meanwhile (you saw ${input.expectedQuantity}, it is now ${plan.qtyBefore}) — reload`);
+  }
+
+  const buchung = watchLedgerPosts('initial quantity correction');
+  const abgleich = watchSyncTracks('initial quantity correction');
+  const db = getDatabase();
+  const id = uuid();
+  const number = getNextDocumentNumber('ADJ');
+  const businessDate = ctx.now.slice(0, 10);
+  db.run('UPDATE products SET quantity = ?, updated_at = ? WHERE id = ? AND quantity = ?', [plan.qtyAfter, ctx.now, input.productId, plan.qtyBefore]);
+  if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) throw nein('STOCK_CHANGED', 'the item changed meanwhile');
+  trackChange('products', input.productId, 'update', {});
+  db.run(
+    `INSERT INTO stock_adjustments (id, branch_id, adjustment_number, product_id, direction, quantity, qty_before, qty_after,
+       status_before, status_after, accounting, value_booked, purchase_price_hint, lots_json, reason_category, reason,
+       business_date, status, action_id, payload_hash, created_by, created_at, revision)
+     VALUES (?, ?, ?, ?, 'CORRECTION', ?, ?, ?, ?, ?, 'ACCOUNTING_RECONCILIATION_PENDING', 0, ?, '[]', ?, ?, ?, 'POSTED', ?, ?, ?, ?, 0)`,
+    [id, ctx.branchId, number, input.productId, Math.abs(plan.delta), plan.qtyBefore, plan.qtyAfter, plan.statusBefore, plan.statusBefore,
+      plan.itemCost, INITIAL_QTY_REASON, reason, businessDate, actionId, hash, ctx.userId || null, ctx.now],
+  );
+  trackChange('stock_adjustments', id, 'insert', {});
+
+  const actor = { userId: ctx.userId, branchId: ctx.branchId };
+  logAuditOrThrow({
+    module: 'Stock', entityType: 'stock_adjustments', entityId: id, action: 'CREATE',
+    newValue: { adjustmentNumber: number, productId: input.productId, direction: 'CORRECTION', qtyBefore: plan.qtyBefore, qtyAfter: plan.qtyAfter,
+      reasonCategory: INITIAL_QTY_REASON, reason, booking: 'none (input correction)', earlierCorrections: plan.earlierCorrections, initialQtyCorrection: true },
+    actor,
+  });
+  logAuditOrThrow({
+    module: 'Product', entityType: 'products', entityId: input.productId, action: 'UPDATE', field: 'quantity',
+    oldValue: plan.qtyBefore, newValue: { quantity: plan.qtyAfter, adjustmentNumber: number, initialQtyCorrection: true }, actor,
+  });
+  buchung();
+  abgleich();
+  return resultOf(query('SELECT * FROM stock_adjustments WHERE id = ?', [id])[0]);
+}
+
+export interface InitialQtyPreview { plan: InitialQtyPlan | null; issue: string | null; code: string | null }
+
+export function initialQtyPreviewFor(ctx: { branchId: string }, productId: string, newQuantity: unknown): InitialQtyPreview {
+  try { return { plan: planInitialQtyCorrection(productId, newQuantity, ctx.branchId), issue: null, code: null }; }
+  catch (e) { return { plan: null, issue: e instanceof Error ? e.message : String(e), code: (e as { code?: string }).code ?? null }; }
+}
+
 // ── Lesen (Karte am Primary und, als Fernauskunft `stock_adjustments.product.get`, am PC2) ──────────
 // Die Filiale kommt aus dem Kontext (am PC2: aus dem geprüften Absender), nie aus dem Rumpf.
 
 export interface StockIssuePreview { plan: StockIssuePlan | null; issue: string | null; code: string | null }
 export interface OldStockReceiptPreview { plan: OldStockReceiptPlan | null; issue: string | null; code: string | null }
-export interface StockCorrectionsRead { docs: StockAdjustmentResult[]; issuePreview: StockIssuePreview | null; receiptPreview: OldStockReceiptPreview | null }
+export interface StockCorrectionsRead { docs: StockAdjustmentResult[]; issuePreview: StockIssuePreview | null; receiptPreview: OldStockReceiptPreview | null; correctionPreview?: InitialQtyPreview | null }
 
 export function oldStockReceiptPreviewFor(ctx: { branchId: string }, productId: string, quantity: unknown, unitCost: unknown): OldStockReceiptPreview {
   try { return { plan: planOldStockReceipt(productId, quantity, unitCost, ctx.branchId), issue: null, code: null }; }
@@ -549,13 +701,14 @@ export function stockIssuePreviewFor(ctx: { branchId: string }, productId: strin
 /** Alles, was die Karte „Stock corrections" zeichnet: die Belege und — wenn eine Menge genannt ist — die Vorschau. */
 export function stockCorrectionsFor(
   ctx: { branchId: string },
-  input: { productId: string; issueQuantity?: unknown; receiptQuantity?: unknown; receiptUnitCost?: unknown },
+  input: { productId: string; issueQuantity?: unknown; receiptQuantity?: unknown; receiptUnitCost?: unknown; correctionQuantity?: unknown },
 ): StockCorrectionsRead {
   const leer = (v: unknown): boolean => v === undefined || v === null;
   return {
     docs: stockAdjustmentsFor(ctx, input.productId),
     issuePreview: leer(input.issueQuantity) ? null : stockIssuePreviewFor(ctx, input.productId, input.issueQuantity),
     receiptPreview: leer(input.receiptQuantity) ? null : oldStockReceiptPreviewFor(ctx, input.productId, input.receiptQuantity, input.receiptUnitCost),
+    correctionPreview: leer(input.correctionQuantity) ? null : initialQtyPreviewFor(ctx, input.productId, input.correctionQuantity),
   };
 }
 
@@ -589,4 +742,8 @@ export function cancelStockAdjustmentOnPrimary(input: StockAdjustmentCancelInput
 export function addOldStockOnPrimary(input: OldStockReceiptInput, reload: () => void): Promise<StockAdjustmentResult> {
   if (isClientMode()) return nurPrimary();
   return runOnPrimary(() => addOldStockInHouse(input, localCtx()), reload);
+}
+export function correctInitialQtyOnPrimary(input: InitialQtyInput, reload: () => void): Promise<StockAdjustmentResult> {
+  if (isClientMode()) return nurPrimary();
+  return runOnPrimary(() => correctInitialQtyInHouse(input, localCtx()), reload);
 }

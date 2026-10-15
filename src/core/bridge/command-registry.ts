@@ -177,6 +177,8 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   'opening_balances.create', 'opening_balances.cancel',
   // SETTLEMENT — „Receive Payment" über offene Rechnungen eines Kunden (der vorhandene Rechnungszahlungsweg, eine Transaktion).
   'customers.settle',
+  // INITIAL QTY — die erste Mengeneingabe eines unberührten Artikels berichtigen (nur Owner; Beleg, keine Buchung).
+  'stock_adjustments.correct_initial',
 ];
 
 export interface CommandSpec {

@@ -2393,12 +2393,14 @@ function runMigrations(database: Database): void {
     // OLD STOCK — Richtung RECEIPT: zusätzlich erfasster Altbestand („Add Old Stock"), nur Menge, immer
     // ACCOUNTING_RECONCILIATION_PENDING, historischer Einstand je Stück in purchase_price_hint. Ältere Tabellen mit
     // der Regel „nur ISSUE" baut `stock-adjustment-schema.ts` einmal um.
+    // INITIAL QTY — Richtung CORRECTION: die erste Mengeneingabe eines unberührten Artikels berichtigt („Correct initial qty"),
+    // keine Bewegung, keine Buchung; Tabellen mit der Regel ISSUE/RECEIPT baut dieselbe Datei einmal um.
     `CREATE TABLE IF NOT EXISTS stock_adjustments (
       id TEXT PRIMARY KEY,
       branch_id TEXT NOT NULL,
       adjustment_number TEXT NOT NULL,
       product_id TEXT NOT NULL,
-      direction TEXT NOT NULL CHECK (direction IN ('ISSUE','RECEIPT')),
+      direction TEXT NOT NULL CHECK (direction IN ('ISSUE','RECEIPT','CORRECTION')),
       quantity INTEGER NOT NULL CHECK (quantity > 0),
       qty_before REAL NOT NULL,
       qty_after REAL NOT NULL,

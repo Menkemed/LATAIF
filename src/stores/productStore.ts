@@ -54,7 +54,8 @@ import { PRODUCT_LIFECYCLE_LOCKED, lifecycleEditRefusal } from '@/core/products/
 // Wichtig: stock_lots zaehlt mit, blockt aber nie ein sauber manuell angelegtes
 // Produkt — Lots entstehen ausschliesslich aus Purchase/Consignment/Return.
 // production_inputs + production_outputs teilen sich das Label "Production".
-const PRODUCT_LINK_TABLES: { table: string; label: string }[] = [
+// INITIAL QTY — dieselbe Liste entscheidet auch, ob die erste Mengeneingabe eines Artikels noch berichtigt werden darf.
+export const PRODUCT_LINK_TABLES: { table: string; label: string }[] = [
   { table: 'invoice_lines', label: 'Invoice' },
   { table: 'purchase_lines', label: 'Purchase' },
   { table: 'offer_lines', label: 'Offer' },

@@ -546,7 +546,7 @@ const ORDER = { customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, un
   // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
   // STOCK CORRECTION (+3) blieb hier seit Phase 1 auf 114 stehen; OPENING BALANCES & SETTLEMENT (+3) → 120.
-  ok(known.length === 60 && reads.length === 19 && ALLOWED_MUTATIONS.length === 120,
+  ok(known.length === 60 && reads.length === 19 && ALLOWED_MUTATIONS.length === 121,
     `SCOPE 1 Probe + 19 Reads + 40 Mutationen = 60 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
   ok(!ALLOWED_MUTATIONS.includes('purchases.update'),
     'SCOPE der Einkauf bleibt Create-only — es gibt keinen lokalen Edit-Pfad');

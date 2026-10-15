@@ -296,7 +296,7 @@ const valueOf = (o: unknown): Record<string, unknown> => ((o as { value?: Record
     && perms.roleMayRunOp('ADMIN', 'stock_adjustments.issue') && !perms.roleMayRunOp('MANAGER', 'stock_adjustments.issue')
     && !perms.roleMayRunOp('', 'stock_adjustments.cancel') && !perms.roleMayRunOp('SALES', 'stock_adjustments.cancel'),
     'D1 Fernbefehle verlangen den Owner (ADMIN); Manager, Verkauf und eine fehlende Rolle dürfen nicht');
-  ok(registry.ALLOWED_MUTATIONS.at(-6) === 'stock_adjustments.issue' && registry.ALLOWED_MUTATIONS.at(-5) === 'stock_adjustments.cancel'
+  ok(registry.ALLOWED_MUTATIONS.at(-7) === 'stock_adjustments.issue' && registry.ALLOWED_MUTATIONS.at(-6) === 'stock_adjustments.cancel'
     && readOps.STORE_READ_OPS.includes('stock_adjustments.product.get') && perms.isOperationCovered('stock_adjustments.product.get')
     && /OP_STOCK_ISSUE,\s*OP_STOCK_CANCEL,\s*OP_OLD_STOCK_ADD,\s*OP_STOCK_PRODUCT_GET,\s*OP_PAGE_OLD_STOCK_GET,/.test(src('src-tauri/src/bridge.rs'))
     && /import '\.\/stock-adjustment-commands';/.test(src('src/core/bridge/bridge-listener.ts')),
@@ -394,7 +394,7 @@ const valueOf = (o: unknown): Record<string, unknown> => ((o as { value?: Record
   for (const h of ['issueStockInHouse', 'cancelStockAdjustmentInHouse', 'addOldStockInHouse']) {
     if (!new RegExp(`if \\(isClientMode\\(\\)\\) return nurPrimary\\(\\);\\s*return runOnPrimary\\(\\(\\) => ${h}`).test(sa2)) fehler.push(`${h}: lokaler Anschluss ohne PC2-Sperre`);
   }
-  ok(fehler.length === 0 && rustNames.slice(-11, -6).join(',') === [...MUT, ...READ].join(','),
+  ok(fehler.length === 0 && rustNames.slice(-12, -7).join(',') === [...MUT, ...READ].join(','),
     `D10 drei Buchungen und zwei Auskünfte überall gleich (Freigabe, Owner-Recht, Anmeldung, Rust); lokale Anschlüsse sperren am PC2 (${fehler.join('; ') || 'konsistent'})`);
 }
 
@@ -627,7 +627,7 @@ const balance = (db: Db, acc: string): number => r3(n(db, "SELECT COALESCE(SUM(C
   const body = { actionId: 'pc2-old-1-xxxxxx', productId: 'r2', quantity: 2, expectedQuantity: 1, unitCost: 500, reason: 'old stock from the shop safe' };
   const m = await cmdS.runStockAction(sa!.addOldStockInHouse as never, cmdS.OLD_STOCK_KEYS, d, ident('21', 'stock_adjustments.add_old_stock'), 'MANAGER', body);
   ok(m.kind === 'rejected' && (m as { code: string }).code === 'PERMISSION_DENIED' && qtyOf(db, 'r2') === 1
-    && perms.permissionForOp('stock_adjustments.add_old_stock')?.kind === 'isOwner' && registry.ALLOWED_MUTATIONS.at(-4) === 'stock_adjustments.add_old_stock',
+    && perms.permissionForOp('stock_adjustments.add_old_stock')?.kind === 'isOwner' && registry.ALLOWED_MUTATIONS.at(-5) === 'stock_adjustments.add_old_stock',
     'A7 Fernbefehl verlangt den Owner (Recht und Hausfolge), steht namentlich am Ende der Liste');
   const ok1 = await cmdS.runStockAction(sa!.addOldStockInHouse as never, cmdS.OLD_STOCK_KEYS, d, ident('22', 'stock_adjustments.add_old_stock'), 'ADMIN', body);
   const ok2 = await cmdS.runStockAction(sa!.addOldStockInHouse as never, cmdS.OLD_STOCK_KEYS, d, ident('22', 'stock_adjustments.add_old_stock'), 'ADMIN', body);
@@ -677,7 +677,7 @@ const balance = (db: Db, acc: string): number => r3(n(db, "SELECT COALESCE(SUM(C
 // A9 — die Belegtabelle einer älteren Entwicklungsdatenbank (nur ISSUE erlaubt) wird einmal verlustfrei umgebaut.
 {
   const alt = new SQL.Database() as unknown as Db;
-  const ddl = MIGRATIONS.find((m) => m.includes('CREATE TABLE IF NOT EXISTS stock_adjustments'))!.replace("CHECK (direction IN ('ISSUE','RECEIPT'))", "CHECK (direction IN ('ISSUE'))");
+  const ddl = MIGRATIONS.find((m) => m.includes('CREATE TABLE IF NOT EXISTS stock_adjustments'))!.replace("CHECK (direction IN ('ISSUE','RECEIPT','CORRECTION'))", "CHECK (direction IN ('ISSUE'))");
   alt.run(ddl);
   for (const ix of schema.STOCK_ADJUSTMENT_INDEXES) alt.run(ix);
   alt.run(`INSERT INTO stock_adjustments (id, branch_id, adjustment_number, product_id, direction, quantity, qty_before, qty_after, accounting, reason_category, reason, business_date, action_id, payload_hash, created_at)
