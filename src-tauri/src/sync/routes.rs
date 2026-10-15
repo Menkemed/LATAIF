@@ -2814,7 +2814,8 @@ mod legacy_push_tests {
         // cancellation, never deleted (54 → 55 insert, 37 → 38 update).
         // OPENING BALANCES: the opening position document opening_balance_items is inserted and updated by its
         // cancellation, never deleted (55 → 56 insert, 38 → 39 update).
-        assert_eq!((ins, upd, del), (56, 39, 38), "insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
+        // B1 OPENING ACCOUNTING: the opening document opening_account_items likewise (56 → 57 insert, 39 → 40 update).
+        assert_eq!((ins, upd, del), (57, 40, 38), "insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
     }
 
     // O6 — a mixed batch with one disallowed operation writes NOTHING (all-or-nothing).

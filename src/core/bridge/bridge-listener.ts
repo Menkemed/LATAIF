@@ -45,6 +45,8 @@ import './bulk-metal-commands';
 import './stock-adjustment-commands';
 // OPENING BALANCES & SETTLEMENT — Salden (S0), Eröffnungsposten (Owner), „Receive Payment" am Kunden.
 import './party-commands';
+// B1 OPENING ACCOUNTING — Eröffnungsbelege (Owner) und die Übersicht von Settings → Opening Balances.
+import './opening-accounting-commands';
 // CENTRAL-UI-PARITY R6E — das Angebot (anlegen, speichern, Zustand, Umwandlung über den Rechnungsweg).
 import './offer-commands';
 // R6E — Nachrichtenprotokoll am Kunden; das Butterfly-Kennzeichen der Rechnung.

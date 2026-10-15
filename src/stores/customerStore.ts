@@ -217,8 +217,9 @@ export const useCustomerStore = create<CustomerStore>((set, get) => ({
          (SELECT COUNT(*) FROM consignments   WHERE consignor_id = ?) AS consignments,
          (SELECT COUNT(*) FROM orders         WHERE customer_id = ?) AS orders,
          (SELECT COUNT(*) FROM repairs        WHERE customer_id = ?) AS repairs,
-         (SELECT COUNT(*) FROM opening_balance_items WHERE party_type = 'CUSTOMER' AND party_id = ?) AS "opening balances"`,
-      [id, id, id, id, id, id, id]
+         (SELECT COUNT(*) FROM opening_balance_items WHERE party_type = 'CUSTOMER' AND party_id = ?)
+           + (SELECT COUNT(*) FROM opening_account_items WHERE counterparty_type = 'CUSTOMER' AND counterparty_id = ?) AS "opening balances"`,
+      [id, id, id, id, id, id, id, id]
     );
     const r = refs[0] || {};
     // OPENING BALANCES S1 — ein Eröffnungsposten (auch storniert: Belegkette) hängt am Kunden.

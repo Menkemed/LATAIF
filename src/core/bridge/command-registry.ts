@@ -179,6 +179,8 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   'customers.settle',
   // INITIAL QTY — die erste Mengeneingabe eines unberührten Artikels berichtigen (nur Owner; Beleg, keine Buchung).
   'stock_adjustments.correct_initial',
+  // B1 OPENING ACCOUNTING — Eröffnungsbelege der übrigen Saldoarten erfassen/ersetzen und stornieren (nur Owner; keine Buchung).
+  'opening_accounts.create', 'opening_accounts.cancel',
 ];
 
 export interface CommandSpec {

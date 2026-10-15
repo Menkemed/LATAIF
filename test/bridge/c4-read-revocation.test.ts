@@ -111,6 +111,8 @@ await import('../../src/core/bridge/invoice-cancel-command.ts');
 await import('../../src/core/bridge/bulk-metal-commands.ts');
 await import('../../src/core/bridge/stock-adjustment-commands.ts');
 await import('../../src/core/bridge/party-commands.ts');
+// B1 OPENING ACCOUNTING — Eröffnungsbelege (Owner) und die Übersicht von Settings → Opening Balances.
+await import('../../src/core/bridge/opening-accounting-commands.ts');
 const posting =await import('../../src/core/ledger/posting.ts');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 const { useInvoiceStore } = await import('../../src/stores/invoiceStore.ts');
@@ -221,11 +223,11 @@ const ACT = (over: Record<string, unknown> = {}) => ({
 // ── 1) Alle 59 Operationen sind namentlich gegen Rechte geprüft ──────────
 {
   const known = knownCommands();
-  ok(known.length === 204, `COVER die Registrierung zaehlt 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${known.length})`);
+  ok(known.length === 207, `COVER die Registrierung zaehlt 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${known.length})`);
   const probes = known.filter((o) => o === 'bridge.probe');
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = known.filter((o) => !probes.includes(o) && !reads.includes(o));
-  ok(probes.length === 1 && reads.length === 82 && mutations.length === 121,
+  ok(probes.length === 1 && reads.length === 83 && mutations.length === 123,
     `COVER 1 Probe + 78 Auskuenfte (19 + 59 typisierte) + 116 Buchungen (${probes.length}/${reads.length}/${mutations.length})`);
 
   // JEDE Auskunft und JEDE Buchung ist bedacht. Die Probe braucht es nicht: sie liest nichts.
@@ -238,8 +240,8 @@ const ACT = (over: Record<string, unknown> = {}) => ({
   // und aus demselben Grund: der Primary bewacht seine Anzeige nirgends mit einem Recht.
   const storePerms = Object.keys(perms.READ_PERMISSIONS).filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get', 'page.dashboard.get', 'page.invoice_list.get', 'page.order_list.get', 'page.customer_detail.get', 'page.order_detail.get', 'page.supplier_detail.get', 'page.product_detail.get', 'page.purchase_create.get', 'refs.numbers.get', 'metals.stock_by_karat.get', 'search.global.get', 'page.reconciliation.get', 'ledger.balances.get', 'finance.receivables.get', 'inventory.lot_aggregates.get', 'product.lots.get', 'product.lots.batch.get', 'expenses.credit_paid.get', 'inventory.session.get', 'inventory.checks.get', 'metals.spot_prices.get', 'debts.payments.get', 'suppliers.credits.get', 'page.invoice_print.get',
     // BULK METAL V1
-    'page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bulk_metals.lot_detail.get', 'bulk_metals.allocation_preview.get', 'stock_adjustments.product.get', 'page.old_stock.get', 'parties.balances.get', 'parties.account.get', 'page.opening_balances.get'].includes(o));
-  ok(Object.keys(perms.READ_PERMISSIONS).length === 82 && storePerms.length === 63,
+    'page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bulk_metals.lot_detail.get', 'bulk_metals.allocation_preview.get', 'stock_adjustments.product.get', 'page.old_stock.get', 'parties.balances.get', 'parties.account.get', 'page.opening_balances.get', 'page.opening_accounting.get'].includes(o));
+  ok(Object.keys(perms.READ_PERMISSIONS).length === 83 && storePerms.length === 64,
     `COVER 19 Auskuenfte + 59 typisierte Auskuenfte stehen einzeln da (${Object.keys(perms.READ_PERMISSIONS).length}/${storePerms.length})`);
   for (const r of reads) ok(r in perms.READ_PERMISSIONS, `COVER ${r} ist als Auskunft bedacht`);
 

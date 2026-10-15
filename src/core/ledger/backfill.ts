@@ -33,6 +33,7 @@ import {
   postAgentTransferSold,
   postConsignmentPayout,
   postOpeningBalances,
+  LEGACY_OPENING_FROZEN,
   postOrderCancellationChoice,
   postGoldConversionCredit,
   hasLedgerEntries,
@@ -1080,8 +1081,9 @@ export function backfillConsignmentPayouts(branchId: string): BackfillResult {
 // ── Top-Level Orchestrator ────────────────────────────────────
 
 // ── M-12 Phase 1 — Opening-Balances (settings → Ledger) ──────
-// Idempotentes Seed-Posting des Geschaeftsstart-Bestands. postOpeningBalances
-// ist selbst guarded (hasLedgerEntries) → posted/skipped spiegelt das wider.
+// B1 OPENING ACCOUNTING — postOpeningBalances ist eingefroren: es bucht nichts mehr (übereinstimmend → skipped;
+// abweichend → LEGACY_OPENING_FROZEN, ebenfalls skipped mit Hinweis, nichts geändert). Der Stand am Stichtag wird
+// unter Settings → Opening Balances erfasst.
 export function backfillOpeningBalances(branchId: string): BackfillResult {
   const res = emptyResult('opening_balances');
   res.total = 1;
@@ -1089,8 +1091,13 @@ export function backfillOpeningBalances(branchId: string): BackfillResult {
     const posted = postOpeningBalances(branchId);
     if (posted) res.posted++; else res.skipped++;
   } catch (err) {
-    res.failed++;
-    res.errors.push(`opening: ${(err as Error).message}`);
+    if ((err as { code?: string }).code === LEGACY_OPENING_FROZEN) {
+      res.skipped++;
+      res.errors.push(`opening (skipped): ${(err as Error).message}`);
+    } else {
+      res.failed++;
+      res.errors.push(`opening: ${(err as Error).message}`);
+    }
   }
   return res;
 }

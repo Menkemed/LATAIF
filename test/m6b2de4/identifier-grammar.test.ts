@@ -74,8 +74,9 @@ for (const c of columns) check(isValidSyncIdentifier(c), `frontend column ${JSON
 // adjustment_number, cancel_reason, lots_json, purchase_price_hint, qty_after, qty_before, reason_category, status_after,
 // status_before, value_booked) — canonical.
 // OPENING BALANCES: +1 table `opening_balance_items` (synced) with 8 previously-unseen column identifiers — canonical.
-check(tables.size === 57, `frontend table count is 57 (got ${tables.size})`);
-check(columns.size === 241, `frontend distinct column count is 241 (got ${columns.size})`);
+// B1 OPENING ACCOUNTING: +1 table `opening_account_items` (synced) with 2 previously-unseen column identifiers (corrects_id, counterparty_name) — canonical.
+check(tables.size === 58, `frontend table count is 58 (got ${tables.size})`);
+check(columns.size === 243, `frontend distinct column count is 243 (got ${columns.size})`);
 
 console.log(
   `M6-B2DE4 identifier-grammar: ${pass}/${pass + fails.length} checks passed ` +

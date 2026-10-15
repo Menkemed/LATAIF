@@ -2463,6 +2463,40 @@ function runMigrations(database: Database): void {
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_opening_items_document ON opening_balance_items(branch_id, party_type, party_id, kind, reference_key) WHERE scope = 'DOCUMENT' AND status = 'RECORDED'`,
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_opening_items_remainder ON opening_balance_items(branch_id, party_type, party_id, kind) WHERE scope = 'REMAINDER' AND status = 'RECORDED'`,
     `CREATE INDEX IF NOT EXISTS idx_opening_items_party ON opening_balance_items(party_type, party_id)`,
+    // B1 OPENING ACCOUNTING — die übrigen Eröffnungssalden zum 15.10.2026 als Entwurfsbelege (OB-…): gezählter Stand von
+    // Kasse/Bank/Benefit (je Konto einer; Bank darf überzogen sein), alte Darlehen, sonstige Vermögenswerte und
+    // Verbindlichkeiten, VAT-Eröffnungssalden. accounting bleibt PENDING (keine Buchung); Korrektur = Storno des alten und
+    // neuer Beleg mit corrects_id in einer Transaktion. Synchronisiert (insert/update — gelöscht wird nie).
+    `CREATE TABLE IF NOT EXISTS opening_account_items (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      item_number TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('CASH_BALANCE','BANK_BALANCE','BENEFIT_BALANCE','LOAN_RECEIVABLE','LOAN_PAYABLE','OTHER_ASSET','OTHER_LIABILITY','VAT_PAYABLE','VAT_RECEIVABLE')),
+      amount REAL NOT NULL CHECK (kind = 'BANK_BALANCE' OR amount >= 0),
+      reference TEXT NOT NULL,
+      reference_key TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      counterparty_type TEXT CHECK (counterparty_type IS NULL OR counterparty_type IN ('CUSTOMER','SUPPLIER','OTHER')),
+      counterparty_id TEXT,
+      counterparty_name TEXT,
+      cutoff_date TEXT NOT NULL,
+      corrects_id TEXT,
+      status TEXT NOT NULL DEFAULT 'RECORDED' CHECK (status IN ('RECORDED','CANCELLED')),
+      accounting TEXT NOT NULL DEFAULT 'PENDING' CHECK (accounting IN ('PENDING','POSTED')),
+      action_id TEXT NOT NULL,
+      payload_hash TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      created_by TEXT,
+      cancelled_at TEXT,
+      cancelled_by TEXT,
+      cancel_reason TEXT,
+      revision INTEGER NOT NULL DEFAULT 0
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_opening_accounts_action ON opening_account_items(branch_id, action_id)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_opening_accounts_number ON opening_account_items(branch_id, item_number)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_opening_accounts_count ON opening_account_items(branch_id, kind) WHERE status = 'RECORDED' AND kind IN ('CASH_BALANCE','BANK_BALANCE','BENEFIT_BALANCE')`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_opening_accounts_reference ON opening_account_items(branch_id, kind, reference_key) WHERE status = 'RECORDED' AND kind NOT IN ('CASH_BALANCE','BANK_BALANCE','BENEFIT_BALANCE')`,
+    `CREATE INDEX IF NOT EXISTS idx_opening_accounts_counterparty ON opening_account_items(counterparty_type, counterparty_id)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

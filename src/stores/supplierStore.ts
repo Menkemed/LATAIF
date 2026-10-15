@@ -80,6 +80,8 @@ const SUPPLIER_LINK_TABLES: { table: string; column: string; label: string }[] =
   { table: 'order_lines',                 column: 'ordered_supplier_id',   label: 'order' },
   // OPENING BALANCES S1 — ein Eröffnungsposten (auch storniert: Belegkette) hängt am Lieferanten.
   { table: 'opening_balance_items',       column: 'party_id',              label: 'opening balance' },
+  // B1 OPENING ACCOUNTING — ein Eröffnungsbeleg (Darlehen, sonstiger Posten) nennt den Lieferanten als Gegenpartei.
+  { table: 'opening_account_items',       column: 'counterparty_id',       label: 'opening balance' },
 ];
 
 /**

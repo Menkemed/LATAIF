@@ -63,6 +63,8 @@ const ALL_ACCOUNTS: LedgerAccount[] = [
   'TAX_PAID', 'INTERNAL_TRANSFER',
   'CANCELLATION_FEE_INCOME',
   'PARTNER_ITEM_BALANCE', 'PARTNER_ITEM_PROFIT_SHARE',
+  // B1 OPENING ACCOUNTING — das Eröffnungskonto (Settings-Eröffnung vom 01.01.2000) fehlte in dieser Liste.
+  'OPENING_BALANCE_EQUITY',
 ];
 
 const fmt = (n: number) => n.toFixed(3);

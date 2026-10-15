@@ -457,7 +457,9 @@ function obState(db: Db): string {
     const p = 'src/' + rel.replace(/\\/g, '/');
     if (/\bopening_balance_items\b/.test(src(p).replace(/\/\/.*$/gm, ''))) leser.add(p);
   }
-  ok(S([...leser].sort()) === S(['src/core/db/database.ts', 'src/core/parties/opening-balances.ts', 'src/stores/customerStore.ts', 'src/stores/supplierStore.ts']),
+  // B1 OPENING ACCOUNTING — die Eröffnungsübersicht liest die Posten auch, aber nur als ungebuchte Entwürfe (getrennt vom
+  // gebuchten Saldo; test/opening-accounting): weiterhin kein Saldo, kein Zahlungsweg, kein Bericht.
+  ok(S([...leser].sort()) === S(['src/core/accounting/opening-accounting.ts', 'src/core/db/database.ts', 'src/core/parties/opening-balances.ts', 'src/stores/customerStore.ts', 'src/stores/supplierStore.ts']),
     `G1-1 die Tabelle lesen nur: Schema, das Eröffnungsmodul, die Löschsperren von Kunde/Lieferant — kein Saldo, kein Zahlungsweg, kein Bericht (${S([...leser].sort())})`);
   const obCode = src('src/core/parties/opening-balances.ts').replace(/\/\/.*$/gm, '');
   ok(!/INSERT INTO (ledger_entries|payments|purchase_payments|expense_payments|customer_credits|supplier_credits|invoices|purchases|expenses|debts)\b/.test(obCode)
@@ -759,7 +761,7 @@ function obState(db: Db): string {
     if (!known.includes(op)) fehler.push(`${op}: nicht angemeldet`);
     if (!rustNames.includes(op)) fehler.push(`${op}: Rust kennt es nicht`);
   }
-  ok(fehler.length === 0 && rustNames.slice(-7, -1).join(',') === [...MUT, ...READ].join(',') && registry.ALLOWED_MUTATIONS.slice(-4, -1).join(',') === MUT.join(','),
+  ok(fehler.length === 0 && rustNames.slice(-10, -4).join(',') === [...MUT, ...READ].join(',') && registry.ALLOWED_MUTATIONS.slice(-6, -3).join(',') === MUT.join(','),
     `N1 drei Buchungen und drei Auskünfte überall gleich (Freigabe, Recht, Anmeldung, Katalog, Rust) (${fehler.join('; ') || 'konsistent'})`);
   const manifest = JSON.parse(src('src/core/sync/sync-business-schema.json')) as { tables: Record<string, { allowed_operations: string[]; allowed_fields: string[] }> };
   const t = manifest.tables.opening_balance_items;

@@ -62,7 +62,9 @@ for (const m of ['read-commands', 'invoice-command', 'customer-commands', 'produ
   // BULK METAL V1 — vier manuelle Lot-Aktionen und vier Lesebefehle gehören zum ausgelieferten Zustand.
   'bulk-metal-commands',
   // STOCK CORRECTION — Abgang und Storno (Owner) vom zweiten Rechner, die Karte am Artikel.
-  'stock-adjustment-commands', 'party-commands']) {
+  'stock-adjustment-commands', 'party-commands',
+  // B1 OPENING ACCOUNTING — Eröffnungsbelege (Owner) und die Übersicht von Settings → Opening Balances.
+  'opening-accounting-commands']) {
   await import(`../../src/core/bridge/${m}.ts`);
 }
 const perms = await import('../../src/core/bridge/command-permissions.ts');
@@ -109,10 +111,10 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   const list = (t: string): string[] => [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const vorher = list(vor('src/core/bridge/command-registry.ts'));
   const jetzt = [...registry.ALLOWED_MUTATIONS];
-  ok(vorher.length === 88 && jetzt.length === 121 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT, ...OB_MUT, 'stock_adjustments.correct_initial']) && vorher.every((o) => jetzt.includes(o)),
+  ok(vorher.length === 88 && jetzt.length === 123 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT, ...OB_MUT, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel']) && vorher.every((o) => jetzt.includes(o)),
     `REGISTRY Buchungen 88 → 102 (R6F) → 103 (R7A) → 110 (MEDIA-INBOX + PARTNER-ITEMS) → 114 (BULK METAL V1) → 116 (STOCK CORRECTION): GENAU die vierzehn R6F-Namen + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1, in dieser Reihenfolge, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
-  ok(S([...readOps.STORE_READ_OPS]) === S([...catalogue(vor('src/core/bridge/store-read-ops.ts')), 'page.invoice_print.get', ...BULK_READ, ...STOCK_READ, ...OB_READ]),
+  ok(S([...readOps.STORE_READ_OPS]) === S([...catalogue(vor('src/core/bridge/store-read-ops.ts')), 'page.invoice_print.get', ...BULK_READ, ...STOCK_READ, ...OB_READ, 'page.opening_accounting.get']),
     'REGISTRY Auskünfte unverändert bis auf die A5-Druckauskunft und die vier BULK METAL V1 — die Bildkennungen kommen schon über products.get, die Inbox über store.purchases.get');
   const rustOps = (t: string): string[] => {
     const l = /pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(t)?.[1] ?? '';
@@ -120,10 +122,10 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 160 && rJetzt.length === 204 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial']),
+  ok(rVor.length === 160 && rJetzt.length === 207 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'page.opening_accounting.get']),
     `REGISTRY Rust 160 → 174 (R6F) → 175 (R7A) → 176 (PRE-G5) → 184 (MEDIA-INBOX, PARTNER-ITEMS, A5) → 192 (BULK METAL V1) → 195 (STOCK CORRECTION): GENAU diese vierzehn + eins aus R7A (production.complete) + acht BULK METAL V1, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 204 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
+  ok(known.length === 207 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
   for (const op of R6F_MUT) {
     const rule = (perms.OPERATION_PERMISSIONS as Record<string, { kind?: string } | null>)[op];
     const soll = ADMIN_OPS.includes(op) ? 'isAdmin' : null;

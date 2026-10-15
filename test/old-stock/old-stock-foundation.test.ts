@@ -266,7 +266,12 @@ const RCTX = { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test
   db.run("UPDATE products SET paid_from = 'cash' WHERE id = 'alt'");
   db.run("DELETE FROM settings WHERE branch_id = 'branch-main' AND key = 'finance.opening_cash'");
   insert(db, 'settings', { id: 'set-oc', branch_id: 'branch-main', key: 'finance.opening_cash', value: '1000' });
-  imHaus(() => posting.postOpeningBalances('branch-main', 'user-test'));
+  // B1 OPENING ACCOUNTING — postOpeningBalances bucht nicht mehr (eingefroren); die Eröffnung steht so im Hauptbuch,
+  // wie ein früherer Stand sie gebucht hat (01.01.2000, Quelle OPENING_BALANCE).
+  imHaus(() => posting.postEntries([
+    { account: 'CASH', direction: 'DEBIT', amount: 1000, metadata: { kind: 'opening_balance' } },
+    { account: 'OPENING_BALANCE_EQUITY', direction: 'CREDIT', amount: 1000, metadata: { kind: 'opening_balance' } },
+  ], { occurredAt: '2000-01-01T00:00:00.000Z', sourceModule: 'OPENING_BALANCE', sourceId: 'opening:branch-main', branchId: 'branch-main', userId: 'user-test' }));
   reload();
   const f = analytics.financeFor(RCTX) as Record<string, number> | null;
   ok(!!f && !('productEkCash' in f) && !('productEkBank' in f), 'C1 die Finanzsicht kennt keinen „Product EK"-Abfluss mehr');
@@ -296,7 +301,7 @@ const valueOf = (o: unknown): Record<string, unknown> => ((o as { value?: Record
     && perms.roleMayRunOp('ADMIN', 'stock_adjustments.issue') && !perms.roleMayRunOp('MANAGER', 'stock_adjustments.issue')
     && !perms.roleMayRunOp('', 'stock_adjustments.cancel') && !perms.roleMayRunOp('SALES', 'stock_adjustments.cancel'),
     'D1 Fernbefehle verlangen den Owner (ADMIN); Manager, Verkauf und eine fehlende Rolle dürfen nicht');
-  ok(registry.ALLOWED_MUTATIONS.at(-7) === 'stock_adjustments.issue' && registry.ALLOWED_MUTATIONS.at(-6) === 'stock_adjustments.cancel'
+  ok(registry.ALLOWED_MUTATIONS.at(-9) === 'stock_adjustments.issue' && registry.ALLOWED_MUTATIONS.at(-8) === 'stock_adjustments.cancel'
     && readOps.STORE_READ_OPS.includes('stock_adjustments.product.get') && perms.isOperationCovered('stock_adjustments.product.get')
     && /OP_STOCK_ISSUE,\s*OP_STOCK_CANCEL,\s*OP_OLD_STOCK_ADD,\s*OP_STOCK_PRODUCT_GET,\s*OP_PAGE_OLD_STOCK_GET,/.test(src('src-tauri/src/bridge.rs'))
     && /import '\.\/stock-adjustment-commands';/.test(src('src/core/bridge/bridge-listener.ts')),
@@ -394,7 +399,7 @@ const valueOf = (o: unknown): Record<string, unknown> => ((o as { value?: Record
   for (const h of ['issueStockInHouse', 'cancelStockAdjustmentInHouse', 'addOldStockInHouse']) {
     if (!new RegExp(`if \\(isClientMode\\(\\)\\) return nurPrimary\\(\\);\\s*return runOnPrimary\\(\\(\\) => ${h}`).test(sa2)) fehler.push(`${h}: lokaler Anschluss ohne PC2-Sperre`);
   }
-  ok(fehler.length === 0 && rustNames.slice(-12, -7).join(',') === [...MUT, ...READ].join(','),
+  ok(fehler.length === 0 && rustNames.slice(-15, -10).join(',') === [...MUT, ...READ].join(','),
     `D10 drei Buchungen und zwei Auskünfte überall gleich (Freigabe, Owner-Recht, Anmeldung, Rust); lokale Anschlüsse sperren am PC2 (${fehler.join('; ') || 'konsistent'})`);
 }
 
@@ -627,7 +632,7 @@ const balance = (db: Db, acc: string): number => r3(n(db, "SELECT COALESCE(SUM(C
   const body = { actionId: 'pc2-old-1-xxxxxx', productId: 'r2', quantity: 2, expectedQuantity: 1, unitCost: 500, reason: 'old stock from the shop safe' };
   const m = await cmdS.runStockAction(sa!.addOldStockInHouse as never, cmdS.OLD_STOCK_KEYS, d, ident('21', 'stock_adjustments.add_old_stock'), 'MANAGER', body);
   ok(m.kind === 'rejected' && (m as { code: string }).code === 'PERMISSION_DENIED' && qtyOf(db, 'r2') === 1
-    && perms.permissionForOp('stock_adjustments.add_old_stock')?.kind === 'isOwner' && registry.ALLOWED_MUTATIONS.at(-5) === 'stock_adjustments.add_old_stock',
+    && perms.permissionForOp('stock_adjustments.add_old_stock')?.kind === 'isOwner' && registry.ALLOWED_MUTATIONS.at(-7) === 'stock_adjustments.add_old_stock',
     'A7 Fernbefehl verlangt den Owner (Recht und Hausfolge), steht namentlich am Ende der Liste');
   const ok1 = await cmdS.runStockAction(sa!.addOldStockInHouse as never, cmdS.OLD_STOCK_KEYS, d, ident('22', 'stock_adjustments.add_old_stock'), 'ADMIN', body);
   const ok2 = await cmdS.runStockAction(sa!.addOldStockInHouse as never, cmdS.OLD_STOCK_KEYS, d, ident('22', 'stock_adjustments.add_old_stock'), 'ADMIN', body);

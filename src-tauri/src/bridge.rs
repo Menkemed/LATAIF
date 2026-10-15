@@ -292,6 +292,10 @@ pub const OP_PARTIES_ACCOUNT_GET: &str = "parties.account.get";
 pub const OP_PAGE_OPENING_BALANCES_GET: &str = "page.opening_balances.get";
 // INITIAL QTY — die erste Mengeneingabe eines unberührten Artikels berichtigen (nur Owner, keine Buchung).
 pub const OP_STOCK_CORRECT_INITIAL: &str = "stock_adjustments.correct_initial";
+// B1 OPENING ACCOUNTING — Eröffnungsbelege erfassen/ersetzen und stornieren (nur Owner, keine Buchung) und die Übersicht.
+pub const OP_OPENING_ACCOUNTS_CREATE: &str = "opening_accounts.create";
+pub const OP_OPENING_ACCOUNTS_CANCEL: &str = "opening_accounts.cancel";
+pub const OP_PAGE_OPENING_ACCOUNTING_GET: &str = "page.opening_accounting.get";
 // CENTRAL-UI-PARITY R6E — Angebot, Rechnungs-Lebenszyklus, Nachrichtenprotokoll.
 pub const OP_OFFERS_CREATE: &str = "offers.create";
 pub const OP_OFFERS_UPDATE: &str = "offers.update";
@@ -552,6 +556,10 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_PAGE_OPENING_BALANCES_GET,
     // INITIAL QTY — die Berichtigung der ersten Mengeneingabe (Buchung im Sinne der Brücke, ohne Hauptbuch).
     OP_STOCK_CORRECT_INITIAL,
+    // B1 OPENING ACCOUNTING — zwei Buchungen im Sinne der Brücke (Belege ohne Hauptbuch), dann die Übersicht.
+    OP_OPENING_ACCOUNTS_CREATE,
+    OP_OPENING_ACCOUNTS_CANCEL,
+    OP_PAGE_OPENING_ACCOUNTING_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

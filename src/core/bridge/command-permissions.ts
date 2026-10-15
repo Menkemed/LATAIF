@@ -203,6 +203,9 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'customers.settle': RECORD_PAYMENTS,
   // INITIAL QTY — dieselbe Karte „Stock corrections" (nur `perm.isOwner`); die Hausfolge prüft es noch einmal.
   'stock_adjustments.correct_initial': owner('ProductDetail: perm.isOwner (Stock corrections — Correct initial qty)'),
+  // B1 OPENING ACCOUNTING — Settings → Opening Balances steht nur für `perm.isOwner`; die Hausfolge prüft es noch einmal.
+  'opening_accounts.create': owner('Settings → Opening Balances: perm.isOwner (record / correct an opening document)'),
+  'opening_accounts.cancel': owner('Settings → Opening Balances: perm.isOwner (cancel an opening document)'),
 
   // ── Angebot, Rechnungs-Lebenszyklus, Nachrichten (R6E) ──────────────────
   // BEFUND: `OfferList` („New Offer", „Send", „Accept", „Reject") fragt `usePermission` NICHT, und
