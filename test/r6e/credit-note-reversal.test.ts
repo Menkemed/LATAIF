@@ -693,6 +693,8 @@ marker('CENTRAL_UI_R6E_PAID_REFUND_CANCEL_CONTRACT_PINNED');
   // Jede Datei, deren CODE (ohne Kommentare) die Tabelle nennt, ist hier eingeordnet. Ein neuer Leser
   // fällt auf, statt still eine stornierte Gutschrift mitzuzählen.
   const KLASSEN: Record<string, string> = {
+    // B1 OPENING ACCOUNTING — die Stichtagsliste löst nur die Belegnummer einer Buchung auf (credit_note_number je id).
+    'src/core/accounting/ledger-statements.ts': 'Verweis (Belegnummer einer Buchung in der Stichtagsliste), keine Summe',
     'src/core/bridge/return-commands.ts': 'Verweis (Gutschrift der Freigabe), keine Summe',
     'src/core/bridge/store-read-ops.ts': 'Name der Auskunft store.credit_notes.get',
     'src/core/data/page-reads.ts': 'Summen/Zählungen ohne CANCELLED',
