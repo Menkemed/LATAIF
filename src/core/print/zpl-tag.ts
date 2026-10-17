@@ -80,7 +80,7 @@ function buildWatchFace(p: Product): TagFace {
   return { upper: [], lower: [], scan: { sku, barcode, price, details: details.slice(0, 5) } };
 }
 
-// ── Gold-Jewelry: Karat & Color kurz (18K Yellow → 18K YG, 18K Mix → 18K MIX, Silver → SILVER) ──
+// ── Gold-Jewelry: Karat & Color kurz (18K Yellow → 18K YG, 18K Mix → 18K MIX, Silver → SILVER, Platinum → PLATINUM) ──
 function karatShortJewelry(karat: unknown): string {
   const s = String(karat ?? '').trim();
   if (!s) return '';
@@ -136,21 +136,37 @@ function buildBrandedJewelryFace(p: Product): TagFace {
 }
 
 // ── Original Gold Jewelry (2026-06-04) — Scan-Tag mit Barcode ──
-// Unten: Serial, Ref (model_number, nur wenn vorhanden), Size (nur Nummer), Certificate/Year.
+// Unten: Serial, Ref (model_number, nur wenn vorhanden), Size (nur Nummer) / Material, Certificate/Year.
 function buildOriginalJewelryFace(p: Product): TagFace {
   const a = (p.attributes || {}) as Record<string, unknown>;
   const sku = fit(up(p.sku || ''));
   const barcode = String(p.sku || '').trim();
   const price = fit(`BD ${Math.round(p.plannedSalePrice || p.purchasePrice || 0)}`);
 
-  const details: string[] = [];
-  if (a.serial_number) details.push(fit(`SN ${up(a.serial_number)}`));
-  if (a.model_number) details.push(fit(`REF ${up(a.model_number)}`)); // model_number, als "REF" angezeigt
-  if (a.size != null && a.size !== '') details.push(fit(up(a.size))); // nur die Nummer
+  const kopf: string[] = [];
+  if (a.serial_number) kopf.push(fit(`SN ${up(a.serial_number)}`));
+  if (a.model_number) kopf.push(fit(`REF ${up(a.model_number)}`)); // model_number, als "REF" angezeigt
+  const size = (a.size != null && a.size !== '') ? up(a.size) : ''; // nur die Nummer
   const hasCert = (p.scopeOfDelivery || []).includes('Certificate');
   const year = a.year ? String(a.year) : '';
   const certYear = [hasCert ? 'CERTIFICATE' : '', year].filter(Boolean).join(' ');
-  if (certYear) details.push(fit(certYear));
+  const fuss = certYear ? [fit(certYear)] : [];
+
+  // JEWELLERY-LABEL — das Material (18K YG, 22K YG, SILVER, PLATINUM) steht wie bei Branded neben der Größe
+  // („52 / PLATINUM"); so bleiben es höchstens 4 Zeilen wie bei allen Scan-Tags. Passt beides nicht ungekürzt in
+  // eine Zeile, bekommt das Material eine eigene Zeile, solange es bei 4 Zeilen bleibt; sonst wird nur die
+  // Größe gekürzt — das Material steht immer vollständig da.
+  const material = karatShortJewelry(a.karat);
+  const zusammen = [size, material].filter(Boolean).join(' / ');
+  let mitte: string[];
+  if (!material) mitte = size ? [fit(size)] : [];
+  else if (zusammen.length <= MAX_CHARS) mitte = [zusammen];
+  else if (kopf.length + 2 + fuss.length <= 4) mitte = [fit(size), material];
+  else {
+    const platz = MAX_CHARS - ' / '.length - material.length;
+    mitte = [platz > 0 ? `${size.slice(0, platz)} / ${material}` : fit(zusammen)];
+  }
+  const details = [...kopf, ...mitte, ...fuss];
 
   return { upper: [], lower: [], scan: { sku, barcode, price, details: details.slice(0, 5) } };
 }

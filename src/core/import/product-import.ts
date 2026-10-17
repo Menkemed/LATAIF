@@ -272,6 +272,9 @@ export function itemTypeOption(raw: string, options: readonly string[]): string 
   return options.find((o) => { const l = o.toLowerCase(); return l === s || l === s.replace(/s$/, '') || l === s + 's'; }) ?? null;
 }
 
+/** Gold, eine Goldfarbe oder ein Überzug neben Platin/Silber — dann ist der Wert gemischt und wird nicht geraten. */
+const GOLD_ODER_UEBERZUG = /\bgold\b|yellow|rose|pink|\bred\b|\bmix|two[\s-]?tone|bi[\s-]?colou?r|tri[\s-]?colou?r|plated|plating|coated|filled|vermeil/;
+
 /** PLATINUM — eine Platin-Angabe in einer Tabelle: „Platinum", „Platin", „Plat", „PT950", „Pt 999". */
 export function isPlatinumText(raw: string): boolean {
   return /\bplatin(um)?\b|\bplat\b|\bpt\s*-?\s*\d{3}\b/.test(raw.toLowerCase());
@@ -293,11 +296,17 @@ export function karatColorOption(raw: string, options: readonly string[]): strin
   // eine Auswahl „Platinum" (950/999 hat kein Feld — classifyRow behält sie in der Notiz). Steht zugleich Gold,
   // Silber, eine Goldfarbe, ein Gold-Karat oder „plated" da, wird nicht geraten → null.
   if (isPlatinumText(s)) {
-    const gemischt = /\bgold\b|\bsilver\b|\bsterling\b|yellow|rose|pink|\bred\b|\bmix|two[\s-]?tone|bi[\s-]?colou?r|tri[\s-]?colou?r|plated|plating|coated|filled|vermeil/.test(s)
+    const gemischt = /\bsilver\b|\bsterling\b/.test(s) || GOLD_ODER_UEBERZUG.test(s)
       || /\d\s*k(t|arat)?\b/.test(s) || !!fuer('24|22|21|18|14|9|916|875|750|585|375|925');
     return gemischt ? null : options.find((o) => o.toLowerCase() === 'platinum') ?? null;
   }
-  if (/\bsilver\b|\bsterling\b/.test(s) || fuer('925')) return options.find((o) => o.toLowerCase() === 'silver') ?? null;
+  // SILVER — „Silver", „Sterling", „925", „Silver 999" → „Silver" (die Feinheit behält classifyRow in der Notiz).
+  // Steht zugleich Gold, eine Goldfarbe, ein Gold-Karat oder eine Gold-Feinheit oder „plated" da („925 white gold",
+  // „18K Gold & Silver", „silver plated"), wird nicht geraten → null; vorher wurde daraus still „Silver".
+  if (/\bsilver\b|\bsterling\b/.test(s) || fuer('925')) {
+    const gemischt = GOLD_ODER_UEBERZUG.test(s) || /\d\s*k(t|arat)?\b/.test(s) || !!fuer('24|22|21|18|14|9|916|875|750|585|375');
+    return gemischt ? null : options.find((o) => o.toLowerCase() === 'silver') ?? null;
+  }
   const FEIN: Record<string, number> = { '999': 24, '916': 22, '875': 21, '750': 18, '585': 14, '375': 9 };
   const fein = fuer('999|916|875|750|585|375');
   const zahl = fuer('24|22|21|18|14|9');
@@ -341,9 +350,11 @@ function classifyRow(row: RawRow, idx: number, opts: ClassifyOptions, runningInd
   const itemType = itemTypeRaw ? itemTypeOption(itemTypeRaw, optionsOf(katAttrs, 'item_type')) || '' : '';
   const karatQuelle = karatColorRaw || [karatAltRaw, material].filter(Boolean).join(' ');
   const karatColor = gold && karatQuelle ? karatColorOption(karatQuelle, optionsOf(katAttrs, 'karat')) || '' : '';
-  // PLATINUM — „Platinum 950", „PT999", Karat „950" + Metal „Platinum": die Auswahl ist „Platinum", die Feinheit
-  // hat kein Feld. Sie geht nicht still verloren — die Spalten bleiben wörtlich in der Notiz, die Zeile warnt.
-  const platinZusatz = karatColor.toLowerCase() === 'platinum' && karatQuelle.toLowerCase().replace(/\s+/g, ' ').trim() !== 'platinum';
+  // PLATINUM / SILVER — „Platinum 950", „PT999", „Silver 925", „Sterling", Karat „925" + Metal „Silver": die Auswahl ist
+  // „Platinum" bzw. „Silver", die Feinheit hat kein Feld. Sie geht nicht still verloren — die Spalten bleiben wörtlich
+  // in der Notiz (jeder Text nur einmal), die Zeile warnt.
+  const feinheitZusatz = /^(platinum|silver)$/i.test(karatColor)
+    && karatQuelle.toLowerCase().replace(/\s+/g, ' ').trim() !== karatColor.toLowerCase();
   // Bei Gold kein erfundener Name: ohne Marke/Modell benennen die Merkmale den Artikel (wie in der Maske).
   const name = gold ? referenceNo : (description1 || referenceNo || brand || 'Unknown');
 
@@ -435,16 +446,19 @@ function classifyRow(row: RawRow, idx: number, opts: ClassifyOptions, runningInd
     if (itemTypeRaw && !itemType) warnings.push(`Item Type "${itemTypeRaw}" not recognised → left empty (kept in notes)`);
     else if (!itemTypeRaw) warnings.push('Item Type not set');
     if (karatQuelle && !karatColor) warnings.push(`Karat & Color "${karatQuelle}" not recognised → left empty (kept in notes)`);
-    else if (platinZusatz) warnings.push(`Karat & Color "${karatQuelle}" → Platinum; the fineness has no field (kept in notes)`);
+    else if (feinheitZusatz) warnings.push(`Karat & Color "${karatQuelle}" → ${karatColor}; the fineness has no field (kept in notes)`);
     else if (!karatQuelle) warnings.push('Karat & Color not set');
     if (weight == null) warnings.push('Weight not set');
     // Die Metall-Spalte ist nur dann „aufgebraucht“, wenn erst sie die Farbe zu Karat & Color geliefert hat.
     const metallVerbraucht = !karatColorRaw && !!karatColor && !karatColorOption(karatAltRaw, optionsOf(katAttrs, 'karat'));
+    const kcNotiz = !!karatColorRaw && (!karatColor || feinheitZusatz);
+    // Derselbe Text in Karat & Color und Metal steht nur einmal in der Notiz.
+    const gleicherText = kcNotiz && material.toLowerCase().replace(/\s+/g, ' ') === karatColorRaw.toLowerCase().replace(/\s+/g, ' ');
     notizTeile = notizTeile.concat([
       itemTypeRaw && !itemType ? `Item type: ${itemTypeRaw}` : '',
-      karatColorRaw && (!karatColor || platinZusatz) ? `Karat & Color: ${karatColorRaw}` : '',
-      !karatColorRaw && karatAltRaw && (!karatColor || platinZusatz) ? `Karat: ${karatAltRaw}` : '',
-      material && (!metallVerbraucht || platinZusatz) ? `Metal: ${material}` : '',
+      kcNotiz ? `Karat & Color: ${karatColorRaw}` : '',
+      !karatColorRaw && karatAltRaw && (!karatColor || feinheitZusatz) ? `Karat: ${karatAltRaw}` : '',
+      material && (!metallVerbraucht || feinheitZusatz) && !gleicherText ? `Metal: ${material}` : '',
       serialNo ? `Serial: ${serialNo}` : '', size ? `Size: ${size}` : '', markup ? `Markup: ${markup}` : '',
     ]);
   } else {
@@ -580,6 +594,7 @@ export function importTemplate(): { items: Array<Array<string | number>>; help: 
     ['Weight — in grams. Description 1 — a short description (e.g. SOLITAIRE). Description 2/3, Serial, Size and Markup are kept in the item notes.'],
     ['Older files still import: Karat / Carat (e.g. 18) together with Metal / Material (e.g. White Gold) become Karat & Color (18K White); 21, 22 and 24 are always Yellow.'],
     ['Platinum, Platinum 950, Platinum 999 or PT950 become Platinum — never a gold karat. A fineness (950, 999) has no field of its own: it is kept in the notes and the preview warns.'],
+    ['Silver, Silver 925, Sterling or 925 become Silver — never a gold karat. The fineness (925, 999) is kept in the notes the same way. A value that also names gold or plating (e.g. 925 White Gold) is not guessed.'],
     ['Without a clear value nothing is guessed — the preview warns and the value is kept in the notes. Material is never used as Item Type.'],
     ['Watches and all other categories: the columns work as before.'],
     [''],
