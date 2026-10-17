@@ -137,12 +137,14 @@ function buildBrandedJewelryFace(p: Product): TagFace {
 
 // ── Original Gold Jewelry (2026-06-04) — Scan-Tag mit Barcode ──
 // Unten: Serial, Ref (model_number, nur wenn vorhanden), Size (nur Nummer) / Material, Certificate/Year.
-function buildOriginalJewelryFace(p: Product): TagFace {
+//
+// JEWELLERY-LABEL — das Material (18K YG, 22K YG, SILVER, PLATINUM) steht wie bei Branded neben der Größe
+// („52 / PLATINUM"); es bleiben höchstens 4 Zeilen wie bei allen Scan-Tags. Größe und Material werden NIE gekürzt:
+//   1 „52 / PLATINUM" in einer Zeile   2 sonst eigene Zeilen, solange es bei 4 Zeilen bleibt
+//   3 sonst ohne Leerzeichen „17.5 CM/PLATINUM"   4 sonst ist das Etikett nicht vollständig darstellbar →
+//     `tagProblem` meldet es, und `buildBatchTagsZpl`/`buildProductTagsZpl` drucken es nicht (Drucksperre).
+function originalJewelryLayout(p: Product): { details: string[]; problem: string | null } {
   const a = (p.attributes || {}) as Record<string, unknown>;
-  const sku = fit(up(p.sku || ''));
-  const barcode = String(p.sku || '').trim();
-  const price = fit(`BD ${Math.round(p.plannedSalePrice || p.purchasePrice || 0)}`);
-
   const kopf: string[] = [];
   if (a.serial_number) kopf.push(fit(`SN ${up(a.serial_number)}`));
   if (a.model_number) kopf.push(fit(`REF ${up(a.model_number)}`)); // model_number, als "REF" angezeigt
@@ -152,23 +154,45 @@ function buildOriginalJewelryFace(p: Product): TagFace {
   const certYear = [hasCert ? 'CERTIFICATE' : '', year].filter(Boolean).join(' ');
   const fuss = certYear ? [fit(certYear)] : [];
 
-  // JEWELLERY-LABEL — das Material (18K YG, 22K YG, SILVER, PLATINUM) steht wie bei Branded neben der Größe
-  // („52 / PLATINUM"); so bleiben es höchstens 4 Zeilen wie bei allen Scan-Tags. Passt beides nicht ungekürzt in
-  // eine Zeile, bekommt das Material eine eigene Zeile, solange es bei 4 Zeilen bleibt; sonst wird nur die
-  // Größe gekürzt — das Material steht immer vollständig da.
   const material = karatShortJewelry(a.karat);
   const zusammen = [size, material].filter(Boolean).join(' / ');
-  let mitte: string[];
-  if (!material) mitte = size ? [fit(size)] : [];
-  else if (zusammen.length <= MAX_CHARS) mitte = [zusammen];
-  else if (kopf.length + 2 + fuss.length <= 4) mitte = [fit(size), material];
-  else {
-    const platz = MAX_CHARS - ' / '.length - material.length;
-    mitte = [platz > 0 ? `${size.slice(0, platz)} / ${material}` : fit(zusammen)];
-  }
-  const details = [...kopf, ...mitte, ...fuss];
+  const eng = size && material ? `${size}/${material}` : zusammen;
+  const platz = kopf.length + 2 + fuss.length <= 4;
+  let mitte: string[] | null;
+  if (zusammen.length <= MAX_CHARS) mitte = zusammen ? [zusammen] : [];
+  else if (size && material && platz && size.length <= MAX_CHARS && material.length <= MAX_CHARS) mitte = [size, material];
+  else if (eng.length <= MAX_CHARS) mitte = [eng];
+  else mitte = null;
+  if (mitte) return { details: [...kopf, ...mitte, ...fuss], problem: null };
+  const max = !material || platz ? MAX_CHARS : MAX_CHARS - 1 - material.length;
+  return {
+    details: [...kopf, ...[size, material].filter(Boolean), ...fuss],
+    problem: `size "${size}"${material ? ` and material "${material}" do` : ' does'} not fit the tag completely — shorten the size on the item to at most ${Math.max(0, max)} characters`,
+  };
+}
 
-  return { upper: [], lower: [], scan: { sku, barcode, price, details: details.slice(0, 5) } };
+function buildOriginalJewelryFace(p: Product): TagFace {
+  const sku = fit(up(p.sku || ''));
+  const barcode = String(p.sku || '').trim();
+  const price = fit(`BD ${Math.round(p.plannedSalePrice || p.purchasePrice || 0)}`);
+  return { upper: [], lower: [], scan: { sku, barcode, price, details: originalJewelryLayout(p).details.slice(0, 5) } };
+}
+
+/**
+ * JEWELLERY-LABEL — warum ein Etikett nicht gedruckt werden darf (`null` = druckbar). Heute nur Original Gold
+ * Jewellery: Größe und Material passen nicht vollständig auf das Etikett. Gekürzt wird nicht.
+ */
+export function tagProblem(p: Product, category?: Category): string | null {
+  if (category?.id === 'cat-original-gold-jewelry' || category?.name === 'Original Gold Jewelry') return originalJewelryLayout(p).problem;
+  return null;
+}
+
+/** Die Drucksperre: ein nicht vollständig darstellbares Etikett wird nie zu ZPL. */
+function assertPrintable(items: Array<{ product: Product; category?: Category }>): void {
+  for (const it of items) {
+    const problem = tagProblem(it.product, it.category);
+    if (problem) throw new Error(`Tag ${it.product.sku || it.product.id || ''} not printed: ${problem}.`);
+  }
 }
 
 // ── Accessory (2026-06-04) — Scan-Tag mit Barcode ──
@@ -293,6 +317,7 @@ export function facesToZpl(faces: TagFace[]): string {
  * 2 Tags teilen sich ein Feld (kein verschwendeter Vorschub bei gerader Anzahl).
  */
 export function buildProductTagsZpl(p: Product, category: Category | undefined, copies = 1): string {
+  assertPrintable([{ product: p, category }]);
   const face = buildProductFace(p, category);
   const faces: TagFace[] = Array.from({ length: Math.max(1, copies) }, () => face);
   return facesToZpl(faces);
@@ -300,6 +325,7 @@ export function buildProductTagsZpl(p: Product, category: Category | undefined, 
 
 /** ZPL für mehrere verschiedene Produkte (Batch, je 1 Tag) — 2-up gepackt. */
 export function buildBatchTagsZpl(items: Array<{ product: Product; category?: Category }>): string {
+  assertPrintable(items);
   const faces = items.map(it => buildProductFace(it.product, it.category));
   return facesToZpl(faces);
 }

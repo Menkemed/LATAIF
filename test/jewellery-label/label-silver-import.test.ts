@@ -62,23 +62,62 @@ const FAELLE: Array<[string, Record<string, unknown>, string[], string[]]> = [
     ['SN X1', 'REF Y2', 'M / SILVER', 'CERTIFICATE 2001']],
   ['lange Größe, Platz für eigene Zeile', { item_type: 'Bracelet', karat: 'Platinum', size: '17.5 cm', serial_number: 'S9' }, ['Certificate'],
     ['SN S9', '17.5 CM', 'PLATINUM', 'CERTIFICATE']],
-  ['lange Größe, ohne Platz: nur die Größe gekürzt', { item_type: 'Bracelet', karat: 'Platinum', size: '17.5 cm', serial_number: 'S9', model_number: 'R1', year: 2020 }, ['Certificate'],
-    ['SN S9', 'REF R1', '17.5 C / PLATINUM', 'CERTIFICATE 2020']],
+  ['volles Etikett, lange Größe: ohne Leerzeichen, nichts gekürzt', { item_type: 'Bracelet', karat: 'Platinum', size: '17.5 cm', serial_number: 'S9', model_number: 'R1', year: 2020 }, ['Certificate'],
+    ['SN S9', 'REF R1', '17.5 CM/PLATINUM', 'CERTIFICATE 2020']],
+  ['volles Etikett, Silver, 10 Zeichen Größe', { item_type: 'Bracelet', karat: 'Silver', size: 'ADJUSTABLE', serial_number: 'S1', model_number: 'R2', year: 2021 }, ['Certificate'],
+    ['SN S1', 'REF R2', 'ADJUSTABLE/SILVER', 'CERTIFICATE 2021']],
+  ['volles Etikett, 18K YG', { item_type: 'Ring', karat: '18K Yellow', size: '16-18 CM', serial_number: 'S2', model_number: 'R3' }, ['Certificate'],
+    ['SN S2', 'REF R3', '16-18 CM / 18K YG', 'CERTIFICATE']],
+  ['lange Größe ohne Kopf: eigene Zeilen', { item_type: 'Bangle', karat: '22K Yellow', size: '17.5 CM WIDE' }, ['Certificate'],
+    ['17.5 CM WIDE', '22K YG', 'CERTIFICATE']],
 ];
 for (const [was, attrs, scope, soll] of FAELLE) {
   const d = det(attrs, scope);
   ok(S(d) === S(soll), `ORIGINAL ${was}: ${S(d)} soll ${S(soll)}`);
 }
+const KURZ: Record<string, string> = { Platinum: 'PLATINUM', Silver: 'SILVER', '18K Yellow': '18K YG', '22K Yellow': '22K YG', '18K Mix': '18K MIX' };
+const prod = (attrs: Record<string, unknown>, scope: string[] = []) => ({ sku: 'OJ-0001', plannedSalePrice: 2500, scopeOfDelivery: scope, attributes: attrs });
 for (const [was, attrs, scope] of FAELLE) {
   const d = det(attrs, scope);
-  const material = String(attrs.karat) === 'Platinum' ? 'PLATINUM' : String(attrs.karat) === 'Silver' ? 'SILVER' : '';
+  const material = KURZ[String(attrs.karat)] || '';
+  const size = attrs.size ? String(attrs.size).toUpperCase() : '';
   ok(d.length <= 4 && d.every((z) => z.length <= 17), `ORIGINAL ${was}: höchstens 4 Zeilen à 17 Zeichen`);
-  if (material) ok(d.some((z) => z === material || z.endsWith(' / ' + material)), `ORIGINAL ${was}: Material vollständig`);
+  if (material) ok(d.some((z) => z === material || z.endsWith(' / ' + material) || z.endsWith('/' + material)), `ORIGINAL ${was}: Material vollständig`);
+  if (size) ok(d.some((z) => z === size || z.startsWith(size + ' / ') || z.startsWith(size + '/')), `ORIGINAL ${was}: Größe vollständig`);
+  ok(zpl.tagProblem(prod(attrs, scope) as never, ORIGINAL as never) === null, `ORIGINAL ${was}: druckbar`);
 }
 // Ein Artikel ohne Karat: genau wie vorher.
-for (const attrs of [{ item_type: 'Ring', size: '52', serial_number: 'A', model_number: 'B', year: 2019 }, { item_type: 'Ring' }, { item_type: 'Ring', size: 'A VERY LONG SIZE TEXT' }]) {
-  ok(S(face(attrs, ['Certificate'])) === S(alt.buildProductFace({ sku: 'OJ-0001', plannedSalePrice: 2500, scopeOfDelivery: ['Certificate'], attributes: attrs }, ORIGINAL)),
-    `ORIGINAL ohne Karat unverändert ${S(attrs)}`);
+for (const attrs of [{ item_type: 'Ring', size: '52', serial_number: 'A', model_number: 'B', year: 2019 }, { item_type: 'Ring' }, { item_type: 'Ring', size: 'SEVENTEEN CHARS 1' }]) {
+  ok(S(face(attrs, ['Certificate'])) === S(alt.buildProductFace(prod(attrs, ['Certificate']), ORIGINAL)), `ORIGINAL ohne Karat unverändert ${S(attrs)}`);
+}
+
+// ── A1b volles Etikett, das auch kompakt nicht passt: Drucksperre mit Grund, nie gekürzt ─────────────────
+const GESPERRT: Array<[string, Record<string, unknown>, string[], RegExp]> = [
+  ['Platinum, Größe 9 Zeichen', { item_type: 'Bracelet', karat: 'Platinum', size: '17.5 CM W', serial_number: 'S9', model_number: 'R1', year: 2020 }, ['Certificate'], /at most 8 characters/],
+  ['22K YG, Größe 12 Zeichen', { item_type: 'Bangle', karat: '22K Yellow', size: '17.5 CM WIDE', serial_number: 'S3', model_number: 'R4', year: 1999 }, ['Certificate'], /at most 10 characters/],
+  ['Silver, Größe 18 Zeichen (auch allein zu lang)', { item_type: 'Ring', karat: 'Silver', size: 'ADJUSTABLE 16-19CM' }, [], /at most 17 characters/],
+  ['ohne Karat, Größe 18 Zeichen', { item_type: 'Ring', size: 'A VERY LONG SIZE 1' }, [], /size "A VERY LONG SIZE 1" does not fit the tag completely — shorten the size on the item to at most 17 characters/],
+];
+for (const [was, attrs, scope, grund] of GESPERRT) {
+  const problem = zpl.tagProblem(prod(attrs, scope) as never, ORIGINAL as never);
+  ok(!!problem && grund.test(problem) && problem.includes(String(attrs.size).toUpperCase()), `GESPERRT ${was}: sichtbarer Grund (${problem})`);
+  let einzel = '', stapel = '';
+  try { zpl.buildProductTagsZpl(prod(attrs, scope) as never, ORIGINAL as never); } catch (e) { einzel = String((e as Error).message); }
+  try { zpl.buildBatchTagsZpl([{ product: prod({ item_type: 'Ring', karat: 'Silver', size: '52' }) as never, category: ORIGINAL as never }, { product: prod(attrs, scope) as never, category: ORIGINAL as never }]); }
+  catch (e) { stapel = String((e as Error).message); }
+  ok(/^Tag OJ-0001 not printed: /.test(einzel) && /^Tag OJ-0001 not printed: /.test(stapel), `GESPERRT ${was}: kein ZPL — weder einzeln noch im Stapel`);
+  const d = det(attrs, scope);
+  ok(!d.some((z) => z.length > 0 && String(attrs.size).toUpperCase().startsWith(z) && z !== String(attrs.size).toUpperCase() && z.length < String(attrs.size).length),
+    `GESPERRT ${was}: keine gekürzte Größe im Etikett`);
+}
+{
+  const wl = readFileSync(join(repo, 'src/pages/watches/WatchList.tsx'), 'utf8');
+  ok(/import \{ buildBatchTagsZpl, tagProblem \} from '@\/core\/print\/zpl-tag'/.test(wl)
+    && /const blocked = selAll\.map\(p => \(\{ p, problem: tagProblem\(p, getCat\(p\.categoryId\)\) \}\)\)\.filter\(x => x\.problem\)/.test(wl)
+    && /const selProducts = selAll\.filter\(p => !blocked\.some\(b => b\.p\.id === p\.id\)\)/.test(wl)
+    && /data-tag-blocked=\{blocked\.length\}/.test(wl) && /not printed<\/strong>/.test(wl),
+    'DIALOG Print Tags nennt gesperrte Etiketten sichtbar und druckt nur die vollständigen');
+  ok(/const items = selProducts\.map\(p => \(\{ product: p, category: getCat\(p\.categoryId\) \}\)\);/.test(wl), 'DIALOG der Druck nimmt nur die druckbaren Artikel');
 }
 
 // ── A2 ZPL: nur der Text, gleiche Geometrie, nichts überlagert ──────────────────

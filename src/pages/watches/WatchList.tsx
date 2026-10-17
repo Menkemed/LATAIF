@@ -14,7 +14,7 @@ import { SkuInput } from '@/components/ui/SkuInput';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
 import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/core/products/duplicate-dismiss';
-import { buildBatchTagsZpl } from '@/core/print/zpl-tag';
+import { buildBatchTagsZpl, tagProblem } from '@/core/print/zpl-tag';
 import { printRawZpl, canRawPrint, getTagPrinterName, setTagPrinterName } from '@/core/print/raw-print';
 import { useProductStore } from '@/stores/productStore';
 import { validateProductFields, blockingIssues, editableAttributes, isBrandRequired } from '@/core/products/field-contract';
@@ -1242,7 +1242,11 @@ export function WatchList() {
       {/* v0.7.27 — ZPL-Bulk-Tag-Druck (gerade Anzahl, 2 Tags pro Vorschub) */}
       <Modal open={showBulkPrint} onClose={() => setShowBulkPrint(false)} title="Print Tags (Zebra ZPL)" width={440}>
         {(() => {
-          const selProducts = filtered.filter(p => printSelectedIds.has(p.id));
+          // JEWELLERY-LABEL — ein Etikett, dessen Angaben (Größe/Material) nicht vollständig passen, wird nicht
+          // gedruckt und hier genannt; gekürzt wird nie. Die übrigen Etiketten druckt der Knopf wie bisher.
+          const selAll = filtered.filter(p => printSelectedIds.has(p.id));
+          const blocked = selAll.map(p => ({ p, problem: tagProblem(p, getCat(p.categoryId)) })).filter(x => x.problem);
+          const selProducts = selAll.filter(p => !blocked.some(b => b.p.id === p.id));
           const productCount = selProducts.length;
           const tagCount = productCount % 2 === 1 ? productCount + 1 : productCount;
           return (
@@ -1257,6 +1261,12 @@ export function WatchList() {
                 <div>Prints <strong style={{ color: '#0F0F10' }}>{tagCount}</strong> tag{tagCount === 1 ? '' : 's'} (1 per product){tagCount !== productCount ? ' — rounded up to an even number (+1 spare of the last item) so no label is wasted' : ''}.</div>
                 <div style={{ marginTop: 6, fontSize: 12, color: '#6B7280' }}>2 tags share one feed strip, so the total is always even.</div>
               </div>
+              {blocked.length > 0 && (
+                <div data-tag-blocked={blocked.length} style={{ padding: '10px 12px', borderRadius: 8, marginBottom: 16, background: '#FEF2F2', border: '1px solid #FECACA', color: '#B91C1C', fontSize: 12.5, lineHeight: 1.5 }}>
+                  <strong>{blocked.length} tag{blocked.length === 1 ? '' : 's'} not printed</strong> — the details would not fit completely, and nothing is cut off:
+                  {blocked.map(b => <div key={b.p.id} style={{ marginTop: 4 }}>{b.p.sku || b.p.name || b.p.id}: {b.problem}.</div>)}
+                </div>
+              )}
               <div style={{ marginBottom: 16 }}>
                 <label style={{ fontSize: 11, color: '#6B7280', display: 'block', marginBottom: 4 }}>PRINTER</label>
                 <Input value={bulkPrinter} onChange={e => setBulkPrinter(e.target.value)} placeholder="Zebra ZD220 (203 dpi) - ZPL" />
