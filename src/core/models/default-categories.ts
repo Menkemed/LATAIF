@@ -56,6 +56,8 @@ const WATCH_ATTRIBUTES: CategoryAttribute[] = [
 // Plan §4.2 GOLD_DIAMOND_JEWELRY — 2026-05-17: umbenannt + karat/color zu Karat & Color kombiniert.
 // 24K/22K/21K nur Yellow (reines Gold); ab 18K alle 4 Farben möglich (Mix = Two-Tone). Silber separat.
 // Bar + Coin als item_type für Investitions-Gold/Münzen. Diamond Weight direkt neben Weight.
+// PLATINUM — „Platinum" ist (wie „Silver") EINE Auswahl ohne 950/999 in allen drei Schmuck-Kategorien: nur eine
+// Angabe am Artikel, nie ein Gold-Karat und keine Reinheitsrechnung (src/core/gold/purity.ts bleibt unberührt).
 const GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'weight', label: 'Weight', type: 'number', unit: 'g', required: true, showInList: true },
   // STONES (v0.8.68) — Diamond Weight ist kein eigenes Eingabefeld mehr: die Summe der Diamant-Zeilen
@@ -70,7 +72,7 @@ const GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
       '24K Yellow', '22K Yellow', '21K Yellow',
       '18K Yellow', '18K Rose', '18K White', '18K Mix',
       '14K Yellow', '14K Rose', '14K White', '14K Mix',
-      'Silver',
+      'Silver', 'Platinum',
     ],
     required: true, showInList: true },
   { key: 'description', label: 'Description', type: 'text', required: false, showInList: false },
@@ -89,7 +91,7 @@ const BRANDED_GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
       '24K Yellow', '22K Yellow', '21K Yellow',
       '18K Yellow', '18K Rose', '18K White', '18K Mix',
       '14K Yellow', '14K Rose', '14K White', '14K Mix',
-      'Silver',
+      'Silver', 'Platinum',
     ],
     required: true, showInList: true },
   { key: 'weight', label: 'Weight', type: 'number', unit: 'g', required: false, showInList: true },
@@ -108,7 +110,7 @@ const ORIGINAL_GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
       '24K Yellow', '22K Yellow', '21K Yellow',
       '18K Yellow', '18K Rose', '18K White', '18K Mix',
       '14K Yellow', '14K Rose', '14K White', '14K Mix',
-      'Silver',
+      'Silver', 'Platinum',
     ],
     required: true, showInList: true },
   { key: 'weight', label: 'Weight', type: 'number', unit: 'g', required: false, showInList: true },

@@ -188,7 +188,8 @@
             "14K Rose",
             "14K White",
             "14K Mix",
-            "Silver"
+            "Silver",
+            "Platinum"
           ],
           "required": true
         },
@@ -248,7 +249,8 @@
             "14K Rose",
             "14K White",
             "14K Mix",
-            "Silver"
+            "Silver",
+            "Platinum"
           ],
           "required": true
         },
@@ -326,7 +328,8 @@
             "14K Rose",
             "14K White",
             "14K Mix",
-            "Silver"
+            "Silver",
+            "Platinum"
           ],
           "required": true
         },

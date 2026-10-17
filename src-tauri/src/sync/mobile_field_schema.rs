@@ -684,4 +684,24 @@ mod tests {
         assert_eq!(code(gold(json!([{ "type": "diamond", "qty": 1, "size_mm": 3 }]))), "STONE_FIELD_UNKNOWN");
         assert_eq!(code(json!({ "categoryId": "cat-branded-gold-jewelry", "brand": "C", "name": "L", "attributes": { "item_type": "Ring", "karat": "18K Yellow", "stones": [] } })), "UNKNOWN_FIELD");
     }
+
+    #[test]
+    fn platinum_is_one_jewellery_option_without_fineness() {
+        // PLATINUM — „Platinum" ist in allen drei Schmuck-Kategorien EINE Auswahl; 950/999 und „PT950" sind keine.
+        let cases = [
+            json!({ "categoryId": "cat-gold-jewelry", "attributes": { "weight": 5.0, "item_type": "Ring", "karat": "Platinum" } }),
+            json!({ "categoryId": "cat-branded-gold-jewelry", "brand": "Cartier", "name": "Love", "attributes": { "item_type": "Ring", "karat": "Platinum" } }),
+            json!({ "categoryId": "cat-original-gold-jewelry", "brand": "X", "name": "Y", "attributes": { "item_type": "Ring", "karat": "Platinum" } }),
+        ];
+        for c in cases { assert_eq!(validate_metadata(&c, 2), Ok(()), "Platinum must be accepted for {}", c["categoryId"]); }
+        for bad in ["Platinum 950", "Platinum 999", "PT950", "platinum"] {
+            let m = json!({ "categoryId": "cat-gold-jewelry", "attributes": { "weight": 5.0, "item_type": "Ring", "karat": bad } });
+            assert_eq!(validate_metadata(&m, 2).unwrap_err().code, "BAD_ENUM", "{bad} is not an option");
+        }
+        // Die Uhr bleibt, wie sie war: Platinum ist dort Material, nie ein Karat & Color.
+        let watch = json!({ "categoryId": "cat-watch", "brand": "R", "name": "S", "attributes": { "case_diameter_mm": 40, "dial": "B", "material": "Platinum" } });
+        assert_eq!(validate_metadata(&watch, 2), Ok(()));
+        let watch_karat = json!({ "categoryId": "cat-watch", "brand": "R", "name": "S", "attributes": { "case_diameter_mm": 40, "dial": "B", "material": "Solid Gold", "karat_color": "Platinum" } });
+        assert_eq!(validate_metadata(&watch_karat, 2).unwrap_err().code, "BAD_ENUM");
+    }
 }

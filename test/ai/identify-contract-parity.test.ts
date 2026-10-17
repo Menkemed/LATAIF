@@ -30,6 +30,12 @@ const RELEASED = 'ff038ad';
 /** STONES — der Zusatz zur Steinliste, wörtlich (siehe §2). */
 const GOLD_STONES_NOTE = " stones: the stones you can actually see, as a list of rows [{\"type\": one of diamond, emerald, sapphire, ruby, pearl, moissanite, cubic_zirconia, amethyst, aquamarine, topaz, tourmaline, opal, garnet, onyx, turquoise, other, \"qty\": whole number of stones in the row, \"carat\": total carat of the row or null, \"name\": only for other, \"color\"/\"clarity\"/\"shape\": only for diamonds and only when clearly readable (e.g. from a certificate), otherwise null}]. Several rows of the same type are fine (e.g. one centre diamond and a row of small diamonds). Only add a row when you can count the stones; NEVER guess carat, color, clarity or shape — leave them null. Return null when no stone is visible. Do not return diamond_weight — it is computed from the diamond rows.";
 const GOLD_NO_BRAND_NOTE = ' brand and name: this category is unbranded jewellery — return brand = null and name = null. NEVER put the piece type (Ring, Pendant, Necklace, …) or a stone into brand or name; the piece type goes into item_type, the short summary into description.';
+/** PLATINUM — „Platinum" als eine Auswahl in allen drei Schmuck-Kategorien, wörtlich (siehe §2). */
+const JEWELLERY = ['cat-gold-jewelry', 'cat-branded-gold-jewelry', 'cat-original-gold-jewelry'];
+const mitPlatin = (t: string): string => t
+  .replace('14K Mix, Silver}', '14K Mix, Silver, Platinum}')
+  .replace('Silver for non-gold silver items.', 'Silver for non-gold silver items. Platinum for platinum pieces (one value, no 950/999 — never a gold karat).')
+  .replace('only Yellow; Silver for non-gold)', 'only Yellow; Silver for non-gold silver; Platinum for platinum — one value, no 950/999)');
 
 /** Rebuild the prompt the way the released file built it, straight from that file's text. */
 function releasedPrompts(): Record<string, { system: string; userPlain: string; userHints: string }> {
@@ -94,11 +100,14 @@ for (const id of knownCategoryIds()) {
   // DISPLAY-NAME (v0.8.67) + STONES (v0.8.68) — die bewussten Abweichungen vom Freigabestand, nur bei
   // Gold-Diamond Jewellery: keine Marke/kein Modell von der KI, und statt diamond_weight die Steinliste
   // (diamond_weight wird aus den Diamant-Zeilen gerechnet). Alles andere bleibt zeichengleich.
-  const soll = id === 'cat-gold-jewelry'
+  const sollOhnePlatin = id === 'cat-gold-jewelry'
     ? ref.system.replace('longer text gets cut off.', 'longer text gets cut off.' + GOLD_NO_BRAND_NOTE + GOLD_STONES_NOTE)
       .replace('**Optional attributes**: diamond_weight, description', '**Optional attributes**: stones, description')
       .replace('"diamond_weight": null', '"stones": null')
     : ref.system;
+  // PLATINUM — die bewusste Abweichung bei allen drei Schmuck-Kategorien; jede Ersetzung muss genau greifen.
+  const soll = JEWELLERY.includes(id) ? mitPlatin(sollOhnePlatin) : sollOhnePlatin;
+  if (JEWELLERY.includes(id)) ok(soll !== sollOhnePlatin && soll.includes('14K Mix, Silver, Platinum}'), `§2 ${id}: the Platinum delta applies to the released prompt`);
   ok(sys === soll,
     `§2 ${id}: system prompt is character-identical to ${RELEASED}` +
     (sys === soll ? '' : ` (len ${sys.length} vs ${soll.length})`));
@@ -208,7 +217,8 @@ for (const id of knownCategoryIds()) {
   // gates goes red and names the side that moved.
   // DISPLAY-NAME — war 0c33a03188de4b83; der Gold-Hinweis (keine Marke) hat ihn einmal und bewusst bewegt.
   // STONES — war 99b2eeedc75bb347; die Steinliste statt diamond_weight hat ihn einmal und bewusst bewegt.
-  const EXPECTED_FINGERPRINT = 'ba9af9c515fa5ce1';
+  // PLATINUM — war ba9af9c515fa5ce1; „Platinum" in den drei Schmuck-Hinweisen hat ihn einmal und bewusst bewegt.
+  const EXPECTED_FINGERPRINT = '19086db5c0a21ce1';
   ok(contractFingerprint() === EXPECTED_FINGERPRINT,
     `the TypeScript fingerprint matches the Rust EXPECTED_FINGERPRINT (got ${contractFingerprint()})`);
   ok(/^[0-9a-f]{16}$/.test(contractFingerprint()), 'the contract fingerprint is a 16-hex-digit value');
