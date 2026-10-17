@@ -70,7 +70,7 @@ ok(!pv.issues.length && pv.rows.length === 4 && pv.rows[0].carat === 0.5 && pv.r
 ok(st.parseStones([{ type: 'other', qty: 2, name: ' Spinel ' }]).rows[0]?.name === 'Spinel', 'REGEL Other mit Namen');
 ok(S(codes([{ type: 'other', qty: 2 }])) === S(['STONE_NAME_REQUIRED']), 'REGEL Other ohne Namen → abgelehnt');
 ok(codes([{ type: 'diamond', qty: 0 }])[0] === 'STONE_QTY_INVALID' && codes([{ type: 'diamond', qty: 1.5 }])[0] === 'STONE_QTY_INVALID'
-  && codes([{ type: 'diamond', qty: 'x' }])[0] === 'STONE_QTY_INVALID' && codes([{ type: 'diamond' }])[0] === 'STONE_QTY_INVALID', 'REGEL Menge ganz und ≥ 1');
+  && codes([{ type: 'diamond', qty: 'x' }])[0] === 'STONE_QTY_INVALID' && codes([{ type: 'diamond', qty: -1 }])[0] === 'STONE_QTY_INVALID', 'REGEL eine angegebene Menge ist ganz und ≥ 1');
 ok(!codes([{ type: 'ruby', qty: 1, carat: '' }]).length, 'REGEL Gesamt-Karat darf leer sein');
 ok(codes([{ type: 'ruby', qty: 1, carat: 0.1234 }])[0] === 'STONE_CARAT_INVALID' && codes([{ type: 'ruby', qty: 1, carat: -1 }])[0] === 'STONE_CARAT_INVALID'
   && codes([{ type: 'ruby', qty: 1, carat: 0 }])[0] === 'STONE_CARAT_INVALID', 'REGEL Karat > 0, höchstens drei Nachkommastellen');
@@ -137,10 +137,10 @@ const ki = st.stonesFromAi([
   { type: 'Diamond', qty: 20, carat: 0.8, color: 'g', clarity: 'vs1', shape: 'Round' },
   { type: 'emerald', qty: 3, carat: 0.45 },
   { type: 'spinel', qty: 2 },
-  { type: 'diamond', carat: 0.5 },              // ohne Stückzahl — nichts erfinden
+  { type: 'diamond', carat: 0.5 },              // ohne Stückzahl — bleibt, ohne erfundene Stückzahl
   { type: 'ruby', qty: 1, color: 'D' },          // Farbe gehört nur zum Diamanten — sie fällt weg, die Zeile bleibt
 ]);
-ok(S(ki) === S([{ type: 'diamond', qty: 20, carat: 0.8, color: 'G', clarity: 'VS1', shape: 'round' }, { type: 'emerald', qty: 3, carat: 0.45 }, { type: 'other', qty: 2, name: 'spinel' }, { type: 'ruby', qty: 1 }]),
+ok(S(ki) === S([{ type: 'diamond', qty: 20, carat: 0.8, color: 'G', clarity: 'VS1', shape: 'round' }, { type: 'emerald', qty: 3, carat: 0.45 }, { type: 'other', qty: 2, name: 'spinel' }, { type: 'diamond', carat: 0.5 }, { type: 'ruby', qty: 1 }]),
   `KI nur Zeilen, die die Prüfung bestehen; nichts erfunden (${S(ki)})`);
 ok(st.stonesFromAi('[{"type":"pearl","qty":12}]').length === 1 && st.stonesFromAi('kaputt').length === 0, 'KI die Liste kommt vom Primary als JSON-Text');
 const kiRes = dn.aiResultForCategory({ brand: 'Ring', attributes: { diamond_weight: 0.9, stones: '[{"type":"diamond","qty":2,"carat":0.4}]', karat: '18K White' } }, GOLD);
@@ -273,7 +273,7 @@ const ohneName = zeileImp({ 'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 1, 'Stone 
 ok(ohneName.status === 'invalid' && ohneName.errors.some((e: string) => e === 'Stones — Stone 3: enter the stone name for "Other".'),
   `IMPORT Other ohne Namen → abgelehnt, Meldung nennt die Spaltengruppe (${S(ohneName.errors)})`);
 for (const [feld, wert, text] of [
-  ['Stone 1 Qty', '2.5', 'quantity must be a whole number'], ['Stone 1 Qty', 0, 'quantity must be a whole number'], ['Stone 1 Qty', '', 'quantity must be a whole number'],
+  ['Stone 1 Qty', '2.5', 'quantity must be a whole number'], ['Stone 1 Qty', 0, 'quantity must be a whole number'],
   ['Stone 1 Carat', 'abc', 'total carat must be a positive number'], ['Stone 1 Carat', 1.2345, 'total carat must be a positive number'], ['Stone 1 Carat', '-1', 'total carat must be a positive number'],
 ] as Array<[string, string | number, string]>) {
   const r = zeileImp({ 'Stone 1 Type': 'Emerald', 'Stone 1 Qty': 3, [feld]: wert });
@@ -361,6 +361,47 @@ ok(/Item Type · Karat & Color/.test(importSeite) && /Gold-Diamond Jewellery<\/s
   'IMPORT-SEITE Vorschau und Spaltenhinweis zeigen die Gold-Felder; Kategorien aus der Datenbank');
 ok(/stonesFromLabels, normalizeStoneAttributes/.test(src('src/core/import/product-import.ts')) && !/STONE_TYPES\.some|DIAMOND_COLORS\.some/.test(src('src/core/import/product-import.ts')),
   'IMPORT keine eigene Steinprüfung — nur die zentrale Regel');
+
+// ── OPTIONAL STONE QTY — die Steinmenge ist für ALLE Steinarten optional ──
+{
+  const ohne = st.STONE_TYPES.map((o) => (o.key === 'other' ? { type: 'other', name: 'Spinel' } : { type: o.key }));
+  const p1 = st.parseStones(ohne);
+  ok(!p1.issues.length && p1.rows.length === st.STONE_TYPES.length && p1.rows.every((r) => !('qty' in r)),
+    `QTY jede Steinart ohne Menge ist gültig und bleibt ohne Menge (${p1.issues.map((i) => i.code).join(',') || p1.rows.length})`);
+  const leer = st.parseStones([{ type: 'ruby', qty: '' }, { type: 'sapphire', qty: null }, { type: 'emerald', qty: '   ' }, { type: 'diamond', qty: undefined, carat: '0.40' }]);
+  ok(!leer.issues.length && S(leer.rows) === S([{ type: 'ruby' }, { type: 'sapphire' }, { type: 'emerald' }, { type: 'diamond', carat: 0.4 }]),
+    `QTY leer / null / Leerzeichen wird nie still 0 oder 1 (${S(leer.rows)})`);
+  const alt = [{ type: 'diamond', qty: 3, carat: 0.5, color: 'G' }, { type: 'ruby', qty: 12 }];
+  const neuGespeichert = st.stonesOrThrow(GOLD, { stones: JSON.parse(JSON.stringify(alt)) } as Record<string, unknown>, { stones: alt });
+  ok(JSON.stringify(neuGespeichert.stones) === JSON.stringify(alt), 'QTY gespeicherte Mengen bleiben beim Bearbeiten byte-gleich (Reihenfolge type, qty, carat)');
+  const geloescht = st.stonesOrThrow(GOLD, { stones: [{ type: 'diamond', qty: '', carat: 0.5, color: 'G' }, { type: 'ruby', qty: 12 }] } as Record<string, unknown>, { stones: alt });
+  ok(S(geloescht.stones) === S([{ type: 'diamond', carat: 0.5, color: 'G' }, { type: 'ruby', qty: 12 }]) && geloescht.diamond_weight === 0.5,
+    'QTY eine Menge verschwindet nur, wenn sie ausdrücklich geleert wird; Diamond Weight bleibt aus dem Karat');
+  ok(st.stoneRowLabel({ type: 'ruby', carat: 0.3 }) === 'Ruby · 0.30 ct' && st.stoneRowLabel({ type: 'pearl' }) === 'Pearl'
+    && st.stoneRowLabel({ type: 'diamond', qty: 1, carat: 0.5 }) === 'Diamond · Qty 1 · 0.50 ct', 'QTY Zeilenanzeige ohne „Qty", wenn keine Menge erfasst ist');
+  ok(st.stonesSummary([{ type: 'ruby' }]) === 'Ruby' && st.stonesSummary([{ type: 'ruby', qty: 2 }, { type: 'ruby' }]) === 'Ruby'
+    && st.stonesSummary([{ type: 'pearl', qty: 12 }]) === 'Pearl ×12' && st.stonesSummary([{ type: 'diamond', carat: 0.5 }, { type: 'diamond', qty: 2, carat: 0.3 }]) === 'Diamond 0.80 ct'
+    && st.stonesSectionSummary(st.readStones([{ type: 'sapphire' }])) === '1 row · Sapphire',
+    'QTY Kurzform erfindet keine Summe: fehlt eine Menge, steht nur die Steinart; Karat-Summen wie bisher');
+  ok(S(st.readStones('[{"type":"onyx"},{"type":"pearl","qty":4}]')) === S([{ type: 'onyx' }, { type: 'pearl', qty: 4 }]), 'QTY gespeicherte Zeilen ohne Menge werden gelesen und angezeigt');
+  const plan = pc.planProductCreate({ categoryId: GOLD, quantity: 1, attributes: { weight: 1, item_type: 'Ring', karat: '18K White', stones: [{ type: 'emerald', qty: '' }] } } as never,
+    { category: kat as never, isSkuTaken: () => false, allocateSku: () => 'X-2' });
+  ok(plan.kind === 'ok' && S((plan.data.attributes as Record<string, unknown>).stones) === S([{ type: 'emerald' }]) && (plan.data as { quantity?: number }).quantity === 1,
+    `QTY Neuanlage mit Stein ohne Menge: gespeichert ohne Menge, Artikelmenge unverändert 1 (${plan.kind})`);
+  const imLeer = zeileImp({ 'Stone 1 Type': 'Ruby', 'Stone 1 Qty': '', 'Stone 1 Carat': 0.3, 'Stone 2 Type': 'Pearl' });
+  ok(imLeer.status === 'new' && S(imLeer.stones) === S([{ type: 'ruby', carat: 0.3 }, { type: 'pearl' }]),
+    `QTY Excel-Import: leere Qty-Spalte ist kein Fehler und wird nicht ausgefüllt (${S(imLeer.stones)} ${S(imLeer.errors)})`);
+  for (const f of [[{ type: 'ruby' }], [{ type: 'diamond', qty: '', carat: 0.5 }], [{ type: 'pearl', qty: null }], [{ type: 'ruby', qty: 0 }], [{ type: 'onyx', qty: '7' }]] as unknown[]) {
+    ok(S(js.parseStones(f)) === S(st.parseStones(f)), `QTY PARITÄT Telefon parseStones ${S(f)}`);
+  }
+  ok(js.stonesSummary([{ type: 'ruby', qty: 2 }, { type: 'ruby' }]) === st.stonesSummary([{ type: 'ruby', qty: 2 }, { type: 'ruby' }])
+    && js.stoneRowLabel({ type: 'ruby', carat: 0.3 }) === st.stoneRowLabel({ type: 'ruby', carat: 0.3 })
+    && S(js.stonesFromAi([{ type: 'Diamond', carat: 0.5 }])) === S(st.stonesFromAi([{ type: 'Diamond', carat: 0.5 }])), 'QTY PARITÄT Telefon Anzeige, Summe, KI ohne Menge');
+  const rsSrc = src('src-tauri/src/sync/mobile_field_schema.rs');
+  ok(/None \| Some\(Value::Null\) => true,\s*Some\(Value::String\(s\)\) if s\.trim\(\)\.is_empty\(\) => true,/.test(rsSrc), 'QTY Rust (Handy-Upload) nimmt eine fehlende oder leere Menge an');
+  ok(!/qty: *1\b|qty: *'1'/.test(src('src/components/products/StonesEditor.tsx')) && /box\._rows\.push\(\{ type: '', qty: '' \}\)/.test(src('src-tauri/src/sync/mobile_page.rs')),
+    'QTY neue Zeilen starten am Rechner und am Telefon mit leerer Menge');
+}
 
 console.log(`\nstones: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }

@@ -2,7 +2,7 @@
 //
 // Dieselbe Struktur, dieselben Listen und dieselbe Prüfung wie `src/core/products/stones.ts` am
 // Rechner/Primary (ein Paritätstest hält beide gleich). Gespeichert wird `attributes.stones`:
-// [{ type, qty, carat?, name?, color?, clarity?, shape? }] — kanonische Schlüssel, Reihenfolge bleibt.
+// [{ type, qty?, carat?, name?, color?, clarity?, shape? }] — kanonische Schlüssel, Reihenfolge bleibt; die Menge ist optional.
 (function (root, factory) {
   const api = factory();
   if (typeof module !== 'undefined' && module.exports) module.exports = api;
@@ -61,7 +61,9 @@
     const rest = String(thousandths % 1000).padStart(3, '0');
     return ganz + '.' + (rest.endsWith('0') ? rest.slice(0, 2) : rest);
   }
+  // OPTIONAL STONE QTY — leer → null (bleibt leer); gültig → Zahl; sonst NaN.
   function qtyOf(v) {
+    if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '')) return null;
     if (typeof v === 'number') return Number.isInteger(v) && v >= 1 && v <= MAX_STONE_QTY ? v : NaN;
     if (typeof v === 'string' && /^\d+$/.test(v.trim())) { const n = Number(v.trim()); return n >= 1 && n <= MAX_STONE_QTY ? n : NaN; }
     return NaN;
@@ -82,12 +84,12 @@
         if (ROW_KEYS.indexOf(k) < 0) issues.push({ row: i, field: k, code: 'STONE_FIELD_UNKNOWN', message: n + 'unknown field "' + k + '".' });
       }
       const type = text(r.type);
-      const out = { type: type, qty: 0 };
+      const out = { type: type };
       if (!type) issues.push({ row: i, field: 'type', code: 'STONE_TYPE_REQUIRED', message: n + 'choose the stone type.' });
       else if (!STONE_TYPES.some((t) => t.key === type)) issues.push({ row: i, field: 'type', code: 'STONE_TYPE_INVALID', message: n + 'unknown stone type "' + type + '".' });
       const qty = qtyOf(r.qty);
-      if (Number.isNaN(qty)) issues.push({ row: i, field: 'qty', code: 'STONE_QTY_INVALID', message: n + 'quantity must be a whole number of at least 1.' });
-      else out.qty = qty;
+      if (Number.isNaN(qty)) issues.push({ row: i, field: 'qty', code: 'STONE_QTY_INVALID', message: n + 'quantity must be a whole number of at least 1 (or left empty).' });
+      else if (qty !== null) out.qty = qty;
       const ct = caratThousandths(r.carat);
       if (Number.isNaN(ct)) issues.push({ row: i, field: 'carat', code: 'STONE_CARAT_INVALID', message: n + 'total carat must be a positive number with at most 3 decimals.' });
       else if (ct !== null) out.carat = ct / 1000;
@@ -148,21 +150,21 @@
   function stoneRowLabel(r) {
     const art = r.type === 'other' ? (r.name || 'Other') : stoneTypeLabel(r.type);
     const t = caratThousandths(r.carat);
-    return [art, 'Qty ' + r.qty, t && !Number.isNaN(t) ? fmtCarat(t) + ' ct' : '',
+    return [art, r.qty !== undefined ? 'Qty ' + r.qty : '', t && !Number.isNaN(t) ? fmtCarat(t) + ' ct' : '',
       r.color || '', r.clarity || '', r.shape ? diamondShapeLabel(r.shape) : ''].filter(Boolean).join(' · ');
   }
   function stonesSummary(rowsOrRaw) {
-    const rows = Array.isArray(rowsOrRaw) && rowsOrRaw.every((r) => r && typeof r === 'object' && 'qty' in r) ? rowsOrRaw : readStones(rowsOrRaw);
+    const rows = readStones(rowsOrRaw);
     const gruppen = [];
     for (const r of rows) {
       const label = r.type === 'other' ? (r.name || 'Other') : stoneTypeLabel(r.type);
       let g = gruppen.find((x) => x.label === label);
       if (!g) { g = { label: label, t: null, qty: 0 }; gruppen.push(g); }
-      g.qty += r.qty;
+      g.qty = g.qty === null || r.qty === undefined ? null : g.qty + r.qty;
       const t = caratThousandths(r.carat);
       if (t !== null && !Number.isNaN(t)) g.t = (g.t === null ? 0 : g.t) + t;
     }
-    return gruppen.map((g) => g.label + ' ' + (g.t !== null ? fmtCarat(g.t) + ' ct' : '×' + g.qty)).join(' · ');
+    return gruppen.map((g) => (g.t !== null ? g.label + ' ' + fmtCarat(g.t) + ' ct' : g.qty !== null ? g.label + ' ×' + g.qty : g.label)).join(' · ');
   }
   function stonesSectionSummary(rows) {
     if (!rows.length) return 'none';

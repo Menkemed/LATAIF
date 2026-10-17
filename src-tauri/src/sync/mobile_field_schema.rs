@@ -364,13 +364,16 @@ fn validate_stones(key: &str, val: &Value) -> Result<(), MetadataError> {
         let typ = stone_text(obj.get("type"));
         if typ.is_empty() { return bad("STONE_TYPE_REQUIRED", format!("stone {n}: stone type is required")); }
         if !STONE_TYPES.contains(&typ.as_str()) { return bad("STONE_TYPE_INVALID", format!("stone {n}: unknown stone type \"{typ}\"")); }
+        // OPTIONAL STONE QTY — die Menge darf fehlen (null oder leer, alle Steinarten); wenn angegeben, ganze Zahl ≥ 1.
         let qty_ok = match obj.get("qty") {
+            None | Some(Value::Null) => true,
+            Some(Value::String(s)) if s.trim().is_empty() => true,
             Some(Value::Number(q)) => q.as_i64().map(|q| (1..=MAX_STONE_QTY).contains(&q)).unwrap_or(false),
             Some(Value::String(s)) => s.trim().parse::<i64>().map(|q| (1..=MAX_STONE_QTY).contains(&q)).unwrap_or(false)
                 && s.trim().bytes().all(|b| b.is_ascii_digit()),
             _ => false,
         };
-        if !qty_ok { return bad("STONE_QTY_INVALID", format!("stone {n}: quantity must be a whole number of at least 1")); }
+        if !qty_ok { return bad("STONE_QTY_INVALID", format!("stone {n}: quantity must be a whole number of at least 1 (or left empty)")); }
         if carat_thousandths(obj.get("carat")).is_err() {
             return bad("STONE_CARAT_INVALID", format!("stone {n}: total carat must be a positive number with at most 3 decimals"));
         }
@@ -661,7 +664,12 @@ mod tests {
             { "type": "diamond", "qty": 20, "carat": 0.3 },
             { "type": "emerald", "qty": 3, "carat": "0.45" },
             { "type": "other", "qty": 2, "name": "Spinel" },
-            { "type": "", "qty": null }
+            { "type": "", "qty": null },
+            // OPTIONAL STONE QTY — ohne Menge (fehlt, null oder leer) ist für jede Steinart gültig.
+            { "type": "ruby" },
+            { "type": "pearl", "qty": "" },
+            { "type": "sapphire", "qty": null, "carat": "0.2" },
+            { "type": "other", "name": "Tsavorite" }
         ]));
         assert_eq!(validate_metadata(&ok, 2), Ok(()));
         let code = |v: Value| validate_metadata(&v, 2).unwrap_err().code;
@@ -669,6 +677,8 @@ mod tests {
         assert_eq!(code(gold(json!([{ "type": "emerald", "qty": 1, "color": "G" }]))), "STONE_DIAMOND_ONLY");
         assert_eq!(code(gold(json!([{ "type": "diamond", "qty": 0 }]))), "STONE_QTY_INVALID");
         assert_eq!(code(gold(json!([{ "type": "diamond", "qty": 1.5 }]))), "STONE_QTY_INVALID");
+        assert_eq!(code(gold(json!([{ "type": "diamond", "qty": "x" }]))), "STONE_QTY_INVALID");
+        assert_eq!(code(gold(json!([{ "type": "diamond", "qty": -2 }]))), "STONE_QTY_INVALID");
         assert_eq!(code(gold(json!([{ "type": "diamond", "qty": 1, "carat": 0.1234 }]))), "STONE_CARAT_INVALID");
         assert_eq!(code(gold(json!([{ "type": "Diamond", "qty": 1 }]))), "STONE_TYPE_INVALID");
         assert_eq!(code(gold(json!([{ "type": "diamond", "qty": 1, "size_mm": 3 }]))), "STONE_FIELD_UNKNOWN");

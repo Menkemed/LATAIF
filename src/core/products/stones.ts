@@ -5,9 +5,9 @@
 // genau diese Struktur — für Collection, Einkauf, Kommission, Bearbeiten, Reparatur und die KI.
 //
 // Gespeichert in `attributes.stones` als geordnete Liste:
-//   { type, qty, carat?, name?, color?, clarity?, shape? }
+//   { type, qty?, carat?, name?, color?, clarity?, shape? }
 //   • type    — kanonischer Schlüssel aus STONE_TYPES (nie die Anzeige-Bezeichnung)
-//   • qty     — ganze Zahl ≥ 1
+//   • qty     — optional (alle Steinarten): leer bleibt leer, nie still 0 oder 1; wenn angegeben, ganze Zahl ≥ 1
 //   • carat   — optional, Gesamt-Karat der Zeile, > 0, höchstens 3 Nachkommastellen
 //   • name    — nur und genau bei type = 'other'
 //   • color / clarity / shape — nur bei type = 'diamond', optional, aus festen Listen
@@ -67,7 +67,8 @@ export const MAX_STONE_NAME = 60;
 
 export interface StoneRow {
   type: string;
-  qty: number;
+  /** OPTIONAL STONE QTY — fehlt, wenn die Menge nicht erfasst ist (nie 0 oder 1 als Ersatz). */
+  qty?: number;
   carat?: number;
   name?: string;
   color?: string;
@@ -111,7 +112,9 @@ export function fmtCarat(thousandths: number): string {
   return ganz + '.' + (rest.endsWith('0') ? rest.slice(0, 2) : rest);
 }
 
-function qtyOf(v: unknown): number {
+/** Leer → null (bleibt leer); gültig → Zahl; sonst NaN. */
+function qtyOf(v: unknown): number | null {
+  if (v === undefined || v === null || (typeof v === 'string' && v.trim() === '')) return null;
   if (typeof v === 'number') return Number.isInteger(v) && v >= 1 && v <= MAX_STONE_QTY ? v : NaN;
   if (typeof v === 'string' && /^\d+$/.test(v.trim())) {
     const n = Number(v.trim());
@@ -143,12 +146,12 @@ export function parseStones(raw: unknown): { rows: StoneRow[]; issues: StoneIssu
       if (!ROW_KEYS.includes(k)) issues.push({ row: i, field: k, code: 'STONE_FIELD_UNKNOWN', message: n + `unknown field "${k}".` });
     }
     const type = text(r.type);
-    const out: StoneRow = { type, qty: 0 };
+    const out: StoneRow = { type };
     if (!type) issues.push({ row: i, field: 'type', code: 'STONE_TYPE_REQUIRED', message: n + 'choose the stone type.' });
     else if (!STONE_TYPES.some((t) => t.key === type)) issues.push({ row: i, field: 'type', code: 'STONE_TYPE_INVALID', message: n + `unknown stone type "${type}".` });
     const qty = qtyOf(r.qty);
-    if (Number.isNaN(qty)) issues.push({ row: i, field: 'qty', code: 'STONE_QTY_INVALID', message: n + 'quantity must be a whole number of at least 1.' });
-    else out.qty = qty;
+    if (Number.isNaN(qty)) issues.push({ row: i, field: 'qty', code: 'STONE_QTY_INVALID', message: n + 'quantity must be a whole number of at least 1 (or left empty).' });
+    else if (qty !== null) out.qty = qty;
     const ct = caratThousandths(r.carat);
     if (Number.isNaN(ct)) issues.push({ row: i, field: 'carat', code: 'STONE_CARAT_INVALID', message: n + 'total carat must be a positive number with at most 3 decimals.' });
     else if (ct !== null) out.carat = ct / 1000;
@@ -255,27 +258,27 @@ export function diamondWeightInfo(attributes: Record<string, unknown> | null | u
 export function stoneRowLabel(r: StoneRow): string {
   const art = r.type === 'other' ? (r.name || 'Other') : stoneTypeLabel(r.type);
   const t = caratThousandths(r.carat);
-  return [art, 'Qty ' + r.qty, t && !Number.isNaN(t) ? fmtCarat(t) + ' ct' : '',
+  return [art, r.qty !== undefined ? 'Qty ' + r.qty : '', t && !Number.isNaN(t) ? fmtCarat(t) + ' ct' : '',
     r.color || '', r.clarity || '', r.shape ? diamondShapeLabel(r.shape) : ''].filter(Boolean).join(' · ');
 }
 
 /**
  * Kurzform für Listen und Dokumente: je Steinart (bei Other je Name) die Karat-Summe, sonst die
  * Stückzahl — „Diamond 0.80 ct · Emerald 0.45 ct", „Pearl ×12". Reihenfolge des ersten Auftretens.
+ * OPTIONAL STONE QTY — fehlt bei einer Zeile der Gruppe die Menge, steht nur die Steinart da (keine erfundene Summe).
  */
 export function stonesSummary(rowsOrRaw: readonly StoneRow[] | unknown): string {
-  const rows = Array.isArray(rowsOrRaw) && rowsOrRaw.every((r) => r && typeof r === 'object' && 'qty' in r)
-    ? rowsOrRaw as StoneRow[] : readStones(rowsOrRaw);
-  const gruppen: Array<{ label: string; t: number | null; qty: number }> = [];
+  const rows = readStones(rowsOrRaw);
+  const gruppen: Array<{ label: string; t: number | null; qty: number | null }> = [];
   for (const r of rows) {
     const label = r.type === 'other' ? (r.name || 'Other') : stoneTypeLabel(r.type);
     let g = gruppen.find((x) => x.label === label);
     if (!g) { g = { label, t: null, qty: 0 }; gruppen.push(g); }
-    g.qty += r.qty;
+    g.qty = g.qty === null || r.qty === undefined ? null : g.qty + r.qty;
     const t = caratThousandths(r.carat);
     if (t !== null && !Number.isNaN(t)) g.t = (g.t ?? 0) + t;
   }
-  return gruppen.map((g) => g.label + ' ' + (g.t !== null ? fmtCarat(g.t) + ' ct' : '×' + g.qty)).join(' · ');
+  return gruppen.map((g) => (g.t !== null ? g.label + ' ' + fmtCarat(g.t) + ' ct' : g.qty !== null ? g.label + ' ×' + g.qty : g.label)).join(' · ');
 }
 
 /** Geschlossene Zusammenfassung des Abschnitts: „3 rows · Diamond 0.80 ct · Emerald 0.45 ct". */
@@ -294,7 +297,7 @@ export function stonesSearchText(raw: unknown): string {
 /**
  * KI-Vorschläge: nur Zeilen, die die Prüfung bestehen; ein Stein wird über seine Bezeichnung
  * erkannt („Diamond" → diamond, unbekannt → Other mit Namen). Nichts wird erfunden — was fehlt,
- * bleibt leer; eine Zeile ohne erkennbare Stückzahl entfällt.
+ * bleibt leer (auch die Stückzahl); eine unlesbare Stückzahl lässt die Zeile entfallen.
  */
 export function stonesFromAi(raw0: unknown): StoneRow[] {
   let raw = raw0;

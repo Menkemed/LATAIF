@@ -569,7 +569,7 @@ export function importTemplate(): { items: Array<Array<string | number>>; help: 
     ['Each stone has its own column group: Stone 1 Type, Stone 1 Qty, Stone 1 Carat, Stone 1 Color, Stone 1 Clarity, Stone 1 Shape, Stone 1 Name.'],
     [`For more stones add the same columns with the next number (Stone 4 Type, Stone 4 Qty, …) — up to ${MAX_STONE_ROWS} stones per item.`],
     ['Type — ' + liste(STONE_TYPES) + '.'],
-    ['Qty — whole number of stones in that row (required). Carat — total carat of that row (optional, up to 3 decimals).'],
+    ['Qty — whole number of stones in that row (optional; leave it empty if unknown — it is not filled in). Carat — total carat of that row (optional, up to 3 decimals).'],
     ['Color, Clarity, Shape — only for Diamond (optional). Color: ' + liste(DIAMOND_COLORS) + '. Clarity: ' + liste(DIAMOND_CLARITIES) + '. Shape: ' + liste(DIAMOND_SHAPES) + '.'],
     ['Name — only for Other, and required there (e.g. Tsavorite).'],
     ['Diamond Weight is calculated from the diamond rows with carat. Older files with only a Diamond Weight column still import; no stone rows are created from it.'],

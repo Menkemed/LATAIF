@@ -11,7 +11,8 @@ import {
 } from '@/core/products/stones';
 
 /** Eine Zeile, wie sie in der Maske steht (Menge/Karat noch als Text möglich). */
-export interface StoneDraft { type: string; qty: string | number; carat?: string | number; name?: string; color?: string; clarity?: string; shape?: string }
+/** OPTIONAL STONE QTY — die Menge darf leer bleiben (alle Steinarten). */
+export interface StoneDraft { type: string; qty?: string | number; carat?: string | number; name?: string; color?: string; clarity?: string; shape?: string }
 
 const leerZeile = (): StoneDraft => ({ type: '', qty: '' });
 
