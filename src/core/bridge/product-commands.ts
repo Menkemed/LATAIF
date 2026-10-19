@@ -61,6 +61,7 @@ import {
   type StagingOwner, type StagedMediaReader,
 } from './remote-create-support';
 import { planProductCreate, productCreateRefusal } from '@/core/products/product-create';
+import { SKU_TAKEN, skuTakenMessage } from '@/core/products/sku-unique';
 
 // R5B — die Bausteine der Zwischenablage wohnen jetzt in `remote-create-support` (die Kommission
 // braucht dieselben). Die Namen bleiben hier erreichbar, damit kein Leser umziehen muss.
@@ -390,6 +391,8 @@ export async function runProductCreate(
       // Mal einreihen, sonst wartet sie auf sich selbst.
       { alreadySerialised: true },
     );
+    // SKU-UNIQUE — die SKU wurde beim Schreiben abgewiesen: ein Urteil über DIESE Anfrage, nichts wurde angelegt.
+    if (result.status === 'product_save_failed' && result.errorCode === SKU_TAKEN) throw new CommandRejected(SKU_TAKEN, skuTakenMessage(sku));
     if (result.status !== 'created') {
       // Ein halbes Produkt wird nicht eingefroren. Der Wurf rollt die ganze Transaktion zurück —
       // es bleibt nichts Durables, und derselbe Auftrag darf mit DERSELBEN Kennung wiederholt

@@ -35,7 +35,10 @@ const JEWELLERY = ['cat-gold-jewelry', 'cat-branded-gold-jewelry', 'cat-original
 const mitPlatin = (t: string): string => t
   .replace('14K Mix, Silver}', '14K Mix, Silver, Platinum}')
   .replace('Silver for non-gold silver items.', 'Silver for non-gold silver items. Platinum for platinum pieces (one value, no 950/999 — never a gold karat).')
-  .replace('only Yellow; Silver for non-gold)', 'only Yellow; Silver for non-gold silver; Platinum for platinum — one value, no 950/999)');
+  .replace('only Yellow; Silver for non-gold)', 'only Yellow; Silver for non-gold silver; Platinum for platinum — one value, no 950/999)')
+  // PENDANT (19.10.2026) — keine eigene Schmuckart mehr: aus der Liste, und der Hinweis „ein Anhänger ist Necklace".
+  .replace('Necklace, Pendant, Earrings, Brooch, Bar, Coin} (Bar/Coin for investment-grade pieces).', 'Necklace, Earrings, Brooch, Bar, Coin} (Bar/Coin for investment-grade pieces). A pendant (with or without a chain) is Necklace — there is no separate Pendant type.')
+  .replace('Necklace, Pendant, Earrings, Brooch}.', 'Necklace, Earrings, Brooch}. A pendant (with or without a chain) is Necklace — there is no separate Pendant type.');
 
 /** Rebuild the prompt the way the released file built it, straight from that file's text. */
 function releasedPrompts(): Record<string, { system: string; userPlain: string; userHints: string }> {
@@ -107,7 +110,7 @@ for (const id of knownCategoryIds()) {
     : ref.system;
   // PLATINUM — die bewusste Abweichung bei allen drei Schmuck-Kategorien; jede Ersetzung muss genau greifen.
   const soll = JEWELLERY.includes(id) ? mitPlatin(sollOhnePlatin) : sollOhnePlatin;
-  if (JEWELLERY.includes(id)) ok(soll !== sollOhnePlatin && soll.includes('14K Mix, Silver, Platinum}'), `§2 ${id}: the Platinum delta applies to the released prompt`);
+  if (JEWELLERY.includes(id)) ok(soll !== sollOhnePlatin && soll.includes('14K Mix, Silver, Platinum}') && !soll.includes('Necklace, Pendant') && soll.includes('there is no separate Pendant type'), `§2 ${id}: the Platinum and Pendant deltas apply to the released prompt`);
   ok(sys === soll,
     `§2 ${id}: system prompt is character-identical to ${RELEASED}` +
     (sys === soll ? '' : ` (len ${sys.length} vs ${soll.length})`));
@@ -218,7 +221,8 @@ for (const id of knownCategoryIds()) {
   // DISPLAY-NAME — war 0c33a03188de4b83; der Gold-Hinweis (keine Marke) hat ihn einmal und bewusst bewegt.
   // STONES — war 99b2eeedc75bb347; die Steinliste statt diamond_weight hat ihn einmal und bewusst bewegt.
   // PLATINUM — war ba9af9c515fa5ce1; „Platinum" in den drei Schmuck-Hinweisen hat ihn einmal und bewusst bewegt.
-  const EXPECTED_FINGERPRINT = '19086db5c0a21ce1';
+  // PENDANT — war 19086db5c0a21ce1; „Pendant" aus den Schmuck-Listen (ein Anhänger ist Necklace) hat ihn einmal und bewusst bewegt.
+  const EXPECTED_FINGERPRINT = 'f7bb796b6a5919cc';
   ok(contractFingerprint() === EXPECTED_FINGERPRINT,
     `the TypeScript fingerprint matches the Rust EXPECTED_FINGERPRINT (got ${contractFingerprint()})`);
   ok(/^[0-9a-f]{16}$/.test(contractFingerprint()), 'the contract fingerprint is a 16-hex-digit value');

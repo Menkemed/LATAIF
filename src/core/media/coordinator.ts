@@ -14,6 +14,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 import { evaluatePriceEligibility, touchesPriceColumns } from '../products/price-eligibility.ts';
+import { assertSkuFree } from '../products/sku-unique.ts';
 import { enterTransaction, leaveNestedTransaction, resetTransactionContext, isTransactionActive } from '../db/transaction-context.ts';
 import { isTransactionUnhealthy } from '../db/transaction-health.ts';
 import { assertOwnerKind, type MediaSecurityClass } from './media-owner.ts';
@@ -1406,6 +1407,10 @@ export class MediaDbCoordinator {
         throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MOBILE_PRICE_NOT_ELIGIBLE');
       }
     }
+    // SKU-UNIQUE — im selben Schritt wie das UPDATE: eine geänderte SKU, die schon an einem anderen Artikel steht,
+    // wird nie geschrieben (die Transaktion rollt zurück, nichts wird durabel).
+    const skuNeu = pe.set.find(([c]) => c === 'sku');
+    if (skuNeu) assertSkuFree((sql) => allRows(this.db, sql), skuNeu[1], ctx.entityId);
     const parts: string[] = pe.set.map(([c]) => `${c} = ?`);
     const vals: unknown[] = pe.set.map(([, v]) => v);
     if (pe.invalidateImageDerived) parts.push('image_hash = NULL', 'image_description = NULL', 'image_embedding = NULL');

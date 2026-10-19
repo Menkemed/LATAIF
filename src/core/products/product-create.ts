@@ -14,6 +14,7 @@
 import { validateProductFields, blockingIssues, stripStaleAttributes } from './field-contract';
 import { normalizeStoneAttributes } from './stones';
 import { skuIsEmpty } from './sku-allocation';
+import { retiredChoiceIssues, CHOICE_RETIRED } from './retired-choices';
 import { PRODUCT_CREATE_FIELDS, createPayload } from '@/core/data/write-payloads';
 import type { Category, Product } from '@/core/models/types';
 
@@ -42,9 +43,11 @@ export type ProductCreatePlan =
  * sind dieselbe Nummer, sonst schlüpft die zweite an jeder Prüfung vorbei.
  */
 export function planProductCreate(input: Partial<Product>, port: ProductCreatePort, reuseSku = ''): ProductCreatePlan {
-  const issues = blockingIssues(validateProductFields(port.category ?? undefined, {
+  const issues = [...blockingIssues(validateProductFields(port.category ?? undefined, {
     categoryId: input.categoryId, brand: input.brand, name: input.name, attributes: input.attributes,
-  }));
+  })),
+  // RETIRED-CHOICES — ein ausgemusterter Wert (Pendant) wird an keinem neuen Artikel gespeichert (KI, Copy details …).
+  ...retiredChoiceIssues(input.attributes as Record<string, unknown> | undefined, port.category)];
   if (issues.length > 0) {
     return { kind: 'invalid', issues: issues.map((i) => ({ field: i.field, label: i.label, code: i.code, ...(i.message ? { message: i.message } : {}) })) };
   }
@@ -69,6 +72,8 @@ export function planProductCreate(input: Partial<Product>, port: ProductCreatePo
 export function productCreateRefusal(plan: Exclude<ProductCreatePlan, { kind: 'ok' }>): { code: string; message: string } {
   if (plan.kind === 'sku_taken') return { code: 'SKU_TAKEN', message: `The SKU / reference ${plan.sku} is already in use.` };
   if (plan.issues.some((i) => i.code === 'UNKNOWN_CATEGORY')) return { code: 'CATEGORY_NOT_FOUND', message: 'No such category.' };
+  const ausgemustert = plan.issues.find((i) => i.code === CHOICE_RETIRED);
+  if (ausgemustert) return { code: CHOICE_RETIRED, message: ausgemustert.message || 'This choice is no longer available.' };
   const stein = plan.issues.find((i) => i.code === 'STONES_INVALID');
   if (stein) return { code: 'STONES_INVALID', message: stein.message || 'The stone list is not valid.' };
   return { code: 'PRODUCT_FIELDS_REQUIRED', message: `Required: ${plan.issues.map((i) => i.label).join(', ')}` };

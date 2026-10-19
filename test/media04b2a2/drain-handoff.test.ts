@@ -18,6 +18,7 @@ import { applyMediaSchema, MEDIA_ENTITY_SCOPE } from '../../src/core/db/media-sc
 import { StockMediaOrchestrator, type OrchestratorLease, type OrchestratorRawDb } from '../../src/core/media/orchestrator.ts';
 import { ProductMediaResolver } from '../../src/core/media/product-media-resolver.ts';
 import { createProductWithDurableMedia } from '../../src/core/media/product-media-create.ts';
+import { assertSkuFree, SkuTakenError, SKU_TAKEN } from '../../src/core/products/sku-unique.ts';
 import type {
   AbortInput, AbortResult, CommitInput, CommitResult, MediaBytes,
   MediaCommandGateway, PrepareInput, PrepareResult, ReadVerifiedInput, RecoveryOutcome,
@@ -153,8 +154,9 @@ class FakeBridge implements MobileUploadBridge {
   async release(u: string, ev: string, tok: string): Promise<boolean> {
     const j = this.find(ev, u); if (j && j.state === 'processing' && j.claimToken === tok) { j.state = 'accepted'; j.claimToken = ''; return true; } return false;
   }
-  async markQuarantined(u: string, ev: string, tok: string, _code: string): Promise<boolean> {
-    const j = this.find(ev, u); if (j && j.state === 'processing' && j.claimToken === tok) { j.state = 'quarantined'; j.claimToken = ''; return true; } return false;
+  lastQuarantineCode = '';
+  async markQuarantined(u: string, ev: string, tok: string, code: string): Promise<boolean> {
+    const j = this.find(ev, u); if (j && j.state === 'processing' && j.claimToken === tok) { j.state = 'quarantined'; j.claimToken = ''; this.lastQuarantineCode = code; return true; } return false;
   }
   async markReady(u: string, ev: string, tok: string, entityId: string, ph: string, productId: string): Promise<ReadyResult> {
     const j = this.find(ev, u);
@@ -165,7 +167,7 @@ class FakeBridge implements MobileUploadBridge {
   stateOf(ev: string, u = 'user-origin') { return this.find(ev, u)?.state; }
 }
 
-function makeDeps(db: any, gw: FakeGateway, disk: Disk, bridge: FakeBridge, opts: { scope?: { tenantId: string; branchId: string } | null; badBrand?: boolean; scopeBlocked?: boolean; bindingRevision?: () => number } = {}): MobileDrainDeps {
+function makeDeps(db: any, gw: FakeGateway, disk: Disk, bridge: FakeBridge, opts: { scope?: { tenantId: string; branchId: string } | null; badBrand?: boolean; scopeBlocked?: boolean; bindingRevision?: () => number; skuGuard?: boolean } = {}): MobileDrainDeps {
   const scope = opts.scope === undefined ? { tenantId: 't1', branchId: 'b1' } : opts.scope;
   return {
     bridge, claimantInstanceId: 'worker-1',
@@ -218,9 +220,13 @@ function makeDeps(db: any, gw: FakeGateway, disk: Disk, bridge: FakeBridge, opts
       const meta = JSON.parse(g.metadataJson) as Record<string, string>;
       const brand = opts.badBrand ? 'WRONG-BRAND' : (meta.brand ?? '');
       const orch = new StockMediaOrchestrator({ gateway: gw, leaseFactory: () => leaseFor(db, disk) });
-      return createProductWithDurableMedia(g.entityId, { kind: 'prepared_media', items: prepared }, {
+      // SKU-UNIQUE — `skuGuard` bildet die Store-Aktion nach (productStore.createProductWithMedia): Prüfung gegen die
+      // Datenbank im insertProductRow, SkuTakenError → product_save_failed/SKU_TAKEN. Ohne `skuGuard`: der alte Stand.
+      const rows = (sql: string) => { const r = db.exec(sql); return r.length ? r[0].values.map((v: unknown[]) => Object.fromEntries(r[0].columns.map((c: string, i: number) => [c, v[i]]))) : []; };
+      try {
+      return await createProductWithDurableMedia(g.entityId, { kind: 'prepared_media', items: prepared }, {
         productExists: (pid: string) => count(db, `SELECT COUNT(*) FROM products WHERE id=?`, [pid]) > 0,
-        insertProductRow: (pid: string) => { db.run(`INSERT INTO products (id, branch_id, images, brand, name, category_id, sku, attributes) VALUES (?, 'b1', '[]', ?, ?, ?, ?, ?)`, [pid, brand, meta.name ?? '', meta.categoryId ?? '', meta.sku ?? null, JSON.stringify((meta as any).attributes ?? {})]); },
+        insertProductRow: (pid: string) => { if (opts.skuGuard) assertSkuFree(rows, meta.sku); db.run(`INSERT INTO products (id, branch_id, images, brand, name, category_id, sku, attributes) VALUES (?, 'b1', '[]', ?, ?, ?, ?, ?)`, [pid, brand, meta.name ?? '', meta.categoryId ?? '', meta.sku ?? null, JSON.stringify((meta as any).attributes ?? {})]); },
         recordDurableInsert: (pid: string) => {
           db.run(`INSERT INTO sync_changelog (table_name, record_id, action) VALUES ('products', ?, 'insert')`, [pid]);
           db.run(`INSERT INTO audit_log (entity_type, entity_id) VALUES ('products', ?)`, [pid]);
@@ -244,6 +250,10 @@ function makeDeps(db: any, gw: FakeGateway, disk: Disk, bridge: FakeBridge, opts
         prepareAndRegisterBatch: (items: any[]) => orch.prepareAndRegisterBatch(items),
         finalizeBatch: (items: any[]) => orch.finalizeBatch(items),
       });
+      } catch (e) {
+        if (e instanceof SkuTakenError) return { status: 'product_save_failed', productId: g.entityId, errorCode: SKU_TAKEN };
+        throw e;
+      }
     },
     verifyReady: async (g): Promise<ReadyVerdict> => {
       const r = await new ProductMediaResolver({ dbProvider: () => db, gateway: gw, tenantId: 't1', branchId: 'b1' }).resolveProductMedia(g.entityId);
@@ -600,6 +610,35 @@ async function main(): Promise<void> {
     ok(orderOf(db, 'prod-20') === '0,1' && productImages(db, 'prod-20') === '[]', 'both photos in the gallery, none lost');
     ok(count(db, `SELECT COUNT(*) FROM media_ingest_jobs WHERE requested_entity_id='prod-20'`) === 2, 'one create batch (2 jobs), not two');
     ok((await bridge.markReady('user-origin', 'ev-20', gA!.claimToken, 'prod-20', 'ph-ev-20', 'prod-20')) === 'already_ready', 'a late stale ready after B changes nothing (idempotent)');
+    db.close();
+  }
+
+  // ── SKU-UNIQUE — eine am Telefon eingetippte SKU, die schon an einem Artikel steht ─────────────────────────────
+  // Negativkontrolle (alter Stand, ohne Prüfung): der Upload legt einen ZWEITEN Artikel mit derselben SKU an.
+  // Mit der Prüfung: nichts angelegt, der Auftrag endgültig beiseitegelegt (MOBILE_UPLOAD_SKU_TAKEN), kein Endlos-Retry.
+  for (const guard of [false, true]) {
+    const { db, gw, disk, bridge } = freshEnv(SQL);
+    db.run(`INSERT INTO products (id, branch_id, images, brand, name, category_id, sku, attributes) VALUES ('prod-old', 'b1', '[]', 'Roberto Coin', 'Black', 'cat-watch', 'RC-1226V1', '{}')`);
+    const meta = JSON.stringify({ ...JSON.parse(META), sku: ' rc-1226v1 ' });
+    bridge.seedAccepted('ev-sku', 'prod-new', ['a'], { metadataJson: meta });
+    const outs = await drainMobileUploads(makeDeps(db, gw, disk, bridge, { skuGuard: guard }));
+    const gleiche = count(db, `SELECT COUNT(*) FROM products WHERE UPPER(TRIM(sku)) = 'RC-1226V1'`);
+    if (!guard) {
+      ok(outs[0].code === 'ready' && gleiche === 2, `SKU ohne Prüfung (alter Stand): Handy-Upload legt einen zweiten Artikel mit derselben SKU an (${outs[0].code}, ${gleiche})`);
+    } else {
+      ok(outs[0].code === 'manifest_invalid' && outs[0].detail === 'MOBILE_UPLOAD_SKU_TAKEN', `SKU mit Prüfung: abgewiesen (${outs[0].code} ${outs[0].detail ?? ''})`);
+      ok(gleiche === 1 && count(db, `SELECT COUNT(*) FROM products WHERE id='prod-new'`) === 0, 'SKU: kein zweiter Artikel angelegt');
+      ok(bridge.stateOf('ev-sku') === 'quarantined' && bridge.lastQuarantineCode === 'MOBILE_UPLOAD_SKU_TAKEN', 'SKU: Auftrag endgültig beiseitegelegt, mit festem Code');
+      ok(count(db, `SELECT COUNT(*) FROM mobile_upload_receipts WHERE upload_event_id='ev-sku'`) === 0
+        && count(db, `SELECT COUNT(*) FROM sync_changelog WHERE record_id='prod-new'`) === 0 && count(db, `SELECT COUNT(*) FROM audit_log WHERE entity_id='prod-new'`) === 0,
+        'SKU: kein Beleg, kein Abgleich-, kein Protokolleintrag');
+      const nochmal = await drainMobileUploads(makeDeps(db, gw, disk, bridge, { skuGuard: true }));
+      ok(nochmal.length === 0 || nochmal.every((o) => o.code === 'idle'), `SKU: ein weiterer Lauf holt den Auftrag nicht wieder (${JSON.stringify(nochmal)})`);
+      // Eine freie SKU geht weiter durch.
+      bridge.seedAccepted('ev-sku-frei', 'prod-frei', ['b'], { metadataJson: JSON.stringify({ ...JSON.parse(META), sku: 'RC-1226V2' }) });
+      const frei = await drainMobileUploads(makeDeps(db, gw, disk, bridge, { skuGuard: true }));
+      ok(frei[0].code === 'ready' && count(db, `SELECT COUNT(*) FROM products WHERE sku='RC-1226V2'`) === 1, `SKU: eine freie SKU wird angelegt (${frei[0].code})`);
+    }
     db.close();
   }
 

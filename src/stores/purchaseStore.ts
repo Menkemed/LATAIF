@@ -15,6 +15,7 @@ import type { Purchase, PurchaseLine, PurchasePayment, PurchaseStatus, PurchaseR
 import { identityDocumentFor, supplierLegacyIdPhoto } from '@/core/identity/identity-media';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
+import { assertSkuFree } from '@/core/products/sku-unique';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — Line-Tabellen
 import { getAvailableStock, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
@@ -412,6 +413,8 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
           productId = created.id;
         } else {
           // Legacy-Pfad: nur Brand/Name/SKU/Kategorie aus Inline-Eingabe.
+          // SKU-UNIQUE — dieselbe Prüfung gegen die Datenbank wie jeder andere Anlegeweg.
+          assertSkuFree(query, ln.newProductSku);
           productId = uuid();
           const pNow = new Date().toISOString();
           db.run(

@@ -33,7 +33,7 @@ import { presentationToResolverStatus, editSaveFailsClosed, type ResolverStatus 
 import { validateProductFields, blockingIssues, stripStaleAttributes, isBrandRequired, editableAttributes } from '@/core/products/field-contract';
 import { identifyProductFromResolvedInput } from '@/core/ai/identify-adapter';
 import { buildAiAttributePatch, buildAiFormPatch, type FormLike } from '@/core/ai/edit-merge';
-import { applyChoiceSelection } from '@/core/products/choice-value';
+import { applyChoiceSelection, optionsWithStored } from '@/core/products/choice-value';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import { StockCheckPanel } from '@/components/products/StockCheckPanel';
@@ -1411,7 +1411,7 @@ export function ProductDetail() {
                         <div key={attr.key} id={`field-${errKey}`} style={{ padding: hasErr ? 8 : '8px 0', border: hasErr ? '1px solid #DC2626' : undefined, borderBottom: hasErr ? '1px solid #DC2626' : '1px solid #E5E9EE', borderRadius: hasErr ? 8 : 0 }}>
                           <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 4 }}>{attr.label}{reqMark}</span>
                           <div className="flex flex-wrap gap-1">
-                            {attr.options.map(opt => (
+                            {optionsWithStored(attr.options, formAttrs[attr.key]).map(opt => (
                               <button key={opt} onClick={() => { setFormAttrs(a => applyChoiceSelection(a, attr.key, opt) as typeof a); if (hasErr) setErrors({ ...errors, [errKey]: '' }); }}
                                 className="cursor-pointer" style={{
                                   padding: '3px 8px', fontSize: 11, borderRadius: 4, border: 'none',

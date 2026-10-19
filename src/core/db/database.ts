@@ -440,7 +440,7 @@ function runMigrations(database: Database): void {
     `UPDATE categories SET name = 'Gold-Diamond Jewellery', condition_options = '["Pre-Owned","Vintage"]', attributes = '[
       {"key":"weight","label":"Weight","type":"number","unit":"g","required":true,"showInList":true},
       {"key":"diamond_weight","label":"Diamond Weight","type":"number","unit":"ct","required":false,"showInList":true},
-      {"key":"item_type","label":"Item Type","type":"select","options":["Ring","Bangle","Bracelet","Necklace","Pendant","Earrings","Brooch","Bar","Coin"],"required":true,"showInList":true},
+      {"key":"item_type","label":"Item Type","type":"select","options":["Ring","Bangle","Bracelet","Necklace","Earrings","Brooch","Bar","Coin"],"required":true,"showInList":true},
       {"key":"karat","label":"Karat & Color","type":"select","options":["24K Yellow","22K Yellow","21K Yellow","18K Yellow","18K Rose","18K White","18K Mix","14K Yellow","14K Rose","14K White","14K Mix","Silver","Platinum"],"required":true,"showInList":true},
       {"key":"description","label":"Description","type":"text","required":false,"showInList":false}
     ]' WHERE id = 'cat-gold-jewelry'`,

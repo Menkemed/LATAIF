@@ -13,6 +13,7 @@
 import type { TaxScheme, CategoryAttribute } from '@/core/models/types';
 import { DEFAULT_CATEGORIES } from '../models/default-categories.ts';
 import { productDisplayName } from '../products/display-name.ts';
+import { retiredReplacement } from '../products/retired-choices.ts';
 // STONES — Bedeutung und Prüfung der Steinzeilen kommen aus der EINEN Steinregel (Rechner/Telefon/Primary).
 // Relativer Pfad: dieser Baustein läuft auch headless ohne Alias-Auflösung (test/x3).
 import {
@@ -347,7 +348,12 @@ function classifyRow(row: RawRow, idx: number, opts: ClassifyOptions, runningInd
   const itemTypeRaw = gold ? cleanStr(getCol(row, ...ITEM_TYPE_COLUMNS)) : '';
   const karatColorRaw = gold ? cleanStr(getCol(row, ...KARAT_COLOR_COLUMNS)) : '';
   const karatAltRaw = gold ? cleanStr(getCol(row, 'Karat', 'Carat')) : '';
-  const itemType = itemTypeRaw ? itemTypeOption(itemTypeRaw, optionsOf(katAttrs, 'item_type')) || '' : '';
+  const itemTypeDirekt = itemTypeRaw ? itemTypeOption(itemTypeRaw, optionsOf(katAttrs, 'item_type')) || '' : '';
+  // RETIRED-CHOICES — „Pendant" ist keine eigene Schmuckart mehr (Owner 19.10.2026): wird Necklace, sichtbar — Warnung,
+  // und die Angabe der Datei bleibt wörtlich in der Notiz. Nie still, und nur wenn die Kategorie den Ersatz anbietet.
+  const itemTypeErsatz = !itemTypeDirekt && itemTypeRaw ? retiredReplacement('item_type', itemTypeRaw) : null;
+  const itemType = itemTypeDirekt || (itemTypeErsatz && optionsOf(katAttrs, 'item_type').includes(itemTypeErsatz) ? itemTypeErsatz : '');
+  const itemTypeUmgestellt = !itemTypeDirekt && !!itemType;
   const karatQuelle = karatColorRaw || [karatAltRaw, material].filter(Boolean).join(' ');
   const karatColor = gold && karatQuelle ? karatColorOption(karatQuelle, optionsOf(katAttrs, 'karat')) || '' : '';
   // PLATINUM / SILVER — „Platinum 950", „PT999", „Silver 925", „Sterling", Karat „925" + Metal „Silver": die Auswahl ist
@@ -444,6 +450,7 @@ function classifyRow(row: RawRow, idx: number, opts: ClassifyOptions, runningInd
     if (karatColor) attributes.karat = karatColor;
     if (description1) attributes.description = description1;
     if (itemTypeRaw && !itemType) warnings.push(`Item Type "${itemTypeRaw}" not recognised → left empty (kept in notes)`);
+    else if (itemTypeUmgestellt) warnings.push(`Item Type "${itemTypeRaw}" → ${itemType}; it is no longer a separate type (kept in notes)`);
     else if (!itemTypeRaw) warnings.push('Item Type not set');
     if (karatQuelle && !karatColor) warnings.push(`Karat & Color "${karatQuelle}" not recognised → left empty (kept in notes)`);
     else if (feinheitZusatz) warnings.push(`Karat & Color "${karatQuelle}" → ${karatColor}; the fineness has no field (kept in notes)`);
@@ -455,7 +462,7 @@ function classifyRow(row: RawRow, idx: number, opts: ClassifyOptions, runningInd
     // Derselbe Text in Karat & Color und Metal steht nur einmal in der Notiz.
     const gleicherText = kcNotiz && material.toLowerCase().replace(/\s+/g, ' ') === karatColorRaw.toLowerCase().replace(/\s+/g, ' ');
     notizTeile = notizTeile.concat([
-      itemTypeRaw && !itemType ? `Item type: ${itemTypeRaw}` : '',
+      itemTypeRaw && (!itemType || itemTypeUmgestellt) ? `Item type: ${itemTypeRaw}` : '',
       kcNotiz ? `Karat & Color: ${karatColorRaw}` : '',
       !karatColorRaw && karatAltRaw && (!karatColor || feinheitZusatz) ? `Karat: ${karatAltRaw}` : '',
       material && (!metallVerbraucht || feinheitZusatz) && !gleicherText ? `Metal: ${material}` : '',
@@ -576,7 +583,7 @@ export function importTemplate(): { items: Array<Array<string | number>>; help: 
       'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 12, 'Stone 1 Carat': 0.8, 'Stone 1 Color': 'G', 'Stone 1 Clarity': 'VS1', 'Stone 1 Shape': 'Round',
       'Stone 2 Type': 'Emerald', 'Stone 2 Qty': 2, 'Stone 2 Carat': 0.45,
       'Stone 3 Type': 'Other', 'Stone 3 Qty': 6, 'Stone 3 Name': 'Tsavorite' }),
-    zeile({ Category: 'Gold-Diamond Jewellery', 'Item Type': 'Pendant', 'Karat & Color': '18K White', Weight: 3.1, 'Description 1': 'Halo', Cost: 380, Qty: 1, VAT: 'VAT_10',
+    zeile({ Category: 'Gold-Diamond Jewellery', 'Item Type': 'Necklace', 'Karat & Color': '18K White', Weight: 3.1, 'Description 1': 'Halo', Cost: 380, Qty: 1, VAT: 'VAT_10',
       'Stone 1 Type': 'Diamond', 'Stone 1 Qty': 1, 'Stone 1 Carat': 0.5, 'Stone 1 Color': 'F', 'Stone 1 Clarity': 'VVS2', 'Stone 1 Shape': 'Oval',
       'Stone 2 Type': 'Diamond', 'Stone 2 Qty': 20, 'Stone 2 Carat': 0.3 }),
     zeile({ Category: 'Gold-Diamond Jewellery', 'Item Type': 'Bangle', 'Karat & Color': '21K Yellow', Weight: 15, 'Diamond Weight': 1.2, Cost: 700, Qty: 1, VAT: 'VAT_10' }),
@@ -590,6 +597,7 @@ export function importTemplate(): { items: Array<Array<string | number>>; help: 
     ['Gold-Diamond Jewellery'],
     ['Brand and Model are not needed — the item is named from its details (e.g. Ring · Diamond Ring · 18K Yellow · 6.40 g).'],
     ['Item Type — ' + optionsOf(goldAttrs, 'item_type').join(', ') + '.'],
+    ['Pendant is no longer a separate type: it becomes Necklace, the preview warns and the original value stays in the notes.'],
     ['Karat & Color — ' + optionsOf(goldAttrs, 'karat').join(', ') + '.'],
     ['Weight — in grams. Description 1 — a short description (e.g. SOLITAIRE). Description 2/3, Serial, Size and Markup are kept in the item notes.'],
     ['Older files still import: Karat / Carat (e.g. 18) together with Metal / Material (e.g. White Gold) become Karat & Color (18K White); 21, 22 and 24 are always Yellow.'],

@@ -65,7 +65,7 @@ const GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'diamond_weight', label: 'Diamond Weight', type: 'number', unit: 'ct', required: false, showInList: true },
   { key: 'stones', label: 'Stones', type: 'stones', required: false, showInList: false },
   { key: 'item_type', label: 'Item Type', type: 'select',
-    options: ['Ring', 'Bangle', 'Bracelet', 'Necklace', 'Pendant', 'Earrings', 'Brooch', 'Bar', 'Coin'],
+    options: ['Ring', 'Bangle', 'Bracelet', 'Necklace', 'Earrings', 'Brooch', 'Bar', 'Coin'],
     required: true, showInList: true },
   { key: 'karat', label: 'Karat & Color', type: 'select',
     options: [
@@ -81,7 +81,7 @@ const GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
 // Plan §4.3 BRANDED_GOLD_JEWELRY — 2026-05-17: karat + color_type kombiniert.
 const BRANDED_GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'item_type', label: 'Item Type', type: 'select',
-    options: ['Ring', 'Bangle', 'Bracelet', 'Necklace', 'Pendant', 'Earrings', 'Brooch'],
+    options: ['Ring', 'Bangle', 'Bracelet', 'Necklace', 'Earrings', 'Brooch'],
     required: true, showInList: true },
   // 2026-08-10: optional — a branded piece is often catalogued before it is sized (matches the
   // Original Gold Jewelry contract, where size has always been optional).
@@ -102,7 +102,7 @@ const BRANDED_GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
 // Plan §4.4 ORIGINAL_GOLD_JEWELRY — 2026-05-17: karat + color_type kombiniert.
 const ORIGINAL_GOLD_JEWELRY_ATTRIBUTES: CategoryAttribute[] = [
   { key: 'item_type', label: 'Item Type', type: 'select',
-    options: ['Ring', 'Bangle', 'Bracelet', 'Necklace', 'Pendant', 'Earrings', 'Brooch'],
+    options: ['Ring', 'Bangle', 'Bracelet', 'Necklace', 'Earrings', 'Brooch'],
     required: true, showInList: true },
   { key: 'size', label: 'Size', type: 'text', required: false, showInList: true },
   { key: 'karat', label: 'Karat & Color', type: 'select',

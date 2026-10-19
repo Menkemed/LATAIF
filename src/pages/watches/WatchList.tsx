@@ -25,6 +25,7 @@ import { resolvePrimaryImageForExport } from '@/core/media/product-image-export'
 import { buildCollectionWorkbookBuffer } from '@/core/media/collection-workbook';
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
 import { decideProductCreateUi, type ProductCreateResult } from '@/core/media/product-media-create';
+import { SKU_TAKEN, skuTakenMessage } from '@/core/products/sku-unique';
 import { planProductCreate, productCreateRefusal, productCreateRequest } from '@/core/products/product-create';
 import { useSharedWrites } from '@/core/data/shared-write';
 import { primaryOnlyDeleteProps, blockDeleteOnClient, primaryOnlyLocked, primaryOnlyText } from '@/core/data/primary-only';
@@ -468,10 +469,14 @@ export function WatchList() {
         setShowNew(false);
       } else {
         setRetryProductId(ui.retainProductId);
+        const createResult = r.value as ProductCreateResult;
         setCreateWarning(
           ui.message === 'media_incomplete'
             ? 'Product saved, but its images are not fully in place yet. Press “Retry images” to finish — the same product is reused.'
-            : 'Could not save the product. Nothing was created — please try again.',
+            // SKU-UNIQUE — die SKU war beim Schreiben schon vergeben (z. B. inzwischen von PC2/Handy angelegt).
+            : createResult.status === 'product_save_failed' && createResult.errorCode === SKU_TAKEN
+              ? `${skuTakenMessage(form.sku)} Nothing was created — choose another SKU.`
+              : 'Could not save the product. Nothing was created — please try again.',
         );
       }
     } finally {

@@ -60,6 +60,15 @@ export function applyChoiceSelection<V extends Record<string, unknown>>(
 }
 
 /** Did this click clear the field? Useful where the caller wants to react (e.g. clear an error). */
+/**
+ * RETIRED-CHOICES — die Auswahl beim BEARBEITEN eines bestehenden Artikels: steht dort ein Wert, den es als Auswahl nicht
+ * mehr gibt (z. B. „Pendant"), bleibt er sichtbar und gewählt, statt dass scheinbar nichts gesetzt ist. Er wird nicht
+ * umgeschrieben; wer eine andere Auswahl klickt, ändert ihn.
+ */
+export function optionsWithStored(options: readonly string[], stored: unknown): string[] {
+  return typeof stored === 'string' && stored.trim() !== '' && !options.includes(stored) ? [...options, stored] : [...options];
+}
+
 export function clearsChoice(attrs: Record<string, unknown> | undefined, key: string, option: ChoiceValue): boolean {
   return isSameChoice((attrs ?? {})[key], option);
 }

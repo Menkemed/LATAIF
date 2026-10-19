@@ -16,7 +16,8 @@ use super::*;
 /// once and deliberately.
 /// STONES — was `99b2eeedc75bb347`; the stone list instead of diamond_weight moved it once and deliberately.
 /// PLATINUM — was `ba9af9c515fa5ce1`; „Platinum" in the three jewellery notes moved it once and deliberately.
-const EXPECTED_FINGERPRINT: &str = "19086db5c0a21ce1";
+/// PENDANT — was `19086db5c0a21ce1`; removing „Pendant" from the jewellery lists (a pendant is Necklace) moved it once and deliberately.
+const EXPECTED_FINGERPRINT: &str = "f7bb796b6a5919cc";
 
 #[test]
 fn rust_and_typescript_assemble_the_identical_prompts() {

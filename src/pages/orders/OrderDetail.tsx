@@ -1,4 +1,5 @@
 import { adoptOrderPhotosToProduct } from '@/core/orders/order-media';
+import { optionsWithStored } from '@/core/products/choice-value';
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Trash2, Save, XCircle, ShoppingBag, MessageCircle, Download, Plus } from 'lucide-react';
@@ -1047,7 +1048,7 @@ export function OrderDetail() {
                             <div key={attr.key}>
                               <span className="text-overline" style={{ marginBottom: 6 }}>{attr.label.toUpperCase()}</span>
                               <div className="flex flex-wrap gap-1" style={{ marginTop: 6 }}>
-                                {attr.options.map(opt => (
+                                {optionsWithStored(attr.options, attrs[attr.key]).map(opt => (
                                   <button key={opt} type="button" onClick={() => setAttr(attr.key, opt)}
                                     className="cursor-pointer"
                                     style={{

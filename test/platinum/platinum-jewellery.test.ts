@@ -263,8 +263,12 @@ for (const id of JEWELLERY) {
   ok(prompt.buildSystemPrompt(id).includes('14K Mix, Silver, Platinum}'), `KI ${id}: der Prompt (Rechner und Primary lesen dieselbe Datei) nennt Platinum`);
 }
 ok(!String(vertrag.categories['cat-watch'].notes).includes('Silver, Platinum}'), 'KI Uhr unverändert');
-ok(/EXPECTED_FINGERPRINT: &str = "19086db5c0a21ce1"/.test(src('src-tauri/src/sync/ai_identify_tests.rs'))
-  && /EXPECTED_FINGERPRINT = '19086db5c0a21ce1'/.test(src('test/ai/identify-contract-parity.test.ts')), 'KI Rust und TypeScript erwarten denselben neuen Fingerabdruck');
+{
+  // Der Wert selbst bewegt sich mit jeder bewussten Vertragsänderung (zuletzt PENDANT); geprüft wird, dass beide Seiten denselben erwarten.
+  const rust = /EXPECTED_FINGERPRINT: &str = "([0-9a-f]{16})"/.exec(src('src-tauri/src/sync/ai_identify_tests.rs'))?.[1];
+  const ts = /const EXPECTED_FINGERPRINT = '([0-9a-f]{16})'/.exec(src('test/ai/identify-contract-parity.test.ts'))?.[1];
+  ok(!!rust && rust === ts && rust !== 'ba9af9c515fa5ce1', `KI Rust und TypeScript erwarten denselben neuen Fingerabdruck (${rust} / ${ts})`);
+}
 
 // ── 8 Anzeige, Rechnung, Etikett ────────────────────────────────────────────
 ok(dn.karatText('Platinum') === 'Platinum', 'ANZEIGE „Platinum" bleibt „Platinum" (nie „Platinum Gold")');

@@ -47,6 +47,7 @@ import { stonesOrThrow } from '../core/products/stones.ts';
 import { belongsToConsignment } from '@/core/consignment/consignment-sale-link';
 // F9 — Menge, Bestandsstatus und Herkunft folgen aus den Vorgängen, nicht aus der Artikelbearbeitung.
 import { PRODUCT_LIFECYCLE_LOCKED, lifecycleEditRefusal } from '@/core/products/lifecycle-fields';
+import { SKU_TAKEN, SkuTakenError, assertSkuFree, skuTakenBy, skuTakenMessage, isSkuTaken as isSkuTakenRefusal } from '@/core/products/sku-unique';
 
 // ── SSOT: alle Tabellen die ein Produkt via product_id referenzieren ──
 // Hat EINE davon einen Treffer, gilt das Produkt als "verknuepft" und darf
@@ -732,6 +733,13 @@ function parseResults(results: { columns: string[]; values: unknown[][] }[]): Re
   });
 }
 
+/** SKU-UNIQUE — eine geänderte SKU, die schon an einem anderen Artikel steht: ein fachliches Nein vor jedem Schreiben. */
+function skuEditRefusal(id: string, set: ReadonlyArray<readonly [string, unknown]>): { status: 'blocked'; errorCode: string; message: string } | null {
+  const neu = set.find(([c]) => c === 'sku');
+  if (!neu || skuTakenBy(query, neu[1], id) === null) return null;
+  return { status: 'blocked', errorCode: SKU_TAKEN, message: skuTakenMessage(neu[1]) };
+}
+
 export const useProductStore = create<ProductStore>((set, get) => ({
   products: [],
   categories: [],
@@ -818,6 +826,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     let branchId: string;
     try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
 
+    // SKU-UNIQUE — gegen die Datenbank, im selben Schritt wie das INSERT (jeder Weg, der hier anlegt).
+    assertSkuFree(query, data.sku);
     db.run(
       `INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition, scope_of_delivery,
         storage_location, purchase_date, purchase_price, purchase_currency, planned_sale_price,
@@ -898,10 +908,15 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // retries, frozen into every slot's intent for restart recovery.
     const batchId = `create:${tenantId}:${branchId}:${id}:${role}`;
 
-    const result = await createProductWithDurableMedia(id, src, {
+    // SKU-UNIQUE — geprüft wird im selben Schritt wie das INSERT (insertProductRow). Eine dort abgewiesene SKU heißt:
+    // nichts angelegt, mit festem Code — der Handy-Weg legt den Auftrag damit endgültig beiseite.
+    let result: ProductCreateResult;
+    try {
+    result = await createProductWithDurableMedia(id, src, {
       expectedImages: frozen?.images,
       productExists: (pid) => query('SELECT 1 FROM products WHERE id = ?', [pid]).length > 0,
       insertProductRow: (pid) => {
+        assertSkuFree(query, data.sku);
         const margin = data.plannedSalePrice ? data.plannedSalePrice - (data.purchasePrice || 0) : undefined;
         // Identical column set to createProduct, but images is ALWAYS '[]' — no
         // base64/data URL is ever written to products.images on this path.
@@ -1043,6 +1058,10 @@ export const useProductStore = create<ProductStore>((set, get) => ({
           .finally(() => { embeddingInFlight.delete(pid); });
       },
     });
+    } catch (e) {
+      if (e instanceof SkuTakenError) return { status: 'product_save_failed', productId: id, errorCode: SKU_TAKEN };
+      throw e;
+    }
 
     // Freeze or clear the retry manifest based on the outcome.
     if (result.status === 'created') {
@@ -1124,6 +1143,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // VAT-PERIOD-LOCK — Marke/Name eines gemeldeten Artikels; vor jedem Staging, ein fachliches Nein.
     const vatNein = productVatLabelRefusal(id, Object.fromEntries(textDiff.set));
     if (vatNein) return { status: 'blocked', errorCode: VAT_PERIOD_FILED, message: vatNein };
+    const skuNein = skuEditRefusal(id, textDiff.set);
+    if (skuNein) return skuNein;
 
     const productEdit: ProductEditIntent = {
       set: textDiff.set, baseline: textDiff.baseline,
@@ -1165,6 +1186,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
         }, async (s) => canonicalRequestHash(new TextEncoder().encode(s), 'edit-plan')));
       await orchestrator.applyEditDurably(env);
     } catch (e) {
+      if (isSkuTakenRefusal(e)) { retryEditBatches.delete(id); return { status: 'blocked', errorCode: SKU_TAKEN, message: (e as Error).message }; }
       const msg = (e as { message?: string })?.message ?? String(e);
       if (/BASELINE_CHANGED|PLAN_CONFLICT/.test(msg)) return { status: 'edit_conflict', errorCode: msg };
       return { status: 'edit_incomplete', errorCode: msg, batchId };
@@ -1198,6 +1220,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // VAT-PERIOD-LOCK — Marke/Name eines gemeldeten Artikels (Desktop, PC2 `products.update`, Handy).
     const vatNein = productVatLabelRefusal(id, Object.fromEntries(textDiff.set));
     if (vatNein) return { status: 'blocked', errorCode: VAT_PERIOD_FILED, message: vatNein };
+    const skuNein = skuEditRefusal(id, textDiff.set);
+    if (skuNein) return skuNein;
 
     const productEdit = {
       set: textDiff.set, baseline: textDiff.baseline,
@@ -1218,6 +1242,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       const orchestrator = await getStockMediaOrchestrator();
       await orchestrator.applyProductTextEditDurably({ tenantId, branchId, entityId: id, batchId, productEdit });
     } catch (e) {
+      if (isSkuTakenRefusal(e)) return { status: 'blocked', errorCode: SKU_TAKEN, message: (e as Error).message };
       const msg = (e as { message?: string })?.message ?? String(e);
       if (/BASELINE_CHANGED|CONFLICT/.test(msg)) return { status: 'edit_conflict', errorCode: msg };
       return { status: 'edit_incomplete', errorCode: msg, batchId };
@@ -1231,6 +1256,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     assertNotBulkSystemProduct(id);
     // VAT-PERIOD-LOCK — auch der direkte Weg: Marke/Name eines gemeldeten Artikels bleiben stehen.
     assertProductVatLabelUnchanged(id, data as Record<string, unknown>);
+    // SKU-UNIQUE — eine neue SKU nur, wenn kein anderer Artikel sie trägt.
+    if (data.sku !== undefined) assertSkuFree(query, data.sku, id);
     const db = getDatabase();
     const now = new Date().toISOString();
     const fields: string[] = [];
@@ -1538,10 +1565,14 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     const t = (sku || '').trim();
     if (!t) return false;
     const needle = t.toUpperCase();
-    return get().products.some(p =>
+    if (get().products.some(p =>
       p.id !== excludeProductId &&
       (p.sku || '').trim().toUpperCase() === needle
-    );
+    )) return true;
+    // SKU-UNIQUE — die Liste im Speicher kann veraltet sein (Handy, PC2, Einkauf, Import schreiben an ihr vorbei):
+    // wo eine Datenbank da ist (Primary), entscheidet sie. Auf PC2 entscheidet der Primary im Auftrag selbst.
+    if (readsFromPrimary()) return false;
+    try { return skuTakenBy(query, t, excludeProductId) !== null; } catch { return false; }
   },
 
   // Universell: Findet die letzte Ziffernfolge am Ende und erhöht sie.

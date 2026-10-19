@@ -125,16 +125,20 @@ d.items = [w];
 ok(MPX.validate(d).some((x: { code: string }) => x.code === 'LINE_INVALID'), 'TELEFON eine Uhr ohne Marke bleibt ungültig');
 
 // ── 5 AI Identify bei Gold: keine Marke, Schmuckart nach item_type ──
-const ai = dn.aiResultForCategory({ brand: 'Pendant', name: 'Emerald Pendant Necklace', attributes: { karat: '18K White' } }, GOLD);
-ok(!('brand' in ai) && !('name' in ai) && ai.attributes.item_type === 'Pendant' && ai.attributes.karat === '18K White',
-  `KI Gold: Marke/Modell fallen weg, „Pendant" wandert nach Item Type (${S(ai)})`);
+// PENDANT (19.10.2026) — „Pendant" ist keine Auswahl mehr; das Beispiel nimmt eine weiterhin gültige Schmuckart.
+const ai = dn.aiResultForCategory({ brand: 'Ring', name: 'Emerald Ring', attributes: { karat: '18K White' } }, GOLD);
+ok(!('brand' in ai) && !('name' in ai) && ai.attributes.item_type === 'Ring' && ai.attributes.karat === '18K White',
+  `KI Gold: Marke/Modell fallen weg, „Ring" wandert nach Item Type (${S(ai)})`);
+const aiAlt = dn.aiResultForCategory({ brand: 'Pendant', name: 'Emerald Pendant', attributes: {} }, GOLD);
+ok(!('item_type' in aiAlt.attributes), `KI Gold: „Pendant" ist keine Auswahl mehr und wird nicht zum Item Type (${S(aiAlt)})`);
 const ai2 = dn.aiResultForCategory({ brand: 'Pendant', attributes: { item_type: 'Necklace' } }, GOLD);
 ok(ai2.attributes.item_type === 'Necklace' && !('brand' in ai2), 'KI Gold: ein schon erkanntes Item Type bleibt');
 const uhr = { brand: 'Rolex', name: 'Datejust', attributes: {} };
 ok(dn.aiResultForCategory(uhr, 'cat-watch') === uhr && dn.aiResultForCategory(uhr, 'cat-branded-gold-jewelry') === uhr, 'KI andere Kategorien unverändert (Branded Gold behält die Marke)');
 const opts = (DEFAULT_CATEGORIES.find((c) => c.id === GOLD)!.attributes.find((a) => a.key === 'item_type')!.options) as string[];
-ok(S(js.aiResultForCategory({ brand: 'Pendant', name: 'X', attributes: {} }, GOLD, opts)) === S(ai.attributes ? { attributes: { item_type: 'Pendant' } } : {}),
-  'PARITÄT Telefon KI-Regel');
+ok(S(js.aiResultForCategory({ brand: 'Ring', name: 'X', attributes: {} }, GOLD, opts)) === S({ attributes: { item_type: 'Ring' } })
+  && S(js.aiResultForCategory({ brand: 'Pendant', name: 'X', attributes: {} }, GOLD, opts)) === S({ attributes: {} }),
+  'PARITÄT Telefon KI-Regel (auch: Pendant wird nicht zum Item Type)');
 const vertrag = JSON.parse(src('src/core/ai/identify-contract.json'));
 ok(/return brand = null and name = null/.test(vertrag.categories[GOLD].notes), 'KI-Vorgabe (PC + Primary lesen dieselbe): bei Gold brand/name = null');
 ok(/aiResultForCategory\(r, p\.categoryId\)/.test(src('src/core/ai/identify-adapter.ts')), 'KI Rechner: alle Masken gehen durch den einen Adapter mit der Regel');

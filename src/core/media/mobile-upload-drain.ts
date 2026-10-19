@@ -18,6 +18,7 @@ import type { MobileUploadReceiptIntent } from '../../stores/productStore';
 import type { PrepareResult } from './gateway';
 import { runtimeScopeAvailable, runtimeBindingRevisionOf, type RuntimeScopeEvidence } from './runtime-scope-evidence.ts';
 import { buildSkuSeed, skuIsEmpty } from '../products/sku-allocation.ts';
+import { SKU_TAKEN } from '../products/sku-unique.ts';
 import { parseMobileGalleryPlan, ERR_GALLERY_PLAN_INVALID, type MobileGalleryPlan } from './mobile-gallery-edit.ts';
 import {
   parseMobileProductPatch, resolveMobileProductPatch, patchTouchesPrices,
@@ -250,6 +251,8 @@ const ERR_TARGET_CONFLICT = 'MOBILE_UPLOAD_TARGET_CONFLICT';
 const ERR_RECEIPT_INCONSISTENT = 'MOBILE_UPLOAD_RECEIPT_INCONSISTENT';
 const ERR_BROKEN = 'MOBILE_UPLOAD_MEDIA_BROKEN';
 const ERR_METADATA_MISMATCH = 'MOBILE_UPLOAD_METADATA_MISMATCH';
+/** SKU-UNIQUE — die am Telefon eingetippte SKU steht schon an einem Artikel. */
+export const ERR_SKU_TAKEN = 'MOBILE_UPLOAD_SKU_TAKEN';
 const ERR_BATCH_MISMATCH = 'MOBILE_UPLOAD_BATCH_MISMATCH';
 // MOBILE-EDIT-S2 — ein Edit-Job, der mehr will als Text, wird quarantaeniert statt halb ausgefuehrt.
 const ERR_EDIT_GALLERY_UNSUPPORTED = 'MOBILE_EDIT_GALLERY_NOT_SUPPORTED';
@@ -479,6 +482,12 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
     preparedManifestHash: manifestHash,
   });
   if (result.status === 'product_save_failed') {
+    // SKU-UNIQUE — eine eingetippte SKU, die schon an einem Artikel steht, ist eine Eigenschaft des Auftrags: Warten
+    // ändert nichts. Endgültig beiseitelegen (fester Code) statt ewig zu wiederholen — angelegt wurde nichts.
+    if (result.errorCode === SKU_TAKEN) {
+      await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_SKU_TAKEN, sc);
+      return { code: 'manifest_invalid', detail: ERR_SKU_TAKEN };
+    }
     await deferJob(deps, grant, sc, result.errorCode ?? 'product_save_failed'); // nothing durable → retry after the backoff
     return { code: 'deferred', detail: result.errorCode };
   }

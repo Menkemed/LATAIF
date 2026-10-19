@@ -704,4 +704,15 @@ mod tests {
         let watch_karat = json!({ "categoryId": "cat-watch", "brand": "R", "name": "S", "attributes": { "case_diameter_mm": 40, "dial": "B", "material": "Solid Gold", "karat_color": "Platinum" } });
         assert_eq!(validate_metadata(&watch_karat, 2).unwrap_err().code, "BAD_ENUM");
     }
+
+    #[test]
+    fn pendant_is_no_longer_an_item_type() {
+        // PENDANT (19.10.2026) — ein Anhänger ist „Necklace"; „Pendant" ist für neue Uploads keine Auswahl mehr.
+        for cat in ["cat-gold-jewelry", "cat-branded-gold-jewelry", "cat-original-gold-jewelry"] {
+            let m = json!({ "categoryId": cat, "brand": "B", "name": "N", "attributes": { "weight": 3.0, "item_type": "Pendant", "karat": "18K White" } });
+            assert_eq!(validate_metadata(&m, 1).unwrap_err().code, "BAD_ENUM", "{cat}: Pendant must be refused");
+        }
+        let ok = json!({ "categoryId": "cat-gold-jewelry", "attributes": { "weight": 3.0, "item_type": "Necklace", "karat": "18K White" } });
+        assert_eq!(validate_metadata(&ok, 2), Ok(()));
+    }
 }
