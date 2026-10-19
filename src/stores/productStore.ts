@@ -47,7 +47,7 @@ import { stonesOrThrow } from '../core/products/stones.ts';
 import { belongsToConsignment } from '@/core/consignment/consignment-sale-link';
 // F9 — Menge, Bestandsstatus und Herkunft folgen aus den Vorgängen, nicht aus der Artikelbearbeitung.
 import { PRODUCT_LIFECYCLE_LOCKED, lifecycleEditRefusal } from '@/core/products/lifecycle-fields';
-import { SKU_TAKEN, SkuTakenError, assertSkuFree, skuTakenBy, skuTakenMessage, isSkuTaken as isSkuTakenRefusal } from '@/core/products/sku-unique';
+import { SKU_TAKEN, SkuTakenError, assertSkuFree, assertSkuChangeFree, skuTakenBy, skuChangeTakenBy, skuTakenMessage, isSkuTaken as isSkuTakenRefusal } from '@/core/products/sku-unique';
 
 // ── SSOT: alle Tabellen die ein Produkt via product_id referenzieren ──
 // Hat EINE davon einen Treffer, gilt das Produkt als "verknuepft" und darf
@@ -736,7 +736,7 @@ function parseResults(results: { columns: string[]; values: unknown[][] }[]): Re
 /** SKU-UNIQUE — eine geänderte SKU, die schon an einem anderen Artikel steht: ein fachliches Nein vor jedem Schreiben. */
 function skuEditRefusal(id: string, set: ReadonlyArray<readonly [string, unknown]>): { status: 'blocked'; errorCode: string; message: string } | null {
   const neu = set.find(([c]) => c === 'sku');
-  if (!neu || skuTakenBy(query, neu[1], id) === null) return null;
+  if (!neu || skuChangeTakenBy(query, neu[1], id) === null) return null;
   return { status: 'blocked', errorCode: SKU_TAKEN, message: skuTakenMessage(neu[1]) };
 }
 
@@ -827,7 +827,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     try { branchId = currentBranchId(); } catch { branchId = 'branch-main'; }
 
     // SKU-UNIQUE — gegen die Datenbank, im selben Schritt wie das INSERT (jeder Weg, der hier anlegt).
-    assertSkuFree(query, data.sku);
+    assertSkuFree(query, data.sku, null, branchId);
     db.run(
       `INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition, scope_of_delivery,
         storage_location, purchase_date, purchase_price, purchase_currency, planned_sale_price,
@@ -916,7 +916,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       expectedImages: frozen?.images,
       productExists: (pid) => query('SELECT 1 FROM products WHERE id = ?', [pid]).length > 0,
       insertProductRow: (pid) => {
-        assertSkuFree(query, data.sku);
+        assertSkuFree(query, data.sku, null, branchId);
         const margin = data.plannedSalePrice ? data.plannedSalePrice - (data.purchasePrice || 0) : undefined;
         // Identical column set to createProduct, but images is ALWAYS '[]' — no
         // base64/data URL is ever written to products.images on this path.
@@ -1257,7 +1257,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // VAT-PERIOD-LOCK — auch der direkte Weg: Marke/Name eines gemeldeten Artikels bleiben stehen.
     assertProductVatLabelUnchanged(id, data as Record<string, unknown>);
     // SKU-UNIQUE — eine neue SKU nur, wenn kein anderer Artikel sie trägt.
-    if (data.sku !== undefined) assertSkuFree(query, data.sku, id);
+    if (data.sku !== undefined) assertSkuChangeFree(query, data.sku, id);
     const db = getDatabase();
     const now = new Date().toISOString();
     const fields: string[] = [];
@@ -1572,7 +1572,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // SKU-UNIQUE — die Liste im Speicher kann veraltet sein (Handy, PC2, Einkauf, Import schreiben an ihr vorbei):
     // wo eine Datenbank da ist (Primary), entscheidet sie. Auf PC2 entscheidet der Primary im Auftrag selbst.
     if (readsFromPrimary()) return false;
-    try { return skuTakenBy(query, t, excludeProductId) !== null; } catch { return false; }
+    try { return skuTakenBy(query, t, excludeProductId, currentBranchId()) !== null; } catch { return false; }
   },
 
   // Universell: Findet die letzte Ziffernfolge am Ende und erhöht sie.

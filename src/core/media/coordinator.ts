@@ -14,7 +14,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 
 import { evaluatePriceEligibility, touchesPriceColumns } from '../products/price-eligibility.ts';
-import { assertSkuFree } from '../products/sku-unique.ts';
+import { assertSkuChangeFree } from '../products/sku-unique.ts';
 import { enterTransaction, leaveNestedTransaction, resetTransactionContext, isTransactionActive } from '../db/transaction-context.ts';
 import { isTransactionUnhealthy } from '../db/transaction-health.ts';
 import { assertOwnerKind, type MediaSecurityClass } from './media-owner.ts';
@@ -1410,7 +1410,10 @@ export class MediaDbCoordinator {
     // SKU-UNIQUE — im selben Schritt wie das UPDATE: eine geänderte SKU, die schon an einem anderen Artikel steht,
     // wird nie geschrieben (die Transaktion rollt zurück, nichts wird durabel).
     const skuNeu = pe.set.find(([c]) => c === 'sku');
-    if (skuNeu) assertSkuFree((sql) => allRows(this.db, sql), skuNeu[1], ctx.entityId);
+    if (skuNeu) {
+      const rows = (sql: string, params: unknown[]) => { const r = this.db.exec(sql, params as never); return r.length ? r[0].values.map((v) => zip(r[0].columns, v)) : []; };
+      assertSkuChangeFree(rows, skuNeu[1], ctx.entityId);
+    }
     const parts: string[] = pe.set.map(([c]) => `${c} = ?`);
     const vals: unknown[] = pe.set.map(([, v]) => v);
     if (pe.invalidateImageDerived) parts.push('image_hash = NULL', 'image_description = NULL', 'image_embedding = NULL');

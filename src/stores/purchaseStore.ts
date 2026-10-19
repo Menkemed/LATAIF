@@ -414,7 +414,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
         } else {
           // Legacy-Pfad: nur Brand/Name/SKU/Kategorie aus Inline-Eingabe.
           // SKU-UNIQUE — dieselbe Prüfung gegen die Datenbank wie jeder andere Anlegeweg.
-          assertSkuFree(query, ln.newProductSku);
+          assertSkuFree(query, ln.newProductSku, null, branchId);
           productId = uuid();
           const pNow = new Date().toISOString();
           db.run(

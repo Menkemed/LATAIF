@@ -174,17 +174,58 @@ const CAT = { id: 'cat-w', name: 'Watch', attributes: [], conditionOptions: [], 
 // ── 6 Verdrahtung ────────────────────────────────────────────────────────────────────────────────
 {
   const store = src('src/stores/productStore.ts');
-  ok(/insertProductRow: \(pid\) => \{\n\s*assertSkuFree\(query, data\.sku\);/.test(store)
+  ok(/insertProductRow: \(pid\) => \{\n\s*assertSkuFree\(query, data\.sku, null, branchId\);/.test(store)
     && /if \(e instanceof SkuTakenError\) return \{ status: 'product_save_failed', productId: id, errorCode: SKU_TAKEN \};/.test(store),
     'VERDRAHTUNG Anlegen mit Bildern (Rechner, PC2, Handy): Prüfung im selben Schritt wie das INSERT, fester Code');
   ok((store.match(/const skuNein = skuEditRefusal\(id, textDiff\.set\);/g) || []).length === 2
     && (store.match(/if \(isSkuTakenRefusal\(e\)\)/g) || []).length === 2, 'VERDRAHTUNG beide Speicherwege der Artikelseite: Vorprüfung + Abweisung aus der Transaktion als fachliches Nein');
-  ok(/if \(readsFromPrimary\(\)\) return false;\n\s*try \{ return skuTakenBy\(query, t, excludeProductId\) !== null; \}/.test(store), 'VERDRAHTUNG isSkuTaken: auf dem Primary entscheidet die Datenbank, PC2 fragt im Auftrag den Primary');
-  ok(/if \(skuNeu\) assertSkuFree\(\(sql\) => allRows\(this\.db, sql\), skuNeu\[1\], ctx\.entityId\);/.test(src('src/core/media/coordinator.ts')), 'VERDRAHTUNG Koordinator prüft vor dem UPDATE');
+  ok(/if \(readsFromPrimary\(\)\) return false;\n\s*try \{ return skuTakenBy\(query, t, excludeProductId, currentBranchId\(\)\) !== null; \}/.test(store), 'VERDRAHTUNG isSkuTaken: auf dem Primary entscheidet die Datenbank, PC2 fragt im Auftrag den Primary');
+  ok(/assertSkuChangeFree\(rows, skuNeu\[1\], ctx\.entityId\);\n\s*\}\n\s*const parts: string\[\] = pe\.set\.map/.test(src('src/core/media/coordinator.ts')), 'VERDRAHTUNG Koordinator prüft unmittelbar vor dem UPDATE, ohne Wartepunkt');
   ok(/result\.status === 'product_save_failed' && result\.errorCode === SKU_TAKEN\) throw new CommandRejected\(SKU_TAKEN, skuTakenMessage\(sku\)\)/.test(src('src/core/bridge/product-commands.ts')), 'VERDRAHTUNG Fernauftrag (PC2) meldet SKU_TAKEN als Urteil, nicht als „Bilder unvollständig"');
   ok(/createResult\.errorCode === SKU_TAKEN/.test(src('src/pages/watches/WatchList.tsx')), 'VERDRAHTUNG Anlegemaske nennt die vergebene SKU');
-  ok(/assertSkuFree\(query, ln\.newProductSku\);/.test(src('src/stores/purchaseStore.ts')), 'VERDRAHTUNG Einkauf (alter Inline-Weg) prüft auch');
+  ok(/assertSkuFree\(query, data\.sku, null, branchId\);\n\s*db\.run\(\n\s*\x60INSERT INTO products/.test(store), 'VERDRAHTUNG createProduct: Prüfung und INSERT im selben synchronen Schritt');
+  ok(/if \(data\.sku !== undefined\) assertSkuChangeFree\(query, data\.sku, id\);/.test(store), 'VERDRAHTUNG updateProduct: nur eine echte SKU-Änderung wird geprüft');
+  ok(/assertSkuFree\(query, ln\.newProductSku, null, branchId\);/.test(src('src/stores/purchaseStore.ts')), 'VERDRAHTUNG Einkauf (alter Inline-Weg) prüft auch');
   ok(/if \(result\.errorCode === SKU_TAKEN\) \{\n\s*await deps\.bridge\.markQuarantined\(u, grant\.uploadEventId, grant\.claimToken, ERR_SKU_TAKEN, sc\);/.test(src('src/core/media/mobile-upload-drain.ts')), 'VERDRAHTUNG Handy-Upload: vergebene SKU endgültig beiseite (test/media04b2a2 beweist den Ablauf)');
+}
+
+// ── 7 bestehende Doppelte bleiben unangetastet und normal bearbeitbar ──────────────────────────────────
+{
+  const db = freshDb();
+  anDerListeVorbei(db, 'd-1', '1226v1');
+  anDerListeVorbei(db, 'd-2', '1226v1');            // schon doppelt — so, wie es in einer Datenbank vorkommen kann
+  useProductStore.getState().loadProducts();
+  const st = useProductStore.getState();
+  st.updateProduct('d-2', { name: 'Turquoise' } as never);
+  st.updateProduct('d-2', { sku: '1226v1', name: 'Turquoise 2' } as never);        // unveränderte SKU mitgeschickt
+  st.updateProduct('d-2', { sku: ' 1226V1 ' } as never);                              // nur Schreibweise — dieselbe Nummer
+  ok(n(db, "SELECT COUNT(*) FROM products WHERE id = 'd-2' AND name = 'Turquoise 2'") === 1, 'DOPPELT ein betroffener Artikel bleibt normal bearbeitbar (auch mit unveränderter SKU)');
+  ok(n(db, "SELECT COUNT(*) FROM products WHERE UPPER(TRIM(sku)) = '1226V1'") === 2 && n(db, "SELECT COUNT(*) FROM products WHERE id = 'd-1' AND sku = '1226v1'") === 1,
+    'DOPPELT nichts wird automatisch geändert, gelöscht oder zusammengeführt');
+  ok(su.skuChangeTakenBy(rowsOf(db), '1226v1', 'd-1') === null, 'DOPPELT die Artikelseite meldet bei unveränderter SKU nichts');
+  let e: unknown = null;
+  try { st.updateProduct('d-2', { sku: 'NEU-1' } as never); st.updateProduct('d-2', { sku: '1226v1' } as never); } catch (x) { e = x; }
+  ok(n(db, "SELECT COUNT(*) FROM products WHERE id = 'd-2' AND sku = 'NEU-1'") === 1 && e instanceof su.SkuTakenError, 'DOPPELT wer die Nummer einmal frei macht, kann nicht zurück auf eine vergebene');
+  const lease = { db, epoch: 0, async saveDurably() { /* in-memory */ }, release() { /* nichts */ } };
+  const orch = new StockMediaOrchestrator({ gateway: {} as never, leaseFactory: () => lease as never });
+  anDerListeVorbei(db, 'd-3', '1226v1');
+  const r = await orch.applyProductTextEditDurably({ tenantId: 'tenant-1', branchId: 'branch-main', entityId: 'd-3', batchId: 'dup-1',
+    productEdit: { set: [['sku', '1226V1']], baseline: ['1226v1'], invalidateImageDerived: false, withSync: true, audit: { module: 'Product', changedBy: 'u1', newValueJson: '{}' } } as never });
+  ok(r.status === 'edited', 'DOPPELT der Koordinator lässt eine reine Schreibweise-Änderung derselben Nummer durch');
+}
+
+// ── 8 Filialbezug wie bisher (isSkuTaken prüfte die Liste der Filiale) ─────────────────────────────────
+{
+  const db = freshDb();
+  db.run("INSERT INTO branches (id, tenant_id, name, created_at, updated_at) VALUES ('branch-2','tenant-1','Zweite',?,?)", [NOW, NOW]);
+  db.run(`INSERT INTO products (id, branch_id, category_id, brand, name, sku, quantity, condition, scope_of_delivery, purchase_price,
+      purchase_currency, stock_status, tax_scheme, days_in_stock, images, attributes, source_type, created_at, updated_at)
+    VALUES ('z-1','branch-2','cat-w','B','N','FIL-1',1,'New','[]',1,'BHD','in_stock','MARGIN',0,'[]','{}','OWN',?,?)`, [NOW, NOW]);
+  const rows = rowsOf(db);
+  ok(su.skuTakenBy(rows, 'fil-1', null, 'branch-main') === null && su.skuTakenBy(rows, 'fil-1', null, 'branch-2') === 'z-1', 'FILIALE vergeben ist eine SKU in ihrer Filiale (wie bisher die Liste je Filiale)');
+  ok(su.skuTakenBy(rows, 'fil-1') === 'z-1', 'FILIALE ohne bekannte Filiale wird strenger über alle geprüft');
+  const p = useProductStore.getState().createProduct({ categoryId: 'cat-w', brand: 'B', name: 'N', sku: 'FIL-1' } as never);
+  ok(n(db, 'SELECT COUNT(*) FROM products WHERE id = ?', [p.id]) === 1, 'FILIALE dieselbe Nummer in einer anderen Filiale bleibt erlaubt (unveränderter Vertrag)');
 }
 
 console.log(`\nsku-unique: ${PASS} passed, ${fails.length} failed`);
