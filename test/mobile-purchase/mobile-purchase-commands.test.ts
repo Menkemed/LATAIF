@@ -132,6 +132,21 @@ function item(uid: string, extra: Record<string, unknown> = {}) {
   ok(!('idPhotoStagingId' in MP.buildBody(p, () => []).body.newSupplierPerson), 'RUMPF ein noch nicht abgelegtes Foto reist nicht mit');
   const bad = draft();
   ok(MP.buildBody(bad, () => []).ok === false, 'RUMPF ungültiger Entwurf ergibt keinen Rumpf');
+
+  // ── MOBILE-PURCHASE-CONTACT — Vorwahl und Ausweisnummer der neuen Person ──
+  const k = draft(); k.supplier = { mode: 'person', person: { firstName: 'Karim', lastName: 'Saleh', phoneIso: 'SA', phone: '5 1234 5678', email: '', personalId: ' 900123456 ' }, createDespite: false }; k.items.push(item('a'));
+  const kb = MP.buildBody(k, () => []).body.newSupplierPerson;
+  ok(kb.phone === '+966512345678' && kb.personalId === '900123456', `KONTAKT Land + Nummer reisen als E.164 wie am Rechner, die Ausweisnummer getrimmt (${S(kb)})`);
+  k.supplier.person.phone = '  ';
+  ok(!('phone' in MP.buildBody(k, () => []).body.newSupplierPerson), 'KONTAKT ohne Nummer kein Telefon — nie „+966" allein');
+  k.supplier.person.personalId = '';
+  ok(!('personalId' in MP.buildBody(k, () => []).body.newSupplierPerson), 'KONTAKT ohne Ausweisnummer kein Feld');
+  const alt = draft(); alt.supplier = { mode: 'person', person: { firstName: 'A', lastName: 'B', phone: '+973 3612 3456', email: '' }, createDespite: false }; alt.items.push(item('a'));
+  ok(MP.buildBody(alt, () => []).body.newSupplierPerson.phone === '+97336123456', 'KONTAKT ein alter Entwurf (freier Text mit Vorwahl, ohne Land) wird nicht doppelt vorgewählt');
+  const np = MP.normalizePerson({ firstName: 'X', phone: '00971 50 123 4567' });
+  ok(np.phoneIso === 'AE' && np.phone === '501234567' && np.personalId === '', `KONTAKT alter Entwurf beim Öffnen einmal in Land + Nummer zerlegt (${S(np)})`);
+  const frisch = MP.newDraft('d-x', '2026-10-21').supplier.person;
+  ok(frisch.phoneIso === 'BH' && frisch.phone === '' && frisch.personalId === '', 'KONTAKT neuer Entwurf: Bahrain vorgewählt, Nummer und Ausweisnummer leer');
 }
 
 // ── BUSINESS-DATE — das Einkaufsdatum: heute vorbelegt, rückdatierbar, nie in der Zukunft ──
@@ -215,6 +230,30 @@ function item(uid: string, extra: Record<string, unknown> = {}) {
   ok(/indexedDB\.open\(MP_DB/.test(ui) && /stagePhoto\(p\.dataUrl\)/.test(ui) && /clarify: true/.test(ui), 'UI Entwurf samt Fotos in IndexedDB; Fotos in die Ablage; Klärung unter derselben Kennung');
   ok(/if \(\(MP\.partners \|\| \[\]\)\.length\)/.test(ui) && /Add partner/.test(ui), 'UI Partnerbereich nur bei aktiven Partnern, optional per „Add partner"');
   ok(/aiApplyToForm\(data\.result/.test(ui) && !/unitPrice[^\n]*aiApplyToForm|aiApplyToForm[^\n]*unitPrice/.test(ui), 'UI AI füllt nur Marke/Modell/Zustand/Merkmale, nie Preise');
+}
+
+// ── MOBILE-PURCHASE-CONTACT — dieselbe Liste und dieselben Regeln wie am Rechner (an der Quelle) ──
+{
+  const cc = await import('../../src/core/contacts/country-codes.ts');
+  const cv = await import('../../src/core/contacts/contact-validate.ts');
+  const rechner = cc.COUNTRIES.map((c) => ({ iso: c.iso, dial: c.dial, label: c.label, flag: c.flag, example: c.example, maxLength: c.maxLength }));
+  ok(S(MP.COUNTRIES) === S(rechner), 'KONTAKT die Vorwahlen des Telefons sind die des Rechners (country-codes.ts)');
+  ok(MP.DEFAULT_ISO === cc.DEFAULT_COUNTRY.iso, 'KONTAKT dasselbe vorgewählte Land');
+  const nummern = ['', '+97336123456', '0097336123456', '36123456', '3612 3456', '+966512345678', '+12125551234', '+447700900123', '+4930123456', '+971501234567', 'abc'];
+  for (const s of nummern) {
+    const t = cc.splitPhone(s), m = MP.splitPhone(s);
+    ok(t.country.iso === m.iso && t.national === m.national && cc.joinPhone(t.country, t.national) === MP.joinPhone(m.iso, m.national),
+      `KONTAKT „${s}" zerlegt und zusammengesetzt wie am Rechner (${m.iso} ${m.national})`);
+    ok(cv.validatePhone(cc.joinPhone(t.country, t.national)).ok === (MP.phoneHint(m.iso, m.national) === ''), `KONTAKT Hinweis zu „${s}" wie am Rechner (${MP.phoneHint(m.iso, m.national) || 'keiner'})`);
+  }
+  for (const id of ['', '900123456', '90012345', '9001234', '9001234567', '900-123-456', 'P1234567', 'AB1', 'CR 12345']) {
+    ok(cv.validateCpr(id).ok === (MP.personalIdHint(id) === ''), `KONTAKT Ausweisnummer „${id}" wie am Rechner (${MP.personalIdHint(id) || 'kein Hinweis'})`);
+  }
+  // Die Maske: Land als Auswahl neben der Nummer, die Ausweisnummer wie am Rechner beschriftet.
+  const ui = src('src-tauri/src/sync/mobile_purchase_ui.js');
+  ok(/data-mp-field="person\.phoneIso"/.test(ui) && /MPX\.COUNTRIES\.map/.test(ui) && /data-mp-field="person\.personalId"/.test(ui) && /Personal ID \(CPR \/ passport\)/.test(ui),
+    'KONTAKT UI: Vorwahl-Auswahl, Nummer, „Personal ID (CPR / passport)"');
+  ok(/MPX\.normalizePerson\(d\.supplier\.person\)/.test(ui), 'KONTAKT UI: ein geöffneter alter Entwurf wird zerlegt');
 }
 
 console.log(`\nmobile-purchase commands: ${PASS} passed, ${fails.length} failed`);

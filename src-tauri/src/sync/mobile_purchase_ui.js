@@ -196,7 +196,16 @@
       const p = s.person;
       h += '<div class="mp-row"><label>First name</label><input data-mp-field="person.firstName" value="' + mpH(p.firstName) + '" /></div>'
         + '<div class="mp-row"><label>Last name</label><input data-mp-field="person.lastName" value="' + mpH(p.lastName) + '" /></div>'
-        + '<div class="mp-row"><label>Phone</label><input data-mp-field="person.phone" inputmode="tel" value="' + mpH(p.phone) + '" /></div>'
+        // MOBILE-PURCHASE-CONTACT — wie am Rechner: Land (Vorwahl) und Nummer getrennt, gespeichert als E.164;
+        // dazu die Ausweisnummer. Hinweise sind weich wie dort — nie eine Sperre.
+        + '<div class="mp-row"><label>Phone</label><div class="mp-two">'
+        +   '<select data-mp-field="person.phoneIso" aria-label="Country code" style="flex:0 0 auto;width:auto;">'
+        +     MPX.COUNTRIES.map((c) => '<option value="' + c.iso + '"' + (c.iso === (p.phoneIso || MPX.DEFAULT_ISO) ? ' selected' : '') + '>' + c.flag + ' ' + c.dial + '</option>').join('')
+        +   '</select>'
+        +   '<input data-mp-field="person.phone" inputmode="tel" placeholder="' + mpH(MPX.countryOf(p.phoneIso).example || '') + '" value="' + mpH(p.phone) + '" />'
+        + '</div><div class="mp-note" data-mp-hint="phone">' + mpH(MPX.phoneHint(p.phoneIso, p.phone)) + '</div></div>'
+        + '<div class="mp-row"><label>Personal ID (CPR / passport)</label><input data-mp-field="person.personalId" placeholder="e.g. 900123456" value="' + mpH(p.personalId) + '" />'
+        + '<div class="mp-note" data-mp-hint="personalId">' + mpH(MPX.personalIdHint(p.personalId)) + '</div></div>'
         + '<div class="mp-row"><label>Email</label><input data-mp-field="person.email" type="email" value="' + mpH(p.email) + '" /></div>'
         // Das Ausweisfoto ist OPTIONAL — derselbe Weg wie bei Reparatur und Kommission: aufnehmen,
         // verkleinern, vor dem Auftrag in die Ablage; im Auftrag nur die Kennung.
@@ -470,7 +479,15 @@
     const p = f.split(':');
     if (f === 'purchaseDate' || f === 'taxScheme' || f === 'notes') d[f] = v;
     else if (f === 'createDespite') d.supplier.createDespite = !!v;
-    else if (p[0].indexOf('person.') === 0) d.supplier.person[p[0].slice(7)] = v;
+    else if (p[0].indexOf('person.') === 0) {
+      const pers = d.supplier.person;
+      pers[p[0].slice(7)] = v;
+      // Weiche Hinweise frisch halten; ein anderes Land zeigt auch sein Beispiel als Platzhalter.
+      const hp = document.querySelector('[data-mp-hint="phone"]'), hi = document.querySelector('[data-mp-hint="personalId"]');
+      if (hp) hp.textContent = MPX.phoneHint(pers.phoneIso, pers.phone);
+      if (hi) hi.textContent = MPX.personalIdHint(pers.personalId);
+      if (p[0] === 'person.phoneIso') { const n = document.querySelector('[data-mp-field="person.phone"]'); if (n) n.placeholder = MPX.countryOf(v).example || ''; }
+    }
     else if (p[0] === 'pay') d.payments[Number(p[1])][p[2]] = v;
     else if (p[0] === 'item') {
       const it = mpItem(p[1]);
@@ -819,6 +836,8 @@
 
   function mpOpen(d) {
     MP.draft = d;
+    // Ein Entwurf von vor MOBILE-PURCHASE-CONTACT: Telefon als freier Text → einmal in Land + Nummer zerlegen.
+    if (d.supplier && d.supplier.person) MPX.normalizePerson(d.supplier.person);
     for (const it of d.items) { it.partners = it.partners || []; it.photos = it.photos || []; it.attributes = it.attributes || {}; it.scopeOfDelivery = it.scopeOfDelivery || []; }
     // Ein wartender oder gebuchter Einkauf zeigt zuerst nur seine Zusammenfassungen.
     MP.open = d.status === 'draft' ? new Set(['supplier', 'items']) : new Set();

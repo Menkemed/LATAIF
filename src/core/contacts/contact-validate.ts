@@ -12,7 +12,7 @@
 //   warning='...'  → Feld ist gesetzt, sieht aber komisch aus → gelber Hinweis
 // ═══════════════════════════════════════════════════════════
 
-import { COUNTRIES, splitPhone, digitsOnly, type CountryCode } from './country-codes';
+import { COUNTRIES, splitPhone, digitsOnly, type CountryCode } from './country-codes.ts';
 
 export interface ValidationResult {
   ok: boolean;

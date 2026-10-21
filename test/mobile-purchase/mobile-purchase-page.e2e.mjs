@@ -408,6 +408,21 @@ try {
   await c.ev(klick('#mpNewBtn') + ' await new Promise((r) => setTimeout(r, 300)); return 1;');
   await c.ev(klick('[data-mp-action="supplier-mode"][data-mode="person"]') + ' return 1;');
   await c.ev(tippe('[data-mp-field="person.firstName"]', 'Karim') + tippe('[data-mp-field="person.lastName"]', 'Saleh') + ' return 1;');
+  // MOBILE-PURCHASE-CONTACT — Vorwahl als Auswahl neben der Nummer, Ausweisnummer; Hinweise weich wie am Rechner.
+  const vw = await c.ev(`const s = document.querySelector('[data-mp-field="person.phoneIso"]'); const n = document.querySelector('[data-mp-field="person.phone"]');
+    return { opts: s ? [...s.options].map((o) => o.textContent) : [], wert: s && s.value, ph: n && n.placeholder, id: !!document.querySelector('[data-mp-field="person.personalId"]') };`);
+  ok(vw.opts.length === 8 && vw.opts[0] === '🇧🇭 +973' && vw.wert === 'BH' && vw.ph === '3612 3456' && vw.id,
+    `§5 KONTAKT Vorwahl-Auswahl (Bahrain vorgewählt, 8 Länder wie am Rechner), Nummer, Ausweisnummer (${S(vw)})`);
+  await c.ev(tippe('[data-mp-field="person.phoneIso"]', 'SA') + tippe('[data-mp-field="person.phone"]', '512') + ' return 1;');
+  ok(/Saudi Arabia number looks too short/.test(await c.ev(`return document.querySelector('[data-mp-hint="phone"]').textContent;`))
+    && await c.ev(`return document.querySelector('[data-mp-field="person.phone"]').placeholder;`) === '5xxxxxxxx',
+    '§5 KONTAKT anderes Land: sein Beispiel als Platzhalter, weicher Hinweis bei zu kurzer Nummer');
+  await c.ev(tippe('[data-mp-field="person.phone"]', '5 1234 5678') + tippe('[data-mp-field="person.personalId"]', '9001234') + ' return 1;');
+  ok(await c.ev(`return document.querySelector('[data-mp-hint="phone"]').textContent === '' && /CPR looks too short/.test(document.querySelector('[data-mp-hint="personalId"]').textContent);`),
+    '§5 KONTAKT gültige Nummer ohne Hinweis; zu kurze CPR mit weichem Hinweis (keine Sperre)');
+  await c.ev(tippe('[data-mp-field="person.personalId"]', '900123456') + ' return 1;');
+  ok(await c.ev('return document.documentElement.scrollWidth <= document.documentElement.clientWidth;'), '§5 KONTAKT bei 360 px kein waagerechtes Scrollen');
+  await shot(c, 'mp-contact');
   // Das Ausweisfoto der neuen Person (optional) — dieselbe Aufnahme wie die Positionsfotos.
   ok(await c.ev("return !!document.querySelector('#mpIdPhoto[data-mp-id-photo]') && /ID \\/ CPR photo \\(optional\\)/.test(document.getElementById('mpSections').textContent);"),
     '§5 „New person" bietet ein optionales Ausweisfoto an');
@@ -432,6 +447,8 @@ try {
   const k = gesehen.filter((g) => g.body && g.body.op === 'purchases.create').slice(-2);
   ok(k[0].body.commandId !== k[1].body.commandId && k[1].body.payload.newSupplierPerson.createDespiteExistingSuppliers === true && await c.ev("return window.__MP.draft.status === 'confirmed';"),
     '§5 die bewusste Entscheidung ist ein NEUER Auftrag (eigene Kennung) und wird gebucht');
+  ok(k[1].body.payload.newSupplierPerson.phone === '+966512345678' && k[1].body.payload.newSupplierPerson.personalId === '900123456',
+    `§5 KONTAKT im Auftrag: Telefon als E.164 mit gewählter Vorwahl, Ausweisnummer (${S({ phone: k[1].body.payload.newSupplierPerson.phone, id: k[1].body.payload.newSupplierPerson.personalId })})`);
   ok(/^[0-9a-f]{64}$/.test(String(k[1].body.payload.newSupplierPerson.idPhotoStagingId)) && !JSON.stringify(k[1].body.payload).includes('base64')
     && await c.ev("return !window.__MP.draft.supplier.person.idPhoto.dataUrl && !!window.__MP.draft.supplier.person.idPhoto.stagingId;"),
     '§5 das Ausweisfoto reist nur als Ablagekennung; nach der Buchung keine Ausweisbytes mehr auf dem Telefon');

@@ -418,7 +418,8 @@ const ZEILE = (name: string, qty: number, price: number, extra: Record<string, u
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const MPX = sandbox.MobilePurchase as any;
   const d = MPX.newDraft('draft-1', '2026-09-21');
-  d.supplier = { mode: 'person', person: { firstName: 'Samir', lastName: 'Telefon', phone: '+973 3600 0777', email: '' }, createDespite: false };
+  // MOBILE-PURCHASE-CONTACT — so, wie die Maske es jetzt erfasst: Land getrennt, Nummer, Ausweisnummer.
+  d.supplier = { mode: 'person', person: { firstName: 'Samir', lastName: 'Telefon', phoneIso: 'SA', phone: '5 1234 5678', email: '', personalId: ' 900123456 ' }, createDespite: false };
   const a = Object.assign(MPX.newItem('a', 'cat-w'), { brand: 'Rolex', name: 'Datejust', quantity: '1', unitPrice: '1000',
     photos: [{ id: 'f1', dataUrl: foto(11) }, { id: 'f2', dataUrl: foto(12) }], partners: [{ partnerId: 'pa-1', sharePct: '40' }] });
   const b = Object.assign(MPX.newItem('b', 'cat-w'), { brand: 'Gold', name: 'Chain', quantity: '3', unitPrice: '166.667' });
@@ -437,6 +438,9 @@ const ZEILE = (name: string, qty: number, price: number, extra: Record<string, u
   ok(zahl(db, 'SELECT COUNT(*) FROM item_participations WHERE purchase_id = ?', [pid]) === 2 && zahl(db, 'SELECT COUNT(*) FROM purchase_payments WHERE purchase_id = ?', [pid]) === 3
     && s(db, 'SELECT first_name FROM customers WHERE id = ?', [String(r.value?.customerId)]) === 'Samir' && unbalanced(db) === 0,
     'TELEFON-RUMPF neue Person, Partner, drei Zahlungen, Hauptbuch ausgeglichen');
+  const kunde = row(db, 'SELECT phone, personal_id FROM customers WHERE id = ?', [String(r.value?.customerId)]);
+  ok(kunde.phone === '+966512345678' && kunde.personal_id === '900123456',
+    `TELEFON-KONTAKT am Primary: Telefon als E.164 mit der gewählten Vorwahl, Ausweisnummer — wie vom Rechner angelegt (${S(kunde)})`);
 }
 
 // ── 9 SKU-ALLOC — ein neuer Artikel ohne SKU bekommt eine aus dem durablen Zähler, am Telefon wie am Rechner ──
