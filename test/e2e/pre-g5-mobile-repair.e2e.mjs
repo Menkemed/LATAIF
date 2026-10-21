@@ -3,11 +3,12 @@
 // Primary (lataif.exe), Telefon (die echte /mobile-Seite in einem kopflosen Edge) und PC2
 // (lataif-e2e-client.exe). Run: node test/e2e/pre-g5-mobile-repair.e2e.mjs
 //
-//   M1  Erfassen    Telefon legt Kunde + Reparatur mit ZWEI Fotos an. Der Primary vergibt Nummer und
-//                   Gutscheincode (kein `REP-MOB-`), die Bilder stehen normalisiert in der Zeile, im
-//                   durablen Nachweis steht GENAU eine Zeile.
+//   M1  Erfassen    Telefon legt Kunde (mit Vorwahl + Ausweisnummer) + Reparatur mit ZWEI Fotos an. Der
+//                   Primary vergibt Nummer und Gutscheincode (kein `REP-MOB-`), die Bilder liegen
+//                   normalisiert im Medienkern der Reparatur (seit MEDIA-REPAIR, 2026-09-20 — nicht mehr
+//                   in `repairs.images`), im durablen Nachweis steht GENAU eine Zeile.
 //   M2  Bearbeiten  Dasselbe Telefon aendert Problem + Notiz und haengt ein drittes Foto an — eine
-//                   Aenderung, eine neue Fassung, die beiden alten Bilder Byte fuer Byte erhalten.
+//                   Aenderung, eine neue Fassung, die beiden alten Bilder bleiben (dasselbe Medium, derselbe Inhalt).
 //   M3  Verlorene   Die Antwort auf einen Befehl wird VERWORFEN, nachdem der Primary ihn ausgefuehrt
 //       Antwort     hat. Das Telefon zeigt den Vorgang unter „Unresolved saves"; „Clarify now"
 //                   wiederholt DIESELBE Kennung → Replay, KEINE zweite Reparatur, kein zweites Bild.
@@ -22,8 +23,11 @@
 //
 // PROZESS-ISOLATION (dauerhafte Regel): gestartet wird nur ueber `spawnTracked`; beendet wird nur,
 // was dieser Lauf gestartet hat — regulaer nach Pruefung von PID UND exaktem Test-Pfad, hart nur
-// ueber den Helfer. Edge ist ein EIGENES Kind dieses Laufs (`killOwnChild`). Die installierte
-// Produktions-App, E:\LATAIF\Data und die Ports 3001/3443 bleiben unberuehrt.
+// ueber den Helfer. Edge wird ueber seine EIGENE Debug-Verbindung geschlossen (`edgeSchliessen`) —
+// `killOwnChild` bleibt nur der Rueckfall. Die installierte
+// Produktions-App, E:\LATAIF\Data und die Ports 3001/3443 bleiben unberuehrt. Kein aeusseres
+// `timeout` um diesen Lauf: es beendet nur node, und App wie Browser blieben verwaist stehen —
+// die Zeitgrenze ist der WACHHUND unten, er raeumt vorher auf.
 // ════════════════════════════════════════════════════════════════════════════
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
 import {
@@ -62,6 +66,13 @@ const BIZ_DB = join(APP_DATA_DIR, 'lataif.db');
 const SERVER_DB = join(APP_DATA_DIR, 'lataif_sync_server.db');
 const CLIENT_HOME = join(RUN, 'client-home');
 const CLIENT_APPDATA = join(CLIENT_HOME, 'Roaming');
+// PC2 legt seinen Fenster-Speicher (EBWebView: Server, Ausweis, Sitzung) und seine offenen Speichervorgaenge
+// (`pending-saves`) unter dem ECHTEN LocalAppData seiner Test-Kennung ab — die Umleitung ueber die Umgebung
+// greift dort nicht. Ohne Neuanfang startet PC2 mit dem Ausweis eines frueheren Laufs fuer einen Server, den
+// es nicht mehr gibt: keine Erststart-Maske, keine Anmeldemaske, jede Anfrage 401. Dieser Ordner gehoert nur
+// der Test-Kennung (nie der Produktion) und wird deshalb zu Beginn geleert — wie APP_DATA_DIR des Primary.
+const REAL_LOCALAPPDATA = process.env.LOCALAPPDATA || join(os.homedir(), 'AppData', 'Local');
+const CLIENT_LOCAL_STATE = join(REAL_LOCALAPPDATA, CLIENT_IDENT);
 const STAGING_ROOT = join(APP_DATA_DIR, 'command-staging');
 
 let PASS = 0, FAIL = 0; const fails = [];
@@ -73,17 +84,60 @@ const MESS = {};
 const RV = { create: false, edit: false, lostAnswer: false, staleEdit: false, bothSurfaces: false, workshop: false, media: false };
 
 let edgeProc = null;
+let edgeBrowserWs = '';
+/**
+ * Der Test-Browser wird ueber seine EIGENE Debug-Verbindung geschlossen (`Browser.close`), nicht beendet:
+ * `msedge.exe` startet den eigentlichen Browser als neuen Prozess und endet sofort (Exit 0). Das gestartete
+ * Kind ist danach weg, `killOwnChild` greift ins Leere — bisher blieb nach JEDEM Lauf ein ganzer Edge-Baum
+ * stehen. Die Verbindung ist die des Browsers, den dieser Lauf auf seinem eigenen Port gestartet hat (ihre
+ * Kennung gilt nur fuer genau diese Browser-Instanz); kein Prozess wird nach Name, Befehlszeile oder PID angefasst.
+ */
+async function edgeSchliessen() {
+  if (!edgeBrowserWs) return true;
+  await new Promise((res) => {
+    let ws = null;
+    const fertig = () => { try { ws?.close(); } catch { /* zu */ } res(); };
+    const t = setTimeout(fertig, 5000);
+    try {
+      ws = new WebSocket(edgeBrowserWs);
+      ws.addEventListener('open', () => ws.send(JSON.stringify({ id: 1, method: 'Browser.close' })));
+      ws.addEventListener('message', () => { clearTimeout(t); fertig(); });
+      ws.addEventListener('close', () => { clearTimeout(t); res(); });
+      ws.addEventListener('error', () => { clearTimeout(t); res(); });
+    } catch { clearTimeout(t); res(); }
+  });
+  for (let i = 0; i < 40; i++) {
+    try { await fetch(`http://127.0.0.1:${EDGE_CDP}/json/version`); } catch { edgeBrowserWs = ''; return true; }
+    await sleep(250);
+  }
+  return false;
+}
+/** Nur lesend: wie viele Prozesse laufen noch mit dem Profil DIESES Laufs? */
+const edgeReste = () => {
+  try {
+    const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
+      `@(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -like '*${EDGE_PROFILE}*' }).Count`],
+    { encoding: 'utf8', windowsHide: true });
+    return Number(out.trim());
+  } catch { return -1; }
+};
 const aufraeumen = () => {
   try { killOwnChild(edgeProc); } catch { /* schon weg */ }
   // Nur der EIGENE Test-Browser (PID + Startpfad geprüft, samt Prozessbaum) — nie nach Name oder
   // Befehlszeile: jeder Lauf hat ein eigenes Profil unter RUN, ein Rest eines früheren Laufs stört nicht.
   killStarted(); killTestImage('lataif.exe'); killTestImage('lataif-e2e-client.exe');
 };
-const WACHHUND = setTimeout(() => {
+// `PREG5_WACHHUND_MS` verkuerzt die Grenze — nur um den Aufraeumweg bei einer Zeitueberschreitung zu beweisen.
+const WACHHUND = setTimeout(async () => {
   console.log('  x ABBRUCH: Zeitgrenze erreicht — der Lauf steht.');
+  await edgeSchliessen();
   aufraeumen();
+  await waitTestImageGone('lataif.exe'); await waitTestImageGone('lataif-e2e-client.exe');
+  let rest = edgeReste();
+  for (let i = 0; i < 40 && rest > 0; i++) { await sleep(250); rest = edgeReste(); }
+  console.log('  ABBRUCH-AUFRAEUMEN ' + JSON.stringify({ edgeGestartet: !!edgeProc, browserZu: !edgeBrowserWs, reste: rest }));
   process.exit(1);
-}, 70 * 60 * 1000);
+}, Number(process.env.PREG5_WACHHUND_MS) || 70 * 60 * 1000);
 
 const appEnv = () => ({ ...process.env, LATAIF_E2E_SYNC_PORT: String(PORT), TEMP: join(RUN, 'tmp'), TMP: join(RUN, 'tmp') });
 const clientEnv = () => ({
@@ -193,6 +247,8 @@ async function startEdge(url) {
   // Genau DIESE Seite, nicht irgendeine: der Vergleich geht gegen die volle Adresse dieses Laufs.
   const c = await attachOnly(EDGE_CDP, new RegExp('^' + url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 60000);
   await c.send('Network.enable', {}, 15000);
+  // Die Browser-Verbindung DIESES Browsers — damit wird er am Ende geschlossen (siehe `edgeSchliessen`).
+  try { edgeBrowserWs = String((await (await fetch(`http://127.0.0.1:${EDGE_CDP}/json/version`)).json()).webSocketDebuggerUrl || ''); } catch { edgeBrowserWs = ''; }
   return c;
 }
 
@@ -223,7 +279,18 @@ const repZeile = (nr) => dbQ(BIZ_DB, 'SELECT * FROM repairs WHERE repair_number 
 const repById = (id) => dbQ(BIZ_DB, 'SELECT * FROM repairs WHERE id = ?', [id])[0] || null;
 const repAnzahl = () => Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM repairs')[0]?.n || 0);
 const nachweisFuer = (op) => Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM remote_command_ledger WHERE op = ?', [op])[0]?.n || 0);
-const bilderVon = (id) => { try { return JSON.parse(String(repById(id)?.images || '[]')); } catch { return []; } };
+// MEDIA-REPAIR (seit 2026-09-20) — die Fotos einer Reparatur liegen im Medienkern: Verknuepfung → Medium →
+// aktuelle Generation. `repairs.images` ist nur noch der Altweg und wird beim Speichern geleert.
+const fotosVon = (id) => dbQ(BIZ_DB, `SELECT l.media_id AS media, g.stored_blob_hash AS hash, g.byte_size AS bytes,
+    g.mime_type AS mime, g.gen_status AS stand
+  FROM media_links l
+  JOIN media_objects o ON o.tenant_id = l.tenant_id AND o.media_id = l.media_id
+  JOIN media_blobs b ON b.tenant_id = o.tenant_id AND b.blob_id = o.master_blob_id
+  JOIN media_blob_generations g ON g.tenant_id = b.tenant_id AND g.blob_id = b.blob_id AND g.generation_no = b.current_generation_no
+  WHERE l.entity_type = 'repair' AND l.entity_id = ? AND l.media_role = 'gallery' AND l.deleted_at IS NULL
+  ORDER BY l.sort_order ASC`, [id]);
+const fotoGut = (f) => f.mime === 'image/jpeg' && Number(f.bytes) > 0 && Number(f.bytes) <= 100000 && f.stand === 'available';
+const bildspalteLeer = (id) => { const v = String(repById(id)?.images ?? ''); return v === '' || v === '[]' || v === 'null'; };
 const stagingDateien = () => {
   const out = [];
   const lauf = (d) => { if (!existsSync(d)) return; for (const e of readdirSync(d, { withFileTypes: true })) { const p = join(d, e.name); if (e.isDirectory()) lauf(p); else out.push(p); } };
@@ -248,6 +315,7 @@ try {
   aufraeumen(); await waitTestImageGone('lataif.exe'); await waitTestImageGone('lataif-e2e-client.exe');
   for (const d of [RUN, CLIENT_APPDATA, join(CLIENT_HOME, 'Local'), join(CLIENT_HOME, 'tmp'), join(RUN, 'tmp')]) mkdirSync(d, { recursive: true });
   if (existsSync(APP_DATA_DIR)) rmSync(APP_DATA_DIR, { recursive: true, force: true });
+  if (existsSync(CLIENT_LOCAL_STATE)) rmSync(CLIENT_LOCAL_STATE, { recursive: true, force: true, maxRetries: 20, retryDelay: 300 });
   console.log(e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: appEnv() }));
 
   // ══ SETUP — Primary einrichten, Server-Zugang setzen, Server starten ═══════════════════════════
@@ -346,7 +414,7 @@ try {
 
     const neu = dbQ(BIZ_DB, 'SELECT id, repair_number, voucher_code, status, created_by, images FROM repairs ORDER BY rowid DESC LIMIT 1')[0] || {};
     REP_ID = String(neu.id || ''); REP_NR = String(neu.repair_number || '');
-    const bilder = bilderVon(REP_ID);
+    const bilder = fotosVon(REP_ID);
     const nummerGut = /^REP-/.test(REP_NR) && !/REP-MOB-/.test(REP_NR);
     const einmal = repAnzahl() === vorher + 1 && nachweisFuer('repairs.create') === 1;
     MESS.m1 = { nummer: REP_NR, gutschein: String(neu.voucher_code || '').length, status: neu.status, bilder: bilder.length, fotosInMaske: fotos, kunden: kundenZeilen.length, meldung: meldung.slice(0, 80) };
@@ -354,13 +422,15 @@ try {
     ok(fotos === 2, `M1 zwei Fotos liegen in der Maske (${fotos})`);
     ok(gespeichert && nummerGut, `M1 der PRIMARY vergibt die Nummer — kein REP-MOB- (${REP_NR})`);
     ok(einmal, `M1 genau eine Reparatur, genau eine Zeile im durablen Nachweis (${repAnzahl() - vorher}/${nachweisFuer('repairs.create')})`);
-    ok(bilder.length === 2 && bilder.every((b) => /^data:image\/jpeg/.test(b)), `M1 beide Fotos stehen normalisiert in der Zeile (${bilder.length})`);
-    RV.create = uebersicht && maske && kundeDa && kundenZeilen.length === 1 && fotos === 2 && gespeichert && nummerGut && einmal && bilder.length === 2;
+    ok(bilder.length === 2 && bilder.every(fotoGut) && bildspalteLeer(REP_ID),
+      `M1 beide Fotos liegen normalisiert im Medienkern der Reparatur — JPEG <= 100 000 B, keine Bildbytes in der Zeile (${S(bilder.map((f) => [f.mime, f.bytes, f.stand]))})`);
+    RV.create = uebersicht && maske && kundeDa && kundenZeilen.length === 1 && fotos === 2 && gespeichert && nummerGut && einmal
+      && bilder.length === 2 && bilder.every(fotoGut) && bildspalteLeer(REP_ID);
   }
 
   // ══ M2 — Bearbeiten: Problem + Notiz + drittes Foto ════════════════════════════════════════════
   {
-    const vorBilder = bilderVon(REP_ID);
+    const vorBilder = fotosVon(REP_ID);
     const vorFassung = Number(repById(REP_ID)?.revision || 0);
     const vorNachweis = nachweisFuer('repairs.update');
     await setVal(phone, '#rpIssue', ISSUE2);
@@ -369,13 +439,18 @@ try {
     await klick(phone, '#rpSaveBtn');
     const gespeichert = await warteBis(phone, `/Changes saved/.test(document.getElementById('rpSuccess').textContent)`, 120000);
     const zeile = repById(REP_ID) || {};
-    const bilder = bilderVon(REP_ID);
-    const alteErhalten = vorBilder.length === 2 && bilder.length === 3 && bilder[0] === vorBilder[0] && bilder[1] === vorBilder[1];
+    const bilder = fotosVon(REP_ID);
+    const gleich = (a, b) => !!a && !!b && a.media === b.media && a.hash === b.hash;
+    const alteErhalten = vorBilder.length === 2 && bilder.length === 3 && gleich(bilder[0], vorBilder[0]) && gleich(bilder[1], vorBilder[1])
+      && !vorBilder.some((v) => v.media === bilder[2].media) && bilder.every(fotoGut) && bildspalteLeer(REP_ID);
     const einmal = nachweisFuer('repairs.update') === vorNachweis + 1;
-    MESS.m2 = { issue: String(zeile.issue_description || '').slice(0, 60), notes: zeile.notes, bilder: bilder.length, fassung: [vorFassung, Number(zeile.revision || 0)] };
+    // Was das Telefon nach dem Speichern zeigt, kommt vom Primary (die Maske liest die Reparatur neu).
+    const inMaske = await warteBis(phone, `document.querySelectorAll('#rpPhotoStrip .photo-thumb').length === 3`, 30000);
+    MESS.m2 = { issue: String(zeile.issue_description || '').slice(0, 60), notes: zeile.notes, bilder: bilder.length, inMaske, fassung: [vorFassung, Number(zeile.revision || 0)] };
     ok(gespeichert && String(zeile.issue_description) === ISSUE2 && String(zeile.notes) === 'Handed in at the counter',
       `M2 Problem und Notiz sind geaendert (${S(MESS.m2)})`);
-    ok(alteErhalten, `M2 das dritte Foto kommt HINZU, die beiden alten bleiben Byte fuer Byte (${vorBilder.length} → ${bilder.length})`);
+    ok(alteErhalten, `M2 das dritte Foto kommt HINZU, die beiden alten bleiben — dasselbe Medium, derselbe Inhalt (${vorBilder.length} → ${bilder.length})`);
+    ok(inMaske, `M2 das Telefon zeigt nach dem Speichern alle drei Fotos vom Primary (${await fotoZahl(phone)})`);
     ok(einmal && Number(zeile.revision || 0) > vorFassung, `M2 genau eine Aenderung, die Fassung steigt (${S(MESS.m2.fassung)})`);
     RV.edit = gespeichert && String(zeile.issue_description) === ISSUE2 && alteErhalten && einmal;
   }
@@ -425,20 +500,24 @@ try {
     const nachher = repAnzahl();
     const nachweis = nachweisFuer('repairs.create');
     const mitIssue3 = Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM repairs WHERE issue_description = ?', [ISSUE3])[0]?.n || 0);
-    MESS.m3 = { verworfen, vorRep, nachher, nachweisVor: vorNachweis, nachweis, zeilenInLeiste: zeilen, mitIssue3 };
+    const m3Fotos = fotosVon(String(dbQ(BIZ_DB, 'SELECT id FROM repairs WHERE issue_description = ?', [ISSUE3])[0]?.id || ''));
+    MESS.m3 = { verworfen, vorRep, nachher, nachweisVor: vorNachweis, nachweis, zeilenInLeiste: zeilen, mitIssue3, fotos: m3Fotos.length };
     ok(verworfen === 1 && offen, `M3 die Antwort ging verloren, die Maske sagt es ehrlich (${S(MESS.m3)})`);
     ok(gebucht, 'M3 der Primary hatte trotzdem gebucht');
     ok(leiste && zeilen === 1, `M3 der Vorgang steht unter „Unresolved saves" (${zeilen})`);
     ok(geklaert && nachher === vorRep + 1 && mitIssue3 === 1 && nachweis === vorNachweis + 1,
       `M3 „Clarify now" wiederholt DIESELBE Kennung → Replay: KEINE zweite Reparatur (${S(MESS.m3)})`);
+    ok(m3Fotos.length === 1 && m3Fotos.every(fotoGut), `M3 …und kein zweites Bild: genau ein Foto an der Reparatur (${m3Fotos.length})`);
     RV.lostAnswer = verworfen === 1 && offen && gebucht && leiste && zeilen === 1 && geklaert
-      && nachher === vorRep + 1 && mitIssue3 === 1 && nachweis === vorNachweis + 1;
+      && nachher === vorRep + 1 && mitIssue3 === 1 && nachweis === vorNachweis + 1 && m3Fotos.length === 1;
   }
 
   // ══ SETUP PC2 — derselbe Datensatz auf dem zweiten Rechner ═════════════════════════════════════
   client = await attachApp(CLIENT_CDP, CLIENT_APP, clientEnv());
   await waitInvoke(client);
-  await waitFor(client, '[data-first-run-gate]', 120000);
+  const pc2Frisch = await waitFor(client, '[data-first-run-gate]', 120000);
+  ok(pc2Frisch && !existsSync(join(CLIENT_LOCAL_STATE, 'pending-saves')),
+    `SETUP PC2 beginnt frisch: Erststart-Maske, kein Ausweis und kein offener Speichervorgang eines frueheren Laufs (${pc2Frisch})`);
   await klick(client, '[data-first-run-connect]');
   await waitFor(client, '[data-first-run-server]', 20000);
   await setVal(client, '[data-first-run-server]', `127.0.0.1:${PORT}`);
@@ -552,6 +631,12 @@ try {
     const werkMeldung = await text(phone, '#rpWorkMsg');
     MESS.m7 = { zeilen: [vorZeilen, zeilen().length], art: neueZeile.work_type, kosten: Number(neueZeile.cost_amount || 0), meldung: werkMeldung.slice(0, 60) };
     ok(zeileDa && neueZeile.work_type === 'polishing', `M7 „Add work line" schreibt die Zeile am Primary (${S(MESS.m7)})`);
+    if (!zeileDa) {
+      console.log('      (M7 Diagnose) Fehler: ' + String(await text(phone, '#rpError')) + ' | Erfolg: ' + String(await text(phone, '#rpSuccess'))
+        + ' | Kopf: ' + String(await text(phone, '#rpHeadline')) + ' | Werkstattkarte sichtbar: '
+        + String(await phone.ev("return !document.getElementById('rpWorkCard').classList.contains('hidden');").catch((e) => String(e)))
+        + ' | Antworten: ' + phone.antworten.slice(-8).join(' ; ') + ' | Konsole: ' + (phone.events || []).slice(-8).join(' ~ '));
+    }
 
     // ── Dieselbe Zeile zuruecknehmen (zwei Klicks: erst Nachfrage)
     const lineId = String(neueZeile.id || '');
@@ -597,16 +682,18 @@ try {
 
   // ══ M6 — Medien und Grenzen ═══════════════════════════════════════════════════════════════════
   {
-    const bilder = bilderVon(REP_ID);
-    const groessen = bilder.map((b) => Math.round((String(b).length - String(b).indexOf(',') - 1) * 3 / 4));
-    const imRahmen = groessen.every((g) => g <= 100000) && bilder.every((b) => /^data:image\/jpeg;base64,/.test(b));
+    const bilder = fotosVon(REP_ID);
+    const groessen = bilder.map((f) => Number(f.bytes));
+    const imRahmen = bilder.length === 3 && bilder.every(fotoGut) && bildspalteLeer(REP_ID);
     const staging = stagingDateien();
     const pushGerufen = phone.requests.filter((u) => /\/api\/sync\/push/.test(u)).length;
     const befehle = phone.requests.filter((u) => /\/api\/command/.test(u)).length;
     const stagingRufe = phone.requests.filter((u) => /\/api\/staging\/media/.test(u)).length;
-    const keineEigeneDb = !existsSync(join(CLIENT_HOME, 'Local', CLIENT_IDENT, 'lataif.db'));
+    // Alle Orte, an denen PC2 eine Datenbank anlegen koennte — die umgeleiteten UND die echten seiner Test-Kennung.
+    const keineEigeneDb = [join(CLIENT_HOME, 'Local', CLIENT_IDENT), join(CLIENT_APPDATA, CLIENT_IDENT), CLIENT_LOCAL_STATE, join(REAL_APPDATA, CLIENT_IDENT)]
+      .every((d) => !existsSync(join(d, 'lataif.db')));
     MESS.m6 = { bilder: groessen, stagingDateien: staging.length, pushGerufen, befehle, stagingRufe, keineEigeneDb };
-    ok(imRahmen, `M6 jedes Bild ist JPEG und <= 100 000 B (${S(groessen)})`);
+    ok(imRahmen, `M6 jedes Bild ist JPEG und <= 100 000 B, die alte Bildspalte bleibt leer (${S(groessen)})`);
     ok(staging.length === 0, `M6 die Ablage des Primary ist nach dem Erfolg leer — kein verwaister Blob (${staging.length})`);
     ok(pushGerufen === 0 && befehle > 0 && stagingRufe > 0,
       `M6 das Telefon schreibt NUR ueber /api/command (+Ablage) — nie ueber /api/sync/push (${S(MESS.m6)})`);
@@ -625,9 +712,16 @@ try {
   try { primary?.close(); } catch { /* zu */ }
   try { phone?.close(); } catch { /* zu */ }
   try { client?.close(); } catch { /* zu */ }
+  await edgeSchliessen();
   aufraeumen();
   await waitTestImageGone('lataif.exe'); await waitTestImageGone('lataif-e2e-client.exe');
 }
+
+// Der Test-Browser ist zu — und mit ihm jeder Prozess seines Profils (nur gelesen, nichts beendet).
+let reste = edgeReste();
+for (let i = 0; i < 40 && reste > 0; i++) { await sleep(250); reste = edgeReste(); }
+ok(!edgeBrowserWs && reste === 0, `AUFRAEUMEN der Test-Browser ist geschlossen, kein Prozess seines Profils laeuft noch (${reste})`);
+MESS.aufraeumen = { browserZu: !edgeBrowserWs, reste };
 
 clearTimeout(WACHHUND);
 console.log('\n  PRE-G5 Mobile Repair              Ergebnis');
