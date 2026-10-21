@@ -143,9 +143,17 @@ async function main(): Promise<void> {
     // eine schon früher aus der Galerie entfernte Verknüpfung: bleibt wie sie ist
     medium(db, 'm-old', blob(db, 'om'), blob(db, 'ot', 900));
     link(db, 'gone', 'm-old', 1, NOW);
+    // dasselbe Medium hängt auch an einem anderen Vorgang (Einkauf) — anderer Besitzertyp, gleiche Id-Form
+    medium(db, 'm-pur', blob(db, 'pm'), blob(db, 'pt', 900));
+    link(db, 'gone', 'm-pur', 2);
+    db.run(`INSERT INTO purchases (id, branch_id, tenant_id) VALUES ('gone', ?, ?)`, [B, T]); // sogar mit derselben Id
+    db.run(`INSERT INTO media_links (tenant_id, link_id, scope_kind, branch_id, entity_type, entity_id, media_id, media_role, sort_order, is_primary, created_at, deleted_at)
+            VALUES (?, 'link-purchase-gone', 'branch', ?, 'purchase', 'gone', 'm-pur', 'document', 0, 1, ?, NULL)`, [T, B, NOW]);
     deleteRow(db, 'gone');
     const r = purgeProductLeftovers(db, ['gone'], LATER);
-    ok(r.links === 1, `2: nur die eine aktive Verknüpfung des gelöschten Artikels (${r.links})`);
+    ok(r.links === 2, `2: nur die aktiven Artikel-Verknüpfungen des gelöschten Artikels (${r.links})`);
+    ok(num(db, `SELECT COUNT(*) FROM media_links WHERE entity_type = 'purchase' AND entity_id = 'gone' AND deleted_at IS NULL`) === 1
+      && required(db).has('pm') && required(db).has('pt'), '2: die Verknüpfung eines anderen Vorgangs (Einkauf, gleiche Id) bleibt aktiv, das Foto bleibt in der Sicherung');
     ok(num(db, `SELECT COUNT(*) FROM media_links WHERE entity_id = 'other' AND deleted_at IS NULL AND is_primary = 1`) === 1, '2: die Verknüpfung des anderen Artikels bleibt aktiv (auch als Titelbild)');
     ok(required(db).has('sm') && required(db).has('st'), '2: ein Foto, das noch ein anderer Artikel zeigt, bleibt gebraucht');
     ok(num(db, `SELECT COUNT(*) FROM media_links WHERE entity_id = 'gone' AND media_id = 'm-old' AND deleted_at = ?`, [NOW]) === 1, '2: früher entfernte Verknüpfung unverändert');
