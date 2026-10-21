@@ -35,6 +35,7 @@ const befehleRepair = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_
 const anzeigeName = readFileSync(join(repo, 'src-tauri/src/sync/mobile_display_name.js'), 'utf8');
 const steine = readFileSync(join(repo, 'src-tauri/src/sync/mobile_stones.js'), 'utf8');
 const datumRegel = readFileSync(join(repo, 'src-tauri/src/sync/mobile_business_date.js'), 'utf8');
+const kontakt = readFileSync(join(repo, 'src-tauri/src/sync/mobile_contact.js'), 'utf8');
 // STONES — dieselben Stile wie die echte Seite (für die Sichtprüfung bei 360 px).
 const STEIN_CSS = (() => {
   const pg = readFileSync(join(repo, 'src-tauri/src/sync/mobile_page.rs'), 'utf8').split(String.fromCharCode(13)).join('');
@@ -100,7 +101,7 @@ ${STEIN_CSS}
 ${FOTO_CSS}</style>
 </head><body>
 ${html}
-<script src="/display-name.js"></script><script src="/stones.js"></script><script src="/business-date.js"></script><script src="/repair-commands.js"></script><script src="/commands.js"></script><script src="/shim.js"></script><script src="/ui.js"></script>
+<script src="/display-name.js"></script><script src="/stones.js"></script><script src="/business-date.js"></script><script src="/contact.js"></script><script src="/repair-commands.js"></script><script src="/commands.js"></script><script src="/shim.js"></script><script src="/ui.js"></script>
 </body></html>`;
 
 // ── Attrappen-Primary ─────────────────────────────────────────────────────────────────────────
@@ -110,7 +111,7 @@ let aiErgebnis = {};
 let einkauf = () => ({ status: 200, body: { ok: true, value: { purchaseId: 'pur-1', purchaseNumber: 'PUR-2026-000042', totalAmount: 1361.5, paidAmount: 700, openAmount: 661.5 } } });
 const server = createServer((req, res) => {
   if (req.method === 'GET') {
-    const js = { '/display-name.js': anzeigeName, '/stones.js': steine, '/business-date.js': datumRegel, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI }[req.url.split('?')[0]];
+    const js = { '/display-name.js': anzeigeName, '/stones.js': steine, '/business-date.js': datumRegel, '/contact.js': kontakt, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI }[req.url.split('?')[0]];
     if (js !== undefined) { res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' }); res.end(js); return; }
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' }); res.end(SEITE); return;
   }

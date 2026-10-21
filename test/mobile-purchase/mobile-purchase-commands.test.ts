@@ -17,6 +17,7 @@ const S = (v: unknown): string => JSON.stringify(v);
 const sandbox: Record<string, unknown> = {};
 new Function('self', src('src-tauri/src/sync/mobile_repair_commands.js'))(sandbox);
 new Function('self', src('src-tauri/src/sync/mobile_business_date.js'))(sandbox);
+new Function('self', src('src-tauri/src/sync/mobile_contact.js'))(sandbox);
 new Function('self', src('src-tauri/src/sync/mobile_purchase_commands.js'))(sandbox);
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const MP = sandbox.MobilePurchase as any;

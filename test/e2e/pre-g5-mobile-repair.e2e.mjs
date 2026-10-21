@@ -304,9 +304,18 @@ try {
 
     await setVal(phone, '#rpCustomerFirst', KUNDE_VOR);
     await setVal(phone, '#rpCustomerLast', KUNDE_NACH);
+    // MOBILE-CONTACT — Vorwahl + Nummer + Ausweisnummer wie am Rechner; der Primary speichert E.164.
+    await setVal(phone, '#rpCustomerPhoneIso', 'SA');
+    await setVal(phone, '#rpCustomerPhone', '5 1234 5678');
+    await setVal(phone, '#rpCustomerPersonalId', ' 900123456 ');
     await klick(phone, '#rpCustomerCreateBtn');
     const kundeDa = await warteBis(phone, `!document.getElementById('rpCustomerPicked').classList.contains('hidden')`, 60000);
-    const kundenZeilen = dbQ(BIZ_DB, 'SELECT id FROM customers WHERE first_name = ? AND last_name = ?', [KUNDE_VOR, KUNDE_NACH]);
+    const kundenZeilen = dbQ(BIZ_DB, 'SELECT id, phone, personal_id FROM customers WHERE first_name = ? AND last_name = ?', [KUNDE_VOR, KUNDE_NACH]);
+    const kontakt = kundenZeilen[0] || {};
+    ok(kundenZeilen.length === 1 && kontakt.phone === '+966512345678' && kontakt.personal_id === '900123456',
+      `M1 KONTAKT der Primary speichert die Nummer international und die Ausweisnummer (${S({ phone: kontakt.phone, personalId: kontakt.personal_id })})`);
+    const zurueck = await phone.ev("return { iso: document.getElementById('rpCustomerPhoneIso').value, nr: document.getElementById('rpCustomerPhone').value, id: document.getElementById('rpCustomerPersonalId').value };");
+    ok(zurueck.iso === 'BH' && zurueck.nr === '' && zurueck.id === '', `M1 KONTAKT nach dem Anlegen steht die Maske wieder auf Bahrain und leer (${S(zurueck)})`);
 
     await fotoLegen(phone, 1); await sleep(400);
     await fotoLegen(phone, 2); await sleep(400);

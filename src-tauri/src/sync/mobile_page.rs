@@ -52,6 +52,12 @@ pub const MOBILE_HTML: &str = concat!(r##"<!DOCTYPE html>
   .photo-btn .icon { font-size: 24px; line-height: 1; }
   .photo-btn.is-full { opacity: .4; pointer-events: none; }
   .photo-count { color: #6B6B73; font-size: 12px; margin-top: 8px; }
+  /* MOBILE-CONTACT — Vorwahl und Nummer in einer Zeile (neuer Kunde bei Reparatur und Kommission) */
+  .phone-row { display: flex; gap: 8px; }
+  .phone-row select { flex: 0 0 auto; width: auto; }
+  .phone-row input { flex: 1; min-width: 0; }
+  .contact-hint { color: #8A8A93; font-size: 12px; line-height: 1.5; margin-top: 6px; }
+  .contact-hint:empty { display: none; }
   .hidden { display: none; }
   /* MOBILE-FIELDS — dynamic per-category fields */
   .chips { display: flex; flex-wrap: wrap; gap: 8px; }
@@ -303,6 +309,7 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
 "##, include_str!("mobile_display_name.js"), r##"
 "##, include_str!("mobile_stones.js"), r##"
 "##, include_str!("mobile_business_date.js"), r##"
+"##, include_str!("mobile_contact.js"), r##"
 "##, include_str!("mobile_upload_queue.js"), r##"
 "##, include_str!("mobile_repair_commands.js"), r##"
 "##, include_str!("mobile_consignment_commands.js"), r##"

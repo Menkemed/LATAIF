@@ -208,13 +208,30 @@
     const p = $('rpCustomerIdPreview');
     p.removeAttribute('src'); p.classList.add('hidden');
   }
+  // MOBILE-CONTACT — Vorwahl, Nummer und Ausweisnummer wie am Rechner und beim Einkauf: EINE Regel (`MobileContact`).
+  // Die Hinweise sind weich — nie eine Sperre.
+  MobileContact.COUNTRIES.forEach((c) => $('rpCustomerPhoneIso').appendChild(el('option', { value: c.iso }, MobileContact.optionLabel(c))));
+  function rpContactHints() {
+    const iso = $('rpCustomerPhoneIso').value || MobileContact.DEFAULT_ISO;
+    $('rpCustomerPhone').placeholder = MobileContact.countryOf(iso).example || '';
+    $('rpCustomerPhoneHint').textContent = MobileContact.phoneHint(iso, $('rpCustomerPhone').value);
+    $('rpCustomerPersonalIdHint').textContent = MobileContact.personalIdHint($('rpCustomerPersonalId').value);
+  }
+  function rpContactReset() {
+    $('rpCustomerPhoneIso').value = MobileContact.DEFAULT_ISO;
+    $('rpCustomerPhone').value = ''; $('rpCustomerPersonalId').value = '';
+    rpContactHints();
+  }
+  $('rpCustomerPhoneIso').onchange = rpContactHints;
+  $('rpCustomerPhone').oninput = rpContactHints;
+  $('rpCustomerPersonalId').oninput = rpContactHints;
+  rpContactReset();
   $('rpCustomerCreateBtn').onclick = async () => {
     const first = $('rpCustomerFirst').value.trim(), last = $('rpCustomerLast').value.trim();
     if (!first && !last) { rpSay('rpError', 'A new customer needs a name.'); return; }
     const key = 'customer:' + (RP.draftKey || 'draft');
     const body = { firstName: first, lastName: last };
-    const phone = MobileRepair.textOrNull($('rpCustomerPhone').value);
-    if (phone) body.phone = phone;
+    Object.assign(body, MobileContact.contactFields($('rpCustomerPhoneIso').value, $('rpCustomerPhone').value, $('rpCustomerPersonalId').value));
     // Erst die Bytes in die Ablage, dann der Auftrag mit ihrer Kennung. Scheitert die Ablage,
     // geht GAR NICHTS hinaus — sonst entstuende ein Kunde ohne das Dokument, das jemand gerade
     // aufgenommen hat, und niemand wuesste, dass es fehlt.
@@ -227,7 +244,8 @@
     if (r.kind === 'ok' && r.value && r.value.customerId) {
       rpSetCustomer(r.value.customerId, r.value.name || (first + ' ' + last).trim());
       rpSay('rpSuccess', 'Customer created.');
-      $('rpCustomerFirst').value = ''; $('rpCustomerLast').value = ''; $('rpCustomerPhone').value = '';
+      $('rpCustomerFirst').value = ''; $('rpCustomerLast').value = '';
+      rpContactReset();
       rpClearIdPhoto();
     } else {
       rpSay('rpError', rpMessageFor(r, 'The customer was not created'));

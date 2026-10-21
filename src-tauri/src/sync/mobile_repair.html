@@ -55,7 +55,17 @@
         <label>New customer</label>
         <input id="rpCustomerFirst" type="text" placeholder="First name" />
         <input id="rpCustomerLast" type="text" placeholder="Last name" />
-        <input id="rpCustomerPhone" type="text" placeholder="Phone (optional)" />
+        <!-- MOBILE-CONTACT — wie am Rechner und beim Einkauf: Land (Vorwahl) und Nummer getrennt,
+             gespeichert als E.164; dazu die Ausweisnummer. Hinweise sind weich — nie eine Sperre. -->
+        <label class="hint" for="rpCustomerPhone" style="margin-top:6px;">Phone (optional)</label>
+        <div class="phone-row">
+          <select id="rpCustomerPhoneIso" aria-label="Country code"></select>
+          <input id="rpCustomerPhone" type="text" inputmode="tel" placeholder="3612 3456" />
+        </div>
+        <div id="rpCustomerPhoneHint" class="contact-hint"></div>
+        <label class="hint" for="rpCustomerPersonalId" style="margin-top:6px;">Personal ID (CPR / passport, optional)</label>
+        <input id="rpCustomerPersonalId" type="text" placeholder="e.g. 900123456" />
+        <div id="rpCustomerPersonalIdHint" class="contact-hint"></div>
         <!-- MEDIA-IDENTITY §5 — das Ausweisfoto ist OPTIONAL und hat denselben Weg wie jedes andere
              Foto am Telefon: aufnehmen oder aus der Galerie, verkleinern, in die Ablage des
              Primary. Im Auftrag steht nur seine Inhaltskennung, nie Bytes. -->

@@ -32,10 +32,13 @@ const S = (v) => JSON.stringify(v);
 const html = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair.html'), 'utf8');
 const commands = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_commands.js'), 'utf8');
 const datumRegel = readFileSync(join(repo, 'src-tauri/src/sync/mobile_business_date.js'), 'utf8');
+const kontakt = readFileSync(join(repo, 'src-tauri/src/sync/mobile_contact.js'), 'utf8');
 const ui = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_ui.js'), 'utf8');
 // Die Helfer sind WOERTLICH die der Seite (`mobile_page.rs`) — wer sie hier nachbaut, testet seine
 // Nachbildung. Deshalb werden sie aus der Seite geschnitten.
 const page = readFileSync(join(repo, 'src-tauri/src/sync/mobile_page.rs'), 'utf8');
+// MOBILE-CONTACT — die Stile der echten Seite, fuer die Sichtpruefung bei 360 px.
+const SEITEN_CSS = (() => { const pg = page.split(String.fromCharCode(13)).join(''); return pg.slice(pg.indexOf('<style>') + 7, pg.indexOf('</style>')); })();
 /** Eine Funktion aus der Seite holen — ueber die Klammerbilanz, nicht ueber ein Endemuster. */
 function funktionAusSeite(kopf) {
   const a = page.indexOf(kopf);
@@ -79,9 +82,10 @@ window.fetch = function (u, o) { window.__PROTOKOLL.push('fetch ' + u); return e
 `;
 const UI_DATEI = `(function () {\n${ui}\n  window.__rpHomeOpen = rpHomeOpen;\n})();\n`;
 
-const SEITE = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>repair page test</title></head><body>
+const SEITE = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>repair page test</title></head><body>
 ${html}
 <script src="/business-date.js"></script>
+<script src="/contact.js"></script>
 <script src="/commands.js"></script>
 <script src="/shim.js"></script>
 <script src="/ui.js"></script>
@@ -100,7 +104,7 @@ let antwortGeber = () => ({ status: 200, body: { ok: true, value: {} } });
 const gesehen = [];
 const server = createServer((req, res) => {
   if (req.method === 'GET') {
-    const js = { '/business-date.js': datumRegel, '/commands.js': commands, '/shim.js': SHIM, '/ui.js': UI_DATEI }[req.url];
+    const js = { '/business-date.js': datumRegel, '/contact.js': kontakt, '/commands.js': commands, '/shim.js': SHIM, '/ui.js': UI_DATEI }[req.url];
     if (js !== undefined) {
       res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
       res.end(js);
@@ -196,10 +200,38 @@ try {
   };
   await c.ev("document.getElementById('rpNewBtn').click(); return 1;");
   await sleep(300);
+  // MOBILE-CONTACT — Vorwahl + Nummer + Ausweisnummer wie am Rechner; bei 360 px ohne Querscrollen.
+  const kontaktVor = await c.ev(`const s = document.getElementById('rpCustomerPhoneIso');
+    return { n: s.options.length, iso: s.value, erst: s.options[0].textContent, platz: document.getElementById('rpCustomerPhone').placeholder };`);
+  ok(kontaktVor.n === 8 && kontaktVor.iso === 'BH' && kontaktVor.erst === '🇧🇭 +973' && kontaktVor.platz === '3612 3456',
+    `KONTAKT Auswahl wie am Rechner, Bahrain vorgewaehlt (${S(kontaktVor)})`);
+  const kontaktHinweis = await c.ev(`const s = document.getElementById('rpCustomerPhoneIso'), n = document.getElementById('rpCustomerPhone'), i = document.getElementById('rpCustomerPersonalId');
+    s.value = 'SA'; s.dispatchEvent(new Event('change', { bubbles: true }));
+    n.value = '12'; n.dispatchEvent(new Event('input', { bubbles: true }));
+    const kurz = document.getElementById('rpCustomerPhoneHint').textContent;
+    n.value = '5 1234 5678'; n.dispatchEvent(new Event('input', { bubbles: true }));
+    i.value = ' 900123456 '; i.dispatchEvent(new Event('input', { bubbles: true }));
+    return { platz: n.placeholder, kurz: kurz, danach: document.getElementById('rpCustomerPhoneHint').textContent, ausweis: document.getElementById('rpCustomerPersonalIdHint').textContent };`);
+  ok(/too short/.test(kontaktHinweis.kurz) && kontaktHinweis.danach === '' && kontaktHinweis.ausweis === '' && kontaktHinweis.platz !== '3612 3456',
+    `KONTAKT Land gewechselt: eigener Platzhalter, weicher Hinweis beim Tippen (${S(kontaktHinweis)})`);
+  await c.send('Emulation.setDeviceMetricsOverride', { width: 360, height: 780, deviceScaleFactor: 2, mobile: true });
+  const schmal = await c.ev(`const st = document.createElement('style'); st.textContent = ${S(SEITEN_CSS)}; document.head.appendChild(st);
+    await new Promise((r) => setTimeout(r, 150));
+    const s = document.getElementById('rpCustomerPhoneIso').getBoundingClientRect(), n = document.getElementById('rpCustomerPhone').getBoundingClientRect(), i = document.getElementById('rpCustomerPersonalId').getBoundingClientRect();
+    const r = { quer: document.documentElement.scrollWidth, fenster: window.innerWidth, eineZeile: Math.abs(s.top - n.top) < 2, auswahl: Math.round(s.width), nummer: Math.round(n.width), rechts: Math.round(Math.max(n.right, i.right)) };
+    st.remove(); return r;`);
+  await c.send('Emulation.clearDeviceMetricsOverride');
+  ok(schmal.fenster === 360 && schmal.quer <= 360 && schmal.eineZeile && schmal.nummer >= 150 && schmal.rechts <= 360,
+    `KONTAKT 360 px: Vorwahl und Nummer in einer Zeile, kein Querscrollen (${S(schmal)})`);
   await c.ev("document.getElementById('rpCustomerFirst').value='Mo'; document.getElementById('rpCustomerLast').value='Kunde'; document.getElementById('rpCustomerCreateBtn').click(); return 1;");
   await sleep(800);
   const kundeOk = await c.ev("return !document.getElementById('rpCustomerPicked').classList.contains('hidden');");
   ok(kundeOk, 'der Kunde wird angelegt und gewaehlt');
+  const kontaktAuftrag = gesehen.filter((g) => g.body && g.body.op === 'customers.create').map((g) => g.body.payload)[0] || {};
+  ok(kontaktAuftrag.phone === '+966512345678' && kontaktAuftrag.personalId === '900123456',
+    `KONTAKT customers.create traegt die Nummer international und die Ausweisnummer (${S({ phone: kontaktAuftrag.phone, personalId: kontaktAuftrag.personalId })})`);
+  const kontaktLeer = await c.ev("return { iso: document.getElementById('rpCustomerPhoneIso').value, nr: document.getElementById('rpCustomerPhone').value, id: document.getElementById('rpCustomerPersonalId').value };");
+  ok(kontaktLeer.iso === 'BH' && kontaktLeer.nr === '' && kontaktLeer.id === '', `KONTAKT danach wieder Bahrain und leer (${S(kontaktLeer)})`);
 
   // BUSINESS-DATE — „Received Date": heute vorbelegt, Zukunft geht nicht hinaus, rückdatiert reist mit.
   const heute = new Date().toISOString().split('T')[0];

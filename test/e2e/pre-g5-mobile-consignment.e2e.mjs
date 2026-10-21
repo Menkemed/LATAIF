@@ -319,8 +319,16 @@ try {
 
     await setVal(phone, '#cnConsignorFirst', EINLIEFERER_VOR);
     await setVal(phone, '#cnConsignorLast', EINLIEFERER_NACH);
+    // MOBILE-CONTACT — Vorwahl + Nummer + Ausweisnummer (hier ein Pass) wie am Rechner.
+    await setVal(phone, '#cnConsignorPhoneIso', 'KW');
+    await setVal(phone, '#cnConsignorPhone', '5123 4567');
+    await setVal(phone, '#cnConsignorPersonalId', 'P1234567');
     await klick(phone, '#cnConsignorCreateBtn');
     const einlieferer = await warteBis(phone, `!document.getElementById('cnConsignorPicked').classList.contains('hidden')`, 60000);
+    const kontaktZeilen = dbQ(BIZ_DB, 'SELECT phone, personal_id FROM customers WHERE first_name = ? AND last_name = ?', [EINLIEFERER_VOR, EINLIEFERER_NACH]);
+    const kontakt = kontaktZeilen[0] || {};
+    ok(kontaktZeilen.length === 1 && kontakt.phone === '+96551234567' && kontakt.personal_id === 'P1234567',
+      `K1 KONTAKT der Primary speichert die Nummer international und die Ausweisnummer (${S({ phone: kontakt.phone, personalId: kontakt.personal_id })})`);
 
     await fotoLegen(phone, 1); await sleep(500);
     await fotoLegen(phone, 2); await sleep(500);

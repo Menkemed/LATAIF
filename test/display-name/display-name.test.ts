@@ -97,6 +97,7 @@ ok(S(js.BRAND_MODEL_HIDDEN_CATEGORIES) === S(dn.BRAND_MODEL_HIDDEN_CATEGORIES), 
 const sandbox: Record<string, unknown> = { MobileDisplayName: js };
 new Function('self', src('src-tauri/src/sync/mobile_repair_commands.js'))(sandbox);
 new Function('self', src('src-tauri/src/sync/mobile_business_date.js'))(sandbox);
+new Function('self', src('src-tauri/src/sync/mobile_contact.js'))(sandbox);
 new Function('self', src('src-tauri/src/sync/mobile_purchase_commands.js'))(sandbox);
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const MPX = sandbox.MobilePurchase as any;

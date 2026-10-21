@@ -39,8 +39,11 @@ const STEIN_CSS = (() => {
 const befehle = readFileSync(join(repo, 'src-tauri/src/sync/mobile_consignment_commands.js'), 'utf8');
 const ui = readFileSync(join(repo, 'src-tauri/src/sync/mobile_consignment_ui.js'), 'utf8');
 const datumRegel = readFileSync(join(repo, 'src-tauri/src/sync/mobile_business_date.js'), 'utf8');
+const kontakt = readFileSync(join(repo, 'src-tauri/src/sync/mobile_contact.js'), 'utf8');
 const schema = readFileSync(join(repo, 'src-tauri/src/sync/mobile_field_schema.json'), 'utf8');
 const page = readFileSync(join(repo, 'src-tauri/src/sync/mobile_page.rs'), 'utf8');
+// MOBILE-CONTACT — die Stile der echten Seite, fuer die Sichtpruefung bei 360 px.
+const SEITEN_CSS = (() => { const pg = page.split(String.fromCharCode(13)).join(''); return pg.slice(pg.indexOf('<style>') + 7, pg.indexOf('</style>')); })();
 
 /** Eine Funktion aus der echten Seite holen — ueber die Klammerbilanz, nicht ueber ein Muster. */
 function ausSeite(kopf) {
@@ -92,9 +95,9 @@ var idbReq = function (req) { return new Promise(function (res, rej) { req.onsuc
 
 const UI_DATEI = `(function () {\n${ui}\n  window.__cnHomeOpen = cnHomeOpen;\n  window.__CN = CN;\n})();\n`;
 
-const SEITE = `<!DOCTYPE html><html><head><meta charset="utf-8"><title>consignment page test</title></head><body>
+const SEITE = `<!DOCTYPE html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>consignment page test</title></head><body>
 ${html}
-<script src="/display-name.js"></script><script src="/stones.js"></script><script src="/business-date.js"></script><script src="/repair-commands.js"></script>
+<script src="/display-name.js"></script><script src="/stones.js"></script><script src="/business-date.js"></script><script src="/contact.js"></script><script src="/repair-commands.js"></script>
 <script src="/commands.js"></script>
 <script src="/shim.js"></script>
 <script src="/ui.js"></script>
@@ -114,7 +117,7 @@ const medienAbrufe = [];
 const server = createServer((req, res) => {
   if (req.method === 'GET') {
     const js = {
-      '/display-name.js': anzeigeName, '/stones.js': steine, '/business-date.js': datumRegel, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI,
+      '/display-name.js': anzeigeName, '/stones.js': steine, '/business-date.js': datumRegel, '/contact.js': kontakt, '/repair-commands.js': befehleRepair, '/commands.js': befehle, '/shim.js': SHIM, '/ui.js': UI_DATEI,
     }[req.url.split('?')[0]];
     if (js !== undefined) {
       res.writeHead(200, { 'content-type': 'application/javascript; charset=utf-8' });
@@ -250,6 +253,29 @@ try {
 
   await c.ev("document.getElementById('cnNewBtn').click(); return 1;");
   await sleep(200);
+  // MOBILE-CONTACT — Vorwahl + Nummer + Ausweisnummer wie am Rechner; bei 360 px ohne Querscrollen.
+  const kontaktVor = await c.ev(`const s = document.getElementById('cnConsignorPhoneIso');
+    return { n: s.options.length, iso: s.value, erst: s.options[0].textContent, platz: document.getElementById('cnConsignorPhone').placeholder };`);
+  ok(kontaktVor.n === 8 && kontaktVor.iso === 'BH' && kontaktVor.erst === '🇧🇭 +973' && kontaktVor.platz === '3612 3456',
+    `KONTAKT Auswahl wie am Rechner, Bahrain vorgewaehlt (${S(kontaktVor)})`);
+  const kontaktHinweis = await c.ev(`const s = document.getElementById('cnConsignorPhoneIso'), n = document.getElementById('cnConsignorPhone'), i = document.getElementById('cnConsignorPersonalId');
+    s.value = 'KW'; s.dispatchEvent(new Event('change', { bubbles: true }));
+    n.value = '12'; n.dispatchEvent(new Event('input', { bubbles: true }));
+    const kurz = document.getElementById('cnConsignorPhoneHint').textContent;
+    n.value = '5123 4567'; n.dispatchEvent(new Event('input', { bubbles: true }));
+    i.value = 'P1234567'; i.dispatchEvent(new Event('input', { bubbles: true }));
+    return { platz: n.placeholder, kurz: kurz, danach: document.getElementById('cnConsignorPhoneHint').textContent, ausweis: document.getElementById('cnConsignorPersonalIdHint').textContent };`);
+  ok(/too short/.test(kontaktHinweis.kurz) && kontaktHinweis.danach === '' && kontaktHinweis.ausweis === '' && kontaktHinweis.platz !== '3612 3456',
+    `KONTAKT Land gewechselt: eigener Platzhalter, weicher Hinweis beim Tippen (${S(kontaktHinweis)})`);
+  await c.send('Emulation.setDeviceMetricsOverride', { width: 360, height: 780, deviceScaleFactor: 2, mobile: true });
+  const schmal = await c.ev(`const st = document.createElement('style'); st.textContent = ${S(SEITEN_CSS)}; document.head.appendChild(st);
+    await new Promise((r) => setTimeout(r, 150));
+    const s = document.getElementById('cnConsignorPhoneIso').getBoundingClientRect(), n = document.getElementById('cnConsignorPhone').getBoundingClientRect(), i = document.getElementById('cnConsignorPersonalId').getBoundingClientRect();
+    const r = { quer: document.documentElement.scrollWidth, fenster: window.innerWidth, eineZeile: Math.abs(s.top - n.top) < 2, auswahl: Math.round(s.width), nummer: Math.round(n.width), rechts: Math.round(Math.max(n.right, i.right)) };
+    st.remove(); return r;`);
+  await c.send('Emulation.clearDeviceMetricsOverride');
+  ok(schmal.fenster === 360 && schmal.quer <= 360 && schmal.eineZeile && schmal.nummer >= 150 && schmal.rechts <= 360,
+    `KONTAKT 360 px: Vorwahl und Nummer in einer Zeile, kein Querscrollen (${S(schmal)})`);
   await c.ev(`
     document.getElementById('cnConsignorFirst').value = 'Mo';
     document.getElementById('cnConsignorLast').value = 'Kunde';
@@ -258,6 +284,11 @@ try {
   await sleep(700);
   ok(await c.ev("return !document.getElementById('cnConsignorPicked').classList.contains('hidden');"),
     '§1 der Einlieferer wird angelegt und gewaehlt');
+  const kontaktAuftrag = gesehen.filter((g) => g.body && g.body.op === 'customers.create').map((g) => g.body.payload)[0] || {};
+  ok(kontaktAuftrag.phone === '+96551234567' && kontaktAuftrag.personalId === 'P1234567',
+    `KONTAKT customers.create traegt die Nummer international und die Ausweisnummer (${S({ phone: kontaktAuftrag.phone, personalId: kontaktAuftrag.personalId })})`);
+  const kontaktLeer = await c.ev("return { iso: document.getElementById('cnConsignorPhoneIso').value, nr: document.getElementById('cnConsignorPhone').value, id: document.getElementById('cnConsignorPersonalId').value };");
+  ok(kontaktLeer.iso === 'BH' && kontaktLeer.nr === '' && kontaktLeer.id === '', `KONTAKT danach wieder Bahrain und leer (${S(kontaktLeer)})`);
 
   // Ein Foto wie von der Kamera — ein ECHTES Bild, sonst hat das Verkleinern nichts zu tun.
   await c.ev(`

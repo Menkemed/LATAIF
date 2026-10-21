@@ -510,12 +510,28 @@
       p.src = CN.idPhoto; p.classList.remove('hidden');
     } catch (err) { CN.idPhoto = null; cnSay('cnError', 'That ID photo could not be read.'); }
   };
+  // MOBILE-CONTACT — dieselben Kontaktfelder wie bei der Reparatur und beim Einkauf: EINE Regel (`MobileContact`).
+  MobileContact.COUNTRIES.forEach((c) => $('cnConsignorPhoneIso').appendChild(el('option', { value: c.iso }, MobileContact.optionLabel(c))));
+  function cnContactHints() {
+    const iso = $('cnConsignorPhoneIso').value || MobileContact.DEFAULT_ISO;
+    $('cnConsignorPhone').placeholder = MobileContact.countryOf(iso).example || '';
+    $('cnConsignorPhoneHint').textContent = MobileContact.phoneHint(iso, $('cnConsignorPhone').value);
+    $('cnConsignorPersonalIdHint').textContent = MobileContact.personalIdHint($('cnConsignorPersonalId').value);
+  }
+  function cnContactReset() {
+    $('cnConsignorPhoneIso').value = MobileContact.DEFAULT_ISO;
+    $('cnConsignorPhone').value = ''; $('cnConsignorPersonalId').value = '';
+    cnContactHints();
+  }
+  $('cnConsignorPhoneIso').onchange = cnContactHints;
+  $('cnConsignorPhone').oninput = cnContactHints;
+  $('cnConsignorPersonalId').oninput = cnContactHints;
+  cnContactReset();
   $('cnConsignorCreateBtn').onclick = async () => {
     const first = $('cnConsignorFirst').value.trim(), last = $('cnConsignorLast').value.trim();
     if (!first && !last) { cnSay('cnError', 'A new client needs a name.'); return; }
     const body = { firstName: first, lastName: last };
-    const phone = MobileRepair.textOrNull($('cnConsignorPhone').value);
-    if (phone) body.phone = phone;
+    Object.assign(body, MobileContact.contactFields($('cnConsignorPhoneIso').value, $('cnConsignorPhone').value, $('cnConsignorPersonalId').value));
     if (CN.idPhoto) {
       const s = await cnClient.stagePhoto(CN.idPhoto);
       if (!s.ok) { cnSay('cnError', 'The ID photo could not be sent (' + s.code + '). Nothing was created.'); return; }
@@ -525,7 +541,8 @@
     if (r.kind === 'ok' && r.value && r.value.customerId) {
       cnSetConsignor(r.value.customerId, r.value.name || (first + ' ' + last).trim());
       cnSay('cnSuccess', 'Client created.');
-      $('cnConsignorFirst').value = ''; $('cnConsignorLast').value = ''; $('cnConsignorPhone').value = '';
+      $('cnConsignorFirst').value = ''; $('cnConsignorLast').value = '';
+      cnContactReset();
       CN.idPhoto = null;
       const p = $('cnConsignorIdPreview');
       p.removeAttribute('src'); p.classList.add('hidden');

@@ -54,7 +54,16 @@
       <label>New client</label>
       <input id="cnConsignorFirst" type="text" placeholder="First name" />
       <input id="cnConsignorLast" type="text" placeholder="Last name" />
-      <input id="cnConsignorPhone" type="text" placeholder="Phone (optional)" />
+      <!-- MOBILE-CONTACT — dieselben Kontaktfelder wie bei der Reparatur und beim Einkauf. -->
+      <label class="hint" for="cnConsignorPhone" style="margin-top:6px;">Phone (optional)</label>
+      <div class="phone-row">
+        <select id="cnConsignorPhoneIso" aria-label="Country code"></select>
+        <input id="cnConsignorPhone" type="text" inputmode="tel" placeholder="3612 3456" />
+      </div>
+      <div id="cnConsignorPhoneHint" class="contact-hint"></div>
+      <label class="hint" for="cnConsignorPersonalId" style="margin-top:6px;">Personal ID (CPR / passport, optional)</label>
+      <input id="cnConsignorPersonalId" type="text" placeholder="e.g. 900123456" />
+      <div id="cnConsignorPersonalIdHint" class="contact-hint"></div>
       <!-- MEDIA-IDENTITY §5 — optionales Ausweisfoto, derselbe Weg wie bei der Reparatur. -->
       <label class="hint" for="cnConsignorIdPhoto" style="margin-top:6px;">ID / CPR photo (optional)</label>
       <input id="cnConsignorIdPhoto" type="file" accept="image/*" capture="environment" />

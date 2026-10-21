@@ -414,6 +414,7 @@ const ZEILE = (name: string, qty: number, price: number, extra: Record<string, u
   const sandbox: Record<string, unknown> = {};
   new Function('self', src('src-tauri/src/sync/mobile_repair_commands.js'))(sandbox);
   new Function('self', src('src-tauri/src/sync/mobile_business_date.js'))(sandbox);
+  new Function('self', src('src-tauri/src/sync/mobile_contact.js'))(sandbox);
   new Function('self', src('src-tauri/src/sync/mobile_purchase_commands.js'))(sandbox);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const MPX = sandbox.MobilePurchase as any;
@@ -576,7 +577,7 @@ const ZEILE = (name: string, qty: number, price: number, extra: Record<string, u
 {
   const db = freshDb(); seedMobile(db);
   const sandbox: Record<string, unknown> = {};
-  for (const f of ['mobile_business_date.js', 'mobile_repair_commands.js', 'mobile_purchase_commands.js']) new Function('self', src('src-tauri/src/sync/' + f))(sandbox);
+  for (const f of ['mobile_business_date.js', 'mobile_repair_commands.js', 'mobile_contact.js', 'mobile_purchase_commands.js']) new Function('self', src('src-tauri/src/sync/' + f))(sandbox);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const MPX = sandbox.MobilePurchase as any;
   const heute = new Date().toISOString().split('T')[0];

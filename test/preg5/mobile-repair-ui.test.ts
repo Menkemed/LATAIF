@@ -147,12 +147,16 @@ function starteOberflaeche(antworten: (url: string, body: unknown) => Antwort) {
   const datumSand: Record<string, unknown> = {};
   new Function('self', readFileSync(join(repo, 'src-tauri/src/sync/mobile_business_date.js'), 'utf8'))(datumSand);
   const MobileBusinessDate = datumSand.MobileBusinessDate;
+  // MOBILE-CONTACT — die Kontaktregel der Seite, woertlich (dieselbe Datei, die `mobile_page.rs` einbettet).
+  const kontaktSand: Record<string, unknown> = {};
+  new Function('self', readFileSync(join(repo, 'src-tauri/src/sync/mobile_contact.js'), 'utf8'))(kontaktSand);
+  const MobileContact = kontaktSand.MobileContact;
   const umgebung = baueUmgebung(antworten);
   const schirme: string[] = [];
   const src = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair_ui.js'), 'utf8');
   const fn = new Function(
     '$', 'show', 'hide', 'setText', 'screen', 'el', 'uuid', 'resizePhoto', 'TOKEN_KEY',
-    'idbReq', 'MobileRepair', 'indexedDB', 'fetch', 'localStorage', 'document', 'MobileBusinessDate',
+    'idbReq', 'MobileRepair', 'indexedDB', 'fetch', 'localStorage', 'document', 'MobileBusinessDate', 'MobileContact',
     src + '\n; return { rpHomeOpen };',
   );
   let nr = 0;
@@ -171,7 +175,7 @@ function starteOberflaeche(antworten: (url: string, body: unknown) => Antwort) {
     'lataif_mobile_token',
     umgebung.idbReq, MobileRepair, umgebung.indexedDB, umgebung.fetchFn,
     { getItem: () => 'token-xyz', setItem: () => {}, removeItem: () => {} },
-    document, MobileBusinessDate,
+    document, MobileBusinessDate, MobileContact,
   );
   return { document, nach, MobileRepair, schirme, api, ...umgebung };
 }
@@ -201,6 +205,10 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
   await $('rpCustomerCreateBtn').onclick!();
   await warte();
   ok(!$('rpCustomerPicked').classList.contains('hidden'), '§1 der angelegte Kunde ist gewaehlt');
+  const ohneKontakt = t.gerufen.find((g) => (g.body as { op?: string })?.op === 'customers.create');
+  const leer = (ohneKontakt?.body as { payload?: Record<string, unknown> })?.payload ?? {};
+  ok(!('phone' in leer) && !('personalId' in leer),
+    `§1 KONTAKT leere Felder → weder Nummer noch Ausweisnummer im Auftrag, nie ein „+973" allein (${JSON.stringify(leer)})`);
 
   $('rpIssue').value = 'Krone lose';
   await $('rpSaveBtn').onclick!();
@@ -591,6 +599,42 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
   const zweite = anlagen();
   ok(zweite.length === 2 && (zweite[1].body as { payload: { receivedAt?: string } }).payload.receivedAt === heute,
     `§8 leeres Feld: der Auftrag traegt heute, ausgeschrieben (${(zweite[1]?.body as { payload?: { receivedAt?: string } })?.payload?.receivedAt})`);
+}
+
+// ── §9 MOBILE-CONTACT: Vorwahl, Nummer und Ausweisnummer wie am Rechner ─────
+{
+  const t = starteOberflaeche((url: string, body: unknown): Antwort => {
+    const b = body as { op?: string } | null;
+    if (b?.op === 'customers.create') return { status: 200, body: { ok: true, value: { customerId: 'cust-k', name: 'Sara Kontakt' } } };
+    return { status: 200, body: { ok: true, value: { items: [] } } };
+  });
+  const $ = (id: string) => t.document.getElementById(id)! as El & { placeholder?: string; oninput?: () => void };
+  $('rpNewBtn').click();
+  await warte();
+  const optionen = $('rpCustomerPhoneIso').children;
+  ok(optionen.length === 8 && optionen[0].attrs.value === 'BH' && optionen[0].textContent === '🇧🇭 +973' && $('rpCustomerPhoneIso').value === 'BH',
+    `§9 die Auswahl traegt die Liste des Rechners, Bahrain vorgewaehlt (${optionen.length}, ${$('rpCustomerPhoneIso').value})`);
+  ok($('rpCustomerPhone').placeholder === '3612 3456', `§9 der Platzhalter ist das Beispiel des Landes (${$('rpCustomerPhone').placeholder})`);
+  $('rpCustomerPhoneIso').value = 'SA'; $('rpCustomerPhoneIso').onchange!();
+  $('rpCustomerPhone').value = '512'; $('rpCustomerPhone').oninput!();
+  ok($('rpCustomerPhone').placeholder === '5xxxxxxxx' && $('rpCustomerPhoneHint').textContent === 'Saudi Arabia number looks too short (3/9 digits).',
+    `§9 Land gewechselt: neuer Platzhalter, weicher Hinweis (${$('rpCustomerPhoneHint').textContent})`);
+  $('rpCustomerPhone').value = '5 1234 5678'; $('rpCustomerPhone').oninput!();
+  $('rpCustomerPersonalId').value = '12345'; $('rpCustomerPersonalId').oninput!();
+  ok($('rpCustomerPhoneHint').textContent === '' && /CPR looks too short \(5 digits\)/.test($('rpCustomerPersonalIdHint').textContent),
+    `§9 gueltige Nummer → kein Hinweis; zu kurze CPR → Hinweis (${$('rpCustomerPersonalIdHint').textContent})`);
+  $('rpCustomerPersonalId').value = ' 900123456 '; $('rpCustomerPersonalId').oninput!();
+  ok($('rpCustomerPersonalIdHint').textContent === '', '§9 eine CPR mit 9 Ziffern → kein Hinweis');
+  $('rpCustomerFirst').value = 'Sara'; $('rpCustomerLast').value = 'Kontakt';
+  await $('rpCustomerCreateBtn').onclick!();
+  await warte();
+  const anlage = t.gerufen.find((g) => (g.body as { op?: string })?.op === 'customers.create');
+  const p = (anlage?.body as { payload?: Record<string, unknown> })?.payload ?? {};
+  ok(p.phone === '+966512345678' && p.personalId === '900123456' && p.firstName === 'Sara',
+    `§9 der Auftrag traegt die Nummer international und die Ausweisnummer getrimmt (${JSON.stringify(p)})`);
+  ok($('rpCustomerPhoneIso').value === 'BH' && $('rpCustomerPhone').value === '' && $('rpCustomerPersonalId').value === ''
+    && $('rpCustomerPhone').placeholder === '3612 3456' && $('rpCustomerPersonalIdHint').textContent === '',
+    '§9 nach dem Anlegen steht die Maske wieder auf Bahrain und leer');
 }
 
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — preg5 mobile repair ui: ${PASS} passed, ${FAIL} failed`);
