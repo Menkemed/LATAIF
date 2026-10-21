@@ -19,6 +19,7 @@ import { StockMediaOrchestrator, type OrchestratorLease, type OrchestratorRawDb 
 import { ProductMediaResolver } from '../../src/core/media/product-media-resolver.ts';
 import { createProductWithDurableMedia } from '../../src/core/media/product-media-create.ts';
 import { assertSkuFree, SkuTakenError, SKU_TAKEN } from '../../src/core/products/sku-unique.ts';
+import { purgeProductLeftovers, productWasDeleted } from '../../src/core/products/product-leftovers.ts';
 import type {
   AbortInput, AbortResult, CommitInput, CommitResult, MediaBytes,
   MediaCommandGateway, PrepareInput, PrepareResult, ReadVerifiedInput, RecoveryOutcome,
@@ -85,7 +86,8 @@ function seed(db: any): void {
   db.run(`ALTER TABLE products ADD COLUMN images TEXT DEFAULT '[]'`);
   for (const c of ['brand', 'name', 'category_id', 'sku', 'attributes']) db.run(`ALTER TABLE products ADD COLUMN ${c} TEXT`);
   db.run(`CREATE TABLE sync_changelog (id INTEGER PRIMARY KEY AUTOINCREMENT, table_name TEXT, record_id TEXT, action TEXT)`);
-  db.run(`CREATE TABLE audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT, entity_id TEXT)`);
+  // `action_type` wie in der echten Tabelle — die Lösch-Sperre (PRODUCT-LEFTOVERS) liest sie.
+  db.run(`CREATE TABLE audit_log (id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT, entity_id TEXT, action_type TEXT)`);
   db.run(`CREATE TABLE mobile_upload_receipts (tenant_id TEXT, branch_id TEXT, authenticated_user_id TEXT, upload_event_id TEXT, payload_hash TEXT, entity_id TEXT, create_batch_id TEXT, product_id TEXT, canonical_product_metadata_hash TEXT, prepared_manifest_hash TEXT, created_at TEXT, PRIMARY KEY (tenant_id, branch_id, authenticated_user_id, upload_event_id))`);
   db.run(`INSERT INTO tenants (id) VALUES ('t1')`);
   db.run(`INSERT INTO branches (id, tenant_id) VALUES ('b1','t1')`);
@@ -638,6 +640,41 @@ async function main(): Promise<void> {
       bridge.seedAccepted('ev-sku-frei', 'prod-frei', ['b'], { metadataJson: JSON.stringify({ ...JSON.parse(META), sku: 'RC-1226V2' }) });
       const frei = await drainMobileUploads(makeDeps(db, gw, disk, bridge, { skuGuard: true }));
       ok(frei[0].code === 'ready' && count(db, `SELECT COUNT(*) FROM products WHERE sku='RC-1226V2'`) === 1, `SKU: eine freie SKU wird angelegt (${frei[0].code})`);
+    }
+    db.close();
+  }
+
+  // ── PRODUCT-LEFTOVERS — der Artikel wurde gelöscht, bevor sein Auftrag `ready` gemeldet werden konnte ──────────────
+  // Mit dem Artikel geht sein Beleg (der Wiederaufsetzpunkt). Negativkontrolle (ohne Sperre): der liegengebliebene Auftrag
+  // legt den gelöschten Artikel NEU an. Mit Sperre: nichts angelegt, Auftrag endgültig beiseitegelegt, fester Code.
+  for (const guard of [false, true]) {
+    const { db, gw, disk, bridge } = freshEnv(SQL);
+    const base = makeDeps(db, gw, disk, bridge);
+    bridge.seedAccepted('ev-del', 'prod-del', ['a', 'b']);
+    const g = await bridge.claim('pre', 100);
+    await manualCreate(base, g!, 'ev-del');               // Artikel + Beleg durabel …
+    await bridge.release('user-origin', 'ev-del', g!.claimToken); // … aber `ready` kam nie an
+    // Der Inhaber löscht den Artikel — wie die App: Zeile weg, Löschen protokolliert, Beleg und Verknüpfungen mit.
+    db.run(`DELETE FROM products WHERE id='prod-del'`);
+    db.run(`INSERT INTO sync_changelog (table_name, record_id, action) VALUES ('products', 'prod-del', 'delete')`);
+    const weg = purgeProductLeftovers(db, ['prod-del']);
+    ok(weg.receipts === 1 && weg.links === 2, `gelöscht: Beleg und beide Verknüpfungen entfernt (${JSON.stringify(weg)})`);
+    const deps: MobileDrainDeps = guard ? { ...base, productWasDeleted: (id: string) => productWasDeleted(db, id) } : base;
+    const outs = await drainMobileUploads(deps);
+    const wieder = count(db, `SELECT COUNT(*) FROM products WHERE id='prod-del'`);
+    if (!guard) {
+      ok(wieder === 1, `gelöscht, ohne Sperre (Negativkontrolle): der liegengebliebene Auftrag legt den Artikel wieder an (${outs[0]?.code}, ${wieder})`);
+    } else {
+      ok(outs[0].code === 'target_conflict' && outs[0].detail === 'MOBILE_UPLOAD_TARGET_DELETED', `gelöscht, mit Sperre: abgewiesen (${outs[0].code} ${outs[0].detail ?? ''})`);
+      ok(wieder === 0 && count(db, `SELECT COUNT(*) FROM mobile_upload_receipts WHERE upload_event_id='ev-del'`) === 0
+        && count(db, `SELECT COUNT(*) FROM media_links WHERE entity_id='prod-del' AND deleted_at IS NULL`) === 0, 'gelöscht: kein Artikel, kein Beleg, keine aktive Verknüpfung');
+      ok(bridge.stateOf('ev-del') === 'quarantined' && bridge.lastQuarantineCode === 'MOBILE_UPLOAD_TARGET_DELETED', 'gelöscht: Auftrag endgültig beiseitegelegt, fester Code');
+      const nochmal = await drainMobileUploads(deps);
+      ok(nochmal.length === 0 || nochmal.every((o) => o.code === 'idle'), `gelöscht: ein weiterer Lauf holt den Auftrag nicht wieder (${JSON.stringify(nochmal)})`);
+      // Ein neuer Artikel (nie gelöscht) geht weiter durch.
+      bridge.seedAccepted('ev-neu', 'prod-neu', ['c']);
+      const neu = await drainMobileUploads(deps);
+      ok(neu[0].code === 'ready' && count(db, `SELECT COUNT(*) FROM products WHERE id='prod-neu'`) === 1, `gelöscht: ein anderer, neuer Artikel wird normal angelegt (${neu[0].code})`);
     }
     db.close();
   }

@@ -154,6 +154,10 @@ export interface MobileDrainDeps {
   /** The durable sql.js source-binding for this upload. Keyed by the FULL identity incl. user. */
   readReceipt: (tenantId: string, branchId: string, authenticatedUserId: string, uploadEventId: string) => DurableReceipt | null;
   productExists: (productId: string) => boolean;
+  /** PRODUCT-LEFTOVERS — wurde der Artikel mit dieser Id gelöscht? Mit dem Artikel geht sein Beleg; ein noch nicht
+   *  `ready` gemeldeter Auftrag fände dann weder Beleg noch Artikel und legte ihn neu an. Fehlt die Abhängigkeit,
+   *  gilt nichts als gelöscht (der Stand vorher). */
+  productWasDeleted?: (productId: string) => boolean;
   /** The stored product's canonical metadata hash, for the pre-ready projection check. */
   readProductMetadataHash: (productId: string) => Promise<string | null>;
   /** The DURABLE create batch (media_ingest_jobs) bound to this product, for the pre-ready
@@ -249,6 +253,8 @@ const ERR_MANIFEST = 'MOBILE_UPLOAD_HANDOFF_MANIFEST_INVALID';
 const ERR_OP_CONFLICT = 'MOBILE_UPLOAD_OPERATION_CONFLICT';
 const ERR_TARGET_CONFLICT = 'MOBILE_UPLOAD_TARGET_CONFLICT';
 const ERR_RECEIPT_INCONSISTENT = 'MOBILE_UPLOAD_RECEIPT_INCONSISTENT';
+/** PRODUCT-LEFTOVERS — der Artikel dieses Auftrags wurde gelöscht. */
+export const ERR_TARGET_DELETED = 'MOBILE_UPLOAD_TARGET_DELETED';
 const ERR_BROKEN = 'MOBILE_UPLOAD_MEDIA_BROKEN';
 const ERR_METADATA_MISMATCH = 'MOBILE_UPLOAD_METADATA_MISMATCH';
 /** SKU-UNIQUE — die am Telefon eingetippte SKU steht schon an einem Artikel. */
@@ -440,6 +446,13 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
     // A product with our target id exists but has NO source receipt → foreign; never overwrite.
     await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_TARGET_CONFLICT, sc);
     return { code: 'target_conflict' };
+  }
+
+  // PRODUCT-LEFTOVERS — ein gelöschter Artikel wird nie wieder angelegt, auch nicht von einem Auftrag, der vor dem
+  // Löschen nicht mehr als `ready` gemeldet werden konnte (sein Beleg ging mit dem Artikel).
+  if (deps.productWasDeleted?.(grant.entityId)) {
+    await deps.bridge.markQuarantined(u, grant.uploadEventId, grant.claimToken, ERR_TARGET_DELETED, sc);
+    return { code: 'target_conflict', detail: ERR_TARGET_DELETED };
   }
 
   // Normal create. Prepare every image OUT-OF-BAND (Rust reads staging + renders → opaque

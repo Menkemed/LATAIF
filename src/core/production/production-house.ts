@@ -38,6 +38,7 @@ import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { getActiveLots, consumeLot, restoreLot, syncProductQuantity, trackLotRow, trackProductRow, getStockAggregates } from '@/core/lots/lot-queries';
 import { hasLedgerEntries, hasReversalFor, reverseSource } from '@/core/ledger/posting';
 import { inventoryCostBasis } from '@/core/lots/lot-cost';
+import { purgeProductLeftoversSafely, type LeftoverDb } from '@/core/products/product-leftovers';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { useProductStore } from '@/stores/productStore';
 import { checkEmbeddedProduct, EmbeddedProductRejected, pickProductSpec } from '@/core/products/embedded-product';
@@ -597,6 +598,9 @@ export function deleteProductionInHouse(recordId: string, ctx: ProductionCtx): P
     db.run('DELETE FROM products WHERE id = ?', [pid]);
     trackChange('products', pid, 'delete', {});
   }
+  // PRODUCT-LEFTOVERS — Upload-Beleg und Foto-Verknüpfungen der entfernten Ausgänge gehen mit (Aufräumen; scheitert es,
+  // räumt der nächste Start — der Vorgang selbst hängt nicht daran).
+  purgeProductLeftoversSafely(db as unknown as LeftoverDb, outputs.map((o) => String(o.product_id ?? '')));
   // 3. Ausgabe für Lohn/Gemeinkosten (aus dem Abschluss): Buchungen strikt storniert, dann die Zeilen.
   const expenses = query(`SELECT id FROM expenses WHERE related_module = 'production' AND related_entity_id = ?`, [recordId]).map((e) => String(e.id));
   for (const expId of expenses) {

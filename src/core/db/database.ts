@@ -10,6 +10,7 @@ import wasmUrl from 'sql.js/dist/sql-wasm.wasm?url';
 import { v4 as uuid } from 'uuid';
 import { DEFAULT_CATEGORIES } from '../models/default-categories';
 import { migrateCategoryStonesV1 } from './category-stones-migration';
+import { sweepDeletedProductLeftovers, type LeftoverDb } from '../products/product-leftovers';
 import SCHEMA from './schema.sql?raw';
 // MEDIA-03A — additive, INACTIVE core media schema (content-addressed store).
 // Applied idempotently at the end of runMigrations(); creates empty tables +
@@ -3115,6 +3116,29 @@ function backfillConsumedProducts(database: Database): void {
   }
 }
 
+// PRODUCT-LEFTOVERS — Upload-Belege und aktive Foto-Verknuepfungen von Artikeln, deren Loeschen protokolliert ist (auch von vor
+// diesem Stand, als das Loeschen sie stehen liess). Bei jedem Start, ohne Merker: findet es nichts, schreibt es nichts.
+// Fehler sind nicht fatal — dann bleibt alles wie es war. Wahr, wenn etwas entfernt wurde.
+function sweepProductLeftovers(database: Database): boolean {
+  try {
+    database.run('SAVEPOINT product_leftovers_sweep');
+    try {
+      const r = sweepDeletedProductLeftovers(database as unknown as LeftoverDb);
+      database.run('RELEASE product_leftovers_sweep');
+      const changed = r.receipts + r.links > 0;
+      if (changed) console.info(`[Migration] product leftovers: ${r.products} geloeschte Artikel — ${r.receipts} Belege, ${r.links} Foto-Verknuepfungen entfernt.`);
+      return changed;
+    } catch (err) {
+      database.run('ROLLBACK TO product_leftovers_sweep');
+      database.run('RELEASE product_leftovers_sweep');
+      throw err;
+    }
+  } catch (err) {
+    console.warn('[Migration] product leftovers sweep failed:', err);
+    return false;
+  }
+}
+
 // Der Schema-TEXT, nicht PRAGMA schema_version: einige Trigger werden bei jedem Start neu angelegt
 // (gleicher Text, neue Versionsnummer) — das ist keine Aenderung, die gespeichert werden muesste.
 function schemaSignatureOf(d: Database): string {
@@ -3147,11 +3171,13 @@ export async function initDatabase(): Promise<Database> {
       backfillStockLots(db);
       reconcileProductQuantities(db);
       backfillConsumedProducts(db);
+      const leftoversRemoved = sweepProductLeftovers(db);
       // Die Migrationen aendern nur den Stand im Speicher. Der Primary-Server (Rust) liest aber die
       // DATEI — bis zum ersten fachlichen Speichern fehlten ihm neue Spalten (z. B. line_key), und
       // seine Medienfreigabe antwortete fuer ALLE Bilder 404. Hat sich das Schema geaendert, den
       // migrierten Stand einmal zurueckschreiben (dieselbe Datei, die gerade geladen wurde).
-      if (schemaSignatureOf(db) !== schemaBefore) {
+      // Dasselbe fuer entfernte Foto-Verknuepfungen: Sicherung und Medien-Erreichbarkeit (Rust) lesen die DATEI.
+      if (schemaSignatureOf(db) !== schemaBefore || leftoversRemoved) {
         void saveDatabase().catch((err) => console.warn('[DB] saving the migrated schema failed:', err));
       }
     } catch (err) {

@@ -48,6 +48,7 @@ import { belongsToConsignment } from '@/core/consignment/consignment-sale-link';
 // F9 — Menge, Bestandsstatus und Herkunft folgen aus den Vorgängen, nicht aus der Artikelbearbeitung.
 import { PRODUCT_LIFECYCLE_LOCKED, lifecycleEditRefusal } from '@/core/products/lifecycle-fields';
 import { SKU_TAKEN, SkuTakenError, assertSkuFree, assertSkuChangeFree, skuTakenBy, skuChangeTakenBy, skuTakenMessage, isSkuTaken as isSkuTakenRefusal } from '@/core/products/sku-unique';
+import { purgeProductLeftoversSafely, type LeftoverDb } from '@/core/products/product-leftovers';
 
 // ── SSOT: alle Tabellen die ein Produkt via product_id referenzieren ──
 // Hat EINE davon einen Treffer, gilt das Produkt als "verknuepft" und darf
@@ -1338,6 +1339,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     }
     const db = getDatabase();
     db.run('DELETE FROM products WHERE id = ?', [id]);
+    // PRODUCT-LEFTOVERS — Upload-Beleg und Foto-Verknüpfungen des Artikels gehen mit.
+    purgeProductLeftoversSafely(db as unknown as LeftoverDb, [id]);
     saveDatabase();
     trackDelete('products', id);
     get().loadProducts();
@@ -1367,6 +1370,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       deleted.push(id);
     }
     if (deleted.length > 0) {
+      purgeProductLeftoversSafely(db as unknown as LeftoverDb, deleted);
       saveDatabase();
       get().loadProducts();
     }

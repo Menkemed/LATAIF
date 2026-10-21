@@ -26,6 +26,7 @@ import { isSyncConfigured } from '@/core/sync/sync-service';
 import { editRequestId, type ProductEditIntent } from '@/core/media/coordinator';
 import type { CurrentProductState } from '@/core/media/mobile-product-patch';
 import { evaluatePriceEligibility } from '@/core/products/price-eligibility';
+import { productWasDeleted, type LeftoverDb } from '@/core/products/product-leftovers';
 import { useProductStore, buildProductEditColumns } from '@/stores/productStore';
 import { productVatLabelRefusal, VAT_PERIOD_FILED } from '@/core/tax/vat-period-lock';
 import {
@@ -219,6 +220,7 @@ export function buildMobileUploadDrainDeps(): MobileDrainDeps {
     currentScope,
     readReceipt,
     productExists: (id) => query('SELECT 1 FROM products WHERE id = ?', [id]).length > 0,
+    productWasDeleted: (id) => productWasDeleted(getDatabase() as unknown as LeftoverDb, id),
     // SKU-ALLOC §A3 — the DURABLE allocator, not a scan of the current products: a scan would
     // re-issue the number of any product that has since been deleted. The counter is incremented
     // before it is read, so two drains in the same tick cannot claim the same number.
