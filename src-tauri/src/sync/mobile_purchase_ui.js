@@ -206,8 +206,13 @@
           ? '<div class="photo-strip"><div class="photo-thumb">'
             + (p.idPhoto.dataUrl ? '<img src="' + p.idPhoto.dataUrl + '" alt="ID photo" />' : '<div style="display:flex;align-items:center;justify-content:center;height:100%;font-size:11px;color:#8A8A93;text-align:center;">stored ✓</div>')
             + '<button type="button" class="rm" data-mp-action="id-photo-remove">✕</button></div></div>'
-          : '<label for="mpIdPhoto" class="photo-area" style="min-height:70px;padding:12px;"><div>🪪 Take ID photo</div><div class="hint">passport or CPR card</div></label>')
+          // MOBILE-PURCHASE-GALLERY — auch hier Kamera ODER Galerie (z. B. ein vorher fotografierter Ausweis).
+          : '<div class="photo-pick">'
+            + '<label for="mpIdPhoto" class="photo-btn"><span class="icon">🪪</span><span>Take ID photo</span></label>'
+            + '<label for="mpIdPhotoGallery" class="photo-btn"><span class="icon">🖼️</span><span>Choose from gallery</span></label>'
+            + '</div><div class="photo-count">passport or CPR card</div>')
         + '<input id="mpIdPhoto" class="hidden" type="file" accept="image/*" capture="environment" data-mp-id-photo="1" />'
+        + '<input id="mpIdPhotoGallery" class="hidden" type="file" accept="image/*" data-mp-id-photo="1" />'
         + '<p class="mp-note">Search the client list first — a new person is created as a client with a linked supplier role.</p>';
     }
     if (s.candidates || s.createDespite) {
@@ -249,9 +254,20 @@
     let h = '<div class="mp-tabs"><button type="button" class="' + (it.mode === 'new' ? 'on' : '') + '" data-mp-action="item-mode" data-uid="' + it.uid + '" data-mode="new">New item</button>'
       + '<button type="button" class="' + (it.mode === 'existing' ? 'on' : '') + '" data-mp-action="item-mode" data-uid="' + it.uid + '" data-mode="existing">Existing item</button></div>';
     if (it.mode === 'new') {
-      h += '<div class="header-row" style="margin-bottom:6px;"><span style="font-size:13px;color:#A1A1AA;">Photos</span><span class="badge' + (it.photos.length ? '' : ' hidden') + '">' + it.photos.length + ' / ' + MPX.MAX_PHOTOS + '</span></div>'
-        + '<label for="mpf' + it.uid + '" class="photo-area" style="min-height:90px;padding:16px;"><div>📷 ' + (it.photos.length ? 'Add more photos' : 'Take or choose photos') + '</div><div class="hint">first photo is the cover</div></label>'
-        + '<input id="mpf' + it.uid + '" class="hidden" type="file" accept="image/*" capture="environment" multiple data-mp-photo-input="' + it.uid + '" />';
+      const max = MPX.MAX_PHOTOS, n = it.photos.length, voll = n >= max;
+      h += '<div class="header-row" style="margin-bottom:6px;"><span style="font-size:13px;color:#A1A1AA;">Photos</span><span class="badge' + (n ? '' : ' hidden') + '">' + n + ' / ' + max + '</span></div>'
+        // MOBILE-PURCHASE-GALLERY — dieselben zwei Wege wie bei New Collection und Check Item: Kamera (`capture`) und
+        // Galerie (ohne `capture`, mehrere auf einmal). Das EINE Feld mit `capture` oeffnete auf dem Telefon direkt die
+        // Kamera; die Galerie war nie erreichbar. Beide Felder fuellen dieselbe Liste ueber denselben Handler — ein
+        // Galeriebild ist genau ein neues Bild wie ein Kamerabild, es kommt hinten DAZU, das Titelbild bleibt.
+        + '<div class="photo-pick">'
+        +   '<label for="mpf' + it.uid + '" class="photo-btn' + (voll ? ' is-full' : '') + '" data-mp-take="' + it.uid + '"><span class="icon">📷</span><span>Take photo</span></label>'
+        +   '<label for="mpg' + it.uid + '" class="photo-btn' + (voll ? ' is-full' : '') + '" data-mp-gallery="' + it.uid + '"><span class="icon">🖼️</span><span>Choose from gallery</span></label>'
+        + '</div>'
+        + '<div class="photo-count" data-mp-photo-count="' + it.uid + '">' + (voll ? max + ' of ' + max + ' photos — remove one to add another.'
+          : n ? n + ' of ' + max + ' — ' + (max - n) + ' more possible. The first photo is the cover.' : 'The first photo is the cover.') + '</div>'
+        + '<input id="mpf' + it.uid + '" class="hidden" type="file" accept="image/*" capture="environment" multiple data-mp-photo-input="' + it.uid + '"' + (voll ? ' disabled' : '') + ' />'
+        + '<input id="mpg' + it.uid + '" class="hidden" type="file" accept="image/*" multiple data-mp-photo-input="' + it.uid + '"' + (voll ? ' disabled' : '') + ' />';
       if (it.photos.length) {
         h += '<div class="photo-strip">';
         it.photos.forEach((p, k) => {
@@ -504,15 +520,26 @@
     const it = mpItem(uid);
     const files = Array.from(ev.target.files || []);
     ev.target.value = '';
-    let abgelehnt = 0;
+    // Eine abgebrochene Auswahl liefert keine Dateien — dann bleibt alles, wie es war.
+    if (!it || !files.length) return;
+    // MOBILE-PURCHASE-GALLERY — jeder Grund wird benannt: voll, nicht lesbar oder schon dabei (dasselbe Foto
+    // zweimal aus der Galerie gewaehlt — es wuerde sonst zweimal hochgeladen und zweimal am Artikel haengen).
+    let zuViele = 0, unlesbar = 0, doppelt = 0;
     mpReadItemDom(it);
     for (const f of files) {
-      if (it.photos.length >= MPX.MAX_PHOTOS) { abgelehnt += 1; continue; }
-      try { it.photos.push({ id: mpShort(), dataUrl: await resizePhoto(f, 1600, 0.85) }); } catch (e) { abgelehnt += 1; }
+      if (it.photos.length >= MPX.MAX_PHOTOS) { zuViele += 1; continue; }
+      let dataUrl;
+      try { dataUrl = await resizePhoto(f, 1600, 0.85); } catch (e) { unlesbar += 1; continue; }
+      if (it.photos.some((p) => p.dataUrl === dataUrl)) { doppelt += 1; continue; }
+      it.photos.push({ id: mpShort(), dataUrl: dataUrl });
     }
     mpRender();
     await mpPersist();
-    if (abgelehnt) mpSay('mpError', abgelehnt + ' photo(s) not added — at most ' + MPX.MAX_PHOTOS + ' per item.');
+    const gruende = [];
+    if (zuViele) gruende.push(zuViele + ' photo(s) not added — at most ' + MPX.MAX_PHOTOS + ' per item.');
+    if (unlesbar) gruende.push(unlesbar + ' photo(s) could not be read.');
+    if (doppelt) gruende.push(doppelt + ' photo(s) already added.');
+    if (gruende.length) mpSay('mpError', gruende.join(' '));
   });
 
   // ── Knoepfe ─────────────────────────────────────────────────────────────────────────────────

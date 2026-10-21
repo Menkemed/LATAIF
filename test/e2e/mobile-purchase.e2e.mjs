@@ -299,17 +299,18 @@ try {
     (await import('node:fs')).writeFileSync(join(process.env.E2E_SHOTS, name + '.png'), Buffer.from(r.data, 'base64'));
   };
   const uidVon = (i) => phone.ev(`return window.__mpTest ? '' : ([...document.querySelectorAll('[data-mp-sec^="item:"]')][${i}] || { getAttribute: () => '' }).getAttribute('data-mp-sec').slice(5);`);
-  async function fotosLegen(uid, n) {
+  // MOBILE-PURCHASE-GALLERY — `feld`: "mpf" = Kamera-Feld, "mpg" = Galerie-Feld; `von` macht die Bilder unterscheidbar.
+  async function fotosLegen(uid, n, feld = 'mpf', von = 0) {
     return phone.ev(`
       const dt = new DataTransfer();
       for (let i = 0; i < ${n}; i++) {
         const c = document.createElement('canvas'); c.width = 240; c.height = 180;
-        const x = c.getContext('2d'); x.fillStyle = 'hsl(' + ((i + 1) * 97 % 360) + ',60%,50%)'; x.fillRect(0, 0, 240, 180);
-        x.fillStyle = '#111'; x.font = '28px sans-serif'; x.fillText('MP' + i, 20, 100);
+        const x = c.getContext('2d'); x.fillStyle = 'hsl(' + ((i + 1 + ${von}) * 97 % 360) + ',60%,50%)'; x.fillRect(0, 0, 240, 180);
+        x.fillStyle = '#111'; x.font = '28px sans-serif'; x.fillText('MP' + (i + ${von}), 20, 100);
         const blob = await (await fetch(c.toDataURL('image/jpeg', 0.9))).blob();
         dt.items.add(new File([blob], 'mp' + i + '.jpg', { type: 'image/jpeg' }));
       }
-      const inp = document.getElementById('mpf' + ${S(uid)}); inp.files = dt.files; inp.dispatchEvent(new Event('change', { bubbles: true }));
+      const inp = document.getElementById(${S(feld)} + ${S(uid)}); inp.files = dt.files; inp.dispatchEvent(new Event('change', { bubbles: true }));
       await new Promise((r) => setTimeout(r, 1200));
       return document.querySelectorAll('[data-mp-sec="item:' + ${S(uid)} + '"] .photo-thumb').length;`);
   }
@@ -369,7 +370,9 @@ try {
     await warteBis(phone, `document.querySelectorAll('[data-mp-action="pick-customer"]').length > 0`, 30000);
     await klick(phone, '[data-mp-action="pick-customer"]');
     const u1 = await uidVon(0);
-    const fotos = await fotosLegen(u1, 2);
+    // Ein Foto mit der Kamera, eines aus der Galerie — beide in dieselbe Liste.
+    await fotosLegen(u1, 1, 'mpf', 0);
+    const fotos = await fotosLegen(u1, 1, 'mpg', 1);
     await pflicht(u1, 'cat-watch');
     await tippe(`[data-mp-field="item:${u1}:brand"]`, MARKE);
     await tippe(`[data-mp-field="item:${u1}:name"]`, MODELL);
@@ -435,7 +438,7 @@ try {
     const bilder = fotosAmArtikel(zeilen[0]?.product_id);
     const kette = prodById(zeilen[1]?.product_id) || {};
     MESS.m1 = { nr: PUR_NR, summen, kopf, zeilen: zeilen.map((z) => [z.quantity, z.unit_price, z.line_total]), lose, zahlungen, teile, bilder, fotos };
-    ok(home && maske && fotos === 2, `M1 Telefon: Einkaufsmaske, zwei Fotos an Position 1 (${fotos})`);
+    ok(home && maske && fotos === 2, `M1 Telefon: Einkaufsmaske, zwei Fotos an Position 1 — eines per Kamera, eines aus der Galerie (${fotos})`);
     ok(S(summen) === S(['2 positions · 4 pcs · 1,361.500 BHD', '900.000 / 1,361.500 BHD paid · 461.500 open', 'Partner 40 % · LATAIF 60 %']),
       `M1 Zusammenfassungen am Telefon (${S(summen)})`);
     ok(gebucht && /^PUR-/.test(PUR_NR) && einkaeufe() === vorher + 1 && nachweisFuer('purchases.create') === 1,

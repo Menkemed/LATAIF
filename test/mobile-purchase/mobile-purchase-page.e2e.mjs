@@ -41,6 +41,13 @@ const STEIN_CSS = (() => {
   const i = pg.indexOf('/* STONES — kompakter Steinbereich */');
   return pg.slice(i, pg.indexOf(String.fromCharCode(10), pg.indexOf('.stones-foot', i)));
 })();
+// MOBILE-PURCHASE-GALLERY — die Foto-Knoepfe (Kamera | Galerie) mit den Stilen der echten Seite, damit die
+// 360-px-Pruefung die echte Breite misst.
+const FOTO_CSS = (() => {
+  const pg = readFileSync(join(repo, 'src-tauri/src/sync/mobile_page.rs'), 'utf8').split(String.fromCharCode(13)).join('');
+  const i = pg.indexOf('  .photo-pick {');
+  return pg.slice(i, pg.indexOf(String.fromCharCode(10), pg.indexOf('.photo-count {', i)));
+})();
 const befehle = readFileSync(join(repo, 'src-tauri/src/sync/mobile_purchase_commands.js'), 'utf8');
 const ui = readFileSync(join(repo, 'src-tauri/src/sync/mobile_purchase_ui.js'), 'utf8');
 const schema = readFileSync(join(repo, 'src-tauri/src/sync/mobile_field_schema.json'), 'utf8');
@@ -89,7 +96,8 @@ label { display: block; font-size: 11px; margin-bottom: 8px; } input, textarea, 
 button { width: 100%; padding: 14px; } .photo-strip { display: flex; gap: 8px; overflow-x: auto; } .photo-thumb { position: relative; width: 78px; height: 78px; flex: 0 0 auto; }
 .photo-thumb img { width: 100%; height: 100%; object-fit: cover; } .chips { display: flex; flex-wrap: wrap; gap: 8px; } .chip { width: auto; }
 .row + .row { margin-top: 14px; } .error, .success { padding: 10px; } .header-row { display: flex; justify-content: space-between; } .photo-area { display: flex; flex-direction: column; }
-${STEIN_CSS}</style>
+${STEIN_CSS}
+${FOTO_CSS}</style>
 </head><body>
 ${html}
 <script src="/display-name.js"></script><script src="/stones.js"></script><script src="/business-date.js"></script><script src="/repair-commands.js"></script><script src="/commands.js"></script><script src="/shim.js"></script><script src="/ui.js"></script>
@@ -159,12 +167,13 @@ async function shot(c, name) {
 // Ein Wert in ein Feld der Maske — wie getippt (input + change).
 const tippe = (sel, v) => `(function(){ const e = document.querySelector(${S(sel)}); if (!e) throw new Error('kein Feld ' + ${S(sel)}); e.value = ${S(v)}; e.dispatchEvent(new Event('input', { bubbles: true })); e.dispatchEvent(new Event('change', { bubbles: true })); })();`;
 const klick = (sel) => `(function(){ const e = document.querySelector(${S(sel)}); if (!e) throw new Error('kein Knopf ' + ${S(sel)}); e.click(); })();`;
-/** Fotos in das Feld einer Position (oder, mit `feld`, in ein anderes Fotofeld) legen. */
-const fotos = (uid, n, feld) => `
+/** Fotos in das Feld einer Position (oder, mit `feld`, in ein anderes Fotofeld) legen. `von` verschiebt die Farbe:
+ *  gleiche `von`/`i` = dasselbe Bild (für die Doppelt-Prüfung), andere = ein anderes. */
+const fotos = (uid, n, feld, von = 0) => `
   const dt = new DataTransfer();
   for (let i = 0; i < ${n}; i++) {
     const c2 = document.createElement('canvas'); c2.width = 40; c2.height = 30;
-    const x = c2.getContext('2d'); x.fillStyle = 'hsl(' + (i * 90) + ',60%,50%)'; x.fillRect(0, 0, 40, 30);
+    const x = c2.getContext('2d'); x.fillStyle = 'hsl(' + ((i + ${von}) * 37) + ',60%,50%)'; x.fillRect(0, 0, 40, 30);
     const blob = await (await fetch(c2.toDataURL('image/jpeg', 0.9))).blob();
     dt.items.add(new File([blob], 'f' + i + '.jpg', { type: 'image/jpeg' }));
   }
@@ -219,6 +228,37 @@ try {
   await c.ev(fotos(uid1, 2) + ' return 1;');
   ok(await c.ev(`return document.querySelectorAll('[data-mp-sec="item:${uid1}"] .photo-thumb').length === 2 && !!document.querySelector('[data-mp-action="ai"][data-uid="${uid1}"]');`),
     '§1 zwei Fotos an Position 1, „AI Identify" erscheint');
+
+  // ── MOBILE-PURCHASE-GALLERY — Kamera ODER Galerie, beide in dieselbe Liste ──
+  const felder = await c.ev(`const k = document.getElementById('mpf${uid1}'), g = document.getElementById('mpg${uid1}');
+    return { k: !!k && k.getAttribute('capture') === 'environment' && k.multiple, g: !!g && !g.hasAttribute('capture') && g.multiple && g.accept === 'image/*',
+      knoepfe: [...document.querySelectorAll('[data-mp-sec="item:${uid1}"] .photo-btn')].map((b) => b.textContent.trim()) };`);
+  ok(felder.k && felder.g && S(felder.knoepfe) === S(['📷Take photo', '🖼️Choose from gallery']),
+    `§1 GALERIE zwei Wege: „Take photo" öffnet die Kamera (capture), „Choose from gallery" die Galerie (ohne capture, mehrere) (${S(felder)})`);
+  const vorher = await c.ev('return window.__MP.draft.items[0].photos.map((p) => p.id);');
+  await c.ev(fotos(uid1, 2, 'mpg' + uid1, 10) + ' return 1;');
+  const nachG = await c.ev('return window.__MP.draft.items[0].photos.map((p) => p.id);');
+  ok(nachG.length === 4 && S(nachG.slice(0, 2)) === S(vorher) && await c.ev(`return document.querySelectorAll('[data-mp-sec="item:${uid1}"] .photo-thumb').length === 4
+      && document.querySelector('[data-mp-sec="item:${uid1}"] .photo-thumb.is-primary') === document.querySelector('[data-mp-sec="item:${uid1}"] .photo-thumb');`),
+    '§1 GALERIE zwei Fotos aus der Galerie kommen hinten dazu — die zwei Kamerafotos bleiben, das Titelbild bleibt das erste');
+  await c.ev(fotos(uid1, 1, 'mpg' + uid1, 10) + ' return 1;');
+  ok(await c.ev('return window.__MP.draft.items[0].photos.length;') === 4 && /1 photo\(s\) already added/.test(await c.ev("return document.getElementById('mpError').textContent;")),
+    '§1 GALERIE dasselbe Foto noch einmal gewählt: nicht doppelt, Grund in Worten');
+  await c.ev(fotos(uid1, 4, 'mpg' + uid1, 20) + ' return 1;');
+  const voll = await c.ev(`return { n: window.__MP.draft.items[0].photos.length, full: [...document.querySelectorAll('[data-mp-sec="item:${uid1}"] .photo-btn')].every((b) => b.classList.contains('is-full')),
+    aus: document.getElementById('mpf${uid1}').disabled && document.getElementById('mpg${uid1}').disabled, hint: document.querySelector('[data-mp-photo-count="${uid1}"]').textContent };`);
+  ok(voll.n === 8 && voll.full && voll.aus && /8 of 8 photos — remove one to add another/.test(voll.hint), `§1 GALERIE bei 8 Fotos sind beide Wege gesperrt (${S(voll)})`);
+  // Selbst eine trotzdem ausgelöste Auswahl (gesperrtes Feld) fügt nichts hinzu.
+  await c.ev(`document.getElementById('mpg${uid1}').disabled = false; ` + fotos(uid1, 1, 'mpg' + uid1, 40) + ' return 1;');
+  ok(await c.ev('return window.__MP.draft.items[0].photos.length;') === 8 && /at most 8 per item/.test(await c.ev("return document.getElementById('mpError').textContent;")),
+    '§1 GALERIE ein neuntes Foto wird abgewiesen, Grund in Worten');
+  ok(await c.ev('return document.documentElement.scrollWidth <= document.documentElement.clientWidth;'), '§1 GALERIE bei 360 px kein waagerechtes Scrollen');
+  await shot(c, 'mp-gallery-full');
+  // Einzeln wieder entfernen (von hinten) — die Wege gehen wieder auf, die zwei ursprünglichen Fotos bleiben.
+  for (let k = 7; k >= 2; k--) await c.ev(klick(`[data-mp-action="photo-remove"][data-uid="${uid1}"][data-k="${k}"]`) + ' await new Promise((r) => setTimeout(r, 120)); return 1;');
+  ok(S(await c.ev('return window.__MP.draft.items[0].photos.map((p) => p.id);')) === S(vorher)
+    && await c.ev(`return [...document.querySelectorAll('[data-mp-sec="item:${uid1}"] .photo-btn')].every((b) => !b.classList.contains('is-full')) && !document.getElementById('mpg${uid1}').disabled;`),
+    '§1 GALERIE einzeln entfernt: genau die zwei ursprünglichen Fotos bleiben, beide Wege wieder offen');
   await c.ev(tippe(`[data-mp-field="item:${uid1}:brand"]`, 'Rolex') + tippe(`[data-mp-field="item:${uid1}:name"]`, 'Datejust 41')
     + tippe(`[data-mp-field="item:${uid1}:quantity"]`, '1') + tippe(`[data-mp-field="item:${uid1}:unitPrice"]`, '1000') + ' return 1;');
   const attrId = await c.ev(`return (document.querySelector('#mpAttrs${uid1} input[type=text], #mpAttrs${uid1} input') || {}).id || '';`);
@@ -371,6 +411,12 @@ try {
   // Das Ausweisfoto der neuen Person (optional) — dieselbe Aufnahme wie die Positionsfotos.
   ok(await c.ev("return !!document.querySelector('#mpIdPhoto[data-mp-id-photo]') && /ID \\/ CPR photo \\(optional\\)/.test(document.getElementById('mpSections').textContent);"),
     '§5 „New person" bietet ein optionales Ausweisfoto an');
+  ok(await c.ev("const g = document.getElementById('mpIdPhotoGallery'); return !!g && !g.hasAttribute('capture') && g.getAttribute('data-mp-id-photo') === '1' && document.getElementById('mpIdPhoto').getAttribute('capture') === 'environment' && /Choose from gallery/.test(document.getElementById('mpSections').textContent);"),
+    '§5 GALERIE Ausweisfoto: „Take ID photo" (Kamera) oder „Choose from gallery"');
+  await c.ev(fotos('', 1, 'mpIdPhotoGallery', 50) + ' return 1;');
+  ok(await c.ev("return !!(window.__MP.draft.supplier.person.idPhoto && window.__MP.draft.supplier.person.idPhoto.dataUrl) && /Captured/.test(document.getElementById('mpSections').textContent);"),
+    '§5 GALERIE Ausweisfoto aus der Galerie übernommen');
+  await c.ev(klick('[data-mp-action="id-photo-remove"]') + ' await new Promise((r) => setTimeout(r, 150)); return 1;');
   await c.ev(fotos('', 1, 'mpIdPhoto') + ' return 1;');
   ok(await c.ev("return !!(window.__MP.draft.supplier.person.idPhoto && window.__MP.draft.supplier.person.idPhoto.dataUrl) && /Captured/.test(document.getElementById('mpSections').textContent) && /ID photo/.test(document.getElementById('mpSections').textContent);"),
     '§5 Ausweisfoto aufgenommen, in der Maske und in der Zusammenfassung');
