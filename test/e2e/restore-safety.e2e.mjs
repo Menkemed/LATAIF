@@ -234,6 +234,19 @@ async function main() {
   await waitFor(c, '[data-testid="brp-confirm-modal"]');
   await setVal(c, '[data-testid="brp-confirm-pw"]', OWNER_PW);
   ok(await c.ev(`return document.querySelector('[data-testid="brp-confirm"]').disabled;`), 'R3: confirm is disabled before the preview');
+  // The emergency path first: a preview that FAILS (here: a wrong owner password) shows the unknown-effects
+  // warning, and the restore stays disabled until the owner ticks it deliberately.
+  await setVal(c, '[data-testid="brp-confirm-pw"]', OWNER_PW + '-wrong');
+  await click(c, '[data-testid="brp-preview"]');
+  await waitFor(c, '[data-testid="brp-unknown-box"]', 30000);
+  const em1 = await c.ev(`const b = document.querySelector('[data-testid="brp-confirm"]'); return { disabled: b.disabled, label: b.textContent, text: document.querySelector('[data-testid="brp-unknown-box"]').textContent };`);
+  ok(em1.disabled && /could not be determined/.test(em1.text), `R3: failed preview → warning, restore still disabled (${S(em1.label)})`);
+  await click(c, '[data-testid="brp-ack-unknown"]');
+  const em2 = await c.ev(`const b = document.querySelector('[data-testid="brp-confirm"]'); return { disabled: b.disabled, label: b.textContent.trim() };`);
+  ok(!em2.disabled && em2.label === 'Restore without preview', `R3: only the deliberate tick enables the emergency restore (${S(em2)})`);
+  await setVal(c, '[data-testid="brp-confirm-pw"]', OWNER_PW);
+  const em3 = await c.ev(`return { disabled: document.querySelector('[data-testid="brp-confirm"]').disabled, box: !!document.querySelector('[data-testid="brp-unknown-box"]') };`);
+  ok(em3.disabled && !em3.box, 'R3: a new password resets the preview and the tick');
   await click(c, '[data-testid="brp-preview"]');
   await waitFor(c, '[data-testid="brp-preview-box"]', 30000);
   const lines = await c.ev(`return [...document.querySelectorAll('[data-testid="brp-preview-line"]')].map(l => ({ tone: l.dataset.tone, text: l.textContent }));`);

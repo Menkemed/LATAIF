@@ -73,11 +73,16 @@ export function canConfirmRestore(snapshotId: string | null, password: string, b
 export type PreviewState = 'none' | 'loading' | 'loaded' | 'failed';
 
 /**
- * Confirm only after the owner has SEEN what the restore changes — or seen that the preview could not be
- * made (a damaged live database is a reason to restore, so a failed preview must not lock the owner out).
+ * Confirm only after the owner has SEEN what the restore changes. A failed preview must not lock the owner
+ * out (a damaged live database is a reason to restore) — but then the owner must ALSO tick that the effects
+ * are unknown (`unknownAccepted`): an emergency restore is a deliberate second decision, never a silent pass.
  */
-export function canConfirmRestoreAfterPreview(snapshotId: string | null, password: string, busy: boolean, preview: PreviewState): boolean {
-  return canConfirmRestore(snapshotId, password, busy) && (preview === 'loaded' || preview === 'failed');
+export function canConfirmRestoreAfterPreview(
+  snapshotId: string | null, password: string, busy: boolean, preview: PreviewState, unknownAccepted = false,
+): boolean {
+  if (!canConfirmRestore(snapshotId, password, busy)) return false;
+  if (preview === 'loaded') return true;
+  return preview === 'failed' && unknownAccepted;
 }
 
 export interface PreviewLine {

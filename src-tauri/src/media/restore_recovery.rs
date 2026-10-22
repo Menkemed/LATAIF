@@ -99,6 +99,37 @@ pub fn rollback_to_prior(live: &Path, rollback: &Path) -> Result<(), MediaError>
     Ok(())
 }
 
+/// RESTORE-SAFETY — is the live installation missing something the set-aside state holds? Every database and
+/// the media folder in the set-aside state must exist in live (a `-wal`/`-shm` sidecar may legitimately be
+/// absent), and the live main database must pass `PRAGMA quick_check`. Returns the reason code, or `None`
+/// when live is complete.
+fn live_incomplete_against(live: &Path, rollback: &Path) -> Option<&'static str> {
+    let Ok(entries) = fs::read_dir(rollback) else { return Some("ROLLBACK_UNREADABLE") };
+    for e in entries.flatten() {
+        let name = e.file_name().to_string_lossy().to_string();
+        if name.ends_with("-wal") || name.ends_with("-shm") || name == "archive.json" {
+            continue;
+        }
+        let here = live.join(&name);
+        let present = if e.path().is_dir() { here.is_dir() } else { fs::metadata(&here).map(|m| m.is_file() && m.len() > 0).unwrap_or(false) };
+        if !present {
+            return Some("LIVE_INCOMPLETE");
+        }
+    }
+    let front = live.join(super::restore_archive::FRONT_DB);
+    if front.exists() {
+        let ok = rusqlite::Connection::open_with_flags(&front, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)
+            .ok()
+            .and_then(|c| c.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)).ok())
+            .map(|s| s == "ok")
+            .unwrap_or(false);
+        if !ok {
+            return Some("LIVE_DB_DAMAGED");
+        }
+    }
+    None
+}
+
 /// Boot recovery. Returns `Ok` once the tree is a consistent whole (old or committed-new); returns `Err`
 /// (fail-closed) on an unrecoverable journal or an incomplete rollback, so the caller aborts startup
 /// without touching the DBs.
@@ -119,10 +150,16 @@ pub fn recover(app_data_dir: &Path) -> Result<(), MediaError> {
                 ra::clear_context(live);
                 let _ = fs::remove_dir_all(&staging);
             }
-            // A set-aside state WITHOUT a journal (left by an older version or by hand) is kept untouched as
-            // an archive — never deleted, and it no longer blocks the next restore.
+            // A set-aside state WITHOUT a journal (left by an older version or by hand) is archived untouched —
+            // but ONLY when the live installation is complete. If live lacks anything the set-aside state holds
+            // (a database, the media folder) or its main database does not pass a quick check, the set-aside
+            // state may be the only complete one: then nothing moves and startup stops (fail-closed).
             if fs::read_dir(&rollback).map(|mut r| r.next().is_some()).unwrap_or(false) {
                 let ctx = ra::RestoreContext::unknown(live);
+                if let Some(missing) = live_incomplete_against(live, &rollback) {
+                    ra::note(live, "orphan_rollback_kept", Some(&ctx), None, Some(missing), None);
+                    return Err(MediaError::Io("set-aside state kept: the live installation is incomplete".into()));
+                }
                 match ra::finish_after_commit(live, &ctx, &|_| Ok(())) {
                     Ok(rep) => ra::note(live, "orphan_rollback_archived", Some(&ctx), None, None, serde_json::to_value(&rep.archive).ok()),
                     Err(e) => ra::note(live, "orphan_rollback_kept", Some(&ctx), None, Some(e.code()), None),

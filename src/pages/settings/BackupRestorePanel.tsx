@@ -58,6 +58,8 @@ export function BackupRestorePanel() {
   // RESTORE-SAFETY — what the chosen restore would change, shown before it can be confirmed.
   const [previewState, setPreviewState] = useState<PreviewState>('none');
   const [previewLines, setPreviewLines] = useState<PreviewLine[]>([]);
+  // A failed preview → an emergency restore needs this second, deliberate tick.
+  const [unknownAccepted, setUnknownAccepted] = useState(false);
   const [backupOpen, setBackupOpen] = useState(false);
   const [backupPw, setBackupPw] = useState('');
   const [loc, setLoc] = useState<BackupLocationInfo | null>(null);
@@ -191,11 +193,11 @@ export function BackupRestorePanel() {
     } finally { setBusy(false); }
   };
 
-  const cancelConfirm = () => { setConfirmId(null); setConfirmPw(''); setPreviewState('none'); setPreviewLines([]); };
+  const cancelConfirm = () => { setConfirmId(null); setConfirmPw(''); setPreviewState('none'); setPreviewLines([]); setUnknownAccepted(false); };
 
   const doPreview = async () => {
     if (!confirmId || !canRunOwnerAction(email, confirmPw, busy)) return;
-    setBusy(true); setError(null); setPreviewState('loading');
+    setBusy(true); setError(null); setPreviewState('loading'); setUnknownAccepted(false);
     try {
       const { preview, liveSaved } = await previewRestoreSnapshot({ snapshotId: confirmId, email: email.trim(), password: confirmPw });
       setPreviewLines(describeRestorePreview(preview, liveSaved));
@@ -208,7 +210,7 @@ export function BackupRestorePanel() {
   };
 
   const doConfirmRestore = async () => {
-    if (!canConfirmRestoreAfterPreview(confirmId, confirmPw, busy, previewState)) return;
+    if (!canConfirmRestoreAfterPreview(confirmId, confirmPw, busy, previewState, unknownAccepted)) return;
     setBusy(true); setError(null);
     try {
       // Starts the orchestrator: quiesce → durably SCHEDULE the restore → relaunch. On success the process
@@ -263,7 +265,7 @@ export function BackupRestorePanel() {
                   <div style={{ ...cell, fontFamily: 'monospace', fontSize: 11 }} data-testid="brp-row-id">{s.snapshotId}</div>
                 </div>
                 <button data-testid="brp-restore" data-snapshot-id={s.snapshotId}
-                  onClick={() => { setConfirmId(s.snapshotId); setConfirmPw(''); setError(null); setPreviewState('none'); setPreviewLines([]); }}
+                  onClick={() => { setConfirmId(s.snapshotId); setConfirmPw(''); setError(null); setPreviewState('none'); setPreviewLines([]); setUnknownAccepted(false); }}
                   disabled={busy} style={dangerBtn}>Restore</button>
               </div>
             ))}
@@ -392,7 +394,7 @@ export function BackupRestorePanel() {
             archive in the data folder.
           </div>
           <Input label="RE-ENTER OWNER PASSWORD" data-testid="brp-confirm-pw" type="password" value={confirmPw}
-            onChange={(e) => { setConfirmPw(e.target.value); setPreviewState('none'); setPreviewLines([]); }} autoComplete="off" />
+            onChange={(e) => { setConfirmPw(e.target.value); setPreviewState('none'); setPreviewLines([]); setUnknownAccepted(false); }} autoComplete="off" />
           <div>
             <button data-testid="brp-preview" onClick={doPreview} disabled={!canRunOwnerAction(email, confirmPw, busy)} style={ghostBtn}>
               {previewState === 'loading' ? 'Checking…' : 'Show what changes'}
@@ -408,11 +410,21 @@ export function BackupRestorePanel() {
               ))}
             </ul>
           )}
+          {previewState === 'failed' && (
+            <div data-testid="brp-unknown-box" style={{ background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 8, padding: 12, fontSize: 13, color: '#991B1B' }}>
+              <b>The effects of this restore could not be determined.</b> It is not known which records, photos or
+              files would be lost or come back. Use this only in an emergency (e.g. the current data is damaged).
+              <label style={{ display: 'flex', gap: 8, alignItems: 'flex-start', marginTop: 8, cursor: 'pointer' }}>
+                <input type="checkbox" data-testid="brp-ack-unknown" checked={unknownAccepted} onChange={(e) => setUnknownAccepted(e.target.checked)} />
+                <span>I understand the effects are unknown and want to restore anyway.</span>
+              </label>
+            </div>
+          )}
           {error && <div data-testid="brp-error" style={{ color: '#B42318', fontSize: 13 }}>{error}</div>}
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
             <button data-testid="brp-confirm-cancel" onClick={cancelConfirm} disabled={busy} style={ghostBtn}>Cancel</button>
-            <button data-testid="brp-confirm" onClick={doConfirmRestore} disabled={!canConfirmRestoreAfterPreview(confirmId, confirmPw, busy, previewState)} style={dangerBtn}>
-              {busy && previewState !== 'loading' ? 'Restoring…' : 'Confirm restore'}
+            <button data-testid="brp-confirm" onClick={doConfirmRestore} disabled={!canConfirmRestoreAfterPreview(confirmId, confirmPw, busy, previewState, unknownAccepted)} style={dangerBtn}>
+              {busy && previewState !== 'loading' ? 'Restoring…' : previewState === 'failed' ? 'Restore without preview' : 'Confirm restore'}
             </button>
           </div>
         </div>

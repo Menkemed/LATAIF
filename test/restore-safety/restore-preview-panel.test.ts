@@ -58,7 +58,9 @@ const base = {
   ok(!canConfirmRestoreAfterPreview('snap', 'pw', false, 'none'), '§2 not before the preview');
   ok(!canConfirmRestoreAfterPreview('snap', 'pw', false, 'loading'), '§2 not while it loads');
   ok(canConfirmRestoreAfterPreview('snap', 'pw', false, 'loaded'), '§2 after the preview');
-  ok(canConfirmRestoreAfterPreview('snap', 'pw', false, 'failed'), '§2 a failed preview does not lock the owner out');
+  ok(!canConfirmRestoreAfterPreview('snap', 'pw', false, 'failed'), '§2 a failed preview alone does NOT enable the restore');
+  ok(canConfirmRestoreAfterPreview('snap', 'pw', false, 'failed', true), '§2 …only the deliberate "effects unknown" tick does (emergency)');
+  ok(canConfirmRestoreAfterPreview('snap', 'pw', false, 'loaded', false), '§2 a shown preview needs no extra tick');
   ok(!canConfirmRestoreAfterPreview('snap', '', false, 'loaded') && !canConfirmRestoreAfterPreview(null, 'pw', false, 'loaded') && !canConfirmRestoreAfterPreview('snap', 'pw', true, 'loaded'), '§2 the old conditions still hold');
 }
 
@@ -77,7 +79,12 @@ const base = {
   const wiring = src('src/core/lifecycle/restore-wiring.ts');
   const lib = src('src-tauri/src/lib.rs');
   ok(/previewRestoreSnapshot\(\{ snapshotId: confirmId, email: email\.trim\(\), password: confirmPw \}\)/.test(panel), '§4 the panel previews with the re-entered owner password');
-  ok(/canConfirmRestoreAfterPreview\(confirmId, confirmPw, busy, previewState\)/.test(panel) && !/canConfirmRestore\(confirmId/.test(panel), '§4 the confirm button waits for the preview');
+  ok(/disabled=\{!canConfirmRestoreAfterPreview\(confirmId, confirmPw, busy, previewState, unknownAccepted\)\}/.test(panel)
+    && /if \(!canConfirmRestoreAfterPreview\(confirmId, confirmPw, busy, previewState, unknownAccepted\)\) return;/.test(panel)
+    && !/canConfirmRestore\(confirmId/.test(panel), '§4 the confirm button waits for the preview (or the emergency tick)');
+  ok(/previewState === 'failed' && \([\s\S]*?data-testid="brp-unknown-box"[\s\S]*?could not be determined[\s\S]*?data-testid="brp-ack-unknown"/.test(panel)
+    && /'Restore without preview'/.test(panel), '§4 a failed preview shows the warning box with its own tick and an honest button label');
+  ok((panel.match(/setUnknownAccepted\(false\)/g) ?? []).length >= 4, '§4 the tick is reset on open, cancel, password change and a new preview');
   ok(/kept as a pre-restore\s+archive/.test(panel) && !/This cannot be undone/.test(panel), '§4 the warning says the data is kept');
   ok(/invoke\('preview_restore_snapshot'/.test(wiring) && /saveDatabaseDurably\(\)/.test(wiring), '§4 the wiring saves first, then asks the command');
   ok(/fn preview_restore_snapshot\([\s\S]*?authorize_owner[\s\S]*?restore_preview::preview/.test(lib) && /preview_restore_snapshot,/.test(lib), '§4 the command is owner-gated and registered');

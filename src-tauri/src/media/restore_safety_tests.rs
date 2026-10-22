@@ -351,6 +351,35 @@ fn s6_an_unarchived_set_aside_state_is_never_deleted() {
 }
 
 #[test]
+fn s6b_an_orphan_set_aside_state_is_not_archived_when_live_is_incomplete() {
+    // live lacks the main database the set-aside state holds → the set-aside state may be the only complete
+    // one: recover() moves nothing and stops startup (fail-closed)
+    let (_b, app, _m) = scenario();
+    std::fs::create_dir_all(app.join(ROLLBACK)).unwrap();
+    std::fs::copy(app.join(FRONT_DB), app.join(ROLLBACK).join(FRONT_DB)).unwrap();
+    std::fs::remove_file(app.join(FRONT_DB)).unwrap();
+    let kept = std::fs::read(app.join(ROLLBACK).join(FRONT_DB)).unwrap();
+    assert!(recover(&app).is_err(), "fail-closed");
+    assert_eq!(std::fs::read(app.join(ROLLBACK).join(FRONT_DB)).unwrap(), kept, "untouched");
+    assert!(archives(&app).is_empty(), "nothing archived");
+    let last = events(&app).into_iter().last().unwrap();
+    assert_eq!((last["event"].as_str(), last["code"].as_str()), (Some("orphan_rollback_kept"), Some("LIVE_INCOMPLETE")));
+    // the same when live HAS a main database, but a damaged one
+    let (_b2, app2, _m2) = scenario();
+    std::fs::create_dir_all(app2.join(ROLLBACK)).unwrap();
+    std::fs::copy(app2.join(FRONT_DB), app2.join(ROLLBACK).join(FRONT_DB)).unwrap();
+    std::fs::write(app2.join(FRONT_DB), vec![0x42u8; 8192]).unwrap();
+    assert!(recover(&app2).is_err(), "fail-closed on a damaged live database");
+    assert!(app2.join(ROLLBACK).join(FRONT_DB).exists() && archives(&app2).is_empty());
+    assert_eq!(events(&app2).into_iter().last().unwrap()["code"], "LIVE_DB_DAMAGED");
+    // and the media folder: set aside, but missing in live
+    let (_b3, app3, _m3) = scenario();
+    std::fs::create_dir_all(app3.join(ROLLBACK)).unwrap();
+    std::fs::rename(app3.join("media"), app3.join(ROLLBACK).join("media")).unwrap();
+    assert!(recover(&app3).is_err() && app3.join(ROLLBACK).join("media").is_dir() && archives(&app3).is_empty(), "media kept in place");
+}
+
+#[test]
 fn s7_archive_step_failing_keeps_everything_until_recover() {
     let (_b, app, m) = scenario();
     let prior = data_set(&app);
