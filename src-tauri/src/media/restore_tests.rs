@@ -61,6 +61,8 @@ fn make_backup(live: &std::path::Path, out: &std::path::Path, ws_parent: &std::p
     };
     backup::snapshot(&input).unwrap()
 }
+/// The DATA SET of a tree (DBs + media). RESTORE-SAFETY: the restore history and the archive of replaced
+/// states are not part of it — they are checked by their own tests below.
 fn dir_hashes(base: &std::path::Path) -> std::collections::BTreeMap<String, String> {
     let mut out = std::collections::BTreeMap::new();
     let mut stack = vec![base.to_path_buf()];
@@ -70,6 +72,7 @@ fn dir_hashes(base: &std::path::Path) -> std::collections::BTreeMap<String, Stri
             let p = e.unwrap().path();
             let name = p.file_name().unwrap().to_string_lossy().to_string();
             if name.starts_with(".restore-") { continue; }
+            if d == base && (name == crate::media::restore_archive::HISTORY_FILE || name == crate::media::restore_archive::ARCHIVE_DIR) { continue; }
             if p.is_dir() { stack.push(p); continue; }
             let rel = p.strip_prefix(base).unwrap().to_string_lossy().replace('\\', "/");
             out.insert(rel, sha256_hex(&std::fs::read(&p).unwrap()));

@@ -77,6 +77,7 @@ const EXCLUDED_EXACT: &[&str] = &[
     ".restore-rollback",
     ".restore-journal",
     ".restore-intent",
+    ".restore-context.json",
     ".backup-intent",
     ".gc-intent",
 ];

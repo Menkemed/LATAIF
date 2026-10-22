@@ -16,6 +16,7 @@ import { useAuthStore } from '@/stores/authStore';
 import {
   scheduleBackupSnapshot,
   listRestoreSnapshots,
+  previewRestoreSnapshot,
   startRestore,
   type SnapshotSummary,
 } from '@/core/lifecycle/restore-wiring';
@@ -33,8 +34,11 @@ import {
   sanitizeBackupError,
   formatBytes,
   canRunOwnerAction,
-  canConfirmRestore,
+  canConfirmRestoreAfterPreview,
+  describeRestorePreview,
   formatSnapshotTime,
+  type PreviewLine,
+  type PreviewState,
 } from './backup-restore-panel-logic';
 
 const primaryBtn: CSSProperties = { padding: '8px 14px', borderRadius: 8, border: '1px solid #715DE3', background: '#715DE3', color: '#fff', cursor: 'pointer' };
@@ -51,6 +55,9 @@ export function BackupRestorePanel() {
   const [snapshots, setSnapshots] = useState<SnapshotSummary[] | null>(null);
   const [confirmId, setConfirmId] = useState<string | null>(null);
   const [confirmPw, setConfirmPw] = useState('');
+  // RESTORE-SAFETY — what the chosen restore would change, shown before it can be confirmed.
+  const [previewState, setPreviewState] = useState<PreviewState>('none');
+  const [previewLines, setPreviewLines] = useState<PreviewLine[]>([]);
   const [backupOpen, setBackupOpen] = useState(false);
   const [backupPw, setBackupPw] = useState('');
   const [loc, setLoc] = useState<BackupLocationInfo | null>(null);
@@ -184,10 +191,24 @@ export function BackupRestorePanel() {
     } finally { setBusy(false); }
   };
 
-  const cancelConfirm = () => { setConfirmId(null); setConfirmPw(''); };
+  const cancelConfirm = () => { setConfirmId(null); setConfirmPw(''); setPreviewState('none'); setPreviewLines([]); };
+
+  const doPreview = async () => {
+    if (!confirmId || !canRunOwnerAction(email, confirmPw, busy)) return;
+    setBusy(true); setError(null); setPreviewState('loading');
+    try {
+      const { preview, liveSaved } = await previewRestoreSnapshot({ snapshotId: confirmId, email: email.trim(), password: confirmPw });
+      setPreviewLines(describeRestorePreview(preview, liveSaved));
+      setPreviewState('loaded');
+    } catch (e) {
+      // Shown, never hidden: a damaged live database is a reason to restore, so the owner may still go on.
+      setPreviewLines([{ tone: 'unknown', text: `The preview could not be made (${sanitizeBackupError(e)}) — what changes is not determined.` }]);
+      setPreviewState('failed');
+    } finally { setBusy(false); }
+  };
 
   const doConfirmRestore = async () => {
-    if (!canConfirmRestore(confirmId, confirmPw, busy)) return;
+    if (!canConfirmRestoreAfterPreview(confirmId, confirmPw, busy, previewState)) return;
     setBusy(true); setError(null);
     try {
       // Starts the orchestrator: quiesce → durably SCHEDULE the restore → relaunch. On success the process
@@ -242,7 +263,7 @@ export function BackupRestorePanel() {
                   <div style={{ ...cell, fontFamily: 'monospace', fontSize: 11 }} data-testid="brp-row-id">{s.snapshotId}</div>
                 </div>
                 <button data-testid="brp-restore" data-snapshot-id={s.snapshotId}
-                  onClick={() => { setConfirmId(s.snapshotId); setConfirmPw(''); setError(null); }}
+                  onClick={() => { setConfirmId(s.snapshotId); setConfirmPw(''); setError(null); setPreviewState('none'); setPreviewLines([]); }}
                   disabled={busy} style={dangerBtn}>Restore</button>
               </div>
             ))}
@@ -367,14 +388,31 @@ export function BackupRestorePanel() {
         <div data-testid="brp-confirm-modal" style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
           <div data-testid="brp-confirm-warning" style={{ background: '#FEF2F2', border: '1px solid #FCA5A5', borderRadius: 8, padding: 12, fontSize: 13, color: '#991B1B' }}>
             <b>This replaces ALL current data</b> with the selected backup. The app will restart and the
-            restore runs at the next boot. This cannot be undone.
+            restore runs at the next boot. Your current data is not deleted: it is kept as a pre-restore
+            archive in the data folder.
           </div>
-          <Input label="RE-ENTER OWNER PASSWORD" data-testid="brp-confirm-pw" type="password" value={confirmPw} onChange={(e) => setConfirmPw(e.target.value)} autoComplete="off" />
+          <Input label="RE-ENTER OWNER PASSWORD" data-testid="brp-confirm-pw" type="password" value={confirmPw}
+            onChange={(e) => { setConfirmPw(e.target.value); setPreviewState('none'); setPreviewLines([]); }} autoComplete="off" />
+          <div>
+            <button data-testid="brp-preview" onClick={doPreview} disabled={!canRunOwnerAction(email, confirmPw, busy)} style={ghostBtn}>
+              {previewState === 'loading' ? 'Checking…' : 'Show what changes'}
+            </button>
+          </div>
+          {previewLines.length > 0 && (
+            <ul data-testid="brp-preview-box" style={{ margin: 0, padding: '8px 12px 8px 28px', border: '1px solid #E5E9EE', borderRadius: 8, fontSize: 12, lineHeight: 1.5 }}>
+              {previewLines.map((l, i) => (
+                <li key={i} data-testid="brp-preview-line" data-tone={l.tone}
+                  style={{ color: l.tone === 'loss' ? '#B42318' : l.tone === 'return' ? '#B54708' : l.tone === 'keep' ? '#067647' : l.tone === 'unknown' ? '#6B7280' : '#344054' }}>
+                  {l.text}
+                </li>
+              ))}
+            </ul>
+          )}
           {error && <div data-testid="brp-error" style={{ color: '#B42318', fontSize: 13 }}>{error}</div>}
           <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
             <button data-testid="brp-confirm-cancel" onClick={cancelConfirm} disabled={busy} style={ghostBtn}>Cancel</button>
-            <button data-testid="brp-confirm" onClick={doConfirmRestore} disabled={!canConfirmRestore(confirmId, confirmPw, busy)} style={dangerBtn}>
-              {busy ? 'Restoring…' : 'Confirm restore'}
+            <button data-testid="brp-confirm" onClick={doConfirmRestore} disabled={!canConfirmRestoreAfterPreview(confirmId, confirmPw, busy, previewState)} style={dangerBtn}>
+              {busy && previewState !== 'loading' ? 'Restoring…' : 'Confirm restore'}
             </button>
           </div>
         </div>

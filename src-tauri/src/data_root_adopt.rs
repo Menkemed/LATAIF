@@ -117,6 +117,7 @@ const MAINTENANCE_MARKERS: &[&str] = &[
     ".restore-journal",
     ".restore-staging",
     ".restore-rollback",
+    ".restore-context.json",
     ".backup-intent",
     ".gc-intent",
     data_root::LOCATOR_FILENAME, // ein Locator IM Ordner ist eine tote Kopie eines fruehen Moves

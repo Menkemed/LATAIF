@@ -2785,6 +2785,25 @@ fn list_restore_snapshots(
     media::restore::list_snapshots(&app_dir).map_err(|code| code.code().to_string())
 }
 
+/// RESTORE-SAFETY — owner-gated, READ-ONLY preview of what restoring one snapshot would change (records lost
+/// or returning, gallery photos, files archived / filled in, space). Takes only an opaque `snapshotId`.
+#[tauri::command]
+fn preview_restore_snapshot(
+    app_handle: tauri::AppHandle,
+    state: tauri::State<'_, AppHandleState>,
+    email: String,
+    password: String,
+    snapshot_id: String,
+) -> Result<media::restore_preview::RestorePreview, String> {
+    {
+        let (conn, _id) = open_config_db(&state.server)?;
+        sync::primary::authorize_owner(&conn, "tenant-1", "branch-main", &email, &password)
+            .map_err(|code| code.to_string())?;
+    }
+    let app_dir = data_root_of(&app_handle)?;
+    media::restore_preview::preview(&app_dir, &snapshot_id).map_err(|code| code.code().to_string())
+}
+
 /// Owner-gated SCHEDULE of a boot-time restore. There is NO command that mutates DB/media while the app
 /// runs — the restore is applied by the boot path (DBs closed) after the controlled relaunch. Accepts ONLY
 /// an opaque `snapshotId` (never a free path). Order:
@@ -3536,6 +3555,7 @@ pub fn run() {
             mobile_runtime_scope_configure,
             list_restore_snapshots,
             schedule_restore_snapshot,
+            preview_restore_snapshot,
             schedule_backup_snapshot,
             get_backup_location,
             set_backup_location,

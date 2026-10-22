@@ -124,6 +124,57 @@ export async function listRestoreSnapshots(
   })) as SnapshotSummary[];
 }
 
+/** RESTORE-SAFETY — one business table: records lost by the restore / coming back. `null` = not determined. */
+export interface RestoreRecordDiff {
+  table: string;
+  lost: number | null;
+  returning: number | null;
+}
+
+/** RESTORE-SAFETY — what restoring one snapshot would change (read-only, `preview_restore_snapshot`). */
+export interface RestorePreview {
+  snapshotId: string;
+  snapshotCreatedAt: string;
+  snapshotAppVersion: string;
+  liveDbRead: boolean;
+  records: RestoreRecordDiff[];
+  fieldChangesCompared: boolean;
+  photosVisibleAgain: number | null;
+  photosLeaving: number | null;
+  mediaFilesNotInSnapshot: number;
+  mediaBytesNotInSnapshot: number;
+  filesFilledIn: number | null;
+  filesStillMissing: number | null;
+  archiveFiles: number;
+  archiveBytes: number;
+  spaceNeededBytes: number;
+  spaceFreeBytes: number | null;
+  archivesExisting: number;
+  archivesExistingBytes: number;
+}
+
+/**
+ * Owner-gated, READ-ONLY preview of a restore. The backend compares against the LAST SAVED state of the live
+ * database, so the in-memory state is saved durably first; if that is not possible right now, `liveSaved`
+ * says so and the panel tells the owner the comparison may miss the latest unsaved change.
+ */
+export async function previewRestoreSnapshot(params: RestoreParams): Promise<{ preview: RestorePreview; liveSaved: boolean }> {
+  let liveSaved = true;
+  try {
+    const db = await import('@/core/db/database');
+    await db.saveDatabaseDurably();
+  } catch {
+    liveSaved = false;
+  }
+  const core = await import('@tauri-apps/api/core');
+  const preview = (await core.invoke('preview_restore_snapshot', {
+    email: params.email,
+    password: params.password,
+    snapshotId: params.snapshotId,
+  })) as RestorePreview;
+  return { preview, liveSaved };
+}
+
 export interface BackupRuntimeDeps {
   invoke: (cmd: string, args?: Record<string, unknown>) => Promise<unknown>;
   pauseAutoSync: () => void;

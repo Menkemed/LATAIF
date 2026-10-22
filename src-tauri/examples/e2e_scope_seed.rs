@@ -139,6 +139,10 @@ fn main() {
                 "moved-aside" => lataif_lib::e2e_support::CrashAt::MovedAside,
                 "swap-journalled" => lataif_lib::e2e_support::CrashAt::SwapJournalled,
                 "swapped-in" => lataif_lib::e2e_support::CrashAt::SwappedIn,
+                // RESTORE-SAFETY — after the durable commit: boot recovery must finish fill-in + archive.
+                "committed" => lataif_lib::e2e_support::CrashAt::Committed,
+                "filled-in" => lataif_lib::e2e_support::CrashAt::FilledIn,
+                "archived" => lataif_lib::e2e_support::CrashAt::Archived,
                 other => { eprintln!("unknown crash point: {}", other); std::process::exit(2); }
             };
             let input = lataif_lib::e2e_support::RestoreInput { backup_dir: &backup_dir, app_data_dir: app_dir };

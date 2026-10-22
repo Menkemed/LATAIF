@@ -17,6 +17,13 @@ export function sanitizeBackupError(raw: unknown): string {
   if (/BACKUP_LOCATION_NOT_ABSOLUTE/i.test(msg)) return 'Please choose a valid folder.';
   if (/BACKUP_LOCATION_OVERLAPS_APPDATA/i.test(msg))
     return 'Choose a folder outside the app data — it cannot be the data/media folder or contain it.';
+  // RESTORE-SAFETY — refusals that left everything untouched; each says what to do.
+  if (/RESTORE_INSUFFICIENT_SPACE/i.test(msg))
+    return 'Not enough free disk space for the restore — free some space and try again. Nothing was changed.';
+  if (/RESTORE_FREE_SPACE_UNKNOWN/i.test(msg))
+    return 'The free disk space could not be determined, so the restore was refused. Nothing was changed.';
+  if (/RESTORE_ROLLBACK_PRESENT/i.test(msg))
+    return 'An earlier restore has not been archived yet — restart the app once, then try again. Nothing was changed.';
   if (/OUTSIDE_ROOT|REPARSE|MISSING|HASH|VERSION|INCOMPLETE|UNEXPECTED/i.test(msg))
     return 'The selected backup could not be verified.';
   return 'Operation failed.';
@@ -59,4 +66,101 @@ export function canRunOwnerAction(email: string, password: string, busy: boolean
 /** A restore may be confirmed only for a chosen snapshot, with the owner password re-entered, not busy. */
 export function canConfirmRestore(snapshotId: string | null, password: string, busy: boolean): boolean {
   return !busy && !!snapshotId && password.length > 0;
+}
+
+// ── RESTORE-SAFETY — the preview the owner sees before confirming ────────────────────────────────────
+
+export type PreviewState = 'none' | 'loading' | 'loaded' | 'failed';
+
+/**
+ * Confirm only after the owner has SEEN what the restore changes — or seen that the preview could not be
+ * made (a damaged live database is a reason to restore, so a failed preview must not lock the owner out).
+ */
+export function canConfirmRestoreAfterPreview(snapshotId: string | null, password: string, busy: boolean, preview: PreviewState): boolean {
+  return canConfirmRestore(snapshotId, password, busy) && (preview === 'loaded' || preview === 'failed');
+}
+
+export interface PreviewLine {
+  tone: 'loss' | 'return' | 'keep' | 'info' | 'unknown';
+  text: string;
+}
+
+interface PreviewInput {
+  snapshotCreatedAt: string;
+  snapshotAppVersion: string;
+  liveDbRead: boolean;
+  records: Array<{ table: string; lost: number | null; returning: number | null }>;
+  fieldChangesCompared: boolean;
+  photosVisibleAgain: number | null;
+  photosLeaving: number | null;
+  mediaFilesNotInSnapshot: number;
+  filesFilledIn: number | null;
+  filesStillMissing: number | null;
+  archiveFiles: number;
+  archiveBytes: number;
+  spaceNeededBytes: number;
+  spaceFreeBytes: number | null;
+  archivesExisting: number;
+  archivesExistingBytes: number;
+}
+
+const TABLE_WORDS: Record<string, [string, string]> = {
+  products: ['item', 'items'], customers: ['client', 'clients'], suppliers: ['supplier', 'suppliers'],
+  purchases: ['purchase', 'purchases'], invoices: ['invoice', 'invoices'], repairs: ['repair', 'repairs'],
+  consignments: ['consignment', 'consignments'], orders: ['order', 'orders'], offers: ['offer', 'offers'],
+  expenses: ['expense', 'expenses'], payments: ['payment', 'payments'],
+};
+const word = (table: string, n: number) => {
+  const w = TABLE_WORDS[table] ?? [table, table];
+  return n === 1 ? w[0] : w[1];
+};
+
+/**
+ * The preview in plain sentences. A number appears ONLY where the backend determined it exactly; whatever
+ * was not compared is said in words ("not determined"), never as a guessed number.
+ */
+export function describeRestorePreview(p: PreviewInput, liveSaved: boolean): PreviewLine[] {
+  const out: PreviewLine[] = [];
+  out.push({ tone: 'info', text: `Backup from ${formatSnapshotTime(p.snapshotCreatedAt)} · v${p.snapshotAppVersion}.` });
+  if (!liveSaved) out.push({ tone: 'unknown', text: 'Unsaved changes could not be written first — the comparison uses the last saved state.' });
+  if (!p.liveDbRead) {
+    out.push({ tone: 'unknown', text: 'The current data could not be read — what would be lost or come back is not determined.' });
+  }
+  const unknownTables: string[] = [];
+  for (const r of p.records) {
+    if (r.lost === null || r.returning === null) {
+      if (p.liveDbRead) unknownTables.push(word(r.table, 2));
+      continue;
+    }
+    if (r.lost > 0) out.push({ tone: 'loss', text: `${r.lost} ${word(r.table, r.lost)} added since the backup will be gone from the app (kept in the archive).` });
+    if (r.returning > 0) out.push({ tone: 'return', text: `${r.returning} ${word(r.table, r.returning)} deleted since the backup come back.` });
+  }
+  if (unknownTables.length) out.push({ tone: 'unknown', text: `Not determined for: ${unknownTables.join(', ')}.` });
+  if (!p.fieldChangesCompared) {
+    out.push({ tone: 'unknown', text: 'Changes inside existing records are not compared — anything edited since the backup goes back to the backup’s version.' });
+  }
+  if (p.photosVisibleAgain === null || p.photosLeaving === null) {
+    out.push({ tone: 'unknown', text: 'Gallery changes are not determined.' });
+  } else {
+    if (p.photosVisibleAgain > 0) out.push({ tone: 'return', text: `${p.photosVisibleAgain} gallery photo(s) removed since the backup become visible again.` });
+    if (p.photosLeaving > 0) out.push({ tone: 'loss', text: `${p.photosLeaving} gallery photo(s) added since the backup leave their galleries (files kept in the archive).` });
+  }
+  if (p.filesFilledIn !== null && p.filesFilledIn > 0) {
+    out.push({ tone: 'keep', text: `${p.filesFilledIn} photo file(s) the backup lacks are taken over from the current folder (checked by content).` });
+  }
+  if (p.filesStillMissing !== null && p.filesStillMissing > 0) {
+    out.push({ tone: 'info', text: `${p.filesStillMissing} photo file(s) listed in the backup's data exist nowhere and stay missing.` });
+  }
+  out.push({ tone: 'keep', text: `Everything you have now — both databases and all media (${p.archiveFiles} files, ${formatBytes(p.archiveBytes)}) — is kept as a pre-restore archive in the data folder. Nothing is deleted.` });
+  if (p.archivesExisting > 0) {
+    out.push({ tone: 'info', text: `Earlier restore archives: ${p.archivesExisting} (${formatBytes(p.archivesExistingBytes)}). They are never deleted automatically.` });
+  }
+  if (p.spaceFreeBytes === null) {
+    out.push({ tone: 'unknown', text: 'The free disk space could not be determined — the restore will refuse to start.' });
+  } else if (p.spaceFreeBytes < p.spaceNeededBytes) {
+    out.push({ tone: 'loss', text: `Not enough free disk space: needs ${formatBytes(p.spaceNeededBytes)}, ${formatBytes(p.spaceFreeBytes)} free — the restore will refuse to start.` });
+  } else {
+    out.push({ tone: 'info', text: `Disk space: needs about ${formatBytes(p.spaceNeededBytes)}, ${formatBytes(p.spaceFreeBytes)} free.` });
+  }
+  return out;
 }

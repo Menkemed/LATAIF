@@ -25,6 +25,10 @@ pub mod reachability;
 pub mod restore;
 // MEDIA-04B2A12-R3 — boot recovery for an interrupted restore. PRODUCTION (runs before any DB opens).
 pub mod restore_recovery;
+// RESTORE-SAFETY — after the commit: verified fill-in, durable archive of the replaced state, restore history.
+pub mod restore_archive;
+// RESTORE-SAFETY — owner-gated, read-only "what would this restore change" preview.
+pub mod restore_preview;
 // MOBILE-04B2A14-I1 — safe temporary staging GC. Production compiles the dry-run analysis only; `apply`
 // (real deletion) is test/e2e-gated and there is no automatic boot deletion.
 pub mod staging_gc;
@@ -80,6 +84,13 @@ pub enum MediaError {
     RestoreIncompleteBackup,
     /// MEDIA-04B2A12-R1 — restore: the backup dir carries a file the manifest does not list.
     RestoreUnexpectedFile,
+    /// RESTORE-SAFETY — the volume cannot hold the staged copy (+ fill-in + margin). Nothing was touched.
+    RestoreInsufficientSpace,
+    /// RESTORE-SAFETY — the free space of the volume cannot be determined. Fail-closed: nothing was touched.
+    RestoreFreeSpaceUnknown,
+    /// RESTORE-SAFETY — a set-aside prior state from an earlier restore was never archived. It is the
+    /// owner's data, so a new restore refuses instead of deleting it (boot recovery archives it first).
+    RestoreRollbackPresent,
     /// BACKUP-LOCATION — a chosen backup root is not an absolute path (rejected before any write).
     BackupLocationNotAbsolute,
     /// BACKUP-LOCATION — a chosen backup root does not exist and cannot be created, or a write-test
@@ -110,6 +121,9 @@ impl MediaError {
             MediaError::RestoreUnknownVersion => "MEDIA_RESTORE_UNKNOWN_VERSION",
             MediaError::RestoreIncompleteBackup => "MEDIA_RESTORE_INCOMPLETE_BACKUP",
             MediaError::RestoreUnexpectedFile => "MEDIA_RESTORE_UNEXPECTED_FILE",
+            MediaError::RestoreInsufficientSpace => "MEDIA_RESTORE_INSUFFICIENT_SPACE",
+            MediaError::RestoreFreeSpaceUnknown => "MEDIA_RESTORE_FREE_SPACE_UNKNOWN",
+            MediaError::RestoreRollbackPresent => "MEDIA_RESTORE_ROLLBACK_PRESENT",
             MediaError::BackupLocationNotAbsolute => "MEDIA_BACKUP_LOCATION_NOT_ABSOLUTE",
             MediaError::BackupLocationNotWritable => "MEDIA_BACKUP_LOCATION_NOT_WRITABLE",
             MediaError::BackupLocationOverlapsAppData => "MEDIA_BACKUP_LOCATION_OVERLAPS_APPDATA",

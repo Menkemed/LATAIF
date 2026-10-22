@@ -14,6 +14,10 @@
 //!     durable `done` written only AFTER a full swap + integrity verify. On ANY in-process error the live
 //!     tree is rolled back to the EXACT prior state; a crash at ANY step is reconciled by `recover()` to
 //!     the OLD state (never a mixed old/new stand) — the backup SOURCE is never modified.
+//!   • RESTORE-SAFETY: before anything is touched the free space is checked (fail-closed) and the restore is
+//!     recorded (`restore-history.jsonl` + `.restore-context.json`); after the commit the files the restored
+//!     DB lists but the backup lacks are copied back VERIFIED from the old media, and the set-aside prior
+//!     state is ARCHIVED under `restore-archive/` instead of deleted (see `restore_archive`).
 //! Never logs bytes/content paths.
 
 use std::collections::BTreeSet;
@@ -37,12 +41,16 @@ const CRASH: &str = "SIMULATED_CRASH";
 
 /// Test-only crash points, taken right after a journal write or a rename group. Never exposed in a
 /// production build (constructed only by the `cfg(test, e2e)` crash-injection entry below).
+/// RESTORE-SAFETY — the last three lie AFTER the durable commit: `recover()` must finish fill-in + archive.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CrashAt {
     AsideJournalled,
     MovedAside,
     SwapJournalled,
     SwappedIn,
+    Committed,
+    FilledIn,
+    Archived,
 }
 
 fn is_unsafe_rel(p: &str) -> bool {
@@ -183,21 +191,71 @@ pub fn restore_crashing(input: &RestoreInput, crash_at: CrashAt) -> Result<Backu
     restore_impl(input, false, Some(crash_at))
 }
 
+/// The opaque id of a snapshot dir (its single-segment name) — for the history, never a path.
+fn snapshot_label(backup_dir: &Path) -> String {
+    backup_dir.file_name().and_then(|n| n.to_str()).unwrap_or("unknown").to_string()
+}
+
+/// Bytes the staged copy of this snapshot needs on the live volume.
+pub fn staged_bytes(manifest: &BackupManifest) -> u64 {
+    manifest.db.byte_size
+        + manifest.additional_db_files.iter().map(|d| d.byte_size).sum::<u64>()
+        + manifest.files.iter().map(|f| f.byte_size).sum::<u64>()
+}
+
+/// RESTORE-SAFETY — a set-aside prior state that holds anything is the owner's data (an earlier restore
+/// whose archive step has not run yet). A new restore never deletes it; it refuses instead.
+fn unarchived_rollback(live: &Path) -> bool {
+    fs::read_dir(live.join(ROLLBACK)).map(|mut r| r.next().is_some()).unwrap_or(false)
+}
+
 fn restore_impl(
     input: &RestoreInput,
     inject_swap_failure: bool,
     crash_at: Option<CrashAt>,
 ) -> Result<BackupManifest, MediaError> {
-    let manifest = validate_snapshot(input.backup_dir)?; // live untouched on any pre-check failure
+    use super::restore_archive as ra;
     let live = input.app_data_dir;
+    let snapshot_id = snapshot_label(input.backup_dir);
+    let abort = |e: MediaError| -> MediaError {
+        ra::note(live, "aborted", None, Some(&snapshot_id), Some(e.code()), None);
+        e
+    };
+    // ── 0. pre-checks — live untouched on ANY failure ──
+    let manifest = validate_snapshot(input.backup_dir).map_err(&abort)?;
     let staging = live.join(STAGING);
     let rollback = live.join(ROLLBACK);
     let journal_path = live.join(JOURNAL);
+    if unarchived_rollback(live) {
+        return Err(abort(MediaError::RestoreRollbackPresent));
+    }
+    ra::ensure_space(live, staged_bytes(&manifest)).map_err(&abort)?;
     let _ = fs::remove_dir_all(&staging);
-    let _ = fs::remove_dir_all(&rollback);
+    let _ = fs::remove_dir(&rollback); // empty by the check above
     let _ = fs::remove_file(&journal_path);
-    fs::create_dir_all(&staging).map_err(io("mkstaging"))?;
-    fs::create_dir_all(&rollback).map_err(io("mkrollback"))?;
+
+    // The facts a crash must not lose (snapshot + archive id) and the history entry are written BEFORE
+    // anything is touched — a restore that cannot be recorded does not start.
+    let ctx = ra::RestoreContext {
+        snapshot_id: snapshot_id.clone(),
+        snapshot_created_at: manifest.created_at.clone(),
+        started_at: chrono::Utc::now().to_rfc3339(),
+        archive_id: ra::new_archive_id(live, chrono::Utc::now()),
+    };
+    ra::write_context(live, &ctx).map_err(&abort)?;
+    if let Err(e) = ra::history(live, "started", Some(&ctx), None, None, None) {
+        ra::clear_context(live);
+        return Err(e);
+    }
+    let fail_before_swap = |e: MediaError| -> MediaError {
+        let _ = fs::remove_dir_all(&staging);
+        let _ = fs::remove_dir(&rollback);
+        ra::note(live, "aborted", Some(&ctx), None, Some(e.code()), None);
+        ra::clear_context(live);
+        e
+    };
+    fs::create_dir_all(&staging).map_err(io("mkstaging")).map_err(&fail_before_swap)?;
+    fs::create_dir_all(&rollback).map_err(io("mkrollback")).map_err(&fail_before_swap)?;
 
     let mut db_names: Vec<String> = vec![manifest.db.file_name.clone()];
     for d in &manifest.additional_db_files {
@@ -214,11 +272,15 @@ fn restore_impl(
         }
         verify_staging(&staging, &manifest)
     };
-    if let Err(e) = prep() {
-        let _ = fs::remove_dir_all(&staging);
-        let _ = fs::remove_dir_all(&rollback);
-        return Err(e); // live never touched
-    }
+    prep().map_err(&fail_before_swap)?; // live never touched
+
+    // RESTORE-SAFETY — room for the files the restored DB lists but the backup does not carry, which the
+    // fill-in will copy back from the current media after the commit (estimate by name + size; the copy
+    // itself proves the hash). Still before any live change.
+    let fill_bytes = ra::plan_fill_in(&staging.join(&manifest.db.file_name), &staging.join("media"), &live.join("media"), false)
+        .map(|(plan, _)| plan.iter().map(|p| p.bytes).sum::<u64>())
+        .map_err(&fail_before_swap)?;
+    ra::ensure_space(live, fill_bytes).map_err(&fail_before_swap)?;
 
     // ── 2. swap (write-ahead journal before each rename group). Any error/crash → live rolls back. ──
     let crash = |p: CrashAt| -> Result<(), MediaError> {
@@ -259,9 +321,35 @@ fn restore_impl(
     match outcome {
         Ok(()) => {
             journal_write(&journal_path, "done")?; // COMMIT POINT (durable)
-            let _ = fs::remove_dir_all(&staging);
-            let _ = fs::remove_dir_all(&rollback);
-            let _ = fs::remove_file(&journal_path);
+            crash(CrashAt::Committed)?;
+            // RESTORE-SAFETY — after the commit: verified fill-in, then ARCHIVE the set-aside prior state
+            // (never delete it). Idempotent; a crash or error here is finished by `recover()` at the next boot.
+            let step = |s: &'static str| -> Result<(), MediaError> {
+                match s {
+                    "filled-in" => crash(CrashAt::FilledIn),
+                    "archived" => crash(CrashAt::Archived),
+                    _ => Ok(()),
+                }
+            };
+            match ra::finish_after_commit(live, &ctx, &step) {
+                Ok(rep) => {
+                    let mut counts = serde_json::to_value(&rep).unwrap_or_default();
+                    if let Some(o) = counts.as_object_mut() {
+                        o.insert("restoredMediaFiles".into(), (manifest.files.len() as u64).into());
+                        o.insert("restoredDbFiles".into(), (db_names.len() as u64).into());
+                    }
+                    ra::note(live, "committed", Some(&ctx), None, None, Some(counts));
+                    let _ = fs::remove_dir_all(&staging);
+                    ra::clear_context(live);
+                    let _ = fs::remove_file(&journal_path);
+                }
+                Err(MediaError::Io(ref s)) if s == CRASH => return Err(MediaError::Io(CRASH.into())),
+                Err(e) => {
+                    // Committed and consistent; the set-aside state stays where it is (journal + context kept)
+                    // and boot recovery finishes the archive step.
+                    ra::note(live, "finish_deferred", Some(&ctx), None, Some(e.code()), None);
+                }
+            }
             Ok(manifest)
         }
         Err(MediaError::Io(ref s)) if s == CRASH => {
@@ -269,9 +357,17 @@ fn restore_impl(
             Err(MediaError::Io(CRASH.into()))
         }
         Err(e) => {
-            rollback_to_prior(live, &rollback); // in-process error → exact prior state
-            let _ = fs::remove_dir_all(&staging);
-            let _ = fs::remove_file(&journal_path);
+            // in-process error → exact prior state. If even that is incomplete, NOTHING is deleted: the
+            // journal + set-aside state stay, and boot recovery (fail-closed) completes the rollback.
+            match rollback_to_prior(live, &rollback) {
+                Ok(()) => {
+                    let _ = fs::remove_dir_all(&staging);
+                    let _ = fs::remove_file(&journal_path);
+                    ra::note(live, "rolled_back", Some(&ctx), None, Some(e.code()), None);
+                    ra::clear_context(live);
+                }
+                Err(_) => ra::note(live, "rollback_incomplete", Some(&ctx), None, Some(e.code()), None),
+            }
             Err(e)
         }
     }
@@ -414,8 +510,21 @@ pub fn restore_by_id(app_data_dir: &Path, snapshot_id: &str) -> Result<BackupMan
 /// canonical backups root, run the FULL pre-check, then durably record the pending intent. Performs NO
 /// DB/media mutation — a wrong/foreign/incomplete id fails here with nothing written.
 pub fn schedule_restore(app_data_dir: &Path, snapshot_id: &str) -> Result<(), MediaError> {
+    use super::restore_archive as ra;
     let backup_dir = resolve_snapshot_id(app_data_dir, snapshot_id)?;
-    validate_snapshot(&backup_dir)?; // full pre-check BEFORE any intent is written
+    let manifest = validate_snapshot(&backup_dir)?; // full pre-check BEFORE any intent is written
+    // RESTORE-SAFETY — refuse NOW what the boot restore would refuse, so the owner sees it in the app
+    // instead of after a relaunch: an unarchived earlier restore, or a volume without room for the copy.
+    let pre = if unarchived_rollback(app_data_dir) {
+        Err(MediaError::RestoreRollbackPresent)
+    } else {
+        ra::ensure_space(app_data_dir, staged_bytes(&manifest))
+    };
+    if let Err(e) = pre {
+        ra::note(app_data_dir, "schedule_refused", None, Some(snapshot_id), Some(e.code()), None);
+        return Err(e);
+    }
+    ra::history(app_data_dir, "scheduled", None, Some(snapshot_id), None, None)?;
     super::restore_recovery::write_intent(app_data_dir, snapshot_id)
 }
 
