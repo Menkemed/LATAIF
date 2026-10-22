@@ -22,14 +22,18 @@
 //
 // PROZESS-ISOLATION (dauerhafte Regel): gestartet wird nur ueber `spawnTracked`; beendet wird nur,
 // was dieser Lauf gestartet hat — regulaer nach Pruefung von PID UND exaktem Test-Pfad, hart nur
-// ueber den Helfer. Edge ist ein EIGENES Kind dieses Laufs (`killOwnChild`). Die installierte
-// Produktions-App, E:\LATAIF\Data und die Ports 3001/3443 bleiben unberuehrt.
+// ueber den Helfer. Edge wird ueber seine EIGENE Debug-Verbindung geschlossen (`_e2e-browser.mjs`) —
+// `killOwnChild` bleibt nur der Rueckfall. Die installierte
+// Produktions-App, E:\LATAIF\Data und die Ports 3001/3443 bleiben unberuehrt. Kein aeusseres
+// `timeout` um diesen Lauf: es beendet nur node, und App wie Browser blieben verwaist stehen —
+// die Zeitgrenze ist der WACHHUND unten, er raeumt vorher auf.
 // ════════════════════════════════════════════════════════════════════════════
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
 import {
   killStarted, killTestImage, killTestPid, killOwnChild, spawnTracked, waitTestImageGone,
   foreignProcesses, pathOfPid, startedPids, waitPidGone,
 } from './_e2e-process.mjs';
+import { edgeBrowserEndpoint, closeEdge, waitEdgeProfileGone } from './_e2e-browser.mjs';
 import { spawn, execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -62,6 +66,13 @@ const BIZ_DB = join(APP_DATA_DIR, 'lataif.db');
 const SERVER_DB = join(APP_DATA_DIR, 'lataif_sync_server.db');
 const CLIENT_HOME = join(RUN, 'client-home');
 const CLIENT_APPDATA = join(CLIENT_HOME, 'Roaming');
+// PC2 legt seinen Fenster-Speicher (EBWebView: Server, Ausweis, Sitzung) und seine offenen Speichervorgaenge
+// (`pending-saves`) unter dem ECHTEN LocalAppData seiner Test-Kennung ab — die Umleitung ueber die Umgebung
+// greift dort nicht. Ohne Neuanfang startet PC2 mit dem Ausweis eines frueheren Laufs fuer einen Server, den
+// es nicht mehr gibt: keine Erststart-Maske, keine Anmeldemaske, jede Anfrage 401. Dieser Ordner gehoert nur
+// der Test-Kennung (nie der Produktion) und wird deshalb zu Beginn geleert — wie APP_DATA_DIR des Primary.
+const REAL_LOCALAPPDATA = process.env.LOCALAPPDATA || join(os.homedir(), 'AppData', 'Local');
+const CLIENT_LOCAL_STATE = join(REAL_LOCALAPPDATA, CLIENT_IDENT);
 const STAGING_ROOT = join(APP_DATA_DIR, 'command-staging');
 
 let PASS = 0, FAIL = 0; const fails = [];
@@ -76,15 +87,24 @@ const RV = {
 };
 
 let edgeProc = null;
+let edgeBrowserWs = '';
+/** Den Test-Browser ueber seine EIGENE Debug-Verbindung schliessen — warum, steht in `_e2e-browser.mjs`. */
+async function edgeSchliessen() {
+  if (await closeEdge(edgeBrowserWs, EDGE_CDP)) edgeBrowserWs = '';
+  return !edgeBrowserWs;
+}
 const aufraeumen = () => {
   try { killOwnChild(edgeProc); } catch { /* schon weg */ }
   // Nur der EIGENE Test-Browser (PID + Startpfad geprüft, samt Prozessbaum) — nie nach Name oder
   // Befehlszeile: jeder Lauf hat ein eigenes Profil unter RUN, ein Rest eines früheren Laufs stört nicht.
   killStarted(); killTestImage('lataif.exe'); killTestImage('lataif-e2e-client.exe');
 };
-const WACHHUND = setTimeout(() => {
+const WACHHUND = setTimeout(async () => {
   console.log('  x ABBRUCH: Zeitgrenze erreicht — der Lauf steht.');
+  await edgeSchliessen();
   aufraeumen();
+  await waitTestImageGone('lataif.exe'); await waitTestImageGone('lataif-e2e-client.exe');
+  console.log('  ABBRUCH-AUFRAEUMEN ' + JSON.stringify({ edgeGestartet: !!edgeProc, browserZu: !edgeBrowserWs, reste: await waitEdgeProfileGone(EDGE_PROFILE) }));
   process.exit(1);
 }, 70 * 60 * 1000);
 
@@ -196,6 +216,8 @@ async function startEdge(url) {
   // Genau DIESE Seite, nicht irgendeine: der Vergleich geht gegen die volle Adresse dieses Laufs.
   const c = await attachOnly(EDGE_CDP, new RegExp('^' + url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 60000);
   await c.send('Network.enable', {}, 15000);
+  // Die Browser-Verbindung DIESES Browsers — damit wird er am Ende geschlossen.
+  edgeBrowserWs = await edgeBrowserEndpoint(EDGE_CDP);
   return c;
 }
 
@@ -245,6 +267,7 @@ try {
   aufraeumen(); await waitTestImageGone('lataif.exe'); await waitTestImageGone('lataif-e2e-client.exe');
   for (const d of [RUN, CLIENT_APPDATA, join(CLIENT_HOME, 'Local'), join(CLIENT_HOME, 'tmp'), join(RUN, 'tmp')]) mkdirSync(d, { recursive: true });
   if (existsSync(APP_DATA_DIR)) rmSync(APP_DATA_DIR, { recursive: true, force: true });
+  if (existsSync(CLIENT_LOCAL_STATE)) rmSync(CLIENT_LOCAL_STATE, { recursive: true, force: true, maxRetries: 20, retryDelay: 300 });
   console.log(e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: appEnv() }));
 
   // ══ SETUP — Primary einrichten, Server-Zugang setzen, Server starten ══════════════════════════
@@ -473,7 +496,9 @@ try {
   // ══ SETUP PC2 ════════════════════════════════════════════════════════════════════════════════
   client = await attachApp(CLIENT_CDP, CLIENT_APP, clientEnv());
   await waitInvoke(client);
-  await waitFor(client, '[data-first-run-gate]', 120000);
+  const pc2Frisch = await waitFor(client, '[data-first-run-gate]', 120000);
+  ok(pc2Frisch && !existsSync(join(CLIENT_LOCAL_STATE, 'pending-saves')),
+    `SETUP PC2 beginnt frisch: Erststart-Maske, kein Ausweis und kein offener Speichervorgang eines frueheren Laufs (${pc2Frisch})`);
   await klick(client, '[data-first-run-connect]');
   await waitFor(client, '[data-first-run-server]', 20000);
   await setVal(client, '[data-first-run-server]', `127.0.0.1:${PORT}`);
@@ -608,7 +633,9 @@ try {
 
   // ══ K7 — Grenzen: keine eigene Datenbank auf PC2, kein Abgleichkanal fuer Kommissionen ════════
   {
-    const keineEigeneDb = !existsSync(join(CLIENT_HOME, 'Local', CLIENT_IDENT, 'lataif.db'));
+    // Alle Orte, an denen PC2 eine Datenbank anlegen koennte — die umgeleiteten UND die echten seiner Test-Kennung.
+    const keineEigeneDb = [join(CLIENT_HOME, 'Local', CLIENT_IDENT), join(CLIENT_APPDATA, CLIENT_IDENT), CLIENT_LOCAL_STATE, join(REAL_APPDATA, CLIENT_IDENT)]
+      .every((d) => !existsSync(join(d, 'lataif.db')));
     const pushs = phone.antworten.filter((z) => /api\/sync\/push/.test(String(z))).length;
     MESS.k7 = { keineEigeneDb, pushs };
     ok(keineEigeneDb, 'K7 PC2 hat keine eigene Geschaeftsdatenbank angelegt');
@@ -626,9 +653,15 @@ try {
   try { primary?.close(); } catch { /* zu */ }
   try { phone?.close(); } catch { /* zu */ }
   try { client?.close(); } catch { /* zu */ }
+  await edgeSchliessen();
   aufraeumen();
   await waitTestImageGone('lataif.exe'); await waitTestImageGone('lataif-e2e-client.exe');
 }
+
+// Der Test-Browser ist zu — und mit ihm jeder Prozess seines Profils (nur gelesen, nichts beendet).
+const reste = await waitEdgeProfileGone(EDGE_PROFILE);
+ok(!edgeBrowserWs && reste === 0, `AUFRAEUMEN der Test-Browser ist geschlossen, kein Prozess seines Profils laeuft noch (${reste})`);
+MESS.aufraeumen = { browserZu: !edgeBrowserWs, reste };
 
 clearTimeout(WACHHUND);
 console.log('\n  PRE-G5 Mobile Consignment         Ergebnis');

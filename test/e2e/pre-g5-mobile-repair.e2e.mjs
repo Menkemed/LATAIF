@@ -34,6 +34,7 @@ import {
   killStarted, killTestImage, killTestPid, killOwnChild, spawnTracked, waitTestImageGone,
   foreignProcesses, pathOfPid, startedPids, waitPidGone,
 } from './_e2e-process.mjs';
+import { edgeBrowserEndpoint, closeEdge, waitEdgeProfileGone } from './_e2e-browser.mjs';
 import { spawn, execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -85,42 +86,11 @@ const RV = { create: false, edit: false, lostAnswer: false, staleEdit: false, bo
 
 let edgeProc = null;
 let edgeBrowserWs = '';
-/**
- * Der Test-Browser wird ueber seine EIGENE Debug-Verbindung geschlossen (`Browser.close`), nicht beendet:
- * `msedge.exe` startet den eigentlichen Browser als neuen Prozess und endet sofort (Exit 0). Das gestartete
- * Kind ist danach weg, `killOwnChild` greift ins Leere — bisher blieb nach JEDEM Lauf ein ganzer Edge-Baum
- * stehen. Die Verbindung ist die des Browsers, den dieser Lauf auf seinem eigenen Port gestartet hat (ihre
- * Kennung gilt nur fuer genau diese Browser-Instanz); kein Prozess wird nach Name, Befehlszeile oder PID angefasst.
- */
+/** Den Test-Browser ueber seine EIGENE Debug-Verbindung schliessen — warum, steht in `_e2e-browser.mjs`. */
 async function edgeSchliessen() {
-  if (!edgeBrowserWs) return true;
-  await new Promise((res) => {
-    let ws = null;
-    const fertig = () => { try { ws?.close(); } catch { /* zu */ } res(); };
-    const t = setTimeout(fertig, 5000);
-    try {
-      ws = new WebSocket(edgeBrowserWs);
-      ws.addEventListener('open', () => ws.send(JSON.stringify({ id: 1, method: 'Browser.close' })));
-      ws.addEventListener('message', () => { clearTimeout(t); fertig(); });
-      ws.addEventListener('close', () => { clearTimeout(t); res(); });
-      ws.addEventListener('error', () => { clearTimeout(t); res(); });
-    } catch { clearTimeout(t); res(); }
-  });
-  for (let i = 0; i < 40; i++) {
-    try { await fetch(`http://127.0.0.1:${EDGE_CDP}/json/version`); } catch { edgeBrowserWs = ''; return true; }
-    await sleep(250);
-  }
-  return false;
+  if (await closeEdge(edgeBrowserWs, EDGE_CDP)) edgeBrowserWs = '';
+  return !edgeBrowserWs;
 }
-/** Nur lesend: wie viele Prozesse laufen noch mit dem Profil DIESES Laufs? */
-const edgeReste = () => {
-  try {
-    const out = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command',
-      `@(Get-CimInstance Win32_Process -Filter "Name='msedge.exe'" | Where-Object { $_.CommandLine -like '*${EDGE_PROFILE}*' }).Count`],
-    { encoding: 'utf8', windowsHide: true });
-    return Number(out.trim());
-  } catch { return -1; }
-};
 const aufraeumen = () => {
   try { killOwnChild(edgeProc); } catch { /* schon weg */ }
   // Nur der EIGENE Test-Browser (PID + Startpfad geprüft, samt Prozessbaum) — nie nach Name oder
@@ -133,8 +103,7 @@ const WACHHUND = setTimeout(async () => {
   await edgeSchliessen();
   aufraeumen();
   await waitTestImageGone('lataif.exe'); await waitTestImageGone('lataif-e2e-client.exe');
-  let rest = edgeReste();
-  for (let i = 0; i < 40 && rest > 0; i++) { await sleep(250); rest = edgeReste(); }
+  const rest = await waitEdgeProfileGone(EDGE_PROFILE);
   console.log('  ABBRUCH-AUFRAEUMEN ' + JSON.stringify({ edgeGestartet: !!edgeProc, browserZu: !edgeBrowserWs, reste: rest }));
   process.exit(1);
 }, Number(process.env.PREG5_WACHHUND_MS) || 70 * 60 * 1000);
@@ -248,7 +217,7 @@ async function startEdge(url) {
   const c = await attachOnly(EDGE_CDP, new RegExp('^' + url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 60000);
   await c.send('Network.enable', {}, 15000);
   // Die Browser-Verbindung DIESES Browsers — damit wird er am Ende geschlossen (siehe `edgeSchliessen`).
-  try { edgeBrowserWs = String((await (await fetch(`http://127.0.0.1:${EDGE_CDP}/json/version`)).json()).webSocketDebuggerUrl || ''); } catch { edgeBrowserWs = ''; }
+  edgeBrowserWs = await edgeBrowserEndpoint(EDGE_CDP);
   return c;
 }
 
@@ -718,8 +687,7 @@ try {
 }
 
 // Der Test-Browser ist zu — und mit ihm jeder Prozess seines Profils (nur gelesen, nichts beendet).
-let reste = edgeReste();
-for (let i = 0; i < 40 && reste > 0; i++) { await sleep(250); reste = edgeReste(); }
+const reste = await waitEdgeProfileGone(EDGE_PROFILE);
 ok(!edgeBrowserWs && reste === 0, `AUFRAEUMEN der Test-Browser ist geschlossen, kein Prozess seines Profils laeuft noch (${reste})`);
 MESS.aufraeumen = { browserZu: !edgeBrowserWs, reste };
 

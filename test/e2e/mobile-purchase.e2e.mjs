@@ -13,14 +13,17 @@
 //                   auch nach verlorener Antwort und nach Neustart); Zukunft weist der Primary ab.
 //
 // PROZESS-ISOLATION (dauerhafte Regel): gestartet wird nur ueber `spawnTracked`; beendet wird nur,
-// was dieser Lauf gestartet hat. Edge ist ein EIGENES Kind dieses Laufs (`killOwnChild`).
+// was dieser Lauf gestartet hat. Edge wird ueber seine EIGENE Debug-Verbindung geschlossen
+// (`_e2e-browser.mjs`) — `killOwnChild` bleibt nur der Rueckfall.
 // Die installierte Produktions-App, E:LATAIFData und die Ports 3001/3443 werden nie berührt.
+// Kein aeusseres `timeout` um diesen Lauf (es beendet nur node); die Zeitgrenze ist der WACHHUND.
 // ════════════════════════════════════════════════════════════════════════════
 import { e2ePreflight } from './_e2e-preflight.mjs';
 import {
   killStarted, killTestImage, killTestPid, killOwnChild, spawnTracked, waitTestImageGone,
   foreignProcesses, pathOfPid, startedPids, waitPidGone,
 } from './_e2e-process.mjs';
+import { edgeBrowserEndpoint, closeEdge, waitEdgeProfileGone } from './_e2e-browser.mjs';
 import { spawn, execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, statSync } from 'node:fs';
@@ -64,15 +67,24 @@ const MESS = {};
 const RV = { m1: false, m2: false, m3: false, m4: false, m5: false };
 
 let edgeProc = null;
+let edgeBrowserWs = '';
+/** Den Test-Browser ueber seine EIGENE Debug-Verbindung schliessen — warum, steht in `_e2e-browser.mjs`. */
+async function edgeSchliessen() {
+  if (await closeEdge(edgeBrowserWs, EDGE_CDP)) edgeBrowserWs = '';
+  return !edgeBrowserWs;
+}
 const aufraeumen = () => {
   try { killOwnChild(edgeProc); } catch { /* schon weg */ }
   // Nur der EIGENE Test-Browser (PID + Startpfad geprüft, samt Prozessbaum) — nie nach Name oder
   // Befehlszeile: jeder Lauf hat ein eigenes Profil unter RUN, ein Rest eines früheren Laufs stört nicht.
   killStarted(); killTestImage('lataif.exe'); killTestImage('lataif-e2e-client.exe');
 };
-const WACHHUND = setTimeout(() => {
+const WACHHUND = setTimeout(async () => {
   console.log('  x ABBRUCH: Zeitgrenze erreicht — der Lauf steht.');
+  await edgeSchliessen();
   aufraeumen();
+  await waitTestImageGone('lataif.exe');
+  console.log('  ABBRUCH-AUFRAEUMEN ' + JSON.stringify({ edgeGestartet: !!edgeProc, browserZu: !edgeBrowserWs, reste: await waitEdgeProfileGone(EDGE_PROFILE) }));
   process.exit(1);
 }, 70 * 60 * 1000);
 
@@ -184,6 +196,8 @@ async function startEdge(url) {
   // Genau DIESE Seite, nicht irgendeine: der Vergleich geht gegen die volle Adresse dieses Laufs.
   const c = await attachOnly(EDGE_CDP, new RegExp('^' + url.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), 60000);
   await c.send('Network.enable', {}, 15000);
+  // Die Browser-Verbindung DIESES Browsers — damit wird er am Ende geschlossen.
+  edgeBrowserWs = await edgeBrowserEndpoint(EDGE_CDP);
   return c;
 }
 
@@ -599,9 +613,15 @@ try {
 } finally {
   try { primary?.close(); } catch { /* zu */ }
   try { phone?.close(); } catch { /* zu */ }
+  await edgeSchliessen();
   aufraeumen();
   await waitTestImageGone('lataif.exe');
 }
+
+// Der Test-Browser ist zu — und mit ihm jeder Prozess seines Profils (nur gelesen, nichts beendet).
+const reste = await waitEdgeProfileGone(EDGE_PROFILE);
+ok(!edgeBrowserWs && reste === 0, `AUFRAEUMEN der Test-Browser ist geschlossen, kein Prozess seines Profils laeuft noch (${reste})`);
+MESS.aufraeumen = { browserZu: !edgeBrowserWs, reste };
 
 clearTimeout(WACHHUND);
 console.log('\n  MOBILE-PURCHASE                    Ergebnis');

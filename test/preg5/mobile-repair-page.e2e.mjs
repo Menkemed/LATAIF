@@ -14,6 +14,7 @@ import { readFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
+import { edgeBrowserEndpoint, closeEdge, waitEdgeProfileGone } from '../e2e/_e2e-browser.mjs';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const EDGE = existsSync('C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe')
@@ -22,6 +23,8 @@ const EDGE = existsSync('C:/Program Files (x86)/Microsoft/Edge/Application/msedg
 const CDP_PORT = 9300 + Math.floor(Math.random() * 600); // eigener Port je Lauf: nie an eine fremde/alte Sitzung geraten
 const RUN = join(os.tmpdir(), 'lataif-preg5-page', 'run-' + Date.now());
 const PROFILE = join(RUN, 'edge');
+// Edge wird ueber seine eigene Debug-Verbindung geschlossen — `edge.kill()` trifft nur das Startprogramm (`_e2e-browser.mjs`).
+let edgeWs = '', edgeRest = -1;
 
 let PASS = 0, FAIL = 0; const fails = [];
 const ok = (c, m) => { if (c) PASS++; else { FAIL++; fails.push(m); console.log('  x ' + m); } return !!c; };
@@ -181,6 +184,7 @@ try {
   }
   if (!seite) throw new Error('Edge kam nicht hoch');
   c = new CDP(seite.webSocketDebuggerUrl);
+  edgeWs = await edgeBrowserEndpoint(CDP_PORT);
   await c.send('Runtime.enable');
   await c.send('Log.enable').catch(() => {});
   await sleep(600);
@@ -476,10 +480,13 @@ try {
   if (c) console.log('      Konsole: ' + c.konsole.slice(-10).join(' ~ '));
 } finally {
   try { c?.close(); } catch { /* zu */ }
+  try { await closeEdge(edgeWs, CDP_PORT); } catch { /* egal */ }
   try { edge?.kill(); } catch { /* zu */ }
+  edgeRest = await waitEdgeProfileGone(PROFILE);
   try { server.close(); } catch { /* zu */ }
   try { rmSync(RUN, { recursive: true, force: true }); } catch { /* egal */ }
 }
+ok(edgeRest === 0, `AUFRAEUMEN kein Prozess des Test-Browsers laeuft noch (${edgeRest})`);
 
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — preg5 mobile repair page: ${PASS} passed, ${FAIL} failed`);
 if (FAIL > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }

@@ -12,6 +12,7 @@ import { readFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
+import { edgeBrowserEndpoint, closeEdge, waitEdgeProfileGone } from '../e2e/_e2e-browser.mjs';
 
 const repo = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const EDGE = existsSync('C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe')
@@ -20,6 +21,8 @@ const EDGE = existsSync('C:/Program Files (x86)/Microsoft/Edge/Application/msedg
 const CDP_PORT = 9400 + Math.floor(Math.random() * 500);
 const RUN = join(os.tmpdir(), 'lataif-preg5-consign', 'run-' + Date.now());
 const PROFILE = join(RUN, 'edge');
+// Edge wird ueber seine eigene Debug-Verbindung geschlossen — `edge.kill()` trifft nur das Startprogramm (`_e2e-browser.mjs`).
+let edgeWs = '', edgeRest = -1;
 
 let PASS = 0, FAIL = 0; const fails = [];
 const ok = (c, m) => { if (c) PASS++; else { FAIL++; fails.push(m); console.log('  x ' + m); } return !!c; };
@@ -214,6 +217,7 @@ try {
   }
   if (!seite) throw new Error('Edge kam nicht hoch');
   c = new CDP(seite.webSocketDebuggerUrl);
+  edgeWs = await edgeBrowserEndpoint(CDP_PORT);
   await c.send('Runtime.enable');
   await sleep(600);
   ok(await c.ev("return !!document.getElementById('cnSaveBtn') && typeof window.__cnHomeOpen === 'function';"),
@@ -851,9 +855,12 @@ try {
   console.log('  x Lauf abgebrochen: ' + (e && e.stack ? e.stack : e));
 } finally {
   if (c) { try { console.log(c.konsole.slice(-5).join('\n')); } catch { /* egal */ } c.close(); }
+  try { await closeEdge(edgeWs, CDP_PORT); } catch { /* egal */ }
   if (edge) { try { edge.kill(); } catch { /* egal */ } }
+  edgeRest = await waitEdgeProfileGone(PROFILE);
   server.close();
 }
+ok(edgeRest === 0, `AUFRAEUMEN kein Prozess des Test-Browsers laeuft noch (${edgeRest})`);
 
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — preg5 mobile consignment page: ${PASS} passed, ${FAIL} failed`);
 if (FAIL > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
