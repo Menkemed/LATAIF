@@ -101,33 +101,65 @@ pub fn rollback_to_prior(live: &Path, rollback: &Path) -> Result<(), MediaError>
 
 /// RESTORE-SAFETY — is the live installation missing something the set-aside state holds? Every database and
 /// the media folder in the set-aside state must exist in live (a `-wal`/`-shm` sidecar may legitimately be
-/// absent), and the live main database must pass `PRAGMA quick_check`. Returns the reason code, or `None`
-/// when live is complete.
+/// absent), and EVERY such live database — the main one AND the server one — must pass `PRAGMA quick_check`.
+/// Returns the reason code, or `None` when live is complete.
 fn live_incomplete_against(live: &Path, rollback: &Path) -> Option<&'static str> {
     let Ok(entries) = fs::read_dir(rollback) else { return Some("ROLLBACK_UNREADABLE") };
+    let mut databases = Vec::new();
     for e in entries.flatten() {
         let name = e.file_name().to_string_lossy().to_string();
-        if name.ends_with("-wal") || name.ends_with("-shm") || name == "archive.json" {
+        if name.ends_with("-wal") || name.ends_with("-shm") || name.ends_with("-journal") || name == "archive.json" {
             continue;
         }
         let here = live.join(&name);
-        let present = if e.path().is_dir() { here.is_dir() } else { fs::metadata(&here).map(|m| m.is_file() && m.len() > 0).unwrap_or(false) };
+        let is_dir = e.path().is_dir();
+        let present = if is_dir { here.is_dir() } else { fs::metadata(&here).map(|m| m.is_file() && m.len() > 0).unwrap_or(false) };
         if !present {
             return Some("LIVE_INCOMPLETE");
         }
+        if !is_dir {
+            databases.push(here);
+        }
     }
-    let front = live.join(super::restore_archive::FRONT_DB);
-    if front.exists() {
-        let ok = rusqlite::Connection::open_with_flags(&front, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX)
-            .ok()
-            .and_then(|c| c.query_row("PRAGMA quick_check", [], |r| r.get::<_, String>(0)).ok())
-            .map(|s| s == "ok")
-            .unwrap_or(false);
-        if !ok {
+    for db in &databases {
+        if !live_db_passes_quick_check(db) {
             return Some("LIVE_DB_DAMAGED");
         }
     }
     None
+}
+
+static CHECK_SEQ: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// `PRAGMA quick_check` on a COPY of the live database together with its committed sidecars (`-wal`, a
+/// rollback `-journal`), in a private temp folder: the check sees exactly what the app would open, and the
+/// live files are never opened, replayed or checkpointed. Any failure counts as damaged (fail-closed).
+fn live_db_passes_quick_check(db: &Path) -> bool {
+    let Some(name) = db.file_name().map(|n| n.to_string_lossy().to_string()) else { return false };
+    let dir = std::env::temp_dir().join(format!(
+        "lataif-restore-check-{}-{}",
+        std::process::id(),
+        CHECK_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    ));
+    let _ = fs::remove_dir_all(&dir);
+    if fs::create_dir_all(&dir).is_err() {
+        return false;
+    }
+    let ok = (|| -> Option<bool> {
+        fs::copy(db, dir.join(&name)).ok()?;
+        for suffix in ["-wal", "-journal"] {
+            let side = db.with_file_name(format!("{name}{suffix}"));
+            if side.exists() {
+                fs::copy(&side, dir.join(format!("{name}{suffix}"))).ok()?;
+            }
+        }
+        let c = rusqlite::Connection::open(dir.join(&name)).ok()?;
+        let r: String = c.query_row("PRAGMA quick_check", [], |r| r.get(0)).ok()?;
+        Some(r == "ok")
+    })()
+    .unwrap_or(false);
+    let _ = fs::remove_dir_all(&dir);
+    ok
 }
 
 /// Boot recovery. Returns `Ok` once the tree is a consistent whole (old or committed-new); returns `Err`

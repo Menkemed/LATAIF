@@ -244,6 +244,18 @@ async function main() {
   await click(c, '[data-testid="brp-ack-unknown"]');
   const em2 = await c.ev(`const b = document.querySelector('[data-testid="brp-confirm"]'); return { disabled: b.disabled, label: b.textContent.trim() };`);
   ok(!em2.disabled && em2.label === 'Restore without preview', `R3: only the deliberate tick enables the emergency restore (${S(em2)})`);
+  // …but the tick is UI only: with the WRONG owner password the server refuses — nothing is scheduled,
+  // nothing relaunches, nothing is written.
+  const pageBefore = c.pageId;
+  await click(c, '[data-testid="brp-confirm"]');
+  await waitFor(c, '[data-testid="brp-confirm-modal"] [data-testid="brp-error"]', 30000);
+  await sleep(3000);
+  const refused = await c.ev(`return document.querySelector('[data-testid="brp-confirm-modal"] [data-testid="brp-error"]').textContent;`);
+  ok(/Owner authorization failed/.test(refused), `R3: wrong password + tick → refused by the server (${S(refused)})`);
+  ok(!existsSync(join(APP_DATA_DIR, '.restore-intent')) && !existsSync(join(APP_DATA_DIR, 'restore-history.jsonl')),
+    'R3: no restore intent and no history entry were written');
+  const l2 = await (await fetch(`http://127.0.0.1:${CDP_PORT}/json/list`)).json();
+  ok(l2.some((t) => t.id === pageBefore) && (await c.ev('return !!window.__TAURI_INTERNALS__;')), 'R3: the app did not relaunch (same page alive)');
   await setVal(c, '[data-testid="brp-confirm-pw"]', OWNER_PW);
   const em3 = await c.ev(`return { disabled: document.querySelector('[data-testid="brp-confirm"]').disabled, box: !!document.querySelector('[data-testid="brp-unknown-box"]') };`);
   ok(em3.disabled && !em3.box, 'R3: a new password resets the preview and the tick');
@@ -259,7 +271,23 @@ async function main() {
   ok(lines.some((l) => l.tone === 'unknown' && /not compared/.test(l.text)), 'R3: preview — field changes said to be not compared');
   ok(!(await c.ev(`return document.querySelector('[data-testid="brp-confirm"]').disabled;`)), 'R3: confirm enabled after the preview');
 
-  // ── R4 · confirm → schedule → relaunch → boot restore ─────────────────────────────────────────────────────────
+  // The real emergency path: VALID owner password, but the preview fails technically. Tauri's IPC answers a
+  // command over `fetch(http://ipc.localhost/<cmd>)` and treats every response without `Tauri-Response: ok`
+  // as an error — so in THIS page only, that one command gets an error response; every other command,
+  // including the schedule, goes to the real backend.
+  ok(await c.ev(`const real = window.fetch.bind(window);
+    window.fetch = (url, init) => String(url).includes('preview_restore_snapshot')
+      ? Promise.resolve(new Response('SIMULATED_TECHNICAL_FAILURE', { status: 500, headers: { 'content-type': 'text/plain' } }))
+      : real(url, init);
+    return true;`), 'R3: the preview command is made to fail technically (this page only)');
+  await setVal(c, '[data-testid="brp-confirm-pw"]', OWNER_PW); // resets preview + tick
+  await click(c, '[data-testid="brp-preview"]');
+  await waitFor(c, '[data-testid="brp-unknown-box"]', 30000);
+  ok(await c.ev(`return document.querySelector('[data-testid="brp-confirm"]').disabled;`), 'R3: technical preview failure (valid password) → restore still disabled');
+  await click(c, '[data-testid="brp-ack-unknown"]');
+  ok((await c.ev(`return document.querySelector('[data-testid="brp-confirm"]').textContent.trim();`)) === 'Restore without preview', 'R3: the emergency restore after the deliberate tick');
+
+  // ── R4 · emergency confirm → schedule (server-authorized) → relaunch → boot restore ──────────────────────────
   const oldPage = c.pageId;
   await click(c, '[data-testid="brp-confirm"]');
   c.close();

@@ -372,11 +372,40 @@ fn s6b_an_orphan_set_aside_state_is_not_archived_when_live_is_incomplete() {
     assert!(recover(&app2).is_err(), "fail-closed on a damaged live database");
     assert!(app2.join(ROLLBACK).join(FRONT_DB).exists() && archives(&app2).is_empty());
     assert_eq!(events(&app2).into_iter().last().unwrap()["code"], "LIVE_DB_DAMAGED");
+    // the server database counts too: the live one damaged → kept, fail-closed
+    let (_b4, app4, _m4) = scenario();
+    std::fs::create_dir_all(app4.join(ROLLBACK)).unwrap();
+    std::fs::copy(app4.join("lataif_sync_server.db"), app4.join(ROLLBACK).join("lataif_sync_server.db")).unwrap();
+    std::fs::write(app4.join("lataif_sync_server.db"), vec![0x13u8; 4096]).unwrap();
+    assert!(recover(&app4).is_err(), "fail-closed on a damaged live server database");
+    assert!(app4.join(ROLLBACK).join("lataif_sync_server.db").exists() && archives(&app4).is_empty());
+    assert_eq!(events(&app4).into_iter().last().unwrap()["code"], "LIVE_DB_DAMAGED");
     // and the media folder: set aside, but missing in live
     let (_b3, app3, _m3) = scenario();
     std::fs::create_dir_all(app3.join(ROLLBACK)).unwrap();
     std::fs::rename(app3.join("media"), app3.join(ROLLBACK).join("media")).unwrap();
     assert!(recover(&app3).is_err() && app3.join(ROLLBACK).join("media").is_dir() && archives(&app3).is_empty(), "media kept in place");
+}
+
+#[test]
+fn s6c_a_healthy_live_server_db_in_wal_mode_is_checked_with_its_wal_and_left_untouched() {
+    // live server DB in WAL mode whose newest committed rows live ONLY in the -wal file: the check must see
+    // them (copy with sidecar), must not touch the live files, and the orphan set-aside state is archived
+    let (_b, app, _m) = scenario();
+    let src = app.join("wal-src");
+    std::fs::create_dir_all(&src).unwrap();
+    let conn = rusqlite::Connection::open(src.join("s.db")).unwrap();
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE s(x); INSERT INTO s VALUES('only-in-wal');").unwrap();
+    std::fs::copy(src.join("s.db"), app.join("lataif_sync_server.db")).unwrap();
+    std::fs::copy(src.join("s.db-wal"), app.join("lataif_sync_server.db-wal")).unwrap();
+    drop(conn);
+    let before = (std::fs::read(app.join("lataif_sync_server.db")).unwrap(), std::fs::read(app.join("lataif_sync_server.db-wal")).unwrap());
+    std::fs::create_dir_all(app.join(ROLLBACK)).unwrap();
+    std::fs::write(app.join(ROLLBACK).join("lataif_sync_server.db"), b"older server state").unwrap();
+    recover(&app).expect("a complete, healthy live installation → archive");
+    assert_eq!(archives(&app).len(), 1, "orphan archived");
+    let after = (std::fs::read(app.join("lataif_sync_server.db")).unwrap(), std::fs::read(app.join("lataif_sync_server.db-wal")).unwrap());
+    assert_eq!(before, after, "the live server DB and its WAL were never opened or checkpointed");
 }
 
 #[test]
