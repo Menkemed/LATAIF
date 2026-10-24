@@ -14,6 +14,7 @@ import { usePurchaseStore } from '@/stores/purchaseStore';
 import { canonicalStockStatus, isCapitalizedExpenseCategory } from '@/core/models/types';
 import { computeStockValuation, summarizeInventory, isOwnStockAsset } from '@/core/lots/lot-queries';
 import { bulkInventoryValuation } from '@/core/bulk/bulk-reads';
+import { effectiveMargin } from '@/core/reports/sales-metrics';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { currentBranchId } from '@/core/db/helpers';
 import type { Invoice, Customer, Product } from '@/core/models/types';
@@ -67,7 +68,7 @@ function toolTopCustomers(args: { period_days?: number; sort_by?: 'revenue' | 'm
   for (const inv of invoices) {
     const cur = agg.get(inv.customerId) || { revenue: 0, margin: 0, count: 0, open: 0 };
     cur.revenue += inv.grossAmount || 0;
-    cur.margin += inv.marginSnapshot || 0;
+    cur.margin += effectiveMargin(inv);   // PURCHASE-EDIT D1 — wirtschaftlich korrigiert
     cur.count += 1;
     cur.open += Math.max(0, (inv.grossAmount || 0) - (inv.paidAmount || 0));
     agg.set(inv.customerId, cur);
@@ -248,7 +249,7 @@ function toolMonthlyReview(args: { year?: number; month?: number }): AIBlock {
   const prev = allInvoices.filter(i => i.status !== 'DRAFT' && i.status !== 'CANCELLED' && inP(i.issuedAt || i.createdAt, prevStart, prevEnd));
 
   const sumGross = (xs: Invoice[]) => xs.reduce((s, i) => s + (i.grossAmount || 0), 0);
-  const sumMargin = (xs: Invoice[]) => xs.reduce((s, i) => s + (i.marginSnapshot || 0), 0);
+  const sumMargin = (xs: Invoice[]) => xs.reduce((s, i) => s + effectiveMargin(i), 0);
   const sumPaid = (xs: Invoice[]) => xs.reduce((s, i) => s + (i.paidAmount || 0), 0);
 
   const revenue = sumGross(cur);

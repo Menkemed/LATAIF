@@ -64,6 +64,7 @@ function partnerUrteil<T>(fn: () => T): T {
 }
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import type { HouseCtx } from '@/core/payables/payables-house';
+import { purchaseCancelBlocker } from '@/core/purchases/purchase-consumption';
 
 /** Die drei Buchungen dieses Bereichs — Maske (useSharedWrite) und Fernbefehl benutzen DIESE Namen. */
 export const PURCHASE_LIFECYCLE_OP = {
@@ -140,7 +141,7 @@ function statusOf(totalF: number, settledF: number): PurchaseStatus {
 }
 
 const creditPaidF = (purchaseId: string): number =>
-  F(query(`SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit'`, [purchaseId])[0]?.t);
+  F(query(`SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit' AND voided_at IS NULL`, [purchaseId])[0]?.t);
 
 /** Das Nein der Overpay-Helfer (Slice 4b) wird ein Nein DIESES Hauses — mit demselben Code. */
 function liveOrRedeemed<T>(fn: () => T): T {
@@ -760,6 +761,11 @@ export function cancelPurchaseInHouse(purchaseId: string, branchId: string, opts
     throw nein('PURCHASE_STOCK_SOLD',
       'Cannot cancel this purchase: items from it are already on an invoice. Return or cancel that sale first.');
   }
+  // Sperre 4 — PURCHASE-EDIT B5: die übrigen Wege, auf denen ein Stück das Los verließ oder seinen
+  // Einstand änderte (Agentenverkauf, Produktion, Bestandsabgang, aktivierte Reparaturkosten). Vorher
+  // reversierte der Storno auch dann den vollen Lagerzugang, und INVENTORY passte nicht mehr zu den Losen.
+  const verbraucht = purchaseCancelBlocker(purchaseId);
+  if (verbraucht) throw nein(verbraucht.code, verbraucht.message);
   // BULK METAL V1 — ein Bulk-Lot darf nur unbenutzt mit dem Einkauf storniert werden (6.5).
   assertBulkLotsOfPurchaseUnused(purchaseId);
 

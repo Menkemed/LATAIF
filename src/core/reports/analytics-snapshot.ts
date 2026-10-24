@@ -23,6 +23,7 @@ import { query } from '@/core/db/helpers';
 import { balanceOf } from '@/core/ledger/queries';
 import { computeSalesMetricsByCustomer } from '@/core/reports/sales-metrics';
 import { loadSalesData } from '@/core/reports/sales-metrics-loader';
+import { invoiceCostCorrectionSql } from '@/core/purchases/cost-correction-read';
 import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
 // BULK METAL V1 — Bulk-Wert als eigene Zeile im Lagerwert; Bestandsverlust als eigene Zeile beim Gewinn.
 import { bulkInventoryLossFils, bulkInventoryValuation } from '@/core/bulk/bulk-reads';
@@ -49,10 +50,12 @@ export function num(row: Record<string, unknown>, key: string): number {
 // Sales- und Finance-Block (vorher 2x identisch dupliziert). All-time (kein Period-Filter,
 // passend zur Analytics-Lifetime-Sicht). Regel deckt sich mit computeSalesMetrics.
 function finalRefundTotals(branchId: string): { cash: number; net: number; profit: number } {
+  // PURCHASE-EDIT D1 — der anteilige Gewinn einer Erstattung folgt dem korrigierten Einstand der Rechnung.
+  const corr = invoiceCostCorrectionSql();
   const rows = qry(
     `SELECT COALESCE(SUM(r.refund_paid_amount), 0)                                                  AS cash,
             COALESCE(SUM(r.refund_paid_amount * (i.net_amount      / NULLIF(i.gross_amount, 0))), 0)  AS net,
-            COALESCE(SUM(r.refund_paid_amount * (i.margin_snapshot / NULLIF(i.gross_amount, 0))), 0)  AS profit
+            COALESCE(SUM(r.refund_paid_amount * ((i.margin_snapshot - ${corr}) / NULLIF(i.gross_amount, 0))), 0)  AS profit
        FROM sales_returns r
        JOIN invoices i ON i.id = r.invoice_id
       WHERE i.branch_id = ? AND i.status = 'FINAL'`,
@@ -71,11 +74,11 @@ export function salesFor(ctx: BusinessReadContext) {
 
     // Invoices (non-cancelled)
     const invoices = qry(
-      `SELECT COUNT(*) as cnt, COALESCE(SUM(gross_amount),0) as gross,
-              COALESCE(SUM(net_amount),0) as net,
-              COALESCE(SUM(margin_snapshot),0) as profit,
-              COALESCE(SUM(purchase_price_snapshot),0) as cost
-       FROM invoices WHERE branch_id = ? AND status = 'FINAL'`,
+      `SELECT COUNT(*) as cnt, COALESCE(SUM(i.gross_amount),0) as gross,
+              COALESCE(SUM(i.net_amount),0) as net,
+              COALESCE(SUM(i.margin_snapshot - ${invoiceCostCorrectionSql()}),0) as profit,
+              COALESCE(SUM(i.purchase_price_snapshot + ${invoiceCostCorrectionSql()}),0) as cost
+       FROM invoices i WHERE i.branch_id = ? AND i.status = 'FINAL'`,
       [branchId]
     );
     const inv = invoices[0] || {};
@@ -228,11 +231,11 @@ export function financeFor(ctx: BusinessReadContext) {
     //  - Margin-VAT muss live aus invoice_lines berechnet werden:
     //    qty × max(0, unit_price − purchase_price) × vat_rate / (100 + vat_rate)
     const rev = qry(
-      `SELECT COALESCE(SUM(net_amount),0) as net,
-              COALESCE(SUM(gross_amount),0) as gross,
-              COALESCE(SUM(vat_amount),0) as stored_vat,
-              COALESCE(SUM(margin_snapshot),0) as profit
-       FROM invoices WHERE branch_id = ? AND status = 'FINAL'`,
+      `SELECT COALESCE(SUM(i.net_amount),0) as net,
+              COALESCE(SUM(i.gross_amount),0) as gross,
+              COALESCE(SUM(i.vat_amount),0) as stored_vat,
+              COALESCE(SUM(i.margin_snapshot - ${invoiceCostCorrectionSql()}),0) as profit
+       FROM invoices i WHERE i.branch_id = ? AND i.status = 'FINAL'`,
       [branchId]
     );
     // Per-Line MARGIN-VAT — über alle FINAL-Invoices, alle Lines mit tax_scheme='MARGIN'.
@@ -565,7 +568,7 @@ export function financeFor(ctx: BusinessReadContext) {
       const ppRows = qry(
         `SELECT pp.method, COALESCE(SUM(pp.amount),0) as total
          FROM purchase_payments pp JOIN purchases p ON p.id = pp.purchase_id
-         WHERE p.branch_id = ? AND p.status != 'CANCELLED'
+         WHERE p.branch_id = ? AND p.status != 'CANCELLED' AND pp.voided_at IS NULL
          GROUP BY pp.method`,
         [branchId]
       );

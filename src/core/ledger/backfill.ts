@@ -414,7 +414,7 @@ export function backfillPurchasePayments(branchId: string): BackfillResult {
   const rows = query(
     `SELECT pp.*, p.supplier_id
      FROM purchase_payments pp JOIN purchases p ON p.id = pp.purchase_id
-     WHERE p.branch_id = ?`,
+     WHERE p.branch_id = ? AND pp.voided_at IS NULL`,
     [branchId]
   );
   res.total = rows.length;

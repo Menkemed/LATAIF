@@ -2500,6 +2500,90 @@ function runMigrations(database: Database): void {
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_opening_accounts_count ON opening_account_items(branch_id, kind) WHERE status = 'RECORDED' AND kind IN ('CASH_BALANCE','BANK_BALANCE','BENEFIT_BALANCE')`,
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_opening_accounts_reference ON opening_account_items(branch_id, kind, reference_key) WHERE status = 'RECORDED' AND kind NOT IN ('CASH_BALANCE','BANK_BALANCE','BENEFIT_BALANCE')`,
     `CREATE INDEX IF NOT EXISTS idx_opening_accounts_counterparty ON opening_account_items(counterparty_type, counterparty_id)`,
+
+    // ── PURCHASE-EDIT — ein bestehender Einkauf wird bearbeitet (Owner-Entscheide D1–D14) ─────────────
+    // `created_product`: 1 = diese Einkaufszeile hat ihren Artikel angelegt (Einkaufspreis und -datum des
+    // Artikels gehören dann dem Einkauf, D13). NULL = Zeile von vor diesem Vertrag — Herkunft unbekannt,
+    // nichts wird deshalb gesperrt oder umgedeutet.
+    `ALTER TABLE purchase_lines ADD COLUMN created_product INTEGER`,
+    // B6 — der Auto-Einkauf beim Einlieferer kennt seine Kommission als Spalte, nicht nur im frei
+    // bearbeitbaren Vermerk. Bestand: einmalig aus dem Vermerk (dieselbe Suche wie die Kommissionsumkehr,
+    // dazu der Artikel der Zeile; bei mehreren Treffern die längste Nummer). Läuft bei jedem Start, ändert
+    // aber nur Zeilen ohne Wert.
+    `ALTER TABLE purchases ADD COLUMN source_consignment_id TEXT`,
+    `UPDATE purchases SET source_consignment_id = (
+        SELECT c.id FROM consignments c
+         WHERE c.branch_id = purchases.branch_id
+           AND purchases.notes LIKE '%' || c.consignment_number || '%'
+           AND EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = purchases.id AND pl.product_id = c.product_id)
+         ORDER BY LENGTH(c.consignment_number) DESC, c.id LIMIT 1)
+      WHERE source_consignment_id IS NULL AND notes LIKE 'Consignor payout%'
+        AND EXISTS (
+          SELECT 1 FROM consignments c
+           WHERE c.branch_id = purchases.branch_id
+             AND purchases.notes LIKE '%' || c.consignment_number || '%'
+             AND EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = purchases.id AND pl.product_id = c.product_id))`,
+    // D14 — eine falsch erfasste Zahlung wird storniert, nicht gelöscht: die Zeile bleibt mit Betrag, Weg und
+    // Datum stehen, trägt ihren Storno (wann, wer, warum), und ihre Buchung ist gegengebucht.
+    `ALTER TABLE purchase_payments ADD COLUMN voided_at TEXT`,
+    `ALTER TABLE purchase_payments ADD COLUMN voided_by TEXT`,
+    `ALTER TABLE purchase_payments ADD COLUMN void_reason TEXT`,
+    // Je Bearbeitung EINE Zeile mit Pflicht-Grund und vollem Vorher/Nachher (wie `invoice_edits`). Nur
+    // anfügen, nie ändern. Wie `vat_filings` nicht im Abgleichsvertrag: der Primary ist die Quelle.
+    `CREATE TABLE IF NOT EXISTS purchase_edits (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      purchase_id TEXT NOT NULL,
+      edit_no INTEGER NOT NULL,
+      reason TEXT NOT NULL,
+      kinds TEXT NOT NULL,
+      correction_kind TEXT,
+      old_snapshot TEXT NOT NULL,
+      new_snapshot TEXT NOT NULL,
+      edited_by TEXT,
+      edited_at TEXT NOT NULL
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_purchase_edits_purchase ON purchase_edits(purchase_id)`,
+    // D1 — die Einstandskorrektur eines schon verkauften Stücks: die Rechnung bleibt unverändert, die
+    // Korrektur hat ihren eigenen Beleg und ihre eigene Buchung (COST_CORRECTION). Zwei Daten: gebucht im
+    // offenen Zeitraum (`booking_date`), wirtschaftlich dem Verkauf zugeordnet (`economic_date`).
+    // `amount` = Differenz des Wareneinsatzes (negativ = Einstand gesunken). `vat_status` REVIEW = die
+    // mögliche VAT-Wirkung prüft der Buchhalter; nichts geht automatisch in eine Erklärung.
+    `CREATE TABLE IF NOT EXISTS cost_corrections (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      correction_number TEXT NOT NULL,
+      purchase_id TEXT NOT NULL,
+      purchase_line_id TEXT NOT NULL,
+      edit_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('ENTRY_ERROR')),
+      invoice_id TEXT NOT NULL,
+      invoice_line_id TEXT NOT NULL,
+      product_id TEXT,
+      quantity REAL NOT NULL,
+      old_unit_cost REAL NOT NULL,
+      new_unit_cost REAL NOT NULL,
+      unit_delta REAL NOT NULL,
+      amount REAL NOT NULL,
+      booking_date TEXT NOT NULL,
+      economic_date TEXT NOT NULL,
+      sale_tax_scheme TEXT,
+      vat_status TEXT NOT NULL DEFAULT 'REVIEW' CHECK (vat_status IN ('REVIEW')),
+      vat_estimate REAL NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','REVERSED')),
+      reversed_at TEXT,
+      reversed_reason TEXT,
+      created_at TEXT NOT NULL,
+      created_by TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_cost_corrections_invoice_line ON cost_corrections(invoice_line_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_cost_corrections_invoice ON cost_corrections(invoice_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_cost_corrections_purchase ON cost_corrections(purchase_id)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_cost_corrections_number ON cost_corrections(branch_id, correction_number)`,
+    // D7 — was die Rechnung über den Artikel druckt (Marke, Modell, SKU, Kategorie, Zustand, Merkmale), eingefroren in dem
+    // Moment, in dem jemand diese Angaben am Artikel ÄNDERT. NULL = nie geändert: der Druck liest weiter den Artikel (der
+    // dann ja noch genau so ist). So zeigt der Nachdruck einer alten Rechnung, was damals auf ihr stand.
+    `ALTER TABLE invoice_lines ADD COLUMN product_snapshot TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

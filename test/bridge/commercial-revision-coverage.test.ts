@@ -546,10 +546,11 @@ const ORDER = { customerId: 'cust-1', lines: [{ productId: 'p1', quantity: 1, un
   // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
   // STOCK CORRECTION (+3) blieb hier seit Phase 1 auf 114 stehen; OPENING BALANCES & SETTLEMENT (+3) → 120.
-  ok(known.length === 60 && reads.length === 19 && ALLOWED_MUTATIONS.length === 123,
+  // PURCHASE-EDIT (+3) → 126; die Einkaufsbearbeitung meldet sich in ihrem eigenen Modul an.
+  ok(known.length === 60 && reads.length === 19 && ALLOWED_MUTATIONS.length === 126,
     `SCOPE 1 Probe + 19 Reads + 40 Mutationen = 60 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
-  ok(!ALLOWED_MUTATIONS.includes('purchases.update'),
-    'SCOPE der Einkauf bleibt Create-only — es gibt keinen lokalen Edit-Pfad');
+  ok(ALLOWED_MUTATIONS.includes('purchases.update'),
+    'SCOPE der Einkauf hat EINE Bearbeitung (purchase-edit-commands, Pflicht-Fassung und -Grund)');
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3e final revision coverage: ${PASS} passed, ${fails.length} failed`);

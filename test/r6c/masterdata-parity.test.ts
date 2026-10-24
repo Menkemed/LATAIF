@@ -178,9 +178,9 @@ const MD_OPS = ['suppliers.create', 'suppliers.update', 'agents.update', 'partne
 // ══ §1 — Umfang, Registry, Rechte ═══════════════════════════════════════════
 {
   ok(MD_OPS.every((op) => registry.ALLOWED_MUTATIONS.includes(op)), 'SCOPE die sieben Stammdaten-Aktionen sind namentlich freigegeben');
-  ok(registry.ALLOWED_MUTATIONS.length === 123 && registry.ALLOWED_MUTATIONS.at(-21) === 'production.complete' && registry.ALLOWED_MUTATIONS.at(-20) === 'purchase_inbox.create' && registry.ALLOWED_MUTATIONS.at(-14) === 'partner_items.change_partners'
+  ok(registry.ALLOWED_MUTATIONS.length === 126 && registry.ALLOWED_MUTATIONS.at(-24) === 'production.complete' && registry.ALLOWED_MUTATIONS.at(-23) === 'purchase_inbox.create' && registry.ALLOWED_MUTATIONS.at(-17) === 'partner_items.change_partners'
     // BULK METAL V1
-    && registry.ALLOWED_MUTATIONS.at(-13) === 'bulk_metals.write_off' && registry.ALLOWED_MUTATIONS.at(-10) === 'bulk_metals.reverse_adjustment' && registry.ALLOWED_MUTATIONS.at(-8) === 'stock_adjustments.cancel' && registry.ALLOWED_MUTATIONS.at(-7) === 'stock_adjustments.add_old_stock',
+    && registry.ALLOWED_MUTATIONS.at(-16) === 'bulk_metals.write_off' && registry.ALLOWED_MUTATIONS.at(-13) === 'bulk_metals.reverse_adjustment' && registry.ALLOWED_MUTATIONS.at(-11) === 'stock_adjustments.cancel' && registry.ALLOWED_MUTATIONS.at(-10) === 'stock_adjustments.add_old_stock',
     `SCOPE 41 + 7 Stammdaten + 4 Inventur + 28 R6D + 8 R6E + 14 R6F + 1 R7A (production.complete) + 1 Posteingang + 6 PARTNER-ITEMS + 4 BULK METAL V1 = 114 Buchungen (${registry.ALLOWED_MUTATIONS.length})`);
   ok(MD_OPS.every((op) => registry.knownCommands().includes(op)), 'SCOPE und registriert');
   ok(MD_OPS.every((op) => op in perms.OPERATION_PERMISSIONS && perms.OPERATION_PERMISSIONS[op] === null),
@@ -193,7 +193,7 @@ const MD_OPS = ['suppliers.create', 'suppliers.update', 'agents.update', 'partne
   const rust = src('src-tauri/src/bridge.rs');
   const list = /pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '';
   const count = (list.match(/OP_[A-Z_]+/g) ?? []).length;
-  ok(count === 207 &&['OP_SUPPLIERS_CREATE', 'OP_SUPPLIERS_UPDATE', 'OP_AGENTS_UPDATE', 'OP_PARTNERS_CREATE', 'OP_PARTNERS_UPDATE', 'OP_EMPLOYEES_CREATE', 'OP_EMPLOYEES_UPDATE'].every((c) => list.includes(c)),
+  ok(count === 212 &&['OP_SUPPLIERS_CREATE', 'OP_SUPPLIERS_UPDATE', 'OP_AGENTS_UPDATE', 'OP_PARTNERS_CREATE', 'OP_PARTNERS_UPDATE', 'OP_EMPLOYEES_CREATE', 'OP_EMPLOYEES_UPDATE'].every((c) => list.includes(c)),
     `SCOPE Rust lässt dieselben Namen durch; Registry 108 → 121 (R6C) → 152 (R6D) → 160 (R6E) → 174 (R6F) → 175 (R7A) → 176 (PRE-G5) → 184 (MEDIA-INBOX, PARTNER-ITEMS, A5) → 192 (BULK METAL V1) (${count})`);
   const listener = src('src/core/bridge/bridge-listener.ts');
   ok(/import '\.\/masterdata-commands';/.test(listener) && /import '\.\/inventory-commands';/.test(listener), 'SCOPE der Renderer des Primary lädt beide Befehlsdateien');

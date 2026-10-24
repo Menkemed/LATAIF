@@ -43,8 +43,10 @@ function ok(c: unknown, m: string): void { if (c) PASS++; else { FAIL++; failure
   ok(/if \(!imagesDirty\) \{/.test(save), 'handleSave branches on imagesDirty');
   ok(/editProductWithMedia\(id, textPayload, \{ srcs:/.test(save), 'dirty branch calls editProductWithMedia with the reconcile args');
   const clean = save.slice(save.indexOf('if (!imagesDirty) {'), save.indexOf('// R4B — der Bildweg'));
-  ok(clean.length > 100 && /editProductTextDurably\(id, textPayload\)/.test(clean) && !/editProductWithMedia\(/.test(clean),
-    'clean branch calls editProductTextDurably (no gallery args)');
+  // PURCHASE-EDIT D7 — der Textweg trägt optional den Bearbeitungsgrund (`{ editReason }`), nie Galerie-Argumente.
+  ok(clean.length > 100 && /editProductTextDurably\(id, textPayload(\)|, editReason\.trim\(\) \? \{ editReason: editReason\.trim\(\) \} : undefined\))/.test(clean)
+    && !/editProductWithMedia\(|srcs:/.test(clean),
+    'clean branch calls editProductTextDurably (no gallery args; optional edit reason only)');
   // The text-only call passes NO srcs/resolved/status — it cannot reconcile.
   ok(!/editProductTextDurably\([^)]*srcs/.test(save), 'editProductTextDurably is never handed a gallery/srcs argument');
   ok(/setImagesDirty\(false\);\s*\n\s*setDraftSeeded\(false\);\s*\n\s*setEditing\(false\)/.test(save), 'a successful save resets BOTH the dirty flag and the seed proof');

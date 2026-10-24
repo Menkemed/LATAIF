@@ -226,12 +226,19 @@ export interface ProductUpdateRequest {
    * allein — kein Textfeld, keine Galerie daneben.
    */
   confirmAi?: true;
+  /** PURCHASE-EDIT D7 — die Begründung, wenn ein verkaufter Artikel seine Druckangaben ändert. */
+  editReason?: string;
 }
 
 export function parseProductUpdate(raw: unknown): ProductUpdateRequest {
   if (!isPlain(raw)) throw new ProductPayloadError('payload must be an object');
-  const { id, gallery, aiConfirmedAt, ...rest } = raw as { id?: unknown; gallery?: unknown; aiConfirmedAt?: unknown };
+  const { id, gallery, aiConfirmedAt, editReason, ...rest } = raw as { id?: unknown; gallery?: unknown; aiConfirmedAt?: unknown; editReason?: unknown };
   if (typeof id !== 'string' || !id.trim()) throw new ProductPayloadError('id is required');
+  // PURCHASE-EDIT D7 — die Begründung, wenn ein schon verkaufter Artikel seine Druckangaben ändert (das Haus verlangt sie).
+  if (editReason !== undefined && (typeof editReason !== 'string' || editReason.length > 500)) {
+    throw new ProductPayloadError('editReason must be text (at most 500 characters)');
+  }
+  const reason = typeof editReason === 'string' && editReason.trim() ? editReason.trim() : undefined;
   if (aiConfirmedAt !== undefined) {
     if (aiConfirmedAt !== true) {
       throw new ProductPayloadError('aiConfirmedAt is a confirmation (true) — the primary stamps the time, not the client');
@@ -248,7 +255,7 @@ export function parseProductUpdate(raw: unknown): ProductUpdateRequest {
 
   if (gallery === undefined || gallery === null) {
     if (Object.keys(out).length === 0) throw new ProductPayloadError('nothing to change');
-    return { id, fields: out };
+    return { id, fields: out, ...(reason ? { editReason: reason } : {}) };
   }
   if (!Array.isArray(gallery)) throw new ProductPayloadError('gallery must be a list of slots');
   if (gallery.length > MAX_REMOTE_IMAGES) throw new ProductPayloadError(`at most ${MAX_REMOTE_IMAGES} images`);
@@ -278,7 +285,7 @@ export function parseProductUpdate(raw: unknown): ProductUpdateRequest {
     }
     throw new ProductPayloadError('a gallery slot is either { keep } or { stagingId }');
   }
-  return { id, fields: out, gallery: slots };
+  return { id, fields: out, gallery: slots, ...(reason ? { editReason: reason } : {}) };
 }
 
 /** Typ-Alias aus demselben Grund wie beim Kunden: als `CommandResult` herausgegeben. */
@@ -472,7 +479,7 @@ export async function runProductUpdate(
   raw: unknown,
   extras: ProductEngineExtras = {},
 ): Promise<CommandOutcome> {
-  const { id, fields: patch, gallery, confirmAi } = parseProductUpdate(raw);
+  const { id, fields: patch, gallery, confirmAi, editReason } = parseProductUpdate(raw);
   const readStaged = extras.readStaged ?? invokeReadStaged;
   const discard = extras.discardStaged ?? invokeDiscardStaged;
   const readGallery = extras.readGallery ?? resolveGallery;
@@ -521,7 +528,7 @@ export async function runProductUpdate(
         patch as never,
         // Dieselbe Preissperre wie beim Handy, in derselben Transaktion geprüft. Ein Fernauftrag ist
         // kein Grund, sie zu überspringen — im Gegenteil.
-        { priceEligibilityRequired: true },
+        { priceEligibilityRequired: true, ...(editReason ? { editReason } : {}) },
         { alreadySerialised: true },
       )
       : await store.editProductWithMedia(
@@ -531,7 +538,7 @@ export async function runProductUpdate(
         undefined,
         { alreadySerialised: true },
         // …und dieselbe Preissperre. Ein Bild mitzuschicken darf kein Weg sein, an ihr vorbeizukommen.
-        { priceEligibilityRequired: true },
+        { priceEligibilityRequired: true, ...(editReason ? { editReason } : {}) },
       );
 
     if (result.status === 'blocked') {

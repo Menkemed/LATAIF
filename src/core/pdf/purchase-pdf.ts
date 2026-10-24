@@ -102,11 +102,13 @@ export function generatePurchasePdfHtml(opts: PurchasePdfOptions): string {
     </tr>`;
   }).join('');
 
-  const paymentsHtml = purchase.payments.length === 0 ? '' : `
+  // PURCHASE-EDIT D14 — eine stornierte Zahlung steht nicht auf dem Beleg (sie zählt nicht; der Verlauf bleibt in der App).
+  const livePayments = purchase.payments.filter(p => !p.voidedAt);
+  const paymentsHtml = livePayments.length === 0 ? '' : `
     <div style="margin-top:18px">
       <div style="font-size:10px;color:#888;text-transform:uppercase;letter-spacing:0.08em;font-weight:600;margin-bottom:6px">Payments</div>
       <table style="width:100%;border-collapse:collapse;font-size:11px">
-        ${purchase.payments.map(p => `<tr style="border-bottom:1px solid #eee">
+        ${livePayments.map(p => `<tr style="border-bottom:1px solid #eee">
           <td style="padding:6px 4px;color:#333">${escapeHtml(p.paidAt)}</td>
           <td style="padding:6px 4px;color:#666;text-transform:uppercase;font-size:10px">${escapeHtml(p.method)}</td>
           <td style="padding:6px 4px;color:#666">${p.reference ? `Ref: ${escapeHtml(p.reference)}` : ''}</td>

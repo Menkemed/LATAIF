@@ -181,6 +181,10 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   'stock_adjustments.correct_initial',
   // B1 OPENING ACCOUNTING — Eröffnungsbelege der übrigen Saldoarten erfassen/ersetzen und stornieren (nur Owner; keine Buchung).
   'opening_accounts.create', 'opening_accounts.cancel',
+  // PURCHASE-EDIT — einen bestehenden Einkauf bearbeiten (D1–D14): Notiz/Mitarbeiter/Ausweisfoto nach den Rechten des
+  // Einkaufs, die Finanzkorrektur (Datum, Lieferant, Preise, Mengen, Einstandskorrektur verkaufter Stücke) und das
+  // Stornieren einer falsch erfassten Zahlung nur Owner/Admin. Dieselbe Hausfolge am Primary, Pflicht-Fassung und -Grund.
+  'purchases.update', 'purchases.correct', 'purchases.void_payment',
 ];
 
 export interface CommandSpec {

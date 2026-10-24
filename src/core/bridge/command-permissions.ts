@@ -231,6 +231,12 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'purchases.return_to_supplier': null,
   'purchases.cancel': null,
   'purchases.dismiss_inbox': null,
+  // PURCHASE-EDIT D11 — Notiz, Mitarbeiter, Ausweisfoto nach den bestehenden Einkaufsrechten (kein Tor, wie
+  // `purchases.create`); die Finanzkorrektur und das Stornieren einer Zahlung nur der Owner (`perm.isOwner`) —
+  // dieselbe Regel blendet die Maske am Primary ein.
+  'purchases.update': null,
+  'purchases.correct': owner('PurchaseDetail Edit: perm.isOwner (date, supplier, prices, quantities)'),
+  'purchases.void_payment': owner('PurchaseDetail: perm.isOwner (void a payment)'),
   // MEDIA-INBOX — dasselbe Recht wie das Anlegen eines Einkaufs: wer einkaufen darf, darf ein Foto
   // in den Posteingang legen. Am Telefon gibt es keine Maske, die ein eigenes Recht prüfen könnte;
   // die Rolle des geprüften Absenders entscheidet.

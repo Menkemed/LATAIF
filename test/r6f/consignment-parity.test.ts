@@ -718,6 +718,40 @@ marker('CENTRAL_UI_R6F_CONSIGNMENT_CANCEL_SALE_PARITY_PROVED');
 }
 marker('CENTRAL_UI_R6F_CONSIGNMENT_CANCEL_SALE_STATE_PROVED');
 
+// ══ §7b — PURCHASE-EDIT B6: Altbestand ohne Kommissions-Spalte — keine Verknüpfung geht verloren ═══
+{
+  const payout = (db: Db): string => s(db, "SELECT id FROM purchases WHERE notes LIKE 'Consignor payout%'");
+  const spalte = (db: Db, pid: string): string => s(db, 'SELECT COALESCE(source_consignment_id, \'\') FROM purchases WHERE id = ?', [pid]);
+  // (a) Wie vor dem Update: die Spalte gab es nicht, der Auszahlungs-Einkauf trägt die Kommission nur im Vermerk.
+  for (const weg of ['primary', 'fern'] as const) {
+    const w = await welt();
+    const pur = payout(w.db);
+    ok(spalte(w.db, pur) === w.cid, `B6 neu angelegt (${weg}): die Spalte trägt die Kommission`);
+    w.db.run('UPDATE purchases SET source_consignment_id = NULL WHERE id = ?', [pur]);
+    const aus = await storno(weg, w);
+    ok(aus.ok && Number(aus.value.cancelledPurchases) === 1 && s(w.db, 'SELECT status FROM purchases WHERE id = ?', [pur]) === 'CANCELLED',
+      `B6 Altbestand ohne Spalte (${weg}): „Cancel Sale" findet den Einkauf weiter über den Vermerk (${aus.code || 'ok'})`);
+    nachStorno(w, `Altbestand ohne Spalte (${weg})`);
+  }
+  // (b) Erster Start nach dem Update: der Nachtrag macht aus dem Vermerk die Spalte. Danach hängt die
+  //     Verknüpfung nicht mehr am Text — eine später geänderte Notiz bricht sie nicht.
+  const w = await welt();
+  const pur = payout(w.db);
+  w.db.run('UPDATE purchases SET source_consignment_id = NULL WHERE id = ?', [pur]);
+  const nachtrag = MIGRATIONS.find((m) => m.includes('UPDATE purchases SET source_consignment_id'));
+  ok(!!nachtrag, 'B6 der Nachtrag steht in den Migrationen (läuft bei jedem Start, nur für Zeilen ohne Wert)');
+  w.db.run(nachtrag!);
+  ok(spalte(w.db, pur) === w.cid, 'B6 Nachtrag: die Spalte steht aus dem Vermerk');
+  w.db.run(nachtrag!);
+  ok(spalte(w.db, pur) === w.cid, 'B6 Nachtrag zweimal: unverändert (idempotent)');
+  w.db.run("UPDATE purchases SET notes = 'vom Owner umgeschrieben' WHERE id = ?", [pur]);
+  const aus = await storno('primary', w);
+  ok(aus.ok && Number(aus.value.cancelledPurchases) === 1 && s(w.db, 'SELECT status FROM purchases WHERE id = ?', [pur]) === 'CANCELLED',
+    `B6 nach dem Nachtrag: auch mit geänderter Notiz gefunden und storniert (${aus.code || 'ok'})`);
+  nachStorno(w, 'nach dem Nachtrag mit geänderter Notiz');
+}
+marker('PURCHASE_EDIT_B6_LEGACY_CONSIGNMENT_PROVED');
+
 // ══ §8 — Storno: Wiederholung, Fassung, Sperren, Autorität ════════════════════
 {
   // Verlorene Antwort

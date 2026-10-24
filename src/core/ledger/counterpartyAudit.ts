@@ -199,7 +199,7 @@ function domainApMap(run: SqlRunner, branchId: string): FilsMap {
     [branchId], 1, bhd);
   accumulate(run,
     `SELECT COALESCE(pu.supplier_id,'') AS cid, COALESCE(SUM(MIN(pp.paid,pu.total_amount)),0) AS t
-     FROM (SELECT purchase_id, SUM(amount) AS paid FROM purchase_payments GROUP BY purchase_id) pp
+     FROM (SELECT purchase_id, SUM(amount) AS paid FROM purchase_payments WHERE voided_at IS NULL GROUP BY purchase_id) pp
      JOIN purchases pu ON pu.id=pp.purchase_id
      WHERE pu.branch_id=? AND pu.status!='CANCELLED' GROUP BY cid`,
     [branchId], -1, bhd);

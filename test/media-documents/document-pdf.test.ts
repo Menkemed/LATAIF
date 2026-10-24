@@ -77,7 +77,7 @@ const metalCmd = await import('../../src/core/bridge/metal-commands.ts');
 const commercial = await import('../../src/core/bridge/commercial-commands.ts');
 const inboxMedia = await import('../../src/core/purchases/inbox-media.ts');
 const lifecycleHouse = await import('../../src/core/purchases/purchase-lifecycle-house.ts');
-const lifecycleCmd = await import('../../src/core/bridge/purchase-lifecycle-commands.ts');
+const lifecycleCmd = await import('../../src/core/bridge/purchase-lifecycle-commands.ts'); await import('../../src/core/bridge/purchase-edit-commands.ts');
 const registry = await import('../../src/core/bridge/command-registry.ts');
 const perms = await import('../../src/core/bridge/command-permissions.ts');
 const pageReads = await import('../../src/core/data/page-reads.ts');
@@ -423,11 +423,11 @@ async function hochladen(db: Db, nr: string, bytes: Uint8Array, extra: Record<st
   ok(!/filePath.*data:|createObjectURL\(new Blob\(\[.*base64/.test(dl), '§3 …und legt nirgends eine dauerhafte Daten-URL an');
 
   // §3 Der Registry-Umfang bleibt: kein neuer Fernbefehl, dieselbe Buchung.
-  ok(registry.ALLOWED_MUTATIONS.length === 123 && registry.ALLOWED_MUTATIONS.includes('documents.upload')
+  ok(registry.ALLOWED_MUTATIONS.length === 126 && registry.ALLOWED_MUTATIONS.includes('documents.upload')
     && !registry.ALLOWED_MUTATIONS.includes('documents.replace'),
   `§18 kein neuer Fernbefehl — der Beleg nutzt die vorhandene Buchung (116 mit PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${registry.ALLOWED_MUTATIONS.length})`);
   const rl = src('src-tauri/src/bridge.rs');
-  ok((/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rl)?.[1].match(/OP_[A-Z_]+/g) ?? []).length === 207,
+  ok((/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rl)?.[1].match(/OP_[A-Z_]+/g) ?? []).length === 212,
     '§18 …und die Registry steht bei 195 (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION)');
 
   // §3 Der Rohweg von PC2 trägt seine EIGENE Grenze — vor dem Handler.

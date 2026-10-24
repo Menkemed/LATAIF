@@ -21,6 +21,7 @@ import { query } from '@/core/db/helpers';
 import type { BusinessReadContext } from '@/core/data/read-context';
 import { productDisplayName } from '../products/display-name.ts';
 import { INVOICE_COMPANY_KEYS, invoiceCompany, type InvoiceA5Company } from '@/core/pdf/invoice-a5';
+import { purchaseBoundOf } from '@/core/products/purchase-bound';
 
 const s = (v: unknown): string => (v as string) ?? '';
 const n = (v: unknown): number => Number(v ?? 0) || 0;
@@ -267,7 +268,7 @@ export function supplierDetailReadsFor(ctx: BusinessReadContext, supplierId: str
   const payRows = query(
     `SELECT pp.id, pp.amount, pp.method, pp.paid_at, pp.reference, p.purchase_number
        FROM purchase_payments pp JOIN purchases p ON p.id = pp.purchase_id
-      WHERE p.supplier_id = ? AND p.branch_id = ?
+      WHERE p.supplier_id = ? AND p.branch_id = ? AND pp.voided_at IS NULL
       ORDER BY pp.paid_at DESC`,
     [supplierId, ctx.branchId],
   );
@@ -328,9 +329,11 @@ export interface ProductDetailReads {
     counterpart: Array<{ productId: string; label: string; value: number }>;
   }>;
   provenance: { supplier: string | null; paidFrom: string | null };
+  /** PURCHASE-EDIT D13 — der Einkauf, dem Einkaufspreis und -datum gehören (dort zu korrigieren), oder null. */
+  purchaseBound?: { purchaseId: string; purchaseNumber: string } | null;
 }
 
-const LEER_PRODUCT_DETAIL: ProductDetailReads = { sales: [], purchases: [], production: [], provenance: { supplier: null, paidFrom: null } };
+const LEER_PRODUCT_DETAIL: ProductDetailReads = { sales: [], purchases: [], production: [], provenance: { supplier: null, paidFrom: null }, purchaseBound: null };
 
 export function productDetailReadsFor(ctx: BusinessReadContext, productId: string): ProductDetailReads {
   // Zuerst die Frage, wem der Artikel gehört. Gehört er nicht hierher, gibt es nichts —
@@ -430,7 +433,7 @@ export function productDetailReadsFor(ctx: BusinessReadContext, productId: strin
        FROM stock_lots sl
        LEFT JOIN purchases p ON p.id = sl.purchase_id
        LEFT JOIN suppliers s ON s.id = p.supplier_id
-       LEFT JOIN purchase_payments pp ON pp.purchase_id = sl.purchase_id
+       LEFT JOIN purchase_payments pp ON pp.purchase_id = sl.purchase_id AND pp.voided_at IS NULL
       WHERE sl.product_id = ? AND sl.branch_id = ? AND sl.status != 'CANCELLED'`,
     [productId, ctx.branchId],
   );
@@ -457,6 +460,7 @@ export function productDetailReadsFor(ctx: BusinessReadContext, productId: strin
         ? methods.map((m) => (m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : m)).join(', ')
         : null,
     },
+    purchaseBound: purchaseBoundOf(productId),
   };
 }
 

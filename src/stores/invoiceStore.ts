@@ -8,6 +8,7 @@ import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment 
 import { trackChange } from '@/core/sync/sync-service';
 import { assertLotLessStockAvailable, assertNoLegacyLotLessLines, giveBackStock, hasLotHistory, invoiceStockLines, isWholePieceQuantity, movesPieceStock, PIECE_QUANTITY_NOT_WHOLE, releaseLegacyDeduction, takeStock } from '@/core/lots/stock-contract';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
+import { correctedLinesOf, costCorrectionsByInvoice, costCorrectionsByLine, reverseCostCorrectionsOfInvoice } from '@/core/purchases/cost-correction';
 // CONSIGNMENT-INTEGRITY F7 — Kommissionsware nur über „Record Sale“ (dessen Erlaubnis gilt nur für seinen Artikel).
 import { assertConsignmentSaleInvoiceEdit, assertNoConsignmentGoods, assertNotConsignmentSaleInvoice } from '@/core/consignment/consignment-sale-link';
 import { consumeLot, restoreLot, syncProductQuantity, reserveProductIfDepleted, unreserveProductIfRestored, reconcileSaleStatus, assertLotsConsumable, assertLotTrackedLinesResolved, assertProductsSellable } from '@/core/lots/lot-queries';
@@ -236,6 +237,12 @@ function rowToLine(row: Record<string, unknown>): InvoiceLine {
     bulkType: (row.bulk_type as string | null) ?? null,
     bulkLotNo: row.bulk_weight_mg === null || row.bulk_weight_mg === undefined || !row.lot_id ? null
       : ((query('SELECT lot_no FROM stock_lots WHERE id = ?', [row.lot_id])[0]?.lot_no as string | undefined) ?? null),
+    // D7 — die beim Ändern des Artikels eingefrorenen Druckangaben (sonst liest der Druck den Artikel).
+    productSnapshot: (() => {
+      const raw = row.product_snapshot;
+      if (typeof raw !== 'string' || !raw) return null;
+      try { const s = JSON.parse(raw); return s && typeof s === 'object' ? s : null; } catch { return null; }
+    })(),
   };
 }
 
@@ -608,6 +615,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           if (!hasLedgerEntries('INVOICE', id)) return;     // nie gepostet → nichts zu reverten
           if (hasReversalFor('INVOICE', id)) return;        // bereits storniert
           postInvoiceCancelled({ id } as Invoice);
+          // PURCHASE-EDIT D1 — die Einstandskorrekturen dieser Rechnung gehen mit (das Stück kehrt zum
+          // berichtigten Einstand ins Los zurück; ohne Gegenbuchung bliebe die Differenz im Lager stehen).
+          reverseCostCorrectionsOfInvoice(id, now, 'invoice cancelled');
         });
         // L2 — full-unwind: bei direktem Status-Cancel OHNE Refund-Return (z.B.
         // consignmentStore.cancelSale mit bereits bezahlter Buyer-Invoice) auch die
@@ -740,6 +750,22 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         description: it.description || String(query('SELECT description FROM invoice_lines WHERE id = ?', [b.id])[0]?.description ?? '') };
     });
     assertEditKeepsReturns(id, baseLines, lines, lineMatch);
+    // PURCHASE-EDIT D1 — eine Zeile mit Einstandskorrektur behält ihre Menge: die Korrektur gilt genau ihren
+    // verkauften Stücken (Einstand, Lager und Wareneinsatz stimmen nur so). Entfernen oder eine andere Menge
+    // geht über Storno (die Korrektur geht dann mit) und eine neue Rechnung. Preis und alles andere bleiben frei.
+    const costCorrected = correctedLinesOf(id);
+    if (costCorrected.size > 0) {
+      const keptQty = new Map<string, number>();
+      lines.forEach((l, i) => { const b = lineMatch[i]; if (b) keptQty.set(b, Math.max(1, Number(l.quantity) || 1)); });
+      for (const lid of costCorrected) {
+        const base = baseById.get(lid);
+        const q = keptQty.get(lid);
+        if (!base || q === undefined || q !== Math.max(1, Number(base.qty) || 1)) {
+          throw new InvoiceActionRejected('INVOICE_LINE_COST_CORRECTED',
+            'A line of this invoice carries a cost correction from a purchase edit — its item and quantity stay. Cancel the invoice to change them.');
+        }
+      }
+    }
 
     const deltaAmount = deltaPayment && deltaPayment.amount > 0.005 ? deltaPayment.amount : 0;
 
@@ -1617,6 +1643,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       if (!hasLedgerEntries('INVOICE', id)) return;
       if (hasReversalFor('INVOICE', id)) return;
       postInvoiceCancelled({ id } as Invoice);
+      // PURCHASE-EDIT D1 — die Einstandskorrekturen gehen mit (Beleg bleibt als REVERSED stehen).
+      reverseCostCorrectionsOfInvoice(id, new Date().toISOString(), 'invoice deleted');
     });
     for (const er of linkedExpenses) {
       const expId = er.id as string;
@@ -2012,10 +2040,18 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
  */
 export function loadInvoicesFor(ctx: BusinessReadContext): { invoices: Invoice[] } {
   const rows = query('SELECT * FROM invoices WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  // PURCHASE-EDIT D1 — die Einstandskorrekturen in EINER Abfrage je Ebene (die Liste bleibt eine Liste).
+  const corrByInvoice = costCorrectionsByInvoice();
+  const corrByLine = corrByInvoice.size > 0 ? costCorrectionsByLine() : new Map<string, number>();
   const invoices = rows.map((r) => {
     const inv = rowToInvoice(r);
     const lineRows = query('SELECT * FROM invoice_lines WHERE invoice_id = ? ORDER BY position', [inv.id]);
     inv.lines = lineRows.map(rowToLine);
+    const c = corrByInvoice.get(inv.id);
+    if (c) {
+      inv.costCorrection = c;
+      for (const l of inv.lines) { const lc = corrByLine.get(l.id); if (lc) l.costCorrection = lc; }
+    }
     return inv;
   });
   return { invoices };

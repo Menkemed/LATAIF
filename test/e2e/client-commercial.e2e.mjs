@@ -568,7 +568,7 @@ try {
     'NUMBERING and every item still has its own SKU');
 
   // ── 8) Was NICHT freigegeben ist, erreicht nichts ───────────────────────
-  for (const op of ['purchases.update', 'orders.delete', 'consignments.record_sale']) {
+  for (const op of ['purchases.delete', 'orders.delete', 'consignments.record_sale']) {
     const r = await post(op, {});
     const b = await r.json().catch(() => ({}));
     ok(!r.ok || b.ok === false, `CLOSED ${op} is refused (${r.status} ${S(b).slice(0, 80)})`);

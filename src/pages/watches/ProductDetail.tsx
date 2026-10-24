@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useParams, useNavigate } from 'react-router-dom';
+import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, Edit3, Package, Trash2, Save, Tag, Sparkles, AlertTriangle, ChevronDown, BarChart3, PieChart, Receipt, Factory } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
@@ -61,6 +61,12 @@ export function ProductDetail() {
   const { purchases, loadPurchases } = usePurchaseStore();
   const { repairs, loadRepairs } = useRepairStore();
   const [editing, setEditing] = useState(false);
+  // PURCHASE-EDIT D13 — „Edit item" aus der Einkaufsbearbeitung öffnet die Maske direkt und führt dorthin zurück.
+  const [searchParams] = useSearchParams();
+  const fromPurchase = searchParams.get('fromPurchase');
+  // D7 — die Begründung, wenn ein schon verkaufter Artikel seine Druckangaben ändert (das Haus verlangt sie).
+  const [editReason, setEditReason] = useState('');
+  const [reasonAsked, setReasonAsked] = useState(false);
   // CENTRAL-UI-PARITY R4B — dieselbe Maske, zwei Anschluesse hinter dem Speichern.
   const aendern = useSharedWrite<EditProductResult>('products.update');
   // CENTRAL-UI-PARITY R6B — „KI-Identifikation bestätigen": eine eigene Absicht auf derselben
@@ -141,6 +147,16 @@ export function ProductDetail() {
   );
 
   const product = useMemo(() => products.find(p => p.id === id), [products, id]);
+
+  // PURCHASE-EDIT D13 — `?edit=1` (aus „Edit item" der Einkaufsbearbeitung) öffnet die Maske einmal, sauber wie der Knopf.
+  const autoEditDone = useRef(false);
+  useEffect(() => {
+    if (searchParams.get('edit') !== '1' || !product || !perm.canEditProducts || autoEditDone.current) return;
+    autoEditDone.current = true;
+    setImagesDirty(false);
+    setDraftSeeded(false);
+    setEditing(true);
+  }, [searchParams, product, perm.canEditProducts]);
 
   // ── MEDIA-04A-3B1: geordnete Galerie aus dem read-only Resolver ──
   // Autorisierter Scope: branchId aus der Session (der productStore lädt
@@ -423,12 +439,16 @@ export function ProductDetail() {
       const diff = updatePayload(product as unknown as Record<string, unknown>, textPayload as Record<string, unknown>, PRODUCT_UPDATE_FIELDS);
       if (aendern.remote && Object.keys(diff).length === 0) { setEditing(false); return; }
       const r = await aendern.save({
-        local: async () => await editProductTextDurably(id, textPayload),
-        remote: () => ({ id, ...diff }),
+        local: async () => await editProductTextDurably(id, textPayload, editReason.trim() ? { editReason: editReason.trim() } : undefined),
+        remote: () => ({ id, ...diff, ...(editReason.trim() ? { editReason: editReason.trim() } : {}) }),
         shape: () => ({ status: 'edited' } as EditProductResult),
       });
       if (!mountedRef.current || idRef.current !== startId) return;
-      if (r.kind !== 'ok') { setErrors(e => ({ ...e, _save: fehlertext(r) })); return; }
+      if (r.kind !== 'ok') {
+        if ('code' in r && r.code === 'PRODUCT_EDIT_REASON_REQUIRED') setReasonAsked(true);
+        setErrors(e => ({ ...e, _save: fehlertext(r) }));
+        return;
+      }
       const lokal = r.value as EditProductResult;
       if (lokal.status === 'edited') {
         setMediaReloadNonce(n => n + 1);
@@ -439,6 +459,7 @@ export function ProductDetail() {
         return;
       }
       if (lokal.status === 'cutover_reload') { setMediaReloadNonce(n => n + 1); return; }
+      if (lokal.status === 'blocked' && lokal.errorCode === 'PRODUCT_EDIT_REASON_REQUIRED') setReasonAsked(true);
       setErrors(e => ({ ...e, _media: ('message' in lokal && lokal.message) || lokal.errorCode }));
       return;
     }
@@ -478,8 +499,9 @@ export function ProductDetail() {
     const resolved = media.status === 'media' ? media.items.map(i => ({ url: i.url, mediaId: i.mediaId })) : [];
     const textDiff = updatePayload(product as unknown as Record<string, unknown>, textPayload as Record<string, unknown>, PRODUCT_UPDATE_FIELDS);
     const r = await aendern.save({
-      local: async () => await editProductWithMedia(id, textPayload, { srcs: form.images || [], resolved, status }),
-      remote: () => ({ id, ...textDiff, gallery }),
+      local: async () => await editProductWithMedia(id, textPayload, { srcs: form.images || [], resolved, status }, undefined, undefined,
+        editReason.trim() ? { editReason: editReason.trim() } : undefined),
+      remote: () => ({ id, ...textDiff, gallery, ...(editReason.trim() ? { editReason: editReason.trim() } : {}) }),
       shape: () => ({ status: 'edited' } as EditProductResult),
     });
     // Stale-save guard: the user navigated to another product or the view
@@ -514,6 +536,7 @@ export function ProductDetail() {
     // blocked / incomplete / conflict → NO refresh; editor stays OPEN, draft
     // intact, and a retry reuses the SAME frozen batch (typed conflict if the
     // draft changed under the same batch id).
+    if (res.status === 'blocked' && res.errorCode === 'PRODUCT_EDIT_REASON_REQUIRED') setReasonAsked(true);
     setErrors(e => ({ ...e, _media: ('message' in res && res.message) || res.errorCode }));
   }
 
@@ -604,6 +627,24 @@ export function ProductDetail() {
 
         {/* R4B — der Ausgang des Speicherns. Bis hier wurde `_media` gesetzt und NIE angezeigt:
             ein blockierter Speichervorgang sah aus wie gar nichts. */}
+        {editing && (detail.sales.length > 0 || reasonAsked) && (
+          <div style={{ marginBottom: 16, maxWidth: 640 }} data-testid="product-edit-reason">
+            <Input label="REASON FOR THE CHANGE (this item was already sold)" value={editReason}
+              placeholder="e.g. wrong karat entered at purchase"
+              onChange={e => setEditReason(e.target.value)} />
+            <div style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
+              The invoices of this item keep the description they printed; only the item changes.
+            </div>
+          </div>
+        )}
+        {fromPurchase && (
+          <div style={{ marginBottom: 12 }}>
+            <button type="button" onClick={() => navigate(`/purchases/${fromPurchase}/edit`)} data-testid="back-to-purchase-edit"
+              style={{ background: 'none', border: 'none', padding: 0, color: '#2563EB', fontSize: 13, cursor: 'pointer' }}>
+              ← Back to the purchase edit
+            </button>
+          </div>
+        )}
         {editing && (errors._save || errors._media) && (
           <div data-save-error style={{
             marginBottom: 16, padding: '12px 16px', borderRadius: 8, fontSize: 13,
@@ -943,9 +984,21 @@ export function ProductDetail() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
                   <div id="field-purchasePrice">
                     {/* DESKTOP-CONTRACT: no surface enforces a purchase price and 0 is a legitimate
-                        stored value (unknown cost) — so no required marker, and no error. */}
-                    <Input label="PURCHASE PRICE (BHD)" type="number" value={form.purchasePrice || ''} error={errors.purchasePrice}
-                      onChange={e => { setForm({ ...form, purchasePrice: Number(e.target.value) }); if (errors.purchasePrice) setErrors({ ...errors, purchasePrice: '' }); }} />
+                        stored value (unknown cost) — so no required marker, and no error.
+                        PURCHASE-EDIT D13 — angelegt von einem Einkauf: Preis (und Datum) gehören ihm. */}
+                    {detail.purchaseBound ? (
+                      <div data-testid="purchase-bound-price">
+                        <span className="text-overline" style={{ marginBottom: 6 }}>PURCHASE PRICE (BHD)</span>
+                        <div style={{ fontSize: 14, color: '#4B5563', padding: '8px 0' }}><Bhd v={product.purchasePrice}/> BHD</div>
+                        <button type="button" onClick={() => navigate(`/purchases/${detail.purchaseBound!.purchaseId}/edit`)}
+                          style={{ background: 'none', border: 'none', padding: 0, color: '#2563EB', fontSize: 12, cursor: 'pointer', textAlign: 'left' }}>
+                          Set by purchase {detail.purchaseBound.purchaseNumber} — correct it there
+                        </button>
+                      </div>
+                    ) : (
+                      <Input label="PURCHASE PRICE (BHD)" type="number" value={form.purchasePrice || ''} error={errors.purchasePrice}
+                        onChange={e => { setForm({ ...form, purchasePrice: Number(e.target.value) }); if (errors.purchasePrice) setErrors({ ...errors, purchasePrice: '' }); }} />
+                    )}
                   </div>
                   <Input label="SALE PRICE (BHD)" type="number" value={form.plannedSalePrice || ''} onChange={e => setForm({ ...form, plannedSalePrice: Number(e.target.value) || undefined })} />
                   <Input label="MIN SALE PRICE (BHD)" type="number" value={form.minSalePrice || ''} onChange={e => setForm({ ...form, minSalePrice: Number(e.target.value) || undefined })} />
@@ -1522,7 +1575,14 @@ export function ProductDetail() {
                   <Input label="PURCHASE SOURCE" placeholder="Souq, Private seller, Auction..." value={form.purchaseSource || ''} onChange={e => setForm({ ...form, purchaseSource: e.target.value })} />
                   {/* OLD STOCK — kein „Paid from" mehr: ein Artikel aus New Collection/Import ist Altbestand ohne Geldfluss.
                       Ein früher gespeicherter Wert bleibt unverändert (die Änderungsabsicht enthält das Feld nie). */}
-                  <Input label="PURCHASE DATE" type="date" value={form.purchaseDate || ''} onChange={e => setForm({ ...form, purchaseDate: e.target.value })} />
+                  {detail.purchaseBound ? (
+                    <div data-testid="purchase-bound-date">
+                      <span className="text-overline" style={{ marginBottom: 6 }}>PURCHASE DATE</span>
+                      <div style={{ fontSize: 13, color: '#4B5563', padding: '8px 0' }}>{product.purchaseDate ? String(product.purchaseDate).slice(0, 10) : '—'} · set by purchase {detail.purchaseBound.purchaseNumber}</div>
+                    </div>
+                  ) : (
+                    <Input label="PURCHASE DATE" type="date" value={form.purchaseDate || ''} onChange={e => setForm({ ...form, purchaseDate: e.target.value })} />
+                  )}
                   <div>
                     <span className="text-overline" style={{ marginBottom: 6 }}>NOTES</span>
                     <textarea

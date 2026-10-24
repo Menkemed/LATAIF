@@ -10,10 +10,12 @@
 // täte, wäre genau der Fehler, den §4 verbietet.
 // ════════════════════════════════════════════════════════════════════════════
 import { useEffect, useRef, useState } from 'react';
-import { IdCard, Trash2, Upload } from 'lucide-react';
+import { Camera, IdCard, Trash2, Upload } from 'lucide-react';
 import type { IdentityDocumentRef } from '@/core/models/types';
 import { loadIdentityPhoto, revokeIdentityPhoto, type IdentityPhotoView } from '@/core/identity/identity-photo-view';
 import { captureImage } from '@/core/media/capture-profile';
+// PURCHASE-EDIT D10 — ein neues Ausweisfoto aus Kamera ODER Galerie.
+import { CameraCapture, cameraSupported } from '@/components/media/CameraCapture';
 
 export interface IdentityPhotoFieldProps {
   /** Die Referenz aus der Geschäftsauskunft (`customer.identity` / `supplier.identity`). */
@@ -38,6 +40,7 @@ export function IdentityPhotoField({
 }: IdentityPhotoFieldProps) {
   const [view, setView] = useState<IdentityPhotoView | null>(null);
   const [error, setError] = useState('');
+  const [camera, setCamera] = useState(false);
   const inputRef = useRef<HTMLInputElement>(null);
 
   // Das gespeicherte Dokument holen — und beim Verlassen wieder freigeben. `value` steuert das
@@ -103,6 +106,12 @@ export function IdentityPhotoField({
             style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '4px 10px', border: '1px solid #D1D5DB', borderRadius: 6, background: '#FFFFFF', cursor: 'pointer' }}>
             <Upload size={13} /> {zeigen ? 'Replace' : 'Add'}
           </button>
+          {cameraSupported() && (
+            <button type="button" onClick={() => setCamera(true)} data-identity-camera
+              style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12, padding: '4px 10px', border: '1px solid #D1D5DB', borderRadius: 6, background: '#FFFFFF', cursor: 'pointer' }}>
+              <Camera size={13} /> Camera
+            </button>
+          )}
           {/* Entfernen gilt dem Dokument im Medienspeicher. Ein reiner Altbestand (Bytes in der
               alten Spalte) bleibt stehen: er ist der Nachweis alter Einkaufsbelege, die keinen
               eigenen Abzug mitbekommen haben. */}
@@ -120,6 +129,7 @@ export function IdentityPhotoField({
           )}
         </div>
       )}
+      <CameraCapture open={camera} onClose={() => setCamera(false)} title="Take ID photo" onCapture={(url) => onChange(url)} />
     </div>
   );
 }

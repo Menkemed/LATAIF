@@ -184,11 +184,15 @@ const MATRIX: Record<string, Zeile> = {
   // B1 OPENING ACCOUNTING — Settings → Opening Balances: Eröffnungsbelege erfassen/ersetzen und stornieren (nur Owner, keine Buchung).
   'opening_accounts.create': { ui: 'Settings → Opening Balances — Record / Correct document', gleich: true },
   'opening_accounts.cancel': { ui: 'Settings → Opening Balances — Cancel document', gleich: true },
+  // PURCHASE-EDIT — PurchaseDetail → Edit (eigene Maske); Finanzkorrektur und Zahlungsstorno nur Owner.
+  'purchases.update': { ui: 'PurchaseEdit — Save (Notiz/Mitarbeiter/Ausweisfoto)', gleich: true },
+  'purchases.correct': { ui: 'PurchaseEdit — Save (Datum/Lieferant/Preis/Menge)', gleich: true },
+  'purchases.void_payment': { ui: 'PurchaseDetail — Payments: Void', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 123, `A 116 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 126, `A 116 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

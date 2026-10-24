@@ -582,7 +582,7 @@ const CASH = { kind: 'CASH_BALANCE', reference: 'Cash count 15.10.2026', reason:
     if (!known.includes(op)) fehler.push(`${op}: nicht angemeldet`);
     if (!rustNames.includes(op)) fehler.push(`${op}: Rust kennt es nicht`);
   }
-  ok(fehler.length === 0 && rustNames.slice(-3).join(',') === [...MUT, ...READ].join(',') && registry.ALLOWED_MUTATIONS.slice(-2).join(',') === MUT.join(',')
+  ok(fehler.length === 0 && rustNames.slice(-8, -5).join(',') === [...MUT, ...READ].join(',') && registry.ALLOWED_MUTATIONS.slice(-5, -3).join(',') === MUT.join(',')
     && !perms.roleMayRunOp('MANAGER', 'opening_accounts.create') && perms.roleMayRunOp('ADMIN', 'opening_accounts.cancel'),
     `G1 zwei Buchungen (nur Owner) und eine Auskunft überall gleich (Freigabe, Recht, Anmeldung, Katalog, Rust, am Ende der Listen) (${fehler.join('; ') || 'konsistent'})`);
   const ui = src('src/components/finance/OpeningAccountingPanel.tsx');

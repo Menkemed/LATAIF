@@ -31,6 +31,7 @@ import {
 import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment, CanonicalLoanDirection, CashSource, ScrapPaymentMethod } from '@/core/models/types';
 import { canonicalLoanDirection, repairCostAccount } from '@/core/models/types';
 import { capitalizedLineCost } from '@/core/lots/lot-cost';
+import { hasCostCorrectionTable } from '@/core/purchases/cost-correction-read';
 
 /** POST-PARITY PP-14 — die Zeile einer Reparaturrechnung (Artikel `svc-repair-<Filiale>`): ihre Kosten sind
  * bereits als Dienstleistungs-Einstand gebucht (Soll COGS bei der Kostenentstehung) — kein zweiter Wareneinsatz,
@@ -161,7 +162,11 @@ export type SourceModule =
   // Credit-Modell — Konvertierung eines customer_gold_credit (Buch B, Gewicht) in
   // BHD-Store-Guthaben: DR GOLD_CREDIT_CLEARING / CR CUSTOMER_CREDIT. Gekeyt auf die
   // customer_credits-Row-id. Kein Reverse-Pfad (Gold-Conversion ist FULFILLED-terminal).
-  | 'GOLD_CONVERSION';
+  | 'GOLD_CONVERSION'
+  // PURCHASE-EDIT D1 — die Einstandskorrektur eines schon verkauften Stücks: der Wareneinsatz der
+  // Rechnungszeile wird um die Differenz berichtigt (INVENTORY ↔ COGS), die Rechnung selbst bleibt.
+  // Gekeyt auf die cost_corrections-Zeile, source_line_id = die Rechnungszeile. Kein VAT-Konto.
+  | 'COST_CORRECTION';
 
 export type CounterpartyType =
   | 'CUSTOMER'
@@ -709,6 +714,21 @@ function getInvoiceLineCogs(invoiceLineId: string): number {
   return Number(row?.cogs || 0);
 }
 
+/**
+ * PURCHASE-EDIT D1 — die wirksame Einstandsdifferenz JE STÜCK einer Rechnungszeile aus ihren
+ * Einstandskorrekturen (Σ unit_delta der wirksamen). Eine Korrektur gilt jedem Stück, dessen
+ * Wareneinsatz zu ihrem Zeitpunkt noch gebucht war — also genau jedem, das später noch
+ * zurückkommen kann. Darum wird sie bei einer Retoure je Stück mitgedreht, nicht anteilig.
+ */
+export function costCorrectionUnitDelta(invoiceLineId: string): number {
+  if (!hasCostCorrectionTable()) return 0;
+  const row = query(
+    `SELECT COALESCE(SUM(unit_delta), 0) AS d FROM cost_corrections WHERE invoice_line_id = ? AND status = 'ACTIVE'`,
+    [invoiceLineId],
+  )[0];
+  return Number(row?.d || 0);
+}
+
 export function postSalesReturnCogs(
   returnId: string,
   lines: { invoiceLineId: string; productId?: string; quantity: number }[],
@@ -722,7 +742,11 @@ export function postSalesReturnCogs(
     const origQty = Number(
       query(`SELECT quantity FROM invoice_lines WHERE id = ?`, [l.invoiceLineId])[0]?.quantity || 0
     );
-    const reverseCost = origQty > 0 ? ROUND(origCogs * (l.quantity || 0) / origQty) : 0;
+    // PURCHASE-EDIT D1 — dazu die Einstandskorrektur je zurückgenommenem Stück (das Stück kommt zum
+    // berichtigten Los-Einstand zurück; die Rechnung trägt weiter ihren damaligen).
+    const reverseCost = origQty > 0
+      ? Math.max(0, ROUND(origCogs * (l.quantity || 0) / origQty + costCorrectionUnitDelta(l.invoiceLineId) * (l.quantity || 0)))
+      : 0;
     if (reverseCost <= 0) continue;
     entries.push({
       account: 'INVENTORY',
@@ -744,6 +768,34 @@ export function postSalesReturnCogs(
     occurredAt,
     sourceModule: 'SALES_RETURN_COGS',
     sourceId: returnId,
+  });
+}
+
+// ── PURCHASE-EDIT D1 — Einstandskorrektur eines verkauften Stücks ─────────
+//
+// Der Einkauf wurde berichtigt (gegengebucht und neu gebucht) — für die Stücke, die schon verkauft
+// sind, hat INVENTORY beim Verkauf den ALTEN Einstand abgegeben. Die Differenz wird hier ausgeglichen:
+//   Einstand gesunken (amount < 0):  DEBIT INVENTORY / CREDIT COGS
+//   Einstand gestiegen (amount > 0): DEBIT COGS / CREDIT INVENTORY
+// Kein VAT-Konto, kein Kunde, keine Änderung an der Rechnung. Datum = Buchungsdatum der Korrektur.
+export function postCostCorrection(input: {
+  correctionId: string; correctionNumber: string; invoiceLineId: string; invoiceId: string; invoiceNumber: string;
+  purchaseId: string; productId?: string; amount: number; occurredAt: string; economicDate: string;
+}): PostingResult | null {
+  const amount = ROUND(Math.abs(input.amount));
+  if (amount <= 0) return null;
+  const down = input.amount < 0;
+  const metadata = {
+    correctionNumber: input.correctionNumber, invoiceId: input.invoiceId, invoiceNumber: input.invoiceNumber,
+    purchaseId: input.purchaseId, productId: input.productId, economicDate: input.economicDate, kind: 'cost_correction',
+  };
+  return postEntries([
+    { account: down ? 'INVENTORY' : 'COGS', direction: 'DEBIT', amount, sourceLineId: input.invoiceLineId, metadata },
+    { account: down ? 'COGS' : 'INVENTORY', direction: 'CREDIT', amount, sourceLineId: input.invoiceLineId, metadata },
+  ], {
+    occurredAt: input.occurredAt,
+    sourceModule: 'COST_CORRECTION',
+    sourceId: input.correctionId,
   });
 }
 
@@ -1298,11 +1350,13 @@ function reverseTransactionOnce(transactionId: string, occurredAt: string): Post
 //   DEBIT  VAT_INPUT        by vatAmount                 Vorsteuer (rückforderbar)
 //   CREDIT ACCOUNTS_PAYABLE by lineTotal                 Schuld beim Lieferanten
 
-export function postPurchaseReceived(purchase: Purchase): PostingResult {
+// PURCHASE-EDIT — `opts.occurredAt`: Buchungsdatum einer KORREKTUR (Bearbeitung am offenen Tag). Standard
+// bleibt das Einkaufsdatum; der Einkauf selbst (purchase_date) ändert sich dadurch nicht.
+export function postPurchaseReceived(purchase: Purchase, opts: { occurredAt?: string } = {}): PostingResult {
   if (!purchase.lines || purchase.lines.length === 0) {
     throw new Error(`postPurchaseReceived: purchase ${purchase.id} has no lines`);
   }
-  const occurredAt = purchase.purchaseDate ?? purchase.createdAt;
+  const occurredAt = opts.occurredAt ?? purchase.purchaseDate ?? purchase.createdAt;
   const entries: LedgerEntryInput[] = [];
   for (const line of purchase.lines) {
     const gross = ROUND(line.lineTotal);
@@ -1362,13 +1416,18 @@ export function postPurchaseReceived(purchase: Purchase): PostingResult {
 // (INVENTORY=netto, VAT_INPUT=vat), gekeyt ueber source_line_id = purchase_line.id.
 // Wird vom Purchase-Return genutzt, um die Vorsteuer korrekt mit zurueckzudrehen.
 // Liefert {0,0}, wenn nie gebucht (legacy) -> Caller faellt auf reines INVENTORY zurueck.
+// PURCHASE-EDIT B1 — „nicht reversiert" heißt wie bei `getInvoiceLineCogs`: weder selbst Gegenbuchung
+// NOCH eine schon gegengebuchte Originalbuchung. Seit eine Bearbeitung den Einkauf mit derselben
+// Zeilen-ID neu bucht, stehen darunter die alte (gegengebuchte) und die neue Buchung; ohne den zweiten
+// Ausschluss zählte eine spätere Rückgabe Lager und Vorsteuer doppelt.
 export function getPurchaseLineInputSplit(purchaseLineId: string): { net: number; vat: number } {
   const rows = query(
-    `SELECT account, COALESCE(SUM(amount), 0) AS amt
-       FROM ledger_entries
-      WHERE source_module = 'PURCHASE' AND source_line_id = ? AND direction = 'DEBIT'
-        AND reverses_entry_id IS NULL AND account IN ('INVENTORY', 'VAT_INPUT')
-      GROUP BY account`,
+    `SELECT e1.account AS account, COALESCE(SUM(e1.amount), 0) AS amt
+       FROM ledger_entries e1
+      WHERE e1.source_module = 'PURCHASE' AND e1.source_line_id = ? AND e1.direction = 'DEBIT'
+        AND e1.reverses_entry_id IS NULL AND e1.account IN ('INVENTORY', 'VAT_INPUT')
+        AND NOT EXISTS (SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id)
+      GROUP BY e1.account`,
     [purchaseLineId]
   );
   let net = 0, vat = 0;
@@ -1397,9 +1456,12 @@ function purchaseCashAccountFor(method: PurchasePayment['method']): LedgerAccoun
   }
 }
 
+// PURCHASE-EDIT D5 — `opts.occurredAt`: Buchungsdatum einer UMBUCHUNG (Lieferantenwechsel am offenen
+// Tag). Standard bleibt das Zahlungsdatum; die Zahlung selbst (paid_at) ändert sich dadurch nicht.
 export function postPurchasePayment(
   payment: PurchasePayment,
-  supplierId: string
+  supplierId: string,
+  opts: { occurredAt?: string } = {},
 ): PostingResult {
   const amount = ROUND(payment.amount);
   if (amount <= 0) {
@@ -1426,7 +1488,7 @@ export function postPurchasePayment(
       },
     ],
     {
-      occurredAt: payment.paidAt,
+      occurredAt: opts.occurredAt ?? payment.paidAt,
       sourceModule: 'PURCHASE_PAYMENT',
       sourceId: payment.id,
     }

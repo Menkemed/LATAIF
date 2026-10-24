@@ -86,14 +86,19 @@ function liveConsignment(id: string, branchId: string, expectedRevision?: number
  * (dieselbe Suche wie bisher) — und seine Zeile den Artikel: ohne diese zweite Bedingung fände
  * „CON-…1" auch den Einkauf von „CON-…10". Nur in dieser Filiale, nur wirksame.
  */
-function consignorPurchases(consignmentNumber: string, productId: string, branchId: string): string[] {
+// PURCHASE-EDIT B6 — zuerst die Spalte (`source_consignment_id`, seit dieser Version gesetzt und für den
+// Bestand einmalig aus dem Vermerk nachgetragen); der Vermerk gilt nur noch für einen Einkauf ohne Spalte.
+// So bricht eine geänderte Notiz die Verknüpfung nicht mehr. (Exportiert für den Altbestands-Nachweis.)
+export function consignorPurchases(consignmentId: string, consignmentNumber: string, productId: string, branchId: string): string[] {
   if (!consignmentNumber || !productId) return [];
   return query(
     `SELECT p.id FROM purchases p
-      WHERE p.branch_id = ? AND p.status != 'CANCELLED' AND p.notes LIKE ?
-        AND EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.product_id = ?)
+      WHERE p.branch_id = ? AND p.status != 'CANCELLED'
+        AND (p.source_consignment_id = ?
+             OR (p.source_consignment_id IS NULL AND p.notes LIKE ?
+                 AND EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.product_id = ?)))
       ORDER BY p.created_at ASC, p.id ASC`,
-    [branchId, `%${consignmentNumber}%`, productId],
+    [branchId, consignmentId, `%${consignmentNumber}%`, productId],
   ).map((r) => String(r.id));
 }
 
@@ -219,7 +224,7 @@ export function returnConsignmentAfterSaleInHouse(
   const lineId = String(line.id);
   const rest = Number(line.quantity ?? 1) - Number(line.zurueck ?? 0);
   if (rest <= 0.005) throw nein('CONSIGNMENT_ALREADY_RETURNED', 'the consigned item on this invoice has already come back');
-  const purchases = disposition === 'RETURN_TO_OWNER' ? consignorPurchases(consignmentNumber, productId, branchId) : [];
+  const purchases = disposition === 'RETURN_TO_OWNER' ? consignorPurchases(id, consignmentNumber, productId, branchId) : [];
   const losses = disposition === 'RETURN_TO_OWNER' ? consignorLosses(id, branchId) : [];
 
   // 1. Die Retoure — über das Retourenhaus: Preis und Steuer aus der Rechnung, Gutschrift, Erstattung im
@@ -340,7 +345,7 @@ export function cancelConsignmentSaleInHouse(
     throw nein('CONSIGNMENT_INVOICE_HAS_RETURNS',
       'the invoice of this sale has a return that is not the consignment\'s own — cancel that return first');
   }
-  const purchases = consignorPurchases(consignmentNumber, productId, branchId);
+  const purchases = consignorPurchases(id, consignmentNumber, productId, branchId);
   const losses = consignorLosses(id, branchId);
   const db = getDatabase();
   const now = new Date().toISOString();

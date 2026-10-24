@@ -1407,6 +1407,12 @@ export class MediaDbCoordinator {
         throw new CoordinatorError('MEDIA_DB_MEDIA_CONFLICT', 'MOBILE_PRICE_NOT_ELIGIBLE');
       }
     }
+    // D7 — ändert die Bearbeitung, was eine Rechnung über den Artikel druckt, werden die Angaben VORHER in jede
+    // Rechnungszeile eingefroren, die sie noch nicht trägt (nicht stornierte Rechnungen). Dieselbe Transaktion:
+    // ein Nachdruck zeigt danach, was beim Verkauf auf der Rechnung stand; scheitert unten die SKU, rollt es mit zurück.
+    if (pe.set.some(([c]) => INVOICE_PRINT_COLUMNS.includes(c)) && hasInvoiceSnapshotColumn(this.db)) {
+      this.freezeInvoicePrintInTx(ctx.entityId, ctx.branchId, pe.withSync, now);
+    }
     // SKU-UNIQUE — im selben Schritt wie das UPDATE: eine geänderte SKU, die schon an einem anderen Artikel steht,
     // wird nie geschrieben (die Transaktion rollt zurück, nichts wird durabel).
     const skuNeu = pe.set.find(([c]) => c === 'sku');
@@ -1437,6 +1443,33 @@ export class MediaDbCoordinator {
        VALUES (?, ?, ?, 'products', ?, 'UPDATE', NULL, NULL, ?, ?, ?)`,
       [`audit-edit-${ctx.batchId}`, ctx.branchId, pe.audit.module, ctx.entityId, pe.audit.newValueJson, pe.audit.changedBy, now] as unknown[],
     );
+  }
+
+  /** D7 — die Druckangaben des Artikels (Stand VOR der Bearbeitung) in seine noch ungefrorenen Rechnungszeilen. */
+  private freezeInvoicePrintInTx(productId: string, branchId: string | null, withSync: boolean, now: string): void {
+    const cur = firstRow(this.db, `SELECT brand, name, sku, category_id, condition, attributes FROM products WHERE id = $id`, { $id: productId });
+    if (!cur) return;
+    let attributes: unknown = null;
+    try { attributes = typeof cur.attributes === 'string' && cur.attributes ? JSON.parse(cur.attributes) : null; } catch { attributes = null; }
+    const snapshot = JSON.stringify({
+      brand: cur.brand ?? null, name: cur.name ?? null, sku: cur.sku ?? null, categoryId: cur.category_id ?? null,
+      condition: cur.condition ?? null, attributes, frozenAt: now,
+    });
+    const lineIds = allRows(this.db,
+      `SELECT il.id FROM invoice_lines il JOIN invoices i ON i.id = il.invoice_id
+        WHERE il.product_id = $id AND il.product_snapshot IS NULL AND i.status != 'CANCELLED'`, { $id: productId })
+      .map((r) => String(r.id));
+    for (const lineId of lineIds) {
+      this.db.run(`UPDATE invoice_lines SET product_snapshot = ? WHERE id = ? AND product_snapshot IS NULL`, [snapshot, lineId] as unknown[]);
+      if (withSync) {
+        const full = firstRow(this.db, `SELECT * FROM invoice_lines WHERE id = $id`, { $id: lineId }) ?? {};
+        this.db.run(
+          `INSERT INTO sync_changelog (table_name, record_id, branch_id, action, data, synced, created_at)
+           VALUES ('invoice_lines', ?, ?, 'update', ?, 0, ?)`,
+          [lineId, branchId, JSON.stringify(full), now] as unknown[],
+        );
+      }
+    }
   }
 
   /**
@@ -2754,6 +2787,17 @@ function paramsToPositional(
     return '?';
   });
   return { sql: compiled, values: order.map((k) => bound[k]) };
+}
+
+/** D7 — die Spalten eines Artikels, die eine Rechnung druckt (Name, Kurzangaben, SKU). */
+const INVOICE_PRINT_COLUMNS: readonly string[] = ['brand', 'name', 'sku', 'category_id', 'condition', 'attributes'];
+
+/** Eine Datenbank ohne Rechnungen (Medien-Testaufbau, sehr alter Stand) hat nichts einzufrieren. */
+function hasInvoiceSnapshotColumn(db: RawDb): boolean {
+  const t = db.exec(`SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'invoice_lines' LIMIT 1`);
+  if (t.length === 0 || t[0].values.length === 0) return false;
+  const cols = db.exec(`PRAGMA table_info(invoice_lines)`);
+  return cols.length > 0 && cols[0].values.some((v) => v[1] === 'product_snapshot');
 }
 
 function firstRow(

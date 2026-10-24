@@ -15,6 +15,7 @@
 
 import { query } from '@/core/db/helpers';
 import type { SalesMetricsInvoice, SalesMetricsReturn } from '@/core/reports/sales-metrics';
+import { invoiceCostCorrectionSql } from '@/core/purchases/cost-correction-read';
 
 export interface SalesDataFilter {
   branchId?: string;
@@ -39,7 +40,8 @@ export function loadSalesData(filter: SalesDataFilter): LoadedSalesData {
 
   const invRows = query(
     `SELECT i.id, i.customer_id, i.status, i.gross_amount, i.net_amount,
-            i.margin_snapshot, i.purchase_price_snapshot, i.issued_at, i.created_at
+            i.margin_snapshot, i.purchase_price_snapshot, i.issued_at, i.created_at,
+            ${invoiceCostCorrectionSql()} AS cost_correction
        FROM invoices i
       WHERE ${where}`,
     params
@@ -65,6 +67,7 @@ export function loadSalesData(filter: SalesDataFilter): LoadedSalesData {
     netAmount: Number(r.net_amount) || 0,
     marginSnapshot: Number(r.margin_snapshot) || 0,
     purchasePriceSnapshot: Number(r.purchase_price_snapshot) || 0,
+    costCorrection: Number(r.cost_correction) || 0,
     issuedAt: (r.issued_at as string) || undefined,
     createdAt: (r.created_at as string) || undefined,
     lines: linesByInv.get(String(r.id)) || [],

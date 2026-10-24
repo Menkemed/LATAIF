@@ -46,16 +46,7 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
-
-// ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
-// Wenn die Buchung scheitert, wird das Domain-Insert NICHT zurückgerollt; stattdessen
-// loggen wir und überlassen die Korrektur der Reconciliation-View. Der operative Flow
-// (Purchase / Payment / Cancel) darf nicht an einer Bilanz-Diskrepanz blockiert werden.
-function safePost(label: string, fn: () => void): void {
-  try { fn(); } catch (err) {
-    console.error(`[ledger] ${label} failed:`, err);
-  }
-}
+import { hasCostCorrectionTable } from '@/core/purchases/cost-correction-read';
 
 // ── Slice 4b — Purchase-Ueberzahlung → SUPPLIER_CREDIT ────────────────────────
 // Die Helfer (Overpay-Basis purchases.paid_amount = NETTO-CASH, clawback-then-rebook, Teardown)
@@ -99,6 +90,8 @@ interface PurchaseInput {
   initialPayment?: { amount: number; method: 'cash' | 'bank' | 'benefit'; reference?: string };
   // Back-to-Back: Order, deren Posten dieser Einkauf (mit-)beschafft.
   sourceOrderId?: string;
+  // B6 — der Auto-Einkauf beim Einlieferer: seine Kommission als Spalte (vorher nur im Vermerk).
+  sourceConsignmentId?: string;
 }
 
 // v0.4.0 — Mobile-Capture: ein Foto aus der /mobile-Seite, das noch zu einer
@@ -182,6 +175,7 @@ function rowToPurchase(row: Record<string, unknown>): Purchase & { revision?: nu
     updatedAt: row.updated_at as string,
     createdBy: row.created_by as string | undefined,
     sourceOrderId: (row.source_order_id as string | null) || undefined,
+    sourceConsignmentId: (row.source_consignment_id as string | null) || undefined,
     revision: Number(row.revision ?? 0) || undefined,
   };
 }
@@ -200,6 +194,7 @@ function rowToLine(row: Record<string, unknown>): PurchaseLine {
     vatRate: row.vat_rate != null ? (row.vat_rate as number) : undefined,
     vatAmount: row.vat_amount != null ? (row.vat_amount as number) : undefined,
     sourceOrderLineId: (row.source_order_line_id as string | null) || undefined,
+    createdProduct: row.created_product === null || row.created_product === undefined ? undefined : Number(row.created_product) === 1,
   };
 }
 
@@ -213,6 +208,7 @@ function rowToPayment(row: Record<string, unknown>): PurchasePayment {
     reference: row.reference as string | undefined,
     note: row.note as string | undefined,
     createdAt: row.created_at as string,
+    ...(row.voided_at ? { voidedAt: String(row.voided_at), voidReason: (row.void_reason as string | null) || undefined } : {}),
   };
 }
 
@@ -373,6 +369,9 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
       sourceOrderLineId: string | null;
       partnerShares?: PartnerShareInput[];
       bulk?: BulkPurchaseLine; bulkLotValueFils?: number;
+      // PURCHASE-EDIT D13 — hat DIESE Zeile ihren Artikel angelegt? Dann gehören Einkaufspreis und
+      // -datum des Artikels dem Einkauf. Der Bulk-Systemartikel gehört nie einer Zeile.
+      createdProduct: boolean;
     }> = [];
     let total = 0;
     // Bestehende (nicht in diesem Purchase neu angelegte) Produkte — fuer die
@@ -391,11 +390,12 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
           description: bulkPurchaseDescription(b.metal, b.fineness, b.weightMg),
           qty: 1, unitPrice: amounts.lineTotal, lineTotal: amounts.lineTotal, position: idx + 1,
           taxScheme: scheme, vatRate: rate, vatAmount: amounts.vatAmount,
-          sourceOrderLineId: null, bulk: b, bulkLotValueFils: amounts.lotValueFils,
+          sourceOrderLineId: null, bulk: b, bulkLotValueFils: amounts.lotValueFils, createdProduct: false,
         });
         return;
       }
       let productId = ln.productId;
+      const createdProduct = !productId;
       if (ln.productId) existingProductIds.add(ln.productId);
       if (!productId) {
         if (ln.newProduct) {
@@ -442,6 +442,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
         taxScheme: scheme, vatRate: rate, vatAmount,
         sourceOrderLineId: ln.sourceOrderLineId ?? null,
         partnerShares: ln.partnerShares,
+        createdProduct,
       });
     });
 
@@ -498,20 +499,20 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
 
     db.run(
       `INSERT INTO purchases (id, branch_id, purchase_number, supplier_id, status, total_amount, paid_amount, remaining_amount,
-        purchase_date, notes, staff_id, supplier_snapshot, created_at, updated_at, created_by, source_order_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+        purchase_date, notes, staff_id, supplier_snapshot, created_at, updated_at, created_by, source_order_id, source_consignment_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, purchaseNumber, input.supplierId, status, total, paid, total - paid,
        purchaseDate, input.notes || null, input.staffId || null, snapshotJson, now, now, userId,
-       input.sourceOrderId || null]
+       input.sourceOrderId || null, input.sourceConsignmentId || null]
     );
 
     // Insert lines (inkl. Input-VAT-Felder + Back-to-Back Order-Link)
     const lineStmt = db.prepare(
-      `INSERT INTO purchase_lines (id, purchase_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate, vat_amount, source_order_line_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+      `INSERT INTO purchase_lines (id, purchase_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate, vat_amount, source_order_line_id, created_product)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
     );
     for (const l of lineRecords) {
-      lineStmt.run([l.id, id, l.productId, l.description, l.qty, l.unitPrice, l.lineTotal, l.position, l.taxScheme, l.vatRate, l.vatAmount, l.sourceOrderLineId]);
+      lineStmt.run([l.id, id, l.productId, l.description, l.qty, l.unitPrice, l.lineTotal, l.position, l.taxScheme, l.vatRate, l.vatAmount, l.sourceOrderLineId, l.createdProduct ? 1 : 0]);
     }
     lineStmt.free();
 
@@ -605,38 +606,22 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
     get().loadPurchases();
 
     // ZIEL.md §3a — Ledger-Posting nach Domain-Insert.
-    // BULK METAL V1 — mit Bulk-Zeile darf ein Buchungsfehler NICHT verschluckt werden: der Lot-Wert
-    // ist genau das INVENTORY-Soll; ohne Buchung bricht die ganze Klammer ab.
-    if (lineRecords.some((l) => l.bulk)) {
-      if (!hasLedgerEntries('PURCHASE', id)) {
-        const fresh = get().getPurchase(id);
-        if (!fresh) throw new Error('the purchase with a bulk line was not created');
-        postPurchaseReceived(fresh);
-      }
-    } else safePost(`postPurchaseReceived(${id})`, () => {
-      if (hasLedgerEntries('PURCHASE', id)) return;
+    // PURCHASE-EDIT B7 — jede Buchung ist strikt (wie schon die Bulk-Zeile): scheitert sie, gibt es
+    // auch den Einkauf nicht — die Klammer des Aufrufers nimmt alles zurück. Vorher wurde ein Fehler
+    // verschluckt, und es entstand ein Einkauf ohne Hauptbuch (Lager und Lieferantenschuld fehlten).
+    // Ein Einkauf mit Summe 0 hat nichts zu buchen.
+    if (total > 0 && !hasLedgerEntries('PURCHASE', id)) {
       const fresh = get().getPurchase(id);
-      if (fresh) postPurchaseReceived(fresh);
-    });
-    if (initialPaymentId && input.initialPayment) {
-      const ipId = initialPaymentId;
-      const ipMethod = input.initialPayment.method;
-      safePost(`postPurchasePayment(${ipId}) [initial]`, () => {
-        if (hasLedgerEntries('PURCHASE_PAYMENT', ipId)) return;
-        const fresh = get().getPurchase(id);
-        const ip = fresh?.payments.find(p => p.id === ipId);
-        if (ip) postPurchasePayment(ip, input.supplierId);
-        else if (fresh) {
-          // Fallback wenn loadPurchases nicht alle Felder hatte
-          postPurchasePayment(
-            {
-              id: ipId, purchaseId: id, amount: input.initialPayment!.amount,
-              method: ipMethod, paidAt: purchaseDate, createdAt: now,
-            },
-            input.supplierId
-          );
-        }
-      });
+      if (!fresh) throw new Error(`the purchase ${purchaseNumber} was not created`);
+      postPurchaseReceived(fresh);
+    }
+    if (initialPaymentId && input.initialPayment && !hasLedgerEntries('PURCHASE_PAYMENT', initialPaymentId)) {
+      const fresh = get().getPurchase(id);
+      const ip = fresh?.payments.find(p => p.id === initialPaymentId) ?? {
+        id: initialPaymentId, purchaseId: id, amount: input.initialPayment.amount,
+        method: input.initialPayment.method, paidAt: purchaseDate, createdAt: now,
+      };
+      postPurchasePayment(ip, input.supplierId);
     }
 
     return get().getPurchase(id)!;
@@ -750,6 +735,8 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
  */
 export function loadPurchasesFor(ctx: BusinessReadContext): { purchases: Purchase[] } {
   const rows = query('SELECT * FROM purchases WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
+  const hasCorrections = hasCostCorrectionTable()
+    && Number(query('SELECT COUNT(*) AS c FROM cost_corrections WHERE branch_id = ?', [ctx.branchId])[0]?.c ?? 0) > 0;
   const purchases: Purchase[] = rows.map((r) => {
     const p = rowToPurchase(r);
     p.lines = query('SELECT * FROM purchase_lines WHERE purchase_id = ? ORDER BY position', [p.id]).map(rowToLine);
@@ -757,6 +744,22 @@ export function loadPurchasesFor(ctx: BusinessReadContext): { purchases: Purchas
     // PARTNER-ITEMS — die Beteiligten gemeinsam gekaufter Zeilen (fehlt, wenn allein gekauft).
     const parts = participationsOfPurchase(p.id, ctx.branchId);
     if (parts.length > 0) p.participations = parts;
+    // PURCHASE-EDIT D1 — die Einstandskorrekturen verkaufter Stücke (eigener Beleg je Rechnungszeile).
+    if (hasCorrections) {
+      const cc = query(
+        `SELECT cc.id, cc.correction_number, cc.invoice_id, i.invoice_number, cc.amount, cc.quantity, cc.booking_date, cc.economic_date,
+                cc.vat_status, cc.vat_estimate, cc.status
+           FROM cost_corrections cc LEFT JOIN invoices i ON i.id = cc.invoice_id
+          WHERE cc.purchase_id = ? ORDER BY cc.created_at, cc.id`, [p.id]);
+      if (cc.length > 0) {
+        p.costCorrections = cc.map((r) => ({
+          id: String(r.id), correctionNumber: String(r.correction_number), invoiceId: String(r.invoice_id),
+          invoiceNumber: String(r.invoice_number ?? ''), amount: Number(r.amount) || 0, quantity: Number(r.quantity) || 0,
+          bookingDate: String(r.booking_date), economicDate: String(r.economic_date), vatStatus: String(r.vat_status),
+          vatEstimate: Number(r.vat_estimate) || 0, status: String(r.status),
+        }));
+      }
+    }
     // PARTNER-ITEMS — Übernahme / Partnerwechsel je Zeile mit unverkauften Stücken oder Beteiligung.
     if (p.status !== 'CANCELLED') {
       const lineIds = query(

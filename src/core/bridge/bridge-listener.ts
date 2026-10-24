@@ -62,6 +62,8 @@ import './office-commands';
 import './order-lifecycle-commands';
 // R6F — der Einkauf: Rückgabe an den Lieferanten, Storno, Inbox-Foto verwerfen.
 import './purchase-lifecycle-commands';
+// PURCHASE-EDIT — den Einkauf bearbeiten (Notiz/Foto, Finanzkorrektur, Zahlung stornieren) und seine Auskünfte.
+import './purchase-edit-commands';
 // R6F — die Kommission nach dem Verkauf: Rückgabe nach Verkauf, Verkaufsstorno (R6E-Storno-Grundlage).
 import './consignment-lifecycle-commands';
 // CENTRAL-UI-PARITY — die Store-Auskuenfte, mit denen der zweite Rechner DIESELBE Oberflaeche

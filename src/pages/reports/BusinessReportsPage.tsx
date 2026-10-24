@@ -16,7 +16,7 @@ import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { useRepairStore } from '@/stores/repairStore';
 import { exportCsv, exportExcel } from '@/core/utils/export-file';
-import { computeSalesMetrics } from '@/core/reports/sales-metrics';
+import { computeSalesMetrics, effectiveCost, effectiveMargin } from '@/core/reports/sales-metrics';
 import { isCapitalizedExpenseCategory } from '@/core/models/types';
 import { usePartnerStore } from '@/stores/partnerStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
@@ -220,8 +220,9 @@ export function BusinessReportsPage() {
         for (const l of i.lines) {
           const prod = products.find(p => p.id === l.productId);
           if (prod?.categoryId === categoryFilter) {
-            profit += (l.unitPrice - (l.purchasePriceSnapshot || 0)) * Math.max(1, l.quantity || 1);
-            cost += (l.purchasePriceSnapshot || 0) * Math.max(1, l.quantity || 1);
+            // PURCHASE-EDIT D1 — der Einstand der Zeile wirtschaftlich korrigiert (Verkaufstag + Korrektur).
+            profit += (l.unitPrice - (l.purchasePriceSnapshot || 0)) * Math.max(1, l.quantity || 1) - (l.costCorrection || 0);
+            cost += (l.purchasePriceSnapshot || 0) * Math.max(1, l.quantity || 1) + (l.costCorrection || 0);
           }
         }
       }
@@ -462,7 +463,7 @@ export function BusinessReportsPage() {
     for (const i of finalInvs) {
       const e = resolve(i.staffId);
       e.revenue      += i.grossAmount || 0;
-      e.profit       += i.marginSnapshot || 0;
+      e.profit       += effectiveMargin(i);
       e.invoiceCount += 1;
     }
     for (const r of repairsInRange) {
@@ -834,8 +835,8 @@ export function BusinessReportsPage() {
             {invoices.filter(i => i.status === 'FINAL').slice(0, 20).map(i => (
               <div key={i.id} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid #E5E9EE', fontSize: 12 }}>
                 <span className="font-mono" style={{ color: '#0F0F10' }}>{formatInvoiceDisplayShort(i)}</span>
-                <span style={{ color: '#6B7280' }}>Cost: <Bhd v={i.purchasePriceSnapshot || 0}/></span>
-                <span className="font-mono" style={{ color: '#16A34A' }}>+<Bhd v={i.marginSnapshot || 0}/> BHD</span>
+                <span style={{ color: '#6B7280' }}>Cost: <Bhd v={effectiveCost(i)}/>{i.costCorrection ? <span title="includes a cost correction from a purchase edit" style={{ color: '#B45309' }}> *</span> : null}</span>
+                <span className="font-mono" style={{ color: '#16A34A' }}>+<Bhd v={effectiveMargin(i)}/> BHD</span>
               </div>
             ))}
           </Card>

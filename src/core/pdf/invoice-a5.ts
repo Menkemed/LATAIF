@@ -138,7 +138,11 @@ export interface InvoiceA5Input {
   invoice: {
     number: string; status: string; issuedAt?: string | null; createdAt?: string | null;
     grossAmount: number; paidAmount: number;
-    lines: Array<{ productId?: string; description?: string | null; quantity: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number }>;
+    lines: Array<{
+      productId?: string; description?: string | null; quantity: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number;
+      /** D7 — die beim Ändern des Artikels eingefrorenen Angaben: der Nachdruck zeigt, was damals auf der Rechnung stand. */
+      productSnapshot?: { brand?: string | null; name?: string | null; sku?: string | null; categoryId?: string | null; condition?: string | null; attributes?: Record<string, unknown> | string | null } | null;
+    }>;
   };
   customer?: { firstName?: string; lastName?: string; company?: string; personalId?: string; phone?: string; vatAccountNumber?: string } | null;
   products: ReadonlyArray<{ id: string; brand?: string | null; name?: string | null; sku?: string | null; categoryId?: string | null; condition?: string | null; attributes?: Record<string, unknown> | string | null }>;
@@ -205,7 +209,10 @@ export function buildInvoiceA5Data(input: InvoiceA5Input): InvoiceA5Data {
   const { invoice, customer } = input;
   const lines: InvoiceA5Line[] = invoice.lines.map((l) => {
     // BULK METAL V1 — Bulk-Zeile: Beschreibung (mit Gewicht), kein Systemartikel, keine SKU, nie Lot/COGS.
-    const p = String(l.productId ?? '').startsWith('bulk-') ? undefined : input.products.find((x) => x.id === l.productId);
+    // D7 — ein seit dem Verkauf geänderter Artikel druckt die eingefrorenen Angaben der Zeile, nicht die neuen.
+    const p = String(l.productId ?? '').startsWith('bulk-') ? undefined
+      : l.productSnapshot ? { id: String(l.productId ?? ''), ...l.productSnapshot }
+      : input.products.find((x) => x.id === l.productId);
     const qty = Number(l.quantity) > 0 ? Number(l.quantity) : 1;
     const amount = r3(Number(l.lineTotal) || 0);
     // Nur die 10-%-Steuer steht auf dem Beleg; die Margin-Steuer bleibt im Betrag (wie bisher).

@@ -117,6 +117,9 @@ export const OP_PARTIES_ACCOUNT_GET = 'parties.account.get';
 export const OP_PAGE_OPENING_BALANCES_GET = 'page.opening_balances.get';
 // B1 OPENING ACCOUNTING — Eröffnungsübersicht, Saldenliste, Bilanzvorschau und Stichtagsliste (nur lesen).
 export const OP_PAGE_OPENING_ACCOUNTING_GET = 'page.opening_accounting.get';
+// PURCHASE-EDIT — was an einem Einkauf änderbar ist (und warum nicht) und die Überleitung der Einstandskorrekturen.
+export const OP_PURCHASE_EDIT_CHECK_GET = 'purchase.edit_check.get';
+export const OP_PAGE_COST_CORRECTIONS_GET = 'page.cost_corrections.get';
 
 /**
  * Die Liste IST die Erlaubnis. Ein Name, der hier fehlt, existiert fuer das Netz nicht — genau
@@ -187,6 +190,8 @@ export const STORE_READ_OPS: readonly string[] = [
   OP_PARTIES_ACCOUNT_GET,
   OP_PAGE_OPENING_BALANCES_GET,
   OP_PAGE_OPENING_ACCOUNTING_GET,
+  OP_PURCHASE_EDIT_CHECK_GET,
+  OP_PAGE_COST_CORRECTIONS_GET,
 ];
 
 // Nicht hier — und damit fern nicht aufrufbar — sind nur noch drei Arten von Zugriffen, und keine

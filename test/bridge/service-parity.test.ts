@@ -476,7 +476,7 @@ const REPAIR_COMPARE = [
   // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
   // STOCK CORRECTION (+3) blieb hier seit Phase 1 auf 114 stehen; OPENING BALANCES & SETTLEMENT (+3) → 120.
-  ok(known.length === 60 && reads.length === 19 && ALLOWED_MUTATIONS.length === 123,
+  ok(known.length === 60 && reads.length === 19 && ALLOWED_MUTATIONS.length === 126,
     `SCOPE 1 Probe + 19 Reads + 40 Mutationen = 60 (${known.length}/${reads.length}/${ALLOWED_MUTATIONS.length})`);
   const c3f = ['repairs.create', 'repairs.update', 'transfers.create', 'transfers.update', 'transfers.mark_returned'];
   for (const op of c3f) ok((ALLOWED_MUTATIONS as readonly string[]).includes(op), `SCOPE ${op} steht darauf`);

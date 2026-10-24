@@ -1,6 +1,8 @@
 import { useRef, useState } from 'react';
-import { Plus, X, Image as ImageIcon } from 'lucide-react';
+import { Plus, X, Image as ImageIcon, Camera, RefreshCw } from 'lucide-react';
 import { captureImage } from '@/core/media/capture-profile';
+// Artikelfotos aus Kamera UND Galerie (Owner-Auftrag Purchase Edit): die Aufnahme geht durch denselben Normalisierer.
+import { CameraCapture, cameraSupported } from '@/components/media/CameraCapture';
 
 interface ImageUploadProps {
   images: string[];
@@ -13,6 +15,11 @@ export function ImageUpload({ images, onChange, maxImages = 6, disabled = false 
   const inputRef = useRef<HTMLInputElement>(null);
   const [dragOver, setDragOver] = useState(false);
   const [skipped, setSkipped] = useState(0);
+  // Kamera fürs Anhängen (`at: null`) oder fürs Ersetzen eines Platzes (`at: i`).
+  const [camera, setCamera] = useState<{ at: number | null } | null>(null);
+  // PURCHASE-EDIT — ein Foto an SEINEM Platz ersetzen (das Titelbild bleibt Titelbild); dieselbe Aufnahme.
+  const replaceRef = useRef<HTMLInputElement>(null);
+  const [replaceAt, setReplaceAt] = useState<number | null>(null);
 
   // POST-PARITY R7B PP-12 — das Aufnahmeprofil steht an EINER Stelle (`capture-profile.ts`). Eine
   // unlesbare Datei wird übersprungen und genannt, statt die gültigen mitzureißen.
@@ -38,6 +45,21 @@ export function ImageUpload({ images, onChange, maxImages = 6, disabled = false 
     onChange(images.filter((_, i) => i !== index));
   }
 
+  function replaceImage(index: number, url: string) {
+    onChange(images.map((src, i) => (i === index ? url : src)));
+  }
+
+  async function replaceFromFile(file: File | undefined, index: number | null) {
+    if (!file || index === null || disabled) return;
+    if (!file.type.startsWith('image/')) { setSkipped(1); return; }
+    try {
+      replaceImage(index, await captureImage(file));
+      setSkipped(0);
+    } catch {
+      setSkipped(1);
+    }
+  }
+
   return (
     <div>
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
@@ -53,6 +75,24 @@ export function ImageUpload({ images, onChange, maxImages = 6, disabled = false 
               >
                 <X size={12} />
               </button>
+            )}
+            {!disabled && (
+              <div className="absolute flex" style={{ bottom: 4, left: 4, gap: 4 }}>
+                <button type="button" title="Replace photo" data-image-upload-replace={i}
+                  onClick={() => { setReplaceAt(i); replaceRef.current?.click(); }}
+                  className="cursor-pointer flex items-center justify-center rounded-full"
+                  style={{ width: 22, height: 22, background: '#FFFFFF', border: '1px solid #D5D9DE', color: '#0F0F10' }}>
+                  <RefreshCw size={11} />
+                </button>
+                {cameraSupported() && (
+                  <button type="button" title="Replace with camera" data-image-upload-replace-camera={i}
+                    onClick={() => setCamera({ at: i })}
+                    className="cursor-pointer flex items-center justify-center rounded-full"
+                    style={{ width: 22, height: 22, background: '#FFFFFF', border: '1px solid #D5D9DE', color: '#0F0F10' }}>
+                    <Camera size={11} />
+                  </button>
+                )}
+              </div>
             )}
           </div>
         ))}
@@ -77,7 +117,24 @@ export function ImageUpload({ images, onChange, maxImages = 6, disabled = false 
             <span style={{ fontSize: 10, marginTop: 4 }}>Add Photo</span>
           </div>
         )}
+        {images.length < maxImages && !disabled && cameraSupported() && (
+          <div
+            className="rounded-lg flex flex-col items-center justify-center cursor-pointer transition-all duration-200"
+            style={{ aspectRatio: '1', border: '1px dashed #D5D9DE', color: '#6B7280' }}
+            onClick={() => setCamera({ at: null })}
+            data-image-upload-camera
+          >
+            <Camera size={20} />
+            <span style={{ fontSize: 10, marginTop: 4 }}>Take Photo</span>
+          </div>
+        )}
       </div>
+      <CameraCapture open={camera !== null} onClose={() => setCamera(null)}
+        onCapture={(url) => {
+          const at = camera?.at ?? null;
+          if (at !== null) replaceImage(at, url);
+          else if (images.length < maxImages) onChange([...images, url]);
+        }} />
 
       {skipped > 0 && (
         <p data-image-upload-skipped={skipped} style={{ fontSize: 11, marginTop: 6, color: '#DC2626' }}>
@@ -98,6 +155,13 @@ export function ImageUpload({ images, onChange, maxImages = 6, disabled = false 
         multiple
         style={{ display: 'none' }}
         onChange={e => handleFiles(e.target.files)}
+      />
+      <input
+        ref={replaceRef}
+        type="file"
+        accept="image/*"
+        style={{ display: 'none' }}
+        onChange={e => { const at = replaceAt; void replaceFromFile(e.target.files?.[0], at); e.target.value = ''; setReplaceAt(null); }}
       />
     </div>
   );

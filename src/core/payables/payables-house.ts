@@ -764,7 +764,8 @@ function livePurchase(id: string, branchId: string): Record<string, unknown> {
   return r;
 }
 function purchaseCreditPaidF(purchaseId: string): number {
-  return F(query(`SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit'`, [purchaseId])[0]?.t);
+  // PURCHASE-EDIT D14 — eine stornierte Guthaben-Zahlung zählt nicht (ihr Guthaben ist zurückgegeben).
+  return F(query(`SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit' AND voided_at IS NULL`, [purchaseId])[0]?.t);
 }
 /** Dieselbe Statusregel wie `computeStatus` — nur auf dem Beglichenen (cash + credit), in Fils. */
 function purchaseStatusOf(totalF: number, settledF: number): PurchaseStatus {
@@ -1223,7 +1224,7 @@ export function openSupplierItems(supplierId: string, branchId: string): Supplie
   }
   for (const r of query(
     `SELECT p.id, p.purchase_number, p.purchase_date, p.total_amount, p.paid_amount,
-            COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp WHERE pp.purchase_id = p.id AND pp.method = 'credit'), 0) AS credit_paid
+            COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp WHERE pp.purchase_id = p.id AND pp.method = 'credit' AND pp.voided_at IS NULL), 0) AS credit_paid
        FROM purchases p WHERE p.supplier_id = ? AND p.branch_id = ? AND p.status NOT IN ('PAID', 'CANCELLED')`,
     [supplierId, branchId],
   )) {

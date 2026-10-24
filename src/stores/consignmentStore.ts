@@ -506,6 +506,8 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       supplierId: consignorSupplierId,
       purchaseDate: params.saleDate || new Date().toISOString().split('T')[0],
       notes: `Consignor payout · ${con.consignmentNumber}${params.notes ? ' · ' + params.notes : ''}`,
+      // PURCHASE-EDIT B6 — die Kommission als Spalte: die Umkehr findet ihren Einkauf darüber, nicht über den Vermerk.
+      sourceConsignmentId: con.id,
       lines: [{
         productId: con.productId,
         quantity: 1,

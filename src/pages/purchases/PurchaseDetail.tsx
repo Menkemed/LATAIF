@@ -1,7 +1,7 @@
 // Plan §Purchases + §Purchase Returns — Detail page
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, CreditCard, XCircle, RotateCcw, Printer } from 'lucide-react';
+import { ArrowLeft, CreditCard, XCircle, RotateCcw, Printer, Edit3 } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -32,7 +32,10 @@ import { savePurchaseCredit, savePurchasePayment, viaWrites } from '@/core/payab
 // (`purchases.return_to_supplier` / `purchases.cancel`): am Primary die Hausfolge in einer Klammer,
 // auf PC2 der geprüfte Befehl mit der gesehenen Fassung. Summen, Erstattung, Bestand rechnet der Primary.
 import { PURCHASE_LIFECYCLE_OP } from '@/core/purchases/purchase-lifecycle-house';
-import { savePurchaseCancel, savePurchaseReturn } from '@/core/purchases/purchase-house';
+import { savePurchaseCancel, savePurchasePaymentVoid, savePurchaseReturn } from '@/core/purchases/purchase-house';
+// PURCHASE-EDIT — Bearbeiten (eigene Maske), eine falsch erfasste Zahlung stornieren (D14, nur Owner).
+import { PURCHASE_EDIT_OP } from '@/core/purchases/purchase-edit-house';
+import { usePermission } from '@/hooks/usePermission';
 import { loadPurchaseIdentityPhoto, purchaseIdentityDataUrl, revokeIdentityPhoto, type IdentityPhotoView } from '@/core/identity/identity-photo-view';
 import { productDisplayName } from '@/core/products/display-name';
 
@@ -71,6 +74,11 @@ export function PurchaseDetail() {
   const [returnNotes, setReturnNotes] = useState('');
   const [retFehler, setRetFehler] = useState('');
   const [cancelFehler, setCancelFehler] = useState('');
+  // D14 — Storno einer Zahlung: welche, warum; das Modal schließt nur bei Erfolg.
+  const [voidPay, setVoidPay] = useState<{ id: string; label: string } | null>(null);
+  const [voidReason, setVoidReason] = useState('');
+  const [voidFehler, setVoidFehler] = useState('');
+  const perm = usePermission();
 
   useEffect(() => { loadPurchases(); loadSuppliers(); loadReturns(); loadProducts(); loadCategories(); loadEmployees(); }, [loadPurchases, loadSuppliers, loadReturns, loadProducts, loadCategories, loadEmployees]);
   const { partners, loadPartners } = usePartnerStore();
@@ -200,6 +208,17 @@ export function PurchaseDetail() {
     setConfirmCancel(false);
   }
 
+  // D14 — „Void payment": EINE Buchung gegen die gesehene Fassung; die Zahlung bleibt als stornierte Zeile.
+  async function handleVoidPayment() {
+    if (!purchase || !voidPay || w.busy) return;
+    setVoidFehler('');
+    const r = await savePurchasePaymentVoid(viaWrites(w, PURCHASE_EDIT_OP.VOID_PAYMENT), purchase, voidPay.id, voidReason);
+    if (r.kind !== 'ok') { setVoidFehler(fehlertext(r)); return; }
+    setCreditTick((t) => t + 1);
+    setVoidPay(null);
+    setVoidReason('');
+  }
+
   const getProductName = (pid?: string) => {
     if (!pid) return '—';
     const p = products.find(pr => pr.id === pid);
@@ -229,6 +248,9 @@ export function PurchaseDetail() {
               <Printer size={14} /> Print
             </Button>
             <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
+            {purchase.status !== 'CANCELLED' && (
+              <Button variant="secondary" onClick={() => navigate(`/purchases/${purchase.id}/edit`)} data-purchase-edit><Edit3 size={14} /> Edit</Button>
+            )}
             {canCancel && <Button variant="danger" onClick={() => { setCancelFehler(''); setConfirmCancel(true); }} data-purchase-cancel><XCircle size={14} /> Cancel</Button>}
           </div>
         </div>
@@ -428,18 +450,57 @@ export function PurchaseDetail() {
           ) : (
             <div style={{ marginTop: 10 }}>
               {purchase.payments.map(p => (
-                <div key={p.id} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid rgba(229,225,214,0.5)' }}>
+                <div key={p.id} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid rgba(229,225,214,0.5)', opacity: p.voidedAt ? 0.6 : 1 }}
+                  data-purchase-payment={p.id} {...(p.voidedAt ? { 'data-purchase-payment-voided': '' } : {})}>
                   <div>
-                    <span style={{ fontSize: 13, color: '#0F0F10' }}>{p.paidAt}</span>
+                    <span style={{ fontSize: 13, color: '#0F0F10', textDecoration: p.voidedAt ? 'line-through' : 'none' }}>{p.paidAt}</span>
                     <span style={{ fontSize: 11, color: '#6B7280', marginLeft: 10 }}>{p.method.toUpperCase()}</span>
                     {p.reference && <span style={{ fontSize: 11, color: '#9CA3AF', marginLeft: 10 }}>Ref: {p.reference}</span>}
+                    {p.voidedAt && (
+                      <span style={{ fontSize: 10, marginLeft: 10, padding: '1px 6px', borderRadius: 999, background: 'rgba(220,38,38,0.08)', color: '#B91C1C' }}
+                        title={p.voidReason ? `Voided: ${p.voidReason}` : 'Voided'}>
+                        VOIDED {p.voidedAt.slice(0, 10)}{p.voidReason ? ` · ${p.voidReason}` : ''}
+                      </span>
+                    )}
                   </div>
-                  <span className="font-mono" style={{ fontSize: 13, color: '#16A34A' }}><Bhd v={p.amount}/> BHD</span>
+                  <div className="flex items-center gap-3">
+                    <span className="font-mono" style={{ fontSize: 13, color: p.voidedAt ? '#9CA3AF' : '#16A34A', textDecoration: p.voidedAt ? 'line-through' : 'none' }}><Bhd v={p.amount}/> BHD</span>
+                    {!p.voidedAt && perm.isOwner && purchase.status !== 'CANCELLED' && (
+                      <Button variant="ghost" onClick={() => { setVoidFehler(''); setVoidReason(''); setVoidPay({ id: p.id, label: `${p.paidAt} · ${p.method.toUpperCase()} · ${fmt(p.amount)} BHD` }); }}
+                        data-purchase-payment-void={p.id}>Void</Button>
+                    )}
+                  </div>
                 </div>
               ))}
             </div>
           )}
         </Card></div>
+
+        {/* PURCHASE-EDIT D1 — Einstandskorrekturen verkaufter Stücke (eigener Beleg; die Rechnung bleibt). */}
+        {(purchase.costCorrections ?? []).length > 0 && (
+          <div style={{ marginTop: 20 }} data-purchase-cost-corrections><Card>
+            <span className="text-overline">COST CORRECTIONS (SOLD PIECES)</span>
+            <div style={{ marginTop: 10 }}>
+              {(purchase.costCorrections ?? []).map(c => (
+                <div key={c.id} className="flex justify-between" style={{ padding: '8px 0', borderBottom: '1px solid rgba(229,225,214,0.5)', opacity: c.status === 'ACTIVE' ? 1 : 0.55 }}>
+                  <div>
+                    <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{c.correctionNumber}</span>
+                    <span style={{ fontSize: 11, color: '#6B7280', marginLeft: 10 }}>invoice {c.invoiceNumber || '—'} · {c.quantity} pc</span>
+                    <span style={{ fontSize: 11, color: '#9CA3AF', marginLeft: 10 }}>sale month {c.economicDate.slice(0, 7)} · booked {c.bookingDate}</span>
+                    {c.status !== 'ACTIVE' && <span style={{ fontSize: 10, marginLeft: 10, color: '#6B7280' }}>{c.status}</span>}
+                    {c.status === 'ACTIVE' && c.vatStatus === 'REVIEW' && (
+                      <span style={{ fontSize: 10, marginLeft: 10, padding: '1px 6px', borderRadius: 999, background: 'rgba(180,83,9,0.1)', color: '#B45309' }}
+                        title="A possible VAT effect is marked for the accountant. Nothing is added to a VAT return automatically.">
+                        VAT TO REVIEW{c.vatEstimate ? ` · est. ${fmt(c.vatEstimate)}` : ''}
+                      </span>
+                    )}
+                  </div>
+                  <span className="font-mono" style={{ fontSize: 13, color: c.amount < 0 ? '#16A34A' : '#DC2626' }}>{c.amount < 0 ? '−' : '+'}<Bhd v={Math.abs(c.amount)}/> BHD cost</span>
+                </div>
+              ))}
+            </div>
+          </Card></div>
+        )}
 
         {/* Linked Returns */}
         {linkedReturns.length > 0 && (
@@ -615,6 +676,25 @@ export function PurchaseDetail() {
           <Button variant="danger" onClick={() => void handleCancelPurchase()} disabled={w.busy} data-purchase-cancel-confirm>
             {w.busy ? 'Cancelling…' : 'Confirm Cancel'}
           </Button>
+        </div>
+      </Modal>
+
+      {/* D14 — eine falsch erfasste Zahlung stornieren (die Zeile bleibt, ihre Buchung wird heute gegengebucht). */}
+      <Modal open={!!voidPay} onClose={() => setVoidPay(null)} title="Void Payment" width={440}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <p style={{ fontSize: 13, color: '#4B5563' }}>
+            Void <strong style={{ color: '#0F0F10' }}>{voidPay?.label}</strong>? The payment stays visible as voided, its booking is reversed today,
+            and a supplier credit it used is given back. Record the correct payment afterwards.
+          </p>
+          <Input required label="REASON" value={voidReason} onChange={e => setVoidReason(e.target.value)} disabled={w.busy} data-purchase-void-reason
+            placeholder="e.g. amount entered wrongly" />
+          <WriteError text={voidFehler} />
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={() => setVoidPay(null)} disabled={w.busy}>Cancel</Button>
+            <Button variant="danger" onClick={() => void handleVoidPayment()} disabled={w.busy || !voidReason.trim()} data-purchase-void-confirm>
+              {w.busy ? 'Voiding…' : 'Void Payment'}
+            </Button>
+          </div>
         </div>
       </Modal>
 

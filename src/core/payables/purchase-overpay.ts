@@ -83,9 +83,10 @@ function clawbackSupplierOverpayCredit(purchaseId: string): void {
 // beginLedgerTransaction (wirft → rollback). reverseSource ist multi-cycle-safe (per-Leg).
 // Innerhalb einer offenen Handlung (R6D) verschachtelt sich die Klammer nur — ein Fehler nimmt dann
 // die GANZE Handlung zurueck, nicht bloss die Gutschrift.
-export function reconcilePurchaseOverpayCredit(purchaseId: string): void {
+export function reconcilePurchaseOverpayCredit(purchaseId: string, opts?: { now?: string }): void {
   const db = getDatabase();
-  const now = new Date().toISOString();
+  // PURCHASE-EDIT D1 — die Einkaufsbearbeitung gibt ihre Vorgangszeit mit: das Guthaben steht am selben Tag wie Gegen- und Neubuchung.
+  const now = opts?.now ?? new Date().toISOString();
   const { over, supplierId, branchId: purchaseBranch } = purchaseOverpayOf(purchaseId);
   const ex = existingSupplierOverpayCredit(purchaseId);
   const exAmt = ex ? ex.amount : 0;

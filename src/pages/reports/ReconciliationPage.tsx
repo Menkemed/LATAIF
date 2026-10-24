@@ -15,6 +15,8 @@ import { useAuthStore } from '@/stores/authStore';
 import { useSharedRead } from '@/core/data/shared-read';
 import { readsFromPrimary } from '@/core/data/primary-source';
 import { blockPrimaryOnlyOnClient } from '@/core/data/primary-only';
+// PURCHASE-EDIT D1 — Einstandskorrekturen: Buchungsmonat (Hauptbuch) gegen Verkaufsmonat (Gewinnbericht).
+import { CostCorrectionsCard } from '@/components/finance/CostCorrectionsCard';
 import {
   reconciliationSnapshotFor, diff, status, EPSILON,
   type ReconciliationSnapshot,
@@ -328,6 +330,8 @@ export function ReconciliationPage() {
           </div>
         </Card>
       )}
+
+      <CostCorrectionsCard refreshTick={refreshTick} branchId={sessionBranchId} />
     </div>
     </div>
   );

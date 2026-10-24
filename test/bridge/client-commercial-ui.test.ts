@@ -87,13 +87,12 @@ const accepts = (f: () => unknown, m: string): void => {
     'DBLESS R7B PP-7 ihr Rumpfbau (client-commercial-request) ist mit ihnen entfernt');
 }
 
-// ── 2) Für einen Einkauf gibt es kein Änderungsformular ───────────────────
+// ── 2) Die Einkaufsbearbeitung ist EIN Vertrag im Haus (PURCHASE-EDIT) ─────
 {
-  // Die Zusage dahinter lebt weiter: es gibt im Haus keine Einkaufs-Bearbeitung, also auch keine
-  // freigegebene Buchung dafuer.
+  // Freigegeben ist die Buchung, weil es im Haus genau EINE Bearbeitung gibt (`editPurchaseInHouse`).
   const { ALLOWED_MUTATIONS } = await import('../../src/core/bridge/command-registry.ts');
-  ok(!ALLOWED_MUTATIONS.includes('purchases.update'),
-    'SCOPE es gibt keine Einkaufs-Bearbeitung — den Vertrag gibt es im Haus nicht');
+  ok(ALLOWED_MUTATIONS.includes('purchases.update') && ALLOWED_MUTATIONS.includes('purchases.correct'),
+    'SCOPE die Einkaufsbearbeitung ist freigegeben — und hat ihren Vertrag im Haus');
 }
 
 // ── 3) Was das Einkaufsformular schickt, hält der echte Prüfer aus ────────

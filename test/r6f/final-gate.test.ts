@@ -58,7 +58,7 @@ for (const m of ['read-commands', 'invoice-command', 'customer-commands', 'produ
   'lifecycle-commands', 'masterdata-commands', 'inventory-commands', 'store-read-commands',
   'money-commands', 'partner-item-commands', 'payables-commands', 'gold-commands', 'metal-commands',
   'offer-commands', 'invoice-flag-commands', 'sales-reversal-commands', 'message-commands',
-  'purchase-lifecycle-commands', 'order-lifecycle-commands', 'consignment-lifecycle-commands', 'production-commands', 'office-commands',
+  'purchase-lifecycle-commands', 'purchase-edit-commands', 'order-lifecycle-commands', 'consignment-lifecycle-commands', 'production-commands', 'office-commands',
   // BULK METAL V1 — vier manuelle Lot-Aktionen und vier Lesebefehle gehören zum ausgelieferten Zustand.
   'bulk-metal-commands',
   // STOCK CORRECTION — Abgang und Storno (Owner) vom zweiten Rechner, die Karte am Artikel.
@@ -111,10 +111,10 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   const list = (t: string): string[] => [...(/export const ALLOWED_MUTATIONS: readonly string\[\] = \[([\s\S]*?)\];/.exec(t)?.[1] ?? '').matchAll(/'([^']+)'/g)].map((m) => m[1]);
   const vorher = list(vor('src/core/bridge/command-registry.ts'));
   const jetzt = [...registry.ALLOWED_MUTATIONS];
-  ok(vorher.length === 88 && jetzt.length === 123 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT, ...OB_MUT, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel']) && vorher.every((o) => jetzt.includes(o)),
+  ok(vorher.length === 88 && jetzt.length === 126 && S(jetzt.filter((o) => !vorher.includes(o))) === S([...R6F_MUT, ...R7A_MUT, ...PREG5_MUT, ...BULK_MUT, ...STOCK_MUT, ...OB_MUT, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'purchases.update', 'purchases.correct', 'purchases.void_payment']) && vorher.every((o) => jetzt.includes(o)),
     `REGISTRY Buchungen 88 → 102 (R6F) → 103 (R7A) → 110 (MEDIA-INBOX + PARTNER-ITEMS) → 114 (BULK METAL V1) → 116 (STOCK CORRECTION): GENAU die vierzehn R6F-Namen + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1, in dieser Reihenfolge, keine fällt weg (${jetzt.filter((o) => !vorher.includes(o)).join(',')})`);
   const catalogue = (t: string): string[] => [...t.matchAll(/^export const OP_[A-Z_]+ = '([^']+)'/gm)].map((m) => m[1]);
-  ok(S([...readOps.STORE_READ_OPS]) === S([...catalogue(vor('src/core/bridge/store-read-ops.ts')), 'page.invoice_print.get', ...BULK_READ, ...STOCK_READ, ...OB_READ, 'page.opening_accounting.get']),
+  ok(S([...readOps.STORE_READ_OPS]) === S([...catalogue(vor('src/core/bridge/store-read-ops.ts')), 'page.invoice_print.get', ...BULK_READ, ...STOCK_READ, ...OB_READ, 'page.opening_accounting.get', 'purchase.edit_check.get', 'page.cost_corrections.get']),
     'REGISTRY Auskünfte unverändert bis auf die A5-Druckauskunft und die vier BULK METAL V1 — die Bildkennungen kommen schon über products.get, die Inbox über store.purchases.get');
   const rustOps = (t: string): string[] => {
     const l = /pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(t)?.[1] ?? '';
@@ -122,10 +122,10 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 160 && rJetzt.length === 207 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'page.opening_accounting.get']),
+  ok(rVor.length === 160 && rJetzt.length === 212 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'page.opening_accounting.get', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchase.edit_check.get', 'page.cost_corrections.get']),
     `REGISTRY Rust 160 → 174 (R6F) → 175 (R7A) → 176 (PRE-G5) → 184 (MEDIA-INBOX, PARTNER-ITEMS, A5) → 192 (BULK METAL V1) → 195 (STOCK CORRECTION): GENAU diese vierzehn + eins aus R7A (production.complete) + acht BULK METAL V1, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 207 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
+  ok(known.length === 212 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
   for (const op of R6F_MUT) {
     const rule = (perms.OPERATION_PERMISSIONS as Record<string, { kind?: string } | null>)[op];
     const soll = ADMIN_OPS.includes(op) ? 'isAdmin' : null;
@@ -138,7 +138,7 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   const ident = { commandId: '00000001-0000-4000-8000-000000000000', tenantId: 't', branchId: 'branch-main', userId: 'u', role: 'ADMIN', payloadHash: 'h' };
   const r = await registry.executeCommand('orders.delete', {}, { ...ident, op: 'orders.delete' } as never);
   ok(r.kind === 'infrastructure_error' && r.code === 'BRIDGE_OP_NOT_REGISTERED', `FAILCLOSED „Auftrag löschen" läuft nicht fern (${S(r)})`);
-  for (const op of ['orders.delete', 'consignments.delete', 'purchases.delete', 'purchases.update', 'production.delete', 'tasks.delete',
+  for (const op of ['orders.delete', 'consignments.delete', 'purchases.delete', 'production.delete', 'tasks.delete',
     'documents.delete', 'orders.cancel_with_money', 'consignments.mark_returned_after_sale', 'purchases.delete_return']) {
     let t = ''; try { registry.registerCommand(op, { kind: 'mutation', handler: () => ({}) }); } catch (e) { t = String(e); }
     ok(/refusing to register/.test(t) && !rJetzt.includes(op), `FAILCLOSED ${op} ist weder registrierbar noch in Rust`);

@@ -50,6 +50,12 @@ export interface SalesMetricsInvoice {
   netAmount: number;
   marginSnapshot?: number;
   purchasePriceSnapshot?: number;
+  /**
+   * PURCHASE-EDIT D1 — Σ der wirksamen Einstandskorrekturen dieser Rechnung (positiv = Einstand
+   * gestiegen). Die Rechnung bleibt, wie sie war; der Gewinn ist wirtschaftlich korrigiert und gehört
+   * zur Periode der Rechnung (D1-B).
+   */
+  costCorrection?: number;
   issuedAt?: string;
   createdAt?: string;
   lines: SalesMetricsLine[];
@@ -76,6 +82,17 @@ export interface SalesMetrics {
   vat: number;      // kundensichtbare VAT (nur VAT_10-Lines) abzgl. anteiligem Return-VAT
   profit: number;   // Marge (marginSnapshot) abzgl. anteiligem Return-Profit
   cost: number;     // Wareneinsatz (purchasePriceSnapshot) abzgl. anteiligem Return-Cost
+}
+
+/**
+ * PURCHASE-EDIT D1 — Gewinn und Einstand einer Rechnung, wie sie wirtschaftlich gelten: der Stand vom
+ * Verkaufstag, berichtigt um die Einstandskorrekturen. Der eine Ort für jeden Gewinnleser.
+ */
+export function effectiveMargin(inv: { marginSnapshot?: number; costCorrection?: number }): number {
+  return (inv.marginSnapshot || 0) - (inv.costCorrection || 0);
+}
+export function effectiveCost(inv: { purchasePriceSnapshot?: number; costCorrection?: number }): number {
+  return (inv.purchasePriceSnapshot || 0) + (inv.costCorrection || 0);
 }
 
 // Kundensichtbare VAT einer Rechnung = nur VAT_10-Lines (Differenzbesteuerung/MARGIN
@@ -115,8 +132,8 @@ export function computeSalesMetrics(
     gross += i.grossAmount || 0;
     net += i.netAmount || 0;
     vat += vat10Of(i);
-    profit += i.marginSnapshot || 0;
-    cost += i.purchasePriceSnapshot || 0;
+    profit += effectiveMargin(i);
+    cost += effectiveCost(i);
   }
 
   // B3 / B3-B — wirksame Returns (Credit Note existiert) mindern ALLE Kennzahlen anteilig,
@@ -144,8 +161,8 @@ export function computeSalesMetrics(
       const ratio = amt / g;
       net -= (inv.netAmount || 0) * ratio;
       vat -= vat10Of(inv) * ratio;
-      profit -= (inv.marginSnapshot || 0) * ratio;
-      cost -= (inv.purchasePriceSnapshot || 0) * ratio;
+      profit -= effectiveMargin(inv) * ratio;
+      cost -= effectiveCost(inv) * ratio;
     }
   }
 

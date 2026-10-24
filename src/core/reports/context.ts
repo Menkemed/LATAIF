@@ -8,6 +8,7 @@ import { query } from '@/core/db/helpers';
 import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queries';
 import { computeSalesMetrics, type SalesMetrics } from '@/core/reports/sales-metrics';
 import { loadSalesData } from '@/core/reports/sales-metrics-loader';
+import { lineCostCorrectionSql } from '@/core/purchases/cost-correction-read';
 import { balanceOf } from '@/core/ledger/queries';
 
 // ── Period helpers ──────────────────────────────────────────
@@ -286,11 +287,13 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
   }).sort((a, b) => b.purchaseValue - a.purchaseValue);
 
   // ── Sales breakdown (period-scoped) ────────────────────
+  // PURCHASE-EDIT D1 — der Gewinn je Zeile folgt dem korrigierten Einstand (Verkaufstag + Korrektur).
+  const lineCorr = lineCostCorrectionSql();
   const salesByBrand = rows(
     `SELECT p.brand AS brand,
             COUNT(il.id) AS units,
             COALESCE(SUM(il.line_total), 0) AS revenue,
-            COALESCE(SUM(il.line_total - il.purchase_price_snapshot * COALESCE(il.quantity, 1)), 0) AS profit
+            COALESCE(SUM(il.line_total - il.purchase_price_snapshot * COALESCE(il.quantity, 1) - ${lineCorr}), 0) AS profit
      FROM invoice_lines il
      JOIN invoices i ON i.id = il.invoice_id
      JOIN products p ON p.id = il.product_id
@@ -309,7 +312,7 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
     `SELECT c.name AS category,
             COUNT(il.id) AS units,
             COALESCE(SUM(il.line_total), 0) AS revenue,
-            COALESCE(SUM(il.line_total - il.purchase_price_snapshot * COALESCE(il.quantity, 1)), 0) AS profit
+            COALESCE(SUM(il.line_total - il.purchase_price_snapshot * COALESCE(il.quantity, 1) - ${lineCorr}), 0) AS profit
      FROM invoice_lines il
      JOIN invoices i ON i.id = il.invoice_id
      JOIN products p ON p.id = il.product_id
@@ -327,7 +330,7 @@ export function buildReportContext(opts: BuildOpts): ReportContext {
 
   const topProducts = rows(
     `SELECT p.brand AS brand, p.name AS name, il.line_total AS sale_price,
-            (il.line_total - il.purchase_price_snapshot * COALESCE(il.quantity, 1)) AS profit
+            (il.line_total - il.purchase_price_snapshot * COALESCE(il.quantity, 1) - ${lineCorr}) AS profit
      FROM invoice_lines il
      JOIN invoices i ON i.id = il.invoice_id
      JOIN products p ON p.id = il.product_id

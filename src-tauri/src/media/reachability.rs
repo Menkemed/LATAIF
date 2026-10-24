@@ -76,6 +76,11 @@ pub const REQUIRED_VARIANT_SQL: &str = "SELECT v.tenant_id, v.media_id, v.varian
 /// The hash is required to match as well. If the snapshot's hash and the generation's hash disagree
 /// the row is simply not selected — a mismatched pair is not the evidence this purchase recorded,
 /// and silently substituting a different file would be worse than showing none.
+///
+/// PURCHASE-EDIT D10 — the second half: an ID photo that was REPLACED on the purchase (`$.identityRetired[]`).
+/// It is never shown again (no visible history), but it is evidence that has to be kept — ID copies of a
+/// purchase are retained for at least five years in Bahrain — so it is exactly as required as the current
+/// one: same exact-generation join, same hash match, in every backup and every move.
 pub const REQUIRED_PURCHASE_IDENTITY_SQL: &str = "SELECT o.tenant_id, o.media_id, 'identity_snapshot', g.stored_blob_hash, g.byte_size, g.generation_no, g.extension \
      FROM purchases p \
      JOIN media_objects o ON o.media_id = json_extract(p.supplier_snapshot, '$.identity.mediaId') \
@@ -83,7 +88,16 @@ pub const REQUIRED_PURCHASE_IDENTITY_SQL: &str = "SELECT o.tenant_id, o.media_id
      JOIN media_blob_generations g ON g.tenant_id=b.tenant_id AND g.blob_id=b.blob_id \
                                   AND g.generation_no = json_extract(p.supplier_snapshot, '$.identity.generationNo') \
                                   AND g.stored_blob_hash = json_extract(p.supplier_snapshot, '$.identity.blobHash') \
-     WHERE p.supplier_snapshot IS NOT NULL AND json_extract(p.supplier_snapshot, '$.identity.mediaId') IS NOT NULL";
+     WHERE p.supplier_snapshot IS NOT NULL AND json_extract(p.supplier_snapshot, '$.identity.mediaId') IS NOT NULL \
+     UNION ALL \
+     SELECT o.tenant_id, o.media_id, 'identity_snapshot', g.stored_blob_hash, g.byte_size, g.generation_no, g.extension \
+     FROM purchases p, json_each(p.supplier_snapshot, '$.identityRetired') r \
+     JOIN media_objects o ON o.media_id = json_extract(r.value, '$.mediaId') \
+     JOIN media_blobs b ON b.tenant_id=o.tenant_id AND b.blob_id=o.master_blob_id \
+     JOIN media_blob_generations g ON g.tenant_id=b.tenant_id AND g.blob_id=b.blob_id \
+                                  AND g.generation_no = json_extract(r.value, '$.generationNo') \
+                                  AND g.stored_blob_hash = json_extract(r.value, '$.blobHash') \
+     WHERE p.supplier_snapshot IS NOT NULL AND json_type(p.supplier_snapshot, '$.identityRetired') = 'array'";
 
 /// Media-root-relative storage path, the same layout the store writes: `<scope>/<hh>/<hash>.<ext>`.
 pub fn rel_path_for(scope: &str, hash: &str, ext: &str) -> Result<String, MediaError> {

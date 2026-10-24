@@ -237,6 +237,33 @@ const wirftAsync = async (fn: () => Promise<unknown>): Promise<{ code: string; m
 }
 marker('CENTRAL_UI_R6F_PRODUCT_MEDIA_PARITY_PROVED');
 
+// ══ §1b — PURCHASE-EDIT: ein Foto an SEINEM Platz ersetzen (ImageUpload „Replace"), Primary == PC2 ═══
+{
+  const R = bytes('r-replace');
+  // Was ImageUpload nach „Replace" an Platz 0 liefert: [neu, altes zweites] — die Reihenfolge bleibt.
+  const dbA = freshDb();
+  const pA = await artikel(dbA, '41');
+  const [a0, a1] = gallery(dbA, pA);
+  const resA = await useProductStore.getState().editProductWithMedia(pA, textPayloadOf(pA, {}) as never, {
+    srcs: [dataUrl(R), 'blob:a1'],
+    resolved: [{ url: 'blob:a0', mediaId: a0 }, { url: 'blob:a1', mediaId: a1 }],
+    status: 'media',
+  });
+  const dbB = freshDb();
+  const pB = await artikel(dbB, '41');
+  const [b0, b1] = gallery(dbB, pB);
+  const plan = await planRemoteGallery([dataUrl(R), 'blob:b1'], [{ url: 'blob:b0', mediaId: b0 }, { url: 'blob:b1', mediaId: b1 }], stageAs());
+  const resB = await runProductUpdate(deps(dbB) as never, identity('42'), { id: pB, gallery: plan });
+  const wA = { inhalt: inhalt(dbA, pA), retired: retired(dbA, pA) };
+  const wB = { inhalt: inhalt(dbB, pB), retired: retired(dbB, pB) };
+  ok(resA.status === 'edited' && resB.kind === 'ok', `REPLACE beide Wege gehen durch (${S(resA)} / ${S(resB).slice(0, 120)})`);
+  ok(S(wA) === S(wB), `REPLACE Primary == PC2 (Inhalt, Reihenfolge, Hauptbild, Rückzug)\n  A=${S(wA)}\n  B=${S(wB)}`);
+  const gB = gallery(dbB, pB);
+  ok(gB.length === 2 && gB[1] === b1 && gB[0] !== b0 && !gB.includes(b0) && Number(wB.inhalt[0][1]) === 1,
+    'REPLACE das neue Foto steht auf Platz 0 und ist Hauptbild; das zweite bleibt DASSELBE auf Platz 1');
+  ok(wB.retired === 1 && wA.retired === 1, 'REPLACE das ersetzte Foto ist zurückgezogen, nicht gelöscht (Spur bleibt)');
+}
+
 // ══ §4 — Fehlerinjektion ═════════════════════════════════════════════════════
 {
   // (a) Das Veröffentlichen des neuen Bildes scheitert — fern: kein Urteil, nichts bleibt, Ablage bleibt.
@@ -424,8 +451,9 @@ marker('CENTRAL_UI_R6F_PRODUCT_MEDIA_CLIENT_PROVED');
   ok(!/nichtAmClient\(/.test(pd), 'UI der Bildweg meldet sich am Client nicht mehr als „not available"');
   ok(/planRemoteGallery\(form\.images \|\| \[\], media\.status === 'media' \? media\.items : \[\], stageDataUrls\)/.test(save),
     'UI PC2 baut die Plätze aus dem angezeigten Entwurf (media.items aus products.get) und legt neue Fotos ab');
-  ok(/local: async \(\) => await editProductWithMedia\(id, textPayload, \{ srcs: form\.images \|\| \[\], resolved, status \}\)/.test(save)
-    && /remote: \(\) => \(\{ id, \.\.\.textDiff, gallery \}\)/.test(save),
+  // PURCHASE-EDIT D7 — beide Wege tragen optional den Bearbeitungsgrund eines verkauften Artikels mit.
+  ok(/local: async \(\) => await editProductWithMedia\(id, textPayload, \{ srcs: form\.images \|\| \[\], resolved, status \}(\)|, undefined, undefined,\s*editReason\.trim\(\) \? \{ editReason: editReason\.trim\(\) \} : undefined\))/.test(save)
+    && /remote: \(\) => \(\{ id, \.\.\.textDiff, gallery(, \.\.\.\(editReason\.trim\(\) \? \{ editReason: editReason\.trim\(\) \} : \{\}\))? \}\)/.test(save),
   'UI EINE Weiche: am Primary editProductWithMedia, auf PC2 products.update mit gallery');
   const guard = save.indexOf('if (!draftSeeded) {');
   ok(guard > 0 && guard < save.indexOf('planRemoteGallery(') && guard < save.indexOf('presentationToResolverStatus('),

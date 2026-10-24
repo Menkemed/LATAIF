@@ -47,6 +47,7 @@ import { stonesOrThrow } from '../core/products/stones.ts';
 import { belongsToConsignment } from '@/core/consignment/consignment-sale-link';
 // F9 — Menge, Bestandsstatus und Herkunft folgen aus den Vorgängen, nicht aus der Artikelbearbeitung.
 import { PRODUCT_LIFECYCLE_LOCKED, lifecycleEditRefusal } from '@/core/products/lifecycle-fields';
+import { PRODUCT_EDIT_REASON_REQUIRED, purchaseBoundRefusal, soldItemEditNeedsReason } from '@/core/products/purchase-bound';
 import { SKU_TAKEN, SkuTakenError, assertSkuFree, assertSkuChangeFree, skuTakenBy, skuChangeTakenBy, skuTakenMessage, isSkuTaken as isSkuTakenRefusal } from '@/core/products/sku-unique';
 import { purgeProductLeftoversSafely, type LeftoverDb } from '@/core/products/product-leftovers';
 
@@ -413,7 +414,7 @@ interface ProductStore {
      * weg (ein Mensch am Primary aendert Preise bewusst); ein FERNAUFTRAG setzt sie, sonst waere
      * „ein Bild mitschicken" der Weg, an der Sperre vorbeizukommen.
      */
-    opts?: { priceEligibilityRequired?: boolean },
+    opts?: { priceEligibilityRequired?: boolean; editReason?: string },
   ) => Promise<EditProductResult>;
   /**
    * MEDIA-EDIT-PRESERVE — durable PRODUCT-TEXT-ONLY edit that NEVER touches the
@@ -424,7 +425,7 @@ interface ProductStore {
    * cannot be lost by a pure text save. The gallery reconciliation lives ONLY in
    * editProductWithMedia and runs ONLY when the user actually edited images.
    */
-  editProductTextDurably: (id: string, data: Partial<Product>, opts?: { priceEligibilityRequired?: boolean }, ctx?: WriteContext) => Promise<EditProductResult>;
+  editProductTextDurably: (id: string, data: Partial<Product>, opts?: { priceEligibilityRequired?: boolean; editReason?: string }, ctx?: WriteContext) => Promise<EditProductResult>;
   updateProduct: (id: string, data: Partial<Product>) => void;
   deleteProduct: (id: string) => void;
   createCategory: (data: Partial<Category>) => Category;
@@ -1146,6 +1147,14 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     if (vatNein) return { status: 'blocked', errorCode: VAT_PERIOD_FILED, message: vatNein };
     const skuNein = skuEditRefusal(id, textDiff.set);
     if (skuNein) return skuNein;
+    // PURCHASE-EDIT D13/D7 — Einkaufspreis/-datum eines einkaufsgebundenen Artikels nur über „Purchase → Edit";
+    // die Druckangaben eines verkauften Artikels nur mit Begründung (die Rechnung friert sie vorher ein).
+    const gebunden = purchaseBoundRefusal(id, textDiff.set);
+    if (gebunden) return { status: 'blocked', errorCode: gebunden.code, message: gebunden.message };
+    const editReason = typeof opts?.editReason === 'string' ? opts.editReason.trim() : '';
+    if (!editReason && soldItemEditNeedsReason(id, textDiff.set)) {
+      return { status: 'blocked', errorCode: PRODUCT_EDIT_REASON_REQUIRED, message: 'This item is on an invoice. Please enter a reason for changing its details — the invoice keeps what it printed.' };
+    }
 
     const productEdit: ProductEditIntent = {
       set: textDiff.set, baseline: textDiff.baseline,
@@ -1154,7 +1163,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       // Die Preisberechtigung wird DURCHGEREICHT, nicht hier entschieden: geprueft wird sie in
       // derselben Transaktion, unmittelbar vor dem UPDATE (coordinator.applyProductEditInTx).
       ...(opts?.priceEligibilityRequired === true ? { priceEligibilityRequired: true } : {}),
-      audit: { module: 'Product', changedBy: (() => { try { return currentUserId(); } catch { return null; } })(), newValueJson: JSON.stringify(Object.fromEntries(textDiff.set)) },
+      audit: { module: 'Product', changedBy: (() => { try { return currentUserId(); } catch { return null; } })(), newValueJson: JSON.stringify({ ...Object.fromEntries(textDiff.set), ...(editReason ? { editReason } : {}) }) },
     };
 
     // Decode new images → prepare inputs (requestId = clientId, content hash). Freeze the batch now: a
@@ -1223,6 +1232,14 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     if (vatNein) return { status: 'blocked', errorCode: VAT_PERIOD_FILED, message: vatNein };
     const skuNein = skuEditRefusal(id, textDiff.set);
     if (skuNein) return skuNein;
+    // PURCHASE-EDIT D13/D7 — Einkaufspreis/-datum eines einkaufsgebundenen Artikels nur über „Purchase → Edit";
+    // die Druckangaben eines verkauften Artikels nur mit Begründung (die Rechnung friert sie vorher ein).
+    const gebunden = purchaseBoundRefusal(id, textDiff.set);
+    if (gebunden) return { status: 'blocked', errorCode: gebunden.code, message: gebunden.message };
+    const editReason = typeof opts?.editReason === 'string' ? opts.editReason.trim() : '';
+    if (!editReason && soldItemEditNeedsReason(id, textDiff.set)) {
+      return { status: 'blocked', errorCode: PRODUCT_EDIT_REASON_REQUIRED, message: 'This item is on an invoice. Please enter a reason for changing its details — the invoice keeps what it printed.' };
+    }
 
     const productEdit = {
       set: textDiff.set, baseline: textDiff.baseline,
@@ -1233,7 +1250,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       // v0.8.48 — nur der mobile Edit verlangt die Preisberechtigung; der Desktop laesst das Feld
       // weg und unterliegt der Regel nicht. Geprueft wird sie im Koordinator, in der Transaktion.
       ...(opts?.priceEligibilityRequired ? { priceEligibilityRequired: true } : {}),
-      audit: { module: 'Product', changedBy: (() => { try { return currentUserId(); } catch { return null; } })(), newValueJson: JSON.stringify(Object.fromEntries(textDiff.set)) },
+      audit: { module: 'Product', changedBy: (() => { try { return currentUserId(); } catch { return null; } })(), newValueJson: JSON.stringify({ ...Object.fromEntries(textDiff.set), ...(editReason ? { editReason } : {}) }) },
     };
     // A fresh batch id per save: a text edit stages nothing in Rust, so there is
     // no frozen retry to reuse; the coordinator's deterministic audit id still

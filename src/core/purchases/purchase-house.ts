@@ -20,7 +20,12 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { MasterdataInputError } from '@/core/masterdata/masterdata-rules';
 import { normalizeSpecImages } from '@/core/media/record-image';
 import { adoptInboxPhotosToProduct } from './inbox-media';
-import { applyIdentityDocument, IdentityMediaError } from '@/core/identity/identity-media';
+import { applyIdentityDocument, identitySourceOf, IdentityMediaError } from '@/core/identity/identity-media';
+import { prepareIdentityPhoto } from '@/core/identity/identity-save';
+import {
+  PurchaseEditRejected, editPurchaseInHouse, voidPurchasePaymentInHouse,
+  type CorrectionKind, type PurchaseEditRequest, type PurchaseEdited, type PurchasePaymentVoided,
+} from './purchase-edit-house';
 import { PurchaseActionRejected, planPurchaseCreate, purchaseCreateIssue, type PurchaseCreateInput, type PurchaseCreatePort } from './purchase-create';
 import {
   PURCHASE_PRIMARY_ONLY, PurchaseLifecycleRejected,
@@ -304,5 +309,119 @@ export function saveInboxDismiss(write: PurchaseLifecycleWrite<Result>, inboxId:
   return speichern(write, {
     local: () => dismissPurchaseInboxOnPrimary(inboxId) as unknown as Promise<Result>,
     remote: () => inboxDismissBody(inboxId),
+  });
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// PURCHASE-EDIT — „Save" der Einkaufsbearbeitung und „Void payment": am Primary `runOnPrimary`
+// (exklusiv, EINE Transaktion, danach durabel), auf PC2 der Rumpf für den geprüften Fernbefehl —
+// beide für DIESELBE Hausfolge (`purchase-edit-house.ts`).
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Was die Maske „Edit purchase" den Menschen ändern lässt. `undefined` = unverändert. */
+export interface PurchaseEditForm {
+  reason: string;
+  notes?: string | null;
+  staffId?: string | null;
+  purchaseDate?: string;
+  supplierId?: string;
+  confirmPaymentsToNewSupplier?: boolean;
+  lines?: Array<{ lineId: string; unitPrice?: number; quantity?: number }>;
+  correctionKind?: CorrectionKind;
+  /** Das neue Ausweisfoto (Kamera/Galerie, schon normalisiert) und ob es auch die Person bekommt. */
+  identityPhoto?: { dataUrl: string; alsoUpdatePerson?: boolean };
+}
+
+/** Ändert diese Maske Geld oder Ware (Klasse C, nur Owner)? Dann `purchases.correct`, sonst `purchases.update`. */
+export function isFinancialPurchaseEdit(form: PurchaseEditForm): boolean {
+  return form.purchaseDate !== undefined || form.supplierId !== undefined
+    || (form.lines !== undefined && form.lines.length > 0) || form.correctionKind !== undefined;
+}
+
+/** Der Rumpf für `purchases.update` / `purchases.correct` — Summen, Lose, Buchungen rechnet der Primary. */
+export function purchaseEditBody(purchase: { id: string }, form: PurchaseEditForm, stagingId?: string): Record<string, unknown> {
+  const body: Record<string, unknown> = { purchaseId: purchase.id, expectedRevision: fassungVon(purchase), reason: form.reason };
+  if (form.notes !== undefined) body.notes = form.notes;
+  if (form.staffId !== undefined) body.staffId = form.staffId;
+  if (stagingId) {
+    body.identityPhotoStagingId = stagingId;
+    if (form.identityPhoto?.alsoUpdatePerson) body.alsoUpdatePerson = true;
+  }
+  if (form.purchaseDate !== undefined) body.purchaseDate = form.purchaseDate;
+  if (form.supplierId !== undefined) body.supplierId = form.supplierId;
+  if (form.confirmPaymentsToNewSupplier !== undefined) body.confirmPaymentsToNewSupplier = form.confirmPaymentsToNewSupplier;
+  if (form.lines !== undefined && form.lines.length > 0) body.lines = form.lines;
+  if (form.correctionKind !== undefined) body.correctionKind = form.correctionKind;
+  return body;
+}
+
+/** „Save" am Primary: das neue Ausweisfoto VOR der Klammer aufnehmen (im Bereich der Person), dann EINE Klammer. */
+export async function editPurchaseOnPrimary(purchaseId: string, form: PurchaseEditForm, expectedRevision?: number): Promise<PurchaseEdited> {
+  const blocked = nurAmPrimary<PurchaseEdited>();
+  if (blocked) return blocked;
+  let identityPhoto: PurchaseEditRequest['identityPhoto'];
+  if (form.identityPhoto) {
+    const sid = form.supplierId
+      ?? String(query('SELECT supplier_id FROM purchases WHERE id = ?', [purchaseId])[0]?.supplier_id ?? '');
+    const owner = identitySourceOf('supplier', sid);
+    const prepared = await prepareIdentityPhoto(false, owner.ownerType, { kind: 'set', dataUrl: form.identityPhoto.dataUrl },
+      { staging: 'identityPhotoStagingId', remove: 'identityPhoto' }, owner.ownerId);
+    if (prepared.kind === 'fail') {
+      const o = prepared.outcome as { code?: string; message?: string };
+      throw new PurchaseEditRejected(o.code ?? 'IDENTITY_INGEST_FAILED', o.message ?? 'The ID photo could not be stored. Nothing was saved.');
+    }
+    if (prepared.kind === 'ready' && prepared.mediaId) {
+      identityPhoto = { mediaId: prepared.mediaId, alsoUpdatePerson: form.identityPhoto.alsoUpdatePerson === true };
+    }
+  }
+  const req: PurchaseEditRequest = {
+    purchaseId, reason: form.reason, notes: form.notes, staffId: form.staffId, purchaseDate: form.purchaseDate,
+    supplierId: form.supplierId, confirmPaymentsToNewSupplier: form.confirmPaymentsToNewSupplier, lines: form.lines,
+    correctionKind: form.correctionKind, ...(identityPhoto ? { identityPhoto } : {}),
+  };
+  return runOnPrimary(() => editPurchaseInHouse(req, localHouseCtx(), expectedRevision), lebenszyklusLesen);
+}
+
+/** „Save" der Maske: EINE Buchung — am Primary die Hausfolge, auf PC2 der geprüfte Befehl (Foto vorher in die Ablage). */
+export async function savePurchaseEdit(
+  write: PurchaseLifecycleWrite<Result>, purchase: { id: string }, form: PurchaseEditForm,
+): Promise<WriteOutcome<Result>> {
+  if (!form.reason || !form.reason.trim()) return absage('PURCHASE_EDIT_REASON_REQUIRED', 'Please enter a reason for this edit.');
+  const rev = fassungVon(purchase);
+  if (write.remote && rev === undefined) return ohneFassung();
+  let stagingId: string | undefined;
+  if (write.remote && form.identityPhoto) {
+    const prepared = await prepareIdentityPhoto(true, 'supplier', { kind: 'set', dataUrl: form.identityPhoto.dataUrl },
+      { staging: 'identityPhotoStagingId', remove: 'identityPhoto' });
+    if (prepared.kind === 'fail') return prepared.outcome as WriteOutcome<Result>;
+    if (prepared.kind === 'ready') stagingId = String(prepared.body.identityPhotoStagingId ?? '') || undefined;
+  }
+  return speichern(write, {
+    local: () => editPurchaseOnPrimary(purchase.id, form, rev) as unknown as Promise<Result>,
+    remote: () => purchaseEditBody(purchase, form, stagingId),
+  });
+}
+
+/** Der Rumpf für `purchases.void_payment`. */
+export function purchaseVoidPaymentBody(purchase: { id: string }, paymentId: string, reason: string): Record<string, unknown> {
+  return { purchaseId: purchase.id, paymentId, expectedRevision: fassungVon(purchase), reason };
+}
+
+/** „Void payment" am Primary. */
+export function voidPurchasePaymentOnPrimary(purchaseId: string, paymentId: string, reason: string, expectedRevision?: number): Promise<PurchasePaymentVoided> {
+  return nurAmPrimary<PurchasePaymentVoided>()
+    ?? runOnPrimary(() => voidPurchasePaymentInHouse(purchaseId, paymentId, reason, localHouseCtx(), expectedRevision), lebenszyklusLesen);
+}
+
+/** „Void payment": EINE Buchung gegen die gesehene Fassung. */
+export function savePurchasePaymentVoid(
+  write: PurchaseLifecycleWrite<Result>, purchase: { id: string }, paymentId: string, reason: string,
+): Promise<WriteOutcome<Result>> {
+  if (!reason || !reason.trim()) return Promise.resolve(absage('PURCHASE_EDIT_REASON_REQUIRED', 'Please enter a reason for voiding this payment.'));
+  const rev = fassungVon(purchase);
+  if (write.remote && rev === undefined) return Promise.resolve(ohneFassung());
+  return speichern(write, {
+    local: () => voidPurchasePaymentOnPrimary(purchase.id, paymentId, reason.trim(), rev) as unknown as Promise<Result>,
+    remote: () => purchaseVoidPaymentBody(purchase, paymentId, reason.trim()),
   });
 }

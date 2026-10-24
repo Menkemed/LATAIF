@@ -296,6 +296,14 @@ pub const OP_STOCK_CORRECT_INITIAL: &str = "stock_adjustments.correct_initial";
 pub const OP_OPENING_ACCOUNTS_CREATE: &str = "opening_accounts.create";
 pub const OP_OPENING_ACCOUNTS_CANCEL: &str = "opening_accounts.cancel";
 pub const OP_PAGE_OPENING_ACCOUNTING_GET: &str = "page.opening_accounting.get";
+// PURCHASE-EDIT — einen bestehenden Einkauf bearbeiten: Notiz/Mitarbeiter/Ausweisfoto, die Finanzkorrektur
+// (Datum, Lieferant, Preise, Mengen; nur Owner) und das Stornieren einer Zahlung (nur Owner) — dieselbe Hausfolge
+// am Primary, Pflicht-Fassung und -Grund; dazu die Prüfauskunft der Maske und die Überleitung der Einstandskorrekturen.
+pub const OP_PURCHASES_UPDATE: &str = "purchases.update";
+pub const OP_PURCHASES_CORRECT: &str = "purchases.correct";
+pub const OP_PURCHASES_VOID_PAYMENT: &str = "purchases.void_payment";
+pub const OP_PURCHASE_EDIT_CHECK_GET: &str = "purchase.edit_check.get";
+pub const OP_PAGE_COST_CORRECTIONS_GET: &str = "page.cost_corrections.get";
 // CENTRAL-UI-PARITY R6E — Angebot, Rechnungs-Lebenszyklus, Nachrichtenprotokoll.
 pub const OP_OFFERS_CREATE: &str = "offers.create";
 pub const OP_OFFERS_UPDATE: &str = "offers.update";
@@ -560,6 +568,12 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_OPENING_ACCOUNTS_CREATE,
     OP_OPENING_ACCOUNTS_CANCEL,
     OP_PAGE_OPENING_ACCOUNTING_GET,
+    // PURCHASE-EDIT — drei Buchungen (Bearbeiten, Finanzkorrektur, Zahlung stornieren), dann die beiden Auskünfte.
+    OP_PURCHASES_UPDATE,
+    OP_PURCHASES_CORRECT,
+    OP_PURCHASES_VOID_PAYMENT,
+    OP_PURCHASE_EDIT_CHECK_GET,
+    OP_PAGE_COST_CORRECTIONS_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

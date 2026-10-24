@@ -57,7 +57,8 @@ const source = (t: string) => [S.has(t) ? 'schema.sql' : null, D.has(t) ? 'datab
 // STOCK-ADJUSTMENT Phase 1: +1 (stock_adjustments, synced) → 56.
 // OPENING BALANCES: +1 (opening_balance_items, synced) → 57.
 // B1 OPENING ACCOUNTING: +1 (opening_account_items, synced) → 58.
-ok(b2de48.size === 58, `b2de48 (database.ts ∪ migration.ts CREATE TABLE) = 58 (got ${b2de48.size})`);
+// PURCHASE-EDIT Phase 2: +2 primary-only tables (purchase_edits, cost_corrections) → 60.
+ok(b2de48.size === 60, `b2de48 (database.ts ∪ migration.ts CREATE TABLE) = 60 (got ${b2de48.size})`);
 // POST-PARITY R7A (PP-10) — production_inputs/production_outputs sind jetzt synchronisiert → 52.
 // BULK METAL V1 — bulk_lot_movements reist mit seinem Lot → 54.
 // STOCK-ADJUSTMENT Phase 1 — stock_adjustments reist zum Spiegel → 55.
@@ -93,8 +94,10 @@ const EXPECT_B2DE_ONLY = [
   'item_participations', 'item_partner_movements',
   // BULK METAL V1: the BM lot-number counter — primary-only like document_sequences.
   'bulk_lot_sequences',
+  // PURCHASE-EDIT Phase 2: edit log and cost corrections — primary-only like vat_filings; PC2 reads there.
+  'purchase_edits', 'cost_corrections',
 ].sort();
-ok(JSON.stringify(b2deOnly) === JSON.stringify(EXPECT_B2DE_ONLY), `b2de48 − sync50 is the 16 non-synced local/control tables (got ${JSON.stringify(b2deOnly)})`);
+ok(JSON.stringify(b2deOnly) === JSON.stringify(EXPECT_B2DE_ONLY), `b2de48 − sync50 is the 18 non-synced local/control tables (got ${JSON.stringify(b2deOnly)})`);
 for (const t of b2deOnly) {
   ok(b2de48.has(t) && !sync50.has(t), `${t}: declared in ${source(t)}, control-plane/local — scanned for identifier grammar but intentionally not synced`);
 }
@@ -107,7 +110,7 @@ const inter = [...sync50].filter((t) => b2de48.has(t));
 // B1 OPENING ACCOUNTING: opening_account_items is declared in database.ts and synced → 42.
 ok(inter.length === 42, `sync50 ∩ b2de48 = 42 (got ${inter.length})`);
 ok(inter.length + syncOnly.length === 57, 'intersection + sync-only accounts for all 57 sync tables');
-ok(inter.length + b2deOnly.length === 58, 'intersection + b2de-only accounts for all 58 B2DE4 tables');
+ok(inter.length + b2deOnly.length === 60, 'intersection + b2de-only accounts for all 60 B2DE4 tables');
 
 // ── B2DE4 is a documented grammar subset, not the sync schema ──
 // (its scan excludes schema.sql on purpose; that is WHY 15 real sync tables are absent from it)

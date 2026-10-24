@@ -48,6 +48,8 @@ import { PayablesPage } from '@/pages/payables/PayablesPage';
 import { PurchaseList } from '@/pages/purchases/PurchaseList';
 import { PurchaseCreate } from '@/pages/purchases/PurchaseCreate';
 import { PurchaseDetail } from '@/pages/purchases/PurchaseDetail';
+// PURCHASE-EDIT Phase 2 — einen bestehenden Einkauf berichtigen (eigene Maske, EINE Buchung).
+import { PurchaseEdit } from '@/pages/purchases/PurchaseEdit';
 import { BankingPage } from '@/pages/banking/BankingPage';
 import { PartnersPage } from '@/pages/partners/PartnersPage';
 import { ProductionPage } from '@/pages/production/ProductionPage';
@@ -484,6 +486,7 @@ export default function App() {
           <Route path="/purchases" element={<PurchaseList />} />
           <Route path="/purchases/new" element={<PurchaseCreate />} />
           <Route path="/purchases/:id" element={<PurchaseDetail />} />
+          <Route path="/purchases/:id/edit" element={<PurchaseEdit />} />
           <Route path="/expenses" element={<ExpenseList />} />
           <Route path="/payables" element={<PayablesPage />} />
           <Route path="/banking" element={<BankingPage />} />

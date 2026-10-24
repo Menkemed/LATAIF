@@ -300,7 +300,24 @@ export interface InvoiceLine {
   bulkType?: string | null;
   /** BULK METAL V1 — die BM-Nummer des Lots, aus dem Lot am Primary gelesen (nur intern, nie auf dem Beleg). */
   bulkLotNo?: string | null;
+  /** PURCHASE-EDIT D1 — Σ der wirksamen Einstandskorrekturen dieser Zeile (positiv = Einstand gestiegen). */
+  costCorrection?: number;
+  /**
+   * D7 — die Artikelangaben, die diese Rechnung druckt, eingefroren beim ersten Ändern des Artikels danach.
+   * Fehlt sie, ist der Artikel seit dem Verkauf unverändert und der Druck liest ihn selbst.
+   */
+  productSnapshot?: InvoiceLineProductSnapshot | null;
   product?: Product;
+}
+
+export interface InvoiceLineProductSnapshot {
+  brand?: string | null;
+  name?: string | null;
+  sku?: string | null;
+  categoryId?: string | null;
+  condition?: string | null;
+  attributes?: Record<string, unknown> | null;
+  frozenAt?: string;
 }
 
 export interface Invoice {
@@ -321,6 +338,12 @@ export interface Invoice {
   purchasePriceSnapshot?: number;
   salePriceSnapshot?: number;
   marginSnapshot?: number;
+  /**
+   * PURCHASE-EDIT D1 — Σ der wirksamen Einstandskorrekturen (positiv = Einstand gestiegen). Die Werte
+   * oben bleiben die vom Verkaufstag (Beleg, Steuer); der Gewinn gilt wirtschaftlich korrigiert
+   * (`effectiveMargin`).
+   */
+  costCorrection?: number;
   paidAmount: number;
   tipAmount?: number;
   butterfly?: boolean;
@@ -1222,6 +1245,8 @@ export interface PurchaseLine {
   // Back-to-Back Beschaffung: verknuepft diese Einkaufs-Zeile mit der Order-Zeile,
   // die sie ausgeloest hat. NULL = reine Lager-Zeile ohne Order-Bezug.
   sourceOrderLineId?: UUID;
+  /** PURCHASE-EDIT D13 — true: diese Zeile hat ihren Artikel angelegt; undefined: Zeile von vor dem Vertrag. */
+  createdProduct?: boolean;
 }
 
 // Plan §Purchase Returns §8: 'credit' erlaubt Nutzung von Supplier-Credit-Balance.
@@ -1234,6 +1259,9 @@ export interface PurchasePayment {
   reference?: string;
   note?: string;
   createdAt: string;
+  /** PURCHASE-EDIT D14 — storniert: die Zeile bleibt, ihre Buchung ist gegengebucht; sie zählt nicht mehr. */
+  voidedAt?: string;
+  voidReason?: string;
 }
 
 // Audit-Snapshot: Supplier-Stamm-/Identifikationsdaten zum Zeitpunkt des
@@ -1281,6 +1309,15 @@ export interface SupplierSnapshot {
   cprImage?: string;
   identity?: PurchaseIdentityReference;
   snapshotAt: string;
+  /**
+   * PURCHASE-EDIT D10 — ersetzte Ausweisfassungen dieses Einkaufs. Nie angezeigt (keine sichtbare
+   * Historie), aber aufbewahrt: Sicherung und Speicher halten sie wie `identity` (Rust
+   * `REQUIRED_PURCHASE_IDENTITY_SQL`), weil Ausweiskopien in Bahrain mindestens fünf Jahre
+   * aufbewahrt werden müssen.
+   */
+  identityRetired?: Array<PurchaseIdentityReference & { retiredAt: string }>;
+  /** PURCHASE-EDIT D5 — die Daten des Lieferanten, unter dem der Einkauf vorher stand (nur Verlauf). */
+  previousSuppliers?: Array<{ supplierId: string; name: string; replacedAt: string }>;
 }
 
 export interface Purchase {
@@ -1304,6 +1341,13 @@ export interface Purchase {
   supplier?: Supplier;
   // Back-to-Back Beschaffung: Order, deren Posten dieser Einkauf (mit-)beschafft.
   sourceOrderId?: UUID;
+  /** B6 — der Auto-Einkauf beim Einlieferer: seine Kommission. */
+  sourceConsignmentId?: UUID;
+  /** PURCHASE-EDIT D1 — die Einstandskorrekturen verkaufter Stücke aus Bearbeitungen dieses Einkaufs. */
+  costCorrections?: Array<{
+    id: UUID; correctionNumber: string; invoiceId: UUID; invoiceNumber: string; amount: number; quantity: number;
+    bookingDate: string; economicDate: string; vatStatus: string; vatEstimate: number; status: string;
+  }>;
   // PARTNER-ITEMS — gemeinsam gekaufte Zeilen: LATAIF + Partner mit Anteil und Kostenanteil (leer = allein).
   participations?: PurchaseLineParticipation[];
   /** PARTNER-ITEMS — je Zeile mit unverkauften Stücken: Übernahme / Partnerwechsel (auch allein gekauft). */

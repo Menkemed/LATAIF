@@ -694,7 +694,8 @@ registerCommand(OP_PURCHASES_GET, {
       vatAmount: num(l.vat_amount),
     }));
     const payments = rows(
-      'SELECT id, amount, method, paid_at FROM purchase_payments WHERE purchase_id = ? ORDER BY paid_at ASC',
+      // PURCHASE-EDIT D14 — eine stornierte Zahlung zählt nicht mehr.
+      'SELECT id, amount, method, paid_at FROM purchase_payments WHERE purchase_id = ? AND voided_at IS NULL ORDER BY paid_at ASC',
       [id],
     ).map((x) => ({ id: str(x.id), amount: num(x.amount), method: str(x.method), paidAt: str(x.paid_at) }));
     return { ...purchaseDto(found[0]), notes: str(found[0].notes), lines, payments };

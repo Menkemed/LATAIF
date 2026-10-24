@@ -310,7 +310,7 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
   const purchPay = safeQuery('purchase_payments',
     `SELECT pp.id, pp.amount, pp.method, pp.paid_at, pp.purchase_id, p.purchase_number, pp.created_at AS created_at
      FROM purchase_payments pp JOIN purchases p ON p.id = pp.purchase_id
-     WHERE p.branch_id = ?`,
+     WHERE p.branch_id = ? AND pp.voided_at IS NULL`,
     [branchId]
   );
   for (const p of purchPay) {

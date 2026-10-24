@@ -125,7 +125,7 @@ function domainAP(branchId: string): number {
   // Symmetrisch zum domainAR-Cap.
   const purPayments = query(
     `SELECT COALESCE(SUM(MIN(pp.paid, pu.total_amount)), 0) AS t
-     FROM (SELECT purchase_id, SUM(amount) AS paid FROM purchase_payments GROUP BY purchase_id) pp
+     FROM (SELECT purchase_id, SUM(amount) AS paid FROM purchase_payments WHERE voided_at IS NULL GROUP BY purchase_id) pp
      JOIN purchases pu ON pu.id = pp.purchase_id
      WHERE pu.branch_id = ? AND pu.status != 'CANCELLED'`,
     [branchId]
@@ -335,6 +335,8 @@ const SOURCE_TABLE_MAP: Record<string, string> = {
   // Customer-Credit: sourceId = customer_credits-Row-id (Slice 4b).
   // ORDER_CANCEL fehlt bewusst — sourceId hat dort Präfixe ('credit:<orderId>'), kein 1:1-Row-Match.
   GOLD_CONVERSION: 'customer_credits',
+  // PURCHASE-EDIT D1 — sourceId = cost_corrections.id (eigener Beleg je korrigiertem Verkauf).
+  COST_CORRECTION: 'cost_corrections',
 };
 
 function loadOrphans(branchId: string): Orphan[] {

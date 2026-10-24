@@ -107,6 +107,46 @@ fn a_snapshot_that_names_a_version_we_do_not_have_requires_nothing() {
     assert!(req.contains(&key(H1)), "the live product image is unaffected");
 }
 
+// PURCHASE-EDIT D10 — ein im Einkauf ERSETZTES Ausweisfoto wird nie mehr gezeigt, aber aufbewahrt:
+// es bleibt so gefordert wie das aktuelle (Sicherung, Umzug), mit demselben Abgleich von Fassung und Hash.
+const RETIRED: &str = "ee55555555555555555555555555555555555555555555555555555555555555";
+
+#[test]
+fn a_replaced_id_photo_of_a_purchase_stays_required() {
+    let c = db();
+    add_linked_media(&c);
+    add_purchase_snapshot_media(&c);
+    c.execute("INSERT INTO media_objects VALUES ('t1','m-old','b-old',NULL)", []).unwrap();
+    c.execute("INSERT INTO media_blobs VALUES ('t1','b-old','present',1,NULL)", []).unwrap();
+    add_generation(&c, "b-old", 1, RETIRED, "available");
+    let snap = format!(
+        "{{\"name\":\"S\",\"snapshotAt\":\"x\",\"identity\":{{\"mediaId\":\"m-id\",\"generationNo\":1,\"blobHash\":\"{}\",\"storageKey\":\"{}\",\"extension\":\"jpg\",\"ownerType\":\"customer\",\"ownerId\":\"c1\"}},\"identityRetired\":[{{\"mediaId\":\"m-old\",\"generationNo\":1,\"blobHash\":\"{}\",\"storageKey\":\"{}\",\"extension\":\"jpg\",\"ownerType\":\"customer\",\"ownerId\":\"c1\",\"retiredAt\":\"y\"}}]}}",
+        HIST, key(HIST), RETIRED, key(RETIRED),
+    );
+    c.execute("UPDATE purchases SET supplier_snapshot = ?1", rusqlite::params![snap]).unwrap();
+    let req = required_keys(&c).unwrap();
+    assert!(req.contains(&key(HIST)), "the current ID photo of the purchase is required");
+    assert!(req.contains(&key(RETIRED)), "the replaced one is kept as well — hidden, not dropped");
+    // Derselbe strenge Abgleich: eine ersetzte Fassung, deren Hash nicht passt, fordert nichts.
+    c.execute("UPDATE purchases SET supplier_snapshot = replace(supplier_snapshot, ?1, ?2)",
+        rusqlite::params![format!("\"blobHash\":\"{}\"", RETIRED), format!("\"blobHash\":\"{}\"", ORPH)]).unwrap();
+    let req = required_keys(&c).unwrap();
+    assert!(!req.contains(&key(RETIRED)), "a mismatched retired reference requires nothing");
+    assert!(req.contains(&key(HIST)), "the current one is unaffected");
+}
+
+#[test]
+fn a_purchase_without_retired_photos_answers_as_before() {
+    let c = db();
+    add_linked_media(&c);
+    add_purchase_snapshot_media(&c);
+    c.execute("INSERT INTO purchases VALUES ('pur-2','b-1',NULL)", []).unwrap();
+    c.execute("INSERT INTO purchases VALUES ('pur-3','b-1','{\"name\":\"T\",\"snapshotAt\":\"x\"}')", []).unwrap();
+    let req = required_keys(&c).unwrap();
+    assert!(req.contains(&key(HIST)) && req.contains(&key(H1)) && req.contains(&key(H2)));
+    assert_eq!(req.len(), 3, "no retired array, nothing more");
+}
+
 #[test]
 fn a_database_without_purchases_still_answers() {
     let c = db();

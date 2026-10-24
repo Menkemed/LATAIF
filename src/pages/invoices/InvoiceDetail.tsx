@@ -45,6 +45,7 @@ import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-w
 import { invoicePaymentBody, recordInvoicePaymentOnPrimary } from '@/core/invoices/invoice-payment-house';
 import { invoiceButterflyBody, setInvoiceButterflyOnPrimary } from '@/core/invoices/invoice-flag-house';
 import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
+import { effectiveMargin } from '@/core/reports/sales-metrics';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { WriteError } from '@/components/shared/WriteError';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
@@ -1014,12 +1015,35 @@ export function InvoiceDetail() {
                     {invoice.salePriceSnapshot != null ? <><Bhd v={invoice.salePriceSnapshot}/> BHD</> : '\u2014'}
                   </span>
                 </div>
+                {/* PURCHASE-EDIT D1 \u2014 die Rechnung bleibt, wie sie war; eine Einstandskorrektur aus dem Einkauf
+                    berichtigt den Gewinn wirtschaftlich (gebucht als eigener Beleg, die Steuerzahlen bleiben). */}
+                {invoice.costCorrection ? (
+                  <>
+                    <div className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
+                      <span style={{ fontSize: 13, color: '#6B7280' }}>Margin at sale</span>
+                      <span className="font-mono" style={{ fontSize: 13, color: '#4B5563' }}>
+                        {invoice.marginSnapshot != null ? <><Bhd v={invoice.marginSnapshot}/> BHD</> : '\u2014'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between items-center" data-testid="invoice-cost-correction" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE' }}>
+                      <span style={{ fontSize: 13, color: '#B45309' }}>Margin from cost correction (purchase edit)</span>
+                      <span className="font-mono" style={{ fontSize: 13, color: '#B45309' }}>
+                        {-invoice.costCorrection > 0 ? '+' : ''}<Bhd v={-invoice.costCorrection}/> BHD
+                      </span>
+                    </div>
+                  </>
+                ) : null}
                 <div className="flex justify-between items-center" style={{ padding: '10px 0' }}>
-                  <span style={{ fontSize: 13, color: '#6B7280' }}>Margin</span>
-                  <span className="font-mono" style={{ fontSize: 15, color: (invoice.marginSnapshot || 0) >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
-                    {invoice.marginSnapshot != null ? <><Bhd v={invoice.marginSnapshot}/> BHD</> : '\u2014'}
+                  <span style={{ fontSize: 13, color: '#6B7280' }}>{invoice.costCorrection ? 'Corrected margin' : 'Margin'}</span>
+                  <span className="font-mono" data-testid="invoice-effective-margin" style={{ fontSize: 15, color: effectiveMargin(invoice) >= 0 ? '#7EAA6E' : '#AA6E6E' }}>
+                    {invoice.marginSnapshot != null ? <><Bhd v={effectiveMargin(invoice)}/> BHD</> : '\u2014'}
                   </span>
                 </div>
+                {invoice.costCorrection ? (
+                  <div style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
+                    The invoice itself is unchanged. A possible VAT effect is marked for the accountant and not added to any VAT return.
+                  </div>
+                ) : null}
               </div>
             </Card>
 

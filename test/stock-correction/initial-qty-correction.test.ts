@@ -469,7 +469,7 @@ function verkauf(pid: string, qty = 1): void {
   const nachU = await korr(voll, pk, 3);
   ok(nachU.ok && qtyOf(voll, pk) === 3 && n(voll, "SELECT COUNT(*) FROM stock_adjustments WHERE direction = 'CORRECTION'") === 1, `E2d nach dem Umbau ist die Berichtigung möglich (${nachU.code})`);
   const rs = src('src-tauri/src/bridge.rs');
-  ok(registry.ALLOWED_MUTATIONS.at(-3) === 'stock_adjustments.correct_initial' && perms.permissionForOp('stock_adjustments.correct_initial')?.kind === 'isOwner'
+  ok(registry.ALLOWED_MUTATIONS.at(-6) === 'stock_adjustments.correct_initial' && perms.permissionForOp('stock_adjustments.correct_initial')?.kind === 'isOwner'
     && perms.roleMayRunOp('ADMIN', 'stock_adjustments.correct_initial') && !perms.roleMayRunOp('MANAGER', 'stock_adjustments.correct_initial')
     && registry.knownCommands().includes('stock_adjustments.correct_initial')
     && /pub const OP_STOCK_CORRECT_INITIAL: &str = "stock_adjustments\.correct_initial";/.test(rs) && /OP_PAGE_OPENING_BALANCES_GET,\s*\/\/[^\n]*\n\s*OP_STOCK_CORRECT_INITIAL,\s*\/\/[^\n]*\n\s*OP_OPENING_ACCOUNTS_CREATE,/.test(rs),

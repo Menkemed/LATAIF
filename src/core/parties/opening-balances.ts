@@ -388,7 +388,7 @@ export function openLataifDocumentsFor(ctx: { branchId: string }, partyType: Ope
   const out: OpenLataifDocument[] = [];
   for (const r of query(
     `SELECT p.id, p.purchase_number, p.purchase_date, p.total_amount, p.paid_amount,
-            COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp WHERE pp.purchase_id = p.id AND pp.method = 'credit'), 0) AS credit_paid
+            COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp WHERE pp.purchase_id = p.id AND pp.method = 'credit' AND pp.voided_at IS NULL), 0) AS credit_paid
        FROM purchases p WHERE p.supplier_id = ? AND p.branch_id = ? AND p.status NOT IN ('PAID', 'CANCELLED')`,
     [partyId, ctx.branchId],
   )) {

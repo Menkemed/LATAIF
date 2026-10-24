@@ -614,6 +614,7 @@
         "lot_id",
         "position",
         "product_id",
+        "product_snapshot",
         "purchase_price_snapshot",
         "quantity",
         "stock_taken",
@@ -1193,6 +1194,7 @@
       ],
       "record_id_field": "id",
       "allowed_fields": [
+        "created_product",
         "description",
         "id",
         "line_total",
@@ -1211,7 +1213,8 @@
     },
     "purchase_payments": {
       "allowed_operations": [
-        "insert"
+        "insert",
+        "update"
       ],
       "record_id_field": "id",
       "allowed_fields": [
@@ -1222,7 +1225,10 @@
         "note",
         "paid_at",
         "purchase_id",
-        "reference"
+        "reference",
+        "void_reason",
+        "voided_at",
+        "voided_by"
       ],
       "required_fields": [],
       "immutable_fields": []
@@ -1286,6 +1292,7 @@
         "purchase_number",
         "remaining_amount",
         "revision",
+        "source_consignment_id",
         "source_order_id",
         "staff_id",
         "status",

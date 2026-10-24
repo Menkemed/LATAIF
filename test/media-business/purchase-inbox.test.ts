@@ -79,7 +79,7 @@ const metalCmd = await import('../../src/core/bridge/metal-commands.ts');
 const commercial = await import('../../src/core/bridge/commercial-commands.ts');
 const inboxMedia = await import('../../src/core/purchases/inbox-media.ts');
 const lifecycleHouse = await import('../../src/core/purchases/purchase-lifecycle-house.ts');
-const lifecycleCmd = await import('../../src/core/bridge/purchase-lifecycle-commands.ts');
+const lifecycleCmd = await import('../../src/core/bridge/purchase-lifecycle-commands.ts'); await import('../../src/core/bridge/purchase-edit-commands.ts');
 const registry = await import('../../src/core/bridge/command-registry.ts');
 const perms = await import('../../src/core/bridge/command-permissions.ts');
 const pageReads = await import('../../src/core/data/page-reads.ts');
@@ -389,7 +389,7 @@ const J = (v: unknown): string => JSON.stringify(v ?? null);
 
 // ── §10 Verdrahtung ─────────────────────────────────────────────────────────────────────────
 {
-  ok(registry.ALLOWED_MUTATIONS.includes('purchase_inbox.create') && registry.ALLOWED_MUTATIONS.length === 123,
+  ok(registry.ALLOWED_MUTATIONS.includes('purchase_inbox.create') && registry.ALLOWED_MUTATIONS.length === 126,
     `§10 die Buchung steht namentlich in der Zulassungsliste (116 mit PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${registry.ALLOWED_MUTATIONS.length})`);
   ok(registry.knownCommands().includes('purchase_inbox.create'), '§10 …und sie ist angemeldet');
   ok('purchase_inbox.create' in perms.OPERATION_PERMISSIONS
@@ -400,7 +400,7 @@ const J = (v: unknown): string => JSON.stringify(v ?? null);
     // PARTNER-ITEMS: seither stehen vier weitere Buchungen dahinter — geprüft wird die Zulassung selbst.
     && (/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').includes('OP_PURCHASE_INBOX_CREATE,'),
     '§10 Rust kennt denselben Namen und lässt ihn durch');
-  ok((/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1].match(/OP_[A-Z_]+/g) ?? []).length === 207,
+  ok((/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1].match(/OP_[A-Z_]+/g) ?? []).length === 212,
     '§10 die Registry steht bei 195 (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION)');
 
   // Das Telefon: kein Tabellen-Push. MOBILE-PURCHASE ersetzt den Modus „Purchase Photo" — der Einkauf

@@ -5,6 +5,7 @@
 // ═══════════════════════════════════════════════════════════
 
 import { create } from 'zustand';
+import { invoiceCostCorrectionSql } from '@/core/purchases/cost-correction-read';   // PURCHASE-EDIT D1 — Gewinn wirtschaftlich korrigiert
 import { v4 as uuid } from 'uuid';
 import type { Employee, EmploymentStatus } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
@@ -318,7 +319,7 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
       const rows = query(
         `SELECT i.id, i.invoice_number, i.issued_at, i.customer_id, i.special_mark, i.number_finalized_at,
                 c.first_name, c.last_name, c.company,
-                i.gross_amount, i.paid_amount, i.status, i.margin_snapshot
+                i.gross_amount, i.paid_amount, i.status, i.margin_snapshot - ${invoiceCostCorrectionSql()} AS margin_snapshot
            FROM invoices i
            JOIN customers c ON c.id = i.customer_id
           WHERE i.staff_id = ? AND i.status != 'CANCELLED'
@@ -345,11 +346,11 @@ export const useEmployeeStore = create<EmployeeStore>((set, get) => ({
   getSalesStats: (employeeId) => {
     try {
       const rows = query(
-        `SELECT COALESCE(SUM(gross_amount), 0) AS revenue,
-                COALESCE(SUM(margin_snapshot), 0) AS profit,
+        `SELECT COALESCE(SUM(i.gross_amount), 0) AS revenue,
+                COALESCE(SUM(i.margin_snapshot - ${invoiceCostCorrectionSql()}), 0) AS profit,
                 COUNT(*) AS cnt
-           FROM invoices
-          WHERE staff_id = ? AND status != 'CANCELLED'`,
+           FROM invoices i
+          WHERE i.staff_id = ? AND i.status != 'CANCELLED'`,
         [employeeId]
       );
       return {

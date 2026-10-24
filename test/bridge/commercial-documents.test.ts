@@ -169,7 +169,7 @@ const PURCHASE_BODY = {
   // CENTRAL-C3H hat die sechzehn in C3G als `B_DEFERRED` klassifizierten Aktionen freigeschaltet.
   // Was DIESE Datei prueft, aendert sich dadurch nicht — nur die Zahlen ziehen mit, und die
   // Namen, die weiterhin NICHT drauf stehen duerfen, bleiben dieselben zerstoerenden.
-  ok(list.length === 123, `SCOPE genau 116 Mutationen sind freigegeben (R7A + MEDIA-INBOX + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${list.length})`);
+  ok(list.length === 126, `SCOPE genau 126 Mutationen sind freigegeben (R7A + MEDIA-INBOX + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION + PURCHASE-EDIT) (${list.length})`);
   for (const op of ['purchases.create', 'consignments.create', 'consignments.update', 'orders.create', 'orders.update']) {
     ok(list.includes(op), `SCOPE ${op} steht namentlich in der Zulassungsliste`);
   }
@@ -179,7 +179,9 @@ const PURCHASE_BODY = {
   }
   for (const op of [
     // R6F — `purchases.cancel` ist seither freigegeben (Einkaufsstorno als EINE Hausfolge).
-    'purchases.update', 'purchases.add_payment', 'purchases.create_return',
+    // PURCHASE-EDIT — `purchases.update` ebenso (Einkaufsbearbeitung als EINE Hausfolge, D1–D14); das
+    // Löschen eines Einkaufs bleibt fail-closed.
+    'purchases.delete', 'purchases.add_payment', 'purchases.create_return',
     'consignments.mark_paid_out', 'consignments.delete',
     'orders.delete', 'orders.cancel_with_money',
   ]) {
@@ -191,12 +193,16 @@ const PURCHASE_BODY = {
   ok(!/REMOTE_MUTATIONS_ENABLED|allowAllMutations/.test(registryCode),
     'SCOPE es gibt keinen Schalter, der alles auf einmal freigibt');
 
-  // Der Beleg, warum es KEIN purchases.update gibt: im ganzen Produktcode existiert keine
-  // Bearbeitung eines Einkaufs. Eine zu bauen hiesse, die Warenbewertung ein zweites Mal zu
-  // schreiben — genau das verbietet der Vertrag.
+  // PURCHASE-EDIT — es gibt jetzt GENAU EINE Bearbeitung eines Einkaufs: die Hausfolge
+  // `editPurchaseInHouse`, die Maske und Fernbefehl gleichermaßen rufen. Der Store hat keinen
+  // zweiten Weg, der die Warenbewertung an ihr vorbei ein zweites Mal schriebe.
   const purchaseSrc = src('src/stores/purchaseStore.ts');
   ok(!/\bupdatePurchase\b|\beditPurchase\b/.test(purchaseSrc),
-    'SCOPE der Einkauf hat lokal GAR KEINE Bearbeitung — deshalb auch keine aus der Ferne');
+    'SCOPE der Store hat keinen eigenen Bearbeitungsweg neben der Hausfolge');
+  ok(list.includes('purchases.update') && list.includes('purchases.correct') && list.includes('purchases.void_payment'),
+    'SCOPE die Einkaufsbearbeitung ist namentlich freigegeben (update, correct, void_payment)');
+  ok(/export function editPurchaseInHouse/.test(src('src/core/purchases/purchase-edit-house.ts')),
+    'SCOPE und sie hat genau eine Hausfolge');
 
   const known = knownCommands();
   ok(known.includes('suppliers.list') && known.includes('purchases.get')

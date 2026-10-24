@@ -543,7 +543,7 @@ export function supplierLedgerStrict(id: string, branchId: string): SupplierLedg
   const purchaseRows = query(
     `SELECT p.total_amount AS total, p.paid_amount AS paid,
             COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp
-                      WHERE pp.purchase_id = p.id AND pp.method = 'credit'), 0) AS credit_paid
+                      WHERE pp.purchase_id = p.id AND pp.method = 'credit' AND pp.voided_at IS NULL), 0) AS credit_paid
        FROM purchases p WHERE p.supplier_id = ? AND p.branch_id = ? AND p.status != 'CANCELLED'`,
     [id, branchId]
   );
