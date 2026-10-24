@@ -337,7 +337,7 @@ interface SalesReturnStore {
   };
   getCustomerRefundPayable: (customerId: string) => number;
   // Slice 5 — Karten-Zahlungs-Info der Original-Invoice (fuer die 3-Wege-Refund-UI).
-  getInvoiceCardInfo: (invoiceId: string) => { cardPaid: number; brand: 'normal' | 'amex'; activeFee: number };
+  getInvoiceCardInfo: (invoiceId: string) => { cardPaid: number; brand: 'normal' | 'amex' | 'debit'; activeFee: number };
   getReturnedQtyForLine: (invoiceLineId: string) => number;
 }
 

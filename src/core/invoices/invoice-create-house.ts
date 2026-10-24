@@ -29,13 +29,16 @@ import { InvoiceActionRejected } from './invoice-cancel';
 import { assertInvoiceHouse, localInvoiceBranch } from './invoice-house-guards';
 // BULK METAL V1 — Bulk-Absichten werden hier zu Zeilen (Zuteilung in DIESER Transaktion).
 import { resolveBulkIntents } from '@/core/bulk/bulk-invoice';
+// v0.8.87 — die Kartenarten aus der EINEN Quelle (Normal / Amex / Debit); das Zahlungsdatum nach der EINEN Datumsregel.
+import { CARD_BRANDS, type CardBrand } from '@/core/finance/card-fees';
+import { businessDateIssue, businessTimestamp, todayIso } from '@/core/utils/business-date';
 
 /** Die Zahlarten der Maske („4 · PAYMENT": Cash, Bank, Card, Benefit) — keine weitere. */
 export const INVOICE_CREATE_PAYMENT_METHODS = ['cash', 'bank_transfer', 'card', 'benefit'] as const;
 export type InvoiceCreatePaymentMethod = typeof INVOICE_CREATE_PAYMENT_METHODS[number];
-/** Die Kartenmarken der Maske (Normal 2,2 % / Amex 2,5 %). */
-export const INVOICE_CARD_BRANDS = ['normal', 'amex'] as const;
-export type InvoiceCardBrand = typeof INVOICE_CARD_BRANDS[number];
+/** Die Kartenmarken der Masken — dieselbe Liste wie die Gebührensätze (Normal / Amex / Debit). */
+export const INVOICE_CARD_BRANDS = CARD_BRANDS;
+export type InvoiceCardBrand = CardBrand;
 
 export const INVOICE_NEEDS_A_LINE = 'INVOICE_NEEDS_A_LINE';
 export const CUSTOMER_NOT_FOUND = 'CUSTOMER_NOT_FOUND';
@@ -44,12 +47,19 @@ export const PRODUCT_NOT_FOUND = 'PRODUCT_NOT_FOUND';
 export const PAYMENT_AMOUNT_INVALID = 'PAYMENT_AMOUNT_INVALID';
 export const PAYMENT_METHOD_INVALID = 'PAYMENT_METHOD_INVALID';
 export const PAYMENT_EXCEEDS_TOTAL = 'PAYMENT_EXCEEDS_TOTAL';
+export const PAYMENT_DATE_INVALID = 'PAYMENT_DATE_INVALID';
+export const PAYMENT_DATE_BEFORE_INVOICE = 'PAYMENT_DATE_BEFORE_INVOICE';
+export const PAYMENTS_INVALID = 'PAYMENTS_INVALID';
+/** So viele Zahlungen nimmt das Anlegen auf einmal an (die Maske bietet „Add Payment" bis dahin). */
+export const MAX_CREATE_PAYMENTS = 10;
 
-/** Die Zahlung, die ein Mensch beim Anlegen eingibt: Betrag, Weg, bei Karte die Marke. Mehr nicht. */
+/** Die Zahlung, die ein Mensch beim Anlegen eingibt: Betrag, Weg, bei Karte die Marke, der Tag. Mehr nicht. */
 export interface InvoiceCreatePayment {
   amount: number;
   method: InvoiceCreatePaymentMethod;
   cardBrand?: InvoiceCardBrand;
+  /** v0.8.87 — der Tag, an dem das Geld kam (JJJJ-MM-TT). Ohne Angabe: das Rechnungsdatum. */
+  paidDate?: string;
 }
 
 /** Eine Zeile, wie `createDirectInvoice` sie erwartet — gerechnet von `toInvoiceLine` (Maske) bzw. `buildInvoiceLines` (fern). */
@@ -64,7 +74,10 @@ export interface InvoiceCreateInput {
   staffId?: string;
   /** Die Wahl aus dem Nummern-Dialog: gilt für die Endnummer, wenn diese Zahlung die Rechnung schließt. */
   specialMark: boolean;
+  /** Eine Zahlung (der bisherige Rumpf). */
   payment?: InvoiceCreatePayment;
+  /** v0.8.87 — mehrere Zahlungen beim Anlegen (Cash, Bank, Karten, Benefit beliebig kombiniert). Nicht zusammen mit `payment`. */
+  payments?: InvoiceCreatePayment[];
 }
 
 export interface InvoiceCreated {
@@ -76,7 +89,10 @@ export interface InvoiceCreated {
   paidAmount: number;
   specialMark: boolean;
   revision: number;
+  /** Die Zahlung, die zuletzt gebucht wurde (bei einer einzigen: diese). */
   paymentId?: string;
+  /** v0.8.87 — alle Zahlungen dieses Anlegens, in der Reihenfolge der Buchung (nach Zahlungstag). */
+  paymentIds?: string[];
 }
 
 const toFils = (v: number): number => Math.round(v * 1000);
@@ -102,10 +118,36 @@ export function invoiceCreatePayment(raw: Record<string, unknown>): InvoiceCreat
     }
     out.cardBrand = raw.cardBrand as InvoiceCardBrand;
   }
+  if (raw.paidDate !== undefined) {
+    const issue = businessDateIssue(raw.paidDate, 'Payment date');
+    if (issue || typeof raw.paidDate !== 'string' || raw.paidDate === '') throw new InvoiceActionRejected(PAYMENT_DATE_INVALID, issue || 'Payment date is not a valid date');
+    out.paidDate = raw.paidDate;
+  }
   return out;
 }
 
-function createdState(invoiceId: string, paymentId?: string): InvoiceCreated {
+/**
+ * v0.8.87 — die Zahlungen eines Anlegens: entweder die eine (`payment`, der bisherige Rumpf) oder die Liste
+ * (`payments`), nie beides; höchstens MAX_CREATE_PAYMENTS; jede einzeln geprüft (rein, ohne Datenbank).
+ */
+export function invoiceCreatePayments(input: { payment?: unknown; payments?: unknown }): InvoiceCreatePayment[] {
+  if (input.payment !== undefined && input.payments !== undefined) {
+    throw new InvoiceActionRejected(PAYMENTS_INVALID, 'send the payments either as one payment or as a list, not both');
+  }
+  if (input.payments === undefined) {
+    return input.payment === undefined ? [] : [invoiceCreatePayment(input.payment as Record<string, unknown>)];
+  }
+  if (!Array.isArray(input.payments)) throw new InvoiceActionRejected(PAYMENTS_INVALID, 'payments must be a list');
+  if (input.payments.length > MAX_CREATE_PAYMENTS) {
+    throw new InvoiceActionRejected(PAYMENTS_INVALID, `at most ${MAX_CREATE_PAYMENTS} payments when creating an invoice`);
+  }
+  return input.payments.map((p, i) => {
+    if (typeof p !== 'object' || p === null || Array.isArray(p)) throw new InvoiceActionRejected(PAYMENTS_INVALID, `payment ${i + 1} must be an object`);
+    return invoiceCreatePayment(p as Record<string, unknown>);
+  });
+}
+
+function createdState(invoiceId: string, paymentIds: string[] = []): InvoiceCreated {
   const r = query(
     'SELECT invoice_number, status, gross_amount, paid_amount, special_mark, revision FROM invoices WHERE id = ?',
     [invoiceId],
@@ -119,7 +161,10 @@ function createdState(invoiceId: string, paymentId?: string): InvoiceCreated {
     specialMark: Number(r?.special_mark ?? 0) === 1,
     revision: Number(r?.revision ?? 0),
   };
-  if (paymentId) out.paymentId = paymentId;
+  if (paymentIds.length > 0) {
+    out.paymentId = paymentIds[paymentIds.length - 1];
+    out.paymentIds = [...paymentIds];
+  }
   return out;
 }
 
@@ -147,14 +192,25 @@ export function createInvoiceInHouse(input: InvoiceCreateInput, branchId: string
       throw new InvoiceActionRejected(PRODUCT_NOT_FOUND, 'no such article in this branch');
     }
   }
-  const payment = input.payment ? invoiceCreatePayment(input.payment as unknown as Record<string, unknown>) : undefined;
-  if (payment) {
+  const payments = invoiceCreatePayments(input);
+  // v0.8.87 — jede Zahlung trägt ihren Tag: ohne Angabe das Rechnungsdatum (so kommt eine am 24.10. erfasste
+  // Zahlung zu einer Rechnung vom 23.10. auch am 23.10. in Banking an). Nie vor dem Rechnungsdatum.
+  const issuedDay = input.issuedDate || todayIso();
+  const mitTag = payments.map((p, i) => ({ ...p, paidDate: p.paidDate ?? issuedDay, order: i }));
+  for (const p of mitTag) {
+    if (p.paidDate < issuedDay) {
+      throw new InvoiceActionRejected(PAYMENT_DATE_BEFORE_INVOICE,
+        `the payment date (${p.paidDate}) is before the invoice date (${issuedDay})`);
+    }
+  }
+  if (payments.length > 0) {
     // Dieselbe Summe, die `createDirectInvoice` gleich schreibt (v0.7.1: Summe der Zeilensummen),
     // in Fils verglichen — und dieselbe Regel wie `validate` der Maske im Anlege-Modus.
     const gross = input.lines.reduce((s, l) => s + (Number(l.lineTotal) || 0), 0);
-    if (toFils(payment.amount) > toFils(gross)) {
+    const paidF = payments.reduce((s, p) => s + toFils(p.amount), 0);
+    if (paidF > toFils(gross)) {
       throw new InvoiceActionRejected(PAYMENT_EXCEEDS_TOTAL,
-        `Paid (${payment.amount.toFixed(3)}) exceeds total (${gross.toFixed(3)}) — an overpayment is recorded on the invoice page, where it becomes store credit`);
+        `Paid (${(paidF / 1000).toFixed(3)}) exceeds total (${gross.toFixed(3)}) — an overpayment is recorded on the invoice page, where it becomes store credit`);
     }
   }
 
@@ -166,17 +222,25 @@ export function createInvoiceInHouse(input: InvoiceCreateInput, branchId: string
   // `createDirectInvoice` gibt die Rechnung aus SEINER frisch geladenen Liste zurück — fehlt sie dort,
   // stimmt etwas mit der Filiale nicht, und die Zahlung liefe ins Leere. Also kein Weiter.
   if (!inv?.id) throw new Error('the invoice was not created');
-  let paymentId: string | undefined;
-  if (payment) {
+  const paymentIds: string[] = [];
+  // Nach Zahlungstag gebucht (bei gleichem Tag in der Reihenfolge der Maske): die Zahlung, die schließt, ist
+  // die mit dem spätesten Tag — genau der Tag, den der NBR-Export als Vollzahlung liest; an ihm prüft das Haus
+  // die VAT-Periode. Jede Zahlung bekommt ihren EIGENEN Erfassungszeitpunkt (eine Millisekunde Abstand):
+  // Banking verknüpft eine Kartengebühr über diesen Zeitpunkt mit ihrer Zahlung.
+  const geordnet = [...mitTag].sort((a, b) => (a.paidDate < b.paidDate ? -1 : a.paidDate > b.paidDate ? 1 : a.order - b.order));
+  const basis = Date.now();
+  geordnet.forEach((p, i) => {
+    const createdAt = new Date(basis + i).toISOString();
+    const receivedAt = businessTimestamp(p.paidDate, createdAt);
     // Dieselbe Wahl wie bisher an der Maske: die Nummernart gilt, wenn DIESE Zahlung schließt;
     // sonst bleibt die Marke, mit der die Rechnung angelegt wurde.
-    paymentId = useInvoiceStore.getState().recordPayment(
-      inv.id, payment.amount, payment.method, undefined, input.specialMark === true,
-      payment.method === 'card' ? payment.cardBrand : undefined,
-    );
-  }
+    paymentIds.push(useInvoiceStore.getState().recordPayment(
+      inv.id, p.amount, p.method, undefined, input.specialMark === true,
+      p.method === 'card' ? p.cardBrand : undefined, undefined, undefined, { receivedAt, createdAt },
+    ));
+  });
   buchung();
-  return createdState(inv.id, paymentId);
+  return createdState(inv.id, paymentIds);
 }
 
 /** Die Listen, die die Maske danach zeigt — auch nach einem Rollback. */
@@ -193,11 +257,18 @@ export async function createInvoiceOnPrimary(input: InvoiceCreateInput): Promise
 
 /**
  * Die Zahlung, wie die Maske sie meint — für beide Anschlüsse dieselbe: kein Betrag, keine Zahlung;
- * die Kartenmarke nur bei Karte.
+ * die Kartenmarke nur bei Karte; der Tag, wenn die Maske einen nennt.
  */
 export function invoiceCreatePaymentBody(
-  paidAmount: number, method: string, cardBrand: InvoiceCardBrand,
+  paidAmount: number, method: string, cardBrand: InvoiceCardBrand, paidDate?: string,
 ): Record<string, unknown> | undefined {
   if (!(paidAmount > 0)) return undefined;
-  return { amount: paidAmount, method, ...(method === 'card' ? { cardBrand } : {}) };
+  return { amount: paidAmount, method, ...(method === 'card' ? { cardBrand } : {}), ...(paidDate ? { paidDate } : {}) };
+}
+
+/** v0.8.87 — die Zahlungszeilen der Maske als Rumpf: Zeilen ohne Betrag fallen weg. */
+export function invoiceCreatePaymentsBody(
+  rows: ReadonlyArray<{ amount: number; method: string; cardBrand: InvoiceCardBrand; paidDate?: string }>,
+): Array<Record<string, unknown>> {
+  return rows.map((r) => invoiceCreatePaymentBody(r.amount, r.method, r.cardBrand, r.paidDate)).filter((x): x is Record<string, unknown> => !!x);
 }

@@ -719,7 +719,8 @@ marker('CENTRAL_UI_R6E_INVOICE_CLIENT_NO_LOCAL_DB_PROVED');
   ok(!/recording a payment while creating an invoice/.test(ic) && /recording a payment while editing an invoice/.test(ic),
     'UI Direct Sale: das ehrliche Nein beim Anlegen mit Zahlung ist weg; im Ändern bleibt es');
   ok(/local: async \(\) => \{\s*const inv = await createInvoiceOnPrimary\(/.test(ic) && !/createDirectInvoice\(|recordPayment\(/.test(ic)
-    && /\.\.\.\(zahlung \? \{ payment: zahlung \} : \{\}\)/.test(ic),
+    // v0.8.87 — mehrere Zahlungen beim Anlegen: die Liste `payments` als Feld derselben Absicht.
+    && /\.\.\.\(zahlungen\.length > 0 \? \{ payments: zahlungen \} : \{\}\)/.test(ic),
   'UI Direct Sale: am Primary EINE Hausfolge (keine zwei losen Store-Aufrufe mehr), fern die Zahlung als Feld');
   const idt = codeOf(src('src/pages/invoices/InvoiceDetail.tsx'));
   const il = codeOf(src('src/pages/invoices/InvoiceList.tsx'));

@@ -246,6 +246,10 @@ function TaxTab() {
   const [defaultScheme, setDefaultScheme] = useState('');
   const [cardFeeRate, setCardFeeRate] = useState('');
   const [amexFeeRate, setAmexFeeRate] = useState('');
+  // v0.8.87 — Debitkarte: eigener Satz, kein eingebauter Wert und kein Rückfall. Leer = nicht eingerichtet →
+  // Debitzahlungen werden abgelehnt. Einmal gesetzt, lässt er sich nicht mehr leeren (0 ist erlaubt).
+  const [debitFeeRate, setDebitFeeRate] = useState('');
+  const [debitFeeError, setDebitFeeError] = useState('');
   const [fyStartMonth, setFyStartMonth] = useState('');
   const [openingCash, setOpeningCash] = useState('');
   const [openingBank, setOpeningBank] = useState('');
@@ -274,6 +278,7 @@ function TaxTab() {
     setDefaultScheme(getSetting(branchId, 'tax.default_scheme') || 'MARGIN');
     setCardFeeRate(getSetting(branchId, 'finance.card_fee_rate') || '2.2');
     setAmexFeeRate(getSetting(branchId, 'finance.card_fee_rate_amex') || '2.5');
+    setDebitFeeRate(getSetting(branchId, 'finance.card_fee_rate_debit') || '');
     setFyStartMonth(getSetting(branchId, 'finance.fiscal_year_start_month') || '1');
     setOpeningCash(getSetting(branchId, 'finance.opening_cash') || '0');
     setOpeningBank(getSetting(branchId, 'finance.opening_bank') || '0');
@@ -290,12 +295,24 @@ function TaxTab() {
   }, [branchId]);
 
   function save() {
+    const debit = debitFeeRate.trim();
+    const debitStored = (getSetting(branchId, 'finance.card_fee_rate_debit') || '').trim();
+    if (debit !== '' && !(Number.isFinite(Number(debit)) && Number(debit) >= 0 && Number(debit) <= 100)) {
+      setDebitFeeError('Debit card fee must be a number from 0 to 100.');
+      return;
+    }
+    if (debit === '' && debitStored !== '') {
+      setDebitFeeError('The debit card fee cannot be emptied once set. Enter 0 if the bank charges no fee.');
+      return;
+    }
+    setDebitFeeError('');
     setSetting(branchId, 'vat.standard_rate', stdRate, 'tax');
     setSetting(branchId, 'vat.margin_rate', marginRate, 'tax');
     setSetting(branchId, 'tax.margin_enabled', marginEnabled ? '1' : '0', 'tax');
     setSetting(branchId, 'tax.default_scheme', defaultScheme, 'tax');
     setSetting(branchId, 'finance.card_fee_rate', cardFeeRate, 'finance');
     setSetting(branchId, 'finance.card_fee_rate_amex', amexFeeRate, 'finance');
+    if (debit !== '') setSetting(branchId, 'finance.card_fee_rate_debit', debit, 'finance');
     setSetting(branchId, 'finance.fiscal_year_start_month', fyStartMonth, 'finance');
     setSetting(branchId, 'payment.default_inflow_account', defaultInflowAccount, 'payment');
     setSetting(branchId, 'payment.default_outflow_account', defaultOutflowAccount, 'payment');
@@ -363,7 +380,7 @@ function TaxTab() {
           </FieldRow>
           <FieldRow label="Card Processing Fee">
             <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-              <span style={{ fontSize: 12, color: '#6B7280', minWidth: 150 }}>Normal (Visa / MC / Debit)</span>
+              <span style={{ fontSize: 12, color: '#6B7280', minWidth: 150 }}>Normal (Visa / MC)</span>
               <Input
                 type="number" step="0.01" value={cardFeeRate} onChange={e => setCardFeeRate(e.target.value)}
                 placeholder="2.2" style={{ maxWidth: 90 }}
@@ -376,7 +393,21 @@ function TaxTab() {
                 type="number" step="0.01" value={amexFeeRate} onChange={e => setAmexFeeRate(e.target.value)}
                 placeholder="2.5" style={{ maxWidth: 90 }}
               />
-              <span style={{ fontSize: 13, color: '#6B7280' }}>% deducted by bank on every card payment</span>
+              <span style={{ fontSize: 13, color: '#6B7280' }}>%</span>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 8 }}>
+              <span style={{ fontSize: 12, color: '#6B7280', minWidth: 150 }}>Debit card</span>
+              <Input
+                type="number" step="0.01" value={debitFeeRate} onChange={e => { setDebitFeeRate(e.target.value); setDebitFeeError(''); }}
+                placeholder="not set" style={{ maxWidth: 90 }} data-settings-debit-fee
+              />
+              <span style={{ fontSize: 13, color: '#6B7280' }}>%</span>
+            </div>
+            {debitFeeError && (
+              <div style={{ fontSize: 11, color: '#AA6E6E', marginTop: 6 }} data-settings-debit-fee-error>{debitFeeError}</div>
+            )}
+            <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 6 }}>
+              Deducted by the bank on every card payment. Debit card: set your own rate before the first debit card payment (0 is allowed) — until then debit card payments are refused. A change applies to new payments only — fees already booked stay as they were.
             </div>
           </FieldRow>
           <FieldRow label="Fiscal Year Starts In">

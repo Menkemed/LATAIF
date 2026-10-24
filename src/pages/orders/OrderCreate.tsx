@@ -36,6 +36,8 @@ import { ORDER_CREATE_STATUSES, orderCreateBody, orderCreateInput, validateOrder
 import { todayIso, latestBusinessDate } from '@/core/utils/business-date';
 import { createOrderOnPrimary } from '@/core/orders/order-house';
 import { productDisplayName } from '@/core/products/display-name';
+// v0.8.87 — Kartenarten aus der EINEN Quelle (Normal / Amex / Debit).
+import { CARD_BRANDS } from '@/core/finance/card-fees';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 
@@ -156,7 +158,7 @@ export function OrderCreate() {
   const [depositAmount, setDepositAmount] = useState<number>(0);
   const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank' | 'card' | 'benefit'>('cash');
   // v0.7.26 — Deposit-Karten-Brand (nur relevant bei paymentMethod 'card').
-  const [cardBrand, setCardBrand] = useState<'normal' | 'amex'>('normal');
+  const [cardBrand, setCardBrand] = useState<'normal' | 'amex' | 'debit'>('normal');
   const [fullyPaid, setFullyPaid] = useState(false);
   const [expectedDelivery, setExpectedDelivery] = useState('');
   // ORDER-DATE — das Datum des Auftrags, vorbelegt mit heute; eine Anzahlung beim Anlegen trägt dasselbe Datum.
@@ -1090,10 +1092,10 @@ export function OrderCreate() {
                     );
                   })}
                 </div>
-                {/* v0.7.26 — Karten-Brand bei Card-Anzahlung (Normal 2,2% / Amex 2,5%). */}
+                {/* v0.7.26 — Karten-Brand bei Card-Anzahlung (Normal / Amex / Debit, je eigener Satz). */}
                 {paymentMethod === 'card' && (
                   <div className="flex gap-2" style={{ marginTop: 10 }}>
-                    {(['normal', 'amex'] as const).map(b => {
+                    {CARD_BRANDS.map(b => {
                       const on = cardBrand === b;
                       return (
                         <button key={b} type="button" onClick={() => setCardBrand(b)}
@@ -1102,7 +1104,7 @@ export function OrderCreate() {
                             border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`,
                             color: on ? '#0F0F10' : '#6B7280',
                             background: on ? 'rgba(15,15,16,0.06)' : 'transparent',
-                          }}>{b === 'amex' ? 'Amex' : 'Normal'}</button>
+                          }}>{b === 'amex' ? 'Amex' : b === 'debit' ? 'Debit' : 'Normal'}</button>
                       );
                     })}
                   </div>

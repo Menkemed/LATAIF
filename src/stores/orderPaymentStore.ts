@@ -21,7 +21,7 @@ import {
 // reine Funktionen, invoiceStore importiert orderStore/orderPaymentStore nicht zurueck.
 import { assertGrantedCreditUnused, clawbackGrantedCredit } from '@/stores/invoiceStore';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
-import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
+import { assertCardFeeConfigured, normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
@@ -257,6 +257,12 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
     assertOrderOverpayMutable(p.orderId, nonConvertedTotal(p.orderId) + p.amount);
     // v0.7.26 — Karten-Brand nur bei method 'card'; steuert die Gebuehren-Rate.
     const brand: CardBrand | null = p.method === 'card' ? normalizeCardBrand(p.cardBrand) : null;
+    // v0.8.87 — Debit ohne gespeicherten Satz: Nein VOR dem Insert.
+    if (brand) {
+      let feeBranch = 'branch-main';
+      try { feeBranch = currentBranchId(); } catch { /* default */ }
+      assertCardFeeConfigured(feeBranch, brand);
+    }
     db.run(
       `INSERT INTO order_payments (id, order_id, amount, paid_at, method, card_brand, reference, note, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,

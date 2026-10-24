@@ -582,7 +582,7 @@ export interface Repair {
   customerPaidFrom?: typeof REPAIR_CUSTOMER_PAID_FROM[number] | null;
   internalPaidFrom?: typeof REPAIR_INTERNAL_PAID_FROM[number] | null;
   // v0.7.26 — Karten-Brand fuer die Repair-Kundenzahlung (Gebuehren-Rate normal/amex).
-  customerCardBrand?: 'normal' | 'amex' | null;
+  customerCardBrand?: 'normal' | 'amex' | 'debit' | null;
   // Plan §8 — Repair customer payment tracking
   customerPaidAmount?: number;
   customerPaymentStatus?: 'UNPAID' | 'PARTIALLY_PAID' | 'PAID';
@@ -1100,7 +1100,7 @@ export interface Order {
   orderDate?: string;
   remainingAmount?: number;
   paymentMethod?: 'cash' | 'bank' | 'card' | 'benefit';
-  cardBrand?: 'normal' | 'amex';   // v0.7.26 — Deposit-Karten-Brand (nur bei paymentMethod 'card')
+  cardBrand?: 'normal' | 'amex' | 'debit';   // v0.7.26 — Deposit-Karten-Brand (nur bei paymentMethod 'card')
   fullyPaid?: boolean;
   supplierName?: string;
   supplierPrice?: number;

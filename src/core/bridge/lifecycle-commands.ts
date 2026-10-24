@@ -27,7 +27,7 @@
 
 import { query } from '@/core/db/helpers';
 import { REPAIR_WORK_TYPES } from '@/core/models/types';
-import { CARD_BRANDS, type CardBrand } from '@/core/finance/card-fees';
+import { CARD_BRANDS, CardFeeNotConfigured, type CardBrand } from '@/core/finance/card-fees';
 import { nextOrderStatus, isAllowedOrderAdvance } from '@/core/orders/order-status-flow';
 import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
 import { RepairActionRejected, isRepairTaxScheme, repairInvoiceBlocker } from '@/core/repairs/repair-rules';
@@ -262,6 +262,8 @@ export function runAddOrderPayment(deps: EngineDeps, identity: CommandIdentity, 
         note: req.note,
       });
     } catch (err) {
+      // v0.8.87 — Debitzahlung ohne gespeicherten Satz.
+      if (err instanceof CardFeeNotConfigured) throw new CommandRejected(err.code, err.message);
       const verdict = asVerdict(err, ORDER_PAY_VERDICTS);
       if (verdict) throw verdict;
       throw err;

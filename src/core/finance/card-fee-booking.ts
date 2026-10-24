@@ -35,11 +35,14 @@ export interface BookCardFeeArgs {
   branchId: string;
   userId: string;
   amount: number;          // Brutto-Betrag der Karten-Zahlung
-  brand: CardBrand;        // 'normal' | 'amex'
+  brand: CardBrand;        // 'normal' | 'amex' | 'debit'
   relatedModule: string;   // 'invoice' | 'order' | 'repair'
   relatedEntityId: string;
   label: string;           // Doc-Nummer/Label fuer die Beschreibung
   createdAt: string;       // MUSS == payment.created_at sein (Banking-Netting!)
+  /** v0.8.87 — der Tag der Zahlung (received_at), wenn er nicht der Erfassungstag ist: Ausgabedatum und
+   *  Buchungsdatum der Gebühr folgen ihm. `created_at` bleibt `createdAt` (die Verknüpfung in Banking). */
+  occurredAt?: string;
 }
 
 /**
@@ -57,8 +60,10 @@ export function bookCardFee(args: BookCardFeeArgs): string | null {
   const db = getDatabase();
   const expenseId = uuid();
   const expenseNumber = getNextDocumentNumber('EXP');
-  const expenseDescription = `Card fee (${brand === 'amex' ? 'Amex' : 'Normal'}) · ${label} · ${feeRate}% of ${amount.toFixed(3)} BHD`;
-  const expenseDate = createdAt.split('T')[0];
+  const brandName = brand === 'amex' ? 'Amex' : brand === 'debit' ? 'Debit' : 'Normal';
+  const expenseDescription = `Card fee (${brandName}) · ${label} · ${feeRate}% of ${amount.toFixed(3)} BHD`;
+  const occurredAt = args.occurredAt || createdAt;
+  const expenseDate = occurredAt.split('T')[0];
 
   // Expense als PAID anlegen (paid_amount = fee, status PAID).
   db.run(
@@ -86,7 +91,7 @@ export function bookCardFee(args: BookCardFeeArgs): string | null {
           metadata: { expenseNumber, category: 'CardFees' },
         },
       ],
-      { occurredAt: createdAt, sourceModule: 'EXPENSE', sourceId: expenseId, branchId, userId }
+      { occurredAt, sourceModule: 'EXPENSE', sourceId: expenseId, branchId, userId }
     );
   });
   return expenseId;

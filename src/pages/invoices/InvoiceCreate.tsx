@@ -28,7 +28,13 @@ import { keptLineLotShortMessage } from '@/core/invoices/edit-lines';
 import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-write';
 import { lotAggregatesFor, productLotsBatchFor, LEERE_LOSE } from '@/core/data/domain-reads';
-import { createInvoiceOnPrimary, invoiceCreatePaymentBody, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
+import { createInvoiceOnPrimary, invoiceCreatePaymentsBody, MAX_CREATE_PAYMENTS, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
+// v0.8.87 — Kartenarten (Normal / Amex / Debit) und die Datumsregel aus je EINER Quelle.
+import { CARD_BRAND_OPTIONS, cardFeeConfigured, computeCardFee, type CardBrand } from '@/core/finance/card-fees';
+
+const DEBIT_FEE_MISSING = 'Debit card fee is not set yet. Enter it in Settings → Tax / VAT → Card Processing Fee (0 % is allowed).';
+import { businessDateIssue, latestBusinessDate } from '@/core/utils/business-date';
+import { currentBranchId } from '@/core/db/helpers';
 import { productDisplayName } from '@/core/products/display-name';
 // BULK METAL V1 — Bulk-Zeile: Absicht (Lot, Gewicht, Typ, Preis); Zeile rechnet das Haus mit dem Zeilenvertrag.
 import { BulkInvoiceLineRow, previewBulkCogs, type BulkInvoiceDraft } from '@/components/bulk/BulkInvoiceLineRow';
@@ -37,6 +43,18 @@ import { formatMg, netFilsFromGross, parseBhdToFils, parseGramsToMg, type BulkTy
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 type Method = 'cash' | 'bank_transfer' | 'card' | 'benefit';
+
+/** v0.8.87 — eine Zahlungszeile beim Anlegen: Weg, Kartenart, Betrag (Text, wie getippt), Tag. */
+interface PayRow {
+  key: number;
+  method: Method;
+  cardBrand: CardBrand;
+  amountText: string;
+  date: string;
+  /** Der Mensch hat den Tag selbst gewählt — dann folgt er dem Rechnungsdatum nicht mehr. */
+  dateTouched: boolean;
+}
+const payAmountOf = (r: PayRow): number => { const v = parseFloat(r.amountText); return Number.isFinite(v) ? v : 0; };
 
 interface DraftLine {
   /** INVOICE-EDIT S2 — beim Ändern: die gespeicherte Rechnungszeile, die diese Zeile fortsetzt. */
@@ -116,8 +134,11 @@ export function InvoiceCreate() {
   const [expandedLines, setExpandedLines] = useState<Record<number, boolean>>({});
   const [paymentMethod, setPaymentMethod] = useState<Method>('cash');
   // v0.7.26 — Karten-Brand (nur relevant wenn method === 'card'); steuert die Gebuehr (2,2% vs 2,5%).
-  const [cardBrand, setCardBrand] = useState<'normal' | 'amex'>('normal');
+  const [cardBrand, setCardBrand] = useState<'normal' | 'amex' | 'debit'>('normal');
   const [paidAmount, setPaidAmount] = useState<number>(0);
+  // v0.8.87 — beim ANLEGEN mehrere Zahlungen (je Weg, Kartenart, Betrag, Tag); das Ändern behält die eine Delta-Zahlung oben.
+  const [payRows, setPayRows] = useState<PayRow[]>(() => [{ key: 1, method: 'cash', cardBrand: 'normal', amountText: '', date: new Date().toISOString().split('T')[0], dateTouched: false }]);
+  const [payRowSeq, setPayRowSeq] = useState(2);
   // CENTRAL-UI-PARITY R4B — dieselbe Maske, zwei Anschluesse hinter dem Speichern.
   const anlegen = useSharedWrite<{ invoiceId: string }>('invoices.create');
   // CENTRAL-UI-PARITY R6B — das Ändern dieser Seite geht fern über die vorhandene Buchung.
@@ -311,8 +332,40 @@ export function InvoiceCreate() {
   const subtotal = computed.reduce((s, c) => s + c.net, 0);
   const totalVat = computed.reduce((s, c) => s + c.vat, 0);
   const total = subtotal + totalVat;
-  const remaining = Math.max(0, total - paidAmount);
-  const invoiceType: 'INV' | 'PINV' = paidAmount >= total && total > 0 ? 'INV' : 'PINV';
+  // v0.8.87 — beim Anlegen: die Summe der Zahlungszeilen; beim Ändern: der bezahlte Betrag wie bisher.
+  const createPaid = payRows.reduce((sum, r) => sum + Math.max(0, payAmountOf(r)), 0);
+  const paidNow = isEditMode ? paidAmount : createPaid;
+  const remaining = Math.max(0, total - paidNow);
+  const invoiceType: 'INV' | 'PINV' = paidNow >= total && total > 0 ? 'INV' : 'PINV';
+
+  // Der vorgeschlagene Zahlungstag ist das Rechnungsdatum — bis der Mensch den Tag einer Zeile selbst wählt.
+  useEffect(() => {
+    setPayRows(prev => prev.map(r => (r.dateTouched || r.date === issuedDate ? r : { ...r, date: issuedDate })));
+  }, [issuedDate]);
+  function updatePayRow(key: number, patch: Partial<PayRow>) {
+    setPayRows(prev => prev.map(r => (r.key === key ? { ...r, ...patch } : r)));
+  }
+  function addPayRow() {
+    setPayRows(prev => {
+      if (prev.length >= MAX_CREATE_PAYMENTS) return prev;
+      const open = Math.max(0, total - prev.reduce((sum, r) => sum + Math.max(0, payAmountOf(r)), 0));
+      return [...prev, { key: payRowSeq, method: 'cash', cardBrand: 'normal', amountText: open > 0.0005 ? open.toFixed(3) : '', date: issuedDate, dateTouched: false }];
+    });
+    setPayRowSeq(n => n + 1);
+  }
+  function removePayRow(key: number) {
+    setPayRows(prev => (prev.length === 1 ? [{ ...prev[0], amountText: '' }] : prev.filter(r => r.key !== key)));
+  }
+  /** Die Kartengebühr einer Zeile als Vorschau — nur, wo die Sätze liegen (Primary); gebucht wird sie im Haus. */
+  function cardFeePreview(r: PayRow): number | null {
+    if (anlegen.remote || r.method !== 'card' || !(payAmountOf(r) > 0)) return null;
+    try { return computeCardFee(currentBranchId(), payAmountOf(r), r.cardBrand); } catch { return null; }
+  }
+  /** v0.8.87 — Debit ohne gespeicherten Satz (nur am Primary sichtbar; fern sagt es das Haus beim Speichern). */
+  function debitFeeMissing(r: PayRow): boolean {
+    if (anlegen.remote || r.method !== 'card' || r.cardBrand !== 'debit') return false;
+    try { return !cardFeeConfigured(currentBranchId(), 'debit'); } catch { return false; }
+  }
 
   function updateLine(idx: number, patch: Partial<DraftLine>) {
     setLines(prev => prev.map((l, i) => i === idx ? { ...l, ...patch } : l));
@@ -353,13 +406,27 @@ export function InvoiceCreate() {
     if (bad !== -1) return `Line ${bad + 1}: pick a product, set qty > 0, price ≥ 0`;
     const short = computed.findIndex(c => c.keptShort);
     if (short !== -1) return `Line ${short + 1}: ${computed[short].keptShort}`;
-    if (paidAmount < 0) return 'Paid amount cannot be negative';
+    if (isEditMode && paidAmount < 0) return 'Paid amount cannot be negative';
+    if (!isEditMode) {
+      for (let i = 0; i < payRows.length; i++) {
+        const r = payRows[i];
+        const raw = r.amountText.trim();
+        if (raw === '') continue;
+        const v = parseFloat(raw);
+        if (!Number.isFinite(v) || v < 0) return `Payment ${i + 1}: the amount must be a number of 0 or more`;
+        if (v === 0) continue;
+        const dateIssue = businessDateIssue(r.date, `Payment ${i + 1} date`);
+        if (dateIssue || !r.date) return dateIssue || `Payment ${i + 1}: please choose the payment date`;
+        if (r.date < issuedDate) return `Payment ${i + 1}: the payment date cannot be before the invoice date`;
+        if (debitFeeMissing(r)) return `Payment ${i + 1}: ${DEBIT_FEE_MISSING}`;
+      }
+    }
     // Überzahlung: Im EDIT-Modus erlaubt — editInvoice (S3b) verbucht den Überschuss
     // (Reduktion des Totals unter den bereits bezahlten Betrag ODER Delta-Überzahlung)
     // atomar als Customer Credit. Im CREATE-Modus (Direktverkauf) bleibt der Guard ein
     // Tippfehler-Schutz; S3a-Überzahlung läuft bewusst über den Payment-Flow am
     // Invoice-Detail (InvoiceDetail.handleRecordPayment hat dort keinen Guard).
-    if (!isEditMode && paidAmount > total) return `Paid (${fmt(paidAmount)}) exceeds total (${fmt(total)})`;
+    if (!isEditMode && createPaid > total + 0.0005) return `Paid (${fmt(createPaid)}) exceeds total (${fmt(total)})`;
     return null;
   }
 
@@ -371,7 +438,7 @@ export function InvoiceCreate() {
     // Wird die Rechnung mit diesem Save final?
     //   Create:  paidAmount >= total
     //   Edit:    bisher nicht final + neues paid >= total
-    const goingFinal = total > 0 && paidAmount >= total - 0.005 && (
+    const goingFinal = total > 0 && paidNow >= total - 0.005 && (
       !isEditMode || (editInvoice && editInvoice.status !== 'FINAL' && !editInvoice.numberFinalizedAt)
     );
     if (goingFinal) {
@@ -387,7 +454,8 @@ export function InvoiceCreate() {
     // Transaktion (`createInvoiceOnPrimary`). Vorher waren es zwei lose Aufrufe: scheiterte die
     // Zahlung, blieb eine unbezahlte Rechnung stehen. Nur im Aendern bleibt eine Zahlung fern ein
     // ehrliches Nein (unten) — dort ist sie kein Feld.
-    const zahlung = invoiceCreatePaymentBody(paidAmount, paymentMethod, cardBrand);
+    // v0.8.87 — die Zahlungszeilen (ohne Betrag fallen weg), je mit Weg, Kartenart und Tag.
+    const zahlungen = invoiceCreatePaymentsBody(payRows.map(r => ({ amount: payAmountOf(r), method: r.method, cardBrand: r.cardBrand, paidDate: r.date })));
     // CENTRAL-C3B — dieselbe Ableitung, die der Fernauftrag benutzt. Phase 3 (Cost-Snapshot aus
     // dem gewaehlten Lot, Fallback auf products.purchase_price) und die v0.7.1-Regel fuer MARGIN
     // (internalVat persistieren) stecken jetzt in `toInvoiceLine` — eine Stelle, zwei Aufrufer.
@@ -517,7 +585,7 @@ export function InvoiceCreate() {
       local: async () => {
         const inv = await createInvoiceOnPrimary({
           customerId, lines: payload, notes: notes || undefined, issuedDate, staffId: staffId || undefined, specialMark,
-          payment: zahlung as InvoiceCreatePayment | undefined,
+          ...(zahlungen.length > 0 ? { payments: zahlungen as unknown as InvoiceCreatePayment[] } : {}),
         });
         return { invoiceId: inv.invoiceId };
       },
@@ -538,7 +606,7 @@ export function InvoiceCreate() {
         ...(issuedDate ? { issuedDate } : {}),
         ...(staffId ? { staffId } : {}),
         specialMark,
-        ...(zahlung ? { payment: zahlung } : {}),
+        ...(zahlungen.length > 0 ? { payments: zahlungen } : {}),
       }),
       shape: (v) => ({ invoiceId: String(v.invoiceId ?? '') }),
     });
@@ -880,6 +948,7 @@ export function InvoiceCreate() {
         <div style={{ marginTop: 16 }}>
           <Card>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>4 · PAYMENT</span>
+            {isEditMode ? (<>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12 }}>
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
@@ -902,13 +971,10 @@ export function InvoiceCreate() {
                     );
                   })}
                 </div>
-                {/* v0.7.26 — Karten-Brand: Normal (Visa/MC/Debit) 2,2% vs Amex 2,5%. */}
+                {/* v0.7.26 — Karten-Brand: Normal / Amex / Debit (je eigener Satz in Settings). */}
                 {paymentMethod === 'card' && (
                   <div className="flex gap-2" style={{ marginTop: 10 }}>
-                    {([
-                      { id: 'normal', label: 'Normal' },
-                      { id: 'amex', label: 'Amex' },
-                    ] as const).map(b => {
+                    {CARD_BRAND_OPTIONS.map(b => {
                       const on = cardBrand === b.id;
                       return (
                         <button key={b.id} type="button" onClick={() => setCardBrand(b.id)} data-invoice-pay-card-brand={b.id}
@@ -938,6 +1004,109 @@ export function InvoiceCreate() {
                 Pay Later
               </button>
             </div>
+            </>) : (<>
+            {/* v0.8.87 — mehrere Zahlungen beim Anlegen: je Weg, Kartenart, Betrag und Tag (vorbelegt: Rechnungsdatum). */}
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }} data-invoice-pay-rows>
+              {payRows.map((r, idx) => {
+                const fee = cardFeePreview(r);
+                return (
+                  <div key={r.key} data-invoice-pay-row={idx}
+                    style={{ display: 'grid', gridTemplateColumns: '1.6fr 1fr 1fr auto', gap: 12, alignItems: 'end', padding: '10px 12px', border: '1px solid #E5E9EE', borderRadius: 8 }}>
+                    <div>
+                      <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>{payRows.length > 1 ? `PAYMENT ${idx + 1} · METHOD` : 'METHOD'}</span>
+                      <div className="flex gap-2" style={{ marginTop: 6, flexWrap: 'wrap' }}>
+                        {([
+                          { id: 'cash', label: 'Cash' },
+                          { id: 'bank_transfer', label: 'Bank' },
+                          { id: 'card', label: 'Card' },
+                          { id: 'benefit', label: 'Benefit' },
+                        ] as const).map(m => {
+                          const active = r.method === m.id;
+                          return (
+                            <button key={m.id} type="button" onClick={() => updatePayRow(r.key, { method: m.id })} data-invoice-pay-method={m.id}
+                              className="cursor-pointer rounded"
+                              style={{ padding: '8px 14px', fontSize: 13,
+                                border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
+                                color: active ? '#0F0F10' : '#6B7280',
+                                background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
+                              }}>{m.label}</button>
+                          );
+                        })}
+                      </div>
+                      {r.method === 'card' && (
+                        <div className="flex gap-2" style={{ marginTop: 8 }}>
+                          {CARD_BRAND_OPTIONS.map(b => {
+                            const on = r.cardBrand === b.id;
+                            return (
+                              <button key={b.id} type="button" onClick={() => updatePayRow(r.key, { cardBrand: b.id })} data-invoice-pay-card-brand={b.id}
+                                className="cursor-pointer rounded"
+                                style={{ padding: '5px 12px', fontSize: 12,
+                                  border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`,
+                                  color: on ? '#0F0F10' : '#6B7280',
+                                  background: on ? 'rgba(15,15,16,0.06)' : 'transparent',
+                                }}>{b.label}</button>
+                            );
+                          })}
+                        </div>
+                      )}
+                      {r.method === 'card' && (
+                        debitFeeMissing(r) ? (
+                          <div style={{ fontSize: 11, color: '#AA6E6E', marginTop: 6 }} data-invoice-pay-fee={idx} data-invoice-pay-fee-missing>
+                            {DEBIT_FEE_MISSING}
+                          </div>
+                        ) : (
+                          <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }} data-invoice-pay-fee={idx}>
+                            {fee !== null ? <>Card fee <Bhd v={fee}/> BHD (booked with this payment)</> : 'The card fee is booked with this payment by the main computer.'}
+                          </div>
+                        )
+                      )}
+                    </div>
+                    <Input label="AMOUNT (BHD)" type="number" step="0.001" min="0"
+                      value={r.amountText} onChange={e => updatePayRow(r.key, { amountText: e.target.value })} data-invoice-pay-amount />
+                    <Input label="PAYMENT DATE" type="date" min={issuedDate} max={latestBusinessDate()}
+                      value={r.date} onChange={e => updatePayRow(r.key, { date: e.target.value, dateTouched: true })} data-invoice-pay-date />
+                    <button type="button" onClick={() => removePayRow(r.key)} data-invoice-pay-remove={idx} title="Remove this payment"
+                      className="cursor-pointer rounded" disabled={payRows.length === 1 && !r.amountText}
+                      style={{ padding: 8, border: '1px solid #D5D9DE', background: 'transparent', color: '#9CA3AF', marginBottom: 2 }}>
+                      <Trash2 size={14} />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+            <div className="flex gap-2" style={{ marginTop: 14 }}>
+              <button onClick={addPayRow} data-invoice-pay-add disabled={payRows.length >= MAX_CREATE_PAYMENTS}
+                className="cursor-pointer rounded flex items-center gap-1"
+                style={{ padding: '6px 12px', fontSize: 11, border: '1px solid #0F0F10', color: '#0F0F10', background: 'transparent' }}>
+                <Plus size={12} /> Add Payment
+              </button>
+              <button data-invoice-pay-full
+                onClick={() => setPayRows(prev => {
+                  const last = prev[prev.length - 1];
+                  const others = prev.slice(0, -1).reduce((sum, x) => sum + Math.max(0, payAmountOf(x)), 0);
+                  const rest = Math.max(0, total - others);
+                  return prev.map(x => (x.key === last.key ? { ...x, amountText: rest > 0.0005 ? rest.toFixed(3) : '' } : x));
+                })}
+                className="cursor-pointer rounded"
+                style={{ padding: '6px 12px', fontSize: 11, border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}>
+                Pay Full
+              </button>
+              <button data-invoice-pay-later
+                onClick={() => {
+                  setPayRows([{ key: payRowSeq, method: 'cash', cardBrand: 'normal', amountText: '', date: issuedDate, dateTouched: false }]);
+                  setPayRowSeq(n => n + 1);
+                }}
+                className="cursor-pointer rounded"
+                style={{ padding: '6px 12px', fontSize: 11, border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}>
+                Pay Later
+              </button>
+            </div>
+            {createPaid > total + 0.0005 && (
+              <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.3)', borderRadius: 6, fontSize: 12, color: '#B91C1C' }} data-invoice-pay-over>
+                The payments (<strong><Bhd v={createPaid}/> BHD</strong>) exceed the total. An overpayment is recorded on the invoice page, where it becomes customer credit.
+              </div>
+            )}
+            </>)}
             {isEditMode && (
               <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(170,149,110,0.08)', border: '1px solid rgba(170,149,110,0.3)', borderRadius: 6, fontSize: 12, color: '#7A6B4F' }}>
                 Paid so far: <strong><Bhd v={originalPaid}/> BHD</strong>. If you raise the amount, the difference is booked as a new payment. Existing payments are not overwritten — for detailed payment management use the detail page. If the new total is below the paid amount, the difference becomes customer credit.
@@ -952,7 +1121,7 @@ export function InvoiceCreate() {
               <div style={{ padding: 12, background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE' }}>
                 <span className="text-overline">PAID</span>
                 <div className="font-mono" style={{ fontSize: 17, color: '#7EAA6E', marginTop: 4 }}>
-                  <Bhd v={paidAmount}/> BHD
+                  <Bhd v={paidNow}/> BHD
                 </div>
               </div>
               <div style={{ padding: 12, background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE' }}>
@@ -1072,7 +1241,7 @@ export function InvoiceCreate() {
               </div>
               <div>
                 <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', marginBottom: 4 }}>PAID</div>
-                <div className="font-mono" style={{ fontSize: 16, color: '#86E5A4' }}><Bhd v={paidAmount}/> BHD</div>
+                <div className="font-mono" style={{ fontSize: 16, color: '#86E5A4' }}><Bhd v={paidNow}/> BHD</div>
               </div>
               <div>
                 <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', marginBottom: 4 }}>REMAINING</div>

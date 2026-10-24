@@ -16,7 +16,7 @@ import { adoptOrderPhotosToProduct } from '@/core/orders/order-media';
 import { GRAM_EPS, assertGoldPayablesRemovable } from '@/core/gold/gold-settle';
 import { useProductStore } from '@/stores/productStore';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
-import { normalizeCardBrand } from '@/core/finance/card-fees';
+import { assertCardFeeConfigured, normalizeCardBrand } from '@/core/finance/card-fees';
 import {
   postOrderPayment,
   postOrderPaymentReversed,
@@ -414,6 +414,10 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     let branchId: string, userId: string;
     try { branchId = currentBranchId(); userId = currentUserId(); }
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
+    // v0.8.87 — Anzahlung per Debitkarte ohne gespeicherten Satz: Nein VOR dem ersten Schreiben (auch vor der Nummer).
+    if ((data.paymentMethod || 'cash') === 'card' && (data.fullyPaid || (data.depositAmount || 0) > 0)) {
+      assertCardFeeConfigured(branchId, normalizeCardBrand(data.cardBrand));
+    }
 
     // CENTRAL-C3A — durabler Zaehler statt MAX(Bestand)+1.
     ensureLegacySequence(getDatabase() as unknown as SqlDb, legacySpec('ORD'), new Date().toISOString(), new Date().getFullYear());

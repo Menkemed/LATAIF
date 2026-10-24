@@ -329,7 +329,7 @@ export const REPAIR_EDIT_INPUTS = [
 export type RepairEditInput = typeof REPAIR_EDIT_INPUTS[number];
 
 /** Die Kartenart gilt nur bei Kartenzahlung; ohne Angabe ist sie „normal" (v0.7.26). */
-export function repairCardBrandFor(paidFrom: unknown, brand: unknown): 'normal' | 'amex' | null {
+export function repairCardBrandFor(paidFrom: unknown, brand: unknown): 'normal' | 'amex' | 'debit' | null {
   if (paidFrom !== 'card') return null;
   if (brand === undefined || brand === null) return 'normal';
   if (!oneOf(CARD_BRANDS, brand)) throw new RepairActionRejected('INVALID_CARD_BRAND', `unknown card brand: ${String(brand)}`);

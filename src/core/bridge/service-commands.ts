@@ -37,7 +37,7 @@ import {
 } from '@/core/ledger/posting';
 import { useRepairStore, sumOpenRepairLineCosts } from '@/stores/repairStore';
 import { useAgentStore } from '@/stores/agentStore';
-import { CARD_BRANDS } from '@/core/finance/card-fees';
+import { CARD_BRANDS, CardFeeNotConfigured } from '@/core/finance/card-fees';
 import { SUPPLIER_CREDIT_LOCK_MESSAGE } from '@/core/finance/expenseSettlement';
 import {
   REPAIR_CUSTOMER_PAID_FROM, REPAIR_INTERNAL_PAID_FROM, REPAIR_TAX_SCHEMES, REPAIR_TYPES, type Repair,
@@ -218,7 +218,9 @@ function house<T>(fn: () => T): T {
   try {
     return fn();
   } catch (e) {
-    if (e instanceof RepairActionRejected || e instanceof TransferActionRejected) throw new CommandRejected(e.code, e.message);
+    if (e instanceof RepairActionRejected || e instanceof TransferActionRejected || e instanceof CardFeeNotConfigured) {
+      throw new CommandRejected(e.code, e.message);
+    }
     throw e;
   }
 }

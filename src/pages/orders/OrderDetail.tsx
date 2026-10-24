@@ -66,6 +66,8 @@ import { WriteError } from '@/components/shared/WriteError';
 import { orderDetailReadsFor } from '@/core/data/page-reads';
 import { creditPaidFor } from '@/core/data/domain-reads';
 import { productDisplayName } from '@/core/products/display-name';
+// v0.8.87 — Kartenarten aus der EINEN Quelle (Normal / Amex / Debit).
+import { CARD_BRANDS } from '@/core/finance/card-fees';
 
 function fmt(v: number | undefined | null): string {
   if (v === undefined || v === null) return '0.000';
@@ -125,7 +127,7 @@ export function OrderDetail() {
   const [payDate, setPayDate] = useState(new Date().toISOString().split('T')[0]);
   const [payMethod, setPayMethod] = useState('cash');
   // v0.7.26 — Karten-Brand fuer Order-Folgezahlung (nur bei method 'card').
-  const [payCardBrand, setPayCardBrand] = useState<'normal' | 'amex'>('normal');
+  const [payCardBrand, setPayCardBrand] = useState<'normal' | 'amex' | 'debit'>('normal');
   const [payNote, setPayNote] = useState('');
   const [showInvoiceVatConfirm, setShowInvoiceVatConfirm] = useState(false);
   // v0.6.7 — VAT-Picker auch fuer persistierte Multi-Line-Orders, damit der User
@@ -1763,10 +1765,10 @@ export function OrderDetail() {
                   }}>{m.replace('_', ' ').replace(/\b\w/g, c => c.toUpperCase())}</button>
               ))}
             </div>
-            {/* v0.7.26 — Karten-Brand bei Card-Zahlung (Normal 2,2% / Amex 2,5%). */}
+            {/* v0.7.26 — Karten-Brand bei Card-Zahlung (Normal / Amex / Debit, je eigener Satz). */}
             {payMethod === 'card' && (
               <div className="flex gap-2" style={{ marginTop: 10 }}>
-                {(['normal', 'amex'] as const).map(b => {
+                {CARD_BRANDS.map(b => {
                   const on = payCardBrand === b;
                   return (
                     <button key={b} type="button" onClick={() => setPayCardBrand(b)}
@@ -1775,7 +1777,7 @@ export function OrderDetail() {
                         border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`,
                         color: on ? '#0F0F10' : '#6B7280',
                         background: on ? 'rgba(15,15,16,0.06)' : 'transparent',
-                      }}>{b === 'amex' ? 'Amex' : 'Normal'}</button>
+                      }}>{b === 'amex' ? 'Amex' : b === 'debit' ? 'Debit' : 'Normal'}</button>
                   );
                 })}
               </div>

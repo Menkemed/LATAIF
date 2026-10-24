@@ -37,7 +37,7 @@ import {
 import { expenseHasActiveCreditSettlement, SUPPLIER_CREDIT_LOCK_MESSAGE } from '@/core/finance/expenseSettlement';
 import type { Expense } from '@/core/models/types';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
-import { normalizeCardBrand } from '@/core/finance/card-fees';
+import { assertCardFeeConfigured, normalizeCardBrand } from '@/core/finance/card-fees';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
 import { stonesOrThrow } from '@/core/products/stones';
@@ -581,7 +581,7 @@ function rowToRepair(row: Record<string, unknown>): Repair {
     internalCost: (row.internal_cost as number) || 0,
     chargeToCustomer: row.charge_to_customer as number | undefined,
     customerPaidFrom: (row.customer_paid_from as 'cash' | 'bank' | 'card' | 'benefit' | null) ?? null,
-    customerCardBrand: (row.customer_card_brand as 'normal' | 'amex' | null) ?? null,
+    customerCardBrand: (row.customer_card_brand as 'normal' | 'amex' | 'debit' | null) ?? null,
     internalPaidFrom: (row.internal_paid_from as 'cash' | 'bank' | null) ?? null,
     customerPaidAmount: (row.customer_paid_amount as number) || 0,
     customerPaymentStatus: (row.customer_payment_status as 'UNPAID' | 'PARTIALLY_PAID' | 'PAID') || 'UNPAID',
@@ -748,6 +748,16 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
           throw new Error(SUPPLIER_CREDIT_LOCK_MESSAGE);
         }
       }
+    }
+
+    // v0.8.87 — Kundenzahlung per Debitkarte ohne gespeicherten Satz: Nein VOR dem Update (die Gebühr bucht
+    // syncRepairCustomerPayment danach aus genau diesen Spalten).
+    const paidFromNachher = data.customerPaidFrom !== undefined ? data.customerPaidFrom : before?.customerPaidFrom;
+    const brandNachher = data.customerCardBrand !== undefined ? data.customerCardBrand : before?.customerCardBrand;
+    if (paidFromNachher === 'card') {
+      let feeBranch = 'branch-main';
+      try { feeBranch = currentBranchId(); } catch { /* default */ }
+      assertCardFeeConfigured(feeBranch, normalizeCardBrand(brandNachher || undefined));
     }
 
     const fields: string[] = [];

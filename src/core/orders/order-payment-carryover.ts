@@ -75,7 +75,7 @@ export function carryOverOrderPaymentsToInvoice(
   const cap = Math.min(pool, invoiceTotal);
   let budget = cap;
   let lastMethod = 'cash';
-  let lastBrand: 'normal' | 'amex' | undefined;
+  let lastBrand: 'normal' | 'amex' | 'debit' | undefined;
   for (const r of poolRows) {
     if (budget <= 0.005) break;
     const take = Math.min(Number(r.amount || 0), budget);
@@ -83,7 +83,7 @@ export function carryOverOrderPaymentsToInvoice(
     // v0.7.26 — Karten-Brand der Order-Zahlung mitnehmen: die Order-CardFee wurde
     // beim Convert reversed (markConvertedToInvoice); die Invoice bucht hier eine
     // frische CardFee mit der richtigen Rate (Amex 2,5% / Normal 2,2%).
-    lastBrand = lastMethod === 'card' ? ((r.card_brand as 'normal' | 'amex') || 'normal') : undefined;
+    lastBrand = lastMethod === 'card' ? ((r.card_brand as 'normal' | 'amex' | 'debit') || 'normal') : undefined;
     inv.recordPayment(invoiceId, take, lastMethod, `Carried over from order ${orderNumber}`, undefined, lastBrand);
     budget -= take;
   }

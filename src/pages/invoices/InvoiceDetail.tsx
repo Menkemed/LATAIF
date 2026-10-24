@@ -49,7 +49,7 @@ import { effectiveMargin } from '@/core/reports/sales-metrics';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { WriteError } from '@/components/shared/WriteError';
 import { useCreditNoteStore } from '@/stores/creditNoteStore';
-import { computeCardFee } from '@/core/finance/card-fees';
+import { computeCardFee, CARD_BRAND_OPTIONS } from '@/core/finance/card-fees';
 import { currentBranchId } from '@/core/db/helpers';
 import { exportCsv } from '@/core/utils/export-file';
 import type { ProductDisposition } from '@/core/models/types';
@@ -105,7 +105,7 @@ export function InvoiceDetail() {
   const [returnRefundNow, setReturnRefundNow] = useState(true); // Toggle: Refund sofort oder offen lassen
 
   // Plan §Returns Fix — Refund-Payment-Modal statt window.prompt()
-  const [refundPayModal, setRefundPayModal] = useState<{ returnId: string; outstanding: number; cardPaid: number; cardBrand: 'normal' | 'amex' } | null>(null);
+  const [refundPayModal, setRefundPayModal] = useState<{ returnId: string; outstanding: number; cardPaid: number; cardBrand: 'normal' | 'amex' | 'debit' } | null>(null);
   const [refundPayAmount, setRefundPayAmount] = useState('');
   const [refundPayMethod, setRefundPayMethod] = useState<'cash' | 'bank' | 'card' | 'benefit' | 'credit' | 'other'>('bank');
   // Slice 5 — bei cash/bank-Refund einer karten-gezahlten Invoice: Gebuehr abziehen (Kunde traegt)?
@@ -121,9 +121,9 @@ export function InvoiceDetail() {
   const [paymentAmount, setPaymentAmount] = useState('');
   const [paymentMethod, setPaymentMethod] = useState<PaymentMethod>('bank_transfer');
   // v0.7.26 — Karten-Brand (nur bei method === 'card'); steuert die Gebuehr (2,2% vs 2,5%).
-  const [cardBrand, setCardBrand] = useState<'normal' | 'amex'>('normal');
+  const [cardBrand, setCardBrand] = useState<'normal' | 'amex' | 'debit'>('normal');
   // 2026-05-16 — Pending payment that will trigger Final → Number-Type-Dialog.
-  const [pendingFinalPayment, setPendingFinalPayment] = useState<{ amount: number; method: PaymentMethod; cardBrand?: 'normal' | 'amex' } | null>(null);
+  const [pendingFinalPayment, setPendingFinalPayment] = useState<{ amount: number; method: PaymentMethod; cardBrand?: 'normal' | 'amex' | 'debit' } | null>(null);
 
   // Cancel confirm
   const [confirmCancel, setConfirmCancel] = useState(false);
@@ -1293,13 +1293,10 @@ export function InvoiceDetail() {
                 >{m.label}</button>
               ))}
             </div>
-            {/* v0.7.26 — Karten-Brand bei Card-Zahlung (Normal 2,2% / Amex 2,5%). */}
+            {/* v0.7.26 — Karten-Brand bei Card-Zahlung (Normal / Amex / Debit, je eigener Satz in Settings). */}
             {paymentMethod === 'card' && (
               <div className="flex gap-2" style={{ marginTop: 10 }}>
-                {([
-                  { id: 'normal', label: 'Normal' },
-                  { id: 'amex', label: 'Amex' },
-                ] as const).map(b => {
+                {CARD_BRAND_OPTIONS.map(b => {
                   const on = cardBrand === b.id;
                   return (
                     <button key={b.id} type="button" onClick={() => setCardBrand(b.id)}

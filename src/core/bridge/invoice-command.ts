@@ -39,7 +39,7 @@ import { getBulkLot } from '@/core/bulk/bulk-lot-house';
 import { WITH_AGENT_INVOICE_BLOCKED_MESSAGE } from '@/core/products/product-sellability';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import {
-  createInvoiceInHouse, invoiceCreatePayment, type InvoiceCreatePayment,
+  createInvoiceInHouse, invoiceCreatePayments, type InvoiceCreatePayment,
 } from '@/core/invoices/invoice-create-house';
 import { resolveLineScheme, toInvoiceLine, type InvoiceLineInput, type RequestedScheme } from '@/core/invoices/line-derivation';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
@@ -183,26 +183,41 @@ const PAYMENT_FORBIDDEN = [
   'status', 'paidAmount', 'openAmount', 'invoiceNumber', 'specialMark', 'specialMarkOnFinal',
   'fee', 'cardFee', 'creditAmount', 'overpayment', 'ledger', 'account', 'debit', 'credit',
 ];
-const PAYMENT_KEYS = new Set(['amount', 'method', 'cardBrand']);
+// v0.8.87 — `paidDate`: der Tag des Geldeingangs (JJJJ-MM-TT). Den Zeitpunkt (`receivedAt`) setzt der Primary.
+const PAYMENT_KEYS = new Set(['amount', 'method', 'cardBrand', 'paidDate']);
+
+function checkPaymentKeys(payment: Record<string, unknown>, where: string): void {
+  for (const k of Object.keys(payment)) {
+    if (PAYMENT_FORBIDDEN.includes(k)) throw new InvoicePayloadError(`the primary decides ${k}, not the client (${where})`);
+    if (!PAYMENT_KEYS.has(k)) throw new InvoicePayloadError(`unknown field in ${where}: ${k}`);
+  }
+}
 
 /**
  * Der Rumpf von `invoices.create`: derselbe Wunsch wie `parseInvoicePayload` — plus, nur HIER, die
- * optionale Zahlung. `invoices.update` teilt sich `parseInvoicePayload` und kennt `payment` damit
- * weiterhin nicht (eine Zahlung ist dort kein Feld).
+ * optionale Zahlung (`payment`) bzw. v0.8.87 die Zahlungen (`payments`, Liste). `invoices.update` teilt
+ * sich `parseInvoicePayload` und kennt beides damit weiterhin nicht (eine Zahlung ist dort kein Feld).
  */
-export function parseInvoiceCreatePayload(raw: unknown): ReturnType<typeof parseInvoicePayload> & { payment?: InvoiceCreatePayment } {
+export function parseInvoiceCreatePayload(raw: unknown): ReturnType<typeof parseInvoicePayload> & { payment?: InvoiceCreatePayment; payments?: InvoiceCreatePayment[] } {
   if (!isPlain(raw)) throw new InvoicePayloadError('payload must be an object');
-  const { payment, ...rest } = raw;
+  const { payment, payments, ...rest } = raw;
   const wish = parseInvoicePayload(rest);
-  if (payment === undefined) return wish;
-  if (!isPlain(payment)) throw new InvoicePayloadError('payment must be an object');
-  for (const k of Object.keys(payment)) {
-    if (PAYMENT_FORBIDDEN.includes(k)) throw new InvoicePayloadError(`the primary decides ${k}, not the client (payment)`);
-    if (!PAYMENT_KEYS.has(k)) throw new InvoicePayloadError(`unknown field in payment: ${k}`);
+  if (payment === undefined && payments === undefined) return wish;
+  if (payment !== undefined) {
+    if (!isPlain(payment)) throw new InvoicePayloadError('payment must be an object');
+    checkPaymentKeys(payment, 'payment');
+  }
+  if (payments !== undefined) {
+    if (!Array.isArray(payments)) throw new InvoicePayloadError('payments must be a list');
+    payments.forEach((p, i) => {
+      if (!isPlain(p)) throw new InvoicePayloadError(`payment ${i + 1} must be an object`);
+      checkPaymentKeys(p, `payment ${i + 1}`);
+    });
   }
   try {
     // Dieselbe Regel wie in der Hausfolge — hier als Prüfung des Rumpfs.
-    return { ...wish, payment: invoiceCreatePayment(payment) };
+    const geprueft = invoiceCreatePayments({ payment, payments });
+    return payments !== undefined ? { ...wish, payments: geprueft } : { ...wish, payment: geprueft[0] };
   } catch (err) {
     if (err instanceof InvoiceActionRejected) throw new InvoicePayloadError(err.message);
     throw err;
@@ -334,6 +349,8 @@ export interface InvoiceCreateResult {
   specialMark: boolean;
   revision: number;
   paymentId?: string;
+  /** v0.8.87 — alle Zahlungen dieses Anlegens (nach Zahlungstag gebucht). */
+  paymentIds?: string[];
 }
 
 /** Die Transaktionsklammern des Hauses — dieselben, die `beginLedgerTransaction` überall setzt. */
@@ -368,7 +385,7 @@ export function runInvoiceCreate(deps: EngineDeps, identity: CommandIdentity, ra
         issuedDate: wish.issuedDate,
         staffId: wish.staffId,
         specialMark: wish.specialMark,
-        payment: wish.payment,
+        ...(wish.payments !== undefined ? { payments: wish.payments } : wish.payment ? { payment: wish.payment } : {}),
       }, identity.branchId);
       const result: InvoiceCreateResult = { ...created };
       return result;

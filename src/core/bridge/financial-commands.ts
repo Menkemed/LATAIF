@@ -64,6 +64,7 @@ import {
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import { VAT_PERIOD_FILED, VatPeriodFiled } from '@/core/tax/vat-period-lock';
+import { CardFeeNotConfigured } from '@/core/finance/card-fees';
 
 export const OP_INVOICES_APPLY_CREDIT = 'invoices.apply_credit';
 export const OP_INVOICES_UPDATE_PAYMENT = 'invoices.update_payment';
@@ -327,6 +328,8 @@ export function runUpdatePayment(deps: EngineDeps, identity: CommandIdentity, ra
     } catch (err) {
       // VAT-PERIOD-LOCK — ein eingereichtes/bezahltes Quartal ist ein endgültiges fachliches Nein.
       if (err instanceof VatPeriodFiled) throw new CommandRejected(VAT_PERIOD_FILED, err.message);
+      // v0.8.87 — Debitzahlung ohne gespeicherten Satz.
+      if (err instanceof CardFeeNotConfigured) throw new CommandRejected(err.code, err.message);
       throw err;
     }
     return { ...invoiceState(req.invoiceId), paymentId: req.paymentId } as unknown as Record<string, unknown>;

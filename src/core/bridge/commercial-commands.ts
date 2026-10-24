@@ -59,6 +59,7 @@ import {
 } from '@/core/orders/order-create';
 import { ORDER_EDIT_FIELDS, type OrderEditInput } from '@/core/orders/order-edit';
 import { createOrderInHouse, updateOrderInHouse } from '@/core/orders/order-house';
+import { CARD_BRANDS, CardFeeNotConfigured } from '@/core/finance/card-fees';
 import {
   PURCHASE_PAYMENT_METHODS, PURCHASE_TAX_SCHEMES, PurchaseActionRejected, purchaseCreateIssue, type PurchaseCreateInput,
 } from '@/core/purchases/purchase-create';
@@ -205,7 +206,8 @@ function urteil<T>(fn: () => T): T {
   try {
     return fn();
   } catch (e) {
-    if (e instanceof OrderActionRejected || e instanceof PurchaseActionRejected || e instanceof EmbeddedProductRejected) {
+    if (e instanceof OrderActionRejected || e instanceof PurchaseActionRejected || e instanceof EmbeddedProductRejected
+      || e instanceof CardFeeNotConfigured) {
       throw new CommandRejected(e.code, e.message);
     }
     throw e;
@@ -882,7 +884,8 @@ export function parseOrderCreate(raw: unknown): OrderCreateRequest {
     materials,
     depositAmount: num0(raw.depositAmount, 'depositAmount'),
     paymentMethod: oneOf(raw.paymentMethod, ORDER_PAYMENT_METHODS, 'cash', 'payment method'),
-    cardBrand: oneOf(raw.cardBrand, ['normal', 'amex'] as const, 'normal', 'card brand'),
+    // v0.8.87 — dieselbe Liste wie die Gebührenrechnung des Hauses (vorher fehlte Debit hier).
+    cardBrand: oneOf(raw.cardBrand, CARD_BRANDS, 'normal', 'card brand'),
     fullyPaid: raw.fullyPaid === true,
     expectedDelivery: text0(raw.expectedDelivery, 'expectedDelivery'),
     // ORDER-DATE — fehlt bei einem älteren zweiten Rechner: dann gilt der heutige Tag.

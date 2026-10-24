@@ -40,6 +40,7 @@ import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
 import { useInvoiceStore } from '@/stores/invoiceStore';
+import { CARD_BRANDS as CARD_BRAND_LIST } from '@/core/finance/card-fees';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { recordInvoicePaymentInHouse } from '@/core/invoices/invoice-payment-house';
 import {
@@ -64,7 +65,8 @@ export const OP_INVOICES_RECORD_PAYMENT = 'invoices.record_payment';
 /** Die Zahlungsarten des Hauses. `credit` fehlt mit Absicht: Guthaben einzulösen ist ein eigener
  *  Vorgang (`applyCreditToInvoice`) mit eigenen Regeln — und der ist nicht freigegeben. */
 const METHODS = ['cash', 'card', 'bank_transfer', 'benefit', 'other'] as const;
-const CARD_BRANDS = ['normal', 'amex'] as const;
+// v0.8.87 — die Kartenarten aus der EINEN Quelle (Normal / Amex / Debit), keine eigene Liste.
+const CARD_BRANDS = CARD_BRAND_LIST;
 
 const isPlain = (v: unknown): v is Record<string, unknown> =>
   typeof v === 'object' && v !== null && !Array.isArray(v);

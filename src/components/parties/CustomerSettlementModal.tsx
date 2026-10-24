@@ -29,7 +29,7 @@ export function CustomerSettlementModal({ customerId, customerName, onClose, onD
   const w = useSharedWrites();
   const [amount, setAmount] = useState('');
   const [method, setMethod] = useState<string>('cash');
-  const [cardBrand, setCardBrand] = useState<'normal' | 'amex'>('normal');
+  const [cardBrand, setCardBrand] = useState<'normal' | 'amex' | 'debit'>('normal');
   const [manual, setManual] = useState(false);
   const [alloc, setAlloc] = useState<Record<string, string>>({});
   const [excessOk, setExcessOk] = useState(false);
@@ -119,9 +119,10 @@ export function CustomerSettlementModal({ customerId, customerName, onClose, onD
           {method === 'card' ? (
             <label style={{ display: 'grid', gap: 4, fontSize: 12 }}>
               <span className="text-overline">CARD</span>
-              <select value={cardBrand} onChange={(e) => setCardBrand(e.target.value as 'normal' | 'amex')}>
+              <select value={cardBrand} onChange={(e) => setCardBrand(e.target.value as 'normal' | 'amex' | 'debit')}>
                 <option value="normal">Visa / Mastercard</option>
                 <option value="amex">Amex</option>
+                <option value="debit">Debit card</option>
               </select>
             </label>
           ) : <span />}

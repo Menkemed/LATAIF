@@ -900,7 +900,7 @@ export function RepairDetail() {
                         );
                       })}
                     </div>
-                    {/* v0.7.26 — Karten-Brand bestimmt die Gebuehren-Rate (Normal 2,2% / Amex 2,5%). */}
+                    {/* v0.7.26 — Karten-Brand bestimmt die Gebuehren-Rate (Normal / Amex / Debit, je eigener Satz). */}
                     {form.customerPaidFrom === 'card' && (
                       <div className="flex gap-2" style={{ marginTop: 8 }}>
                         {CARD_BRANDS.map(b => {
@@ -912,7 +912,7 @@ export function RepairDetail() {
                                 border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
                                 color: active ? '#0F0F10' : '#6B7280',
                                 background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                              }}>{b === 'normal' ? 'Normal (Visa / MC)' : 'Amex'}</button>
+                              }}>{b === 'normal' ? 'Normal (Visa / MC)' : b === 'debit' ? 'Debit' : 'Amex'}</button>
                           );
                         })}
                       </div>
@@ -958,7 +958,7 @@ export function RepairDetail() {
                         : repair.customerPaidFrom === 'bank' ? 'Bank'
                         : repair.customerPaidFrom === 'benefit' ? 'Benefit'
                         : repair.customerPaidFrom === 'card'
-                          ? `Card (${repair.customerCardBrand === 'amex' ? 'Amex' : 'Normal'})`
+                          ? `Card (${repair.customerCardBrand === 'amex' ? 'Amex' : repair.customerCardBrand === 'debit' ? 'Debit' : 'Normal'})`
                           : repair.customerPaidFrom
                       }</span>
                     </div>

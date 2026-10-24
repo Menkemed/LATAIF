@@ -270,7 +270,8 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   ok(!/computeCardFee|cardFeeRate/.test(lc),
     'R5A …und die Gebuehr rechnet der Fernbefehl NICHT selbst');
   const cf = src('src/core/finance/card-fees.ts');
-  ok(/export const CARD_BRANDS = \['normal', 'amex'\] as const;/.test(cf)
+  // v0.8.87 — dritte Kartenart Debit (eigener Satz in Settings).
+  ok(/export const CARD_BRANDS = \['normal', 'amex', 'debit'\] as const;/.test(cf)
     && /export type CardBrand = typeof CARD_BRANDS\[number\];/.test(cf),
     'R5A die Kartenarten sind ein WERT, aus dem der Typ folgt');
 }

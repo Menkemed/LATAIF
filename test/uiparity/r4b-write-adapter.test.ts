@@ -334,7 +334,7 @@ function gehe(root: string): string[] {
     && /aendernRechnung\.save\(\{/.test(inv),
     '6 das Aendern einer Rechnung geht fern ueber invoices.update — nur eine Zahlung darin bleibt ein ehrliches Nein');
   // R6E — die Zahlung beim Anlegen geht seither mit (`invoices.create` + `payment`, EINE Transaktion).
-  ok(!/anlegen\.remote && !isEditMode && paidAmount > 0[\s\S]{0,160}nichtAmClient/.test(inv) && /invoiceCreatePaymentBody\(/.test(inv),
+  ok(!/anlegen\.remote && !isEditMode && paidAmount > 0[\s\S]{0,160}nichtAmClient/.test(inv) && /invoiceCreatePaymentsBody\(/.test(inv),
     '6 …eine Zahlung beim Anlegen geht mit, statt liegen zu bleiben (R6E)');
 }
 

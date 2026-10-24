@@ -33,7 +33,7 @@ import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
 import { assertInvoiceNotInClosedVatQuarter, assertNotFinalizingIntoClosedVatQuarter, assertVatUnchanged, vatFingerprint } from '@/core/tax/vat-period-lock';
 import { planCustomerChange, moveInvoiceBookings, moveLastPurchase, customerDisplayName } from '@/core/invoices/customer-change';
 import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts } from '@/core/invoices/edit-lines';
-import { normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
+import { assertCardFeeConfigured, normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import {
   postInvoiceIssued,
@@ -145,6 +145,14 @@ function clawbackOverpaymentCredit(paymentId: string): void {
   clawbackGrantedCredit('overpayment', paymentId);
 }
 
+/** v0.8.87 — die zwei Zeiten einer Zahlung: wann das Geld kam (`receivedAt`) und wann sie erfasst wurde (`createdAt`). */
+export interface RecordPaymentTimes {
+  /** Zeitpunkt des Zahlungseingangs (received_at, Buchungsdatum). Ohne Angabe: der Erfassungszeitpunkt. */
+  receivedAt?: string;
+  /** Technischer Erfassungszeitpunkt (created_at, Verknüpfung der Kartengebühr). Ohne Angabe: jetzt. */
+  createdAt?: string;
+}
+
 interface InvoiceStore {
   invoices: Invoice[];
   loading: boolean;
@@ -168,7 +176,7 @@ interface InvoiceStore {
     /** INVOICE-EDIT S3 — ausdrückliche Bestätigung: Rechnung MIT Zahlungen wechselt den Kunden. */
     confirmCustomerChange?: boolean;
   }) => void;
-  recordPayment: (invoiceId: string, amount: number, method: string, notes?: string, specialMarkOnFinal?: boolean, cardBrand?: CardBrand, paymentIdOverride?: string, suppressOverpayCredit?: boolean) => string;
+  recordPayment: (invoiceId: string, amount: number, method: string, notes?: string, specialMarkOnFinal?: boolean, cardBrand?: CardBrand, paymentIdOverride?: string, suppressOverpayCredit?: boolean, opts?: RecordPaymentTimes) => string;
   // Credit-Modell Slice 3 — Store-Guthaben des Kunden gegen eine Invoice einlösen.
   // Konsumiert OPEN-customer_credits FIFO (used_amount↑) und bucht via recordPayment('credit')
   // DR CUSTOMER_CREDIT / CR AR. Gibt den tatsächlich verrechneten Betrag zurück.
@@ -1259,7 +1267,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     try { useProductStore.getState().loadProducts(); } catch { /* noop */ }
   },
 
-  recordPayment: (invoiceId, amount, method, notes, specialMarkOnFinal, cardBrand, paymentIdOverride, suppressOverpayCredit) => {
+  recordPayment: (invoiceId, amount, method, notes, specialMarkOnFinal, cardBrand, paymentIdOverride, suppressOverpayCredit, opts) => {
     if (!Number.isFinite(amount) || amount <= 0) {
       throw new Error('Payment amount must be a positive number.');
     }
@@ -1267,13 +1275,19 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // WICHTIG: dasselbe `now` wird fuer den payments-Insert UND die Auto-CardFees-
     // Expense verwendet. bankingStore matcht die Fee ueber created_at = payment.created_at
     // um die Bank-Zeile netto zu zeigen — dieser geteilte Timestamp ist load-bearing.
-    const now = new Date().toISOString();
+    // v0.8.87 — `now` ist der technische Zeitpunkt (Audit, Verknüpfung); `receivedAt` der Tag, an dem
+    // das Geld kam (Zahlungsliste, Banking, Buchung, VAT-Periode, Datum der Kartengebühr). Ohne Angabe
+    // sind beide derselbe Augenblick — wie bisher.
+    const now = opts?.createdAt || new Date().toISOString();
+    const receivedAt = opts?.receivedAt || now;
     // Slice 2 — atomare Caller (applyCreditToInvoice) geben die paymentId vor, damit sie
     // VOR dem Aufruf die credit_applications-Link-Rows darauf keyen koennen.
     const paymentId = paymentIdOverride || uuid();
     let branchId: string, userId: string;
     try { branchId = currentBranchId(); userId = currentUserId(); }
     catch { branchId = 'branch-main'; userId = 'user-owner'; }
+    // v0.8.87 — Debit ohne gespeicherten Satz: Nein VOR jedem Schreiben (keine Zahlung ohne ihre Gebühr).
+    if (method === 'card') assertCardFeeConfigured(branchId, normalizeCardBrand(cardBrand));
 
     // Slice 3 — Ueberzahlungs-Split: openRemainder = offener Invoice-Rest VOR dieser Zahlung;
     // der Teil darueber wird Store-Guthaben (CR CUSTOMER_CREDIT + customer_credits-Row) statt
@@ -1286,7 +1300,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     if (inv0) {
       if (inv0.status === 'FINAL') assertInvoiceNotInClosedVatQuarter(invoiceId);
       else if (inv0.paidAmount + amount >= inv0.grossAmount - 0.005) {
-        assertNotFinalizingIntoClosedVatQuarter(String(query('SELECT branch_id FROM invoices WHERE id = ?', [invoiceId])[0]?.branch_id ?? ''), now);
+        // Der Exportmonat einer Rechnung ist der Tag ihrer Vollzahlung (received_at) — also gegen DIESEN Tag prüfen.
+        assertNotFinalizingIntoClosedVatQuarter(String(query('SELECT branch_id FROM invoices WHERE id = ?', [invoiceId])[0]?.branch_id ?? ''), receivedAt);
       }
     }
     // Slice 3b — suppressOverpayCredit (editInvoice-Delta): kein 3a-Split, voller Betrag auf
@@ -1312,7 +1327,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     db.run(
       `INSERT INTO payments (id, branch_id, invoice_id, amount, method, card_brand, reference, received_at, notes, created_at, created_by)
        VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?, ?, ?)`,
-      [paymentId, branchId, invoiceId, amount, method, cardBrandValue, now, notes || null, now, userId]
+      [paymentId, branchId, invoiceId, amount, method, cardBrandValue, receivedAt, notes || null, now, userId]
     );
 
     // Plan §Sales §12: bei Vollzahlung Auto-Konvertierung Partial → Final.
@@ -1378,6 +1393,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         branchId, userId, amount, brand: cardBrandValue ?? 'normal',
         relatedModule: 'invoice', relatedEntityId: invoiceId,
         label: finalInvoiceLabel || invoiceId.slice(0, 8), createdAt: now,
+        ...(receivedAt !== now ? { occurredAt: receivedAt } : {}),
       });
     }
 
@@ -1409,7 +1425,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
             invoiceId,
             amount,
             method: method as PaymentMethod,
-            receivedAt: now,
+            receivedAt,
             notes,
             createdAt: now,
           },
@@ -1821,6 +1837,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
     const branchId = currentBranchId();
     const userId = currentUserId();
+    // v0.8.87 — wird die Gebühr einer Debitzahlung neu gebucht, muss ihr Satz da sein — VOR dem Rücknehmen.
+    if (cardFeeChanged && newCardBrandValue) assertCardFeeConfigured(branchId, newCardBrandValue);
     const inv = freshInvoice(invoiceId);
     const customerId = inv?.customerId;
     // INVOICE-EDIT S4 — macht die geänderte Zahlung die Rechnung voll bezahlt, ist das der Übergang
