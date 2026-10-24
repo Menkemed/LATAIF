@@ -227,8 +227,14 @@ export function PurchaseEdit() {
     setFehler('');
     const op = isFinancialPurchaseEdit(geaendert.form) ? PURCHASE_EDIT_OP.CORRECT : PURCHASE_EDIT_OP.UPDATE;
     const r = await savePurchaseEdit(viaWrites(w, op), purchase, geaendert.form);
-    // Ein Nein (z. B. RECORD_CHANGED) lädt Beleg und Sperren neu — der nächste Klick prüft gegen die neue Fassung.
-    if (r.kind !== 'ok') { setFehler(fehlertext(r)); setTick((t) => t + 1); loadPurchases(); return; }
+    if (r.kind !== 'ok') {
+      setFehler(fehlertext(r));
+      // Ein Nein (z. B. RECORD_CHANGED) lädt Beleg und Sperren neu — der nächste Klick prüft gegen die neue Fassung.
+      // Ein OFFENER Ausgang (Antwort verloren) lädt bewusst nichts: der nächste Klick muss DENSELBEN Auftrag mit
+      // derselben Kennung wiederholen (sonst wiese die Ablage ihn als „geändert" ab und er bliebe ungeklärt).
+      if (r.kind !== 'unknown') { setTick((t) => t + 1); loadPurchases(); }
+      return;
+    }
     loadPurchases(); loadProducts(); loadSuppliers();
     navigate(`/purchases/${purchase.id}`);
   }
