@@ -126,13 +126,15 @@ const koerper = (code: string, kopf: RegExp, ind = 2): string => {
   ok((c.match(/w\.ok\('invoices\.record_payment'/g) ?? []).length === 2, 'WIRE InvoiceList: beide Einstiege fahren `invoices.record_payment`');
   // R6E — die Schlusszahlung mit Nummernwahl läuft seither über die Hausfolge (EINE Transaktion am
   // Primary) und fern mit der WAHL `specialMarkOnFinal`; die Nummer vergibt der Primary.
-  ok((c.match(/recordPayment\(/g) ?? []).length === 1 && (c.match(/local: \(\) => \{ recordPayment\(/g) ?? []).length === 1
-    && /local: \(\) => recordInvoicePaymentOnPrimary\(zahlung\)/.test(c),
-    'WIRE InvoiceList: recordPayment läuft NUR in den lokalen Anschlüssen');
+  // v0.8.88 — auch die Teilzahlung läuft über die Hausfolge (Zahlungstag, Prüfungen, EINE Transaktion); den
+  // Store direkt ruft die Liste nicht mehr.
+  ok(!/recordPayment\(/.test(c) && (c.match(/local: \(\) => recordInvoicePaymentOnPrimary\(zahlung\)/g) ?? []).length === 2,
+    'WIRE InvoiceList: die Zahlung läuft NUR im lokalen Anschluss über die Hausfolge');
   ok(!/nichtAmClient\('the special number circle'\)/.test(c),
     'WIRE InvoiceList: der Sonderkreis geht fern mit (R6E)');
-  ok(/remote: \(\) => \(\{ invoiceId, amount, method \}\)/.test(c) && /remote: \(\) => invoicePaymentBody\(zahlung\)/.test(c),
-    'WIRE InvoiceList: die Rümpfe nennen Rechnung, Betrag, Weg — nichts sonst');
+  ok((c.match(/remote: \(\) => invoicePaymentBody\(zahlung\)/g) ?? []).length === 2
+    && /const zahlung = \{ invoiceId: showPayment, amount: payAmount, method: payMethod, paidDate: payDate \}/.test(c),
+    'WIRE InvoiceList: die Rümpfe nennen Rechnung, Betrag, Weg, Zahlungstag — nichts sonst');
 }
 {
   // InvoiceDetail: Abholen → repairs.update_status

@@ -31,6 +31,8 @@ import { assertInvoiceHouse, localInvoiceBranch } from './invoice-house-guards';
 import { resolveBulkIntents } from '@/core/bulk/bulk-invoice';
 // v0.8.87 — die Kartenarten aus der EINEN Quelle (Normal / Amex / Debit); das Zahlungsdatum nach der EINEN Datumsregel.
 import { CARD_BRANDS, type CardBrand } from '@/core/finance/card-fees';
+import { relabelCardFees } from '@/core/finance/card-fee-booking';
+import { formatInvoiceDisplay } from '@/core/utils/invoiceNumber';
 import { businessDateIssue, businessTimestamp, todayIso } from '@/core/utils/business-date';
 
 /** Die Zahlarten der Maske („4 · PAYMENT": Cash, Bank, Card, Benefit) — keine weitere. */
@@ -229,9 +231,11 @@ export function createInvoiceInHouse(input: InvoiceCreateInput, branchId: string
   // Banking verknüpft eine Kartengebühr über diesen Zeitpunkt mit ihrer Zahlung.
   const geordnet = [...mitTag].sort((a, b) => (a.paidDate < b.paidDate ? -1 : a.paidDate > b.paidDate ? 1 : a.order - b.order));
   const basis = Date.now();
+  const kartenZeitpunkte: string[] = [];
   geordnet.forEach((p, i) => {
     const createdAt = new Date(basis + i).toISOString();
     const receivedAt = businessTimestamp(p.paidDate, createdAt);
+    if (p.method === 'card') kartenZeitpunkte.push(createdAt);
     // Dieselbe Wahl wie bisher an der Maske: die Nummernart gilt, wenn DIESE Zahlung schließt;
     // sonst bleibt die Marke, mit der die Rechnung angelegt wurde.
     paymentIds.push(useInvoiceStore.getState().recordPayment(
@@ -239,6 +243,15 @@ export function createInvoiceInHouse(input: InvoiceCreateInput, branchId: string
       p.method === 'card' ? p.cardBrand : undefined, undefined, undefined, { receivedAt, createdAt },
     ));
   });
+  // v0.8.88 — eine Kartengebühr, die VOR der schließenden Zahlung gebucht wurde, trug noch die vorläufige Nummer
+  // (PINV-…). Jetzt, in derselben Transaktion, alle Gebühren dieses Anlegens mit der endgültigen (nur der Text).
+  if (kartenZeitpunkte.length > 0) {
+    const kopf = query('SELECT invoice_number, status, special_mark, number_finalized_at FROM invoices WHERE id = ?', [inv.id])[0];
+    relabelCardFees('invoice', inv.id, kartenZeitpunkte, formatInvoiceDisplay({
+      invoiceNumber: String(kopf?.invoice_number ?? ''), status: String(kopf?.status ?? ''),
+      specialMark: Number(kopf?.special_mark ?? 0) === 1, numberFinalizedAt: (kopf?.number_finalized_at as string | null) || undefined,
+    }));
+  }
   buchung();
   return createdState(inv.id, paymentIds);
 }

@@ -98,6 +98,33 @@ export function bookCardFee(args: BookCardFeeArgs): string | null {
 }
 
 /**
+ * v0.8.88 — der sichtbare Text frisch gebuchter Kartengebühren auf die ENDGÜLTIGE Belegnummer: beim Anlegen mit
+ * mehreren Zahlungen sah eine Gebühr vor der schließenden Zahlung noch die vorläufige (PINV-…). Nur der Text —
+ * Betrag, Satz, Verknüpfung (created_at) und Buchung bleiben. Nur für Gebühren derselben Transaktion gedacht
+ * (die Zeitpunkte `createdAts` der eigenen Zahlungen), nie für schon gespeicherte.
+ */
+export function relabelCardFees(relatedModule: string, relatedEntityId: string, createdAts: readonly string[], label: string): number {
+  if (createdAts.length === 0 || !label) return 0;
+  const rows = query(
+    `SELECT id, description FROM expenses
+      WHERE category = 'CardFees' AND related_module = ? AND related_entity_id = ? AND created_at IN (${createdAts.map(() => '?').join(', ')})`,
+    [relatedModule, relatedEntityId, ...createdAts],
+  );
+  let n = 0;
+  for (const r of rows) {
+    // Aufbau wie in bookCardFee: `Card fee (Marke) · <Beleg> · <Satz>% of <Betrag> BHD`.
+    const teile = String(r.description ?? '').split(' · ');
+    if (teile.length < 3 || teile[1] === label) continue;
+    teile[1] = label;
+    const text = teile.join(' · ');
+    getDatabase().run('UPDATE expenses SET description = ? WHERE id = ?', [text, r.id]);
+    trackUpdate('expenses', String(r.id), { description: text, reason: 'card-fee-final-invoice-number' });
+    n++;
+  }
+  return n;
+}
+
+/**
  * Reversiert (Status CANCELLED + Ledger-Reverse) alle nicht-stornierten CardFees
  * eines related-Modul+Entity, optional gefiltert auf einen created_at-Timestamp.
  * postExpenseCancelled (reverseSource 'EXPENSE') dreht die EINE Bank-Buchung

@@ -21,6 +21,7 @@ import { Bhd } from '@/components/ui/Bhd';
 import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrites } from '@/core/data/shared-write';
 import { invoicePaymentBody, recordInvoicePaymentOnPrimary } from '@/core/invoices/invoice-payment-house';
+import { businessDateIssue, latestBusinessDate, todayIso } from '@/core/utils/business-date';
 import { WriteError } from '@/components/shared/WriteError';
 import { invoiceListExtrasFor } from '@/core/data/page-reads';
 
@@ -58,7 +59,7 @@ const STATUS_STYLE: Record<DisplayStatus, { fg: string; bg: string }> = {
 
 export function InvoiceList() {
   const navigate = useNavigate();
-  const { invoices, loadInvoices, recordPayment } = useInvoiceStore();
+  const { invoices, loadInvoices } = useInvoiceStore();
   // CENTRAL-UI-PARITY R6B — „Pay" in der Liste ist dieselbe Buchung wie auf der Rechnung selbst.
   const w = useSharedWrites();
   const { loadReturns: loadSalesReturns, getInvoiceReturnSummary } = useSalesReturnStore();
@@ -85,7 +86,10 @@ export function InvoiceList() {
   const [payAmount, setPayAmount] = useState(0);
   const [payMethod, setPayMethod] = useState('bank_transfer');
   // 2026-05-16 — Pending payment that triggers Final → Number-Type-Dialog.
-  const [pendingFinalPayment, setPendingFinalPayment] = useState<{ invoiceId: string; amount: number; method: string } | null>(null);
+  const [pendingFinalPayment, setPendingFinalPayment] = useState<{ invoiceId: string; amount: number; method: string; paidDate: string } | null>(null);
+  // v0.8.88 — der Tag, an dem das Geld kam (heute vorgeschlagen, änderbar), und seine Meldung im Dialog.
+  const [payDate, setPayDate] = useState(todayIso());
+  const [payDateFehler, setPayDateFehler] = useState('');
   const [showNbrExport, setShowNbrExport] = useState(false);
   const [nbrYear, setNbrYear] = useState(new Date().getFullYear());
   const [nbrSelected, setNbrSelected] = useState<Set<string>>(new Set());
@@ -251,18 +255,23 @@ export function InvoiceList() {
     if (!showPayment || payAmount <= 0) return;
     const inv = invoices.find(i => i.id === showPayment);
     if (!inv) return;
+    // v0.8.88 — dieselbe Regel wie im Haus, hier nur früher gesagt: gültig, nicht künftig, nicht vor dem Rechnungsdatum.
+    const rechnungstag = String(inv.issuedAt || inv.createdAt || '').slice(0, 10);
+    const datumFehler = businessDateIssue(payDate, 'Payment date') || (!payDate ? 'Please choose the payment date' : '')
+      || (payDate < rechnungstag ? `The payment date cannot be before the invoice date (${rechnungstag})` : '');
+    setPayDateFehler(datumFehler);
+    if (datumFehler) return;
     // INVOICE-NUMBER-FREEZE — der Dialog „normal oder Sonder" nur, solange noch keine Endnummer vergeben ist.
     const willGoFinal = inv.status !== 'FINAL' && !inv.numberFinalizedAt && (inv.paidAmount + payAmount) >= inv.grossAmount - 0.005;
     if (willGoFinal) {
-      setPendingFinalPayment({ invoiceId: showPayment, amount: payAmount, method: payMethod });
+      setPendingFinalPayment({ invoiceId: showPayment, amount: payAmount, method: payMethod, paidDate: payDate });
       return;
     }
-    const invoiceId = showPayment;
-    const amount = payAmount;
-    const method = payMethod;
+    // v0.8.88 — dieselbe Hausfolge wie die schließende Zahlung (eine Transaktion, Tag, Prüfungen).
+    const zahlung = { invoiceId: showPayment, amount: payAmount, method: payMethod, paidDate: payDate };
     if (!await w.ok('invoices.record_payment', {
-      local: () => { recordPayment(invoiceId, amount, method); return {}; },
-      remote: () => ({ invoiceId, amount, method }),
+      local: () => recordInvoicePaymentOnPrimary(zahlung),
+      remote: () => invoicePaymentBody(zahlung),
     })) return;
     loadInvoices();
     setShowPayment(null);
@@ -274,7 +283,7 @@ export function InvoiceList() {
     setPendingFinalPayment(null);
     if (!p) return;
     // R6E — dieselbe Hausfolge wie auf der Rechnungsseite, am Primary in EINER Transaktion.
-    const zahlung = { invoiceId: p.invoiceId, amount: p.amount, method: p.method, specialMarkOnFinal: specialMark };
+    const zahlung = { invoiceId: p.invoiceId, amount: p.amount, method: p.method, specialMarkOnFinal: specialMark, paidDate: p.paidDate };
     if (!await w.ok('invoices.record_payment', {
       local: () => recordInvoicePaymentOnPrimary(zahlung),
       remote: () => invoicePaymentBody(zahlung),
@@ -450,7 +459,7 @@ export function InvoiceList() {
                 {displayStatus}
               </span>
               {isOpenPayment && (
-                <button data-pay-invoice={inv.id} onClick={(e) => { e.stopPropagation(); w.clear(); setShowPayment(inv.id); setPayAmount(remaining); }}
+                <button data-pay-invoice={inv.id} onClick={(e) => { e.stopPropagation(); w.clear(); setShowPayment(inv.id); setPayAmount(remaining); setPayDate(todayIso()); setPayDateFehler(''); }}
                   className="cursor-pointer" style={{
                     padding: '3px 8px', fontSize: 10, border: '1px solid #16A34A',
                     color: '#16A34A', borderRadius: 4, background: 'none',
@@ -518,6 +527,9 @@ export function InvoiceList() {
       <Modal open={!!showPayment} onClose={() => setShowPayment(null)} title="Record Payment" width={400}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           <Input label="AMOUNT (BHD)" type="number" value={payAmount || ''} onChange={e => setPayAmount(Number(e.target.value))} data-invoice-list-pay-amount />
+          <Input label="PAYMENT DATE" type="date" value={payDate} max={latestBusinessDate()}
+            min={String((invoices.find(i => i.id === showPayment)?.issuedAt || invoices.find(i => i.id === showPayment)?.createdAt) ?? '').slice(0, 10)}
+            onChange={e => { setPayDate(e.target.value); setPayDateFehler(''); }} data-invoice-list-pay-date />
           <div>
             <span className="text-overline" style={{ marginBottom: 8 }}>METHOD</span>
             <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
@@ -532,7 +544,7 @@ export function InvoiceList() {
               ))}
             </div>
           </div>
-          <WriteError text={w.fehler} />
+          <WriteError text={payDateFehler || w.fehler} />
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowPayment(null)}>Cancel</Button>
             <Button variant="primary" onClick={() => void handlePayment()} disabled={w.busy} data-invoice-list-pay>Record Payment</Button>

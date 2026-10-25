@@ -81,8 +81,8 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
   {
     op: 'invoices.record_payment', handlung: 'Zahlung erfassen', ort: 'pages/invoices/InvoiceDetail.tsx',
-    lokal: 'recordPayment', paritaet: 'exakt', verdrahtet: true, luecke: null,
-    grund: 'Ein Aufruf, dieselben Argumente (Betrag, Weg, Kartenart).',
+    lokal: 'recordInvoicePaymentOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'Ein Aufruf der Hausfolge, dieselben Argumente (Betrag, Weg, Kartenart, Zahlungstag).',
   },
   {
     op: 'invoices.apply_credit', handlung: 'Guthaben verrechnen', ort: 'pages/invoices/InvoiceDetail.tsx',

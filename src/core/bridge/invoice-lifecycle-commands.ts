@@ -43,6 +43,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { CARD_BRANDS as CARD_BRAND_LIST } from '@/core/finance/card-fees';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { recordInvoicePaymentInHouse } from '@/core/invoices/invoice-payment-house';
+import { businessDateIssue } from '@/core/utils/business-date';
 import {
   EDIT_LINE_HAS_RETURN, EDIT_BELOW_RETURNED_QTY, EDIT_RETURNED_LINE_PRICE_LOCKED, EDIT_BELOW_CREDIT_NOTES,
   EDIT_LINE_ID_INVALID, EDIT_AMBIGUOUS_RETURNED_LINE, EDIT_RETURNED_LINE_LOT_UNKNOWN, EDIT_KEPT_LINE_LOT_SHORT,
@@ -277,6 +278,8 @@ export interface PaymentRequest {
   cardBrand?: typeof CARD_BRANDS[number];
   /** R6E — die Wahl aus „Final Number Type"; wirkt nur auf der Zahlung, die die Rechnung schließt. */
   specialMarkOnFinal?: boolean;
+  /** v0.8.88 — der Tag, an dem das Geld kam (JJJJ-MM-TT); den Zeitstempel daraus macht der Primary. */
+  paidDate?: string;
 }
 
 /**
@@ -300,7 +303,7 @@ const PAYMENT_FORBIDDEN = [
  */
 export function parsePaymentPayload(raw: unknown): PaymentRequest {
   if (!isPlain(raw)) throw new InvoicePayloadError('payload must be an object');
-  const allowed = new Set(['invoiceId', 'amount', 'method', 'notes', 'cardBrand', 'specialMarkOnFinal']);
+  const allowed = new Set(['invoiceId', 'amount', 'method', 'notes', 'cardBrand', 'specialMarkOnFinal', 'paidDate']);
   for (const k of Object.keys(raw)) {
     if (PAYMENT_FORBIDDEN.includes(k)) throw new InvoicePayloadError(`the primary decides ${k}, not the client`);
     if (!allowed.has(k)) throw new InvoicePayloadError(`unknown field: ${k}`);
@@ -322,6 +325,10 @@ export function parsePaymentPayload(raw: unknown): PaymentRequest {
   if (raw.cardBrand !== undefined && !(CARD_BRANDS as readonly string[]).includes(String(raw.cardBrand))) {
     throw new InvoicePayloadError('unknown card brand');
   }
+  if (raw.paidDate !== undefined) {
+    const issue = businessDateIssue(raw.paidDate, 'Payment date');
+    if (issue || typeof raw.paidDate !== 'string' || raw.paidDate === '') throw new InvoicePayloadError(issue || 'Payment date is not a valid date');
+  }
   return {
     invoiceId,
     amount,
@@ -329,6 +336,7 @@ export function parsePaymentPayload(raw: unknown): PaymentRequest {
     notes: raw.notes as string | undefined,
     cardBrand: raw.cardBrand as PaymentRequest['cardBrand'],
     ...(typeof raw.specialMarkOnFinal === 'boolean' ? { specialMarkOnFinal: raw.specialMarkOnFinal } : {}),
+    ...(typeof raw.paidDate === 'string' ? { paidDate: raw.paidDate } : {}),
   };
 }
 
@@ -342,7 +350,7 @@ export function runInvoicePayment(deps: EngineDeps, identity: CommandIdentity, r
       // Nebenbuchung (Kartengebühr) nimmt alles zurück.
       const r = recordInvoicePaymentInHouse({
         invoiceId: req.invoiceId, amount: req.amount, method: req.method, notes: req.notes,
-        cardBrand: req.cardBrand, specialMarkOnFinal: req.specialMarkOnFinal,
+        cardBrand: req.cardBrand, specialMarkOnFinal: req.specialMarkOnFinal, paidDate: req.paidDate,
       }, identity.branchId);
       return { ...r } as unknown as Record<string, unknown>;
     } catch (err) {

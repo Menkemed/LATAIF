@@ -27,12 +27,15 @@
 import { query } from '@/core/db/helpers';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { watchLedgerPosts } from '@/core/ledger/posting';
-import { useInvoiceStore } from '@/stores/invoiceStore';
+import { useInvoiceStore, type RecordPaymentTimes } from '@/stores/invoiceStore';
+import { businessDateIssue, businessTimestamp } from '@/core/utils/business-date';
 import { useProductStore } from '@/stores/productStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { InvoiceActionRejected } from './invoice-cancel';
 import { assertInvoiceHouse, localInvoiceBranch } from './invoice-house-guards';
-import { PAYMENT_AMOUNT_INVALID, PAYMENT_METHOD_INVALID, INVOICE_CARD_BRANDS, type InvoiceCardBrand } from './invoice-create-house';
+import {
+  PAYMENT_AMOUNT_INVALID, PAYMENT_METHOD_INVALID, PAYMENT_DATE_INVALID, PAYMENT_DATE_BEFORE_INVOICE, INVOICE_CARD_BRANDS, type InvoiceCardBrand,
+} from './invoice-create-house';
 
 /**
  * Die Zahlarten einer Zahlung auf eine bestehende Rechnung. `credit` fehlt mit Absicht: Guthaben
@@ -51,6 +54,12 @@ export interface InvoicePaymentInput {
   cardBrand?: InvoiceCardBrand;
   /** Die Wahl aus „Final Number Type" — wirkt nur, wenn DIESE Zahlung die Rechnung schließt. */
   specialMarkOnFinal?: boolean;
+  /**
+   * v0.8.88 — der Tag, an dem das Geld kam (JJJJ-MM-TT). Fehlt er: jetzt, wie bisher. Nie in der Zukunft, nie vor
+   * dem Rechnungsdatum; ein eingereichtes/bezahltes VAT-Quartal weist `recordPayment` ab. Liste, Banking, Gebühr und
+   * Buchung tragen ihn; der Erfassungszeitpunkt bleibt fürs Audit.
+   */
+  paidDate?: string;
 }
 
 export interface InvoicePaymentRecorded {
@@ -108,10 +117,28 @@ export function recordInvoicePaymentInHouse(input: InvoicePaymentInput, branchId
   if (input.specialMarkOnFinal !== undefined && typeof input.specialMarkOnFinal !== 'boolean') {
     throw new InvoiceActionRejected('INVALID_INPUT', 'specialMarkOnFinal must be true or false');
   }
-  const inv = query('SELECT id, status FROM invoices WHERE id = ? AND branch_id = ?', [input.invoiceId, branchId])[0];
+  if (input.paidDate !== undefined) {
+    const issue = businessDateIssue(input.paidDate, 'Payment date');
+    if (issue || typeof input.paidDate !== 'string' || input.paidDate === '') {
+      throw new InvoiceActionRejected(PAYMENT_DATE_INVALID, issue || 'Payment date is not a valid date');
+    }
+  }
+  const inv = query('SELECT id, status, issued_at, created_at FROM invoices WHERE id = ? AND branch_id = ?', [input.invoiceId, branchId])[0];
   if (!inv) throw new InvoiceActionRejected(INVOICE_NOT_FOUND, 'no such invoice in this branch');
   if (String(inv.status) === 'CANCELLED') {
     throw new InvoiceActionRejected(INVOICE_CANCELLED, 'a cancelled invoice takes no payment');
+  }
+  // v0.8.88 — ein gewählter Zahlungstag: dieselbe Regel wie beim Anlegen (nicht vor dem Rechnungsdatum), derselbe
+  // Zeitstempel (heute → jetzt, sonst 12:00 UTC des Tages) und ein eigener Erfassungszeitpunkt fürs Audit.
+  let zeiten: RecordPaymentTimes | undefined;
+  if (input.paidDate) {
+    const rechnungstag = String(inv.issued_at || inv.created_at || '').slice(0, 10);
+    if (rechnungstag && input.paidDate < rechnungstag) {
+      throw new InvoiceActionRejected(PAYMENT_DATE_BEFORE_INVOICE,
+        `the payment date (${input.paidDate}) is before the invoice date (${rechnungstag})`);
+    }
+    const createdAt = new Date().toISOString();
+    zeiten = { receivedAt: businessTimestamp(input.paidDate, createdAt), createdAt };
   }
   // Der Store rechnet Rest, Status und Endnummer gegen SEINE geladene Liste — frisch, sonst gegen
   // den Stand irgendeines früheren Zeitpunkts (fern gegen gar keinen).
@@ -119,6 +146,7 @@ export function recordInvoicePaymentInHouse(input: InvoicePaymentInput, branchId
   const buchung = watchLedgerPosts('invoice payment');
   const paymentId = useInvoiceStore.getState().recordPayment(
     input.invoiceId, input.amount, input.method, input.notes, input.specialMarkOnFinal, input.cardBrand,
+    undefined, undefined, zeiten,
   );
   buchung();
   return paymentState(input.invoiceId, paymentId);
@@ -146,5 +174,6 @@ export function invoicePaymentBody(p: InvoicePaymentInput): Record<string, unkno
     ...(p.notes ? { notes: p.notes } : {}),
     ...(p.cardBrand ? { cardBrand: p.cardBrand } : {}),
     ...(typeof p.specialMarkOnFinal === 'boolean' ? { specialMarkOnFinal: p.specialMarkOnFinal } : {}),
+    ...(p.paidDate ? { paidDate: p.paidDate } : {}),
   };
 }

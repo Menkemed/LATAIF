@@ -725,9 +725,12 @@ marker('CENTRAL_UI_R6E_INVOICE_CLIENT_NO_LOCAL_DB_PROVED');
   const idt = codeOf(src('src/pages/invoices/InvoiceDetail.tsx'));
   const il = codeOf(src('src/pages/invoices/InvoiceList.tsx'));
   ok(!/the special number circle/.test(idt) && !/the special number circle/.test(il), 'UI der Sonderkreis ist auf keiner Seite mehr ein Nein am Client');
-  ok((idt.match(/recordInvoicePaymentOnPrimary\(zahlung\)/g) ?? []).length === 1 && (il.match(/recordInvoicePaymentOnPrimary\(zahlung\)/g) ?? []).length === 1
-    && /invoicePaymentBody\(zahlung\)/.test(idt) && /invoicePaymentBody\(zahlung\)/.test(il) && /specialMarkOnFinal: specialMark/.test(idt) && /specialMarkOnFinal: specialMark/.test(il),
-  'UI Schlusszahlung (Rechnung + Liste): am Primary die Hausfolge, fern die Wahl als Feld');
+  // v0.8.88 — Teil- UND Schlusszahlung über die Hausfolge (je zwei Anschlüsse), beide mit dem Zahlungstag.
+  ok((idt.match(/recordInvoicePaymentOnPrimary\(zahlung\)/g) ?? []).length === 2 && (il.match(/recordInvoicePaymentOnPrimary\(zahlung\)/g) ?? []).length === 2
+    && (idt.match(/invoicePaymentBody\(zahlung\)/g) ?? []).length === 2 && (il.match(/invoicePaymentBody\(zahlung\)/g) ?? []).length === 2
+    && /specialMarkOnFinal: specialMark/.test(idt) && /specialMarkOnFinal: specialMark/.test(il)
+    && /paidDate: pending\.paidDate/.test(idt) && /paidDate: p\.paidDate/.test(il) && !/recordPayment\(/.test(idt) && !/recordPayment\(/.test(il),
+  'UI Zahlung (Rechnung + Liste): am Primary die Hausfolge, fern die Wahl und der Zahlungstag als Feld');
   ok(!/updateInvoice\(invoice\.id, \{ butterfly/.test(idt) && /w\.ok\('invoices\.set_butterfly'/.test(idt) && /setInvoiceButterflyOnPrimary\(invId, next, fassung\)/.test(idt),
     'UI Butterfly: kein allgemeines updateInvoice mehr, eine eigene Buchung mit Fassung');
   const all = src('src/pages/invoices/InvoiceCreate.tsx') + src('src/pages/invoices/InvoiceDetail.tsx') + src('src/pages/invoices/InvoiceList.tsx')

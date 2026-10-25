@@ -17,6 +17,8 @@
 //   E  PC2: `invoices.create` mit `payments` == Primary; Wiederholung derselben Kennung ohne zweite Wirkung;
 //      Rumpfregeln (`payment` weiter, nicht beides, verbotene Felder); Debit ohne Satz = eingefrorenes Nein;
 //      Auftrag von PC2 kennt Debit
+//   F  v0.8.88: „Record Payment" mit Zahlungstag (Banking, Hauptbuch, Gebühr; Grenzen; eingereichtes Quartal; ohne
+//      Tag wie bisher; PC2 == Primary, Wiederholung); Gebührentext beim Anlegen mit der endgültigen Nummer
 // ════════════════════════════════════════════════════════════════════════════
 import { readFileSync, existsSync } from 'node:fs';
 import { registerHooks } from 'node:module';
@@ -88,6 +90,9 @@ const { useOrderPaymentStore } = await import('../../src/stores/orderPaymentStor
 const { useRepairStore } = await import('../../src/stores/repairStore.ts');
 const commercial = await import('../../src/core/bridge/commercial-commands.ts');
 const fin = await import('../../src/core/bridge/financial-commands.ts');
+const lifecycle = await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
+const payHouse = await import('../../src/core/invoices/invoice-payment-house.ts');
+const { formatInvoiceDisplay } = await import('../../src/core/utils/invoiceNumber.ts');
 const { bankTransactionsFor } = await import('../../src/stores/bankingStore.ts');
 const house = await import('../../src/core/invoices/invoice-create-house.ts');
 const cmd = await import('../../src/core/bridge/invoice-command.ts');
@@ -518,5 +523,109 @@ const banking = () => bankTransactionsFor({ tenantId: 'tenant-1', branchId: 'bra
   ok(auftragRumpf('debit') === 'ok:debit' && /card brand/.test(auftragRumpf('visa')), `E PC2 Auftrag: Debit-Anzahlung im Rumpf erlaubt, Unbekanntes nicht (${auftragRumpf('debit')} / ${auftragRumpf('visa')})`);
 }
 
-console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — invoice payments v0.8.87: ${PASS} passed, ${fails.length} failed`);
+// ══ F — v0.8.88: Zahlungsdatum bei „Record Payment" + endgültige Nummer im Gebührentext ═══════════════════
+{
+  const ID = (x: string): string => `${x.padStart(8, '0')}-0000-4000-8000-000000000000`;
+  const ACTOR = { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-pc2', role: 'ADMIN' };
+  const ident = (x: string) => ({ commandId: ID(x), ...ACTOR, op: 'invoices.record_payment', payloadHash: 'h' + x });
+  const depsF = (db: Db) => ({
+    db: db as never, begin: () => { setTestDatabase(db as never); posting.beginLedgerTransaction(); },
+    commit: posting.commitLedgerTransaction, rollback: posting.rollbackLedgerTransaction, durableSave: async () => {}, now: () => new Date().toISOString(),
+  });
+  const zahlen = (db: Db, input: Record<string, unknown>) => { const r = imHaus(() => payHouse.recordInvoicePaymentInHouse(input as never, 'branch-main')); reload(); return r; };
+  const T3 = dayBefore(TODAY, 3);
+  const T2 = dayBefore(TODAY, 2);
+  const alles = (db: Db) => S([n(db, 'SELECT COUNT(*) FROM payments'), n(db, 'SELECT COUNT(*) FROM ledger_entries'), n(db, 'SELECT COUNT(*) FROM expenses')]);
+
+  // F1 Primary: Rechnung vom T-3 ohne Zahlung, Kartenzahlung nachgetragen mit Tag T-2.
+  const db = freshDb();
+  const p = ware(400);
+  const offen = anlegen(db, { lines: [LINE(p, 1000)], issuedDate: T3 });
+  const r1 = zahlen(db, { invoiceId: offen.invoiceId, amount: 400, method: 'card', cardBrand: 'normal', paidDate: T2 });
+  const z1 = zahlungen(db, offen.invoiceId).find((x) => x.id === r1.paymentId)!;
+  ok(String(z1.received_at).slice(0, 10) === T2 && String(z1.created_at).slice(0, 10) === TODAY,
+    `F1 Record Payment mit Tag: Eingang ${T2}, Erfassung bleibt heute (${z1.received_at} / ${z1.created_at})`);
+  const le1 = rows(db, "SELECT occurred_at FROM ledger_entries WHERE source_module = 'PAYMENT' AND source_id = ?", [r1.paymentId]);
+  const g1 = gebuehren(db, offen.invoiceId);
+  const b1 = banking().find((t) => t.id === `pay-${r1.paymentId}`);
+  ok(le1.length > 0 && le1.every((r) => String(r.occurred_at).slice(0, 10) === T2) && g1.length === 1 && String(g1[0].expense_date) === T2
+    && String(g1[0].created_at) === String(z1.created_at) && b1 && String(b1.date).slice(0, 10) === T2 && eq(Number(b1.amount), 400 - 8.8),
+  `F1 Hauptbuch, Gebühr (Tag + Verknüpfung) und Banking (netto ${b1?.amount}) tragen den Zahlungstag`);
+  // F2 Grenzen: vor dem Rechnungsdatum / Zukunft → Nein, nichts geschrieben.
+  const vor2 = alles(db);
+  const frueh = meldung(() => zahlen(db, { invoiceId: offen.invoiceId, amount: 100, method: 'cash', paidDate: dayBefore(TODAY, 5) }));
+  const spaet = meldung(() => zahlen(db, { invoiceId: offen.invoiceId, amount: 100, method: 'cash', paidDate: '2099-01-01' }));
+  const kaputt = meldung(() => zahlen(db, { invoiceId: offen.invoiceId, amount: 100, method: 'cash', paidDate: '25.10.2026' }));
+  ok(code(frueh) === 'PAYMENT_DATE_BEFORE_INVOICE' && code(spaet) === 'PAYMENT_DATE_INVALID' && code(kaputt) === 'PAYMENT_DATE_INVALID' && alles(db) === vor2,
+    `F2 vor dem Rechnungsdatum / Zukunft / falsche Form: Nein, nichts geschrieben (${code(frueh)} / ${code(spaet)} / ${code(kaputt)})`);
+  // F3 ohne Tag: wie bisher (Eingang == Erfassung) — und die schließende Zahlung bekommt die Endnummer.
+  const r3 = zahlen(db, { invoiceId: offen.invoiceId, amount: 600, method: 'cash', specialMarkOnFinal: false });
+  const z3 = zahlungen(db, offen.invoiceId).find((x) => x.id === r3.paymentId)!;
+  ok(String(z3.received_at) === String(z3.created_at) && r3.status === 'FINAL', `F3 ohne Tag wie bisher: Eingang == Erfassung, FINAL (${r3.invoiceNumber})`);
+  // Historisches nicht umschreiben: die Gebühr der früheren Teilzahlung behält ihren Text (damals PINV).
+  ok(/PINV-/.test(String(gebuehren(db, offen.invoiceId)[0]?.description)), `F3 die Gebühr der früheren Teilzahlung bleibt, wie sie gebucht wurde (${gebuehren(db, offen.invoiceId)[0]?.description})`);
+  ok(ausgeglichen(db), 'F Hauptbuch ausgeglichen');
+
+  // F4 eingereichtes Quartal: Rechnung vor ~100 Tagen, Quartal eingereicht.
+  const ALT = dayBefore(TODAY, 100);
+  const [ay, am] = ALT.split('-').map(Number);
+  db.run(`INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, filed_by, invoice_count, snapshot_json, created_at)
+          VALUES ('vf3','branch-main',?,?,?, 'user-test', 0, '{}', ?)`, [ay, Math.ceil(am / 3), NOW, NOW]);
+  const p4 = ware(200);
+  const alt = anlegen(db, { lines: [LINE(p4, 500)], issuedDate: ALT });
+  const vor4 = alles(db);
+  const nein4 = meldung(() => zahlen(db, { invoiceId: alt.invoiceId, amount: 100, method: 'cash', paidDate: ALT }));
+  ok(code(nein4) === 'VAT_PERIOD_FILED' && alles(db) === vor4, `F4 Teilzahlung mit Tag im eingereichten Quartal: Nein, nichts geschrieben (${code(nein4)})`);
+  const r4 = zahlen(db, { invoiceId: alt.invoiceId, amount: 100, method: 'cash', paidDate: TODAY });
+  ok(r4.status === 'PARTIAL' && String(zahlungen(db, alt.invoiceId)[0]?.received_at).slice(0, 10) === TODAY, 'F4 …mit Tag im offenen Quartal geht');
+
+  // F5 PC2 == Primary, Wiederholung ohne zweite Wirkung, Rumpfregeln.
+  const bildF = (d: Db, invId: string) => S({
+    pay: rows(d, 'SELECT amount, method, card_brand, substr(received_at, 1, 10) AS d FROM payments WHERE invoice_id = ? ORDER BY received_at, amount', [invId]),
+    fee: rows(d, "SELECT amount, expense_date FROM expenses WHERE category = 'CardFees' AND related_entity_id = ? ORDER BY amount", [invId]),
+    led: rows(d, "SELECT account, ROUND(SUM(CASE WHEN direction='DEBIT' THEN amount ELSE -amount END), 3) AS s FROM ledger_entries GROUP BY account HAVING ABS(s) > 0.0005 ORDER BY account"),
+  });
+  const ZAHLUNG = { amount: 300, method: 'card', cardBrand: 'amex', paidDate: T2 };
+  const dbP = freshDb();
+  const pP = ware(400);
+  const invP = anlegen(dbP, { lines: [LINE(pP, 1000)], issuedDate: T3 });
+  zahlen(dbP, { invoiceId: invP.invoiceId, ...ZAHLUNG });
+  const bP = bildF(dbP, invP.invoiceId);
+  const dbR = freshDb();
+  const pR = ware(400);
+  const invR = anlegen(dbR, { lines: [LINE(pR, 1000)], issuedDate: T3 });
+  const body = payHouse.invoicePaymentBody({ invoiceId: invR.invoiceId, ...ZAHLUNG } as never);
+  const rR = await lifecycle.runInvoicePayment(depsF(dbR) as never, ident('51') as never, body) as { kind: string; value?: Record<string, unknown> };
+  setTestDatabase(dbR as never); reload();
+  ok(rR.kind === 'ok' && body.paidDate === T2 && bildF(dbR, invR.invoiceId) === bP, `F5 PC2 == Primary: Zahlung (Tag, Marke), Gebühr, Salden\n  P=${bP}\n  R=${bildF(dbR, invR.invoiceId)}`);
+  const vorW = alles(dbR);
+  const rW = await lifecycle.runInvoicePayment(depsF(dbR) as never, ident('51') as never, body) as { kind: string; replayed?: boolean };
+  setTestDatabase(dbR as never);
+  ok(rW.kind === 'ok' && rW.replayed === true && alles(dbR) === vorW, 'F5 dieselbe Kennung noch einmal (Verbindungsabbruch): Wiederholung, keine zweite Zahlung');
+  const rumpf = (raw: unknown): string => { try { lifecycle.parsePaymentPayload(raw); return ''; } catch (e) { return (e as Error).message; } };
+  ok(/primary decides receivedAt/.test(rumpf({ invoiceId: 'x', amount: 1, method: 'cash', receivedAt: NOW }))
+    && /not a valid date|cannot be in the future/.test(rumpf({ invoiceId: 'x', amount: 1, method: 'cash', paidDate: '2099-01-01' }))
+    && rumpf({ invoiceId: 'x', amount: 1, method: 'cash', paidDate: T2 }) === '' && rumpf({ invoiceId: 'x', amount: 1, method: 'cash' }) === '',
+  'F5 Rumpf: paidDate erlaubt (und weggelassen wie bisher), receivedAt bestimmt der Primary, Zukunft abgewiesen');
+
+  // F6 endgültige Nummer im Gebührentext — gemischte Zahlungen beim Anlegen.
+  const dbN = freshDb();
+  const pN = ware(1000);
+  const gem = anlegen(dbN, { lines: [LINE(pN, 2000)], issuedDate: T2, payments: [
+    { amount: 500, method: 'card', cardBrand: 'normal' }, { amount: 500, method: 'cash' },
+    { amount: 400, method: 'card', cardBrand: 'amex', paidDate: TODAY }, { amount: 600, method: 'bank_transfer', paidDate: TODAY },
+  ] });
+  const gN = gebuehren(dbN, gem.invoiceId);
+  const label = String(formatInvoiceDisplay(useInvoiceStore.getState().getInvoice(gem.invoiceId)));
+  ok(gem.status === 'FINAL' && gN.length === 2 && gN.every((g) => String(g.description).split(' · ')[1] === label && !/PINV/.test(String(g.description))),
+    `F6 gemischte Zahlungen: jede Gebühr trägt die endgültige Nummer ${label} (${S(gN.map((g) => g.description))})`);
+  ok(S(gN.map((g) => Number(g.amount)).sort((a, b) => a - b)) === S([10, 11]) && n(dbN, "SELECT COUNT(*) FROM expenses WHERE category = 'CardFees'") === 2
+    && ausgeglichen(dbN) && saldo(dbN, 'CARD_CLEARING') === 900 - 21,
+  'F6 …Beträge, Anzahl und Buchungen der Gebühren unverändert (11 + 10, keine zusätzliche, Karten-Clearing netto 879)');
+  const teil = anlegen(dbN, { lines: [LINE(ware(300), 1000)], issuedDate: TODAY, payments: [{ amount: 200, method: 'card', cardBrand: 'normal' }] });
+  ok(String(gebuehren(dbN, teil.invoiceId)[0]?.description).split(' · ')[1] === String(formatInvoiceDisplay(useInvoiceStore.getState().getInvoice(teil.invoiceId))),
+    'F6 Teilzahlung: die Gebühr trägt die (noch vorläufige) Nummer, die die Rechnung jetzt hat');
+}
+
+console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — invoice payments v0.8.88: ${PASS} passed, ${fails.length} failed`);
 if (fails.length > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }

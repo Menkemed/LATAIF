@@ -43,6 +43,7 @@ import { cancelInvoiceOnPrimary } from '@/core/invoices/invoice-cancel-house';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { invoicePaymentBody, recordInvoicePaymentOnPrimary } from '@/core/invoices/invoice-payment-house';
+import { businessDateIssue, latestBusinessDate, todayIso } from '@/core/utils/business-date';
 import { invoiceButterflyBody, setInvoiceButterflyOnPrimary } from '@/core/invoices/invoice-flag-house';
 import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
 import { effectiveMargin } from '@/core/reports/sales-metrics';
@@ -74,7 +75,7 @@ export function InvoiceDetail() {
   const navigate = useNavigate();
   const goBack = useGoBack('/invoices');
   const [searchParams, setSearchParams] = useSearchParams();
-  const { invoices, loadInvoices, recordPayment, applyCreditToInvoice, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
+  const { invoices, loadInvoices, applyCreditToInvoice, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
   // CENTRAL-UI-PARITY R4C — dieselben Masken, zwei Anschluesse hinter jeder Geldhandlung.
   // Ein Waechter je Buchung; eine Anzeige fuer den Ausgang.
   const w = useSharedWrites();
@@ -123,7 +124,10 @@ export function InvoiceDetail() {
   // v0.7.26 — Karten-Brand (nur bei method === 'card'); steuert die Gebuehr (2,2% vs 2,5%).
   const [cardBrand, setCardBrand] = useState<'normal' | 'amex' | 'debit'>('normal');
   // 2026-05-16 — Pending payment that will trigger Final → Number-Type-Dialog.
-  const [pendingFinalPayment, setPendingFinalPayment] = useState<{ amount: number; method: PaymentMethod; cardBrand?: 'normal' | 'amex' | 'debit' } | null>(null);
+  const [pendingFinalPayment, setPendingFinalPayment] = useState<{ amount: number; method: PaymentMethod; cardBrand?: 'normal' | 'amex' | 'debit'; paidDate: string } | null>(null);
+  // v0.8.88 — der Tag, an dem das Geld kam (heute vorgeschlagen, änderbar); die Meldung bleibt im Dialog.
+  const [paymentDate, setPaymentDate] = useState(todayIso());
+  const [paymentFehler, setPaymentFehler] = useState('');
 
   // Cancel confirm
   const [confirmCancel, setConfirmCancel] = useState(false);
@@ -222,6 +226,8 @@ export function InvoiceDetail() {
   const creditedTotal = (creditNotes || []).filter(cn => cn.invoiceId === invoice.id && cn.status !== 'CANCELLED').reduce((s, cn) => s + (cn.totalAmount || 0), 0);
   const effectiveGross = Math.max(0, invoice.grossAmount - creditedTotal);
   const remaining = Math.max(0, effectiveGross - invoice.paidAmount);
+  // v0.8.88 — die Untergrenze des Zahlungstags („Record Payment"): das Rechnungsdatum.
+  const rechnungstag = String(invoice.issuedAt || invoice.createdAt || '').slice(0, 10);
   // Customer-Credit UI-Slice 1 — offenes Store-Guthaben des Kunden (Σ amount-used_amount,
   // OPEN). Plain const wie `remaining`: jeder Render liest frisch → nach Verrechnung aktuell.
   const availableCredit = creditBalances.customer(invoice.customerId)?.storeCredit ?? 0;
@@ -353,17 +359,23 @@ export function InvoiceDetail() {
     if (!id || !invoice) return;
     const amount = parseFloat(paymentAmount);
     if (isNaN(amount) || amount <= 0) return;
+    // v0.8.88 — dieselbe Regel wie im Haus, hier nur früher gesagt: gültig, nicht künftig, nicht vor dem Rechnungsdatum.
+    const datumFehler = businessDateIssue(paymentDate, 'Payment date') || (!paymentDate ? 'Please choose the payment date' : '')
+      || (paymentDate < rechnungstag ? `The payment date cannot be before the invoice date (${fmtDate(rechnungstag)})` : '');
+    setPaymentFehler(datumFehler);
+    if (datumFehler) return;
     // Wird die Invoice mit dieser Zahlung final? → Number-Type-Dialog vorher.
     // INVOICE-NUMBER-FREEZE — der Dialog „normal oder Sonder" nur, solange noch keine Endnummer vergeben ist.
     const willGoFinal = invoice.status !== 'FINAL' && !invoice.numberFinalizedAt && (invoice.paidAmount + amount) >= invoice.grossAmount - 0.005;
     if (willGoFinal) {
-      setPendingFinalPayment({ amount, method: paymentMethod, cardBrand: paymentMethod === 'card' ? cardBrand : undefined });
+      setPendingFinalPayment({ amount, method: paymentMethod, cardBrand: paymentMethod === 'card' ? cardBrand : undefined, paidDate: paymentDate });
       return;
     }
-    const marke = paymentMethod === 'card' ? cardBrand : undefined;
+    // v0.8.88 — dieselbe Hausfolge wie die schließende Zahlung (eine Transaktion, Tag, Prüfungen).
+    const zahlung = { invoiceId: id, amount, method: paymentMethod, cardBrand: paymentMethod === 'card' ? cardBrand : undefined, paidDate: paymentDate };
     if (!await w.ok('invoices.record_payment', {
-      local: () => { recordPayment(id, amount, paymentMethod, undefined, undefined, marke); return {}; },
-      remote: () => ({ invoiceId: id, amount, method: paymentMethod, ...(marke ? { cardBrand: marke } : {}) }),
+      local: () => recordInvoicePaymentOnPrimary(zahlung),
+      remote: () => invoicePaymentBody(zahlung),
     })) return;
     loadInvoices();
     setPaymentOpen(false);
@@ -380,7 +392,7 @@ export function InvoiceDetail() {
     // Transaktion — vorher lief diese Zahlung ohne Klammer (verschluckte Buchungsfehler).
     const zahlung = {
       invoiceId: id, amount: pending.amount, method: pending.method, cardBrand: pending.cardBrand,
-      specialMarkOnFinal: specialMark,
+      specialMarkOnFinal: specialMark, paidDate: pending.paidDate,
     };
     if (!await w.ok('invoices.record_payment', {
       local: () => recordInvoicePaymentOnPrimary(zahlung),
@@ -537,6 +549,9 @@ export function InvoiceDetail() {
 
   function openPaymentModal() {
     setPaymentAmount(String(remaining > 0 ? remaining.toFixed(2) : ''));
+    setPaymentDate(todayIso());
+    setPaymentFehler('');
+    w.clear();
     setPaymentOpen(true);
   }
 
@@ -1277,6 +1292,17 @@ export function InvoiceDetail() {
             max={String(remaining)}
           />
           <div style={{ marginTop: 16 }}>
+            <Input
+              label="PAYMENT DATE"
+              type="date"
+              value={paymentDate}
+              min={rechnungstag}
+              max={latestBusinessDate()}
+              onChange={e => { setPaymentDate(e.target.value); setPaymentFehler(''); }}
+              data-record-payment-date
+            />
+          </div>
+          <div style={{ marginTop: 16 }}>
             <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>PAYMENT METHOD</span>
             <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
               {PAYMENT_METHODS.map(m => (
@@ -1325,6 +1351,9 @@ export function InvoiceDetail() {
             </div>
           )}
         </div>
+        {(paymentFehler || (paymentOpen && w.fehler)) && (
+          <p style={{ fontSize: 12, color: '#AA6E6E', marginBottom: 12 }} data-record-payment-error>{paymentFehler || w.fehler}</p>
+        )}
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setPaymentOpen(false)}>Cancel</Button>
           <Button variant="primary" onClick={() => void handleRecordPayment()} disabled={w.busy} data-record-payment>Confirm Payment</Button>
