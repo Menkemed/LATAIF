@@ -31,6 +31,45 @@ function safePost(label: string, fn: () => void): void {
   try { fn(); } catch (err) { console.error(`[ledger] ${label} failed:`, err); }
 }
 
+/** v0.8.90 — die Belege, an denen eine automatische Kartengebühr hängt (bookCardFee). */
+export const CARD_FEE_MODULES = ['invoice', 'order', 'repair'] as const;
+
+/** Eine automatische Kartengebühr: Kategorie CardFees an einer Rechnung, einem Auftrag oder einer Reparatur. */
+export function isAutoCardFee(row: { category?: unknown; related_module?: unknown }): boolean {
+  return String(row.category ?? '') === 'CardFees' && (CARD_FEE_MODULES as readonly string[]).includes(String(row.related_module ?? ''));
+}
+
+export interface CardFeeEntriesArgs {
+  expenseId: string;
+  expenseNumber: string;
+  amount: number;
+  occurredAt: string;
+  branchId: string;
+  userId: string;
+  relatedModule: string;
+  relatedEntityId: string;
+}
+
+/**
+ * v0.8.90 — DIE Buchung einer Kartengebühr: DR EXPENSES_OPERATING / CR CARD_CLEARING (Source 'EXPENSE'). Der Processor
+ * zieht sie sofort ab — sie ist nie eine offene Verbindlichkeit. Wirft (kein safePost): wer neu bucht, braucht das Ja.
+ */
+export function postCardFeeEntries(a: CardFeeEntriesArgs): void {
+  postEntries(
+    [
+      {
+        account: 'EXPENSES_OPERATING', direction: 'DEBIT', amount: a.amount,
+        metadata: { expenseNumber: a.expenseNumber, category: 'CardFees', relatedModule: a.relatedModule, relatedEntityId: a.relatedEntityId },
+      },
+      {
+        account: 'CARD_CLEARING', direction: 'CREDIT', amount: a.amount,
+        metadata: { expenseNumber: a.expenseNumber, category: 'CardFees' },
+      },
+    ],
+    { occurredAt: a.occurredAt, sourceModule: 'EXPENSE', sourceId: a.expenseId, branchId: a.branchId, userId: a.userId }
+  );
+}
+
 export interface BookCardFeeArgs {
   branchId: string;
   userId: string;
@@ -80,19 +119,7 @@ export function bookCardFee(args: BookCardFeeArgs): string | null {
   // = CARD_CLEARING, nicht direkt auf BANK). Source 'EXPENSE'.
   safePost(`postCardFee(${expenseId})`, () => {
     if (hasLedgerEntries('EXPENSE', expenseId)) return;
-    postEntries(
-      [
-        {
-          account: 'EXPENSES_OPERATING', direction: 'DEBIT', amount: fee,
-          metadata: { expenseNumber, category: 'CardFees', relatedModule, relatedEntityId },
-        },
-        {
-          account: 'CARD_CLEARING', direction: 'CREDIT', amount: fee,
-          metadata: { expenseNumber, category: 'CardFees' },
-        },
-      ],
-      { occurredAt, sourceModule: 'EXPENSE', sourceId: expenseId, branchId, userId }
-    );
+    postCardFeeEntries({ expenseId, expenseNumber, amount: fee, occurredAt, branchId, userId, relatedModule, relatedEntityId });
   });
   return expenseId;
 }

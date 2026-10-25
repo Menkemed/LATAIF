@@ -17,7 +17,9 @@ import { formatFils, formatMg } from '@/core/bulk/bulk-math';
 import { wronglyClosedBulkLotRows } from '@/core/bulk/bulk-reads';
 import { reopenWronglyClosedLotOnPrimary } from '@/core/bulk/bulk-actions';
 import { goldConditionRestoreCandidates, restoreGoldConditionOnPrimary } from '@/core/products/gold-condition-restore';
+import { cardFeeRepairPreview, repairCardFeeBookingsOnPrimary } from '@/core/finance/card-fee-repair';
 import { useProductStore } from '@/stores/productStore';
+import { useExpenseStore } from '@/stores/expenseStore';
 
 export function DataRepairsTab() {
   const [refresh, setRefresh] = useState(0);
@@ -26,8 +28,29 @@ export function DataRepairsTab() {
   const [msg, setMsg] = useState<{ text: string; ok: boolean } | null>(null);
   const lots = useMemo(() => wronglyClosedBulkLotRows(currentBranchId()), [refresh]);
   const gold = useMemo(() => goldConditionRestoreCandidates(), [refresh]);
+  // v0.8.90 — Kartengebühren, die „Edit Expense" als offene Verbindlichkeit neu gebucht hatte.
+  const fees = useMemo(() => cardFeeRepairPreview(currentBranchId()), [refresh]);
   const [abgewaehlt, setAbgewaehlt] = useState<Set<string>>(new Set());
-  const reload = (): void => { useProductStore.getState().loadProducts(); setRefresh((r) => r + 1); };
+  const reload = (): void => { useProductStore.getState().loadProducts(); useExpenseStore.getState().loadExpenses(); setRefresh((r) => r + 1); };
+
+  async function rebookFees(): Promise<void> {
+    if (!reason.trim()) { setMsg({ text: 'Please enter a reason first.', ok: false }); return; }
+    const ids = fees.repairable.map((f) => f.expenseId);
+    if (ids.length === 0) return;
+    const summe = fees.repairable.reduce((s, f) => s + f.amount, 0);
+    if (!(await window.confirm(`Re-book ${ids.length} card fee(s) (${summe.toFixed(3)} BHD) from Payables to Card Clearing?\n`
+      + 'The wrong booking is reversed and the right one is booked on the same day. Amounts, dates and the expenses themselves stay as they are.'))) return;
+    setBusy(true);
+    try {
+      const r = await repairCardFeeBookingsOnPrimary({ expenseIds: ids, reason: reason.trim() }, reload);
+      setMsg({ text: `${r.repaired.length} card fee(s) re-booked to Card Clearing.`, ok: true });
+    } catch (e) {
+      setMsg({ text: e instanceof Error ? e.message : String(e), ok: false });
+    } finally {
+      setBusy(false);
+      setRefresh((x) => x + 1);
+    }
+  }
 
   async function reopen(l: (typeof lots)[number]): Promise<void> {
     if (!reason.trim()) { setMsg({ text: 'Please enter a reason first.', ok: false }); return; }
@@ -73,8 +96,9 @@ export function DataRepairsTab() {
         <h2 className="text-display-xs" style={{ color: '#0F0F10' }}>Data Repairs</h2>
         <p style={{ fontSize: 13, color: '#6B7280', marginTop: 4, maxWidth: 680 }}>
           Up to v0.8.80 a start-up step could close bulk metal lots that still had stock, and set Gold-Diamond Jewellery
-          items from “New” to “Pre-Owned”. Only items where the app’s own records prove this are listed. Nothing changes
-          until you confirm. Make a fresh backup first.
+          items from “New” to “Pre-Owned”. Up to v0.8.89 editing the date or amount of an automatic card fee booked it as
+          an open payable instead of against Card Clearing. Only items where the app’s own records prove this are listed.
+          Nothing changes until you confirm. Make a fresh backup first.
         </p>
         <div style={{ marginTop: 12, maxWidth: 520 }}>
           <Input label="Reason (required, saved in the history)" value={reason} onChange={(e) => setReason(e.target.value)} data-repair-reason />
@@ -115,6 +139,27 @@ export function DataRepairsTab() {
           <div className="flex justify-end" style={{ marginTop: 12 }}>
             <Button variant="primary" disabled={busy || !reason.trim() || gold.every((g) => abgewaehlt.has(g.productId))}
               onClick={() => void restoreGold()} data-repair-gold-restore>Restore “New”</Button>
+          </div>
+        )}
+      </Card>
+
+      <Card>
+        <span className="text-overline">CARD FEES BOOKED AS PAYABLES AFTER AN EDIT</span>
+        {fees.repairable.length === 0 && fees.blocked.length === 0 && <p style={{ fontSize: 13, color: '#6B7280', marginTop: 8 }}>None found.</p>}
+        {fees.repairable.map((f) => (
+          <div key={f.expenseId} data-repair-card-fee={f.expenseNumber} style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13 }}>
+            <b className="font-mono">{f.expenseNumber}</b> · {f.documentNumber} · <span className="font-mono">{f.amount.toFixed(3)} BHD</span>
+            {' · '}booked on {f.occurredAt.slice(0, 10)} · Payables → Card Clearing
+          </div>
+        ))}
+        {fees.blocked.map((f) => (
+          <div key={f.expenseId} data-repair-card-fee-blocked={f.expenseNumber} style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 13, color: '#7A3535' }}>
+            <b className="font-mono">{f.expenseNumber}</b> · <span className="font-mono">{f.amount.toFixed(3)} BHD</span> · not repaired automatically: {f.issue}
+          </div>
+        ))}
+        {fees.repairable.length > 0 && (
+          <div className="flex justify-end" style={{ marginTop: 12 }}>
+            <Button variant="primary" disabled={busy || !reason.trim()} onClick={() => void rebookFees()} data-repair-card-fee-rebook>Re-book card fees</Button>
           </div>
         )}
       </Card>

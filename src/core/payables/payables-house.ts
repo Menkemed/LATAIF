@@ -50,6 +50,8 @@ import {
 import { planSupplierCreditExpenseAllocations } from '@/core/finance/expenseCreditAllocation';
 import { OPEN_ITEMS_CHANGED, OPEN_STAMP_REQUIRED, openItemsStamp } from '@/core/finance/open-items-stamp';
 import { isClientMode } from '@/core/bridge/client-mode';
+import { isAutoCardFee, postCardFeeEntries } from '@/core/finance/card-fee-booking';
+import { closedVatQuarters, nbrQuarterOfDate } from '@/core/tax/vat-period-lock';
 import { assertSupplierOverpayMutable, reconcilePurchaseOverpayCredit, OverpayCreditRedeemed } from './purchase-overpay';
 
 // ── Grundlagen ─────────────────────────────────────────────────────────────
@@ -401,6 +403,28 @@ export function updateExpenseInHouse(expenseId: string, raw: ExpenseEditFields, 
         'this is a booked repair cost — change or cancel its repair line (or change the repair) instead');
     }
   }
+  // v0.8.90 — eine AUTOMATISCHE Kartengebühr bleibt mit ihrer Zahlung und dem Karten-Clearing verbunden: keine andere
+  // Kategorie, kein anderer Zahlweg; ein geänderter Betrag ist sofort bezahlt (der Processor zieht ihn ab); Datum und
+  // Betrag werden gegen das Karten-Clearing neu gebucht — vorher landeten sie als offene Verbindlichkeit (postExpense).
+  // In ein eingereichtes/bezahltes VAT-Quartal wird nichts datiert und aus keinem heraus.
+  const kartengebuehr = isAutoCardFee(row);
+  if (kartengebuehr) {
+    if (f.category !== undefined && f.category !== row.category) {
+      throw nein('EXPENSE_CARD_FEE_LOCKED', 'an automatic card fee stays a card fee — its category is not changed');
+    }
+    if (f.paymentMethod !== undefined && f.paymentMethod !== row.payment_method) {
+      throw nein('EXPENSE_CARD_FEE_LOCKED', 'an automatic card fee is taken by the card processor — its payment method is not changed');
+    }
+    if (f.expenseDate !== undefined && f.expenseDate !== row.expense_date) {
+      const zu = closedVatQuarters(ctx.branchId);
+      for (const tag of [f.expenseDate, String(row.expense_date ?? '')]) {
+        const q = nbrQuarterOfDate(tag);
+        if (q && zu.has(q.key)) {
+          throw nein('VAT_PERIOD_FILED', `the VAT return for ${q.key} is already filed or paid — a card fee is not dated into or out of that quarter`);
+        }
+      }
+    }
+  }
 
   const sets: string[] = [];
   const vals: unknown[] = [];
@@ -423,7 +447,7 @@ export function updateExpenseInHouse(expenseId: string, raw: ExpenseEditFields, 
   }
   const creditPaid = creditPaidForExpense(expenseId);
   const nextAmount = amountChanged ? Number(f.amount) : Number(row.amount);
-  if (amountChanged) {
+  if (amountChanged && !kartengebuehr) {
     // D1 erweitert: nie unter das schon Beglichene (cash + credit). Vorher nur bei aktiver
     // Guthaben-Einloesung — bei Barzahlung ging der Betrag unter das Bezahlte.
     const settledF = F(row.paid_amount) + F(creditPaid);
@@ -436,12 +460,22 @@ export function updateExpenseInHouse(expenseId: string, raw: ExpenseEditFields, 
 
   const db = getDatabase();
   db.run(`UPDATE expenses SET ${sets.join(', ')} WHERE id = ?`, [...vals, expenseId]);
-  const status = computeExpenseSettlement(nextAmount, Number(row.paid_amount) || 0, creditPaid, String(row.status)).status;
+  // Eine Kartengebühr ist immer voll bezahlt: das Beglichene folgt dem Betrag.
+  if (kartengebuehr && amountChanged) db.run('UPDATE expenses SET paid_amount = ? WHERE id = ?', [nextAmount, expenseId]);
+  const status = kartengebuehr ? 'PAID' : computeExpenseSettlement(nextAmount, Number(row.paid_amount) || 0, creditPaid, String(row.status)).status;
   if (status !== row.status) db.run('UPDATE expenses SET status = ? WHERE id = ?', [status, expenseId]);
 
   if ((amountChanged || dateChanged) && hasLedgerEntries('EXPENSE', expenseId)) {
     reverseSource('EXPENSE', expenseId, ctx.now);
-    postExpense(expenseOf(query('SELECT * FROM expenses WHERE id = ?', [expenseId])[0]));
+    const neu = expenseOf(query('SELECT * FROM expenses WHERE id = ?', [expenseId])[0]);
+    if (kartengebuehr) {
+      postCardFeeEntries({
+        expenseId, expenseNumber: neu.expenseNumber, amount: neu.amount, occurredAt: neu.expenseDate,
+        branchId: ctx.branchId, userId: ctx.userId, relatedModule: neu.relatedModule ?? '', relatedEntityId: neu.relatedEntityId ?? '',
+      });
+    } else {
+      postExpense(neu);
+    }
   }
   trackUpdate('expenses', expenseId, { ...changed, status });
   return { expenseId, status, amount: nextAmount, revision: revisionOf('expenses', expenseId), changed: Object.keys(changed) };
