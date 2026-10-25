@@ -402,14 +402,17 @@ export function parsePurchaseCreate(raw: unknown): PurchaseCreateRequest {
     }
     payments = raw.payments.map((p, i) => {
       if (!isPlain(p)) throw new CommercialPayloadError(`payment ${i + 1} must be an object`);
-      onlyKnownFields(p, ['amount', 'method', 'reference']);
+      onlyKnownFields(p, ['amount', 'method', 'reference', 'paidDate']);
       const reference = text0(p.reference, `payment ${i + 1}: reference`);
+      // v0.8.91 — der Tag der Zahlung (Desktop); geprüft wird er im Haus (purchaseCreateIssue).
+      const paidDate = optString(p.paidDate, `payment ${i + 1}: paidDate`);
       return {
         amount: money(p.amount, `payment ${i + 1}: amount`, { min: 0.001 }),
         method: p.method === undefined || p.method === null
           ? (() => { throw new CommercialPayloadError(`payment ${i + 1}: method is required`); })()
           : oneOf(p.method, PURCHASE_PAYMENT_METHODS, 'bank', `payment ${i + 1} method`),
         ...(reference ? { reference } : {}),
+        ...(paidDate ? { paidDate } : {}),
       };
     });
   }

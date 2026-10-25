@@ -55,6 +55,8 @@ export interface PurchasePaymentInput {
   amount: number;
   method: typeof PURCHASE_PAYMENT_METHODS[number];
   reference?: string;
+  /** v0.8.91 — der Tag dieser Zahlung (JJJJ-MM-TT); fehlt er: das Einkaufsdatum (wie bisher, auch am Telefon). */
+  paidDate?: string;
 }
 
 /**
@@ -159,6 +161,14 @@ export function purchaseCreateIssue(input: PurchaseCreateInput): { code: string;
       }
       if (!(PURCHASE_PAYMENT_METHODS as readonly string[]).includes(p.method)) {
         return { code: 'PAYMENT_METHOD_INVALID', message: `Payment ${i + 1}: unknown payment method` };
+      }
+      // v0.8.91 — ein eigener Tag je Zahlung: ein echter Tag, nicht in der Zukunft, nicht vor dem Einkauf.
+      if (p.paidDate !== undefined) {
+        const issue = typeof p.paidDate === 'string' && p.paidDate !== '' ? businessDateIssue(p.paidDate, `Payment ${i + 1} date`) : `Payment ${i + 1} date is not a valid date`;
+        if (issue) return { code: 'PAYMENT_DATE_INVALID', message: issue };
+        if (p.paidDate < input.purchaseDate) {
+          return { code: 'PAYMENT_DATE_BEFORE_PURCHASE', message: `Payment ${i + 1}: the payment date cannot be before the purchase date (${input.purchaseDate})` };
+        }
       }
       sumF += F(p.amount);
     }
@@ -293,8 +303,20 @@ export async function purchaseCreateBody(
   }
   const body: Record<string, unknown> = {
     supplierId: input.supplierId, purchaseDate: input.purchaseDate, taxScheme: input.taxScheme, lines,
-    paymentAmount: input.paymentAmount, paymentMethod: input.paymentMethod, notes: input.notes, staffId: input.staffId,
+    notes: input.notes, staffId: input.staffId,
   };
+  // v0.8.91 — mehrere Zahlungen reisen als Liste (wie vom Telefon); sonst der bisherige Einzelrumpf.
+  // Beides zugleich weist der Primary ab.
+  if (input.payments && input.payments.length > 0) {
+    body.payments = input.payments.map((p) => ({
+      amount: p.amount, method: p.method,
+      ...(p.reference ? { reference: p.reference } : {}),
+      ...(p.paidDate ? { paidDate: p.paidDate } : {}),
+    }));
+  } else {
+    body.paymentAmount = input.paymentAmount;
+    body.paymentMethod = input.paymentMethod;
+  }
   if (input.sourceOrderId) body.sourceOrderId = input.sourceOrderId;
   if (input.inboxId) body.inboxId = input.inboxId;
   return body;

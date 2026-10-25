@@ -71,6 +71,27 @@ interface DraftLine {
   partnerShares?: PartnerShareInput[];
 }
 
+/** v0.8.91 — eine Zahlungszeile der Maske (Betrag als Text, damit Tippen nicht springt). */
+type PurchasePayMethod = 'cash' | 'bank' | 'benefit';
+interface PurchasePayRow {
+  key: number;
+  method: PurchasePayMethod;
+  amountText: string;
+  reference: string;
+  date: string;
+  /** Hat der Mensch den Tag selbst gewählt? Sonst folgt er dem Einkaufsdatum. */
+  dateTouched: boolean;
+}
+/** So viele Zahlungen nimmt `purchases.create` an. */
+const MAX_PURCHASE_PAYMENTS = 10;
+const neueZahlung = (key: number, date: string, amountText = ''): PurchasePayRow =>
+  ({ key, method: 'bank', amountText, reference: '', date, dateTouched: false });
+const zahlBetrag = (r: PurchasePayRow): number => {
+  const v = parseFloat(r.amountText);
+  return Number.isFinite(v) && v > 0 ? v : 0;
+};
+const ZAHLWEG_LABEL: Record<PurchasePayMethod, string> = { cash: 'Cash', bank: 'Bank', benefit: 'Benefit' };
+
 export function PurchaseCreate() {
   const navigate = useNavigate();
   const goBack = useGoBack('/purchases');
@@ -170,8 +191,13 @@ export function PurchaseCreate() {
   const [lines, setLines] = useState<DraftLine[]>([
     { mode: 'new', brand: '', name: '', sku: '', categoryId: categories[0]?.id || '', quantity: 1, unitPrice: 0 },
   ]);
-  const [paymentAmount, setPaymentAmount] = useState<number>(0);
-  const [paymentMethod, setPaymentMethod] = useState<'cash' | 'bank' | 'benefit'>('bank');
+  // v0.8.91 — mehrere Zahlungen beim Anlegen (wie am Telefon): je Zeile Weg, Betrag, Referenz und ein eigener Tag
+  // (Vorschlag: das Einkaufsdatum, bis der Mensch ihn ändert).
+  const [payRows, setPayRows] = useState<PurchasePayRow[]>(() => [neueZahlung(1, new Date().toISOString().split('T')[0])]);
+  const [payRowSeq, setPayRowSeq] = useState(2);
+  useEffect(() => {
+    setPayRows(prev => prev.map(r => (r.dateTouched || r.date === purchaseDate ? r : { ...r, date: purchaseDate })));
+  }, [purchaseDate]);
   const [notes, setNotes] = useState('');
   const [staffId, setStaffId] = useState<string>('');
   const [error, setError] = useState('');
@@ -247,12 +273,28 @@ export function PurchaseCreate() {
   const inputVatRate = purchaseTaxScheme === 'VAT_10' ? 10 : 0;
   const inputVat = inputVatRate > 0 ? total * inputVatRate / (100 + inputVatRate) : 0;
   const subtotal = total - inputVat; // = NET (nach Vorsteuer-Abzug)
-  const remaining = Math.max(0, total - paymentAmount);
+  const paid = payRows.reduce((s, r) => s + zahlBetrag(r), 0);
+  const remaining = Math.max(0, total - paid);
   const status: 'DRAFT' | 'UNPAID' | 'PARTIALLY_PAID' | 'PAID' =
     total <= 0 ? 'DRAFT'
-    : paymentAmount <= 0 ? 'UNPAID'
-    : paymentAmount >= total - 0.001 ? 'PAID'
+    : paid <= 0 ? 'UNPAID'
+    : paid >= total - 0.001 ? 'PAID'
     : 'PARTIALLY_PAID';
+  const zahlwege = [...new Set(payRows.filter(r => zahlBetrag(r) > 0).map(r => r.method))];
+
+  function updatePayRow(key: number, patch: Partial<PurchasePayRow>) {
+    setPayRows(prev => prev.map(r => (r.key === key ? { ...r, ...patch } : r)));
+  }
+  /** Eine weitere Zahlung — mit dem offenen Rest vorgeschlagen, höchstens zehn (wie der Primary annimmt). */
+  function addPayRow() {
+    if (payRows.length >= MAX_PURCHASE_PAYMENTS) return;
+    const offen = Math.max(0, total - paid);
+    setPayRows(prev => [...prev, neueZahlung(payRowSeq, purchaseDate, offen > 0.0005 ? offen.toFixed(3) : '')]);
+    setPayRowSeq(n => n + 1);
+  }
+  function removePayRow(key: number) {
+    setPayRows(prev => (prev.length === 1 ? [{ ...prev[0], amountText: '' }] : prev.filter(r => r.key !== key)));
+  }
 
   function updateLine(idx: number, patch: Partial<DraftLine>) {
     setLines(prev => prev.map((l, i) => i === idx ? { ...l, ...patch } : l));
@@ -322,8 +364,8 @@ export function PurchaseCreate() {
     setSupplierId('');
     setPurchaseDate(new Date().toISOString().split('T')[0]);
     setLines([{ mode: 'new', brand: '', name: '', sku: '', categoryId: categories[0]?.id || '', quantity: 1, unitPrice: 0 }]);
-    setPaymentAmount(0);
-    setPaymentMethod('bank');
+    setPayRows([neueZahlung(payRowSeq, new Date().toISOString().split('T')[0])]);
+    setPayRowSeq(n => n + 1);
     setNotes('');
     setError('');
   }
@@ -332,7 +374,13 @@ export function PurchaseCreate() {
   // Auftragsverknüpfung, Inbox „erledigt") baut EINE Vorbereitung (core/purchases/purchase-create),
   // am Primary wie fern, in EINER Klammer.
   function formInput(): PurchaseCreateInput {
+    // v0.8.91 — die Zahlungen als Liste (jede mit ihrem Tag); leere Zeilen zählen nicht.
+    const zahlungen = payRows.filter(r => zahlBetrag(r) > 0).map(r => ({
+      amount: Math.round(zahlBetrag(r) * 1000) / 1000, method: r.method, paidDate: r.date,
+      ...(r.reference.trim() ? { reference: r.reference.trim() } : {}),
+    }));
     return {
+      ...(zahlungen.length > 0 ? { payments: zahlungen } : {}),
       supplierId, purchaseDate, taxScheme: purchaseTaxScheme,
       lines: lines.map(l => l.mode === 'bulk' && l.bulk ? (() => {
         const b = bulkDraftToInput(l.bulk);
@@ -343,7 +391,7 @@ export function PurchaseCreate() {
         sourceOrderLineId: l.sourceOrderLineId,
         partnerShares: l.partnerShares && l.partnerShares.length > 0 ? l.partnerShares : undefined,
       })),
-      paymentAmount, paymentMethod, notes, staffId,
+      paymentAmount: 0, paymentMethod: 'bank', notes, staffId,
       sourceOrderId: sourceOrderId || undefined,
       inboxId: inboxId || undefined,
     };
@@ -351,6 +399,13 @@ export function PurchaseCreate() {
 
   async function handleSave(continueEditing: boolean) {
     setError('');
+    for (let i = 0; i < payRows.length; i++) {
+      const roh = payRows[i].amountText.trim();
+      if (roh === '') continue;
+      const v = parseFloat(roh);
+      if (!Number.isFinite(v) || v < 0) { setError(`Payment ${i + 1}: the amount must be a number of 0 or more`); return; }
+      if (v > 0 && !payRows[i].date) { setError(`Payment ${i + 1}: please choose the payment date`); return; }
+    }
     let input: PurchaseCreateInput;
     try { input = formInput(); } catch (e) { setError(e instanceof Error ? e.message : String(e)); return; }
     const v = validatePurchaseCreate(input);
@@ -737,40 +792,71 @@ export function PurchaseCreate() {
         {/* 4. INITIAL PAYMENT */}
         <div style={{ marginTop: 16 }}>
           <Card>
-            <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>4 · INITIAL PAYMENT (optional)</span>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginTop: 12 }}>
-              <Input label="AMOUNT (BHD)" type="number" step="0.001"
-                value={paymentAmount || ''} onChange={e => setPaymentAmount(parseFloat(e.target.value) || 0)} />
-              <div>
-                <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
-                <div className="flex gap-2" style={{ marginTop: 6 }}>
-                  {(['cash', 'bank', 'benefit'] as const).map(m => {
-                    const active = paymentMethod === m;
-                    return (
-                      <button key={m} type="button" onClick={() => setPaymentMethod(m)}
-                        className="cursor-pointer rounded"
-                        style={{ padding: '8px 16px', fontSize: 13,
-                          border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
-                          color: active ? '#0F0F10' : '#6B7280',
-                          background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                        }}>{m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : 'Benefit'}</button>
-                    );
-                  })}
+            <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>4 · PAYMENTS (optional)</span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 12, marginTop: 12 }} data-purchase-pay-rows>
+              {payRows.map((r, idx) => (
+                <div key={r.key} data-purchase-pay-row={idx}
+                  style={{ display: 'grid', gridTemplateColumns: 'minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) auto', gap: 12, alignItems: 'end',
+                    paddingBottom: idx < payRows.length - 1 ? 12 : 0, borderBottom: idx < payRows.length - 1 ? '1px solid #E5E9EE' : 'none' }}>
+                  <div>
+                    <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>PAYMENT {idx + 1} · METHOD</span>
+                    <div className="flex gap-2" style={{ marginTop: 6 }}>
+                      {(['cash', 'bank', 'benefit'] as const).map(m => {
+                        const active = r.method === m;
+                        return (
+                          <button key={m} type="button" onClick={() => updatePayRow(r.key, { method: m })} data-purchase-pay-method={m}
+                            className="cursor-pointer rounded"
+                            style={{ padding: '8px 16px', fontSize: 13,
+                              border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
+                              color: active ? '#0F0F10' : '#6B7280',
+                              background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
+                            }}>{ZAHLWEG_LABEL[m]}</button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                  <Input label="AMOUNT (BHD)" type="number" step="0.001" min="0"
+                    value={r.amountText} onChange={e => updatePayRow(r.key, { amountText: e.target.value })} data-purchase-pay-amount />
+                  <Input label="PAYMENT DATE" type="date" min={purchaseDate} max={latestBusinessDate()}
+                    value={r.date} onChange={e => updatePayRow(r.key, { date: e.target.value, dateTouched: true })} data-purchase-pay-date />
+                  <Input label="REFERENCE (optional)" value={r.reference}
+                    onChange={e => updatePayRow(r.key, { reference: e.target.value })} data-purchase-pay-reference />
+                  <button type="button" onClick={() => removePayRow(r.key)} data-purchase-pay-remove={idx} title="Remove this payment"
+                    className="cursor-pointer rounded" style={{ padding: 8, border: '1px solid #D5D9DE', background: 'transparent', color: '#6B7280', marginBottom: 2 }}>
+                    <Trash2 size={14} />
+                  </button>
                 </div>
-              </div>
+              ))}
             </div>
             <div className="flex gap-2" style={{ marginTop: 14 }}>
-              <button onClick={() => setPaymentAmount(total)}
+              <button type="button" onClick={addPayRow} data-purchase-pay-add disabled={payRows.length >= MAX_PURCHASE_PAYMENTS}
+                className="cursor-pointer rounded flex items-center gap-1"
+                style={{ padding: '6px 12px', fontSize: 11, border: '1px solid #0F0F10', color: '#0F0F10', background: 'transparent' }}>
+                <Plus size={12} /> Add Payment
+              </button>
+              <button type="button" data-purchase-pay-full
+                onClick={() => setPayRows(prev => {
+                  const last = prev[prev.length - 1];
+                  const andere = prev.slice(0, -1).reduce((s, x) => s + zahlBetrag(x), 0);
+                  const rest = Math.max(0, total - andere);
+                  return prev.map(x => (x.key === last.key ? { ...x, amountText: rest > 0.0005 ? rest.toFixed(3) : '' } : x));
+                })}
                 className="cursor-pointer rounded"
                 style={{ padding: '6px 12px', fontSize: 11, border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}>
                 Pay Full
               </button>
-              <button onClick={() => setPaymentAmount(0)}
+              <button type="button" data-purchase-pay-later
+                onClick={() => { setPayRows([neueZahlung(payRowSeq, purchaseDate)]); setPayRowSeq(n => n + 1); }}
                 className="cursor-pointer rounded"
                 style={{ padding: '6px 12px', fontSize: 11, border: '1px solid #D5D9DE', color: '#6B7280', background: 'transparent' }}>
                 Credit (later)
               </button>
             </div>
+            {paid > total + 0.0005 && (
+              <p style={{ marginTop: 10, fontSize: 12, color: '#DC2626' }} data-purchase-pay-overpaid>
+                Paid ({fmt(paid)}) exceeds the total ({fmt(total)}) — reduce a payment.
+              </p>
+            )}
           </Card>
         </div>
 
@@ -805,7 +891,7 @@ export function PurchaseCreate() {
               </div>
               <div>
                 <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', marginBottom: 4 }}>PAID</div>
-                <div className="font-mono" style={{ fontSize: 18, color: '#86E5A4' }}><Bhd v={paymentAmount}/> BHD</div>
+                <div className="font-mono" style={{ fontSize: 18, color: '#86E5A4' }} data-purchase-paid><Bhd v={paid}/> BHD</div>
               </div>
               <div>
                 <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', marginBottom: 4 }}>REMAINING</div>
@@ -813,7 +899,7 @@ export function PurchaseCreate() {
               </div>
               <div>
                 <div style={{ fontSize: 10, color: 'rgba(255,255,255,0.6)', marginBottom: 4 }}>METHOD</div>
-                <div style={{ fontSize: 18, color: '#FFFFFF', textTransform: 'capitalize' }}>{paymentMethod}</div>
+                <div style={{ fontSize: 18, color: '#FFFFFF' }} data-purchase-pay-methods>{zahlwege.length === 0 ? '—' : zahlwege.map(m => ZAHLWEG_LABEL[m]).join(' + ')}</div>
               </div>
             </div>
           </div>

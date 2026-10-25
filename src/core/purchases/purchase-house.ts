@@ -151,11 +151,12 @@ export function createPurchaseDetailedInHouse(input: PurchaseCreateInput, branch
   const purchase0 = store.createPurchase(payload as never);
   // MOBILE-PURCHASE — mehrere Zahlungen: jede über denselben Weg wie „Record Payment" (eigene Zeile,
   // eigene Buchung, Status neu gerechnet), mit dem Datum des Einkaufs. Keine Sammelbuchung.
+  // v0.8.91 — der Desktop nennt je Zahlung einen eigenen Tag (geprüft in purchaseCreateIssue); ohne ihn wie bisher.
   if (input.payments && input.payments.length > 0) {
     const ctx = { branchId, userId, now: new Date().toISOString() };
     for (const p of input.payments) {
       alsEinkaufsNein(() => recordPurchasePaymentInHouse(purchase0.id, p.amount, p.method, ctx,
-        { reference: p.reference || undefined, paidAt: input.purchaseDate }));
+        { reference: p.reference || undefined, paidAt: p.paidDate || input.purchaseDate }));
     }
     store.loadPurchases();
   }
