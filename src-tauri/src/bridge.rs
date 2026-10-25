@@ -56,6 +56,8 @@ pub const OP_PROBE: &str = "bridge.probe";
 pub const OP_PRODUCTS_LIST: &str = "products.list";
 pub const OP_PRODUCTS_GET: &str = "products.get";
 pub const OP_PRODUCTS_DUPLICATES_GET: &str = "products.duplicates.get";
+/// v0.8.91 — die SKU-Vorschau („Will be assigned: …") auf PC2: nur gelesen, verbraucht keine Nummer.
+pub const OP_PRODUCTS_SKU_PREVIEW_GET: &str = "products.sku_preview.get";
 pub const OP_CUSTOMERS_LIST: &str = "customers.list";
 pub const OP_CUSTOMERS_GET: &str = "customers.get";
 pub const OP_INVOICES_LIST: &str = "invoices.list";
@@ -574,6 +576,8 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_PURCHASES_VOID_PAYMENT,
     OP_PURCHASE_EDIT_CHECK_GET,
     OP_PAGE_COST_CORRECTIONS_GET,
+    // v0.8.91 — die SKU-Vorschau aus dem Zähler des Primary (nur gelesen).
+    OP_PRODUCTS_SKU_PREVIEW_GET,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

@@ -933,6 +933,7 @@ export function PurchaseCreate() {
         submitLabel="Use this Item"
         hint={<><strong style={{ color: '#0F0F10' }}>Wird ins Lager aufgenommen.</strong> Einkaufspreis kommt aus der Purchase-Line — nicht doppelt eingeben.</>}
         hideFields={{ purchasePrice: true, salePrice: true, paidFrom: true, supplier: true, quantity: true }}
+        skuAutoAssign
       />
 
       {/* Quick-Create Supplier — gleiche Felder wie SupplierList, inkl. CPR + ID-Card. */}

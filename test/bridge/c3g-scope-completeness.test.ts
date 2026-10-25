@@ -196,8 +196,8 @@ const ACTIONS: Action[] = [
   const known = knownCommands();
   // CENTRAL-C3H hat die sechzehn `B_DEFERRED`-Aktionen freigeschaltet. Diese Datei bleibt der
   // Nachweis der KLASSIFIKATION — die Zahlen ziehen mit, die Einordnung nicht.
-  ok(known.length === 60 && known.filter((o) => o.endsWith('.list') || o.endsWith('.get')).length === 19,
-    `REGISTRY 1 Probe + 19 Reads + 40 Mutationen = 60 (${known.length})`);
+  ok(known.length === 61 && known.filter((o) => o.endsWith('.list') || o.endsWith('.get')).length === 20,
+    `REGISTRY 1 Probe + 20 Reads (v0.8.91: die SKU-Vorschau) + 40 Mutationen = 61 (${known.length})`);
   for (const a of ACTIONS.filter((x) => x.klass === 'C_PRIMARY_ONLY')) {
     // Kein Name dieser Aktion — in irgendeiner plausiblen Schreibweise — steht auf der Liste.
     const guesses = [

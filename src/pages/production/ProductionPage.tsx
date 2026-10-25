@@ -363,6 +363,7 @@ export function ProductionPage() {
         title={editingOutput ? 'Edit Output Product' : 'New Output Product'}
         submitLabel={editingOutput ? 'Update' : 'Add to Production'}
         hint="Pick category → brand/name + dynamic attributes from the category. Enter the production value on the card afterwards."
+        skuAutoAssign
         hideFields={{
           purchasePrice: true,
           salePrice: true,

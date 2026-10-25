@@ -7,6 +7,9 @@
 // Transaktion, fern in der Transaktion des Auftrags.
 // ════════════════════════════════════════════════════════════════════════════
 import { query, currentBranchId } from '@/core/db/helpers';
+import { getDatabase } from '@/core/db/database';
+import { trackProductRow } from '@/core/lots/lot-queries';
+import { skuIsEmpty } from '@/core/products/sku-allocation';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useProductStore } from '@/stores/productStore';
@@ -132,6 +135,25 @@ function withAllocatedSkus(payload: Record<string, unknown>): Record<string, unk
   return { ...payload, lines };
 }
 
+/**
+ * v0.8.91 — ein Auftragsartikel wird erst mit dem Wareneingang zum Lagerartikel (Back-to-Back: die Einkaufszeile
+ * zeigt auf die Auftragsposition und auf den Artikel, den der Auftrag ohne SKU angelegt hat). Genau dann bekommt er
+ * seine Nummer aus DEM Zähler — in der Klammer des Einkaufs. Nur so verknüpfte Zeilen: ein anderer vorhandener Artikel
+ * ohne SKU wird hier nicht nummeriert (keine Massennummerierung alter Artikel), eine vorhandene SKU nie ersetzt.
+ */
+function skuForOrderStockArrivals(payload: Record<string, unknown>): void {
+  const allocate = useProductStore.getState().allocateSkuOnCreate;
+  for (const l of payload.lines as Array<Record<string, unknown>>) {
+    if (!l.productId || !l.sourceOrderLineId) continue;
+    const p = query('SELECT sku, brand, category_id FROM products WHERE id = ?', [String(l.productId)])[0];
+    if (!p || !skuIsEmpty(p.sku)) continue;
+    const sku = allocate(undefined, (p.brand as string | null) ?? undefined, (p.category_id as string | null) ?? undefined);
+    if (!sku) continue;
+    getDatabase().run('UPDATE products SET sku = ?, updated_at = ? WHERE id = ?', [sku, new Date().toISOString(), String(l.productId)]);
+    trackProductRow(String(l.productId));
+  }
+}
+
 /** „Save Purchase": der Einkauf — und, wenn er aus einem Inbox-Foto kam, das Foto „erledigt". */
 export function createPurchaseInHouse(input: PurchaseCreateInput, branchId: string, userId = ''): Purchase {
   return createPurchaseDetailedInHouse(input, branchId, userId).purchase;
@@ -149,6 +171,7 @@ export function createPurchaseDetailedInHouse(input: PurchaseCreateInput, branch
   const payload = withAllocatedSkus(planPurchaseCreate(resolved, housePurchasePort(branchId)));
   const store = usePurchaseStore.getState();
   const purchase0 = store.createPurchase(payload as never);
+  skuForOrderStockArrivals(payload);
   // MOBILE-PURCHASE — mehrere Zahlungen: jede über denselben Weg wie „Record Payment" (eigene Zeile,
   // eigene Buchung, Status neu gerechnet), mit dem Datum des Einkaufs. Keine Sammelbuchung.
   // v0.8.91 — der Desktop nennt je Zahlung einen eigenen Tag (geprüft in purchaseCreateIssue); ohne ihn wie bisher.

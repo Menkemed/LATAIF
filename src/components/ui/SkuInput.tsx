@@ -10,6 +10,32 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Input } from './Input';
 import { useProductStore } from '@/stores/productStore';
+import { readsFromPrimary } from '@/core/data/primary-source';
+import { remoteRead } from '@/core/bridge/remote-read';
+
+/**
+ * v0.8.91 — die nächste Nummer zu `seed`, am Primary aus dem lokalen Zähler, auf PC2 aus DEM Zähler des Primary
+ * (`products.sku_preview.get`). Nur gelesen, entprellt; leer, solange nichts zu fragen ist oder die Antwort fehlt.
+ */
+export function useSkuPeek(seed: string, enabled = true): string {
+  const peekSku = useProductStore(s => s.peekSku);
+  const products = useProductStore(s => s.products);
+  const [answer, setAnswer] = useState('');
+  useEffect(() => {
+    const s = (seed || '').trim();
+    if (!enabled || !s) { setAnswer(''); return; }
+    let alive = true;
+    const t = setTimeout(() => {
+      if (!readsFromPrimary()) { if (alive) setAnswer(peekSku(s)); return; }
+      // Eine C2-Auskunft (wie `products.get`): die Antwort IST `{ sku }`. Ohne Antwort keine Vorschau — vergeben wird ohnehin am Primary.
+      remoteRead<{ sku?: unknown }>('products.sku_preview.get', { seed: s })
+        .then(d => { if (alive) setAnswer(typeof d?.sku === 'string' ? d.sku : ''); })
+        .catch(() => { if (alive) setAnswer(''); });
+    }, 200);
+    return () => { alive = false; clearTimeout(t); };
+  }, [seed, enabled, peekSku, products]);
+  return answer;
+}
 
 export interface SkuInputProps {
   value: string;
@@ -37,7 +63,7 @@ export function SkuInput({
   placeholder = 'Internal reference',
   previewSeed,
 }: SkuInputProps) {
-  const { products, peekSku } = useProductStore();
+  const { products } = useProductStore();
 
   const taken = useMemo(() => {
     const t = (value || '').trim();
@@ -52,20 +78,16 @@ export function SkuInput({
   // The number offered when the typed SKU is already gone. It comes from the durable counter, not
   // from the product list: the list forgets a number as soon as its product is deleted, and
   // offering the operator a retired number is the failure this whole split exists to stop.
-  const suggestion = useMemo(() => (taken ? peekSku(value) : ''), [taken, value, peekSku]);
+  // v0.8.91 — auch auf PC2 (aus dem Zähler des Primary).
+  const suggestion = useSkuPeek(value, taken);
 
   /**
    * The number an empty field is about to be given. Debounced because the seed changes with every
    * keystroke in Brand, and the first peek for a stem nobody has used yet reads the whole surviving
    * history to find out where to start — worth it once, not once per letter.
    */
-  const [preview, setPreview] = useState('');
   const empty = !(value || '').trim();
-  useEffect(() => {
-    if (!previewSeed || !empty) { setPreview(''); return; }
-    const t = setTimeout(() => setPreview(peekSku(previewSeed)), 200);
-    return () => clearTimeout(t);
-  }, [previewSeed, empty, peekSku, products]);
+  const preview = useSkuPeek(previewSeed ?? '', !!previewSeed && empty);
 
   return (
     <div>

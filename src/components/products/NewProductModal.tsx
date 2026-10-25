@@ -13,6 +13,7 @@ import { Modal } from '@/components/ui/Modal';
 import { Button } from '@/components/ui/Button';
 import { Input } from '@/components/ui/Input';
 import { SkuInput } from '@/components/ui/SkuInput';
+import { buildSkuSeed } from '@/core/products/sku-allocation';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { DuplicateWarningModal, type DuplicateMatch } from '@/components/ui/DuplicateWarningModal';
 import { duplicateFingerprint, fingerprintAfterCopy, copiedAttributes } from '@/core/products/duplicate-dismiss';
@@ -36,6 +37,11 @@ export interface NewProductModalProps {
   submitLabel?: string;
   /** Optionaler Hinweistext oben im Modal. */
   hint?: React.ReactNode;
+  /**
+   * v0.8.91 — vergibt der Aufrufer beim Speichern eine SKU, wenn das Feld leer bleibt (Einkauf, Produktion)? Dann
+   * zeigt das leere Feld die Nummer, die vergeben wird. Aufträge vergeben keine (erst die Lagerübernahme).
+   */
+  skuAutoAssign?: boolean;
   /** Welche Felder ausgeblendet werden sollen (kontextspezifisch). */
   hideFields?: {
     purchasePrice?: boolean;
@@ -48,7 +54,7 @@ export interface NewProductModalProps {
 }
 
 export function NewProductModal({
-  open, onClose, onSubmit, initial, title, submitLabel, hint, hideFields,
+  open, onClose, onSubmit, initial, title, submitLabel, hint, hideFields, skuAutoAssign,
 }: NewProductModalProps) {
   const { products, categories, loadCategories, isSkuTaken, findPossibleDuplicates } = useProductStore();
   const [form, setForm] = useState<Partial<Product>>({});
@@ -212,7 +218,8 @@ export function NewProductModal({
 
         {/* SKU + (optional) Quantity */}
         <div style={{ display: 'grid', gridTemplateColumns: hideFields?.quantity ? '1fr' : '2fr 1fr', gap: 16 }}>
-          <SkuInput value={form.sku || ''} onChange={v => { setForm(p => ({ ...p, sku: v })); if (skuError) setSkuError(false); }} />
+          <SkuInput value={form.sku || ''} onChange={v => { setForm(p => ({ ...p, sku: v })); if (skuError) setSkuError(false); }}
+            previewSeed={skuAutoAssign ? buildSkuSeed(form.brand, form.categoryId) : undefined} />
           {!hideFields?.quantity && (
             <Input label="QUANTITY" type="number" placeholder="1"
               value={form.quantity || 1}

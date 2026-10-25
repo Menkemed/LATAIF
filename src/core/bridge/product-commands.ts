@@ -228,12 +228,21 @@ export interface ProductUpdateRequest {
   confirmAi?: true;
   /** PURCHASE-EDIT D7 — die Begründung, wenn ein verkaufter Artikel seine Druckangaben ändert. */
   editReason?: string;
+  /**
+   * v0.8.91 — „Find Next SKU": nur die ABSICHT (true). Die Nummer nennt der Client nie (`sku` bleibt verboten); der
+   * Primary vergibt sie aus seinem Zähler, und nur für einen Artikel ohne SKU.
+   */
+  assignSku?: true;
 }
 
 export function parseProductUpdate(raw: unknown): ProductUpdateRequest {
   if (!isPlain(raw)) throw new ProductPayloadError('payload must be an object');
-  const { id, gallery, aiConfirmedAt, editReason, ...rest } = raw as { id?: unknown; gallery?: unknown; aiConfirmedAt?: unknown; editReason?: unknown };
+  const { id, gallery, aiConfirmedAt, editReason, assignSku, ...rest } = raw as { id?: unknown; gallery?: unknown; aiConfirmedAt?: unknown; editReason?: unknown; assignSku?: unknown };
   if (typeof id !== 'string' || !id.trim()) throw new ProductPayloadError('id is required');
+  if (assignSku !== undefined && assignSku !== true) {
+    throw new ProductPayloadError('assignSku is a request (true) — the primary picks the number, not the client');
+  }
+  const vergeben = assignSku === true ? { assignSku: true as const } : {};
   // PURCHASE-EDIT D7 — die Begründung, wenn ein schon verkaufter Artikel seine Druckangaben ändert (das Haus verlangt sie).
   if (editReason !== undefined && (typeof editReason !== 'string' || editReason.length > 500)) {
     throw new ProductPayloadError('editReason must be text (at most 500 characters)');
@@ -243,7 +252,7 @@ export function parseProductUpdate(raw: unknown): ProductUpdateRequest {
     if (aiConfirmedAt !== true) {
       throw new ProductPayloadError('aiConfirmedAt is a confirmation (true) — the primary stamps the time, not the client');
     }
-    if (gallery !== undefined || Object.keys(rest as Record<string, unknown>).length > 0) {
+    if (gallery !== undefined || assignSku !== undefined || Object.keys(rest as Record<string, unknown>).length > 0) {
       throw new ProductPayloadError('confirming the AI identification is its own change — send it alone');
     }
     return { id, fields: {}, confirmAi: true };
@@ -254,8 +263,8 @@ export function parseProductUpdate(raw: unknown): ProductUpdateRequest {
   const out = fields(rest as Record<string, unknown>, UPDATE_FIELDS);
 
   if (gallery === undefined || gallery === null) {
-    if (Object.keys(out).length === 0) throw new ProductPayloadError('nothing to change');
-    return { id, fields: out, ...(reason ? { editReason: reason } : {}) };
+    if (Object.keys(out).length === 0 && assignSku !== true) throw new ProductPayloadError('nothing to change');
+    return { id, fields: out, ...(reason ? { editReason: reason } : {}), ...vergeben };
   }
   if (!Array.isArray(gallery)) throw new ProductPayloadError('gallery must be a list of slots');
   if (gallery.length > MAX_REMOTE_IMAGES) throw new ProductPayloadError(`at most ${MAX_REMOTE_IMAGES} images`);
@@ -285,7 +294,7 @@ export function parseProductUpdate(raw: unknown): ProductUpdateRequest {
     }
     throw new ProductPayloadError('a gallery slot is either { keep } or { stagingId }');
   }
-  return { id, fields: out, gallery: slots, ...(reason ? { editReason: reason } : {}) };
+  return { id, fields: out, gallery: slots, ...(reason ? { editReason: reason } : {}), ...vergeben };
 }
 
 /** Typ-Alias aus demselben Grund wie beim Kunden: als `CommandResult` herausgegeben. */
@@ -479,7 +488,7 @@ export async function runProductUpdate(
   raw: unknown,
   extras: ProductEngineExtras = {},
 ): Promise<CommandOutcome> {
-  const { id, fields: patch, gallery, confirmAi, editReason } = parseProductUpdate(raw);
+  const { id, fields: patch, gallery, confirmAi, editReason, assignSku } = parseProductUpdate(raw);
   const readStaged = extras.readStaged ?? invokeReadStaged;
   const discard = extras.discardStaged ?? invokeDiscardStaged;
   const readGallery = extras.readGallery ?? resolveGallery;
@@ -528,7 +537,7 @@ export async function runProductUpdate(
         patch as never,
         // Dieselbe Preissperre wie beim Handy, in derselben Transaktion geprüft. Ein Fernauftrag ist
         // kein Grund, sie zu überspringen — im Gegenteil.
-        { priceEligibilityRequired: true, ...(editReason ? { editReason } : {}) },
+        { priceEligibilityRequired: true, ...(editReason ? { editReason } : {}), ...(assignSku ? { assignSku: true } : {}) },
         { alreadySerialised: true },
       )
       : await store.editProductWithMedia(
@@ -538,7 +547,7 @@ export async function runProductUpdate(
         undefined,
         { alreadySerialised: true },
         // …und dieselbe Preissperre. Ein Bild mitzuschicken darf kein Weg sein, an ihr vorbeizukommen.
-        { priceEligibilityRequired: true, ...(editReason ? { editReason } : {}) },
+        { priceEligibilityRequired: true, ...(editReason ? { editReason } : {}), ...(assignSku ? { assignSku: true } : {}) },
       );
 
     if (result.status === 'blocked') {

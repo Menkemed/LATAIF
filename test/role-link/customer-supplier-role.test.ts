@@ -331,7 +331,7 @@ const gegenparteien = (db: Db): string => all(db,
     'REGISTRY keine neue Buchung — suppliers.create trägt die Rolle (116 Mutationen mit BULK METAL V1 + STOCK CORRECTION)');
   const rust = src('src-tauri/src/bridge.rs');
   const ops = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(ops === 212, `REGISTRY 195 (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${ops})`);
+  ok(ops === 213, `REGISTRY 195 (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${ops})`);
   // Kein Buchungs-, Saldo- oder Belegcode liest die Verknüpfung.
   const walk = (d: string): string[] => readdirSync(d).flatMap((f) => { const p = join(d, f); return statSync(p).isDirectory() ? walk(p) : [p]; });
   const leser = walk(resolvePath(repo, 'src')).filter((p) => /\.(ts|tsx)$/.test(p))

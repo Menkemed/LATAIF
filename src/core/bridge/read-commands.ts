@@ -42,6 +42,8 @@ export const OP_PRODUCTS_GET = 'products.get';
 // Copy details kommen aus der Autoritaet. Ohne sie muesste ein zweiter Bildschirm die
 // Erkennung und das Kopieren nachbauen — zwei Meinungen ueber dasselbe.
 export const OP_PRODUCTS_DUPLICATES_GET = 'products.duplicates.get';
+// v0.8.91 — die Nummer, die eine Anlage bekäme (Vorschau, auch auf PC2): aus DEM Zähler des Primary, nur gelesen.
+export const OP_PRODUCTS_SKU_PREVIEW_GET = 'products.sku_preview.get';
 export const OP_CUSTOMERS_LIST = 'customers.list';
 export const OP_CUSTOMERS_GET = 'customers.get';
 export const OP_INVOICES_LIST = 'invoices.list';
@@ -71,7 +73,7 @@ export const OP_TRANSFERS_GET = 'transfers.get';
 
 /** Jede Leseoperation, die C2 freischaltet — dieselbe Liste kennt auch Rust. */
 export const C2_READ_OPS = [
-  OP_PRODUCTS_LIST, OP_PRODUCTS_GET, OP_PRODUCTS_DUPLICATES_GET,
+  OP_PRODUCTS_LIST, OP_PRODUCTS_GET, OP_PRODUCTS_DUPLICATES_GET, OP_PRODUCTS_SKU_PREVIEW_GET,
   OP_CUSTOMERS_LIST, OP_CUSTOMERS_GET,
   OP_INVOICES_LIST, OP_INVOICES_GET,
   OP_SUPPLIERS_LIST, OP_CATEGORIES_LIST,
@@ -348,6 +350,25 @@ registerCommand(OP_PRODUCTS_DUPLICATES_GET, {
         };
       }),
     };
+  },
+});
+
+/**
+ * v0.8.91 — „Will be assigned: …" auch auf PC2: die Nummer, die eine Anlage zu diesem Stamm JETZT bekäme. Dieselbe
+ * Antwort wie am Primary (`peekNextSku`): nur gelesen — sie verbraucht nichts, und vergeben wird erst beim Speichern
+ * (`allocateSkuOnCreate`). Die Eingabe ist abschließend: genau ein Beispiel-SKU (`ROL-WCH-001`) oder eine eingetippte.
+ */
+registerCommand(OP_PRODUCTS_SKU_PREVIEW_GET, {
+  kind: 'read',
+  handler: (p) => {
+    actorBranch(p);
+    const eingabe = input(p);
+    for (const k of Object.keys(eingabe)) {
+      if (k !== 'seed') throw new BusinessError('UNKNOWN_FIELD', `this read does not take "${k}"`);
+    }
+    const seed = typeof eingabe.seed === 'string' ? eingabe.seed.trim() : '';
+    if (!seed || seed.length > 64) throw new BusinessError('INVALID_INPUT', 'seed is a SKU of at most 64 characters');
+    return { sku: useProductStore.getState().peekSku(seed) };
   },
 });
 

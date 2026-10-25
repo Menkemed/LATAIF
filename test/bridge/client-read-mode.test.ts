@@ -137,7 +137,7 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
     'AUTH die Lesebefehle laufen auf der sql.js-Datenbank des Primary');
   ok(/kind: 'read'/.test(reads), 'AUTH …und sind als Lesevorgang ausgewiesen');
   const registered = (reads.match(/^registerCommand\(/gm) || []).length;
-  ok(registered === 19, `AUTH neunzehn Leseoperationen (${registered})`);
+  ok(registered === 20, `AUTH zwanzig Leseoperationen (v0.8.91: die SKU-Vorschau) (${registered})`);
   ok(!/kind: 'mutation'/.test(reads), 'AUTH und keine einzige veraendernde');
 
   // Und in Rust wird KEINE neue Leseroute auf die Datei gelegt.
@@ -262,7 +262,7 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   const known = knownCommands();
   ok(known.length === 1 && known[0] === 'bridge.probe',
     `READONLY geladen ist zunaechst nur die Probe (${known.join(',')})`);
-  ok(registeredReads === 19, `READONLY plus neunzehn Lesevorgaenge im Quelltext (${registeredReads})`);
+  ok(registeredReads === 20, `READONLY plus zwanzig Lesevorgaenge im Quelltext (v0.8.91: die SKU-Vorschau) (${registeredReads})`);
   ok(!/registerCommand\('[a-z.]*(create|edit|delete|sell|import|save|update)/i.test(readSrc),
     'READONLY und kein Name klingt nach Veraenderung');
 
@@ -518,14 +518,14 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
   const mutations = resolved.filter((o) => !probes.includes(o) && !reads.includes(o));
 
   // CENTRAL-UI-PARITY: dazu 47 Store-Auskuenfte, mit denen PC2 DIESELBE Oberflaeche fuellt
-  ok(resolved.length === 212, `ALLOWLIST einhundertfünfundneunzig Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) insgesamt (${resolved.length})`);
+  ok(resolved.length === 213, `ALLOWLIST einhundertfünfundneunzig Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) insgesamt (${resolved.length})`);
   ok(probes.length === 1, `ALLOWLIST genau eine Probe (${probes.length})`);
   const storeReads = reads.filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get', 'page.dashboard.get', 'page.invoice_list.get', 'page.order_list.get', 'page.customer_detail.get', 'page.order_detail.get', 'page.supplier_detail.get', 'page.product_detail.get', 'page.purchase_create.get', 'refs.numbers.get', 'metals.stock_by_karat.get', 'search.global.get', 'page.reconciliation.get', 'ledger.balances.get', 'finance.receivables.get', 'inventory.lot_aggregates.get', 'product.lots.get', 'product.lots.batch.get', 'expenses.credit_paid.get', 'inventory.session.get', 'inventory.checks.get', 'metals.spot_prices.get', 'debts.payments.get', 'suppliers.credits.get', 'page.invoice_print.get',
     // BULK METAL V1
     'page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bulk_metals.lot_detail.get', 'bulk_metals.allocation_preview.get', 'stock_adjustments.product.get', 'page.old_stock.get', 'parties.balances.get', 'parties.account.get', 'page.opening_balances.get', 'page.opening_accounting.get', 'purchase.edit_check.get', 'page.cost_corrections.get'].includes(o));
   // CENTRAL-UI-PARITY — achtzehn Auskuenfte aus C2, dazu 48 typisierte Auskuenfte fuer die
   // gemeinsame Oberflaeche. Beides ist Lesen; getrennt gezaehlt, damit die Herkunft sichtbar bleibt.
-  ok(reads.length === 85 && storeReads.length === 66,
+  ok(reads.length === 86 && storeReads.length === 66,
     `ALLOWLIST 19 Auskuenfte + 59 typisierte Auskuenfte (${reads.length}/${storeReads.length})`);
   ok(mutations.join(',') === 'invoices.create,customers.create,customers.update,products.create,products.update,invoices.update,invoices.record_payment,purchases.create,consignments.create,consignments.update,orders.create,orders.update,repairs.create,repairs.update,transfers.create,transfers.update,transfers.mark_returned,invoices.apply_credit,invoices.update_payment,invoices.delete_payment,orders.convert_to_invoice,consignments.record_payout,transfers.mark_sold,transfers.mark_settled,returns.create,returns.approve,returns.refund,returns.record_refund_payment,orders.update_status,orders.add_payment,orders.delete_payment,consignments.record_sale,consignments.mark_returned,repairs.update_status,repairs.create_invoice,repairs.add_line,repairs.update_line,repairs.cancel_line,transfers.convert_to_invoice,transfers.convert_many_to_invoice,invoices.cancel,suppliers.create,suppliers.update,agents.update,partners.create,partners.update,employees.create,employees.update,inventory.start,inventory.save,inventory.finish,inventory.record_check,tax.record_payment,banking.transfer,partners.record_tx,debts.create,debts.update,debts.record_payment,expenses.create,expenses.update,expenses.record_payment,expenses.template_create,expenses.template_update,purchases.record_payment,purchases.apply_credit,suppliers.pay,suppliers.apply_credit,suppliers.refund_credit,gold.payables.settle,gold.customer_credits.settle,repairs.record_gold_usage,repairs.add_material,orders.add_cost,orders.remove_cost,metals.create,metals.update_status,metals.set_spot_price,scrap_trades.create,scrap_trades.update,scrap_trades.cancel,offers.create,offers.update,offers.set_status,offers.convert_to_invoice,invoices.set_butterfly,returns.cancel,transfers.undo_convert,customers.log_message,purchases.return_to_supplier,purchases.cancel,purchases.dismiss_inbox,orders.cancel,orders.update_line_status,orders.mark_line_ordered,orders.update_line,consignments.return_after_sale,consignments.cancel_sale,production.create,tasks.create,tasks.update,documents.upload,documents.set_ocr,production.complete,purchase_inbox.create,partner_items.record_movement,partner_items.settle_sale,partner_items.offset,partner_items.cancel_movement,partner_items.take_over,partner_items.change_partners'
     // BULK METAL V1
@@ -544,7 +544,9 @@ const { CommandScheduler } = await import('../../src/core/bridge/command-schedul
     + ',page.bulk_metals.get,bulk_metals.lots_for_sale.get,bulk_metals.lot_detail.get,bulk_metals.allocation_preview.get'
     // STOCK CORRECTION
     + ',stock_adjustments.issue,stock_adjustments.cancel,stock_adjustments.add_old_stock,stock_adjustments.product.get,page.old_stock.get'
-    + ',opening_balances.create,opening_balances.cancel,customers.settle,parties.balances.get,parties.account.get,page.opening_balances.get,stock_adjustments.correct_initial,opening_accounts.create,opening_accounts.cancel,page.opening_accounting.get,purchases.update,purchases.correct,purchases.void_payment,purchase.edit_check.get,page.cost_corrections.get',
+    + ',opening_balances.create,opening_balances.cancel,customers.settle,parties.balances.get,parties.account.get,page.opening_balances.get,stock_adjustments.correct_initial,opening_accounts.create,opening_accounts.cancel,page.opening_accounting.get,purchases.update,purchases.correct,purchases.void_payment,purchase.edit_check.get,page.cost_corrections.get'
+    // v0.8.91 — die SKU-Vorschau
+    + ',products.sku_preview.get',
     `ALLOWLIST in dieser Reihenfolge (${resolved.join(',')})`);
   // Die Artikelsuche ist ein PARAMETER von `products.list` und bekommt keine eigene Operation.
   // Seit R2D gibt es GENAU EINE Suchoperation, und sie ist etwas anderes: die uebergreifende

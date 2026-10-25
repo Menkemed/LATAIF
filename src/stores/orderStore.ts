@@ -17,6 +17,7 @@ import { GRAM_EPS, assertGoldPayablesRemovable } from '@/core/gold/gold-settle';
 import { useProductStore } from '@/stores/productStore';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import { assertCardFeeConfigured, normalizeCardBrand } from '@/core/finance/card-fees';
+import { skuIsEmpty } from '@/core/products/sku-allocation';
 import {
   postOrderPayment,
   postOrderPaymentReversed,
@@ -1466,11 +1467,15 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         let attrs: Record<string, string | number | boolean | string[]> = {};
         try { attrs = JSON.parse((row.attributes as string) || '{}'); } catch { /* */ }
         const agreedPrice = (row.agreed_price as number) || 0;
+        // v0.8.91 — HIER wird das Stück zum Lagerartikel (Übernahme in den Bestand): ohne eingetippte SKU bekommt
+        // es die nächste aus dem zentralen Zähler, in derselben Klammer wie der Storno.
+        const stockBrand = spec.brand || (row.requested_brand as string) || 'Custom';
+        const stockCategory = spec.categoryId || (row.category_id as string) || '';
         const newProduct = useProductStore.getState().createProduct({
-          categoryId: spec.categoryId || (row.category_id as string) || '',
-          brand: spec.brand || (row.requested_brand as string) || 'Custom',
+          categoryId: stockCategory,
+          brand: stockBrand,
           name: spec.name || (row.requested_model as string) || 'Custom (cancelled order)',
-          sku: spec.sku,
+          sku: skuIsEmpty(spec.sku) ? (useProductStore.getState().allocateSkuOnCreate(undefined, stockBrand, stockCategory) || undefined) : spec.sku,
           condition: spec.condition || (row.condition as string) || '',
           attributes: (spec.attributes as Record<string, string | number | boolean | string[]>) || attrs,
           images: spec.images || [],

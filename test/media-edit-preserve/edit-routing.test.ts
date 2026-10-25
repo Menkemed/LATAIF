@@ -44,7 +44,8 @@ function ok(c: unknown, m: string): void { if (c) PASS++; else { FAIL++; failure
   ok(/editProductWithMedia\(id, textPayload, \{ srcs:/.test(save), 'dirty branch calls editProductWithMedia with the reconcile args');
   const clean = save.slice(save.indexOf('if (!imagesDirty) {'), save.indexOf('// R4B — der Bildweg'));
   // PURCHASE-EDIT D7 — der Textweg trägt optional den Bearbeitungsgrund (`{ editReason }`), nie Galerie-Argumente.
-  ok(clean.length > 100 && /editProductTextDurably\(id, textPayload(\)|, editReason\.trim\(\) \? \{ editReason: editReason\.trim\(\) \} : undefined\))/.test(clean)
+  // v0.8.91 — dazu optional die Absicht „Find Next SKU" (`assignSku`), gebündelt mit dem Grund in `zusatz`.
+  ok(clean.length > 100 && /editProductTextDurably\(id, textPayload(\)|, editReason\.trim\(\) \? \{ editReason: editReason\.trim\(\) \} : undefined\)|, Object\.keys\(zusatz\)\.length \? zusatz : undefined\))/.test(clean)
     && !/editProductWithMedia\(|srcs:/.test(clean),
     'clean branch calls editProductTextDurably (no gallery args; optional edit reason only)');
   // The text-only call passes NO srcs/resolved/status — it cannot reconcile.

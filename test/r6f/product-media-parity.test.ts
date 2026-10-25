@@ -452,8 +452,9 @@ marker('CENTRAL_UI_R6F_PRODUCT_MEDIA_CLIENT_PROVED');
   ok(/planRemoteGallery\(form\.images \|\| \[\], media\.status === 'media' \? media\.items : \[\], stageDataUrls\)/.test(save),
     'UI PC2 baut die Plätze aus dem angezeigten Entwurf (media.items aus products.get) und legt neue Fotos ab');
   // PURCHASE-EDIT D7 — beide Wege tragen optional den Bearbeitungsgrund eines verkauften Artikels mit.
-  ok(/local: async \(\) => await editProductWithMedia\(id, textPayload, \{ srcs: form\.images \|\| \[\], resolved, status \}(\)|, undefined, undefined,\s*editReason\.trim\(\) \? \{ editReason: editReason\.trim\(\) \} : undefined\))/.test(save)
-    && /remote: \(\) => \(\{ id, \.\.\.textDiff, gallery(, \.\.\.\(editReason\.trim\(\) \? \{ editReason: editReason\.trim\(\) \} : \{\}\))? \}\)/.test(save),
+  // v0.8.91 — Grund und „Find Next SKU" reisen gebündelt (`zusatz`), lokal wie fern.
+  ok(/local: async \(\) => await editProductWithMedia\(id, textPayload, \{ srcs: form\.images \|\| \[\], resolved, status \}(\)|, undefined, undefined,\s*(editReason\.trim\(\) \? \{ editReason: editReason\.trim\(\) \} : undefined|Object\.keys\(zusatz\)\.length \? zusatz : undefined)\))/.test(save)
+    && /remote: \(\) => \(\{ id, \.\.\.textDiff, gallery(, \.\.\.\(editReason\.trim\(\) \? \{ editReason: editReason\.trim\(\) \} : \{\}\)|, \.\.\.zusatz)? \}\)/.test(save),
   'UI EINE Weiche: am Primary editProductWithMedia, auf PC2 products.update mit gallery');
   const guard = save.indexOf('if (!draftSeeded) {');
   ok(guard > 0 && guard < save.indexOf('planRemoteGallery(') && guard < save.indexOf('presentationToResolverStatus('),

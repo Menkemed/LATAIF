@@ -45,7 +45,7 @@ function canBackupHere(): boolean {
 export function ImportPage() {
   const navigate = useNavigate();
   const goBack = useGoBack('/collection');
-  const { createProduct, categories, loadCategories, loadProducts, products } = useProductStore();
+  const { createProduct, allocateSkuOnCreate, categories, loadCategories, loadProducts, products } = useProductStore();
   const [step, setStep] = useState<'upload' | 'preview' | 'importing' | 'done'>('upload');
   const [rawRows, setRawRows] = useState<RawRow[]>([]);
   const [fileName, setFileName] = useState('');
@@ -183,7 +183,9 @@ export function ImportPage() {
       categoryId: item.categoryId,
       brand: item.brand,
       name: item.name,
-      sku: item.sku || undefined,
+      // v0.8.91 — ein neuer LAGERartikel ohne SKU in der Datei bekommt die nächste aus dem zentralen Zähler; eine
+      // Zeile, die als schon verkauft importiert wird, ist kein Lagerartikel und bleibt ohne.
+      sku: item.sku || (item.isSold ? undefined : (allocateSkuOnCreate(undefined, item.brand, item.categoryId) || undefined)),
       quantity: item.quantity || 1,
       condition: 'Pre-Owned',
       scopeOfDelivery: [],
@@ -200,7 +202,7 @@ export function ImportPage() {
       attributes: attrs,
       images: [],
     });
-  }, [createProduct]);
+  }, [createProduct, allocateSkuOnCreate]);
 
   // Import: Backup-first → ohne Erfolg KEIN createProduct. Danach per-Row (nicht atomar).
   async function handleImport() {

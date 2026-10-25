@@ -11,7 +11,7 @@ import { assertNotBulkCategory, assertNotBulkSystemProduct, isBulkMetalProduct }
 // Fernauftraege: ein Lesen vom zweiten Rechner darf keinen Zwischenzustand sehen.
 import { runExclusiveUnless } from '@/core/bridge/command-scheduler';
 import { scheduleNewItemMediaCutover } from '@/core/media/new-item-media';
-import { nextSkuFrom } from '@/core/products/sku-allocation';
+import { nextSkuFrom, skuIsEmpty } from '@/core/products/sku-allocation';
 import { peekNextSku, resolveSkuDurable, type SkuSequenceDb } from '@/core/products/sku-sequence';
 import { eventBus } from '@/core/events/event-bus';
 import { registerCategoryLookup, categorySelection } from '@/core/utils/category-lookup';
@@ -103,6 +103,9 @@ const embeddingInFlight = new Set<string>();
 // MEDIA-04A-3B2C2 — retain the frozen edit batch id per product so a retry
 // reuses the SAME durable batch (no duplicate links/changelog/audit).
 const retryEditBatches = new Map<string, string>();
+// v0.8.91 — die beim Bildweg schon vergebene SKU („Find Next SKU"): eine Wiederholung DERSELBEN Bearbeitung nimmt sie
+// wieder, statt eine zweite Nummer zu ziehen (wie `retrySku` beim Anlegen).
+const retryEditSkus = new Map<string, string>();
 
 export type EditProductResult =
   | { status: 'edited'; batchId: string }
@@ -414,7 +417,7 @@ interface ProductStore {
      * weg (ein Mensch am Primary aendert Preise bewusst); ein FERNAUFTRAG setzt sie, sonst waere
      * „ein Bild mitschicken" der Weg, an der Sperre vorbeizukommen.
      */
-    opts?: { priceEligibilityRequired?: boolean; editReason?: string },
+    opts?: { priceEligibilityRequired?: boolean; editReason?: string; assignSku?: boolean },
   ) => Promise<EditProductResult>;
   /**
    * MEDIA-EDIT-PRESERVE — durable PRODUCT-TEXT-ONLY edit that NEVER touches the
@@ -425,7 +428,8 @@ interface ProductStore {
    * cannot be lost by a pure text save. The gallery reconciliation lives ONLY in
    * editProductWithMedia and runs ONLY when the user actually edited images.
    */
-  editProductTextDurably: (id: string, data: Partial<Product>, opts?: { priceEligibilityRequired?: boolean; editReason?: string }, ctx?: WriteContext) => Promise<EditProductResult>;
+  /** v0.8.91 — `assignSku`: „Find Next SKU" — ein Artikel OHNE SKU bekommt beim Speichern die nächste aus dem Zähler. */
+  editProductTextDurably: (id: string, data: Partial<Product>, opts?: { priceEligibilityRequired?: boolean; editReason?: string; assignSku?: boolean }, ctx?: WriteContext) => Promise<EditProductResult>;
   updateProduct: (id: string, data: Partial<Product>) => void;
   deleteProduct: (id: string) => void;
   createCategory: (data: Partial<Category>) => Category;
@@ -734,6 +738,22 @@ function parseResults(results: { columns: string[]; values: unknown[][] }[]): Re
     return obj;
   });
 }
+
+/**
+ * v0.8.91 — „Find Next SKU": nur ein Artikel OHNE SKU bekommt eine (eine vorhandene wird nie ersetzt). Die Prüfungen
+ * davor sehen die SKU schon als gesetzt (sie ist eine Druckangabe); vergeben wird sie erst danach.
+ */
+export const SKU_ALREADY_SET = 'SKU_ALREADY_SET';
+export const SKU_NOT_ASSIGNED = 'SKU_NOT_ASSIGNED';
+function skuAssignRefusal(cur: Record<string, unknown> | undefined): { status: 'blocked'; errorCode: string; message: string } | null {
+  if (cur && !skuIsEmpty(cur.sku)) {
+    return { status: 'blocked', errorCode: SKU_ALREADY_SET, message: `This item already has the SKU ${String(cur.sku)} — an existing SKU is never replaced automatically.` };
+  }
+  return null;
+}
+/** Die Spalten der Prüfungen, wenn die SKU erst beim Speichern vergeben wird: die SKU zählt schon mit. */
+const mitVergebenerSku = (set: ReadonlyArray<readonly [string, unknown]>): Array<readonly [string, unknown]> =>
+  [...set.filter(([c]) => c !== 'sku'), ['sku', '(next free number)'] as const];
 
 /** SKU-UNIQUE — eine geänderte SKU, die schon an einem anderen Artikel steht: ein fachliches Nein vor jedem Schreiben. */
 function skuEditRefusal(id: string, set: ReadonlyArray<readonly [string, unknown]>): { status: 'blocked'; errorCode: string; message: string } | null {
@@ -1139,21 +1159,31 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // Product text diff (only changed whitelisted columns). Same column map as
     // the text-only path (editProductTextDurably) → both diff identically.
     const cur = query('SELECT * FROM products WHERE id = ?', [id])[0] as Record<string, unknown> | undefined;
-    const textDiff = diffProductText(buildProductEditColumns(cur, data));
+    // v0.8.91 — „Find Next SKU": nur ohne vorhandene SKU; eine eingetippte gewinnt; vergeben wird nach den Prüfungen.
+    if (opts?.assignSku) { const nein = skuAssignRefusal(cur); if (nein) return nein; }
+    const vergeben = opts?.assignSku === true && skuIsEmpty(data.sku);
+    let textDiff = diffProductText(buildProductEditColumns(cur, data));
 
-    if (!editHasChanges(textDiff.set, galleryChanged)) return { status: 'edited', batchId: '' };
+    if (!editHasChanges(textDiff.set, galleryChanged) && !vergeben) return { status: 'edited', batchId: '' };
+    const pruefSet = vergeben ? mitVergebenerSku(textDiff.set) : textDiff.set;
     // VAT-PERIOD-LOCK — Marke/Name eines gemeldeten Artikels; vor jedem Staging, ein fachliches Nein.
-    const vatNein = productVatLabelRefusal(id, Object.fromEntries(textDiff.set));
+    const vatNein = productVatLabelRefusal(id, Object.fromEntries(pruefSet));
     if (vatNein) return { status: 'blocked', errorCode: VAT_PERIOD_FILED, message: vatNein };
     const skuNein = skuEditRefusal(id, textDiff.set);
     if (skuNein) return skuNein;
     // PURCHASE-EDIT D13/D7 — Einkaufspreis/-datum eines einkaufsgebundenen Artikels nur über „Purchase → Edit";
     // die Druckangaben eines verkauften Artikels nur mit Begründung (die Rechnung friert sie vorher ein).
-    const gebunden = purchaseBoundRefusal(id, textDiff.set);
+    const gebunden = purchaseBoundRefusal(id, pruefSet);
     if (gebunden) return { status: 'blocked', errorCode: gebunden.code, message: gebunden.message };
     const editReason = typeof opts?.editReason === 'string' ? opts.editReason.trim() : '';
-    if (!editReason && soldItemEditNeedsReason(id, textDiff.set)) {
+    if (!editReason && soldItemEditNeedsReason(id, pruefSet)) {
       return { status: 'blocked', errorCode: PRODUCT_EDIT_REASON_REQUIRED, message: 'This item is on an invoice. Please enter a reason for changing its details — the invoice keeps what it printed.' };
+    }
+    if (vergeben) {
+      const sku = retryEditSkus.get(id) ?? get().allocateSkuOnCreate(undefined, String(data.brand ?? cur?.brand ?? ''), String(data.categoryId ?? cur?.category_id ?? ''));
+      if (!sku) return { status: 'blocked', errorCode: SKU_NOT_ASSIGNED, message: 'No SKU could be assigned — nothing was changed.' };
+      retryEditSkus.set(id, sku);
+      textDiff = diffProductText(buildProductEditColumns(cur, { ...data, sku }));
     }
 
     const productEdit: ProductEditIntent = {
@@ -1196,13 +1226,14 @@ export const useProductStore = create<ProductStore>((set, get) => ({
         }, async (s) => canonicalRequestHash(new TextEncoder().encode(s), 'edit-plan')));
       await orchestrator.applyEditDurably(env);
     } catch (e) {
-      if (isSkuTakenRefusal(e)) { retryEditBatches.delete(id); return { status: 'blocked', errorCode: SKU_TAKEN, message: (e as Error).message }; }
+      if (isSkuTakenRefusal(e)) { retryEditBatches.delete(id); retryEditSkus.delete(id); return { status: 'blocked', errorCode: SKU_TAKEN, message: (e as Error).message }; }
       const msg = (e as { message?: string })?.message ?? String(e);
-      if (/BASELINE_CHANGED|PLAN_CONFLICT/.test(msg)) return { status: 'edit_conflict', errorCode: msg };
+      if (/BASELINE_CHANGED|PLAN_CONFLICT/.test(msg)) { retryEditSkus.delete(id); return { status: 'edit_conflict', errorCode: msg }; }
       return { status: 'edit_incomplete', errorCode: msg, batchId };
     }
 
     retryEditBatches.delete(id);
+    retryEditSkus.delete(id);
     eventBus.emit('product.updated', 'product', id, data);
     get().loadProducts();
     return { status: 'edited', batchId };
@@ -1224,21 +1255,32 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     // F9 — Menge, Status und Herkunft folgen aus den Vorgängen: eine Änderung daran weist das Haus ab (Primary, PC2, Handy).
     const lebenslauf = lifecycleEditRefusal(cur, data as Record<string, unknown>);
     if (lebenslauf) return { status: 'blocked', errorCode: PRODUCT_LIFECYCLE_LOCKED, message: lebenslauf };
-    const textDiff = diffProductText(buildProductEditColumns(cur, data));
+    // v0.8.91 — „Find Next SKU": nur ohne vorhandene SKU; eine eingetippte gewinnt; vergeben wird nach den Prüfungen.
+    if (opts?.assignSku) { const nein = skuAssignRefusal(cur); if (nein) return nein; }
+    const vergeben = opts?.assignSku === true && skuIsEmpty(data.sku);
+    let textDiff = diffProductText(buildProductEditColumns(cur, data));
     // Nothing changed → a durable no-op (the editor still closes cleanly).
-    if (textDiff.set.length === 0) return { status: 'edited', batchId: '' };
+    if (textDiff.set.length === 0 && !vergeben) return { status: 'edited', batchId: '' };
+    const pruefSet = vergeben ? mitVergebenerSku(textDiff.set) : textDiff.set;
     // VAT-PERIOD-LOCK — Marke/Name eines gemeldeten Artikels (Desktop, PC2 `products.update`, Handy).
-    const vatNein = productVatLabelRefusal(id, Object.fromEntries(textDiff.set));
+    const vatNein = productVatLabelRefusal(id, Object.fromEntries(pruefSet));
     if (vatNein) return { status: 'blocked', errorCode: VAT_PERIOD_FILED, message: vatNein };
     const skuNein = skuEditRefusal(id, textDiff.set);
     if (skuNein) return skuNein;
     // PURCHASE-EDIT D13/D7 — Einkaufspreis/-datum eines einkaufsgebundenen Artikels nur über „Purchase → Edit";
     // die Druckangaben eines verkauften Artikels nur mit Begründung (die Rechnung friert sie vorher ein).
-    const gebunden = purchaseBoundRefusal(id, textDiff.set);
+    const gebunden = purchaseBoundRefusal(id, pruefSet);
     if (gebunden) return { status: 'blocked', errorCode: gebunden.code, message: gebunden.message };
     const editReason = typeof opts?.editReason === 'string' ? opts.editReason.trim() : '';
-    if (!editReason && soldItemEditNeedsReason(id, textDiff.set)) {
+    if (!editReason && soldItemEditNeedsReason(id, pruefSet)) {
       return { status: 'blocked', errorCode: PRODUCT_EDIT_REASON_REQUIRED, message: 'This item is on an invoice. Please enter a reason for changing its details — the invoice keeps what it printed.' };
+    }
+    if (vergeben) {
+      // Ein abgebrochener Versuch (edit_incomplete) nimmt beim Wiederholen DIESELBE Nummer, statt eine zweite zu verbrauchen.
+      const sku = retryEditSkus.get(id) ?? get().allocateSkuOnCreate(undefined, String(data.brand ?? cur?.brand ?? ''), String(data.categoryId ?? cur?.category_id ?? ''));
+      if (!sku) return { status: 'blocked', errorCode: SKU_NOT_ASSIGNED, message: 'No SKU could be assigned — nothing was changed.' };
+      retryEditSkus.set(id, sku);
+      textDiff = diffProductText(buildProductEditColumns(cur, { ...data, sku }));
     }
 
     const productEdit = {
@@ -1260,11 +1302,12 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       const orchestrator = await getStockMediaOrchestrator();
       await orchestrator.applyProductTextEditDurably({ tenantId, branchId, entityId: id, batchId, productEdit });
     } catch (e) {
-      if (isSkuTakenRefusal(e)) return { status: 'blocked', errorCode: SKU_TAKEN, message: (e as Error).message };
+      if (isSkuTakenRefusal(e)) { retryEditSkus.delete(id); return { status: 'blocked', errorCode: SKU_TAKEN, message: (e as Error).message }; }
       const msg = (e as { message?: string })?.message ?? String(e);
-      if (/BASELINE_CHANGED|CONFLICT/.test(msg)) return { status: 'edit_conflict', errorCode: msg };
+      if (/BASELINE_CHANGED|CONFLICT/.test(msg)) { retryEditSkus.delete(id); return { status: 'edit_conflict', errorCode: msg }; }
       return { status: 'edit_incomplete', errorCode: msg, batchId };
     }
+    retryEditSkus.delete(id);
     eventBus.emit('product.updated', 'product', id, data);
     get().loadProducts();
     return { status: 'edited', batchId };

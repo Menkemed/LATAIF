@@ -19,7 +19,8 @@
 //   4. Die Ausgänge liefen ohne Pflichtfeld- und SKU-Prüfung (Rückfall 'cat-watch', doppelte SKU
 //      möglich). Jetzt dieselbe Prüfung wie der Artikel-Entwurf in Einkauf und Auftrag
 //      (`checkEmbeddedProduct`): Pflichtfelder der Kategorie, veraltete Merkmale gestrichen, eine
-//      vergebene SKU abgewiesen. Vergeben wird wie bisher KEINE SKU.
+//      vergebene SKU abgewiesen. v0.8.91: ein Ausgang ohne eingetippte SKU ist ein neuer Lagerartikel und bekommt
+//      seine Nummer aus DEM Zähler (`allocateSkuOnCreate`) — in der Klammer des Vorgangs.
 //   5. Ohne Sitzung schrieb der Store still nach 'branch-main' als 'user-owner'. Jetzt: Filiale und
 //      Mensch aus der Sitzung (Primary) bzw. aus dem geprüften Ausweis (PC2), sonst nichts.
 //   6. Zwischendurch `saveDatabase()`, keine Klammer: ein Fehler nach dem ersten Ausgang ließ einen
@@ -362,7 +363,10 @@ export async function createProductionInHouse(input: ProductionCreateInput, ctx:
       categoryId: d.categoryId,
       brand: String(d.brand ?? '').trim(),
       name: String(d.name ?? '').trim(),
-      sku: skuIsEmpty(d.sku) ? undefined : String(d.sku).trim(),
+      // v0.8.91 — ein neuer Lagerartikel ohne eingetippte SKU bekommt die nächste aus dem zentralen Zähler.
+      sku: skuIsEmpty(d.sku)
+        ? (useProductStore.getState().allocateSkuOnCreate(undefined, String(d.brand ?? '').trim(), d.categoryId) || undefined)
+        : String(d.sku).trim(),
       condition: d.condition || '',
       scopeOfDelivery: d.scopeOfDelivery || [],
       attributes: d.attributes || {},

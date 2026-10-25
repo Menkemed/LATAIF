@@ -10,6 +10,7 @@ import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { SkuInput } from '@/components/ui/SkuInput';
+import { buildSkuSeed, skuIsEmpty } from '@/core/products/sku-allocation';
 import { ImageUpload } from '@/components/ui/ImageUpload';
 import { ImageLightbox } from '@/components/ui/ImageLightbox';
 import { useProductStore, type EditProductResult } from '@/stores/productStore';
@@ -67,6 +68,10 @@ export function ProductDetail() {
   // D7 — die Begründung, wenn ein schon verkaufter Artikel seine Druckangaben ändert (das Haus verlangt sie).
   const [editReason, setEditReason] = useState('');
   const [reasonAsked, setReasonAsked] = useState(false);
+  // v0.8.91 — „Find Next SKU": nur die Absicht. Die Nummer vergibt das Haus beim Speichern (Primary-Zähler, auch für PC2);
+  // die Vorschau verbraucht nichts. Jede neue Bearbeitung beginnt ohne sie.
+  const [skuAuto, setSkuAuto] = useState(false);
+  useEffect(() => { setSkuAuto(false); }, [editing, id]);
   // CENTRAL-UI-PARITY R4B — dieselbe Maske, zwei Anschluesse hinter dem Speichern.
   const aendern = useSharedWrite<EditProductResult>('products.update');
   // CENTRAL-UI-PARITY R6B — „KI-Identifikation bestätigen": eine eigene Absicht auf derselben
@@ -429,6 +434,12 @@ export function ProductDetail() {
     // fix for the confirmed bug where a text-only save soft-deleted the photo.
     const { images: _dropImages, ...textPayload } = payload;
     const startId = id;
+    // v0.8.91 — eine eingetippte SKU gewinnt; „Find Next SKU" gilt nur, solange das Feld leer ist.
+    const skuVergeben = skuAuto && skuIsEmpty(product?.sku) && skuIsEmpty(form.sku);
+    const zusatz = {
+      ...(editReason.trim() ? { editReason: editReason.trim() } : {}),
+      ...(skuVergeben ? { assignSku: true as const } : {}),
+    };
 
     // CENTRAL-UI-PARITY R4B — der TEXTWEG geht ueber die gemeinsame Schreibweiche: am Primary
     // dieselbe durable Funktion wie bisher, am Client die vorhandene geprueste Fernbuchung
@@ -437,10 +448,10 @@ export function ProductDetail() {
     // einen halben Medienweg zu bauen waere schlechter als keiner.
     if (!imagesDirty) {
       const diff = updatePayload(product as unknown as Record<string, unknown>, textPayload as Record<string, unknown>, PRODUCT_UPDATE_FIELDS);
-      if (aendern.remote && Object.keys(diff).length === 0) { setEditing(false); return; }
+      if (aendern.remote && Object.keys(diff).length === 0 && !skuVergeben) { setEditing(false); return; }
       const r = await aendern.save({
-        local: async () => await editProductTextDurably(id, textPayload, editReason.trim() ? { editReason: editReason.trim() } : undefined),
-        remote: () => ({ id, ...diff, ...(editReason.trim() ? { editReason: editReason.trim() } : {}) }),
+        local: async () => await editProductTextDurably(id, textPayload, Object.keys(zusatz).length ? zusatz : undefined),
+        remote: () => ({ id, ...diff, ...zusatz }),
         shape: () => ({ status: 'edited' } as EditProductResult),
       });
       if (!mountedRef.current || idRef.current !== startId) return;
@@ -500,8 +511,8 @@ export function ProductDetail() {
     const textDiff = updatePayload(product as unknown as Record<string, unknown>, textPayload as Record<string, unknown>, PRODUCT_UPDATE_FIELDS);
     const r = await aendern.save({
       local: async () => await editProductWithMedia(id, textPayload, { srcs: form.images || [], resolved, status }, undefined, undefined,
-        editReason.trim() ? { editReason: editReason.trim() } : undefined),
-      remote: () => ({ id, ...textDiff, gallery, ...(editReason.trim() ? { editReason: editReason.trim() } : {}) }),
+        Object.keys(zusatz).length ? zusatz : undefined),
+      remote: () => ({ id, ...textDiff, gallery, ...zusatz }),
       shape: () => ({ status: 'edited' } as EditProductResult),
     });
     // Stale-save guard: the user navigated to another product or the view
@@ -896,7 +907,18 @@ export function ProductDetail() {
                     </>
                   );
                 })()}
-                <SkuInput value={form.sku || ''} onChange={v => { setForm({ ...form, sku: v }); if (errors.sku) setErrors({ ...errors, sku: '' }); }} excludeProductId={id} />
+                <div data-sku-field>
+                  <SkuInput value={form.sku || ''} onChange={v => { setForm({ ...form, sku: v }); if (errors.sku) setErrors({ ...errors, sku: '' }); }} excludeProductId={id}
+                    previewSeed={skuAuto && skuIsEmpty(product.sku) ? buildSkuSeed(form.brand, form.categoryId) : undefined} />
+                  {/* v0.8.91 — nur für einen Artikel OHNE SKU: die nächste Nummer aus dem zentralen Zähler, vergeben erst beim Speichern. */}
+                  {skuIsEmpty(product.sku) && skuIsEmpty(form.sku) && (
+                    <button type="button" data-find-next-sku={skuAuto ? 'on' : 'off'} onClick={() => setSkuAuto(a => !a)}
+                      className="cursor-pointer" style={{ marginTop: 6, padding: '3px 10px', fontSize: 11, borderRadius: 999,
+                        border: '1px solid #0F0F10', background: skuAuto ? '#0F0F10' : 'transparent', color: skuAuto ? '#FFFFFF' : '#0F0F10' }}>
+                      {skuAuto ? 'Cancel Next SKU' : 'Find Next SKU'}
+                    </button>
+                  )}
+                </div>
                 {/* F9 — Menge und Status folgen aus den Vorgängen (Einkauf, Verkauf, Retoure, Kommission, Agent …):
                     hier nur angezeigt, nicht gesetzt. Das Haus weist eine Änderung ohnehin ab (Primary und PC2). */}
                 <div>

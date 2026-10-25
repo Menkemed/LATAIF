@@ -224,11 +224,11 @@ const ACT = (over: Record<string, unknown> = {}) => ({
 // ── 1) Alle 59 Operationen sind namentlich gegen Rechte geprüft ──────────
 {
   const known = knownCommands();
-  ok(known.length === 212, `COVER die Registrierung zaehlt 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${known.length})`);
+  ok(known.length === 213, `COVER die Registrierung zaehlt 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${known.length})`);
   const probes = known.filter((o) => o === 'bridge.probe');
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = known.filter((o) => !probes.includes(o) && !reads.includes(o));
-  ok(probes.length === 1 && reads.length === 85 && mutations.length === 126,
+  ok(probes.length === 1 && reads.length === 86 && mutations.length === 126,
     `COVER 1 Probe + 78 Auskuenfte (19 + 59 typisierte) + 116 Buchungen (${probes.length}/${reads.length}/${mutations.length})`);
 
   // JEDE Auskunft und JEDE Buchung ist bedacht. Die Probe braucht es nicht: sie liest nichts.
@@ -242,7 +242,7 @@ const ACT = (over: Record<string, unknown> = {}) => ({
   const storePerms = Object.keys(perms.READ_PERMISSIONS).filter((o) => ['store.products.get', 'store.customers.get', 'store.invoices.get', 'order_payments.get', 'session.context.get', 'store.suppliers.get', 'store.sales_returns.get', 'store.credit_notes.get', 'store.orders.get', 'store.consignments.get', 'store.purchases.get', 'store.repairs.get', 'store.agents.get', 'store.expenses.get', 'store.recurring_expenses.get', 'store.banking.get', 'store.payables.get', 'store.debts.get', 'store.gold.get', 'store.metals.get', 'store.scrap_trades.get', 'store.employees.get', 'store.partners.get', 'store.tasks.get', 'store.documents.get', 'store.offers.get', 'store.production.get', 'store.analytics.get', 'analytics.vat_export.get', 'documents.content.get', 'page.dashboard.get', 'page.invoice_list.get', 'page.order_list.get', 'page.customer_detail.get', 'page.order_detail.get', 'page.supplier_detail.get', 'page.product_detail.get', 'page.purchase_create.get', 'refs.numbers.get', 'metals.stock_by_karat.get', 'search.global.get', 'page.reconciliation.get', 'ledger.balances.get', 'finance.receivables.get', 'inventory.lot_aggregates.get', 'product.lots.get', 'product.lots.batch.get', 'expenses.credit_paid.get', 'inventory.session.get', 'inventory.checks.get', 'metals.spot_prices.get', 'debts.payments.get', 'suppliers.credits.get', 'page.invoice_print.get',
     // BULK METAL V1
     'page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bulk_metals.lot_detail.get', 'bulk_metals.allocation_preview.get', 'stock_adjustments.product.get', 'page.old_stock.get', 'parties.balances.get', 'parties.account.get', 'page.opening_balances.get', 'page.opening_accounting.get', 'purchase.edit_check.get', 'page.cost_corrections.get'].includes(o));
-  ok(Object.keys(perms.READ_PERMISSIONS).length === 85 && storePerms.length === 66,
+  ok(Object.keys(perms.READ_PERMISSIONS).length === 86 && storePerms.length === 66,
     `COVER 19 Auskuenfte + 59 typisierte Auskuenfte stehen einzeln da (${Object.keys(perms.READ_PERMISSIONS).length}/${storePerms.length})`);
   for (const r of reads) ok(r in perms.READ_PERMISSIONS, `COVER ${r} ist als Auskunft bedacht`);
 

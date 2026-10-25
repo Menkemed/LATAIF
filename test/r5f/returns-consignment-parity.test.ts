@@ -330,7 +330,7 @@ function bildDerRetoure(db: Db, inv: string) {
   ok(ALLOWED_MUTATIONS.length === 126 && ALLOWED_MUTATIONS[40] === 'invoices.cancel', `SCOPE invoices.cancel an Platz 41, seither nur die elf aus R6C, die achtundzwanzig aus R6D, die acht aus R6E und die vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION (${ALLOWED_MUTATIONS.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '').matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 212 && /OP_INVOICES_CANCEL/.test(rust), `SCOPE die Registry steht bei 195 (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${rustOps})`);
+  ok(rustOps === 213 && /OP_INVOICES_CANCEL/.test(rust), `SCOPE die Registry steht bei 195 (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${rustOps})`);
   const stand = [R4C_MATRIX.filter((z) => z.verdrahtet).length, R4C_MATRIX.filter((z) => z.paritaet === 'exakt' && !z.verdrahtet).length,
     R4C_MATRIX.filter((z) => z.luecke === 'B').length, R4C_MATRIX.filter((z) => z.paritaet === 'keine-ui').length];
   ok(S(stand) === S([36, 0, 0, 4]), `SCOPE die Matrix steht bei 36/0/0/4 (${stand.join('/')})`);

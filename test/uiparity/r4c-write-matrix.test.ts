@@ -230,7 +230,7 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '')
     .matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 212, `10 und Rust laesst dieselben 195 Namen durch (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${rustOps})`);
+  ok(rustOps === 213, `10 und Rust laesst dieselben 195 Namen durch (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${rustOps})`);
 }
 
 // ── R5A — Auftrag → Rechnung: EINE Handlung, EINE Buchung ───────────────

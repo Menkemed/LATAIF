@@ -122,10 +122,10 @@ const CONSIGNMENT_HOUSE = readdirSync(resolvePath(repo, 'src/core/consignment'))
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 160 && rJetzt.length === 212 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'page.opening_accounting.get', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchase.edit_check.get', 'page.cost_corrections.get']),
+  ok(rVor.length === 160 && rJetzt.length === 213 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'page.opening_accounting.get', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchase.edit_check.get', 'page.cost_corrections.get', 'products.sku_preview.get']),
     `REGISTRY Rust 160 → 174 (R6F) → 175 (R7A) → 176 (PRE-G5) → 184 (MEDIA-INBOX, PARTNER-ITEMS, A5) → 192 (BULK METAL V1) → 195 (STOCK CORRECTION): GENAU diese vierzehn + eins aus R7A (production.complete) + acht BULK METAL V1, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 212 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
+  ok(known.length === 213 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
   for (const op of R6F_MUT) {
     const rule = (perms.OPERATION_PERMISSIONS as Record<string, { kind?: string } | null>)[op];
     const soll = ADMIN_OPS.includes(op) ? 'isAdmin' : null;

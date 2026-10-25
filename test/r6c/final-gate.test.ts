@@ -207,10 +207,10 @@ const OB_READ = ['parties.balances.get', 'parties.account.get', 'page.opening_ba
   };
   const rVor = rustOps(vor('src-tauri/src/bridge.rs'));
   const rJetzt = rustOps(src('src-tauri/src/bridge.rs'));
-  ok(rVor.length === 108 && rJetzt.length === 212 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6C_MUT, ...R6C_READ, ...R6D_MUT, ...R6D_READ, ...R6E_MUT, ...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'page.opening_accounting.get', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchase.edit_check.get', 'page.cost_corrections.get']),
+  ok(rVor.length === 108 && rJetzt.length === 213 && S(rJetzt.filter((o) => !rVor.includes(o))) === S([...R6C_MUT, ...R6C_READ, ...R6D_MUT, ...R6D_READ, ...R6E_MUT, ...R6F_MUT, ...R7A_MUT, 'products.duplicates.get', ...PREG5_MUT, 'page.invoice_print.get', ...BULK_MUT, ...BULK_READ, ...STOCK_MUT, ...STOCK_READ, ...OB_MUT, ...OB_READ, 'stock_adjustments.correct_initial', 'opening_accounts.create', 'opening_accounts.cancel', 'page.opening_accounting.get', 'purchases.update', 'purchases.correct', 'purchases.void_payment', 'purchase.edit_check.get', 'page.cost_corrections.get', 'products.sku_preview.get']),
     `REGISTRY Rust 108 → 121 (R6C) → 152 (R6D) → 160 (R6E) → 174 (R6F) → 175 (R7A) → 176 (PRE-G5) → 184 (MEDIA-INBOX, PARTNER-ITEMS, A5) → 192 (BULK METAL V1) → 195 (STOCK CORRECTION): GENAU diese dreizehn, einunddreißig, acht und vierzehn + eins aus R7A (production.complete) + acht BULK METAL V1, in dieser Reihenfolge (${rJetzt.filter((o) => !rVor.includes(o)).join(',')})`);
   const known = registry.knownCommands();
-  ok(known.length === 212 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
+  ok(known.length === 213 && S([...known].sort()) === S([...rJetzt].sort()), `REGISTRY der Renderer registriert GENAU die 195 Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION), die Rust durchlässt (${known.length})`);
   for (const op of [...R6C_MUT, ...R6C_READ]) {
     const isMut = R6C_MUT.includes(op);
     ok(known.includes(op) && rJetzt.includes(op) && (isMut ? registry.ALLOWED_MUTATIONS.includes(op) : readOps.STORE_READ_OPS.includes(op))

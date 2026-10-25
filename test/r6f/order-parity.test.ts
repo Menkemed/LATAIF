@@ -390,6 +390,10 @@ async function stornoPaar(choice: 'refund' | 'credit' | 'forfeit', extra: Record
   ok(stueck.name === 'Ring R6F' && Number(stueck.quantity) === 1 && Number(stueck.purchase_price) === 250
     && Number(stueck.planned_sale_price) === 2300 && stueck.stock_status === 'in_stock' && stueck.source_type === 'OWN',
   `STOCK das angefangene Sonderstück ist ein Lagerartikel zur Kostenbasis (Arbeit + Gold = 250), wie die Maske verspricht (${S(stueck)})`);
+  // v0.8.91 — die Übernahme in den Bestand IST die Stelle, an der das Stück seine SKU bekommt (zentraler Zähler, beide Wege gleich).
+  const skuP = s(wP.db, "SELECT sku FROM products WHERE brand = 'Atelier'");
+  const skuR = s(wR.db, "SELECT sku FROM products WHERE brand = 'Atelier'");
+  ok(/^[A-Z]{3}-[A-Z]{3}-\d{3,}$/.test(skuP) && skuP === skuR, `SKU das Lagerstück bekommt eine Nummer aus dem Zähler, lokal == fern (${skuP} / ${skuR})`);
   ok(row(wP.db, "SELECT created_by FROM products WHERE brand = 'Atelier'").created_by === 'user-test' && stueck.created_by === 'user-pc2',
     'AUTHOR das Lagerstück gehört dem, der storniert hat — lokal der Sitzung, fern dem Absender');
   const auditP = s(wP.db, "SELECT changed_by FROM audit_log WHERE entity_type = 'orders' AND field_name = 'cancelChoice'");

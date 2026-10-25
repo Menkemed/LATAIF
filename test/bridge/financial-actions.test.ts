@@ -223,8 +223,8 @@ function giveCredit(db: Db, customerId: string, amount: number, id = 'cr-1'): vo
   }
   const known = knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
-  ok(known.length === 60 && reads.length === 19,
-    `SCOPE 1 Probe + 19 Reads + 40 Mutationen = 60 (${known.length}/${reads.length})`);
+  ok(known.length === 61 && reads.length === 20,
+    `SCOPE 1 Probe + 20 Reads + 40 Mutationen = 61 (${known.length}/${reads.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   for (const op of ['invoices.apply_credit', 'invoices.update_payment', 'invoices.delete_payment',
     'orders.convert_to_invoice', 'consignments.record_payout', 'transfers.mark_sold', 'transfers.mark_settled']) {

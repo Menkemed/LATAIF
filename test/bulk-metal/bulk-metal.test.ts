@@ -867,7 +867,7 @@ function projection(db: Db): string {
   const ops = [...am.slice(-16, -12), 'page.bulk_metals.get', 'bulk_metals.lots_for_sale.get', 'bulk_metals.lot_detail.get', 'bulk_metals.allocation_preview.get'];
   ok(ops.every((x) => rust.includes(`"${x}"`)), 'X4 Rust kennt alle acht');
   const remoteOps = (rust.split('pub const REMOTE_OPS')[1] ?? '').split('];')[0].match(/OP_[A-Z0-9_]+/g) ?? [];
-  ok(remoteOps.length === 212, `X4 REMOTE_OPS = 195 (${remoteOps.length})`);
+  ok(remoteOps.length === 213, `X4 REMOTE_OPS = 195 (${remoteOps.length})`);
   // Registry-Arithmetik am ausgelieferten Zustand: genau die Befehlsmodule, die bridge-listener.ts lädt.
   for (const m of src('src/core/bridge/bridge-listener.ts').matchAll(/^import '\.\/([a-z0-9-]+)';/gm)) {
     await import(`../../src/core/bridge/${m[1]}.ts`);
@@ -877,12 +877,12 @@ function projection(db: Db): string {
   const readsK = known.filter((o) => o.endsWith('.get') || o.endsWith('.list'));
   const mutsK = known.filter((o) => !probes.includes(o) && !readsK.includes(o));
   console.log(`  REGISTRY Probe ${probes.length} / Mutations ${mutsK.length} / Reads ${readsK.length} / Total ${known.length}`);
-  ok(probes.length === 1 && mutsK.length === 126 && readsK.length === 85 && known.length === 212 && probes.length + mutsK.length + readsK.length === known.length,
+  ok(probes.length === 1 && mutsK.length === 126 && readsK.length === 86 && known.length === 213 && probes.length + mutsK.length + readsK.length === known.length,
     `X5 Registry 1 Probe + 116 Mutations + 78 Reads = 195 (${probes.length}/${mutsK.length}/${readsK.length}/${known.length})`);
   ok(S([...mutsK].sort()) === S([...am].sort()), 'X5 die registrierten Mutationen sind genau ALLOWED_MUTATIONS');
   const rustName = new Map([...rust.matchAll(/pub const (OP_[A-Z0-9_]+): &str = "([^"]+)";/g)].map((m) => [m[1], m[2]]));
   const rustNames = remoteOps.map((o) => rustName.get(o) ?? `?${o}`);
-  ok(rustNames.every((x) => !x.startsWith('?')) && new Set(rustNames).size === 212 && S([...rustNames].sort()) === S([...known].sort()),
+  ok(rustNames.every((x) => !x.startsWith('?')) && new Set(rustNames).size === 213 && S([...rustNames].sort()) === S([...known].sort()),
     `X5 TS = Rust: dieselben 195 Namen (nur TS: ${known.filter((x) => !rustNames.includes(x)).join(',') || '—'}; nur Rust: ${rustNames.filter((x) => !known.includes(x)).join(',') || '—'})`);
   ok(ops.every((x) => known.includes(x) && perms.isOperationCovered(x)), 'X5 alle acht Bulk-Befehle registriert und mit Recht bedacht');
 }
