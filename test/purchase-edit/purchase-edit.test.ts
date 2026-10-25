@@ -567,7 +567,8 @@ const purchaseLive = (db: Db, pid: string, account: string, dir: string): number
     commit: posting.commitLedgerTransaction,
     rollback: posting.rollbackLedgerTransaction,
     durableSave: async () => {},
-    now: () => NOW,
+    // Dieselbe Uhr wie der Primary-Vergleichslauf (echte Zeit) — mit dem festen NOW war J nur am 24.10.2026 grün.
+    now: () => new Date().toISOString(),
   });
   type Aus = { ok: boolean; code: string; value: Record<string, unknown>; replayed: boolean };
   const fern = async (p: () => Promise<unknown>): Promise<Aus> => {

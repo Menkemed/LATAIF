@@ -163,6 +163,22 @@ export function assertNotFinalizingIntoClosedVatQuarter(branchId: string, iso: s
 }
 
 /**
+ * v0.8.88 — eine Zahlung mit GEWÄHLTEM Tag (nachträglich erfasst oder umdatiert) darf nicht in einem zugemachten
+ * Quartal stehen, auch nicht als Teilzahlung: sie stünde rückwirkend in Kasse/Bank, Hauptbuch und Zahlungsnotiz einer
+ * gemeldeten Periode. Gilt für den gewählten Tag ebenso wie für den Tag, von dem eine Zahlung weg-datiert wird.
+ */
+export function assertPaymentDateNotInClosedVatQuarter(branchId: string, iso: string): void {
+  const q = nbrQuarterOfDate(iso);
+  if (!q) return;
+  const c = closedVatQuarters(branchId).get(q.key);
+  if (!c) return;
+  throw new VatPeriodFiled(
+    `The VAT return for ${quarterLabel(q.key)} is already ${c.filedAt ? 'filed' : 'paid'} — a payment dated in that quarter `
+    + 'cannot be recorded or moved there afterwards. Choose a payment date in an open quarter.',
+  );
+}
+
+/**
  * Ein Umwandlungsweg, der erst die Rechnung und DANACH die mitgehenden Zahlungen schreibt (Agent,
  * Auftrag): schließen die Zahlungen die Rechnung heute ab, wird das VORHER geprüft. Sonst lehnte
  * `recordPayment` erst ab, wenn Rechnung und Gegenbuchungen schon stehen — halb umgewandelt.

@@ -30,7 +30,7 @@ function bulkCtxOfInvoice(invoiceId: string, now: string): BulkCtx {
 }
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
-import { assertInvoiceNotInClosedVatQuarter, assertNotFinalizingIntoClosedVatQuarter, assertVatUnchanged, vatFingerprint } from '@/core/tax/vat-period-lock';
+import { assertInvoiceNotInClosedVatQuarter, assertNotFinalizingIntoClosedVatQuarter, assertPaymentDateNotInClosedVatQuarter, assertVatUnchanged, vatFingerprint } from '@/core/tax/vat-period-lock';
 import { planCustomerChange, moveInvoiceBookings, moveLastPurchase, customerDisplayName } from '@/core/invoices/customer-change';
 import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts } from '@/core/invoices/edit-lines';
 import { assertCardFeeConfigured, normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
@@ -1294,6 +1294,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // negativem AR / tip. overpayExcess via SSOT-Helper, damit die Domain-Row exakt dem
     // Ledger-Bein entspricht (Rounding). method='credit' (Guthaben-Einloesung) splittet nie.
     const inv0 = freshInvoice(invoiceId);
+    // v0.8.88 — ein GEWÄHLTER (nachträglicher) Zahlungstag darf nicht in einem zugemachten Quartal liegen, auch nicht
+    // für eine Teilzahlung. Eine Zahlung „jetzt" (ohne eigenen Tag) folgt weiter nur der Regel darunter.
+    if (opts?.receivedAt && receivedAt !== now) {
+      assertPaymentDateNotInClosedVatQuarter(String(query('SELECT branch_id FROM invoices WHERE id = ?', [invoiceId])[0]?.branch_id ?? ''), receivedAt);
+    }
     // VAT-PERIOD-LOCK — VOR jedem Schreiben: eine weitere Zahlung auf eine gemeldete FINAL-Rechnung
     // verschöbe ihren Exportmonat (Tag der Vollzahlung) und die Zahlungsnotiz; eine Zahlung, die eine
     // Rechnung HEUTE voll bezahlt, fügte sie einem heute schon zugemachten Quartal hinzu.
@@ -1783,6 +1788,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Card-Fee haengt NUR an Betrag/Methode (nicht am Datum) — eine reine
     // received_at-Korrektur laesst die Fee unveraendert (created_at bleibt gleich).
     const cardFeeChanged = amountChanged || methodChanged;
+    // v0.8.88 — eine Zahlung umdatieren: weder IN ein zugemachtes Quartal noch HERAUS (beides änderte Kasse/Bank und
+    // Hauptbuch der gemeldeten Periode rückwirkend) — auch auf einer Teilzahlungs-Rechnung.
+    if (receivedAtChanged) {
+      const filiale = String(query('SELECT branch_id FROM invoices WHERE id = ?', [invoiceId])[0]?.branch_id ?? '');
+      assertPaymentDateNotInClosedVatQuarter(filiale, newReceivedAt);
+      assertPaymentDateNotInClosedVatQuarter(filiale, oldReceivedAt);
+    }
 
     // Slice 3 — eine Zahlung in/weiter-in eine Ueberzahlung zu editieren wird (vorerst)
     // blockiert: updatePayment reverst+reposted OHNE Ueberzahlungs-Split → triebe AR negativ

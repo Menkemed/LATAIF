@@ -11,8 +11,9 @@
 //      alte Gebühr; Normal/Amex unverändert; Altbestand bleibt Normal
 //   C  mehrere Zahlungen beim Anlegen: Cash + Bank + Normal + Amex + Debit; Gebühr je Zeile; Banking nettet jede
 //      Kartenzahlung mit IHRER Gebühr; Status/Endnummer; Teilzahlung; Überzahlung abgewiesen; Rollback
-//   D  VAT-Sperre: eine Zahlung, die in ein eingereichtes Quartal schlösse, wird abgewiesen; D2 Teilzahlung im
-//      eingereichten Quartal + Rest heute → Exportmonat heute, das eingereichte Quartal bleibt unverändert
+//   D  VAT-Sperre: eine Zahlung, die in ein eingereichtes Quartal schlösse, wird abgewiesen; D2 (v0.8.88) auch eine
+//      TEILzahlung mit Tag im eingereichten Quartal und das Umdatieren hinein — Primary und PC2; Zahlungen im
+//      offenen Quartal gehen; Snapshot, Zahlungen/Banking, Hauptbuch der gemeldeten Periode bleiben unverändert
 //   E  PC2: `invoices.create` mit `payments` == Primary; Wiederholung derselben Kennung ohne zweite Wirkung;
 //      Rumpfregeln (`payment` weiter, nicht beides, verbotene Felder); Debit ohne Satz = eingefrorenes Nein;
 //      Auftrag von PC2 kennt Debit
@@ -86,6 +87,7 @@ const { useOrderStore } = await import('../../src/stores/orderStore.ts');
 const { useOrderPaymentStore } = await import('../../src/stores/orderPaymentStore.ts');
 const { useRepairStore } = await import('../../src/stores/repairStore.ts');
 const commercial = await import('../../src/core/bridge/commercial-commands.ts');
+const fin = await import('../../src/core/bridge/financial-commands.ts');
 const { bankTransactionsFor } = await import('../../src/stores/bankingStore.ts');
 const house = await import('../../src/core/invoices/invoice-create-house.ts');
 const cmd = await import('../../src/core/bridge/invoice-command.ts');
@@ -378,27 +380,68 @@ const banking = () => bankTransactionsFor({ tenantId: 'tenant-1', branchId: 'bra
   db.run(`INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, filed_by, invoice_count, snapshot_json, created_at)
           VALUES ('vf2','branch-main',?,?,?, 'user-test', 0, '{}', ?)`, [ay, Math.ceil(am / 3), NOW, NOW]);
   const imAlten = () => liveVatQuarters('branch-main').get(altKey)?.invoiceCount ?? 0;
+  const qVon = `${ay}-${String((Math.ceil(am / 3) - 1) * 3 + 1).padStart(2, '0')}-01`;
+  const qBis = `${ay}-${String(Math.ceil(am / 3) * 3).padStart(2, '0')}-31T23:59:59.999Z`;
+  // Was die gemeldete Periode an ZAHLUNGEN ausmacht: Snapshot, Zahlungen (Banking), Zahlungs-/Gebührenbuchungen im
+  // Hauptbuch — alles mit Datum im Quartal. (Die Verkaufsbuchung einer rückdatierten Rechnung am Rechnungstag ist
+  // älteres, gewolltes Verhalten — v0.8.72 „nachträglich erfassen" — und keine Zahlungsbuchung.)
+  const periode = () => S({
+    snap: one(db, "SELECT snapshot_json FROM vat_filings WHERE id = 'vf2'"),
+    pay: n(db, 'SELECT COUNT(*) FROM payments WHERE received_at >= ? AND received_at <= ?', [qVon, qBis]),
+    bank: banking().filter((t) => String(t.date) >= qVon && String(t.date) <= qBis).length,
+    led: n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module IN ('PAYMENT', 'EXPENSE', 'REFUND') AND occurred_at >= ? AND occurred_at <= ?", [qVon, qBis]),
+    exp: n(db, 'SELECT COUNT(*) FROM expenses WHERE expense_date >= ? AND expense_date <= ?', [qVon, qBis.slice(0, 10)]),
+  });
   const p = ware(200);
-  const vor = S([n(db, 'SELECT COUNT(*) FROM invoices'), n(db, 'SELECT COUNT(*) FROM payments'), n(db, 'SELECT COUNT(*) FROM ledger_entries')]);
+  const alles = () => S([n(db, 'SELECT COUNT(*) FROM invoices'), n(db, 'SELECT COUNT(*) FROM payments'), n(db, 'SELECT COUNT(*) FROM ledger_entries'), n(db, 'SELECT COUNT(*) FROM expenses')]);
+  const vor = alles();
+  const perVor = periode();
   // Vorschlag = Rechnungstag → die Vollzahlung fiele ins eingereichte Quartal: Nein, nichts angelegt.
   const nein = meldung(() => anlegen(db, { lines: [LINE(p, 400)], issuedDate: ALT, payments: [{ amount: 400, method: 'cash' }] }));
-  ok(code(nein) === 'VAT_PERIOD_FILED' && S([n(db, 'SELECT COUNT(*) FROM invoices'), n(db, 'SELECT COUNT(*) FROM payments'), n(db, 'SELECT COUNT(*) FROM ledger_entries')]) === vor,
-    `D2 Rechnung im eingereichten Quartal, Zahlung am Rechnungstag: Nein, nichts angelegt (${code(nein)})`);
-  // Teilzahlung im eingereichten Quartal + Rest heute: Abschluss heute → Exportmonat heute, das eingereichte Quartal bleibt, wie es war.
-  const ja = anlegen(db, { lines: [LINE(p, 400)], issuedDate: ALT, payments: [{ amount: 300, method: 'cash' }, { amount: 100, method: 'card', cardBrand: 'normal', paidDate: TODAY }] });
+  ok(code(nein) === 'VAT_PERIOD_FILED' && alles() === vor, `D2 Abschlusszahlung im eingereichten Quartal: Nein, nichts angelegt (${code(nein)})`);
+  // v0.8.88 — auch eine TEILzahlung mit Tag im eingereichten Quartal ist ein Nein (vorher erlaubt): nichts angelegt.
+  const neinTeil = meldung(() => anlegen(db, { lines: [LINE(p, 400)], issuedDate: ALT, payments: [{ amount: 100, method: 'cash' }] }));
+  const neinMix = meldung(() => anlegen(db, { lines: [LINE(p, 400)], issuedDate: ALT, payments: [{ amount: 300, method: 'card', cardBrand: 'normal' }, { amount: 100, method: 'cash', paidDate: TODAY }] }));
+  ok(code(neinTeil) === 'VAT_PERIOD_FILED' && code(neinMix) === 'VAT_PERIOD_FILED' && /open quarter/.test(neinTeil) && alles() === vor,
+    `D2 Teilzahlung im eingereichten Quartal (allein / mit Rest heute): Nein mit Hinweis, nichts angelegt (${code(neinTeil)} / ${code(neinMix)})`);
+  // Erlaubt bleibt: Rechnungstag im eingereichten Quartal, Zahlungen im offenen (heute) — Abschluss und Exportmonat heute.
+  const ja = anlegen(db, { lines: [LINE(p, 400)], issuedDate: ALT, payments: [{ amount: 300, method: 'cash', paidDate: TODAY }, { amount: 100, method: 'card', cardBrand: 'normal', paidDate: TODAY }] });
   const nbr = nbrMonthTotals(nbrInvoicesFromDb('branch-main', 'FINAL').invoices, nbrInvoicesFromDb('branch-main', 'FINAL').payments);
   ok(ja.status === 'FINAL' && nbr.some((m) => m.invoiceIds.includes(ja.invoiceId) && m.month === TODAY.slice(0, 7)) && imAlten() === 0,
-    `D2 Teilzahlung im eingereichten Quartal, Rest heute: FINAL, Exportmonat ${TODAY.slice(0, 7)}, eingereichtes Quartal ${altKey} unverändert`);
-  const z = zahlungen(db, ja.invoiceId);
-  ok(String(z[0]?.received_at).slice(0, 10) === ALT && String(z[1]?.received_at).slice(0, 10) === TODAY, 'D2 …Banking/Liste zeigen beide Zahlungen an ihrem Tag');
-  // Nur eine Teilzahlung im eingereichten Quartal: PARTIAL — nicht im Export, das Quartal unverändert.
+    `D2 Zahlungen im offenen Quartal: FINAL, Exportmonat ${TODAY.slice(0, 7)}, eingereichtes Quartal ${altKey} ohne Rechnung`);
+  // Teilzahlung heute, dann umdatieren — weder HINEIN ins eingereichte Quartal …
   const p2 = ware(200);
-  const teil = anlegen(db, { lines: [LINE(p2, 400)], issuedDate: ALT, payments: [{ amount: 100, method: 'cash' }] });
-  ok(teil.status === 'PARTIAL' && imAlten() === 0, 'D2 nur Teilzahlung im eingereichten Quartal: PARTIAL, nicht im Export, Quartal unverändert');
-  // Später die Restzahlung heute (Rechnungsseite, ohne Tag): Abschluss heute — wie bisher.
+  const teil = anlegen(db, { lines: [LINE(p2, 400)], issuedDate: ALT, payments: [{ amount: 100, method: 'cash', paidDate: TODAY }] });
+  const zt = zahlungen(db, teil.invoiceId)[0];
+  const vorUm = S(rows(db, 'SELECT amount, received_at FROM payments WHERE id = ?', [zt?.id]));
+  const neinUm = meldung(() => useInvoiceStore.getState().updatePayment(String(zt?.id), teil.invoiceId, { receivedAt: `${ALT}T12:00:00.000Z` }));
+  ok(teil.status === 'PARTIAL' && code(neinUm) === 'VAT_PERIOD_FILED' && S(rows(db, 'SELECT amount, received_at FROM payments WHERE id = ?', [zt?.id])) === vorUm,
+    `D2 Teilzahlung ins eingereichte Quartal umdatieren: Nein, Zahlung unverändert (${code(neinUm)})`);
+  // … und auf PC2 dasselbe Nein (eingefroren), beim Anlegen wie beim Umdatieren.
+  const ID = (x: string): string => `${x.padStart(8, '0')}-0000-4000-8000-000000000000`;
+  const ACTOR = { tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-pc2', role: 'ADMIN' };
+  const deps = { db: db as never, begin: () => { setTestDatabase(db as never); posting.beginLedgerTransaction(); },
+    commit: posting.commitLedgerTransaction, rollback: posting.rollbackLedgerTransaction, durableSave: async () => {}, now: () => new Date().toISOString() };
+  const p3 = ware(200);
+  const lot3 = String(one(db, 'SELECT id FROM stock_lots WHERE product_id = ?', [p3]) ?? '');
+  const vorR = alles();
+  const rA = await cmd.runInvoiceCreate(deps as never, { commandId: ID('41'), ...ACTOR, op: 'invoices.create', payloadHash: 'h41' } as never,
+    { customerId: 'cust-1', lines: [{ productId: p3, lotId: lot3, quantity: 1, unitPrice: 400, scheme: 'ZERO' }], issuedDate: ALT, specialMark: false, payments: [{ amount: 100, method: 'cash', paidDate: ALT }] },
+  ) as { kind: string; code?: string; frozen?: boolean };
+  setTestDatabase(db as never); reload();
+  ok(rA.kind === 'rejected' && rA.code === 'VAT_PERIOD_FILED' && rA.frozen === true && alles() === vorR, `D2 PC2 Teilzahlung im eingereichten Quartal anlegen: eingefrorenes Nein, nichts angelegt (${rA.kind} ${rA.code})`);
+  const rev = Number(one(db, 'SELECT revision FROM invoices WHERE id = ?', [teil.invoiceId]) ?? 0);
+  const rU = await fin.runUpdatePayment(deps as never, { commandId: ID('42'), ...ACTOR, op: 'invoices.update_payment', payloadHash: 'h42' } as never,
+    { invoiceId: teil.invoiceId, paymentId: String(zt?.id), expectedRevision: rev, receivedAt: `${ALT}T12:00:00.000Z` },
+  ) as { kind: string; code?: string };
+  setTestDatabase(db as never); reload();
+  ok(rU.kind === 'rejected' && rU.code === 'VAT_PERIOD_FILED' && S(rows(db, 'SELECT amount, received_at FROM payments WHERE id = ?', [zt?.id])) === vorUm,
+    `D2 PC2 Zahlung ins eingereichte Quartal umdatieren: Nein, Zahlung unverändert (${rU.kind} ${rU.code})`);
+  // Die Restzahlung heute (Rechnungsseite, ohne Tag): Abschluss heute — wie bisher.
   imHaus(() => useInvoiceStore.getState().recordPayment(teil.invoiceId, 300, 'cash'));
   reload();
-  ok(useInvoiceStore.getState().getInvoice(teil.invoiceId)?.status === 'FINAL' && imAlten() === 0, 'D2 …Rest heute: FINAL im offenen Quartal, eingereichtes unverändert');
+  ok(useInvoiceStore.getState().getInvoice(teil.invoiceId)?.status === 'FINAL' && imAlten() === 0, 'D2 …Rest heute: FINAL im offenen Quartal');
+  ok(periode() === perVor, `D2 die gemeldete Periode ist unverändert: Snapshot, Zahlungen/Banking, Zahlungs- und Gebührenbuchungen (${periode()})`);
   ok(ausgeglichen(db), 'D2 Hauptbuch ausgeglichen');
 }
 
