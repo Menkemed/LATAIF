@@ -436,6 +436,51 @@ function artikelBindungen(productId: string, exceptLineId: string): string[] {
   return out;
 }
 
+/**
+ * Teil 3 — der Status eines BEHALTENEN Artikels, dessen letzter Bestand mit der entfernten Zeile geht. Auf „in_stock"
+ * hatte ihn erst der Wareneingang dieser Zeile gesetzt (ein 'sold', 'consumed', 'write_off' … ist dort nicht geschützt);
+ * zurück kommt der Zustand, den ihm der Vorgang gab, der VORHER sein letztes Stück nahm — der jüngste aus der Los- und
+ * Belegfolge: ein Verkauf, dessen Stück noch beim Kunden ist (abgeschlossen FINAL/RETURNED → 'sold', sonst 'reserved',
+ * dieselbe Regel wie `reconcileSaleStatus`), eine Kundenretoure mit eigener Verwendung, eine Produktion, ein
+ * Bestandsabgang, eine echte Rückgabe an den Lieferanten. Gab es keinen (das Stück kam nur mit dieser Zeile), gilt
+ * wie beim Storno des Einkaufs 'returned'.
+ */
+function statusOhneBestand(productId: string): string {
+  const ev: Array<{ at: string; status: string }> = [];
+  for (const r of query(
+    `SELECT i.status, i.created_at, COALESCE(il.quantity, 1) AS qty,
+            (SELECT COALESCE(SUM(srl.quantity), 0) FROM sales_return_lines srl JOIN sales_returns sr ON sr.id = srl.return_id
+              WHERE srl.invoice_line_id = il.id AND sr.status != 'REJECTED') AS back
+       FROM invoice_lines il JOIN invoices i ON i.id = il.invoice_id
+      WHERE il.product_id = ? AND i.status != 'CANCELLED'`, [productId],
+  )) {
+    if (Number(r.qty) - Number(r.back) <= EPS) continue;   // alles zurück: dieser Verkauf hält kein Stück mehr
+    ev.push({ at: String(r.created_at ?? ''), status: ['FINAL', 'RETURNED'].includes(String(r.status)) ? 'sold' : 'reserved' });
+  }
+  const verwendung: Record<string, string> = { UNDER_REPAIR: 'in_repair', WRITE_OFF: 'write_off', RETURN_TO_OWNER: 'returned' };
+  for (const r of query(
+    `SELECT DISTINCT sr.id, sr.product_disposition, sr.created_at FROM sales_returns sr JOIN sales_return_lines srl ON srl.return_id = sr.id
+      WHERE srl.product_id = ? AND sr.status NOT IN ('REJECTED', 'REQUESTED')`, [productId],
+  )) {
+    const st = verwendung[String(r.product_disposition ?? '')];
+    if (st) ev.push({ at: String(r.created_at ?? ''), status: st });
+  }
+  for (const r of query(
+    'SELECT pr.created_at FROM production_inputs pi JOIN production_records pr ON pr.id = pi.record_id WHERE pi.product_id = ?', [productId],
+  )) ev.push({ at: String(r.created_at ?? ''), status: 'consumed' });
+  for (const r of query(
+    `SELECT status_after, created_at FROM stock_adjustments WHERE product_id = ? AND direction = 'ISSUE' AND status != 'CANCELLED' AND COALESCE(status_after, '') != ''`,
+    [productId],
+  )) ev.push({ at: String(r.created_at ?? ''), status: String(r.status_after) });
+  for (const r of query(
+    `SELECT pr.created_at FROM purchase_return_lines prl JOIN purchase_returns pr ON pr.id = prl.return_id
+      WHERE prl.product_id = ? AND pr.status != 'CANCELLED'`, [productId],
+  )) ev.push({ at: String(r.created_at ?? ''), status: 'returned' });
+  if (ev.length === 0) return 'returned';
+  ev.sort((a, b) => (a.at < b.at ? -1 : a.at > b.at ? 1 : 0));
+  return ev[ev.length - 1].status;
+}
+
 /** Teil 3 — ginge der Artikel dieser Zeile beim Entfernen mit? Nur wenn SIE ihn angelegt hat und nichts sonst an ihm hängt. */
 function artikelGehtMit(line: Record<string, unknown>): boolean {
   const productId = String(line.product_id ?? '');
@@ -1001,9 +1046,10 @@ export function editPurchaseInHouse(
   for (const pid of keptProducts) {
     if (removedProductIds.includes(pid)) continue;
     syncProductQuantity(pid);
-    // Wie beim Storno (F-PRC-01): ohne Bestand kein „in_stock"; ein anderer Status gehört einem anderen Vorgang.
+    // Ohne Bestand kein „in_stock" — sondern der Zustand von VOR diesem Einkauf (`statusOhneBestand`); ein anderer
+    // Status als „in_stock" gehört einem anderen Vorgang und bleibt.
     if (getAvailableStock(pid) === 0) {
-      db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ? AND stock_status = 'in_stock'`, [ctx.now, pid]);
+      db.run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ? AND stock_status = 'in_stock'`, [statusOhneBestand(pid), ctx.now, pid]);
     }
     trackProductRow(pid);
   }

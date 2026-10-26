@@ -345,16 +345,104 @@ const zustand = (db: Db): string => S({
     && s(db, 'SELECT status FROM stock_lots WHERE purchase_line_id = ?', [k2.lineIds[1]]) === 'CANCELLED',
   'D das Los des ersten Einkaufs bleibt aktiv; das Los der entfernten Zeile ist storniert (Historie, wie beim Storno)');
   invariant(db, 'D');
-  // Ohne weiteren Bestand: wie beim Storno nicht mehr „in_stock".
+  // Ohne weiteren Bestand: zurück auf den Zustand von VOR dem Einkauf — der verkaufte Artikel ist wieder „sold".
   const k3 = kauf([{ price: 100 }]);
   const y = k3.productIds[0];
   rechnung(y);
+  ok(s(db, 'SELECT stock_status FROM products WHERE id = ?', [y]) === 'sold', 'D2 vorher: verkauft und bezahlt → sold');
   const k4 = kauf([{ price: 50 }, { price: 110, productId: y }]);
   ok(s(db, 'SELECT stock_status FROM products WHERE id = ?', [y]) === 'in_stock', 'D2 der verkaufte Artikel kam mit dem zweiten Einkauf wieder ins Lager');
-  editIt(db, { purchaseId: k4.pid, reason: 'nie gekommen', removeLineIds: [k4.lineIds[1]] });
-  ok(n(db, 'SELECT quantity FROM products WHERE id = ?', [y]) === 0 && s(db, 'SELECT stock_status FROM products WHERE id = ?', [y]) === 'returned',
-    `D2 ohne Bestand nicht mehr im Lager (${s(db, 'SELECT stock_status FROM products WHERE id = ?', [y])}) — dieselbe Regel wie beim Storno`);
+  editIt(db, { purchaseId: k4.pid, reason: 'versehentlich erfasst', removeLineIds: [k4.lineIds[1]] });
+  ok(n(db, 'SELECT quantity FROM products WHERE id = ?', [y]) === 0 && s(db, 'SELECT stock_status FROM products WHERE id = ?', [y]) === 'sold',
+    `D2 ohne Bestand wieder „sold" — keine Rückgabe, also nicht „returned" (${s(db, 'SELECT stock_status FROM products WHERE id = ?', [y])})`);
   invariant(db, 'D2');
+}
+
+// ══ D3 — der Status von VOR dem Einkauf, aus der Los- und Belegfolge ══════════════════════
+{
+  const status = (db: Db, pid: string): string => s(db, 'SELECT stock_status FROM products WHERE id = ?', [pid]);
+  const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 5));   // eindeutige Reihenfolge der created_at
+  // (a) Verkauf noch offen: „reserved" ist beim Wareneingang geschützt — die neue Position ist nicht unberührt im Lager.
+  let db = freshDb();
+  let k1 = kauf([{ price: 100 }]);
+  let x = k1.productIds[0];
+  imHaus(() => useInvoiceStore.getState().createDirectInvoice('cust-1', [LINE(x, 1, 300)] as never, 'PE', `${SDATE}T12:00:00.000Z`));
+  reload();
+  ok(status(db, x) === 'reserved', 'D3a vorher: offene Rechnung → reserved');
+  let k2 = kauf([{ price: 50 }, { price: 90, productId: x }]);
+  ok(status(db, x) === 'reserved', 'D3a der Wareneingang lässt „reserved" stehen');
+  const vor = zustand(db);
+  const m = meldung(() => editIt(db, { purchaseId: k2.pid, reason: 'x', removeLineIds: [k2.lineIds[1]] }));
+  ok(code(m) === 'PURCHASE_EDIT_REMOVE_STOCK_USED' && zustand(db) === vor, `D3a nicht entfernbar, nichts geändert (${code(m)})`);
+  // (b) In einer Produktion verbraucht → wieder „consumed".
+  db = freshDb();
+  k1 = kauf([{ price: 100 }]);
+  x = k1.productIds[0];
+  const { createProductionInHouse } = await import('../../src/core/production/production-house.ts');
+  posting.beginLedgerTransaction();
+  try {
+    await createProductionInHouse({
+      inputProductIds: [x], productionDate: PDATE,
+      outputs: [{ spec: { categoryId: 'cat-w', brand: 'Custom', name: 'Aus Produktion', condition: 'New', taxScheme: 'MARGIN', attributes: {}, images: [], sku: 'PRD-OUT-1' }, value: 100 }] as never,
+    }, { branchId: 'branch-main', userId: 'user-test' });
+    posting.commitLedgerTransaction();
+  } catch (e) { posting.rollbackLedgerTransaction(); throw e; }
+  reload();
+  ok(status(db, x) === 'consumed', 'D3b vorher: in einer Produktion verbraucht → consumed');
+  k2 = kauf([{ price: 50 }, { price: 95, productId: x }]);
+  editIt(db, { purchaseId: k2.pid, reason: 'falscher Artikel gewählt', removeLineIds: [k2.lineIds[1]] });
+  ok(status(db, x) === 'consumed', `D3b nach dem Entfernen wieder „consumed" (${status(db, x)})`);
+  invariant(db, 'D3b');
+  // (c) Echte Rückgabe an den Lieferanten → „returned" ist hier richtig.
+  db = freshDb();
+  k1 = kauf([{ price: 100 }]);
+  x = k1.productIds[0];
+  imHaus(() => life.returnToSupplierInHouse({ purchaseId: k1.pid, refundMethod: 'cash', lines: [{ purchaseLineId: k1.lineIds[0], quantity: 1, unitPrice: 100 }] }, CTX, rev(db, k1.pid)));
+  reload();
+  const nachRueckgabe = status(db, x);
+  k2 = kauf([{ price: 50 }, { price: 80, productId: x }]);
+  editIt(db, { purchaseId: k2.pid, reason: 'doppelt', removeLineIds: [k2.lineIds[1]] });
+  ok(status(db, x) === 'returned', `D3c nach echter Lieferantenrückgabe (vorher ${nachRueckgabe}) bleibt es „returned" (${status(db, x)})`);
+  invariant(db, 'D3c');
+  // (d) Der JÜNGSTE Vorgang zählt: verkauft (sold), wieder eingekauft, dann in einer Produktion verbraucht (consumed).
+  db = freshDb();
+  k1 = kauf([{ price: 100 }]);
+  x = k1.productIds[0];
+  rechnung(x);
+  await tick();
+  kauf([{ price: 70, productId: x }]);
+  await tick();
+  posting.beginLedgerTransaction();
+  try {
+    await createProductionInHouse({
+      inputProductIds: [x], productionDate: PDATE,
+      outputs: [{ spec: { categoryId: 'cat-w', brand: 'Custom', name: 'Aus Produktion 2', condition: 'New', taxScheme: 'MARGIN', attributes: {}, images: [], sku: 'PRD-OUT-2' }, value: 70 }] as never,
+    }, { branchId: 'branch-main', userId: 'user-test' });
+    posting.commitLedgerTransaction();
+  } catch (e) { posting.rollbackLedgerTransaction(); throw e; }
+  reload();
+  await tick();
+  ok(status(db, x) === 'consumed', 'D3d vorher: zuletzt in einer Produktion verbraucht');
+  k2 = kauf([{ price: 50 }, { price: 60, productId: x }]);
+  editIt(db, { purchaseId: k2.pid, reason: 'versehentlich', removeLineIds: [k2.lineIds[1]] });
+  ok(status(db, x) === 'consumed', `D3d der jüngste Vorgang zählt: „consumed", nicht der ältere Verkauf (${status(db, x)})`);
+  invariant(db, 'D3d');
+  // (e) Bestandsabgang (Abschreibung) → dessen Status.
+  db = freshDb();
+  k1 = kauf([{ price: 100 }]);
+  x = k1.productIds[0];
+  const lot = s(db, 'SELECT id FROM stock_lots WHERE purchase_line_id = ?', [k1.lineIds[0]]);
+  db.run(`INSERT INTO stock_adjustments (id, branch_id, adjustment_number, product_id, direction, quantity, qty_before, qty_after, status_before, status_after,
+            accounting, value_booked, lots_json, reason_category, reason, business_date, status, action_id, payload_hash, created_at, revision)
+          VALUES ('adj-1','branch-main','ADJ-1',?, 'ISSUE', 1, 1, 0, 'in_stock', 'write_off', 'BOOKED', 100, ?, 'LOSS', 'x', ?, 'POSTED', 'a1', 'h', ?, 0)`,
+    [x, JSON.stringify([{ lotId: lot, take: 1, unitCost: 100, qtyBefore: 1, statusBefore: 'ACTIVE' }]), PDATE, new Date().toISOString()]);
+  db.run("UPDATE stock_lots SET qty_remaining = 0 WHERE id = ?", [lot]);
+  db.run("UPDATE products SET stock_status = 'write_off', quantity = 0 WHERE id = ?", [x]);
+  reload();
+  k2 = kauf([{ price: 50 }, { price: 85, productId: x }]);
+  ok(status(db, x) === 'in_stock', 'D3e der abgeschriebene Artikel kam mit dem Einkauf wieder ins Lager');
+  editIt(db, { purchaseId: k2.pid, reason: 'versehentlich', removeLineIds: [k2.lineIds[1]] });
+  ok(status(db, x) === 'write_off', `D3e nach dem Entfernen wieder „write_off" (${status(db, x)})`);
 }
 
 // ══ E — Artikel von der Zeile angelegt, aber anderswo gebunden ═══════════════════════
@@ -371,6 +459,8 @@ const zustand = (db: Db): string => S({
   ok(out.removedProductIds.length === 0 && n(db, 'SELECT COUNT(*) FROM products WHERE id = ?', [p2]) === 1
     && n(db, 'SELECT quantity FROM products WHERE id = ?', [p2]) === 0,
   `E der Artikel bleibt (Angebot), ohne Bestand (${S(out.removedProductIds)} / ${all(db, 'SELECT quantity, stock_status FROM products WHERE id = ?', [p2])})`);
+  ok(s(db, 'SELECT stock_status FROM products WHERE id = ?', [p2]) === 'returned',
+    'E ohne jeden früheren Vorgang (das Stück kam nur mit dieser Zeile): wie beim Storno des Einkaufs „returned"');
   invariant(db, 'E');
 }
 
