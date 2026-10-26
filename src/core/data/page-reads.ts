@@ -182,6 +182,64 @@ export interface CustomerDetailReads {
     creditNoteId?: string;
   }>;
   creditNoteCancels: Record<string, number>;
+  /** v0.8.91 — offene Auftragsanzahlungen des Kunden (getrennt von Rechnungsforderungen und Guthaben). */
+  orderDeposits: CustomerOrderDeposits;
+}
+
+/**
+ * v0.8.91 — die noch offenen Anzahlungen eines Kunden auf seine Aufträge: DIESELBE Regel wie die Abstimmung des
+ * Kontos CUSTOMER_DEPOSITS (`domainCustomerDeposits`): Zahlungen, die noch nicht in eine Rechnung umgewandelt sind,
+ * an einem nicht stornierten Auftrag, je Auftrag auf den vereinbarten Preis gedeckelt. Was darüber liegt, ist schon
+ * Kundenguthaben (ORDER_OVERPAY) und zählt hier nicht. Ein Storno (Erstattung, Guthaben, Verfall), eine Umwandlung
+ * oder eine gelöschte Zahlung nimmt die Anzahlung heraus.
+ */
+export interface CustomerOrderDeposits {
+  orders: Array<{
+    orderId: string; orderNumber: string; status: string; agreedPrice: number;
+    /** Gezahlt, noch nicht verrechnet. */
+    paid: number;
+    /** Davon offene Anzahlung (höchstens der vereinbarte Preis). */
+    open: number;
+    /** Der Teil über dem vereinbarten Preis — liegt als Kundenguthaben, nicht hier. */
+    toCredit: number;
+    payments: Array<{ id: string; amount: number; method: string; cardBrand?: string; paidAt: string }>;
+  }>;
+  /** Σ open — derselbe Betrag, den das Hauptbuch für diesen Kunden auf CUSTOMER_DEPOSITS führt. */
+  total: number;
+}
+
+export const EMPTY_ORDER_DEPOSITS: CustomerOrderDeposits = { orders: [], total: 0 };
+
+function customerOrderDepositsFor(ctx: BusinessReadContext, customerId: string): CustomerOrderDeposits {
+  const rows = query(
+    `SELECT o.id AS order_id, o.order_number, o.status, o.agreed_price,
+            op.id AS payment_id, op.amount, op.method, op.card_brand, op.paid_at
+       FROM orders o JOIN order_payments op ON op.order_id = o.id
+      WHERE o.customer_id = ? AND o.branch_id = ? AND o.status != 'cancelled' AND COALESCE(op.converted_to_invoice, 0) = 0
+      ORDER BY o.created_at DESC, o.id, op.paid_at ASC, op.created_at ASC, op.id`,
+    [customerId, ctx.branchId],
+  );
+  const byOrder = new Map<string, CustomerOrderDeposits['orders'][number]>();
+  for (const r of rows) {
+    const id = s(r.order_id);
+    let o = byOrder.get(id);
+    if (!o) {
+      o = { orderId: id, orderNumber: s(r.order_number), status: s(r.status), agreedPrice: n(r.agreed_price), paid: 0, open: 0, toCredit: 0, payments: [] };
+      byOrder.set(id, o);
+    }
+    o.payments.push({
+      id: s(r.payment_id), amount: n(r.amount), method: s(r.method),
+      ...(r.card_brand ? { cardBrand: s(r.card_brand) } : {}), paidAt: s(r.paid_at),
+    });
+    o.paid += n(r.amount);
+  }
+  const R3 = (x: number): number => Math.round(x * 1000) / 1000;
+  const orders = [...byOrder.values()].map((o) => {
+    const paid = R3(o.paid);
+    const open = R3(Math.max(0, Math.min(paid, o.agreedPrice)));
+    return { ...o, paid, open, toCredit: R3(Math.max(0, paid - o.agreedPrice)) };
+  }).filter((o) => o.paid > 0.0005);
+  return { orders, total: R3(orders.reduce((t, o) => t + o.open, 0)) };
 }
 
 export function customerDetailReadsFor(ctx: BusinessReadContext, customerId: string): CustomerDetailReads {
@@ -232,6 +290,7 @@ export function customerDetailReadsFor(ctx: BusinessReadContext, customerId: str
       creditNoteId: (r.cn_id as string | null) || undefined,
     })),
     creditNoteCancels,
+    orderDeposits: customerOrderDepositsFor(ctx, customerId),
   };
 }
 

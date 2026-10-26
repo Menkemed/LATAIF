@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import {
   ArrowLeft, Edit3, Phone, MessageCircle, Mail, Save, Trash2, Sparkles,
-  Receipt, FileMinus, Wallet, TrendingUp, BarChart3, Plus, Building2, CreditCard, Banknote, Smartphone, AlertTriangle,
+  Receipt, FileMinus, Wallet, TrendingUp, BarChart3, Plus, Building2, CreditCard, Banknote, Smartphone, AlertTriangle, PiggyBank,
 } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
@@ -37,7 +37,7 @@ import { useSharedRead } from '@/core/data/shared-read';
 import { usePartyBalances } from '@/core/parties/use-party-balances';
 import { OpeningBalancesSection } from '@/components/parties/OpeningBalancesSection';
 import { CustomerSettlementModal } from '@/components/parties/CustomerSettlementModal';
-import { customerDetailReadsFor, type CustomerDetailReads } from '@/core/data/page-reads';
+import { customerDetailReadsFor, EMPTY_ORDER_DEPOSITS, type CustomerDetailReads } from '@/core/data/page-reads';
 import { IdentityPhotoField } from '@/components/identity/IdentityPhotoField';
 import { saveCustomerUpdate } from '@/core/customers/customer-save';
 import { intentOf } from '@/core/identity/identity-save';
@@ -70,7 +70,7 @@ function useCustomerReads(customerId: string | undefined, v = 0) {
   return useSharedRead(
     'page.customer_detail.get', { customerId: customerId ?? '', ...(v ? { v } : {}) },
     (ctx) => customerDetailReadsFor(ctx, customerId ?? ''),
-    { payments: [], refunds: [], creditNoteCancels: {} } as CustomerDetailReads,
+    { payments: [], refunds: [], creditNoteCancels: {}, orderDeposits: EMPTY_ORDER_DEPOSITS } as CustomerDetailReads,
     [customerId, v],
   );
 }
@@ -197,6 +197,8 @@ export function CustomerDetail() {
   // Die Zuordnung kommt aus derselben Auskunft: die Rechnungsliste dieses Kunden steht in der
   // DATENBANK, sie wird nicht mehr als Kennungsliste mitgeschickt.
   const invoiceCNCancelMap = customerReads.creditNoteCancels;
+  // v0.8.91 — offene Auftragsanzahlungen (eigenes Konto CUSTOMER_DEPOSITS): weder Forderung noch Guthaben.
+  const orderDeposits = customerReads.orderDeposits ?? EMPTY_ORDER_DEPOSITS;
 
   const matchingProducts = useMemo(() => {
     if (!customer) return [];
@@ -699,6 +701,13 @@ export function CustomerDetail() {
                   icon={<Wallet size={18} style={{ color: '#AA956E' }} />} iconBg="rgba(170,149,110,0.10)"
                   valueColor="#AA956E" />
               )}
+              {/* v0.8.91 — erhaltene Anzahlungen auf Aufträge: wir schulden die Ware (oder bei Storno das Geld). */}
+              {orderDeposits.total > 0.0005 && (
+                <KpiCard label="Order Deposits" value={orderDeposits.total}
+                  hint={`${orderDeposits.orders.filter((o) => o.open > 0.0005).length} order(s) · not invoiced yet`}
+                  icon={<PiggyBank size={18} style={{ color: '#7E5BEF' }} />} iconBg="rgba(126,91,239,0.10)"
+                  valueColor="#7E5BEF" />
+              )}
             </div>
 
             {/* OPENING BALANCES — erfasste, noch nicht gebuchte Eröffnungsposten (nur lesen). */}
@@ -714,6 +723,45 @@ export function CustomerDetail() {
                 icon={<TrendingUp size={18} style={{ color: '#16A34A' }} />} iconBg="rgba(22,163,74,0.10)"
                 valueColor={stats.profit >= 0 ? '#0F0F10' : '#DC2626'} />
             </div>
+
+            {/* v0.8.91 — ORDER DEPOSITS: offene Anzahlungen je Auftrag (getrennt von Rechnungen und Guthaben). */}
+            {orderDeposits.orders.length > 0 && (
+              <div style={{ marginTop: 24 }} data-customer-order-deposits>
+                <Card>
+                  <div className="flex items-center justify-between" style={{ marginBottom: 6 }}>
+                    <h3 style={{ fontSize: 17, fontWeight: 600, color: '#0F0F10' }}>Order Deposits</h3>
+                    <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }} data-customer-order-deposits-total={orderDeposits.total}>
+                      Open: <Bhd v={orderDeposits.total} /> BHD
+                    </span>
+                  </div>
+                  <p style={{ fontSize: 12, color: '#6B7280', marginBottom: 12 }}>
+                    Received in advance on orders that are not invoiced yet — not a receivable and not store credit. It is settled when the order becomes an invoice, or refunded / credited / forfeited if the order is cancelled.
+                  </p>
+                  {orderDeposits.orders.map((o) => (
+                    <div key={o.orderId} style={{ padding: '10px 0', borderTop: '1px solid rgba(229,225,214,0.6)' }} data-customer-order-deposit={o.orderId}>
+                      <div className="flex items-center justify-between" style={{ fontSize: 13 }}>
+                        <span>
+                          <Link to={`/orders/${o.orderId}`} style={{ color: '#0F0F10', fontWeight: 500 }}>{o.orderNumber}</Link>
+                          <span style={{ color: '#6B7280', marginLeft: 8, fontSize: 12 }}>{o.status} · agreed <Bhd v={o.agreedPrice} /> BHD</span>
+                        </span>
+                        <span className="font-mono" style={{ color: '#0F0F10' }}>Open <Bhd v={o.open} /> BHD</span>
+                      </div>
+                      {o.payments.map((p) => (
+                        <div key={p.id} className="flex items-center justify-between" style={{ fontSize: 12, color: '#4B5563', marginTop: 4, paddingLeft: 12 }} data-customer-order-deposit-payment={p.id}>
+                          <span className="flex items-center gap-2"><MethodIcon method={p.method} />{fmtDate(p.paidAt)} · {p.method}{p.cardBrand ? ` (${p.cardBrand})` : ''}</span>
+                          <span className="font-mono"><Bhd v={p.amount} /> BHD</span>
+                        </div>
+                      ))}
+                      {o.toCredit > 0.0005 && (
+                        <div style={{ fontSize: 11, color: '#AA956E', marginTop: 4, paddingLeft: 12 }}>
+                          <Bhd v={o.toCredit} /> BHD above the agreed price is store credit (shown under Store Credit), not a deposit.
+                        </div>
+                      )}
+                    </div>
+                  ))}
+                </Card>
+              </div>
+            )}
 
             {/* INVOICES TABLE */}
             <div style={{ marginTop: 24 }}>
