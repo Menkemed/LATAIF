@@ -719,6 +719,88 @@ const zustand = (db: Db): string => S({
   ok(primaryFehler === '' && rb.ok && bA === bB, `K Primary == PC2: Beleg, Zeilen, Lose, Artikel, Protokoll, Salden (${primaryFehler || 'ok'} / ${rb.code || 'ok'}${bA === bB ? '' : ` · ${bA} vs ${bB}`})`);
 }
 
+// ══ N — v0.8.91 Sicherheitsprüfungen: „Cancel Purchase" (Status) und Herkunft (Kommission/Agent) ═══════════
+{
+  const status = (db: Db, pid: string): string => s(db, 'SELECT stock_status FROM products WHERE id = ?', [pid]);
+  const herkunft = (db: Db, pid: string): string => s(db, 'SELECT source_type FROM products WHERE id = ?', [pid]);
+  /** Eine Zeile mit allen Pflichtspalten (Rest mit neutralen Werten), wie die Bestandstests es tun. */
+  const insert = (db: Db, table: string, values: Record<string, unknown>): void => {
+    const cols = (db.exec(`PRAGMA table_info(${table})`)[0]?.values ?? []).map((v) => ({ name: String(v[1]), type: String(v[2] ?? ''), notnull: Number(v[3]) === 1, dflt: v[4], pk: Number(v[5]) > 0 }));
+    const data: Record<string, unknown> = { ...values };
+    for (const c of cols) {
+      if (!c.notnull || c.dflt !== null || c.pk || data[c.name] !== undefined) continue;
+      data[c.name] = /INT|REAL|NUM/i.test(c.type) ? 0 : (/_at$|date/i.test(c.name) ? NOW : '');
+    }
+    const names = Object.keys(data).filter((k) => cols.some((c) => c.name === k));
+    db.run(`INSERT INTO ${table} (${names.join(', ')}) VALUES (${names.map(() => '?').join(', ')})`, names.map((k) => data[k]));
+  };
+  const storno = (db: Db, pid: string): string => meldung(() => { imHaus(() => life.cancelPurchaseInHouse(pid, 'branch-main', {})); reload(); });
+
+  // (1) Cancel Purchase: ein verkaufter Artikel, versehentlich nochmals eingekauft — der Storno macht ihn wieder „sold".
+  let db = freshDb();
+  let k1 = kauf([{ price: 100 }]);
+  let x = k1.productIds[0];
+  rechnung(x);
+  let k2 = kauf([{ price: 120, productId: x }]);
+  ok(status(db, x) === 'in_stock', 'N1 der verkaufte Artikel kam mit dem zweiten Einkauf wieder ins Lager');
+  ok(storno(db, k2.pid) === '' && status(db, x) === 'sold' && n(db, 'SELECT quantity FROM products WHERE id = ?', [x]) === 0,
+    `N1 Cancel Purchase: wieder „sold", nicht „returned" — es gab keine Rückgabe (${status(db, x)})`);
+  invariant(db, 'N1');
+  // …und ein Artikel, den erst dieser Einkauf angelegt hat, wird wie bisher „returned".
+  const k3 = kauf([{ price: 90 }]);
+  ok(storno(db, k3.pid) === '' && status(db, k3.productIds[0]) === 'returned', 'N1 ohne Vorgeschichte: wie bisher „returned"');
+
+  // (2) Herkunft: ein verkaufter KOMMISSIONSartikel wird gekauft — der Kauf macht ihn zu Recht „eigen" …
+  db = freshDb();
+  k1 = kauf([{ price: 100 }]);
+  x = k1.productIds[0];
+  db.run("UPDATE stock_lots SET qty_remaining = 0, status = 'EXHAUSTED' WHERE product_id = ?", [x]);
+  db.run("UPDATE products SET stock_status = 'sold', source_type = 'CONSIGNMENT', quantity = 0 WHERE id = ?", [x]);
+  insert(db, 'consignments', { id: 'con-1', branch_id: 'branch-main', consignment_number: 'CON-2026-0001', consignor_id: 'cust-1', product_id: x,
+    agreed_price: 500, commission_rate: 15, status: 'sold', agreement_date: PDATE, created_at: NOW, updated_at: NOW });
+  reload();
+  k2 = kauf([{ price: 200 }, { price: 450, productId: x }]);
+  ok(herkunft(db, x) === 'OWN' && status(db, x) === 'in_stock', 'N2 der Kauf ist ein echter Eigentumswechsel: OWN, im Lager (bleibt erhalten)');
+  // … aber rückgängig machen kann ihn das ERP nicht sicher: die Herkunft davor ist nicht festgehalten → gesperrt.
+  const chk = edit.purchaseEditCheck(k2.pid, 'branch-main', NOW).lines.find((l) => l.lineId === k2.lineIds[1])!;
+  ok(!chk.remove.allowed && (chk.remove as { code: string }).code === 'PURCHASE_EDIT_OWNERSHIP_UNCLEAR', `N2 Auskunft: Remove gesperrt (${S(chk.remove)})`);
+  let vor = zustand(db);
+  let m = meldung(() => editIt(db, { purchaseId: k2.pid, reason: 'x', removeLineIds: [k2.lineIds[1]] }));
+  ok(code(m) === 'PURCHASE_EDIT_OWNERSHIP_UNCLEAR' && zustand(db) === vor, `N2 Remove Item: gesperrt, nichts geändert (${code(m)})`);
+  vor = zustand(db);
+  m = storno(db, k2.pid);
+  ok(code(m) === 'PURCHASE_OWNERSHIP_UNCLEAR' && zustand(db) === vor && herkunft(db, x) === 'OWN', `N2 Cancel Purchase: gesperrt, nichts geändert (${code(m)})`);
+  // Die andere, unbelastete Zeile desselben Einkaufs bleibt entfernbar.
+  ok(edit.purchaseEditCheck(k2.pid, 'branch-main', NOW).lines.find((l) => l.lineId === k2.lineIds[0])!.remove.allowed, 'N2 die andere Zeile bleibt entfernbar');
+
+  // (3) Dasselbe für einen Artikel mit Agenten-Vorgeschichte.
+  db = freshDb();
+  k1 = kauf([{ price: 100 }]);
+  x = k1.productIds[0];
+  db.run("UPDATE stock_lots SET qty_remaining = 0, status = 'EXHAUSTED' WHERE product_id = ?", [x]);
+  db.run("UPDATE products SET stock_status = 'sold', source_type = 'AGENT', quantity = 0 WHERE id = ?", [x]);
+  insert(db, 'agents', { id: 'ag-1', branch_id: 'branch-main', name: 'Agent', created_at: NOW, updated_at: NOW });
+  insert(db, 'agent_transfers', { id: 'at-1', branch_id: 'branch-main', agent_id: 'ag-1', product_id: x, status: 'sold', created_at: NOW, updated_at: NOW });
+  reload();
+  k2 = kauf([{ price: 200 }, { price: 300, productId: x }]);
+  m = meldung(() => editIt(db, { purchaseId: k2.pid, reason: 'x', removeLineIds: [k2.lineIds[1]] }));
+  ok(code(m) === 'PURCHASE_EDIT_OWNERSHIP_UNCLEAR', `N3 Agenten-Vorgeschichte: Remove gesperrt (${code(m)})`);
+  ok(code(storno(db, k2.pid)) === 'PURCHASE_OWNERSHIP_UNCLEAR', 'N3 …und Cancel Purchase gesperrt');
+
+  // (4) Bleibt Bestand aus einem anderen eigenen Los, ist nichts unklar: der Artikel bleibt eigen.
+  db = freshDb();
+  k1 = kauf([{ price: 100 }]);
+  x = k1.productIds[0];
+  insert(db, 'consignments', { id: 'con-2', branch_id: 'branch-main', consignment_number: 'CON-2026-0002', consignor_id: 'cust-1', product_id: x,
+    agreed_price: 500, commission_rate: 15, status: 'returned', agreement_date: PDATE, created_at: NOW, updated_at: NOW });
+  reload();
+  k2 = kauf([{ price: 200 }, { price: 110, productId: x }]);
+  const out = editIt(db, { purchaseId: k2.pid, reason: 'zweites Stück nie gekommen', removeLineIds: [k2.lineIds[1]] });
+  ok(out.removedLineIds.length === 1 && herkunft(db, x) === 'OWN' && status(db, x) === 'in_stock' && n(db, 'SELECT quantity FROM products WHERE id = ?', [x]) === 1,
+    'N4 mit weiterem eigenem Bestand: entfernbar, der Artikel bleibt eigen und im Lager');
+  invariant(db, 'N4');
+}
+
 // ══ L — Storno nach Nachtrag und Entfernen ═══════════════════════════════════════════
 {
   const db = freshDb();

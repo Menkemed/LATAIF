@@ -65,6 +65,7 @@ function partnerUrteil<T>(fn: () => T): T {
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import type { HouseCtx } from '@/core/payables/payables-house';
 import { purchaseCancelBlocker } from '@/core/purchases/purchase-consumption';
+import { herkunftUnklar, statusOhneBestand } from '@/core/purchases/purchase-undo';
 
 /** Die drei Buchungen dieses Bereichs — Maske (useSharedWrite) und Fernbefehl benutzen DIESE Namen. */
 export const PURCHASE_LIFECYCLE_OP = {
@@ -768,6 +769,24 @@ export function cancelPurchaseInHouse(purchaseId: string, branchId: string, opts
   if (verbraucht) throw nein(verbraucht.code, verbraucht.message);
   // BULK METAL V1 — ein Bulk-Lot darf nur unbenutzt mit dem Einkauf storniert werden (6.5).
   assertBulkLotsOfPurchaseUnused(purchaseId);
+  // Sperre 5 — v0.8.91: brachte DIESER Einkauf einen früheren Kommissions-/Agentenartikel auf „eigen" (und hält seinen
+  // ganzen Bestand), ist die Herkunft davor nicht festgehalten — nicht raten, sperren. Der Auto-Einkauf einer
+  // Kommission ist ausgenommen: dort bleibt der Artikel Kommissionsware, und die Umkehr der Kommission setzt sie selbst.
+  const kommissionsEinkauf = !!p.source_consignment_id || /^Consignor payout/.test(String(p.notes ?? ''));
+  if (!kommissionsEinkauf) {
+    const loseJeArtikel = new Map<string, string[]>();
+    for (const l of query(`SELECT id, product_id FROM stock_lots WHERE purchase_id = ? AND status != 'CANCELLED'`, [purchaseId])) {
+      const pid = String(l.product_id ?? '');
+      if (!pid || isBulkMetalProduct(pid)) continue;
+      loseJeArtikel.set(pid, [...(loseJeArtikel.get(pid) ?? []), String(l.id)]);
+    }
+    for (const [pid, lose] of loseJeArtikel) {
+      if (herkunftUnklar(pid, lose)) {
+        throw nein('PURCHASE_OWNERSHIP_UNCLEAR',
+          'Cannot cancel this purchase: an item from it was on consignment or with an agent before. Its earlier ownership is not recorded, so it is not undone automatically — please check it with the accountant.');
+      }
+    }
+  }
 
   const db = getDatabase();
   const now = opts.now ?? new Date().toISOString();
@@ -806,9 +825,10 @@ export function cancelPurchaseInHouse(purchaseId: string, branchId: string, opts
     if (isBulkMetalProduct(pid)) continue;   // BULK METAL V1 — der Systemartikel bleibt in_stock
     syncProductQuantity(pid);
     // F-PRC-01 — sonst bliebe stock_status='in_stock' bei 0 Lots stehen (Phantom). Nur in_stock
-    // anfassen, damit sold/consumed/returned nicht ueberschrieben werden.
+    // anfassen, damit sold/consumed/returned nicht ueberschrieben werden. v0.8.91 — nicht pauschal 'returned':
+    // der Zustand von VOR diesem Einkauf (ein verkaufter Artikel ist wieder 'sold'), ohne Vorgeschichte wie bisher.
     if (getAvailableStock(pid) === 0) {
-      db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ? AND stock_status = 'in_stock'`, [now, pid]);
+      db.run(`UPDATE products SET stock_status = ?, updated_at = ? WHERE id = ? AND stock_status = 'in_stock'`, [statusOhneBestand(pid), now, pid]);
       trackProductRow(pid);   // LAN-Sync Phase 1b
     }
   }
