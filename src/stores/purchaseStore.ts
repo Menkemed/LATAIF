@@ -303,6 +303,209 @@ function arriveLinkedOrderLines(
   for (const oid of affectedOrders) recomputeOrderStatusRaw(db, oid);
 }
 
+/** Eine Zeile, wie „Save Purchase" sie bekommt (geplant und mit vergebener SKU). */
+export type PurchaseInputLine = PurchaseInput['lines'][number];
+
+/** Eine Einkaufszeile, bevor sie geschrieben wird — die Artikel dazu gibt es schon. */
+export interface PurchaseLineRecord {
+  id: string; productId: string; description: string | null;
+  qty: number; unitPrice: number; lineTotal: number; position: number;
+  taxScheme: 'ZERO' | 'VAT_10'; vatRate: number; vatAmount: number;
+  sourceOrderLineId: string | null;
+  partnerShares?: PartnerShareInput[];
+  bulk?: BulkPurchaseLine; bulkLotValueFils?: number;
+  // PURCHASE-EDIT D13 — hat DIESE Zeile ihren Artikel angelegt? Dann gehören Einkaufspreis und
+  // -datum des Artikels dem Einkauf. Der Bulk-Systemartikel gehört nie einer Zeile.
+  createdProduct: boolean;
+}
+
+interface LineCtx { branchId: string; userId: string; now: string }
+
+/**
+ * Die Zeilenfolge von „Save Purchase", Teil 1: je Zeile den Artikel anlegen oder verknüpfen und die Zeile
+ * rechnen. PURCHASE-EDIT Teil 2 — dieselbe Funktion trägt eine vergessene Position nach (`appendPurchaseLinesInHouse`).
+ */
+function buildPurchaseLineRecords(lines: readonly PurchaseInputLine[], purchaseDate: string, ctx: LineCtx, firstPosition: number)
+  : { records: PurchaseLineRecord[]; total: number; existingProductIds: Set<string> } {
+  const db = getDatabase();
+  const { branchId, userId, now } = ctx;
+  const lineRecords: PurchaseLineRecord[] = [];
+  let total = 0;
+  // Bestehende (nicht in diesem Purchase neu angelegte) Produkte — fuer die
+  // Canonical-Receive-Statusregel weiter unten (neue Produkte setzt createProduct schon).
+  const existingProductIds = new Set<string>();
+  lines.forEach((ln, idx) => {
+    if (ln.bulk) {
+      // BULK METAL V1 — der Systemartikel je Metall/Feinheit; Betrag und Vorsteuer exakt in Fils (4.5).
+      const b = ln.bulk;
+      const scheme: 'ZERO' | 'VAT_10' = ln.taxScheme || 'ZERO';
+      const rate = ln.vatRate ?? (scheme === 'VAT_10' ? 10 : 0);
+      const amounts = bulkPurchaseAmounts(b.lineTotalFils, rate);
+      total += amounts.lineTotal;
+      lineRecords.push({
+        id: uuid(), productId: ensureBulkProduct(branchId, b.metal, b.fineness, userId, now),
+        description: bulkPurchaseDescription(b.metal, b.fineness, b.weightMg),
+        qty: 1, unitPrice: amounts.lineTotal, lineTotal: amounts.lineTotal, position: firstPosition + idx,
+        taxScheme: scheme, vatRate: rate, vatAmount: amounts.vatAmount,
+        sourceOrderLineId: null, bulk: b, bulkLotValueFils: amounts.lotValueFils, createdProduct: false,
+      });
+      return;
+    }
+    let productId = ln.productId;
+    const createdProduct = !productId;
+    if (ln.productId) existingProductIds.add(ln.productId);
+    if (!productId) {
+      if (ln.newProduct) {
+        // Plan §Purchase §New-Item: Neues Produkt mit voller Collection-Spec
+        // (Kategorie + dyn. Attribute + Photos + Tax-Scheme + Storage etc.).
+        // Eine zentrale Stelle für das INSERT — useProductStore.createProduct —
+        // statt SQL hier zu duplizieren.
+        const created = useProductStore.getState().createProduct({
+          ...ln.newProduct,
+          purchasePrice: ln.unitPrice,        // Bruttopreis aus dem Purchase-Line-Input
+          purchaseDate,
+          stockStatus: 'in_stock',
+          quantity: ln.quantity || 1,
+        });
+        productId = created.id;
+      } else {
+        // Legacy-Pfad: nur Brand/Name/SKU/Kategorie aus Inline-Eingabe.
+        // SKU-UNIQUE — dieselbe Prüfung gegen die Datenbank wie jeder andere Anlegeweg.
+        assertSkuFree(query, ln.newProductSku, null, branchId);
+        productId = uuid();
+        const pNow = new Date().toISOString();
+        db.run(
+          `INSERT INTO products (id, branch_id, category_id, brand, name, sku, condition, scope_of_delivery,
+            purchase_date, purchase_price, purchase_currency, stock_status, tax_scheme, expected_margin, days_in_stock,
+            supplier_name, notes, images, attributes, created_at, updated_at, created_by)
+           VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, 'BHD', 'in_stock', 'MARGIN', NULL, 0, NULL, ?, '[]', '{}', ?, ?, ?)`,
+          [productId, branchId, ln.newProductCategoryId || 'cat-watches', ln.newProductBrand || '', ln.newProductName || '',
+           ln.newProductSku || null, '', purchaseDate, ln.unitPrice, ln.description || null, pNow, pNow, userId]
+        );
+      }
+    }
+    const qty = Math.max(1, ln.quantity || 1);
+    const unitPrice = ln.unitPrice || 0;
+    const lineTotal = qty * unitPrice;       // gross-incl-VAT
+    const scheme: 'ZERO' | 'VAT_10' = ln.taxScheme || 'ZERO';
+    const rate = ln.vatRate ?? (scheme === 'VAT_10' ? 10 : 0);
+    // Input-VAT aus Brutto dekomponieren: vat = gross × rate / (100 + rate).
+    const vatAmount = rate > 0 ? lineTotal * rate / (100 + rate) : 0;
+    total += lineTotal;
+    const lineId = uuid();
+    lineRecords.push({
+      id: lineId, productId, description: ln.description || null,
+      qty, unitPrice, lineTotal, position: firstPosition + idx,
+      taxScheme: scheme, vatRate: rate, vatAmount,
+      sourceOrderLineId: ln.sourceOrderLineId ?? null,
+      partnerShares: ln.partnerShares,
+      createdProduct,
+    });
+  });
+  return { records: lineRecords, total, existingProductIds };
+}
+
+/**
+ * Die Zeilenfolge von „Save Purchase", Teil 2: Zeilen, Partner-Beteiligungen, ein Los je Zeile, Menge und
+ * Lagerstatus der Artikel. Der Beleg existiert schon; gespeichert und gebucht wird beim Aufrufer.
+ */
+function insertPurchaseLineRows(
+  purchaseId: string, purchaseDate: string, lineRecords: readonly PurchaseLineRecord[], existingProductIds: ReadonlySet<string>, ctx: LineCtx,
+): void {
+  const db = getDatabase();
+  const { branchId, userId, now } = ctx;
+  const lineStmt = db.prepare(
+    `INSERT INTO purchase_lines (id, purchase_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate, vat_amount, source_order_line_id, created_product)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  );
+  for (const l of lineRecords) {
+    lineStmt.run([l.id, purchaseId, l.productId, l.description, l.qty, l.unitPrice, l.lineTotal, l.position, l.taxScheme, l.vatRate, l.vatAmount, l.sourceOrderLineId, l.createdProduct ? 1 : 0]);
+  }
+  lineStmt.free();
+
+  // PARTNER-ITEMS — Beteiligung je gemeinsam gekaufter Zeile, in derselben Klammer wie Beleg und
+  // Zeilen (scheitert sie, gibt es den Einkauf nicht). Zeilen ohne Partner: nichts, wie bisher.
+  insertLineParticipations({ branchId, userId, now }, purchaseId, lineRecords.map((l) => ({
+    lineId: l.id, productId: l.productId || null, lineTotal: l.lineTotal, quantity: l.qty, partnerShares: l.partnerShares,
+  })));
+
+  // Phase 2 — Stock-Lots: Pro Purchase-Line ein Lot mit dem TATSAECHLICHEN
+  // Einkaufspreis dieser Charge. Existing-Item-Purchase legt einen frischen
+  // Lot an, ohne den alten Lot/products.purchase_price zu beruehren — damit
+  // bleibt der Cost-Snapshot fuer noch nicht verkaufte alte Stuecke korrekt.
+  const lotStmt = db.prepare(
+    `INSERT INTO stock_lots
+       (id, branch_id, product_id, purchase_id, purchase_line_id,
+        unit_cost, qty_total, qty_remaining, status, acquired_at, created_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`
+  );
+  const affectedProductIds = new Set<string>();
+  const createdLotIds: string[] = [];   // LAN-Sync Phase 1a
+  for (const l of lineRecords) {
+    if (!l.productId || l.qty <= 0) continue;
+    if (l.bulk) {
+      // BULK METAL V1 — Bulk-Lot statt Stück-Los: Wert = aktivierter Betrag (= INVENTORY-Soll), Nummer BM-xxxx.
+      createBulkLotForPurchaseLine({
+        productId: l.productId, purchaseId, purchaseLineId: l.id, acquiredAt: purchaseDate,
+        metal: l.bulk.metal, fineness: l.bulk.fineness, weightMg: l.bulk.weightMg, valueFils: l.bulkLotValueFils ?? 0,
+        saleTaxScheme: l.bulk.saleTaxScheme, composition: l.bulk.composition,
+      }, { branchId, userId, now });
+      continue;
+    }
+    // LOT-VAT-COST — unit_cost = der auf INVENTORY aktivierte Einstand je Stueck: ohne Vorsteuer
+    // der Stueckpreis (wie bisher), mit 10 % die Zeile ohne den als VAT_INPUT gebuchten Anteil —
+    // dieselbe gerundete Zahl wie `postPurchaseReceived`. products.purchase_price bleibt brutto (Anzeige).
+    const lotId = uuid();
+    lotStmt.run([lotId, branchId, l.productId, purchaseId, l.id,
+      purchaseLotUnitCost(l), l.qty, l.qty, purchaseDate, now]);
+    createdLotIds.push(lotId);
+    affectedProductIds.add(l.productId);
+  }
+  lotStmt.free();
+  // Phase 7 Sync: products.quantity = Σ lot.qty_remaining
+  for (const pid of affectedProductIds) syncProductQuantity(pid);
+  // LAN-Sync Phase 1a: neue Lots als Full-Row (kanonische id) an Geraet B tracken.
+  for (const lid of createdLotIds) trackLotRow(lid, 'insert');
+
+  // Canonical Purchase-Receive auch fuer BESTEHENDE Produkte: frische OWN-Ware macht
+  // das Produkt wieder verfuegbar. Fuer NEU angelegte Produkte erledigt das bereits
+  // createProduct (stock_status='in_stock'); fuer bestehende griff bisher NICHTS — ein
+  // 'sold'/'returned'/'consumed'-Produkt blieb trotz neuem aktiven Lot unverfuegbar.
+  // Reihenfolge: Lot erzeugt → syncProductQuantity (oben) → finaler Status/source_type → Snapshot.
+  // GUARD (kein Blind-Overwrite, kein neuer Normalizer): Lifecycle-Stati, die noch
+  // laufenden FREMDEN Workflows gehoeren, werden NICHT angefasst — with_agent (Agent-Out),
+  // in_repair (Repair-Out), consignment/consignment_reserved (Konsignations-Ware, nicht
+  // unsere), reserved (offene Teilzahlungs-Reservierung). Ein Purchase in diese Zustaende
+  // fuer DENSELBEN Product-Datensatz ist eine fachliche Fehlbedienung — der Produkt-Picker
+  // laesst sie zwar zu (kein Status-Filter), ein unterstuetzter Workflow ist es aber nicht.
+  const PURCHASE_PROTECTED_STATUS = new Set(['with_agent', 'in_repair', 'consignment', 'consignment_reserved', 'reserved']);
+  for (const pid of existingProductIds) {
+    if (getAvailableStock(pid) <= 0) continue;        // kein aktiver Lot → nichts zu tun
+    const curRows = query(`SELECT stock_status FROM products WHERE id = ?`, [pid]);
+    const curStatus = String(curRows[0]?.stock_status || '');
+    if (curStatus === 'in_stock' || PURCHASE_PROTECTED_STATUS.has(curStatus)) continue;
+    db.run(`UPDATE products SET stock_status = 'in_stock', source_type = 'OWN', updated_at = ? WHERE id = ?`, [now, pid]);
+    trackProductRow(pid);   // LAN-Sync Phase 1b: finaler autoritativer Product-Full-Row
+  }
+}
+
+/**
+ * PURCHASE-EDIT Teil 2 — eine vergessene Position an einen gespeicherten Einkauf anhängen: GENAU die Zeilenfolge
+ * von „Save Purchase" (Artikel anlegen/verknüpfen, Zeile, Los, Menge, Lagerstatus), hinter den vorhandenen Zeilen.
+ * Ohne eigene Klammer, ohne Speichern, ohne Buchung — das alles macht die Hausfolge der Einkaufsbearbeitung.
+ * `lines` sind geplant (`planPurchaseLines`) und tragen schon ihre SKU.
+ */
+export function appendPurchaseLinesInHouse(
+  purchaseId: string, purchaseDate: string, lines: readonly PurchaseInputLine[], ctx: LineCtx,
+): PurchaseLineRecord[] {
+  const next = Number(query('SELECT COALESCE(MAX(position), 0) AS m FROM purchase_lines WHERE purchase_id = ?', [purchaseId])[0]?.m ?? 0) + 1;
+  const { records, existingProductIds } = buildPurchaseLineRecords(lines, purchaseDate, ctx, next);
+  insertPurchaseLineRows(purchaseId, purchaseDate, records, existingProductIds, ctx);
+  // LAN-Sync (Bug-3a): die Zeilen NACH dem (schon bestehenden) Kopf — 1:1 dieselben Kennungen auf beiden Seiten.
+  for (const l of records) trackChange('purchase_lines', l.id, 'insert', {});
+  return records;
+}
+
 export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
   purchases: [],
   returns: [],
@@ -362,89 +565,7 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
 
     // Create or link products for each line and build line records.
     // Plan §5: Ware kommt IMMER ins Inventar, product_status = IN_STOCK, source_type = OWN
-    const lineRecords: Array<{
-      id: string; productId: string; description: string | null;
-      qty: number; unitPrice: number; lineTotal: number; position: number;
-      taxScheme: 'ZERO' | 'VAT_10'; vatRate: number; vatAmount: number;
-      sourceOrderLineId: string | null;
-      partnerShares?: PartnerShareInput[];
-      bulk?: BulkPurchaseLine; bulkLotValueFils?: number;
-      // PURCHASE-EDIT D13 — hat DIESE Zeile ihren Artikel angelegt? Dann gehören Einkaufspreis und
-      // -datum des Artikels dem Einkauf. Der Bulk-Systemartikel gehört nie einer Zeile.
-      createdProduct: boolean;
-    }> = [];
-    let total = 0;
-    // Bestehende (nicht in diesem Purchase neu angelegte) Produkte — fuer die
-    // Canonical-Receive-Statusregel weiter unten (neue Produkte setzt createProduct schon).
-    const existingProductIds = new Set<string>();
-    input.lines.forEach((ln, idx) => {
-      if (ln.bulk) {
-        // BULK METAL V1 — der Systemartikel je Metall/Feinheit; Betrag und Vorsteuer exakt in Fils (4.5).
-        const b = ln.bulk;
-        const scheme: 'ZERO' | 'VAT_10' = ln.taxScheme || 'ZERO';
-        const rate = ln.vatRate ?? (scheme === 'VAT_10' ? 10 : 0);
-        const amounts = bulkPurchaseAmounts(b.lineTotalFils, rate);
-        total += amounts.lineTotal;
-        lineRecords.push({
-          id: uuid(), productId: ensureBulkProduct(branchId, b.metal, b.fineness, userId, now),
-          description: bulkPurchaseDescription(b.metal, b.fineness, b.weightMg),
-          qty: 1, unitPrice: amounts.lineTotal, lineTotal: amounts.lineTotal, position: idx + 1,
-          taxScheme: scheme, vatRate: rate, vatAmount: amounts.vatAmount,
-          sourceOrderLineId: null, bulk: b, bulkLotValueFils: amounts.lotValueFils, createdProduct: false,
-        });
-        return;
-      }
-      let productId = ln.productId;
-      const createdProduct = !productId;
-      if (ln.productId) existingProductIds.add(ln.productId);
-      if (!productId) {
-        if (ln.newProduct) {
-          // Plan §Purchase §New-Item: Neues Produkt mit voller Collection-Spec
-          // (Kategorie + dyn. Attribute + Photos + Tax-Scheme + Storage etc.).
-          // Eine zentrale Stelle für das INSERT — useProductStore.createProduct —
-          // statt SQL hier zu duplizieren.
-          const created = useProductStore.getState().createProduct({
-            ...ln.newProduct,
-            purchasePrice: ln.unitPrice,        // Bruttopreis aus dem Purchase-Line-Input
-            purchaseDate,
-            stockStatus: 'in_stock',
-            quantity: ln.quantity || 1,
-          });
-          productId = created.id;
-        } else {
-          // Legacy-Pfad: nur Brand/Name/SKU/Kategorie aus Inline-Eingabe.
-          // SKU-UNIQUE — dieselbe Prüfung gegen die Datenbank wie jeder andere Anlegeweg.
-          assertSkuFree(query, ln.newProductSku, null, branchId);
-          productId = uuid();
-          const pNow = new Date().toISOString();
-          db.run(
-            `INSERT INTO products (id, branch_id, category_id, brand, name, sku, condition, scope_of_delivery,
-              purchase_date, purchase_price, purchase_currency, stock_status, tax_scheme, expected_margin, days_in_stock,
-              supplier_name, notes, images, attributes, created_at, updated_at, created_by)
-             VALUES (?, ?, ?, ?, ?, ?, ?, '[]', ?, ?, 'BHD', 'in_stock', 'MARGIN', NULL, 0, NULL, ?, '[]', '{}', ?, ?, ?)`,
-            [productId, branchId, ln.newProductCategoryId || 'cat-watches', ln.newProductBrand || '', ln.newProductName || '',
-             ln.newProductSku || null, '', purchaseDate, ln.unitPrice, ln.description || null, pNow, pNow, userId]
-          );
-        }
-      }
-      const qty = Math.max(1, ln.quantity || 1);
-      const unitPrice = ln.unitPrice || 0;
-      const lineTotal = qty * unitPrice;       // gross-incl-VAT
-      const scheme: 'ZERO' | 'VAT_10' = ln.taxScheme || 'ZERO';
-      const rate = ln.vatRate ?? (scheme === 'VAT_10' ? 10 : 0);
-      // Input-VAT aus Brutto dekomponieren: vat = gross × rate / (100 + rate).
-      const vatAmount = rate > 0 ? lineTotal * rate / (100 + rate) : 0;
-      total += lineTotal;
-      const lineId = uuid();
-      lineRecords.push({
-        id: lineId, productId, description: ln.description || null,
-        qty, unitPrice, lineTotal, position: idx + 1,
-        taxScheme: scheme, vatRate: rate, vatAmount,
-        sourceOrderLineId: ln.sourceOrderLineId ?? null,
-        partnerShares: ln.partnerShares,
-        createdProduct,
-      });
-    });
+    const { records: lineRecords, total, existingProductIds } = buildPurchaseLineRecords(input.lines, purchaseDate, { branchId, userId, now }, 1);
 
     // Insert purchase header (status UNPAID unless initial payment covers)
     const status: PurchaseStatus = computeStatus(total, input.initialPayment?.amount || 0);
@@ -506,80 +627,8 @@ export const usePurchaseStore = create<PurchaseStore>((set, get) => ({
        input.sourceOrderId || null, input.sourceConsignmentId || null]
     );
 
-    // Insert lines (inkl. Input-VAT-Felder + Back-to-Back Order-Link)
-    const lineStmt = db.prepare(
-      `INSERT INTO purchase_lines (id, purchase_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate, vat_amount, source_order_line_id, created_product)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
-    );
-    for (const l of lineRecords) {
-      lineStmt.run([l.id, id, l.productId, l.description, l.qty, l.unitPrice, l.lineTotal, l.position, l.taxScheme, l.vatRate, l.vatAmount, l.sourceOrderLineId, l.createdProduct ? 1 : 0]);
-    }
-    lineStmt.free();
-
-    // PARTNER-ITEMS — Beteiligung je gemeinsam gekaufter Zeile, in derselben Klammer wie Beleg und
-    // Zeilen (scheitert sie, gibt es den Einkauf nicht). Zeilen ohne Partner: nichts, wie bisher.
-    insertLineParticipations({ branchId, userId, now }, id, lineRecords.map((l) => ({
-      lineId: l.id, productId: l.productId || null, lineTotal: l.lineTotal, quantity: l.qty, partnerShares: l.partnerShares,
-    })));
-
-    // Phase 2 — Stock-Lots: Pro Purchase-Line ein Lot mit dem TATSAECHLICHEN
-    // Einkaufspreis dieser Charge. Existing-Item-Purchase legt einen frischen
-    // Lot an, ohne den alten Lot/products.purchase_price zu beruehren — damit
-    // bleibt der Cost-Snapshot fuer noch nicht verkaufte alte Stuecke korrekt.
-    const lotStmt = db.prepare(
-      `INSERT INTO stock_lots
-         (id, branch_id, product_id, purchase_id, purchase_line_id,
-          unit_cost, qty_total, qty_remaining, status, acquired_at, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)`
-    );
-    const affectedProductIds = new Set<string>();
-    const createdLotIds: string[] = [];   // LAN-Sync Phase 1a
-    for (const l of lineRecords) {
-      if (!l.productId || l.qty <= 0) continue;
-      if (l.bulk) {
-        // BULK METAL V1 — Bulk-Lot statt Stück-Los: Wert = aktivierter Betrag (= INVENTORY-Soll), Nummer BM-xxxx.
-        createBulkLotForPurchaseLine({
-          productId: l.productId, purchaseId: id, purchaseLineId: l.id, acquiredAt: purchaseDate,
-          metal: l.bulk.metal, fineness: l.bulk.fineness, weightMg: l.bulk.weightMg, valueFils: l.bulkLotValueFils ?? 0,
-          saleTaxScheme: l.bulk.saleTaxScheme, composition: l.bulk.composition,
-        }, { branchId, userId, now });
-        continue;
-      }
-      // LOT-VAT-COST — unit_cost = der auf INVENTORY aktivierte Einstand je Stueck: ohne Vorsteuer
-      // der Stueckpreis (wie bisher), mit 10 % die Zeile ohne den als VAT_INPUT gebuchten Anteil —
-      // dieselbe gerundete Zahl wie `postPurchaseReceived`. products.purchase_price bleibt brutto (Anzeige).
-      const lotId = uuid();
-      lotStmt.run([lotId, branchId, l.productId, id, l.id,
-        purchaseLotUnitCost(l), l.qty, l.qty, purchaseDate, now]);
-      createdLotIds.push(lotId);
-      affectedProductIds.add(l.productId);
-    }
-    lotStmt.free();
-    // Phase 7 Sync: products.quantity = Σ lot.qty_remaining
-    for (const pid of affectedProductIds) syncProductQuantity(pid);
-    // LAN-Sync Phase 1a: neue Lots als Full-Row (kanonische id) an Geraet B tracken.
-    for (const lid of createdLotIds) trackLotRow(lid, 'insert');
-
-    // Canonical Purchase-Receive auch fuer BESTEHENDE Produkte: frische OWN-Ware macht
-    // das Produkt wieder verfuegbar. Fuer NEU angelegte Produkte erledigt das bereits
-    // createProduct (stock_status='in_stock'); fuer bestehende griff bisher NICHTS — ein
-    // 'sold'/'returned'/'consumed'-Produkt blieb trotz neuem aktiven Lot unverfuegbar.
-    // Reihenfolge: Lot erzeugt → syncProductQuantity (oben) → finaler Status/source_type → Snapshot.
-    // GUARD (kein Blind-Overwrite, kein neuer Normalizer): Lifecycle-Stati, die noch
-    // laufenden FREMDEN Workflows gehoeren, werden NICHT angefasst — with_agent (Agent-Out),
-    // in_repair (Repair-Out), consignment/consignment_reserved (Konsignations-Ware, nicht
-    // unsere), reserved (offene Teilzahlungs-Reservierung). Ein Purchase in diese Zustaende
-    // fuer DENSELBEN Product-Datensatz ist eine fachliche Fehlbedienung — der Produkt-Picker
-    // laesst sie zwar zu (kein Status-Filter), ein unterstuetzter Workflow ist es aber nicht.
-    const PURCHASE_PROTECTED_STATUS = new Set(['with_agent', 'in_repair', 'consignment', 'consignment_reserved', 'reserved']);
-    for (const pid of existingProductIds) {
-      if (getAvailableStock(pid) <= 0) continue;        // kein aktiver Lot → nichts zu tun
-      const curRows = query(`SELECT stock_status FROM products WHERE id = ?`, [pid]);
-      const curStatus = String(curRows[0]?.stock_status || '');
-      if (curStatus === 'in_stock' || PURCHASE_PROTECTED_STATUS.has(curStatus)) continue;
-      db.run(`UPDATE products SET stock_status = 'in_stock', source_type = 'OWN', updated_at = ? WHERE id = ?`, [now, pid]);
-      trackProductRow(pid);   // LAN-Sync Phase 1b: finaler autoritativer Product-Full-Row
-    }
+    // Insert lines (inkl. Input-VAT-Felder + Back-to-Back Order-Link), Beteiligungen, Lose, Menge und Lagerstatus.
+    insertPurchaseLineRows(id, purchaseDate, lineRecords, existingProductIds, { branchId, userId, now });
 
     // Initial payment (if any)
     let initialPaymentId: string | null = null;

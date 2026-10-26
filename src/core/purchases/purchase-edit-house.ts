@@ -15,7 +15,12 @@
 //
 // Die Finanzkorrektur (C), Schritt für Schritt:
 //   • Zeilen-IDs bleiben (die Buchung hängt über `source_line_id` daran, die Retoure über
-//     `purchase_line_id`). Zeilen anlegen oder löschen gibt es hier nicht.
+//     `purchase_line_id`). Eine geänderte Zeile behält ihre Kennung.
+//   • Teil 2 (v0.8.91): eine vergessene Position wird NACHGETRAGEN — über dieselbe Planung, SKU-Vergabe und
+//     Zeilenfolge wie „Save Purchase" (`PurchaseLineOps`, von außen hereingereicht: diese Datei kennt keinen Store).
+//   • Teil 3 (v0.8.91): eine UNBERÜHRTE Position wird ENTFERNT — Zeile und Los gehen; der Artikel nur, wenn ihn
+//     diese Zeile angelegt hat und nichts sonst an ihm hängt (jede Spalte `…product_id` zählt). Die letzte Position
+//     bleibt (dafür gibt es „Cancel Purchase"); Zahlungen bleiben, eine Überzahlung wird Lieferantenguthaben.
 //   • Das Hauptbuch wird nicht überschrieben: die Einkaufsbuchung wird gegengebucht und mit den neuen
 //     Werten NEU gebucht — beides am Tag der Korrektur (D3, keine Rückdatierung). Zahlungen bleiben
 //     Zeilen und Buchungen; beim Lieferantenwechsel (D5) werden ihre Buchungen auf den neuen
@@ -37,7 +42,8 @@ import { getDatabase } from '@/core/db/database';
 import { query, getNextDocumentNumber } from '@/core/db/helpers';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { trackChange } from '@/core/sync/sync-service';
-import { syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+import { getAvailableStock, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+import { purgeProductLeftovers, type LeftoverDb } from '@/core/products/product-leftovers';
 import { purchaseLotUnitCost } from '@/core/lots/lot-cost';
 import {
   hasLedgerEntries, postCostCorrection, postPurchasePayment, postPurchaseReceived, reverseSource,
@@ -53,7 +59,7 @@ import { isBulkMetalProduct } from '@/core/bulk/bulk-product';
 import {
   applyIdentityDocument, identityDocumentFor, identitySourceOf, supplierLegacyIdPhoto, IdentityMediaError,
 } from '@/core/identity/identity-media';
-import type { Purchase, PurchaseIdentityReference, PurchasePayment, PurchaseStatus, SupplierSnapshot } from '@/core/models/types';
+import type { Product, Purchase, PurchaseIdentityReference, PurchasePayment, PurchaseStatus, SupplierSnapshot } from '@/core/models/types';
 import { purchaseLineConsumption, type PurchaseLineConsumption } from './purchase-consumption';
 import { restoreSupplierCreditUsage } from '@/core/finance/supplierCreditRestore';
 
@@ -118,6 +124,39 @@ export interface PurchaseEditRequest {
   lines?: Array<{ lineId: string; unitPrice?: number; quantity?: number }>;
   /** C — Pflicht, sobald ein Stückpreis sich ändert. */
   correctionKind?: CorrectionKind;
+  /** C, Teil 2 — vergessene Positionen nachtragen. */
+  addLines?: PurchaseEditAddLine[];
+  /** C, Teil 3 — unberührte Positionen entfernen. */
+  removeLineIds?: string[];
+}
+
+/** Teil 2 — eine nachgetragene Position: ein vorhandener Artikel oder ein neuer (dieselbe Maske „New Item" wie beim Anlegen). */
+export interface PurchaseEditAddLine {
+  mode: 'existing' | 'new';
+  productId?: string;
+  /** Der Artikel-Entwurf (Kategorie, Merkmale, Fotos …) wie bei „Save Purchase"; Einstand und Menge kommen aus der Zeile. */
+  newProduct?: Partial<Product>;
+  quantity: number;
+  /** Brutto je Stück, wie beim Anlegen. */
+  unitPrice: number;
+}
+
+/** So viele Positionen trägt eine Bearbeitung höchstens nach. */
+export const MAX_ADD_LINES = 50;
+
+/** Eine geplante Position: geprüft wie bei „Save Purchase", noch nichts geschrieben, noch keine SKU vergeben. */
+export interface PlannedAddLine { line: Record<string, unknown>; lineTotal: number }
+
+/**
+ * Teil 2 — was die Hausfolge von der Zeilenfolge des Einkaufs braucht (`purchase-lines.ts`): diese Datei importiert
+ * keinen Store, und Artikel legt `createProduct` an. Primary (`editPurchaseOnPrimary`) und PC2 (`runPurchaseEdit`)
+ * reichen DIESELBE Folge herein.
+ */
+export interface PurchaseLineOps {
+  /** Nur lesend: prüfen und planen. Ein Nein ist ein `PurchaseEditRejected`. */
+  planAdd(lines: readonly PurchaseEditAddLine[], taxScheme: 'ZERO' | 'VAT_10', branchId: string): PlannedAddLine[];
+  /** Schreibend, in der Klammer des Aufrufers: SKU vergeben, Artikel anlegen, Zeilen, Lose, Menge, Lagerstatus. */
+  append(purchaseId: string, purchaseDate: string, planned: readonly PlannedAddLine[], ctx: HouseCtx): Array<{ id: string; productId: string; createdProduct: boolean }>;
 }
 
 export interface PurchaseEdited {
@@ -132,6 +171,10 @@ export interface PurchaseEdited {
   revision: number;
   overpayCredit: number;
   corrections: Array<{ correctionNumber: string; invoiceNumber: string; amount: number; economicDate: string; vatEstimate: number }>;
+  /** Teil 2/3 — die nachgetragenen und die entfernten Zeilen, und welche Artikel mit ihrer Zeile gingen. */
+  addedLineIds: string[];
+  removedLineIds: string[];
+  removedProductIds: string[];
 }
 
 // ── Die Sperren (eine Quelle für Maske und Hausfolge) ──────────────────────
@@ -152,6 +195,10 @@ export interface PurchaseEditLineCheck {
   soldUnits: number;
   /** D13 — gehört der Einkaufspreis des Artikels dieser Zeile (er folgt der Korrektur)? */
   productFollows: boolean;
+  /** Teil 3 — darf diese Position entfernt werden (unberührt im Lager, an nichts gebunden)? */
+  remove: EditLock;
+  /** Teil 3 — ginge der Artikel mit (von dieser Zeile angelegt, an nichts sonst gebunden)? Sonst bleibt er. */
+  removesProduct: boolean;
 }
 
 export interface PurchaseEditCheck {
@@ -170,6 +217,10 @@ export interface PurchaseEditCheck {
   cutoverDate: string;
   /** Live gebuchte Zahlungen (bar/Bank/Benefit) — beim Lieferantenwechsel zu bestätigen (D5). */
   livePayments: number;
+  /** Teil 2 — dürfen Positionen nachgetragen werden? */
+  addLines: EditLock;
+  /** Teil 2 — das Steuerschema einer nachgetragenen Position: das des Einkaufs. */
+  addTaxScheme: 'ZERO' | 'VAT_10';
 }
 
 interface Kontext {
@@ -191,6 +242,8 @@ interface Kontext {
   creditPaidF: number;
   overpayCredit: boolean;
   livePayments: Array<Record<string, unknown>>;
+  /** Teil 2 — das eine Steuerschema der Zeilen (eine nachgetragene Zeile übernimmt es); `null` = gemischt. */
+  addScheme: 'ZERO' | 'VAT_10' | null;
 }
 
 function assertBooks(): void {
@@ -245,7 +298,10 @@ function kontext(purchaseId: string, branchId: string, now: string): Kontext {
   const overpayCredit = !!query(
     'SELECT 1 FROM supplier_credits WHERE source_purchase_id = ? AND source_return_id IS NULL LIMIT 1', [purchaseId],
   )[0];
+  const schemes = new Set(lines.map((l) => (String(l.tax_scheme ?? '') === 'VAT_10' || Number(l.vat_amount ?? 0) > EPS ? 'VAT_10' : 'ZERO')));
+  const addScheme = schemes.size === 0 ? 'ZERO' : schemes.size === 1 ? ([...schemes][0] as 'ZERO' | 'VAT_10') : null;
   return {
+    addScheme,
     p, lines, consumption, partnerLines, hasReturn,
     consignment: byColumn || byNote, consignmentByNoteOnly: byNote,
     bulk, needsLedger, hasLedger,
@@ -341,6 +397,86 @@ function mengenSperre(k: Kontext, line: Record<string, unknown>): EditLock {
   return offen();
 }
 
+/** Teil 2 — Positionen nachtragen: dieselben Sperren wie eine Mengenänderung (Geld, Stichtag, Vorsteuer), ohne Zeile. */
+function hinzufuegenSperre(k: Kontext): EditLock {
+  const base = finanzSperre(k);
+  if (!base.allowed) return base;
+  if (k.beforeCutover) return vorStichtag();
+  const v = vorsteuerSperre(k);
+  if (!v.allowed) return v;
+  if (!k.addScheme) {
+    return zu('PURCHASE_EDIT_ADD_MIXED_VAT', 'The lines of this purchase carry different input VAT — a new line cannot take one of them over.');
+  }
+  return offen(k.addScheme === 'VAT_10' ? 'a new line carries 10% input VAT like the purchase' : undefined);
+}
+
+/** Spalten, die auf einen Artikel zeigen — und was davon beim Entfernen NICHT als Bindung zählt. */
+const ARTIKEL_SPALTE = /(^|_)product_id$/;
+// Der Upload-Beleg des Handys geht mit dem Artikel (`purgeProductLeftovers`), wie beim normalen Löschen.
+const KEINE_BINDUNG = new Set(['mobile_upload_receipts']);
+
+/**
+ * Teil 3 — woran hängt ein Artikel außer an der Zeile `exceptLineId` und ihrem Los? JEDE Tabelle mit einer Spalte
+ * `…product_id` zählt (fail-closed: auch eine, die es heute noch nicht gibt). Leer = an nichts.
+ */
+function artikelBindungen(productId: string, exceptLineId: string): string[] {
+  const out: string[] = [];
+  const tables = query(`SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name`)
+    .map((r) => String(r.name)).filter((t) => /^[a-z_][a-z0-9_]*$/.test(t) && !KEINE_BINDUNG.has(t));
+  for (const t of tables) {
+    for (const col of query(`PRAGMA table_info(${t})`).map((c) => String(c.name)).filter((c) => ARTIKEL_SPALTE.test(c))) {
+      let sql = `SELECT COUNT(*) AS n FROM ${t} WHERE ${col} = ?`;
+      const params: unknown[] = [productId];
+      if (t === 'purchase_lines') { sql += ' AND id != ?'; params.push(exceptLineId); }
+      if (t === 'stock_lots') { sql += ` AND COALESCE(purchase_line_id, '') != ?`; params.push(exceptLineId); }
+      const n = Number(query(sql, params)[0]?.n ?? 0);
+      if (n > 0) out.push(`${t}.${col}`);
+    }
+  }
+  return out;
+}
+
+/** Teil 3 — ginge der Artikel dieser Zeile beim Entfernen mit? Nur wenn SIE ihn angelegt hat und nichts sonst an ihm hängt. */
+function artikelGehtMit(line: Record<string, unknown>): boolean {
+  const productId = String(line.product_id ?? '');
+  if (!productId || isBulkMetalProduct(productId)) return false;
+  // Eine Altzeile ohne Vermerk (`created_product` NULL) gilt nicht als Anlegerin — der Artikel bleibt (fail-closed).
+  if (Number(line.created_product) !== 1) return false;
+  return artikelBindungen(productId, String(line.id)).length === 0;
+}
+
+/**
+ * Teil 3 — eine Position entfernen: nur, solange jedes ihrer Stücke unberührt im Lager liegt (nicht verkauft,
+ * reserviert, zurückgegeben, in Kommission, in Produktion, abgeschrieben oder sonst bewegt) und sie an nichts
+ * gebunden ist (Partner, Kundenauftrag). Dazu die Sperren jeder Geldkorrektur. Die letzte Position bleibt.
+ */
+function entfernenSperre(k: Kontext, line: Record<string, unknown>): EditLock {
+  const base = finanzSperre(k);
+  if (!base.allowed) return base;
+  if (k.beforeCutover) return vorStichtag();
+  const v = vorsteuerSperre(k);
+  if (!v.allowed) return v;
+  const lineId = String(line.id);
+  if (k.partnerLines.has(lineId)) {
+    return zu('PURCHASE_EDIT_PARTNER_LINE', 'This item was bought together with a partner. Its line stays until the accountant settles the gross/net basis.');
+  }
+  if (line.source_order_line_id) {
+    return zu('PURCHASE_EDIT_REMOVE_ORDER_LINE', 'This line received an item for a customer order. It is not removed here — change the order, or cancel the purchase.');
+  }
+  const c = k.consumption.get(lineId);
+  const status = String(query('SELECT stock_status FROM products WHERE id = ?', [String(line.product_id ?? '')])[0]?.stock_status ?? '');
+  if (!line.product_id || !c || !c.untouched || status !== 'in_stock') {
+    return zu('PURCHASE_EDIT_REMOVE_STOCK_USED',
+      'Only a line whose items are all still untouched in stock can be removed — not sold, reserved, returned, on consignment, in production, written off or moved.');
+  }
+  if (k.lines.length <= 1) {
+    return zu('PURCHASE_EDIT_LAST_LINE', 'This is the only line of the purchase. To undo the whole purchase, use Cancel Purchase.');
+  }
+  return offen(artikelGehtMit(line)
+    ? 'the item was created by this line and is removed with it'
+    : 'only this purchase line and its stock lot are removed — the item itself stays');
+}
+
 function lieferantSperre(k: Kontext): EditLock {
   const base = finanzSperre(k);
   if (!base.allowed) return base;
@@ -409,8 +545,12 @@ export function purchaseEditCheck(purchaseId: string, branchId: string, now: str
         quantityLock: mengenSperre(k, l),
         soldUnits: c ? c.sales.reduce((n, s) => n + s.unitsInCogs, 0) : 0,
         productFollows: artikelFolgt(l),
+        remove: entfernenSperre(k, l),
+        removesProduct: artikelGehtMit(l),
       };
     }),
+    addLines: hinzufuegenSperre(k),
+    addTaxScheme: k.addScheme ?? 'ZERO',
     correctionKinds: [
       { kind: 'ENTRY_ERROR', allowed: true },
       { kind: 'SUPPLIER_DISCOUNT', allowed: false, reason: 'A later discount from the supplier is not booked yet — the accountant decides its treatment first.' },
@@ -571,7 +711,9 @@ function statusOf(totalF: number, settledF: number): PurchaseStatus {
  * „Save" der Einkaufsbearbeitung. Alle Regeln stehen vor dem ersten Schreiben; in der Transaktion des
  * Aufrufers (Primary: `runOnPrimary`, PC2: `runRemoteCommand`).
  */
-export function editPurchaseInHouse(req: PurchaseEditRequest, ctx: HouseCtx, expectedRevision?: number): PurchaseEdited {
+export function editPurchaseInHouse(
+  req: PurchaseEditRequest, ctx: HouseCtx, expectedRevision?: number, ops?: PurchaseLineOps,
+): PurchaseEdited {
   assertBooks();
   const k = kontext(req.purchaseId, ctx.branchId, ctx.now);
   assertSeen(req.purchaseId, expectedRevision);
@@ -621,6 +763,20 @@ export function editPurchaseInHouse(req: PurchaseEditRequest, ctx: HouseCtx, exp
   }
   if (changes.some((c) => c.priceChanged)) kinds.push('PRICE');
   if (changes.some((c) => c.qtyChanged)) kinds.push('QUANTITY');
+  // Teil 3 — die zu entfernenden Positionen (eine Zeile wird entweder berichtigt oder entfernt).
+  const removeIds: string[] = [];
+  for (const raw of req.removeLineIds ?? []) {
+    const lineId = String(raw ?? '');
+    if (removeIds.includes(lineId)) throw nein('PURCHASE_EDIT_LINE_DUPLICATE', 'the same line twice is not an edit');
+    if (!lineById.has(lineId)) throw nein('PURCHASE_EDIT_LINE_UNKNOWN', 'a removed line is not a line of this purchase');
+    if (seen.has(lineId)) throw nein('PURCHASE_EDIT_LINE_CONFLICT', 'a line is either corrected or removed, not both');
+    removeIds.push(lineId);
+  }
+  if (removeIds.length > 0) kinds.push('REMOVE_LINE');
+  // Teil 2 — die nachzutragenden Positionen.
+  const adds = req.addLines ?? [];
+  if (adds.length > MAX_ADD_LINES) throw nein('PURCHASE_EDIT_ADD_TOO_MANY', `at most ${MAX_ADD_LINES} lines are added in one edit`);
+  if (adds.length > 0) kinds.push('ADD_LINE');
   if (kinds.length === 0) throw nein('PURCHASE_EDIT_NOTHING', 'Nothing was changed.');
 
   // ── 2. Die Regeln — alle VOR dem ersten Schreiben ──
@@ -674,13 +830,30 @@ export function editPurchaseInHouse(req: PurchaseEditRequest, ctx: HouseCtx, exp
     }
   }
 
+  // Teil 3 — jede Position einzeln geprüft, und eine bleibt immer (für alles andere gibt es „Cancel Purchase").
+  const removed = new Set(removeIds);
+  for (const lineId of removeIds) wirf(lineChecks.get(lineId)!.remove);
+  if (removeIds.length > 0 && removeIds.length >= k.lines.length) {
+    throw nein('PURCHASE_EDIT_LAST_LINE', 'At least one line of the purchase stays. To undo the whole purchase, use Cancel Purchase.');
+  }
+  // Teil 2 — geprüft und geplant wie bei „Save Purchase"; geschrieben (und eine SKU vergeben) wird erst unten.
+  let planned: PlannedAddLine[] = [];
+  if (adds.length > 0) {
+    wirf(check.addLines);
+    if (!ops) throw nein('PURCHASE_EDIT_ADD_UNAVAILABLE', 'adding lines needs the purchase line flow of the main computer');
+    planned = ops.planAdd(adds, check.addTaxScheme, ctx.branchId);
+    if (planned.length !== adds.length) throw nein('PURCHASE_EDIT_ADD_INVALID', 'a new line could not be planned');
+  }
+
   // Die neuen Summen — und ob die Zahlungen dazu passen.
   const neu = new Map(changes.map((c) => [String(c.line.id), c]));
   let newTotalF = 0;
   for (const l of k.lines) {
+    if (removed.has(String(l.id))) continue;
     const c = neu.get(String(l.id));
     newTotalF += c ? F(c.qty * c.price) : F(l.line_total);
   }
+  for (const pl of planned) newTotalF += F(pl.lineTotal);
   const cashF = F(p.paid_amount);
   const settledF = cashF + k.creditPaidF;
   if (k.creditPaidF > 0 && newTotalF < settledF) {
@@ -749,7 +922,7 @@ export function editPurchaseInHouse(req: PurchaseEditRequest, ctx: HouseCtx, exp
   const db = getDatabase();
   const before = belegZustand(purchaseId);
   const today = dayOf(ctx.now);
-  const finanz = kinds.some((x) => x === 'PRICE' || x === 'QUANTITY' || x === 'SUPPLIER');
+  const finanz = kinds.some((x) => x === 'PRICE' || x === 'QUANTITY' || x === 'SUPPLIER' || x === 'ADD_LINE' || x === 'REMOVE_LINE');
 
   // a) Zeilen und Lose.
   const touchedProducts = new Set<string>();
@@ -780,6 +953,65 @@ export function editPurchaseInHouse(req: PurchaseEditRequest, ctx: HouseCtx, exp
     if (l.product_id) touchedProducts.add(String(l.product_id));
   }
 
+  // a2) Teil 3 — Positionen entfernen. Entschieden wird VOR dem ersten Löschen (dieselbe Regel wie die Auskunft):
+  //     • der Artikel geht mit (von DIESER Zeile angelegt, an nichts sonst gebunden): Los, Zeile und Artikel weg;
+  //     • sonst bleibt der Artikel: sein Los wird storniert (Historie, wie beim Storno des Einkaufs — so bleibt die
+  //       Los-Historie, und die Menge folgt den Losen statt als „Altbestand ohne Lose" stehen zu bleiben), die Zeile geht.
+  //     Alles im Protokoll; der Vorher-Stand jeder Zeile steht zusätzlich im Bearbeitungsbeleg (`purchase_edits`).
+  const removedProductIds: string[] = [];
+  const keptProducts = new Set<string>();
+  const mitArtikel = new Map(removeIds.map((id) => [id, artikelGehtMit(lineById.get(id)!)]));
+  for (const lineId of removeIds) {
+    const l = lineById.get(lineId)!;
+    const productId = String(l.product_id ?? '');
+    const geht = mitArtikel.get(lineId) === true;
+    for (const lot of query('SELECT id FROM stock_lots WHERE purchase_line_id = ?', [lineId])) {
+      if (geht) {
+        db.run('DELETE FROM stock_lots WHERE id = ?', [String(lot.id)]);
+        trackLotRow(String(lot.id), 'delete');
+      } else {
+        db.run(`UPDATE stock_lots SET status = 'CANCELLED' WHERE id = ?`, [String(lot.id)]);
+        trackLotRow(String(lot.id), 'update');
+      }
+    }
+    db.run('DELETE FROM purchase_lines WHERE id = ?', [lineId]);
+    trackChange('purchase_lines', lineId, 'delete', {});
+    logAuditOrThrow({
+      module: 'Purchase', entityType: 'purchase_lines', entityId: lineId, action: 'DELETE', field: 'line',
+      oldValue: { productId: productId || null, quantity: l.quantity, unitPrice: l.unit_price, lineTotal: l.line_total, taxScheme: l.tax_scheme ?? null },
+      newValue: { purchaseId, reason, itemRemoved: geht },
+      actor: { branchId: ctx.branchId, userId: ctx.userId },
+    });
+    if (!productId) continue;
+    if (!geht) { keptProducts.add(productId); continue; }
+    const p0 = query('SELECT brand, name, sku, category_id FROM products WHERE id = ?', [productId])[0];
+    if (!p0) continue;
+    purgeProductLeftovers(db as unknown as LeftoverDb, [productId], ctx.now);
+    db.run('DELETE FROM products WHERE id = ?', [productId]);
+    trackChange('products', productId, 'delete', {});
+    logAuditOrThrow({
+      module: 'Product', entityType: 'products', entityId: productId, action: 'DELETE', field: 'product',
+      oldValue: { brand: p0.brand ?? null, name: p0.name ?? null, sku: p0.sku ?? null, categoryId: p0.category_id ?? null },
+      newValue: { reason: 'purchase line removed', purchaseId, purchaseLineId: lineId },
+      actor: { branchId: ctx.branchId, userId: ctx.userId },
+    });
+    removedProductIds.push(productId);
+    touchedProducts.delete(productId);
+  }
+  for (const pid of keptProducts) {
+    if (removedProductIds.includes(pid)) continue;
+    syncProductQuantity(pid);
+    // Wie beim Storno (F-PRC-01): ohne Bestand kein „in_stock"; ein anderer Status gehört einem anderen Vorgang.
+    if (getAvailableStock(pid) === 0) {
+      db.run(`UPDATE products SET stock_status = 'returned', updated_at = ? WHERE id = ? AND stock_status = 'in_stock'`, [ctx.now, pid]);
+    }
+    trackProductRow(pid);
+  }
+
+  // a3) Teil 2 — Positionen nachtragen: dieselbe Zeilenfolge wie „Save Purchase" (SKU, Artikel, Zeile, Los, Menge),
+  //     datiert auf das (neue) Einkaufsdatum. Die Buchung folgt unten mit allen Zeilen.
+  const addedLineIds = planned.length > 0 && ops ? ops.append(purchaseId, newDate, planned, ctx).map((a) => a.id) : [];
+
   // b) Datum: Lose (FIFO-Reihenfolge) und — wo er dem Einkauf gehört — der Artikel. Das Hauptbuch behält
   //    sein Buchungsdatum (D4): verschoben wird nichts, und die Vorsteuer bleibt in ihrem Quartal.
   if (kinds.includes('DATE')) {
@@ -792,7 +1024,7 @@ export function editPurchaseInHouse(req: PurchaseEditRequest, ctx: HouseCtx, exp
   // c) D13 — der Artikel folgt, wo er dem Einkauf gehört. Verkaufs- und Mindestpreis bleiben.
   for (const l of k.lines) {
     const productId = String(l.product_id ?? '');
-    if (!productId || !artikelFolgt(l)) continue;
+    if (removed.has(String(l.id)) || !productId || !artikelFolgt(l)) continue;
     const c = neu.get(String(l.id));
     const sets: string[] = [];
     const vals: unknown[] = [];
@@ -920,7 +1152,11 @@ export function editPurchaseInHouse(req: PurchaseEditRequest, ctx: HouseCtx, exp
   logAuditOrThrow({
     module: 'Purchase', entityType: 'purchases', entityId: purchaseId, action: 'UPDATE', field: kinds.join(','),
     oldValue: (before as { header: unknown }).header,
-    newValue: { reason, kinds, editNo, editId, header: (after as { header: unknown }).header, corrections: corrections.map((c) => c.correctionNumber) },
+    newValue: {
+      reason, kinds, editNo, editId, header: (after as { header: unknown }).header, corrections: corrections.map((c) => c.correctionNumber),
+      ...(addedLineIds.length ? { addedLines: addedLineIds } : {}),
+      ...(removeIds.length ? { removedLines: removeIds, removedProducts: removedProductIds } : {}),
+    },
     actor: { branchId: ctx.branchId, userId: ctx.userId },
   });
   trackChange('purchases', purchaseId, 'update', {});
@@ -929,7 +1165,7 @@ export function editPurchaseInHouse(req: PurchaseEditRequest, ctx: HouseCtx, exp
   return {
     purchaseId, purchaseNumber: String(p.purchase_number ?? ''), editId, editNo, kinds,
     totalAmount: B(newTotalF), remainingAmount: B(remainingF), status, revision: revisionOf(purchaseId),
-    overpayCredit: over, corrections,
+    overpayCredit: over, corrections, addedLineIds, removedLineIds: removeIds, removedProductIds,
   };
 }
 

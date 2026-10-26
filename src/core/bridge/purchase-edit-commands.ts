@@ -1,7 +1,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 // PURCHASE-EDIT — die Einkaufsbearbeitung vom zweiten Rechner: `purchases.update` (Notiz,
 // Mitarbeiter, Ausweisfoto), `purchases.correct` (dazu Datum, Lieferant, Preise, Mengen — nur
-// Owner/Admin, D11), `purchases.void_payment` (D14) und die Auskünfte `purchase.edit_check.get`
+// Owner/Admin, D11; v0.8.91 auch Positionen nachtragen und entfernen), `purchases.void_payment` (D14) und die Auskünfte `purchase.edit_check.get`
 // (was darf sich ändern, und warum nicht) und `page.cost_corrections.get` (die Überleitungsansicht).
 //
 // Derselbe Bau wie beim Lebenszyklus (`purchase-lifecycle-commands.ts`):
@@ -12,6 +12,8 @@
 //  3. Ändern braucht die gesehene Fassung (`purchases.revision`), INNERHALB der Transaktion verglichen.
 //  4. Das neue Ausweisfoto reist als Ablagekennung (`identityPhotoStagingId`), nie als Bytes; es wird
 //     VOR der Klammer aufgenommen (der Ingest hat eigene durable Haltepunkte).
+//  5. Teil 2 — ein nachgetragener NEUER Artikel reist wie bei `purchases.create`: sein Entwurf (`parseSpec`) und
+//     statt der Fotos ihre Ablagekennungen, gelesen INNERHALB des Auftrags (`mitFotos`), geräumt erst nach Erfolg.
 // ════════════════════════════════════════════════════════════════════════════
 import { getDatabase, saveDatabaseDurably } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
@@ -26,10 +28,14 @@ import {
 } from './remote-create-support';
 import { ingestIdentityPhoto, identitySourceOf } from '@/core/identity/identity-media';
 import {
-  PURCHASE_EDIT_OP, PURCHASE_EDIT_CHECK_OP, PurchaseEditRejected, editPurchaseInHouse, isCorrectionKind,
-  purchaseEditCheck, voidPurchasePaymentInHouse, type PurchaseEditRequest,
+  MAX_ADD_LINES, PURCHASE_EDIT_OP, PURCHASE_EDIT_CHECK_OP, PurchaseEditRejected, editPurchaseInHouse, isCorrectionKind,
+  purchaseEditCheck, voidPurchasePaymentInHouse, type PurchaseEditAddLine, type PurchaseEditRequest,
 } from '@/core/purchases/purchase-edit-house';
 import { costCorrectionBridge, costCorrectionRows } from '@/core/purchases/cost-correction-read';
+import { PURCHASE_LINE_OPS } from '@/core/purchases/purchase-lines';
+import { EMBEDDED_PRODUCT_FIELDS } from '@/core/products/embedded-product';
+import type { Product } from '@/core/models/types';
+import { CommercialPayloadError, mitFotos, parseSpec } from './commercial-commands';
 import { OP_PAGE_COST_CORRECTIONS_GET, OP_PURCHASE_EDIT_CHECK_GET } from './store-read-ops';
 
 export const OP_PURCHASES_UPDATE = PURCHASE_EDIT_OP.UPDATE;
@@ -59,7 +65,9 @@ const FORBIDDEN = ['id', 'branchId', 'tenantId', 'userId', 'createdBy', 'actor',
   'lots', 'ledger', 'entries', 'corrections', 'costCorrections', 'lineTotal', 'vatAmount', 'taxScheme', 'productId'];
 
 const A_FIELDS = ['purchaseId', 'expectedRevision', 'reason', 'notes', 'staffId', 'identityPhotoStagingId', 'alsoUpdatePerson'];
-const C_FIELDS = [...A_FIELDS, 'purchaseDate', 'supplierId', 'confirmPaymentsToNewSupplier', 'lines', 'correctionKind'];
+const C_FIELDS = [...A_FIELDS, 'purchaseDate', 'supplierId', 'confirmPaymentsToNewSupplier', 'lines', 'correctionKind', 'addLines', 'removeLineIds'];
+/** Teil 2 — eine nachgetragene Position: genau die Eingaben der Maske; Summe, Vorsteuer, Los und SKU rechnet der Primary. */
+const ADD_LINE_FIELDS = ['mode', 'productId', 'newProduct', 'quantity', 'unitPrice'];
 
 function strict(raw: unknown, allowed: readonly string[], what = 'payload'): Record<string, unknown> {
   if (!isPlain(raw)) throw new PurchaseEditPayloadError(`${what} must be an object`);
@@ -99,6 +107,37 @@ export interface PurchaseEditCommand {
   expectedRevision: number;
   identityPhotoStagingId?: string;
   alsoUpdatePerson?: boolean;
+  /** Teil 2 — je nachgetragener Position der Artikel-Entwurf mit den Kennungen seiner Fotos (oder nichts). */
+  addSpecs?: Array<{ spec: Partial<Product>; stagingIds?: string[] } | undefined>;
+}
+
+/** Teil 2 — die nachgetragenen Positionen aus dem Rumpf. */
+function parseAddLines(v: unknown): { lines: PurchaseEditAddLine[]; specs: Array<{ spec: Partial<Product>; stagingIds?: string[] } | undefined> } {
+  if (!Array.isArray(v)) throw new PurchaseEditPayloadError('addLines must be a list');
+  if (v.length > MAX_ADD_LINES) throw new PurchaseEditPayloadError('too many new lines');
+  const specs: Array<{ spec: Partial<Product>; stagingIds?: string[] } | undefined> = [];
+  const lines = v.map((raw, i): PurchaseEditAddLine => {
+    if (!isPlain(raw)) throw new PurchaseEditPayloadError(`new line ${i + 1} must be an object`);
+    for (const k of Object.keys(raw)) {
+      if (!ADD_LINE_FIELDS.includes(k)) throw new PurchaseEditPayloadError(`new line ${i + 1}: unknown field: ${k}`);
+    }
+    if (raw.mode !== 'existing' && raw.mode !== 'new') throw new PurchaseEditPayloadError(`new line ${i + 1}: mode is existing or new`);
+    if (typeof raw.quantity !== 'number' || !Number.isFinite(raw.quantity)) throw new PurchaseEditPayloadError(`new line ${i + 1}: quantity must be a number`);
+    if (typeof raw.unitPrice !== 'number' || !Number.isFinite(raw.unitPrice)) throw new PurchaseEditPayloadError(`new line ${i + 1}: unitPrice must be a number`);
+    let spec: { spec: Partial<Product>; stagingIds?: string[] } | undefined;
+    try { spec = parseSpec(raw.newProduct, EMBEDDED_PRODUCT_FIELDS, `new line ${i + 1}: newProduct`); } catch (e) {
+      if (e instanceof CommercialPayloadError) throw new PurchaseEditPayloadError(e.message);
+      throw e;
+    }
+    specs.push(spec);
+    return {
+      mode: raw.mode,
+      ...(raw.productId !== undefined ? { productId: idOf(raw.productId, `new line ${i + 1}: productId`) } : {}),
+      ...(spec ? { newProduct: spec.spec } : {}),
+      quantity: raw.quantity, unitPrice: raw.unitPrice,
+    };
+  });
+  return { lines, specs };
 }
 
 /** `purchases.update` (A/B) oder `purchases.correct` (alles) — `financial` entscheidet, was erlaubt ist. */
@@ -147,6 +186,16 @@ export function parsePurchaseEdit(raw: unknown, financial: boolean): PurchaseEdi
         return line;
       });
     }
+    if (r.removeLineIds !== undefined) {
+      if (!Array.isArray(r.removeLineIds)) throw new PurchaseEditPayloadError('removeLineIds must be a list');
+      if (r.removeLineIds.length > 200) throw new PurchaseEditPayloadError('too many lines');
+      out.request.removeLineIds = r.removeLineIds.map((x) => idOf(x, 'removeLineIds'));
+    }
+    if (r.addLines !== undefined) {
+      const add = parseAddLines(r.addLines);
+      out.request.addLines = add.lines;
+      out.addSpecs = add.specs;
+    }
   }
   return out;
 }
@@ -188,6 +237,9 @@ export async function runPurchaseEdit(
 ): Promise<CommandOutcome> {
   const req = parsePurchaseEdit(raw, financial);
   const staged = req.identityPhotoStagingId ? [req.identityPhotoStagingId] : [];
+  // Teil 2 — die Fotos nachgetragener neuer Artikel: gelesen IN der Klammer, geräumt erst nach Erfolg (wie `purchases.create`).
+  const addStaged = (req.addSpecs ?? []).flatMap((x) => x?.stagingIds ?? []);
+  const read = media.readStaged ?? invokeReadStagedRecord;
   // Das neue Foto VOR der Klammer aufnehmen — im Bereich der Person, der das Dokument gehört (beim
   // neuen Lieferanten der neue). Ein Nein wird mitgenommen: die Wiederholung desselben Auftrags (die
   // Ablage ist dann geräumt) muss die eingefrorene Antwort bekommen, nicht einen neuen Fehler.
@@ -203,16 +255,25 @@ export async function runPurchaseEdit(
       mediaId = img ? await ingestIdentityPhoto(img, owner.ownerType, { ownerId: owner.ownerId }) : null;
     } catch (e) { fotoFehler = e; }
   }
-  const outcome = await runRemoteCommand(deps, identity, () => {
+  const outcome = await runRemoteCommand(deps, identity, async () => {
     if (fotoFehler) throw fotoFehler;
     assertHouseBranch(identity);
     const ctx = { branchId: identity.branchId, userId: identity.userId, now: deps.now() };
     const request: PurchaseEditRequest = { ...req.request };
     if (mediaId) request.identityPhoto = { mediaId, alsoUpdatePerson: req.alsoUpdatePerson === true };
-    return { ...urteil(() => editPurchaseInHouse(request, ctx, req.expectedRevision)) };
+    if (request.addLines && req.addSpecs) {
+      const owner = stagingOwnerOf(identity);
+      const lines: PurchaseEditAddLine[] = [];
+      for (let i = 0; i < request.addLines.length; i++) {
+        const spec = req.addSpecs[i];
+        lines.push(spec ? { ...request.addLines[i], newProduct: await mitFotos(spec, owner, read) } : request.addLines[i]);
+      }
+      request.addLines = lines;
+    }
+    return { ...urteil(() => editPurchaseInHouse(request, ctx, req.expectedRevision, PURCHASE_LINE_OPS)) };
   });
-  if (outcome.kind === 'ok' && staged.length) {
-    await discardStagedAfterSuccess(staged, stagingOwnerOf(identity), media.discardStaged ?? invokeDiscardStaged);
+  if (outcome.kind === 'ok' && (staged.length || addStaged.length)) {
+    await discardStagedAfterSuccess([...staged, ...addStaged], stagingOwnerOf(identity), media.discardStaged ?? invokeDiscardStaged);
   }
   return outcome;
 }

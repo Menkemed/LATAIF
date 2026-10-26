@@ -2817,7 +2817,9 @@ mod legacy_push_tests {
         // B1 OPENING ACCOUNTING: the opening document opening_account_items likewise (56 → 57 insert, 39 → 40 update).
         // PURCHASE-EDIT D14: a wrongly recorded purchase payment is voided (voided_*), never deleted → purchase_payments
         // gains update (40 → 41 update).
-        assert_eq!((ins, upd, del), (57, 41, 38),"insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
+        // PURCHASE-EDIT Teil 3 (v0.8.91): an untouched purchase line is removed from a saved purchase → purchase_lines
+        // gains delete, like invoice_lines/order_lines (38 → 39 delete).
+        assert_eq!((ins, upd, del), (57, 41, 39),"insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
     }
 
     // O6 — a mixed batch with one disallowed operation writes NOTHING (all-or-nothing).

@@ -9,10 +9,14 @@
 // Nummer, Originalbelege, Zahlungen und Protokoll bleiben; die Rechnung eines verkauften Stücks
 // bleibt unverändert (D1: eigene Einstandskorrektur). Artikelangaben und Fotos ändert „Edit item"
 // am Artikel selbst (D13: derselbe Artikel in Collections).
+//
+// v0.8.91 — Teil 2/3: eine vergessene Position nachtragen (vorhandener Artikel oder „New Item" — dieselbe Maske
+// wie beim Anlegen, mit SKU-Vorschau) und eine unberührte Position entfernen. Beides ist eine Geldkorrektur
+// (`purchases.correct`, nur Owner); was erlaubt ist, sagt die Auskunft je Zeile (`remove`) und für den Einkauf (`addLines`).
 // ════════════════════════════════════════════════════════════════════════════
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
-import { ArrowLeft, Lock, Save, Edit3 } from 'lucide-react';
+import { ArrowLeft, Lock, Save, Edit3, Plus, Trash2, Undo2 } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -21,6 +25,7 @@ import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { StaffSelect } from '@/components/employees/StaffSelect';
 import { IdentityPhotoField } from '@/components/identity/IdentityPhotoField';
+import { NewProductModal } from '@/components/products/NewProductModal';
 import { WriteError } from '@/components/shared/WriteError';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useSupplierStore } from '@/stores/supplierStore';
@@ -30,12 +35,12 @@ import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { viaWrites } from '@/core/payables/payables-save';
 import { latestBusinessDate } from '@/core/utils/business-date';
-import { productDisplayName } from '@/core/products/display-name';
+import { productDisplayName, productDisplayLines } from '@/core/products/display-name';
 import type { Product, PurchaseIdentityReference } from '@/core/models/types';
 import { loadPurchaseIdentityPhoto, revokeIdentityPhoto, type IdentityPhotoView } from '@/core/identity/identity-photo-view';
 import {
   PURCHASE_EDIT_CHECK_OP, PURCHASE_EDIT_OP, purchaseEditCheck,
-  type CorrectionKind, type EditLock, type PurchaseEditCheck,
+  type CorrectionKind, type EditLock, type PurchaseEditAddLine, type PurchaseEditCheck,
 } from '@/core/purchases/purchase-edit-house';
 import { isFinancialPurchaseEdit, savePurchaseEdit, type PurchaseEditForm } from '@/core/purchases/purchase-house';
 
@@ -58,8 +63,18 @@ function labelFor(products: readonly Product[], pid: string): string {
   return p ? productDisplayName(p) : pid.slice(0, 8);
 }
 
-const NUR_OWNER_TEXT = 'Only the owner corrects date, supplier, prices and quantities.';
+const NUR_OWNER_TEXT = 'Only the owner corrects date, supplier, prices, quantities and the items of a purchase.';
 const NUR_OWNER: EditLock = { allowed: false, code: 'PURCHASE_EDIT_OWNER_ONLY', reason: NUR_OWNER_TEXT };
+
+/** Teil 2 — eine nachzutragende Position in der Maske (Menge/Preis als Text: ein leeres Feld ist keine 0). */
+interface AddRow {
+  key: number;
+  mode: 'existing' | 'new';
+  productId?: string;
+  newProduct?: Partial<Product>;
+  quantity: string;
+  unitPrice: string;
+}
 
 export function PurchaseEdit() {
   const { id } = useParams<{ id: string }>();
@@ -67,11 +82,11 @@ export function PurchaseEdit() {
   const goBack = useGoBack(`/purchases/${id ?? ''}`);
   const { purchases, loadPurchases } = usePurchaseStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
-  const { products, loadProducts } = useProductStore();
+  const { products, loadProducts, categories, loadCategories } = useProductStore();
   const perm = usePermission();
   const w = useSharedWrites();
   const [tick, setTick] = useState(0);
-  useEffect(() => { loadPurchases(); loadSuppliers(); loadProducts(); }, [loadPurchases, loadSuppliers, loadProducts]);
+  useEffect(() => { loadPurchases(); loadSuppliers(); loadProducts(); loadCategories(); }, [loadPurchases, loadSuppliers, loadProducts, loadCategories]);
 
   const purchase = useMemo(() => purchases.find((p) => p.id === id), [purchases, id]);
   const check = useSharedRead<PurchaseEditCheck | null>(
@@ -96,6 +111,18 @@ export function PurchaseEdit() {
   const [idPhoto, setIdPhoto] = useState<string | undefined>(undefined);
   const [alsoPerson, setAlsoPerson] = useState(false);
   const [fehler, setFehler] = useState('');
+  // Teil 3 — zum Entfernen vorgemerkte Positionen; Teil 2 — nachzutragende Positionen und die „New Item"-Maske.
+  const [removeIds, setRemoveIds] = useState<string[]>([]);
+  const [addRows, setAddRows] = useState<AddRow[]>([]);
+  const [addSeq, setAddSeq] = useState(1);
+  const [modalKey, setModalKey] = useState<number | null>(null);
+  const updateAdd = (key: number, patch: Partial<AddRow>) => setAddRows((rs) => rs.map((r) => (r.key === key ? { ...r, ...patch } : r)));
+  const addRow = (mode: 'existing' | 'new') => {
+    const key = addSeq;
+    setAddSeq((n) => n + 1);
+    setAddRows((rs) => [...rs, { key, mode, quantity: '1', unitPrice: '' }]);
+    if (mode === 'new') setModalKey(key);
+  };
 
   useEffect(() => {
     if (!purchase || startedFor === purchase.id) return;
@@ -127,6 +154,10 @@ export function PurchaseEdit() {
   const supplierOptions = useMemo(() => suppliers
     .filter((s) => s.active || s.id === purchase?.supplierId)
     .map((s) => ({ id: s.id, label: s.name, subtitle: s.phone || s.email })), [suppliers, purchase?.supplierId]);
+  // Teil 2 — dieselbe Artikelauswahl wie beim Anlegen (ohne Reparatur-Service und Edelmetall-Systemartikel).
+  const addProductOptions = useMemo(() => products
+    .filter((p) => !(p.categoryId || '').startsWith('cat-repair-service') && !(p.categoryId || '').startsWith('cat-bulk-metal') && !p.id.startsWith('bulk-'))
+    .map((p) => ({ id: p.id, label: productDisplayName(p), subtitle: p.sku || undefined, meta: `${fmt(p.purchasePrice || 0)} BHD` })), [products]);
 
   // ── Was sich geändert hat → das Formular für die Hausfolge ──
   const geaendert = useMemo(() => {
@@ -134,6 +165,8 @@ export function PurchaseEdit() {
     const lines: NonNullable<PurchaseEditForm['lines']> = [];
     let invalid = '';
     for (const l of purchase.lines) {
+      // Eine zum Entfernen vorgemerkte Position wird nicht zugleich berichtigt.
+      if (removeIds.includes(l.id)) continue;
       const pRaw = prices[l.id] ?? String(l.unitPrice);
       const qRaw = qtys[l.id] ?? String(l.quantity);
       // Ein leeres Feld ist keine 0 (Number('') wäre 0) — sonst würde ein gelöschter Preis still zu 0.
@@ -158,10 +191,27 @@ export function PurchaseEdit() {
     if (lines.length > 0) form.lines = lines;
     if (lines.some((l) => l.unitPrice !== undefined)) form.correctionKind = kind;
     if (idPhoto) form.identityPhoto = { dataUrl: idPhoto, alsoUpdatePerson: alsoPerson };
+    // Teil 3/2 — entfernen und nachtragen.
+    const removeLineIds = purchase.lines.filter((l) => removeIds.includes(l.id)).map((l) => l.id);
+    if (removeLineIds.length > 0) form.removeLineIds = removeLineIds;
+    const addLines: PurchaseEditAddLine[] = [];
+    addRows.forEach((r, i) => {
+      const n = `New line ${i + 1}`;
+      const p = r.unitPrice.trim() === '' ? NaN : Number(r.unitPrice);
+      const q = r.quantity.trim() === '' ? NaN : Number(r.quantity);
+      if (r.mode === 'existing' && !r.productId) { invalid = `${n}: pick the item.`; return; }
+      if (r.mode === 'new' && !r.newProduct) { invalid = `${n}: define the new item.`; return; }
+      if (!Number.isFinite(p) || p < 0) { invalid = `${n}: the unit price must be a number of 0 or more.`; return; }
+      if (!Number.isInteger(q) || q < 1) { invalid = `${n}: the quantity must be a whole number of at least 1.`; return; }
+      addLines.push(r.mode === 'existing'
+        ? { mode: 'existing', productId: r.productId, quantity: q, unitPrice: R3(p) }
+        : { mode: 'new', newProduct: r.newProduct, quantity: q, unitPrice: R3(p) });
+    });
+    if (addLines.length > 0) form.addLines = addLines;
     const anything = form.notes !== undefined || form.staffId !== undefined || form.purchaseDate !== undefined
-      || form.supplierId !== undefined || lines.length > 0 || !!form.identityPhoto;
+      || form.supplierId !== undefined || lines.length > 0 || !!form.identityPhoto || removeLineIds.length > 0 || addRows.length > 0;
     return { form, invalid, anything };
-  }, [purchase, prices, qtys, reason, notes, staffId, date, supplierId, confirmPay, kind, idPhoto, alsoPerson, check?.livePayments]);
+  }, [purchase, prices, qtys, reason, notes, staffId, date, supplierId, confirmPay, kind, idPhoto, alsoPerson, check?.livePayments, removeIds, addRows]);
 
   // ── Die Wirkung vorab (nur Anzeige — die Zahlen rechnet beim Speichern der Primary) ──
   const vorschau = useMemo(() => {
@@ -170,13 +220,19 @@ export function PurchaseEdit() {
     let neu = 0;
     const hinweise: string[] = [];
     for (const l of purchase.lines) {
+      const c = lineCheck.get(l.id);
+      const name = l.productId ? labelFor(products, l.productId) : (l.description || 'line');
+      if (geaendert.form.removeLineIds?.includes(l.id)) {
+        hinweise.push(c?.removesProduct
+          ? `${name}: the line, its stock lot and the item itself are removed (the item was created by this line and is used nowhere else).`
+          : `${name}: the line and its stock lot are removed — the item stays in Collections.`);
+        continue;
+      }
       const ch = geaendert.form.lines?.find((x) => x.lineId === l.id);
       const price = ch?.unitPrice ?? l.unitPrice;
       const qty = ch?.quantity ?? l.quantity;
       neu += price * qty;
       if (!ch) continue;
-      const c = lineCheck.get(l.id);
-      const name = l.productId ? labelFor(products, l.productId) : (l.description || 'line');
       if (ch.unitPrice !== undefined) {
         const delta = ch.unitPrice - l.unitPrice;
         const deltaNet = l.taxScheme === 'VAT_10' ? delta / 1.1 : delta;
@@ -189,6 +245,20 @@ export function PurchaseEdit() {
           : `${name}: the item keeps its purchase price — it is not tied to this purchase line only. Sale prices are not changed.`);
       }
       if (ch.quantity !== undefined) hinweise.push(`${name}: stock of this line becomes ${ch.quantity} piece(s).`);
+    }
+    for (const a of geaendert.form.addLines ?? []) {
+      neu += a.unitPrice * a.quantity;
+      const name = a.mode === 'existing' && a.productId ? labelFor(products, a.productId)
+        : (a.newProduct ? (productDisplayName(a.newProduct as Product) || 'new item') : 'new item');
+      hinweise.push(a.mode === 'new'
+        ? `${name}: a new item is created in Collections with ${a.quantity} piece(s) in stock${a.newProduct?.sku ? '' : ' and the next SKU from the counter'}.`
+        : `${name}: ${a.quantity} more piece(s) come into stock on their own stock lot.`);
+    }
+    if ((geaendert.form.addLines?.length ?? 0) > 0 && check.addTaxScheme === 'VAT_10') {
+      hinweise.push('New lines carry 10% input VAT like the rest of this purchase.');
+    }
+    if ((geaendert.form.addLines?.length ?? 0) > 0 || (geaendert.form.removeLineIds?.length ?? 0) > 0) {
+      hinweise.push('The purchase booking is reversed and posted again today with all its lines; payments stay as they are.');
     }
     if (geaendert.form.purchaseDate) hinweise.push('The stock lots of this purchase take the new date (stock age); the booking is reversed and posted again today.');
     if (geaendert.form.supplierId) {
@@ -209,6 +279,8 @@ export function PurchaseEdit() {
   }
 
   const owner = perm.isOwner;
+  const addLock: EditLock | undefined = !owner ? NUR_OWNER : check?.addLines;
+  const modalRow = modalKey != null ? addRows.find((r) => r.key === modalKey) : undefined;
   const financial = geaendert ? isFinancialPurchaseEdit(geaendert.form) : false;
   const dateLock: EditLock | undefined = !owner ? NUR_OWNER : check?.date;
   const supplierLock: EditLock | undefined = !owner ? NUR_OWNER : check?.supplier;
@@ -302,41 +374,120 @@ export function PurchaseEdit() {
           <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 14 }}>
             {purchase.lines.map((l) => {
               const c = check?.lines.find((x) => x.lineId === l.id);
+              const weg = removeIds.includes(l.id);
               const priceLock: EditLock | undefined = !owner ? NUR_OWNER : c?.price;
               const qtyLock: EditLock | undefined = !owner ? NUR_OWNER : c?.quantityLock;
+              const removeLock: EditLock | undefined = !owner ? NUR_OWNER : c?.remove;
               return (
-                <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: 14, alignItems: 'start', paddingBottom: 12, borderBottom: '1px solid rgba(229,225,214,0.5)' }}
-                  data-purchase-edit-line={l.id}>
+                <div key={l.id} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: 14, alignItems: 'start', paddingBottom: 12, borderBottom: '1px solid rgba(229,225,214,0.5)', opacity: weg ? 0.55 : 1 }}
+                  data-purchase-edit-line={l.id} data-purchase-edit-removed={weg ? 'true' : undefined}>
                   <div>
-                    <div style={{ fontSize: 13, color: '#0F0F10' }}>{l.productId ? labelFor(products, l.productId) : (l.description || '—')}</div>
+                    <div style={{ fontSize: 13, color: '#0F0F10', textDecoration: weg ? 'line-through' : 'none' }}>{l.productId ? labelFor(products, l.productId) : (l.description || '—')}</div>
                     <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
                       {l.taxScheme === 'VAT_10' ? 'VAT 10% included' : 'No input VAT'}
                       {c && c.soldUnits > 0 ? ` · ${c.soldUnits} sold` : ''}
                     </div>
+                    {weg && (
+                      <div style={{ fontSize: 11, color: '#B45309', marginTop: 4 }} data-purchase-edit-remove-note>
+                        {c?.removesProduct ? 'Will be removed together with the item (created by this line, used nowhere else).' : 'Will be removed — the item itself stays in Collections.'}
+                      </div>
+                    )}
+                    {!weg && removeLock && !removeLock.allowed && removeLock.code !== 'PURCHASE_EDIT_OWNER_ONLY' && (
+                      <div data-purchase-edit-remove-locked={l.id}><Gesperrt lock={removeLock} /></div>
+                    )}
                   </div>
                   <div>
                     <Input label="UNIT PRICE (BHD)" type="number" step="0.001" min="0" value={prices[l.id] ?? ''}
                       onChange={(e) => setPrices((s) => ({ ...s, [l.id]: e.target.value }))}
-                      disabled={!priceLock?.allowed || w.busy} data-purchase-edit-price={l.id} />
-                    <Gesperrt lock={priceLock} />
+                      disabled={weg || !priceLock?.allowed || w.busy} data-purchase-edit-price={l.id} />
+                    {!weg && <Gesperrt lock={priceLock} />}
                   </div>
                   <div>
                     <Input label="QUANTITY" type="number" step="1" min="1" value={qtys[l.id] ?? ''}
                       onChange={(e) => setQtys((s) => ({ ...s, [l.id]: e.target.value }))}
-                      disabled={!qtyLock?.allowed || w.busy} data-purchase-edit-qty={l.id} />
-                    <Gesperrt lock={qtyLock} />
+                      disabled={weg || !qtyLock?.allowed || w.busy} data-purchase-edit-qty={l.id} />
+                    {!weg && <Gesperrt lock={qtyLock} />}
                   </div>
-                  <div style={{ paddingTop: 20 }}>
-                    {l.productId && (
+                  <div style={{ paddingTop: 20, display: 'flex', gap: 6, alignItems: 'center' }}>
+                    {l.productId && !weg && (
                       <Button variant="ghost" onClick={() => navigate(`/collection/${l.productId}?edit=1&fromPurchase=${purchase.id}`)}
                         data-purchase-edit-item={l.productId}>
                         <Edit3 size={13} /> Edit item
+                      </Button>
+                    )}
+                    {weg ? (
+                      <Button variant="ghost" onClick={() => setRemoveIds((ids) => ids.filter((x) => x !== l.id))} disabled={w.busy}
+                        data-purchase-edit-unremove={l.id}>
+                        <Undo2 size={13} /> Keep
+                      </Button>
+                    ) : (
+                      <Button variant="ghost" onClick={() => {
+                        setRemoveIds((ids) => [...ids, l.id]);
+                        setPrices((s) => ({ ...s, [l.id]: String(l.unitPrice) }));
+                        setQtys((s) => ({ ...s, [l.id]: String(l.quantity) }));
+                      }}
+                        disabled={!removeLock?.allowed || w.busy || purchase.lines.length - removeIds.length <= 1}
+                        title={removeLock && !removeLock.allowed ? removeLock.reason : purchase.lines.length - removeIds.length <= 1 ? 'At least one line stays — to undo the whole purchase, use Cancel Purchase.' : 'Remove this line'}
+                        data-purchase-edit-remove={l.id}>
+                        <Trash2 size={13} /> Remove
                       </Button>
                     )}
                   </div>
                 </div>
               );
             })}
+          </div>
+
+          {/* Teil 2 — vergessene Positionen nachtragen */}
+          <div style={{ marginTop: 18 }} data-purchase-edit-add>
+            {addRows.map((r, i) => {
+              const p = r.productId ? products.find((x) => x.id === r.productId) : undefined;
+              return (
+                <div key={r.key} style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr auto', gap: 14, alignItems: 'start', padding: '10px 0', borderBottom: '1px solid rgba(229,225,214,0.5)' }}
+                  data-purchase-edit-add-row={r.key}>
+                  <div>
+                    <label className="text-overline" style={{ marginBottom: 6, display: 'block' }}>
+                      NEW LINE {i + 1} · {r.mode === 'existing' ? 'EXISTING ITEM' : 'NEW ITEM'}
+                    </label>
+                    {r.mode === 'existing' ? (
+                      <SearchSelect placeholder="Pick item..." options={addProductOptions} value={r.productId ?? ''}
+                        onChange={(pid) => {
+                          const picked = products.find((x) => x.id === pid);
+                          updateAdd(r.key, { productId: pid, unitPrice: r.unitPrice || String(picked?.purchasePrice ?? '') });
+                        }} disabled={w.busy} />
+                    ) : (
+                      <button type="button" onClick={() => setModalKey(r.key)} disabled={w.busy} className="cursor-pointer"
+                        style={{ width: '100%', textAlign: 'left', padding: '8px 10px', fontSize: 12, border: r.newProduct ? '1px solid #E5E9EE' : '1px dashed #D5D9DE', borderRadius: 4, background: r.newProduct ? '#F2F7FA' : '#FFFFFF', color: r.newProduct ? '#0F0F10' : '#6B7280' }}
+                        data-purchase-edit-add-define={r.key}>
+                        {r.newProduct
+                          ? <>{productDisplayLines(r.newProduct).overline} <span style={{ color: '#4B5563' }}>{productDisplayLines(r.newProduct).title}</span> <span style={{ color: '#6B7280' }}>· Edit</span></>
+                          : '+ Define new item…'}
+                      </button>
+                    )}
+                    {p?.sku && <div style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }} className="font-mono">{p.sku}</div>}
+                  </div>
+                  <Input label="UNIT PRICE (BHD)" type="number" step="0.001" min="0" value={r.unitPrice}
+                    onChange={(e) => updateAdd(r.key, { unitPrice: e.target.value })} disabled={w.busy} data-purchase-edit-add-price={r.key} />
+                  <Input label="QUANTITY" type="number" step="1" min="1" value={r.quantity}
+                    onChange={(e) => updateAdd(r.key, { quantity: e.target.value })} disabled={w.busy} data-purchase-edit-add-qty={r.key} />
+                  <div style={{ paddingTop: 20 }}>
+                    <Button variant="ghost" onClick={() => setAddRows((rs) => rs.filter((x) => x.key !== r.key))} disabled={w.busy}
+                      data-purchase-edit-add-discard={r.key}>
+                      <Trash2 size={13} /> Discard
+                    </Button>
+                  </div>
+                </div>
+              );
+            })}
+            <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+              <Button variant="secondary" onClick={() => addRow('existing')} disabled={!addLock?.allowed || w.busy} data-purchase-edit-add-existing>
+                <Plus size={13} /> Add existing item
+              </Button>
+              <Button variant="secondary" onClick={() => addRow('new')} disabled={!addLock?.allowed || w.busy} data-purchase-edit-add-new>
+                <Plus size={13} /> Add new item
+              </Button>
+            </div>
+            <Gesperrt lock={addLock} />
           </div>
           {geaendert?.form.correctionKind !== undefined && check && (
             <div style={{ marginTop: 14 }}>
@@ -407,6 +558,22 @@ export function PurchaseEdit() {
           <WriteError text={fehler} />
         </div>
       </div>
+
+      {/* Teil 2 — dieselbe „New Item"-Maske wie beim Anlegen (Merkmale, Fotos, SKU-Vorschau aus dem zentralen Zähler). */}
+      <NewProductModal
+        open={modalKey != null && !!modalRow}
+        onClose={() => setModalKey(null)}
+        onSubmit={(prod) => { if (modalKey != null) updateAdd(modalKey, { newProduct: prod }); setModalKey(null); }}
+        initial={modalRow?.newProduct ?? {
+          categoryId: categories[0]?.id || '', brand: '', name: '', sku: '', condition: '', taxScheme: 'MARGIN',
+          scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {}, images: [],
+        }}
+        title="New Item — Add to this purchase"
+        submitLabel="Use this Item"
+        hint={<><strong style={{ color: '#0F0F10' }}>Comes into stock with this purchase.</strong> The purchase price comes from the line — do not enter it twice.</>}
+        hideFields={{ purchasePrice: true, salePrice: true, paidFrom: true, supplier: true, quantity: true }}
+        skuAutoAssign
+      />
     </div>
   );
 }

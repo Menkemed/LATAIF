@@ -722,7 +722,8 @@ const reconOk = (): boolean => {
     ['src/core/bridge/product-commands.ts', /BULK_SYSTEM_PRODUCT_LOCKED/],
     ['src-tauri/src/sync/product_query.rs', /WHERE p\.branch_id = \?2 AND p\.id NOT LIKE 'bulk-%'/],
     ['src-tauri/src/sync/stock_check.rs', /AND p\.id NOT LIKE 'bulk-%'/],
-    ['src/core/purchases/purchase-house.ts', /NOT LIKE 'cat-bulk-metal%' AND id NOT LIKE 'bulk-%'/],
+    // v0.8.91 — der Port der Einkaufsauswahl wohnt bei der Zeilenfolge (Anlegen UND Nachtragen).
+    ['src/core/purchases/purchase-lines.ts', /NOT LIKE 'cat-bulk-metal%' AND id NOT LIKE 'bulk-%'/],
   ];
   for (const [f, re] of files) ok(re.test(src(f)), `O4 Ausschluss/Gate in ${f}`);
 }

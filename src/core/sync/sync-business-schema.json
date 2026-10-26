@@ -1190,7 +1190,8 @@
     "purchase_lines": {
       "allowed_operations": [
         "insert",
-        "update"
+        "update",
+        "delete"
       ],
       "record_id_field": "id",
       "allowed_fields": [

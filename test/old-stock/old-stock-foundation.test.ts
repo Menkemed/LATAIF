@@ -399,7 +399,7 @@ const valueOf = (o: unknown): Record<string, unknown> => ((o as { value?: Record
   for (const h of ['issueStockInHouse', 'cancelStockAdjustmentInHouse', 'addOldStockInHouse']) {
     if (!new RegExp(`if \\(isClientMode\\(\\)\\) return nurPrimary\\(\\);\\s*return runOnPrimary\\(\\(\\) => ${h}`).test(sa2)) fehler.push(`${h}: lokaler Anschluss ohne PC2-Sperre`);
   }
-  ok(fehler.length === 0 && rustNames.slice(-20, -15).join(',') === [...MUT, ...READ].join(','),
+  ok(fehler.length === 0 && rustNames.slice(-21, -16).join(',') === [...MUT, ...READ].join(','),
     `D10 drei Buchungen und zwei Auskünfte überall gleich (Freigabe, Owner-Recht, Anmeldung, Rust); lokale Anschlüsse sperren am PC2 (${fehler.join('; ') || 'konsistent'})`);
 }
 

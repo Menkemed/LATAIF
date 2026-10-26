@@ -225,11 +225,31 @@ export function planPurchaseCreate(input: PurchaseCreateInput, port: PurchaseCre
   if (input.inboxId && !port.inboxExists(input.inboxId)) {
     throw new PurchaseActionRejected('INBOX_NOT_FOUND', 'no such inbox photo in this branch');
   }
-  const inputVatRate = input.taxScheme === 'VAT_10' ? 10 : 0;
-  const lines = input.lines.map((l) => {
+  const lines = planPurchaseLines(input.lines, input.taxScheme, input.sourceOrderId, port);
+  return {
+    supplierId: input.supplierId,
+    purchaseDate: input.purchaseDate,
+    notes: input.notes || undefined,
+    staffId: input.staffId || undefined,
+    lines,
+    initialPayment: input.paymentAmount > 0 ? { amount: input.paymentAmount, method: input.paymentMethod } : undefined,
+    sourceOrderId: input.sourceOrderId || undefined,
+  };
+}
+
+/**
+ * Die Zeilen eines Einkaufs, wie das Haus sie anlegt: neue Artikel mit ihrer geprüften Spec, die Inline-Felder als
+ * Rückfall, das Schema und die Vorsteuer je Zeile, die Verknüpfung mit dem Auftrag. PURCHASE-EDIT Teil 2 — dieselbe
+ * Planung trägt eine vergessene Position in einen gespeicherten Einkauf nach.
+ */
+export function planPurchaseLines(
+  input: readonly PurchaseDraftLine[], taxScheme: PurchaseCreateInput['taxScheme'], sourceOrderId: string | undefined, port: PurchaseCreatePort,
+): Array<Record<string, unknown>> {
+  const inputVatRate = taxScheme === 'VAT_10' ? 10 : 0;
+  return input.map((l) => {
     // Eine verknüpfte Auftragsposition gehört zu GENAU dem Auftrag, aus dem die Maske kam.
     if (l.sourceOrderLineId) {
-      if (!input.sourceOrderId || port.orderLineOf(l.sourceOrderLineId) !== input.sourceOrderId) {
+      if (!sourceOrderId || port.orderLineOf(l.sourceOrderLineId) !== sourceOrderId) {
         throw new PurchaseActionRejected('ORDER_LINE_NOT_ON_ORDER', 'this order line does not belong to the order');
       }
     }
@@ -241,7 +261,7 @@ export function planPurchaseCreate(input: PurchaseCreateInput, port: PurchaseCre
       : undefined;
     if (l.mode === 'bulk') {
       const bulk = checkBulkPurchaseLine(l.bulk);
-      return { bulk, quantity: 1, unitPrice: filsToBhd(bulk.lineTotalFils), taxScheme: input.taxScheme, vatRate: inputVatRate };
+      return { bulk, quantity: 1, unitPrice: filsToBhd(bulk.lineTotalFils), taxScheme, vatRate: inputVatRate };
     }
     if (l.mode === 'existing') {
       if (!l.productId || !port.productPickable(l.productId)) {
@@ -249,7 +269,7 @@ export function planPurchaseCreate(input: PurchaseCreateInput, port: PurchaseCre
       }
       return {
         productId: l.productId, quantity: l.quantity, unitPrice: l.unitPrice,
-        taxScheme: input.taxScheme, vatRate: inputVatRate, sourceOrderLineId: l.sourceOrderLineId, partnerShares,
+        taxScheme, vatRate: inputVatRate, sourceOrderLineId: l.sourceOrderLineId, partnerShares,
       };
     }
     const picked = pickProductSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS);
@@ -265,21 +285,12 @@ export function planPurchaseCreate(input: PurchaseCreateInput, port: PurchaseCre
       newProductCategoryId: l.categoryId || undefined,
       quantity: l.quantity,
       unitPrice: l.unitPrice,
-      taxScheme: input.taxScheme,
+      taxScheme,
       vatRate: inputVatRate,
       sourceOrderLineId: l.sourceOrderLineId,
       partnerShares,
     };
   });
-  return {
-    supplierId: input.supplierId,
-    purchaseDate: input.purchaseDate,
-    notes: input.notes || undefined,
-    staffId: input.staffId || undefined,
-    lines,
-    initialPayment: input.paymentAmount > 0 ? { amount: input.paymentAmount, method: input.paymentMethod } : undefined,
-    sourceOrderId: input.sourceOrderId || undefined,
-  };
 }
 
 /** Der Rumpf von `purchases.create`, wie ihn die Maske am zweiten Rechner baut. */

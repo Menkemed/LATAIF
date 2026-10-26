@@ -761,7 +761,7 @@ function obState(db: Db): string {
     if (!known.includes(op)) fehler.push(`${op}: nicht angemeldet`);
     if (!rustNames.includes(op)) fehler.push(`${op}: Rust kennt es nicht`);
   }
-  ok(fehler.length === 0 && rustNames.slice(-15, -9).join(',') === [...MUT, ...READ].join(',') && registry.ALLOWED_MUTATIONS.slice(-9, -6).join(',') === MUT.join(','),
+  ok(fehler.length === 0 && rustNames.slice(-16, -10).join(',') === [...MUT, ...READ].join(',') && registry.ALLOWED_MUTATIONS.slice(-9, -6).join(',') === MUT.join(','),
     `N1 drei Buchungen und drei Auskünfte überall gleich (Freigabe, Recht, Anmeldung, Katalog, Rust) (${fehler.join('; ') || 'konsistent'})`);
   const manifest = JSON.parse(src('src/core/sync/sync-business-schema.json')) as { tables: Record<string, { allowed_operations: string[]; allowed_fields: string[] }> };
   const t = manifest.tables.opening_balance_items;

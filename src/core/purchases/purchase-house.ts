@@ -9,6 +9,8 @@
 import { query, currentBranchId } from '@/core/db/helpers';
 import { getDatabase } from '@/core/db/database';
 import { trackProductRow } from '@/core/lots/lot-queries';
+// PURCHASE-EDIT Teil 2 — der Port wohnt jetzt bei der Zeilenfolge (`purchase-lines.ts`); der Name bleibt hier erreichbar.
+export { housePurchasePort };
 import { skuIsEmpty } from '@/core/products/sku-allocation';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { usePurchaseStore } from '@/stores/purchaseStore';
@@ -23,48 +25,21 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { MasterdataInputError } from '@/core/masterdata/masterdata-rules';
 import { normalizeSpecImages } from '@/core/media/record-image';
 import { adoptInboxPhotosToProduct } from './inbox-media';
+import { housePurchasePort, withAllocatedSkus, PURCHASE_LINE_OPS } from './purchase-lines';
 import { applyIdentityDocument, identitySourceOf, IdentityMediaError } from '@/core/identity/identity-media';
 import { prepareIdentityPhoto } from '@/core/identity/identity-save';
 import {
   PurchaseEditRejected, editPurchaseInHouse, voidPurchasePaymentInHouse,
-  type CorrectionKind, type PurchaseEditRequest, type PurchaseEdited, type PurchasePaymentVoided,
+  type CorrectionKind, type PurchaseEditAddLine, type PurchaseEditRequest, type PurchaseEdited, type PurchasePaymentVoided,
 } from './purchase-edit-house';
-import { PurchaseActionRejected, planPurchaseCreate, purchaseCreateIssue, type PurchaseCreateInput, type PurchaseCreatePort } from './purchase-create';
+import { PurchaseActionRejected, planPurchaseCreate, purchaseCreateIssue, type PurchaseCreateInput } from './purchase-create';
+import { EMBEDDED_PRODUCT_FIELDS, pickProductSpec, stageSpecImages } from '@/core/products/embedded-product';
+import { stageRecordDataUrls } from '@/core/bridge/client-staging-upload';
 import {
   PURCHASE_PRIMARY_ONLY, PurchaseLifecycleRejected,
   returnToSupplierInHouse, cancelPurchaseInHouse, dismissPurchaseInboxInHouse,
   type PurchaseReturnRequest, type PurchaseReturned, type PurchaseCancelled, type PurchaseInboxDismissed, type RefundMethod,
 } from './purchase-lifecycle-house';
-
-/** Die Nachschlagestellen des Hauses — immer in der Filiale, deren Bücher dieser Rechner führt. */
-export function housePurchasePort(branchId: string): PurchaseCreatePort {
-  const ps = useProductStore.getState();
-  ps.loadCategories();
-  ps.loadProducts();
-  const has = (sql: string, p: unknown[]): boolean => !!query(sql, p)[0];
-  return {
-    // Die Lieferantenauswahl der Maske zeigt nur aktive.
-    supplierActive: (id) => has('SELECT id FROM suppliers WHERE id = ? AND branch_id = ? AND COALESCE(active, 1) = 1', [id, branchId]),
-    // Die Artikelauswahl der Maske: alles außer dem Reparatur-Service.
-    productPickable: (id) => has(
-      "SELECT id FROM products WHERE id = ? AND branch_id = ? AND COALESCE(category_id, '') NOT LIKE 'cat-repair-service%' AND COALESCE(category_id, '') NOT LIKE 'cat-bulk-metal%' AND id NOT LIKE 'bulk-%'",
-      [id, branchId]),
-    categoryExists: (id) => has('SELECT id FROM categories WHERE id = ? AND branch_id = ?', [id, branchId]),
-    employeeActive: (id) => has(
-      "SELECT id FROM employees WHERE id = ? AND branch_id = ? AND COALESCE(employment_status, 'active') != 'inactive'",
-      [id, branchId]),
-    orderExists: (id) => has('SELECT id FROM orders WHERE id = ? AND branch_id = ?', [id, branchId]),
-    orderLineOf: (lineId) => {
-      const r = query('SELECT ol.order_id FROM order_lines ol JOIN orders o ON o.id = ol.order_id WHERE ol.id = ? AND o.branch_id = ?',
-        [lineId, branchId])[0];
-      return r ? String(r.order_id) : undefined;
-    },
-    inboxExists: (id) => has('SELECT id FROM purchase_inbox WHERE id = ? AND branch_id = ?', [id, branchId]),
-    partnerActive: (id) => has('SELECT id FROM partners WHERE id = ? AND branch_id = ? AND active = 1', [id, branchId]),
-    category: (id) => useProductStore.getState().categories.find((c) => c.id === id && !c.id.startsWith('cat-repair-service') && !c.id.startsWith('cat-bulk-metal')),
-    isSkuTaken: (sku) => useProductStore.getState().isSkuTaken(sku),
-  };
-}
 
 function frischLesen(): void {
   usePurchaseStore.getState().loadPurchases();
@@ -112,27 +87,6 @@ function resolveSupplier(input: PurchaseCreateInput): { supplierId: string; cust
       { createDespiteExistingSuppliers: np.createDespiteExistingSuppliers === true }, fresh ? String(fresh.updated_at) : undefined);
     return { supplierId: r.supplier.id, customerId: customer.id };
   });
-}
-
-/**
- * SKU-ALLOC — ein neuer Artikel ohne eingetippte SKU bekommt eine aus DEMSELBEN durablen Zähler wie
- * Collection, Kommission und Handy-Upload (`allocateSkuOnCreate`), am PC wie vom Telefon. Erst nach
- * der Planung — eine abgewiesene Eingabe verbraucht keine Nummer — und innerhalb der Klammer des
- * Einkaufs: scheitert er, fällt auch die Nummer zurück. Eine eingetippte SKU bleibt, wie sie ist.
- */
-function withAllocatedSkus(payload: Record<string, unknown>): Record<string, unknown> {
-  const allocate = useProductStore.getState().allocateSkuOnCreate;
-  const lines = (payload.lines as Array<Record<string, unknown>>).map((l) => {
-    if (l.productId) return l;
-    const np = l.newProduct as Record<string, unknown> | undefined;
-    if (np) {
-      return np.sku ? l : { ...l, newProduct: { ...np, sku: allocate(undefined, np.brand as string | undefined, np.categoryId as string | undefined) } };
-    }
-    return l.newProductSku ? l : {
-      ...l, newProductSku: allocate(undefined, l.newProductBrand as string | undefined, l.newProductCategoryId as string | undefined),
-    };
-  });
-  return { ...payload, lines };
 }
 
 /**
@@ -354,16 +308,23 @@ export interface PurchaseEditForm {
   correctionKind?: CorrectionKind;
   /** Das neue Ausweisfoto (Kamera/Galerie, schon normalisiert) und ob es auch die Person bekommt. */
   identityPhoto?: { dataUrl: string; alsoUpdatePerson?: boolean };
+  /** Teil 2 — nachzutragende Positionen (ein neuer Artikel trägt seine Fotos als Datenbilder, wie beim Anlegen). */
+  addLines?: PurchaseEditAddLine[];
+  /** Teil 3 — zu entfernende Positionen. */
+  removeLineIds?: string[];
 }
 
 /** Ändert diese Maske Geld oder Ware (Klasse C, nur Owner)? Dann `purchases.correct`, sonst `purchases.update`. */
 export function isFinancialPurchaseEdit(form: PurchaseEditForm): boolean {
   return form.purchaseDate !== undefined || form.supplierId !== undefined
-    || (form.lines !== undefined && form.lines.length > 0) || form.correctionKind !== undefined;
+    || (form.lines !== undefined && form.lines.length > 0) || form.correctionKind !== undefined
+    || (form.addLines !== undefined && form.addLines.length > 0) || (form.removeLineIds !== undefined && form.removeLineIds.length > 0);
 }
 
 /** Der Rumpf für `purchases.update` / `purchases.correct` — Summen, Lose, Buchungen rechnet der Primary. */
-export function purchaseEditBody(purchase: { id: string }, form: PurchaseEditForm, stagingId?: string): Record<string, unknown> {
+export function purchaseEditBody(
+  purchase: { id: string }, form: PurchaseEditForm, stagingId?: string, stagedAddLines?: Array<Record<string, unknown>>,
+): Record<string, unknown> {
   const body: Record<string, unknown> = { purchaseId: purchase.id, expectedRevision: fassungVon(purchase), reason: form.reason };
   if (form.notes !== undefined) body.notes = form.notes;
   if (form.staffId !== undefined) body.staffId = form.staffId;
@@ -376,7 +337,24 @@ export function purchaseEditBody(purchase: { id: string }, form: PurchaseEditFor
   if (form.confirmPaymentsToNewSupplier !== undefined) body.confirmPaymentsToNewSupplier = form.confirmPaymentsToNewSupplier;
   if (form.lines !== undefined && form.lines.length > 0) body.lines = form.lines;
   if (form.correctionKind !== undefined) body.correctionKind = form.correctionKind;
+  if (form.removeLineIds !== undefined && form.removeLineIds.length > 0) body.removeLineIds = [...form.removeLineIds];
+  // Teil 2 — die Fotos eines neuen Artikels reisen als Ablagekennungen (`stagedAddLines`), nie als Bytes.
+  if (stagedAddLines && stagedAddLines.length > 0) body.addLines = stagedAddLines;
   return body;
+}
+
+/** Teil 2 — die nachzutragenden Positionen für den Fernbefehl: Fotos vorab in die Ablage des Primary (wie „Save Purchase"). */
+export async function stagePurchaseEditAddLines(
+  lines: readonly PurchaseEditAddLine[], stage: (urls: readonly string[]) => Promise<string[]> = stageRecordDataUrls,
+): Promise<Array<Record<string, unknown>>> {
+  const out: Array<Record<string, unknown>> = [];
+  for (const l of lines) {
+    const line: Record<string, unknown> = { mode: l.mode, quantity: l.quantity, unitPrice: l.unitPrice };
+    if (l.productId) line.productId = l.productId;
+    if (l.newProduct) line.newProduct = await stageSpecImages(pickProductSpec(l.newProduct, EMBEDDED_PRODUCT_FIELDS), stage);
+    out.push(line);
+  }
+  return out;
 }
 
 /** „Save" am Primary: das neue Ausweisfoto VOR der Klammer aufnehmen (im Bereich der Person), dann EINE Klammer. */
@@ -398,12 +376,20 @@ export async function editPurchaseOnPrimary(purchaseId: string, form: PurchaseEd
       identityPhoto = { mediaId: prepared.mediaId, alsoUpdatePerson: form.identityPhoto.alsoUpdatePerson === true };
     }
   }
+  // Teil 2 — die Fotos eines neuen Artikels durch DENSELBEN Normalisierer wie beim Anlegen, vor der Klammer.
+  let addLines: PurchaseEditAddLine[] | undefined;
+  if (form.addLines && form.addLines.length > 0) {
+    addLines = [];
+    for (const l of form.addLines) addLines.push(l.newProduct ? { ...l, newProduct: await normalizeSpecImages(l.newProduct) } : l);
+  }
   const req: PurchaseEditRequest = {
     purchaseId, reason: form.reason, notes: form.notes, staffId: form.staffId, purchaseDate: form.purchaseDate,
     supplierId: form.supplierId, confirmPaymentsToNewSupplier: form.confirmPaymentsToNewSupplier, lines: form.lines,
     correctionKind: form.correctionKind, ...(identityPhoto ? { identityPhoto } : {}),
+    ...(addLines ? { addLines } : {}),
+    ...(form.removeLineIds && form.removeLineIds.length > 0 ? { removeLineIds: form.removeLineIds } : {}),
   };
-  return runOnPrimary(() => editPurchaseInHouse(req, localHouseCtx(), expectedRevision), lebenszyklusLesen);
+  return runOnPrimary(() => editPurchaseInHouse(req, localHouseCtx(), expectedRevision, PURCHASE_LINE_OPS), lebenszyklusLesen);
 }
 
 /** „Save" der Maske: EINE Buchung — am Primary die Hausfolge, auf PC2 der geprüfte Befehl (Foto vorher in die Ablage). */
@@ -420,9 +406,16 @@ export async function savePurchaseEdit(
     if (prepared.kind === 'fail') return prepared.outcome as WriteOutcome<Result>;
     if (prepared.kind === 'ready') stagingId = String(prepared.body.identityPhotoStagingId ?? '') || undefined;
   }
+  // Teil 2 — auf PC2 reisen die Fotos eines neuen Artikels vorab in die Ablage des Primary; der Auftrag nennt ihre Kennungen.
+  let stagedAddLines: Array<Record<string, unknown>> | undefined;
+  if (write.remote && form.addLines && form.addLines.length > 0) {
+    try { stagedAddLines = await stagePurchaseEditAddLines(form.addLines); } catch (e) {
+      return absage('STAGING_FAILED', `The photos of a new item could not be handed to the main computer (${e instanceof Error ? e.message : String(e)}). Nothing was saved.`);
+    }
+  }
   return speichern(write, {
     local: () => editPurchaseOnPrimary(purchase.id, form, rev) as unknown as Promise<Result>,
-    remote: () => purchaseEditBody(purchase, form, stagingId),
+    remote: () => purchaseEditBody(purchase, form, stagingId, stagedAddLines),
   });
 }
 

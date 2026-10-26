@@ -239,7 +239,8 @@ for (const t of manifestTables) {
 // OPENING BALANCES — `opening_balance_items`: insert (Erfassung) und update (Storno), nie delete → 56/39/38.
 // B1 OPENING ACCOUNTING — `opening_account_items`: insert (Erfassung) und update (Storno/Korrektur), nie delete → 57/40/38.
 // PURCHASE-EDIT D14 — `purchase_payments`: eine falsch erfasste Zahlung wird storniert (voided_*), nie gelöscht → 57/41/38.
-check(iC === 57 && uC === 41 && dC === 38, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 57/41/38 — incl. the purchase payment void, incl. the mobile purchase_inbox insert, the R7A production child rows, the PRE-G5 gold usage history, the bulk lot movements, the invoice_lines update of the invoice edit, the agent settlement payment delete, the stock adjustment insert/update and the opening position insert/update)`);
+// PURCHASE-EDIT Teil 3 (v0.8.91) — `purchase_lines` + delete: eine unberührte Position wird entfernt (wie invoice_lines/order_lines) → 57/41/39.
+check(iC === 57 && uC === 41 && dC === 39, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 57/41/39 — incl. the purchase line removal, incl. the purchase payment void, incl. the mobile purchase_inbox insert, the R7A production child rows, the PRE-G5 gold usage history, the bulk lot movements, the invoice_lines update of the invoice edit, the agent settlement payment delete, the stock adjustment insert/update and the opening position insert/update)`);
 
 // ── 5. Rust/TS semantic parity: the SAME shared fixture the Rust test runs. Both sides must map
 //    each vector to the same verdict → transitively, Rust and TS agree byte-for-byte. ──
