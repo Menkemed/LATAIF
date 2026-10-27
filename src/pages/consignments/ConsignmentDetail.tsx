@@ -8,6 +8,7 @@ import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
+import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
 import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useCustomerStore } from '@/stores/customerStore';
@@ -89,6 +90,7 @@ export function ConsignmentDetail() {
   const [soldDate, setSoldDate] = useState('');
   const [soldNotes, setSoldNotes] = useState('');
   const [soldAck, setSoldAck] = useState(false);
+  const [showQuickBuyer, setShowQuickBuyer] = useState(false);
   const [paidModal, setPaidModal] = useState(false);
   const [paidMethod, setPaidMethod] = useState('bank_transfer');
   const [paidRef, setPaidRef] = useState('');
@@ -858,16 +860,29 @@ export function ConsignmentDetail() {
 
       </div>
 
+      <QuickCustomerModal
+        open={showQuickBuyer}
+        onClose={() => setShowQuickBuyer(false)}
+        onCreated={(id) => { loadCustomers(); setSoldBuyer(id); }}
+      />
+
       {/* ── Record Sale Modal (Plan 2026-05) ── */}
       <Modal open={soldModal} onClose={() => setSoldModal(false)} title="Record Sale" width={500}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-          <SearchSelect
-            label="BUYER"
-            placeholder="Search clients..."
-            options={customers.map(c => ({ id: c.id, label: `${c.firstName} ${c.lastName}`, subtitle: c.company, meta: c.phone }))}
-            value={soldBuyer}
-            onChange={id => setSoldBuyer(id)}
-          />
+          <div>
+            <SearchSelect
+              label="BUYER"
+              placeholder="Search clients..."
+              options={customers.map(c => ({ id: c.id, label: `${c.firstName} ${c.lastName}`, subtitle: c.company, meta: c.phone }))}
+              value={soldBuyer}
+              onChange={id => setSoldBuyer(id)}
+            />
+            <button onClick={() => setShowQuickBuyer(true)}
+              data-consignment-sale-new-client
+              className="cursor-pointer transition-colors"
+              style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, marginTop: 6, padding: 0 }}
+            >+ New Client</button>
+          </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
             <Input required label="SALE PRICE (BHD)" type="number" placeholder="0"
               value={soldPrice}
