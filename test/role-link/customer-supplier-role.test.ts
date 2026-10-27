@@ -375,9 +375,11 @@ const gegenparteien = (db: Db): string => all(db,
   ok(wirft(() => imHaus(() => cons.findOrCreateSupplierForConsignor('cB'))) === 'CONSIGNOR_BRANCH_MISMATCH', 'V2 Filiale: Kommission → CONSIGNOR_BRANCH_MISMATCH');
   ok(lieferanten() === vorher && n(db, 'SELECT COUNT(*) FROM ledger_entries') === buchungenVorher, 'V2 Filiale: kein Lieferant, keine Buchung');
   const rs = src('src/stores/consignmentStore.ts');
-  const beginn = rs.indexOf('recordSale: (id, params) => {');
+  // CONSIGNMENT MULTI-SALE — der Einzelverkauf ist `recordSales` mit einem Artikel; dort fällt die Zuordnung je Artikel
+  // vor dessen Einkauf und vor der Rechnung (und jedes Nein nimmt die ganze Klammer zurück).
+  const beginn = rs.indexOf('recordSales: (params) => {');
   const zu = rs.indexOf('findOrCreateSupplierForConsignor(con.consignorId)', beginn);
-  ok(zu > beginn && zu < rs.indexOf('purch.createPurchase(', beginn) && zu < rs.indexOf('inv.createDirectInvoice(', beginn),
+  ok(beginn > 0 && zu > beginn && zu < rs.indexOf('usePurchaseStore.getState().createPurchase(', beginn) && zu < rs.indexOf('createInvoiceInHouse(', beginn),
     'V2 Filiale: die Zuordnung fällt VOR Einkauf und Rechnung — ein Nein hinterlässt keine Auszahlung');
 
   // ── V2-2 mehrdeutige / fremde Treffer → keine Auswahl ─────────────────────────────────────

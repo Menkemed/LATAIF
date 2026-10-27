@@ -628,6 +628,30 @@ export function canonicalConsignmentStatus(s: ConsignmentStatus | string | undef
   return 'IN_STOCK';
 }
 
+/** D3 — die Rückzahlung einer Auszahlung an den Einlieferer (Lieferanten-Retoure seines Einkaufs). */
+export interface ConsignorRefundRow {
+  returnId: string;
+  returnNumber: string;
+  date: string;
+  /** received = Geld kam mit der Rückgabe; pending = offene Rückforderung (Lieferanten-Guthaben). */
+  mode: 'received' | 'pending';
+  method: string | null;
+  amount: number;
+  /** Noch offen (nur pending): Guthaben minus schon Verrechnetes. */
+  open: number;
+  /** Gehört zum JETZIGEN Verkauf (der Einkauf hängt an der jetzigen Rechnung) — sonst ein früherer, stornierter Verkauf. */
+  currentSale: boolean;
+}
+
+/** D4 — die Seite des Einlieferers je Kommission, abgeleitet beim Lesen (`core/consignment/consignor-side.ts`). */
+export interface ConsignorSide {
+  open: number;
+  paid: number;
+  refunds: ConsignorRefundRow[];
+  /** Summe der noch offenen Rückforderungen (pending). */
+  refundOpen: number;
+}
+
 export interface Consignment {
   /** R4C — die gesehene Fassung; jede Geldhandlung nennt sie. */
   revision?: number;
@@ -666,6 +690,9 @@ export interface Consignment {
   createdAt: string;
   updatedAt: string;
   createdBy?: UUID;
+  /** Abgeleitet beim Lesen (nie gespeichert): was wir dem Einlieferer für den Verkauf noch schulden, was er bekam,
+   *  und — D3 — die Rückzahlung seiner Auszahlung, wenn die Ware nach dem Verkauf zu ihm zurückging. */
+  consignorSide?: ConsignorSide;
   // Populated
   consignor?: Customer;
   product?: Product;

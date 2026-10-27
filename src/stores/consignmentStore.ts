@@ -19,13 +19,16 @@ import {
   cancelConsignmentSaleInHouse, localConsignmentActor, returnConsignmentAfterSaleInHouse,
 } from '@/core/consignment/consignment-reversal-house';
 import { useSupplierStore } from './supplierStore';
-import { useInvoiceStore } from './invoiceStore';
 import { usePurchaseStore } from './purchaseStore';
 import { useExpenseStore } from './expenseStore';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { computeConsignmentSale } from '@/core/consignment/economics';
 // CONSIGNMENT-INTEGRITY F7 — nur dieser Verkauf darf Kommissionsware auf eine Rechnung setzen.
 import { withConsignmentSalePermit } from '@/core/consignment/consignment-sale-link';
+// CONSIGNMENT MULTI-SALE (D5) — die Rechnung samt Zahlungen über DENSELBEN Weg wie „Save Invoice" (Mehrfachzahlung,
+// Kartenmarke und -gebühr, Zahlungstag, Nummernkreis) — keine zweite Zahlungslogik.
+import { createInvoiceInHouse, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
+import { consignorSidesFor } from '@/core/consignment/consignor-side';
 import { payoutModelLock, buildPayoutPatch, PayoutPatchError, PAYOUT_EDITABLE_SQL, type PayoutInput } from '@/core/consignment/payout-edit';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
 import { hydrateFromPrimary } from '@/core/data/primary-source';
@@ -144,6 +147,32 @@ export interface RecordSaleResult {
   ourCommission: number;
 }
 
+/** CONSIGNMENT MULTI-SALE — ein Artikel des Verkaufs: welche Kommission, zu welchem Preis, ggf. die Bestätigung der Unterdeckung. */
+export interface RecordSalesItem {
+  consignmentId: string;
+  salePrice: number;
+  acknowledgeShortfall?: boolean;
+}
+
+/**
+ * CONSIGNMENT MULTI-SALE — EIN Verkauf an EINEN Käufer: eine Rechnung mit einer Zeile je Artikel, je Artikel ein
+ * Einkauf beim Einlieferer (Verbindlichkeiten je Consignor getrennt), Zahlungen wie bei „Save Invoice".
+ */
+export interface RecordSalesParams {
+  items: RecordSalesItem[];
+  buyerId: string;
+  saleDate?: string;                   // YYYY-MM-DD, default heute — zugleich das Rechnungsdatum (D1)
+  notes?: string;
+  specialMark?: boolean;
+  payments?: InvoiceCreatePayment[];
+}
+
+export interface RecordSalesResult {
+  invoiceId: string;
+  items: Array<RecordSaleResult & { consignmentId: string }>;
+  paymentIds: string[];
+}
+
 interface ConsignmentStore {
   consignments: Consignment[];
   loading: boolean;
@@ -159,6 +188,8 @@ interface ConsignmentStore {
   markSold: (id: string, salePrice: number, buyerId?: string, saleMethod?: 'cash' | 'bank') => void;
   // Neuer atomic Sold-Flow: Auto-Invoice + Auto-Purchase + optional Consignor-Loss.
   recordSale: (id: string, params: RecordSaleParams) => RecordSaleResult;
+  // CONSIGNMENT MULTI-SALE — derselbe Flow für einen oder mehrere Artikel auf EINER Rechnung, samt Zahlungen.
+  recordSales: (params: RecordSalesParams) => RecordSalesResult;
   // Vollständige Sale-Stornierung (Plan 2026-05): reverst Invoice + Auto-Purchase
   // + Loss-Expense (alle 3 Records die recordSale erzeugt) und setzt das
   // Consignment zurück auf 'active'. Für „Verkauf war ein Fehler"-Fälle wie
@@ -432,108 +463,140 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
   // Plan 2026-05: Eine Wahrheit pro Verpflichtung — Invoice = Käufer-AR,
   // Purchase = Consignor-AP, Expense = Loss-Tracking. Bezahlung läuft über
   // die normalen Zahlungspfade (Invoice-Payment, Purchase-Payment, Expense-Payment).
+  // Der Einzelverkauf ist derselbe Weg mit EINEM Artikel (dieselbe Rechnung, derselbe Einkauf, dieselben Regeln).
   recordSale: (id, params) => {
-    const con = get().getConsignment(id);
-    if (!con) throw new Error(`Consignment ${id} not found`);
-    if (con.status !== 'active') {
-      throw new Error(`Consignment ${con.consignmentNumber} is ${con.status} — cannot record sale`);
-    }
+    const r = get().recordSales({
+      items: [{ consignmentId: id, salePrice: params.salePrice, acknowledgeShortfall: params.acknowledgeShortfall }],
+      buyerId: params.buyerId,
+      saleDate: params.saleDate,
+      notes: params.notes,
+      specialMark: params.specialMark,
+    });
+    const it = r.items[0];
+    return {
+      invoiceId: it.invoiceId, purchaseId: it.purchaseId, expenseId: it.expenseId,
+      consignorLossAmount: it.consignorLossAmount, consignorPayout: it.consignorPayout, ourCommission: it.ourCommission,
+    };
+  },
+
+  // CONSIGNMENT MULTI-SALE — EIN Verkauf an EINEN Käufer: eine Rechnung mit einer Zeile je Artikel, je Artikel
+  // ein Einkauf beim Einlieferer, die Zahlungen wie bei „Save Invoice". Erst wird JEDER Artikel geprüft, dann
+  // geschrieben — in der Klammer des Aufrufers (Haus: runOnPrimary / runRemoteCommand).
+  recordSales: (params) => {
+    if (!Array.isArray(params.items) || params.items.length === 0) throw new Error('Select at least one consignment to sell');
     if (!params.buyerId) throw new Error('Buyer is required (Invoice needs a customer)');
-    if (!Number.isFinite(params.salePrice) || params.salePrice <= 0) {
-      throw new Error('Sale price must be positive');
-    }
-    // Plan 2026-05: Buyer != Consignor. Wenn der Consignor seine eigene Ware
-    // „kauft", ist das wirtschaftlich kein Verkauf, sondern eine Rückgabe —
-    // die müsste über den Return-Flow laufen. Wir blocken hier strikt, sonst
-    // entstehen sinnlose AR/AP-Posts gegen denselben Kontakt.
-    if (params.buyerId === con.consignorId) {
-      throw new Error(
-        'Buyer cannot be the same as the consignor. ' +
-        'If the consignor is taking the item back, use "Return" instead — ' +
-        'no sale, no invoice, no purchase needed.'
-      );
-    }
+    const saleDate = params.saleDate || new Date().toISOString().split('T')[0];
 
-    // Unsupported-Type-Guard bleibt (legacy 'fixed' o.ä. nie über recordSale).
-    const ctype = con.commissionType || 'percent';
-    if (ctype !== 'percent' && ctype !== 'consignor_fixed' && ctype !== 'cost_split') {
-      throw new Error(`Unsupported commission type "${ctype}" — use percent / consignor_fixed / cost_split`);
-    }
+    // ── Prüfen, für JEDEN Artikel, bevor irgendetwas geschrieben wird ──
+    const seen = new Set<string>();
+    const artikel = new Set<string>();
+    const plan = params.items.map((item) => {
+      const con = get().getConsignment(item.consignmentId);
+      if (!con) throw new Error(`Consignment ${item.consignmentId} not found`);
+      if (seen.has(con.id)) throw new Error(`Consignment ${con.consignmentNumber} is selected twice — each item is sold once`);
+      seen.add(con.id);
+      // Eine Rechnungszeile gehört über (Rechnung, Artikel) zu GENAU einer Kommission — derselbe Artikel zweimal
+      // auf einer Rechnung wäre nicht mehr eindeutig zuzuordnen (Rückgabe, Storno).
+      if (artikel.has(con.productId)) {
+        throw new Error(`Consignment ${con.consignmentNumber}: the same item cannot be sold twice on one invoice`);
+      }
+      artikel.add(con.productId);
+      if (con.status !== 'active') {
+        throw new Error(`Consignment ${con.consignmentNumber} is ${con.status} — cannot record sale`);
+      }
+      if (!Number.isFinite(item.salePrice) || item.salePrice <= 0) {
+        throw new Error(`Sale price must be positive (${con.consignmentNumber})`);
+      }
+      // Plan 2026-05: Buyer != Consignor. Wenn der Consignor seine eigene Ware
+      // „kauft", ist das wirtschaftlich kein Verkauf, sondern eine Rückgabe —
+      // die müsste über den Return-Flow laufen. Wir blocken hier strikt, sonst
+      // entstehen sinnlose AR/AP-Posts gegen denselben Kontakt.
+      if (params.buyerId === con.consignorId) {
+        throw new Error(
+          'Buyer cannot be the same as the consignor. ' +
+          'If the consignor is taking the item back, use "Return" instead — ' +
+          'no sale, no invoice, no purchase needed.'
+        );
+      }
 
-    // Payout/Loss/Commission — SSOT: computeConsignmentSale (core/consignment/economics.ts).
-    // Dieselbe Funktion nutzen alle Anzeige-Vorschauen, damit Buchung == Vorschau.
-    const econ = computeConsignmentSale(con, params.salePrice);
-    // Verkauf unter dem Consignor-Floor (Kost bei cost_split / Agreed bei
-    // consignor_fixed) muss explizit bestätigt werden — sonst Abbruch, damit
-    // kein versehentlicher Consignor-Loss gebucht wird (Variante B).
-    if (econ.belowFloor && !params.acknowledgeShortfall) {
-      throw new Error(
-        `Sale ${params.salePrice} below consignor floor ${econ.floor}. Confirm shortfall (acknowledgeShortfall=true) — will be recorded as Consignor Loss expense.`
-      );
-    }
-    const consignorPayout = econ.payout;
-    const ourCommission = econ.commission;
-    const consignorLoss = econ.loss;
+      // Unsupported-Type-Guard bleibt (legacy 'fixed' o.ä. nie über recordSale).
+      const ctype = con.commissionType || 'percent';
+      if (ctype !== 'percent' && ctype !== 'consignor_fixed' && ctype !== 'cost_split') {
+        throw new Error(`Unsupported commission type "${ctype}" — use percent / consignor_fixed / cost_split`);
+      }
 
-    // Tax-Scheme + VAT-Berechnung für Buyer-Invoice (ähnlich agentStore convertTransferToInvoice)
-    const prodRows = query(
-      `SELECT id, tax_scheme, purchase_price, brand, name FROM products WHERE id = ?`,
-      [con.productId]
-    );
-    const prod = prodRows[0];
-    const scheme = ((prod?.tax_scheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme;
-    const purchasePrice = (prod?.purchase_price as number | undefined) || consignorPayout;
-    const rate = scheme === 'ZERO' ? 0 : 10;
-    const grossSale = params.salePrice;
-    const netInput = scheme === 'VAT_10' ? grossSale / (1 + rate / 100) : grossSale;
-    const calc = vatEngine.calculateNet(netInput, purchasePrice, scheme, rate);
-    // v0.7.1 — NBR: MARGIN persistiert internalVat.
-    const persistedVat = calc.internalVatAmount ?? calc.vatAmount;
-
-    // 1. Find-or-Create Supplier für den Consignor (1 Person, 2 Rollen)
-    const consignorSupplierId = findOrCreateSupplierForConsignor(con.consignorId);
-
-    // 2. Consignor-Purchase ZUERST anlegen — sonst hat das Consignment-Produkt
-    // beim Invoice-Insert noch keinen Stock-Lot, und der FIFO-Auto-Pick in
-    // createDirectInvoice findet nichts. Reihenfolge: Purchase (= Lot entsteht)
-    // → Invoice (= Lot wird konsumiert + Cost-Snapshot zieht lot.unit_cost).
-    //
-    // Bei Shortfall: Purchase = echter Marktwert (= Sale Price), Loss läuft separat als Expense.
-    // Bei normalem/excess Sale: Purchase = consignorPayout (was Frau Y wirklich kriegt).
-    const purchaseAmount = consignorLoss > 0 ? params.salePrice : consignorPayout;
-    const purch = usePurchaseStore.getState();
-    const purchase = purch.createPurchase({
-      supplierId: consignorSupplierId,
-      purchaseDate: params.saleDate || new Date().toISOString().split('T')[0],
-      notes: `Consignor payout · ${con.consignmentNumber}${params.notes ? ' · ' + params.notes : ''}`,
-      // PURCHASE-EDIT B6 — die Kommission als Spalte: die Umkehr findet ihren Einkauf darüber, nicht über den Vermerk.
-      sourceConsignmentId: con.id,
-      lines: [{
-        productId: con.productId,
-        quantity: 1,
-        unitPrice: purchaseAmount,
-        taxScheme: 'ZERO',                  // Privatperson → keine Vorsteuer
-        vatRate: 0,
-      }],
+      // Payout/Loss/Commission — SSOT: computeConsignmentSale (core/consignment/economics.ts).
+      // Dieselbe Funktion nutzen alle Anzeige-Vorschauen, damit Buchung == Vorschau.
+      const econ = computeConsignmentSale(con, item.salePrice);
+      // Verkauf unter dem Consignor-Floor (Kost bei cost_split / Agreed bei
+      // consignor_fixed) muss explizit bestätigt werden — sonst Abbruch, damit
+      // kein versehentlicher Consignor-Loss gebucht wird (Variante B). Je Artikel.
+      if (econ.belowFloor && !item.acknowledgeShortfall) {
+        throw new Error(
+          `Sale ${item.salePrice} below consignor floor ${econ.floor} (${con.consignmentNumber}). Confirm shortfall (acknowledgeShortfall=true) — will be recorded as Consignor Loss expense.`
+        );
+      }
+      return { con, salePrice: item.salePrice, econ };
     });
 
-    // 2b. Cost-Snapshot auf das Produkt selbst schreiben — Consignment-Produkte
-    // werden mit purchase_price=0 angelegt; ohne diese Zeile bleibt der Cost
-    // auf der Product-Detail-Seite auf 0 obwohl der Auto-Purchase einen Lot
-    // mit echtem unit_cost erzeugt hat. Wir ueberschreiben nur wenn aktuell
-    // 0 (= placeholder), damit echte Cost-Daten nicht ueberschrieben werden.
-    const db0 = getDatabase();
-    db0.run(
-      `UPDATE products SET purchase_price = ? WHERE id = ? AND COALESCE(purchase_price, 0) = 0`,
-      [purchaseAmount, con.productId]
-    );
+    const db = getDatabase();
+    const lines: Parameters<typeof createInvoiceInHouse>[0]['lines'] = [];
+    const seiten = plan.map(({ con, salePrice, econ }) => {
+      const consignorPayout = econ.payout;
+      const consignorLoss = econ.loss;
 
-    // 3. Buyer-Invoice — auto-FIFO im createDirectInvoice findet den frisch
-    // angelegten Lot aus Schritt 2 und konsumiert ihn.
-    const inv = useInvoiceStore.getState();
-    const invoice = withConsignmentSalePermit(con.productId, () => inv.createDirectInvoice(
-      params.buyerId,
-      [{
+      // Tax-Scheme + VAT-Berechnung für Buyer-Invoice (ähnlich agentStore convertTransferToInvoice)
+      const prod = query(
+        `SELECT id, tax_scheme, purchase_price, brand, name FROM products WHERE id = ?`,
+        [con.productId]
+      )[0];
+      const scheme = ((prod?.tax_scheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme;
+      const purchasePrice = (prod?.purchase_price as number | undefined) || consignorPayout;
+      const rate = scheme === 'ZERO' ? 0 : 10;
+      const netInput = scheme === 'VAT_10' ? salePrice / (1 + rate / 100) : salePrice;
+      const calc = vatEngine.calculateNet(netInput, purchasePrice, scheme, rate);
+      // v0.7.1 — NBR: MARGIN persistiert internalVat.
+      const persistedVat = calc.internalVatAmount ?? calc.vatAmount;
+
+      // 1. Find-or-Create Supplier für den Consignor (1 Person, 2 Rollen)
+      const consignorSupplierId = findOrCreateSupplierForConsignor(con.consignorId);
+
+      // 2. Consignor-Purchase ZUERST anlegen — sonst hat das Consignment-Produkt
+      // beim Invoice-Insert noch keinen Stock-Lot, und der FIFO-Auto-Pick in
+      // createDirectInvoice findet nichts. Reihenfolge: Purchase (= Lot entsteht)
+      // → Invoice (= Lot wird konsumiert + Cost-Snapshot zieht lot.unit_cost).
+      // Je Artikel EIN Einkauf — auch bei zwei Artikeln desselben Einlieferers: Verbindlichkeit, Auszahlung,
+      // Rückgabe und Storno wirken je Kommission.
+      //
+      // Bei Shortfall: Purchase = echter Marktwert (= Sale Price), Loss läuft separat als Expense.
+      // Bei normalem/excess Sale: Purchase = consignorPayout (was Frau Y wirklich kriegt).
+      const purchaseAmount = consignorLoss > 0 ? salePrice : consignorPayout;
+      const purchase = usePurchaseStore.getState().createPurchase({
+        supplierId: consignorSupplierId,
+        purchaseDate: saleDate,
+        notes: `Consignor payout · ${con.consignmentNumber}${params.notes ? ' · ' + params.notes : ''}`,
+        // PURCHASE-EDIT B6 — die Kommission als Spalte: die Umkehr findet ihren Einkauf darüber, nicht über den Vermerk.
+        sourceConsignmentId: con.id,
+        lines: [{
+          productId: con.productId,
+          quantity: 1,
+          unitPrice: purchaseAmount,
+          taxScheme: 'ZERO',                  // Privatperson → keine Vorsteuer
+          vatRate: 0,
+        }],
+      });
+
+      // 2b. Cost-Snapshot auf das Produkt selbst schreiben — Consignment-Produkte
+      // werden mit purchase_price=0 angelegt; ohne diese Zeile bleibt der Cost
+      // auf der Product-Detail-Seite auf 0 obwohl der Auto-Purchase einen Lot
+      // mit echtem unit_cost erzeugt hat. Wir ueberschreiben nur wenn aktuell
+      // 0 (= placeholder), damit echte Cost-Daten nicht ueberschrieben werden.
+      db.run(
+        `UPDATE products SET purchase_price = ? WHERE id = ? AND COALESCE(purchase_price, 0) = 0`,
+        [purchaseAmount, con.productId]
+      );
+
+      lines.push({
         productId: con.productId,
         unitPrice: calc.netAmount,
         purchasePrice,
@@ -541,78 +604,92 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
         vatRate: rate,
         vatAmount: persistedVat,
         lineTotal: calc.grossAmount,
-      }],
-      `Consignment sale · ${con.consignmentNumber}`,
-      undefined,
-      undefined,
-      undefined,
-      params.specialMark,
-    ));
-
-    // 4. Bei Shortfall: Consignor-Loss-Expense (Variante B)
-    let expenseId: string | undefined;
-    if (consignorLoss > 0) {
-      const exp = useExpenseStore.getState();
-      const expense = exp.createExpense({
-        category: 'ConsignorLoss',
-        amount: consignorLoss,
-        supplierId: consignorSupplierId,
-        paymentMethod: 'cash',
-        description: `Consignor guarantee shortfall · ${con.consignmentNumber} · sold ${params.salePrice} BHD vs agreed ${con.agreedPrice} BHD`,
-        expenseDate: params.saleDate || new Date().toISOString().split('T')[0],
-        relatedModule: 'consignment',
-        relatedEntityId: id,
-        // WICHTIG: payNow=false → bleibt PENDING. Sonst zieht createExpense
-        // sofort Cash/Bank ab. Wir wollen aber AP zur Frau Y aufbauen, die
-        // dann via Banking gezahlt wird (zusammen mit Purchase-AP).
-        payNow: false,
       });
-      expenseId = expense.id;
-    }
-
-    // 5. Consignment-Status + Verlinkungen
-    get().updateConsignment(id, {
-      status: 'sold',
-      salePrice: params.salePrice,
-      buyerId: params.buyerId,
-      commissionAmount: ourCommission,
-      payoutAmount: consignorPayout,
-      invoiceId: invoice.id,
+      return { con, salePrice, econ, consignorSupplierId, purchaseId: purchase.id };
     });
 
-    // 6. Produkt: NUR quantity dekrementieren + last_sale_price merken.
-    // Plan §Sales §Partial-Payment-Reservation (2026-05-16): stock_status NICHT
-    // mehr explizit auf 'sold' setzen — der Invoice-Flow markiert das Produkt
-    // automatisch korrekt: 'consignment' → 'consignment_reserved' (PARTIAL) →
-    // 'sold' (FINAL via invoice.paid event). Ein hartes 'sold' hier wuerde
-    // den Reserved-Lifecycle ueberspringen, sodass ein Teilzahlungs-Verkauf
-    // sofort als komplett bezahlt aussieht.
-    const db = getDatabase();
-    db.run(
-      `UPDATE products SET
-         quantity = CASE WHEN COALESCE(quantity,1) > 1 THEN COALESCE(quantity,1) - 1 ELSE 0 END,
-         last_sale_price = ?, updated_at = ? WHERE id = ?`,
-      [params.salePrice, new Date().toISOString(), con.productId]
-    );
+    // 3. Buyer-Invoice — EINE für den ganzen Verkauf, datiert auf den Verkaufstag (D1), samt Zahlungen (D5)
+    // über denselben Weg wie „Save Invoice". Der auto-FIFO findet je Zeile den frisch angelegten Lot aus
+    // Schritt 2 und konsumiert ihn. Kommissionsware ist dort nur für GENAU diese Artikel erlaubt.
+    const nummern = plan.map((p) => p.con.consignmentNumber).join(', ');
+    const invoice = withConsignmentSalePermit(plan.map((p) => p.con.productId), () => createInvoiceInHouse({
+      customerId: params.buyerId,
+      lines,
+      notes: `Consignment sale · ${nummern}`,
+      issuedDate: saleDate,
+      specialMark: params.specialMark === true,
+      ...(params.payments && params.payments.length > 0 ? { payments: params.payments } : {}),
+    }, currentBranchId()));
+
+    const items = seiten.map(({ con, salePrice, econ, consignorSupplierId, purchaseId }) => {
+      const consignorPayout = econ.payout;
+      const ourCommission = econ.commission;
+      const consignorLoss = econ.loss;
+
+      // 4. Bei Shortfall: Consignor-Loss-Expense (Variante B)
+      let expenseId: string | undefined;
+      if (consignorLoss > 0) {
+        const expense = useExpenseStore.getState().createExpense({
+          category: 'ConsignorLoss',
+          amount: consignorLoss,
+          supplierId: consignorSupplierId,
+          paymentMethod: 'cash',
+          description: `Consignor guarantee shortfall · ${con.consignmentNumber} · sold ${salePrice} BHD vs agreed ${con.agreedPrice} BHD`,
+          expenseDate: saleDate,
+          relatedModule: 'consignment',
+          relatedEntityId: con.id,
+          // WICHTIG: payNow=false → bleibt PENDING. Sonst zieht createExpense
+          // sofort Cash/Bank ab. Wir wollen aber AP zur Frau Y aufbauen, die
+          // dann via Banking gezahlt wird (zusammen mit Purchase-AP).
+          payNow: false,
+        });
+        expenseId = expense.id;
+      }
+
+      // 5. Consignment-Status + Verlinkungen
+      get().updateConsignment(con.id, {
+        status: 'sold',
+        salePrice,
+        buyerId: params.buyerId,
+        commissionAmount: ourCommission,
+        payoutAmount: consignorPayout,
+        invoiceId: invoice.invoiceId,
+      });
+
+      // 6. Produkt: NUR quantity dekrementieren + last_sale_price merken.
+      // Plan §Sales §Partial-Payment-Reservation (2026-05-16): stock_status NICHT
+      // mehr explizit auf 'sold' setzen — der Invoice-Flow markiert das Produkt
+      // automatisch korrekt: 'consignment' → 'consignment_reserved' (PARTIAL) →
+      // 'sold' (FINAL via invoice.paid event). Ein hartes 'sold' hier wuerde
+      // den Reserved-Lifecycle ueberspringen, sodass ein Teilzahlungs-Verkauf
+      // sofort als komplett bezahlt aussieht.
+      db.run(
+        `UPDATE products SET
+           quantity = CASE WHEN COALESCE(quantity,1) > 1 THEN COALESCE(quantity,1) - 1 ELSE 0 END,
+           last_sale_price = ?, updated_at = ? WHERE id = ?`,
+        [salePrice, new Date().toISOString(), con.productId]
+      );
+
+      eventBus.emit('consignment.sale_recorded', 'consignment', con.id, {
+        invoiceId: invoice.invoiceId,
+        purchaseId,
+        expenseId,
+        consignorPayout,
+        ourCommission,
+        consignorLoss,
+      });
+      return {
+        consignmentId: con.id,
+        invoiceId: invoice.invoiceId,
+        purchaseId,
+        expenseId,
+        consignorLossAmount: consignorLoss,
+        consignorPayout,
+        ourCommission,
+      };
+    });
     saveDatabase();
-
-    eventBus.emit('consignment.sale_recorded', 'consignment', id, {
-      invoiceId: invoice.id,
-      purchaseId: purchase.id,
-      expenseId,
-      consignorPayout,
-      ourCommission,
-      consignorLoss,
-    });
-
-    return {
-      invoiceId: invoice.id,
-      purchaseId: purchase.id,
-      expenseId,
-      consignorLossAmount: consignorLoss,
-      consignorPayout,
-      ourCommission,
-    };
+    return { invoiceId: invoice.invoiceId, items, paymentIds: invoice.paymentIds ?? [] };
   },
 
   // ── Cancel Sale: vollständiges Undo des recordSale-Flows ────────────────
@@ -764,5 +841,13 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
  */
 export function loadConsignmentsFor(ctx: BusinessReadContext): { consignments: Consignment[] } {
   const rows = query('SELECT * FROM consignments WHERE branch_id = ? ORDER BY created_at DESC', [ctx.branchId]);
-  return { consignments: rows.map(rowToConsignment) };
+  // D4 — die Seite des Einlieferers je Kommission (eine Ableitung für alle Masken, reist mit nach PC2).
+  const seiten = consignorSidesFor(ctx.branchId, rows);
+  return {
+    consignments: rows.map((r) => {
+      const c = rowToConsignment(r);
+      const s = seiten.get(c.id);
+      return s ? { ...c, consignorSide: s } : c;
+    }),
+  };
 }

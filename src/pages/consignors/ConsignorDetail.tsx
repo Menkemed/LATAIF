@@ -22,6 +22,9 @@ import { commissionModelLabel } from '@/core/consignment/economics';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { assertConsignmentReturnable, consignmentReturnBody } from '@/core/consignment/consignment-return';
 import { productDisplayName } from '@/core/products/display-name';
+// CONSIGNMENT MULTI-SALE — mehrere Artikel dieses Einlieferers in EINEM Verkauf (derselbe Dialog wie überall).
+import { ConsignmentSaleDialog } from '@/components/consignments/ConsignmentSaleDialog';
+import { consignorOpenFor } from '@/core/consignment/consignor-side';
 
 export function ConsignorDetail() {
   const { id } = useParams<{ id: string }>();
@@ -45,6 +48,8 @@ export function ConsignorDetail() {
   const { suppliers, loadSuppliers } = useSupplierStore();
   const [showHistory, setShowHistory] = useState(false);
   const [showPrint, setShowPrint] = useState(false);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  const [saleIds, setSaleIds] = useState<string[] | null>(null);
 
   useEffect(() => {
     loadConsignments(); loadCustomers(); loadProducts(); loadCategories(); loadSuppliers();
@@ -55,6 +60,18 @@ export function ConsignorDetail() {
     () => consignments.filter(c => c.consignorId === id),
     [consignments, id]
   );
+  // CONSIGNMENT MULTI-SALE — die Auswahl verkaufbarer (aktiver) Artikel; gezählt wird nur, was noch aktiv ist.
+  const sellable = useMemo(() => myConsignments.filter(c => c.status === 'active'), [myConsignments]);
+  const selectedList = useMemo(() => sellable.filter(c => selected.has(c.id)), [sellable, selected]);
+  const selectedAgreed = selectedList.reduce((s, c) => s + (c.agreedPrice || 0), 0);
+  const allSelected = sellable.length > 0 && sellable.every(c => selected.has(c.id));
+  function toggleSelected(cid: string) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(cid)) next.delete(cid); else next.add(cid);
+      return next;
+    });
+  }
 
   // Linked-Supplier-Mirror: Beim ersten recordSale wird ein Supplier mit dem
   // Phone des Consignors angelegt (findOrCreateSupplierForConsignor). Wenn der
@@ -78,12 +95,9 @@ export function ConsignorDetail() {
     const itemsHeld = active.length;
     const totalAgreed = active.reduce((s, c) => s + (c.agreedPrice || 0), 0);
     const totalSold = sold.reduce((s, c) => s + ((c.salePrice ?? c.agreedPrice) || 0), 0);
-    const totalPaidOut = sold
-      .filter(c => c.payoutStatus === 'paid')
-      .reduce((s, c) => s + (c.payoutAmount || 0), 0);
-    const outstandingPayout = sold
-      .filter(c => c.payoutStatus !== 'paid')
-      .reduce((s, c) => s + (c.payoutAmount || 0), 0);
+    // D4 — bezahlt/offen aus dem Einkauf beim Einlieferer (Record Sale) bzw. der Kommission (Altweg) — eine Ableitung.
+    const totalPaidOut = sold.reduce((s, c) => s + (c.consignorSide?.paid ?? 0), 0);
+    const outstandingPayout = sold.reduce((s, c) => s + consignorOpenFor(c), 0);
     const isActive = itemsHeld > 0;
     return { itemsHeld, totalAgreed, totalSold, totalPaidOut, outstandingPayout, isActive };
   }, [myConsignments]);
@@ -189,7 +203,21 @@ export function ConsignorDetail() {
 
         {/* Items */}
         <div style={{ marginBottom: 16 }}>
-          <h2 className="font-display" style={{ fontSize: 18, color: '#0F0F10', marginBottom: 12 }}>Consignments</h2>
+          <div className="flex items-center justify-between" style={{ marginBottom: 12, gap: 12 }}>
+            <h2 className="font-display" style={{ fontSize: 18, color: '#0F0F10' }}>Consignments</h2>
+            {/* CONSIGNMENT MULTI-SALE — Anzahl und vereinbarte Summe der Auswahl, ein gemeinsamer Verkauf. */}
+            {selectedList.length > 0 && (
+              <div className="flex items-center gap-3" data-consignor-selection>
+                <span style={{ fontSize: 13, color: '#0F0F10' }}>
+                  <strong>{selectedList.length}</strong> selected · agreed <Bhd v={selectedAgreed}/> BHD
+                </span>
+                <Button variant="ghost" onClick={() => setSelected(new Set())}>Clear</Button>
+                <Button variant="primary" onClick={() => setSaleIds(selectedList.map(c => c.id))} data-consignor-record-sale-selected>
+                  Record Sale ({selectedList.length})
+                </Button>
+              </div>
+            )}
+          </div>
           {myConsignments.length === 0 ? (
             <Card>
               <div style={{ padding: '40px 0', textAlign: 'center' }}>
@@ -202,6 +230,11 @@ export function ConsignorDetail() {
               <table style={{ width: '100%', borderCollapse: 'collapse' }}>
                 <thead>
                   <tr style={{ borderBottom: '1px solid #E5E9EE' }}>
+                    <th style={{ padding: '12px 0 12px 16px', width: 28 }}>
+                      <input type="checkbox" title="Select all sellable items" data-consignor-select-all
+                        disabled={sellable.length === 0} checked={allSelected}
+                        onChange={() => setSelected(allSelected ? new Set() : new Set(sellable.map(c => c.id)))} />
+                    </th>
                     {['Number', 'Product', 'Agreed Price', 'Sale / Payout', 'Status', 'Actions'].map(h => (
                       <th key={h} style={{
                         padding: '12px 16px', textAlign: 'left', fontSize: 11,
@@ -228,6 +261,12 @@ export function ConsignorDetail() {
                           onMouseEnter={e => (e.currentTarget.style.background = '#F8FAFB')}
                           onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                         >
+                          <td style={{ padding: '12px 0 12px 16px' }} onClick={e => e.stopPropagation()}>
+                            {con.status === 'active' && (
+                              <input type="checkbox" data-consignor-select={con.id}
+                                checked={selected.has(con.id)} onChange={() => toggleSelected(con.id)} />
+                            )}
+                          </td>
                           <td style={{ padding: '12px 16px' }}>
                             <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10' }}>{con.consignmentNumber}</span>
                           </td>
@@ -255,7 +294,9 @@ export function ConsignorDetail() {
                                 </span>
                                 {payoutValue != null && (
                                   <span style={{ fontSize: 10, color: '#6B7280', display: 'block', marginTop: 2 }}>
-                                    payout: <Bhd v={payoutValue}/> ({con.payoutStatus})
+                                    payout: <Bhd v={payoutValue}/> ({con.invoiceId
+                                      ? (consignorOpenFor(con) > 0.0005 ? <>open <Bhd v={consignorOpenFor(con)}/></> : 'paid')
+                                      : con.payoutStatus})
                                   </span>
                                 )}
                               </>
@@ -322,6 +363,13 @@ export function ConsignorDetail() {
           </Card>
         )}
       </div>
+
+      <ConsignmentSaleDialog
+        open={saleIds !== null}
+        consignmentIds={saleIds ?? []}
+        onClose={() => setSaleIds(null)}
+        onSold={() => { loadConsignments(); setSelected(new Set()); }}
+      />
 
       <HistoryDrawer
         open={showHistory}

@@ -17,10 +17,50 @@ export type PostSaleDisposition = typeof POST_SALE_DISPOSITIONS[number];
 export const POST_SALE_REFUND_METHODS: readonly ReturnRefundMethod[] = RETURN_REFUND_METHODS;
 export const DEFAULT_POST_SALE_REFUND_METHOD: ReturnRefundMethod = 'cash';
 
+// ── D3 — die schon geleistete Auszahlung an den Einlieferer, wenn die Ware zu ihm zurückgeht ──────────────
+//
+// War der Einkauf beim Einlieferer schon (teilweise) bezahlt, stornierte die Rücknahme ihn bisher samt Zahlungen:
+// das Hauptbuch zeigte die Auszahlung HEUTE als zurückgekommen, ohne dass Geld kam. Jetzt entscheidet der Owner,
+// und gebucht wird über die VORHANDENE Lieferanten-Retoure (PRET) dieses Einkaufs — keine neue Buchungsregel:
+//   • „received": der Einlieferer hat das Geld zurückgegeben — Eingang auf Kasse/Bank/Benefit (Weg wählbar), heute;
+//   • „pending":  das Geld kommt später — der bezahlte Betrag wird Lieferanten-Guthaben beim Einlieferer (eine offene
+//                 Rückforderung, verrechenbar wie jedes Guthaben). Die ursprüngliche Auszahlung bleibt stehen.
+
+export const CONSIGNOR_REFUND_MODES = ['received', 'pending'] as const;
+export type ConsignorRefundMode = typeof CONSIGNOR_REFUND_MODES[number];
+/** Wie das Geld des Einlieferers zurückkam — die Wege der Lieferanten-Retoure ohne „credit". */
+export const CONSIGNOR_REFUND_METHODS = ['cash', 'bank', 'benefit'] as const;
+export type ConsignorRefundMethod = typeof CONSIGNOR_REFUND_METHODS[number];
+
+export type ConsignorRefundChoice =
+  | { mode: 'received'; method: ConsignorRefundMethod }
+  | { mode: 'pending' };
+
+export const CONSIGNOR_REFUND_REQUIRED = 'CONSIGNOR_REFUND_REQUIRED';
+export const CONSIGNOR_REFUND_INVALID = 'CONSIGNOR_REFUND_INVALID';
+export const CONSIGNOR_PAID_BY_CREDIT = 'CONSIGNOR_PAID_BY_CREDIT';
+export const CONSIGNOR_LOSS_PAID = 'CONSIGNOR_LOSS_PAID';
+export const CONSIGNOR_PAYOUT_PAID_LEGACY = 'CONSIGNOR_PAYOUT_PAID_LEGACY';
+export const CONSIGNMENT_CONSIGNOR_SETTLED = 'CONSIGNMENT_CONSIGNOR_SETTLED';
+
+/** Die Wahl prüfen — rein, ohne Datenbank (Maske, Fernrumpf und Haus nennen dasselbe Nein). */
+export function consignorRefundOf(raw: unknown): ConsignorRefundChoice | null {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return null;
+  const r = raw as Record<string, unknown>;
+  if (Object.keys(r).some((k) => k !== 'mode' && k !== 'method')) return null;
+  if (r.mode === 'pending' && r.method === undefined) return { mode: 'pending' };
+  if (r.mode === 'received' && (CONSIGNOR_REFUND_METHODS as readonly unknown[]).includes(r.method)) {
+    return { mode: 'received', method: r.method as ConsignorRefundMethod };
+  }
+  return null;
+}
+
 /** Die EINGABEN von „Buyer Returns the Item" — kein Betrag, keine Zeile, keine Steuer (die rechnet das Haus). */
 export interface ConsignmentReturnAfterSaleInput {
   disposition: PostSaleDisposition;
   refundMethod?: ReturnRefundMethod;
+  /** D3 — nur bei „Return to Owner", wenn der Einlieferer schon (teilweise) bezahlt ist: Pflicht. */
+  consignorRefund?: ConsignorRefundChoice;
   reason?: string;
   /** CONSIGNMENT-INTEGRITY F6 — nur wenn die Rückgabe von der Rechnung aus kommt: Notiz und Mitarbeiter der
    *  Retourenmaske gehen nicht verloren. Kein Teil des Fernrumpfs `consignments.return_after_sale`. */
@@ -86,11 +126,21 @@ export function consignmentReturnAfterSaleBody(
 ): Record<string, unknown> {
   const body: Record<string, unknown> = { consignmentId: id, expectedRevision: revision, disposition: i.disposition };
   if (i.refundMethod !== undefined) body.refundMethod = i.refundMethod;
+  if (i.consignorRefund !== undefined) body.consignorRefund = { ...i.consignorRefund };
   if (i.reason !== undefined && i.reason.trim() !== '') body.reason = i.reason;
   return body;
 }
 
-/** Der Rumpf von `consignments.cancel_sale` — WELCHE Kommission, in welcher Fassung. Sonst nichts. */
-export function consignmentCancelSaleBody(id: string, revision: number): Record<string, unknown> {
-  return { consignmentId: id, expectedRevision: revision };
+/**
+ * Der Rumpf von `consignments.cancel_sale` — WELCHE Kommission, in welcher Fassung; bei einem bezahlten Einlieferer
+ * (D3) je Kommission die Wahl, was mit seiner Auszahlung geschieht. Sonst nichts.
+ */
+export function consignmentCancelSaleBody(
+  id: string, revision: number, consignorRefunds?: Readonly<Record<string, ConsignorRefundChoice>>,
+): Record<string, unknown> {
+  const body: Record<string, unknown> = { consignmentId: id, expectedRevision: revision };
+  if (consignorRefunds && Object.keys(consignorRefunds).length > 0) {
+    body.consignorRefunds = Object.fromEntries(Object.entries(consignorRefunds).map(([k, v]) => [k, { ...v }]));
+  }
+  return body;
 }

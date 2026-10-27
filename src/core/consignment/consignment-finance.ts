@@ -6,6 +6,7 @@
 // aus (markPaidOut, ohne Betrag); der Fernbefehl kannte nur den Teilbetrag. Jetzt schicken beide
 // Masken ihre Eingaben, und das Haus (`consignment-finance-house`) entscheidet — am Primary wie fern.
 // ════════════════════════════════════════════════════════════════════════════
+import type { InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
 
 /** Ein Nein der geteilten Regeln — am Primary eine Absage der Maske, fern ein eingefrorenes Urteil. */
 export class ConsignmentActionRejected extends Error {
@@ -32,6 +33,30 @@ export interface ConsignmentSaleInput {
   specialMark: boolean;
 }
 
+/** CONSIGNMENT MULTI-SALE — ein Artikel des gemeinsamen Verkaufs (je Artikel Preis und ggf. die Bestätigung der Unterdeckung). */
+export interface ConsignmentSaleItemInput {
+  consignmentId: string;
+  salePrice: number;
+  acknowledgeShortfall: boolean;
+}
+
+/**
+ * CONSIGNMENT MULTI-SALE — die EINGABEN des Verkaufsdialogs: ein oder mehrere Artikel (auch verschiedener
+ * Einlieferer), EIN Käufer, EINE Rechnung, datiert auf den Verkaufstag (D1), optional mit Zahlungen (D5) —
+ * dieselben Zahlungszeilen wie „Save Invoice".
+ */
+export interface ConsignmentMultiSaleInput {
+  items: ConsignmentSaleItemInput[];
+  buyerId: string;
+  saleDate?: string;
+  notes?: string;
+  specialMark: boolean;
+  payments?: InvoiceCreatePayment[];
+}
+
+/** So viele Artikel nimmt ein gemeinsamer Verkauf auf einmal an. */
+export const MAX_SALE_ITEMS = 50;
+
 /** Die EINGABEN einer Auszahlung an den Eigentümer. */
 export interface ConsignmentPayoutInput {
   amount: number;
@@ -54,6 +79,25 @@ export function consignmentSaleBody(id: string, revision: number, i: Consignment
   };
   if (i.saleDate !== undefined) body.saleDate = i.saleDate;
   if (i.notes !== undefined) body.notes = i.notes;
+  return body;
+}
+
+/**
+ * CONSIGNMENT MULTI-SALE — der Rumpf von `consignments.record_sale` für einen gemeinsamen Verkauf: je Artikel die
+ * gesehene Fassung (jede Kommission wird gegen IHRE Fassung geprüft), dazu Käufer, Tag, Nummernkreis, Zahlungen.
+ */
+export function consignmentSalesBody(i: ConsignmentMultiSaleInput, revisions: Readonly<Record<string, number>>): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    items: i.items.map((it) => ({
+      consignmentId: it.consignmentId, expectedRevision: revisions[it.consignmentId],
+      salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall,
+    })),
+    buyerId: i.buyerId,
+    specialMark: i.specialMark,
+  };
+  if (i.saleDate !== undefined) body.saleDate = i.saleDate;
+  if (i.notes !== undefined) body.notes = i.notes;
+  if (i.payments && i.payments.length > 0) body.payments = i.payments.map((p) => ({ ...p }));
   return body;
 }
 

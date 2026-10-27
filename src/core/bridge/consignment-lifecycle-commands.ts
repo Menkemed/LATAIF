@@ -28,7 +28,7 @@ import { BusinessError, registerCommand, type CommandActor } from './command-reg
 import { assertHouseBranch } from './remote-create-support';
 import { ConsignmentActionRejected } from '@/core/consignment/consignment-finance';
 import {
-  POST_SALE_DISPOSITIONS, POST_SALE_REFUND_METHODS, type PostSaleDisposition,
+  POST_SALE_DISPOSITIONS, POST_SALE_REFUND_METHODS, consignorRefundOf, type ConsignorRefundChoice, type PostSaleDisposition,
 } from '@/core/consignment/consignment-reversal';
 import {
   cancelConsignmentSaleInHouse, returnConsignmentAfterSaleInHouse,
@@ -136,11 +136,20 @@ export interface ReturnAfterSaleRequest {
   expectedRevision: number;
   disposition: PostSaleDisposition;
   refundMethod?: ReturnRefundMethod;
+  /** D3 — was mit der schon geleisteten Auszahlung geschieht (nur „Return to Owner" mit bezahltem Einlieferer). */
+  consignorRefund?: ConsignorRefundChoice;
   reason?: string;
 }
 
+/** D3 — die Wahl des Owners, rein geprüft (dieselbe Regel wie im Haus). */
+function refundWahl(raw: unknown, name: string): ConsignorRefundChoice {
+  const w = consignorRefundOf(raw);
+  if (!w) throw new ConsignmentLifecyclePayloadError(`${name} is { mode: "received", method: cash | bank | benefit } or { mode: "pending" }`);
+  return w;
+}
+
 export function parseReturnAfterSale(raw: unknown): ReturnAfterSaleRequest {
-  const r = strict(raw, ['consignmentId', 'expectedRevision', 'disposition', 'refundMethod', 'reason'],
+  const r = strict(raw, ['consignmentId', 'expectedRevision', 'disposition', 'refundMethod', 'consignorRefund', 'reason'],
     CONSIGNMENT_LIFECYCLE_COMPUTED.returnAfterSale);
   if (typeof r.disposition !== 'string' || !(POST_SALE_DISPOSITIONS as readonly string[]).includes(r.disposition)) {
     throw new ConsignmentLifecyclePayloadError(`disposition is one of ${POST_SALE_DISPOSITIONS.join(', ')}`);
@@ -156,6 +165,7 @@ export function parseReturnAfterSale(raw: unknown): ReturnAfterSaleRequest {
     }
     out.refundMethod = r.refundMethod as ReturnRefundMethod;
   }
+  if (r.consignorRefund !== undefined) out.consignorRefund = refundWahl(r.consignorRefund, 'consignorRefund');
   if (r.reason !== undefined && r.reason !== null) {
     if (typeof r.reason !== 'string') throw new ConsignmentLifecyclePayloadError('reason must be a string');
     if (r.reason.trim() !== '') out.reason = r.reason.trim();
@@ -163,11 +173,22 @@ export function parseReturnAfterSale(raw: unknown): ReturnAfterSaleRequest {
   return out;
 }
 
-export interface CancelSaleRequest { consignmentId: string; expectedRevision: number }
+export interface CancelSaleRequest {
+  consignmentId: string;
+  expectedRevision: number;
+  /** D3 — je Kommission des Verkaufs mit schon bezahltem Einlieferer die Wahl des Owners. */
+  consignorRefunds?: Record<string, ConsignorRefundChoice>;
+}
 
 export function parseCancelSale(raw: unknown): CancelSaleRequest {
-  const r = strict(raw, ['consignmentId', 'expectedRevision'], CONSIGNMENT_LIFECYCLE_COMPUTED.cancelSale);
-  return { consignmentId: idOf(r.consignmentId, 'consignmentId'), expectedRevision: revisionOf(r.expectedRevision) };
+  const r = strict(raw, ['consignmentId', 'expectedRevision', 'consignorRefunds'], CONSIGNMENT_LIFECYCLE_COMPUTED.cancelSale);
+  const out: CancelSaleRequest = { consignmentId: idOf(r.consignmentId, 'consignmentId'), expectedRevision: revisionOf(r.expectedRevision) };
+  if (r.consignorRefunds !== undefined) {
+    if (!isPlain(r.consignorRefunds)) throw new ConsignmentLifecyclePayloadError('consignorRefunds is an object keyed by consignment');
+    out.consignorRefunds = Object.fromEntries(Object.entries(r.consignorRefunds)
+      .map(([k, v]) => [idOf(k, 'consignorRefunds key'), refundWahl(v, `consignorRefunds.${k}`)]));
+  }
+  return out;
 }
 
 // ── Die Läufe ───────────────────────────────────────────────────────────────
@@ -189,6 +210,7 @@ export function runReturnAfterSale(deps: EngineDeps, identity: CommandIdentity, 
     assertHouseBranch(identity);
     const out = urteil(() => returnConsignmentAfterSaleInHouse(req.consignmentId, {
       disposition: req.disposition, refundMethod: req.refundMethod, reason: req.reason,
+      ...(req.consignorRefund ? { consignorRefund: req.consignorRefund } : {}),
     }, identity.branchId, req.expectedRevision));
     const after = stand(req.consignmentId);
     if (after.status !== 'returned') throw new CommandNotEvaluated('RETURN_NOT_APPLIED', `status is ${after.status}`);
@@ -204,11 +226,15 @@ export function runCancelSale(deps: EngineDeps, identity: CommandIdentity, raw: 
     assertHouseBranch(identity);
     const out = urteil(() => cancelConsignmentSaleInHouse(
       req.consignmentId, { userId: identity.userId, role: rolleVon(identity) }, identity.branchId, req.expectedRevision,
+      req.consignorRefunds,
     ));
     const after = stand(req.consignmentId);
-    const still = query('SELECT invoice_id FROM consignments WHERE id = ?', [req.consignmentId])[0];
-    if (after.status !== 'active' || String(still?.invoice_id ?? '') !== '') {
-      throw new CommandNotEvaluated('CANCEL_NOT_APPLIED', `status is ${after.status}`);
+    // D2 — JEDE Kommission des Verkaufs ist danach wieder „active" und ohne Rechnung.
+    for (const kid of out.consignmentIds) {
+      const k = query('SELECT status, invoice_id FROM consignments WHERE id = ?', [kid])[0];
+      if (String(k?.status ?? '') !== 'active' || String(k?.invoice_id ?? '') !== '') {
+        throw new CommandNotEvaluated('CANCEL_NOT_APPLIED', `status is ${String(k?.status ?? '')}`);
+      }
     }
     const inv = out.invoiceId ? query('SELECT status FROM invoices WHERE id = ?', [out.invoiceId])[0] : undefined;
     frischLesen();

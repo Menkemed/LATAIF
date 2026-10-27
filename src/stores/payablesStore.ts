@@ -247,7 +247,9 @@ export function loadPayablesFor(ctx: BusinessReadContext): { payables: PayableRo
   //    der offenen Settlements erfolgt direkt auf /agents (AgentList) und
   //    künftig per Convert-to-Invoice (dann als Receivable im Customer-Modul).
 
-  // 4) Consignor Payouts — verkauft, Eigentümer noch nicht voll ausgezahlt
+  // 4) Consignor Payouts — verkauft, Eigentümer noch nicht voll ausgezahlt. NUR der Altweg ohne Rechnung (`markSold`):
+  //    ein „Record Sale" führt die Schuld als Einkauf beim Einlieferer (Abschnitt Einkäufe) — hier stünde sie sonst
+  //    ein zweites Mal (D4/B1), und „Pay Out Consignor" ist für ihn gesperrt (PAYOUT_VIA_PURCHASE).
   const consignmentRows = query(
     `SELECT cs.id, cs.consignment_number, cs.consignor_id,
             c.first_name, c.last_name,
@@ -255,6 +257,7 @@ export function loadPayablesFor(ctx: BusinessReadContext): { payables: PayableRo
      FROM consignments cs
      LEFT JOIN customers c ON c.id = cs.consignor_id
      WHERE (cs.status = 'sold' OR cs.status = 'SOLD')
+       AND (cs.invoice_id IS NULL OR cs.invoice_id = '')
        AND COALESCE(cs.payout_amount, 0) > COALESCE(cs.payout_paid_amount, 0)
        AND cs.branch_id = ?`,
     [ctx.branchId]

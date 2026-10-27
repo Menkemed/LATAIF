@@ -101,6 +101,7 @@ const { CommandSaveController } = await import('../../src/core/bridge/client-com
 
 type SI = import('../../src/core/consignment/consignment-finance.ts').ConsignmentSaleInput;
 type RI = import('../../src/core/consignment/consignment-reversal.ts').ConsignmentReturnAfterSaleInput;
+type CR = import('../../src/core/consignment/consignment-reversal.ts').ConsignorRefundChoice;
 
 let PASS = 0; const fails: string[] = [];
 const ok = (c: unknown, m: string): void => { if (c) PASS++; else { fails.push(m); console.log('  x ' + m); } };
@@ -406,11 +407,11 @@ function rueckgabe(weg: Weg, w: Welt, input: RI, x = nx(), over: Partial<typeof 
     ? primary(() => conHouse.returnConsignmentAfterSaleOnPrimary(w.cid, input))
     : fern(() => cl.runReturnAfterSale(deps(db), identity(x, OP_R, over), rules.consignmentReturnAfterSaleBody(w.cid, crev(w.db, w.cid), input)));
 }
-function storno(weg: Weg, w: Welt, x = nx(), over: Partial<typeof ACTOR> = {}, db: Db = w.db): Promise<Ausgang> {
+function storno(weg: Weg, w: Welt, x = nx(), over: Partial<typeof ACTOR> = {}, db: Db = w.db, erstattung?: Record<string, CR>): Promise<Ausgang> {
   nimm(db);
   return weg === 'primary'
-    ? primary(() => conHouse.cancelConsignmentSaleOnPrimary(w.cid))
-    : fern(() => cl.runCancelSale(deps(db), identity(x, OP_C, over), rules.consignmentCancelSaleBody(w.cid, crev(w.db, w.cid))));
+    ? primary(() => conHouse.cancelConsignmentSaleOnPrimary(w.cid, erstattung))
+    : fern(() => cl.runCancelSale(deps(db), identity(x, OP_C, over), rules.consignmentCancelSaleBody(w.cid, crev(w.db, w.cid), erstattung)));
 }
 
 // ══ §1 — Umfang ═════════════════════════════════════════════════════════════
@@ -621,7 +622,7 @@ marker('CENTRAL_UI_R6F_CONSIGNMENT_RETURN_PROVED');
 // ════════════════════════════════════════════════════════════════════════════
 // „Cancel Sale" — der Stand VOR dem Verkauf ist das Ziel.
 // ════════════════════════════════════════════════════════════════════════════
-function nachStorno(w: Welt, was: string, auch: { erlaubt?: string[] } = {}): void {
+function nachStorno(w: Welt, was: string, auch: { erlaubt?: string[]; einlieferer?: 'retoure' } = {}): void {
   const nach = zustand(w.db, w.cid);
   const d = diffAll(w.vor as unknown as Record<string, unknown>, nach as unknown as Record<string, unknown>)
     .filter((x) => !(auch.erlaubt ?? []).some((e) => x.startsWith(e)));
@@ -634,6 +635,17 @@ function nachStorno(w: Welt, was: string, auch: { erlaubt?: string[] } = {}): vo
   }
   ok(n(w.db, "SELECT COUNT(*) FROM credit_notes WHERE status != 'CANCELLED'") === 0 && n(w.db, "SELECT COUNT(*) FROM sales_returns WHERE status != 'REJECTED'") === 0,
     `NO-DELETE ${was}: keine wirksame Gutschrift, keine wirksame Retoure mehr`);
+  if (auch.einlieferer === 'retoure') {
+    // D3 — der bezahlte Einkauf beim Einlieferer wurde NICHT samt Zahlung storniert (kein fiktiver Geldeingang),
+    // sondern über die Lieferanten-Retoure zurückgenommen: Summe, Rest und Bezahltes null, die Zahlung bleibt stehen.
+    ok(n(w.db, "SELECT COUNT(*) FROM purchases WHERE status != 'CANCELLED' AND (total_amount > 0.0005 OR remaining_amount > 0.0005 OR paid_amount > 0.0005)") === 0
+      && n(w.db, "SELECT COUNT(*) FROM purchase_returns WHERE status != 'CANCELLED'") === n(w.db, "SELECT COUNT(*) FROM purchases WHERE status != 'CANCELLED'")
+      && n(w.db, "SELECT COUNT(*) FROM purchase_payments") > 0
+      && n(w.db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'PURCHASE_PAYMENT' AND reverses_entry_id IS NOT NULL") === 0
+      && n(w.db, "SELECT COUNT(*) FROM expenses WHERE status != 'CANCELLED'") === 0,
+    `STATE ${was}: der bezahlte Einkauf geht über die Lieferanten-Retoure zurück, die Auszahlung bleibt (keine Umkehrbuchung der Zahlung)`);
+    return;
+  }
   ok(n(w.db, "SELECT COUNT(*) FROM purchases WHERE status != 'CANCELLED'") === 0 && n(w.db, "SELECT COUNT(*) FROM expenses WHERE status != 'CANCELLED'") === 0,
     `STATE ${was}: Auto-Einkauf und Verlust-Ausgabe CANCELLED (stehen als Historie)`);
 }
@@ -668,16 +680,17 @@ marker('CENTRAL_UI_R6F_CONSIGNMENT_CANCEL_SALE_PARITY_PROVED');
 
 // ══ §7 — Storno: weitere Welten, jede zurück auf den Stand vor dem Verkauf ═══
 {
-  const WELTEN: Array<[string, Parameters<typeof welt>[0], RI | null, string[]]> = [
-    ['beide Seiten bezahlt (Käufer bar, Einlieferer bar)', { bezahlt: 1200, einlieferer: 960 }, null, []],
+  // D3 — ein schon bezahlter Einlieferer: ohne Wahl des Owners kein Storno (vorher buchte er die Auszahlung HEUTE als
+  // zurückgekommen); mit „received" über die Lieferanten-Retoure — Kasse null, die Auszahlung bleibt als Historie.
+  const WELTEN: Array<[string, Parameters<typeof welt>[0], RI | null, string[], CR?]> = [
+    ['beide Seiten bezahlt (Käufer bar, Einlieferer bar)', { bezahlt: 1200, einlieferer: 960 }, null, [], { mode: 'received', method: 'cash' }],
     ['nach „Return to Owner" (cleanup)', {}, { disposition: 'RETURN_TO_OWNER' }, []],
     // Befund (bekannt, R6E `revertDisposition`): der Einstand, den „Keep" setzte, bleibt am Artikel.
     ['nach „Keep" (cleanup)', {}, { disposition: 'KEEP_AS_OWN' }, ['produkt.purchase_price']],
     ['Unterdeckung mit Verlust-Ausgabe', { body: FIXED, sale: SHORT }, null, []],
-    ['Altweg ausbezahlt, ohne Rechnung', { alt: true }, null, []],
     ['VAT_10-Ware', { vat10: true }, null, []],
   ];
-  for (const [was, o, vorab, erlaubt] of WELTEN) {
+  for (const [was, o, vorab, erlaubt, erstattung] of WELTEN) {
     for (const weg of ['primary', 'fern'] as const) {
       const w = await welt(o);
       if (vorab) {
@@ -685,9 +698,15 @@ marker('CENTRAL_UI_R6F_CONSIGNMENT_CANCEL_SALE_PARITY_PROVED');
         if (!r0.ok) { ok(false, `SETUP ${was}: ${r0.code}`); continue; }
       }
       const gutschriften = n(w.db, 'SELECT COUNT(*) FROM credit_notes');
-      const aus = await storno(weg, w);
+      if (erstattung) {
+        const vorher = S([zustand(w.db, w.cid), lc(w.db)]);
+        const ohne = await storno(weg, w);
+        ok(!ohne.ok && ohne.code === 'CONSIGNOR_REFUND_REQUIRED' && S([zustand(w.db, w.cid), lc(w.db)]) === vorher,
+          `D3 ${was} (${weg}): bezahlter Einlieferer ohne Wahl → abgewiesen, nichts verändert (${ohne.code || 'ok'})`);
+      }
+      const aus = await storno(weg, w, nx(), {}, w.db, erstattung ? { [w.cid]: erstattung } : undefined);
       ok(aus.ok, `CANCEL ${was} (${weg}) gelingt (${aus.code || 'ok'})`);
-      nachStorno(w, `${was} (${weg})`, { erlaubt });
+      nachStorno(w, `${was} (${weg})`, { erlaubt, ...(erstattung ? { einlieferer: 'retoure' as const } : {}) });
       ok(n(w.db, 'SELECT COUNT(*) FROM credit_notes') === gutschriften,
         `NO-DELETE ${was} (${weg}): keine Gutschrift gelöscht (${gutschriften} → ${n(w.db, 'SELECT COUNT(*) FROM credit_notes')})`);
       if (vorab) {
@@ -717,6 +736,18 @@ marker('CENTRAL_UI_R6F_CONSIGNMENT_CANCEL_SALE_PARITY_PROVED');
   }
 }
 marker('CENTRAL_UI_R6F_CONSIGNMENT_CANCEL_SALE_STATE_PROVED');
+
+// ══ §7a — D3: der Altweg (Verkauf ohne Rechnung, ausbezahlt) wird nicht mehr still zurückgebucht ═══
+{
+  for (const weg of ['primary', 'fern'] as const) {
+    const w = await welt({ alt: true });
+    const vorher = S([zustand(w.db, w.cid), lc(w.db)]);
+    const aus = await storno(weg, w);
+    ok(!aus.ok && aus.code === 'CONSIGNOR_PAYOUT_PAID_LEGACY' && S([zustand(w.db, w.cid), lc(w.db)]) === vorher,
+      `D3 Altweg ausbezahlt, ohne Rechnung (${weg}): abgewiesen statt die Auszahlung als zurückgekommen zu buchen; nichts verändert (${aus.code || 'ok'})`);
+  }
+}
+marker('CONSIGNMENT_D3_LEGACY_PAYOUT_FAIL_CLOSED');
 
 // ══ §7b — PURCHASE-EDIT B6: Altbestand ohne Kommissions-Spalte — keine Verknüpfung geht verloren ═══
 {
@@ -968,10 +999,15 @@ marker('CENTRAL_UI_R6F_CONSIGNMENT_CLIENT_PROVED');
     'data-consignment-return-refund-method', 'data-consignment-return-reason', 'data-consignment-cancel-sale', 'data-consignment-cancel-sale-confirm']) {
     ok(ui.includes(attr), `UI ${attr}`);
   }
-  ok(/onClick=\{\(\) => void handlePostSaleReturn\(\)\} disabled=\{w\.busy\}/.test(ui) && /onClick=\{\(\) => void handleCancelSale\(\)\} disabled=\{w\.busy\}/.test(ui),
-    'UI beide Bestätigungen während des Laufs gesperrt');
-  ok(!/NOT auto-refunded/.test(ui) && !/stay booked/.test(ui) && (ui.match(/reversed in the books/g) ?? []).length >= 3,
-    'UI die Rückfrage sagt, was gebucht wird: Zahlungen werden im Hauptbuch umgekehrt (vorher „NOT auto-refunded" / „stay booked")');
+  ok(/onClick=\{\(\) => void handlePostSaleReturn\(\)\} disabled=\{w\.busy\}/.test(ui)
+    && /onClick=\{\(\) => void handleCancelSale\(\)\}[^>]*?disabled=\{w\.busy\b/.test(ui),
+  'UI beide Bestätigungen während des Laufs gesperrt');
+  // D3 — die Zahlung des KÄUFERS kehrt der Storno im Hauptbuch um (das sagt die Rückfrage); die Auszahlung an den
+  // Einlieferer NICHT mehr (keine fiktive Rückbuchung) — dafür die Wahl „Geld zurück jetzt" / „Rückzahlung offen".
+  ok(!/NOT auto-refunded/.test(ui) && !/stay booked/.test(ui) && (ui.match(/reversed in the books/g) ?? []).length === 1
+    && !/collect the money back from the consignor/.test(ui) && /The payout stays in the books/.test(ui)
+    && /data-consignor-refund-mode="received"/.test(ui) && /data-consignor-refund-mode="pending"/.test(ui),
+  'UI die Rückfrage sagt, was gebucht wird: die Käuferzahlung wird umgekehrt, die Auszahlung an den Einlieferer bleibt (D3-Wahl)');
   const st = codeOf(src('src/stores/consignmentStore.ts'));
   const cStart = st.indexOf('cancelSale: (id) =>');
   const rStart = st.indexOf('markReturnedAfterSale: (id, disposition) =>');

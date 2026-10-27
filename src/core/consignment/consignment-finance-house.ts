@@ -10,7 +10,7 @@
 import { query, currentBranchId } from '@/core/db/helpers';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { watchLedgerPosts } from '@/core/ledger/posting';
-import { useConsignmentStore } from '@/stores/consignmentStore';
+import { ConsignorSupplierError, useConsignmentStore } from '@/stores/consignmentStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
@@ -18,12 +18,15 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import {
-  ACCEPTED_PAYOUT_METHODS, ConsignmentActionRejected, payoutOpenAmount,
-  type ConsignmentPayoutInput, type ConsignmentSaleInput,
+  ACCEPTED_PAYOUT_METHODS, ConsignmentActionRejected, MAX_SALE_ITEMS, payoutOpenAmount,
+  type ConsignmentMultiSaleInput, type ConsignmentPayoutInput, type ConsignmentSaleInput,
 } from './consignment-finance';
+import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
+import { invoiceCreatePayments, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
+import { businessDateIssue } from '@/core/utils/business-date';
 // R6F — die Rücknahmen nach dem Verkauf: dieselbe Klammer, dieselben Listen danach.
 import { isClientMode } from '@/core/bridge/client-mode';
-import { CONSIGNMENT_PRIMARY_ONLY, type ConsignmentReturnAfterSaleInput } from './consignment-reversal';
+import { CONSIGNMENT_PRIMARY_ONLY, type ConsignmentReturnAfterSaleInput, type ConsignorRefundChoice } from './consignment-reversal';
 import {
   cancelConsignmentSaleInHouse, localConsignmentActor, returnConsignmentAfterSaleInHouse,
   type ConsignmentReturnedAfterSale, type ConsignmentSaleCancelled,
@@ -34,6 +37,8 @@ const SALE_VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/Buyer cannot be the same as the consignor/i, 'BUYER_IS_CONSIGNOR'],
   [/Unsupported commission type/i, 'UNSUPPORTED_PAYOUT_MODEL'],
   [/cannot record sale/i, 'CONSIGNMENT_NOT_ACTIVE'],
+  [/selected twice/i, 'DUPLICATE_ITEM'],
+  [/same item cannot be sold twice/i, 'DUPLICATE_PRODUCT'],
 ];
 
 function alsUrteil(e: unknown, table: ReadonlyArray<readonly [RegExp, string]>): never {
@@ -55,24 +60,70 @@ export interface ConsignmentSold {
 /**
  * „Record Sale" (nach dem Nummerndialog): Einkauf beim Einlieferer (damit ein Los entsteht),
  * Rechnung an den Käufer im gewählten Kreis, bei Unterdeckung die Verlust-Ausgabe, Status, Menge.
+ * CONSIGNMENT MULTI-SALE — derselbe Weg wie der gemeinsame Verkauf, mit EINEM Artikel.
  */
 export function recordConsignmentSaleInHouse(
   id: string, input: ConsignmentSaleInput, branchId: string, beforeWrite?: () => void,
 ): ConsignmentSold {
-  if (!Number.isFinite(input.salePrice) || input.salePrice <= 0) {
-    throw new ConsignmentActionRejected('INVALID_AMOUNT', 'the sale price must be a positive number');
+  const out = recordConsignmentSalesInHouse({
+    items: [{ consignmentId: id, salePrice: input.salePrice, acknowledgeShortfall: input.acknowledgeShortfall }],
+    buyerId: input.buyerId, saleDate: input.saleDate, notes: input.notes, specialMark: input.specialMark,
+  }, branchId, beforeWrite);
+  const it = out.items[0];
+  return {
+    invoiceId: it.invoiceId, purchaseId: it.purchaseId, expenseId: it.expenseId,
+    consignorLossAmount: it.consignorLossAmount, consignorPayout: it.consignorPayout, ourCommission: it.ourCommission,
+  };
+}
+
+export interface ConsignmentsSold {
+  invoiceId: string;
+  items: Array<ConsignmentSold & { consignmentId: string }>;
+  paymentIds: string[];
+}
+
+/**
+ * CONSIGNMENT MULTI-SALE — EIN Verkauf an EINEN Käufer: eine Rechnung mit einer Zeile je Artikel (datiert auf den
+ * Verkaufstag), je Artikel ein Einkauf beim Einlieferer, ggf. Verlust-Ausgaben, die Zahlungen wie bei „Save
+ * Invoice" — zusammen oder gar nicht. Geprüft wird aus der DATENBANK, in der Filiale des Auftrags, JEDER Artikel
+ * vor dem ersten Schreiben; `beforeWrite` ist der letzte Wächter (fern: die gesehene Fassung jeder Kommission).
+ */
+export function recordConsignmentSalesInHouse(
+  input: ConsignmentMultiSaleInput, branchId: string, beforeWrite?: () => void,
+): ConsignmentsSold {
+  const nein = (code: string, message: string): never => { throw new ConsignmentActionRejected(code, message); };
+  if (!Array.isArray(input.items) || input.items.length === 0) nein('NO_ITEMS', 'select at least one consignment to sell');
+  if (input.items.length > MAX_SALE_ITEMS) nein('TOO_MANY_ITEMS', `at most ${MAX_SALE_ITEMS} items in one sale`);
+  const ids = new Set<string>();
+  for (const it of input.items) {
+    if (!Number.isFinite(it.salePrice) || it.salePrice <= 0) nein('INVALID_AMOUNT', 'the sale price must be a positive number');
+    if (ids.has(it.consignmentId)) nein('DUPLICATE_ITEM', 'the same consignment is selected twice — each item is sold once');
+    ids.add(it.consignmentId);
   }
-  if (!input.buyerId) throw new ConsignmentActionRejected('BUYER_REQUIRED', 'a sale needs a buyer (the invoice needs a client)');
-  const con = query('SELECT id, status, invoice_id FROM consignments WHERE id = ? AND branch_id = ?', [id, branchId])[0];
-  if (!con) throw new ConsignmentActionRejected('CONSIGNMENT_NOT_FOUND', 'no such consignment in this branch');
-  if (String(con.status) !== 'active') {
-    throw new ConsignmentActionRejected('CONSIGNMENT_NOT_ACTIVE', `this consignment is "${String(con.status)}" — only an active one is sold`);
-  }
-  if (String(con.invoice_id ?? '') !== '') {
-    throw new ConsignmentActionRejected('CONSIGNMENT_ALREADY_SOLD', 'this consignment already has an invoice');
+  if (!input.buyerId) nein('BUYER_REQUIRED', 'a sale needs a buyer (the invoice needs a client)');
+  const tag = businessDateIssue(input.saleDate, 'Sale date');
+  if (tag) nein('INVALID_DATE', tag);
+  for (const it of input.items) {
+    const con = query('SELECT id, status, invoice_id, consignment_number FROM consignments WHERE id = ? AND branch_id = ?', [it.consignmentId, branchId])[0];
+    if (!con) nein('CONSIGNMENT_NOT_FOUND', 'no such consignment in this branch');
+    const nr = String(con.consignment_number ?? '');
+    if (String(con.status) !== 'active') {
+      nein('CONSIGNMENT_NOT_ACTIVE', `${input.items.length > 1 ? `${nr}: ` : ''}this consignment is "${String(con.status)}" — only an active one is sold`);
+    }
+    if (String(con.invoice_id ?? '') !== '') {
+      nein('CONSIGNMENT_ALREADY_SOLD', `${input.items.length > 1 ? `${nr}: ` : ''}this consignment already has an invoice`);
+    }
   }
   if (!query('SELECT id FROM customers WHERE id = ? AND branch_id = ?', [input.buyerId, branchId])[0]) {
-    throw new ConsignmentActionRejected('BUYER_NOT_FOUND', 'no such client in this branch');
+    nein('BUYER_NOT_FOUND', 'no such client in this branch');
+  }
+  // Die Zahlungen nach derselben Regel wie „Save Invoice" — rein, vor dem ersten Schreiben.
+  let payments: InvoiceCreatePayment[] = [];
+  try {
+    payments = invoiceCreatePayments({ payments: input.payments });
+  } catch (e) {
+    if (e instanceof InvoiceActionRejected) nein(e.code, e.message);
+    throw e;
   }
   beforeWrite?.();
 
@@ -84,17 +135,19 @@ export function recordConsignmentSaleInHouse(
   useProductStore.getState().loadProducts();
   useInvoiceStore.getState().loadInvoices();
   const buchung = watchLedgerPosts('consignment sale');
-  let out: ConsignmentSold | undefined;
+  let out: ConsignmentsSold | undefined;
   try {
-    out = useConsignmentStore.getState().recordSale(id, {
-      salePrice: input.salePrice,
+    out = useConsignmentStore.getState().recordSales({
+      items: input.items.map((it) => ({ consignmentId: it.consignmentId, salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall })),
       buyerId: input.buyerId,
       saleDate: input.saleDate,
       notes: input.notes,
-      acknowledgeShortfall: input.acknowledgeShortfall,
       specialMark: input.specialMark,
+      payments,
     });
   } catch (e) {
+    // Ein fachliches Nein der Rechnung (Zahlung, VAT-Quartal …) oder der Lieferanten-Rolle bleibt ein fachliches Nein.
+    if (e instanceof InvoiceActionRejected || e instanceof ConsignorSupplierError) nein(e.code, e.message);
     alsUrteil(e, SALE_VERDICTS);
   }
   buchung();
@@ -153,6 +206,7 @@ function frischLesen(): void {
   useConsignmentStore.getState().loadConsignments();
   useInvoiceStore.getState().loadInvoices();
   usePurchaseStore.getState().loadPurchases();
+  usePurchaseStore.getState().loadReturns();
   useExpenseStore.getState().loadExpenses();
   useProductStore.getState().loadProducts();
   useCustomerStore.getState().loadCustomers();
@@ -162,6 +216,11 @@ function frischLesen(): void {
 /** „Record Sale" am Primary. */
 export function recordConsignmentSaleOnPrimary(id: string, input: ConsignmentSaleInput): Promise<ConsignmentSold> {
   return runOnPrimary(() => recordConsignmentSaleInHouse(id, input, currentBranchId()), frischLesen);
+}
+
+/** CONSIGNMENT MULTI-SALE — der gemeinsame „Record Sale" am Primary (ein oder mehrere Artikel). */
+export function recordConsignmentSalesOnPrimary(input: ConsignmentMultiSaleInput): Promise<ConsignmentsSold> {
+  return runOnPrimary(() => recordConsignmentSalesInHouse(input, currentBranchId()), frischLesen);
 }
 
 /** „Pay Out Consignor" am Primary. */
@@ -187,10 +246,15 @@ export function returnConsignmentAfterSaleOnPrimary(
  * R6F — „Cancel Sale" am Primary: dieselbe Hausfolge wie `consignments.cancel_sale`. Verantwortlich ist
  * die Sitzung — ihre Rolle entscheidet über den Storno einer eigenen Rückgabe nach dem Verkauf (Owner).
  */
-export function cancelConsignmentSaleOnPrimary(id: string): Promise<ConsignmentSaleCancelled> {
+export function cancelConsignmentSaleOnPrimary(
+  id: string, consignorRefunds?: Readonly<Record<string, ConsignorRefundChoice>>,
+): Promise<ConsignmentSaleCancelled> {
   if (isClientMode()) {
     return Promise.reject(new ConsignmentActionRejected(CONSIGNMENT_PRIMARY_ONLY,
       'a sale is cancelled on the main computer — this window has no business database'));
   }
-  return runOnPrimary(() => cancelConsignmentSaleInHouse(id, localConsignmentActor(), currentBranchId()), frischLesen);
+  return runOnPrimary(
+    () => cancelConsignmentSaleInHouse(id, localConsignmentActor(), currentBranchId(), undefined, consignorRefunds),
+    frischLesen,
+  );
 }

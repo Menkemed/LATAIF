@@ -695,23 +695,27 @@ async function bruch(was: string, weg: 'primary' | 'fern', aufbau: () => Promise
   ok(/returnCreateInput\(/.test(anlegen) && /createReturnOnPrimary\(/.test(anlegen) && /returnCreateBody\(/.test(anlegen)
     && (anlegen.match(/w\.(ok|save)\(/g) ?? []).length === 1 && !/createReturn\(|refundReturn\(|returnLineAmounts\(/.test(anlegen),
   'DOMAIN die Retourenmaske schickt Eingaben ueber GENAU eine Buchung — keine Preisrechnung, kein Nacheinander');
+  // CONSIGNMENT MULTI-SALE — der Verkauf läuft über den EINEN Dialog (Detail, Liste, Einlieferer-Seite); er ruft die Hausfolge.
+  const dlg = codeOf(src('src/components/consignments/ConsignmentSaleDialog.tsx'));
+  ok(/w\.ok\('consignments\.record_sale'/.test(dlg) && /recordConsignmentSalesOnPrimary\(/.test(dlg) && /consignmentSalesBody\(/.test(dlg)
+    && !/\brecordSales?\(/.test(dlg), 'DOMAIN der Verkaufsdialog bucht über die Hausfolge — kein Store-Aufruf');
   for (const f of ['src/pages/consignments/ConsignmentDetail.tsx', 'src/pages/consignments/ConsignmentList.tsx']) {
     const c = codeOf(src(f));
-    ok(!/\brecordSale\(|\bmarkPaidOut\(/.test(c) && /recordConsignmentSaleOnPrimary\(/.test(c) && /payOutConsignmentOnPrimary\(/.test(c)
+    ok(!/\brecordSales?\(|\bmarkPaidOut\(/.test(c) && /<ConsignmentSaleDialog\b/.test(c) && /payOutConsignmentOnPrimary\(/.test(c)
       && /CONSIGNMENT_PAYOUT_METHODS\.map/.test(c) && !/\['bank_transfer', 'cash', 'card', 'benefit'\]/.test(c),
-    `DOMAIN ${f.split('/').pop()}: Verkauf und Auszahlung ueber die Hausfolge, die Wege aus EINER Liste`);
+    `DOMAIN ${f.split('/').pop()}: Verkauf (gemeinsamer Dialog) und Auszahlung ueber die Hausfolge, die Wege aus EINER Liste`);
   }
   const rc = codeOf(src('src/core/bridge/return-commands.ts'));
   ok(/createReturnInHouse\(/.test(rc) && !/\.createReturn\(/.test(rc) && !/returnLineAmounts/.test(rc), 'DOMAIN der Fernbefehl ruft dieselbe Folge — keine zweite Preis- oder Rueckgaberechnung');
   const lc = codeOf(src('src/core/bridge/lifecycle-commands.ts'));
-  ok(/recordConsignmentSaleInHouse\(/.test(lc) && !/\.recordSale\(/.test(lc), 'DOMAIN der Fernverkauf ruft dieselbe Folge');
+  ok(/recordConsignmentSalesInHouse\(/.test(lc) && !/\.recordSales?\(/.test(lc), 'DOMAIN der Fernverkauf ruft dieselbe Folge');
   const fc = codeOf(src('src/core/bridge/financial-commands.ts'));
   ok(/payOutConsignmentInHouse\(/.test(fc) && !/recordPartialPayout\(/.test(fc) && !/PAYOUT_METHODS = \[/.test(fc), 'DOMAIN die Fernauszahlung ruft dieselbe Folge — keine zweite Wegeliste');
   const rh = codeOf(src('src/core/returns/return-house.ts'));
   ok(/returnLineAmounts\(/.test(rh) && /\.createReturn\(/.test(rh) && /\.refundReturn\(/.test(rh) && !/computeRefundSplit|postCreditNote|postSalesReturnCogs/.test(rh),
     'DOMAIN die Hausfolge baut keine Erstattungs-, Gutschrift- oder Buchungsrechnung nach — sie ruft den Store');
   const ch = codeOf(src('src/core/consignment/consignment-finance-house.ts'));
-  ok(/\.recordSale\(/.test(ch) && /\.recordPartialPayout\(/.test(ch) && !/computeConsignmentSale|postConsignmentPayout/.test(ch),
+  ok(/\.recordSales\(/.test(ch) && /\.recordPartialPayout\(/.test(ch) && !/computeConsignmentSale|postConsignmentPayout/.test(ch),
     'DOMAIN …ebenso Verkauf und Auszahlung (Anteil, Auszahlung, Buchung bleiben im Store)');
   ok(/watchLedgerPosts\('return'\)/.test(rh) && /watchLedgerPosts\('consignment sale'\)/.test(ch) && /watchLedgerPosts\('consignment payout'\)/.test(ch),
     'DOMAIN jede der drei Folgen bricht ab, wenn darin eine Buchung scheitert — auch eine abgefangene');

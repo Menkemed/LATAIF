@@ -3,6 +3,9 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { FileText, Printer } from 'lucide-react';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
+// CONSIGNMENT MULTI-SALE — derselbe Verkaufsdialog wie Detail- und Einlieferer-Seite.
+import { ConsignmentSaleDialog } from '@/components/consignments/ConsignmentSaleDialog';
+import { consignorOpenFor } from '@/core/consignment/consignor-side';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -28,13 +31,13 @@ import { buildSkuSeed } from '@/core/products/sku-allocation';
 import type { ConsignmentStatus, Product, Category, TaxScheme } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 import { Bhd } from '@/components/ui/Bhd';
-import { computeConsignmentSale, commissionLineLabel, commissionModelLabel } from '@/core/consignment/economics';
+import { commissionModelLabel } from '@/core/consignment/economics';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { assertConsignmentReturnable, consignmentReturnBody } from '@/core/consignment/consignment-return';
 import {
-  CONSIGNMENT_PAYOUT_METHODS, consignmentPayoutBody, consignmentSaleBody, payoutOpenAmount, type ConsignmentSaleInput,
+  CONSIGNMENT_PAYOUT_METHODS, consignmentPayoutBody, payoutOpenAmount,
 } from '@/core/consignment/consignment-finance';
-import { payOutConsignmentOnPrimary, recordConsignmentSaleOnPrimary } from '@/core/consignment/consignment-finance-house';
+import { payOutConsignmentOnPrimary } from '@/core/consignment/consignment-finance-house';
 import { WriteError } from '@/components/shared/WriteError';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { createConsignmentOnPrimary, consignmentCreateRequest, type ConsignmentCreateInput } from '@/core/consignment/consignment-create';
@@ -86,13 +89,9 @@ export function ConsignmentList() {
   const [excessSplitPct, setExcessSplitPct] = useState<string>('50');
 
   // Quick-action modals
-  const [soldModal, setSoldModal] = useState<string | null>(null);
-  const [soldPrice, setSoldPrice] = useState('');
-  const [soldBuyerId, setSoldBuyerId] = useState<string>('');
-  const [soldDate, setSoldDate] = useState<string>('');
-  const [soldNotes, setSoldNotes] = useState<string>('');
-  const [soldAckShortfall, setSoldAckShortfall] = useState(false);
-  const [showQuickBuyer, setShowQuickBuyer] = useState(false);
+  // CONSIGNMENT MULTI-SALE — welche Kommissionen der Verkaufsdialog verkauft (null = zu), und die Auswahl der Liste.
+  const [saleIds, setSaleIds] = useState<string[] | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(() => new Set());
   const [paidModal, setPaidModal] = useState<string | null>(null);
   const [paidMethod, setPaidMethod] = useState('bank_transfer');
   const [paidRef, setPaidRef] = useState('');
@@ -198,14 +197,13 @@ export function ConsignmentList() {
     .filter(c => c.status === 'active')
     .reduce((s, c) => s + c.agreedPrice, 0);
 
-  // Plan §Commission §8: offene Auszahlungen an Besitzer.
+  // Plan §Commission §8: offene Auszahlungen an Besitzer. D4 — aus dem Einkauf beim Einlieferer (Record Sale) bzw.
+  // der Kommission (Altweg), nicht mehr aus `payoutStatus`: ein über den Einkauf bezahlter Verkauf ist nicht offen.
   const outstandingPayouts = useMemo(() => {
-    return consignments
-      .filter(c => c.status === 'sold' && c.payoutStatus !== 'paid')
-      .reduce((s, c) => s + (c.payoutAmount || 0), 0);
+    return consignments.reduce((s, c) => s + consignorOpenFor(c), 0);
   }, [consignments]);
   const outstandingCount = useMemo(() =>
-    consignments.filter(c => c.status === 'sold' && c.payoutStatus !== 'paid').length
+    consignments.filter(c => consignorOpenFor(c) > 0.0005).length
   , [consignments]);
 
   // 2026-05-18: Aggregat pro Consignor (Customer-Id). Zeigt fuer jede Person mit
@@ -243,9 +241,7 @@ export function ConsignmentList() {
       }
       if (c.status === 'sold') {
         acc.sold += (c.salePrice ?? c.agreedPrice) || 0;
-        if (c.payoutStatus !== 'paid') {
-          acc.outstanding += c.payoutAmount || 0;
-        }
+        acc.outstanding += consignorOpenFor(c);
       }
     }
     const list = Array.from(byId.values());
@@ -436,59 +432,26 @@ export function ConsignmentList() {
     }
   }
 
-  // Sold-Flow Validierung: nur Model 2 + sale < agreed verlangt Acknowledge.
-  // Bei Model 1 ist der Sale-Preis frei wählbar (Margin geht entsprechend mit).
-  // Zusätzlich: Buyer != Consignor (sonst wäre es ein Return, kein Sale).
-  const soldValidation = useMemo(() => {
-    const empty = { needsAck: false, agreed: 0, shortfall: 0, buyerIsConsignor: false };
-    if (!soldModal) return empty;
-    const con = consignments.find(c => c.id === soldModal);
-    if (!con) return empty;
-    const isAgreedExcess = con.commissionType === 'consignor_fixed';
-    const sp = Number(soldPrice) || 0;
-    const agreed = con.agreedPrice || 0;
-    const buyerIsConsignor = !!soldBuyerId && soldBuyerId === con.consignorId;
-    if (isAgreedExcess && sp > 0 && sp < agreed) {
-      return { needsAck: true, agreed, shortfall: agreed - sp, buyerIsConsignor };
-    }
-    return { ...empty, agreed, buyerIsConsignor };
-  }, [soldModal, soldPrice, soldBuyerId, consignments]);
-
-  async function handleRecordSale() {
-    if (!soldModal || !soldPrice || !soldBuyerId) return;
-    if (soldValidation.buyerIsConsignor) {
-      alert('Buyer cannot be the same as the consignor. Use "Return" if the consignor is taking the item back.');
-      return;
-    }
-    if (soldValidation.needsAck && !soldAckShortfall) {
-      alert('Please confirm the consignor-loss shortfall before saving.');
-      return;
-    }
-    const cid = soldModal;
-    const fassung = consignments.find(c => c.id === cid)?.revision;
-    if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('recording this sale (no revision loaded)'))); return; }
-    // CENTRAL-UI-PARITY R5F — dieselbe Folge wie auf der Detailseite; die Liste fragt keinen
-    // Nummernkreis (der normale Kreis, wie bisher).
-    const input: ConsignmentSaleInput = {
-      salePrice: Number(soldPrice),
-      buyerId: soldBuyerId,
-      saleDate: soldDate || new Date().toISOString().split('T')[0],
-      notes: soldNotes || undefined,
-      acknowledgeShortfall: soldAckShortfall,
-      specialMark: false,
-    };
-    if (!await w.ok('consignments.record_sale', {
-      local: () => recordConsignmentSaleOnPrimary(cid, input),
-      remote: () => consignmentSaleBody(cid, Number(fassung), input),
-    })) return;
-    loadConsignments();
-    // Modal schließen + Form reset
-    setSoldModal(null);
-    setSoldPrice('');
-    setSoldBuyerId('');
-    setSoldDate('');
-    setSoldNotes('');
-    setSoldAckShortfall(false);
+  // CONSIGNMENT MULTI-SALE — die Auswahl verkaufbarer Artikel (auch verschiedener Einlieferer) für EINEN Verkauf.
+  // Sie bleibt beim Filter- und Suchwechsel erhalten; gezählt wird nur, was noch aktiv ist.
+  const selectedList = useMemo(() => consignments.filter(c => selected.has(c.id) && c.status === 'active'), [consignments, selected]);
+  const selectedAgreed = selectedList.reduce((s, c) => s + (c.agreedPrice || 0), 0);
+  const selectedConsignors = new Set(selectedList.map(c => c.consignorId)).size;
+  const visibleActive = filtered.filter(c => c.status === 'active');
+  const allVisibleSelected = visibleActive.length > 0 && visibleActive.every(c => selected.has(c.id));
+  function toggleSelected(cid: string) {
+    setSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(cid)) next.delete(cid); else next.add(cid);
+      return next;
+    });
+  }
+  function toggleAllVisible() {
+    setSelected(prev => {
+      const next = new Set(prev);
+      for (const c of visibleActive) { if (allVisibleSelected) next.delete(c.id); else next.add(c.id); }
+      return next;
+    });
   }
 
   async function handleMarkPaid() {
@@ -549,6 +512,22 @@ export function ConsignmentList() {
         </div>
       }
     >
+      {/* CONSIGNMENT MULTI-SALE — die Auswahl der Items-Liste: Anzahl, Einlieferer, vereinbarte Summe, ein Verkauf. */}
+      {selectedList.length > 0 && (
+        <div data-consignment-selection style={{
+          marginBottom: 20, padding: '12px 16px', borderRadius: 10, border: '1px solid #0F0F10',
+          background: 'rgba(15,15,16,0.04)', display: 'flex', alignItems: 'center', gap: 16,
+        }}>
+          <span style={{ fontSize: 13, color: '#0F0F10' }}>
+            <strong>{selectedList.length}</strong> item{selectedList.length === 1 ? '' : 's'} selected · {selectedConsignors} consignor{selectedConsignors === 1 ? '' : 's'} · agreed <Bhd v={selectedAgreed}/> BHD
+          </span>
+          <div style={{ flex: 1 }} />
+          <Button variant="ghost" onClick={() => setSelected(new Set())}>Clear</Button>
+          <Button variant="primary" onClick={() => { w.clear(); setSaleIds(selectedList.map(c => c.id)); }} data-consignment-record-sale-selected>
+            Record Sale ({selectedList.length})
+          </Button>
+        </div>
+      )}
       {outstandingCount > 0 && (
         <div style={{
           marginBottom: 20, padding: '14px 18px', borderRadius: 10,
@@ -649,6 +628,10 @@ export function ConsignmentList() {
           <table style={{ width: '100%', borderCollapse: 'collapse' }}>
             <thead>
               <tr style={{ borderBottom: '1px solid #E5E9EE' }}>
+                <th style={{ padding: '14px 0 14px 18px', width: 28 }}>
+                  <input type="checkbox" title="Select all sellable items shown" data-consignment-select-all
+                    disabled={visibleActive.length === 0} checked={allVisibleSelected} onChange={toggleAllVisible} />
+                </th>
                 {['Number', 'Consignor', 'Product', 'Agreed Price', 'Commission', 'Status', 'Actions'].map(h => (
                   <th key={h} style={{
                     padding: '14px 18px', textAlign: 'left', fontSize: 11,
@@ -673,6 +656,12 @@ export function ConsignmentList() {
                     onMouseEnter={e => (e.currentTarget.style.background = 'rgba(255,255,255,0.015)')}
                     onMouseLeave={e => (e.currentTarget.style.background = 'transparent')}
                   >
+                    <td style={{ padding: '14px 0 14px 18px' }} onClick={e => e.stopPropagation()}>
+                      {con.status === 'active' && (
+                        <input type="checkbox" data-consignment-select={con.id}
+                          checked={selected.has(con.id)} onChange={() => toggleSelected(con.id)} />
+                      )}
+                    </td>
                     <td style={{ padding: '14px 18px' }}>
                       <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{con.consignmentNumber}</span>
                     </td>
@@ -726,12 +715,8 @@ export function ConsignmentList() {
                             <button
                               onClick={(e) => {
                                 e.stopPropagation();
-                                setSoldModal(con.id);
-                                setSoldPrice(String(con.agreedPrice || ''));
-                                setSoldBuyerId('');
-                                setSoldDate(new Date().toISOString().split('T')[0]);
-                                setSoldNotes('');
-                                setSoldAckShortfall(false);
+                                w.clear();
+                                setSaleIds([con.id]);
                               }}
                               className="cursor-pointer transition-all duration-200"
                               style={{
@@ -1298,144 +1283,12 @@ export function ConsignmentList() {
         onCreated={(id) => { loadCustomers(); setForm(f => ({ ...f, consignorId: id })); }}
       />
 
-      {/* ── Record Sale Modal (Plan 2026-05) ── */}
-      <Modal open={!!soldModal} onClose={() => { setSoldModal(null); setSoldAckShortfall(false); }} title="Record Sale" width={500}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-          {/* Buyer-Picker */}
-          <div>
-            <SearchSelect
-              label="BUYER"
-              placeholder="Search clients..."
-              options={customers.map(c => ({ id: c.id, label: `${c.firstName} ${c.lastName}`, subtitle: c.company, meta: c.phone }))}
-              value={soldBuyerId}
-              onChange={id => setSoldBuyerId(id)}
-            />
-            <button onClick={() => setShowQuickBuyer(true)}
-              className="cursor-pointer transition-colors"
-              style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, marginTop: 6, padding: 0 }}
-            >+ New Client</button>
-          </div>
-
-          {/* Sale Price */}
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-            <Input required label="SALE PRICE (BHD)" type="number" placeholder="0"
-              value={soldPrice}
-              onChange={e => { setSoldPrice(e.target.value); setSoldAckShortfall(false); }} />
-            <Input label="SALE DATE" type="date"
-              value={soldDate}
-              onChange={e => setSoldDate(e.target.value)} />
-          </div>
-
-          {/* Live-Vorschau Payout / Profit */}
-          {Number(soldPrice) > 0 && soldModal && (() => {
-            const con = consignments.find(c => c.id === soldModal);
-            if (!con) return null;
-            const sp = Number(soldPrice);
-            // v0.7.21 — SSOT-Economics statt eigener Verzweigung (cost_split inkl.).
-            const econ = computeConsignmentSale(con, sp);
-            const comm = econ.commission;
-            const po = econ.payout;
-            const modelLabel = commissionLineLabel(con);
-            return (
-              <div className="rounded font-mono" style={{
-                padding: 14, background: '#F2F7FA', border: '1px solid #E5E9EE', fontSize: 13,
-              }}>
-                <div className="flex justify-between" style={{ marginBottom: 8 }}>
-                  <span style={{ color: '#6B7280' }}>{modelLabel}</span>
-                  <span style={{ color: comm < 0 ? '#DC2626' : '#0F0F10' }}><Bhd v={comm}/> BHD</span>
-                </div>
-                <div className="flex justify-between">
-                  <span style={{ color: '#6B7280' }}>Payout to consignor</span>
-                  <span style={{ color: '#7EAA6E' }}><Bhd v={po}/> BHD</span>
-                </div>
-              </div>
-            );
-          })()}
-
-          {/* Buyer == Consignor — Hard-Block (logischer Fehler, kein Verkauf an sich selbst) */}
-          {soldValidation.buyerIsConsignor && (
-            <div style={{
-              padding: '12px 14px', borderRadius: 8,
-              background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.40)',
-              fontSize: 12, color: '#DC2626',
-            }}>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>
-                Buyer cannot be the same as the consignor
-              </div>
-              <div style={{ color: '#7A2A2A' }}>
-                If the consignor is taking the item back, use <strong>Return</strong> instead — no invoice/purchase needed.
-              </div>
-            </div>
-          )}
-
-          {/* Shortfall-Warning + Acknowledge-Checkbox */}
-          {soldValidation.needsAck && (
-            <div style={{
-              padding: '12px 14px', borderRadius: 8,
-              background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.30)',
-              fontSize: 12, color: '#DC2626',
-            }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>
-                ⚠ Sale <Bhd v={soldValidation.shortfall}/> BHD below agreed price
-              </div>
-              <div style={{ marginBottom: 10, color: '#7A2A2A' }}>
-                Consignor will still receive the full agreed <Bhd v={soldValidation.agreed}/> BHD —
-                the <Bhd v={soldValidation.shortfall}/> BHD difference will be recorded as
-                a <strong>Consignor Loss</strong> expense.
-              </div>
-              <label className="flex items-center gap-2 cursor-pointer" style={{ fontSize: 12 }}>
-                <input type="checkbox"
-                  checked={soldAckShortfall}
-                  onChange={e => setSoldAckShortfall(e.target.checked)} />
-                <span>I confirm — record this shortfall as Consignor Loss</span>
-              </label>
-            </div>
-          )}
-
-          {/* Notes */}
-          <div>
-            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NOTES (OPTIONAL)</span>
-            <textarea
-              placeholder="Reference, payment terms, …"
-              value={soldNotes}
-              onChange={e => setSoldNotes(e.target.value)}
-              className="w-full"
-              style={{
-                background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6,
-                padding: '8px 10px', fontSize: 13, color: '#0F0F10',
-                resize: 'vertical', minHeight: 50,
-              }}
-            />
-          </div>
-
-          <div style={{
-            padding: '10px 12px', borderRadius: 6,
-            background: '#F2F7FA', border: '1px solid #E5E9EE',
-            fontSize: 11, color: '#6B7280', lineHeight: 1.4,
-          }}>
-            On save: <strong>Auto-Invoice</strong> created for buyer · <strong>Auto-Purchase</strong> created
-            for consignor (as supplier) · payment via /invoices &amp; /purchases.
-          </div>
-
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => { setSoldModal(null); setSoldAckShortfall(false); }}>Cancel</Button>
-            <Button variant="primary" onClick={() => void handleRecordSale()} data-consignment-sale
-              disabled={
-                w.busy ||
-                !soldPrice ||
-                !soldBuyerId ||
-                soldValidation.buyerIsConsignor ||
-                (soldValidation.needsAck && !soldAckShortfall)
-              }
-            >Confirm Sale</Button>
-          </div>
-        </div>
-      </Modal>
-
-      <QuickCustomerModal
-        open={showQuickBuyer}
-        onClose={() => setShowQuickBuyer(false)}
-        onCreated={(id) => { loadCustomers(); setSoldBuyerId(id); }}
+      {/* ── Record Sale (Plan 2026-05) — CONSIGNMENT MULTI-SALE: ein oder mehrere Artikel, eine Rechnung ── */}
+      <ConsignmentSaleDialog
+        open={saleIds !== null}
+        consignmentIds={saleIds ?? []}
+        onClose={() => setSaleIds(null)}
+        onSold={() => { loadConsignments(); setSelected(new Set()); }}
       />
 
       <PrintItemsFilterModal

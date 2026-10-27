@@ -7,9 +7,8 @@ import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
 import { Modal } from '@/components/ui/Modal';
 import { Input } from '@/components/ui/Input';
-import { SearchSelect } from '@/components/ui/SearchSelect';
-import { QuickCustomerModal } from '@/components/customers/QuickCustomerModal';
-import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
+// CONSIGNMENT MULTI-SALE — der EINE Verkaufsdialog (Käufer mit „+ New Client", Zahlungen, Verkaufstag = Rechnungsdatum).
+import { ConsignmentSaleDialog } from '@/components/consignments/ConsignmentSaleDialog';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
@@ -28,17 +27,19 @@ import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs } from '@/core/utils/product-format';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { computeConsignmentSale, commissionLineLabel, commissionModelLabel } from '@/core/consignment/economics';
+import { consignorOpenFor } from '@/core/consignment/consignor-side';
 import { PAYOUT_MODELS, payoutModelLock, payoutFieldsFor, normalizePayoutModel, bookedCommissionInput, HISTORICAL_MARGIN_LABEL } from '@/core/consignment/payout-edit';
 import {
-  CONSIGNMENT_PAYOUT_METHODS, consignmentPayoutBody, consignmentSaleBody, payoutOpenAmount, type ConsignmentSaleInput,
+  CONSIGNMENT_PAYOUT_METHODS, consignmentPayoutBody, payoutOpenAmount,
 } from '@/core/consignment/consignment-finance';
 import {
-  cancelConsignmentSaleOnPrimary, payOutConsignmentOnPrimary, recordConsignmentSaleOnPrimary, returnConsignmentAfterSaleOnPrimary,
+  cancelConsignmentSaleOnPrimary, payOutConsignmentOnPrimary, returnConsignmentAfterSaleOnPrimary,
 } from '@/core/consignment/consignment-finance-house';
 // R6F — Rückgabe nach dem Verkauf und Verkaufsstorno: Wege und Rümpfe aus EINER Quelle.
 import {
-  DEFAULT_POST_SALE_REFUND_METHOD, POST_SALE_REFUND_METHODS, consignmentCancelSaleBody, consignmentReturnAfterSaleBody,
-  type ConsignmentReturnAfterSaleInput, type PostSaleDisposition,
+  CONSIGNOR_REFUND_METHODS, DEFAULT_POST_SALE_REFUND_METHOD, POST_SALE_REFUND_METHODS, consignmentCancelSaleBody,
+  consignmentReturnAfterSaleBody,
+  type ConsignmentReturnAfterSaleInput, type ConsignorRefundChoice, type ConsignorRefundMethod, type PostSaleDisposition,
 } from '@/core/consignment/consignment-reversal';
 import type { ReturnRefundMethod } from '@/core/returns/return-create';
 import { productDisplayName } from '@/core/products/display-name';
@@ -46,6 +47,51 @@ import { productDisplayName } from '@/core/products/display-name';
 const REFUND_LABEL: Record<ReturnRefundMethod, string> = {
   cash: 'Cash', bank: 'Bank Transfer', card: 'Card', benefit: 'Benefit', credit: 'Store Credit', other: 'Other',
 };
+/** D3 — wie das Geld des Einlieferers zurückkam. */
+const CONSIGNOR_REFUND_LABEL: Record<ConsignorRefundMethod, string> = { cash: 'Cash', bank: 'Bank Transfer', benefit: 'Benefit' };
+
+/** D3 — die Wahl des Owners, was mit einer schon geleisteten Auszahlung geschieht (Return to Owner / Cancel Sale). */
+function ConsignorRefundPicker({ paid, name, value, onChange, testId }: {
+  paid: number; name: string; value: ConsignorRefundChoice; onChange: (v: ConsignorRefundChoice) => void; testId: string;
+}) {
+  const received = value.mode === 'received';
+  const method: ConsignorRefundMethod = value.mode === 'received' ? value.method : 'cash';
+  const knopf = (on: boolean) => ({
+    padding: '7px 12px', fontSize: 12, borderRadius: 6, cursor: 'pointer',
+    border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`, color: on ? '#0F0F10' : '#6B7280',
+    background: on ? 'rgba(15,15,16,0.06)' : 'transparent',
+  });
+  return (
+    <div data-consignor-refund={testId} style={{ padding: '12px 14px', borderRadius: 8, background: 'rgba(255,135,48,0.06)', border: '1px solid rgba(255,135,48,0.30)', fontSize: 12, color: '#7A4A20' }}>
+      <div style={{ fontWeight: 600, marginBottom: 6 }}>{name} was already paid <Bhd v={paid}/> BHD for this item.</div>
+      <div style={{ marginBottom: 8 }}>The payout stays in the books. What happens with that money now?</div>
+      <div className="flex flex-wrap gap-2" style={{ marginBottom: 8 }}>
+        <button type="button" data-consignor-refund-mode="received" onClick={() => onChange({ mode: 'received', method })} style={knopf(received)}>
+          Money came back now
+        </button>
+        <button type="button" data-consignor-refund-mode="pending" onClick={() => onChange({ mode: 'pending' })} style={knopf(!received)}>
+          Repayment still open
+        </button>
+      </div>
+      {received ? (
+        <div className="flex flex-wrap gap-2 items-center">
+          <span>Received as:</span>
+          {CONSIGNOR_REFUND_METHODS.map((m) => (
+            <button key={m} type="button" data-consignor-refund-method={m} onClick={() => onChange({ mode: 'received', method: m })} style={knopf(method === m)}>
+              {CONSIGNOR_REFUND_LABEL[m]}
+            </button>
+          ))}
+          <span style={{ color: '#6B7280' }}>— booked today as money in.</span>
+        </div>
+      ) : (
+        <div style={{ color: '#6B7280', lineHeight: 1.5 }}>
+          No money is booked. <Bhd v={paid}/> BHD stays open as the consignor&apos;s supplier credit (he owes it to us) and can be
+          offset against his next payouts. Recording a later cash repayment waits for the accountant&apos;s booking rule.
+        </div>
+      )}
+    </div>
+  );
+}
 
 function daysUntil(dateStr: string): number {
   const now = new Date();
@@ -85,12 +131,6 @@ export function ConsignmentDetail() {
 
   // Modals
   const [soldModal, setSoldModal] = useState(false);
-  const [soldPrice, setSoldPrice] = useState('');
-  const [soldBuyer, setSoldBuyer] = useState('');
-  const [soldDate, setSoldDate] = useState('');
-  const [soldNotes, setSoldNotes] = useState('');
-  const [soldAck, setSoldAck] = useState(false);
-  const [showQuickBuyer, setShowQuickBuyer] = useState(false);
   const [paidModal, setPaidModal] = useState(false);
   const [paidMethod, setPaidMethod] = useState('bank_transfer');
   const [paidRef, setPaidRef] = useState('');
@@ -100,12 +140,15 @@ export function ConsignmentDetail() {
   // R6F — die übrige Wahl des Dialogs: wie der Käufer sein Geld zurückbekommt (nur wenn er bezahlt hat) und warum.
   const [postSaleRefundMethod, setPostSaleRefundMethod] = useState<ReturnRefundMethod>(DEFAULT_POST_SALE_REFUND_METHOD);
   const [postSaleReason, setPostSaleReason] = useState('');
+  // D3 — was mit der schon geleisteten Auszahlung geschieht (Return to Owner), und je Kommission beim Cancel Sale.
+  const [postSaleConsignorRefund, setPostSaleConsignorRefund] = useState<ConsignorRefundChoice>({ mode: 'received', method: 'cash' });
+  const [cancelRefunds, setCancelRefunds] = useState<Record<string, ConsignorRefundChoice>>({});
   const [cancelSaleModal, setCancelSaleModal] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
-  // 2026-05-16 — Number-Type-Dialog vor Auto-Invoice.
-  const [numberDialogOpen, setNumberDialogOpen] = useState(false);
   const perm = usePermission();
+  // CONSIGNMENT MULTI-SALE — der Dialog bekommt die Kommission dieser Seite als (einzige) Auswahl.
+  const saleIds = useMemo(() => (id ? [id] : []), [id]);
 
   useEffect(() => {
     loadConsignments();
@@ -147,8 +190,16 @@ export function ConsignmentDetail() {
   const linkedPurchase = useMemo(() => {
     if (!consignment) return null;
     if (consignment.status !== 'sold' && consignment.status !== 'paid_out') return null;
-    return purchases.find(p => (p.notes || '').includes(consignment.consignmentNumber)) || null;
+    // PURCHASE-EDIT B6 — die Spalte zuerst; der Vermerk nur für einen Altbestand ohne Spalte.
+    return purchases.find(p => p.sourceConsignmentId === consignment.id && p.status !== 'CANCELLED')
+      || purchases.find(p => !p.sourceConsignmentId && p.status !== 'CANCELLED' && (p.notes || '').includes(consignment.consignmentNumber)) || null;
   }, [purchases, consignment]);
+  // D2 — die Kommissionen DESSELBEN Verkaufs (eine Rechnung): Cancel Sale nimmt sie alle zurück.
+  const saleGroup = useMemo(() => {
+    if (!consignment?.invoiceId) return consignment ? [consignment] : [];
+    return consignments.filter(c => c.invoiceId === consignment.invoiceId)
+      .sort((a, b) => a.consignmentNumber.localeCompare(b.consignmentNumber));
+  }, [consignments, consignment]);
   const linkedLossExpense = useMemo(() => {
     if (!consignment) return null;
     if (consignment.status !== 'sold' && consignment.status !== 'paid_out') return null;
@@ -205,15 +256,8 @@ export function ConsignmentDetail() {
   // Fuer eine bereits gebuchte Marge: der eingefrorene Stand, sonst der heutige.
   const bookedLabelInput = bookedCommissionInput(consignment);
 
-  // Sale modal calculations — SSOT economics (percent/consignor_fixed/cost_split).
-  const salePriceNum = Number(soldPrice) || 0;
-  const saleEcon = computeConsignmentSale(consignment, salePriceNum);
-  const saleCommission = saleEcon.commission;
-  const salePayout = saleEcon.payout;
-  // Shortfall (Verkauf unter Floor) gilt für consignor_fixed UND cost_split.
-  const saleNeedsAck = salePriceNum > 0 && saleEcon.belowFloor;
-  const saleShortfall = saleNeedsAck ? saleEcon.loss : 0;
-  const buyerIsConsignor = !!soldBuyer && soldBuyer === consignment.consignorId;
+  // D3 — was der Einlieferer für diesen Verkauf schon bekam (bar und per Guthaben, über seinen Einkauf).
+  const consignorPaid = consignment.consignorSide?.paid ?? 0;
 
   // Linked invoice (no useMemo needed — simple lookup, can stay after early return).
   const linkedInvoice = consignment.invoiceId ? invoices.find(i => i.id === consignment.invoiceId) : null;
@@ -258,47 +302,6 @@ export function ConsignmentDetail() {
     }
   }
 
-  function handleRecordSale() {
-    if (!id || !soldPrice || !soldBuyer) return;
-    if (buyerIsConsignor) {
-      alert('Buyer cannot be the same as the consignor. Use "Return" if the consignor is taking the item back.');
-      return;
-    }
-    if (saleNeedsAck && !soldAck) {
-      alert('Please confirm the consignor-loss shortfall before saving.');
-      return;
-    }
-    setNumberDialogOpen(true);
-  }
-
-  async function executeRecordSale(specialMark: boolean) {
-    if (!id || !consignment) return;
-    setNumberDialogOpen(false);
-    const fassung = consignment.revision;
-    if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('recording this sale (no revision loaded)'))); return; }
-    // CENTRAL-UI-PARITY R5F — die Eingaben der Maske samt Wahl im Nummerndialog. Einkauf beim
-    // Einlieferer, Rechnung im gewählten Kreis, Verlust, Status und Menge schreibt das Haus in EINER
-    // Klammer — am Primary wie fern.
-    const input: ConsignmentSaleInput = {
-      salePrice: Number(soldPrice),
-      buyerId: soldBuyer,
-      saleDate: soldDate || new Date().toISOString().split('T')[0],
-      notes: soldNotes || undefined,
-      acknowledgeShortfall: soldAck,
-      specialMark,
-    };
-    if (!await w.ok('consignments.record_sale', {
-      local: () => recordConsignmentSaleOnPrimary(id, input),
-      remote: () => consignmentSaleBody(id, Number(fassung), input),
-    })) return;
-    loadConsignments();
-    loadInvoices();
-    loadPurchases();
-    loadExpenses();
-    loadProducts();
-    setSoldModal(false);
-    setSoldPrice(''); setSoldBuyer(''); setSoldDate(''); setSoldNotes(''); setSoldAck(false);
-  }
 
   async function handleMarkPaid() {
     if (!id || !consignment) return;
@@ -351,6 +354,8 @@ export function ConsignmentDetail() {
     const input: ConsignmentReturnAfterSaleInput = { disposition: postSaleDisposition };
     // Ohne erhaltenes Geld fließt nichts zurück — dann gibt es auch keinen Weg zu wählen.
     if ((linkedInvoice?.paidAmount || 0) > 0.005) input.refundMethod = postSaleRefundMethod;
+    // D3 — geht die Ware an einen schon bezahlten Einlieferer zurück, sagt der Owner, was mit dem Geld geschieht.
+    if (postSaleDisposition === 'RETURN_TO_OWNER' && consignorPaid > 0.0005) input.consignorRefund = postSaleConsignorRefund;
     if (postSaleReason.trim()) input.reason = postSaleReason.trim();
     if (!await w.ok('consignments.return_after_sale', {
       local: () => returnConsignmentAfterSaleOnPrimary(id, input),
@@ -367,9 +372,13 @@ export function ConsignmentDetail() {
     if (!id || !consignment) return;
     const fassung = consignment.revision;
     if (w.remote && !fassung) { w.clear(); alert(fehlertext(nichtAmClient('cancelling this sale (no revision loaded)'))); return; }
+    // D3 — nur für die schon bezahlten Einlieferer des Verkaufs (je Kommission die Wahl im Dialog).
+    const erstattung = Object.fromEntries(saleGroup
+      .filter(c => (c.consignorSide?.paid ?? 0) > 0.0005 && c.invoiceId)
+      .map(c => [c.id, cancelRefunds[c.id] ?? { mode: 'received', method: 'cash' }]));
     if (!await w.ok('consignments.cancel_sale', {
-      local: () => cancelConsignmentSaleOnPrimary(id),
-      remote: () => consignmentCancelSaleBody(id, Number(fassung)),
+      local: () => cancelConsignmentSaleOnPrimary(id, erstattung),
+      remote: () => consignmentCancelSaleBody(id, Number(fassung), erstattung),
     })) return;
     reloadAfterReversal();
     setCancelSaleModal(false);
@@ -392,11 +401,9 @@ export function ConsignmentDetail() {
 
   // 2026-05-18: Layout neu im Transfer-Detail-Stil (KPI-Strip / Action-Bar /
   // Item+Consignor-Row / Meta-Footer). Edit ist jetzt ein Modal statt Inline.
-  const outstandingPayout = consignment.status === 'sold'
-    ? (linkedPurchase
-        ? Math.max(0, (linkedPurchase.totalAmount || 0) - (linkedPurchase.paidAmount || 0))
-        : (consignment.payoutStatus !== 'paid' ? (consignment.payoutAmount || 0) : 0))
-    : 0;
+  // D4 — was wir dem Einlieferer für diesen Verkauf noch schulden: aus SEINEM Einkauf (und einer offenen
+  // Verlust-Ausgabe), beim Altweg aus der Kommission — dieselbe Ableitung wie Liste und Einlieferer-Seite.
+  const outstandingPayout = consignorOpenFor(consignment);
   const consignmentSubtitle = `Consignor: ${consignorName}`;
   const transferredDate = consignment.agreementDate || (consignment.createdAt || '').split('T')[0];
   const soldOnDate = consignment.status === 'sold' && consignment.updatedAt
@@ -493,14 +500,7 @@ export function ConsignmentDetail() {
             <div className="flex flex-wrap gap-2">
               {consignment.status === 'active' && (
                 <>
-                  <Button variant="primary" onClick={() => {
-                    setSoldPrice(String(consignment.agreedPrice || ''));
-                    setSoldBuyer('');
-                    setSoldDate(new Date().toISOString().split('T')[0]);
-                    setSoldNotes('');
-                    setSoldAck(false);
-                    setSoldModal(true);
-                  }}>
+                  <Button variant="primary" onClick={() => setSoldModal(true)}>
                     Record Sale
                   </Button>
                   <Button variant="ghost" onClick={() => setReturnModal(true)}>Return</Button>
@@ -778,6 +778,35 @@ export function ConsignmentDetail() {
           </Card>
         )}
 
+        {/* D3 — die Rückzahlung der Auszahlung, wenn die Ware nach dem Verkauf an den Einlieferer zurückging. */}
+        {(consignment.consignorSide?.refunds.length ?? 0) > 0 && (
+          <Card style={{ padding: 14, marginBottom: 18 }}>
+            <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>Consignor Repayment</span>
+            {consignment.consignorSide!.refunds.map(r => (
+              <div key={r.returnId} data-consignor-repayment={r.mode} className="flex justify-between items-center"
+                style={{ fontSize: 13, padding: '6px 0', borderBottom: '1px solid #F0F2F5' }}>
+                <span style={{ color: '#0F0F10' }}>
+                  <span className="font-mono" style={{ color: '#3D7FFF', marginRight: 8 }}>{r.returnNumber}</span>
+                  {r.mode === 'received'
+                    ? <>Received {r.date} · {r.method === 'bank' ? 'Bank Transfer' : r.method === 'benefit' ? 'Benefit' : 'Cash'}</>
+                    : r.open <= 0.0005
+                      ? <>Repayment settled (offset)</>
+                      : r.open < r.amount - 0.0005
+                        ? <>Repayment partly settled — <strong style={{ color: '#B45309' }}><Bhd v={r.open}/> BHD still open</strong></>
+                        : <>Repayment pending — <strong style={{ color: '#B45309' }}><Bhd v={r.open}/> BHD open</strong></>}
+                </span>
+                <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={r.amount}/> BHD</span>
+              </div>
+            ))}
+            {consignment.consignorSide!.refundOpen > 0.0005 && (
+              <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
+                The open amount is the consignor&apos;s supplier credit — it is offset when his next payout is paid with “Credit”.
+                Recording a later cash repayment waits for the accountant&apos;s booking rule.
+              </div>
+            )}
+          </Card>
+        )}
+
         {/* Payout Details (paid_out) */}
         {consignment.status === 'paid_out' && (
           <Card style={{ padding: 14, marginBottom: 18 }}>
@@ -860,118 +889,13 @@ export function ConsignmentDetail() {
 
       </div>
 
-      <QuickCustomerModal
-        open={showQuickBuyer}
-        onClose={() => setShowQuickBuyer(false)}
-        onCreated={(id) => { loadCustomers(); setSoldBuyer(id); }}
-      />
-
-      {/* ── Record Sale Modal (Plan 2026-05) ── */}
-      <Modal open={soldModal} onClose={() => setSoldModal(false)} title="Record Sale" width={500}>
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 18 }}>
-          <div>
-            <SearchSelect
-              label="BUYER"
-              placeholder="Search clients..."
-              options={customers.map(c => ({ id: c.id, label: `${c.firstName} ${c.lastName}`, subtitle: c.company, meta: c.phone }))}
-              value={soldBuyer}
-              onChange={id => setSoldBuyer(id)}
-            />
-            <button onClick={() => setShowQuickBuyer(true)}
-              data-consignment-sale-new-client
-              className="cursor-pointer transition-colors"
-              style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, marginTop: 6, padding: 0 }}
-            >+ New Client</button>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
-            <Input required label="SALE PRICE (BHD)" type="number" placeholder="0"
-              value={soldPrice}
-              onChange={e => { setSoldPrice(e.target.value); setSoldAck(false); }} />
-            <Input label="SALE DATE" type="date"
-              value={soldDate}
-              onChange={e => setSoldDate(e.target.value)} />
-          </div>
-          {salePriceNum > 0 && (
-            <div className="rounded font-mono" style={{
-              padding: 14, background: '#F2F7FA', border: '1px solid #E5E9EE', fontSize: 13,
-            }}>
-              <div className="flex justify-between" style={{ marginBottom: 8 }}>
-                <span style={{ color: '#6B7280' }}>
-                  {commissionLineLabel(consignment)}
-                </span>
-                <span style={{ color: saleCommission < 0 ? '#DC2626' : '#0F0F10' }}><Bhd v={saleCommission}/> BHD</span>
-              </div>
-              <div className="flex justify-between">
-                <span style={{ color: '#6B7280' }}>Payout to consignor</span>
-                <span style={{ color: '#7EAA6E' }}><Bhd v={salePayout}/> BHD</span>
-              </div>
-            </div>
-          )}
-          {buyerIsConsignor && (
-            <div style={{
-              padding: '12px 14px', borderRadius: 8,
-              background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.40)',
-              fontSize: 12, color: '#DC2626',
-            }}>
-              <div style={{ fontWeight: 600, marginBottom: 4 }}>Buyer cannot be the same as the consignor</div>
-              <div style={{ color: '#7A2A2A' }}>
-                If the consignor is taking the item back, use <strong>Return</strong> instead — no invoice/purchase needed.
-              </div>
-            </div>
-          )}
-          {saleNeedsAck && (
-            <div style={{
-              padding: '12px 14px', borderRadius: 8,
-              background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.30)',
-              fontSize: 12, color: '#DC2626',
-            }}>
-              <div style={{ fontWeight: 600, marginBottom: 6 }}>
-                ⚠ Sale <Bhd v={saleShortfall}/> BHD below {consignment.commissionType === 'cost_split' ? "consignor's cost" : 'agreed price'}
-              </div>
-              <div style={{ marginBottom: 10, color: '#7A2A2A' }}>
-                Consignor still receives <Bhd v={consignment.agreedPrice}/> BHD —
-                the <Bhd v={saleShortfall}/> BHD difference will be recorded as a <strong>Consignor Loss</strong> expense.
-              </div>
-              <label className="flex items-center gap-2 cursor-pointer" style={{ fontSize: 12 }}>
-                <input type="checkbox" checked={soldAck} onChange={e => setSoldAck(e.target.checked)} />
-                <span>I confirm — record this shortfall as Consignor Loss</span>
-              </label>
-            </div>
-          )}
-          <div>
-            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>NOTES (OPTIONAL)</span>
-            <textarea
-              placeholder="Reference, payment terms, …"
-              value={soldNotes}
-              onChange={e => setSoldNotes(e.target.value)}
-              className="w-full"
-              style={{
-                background: 'transparent', border: '1px solid #D5D9DE', borderRadius: 6,
-                padding: '8px 10px', fontSize: 13, color: '#0F0F10', resize: 'vertical', minHeight: 50,
-              }}
-            />
-          </div>
-          <div style={{
-            padding: '10px 12px', borderRadius: 6, background: '#F2F7FA',
-            border: '1px solid #E5E9EE', fontSize: 11, color: '#6B7280', lineHeight: 1.4,
-          }}>
-            On save: <strong>Auto-Invoice</strong> for buyer · <strong>Auto-Purchase</strong> for consignor (as supplier).
-          </div>
-          <WriteError text={w.fehler} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setSoldModal(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleRecordSale} data-consignment-sale
-              disabled={w.busy || !soldPrice || !soldBuyer || buyerIsConsignor || (saleNeedsAck && !soldAck)}
-            >Confirm Sale</Button>
-          </div>
-        </div>
-      </Modal>
-
-      <NumberTypeDialog
-        open={numberDialogOpen}
-        variant="sales"
-        onCancel={() => setNumberDialogOpen(false)}
-        onConfirm={executeRecordSale}
+      {/* ── Record Sale (Plan 2026-05) — CONSIGNMENT MULTI-SALE: derselbe Dialog wie Liste und Einlieferer-Seite
+            (Käufer mit „+ New Client", Zahlungen, Verkaufstag = Rechnungsdatum, Nummernkreis). ── */}
+      <ConsignmentSaleDialog
+        open={soldModal}
+        consignmentIds={saleIds}
+        onClose={() => setSoldModal(false)}
+        onSold={reloadAfterReversal}
       />
 
       {/* ── Pay Out Modal ── */}
@@ -1027,10 +951,11 @@ export function ConsignmentDetail() {
       </Modal>
 
       {/* ── Post-Sale Return Modal (Plan §Commission §13) ── */}
-      <Modal open={postSaleReturnModal} onClose={() => setPostSaleReturnModal(false)} title="Buyer Returns the Item" width={520}>
+      <Modal open={postSaleReturnModal} onClose={() => setPostSaleReturnModal(false)} title="Buyer Returns the Item" width={560}>
         <p style={{ fontSize: 13, color: '#4B5563', marginBottom: 16, lineHeight: 1.5 }}>
           The buyer is returning <strong style={{ color: '#0F0F10' }}>{productLabel}</strong>.
           What should happen with the item?
+          {saleGroup.length > 1 && <> Only this item comes back — the other {saleGroup.length - 1} item{saleGroup.length - 1 === 1 ? '' : 's'} of the same invoice stay sold.</>}
         </p>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 20 }}>
           <button onClick={() => setPostSaleDisposition('RETURN_TO_OWNER')} data-consignment-return-disposition="RETURN_TO_OWNER"
@@ -1043,6 +968,7 @@ export function ConsignmentDetail() {
             <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>{'↩'} Give back to consignor</div>
             <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4, lineHeight: 1.5 }}>
               Goods leave our system back to <strong>{consignorName}</strong>. Our A/P to him gets cancelled (we owe nothing anymore {'—'} he has his watch back). No inventory effect for us.
+              {consignorPaid > 0.0005 && <> He was already paid — his payout comes back (now or later, see below).</>}
             </div>
           </button>
           <button onClick={() => setPostSaleDisposition('KEEP_AS_OWN')} data-consignment-return-disposition="KEEP_AS_OWN"
@@ -1054,13 +980,22 @@ export function ConsignmentDetail() {
             }}>
             <div style={{ fontSize: 14, color: '#0F0F10', fontWeight: 500 }}>{'📦'} Keep in our inventory</div>
             <div style={{ fontSize: 12, color: '#6B7280', marginTop: 4, lineHeight: 1.5 }}>
-              Item becomes our own stock. Our A/P to <strong>{consignorName}</strong> (<Bhd v={consignment.payoutAmount || 0}/> BHD) stays open {'—'} we still owe him that. Cost basis for re-sale = <Bhd v={consignment.payoutAmount || 0}/> BHD.
+              Item becomes our own stock. {consignorPaid > 0.0005
+                ? <>The payout to <strong>{consignorName}</strong> (<Bhd v={consignorPaid}/> BHD already paid) stays as it is {'—'} no repayment.</>
+                : <>Our A/P to <strong>{consignorName}</strong> (<Bhd v={consignment.payoutAmount || 0}/> BHD) stays open {'—'} we still owe him that.</>}
+              {' '}Cost basis for re-sale = <Bhd v={consignment.payoutAmount || 0}/> BHD.
             </div>
           </button>
         </div>
+        {postSaleDisposition === 'RETURN_TO_OWNER' && consignorPaid > 0.0005 && (
+          <div style={{ marginBottom: 16 }}>
+            <ConsignorRefundPicker paid={consignorPaid} name={consignorName} value={postSaleConsignorRefund}
+              onChange={setPostSaleConsignorRefund} testId={consignment.id} />
+          </div>
+        )}
         {(linkedInvoice?.paidAmount || 0) > 0.005 && (
           <div style={{ marginBottom: 16 }}>
-            <span className="text-overline">REFUND METHOD</span>
+            <span className="text-overline">REFUND METHOD (BUYER)</span>
             <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>
               {POST_SALE_REFUND_METHODS.map(m => (
                 <button key={m} onClick={() => setPostSaleRefundMethod(m)} data-consignment-return-refund-method={m}
@@ -1074,14 +1009,14 @@ export function ConsignmentDetail() {
               ))}
             </div>
             <div style={{ fontSize: 12, color: '#6B7280', marginTop: 6 }}>
-              The buyer paid <Bhd v={linkedInvoice?.paidAmount || 0}/> BHD — that amount is refunded this way.
+              The buyer paid <Bhd v={linkedInvoice?.paidAmount || 0}/> BHD on this invoice — whatever exceeds what he still owes after this return is refunded this way.
             </div>
           </div>
         )}
         <Input label="REASON" placeholder="Optional reason..." value={postSaleReason}
           onChange={e => setPostSaleReason(e.target.value)} data-consignment-return-reason style={{ marginBottom: 16 }} />
         <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12, color: '#4B5563', marginBottom: 16 }}>
-          A Credit Note + Sales Return will be created automatically to refund the buyer for the original sale.
+          A Credit Note + Sales Return will be created automatically to refund the buyer for this item.
         </div>
         <WriteError text={w.fehler} />
         <div className="flex justify-end gap-3">
@@ -1090,54 +1025,87 @@ export function ConsignmentDetail() {
         </div>
       </Modal>
 
-      {/* ── Cancel Sale Confirmation Modal ── */}
-      <Modal open={cancelSaleModal} onClose={() => setCancelSaleModal(false)} title="Cancel Sale" width={500}>
+      {/* ── Cancel Sale Confirmation Modal — D2: die GANZE Rechnung mit ALLEN ihren Kommissionen ── */}
+      <Modal open={cancelSaleModal} onClose={() => setCancelSaleModal(false)} title="Cancel Sale" width={600}>
         <p style={{ fontSize: 13, color: '#4B5563', marginBottom: 12, lineHeight: 1.5 }}>
-          This will <strong style={{ color: '#0F0F10' }}>fully reverse</strong> the sale of <strong>{productLabel}</strong>:
+          This will <strong style={{ color: '#0F0F10' }}>fully reverse</strong> the sale
+          {saleGroup.length > 1
+            ? <> — the <strong>whole invoice with all {saleGroup.length} items</strong>:</>
+            : <> of <strong>{productLabel}</strong>:</>}
         </p>
+        {saleGroup.length > 1 && (
+          <div style={{ marginBottom: 14, border: '1px solid #E5E9EE', borderRadius: 8 }} data-cancel-sale-items>
+            {saleGroup.map(c => {
+              const p = products.find(x => x.id === c.productId);
+              const k = customers.find(x => x.id === c.consignorId);
+              return (
+                <div key={c.id} className="flex justify-between" style={{ padding: '8px 12px', fontSize: 12, borderBottom: '1px solid #F0F2F5' }}>
+                  <span><span className="font-mono" style={{ color: '#6B7280', marginRight: 8 }}>{c.consignmentNumber}</span>{p ? productDisplayName(p) : '—'}</span>
+                  <span style={{ color: '#6B7280' }}>{k ? `${k.firstName} ${k.lastName}` : '—'} · <Bhd v={c.salePrice || 0}/> BHD{c.status === 'returned' ? ' · returned' : ''}</span>
+                </div>
+              );
+            })}
+          </div>
+        )}
         <ul style={{ fontSize: 13, color: '#4B5563', marginBottom: 16, paddingLeft: 18, lineHeight: 1.7 }}>
           {linkedInvoice && (
             <li>Buyer Invoice <span className="font-mono" style={{ color: '#3D7FFF' }}>{formatInvoiceDisplayShort(linkedInvoice)}</span> → <strong>CANCELLED</strong> (AR cleared)</li>
           )}
-          {consignment.status === 'returned' && (
-            <li>The post-sale return and its credit note → <strong>cancelled</strong> (kept as history, not deleted)</li>
+          {saleGroup.some(c => c.status === 'returned') && (
+            <li>The post-sale return{saleGroup.filter(c => c.status === 'returned').length > 1 ? 's' : ''} and credit note{saleGroup.filter(c => c.status === 'returned').length > 1 ? 's' : ''} → <strong>cancelled</strong> (kept as history, not deleted)</li>
           )}
-          {/* R6F — die Worte folgen der Buchung: der Rechnungsstorno kehrt Zahlungen im Hauptbuch um
-              (vorher stand hier „NOT auto-refunded"), der Einkaufsstorno ebenso (vorher „stay booked"). */}
+          {/* R6F — die Worte folgen der Buchung: der Rechnungsstorno kehrt Zahlungen im Hauptbuch um. */}
           {linkedInvoice && (linkedInvoice.paidAmount || 0) > 0.005 && (
             <li style={{ color: '#B45309' }}>Buyer's payment of <strong><Bhd v={linkedInvoice.paidAmount}/> BHD</strong> → <strong>reversed in the books</strong> — hand the money back to the buyer</li>
           )}
-          {linkedPurchase && (
-            <li>Consignor Purchase <span className="font-mono" style={{ color: '#3D7FFF' }}>{linkedPurchase.purchaseNumber}</span> → <strong>CANCELLED</strong> (AP cleared)</li>
-          )}
-          {linkedPurchase && (linkedPurchase.paidAmount || 0) > 0.005 && (
-            <li style={{ color: '#B45309' }}>Payments of <strong><Bhd v={linkedPurchase.paidAmount}/> BHD</strong> on the consignor purchase → <strong>reversed in the books</strong> — collect the money back from the consignor</li>
-          )}
+          <li>Unpaid consignor purchase{saleGroup.length > 1 ? 's' : ''} → <strong>CANCELLED</strong> (AP cleared)</li>
           {linkedLossExpense && (
             <li>Consignor-Loss-Expense <span className="font-mono" style={{ color: '#DC2626' }}>{linkedLossExpense.expenseNumber}</span> → <strong>CANCELLED</strong></li>
           )}
           {(consignment.payoutPaidAmount || 0) > 0.005 && (
-            <li style={{ color: '#B45309' }}>Consignor payout of <strong><Bhd v={consignment.payoutPaidAmount || 0}/> BHD</strong>{consignment.payoutMethod ? ` (paid via ${consignment.payoutMethod})` : ''} → <strong>reversed in the books</strong></li>
+            <li style={{ color: '#DC2626' }}>An old payout of <strong><Bhd v={consignment.payoutPaidAmount || 0}/> BHD</strong> without invoice was already paid {'—'} this cannot be undone automatically; please check it with the accountant.</li>
           )}
-          <li>Consignment <strong>{consignment.consignmentNumber}</strong> → status back to <strong>active</strong>, sale data cleared</li>
-          <li>Product <strong>{productLabel}</strong> → stock_status back to <strong>consignment</strong></li>
+          <li>Consignment{saleGroup.length > 1 ? 's' : ''} → status back to <strong>active</strong>, sale data cleared; product{saleGroup.length > 1 ? 's' : ''} back to <strong>consignment</strong></li>
         </ul>
+        {/* D3 — ging ein Artikel DIESES Verkaufs schon samt Rückzahlung an seinen Einlieferer zurück, ist der Verkauf
+            als Ganzes nicht mehr stornierbar (die Ware ist bei ihm, die Rückzahlung steht) — vorher sagen, nicht erst danach. */}
+        {saleGroup.filter(c => c.consignorSide?.refunds.some(r => r.currentSale)).map(c => (
+          <div key={`settled-${c.id}`} data-cancel-sale-settled={c.id} style={{
+            marginBottom: 12, padding: '10px 12px', borderRadius: 6, fontSize: 12, lineHeight: 1.5,
+            background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.30)', color: '#B91C1C',
+          }}>
+            {c.consignmentNumber} already went back to its consignor and the repayment of his payout is recorded
+            ({c.consignorSide!.refunds.filter(r => r.currentSale).map(r => r.returnNumber).join(', ')}). This sale can no longer be cancelled as a whole —
+            return the other items one by one with <strong>Post-Sale Return</strong>.
+          </div>
+        ))}
+        {/* D3 — ein schon bezahlter Einlieferer: seine Auszahlung wird nicht still als zurückgekommen gebucht. */}
+        {saleGroup.filter(c => c.invoiceId && (c.consignorSide?.paid ?? 0) > 0.0005).map(c => {
+          const k = customers.find(x => x.id === c.consignorId);
+          const name = `${k ? `${k.firstName} ${k.lastName}`.trim() : 'The consignor'}${saleGroup.length > 1 ? ` (${c.consignmentNumber})` : ''}`;
+          return (
+            <div key={c.id} style={{ marginBottom: 12 }}>
+              <ConsignorRefundPicker paid={c.consignorSide?.paid ?? 0} name={name}
+                value={cancelRefunds[c.id] ?? { mode: 'received', method: 'cash' }}
+                onChange={(v) => setCancelRefunds(prev => ({ ...prev, [c.id]: v }))} testId={c.id} />
+            </div>
+          );
+        })}
         <div style={{
           padding: '10px 12px', borderRadius: 6,
           background: 'rgba(255,135,48,0.06)', border: '1px solid rgba(255,135,48,0.30)',
           fontSize: 12, color: '#7A4A20', marginBottom: 16, lineHeight: 1.5,
         }}>
           Use this when the sale was a mistake (wrong buyer, wrong price, buyer = consignor).
-          For a normal post-sale return where the customer brings the item back, use <strong>Post-Sale Return</strong> instead.
-          {(consignment.payoutPaidAmount || 0) > 0.005 && (
-            <> The payout reversal is a <strong>booking only</strong> — cash/bank will show the money as returned,
-            so make sure you actually collect <Bhd v={consignment.payoutPaidAmount || 0}/> BHD back from the consignor.</>
-          )}
+          For a normal post-sale return where the customer brings <strong>one</strong> item back, use <strong>Post-Sale Return</strong> on that item instead {'—'} the other items of the invoice stay sold.
         </div>
         <WriteError text={w.fehler} />
         <div className="flex justify-end gap-3">
           <Button variant="ghost" onClick={() => setCancelSaleModal(false)}>Keep Sale</Button>
-          <Button variant="danger" onClick={() => void handleCancelSale()} disabled={w.busy} data-consignment-cancel-sale-confirm>Cancel Sale</Button>
+          <Button variant="danger" onClick={() => void handleCancelSale()} data-consignment-cancel-sale-confirm
+            disabled={w.busy || saleGroup.some(c => c.consignorSide?.refunds.some(r => r.currentSale))}>
+            {saleGroup.length > 1 ? `Cancel Sale (${saleGroup.length} items)` : 'Cancel Sale'}
+          </Button>
         </div>
       </Modal>
 

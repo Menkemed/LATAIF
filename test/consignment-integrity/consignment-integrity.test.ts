@@ -473,7 +473,7 @@ function eigenerArtikel(db: Db, id: string): void {
     'src/core/bridge/commercial-commands.ts', 'src/core/bridge/consignment-lifecycle-commands.ts', 'src/pages/consignments/ConsignmentDetail.tsx'];
   const setzer = files.flatMap((f) => [...codeOf(src(f)).matchAll(/invoiceId:\s*invoice\.id|invoice_id\s*=\s*NULL|invoiceId:\s*[a-z]/g)].map((m) => `${f}:${m[0]}`))
     .filter((x) => !/invoiceId:\s*(invoice\.id|invoiceId|inv)/.test(x) || /consignmentStore/.test(x));
-  ok(/withConsignmentSalePermit\(con\.productId/.test(src('src/stores/consignmentStore.ts')) && (codeOf(src('src/core/consignment/consignment-reversal-house.ts')).match(/invoice_id = NULL/g) ?? []).length === 1,
+  ok(/withConsignmentSalePermit\(plan\.map\(\(p\) => p\.con\.productId\)/.test(src('src/stores/consignmentStore.ts')) && (codeOf(src('src/core/consignment/consignment-reversal-house.ts')).match(/invoice_id = NULL/g) ?? []).length === 1,
     `A4 Quelltext: Verknüpfung setzt nur „Record Sale" (mit seiner Erlaubnis), löscht nur „Cancel Sale" (${setzer.length})`);
   // Mehrdeutig (künstlich): zwei Kommissionen mit DERSELBEN Rechnung → nichts darf sich ändern.
   insert(w.db, 'consignments', { id: 'cons-dup', branch_id: 'branch-main', consignment_number: 'CN-D', consignor_id: 'cust-1',
@@ -561,15 +561,21 @@ for (const [was, o, disp] of [
   const w = await welt();
   const spaet = await viaRechnung('primary', w, rechnungsEingabe(w, 'RETURN_TO_OWNER', false));
   ok(!spaet.ok && spaet.code === 'CONSIGNMENT_RETURN_REFUNDS_NOW', `C „später erstatten" für Kommissionsware → abgewiesen (${spaet.code})`);
-  // Beide Seiten schon bezahlt (Käufer bar, Einlieferer bar): der bestehende Vertrag des Kommissionswegs gilt
-  // unverändert auch von der Rechnung aus (PC2) — derselbe Endzustand.
+  // Beide Seiten schon bezahlt (Käufer bar, Einlieferer bar): D3 — was mit der Auszahlung geschieht, entscheidet der
+  // Owner in der Kommissionsmaske. Von der Rechnung aus (PC2) daher ein klares Nein, nichts verändert; von der
+  // Kommission aus mit der Wahl „received" gelingt es — Kasse null, die Auszahlung bleibt als Historie stehen.
   const w2 = await welt({ bezahlt: 1200, einlieferer: 960 });
+  const vor2 = unberuehrt(w2);
   const a2 = await viaRechnung('fern', w2, rechnungsEingabe(w2, 'RETURN_TO_OWNER'));
+  ok(!a2.ok && a2.code === 'CONSIGNOR_REFUND_REQUIRED' && unberuehrt(w2) === vor2,
+    `C beide Seiten bezahlt, von der Rechnung (PC2): abgewiesen mit Hinweis auf die Kommissionsmaske, nichts verändert (${a2.code || 'ok'})`);
   const w3 = await welt({ bezahlt: 1200, einlieferer: 960 });
-  const a3 = await rueckgabe('fern', w3, { disposition: 'RETURN_TO_OWNER', refundMethod: 'cash', reason: 'Kunde bringt es zurück' });
-  const d2 = diffAll(bild(w2.db, w2.cid), bild(w3.db, w3.cid));
-  ok(a2.ok && a3.ok && d2.length === 0 && balanced(w2.db),
-    `C beide Seiten bezahlt: von der Rechnung ≡ von der Kommission (PC2) (${a2.code || 'ok'}/${a3.code || 'ok'}; ${d2.slice(0, 2).join(' | ') || 'gleich'})`);
+  const a3 = await rueckgabe('fern', w3, { disposition: 'RETURN_TO_OWNER', refundMethod: 'cash', reason: 'Kunde bringt es zurück',
+    consignorRefund: { mode: 'received', method: 'cash' } });
+  ok(a3.ok && balanced(w3.db) && Object.keys(konten(w3.db)).length === 0
+    && n(w3.db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'PURCHASE_PAYMENT' AND reverses_entry_id IS NOT NULL") === 0
+    && n(w3.db, "SELECT COUNT(*) FROM purchase_returns WHERE status = 'COMPLETED' AND refund_method = 'cash' AND ABS(refund_amount - 960) < 0.001") === 1,
+  `C beide Seiten bezahlt, von der Kommission mit „received": Lieferanten-Retoure statt Zahlungsumkehr, alle Konten 0 (${a3.code || 'ok'}; ${S(konten(w3.db))})`);
 }
 
 // ══ D — direkter Storno einer Rückgabe an den Einlieferer ═════════════════════

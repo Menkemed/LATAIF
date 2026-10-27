@@ -144,9 +144,9 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
     grund: 'EIN Auftrag statt zweier Aufrufe: die Fernbuchung fuehrt Auszahlungsmodell und Stammdaten in derselben Klammer aus, in derselben Reihenfolge wie die Maske.',
   },
   {
-    op: 'consignments.record_sale', handlung: 'Kommissionsverkauf erfassen', ort: 'pages/consignments/ConsignmentDetail.tsx',
-    lokal: 'recordConsignmentSaleOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
-    grund: 'R5F — EINE Folge fuer beide Seiten (core/consignment/consignment-finance-house): Kaeufer, Preis, Datum, Notiz, Verlust-Bestaetigung und die Wahl im Nummerndialog (`specialMark` → Kreis der Rechnung) — Einkauf beim Einlieferer, Rechnung, ggf. Verlust-Ausgabe, Status und Menge in EINER Klammer. Auch die Liste (normaler Kreis) laeuft ueber dieselbe Buchung.',
+    op: 'consignments.record_sale', handlung: 'Kommissionsverkauf erfassen', ort: 'components/consignments/ConsignmentSaleDialog.tsx',
+    lokal: 'recordConsignmentSalesOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    grund: 'R5F / CONSIGNMENT MULTI-SALE — EINE Folge fuer beide Seiten (core/consignment/consignment-finance-house): ein oder mehrere Artikel, Kaeufer, Preise, Verkaufstag (= Rechnungsdatum), Notiz, Verlust-Bestaetigungen, Zahlungen und die Wahl im Nummerndialog — je Artikel Einkauf beim Einlieferer, EINE Rechnung samt Zahlungen, ggf. Verlust-Ausgaben, Status und Menge in EINER Klammer. Detail, Liste und Einlieferer-Seite oeffnen denselben Dialog.',
   },
   {
     op: 'consignments.mark_returned', handlung: 'Kommission zurueckgeben', ort: 'pages/consignments/ConsignmentDetail.tsx',

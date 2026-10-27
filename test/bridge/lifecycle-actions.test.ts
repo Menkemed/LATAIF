@@ -240,7 +240,7 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
   for (const call of [
     'os.updateStatus(', 'ops.addPayment(', 'ops.deletePayment(',
     // R5F — der Verkauf laeuft ueber die GETEILTE Folge (sie ruft `recordSale` des Stores).
-    'recordConsignmentSaleInHouse(', 'useConsignmentStore.getState().markReturned(',
+    'recordConsignmentSalesInHouse(', 'useConsignmentStore.getState().markReturned(',
     'rs.updateStatus(', 'rs.createCombinedRepairInvoice(', 'rs.addRepairLine(',
     'rs.updateRepairLine(', 'rs.cancelRepairLine(',
     // R5D — die Umwandlungen laufen über die GETEILTE Folge, die auch die Masken des Primary rufen.

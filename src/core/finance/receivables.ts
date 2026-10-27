@@ -72,9 +72,12 @@ export function receivablesBreakdown(branchId?: string): ReceivableRow[] {
   const rows: ReceivableRow[] = [];
 
   // ── 1. Consignment-Auto-Invoices ─────────────────────────────
+  // CONSIGNMENT MULTI-SALE — EINE Forderung je Rechnung: ein gemeinsamer Verkauf trägt mehrere Kommissionen, die
+  // Rechnung (und ihr offener Betrag) aber nur einmal. Vorher eine Zeile je Kommission, jede mit der vollen Summe.
   const consRows = query(
-    `SELECT cs.id          AS cs_id,
-            cs.consignment_number AS cs_number,
+    `SELECT MIN(cs.id)     AS cs_id,
+            GROUP_CONCAT(cs.consignment_number, ', ') AS cs_number,
+            COUNT(cs.id)   AS cs_count,
             i.id           AS inv_id,
             i.customer_id  AS customer_id,
             c.first_name   AS first_name,
@@ -95,10 +98,12 @@ export function receivablesBreakdown(branchId?: string): ReceivableRow[] {
        ) cn ON cn.invoice_id = i.id
       WHERE cs.invoice_id IS NOT NULL
         AND i.status NOT IN ('CANCELLED', 'DRAFT', 'RETURNED')
-        AND (i.gross_amount - i.paid_amount - COALESCE(cn.cancel_amount, 0)) > 0.005${branchId ? ' AND i.branch_id = ?' : ''}`,
+        AND (i.gross_amount - i.paid_amount - COALESCE(cn.cancel_amount, 0)) > 0.005${branchId ? ' AND i.branch_id = ?' : ''}
+      GROUP BY i.id`,
     branchId ? [branchId] : []
   );
   for (const r of consRows) {
+    const mehrere = Number(r.cs_count) > 1;
     const total = (Number(r.gross) || 0) - (Number(r.cn_cancel) || 0);
     const paid  = Number(r.paid) || 0;
     const open  = Math.max(0, total - paid);
@@ -111,7 +116,7 @@ export function receivablesBreakdown(branchId?: string): ReceivableRow[] {
       source:       'CONSIGNMENT',
       sourceId:     r.cs_id as string,
       reference:    (r.cs_number as string) || (r.inv_id as string),
-      detailLabel:  'Consignment sale',
+      detailLabel:  mehrere ? `Consignment sale (${Number(r.cs_count)} items)` : 'Consignment sale',
       invoiceId:    r.inv_id as string,
       totalAmount:  total,
       paidAmount:   paid,
@@ -119,7 +124,7 @@ export function receivablesBreakdown(branchId?: string): ReceivableRow[] {
       issuedAt,
       dueAt,
       daysOverdue:  computeDaysOverdue(dueAt, issuedAt),
-      navigateTo:   `/consignments/${r.cs_id}`,
+      navigateTo:   mehrere ? `/invoices/${r.inv_id}` : `/consignments/${r.cs_id}`,
     });
   }
 

@@ -35,8 +35,10 @@ import { TransferActionRejected, transferConvertBlocker, type TransferBillTo } f
 import { convertTransferInHouse, convertTransfersInHouse, type TransferConversion } from '@/core/agents/transfer-house';
 import { VatPeriodFiled } from '@/core/tax/vat-period-lock';
 import { assertHouseBranch } from './remote-create-support';
-import { ConsignmentActionRejected } from '@/core/consignment/consignment-finance';
-import { recordConsignmentSaleInHouse, type ConsignmentSold } from '@/core/consignment/consignment-finance-house';
+import { ConsignmentActionRejected, MAX_SALE_ITEMS } from '@/core/consignment/consignment-finance';
+import { recordConsignmentSalesInHouse, type ConsignmentsSold } from '@/core/consignment/consignment-finance-house';
+import { invoiceCreatePayments, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
+import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { useOrderStore } from '@/stores/orderStore';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 import { useConsignmentStore } from '@/stores/consignmentStore';
@@ -363,6 +365,13 @@ export interface RecordSaleRequest {
   notes?: string;
   acknowledgeShortfall?: boolean;
   specialMark: boolean;
+  /**
+   * CONSIGNMENT MULTI-SALE — der gemeinsame Verkauf: je Artikel Kommission, gesehene Fassung, Preis und Bestätigung.
+   * Gesetzt, wenn der Rumpf `items` trägt; dann sind `consignmentId`/`salePrice`/`expectedRevision` die des ersten.
+   */
+  items?: Array<{ consignmentId: string; expectedRevision: number; salePrice: number; acknowledgeShortfall: boolean }>;
+  /** CONSIGNMENT MULTI-SALE (D5) — Zahlungen beim Verkauf, dieselben Zeilen wie bei `invoices.create`. */
+  payments?: InvoiceCreatePayment[];
 }
 
 /**
@@ -372,7 +381,9 @@ export interface RecordSaleRequest {
  */
 export function parseRecordSale(raw: unknown): RecordSaleRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['consignmentId', 'buyerId', 'salePrice', 'expectedRevision', 'saleDate', 'notes', 'acknowledgeShortfall', 'specialMark']);
+  // CONSIGNMENT MULTI-SALE — der gemeinsame Verkauf (`items`) neben dem bisherigen Einzelrumpf; nie beides.
+  if (raw.items !== undefined) return parseRecordSales(raw);
+  onlyKnownFields(raw, ['consignmentId', 'buyerId', 'salePrice', 'expectedRevision', 'saleDate', 'notes', 'acknowledgeShortfall', 'specialMark', 'payments']);
   if (raw.specialMark !== undefined && typeof raw.specialMark !== 'boolean') {
     throw new FinancialPayloadError('specialMark is yes or no');
   }
@@ -388,36 +399,106 @@ export function parseRecordSale(raw: unknown): RecordSaleRequest {
   // Dieselbe Bedeutung wie am Bildschirm: ein Verkauf unter dem Boden des Einlieferers
   // erzeugt einen Verlust und braucht eine ausdrückliche Bestätigung. Sie bestätigt genau das.
   out.acknowledgeShortfall = raw.acknowledgeShortfall === true;
+  const payments = parseSalePayments(raw.payments);
+  if (payments) out.payments = payments;
+  return out;
+}
+
+/** CONSIGNMENT MULTI-SALE (D5) — die Zahlungszeilen nach derselben Regel wie bei `invoices.create` (rein, ohne Datenbank). */
+function parseSalePayments(raw: unknown): InvoiceCreatePayment[] | undefined {
+  if (raw === undefined) return undefined;
+  if (!Array.isArray(raw)) throw new FinancialPayloadError('payments must be a list');
+  raw.forEach((p, i) => {
+    if (!isPlain(p)) throw new FinancialPayloadError(`payment ${i + 1} must be an object`);
+    onlyKnownFields(p, ['amount', 'method', 'cardBrand', 'paidDate']);
+  });
+  try {
+    return invoiceCreatePayments({ payments: raw });
+  } catch (err) {
+    if (err instanceof InvoiceActionRejected) throw new FinancialPayloadError(err.message);
+    throw err;
+  }
+}
+
+/** CONSIGNMENT MULTI-SALE — der Rumpf des gemeinsamen Verkaufs: `items` (je Artikel mit seiner Fassung), Käufer, Tag, Zahlungen. */
+function parseRecordSales(raw: Record<string, unknown>): RecordSaleRequest {
+  onlyKnownFields(raw, ['items', 'buyerId', 'saleDate', 'notes', 'specialMark', 'payments']);
+  if (raw.specialMark !== undefined && typeof raw.specialMark !== 'boolean') {
+    throw new FinancialPayloadError('specialMark is yes or no');
+  }
+  if (!Array.isArray(raw.items) || raw.items.length === 0) throw new FinancialPayloadError('items must be a non-empty list');
+  if (raw.items.length > MAX_SALE_ITEMS) throw new FinancialPayloadError(`at most ${MAX_SALE_ITEMS} items in one sale`);
+  const items = raw.items.map((it, i) => {
+    if (!isPlain(it)) throw new FinancialPayloadError(`item ${i + 1} must be an object`);
+    onlyKnownFields(it, ['consignmentId', 'expectedRevision', 'salePrice', 'acknowledgeShortfall']);
+    return {
+      consignmentId: reqString(it.consignmentId, `item ${i + 1} consignmentId`),
+      expectedRevision: expectedRevisionOf(it.expectedRevision),
+      salePrice: positive(it.salePrice, `item ${i + 1} salePrice`),
+      acknowledgeShortfall: it.acknowledgeShortfall === true,
+    };
+  });
+  if (new Set(items.map((it) => it.consignmentId)).size !== items.length) {
+    throw new FinancialPayloadError('the same consignment is listed twice');
+  }
+  const out: RecordSaleRequest = {
+    consignmentId: items[0].consignmentId,
+    buyerId: reqString(raw.buyerId, 'buyerId'),
+    salePrice: items[0].salePrice,
+    expectedRevision: items[0].expectedRevision,
+    acknowledgeShortfall: items[0].acknowledgeShortfall,
+    specialMark: raw.specialMark === true,
+    items,
+  };
+  out.saleDate = optString(raw.saleDate, 'saleDate');
+  out.notes = optText(raw.notes, 'notes');
+  const payments = parseSalePayments(raw.payments);
+  if (payments) out.payments = payments;
   return out;
 }
 
 export function runRecordSale(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseRecordSale(raw);
+  // CONSIGNMENT MULTI-SALE — ohne `items` der Einzelrumpf als ein Artikel; dieselbe Hausfolge für beide.
+  const items = req.items ?? [{
+    consignmentId: req.consignmentId, expectedRevision: req.expectedRevision, salePrice: req.salePrice,
+    acknowledgeShortfall: req.acknowledgeShortfall === true,
+  }];
   return runRemoteCommand(deps, identity, () => {
-    let result: ConsignmentSold;
+    let result: ConsignmentsSold;
     try {
       // R5F — dieselbe Folge wie „Record Sale" am Primary: Einkauf beim Einlieferer (damit ein Los
       // entsteht), Rechnung an den Käufer im gewählten Kreis, bei Unterdeckung die Verlust-Ausgabe,
-      // Status und Menge — in DIESER Transaktion. Die gesehene Fassung ist der letzte Wächter.
-      result = recordConsignmentSaleInHouse(req.consignmentId, {
-        salePrice: req.salePrice, buyerId: req.buyerId, saleDate: req.saleDate, notes: req.notes,
-        acknowledgeShortfall: req.acknowledgeShortfall === true, specialMark: req.specialMark,
-      }, identity.branchId, () => assertRevision('consignments', req.consignmentId, req.expectedRevision, 'CONSIGNMENT_NOT_FOUND'));
+      // Status und Menge — in DIESER Transaktion. Die gesehene Fassung JEDER Kommission ist der letzte Wächter.
+      result = recordConsignmentSalesInHouse({
+        items: items.map((it) => ({ consignmentId: it.consignmentId, salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall })),
+        buyerId: req.buyerId, saleDate: req.saleDate, notes: req.notes, specialMark: req.specialMark,
+        ...(req.payments ? { payments: req.payments } : {}),
+      }, identity.branchId, () => {
+        for (const it of items) assertRevision('consignments', it.consignmentId, it.expectedRevision, 'CONSIGNMENT_NOT_FOUND');
+      });
     } catch (e) {
       if (e instanceof ConsignmentActionRejected) throw new CommandRejected(e.code, e.message);
       throw e;
     }
-    const after = consignmentState(req.consignmentId);
-    if (s(after.status) !== 'sold') {
-      throw new CommandNotEvaluated('SALE_NOT_APPLIED', `status is ${s(after.status)}`);
+    const states = items.map((it) => consignmentState(it.consignmentId));
+    const offen = states.find((st) => s(st.status) !== 'sold');
+    if (offen) {
+      throw new CommandNotEvaluated('SALE_NOT_APPLIED', `status is ${s(offen.status)}`);
     }
     useProductStore.getState().loadProducts();
+    const first = result.items[0];
     return {
-      ...after,
+      ...states[0],
       invoiceId: result.invoiceId,
-      purchaseId: result.purchaseId,
-      consignorLossAmount: result.consignorLossAmount,
+      purchaseId: first.purchaseId,
+      consignorLossAmount: first.consignorLossAmount,
       invoice: invoiceState(result.invoiceId),
+      ...(req.items ? {
+        consignments: states,
+        purchaseIds: result.items.map((it) => it.purchaseId),
+      } : {}),
+      ...(result.paymentIds.length > 0 ? { paymentIds: result.paymentIds } : {}),
     };
   });
 }

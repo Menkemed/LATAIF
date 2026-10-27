@@ -50,12 +50,17 @@ import { useExpenseStore } from '@/stores/expenseStore';
 import { createReturnInHouse } from '@/core/returns/return-house';
 import { cancelReturnInHouse } from '@/core/returns/return-cancel-house';
 import { reverseInvoiceInHouse } from '@/core/invoices/invoice-reversal';
-import { cancelPurchaseInHouse } from '@/core/purchases/purchase-lifecycle-house';
+import {
+  cancelPurchaseInHouse, confirmPurchaseReturnInHouse, createPurchaseReturnDraftInHouse,
+} from '@/core/purchases/purchase-lifecycle-house';
 import { ConsignmentActionRejected } from './consignment-finance';
 import {
-  CONSIGNMENT_PRIMARY_ONLY, DEFAULT_POST_SALE_REFUND_METHOD, POST_SALE_DISPOSITIONS, POST_SALE_REFUND_METHODS,
-  cancelSaleBlocker, consignmentSaleInvoiceRule, postSaleReturnBlocker, postSaleReturnMarker,
-  type ConsignmentReturnAfterSaleInput, type PostSaleDisposition,
+  CONSIGNMENT_CONSIGNOR_SETTLED, CONSIGNMENT_PRIMARY_ONLY, CONSIGNOR_LOSS_PAID, CONSIGNOR_PAID_BY_CREDIT,
+  CONSIGNOR_PAYOUT_PAID_LEGACY, CONSIGNOR_REFUND_INVALID, CONSIGNOR_REFUND_REQUIRED,
+  DEFAULT_POST_SALE_REFUND_METHOD, POST_SALE_DISPOSITIONS, POST_SALE_REFUND_METHODS,
+  cancelSaleBlocker, consignmentSaleInvoiceRule, consignorRefundOf, postSaleReturnBlocker, postSaleReturnMarker,
+  type ConsignmentReturnAfterSaleInput, type ConsignorRefundChoice, type ConsignorRefundMethod, type ConsignorRefundMode,
+  type PostSaleDisposition,
 } from './consignment-reversal';
 
 const nein = (code: string, message: string): ConsignmentActionRejected => new ConsignmentActionRejected(code, message);
@@ -102,6 +107,21 @@ export function consignorPurchases(consignmentId: string, consignmentNumber: str
   ).map((r) => String(r.id));
 }
 
+/**
+ * D3 — die Einkäufe DIESES Verkaufs: ein früherer, storniert-und-neu-verkaufter Verkauf kann einen bezahlten Einkauf
+ * hinterlassen, der über die Lieferanten-Retoure zurückging (nicht storniert, Summe 0). Er gehört nicht zum jetzigen
+ * Verkauf — zugeordnet wird über das Los des Einkaufs auf einer Zeile der jetzigen Rechnung. Ohne diese Zuordnung
+ * (Altbestand ohne Los) bleiben es alle wie bisher.
+ */
+function zumVerkauf(invoiceId: string, purchases: string[]): string[] {
+  if (!invoiceId || purchases.length <= 1) return purchases;
+  const verknuepft = purchases.filter((pid) => query(
+    `SELECT 1 FROM invoice_lines il JOIN stock_lots sl ON sl.id = il.lot_id WHERE il.invoice_id = ? AND sl.purchase_id = ? LIMIT 1`,
+    [invoiceId, pid],
+  ).length > 0);
+  return verknuepft.length > 0 ? verknuepft : purchases;
+}
+
 /** Die Verlust-Ausgabe (Verkauf unter dem Boden des Einlieferers), die `recordSale` anlegt. */
 function consignorLosses(consignmentId: string, branchId: string): string[] {
   return query(
@@ -139,6 +159,127 @@ export function localConsignmentActor(): ConsignmentActor {
 }
 
 // ════════════════════════════════════════════════════════════════════════════
+// D3 — die Seite des Einlieferers, wenn sein Verkauf zurückgenommen wird
+// ════════════════════════════════════════════════════════════════════════════
+
+const F = (n: unknown): number => Math.round((Number(n) || 0) * 1000);
+const B = (f: number): number => f / 1000;
+
+/** Was ein Einkauf beim Einlieferer schon gesehen hat: Bezahltes (bar UND per Guthaben) und eine wirksame Lieferanten-Retoure. */
+interface EinkaufLage { id: string; number: string; bezahltF: number; guthabenF: number; retoure: string | null }
+
+function einkaufLage(purchaseId: string): EinkaufLage {
+  const p = query('SELECT purchase_number, paid_amount FROM purchases WHERE id = ?', [purchaseId])[0];
+  const guthabenF = F(query(
+    `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit' AND voided_at IS NULL`,
+    [purchaseId],
+  )[0]?.t);
+  const ret = query(`SELECT return_number FROM purchase_returns WHERE purchase_id = ? AND status != 'CANCELLED' LIMIT 1`, [purchaseId])[0];
+  return {
+    id: purchaseId, number: String(p?.purchase_number ?? ''), bezahltF: F(p?.paid_amount) + guthabenF, guthabenF,
+    retoure: ret ? String(ret.return_number ?? '') || 'a supplier return' : null,
+  };
+}
+
+/** Was auf eine Verlust-Ausgabe schon gezahlt ist (bar und per Guthaben). */
+function verlustBezahltF(expenseId: string): number {
+  const e = query('SELECT paid_amount FROM expenses WHERE id = ?', [expenseId])[0];
+  const guthaben = query(`SELECT COALESCE(SUM(amount), 0) AS t FROM expense_payments WHERE expense_id = ? AND method = 'credit'`, [expenseId])[0];
+  return F(e?.paid_amount) + F(guthaben?.t);
+}
+
+/** Der Vermerk der Lieferanten-Retoure, mit der die Auszahlung einer Kommission zurückkommt. */
+export function consignorRefundMarker(consignmentNumber: string): string {
+  return `Consignment payout back (${consignmentNumber})`;
+}
+
+/** D3 — die gebuchte Rückzahlung des Einlieferers (Lieferanten-Retoure seines Einkaufs). */
+export interface ConsignorRefundBooked {
+  consignmentId: string;
+  purchaseId: string;
+  purchaseNumber: string;
+  mode: ConsignorRefundMode;
+  /** received: der Weg des Eingangs; pending: null (Lieferanten-Guthaben). */
+  method: ConsignorRefundMethod | null;
+  returnId: string;
+  returnNumber: string;
+  /** Der zurückkommende bzw. offene Betrag — genau das schon Bezahlte. */
+  refundAmount: number;
+  supplierCreditId: string | null;
+}
+
+/**
+ * Was eine Rücknahme an der Seite des Einlieferers prüfen muss, BEVOR geschrieben wird: kein schon zurückgegebener
+ * Einkauf, kein mit Guthaben bezahlter, keine bezahlte Verlust-Ausgabe, keine Altweg-Auszahlung — und bei einem
+ * bezahlten Einkauf die Wahl des Owners (D3). Wirft das erste Nein.
+ */
+function pruefeEinlieferer(
+  con: Record<string, unknown>, purchases: string[], losses: string[], wahl: ConsignorRefundChoice | undefined,
+): EinkaufLage[] {
+  const nr = String(con.consignment_number ?? '');
+  const lagen = purchases.map(einkaufLage);
+  for (const l of lagen) {
+    if (l.retoure) {
+      throw nein(CONSIGNMENT_CONSIGNOR_SETTLED,
+        `${nr}: the consignor's purchase ${l.number} already went back to the consignor (${l.retoure}) — this sale cannot be undone again`);
+    }
+    if (l.guthabenF > 0) {
+      throw nein(CONSIGNOR_PAID_BY_CREDIT,
+        `${nr}: the consignor's purchase ${l.number} was paid with supplier credit — it is not undone automatically; please check it with the accountant`);
+    }
+  }
+  const bezahltF = lagen.reduce((s, l) => s + l.bezahltF, 0);
+  if (bezahltF > 0 && !wahl) {
+    throw nein(CONSIGNOR_REFUND_REQUIRED,
+      `${nr}: the consignor was already paid ${B(bezahltF).toFixed(3)} BHD — choose whether that money came back now or is still to be repaid`);
+  }
+  for (const e of losses) {
+    if (verlustBezahltF(e) > 0) {
+      throw nein(CONSIGNOR_LOSS_PAID,
+        `${nr}: the consignor's guarantee shortfall was already paid — it is not undone automatically; please check it with the accountant`);
+    }
+  }
+  if (F(con.payout_paid_amount) > 0) {
+    throw nein(CONSIGNOR_PAYOUT_PAID_LEGACY,
+      `${nr}: this old sale was already paid out to the consignor (${B(F(con.payout_paid_amount)).toFixed(3)} BHD) — undoing it would book that money as returned; please check it with the accountant`);
+  }
+  return lagen;
+}
+
+/**
+ * Der Einkauf beim Einlieferer wird zurückgenommen: unbezahlt wie bisher über den Einkaufsstorno; bezahlt (D3) über
+ * die VORHANDENE Lieferanten-Retoure — die Verbindlichkeit fällt, das schon Bezahlte kommt zurück (received: auf
+ * dem gewählten Weg) oder wird Lieferanten-Guthaben beim Einlieferer (pending). Die Auszahlung selbst bleibt stehen.
+ */
+function einkaufZurueck(
+  con: Record<string, unknown>, lage: EinkaufLage, wahl: ConsignorRefundChoice | undefined, branchId: string, now: string,
+): ConsignorRefundBooked | null {
+  if (lage.bezahltF <= 0) {
+    cancelPurchaseInHouse(lage.id, branchId);
+    return null;
+  }
+  if (!wahl) throw nein(CONSIGNOR_REFUND_REQUIRED, 'the consignor was already paid — choose how the money comes back');
+  const nr = String(con.consignment_number ?? '');
+  const lines = query('SELECT id, quantity, unit_price FROM purchase_lines WHERE purchase_id = ? ORDER BY position, id', [lage.id]);
+  const ctx = { branchId, userId: currentUserId(), now };
+  const draft = createPurchaseReturnDraftInHouse({
+    purchaseId: lage.id,
+    refundMethod: wahl.mode === 'received' ? wahl.method : 'credit',
+    notes: consignorRefundMarker(nr),
+    lines: lines.map((l) => ({ purchaseLineId: String(l.id), quantity: Number(l.quantity) || 1, unitPrice: Number(l.unit_price) || 0 })),
+  }, ctx);
+  const done = confirmPurchaseReturnInHouse(draft.returnId, ctx);
+  if (F(done.refundAmount) !== lage.bezahltF) {
+    throw new Error(`consignor refund ${draft.returnNumber}: ${done.refundAmount} back, but ${B(lage.bezahltF)} was paid`);
+  }
+  return {
+    consignmentId: String(con.id), purchaseId: lage.id, purchaseNumber: lage.number, mode: wahl.mode,
+    method: wahl.mode === 'received' ? wahl.method : null, returnId: draft.returnId, returnNumber: draft.returnNumber,
+    refundAmount: done.refundAmount, supplierCreditId: done.supplierCreditId,
+  };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
 // „Post-Sale Return" — der Käufer bringt die Ware zurück
 // ════════════════════════════════════════════════════════════════════════════
 
@@ -154,6 +295,8 @@ export interface ConsignmentReturnedAfterSale {
   refundMethod: string;
   cancelledPurchases: number;
   cancelledLossExpenses: number;
+  /** D3 — die Rückzahlung eines schon bezahlten Einlieferers (nur bei „Return to Owner"). */
+  consignorRefunds: ConsignorRefundBooked[];
 }
 
 /**
@@ -161,10 +304,12 @@ export interface ConsignmentReturnedAfterSale {
  * Restmenge, Rechnungspreis brutto, sofort erstattet im gewählten Weg — unbezahlt ist das die
  * Forderungsstornierung), der Wareneinsatz zurück, dann je Weg:
  *   • „Return to Owner": die Ware geht an den Einlieferer; sein Auto-Einkauf und die Verlust-Ausgabe
- *     werden storniert (die Maske: „Our A/P to him gets cancelled … No inventory effect for us");
- *   • „Keep": die Ware wird eigener Bestand zum Einstand = Auszahlung an den Einlieferer (v0.7.11,
- *     derselbe Betrag wie die offen bleibende Verbindlichkeit); der Einkauf bleibt offen.
+ *     werden storniert (die Maske: „Our A/P to him gets cancelled … No inventory effect for us") —
+ *     D3: war er schon bezahlt, kommt das Geld über die Lieferanten-Retoure zurück (jetzt oder als Guthaben);
+ *   • „Keep": die Ware wird eigener Bestand zum Einstand, den das Lager zurückbekam (= Auszahlung an den
+ *     Einlieferer, v0.7.11); der Einkauf bleibt (offen oder bezahlt — eine Auszahlung bleibt eine Auszahlung).
  * Die Kommission steht danach auf „returned" (die Maske bietet dann „Cancel Sale (cleanup)").
+ * Bei einem gemeinsamen Verkauf wirkt das NUR auf diese Kommission — die übrigen Zeilen der Rechnung bleiben.
  */
 export function returnConsignmentAfterSaleInHouse(
   id: string, input: ConsignmentReturnAfterSaleInput, branchId: string, expectedRevision?: number,
@@ -177,6 +322,12 @@ export function returnConsignmentAfterSaleInHouse(
   const refundMethod = input.refundMethod ?? DEFAULT_POST_SALE_REFUND_METHOD;
   if (!(POST_SALE_REFUND_METHODS as readonly string[]).includes(refundMethod)) {
     throw nein('INVALID_INPUT', `unknown refund method: ${String(refundMethod)}`);
+  }
+  let wahl: ConsignorRefundChoice | undefined;
+  if (input.consignorRefund !== undefined) {
+    const w = consignorRefundOf(input.consignorRefund);
+    if (!w) throw nein(CONSIGNOR_REFUND_INVALID, 'the consignor refund is "received" with cash, bank or benefit — or "pending"');
+    wahl = w;
   }
   const reason = typeof input.reason === 'string' ? input.reason.trim() : '';
   const con = liveConsignment(id, branchId, expectedRevision);
@@ -204,7 +355,7 @@ export function returnConsignmentAfterSaleInHouse(
     eventBus.emit('consignment.returned', 'consignment', id, {});
     return {
       consignmentId: id, status: 'returned', disposition, withoutInvoice: true, invoiceId: '', returnId: '', returnNumber: '',
-      refundMethod, cancelledPurchases: 0, cancelledLossExpenses: 0,
+      refundMethod, cancelledPurchases: 0, cancelledLossExpenses: 0, consignorRefunds: [],
     };
   }
 
@@ -224,8 +375,10 @@ export function returnConsignmentAfterSaleInHouse(
   const lineId = String(line.id);
   const rest = Number(line.quantity ?? 1) - Number(line.zurueck ?? 0);
   if (rest <= 0.005) throw nein('CONSIGNMENT_ALREADY_RETURNED', 'the consigned item on this invoice has already come back');
-  const purchases = disposition === 'RETURN_TO_OWNER' ? consignorPurchases(id, consignmentNumber, productId, branchId) : [];
+  const purchases = disposition === 'RETURN_TO_OWNER' ? zumVerkauf(invoiceId, consignorPurchases(id, consignmentNumber, productId, branchId)) : [];
   const losses = disposition === 'RETURN_TO_OWNER' ? consignorLosses(id, branchId) : [];
+  // D3 — VOR dem ersten Schreiben: was an der Seite des Einlieferers schon bezahlt ist, und die Wahl des Owners.
+  const lagen = disposition === 'RETURN_TO_OWNER' ? pruefeEinlieferer(con, purchases, losses, wahl) : [];
 
   // 1. Die Retoure — über das Retourenhaus: Preis und Steuer aus der Rechnung, Gutschrift, Erstattung im
   //    gewählten Weg (nur was der Käufer bezahlt hat, fließt zurück), Warenfolge, Nummer aus dem Zähler.
@@ -245,18 +398,28 @@ export function returnConsignmentAfterSaleInHouse(
 
   // 2. Der Wareneinsatz des Verkaufs zurück (DR INVENTORY / CR COGS, zum Einstand der Rechnungszeile).
   //    Das Retourenhaus tut das nur bei „In Stock"; hier gilt es für BEIDE Wege: bei „Return to Owner"
-  //    nimmt der Einkaufsstorno den Bestand danach wieder heraus (Lager im Hauptbuch null statt negativ),
-  //    bei „Keep" steht dem neuen Los endlich der Bestand im Hauptbuch gegenüber. Strikt: wirft.
+  //    nimmt der Einkaufsstorno (bzw. die Lieferanten-Retoure) den Bestand danach wieder heraus (Lager im
+  //    Hauptbuch null statt negativ), bei „Keep" steht dem neuen Los endlich der Bestand im Hauptbuch gegenüber.
+  //    Strikt: wirft.
   if (!hasLedgerEntries('SALES_RETURN_COGS', returnId)) {
     postSalesReturnCogs(returnId, [{ invoiceLineId: lineId, productId, quantity: rest }], now);
   }
 
-  // 3. „Keep": Einstand = Auszahlung an den Einlieferer (v0.7.11 — sonst Einstand = Verkaufspreis, und
-  //    Marge und Margensteuer des Wiederverkaufs wären falsch). Das Retourenhaus legt das Los zum
-  //    Verkaufspreis an; es wird hier auf den Einstand gesetzt — dasselbe Los, das ein Storno der
-  //    Retoure wieder findet (jüngstes aktives, unangebrochenes Los ohne Einkauf).
+  // 3. „Keep": Einstand = was das Lager eben zurückbekam (v0.7.11: die Auszahlung an den Einlieferer — sonst
+  //    Einstand = Verkaufspreis, und Marge und Margensteuer des Wiederverkaufs wären falsch). Das ist der Einkauf
+  //    beim Einlieferer; bei Unterdeckung der Verkaufspreis (der Rest steht schon als Verlust-Ausgabe), damit Los
+  //    und Hauptbuch denselben Bestand zeigen. Das Retourenhaus legt das Los zum Verkaufspreis an; es wird hier auf
+  //    den Einstand gesetzt — dasselbe Los, das ein Storno der Retoure wieder findet (jüngstes aktives,
+  //    unangebrochenes Los ohne Einkauf).
   if (disposition === 'KEEP_AS_OWN') {
-    const costBasis = Number(con.payout_amount ?? con.sale_price ?? 0);
+    const eingebucht = Number(query(
+      `SELECT COALESCE(SUM(amount), 0) AS t FROM ledger_entries
+        WHERE source_module = 'SALES_RETURN_COGS' AND source_id = ? AND account = 'INVENTORY' AND direction = 'DEBIT'
+          AND reverses_entry_id IS NULL`,
+      [returnId],
+    )[0]?.t ?? 0);
+    const costBasis = eingebucht > 0.0005 && rest > 0 ? Math.round((eingebucht / rest) * 1000) / 1000
+      : Number(con.payout_amount ?? con.sale_price ?? 0);
     const lot = query(
       `SELECT id FROM stock_lots
           WHERE product_id = ? AND purchase_id IS NULL AND status = 'ACTIVE' AND qty_remaining = qty_total
@@ -271,9 +434,14 @@ export function returnConsignmentAfterSaleInHouse(
     }
   }
 
-  // 4. „Return to Owner": wir schulden dem Einlieferer nichts mehr — sein Auto-Einkauf und die
-  //    Verlust-Ausgabe werden storniert. Strikt: scheitert es, gibt es auch die Rückgabe nicht.
-  for (const purchaseId of purchases) cancelPurchaseInHouse(purchaseId, branchId);
+  // 4. „Return to Owner": wir schulden dem Einlieferer nichts mehr — sein Auto-Einkauf (unbezahlt: storniert;
+  //    bezahlt: Lieferanten-Retoure, D3) und die Verlust-Ausgabe. Strikt: scheitert es, gibt es auch die Rückgabe nicht.
+  const consignorRefunds: ConsignorRefundBooked[] = [];
+  let cancelledPurchases = 0;
+  for (const lage of lagen) {
+    const r = einkaufZurueck(con, lage, wahl, branchId, now);
+    if (r) consignorRefunds.push(r); else cancelledPurchases++;
+  }
   for (const expenseId of losses) cancelConsignorLoss(expenseId);
 
   // 5. Die Kommission. Das Retourenhaus schreibt dafür RETURNED / RETURNED_TO_OWNER; die Kommissions-
@@ -285,12 +453,17 @@ export function returnConsignmentAfterSaleInHouse(
   // 6. Protokoll ATOMAR in derselben Transaktion — mit dem, der die Rückgabe gebucht hat.
   protokoll({
     status: 'returned', disposition, refundMethod, reason: reason || null, invoiceId, returnId, returnNumber,
-    cancelledPurchases: purchases.length, cancelledLossExpenses: losses.length,
+    cancelledPurchases, cancelledLossExpenses: losses.length,
+    ...(consignorRefunds.length > 0 ? {
+      consignorRefunds: consignorRefunds.map((r) => ({
+        purchaseNumber: r.purchaseNumber, mode: r.mode, method: r.method, returnNumber: r.returnNumber, amount: r.refundAmount,
+      })),
+    } : {}),
   });
   eventBus.emit('consignment.returned', 'consignment', id, { disposition, returnId });
   return {
     consignmentId: id, status: 'returned', disposition, withoutInvoice: false, invoiceId, returnId, returnNumber,
-    refundMethod, cancelledPurchases: purchases.length, cancelledLossExpenses: losses.length,
+    refundMethod, cancelledPurchases, cancelledLossExpenses: losses.length, consignorRefunds,
   };
 }
 
@@ -309,58 +482,89 @@ export interface ConsignmentSaleCancelled {
   cancelledPurchases: number;
   cancelledLossExpenses: number;
   reversedPayouts: number;
+  /** CONSIGNMENT MULTI-SALE (D2) — ALLE Kommissionen dieses Verkaufs (eine Rechnung = ein Verkauf). */
+  consignmentIds: string[];
+  /** D3 — die Rückzahlungen schon bezahlter Einlieferer. */
+  consignorRefunds: ConsignorRefundBooked[];
+}
+
+/** D2 — die Kommissionen eines Verkaufs: bei einer Rechnung ALLE mit dieser Rechnung, sonst (Altweg) nur diese. */
+export function saleGroupOf(con: Record<string, unknown>, branchId: string): Array<Record<string, unknown>> {
+  const invoiceId = String(con.invoice_id ?? '');
+  if (!invoiceId) return [con];
+  return query('SELECT * FROM consignments WHERE invoice_id = ? AND branch_id = ? ORDER BY consignment_number, id', [invoiceId, branchId]);
 }
 
 /**
- * „Cancel Sale": der Verkauf wird vollständig zurückgenommen — in DIESER Reihenfolge, in EINER Klammer:
- *   1. die eigene Rückgabe nach dem Verkauf (falls da) über den Retourenstorno — nichts wird gelöscht;
+ * „Cancel Sale": der Verkauf wird vollständig zurückgenommen — bei einem gemeinsamen Verkauf ausdrücklich die
+ * GANZE Rechnung mit ALLEN ihren Kommissionen (D2; eine einzelne zurückgebrachte Uhr geht über „Post-Sale Return").
+ * In DIESER Reihenfolge, in EINER Klammer:
+ *   1. die eigenen Rückgaben nach dem Verkauf (falls da) über den Retourenstorno — nichts wird gelöscht;
  *   2. die Käuferrechnung über die Grundlage (CANCELLED: Los zurück, Buchung, Zahlungen, Auto-Ausgaben);
- *   3. die Seite des Einlieferers: Auto-Einkauf (samt Zahlungen), Verlust-Ausgabe, Auszahlungen;
- *   4. der Artikel zurück in den Kommissionsbestand, die Kommission zurück auf „active";
+ *   3. je Kommission die Seite des Einlieferers: Auto-Einkauf (unbezahlt storniert; bezahlt nach der Wahl des
+ *      Owners über die Lieferanten-Retoure, D3), Verlust-Ausgabe, Auszahlungen;
+ *   4. je Kommission der Artikel zurück in den Kommissionsbestand, die Kommission zurück auf „active";
  *   5. das Protokoll.
- * Eine fremde Retoure an der Rechnung (nicht die der Kommission) sperrt — erst sie stornieren (dieselbe
- * Regel wie „Undo convert"). Ist die Rechnung schon storniert, wird sie nicht ein zweites Mal angefasst.
+ * Alle Sperren gelten für JEDE Kommission und stehen vor dem ersten Schreiben. Eine fremde Retoure an der
+ * Rechnung (nicht die einer Kommission dieses Verkaufs) sperrt — erst sie stornieren (dieselbe Regel wie „Undo
+ * convert"). Ist die Rechnung schon storniert, wird sie nicht ein zweites Mal angefasst.
  */
 export function cancelConsignmentSaleInHouse(
   id: string, actor: ConsignmentActor, branchId: string, expectedRevision?: number,
+  consignorRefunds?: Readonly<Record<string, unknown>>,
 ): ConsignmentSaleCancelled {
   assertBooks();
   const con = liveConsignment(id, branchId, expectedRevision);
   const block = cancelSaleBlocker(con.status, con.invoice_id);
   if (block) throw nein(block.code, block.message);
-  const consignmentNumber = String(con.consignment_number ?? '');
-  const productId = String(con.product_id ?? '');
   const invoiceId = String(con.invoice_id ?? '');
   const inv = invoiceId ? query('SELECT id, status FROM invoices WHERE id = ? AND branch_id = ?', [invoiceId, branchId])[0] : undefined;
   if (invoiceId && !inv) throw nein('INVOICE_NOT_FOUND', 'the invoice of this sale is not in this branch');
+  const gruppe = saleGroupOf(con, branchId);
+  for (const k of gruppe) {
+    const b = cancelSaleBlocker(k.status, k.invoice_id);
+    if (b) throw nein(b.code, `${String(k.consignment_number ?? '')}: ${b.message}`);
+  }
+  // D3 — die Wahl je Kommission (nur für schon bezahlte Einlieferer nötig, aber nie eine ungültige).
+  const wahlen = new Map<string, ConsignorRefundChoice>();
+  for (const [kid, roh] of Object.entries(consignorRefunds ?? {})) {
+    const w = consignorRefundOf(roh);
+    if (!w) throw nein(CONSIGNOR_REFUND_INVALID, 'the consignor refund is "received" with cash, bank or benefit — or "pending"');
+    if (!gruppe.some((k) => String(k.id) === kid)) throw nein(CONSIGNOR_REFUND_INVALID, 'a consignor refund names a consignment that is not part of this sale');
+    wahlen.set(kid, w);
+  }
   // Eine schon stornierte Rechnung (z. B. über „Cancel Invoice") ist umgekehrt — ihre Retouren und
   // Gutschriften gehören zu jenem Storno und bleiben, wie sie sind.
   const invoiceLive = !!inv && String(inv.status ?? '') !== 'CANCELLED';
-  const marker = postSaleReturnMarker(consignmentNumber);
   const retouren = invoiceLive
     ? query(`SELECT id, notes FROM sales_returns WHERE invoice_id = ? AND status != 'REJECTED' ORDER BY created_at ASC, id ASC`, [invoiceId])
     : [];
-  const eigene = retouren.filter((r) => String(r.notes ?? '').includes(marker)).map((r) => String(r.id));
-  if (eigene.length !== retouren.length) {
+  const teile = gruppe.map((k) => {
+    const kid = String(k.id);
+    const nr = String(k.consignment_number ?? '');
+    const pid = String(k.product_id ?? '');
+    const marker = postSaleReturnMarker(nr);
+    const eigene = retouren.filter((r) => String(r.notes ?? '').includes(marker)).map((r) => String(r.id));
+    const purchases = zumVerkauf(String(k.invoice_id ?? ''), consignorPurchases(kid, nr, pid, branchId));
+    const losses = consignorLosses(kid, branchId);
+    const lagen = pruefeEinlieferer(k, purchases, losses, wahlen.get(kid));
+    return { k, kid, nr, pid, eigene, purchases, losses, lagen };
+  });
+  if (teile.reduce((s, t) => s + t.eigene.length, 0) !== retouren.length) {
     throw nein('CONSIGNMENT_INVOICE_HAS_RETURNS',
       'the invoice of this sale has a return that is not the consignment\'s own — cancel that return first');
   }
-  const purchases = consignorPurchases(id, consignmentNumber, productId, branchId);
-  const losses = consignorLosses(id, branchId);
   const db = getDatabase();
   const now = new Date().toISOString();
-  const vorher = {
-    status: String(con.status ?? ''), invoiceId, salePrice: con.sale_price ?? null,
-    payoutAmount: con.payout_amount ?? null, payoutPaidAmount: Number(con.payout_paid_amount ?? 0),
-    payoutStatus: String(con.payout_status ?? ''),
-  };
 
-  // 1. Die eigene Rückgabe nach dem Verkauf — über den Retourenstorno des Hauses: Warenfolge, Steuer,
+  // 1. Die eigenen Rückgaben nach dem Verkauf — über den Retourenstorno des Hauses: Warenfolge, Steuer,
   //    Wareneinsatz, Gutschrift (CANCELLED, bleibt mit Nummer stehen), unbenutztes Guthaben, Retoure
   //    REJECTED. Seine Sperren gelten auch hier (ausgezahlte Erstattung, verbrauchtes Guthaben, Owner).
-  for (const returnId of eigene) {
-    cancelReturnInHouse(returnId, `Consignment sale cancelled (${consignmentNumber})`, actor, branchId, undefined,
-      { viaConsignmentCancelSale: id });
+  for (const t of teile) {
+    for (const returnId of t.eigene) {
+      cancelReturnInHouse(returnId, `Consignment sale cancelled (${t.nr})`, actor, branchId, undefined,
+        { viaConsignmentCancelSale: t.kid });
+    }
   }
 
   // 2. Die Käuferrechnung — über die Grundlage, nicht mehr direkt über `updateInvoice`. Keine offene
@@ -377,49 +581,78 @@ export function cancelConsignmentSaleInHouse(
     invoiceReversed = true;
   }
 
-  // 3. Die Seite des Einlieferers: Auto-Einkauf (Zahlungen und Einkauf strikt zurückgebucht, Lose
-  //    storniert), Verlust-Ausgabe, und Auszahlungen ohne Rechnung (M-22) — strikt: der Zähler bricht
-  //    ab, wenn darin eine Umkehrbuchung scheiterte (die Hilfe fängt sie je Quelle ab).
-  for (const purchaseId of purchases) cancelPurchaseInHouse(purchaseId, branchId);
-  for (const expenseId of losses) cancelConsignorLoss(expenseId);
-  const auszahlungen = watchLedgerPosts('consignor payout reversal');
-  const reversedPayouts = reverseConsignmentPayouts(id, now);
-  auszahlungen();
+  // 3.–5. Je Kommission: die Seite des Einlieferers (Auto-Einkauf — unbezahlt storniert, bezahlt über die
+  //    Lieferanten-Retoure nach der Wahl des Owners —, Verlust-Ausgabe, Auszahlungen ohne Rechnung, M-22: strikt,
+  //    der Zähler bricht ab, wenn darin eine Umkehrbuchung scheiterte), der Artikel, die Kommission, das Protokoll.
+  const erstattet: ConsignorRefundBooked[] = [];
+  let cancelledPurchases = 0;
+  let cancelledLossExpenses = 0;
+  let reversedPayouts = 0;
+  let cancelledReturns = 0;
+  for (const t of teile) {
+    const vorher = {
+      status: String(t.k.status ?? ''), invoiceId, salePrice: t.k.sale_price ?? null,
+      payoutAmount: t.k.payout_amount ?? null, payoutPaidAmount: Number(t.k.payout_paid_amount ?? 0),
+      payoutStatus: String(t.k.payout_status ?? ''),
+    };
+    const eigeneErstattungen: ConsignorRefundBooked[] = [];
+    let einkaeufe = 0;
+    for (const lage of t.lagen) {
+      const r = einkaufZurueck(t.k, lage, wahlen.get(t.kid), branchId, now);
+      if (r) eigeneErstattungen.push(r); else einkaeufe++;
+    }
+    for (const expenseId of t.losses) cancelConsignorLoss(expenseId);
+    const auszahlungen = watchLedgerPosts('consignor payout reversal');
+    const umgekehrt = reverseConsignmentPayouts(t.kid, now);
+    auszahlungen();
 
-  // 4. Der Artikel zurück in den Kommissionsbestand. `quantity` defensiv auf 1, wenn ≤ 0: der Altweg
-  //    (markSold ohne Rechnung) zählte herunter und kennt kein Los, das zurückkäme.
-  db.run(
-    `UPDATE products SET stock_status = 'consignment', source_type = 'CONSIGNMENT', quantity = CASE WHEN quantity <= 0 THEN 1 ELSE quantity END, updated_at = ? WHERE id = ?`,
-    [now, productId],
-  );
-  trackUpdate('products', productId, { stockStatus: 'consignment', sourceType: 'CONSIGNMENT', cancelledSale: true });
-  //    …und die Kommission zurück auf „active", Verkaufs- und Auszahlungsfelder leer — auch Methode,
-  //    Datum und Referenz, sonst erschienen sie im nächsten Auszahlungszyklus als alte Daten.
-  db.run(
-    `UPDATE consignments SET
-       status = 'active', sale_price = NULL, buyer_id = NULL, invoice_id = NULL,
-       commission_amount = NULL, payout_amount = NULL, payout_paid_amount = 0, payout_status = 'pending',
-       payout_method = NULL, payout_date = NULL, payout_reference = NULL, sale_method = NULL, updated_at = ?
-     WHERE id = ?`,
-    [now, id],
-  );
-  trackUpdate('consignments', id, { status: 'active', cancelledSale: true });
+    // Der Artikel zurück in den Kommissionsbestand. `quantity` defensiv auf 1, wenn ≤ 0: der Altweg
+    // (markSold ohne Rechnung) zählte herunter und kennt kein Los, das zurückkäme.
+    db.run(
+      `UPDATE products SET stock_status = 'consignment', source_type = 'CONSIGNMENT', quantity = CASE WHEN quantity <= 0 THEN 1 ELSE quantity END, updated_at = ? WHERE id = ?`,
+      [now, t.pid],
+    );
+    trackUpdate('products', t.pid, { stockStatus: 'consignment', sourceType: 'CONSIGNMENT', cancelledSale: true });
+    //    …und die Kommission zurück auf „active", Verkaufs- und Auszahlungsfelder leer — auch Methode,
+    //    Datum und Referenz, sonst erschienen sie im nächsten Auszahlungszyklus als alte Daten.
+    db.run(
+      `UPDATE consignments SET
+         status = 'active', sale_price = NULL, buyer_id = NULL, invoice_id = NULL,
+         commission_amount = NULL, payout_amount = NULL, payout_paid_amount = 0, payout_status = 'pending',
+         payout_method = NULL, payout_date = NULL, payout_reference = NULL, sale_method = NULL, updated_at = ?
+       WHERE id = ?`,
+      [now, t.kid],
+    );
+    trackUpdate('consignments', t.kid, { status: 'active', cancelledSale: true });
 
-  // 5. Protokoll ATOMAR in derselben Transaktion — mit dem Menschen, der storniert hat.
-  const invoiceStatus = invoiceId ? String(query('SELECT status FROM invoices WHERE id = ?', [invoiceId])[0]?.status ?? '') : '';
-  logAuditOrThrow({
-    module: 'Commission', entityType: 'consignments', entityId: id, action: 'STATUS_CHANGE', field: 'cancel_sale',
-    oldValue: vorher,
-    newValue: {
-      status: 'active', invoiceId: invoiceId || null, invoiceStatus: invoiceStatus || null, invoiceReversed,
-      cancelledReturns: eigene.length, cancelledPurchases: purchases.length, cancelledLossExpenses: losses.length,
-      reversedPayouts,
-    },
-    actor: { userId: actor.userId, branchId },
-  });
-  eventBus.emit('consignment.sale_cancelled', 'consignment', id, { previousInvoiceId: invoiceId || undefined });
+    // Protokoll ATOMAR in derselben Transaktion — mit dem Menschen, der storniert hat.
+    const invoiceStatus = invoiceId ? String(query('SELECT status FROM invoices WHERE id = ?', [invoiceId])[0]?.status ?? '') : '';
+    logAuditOrThrow({
+      module: 'Commission', entityType: 'consignments', entityId: t.kid, action: 'STATUS_CHANGE', field: 'cancel_sale',
+      oldValue: vorher,
+      newValue: {
+        status: 'active', invoiceId: invoiceId || null, invoiceStatus: invoiceStatus || null, invoiceReversed,
+        cancelledReturns: t.eigene.length, cancelledPurchases: einkaeufe, cancelledLossExpenses: t.losses.length,
+        reversedPayouts: umgekehrt,
+        ...(gruppe.length > 1 ? { saleConsignments: teile.map((x) => x.nr) } : {}),
+        ...(eigeneErstattungen.length > 0 ? {
+          consignorRefunds: eigeneErstattungen.map((r) => ({
+            purchaseNumber: r.purchaseNumber, mode: r.mode, method: r.method, returnNumber: r.returnNumber, amount: r.refundAmount,
+          })),
+        } : {}),
+      },
+      actor: { userId: actor.userId, branchId },
+    });
+    eventBus.emit('consignment.sale_cancelled', 'consignment', t.kid, { previousInvoiceId: invoiceId || undefined });
+    erstattet.push(...eigeneErstattungen);
+    cancelledPurchases += einkaeufe;
+    cancelledLossExpenses += t.losses.length;
+    reversedPayouts += umgekehrt;
+    cancelledReturns += t.eigene.length;
+  }
   return {
-    consignmentId: id, status: 'active', invoiceId, invoiceReversed, cancelledReturns: eigene.length,
-    cancelledPurchases: purchases.length, cancelledLossExpenses: losses.length, reversedPayouts,
+    consignmentId: id, status: 'active', invoiceId, invoiceReversed, cancelledReturns,
+    cancelledPurchases, cancelledLossExpenses, reversedPayouts,
+    consignmentIds: teile.map((t) => t.kid), consignorRefunds: erstattet,
   };
 }

@@ -3,8 +3,9 @@
 // überhaupt Kommissionsware? EINE Stelle für Verkauf, Rückgabe und Storno.
 //
 // Autoritative Zuordnung (bewiesen, nicht angenommen):
-//   • `consignments.invoice_id` schreibt NUR „Record Sale" (`consignmentStore.recordSale`) — immer mit
-//     einer FRISCH angelegten Rechnung, die genau EINE Zeile für den Artikel der Kommission trägt — und
+//   • `consignments.invoice_id` schreibt NUR „Record Sale" (`consignmentStore.recordSales`) — immer mit
+//     einer FRISCH angelegten Rechnung, die für JEDEN verkauften Artikel genau EINE Zeile trägt (ein Verkauf
+//     = eine Kommission, ein gemeinsamer Verkauf = mehrere Kommissionen auf derselben Rechnung) — und
 //     NUR „Cancel Sale" setzt sie wieder auf NULL. Keine Maske, kein Fernbefehl, keine Bearbeitung
 //     (`updateConsignment` wird nie mit `invoiceId` gerufen außer von „Record Sale").
 //   • Also gehört zu (Rechnung, Artikel) höchstens EINE Kommission. Das wird hier trotzdem gezählt:
@@ -105,17 +106,17 @@ export function saleConsignmentOfLine(invoiceLineId: string, branchId: string): 
 
 // ── Die Erlaubnis von „Record Sale" ──────────────────────────────────────────
 // „Record Sale" legt seine Rechnung über denselben Rechnungsweg an wie jede andere Rechnung. Nur für
-// GENAU diesen Artikel und nur während dieses Aufrufs ist Kommissionsware dort erlaubt (synchron;
-// danach in jedem Fall wieder zu).
-let permittedProduct: string | null = null;
+// GENAU diese Artikel (die Kommissionen dieses Verkaufs) und nur während dieses Aufrufs ist Kommissionsware
+// dort erlaubt (synchron; danach in jedem Fall wieder zu).
+let permittedProducts: ReadonlySet<string> = new Set();
 
-export function withConsignmentSalePermit<T>(productId: string, fn: () => T): T {
-  const before = permittedProduct;
-  permittedProduct = productId;
+export function withConsignmentSalePermit<T>(productIds: string | readonly string[], fn: () => T): T {
+  const before = permittedProducts;
+  permittedProducts = new Set(typeof productIds === 'string' ? [productIds] : productIds);
   try {
     return fn();
   } finally {
-    permittedProduct = before;
+    permittedProducts = before;
   }
 }
 
@@ -129,22 +130,29 @@ export const CONSIGNMENT_INVOICE_LOCKED = 'CONSIGNMENT_INVOICE_LOCKED';
 
 export interface BoundSaleConsignment { id: string; number: string; productId: string; buyerId: string }
 
-/** Die Kommission, deren Verkaufsrechnung diese Rechnung ist (`consignments.invoice_id`) — oder null. */
-export function boundSaleConsignment(invoiceId: string): BoundSaleConsignment | null {
-  const r = query(
-    'SELECT id, consignment_number, product_id, buyer_id FROM consignments WHERE invoice_id = ? ORDER BY id LIMIT 1',
+/**
+ * ALLE Kommissionen, deren Verkaufsrechnung diese Rechnung ist (`consignments.invoice_id`) — bei einem
+ * gemeinsamen Verkauf mehrere, sonst eine oder keine. Wer eine Zeile prüft, prüft sie gegen jede davon.
+ */
+export function boundSaleConsignments(invoiceId: string): BoundSaleConsignment[] {
+  return query(
+    'SELECT id, consignment_number, product_id, buyer_id FROM consignments WHERE invoice_id = ? ORDER BY consignment_number, id',
     [invoiceId],
-  )[0];
-  return r ? { id: String(r.id), number: String(r.consignment_number ?? ''), productId: String(r.product_id ?? ''), buyerId: String(r.buyer_id ?? '') } : null;
+  ).map((r) => ({ id: String(r.id), number: String(r.consignment_number ?? ''), productId: String(r.product_id ?? ''), buyerId: String(r.buyer_id ?? '') }));
 }
 
-const gesperrt = (c: BoundSaleConsignment, was: string): InvoiceActionRejected => new InvoiceActionRejected(CONSIGNMENT_INVOICE_LOCKED,
-  `This invoice is the sale of consignment ${c.number || c.id}. ${was} Use "Cancel Sale" on the consignment (and record the sale again if needed). Nothing was changed.`);
+/** Die (erste) Kommission, deren Verkaufsrechnung diese Rechnung ist — oder null. Für Sperren, die nur „gebunden?" fragen. */
+export function boundSaleConsignment(invoiceId: string): BoundSaleConsignment | null {
+  return boundSaleConsignments(invoiceId)[0] ?? null;
+}
+
+const gesperrt = (alle: readonly BoundSaleConsignment[], was: string): InvoiceActionRejected => new InvoiceActionRejected(CONSIGNMENT_INVOICE_LOCKED,
+  `This invoice is the sale of ${alle.length > 1 ? 'consignments' : 'consignment'} ${alle.map((c) => c.number || c.id).join(', ')}. ${was} Use "Cancel Sale" on the consignment (and record the sale again if needed). Nothing was changed.`);
 
 /** Löschen / Stornieren der Verkaufsrechnung einer Kommission: nur über „Cancel Sale". */
 export function assertNotConsignmentSaleInvoice(invoiceId: string, was: string): void {
-  const c = boundSaleConsignment(invoiceId);
-  if (c) throw gesperrt(c, was);
+  const alle = boundSaleConsignments(invoiceId);
+  if (alle.length > 0) throw gesperrt(alle, was);
 }
 
 const gleich = (a: number, b: number): boolean => Math.abs((Number(a) || 0) - (Number(b) || 0)) < 0.0005;
@@ -163,8 +171,8 @@ export function assertConsignmentSaleInvoiceEdit(
   // Verschöbe nur die Rechnung, lägen Verkauf und Einkauf an anderen Tagen (bis in eine andere VAT-Periode).
   dateChanged = false,
 ): void {
-  const c = boundSaleConsignment(invoiceId);
-  if (!c) return;
+  const c = boundSaleConsignments(invoiceId);
+  if (c.length === 0) return;
   if (customerChanged) throw gesperrt(c, 'Its buyer belongs to the consignment.');
   if (dateChanged) throw gesperrt(c, 'Its date is the date of the consignment sale (and of the consignor\'s purchase).');
   if (next.length !== base.length || lineMatch.some((m) => m === null)) {
@@ -183,7 +191,7 @@ export function assertConsignmentSaleInvoiceEdit(
 /** Wirft, wenn eine dieser Zeilen Kommissionsware am Kommissionsverkauf vorbei verkaufen würde. */
 export function assertNoConsignmentGoods(lines: ReadonlyArray<{ productId?: string | null }>): void {
   for (const l of lines) {
-    if (!l.productId || l.productId === permittedProduct) continue;
+    if (!l.productId || permittedProducts.has(l.productId)) continue;
     if (isConsignmentGoods(l.productId)) {
       throw new InvoiceActionRejected(CONSIGNMENT_SELL_VIA_CONSIGNMENT,
         'This item is consignment stock — sell it with "Record Sale" on its consignment, not on an ordinary invoice.');

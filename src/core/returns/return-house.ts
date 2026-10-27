@@ -29,9 +29,10 @@ import {
 // CONSIGNMENT-INTEGRITY F6 — „Return to Owner“ / „Keep“ einer verkauften Kommission laufen über DEN einen
 // Kommissionsweg (Wareneinsatz zurück, Einkauf/Verlust beim Einlieferer storniert bzw. Einstand = Auszahlung,
 // Kommission „returned“) — egal ob von der Rechnung oder von der Kommission aus angestoßen.
-import { boundSaleConsignment, saleConsignmentOfLine } from '@/core/consignment/consignment-sale-link';
+import { boundSaleConsignments, saleConsignmentOfLine } from '@/core/consignment/consignment-sale-link';
 import { returnConsignmentAfterSaleInHouse } from '@/core/consignment/consignment-reversal-house';
 import { ConsignmentActionRejected } from '@/core/consignment/consignment-finance';
+import { CONSIGNOR_REFUND_REQUIRED } from '@/core/consignment/consignment-reversal';
 import { ReturnCancelRejected } from './return-cancel-house';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { PurchaseLifecycleRejected } from '@/core/purchases/purchase-lifecycle-house';
@@ -136,8 +137,9 @@ export function createReturnInHouse(
   // Die Verkaufsrechnung einer Kommission: kommt die Ware zurück, gehört sie dem Einlieferer — „Back to Stock",
   // „Under Repair" oder „Write Off" ließen die Kommission verkauft und seinen Einkauf offen. Nur die beiden
   // Kommissions-Warenfolgen (oben, über den Kommissionsweg).
-  const gebunden = internal ? null : boundSaleConsignment(input.invoiceId);
-  if (gebunden && lines.some((l) => l.productId === gebunden.productId)) {
+  // Bei einem gemeinsamen Verkauf gilt das für JEDE Kommission der Rechnung — nicht nur für die erste.
+  const gebunden = internal ? [] : boundSaleConsignments(input.invoiceId);
+  if (lines.some((l) => gebunden.some((g) => l.productId === g.productId))) {
     throw new ReturnActionRejected('CONSIGNMENT_RETURN_VIA_CONSIGNMENT',
       'This item was sold for a consignment — when it comes back, choose "Return to Owner" or "Keep (→ OWN)". Nothing was changed.');
   }
@@ -219,6 +221,11 @@ function viaConsignment(
     return { returnId: out.returnId };
   } catch (e) {
     // Ein fachliches Nein des Kommissionswegs bleibt ein fachliches Nein — am Primary wie fern (`returns.create`).
+    // D3 — die Wahl, was mit einer schon geleisteten Auszahlung geschieht, trifft nur die Kommissionsmaske.
+    if (e instanceof ConsignmentActionRejected && e.code === CONSIGNOR_REFUND_REQUIRED) {
+      throw new ReturnActionRejected(e.code,
+        'The consignor of this item was already paid. Record this return with "Post-Sale Return" on the consignment, where you choose whether the payout came back now or is still to be repaid. Nothing was changed.');
+    }
     if (e instanceof ConsignmentActionRejected || e instanceof ReturnCancelRejected
       || e instanceof InvoiceActionRejected || e instanceof PurchaseLifecycleRejected) {
       throw new ReturnActionRejected(e.code, e.message);
