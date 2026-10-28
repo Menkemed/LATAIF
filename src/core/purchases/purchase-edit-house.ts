@@ -285,7 +285,8 @@ function kontext(purchaseId: string, branchId: string, now: string): Kontext {
   const partnerLines = new Set(query('SELECT DISTINCT purchase_line_id FROM item_participations WHERE purchase_id = ?', [purchaseId])
     .map((r) => String(r.purchase_line_id)));
   const hasReturn = !!query(`SELECT 1 FROM purchase_returns WHERE purchase_id = ? AND status != 'CANCELLED' LIMIT 1`, [purchaseId])[0];
-  const byColumn = !!p.source_consignment_id;
+  // CONSIGNOR-JOINT-PURCHASE — ein gemeinsamer Einkauf beim Einlieferer trägt die Kommission an seinen Zeilen.
+  const byColumn = !!p.source_consignment_id || lines.some((l) => !!l.source_consignment_id);
   const byNote = !byColumn && /^Consignor payout/.test(String(p.notes ?? ''));
   const bulk = lines.some((l) => isBulkMetalProduct(String(l.product_id ?? '')));
   const needsLedger = F(p.total_amount) > 0;
@@ -1209,7 +1210,8 @@ export function voidPurchasePaymentInHouse(
   const reason = typeof reasonRaw === 'string' ? reasonRaw.trim() : '';
   if (!reason) throw nein('PURCHASE_EDIT_REASON_REQUIRED', 'Please enter a reason for voiding this payment.');
   if (String(p.status) === 'CANCELLED') throw nein('PURCHASE_CANCELLED', 'A cancelled purchase is not edited.');
-  if (p.source_consignment_id || /^Consignor payout/.test(String(p.notes ?? ''))) {
+  if (p.source_consignment_id || /^Consignor payout/.test(String(p.notes ?? ''))
+    || query('SELECT 1 FROM purchase_lines WHERE purchase_id = ? AND source_consignment_id IS NOT NULL LIMIT 1', [purchaseId]).length > 0) {
     throw nein('PURCHASE_EDIT_CONSIGNMENT', 'This is the automatic purchase of a consignment sale — correct it through the consignment.');
   }
   const pay = query('SELECT * FROM purchase_payments WHERE id = ? AND purchase_id = ?', [paymentId, purchaseId])[0];

@@ -1203,6 +1203,7 @@
         "product_id",
         "purchase_id",
         "quantity",
+        "source_consignment_id",
         "source_order_line_id",
         "tax_scheme",
         "unit_price",

@@ -344,7 +344,10 @@ function stornoK(weg: Weg, db: Db, cid: string, erstattung?: Record<string, CR>)
     ? primary(() => conHouse.cancelConsignmentSaleOnPrimary(cid, erstattung))
     : fern(() => cl.runCancelSale(deps(db), identity(nx(), OP_C), rules.consignmentCancelSaleBody(cid, rev(db, cid), erstattung)));
 }
-const einkaufVon = (db: Db, cid: string): string => s(db, "SELECT id FROM purchases WHERE source_consignment_id = ? AND status != 'CANCELLED' ORDER BY rowid DESC LIMIT 1", [cid]);
+// CONSIGNOR-JOINT-PURCHASE — der Einkauf einer Kommission: an der Spalte des Einkaufs (allein) oder an seiner Zeile (gemeinsam).
+const einkaufVon = (db: Db, cid: string): string => s(db, `SELECT p.id FROM purchases p WHERE p.status != 'CANCELLED'
+  AND (p.source_consignment_id = ? OR EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.source_consignment_id = ?))
+  ORDER BY p.rowid DESC LIMIT 1`, [cid, cid]);
 function bezahleEinlieferer(db: Db, cid: string, betrag: number, weg = 'cash'): void {
   nimm(db);
   usePurchaseStore.getState().loadPurchases();
@@ -384,17 +387,22 @@ function abgleich(db: Db): string[] {
       && Math.abs(Number(invs[0].gross_amount) - 2700) < 0.001,
     `S1 ${weg}: EINE Rechnung mit zwei Zeilen, Summe 2700 (${S(invs)})`);
     ok(String(invs[0]?.issued_at ?? '').startsWith('2026-09-10'), `S1 ${weg}: D1 Rechnungsdatum = Verkaufstag (${String(invs[0]?.issued_at)})`);
-    const ps = rows(db, 'SELECT source_consignment_id, total_amount, purchase_date, supplier_id FROM purchases ORDER BY total_amount');
-    ok(ps.length === 2 && Math.abs(Number(ps[0].total_amount) - 960) < 0.001 && Math.abs(Number(ps[1].total_amount) - 1200) < 0.001
-      && ps[0].supplier_id === ps[1].supplier_id && ps.every((p) => String(p.purchase_date).startsWith('2026-09-10')),
-    `S1 ${weg}: je Artikel ein Einkauf beim (selben) Einlieferer, getrennt (960 / 1200) (${S(ps)})`);
+    // CONSIGNOR-JOINT-PURCHASE — derselbe Einlieferer: EIN Einkauf mit einer Zeile je Artikel (960 / 1200), jede Zeile
+    // mit ihrer Kommission; der Einkauf selbst nennt keine (er gehört zwei Kommissionen).
+    const ps = rows(db, 'SELECT id, source_consignment_id, total_amount, purchase_date, supplier_id FROM purchases');
+    const pls = rows(db, 'SELECT source_consignment_id, line_total, tax_scheme FROM purchase_lines ORDER BY line_total');
+    ok(ps.length === 1 && Math.abs(Number(ps[0].total_amount) - 2160) < 0.001 && ps[0].source_consignment_id == null
+      && String(ps[0].purchase_date).startsWith('2026-09-10')
+      && pls.length === 2 && pls[0].source_consignment_id === a && Math.abs(Number(pls[0].line_total) - 960) < 0.001
+      && pls[1].source_consignment_id === b && Math.abs(Number(pls[1].line_total) - 1200) < 0.001 && pls.every((l) => l.tax_scheme === 'ZERO'),
+    `S1 ${weg}: derselbe Einlieferer → EIN Einkauf, zwei Zeilen mit ihrer Kommission (960 / 1200), ohne VAT (${S([ps, pls])})`);
     ok(n(db, "SELECT COUNT(*) FROM consignments WHERE status = 'sold' AND invoice_id = ?", [inv]) === 2,
       `S1 ${weg}: beide Kommissionen sold und an DIESER Rechnung`);
     ok(abgleich(db).length === 0, `S1 ${weg}: Hauptbuch ausgeglichen, Lager == Lose, AP == Einkäufe (${abgleich(db).join(' | ') || 'ok'})`);
     // D4 — Payables: keine zweite „Consignor payout"-Zeile neben den Einkäufen.
     const pay = loadPayablesFor(CTX).payables;
-    ok(!pay.some((p) => p.sourceTable === 'consignments') && pay.filter((p) => p.sourceTable === 'purchases').length === 2,
-      `S1 ${weg}: D4 Payables zeigt die zwei Einkäufe, keine doppelte Consignor-Payout-Zeile (${S(pay.map((p) => p.sourceTable))})`);
+    ok(!pay.some((p) => p.sourceTable === 'consignments') && pay.filter((p) => p.sourceTable === 'purchases').length === 1,
+      `S1 ${weg}: D4 Payables zeigt den EINEN Einkauf, keine doppelte Consignor-Payout-Zeile (${S(pay.map((p) => p.sourceTable))})`);
     // Receivables: EINE Forderung je Rechnung.
     const rec = receivablesBreakdown('branch-main');
     ok(rec.length === 1 && Math.abs(rec[0].open - 2700) < 0.001, `S1 ${weg}: Receivables eine Zeile, offen 2700 (${S(rec.map((x) => [x.source, x.open]))})`);
@@ -528,8 +536,9 @@ marker('CONSIGNMENT_MULTI_SALE_TWO_CONSIGNORS_PAYMENTS_PROVED');
   ok(f.fired && !roll.ok && nachher === vorher, `S3 ROLLBACK Fehler beim 2. Artikel → nichts bleibt, keine Rechnung, kein Einkauf, keine Zahlung (${roll.code.slice(0, 60)}; ${nachher === vorher ? 'gleich' : vorher + ' → ' + nachher})`);
   const heil = await verkauf('primary', db2, { items: [{ consignmentId: p1, salePrice: 1200, acknowledgeShortfall: false },
     { consignmentId: p2, salePrice: 1300, acknowledgeShortfall: false }], buyerId: 'cust-2', specialMark: false });
-  ok(heil.ok && n(db2, 'SELECT COUNT(*) FROM invoices') === 1 && n(db2, 'SELECT COUNT(*) FROM purchases') === 2,
-    `S3 danach gelingt derselbe Verkauf genau einmal (${heil.code || 'ok'})`);
+  ok(heil.ok && n(db2, 'SELECT COUNT(*) FROM invoices') === 1 && n(db2, 'SELECT COUNT(*) FROM purchases') === 1
+    && n(db2, 'SELECT COUNT(*) FROM purchase_lines') === 2,
+    `S3 danach gelingt derselbe Verkauf genau einmal (ein Einlieferer → ein Einkauf, zwei Zeilen) (${heil.code || 'ok'})`);
 }
 marker('CONSIGNMENT_MULTI_SALE_GUARDS_IDEMPOTENCY_ROLLBACK_PROVED');
 
@@ -543,16 +552,24 @@ marker('CONSIGNMENT_MULTI_SALE_GUARDS_IDEMPOTENCY_ROLLBACK_PROVED');
       { consignmentId: b, salePrice: 1500, acknowledgeShortfall: false }], buyerId: 'cust-2', specialMark: false,
       payments: [{ amount: 1000, method: 'cash' }] });
     if (!r.ok) { ok(false, `S4 setup ${r.code}`); continue; }
-    const bVor = S([row(db, 'SELECT status, invoice_id, sale_price FROM consignments WHERE id = ?', [b]),
-      row(db, "SELECT status, total_amount, remaining_amount FROM purchases WHERE source_consignment_id = ?", [b])]);
+    const pid = einkaufVon(db, a);
+    const bZeile = (): string => S(row(db, 'SELECT id, line_total, quantity FROM purchase_lines WHERE source_consignment_id = ?', [b]));
+    const bVor = S([row(db, 'SELECT status, invoice_id, sale_price FROM consignments WHERE id = ?', [b]), bZeile()]);
     const ret = await rueckgabeK(weg, db, a, { disposition: 'RETURN_TO_OWNER', refundMethod: 'cash' });
     ok(ret.ok, `S4 ${weg}: Rückgabe EINES Artikels der Sammelrechnung (${ret.code || 'ok'})`);
-    const bNach = S([row(db, 'SELECT status, invoice_id, sale_price FROM consignments WHERE id = ?', [b]),
-      row(db, "SELECT status, total_amount, remaining_amount FROM purchases WHERE source_consignment_id = ?", [b])]);
-    ok(bVor === bNach, `S4 ${weg}: der andere Artikel bleibt unverändert verkauft, sein Einkauf offen (${bNach})`);
-    ok(s(db, 'SELECT status FROM consignments WHERE id = ?', [a]) === 'returned'
-      && s(db, 'SELECT status FROM purchases WHERE source_consignment_id = ?', [a]) === 'CANCELLED',
-    `S4 ${weg}: der zurückgegebene Artikel → returned, sein (unbezahlter) Einkauf storniert`);
+    const bNach = S([row(db, 'SELECT status, invoice_id, sale_price FROM consignments WHERE id = ?', [b]), bZeile()]);
+    ok(bVor === bNach, `S4 ${weg}: der andere Artikel bleibt unverändert verkauft, seine Einkaufszeile bleibt (${bNach})`);
+    // CONSIGNOR-JOINT-PURCHASE — der gemeinsame (unbezahlte) Einkauf bleibt; nur die Zeile von a geht über die Lieferanten-
+    // Retoure zurück: Summe und offener Rest sinken um 960, nichts wird erstattet (es war nichts bezahlt).
+    const pNach = row(db, 'SELECT status, total_amount, remaining_amount, paid_amount FROM purchases WHERE id = ?', [pid]);
+    const pret = rows(db, `SELECT pr.refund_amount, prl.purchase_line_id FROM purchase_returns pr JOIN purchase_return_lines prl ON prl.return_id = pr.id
+      WHERE pr.purchase_id = ? AND pr.status != 'CANCELLED'`, [pid]);
+    ok(s(db, 'SELECT status FROM consignments WHERE id = ?', [a]) === 'returned' && pNach.status !== 'CANCELLED'
+      && Math.abs(Number(pNach.total_amount) - 1200) < 0.001 && Math.abs(Number(pNach.remaining_amount) - 1200) < 0.001
+      && pret.length === 1 && Number(pret[0].refund_amount) === 0
+      && pret[0].purchase_line_id === s(db, 'SELECT id FROM purchase_lines WHERE source_consignment_id = ?', [a])
+      && n(db, 'SELECT COUNT(*) FROM supplier_credits') === 0,
+    `S4 ${weg}: der zurückgegebene Artikel → returned, NUR seine Zeile des gemeinsamen Einkaufs zurück (Summe 1200, keine Erstattung) (${S([pNach, pret])})`);
     const inv = row(db, 'SELECT status, gross_amount, paid_amount FROM invoices');
     // Käufer hatte 1000 von 2700 bezahlt; nach der Retoure von 1200 schuldet er 1500 → keine Barerstattung, offen 500.
     const cn = row(db, 'SELECT cash_refund_amount, receivable_cancel_amount FROM credit_notes');
@@ -604,8 +621,10 @@ marker('CONSIGNMENT_MULTI_SALE_CANCEL_WHOLE_INVOICE_PROVED');
 // ══ §6 — D3: Einlieferer schon bezahlt ════════════════════════════════════════
 async function bezahlteWelt(weg: Weg): Promise<{ db: Db; a: string; b: string }> {
   const db = freshDb();
+  // Zwei Einlieferer: je einer sein eigener Einkauf (der gemeinsame Einkauf DESSELBEN Einlieferers steht in §8).
+  dritterKunde(db);
   const a = await kommission(db, 'cust-1', 'Nautilus');
-  const b = await kommission(db, 'cust-1', 'Aquanaut');
+  const b = await kommission(db, 'cust-3', 'Aquanaut');
   const r = await verkauf(weg, db, { items: [{ consignmentId: a, salePrice: 1200, acknowledgeShortfall: false },
     { consignmentId: b, salePrice: 1500, acknowledgeShortfall: false }], buyerId: 'cust-2', specialMark: false,
     payments: [{ amount: 2700, method: 'cash' }] });
@@ -720,6 +739,152 @@ for (const weg of ['primary', 'fern'] as const) {
   }
 }
 marker('CONSIGNMENT_D3_PAID_CONSIGNOR_PROVED');
+
+// ══ §8 — CONSIGNOR-JOINT-PURCHASE + CONSIGNOR-PURCHASE-VAT: ein Einkauf je Einlieferer, Zeile je Artikel, Steuer getrennt ══
+// Ahmed (cust-1): Rolex 1000 → Auszahlung 800, Omega 500 → 400; Mohammed (cust-3): Cartier 750 → 600 (20 % Provision).
+{
+  const pe = await import('../../src/core/purchases/purchase-edit-house.ts');
+  async function welt3(weg: Weg, extra: Partial<MI> = {}, vat?: { a?: 'ZERO' | 'VAT_10'; b?: 'ZERO' | 'VAT_10' }) {
+    const db = freshDb();
+    dritterKunde(db);
+    const a = await kommission(db, 'cust-1', 'Rolex');
+    const b = await kommission(db, 'cust-1', 'Omega');
+    const c = await kommission(db, 'cust-3', 'Cartier');
+    const r = await verkauf(weg, db, { items: [
+      { consignmentId: a, salePrice: 1000, acknowledgeShortfall: false, ...(vat?.a ? { consignorTaxScheme: vat.a } : {}) },
+      { consignmentId: b, salePrice: 500, acknowledgeShortfall: false, ...(vat?.b ? { consignorTaxScheme: vat.b } : {}) },
+      { consignmentId: c, salePrice: 750, acknowledgeShortfall: false },
+    ], buyerId: 'cust-2', saleDate: '2026-09-12', specialMark: false, ...extra });
+    return { db, a, b, c, r };
+  }
+  const seite = (cid: string) => loadConsignmentsFor(CTX).consignments.find((k) => k.id === cid)?.consignorSide;
+  const ahmed = (db: Db, a: string) => einkaufVon(db, a);
+  const bild: string[] = [];
+  for (const weg of ['primary', 'fern'] as const) {
+    const { db, a, b, c, r } = await welt3(weg);
+    ok(r.ok, `J1 ${weg}: drei Artikel zweier Einlieferer → ein Verkauf (${r.code || 'ok'})`);
+    const ps = rows(db, 'SELECT id, supplier_id, source_consignment_id, total_amount, remaining_amount, status FROM purchases ORDER BY total_amount DESC');
+    const pa = ahmed(db, a);
+    ok(n(db, 'SELECT COUNT(*) FROM invoices') === 1 && n(db, 'SELECT COUNT(*) FROM invoice_lines') === 3 && ps.length === 2
+      && pa === einkaufVon(db, b) && pa !== einkaufVon(db, c)
+      && Math.abs(Number(ps[0].total_amount) - 1200) < 0.001 && ps[0].source_consignment_id == null
+      && Math.abs(Number(ps[1].total_amount) - 600) < 0.001 && ps[1].source_consignment_id === c,
+    `J1 ${weg}: EINE Rechnung (3 Zeilen); Ahmed EIN Einkauf 1200 (2 Zeilen), Mohammed eigener Einkauf 600 (${S(ps)})`);
+    ok(S(rows(db, 'SELECT source_consignment_id AS k, line_total AS v FROM purchase_lines WHERE purchase_id = ? ORDER BY position', [pa]).map((x) => [x.k, Number(x.v)]))
+      === S([[a, 800], [b, 400]]), `J1 ${weg}: jede Zeile trägt ihre Kommission und ihre Auszahlung (800 / 400)`);
+    ok(n(db, 'SELECT COUNT(*) FROM purchase_payments') === 0 && n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'PURCHASE_PAYMENT'") === 0,
+      `J1 ${weg}: Record Sale zahlt den Einlieferer NICHT aus (keine Einkaufszahlung)`);
+    const sa = seite(a), sb = seite(b), sc = seite(c);
+    ok(sa?.open === 800 && sb?.open === 400 && sc?.open === 600 && sa?.paid === 0 && sb?.paid === 0,
+      `J1 ${weg}: Einlieferer-Seite je Artikel offen 800 / 400 / 600 (${S([sa, sb, sc].map((x) => x?.open))})`);
+    ok(abgleich(db).length === 0, `J1 ${weg}: Abgleich (${abgleich(db).join(' | ') || 'ok'})`);
+    bild.push(S({ ps: all(db, 'SELECT total_amount, status FROM purchases ORDER BY total_amount'),
+      pl: all(db, 'SELECT line_total, tax_scheme FROM purchase_lines ORDER BY line_total'), konten: konten(db) }));
+  }
+  ok(bild[0] === bild[1], 'J1 PARITY Primary == PC2 (Einkäufe, Zeilen, Konten)');
+
+  // J2/J3 — Teilzahlung des gemeinsamen Einkaufs; Rückgabe EINES Artikels: die Zeile mindert zuerst den offenen Rest.
+  for (const weg of ['primary', 'fern'] as const) {
+    const { db, a, b } = await welt3('primary');
+    bezahleEinlieferer(db, a, 1000, 'bank');
+    const sa = seite(a), sb = seite(b);
+    ok(sa?.paid === 800 && sa?.open === 0 && sb?.paid === 200 && sb?.open === 200 && sa?.returnRefund === 600 && sb?.returnRefund === 200,
+      `J2 ${weg}: 1000 auf Ahmeds Einkauf → Anzeige je Artikel der Reihe nach (800/0, 200/200), bei Rückgabe käme 600 bzw. 200 zurück (${S([sa, sb])})`);
+    const pa = ahmed(db, a);
+    const vor = S([lc(db), all(db, 'SELECT status FROM consignments ORDER BY id'), all(db, 'SELECT total_amount, paid_amount FROM purchases ORDER BY id')]);
+    const ohne = await rueckgabeK(weg, db, a, { disposition: 'RETURN_TO_OWNER', refundMethod: 'cash' });
+    ok(!ohne.ok && ohne.code === 'CONSIGNOR_REFUND_REQUIRED'
+      && S([lc(db), all(db, 'SELECT status FROM consignments ORDER BY id'), all(db, 'SELECT total_amount, paid_amount FROM purchases ORDER BY id')]) === vor,
+      `J3 ${weg}: Rückgabe ohne Wahl, obwohl 600 zurückkämen → abgewiesen, nichts verändert (${ohne.code})`);
+    const mit = await rueckgabeK(weg, db, a, { disposition: 'RETURN_TO_OWNER', refundMethod: 'cash', consignorRefund: { mode: 'pending' } });
+    const p = row(db, 'SELECT status, total_amount, paid_amount, remaining_amount FROM purchases WHERE id = ?', [pa]);
+    const scr = row(db, 'SELECT amount, status FROM supplier_credits');
+    ok(mit.ok && p.status === 'PAID' && Number(p.total_amount) === 400 && Number(p.paid_amount) === 400 && Number(p.remaining_amount) === 0
+      && Math.abs(Number(scr.amount) - 600) < 0.005 && scr.status === 'OPEN',
+      `J3 ${weg}: „pending" → nur Rolex-Zeile zurück; Einkauf jetzt 400 und bezahlt; offene Rückforderung 600 (${mit.code || 'ok'} ${S([p, scr])})`);
+    const sa2 = seite(a), sb2 = seite(b);
+    ok(sb2?.paid === 400 && sb2?.open === 0 && s(db, 'SELECT status FROM consignments WHERE id = ?', [b]) === 'sold'
+      && sa2?.refunds.length === 1 && sa2.refunds[0].mode === 'pending' && sa2.refundOpen === 600,
+      `J3 ${weg}: Omega bleibt verkauft und ist jetzt voll bezahlt; Rolex zeigt die offene Rückforderung 600 (${S([sa2?.refundOpen, sb2])})`);
+    ok(abgleich(db).length === 0, `J3 ${weg}: Abgleich (${abgleich(db).join(' | ') || 'ok'})`);
+    // Die zweite Rückgabe desselben Einkaufs (Omega) geht ebenfalls — ihre Zeile ist noch nicht zurück.
+    const zwei = await rueckgabeK(weg, db, b, { disposition: 'RETURN_TO_OWNER', refundMethod: 'cash', consignorRefund: { mode: 'received', method: 'cash' } });
+    const p2 = row(db, 'SELECT total_amount, paid_amount, remaining_amount FROM purchases WHERE id = ?', [pa]);
+    ok(zwei.ok && Number(p2.total_amount) === 0 && Number(p2.paid_amount) === 0 && n(db, "SELECT COUNT(*) FROM purchase_returns WHERE status != 'CANCELLED'") === 2,
+      `J3 ${weg}: danach auch Omega zurück (400 bar zurück) — zwei Zeilen-Retouren, Einkauf 0 (${zwei.code || 'ok'} ${S(p2)})`);
+    const nochmal = await rueckgabeK(weg, db, b, { disposition: 'RETURN_TO_OWNER', refundMethod: 'cash', consignorRefund: { mode: 'pending' } });
+    ok(!nochmal.ok, `J3 ${weg}: ein drittes Mal → abgewiesen (${nochmal.code})`);
+    ok(abgleich(db).length === 0, `J3 ${weg}: Abgleich nach zwei Zeilen-Retouren (${abgleich(db).join(' | ') || 'ok'})`);
+  }
+
+  // J4 — Cancel Sale: der gemeinsame Einkauf wird EINMAL zurückgenommen (unbezahlt: storniert; bezahlt: eine Retoure).
+  for (const weg of ['primary', 'fern'] as const) {
+    {
+      const { db, a, b, c } = await welt3('primary');
+      const st = await stornoK(weg, db, b);
+      ok(st.ok && n(db, "SELECT COUNT(*) FROM purchases WHERE status = 'CANCELLED'") === 2 && n(db, 'SELECT COUNT(*) FROM purchase_returns') === 0
+        && [a, b, c].every((k) => s(db, 'SELECT status FROM consignments WHERE id = ?', [k]) === 'active') && abgleich(db).length === 0,
+      `J4 ${weg}: Cancel Sale unbezahlt → beide Einkäufe storniert (Ahmeds gemeinsamer genau einmal), alle aktiv (${st.code || 'ok'})`);
+    }
+    {
+      const { db, a, b } = await welt3('primary');
+      bezahleEinlieferer(db, a, 1200, 'bank');
+      const ohne = await stornoK(weg, db, a);
+      ok(!ohne.ok && ohne.code === 'CONSIGNOR_REFUND_REQUIRED', `J4 ${weg}: bezahlt, ohne Wahl → abgewiesen (${ohne.code})`);
+      const bank = kasse(db, 'BANK');
+      const st = await stornoK(weg, db, a, { [b]: { mode: 'received', method: 'bank' } });
+      const prs = rows(db, "SELECT refund_method, refund_amount FROM purchase_returns WHERE status != 'CANCELLED'");
+      ok(st.ok && prs.length === 1 && prs[0].refund_method === 'bank' && Math.abs(Number(prs[0].refund_amount) - 1200) < 0.005
+        && Math.abs(kasse(db, 'BANK') - bank - 1200) < 0.005 && abgleich(db).length === 0,
+      `J4 ${weg}: bezahlt (1200) → EINE Lieferanten-Retoure des gemeinsamen Einkaufs, 1200 per Bank zurück — keine doppelte (${st.code || 'ok'} ${S(prs)})`);
+    }
+  }
+
+  // J5 — CONSIGNOR-PURCHASE-VAT: getrennt von der Rechnung; VAT 10 % nur auf ausdrückliche Wahl, je Einlieferer eine.
+  {
+    const { db, a, c, r } = await welt3('fern', {}, { a: 'VAT_10', b: 'VAT_10' });
+    const pl = rows(db, 'SELECT tax_scheme, vat_amount, line_total FROM purchase_lines WHERE purchase_id = ? ORDER BY position', [einkaufVon(db, a)]);
+    const il = rows(db, 'SELECT tax_scheme FROM invoice_lines');
+    ok(r.ok && pl.every((l) => l.tax_scheme === 'VAT_10') && Math.abs(Number(pl[0].vat_amount) - 72.727) < 0.002 && Math.abs(Number(pl[1].vat_amount) - 36.364) < 0.002
+      && Number(pl[0].line_total) === 800 && n(db, 'SELECT total_amount FROM purchases WHERE id = ?', [einkaufVon(db, a)]) === 1200
+      && il.every((l) => l.tax_scheme === 'MARGIN') && rows(db, 'SELECT tax_scheme FROM purchase_lines WHERE purchase_id = ?', [einkaufVon(db, c)]).every((l) => l.tax_scheme === 'ZERO'),
+    `J5 Ahmed mit Steuerrechnung → seine Einkaufszeilen VAT 10 % (Vorsteuer 72.727 / 36.364, Auszahlung bleibt 1200 brutto); Rechnung unverändert Margin; Mohammed ohne VAT (${r.code || 'ok'})`);
+    ok(abgleich(db).length === 0 && Math.abs((konten(db).VAT_INPUT ?? 0) - 109.091) < 0.002, `J5 Abgleich; Vorsteuer 109.091 (${S(konten(db))})`);
+    const gemischt = await welt3('fern', {}, { a: 'VAT_10', b: 'ZERO' });
+    ok(!gemischt.r.ok && n(gemischt.db, 'SELECT COUNT(*) FROM invoices') === 0 && n(gemischt.db, 'SELECT COUNT(*) FROM purchases') === 0,
+      `J5 Ahmed einmal mit, einmal ohne VAT → abgewiesen, nichts gebucht (${gemischt.r.code.slice(0, 80)})`);
+    const db3 = freshDb();
+    const k = await kommission(db3, 'cust-1', 'Rolex');
+    nimm(db3);
+    const falsch = await fern(() => life.runRecordSale(deps(db3), identity(nx(), OP_S), {
+      items: [{ consignmentId: k, expectedRevision: rev(db3, k), salePrice: 1000, acknowledgeShortfall: false, consignorTaxScheme: 'MARGIN' }],
+      buyerId: 'cust-2', specialMark: false,
+    }));
+    ok(!falsch.ok && n(db3, 'SELECT COUNT(*) FROM invoices') === 0, `J5 Einkaufs-VAT „MARGIN" (gibt es beim Einkauf nicht) → abgewiesen (${falsch.code})`);
+  }
+
+  // J6 — Wiederholung (verlorene Antwort) und Sperre am Einkauf.
+  {
+    const db = freshDb();
+    dritterKunde(db);
+    const a = await kommission(db, 'cust-1', 'Rolex');
+    const b = await kommission(db, 'cust-1', 'Omega');
+    const input: MI = { items: [{ consignmentId: a, salePrice: 1000, acknowledgeShortfall: false }, { consignmentId: b, salePrice: 500, acknowledgeShortfall: false }],
+      buyerId: 'cust-2', specialMark: false };
+    const x = nx();
+    const revs = { [a]: rev(db, a), [b]: rev(db, b) };
+    nimm(db);
+    const r1 = await fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(input, revs)));
+    const r2 = await fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(input, revs)));
+    ok(r1.ok && r2.ok && r2.replayed && n(db, 'SELECT COUNT(*) FROM purchases') === 1 && n(db, 'SELECT COUNT(*) FROM purchase_lines') === 2,
+      `J6 derselbe Auftrag zweimal → ein Einkauf mit zwei Zeilen, Wiederholung = Replay (${r1.code || 'ok'}/${r2.code || 'ok'})`);
+    bezahleEinlieferer(db, a, 300, 'cash');
+    const pay = s(db, 'SELECT id FROM purchase_payments');
+    const sperre = wirft(() => imHaus(() => pe.voidPurchasePaymentInHouse(einkaufVon(db, a), pay, 'test', { branchId: 'branch-main', userId: 'user-test', now: NOW })));
+    ok(sperre === 'PURCHASE_EDIT_CONSIGNMENT', `J6 der gemeinsame Einkauf ist ein Kommissions-Einkauf: Zahlung stornieren dort gesperrt (${sperre})`);
+  }
+}
+marker('CONSIGNOR_JOINT_PURCHASE_PROVED');
 
 // ══ §7 — Quelltext: der Einzelverkauf IST der gemeinsame; keine zweite Zahlungslogik ══
 {

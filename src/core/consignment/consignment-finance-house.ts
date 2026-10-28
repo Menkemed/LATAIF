@@ -18,7 +18,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import {
-  ACCEPTED_PAYOUT_METHODS, ConsignmentActionRejected, MAX_SALE_ITEMS, payoutOpenAmount,
+  ACCEPTED_PAYOUT_METHODS, ConsignmentActionRejected, MAX_SALE_ITEMS, isConsignmentSaleTaxScheme, isConsignorPurchaseTaxScheme, payoutOpenAmount,
   type ConsignmentMultiSaleInput, type ConsignmentPayoutInput, type ConsignmentSaleInput,
 } from './consignment-finance';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
@@ -97,6 +97,12 @@ export function recordConsignmentSalesInHouse(
   const ids = new Set<string>();
   for (const it of input.items) {
     if (!Number.isFinite(it.salePrice) || it.salePrice <= 0) nein('INVALID_AMOUNT', 'the sale price must be a positive number');
+    if (it.taxScheme !== undefined && !isConsignmentSaleTaxScheme(it.taxScheme)) {
+      nein('INVALID_TAX_SCHEME', `unknown tax scheme: ${String(it.taxScheme)} — Margin scheme, VAT 10 % or Zero-rated`);
+    }
+    if (it.consignorTaxScheme !== undefined && !isConsignorPurchaseTaxScheme(it.consignorTaxScheme)) {
+      nein('INVALID_TAX_SCHEME', `unknown VAT for the consignor's purchase: ${String(it.consignorTaxScheme)} — no VAT or VAT 10 %`);
+    }
     if (ids.has(it.consignmentId)) nein('DUPLICATE_ITEM', 'the same consignment is selected twice — each item is sold once');
     ids.add(it.consignmentId);
   }
@@ -138,7 +144,11 @@ export function recordConsignmentSalesInHouse(
   let out: ConsignmentsSold | undefined;
   try {
     out = useConsignmentStore.getState().recordSales({
-      items: input.items.map((it) => ({ consignmentId: it.consignmentId, salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall })),
+      items: input.items.map((it) => ({
+        consignmentId: it.consignmentId, salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall,
+        ...(it.taxScheme ? { taxScheme: it.taxScheme } : {}),
+        ...(it.consignorTaxScheme ? { consignorTaxScheme: it.consignorTaxScheme } : {}),
+      })),
       buyerId: input.buyerId,
       saleDate: input.saleDate,
       notes: input.notes,

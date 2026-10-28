@@ -21,7 +21,7 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useSharedWrites, fehlertext, nichtAmClient } from '@/core/data/shared-write';
 import { computeConsignmentSale, commissionLineLabel } from '@/core/consignment/economics';
-import { consignmentSalesBody, MAX_SALE_ITEMS, type ConsignmentMultiSaleInput } from '@/core/consignment/consignment-finance';
+import { consignmentSalesBody, MAX_SALE_ITEMS, type ConsignmentMultiSaleInput, type ConsignorPurchaseTaxScheme } from '@/core/consignment/consignment-finance';
 import { recordConsignmentSalesOnPrimary } from '@/core/consignment/consignment-finance-house';
 import { invoiceCreatePaymentsBody, MAX_CREATE_PAYMENTS, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
 import { CARD_BRAND_OPTIONS, cardFeeConfigured, computeCardFee, type CardBrand } from '@/core/finance/card-fees';
@@ -65,6 +65,11 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
 
   const [prices, setPrices] = useState<Record<string, string>>({});
   const [acks, setAcks] = useState<Record<string, boolean>>({});
+  // CONSIGNMENT-SALE-TAX — die Steuerart je Artikel; vorbelegt mit der des Artikels (sonst Margin), frei wählbar.
+  const [schemes, setSchemes] = useState<Record<string, TaxScheme>>({});
+  // CONSIGNOR-PURCHASE-VAT — je Einlieferer (EIN Einkauf) die Steuer seines Einkaufs, GETRENNT von der Rechnung:
+  // ohne VAT ist die Vorgabe; VAT 10 % nur, wenn er steuerpflichtig liefert und eine gültige Steuerrechnung stellt.
+  const [consignorVat, setConsignorVat] = useState<Record<string, ConsignorPurchaseTaxScheme>>({});
   const [buyerId, setBuyerId] = useState('');
   const [saleDate, setSaleDate] = useState(today());
   const [notes, setNotes] = useState('');
@@ -89,6 +94,12 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
       return [id, c?.agreedPrice ? String(c.agreedPrice) : ''];
     })));
     setAcks({});
+    setSchemes(Object.fromEntries(consignmentIds.map((id) => {
+      const c = useConsignmentStore.getState().consignments.find((k) => k.id === id);
+      const p = c ? useProductStore.getState().products.find((pp) => pp.id === c.productId) : undefined;
+      return [id, ((p?.taxScheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme];
+    })));
+    setConsignorVat({});
     setBuyerId('');
     setSaleDate(today());
     setNotes('');
@@ -106,7 +117,7 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
     const price = Number(prices[c.id]) || 0;
     const econ = computeConsignmentSale(c, price);
     const prod = products.find((p) => p.id === c.productId);
-    const scheme = ((prod?.taxScheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme;
+    const scheme = (schemes[c.id] || (prod?.taxScheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme;
     const rate = scheme === 'ZERO' ? 0 : 10;
     const purchasePrice = prod?.purchasePrice || econ.payout;
     const calc = price > 0 ? vatEngine.calculateNet(scheme === 'VAT_10' ? price / (1 + rate / 100) : price, purchasePrice, scheme, rate) : null;
@@ -118,8 +129,18 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
       consignorName: consignor ? `${consignor.firstName} ${consignor.lastName}`.trim() : '—',
       needsAck: price > 0 && econ.belowFloor,
     };
-  }), [items, prices, products, customers]);
+  }), [items, prices, products, customers, schemes]);
 
+  /** CONSIGNOR-JOINT-PURCHASE — je Einlieferer ein Einkauf: Name, Zahl der Artikel, Summe der Auszahlungen. */
+  const consignorGroups = useMemo(() => {
+    const m = new Map<string, { consignorId: string; name: string; count: number; payout: number }>();
+    for (const r of rows) {
+      const g = m.get(r.c.consignorId) ?? { consignorId: r.c.consignorId, name: r.consignorName, count: 0, payout: 0 };
+      g.count += 1; g.payout += r.econ.payout;
+      m.set(r.c.consignorId, g);
+    }
+    return [...m.values()];
+  }, [rows]);
   const total = rows.reduce((s, r) => s + r.price, 0);
   const totalPayout = rows.reduce((s, r) => s + r.econ.payout, 0);
   const totalCommission = rows.reduce((s, r) => s + r.econ.commission, 0);
@@ -194,7 +215,10 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
     setNumberDialogOpen(false);
     const zahlungen = invoiceCreatePaymentsBody(payRows.map((r) => ({ amount: payAmountOf(r), method: r.method, cardBrand: r.cardBrand, paidDate: r.date })));
     const input: ConsignmentMultiSaleInput = {
-      items: rows.map((r) => ({ consignmentId: r.c.id, salePrice: r.price, acknowledgeShortfall: acks[r.c.id] === true })),
+      items: rows.map((r) => ({
+        consignmentId: r.c.id, salePrice: r.price, acknowledgeShortfall: acks[r.c.id] === true, taxScheme: r.scheme,
+        consignorTaxScheme: consignorVat[r.c.consignorId] ?? 'ZERO',
+      })),
       buyerId,
       saleDate,
       notes: notes.trim() || undefined,
@@ -266,6 +290,21 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
                     </div>
                   )}
                 </div>
+                {/* CONSIGNMENT-SALE-TAX — die Steuerart der Rechnungszeile, wie bei einer gewöhnlichen Rechnung wählbar. */}
+                <div style={{ marginTop: 10 }}>
+                  <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>TAX SCHEME</span>
+                  <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
+                    {(['MARGIN', 'VAT_10', 'ZERO'] as const).map((s) => (
+                      <button key={s} type="button" data-consignment-sale-scheme={r.c.id} data-scheme={s}
+                        onClick={() => setSchemes((m) => ({ ...m, [r.c.id]: s }))}
+                        className="cursor-pointer rounded"
+                        style={{ padding: '6px 12px', fontSize: 12, border: `1px solid ${r.scheme === s ? '#0F0F10' : '#D5D9DE'}`,
+                          color: r.scheme === s ? '#0F0F10' : '#6B7280', background: r.scheme === s ? 'rgba(15,15,16,0.06)' : 'transparent' }}>
+                        {SCHEME_LABEL[s]}
+                      </button>
+                    ))}
+                  </div>
+                </div>
                 {single && r.price > 0 && (
                   <div className="rounded font-mono" style={{ padding: 14, background: '#F2F7FA', border: '1px solid #E5E9EE', fontSize: 13, marginTop: 14 }}>
                     <div className="flex justify-between" style={{ marginBottom: 8 }}>
@@ -297,6 +336,38 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
                     </label>
                   </div>
                 )}
+              </div>
+            ))}
+          </div>
+
+          {/* CONSIGNOR-JOINT-PURCHASE + CONSIGNOR-PURCHASE-VAT — je Einlieferer EIN Einkauf (eine Zeile je Artikel) und
+              seine Steuer, getrennt von der Rechnung. Ausgezahlt wird nichts: das bleibt die Zahlung am Einkauf. */}
+          <div data-consignor-purchases style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <span className="text-overline" style={{ display: 'block' }}>CONSIGNOR PURCHASE</span>
+            {consignorGroups.map((g) => (
+              <div key={g.consignorId} data-consignor-purchase={g.consignorId}
+                style={{ padding: '10px 12px', border: '1px solid #E5E9EE', borderRadius: 8, fontSize: 12, color: '#4B5563' }}>
+                <div className="flex justify-between" style={{ marginBottom: 8 }}>
+                  <span style={{ color: '#0F0F10' }}>{g.name} · {g.count} item{g.count === 1 ? '' : 's'} in one purchase</span>
+                  <span className="font-mono"><Bhd v={g.payout}/> BHD</span>
+                </div>
+                <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
+                  {(['ZERO', 'VAT_10'] as const).map((v) => {
+                    const an = (consignorVat[g.consignorId] ?? 'ZERO') === v;
+                    return (
+                      <button key={v} type="button" data-consignor-purchase-vat={g.consignorId} data-vat={v}
+                        onClick={() => setConsignorVat((m) => ({ ...m, [g.consignorId]: v }))}
+                        className="cursor-pointer rounded"
+                        style={{ padding: '6px 12px', fontSize: 12, border: `1px solid ${an ? '#0F0F10' : '#D5D9DE'}`,
+                          color: an ? '#0F0F10' : '#6B7280', background: an ? 'rgba(15,15,16,0.06)' : 'transparent' }}>
+                        {v === 'ZERO' ? 'No VAT (private / not VAT-registered)' : 'VAT 10 % (consignor issues a VAT invoice)'}
+                      </button>
+                    );
+                  })}
+                </div>
+                <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+                  Separate from the invoice VAT. The payout stays the amount incl. VAT; nothing is paid now.
+                </div>
               </div>
             ))}
           </div>

@@ -96,15 +96,40 @@ function liveConsignment(id: string, branchId: string, expectedRevision?: number
 // So bricht eine geänderte Notiz die Verknüpfung nicht mehr. (Exportiert für den Altbestands-Nachweis.)
 export function consignorPurchases(consignmentId: string, consignmentNumber: string, productId: string, branchId: string): string[] {
   if (!consignmentNumber || !productId) return [];
+  // CONSIGNOR-JOINT-PURCHASE — ein gemeinsamer Einkauf (mehrere Artikel desselben Einlieferers) trägt die Kommission an
+  // der ZEILE; der Einkauf selbst hat dann keine.
   return query(
     `SELECT p.id FROM purchases p
       WHERE p.branch_id = ? AND p.status != 'CANCELLED'
         AND (p.source_consignment_id = ?
+             OR EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.source_consignment_id = ?)
              OR (p.source_consignment_id IS NULL AND p.notes LIKE ?
                  AND EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.product_id = ?)))
       ORDER BY p.created_at ASC, p.id ASC`,
-    [branchId, consignmentId, `%${consignmentNumber}%`, productId],
+    [branchId, consignmentId, consignmentId, `%${consignmentNumber}%`, productId],
   ).map((r) => String(r.id));
+}
+
+/**
+ * CONSIGNOR-JOINT-PURCHASE — gehört ein Einkauf NICHT dieser Kommission allein (mehrere Zeilen, je Artikel eine), dann die
+ * Zeile dieser Kommission: Rückgabe wirkt nur auf sie. `null`: der Einkauf gehört ihr allein (wie bisher, ganz).
+ */
+interface GemeinsameZeile { lineId: string; quantity: number; unitPrice: number; wertF: number; zurueck: string | null }
+function gemeinsameZeile(purchaseId: string, consignmentId: string, productId: string): GemeinsameZeile | null {
+  const zeilen = query('SELECT id, product_id, quantity, unit_price, line_total, source_consignment_id FROM purchase_lines WHERE purchase_id = ? ORDER BY position, id', [purchaseId]);
+  if (zeilen.length <= 1) return null;
+  const z = zeilen.find((l) => String(l.source_consignment_id ?? '') === consignmentId)
+    ?? zeilen.find((l) => !l.source_consignment_id && String(l.product_id ?? '') === productId);
+  if (!z) return null;
+  const ret = query(
+    `SELECT pr.return_number FROM purchase_return_lines prl JOIN purchase_returns pr ON pr.id = prl.return_id
+      WHERE prl.purchase_line_id = ? AND pr.status != 'CANCELLED' LIMIT 1`,
+    [String(z.id)],
+  )[0];
+  return {
+    lineId: String(z.id), quantity: Number(z.quantity) || 1, unitPrice: Number(z.unit_price) || 0, wertF: F(z.line_total),
+    zurueck: ret ? String(ret.return_number ?? '') || 'a supplier return' : null,
+  };
 }
 
 /**
@@ -165,11 +190,12 @@ export function localConsignmentActor(): ConsignmentActor {
 const F = (n: unknown): number => Math.round((Number(n) || 0) * 1000);
 const B = (f: number): number => f / 1000;
 
-/** Was ein Einkauf beim Einlieferer schon gesehen hat: Bezahltes (bar UND per Guthaben) und eine wirksame Lieferanten-Retoure. */
-interface EinkaufLage { id: string; number: string; bezahltF: number; guthabenF: number; retoure: string | null }
+/** Was ein Einkauf beim Einlieferer schon gesehen hat: Bezahltes (bar UND per Guthaben) und eine wirksame Lieferanten-Retoure.
+ *  CONSIGNOR-JOINT-PURCHASE — `offenF`: der offene Rest des Einkaufs (eine Zeilen-Retoure mindert zuerst ihn). */
+interface EinkaufLage { id: string; number: string; bezahltF: number; guthabenF: number; retoure: string | null; offenF: number }
 
 function einkaufLage(purchaseId: string): EinkaufLage {
-  const p = query('SELECT purchase_number, paid_amount FROM purchases WHERE id = ?', [purchaseId])[0];
+  const p = query('SELECT purchase_number, paid_amount, remaining_amount FROM purchases WHERE id = ?', [purchaseId])[0];
   const guthabenF = F(query(
     `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit' AND voided_at IS NULL`,
     [purchaseId],
@@ -177,9 +203,15 @@ function einkaufLage(purchaseId: string): EinkaufLage {
   const ret = query(`SELECT return_number FROM purchase_returns WHERE purchase_id = ? AND status != 'CANCELLED' LIMIT 1`, [purchaseId])[0];
   return {
     id: purchaseId, number: String(p?.purchase_number ?? ''), bezahltF: F(p?.paid_amount) + guthabenF, guthabenF,
-    retoure: ret ? String(ret.return_number ?? '') || 'a supplier return' : null,
+    retoure: ret ? String(ret.return_number ?? '') || 'a supplier return' : null, offenF: F(p?.remaining_amount),
   };
 }
+
+/**
+ * CONSIGNOR-JOINT-PURCHASE — was eine Zeilen-Retoure zurückzahlt: die Lieferanten-Retoure mindert zuerst den offenen Rest
+ * des Einkaufs, nur der Überschuss kommt zurück (dieselbe Regel wie `confirmPurchaseReturnInHouse`).
+ */
+const zeilenErstattungF = (lage: EinkaufLage, zeile: GemeinsameZeile): number => Math.max(0, zeile.wertF - lage.offenF);
 
 /** Was auf eine Verlust-Ausgabe schon gezahlt ist (bar und per Guthaben). */
 function verlustBezahltF(expenseId: string): number {
@@ -215,11 +247,20 @@ export interface ConsignorRefundBooked {
  */
 function pruefeEinlieferer(
   con: Record<string, unknown>, purchases: string[], losses: string[], wahl: ConsignorRefundChoice | undefined,
+  /** CONSIGNOR-JOINT-PURCHASE — true: nur die Zeile DIESER Kommission geht zurück (Rückgabe nach dem Verkauf). */
+  nurZeile = false,
 ): EinkaufLage[] {
   const nr = String(con.consignment_number ?? '');
   const lagen = purchases.map(einkaufLage);
+  let erstattungF = 0;
   for (const l of lagen) {
-    if (l.retoure) {
+    const zeile = nurZeile ? gemeinsameZeile(l.id, String(con.id), String(con.product_id ?? '')) : null;
+    if (zeile) {
+      if (zeile.zurueck) {
+        throw nein(CONSIGNMENT_CONSIGNOR_SETTLED,
+          `${nr}: this item's line of the consignor's purchase ${l.number} already went back to the consignor (${zeile.zurueck})`);
+      }
+    } else if (l.retoure) {
       throw nein(CONSIGNMENT_CONSIGNOR_SETTLED,
         `${nr}: the consignor's purchase ${l.number} already went back to the consignor (${l.retoure}) — this sale cannot be undone again`);
     }
@@ -227,8 +268,9 @@ function pruefeEinlieferer(
       throw nein(CONSIGNOR_PAID_BY_CREDIT,
         `${nr}: the consignor's purchase ${l.number} was paid with supplier credit — it is not undone automatically; please check it with the accountant`);
     }
+    erstattungF += zeile ? zeilenErstattungF(l, zeile) : l.bezahltF;
   }
-  const bezahltF = lagen.reduce((s, l) => s + l.bezahltF, 0);
+  const bezahltF = erstattungF;
   if (bezahltF > 0 && !wahl) {
     throw nein(CONSIGNOR_REFUND_REQUIRED,
       `${nr}: the consignor was already paid ${B(bezahltF).toFixed(3)} BHD — choose whether that money came back now or is still to be repaid`);
@@ -253,7 +295,33 @@ function pruefeEinlieferer(
  */
 function einkaufZurueck(
   con: Record<string, unknown>, lage: EinkaufLage, wahl: ConsignorRefundChoice | undefined, branchId: string, now: string,
+  nurZeile = false,
 ): ConsignorRefundBooked | null {
+  // CONSIGNOR-JOINT-PURCHASE — ein gemeinsamer Einkauf: nur die Zeile dieser Kommission geht über die Lieferanten-Retoure
+  // zurück. Sie mindert zuerst den offenen Rest; was darüber schon bezahlt war, kommt zurück (D3-Wahl) — sonst nichts.
+  const zeile = nurZeile ? gemeinsameZeile(lage.id, String(con.id), String(con.product_id ?? '')) : null;
+  if (zeile) {
+    const erwartetF = zeilenErstattungF(lage, zeile);
+    if (erwartetF > 0 && !wahl) throw nein(CONSIGNOR_REFUND_REQUIRED, 'the consignor was already paid — choose how the money comes back');
+    const nrZ = String(con.consignment_number ?? '');
+    const ctxZ = { branchId, userId: currentUserId(), now };
+    const entwurf = createPurchaseReturnDraftInHouse({
+      purchaseId: lage.id,
+      refundMethod: erwartetF > 0 && wahl && wahl.mode === 'received' ? wahl.method : 'credit',
+      notes: consignorRefundMarker(nrZ),
+      lines: [{ purchaseLineId: zeile.lineId, quantity: zeile.quantity, unitPrice: zeile.unitPrice }],
+    }, ctxZ);
+    const fertig = confirmPurchaseReturnInHouse(entwurf.returnId, ctxZ);
+    if (F(fertig.refundAmount) !== erwartetF) {
+      throw new Error(`consignor refund ${entwurf.returnNumber}: ${fertig.refundAmount} back, but ${B(erwartetF)} was expected`);
+    }
+    if (erwartetF <= 0) return null;
+    return {
+      consignmentId: String(con.id), purchaseId: lage.id, purchaseNumber: lage.number, mode: wahl!.mode,
+      method: wahl!.mode === 'received' ? wahl!.method : null, returnId: entwurf.returnId, returnNumber: entwurf.returnNumber,
+      refundAmount: fertig.refundAmount, supplierCreditId: fertig.supplierCreditId,
+    };
+  }
   if (lage.bezahltF <= 0) {
     cancelPurchaseInHouse(lage.id, branchId);
     return null;
@@ -378,7 +446,7 @@ export function returnConsignmentAfterSaleInHouse(
   const purchases = disposition === 'RETURN_TO_OWNER' ? zumVerkauf(invoiceId, consignorPurchases(id, consignmentNumber, productId, branchId)) : [];
   const losses = disposition === 'RETURN_TO_OWNER' ? consignorLosses(id, branchId) : [];
   // D3 — VOR dem ersten Schreiben: was an der Seite des Einlieferers schon bezahlt ist, und die Wahl des Owners.
-  const lagen = disposition === 'RETURN_TO_OWNER' ? pruefeEinlieferer(con, purchases, losses, wahl) : [];
+  const lagen = disposition === 'RETURN_TO_OWNER' ? pruefeEinlieferer(con, purchases, losses, wahl, true) : [];
 
   // 1. Die Retoure — über das Retourenhaus: Preis und Steuer aus der Rechnung, Gutschrift, Erstattung im
   //    gewählten Weg (nur was der Käufer bezahlt hat, fließt zurück), Warenfolge, Nummer aus dem Zähler.
@@ -439,7 +507,7 @@ export function returnConsignmentAfterSaleInHouse(
   const consignorRefunds: ConsignorRefundBooked[] = [];
   let cancelledPurchases = 0;
   for (const lage of lagen) {
-    const r = einkaufZurueck(con, lage, wahl, branchId, now);
+    const r = einkaufZurueck(con, lage, wahl, branchId, now, true);
     if (r) consignorRefunds.push(r); else cancelledPurchases++;
   }
   for (const expenseId of losses) cancelConsignorLoss(expenseId);
@@ -539,17 +607,27 @@ export function cancelConsignmentSaleInHouse(
   const retouren = invoiceLive
     ? query(`SELECT id, notes FROM sales_returns WHERE invoice_id = ? AND status != 'REJECTED' ORDER BY created_at ASC, id ASC`, [invoiceId])
     : [];
+  // CONSIGNOR-JOINT-PURCHASE — ein gemeinsamer Einkauf gehört mehreren Kommissionen dieses Verkaufs: er wird EINMAL
+  // zurückgenommen (ganz), mit der Wahl, die für irgendeine seiner Kommissionen genannt ist.
+  const einkaufDer = new Map<string, string>();
   const teile = gruppe.map((k) => {
     const kid = String(k.id);
     const nr = String(k.consignment_number ?? '');
     const pid = String(k.product_id ?? '');
     const marker = postSaleReturnMarker(nr);
     const eigene = retouren.filter((r) => String(r.notes ?? '').includes(marker)).map((r) => String(r.id));
-    const purchases = zumVerkauf(String(k.invoice_id ?? ''), consignorPurchases(kid, nr, pid, branchId));
+    const alle = zumVerkauf(String(k.invoice_id ?? ''), consignorPurchases(kid, nr, pid, branchId));
+    const purchases = alle.filter((p) => !einkaufDer.has(p));
+    for (const p of purchases) einkaufDer.set(p, kid);
     const losses = consignorLosses(kid, branchId);
-    const lagen = pruefeEinlieferer(k, purchases, losses, wahlen.get(kid));
-    return { k, kid, nr, pid, eigene, purchases, losses, lagen };
+    return { k, kid, nr, pid, eigene, purchases, losses, lagen: [] as EinkaufLage[] };
   });
+  const wahlFuer = (purchaseId: string, kid: string): ConsignorRefundChoice | undefined => wahlen.get(kid)
+    ?? [...wahlen.entries()].find(([k]) => teile.some((t) => t.kid === k && consignorPurchases(k, t.nr, t.pid, branchId).includes(purchaseId)))?.[1];
+  for (const t of teile) {
+    t.lagen = t.purchases.flatMap((p) => pruefeEinlieferer(t.k, [p], [], wahlFuer(p, t.kid)));
+    pruefeEinlieferer(t.k, [], t.losses, undefined);
+  }
   if (teile.reduce((s, t) => s + t.eigene.length, 0) !== retouren.length) {
     throw nein('CONSIGNMENT_INVOICE_HAS_RETURNS',
       'the invoice of this sale has a return that is not the consignment\'s own — cancel that return first');
@@ -598,7 +676,7 @@ export function cancelConsignmentSaleInHouse(
     const eigeneErstattungen: ConsignorRefundBooked[] = [];
     let einkaeufe = 0;
     for (const lage of t.lagen) {
-      const r = einkaufZurueck(t.k, lage, wahlen.get(t.kid), branchId, now);
+      const r = einkaufZurueck(t.k, lage, wahlFuer(lage.id, t.kid), branchId, now);
       if (r) eigeneErstattungen.push(r); else einkaeufe++;
     }
     for (const expenseId of t.losses) cancelConsignorLoss(expenseId);

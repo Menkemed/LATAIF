@@ -152,6 +152,11 @@ export interface RecordSalesItem {
   consignmentId: string;
   salePrice: number;
   acknowledgeShortfall?: boolean;
+  /** CONSIGNMENT-SALE-TAX — die Steuerart der Rechnungszeile; fehlt = die des Artikels (sonst MARGIN). */
+  taxScheme?: TaxScheme;
+  /** CONSIGNOR-PURCHASE-VAT — der Einkauf beim Einlieferer: ohne VAT (Privatperson, Vorgabe) oder VAT 10 % (er stellt eine
+   *  Steuerrechnung). Die Auszahlung bleibt der Betrag inkl. VAT. Je Einlieferer EINE Wahl (ein Einkauf). */
+  consignorTaxScheme?: 'ZERO' | 'VAT_10';
 }
 
 /**
@@ -536,76 +541,104 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
           `Sale ${item.salePrice} below consignor floor ${econ.floor} (${con.consignmentNumber}). Confirm shortfall (acknowledgeShortfall=true) — will be recorded as Consignor Loss expense.`
         );
       }
-      return { con, salePrice: item.salePrice, econ };
+      if (item.taxScheme !== undefined && !(['MARGIN', 'VAT_10', 'ZERO'] as string[]).includes(String(item.taxScheme))) {
+        throw new Error(`Unknown tax scheme "${String(item.taxScheme)}" (${con.consignmentNumber})`);
+      }
+      if (item.consignorTaxScheme !== undefined && item.consignorTaxScheme !== 'ZERO' && item.consignorTaxScheme !== 'VAT_10') {
+        throw new Error(`Unknown VAT for the consignor's purchase "${String(item.consignorTaxScheme)}" (${con.consignmentNumber})`);
+      }
+      return { con, salePrice: item.salePrice, econ, taxScheme: item.taxScheme, consignorTaxScheme: item.consignorTaxScheme ?? 'ZERO' };
     });
+    // CONSIGNOR-JOINT-PURCHASE — je Einlieferer EIN Einkauf: also auch EINE Steuerwahl für seinen Einkauf.
+    {
+      const wahl = new Map<string, string>();
+      for (const p of plan) {
+        const w = wahl.get(p.con.consignorId);
+        if (w !== undefined && w !== p.consignorTaxScheme) {
+          throw new Error(`Consignment ${p.con.consignmentNumber}: one consignor gets one purchase — choose the same VAT for all his items`);
+        }
+        wahl.set(p.con.consignorId, p.consignorTaxScheme);
+      }
+    }
 
     const db = getDatabase();
     const lines: Parameters<typeof createInvoiceInHouse>[0]['lines'] = [];
-    const seiten = plan.map(({ con, salePrice, econ }) => {
+    // 1. Je Artikel: Steuer der Rechnungszeile (ähnlich agentStore convertTransferToInvoice) und der Betrag des Einkaufs.
+    const teile = plan.map(({ con, salePrice, econ, taxScheme, consignorTaxScheme }) => {
       const consignorPayout = econ.payout;
       const consignorLoss = econ.loss;
-
-      // Tax-Scheme + VAT-Berechnung für Buyer-Invoice (ähnlich agentStore convertTransferToInvoice)
       const prod = query(
         `SELECT id, tax_scheme, purchase_price, brand, name FROM products WHERE id = ?`,
         [con.productId]
       )[0];
-      const scheme = ((prod?.tax_scheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme;
+      // CONSIGNMENT-SALE-TAX — die im Verkaufsdialog gewählte Steuerart; ohne Wahl die des Artikels (sonst MARGIN).
+      const scheme = (taxScheme || (prod?.tax_scheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme;
       const purchasePrice = (prod?.purchase_price as number | undefined) || consignorPayout;
       const rate = scheme === 'ZERO' ? 0 : 10;
       const netInput = scheme === 'VAT_10' ? salePrice / (1 + rate / 100) : salePrice;
       const calc = vatEngine.calculateNet(netInput, purchasePrice, scheme, rate);
       // v0.7.1 — NBR: MARGIN persistiert internalVat.
       const persistedVat = calc.internalVatAmount ?? calc.vatAmount;
-
-      // 1. Find-or-Create Supplier für den Consignor (1 Person, 2 Rollen)
-      const consignorSupplierId = findOrCreateSupplierForConsignor(con.consignorId);
-
-      // 2. Consignor-Purchase ZUERST anlegen — sonst hat das Consignment-Produkt
-      // beim Invoice-Insert noch keinen Stock-Lot, und der FIFO-Auto-Pick in
-      // createDirectInvoice findet nichts. Reihenfolge: Purchase (= Lot entsteht)
-      // → Invoice (= Lot wird konsumiert + Cost-Snapshot zieht lot.unit_cost).
-      // Je Artikel EIN Einkauf — auch bei zwei Artikeln desselben Einlieferers: Verbindlichkeit, Auszahlung,
-      // Rückgabe und Storno wirken je Kommission.
-      //
       // Bei Shortfall: Purchase = echter Marktwert (= Sale Price), Loss läuft separat als Expense.
       // Bei normalem/excess Sale: Purchase = consignorPayout (was Frau Y wirklich kriegt).
       const purchaseAmount = consignorLoss > 0 ? salePrice : consignorPayout;
+      return { con, salePrice, econ, scheme, rate, calc, persistedVat, purchasePrice, purchaseAmount, consignorTaxScheme };
+    });
+
+    // 2. Consignor-Purchase ZUERST anlegen — sonst hat das Consignment-Produkt beim Invoice-Insert noch keinen Stock-Lot,
+    // und der FIFO-Auto-Pick in createDirectInvoice findet nichts. Reihenfolge: Purchase (= Lot entsteht) → Invoice
+    // (= Lot wird konsumiert + Cost-Snapshot zieht lot.unit_cost).
+    // CONSIGNOR-JOINT-PURCHASE — EIN Einkauf je Einlieferer und Verkauf, eine Zeile je Artikel; jede Zeile nennt ihre
+    // Kommission (Rückgabe und Storno wirken je Zeile). Ein einzelner Artikel trägt die Kommission zusätzlich am Einkauf
+    // (wie bisher). CONSIGNOR-PURCHASE-VAT — ohne VAT (Privatperson) oder VAT 10 % (Steuerrechnung des Einlieferers);
+    // der Zeilenbetrag ist brutto (= die Auszahlung), die Vorsteuer wird daraus herausgerechnet.
+    const gruppen = new Map<string, typeof teile>();
+    for (const t of teile) gruppen.set(t.con.consignorId, [...(gruppen.get(t.con.consignorId) ?? []), t]);
+    const einkaufJe = new Map<string, { purchaseId: string; supplierId: string }>();
+    for (const [consignorId, gruppe] of gruppen) {
+      // Find-or-Create Supplier für den Consignor (1 Person, 2 Rollen)
+      const consignorSupplierId = findOrCreateSupplierForConsignor(consignorId);
+      const vat = gruppe[0].consignorTaxScheme;
       const purchase = usePurchaseStore.getState().createPurchase({
         supplierId: consignorSupplierId,
         purchaseDate: saleDate,
-        notes: `Consignor payout · ${con.consignmentNumber}${params.notes ? ' · ' + params.notes : ''}`,
-        // PURCHASE-EDIT B6 — die Kommission als Spalte: die Umkehr findet ihren Einkauf darüber, nicht über den Vermerk.
-        sourceConsignmentId: con.id,
-        lines: [{
-          productId: con.productId,
+        notes: `Consignor payout · ${gruppe.map((t) => t.con.consignmentNumber).join(', ')}${params.notes ? ' · ' + params.notes : ''}`,
+        // PURCHASE-EDIT B6 — die Kommission als Spalte (nur beim Einkauf GENAU einer Kommission).
+        sourceConsignmentId: gruppe.length === 1 ? gruppe[0].con.id : undefined,
+        lines: gruppe.map((t) => ({
+          productId: t.con.productId,
           quantity: 1,
-          unitPrice: purchaseAmount,
-          taxScheme: 'ZERO',                  // Privatperson → keine Vorsteuer
-          vatRate: 0,
-        }],
+          unitPrice: t.purchaseAmount,
+          taxScheme: vat,
+          vatRate: vat === 'VAT_10' ? 10 : 0,
+          sourceConsignmentId: t.con.id,
+        })),
       });
+      for (const t of gruppe) {
+        einkaufJe.set(t.con.id, { purchaseId: purchase.id, supplierId: consignorSupplierId });
+        // 2b. Cost-Snapshot auf das Produkt selbst schreiben — Consignment-Produkte werden mit purchase_price=0
+        // angelegt; ohne diese Zeile bleibt der Cost auf der Product-Detail-Seite auf 0 obwohl der Auto-Purchase einen
+        // Lot mit echtem unit_cost erzeugt hat. Nur wenn aktuell 0 (= placeholder): echte Cost-Daten bleiben.
+        db.run(
+          `UPDATE products SET purchase_price = ? WHERE id = ? AND COALESCE(purchase_price, 0) = 0`,
+          [t.purchaseAmount, t.con.productId]
+        );
+      }
+    }
 
-      // 2b. Cost-Snapshot auf das Produkt selbst schreiben — Consignment-Produkte
-      // werden mit purchase_price=0 angelegt; ohne diese Zeile bleibt der Cost
-      // auf der Product-Detail-Seite auf 0 obwohl der Auto-Purchase einen Lot
-      // mit echtem unit_cost erzeugt hat. Wir ueberschreiben nur wenn aktuell
-      // 0 (= placeholder), damit echte Cost-Daten nicht ueberschrieben werden.
-      db.run(
-        `UPDATE products SET purchase_price = ? WHERE id = ? AND COALESCE(purchase_price, 0) = 0`,
-        [purchaseAmount, con.productId]
-      );
-
+    // 3. Die Rechnungszeilen in der Reihenfolge der Auswahl.
+    const seiten = teile.map((t) => {
       lines.push({
-        productId: con.productId,
-        unitPrice: calc.netAmount,
-        purchasePrice,
-        taxScheme: scheme,
-        vatRate: rate,
-        vatAmount: persistedVat,
-        lineTotal: calc.grossAmount,
+        productId: t.con.productId,
+        unitPrice: t.calc.netAmount,
+        purchasePrice: t.purchasePrice,
+        taxScheme: t.scheme,
+        vatRate: t.rate,
+        vatAmount: t.persistedVat,
+        lineTotal: t.calc.grossAmount,
       });
-      return { con, salePrice, econ, consignorSupplierId, purchaseId: purchase.id };
+      const e = einkaufJe.get(t.con.id)!;
+      return { con: t.con, salePrice: t.salePrice, econ: t.econ, consignorSupplierId: e.supplierId, purchaseId: e.purchaseId };
     });
 
     // 3. Buyer-Invoice — EINE für den ganzen Verkauf, datiert auf den Verkaufstag (D1), samt Zahlungen (D5)

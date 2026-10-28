@@ -743,6 +743,136 @@ for (const disp of ['RETURN_TO_OWNER', 'KEEP_AS_OWN']) {
       `I6 PC2 invoices.update Preis → dasselbe fachliche Nein, nichts verändert (${r.code})`);
   }
 
+
+  { // I9 CONSIGNMENT-SALE-TAX — die STEUERART einer Kommissionszeile darf wechseln; Preis inkl. VAT, Artikel, Menge bleiben
+    const vatKonten = (w: Welt) => all(w.db, `SELECT account, ROUND(SUM(CASE WHEN direction = 'CREDIT' THEN amount ELSE -amount END), 3)
+      FROM ledger_entries WHERE account IN ('MARGIN_VAT', 'VAT_OUTPUT') GROUP BY account HAVING ABS(SUM(CASE WHEN direction = 'CREDIT' THEN amount ELSE -amount END)) > 0.0005 ORDER BY account`);
+    const kommissionsBild = (w: Welt) => all(w.db, 'SELECT id, status, invoice_id, sale_price, commission_amount, payout_amount, payout_status FROM consignments ORDER BY id');
+    const einkaufsBild = (w: Welt) => all(w.db, 'SELECT id, status, total_amount, paid_amount, remaining_amount, supplier_id FROM purchases ORDER BY id');
+    const ausgeglichen = (w: Welt) => n(w.db, "SELECT ROUND(COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0), 3) FROM ledger_entries") === 0;
+    const bild: string[] = [];
+    { // Primary: Margin → Zero-rated
+      const w = await welt({ bezahlt: 1200 });
+      const b0 = basis(w);
+      const kons0 = kommissionsBild(w), pur0 = einkaufsBild(w);
+      ok(String(b0.tax_scheme) === 'MARGIN' && Number(b0.vat_amount) > 0 && vatKonten(w).includes('MARGIN_VAT'),
+        `I9 Ausgang: Kommissionszeile Margin mit Margen-VAT ${Number(b0.vat_amount)} (${vatKonten(w)})`);
+      const m = aendern(w, [zeile(w, { taxScheme: 'ZERO', vatRate: 0, vatAmount: 0 })]);
+      const b1 = basis(w);
+      ok(m === '' && String(b1.tax_scheme) === 'ZERO' && Number(b1.vat_amount) === 0 && Math.abs(Number(b1.line_total) - Number(b0.line_total)) < 0.0005,
+        `I9 Primary Margin → Zero-rated erlaubt: Zeile ZERO, VAT 0, Preis ${Number(b1.line_total)} bleibt (${m || 'ok'})`);
+      ok(n(w.db, 'SELECT vat_amount FROM invoices WHERE id = ?', [w.invId]) === 0 && zweiWahrheiten(w) === '' && vatKonten(w) === '[]',
+        `I9 …Rechnung ohne VAT, Summe == Verkaufspreis der Kommission, Margen-VAT im Hauptbuch ausgebucht (${vatKonten(w)})`);
+      ok(kommissionsBild(w) === kons0 && einkaufsBild(w) === pur0 && kstatus(w.db, w.cid) === 'sold' && ausgeglichen(w),
+        'I9 …Kommission (Provision, Auszahlung, Status) und Einkauf beim Einlieferer unverändert, Hauptbuch ausgeglichen');
+      ok(n(w.db, 'SELECT paid_amount FROM invoices WHERE id = ?', [w.invId]) === 1200 && s(w.db, 'SELECT status FROM invoices WHERE id = ?', [w.invId]) === 'FINAL',
+        'I9 …Zahlung und Status der Rechnung bleiben');
+      bild.push(S({ line: all(w.db, 'SELECT tax_scheme, vat_rate, vat_amount, unit_price, line_total FROM invoice_lines'), vat: vatKonten(w), kons: kommissionsBild(w).replace(/"[0-9a-f-]{36}"/g, '"id"') }));
+      // Preis UND Steuerart zugleich → weiter gesperrt.
+      const vor = unberuehrt(w);
+      const preis = aendern(w, [zeile(w, { taxScheme: 'MARGIN', vatRate: 10, unitPrice: 1500, lineTotal: 1500 })]);
+      ok(preis === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor, `I9 Steuerart + Preis zugleich → abgewiesen (${preis || 'GEÄNDERT'})`);
+      // VAT 10 % mit demselben Nettopreis hieße Käuferpreis 1320 → abgewiesen, mit dem Nettopreis 1090.909 erlaubt.
+      let text = '';
+      try { nimm(w.db); imHaus(() => useInvoiceStore.getState().editInvoice(w.invId, { reason: 'VAT', lines: [zeile(w, { taxScheme: 'VAT_10', vatRate: 10, lineTotal: 1320 })] as never })); }
+      catch (e) { text = (e as Error).message; }
+      reload();
+      ok(/price incl\. VAT stays 1200\.000 BHD/.test(text) && /net price 1090\.909/.test(text) && unberuehrt(w) === vor,
+        `I9 VAT 10 % mit Nettopreis 1200 (Käufer zahlte 1320) → abgewiesen, die Meldung nennt den Nettopreis (${text.slice(0, 160)})`);
+      const v10 = aendern(w, [zeile(w, { taxScheme: 'VAT_10', vatRate: 10, unitPrice: 1090.909, lineTotal: 1200 })]);
+      const b2 = basis(w);
+      ok(v10 === '' && String(b2.tax_scheme) === 'VAT_10' && Math.abs(Number(b2.line_total) - 1200) < 0.0005 && Math.abs(Number(b2.vat_amount) - 109.091) < 0.0005
+        && zweiWahrheiten(w) === '' && kommissionsBild(w) === kons0 && einkaufsBild(w) === pur0 && ausgeglichen(w),
+        `I9 VAT 10 % mit Nettopreis 1090.909 → erlaubt: brutto 1200, VAT 109.091, Kommission und Einkauf unverändert (${v10 || 'ok'})`);
+    }
+    { // PC2 invoices.update — dieselbe Änderung, dasselbe Ergebnis
+      const w = await welt({ bezahlt: 1200 });
+      const b = basis(w);
+      const r = await fern(() => lc2.runInvoiceUpdate(deps(w.db), identity(nx(), 'invoices.update'), {
+        id: w.invId, expectedRevision: n(w.db, 'SELECT revision FROM invoices WHERE id = ?', [w.invId]), reason: 'Steuerart',
+        customerId: 'cust-2', specialMark: false,
+        lines: [{ lineId: String(b.id), productId: String(b.product_id), quantity: 1, unitPrice: Number(b.unit_price), scheme: 'ZERO' }],
+      }));
+      reload();
+      ok(r.ok && String(basis(w).tax_scheme) === 'ZERO' && Number(basis(w).vat_amount) === 0 && zweiWahrheiten(w) === '' && ausgeglichen(w),
+        `I9 PC2 invoices.update Margin → Zero-rated erlaubt (${r.code || 'ok'})`);
+      bild.push(S({ line: all(w.db, 'SELECT tax_scheme, vat_rate, vat_amount, unit_price, line_total FROM invoice_lines'), vat: vatKonten(w), kons: kommissionsBild(w).replace(/"[0-9a-f-]{36}"/g, '"id"') }));
+      const vor = unberuehrt(w);
+      const r2 = await fern(() => lc2.runInvoiceUpdate(deps(w.db), identity(nx(), 'invoices.update'), {
+        id: w.invId, expectedRevision: n(w.db, 'SELECT revision FROM invoices WHERE id = ?', [w.invId]), reason: 'Preis',
+        customerId: 'cust-2', specialMark: false,
+        lines: [{ lineId: String(b.id), productId: String(b.product_id), quantity: 1, unitPrice: 1500, scheme: 'ZERO' }],
+      }));
+      ok(!r2.ok && r2.code === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor, `I9 PC2 Preis ändern bleibt gesperrt (${r2.code})`);
+    }
+    ok(bild[0] === bild[1], `I9 PARITY Primary == PC2 nach Margin → Zero-rated (${bild[0] === bild[1] ? 'gleich' : bild.join(' ≠ ')})`);
+    { // Eingereichtes VAT-Quartal: die Steuerart wechselt dort NICHT (die bestehende Sperre gilt auch hier). Das Quartal einer
+      // Rechnung ist das ihres NBR-Datums (Tag der letzten Zahlung) — hier im September 2026 bezahlt, Q3 eingereicht.
+      const lock = await import('../../src/core/tax/vat-period-lock.ts');
+      const w = await welt();
+      nimm(w.db);
+      useInvoiceStore.getState().loadInvoices();
+      imHaus(() => useInvoiceStore.getState().recordPayment(w.invId, 1200, 'cash', undefined, undefined, undefined, undefined, undefined,
+        { receivedAt: '2026-09-14T10:00:00.000Z' }));
+      reload();
+      imHaus(() => lock.markVatQuarterFiled({ branchId: 'branch-main', year: 2026, quarter: 3, userId: 'user-test' }));
+      reload();
+      const vor = unberuehrt(w);
+      const linie0 = S(basis(w));
+      const m = aendern(w, [zeile(w, { taxScheme: 'ZERO', vatRate: 0, vatAmount: 0 })]);
+      ok(m !== '' && (m === lock.VAT_PERIOD_FILED || /VAT|filed|quarter/i.test(m)) && unberuehrt(w) === vor && S(basis(w)) === linie0,
+        `I9 Verkauf im eingereichten Quartal (Q3 2026) → Steuerart ändern abgewiesen, nichts verändert (${m.slice(0, 90)})`);
+    }
+  }
+
+  { // I10 CONSIGNMENT-SALE-TAX — „Record Sale" mit gewählter Steuerart (Primary und PC2), unbekannte Steuerart abgewiesen
+    const life = await import('../../src/core/bridge/lifecycle-commands.ts');
+    const ergebnis: string[] = [];
+    for (const weg of ['primary', 'fern'] as const) {
+      const w = await welt({ sale: null });
+      const input = { items: [{ consignmentId: w.cid, salePrice: 1200, acknowledgeShortfall: false, taxScheme: 'ZERO' as const }],
+        buyerId: 'cust-2', saleDate: '2026-09-13', specialMark: false };
+      nimm(w.db);
+      const r = weg === 'primary'
+        ? await primary(() => conHouse.recordConsignmentSalesOnPrimary(input))
+        : await fern(() => life.runRecordSale(deps(w.db), identity(nx(), 'consignments.record_sale'), {
+          items: [{ consignmentId: w.cid, expectedRevision: crev(w.db, w.cid), salePrice: 1200, acknowledgeShortfall: false, taxScheme: 'ZERO' }],
+          buyerId: 'cust-2', saleDate: '2026-09-13', specialMark: false,
+        }));
+      reload();
+      const l = row(w.db, "SELECT tax_scheme, vat_amount, line_total FROM invoice_lines WHERE invoice_id = (SELECT invoice_id FROM consignments WHERE id = ?)", [w.cid]);
+      ok(r.ok && l.tax_scheme === 'ZERO' && Number(l.vat_amount) === 0 && Number(l.line_total) === 1200
+        && s(w.db, 'SELECT tax_scheme FROM products WHERE id = ?', [w.pid]) === 'MARGIN',
+        `I10 ${weg}: Record Sale mit Zero-rated → Zeile ZERO, VAT 0, 1200; der Artikel selbst bleibt Margin (${r.code || 'ok'} ${S(l)})`);
+      ergebnis.push(S(l));
+    }
+    ok(ergebnis[0] === ergebnis[1], 'I10 PARITY Primary == PC2');
+    {
+      const w = await welt({ sale: null });
+      const vor = unberuehrt(w);
+      nimm(w.db);
+      const r = await fern(() => life.runRecordSale(deps(w.db), identity(nx(), 'consignments.record_sale'), {
+        items: [{ consignmentId: w.cid, expectedRevision: crev(w.db, w.cid), salePrice: 1200, acknowledgeShortfall: false, taxScheme: 'GOLD' }],
+        buyerId: 'cust-2', saleDate: '2026-09-13', specialMark: false,
+      }));
+      const h = await primary(() => conHouse.recordConsignmentSalesOnPrimary({ items: [{ consignmentId: w.cid, salePrice: 1200, acknowledgeShortfall: false, taxScheme: 'GOLD' as never }],
+        buyerId: 'cust-2', saleDate: '2026-09-13', specialMark: false }));
+      reload();
+      ok(!r.ok && !h.ok && /INVALID_TAX_SCHEME|taxScheme|PAYLOAD/i.test(r.code + ' ' + h.code) && unberuehrt(w) === vor,
+        `I10 unbekannte Steuerart → abgewiesen, nichts gebucht (${r.code} / ${h.code})`);
+    }
+    {
+      const w = await welt({ sale: null });
+      nimm(w.db);
+      const r = await primary(() => conHouse.recordConsignmentSalesOnPrimary({ items: [{ consignmentId: w.cid, salePrice: 1200, acknowledgeShortfall: false }],
+        buyerId: 'cust-2', saleDate: '2026-09-13', specialMark: false }));
+      reload();
+      ok(r.ok && s(w.db, "SELECT tax_scheme FROM invoice_lines LIMIT 1") === 'MARGIN', 'I10 ohne Wahl wie bisher: die Steuerart des Artikels (Margin)');
+    }
+    const dlg = src('src/components/consignments/ConsignmentSaleDialog.tsx');
+    ok(/data-consignment-sale-scheme/.test(dlg) && /taxScheme: r\.scheme/.test(dlg) && /\['MARGIN', 'VAT_10', 'ZERO'\] as const/.test(dlg),
+      'I10 der Dialog bietet die Steuerart je Artikel an und schickt sie mit');
+  }
   { // I7 Löschen, I8 Stornieren (Primary + PC2)
     const w = await welt();
     const vor = unberuehrt(w);

@@ -1122,7 +1122,10 @@ export function recordSupplierCreditRefundInHouse(input: SupplierCreditRefundInp
   const m = methodOf(input.method);
   const c = query(
     `SELECT sc.id, sc.supplier_id, sc.amount, sc.used_amount, sc.status, sc.source_return_id,
-            pr.status AS return_status, pr.return_date, pr.return_number, p.source_consignment_id
+            pr.status AS return_status, pr.return_date, pr.return_number,
+            COALESCE(p.source_consignment_id,
+              (SELECT pl.source_consignment_id FROM purchase_return_lines prl JOIN purchase_lines pl ON pl.id = prl.purchase_line_id
+                WHERE prl.return_id = pr.id AND pl.source_consignment_id IS NOT NULL LIMIT 1)) AS source_consignment_id
        FROM supplier_credits sc
        LEFT JOIN purchase_returns pr ON pr.id = sc.source_return_id
        LEFT JOIN purchases p ON p.id = pr.purchase_id

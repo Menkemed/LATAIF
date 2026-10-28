@@ -82,6 +82,8 @@ interface PurchaseInput {
     vatRate?: number;          // 0 oder 10
     // Back-to-Back: verknuepft diese Zeile mit der Order-Zeile, die sie ausgeloest hat.
     sourceOrderLineId?: string;
+    // CONSIGNOR-JOINT-PURCHASE — die Kommission DIESER Zeile (ein Einkauf je Einlieferer und Verkauf, eine Zeile je Artikel).
+    sourceConsignmentId?: string;
     // PARTNER-ITEMS — gemeinsam gekauft: die Partner und ihre Anteile (LATAIF haelt den Rest).
     partnerShares?: PartnerShareInput[];
     // BULK METAL V1 — die geprüfte Bulk-Zeile (Menge 1, Betrag = lineTotalFils).
@@ -194,6 +196,7 @@ function rowToLine(row: Record<string, unknown>): PurchaseLine {
     vatRate: row.vat_rate != null ? (row.vat_rate as number) : undefined,
     vatAmount: row.vat_amount != null ? (row.vat_amount as number) : undefined,
     sourceOrderLineId: (row.source_order_line_id as string | null) || undefined,
+    sourceConsignmentId: (row.source_consignment_id as string | null) || undefined,
     createdProduct: row.created_product === null || row.created_product === undefined ? undefined : Number(row.created_product) === 1,
   };
 }
@@ -312,6 +315,8 @@ export interface PurchaseLineRecord {
   qty: number; unitPrice: number; lineTotal: number; position: number;
   taxScheme: 'ZERO' | 'VAT_10'; vatRate: number; vatAmount: number;
   sourceOrderLineId: string | null;
+  /** CONSIGNOR-JOINT-PURCHASE — die Kommission dieser Zeile (nur beim Einkauf beim Einlieferer). */
+  sourceConsignmentId?: string | null;
   partnerShares?: PartnerShareInput[];
   bulk?: BulkPurchaseLine; bulkLotValueFils?: number;
   // PURCHASE-EDIT D13 — hat DIESE Zeile ihren Artikel angelegt? Dann gehören Einkaufspreis und
@@ -398,6 +403,7 @@ function buildPurchaseLineRecords(lines: readonly PurchaseInputLine[], purchaseD
       qty, unitPrice, lineTotal, position: firstPosition + idx,
       taxScheme: scheme, vatRate: rate, vatAmount,
       sourceOrderLineId: ln.sourceOrderLineId ?? null,
+      sourceConsignmentId: ln.sourceConsignmentId ?? null,
       partnerShares: ln.partnerShares,
       createdProduct,
     });
@@ -415,11 +421,11 @@ function insertPurchaseLineRows(
   const db = getDatabase();
   const { branchId, userId, now } = ctx;
   const lineStmt = db.prepare(
-    `INSERT INTO purchase_lines (id, purchase_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate, vat_amount, source_order_line_id, created_product)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    `INSERT INTO purchase_lines (id, purchase_id, product_id, description, quantity, unit_price, line_total, position, tax_scheme, vat_rate, vat_amount, source_order_line_id, created_product, source_consignment_id)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
   );
   for (const l of lineRecords) {
-    lineStmt.run([l.id, purchaseId, l.productId, l.description, l.qty, l.unitPrice, l.lineTotal, l.position, l.taxScheme, l.vatRate, l.vatAmount, l.sourceOrderLineId, l.createdProduct ? 1 : 0]);
+    lineStmt.run([l.id, purchaseId, l.productId, l.description, l.qty, l.unitPrice, l.lineTotal, l.position, l.taxScheme, l.vatRate, l.vatAmount, l.sourceOrderLineId, l.createdProduct ? 1 : 0, l.sourceConsignmentId ?? null]);
   }
   lineStmt.free();
 

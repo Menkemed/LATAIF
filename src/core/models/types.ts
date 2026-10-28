@@ -657,6 +657,9 @@ export interface ConsignorSide {
   refunds: ConsignorRefundRow[];
   /** Summe der noch offenen Rückforderungen (pending). */
   refundOpen: number;
+  /** CONSIGNOR-JOINT-PURCHASE — was bei „Return to Owner" vom Einlieferer zurückkäme: beim eigenen Einkauf das Bezahlte,
+   *  bei einem gemeinsamen Einkauf der Teil der Zeile, der über dessen offenen Rest hinaus schon bezahlt ist. */
+  returnRefund?: number;
 }
 
 export interface Consignment {
@@ -1285,6 +1288,8 @@ export interface PurchaseLine {
   // Back-to-Back Beschaffung: verknuepft diese Einkaufs-Zeile mit der Order-Zeile,
   // die sie ausgeloest hat. NULL = reine Lager-Zeile ohne Order-Bezug.
   sourceOrderLineId?: UUID;
+  /** CONSIGNOR-JOINT-PURCHASE — die Kommission dieser Einkaufszeile (Einkauf beim Einlieferer). */
+  sourceConsignmentId?: UUID;
   /** PURCHASE-EDIT D13 — true: diese Zeile hat ihren Artikel angelegt; undefined: Zeile von vor dem Vertrag. */
   createdProduct?: boolean;
 }

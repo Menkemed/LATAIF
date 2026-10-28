@@ -378,7 +378,8 @@ const gegenparteien = (db: Db): string => all(db,
   // CONSIGNMENT MULTI-SALE — der Einzelverkauf ist `recordSales` mit einem Artikel; dort fällt die Zuordnung je Artikel
   // vor dessen Einkauf und vor der Rechnung (und jedes Nein nimmt die ganze Klammer zurück).
   const beginn = rs.indexOf('recordSales: (params) => {');
-  const zu = rs.indexOf('findOrCreateSupplierForConsignor(con.consignorId)', beginn);
+  // CONSIGNOR-JOINT-PURCHASE — je Einlieferer (nicht mehr je Artikel): die Zuordnung vor SEINEM Einkauf und vor der Rechnung.
+  const zu = rs.indexOf('findOrCreateSupplierForConsignor(consignorId)', beginn);
   ok(beginn > 0 && zu > beginn && zu < rs.indexOf('usePurchaseStore.getState().createPurchase(', beginn) && zu < rs.indexOf('createInvoiceInHouse(', beginn),
     'V2 Filiale: die Zuordnung fällt VOR Einkauf und Rechnung — ein Nein hinterlässt keine Auszahlung');
 

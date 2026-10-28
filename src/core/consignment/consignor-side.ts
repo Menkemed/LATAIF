@@ -23,7 +23,7 @@ export function consignorSidesFor(branchId: string, rows: ReadonlyArray<Record<s
   const out = new Map<string, ConsignorSide>();
   const seite = (cid: string): ConsignorSide => {
     let s = out.get(cid);
-    if (!s) { s = { open: 0, paid: 0, refunds: [], refundOpen: 0 }; out.set(cid, s); }
+    if (!s) { s = { open: 0, paid: 0, refunds: [], refundOpen: 0, returnRefund: 0 }; out.set(cid, s); }
     return s;
   };
   for (const p of query(
@@ -40,6 +40,38 @@ export function consignorSidesFor(branchId: string, rows: ReadonlyArray<Record<s
     const s = seite(String(p.cid));
     s.open = r3(s.open + Number(p.offen));
     s.paid = r3(s.paid + Number(p.bar) + Number(p.guthaben));
+    s.returnRefund = r3((s.returnRefund ?? 0) + Number(p.bar) + Number(p.guthaben));
+  }
+  // CONSIGNOR-JOINT-PURCHASE — ein gemeinsamer Einkauf (mehrere Artikel desselben Einlieferers, die Kommission an der ZEILE):
+  // je Zeile ihr Wert (abzüglich ihrer Lieferanten-Retouren); das Bezahlte des Einkaufs (bar und per Guthaben) der Reihe nach
+  // auf die Zeilen verteilt. Die Bücher führt der Einkauf als Ganzes — das hier ist nur die Anzeige je Kommission.
+  for (const p of query(
+    `SELECT p.id, COALESCE(p.paid_amount, 0) AS bar, COALESCE(p.remaining_amount, 0) AS offen,
+            (SELECT COALESCE(SUM(pp.amount), 0) FROM purchase_payments pp
+              WHERE pp.purchase_id = p.id AND pp.method = 'credit' AND pp.voided_at IS NULL) AS guthaben
+       FROM purchases p
+      WHERE p.branch_id = ? AND p.source_consignment_id IS NULL AND p.status != 'CANCELLED'
+        AND EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.source_consignment_id IS NOT NULL)`,
+    [branchId],
+  )) {
+    let restF = Math.round((Number(p.bar) + Number(p.guthaben)) * 1000);
+    for (const l of query(
+      `SELECT pl.source_consignment_id AS cid,
+              pl.line_total - COALESCE((SELECT SUM(prl.line_total) FROM purchase_return_lines prl
+                                          JOIN purchase_returns pr ON pr.id = prl.return_id
+                                         WHERE prl.purchase_line_id = pl.id AND pr.status != 'CANCELLED'), 0) AS wert
+         FROM purchase_lines pl WHERE pl.purchase_id = ? AND pl.source_consignment_id IS NOT NULL ORDER BY pl.position, pl.id`,
+      [String(p.id)],
+    )) {
+      const wertF = Math.max(0, Math.round(Number(l.wert) * 1000));
+      const bezahltF = Math.min(restF, wertF);
+      restF -= bezahltF;
+      const s = seite(String(l.cid));
+      s.paid = r3(s.paid + bezahltF / 1000);
+      s.open = r3(s.open + (wertF - bezahltF) / 1000);
+      // Eine Zeilen-Retoure mindert zuerst den offenen Rest des Einkaufs; zurück käme nur der Überschuss.
+      s.returnRefund = r3((s.returnRefund ?? 0) + Math.max(0, wertF - Math.round(Number(p.offen) * 1000)) / 1000);
+    }
   }
   for (const e of query(
     `SELECT e.related_entity_id AS cid,
@@ -69,18 +101,30 @@ export function consignorSidesFor(branchId: string, rows: ReadonlyArray<Record<s
       }]);
     }
   }
+  // CONSIGNOR-JOINT-PURCHASE — die Kommission einer Retoure: am Einkauf (ein Einkauf je Kommission) oder an der
+  // zurückgegebenen Zeile (gemeinsamer Einkauf); „aktuell" über das Los genau dieser Zeile.
   for (const r of query(
-    `SELECT pr.id, pr.return_number, pr.return_date, pr.refund_method, pr.refund_amount, p.source_consignment_id AS cid,
-            sc.id AS credit_id, sc.amount AS credit_amount, sc.used_amount AS credit_used,
-            EXISTS (SELECT 1 FROM invoice_lines il JOIN stock_lots sl ON sl.id = il.lot_id
-                      JOIN consignments c ON c.invoice_id = il.invoice_id
-                     WHERE c.id = p.source_consignment_id AND sl.purchase_id = p.id) AS aktuell
-       FROM purchase_returns pr
-       JOIN purchases p ON p.id = pr.purchase_id
-       LEFT JOIN supplier_credits sc ON sc.source_return_id = pr.id
-      WHERE pr.branch_id = ? AND pr.status != 'CANCELLED' AND p.source_consignment_id IS NOT NULL
-        AND COALESCE(pr.refund_amount, 0) > 0.0005
-      ORDER BY pr.created_at ASC, pr.id ASC`,
+    `SELECT x.*, EXISTS (SELECT 1 FROM invoice_lines il JOIN stock_lots sl ON sl.id = il.lot_id
+                           JOIN consignments c ON c.invoice_id = il.invoice_id
+                          WHERE c.id = x.cid AND sl.purchase_id = x.purchase_id
+                            AND (x.line_id IS NULL OR sl.purchase_line_id = x.line_id)) AS aktuell
+       FROM (
+         SELECT pr.id, pr.return_number, pr.return_date, pr.refund_method, pr.refund_amount, pr.created_at AS created,
+                p.id AS purchase_id,
+                COALESCE(p.source_consignment_id,
+                  (SELECT pl.source_consignment_id FROM purchase_return_lines prl JOIN purchase_lines pl ON pl.id = prl.purchase_line_id
+                    WHERE prl.return_id = pr.id AND pl.source_consignment_id IS NOT NULL LIMIT 1)) AS cid,
+                CASE WHEN p.source_consignment_id IS NULL THEN
+                  (SELECT pl.id FROM purchase_return_lines prl JOIN purchase_lines pl ON pl.id = prl.purchase_line_id
+                    WHERE prl.return_id = pr.id AND pl.source_consignment_id IS NOT NULL LIMIT 1) END AS line_id,
+                sc.id AS credit_id, sc.amount AS credit_amount, sc.used_amount AS credit_used
+           FROM purchase_returns pr
+           JOIN purchases p ON p.id = pr.purchase_id
+           LEFT JOIN supplier_credits sc ON sc.source_return_id = pr.id
+          WHERE pr.branch_id = ? AND pr.status != 'CANCELLED' AND COALESCE(pr.refund_amount, 0) > 0.0005
+       ) x
+      WHERE x.cid IS NOT NULL
+      ORDER BY x.created ASC, x.id ASC`,
     [branchId],
   )) {
     const s = seite(String(r.cid));

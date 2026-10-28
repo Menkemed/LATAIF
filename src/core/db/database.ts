@@ -2607,6 +2607,10 @@ function runMigrations(database: Database): void {
     // wählbar). Bestehende Lieferanten bleiben 0 — der Owner markiert seine Werkstätten selbst, nichts wird
     // umklassifiziert. Einkäufe, Zahlungen und Buchungen hängen nicht daran. Synchronisiert mit der Lieferantenzeile.
     `ALTER TABLE suppliers ADD COLUMN is_workshop INTEGER NOT NULL DEFAULT 0`,
+    // CONSIGNOR-JOINT-PURCHASE — ein gemeinsamer Verkauf mehrerer Artikel DESSELBEN Einlieferers legt EINEN Einkauf mit einer
+    // Zeile je Artikel an; jede Zeile nennt ihre Kommission. Bestehende Einkäufe bleiben unberührt: ihre Zeilen haben NULL,
+    // und die Suche fällt dort auf `purchases.source_consignment_id` zurück (ein Einkauf je Kommission, wie bisher).
+    `ALTER TABLE purchase_lines ADD COLUMN source_consignment_id TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

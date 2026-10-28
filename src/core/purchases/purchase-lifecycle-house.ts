@@ -772,7 +772,9 @@ export function cancelPurchaseInHouse(purchaseId: string, branchId: string, opts
   // Sperre 5 — v0.8.91: brachte DIESER Einkauf einen früheren Kommissions-/Agentenartikel auf „eigen" (und hält seinen
   // ganzen Bestand), ist die Herkunft davor nicht festgehalten — nicht raten, sperren. Der Auto-Einkauf einer
   // Kommission ist ausgenommen: dort bleibt der Artikel Kommissionsware, und die Umkehr der Kommission setzt sie selbst.
-  const kommissionsEinkauf = !!p.source_consignment_id || /^Consignor payout/.test(String(p.notes ?? ''));
+  const kommissionsEinkauf = !!p.source_consignment_id || /^Consignor payout/.test(String(p.notes ?? ''))
+    // CONSIGNOR-JOINT-PURCHASE — der gemeinsame Einkauf nennt die Kommission an seinen Zeilen.
+    || query('SELECT 1 FROM purchase_lines WHERE purchase_id = ? AND source_consignment_id IS NOT NULL LIMIT 1', [purchaseId]).length > 0;
   if (!kommissionsEinkauf) {
     const loseJeArtikel = new Map<string, string[]>();
     for (const l of query(`SELECT id, product_id FROM stock_lots WHERE purchase_id = ? AND status != 'CANCELLED'`, [purchaseId])) {

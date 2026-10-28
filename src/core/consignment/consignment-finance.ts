@@ -33,12 +33,29 @@ export interface ConsignmentSaleInput {
   specialMark: boolean;
 }
 
+/** CONSIGNMENT-SALE-TAX — die Steuerarten, die „Record Sale" je Artikel annimmt (wie eine gewöhnliche Rechnungszeile). */
+export const CONSIGNMENT_SALE_TAX_SCHEMES = ['MARGIN', 'VAT_10', 'ZERO'] as const;
+export type ConsignmentSaleTaxScheme = typeof CONSIGNMENT_SALE_TAX_SCHEMES[number];
+export const isConsignmentSaleTaxScheme = (v: unknown): v is ConsignmentSaleTaxScheme =>
+  typeof v === 'string' && (CONSIGNMENT_SALE_TAX_SCHEMES as readonly string[]).includes(v);
+
 /** CONSIGNMENT MULTI-SALE — ein Artikel des gemeinsamen Verkaufs (je Artikel Preis und ggf. die Bestätigung der Unterdeckung). */
 export interface ConsignmentSaleItemInput {
   consignmentId: string;
   salePrice: number;
   acknowledgeShortfall: boolean;
+  /** CONSIGNMENT-SALE-TAX — die gewählte Steuerart der Rechnungszeile; fehlt = die des Artikels (sonst MARGIN). */
+  taxScheme?: ConsignmentSaleTaxScheme;
+  /** CONSIGNOR-PURCHASE-VAT — die Steuer des Einkaufs beim Einlieferer, GETRENNT von der Rechnung: ohne VAT (Vorgabe,
+   *  nicht steuerpflichtiger Einlieferer) oder VAT 10 % (steuerpflichtige Lieferung mit gültiger Steuerrechnung). */
+  consignorTaxScheme?: ConsignorPurchaseTaxScheme;
 }
+
+/** CONSIGNOR-PURCHASE-VAT — was der Einkauf beim Einlieferer annimmt. */
+export const CONSIGNOR_PURCHASE_TAX_SCHEMES = ['ZERO', 'VAT_10'] as const;
+export type ConsignorPurchaseTaxScheme = typeof CONSIGNOR_PURCHASE_TAX_SCHEMES[number];
+export const isConsignorPurchaseTaxScheme = (v: unknown): v is ConsignorPurchaseTaxScheme =>
+  typeof v === 'string' && (CONSIGNOR_PURCHASE_TAX_SCHEMES as readonly string[]).includes(v);
 
 /**
  * CONSIGNMENT MULTI-SALE — die EINGABEN des Verkaufsdialogs: ein oder mehrere Artikel (auch verschiedener
@@ -91,6 +108,8 @@ export function consignmentSalesBody(i: ConsignmentMultiSaleInput, revisions: Re
     items: i.items.map((it) => ({
       consignmentId: it.consignmentId, expectedRevision: revisions[it.consignmentId],
       salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall,
+      ...(it.taxScheme ? { taxScheme: it.taxScheme } : {}),
+      ...(it.consignorTaxScheme ? { consignorTaxScheme: it.consignorTaxScheme } : {}),
     })),
     buyerId: i.buyerId,
     specialMark: i.specialMark,

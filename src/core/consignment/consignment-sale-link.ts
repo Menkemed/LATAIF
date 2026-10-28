@@ -19,6 +19,8 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { query } from '@/core/db/helpers';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
+import { vatEngine } from '@/core/tax/vat-engine';
+import type { TaxScheme } from '@/core/models/types';
 
 /** Status einer Kommission, deren Ware noch beim Händler liegt und noch nicht verkauft ist. */
 const OPEN_CONSIGNMENT = ['active', 'IN_STOCK'];
@@ -159,7 +161,11 @@ const gleich = (a: number, b: number): boolean => Math.abs((Number(a) || 0) - (N
 
 /**
  * Rechnung ändern: ist sie die Verkaufsrechnung einer Kommission, bleiben ihre Zeilen, wie „Record Sale" sie
- * schrieb (Artikel, Menge, Preis, Steuerart, Summe; keine Zeile dazu, keine weg), und der Käufer bleibt.
+ * schrieb (Artikel, Menge, Preis, Summe; keine Zeile dazu, keine weg), und der Käufer bleibt.
+ *
+ * CONSIGNMENT-SALE-TAX — die STEUERART einer Zeile darf wechseln (z. B. „Margin" → „Zero-rated"): sie bestimmt nur
+ * die VAT der Rechnung, nicht Provision, Auszahlung oder den Einkauf beim Einlieferer (der rechnet mit dem
+ * Verkaufspreis). Was der Käufer zahlt — der Preis inkl. VAT — bleibt der Verkaufspreis der Kommission.
  */
 export function assertConsignmentSaleInvoiceEdit(
   invoiceId: string,
@@ -179,11 +185,27 @@ export function assertConsignmentSaleInvoiceEdit(
     throw gesperrt(c, 'Its lines cannot be added, removed or replaced.');
   }
   const byId = new Map(base.map((b) => [b.id, b]));
+  const artikel = 'Its item, quantity and price belong to the consignment (commission, payout and the consignor\'s purchase).';
   next.forEach((n, i) => {
     const b = byId.get(lineMatch[i] as string);
-    if (!b || (n.productId ?? null) !== b.productId || !gleich(n.quantity ?? 1, b.qty) || !gleich(n.unitPrice, b.unitPrice)
-      || String(n.taxScheme) !== String(b.taxScheme) || !gleich(n.lineTotal, b.lineTotal)) {
-      throw gesperrt(c, 'Its item, quantity and price belong to the consignment (commission, payout and the consignor\'s purchase).');
+    if (!b || (n.productId ?? null) !== b.productId || !gleich(n.quantity ?? 1, b.qty)) throw gesperrt(c, artikel);
+    if (String(n.taxScheme) === String(b.taxScheme)) {
+      if (!gleich(n.unitPrice, b.unitPrice) || !gleich(n.lineTotal, b.lineTotal)) throw gesperrt(c, artikel);
+      return;
+    }
+    // Neue Steuerart: der Bruttobetrag nach DERSELBEN Regel wie die Rechnung (Margin/Zero: Preis = brutto, VAT 10 %:
+    // netto + 10 %) — er muss der gespeicherte Verkaufspreis bleiben.
+    const scheme = String(n.taxScheme) as TaxScheme;
+    const rate = scheme === 'ZERO' ? 0 : 10;
+    const brutto = vatEngine.calculateNet((Number(n.unitPrice) || 0) * (n.quantity ?? 1), 0, scheme, rate).grossAmount;
+    if (!gleich(brutto, b.lineTotal)) {
+      const preis = Number(b.lineTotal).toFixed(3);
+      // Kein „Cancel Sale"-Rat hier: die Steuerart lässt sich ja ändern, nur der Preis muss stimmen.
+      throw new InvoiceActionRejected(CONSIGNMENT_INVOICE_LOCKED,
+        `This invoice is the sale of ${c.length > 1 ? 'consignments' : 'consignment'} ${c.map((k) => k.number || k.id).join(', ')}. `
+        + `Only the tax scheme of a line can change — the price incl. VAT stays ${preis} BHD (the consignment sale price). `
+        + (scheme === 'VAT_10' ? `For VAT 10 % enter the net price ${(Number(b.lineTotal) / 1.1).toFixed(3)}.` : `Enter the price ${preis}.`)
+        + ' Nothing was changed.');
     }
   });
 }

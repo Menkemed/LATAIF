@@ -201,6 +201,8 @@ export function ConsignmentDetail() {
     if (consignment.status !== 'sold' && consignment.status !== 'paid_out') return null;
     // PURCHASE-EDIT B6 — die Spalte zuerst; der Vermerk nur für einen Altbestand ohne Spalte.
     return purchases.find(p => p.sourceConsignmentId === consignment.id && p.status !== 'CANCELLED')
+      // CONSIGNOR-JOINT-PURCHASE — ein gemeinsamer Einkauf nennt die Kommission an seiner Zeile.
+      || purchases.find(p => p.status !== 'CANCELLED' && (p.lines || []).some(l => l.sourceConsignmentId === consignment.id))
       || purchases.find(p => !p.sourceConsignmentId && p.status !== 'CANCELLED' && (p.notes || '').includes(consignment.consignmentNumber)) || null;
   }, [purchases, consignment]);
   // D2 — die Kommissionen DESSELBEN Verkaufs (eine Rechnung): Cancel Sale nimmt sie alle zurück.
@@ -267,6 +269,8 @@ export function ConsignmentDetail() {
 
   // D3 — was der Einlieferer für diesen Verkauf schon bekam (bar und per Guthaben, über seinen Einkauf).
   const consignorPaid = consignment.consignorSide?.paid ?? 0;
+  // CONSIGNOR-JOINT-PURCHASE — was bei „Return to Owner" zurückkäme (beim gemeinsamen Einkauf nur der Teil über dessen offenem Rest).
+  const consignorReturnRefund = consignment.consignorSide?.returnRefund ?? consignorPaid;
 
   // Linked invoice (no useMemo needed — simple lookup, can stay after early return).
   const linkedInvoice = consignment.invoiceId ? invoices.find(i => i.id === consignment.invoiceId) : null;
@@ -1044,9 +1048,9 @@ export function ConsignmentDetail() {
             </div>
           </button>
         </div>
-        {postSaleDisposition === 'RETURN_TO_OWNER' && consignorPaid > 0.0005 && (
+        {postSaleDisposition === 'RETURN_TO_OWNER' && consignorReturnRefund > 0.0005 && (
           <div style={{ marginBottom: 16 }}>
-            <ConsignorRefundPicker paid={consignorPaid} name={consignorName} value={postSaleConsignorRefund}
+            <ConsignorRefundPicker paid={consignorReturnRefund} name={consignorName} value={postSaleConsignorRefund}
               onChange={setPostSaleConsignorRefund} testId={consignment.id} />
           </div>
         )}
@@ -1137,14 +1141,17 @@ export function ConsignmentDetail() {
           </div>
         ))}
         {/* D3 — ein schon bezahlter Einlieferer: seine Auszahlung wird nicht still als zurückgekommen gebucht. */}
-        {saleGroup.filter(c => c.invoiceId && (c.consignorSide?.paid ?? 0) > 0.0005).map(c => {
-          const k = customers.find(x => x.id === c.consignorId);
-          const name = `${k ? `${k.firstName} ${k.lastName}`.trim() : 'The consignor'}${saleGroup.length > 1 ? ` (${c.consignmentNumber})` : ''}`;
+        {/* CONSIGNOR-JOINT-PURCHASE — EINE Wahl je Einlieferer (sein Einkauf dieses Verkaufs), mit der Summe des Bezahlten. */}
+        {[...new Set(saleGroup.filter(c => c.invoiceId && (c.consignorSide?.paid ?? 0) > 0.0005).map(c => c.consignorId))].map(cid => {
+          const seine = saleGroup.filter(c => c.invoiceId && c.consignorId === cid && (c.consignorSide?.paid ?? 0) > 0.0005);
+          const k = customers.find(x => x.id === cid);
+          const name = `${k ? `${k.firstName} ${k.lastName}`.trim() : 'The consignor'}${saleGroup.length > 1 ? ` (${seine.map(c => c.consignmentNumber).join(', ')})` : ''}`;
+          const erste = seine[0];
           return (
-            <div key={c.id} style={{ marginBottom: 12 }}>
-              <ConsignorRefundPicker paid={c.consignorSide?.paid ?? 0} name={name}
-                value={cancelRefunds[c.id] ?? { mode: 'received', method: 'cash' }}
-                onChange={(v) => setCancelRefunds(prev => ({ ...prev, [c.id]: v }))} testId={c.id} />
+            <div key={cid} style={{ marginBottom: 12 }}>
+              <ConsignorRefundPicker paid={seine.reduce((s, c) => s + (c.consignorSide?.paid ?? 0), 0)} name={name}
+                value={cancelRefunds[erste.id] ?? { mode: 'received', method: 'cash' }}
+                onChange={(v) => setCancelRefunds(prev => ({ ...prev, ...Object.fromEntries(seine.map(c => [c.id, v])) }))} testId={erste.id} />
             </div>
           );
         })}

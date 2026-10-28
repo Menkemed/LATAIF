@@ -35,7 +35,10 @@ import { TransferActionRejected, transferConvertBlocker, type TransferBillTo } f
 import { convertTransferInHouse, convertTransfersInHouse, type TransferConversion } from '@/core/agents/transfer-house';
 import { VatPeriodFiled } from '@/core/tax/vat-period-lock';
 import { assertHouseBranch } from './remote-create-support';
-import { ConsignmentActionRejected, MAX_SALE_ITEMS } from '@/core/consignment/consignment-finance';
+import {
+  ConsignmentActionRejected, MAX_SALE_ITEMS, isConsignmentSaleTaxScheme, isConsignorPurchaseTaxScheme,
+  type ConsignmentSaleTaxScheme, type ConsignorPurchaseTaxScheme,
+} from '@/core/consignment/consignment-finance';
 import { recordConsignmentSalesInHouse, type ConsignmentsSold } from '@/core/consignment/consignment-finance-house';
 import { invoiceCreatePayments, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
@@ -369,7 +372,10 @@ export interface RecordSaleRequest {
    * CONSIGNMENT MULTI-SALE — der gemeinsame Verkauf: je Artikel Kommission, gesehene Fassung, Preis und Bestätigung.
    * Gesetzt, wenn der Rumpf `items` trägt; dann sind `consignmentId`/`salePrice`/`expectedRevision` die des ersten.
    */
-  items?: Array<{ consignmentId: string; expectedRevision: number; salePrice: number; acknowledgeShortfall: boolean }>;
+  items?: Array<{
+    consignmentId: string; expectedRevision: number; salePrice: number; acknowledgeShortfall: boolean;
+    taxScheme?: ConsignmentSaleTaxScheme; consignorTaxScheme?: ConsignorPurchaseTaxScheme;
+  }>;
   /** CONSIGNMENT MULTI-SALE (D5) — Zahlungen beim Verkauf, dieselben Zeilen wie bei `invoices.create`. */
   payments?: InvoiceCreatePayment[];
 }
@@ -430,12 +436,20 @@ function parseRecordSales(raw: Record<string, unknown>): RecordSaleRequest {
   if (raw.items.length > MAX_SALE_ITEMS) throw new FinancialPayloadError(`at most ${MAX_SALE_ITEMS} items in one sale`);
   const items = raw.items.map((it, i) => {
     if (!isPlain(it)) throw new FinancialPayloadError(`item ${i + 1} must be an object`);
-    onlyKnownFields(it, ['consignmentId', 'expectedRevision', 'salePrice', 'acknowledgeShortfall']);
+    onlyKnownFields(it, ['consignmentId', 'expectedRevision', 'salePrice', 'acknowledgeShortfall', 'taxScheme', 'consignorTaxScheme']);
+    if (it.taxScheme !== undefined && !isConsignmentSaleTaxScheme(it.taxScheme)) {
+      throw new FinancialPayloadError(`item ${i + 1} taxScheme must be MARGIN, VAT_10 or ZERO`);
+    }
+    if (it.consignorTaxScheme !== undefined && !isConsignorPurchaseTaxScheme(it.consignorTaxScheme)) {
+      throw new FinancialPayloadError(`item ${i + 1} consignorTaxScheme must be ZERO or VAT_10`);
+    }
     return {
       consignmentId: reqString(it.consignmentId, `item ${i + 1} consignmentId`),
       expectedRevision: expectedRevisionOf(it.expectedRevision),
       salePrice: positive(it.salePrice, `item ${i + 1} salePrice`),
       acknowledgeShortfall: it.acknowledgeShortfall === true,
+      ...(it.taxScheme !== undefined ? { taxScheme: it.taxScheme as ConsignmentSaleTaxScheme } : {}),
+      ...(it.consignorTaxScheme !== undefined ? { consignorTaxScheme: it.consignorTaxScheme as ConsignorPurchaseTaxScheme } : {}),
     };
   });
   if (new Set(items.map((it) => it.consignmentId)).size !== items.length) {
@@ -471,7 +485,11 @@ export function runRecordSale(deps: EngineDeps, identity: CommandIdentity, raw: 
       // entsteht), Rechnung an den Käufer im gewählten Kreis, bei Unterdeckung die Verlust-Ausgabe,
       // Status und Menge — in DIESER Transaktion. Die gesehene Fassung JEDER Kommission ist der letzte Wächter.
       result = recordConsignmentSalesInHouse({
-        items: items.map((it) => ({ consignmentId: it.consignmentId, salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall })),
+        items: items.map((it) => ({
+          consignmentId: it.consignmentId, salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall,
+          ...('taxScheme' in it && it.taxScheme ? { taxScheme: it.taxScheme } : {}),
+          ...('consignorTaxScheme' in it && it.consignorTaxScheme ? { consignorTaxScheme: it.consignorTaxScheme } : {}),
+        })),
         buyerId: req.buyerId, saleDate: req.saleDate, notes: req.notes, specialMark: req.specialMark,
         ...(req.payments ? { payments: req.payments } : {}),
       }, identity.branchId, () => {

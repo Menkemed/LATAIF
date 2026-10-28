@@ -406,7 +406,10 @@ try {
     return String(r.body?.value?.consignmentId || '');
   }
   const kon = (id) => zeile('consignments', id);
-  const einkaufVon = (cid) => dbQ(BIZ_DB, "SELECT * FROM purchases WHERE source_consignment_id = ? AND status != 'CANCELLED' ORDER BY rowid DESC", [cid])[0] || {};
+  // CONSIGNOR-JOINT-PURCHASE — der Einkauf einer Kommission: an der Spalte des Einkaufs (allein) oder an seiner Zeile (gemeinsam).
+  const einkaufVon = (cid) => dbQ(BIZ_DB, `SELECT p.* FROM purchases p WHERE p.status != 'CANCELLED'
+    AND (p.source_consignment_id = ? OR EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.source_consignment_id = ?))
+    ORDER BY p.rowid DESC`, [cid, cid])[0] || {};
   /** PC2: die Kommissionsliste, Reiter „Items". */
   async function itemsListe() {
     await syncRuhe();
@@ -477,17 +480,22 @@ try {
     const pays = dbQ(BIZ_DB, 'SELECT method, amount FROM payments WHERE invoice_id = ? ORDER BY amount', [inv]);
     ok(S(pays.map((p) => [p.method, r3(p.amount)])) === S([['benefit', 500], ['cash', 1000]]), `C Zahlungen bar + Benefit (${S(pays)})`);
     const ein = [K1, K2, K3].map((k) => einkaufVon(k));
-    ok(S(ein.map((p) => r3(p.total_amount))) === S([800, 1600, 2400]) && ein[0].supplier_id === ein[1].supplier_id && ein[0].supplier_id !== ein[2].supplier_id,
-      `C je Artikel ein Einkauf, Verbindlichkeit je Einlieferer getrennt (${S(ein.map((p) => [p.total_amount, p.supplier_id]))})`);
+    const zeilenA = dbQ(BIZ_DB, 'SELECT source_consignment_id AS k, line_total AS v FROM purchase_lines WHERE purchase_id = ? ORDER BY position', [ein[0].id]);
+    ok(ein[0].id && ein[0].id === ein[1].id && ein[0].id !== ein[2].id && r3(ein[0].total_amount) === 2400 && r3(ein[2].total_amount) === 2400
+      && ein[0].supplier_id !== ein[2].supplier_id
+      && S(zeilenA.map((z) => [z.k, r3(z.v)]).sort((x, y) => x[1] - y[1])) === S([[K1, 800], [K2, 1600]])
+      && zahl('SELECT COUNT(*) AS n FROM purchase_payments') === 0,
+    `C je Einlieferer EIN Einkauf: A 2400 (Zeilen 800 / 1600), B 2400 — nichts automatisch ausgezahlt (${S(ein.map((p) => [p.total_amount, p.supplier_id]))})`);
     ok(r3(zahl("SELECT COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0) AS n FROM ledger_entries")) === 0, 'C Hauptbuch ausgeglichen');
   }
 
   // ── D D3: Einlieferer A ist für K1 bezahlt; der Käufer bringt K1 zurück → „Repayment still open" am PC2 ────
   {
+    // Der gemeinsame Einkauf von Einlieferer A (K1 + K2, 2400) wird ganz bezahlt; zurück käme bei K1 genau seine Zeile (800).
     const p1 = einkaufVon(K1);
-    const z = await sende(client, 'purchases.record_payment', { purchaseId: p1.id, expectedRevision: Number(p1.revision), amount: 800, method: 'bank' });
+    const z = await sende(client, 'purchases.record_payment', { purchaseId: p1.id, expectedRevision: Number(p1.revision), amount: 2400, method: 'bank' });
     await spuelen(primary);
-    ok(z.status === 200 && z.body?.ok && zeile('purchases', p1.id).status === 'PAID', `D Einkauf K1 bezahlt (bank 800) (${z.status})`);
+    ok(z.status === 200 && z.body?.ok && zeile('purchases', p1.id).status === 'PAID', `D gemeinsamer Einkauf von A bezahlt (bank 2400) (${z.status})`);
     const bank = saldo('BANK');
     await syncRuhe();
     client = await lade(client, `/consignments/${K1}`);
@@ -717,8 +725,14 @@ try {
       await primary.ev("document.querySelector('button[type=submit]')?.click(); return 1;");
     }
     await waitFor(primary, SHELL, 90000);
+    // Nach dem Neustart auf dem wiederhergestellten Stand braucht die erste Seite unter Last länger (Startroutinen) — 90 s.
+    const fehlerR4 = [];
+    primary.ws.addEventListener('message', (e) => { try { const m = JSON.parse(e.data); if (m.method === 'Runtime.exceptionThrown') fehlerR4.push(m.params?.exceptionDetails?.exception?.description || m.params?.exceptionDetails?.text || ''); if (m.method === 'Runtime.consoleAPICalled' && m.params.type === 'error') fehlerR4.push((m.params.args || []).map((a) => a.value ?? a.description ?? '').join(' ')); } catch { /* egal */ } });
+    await primary.send('Runtime.enable').catch(() => null);
     await gehFrisch(primary, `/consignments/${K1}`);
-    const beleg = await warteBis(primary, "document.querySelector('[data-consignor-repayment-status=\"partial\"]') && document.querySelector('[data-consignor-repayment-receipts]') && /Received .* Cash/.test(document.querySelector('[data-consignor-repayment-receipts]').innerText)", 30000);
+    const beleg = await warteBis(primary, "document.querySelector('[data-consignor-repayment-status=\"partial\"]') && document.querySelector('[data-consignor-repayment-receipts]') && /Received .* Cash/.test(document.querySelector('[data-consignor-repayment-receipts]').innerText)", 90000);
+    if (!beleg) console.log('      (R4 Fehler) ' + fehlerR4.join(' ~ ').slice(0, 1500));
+    if (!beleg) console.log('      (R4 Diagnose) ' + String(await primary.ev("const c = document.querySelector('[data-consignor-repayment]'); return [location.pathname, c ? 'KARTE ' + c.getAttribute('data-consignor-repayment-status') : 'KEINE KARTE', document.body.innerText.split(String.fromCharCode(10)).join(' | ').slice(0, 1500)].join(' || ');").catch((x) => String(x))));
     await gehFrisch(primary, '/suppliers');
     const markiert = await warteBis(primary, "document.querySelectorAll('[data-supplier-workshop-badge]').length === 1", 30000);
     await gehFrisch(primary, `/repairs/${repId}`);
