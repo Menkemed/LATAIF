@@ -75,6 +75,9 @@ const LEGACY_LOCAL_NON_SYNC = new Set<string>([
   'bulk_lot_sequences',
   // PURCHASE-EDIT Phase 2 — edit log and cost corrections: primary-only like vat_filings; PC2 reads them through the bridge.
   'purchase_edits', 'cost_corrections',
+  // CONSIGNMENT D3 — receipts on a consignor's open repayment: primary-only like cost_corrections; PC2 reads them through
+  // the bridge (the ledger rows and the supplier credit sync normally).
+  'supplier_credit_refunds',
 ]);
 const LOCAL_INACTIVE_MEDIA = new Set<string>(MEDIA_TABLES);
 const DEPRECATED_OR_UNREACHABLE_DDL = new Set<string>(); // none; see §2 note below.
@@ -112,7 +115,8 @@ for (let i = 0; i < names.length; i++) for (let j = i + 1; j < names.length; j++
 ok(LEGACY_SYNC_APPLY.size === 57, `legacy_sync_apply = 57 sync allowlist tables (got ${LEGACY_SYNC_APPLY.size})`);
 for (const t of LEGACY_SYNC_APPLY) ok(actualLegacy.has(t), `sync_apply table ${t} is present in the legacy DDL`);
 // PURCHASE-EDIT Phase 2: +2 primary-only tables purchase_edits, cost_corrections → 29.
-ok(LEGACY_LOCAL_NON_SYNC.size === 29, `legacy_local_non_sync = 29 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
+// CONSIGNMENT D3: +1 primary-only table supplier_credit_refunds → 30.
+ok(LEGACY_LOCAL_NON_SYNC.size === 30, `legacy_local_non_sync = 30 (got ${LEGACY_LOCAL_NON_SYNC.size})`);
 ok(DEPRECATED_OR_UNREACHABLE_DDL.size === 0, 'deprecated_or_unreachable_ddl is empty (nothing unreachable)');
 
 // media: scanner sees them (anti-hiding), they equal MEDIA_TABLES, none is synced
