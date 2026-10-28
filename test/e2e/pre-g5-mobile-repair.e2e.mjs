@@ -229,14 +229,14 @@ const MAKE_PHOTO = (seed) => `
   x.fillStyle = '#111'; x.font = '28px sans-serif'; x.fillText('P${seed}', 20, 100);
   return c.toDataURL('image/jpeg', 0.9);`;
 
-/** Ein Foto in die Maske legen — denselben Weg wie die Kamera: ueber den Datei-Eingang. */
-async function fotoLegen(phone, seed) {
+/** Ein Foto in die Maske legen — ueber den Datei-Eingang der Kamera (Vorgabe) oder der Galerie (MOBILE-REPAIR-GALLERY). */
+async function fotoLegen(phone, seed, eingang = 'rpPhotoInput') {
   return phone.ev(`
     const dataUrl = await (async () => { ${MAKE_PHOTO(seed)} })();
     const res = await fetch(dataUrl); const blob = await res.blob();
     const file = new File([blob], 'p${seed}.jpg', { type: 'image/jpeg' });
     const dt = new DataTransfer(); dt.items.add(file);
-    const inp = document.getElementById('rpPhotoInput');
+    const inp = document.getElementById(${S(eingang)});
     inp.files = dt.files;
     inp.dispatchEvent(new Event('change', { bubbles: true }));
     return 'OK';`);
@@ -354,8 +354,9 @@ try {
     const zurueck = await phone.ev("return { iso: document.getElementById('rpCustomerPhoneIso').value, nr: document.getElementById('rpCustomerPhone').value, id: document.getElementById('rpCustomerPersonalId').value };");
     ok(zurueck.iso === 'BH' && zurueck.nr === '' && zurueck.id === '', `M1 KONTAKT nach dem Anlegen steht die Maske wieder auf Bahrain und leer (${S(zurueck)})`);
 
+    // MOBILE-REPAIR-GALLERY — ein Foto von der Kamera, eines aus der Galerie: beide in dieselbe Reparatur.
     await fotoLegen(phone, 1); await sleep(400);
-    await fotoLegen(phone, 2); await sleep(400);
+    await fotoLegen(phone, 2, 'rpGalleryInput'); await sleep(400);
     const fotos = await fotoZahl(phone);
 
     await setVal(phone, '#rpIssue', ISSUE1);
@@ -404,7 +405,7 @@ try {
     const vorNachweis = nachweisFuer('repairs.update');
     await setVal(phone, '#rpIssue', ISSUE2);
     await setVal(phone, '#rpNotes', 'Handed in at the counter');
-    await fotoLegen(phone, 3); await sleep(400);
+    await fotoLegen(phone, 3, 'rpGalleryInput'); await sleep(400);
     await klick(phone, '#rpSaveBtn');
     const gespeichert = await warteBis(phone, `/Changes saved/.test(document.getElementById('rpSuccess').textContent)`, 120000);
     const zeile = repById(REP_ID) || {};
@@ -540,6 +541,18 @@ try {
     const aufDetail = await warteBis(client, `document.body.innerText.includes(${S(REP_NR)}) && [...document.querySelectorAll('button')].some(b=>/Edit|Save/.test(b.textContent))`, 60000);
     MESS.m5 = { listeSichtbar: sichtbar, detail: aufDetail };
     ok(sichtbar, `M5 PC2 sieht die Reparatur des Telefons in seiner Liste (${REP_NR})`);
+    // MOBILE-REPAIR-GALLERY — die Fotos des Telefons (Kamera + Galerie) stehen in der Reparatur auf PC2 UND am
+    // Primary — wirklich geladen (naturalWidth > 0), nicht nur als leere Rahmen.
+    const sollBilder = fotosVon(REP_ID).length;
+    const geladen = `[...document.querySelectorAll('img[alt^="Item photo"]')].filter((i) => i.complete && i.naturalWidth > 0).length`;
+    const pc2Bilder = await warteBis(client, `${geladen} === ${sollBilder}`, 60000);
+    const pc2Zahl = await client.ev(`return ${geladen};`);
+    ok(sollBilder === 3 && pc2Bilder, `GALERIE PC2 zeigt alle Fotos der Telefon-Reparatur, geladen (${pc2Zahl}/${sollBilder})`);
+    await primary.ev(`history.pushState({}, '', '/repairs/' + ${S(REP_ID)}); window.dispatchEvent(new PopStateEvent('popstate')); return 1;`);
+    const primBilder = await warteBis(primary, `${geladen} === ${sollBilder}`, 60000);
+    const primZahl = await primary.ev(`return ${geladen};`);
+    ok(sollBilder === 3 && primBilder, `GALERIE der Primary zeigt dieselben Fotos, geladen (${primZahl}/${sollBilder})`);
+    MESS.galerie = { soll: sollBilder, pc2: pc2Zahl, primary: primZahl };
 
     // Aenderung von PC2 ueber den Fernbefehl, den die Oberflaeche ohnehin benutzt.
     const pc2Aenderung = await client.ev(`

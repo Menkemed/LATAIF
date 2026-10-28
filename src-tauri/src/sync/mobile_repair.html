@@ -70,7 +70,14 @@
              Foto am Telefon: aufnehmen oder aus der Galerie, verkleinern, in die Ablage des
              Primary. Im Auftrag steht nur seine Inhaltskennung, nie Bytes. -->
         <label class="hint" for="rpCustomerIdPhoto" style="margin-top:6px;">ID / CPR photo (optional)</label>
-        <input id="rpCustomerIdPhoto" type="file" accept="image/*" capture="environment" />
+        <!-- MOBILE-REPAIR-GALLERY — wie beim Einkauf: Kamera ODER Galerie (z. B. ein vorher fotografierter Ausweis).
+             Das eine Feld mit `capture` oeffnete am Telefon nur die Kamera. -->
+        <div class="photo-pick">
+          <label for="rpCustomerIdPhoto" class="photo-btn" id="rpCustomerIdTake"><span class="icon">🪪</span><span>Take ID photo</span></label>
+          <label for="rpCustomerIdPhotoGallery" class="photo-btn" id="rpCustomerIdGallery"><span class="icon">🖼️</span><span>Choose from gallery</span></label>
+        </div>
+        <input id="rpCustomerIdPhoto" class="hidden" type="file" accept="image/*" capture="environment" />
+        <input id="rpCustomerIdPhotoGallery" class="hidden" type="file" accept="image/*" />
         <img id="rpCustomerIdPreview" class="hidden" alt="ID photo" style="max-width:160px;max-height:110px;border-radius:6px;object-fit:contain;background:#18181B;margin-top:6px;" />
       </div>
       <button id="rpCustomerCreateBtn" class="secondary">Create customer</button>
@@ -82,12 +89,16 @@
       <span style="font-size: 13px; color: #A1A1AA;">Photos</span>
       <span id="rpPhotoStatus" class="badge hidden"></span>
     </div>
-    <label for="rpPhotoInput" class="photo-area" id="rpPhotoArea">
-      <div class="icon">📷</div>
-      <div>Tap to take photos</div>
-      <div class="hint">the item as handed in — up to 6</div>
-    </label>
+    <!-- MOBILE-REPAIR-GALLERY — dieselben zwei Wege wie Einkauf, New Collection und Check Item: Kamera (`capture`) und
+         Galerie (ohne `capture`, mehrere auf einmal). Das EINE Feld mit `capture` oeffnete am Telefon direkt die Kamera;
+         die Galerie war nie erreichbar. Beide Felder fuellen dieselbe Fotoliste ueber denselben Handler. -->
+    <div class="photo-pick" id="rpPhotoArea">
+      <label for="rpPhotoInput" class="photo-btn" id="rpTakePhoto"><span class="icon">📷</span><span>Take photo</span></label>
+      <label for="rpGalleryInput" class="photo-btn" id="rpChooseGallery"><span class="icon">🖼️</span><span>Choose from gallery</span></label>
+    </div>
+    <div id="rpPhotoCount" class="photo-count">The item as handed in — up to 6. The first photo is the cover.</div>
     <input id="rpPhotoInput" class="hidden" type="file" accept="image/*" capture="environment" multiple />
+    <input id="rpGalleryInput" class="hidden" type="file" accept="image/*" multiple />
     <div id="rpPhotoStrip" class="photo-strip hidden"></div>
     <div id="rpPhotoHint" class="hint hidden">Tap a photo to make it the first one.</div>
     <button id="rpAiBtn" class="secondary hidden">✨&nbsp; AI Identify</button>

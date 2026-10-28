@@ -11,6 +11,7 @@
 import { spawn } from 'node:child_process';
 import { createServer } from 'node:http';
 import { readFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import os from 'node:os';
@@ -473,6 +474,138 @@ try {
     await sleep(800);
     const versteckt = await c.ev("return document.getElementById('rpInvoiceBtn').classList.contains('hidden');");
     ok(versteckt, '§4 eine fakturierte Reparatur bietet keine zweite Rechnung an');
+  }
+
+  // ── §5 MOBILE-REPAIR-GALLERY: Kamera ODER Galerie im echten Browser ───────────────────────────
+  //
+  // Dieselben Felder, dieselbe Groessenregel (`resizePhoto` der Seite, woertlich), dieselbe Ablage.
+  // Galeriebilder kommen DAZU, Doppeltes nicht; ein gestoerter Upload speichert nichts, und das
+  // erneute Speichern laedt nur nach, was noch fehlt.
+  {
+    gesehen.length = 0;
+    // Upload 1 = Ausweis, 2 = erstes Reparaturfoto, 3 = zweites → scheitert EINMAL (Verbindung weg).
+    let uploadNr = 0, stagingFehler = 1;
+    antwortGeber = (url, body) => {
+      if (/staging/.test(url)) {
+        uploadNr += 1;
+        if (uploadNr === 3 && stagingFehler > 0) { stagingFehler -= 1; return { status: 503, body: { code: 'MEDIA_STORE_BUSY' } }; }
+        // Die Kennung ist der Hash der Bytes — wie am Primary.
+        return { status: 201, body: { stagingId: createHash('sha256').update(String(body && body.dataBase64)).digest('hex') } };
+      }
+      const op = body && body.op;
+      if (op === 'customers.create') return { status: 200, body: { ok: true, value: { customerId: 'c-gal', name: 'Gal Lerie' } } };
+      if (op === 'repairs.create') return { status: 200, body: { ok: true, value: { repairId: 'rep-gal', repairNumber: 'REP-2026-00077' } } };
+      if (op === 'repairs.get') {
+        return { status: 200, body: { ok: true, value: { id: 'rep-gal', repairNumber: 'REP-2026-00077', revision: 1, status: 'received', issueDescription: 'Band gerissen', notes: '', images: [], mediaIds: [], lines: [], openLineTotal: 0, allowedStatusTargets: [] } } };
+      }
+      return { status: 200, body: { ok: true, value: { items: [] } } };
+    };
+    await c.ev("document.getElementById('rpNewBtn').click(); return 1;");
+    await sleep(300);
+
+    const felder = await c.ev(`const k = document.getElementById('rpPhotoInput'), g = document.getElementById('rpGalleryInput'),
+      ik = document.getElementById('rpCustomerIdPhoto'), ig = document.getElementById('rpCustomerIdPhotoGallery');
+      return { kCap: k.getAttribute('capture'), kMulti: k.multiple, gCap: g.hasAttribute('capture'), gMulti: g.multiple, gAccept: g.accept,
+        ikCap: ik.getAttribute('capture'), igCap: ig.hasAttribute('capture'),
+        lk: document.getElementById('rpTakePhoto').htmlFor, lg: document.getElementById('rpChooseGallery').htmlFor,
+        lik: document.getElementById('rpCustomerIdTake').htmlFor, lig: document.getElementById('rpCustomerIdGallery').htmlFor };`);
+    ok(felder.kCap === 'environment' && felder.kMulti && !felder.gCap && felder.gMulti && felder.gAccept === 'image/*'
+      && felder.ikCap === 'environment' && !felder.igCap
+      && felder.lk === 'rpPhotoInput' && felder.lg === 'rpGalleryInput' && felder.lik === 'rpCustomerIdPhoto' && felder.lig === 'rpCustomerIdPhotoGallery',
+      `§5 echte Felder: Kamera mit capture, Galerie ohne — fuer Reparaturfotos und Ausweis (${S(felder)})`);
+
+    // 360 px Telefonbreite mit den Stilen der echten Seite: beide Knoepfe nebeneinander, kein Querscrollen.
+    await c.send('Emulation.setDeviceMetricsOverride', { width: 360, height: 780, deviceScaleFactor: 2, mobile: true });
+    const knoepfe = await c.ev(`const st = document.createElement('style'); st.textContent = ${S(SEITEN_CSS)}; document.head.appendChild(st);
+      await new Promise((r) => setTimeout(r, 150));
+      const a = document.getElementById('rpTakePhoto').getBoundingClientRect(), b = document.getElementById('rpChooseGallery').getBoundingClientRect();
+      const r = { quer: document.documentElement.scrollWidth, nebeneinander: Math.abs(a.top - b.top) < 2 && b.left > a.right - 1,
+        breiteA: Math.round(a.width), breiteB: Math.round(b.width), hoehe: Math.round(a.height), rechts: Math.round(b.right) };
+      st.remove(); return r;`);
+    await c.send('Emulation.clearDeviceMetricsOverride');
+    ok(knoepfe.quer <= 360 && knoepfe.nebeneinander && knoepfe.breiteA >= 120 && knoepfe.breiteB >= 120 && knoepfe.hoehe >= 60 && knoepfe.rechts <= 360,
+      `§5 360 px: „Take photo" und „Choose from gallery" nebeneinander, gross genug, kein Querscrollen (${S(knoepfe)})`);
+
+    // Bilder wie aus der Galerie: echte JPEG-Dateien, gesetzt ueber DataTransfer (so liefert der Browser die Wahl).
+    const waehle = async (id, bilder) => c.ev(`
+      const dt = new DataTransfer();
+      for (const [farbe, w, h] of ${S(bilder)}) {
+        const cv = document.createElement('canvas'); cv.width = w; cv.height = h;
+        const x = cv.getContext('2d'); x.fillStyle = farbe; x.fillRect(0, 0, w, h);
+        const blob = await new Promise((r) => cv.toBlob(r, 'image/jpeg', 0.9));
+        dt.items.add(new File([blob], farbe.replace('#', '') + '.jpg', { type: 'image/jpeg' }));
+      }
+      const inp = document.getElementById(${S(id)});
+      inp.files = dt.files;
+      inp.dispatchEvent(new Event('change', { bubbles: true }));
+      return 1;`);
+    const daumen = () => c.ev("return document.querySelectorAll('#rpPhotoStrip .photo-thumb').length;");
+    const warteAuf = async (n) => { for (let i = 0; i < 40; i++) { if (await daumen() === n) return; await sleep(150); } };
+
+    // Ausweis aus der Galerie → Vorschau, dann reist er als Kennung mit dem neuen Kunden.
+    await waehle('rpCustomerIdPhotoGallery', [['#123456', 60, 40]]);
+    for (let i = 0; i < 30; i++) { if (await c.ev("return !document.getElementById('rpCustomerIdPreview').classList.contains('hidden');")) break; await sleep(150); }
+    const ausweis = await c.ev("const p = document.getElementById('rpCustomerIdPreview'); return { sichtbar: !p.classList.contains('hidden'), jpeg: /^data:image\\/jpeg;base64,/.test(p.src), leer: document.getElementById('rpCustomerIdPhotoGallery').value === '' };");
+    ok(ausweis.sichtbar && ausweis.jpeg && ausweis.leer, `§5 Ausweis aus der Galerie: Vorschau, Feld wieder leer (${S(ausweis)})`);
+    await c.ev("document.getElementById('rpCustomerFirst').value='Gal'; document.getElementById('rpCustomerLast').value='Lerie'; document.getElementById('rpCustomerCreateBtn').click(); return 1;");
+    for (let i = 0; i < 30; i++) { if (await c.ev("return !document.getElementById('rpCustomerPicked').classList.contains('hidden');")) break; await sleep(150); }
+    const kunde = gesehen.filter((g) => g.body && g.body.op === 'customers.create')[0];
+    ok(kunde && /^[0-9a-f]{64}$/.test(String(kunde.body.payload.idPhotoStagingId)) && !/data:/.test(S(kunde.body)),
+      `§5 …der Kunde traegt die Ausweis-Kennung, keine Bytes (${S(kunde && kunde.body.payload.idPhotoStagingId)})`);
+
+    // Galerie: drei Bilder, eines doppelt; eines ist gross (2400 × 1200) → dieselbe Groessenregel wie die Kamera.
+    await waehle('rpGalleryInput', [['#cc3333', 2400, 1200], ['#33aa55', 50, 50], ['#cc3333', 2400, 1200]]);
+    await warteAuf(2);
+    await sleep(200);
+    const nachGalerie = await c.ev(`const imgs = [...document.querySelectorAll('#rpPhotoStrip .photo-thumb img')];
+      await Promise.all(imgs.map((i) => i.complete ? 0 : new Promise((r) => { i.onload = r; i.onerror = r; })));
+      return { n: imgs.length, breite: imgs.map((i) => i.naturalWidth), fehler: document.getElementById('rpError').textContent,
+        zaehler: document.getElementById('rpPhotoCount').textContent, leer: document.getElementById('rpGalleryInput').value === '' };`);
+    ok(nachGalerie.n === 2 && /1 photo\(s\) already added/.test(nachGalerie.fehler) && nachGalerie.leer,
+      `§5 Galerie: zwei Bilder dazu, das doppelte benannt statt doppelt hochgeladen (${S(nachGalerie)})`);
+    ok(nachGalerie.breite[0] === 1600 && nachGalerie.breite[1] === 50,
+      `§5 …grosses Galeriebild auf 1600 px verkleinert (dieselbe Regel wie Kamera und Einkauf), kleines unveraendert (${S(nachGalerie.breite)})`);
+
+    // Kamera dazu — dieselbe Liste.
+    await waehle('rpPhotoInput', [['#3355cc', 40, 30]]);
+    await warteAuf(3);
+    ok(await daumen() === 3 && /3 of 6 — 3 more possible/.test(await c.ev("return document.getElementById('rpPhotoCount').textContent;")),
+      '§5 Kamera haengt an dieselbe Liste an: 3 von 6');
+
+    // Das zweite (gruene) vor dem Speichern entfernen.
+    await c.ev("document.querySelectorAll('#rpPhotoStrip .photo-thumb')[1].querySelector('.rm').click(); return 1;");
+    await warteAuf(2);
+    ok(await daumen() === 2, '§5 ein einzelnes Foto laesst sich vor dem Speichern entfernen');
+
+    // Speichern — das erste Foto liegt schon in der Ablage, das zweite scheitert: nichts gespeichert, Fotos bleiben.
+    const speichern = async () => {
+      await c.ev("document.getElementById('rpSaveBtn').click(); return 1;");
+      await sleep(150);
+      for (let i = 0; i < 60; i++) { if (await c.ev("return !document.getElementById('rpSaveBtn').disabled;")) break; await sleep(200); }
+      await sleep(300);
+    };
+    await c.ev("document.getElementById('rpIssue').value='Band gerissen'; return 1;");
+    await speichern();
+    const gestoert = await c.ev("return { fehler: document.getElementById('rpError').textContent, n: document.querySelectorAll('#rpPhotoStrip .photo-thumb').length, knopf: document.getElementById('rpSaveBtn').textContent };");
+    const anlagen = () => gesehen.filter((g) => g.body && g.body.op === 'repairs.create');
+    ok(anlagen().length === 0 && /could not be uploaded \(MEDIA_STORE_BUSY\) — nothing was saved/.test(gestoert.fehler) && gestoert.n === 2,
+      `§5 Upload gestoert → keine Reparatur, Fotos bleiben, Grund in Worten (${S(gestoert)})`);
+
+    // Erneut speichern (Verbindung wieder da): nur das fehlende Foto wird nachgeladen, genau EINE Reparatur entsteht.
+    await speichern();
+    const fertig = await c.ev("return { erfolg: document.getElementById('rpSuccess').textContent, n: document.querySelectorAll('#rpPhotoStrip .photo-thumb').length };");
+    const anlage = anlagen()[0];
+    const fotos = (anlage && anlage.body.payload.photos) || [];
+    const uploads = gesehen.filter((g) => /staging/.test(g.url));
+    ok(anlagen().length === 1 && /REP-2026-00077/.test(fertig.erfolg), `§5 Wiederholung → genau EINE Reparatur, bestaetigt (${S(fertig)})`);
+    ok(fotos.length === 2 && fotos.every((p) => /^[0-9a-f]{64}$/.test(p.stagingId)) && fotos[0].stagingId !== fotos[1].stagingId && !/data:/.test(S(anlage.body)),
+      `§5 …mit beiden Fotos als Ablagekennungen, keine Bytes im Befehl (${S(fotos)})`);
+    const hash = (u) => createHash('sha256').update(String(u && u.body && u.body.dataBase64)).digest('hex');
+    ok(uploads.length === 4 && uploads.every((u) => u.body && u.body.mime === 'image/jpeg')
+      && hash(uploads[2]) === hash(uploads[3]) && hash(uploads[1]) !== hash(uploads[3]),
+      `§5 …Ausweis + Foto 1 + Foto 2 (gescheitert) + Foto 2 erneut = 4 Uploads; Foto 1 wurde NICHT noch einmal gesendet (${uploads.length})`);
+    ok(fotos[0] && fotos[0].stagingId === hash(uploads[1]) && fotos[1].stagingId === hash(uploads[3]),
+      '§5 …Titelbild = das zuerst gewaehlte Galeriebild, dahinter das Kamerafoto (Reihenfolge der Maske)');
   }
 } catch (e) {
   FAIL++; fails.push('ABBRUCH: ' + String(e && e.stack ? e.stack : e));

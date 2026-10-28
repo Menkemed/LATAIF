@@ -125,17 +125,20 @@
   }
 
   function rpRenderPhotos() {
-    const strip = $('rpPhotoStrip'), area = $('rpPhotoArea'), hint = $('rpPhotoHint'), status = $('rpPhotoStatus');
+    const strip = $('rpPhotoStrip'), hint = $('rpPhotoHint'), status = $('rpPhotoStatus');
     strip.innerHTML = '';
     const has = RP.slots.length > 0;
     strip.classList.toggle('hidden', !has);
     hint.classList.toggle('hidden', !has);
     status.classList.toggle('hidden', !has);
     if (has) status.textContent = RP.slots.length + ' / ' + MobileRepair.MAX_PHOTOS;
-    area.classList.remove('has-image');
-    area.innerHTML = has
-      ? '<div class="icon">📷</div><div>Add more photos</div><div class="hint">' + RP.slots.length + ' of ' + MobileRepair.MAX_PHOTOS + '</div>'
-      : '<div class="icon">📷</div><div>Tap to take photos</div><div class="hint">the item as handed in — up to 6</div>';
+    // MOBILE-REPAIR-GALLERY — Kamera und Galerie sind ZWEI Wege in DIESELBE Liste: voll heisst beide zu.
+    const max = MobileRepair.MAX_PHOTOS, n = RP.slots.length, voll = n >= max;
+    for (const id of ['rpTakePhoto', 'rpChooseGallery']) { const b = $(id); if (b) b.classList.toggle('is-full', voll); }
+    for (const id of ['rpPhotoInput', 'rpGalleryInput']) { const i = $(id); if (i) i.disabled = voll; }
+    $('rpPhotoCount').textContent = voll ? max + ' of ' + max + ' photos — remove one to add another.'
+      : n ? n + ' of ' + max + ' — ' + (max - n) + ' more possible.'
+        : 'The item as handed in — up to ' + max + '. The first photo is the cover.';
     RP.slots.forEach((slot, i) => {
       const t = el('div', { class: 'photo-thumb' + (i === 0 ? ' is-primary' : '') });
       const im = el('img');
@@ -153,21 +156,33 @@
     });
     $('rpAiBtn').classList.toggle('hidden', !has);
   }
-  $('rpPhotoInput').onchange = async (e) => {
-    const files = Array.from((e.target && e.target.files) || []);
+  // MOBILE-REPAIR-GALLERY — EIN Handler fuer Kamera und Galerie (wie beim Einkauf): ein Galeriebild ist genau ein
+  // neues Bild wie ein Kamerabild — es kommt hinten DAZU, gespeicherte Fotos und das Titelbild bleiben, nichts wird
+  // ersetzt. Jeder Grund wird benannt: voll, nicht lesbar oder schon dabei (dasselbe Foto zweimal aus der Galerie
+  // gewaehlt — es wuerde sonst zweimal hochgeladen und zweimal an der Reparatur haengen).
+  async function rpAddPhotos(e) {
+    const input = (e && e.target) || null;
+    const files = Array.from((input && input.files) || []);
+    if (input) input.value = '';
+    // Eine abgebrochene Auswahl liefert keine Dateien — dann bleibt alles, wie es war.
     if (!files.length) return;
-    let rejected = 0;
+    let zuViele = 0, unlesbar = 0, doppelt = 0;
     for (const f of files) {
-      if (RP.slots.length >= MobileRepair.MAX_PHOTOS) { rejected += 1; continue; }
-      try {
-        const dataUrl = await resizePhoto(f, 1600, 0.85);
-        RP.slots.push({ dataUrl: dataUrl, src: dataUrl });
-      } catch (err) { rejected += 1; }
+      if (RP.slots.length >= MobileRepair.MAX_PHOTOS) { zuViele += 1; continue; }
+      let dataUrl;
+      try { dataUrl = await resizePhoto(f, 1600, 0.85); } catch (err) { unlesbar += 1; continue; }
+      if (RP.slots.some((s) => s.dataUrl === dataUrl)) { doppelt += 1; continue; }
+      RP.slots.push({ dataUrl: dataUrl, src: dataUrl });
     }
-    $('rpPhotoInput').value = '';
     rpRenderPhotos();
-    if (rejected) rpSay('rpError', rejected + ' photo(s) not added — at most ' + MobileRepair.MAX_PHOTOS + ' per repair.');
-  };
+    const gruende = [];
+    if (zuViele) gruende.push(zuViele + ' photo(s) not added — at most ' + MobileRepair.MAX_PHOTOS + ' per repair.');
+    if (unlesbar) gruende.push(unlesbar + ' photo(s) could not be read.');
+    if (doppelt) gruende.push(doppelt + ' photo(s) already added.');
+    if (gruende.length) rpSay('rpError', gruende.join(' '));
+  }
+  $('rpPhotoInput').onchange = rpAddPhotos;
+  $('rpGalleryInput').onchange = rpAddPhotos;
 
   // ── Kunde ────────────────────────────────────────────────────────────────────────────────────
   function rpSetCustomer(id, name) {
@@ -193,16 +208,20 @@
   // MEDIA-IDENTITY §5 — das optionale Ausweisfoto des neuen Kunden. Es liegt NUR hier, bis der
   // Auftrag hinausgeht: kein Entwurf speichert es, keine Wiederherstellung bringt es zurueck.
   RP.idPhoto = null;
-  $('rpCustomerIdPhoto').onchange = async (e) => {
-    const f = (e.target && e.target.files && e.target.files[0]) || null;
-    $('rpCustomerIdPhoto').value = '';
+  // MOBILE-REPAIR-GALLERY — dasselbe Ausweisfoto aus der Kamera ODER der Galerie (ein Handler, wie beim Einkauf).
+  async function rpPickIdPhoto(e) {
+    const input = (e && e.target) || null;
+    const f = (input && input.files && input.files[0]) || null;
+    if (input) input.value = '';
     if (!f) return;
     try {
       RP.idPhoto = await resizePhoto(f, 1600, 0.85);
       const p = $('rpCustomerIdPreview');
       p.src = RP.idPhoto; p.classList.remove('hidden');
     } catch (err) { RP.idPhoto = null; rpSay('rpError', 'That ID photo could not be read.'); }
-  };
+  }
+  $('rpCustomerIdPhoto').onchange = rpPickIdPhoto;
+  $('rpCustomerIdPhotoGallery').onchange = rpPickIdPhoto;
   function rpClearIdPhoto() {
     RP.idPhoto = null;
     const p = $('rpCustomerIdPreview');

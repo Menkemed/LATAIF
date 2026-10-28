@@ -171,7 +171,11 @@ function starteOberflaeche(antworten: (url: string, body: unknown) => Antwort) {
       return e;
     },
     () => 'id-' + (++nr),
-    async () => 'data:image/jpeg;base64,AAAA',
+    // MOBILE-REPAIR-GALLERY — eine Datei kann ihr eigenes Bild tragen (`dataUrl`) oder unlesbar sein (`kaputt`).
+    async (f?: { dataUrl?: string; kaputt?: boolean } | null) => {
+      if (f && f.kaputt) throw new Error('unlesbar');
+      return (f && f.dataUrl) || 'data:image/jpeg;base64,AAAA';
+    },
     'lataif_mobile_token',
     umgebung.idbReq, MobileRepair, umgebung.indexedDB, umgebung.fetchFn,
     { getItem: () => 'token-xyz', setItem: () => {}, removeItem: () => {} },
@@ -635,6 +639,163 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
   ok($('rpCustomerPhoneIso').value === 'BH' && $('rpCustomerPhone').value === '' && $('rpCustomerPersonalId').value === ''
     && $('rpCustomerPhone').placeholder === '3612 3456' && $('rpCustomerPersonalIdHint').textContent === '',
     '§9 nach dem Anlegen steht die Maske wieder auf Bahrain und leer');
+}
+
+// ── §10 MOBILE-REPAIR-GALLERY: Kamera ODER Galerie, eine Fotoliste, nichts geht verloren ─────
+//
+// Das eine Feld mit `capture="environment"` oeffnete am Telefon direkt die Kamera — ein vorher
+// fotografiertes Stueck (oder Ausweis) war nicht erreichbar. Jetzt: zwei Wege wie beim Einkauf,
+// derselbe Handler, dieselbe Groessenregel, dieselbe Ablage, dieselbe Wiederholung.
+{
+  const html = readFileSync(join(repo, 'src-tauri/src/sync/mobile_repair.html'), 'utf8');
+  const tag = (id: string): string => (new RegExp('<input id="' + id + '"[^>]*>').exec(html) || [''])[0];
+  ok(/capture="environment"/.test(tag('rpPhotoInput')) && /multiple/.test(tag('rpPhotoInput')) && /accept="image\/\*"/.test(tag('rpPhotoInput')),
+    '§10 die Kamera bleibt: rpPhotoInput mit capture, mehrere, nur Bilder');
+  ok(tag('rpGalleryInput') !== '' && !/capture/.test(tag('rpGalleryInput')) && /multiple/.test(tag('rpGalleryInput')) && /accept="image\/\*"/.test(tag('rpGalleryInput')),
+    `§10 die Galerie: rpGalleryInput OHNE capture, mehrere, nur Bilder (${tag('rpGalleryInput')})`);
+  ok(/<label for="rpPhotoInput"[^>]*id="rpTakePhoto"/.test(html) && /<label for="rpGalleryInput"[^>]*id="rpChooseGallery"/.test(html),
+    '§10 zwei Knoepfe, jeder auf sein Feld');
+  ok(/capture="environment"/.test(tag('rpCustomerIdPhoto')) && tag('rpCustomerIdPhotoGallery') !== '' && !/capture/.test(tag('rpCustomerIdPhotoGallery')),
+    '§10 Ausweisfoto ebenso: Kamera bleibt, Galerie dazu');
+  ok(/<label for="rpCustomerIdPhotoGallery"[^>]*id="rpCustomerIdGallery"/.test(html), '§10 …mit eigenem Knopf');
+
+  let stagingRufe = 0, scheitertBeim = 3;
+  const antworten = (url: string, body: unknown): Antwort => {
+    const b = body as { op?: string; dataBase64?: string } | null;
+    if (/staging\/media/.test(url)) {
+      stagingRufe += 1;
+      if (stagingRufe === scheitertBeim) return { status: 503, body: { code: 'MEDIA_STORE_BUSY' } };
+      // Die Kennung haengt an den Bytes (wie der Inhalts-Hash des Primary).
+      return { status: 201, body: { stagingId: ('s' + (b?.dataBase64 || '')).padEnd(64, '0') } };
+    }
+    if (b?.op === 'customers.create') return { status: 200, body: { ok: true, value: { customerId: 'cust-g', name: 'Gal Lerie' } } };
+    if (b?.op === 'repairs.create') return { status: 200, body: { ok: true, value: { repairId: 'rep-g', repairNumber: 'REP-2026-00010' } } };
+    if (b?.op === 'repairs.get') {
+      return { status: 200, body: { ok: true, value: { id: 'rep-g', repairNumber: 'REP-2026-00010', revision: 1, status: 'received', issueDescription: 'Band gerissen', images: [], mediaIds: [], lines: [], openLineTotal: 0, allowedStatusTargets: [] } } };
+    }
+    return { status: 200, body: { ok: true, value: { items: [] } } };
+  };
+  const t = starteOberflaeche(antworten);
+  const $ = (id: string) => t.document.getElementById(id)!;
+  const foto = (n: string) => ({ dataUrl: 'data:image/jpeg;base64,' + n });
+  const waehle = async (id: string, files: unknown[]) => { t.nach[id].files = files; t.nach[id].value = 'C:\\fakepath\\x.jpg'; await t.nach[id].onchange!({ target: t.nach[id] }); await warte(); };
+
+  ok(typeof t.nach.rpGalleryInput.onchange === 'function' && t.nach.rpGalleryInput.onchange === t.nach.rpPhotoInput.onchange,
+    '§10 Kamera und Galerie haben DENSELBEN Handler');
+  ok(typeof t.nach.rpCustomerIdPhotoGallery.onchange === 'function' && t.nach.rpCustomerIdPhotoGallery.onchange === t.nach.rpCustomerIdPhoto.onchange,
+    '§10 …Ausweis-Kamera und Ausweis-Galerie ebenso');
+
+  $('rpNewBtn').click();
+  await warte();
+  ok(/up to 6/.test($('rpPhotoCount').textContent) && !$('rpChooseGallery').classList.contains('is-full'),
+    `§10 leer: Hinweis „bis 6", Galerie offen (${$('rpPhotoCount').textContent})`);
+
+  // Ausweis aus der Galerie → reist mit dem Kunden, als Staging-Kennung.
+  await waehle('rpCustomerIdPhotoGallery', [foto('AUSWEIS')]);
+  ok(!$('rpCustomerIdPreview').classList.contains('hidden') && $('rpCustomerIdPreview').src === 'data:image/jpeg;base64,AUSWEIS',
+    '§10 Ausweis aus der Galerie: Vorschau steht');
+  ok(t.nach.rpCustomerIdPhotoGallery.value === '', '§10 …und das Feld ist wieder leer (dasselbe Bild nochmal waehlbar)');
+  $('rpCustomerFirst').value = 'Gal'; $('rpCustomerLast').value = 'Lerie';
+  await $('rpCustomerCreateBtn').onclick!();
+  await warte();
+  const kunde = t.gerufen.find((g) => (g.body as { op?: string })?.op === 'customers.create');
+  const kp = (kunde?.body as { payload?: Record<string, unknown> })?.payload ?? {};
+  ok(typeof kp.idPhotoStagingId === 'string' && String(kp.idPhotoStagingId).startsWith('sAUSWEIS') && !/data:/.test(JSON.stringify(kunde?.body)),
+    `§10 …der Kunde traegt die Kennung, nie Bytes (${String(kp.idPhotoStagingId)})`);
+  stagingRufe = 0;
+
+  // Kamera 1 Foto, dann Galerie 3 — eines davon ist schon dabei.
+  await waehle('rpPhotoInput', [foto('P1')]);
+  await waehle('rpGalleryInput', [foto('P2'), foto('P3'), foto('P1')]);
+  ok($('rpPhotoStatus').textContent === '3 / 6', `§10 Kamera + Galerie fuellen EINE Liste, Doppeltes nicht (${$('rpPhotoStatus').textContent})`);
+  ok(/1 photo\(s\) already added/.test($('rpError').textContent), `§10 …und die Maske sagt, warum eins fehlt (${$('rpError').textContent})`);
+  ok(t.nach.rpGalleryInput.value === '', '§10 das Galeriefeld ist danach leer');
+  const bilder = () => t.nach.rpPhotoStrip.children.map((c) => (c.children[0] as El).src);
+  ok(JSON.stringify(bilder()) === JSON.stringify(['data:image/jpeg;base64,P1', 'data:image/jpeg;base64,P2', 'data:image/jpeg;base64,P3']),
+    `§10 Vorschau in Wahlreihenfolge, das erste ist das Titelbild (${bilder().join(',')})`);
+  ok(/3 of 6 — 3 more possible/.test($('rpPhotoCount').textContent), `§10 Zaehler (${$('rpPhotoCount').textContent})`);
+
+  // Unlesbar und ueber dem Limit — jeder Grund wird benannt, nichts verschwindet still.
+  await waehle('rpGalleryInput', [foto('P4'), { kaputt: true }, foto('P5'), foto('P6'), foto('P7')]);
+  ok($('rpPhotoStatus').textContent === '6 / 6', `§10 voll bei 6 (${$('rpPhotoStatus').textContent})`);
+  ok(/1 photo\(s\) not added — at most 6/.test($('rpError').textContent) && /1 photo\(s\) could not be read/.test($('rpError').textContent),
+    `§10 zu viele UND unlesbar werden beide genannt (${$('rpError').textContent})`);
+  ok($('rpTakePhoto').classList.contains('is-full') && $('rpChooseGallery').classList.contains('is-full')
+    && t.nach.rpPhotoInput.disabled && t.nach.rpGalleryInput.disabled,
+    '§10 voll: BEIDE Wege zu (Knopf grau, Feld gesperrt)');
+  ok(/6 of 6 photos — remove one/.test($('rpPhotoCount').textContent), `§10 …mit Hinweis (${$('rpPhotoCount').textContent})`);
+
+  // Ein einzelnes Foto vor dem Speichern entfernen → beide Wege wieder offen.
+  await (t.nach.rpPhotoStrip.children[2].children.find((c) => c.className === 'rm') as El).onclick!({ stopPropagation() {}, preventDefault() {} });
+  ok($('rpPhotoStatus').textContent === '5 / 6' && !bilder().includes('data:image/jpeg;base64,P3'),
+    `§10 genau das gewaehlte Foto ist weg (${bilder().join(',')})`);
+  ok(!$('rpChooseGallery').classList.contains('is-full') && !t.nach.rpGalleryInput.disabled && !t.nach.rpPhotoInput.disabled,
+    '§10 …und Kamera wie Galerie sind wieder offen');
+
+  // Speichern — die Ablage bricht beim dritten Foto ab: NICHTS wird gespeichert, die Fotos bleiben.
+  $('rpIssue').value = 'Band gerissen';
+  await $('rpSaveBtn').onclick!();
+  await warte();
+  const anlagen = () => t.gerufen.filter((g) => (g.body as { op?: string })?.op === 'repairs.create');
+  ok(anlagen().length === 0 && /could not be uploaded \(MEDIA_STORE_BUSY\) — nothing was saved/.test($('rpError').textContent),
+    `§10 Ablage gestoert → keine Reparatur, klare Ansage (${$('rpError').textContent})`);
+  ok($('rpPhotoStatus').textContent === '5 / 6' && $('rpSaveBtn').textContent !== 'Save Changes',
+    '§10 …die 5 Fotos stehen weiter da, die Maske bleibt bei „Neu"');
+
+  // Erneut speichern (Verbindung wieder da): nur die noch nicht abgelegten Fotos reisen.
+  await $('rpSaveBtn').onclick!();
+  await warte();
+  ok(anlagen().length === 1, `§10 Wiederholung → genau EINE Reparatur (${anlagen().length})`);
+  ok(stagingRufe === 6, `§10 …2 vorher abgelegte werden nicht neu hochgeladen: 2 + 1 gescheitert + 3 (${stagingRufe})`);
+  const rumpf = (anlagen()[0]?.body as { payload?: { photos?: Array<{ stagingId: string }> } })?.payload ?? {};
+  const ids = (rumpf.photos || []).map((p) => p.stagingId.replace(/0+$/, ''));
+  ok(JSON.stringify(ids) === JSON.stringify(['sP1', 'sP2', 'sP4', 'sP5', 'sP6']),
+    `§10 die Reparatur traegt die 5 Fotos in der gezeigten Reihenfolge (${ids.join(',')})`);
+  ok(!/data:/.test(JSON.stringify(anlagen()[0]?.body)), '§10 …nur Kennungen, nie Bytes im Befehl');
+  ok(/REP-2026-00010/.test($('rpSuccess').textContent), `§10 und die Maske meldet die Nummer (${$('rpSuccess').textContent})`);
+  scheitertBeim = -1;
+}
+
+// ── §11 MOBILE-REPAIR-GALLERY beim Aendern: gespeicherte Fotos bleiben, Galeriebilder kommen DAZU ──
+{
+  let fassung = 7;
+  const antworten = (url: string, body: unknown): Antwort => {
+    const b = body as { op?: string; dataBase64?: string } | null;
+    if (/staging\/media/.test(url)) return { status: 201, body: { stagingId: ('s' + (b?.dataBase64 || '')).padEnd(64, '0') } };
+    if (b?.op === 'repairs.list') return { status: 200, body: { ok: true, value: { items: [{ id: 'rep-e', repairNumber: 'REP-E', status: 'received' }] } } };
+    if (b?.op === 'repairs.get') {
+      return { status: 200, body: { ok: true, value: { id: 'rep-e', repairNumber: 'REP-E', revision: fassung, status: 'received', issueDescription: 'Glas', notes: '', images: [], mediaIds: ['media-1', 'media-2'], mediaKeys: ['t/a/1.jpg', 't/a/2.jpg'], lines: [], openLineTotal: 0, allowedStatusTargets: [] } } };
+    }
+    if (b?.op === 'repairs.update') { fassung += 1; return { status: 200, body: { ok: true, value: { repairId: 'rep-e' } } }; }
+    return { status: 200, body: { ok: true, value: {} } };
+  };
+  const t = starteOberflaeche(antworten);
+  const $ = (id: string) => t.document.getElementById(id)!;
+  await t.api.rpHomeOpen();
+  await warte();
+  await t.document.querySelectorAll('#rpList button')[0].onclick!();
+  await warte();
+  ok($('rpPhotoStatus').textContent === '2 / 6', `§11 die 2 gespeicherten Fotos sind geladen (${$('rpPhotoStatus').textContent})`);
+
+  t.nach.rpGalleryInput.files = [{ dataUrl: 'data:image/jpeg;base64,NEU1' }, { dataUrl: 'data:image/jpeg;base64,NEU2' }];
+  await t.nach.rpGalleryInput.onchange!({ target: t.nach.rpGalleryInput });
+  await warte();
+  ok($('rpPhotoStatus').textContent === '4 / 6', `§11 Galerie haengt an, ersetzt nichts (${$('rpPhotoStatus').textContent})`);
+
+  // Abgebrochene Auswahl: keine Dateien → alles bleibt.
+  t.nach.rpGalleryInput.files = [];
+  await t.nach.rpGalleryInput.onchange!({ target: t.nach.rpGalleryInput });
+  ok($('rpPhotoStatus').textContent === '4 / 6', '§11 abgebrochene Galerie-Auswahl aendert nichts');
+
+  await $('rpSaveBtn').onclick!();
+  await warte();
+  const update = t.gerufen.filter((g) => (g.body as { op?: string })?.op === 'repairs.update');
+  const plan = ((update[0]?.body as { payload?: { photos?: Array<Record<string, string>> } })?.payload?.photos) ?? [];
+  ok(update.length === 1 && plan.length === 4 && plan[0].keep === 'media-1' && plan[1].keep === 'media-2'
+    && String(plan[2].stagingId).startsWith('sNEU1') && String(plan[3].stagingId).startsWith('sNEU2'),
+    `§11 der Bildplan behaelt beide gespeicherten (Titelbild zuerst) und haengt die neuen an (${JSON.stringify(plan)})`);
+  ok(!/data:/.test(JSON.stringify(update[0]?.body)), '§11 …auch hier nur Kennungen');
+  ok(/Changes saved/.test($('rpSuccess').textContent), `§11 Aenderung bestaetigt (${$('rpSuccess').textContent})`);
 }
 
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — preg5 mobile repair ui: ${PASS} passed, ${FAIL} failed`);
