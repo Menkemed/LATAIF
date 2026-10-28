@@ -308,9 +308,11 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
 
   // PURCHASE_OUT: purchase payments
   const purchPay = safeQuery('purchase_payments',
+    // CONSIGNMENT D3 — eine Verrechnung mit Lieferanten-Guthaben (method='credit') bewegt kein Geld: nicht in die Liste
+    // (vorher als Bank-Abgang gezeigt; die Salden kamen schon immer aus dem Hauptbuch).
     `SELECT pp.id, pp.amount, pp.method, pp.paid_at, pp.purchase_id, p.purchase_number, pp.created_at AS created_at
      FROM purchase_payments pp JOIN purchases p ON p.id = pp.purchase_id
-     WHERE p.branch_id = ? AND pp.voided_at IS NULL`,
+     WHERE p.branch_id = ? AND pp.voided_at IS NULL AND COALESCE(pp.method, '') != 'credit'`,
     [branchId]
   );
   for (const p of purchPay) {
@@ -544,10 +546,13 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
     });
   }
 
-  // REFUND_IN: purchase returns with refund_amount > 0 (money back from supplier)
+  // REFUND_IN: purchase returns with refund_amount > 0 (money back from supplier). CONSIGNMENT D3 — eine Erstattung als
+  // Lieferanten-Guthaben (refund_method='credit', die offene Rückforderung) ist KEIN Geldeingang (wie L-01 bei den
+  // Kundenretouren); das Geld erscheint erst mit dem tatsächlichen Eingang (supplier_credit_refunds, unten).
   const purchRet = safeQuery('purchase_returns',
     `SELECT id, refund_amount, refund_method, return_date, return_number, purchase_id, created_at
-     FROM purchase_returns WHERE branch_id = ? AND refund_amount > 0 AND status != 'CANCELLED'`,
+     FROM purchase_returns WHERE branch_id = ? AND refund_amount > 0 AND status != 'CANCELLED'
+       AND COALESCE(refund_method, '') != 'credit'`,
     [branchId]
   );
   for (const r of purchRet) {
@@ -565,6 +570,33 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
       description: `Purchase refund · ${r.return_number || ''}`,
       // v0.3.3 — Refund hat keine eigene Detail-Page → auf die Quell-Purchase verlinken.
       link: (r.purchase_id as string) ? `/purchases/${r.purchase_id}` : undefined,
+    });
+  }
+
+  // CONSIGNMENT D3 — REFUND_IN: der tatsächliche spätere Geldeingang auf eine Rückforderung (Tag, Weg, Betrag).
+  const creditRefunds = safeQuery('supplier_credit_refunds',
+    `SELECT r.id, r.amount, r.method, r.received_at, r.created_at, r.consignment_id, pr.return_number, pr.purchase_id
+       FROM supplier_credit_refunds r
+       LEFT JOIN supplier_credits sc ON sc.id = r.supplier_credit_id
+       LEFT JOIN purchase_returns pr ON pr.id = sc.source_return_id
+      WHERE r.branch_id = ?`,
+    [branchId]
+  );
+  for (const r of creditRefunds) {
+    const date = (r.received_at as string) || '';
+    txs.push({
+      id: `scref-${r.id}`,
+      date,
+      createdAt: (r.created_at as string) || date,
+      type: 'REFUND',
+      account: accountFor(r.method as string),
+      amount: (r.amount as number) || 0,
+      flow: 'in',
+      relatedModule: 'purchase_return',
+      relatedEntityId: r.id as string,
+      description: `Repayment received · ${r.return_number || ''}`,
+      link: (r.consignment_id as string) ? `/consignments/${r.consignment_id}`
+        : ((r.purchase_id as string) ? `/purchases/${r.purchase_id}` : undefined),
     });
   }
 

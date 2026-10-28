@@ -40,7 +40,7 @@ import { trackInsert, trackUpdate, trackDelete, trackPayment, trackStatusChange 
 import { trackChange } from '@/core/sync/sync-service';
 import {
   postExpense, postExpensePayment, postExpenseSupplierCreditPayment, postPurchasePayment,
-  postStandaloneSupplierCredit, reverseSource, hasLedgerEntries, hasReversalFor,
+  postStandaloneSupplierCredit, postSupplierCreditRefund, reverseSource, hasLedgerEntries, hasReversalFor,
   inLedgerTransaction, beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
 import {
@@ -52,6 +52,8 @@ import { OPEN_ITEMS_CHANGED, OPEN_STAMP_REQUIRED, openItemsStamp } from '@/core/
 import { isClientMode } from '@/core/bridge/client-mode';
 import { isAutoCardFee, postCardFeeEntries } from '@/core/finance/card-fee-booking';
 import { closedVatQuarters, nbrQuarterOfDate } from '@/core/tax/vat-period-lock';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
+import { businessTimestamp } from '@/core/utils/business-date';
 import { assertSupplierOverpayMutable, reconcilePurchaseOverpayCredit, OverpayCreditRedeemed } from './purchase-overpay';
 
 // ── Grundlagen ─────────────────────────────────────────────────────────────
@@ -1077,6 +1079,112 @@ export function refundStandaloneCreditInHouse(creditId: string, ctx: HouseCtx): 
   getDatabase().run('DELETE FROM supplier_credits WHERE id = ?', [creditId]);
   trackDelete('supplier_credits', creditId);
   return { creditId, supplierId: String(c.supplier_id ?? ''), amount: Number(c.amount) || 0, method };
+}
+
+// ── CONSIGNMENT D3 — Geldeingang auf eine offene Rückforderung (Lieferanten-Guthaben aus einer Retoure) ─────────
+
+/** Die Eingaben eines Geldeingangs: welches Guthaben, wie viel, auf welchem Weg, an welchem Tag. */
+export interface SupplierCreditRefundInput {
+  creditId: string;
+  amount: number;
+  method: string;
+  /** JJJJ-MM-TT — der Tag, an dem das Geld kam (ohne Angabe: heute). */
+  receivedDate?: string;
+  reference?: string;
+  note?: string;
+}
+
+export interface SupplierCreditRefundRecorded {
+  refundId: string;
+  creditId: string;
+  supplierId: string;
+  amount: number;
+  method: PayMethod;
+  receivedDate: string;
+  /** Was danach noch offen ist (0 = vollständig zurückgezahlt bzw. verrechnet). */
+  openAmount: number;
+  creditStatus: 'OPEN' | 'USED';
+}
+
+/**
+ * „Record Repayment": der Einlieferer (Lieferant) zahlt seine offene Rückforderung — ganz oder in Teilen — tatsächlich
+ * zurück. Gebucht wird DR Kasse/Bank/Benefit / CR SUPPLIER_CREDIT (dieselbe Paarung wie „Refund Credit"), das Guthaben
+ * sinkt um genau diesen Betrag (used_amount, wie jede Verrechnung), und der Eingang bleibt als eigener Beleg stehen.
+ *
+ * Nur für ein Guthaben aus einer wirksamen Lieferanten-Retoure (die Rückforderung der Rücknahme). Ein Standalone-Guthaben
+ * hat seinen eigenen „Refund Credit" (zurück auf das Ursprungskonto), ein Überzahlungs-Guthaben wird verrechnet — beide
+ * hier fail-closed. Nie mehr als offen (keine Überzahlung, keine doppelte Verwendung), nie vor der Rückforderung, nie in
+ * der Zukunft, nie in einem eingereichten VAT-Quartal (dieselbe Regel wie ein nachträglich datierter Zahlungseingang).
+ */
+export function recordSupplierCreditRefundInHouse(input: SupplierCreditRefundInput, ctx: HouseCtx): SupplierCreditRefundRecorded {
+  assertHouseBooks();
+  const amtF = positiveF(input.amount, 'PAYMENT_AMOUNT_INVALID', 'the repayment');
+  const m = methodOf(input.method);
+  const c = query(
+    `SELECT sc.id, sc.supplier_id, sc.amount, sc.used_amount, sc.status, sc.source_return_id,
+            pr.status AS return_status, pr.return_date, pr.return_number, p.source_consignment_id
+       FROM supplier_credits sc
+       LEFT JOIN purchase_returns pr ON pr.id = sc.source_return_id
+       LEFT JOIN purchases p ON p.id = pr.purchase_id
+      WHERE sc.id = ? AND sc.branch_id = ?`,
+    [input.creditId, ctx.branchId],
+  )[0];
+  if (!c) throw nein('SUPPLIER_CREDIT_NOT_FOUND', 'no such supplier credit in this branch');
+  if (!c.source_return_id || !c.return_status || String(c.return_status) === 'CANCELLED') {
+    throw nein('SUPPLIER_CREDIT_NOT_A_RETURN_CREDIT',
+      'only the open repayment from a return can be recorded as money received — a prepayment is refunded with "Refund Credit", an overpayment is applied to the next purchase');
+  }
+  if (String(c.status) !== 'OPEN') throw nein('SUPPLIER_CREDIT_NOT_OPEN', 'this repayment is already settled in full');
+  const openF = F(c.amount) - F(c.used_amount);
+  if (openF <= 0) throw nein('SUPPLIER_CREDIT_NOT_OPEN', 'this repayment is already settled in full');
+  if (amtF > openF) {
+    throw nein('SUPPLIER_CREDIT_REFUND_EXCEEDS_OPEN', `the repayment (${fmt(amtF)}) is more than what is still open (${fmt(openF)})`);
+  }
+  const today = dayOf(ctx.now);
+  const tag = input.receivedDate === undefined || input.receivedDate === '' ? today
+    : isoDateOf(input.receivedDate, 'PAYMENT_DATE_INVALID', 'the date the money came');
+  if (tag > today) throw nein('PAYMENT_DATE_INVALID', 'the date the money came cannot be in the future');
+  const ab = String(c.return_date ?? '').slice(0, 10);
+  if (ab && tag < ab) throw nein('PAYMENT_DATE_BEFORE_CLAIM', `the money cannot have come before the return it repays (${ab})`);
+  const q = nbrQuarterOfDate(tag);
+  if (q && closedVatQuarters(ctx.branchId).has(q.key)) {
+    throw nein('VAT_PERIOD_FILED', `the VAT return for ${q.key} is already filed or paid — a money movement is not dated into that quarter afterwards; choose a date in an open quarter`);
+  }
+  const reference = textOf(input.reference, 'the reference');
+  const note = textOf(input.note, 'the note');
+
+  const supplierId = String(c.supplier_id ?? '');
+  const consignmentId = (c.source_consignment_id as string | null) || null;
+  const refundId = uuid();
+  // Der Zeitpunkt: heute → jetzt; ein früherer Tag → dieser Tag (Kasse/Bank stehen am Tag des Eingangs).
+  const receivedAt = businessTimestamp(tag, ctx.now);
+  const newUsedF = F(c.used_amount) + amtF;
+  const status: 'OPEN' | 'USED' = newUsedF >= F(c.amount) ? 'USED' : 'OPEN';
+  const db = getDatabase();
+  db.run(
+    `INSERT INTO supplier_credit_refunds (id, branch_id, supplier_credit_id, supplier_id, consignment_id, amount, method,
+       received_at, reference, note, created_at, created_by)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    [refundId, ctx.branchId, input.creditId, supplierId, consignmentId, B(amtF), m, receivedAt, reference ?? null, note ?? null,
+      ctx.now, ctx.userId || null],
+  );
+  db.run('UPDATE supplier_credits SET used_amount = ?, status = ? WHERE id = ?', [B(newUsedF), status, input.creditId]);
+  trackChange('supplier_credits', input.creditId, 'update', {});
+  postSupplierCreditRefund(refundId, supplierId, B(amtF), m, receivedAt, { creditId: input.creditId, consignmentId });
+  logAuditOrThrow({
+    module: 'Supplier', entityType: 'supplier_credits', entityId: input.creditId, action: 'REFUND', field: 'repayment_received',
+    oldValue: { usedAmount: Number(c.used_amount ?? 0), status: String(c.status) },
+    newValue: {
+      refundId, amount: B(amtF), method: m, receivedDate: tag, usedAmount: B(newUsedF), status,
+      returnNumber: String(c.return_number ?? ''), ...(consignmentId ? { consignmentId } : {}),
+      ...(reference ? { reference } : {}),
+    },
+    actor: { userId: ctx.userId || undefined, branchId: ctx.branchId },
+  });
+  return {
+    refundId, creditId: input.creditId, supplierId, amount: B(amtF), method: m, receivedDate: tag,
+    openAmount: B(F(c.amount) - newUsedF), creditStatus: status,
+  };
 }
 
 /** Standalone-Guthaben (Vorauszahlung): Zeile + DR SUPPLIER_CREDIT / CR Kasse, strikt. */

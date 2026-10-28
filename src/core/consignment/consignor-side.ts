@@ -14,7 +14,7 @@
 //                 Retoure des Einkaufs): sofort erhalten (Weg, Tag) oder offen als Lieferanten-Guthaben (Rest).
 // ════════════════════════════════════════════════════════════════════════════
 import { query } from '@/core/db/helpers';
-import type { ConsignorSide } from '@/core/models/types';
+import type { ConsignorRefundRow, ConsignorSide } from '@/core/models/types';
 
 const r3 = (v: unknown): number => Math.round((Number(v) || 0) * 1000) / 1000;
 
@@ -53,9 +53,25 @@ export function consignorSidesFor(branchId: string, rows: ReadonlyArray<Record<s
     const s = seite(String(e.cid));
     s.open = r3(s.open + Number(e.offen));
   }
+  // D3 — die späteren Geldeingänge je Guthaben (nur am Primary gespeichert; PC2 bekommt sie mit diesem Lesebefehl).
+  const eingaenge = new Map<string, ConsignorRefundRow['receipts']>();
+  let hatTabelle = true;
+  try { query('SELECT 1 FROM supplier_credit_refunds LIMIT 1'); } catch { hatTabelle = false; }
+  if (hatTabelle) {
+    for (const e of query(
+      `SELECT id, supplier_credit_id, received_at, method, amount FROM supplier_credit_refunds
+        WHERE branch_id = ? ORDER BY received_at ASC, created_at ASC, id ASC`,
+      [branchId],
+    )) {
+      const k = String(e.supplier_credit_id);
+      eingaenge.set(k, [...(eingaenge.get(k) ?? []), {
+        id: String(e.id), date: String(e.received_at ?? '').slice(0, 10), method: String(e.method ?? ''), amount: r3(e.amount),
+      }]);
+    }
+  }
   for (const r of query(
     `SELECT pr.id, pr.return_number, pr.return_date, pr.refund_method, pr.refund_amount, p.source_consignment_id AS cid,
-            sc.amount AS credit_amount, sc.used_amount AS credit_used,
+            sc.id AS credit_id, sc.amount AS credit_amount, sc.used_amount AS credit_used,
             EXISTS (SELECT 1 FROM invoice_lines il JOIN stock_lots sl ON sl.id = il.lot_id
                       JOIN consignments c ON c.invoice_id = il.invoice_id
                      WHERE c.id = p.source_consignment_id AND sl.purchase_id = p.id) AS aktuell
@@ -70,10 +86,15 @@ export function consignorSidesFor(branchId: string, rows: ReadonlyArray<Record<s
     const s = seite(String(r.cid));
     const pending = String(r.refund_method ?? '') === 'credit';
     const open = pending ? Math.max(0, r3(Number(r.credit_amount ?? 0) - Number(r.credit_used ?? 0))) : 0;
+    const creditId = pending && r.credit_id ? String(r.credit_id) : null;
+    const receipts = creditId ? (eingaenge.get(creditId) ?? []) : [];
+    const received = r3(receipts.reduce((x, e) => x + e.amount, 0));
     s.refunds.push({
       returnId: String(r.id), returnNumber: String(r.return_number ?? ''), date: String(r.return_date ?? ''),
       mode: pending ? 'pending' : 'received', method: pending ? null : String(r.refund_method ?? ''),
       amount: r3(r.refund_amount), open, currentSale: Number(r.aktuell) === 1,
+      creditId, receipts, received,
+      offset: pending ? Math.max(0, r3(Number(r.credit_used ?? 0) - received)) : 0,
     });
     s.refundOpen = r3(s.refundOpen + open);
   }

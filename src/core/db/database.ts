@@ -2584,6 +2584,25 @@ function runMigrations(database: Database): void {
     // Moment, in dem jemand diese Angaben am Artikel ÄNDERT. NULL = nie geändert: der Druck liest weiter den Artikel (der
     // dann ja noch genau so ist). So zeigt der Nachdruck einer alten Rechnung, was damals auf ihr stand.
     `ALTER TABLE invoice_lines ADD COLUMN product_snapshot TEXT`,
+    // CONSIGNMENT D3 — ein tatsächlicher Geldeingang auf ein Lieferanten-Guthaben aus einer Retoure (die offene
+    // Rückforderung an einen Einlieferer, der seine Auszahlung später zurückgibt): je Eingang ein Beleg mit Betrag, Weg
+    // und Tag; das Guthaben (used_amount) sinkt um genau diesen Betrag. Nur am Primary (wie cost_corrections) — PC2 liest
+    // über die Brücke; die Hauptbuchzeilen (SUPPLIER_CREDIT_REFUND) und das Guthaben synchronisieren normal. Kein Löschen.
+    `CREATE TABLE IF NOT EXISTS supplier_credit_refunds (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      supplier_credit_id TEXT NOT NULL,
+      supplier_id TEXT NOT NULL,
+      consignment_id TEXT,
+      amount REAL NOT NULL CHECK (amount > 0),
+      method TEXT NOT NULL CHECK (method IN ('cash','bank','benefit')),
+      received_at TEXT NOT NULL,
+      reference TEXT,
+      note TEXT,
+      created_at TEXT NOT NULL,
+      created_by TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_supplier_credit_refunds_credit ON supplier_credit_refunds(supplier_credit_id)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

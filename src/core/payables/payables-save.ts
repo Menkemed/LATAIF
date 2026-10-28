@@ -29,6 +29,7 @@ import {
   createTemplateInHouse, updateTemplateInHouse,
   recordPurchasePaymentInHouse, applyCreditToPurchaseInHouse,
   refundStandaloneCreditInHouse, paySupplierInHouse, applySupplierCreditToExpensesInHouse,
+  recordSupplierCreditRefundInHouse,
   type ExpenseCreateIntent, type PayTiming, type TemplateCreateIntent,
 } from './payables-house';
 
@@ -248,6 +249,23 @@ export async function savePurchaseCredit(write: PayablesWrite<Result>, purchase:
 }
 
 // ── Lieferant ──────────────────────────────────────────────────────────────
+
+/**
+ * CONSIGNMENT D3 — „Record Repayment": der Einlieferer zahlt seine offene Rückforderung (ganz oder teilweise)
+ * tatsächlich zurück — dieselbe Buchung `suppliers.refund_credit`, mit Betrag, Weg und Tag.
+ */
+export function saveSupplierCreditRepayment(
+  write: PayablesWrite<Result>, input: { creditId: string; amount: number; method: string; receivedDate?: string; reference?: string; note?: string },
+): Promise<WriteOutcome<Result>> {
+  const body: Record<string, unknown> = { creditId: input.creditId, amount: input.amount, method: input.method };
+  if (input.receivedDate) body.receivedDate = input.receivedDate;
+  if (input.reference) body.reference = input.reference;
+  if (input.note) body.note = input.note;
+  return speichern(write, {
+    local: () => runOnPrimary(() => recordSupplierCreditRefundInHouse(input, localHouseCtx()) as unknown as Result, supplierHier),
+    remote: () => body,
+  }, supplierHier);
+}
 
 /** „Refund Credit": ein unbenutztes Standalone-Guthaben zurueck auf das Ursprungskonto. */
 export function saveSupplierRefund(write: PayablesWrite<Result>, creditId: string): Promise<WriteOutcome<Result>> {

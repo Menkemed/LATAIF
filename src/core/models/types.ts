@@ -641,6 +641,13 @@ export interface ConsignorRefundRow {
   open: number;
   /** Gehört zum JETZIGEN Verkauf (der Einkauf hängt an der jetzigen Rechnung) — sonst ein früherer, stornierter Verkauf. */
   currentSale: boolean;
+  /** pending: das Lieferanten-Guthaben, auf das spätere Rückzahlungen gebucht werden. */
+  creditId: string | null;
+  /** pending: die tatsächlichen späteren Geldeingänge (Tag, Weg, Betrag). */
+  receipts: Array<{ id: string; date: string; method: string; amount: number }>;
+  /** pending: Σ Geldeingänge; der Rest des Verbrauchten wurde mit Auszahlungen verrechnet. */
+  received: number;
+  offset: number;
 }
 
 /** D4 — die Seite des Einlieferers je Kommission, abgeleitet beim Lesen (`core/consignment/consignor-side.ts`). */

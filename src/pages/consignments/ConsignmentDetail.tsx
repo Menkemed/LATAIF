@@ -42,6 +42,8 @@ import {
   type ConsignmentReturnAfterSaleInput, type ConsignorRefundChoice, type ConsignorRefundMethod, type PostSaleDisposition,
 } from '@/core/consignment/consignment-reversal';
 import type { ReturnRefundMethod } from '@/core/returns/return-create';
+import { saveSupplierCreditRepayment, viaWrites } from '@/core/payables/payables-save';
+import { latestBusinessDate } from '@/core/utils/business-date';
 import { productDisplayName } from '@/core/products/display-name';
 
 const REFUND_LABEL: Record<ReturnRefundMethod, string> = {
@@ -144,6 +146,13 @@ export function ConsignmentDetail() {
   const [postSaleConsignorRefund, setPostSaleConsignorRefund] = useState<ConsignorRefundChoice>({ mode: 'received', method: 'cash' });
   const [cancelRefunds, setCancelRefunds] = useState<Record<string, ConsignorRefundChoice>>({});
   const [cancelSaleModal, setCancelSaleModal] = useState(false);
+  // D3 — ein späterer Geldeingang auf die offene Rückforderung (Betrag, Weg, Tag).
+  const [repayRow, setRepayRow] = useState<{ creditId: string; open: number; from: string; returnNumber: string } | null>(null);
+  const [repayAmount, setRepayAmount] = useState('');
+  const [repayMethod, setRepayMethod] = useState<ConsignorRefundMethod>('cash');
+  const [repayDate, setRepayDate] = useState('');
+  const [repayRef, setRepayRef] = useState('');
+  const [repayFehler, setRepayFehler] = useState('');
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   const perm = usePermission();
@@ -382,6 +391,22 @@ export function ConsignmentDetail() {
     })) return;
     reloadAfterReversal();
     setCancelSaleModal(false);
+  }
+
+  // D3 — „Record Repayment": der Einlieferer zahlt seine offene Rückforderung ganz oder teilweise zurück. Dieselbe
+  // Buchung wie „Refund Credit" (suppliers.refund_credit) — am Primary wie von PC2; das Haus prüft Rest, Tag und Quartal.
+  async function handleRecordRepayment() {
+    if (!repayRow) return;
+    const amount = Number(repayAmount);
+    if (!(amount > 0)) { setRepayFehler('Enter the amount that came back.'); return; }
+    if (amount > repayRow.open + 0.0005) { setRepayFehler(`At most ${repayRow.open.toFixed(3)} BHD is still open.`); return; }
+    setRepayFehler('');
+    const r = await saveSupplierCreditRepayment(viaWrites(w, 'suppliers.refund_credit'), {
+      creditId: repayRow.creditId, amount, method: repayMethod, receivedDate: repayDate || undefined, reference: repayRef.trim() || undefined,
+    });
+    if (r.kind !== 'ok') { setRepayFehler(fehlertext(r)); return; }
+    reloadAfterReversal();
+    setRepayRow(null);
   }
 
   function handleDelete() {
@@ -778,30 +803,62 @@ export function ConsignmentDetail() {
           </Card>
         )}
 
-        {/* D3 — die Rückzahlung der Auszahlung, wenn die Ware nach dem Verkauf an den Einlieferer zurückging. */}
+        {/* D3 — die Rückzahlung der Auszahlung, wenn die Ware nach dem Verkauf an den Einlieferer zurückging: sofort
+            erhalten, oder offen — dann jeder spätere Geldeingang (Tag, Weg, Betrag) bis der Rest null ist. */}
         {(consignment.consignorSide?.refunds.length ?? 0) > 0 && (
           <Card style={{ padding: 14, marginBottom: 18 }}>
             <span className="text-overline" style={{ marginBottom: 12, display: 'block' }}>Consignor Repayment</span>
-            {consignment.consignorSide!.refunds.map(r => (
-              <div key={r.returnId} data-consignor-repayment={r.mode} className="flex justify-between items-center"
-                style={{ fontSize: 13, padding: '6px 0', borderBottom: '1px solid #F0F2F5' }}>
-                <span style={{ color: '#0F0F10' }}>
-                  <span className="font-mono" style={{ color: '#3D7FFF', marginRight: 8 }}>{r.returnNumber}</span>
-                  {r.mode === 'received'
-                    ? <>Received {r.date} · {r.method === 'bank' ? 'Bank Transfer' : r.method === 'benefit' ? 'Benefit' : 'Cash'}</>
-                    : r.open <= 0.0005
-                      ? <>Repayment settled (offset)</>
-                      : r.open < r.amount - 0.0005
-                        ? <>Repayment partly settled — <strong style={{ color: '#B45309' }}><Bhd v={r.open}/> BHD still open</strong></>
-                        : <>Repayment pending — <strong style={{ color: '#B45309' }}><Bhd v={r.open}/> BHD open</strong></>}
-                </span>
-                <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={r.amount}/> BHD</span>
-              </div>
-            ))}
+            {consignment.consignorSide!.refunds.map(r => {
+              const status = r.mode === 'received' ? 'received'
+                : r.open <= 0.0005 ? 'settled' : r.open < r.amount - 0.0005 ? 'partial' : 'pending';
+              return (
+                <div key={r.returnId} data-consignor-repayment={r.mode} data-consignor-repayment-status={status}
+                  style={{ fontSize: 13, padding: '8px 0', borderBottom: '1px solid #F0F2F5' }}>
+                  <div className="flex justify-between items-center">
+                    <span style={{ color: '#0F0F10' }}>
+                      <span className="font-mono" style={{ color: '#3D7FFF', marginRight: 8 }}>{r.returnNumber}</span>
+                      {status === 'received'
+                        ? <>Received {r.date} · {r.method === 'bank' ? 'Bank Transfer' : r.method === 'benefit' ? 'Benefit' : 'Cash'}</>
+                        : status === 'settled'
+                          ? <>Fully repaid</>
+                          : status === 'partial'
+                            ? <>Partly repaid — <strong style={{ color: '#B45309' }}><Bhd v={r.open}/> BHD still open</strong></>
+                            : <>Repayment pending — <strong style={{ color: '#B45309' }}><Bhd v={r.open}/> BHD open</strong></>}
+                    </span>
+                    <span className="flex items-center gap-3">
+                      <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={r.amount}/> BHD</span>
+                      {r.mode === 'pending' && r.creditId && r.open > 0.0005 && perm.canManageConsignments && (
+                        <Button variant="secondary" data-consignor-repayment-record={r.creditId}
+                          onClick={() => { w.clear(); setRepayFehler(''); setRepayRow({ creditId: r.creditId!, open: r.open, from: r.date, returnNumber: r.returnNumber });
+                            setRepayAmount(r.open.toFixed(3)); setRepayMethod('cash'); setRepayDate(new Date().toISOString().split('T')[0]); setRepayRef(''); }}>
+                          Record Repayment
+                        </Button>
+                      )}
+                    </span>
+                  </div>
+                  {r.mode === 'pending' && (r.receipts.length > 0 || r.offset > 0.0005) && (
+                    <div style={{ marginTop: 6, paddingLeft: 12, fontSize: 12, color: '#4B5563', lineHeight: 1.7 }} data-consignor-repayment-receipts>
+                      {r.receipts.map(e => (
+                        <div key={e.id} className="flex justify-between">
+                          <span>Received {e.date} · {e.method === 'bank' ? 'Bank Transfer' : e.method === 'benefit' ? 'Benefit' : 'Cash'}</span>
+                          <span className="font-mono"><Bhd v={e.amount}/> BHD</span>
+                        </div>
+                      ))}
+                      {r.offset > 0.0005 && (
+                        <div className="flex justify-between">
+                          <span>Offset against later payouts (credit)</span>
+                          <span className="font-mono"><Bhd v={r.offset}/> BHD</span>
+                        </div>
+                      )}
+                    </div>
+                  )}
+                </div>
+              );
+            })}
             {consignment.consignorSide!.refundOpen > 0.0005 && (
               <div style={{ fontSize: 11, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
-                The open amount is the consignor&apos;s supplier credit — it is offset when his next payout is paid with “Credit”.
-                Recording a later cash repayment waits for the accountant&apos;s booking rule.
+                The open amount is the consignor&apos;s supplier credit. Record each repayment with its date and method when the money
+                comes — or offset it when his next payout is paid with “Credit”.
               </div>
             )}
           </Card>
@@ -1107,6 +1164,46 @@ export function ConsignmentDetail() {
             {saleGroup.length > 1 ? `Cancel Sale (${saleGroup.length} items)` : 'Cancel Sale'}
           </Button>
         </div>
+      </Modal>
+
+      {/* ── D3: Record Repayment — ein späterer Geldeingang auf die offene Rückforderung ── */}
+      <Modal open={!!repayRow} onClose={() => setRepayRow(null)} title="Record Repayment" width={480}>
+        {repayRow && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }} data-consignor-repayment-dialog>
+            <p style={{ fontSize: 13, color: '#4B5563', lineHeight: 1.5, margin: 0 }}>
+              <strong style={{ color: '#0F0F10' }}>{consignorName}</strong> pays back his payout for <span className="font-mono">{repayRow.returnNumber}</span>.
+              Still open: <strong><Bhd v={repayRow.open}/> BHD</strong>. Record only money that actually came in — a part is fine, the rest stays open.
+            </p>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>
+              <Input label="AMOUNT RECEIVED (BHD)" type="number" step="0.001" min="0" value={repayAmount}
+                onChange={e => setRepayAmount(e.target.value)} data-consignor-repayment-amount />
+              <Input label="DATE RECEIVED" type="date" min={repayRow.from || undefined} max={latestBusinessDate()} value={repayDate}
+                onChange={e => setRepayDate(e.target.value)} data-consignor-repayment-date />
+            </div>
+            <div>
+              <span className="text-overline">RECEIVED AS</span>
+              <div className="flex gap-2" style={{ marginTop: 8 }}>
+                {CONSIGNOR_REFUND_METHODS.map(m => (
+                  <button key={m} type="button" onClick={() => setRepayMethod(m)} data-consignor-repayment-method={m}
+                    className="cursor-pointer rounded"
+                    style={{ padding: '7px 14px', fontSize: 12, border: `1px solid ${repayMethod === m ? '#0F0F10' : '#D5D9DE'}`,
+                      color: repayMethod === m ? '#0F0F10' : '#6B7280', background: repayMethod === m ? 'rgba(15,15,16,0.06)' : 'transparent' }}>
+                    {CONSIGNOR_REFUND_LABEL[m]}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <Input label="REFERENCE (OPTIONAL)" placeholder="Receipt no., transfer ref., …" value={repayRef}
+              onChange={e => setRepayRef(e.target.value)} data-consignor-repayment-reference />
+            <WriteError text={repayFehler || w.fehler} />
+            <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+              <Button variant="ghost" onClick={() => setRepayRow(null)}>Cancel</Button>
+              <Button variant="primary" onClick={() => void handleRecordRepayment()} disabled={w.busy} data-consignor-repayment-confirm>
+                Record Repayment
+              </Button>
+            </div>
+          </div>
+        )}
       </Modal>
 
       {/* ── Delete Confirmation Modal ── */}

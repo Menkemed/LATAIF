@@ -703,8 +703,13 @@ marker('CENTRAL_UI_R6D_PAYABLES_PURCHASE_CREDIT_PROVED');
   X.db.run("UPDATE supplier_credits SET branch_id = 'branch-other' WHERE id = ?", [X.creditId]);
   const fx = await fern(() => cmds.runSupplierRefund(deps(X.db), identity(nextId(), 'suppliers.refund_credit'), { creditId: X.creditId }));
   ok(fx.code === 'SUPPLIER_CREDIT_NOT_FOUND' && n(X.db, 'SELECT COUNT(*) FROM supplier_credits') === 1, 'SECURITY neu: ein Guthaben einer anderen Filiale ist hier nicht vorhanden');
-  ok(/unknown field/.test(parseFails(() => cmds.parseSupplierRefund({ creditId: 'x', amount: 5 }))) || /the primary decides/.test(parseFails(() => cmds.parseSupplierRefund({ creditId: 'x', amount: 5 }))),
-    'PAYLOAD der Refund trägt nur die Kennung');
+  // CONSIGNMENT D3 — derselbe Befehl nimmt jetzt AUCH den Geldeingang auf eine Rückforderung aus einer Retoure an (Betrag +
+  // Weg + Tag); der Standalone-Refund bleibt der Rumpf nur mit Kennung, ein Betrag ohne Weg ist kein Rumpf. (Ein Betrag
+  // auf ein Standalone-Guthaben weist das Haus ab — SUPPLIER_CREDIT_NOT_A_RETURN_CREDIT, test/consignment-multi-sale/d3-repayment.)
+  ok(/method is required/.test(parseFails(() => cmds.parseSupplierRefund({ creditId: 'x', amount: 5 })))
+    && Object.keys(cmds.parseSupplierRefund({ creditId: 'x' })).join(',') === 'creditId'
+    && /unknown field|the primary decides/.test(parseFails(() => cmds.parseSupplierRefund({ creditId: 'x', amount: 5, method: 'cash', usedAmount: 5 }))),
+  'PAYLOAD der Standalone-Refund trägt nur die Kennung; Betrag ohne Weg ist kein Rumpf; Rechenfelder bleiben verboten');
   ok(unbalanced(C.db) === 0, 'LEDGER jede Transaktion ausgeglichen');
 }
 marker('CENTRAL_UI_R6D_PAYABLES_REFUND_PROVED');

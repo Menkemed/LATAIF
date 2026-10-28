@@ -386,6 +386,13 @@ function auditCreditIntegrity(run: SqlRunner, branchId: string): CreditIssue[] {
       appliedFils.set(ref, (appliedFils.get(ref) ?? 0) + toFils(r.amount));
     }
   }
+  // CONSIGNMENT D3 — ein tatsächlicher Geldeingang auf eine Rückforderung verbraucht das Guthaben ebenso (used_amount).
+  try {
+    for (const r of run(`SELECT supplier_credit_id AS ref, amount FROM supplier_credit_refunds`, [])) {
+      const ref = String(r.ref);
+      appliedFils.set(ref, (appliedFils.get(ref) ?? 0) + toFils(r.amount));
+    }
+  } catch { /* ältere Datenbank ohne die Tabelle: keine Eingänge */ }
 
   // 1+6+7 — supplier_credits in EINER Query (overused/status/drift/credit_no_ledger).
   const scRows = run(

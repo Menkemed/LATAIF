@@ -337,6 +337,8 @@ const SOURCE_TABLE_MAP: Record<string, string> = {
   GOLD_CONVERSION: 'customer_credits',
   // PURCHASE-EDIT D1 — sourceId = cost_corrections.id (eigener Beleg je korrigiertem Verkauf).
   COST_CORRECTION: 'cost_corrections',
+  // CONSIGNMENT D3 — sourceId = supplier_credit_refunds.id (ein Geldeingang auf eine Rückforderung).
+  SUPPLIER_CREDIT_REFUND: 'supplier_credit_refunds',
 };
 
 function loadOrphans(branchId: string): Orphan[] {

@@ -156,6 +156,11 @@ export type SourceModule =
   // NICHT dokument-gebunden (supplier_credits source_purchase_id IS NULL AND source_return_id IS NULL).
   // Gekeyt auf die supplier_credits-Row-id; Reverse via deleteStandaloneSupplierCredit (Refund).
   | 'SUPPLIER_PREPAYMENT'
+  // CONSIGNMENT D3 — ein tatsächlicher Geldeingang auf ein Lieferanten-Guthaben aus einer Retoure (die offene
+  // Rückforderung an den Einlieferer): DR CASH|BANK|BENEFIT / CR SUPPLIER_CREDIT — dieselbe Kontenpaarung wie der
+  // „Refund Credit" (reverseSource SUPPLIER_PREPAYMENT), nur als eigener, teilbarer Beleg mit Tag und Weg.
+  // Gekeyt auf supplier_credit_refunds.id.
+  | 'SUPPLIER_CREDIT_REFUND'
   // M-12 Phase 1 — Opening-Balance-Seed aus settings.finance.opening_*. Idempotent
   // gekeyt auf `opening:<branchId>`.
   | 'OPENING_BALANCE'
@@ -1976,6 +1981,42 @@ export function postStandaloneSupplierCredit(
       },
     ],
     { occurredAt, sourceModule: 'SUPPLIER_PREPAYMENT', sourceId: creditId }
+  );
+}
+
+// CONSIGNMENT D3 — Geld kommt auf ein Lieferanten-Guthaben (offene Rückforderung) zurück:
+//   DR CASH|BANK|BENEFIT (das Geld kommt tatsächlich herein, am Tag des Eingangs)
+//   CR SUPPLIER_CREDIT   (die Rückforderung sinkt um genau diesen Betrag)
+// Dieselbe Kontenpaarung wie der „Refund Credit" eines Standalone-Guthabens (reverseSource SUPPLIER_PREPAYMENT) und —
+// zusammengenommen mit der Lieferanten-Retoure „credit" (DR SUPPLIER_CREDIT) — dasselbe Ergebnis wie eine Retoure mit
+// sofortigem Geldeingang (DR CASH). Kein AP, kein Aufwand, kein VAT. sourceId = supplier_credit_refunds.id.
+export function postSupplierCreditRefund(
+  refundId: string,
+  supplierId: string,
+  amount: number,
+  // Strikt cash/bank/benefit — ein Eingang ist echtes Geld (wie postStandaloneSupplierCredit).
+  method: 'cash' | 'bank' | 'benefit',
+  occurredAt: string,
+  meta: { creditId: string; consignmentId?: string | null },
+): PostingResult {
+  const amt = ROUND(amount);
+  if (amt <= 0) {
+    throw new Error(`postSupplierCreditRefund: amount must be > 0 (got ${amount})`);
+  }
+  const cashAcc = expenseCashAccountFor(method);
+  const metadata = { creditId: meta.creditId, ...(meta.consignmentId ? { consignmentId: meta.consignmentId } : {}), kind: 'supplier_credit_refund' };
+  return postEntries(
+    [
+      {
+        account: cashAcc, direction: 'DEBIT', amount: amt,
+        counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata,
+      },
+      {
+        account: 'SUPPLIER_CREDIT', direction: 'CREDIT', amount: amt,
+        counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata,
+      },
+    ],
+    { occurredAt, sourceModule: 'SUPPLIER_CREDIT_REFUND', sourceId: refundId }
   );
 }
 

@@ -31,6 +31,7 @@ import {
   createTemplateInHouse, updateTemplateInHouse,
   recordPurchasePaymentInHouse, applyCreditToPurchaseInHouse,
   refundStandaloneCreditInHouse, paySupplierInHouse, applySupplierCreditToExpensesInHouse,
+  recordSupplierCreditRefundInHouse,
   type HouseCtx,
 } from '@/core/payables/payables-house';
 
@@ -181,9 +182,33 @@ export function parsePurchaseCredit(raw: unknown): { purchaseId: string; expecte
   return { purchaseId: idOf(r.purchaseId, 'purchaseId'), expectedRevision: revisionOf(r.expectedRevision), amount: numberOf(r.amount, 'amount') };
 }
 
-export function parseSupplierRefund(raw: unknown): { creditId: string } {
-  const r = strict(raw, ['creditId']);
-  return { creditId: idOf(r.creditId, 'creditId') };
+/**
+ * `suppliers.refund_credit` — „Refund Credit" eines Standalone-Guthabens (nur `creditId`, wie bisher) ODER (CONSIGNMENT
+ * D3) ein tatsächlicher Geldeingang auf eine offene Rückforderung aus einer Retoure: Betrag, Weg, Tag, optional Referenz
+ * und Notiz. Derselbe Geschäftsvorgang (der Lieferant zahlt Guthaben zurück), dieselbe Buchung; was gilt, entscheidet
+ * das Haus am Guthaben.
+ */
+export interface SupplierRefundRequest {
+  creditId: string;
+  repayment?: { amount: number; method: string; receivedDate?: string; reference?: string; note?: string };
+}
+
+export function parseSupplierRefund(raw: unknown): SupplierRefundRequest {
+  const r = strict(raw, ['creditId', 'amount', 'method', 'receivedDate', 'reference', 'note']);
+  const creditId = idOf(r.creditId, 'creditId');
+  if (['amount', 'method', 'receivedDate', 'reference', 'note'].every((k) => r[k] === undefined)) return { creditId };
+  textOrAbsent(r.receivedDate, 'receivedDate');
+  textOrAbsent(r.reference, 'reference');
+  textOrAbsent(r.note, 'note');
+  return {
+    creditId,
+    repayment: {
+      amount: numberOf(r.amount, 'amount'), method: idOf(r.method, 'method'),
+      ...(typeof r.receivedDate === 'string' && r.receivedDate ? { receivedDate: r.receivedDate } : {}),
+      ...(typeof r.reference === 'string' && r.reference ? { reference: r.reference } : {}),
+      ...(typeof r.note === 'string' && r.note ? { note: r.note } : {}),
+    },
+  };
 }
 
 export function parseSupplierPay(raw: unknown): {
@@ -281,7 +306,9 @@ export const runPurchaseCredit: Run = (deps, identity, raw) => {
 
 export const runSupplierRefund: Run = (deps, identity, raw) => {
   const req = parseSupplierRefund(raw);
-  return lauf(deps, identity, (ctx) => refundStandaloneCreditInHouse(req.creditId, ctx));
+  return lauf(deps, identity, (ctx) => (req.repayment
+    ? recordSupplierCreditRefundInHouse({ creditId: req.creditId, ...req.repayment }, ctx)
+    : refundStandaloneCreditInHouse(req.creditId, ctx)));
 };
 
 export const runSupplierPay: Run = (deps, identity, raw) => {
