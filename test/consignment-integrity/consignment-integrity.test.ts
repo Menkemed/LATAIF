@@ -823,6 +823,30 @@ for (const disp of ['RETURN_TO_OWNER', 'KEEP_AS_OWN']) {
       ok(m !== '' && (m === lock.VAT_PERIOD_FILED || /VAT|filed|quarter/i.test(m)) && unberuehrt(w) === vor && S(basis(w)) === linie0,
         `I9 Verkauf im eingereichten Quartal (Q3 2026) → Steuerart ändern abgewiesen, nichts verändert (${m.slice(0, 90)})`);
     }
+    { // Rechnungsdatum in einem eingereichten Quartal (Q3), voll bezahlt erst in Q4 (offen): der Export von Q3 enthält sie
+      // nicht — die Änderung ist erlaubt. Aber die BUCHUNGEN von Q3 dürfen sich nicht ändern: die Korrektur bucht heute.
+      const lock = await import('../../src/core/tax/vat-period-lock.ts');
+      const w = await welt();
+      nimm(w.db);
+      useInvoiceStore.getState().loadInvoices();
+      imHaus(() => useInvoiceStore.getState().recordPayment(w.invId, 1200, 'cash', undefined, undefined, undefined, undefined, undefined,
+        { receivedAt: '2026-10-05T10:00:00.000Z' }));
+      imHaus(() => lock.markVatQuarterFiled({ branchId: 'branch-main', year: 2026, quarter: 3, userId: 'user-test' }));
+      reload();
+      const q3 = (): string => all(w.db, `SELECT account, direction, ROUND(SUM(amount), 3), COUNT(*) FROM ledger_entries
+        WHERE occurred_at < '2026-10-01' GROUP BY account, direction ORDER BY account, direction`);
+      const vorQ3 = q3();
+      const vorAnzahlQ3 = n(w.db, "SELECT COUNT(*) FROM ledger_entries WHERE occurred_at < '2026-10-01'");
+      const m = aendern(w, [zeile(w, { taxScheme: 'ZERO', vatRate: 0, vatAmount: 0 })]);
+      ok(m === '' && String(basis(w).tax_scheme) === 'ZERO' && vatKonten(w) === '[]' && zweiWahrheiten(w) === ''
+        && n(w.db, "SELECT ROUND(COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0), 3) FROM ledger_entries") === 0,
+        `I9 Rechnungsdatum Q3 (eingereicht), Vollzahlung Q4: Steuerart ändern erlaubt, Margen-VAT ausgebucht, ausgeglichen (${m || 'ok'})`);
+      ok(q3() === vorQ3 && n(w.db, "SELECT COUNT(*) FROM ledger_entries WHERE occurred_at < '2026-10-01'") === vorAnzahlQ3,
+        `I9 …die Buchungen des eingereichten Q3 bleiben bitgleich — Gegen- und Neubuchung stehen im offenen Zeitraum (${vorAnzahlQ3} Zeilen)`);
+      // Dieselbe Rechnung noch einmal (Notiz): auch das bucht nichts in Q3.
+      const notiz = aendern(w, [zeile(w)], { notes: 'Steuerart korrigiert' });
+      ok(notiz === '' && q3() === vorQ3, 'I9 …und eine spätere Notiz-Änderung ebenso');
+    }
   }
 
   { // I10 CONSIGNMENT-SALE-TAX — „Record Sale" mit gewählter Steuerart (Primary und PC2), unbekannte Steuerart abgewiesen

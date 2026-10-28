@@ -30,7 +30,10 @@ function bulkCtxOfInvoice(invoiceId: string, now: string): BulkCtx {
 }
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
-import { assertInvoiceNotInClosedVatQuarter, assertNotFinalizingIntoClosedVatQuarter, assertPaymentDateNotInClosedVatQuarter, assertVatUnchanged, vatFingerprint } from '@/core/tax/vat-period-lock';
+import {
+  assertInvoiceNotInClosedVatQuarter, assertNotFinalizingIntoClosedVatQuarter, assertPaymentDateNotInClosedVatQuarter, assertVatUnchanged,
+  closedVatQuarters, nbrQuarterOfDate, vatFingerprint,
+} from '@/core/tax/vat-period-lock';
 import { planCustomerChange, moveInvoiceBookings, moveLastPurchase, customerDisplayName } from '@/core/invoices/customer-change';
 import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts } from '@/core/invoices/edit-lines';
 import { assertCardFeeConfigured, normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
@@ -1093,7 +1096,15 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         // INVOICE-EDIT S3 — beim Kundenwechsel bucht die Rechnung auf das Korrekturdatum (wie ihre
         // Zahlungen), nicht zurück auf das Rechnungsdatum: der neue Kunde hatte die Forderung vorher
         // nicht. Ohne Kundenwechsel bleibt alles wie bisher.
-        postInvoiceIssued(fresh, customerPlan ? { occurredAt: now } : {});
+        // VAT-PERIOD-LOCK — läge die Neubuchung (Rechnungsdatum) in einem eingereichten oder bezahlten VAT-Quartal,
+        // entstünden dort neue Hauptbuchzeilen, während die Gegenbuchung oben heute steht: die Buchungen eines
+        // zugemachten Quartals änderten sich (auch wenn sein Export unberührt bleibt). Dann bucht die Korrektur —
+        // Gegen- UND Neubuchung — heute; das zugemachte Quartal bleibt, wie es gemeldet wurde.
+        const buchungstag = fresh.issuedAt || fresh.createdAt;
+        const buchungsquartal = buchungstag ? nbrQuarterOfDate(buchungstag) : null;
+        const quartalZu = !!buchungsquartal
+          && closedVatQuarters(String(query('SELECT branch_id FROM invoices WHERE id = ?', [id])[0]?.branch_id ?? '')).has(buchungsquartal.key);
+        postInvoiceIssued(fresh, customerPlan || quartalZu ? { occurredAt: now } : {});
       }
 
       // 7. Optionale Delta-Zahlung — innerhalb der Transaktion. recordPayment macht

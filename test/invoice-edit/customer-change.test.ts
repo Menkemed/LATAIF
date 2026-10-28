@@ -549,7 +549,8 @@ const nummer = (db: Db, inv: string): string => s(db, 'SELECT invoice_number FRO
   ok(/save the customer change first, then record the payment/.test(m), 'Q …neue Zahlung im selben Speichern wird vorher gemeldet');
   const store = src('src/stores/invoiceStore.ts');
   ok(!/Cannot change the customer of an invoice that has payments/.test(store) && /moveInvoiceBookings\(customerPlan, now\)/.test(store)
-    && /postInvoiceIssued\(fresh, customerPlan \? \{ occurredAt: now \} : \{\}\)/.test(store),
+    // VAT-PERIOD-LOCK (v0.8.93) — ebenso heute, wenn das Rechnungsdatum in einem zugemachten VAT-Quartal liegt.
+    && /postInvoiceIssued\(fresh, customerPlan \|\| quartalZu \? \{ occurredAt: now \} : \{\}\)/.test(store),
     'Q die alte Pauschalsperre ist ersetzt; Umbuchen läuft in der Edit-Transaktion');
 }
 void current;
