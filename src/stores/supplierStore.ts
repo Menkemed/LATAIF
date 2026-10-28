@@ -201,6 +201,7 @@ function rowToSupplier(row: Record<string, unknown>): Supplier {
     cprImage: (row.cpr_image as string) || undefined,
     linkedCustomerId: (row.linked_customer_id as string) || undefined,
     active: Number(row.active) === 1,
+    isWorkshop: Number(row.is_workshop ?? 0) === 1,
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
   };
@@ -259,11 +260,12 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
       // Medium (`identity_document`, Klasse `sensitive`) und wird vom Aufrufer in DERSELBEN
       // Klammer verknüpft (`applyIdentityDocument`). Die Spalte bleibt stehen und lesbar: alte
       // Lieferanten und alte Einkaufsbelege zeigen ihren Abzug weiterhin.
-      `INSERT INTO suppliers (id, branch_id, name, phone, email, address, notes, cpr, linked_customer_id, active, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
+      `INSERT INTO suppliers (id, branch_id, name, phone, email, address, notes, cpr, linked_customer_id, active, is_workshop, created_at, updated_at, created_by)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)`,
       [id, branchId, input.name, input.phone ?? null, input.email ?? null,
        input.address ?? null, input.notes ?? null,
        input.cpr ?? null, opts?.linkedCustomerId ?? null,
+       input.isWorkshop === true ? 1 : 0,
        now, now, userId]
     );
     saveDatabase();
@@ -348,6 +350,8 @@ export const useSupplierStore = create<SupplierStore>((set, get) => ({
       const col = map[k]; if (col) { fields.push(`${col} = ?`); values.push(v ?? null); }
     }
     if (input.active !== undefined) { fields.push('active = ?'); values.push(input.active ? 1 : 0); }
+    // REPAIR-WORKSHOP-FILTER — nur die Einordnung dieser Zeile; Einkäufe, Zahlungen, Buchungen bleiben, wie sie sind.
+    if (input.isWorkshop !== undefined) { fields.push('is_workshop = ?'); values.push(input.isWorkshop ? 1 : 0); }
     if (fields.length === 0) return;
     fields.push('updated_at = ?'); values.push(now); values.push(id);
     db.run(`UPDATE suppliers SET ${fields.join(', ')} WHERE id = ?`, values);
@@ -496,7 +500,34 @@ export function loadSuppliersFor(ctx: BusinessReadContext): { suppliers: Supplie
   // Lieferanten das des Kunden, sonst sein eigenes. Referenzen, nie Bytes.
   const docs = identityDocumentsFor('supplier', suppliers.map((s) => s.id), ctx.branchId);
   for (const s of suppliers) s.identity = docs.get(s.id) ?? null;
+  // REPAIR-WORKSHOP-FILTER — die Grundlage der Vorschläge („schon als Werkstatt benutzt"), für Primary und PC2 dieselbe.
+  const uses = repairWorkshopUsesFor(ctx.branchId);
+  for (const s of suppliers) s.repairWorkshopUses = uses.get(s.id) ?? 0;
   return { suppliers };
+}
+
+/**
+ * REPAIR-WORKSHOP-FILTER — in wie vielen Reparaturen der Filiale ein Lieferant schon als Werkstatt gearbeitet hat: als
+ * Werkstatt der Reparatur oder mit einer (nicht stornierten) Arbeitszeile. Material zählt NICHT — Ersatzteile kommen oft
+ * vom normalen Händler. Nur eine Auskunft für Vorschläge: markiert wird nie automatisch.
+ */
+export function repairWorkshopUsesFor(branchId: string): Map<string, number> {
+  const out = new Map<string, number>();
+  try {
+    const rows = query(
+      `SELECT supplier_id, COUNT(DISTINCT repair_id) AS n FROM (
+         SELECT workshop_supplier_id AS supplier_id, id AS repair_id FROM repairs
+          WHERE branch_id = ? AND workshop_supplier_id IS NOT NULL AND workshop_supplier_id != ''
+         UNION
+         SELECT supplier_id, repair_id FROM repair_lines
+          WHERE branch_id = ? AND supplier_id IS NOT NULL AND supplier_id != '' AND status != 'CANCELLED'
+            AND (material_kind IS NULL OR material_kind = '' OR material_kind = 'labor')
+       ) GROUP BY supplier_id`,
+      [branchId, branchId],
+    );
+    for (const r of rows) out.set(String(r.supplier_id), Number(r.n) || 0);
+  } catch { /* ohne Reparaturtabellen: keine Vorschläge */ }
+  return out;
 }
 
 /**

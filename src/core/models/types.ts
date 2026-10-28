@@ -1250,9 +1250,15 @@ export interface Supplier {
   /** MEDIA-IDENTITY §10 — das geltende Ausweisdokument als Referenz (ggf. das des Kunden). */
   identity?: IdentityDocumentRef | null;
   active: boolean;
+  /** REPAIR-WORKSHOP-FILTER — als Werkstatt markiert: nur dann in Repair → Workshop wählbar. Eine reine
+   *  Einordnung; Einkäufe, Zahlungen und Buchungen des Lieferanten bleiben unberührt. */
+  isWorkshop?: boolean;
   createdAt: string;
   updatedAt: string;
   // Populated (not stored)
+  /** REPAIR-WORKSHOP-FILTER — in wie vielen Reparaturen dieser Lieferant schon als Werkstatt gearbeitet hat
+   *  (Werkstatt der Reparatur oder eine Arbeitszeile; Material zählt nicht). Grundlage der Vorschläge. */
+  repairWorkshopUses?: number;
   totalPurchases?: number;
   totalPaid?: number;
   outstandingBalance?: number;

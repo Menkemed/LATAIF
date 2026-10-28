@@ -507,19 +507,33 @@
   }
   const RP_WORT = (w) => String(w).replace(/_/g, ' ');
 
-  /** Die Lieferanten des Hauses — einmal je geoeffneter Reparatur, ueber den vorhandenen Leseweg. */
+  /**
+   * Die Lieferanten des Hauses — einmal je geoeffneter Reparatur, ueber den vorhandenen Leseweg.
+   *
+   * REPAIR-WORKSHOP-FILTER — dieselbe Regel wie am Rechner: Arbeitszeile und Gold vom Workshop bieten NUR aktive, als
+   * Werkstatt markierte Lieferanten (der Primary filtert: `workshop: true`), Material bietet ALLE aktiven (Ersatzteile
+   * kommen oft vom normalen Haendler). Gespeicherte Zeilen zeigen ihren Lieferanten weiter (`supplierName` vom Primary).
+   */
   async function rpLadeLieferanten() {
     const eigene = [{ wert: MobileRepair.INHOUSE, text: 'Own workshop (in-house)' }];
-    let liste = [];
-    const r = await rpClient.read('suppliers.list', { limit: 50 });
-    if (r.ok) {
-      liste = ((r.value && r.value.items) || []).map((s) => ({
-        wert: s.id, text: s.name || s.company || s.id,
-      }));
+    const alsWahl = (s) => ({ wert: s.id, text: s.name || s.company || s.id });
+    const [alle, werk] = await Promise.all([
+      rpClient.read('suppliers.list', { limit: 500 }),
+      rpClient.read('suppliers.list', { limit: 500, workshop: true }),
+    ]);
+    const material = alle.ok ? ((alle.value && alle.value.items) || []).filter((s) => s.active !== false).map(alsWahl) : [];
+    const werkstaetten = werk.ok ? ((werk.value && werk.value.items) || []).map(alsWahl) : [];
+    rpFuelle('rpLineSupplier', eigene.concat(werkstaetten), undefined);
+    rpFuelle('rpMatSupplier', eigene.concat(material), undefined);
+    rpFuelle('rpGoldSupplier', werkstaetten, 'Workshop…');
+    // Noch keine Werkstatt markiert: die Maske sagt es, statt eine leere Auswahl zu zeigen.
+    RP.keineWerkstatt = werk.ok && werkstaetten.length === 0;
+    const hinweis = 'No workshops marked yet — mark them on the computer under Suppliers → Edit → “Is Workshop”.';
+    for (const id of ['rpLineSupplierHint', 'rpGoldSupplierHint']) {
+      $(id).textContent = RP.keineWerkstatt ? hinweis : '';
     }
-    rpFuelle('rpLineSupplier', eigene.concat(liste), undefined);
-    rpFuelle('rpMatSupplier', eigene.concat(liste), undefined);
-    rpFuelle('rpGoldSupplier', liste, 'Supplier…');
+    $('rpLineSupplierHint').classList.toggle('hidden', !RP.keineWerkstatt);
+    rpGoldFelder();
   }
 
   function rpWerkstattVorbereiten() {
@@ -537,6 +551,7 @@
   function rpGoldFelder() {
     const werkstatt = $('rpGoldSource').value === 'workshop';
     $('rpGoldSupplier').classList.toggle('hidden', !werkstatt);
+    $('rpGoldSupplierHint').classList.toggle('hidden', !werkstatt || !RP.keineWerkstatt);
     $('rpGoldSettlement').classList.toggle('hidden', !werkstatt);
     $('rpGoldUsed').classList.toggle('hidden', werkstatt);
     $('rpGoldLeftover').classList.toggle('hidden', werkstatt);

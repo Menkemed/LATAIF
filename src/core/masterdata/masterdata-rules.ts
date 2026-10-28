@@ -64,8 +64,10 @@ const has = (o: Record<string, unknown>, k: string): boolean => Object.prototype
 
 // ── Lieferant ──────────────────────────────────────────────────────────────
 
-/** Was die Anlegemasken eines Lieferanten erfassen (SupplierList, PurchaseCreate, RepairList). */
-export const SUPPLIER_CREATE_FIELDS = ['name', 'phone', 'email', 'address', 'notes', 'cpr', 'cprImage'] as const;
+/** Was die Anlegemasken eines Lieferanten erfassen (SupplierList, PurchaseCreate, RepairList).
+ *  REPAIR-WORKSHOP-FILTER — `isWorkshop` ist eine reine Einordnung (in Repair → Workshop wählbar); sie
+ *  ändert keinen Einkauf, keine Zahlung und keine Buchung. */
+export const SUPPLIER_CREATE_FIELDS = ['name', 'phone', 'email', 'address', 'notes', 'cpr', 'cprImage', 'isWorkshop'] as const;
 /** Ändern: dieselben Felder und der Aktiv-Schalter. */
 export const SUPPLIER_UPDATE_FIELDS = [...SUPPLIER_CREATE_FIELDS, 'active'] as const;
 
@@ -78,6 +80,8 @@ export interface SupplierCreateInput {
   cpr?: string;
   /** Das Bild des Ausweises als Daten-URL — so, wie `ImageUpload` es liefert. */
   cprImage?: string;
+  /** REPAIR-WORKSHOP-FILTER — als Werkstatt markiert (fehlt = nein). */
+  isWorkshop?: boolean;
 }
 
 export type SupplierUpdateInput = {
@@ -89,6 +93,7 @@ export type SupplierUpdateInput = {
   cpr?: string | null;
   cprImage?: string | null;
   active?: boolean;
+  isWorkshop?: boolean;
 };
 
 export const SUPPLIER_NAME_REQUIRED = 'SUPPLIER_NAME_REQUIRED';
@@ -99,6 +104,7 @@ export function supplierCreateInput(raw: Record<string, unknown>): SupplierCreat
     const v = text(raw[k], k);
     if (v !== undefined) out[k] = v;
   }
+  if (has(raw, 'isWorkshop')) out.isWorkshop = flag(raw.isWorkshop, 'isWorkshop');
   return out;
 }
 
@@ -109,6 +115,7 @@ export function supplierUpdateInput(raw: Record<string, unknown>): SupplierUpdat
     if (Object.prototype.hasOwnProperty.call(raw, k)) out[k] = textOrClear(raw[k], k);
   }
   if (has(raw, 'active')) out.active = flag(raw.active, 'active');
+  if (has(raw, 'isWorkshop')) out.isWorkshop = flag(raw.isWorkshop, 'isWorkshop');
   return out;
 }
 

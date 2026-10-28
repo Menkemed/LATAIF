@@ -17,7 +17,8 @@ import { useSupplierStore } from '@/stores/supplierStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
-import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
+import { saveSupplierCreate, saveSupplierUpdate } from '@/core/masterdata/masterdata-save';
+import { workshopSuggestions } from '@/core/repairs/repair-workshop-choice';
 import { UseCustomerAsSupplier } from '@/components/suppliers/UseCustomerAsSupplier';
 import type { Supplier } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
@@ -33,6 +34,18 @@ export function SupplierList() {
   // Dieselbe Folge wie „+ New Supplier" im Einkauf und in der Werkstatt (masterdata-save).
   const anlegen = useSharedWrite<{ supplierId: string }>('suppliers.create');
   const [fehler, setFehler] = useState('');
+  // REPAIR-WORKSHOP-FILTER — Vorschläge aus alten Reparaturen: nur anzeigen; markiert wird erst auf Klick (suppliers.update).
+  const markieren = useSharedWrite<{ id: string }>('suppliers.update');
+  const [vorschlagFehler, setVorschlagFehler] = useState('');
+  const vorschlaege = useMemo(() => workshopSuggestions(suppliers), [suppliers]);
+  async function handleMarkWorkshop(id: string) {
+    const s = suppliers.find(x => x.id === id);
+    if (!s) return;
+    setVorschlagFehler('');
+    // `cprImage` ausdrücklich NICHT mitgeben (wie „Deactivate"): nur die Einordnung ändert sich.
+    const r = await saveSupplierUpdate(markieren, s, { ...s, cprImage: undefined, isWorkshop: true });
+    if (r.kind !== 'ok') setVorschlagFehler(`Could not mark ${s.name} as workshop: ${fehlertext(r)}`);
+  }
   const [search, setSearch] = useState('');
   const [showInactive, setShowInactive] = useState(false);
   const [showNew, setShowNew] = useState(false);
@@ -92,6 +105,31 @@ export function SupplierList() {
         </>
       }
     >
+      {vorschlaege.length > 0 && (
+        <div data-workshop-suggestions style={{ marginBottom: 16 }}>
+        <Card style={{ padding: 16 }}>
+          <span className="text-overline" style={{ display: 'block', marginBottom: 6 }}>WORKSHOP SUGGESTIONS</span>
+          <p style={{ fontSize: 12, color: '#6B7280', lineHeight: 1.5, margin: '0 0 10px' }}>
+            These suppliers already worked as a workshop in earlier repairs but are not marked as workshop. Repair → Workshop only
+            offers marked workshops. Nothing is marked automatically — purchases, payments and bookings are not affected.
+          </p>
+          <WriteError text={vorschlagFehler} />
+          {vorschlaege.map(v => (
+            <div key={v.id} className="flex items-center justify-between" data-workshop-suggestion={v.id}
+              style={{ padding: '8px 0', borderTop: '1px solid #F0F2F5', fontSize: 13 }}>
+              <span>
+                <span style={{ color: '#0F0F10' }}>{v.name}</span>
+                <span style={{ color: '#6B7280', marginLeft: 8 }}>used in {v.uses} repair{v.uses === 1 ? '' : 's'}</span>
+              </span>
+              <Button variant="secondary" onClick={() => void handleMarkWorkshop(v.id)} disabled={markieren.busy} data-workshop-suggestion-mark={v.id}>
+                Mark as Workshop
+              </Button>
+            </div>
+          ))}
+        </Card>
+        </div>
+      )}
+
       {filtered.length === 0 ? (
         <div style={{ padding: '80px 0', textAlign: 'center' }}>
           <Building2 size={40} strokeWidth={1} style={{ color: '#6B7280', margin: '0 auto 16px' }} />
@@ -120,7 +158,12 @@ export function SupplierList() {
               borderBottom: '1px solid rgba(229,225,214,0.6)',
             }}>
               <div>
-                <div style={{ fontSize: 14, color: '#0F0F10' }}>{s.name}</div>
+                <div style={{ fontSize: 14, color: '#0F0F10' }}>
+                  {s.name}
+                  {s.isWorkshop && (
+                    <span data-supplier-workshop-badge style={{ fontSize: 10, padding: '1px 7px', borderRadius: 999, marginLeft: 8, color: '#3D7FFF', background: 'rgba(61,127,255,0.08)' }}>Workshop</span>
+                  )}
+                </div>
                 {s.address && <div style={{ fontSize: 11, color: '#6B7280' }}>{s.address}</div>}
               </div>
               <div style={{ fontSize: 12, color: '#4B5563' }}>
@@ -199,6 +242,11 @@ export function SupplierList() {
               style={{ marginTop: 6, background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10', resize: 'vertical' }}
             />
           </div>
+          {/* REPAIR-WORKSHOP-FILTER — eine reine Einordnung (nur dann in Repair → Workshop wählbar). */}
+          <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: '#4B5563', cursor: 'pointer' }}>
+            <input type="checkbox" checked={form.isWorkshop === true} onChange={e => setForm({ ...form, isWorkshop: e.target.checked })} data-supplier-create-is-workshop />
+            <span>Is Workshop — selectable as workshop in repairs</span>
+          </label>
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button variant="primary" onClick={() => void handleCreate()} disabled={!form.name || anlegen.busy} data-supplier-create-save>

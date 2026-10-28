@@ -35,6 +35,7 @@ import { copiedAttributes } from '@/core/products/duplicate-dismiss';
 import { nextOrderStatus } from '@/core/orders/order-status-flow';
 import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
 import { repairPhotoRefs } from '@/core/repairs/repair-media';
+import { SELECTABLE_WORKSHOP_SQL } from '@/core/repairs/repair-workshop-choice';
 
 export const OP_PRODUCTS_LIST = 'products.list';
 export const OP_PRODUCTS_GET = 'products.get';
@@ -598,7 +599,7 @@ registerCommand(OP_INVOICES_GET, {
 
 // ── Lieferanten ────────────────────────────────────────────────────────────
 
-const SUPPLIER_COLUMNS = 'id, name, phone, email, active';
+const SUPPLIER_COLUMNS = 'id, name, phone, email, active, is_workshop';
 
 registerCommand(OP_SUPPLIERS_LIST, {
   kind: 'read',
@@ -606,14 +607,17 @@ registerCommand(OP_SUPPLIERS_LIST, {
     const branch = actorBranch(p);
     const q = searchOf(p);
     const like = `%${q.toLowerCase()}%`;
+    // REPAIR-WORKSHOP-FILTER — `workshop: true` liefert NUR die wählbaren Werkstätten (aktiv UND markiert): dieselbe
+    // Regel wie die Auswahl am Rechner (`repair-workshop-choice`). Ohne den Schalter bleibt die Liste, wie sie war.
+    const nurWerkstatt = input(p).workshop === true ? ` AND ${SELECTABLE_WORKSHOP_SQL}` : '';
     const list = q
       ? rows(
         `SELECT ${SUPPLIER_COLUMNS} FROM suppliers
-          WHERE branch_id = ? AND LOWER(name) LIKE ?
+          WHERE branch_id = ? AND LOWER(name) LIKE ?${nurWerkstatt}
           ORDER BY name ASC LIMIT ?`,
         [branch, like, limitOf(p)],
       )
-      : rows(`SELECT ${SUPPLIER_COLUMNS} FROM suppliers WHERE branch_id = ? ORDER BY name ASC LIMIT ?`,
+      : rows(`SELECT ${SUPPLIER_COLUMNS} FROM suppliers WHERE branch_id = ?${nurWerkstatt} ORDER BY name ASC LIMIT ?`,
         [branch, limitOf(p)]);
     return {
       items: list.map((r) => ({
@@ -624,6 +628,7 @@ registerCommand(OP_SUPPLIERS_LIST, {
         // Ein stillgelegter Lieferant wird nicht versteckt, sondern benannt: eine Lücke in der
         // Liste sähe aus wie ein Fehler, die Kennzeichnung ist eine Auskunft.
         active: Number(r.active ?? 1) === 1,
+        isWorkshop: Number(r.is_workshop ?? 0) === 1,
       })),
       truncated: list.length >= limitOf(p),
     };

@@ -798,6 +798,58 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
   ok(/Changes saved/.test($('rpSuccess').textContent), `§11 Aenderung bestaetigt (${$('rpSuccess').textContent})`);
 }
 
+// ── §12 REPAIR-WORKSHOP-FILTER: Arbeitszeile + Gold nur Werkstaetten, Material alle aktiven ──────────
+{
+const S = (v: unknown): string => JSON.stringify(v);
+for (const fall of ['mit', 'ohne'] as const) {
+  const W = { id: 'sup-w', name: 'Goldsmith Ali', active: true, isWorkshop: true };
+  const P = { id: 'sup-p', name: 'Strap Dealer', active: true, isWorkshop: false };
+  const X = { id: 'sup-x', name: 'Closed Shop', active: false, isWorkshop: true };
+  const t = starteOberflaeche((url: string, body: unknown): Antwort => {
+    const b = body as { op?: string; payload?: { workshop?: boolean; limit?: number } } | null;
+    if (b?.op === 'suppliers.list') {
+      if (b.payload?.workshop === true) return { status: 200, body: { ok: true, value: { items: fall === 'mit' ? [W] : [] } } };
+      return { status: 200, body: { ok: true, value: { items: fall === 'mit' ? [P, W, X] : [P, X] } } };
+    }
+    if (b?.op === 'repairs.list') return { status: 200, body: { ok: true, value: { items: [{ id: 'rep-w', repairNumber: 'REP-W', status: 'received' }] } } };
+    if (b?.op === 'repairs.get') {
+      return { status: 200, body: { ok: true, value: { id: 'rep-w', repairNumber: 'REP-W', revision: 1, status: 'received', issueDescription: 'Glas', notes: '', images: [], mediaIds: [],
+        lines: [{ id: 'l-alt', supplierId: 'sup-old', supplierName: 'Former Watchmaker', workType: 'service', costAmount: 20, status: 'OPEN' }], openLineTotal: 20, allowedStatusTargets: [] } } };
+    }
+    return { status: 200, body: { ok: true, value: {} } };
+  });
+  const $ = (id: string) => t.document.getElementById(id)!;
+  await t.api.rpHomeOpen();
+  await warte();
+  await t.document.querySelectorAll('#rpList button')[0].onclick!();
+  await warte();
+  const werte = (id: string) => $(id).children.map((o: El) => o.attrs.value);
+  const lesen = t.gerufen.filter((g) => (g.body as { op?: string })?.op === 'suppliers.list').map((g) => (g.body as { payload?: unknown }).payload);
+  const INH = (t.MobileRepair as { INHOUSE: string }).INHOUSE;
+  ok(lesen.length === 2 && lesen.some((p) => S(p) === S({ limit: 500, workshop: true })) && lesen.some((p) => S(p) === S({ limit: 500 })),
+    `§12 ${fall}: zwei Lesungen — Werkstaetten (vom Primary gefiltert) und alle (${S(lesen)})`);
+  if (fall === 'mit') {
+    ok(S(werte('rpLineSupplier')) === S([INH, 'sup-w']), `§12 Arbeitszeile: eigene Werkstatt + NUR markierte Werkstaetten (${S(werte('rpLineSupplier'))})`);
+    ok(S(werte('rpGoldSupplier')) === S(['', 'sup-w']), `§12 Gold vom Workshop: NUR Werkstaetten, kein In-house (${S(werte('rpGoldSupplier'))})`);
+    ok(S(werte('rpMatSupplier')) === S([INH, 'sup-p', 'sup-w']), `§12 Material: ALLE aktiven, auch nicht markierte; stillgelegte nicht (${S(werte('rpMatSupplier'))})`);
+    ok($('rpLineSupplierHint').classList.contains('hidden') && $('rpGoldSupplierHint').classList.contains('hidden'), '§12 mit Werkstaetten: kein Hinweis');
+  } else {
+    ok(S(werte('rpLineSupplier')) === S([INH]) && S(werte('rpGoldSupplier')) === S(['']), '§12 ohne Markierung: nur die eigene Werkstatt');
+    ok(!$('rpLineSupplierHint').classList.contains('hidden') && /No workshops marked yet/.test($('rpLineSupplierHint').textContent),
+      `§12 …und die Maske sagt, wo man markiert (${$('rpLineSupplierHint').textContent})`);
+    $('rpGoldSource').value = 'workshop'; $('rpGoldSource').onchange!();
+    const beiWerkstatt = !$('rpGoldSupplierHint').classList.contains('hidden');
+    $('rpGoldSource').value = 'customer'; $('rpGoldSource').onchange!();
+    ok(beiWerkstatt && $('rpGoldSupplierHint').classList.contains('hidden'), '§12 Gold: Hinweis nur bei „From the workshop"');
+    ok(S(werte('rpMatSupplier')) === S([INH, 'sup-p']), '§12 Material bleibt trotzdem offen');
+  }
+  // Die gespeicherte Arbeitszeile nennt ihren Lieferanten weiter — auch einen, der nicht (mehr) markiert ist.
+  ok(/Former Watchmaker/.test(JSON.stringify(t.nach.rpLines?.alleKinder().map((k: El) => k.textContent) ?? [])) || /Former Watchmaker/.test(JSON.stringify(Object.values(t.nach).map((e) => e.alleKinder().map((k) => k.textContent)))),
+    `§12 ${fall}: die gespeicherte Arbeitszeile zeigt ihren Lieferanten weiter`);
+}
+
+}
+
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — preg5 mobile repair ui: ${PASS} passed, ${FAIL} failed`);
 if (FAIL > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
 console.log('PRE_G5_MOBILE_REPAIR_UI_PROVED');

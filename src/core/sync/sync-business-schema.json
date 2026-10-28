@@ -1624,6 +1624,7 @@
         "created_by",
         "email",
         "id",
+        "is_workshop",
         "linked_customer_id",
         "name",
         "notes",

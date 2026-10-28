@@ -59,6 +59,7 @@ import {
   IN_HOUSE_COST_HINT, IN_HOUSE_ESTIMATE_HINT, IN_HOUSE_LINE_SUBTITLE, IN_HOUSE_LINE_NOTE,
   IN_HOUSE_COST_PLACEHOLDER, repairCostLabels,
 } from '@/core/repairs/repair-line-view';
+import { hasSelectableWorkshop, NO_WORKSHOP_HINT, workshopOptions } from '@/core/repairs/repair-workshop-choice';
 import { useSharedRead } from '@/core/data/shared-read';
 import { creditPaidFor } from '@/core/data/domain-reads';
 // CENTRAL-UI-PARITY R6D — „Add Gold Usage" und „Add Material": dieselbe Hausfolge wie der Fernbefehl.
@@ -79,6 +80,9 @@ function fmt(v: number): string {
 
 // Plan §Repair §6: RECEIVED → IN_PROGRESS → (SENT_TO_WORKSHOP if external) → READY → DELIVERED.
 // Flow extended um SENT_TO_WORKSHOP wenn external; sonst direkt ready.
+// v0.7.6 — Explizite In-house-Option als erster Eintrag jeder Werkstatt-Auswahl (Sentinel → beim Speichern undefined).
+const IN_HOUSE_OPTION = { id: '__INHOUSE__', label: '🏠 In-house / Own work', subtitle: IN_HOUSE_LINE_SUBTITLE, meta: '' };
+
 // v0.7.6 — Kind-Icons fuer COSTS / MATERIALS, parallel zu OrderDetail.
 const COST_KIND_META: Record<string, { icon: string; label: string }> = {
   labor:   { icon: '🔨', label: 'Labor' },
@@ -171,10 +175,9 @@ export function RepairDetail() {
   // ID '__INHOUSE__' wird beim Save zu undefined (= null in DB) uebersetzt.
   // CENTRAL-UI-PARITY R4A — Guthaben je Ausgabe aus der gemeinsamen Kernauskunft.
   const guthaben = useSharedRead('expenses.credit_paid.get', {}, creditPaidFor, { byExpense: {} }, []);
-  const supplierOptions = useMemo(() => [
-    { id: '__INHOUSE__', label: '🏠 In-house / Own work', subtitle: IN_HOUSE_LINE_SUBTITLE, meta: '' },
-    ...suppliers.filter(s => s.active).map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '' })),
-  ], [suppliers]);
+  // REPAIR-WORKSHOP-FILTER — gewählt werden nur aktive, als Werkstatt markierte Lieferanten (Material bleibt bei allen
+  // aktiven, `AddMaterialModal`). Was diese Reparatur schon trägt, bleibt in der Auswahl — benannt, nie verschwunden.
+  const keineWerkstatt = !hasSelectableWorkshop(suppliers);
 
   const repair = useMemo(() => repairs.find(r => r.id === id), [repairs, id]);
   // CENTRAL-UI-PARITY R4C.2 — dieselbe Maske, zwei Anschluesse hinter jeder Handlung.
@@ -287,6 +290,14 @@ export function RepairDetail() {
     source: 'workshop', supplierId: '', receivedG: '', usedG: '', karat: '21K',
     settlementType: 'return_gold', leftoverDest: 'return',
   });
+  const werkstattFeldOptionen = useMemo(() => [
+    IN_HOUSE_OPTION, ...workshopOptions(suppliers, [form.workshopSupplierId, repair?.workshopSupplierId]),
+  ], [suppliers, form.workshopSupplierId, repair?.workshopSupplierId]);
+  const arbeitszeileOptionen = useMemo(() => [
+    IN_HOUSE_OPTION, ...workshopOptions(suppliers, [newLineForm.supplierId]),
+  ], [suppliers, newLineForm.supplierId]);
+  // R6D — Workshop-Gold ist eine Schuld bei einem ECHTEN Lieferanten: kein „In-house".
+  const goldWerkstattOptionen = useMemo(() => workshopOptions(suppliers, [newGoldForm.supplierId]), [suppliers, newGoldForm.supplierId]);
   // v0.2.1 — Material-Modal fuer Diamond/Stone/Gold-Piece im Repair
   const [showAddMaterialModal, setShowAddMaterialModal] = useState(false);
   // v0.7.7 — Pay-Modal fuer A/P-Chip-Klick. Klick auf "Unpaid"/"Partial" oeffnet
@@ -1013,10 +1024,13 @@ export function RepairDetail() {
                       ? 'WORKSHOP / GOLDSMITH (SUPPLIER) *'
                       : 'WORKSHOP / GOLDSMITH (SUPPLIER)'}
                     placeholder="Search supplier..."
-                    options={supplierOptions}
+                    options={werkstattFeldOptionen}
                     value={form.workshopSupplierId || ''}
                     onChange={sid => setForm({ ...form, workshopSupplierId: (sid && sid !== '__INHOUSE__') ? sid : undefined })}
                   />
+                  {keineWerkstatt && (
+                    <p data-repair-no-workshop-hint style={{ fontSize: 11, color: '#B45309', marginTop: -4, lineHeight: 1.4 }}>{NO_WORKSHOP_HINT}</p>
+                  )}
                   {(form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId && (
                     <p style={{ fontSize: 11, color: '#6B7280', marginTop: -4, lineHeight: 1.4 }}>
                       💡 Optional — if empty, add workshop + cost later via "+ Add Work Line".
@@ -1645,11 +1659,14 @@ export function RepairDetail() {
           </div>
           <SearchSelect
             label="WORK SOURCE *"
-            placeholder="Pick: In-house OR a supplier"
-            options={supplierOptions}
+            placeholder="Pick: In-house OR a workshop"
+            options={arbeitszeileOptionen}
             value={newLineForm.supplierId}
             onChange={sid => setNewLineForm({ ...newLineForm, supplierId: sid })}
           />
+          {keineWerkstatt && (
+            <p data-repair-no-workshop-hint style={{ fontSize: 11, color: '#B45309', marginTop: -6, lineHeight: 1.4 }}>{NO_WORKSHOP_HINT}</p>
+          )}
           <div>
             <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>WORK TYPE</span>
             <select
@@ -1730,10 +1747,13 @@ export function RepairDetail() {
                 <SearchSelect
                   label="SUPPLIER / GOLDSMITH"
                   placeholder="Pick supplier..."
-                  options={supplierOptions.filter(o => o.id !== '__INHOUSE__')}
+                  options={goldWerkstattOptionen}
                   value={newGoldForm.supplierId}
                   onChange={sid => setNewGoldForm({ ...newGoldForm, supplierId: sid })}
                 />
+                {keineWerkstatt && (
+                  <p data-repair-no-workshop-hint style={{ fontSize: 11, color: '#B45309', marginTop: 6, lineHeight: 1.4 }}>{NO_WORKSHOP_HINT}</p>
+                )}
               </div>
               <div>
                 <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>SETTLEMENT TYPE</span>

@@ -601,6 +601,44 @@ try {
     const vorZeilen = zeilen().length;
     const vorAusgaben = Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM expenses WHERE related_module = 'repair' AND related_entity_id = ?", [REP_ID])[0]?.n || 0);
 
+    // ── REPAIR-WORKSHOP-FILTER am echten Primary: PC2 legt einen Workshop und einen normalen Lieferanten an
+    //    (suppliers.create, derselbe Befehl wie „New Supplier"); das Telefon bietet bei Arbeitszeile und Gold NUR den
+    //    Workshop, bei Material beide; PC2 zeigt die Markierung in seiner Lieferantenliste.
+    {
+      const pc2Anlegen = (body) => client.ev(`
+        const token = localStorage.getItem('lataif_client_token') || '';
+        const res = await fetch('http://127.0.0.1:${PORT}/api/command', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+          body: JSON.stringify({ op: 'suppliers.create', commandId: crypto.randomUUID(), payload: ${S(body)} }) });
+        return res.status + ' ' + (await res.text()).slice(0, 160);`);
+      const WNAME = 'Workshop ' + STEMPEL, PNAME = 'Parts ' + STEMPEL;
+      const a1 = await pc2Anlegen({ name: WNAME, isWorkshop: true });
+      const a2 = await pc2Anlegen({ name: PNAME });
+      await warteAuf(() => Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM suppliers WHERE name IN (?, ?)', [WNAME, PNAME])[0]?.n) === 2, 30);
+      const zeileW = dbQ(BIZ_DB, 'SELECT id, is_workshop FROM suppliers WHERE name = ?', [WNAME])[0] || {};
+      const zeileP = dbQ(BIZ_DB, 'SELECT id, is_workshop FROM suppliers WHERE name = ?', [PNAME])[0] || {};
+      ok(/^200 /.test(String(a1)) && /^200 /.test(String(a2)) && Number(zeileW.is_workshop) === 1 && Number(zeileP.is_workshop) === 0,
+        `WORKSHOP PC2 legt Workshop (is_workshop=1) und normalen Lieferanten (0) am Primary an (${String(a1).slice(0, 40)} / ${String(a2).slice(0, 40)})`);
+      await client.ev(`history.pushState({}, '', '/suppliers'); window.dispatchEvent(new PopStateEvent('popstate')); return 1;`);
+      const pc2Badge = await warteBis(client, `[...document.querySelectorAll('[data-supplier-workshop-badge]')].some((b) => b.parentElement.textContent.includes(${S(WNAME)}))
+        && document.body.innerText.includes(${S(PNAME)})`, 60000);
+      const pc2Falsch = await client.ev(`return [...document.querySelectorAll('[data-supplier-workshop-badge]')].some((b) => b.parentElement.textContent.includes(${S(PNAME)}));`);
+      ok(pc2Badge && !pc2Falsch, 'WORKSHOP PC2 zeigt die Markierung in seiner Lieferantenliste — nur beim Workshop');
+      // Das Telefon oeffnet die Reparatur neu (die Lieferanten werden je geoeffneter Reparatur gelesen).
+      await setVal(phone, '#rpSearch', REP_NR);
+      await klick(phone, '#rpSearchBtn');
+      await warteBis(phone, `[...document.querySelectorAll('#rpList button')].filter((b) => b.textContent.includes(${S(REP_NR)})).length === 1`, 60000);
+      await phone.ev(`const b=[...document.querySelectorAll('#rpList button')].find((x) => x.textContent.includes(${S(REP_NR)})); if(b) b.click(); return 1;`);
+      await warteBis(phone, `[...document.querySelectorAll('#rpMatSupplier option')].some((o) => o.value === ${S(zeileP.id)})`, 60000);
+      const listen = await phone.ev(`const v = (id) => [...document.querySelectorAll('#' + id + ' option')].map((o) => o.value);
+        return { line: v('rpLineSupplier'), gold: v('rpGoldSupplier'), mat: v('rpMatSupplier'), hinweis: !document.getElementById('rpLineSupplierHint').classList.contains('hidden') };`);
+      MESS.workshop = { line: listen.line.length, gold: listen.gold.length, mat: listen.mat.length, hinweis: listen.hinweis };
+      ok(listen.line.includes('__INHOUSE__') && listen.line.includes(zeileW.id) && !listen.line.includes(zeileP.id) && !listen.hinweis,
+        `WORKSHOP Telefon „Add work line": eigene Werkstatt + Workshop, NICHT der normale Lieferant (${S(MESS.workshop)})`);
+      ok(listen.gold.includes(zeileW.id) && !listen.gold.includes(zeileP.id) && !listen.gold.includes('__INHOUSE__'),
+        'WORKSHOP Telefon „Gold vom Workshop": nur der Workshop');
+      ok(listen.mat.includes(zeileW.id) && listen.mat.includes(zeileP.id), 'WORKSHOP Telefon „Material": alle aktiven Lieferanten');
+    }
+
     // ── Arbeitszeile (eigene Werkstatt, damit keine Lieferantenschuld noetig ist)
     await phone.ev(`
       document.getElementById('rpLineCost').value = '12.5';

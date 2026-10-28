@@ -42,6 +42,7 @@ import { productDisplayName, brandModelHidden } from '@/core/products/display-na
 import { repairItemDisplayName } from '@/core/products/display-name';
 import { StonesEditor } from '@/components/products/StonesEditor';
 import { IN_HOUSE_COST_LABEL, IN_HOUSE_COST_HINT, IN_HOUSE_LINE_SUBTITLE, IN_HOUSE_COST_PLACEHOLDER, IN_HOUSE_CREATE_ESTIMATE_NOTE, repairCostLabels } from '@/core/repairs/repair-line-view';
+import { hasSelectableWorkshop, NO_WORKSHOP_HINT, workshopOptions } from '@/core/repairs/repair-workshop-choice';
 import { normalizeStoneAttributes, stonesApply } from '@/core/products/stones';
 
 function fmt(v: number): string {
@@ -133,25 +134,31 @@ export function RepairList() {
   );
 
   // v0.7.6 — In-house Sentinel als erste Option (consistent mit RepairDetail).
+  // REPAIR-WORKSHOP-FILTER — danach NUR aktive, als Werkstatt markierte Lieferanten; ein schon gewählter bleibt sichtbar.
   const supplierOptions = useMemo(() => [
     { id: '__INHOUSE__', label: '🏠 In-house / Own work', subtitle: IN_HOUSE_LINE_SUBTITLE, meta: '' },
-    ...suppliers.filter(s => s.active).map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '' })),
-  ], [suppliers]);
+    ...workshopOptions(suppliers, [form.workshopSupplierId]),
+  ], [suppliers, form.workshopSupplierId]);
+  const keineWerkstatt = !hasSelectableWorkshop(suppliers);
 
   const [showQuickSupplier, setShowQuickSupplier] = useState(false);
   const [quickSupplierName, setQuickSupplierName] = useState('');
   const [quickSupplierPhone, setQuickSupplierPhone] = useState('');
+  // REPAIR-WORKSHOP-FILTER — „+ New Supplier" in der Werkstatt-Auswahl legt im Regelfall eine Werkstatt an: der Haken
+  // steht, sichtbar und abwählbar.
+  const [quickSupplierWorkshop, setQuickSupplierWorkshop] = useState(true);
   // CENTRAL-UI-PARITY R6C — „+ New Supplier" in der Werkstatt: dieselbe Folge wie in der
   // Lieferantenliste und im Einkauf (masterdata-save); danach sofort gewählt.
   const neuerLieferant = useSharedWrite<{ supplierId: string }>('suppliers.create');
   const [quickSupplierFehler, setQuickSupplierFehler] = useState('');
   async function handleQuickSupplierCreate() {
     setQuickSupplierFehler('');
-    const r = await saveSupplierCreate(neuerLieferant, { name: quickSupplierName, phone: quickSupplierPhone });
+    const r = await saveSupplierCreate(neuerLieferant, { name: quickSupplierName, phone: quickSupplierPhone, isWorkshop: quickSupplierWorkshop });
     if (r.kind !== 'ok') { setQuickSupplierFehler(`Could not create supplier: ${fehlertext(r)}`); return; }
     setForm(f => ({ ...f, workshopSupplierId: r.value.supplierId }));
     setQuickSupplierName('');
     setQuickSupplierPhone('');
+    setQuickSupplierWorkshop(true);
     setShowQuickSupplier(false);
   }
 
@@ -1036,7 +1043,10 @@ export function RepairList() {
                   value={form.workshopSupplierId || ''}
                   onChange={sid => setForm({ ...form, workshopSupplierId: (sid && sid !== '__INHOUSE__') ? sid : undefined })}
                 />
-                <button onClick={() => setShowQuickSupplier(true)}
+                {keineWerkstatt && (
+                  <p data-repair-no-workshop-hint style={{ fontSize: 11, color: '#B45309', marginTop: 6, lineHeight: 1.5 }}>{NO_WORKSHOP_HINT}</p>
+                )}
+                <button onClick={() => { setQuickSupplierWorkshop(true); setShowQuickSupplier(true); }} data-repair-quick-supplier-open
                   className="cursor-pointer transition-colors"
                   style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, marginTop: 6, padding: 0 }}
                 >+ New Supplier</button>
@@ -1225,6 +1235,10 @@ export function RepairList() {
             value={quickSupplierName} onChange={e => setQuickSupplierName(e.target.value)} />
           <Input label="PHONE (OPTIONAL)" placeholder="+973…"
             value={quickSupplierPhone} onChange={e => setQuickSupplierPhone(e.target.value)} />
+          <label style={{ display: 'flex', alignItems: 'center', gap: 10, fontSize: 13, color: '#4B5563', cursor: 'pointer' }}>
+            <input type="checkbox" checked={quickSupplierWorkshop} onChange={e => setQuickSupplierWorkshop(e.target.checked)} data-repair-quick-supplier-workshop />
+            <span>Is Workshop — selectable as workshop in repairs</span>
+          </label>
           <p style={{ fontSize: 11, color: '#6B7280' }}>
             Will be created as an active supplier and selected here right away.
           </p>

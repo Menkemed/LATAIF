@@ -330,6 +330,9 @@ export function SupplierDetail() {
                 {!supplier.active && (
                   <span style={{ fontSize: 11, padding: '2px 10px', borderRadius: 999, color: '#6B7280', background: 'rgba(107,114,128,0.10)' }}>Inactive</span>
                 )}
+                {supplier.isWorkshop && (
+                  <span data-supplier-workshop-badge style={{ fontSize: 11, padding: '2px 10px', borderRadius: 999, color: '#3D7FFF', background: 'rgba(61,127,255,0.08)' }}>Workshop</span>
+                )}
               </div>
             )}
             <div style={{ marginTop: 20 }}>
@@ -366,6 +369,18 @@ export function SupplierDetail() {
                       rows={3}
                       style={{ marginTop: 6, background: 'transparent', borderBottom: '1px solid #D5D9DE', padding: '8px 0', fontSize: 14, color: '#0F0F10' }} />
                   </div>
+                  {/* REPAIR-WORKSHOP-FILTER — eine reine Einordnung: nur dann in Repair → Workshop wählbar.
+                      Einkäufe, Zahlungen und Buchungen dieses Lieferanten bleiben, wie sie sind. */}
+                  <label style={{ display: 'flex', alignItems: 'flex-start', gap: 10, fontSize: 13, color: '#4B5563', cursor: 'pointer' }}>
+                    <input type="checkbox" checked={form.isWorkshop === true} onChange={e => setForm({ ...form, isWorkshop: e.target.checked })}
+                      data-supplier-is-workshop style={{ marginTop: 3 }} />
+                    <span>
+                      <strong style={{ color: '#0F0F10', fontWeight: 500 }}>Is Workshop</strong>
+                      <span style={{ display: 'block', fontSize: 11, color: '#6B7280', marginTop: 2 }}>
+                        Selectable as workshop in repairs. Purchases, payments and bookings are not affected.
+                      </span>
+                    </span>
+                  </label>
                 </div>
               ) : (
                 <>

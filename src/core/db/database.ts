@@ -2603,6 +2603,10 @@ function runMigrations(database: Database): void {
       created_by TEXT
     )`,
     `CREATE INDEX IF NOT EXISTS idx_supplier_credit_refunds_credit ON supplier_credit_refunds(supplier_credit_id)`,
+    // REPAIR-WORKSHOP-FILTER — „Is Workshop": eine reine Einordnung des Lieferanten (nur dann in Repair → Workshop
+    // wählbar). Bestehende Lieferanten bleiben 0 — der Owner markiert seine Werkstätten selbst, nichts wird
+    // umklassifiziert. Einkäufe, Zahlungen und Buchungen hängen nicht daran. Synchronisiert mit der Lieferantenzeile.
+    `ALTER TABLE suppliers ADD COLUMN is_workshop INTEGER NOT NULL DEFAULT 0`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

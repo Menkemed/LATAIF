@@ -714,7 +714,9 @@ marker('CENTRAL_UI_R6D_GOLD_CLIENT_NO_LOCAL_DB_PROVED');
     && /w\.ok\('repairs\.add_material'/.test(rd) && /local: \(\) => addRepairMaterialOnPrimary\(req\)/.test(rd),
     'UI Reparatur: Gold-Verbrauch und Material über je EINE Buchung');
   ok(!/createGoldPayable\(|createCustomerGoldCredit\(|creditShopGold\(/.test(rd), 'UI …keine Gold-Schreibaktion mehr direkt aus der Seite');
-  ok(/onSubmitAll=\{handleAddMaterial\}/.test(rd) && /supplierOptions\.filter\(o => o\.id !== '__INHOUSE__'\)/.test(rd) && /Object\.keys\(KARAT_PURITY\)/.test(rd),
+  // REPAIR-WORKSHOP-FILTER — die Gold-Auswahl sind die Werkstätten (`workshopOptions`), und die kennt kein „In-house".
+  ok(/onSubmitAll=\{handleAddMaterial\}/.test(rd) && /goldWerkstattOptionen = useMemo\(\(\) => workshopOptions\(/.test(rd)
+    && /options=\{goldWerkstattOptionen\}/.test(rd) && /Object\.keys\(KARAT_PURITY\)/.test(rd),
     'UI …alle Positionen auf einmal; kein „In-house" als Goldschmied; nur bekannte Karate');
   for (const a of ['data-gold-usage-open', 'data-gold-usage-source', 'data-gold-usage-received', 'data-gold-usage-karat', 'data-gold-usage-supplier',
     'data-gold-usage-settlement', 'data-gold-usage-used', 'data-gold-usage-leftover', 'data-gold-usage-save', 'data-material-open', 'data-gold-settle-open']) {

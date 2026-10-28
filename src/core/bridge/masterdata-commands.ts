@@ -75,7 +75,7 @@ export class MasterdataPayloadError extends Error {
 const FORBIDDEN = ['id', 'branchId', 'tenantId', 'userId', 'createdBy', 'createdAt', 'updatedAt', 'revision'];
 /** Was das Haus selbst führt — je Stammdatum. */
 export const MASTERDATA_COMPUTED = {
-  supplier: ['totalPurchases', 'totalPaid', 'outstandingBalance', 'creditBalance'],
+  supplier: ['totalPurchases', 'totalPaid', 'outstandingBalance', 'creditBalance', 'repairWorkshopUses'],
   partner: ['totalInvested', 'totalWithdrawn', 'totalProfitShare', 'balance'],
   agent: ['totalSales', 'totalCommission', 'commissionRate'],
   employee: [] as string[],
