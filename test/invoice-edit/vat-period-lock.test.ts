@@ -225,9 +225,16 @@ product(DB, 'pC', 1);
 product(DB, 'pD', 1);
 reload();
 
+/** Testaufbau für eine ALTE Rechnung: angelegt, bevor ihr Quartal eingereicht/bezahlt wurde. Seit v0.8.93 lässt sich
+ *  eine Rechnung mit Datum in einem zugemachten Quartal nicht mehr neu anlegen — für die Anlage sind Einreichungen und
+ *  VAT-Zahlungen kurz beiseite, danach wieder da. */
+function vorDerEinreichung<T>(fn: () => T): T {
+  DB.run('UPDATE vat_filings SET year = -year'); DB.run('UPDATE tax_payments SET year = -year');
+  try { return fn(); } finally { DB.run('UPDATE vat_filings SET year = -year'); DB.run('UPDATE tax_payments SET year = -year'); }
+}
 /** Rechnung anlegen und voll bezahlen; Zahlung und ihre Buchungen auf `am` legen (Testaufbau). */
 function bezahlt(pid: string, ausgestellt: string, am: string, qty = 1): { inv: string; z: string; pay: string } {
-  const inv = imHaus(() => useInvoiceStore.getState().createDirectInvoice('cust-1', [{ ...LINE(pid, qty, 1000), lotId: 'lot-' + pid }] as never, pid, ausgestellt).id);
+  const inv = vorDerEinreichung(() => imHaus(() => useInvoiceStore.getState().createDirectInvoice('cust-1', [{ ...LINE(pid, qty, 1000), lotId: 'lot-' + pid }] as never, pid, ausgestellt).id));
   reload();
   const brutto = n(DB, 'SELECT gross_amount FROM invoices WHERE id = ?', [inv]);
   const pay = imHaus(() => useInvoiceStore.getState().recordPayment(inv, brutto, 'cash'));
@@ -463,9 +470,13 @@ const code = (m: string): string => m.split('|')[0];
 {
   const jetzt = new Date();
   const lq = Math.ceil((jetzt.getMonth() + 1) / 3);
+  product(DB, 'pF', 1); product(DB, 'pG', 1); reload();
+  // Die Auftragsrechnung besteht schon, bevor die VAT des laufenden Quartals bezahlt wird (danach ließe sie sich mit
+  // heutigem Datum seit v0.8.93 gar nicht mehr anlegen).
+  const inv = rechnung([{ ...LINE('pG', 1, 1000), lotId: 'lot-pG' } as never]);
   DB.run("INSERT INTO tax_payments (id, branch_id, year, quarter, amount, source, paid_at, created_at) VALUES ('tp-lauf','branch-main',?,?,1,'bank',?,?)",
     [jetzt.getFullYear(), lq, NOW, NOW]);
-  product(DB, 'pF', 1); product(DB, 'pG', 1); reload();
+  reload();
 
   // Agent: Settle-Zahlungen decken die ganze Abrechnung → die neue Rechnung wäre heute FINAL.
   insert(DB, 'agents', { id: 'ag-1', branch_id: 'branch-main', name: 'Agent Eins', created_at: NOW, updated_at: NOW });
@@ -485,7 +496,6 @@ const code = (m: string): string => m.split('|')[0];
   ok(teil === '', '10 …eine Teilzahlung, die nicht abschließt, bleibt erlaubt');
 
   // Auftrag: die Anzahlung deckt die Rechnung → Anrechnung würde heute abschließen.
-  const inv = rechnung([{ ...LINE('pG', 1, 1000), lotId: 'lot-pG' } as never]);
   insert(DB, 'orders', { id: 'ord-1', branch_id: 'branch-main', customer_id: 'cust-1', order_number: 'O-1', agreed_price: 1100, created_at: NOW, updated_at: NOW });
   DB.run("INSERT INTO order_payments (id, order_id, amount, paid_at, method, created_at) VALUES ('op-1','ord-1',1100,'2026-09-01','cash',?)", [NOW]);
   const zOrd = (): string => S([n(DB, 'SELECT COUNT(*) FROM payments WHERE invoice_id = ?', [inv]),
@@ -674,6 +684,60 @@ const code = (m: string): string => m.split('|')[0];
     `14f PC2 invoices.set_butterfly: an A endgültig abgewiesen (${r.kind}:${r.code}), an B (offen) erlaubt (${rOk.kind})`);
   const snapQ2 = JSON.parse(s(DB, 'SELECT snapshot_json FROM vat_filings WHERE year = 2026 AND quarter = 2'));
   ok(!snapQ2.invoices.some((x: { invoiceId: string }) => x.invoiceId === K.inv), '14g …der Q2-Snapshot enthält die Butterfly-Rechnung K nicht (wie der Export)');
+}
+
+// ══ 15) v0.8.93 — eine NEUE Rechnung mit Datum in einem zugemachten Quartal (Primary und PC2) ══
+{
+  const { runInvoiceCreate } = await import('../../src/core/bridge/invoice-command.ts');
+  product(DB, 'pN', 4); reload();
+  /** Alles, was ein Anlegen hinterlässt: Rechnungen, Zeilen, Buchungen, Nummernzähler, Bestand. */
+  const spur = (): string => S([n(DB, 'SELECT COUNT(*) FROM invoices'), n(DB, 'SELECT COUNT(*) FROM invoice_lines'),
+    n(DB, 'SELECT COUNT(*) FROM ledger_entries'), all(DB, 'SELECT doc_type, next_number FROM document_sequences ORDER BY doc_type'),
+    n(DB, "SELECT qty_remaining FROM stock_lots WHERE id = 'lot-pN'")]);
+  /** Die Bücher und Meldungen der zugemachten Quartale (Q1 VAT bezahlt, Q2 eingereicht) — vorher wie nachher. */
+  const zu = (): string => S([all(DB, `SELECT account, direction, ROUND(SUM(amount), 3), COUNT(*) FROM ledger_entries
+      WHERE occurred_at < '2026-07-01' GROUP BY account, direction ORDER BY account, direction`),
+    s(DB, 'SELECT snapshot_json FROM vat_filings WHERE year = 2026 AND quarter = 2'), fp(A.inv), fp(D.inv),
+    all(DB, 'SELECT * FROM invoices WHERE id IN (?, ?) ORDER BY id', [A.inv, D.inv])]);
+  const neu = (datum?: string): string => meldung(() => imHaus(() => useInvoiceStore.getState().createDirectInvoice(
+    'cust-1', [{ ...LINE('pN', 1, 1000), lotId: 'lot-pN' }] as never, 'neu', datum)));
+  const vorSpur = spur(); const vorZu = zu();
+  const mQ2 = neu('2026-05-15'); reload();
+  const mQ2iso = neu('2026-06-15T10:00:00.000Z'); reload();
+  const mQ1 = neu('2026-02-01'); reload();
+  ok(code(mQ2) === VAT_PERIOD_FILED && /Q2\/2026 is already filed/.test(mQ2) && code(mQ2iso) === VAT_PERIOD_FILED
+    && code(mQ1) === VAT_PERIOD_FILED && /Q1\/2026 is already paid/.test(mQ1),
+    `15 Primary: Rechnungsdatum im eingereichten Q2 und im VAT-bezahlten Q1 → abgewiesen — „${mQ2.split('|')[1]?.slice(0, 80)}…"`);
+  ok(spur() === vorSpur && zu() === vorZu,
+    '15 …keine Rechnung, keine Zeile, keine Buchung, keine Nummer verbraucht, Bestand unverändert; Q1/Q2 bitgleich');
+  const mQ3 = neu('2026-08-15'); reload();
+  const mHeute = neu(); reload();
+  const neue = all(DB, "SELECT substr(issued_at, 1, 10) FROM invoices WHERE notes = 'neu' ORDER BY issued_at");
+  ok(mQ3 === '' && mHeute === '' && n(DB, "SELECT COUNT(*) FROM invoices WHERE notes = 'neu'") === 2 && zu() === vorZu,
+    `15 Primary: Rechnungsdatum im offenen Q3 und heute (offen) → angelegt, Q1/Q2 unverändert (${neue})`);
+
+  // PC2 (invoices.create): dieselbe Hausfolge, ein endgültiges Nein — auch bei der Wiederholung.
+  const d = {
+    db: DB as never, begin: posting.beginLedgerTransaction, commit: posting.commitLedgerTransaction,
+    rollback: posting.rollbackLedgerTransaction, durableSave: async () => { /* test */ }, now: () => NOW,
+  };
+  const ID = (x: string): string => `${x.padStart(8, '0')}-0000-4000-8000-000000000000`;
+  const ident = (x: string) => ({ commandId: ID(x), tenantId: 'tenant-1', branchId: 'branch-main', userId: 'user-test', role: 'ADMIN', op: 'invoices.create', payloadKind: 'x', payloadHash: 'h' + x });
+  const rumpf = (issuedDate: string) => ({ customerId: 'cust-1', issuedDate, lines: [{ productId: 'pN', lotId: 'lot-pN', quantity: 1, unitPrice: 1000, scheme: 'auto' }] });
+  type R = { kind: string; code?: string; frozen?: boolean; replayed?: boolean; message?: string };
+  const vorPc2 = spur();
+  const r1 = await runInvoiceCreate(d as never, ident('f151') as never, rumpf('2026-04-20')) as R;
+  reload();
+  const r1b = await runInvoiceCreate(d as never, ident('f151') as never, rumpf('2026-04-20')) as R;
+  reload();
+  ok(r1.kind === 'rejected' && r1.code === VAT_PERIOD_FILED && r1.frozen === true && /already filed/.test(String(r1.message))
+    && r1b.kind === 'rejected' && r1b.code === VAT_PERIOD_FILED && r1b.replayed === true,
+    `15 PC2 invoices.create mit Datum im eingereichten Q2: endgültig abgewiesen, Wiederholung bekommt dasselbe Nein (${r1.kind}:${r1.code}/${r1b.replayed})`);
+  ok(spur() === vorPc2 && zu() === vorZu, '15 …und hinterlässt nichts (keine Rechnung, Buchung, Nummer); Q1/Q2 bitgleich');
+  const r2 = await runInvoiceCreate(d as never, ident('f152') as never, rumpf('2026-08-20')) as R;
+  reload();
+  ok(r2.kind === 'ok' && n(DB, "SELECT COUNT(*) FROM invoices WHERE substr(issued_at, 1, 10) = '2026-08-20'") === 1 && zu() === vorZu,
+    `15 PC2 invoices.create mit Datum im offenen Q3: angelegt (${r2.kind})`);
 }
 
 console.log(`\nvat-period-lock: ${PASS} passed, ${fails.length} failed`);

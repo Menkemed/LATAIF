@@ -897,6 +897,35 @@ for (const disp of ['RETURN_TO_OWNER', 'KEEP_AS_OWN']) {
     ok(/data-consignment-sale-scheme/.test(dlg) && /taxScheme: r\.scheme/.test(dlg) && /\['MARGIN', 'VAT_10', 'ZERO'\] as const/.test(dlg),
       'I10 der Dialog bietet die Steuerart je Artikel an und schickt sie mit');
   }
+  { // I11 v0.8.93 — „Record Sale" mit Verkaufsdatum (= Rechnungsdatum) in einem eingereichten VAT-Quartal (Primary und PC2)
+    const life = await import('../../src/core/bridge/lifecycle-commands.ts');
+    const lock = await import('../../src/core/tax/vat-period-lock.ts');
+    for (const weg of ['primary', 'fern'] as const) {
+      const w = await welt({ sale: null });
+      nimm(w.db);
+      imHaus(() => lock.markVatQuarterFiled({ branchId: 'branch-main', year: 2026, quarter: 2, userId: 'user-test' }));
+      reload();
+      const vor = unberuehrt(w);
+      const vorEinkauf = n(w.db, 'SELECT COUNT(*) FROM purchases');
+      const verkauf = (saleDate: string) => weg === 'primary'
+        ? primary(() => conHouse.recordConsignmentSalesOnPrimary({ items: [{ consignmentId: w.cid, salePrice: 1200, acknowledgeShortfall: false }],
+          buyerId: 'cust-2', saleDate, specialMark: false }))
+        : fern(() => life.runRecordSale(deps(w.db), identity(nx(), 'consignments.record_sale'), {
+          items: [{ consignmentId: w.cid, expectedRevision: crev(w.db, w.cid), salePrice: 1200, acknowledgeShortfall: false }],
+          buyerId: 'cust-2', saleDate, specialMark: false,
+        }));
+      const r = await verkauf('2026-05-20');
+      reload();
+      ok(!r.ok && r.code === lock.VAT_PERIOD_FILED && unberuehrt(w) === vor && n(w.db, 'SELECT COUNT(*) FROM purchases') === vorEinkauf
+        && s(w.db, 'SELECT status FROM consignments WHERE id = ?', [w.cid]) !== 'sold',
+        `I11 ${weg}: Verkaufsdatum im eingereichten Q2 → abgewiesen; kein Einkauf, keine Rechnung, keine Buchung, Kommission offen (${r.code})`);
+      const r2 = await verkauf('2026-09-13');
+      reload();
+      ok(r2.ok && s(w.db, 'SELECT status FROM consignments WHERE id = ?', [w.cid]) === 'sold'
+        && n(w.db, "SELECT COUNT(*) FROM ledger_entries WHERE occurred_at < '2026-07-01'") === 0,
+        `I11 ${weg}: …derselbe Verkauf im offenen Q3 → gebucht, nichts in Q2 (${r2.code || 'ok'})`);
+    }
+  }
   { // I7 Löschen, I8 Stornieren (Primary + PC2)
     const w = await welt();
     const vor = unberuehrt(w);

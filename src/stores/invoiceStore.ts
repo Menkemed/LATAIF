@@ -31,8 +31,8 @@ function bulkCtxOfInvoice(invoiceId: string, now: string): BulkCtx {
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
 import {
-  assertInvoiceNotInClosedVatQuarter, assertNotFinalizingIntoClosedVatQuarter, assertPaymentDateNotInClosedVatQuarter, assertVatUnchanged,
-  closedVatQuarters, nbrQuarterOfDate, vatFingerprint,
+  assertInvoiceDateNotInClosedVatQuarter, assertInvoiceNotInClosedVatQuarter, assertNotFinalizingIntoClosedVatQuarter,
+  assertPaymentDateNotInClosedVatQuarter, assertVatUnchanged, closedVatQuarters, nbrQuarterOfDate, vatFingerprint,
 } from '@/core/tax/vat-period-lock';
 import { planCustomerChange, moveInvoiceBookings, moveLastPurchase, customerDisplayName } from '@/core/invoices/customer-change';
 import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts } from '@/core/invoices/edit-lines';
@@ -333,6 +333,15 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // CONSIGNMENT-INTEGRITY F7 — eine gewöhnliche Rechnung verkauft keine Kommissionsware (sonst zweiter Verkauf
     // über „Record Sale“ möglich, ohne Verbindlichkeit beim Einlieferer). Geprüft VOR jedem Schreiben.
     assertNoConsignmentGoods(lines);
+    // Issued-At Override (z.B. nachträgliche Rechnung mit Datum aus Vergangenheit).
+    // Akzeptiert "YYYY-MM-DD" oder volles ISO. Default = jetzt.
+    const issuedAt = issuedAtOverride
+      ? (issuedAtOverride.includes('T') ? issuedAtOverride : `${issuedAtOverride}T00:00:00.000Z`)
+      : now;
+    // VAT-PERIOD-LOCK (v0.8.93) — JEDER Anlegeweg (Rechnung am Primary und von PC2, Angebot, Auftrag, Reparatur, Agent,
+    // Kommission) läuft hier durch: ein Rechnungsdatum in einem eingereichten/bezahlten VAT-Quartal wird abgelehnt —
+    // VOR der Nummer und vor jedem Schreiben.
+    assertInvoiceDateNotInClosedVatQuarter(branchId, issuedAt);
 
     // Repair-Invoices haben eine eigene Nummernserie analog zum Sales-Flow:
     //   RPINV-YYYY-NNNNNN  während PARTIAL
@@ -342,11 +351,6 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const invoiceNumber = numbering === 'repair'
       ? getNextDocumentNumber('RPINV')
       : get().getNextInvoiceNumber();
-    // Issued-At Override (z.B. nachträgliche Rechnung mit Datum aus Vergangenheit).
-    // Akzeptiert "YYYY-MM-DD" oder volles ISO. Default = jetzt.
-    const issuedAt = issuedAtOverride
-      ? (issuedAtOverride.includes('T') ? issuedAtOverride : `${issuedAtOverride}T00:00:00.000Z`)
-      : now;
     const issuedDate = new Date(issuedAt);
     const dueDate = new Date(issuedDate.getTime() + 14 * 24 * 60 * 60 * 1000).toISOString().split('T')[0];
 

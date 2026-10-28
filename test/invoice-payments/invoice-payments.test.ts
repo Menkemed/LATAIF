@@ -370,8 +370,10 @@ const banking = () => bankTransactionsFor({ tenantId: 'tenant-1', branchId: 'bra
   if (q === tq && YESTERDAY.slice(0, 4) === TODAY.slice(0, 4)) {
     ok(true, 'D (heute liegt im selben eingereichten Quartal — der Ausweichtag entfällt)');
   } else {
-    const ja = anlegen(db, { lines: [LINE(p, 400)], issuedDate: YESTERDAY, payments: [{ amount: 400, method: 'cash', paidDate: TODAY }] });
-    ok(ja.status === 'FINAL', 'D derselbe Verkauf mit Zahlung im offenen Quartal geht');
+    // v0.8.93 — das Rechnungsdatum selbst liegt im eingereichten Quartal: Umsatz/VAT würden dort gebucht → Nein.
+    const neinDatum = meldung(() => anlegen(db, { lines: [LINE(p, 400)], issuedDate: YESTERDAY, payments: [{ amount: 400, method: 'cash', paidDate: TODAY }] }));
+    const ja = anlegen(db, { lines: [LINE(p, 400)], issuedDate: TODAY, payments: [{ amount: 400, method: 'cash', paidDate: TODAY }] });
+    ok(code(neinDatum) === 'VAT_PERIOD_FILED' && ja.status === 'FINAL', 'D Rechnungsdatum im eingereichten Quartal: Nein; mit Datum im offenen Quartal geht derselbe Verkauf');
   }
   ok(S(liveVatQuarters('branch-main').get(`${y}-Q${q}`) ?? null) === 'null' || (liveVatQuarters('branch-main').get(`${y}-Q${q}`)?.invoiceCount ?? 0) === 0,
     'D das eingereichte Quartal bekommt keine Rechnung dazu');
@@ -389,7 +391,8 @@ const banking = () => bankTransactionsFor({ tenantId: 'tenant-1', branchId: 'bra
   const qBis = `${ay}-${String(Math.ceil(am / 3) * 3).padStart(2, '0')}-31T23:59:59.999Z`;
   // Was die gemeldete Periode an ZAHLUNGEN ausmacht: Snapshot, Zahlungen (Banking), Zahlungs-/Gebührenbuchungen im
   // Hauptbuch — alles mit Datum im Quartal. (Die Verkaufsbuchung einer rückdatierten Rechnung am Rechnungstag ist
-  // älteres, gewolltes Verhalten — v0.8.72 „nachträglich erfassen" — und keine Zahlungsbuchung.)
+  // älteres, gewolltes Verhalten — v0.8.72 „nachträglich erfassen" — und keine Zahlungsbuchung. Seit v0.8.93 lässt
+  // sich eine NEUE Rechnung nicht mehr in ein eingereichtes Quartal datieren; die alte unten entsteht vorher.)
   const periode = () => S({
     snap: one(db, "SELECT snapshot_json FROM vat_filings WHERE id = 'vf2'"),
     pay: n(db, 'SELECT COUNT(*) FROM payments WHERE received_at >= ? AND received_at <= ?', [qVon, qBis]),
@@ -409,14 +412,22 @@ const banking = () => bankTransactionsFor({ tenantId: 'tenant-1', branchId: 'bra
   const neinMix = meldung(() => anlegen(db, { lines: [LINE(p, 400)], issuedDate: ALT, payments: [{ amount: 300, method: 'card', cardBrand: 'normal' }, { amount: 100, method: 'cash', paidDate: TODAY }] }));
   ok(code(neinTeil) === 'VAT_PERIOD_FILED' && code(neinMix) === 'VAT_PERIOD_FILED' && /open quarter/.test(neinTeil) && alles() === vor,
     `D2 Teilzahlung im eingereichten Quartal (allein / mit Rest heute): Nein mit Hinweis, nichts angelegt (${code(neinTeil)} / ${code(neinMix)})`);
-  // Erlaubt bleibt: Rechnungstag im eingereichten Quartal, Zahlungen im offenen (heute) — Abschluss und Exportmonat heute.
-  const ja = anlegen(db, { lines: [LINE(p, 400)], issuedDate: ALT, payments: [{ amount: 300, method: 'cash', paidDate: TODAY }, { amount: 100, method: 'card', cardBrand: 'normal', paidDate: TODAY }] });
+  // v0.8.93 — bis v0.8.92 erlaubt: Rechnungstag im eingereichten Quartal, Zahlungen heute. Export heute, aber Umsatz,
+  // VAT und Forderung stünden mit neuen Hauptbuchzeilen im eingereichten Quartal → jetzt ebenfalls ein Nein.
+  const neinDatum = meldung(() => anlegen(db, { lines: [LINE(p, 400)], issuedDate: ALT, payments: [{ amount: 300, method: 'cash', paidDate: TODAY }, { amount: 100, method: 'card', cardBrand: 'normal', paidDate: TODAY }] }));
+  ok(code(neinDatum) === 'VAT_PERIOD_FILED' && /new invoice dated in that quarter/.test(neinDatum) && alles() === vor,
+    `D2 Rechnungstag im eingereichten Quartal, Zahlungen heute: Nein, nichts angelegt (${code(neinDatum)})`);
+  // Mit Rechnungstag im offenen Quartal: FINAL, Exportmonat heute, das eingereichte Quartal bekommt nichts.
+  const ja = anlegen(db, { lines: [LINE(p, 400)], issuedDate: TODAY, payments: [{ amount: 300, method: 'cash', paidDate: TODAY }, { amount: 100, method: 'card', cardBrand: 'normal', paidDate: TODAY }] });
   const nbr = nbrMonthTotals(nbrInvoicesFromDb('branch-main', 'FINAL').invoices, nbrInvoicesFromDb('branch-main', 'FINAL').payments);
   ok(ja.status === 'FINAL' && nbr.some((m) => m.invoiceIds.includes(ja.invoiceId) && m.month === TODAY.slice(0, 7)) && imAlten() === 0,
-    `D2 Zahlungen im offenen Quartal: FINAL, Exportmonat ${TODAY.slice(0, 7)}, eingereichtes Quartal ${altKey} ohne Rechnung`);
-  // Teilzahlung heute, dann umdatieren — weder HINEIN ins eingereichte Quartal …
+    `D2 Rechnung und Zahlungen im offenen Quartal: FINAL, Exportmonat ${TODAY.slice(0, 7)}, eingereichtes Quartal ${altKey} ohne Rechnung`);
+  // Teilzahlung heute, dann umdatieren — weder HINEIN ins eingereichte Quartal … (eine ALTE Rechnung mit Tag im
+  // Quartal, angelegt bevor es eingereicht wurde: die Einreichung für die Anlage kurz beiseite.)
   const p2 = ware(200);
+  db.run("UPDATE vat_filings SET year = -year WHERE id = 'vf2'");
   const teil = anlegen(db, { lines: [LINE(p2, 400)], issuedDate: ALT, payments: [{ amount: 100, method: 'cash', paidDate: TODAY }] });
+  db.run("UPDATE vat_filings SET year = -year WHERE id = 'vf2'");
   const zt = zahlungen(db, teil.invoiceId)[0];
   const vorUm = S(rows(db, 'SELECT amount, received_at FROM payments WHERE id = ?', [zt?.id]));
   const neinUm = meldung(() => useInvoiceStore.getState().updatePayment(String(zt?.id), teil.invoiceId, { receivedAt: `${ALT}T12:00:00.000Z` }));
@@ -569,10 +580,11 @@ const banking = () => bankTransactionsFor({ tenantId: 'tenant-1', branchId: 'bra
   // F4 eingereichtes Quartal: Rechnung vor ~100 Tagen, Quartal eingereicht.
   const ALT = dayBefore(TODAY, 100);
   const [ay, am] = ALT.split('-').map(Number);
-  db.run(`INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, filed_by, invoice_count, snapshot_json, created_at)
-          VALUES ('vf3','branch-main',?,?,?, 'user-test', 0, '{}', ?)`, [ay, Math.ceil(am / 3), NOW, NOW]);
+  // Die Rechnung entstand, bevor das Quartal eingereicht wurde (seit v0.8.93 ließe sie sich danach nicht mehr anlegen).
   const p4 = ware(200);
   const alt = anlegen(db, { lines: [LINE(p4, 500)], issuedDate: ALT });
+  db.run(`INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, filed_by, invoice_count, snapshot_json, created_at)
+          VALUES ('vf3','branch-main',?,?,?, 'user-test', 0, '{}', ?)`, [ay, Math.ceil(am / 3), NOW, NOW]);
   const vor4 = alles(db);
   const nein4 = meldung(() => zahlen(db, { invoiceId: alt.invoiceId, amount: 100, method: 'cash', paidDate: ALT }));
   ok(code(nein4) === 'VAT_PERIOD_FILED' && alles(db) === vor4, `F4 Teilzahlung mit Tag im eingereichten Quartal: Nein, nichts geschrieben (${code(nein4)})`);

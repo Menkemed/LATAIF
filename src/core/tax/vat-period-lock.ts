@@ -163,6 +163,23 @@ export function assertNotFinalizingIntoClosedVatQuarter(branchId: string, iso: s
 }
 
 /**
+ * v0.8.93 — eine NEUE Rechnung bucht Umsatz, VAT, Forderung und Wareneinsatz auf ihr Rechnungsdatum. Läge es in einem
+ * eingereichten oder VAT-bezahlten Quartal, entstünden dort neue Hauptbuchzeilen — eine gemeldete Periode änderte sich
+ * rückwirkend. Fail-closed: abgelehnt, bevor irgendetwas geschrieben (oder eine Nummer vergeben) wird. Es gibt keine
+ * bestätigte Regel, eine solche Rechnung periodengerecht anders zu buchen; ein Datum im offenen Quartal wählen.
+ */
+export function assertInvoiceDateNotInClosedVatQuarter(branchId: string, iso: string): void {
+  const q = nbrQuarterOfDate(iso);
+  if (!q) return;
+  const c = closedVatQuarters(branchId).get(q.key);
+  if (!c) return;
+  throw new VatPeriodFiled(
+    `The VAT return for ${quarterLabel(q.key)} is already ${c.filedAt ? 'filed' : 'paid'} — a new invoice dated in that quarter `
+    + 'would add bookings to it afterwards. Choose an invoice date in an open quarter.',
+  );
+}
+
+/**
  * v0.8.88 — eine Zahlung mit GEWÄHLTEM Tag (nachträglich erfasst oder umdatiert) darf nicht in einem zugemachten
  * Quartal stehen, auch nicht als Teilzahlung: sie stünde rückwirkend in Kasse/Bank, Hauptbuch und Zahlungsnotiz einer
  * gemeldeten Periode. Gilt für den gewählten Tag ebenso wie für den Tag, von dem eine Zahlung weg-datiert wird.
