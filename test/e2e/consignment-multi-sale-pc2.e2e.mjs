@@ -10,6 +10,9 @@
 //   E  PC2 Cancel Sale der Sammelrechnung ist vorher gesperrt (ein Artikel ging samt Rückzahlung zurück).
 //   F  Zweiter Verkauf, Einlieferer B bezahlt: PC2 Cancel Sale der GANZEN Rechnung mit „Geld zurück (Kasse)".
 //   G  Abgleich Lager/AP/Lieferanten-Guthaben.   H  PC2 ohne Datenbank, Prozess-Isolation.
+//   R  FINAL RELEASE GATE: PC2 „Record Repayment" (Beleg supplier_credit_refunds), „Is Workshop" über New/Edit Supplier
+//      (Bücher bitgleich), Repair-Auswahl nur Workshops, historische Zuordnung bleibt; echte Sicherung → frischer Ordner →
+//      echte Wiederherstellung → echte App zeigt Beleg, Markierung und Zuordnung.
 //
 // PROZESS-ISOLATION: gestartet nur über `spawnTracked`, beendet nur, was dieser Lauf gestartet hat oder was am EXAKTEN
 // Test-Pfad läuft. Ports 3011/9223/9224, Datenordner com.lataif.app.e2e(.client).
@@ -569,6 +572,166 @@ try {
   // ── H PC2 ohne Datenbank, Prozess-Isolation ─────────────────────────────────────────────────────
   await merke(client);
   ok(ALLE_TREFFER.length === 0, `H PC2 hat nie eine Geschäftsdatenbank angefasst (${S(ALLE_TREFFER).slice(0, 120)})`);
+  // ── R FINAL RELEASE GATE: Rückzahlung + Workshop am PC2, historische Zuordnung, dann Sicherung → Wiederherstellung ──
+  //    R1 PC2 „Record Repayment" (300 Kasse) auf die offene Rückforderung aus D  → supplier_credit_refunds + Hauptbuch
+  //    R2 PC2 „New Supplier" mit „Is Workshop" und „Edit Supplier" → is_workshop; Einkäufe/Zahlungen/Buchungen unverändert
+  //    R3 PC2 Repair-Auswahl nur Workshops; eine Reparatur behält ihren Workshop, auch wenn die Markierung fällt
+  //    R4 echte Sicherung (Snapshot-Host) → frischer Ordner → echte Wiederherstellung → echte App → Bild unverändert
+  {
+    const heute = new Date().toISOString().split('T')[0];
+    const credit = dbQ(BIZ_DB, "SELECT id, supplier_id, amount, used_amount FROM supplier_credits WHERE status = 'OPEN' ORDER BY rowid")[0] || {};
+    const kasse0 = saldo('CASH');
+    // R1 — Rückzahlung über die echte Maske am PC2.
+    await syncRuhe();
+    client = await lade(client, `/consignments/${K1}`);
+    await waitFor(client, `[data-consignor-repayment-record="${credit.id}"]`, 45000);
+    const r = [await klick(client, `[data-consignor-repayment-record="${credit.id}"]`)];
+    if (!(await warteBis(client, q('[data-consignor-repayment-dialog]'), 15000))) r.push('KEIN-DIALOG');
+    r.push(await setVal(client, '[data-consignor-repayment-amount]', '300'));
+    r.push(await klick(client, '[data-consignor-repayment-method="cash"]'));
+    r.push(await klick(client, '[data-consignor-repayment-confirm]'));
+    if (!(await warteBis(client, `!${q('[data-consignor-repayment-dialog]')}`, 30000))) r.push('BLEIBT:' + (await fehlerText(client)));
+    await spuelen(primary);
+    const belege = dbQ(BIZ_DB, 'SELECT supplier_credit_id, amount, method, received_at FROM supplier_credit_refunds');
+    const nachCredit = zeile('supplier_credits', credit.id);
+    const buchung = dbQ(BIZ_DB, "SELECT account, direction, amount FROM ledger_entries WHERE source_module = 'SUPPLIER_CREDIT_REFUND' ORDER BY account");
+    ok(alleOk(r) === 'OK' && belege.length === 1 && belege[0].supplier_credit_id === credit.id && r3(belege[0].amount) === 300 && belege[0].method === 'cash'
+      && String(belege[0].received_at).startsWith(heute),
+      `R1 PC2 „Record Repayment": ein Beleg 300 Kasse, heute (${alleOk(r)} ${S(belege)})`);
+    ok(r3(nachCredit.used_amount) === 300 && nachCredit.status === 'OPEN' && r3(saldo('CASH') - kasse0) === 300
+      && S(buchung.map((b) => [b.account, b.direction, r3(b.amount)])) === S([['CASH', 'DEBIT', 300], ['SUPPLIER_CREDIT', 'CREDIT', 300]]),
+      `R1 Primary: Guthaben 300 von 800 eingelöst, DR Kasse / CR Lieferanten-Guthaben (${S(buchung)})`);
+    client = await lade(client, `/consignments/${K1}`);
+    const teil = await warteBis(client, "document.querySelector('[data-consignor-repayment-status=\"partial\"]') && /500\\.000 BHD still open/.test(document.body.innerText) && document.querySelector('[data-consignor-repayment-receipts]')", 30000);
+    ok(teil, 'R1 PC2-Detailseite: „Partly repaid — 500 still open" und der Beleg');
+
+    // R2 — Workshop-Markierung über die echten Masken am PC2; die Bücher bleiben.
+    const buecher = () => S(['purchases', 'purchase_lines', 'purchase_payments', 'purchase_returns', 'supplier_credits', 'supplier_credit_refunds',
+      'ledger_entries', 'invoices', 'payments', 'consignments', 'stock_lots'].map((t) => dbQ(BIZ_DB, `SELECT * FROM ${t} ORDER BY rowid`)));
+    const vorBuecher = buecher();
+    // Einlieferer A = der Lieferant der offenen Rückforderung aus D; B = der andere Einlieferer.
+    const supA = String(credit.supplier_id || '');
+    const supB = String(dbQ(BIZ_DB, "SELECT supplier_id FROM purchases WHERE supplier_id != ? AND source_consignment_id IS NOT NULL LIMIT 1", [supA])[0]?.supplier_id || '');
+    const WNAME = 'Gate Workshop ' + Date.now().toString(36);
+    client = await lade(client, '/suppliers');
+    await waitFor(client, SHELL, 30000);
+    const n = [await clickText(client, 'New Supplier')];
+    if (!(await warteBis(client, q('[data-supplier-create-is-workshop]'), 15000))) n.push('KEIN-DIALOG');
+    n.push(await setVal(client, 'input[placeholder="e.g. Gold Dealer LLC"]', WNAME));
+    n.push(await klick(client, '[data-supplier-create-is-workshop]'));
+    n.push(await klick(client, '[data-supplier-create-save]'));
+    if (!(await warteBis(client, `!${q('[data-supplier-create-is-workshop]')}`, 30000))) n.push('BLEIBT:' + (await fehlerText(client)));
+    await spuelen(primary);
+    const werk = dbQ(BIZ_DB, 'SELECT id, is_workshop, active FROM suppliers WHERE name = ?', [WNAME])[0] || {};
+    ok(alleOk(n) === 'OK' && Number(werk.is_workshop) === 1 && Number(werk.active) === 1, `R2 PC2 „New Supplier" mit „Is Workshop" → is_workshop = 1 am Primary (${alleOk(n)})`);
+    client = await lade(client, `/suppliers/${supA}`);
+    await waitFor(client, SHELL, 30000);
+    const e = [await clickText(client, 'Edit')];
+    if (!(await warteBis(client, q('[data-supplier-is-workshop]'), 15000))) e.push('KEIN-FELD');
+    e.push(await klick(client, '[data-supplier-is-workshop]'));
+    e.push(await klick(client, '[data-supplier-save]'));
+    if (!(await warteBis(client, `!${q('[data-supplier-is-workshop]')}`, 30000))) e.push('BLEIBT:' + (await fehlerText(client)));
+    await spuelen(primary);
+    ok(alleOk(e) === 'OK' && Number(zeile('suppliers', supA).is_workshop) === 1 && Number(zeile('suppliers', supB).is_workshop) === 0,
+      `R2 PC2 „Edit Supplier" markiert den Einlieferer A; B bleibt unmarkiert (${alleOk(e)})`);
+    ok(buecher() === vorBuecher, 'R2 Einkäufe, Zahlungen, Retouren, Guthaben, Belege, Hauptbuch, Rechnungen, Kommissionen und Lose bitgleich');
+    client = await lade(client, '/suppliers');
+    const badge = await warteBis(client, `[...document.querySelectorAll('[data-supplier-workshop-badge]')].map((b) => b.parentElement.textContent).some((t) => t.includes(${S(WNAME)}))`, 30000);
+    ok(badge, 'R2 PC2-Lieferantenliste zeigt das Workshop-Badge');
+
+    // R3 — Auswahl am PC2 und historische Zuordnung.
+    client = await lade(client, '/repairs');
+    await waitFor(client, SHELL, 30000);
+    const a = [await clickText(client, 'New Repair')];
+    await sleep(800);
+    a.push(await client.ev("const b=[...document.querySelectorAll('button')].find(x=>/^external$/i.test(x.textContent.trim())); if(!b) return 'NO-EXTERNAL'; b.click(); return 'OK';"));
+    await sleep(500);
+    a.push(await client.ev(`const l=[...document.querySelectorAll('[data-ss-trigger="Pick: In-house OR a workshop / goldsmith"]')]; const t=l[l.length-1]; if(!t) return 'NO-TRIGGER'; t.click(); return 'OK';`));
+    const angebot = await warteBis(client, `document.querySelector('[data-ss-option=${S(werk.id)}]')`, 15000);
+    const auswahl = await client.ev(`return { werk: !!document.querySelector('[data-ss-option=${S(werk.id)}]'), a: !!document.querySelector('[data-ss-option=${S(supA)}]'), b: !!document.querySelector('[data-ss-option=${S(supB)}]'), inhouse: !!document.querySelector('[data-ss-option="__INHOUSE__"]') };`);
+    ok(alleOk(a) === 'OK' && angebot && auswahl.werk && auswahl.a && !auswahl.b && auswahl.inhouse,
+      `R3 PC2 Repair-Auswahl: eigene Werkstatt + die beiden Workshops, NICHT der unmarkierte Lieferant (${S(auswahl)})`);
+    await client.ev("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); [...document.querySelectorAll('button')].filter(b=>b.textContent.trim()==='Cancel').forEach(b=>b.click()); return 1;");
+    const rep = await sende(client, 'repairs.create', { customerId: 'pe-kunde', issueDescription: 'Gate glass', repairType: 'external', workshopSupplierId: werk.id, receivedAt: heute });
+    await spuelen(primary);
+    const repId = String(rep.body?.value?.repairId || '');
+    ok(rep.status === 200 && zeile('repairs', repId).workshop_supplier_id === werk.id, `R3 Reparatur mit diesem Workshop angelegt (${rep.status})`);
+    const aus = await sende(client, 'suppliers.update', { id: werk.id, isWorkshop: false });
+    await spuelen(primary);
+    ok(aus.status === 200 && Number(zeile('suppliers', werk.id).is_workshop) === 0 && zeile('repairs', repId).workshop_supplier_id === werk.id,
+      'R3 Markierung zurückgenommen: die Reparatur behält ihren Workshop');
+    await syncRuhe();
+    client = await lade(client, `/repairs/${repId}`);
+    const historisch = await warteBis(client, `document.body.innerText.includes(${S(WNAME)})`, 30000);
+    ok(historisch, 'R3 PC2 zeigt die Reparatur weiter mit ihrem (nicht mehr markierten) Workshop');
+    const sc = r3(zahl("SELECT COALESCE(SUM(amount - used_amount), 0) AS n FROM supplier_credits"));
+    ok(r3(saldo('SUPPLIER_CREDIT')) === sc && r3(zahl("SELECT COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0) AS n FROM ledger_entries")) === 0,
+      `R3 Abgleich: Lieferanten-Guthaben ${saldo('SUPPLIER_CREDIT')} == ${sc}, Hauptbuch ausgeglichen`);
+
+    // R4 — Sicherung → frischer Ordner → Wiederherstellung → echte App.
+    await merke(client);
+    await spuelen(primary);
+    try { steuer?.close(); } catch { /* zu */ }
+    try { client?.close(); } catch { /* zu */ }
+    client = null;
+    killTestImage('lataif-e2e-client.exe'); await waitTestImageGone('lataif-e2e-client.exe');
+    try { primary?.close(); } catch { /* zu */ }
+    primary = null;
+    killTestImage('lataif.exe'); await waitTestImageGone('lataif.exe'); await sleep(1500);
+    const TAB = ['supplier_credit_refunds', 'supplier_credits', 'suppliers', 'repairs', 'repair_lines', 'purchases', 'purchase_lines', 'purchase_payments',
+      'purchase_returns', 'invoices', 'invoice_lines', 'payments', 'consignments', 'ledger_entries', 'stock_lots', 'customers'];
+    const ohneLagerdauer = (rows) => rows.map(({ days_in_stock: _d, ...x }) => x);
+    const bild = () => S({ ...Object.fromEntries(TAB.map((t) => [t, dbQ(BIZ_DB, `SELECT * FROM ${t} ORDER BY rowid`)])),
+      products: ohneLagerdauer(dbQ(BIZ_DB, 'SELECT * FROM products ORDER BY id')),
+      media_links: dbQ(BIZ_DB, 'SELECT link_id, entity_type, entity_id, media_id, sort_order, deleted_at FROM media_links ORDER BY link_id') });
+    const vor = bild();
+    const spalten = dbQ(BIZ_DB, 'PRAGMA table_info(suppliers)').map((c) => c.name);
+    const mediaVor = existsSync(MEDIA_ROOT) ? readdirSync(MEDIA_ROOT, { recursive: true }).length : 0;
+    const snapDir = join(RUN, 'backups', 'snap-gate');
+    mkdirSync(join(RUN, 'backups'), { recursive: true });
+    const out = seedCmd('backup', APP_DATA_DIR, snapDir, new Date().toISOString());
+    const manifest = JSON.parse(readFileSync(join(snapDir, 'manifest.json'), 'utf8'));
+    ok(/^BACKUP_OK files=\d+ additional=1 status=complete$/.test(out) && manifest.additionalDbFiles?.[0]?.fileName === 'lataif_sync_server.db'
+      && manifest.files.every((f) => existsSync(join(snapDir, f.relPath)) && sha256(join(snapDir, f.relPath)) === f.hash),
+      `R4 Sicherung mit dem echten Snapshot-Host: beide Datenbanken, jede Datei passt zu ihrem Hash (${out})`);
+    const identity = join(RUN, 'identity'); mkdirSync(identity, { recursive: true });
+    const carried = readdirSync(APP_DATA_DIR, { withFileTypes: true }).filter((x) => x.isFile() && !/^lataif(_sync_server)?\.db/.test(x.name)).map((x) => x.name);
+    for (const f of carried) copyFileSync(join(APP_DATA_DIR, f), join(identity, f));
+    rmSync(APP_DATA_DIR, { recursive: true, force: true });
+    mkdirSync(APP_DATA_DIR, { recursive: true });
+    for (const f of carried) copyFileSync(join(identity, f), join(APP_DATA_DIR, f));
+    ok(!existsSync(BIZ_DB) && !existsSync(SERVER_DB), `R4 frischer Datenordner ohne Datenbanken (Kennung übernommen: ${carried.join(', ') || 'keine'})`);
+    const rout = seedCmd('restore', APP_DATA_DIR, snapDir);
+    ok(/^RESTORE_OK files=\d+ status=complete$/.test(rout) && sha256(BIZ_DB) === manifest.db.sha256 && sha256(SERVER_DB) === manifest.additionalDbFiles[0].sha256,
+      `R4 echte Wiederherstellung, beide Datenbanken byte-gleich (${rout})`);
+    ok(bild() === vor && S(dbQ(BIZ_DB, 'PRAGMA table_info(suppliers)').map((c) => c.name)) === S(spalten) && spalten.includes('is_workshop'),
+      'R4 Rückzahlungsbeleg, Guthaben, Workshop-Markierungen, Reparatur-Zuordnung, Einkäufe, Rechnungen, Hauptbuch und Artikel unverändert; Spalte is_workshop da');
+    ok((existsSync(MEDIA_ROOT) ? readdirSync(MEDIA_ROOT, { recursive: true }).length : 0) === mediaVor, `R4 Medienbaum wie vorher (${mediaVor} Einträge)`);
+    primary = await attach(APP_CDP, APP, appEnv());
+    await waitInvoke(primary);
+    await waitFor(primary, SHELL + ', input[type="password"], [data-first-run-gate]', 90000);
+    ok(!(await exists(primary, '[data-first-run-gate]')), 'R4 die App fragt nach der Wiederherstellung NICHT erneut nach der Einrichtung');
+    if (!(await exists(primary, SHELL))) {
+      await setVal(primary, 'input[type="email"]', OWNER_EMAIL);
+      await setVal(primary, 'input[type="password"]', ONBOARD_PW);
+      await primary.ev("document.querySelector('button[type=submit]')?.click(); return 1;");
+    }
+    await waitFor(primary, SHELL, 90000);
+    await gehFrisch(primary, `/consignments/${K1}`);
+    const beleg = await warteBis(primary, "document.querySelector('[data-consignor-repayment-status=\"partial\"]') && document.querySelector('[data-consignor-repayment-receipts]') && /Received .* Cash/.test(document.querySelector('[data-consignor-repayment-receipts]').innerText)", 30000);
+    await gehFrisch(primary, '/suppliers');
+    const markiert = await warteBis(primary, "document.querySelectorAll('[data-supplier-workshop-badge]').length === 1", 30000);
+    await gehFrisch(primary, `/repairs/${repId}`);
+    const zuordnung = await warteBis(primary, `document.body.innerText.includes(${S(WNAME)})`, 30000);
+    ok(beleg && markiert && zuordnung, `R4 die wiederhergestellte App zeigt Rückzahlungsbeleg, genau einen markierten Workshop und die alte Zuordnung (${S([beleg, markiert, zuordnung])})`);
+    await spuelen(primary);
+    const nachStart = bild();
+    try { primary.close(); } catch { /* zu */ }
+    primary = null;
+    killTestImage('lataif.exe'); await waitTestImageGone('lataif.exe'); await sleep(1500);
+    ok(nachStart === vor, 'R4 der Start auf dem wiederhergestellten Stand ändert daran nichts (außer der täglichen Lagerdauer)');
+  }
+
   const fremdNachher = foreignProcesses('lataif.exe').map((p) => p.pid).sort();
   ok(S(fremdVorher) === S(fremdNachher), 'ISOLATION fremde LATAIF-Prozesse (die Produktions-App) unberührt');
 } catch (e) {
