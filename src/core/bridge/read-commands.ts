@@ -36,6 +36,7 @@ import { nextOrderStatus } from '@/core/orders/order-status-flow';
 import { repairStatusTargetsOfRow as statusTargetsOfRow } from '@/core/repairs/repair-transition-row';
 import { repairPhotoRefs } from '@/core/repairs/repair-media';
 import { SELECTABLE_WORKSHOP_SQL } from '@/core/repairs/repair-workshop-choice';
+import { REPAIR_WORK_SOURCE_LABEL, repairCostView, repairWorkSource } from '@/core/repairs/repair-work-source';
 
 export const OP_PRODUCTS_LIST = 'products.list';
 export const OP_PRODUCTS_GET = 'products.get';
@@ -923,8 +924,40 @@ registerCommand(OP_ORDERS_GET, {
 const REPAIR_COLUMNS =
   'id, repair_number, customer_id, product_id, item_brand, item_model, item_serial, '
   + 'issue_description, diagnosis, repair_type, repair_scope, external_vendor, '
-  + 'workshop_supplier_id, estimated_cost, actual_cost, internal_cost, charge_to_customer, '
+  + 'workshop_supplier_id, planned_workshop_supplier_id, estimated_cost, actual_cost, internal_cost, charge_to_customer, '
   + 'margin, status, received_at, estimated_ready, tax_scheme, invoice_id, updated_at, revision';
+
+/**
+ * REPAIR-REDESIGN — wer an der Reparatur arbeitet (eigene Arbeit, Werkstatt, beides) und die Kosten getrennt nach
+ * Arbeit und Material: dieselbe reine Ableitung wie Liste, Quick Edit und Detailseite (`repair-work-source`). Nur
+ * gelesen — das Handy zeigt sie an, es rechnet nichts nach.
+ */
+function repairWorkSummary(r: Row): CommandResult {
+  const lines = rows(
+    'SELECT id, status, supplier_id, work_type, material_kind, cost_amount FROM repair_lines WHERE repair_id = ?',
+    [str(r.id)],
+  ).map((l) => ({
+    id: str(l.id), status: str(l.status), supplierId: str(l.supplier_id) || null, workType: str(l.work_type) || null,
+    materialKind: str(l.material_kind) || null, costAmount: num(l.cost_amount),
+  }));
+  const kopf = {
+    repairType: str(r.repair_type), workshopSupplierId: str(r.workshop_supplier_id) || null,
+    plannedWorkshopSupplierId: str(r.planned_workshop_supplier_id) || null, issueDescription: str(r.issue_description),
+    internalCost: num(r.internal_cost), estimatedCost: r.estimated_cost === null ? null : num(r.estimated_cost),
+  };
+  const ws = repairWorkSource(kopf, lines);
+  const cost = repairCostView(kopf, lines);
+  const name = (id: string): string => str(rows('SELECT name FROM suppliers WHERE id = ?', [id])[0]?.name);
+  return {
+    kind: ws.kind,
+    label: REPAIR_WORK_SOURCE_LABEL[ws.kind],
+    workshops: ws.workshopIds.map((id) => ({ id, name: name(id), planned: id === ws.plannedWorkshopId })),
+    workTypes: ws.entries.map((e) => e.workType).filter((t, i, a): t is NonNullable<typeof t> => !!t && a.indexOf(t) === i),
+    workCost: cost.work,
+    materialCost: cost.material,
+    totalCost: cost.total,
+  };
+}
 
 /**
  * PRE-G5 — die Belegbilder EINER Reparatur.
@@ -1015,6 +1048,7 @@ function repairDto(r: Row): CommandResult {
     repairScope: str(r.repair_scope),
     externalVendor: str(r.external_vendor),
     workshopSupplierId: str(r.workshop_supplier_id),
+    plannedWorkshopSupplierId: str(r.planned_workshop_supplier_id),
     estimatedCost: r.estimated_cost === null ? null : num(r.estimated_cost),
     actualCost: r.actual_cost === null ? null : num(r.actual_cost),
     internalCost: num(r.internal_cost),
@@ -1030,6 +1064,7 @@ function repairDto(r: Row): CommandResult {
     invoiceId: str(r.invoice_id),
     // Und welche Schritte von hier aus wirklich gingen — aus der geteilten Ableitung (auch „Reopen" von „Returned").
     allowedStatusTargets: statusTargetsOfRow(str(r.id)),
+    work: repairWorkSummary(r),
     // REPAIR-PICKUP-DATE — der tatsächliche Abholtag und (getrennt) wann er erfasst wurde.
     pickedUpAt: str(r.picked_up_at),
     pickedUpRecordedAt: str(r.picked_up_recorded_at),

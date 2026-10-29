@@ -31,6 +31,7 @@ import { CARD_BRANDS, CardFeeNotConfigured, type CardBrand } from '@/core/financ
 import { nextOrderStatus, isAllowedOrderAdvance } from '@/core/orders/order-status-flow';
 import { repairStatusTargetsOfRow as statusTargetsOfRow } from '@/core/repairs/repair-transition-row';
 import { RepairActionRejected, isRepairTaxScheme, repairInvoiceBlocker } from '@/core/repairs/repair-rules';
+import { REPAIR_LINE_COST_MESSAGE, repairLineCostIssue } from '@/core/repairs/repair-work-source';
 import { TransferActionRejected, transferConvertBlocker, type TransferBillTo } from '@/core/agents/transfer-rules';
 import { convertTransferInHouse, convertTransfersInHouse, type TransferConversion } from '@/core/agents/transfer-house';
 import { VatPeriodFiled } from '@/core/tax/vat-period-lock';
@@ -809,6 +810,22 @@ export function runCreateRepairInvoice(deps: EngineDeps, identity: CommandIdenti
 // Liste des Hauses, hier gelesen statt abgeschrieben.
 const WORK_TYPES = REPAIR_WORK_TYPES;
 
+/**
+ * REPAIR-REDESIGN — der Betrag einer Arbeitszeile: eine Zahl ab 0. Ob 0 genügt, entscheidet die Quelle der Zeile
+ * (`repairLineCostIssue`: eigene Arbeit ja, Werkstatt nein) — dieselbe Regel wie am Primary und am Handy.
+ */
+function lineCost(v: unknown): number {
+  if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+    throw new FinancialPayloadError('costAmount must be a number of 0 or more');
+  }
+  return v;
+}
+
+function assertLineCost(supplierId: string | null | undefined, cost: number): void {
+  const issue = repairLineCostIssue(supplierId, cost);
+  if (issue) throw new CommandRejected(issue, REPAIR_LINE_COST_MESSAGE[issue]);
+}
+
 export interface AddRepairLineRequest {
   repairId: string;
   costAmount: number;
@@ -825,7 +842,7 @@ export function parseAddRepairLine(raw: unknown): AddRepairLineRequest {
   onlyKnownFields(raw, ['repairId', 'costAmount', 'expectedRevision', 'supplierId', 'workType', 'description', 'dueDate', 'notes']);
   const out: AddRepairLineRequest = {
     repairId: reqString(raw.repairId, 'repairId'),
-    costAmount: positive(raw.costAmount, 'costAmount'),
+    costAmount: lineCost(raw.costAmount),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
   };
   out.supplierId = optString(raw.supplierId, 'supplierId');
@@ -859,6 +876,7 @@ export function runAddRepairLine(deps: EngineDeps, identity: CommandIdentity, ra
     if (req.supplierId && !query('SELECT id FROM suppliers WHERE id = ?', [req.supplierId])[0]) {
       throw new CommandRejected('SUPPLIER_NOT_FOUND', 'no such supplier');
     }
+    assertLineCost(req.supplierId, req.costAmount);
     const rs = useRepairStore.getState();
     rs.loadRepairs();
     rs.loadRepairLines();
@@ -904,7 +922,7 @@ export function parseUpdateRepairLine(raw: unknown): UpdateRepairLineRequest {
     lineId: reqString(raw.lineId, 'lineId'),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
   };
-  if (raw.costAmount !== undefined) out.costAmount = positive(raw.costAmount, 'costAmount');
+  if (raw.costAmount !== undefined) out.costAmount = lineCost(raw.costAmount);
   if (raw.supplierId !== undefined) out.supplierId = optString(raw.supplierId, 'supplierId') ?? '';
   if (raw.workType !== undefined) {
     const w = s(raw.workType);
@@ -946,6 +964,10 @@ export function runUpdateRepairLine(deps: EngineDeps, identity: CommandIdentity,
     }
     if (req.supplierId && !query('SELECT id FROM suppliers WHERE id = ?', [req.supplierId])[0]) {
       throw new CommandRejected('SUPPLIER_NOT_FOUND', 'no such supplier');
+    }
+    if (req.costAmount !== undefined) {
+      const lineSupplier = s(query('SELECT supplier_id FROM repair_lines WHERE id = ?', [req.lineId])[0]?.supplier_id);
+      assertLineCost(req.supplierId !== undefined ? req.supplierId : lineSupplier, req.costAmount);
     }
     const rs = useRepairStore.getState();
     rs.loadRepairs();

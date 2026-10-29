@@ -2618,6 +2618,10 @@ function runMigrations(database: Database): void {
     // `completed_at`). „Reopen" stellt genau das wieder her und leert beides. Bestehende Rückgaben: NULL.
     `ALTER TABLE repairs ADD COLUMN return_from_status TEXT`,
     `ALTER TABLE repairs ADD COLUMN return_completed_at TEXT`,
+    // REPAIR-REDESIGN — die beim Anlegen gewählte Werkstatt, solange es von ihr noch keine Arbeitszeile gibt (die
+    // Gebühr kommt oft erst später). Eine reine Angabe für Anzeige und Filter: sie bucht nichts, sie ist keine
+    // Verbindlichkeit und keine Altgebühr (`workshop_supplier_id` bleibt dafür, wie es ist). Bestehende Reparaturen: NULL.
+    `ALTER TABLE repairs ADD COLUMN planned_workshop_supplier_id TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

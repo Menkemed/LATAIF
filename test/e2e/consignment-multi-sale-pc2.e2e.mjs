@@ -652,13 +652,14 @@ try {
     await waitFor(client, SHELL, 30000);
     const a = [await clickText(client, 'New Repair')];
     await sleep(800);
-    a.push(await client.ev("const b=[...document.querySelectorAll('button')].find(x=>/^external$/i.test(x.textContent.trim())); if(!b) return 'NO-EXTERNAL'; b.click(); return 'OK';"));
+    // REPAIR-REDESIGN — „Wer arbeitet?": die Werkstatt ankreuzen; eigene Arbeit ist ein eigenes Häkchen, kein Eintrag der Auswahl.
+    a.push(await client.ev("const e=document.querySelector('[data-repair-create-external]'); if(!e) return 'NO-EXTERNAL'; if(!e.checked) e.click(); return 'OK';"));
     await sleep(500);
-    a.push(await client.ev(`const l=[...document.querySelectorAll('[data-ss-trigger="Pick: In-house OR a workshop / goldsmith"]')]; const t=l[l.length-1]; if(!t) return 'NO-TRIGGER'; t.click(); return 'OK';`));
+    a.push(await client.ev(`const l=[...document.querySelectorAll('[data-ss-trigger="Pick a workshop / goldsmith"]')]; const t=l[l.length-1]; if(!t) return 'NO-TRIGGER'; t.click(); return 'OK';`));
     const angebot = await warteBis(client, `document.querySelector('[data-ss-option=${S(werk.id)}]')`, 15000);
     const auswahl = await client.ev(`return { werk: !!document.querySelector('[data-ss-option=${S(werk.id)}]'), a: !!document.querySelector('[data-ss-option=${S(supA)}]'), b: !!document.querySelector('[data-ss-option=${S(supB)}]'), inhouse: !!document.querySelector('[data-ss-option="__INHOUSE__"]') };`);
-    ok(alleOk(a) === 'OK' && angebot && auswahl.werk && auswahl.a && !auswahl.b && auswahl.inhouse,
-      `R3 PC2 Repair-Auswahl: eigene Werkstatt + die beiden Workshops, NICHT der unmarkierte Lieferant (${S(auswahl)})`);
+    ok(alleOk(a) === 'OK' && angebot && auswahl.werk && auswahl.a && !auswahl.b && !auswahl.inhouse,
+      `R3 PC2 Repair-Auswahl: die Workshops, NICHT der unmarkierte Lieferant; eigene Arbeit ist das eigene Häkchen (${S(auswahl)})`);
     await client.ev("document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' })); [...document.querySelectorAll('button')].filter(b=>b.textContent.trim()==='Cancel').forEach(b=>b.click()); return 1;");
     const rep = await sende(client, 'repairs.create', { customerId: 'pe-kunde', issueDescription: 'Gate glass', repairType: 'external', workshopSupplierId: werk.id, receivedAt: heute });
     await spuelen(primary);

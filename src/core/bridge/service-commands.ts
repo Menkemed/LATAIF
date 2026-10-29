@@ -250,7 +250,7 @@ export function parseRepairCreate(raw: unknown): RepairCreateRequest {
   onlyKnownFields(raw, [
     'repairScope', 'customerId', 'productId', 'lotId', 'itemCategoryId', 'itemAttributes',
     'itemBrand', 'itemModel', 'itemReference', 'itemSerial', 'itemDescription', 'issueDescription',
-    'repairType', 'workshopSupplierId', 'estimatedCost', 'internalCost', 'chargeToCustomer',
+    'repairType', 'workshopSupplierId', 'plannedWorkshopSupplierId', 'estimatedCost', 'internalCost', 'chargeToCustomer',
     'estimatedReady', 'taxScheme', 'staffId', 'notes', 'photos', 'receivedAt',
   ]);
   const scope = raw.repairScope === undefined ? 'CUSTOMER' : String(raw.repairScope);
@@ -279,7 +279,7 @@ export function parseRepairCreate(raw: unknown): RepairCreateRequest {
     if (raw[k] !== undefined && raw[k] !== null) money(raw[k], k);
   }
   for (const k of ['customerId', 'productId', 'lotId', 'itemCategoryId', 'itemBrand', 'itemModel',
-    'itemReference', 'itemSerial', 'itemDescription', 'workshopSupplierId', 'estimatedReady', 'staffId', 'notes', 'receivedAt'] as const) {
+    'itemReference', 'itemSerial', 'itemDescription', 'workshopSupplierId', 'plannedWorkshopSupplierId', 'estimatedReady', 'staffId', 'notes', 'receivedAt'] as const) {
     optString(raw[k], k);
   }
   if (raw.itemAttributes !== undefined) plainAttributes(raw.itemAttributes, 'itemAttributes');
@@ -408,7 +408,7 @@ export function parseRepairUpdate(raw: unknown): RepairUpdateRequest {
     if (raw[k] !== null && !list.includes(raw[k] as string)) throw new ServicePayloadError(`unknown ${k}: ${String(raw[k])}`);
     c[k] = raw[k];
   };
-  for (const k of ['diagnosis', 'workshopSupplierId', 'estimatedReady', 'itemCategoryId', 'itemBrand',
+  for (const k of ['diagnosis', 'workshopSupplierId', 'plannedWorkshopSupplierId', 'estimatedReady', 'itemCategoryId', 'itemBrand',
     'itemModel', 'itemReference', 'itemSerial', 'itemDescription']) nullableText(k);
   for (const k of ['estimatedCost', 'actualCost', 'chargeToCustomer']) nullableMoney(k);
   if (raw.internalCost !== undefined && raw.internalCost !== null) c.internalCost = money(raw.internalCost, 'internalCost');

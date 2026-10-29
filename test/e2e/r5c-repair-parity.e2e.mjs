@@ -184,6 +184,22 @@ async function click(c, sel) {
 const clickText = (c, t) => c.ev(`const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===${S(t)}); if(!b) return 'NO:'+${S(t)}; if (b.disabled) return 'DISABLED'; b.click(); return 'OK';`);
 /** Klick ohne Abbruch: 'OK' oder der Grund. */
 const klick = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO:'+${S(sel)}; if (e.disabled) return 'DISABLED:'+${S(sel)}; e.click(); return 'OK';`);
+/** REPAIR-REDESIGN — „Wer arbeitet?": Internal = nur In-house, External = nur Werkstatt, Hybrid = beides. Erst ankreuzen, dann abwählen. */
+async function art(c, t) {
+  const soll = { Internal: [true, false], External: [false, true], Hybrid: [true, true] }[t];
+  if (!soll) return 'NO-TYPE:' + t;
+  const sel = ['[data-repair-create-inhouse]', '[data-repair-create-external]'];
+  const stand = () => c.ev(`const i=document.querySelector(${S(sel[0])}), e=document.querySelector(${S(sel[1])}); return i && e ? [i.checked, e.checked] : null;`);
+  for (const an of [true, false]) {
+    for (const k of [0, 1]) {
+      const s = await stand();
+      if (!s) return 'NO-WORK-CHOICE';
+      if (soll[k] === an && s[k] !== an) { await c.ev(`document.querySelector(${S(sel[k])}).click(); return 1;`); await sleep(250); }
+    }
+  }
+  const s = await stand();
+  return s && s[0] === soll[0] && s[1] === soll[1] ? 'OK' : 'ART:' + JSON.stringify(s);
+}
 async function waitFor(c, sel, t = 45000) {
   const end = Date.now() + t;
   while (Date.now() < end) { if (await exists(c, sel)) return true; await sleep(300); }
@@ -382,8 +398,8 @@ async function kundenMaske(c, issue, mitFoto = true) {
   r.push(await clickText(c, 'Steel'));
   r.push(await setByLabel(c, 'ITEM DESCRIPTION (OPTIONAL)', 'Kratzer am Glas'));
   r.push(await setVal(c, 'textarea[placeholder="Describe the issue or requested repair..."]', issue));
-  r.push(await clickText(c, 'External')); await sleep(300);
-  await click(c, '[data-ss-trigger="Pick: In-house OR a workshop / goldsmith"]'); await sleep(500);
+  r.push(await art(c, 'External')); await sleep(300);
+  await click(c, '[data-ss-trigger="Pick a workshop / goldsmith"]'); await sleep(500);
   await click(c, '[data-ss-option="r5c-werkstatt"]'); await sleep(300);
   r.push(await setByLabel(c, 'WORKSHOP FEE (BHD, OPTIONAL)', '30'));
   r.push(await setByLabel(c, 'CHARGE TO CLIENT (BHD)', '90'));
@@ -453,14 +469,14 @@ async function umschaltMaske(c, productId, issue) {
   r.push(await clickText(c, 'Steel'));
   r.push(await setByLabel(c, 'ITEM DESCRIPTION (OPTIONAL)', 'veraltet'));
   r.push(await clickText(c, '0% (no VAT)'));
-  r.push(await clickText(c, 'External')); await sleep(300);
-  await click(c, '[data-ss-trigger="Pick: In-house OR a workshop / goldsmith"]'); await sleep(500);
+  r.push(await art(c, 'External')); await sleep(300);
+  await click(c, '[data-ss-trigger="Pick a workshop / goldsmith"]'); await sleep(500);
   await click(c, '[data-ss-option="r5c-werkstatt"]'); await sleep(300);
   r.push(await c.ev(`const b=[...document.querySelectorAll('button')].find(x=>x.firstElementChild&&x.firstElementChild.textContent.trim()==='Own Item'); if(!b) return 'NO-OWN'; b.click(); return 'OK';`));
   await sleep(400);
   await click(c, '[data-ss-trigger="Search by brand, name, SKU, reference, attributes..."]'); await sleep(500);
   await click(c, `[data-ss-option="${productId}"]`); await sleep(600);
-  r.push(await clickText(c, 'Internal')); await sleep(300);
+  r.push(await art(c, 'Internal')); await sleep(300);
   r.push(await setVal(c, 'textarea[placeholder="Describe the issue or requested repair..."]', issue));
   const schlecht = r.filter((x) => x !== 'OK');
   return schlecht.length ? 'FELD:' + schlecht.join(',') : 'OK';
@@ -766,9 +782,11 @@ try {
     const up = (await buchungen(client)).filter((x) => x.op === 'repairs.update');
     ok(up.length === 1, `EDIT genau EINE Buchung (${up.length})`);
     const p = up[0]?.payload || {};
+    // REPAIR-REDESIGN — mit Kostenzeilen ist Actual Cost deren Summe und an der Maske gesperrt: es reist dann NICHT mit.
+    const mitZeilen = Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'", [pc2Kunde?.id])[0]?.n || 0) > 0;
     ok(typeof p.expectedRevision === 'number' && p.customerPaidFrom === 'card' && p.customerCardBrand === 'amex' && p.internalPaidFrom === 'benefit'
-      && p.actualCost === 55 && p.chargeToCustomer === 150 && p.itemReference === '116500' && p.diagnosis === 'Glas gesprungen',
-      `EDIT Fassung, Zahlwege, Kartenart, Kosten, Referenz und Diagnose reisen mit (${Object.keys(p).join(',')})`);
+      && (mitZeilen ? !('actualCost' in p) : p.actualCost === 55) && p.chargeToCustomer === 150 && p.itemReference === '116500' && p.diagnosis === 'Glas gesprungen',
+      `EDIT Fassung, Zahlwege, Kartenart, Kosten, Referenz und Diagnose reisen mit; Actual ${mitZeilen ? 'aus den Zeilen, gesperrt' : 'von Hand'} (${Object.keys(p).join(',')})`);
     ok(!('margin' in p) && !('internalCost' in p) && !('customerPaidAmount' in p) && !('taxScheme' in p) && !S(p).includes('base64'),
       'EDIT …keine Marge, keine abgeleiteten Kosten, kein Zahlbetrag, keine Steuer, keine Bildbytes');
     ok(S(p.photos?.map((x) => Object.keys(x)[0])) === S(['keep', 'stagingId']) && typeof p.photos?.[0]?.keep === 'string' && p.photos[0].keep.length > 0,

@@ -563,8 +563,18 @@ group('§5 Keine Phantomfelder');
     { ok: boolean; body: Record<string, unknown> };
   ok(eigen.ok && !('supplierId' in eigen.body),
     '§6 eigene Arbeit reist OHNE Lieferant — der Platzhalter ist kein Lieferant');
-  ok((M.lineBody(rep, { costAmount: '0', workType: 'service' }) as { code: string }).code === 'COST_REQUIRED',
-    '§6 ohne Betrag geht nichts hinaus');
+  // REPAIR-REDESIGN — eigene Arbeit darf 0.000 kosten (leer = 0); eine Werkstattzeile nicht.
+  const null0 = M.lineBody(rep, { costAmount: '0', workType: 'polishing', supplierId: M.INHOUSE }) as
+    { ok: boolean; body: Record<string, unknown> };
+  ok(null0.ok && null0.body.costAmount === 0 && !('supplierId' in null0.body), `§6 eigene Arbeit mit 0.000 geht hinaus (${J(null0.body)})`);
+  const leer = M.lineBody(rep, { costAmount: '', workType: 'polishing' }) as { ok: boolean; body: Record<string, unknown> };
+  ok(leer.ok && leer.body.costAmount === 0, `§6 eigene Arbeit ohne Betrag = 0.000 (${J(leer.body)})`);
+  ok((M.lineBody(rep, { costAmount: '0', workType: 'service', supplierId: 'sup-1' }) as { code: string }).code === 'COST_REQUIRED',
+    '§6 eine Werkstattzeile ohne Betrag geht nicht hinaus');
+  ok((M.lineBody(rep, { costAmount: '', workType: 'service', supplierId: 'sup-1' }) as { code: string }).code === 'COST_REQUIRED',
+    '§6 eine Werkstattzeile mit leerem Betrag geht nicht hinaus');
+  ok((M.lineBody(rep, { costAmount: '-3', workType: 'service' }) as { code: string }).code === 'COST_REQUIRED',
+    '§6 ein negativer Betrag geht nicht hinaus');
   ok((M.lineBody(rep, { costAmount: '5', workType: 'erfunden' }) as { code: string }).code === 'WORK_TYPE_INVALID',
     '§6 eine erfundene Arbeitsart wird hier schon abgewiesen');
 

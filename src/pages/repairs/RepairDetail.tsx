@@ -16,7 +16,7 @@ import { MessagePreviewModal } from '@/components/ai/MessagePreviewModal';
 import { useRepairStore, computeRepairTotalCost } from '@/stores/repairStore';
 import { useGoldStore } from '@/stores/goldStore';
 import { SettleGoldModal, type SettleGoldMode } from '@/components/repairs/SettleGoldModal';
-import type { RepairWorkType, GoldPayable, CustomerGoldCredit } from '@/core/models/types';
+import type { GoldPayable, CustomerGoldCredit } from '@/core/models/types';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useSupplierStore } from '@/stores/supplierStore';
@@ -33,7 +33,7 @@ import { WriteError } from '@/components/shared/WriteError';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
 import type { Repair, RepairLine, RepairStatus, RepairTaxScheme } from '@/core/models/types';
 import {
-  REPAIR_CUSTOMER_PAID_FROM, REPAIR_INTERNAL_PAID_FROM, REPAIR_TAX_SCHEMES, REPAIR_TYPES, REPAIR_WORK_TYPES,
+  REPAIR_CUSTOMER_PAID_FROM, REPAIR_INTERNAL_PAID_FROM, REPAIR_TAX_SCHEMES,
 } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 import { AddMaterialModal } from '@/components/work-orders/AddMaterialModal';
@@ -66,6 +66,10 @@ import {
   IN_HOUSE_COST_PLACEHOLDER, repairCostLabels,
 } from '@/core/repairs/repair-line-view';
 import { hasSelectableWorkshop, NO_WORKSHOP_HINT, workshopOptions } from '@/core/repairs/repair-workshop-choice';
+import { repairCostView, repairEstimateRole, repairWorkSource } from '@/core/repairs/repair-work-source';
+import {
+  EMPTY_WORK_LINE, RepairWorkLineForm, RepairWorkSourceBadge, repairWorkSourceText, type WorkLineDraft, type WorkLineValues,
+} from '@/components/repairs/RepairWorkParts';
 import { useSharedRead } from '@/core/data/shared-read';
 import { creditPaidFor } from '@/core/data/domain-reads';
 // CENTRAL-UI-PARITY R6D — „Add Gold Usage" und „Add Material": dieselbe Hausfolge wie der Fernbefehl.
@@ -88,6 +92,8 @@ function fmt(v: number): string {
 // Flow extended um SENT_TO_WORKSHOP wenn external; sonst direkt ready.
 // v0.7.6 — Explizite In-house-Option als erster Eintrag jeder Werkstatt-Auswahl (Sentinel → beim Speichern undefined).
 const IN_HOUSE_OPTION = { id: '__INHOUSE__', label: '🏠 In-house / Own work', subtitle: IN_HOUSE_LINE_SUBTITLE, meta: '' };
+// REPAIR-REDESIGN — „keine Werkstatt eingeplant" in der Auswahl der geplanten Werkstatt.
+const KEIN_PLAN = { id: '__NONE__', label: '— None planned', subtitle: 'No workshop planned for this repair', meta: '' };
 
 // v0.7.6 — Kind-Icons fuer COSTS / MATERIALS, parallel zu OrderDetail.
 const COST_KIND_META: Record<string, { icon: string; label: string }> = {
@@ -312,9 +318,8 @@ export function RepairDetail() {
 
   // Plan repair-multi-supplier — State fuer Add-Line + Add-Gold + Settle-Modal
   const [showAddLineModal, setShowAddLineModal] = useState(false);
-  const [newLineForm, setNewLineForm] = useState<{
-    supplierId: string; workType: RepairWorkType; description: string; cost: string; dueDate: string;
-  }>({ supplierId: '', workType: 'service', description: '', cost: '', dueDate: '' });
+  // REPAIR-REDESIGN — dieselbe Arbeitszeilen-Maske wie Quick Edit (Quelle, Werkstatt, Arbeitsart, Kosten).
+  const [newLineForm, setNewLineForm] = useState<WorkLineDraft>(EMPTY_WORK_LINE);
 
   const [showAddGoldModal, setShowAddGoldModal] = useState(false);
   const [newGoldForm, setNewGoldForm] = useState<{
@@ -329,9 +334,9 @@ export function RepairDetail() {
   const werkstattFeldOptionen = useMemo(() => [
     IN_HOUSE_OPTION, ...workshopOptions(suppliers, [form.workshopSupplierId, repair?.workshopSupplierId]),
   ], [suppliers, form.workshopSupplierId, repair?.workshopSupplierId]);
-  const arbeitszeileOptionen = useMemo(() => [
-    IN_HOUSE_OPTION, ...workshopOptions(suppliers, [newLineForm.supplierId]),
-  ], [suppliers, newLineForm.supplierId]);
+  const geplantOptionen = useMemo(() => [
+    KEIN_PLAN, ...workshopOptions(suppliers, [form.plannedWorkshopSupplierId, repair?.plannedWorkshopSupplierId]),
+  ], [suppliers, form.plannedWorkshopSupplierId, repair?.plannedWorkshopSupplierId]);
   // R6D — Workshop-Gold ist eine Schuld bei einem ECHTEN Lieferanten: kein „In-house".
   const goldWerkstattOptionen = useMemo(() => workshopOptions(suppliers, [newGoldForm.supplierId]), [suppliers, newGoldForm.supplierId]);
   // v0.2.1 — Material-Modal fuer Diamond/Stone/Gold-Piece im Repair
@@ -378,39 +383,22 @@ export function RepairDetail() {
     );
   }
 
-  async function handleAddLine() {
+  async function handleAddLine(v: WorkLineValues) {
     if (!id || !repair) return;
-    const cost = parseFloat(newLineForm.cost) || 0;
-    // v0.7.6 — Sentinel '__INHOUSE__' uebersetzen zu null (in-house Arbeit).
-    // Echte supplier_id ungleich __INHOUSE__ wird durchgereicht.
-    const realSupplierId = newLineForm.supplierId === '__INHOUSE__'
-      ? undefined
-      : (newLineForm.supplierId || undefined);
-    // R4C.4 — wieder angeschlossen: beide Seiten lesen jetzt dieselbe Arbeitsart-Liste.
+    // R4C.4 — beide Seiten lesen dieselbe Arbeitsart-Liste. REPAIR-REDESIGN — die Quelle (eigene Arbeit / Werkstatt) und
+    // die Kostenregel (eigene Arbeit ab 0.000, Werkstatt über 0) kommen aus der gemeinsamen Maske (`RepairWorkLineForm`).
     const fassung = fassungOderNichts('adding a repair line');
     if (fassung === null) return;
     if (!await w.ok('repairs.add_line', {
       local: async () => {
-        await addRepairLineOnPrimary(id, {
-          supplierId: realSupplierId,
-          workType: newLineForm.workType,
-          description: newLineForm.description || undefined,
-          costAmount: cost,
-          dueDate: newLineForm.dueDate || undefined,
-        });
+        await addRepairLineOnPrimary(id, v);
         return {};
       },
-      remote: () => ({
-        repairId: id, expectedRevision: fassung, costAmount: cost,
-        ...(realSupplierId ? { supplierId: realSupplierId } : {}),
-        workType: newLineForm.workType,
-        ...(newLineForm.description ? { description: newLineForm.description } : {}),
-        ...(newLineForm.dueDate ? { dueDate: newLineForm.dueDate } : {}),
-      }),
+      remote: () => ({ repairId: id, expectedRevision: fassung, ...v }),
     })) return;
     loadRepairs(); loadRepairLines();
     setShowAddLineModal(false);
-    setNewLineForm({ supplierId: '', workType: 'service', description: '', cost: '', dueDate: '' });
+    setNewLineForm(EMPTY_WORK_LINE);
   }
 
   async function handleAddGold() {
@@ -464,6 +452,12 @@ export function RepairDetail() {
   }
 
   const nextStatus = getNextStatus(repair.status, repair.repairType, repair.repairScope);
+  // REPAIR-REDESIGN — wer arbeitet (aus den Arbeitszeilen, dem Plan, der Art beim Anlegen) und die Kosten getrennt nach
+  // Arbeit und Material — dieselbe Summe wie Marge und Rechnung (`repairCostView` = `computeRepairTotalCost`).
+  const offeneZeilen = thisRepairLines.filter(l => l.status === 'OPEN');
+  const quelle = repairWorkSource(repair, offeneZeilen);
+  const kostenSicht = repairCostView(repair, offeneZeilen);
+  const lieferantName = (sid: string): string => suppliers.find(s => s.id === sid)?.name || 'Supplier';
   // REPAIR-REOPEN — von „Returned" zurück: dieselbe Regel wie Liste, PC2, Handy und Haus.
   const reopenZiele = repair.status === 'returned' ? repairStatusTargets(repairTransitionFacts(repair, thisRepairLines)) : [];
   // Hybrid-Margin-Fix: bei Hybrid ziehen wir Internal + Workshop ab, sonst nur internalCost
@@ -600,7 +594,8 @@ export function RepairDetail() {
     if (needsWorkshopCheck && hasNoWorkshop) {
       const statusLabel = nextStatus === 'sent_to_workshop' ? '"Sent to Workshop"' : '"Ready"';
       const confirmed = await window.confirm(
-        `You're about to move this repair to ${statusLabel}, but no workshop is set yet.\n\n` +
+        `You're about to move this repair to ${statusLabel}, but there is no workshop work line yet`
+        + `${repair.plannedWorkshopSupplierId ? ` (${lieferantName(repair.plannedWorkshopSupplierId)} is only planned)` : ''}.\n\n` +
         `If you continue now, no A/P will be booked against a supplier — you'll need to add it manually later via "+ Add Work Line".\n\n` +
         `Continue anyway?`
       );
@@ -886,8 +881,12 @@ export function RepairDetail() {
             )}
             <div className="flex items-center gap-4" style={{ marginTop: 12 }}>
               <StatusDot status={repair.status} />
-              <span style={{ fontSize: 13, color: '#4B5563' }}>
-                {repair.repairType === 'external' ? 'External Repair' : repair.repairType === 'hybrid' ? 'Hybrid Repair' : 'Internal Repair'}
+              <RepairWorkSourceBadge kind={quelle.kind} size={12} />
+            </div>
+            <div style={{ fontSize: 12, color: '#4B5563', marginTop: 6 }} data-repair-work-source-text>
+              {repairWorkSourceText(quelle, lieferantName)}
+              <span style={{ color: '#6B7280' }}>
+                {quelle.basis === 'lines' ? ' · follows the work lines' : quelle.plannedWorkshopId ? ' · workshop planned, no work line yet' : ' · no work line yet'}
               </span>
             </div>
 
@@ -922,8 +921,13 @@ export function RepairDetail() {
             <div style={{ marginTop: 20, borderTop: '1px solid #E5E9EE', paddingTop: 16 }}>
               {editing ? (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                  <Input label={`${repairCostLabels(form.repairType).estimated} (BHD)`} type="number" placeholder={form.repairType !== 'external' && form.repairType !== 'hybrid' ? IN_HOUSE_COST_PLACEHOLDER : undefined} value={form.estimatedCost ?? ''} onChange={e => setForm({ ...form, estimatedCost: e.target.value ? Number(e.target.value) : undefined })} />
-                  <Input label={`${repairCostLabels(form.repairType).actual} (BHD)`} type="number" placeholder={form.repairType !== 'external' && form.repairType !== 'hybrid' ? IN_HOUSE_COST_PLACEHOLDER : undefined} value={form.actualCost ?? ''} onChange={e => setForm({ ...form, actualCost: e.target.value ? Number(e.target.value) : undefined })} />
+                  <Input label={`${repairEstimateRole(repair, kostenSicht.hasLines) === 'fee' ? repairCostLabels(form.repairType).estimated : 'ESTIMATED COST'} (BHD)`} type="number" placeholder={form.repairType !== 'external' && form.repairType !== 'hybrid' ? IN_HOUSE_COST_PLACEHOLDER : 'optional'} value={form.estimatedCost ?? ''} onChange={e => setForm({ ...form, estimatedCost: e.target.value ? Number(e.target.value) : undefined })} />
+                  {kostenSicht.hasLines ? (
+                    // REPAIR-REDESIGN — mit Kostenzeilen ist der Aufwand ihre Summe (das Haus schreibt sie bei jeder Zeile).
+                    <Input label="ACTUAL COST (BHD)" value={String(kostenSicht.linesTotal)} disabled readOnly data-repair-actual-from-lines />
+                  ) : (
+                    <Input label={`${repairCostLabels(form.repairType).actual} (BHD)`} type="number" placeholder={form.repairType !== 'external' && form.repairType !== 'hybrid' ? IN_HOUSE_COST_PLACEHOLDER : undefined} value={form.actualCost ?? ''} onChange={e => setForm({ ...form, actualCost: e.target.value ? Number(e.target.value) : undefined })} />
+                  )}
                   <Input label={`${repairCostLabels(form.repairType).own} (BHD)`} type="number" placeholder={form.repairType !== 'external' ? IN_HOUSE_COST_PLACEHOLDER : undefined} value={form.internalCost || ''} onChange={e => setForm({ ...form, internalCost: Number(e.target.value) })} />
                   <Input label="CHARGE TO CUSTOMER (BHD)" type="number" value={form.chargeToCustomer ?? ''} onChange={e => setForm({ ...form, chargeToCustomer: e.target.value ? Number(e.target.value) : undefined })} />
                   <div>
@@ -979,16 +983,37 @@ export function RepairDetail() {
                   </div>
                   {form.repairType !== 'external' && (
                     <p style={{ gridColumn: '1 / -1', fontSize: 11, color: '#6B7280', margin: 0 }}>
-                      {IN_HOUSE_COST_HINT}{form.repairType !== 'hybrid' ? ` ${IN_HOUSE_ESTIMATE_HINT}` : ''}
+                      {IN_HOUSE_COST_HINT}{form.repairType !== 'hybrid' && !kostenSicht.hasLines ? ` ${IN_HOUSE_ESTIMATE_HINT}` : ''}
                     </p>
                   )}
+                  <p style={{ gridColumn: '1 / -1', fontSize: 11, color: '#6B7280', margin: 0 }}>
+                    {kostenSicht.hasLines
+                      ? 'Actual cost is calculated from the cost lines — change a line instead. Estimated is information only.'
+                      : repairEstimateRole(repair, false) === 'fee'
+                        ? 'Older repair without cost lines: Estimated is the workshop fee and is booked at “Ready”.'
+                        : 'Estimated is information only (e.g. for the quote).'}
+                  </p>
                 </div>
               ) : (
                 <>
+                  {kostenSicht.hasLines && (
+                    <>
+                      <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
+                        <span className="text-overline">WORK COST</span>
+                        <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }} data-repair-work-cost><Bhd v={kostenSicht.work}/> BHD</span>
+                      </div>
+                      <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
+                        <span className="text-overline">MATERIAL COST</span>
+                        <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }} data-repair-material-cost><Bhd v={kostenSicht.material}/> BHD</span>
+                      </div>
+                    </>
+                  )}
                   {repair.estimatedCost != null && (
                     <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                       <span className="text-overline">
-                        {repair.repairType === 'hybrid' ? 'WORKSHOP FEE / EXTERNAL COST' : repairCostLabels(repair.repairType).estimated}
+                        {repairEstimateRole(repair, kostenSicht.hasLines) === 'fee'
+                          ? (repair.repairType === 'hybrid' ? 'WORKSHOP FEE / EXTERNAL COST' : repairCostLabels(repair.repairType).estimated)
+                          : 'ESTIMATED COST (INFO)'}
                       </span>
                       <span className="font-display" style={{ fontSize: 16, color: '#4B5563' }}><Bhd v={repair.estimatedCost}/> BHD</span>
                     </div>
@@ -1051,38 +1076,40 @@ export function RepairDetail() {
             <div style={{ marginTop: 16 }}>
               {editing ? (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: 12 }}>
-                  {/* Repair Type */}
-                  <div>
-                    <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Repair Type</span>
-                    <div className="flex flex-wrap gap-1">
-                      {REPAIR_TYPES.map(t => (
-                        <button key={t} onClick={() => setForm({ ...form, repairType: t })}
-                          className="cursor-pointer" style={{
-                            padding: '4px 10px', fontSize: 11, borderRadius: 4, border: 'none',
-                            background: form.repairType === t ? 'rgba(15,15,16,0.1)' : 'transparent',
-                            color: form.repairType === t ? '#0F0F10' : '#6B7280',
-                          }}>{t.charAt(0).toUpperCase() + t.slice(1)}</button>
-                      ))}
+                  {/* REPAIR-REDESIGN — kein Typ-Knopf mehr: In-house / External / Hybrid folgt den Arbeitszeilen. Die
+                      gespeicherte Art (Statusweg, Kostenregel) bleibt, wie sie ist; sie wird hier nicht umgestellt. */}
+                  <div data-repair-edit-work-source>
+                    <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Work source</span>
+                    <div className="flex items-center gap-2">
+                      <RepairWorkSourceBadge kind={quelle.kind} />
+                      <span style={{ fontSize: 12, color: '#4B5563' }}>{repairWorkSourceText(quelle, lieferantName)}</span>
                     </div>
+                    <p style={{ fontSize: 11, color: '#6B7280', marginTop: 4, lineHeight: 1.4 }}>
+                      Follows the work lines — add a work line (in-house or a workshop) or cancel one to change it.
+                    </p>
                   </div>
-                  {/* Plan §Repair §Workshop-as-Supplier: Picker statt Free-Text.
-                      v0.7.6 — __INHOUSE__ Sentinel uebersetzt zu undefined. */}
                   <SearchSelect
-                    label={(form.repairType === 'external' || form.repairType === 'hybrid')
-                      ? 'WORKSHOP / GOLDSMITH (SUPPLIER) *'
-                      : 'WORKSHOP / GOLDSMITH (SUPPLIER)'}
-                    placeholder="Search supplier..."
-                    options={werkstattFeldOptionen}
-                    value={form.workshopSupplierId || ''}
-                    onChange={sid => setForm({ ...form, workshopSupplierId: (sid && sid !== '__INHOUSE__') ? sid : undefined })}
+                    label="PLANNED WORKSHOP (NO WORK LINE YET)"
+                    placeholder="None planned"
+                    options={geplantOptionen}
+                    value={form.plannedWorkshopSupplierId || ''}
+                    onChange={sid => setForm({ ...form, plannedWorkshopSupplierId: (sid && sid !== KEIN_PLAN.id) ? sid : undefined })}
                   />
+                  <p style={{ fontSize: 11, color: '#6B7280', marginTop: -4, lineHeight: 1.4 }}>
+                    Only a plan — nothing is booked. It ends when that workshop’s first work line is added.
+                  </p>
+                  {/* Altbestand: eine Werkstatt, die OHNE jede Zeile an der Reparatur steht (ihre Gebühr bucht bei „ready"). */}
+                  {repair.workshopSupplierId && offeneZeilen.length === 0 && (
+                    <SearchSelect
+                      label="WORKSHOP OF THE FEE (OLDER REPAIR)"
+                      placeholder="Search supplier..."
+                      options={werkstattFeldOptionen}
+                      value={form.workshopSupplierId || ''}
+                      onChange={sid => setForm({ ...form, workshopSupplierId: (sid && sid !== '__INHOUSE__') ? sid : undefined })}
+                    />
+                  )}
                   {keineWerkstatt && (
                     <p data-repair-no-workshop-hint style={{ fontSize: 11, color: '#B45309', marginTop: -4, lineHeight: 1.4 }}>{NO_WORKSHOP_HINT}</p>
-                  )}
-                  {(form.repairType === 'external' || form.repairType === 'hybrid') && !form.workshopSupplierId && (
-                    <p style={{ fontSize: 11, color: '#6B7280', marginTop: -4, lineHeight: 1.4 }}>
-                      💡 Optional — if empty, add workshop + cost later via "+ Add Work Line".
-                    </p>
                   )}
                   <Input label="ESTIMATED READY DATE" type="date" value={form.estimatedReady || ''} onChange={e => setForm({ ...form, estimatedReady: e.target.value || undefined })} />
                   <div>
@@ -1108,25 +1135,20 @@ export function RepairDetail() {
                 </div>
               ) : (
                 <>
-                  {renderField('Repair Type', repair.repairType.charAt(0).toUpperCase() + repair.repairType.slice(1))}
-                  {/* Plan §Repair §Workshop-as-Supplier: bevorzugt Supplier-Lookup;
-                      Fallback auf Legacy-Free-Text falls noch nicht migriert. */}
-                  {(() => {
-                    const sup = repair.workshopSupplierId
-                      ? suppliers.find(s => s.id === repair.workshopSupplierId)
-                      : null;
-                    if (sup) {
-                      return renderField('Workshop / Goldsmith', (
-                        <button onClick={() => navigate(`/suppliers/${sup.id}`)}
+                  {renderField('Work Source', <RepairWorkSourceBadge kind={quelle.kind} />)}
+                  {/* REPAIR-REDESIGN — die Werkstätten aus den Arbeitszeilen, dem Plan und der Altzuordnung — nie ein
+                      Materiallieferant. Fallback auf den alten Freitext, falls nie migriert. */}
+                  {quelle.workshopIds.length > 0 ? renderField('Workshop / Goldsmith', (
+                    <span className="flex flex-col items-end">
+                      {quelle.workshopIds.map((sid) => (
+                        <button key={sid} onClick={() => navigate(`/suppliers/${sid}`)}
                           className="cursor-pointer transition-colors"
                           style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 13, padding: 0, textAlign: 'right' }}>
-                          {sup.name} →
+                          {lieferantName(sid)}{sid === quelle.plannedWorkshopId ? ' (planned)' : ''} →
                         </button>
-                      ));
-                    }
-                    if (repair.externalVendor) return renderField('External Vendor', repair.externalVendor);
-                    return null;
-                  })()}
+                      ))}
+                    </span>
+                  )) : repair.externalVendor ? renderField('External Vendor', repair.externalVendor) : null}
                   {renderField('Received', repair.receivedAt ? new Date(repair.receivedAt).toLocaleDateString() : undefined)}
                   {repair.diagnosedAt && renderField('Diagnosed', new Date(repair.diagnosedAt).toLocaleDateString())}
                   {repair.startedAt && renderField('Started', new Date(repair.startedAt).toLocaleDateString())}
@@ -1329,7 +1351,9 @@ export function RepairDetail() {
             const inHouseCost = repair.internalCost ?? 0;
             const showInHouseRow = showsInternalCostRow(repair.repairType, inHouseCost);
             const totalLineCount = explicitLines.length + (showInHouseRow ? 1 : 0);
-            const totalCost = explicitLines.reduce((s, l) => s + (l.costAmount || 0), 0) + inHouseCost;
+            // REPAIR-REDESIGN — dieselbe Summe wie Marge, Einstand und Rechnung (`computeRepairTotalCost`). Vorher stand hier
+            // Zeilen + `internal_cost` — bei „external" ist `internal_cost` der gespiegelte Voranschlag und zählte doppelt.
+            const totalCost = kostenSicht.total;
             const charge = repair.chargeToCustomer || 0;
             const margin = charge - totalCost;
             return (
@@ -1462,8 +1486,12 @@ export function RepairDetail() {
               )}
               {totalLineCount > 0 && (
                 <div className="flex items-center justify-between" style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-                  <span style={{ fontSize: 12, color: '#6B7280' }}>
-                    Total Cost&nbsp;
+                  <span style={{ fontSize: 12, color: '#6B7280' }} data-repair-cost-summary>
+                    Work&nbsp;<span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={kostenSicht.work}/></span>
+                    &nbsp;·&nbsp;Material&nbsp;<span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={kostenSicht.material}/></span>
+                    {kostenSicht.own > 0.0005 && <>&nbsp;·&nbsp;Own&nbsp;<span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={kostenSicht.own}/></span></>}
+                    {kostenSicht.fee > 0.0005 && <>&nbsp;·&nbsp;Fee&nbsp;<span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={kostenSicht.fee}/></span></>}
+                    &nbsp;·&nbsp;Total Cost&nbsp;
                     <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={totalCost}/> BHD</span>
                   </span>
                   {charge > 0 && (
@@ -1723,54 +1751,14 @@ export function RepairDetail() {
       <Modal open={showAddLineModal} onClose={() => setShowAddLineModal(false)} title="Add Work Line" width={520}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ padding: '10px 12px', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 6, fontSize: 12, color: '#4B5563', lineHeight: 1.5 }}>
-            💡 Pick <strong>🏠 In-house</strong> for internal work (no A/P booking) or a
-            <strong> supplier</strong> for external work (A/P booked at supplier). The
-            repair type (Internal / External / Hybrid) is derived automatically.
-            In-house lines: only costs not already recorded in Payroll or Expenses — not regular
-            salary, not consumables already bought as an expense.
+            Pick <strong>In-house</strong> for your own staff (no payable) or <strong>External workshop</strong> for
+            work sent out (payable to the workshop). In-house / External / Hybrid follows from the work lines.
+            Material and parts are added with “+ Add Material”.
           </div>
-          <SearchSelect
-            label="WORK SOURCE *"
-            placeholder="Pick: In-house OR a workshop"
-            options={arbeitszeileOptionen}
-            value={newLineForm.supplierId}
-            onChange={sid => setNewLineForm({ ...newLineForm, supplierId: sid })}
-          />
-          {keineWerkstatt && (
-            <p data-repair-no-workshop-hint style={{ fontSize: 11, color: '#B45309', marginTop: -6, lineHeight: 1.4 }}>{NO_WORKSHOP_HINT}</p>
-          )}
-          <div>
-            <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>WORK TYPE</span>
-            <select
-              value={newLineForm.workType}
-              onChange={e => setNewLineForm({ ...newLineForm, workType: e.target.value as RepairWorkType })}
-              style={{ width: '100%', padding: '9px 12px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 6, background: '#F2F7FA' }}>
-              {/* R4C.4 — aus derselben Liste, die auch der Fernbefehl prueft. */}
-              {REPAIR_WORK_TYPES.map(t => (
-                <option key={t} value={t}>
-                  {t.split('_').map(w => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')}
-                </option>
-              ))}
-            </select>
-          </div>
-          <Input label="DESCRIPTION" placeholder="e.g. replace mainspring"
-            value={newLineForm.description}
-            onChange={e => setNewLineForm({ ...newLineForm, description: e.target.value })} />
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
-            <Input label="COST (BHD)" type="number" step="0.001"
-              value={newLineForm.cost}
-              onChange={e => setNewLineForm({ ...newLineForm, cost: e.target.value })} />
-            <Input label="DUE DATE (optional)" type="date"
-              value={newLineForm.dueDate}
-              onChange={e => setNewLineForm({ ...newLineForm, dueDate: e.target.value })} />
-          </div>
-          <div className="flex justify-end gap-3" style={{ paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setShowAddLineModal(false)}>Cancel</Button>
-            <Button variant="primary" onClick={() => void handleAddLine()} data-add-repair-line
-              disabled={w.busy || !newLineForm.supplierId || (!parseFloat(newLineForm.cost) && !newLineForm.description.trim())}>
-              Add Line
-            </Button>
-          </div>
+          {/* R4C.4 — die Arbeitsart aus derselben Liste, die auch der Fernbefehl prüft. */}
+          <RepairWorkLineForm draft={newLineForm} onChange={setNewLineForm} onCancel={() => setShowAddLineModal(false)}
+            onSubmit={(v) => void handleAddLine(v)} suppliers={suppliers} busy={w.busy} showDueDate
+            prefix="repair-line" saveAttr="add-repair-line" />
         </div>
       </Modal>
 

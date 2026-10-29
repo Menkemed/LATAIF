@@ -22,8 +22,8 @@ import { productSearchText } from '@/core/utils/product-format';
 import { formatLotLabel } from '@/core/lots/lot-queries';
 import { useSharedRead } from '@/core/data/shared-read';
 import { productLotsFor, LEERE_LOSE } from '@/core/data/domain-reads';
-import type { Repair, RepairStatus, RepairTaxScheme } from '@/core/models/types';
-import { REPAIR_TAX_SCHEMES, REPAIR_TYPES } from '@/core/models/types';
+import type { Repair, RepairLine, RepairStatus, RepairTaxScheme, RepairWorkType } from '@/core/models/types';
+import { REPAIR_TAX_SCHEMES, REPAIR_WORK_TYPES } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 import { Bhd } from '@/components/ui/Bhd';
 // CENTRAL-UI-PARITY R5C — die Regeln der Reparatur (repair-rules) und ihr Anschluss am Primary
@@ -36,7 +36,11 @@ import { createRepairOnPrimary, invoiceRepairsOnPrimary } from '@/core/repairs/r
 import { useSharedWrites, useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
-import { quickRepairNext } from '@/core/repairs/repair-status-flow';
+import { quickRepairNext, repairStatusFlow } from '@/core/repairs/repair-status-flow';
+import {
+  matchRepairWork, repairCostView, repairCreateWorkshopSplit, repairWorkSource, repairWorkTypeLabel, type RepairSourceFilter,
+} from '@/core/repairs/repair-work-source';
+import { RepairWorkSourceBadge, repairWorkSourceText } from '@/components/repairs/RepairWorkParts';
 import { repairInvoiceDateSuggestion } from '@/core/repairs/repair-rules';
 import { usePermission } from '@/hooks/usePermission';
 import { RepairQuickEditModal } from '@/components/repairs/RepairQuickEditModal';
@@ -46,7 +50,7 @@ import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
 import { productDisplayName, brandModelHidden } from '@/core/products/display-name';
 import { repairItemDisplayName } from '@/core/products/display-name';
 import { StonesEditor } from '@/components/products/StonesEditor';
-import { IN_HOUSE_COST_LABEL, IN_HOUSE_COST_HINT, IN_HOUSE_LINE_SUBTITLE, IN_HOUSE_COST_PLACEHOLDER, IN_HOUSE_CREATE_ESTIMATE_NOTE, repairCostLabels } from '@/core/repairs/repair-line-view';
+import { IN_HOUSE_COST_LABEL, IN_HOUSE_COST_HINT, IN_HOUSE_COST_PLACEHOLDER, IN_HOUSE_CREATE_ESTIMATE_NOTE, repairCostLabels } from '@/core/repairs/repair-line-view';
 import { hasSelectableWorkshop, NO_WORKSHOP_HINT, workshopOptions } from '@/core/repairs/repair-workshop-choice';
 import { normalizeStoneAttributes, stonesApply } from '@/core/products/stones';
 
@@ -61,7 +65,17 @@ function fmtDate(iso: string | undefined): string {
   return d.toLocaleDateString('en-GB', { day: '2-digit', month: 'short', year: '2-digit' });
 }
 
-const GRID = '28px minmax(0,0.8fr) minmax(0,1fr) minmax(0,1.4fr) minmax(0,1.5fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,1fr) minmax(0,1fr) minmax(0,0.8fr)';
+// REPAIR-REDESIGN — kompakt: Nummer (mit Datum und Gutschein), Kunde/Artikel, Problem/Arbeitsart, Quelle/Werkstatt,
+// Status (mit Zahlung), Kosten/Preis, Aktionen.
+const GRID = '28px minmax(0,0.9fr) minmax(0,1.4fr) minmax(0,1.5fr) minmax(0,1.3fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr)';
+
+const SOURCE_FILTERS: { value: RepairSourceFilter; label: string }[] = [
+  { value: '', label: 'All' },
+  { value: 'inhouse', label: 'In-house' },
+  { value: 'external', label: 'External workshop' },
+  { value: 'hybrid', label: 'Hybrid' },
+  { value: 'unassigned', label: 'No workshop yet' },
+];
 
 const STATUS_FILTERS: { value: RepairStatus | ''; label: string }[] = [
   { value: '', label: 'All' },
@@ -91,7 +105,7 @@ const PAY_STYLE = {
 
 export function RepairList() {
   const navigate = useNavigate();
-  const { repairs, loadRepairs } = useRepairStore();
+  const { repairs, repairLines, loadRepairs, loadRepairLines } = useRepairStore();
   const { employees, loadEmployees } = useEmployeeStore();
   const activeEmployees = useMemo(() => employees.filter(e => e.employmentStatus !== 'inactive'), [employees]);
   const { customers, loadCustomers } = useCustomerStore();
@@ -108,6 +122,12 @@ export function RepairList() {
   const [filterCustomerId, setFilterCustomerId] = useState<string>('');
   const [filterStaffId, setFilterStaffId] = useState<string>('');
   const [sortDate, setSortDate] = useState<'desc' | 'asc'>('desc');
+  // REPAIR-REDESIGN — Arbeitsart, Quelle und Werkstatt; zusammen mit Suche und Status. Arbeitsart und Werkstatt
+  // gehören dabei zur SELBEN Beteiligung (`matchRepairWork`).
+  const [filterWorkType, setFilterWorkType] = useState<RepairWorkType | ''>('');
+  const [filterSource, setFilterSource] = useState<RepairSourceFilter>('');
+  const [filterWorkshopId, setFilterWorkshopId] = useState('');
+  const [issueFallback, setIssueFallback] = useState(true);
   const [searchQuery, setSearchQuery] = useState('');
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -135,7 +155,20 @@ export function RepairList() {
   // R5C — dieselbe Liste, zwei Anschluesse hinter jeder Handlung (anlegen, abrechnen, weiterschalten).
   const w = useSharedWrites();
 
-  useEffect(() => { loadRepairs(); loadCustomers(); loadCategories(); loadProducts(); loadInvoices(); loadSuppliers(); loadEmployees(); loadOrders(); }, [loadRepairs, loadCustomers, loadCategories, loadProducts, loadInvoices, loadSuppliers, loadEmployees, loadOrders]);
+  useEffect(() => { loadRepairs(); loadRepairLines(); loadCustomers(); loadCategories(); loadProducts(); loadInvoices(); loadSuppliers(); loadEmployees(); loadOrders(); }, [loadRepairs, loadRepairLines, loadCustomers, loadCategories, loadProducts, loadInvoices, loadSuppliers, loadEmployees, loadOrders]);
+
+  // REPAIR-REDESIGN — die offenen Zeilen je Reparatur (dieselben, die Detailseite und Quick Edit lesen).
+  const offeneZeilen = useMemo(() => {
+    const m = new Map<string, RepairLine[]>();
+    for (const l of repairLines) {
+      if (l.status !== 'OPEN') continue;
+      const a = m.get(l.repairId);
+      if (a) a.push(l); else m.set(l.repairId, [l]);
+    }
+    return m;
+  }, [repairLines]);
+  const zeilenVon = (id: string): RepairLine[] => offeneZeilen.get(id) ?? [];
+  const lieferantName = (id: string): string => suppliers.find((s) => s.id === id)?.name || 'Supplier';
 
   const productReservations = useMemo(() => getAllProductReservations(), [orders, getAllProductReservations]);
 
@@ -150,12 +183,9 @@ export function RepairList() {
     [],
   );
 
-  // v0.7.6 — In-house Sentinel als erste Option (consistent mit RepairDetail).
-  // REPAIR-WORKSHOP-FILTER — danach NUR aktive, als Werkstatt markierte Lieferanten; ein schon gewählter bleibt sichtbar.
-  const supplierOptions = useMemo(() => [
-    { id: '__INHOUSE__', label: '🏠 In-house / Own work', subtitle: IN_HOUSE_LINE_SUBTITLE, meta: '' },
-    ...workshopOptions(suppliers, [form.workshopSupplierId]),
-  ], [suppliers, form.workshopSupplierId]);
+  // REPAIR-REDESIGN — die Werkstatt der Anlage: NUR aktive, als Werkstatt markierte Lieferanten (ein schon gewählter
+  // bleibt sichtbar). Eigene Arbeit ist kein Eintrag dieser Auswahl mehr, sondern das eigene Häkchen „In-house".
+  const supplierOptions = useMemo(() => workshopOptions(suppliers, [form.workshopSupplierId]), [suppliers, form.workshopSupplierId]);
   const keineWerkstatt = !hasSelectableWorkshop(suppliers);
 
   const [showQuickSupplier, setShowQuickSupplier] = useState(false);
@@ -315,7 +345,9 @@ export function RepairList() {
     navigate(`/invoices/${r.value.invoiceId}`);
   }
 
-  const filtered = useMemo(() => {
+  const arbeitsFilter = { workType: filterWorkType, source: filterSource, workshopId: filterWorkshopId, issueFallback };
+  const arbeitsFilterAktiv = !!(filterWorkType || filterSource || filterWorkshopId);
+  const { filtered, ausIssue } = useMemo(() => {
     let r = repairs;
     if (searchQuery) {
       r = r.filter(rep => {
@@ -326,13 +358,36 @@ export function RepairList() {
     if (filterStatus) r = r.filter(rep => rep.status === filterStatus);
     if (filterCustomerId) r = r.filter(rep => rep.customerId === filterCustomerId);
     if (filterStaffId) r = r.filter(rep => rep.staffId === filterStaffId);
+    const viaIssue = new Set<string>();
+    if (filterWorkType || filterSource || filterWorkshopId) {
+      r = r.filter((rep) => {
+        const m = matchRepairWork(rep, offeneZeilen.get(rep.id) ?? [],
+          { workType: filterWorkType, source: filterSource, workshopId: filterWorkshopId, issueFallback });
+        if (m.viaIssue) viaIssue.add(rep.id);
+        return m.match;
+      });
+    }
     const sorted = [...r].sort((a, b) => {
       const ad = a.receivedAt || a.createdAt || '';
       const bd = b.receivedAt || b.createdAt || '';
       return sortDate === 'desc' ? bd.localeCompare(ad) : ad.localeCompare(bd);
     });
-    return sorted;
-  }, [repairs, searchQuery, filterStatus, filterCustomerId, filterStaffId, sortDate, customers]);
+    return { filtered: sorted, ausIssue: viaIssue };
+  }, [repairs, searchQuery, filterStatus, filterCustomerId, filterStaffId, sortDate, customers,
+    filterWorkType, filterSource, filterWorkshopId, issueFallback, offeneZeilen]);
+
+  // Wie viele Reparaturen jede Wahl träfe — mit den übrigen Arbeitsfiltern, ohne Suche und Status (die zählen extra).
+  const anzahl = (f: Partial<typeof arbeitsFilter>): number =>
+    repairs.filter((rep) => matchRepairWork(rep, zeilenVon(rep.id), { ...arbeitsFilter, ...f }).match).length;
+  // Die Werkstätten der Auswahl: alle, die an einer Reparatur arbeiten oder eingeplant sind, dazu die markierten.
+  const werkstattAuswahl = useMemo(() => {
+    const ids = new Set<string>();
+    for (const rep of repairs) for (const sid of repairWorkSource(rep, offeneZeilen.get(rep.id) ?? []).workshopIds) ids.add(sid);
+    for (const o of workshopOptions(suppliers, [])) ids.add(o.id);
+    return [...ids].map((id) => ({ id, name: suppliers.find((s) => s.id === id)?.name || 'Supplier' }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+  }, [repairs, offeneZeilen, suppliers]);
+  const arbeitsFilterZuruecksetzen = () => { setFilterWorkType(''); setFilterSource(''); setFilterWorkshopId(''); setIssueFallback(true); };
 
   function openNew() {
     setForm({ repairScope: 'CUSTOMER', repairType: 'internal', taxScheme: 'VAT_10', itemAttributes: {} });
@@ -388,9 +443,12 @@ export function RepairList() {
         return;
       }
     }
+    // REPAIR-REDESIGN — eine gewählte Werkstatt OHNE Gebühr ist eingeplant (`plannedWorkshopSupplierId`): keine
+    // Arbeitszeile, keine Zuordnung als Altgebühr, keine Buchung. Mit Gebühr wie bisher: die Werkstattzeile entsteht.
+    const anlage = repairCreateWorkshopSplit(form);
     const r = await w.save('repairs.create', {
-      local: () => createRepairOnPrimary(form),
-      remote: () => repairCreateBody(form, fotos),
+      local: () => createRepairOnPrimary(anlage),
+      remote: () => repairCreateBody(anlage, fotos),
     });
     if (r.kind !== 'ok') return;
     loadRepairs();
@@ -552,15 +610,70 @@ export function RepairList() {
         </div>
       </div>
 
+      {/* REPAIR-REDESIGN — Arbeitsart, Quelle und Werkstatt. Arbeitsart und Werkstatt müssen an DERSELBEN Beteiligung
+          zusammenkommen; „Hybrid" ist die ganze Reparatur. Ältere Reparaturen ohne Arbeitszeile auf Wunsch über ihr Issue. */}
+      <div style={{ marginBottom: 14, padding: '12px 14px', border: '1px solid #E5E9EE', borderRadius: 12, background: '#FFFFFF', display: 'flex', flexDirection: 'column', gap: 10 }} data-repair-work-filters>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-overline" style={{ width: 96 }}>WORK TYPE</span>
+          {(['', ...REPAIR_WORK_TYPES] as Array<RepairWorkType | ''>).map((t) => {
+            const on = filterWorkType === t;
+            return (
+              <button key={t || 'all'} type="button" onClick={() => setFilterWorkType(t)} aria-pressed={on} data-repair-filter-worktype={t || 'all'}
+                className="cursor-pointer" style={{
+                  padding: '5px 11px', fontSize: 11, borderRadius: 999, fontWeight: on ? 600 : 500,
+                  border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`, color: on ? '#FFFFFF' : '#0F0F10', background: on ? '#0F0F10' : '#FFFFFF',
+                }}>
+                {t ? repairWorkTypeLabel(t) : 'All work types'}
+                <span style={{ marginLeft: 6, color: on ? '#E5E9EE' : '#4B5563' }}>{anzahl({ workType: t })}</span>
+              </button>
+            );
+          })}
+        </div>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-overline" style={{ width: 96 }}>WORK SOURCE</span>
+          {SOURCE_FILTERS.map((sf) => {
+            const on = filterSource === sf.value;
+            return (
+              <button key={sf.value || 'all'} type="button" onClick={() => setFilterSource(sf.value)} aria-pressed={on} data-repair-filter-source={sf.value || 'all'}
+                className="cursor-pointer" style={{
+                  padding: '5px 11px', fontSize: 11, borderRadius: 999, fontWeight: on ? 600 : 500,
+                  border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`, color: on ? '#FFFFFF' : '#0F0F10', background: on ? '#0F0F10' : '#FFFFFF',
+                }}>
+                {sf.label}
+                <span style={{ marginLeft: 6, color: on ? '#E5E9EE' : '#4B5563' }}>{anzahl({ source: sf.value })}</span>
+              </button>
+            );
+          })}
+          <span style={{ width: 1, height: 20, background: '#E5E9EE', margin: '0 4px' }} />
+          <label className="flex items-center gap-2" style={{ fontSize: 11, color: '#4B5563' }}>
+            WORKSHOP
+            <select value={filterWorkshopId} onChange={(e) => setFilterWorkshopId(e.target.value)} data-repair-filter-workshop
+              style={{ padding: '6px 8px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 6, background: '#FFFFFF', color: '#0F0F10' }}>
+              <option value="">All workshops</option>
+              {werkstattAuswahl.map((o) => <option key={o.id} value={o.id}>{o.name}</option>)}
+            </select>
+          </label>
+        </div>
+        <div className="flex flex-wrap items-center justify-between gap-2" style={{ borderTop: '1px solid #EEF1F4', paddingTop: 8 }}>
+          <label className="flex items-center gap-2 cursor-pointer" style={{ fontSize: 11, color: '#4B5563' }}>
+            <input type="checkbox" checked={issueFallback} onChange={(e) => setIssueFallback(e.target.checked)} data-repair-filter-issue
+              style={{ width: 14, height: 14, accentColor: '#715DE3' }} />
+            Also find older repairs without work lines by their Issue text (e.g. “Polish”)
+          </label>
+          {arbeitsFilterAktiv && (
+            <button type="button" onClick={arbeitsFilterZuruecksetzen} className="cursor-pointer"
+              style={{ fontSize: 11, color: '#5B3DCC', background: 'none', border: 'none', padding: '4px 8px' }}>Reset work filters</button>
+          )}
+        </div>
+      </div>
+
       {/* Table header */}
       <div style={{ display: 'grid', gridTemplateColumns: GRID, gap: 12, padding: '0 12px 10px', alignItems: 'end' }}>
         <span />
-        <span className="text-overline">DATE</span>
-        <span className="text-overline">REPAIR #</span>
-        <span className="text-overline">CLIENT</span>
-        <span className="text-overline">ITEM</span>
-        <span className="text-overline">VOUCHER</span>
-        <span className="text-overline">PAYMENT</span>
+        <span className="text-overline">REPAIR</span>
+        <span className="text-overline">CLIENT / ITEM</span>
+        <span className="text-overline">ISSUE / WORK TYPE</span>
+        <span className="text-overline">SOURCE / WORKSHOP</span>
         <span className="text-overline">STATUS</span>
         <span className="text-overline" style={{ textAlign: 'right' }}>COST / CHARGE</span>
         <span className="text-overline" style={{ textAlign: 'right' }}>ACTION</span>
@@ -572,7 +685,7 @@ export function RepairList() {
         <div style={{ padding: '64px 0', textAlign: 'center' }}>
           <Wrench size={40} strokeWidth={1} style={{ color: '#6B7280', margin: '0 auto 16px' }} />
           <p style={{ fontSize: 14, color: '#6B7280' }}>
-            {searchQuery || filterStatus ? 'No repairs match your filters.' : 'No repairs yet. Create your first repair ticket.'}
+            {searchQuery || filterStatus || arbeitsFilterAktiv ? 'No repairs match your filters.' : 'No repairs yet. Create your first repair ticket.'}
           </p>
         </div>
       )}
@@ -591,6 +704,12 @@ export function RepairList() {
         const statusStyle = REPAIR_STATUS_STYLE[rep.status] ?? { label: rep.status, fg: '#6B7280', bg: 'rgba(107,114,128,0.10)' };
         const payStyle = getPaymentStyle(rep);
         const dateStr = fmtDate(rep.receivedAt || rep.createdAt);
+        const zeilen = zeilenVon(rep.id);
+        const quelle = repairWorkSource(rep, zeilen);
+        const kosten = repairCostView(rep, zeilen);
+        const arten = quelle.entries.map((e) => e.workType).filter((t, i, a): t is RepairWorkType => !!t && a.indexOf(t) === i);
+        const materialLieferanten = zeilen.filter((l) => l.materialKind && l.supplierId).map((l) => l.supplierId as string)
+          .filter((x, i, a) => a.indexOf(x) === i && !quelle.workshopIds.includes(x));
 
         return (
           <div
@@ -619,18 +738,17 @@ export function RepairList() {
               ) : null}
             </span>
 
-            {/* Date */}
-            <span style={{ fontSize: 12, color: '#6B7280' }}>{dateStr}</span>
-
-            {/* Repair # */}
-            <div>
+            {/* Repair #, Datum, Gutschein */}
+            <div style={{ minWidth: 0 }}>
               <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{rep.repairNumber}</span>
-              <div style={{ fontSize: 11, color: '#9CA3AF', marginTop: 2 }}>
-                {rep.repairType === 'internal' ? 'Internal' : rep.repairType === 'external' ? 'External' : 'Hybrid'}
-              </div>
+              <div style={{ fontSize: 11, color: '#4B5563', marginTop: 2 }}>{dateStr}</div>
+              <span className="font-mono" title="Voucher code" style={{
+                display: 'inline-block', marginTop: 3, fontSize: 10, color: '#0F0F10', fontWeight: 600, letterSpacing: '0.06em',
+                padding: '1px 6px', borderRadius: 5, background: 'rgba(15,15,16,0.06)', border: '1px solid rgba(15,15,16,0.12)',
+              }}>{rep.voucherCode}</span>
             </div>
 
-            {/* Client */}
+            {/* Client / Item */}
             <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
               <div className="flex items-center justify-center rounded-full shrink-0"
                 style={{ width: 28, height: 28, background: rep.repairScope === 'OWN' ? '#FFF3CD' : '#E5E9EE', border: '1px solid #D5D9DE', fontSize: 10, color: '#4B5563', fontWeight: 500 }}>
@@ -639,60 +757,75 @@ export function RepairList() {
                   return c ? (`${(c.firstName || '').charAt(0)}${(c.lastName || '').charAt(0)}`.toUpperCase() || '?') : '??';
                 })()}
               </div>
-              <span style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {rep.repairScope === 'OWN' ? 'Own Stock' : getCustomerName(rep.customerId)}
-              </span>
-            </div>
-
-            {/* Item */}
-            <div style={{ minWidth: 0 }}>
-              <div style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                {itemLabel || rep.itemDescription || '—'}
+              <div style={{ minWidth: 0 }}>
+                <div style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {rep.repairScope === 'OWN' ? 'Own Stock' : getCustomerName(rep.customerId)}
+                </div>
+                <div style={{ fontSize: 12, color: '#4B5563', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {itemLabel || rep.itemDescription || '—'}
+                  {rep.itemReference && <span className="font-mono" style={{ fontSize: 11, marginLeft: 6 }}>{rep.itemReference}</span>}
+                </div>
               </div>
-              {rep.itemReference && (
-                <span className="font-mono" style={{ fontSize: 11, color: '#9CA3AF' }}>{rep.itemReference}</span>
+            </div>
+
+            {/* Issue / Work type */}
+            <div style={{ minWidth: 0 }} data-repair-row-work={rep.repairNumber}>
+              <div style={{ fontSize: 12, color: '#4B5563', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                Issue: {rep.issueDescription || '—'}
+              </div>
+              <div className="flex flex-wrap gap-1" style={{ marginTop: 4 }}>
+                {arten.map((t) => (
+                  <span key={t} style={{ fontSize: 10, fontWeight: 500, color: '#0F0F10', background: '#F2F7FA', border: '1px solid #D5D9DE', borderRadius: 999, padding: '2px 8px' }}>
+                    {repairWorkTypeLabel(t)}
+                  </span>
+                ))}
+                {!quelle.hasWorkLines && (
+                  <span style={{ fontSize: 10, color: '#4B5563', border: '1px dashed #9CA3AF', borderRadius: 999, padding: '2px 8px' }}>No work line</span>
+                )}
+                {ausIssue.has(rep.id) && (
+                  <span data-repair-found-via-issue style={{ fontSize: 10, fontWeight: 500, color: '#92400E', background: '#FEF3C7', borderRadius: 999, padding: '2px 8px' }}>Found via Issue</span>
+                )}
+              </div>
+            </div>
+
+            {/* Source / Workshop */}
+            <div style={{ minWidth: 0 }}>
+              <RepairWorkSourceBadge kind={quelle.kind} />
+              <div style={{ fontSize: 12, color: '#0F0F10', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                {repairWorkSourceText(quelle, lieferantName)}
+              </div>
+              {materialLieferanten.length > 0 && (
+                <div style={{ fontSize: 10, color: '#4B5563', marginTop: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  Material: {materialLieferanten.map(lieferantName).join(', ')} (not a workshop)
+                </div>
               )}
             </div>
 
-            {/* Voucher */}
-            <div>
-              <span className="font-mono" style={{
-                fontSize: 12, color: '#0F0F10', fontWeight: 600, letterSpacing: '0.06em',
-                padding: '3px 8px', borderRadius: 6,
-                background: 'rgba(15,15,16,0.06)', border: '1px solid rgba(15,15,16,0.12)',
-              }}>{rep.voucherCode}</span>
-            </div>
-
-            {/* Payment Status */}
-            <div>
-              {payStyle ? (
-                <span style={{
-                  display: 'inline-block', padding: '3px 10px', borderRadius: 999,
-                  fontSize: 11, fontWeight: 500,
-                  color: payStyle.fg, background: payStyle.bg,
-                }}>{payStyle.label}</span>
-              ) : (
-                <span style={{ fontSize: 11, color: '#9CA3AF' }}>—</span>
-              )}
-            </div>
-
-            {/* Repair Status */}
-            <div>
+            {/* Status + Zahlung */}
+            <div className="flex flex-col items-start gap-1">
               <span style={{
                 display: 'inline-block', padding: '3px 10px', borderRadius: 999,
                 fontSize: 11, fontWeight: 500,
                 color: statusStyle.fg, background: statusStyle.bg,
               }}>{statusStyle.label}</span>
+              {payStyle ? (
+                <span style={{ fontSize: 10, fontWeight: 500, color: payStyle.fg }}>{payStyle.label}</span>
+              ) : (
+                <span style={{ fontSize: 10, color: '#9CA3AF' }}>—</span>
+              )}
             </div>
 
             {/* Cost / Charge */}
             <div style={{ textAlign: 'right' }}>
+              <div className="font-mono" style={{ fontSize: 12, color: '#4B5563' }} title="Total actual cost (work + material + own costs)">
+                cost <Bhd v={kosten.total}/>
+              </div>
               {rep.chargeToCustomer != null ? (
                 <>
                   <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={rep.chargeToCustomer}/></span>
                   <span style={{ fontSize: 10, color: '#9CA3AF', marginLeft: 3 }}>BHD</span>
                   {rep.margin != null && (
-                    <div className="font-mono" style={{ fontSize: 11, color: rep.margin >= 0 ? '#7EAA6E' : '#AA6E6E', marginTop: 2 }}>
+                    <div className="font-mono" style={{ fontSize: 11, color: rep.margin >= 0 ? '#3F6F2F' : '#B91C1C', marginTop: 2 }}>
                       {rep.margin >= 0 ? '+' : ''}<Bhd v={rep.margin}/>
                     </div>
                   )}
@@ -1074,55 +1207,86 @@ export function RepairList() {
             />
           </div>
 
-          <div>
-            <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>REPAIR TYPE</span>
-            <div className="flex gap-2" style={{ marginTop: 8 }}>
-              {REPAIR_TYPES.map(type => (
-                <button key={type} onClick={() => setForm({ ...form, repairType: type })}
-                  className="cursor-pointer rounded transition-all duration-200"
-                  style={{
-                    padding: '7px 14px', fontSize: 12,
-                    border: `1px solid ${form.repairType === type ? '#0F0F10' : '#D5D9DE'}`,
-                    color: form.repairType === type ? '#0F0F10' : '#6B7280',
-                    background: form.repairType === type ? 'rgba(15,15,16,0.06)' : 'transparent',
-                  }}>
-                  {type.charAt(0).toUpperCase() + type.slice(1)}
-                </button>
-              ))}
-            </div>
-            <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
-              {form.repairType === 'internal' && 'Handled fully in-house — no external costs.'}
-              {form.repairType === 'external' && 'Handled fully externally — Estimated Cost = workshop invoice. Booked as expense at status "Ready".'}
-              {form.repairType === 'hybrid' && 'Part in-house, part external — the external share (Estimated Cost) is booked as expense.'}
-            </p>
-          </div>
-
-          {(form.repairType === 'external' || form.repairType === 'hybrid') && (
-            <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
-              <span className="text-overline" style={{ marginBottom: 12 }}>EXTERNAL REPAIR · WORKSHOP / GOLDSMITH</span>
-              <div style={{ marginTop: 12 }}>
-                <SearchSelect
-                  label="WORK SOURCE"
-                  placeholder="Pick: In-house OR a workshop / goldsmith"
-                  options={supplierOptions}
-                  value={form.workshopSupplierId || ''}
-                  onChange={sid => setForm({ ...form, workshopSupplierId: (sid && sid !== '__INHOUSE__') ? sid : undefined })}
-                />
-                {keineWerkstatt && (
-                  <p data-repair-no-workshop-hint style={{ fontSize: 11, color: '#B45309', marginTop: 6, lineHeight: 1.5 }}>{NO_WORKSHOP_HINT}</p>
-                )}
-                <button onClick={() => { setQuickSupplierWorkshop(true); setShowQuickSupplier(true); }} data-repair-quick-supplier-open
-                  className="cursor-pointer transition-colors"
-                  style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, marginTop: 6, padding: 0 }}
-                >+ New Supplier</button>
-                <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8, lineHeight: 1.5 }}>
-                  💡 Workshop not decided yet? Leave empty — you can enter the workshop +
-                  real cost on the detail page via "+ Add Work Line" once the workshop
-                  gets back to you. Multiple workshops per repair are supported.
-                </p>
+          {/* REPAIR-REDESIGN — „Wer arbeitet?" statt Reparaturtyp UND Arbeitsquelle: eigene Arbeit, eine Werkstatt oder
+              beides. Daraus ergibt sich In-house / External / Hybrid (gespeichert wie bisher als Art der Reparatur). */}
+          {(() => {
+            const innen = form.repairType === 'internal' || form.repairType === 'hybrid' || !form.repairType;
+            const aussen = form.repairType === 'external' || form.repairType === 'hybrid';
+            const setze = (i: boolean, a: boolean) => {
+              if (!i && !a) return;   // eine Seite bleibt immer — sonst arbeitet niemand
+              setForm({ ...form, repairType: i && a ? 'hybrid' : a ? 'external' : 'internal',
+                ...(a ? {} : { workshopSupplierId: undefined }) });
+            };
+            const anzeige = repairWorkSource({ repairType: form.repairType,
+              plannedWorkshopSupplierId: aussen ? form.workshopSupplierId : undefined }, []);
+            const karte = (an: boolean): React.CSSProperties => ({
+              border: `1px solid ${an ? '#715DE3' : '#E5E9EE'}`, background: an ? 'rgba(113,93,227,0.04)' : '#FFFFFF',
+              borderRadius: 10, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10,
+            });
+            return (
+              <div data-repair-create-work>
+                <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
+                  <span className="text-overline" style={{ display: 'block' }}>WHO DOES THE WORK?</span>
+                  <span className="flex items-center gap-2" style={{ fontSize: 11, color: '#4B5563' }}>
+                    This repair is <RepairWorkSourceBadge kind={anzeige.kind} />
+                  </span>
+                </div>
+                <p style={{ fontSize: 11, color: '#4B5563', margin: '0 0 8px' }}>Tick what applies — both is fine. Work lines can be added or changed later.</p>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <div style={karte(innen)}>
+                    <label className="flex gap-3 cursor-pointer" style={{ alignItems: 'flex-start' }}>
+                      <input type="checkbox" checked={innen} onChange={() => setze(!innen, aussen)} data-repair-create-inhouse
+                        style={{ width: 16, height: 16, marginTop: 2, accentColor: '#715DE3' }} />
+                      <span>
+                        <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>In-house — own staff</span>
+                        <span style={{ display: 'block', fontSize: 11, color: '#4B5563' }}>Polishing, cleaning, small work. No payable.</span>
+                      </span>
+                    </label>
+                  </div>
+                  <div style={karte(aussen)}>
+                    <label className="flex gap-3 cursor-pointer" style={{ alignItems: 'flex-start' }}>
+                      <input type="checkbox" checked={aussen} onChange={() => setze(innen, !aussen)} data-repair-create-external
+                        style={{ width: 16, height: 16, marginTop: 2, accentColor: '#715DE3' }} />
+                      <span>
+                        <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>External workshop</span>
+                        <span style={{ display: 'block', fontSize: 11, color: '#4B5563' }}>Sent out to a workshop or goldsmith. Its fee becomes the payable to that workshop.</span>
+                      </span>
+                    </label>
+                    {aussen && (
+                      <div style={{ paddingLeft: 28 }}>
+                        <SearchSelect
+                          label="WORKSHOP"
+                          placeholder="Pick a workshop / goldsmith"
+                          options={supplierOptions}
+                          value={form.workshopSupplierId || ''}
+                          onChange={sid => setForm({ ...form, workshopSupplierId: sid || undefined })}
+                        />
+                        {keineWerkstatt && (
+                          <p data-repair-no-workshop-hint style={{ fontSize: 11, color: '#B45309', marginTop: 6, lineHeight: 1.5 }}>{NO_WORKSHOP_HINT}</p>
+                        )}
+                        <button onClick={() => { setQuickSupplierWorkshop(true); setShowQuickSupplier(true); }} data-repair-quick-supplier-open
+                          className="cursor-pointer transition-colors"
+                          style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, marginTop: 6, padding: 0 }}
+                        >+ New Supplier</button>
+                        <p style={{ fontSize: 11, color: '#4B5563', marginTop: 6, lineHeight: 1.5 }}>
+                          With a workshop fee below, its work line is created now. Without a fee the workshop is only planned —
+                          nothing is booked until you add its work line with the real cost. Not decided yet? Leave it empty.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                <div className="flex flex-wrap items-center gap-1" style={{ marginTop: 8, fontSize: 11, color: '#4B5563' }}>
+                  <span style={{ marginRight: 4 }}>Status steps:</span>
+                  {repairStatusFlow(form.repairType, form.repairScope).map((st) => (
+                    <span key={st} style={{ fontSize: 10, color: '#0F0F10', background: '#FFFFFF', border: `1px solid ${st === 'sent_to_workshop' ? '#93C5FD' : '#D5D9DE'}`, borderRadius: 999, padding: '2px 8px' }}>
+                      {repairWorkTypeLabel(st)}
+                    </span>
+                  ))}
+                </div>
               </div>
-            </div>
-          )}
+            );
+          })()}
 
           <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <span className="text-overline" style={{ marginBottom: 12 }}>COSTS</span>

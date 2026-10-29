@@ -449,8 +449,8 @@ try {
     ok(await warteAuf(() => Number(rep('bq-rep-1').charge_to_customer) === 75), `QUICK PC2: Preis 50 → 75 gespeichert (${await fehlerAnzeige(client)})`);
     await warteBis(client, "!document.querySelector('[data-quick-save-amounts]') || document.querySelector('[data-quick-save-amounts]').disabled", 15000);
     await click(client, '[data-quick-add-work]'); await sleep(300);
-    await click(client, '[data-ss-trigger="Pick: In-house OR a workshop"]'); await sleep(400);
-    await click(client, '[data-ss-option="__INHOUSE__"]'); await sleep(200);
+    // REPAIR-REDESIGN — die Quelle ist ein Schalter (In-house | External workshop); In-house ist vorbelegt.
+    await click(client, '[data-quick-work-source-inhouse]'); await sleep(200);
     await setVal(client, '[data-quick-work-description]', 'Politur'); await setVal(client, '[data-quick-work-cost]', '5'); await sleep(200);
     await click(client, '[data-quick-work-save]');
     ok(await warteAuf(() => offeneZeilen('bq-rep-1').length === 1 && Number(offeneZeilen('bq-rep-1')[0].cost_amount) === 5),

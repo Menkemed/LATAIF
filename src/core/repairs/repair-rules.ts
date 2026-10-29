@@ -143,6 +143,8 @@ export interface RepairCreateInput {
   issueDescription: string;
   repairType: RepairKind;
   workshopSupplierId?: string;
+  /** REPAIR-REDESIGN — Werkstatt eingeplant, ohne Gebühr und ohne Arbeitszeile: bucht nichts. */
+  plannedWorkshopSupplierId?: string;
   estimatedCost?: number;
   internalCost?: number;
   chargeToCustomer?: number;
@@ -193,6 +195,7 @@ export function normalizeRepairCreate(form: Partial<Repair>): RepairCreateInput 
     issueDescription: repairText(form.issueDescription) ?? '',
     repairType,
     workshopSupplierId: repairType === 'internal' ? undefined : repairText(form.workshopSupplierId),
+    plannedWorkshopSupplierId: repairType === 'internal' ? undefined : repairText(form.plannedWorkshopSupplierId),
     estimatedCost: money(form.estimatedCost, 'estimatedCost') || undefined,
     internalCost: money(form.internalCost, 'internalCost') || undefined,
     chargeToCustomer: own ? undefined : (money(form.chargeToCustomer, 'chargeToCustomer') || undefined),
@@ -268,6 +271,9 @@ export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort
   if (input.workshopSupplierId && !port.supplierExists(input.workshopSupplierId)) {
     throw new RepairActionRejected('SUPPLIER_NOT_FOUND', 'no such workshop supplier in this branch');
   }
+  if (input.plannedWorkshopSupplierId && !port.supplierExists(input.plannedWorkshopSupplierId)) {
+    throw new RepairActionRejected('SUPPLIER_NOT_FOUND', 'no such workshop supplier in this branch');
+  }
   if (input.staffId && !port.employeeExists(input.staffId)) {
     throw new RepairActionRejected('EMPLOYEE_NOT_FOUND', 'no such active employee in this branch');
   }
@@ -279,6 +285,7 @@ export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort
     repairType: input.repairType,
     taxScheme: input.taxScheme,
     workshopSupplierId: input.workshopSupplierId,
+    plannedWorkshopSupplierId: input.plannedWorkshopSupplierId,
     estimatedCost: input.estimatedCost,
     // CENTRAL-C3F FINAL — die eigenen Kosten bei der Aufnahme, aus der geteilten Ableitung.
     // POST-PARITY PP-13 — bei „hybrid" trägt die Werkstattzeile den Voranschlag (`createRepair`); ihn
@@ -302,7 +309,7 @@ export function repairCreateBody(form: Partial<Repair>, stagingIds: readonly str
   if (i.repairScope === 'CUSTOMER') body.taxScheme = i.taxScheme;
   for (const k of [
     'customerId', 'productId', 'lotId', 'itemCategoryId', 'itemBrand', 'itemModel', 'itemReference',
-    'itemSerial', 'itemDescription', 'workshopSupplierId', 'estimatedCost', 'internalCost',
+    'itemSerial', 'itemDescription', 'workshopSupplierId', 'plannedWorkshopSupplierId', 'estimatedCost', 'internalCost',
     'chargeToCustomer', 'estimatedReady', 'receivedAt', 'staffId', 'notes',
   ] as const) {
     if (i[k] !== undefined) body[k] = i[k];
@@ -322,7 +329,7 @@ export function repairCreateBody(form: Partial<Repair>, stagingIds: readonly str
 export const REPAIR_EDIT_INPUTS = [
   'diagnosis', 'estimatedCost', 'actualCost', 'internalCost', 'chargeToCustomer',
   'customerPaidFrom', 'customerCardBrand', 'internalPaidFrom',
-  'repairType', 'workshopSupplierId', 'estimatedReady', 'notes',
+  'repairType', 'workshopSupplierId', 'plannedWorkshopSupplierId', 'estimatedReady', 'notes',
   'itemCategoryId', 'itemAttributes', 'itemBrand', 'itemModel', 'itemReference', 'itemSerial',
   'itemDescription', 'issueDescription', 'images',
 ] as const;
@@ -358,6 +365,7 @@ export function repairEditInputs(e: Partial<Repair>): Record<RepairEditInput, un
     internalPaidFrom: internalPaid,
     repairType: repairKind(e.repairType),
     workshopSupplierId: t(e.workshopSupplierId),
+    plannedWorkshopSupplierId: t(e.plannedWorkshopSupplierId),
     estimatedReady: t(e.estimatedReady),
     notes: t(e.notes),
     itemCategoryId: t(e.itemCategoryId),
@@ -402,6 +410,8 @@ export function buildRepairEditPatch(e: Partial<Repair>, openLineTotal = 0): Par
     margin: repairMargin(cost) ?? undefined,
     repairType: cost.repairType,
     workshopSupplierId: u(i.workshopSupplierId),
+    // REPAIR-REDESIGN — leer heißt „kein Plan" (NULL), nicht „unverändert": die Maske schickt den Stand mit.
+    plannedWorkshopSupplierId: (i.plannedWorkshopSupplierId as string | null) as string | undefined,
     estimatedReady: u(i.estimatedReady),
     notes: u(i.notes),
     itemCategoryId: u(i.itemCategoryId),
@@ -424,6 +434,10 @@ export function assertRepairEditRefs(
 ): void {
   if (patch.workshopSupplierId && patch.workshopSupplierId !== seen.workshopSupplierId
     && !port.supplierExists(patch.workshopSupplierId)) {
+    throw new RepairActionRejected('SUPPLIER_NOT_FOUND', 'no such workshop supplier in this branch');
+  }
+  if (patch.plannedWorkshopSupplierId && patch.plannedWorkshopSupplierId !== seen.plannedWorkshopSupplierId
+    && !port.supplierExists(patch.plannedWorkshopSupplierId)) {
     throw new RepairActionRejected('SUPPLIER_NOT_FOUND', 'no such workshop supplier in this branch');
   }
   if (patch.itemCategoryId && patch.itemCategoryId !== seen.itemCategoryId

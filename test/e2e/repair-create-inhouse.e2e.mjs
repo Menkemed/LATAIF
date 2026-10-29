@@ -62,7 +62,8 @@ function seed() {
     if (cat) WATCH = String(cat.name);
     else insert(db, 'categories', { id: 'cat-watch', branch_id, name: 'Watch', icon: 'Watch', color: '#000', attributes: '[]', scope_options: '[]', condition_options: '[]', active: 1, sort_order: 0, created_at: now, updated_at: now });
     insert(db, 'customers', { id: 'rc-kunde', branch_id, first_name: 'Rana', last_name: 'Create', country: 'BH', language: 'en', vip_level: 'NONE', preferences: '[]', customer_type: 'PRIVATE', sales_stage: 'active', created_at: now, updated_at: now });
-    insert(db, 'suppliers', { id: 'rc-werkstatt', branch_id, name: 'RC Werkstatt', active: 1, created_at: now, updated_at: now });
+    // Seit v0.8.92 (REPAIR-WORKSHOP-FILTER) bietet die Maske nur als Werkstatt markierte Lieferanten an.
+    insert(db, 'suppliers', { id: 'rc-werkstatt', branch_id, name: 'RC Werkstatt', active: 1, is_workshop: 1, created_at: now, updated_at: now });
   } finally { db.close(); }
 }
 
@@ -104,6 +105,22 @@ const setByLabel = (c, label, v) => c.ev(
   + `e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
 const clickText = (c, t) => c.ev(`const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===${S(t)}); if(!b) return 'NO:'+${S(t)}; if (b.disabled) return 'DISABLED'; b.click(); return 'OK';`);
 const klick = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO:'+${S(sel)}; if (e.disabled) return 'DISABLED'; e.click(); return 'OK';`);
+/** REPAIR-REDESIGN — „Wer arbeitet?": Internal = nur In-house, External = nur Werkstatt, Hybrid = beides. Erst ankreuzen, dann abwählen. */
+async function art(c, t) {
+  const soll = { Internal: [true, false], External: [false, true], Hybrid: [true, true] }[t];
+  if (!soll) return 'NO-TYPE:' + t;
+  const sel = ['[data-repair-create-inhouse]', '[data-repair-create-external]'];
+  const stand = () => c.ev(`const i=document.querySelector(${S(sel[0])}), e=document.querySelector(${S(sel[1])}); return i && e ? [i.checked, e.checked] : null;`);
+  for (const an of [true, false]) {
+    for (const k of [0, 1]) {
+      const s = await stand();
+      if (!s) return 'NO-WORK-CHOICE';
+      if (soll[k] === an && s[k] !== an) { await c.ev(`document.querySelector(${S(sel[k])}).click(); return 1;`); await sleep(250); }
+    }
+  }
+  const s = await stand();
+  return s && s[0] === soll[0] && s[1] === soll[1] ? 'OK' : 'ART:' + JSON.stringify(s);
+}
 async function waitFor(c, sel, t = 45000) {
   const end = Date.now() + t;
   while (Date.now() < end) { if (await exists(c, sel)) return true; await sleep(300); }
@@ -135,7 +152,7 @@ async function ausfuellen(c, { kunde = true, issue = 'Service', typ = 'Internal'
   r.push(await setByLabel(c, 'BRAND', 'Rolex'));
   r.push(await setByLabel(c, 'NAME / MODEL', 'Datejust'));
   if (issue) r.push(await setVal(c, 'textarea[placeholder="Describe the issue or requested repair..."]', issue));
-  if (typ !== 'Internal') { r.push(await clickText(c, typ)); await sleep(300); }
+  if (typ !== 'Internal') { r.push(await art(c, typ)); await sleep(300); }
   return alleOk(r);
 }
 /** „Create Repair" klicken und festhalten, was danach zu sehen ist. */
@@ -240,8 +257,11 @@ try {
 
   // ── 3 External ──
   ok(await neueMaske(app) === 'OK' && await ausfuellen(app, { issue: 'External neu', typ: 'External' }) === 'OK', 'EXTERNAL Maske ausgefüllt');
-  ok(await ssPick(app, 'Pick: In-house OR a workshop / goldsmith', 'rc-werkstatt') === 'OK'
-    && await setByLabel(app, 'WORKSHOP FEE (BHD, OPTIONAL)', '30') === 'OK' && await setByLabel(app, 'CHARGE TO CLIENT (BHD)', '90') === 'OK', 'EXTERNAL Werkstatt, Gebühr 30, Kunde 90');
+  {
+    const r = [await ssPick(app, 'Pick a workshop / goldsmith', 'rc-werkstatt'),
+      await setByLabel(app, 'WORKSHOP FEE (BHD, OPTIONAL)', '30'), await setByLabel(app, 'CHARGE TO CLIENT (BHD)', '90')];
+    ok(alleOk(r) === 'OK', `EXTERNAL Werkstatt, Gebühr 30, Kunde 90 (${alleOk(r)})`);
+  }
   a = await anlegen(app);
   const ext = dbQ("SELECT id FROM repairs WHERE issue_description = 'External neu'");
   ok(a.zu && a.nachher === a.vorher + 1 && ext.length === 1 && a.pfad === `/repairs/${ext[0]?.id}`, `EXTERNAL genau eine Reparatur, Detailseite offen (${a.vorher}→${a.nachher}, ${a.pfad}; ${a.hinweis})`);
@@ -249,8 +269,10 @@ try {
 
   // ── 4 Hybrid ──
   ok(await neueMaske(app) === 'OK' && await ausfuellen(app, { issue: 'Hybrid neu', typ: 'Hybrid' }) === 'OK', 'HYBRID Maske ausgefüllt');
-  ok(await ssPick(app, 'Pick: In-house OR a workshop / goldsmith', 'rc-werkstatt') === 'OK'
-    && await setByLabel(app, 'WORKSHOP FEE (BHD)', '20') === 'OK', 'HYBRID Werkstatt, Gebühr 20, eigene Zusatzkosten leer');
+  {
+    const r = [await ssPick(app, 'Pick a workshop / goldsmith', 'rc-werkstatt'), await setByLabel(app, 'WORKSHOP FEE (BHD)', '20')];
+    ok(alleOk(r) === 'OK', `HYBRID Werkstatt, Gebühr 20, eigene Zusatzkosten leer (${alleOk(r)})`);
+  }
   a = await anlegen(app);
   const hyb = dbQ("SELECT id FROM repairs WHERE issue_description = 'Hybrid neu'");
   ok(a.zu && a.nachher === a.vorher + 1 && hyb.length === 1 && a.pfad === `/repairs/${hyb[0]?.id}`, `HYBRID genau eine Reparatur, Detailseite offen (${a.vorher}→${a.nachher}, ${a.pfad}; ${a.hinweis})`);

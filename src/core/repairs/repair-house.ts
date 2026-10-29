@@ -26,6 +26,7 @@ import {
   type RepairHousePort, type RepairInvoiceOptions,
 } from './repair-rules';
 import { repairStatusTargets, repairTransitionFacts } from './repair-status-flow';
+import { REPAIR_LINE_COST_MESSAGE, repairLineCostIssue } from './repair-work-source';
 
 /** Die Nachschlagestellen des Hauses — immer in der Filiale, deren Bücher dieser Rechner führt. */
 export function houseRepairPort(branchId: string): RepairHousePort {
@@ -216,9 +217,10 @@ export function updateRepairLineOnPrimary(
     const line = rs.getRepairLines(repairId).find((l) => l.id === lineId);
     if (!line) throw new RepairActionRejected('LINE_NOT_FOUND', 'no such cost line on this repair');
     if (line.status !== 'OPEN') throw new RepairActionRejected('LINE_NOT_OPEN', `this cost line is "${line.status}"`);
-    if (patch.costAmount !== undefined && !(Number.isFinite(patch.costAmount) && patch.costAmount > 0)) {
-      // Dieselbe Grenze wie der Fernbefehl (`positive`): eine Zeile ohne Betrag wird storniert, nicht auf 0 gesetzt.
-      throw new RepairActionRejected('LINE_COST_INVALID', 'the cost must be a positive number');
+    if (patch.costAmount !== undefined) {
+      // REPAIR-REDESIGN — dieselbe Regel wie der Fernbefehl: eigene Arbeit ab 0, eine Werkstattzeile über 0.
+      const issue = repairLineCostIssue(patch.supplierId !== undefined ? patch.supplierId : line.supplierId, patch.costAmount);
+      if (issue) throw new RepairActionRejected(issue, REPAIR_LINE_COST_MESSAGE[issue]);
     }
     mitBuchungswache('repairs.update_line', () => rs.updateRepairLine(lineId, patch));
   });
@@ -226,6 +228,9 @@ export function updateRepairLineOnPrimary(
 
 /** „+ Add Line" am Primary — derselbe Hausweg wie `repairs.add_line`. */
 export function addRepairLineOnPrimary(repairId: string, data: Partial<RepairLine>): Promise<void> {
+  // REPAIR-REDESIGN — dieselbe Regel wie der Fernbefehl (vorher nahm der Primary auch eine Werkstattzeile über 0.000).
+  const issue = repairLineCostIssue(data.supplierId, data.costAmount ?? 0);
+  if (issue) return Promise.reject(new RepairActionRejected(issue, REPAIR_LINE_COST_MESSAGE[issue]));
   return amPrimary(() => {
     const rs = useRepairStore.getState();
     rs.loadRepairs();

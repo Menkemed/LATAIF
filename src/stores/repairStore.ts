@@ -581,6 +581,7 @@ function rowToRepair(row: Record<string, unknown>): Repair {
     repairType: (row.repair_type as Repair['repairType']) || 'internal',
     externalVendor: row.external_vendor as string | undefined,
     workshopSupplierId: (row.workshop_supplier_id as string) || undefined,
+    plannedWorkshopSupplierId: (row.planned_workshop_supplier_id as string | null) || undefined,
     estimatedCost: row.estimated_cost as number | undefined,
     actualCost: row.actual_cost as number | undefined,
     internalCost: (row.internal_cost as number) || 0,
@@ -678,11 +679,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       `INSERT INTO repairs (id, branch_id, repair_number, customer_id, product_id, lot_id,
         item_category_id, item_attributes, tax_scheme,
         item_brand, item_model, item_reference, item_serial, item_description,
-        issue_description, diagnosis, repair_type, external_vendor, workshop_supplier_id,
+        issue_description, diagnosis, repair_type, external_vendor, workshop_supplier_id, planned_workshop_supplier_id,
         estimated_cost, internal_cost, charge_to_customer,
         status, received_at, estimated_ready, voucher_code,
         notes, images, repair_scope, staff_id, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, repairNumber, effectiveCustomerId, data.productId || null, data.lotId || null,
        // STONES — die Steinliste normalisiert, Diamond Weight abgeleitet (wie beim Artikel).
        data.itemCategoryId || null, JSON.stringify(stonesOrThrow(data.itemCategoryId, (data.itemAttributes || {}) as Record<string, unknown>)), data.taxScheme || 'VAT_10',
@@ -690,6 +691,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
        data.itemSerial || null, data.itemDescription || null,
        data.issueDescription || '', data.diagnosis || null,
        data.repairType || 'internal', data.externalVendor || null, data.workshopSupplierId || null,
+       data.plannedWorkshopSupplierId || null,
        data.estimatedCost || null, data.internalCost || 0, effectiveCharge,
        // BUSINESS-DATE — der gewählte Tag der Annahme (nachträglich erfasst); ohne Angabe jetzt.
        businessTimestamp(isBusinessDate(data.receivedAt) ? data.receivedAt : undefined, now), data.estimatedReady || null, voucherCode,
@@ -787,6 +789,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       issueDescription: 'issue_description', diagnosis: 'diagnosis',
       repairType: 'repair_type', externalVendor: 'external_vendor',
       workshopSupplierId: 'workshop_supplier_id',
+      plannedWorkshopSupplierId: 'planned_workshop_supplier_id',
       estimatedCost: 'estimated_cost', actualCost: 'actual_cost',
       internalCost: 'internal_cost', chargeToCustomer: 'charge_to_customer',
       customerPaidFrom: 'customer_paid_from', internalPaidFrom: 'internal_paid_from',
@@ -1319,6 +1322,15 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       repairId, supplierId: data.supplierId, costAmount: data.costAmount, workType: data.workType,
       materialKind: data.materialKind,
     });
+    // REPAIR-REDESIGN — die eingeplante Werkstatt ist mit ihrer ersten Arbeitszeile erfüllt: der Plan endet hier
+    // (sonst bliebe sie nach dem Stornieren der Zeile als „geplant" stehen). Material ist keine Werkstattarbeit.
+    if (data.supplierId && !data.materialKind) {
+      const plan = query('SELECT planned_workshop_supplier_id AS p FROM repairs WHERE id = ?', [repairId])[0]?.p;
+      if (plan && plan === data.supplierId) {
+        db.run('UPDATE repairs SET planned_workshop_supplier_id = NULL, updated_at = ? WHERE id = ?', [now, repairId]);
+        trackUpdate('repairs', repairId, { plannedWorkshopSupplierId: null, plannedFulfilledByLine: id });
+      }
+    }
     saveDatabase();
     get().loadRepairLines();
     get().recomputeRepairAggregates(repairId);

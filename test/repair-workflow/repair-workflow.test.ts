@@ -662,10 +662,12 @@ for (const weg of ['lokal', 'fern'] as const) {
   const vorL = all(db, 'SELECT * FROM repair_lines WHERE id = ?', [line.id]) + buchungen(db);
   const wechsel = weg === 'lokal' ? await nein(house.updateRepairLineOnPrimary(a, line.id, { supplierId: 'sup-2' }, rev(db, a)))
     : code(await life.runUpdateRepairLine(deps(db), identity(nx(), 'repairs.update_line'), { repairId: a, lineId: line.id, expectedRevision: rev(db, a), supplierId: 'sup-2' }));
-  const null0 = weg === 'lokal' ? await nein(house.updateRepairLineOnPrimary(a, line.id, { costAmount: 0 }, rev(db, a))) : 'LINE_COST_INVALID';
+  const null0 = weg === 'lokal' ? await nein(house.updateRepairLineOnPrimary(a, line.id, { costAmount: 0 }, rev(db, a)))
+    : code(await life.runUpdateRepairLine(deps(db), identity(nx(), 'repairs.update_line'), { repairId: a, lineId: line.id, expectedRevision: rev(db, a), costAmount: 0 }));
   const alt = weg === 'lokal' ? await nein(house.updateRepairLineOnPrimary(a, line.id, { costAmount: 40 }, rev(db, a) - 1)) : 'RECORD_CHANGED';
   reload();
-  ok(wechsel === 'REPAIR_LINE_SOURCE_LOCKED' && null0 === 'LINE_COST_INVALID' && alt === 'RECORD_CHANGED'
+  // REPAIR-REDESIGN — eine Werkstattzeile auf 0: LINE_COST_REQUIRED (sie ist die Verbindlichkeit); eigene Arbeit darf 0.
+  ok(wechsel === 'REPAIR_LINE_SOURCE_LOCKED' && null0 === 'LINE_COST_REQUIRED' && alt === 'RECORD_CHANGED'
     && all(db, 'SELECT * FROM repair_lines WHERE id = ?', [line.id]) + buchungen(db) === vorL,
     `QUICK (${weg}) Werkstatt einer gebuchten Zeile wechseln / Betrag 0 / alte Fassung: Nein, nichts geändert (${wechsel}/${null0}/${alt})`);
   // Summen: Zeilen + eigene Kosten = Gesamtkosten (dieselbe Ableitung wie Detailseite und Rechnung).
@@ -702,7 +704,8 @@ for (const weg of ['lokal', 'fern'] as const) {
     'WIRE Liste: Rechnungstag vorgeschlagen (Abholtag), bei verschiedenen Tagen Pflicht');
   ok(/updateRepairLineOnPrimary\(rep\.id, line\.id, patch as never, f\)/.test(quick) && /'repairs\.update_line'/.test(quick)
     && /addRepairLineOnPrimary\(rep\.id/.test(quick) && /addRepairMaterialOnPrimary\(req\)/.test(quick) && /updateRepairOnPrimary\(rep\.id, form, f\)/.test(quick)
-    && /repairStatusTargets\(repairTransitionFacts\(rep, lines\)\)/.test(quick) && /workshopOptions\(suppliers/.test(quick),
+    && /repairStatusTargets\(repairTransitionFacts\(rep, lines\)\)/.test(quick) && /<RepairWorkLineForm[\s\S]{0,300}?suppliers=\{suppliers\}/.test(quick)
+    && /workshopOptions\(suppliers/.test(src('src/components/repairs/RepairWorkParts.tsx')),
     'WIRE Quick Edit: dieselben Hausfunktionen/Fernbefehle wie die Detailseite; Status aus der geteilten Regel; Werkstatt nur markierte');
   ok(/setStatusFrage\('picked_up'\)/.test(detail) && /data-repair-reopen/.test(detail) && /invoiceDate: rechnungsDatum/.test(detail),
     'WIRE Detailseite: Abholtag, Reopen, Rechnungstag');

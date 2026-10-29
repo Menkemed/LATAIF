@@ -188,7 +188,9 @@ const REPAIR_COMPARE = [
   // ruft dieselben.
   const rules = codeOf('src/core/repairs/repair-rules.ts');
   const service = codeOf('src/core/bridge/service-commands.ts');
-  ok(/createRepairOnPrimary\(form\)/.test(list) && /internalCost: internalCostOnCreate\(input\),/.test(rules),
+  // REPAIR-REDESIGN — die Maske teilt vorher nur die Werkstatt auf (geplant ohne Gebühr), dann dieselbe Vorbereitung.
+  ok(/const anlage = repairCreateWorkshopSplit\(form\);/.test(list) && /createRepairOnPrimary\(anlage\)/.test(list)
+    && /internalCost: internalCostOnCreate\(input\),/.test(rules),
     'CALLPATH die Aufnahme leitet die eigenen Kosten mit der GETEILTEN Primitive ab');
   ok(/updateRepairOnPrimary\(id, form, fassung\)/.test(detail) && /internalCost: internalCostOnEdit\(cost, openLineTotal\)/.test(rules)
     && /repairMargin\(cost\)/.test(rules),

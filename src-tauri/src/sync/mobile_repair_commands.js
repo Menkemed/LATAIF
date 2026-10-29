@@ -283,15 +283,20 @@
 
   /** Eine Arbeitszeile (Werkstatt oder eigene Arbeit). */
   function lineBody(repair, form) {
-    const kosten = moneyOrNull(form.costAmount);
-    if (kosten === null || kosten <= 0) return { ok: false, code: 'COST_REQUIRED' };
+    // Eigene Arbeit hat keinen Lieferanten — der Platzhalter reist NICHT mit.
+    const lief = textOrNull(form.supplierId);
+    const werkstatt = lief !== null && lief !== INHOUSE;
+    // REPAIR-REDESIGN — dieselbe Regel wie am Rechner (`repairLineCostIssue`): eigene Arbeit darf 0.000 kosten
+    // (leer = 0, fest angestelltes Personal), eine Werkstattzeile braucht ihren Betrag über 0 — sie wird die
+    // Verbindlichkeit an die Werkstatt.
+    const roh = moneyOrNull(form.costAmount);
+    const kosten = roh === null && !werkstatt && String(form.costAmount == null ? '' : form.costAmount).trim() === '' ? 0 : roh;
+    if (kosten === null || (werkstatt && kosten <= 0)) return { ok: false, code: 'COST_REQUIRED' };
     const art = textOrNull(form.workType);
     if (art !== null && WORK_TYPES.indexOf(art) < 0) return { ok: false, code: 'WORK_TYPE_INVALID' };
     const body = { repairId: repair.id, expectedRevision: repair.revision, costAmount: kosten };
     if (art !== null) body.workType = art;
-    // Eigene Arbeit hat keinen Lieferanten — der Platzhalter reist NICHT mit.
-    const lief = textOrNull(form.supplierId);
-    if (lief !== null && lief !== INHOUSE) body.supplierId = lief;
+    if (werkstatt) body.supplierId = lief;
     const text = textOrNull(form.description);
     if (text !== null) body.description = text;
     return { ok: true, body: body };

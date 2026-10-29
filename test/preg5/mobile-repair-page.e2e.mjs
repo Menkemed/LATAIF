@@ -431,10 +431,15 @@ try {
       && linie[0].body.payload.supplierId === 'sup-1',
     `§4 „Add work line" sendet repairs.add_line mit Betrag, Art, Lieferant und Fassung (${S(linie[0] && linie[0].body.payload)})`);
 
-    const ohneBetrag = await knopf('rpLineAddBtn', "document.getElementById('rpLineCost').value='';");
+    // REPAIR-REDESIGN — eine WERKSTATTZEILE ohne Betrag geht nicht hinaus; eigene Arbeit ohne Betrag ist 0.000.
+    const ohneBetrag = await knopf('rpLineAddBtn', "document.getElementById('rpLineCost').value=''; document.getElementById('rpLineSupplier').value='sup-1';");
     const meldung = await c.ev("return document.getElementById('rpWorkMsg').textContent;");
-    ok(ohneBetrag.length === 0 && /cost greater than zero/.test(meldung),
-      `§4 ohne Betrag geht NICHTS hinaus, die Maske sagt es (${S(meldung)})`);
+    ok(ohneBetrag.length === 0 && /workshop line needs a cost above zero/.test(meldung),
+      `§4 Werkstattzeile ohne Betrag: NICHTS geht hinaus, die Maske sagt es (${S(meldung)})`);
+    const eigen0 = await knopf('rpLineAddBtn', "document.getElementById('rpLineCost').value=''; document.getElementById('rpLineType').value='polishing'; document.getElementById('rpLineSupplier').value='__INHOUSE__';");
+    ok(eigen0.length === 1 && eigen0[0].body.op === 'repairs.add_line' && eigen0[0].body.payload.costAmount === 0
+      && !('supplierId' in eigen0[0].body.payload),
+      `§4 eigene Arbeit ohne Betrag geht als 0.000 hinaus, ohne Lieferant (${S(eigen0[0] && eigen0[0].body.payload)})`);
 
     const material = await knopf('rpMatAddBtn', "document.getElementById('rpMatKind').value='gold'; document.getElementById('rpMatText').value='21K Draht'; document.getElementById('rpMatSupplier').value='sup-1'; document.getElementById('rpMatCost').value='30'; document.getElementById('rpMatWeight').value='3.5'; document.getElementById('rpMatKarat').value='21K';");
     ok(material.length === 1 && material[0].body.op === 'repairs.add_material'

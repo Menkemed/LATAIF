@@ -328,8 +328,10 @@
     if (!items.length) { box.appendChild(el('div', { class: 'hint' }, 'No repairs found.')); return; }
     items.forEach((it) => {
       const card = el('div', { class: 'card' });
-      const b = el('button', { type: 'button', class: 'secondary' },
-        it.repairNumber + ' · ' + (it.itemBrand || '') + ' ' + (it.itemModel || '') + ' · ' + it.status);
+      // REPAIR-REDESIGN — wer arbeitet (In-house / External workshop / Hybrid), fertig vom Primary (`repairs.list`).
+      const wer = it.work && it.work.label ? ' · ' + it.work.label : '';
+      const b = el('button', { type: 'button', class: 'secondary', 'data-rp-work-source': (it.work && it.work.kind) || '' },
+        it.repairNumber + ' · ' + (it.itemBrand || '') + ' ' + (it.itemModel || '') + ' · ' + it.status + wer);
       b.onclick = () => rpOpen(it.id);
       card.appendChild(b);
       box.appendChild(card);
@@ -378,7 +380,8 @@
       }
     }
     $('rpHeadline').textContent = rep.repairNumber || 'Repair';
-    $('rpSubline').textContent = (rep.itemBrand || '') + ' ' + (rep.itemModel || '');
+    $('rpSubline').textContent = (rep.itemBrand || '') + ' ' + (rep.itemModel || '')
+      + (rep.work && rep.work.label ? ' · ' + rep.work.label : '');
     $('rpCustomerCard').classList.add('hidden');
     $('rpDiagnosisRow').classList.remove('hidden');
     $('rpSaveBtn').textContent = 'Save Changes';
@@ -402,27 +405,43 @@
     $('rpLinesTotal').textContent = 'open ' + (rep.openLineTotal || 0);
     const box = $('rpLines');
     box.innerHTML = '';
-    lines.forEach((l) => {
-      const zeile = el('div', { class: 'row' });
-      // Quelle, Art, Erfasstes, Text, Betrag, Stand — die Beschriftung baut MobileRepair, damit am
-      // Telefon und am Rechner dieselbe Schreibweise steht.
-      zeile.appendChild(el('div', { class: 'hint' }, MobileRepair.lineText(l)));
-      // Zuruecknehmen nur, wo der PRIMARY es erlaubt: `editable` heisst offen und ohne gebuchte
-      // Zahlung. Das entscheidet er, nicht eine Nachbildung hier.
-      if (l.editable) {
-        const b = el('button', { type: 'button', class: 'secondary', 'data-line-cancel': l.id }, 'Cancel line');
-        let sicher = false;
-        b.onclick = async () => {
-          if (!sicher) { sicher = true; b.textContent = 'Really cancel?'; return; }
-          b.disabled = true;
-          await rpWerkstatt('repairs.cancel_line', 'line-cancel:' + l.id,
-            () => MobileRepair.cancelLineBody(RP.repair, l.id, null), 'The line was taken back.');
-          b.disabled = false;
-        };
-        zeile.appendChild(b);
-      }
-      box.appendChild(zeile);
+    // REPAIR-REDESIGN — Arbeit und Material getrennt, je mit Summe (die Summen rechnet der Primary: `work`).
+    const arbeit = lines.filter((l) => !l.materialKind);
+    const material = lines.filter((l) => !!l.materialKind);
+    const w = rep.work || {};
+    const gruppen = [
+      { titel: 'Work / Labour', summe: w.workCost, zeilen: arbeit, key: 'work' },
+      { titel: 'Materials / Parts', summe: w.materialCost, zeilen: material, key: 'material' },
+    ];
+    gruppen.forEach((g) => {
+      if (!g.zeilen.length) return;
+      box.appendChild(el('div', { class: 'hint', 'data-rp-line-group': g.key },
+        g.titel + (g.summe !== undefined ? ' — ' + g.summe : '')));
+      g.zeilen.forEach(rpZeile);
     });
+  }
+
+  function rpZeile(l) {
+    const box = $('rpLines');
+    const zeile = el('div', { class: 'row' });
+    // Quelle, Art, Erfasstes, Text, Betrag, Stand — die Beschriftung baut MobileRepair, damit am
+    // Telefon und am Rechner dieselbe Schreibweise steht.
+    zeile.appendChild(el('div', { class: 'hint' }, MobileRepair.lineText(l)));
+    // Zuruecknehmen nur, wo der PRIMARY es erlaubt: `editable` heisst offen und ohne gebuchte
+    // Zahlung. Das entscheidet er, nicht eine Nachbildung hier.
+    if (l.editable) {
+      const b = el('button', { type: 'button', class: 'secondary', 'data-line-cancel': l.id }, 'Cancel line');
+      let sicher = false;
+      b.onclick = async () => {
+        if (!sicher) { sicher = true; b.textContent = 'Really cancel?'; return; }
+        b.disabled = true;
+        await rpWerkstatt('repairs.cancel_line', 'line-cancel:' + l.id,
+          () => MobileRepair.cancelLineBody(RP.repair, l.id, null), 'The line was taken back.');
+        b.disabled = false;
+      };
+      zeile.appendChild(b);
+    }
+    box.appendChild(zeile);
   }
 
   /**
@@ -451,7 +470,7 @@
   // Vier vorhandene Fernbefehle, ein Muster: Rumpf bauen (fehlt etwas, sagt es die Maske), unter
   // der Kennung DIESES Vorhabens senden, danach den Stand neu lesen. Gebucht wird am Primary.
   const RP_GRUND = {
-    COST_REQUIRED: 'Please enter a cost greater than zero.',
+    COST_REQUIRED: 'Please enter the cost — a workshop line needs a cost above zero (own work may be 0).',
     WORK_TYPE_INVALID: 'Please choose a work type.',
     MATERIAL_KIND_REQUIRED: 'Please choose a material kind.',
     CARAT_REQUIRED: 'Please enter the carat per piece (diamond and stone are priced by carat).',

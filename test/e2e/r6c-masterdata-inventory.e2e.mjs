@@ -321,6 +321,13 @@ try {
 
   primary = await attach(APP_CDP, APP, appEnv());
   await waitInvoke(primary);
+  // Wie in den übrigen Zwei-App-Läufen (r5c-billable): nach dem Säen kann die gespeicherte Sitzung fremd sein — dann anmelden.
+  await waitFor(primary, SHELL + ', input[type="password"]', 90000);
+  if (!(await exists(primary, SHELL))) {
+    await setVal(primary, 'input[type="email"]', OWNER_EMAIL);
+    await setVal(primary, 'input[type="password"]', ONBOARD_PW);
+    await primary.ev("document.querySelector('button[type=submit]')?.click(); return 1;");
+  }
   await waitFor(primary, SHELL, 90000);
   await primary.ev(DIALOGE_PRIMARY);
   await primary.ev('return await window.__TAURI_INTERNALS__.invoke("sync_server_start", {}).catch((e)=>String(e));').catch(() => null);
@@ -415,8 +422,9 @@ try {
     const werkstatt = async (c, name) => {
       if (!(await warteBis(c, "[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='New Repair')", 45000))) return 'KEIN-KNOPF';
       await clickText(c, 'New Repair');
-      if (!(await warteBis(c, "document.body.innerText.includes('REPAIR TYPE')", 15000))) return 'KEINE-MASKE';
-      const r = [await clickText(c, 'External')];
+      // REPAIR-REDESIGN — „Wer arbeitet?" statt Typ-Knöpfen: die Werkstatt ankreuzen.
+      if (!(await warteBis(c, "document.body.innerText.includes('WHO DOES THE WORK?')", 15000))) return 'KEINE-MASKE';
+      const r = [await c.ev("const e=document.querySelector('[data-repair-create-external]'); if(!e) return 'NO-EXTERNAL'; if(!e.checked) e.click(); return 'OK';")];
       if (!(await warteBis(c, "[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='+ New Supplier')", 15000))) return 'KEIN-SCHNELLKNOPF';
       r.push(await clickText(c, '+ New Supplier'));
       if (!(await warteBis(c, "document.querySelector('[data-repair-quick-supplier-save]')", 15000))) return 'KEINE-SCHNELLMASKE';
@@ -431,7 +439,8 @@ try {
     { const m = await werkstatt(client, ' R6C Werkstatt C '); ok(m === 'OK', `QUICK-REPAIR die Schnellmaske der Werkstatt am zweiten Rechner (${m})`); }
     ok(await warteAuf(() => !!lieferant('R6C Werkstatt C')), `QUICK-REPAIR der Lieferant steht am Primary (Hinweis: ${String(await fehlerAnzeige(client)).slice(0, 160) || 'keiner'})`);
     const c = (await buchungen(client)).slice(vorher);
-    ok(c.length === 1 && c[0].op === 'suppliers.create' && S(c[0].payload) === S({ name: 'R6C Werkstatt C' }), `QUICK-REPAIR dieselbe Buchung, genau einmal (${c.map((x) => x.op + S(x.payload)).join(',')})`);
+    // Seit v0.8.92 (REPAIR-WORKSHOP-FILTER) legt „+ New Supplier" in der Werkstattauswahl eine Werkstatt an (Is Workshop vorbelegt).
+    ok(c.length === 1 && c[0].op === 'suppliers.create' && S(c[0].payload) === S({ name: 'R6C Werkstatt C', isWorkshop: true }), `QUICK-REPAIR dieselbe Buchung, genau einmal (${c.map((x) => x.op + S(x.payload)).join(',')})`);
     ok(await warteBis(client, "!document.querySelector('[data-repair-quick-supplier-save]') && document.body.innerText.includes('R6C Werkstatt C')", 15000),
       'QUICK-REPAIR sofort gewählt — ohne Neuladen');
     await gehZu(primary, '/repairs', 'New Repair');

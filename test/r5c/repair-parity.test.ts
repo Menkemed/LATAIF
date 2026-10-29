@@ -1009,8 +1009,12 @@ for (const weg of ['fern', 'lokal'] as const) {
   ok(/const isEligibleForBulk = \(r: Repair\) => canInvoiceRepair\(r\);/.test(list)
     && /const showInvoiceShortcut = canInvoiceRepair\(rep\);/.test(list) && /canInvoiceRepair\(repair\)/.test(detail),
     'DOMAIN Auswahl, Kuerzel und Detailknopf: EINE Regel „abrechenbar"');
-  ok(/REPAIR_TYPES\.map\(/.test(list) && /REPAIR_TYPES\.map\(/.test(detail) && /REPAIR_TAX_SCHEMES\.map\(/.test(list)
-    && /REPAIR_TAX_SCHEMES\.map\(/.test(detail) && /REPAIR_WORK_TYPES\.map\(/.test(detail),
+  // REPAIR-REDESIGN — die Art wird nicht mehr gewählt: „Wer arbeitet?" (In-house / Werkstatt / beides) ergibt sie,
+  // die Detailseite zeigt sie aus den Arbeitszeilen. Steuer und Arbeitsart kommen weiter aus den Listen des Hauses.
+  const teile = codeOf(src('src/components/repairs/RepairWorkParts.tsx'));
+  ok(/repairType: i && a \? 'hybrid' : a \? 'external' : 'internal'/.test(list) && !/REPAIR_TYPES\.map\(/.test(detail)
+    && /REPAIR_TAX_SCHEMES\.map\(/.test(list) && /REPAIR_TAX_SCHEMES\.map\(/.test(detail)
+    && /REPAIR_WORK_TYPES\.map\(/.test(teile) && /<RepairWorkLineForm/.test(detail),
     'DOMAIN Reparaturart, Steuer und Arbeitsart kommen aus den Listen des Hauses');
   ok(/maxImages=\{REPAIR_MAX_PHOTOS\}/.test(list) && /maxImages=\{REPAIR_MAX_PHOTOS\}/.test(detail),
     'DOMAIN die Fotogrenze ist dieselbe Zahl, die der Fernbefehl prueft');
@@ -1034,7 +1038,7 @@ for (const weg of ['fern', 'lokal'] as const) {
       ok(alle === imAnschluss, `TRIPWIRE ${datei}: ${f}() steht nur im Primary-Anschluss (${imAnschluss}/${alle})`);
     }
   }
-  ok(/remote: \(\) => repairCreateBody\(form, fotos\)/.test(list) && /remote: \(\) => repairInvoiceBody\(auswahl, wahl\)/.test(list)
+  ok(/remote: \(\) => repairCreateBody\(anlage, fotos\)/.test(list) && /remote: \(\) => repairInvoiceBody\(auswahl, wahl\)/.test(list)
     && /remote: \(\) => repairEditBody\(id, fassung, repair, form, photos\)/.test(detail),
     'TRIPWIRE am zweiten Rechner reist der Rumpf der geteilten Regeln — nichts Eigenes');
   const house2 = codeOf(src('src/core/repairs/repair-house.ts'));

@@ -575,6 +575,8 @@ export interface Repair {
   // nicht mehr ein freier Text. Bei externer Repair-Auto-Expense wird supplier_id
   // gesetzt, sodass die offene Forderung in der Supplier-Bilanz erscheint.
   workshopSupplierId?: UUID;
+  /** REPAIR-REDESIGN — eingeplante Werkstatt ohne Arbeitszeile (beim Anlegen, Gebühr folgt). Bucht nichts. */
+  plannedWorkshopSupplierId?: UUID;
   estimatedCost?: number;
   actualCost?: number;
   internalCost: number;

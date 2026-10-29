@@ -397,11 +397,15 @@ let rAlt = '';
   ok(/useState\(true\)/.test(list) && /isWorkshop: quickSupplierWorkshop/.test(list) && /data-repair-quick-supplier-workshop/.test(list),
     '§12 „+ New Supplier" in der Werkstatt-Auswahl: Is Workshop vorbelegt, sichtbar, abwählbar');
   ok(/workshopOptions\(suppliers, \[form\.workshopSupplierId, repair\?\.workshopSupplierId\]\)/.test(detail), '§12 Werkstatt ändern: gespeicherter Wert bleibt');
-  ok(/IN_HOUSE_OPTION, \.\.\.workshopOptions\(suppliers, \[newLineForm\.supplierId\]\)/.test(detail) && /options=\{arbeitszeileOptionen\}/.test(detail),
+  // REPAIR-REDESIGN — die Arbeitszeile wählt die Quelle (In-house | External workshop) und dann NUR Werkstätten.
+  const teile = src('src/components/repairs/RepairWorkParts.tsx');
+  ok(/workshopOptions\(suppliers, \[draft\.supplierId\]\)/.test(teile) && /source: 'inhouse', supplierId: ''/.test(teile)
+    && /<RepairWorkLineForm[\s\S]{0,300}?suppliers=\{suppliers\}/.test(detail),
     '§12 Add Work Line: eigene Werkstatt + Werkstätten');
   ok(/goldWerkstattOptionen = useMemo\(\(\) => workshopOptions\(suppliers, \[newGoldForm\.supplierId\]\)/.test(detail) && /options=\{goldWerkstattOptionen\}/.test(detail),
     '§12 Gold vom Workshop: nur Werkstätten, kein In-house');
-  ok(!/supplierOptions/.test(detail) && (detail.match(/data-repair-no-workshop-hint/g) || []).length === 3, '§12 keine alte Liste mehr; Hinweis an allen drei Stellen');
+  ok(!/supplierOptions/.test(detail) && (detail.match(/data-repair-no-workshop-hint/g) || []).length === 2
+    && (teile.match(/data-repair-no-workshop-hint/g) || []).length === 1, '§12 keine alte Liste mehr; Hinweis an allen drei Stellen');
   const mat = src('src/components/work-orders/AddMaterialModal.tsx');
   ok(!/isWorkshop|workshopOptions/.test(mat) && /<AddMaterialModal/.test(detail), '§12 Material (AddMaterialModal) bleibt bei allen aktiven Lieferanten');
   const sd = src('src/pages/suppliers/SupplierDetail.tsx'), sl = src('src/pages/suppliers/SupplierList.tsx');
