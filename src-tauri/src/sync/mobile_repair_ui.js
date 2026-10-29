@@ -465,6 +465,7 @@
     LEFTOVER_REQUIRED: 'Please say what happens to the leftover.',
     SETTLEMENT_INVALID: 'Please choose how the workshop gold is settled.',
     TAX_SCHEME_INVALID: 'Please choose a tax scheme.',
+    INVOICE_DATE_INVALID: 'The invoice date is not a valid date.',
     LINE_REQUIRED: 'This line has no id.',
   };
   async function rpWerkstatt(op, zweck, bau, erfolgstext) {
@@ -599,11 +600,15 @@
     if (gut) { $('rpGoldKarat').value = ''; $('rpGoldReceived').value = ''; $('rpGoldUsed').value = ''; }
   };
   $('rpInvoiceBtn').onclick = async () => {
-    await rpWerkstatt('repairs.create_invoice', 'invoice', () => MobileRepair.invoiceBody(RP.repair, $('rpTaxScheme').value),
+    await rpWerkstatt('repairs.create_invoice', 'invoice',
+      () => MobileRepair.invoiceBody(RP.repair, $('rpTaxScheme').value, $('rpInvoiceDate').value),
       'The invoice was created.');
   };
 
   function rpRenderStatus(rep) {
+    // REPAIR-PICKUP-DATE — das Rechnungsdatum gilt nur für DIESE Reparatur: beim Öffnen leer (= Abholtag bzw. heute).
+    const rd = $('rpInvoiceDate');
+    if (rd) { rd.max = MobileBusinessDate.latestBusinessDate(); rd.value = ''; }
     const targets = rep.allowedStatusTargets || [];
     $('rpStatusCard').classList.remove('hidden');
     $('rpStatusNow').textContent = rep.status || '';

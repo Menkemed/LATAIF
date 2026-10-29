@@ -14,7 +14,7 @@ import { SearchSelect } from '@/components/ui/SearchSelect';
 import { WriteError } from '@/components/shared/WriteError';
 import { AddMaterialModal, type MaterialLineInput } from '@/components/work-orders/AddMaterialModal';
 import { RepairStatusDialog, type RepairStatusStep } from '@/components/repairs/RepairStatusDialog';
-import { saveRepairInvoice, saveRepairStatus } from '@/components/repairs/repair-status-save';
+import { pickupKeptInvoiceRefused, saveRepairInvoice, saveRepairStatus } from '@/components/repairs/repair-status-save';
 import { useRepairStore, computeRepairTotalCost } from '@/stores/repairStore';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { useCustomerStore } from '@/stores/customerStore';
@@ -209,10 +209,10 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
       const inv = await saveRepairInvoice(w, [{ id: rep.id, revision: neu || rep.revision }],
         { taxScheme: step.invoice.taxScheme, invoiceDate: step.pickedUpDate });
       neuLaden();
-      if (!inv) { setSchritt(null); setHinweis('Picked up — but the invoice was not created (see the message). Create it later.'); return; }
       setSchritt(null);
+      if ('error' in inv) { w.clear(); setHinweis(pickupKeptInvoiceRefused(step.pickedUpDate, inv.error)); return; }
       onClose();
-      navigate(`/invoices/${inv}`);
+      navigate(`/invoices/${inv.invoiceId}`);
       return;
     }
     setSchritt(null);
@@ -243,7 +243,9 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
               <Button variant="ghost" onClick={() => { onClose(); navigate(`/repairs/${rep.id}`); }} data-quick-open-details>Open details</Button>
             </div>
           </div>
-          {hinweis && <p style={{ fontSize: 12, color: '#5C8550' }} data-quick-hint>{hinweis}</p>}
+          {hinweis && (
+            <p style={{ fontSize: 12, color: /NOT created/.test(hinweis) ? '#B45309' : '#5C8550' }} data-quick-hint>{hinweis}</p>
+          )}
 
           {/* STATUS — nur die Schritte, die das Haus zulässt (vorwärts, Returned, Reopen). */}
           <div>

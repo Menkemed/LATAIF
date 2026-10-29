@@ -384,12 +384,18 @@
   }
 
   /** Die Rechnung zu GENAU dieser Reparatur. Ob sie erlaubt ist, entscheidet der Primary. */
-  function invoiceBody(repair, taxScheme) {
+  function invoiceBody(repair, taxScheme, invoiceDate) {
     const body = { repairId: repair.id, expectedRevision: repair.revision };
     const steuer = textOrNull(taxScheme);
     if (steuer !== null) {
       if (TAX_SCHEMES.indexOf(steuer) < 0) return { ok: false, code: 'TAX_SCHEME_INVALID' };
       body.taxScheme = steuer;
+    }
+    // REPAIR-PICKUP-DATE — ein ausdrücklich gewählter Rechnungstag; leer = der Abholtag bzw. heute (rechnet der Primary).
+    const tag = textOrNull(invoiceDate);
+    if (tag !== null) {
+      if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(tag)) return { ok: false, code: 'INVOICE_DATE_INVALID' };
+      body.invoiceDate = tag;
     }
     return { ok: true, body: body };
   }

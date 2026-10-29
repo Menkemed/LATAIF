@@ -57,7 +57,7 @@ import {
 import { repairInvoiceDateSuggestion } from '@/core/repairs/repair-rules';
 import { latestBusinessDate } from '@/core/utils/business-date';
 import { RepairStatusDialog, type RepairStatusStep } from '@/components/repairs/RepairStatusDialog';
-import { saveRepairInvoice } from '@/components/repairs/repair-status-save';
+import { pickupKeptInvoiceRefused, saveRepairInvoice } from '@/components/repairs/repair-status-save';
 import { goldUsageLine } from '@/core/gold/gold-usage-view';
 import {
   isOwnWorkLine, ownWorkDescription, materialDescription, showsInternalCostRow,
@@ -222,9 +222,10 @@ export function RepairDetail() {
       const inv = await saveRepairInvoice(w, [{ id, revision: neu || repair.revision }],
         { taxScheme: step.invoice.taxScheme, invoiceDate: step.pickedUpDate });
       loadRepairs(); loadInvoices();
-      if (!inv) return;   // abgeholt ist sie; die Rechnung lässt sich danach anlegen (mit demselben Abholtag)
       setStatusFrage(null);
-      navigate(`/invoices/${inv}`);
+      // Die Abholung steht (mit ihrem tatsächlichen Tag); nur die Rechnung auf diesen Tag ist abgewiesen — sagen, was gilt.
+      if ('error' in inv) { w.clear(); alert(pickupKeptInvoiceRefused(step.pickedUpDate, inv.error)); return; }
+      navigate(`/invoices/${inv.invoiceId}`);
       return;
     }
     setStatusFrage(null);

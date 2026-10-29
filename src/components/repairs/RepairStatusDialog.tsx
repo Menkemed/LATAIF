@@ -130,6 +130,10 @@ export function RepairStatusDialog({
                   <input type="checkbox" checked={abrechnen} onChange={(e) => setAbrechnen(e.target.checked)} data-pickup-invoice />
                   Create the invoice now, dated the pickup day
                 </label>
+                <p style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }} data-pickup-invoice-note>
+                  If the VAT quarter of the pickup day is already filed or VAT-paid, the invoice is refused — the pickup
+                  itself is saved with its real date; create the invoice later with a date in an open quarter.
+                </p>
                 {abrechnen && (
                   <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
                     {REPAIR_TAX_SCHEMES.map((s) => (

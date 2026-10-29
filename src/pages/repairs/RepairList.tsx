@@ -41,7 +41,7 @@ import { repairInvoiceDateSuggestion } from '@/core/repairs/repair-rules';
 import { usePermission } from '@/hooks/usePermission';
 import { RepairQuickEditModal } from '@/components/repairs/RepairQuickEditModal';
 import { RepairStatusDialog, type RepairStatusStep } from '@/components/repairs/RepairStatusDialog';
-import { saveRepairInvoice, saveRepairStatus } from '@/components/repairs/repair-status-save';
+import { pickupKeptInvoiceRefused, saveRepairInvoice, saveRepairStatus } from '@/components/repairs/repair-status-save';
 import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
 import { productDisplayName, brandModelHidden } from '@/core/products/display-name';
 import { repairItemDisplayName } from '@/core/products/display-name';
@@ -422,9 +422,10 @@ export function RepairList() {
     const inv = await saveRepairInvoice(w, [{ id: rep.id, revision: neu || rep.revision }],
       { taxScheme: step.invoice.taxScheme, invoiceDate: step.pickedUpDate });
     loadRepairs();
-    if (!inv) return;   // die Abholung steht; der Grund steht im Fenster — abrechnen geht auch später
     setAbholung(null);
-    navigate(`/invoices/${inv}`);
+    // Die Abholung steht (mit ihrem tatsächlichen Tag); nur die Rechnung auf diesen Tag ist abgewiesen — sagen, was gilt.
+    if ('error' in inv) { w.clear(); alert(pickupKeptInvoiceRefused(step.pickedUpDate, inv.error)); return; }
+    navigate(`/invoices/${inv.invoiceId}`);
   }
 
   function handleQuickInvoice(e: React.MouseEvent, rep: Repair) {

@@ -662,6 +662,15 @@ try {
     const wieder = await tippen('Reopen as ready');
     ok(wieder.length === 1 && wieder[0].body.payload.status === 'ready' && wieder[0].body.payload.expectedRevision === 4,
       `§6 „Reopen" sendet denselben Statusbefehl mit der Fassung (${S(wieder[0] && wieder[0].body.payload)})`);
+    // Rechnung mit ausdrücklich gewähltem Tag (z. B. wenn das Quartal des Abholtags schon zu ist); leer = Abholtag/heute.
+    await oeffnen();
+    const leer = await c.ev("const d=document.getElementById('rpInvoiceDate'); return { value: d.value, max: d.max };");
+    gesehen.length = 0;
+    await c.ev(`document.getElementById('rpInvoiceDate').value='${tag(-1)}'; document.getElementById('rpInvoiceBtn').click(); return 1;`);
+    for (let i = 0; i < 20; i++) { if (gesehen.some((g) => g.body && g.body.op === 'repairs.create_invoice')) break; await sleep(150); }
+    const rechnung = gesehen.filter((g) => g.body && g.body.op === 'repairs.create_invoice');
+    ok(leer.value === '' && leer.max === tag(1) && rechnung.length === 1 && rechnung[0].body.payload.invoiceDate === tag(-1),
+      `§6 Rechnungsdatum: beim Öffnen leer, gewählter Tag reist im Auftrag (${S(leer)} ${S(rechnung[0] && rechnung[0].body.payload)})`);
   }
 } catch (e) {
   FAIL++; fails.push('ABBRUCH: ' + String(e && e.stack ? e.stack : e));

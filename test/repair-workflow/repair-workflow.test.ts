@@ -536,6 +536,104 @@ for (const weg of ['lokal', 'fern'] as const) {
     `VATLOCK (${weg}) …mit gewähltem Tag im offenen Quartal: angelegt, nichts im eingereichten Q2`);
 }
 
+// ══ §4c Abholung in einem SCHON eingereichten Quartal: die Abholung gilt, nur die Rechnung auf diesen Tag nicht ══
+for (const weg of ['lokal', 'fern'] as const) {
+  const db = freshDb();
+  const a = await reparatur({ issueDescription: 'Spät erfasst', receivedAt: '2026-05-01' });
+  await schritt(a, 'in_progress', 'ready');
+  posting.beginLedgerTransaction();
+  try { lock.markVatQuarterFiled({ branchId: 'branch-main', year: 2026, quarter: 2, userId: 'user-test' }); posting.commitLedgerTransaction(); }
+  catch (e) { posting.rollbackLedgerTransaction(); throw e; }
+  reload();
+  const vorBuch = buchungen(db);
+  // Q2 ist eingereicht; der Kunde holte am 20.06. ab — erfasst wird es heute. Die Abholung bucht nichts: sie ist erlaubt.
+  const m = weg === 'lokal' ? await nein(house.updateRepairStatusOnPrimary(a, 'picked_up', { pickedUpDate: '2026-06-20' }))
+    : code(await fernStatus(db, a, 'picked_up', { pickedUpDate: '2026-06-20' }));
+  reload();
+  ok(m === '' && s(db, 'SELECT picked_up_at FROM repairs WHERE id = ?', [a]) === '2026-06-20T12:00:00.000Z'
+    && s(db, 'SELECT substr(picked_up_recorded_at, 1, 10) FROM repairs WHERE id = ?', [a]) === HEUTE && buchungen(db) === vorBuch,
+    `PICKUP-Q (${weg}) Abholtag im eingereichten Q2: erfasst (20.06., Erfassung heute), keine Buchung (${m || 'ok'})`);
+  // Die Rechnung auf diesen Tag bleibt gesperrt — kein Ersatztag wird still eingesetzt.
+  const vorInv = n(db, 'SELECT COUNT(*) FROM invoices') + '|' + all(db, 'SELECT next_number FROM document_sequences ORDER BY doc_type');
+  const rs = useRepairStore.getState();
+  const r1 = weg === 'lokal' ? await nein(house.invoiceRepairsOnPrimary([a], { taxScheme: 'VAT_10' }))
+    : code(await life.runCreateRepairInvoice(deps(db), identity(nx(), 'repairs.create_invoice'), rules.repairInvoiceBody([rs.getRepair(a)!], { taxScheme: 'VAT_10' })));
+  const r2 = weg === 'lokal' ? await nein(house.invoiceRepairsOnPrimary([a], { taxScheme: 'VAT_10', invoiceDate: '2026-06-20' }))
+    : code(await life.runCreateRepairInvoice(deps(db), identity(nx(), 'repairs.create_invoice'), rules.repairInvoiceBody([useRepairStore.getState().getRepair(a)!], { taxScheme: 'VAT_10', invoiceDate: '2026-06-20' })));
+  reload();
+  ok(r1 === lock.VAT_PERIOD_FILED && r2 === lock.VAT_PERIOD_FILED
+    && n(db, 'SELECT COUNT(*) FROM invoices') + '|' + all(db, 'SELECT next_number FROM document_sequences ORDER BY doc_type') === vorInv
+    && s(db, 'SELECT picked_up_at FROM repairs WHERE id = ?', [a]) === '2026-06-20T12:00:00.000Z' && s(db, 'SELECT status FROM repairs WHERE id = ?', [a]) === 'picked_up',
+    `PICKUP-Q (${weg}) Rechnung auf den Abholtag (vorgeschlagen / ausdrücklich): gesperrt, nichts angelegt — die Abholung bleibt (${r1}/${r2})`);
+  const inv = weg === 'lokal'
+    ? (await house.invoiceRepairsOnPrimary([a], { taxScheme: 'VAT_10', invoiceDate: HEUTE })).invoiceId
+    : String((await life.runCreateRepairInvoice(deps(db), identity(nx(), 'repairs.create_invoice'),
+      rules.repairInvoiceBody([useRepairStore.getState().getRepair(a)!], { taxScheme: 'VAT_10', invoiceDate: HEUTE })) as Out).value?.invoiceId);
+  reload();
+  ok(s(db, 'SELECT substr(issued_at, 1, 10) FROM invoices WHERE id = ?', [inv]) === HEUTE
+    && s(db, 'SELECT picked_up_at FROM repairs WHERE id = ?', [a]) === '2026-06-20T12:00:00.000Z'
+    && n(db, "SELECT COUNT(*) FROM ledger_entries WHERE occurred_at < '2026-07-01'") === 0,
+    `PICKUP-Q (${weg}) Rechnung mit Tag im offenen Quartal: angelegt; Abholtag bleibt 20.06.; nichts in Q2`);
+}
+{
+  const { pickupKeptInvoiceRefused } = await import('../../src/components/repairs/repair-status-save.ts');
+  const t = pickupKeptInvoiceRefused('2026-06-20', 'The VAT return for Q2/2026 is already filed — …');
+  ok(/Picked up on 2026-06-20 — the pickup is saved\. The invoice was NOT created: The VAT return for Q2\/2026/.test(t) && /open VAT quarter/.test(t),
+    `PICKUP-Q die Meldung sagt beides: Abholung gespeichert, Rechnung nicht — mit dem Grund (${t.slice(0, 90)}…)`);
+  const liste = src('src/pages/repairs/RepairList.tsx'); const detail = src('src/pages/repairs/RepairDetail.tsx');
+  const quick = src('src/components/repairs/RepairQuickEditModal.tsx'); const dlg = src('src/components/repairs/RepairStatusDialog.tsx');
+  ok([liste, detail, quick].every((x) => /pickupKeptInvoiceRefused\(step\.pickedUpDate, inv\.error\)/.test(x))
+    && /data-pickup-invoice-note/.test(dlg) && /setAbholung\(null\);\n?\s*\/\/ Die Abholung steht/.test(liste.replace(/\r/g, '')),
+    'PICKUP-Q Liste, Detailseite, Quick Edit: Fenster zu, klare Meldung; der Hinweis steht schon im Abholfenster');
+}
+
+// ══ §1f Reopen mit Rechnung, danach wieder abholen: keine zweite Rechnung, Forderung oder Buchung ══
+for (const weg of ['lokal', 'fern'] as const) {
+  const db = freshDb();
+  const a = await reparatur({ issueDescription: 'Rechnung + Reopen' });
+  db.run('UPDATE repairs SET internal_cost = 10 WHERE id = ?', [a]);
+  await schritt(a, 'in_progress', 'ready');
+  const inv = (await house.invoiceRepairsOnPrimary([a], { taxScheme: 'VAT_10' })).invoiceId;
+  posting.beginLedgerTransaction();
+  try { useInvoiceStore.getState().loadInvoices(); useInvoiceStore.getState().recordPayment(inv, 40, 'cash'); posting.commitLedgerTransaction(); }
+  catch (e) { posting.rollbackLedgerTransaction(); throw e; }
+  reload();
+  const bild = (): string => S([
+    n(db, 'SELECT COUNT(*) FROM invoices'), all(db, 'SELECT id, invoice_number, status, gross_amount, paid_amount, issued_at FROM invoices'),
+    all(db, 'SELECT * FROM invoice_lines ORDER BY id'), all(db, 'SELECT id, amount, received_at FROM payments ORDER BY id'),
+    buchungen(db), ausgaben(db, a), eigeneArbeit(db, a),
+    n(db, "SELECT ROUND(COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0), 3) FROM ledger_entries WHERE account = 'ACCOUNTS_RECEIVABLE'"),
+  ]);
+  const vor = bild();
+  await schritt(a, 'returned');
+  if (weg === 'lokal') await house.updateRepairStatusOnPrimary(a, 'ready');
+  else await fernStatus(db, a, 'ready');
+  reload();
+  ok(s(db, 'SELECT status FROM repairs WHERE id = ?', [a]) === 'ready' && s(db, 'SELECT invoice_id FROM repairs WHERE id = ?', [a]) === inv && bild() === vor,
+    `REOPEN-INV (${weg}) Returned → Reopen: dieselbe Rechnung, Zahlung, Forderung, Buchungen und eigene Arbeit (${eigeneArbeit(db, a)})`);
+  // Wieder abholen — mit Abholtag; die Abholung legt keine Rechnung an, und eine zweite wird abgewiesen.
+  if (weg === 'lokal') await house.updateRepairStatusOnPrimary(a, 'picked_up', { pickedUpDate: tagVor(1) });
+  else await fernStatus(db, a, 'picked_up', { pickedUpDate: tagVor(1) });
+  reload();
+  const zweite = weg === 'lokal' ? await nein(house.invoiceRepairsOnPrimary([a], { taxScheme: 'VAT_10', invoiceDate: tagVor(1) }))
+    : code(await life.runCreateRepairInvoice(deps(db), identity(nx(), 'repairs.create_invoice'),
+      rules.repairInvoiceBody([useRepairStore.getState().getRepair(a)!], { taxScheme: 'VAT_10', invoiceDate: tagVor(1) })));
+  reload();
+  ok(s(db, 'SELECT status FROM repairs WHERE id = ?', [a]) === 'picked_up' && s(db, 'SELECT substr(picked_up_at, 1, 10) FROM repairs WHERE id = ?', [a]) === tagVor(1)
+    && zweite === 'REPAIR_ALREADY_INVOICED' && bild() === vor && ausgeglichen(db),
+    `REOPEN-INV (${weg}) …wieder abgeholt (${tagVor(1)}): keine zweite Rechnung (${zweite}), Forderung und Buchungen bitgleich`);
+  ok(n(db, "SELECT COUNT(*) FROM audit_log WHERE entity_id = ? AND action_type = 'STATUS_CHANGE'", [a]) >= 4
+    && n(db, "SELECT COUNT(*) FROM audit_log WHERE entity_id = ? AND action_type = 'STATUS_CHANGE' AND old_value = 'returned' AND new_value = 'ready'", [a]) === 1,
+    `REOPEN-INV (${weg}) die Historie bleibt vollständig (Schritte im Audit-Protokoll)`);
+}
+{
+  // Das Abholfenster bietet bei vorhandener Rechnung keine zweite an.
+  const dlg = src('src/components/repairs/RepairStatusDialog.tsx');
+  ok(/canInvoiceRepair\(\{ \.\.\.repair, status: 'ready' \}\) && !repair\.invoiceId/.test(dlg)
+    && /The existing invoice keeps its date and number/.test(dlg),
+    'REOPEN-INV das Abholfenster bietet bei vorhandener Rechnung keine an und sagt, dass sie bleibt');
+}
+
 // ══ §5 Quick Edit — Preis, Kosten, Zeilen ═══════════════════════════════════
 for (const weg of ['lokal', 'fern'] as const) {
   const db = freshDb();
