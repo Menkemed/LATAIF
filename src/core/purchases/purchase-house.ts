@@ -29,8 +29,9 @@ import { housePurchasePort, withAllocatedSkus, PURCHASE_LINE_OPS } from './purch
 import { applyIdentityDocument, identitySourceOf, IdentityMediaError } from '@/core/identity/identity-media';
 import { prepareIdentityPhoto } from '@/core/identity/identity-save';
 import {
-  PurchaseEditRejected, editPurchaseInHouse, voidPurchasePaymentInHouse,
-  type CorrectionKind, type PurchaseEditAddLine, type PurchaseEditRequest, type PurchaseEdited, type PurchasePaymentVoided,
+  PurchaseEditRejected, correctPurchasePaymentDateInHouse, editPurchaseInHouse, voidPurchasePaymentInHouse,
+  type CorrectionKind, type PurchaseEditAddLine, type PurchaseEditRequest, type PurchaseEdited, type PurchasePaymentRedated,
+  type PurchasePaymentVoided,
 } from './purchase-edit-house';
 import { PurchaseActionRejected, planPurchaseCreate, purchaseCreateIssue, type PurchaseCreateInput } from './purchase-create';
 import { EMBEDDED_PRODUCT_FIELDS, pickProductSpec, stageSpecImages } from '@/core/products/embedded-product';
@@ -422,6 +423,33 @@ export async function savePurchaseEdit(
 /** Der Rumpf für `purchases.void_payment`. */
 export function purchaseVoidPaymentBody(purchase: { id: string }, paymentId: string, reason: string): Record<string, unknown> {
   return { purchaseId: purchase.id, paymentId, expectedRevision: fassungVon(purchase), reason };
+}
+
+/** v0.8.94 — „Edit payment date": der Auftrag vom zweiten Rechner (dieselbe Zahlung, der richtige Tag, der Grund). */
+export function purchasePaymentDateBody(purchase: { id: string }, paymentId: string, paidDate: string, reason: string): Record<string, unknown> {
+  return { purchaseId: purchase.id, paymentId, expectedRevision: fassungVon(purchase), paidDate, reason };
+}
+
+/** „Edit payment date" am Primary. */
+export function correctPurchasePaymentDateOnPrimary(
+  purchaseId: string, paymentId: string, paidDate: string, reason: string, expectedRevision?: number,
+): Promise<PurchasePaymentRedated> {
+  return nurAmPrimary<PurchasePaymentRedated>()
+    ?? runOnPrimary(() => correctPurchasePaymentDateInHouse(purchaseId, paymentId, paidDate, reason, localHouseCtx(), expectedRevision), lebenszyklusLesen);
+}
+
+/** „Edit payment date": EINE Buchung gegen die gesehene Fassung — Grund und Tag Pflicht. */
+export function savePurchasePaymentDate(
+  write: PurchaseLifecycleWrite<Result>, purchase: { id: string }, paymentId: string, paidDate: string, reason: string,
+): Promise<WriteOutcome<Result>> {
+  if (!reason || !reason.trim()) return Promise.resolve(absage('PURCHASE_EDIT_REASON_REQUIRED', 'Please enter a reason for correcting the payment date.'));
+  if (!paidDate) return Promise.resolve(absage('PAYMENT_DATE_INVALID', 'Please choose the correct payment date.'));
+  const rev = fassungVon(purchase);
+  if (write.remote && rev === undefined) return Promise.resolve(ohneFassung());
+  return speichern(write, {
+    local: () => correctPurchasePaymentDateOnPrimary(purchase.id, paymentId, paidDate, reason.trim(), rev) as unknown as Promise<Result>,
+    remote: () => purchasePaymentDateBody(purchase, paymentId, paidDate, reason.trim()),
+  });
 }
 
 /** „Void payment" am Primary. */

@@ -219,10 +219,10 @@ try {
   // ── §1 erfassen ──
   await c.ev('await window.__mpHomeOpen(); return 1;');
   await c.ev(klick('#mpNewBtn') + ' await new Promise((r) => setTimeout(r, 300)); return 1;');
-  ok(await c.ev("return !document.getElementById('formMPurchase').classList.contains('hidden') && document.querySelectorAll('.mp-sec').length === 5;"),
-    '§1 neue Maske mit fünf Abschnitten (Supplier, Details, Items, Payments, Notes)');
-  ok(await c.ev("return document.querySelectorAll('.mp-sec.open').length === 2 && !document.querySelector('[data-mp-field=\"purchaseDate\"]');"),
-    '§1 nur Lieferant und Positionen offen — Details, Zahlungen, Notizen zugeklappt (keine Endlosseite)');
+  ok(await c.ev("return !document.getElementById('formMPurchase').classList.contains('hidden') && document.querySelectorAll('.mp-sec').length === 6;"),
+    '§1 neue Maske mit sechs Abschnitten (Supplier, Input VAT, Items, Payments, Notes, Purchase date)');
+  ok(await c.ev("return document.querySelectorAll('.mp-sec.open').length === 3 && [...document.querySelectorAll('.mp-sec.open')].map(e=>e.getAttribute('data-mp-sec')).join(',') === 'supplier,items,date' && !!document.querySelector('[data-mp-field=\"purchaseDate\"]');"),
+    '§1 offen: Lieferant, Positionen und das Datum vor dem Speichern — Steuerart, Zahlungen, Notizen zugeklappt (keine Endlosseite)');
   // Lieferant: Kunde → Lieferantenrolle.
   await c.ev(klick('[data-mp-action="supplier-mode"][data-mode="customer"]') + ' return 1;');
   await c.ev(tippe('#mpSupSearch', 'Ali') + klick('[data-mp-action="search-customer"]') + ' await new Promise((r) => setTimeout(r, 300)); return 1;');
@@ -326,7 +326,12 @@ try {
   const morgen = new Date(Date.now() + 86400000).toISOString().split('T')[0];
   const GEWAEHLT = '2026-08-15';
   const einkaeufe = () => gesehen.filter((g) => g.body && g.body.op === 'purchases.create');
-  await c.ev(klick('[data-mp-toggle="details"]') + ' await new Promise((r) => setTimeout(r, 100)); return 1;');
+  // v0.8.94 — das Datum ist der letzte Abschnitt (offen), direkt vor den Knöpfen; genau ein Datumsfeld.
+  const lage = await c.ev(`const secs=[...document.querySelectorAll('#mpSections > .mp-sec')].map(e=>e.getAttribute('data-mp-sec'));
+    const f=document.querySelectorAll('[data-mp-field="purchaseDate"]'); const letzter=document.querySelector('#mpSections > .mp-sec:last-child');
+    return { secs, felder: f.length, imLetzten: !!(letzter && letzter.contains(f[0])), vorKnoepfen: !!(document.getElementById('mpSections').nextElementSibling && document.getElementById('mpSections').nextElementSibling.id === 'mpActions') };`);
+  ok(S(lage.secs) === S(['supplier', 'details', 'items', 'payments', 'notes', 'date']) && lage.felder === 1 && lage.imLetzten && lage.vorKnoepfen,
+    `§1 DATUM „Purchase date" als letzter Abschnitt vor „Book purchase", ein Feld (${S(lage)})`);
   const datumFeld = await c.ev(`const e = document.querySelector('[data-mp-field="purchaseDate"]'); return { value: e.value, max: e.max, entwurf: window.__MP.draft.purchaseDate };`);
   ok(datumFeld.value === heute && datumFeld.entwurf === heute && datumFeld.max === morgen, `§1 DATUM „Purchase date" heute vorbelegt, spätester Tag morgen (${S(datumFeld)})`);
   await c.ev(tippe('[data-mp-field="purchaseDate"]', '2099-01-01') + ' return 1;');
@@ -334,8 +339,8 @@ try {
   ok(await c.ev("return window.__MP.draft.status === 'draft' && /Purchase date cannot be in the future/.test(document.getElementById('mpError').textContent);") && einkaeufe().length === 0,
     `§1 DATUM Zukunft: kein Auftrag, der Entwurf bleibt, Grund in Worten (${einkaeufe().length})`);
   await c.ev(tippe('[data-mp-field="purchaseDate"]', GEWAEHLT) + ' await new Promise((r) => setTimeout(r, 100)); return 1;');
-  ok((await c.ev(summe('details'))).startsWith(GEWAEHLT) && await c.ev('return window.__MP.draft.purchaseDate;') === GEWAEHLT,
-    `§1 DATUM rückdatiert: im Entwurf und in der Zusammenfassung (${await c.ev(summe('details'))})`);
+  ok((await c.ev(summe('date'))) === '15 August 2026' && await c.ev('return window.__MP.draft.purchaseDate;') === GEWAEHLT,
+    `§1 DATUM rückdatiert: im Entwurf und in der Zusammenfassung ausgeschrieben (${await c.ev(summe('date'))})`);
   await shot(c, 'mp-date');
 
   // ── §2 Entwurf übersteht Neuladen ──

@@ -67,7 +67,9 @@ const R6C = ['suppliers.create', 'suppliers.update', 'agents.update', 'partners.
   'opening_accounts.create', 'opening_accounts.cancel',
   // PURCHASE-EDIT — drei: Einkauf bearbeiten (Notiz/Mitarbeiter/Ausweisfoto), korrigieren (nur Owner), Zahlung stornieren
   // (nur Owner); Beweise in test/purchase-edit.
-  'purchases.update', 'purchases.correct', 'purchases.void_payment'];
+  'purchases.update', 'purchases.correct', 'purchases.void_payment',
+  // v0.8.94 — eins: das Datum einer erfassten Einkaufszahlung berichtigen (nur Owner); Beweise in test/purchase-payment-date.
+  'purchases.correct_payment_date'];
 
 // ── §1 Die Matrix deckt sich mit der Freigabeliste ──────────────────────
 const registry = src('src/core/bridge/command-registry.ts');
@@ -226,11 +228,11 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   const ops = src('src/core/bridge/store-read-ops.ts');
   const parity = [...ops.matchAll(/export const OP_[A-Z_]+ = '([^']+)'/g)].length;
   ok(parity === 66, `10 neunundfuenfzig typisierte Auskuenfte (R6C: +2 Inventur; R6D: +3; A5: +1; BULK METAL V1: +4; STOCK CORRECTION: +1) (${parity})`);
-  ok(erlaubt.length === 126, `10 vierzig Buchungen plus die eine aus R5F.1 plus elf aus R6C plus achtundzwanzig aus R6D plus acht aus R6E plus vierzehn aus R6F plus eins aus R7A (production.complete) plus Posteingang plus sechs PARTNER-ITEMS plus vier BULK METAL V1 plus zwei STOCK CORRECTION (${erlaubt.length})`);
+  ok(erlaubt.length === 127, `10 (v0.8.94 + purchases.correct_payment_date) vierzig Buchungen plus die eine aus R5F.1 plus elf aus R6C plus achtundzwanzig aus R6D plus acht aus R6E plus vierzehn aus R6F plus eins aus R7A (production.complete) plus Posteingang plus sechs PARTNER-ITEMS plus vier BULK METAL V1 plus zwei STOCK CORRECTION (${erlaubt.length})`);
   const rust = src('src-tauri/src/bridge.rs');
   const rustOps = [...(/pub const REMOTE_OPS: &\[&str\] = &\[([\s\S]*?)\];/.exec(rust)?.[1] ?? '')
     .matchAll(/OP_[A-Z_]+/g)].length;
-  ok(rustOps === 213, `10 und Rust laesst dieselben 195 Namen durch (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${rustOps})`);
+  ok(rustOps === 214, `10 und Rust laesst dieselben 214 Namen durch (v0.8.94 + purchases.correct_payment_date) (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION) (${rustOps})`);
 }
 
 // ── R5A — Auftrag → Rechnung: EINE Handlung, EINE Buchung ───────────────

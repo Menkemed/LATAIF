@@ -391,12 +391,10 @@
       if (TAX_SCHEMES.indexOf(steuer) < 0) return { ok: false, code: 'TAX_SCHEME_INVALID' };
       body.taxScheme = steuer;
     }
-    // REPAIR-PICKUP-DATE — ein ausdrücklich gewählter Rechnungstag; leer = der Abholtag bzw. heute (rechnet der Primary).
+    // REPAIR-PICKUP-DATE — ein ausdrücklich gewählter Rechnungstag (das Datumsfeld liefert JJJJ-MM-TT); leer = der Abholtag
+    // bzw. heute. Geprüft wird er verbindlich am Primary (Form, nicht künftig, offenes VAT-Quartal) — hier keine zweite Regel.
     const tag = textOrNull(invoiceDate);
-    if (tag !== null) {
-      if (!/^[0-9]{4}-[0-9]{2}-[0-9]{2}$/.test(tag)) return { ok: false, code: 'INVOICE_DATE_INVALID' };
-      body.invoiceDate = tag;
-    }
+    if (tag !== null) body.invoiceDate = tag;
     return { ok: true, body: body };
   }
 

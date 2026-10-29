@@ -29,7 +29,7 @@ import {
 import { ingestIdentityPhoto, identitySourceOf } from '@/core/identity/identity-media';
 import {
   MAX_ADD_LINES, PURCHASE_EDIT_OP, PURCHASE_EDIT_CHECK_OP, PurchaseEditRejected, editPurchaseInHouse, isCorrectionKind,
-  purchaseEditCheck, voidPurchasePaymentInHouse, type PurchaseEditAddLine, type PurchaseEditRequest,
+  correctPurchasePaymentDateInHouse, purchaseEditCheck, voidPurchasePaymentInHouse, type PurchaseEditAddLine, type PurchaseEditRequest,
 } from '@/core/purchases/purchase-edit-house';
 import { costCorrectionBridge, costCorrectionRows } from '@/core/purchases/cost-correction-read';
 import { PURCHASE_LINE_OPS } from '@/core/purchases/purchase-lines';
@@ -41,11 +41,14 @@ import { OP_PAGE_COST_CORRECTIONS_GET, OP_PURCHASE_EDIT_CHECK_GET } from './stor
 export const OP_PURCHASES_UPDATE = PURCHASE_EDIT_OP.UPDATE;
 export const OP_PURCHASES_CORRECT = PURCHASE_EDIT_OP.CORRECT;
 export const OP_PURCHASES_VOID_PAYMENT = PURCHASE_EDIT_OP.VOID_PAYMENT;
+export const OP_PURCHASES_CORRECT_PAYMENT_DATE = PURCHASE_EDIT_OP.CORRECT_PAYMENT_DATE;
 export { OP_PURCHASE_EDIT_CHECK_GET, OP_PAGE_COST_CORRECTIONS_GET };
 // Die Auskunft heißt im Haus und in der Zulassungsliste gleich — sonst fände die Maske ihren Namen nicht.
 if (PURCHASE_EDIT_CHECK_OP !== OP_PURCHASE_EDIT_CHECK_GET) throw new Error('purchase edit check op drifted');
 
-export const PURCHASE_EDIT_OPS = [OP_PURCHASES_UPDATE, OP_PURCHASES_CORRECT, OP_PURCHASES_VOID_PAYMENT] as const;
+export const PURCHASE_EDIT_OPS = [
+  OP_PURCHASES_UPDATE, OP_PURCHASES_CORRECT, OP_PURCHASES_VOID_PAYMENT, OP_PURCHASES_CORRECT_PAYMENT_DATE,
+] as const;
 
 /** Ein unbrauchbarer Rumpf — eine Antwort, keine Störung. */
 export class PurchaseEditPayloadError extends Error {
@@ -210,6 +213,20 @@ export function parsePurchaseVoidPayment(raw: unknown): PurchaseVoidPaymentComma
   };
 }
 
+/** v0.8.94 — „Edit payment date": welche Zahlung, welcher Tag, welcher Grund, gegen welche Fassung. Nichts sonst. */
+export interface PurchasePaymentDateCommand { purchaseId: string; paymentId: string; expectedRevision: number; paidDate: string; reason: string }
+
+export function parsePurchasePaymentDate(raw: unknown): PurchasePaymentDateCommand {
+  const r = strict(raw, ['purchaseId', 'paymentId', 'expectedRevision', 'paidDate', 'reason']);
+  if (typeof r.paidDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(r.paidDate)) {
+    throw new PurchaseEditPayloadError('paidDate must look like YYYY-MM-DD', 'PAYMENT_DATE_INVALID');
+  }
+  return {
+    purchaseId: idOf(r.purchaseId, 'purchaseId'), paymentId: idOf(r.paymentId, 'paymentId'),
+    expectedRevision: revisionOf(r.expectedRevision), paidDate: r.paidDate, reason: reasonOf(r.reason),
+  };
+}
+
 /** Ein Nein der Hausfolge INNERHALB des Auftrags ist ein eingefrorenes Urteil; alles andere eine Störung. */
 function urteil<T>(fn: () => T): T {
   try { return fn(); } catch (e) {
@@ -287,6 +304,15 @@ export function runPurchaseVoidPayment(deps: EngineDeps, identity: CommandIdenti
   });
 }
 
+export function runPurchasePaymentDate(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const req = parsePurchasePaymentDate(raw);
+  return runRemoteCommand(deps, identity, () => {
+    assertHouseBranch(identity);
+    const ctx = { branchId: identity.branchId, userId: identity.userId, now: deps.now() };
+    return { ...urteil(() => correctPurchasePaymentDateInHouse(req.purchaseId, req.paymentId, req.paidDate, req.reason, ctx, req.expectedRevision)) };
+  });
+}
+
 // ── Die Anmeldung ─────────────────────────────────────────────────────────
 
 type Run = (deps: EngineDeps, identity: CommandIdentity, raw: unknown) => Promise<CommandOutcome>;
@@ -311,6 +337,7 @@ async function execute(run: Run, op: string, payload: unknown, actor?: CommandAc
 registerCommand(OP_PURCHASES_UPDATE, { kind: 'mutation', handler: (p, a) => execute((d, i, r) => runPurchaseEdit(d, i, r, false), OP_PURCHASES_UPDATE, p, a) });
 registerCommand(OP_PURCHASES_CORRECT, { kind: 'mutation', handler: (p, a) => execute((d, i, r) => runPurchaseEdit(d, i, r, true), OP_PURCHASES_CORRECT, p, a) });
 registerCommand(OP_PURCHASES_VOID_PAYMENT, { kind: 'mutation', handler: (p, a) => execute(runPurchaseVoidPayment, OP_PURCHASES_VOID_PAYMENT, p, a) });
+registerCommand(OP_PURCHASES_CORRECT_PAYMENT_DATE, { kind: 'mutation', handler: (p, a) => execute(runPurchasePaymentDate, OP_PURCHASES_CORRECT_PAYMENT_DATE, p, a) });
 
 interface Envelope { readonly actor?: { tenantId?: string; branchId?: string; userId?: string; role?: string }; readonly input?: Record<string, unknown> }
 

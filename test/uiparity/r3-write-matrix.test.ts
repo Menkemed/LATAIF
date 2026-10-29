@@ -188,11 +188,12 @@ const MATRIX: Record<string, Zeile> = {
   'purchases.update': { ui: 'PurchaseEdit — Save (Notiz/Mitarbeiter/Ausweisfoto)', gleich: true },
   'purchases.correct': { ui: 'PurchaseEdit — Save (Datum/Lieferant/Preis/Menge)', gleich: true },
   'purchases.void_payment': { ui: 'PurchaseDetail — Payments: Void', gleich: true },
+  'purchases.correct_payment_date': { ui: 'PurchaseDetail — Payments: Edit date', gleich: true },
 };
 
 // ── A — die Matrix ist vollständig ───────────────────────────────────────
 {
-  ok(MUTATIONEN.length === 126, `A 116 Buchungen (vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
+  ok(MUTATIONEN.length === 127, `A 127 Buchungen (v0.8.94 + purchases.correct_payment_date; vierzig + invoices.cancel + elf aus R6C + achtundzwanzig aus R6D + acht aus R6E + vierzehn aus R6F + eins aus R7A (production.complete) + Posteingang + sechs PARTNER-ITEMS + vier BULK METAL V1 + STOCK CORRECTION) (${MUTATIONEN.length})`);
   const fehlend = MUTATIONEN.filter((m) => !(m in MATRIX));
   ok(fehlend.length === 0, `A jede ist einer sichtbaren Handlung zugeordnet (offen: ${fehlend.join(', ') || 'keine'})`);
   const erfunden = Object.keys(MATRIX).filter((m) => !MUTATIONEN.includes(m));

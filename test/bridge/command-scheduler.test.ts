@@ -362,11 +362,11 @@ const tick = (ms = 0): Promise<void> => new Promise((r) => setTimeout(r, ms));
 
     + ',stock_adjustments.issue,stock_adjustments.cancel,stock_adjustments.add_old_stock'
 
-    + ',opening_balances.create,opening_balances.cancel,customers.settle,stock_adjustments.correct_initial,opening_accounts.create,opening_accounts.cancel,purchases.update,purchases.correct,purchases.void_payment',
+    + ',opening_balances.create,opening_balances.cancel,customers.settle,stock_adjustments.correct_initial,opening_accounts.create,opening_accounts.cancel,purchases.update,purchases.correct,purchases.void_payment,purchases.correct_payment_date',
     // CENTRAL-UI-PARITY R5F.1 — die EINE seither ausdruecklich freigegebene Buchung (`invoices.cancel`) steht am Ende;
     // die Liste ist sonst unveraendert (41 Buchungen, Registry 108). Nur die Erwartung war veraltet.
     `GATE genau diese hundertdrei veraendernden Namen sind freigegeben (${ALLOWED_MUTATIONS.join(', ')})`);
-  ok(ALLOWED_MUTATIONS.length === 126, `GATE hundertsechzehn (STOCK CORRECTION: +2; R6C: +7 Stammdaten, +4 Inventur; R6D: +28; R6E: +8; R6F: +14; R7A: +1 production.complete; MEDIA-INBOX: +1; PARTNER-ITEMS: +6; BULK METAL V1: +4), nicht mehr (${ALLOWED_MUTATIONS.length})`);
+  ok(ALLOWED_MUTATIONS.length === 127, `GATE hundertsechzehn (STOCK CORRECTION: +2; R6C: +7 Stammdaten, +4 Inventur; R6D: +28; R6E: +8; R6F: +14; R7A: +1 production.complete; MEDIA-INBOX: +1; PARTNER-ITEMS: +6; BULK METAL V1: +4), nicht mehr (${ALLOWED_MUTATIONS.length})`);
 
   for (const name of ['invoice.save', 'sale.commit', 'irgendwas.ganz.neu']) {
     let threw: string | null = null;

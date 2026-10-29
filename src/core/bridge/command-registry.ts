@@ -185,6 +185,9 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // Einkaufs, die Finanzkorrektur (Datum, Lieferant, Preise, Mengen, Einstandskorrektur verkaufter Stücke) und das
   // Stornieren einer falsch erfassten Zahlung nur Owner/Admin. Dieselbe Hausfolge am Primary, Pflicht-Fassung und -Grund.
   'purchases.update', 'purchases.correct', 'purchases.void_payment',
+  // v0.8.94 — das Datum einer erfassten Einkaufszahlung berichtigen (nur Owner; Gegenbuchung heute, Neubuchung am
+  // richtigen Tag, Grund und Verlauf; gesperrt in eingereichten/VAT-bezahlten Quartalen).
+  'purchases.correct_payment_date',
 ];
 
 export interface CommandSpec {

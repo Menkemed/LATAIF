@@ -72,6 +72,8 @@ export const PURCHASE_EDIT_OP = {
   CORRECT: 'purchases.correct',
   /** D14: eine falsch erfasste Zahlung stornieren — nur Owner/Admin. */
   VOID_PAYMENT: 'purchases.void_payment',
+  /** v0.8.94: das Datum einer erfassten Zahlung berichtigen — nur Owner. */
+  CORRECT_PAYMENT_DATE: 'purchases.correct_payment_date',
 } as const;
 
 /** Die Auskunft für die Maske: was darf sich bei DIESEM Einkauf ändern, und wenn nicht, warum nicht. */
@@ -100,6 +102,8 @@ const B = (f: number): number => f / 1000;
 const R3 = (n: number): number => Math.round(n * 1000) / 1000;
 const EPS = 0.0005;
 const dayOf = (iso: string): string => String(iso).slice(0, 10);
+/** „2026-Q2" → „Q2/2026" (wie die Meldungen der VAT-Sperre). */
+const quarterLabel = (key: string): string => { const [y, q] = key.split('-'); return `${q}/${y}`; };
 const fmt = (n: number): string => R3(n).toFixed(3);
 
 export interface HouseCtx { branchId: string; userId: string; now: string }
@@ -1277,4 +1281,102 @@ export function voidPurchasePaymentInHouse(
     purchaseId, paymentId, amount: B(amountF), method, paidAmount: B(newCashF), remainingAmount: B(remainingF), status,
     revision: revisionOf(purchaseId), restoredCreditId,
   };
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+// v0.8.94 — das Datum einer erfassten Zahlung berichtigen (falsch eingegebener Tag)
+// ════════════════════════════════════════════════════════════════════════════
+
+export interface PurchasePaymentRedated {
+  purchaseId: string;
+  paymentId: string;
+  amount: number;
+  method: string;
+  oldDate: string;
+  newDate: string;
+  revision: number;
+}
+
+/**
+ * „Edit payment date": DIESELBE Zahlung (Kennung, Betrag, Weg, Beleg, Erfassung bleiben) bekommt ihren richtigen Tag.
+ * Das Hauptbuch folgt wie beim Umdatieren einer Rechnungszahlung: die alte Buchung wird HEUTE gegengebucht, die
+ * Zahlung mit demselben Betrag und Konto auf dem RICHTIGEN Tag neu gebucht (`postPurchasePayment`, dieselbe Quelle).
+ * Bezahlt, Rest und Status ändern sich nicht. Fail-closed: kein Tag in einem eingereichten/VAT-bezahlten Quartal —
+ * weder der alte noch der neue noch der heutige (die Gegenbuchung) —, nichts vor dem Eröffnungsstichtag, kein Tag
+ * vor dem Einkauf oder in der Zukunft. Guthaben-Einlösungen (method 'credit') tragen den Tag ihrer Einlösung und
+ * werden hier nicht umdatiert. Jede Korrektur steht mit Grund im Verlauf (purchase_edits) und im Audit-Protokoll.
+ */
+export function correctPurchasePaymentDateInHouse(
+  purchaseId: string, paymentId: string, newDateRaw: string, reasonRaw: string, ctx: HouseCtx, expectedRevision?: number,
+): PurchasePaymentRedated {
+  assertBooks();
+  const p = livePurchase(purchaseId, ctx.branchId);
+  assertSeen(purchaseId, expectedRevision);
+  const reason = typeof reasonRaw === 'string' ? reasonRaw.trim() : '';
+  if (!reason) throw nein('PURCHASE_EDIT_REASON_REQUIRED', 'Please enter a reason for correcting the payment date.');
+  if (String(p.status) === 'CANCELLED') throw nein('PURCHASE_CANCELLED', 'A cancelled purchase is not edited.');
+  if (p.source_consignment_id || /^Consignor payout/.test(String(p.notes ?? ''))
+    || query('SELECT 1 FROM purchase_lines WHERE purchase_id = ? AND source_consignment_id IS NOT NULL LIMIT 1', [purchaseId]).length > 0) {
+    throw nein('PURCHASE_EDIT_CONSIGNMENT', 'This is the automatic purchase of a consignment sale — correct it through the consignment.');
+  }
+  const pay = query('SELECT * FROM purchase_payments WHERE id = ? AND purchase_id = ?', [paymentId, purchaseId])[0];
+  if (!pay) throw nein('PAYMENT_NOT_FOUND', 'no such payment on this purchase');
+  if (pay.voided_at) throw nein('PAYMENT_ALREADY_VOIDED', 'This payment is voided — its date is not corrected.');
+  const method = String(pay.method ?? '');
+  if (method === 'credit') {
+    throw nein('PAYMENT_DATE_CREDIT', 'A supplier-credit application carries the day it was applied — it is not re-dated.');
+  }
+  const newDate = typeof newDateRaw === 'string' ? newDateRaw.trim() : '';
+  const issue = /^\d{4}-\d{2}-\d{2}$/.test(newDate) ? businessDateIssue(newDate, 'The payment date', Date.parse(ctx.now)) : 'The payment date is not a valid date';
+  if (issue) throw nein('PAYMENT_DATE_INVALID', issue);
+  const oldDate = dayOf(String(pay.paid_at ?? ''));
+  if (newDate === oldDate) throw nein('PAYMENT_DATE_UNCHANGED', 'The payment already has this date.');
+  const purchaseDate = dayOf(String(p.purchase_date ?? ''));
+  if (purchaseDate && newDate < purchaseDate) {
+    throw nein('PAYMENT_DATE_BEFORE_PURCHASE', `The payment date cannot be before the purchase date (${purchaseDate}).`);
+  }
+  if (oldDate < OPENING_CUTOFF_DATE || newDate < OPENING_CUTOFF_DATE) {
+    throw nein('PURCHASE_EDIT_BEFORE_CUTOVER',
+      `A payment dated before the opening cut-off (${OPENING_CUTOFF_DATE}) waits for the accountant to confirm the opening balances.`);
+  }
+  // VAT-PERIOD-LOCK — die Buchungen eines eingereichten oder VAT-bezahlten Quartals ändern sich nicht: weder durch das
+  // Herausnehmen (alter Tag) noch das Hineinlegen (neuer Tag) noch die heutige Gegenbuchung.
+  const zu = closedVatQuarters(ctx.branchId);
+  for (const [tag, was] of [[oldDate, 'the recorded date'], [newDate, 'the new date'], [dayOf(ctx.now), 'today (the correction is booked today)']] as const) {
+    const q = nbrQuarterOfDate(tag)?.key ?? '';
+    const c = q ? zu.get(q) : undefined;
+    if (c) {
+      throw nein('VAT_PERIOD_FILED',
+        `The VAT return for ${quarterLabel(q)} is already ${c.filedAt ? 'filed' : 'paid'} — ${was} lies in it, so the payment date cannot be moved.`);
+    }
+  }
+  if (!hasLedgerEntries('PURCHASE_PAYMENT', paymentId)) {
+    throw nein('PURCHASE_EDIT_NO_LEDGER', 'This payment has no live accounting entry. It has to be reconciled first.');
+  }
+
+  const db = getDatabase();
+  const before = belegZustand(purchaseId);
+  db.run('UPDATE purchase_payments SET paid_at = ? WHERE id = ?', [newDate, paymentId]);
+  trackChange('purchase_payments', paymentId, 'update', {});
+  reverseSource('PURCHASE_PAYMENT', paymentId, ctx.now);
+  postPurchasePayment({
+    id: paymentId, purchaseId, amount: Number(pay.amount) || 0, method: method as PurchasePayment['method'],
+    paidAt: newDate, reference: (pay.reference as string) || undefined, note: (pay.note as string) || undefined,
+    createdAt: String(pay.created_at ?? ctx.now),
+  }, String(p.supplier_id ?? ''), { occurredAt: newDate });
+  db.run('UPDATE purchases SET updated_at = ? WHERE id = ?', [ctx.now, purchaseId]);
+
+  const editNo = Number(query('SELECT COUNT(*) AS c FROM purchase_edits WHERE purchase_id = ?', [purchaseId])[0]?.c ?? 0) + 1;
+  db.run(
+    `INSERT INTO purchase_edits (id, branch_id, purchase_id, edit_no, reason, kinds, correction_kind, old_snapshot, new_snapshot, edited_by, edited_at)
+     VALUES (?, ?, ?, ?, ?, 'PAYMENT_DATE', NULL, ?, ?, ?, ?)`,
+    [uuid(), ctx.branchId, purchaseId, editNo, reason, JSON.stringify(before), JSON.stringify(belegZustand(purchaseId)), ctx.userId || null, ctx.now],
+  );
+  logAuditOrThrow({
+    module: 'Purchase', entityType: 'purchase_payments', entityId: paymentId, action: 'UPDATE', field: 'paid_at',
+    oldValue: { paidAt: oldDate, amount: Number(pay.amount) || 0, method }, newValue: { paidAt: newDate, reason, purchaseId },
+    actor: { branchId: ctx.branchId, userId: ctx.userId },
+  });
+  trackChange('purchases', purchaseId, 'update', {});
+  return { purchaseId, paymentId, amount: Number(pay.amount) || 0, method, oldDate, newDate, revision: revisionOf(purchaseId) };
 }

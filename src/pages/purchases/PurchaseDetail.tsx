@@ -32,7 +32,8 @@ import { savePurchaseCredit, savePurchasePayment, viaWrites } from '@/core/payab
 // (`purchases.return_to_supplier` / `purchases.cancel`): am Primary die Hausfolge in einer Klammer,
 // auf PC2 der geprüfte Befehl mit der gesehenen Fassung. Summen, Erstattung, Bestand rechnet der Primary.
 import { PURCHASE_LIFECYCLE_OP } from '@/core/purchases/purchase-lifecycle-house';
-import { savePurchaseCancel, savePurchasePaymentVoid, savePurchaseReturn } from '@/core/purchases/purchase-house';
+import { savePurchaseCancel, savePurchasePaymentDate, savePurchasePaymentVoid, savePurchaseReturn } from '@/core/purchases/purchase-house';
+import { latestBusinessDate } from '@/core/utils/business-date';
 // PURCHASE-EDIT — Bearbeiten (eigene Maske), eine falsch erfasste Zahlung stornieren (D14, nur Owner).
 import { PURCHASE_EDIT_OP } from '@/core/purchases/purchase-edit-house';
 import { usePermission } from '@/hooks/usePermission';
@@ -78,6 +79,11 @@ export function PurchaseDetail() {
   const [voidPay, setVoidPay] = useState<{ id: string; label: string } | null>(null);
   const [voidReason, setVoidReason] = useState('');
   const [voidFehler, setVoidFehler] = useState('');
+  // v0.8.94 — „Edit date": das Datum EINER erfassten Zahlung berichtigen (Betrag, Weg, Beleg bleiben).
+  const [datePay, setDatePay] = useState<{ id: string; label: string; paidAt: string } | null>(null);
+  const [newPayDate, setNewPayDate] = useState('');
+  const [dateReason, setDateReason] = useState('');
+  const [dateFehler, setDateFehler] = useState('');
   const perm = usePermission();
 
   useEffect(() => { loadPurchases(); loadSuppliers(); loadReturns(); loadProducts(); loadCategories(); loadEmployees(); }, [loadPurchases, loadSuppliers, loadReturns, loadProducts, loadCategories, loadEmployees]);
@@ -217,6 +223,16 @@ export function PurchaseDetail() {
     setCreditTick((t) => t + 1);
     setVoidPay(null);
     setVoidReason('');
+  }
+
+  // v0.8.94 — „Edit date": EINE Buchung gegen die gesehene Fassung; dieselbe Zahlung, der richtige Tag.
+  async function handlePaymentDate() {
+    if (!purchase || !datePay || w.busy) return;
+    setDateFehler('');
+    const r = await savePurchasePaymentDate(viaWrites(w, PURCHASE_EDIT_OP.CORRECT_PAYMENT_DATE), purchase, datePay.id, newPayDate, dateReason);
+    if (r.kind !== 'ok') { setDateFehler(fehlertext(r)); return; }
+    setDatePay(null);
+    setDateReason('');
   }
 
   const getProductName = (pid?: string) => {
@@ -465,6 +481,12 @@ export function PurchaseDetail() {
                   </div>
                   <div className="flex items-center gap-3">
                     <span className="font-mono" style={{ fontSize: 13, color: p.voidedAt ? '#9CA3AF' : '#16A34A', textDecoration: p.voidedAt ? 'line-through' : 'none' }}><Bhd v={p.amount}/> BHD</span>
+                    {!p.voidedAt && perm.isOwner && purchase.status !== 'CANCELLED' && p.method !== 'credit' && (
+                      <Button variant="ghost" onClick={() => {
+                        setDateFehler(''); setDateReason(''); setNewPayDate(String(p.paidAt).slice(0, 10));
+                        setDatePay({ id: p.id, label: `${p.paidAt} · ${p.method.toUpperCase()} · ${fmt(p.amount)} BHD`, paidAt: String(p.paidAt).slice(0, 10) });
+                      }} data-purchase-payment-date={p.id}>Edit date</Button>
+                    )}
                     {!p.voidedAt && perm.isOwner && purchase.status !== 'CANCELLED' && (
                       <Button variant="ghost" onClick={() => { setVoidFehler(''); setVoidReason(''); setVoidPay({ id: p.id, label: `${p.paidAt} · ${p.method.toUpperCase()} · ${fmt(p.amount)} BHD` }); }}
                         data-purchase-payment-void={p.id}>Void</Button>
@@ -693,6 +715,31 @@ export function PurchaseDetail() {
             <Button variant="ghost" onClick={() => setVoidPay(null)} disabled={w.busy}>Cancel</Button>
             <Button variant="danger" onClick={() => void handleVoidPayment()} disabled={w.busy || !voidReason.trim()} data-purchase-void-confirm>
               {w.busy ? 'Voiding…' : 'Void Payment'}
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* v0.8.94 — das Datum einer erfassten Zahlung berichtigen: dieselbe Zahlung (Betrag, Weg, Beleg), der richtige
+          Tag; die Buchung wird heute gegengebucht und am richtigen Tag neu gebucht. Gesperrt in eingereichten oder
+          VAT-bezahlten Quartalen, vor dem Eröffnungsstichtag, vor dem Einkauf und in der Zukunft. */}
+      <Modal open={!!datePay} onClose={() => setDatePay(null)} title="Edit Payment Date" width={440}>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <p style={{ fontSize: 13, color: '#4B5563' }}>
+            Correct the date of <strong style={{ color: '#0F0F10' }}>{datePay?.label}</strong>. Amount, method and reference stay;
+            the booking is moved to the correct day (reversed today, booked again on that day). The correction is logged.
+          </p>
+          <Input label="CORRECT PAYMENT DATE" type="date" value={newPayDate} max={latestBusinessDate()}
+            min={purchase.purchaseDate ? String(purchase.purchaseDate).slice(0, 10) : undefined}
+            onChange={e => setNewPayDate(e.target.value)} disabled={w.busy} data-purchase-payment-date-input />
+          <Input required label="REASON" value={dateReason} onChange={e => setDateReason(e.target.value)} disabled={w.busy}
+            placeholder="e.g. wrong day entered" data-purchase-payment-date-reason />
+          <WriteError text={dateFehler} />
+          <div className="flex justify-end gap-3">
+            <Button variant="ghost" onClick={() => setDatePay(null)} disabled={w.busy}>Cancel</Button>
+            <Button variant="primary" onClick={() => void handlePaymentDate()} data-purchase-payment-date-confirm
+              disabled={w.busy || !dateReason.trim() || !newPayDate || newPayDate === datePay?.paidAt}>
+              {w.busy ? 'Saving…' : 'Save Date'}
             </Button>
           </div>
         </div>

@@ -43,7 +43,7 @@
 
   const MPX = MobilePurchase;
   const MP = {
-    draft: null, open: new Set(['supplier', 'items']), busy: false, sending: false, saveTimer: null,
+    draft: null, open: new Set(['supplier', 'items', 'date']), busy: false, sending: false, saveTimer: null,
     partners: null, results: { supplier: [], customer: [], product: {} }, issues: [],
   };
   const mpH = (s) => String(s == null ? '' : s).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -231,9 +231,15 @@
     return h;
   }
 
+  // v0.8.94 — das Einkaufsdatum ist der LETZTE Abschnitt, direkt vor „Save Purchase" (dort prüft oder ändert man es
+  // vor dem Speichern); die Steuerart bleibt oben, weil sie die Preise der Positionen betrifft. Ein Feld, keine Kopie.
+  function mpDateBody(d) {
+    return '<div class="mp-row"><label>Purchase date *</label><input type="date" data-mp-field="purchaseDate" max="' + MobileBusinessDate.latestBusinessDate() + '" value="' + mpH(d.purchaseDate) + '" />'
+      + '<p class="mp-note">Check or change the date right before saving.</p></div>';
+  }
+
   function mpDetailsBody(d) {
-    return '<div class="mp-row"><label>Purchase date *</label><input type="date" data-mp-field="purchaseDate" max="' + MobileBusinessDate.latestBusinessDate() + '" value="' + mpH(d.purchaseDate) + '" /></div>'
-      + '<div class="mp-row"><label>Input VAT</label><select data-mp-field="taxScheme">'
+    return '<div class="mp-row"><label>Input VAT</label><select data-mp-field="taxScheme">'
       + '<option value="ZERO"' + (d.taxScheme === 'ZERO' ? ' selected' : '') + '>0 % (no input VAT)</option>'
       + '<option value="VAT_10"' + (d.taxScheme === 'VAT_10' ? ' selected' : '') + '>10 % (input VAT included)</option></select>'
       + '<p class="mp-note">Prices are what the supplier gets per piece. With 10 % the input VAT is taken out of that price — as on the desktop.</p></div>';
@@ -355,10 +361,11 @@
     if (!d) return;
     $('mpSubline').textContent = d.status === 'confirmed' ? 'Purchase booked' : (d.status === 'pending' ? 'Waiting for main computer' : 'New Purchase');
     const html = mpSection('supplier', 'Supplier', MPX.supplierSummary(d), mpSupplierBody(d))
-      + mpSection('details', 'Purchase details', d.purchaseDate + ' · ' + (d.taxScheme === 'VAT_10' ? 'VAT 10 %' : 'no VAT'), mpDetailsBody(d))
+      + mpSection('details', 'Input VAT', d.taxScheme === 'VAT_10' ? 'VAT 10 %' : 'no VAT', mpDetailsBody(d))
       + mpSection('items', 'Items', MPX.itemsSummary(d), mpItemsBody(d))
       + mpSection('payments', 'Payments', MPX.paymentsSummary(d), mpPaymentsBody(d))
-      + mpSection('notes', 'Notes', (d.notes || '').slice(0, 30) || 'none', '<textarea rows="3" data-mp-field="notes" placeholder="optional">' + mpH(d.notes) + '</textarea>');
+      + mpSection('notes', 'Notes', (d.notes || '').slice(0, 30) || 'none', '<textarea rows="3" data-mp-field="notes" placeholder="optional">' + mpH(d.notes) + '</textarea>')
+      + mpSection('date', 'Purchase date', MPX.longDate(d.purchaseDate), mpDateBody(d));
     $('mpSections').innerHTML = html;
     for (const it of d.items) if (it.mode === 'new' && $('mpAttrs' + it.uid)) mpRenderItemFields(it);
     mpRenderStatus();
@@ -446,7 +453,8 @@
     if (!d) return;
     const set = (sel, text) => { const e = document.querySelector(sel); if (e) e.textContent = text; };
     set('[data-mp-sum="supplier"]', MPX.supplierSummary(d));
-    set('[data-mp-sum="details"]', d.purchaseDate + ' · ' + (d.taxScheme === 'VAT_10' ? 'VAT 10 %' : 'no VAT'));
+    set('[data-mp-sum="details"]', d.taxScheme === 'VAT_10' ? 'VAT 10 %' : 'no VAT');
+    set('[data-mp-sum="date"]', MPX.longDate(d.purchaseDate));
     set('[data-mp-sum="items"]', MPX.itemsSummary(d));
     set('[data-mp-sum="payments"]', MPX.paymentsSummary(d));
     set('[data-mp-sum="notes"]', (d.notes || '').slice(0, 30) || 'none');
@@ -695,7 +703,7 @@
     const issues = MPX.validate(d, { fieldErrors: mpFieldErrors(d) });
     if (issues.length) {
       for (const x of issues) {
-        if (x.where === 'supplier' || x.where === 'details' || x.where === 'payments' || x.where === 'items') MP.open.add(x.where);
+        if (x.where === 'supplier' || x.where === 'details' || x.where === 'payments' || x.where === 'items' || x.where === 'date') MP.open.add(x.where);
         if (x.where.indexOf('item:') === 0) { MP.open.add('items'); const it = d.items[Number(x.where.slice(5))]; if (it) MP.open.add('item:' + it.uid); }
       }
       mpRender();
@@ -840,7 +848,7 @@
     if (d.supplier && d.supplier.person) MPX.normalizePerson(d.supplier.person);
     for (const it of d.items) { it.partners = it.partners || []; it.photos = it.photos || []; it.attributes = it.attributes || {}; it.scopeOfDelivery = it.scopeOfDelivery || []; }
     // Ein wartender oder gebuchter Einkauf zeigt zuerst nur seine Zusammenfassungen.
-    MP.open = d.status === 'draft' ? new Set(['supplier', 'items']) : new Set();
+    MP.open = d.status === 'draft' ? new Set(['supplier', 'items', 'date']) : new Set();
     MP.results = { supplier: [], customer: [], product: {} };
     mpClearMsgs();
     screen('formMPurchase');

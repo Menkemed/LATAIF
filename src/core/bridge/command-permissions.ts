@@ -237,6 +237,7 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'purchases.update': null,
   'purchases.correct': owner('PurchaseDetail Edit: perm.isOwner (date, supplier, prices, quantities)'),
   'purchases.void_payment': owner('PurchaseDetail: perm.isOwner (void a payment)'),
+  'purchases.correct_payment_date': owner('PurchaseDetail: perm.isOwner (correct a payment date)'),
   // MEDIA-INBOX — dasselbe Recht wie das Anlegen eines Einkaufs: wer einkaufen darf, darf ein Foto
   // in den Posteingang legen. Am Telefon gibt es keine Maske, die ein eigenes Recht prüfen könnte;
   // die Rolle des geprüften Absenders entscheidet.

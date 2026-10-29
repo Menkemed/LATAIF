@@ -175,7 +175,9 @@ function item(uid: string, extra: Record<string, unknown> = {}) {
     `DATUM Zukunft → kein Auftrag (${S(codes(neu('2026-10-02')))})`);
   ok(S(codes(neu('2026-02-31'))) === S(['DATE_INVALID:Purchase date is not a valid date.']) && S(codes(neu('15.08.2026'))) === S(['DATE_INVALID:Purchase date is not a valid date.'])
     && S(codes(neu(''))) === S(['DATE_REQUIRED:Enter the purchase date.']), 'DATUM kein Kalendertag oder leer → kein Auftrag');
-  ok(MP.validate(neu('2099-01-01'), { nowMs: JETZT })[0].where === 'details', 'DATUM der Fehler führt in „Purchase details"');
+  ok(MP.validate(neu('2099-01-01'), { nowMs: JETZT })[0].where === 'date', 'DATUM der Fehler führt in „Purchase date" (v0.8.94: letzter Abschnitt)');
+  ok(MP.longDate('2026-10-29') === '29 October 2026' && MP.longDate('2026-08-05') === '5 August 2026' && MP.longDate('') === '',
+    'DATUM die Zusammenfassung schreibt den Tag aus (29 October 2026), ohne Gebietsschema');
 
   // Entwurf in der Ablage des Telefons (IndexedDB = strukturierte Kopie): das gewählte Datum übersteht den Neustart.
   const abgelegt = JSON.parse(JSON.stringify(frueher));
@@ -216,7 +218,15 @@ function item(uid: string, extra: Record<string, unknown> = {}) {
   const ui = src('src-tauri/src/sync/mobile_purchase_ui.js');
   ok(/MPX\.newDraft\(uuid\(\), mpToday\(\)\)/.test(ui) && /const mpToday = \(\) => MobileBusinessDate\.todayIso\(\);/.test(ui)
     && /data-mp-field="purchaseDate" max="' \+ MobileBusinessDate\.latestBusinessDate\(\) \+ '"/.test(ui) && /f === 'purchaseDate' \|\| f === 'taxScheme'/.test(ui),
-    'UI Datumsfeld in „Purchase details": heute vorbelegt, spätester Tag morgen, die Wahl geht in den Entwurf');
+    'UI Datumsfeld: heute vorbelegt, spätester Tag morgen, die Wahl geht in den Entwurf');
+  {
+    // v0.8.94 — Reihenfolge: Lieferant, Steuerart, Positionen, Zahlungen, Notizen, ZULETZT das Datum (vor „Book purchase");
+    // genau EIN Datumsfeld; der Abschnitt ist im Entwurf offen.
+    const reihe = ['supplier', 'details', 'items', 'payments', 'notes', 'date'].map((k) => ui.indexOf(`mpSection('${k}'`));
+    ok(reihe.every((x, i) => x > 0 && (i === 0 || x > reihe[i - 1])) && (ui.match(/data-mp-field="purchaseDate"/g) || []).length === 1
+      && /new Set\(\['supplier', 'items', 'date'\]\)/.test(ui) && /mpSection\('date', 'Purchase date', MPX\.longDate\(d\.purchaseDate\)/.test(ui),
+      `UI Datum als letzter Abschnitt, ein Feld, offen im Entwurf (${S(reihe)})`);
+  }
 }
 
 // ── Verdrahtung ──

@@ -160,10 +160,11 @@
     // BUSINESS-DATE — dieselbe Regel wie am Primary: ein echter Tag, nicht in der Zukunft. Der Entwurf
     // traegt IMMER einen ausgeschriebenen Tag — „heute" wird beim Anlegen des Entwurfs gesetzt, nie erst
     // beim Senden.
-    if (!textOrNull(draft.purchaseDate)) out.push(issue('DATE_REQUIRED', 'Enter the purchase date.', 'details'));
+    // v0.8.94 — das Datum steht im letzten Abschnitt („Purchase date", direkt vor „Save Purchase"): dorthin führt der Fehler.
+    if (!textOrNull(draft.purchaseDate)) out.push(issue('DATE_REQUIRED', 'Enter the purchase date.', 'date'));
     else {
       const datum = MBD.businessDateIssue(draft.purchaseDate, 'Purchase date', o.nowMs);
-      if (datum) out.push(issue('DATE_INVALID', datum + '.', 'details'));
+      if (datum) out.push(issue('DATE_INVALID', datum + '.', 'date'));
     }
     if (TAX_SCHEMES.indexOf(draft.taxScheme) < 0) out.push(issue('TAX_SCHEME_INVALID', 'Choose the input VAT.', 'details'));
     if (!draft.items.length) out.push(issue('LINES_REQUIRED', 'Add at least one item.', 'items'));
@@ -305,6 +306,14 @@
     return status === 'confirmed' ? 'Booked' : status === 'pending' ? 'Waiting for main computer' : 'Draft';
   }
 
+  const MONATE = ['January', 'February', 'March', 'April', 'May', 'June', 'July', 'August', 'September', 'October', 'November', 'December'];
+  /** „2026-10-29" → „29 October 2026" — ohne Gebietsschema (dasselbe auf jedem Telefon); sonst der Text, wie er ist. */
+  function longDate(iso) {
+    const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(String(iso || ''));
+    if (!m || Number(m[2]) < 1 || Number(m[2]) > 12) return String(iso || '');
+    return Number(m[3]) + ' ' + MONATE[Number(m[2]) - 1] + ' ' + m[1];
+  }
+
   /** Was die AI vorschlagen darf: beschreibende Felder der Ware — nie Preis, Menge, Partner, Zahlung. */
   const AI_FIELDS = ['brand', 'name', 'condition'];
 
@@ -316,7 +325,7 @@
     lineTotalF: lineTotalF, totals: totals, pctOfAmount: pctOfAmount, shareBreakdown: shareBreakdown,
     validate: validate, buildBody: buildBody, brandRequired: brandRequired, brandHidden: brandHidden,
     supplierSummary: supplierSummary, itemsSummary: itemsSummary, itemSummary: itemSummary,
-    partnerSummary: partnerSummary, paymentsSummary: paymentsSummary, statusLabel: statusLabel,
+    partnerSummary: partnerSummary, paymentsSummary: paymentsSummary, statusLabel: statusLabel, longDate: longDate,
     COUNTRIES: COUNTRIES, DEFAULT_ISO: DEFAULT_ISO, countryOf: countryOf, splitPhone: splitPhone, joinPhone: joinPhone,
     phoneHint: phoneHint, personalIdHint: personalIdHint, normalizePerson: normalizePerson,
   };

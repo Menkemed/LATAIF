@@ -304,6 +304,8 @@ pub const OP_PAGE_OPENING_ACCOUNTING_GET: &str = "page.opening_accounting.get";
 pub const OP_PURCHASES_UPDATE: &str = "purchases.update";
 pub const OP_PURCHASES_CORRECT: &str = "purchases.correct";
 pub const OP_PURCHASES_VOID_PAYMENT: &str = "purchases.void_payment";
+// v0.8.94 — das Datum einer erfassten Einkaufszahlung berichtigen (nur Owner; Gegenbuchung heute, Neubuchung am richtigen Tag).
+pub const OP_PURCHASES_CORRECT_PAYMENT_DATE: &str = "purchases.correct_payment_date";
 pub const OP_PURCHASE_EDIT_CHECK_GET: &str = "purchase.edit_check.get";
 pub const OP_PAGE_COST_CORRECTIONS_GET: &str = "page.cost_corrections.get";
 // CENTRAL-UI-PARITY R6E — Angebot, Rechnungs-Lebenszyklus, Nachrichtenprotokoll.
@@ -574,6 +576,8 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_PURCHASES_UPDATE,
     OP_PURCHASES_CORRECT,
     OP_PURCHASES_VOID_PAYMENT,
+    // v0.8.94 — das Datum einer erfassten Zahlung berichtigen.
+    OP_PURCHASES_CORRECT_PAYMENT_DATE,
     OP_PURCHASE_EDIT_CHECK_GET,
     OP_PAGE_COST_CORRECTIONS_GET,
     // v0.8.91 — die SKU-Vorschau aus dem Zähler des Primary (nur gelesen).

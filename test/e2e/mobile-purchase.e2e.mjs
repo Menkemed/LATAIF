@@ -359,7 +359,7 @@ try {
   const HEUTE = new Date().toISOString().split('T')[0];
   const DATUM = { m1: '2026-08-15', m2: '2026-07-04', m3: '2026-06-20' };
   const datumWaehlen = async (tag) => {
-    if (!(await exists(phone, '[data-mp-field="purchaseDate"]'))) { await klick(phone, '[data-mp-toggle="details"]'); await sleep(200); }
+    if (!(await exists(phone, '[data-mp-field="purchaseDate"]'))) { await klick(phone, '[data-mp-toggle="date"]'); await sleep(200); }
     return tippe('[data-mp-field="purchaseDate"]', tag);
   };
   const tageVon = (purchaseId) => ({
@@ -520,9 +520,9 @@ try {
     ok(verworfen === 1 && wartet && nachErstem === vorher + 1, `M2 Antwort verloren: der Primary HAT gebucht, das Telefon wartet ehrlich (${S(MESS.m2)})`);
     ok(gebucht && nachKlaerung === nachErstem && nachweisFuer('purchases.create') === 2, `M2 „Send again" liefert das bekannte Ergebnis — kein zweiter Einkauf (${S(MESS.m2)})`);
     const tage = tageVon(letzterEinkauf());
-    const amTelefon = await text(phone, '[data-mp-sum="details"]');
+    const amTelefon = await text(phone, '[data-mp-sum="date"]');
     MESS.m2.datum = { tage, amTelefon };
-    ok(tage.einkauf === DATUM.m2 && S(tage.lose) === S([DATUM.m2]) && amTelefon.startsWith(DATUM.m2),
+    ok(tage.einkauf === DATUM.m2 && S(tage.lose) === S([DATUM.m2]) && amTelefon === '4 July 2026',
       `M2 DATUM nach verlorener Antwort und „Send again": am Primary und am Telefon der gewählte Tag — nicht „heute" (${S(MESS.m2.datum)})`);
     RV.m2 = verworfen === 1 && wartet && gebucht && nachKlaerung === nachErstem && tage.einkauf === DATUM.m2;
   }
