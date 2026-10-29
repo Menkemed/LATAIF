@@ -584,6 +584,62 @@ try {
     `C3 Zahlung 550 storniert (Zeile bleibt), Einkauf offen 500, Guthaben aufgelöst, Kasse nur noch P3 (${alleOk(r)} ${p.status})`);
   }
 
+  // ── C3b v0.8.94 Zahlungsdatum berichtigen (PC2, Owner): dieselbe Zahlung, der richtige Tag, keine Doppelbuchung ──
+  {
+    const r = [];
+    const k4 = await kauf('pe-sup-a', '2026-10-22', 'Rolex PE4', 1, 600, 200);
+    await spuelen(primary);
+    const P4 = k4.id;
+    const payId = String(dbQ(BIZ_DB, 'SELECT id FROM purchase_payments WHERE purchase_id = ?', [P4])[0]?.id || '');
+    const vorPay = zeile('purchase_payments', payId);
+    const vorKopf = zeile('purchases', P4);
+    const quelle = (id) => dbQ(BIZ_DB, "SELECT account, direction, ROUND(amount, 3) AS a, substr(occurred_at, 1, 10) AS d, reverses_entry_id FROM ledger_entries WHERE source_module = 'PURCHASE_PAYMENT' AND source_id = ? ORDER BY rowid", [id]);
+    const lebend = (id) => dbQ(BIZ_DB, `SELECT e1.account, e1.direction, ROUND(e1.amount, 3) AS a, substr(e1.occurred_at, 1, 10) AS d FROM ledger_entries e1
+      WHERE e1.source_module = 'PURCHASE_PAYMENT' AND e1.source_id = ? AND e1.reverses_entry_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id) ORDER BY e1.account`, [id]);
+    const vorAp = saldo('ACCOUNTS_PAYABLE', 'AND counterparty_id = ?', ['pe-sup-a']);
+    const vorKasse = saldo('CASH');
+    ok(P4 && vorPay.paid_at === '2026-10-22' && S(lebend(payId).map((x) => x.d)) === S(['2026-10-22', '2026-10-22']),
+      `C3b SETUP Einkauf P4 mit Zahlung 200 bar am 22.10. (${S(lebend(payId))})`);
+    await syncRuhe();
+    client = await lade(client, `/purchases/${P4}`);
+    if (!(await warteBis(client, q(`[data-purchase-payment-date="${payId}"]`), 30000))) r.push('KEIN-EDIT-DATE');
+    r.push(await klick(client, `[data-purchase-payment-date="${payId}"]`));
+    await warteBis(client, q('[data-purchase-payment-date-input]'), 10000);
+    r.push(await setVal(client, '[data-purchase-payment-date-input]', '2026-10-24'));
+    r.push(await setVal(client, '[data-purchase-payment-date-reason]', 'e2e: Kontoauszug sagt 24.10.'));
+    await sleep(300);
+    r.push(await klick(client, '[data-purchase-payment-date-confirm]'));
+    const zu = await warteBis(client, "!document.querySelector('[data-purchase-payment-date-input]')", 20000);
+    await spuelen(primary);
+    const pay = zeile('purchase_payments', payId);
+    const kopf = zeile('purchases', P4);
+    await merke(client);
+    const auftraege = kmd('purchases.correct_payment_date');
+    ok(alleOk(r) === 'OK' && zu && auftraege.length === 1,
+      `C3b PC2: „Edit date" schickt EINEN Auftrag purchases.correct_payment_date (${alleOk(r)} ${auftraege.length})`);
+    ok(pay.paid_at === '2026-10-24' && pay.id === vorPay.id && Number(pay.amount) === 200 && pay.method === 'cash' && pay.created_at === vorPay.created_at && !pay.voided_at,
+      `C3b dieselbe Zahlung (Kennung, 200, bar, Erfassung), Tag jetzt 24.10. (${S(pay)})`);
+    ok(kopf.paid_amount === vorKopf.paid_amount && kopf.remaining_amount === vorKopf.remaining_amount && kopf.status === vorKopf.status,
+      `C3b Einkauf: bezahlt ${kopf.paid_amount}, offen ${kopf.remaining_amount}, ${kopf.status} — unverändert`);
+    const alle = quelle(payId);
+    const heute = new Date().toISOString().slice(0, 10);
+    ok(S(lebend(payId)) === S([{ account: 'ACCOUNTS_PAYABLE', direction: 'DEBIT', a: 200, d: '2026-10-24' }, { account: 'CASH', direction: 'CREDIT', a: 200, d: '2026-10-24' }])
+      && alle.length === 6 && alle.filter((x) => x.reverses_entry_id).length === 2 && alle.filter((x) => x.reverses_entry_id).every((x) => x.d === heute),
+      `C3b Hauptbuch: EINE lebende Buchung am 24.10., die alte heute gegengebucht — keine Doppelbuchung (${alle.length} Zeilen)`);
+    ok(saldo('ACCOUNTS_PAYABLE', 'AND counterparty_id = ?', ['pe-sup-a']) === vorAp && saldo('CASH') === vorKasse,
+      `C3b Salden Lieferant (AP) und Kasse unverändert (${vorAp} / ${vorKasse})`);
+    ok(zahl("SELECT COUNT(*) AS n FROM purchase_payments WHERE purchase_id = ? AND paid_at = '2026-10-24'", [P4]) === 1
+      && zahl("SELECT COUNT(*) AS n FROM purchase_payments WHERE purchase_id = ?", [P4]) === 1,
+      'C3b Banking (liest purchase_payments.paid_at): genau eine Bewegung, jetzt am 24.10.');
+    ok(zahl("SELECT COUNT(*) AS n FROM audit_log WHERE entity_id = ? AND field_name = 'paid_at' AND changed_by = 'user-owner'", [payId]) === 1
+      && zahl("SELECT COUNT(*) AS n FROM purchase_edits WHERE purchase_id = ? AND kinds = 'PAYMENT_DATE' AND reason = 'e2e: Kontoauszug sagt 24.10.'", [P4]) === 1,
+      'C3b protokolliert: Audit (paid_at, Benutzer von PC2) und Verlauf des Einkaufs mit Grund');
+    await geh(primary, `/purchases/${P4}`);
+    const anzeige = await warteBis(primary, `(document.querySelector('[data-purchase-payment="${payId}"]')?.textContent || '').includes('2026-10-24')`, 30000);
+    ok(anzeige, 'C3b der Primary zeigt die Zahlung am 24.10.');
+  }
+
   // ── C4 Ausweisfoto an P1 zweimal (PC2): das erste wird verborgen aufbewahrt ─────────────────────────
   const idMedien = [];
   for (const [i, farbe] of [[1, '#aa2222'], [2, '#2222aa']]) {
