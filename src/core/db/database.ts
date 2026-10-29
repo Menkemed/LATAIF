@@ -2611,6 +2611,13 @@ function runMigrations(database: Database): void {
     // Zeile je Artikel an; jede Zeile nennt ihre Kommission. Bestehende Einkäufe bleiben unberührt: ihre Zeilen haben NULL,
     // und die Suche fällt dort auf `purchases.source_consignment_id` zurück (ein Einkauf je Kommission, wie bisher).
     `ALTER TABLE purchase_lines ADD COLUMN source_consignment_id TEXT`,
+    // REPAIR-PICKUP-DATE — `picked_up_at` ist der TATSÄCHLICHE Tag der Abholung (gewählt, Standard heute), dieser der
+    // Zeitpunkt der ERFASSUNG im ERP. Bestehende Abholungen: NULL (bei ihnen war beides dasselbe Klickdatum).
+    `ALTER TABLE repairs ADD COLUMN picked_up_recorded_at TEXT`,
+    // REPAIR-REOPEN — „Returned" merkt sich, woher es kam: Status und Fertig-Zeitpunkt davor (der Return überschreibt
+    // `completed_at`). „Reopen" stellt genau das wieder her und leert beides. Bestehende Rückgaben: NULL.
+    `ALTER TABLE repairs ADD COLUMN return_from_status TEXT`,
+    `ALTER TABLE repairs ADD COLUMN return_completed_at TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

@@ -607,6 +607,62 @@ try {
     ok(fotos[0] && fotos[0].stagingId === hash(uploads[1]) && fotos[1].stagingId === hash(uploads[3]),
       '§5 …Titelbild = das zuerst gewaehlte Galeriebild, dahinter das Kamerafoto (Reihenfolge der Maske)');
   }
+
+  // ── §6 REPAIR-WORKFLOW (v0.8.94): tatsächlicher Abholtag, „Returned" mit zweitem Antippen, „Reopen as …" ──
+  {
+    const tag = (d) => new Date(Date.now() + d * 86400000).toISOString().slice(0, 10);
+    const rep = {
+      id: 'rep-wf', repairNumber: 'REP-2026-00091', revision: 3, status: 'ready', issueDescription: 'Glas', notes: '',
+      repairType: 'internal', actualCost: null, chargeToCustomer: 30, workshopSupplierId: '', images: [], lines: [],
+      openLineTotal: 0, receivedAt: '2026-08-15T12:00:00.000Z', allowedStatusTargets: ['picked_up', 'returned'], invoiceId: '',
+    };
+    antwortGeber = (url, body) => {
+      const op = body && body.op;
+      if (op === 'repairs.get') return { status: 200, body: { ok: true, value: rep } };
+      if (op === 'repairs.list') return { status: 200, body: { ok: true, value: { items: [{ id: rep.id, repairNumber: rep.repairNumber, status: rep.status }] } } };
+      if (op === 'suppliers.list') return { status: 200, body: { ok: true, value: { items: [] } } };
+      return { status: 200, body: { ok: true, value: {} } };
+    };
+    const oeffnen = async () => {
+      await c.ev("window.__rpHomeOpen(); return 1;"); await sleep(500);
+      await c.ev("document.getElementById('rpSearchBtn').click(); return 1;"); await sleep(600);
+      await c.ev("const b=document.querySelectorAll('#rpList button')[0]; if (b) b.click(); return 1;"); await sleep(900);
+    };
+    const tippen = async (text, vorbereiten) => {
+      gesehen.length = 0;
+      if (vorbereiten) await c.ev(vorbereiten + ' return 1;');
+      await c.ev(`const b=[...document.querySelectorAll('#rpStatusRow button')].find(x=>x.textContent.trim()===${S(text)}); if (b) b.click(); return 1;`);
+      for (let i = 0; i < 20; i++) { if (gesehen.some((g) => g.body && g.body.op === 'repairs.update_status')) break; await sleep(150); }
+      await sleep(300);
+      return gesehen.filter((g) => g.body && g.body.op === 'repairs.update_status');
+    };
+    await oeffnen();
+    const feld = await c.ev(`const d=document.getElementById('rpPickupDate'); const b=[...document.querySelectorAll('#rpStatusRow button')].map(x=>x.textContent.trim());
+      return { da: !!d, value: d && d.value, min: d && d.min, max: d && d.max, knoepfe: b };`);
+    ok(feld.da && feld.value === tag(0) && feld.min === '2026-08-15' && feld.max === tag(1) && S(feld.knoepfe) === S(['Mark as picked_up', 'Mark as returned']),
+      `§6 „ready": Abholtag-Feld (heute, nicht vor der Annahme, nicht künftig) und die Schritte des Primary (${S(feld)})`);
+    const zukunft = await tippen('Mark as picked_up', `document.getElementById('rpPickupDate').value='${tag(3)}';`);
+    const fehler = await c.ev("return document.getElementById('rpError').textContent;");
+    ok(zukunft.length === 0 && /cannot be in the future/.test(fehler), `§6 künftiger Abholtag: nichts geht hinaus, die Maske sagt es (${S(fehler)})`);
+    const abholen = await tippen('Mark as picked_up', `document.getElementById('rpPickupDate').value='${tag(-2)}';`);
+    ok(abholen.length === 1 && abholen[0].body.payload.status === 'picked_up' && abholen[0].body.payload.pickedUpDate === tag(-2)
+      && abholen[0].body.payload.expectedRevision === 3,
+      `§6 „picked_up" mit dem tatsächlichen Abholtag ${tag(-2)} und der Fassung (${S(abholen[0] && abholen[0].body.payload)})`);
+    await oeffnen();
+    const erst = await tippen('Mark as returned');
+    const zweiterText = await c.ev("return [...document.querySelectorAll('#rpStatusRow button')].map(x=>x.textContent.trim()).join('|');");
+    ok(erst.length === 0 && /Tap again: return without repair/.test(zweiterText), `§6 „returned": das erste Antippen schickt nichts (${zweiterText})`);
+    rep.status = 'returned'; rep.revision = 4; rep.allowedStatusTargets = ['ready'];
+    const zweit = await tippen('Tap again: return without repair');
+    ok(zweit.length === 1 && zweit[0].body.payload.status === 'returned' && !('pickedUpDate' in zweit[0].body.payload),
+      `§6 …das zweite gibt zurück (${S(zweit[0] && zweit[0].body.payload)})`);
+    await oeffnen();
+    const reopen = await c.ev("return { knoepfe: [...document.querySelectorAll('#rpStatusRow button')].map(x=>x.textContent.trim()), datum: !!document.getElementById('rpPickupDate') };");
+    ok(S(reopen.knoepfe) === S(['Reopen as ready']) && !reopen.datum, `§6 zurückgegeben: „Reopen as ready", kein Abholtag (${S(reopen)})`);
+    const wieder = await tippen('Reopen as ready');
+    ok(wieder.length === 1 && wieder[0].body.payload.status === 'ready' && wieder[0].body.payload.expectedRevision === 4,
+      `§6 „Reopen" sendet denselben Statusbefehl mit der Fassung (${S(wieder[0] && wieder[0].body.payload)})`);
+  }
 } catch (e) {
   FAIL++; fails.push('ABBRUCH: ' + String(e && e.stack ? e.stack : e));
   console.log('  x ABBRUCH: ' + String(e && e.stack ? e.stack : e));

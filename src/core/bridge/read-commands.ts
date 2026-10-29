@@ -33,7 +33,7 @@ import { copiedAttributes } from '@/core/products/duplicate-dismiss';
 // wird hier gelesen, damit der Client sie anzeigen kann — und beim Schreiben ein zweites Mal
 // gefragt. Zwei Fragen an dieselbe Funktion, nie eine Nachbildung.
 import { nextOrderStatus } from '@/core/orders/order-status-flow';
-import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
+import { repairStatusTargetsOfRow as statusTargetsOfRow } from '@/core/repairs/repair-transition-row';
 import { repairPhotoRefs } from '@/core/repairs/repair-media';
 import { SELECTABLE_WORKSHOP_SQL } from '@/core/repairs/repair-workshop-choice';
 
@@ -1028,8 +1028,11 @@ function repairDto(r: Row): CommandResult {
     // CENTRAL-C3H — hat sie schon eine Rechnung? Ohne diese Auskunft boete ein Client eine
     // zweite an, die der Primary sofort abweist.
     invoiceId: str(r.invoice_id),
-    // Und welche Schritte von hier aus wirklich gingen — aus der geteilten Ableitung.
-    allowedStatusTargets: allowedRepairStatusTargets(str(r.status), str(r.repair_type), str(r.repair_scope)),
+    // Und welche Schritte von hier aus wirklich gingen — aus der geteilten Ableitung (auch „Reopen" von „Returned").
+    allowedStatusTargets: statusTargetsOfRow(str(r.id)),
+    // REPAIR-PICKUP-DATE — der tatsächliche Abholtag und (getrennt) wann er erfasst wurde.
+    pickedUpAt: str(r.picked_up_at),
+    pickedUpRecordedAt: str(r.picked_up_recorded_at),
     revision: num(r.revision),
     updatedAt: str(r.updated_at),
   };

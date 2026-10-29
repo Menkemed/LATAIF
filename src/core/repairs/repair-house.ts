@@ -25,6 +25,7 @@ import {
   RepairActionRejected, assertRepairEditRefs, buildRepairEditPatch, normalizeRepairCreate, planRepairCreate,
   type RepairHousePort, type RepairInvoiceOptions,
 } from './repair-rules';
+import { repairStatusTargets, repairTransitionFacts } from './repair-status-flow';
 
 /** Die Nachschlagestellen des Hauses — immer in der Filiale, deren Bücher dieser Rechner führt. */
 export function houseRepairPort(branchId: string): RepairHousePort {
@@ -162,13 +163,64 @@ function mitBuchungswache<T>(what: string, work: () => T): T {
   return out;
 }
 
-/** „Mark Ready" & Co. am Primary — derselbe Hausweg wie `repairs.update_status`. */
-export function updateRepairStatusOnPrimary(id: string, status: RepairStatus): Promise<void> {
+/**
+ * Die Schritte, die das Haus an dieser Reparatur JETZT zulässt — vorwärts oder („Returned") zurück. Aus den Fakten
+ * der Zeile und ihrer Kostenzeilen (dieselbe reine Regel wie Liste, Detailseite, PC2 und Handy).
+ */
+export function repairStatusTargetsInHouse(repairId: string): RepairStatus[] {
+  const rs = useRepairStore.getState();
+  const r = rs.getRepair(repairId);
+  return r ? repairStatusTargets(repairTransitionFacts(r, rs.getRepairLines(repairId))) : [];
+}
+
+/** Ein Statusschritt am Primary — nur, was das Haus anbietet (wie `repairs.update_status`), nie ein freies Setzen. */
+export function assertRepairStatusTarget(repairId: string, status: RepairStatus): void {
+  const r = useRepairStore.getState().getRepair(repairId);
+  if (!r) throw new RepairActionRejected('REPAIR_NOT_FOUND', 'no such repair');
+  const ziele = repairStatusTargetsInHouse(repairId);
+  if (!ziele.includes(status)) {
+    throw new RepairActionRejected('REPAIR_TRANSITION_NOT_ALLOWED',
+      `a repair at "${r.status}" does not go to "${status}" — possible: ${ziele.length ? ziele.join(', ') : '(none, it is finished)'}`);
+  }
+}
+
+/**
+ * „Mark Ready", „Picked Up", „Returned", „Reopen" am Primary — derselbe Hausweg wie `repairs.update_status`:
+ * zulässiger Schritt, gesehene Fassung (wenn die Maske sie kennt), bei „picked_up" der tatsächliche Abholtag.
+ */
+export function updateRepairStatusOnPrimary(
+  id: string, status: RepairStatus, opts: { expectedRevision?: number; pickedUpDate?: string } = {},
+): Promise<void> {
   return amPrimary(() => {
     const rs = useRepairStore.getState();
     rs.loadRepairs();
     rs.loadRepairLines();
-    mitBuchungswache('repairs.update_status', () => rs.updateStatus(id, status));
+    if (opts.expectedRevision !== undefined) assertRepairRevision(id, opts.expectedRevision);
+    assertRepairStatusTarget(id, status);
+    mitBuchungswache('repairs.update_status', () => rs.updateStatus(id, status,
+      opts.pickedUpDate !== undefined ? { pickedUpDate: opts.pickedUpDate } : {}));
+  });
+}
+
+/** Eine Kostenzeile ändern am Primary — derselbe Hausweg wie `repairs.update_line` (gesehene Fassung, offene Zeile). */
+export function updateRepairLineOnPrimary(
+  repairId: string, lineId: string,
+  patch: Partial<Pick<RepairLine, 'costAmount' | 'supplierId' | 'workType' | 'description' | 'dueDate' | 'notes'>>,
+  expectedRevision: number,
+): Promise<void> {
+  return amPrimary(() => {
+    assertRepairRevision(repairId, expectedRevision);
+    const rs = useRepairStore.getState();
+    rs.loadRepairs();
+    rs.loadRepairLines();
+    const line = rs.getRepairLines(repairId).find((l) => l.id === lineId);
+    if (!line) throw new RepairActionRejected('LINE_NOT_FOUND', 'no such cost line on this repair');
+    if (line.status !== 'OPEN') throw new RepairActionRejected('LINE_NOT_OPEN', `this cost line is "${line.status}"`);
+    if (patch.costAmount !== undefined && !(Number.isFinite(patch.costAmount) && patch.costAmount > 0)) {
+      // Dieselbe Grenze wie der Fernbefehl (`positive`): eine Zeile ohne Betrag wird storniert, nicht auf 0 gesetzt.
+      throw new RepairActionRejected('LINE_COST_INVALID', 'the cost must be a positive number');
+    }
+    mitBuchungswache('repairs.update_line', () => rs.updateRepairLine(lineId, patch));
   });
 }
 

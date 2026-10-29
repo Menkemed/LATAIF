@@ -193,6 +193,9 @@ const REP = [
   ['bl-rep-3', 'BL-0003', 'received', 60], ['bl-rep-4', 'BL-0004', 'in_progress', 60], ['bl-rep-5', 'BL-0005', 'returned', 60],
   ['bl-rep-6', 'BL-0006', 'ready', 60], ['bl-rep-7', 'BL-0007', 'picked_up', 80],
 ];
+/** v0.8.94 — Quick Edit: eigene Reparaturen (Nummern ohne „BL-000", damit die Zählungen oben unberührt bleiben). */
+const TAG = (d) => new Date(Date.now() - d * 86400000).toISOString().slice(0, 10);
+const QREP = [['bq-rep-1', 'BQ-0001', 'ready'], ['bq-rep-2', 'BQ-0002', 'ready'], ['bq-rep-3', 'BQ-0003', 'ready']];
 function seed() {
   const db = new DatabaseSync(BIZ_DB);
   try {
@@ -201,6 +204,10 @@ function seed() {
     insert(db, 'customers', { id: 'bl-kunde', branch_id, first_name: 'Lina', last_name: 'Rechnung', country: 'BH', language: 'en', vip_level: 'NONE', preferences: '[]', customer_type: 'PRIVATE', sales_stage: 'active', created_at: now, updated_at: now });
     for (const [id, nr, status, charge] of REP) {
       insert(db, 'repairs', { id, branch_id, repair_number: nr, customer_id: 'bl-kunde', item_brand: 'Tudor', item_model: 'Pelagos', issue_description: 'Service ' + nr, repair_type: 'internal', internal_cost: 0, charge_to_customer: charge, margin: charge, tax_scheme: 'VAT_10', status, received_at: now, completed_at: now, picked_up_at: status === 'picked_up' ? now : null, voucher_code: 'B' + nr.replace(/\D/g, '').padStart(7, '0'), images: '[]', item_attributes: '{}', repair_scope: 'CUSTOMER', revision: 1, created_at: now, updated_at: now });
+    }
+    // v0.8.94 — die Quick-Edit-Reparaturen (nach dem Kunden, auf den sie zeigen).
+    for (const [id, nr, status] of QREP) {
+      insert(db, 'repairs', { id, branch_id, repair_number: nr, customer_id: 'bl-kunde', item_brand: 'Omega', item_model: 'Seamaster', issue_description: 'Quick ' + nr, repair_type: 'internal', internal_cost: 0, charge_to_customer: 50, margin: 50, tax_scheme: 'VAT_10', status, received_at: `${TAG(10)}T12:00:00.000Z`, completed_at: now, voucher_code: 'Q' + nr.replace(/\D/g, '').padStart(7, '0'), images: '[]', item_attributes: '{}', repair_scope: 'CUSTOMER', revision: 1, created_at: now, updated_at: now });
     }
   } finally { try { db.close(); } catch { /* zu */ } }
 }
@@ -422,6 +429,82 @@ try {
     'EINMAL die nicht abrechenbaren tragen keine Rechnung');
   const c = (await kommandos(client)).filter((x) => x.op === 'repairs.create_invoice');
   ok(c.length === 0, 'EINMAL auf den Seiten danach wurde nichts mehr geschickt');
+
+  // ── 3b) v0.8.94 Quick Edit aus der Liste — PC2 und Primary ────────────
+  const rep = (id) => dbQ(BIZ_DB, 'SELECT * FROM repairs WHERE id = ?', [id])[0] || {};
+  const offeneZeilen = (id) => dbQ(BIZ_DB, "SELECT * FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'", [id]);
+  /** „Edit" in der Zeile der Liste → das Quick-Edit-Fenster dieser Reparatur. */
+  async function quickOeffnen(c, nr) {
+    if (!(await warteBis(c, `document.body.innerText.includes(${S(nr)})`, 30000))) return 'KEINE-ZEILE';
+    const k = await c.ev(`const b=document.querySelector('[data-repair-quick-edit=${S(nr)}]'); if(!b) return 'NO'; b.click(); return 'OK';`);
+    if (k !== 'OK') return k;
+    return (await warteBis(c, `!!document.querySelector('[data-repair-quick-edit-modal=${S(nr)}]')`, 15000)) ? 'OK' : 'KEIN-FENSTER';
+  }
+  {
+    // PC2 — BQ-0001: Preis ändern, Arbeitszeile im Haus, Abholung vor 2 Tagen mit Rechnung (0 %), datiert auf den Abholtag.
+    client = await lade(client, '/repairs');
+    ok(await quickOeffnen(client, 'BQ-0001') === 'OK', 'QUICK PC2: „Edit" öffnet das Quick-Edit-Fenster');
+    await setVal(client, '[data-quick-charge]', '75'); await sleep(200);
+    await click(client, '[data-quick-save-amounts]');
+    ok(await warteAuf(() => Number(rep('bq-rep-1').charge_to_customer) === 75), `QUICK PC2: Preis 50 → 75 gespeichert (${await fehlerAnzeige(client)})`);
+    await warteBis(client, "!document.querySelector('[data-quick-save-amounts]') || document.querySelector('[data-quick-save-amounts]').disabled", 15000);
+    await click(client, '[data-quick-add-work]'); await sleep(300);
+    await click(client, '[data-ss-trigger="Pick: In-house OR a workshop"]'); await sleep(400);
+    await click(client, '[data-ss-option="__INHOUSE__"]'); await sleep(200);
+    await setVal(client, '[data-quick-work-description]', 'Politur'); await setVal(client, '[data-quick-work-cost]', '5'); await sleep(200);
+    await click(client, '[data-quick-work-save]');
+    ok(await warteAuf(() => offeneZeilen('bq-rep-1').length === 1 && Number(offeneZeilen('bq-rep-1')[0].cost_amount) === 5),
+      `QUICK PC2: Arbeitszeile „Politur" 5 im Haus angelegt (${await fehlerAnzeige(client)})`);
+    ok(await warteBis(client, "(document.querySelector('[data-quick-lines-total]')?.textContent || '').includes('5')", 20000),
+      'QUICK PC2: die Summen im Fenster zeigen die neue Zeile');
+    await warteBis(client, "!!document.querySelector('[data-quick-status-target=\"picked_up\"]') && !document.querySelector('[data-quick-status-target=\"picked_up\"]').disabled", 20000);
+    await click(client, '[data-quick-status-target="picked_up"]');
+    ok(await warteBis(client, "!!document.querySelector('[data-pickup-date]')", 10000), 'QUICK PC2: „Picked Up" fragt den Abholtag');
+    await setVal(client, '[data-pickup-date]', TAG(2)); await sleep(200);
+    await click(client, '[data-pickup-invoice]'); await sleep(200);
+    await click(client, '[data-pickup-invoice-tax="ZERO"] input'); await sleep(200);
+    await click(client, '[data-status-confirm]');
+    ok(await warteAuf(() => rep('bq-rep-1').status === 'picked_up' && String(rep('bq-rep-1').picked_up_at) === `${TAG(2)}T12:00:00.000Z`
+      && String(rep('bq-rep-1').picked_up_recorded_at || '').slice(0, 10) === TAG(0)),
+    `QUICK PC2: abgeholt am ${TAG(2)}, erfasst heute (${S([rep('bq-rep-1').picked_up_at, rep('bq-rep-1').picked_up_recorded_at])})`);
+    ok(await warteAuf(() => !!rechnungVon('bq-rep-1')), `QUICK PC2: die Rechnung entsteht gleich mit (${await fehlerAnzeige(client)})`);
+    const inv = dbQ(BIZ_DB, 'SELECT substr(issued_at, 1, 10) AS d, gross_amount FROM invoices WHERE id = ?', [rechnungVon('bq-rep-1')])[0] || {};
+    const zl = dbQ(BIZ_DB, 'SELECT tax_scheme, vat_amount FROM invoice_lines WHERE invoice_id = ?', [rechnungVon('bq-rep-1')]);
+    ok(inv.d === TAG(2) && Number(inv.gross_amount) === 75 && zl.length === 1 && zl[0].tax_scheme === 'ZERO' && Number(zl[0].vat_amount) === 0,
+      `QUICK PC2: Rechnung datiert auf den Abholtag ${TAG(2)}, 75 ohne VAT (${S(inv)} ${S(zl)})`);
+    const cmds = (await kommandos(client)).filter((x) => x.op === 'repairs.update_status' && x.payload.repairId === 'bq-rep-1');
+    ok(cmds.length === 1 && cmds[0].payload.pickedUpDate === TAG(2), `QUICK PC2: EIN Statusauftrag mit dem Abholtag (${S(cmds.map((x) => x.payload))})`);
+  }
+  {
+    // Primary — BQ-0002: „Returned" aus Versehen, dann „Reopen as Ready" (alter Stand zurück, protokolliert).
+    await geh(primary, '/repairs');
+    ok(await quickOeffnen(primary, 'BQ-0002') === 'OK', 'QUICK Primary: dasselbe Fenster');
+    await click(primary, '[data-quick-status-target="returned"]');
+    ok(await warteBis(primary, "!!document.querySelector('[data-repair-status-dialog=\"returned\"]')", 10000), 'QUICK Primary: „Returned" fragt nach');
+    await click(primary, '[data-status-confirm]');
+    ok(await warteAuf(() => rep('bq-rep-2').status === 'returned' && rep('bq-rep-2').return_from_status === 'ready'),
+      `QUICK Primary: zurückgegeben, die Stufe davor gemerkt (${S([rep('bq-rep-2').status, rep('bq-rep-2').return_from_status])})`);
+    ok(await warteBis(primary, "!!document.querySelector('[data-quick-status-target=\"reopen\"]')", 15000), 'QUICK Primary: jetzt wird „Reopen" angeboten');
+    await click(primary, '[data-quick-status-target="reopen"]');
+    ok(await warteBis(primary, "!!document.querySelector('[data-repair-status-dialog=\"reopen\"]')", 10000), 'QUICK Primary: das Reopen-Fenster');
+    await click(primary, '[data-status-confirm]');
+    ok(await warteAuf(() => rep('bq-rep-2').status === 'ready' && !rep('bq-rep-2').return_from_status && !!rep('bq-rep-2').completed_at),
+      `QUICK Primary: wieder „ready", Merker geleert (${S([rep('bq-rep-2').status, rep('bq-rep-2').return_from_status])})`);
+    ok(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM audit_log WHERE entity_id = 'bq-rep-2' AND action_type = 'STATUS_CHANGE' AND old_value = 'returned' AND new_value = 'ready' AND changed_by IS NOT NULL")[0]?.n === 1,
+      'QUICK Primary: die Rücknahme steht im Audit-Protokoll (Benutzer, Zeitpunkt)');
+    await primary.ev("document.querySelector('[data-repair-quick-edit-modal] ')?.closest('.fixed')?.querySelector('.absolute')?.click(); return 1;");
+    await sleep(500);
+    // Primary — BQ-0003: „Picked Up" direkt in der Zeile → Abholtag gestern, ohne Rechnung.
+    await geh(primary, '/repairs?r=' + Date.now());
+    await warteBis(primary, "document.body.innerText.includes('BQ-0003')", 20000);
+    const zeile = await primary.ev(`const row=[...document.querySelectorAll('div.cursor-pointer')].find(d=>d.style&&d.style.gridTemplateColumns&&d.textContent.includes('BQ-0003'));`
+      + `const b=row&&[...row.querySelectorAll('button')].find(x=>x.textContent.trim()==='Picked Up'); if(!b) return 'NO'; b.click(); return 'OK';`);
+    ok(zeile === 'OK' && await warteBis(primary, "!!document.querySelector('[data-pickup-date]')", 10000), `QUICK Primary: „Picked Up" in der Zeile fragt den Abholtag (${zeile})`);
+    await setVal(primary, '[data-pickup-date]', TAG(1)); await sleep(200);
+    await click(primary, '[data-status-confirm]');
+    ok(await warteAuf(() => rep('bq-rep-3').status === 'picked_up' && String(rep('bq-rep-3').picked_up_at) === `${TAG(1)}T12:00:00.000Z` && !rechnungVon('bq-rep-3')),
+      `QUICK Primary: abgeholt am ${TAG(1)}, keine Rechnung ohne Wahl (${S([rep('bq-rep-3').status, rep('bq-rep-3').picked_up_at])})`);
+  }
 
   // ── 4) Der Client besitzt nichts ───────────────────────────────────────
   ok((await treffer(client)).length === 0, 'LOKAL kein Griff zur lokalen Datenbank');

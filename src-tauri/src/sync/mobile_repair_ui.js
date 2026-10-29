@@ -610,15 +610,38 @@
     const row = $('rpStatusRow');
     row.innerHTML = '';
     if (!targets.length) { row.appendChild(el('div', { class: 'hint' }, 'No next step from here on a phone.')); return; }
+    // REPAIR-REOPEN — von „Returned" geht es zurück (die Stufen nennt der Primary); sonst vorwärts.
+    const reopen = rep.status === 'returned';
+    // REPAIR-PICKUP-DATE — „Picked Up" mit dem TATSÄCHLICHEN Abholtag (Standard heute; verbindlich prüft der Primary).
+    let abholtag = null;
+    if (!reopen && targets.indexOf('picked_up') >= 0) {
+      abholtag = el('input', { type: 'date', id: 'rpPickupDate' });
+      abholtag.max = MobileBusinessDate.latestBusinessDate();
+      abholtag.value = MobileBusinessDate.todayIso();
+      if (rep.receivedAt) abholtag.min = String(rep.receivedAt).slice(0, 10);
+      row.appendChild(el('div', { class: 'hint' }, 'Pickup date — the day the client actually collected the item:'));
+      row.appendChild(abholtag);
+    }
+    if (reopen) row.appendChild(el('div', { class: 'hint' }, 'Returned by mistake? Reopen it — photos, costs, lines and history stay; invoices and payments are not changed.'));
     targets.forEach((t) => {
-      const b = el('button', { type: 'button', class: 'secondary' }, 'Mark as ' + t);
+      const b = el('button', { type: 'button', class: 'secondary' }, (reopen ? 'Reopen as ' : 'Mark as ') + t);
       b.onclick = async () => {
         if (RP.busy) return;
+        const body = { repairId: rep.id, status: t, expectedRevision: rep.revision };
+        if (t === 'picked_up' && abholtag) {
+          const d = MobileBusinessDate.pickDate(abholtag.value, 'Pickup date');
+          if (!d.ok) { rpSay('rpError', d.message); return; }
+          body.pickedUpDate = d.date;
+        }
+        // „Returned" erst beim zweiten Antippen (die Seite kennt keine Rückfrage-Dialoge; rückgängig geht über Reopen).
+        if (t === 'returned' && b.dataset.armed !== '1') {
+          b.dataset.armed = '1'; b.textContent = 'Tap again: return without repair';
+          return;
+        }
         RP.busy = true; b.disabled = true;
-        const key = 'status:' + rep.id + ':' + rep.revision + ':' + t;
-        const r = await rpClient.mutate(key, 'repairs.update_status', {
-          repairId: rep.id, status: t, expectedRevision: rep.revision,
-        });
+        // Der Abholtag gehört zum Auftrag: ein anderer Tag ist ein anderer Auftrag (eigene Kennung).
+        const key = 'status:' + rep.id + ':' + rep.revision + ':' + t + (body.pickedUpDate ? ':' + body.pickedUpDate : '');
+        const r = await rpClient.mutate(key, 'repairs.update_status', body);
         RP.busy = false; b.disabled = false;
         if (r.kind === 'ok') { await rpOpen(rep.id, { keepMsgs: true, keepForm: true }); rpSay('rpSuccess', 'Status is now ' + t + '.'); }
         else rpSay('rpError', rpMessageFor(r, 'The status was not changed'));

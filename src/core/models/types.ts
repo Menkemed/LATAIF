@@ -594,7 +594,13 @@ export interface Repair {
   diagnosedAt?: string;
   startedAt?: string;
   completedAt?: string;
+  /** REPAIR-PICKUP-DATE — der TATSÄCHLICHE Abholtag (heute → der Zeitpunkt, ein anderer Tag → mittags UTC). */
   pickedUpAt?: string;
+  /** REPAIR-PICKUP-DATE — wann die Abholung im ERP erfasst wurde (fehlt bei Abholungen von vorher). */
+  pickedUpRecordedAt?: string;
+  /** REPAIR-REOPEN — Status und Fertig-Zeitpunkt vor „Returned" (nur solange die Reparatur zurückgegeben ist). */
+  returnFromStatus?: RepairStatus;
+  returnCompletedAt?: string;
   estimatedReady?: string;
   voucherCode: string;
   invoiceId?: UUID;

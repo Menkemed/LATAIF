@@ -261,7 +261,10 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
   ok(!/vatEngine|calculateNet|taxScheme ===/.test(mine), 'REUSE die Steuer rechnet der Fernweg nicht nach');
   // Der Zielzustand kommt aus der GETEILTEN Ableitung, nicht aus einer Liste hier.
   ok(/isAllowedOrderAdvance\(/.test(mine), 'FLOW der Auftrag fragt die geteilte Ableitung');
-  ok(/allowedRepairStatusTargets\(/.test(mine), 'FLOW die Reparatur ebenso');
+  // v0.8.94 — vorwärts UND „Reopen" von „Returned": die geteilte Ableitung über die Fakten der Zeile.
+  ok(/statusTargetsOfRow\(/.test(mine)
+    && /repairStatusTargets\(/.test(readFileSync(resolvePath(repo, 'src/core/repairs/repair-transition-row.ts'), 'utf8')),
+    'FLOW die Reparatur ebenso');
   ok(!/'pending'\s*,\s*'arrived'/.test(mine), 'FLOW …und keine zweite Reihenfolge steht hier');
   // Und die Bildschirme des Primary benutzen dieselbe Datei.
   ok(/ORDER_STATUS_FLOW|nextOrderStatus/.test(codeOf('src/pages/orders/OrderDetail.tsx')),

@@ -852,7 +852,7 @@ for (const weg of ['fern', 'lokal'] as const) {
   const liste = src('src/pages/repairs/RepairList.tsx');
   ok(/invoiceRepairsOnPrimary\(auswahl\.map\(\(x\) => x\.id\), wahl\)/.test(liste) && /repairInvoiceBody\(auswahl, wahl\)/.test(liste)
     && /data-repair-invoice-tax-option=\{s\}/.test(liste) && /setEinzelRechnung\(rep\)/.test(liste)
-    && /const wahl = rechnungSteuer === 'EACH' \? \{\} : \{ taxScheme: rechnungSteuer \};/.test(liste)
+    && /\.\.\.\(rechnungSteuer === 'EACH' \? \{\} : \{ taxScheme: rechnungSteuer \}\),/.test(liste)
     && /arten\.size > 1 \? 'EACH'/.test(liste),
     'LIST-TAX die Liste fragt die Steuerart (Kuerzel und Sammelrechnung) und schickt sie auf beiden Wegen mit; gemischte Auswahl: „wie an jeder Reparatur" (vorbelegt, ohne Wahl im Auftrag)');
 }
@@ -1039,8 +1039,8 @@ for (const weg of ['fern', 'lokal'] as const) {
     'TRIPWIRE am zweiten Rechner reist der Rumpf der geteilten Regeln — nichts Eigenes');
   const house2 = codeOf(src('src/core/repairs/repair-house.ts'));
   // POST-PARITY PP-13: zu Anlegen/Ändern/Abrechnen kamen Status, Zeile hinzufügen, Zeile stornieren
-  // (Kapitalisierung eigener Ware) — alle sechs durch dieselbe Klammer.
-  ok((house2.match(/return amPrimary\(/g) || []).length === 6, 'TRIPWIRE alle sechs Handlungen laufen durch EINE Klammer');
+  // (Kapitalisierung eigener Ware) — alle sechs durch dieselbe Klammer; v0.8.94 dazu „Zeile ändern" (Quick Edit): sieben.
+  ok((house2.match(/return amPrimary\(/g) || []).length === 7, 'TRIPWIRE alle sieben Handlungen laufen durch EINE Klammer');
 }
 
 // ── §9 Veralteter Entwurf am PRIMARY (Live-Test 19.09.2026, Schritt 34) ──────────────────────

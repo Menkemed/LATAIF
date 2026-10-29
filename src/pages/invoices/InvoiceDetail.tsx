@@ -46,6 +46,8 @@ import { invoicePaymentBody, recordInvoicePaymentOnPrimary } from '@/core/invoic
 import { businessDateIssue, latestBusinessDate, todayIso } from '@/core/utils/business-date';
 import { invoiceButterflyBody, setInvoiceButterflyOnPrimary } from '@/core/invoices/invoice-flag-house';
 import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
+import { RepairStatusDialog } from '@/components/repairs/RepairStatusDialog';
+import { saveRepairStatus } from '@/components/repairs/repair-status-save';
 import { effectiveMargin } from '@/core/reports/sales-metrics';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { WriteError } from '@/components/shared/WriteError';
@@ -82,7 +84,9 @@ export function InvoiceDetail() {
   const { customers, loadCustomers } = useCustomerStore();
   const { employees, loadEmployees } = useEmployeeStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
-  const { repairs, loadRepairs, updateStatus: updateRepairStatus } = useRepairStore();
+  const { repairs, loadRepairs } = useRepairStore();
+  // REPAIR-PICKUP-DATE — die Abholung der verknüpften Reparaturen fragt den tatsächlichen Abholtag.
+  const [abholFrage, setAbholFrage] = useState(false);
   const perm = usePermission();
 
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -248,28 +252,15 @@ export function InvoiceDetail() {
   const canMarkRepairPickedUp = pickupReady.length > 0 && isPaid;
 
   // Eine Buchung je Reparatur (`repairs.update_status`), jede mit ihrer gesehenen Fassung — am
-  // Primary dieselbe Domaenenfunktion wie bisher. Die erste, die nicht glueckt, haelt an und sagt es.
-  async function markRepairsPickedUp() {
-    const refs = pickupReady.map(r => r.repairNumber).join(', ');
-    const frage = pickupReady.length === 1
-      ? `Mark repair ${refs} as picked up?`
-      : `Mark all ${pickupReady.length} linked repairs as picked up? (${refs})`;
-    const rest = pickupNotReady.length
-      ? `\n\nNot ready yet — they stay as they are: ${pickupNotReady.map(r => r.repairNumber).join(', ')}`
-      : '';
-    if (!(await window.confirm(frage + rest))) return;
+  // Primary dieselbe Hausfunktion wie die Reparaturseite (eine Klammer, zulässiger Schritt). Die erste, die nicht
+  // glueckt, haelt an und sagt es. REPAIR-PICKUP-DATE — mit dem tatsächlichen Abholtag (für alle gleich); die schon
+  // ausgestellte Rechnung bleibt, wie sie ist.
+  async function markRepairsPickedUp(pickedUpDate: string) {
     for (const r of pickupReady) {
-      const fassung = r.revision;
-      if (w.remote && !fassung) {
-        w.clear(); alert(fehlertext(nichtAmClient('marking a repair as picked up (no revision loaded)'))); break;
-      }
-      const geglueckt = await w.ok('repairs.update_status', {
-        local: () => { updateRepairStatus(r.id, 'picked_up'); return {}; },
-        remote: () => ({ repairId: r.id, status: 'picked_up', expectedRevision: fassung }),
-      });
-      if (!geglueckt) break;
+      if (await saveRepairStatus(w, r, 'picked_up', pickedUpDate) === null) break;
     }
     loadRepairs();
+    setAbholFrage(false);
   }
 
   async function handleCancelInvoice() {
@@ -581,6 +572,22 @@ export function InvoiceDetail() {
 
         {/* R4C — der Ausgang jeder Geldhandlung dieser Seite, an einer Stelle. */}
         <WriteError text={w.fehler} />
+        {/* REPAIR-PICKUP-DATE — der tatsächliche Abholtag der verknüpften Reparaturen (keine zweite Rechnung). */}
+        {abholFrage && pickupReady.length > 0 && (
+          <RepairStatusDialog
+            repair={pickupReady[0]}
+            target="picked_up"
+            allowInvoice={false}
+            busy={w.busy}
+            error={w.fehler}
+            note={[
+              pickupReady.length > 1 ? `Applies to all ${pickupReady.length} linked repairs (${pickupReady.map(r => r.repairNumber).join(', ')}).` : '',
+              pickupNotReady.length ? `Not ready yet — they stay as they are: ${pickupNotReady.map(r => r.repairNumber).join(', ')}.` : '',
+            ].filter(Boolean).join(' ')}
+            onClose={() => { setAbholFrage(false); w.clear(); }}
+            onConfirm={(s) => void markRepairsPickedUp(s.pickedUpDate ?? '')}
+          />
+        )}
 
         {/* Header */}
         <div className="flex items-center justify-between" style={{ marginBottom: 32 }}>
@@ -612,7 +619,7 @@ export function InvoiceDetail() {
                 {perm.canExportData && <Button variant="ghost" onClick={handleExportVat}><Table size={14} /> VAT Export</Button>}
                 {canRecordPayment && perm.canRecordPayments && <Button variant="primary" onClick={openPaymentModal}><CreditCard size={14} /> Record Payment</Button>}
                 {canMarkRepairPickedUp && (
-                  <Button variant="primary" data-repair-pickup disabled={w.busy} onClick={() => { void markRepairsPickedUp(); }}>
+                  <Button variant="primary" data-repair-pickup disabled={w.busy} onClick={() => { w.clear(); setAbholFrage(true); }}>
                     <ExternalLink size={14} /> Mark as Picked Up
                     {pickupReady.length > 1 ? ` (${pickupReady.length})` : ''}
                   </Button>

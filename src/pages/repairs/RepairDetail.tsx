@@ -51,7 +51,13 @@ import {
   addRepairLineOnPrimary, cancelRepairLineOnPrimary, invoiceRepairsOnPrimary, updateRepairOnPrimary, updateRepairStatusOnPrimary,
 } from '@/core/repairs/repair-house';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
-import { nextRepairStatus, repairStatusFlow } from '@/core/repairs/repair-status-flow';
+import {
+  nextRepairStatus, repairStatusActionLabel, repairStatusFlow, repairStatusTargets, repairTransitionFacts,
+} from '@/core/repairs/repair-status-flow';
+import { repairInvoiceDateSuggestion } from '@/core/repairs/repair-rules';
+import { latestBusinessDate } from '@/core/utils/business-date';
+import { RepairStatusDialog, type RepairStatusStep } from '@/components/repairs/RepairStatusDialog';
+import { saveRepairInvoice } from '@/components/repairs/repair-status-save';
 import { goldUsageLine } from '@/core/gold/gold-usage-view';
 import {
   isOwnWorkLine, ownWorkDescription, materialDescription, showsInternalCostRow,
@@ -154,6 +160,10 @@ export function RepairDetail() {
   // ZERO ↔ VAT_10 wechseln koennen ohne erst den Repair zu editieren.
   const [taxSchemeDialog, setTaxSchemeDialog] = useState(false);
   const [pendingTaxScheme, setPendingTaxScheme] = useState<RepairTaxScheme>('ZERO');
+  // REPAIR-PICKUP-DATE — der Rechnungstag im Steuerdialog: vorgeschlagen der Abholtag (abgeholt), sonst heute.
+  const [rechnungsDatum, setRechnungsDatum] = useState('');
+  // REPAIR-WORKFLOW — die Rückfrage zu „Picked Up" (Abholtag) bzw. „Reopen" (zurückgegeben).
+  const [statusFrage, setStatusFrage] = useState<RepairStatus | 'REOPEN' | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [showMessage, setShowMessage] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
@@ -183,16 +193,41 @@ export function RepairDetail() {
   // CENTRAL-UI-PARITY R4C.2 — dieselbe Maske, zwei Anschluesse hinter jeder Handlung.
   const w = useSharedWrites();
   /** R4C.2 — den Status weiterschalten. Bestandswirksam und fassungsbasiert. */
-  async function statusSetzen(status: RepairStatus) {
-    if (!id) return;
+  async function statusSetzen(status: RepairStatus, pickedUpDate?: string): Promise<number | null> {
+    if (!id || !repair) return null;
     const fassung = fassungOderNichts('changing the repair status');
-    if (fassung === null) return;
-    if (!await w.ok('repairs.update_status', {
-      // POST-PARITY PP-13 — am Primary in EINER Klammer (Forderung, Kapitalisierung, Status).
-      local: async () => { await updateRepairStatusOnPrimary(id, status); return {}; },
-      remote: () => ({ repairId: id, status, expectedRevision: fassung }),
-    })) return;
+    if (fassung === null) return null;
+    // POST-PARITY PP-13 — am Primary in EINER Klammer (Forderung, Kapitalisierung, Status); seit v0.8.94 auch dort
+    // gegen die gesehene Fassung und nur als zulässiger Schritt (`repairStatusTargets`), wie fern — bei „picked_up"
+    // mit dem tatsächlichen Abholtag. Gibt die Fassung NACH dem Schritt zurück (für die Rechnung gleich danach).
+    const r = await w.save('repairs.update_status', {
+      local: async () => {
+        await updateRepairStatusOnPrimary(id, status, {
+          ...(fassung ? { expectedRevision: fassung } : {}), ...(pickedUpDate ? { pickedUpDate } : {}),
+        });
+        return { revision: useRepairStore.getState().getRepair(id)?.revision ?? 0 } as Record<string, unknown>;
+      },
+      remote: () => ({ repairId: id, status, expectedRevision: fassung, ...(pickedUpDate ? { pickedUpDate } : {}) }),
+    });
     loadRepairs(); loadRepairLines();
+    return r.kind === 'ok' ? Number((r.value as { revision?: unknown }).revision) || 0 : null;
+  }
+
+  /** „Picked Up" (Abholtag, auf Wunsch gleich die Rechnung) und „Reopen" — aus dem gemeinsamen Statusfenster. */
+  async function statusFrageBestaetigen(step: RepairStatusStep) {
+    if (!id || !repair) return;
+    const neu = await statusSetzen(step.status, step.pickedUpDate);
+    if (neu === null) return;
+    if (step.invoice) {
+      const inv = await saveRepairInvoice(w, [{ id, revision: neu || repair.revision }],
+        { taxScheme: step.invoice.taxScheme, invoiceDate: step.pickedUpDate });
+      loadRepairs(); loadInvoices();
+      if (!inv) return;   // abgeholt ist sie; die Rechnung lässt sich danach anlegen (mit demselben Abholtag)
+      setStatusFrage(null);
+      navigate(`/invoices/${inv}`);
+      return;
+    }
+    setStatusFrage(null);
   }
 
   /** R4C.2 — eine Kostenzeile stornieren. */
@@ -428,6 +463,8 @@ export function RepairDetail() {
   }
 
   const nextStatus = getNextStatus(repair.status, repair.repairType, repair.repairScope);
+  // REPAIR-REOPEN — von „Returned" zurück: dieselbe Regel wie Liste, PC2, Handy und Haus.
+  const reopenZiele = repair.status === 'returned' ? repairStatusTargets(repairTransitionFacts(repair, thisRepairLines)) : [];
   // Hybrid-Margin-Fix: bei Hybrid ziehen wir Internal + Workshop ab, sonst nur internalCost
   // (Workshop ist bei external bereits in internalCost gespiegelt).
   // Plan repair-multi-supplier: bei Multi-Line-Repair zaehlt SUM(OPEN lines) als
@@ -483,6 +520,7 @@ export function RepairDetail() {
     }
     // v0.7.6 — Erst Tax-Scheme-Dialog. Default = aktuelle Repair-taxScheme.
     setPendingTaxScheme(repair.taxScheme === 'ZERO' ? 'ZERO' : 'VAT_10');
+    setRechnungsDatum(repairInvoiceDateSuggestion([repair]) ?? '');
     setTaxSchemeDialog(true);
   }
 
@@ -503,7 +541,7 @@ export function RepairDetail() {
     // Rechner als EIN Auftrag mit der gesehenen Fassung.
     const fassung = fassungOderNichts('creating the repair invoice');
     if (fassung === null) return;
-    const wahl = { taxScheme: pendingTaxScheme, specialMark };
+    const wahl = { taxScheme: pendingTaxScheme, specialMark, ...(rechnungsDatum ? { invoiceDate: rechnungsDatum } : {}) };
     const r = await w.save('repairs.create_invoice', {
       local: () => invoiceRepairsOnPrimary([id], wahl),
       remote: () => repairInvoiceBody([{ id, revision: fassung }], wahl),
@@ -567,6 +605,8 @@ export function RepairDetail() {
       );
       if (!confirmed) return;
     }
+    // REPAIR-PICKUP-DATE — „Picked Up" fragt den tatsächlichen Abholtag (und bietet die Rechnung gleich an).
+    if (nextStatus === 'picked_up') { w.clear(); setStatusFrage('picked_up'); return; }
     try {
       void statusSetzen(nextStatus);
     } catch (err) {
@@ -669,10 +709,17 @@ export function RepairDetail() {
                   && repair.status !== 'cancelled' && repair.status !== 'CANCELLED' && repair.status !== 'DELIVERED' && (
                   <Button variant="secondary" onClick={async () => {
                     if (!id) return;
-                    if (!(await window.confirm(`Mark repair ${repair.repairNumber} as returned to customer (no repair performed)?`))) return;
+                    if (!(await window.confirm(`Mark repair ${repair.repairNumber} as returned to customer (no repair performed)? If this is a mistake, it can be reopened later.`))) return;
                     void statusSetzen('returned');
                   }}>
                     <RotateCcw size={14} /> Mark as Returned
+                  </Button>
+                )}
+                {/* REPAIR-REOPEN — versehentlich „Returned": zurück auf eine zulässige Stufe (Rechnungen, Zahlungen,
+                    Buchungen bleiben; das Haus prüft die Stufe). */}
+                {perm.canManageRepairs && repair.status === 'returned' && reopenZiele.length > 0 && (
+                  <Button variant="primary" onClick={() => { w.clear(); setStatusFrage('REOPEN'); }} data-repair-reopen>
+                    <RotateCcw size={14} /> {reopenZiele.length === 1 ? repairStatusActionLabel('returned', reopenZiele[0]) : 'Reopen Repair'}
                   </Button>
                 )}
                 {repair.status === 'ready' && customer && (
@@ -1084,6 +1131,10 @@ export function RepairDetail() {
                   {repair.startedAt && renderField('Started', new Date(repair.startedAt).toLocaleDateString())}
                   {repair.completedAt && renderField('Completed', new Date(repair.completedAt).toLocaleDateString())}
                   {repair.pickedUpAt && renderField('Picked Up', new Date(repair.pickedUpAt).toLocaleDateString())}
+                  {/* REPAIR-PICKUP-DATE — wann die Abholung erfasst wurde, wenn es ein anderer Tag war. */}
+                  {repair.pickedUpRecordedAt && repair.pickedUpAt
+                    && repair.pickedUpRecordedAt.slice(0, 10) !== repair.pickedUpAt.slice(0, 10)
+                    && renderField('Pickup recorded', new Date(repair.pickedUpRecordedAt).toLocaleString())}
                   {repair.estimatedReady && renderField('Estimated Ready', new Date(repair.estimatedReady).toLocaleDateString())}
                   {repair.staffId && renderField('Staff',
                     (() => {
@@ -1619,6 +1670,14 @@ export function RepairDetail() {
           Pick the tax scheme for this invoice. <strong>VAT 10%</strong> decomposes the gross
           charge into net + VAT. <strong>Zero</strong> treats the full amount as VAT-free.
         </p>
+        {/* REPAIR-PICKUP-DATE — der Rechnungstag: abgeholt → der Abholtag, sonst heute (änderbar; die VAT-Sperre gilt). */}
+        <div style={{ marginBottom: 14 }} data-repair-invoice-date>
+          <Input label="INVOICE DATE" type="date" value={rechnungsDatum} max={latestBusinessDate()}
+            onChange={e => setRechnungsDatum(e.target.value)} data-repair-invoice-date-input />
+          <p style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
+            {repair.status === 'picked_up' ? 'Suggested: the day the client picked up.' : 'Suggested: today.'}
+          </p>
+        </div>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 10, marginBottom: 18 }}>
           {REPAIR_TAX_SCHEMES.map(s => (
             <label key={s}
@@ -1643,9 +1702,21 @@ export function RepairDetail() {
         </div>
         <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={() => setTaxSchemeDialog(false)}>Cancel</Button>
-          <Button variant="primary" onClick={confirmTaxSchemeAndProceed}>Next: Choose Number Type</Button>
+          <Button variant="primary" onClick={confirmTaxSchemeAndProceed} disabled={!rechnungsDatum}>Next: Choose Number Type</Button>
         </div>
       </Modal>
+
+      {statusFrage && (
+        <RepairStatusDialog
+          repair={repair}
+          target={statusFrage === 'REOPEN' ? null : statusFrage}
+          reopenTargets={repair.status === 'returned' ? reopenZiele : []}
+          busy={w.busy}
+          error={w.fehler}
+          onClose={() => { setStatusFrage(null); w.clear(); }}
+          onConfirm={(s) => void statusFrageBestaetigen(s)}
+        />
+      )}
 
       {/* Plan repair-multi-supplier — Add-Line Modal */}
       <Modal open={showAddLineModal} onClose={() => setShowAddLineModal(false)} title="Add Work Line" width={520}>

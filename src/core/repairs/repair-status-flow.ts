@@ -80,3 +80,71 @@ export function allowedRepairStatusTargets(
   if (scope !== 'OWN') out.add('returned');
   return [...out];
 }
+
+// ── REPAIR-REOPEN — eine versehentlich zurückgegebene Reparatur wieder aufnehmen ─────────────────
+
+/**
+ * Was eine Reparatur über sich weiß, um die Schritte von hier zu bestimmen. Alles steht in ihrer Zeile und
+ * ihren Kostenzeilen — am Primary, an PC2 (geladen vom Primary) und am Handy (Lesebefehl) dieselben Fakten.
+ */
+export interface RepairTransitionFacts {
+  status: RepairStatus | string;
+  repairType?: string | null;
+  repairScope?: RepairScope | string | null;
+  invoiceId?: string | null;
+  /** Die Stufe vor „Returned" — gemerkt seit v0.8.94; bei älteren Rückgaben leer. */
+  returnFromStatus?: string | null;
+  startedAt?: string | null;
+  diagnosedAt?: string | null;
+  /** Kostenzeilen, deren Ausgabe schon gebucht ist (das geschieht ab „in Arbeit"). */
+  bookedLineCount?: number;
+}
+
+/**
+ * „Reopen" einer zurückgegebenen Kundenreparatur — auf welche Stufe sie zurück darf:
+ *  • gemerkt (Rückgabe ab v0.8.94): genau die Stufe davor — eindeutig, keine Wahl;
+ *  • mit Rechnung: nur „ready" (abgerechnet wird erst ab „ready"; die Rechnung bleibt, wie sie ist);
+ *  • ältere Rückgabe ohne Merker: die Stufen, die zu ihren Spuren passen — ab „in Arbeit", wenn sie begonnen
+ *    wurde oder Zeilen gebucht sind, ab „diagnosed", wenn diagnostiziert, sonst ab „received" — bis „ready".
+ * Nie „picked_up" (das ist eine eigene Handlung mit Abholtag) und nie eigene Ware (die wird nicht zurückgegeben).
+ */
+export function reopenRepairTargets(f: RepairTransitionFacts): RepairStatus[] {
+  if (String(f.status) !== 'returned' || f.repairScope === 'OWN') return [];
+  const flow: RepairStatus[] = repairStatusFlow(f.repairType ?? undefined, f.repairScope ?? undefined)
+    .filter((s) => s !== 'picked_up');
+  if (f.invoiceId) return flow.includes('ready') ? ['ready'] : [];
+  if (f.returnFromStatus) {
+    return flow.includes(f.returnFromStatus as RepairStatus) ? [f.returnFromStatus as RepairStatus] : [];
+  }
+  const begonnen = !!f.startedAt || (f.bookedLineCount ?? 0) > 0;
+  const ab = begonnen ? flow.indexOf('in_progress') : f.diagnosedAt ? flow.indexOf('diagnosed') : 0;
+  return flow.slice(Math.max(0, ab));
+}
+
+/** JEDER Schritt von hier: vorwärts (`allowedRepairStatusTargets`) oder — von „Returned" — zurück (`reopenRepairTargets`). */
+export function repairStatusTargets(f: RepairTransitionFacts): RepairStatus[] {
+  return String(f.status) === 'returned'
+    ? reopenRepairTargets(f)
+    : allowedRepairStatusTargets(f.status, f.repairType ?? undefined, f.repairScope ?? undefined);
+}
+
+/** Die Fakten aus einer geladenen Reparatur und ihren Zeilen (Bildschirm am Primary und an PC2, Haus). */
+export function repairTransitionFacts(
+  r: {
+    status: RepairStatus | string; repairType?: string | null; repairScope?: string | null; invoiceId?: string | null;
+    returnFromStatus?: string | null; startedAt?: string | null; diagnosedAt?: string | null; id?: string;
+  },
+  lines: ReadonlyArray<{ repairId?: string; status?: string; expenseId?: string | null }> = [],
+): RepairTransitionFacts {
+  return {
+    status: r.status, repairType: r.repairType, repairScope: r.repairScope, invoiceId: r.invoiceId ?? null,
+    returnFromStatus: r.returnFromStatus ?? null, startedAt: r.startedAt ?? null, diagnosedAt: r.diagnosedAt ?? null,
+    bookedLineCount: lines.filter((l) => (!r.id || l.repairId === r.id) && l.status === 'OPEN' && !!l.expenseId).length,
+  };
+}
+
+/** Die Beschriftung eines Schritts — „Reopen as …" von „Returned", sonst „Mark as …". */
+export function repairStatusActionLabel(from: RepairStatus | string, to: RepairStatus | string): string {
+  const name = String(to).split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ');
+  return String(from) === 'returned' ? `Reopen as ${name}` : `Mark as ${name}`;
+}

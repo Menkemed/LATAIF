@@ -388,6 +388,13 @@ try {
 
   primary = await attach(APP_CDP, APP, appEnv());
   await waitInvoke(primary);
+  // Wie in den übrigen Zwei-App-Läufen: nach dem Säen kann die gespeicherte Sitzung fremd sein — dann anmelden.
+  await waitFor(primary, SHELL + ', input[type="password"]', 90000);
+  if (!(await exists(primary, SHELL))) {
+    await setVal(primary, 'input[type="email"]', OWNER_EMAIL);
+    await setVal(primary, 'input[type="password"]', ONBOARD_PW);
+    await primary.ev("document.querySelector('button[type=submit]')?.click(); return 1;");
+  }
   await waitFor(primary, SHELL, 90000);
   await primary.ev(DIALOGE_PRIMARY);
   await primary.ev('return await window.__TAURI_INTERNALS__.invoke("sync_server_start", {}).catch((e)=>String(e));').catch(() => null);
@@ -502,16 +509,23 @@ try {
     const vorher = (await buchungen(client)).length;
     ok(await warteBis(client, "document.querySelector('[data-repair-pickup]')", 45000), 'PICKUP der Knopf steht an der bezahlten Rechnung');
     await click(client, '[data-repair-pickup]');
+    // v0.8.94 — die Abholung fragt den tatsächlichen Abholtag (Standard heute).
+    ok(await warteBis(client, "!!document.querySelector('[data-pickup-date]')", 15000), 'PICKUP fragt den Abholtag');
+    await click(client, '[data-status-confirm]');
     ok(await warteAuf(() => reparatur('r6b-rep-RC1') === 'picked_up'), `PICKUP die fertige Reparatur ist abgeholt (Hinweis: ${String(await fehlerAnzeige(client)).slice(0, 200) || 'keiner'})`);
     await sleep(1200);
     const c = (await buchungen(client)).slice(vorher);
-    ok(c.length === 1 && c[0].op === 'repairs.update_status' && S(c[0].payload) === S({ repairId: 'r6b-rep-RC1', status: 'picked_up', expectedRevision: 1 }),
+    const heute = new Date().toISOString().slice(0, 10);
+    ok(c.length === 1 && c[0].op === 'repairs.update_status'
+      && S(c[0].payload) === S({ repairId: 'r6b-rep-RC1', status: 'picked_up', expectedRevision: 1, pickedUpDate: heute }),
       `PICKUP genau EIN Auftrag — die fertige Reparatur mit ihrer Fassung (${c.map((x) => x.op + S(x.payload)).join(',')})`);
     ok(reparatur('r6b-rep-RC2') === 'in_progress', 'PICKUP die Reparatur in Arbeit überspringt „ready" NICHT');
     await gehZu(primary, '/invoices/r6b-inv-RP', 'R6B-INV-RP');
     await primary.ev(DIALOGE_PRIMARY);
     ok(await warteBis(primary, "document.querySelector('[data-repair-pickup]')", 30000), 'PICKUP-PARITAET derselbe Knopf am Primary');
     await click(primary, '[data-repair-pickup]');
+    ok(await warteBis(primary, "!!document.querySelector('[data-pickup-date]')", 15000), 'PICKUP-PARITAET fragt den Abholtag');
+    await click(primary, '[data-status-confirm]');
     ok(await warteAuf(() => reparatur('r6b-rep-RP1') === 'picked_up'), 'PICKUP-PARITAET der Primary holt ab');
     ok(reparatur('r6b-rep-RP2') === 'in_progress', 'PICKUP-PARITAET auch am Primary springt die Reparatur in Arbeit nicht mehr (Primary-Fix)');
     ok(reparaturN('r6b-rep-RP1') === reparaturN('r6b-rep-RC1'), `PICKUP-PARITAET Reparatur: Primary == PC2${reparaturN('r6b-rep-RP1') !== reparaturN('r6b-rep-RC1') ? ` (${reparaturN('r6b-rep-RP1')} / ${reparaturN('r6b-rep-RC1')})` : ''}`);

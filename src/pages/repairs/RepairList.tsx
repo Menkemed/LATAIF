@@ -32,11 +32,16 @@ import {
   REPAIR_MAX_PHOTOS, canInvoiceRepair, isRepairableOwnProduct, missingRepairItemFields,
   repairCreateBody, repairInvoiceBody,
 } from '@/core/repairs/repair-rules';
-import { createRepairOnPrimary, invoiceRepairsOnPrimary, updateRepairStatusOnPrimary } from '@/core/repairs/repair-house';
-import { useSharedWrites, useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-write';
+import { createRepairOnPrimary, invoiceRepairsOnPrimary } from '@/core/repairs/repair-house';
+import { useSharedWrites, useSharedWrite, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { quickRepairNext } from '@/core/repairs/repair-status-flow';
+import { repairInvoiceDateSuggestion } from '@/core/repairs/repair-rules';
+import { usePermission } from '@/hooks/usePermission';
+import { RepairQuickEditModal } from '@/components/repairs/RepairQuickEditModal';
+import { RepairStatusDialog, type RepairStatusStep } from '@/components/repairs/RepairStatusDialog';
+import { saveRepairInvoice, saveRepairStatus } from '@/components/repairs/repair-status-save';
 import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
 import { productDisplayName, brandModelHidden } from '@/core/products/display-name';
 import { repairItemDisplayName } from '@/core/products/display-name';
@@ -113,6 +118,13 @@ export function RepairList() {
   const [einzelRechnung, setEinzelRechnung] = useState<Repair | null>(null);
   // 'EACH' = jede Zeile behält die Steuerart IHRER Reparatur (nur angeboten, wenn die Auswahl gemischt ist).
   const [rechnungSteuer, setRechnungSteuer] = useState<RepairTaxScheme | 'EACH'>('VAT_10');
+  // REPAIR-PICKUP-DATE — der Rechnungstag: vorgeschlagen der gemeinsame Abholtag (sonst heute); bei verschiedenen
+  // Abholtagen leer — dann muss er ausdrücklich gewählt werden (kein willkürlicher Tag).
+  const [rechnungsDatum, setRechnungsDatum] = useState('');
+  // REPAIR-QUICK-EDIT — die Reparatur im Quick-Edit-Fenster, und die Abholung (Abholtag) aus der Zeile.
+  const [quickEditId, setQuickEditId] = useState<string | null>(null);
+  const [abholung, setAbholung] = useState<Repair | null>(null);
+  const perm = usePermission();
   const [form, setForm] = useState<Partial<Repair>>({
     repairScope: 'CUSTOMER',
     repairType: 'internal',
@@ -257,6 +269,7 @@ export function RepairList() {
   const steuerGemischt = new Set(rechnungsListe.map(steuerVon)).size > 1;
   const steuerWahlen: Array<RepairTaxScheme | 'EACH'> = [...(steuerGemischt ? ['EACH' as const] : []), ...REPAIR_TAX_SCHEMES];
   const schliesseRechnung = () => { setBulkModal(false); setEinzelRechnung(null); };
+  const datumsVorschlag = repairInvoiceDateSuggestion(rechnungsListe);
 
   const toggleSelect = (id: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
@@ -283,7 +296,14 @@ export function RepairList() {
       return;
     }
     setBulkError('');
-    const wahl = rechnungSteuer === 'EACH' ? {} : { taxScheme: rechnungSteuer };
+    if (!rechnungsDatum) {
+      setBulkError('These repairs were picked up on different days — choose the invoice date.');
+      return;
+    }
+    const wahl = {
+      ...(rechnungSteuer === 'EACH' ? {} : { taxScheme: rechnungSteuer }),
+      invoiceDate: rechnungsDatum,
+    };
     const r = await w.save('repairs.create_invoice', {
       local: () => invoiceRepairsOnPrimary(auswahl.map((x) => x.id), wahl),
       remote: () => repairInvoiceBody(auswahl, wahl),
@@ -383,17 +403,28 @@ export function RepairList() {
 
   async function handleQuickStatus(e: React.MouseEvent, rep: Repair, newStatus: RepairStatus) {
     e.stopPropagation();
-    // R5C — die Abkuerzung der Liste ist dieselbe Buchung wie der Knopf der Detailseite.
-    if (w.remote && !rep.revision) {
-      alert(fehlertext(nichtAmClient('changing the repair status (no revision loaded)')));
-      return;
-    }
-    if (!await w.ok('repairs.update_status', {
-      // POST-PARITY PP-13 — am Primary in EINER Klammer (Forderung, Kapitalisierung, Status).
-      local: async () => { await updateRepairStatusOnPrimary(rep.id, newStatus); return {}; },
-      remote: () => ({ repairId: rep.id, status: newStatus, expectedRevision: rep.revision }),
-    })) return;
+    // REPAIR-PICKUP-DATE — „Picked Up" fragt den tatsächlichen Abholtag (und bietet die Rechnung gleich an).
+    if (newStatus === 'picked_up') { w.clear(); setAbholung(rep); return; }
+    // R5C — die Abkuerzung der Liste ist dieselbe Buchung wie der Knopf der Detailseite; am Primary in EINER
+    // Klammer (Forderung, Kapitalisierung, Status), gegen die gesehene Fassung und nur als zulässiger Schritt.
+    if (await saveRepairStatus(w, rep, newStatus) === null) return;
     loadRepairs();
+  }
+
+  /** Die Abholung aus der Liste: Abholtag — und auf Wunsch die Rechnung, datiert auf diesen Tag. */
+  async function abholungBestaetigen(step: RepairStatusStep) {
+    const rep = abholung;
+    if (!rep) return;
+    const neu = await saveRepairStatus(w, rep, step.status, step.pickedUpDate);
+    if (neu === null) return;
+    loadRepairs();
+    if (!step.invoice) { setAbholung(null); return; }
+    const inv = await saveRepairInvoice(w, [{ id: rep.id, revision: neu || rep.revision }],
+      { taxScheme: step.invoice.taxScheme, invoiceDate: step.pickedUpDate });
+    loadRepairs();
+    if (!inv) return;   // die Abholung steht; der Grund steht im Fenster — abrechnen geht auch später
+    setAbholung(null);
+    navigate(`/invoices/${inv}`);
   }
 
   function handleQuickInvoice(e: React.MouseEvent, rep: Repair) {
@@ -403,6 +434,7 @@ export function RepairList() {
     setBulkError('');
     setEinzelRechnung(rep);
     setRechnungSteuer(steuerVorgabe([rep]));
+    setRechnungsDatum(repairInvoiceDateSuggestion([rep]) ?? '');
     setBulkModal(true);
   }
 
@@ -453,7 +485,8 @@ export function RepairList() {
           <div className="flex gap-2">
             <Button variant="ghost" onClick={clearSelection}>Clear</Button>
             <Button variant="primary" onClick={() => {
-              setBulkError(''); setEinzelRechnung(null); setRechnungSteuer(steuerVorgabe(selectedRepairs)); setBulkModal(true);
+              setBulkError(''); setEinzelRechnung(null); setRechnungSteuer(steuerVorgabe(selectedRepairs));
+              setRechnungsDatum(repairInvoiceDateSuggestion(selectedRepairs) ?? ''); setBulkModal(true);
             }} disabled={!sameCustomer}>
               <FileText size={14} /> Create Combined Invoice
             </Button>
@@ -670,6 +703,18 @@ export function RepairList() {
 
             {/* Quick Status Action */}
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
+              {/* REPAIR-QUICK-EDIT — Status, Kosten/Preis, Arbeit und Material, ohne die Detailseite zu öffnen. */}
+              {perm.canManageRepairs && (
+                <button
+                  onClick={(e) => { e.stopPropagation(); w.clear(); setQuickEditId(rep.id); }}
+                  data-repair-quick-edit={rep.repairNumber}
+                  title="Quick edit: status, cost, charge, work and material"
+                  style={{
+                    padding: '4px 10px', fontSize: 11, borderRadius: 4, border: '1px solid #D5D9DE',
+                    color: '#0F0F10', background: '#FFFFFF', cursor: 'pointer',
+                  }}
+                >Edit</button>
+              )}
               {showInvoiceShortcut && (
                 <button
                   onClick={(e) => handleQuickInvoice(e, rep)}
@@ -1325,6 +1370,17 @@ export function RepairList() {
                   ))}
                 </div>
 
+                {/* REPAIR-PICKUP-DATE — der Rechnungstag: der gemeinsame Abholtag, sonst heute; verschieden → wählen. */}
+                <div data-repair-invoice-date>
+                  <Input label="INVOICE DATE" type="date" value={rechnungsDatum} max={latestBusinessDate()}
+                    onChange={(e) => setRechnungsDatum(e.target.value)} data-repair-invoice-date-input />
+                  <p style={{ fontSize: 11, color: datumsVorschlag ? '#6B7280' : '#B45309', marginTop: 4 }}>
+                    {datumsVorschlag
+                      ? (rechnungsListe.some((r) => r.status === 'picked_up') ? 'Suggested: the day the client picked up.' : 'Suggested: today.')
+                      : 'These repairs were picked up on different days — choose the invoice date.'}
+                  </p>
+                </div>
+
                 {/* v0.8.94 — dieselbe Wahl wie der Steuerdialog der Detailseite; gilt für alle Reparaturen der Rechnung
                     (bei gemischter Auswahl zusätzlich „wie an jeder Reparatur", vorbelegt). */}
                 <div data-repair-invoice-tax>
@@ -1378,12 +1434,25 @@ export function RepairList() {
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={schliesseRechnung}>Cancel</Button>
             <Button variant="primary" onClick={handleBulkConfirm}
-              disabled={(!einzelRechnung && !sameCustomer) || rechnungsListe.length === 0 || w.busy} data-combined-invoice-confirm>
+              disabled={(!einzelRechnung && !sameCustomer) || rechnungsListe.length === 0 || !rechnungsDatum || w.busy} data-combined-invoice-confirm>
               <FileText size={14} /> Create Invoice
             </Button>
           </div>
         </div>
       </Modal>
+
+      <RepairQuickEditModal repairId={quickEditId} onClose={() => { setQuickEditId(null); loadRepairs(); }} />
+
+      {abholung && (
+        <RepairStatusDialog
+          repair={repairs.find((r) => r.id === abholung.id) ?? abholung}
+          target="picked_up"
+          busy={w.busy}
+          error={w.fehler}
+          onClose={() => { setAbholung(null); w.clear(); }}
+          onConfirm={(s) => void abholungBestaetigen(s)}
+        />
+      )}
     </PageLayout>
   );
 }

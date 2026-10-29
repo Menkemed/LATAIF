@@ -14,13 +14,15 @@ import { canonicalRepairStatus, REPAIR_CUSTOMER_PAID_FROM, REPAIR_TAX_SCHEMES } 
 // CENTRAL-UI-PARITY R5C — die Regel „abrechenbar" und der Rechnungsvermerk: EINE Quelle für
 // Liste, Detailseite und Fernbefehl.
 import {
-  RepairActionRejected, repairInvoiceBlocker, repairInvoiceNotes, type RepairInvoiceOptions,
+  RepairActionRejected, repairInvoiceBlocker, repairInvoiceDate, repairInvoiceNotes, repairPickupTimestamp,
+  type RepairInvoiceOptions,
 } from '@/core/repairs/repair-rules';
+import { reopenRepairTargets, repairTransitionFacts } from '@/core/repairs/repair-status-flow';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { eventBus } from '@/core/events/event-bus';
 import { formatRepairLineNumber } from '@/core/repairs/line-numbering';
-import { trackInsert, trackUpdate, trackDelete } from '@/core/sync/track';
+import { trackInsert, trackUpdate, trackDelete, trackStatusChange } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — deleteRepair-Cascade (Gold-Buckets + repair_lines)
 import { trackProductRow } from '@/core/lots/lot-queries';
 import { assertGoldPayablesRemovable } from '@/core/gold/gold-settle';
@@ -490,7 +492,10 @@ interface RepairStore {
   getRepairLines: (repairId: string) => RepairLine[];
   createRepair: (data: Partial<Repair>) => Repair;
   updateRepair: (id: string, data: Partial<Repair>) => void;
-  updateStatus: (id: string, status: RepairStatus) => void;
+  /** REPAIR-PICKUP-DATE — `opts.pickedUpDate` (JJJJ-MM-TT) nur bei „picked_up": der tatsächliche Abholtag. */
+  updateStatus: (id: string, status: RepairStatus, opts?: { pickedUpDate?: string }) => void;
+  /** REPAIR-REOPEN — eine zurückgegebene Reparatur auf eine zulässige Stufe zurück (`reopenRepairTargets`). */
+  reopenRepair: (id: string, target: RepairStatus) => void;
   deleteRepair: (id: string) => void;
   getNextRepairNumber: () => string;
   generateVoucherCode: () => string;
@@ -594,6 +599,9 @@ function rowToRepair(row: Record<string, unknown>): Repair {
     startedAt: row.started_at as string | undefined,
     completedAt: row.completed_at as string | undefined,
     pickedUpAt: row.picked_up_at as string | undefined,
+    pickedUpRecordedAt: (row.picked_up_recorded_at as string | null) ?? undefined,
+    returnFromStatus: (row.return_from_status as RepairStatus | null) ?? undefined,
+    returnCompletedAt: (row.return_completed_at as string | null) ?? undefined,
     estimatedReady: row.estimated_ready as string | undefined,
     voucherCode: row.voucher_code as string,
     invoiceId: row.invoice_id as string | undefined,
@@ -750,6 +758,14 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       }
     }
 
+    // REPAIR-QUICK-EDIT — eine abgerechnete Reparatur ändert ihren Preis nicht mehr: er steht auf der Rechnung
+    // (die Kosten sind dort schon eingefroren, PP-14). Vorher ging die Änderung still durch und lief der Rechnung davon.
+    if (before?.invoiceId && data.chargeToCustomer !== undefined
+      && Math.abs((Number(data.chargeToCustomer) || 0) - (Number(before.chargeToCustomer) || 0)) > 0.0005) {
+      throw new RepairActionRejected('REPAIR_ALREADY_INVOICED',
+        'this repair is already invoiced — its charge is on the invoice and is not changed here (correct it with Edit Invoice)');
+    }
+
     // v0.8.87 — Kundenzahlung per Debitkarte ohne gespeicherten Satz: Nein VOR dem Update (die Gebühr bucht
     // syncRepairCustomerPayment danach aus genau diesen Spalten).
     const paidFromNachher = data.customerPaidFrom !== undefined ? data.customerPaidFrom : before?.customerPaidFrom;
@@ -851,11 +867,16 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     get().loadRepairs();
   },
 
-  updateStatus: (id, status) => {
+  updateStatus: (id, status, opts = {}) => {
     const db = getDatabase();
     const now = new Date().toISOString();
     const repair = get().getRepair(id);
     if (!repair) return;
+    // REPAIR-REOPEN — von „Returned" geht es nur über „Reopen" zurück (eigene Regeln, nichts Finanzielles).
+    if (repair.status === 'returned') { get().reopenRepair(id, status); return; }
+    if (opts.pickedUpDate !== undefined && status !== 'picked_up') {
+      throw new RepairActionRejected('PICKUP_DATE_ONLY_ON_PICKUP', 'a pickup date belongs to "picked up" only');
+    }
 
     const updates: Record<string, unknown> = { status, updated_at: now };
 
@@ -912,7 +933,10 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         // ORTHOGONAL — beide unabhängig setzbar. Kein Gate mehr; ein Klient kann
         // die Ware abholen, bevor die Invoice voll bezahlt ist (offene Forderung
         // bleibt sichtbar in der Invoice + Payables).
-        updates.picked_up_at = now;
+        // REPAIR-PICKUP-DATE — der TATSÄCHLICHE Abholtag (gewählt, sonst jetzt) und getrennt davon der Zeitpunkt der
+        // Erfassung. Eine schon ausgestellte Rechnung bleibt, wie sie ist — die Abholung datiert nichts um.
+        updates.picked_up_at = repairPickupTimestamp(opts.pickedUpDate, repair.receivedAt, now);
+        updates.picked_up_recorded_at = now;
         if (repair.productId) {
           db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`, [now, repair.productId]);
           trackProductRow(repair.productId);   // LAN-Sync Phase 1b
@@ -924,6 +948,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       case 'CANCELLED': {
         // User-Spec §Repair Return: Ware ohne Reparatur an Kunden zurück. Terminal
         // wie picked_up — wenn ein Produkt verlinkt war, geht es zurück in den Bestand.
+        // REPAIR-REOPEN — woher sie kam, bleibt gemerkt (der Return überschreibt `completed_at`): „Reopen" stellt es her.
+        if (status === 'returned') {
+          updates.return_from_status = repair.status;
+          updates.return_completed_at = repair.completedAt ?? null;
+        }
         updates.completed_at = now;
         if (repair.productId) {
           db.run(`UPDATE products SET stock_status = 'in_stock', updated_at = ? WHERE id = ?`, [now, repair.productId]);
@@ -939,6 +968,8 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     db.run(`UPDATE repairs SET ${fields.join(', ')} WHERE id = ?`, values);
     saveDatabase();
     trackUpdate('repairs', id, { status });
+    // Die Historie: alter → neuer Status, mit dem handelnden Benutzer und dem Zeitpunkt (audit_log).
+    trackStatusChange('repairs', id, repair.status, status);
 
     // Emit events
     const eventMap: Record<string, string> = {
@@ -957,6 +988,53 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // Plan repair-multi-supplier: nach Stage-Commits (IN_PROGRESS/SENT_TO_WORKSHOP)
     // wurden Lines mit expense_id verlinkt — Store muss neu lesen damit subsequent
     // updateRepairLine / Detail-Page Anzeige die frischen expense_id-Werte sehen.
+    get().loadRepairLines();
+  },
+
+  reopenRepair: (id, target) => {
+    const db = getDatabase();
+    const now = new Date().toISOString();
+    const repair = get().getRepair(id);
+    if (!repair) throw new RepairActionRejected('REPAIR_NOT_FOUND', 'no such repair');
+    if (repair.status !== 'returned') {
+      throw new RepairActionRejected('REPAIR_NOT_RETURNED', `repair ${repair.repairNumber} is not returned — nothing to reopen`);
+    }
+    // Dieselbe Regel wie Liste, Detailseite, PC2 und Handy — aus den Fakten der Zeile und ihrer Kostenzeilen.
+    const ziele = reopenRepairTargets(repairTransitionFacts(repair, get().getRepairLines(id)));
+    if (!ziele.includes(target)) {
+      throw new RepairActionRejected('REPAIR_REOPEN_NOT_ALLOWED',
+        `repair ${repair.repairNumber} cannot be reopened as "${target}" — possible: ${ziele.length ? ziele.join(', ') : '(none)'}`);
+    }
+    // Ein verknüpfter Artikel ging beim Return in den Bestand. Steht er noch dort, kommt er in die Reparatur zurück;
+    // hat er sich seither bewegt (verkauft, reserviert …), ist das kein Fall für eine stille Korrektur.
+    if (repair.productId) {
+      const p = query('SELECT stock_status FROM products WHERE id = ?', [repair.productId])[0];
+      if (p && String(p.stock_status) !== 'in_stock') {
+        throw new RepairActionRejected('REPAIR_REOPEN_ITEM_MOVED',
+          `the linked item is "${String(p.stock_status)}" since the return — the repair cannot be reopened automatically`);
+      }
+    }
+    // „ready" braucht seinen Fertig-Zeitpunkt (Kopfkosten, Marge hängen daran): der gemerkte, sonst der vorhandene.
+    // Jede frühere Stufe ist noch nicht fertig — „Mark Ready" bucht dann wie gewohnt.
+    const completedAt = target === 'ready' ? (repair.returnCompletedAt || repair.completedAt || now) : null;
+    db.run(
+      `UPDATE repairs SET status = ?, completed_at = ?, return_from_status = NULL, return_completed_at = NULL, updated_at = ?
+        WHERE id = ?`,
+      [target, completedAt, now, id],
+    );
+    if (repair.productId) {
+      db.run(`UPDATE products SET stock_status = 'in_repair', updated_at = ? WHERE id = ?`, [now, repair.productId]);
+      trackProductRow(repair.productId);
+    }
+    saveDatabase();
+    trackUpdate('repairs', id, { status: target, completedAt, reopenedFrom: 'returned' });
+    trackStatusChange('repairs', id, 'returned', target);
+    // Zurück auf „ready": die Kopfkosten (eigene Arbeit, Altgebühr) stehen dann gebucht — fehlten sie (ältere Rückgabe
+    // vor „ready"), bucht der Abgleich genau die Differenz; waren sie gebucht, ändert er nichts. Rechnungen,
+    // Zahlungen und Kostenzeilen bleiben unberührt.
+    if (target === 'ready') syncRepairHeaderCosts(id, now, { capitalize: false });
+    eventBus.emit('repair.reopened' as any, 'repair', id, { status: target, customerId: repair.customerId });
+    get().loadRepairs();
     get().loadRepairLines();
   },
 
@@ -1176,12 +1254,17 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       };
     });
 
+    // REPAIR-PICKUP-DATE — der Rechnungstag: gewählt, sonst der gemeinsame Abholtag, sonst heute; verschiedene
+    // Abholtage ohne Wahl sind ein Nein (kein willkürlicher Tag). Die VAT-Periodensperre von `createDirectInvoice`
+    // gilt unverändert — ein Tag in einem eingereichten/bezahlten Quartal wird dort abgelehnt.
+    const rechnungstag = repairInvoiceDate(reps, opts.invoiceDate);
+
     // Der Vermerk nach der Zahl der Reparaturen; die Nummernart waehlt nur der Dialog der Detailseite.
     const invoice = useInvoiceStore.getState().createDirectInvoice(
       customerId,
       lines,
       repairInvoiceNotes(reps),
-      undefined,
+      rechnungstag,
       'repair',
       undefined,
       opts.specialMark === true,
@@ -1268,6 +1351,12 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // POST-PARITY PP-14 — eine abgerechnete Reparatur ändert ihre Kostenzeilen nicht mehr.
     if (get().getRepair(line.repairId)?.invoiceId) {
       throw new RepairActionRejected('REPAIR_ALREADY_INVOICED', 'this repair is already invoiced — its cost lines are frozen');
+    }
+    // REPAIR-QUICK-EDIT — auch nicht von einer Werkstatt zur anderen: die gebuchte Ausgabe (A/P) steht beim ersten
+    // Lieferanten; die Zeile umzuhängen ließe sie dort stehen. Dafür: Zeile stornieren, neu anlegen.
+    if (data.supplierId !== undefined && line.expenseId && (data.supplierId || null) !== (line.supplierId || null)) {
+      throw new RepairActionRejected('REPAIR_LINE_SOURCE_LOCKED',
+        'the supplier of a booked line does not change — cancel the line and add a new one');
     }
     // POST-PARITY PP-13/PP-14 — die Kostenquelle einer gebuchten Zeile (Werkstatt ↔ im Haus) wechselt nicht:
     // Werkstatt = Ausgabe an sie, im Haus = aktivierte Eigenleistung. Dafür: Zeile stornieren, neu anlegen.

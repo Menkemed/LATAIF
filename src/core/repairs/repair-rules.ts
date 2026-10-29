@@ -25,7 +25,7 @@ import { CARD_BRANDS } from '@/core/finance/card-fees';
 import { REPAIR_FIELDS } from '@/core/models/repair-fields';
 import { internalCostOnCreate, internalCostOnEdit, repairMargin } from './repair-cost';
 import { normalizeStoneAttributes } from '@/core/products/stones';
-import { businessDateIssue } from '@/core/utils/business-date';
+import { businessDateIssue, businessTimestamp, todayIso } from '@/core/utils/business-date';
 
 /** Höchstens so viele Fotos je Reparatur — dieselbe Zahl, die die Bildauswahl beider Masken zeigt. */
 export const REPAIR_MAX_PHOTOS = 6;
@@ -545,6 +545,70 @@ export function canInvoiceRepair(r: RepairInvoiceCandidate): boolean {
 export interface RepairInvoiceOptions {
   taxScheme?: RepairTaxScheme;
   specialMark?: boolean;
+  /**
+   * REPAIR-PICKUP-DATE — ausdrücklich gewählter Rechnungstag (JJJJ-MM-TT). Ohne ihn gilt `repairInvoiceDate`:
+   * der gemeinsame Abholtag der Reparaturen, sonst heute; bei verschiedenen Tagen ist er Pflicht.
+   */
+  invoiceDate?: string;
+}
+
+/**
+ * REPAIR-PICKUP-DATE — der Zeitpunkt in `picked_up_at`: ohne Wahl jetzt; mit gewähltem Tag (JJJJ-MM-TT) dieser Tag —
+ * heute → der Zeitpunkt, ein anderer Tag → mittags UTC (wie Annahme und Rechnungstag, kein Verrutschen über
+ * Zeitzonen). Kein künftiger Tag, kein Tag vor der Annahme.
+ */
+export function repairPickupTimestamp(
+  date: string | undefined | null, receivedAt: string | undefined | null, nowIso: string, nowMs = Date.parse(nowIso),
+): string {
+  if (date === undefined || date === null || date === '') return nowIso;
+  const issue = businessDateIssue(date, 'The pickup date', nowMs);
+  if (issue) throw new RepairActionRejected('PICKUP_DATE_INVALID', issue);
+  const received = receivedAt ? String(receivedAt).slice(0, 10) : '';
+  if (received && date < received) {
+    throw new RepairActionRejected('PICKUP_BEFORE_RECEIVED',
+      `The pickup date ${date} is before the repair was received (${received}).`);
+  }
+  return businessTimestamp(date, nowIso);
+}
+
+/** Der Tag, an dem eine Reparatur abgeholt wurde (JJJJ-MM-TT) — nur bei „picked_up". */
+export function repairPickupDay(r: { status?: string; pickedUpAt?: string | null }): string | null {
+  return r.status === 'picked_up' && r.pickedUpAt ? String(r.pickedUpAt).slice(0, 10) : null;
+}
+
+/**
+ * REPAIR-PICKUP-DATE — der Rechnungstag einer Reparaturrechnung. `undefined` = jetzt (heute); sonst der Tag
+ * (JJJJ-MM-TT), auf den `createDirectInvoice` datiert — dessen VAT-Periodensperre gilt unverändert.
+ *  • ausdrücklich gewählt: dieser Tag (gültig, nicht künftig);
+ *  • sonst je Reparatur ihr Abholtag (abgeholt) bzw. heute (noch nicht abgeholt) — EIN gemeinsamer Tag;
+ *  • verschiedene Tage: kein willkürlicher — der Tag muss ausdrücklich gewählt werden.
+ */
+export function repairInvoiceDate(
+  reps: ReadonlyArray<{ repairNumber: string; status?: string; pickedUpAt?: string | null }>,
+  chosen: string | undefined, nowMs = Date.now(),
+): string | undefined {
+  const heute = todayIso(nowMs);
+  if (chosen !== undefined && chosen !== '') {
+    const issue = businessDateIssue(chosen, 'The invoice date', nowMs);
+    if (issue) throw new RepairActionRejected('INVOICE_DATE_INVALID', issue);
+    return chosen === heute ? undefined : chosen;
+  }
+  const tage = reps.map((r) => repairPickupDay(r) ?? heute);
+  if (new Set(tage).size > 1) {
+    throw new RepairActionRejected('REPAIR_INVOICE_DATE_REQUIRED',
+      `These repairs were picked up on different days (${reps.map((r, i) => `${r.repairNumber}: ${tage[i] === heute ? 'today' : tage[i]}`).join(', ')})`
+      + ' — choose the invoice date of the combined invoice.');
+  }
+  return tage[0] === heute ? undefined : tage[0];
+}
+
+/** Der Vorschlag für das Rechnungsdatum in der Maske: der gemeinsame Abholtag, sonst heute; `null` = muss gewählt werden. */
+export function repairInvoiceDateSuggestion(
+  reps: ReadonlyArray<{ status?: string; pickedUpAt?: string | null }>, nowMs = Date.now(),
+): string | null {
+  const heute = todayIso(nowMs);
+  const tage = new Set(reps.map((r) => repairPickupDay(r) ?? heute));
+  return tage.size === 1 ? [...tage][0] : null;
 }
 
 /**
@@ -577,5 +641,6 @@ export function repairInvoiceBody(
   };
   if (opts.taxScheme) body.taxScheme = opts.taxScheme;
   if (opts.specialMark === true) body.specialMark = true;
+  if (opts.invoiceDate) body.invoiceDate = opts.invoiceDate;
   return body;
 }

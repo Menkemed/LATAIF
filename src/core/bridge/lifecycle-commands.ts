@@ -29,7 +29,7 @@ import { query } from '@/core/db/helpers';
 import { REPAIR_WORK_TYPES } from '@/core/models/types';
 import { CARD_BRANDS, CardFeeNotConfigured, type CardBrand } from '@/core/finance/card-fees';
 import { nextOrderStatus, isAllowedOrderAdvance } from '@/core/orders/order-status-flow';
-import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
+import { repairStatusTargetsOfRow as statusTargetsOfRow } from '@/core/repairs/repair-transition-row';
 import { RepairActionRejected, isRepairTaxScheme, repairInvoiceBlocker } from '@/core/repairs/repair-rules';
 import { TransferActionRejected, transferConvertBlocker, type TransferBillTo } from '@/core/agents/transfer-rules';
 import { convertTransferInHouse, convertTransfersInHouse, type TransferConversion } from '@/core/agents/transfer-house';
@@ -586,7 +586,7 @@ export function repairState(id: string): Record<string, unknown> {
     invoiceId: s(r?.invoice_id),
     taxScheme: s(r?.tax_scheme),
     // Welche Schritte von hier aus wirklich gingen — dieselbe Ableitung wie am Bildschirm.
-    allowedStatusTargets: allowedRepairStatusTargets(s(r?.status), s(r?.repair_type), s(r?.repair_scope)),
+    allowedStatusTargets: statusTargetsOfRow(id),
     revision: n(r?.revision),
   };
 }
@@ -604,29 +604,41 @@ export interface UpdateRepairStatusRequest {
   repairId: string;
   status: RepairStatus;
   expectedRevision: number;
+  /** REPAIR-PICKUP-DATE — der tatsächliche Abholtag (JJJJ-MM-TT), nur bei „picked_up". */
+  pickedUpDate?: string;
 }
 
 export function parseUpdateRepairStatus(raw: unknown): UpdateRepairStatusRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['repairId', 'status', 'expectedRevision']);
+  onlyKnownFields(raw, ['repairId', 'status', 'expectedRevision', 'pickedUpDate']);
   const status = s(raw.status);
   if (status === '') throw new FinancialPayloadError('status is required');
   if (status === 'cancelled' || status === 'CANCELLED') {
     throw new FinancialPayloadError(
       'a repair is not cancelled from here — that path deletes records and stays on the primary');
   }
-  return {
+  const out: UpdateRepairStatusRequest = {
     repairId: reqString(raw.repairId, 'repairId'),
     status: status as RepairStatus,
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
   };
+  // REPAIR-PICKUP-DATE — der tatsächliche Abholtag (JJJJ-MM-TT), nur bei „picked_up"; geprüft wird er im Haus.
+  if (raw.pickedUpDate !== undefined) {
+    if (status !== 'picked_up') throw new FinancialPayloadError('pickedUpDate belongs to status "picked_up" only');
+    if (typeof raw.pickedUpDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw.pickedUpDate)) {
+      throw new FinancialPayloadError('pickedUpDate must look like YYYY-MM-DD');
+    }
+    out.pickedUpDate = raw.pickedUpDate;
+  }
+  return out;
 }
 
 export function runUpdateRepairStatus(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseUpdateRepairStatus(raw);
   return runRemoteCommand(deps, identity, () => {
     const r = liveRepair(req.repairId, identity.branchId);
-    const allowed = allowedRepairStatusTargets(s(r.status), s(r.repair_type), s(r.repair_scope));
+    // Vorwärts — oder von „Returned" zurück (Reopen): aus den Fakten der Zeile und ihrer Kostenzeilen.
+    const allowed = statusTargetsOfRow(req.repairId);
     if (!allowed.includes(req.status)) {
       throw new CommandRejected('REPAIR_TRANSITION_NOT_ALLOWED',
         `a repair at "${s(r.status)}" does not go to "${req.status}" — possible: `
@@ -643,7 +655,7 @@ export function runUpdateRepairStatus(deps: EngineDeps, identity: CommandIdentit
     // abgefangene) Buchung, fällt die ganze Handlung zurück; ein Nein der Kostenregel ist ein Urteil.
     const buchung = watchLedgerPosts(OP_REPAIRS_UPDATE_STATUS);
     try {
-      rs.updateStatus(req.repairId, req.status);
+      rs.updateStatus(req.repairId, req.status, req.pickedUpDate !== undefined ? { pickedUpDate: req.pickedUpDate } : {});
     } catch (err) {
       if (err instanceof RepairActionRejected) throw new CommandRejected(err.code, err.message);
       throw err;
@@ -664,6 +676,8 @@ export interface CreateRepairInvoiceRequest {
   repairs: Array<{ repairId: string; expectedRevision: number }>;
   taxScheme?: RepairTaxScheme;
   specialMark: boolean;
+  /** REPAIR-PICKUP-DATE — ausdrücklich gewählter Rechnungstag (JJJJ-MM-TT); ohne ihn der gemeinsame Abholtag, sonst heute. */
+  invoiceDate?: string;
 }
 
 /** Höchstens so viele Reparaturen auf einer Sammelrechnung. */
@@ -682,7 +696,7 @@ const MAX_INVOICE_REPAIRS = 50;
  */
 export function parseCreateRepairInvoice(raw: unknown): CreateRepairInvoiceRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['repairId', 'expectedRevision', 'repairs', 'taxScheme', 'specialMark']);
+  onlyKnownFields(raw, ['repairId', 'expectedRevision', 'repairs', 'taxScheme', 'specialMark', 'invoiceDate']);
   let repairs: CreateRepairInvoiceRequest['repairs'];
   if (raw.repairs !== undefined) {
     if (raw.repairId !== undefined || raw.expectedRevision !== undefined) {
@@ -725,7 +739,14 @@ export function parseCreateRepairInvoice(raw: unknown): CreateRepairInvoiceReque
     repairs,
     taxScheme: raw.taxScheme as RepairTaxScheme | undefined,
     specialMark: raw.specialMark === true,
+    ...(raw.invoiceDate !== undefined ? { invoiceDate: invoiceDateOf(raw.invoiceDate) } : {}),
   };
+}
+
+/** REPAIR-PICKUP-DATE — die Form des Rechnungstags; ob er zulässig ist (nicht künftig, offenes VAT-Quartal), prüft das Haus. */
+function invoiceDateOf(v: unknown): string {
+  if (typeof v !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(v)) throw new FinancialPayloadError('invoiceDate must look like YYYY-MM-DD');
+  return v;
 }
 
 export function runCreateRepairInvoice(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
@@ -757,9 +778,14 @@ export function runCreateRepairInvoice(deps: EngineDeps, identity: CommandIdenti
     try {
       // GENAU der Weg des Hauses — derselbe für eine und für mehrere Reparaturen, mit der Wahl der
       // Dialoge. Der Einstand jeder Zeile ist `internalCost + offene Arbeitszeilen` (C3H).
-      created = rs.createCombinedRepairInvoice(ids, { taxScheme: req.taxScheme, specialMark: req.specialMark });
+      created = rs.createCombinedRepairInvoice(ids, {
+        taxScheme: req.taxScheme, specialMark: req.specialMark,
+        ...(req.invoiceDate !== undefined ? { invoiceDate: req.invoiceDate } : {}),
+      });
     } catch (err) {
       if (err instanceof RepairActionRejected) throw new CommandRejected(err.code, err.message);
+      // VAT-PERIOD-LOCK — ein Rechnungstag in einem eingereichten/bezahlten Quartal ist ein Urteil, keine Störung.
+      if (err instanceof VatPeriodFiled) throw new CommandRejected(err.code, err.message);
       throw err;
     }
     const states = ids.map((id) => repairState(id));

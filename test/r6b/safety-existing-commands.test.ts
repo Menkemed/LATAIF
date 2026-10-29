@@ -139,11 +139,17 @@ const koerper = (code: string, kopf: RegExp, ind = 2): string => {
 {
   // InvoiceDetail: Abholen → repairs.update_status
   const c = codeOf(src('src/pages/invoices/InvoiceDetail.tsx'));
-  const f = koerper(c, /async function markRepairsPickedUp\(\)/);
-  ok(/w\.ok\('repairs\.update_status'/.test(f) && /remote: \(\) => \(\{ repairId: r\.id, status: 'picked_up', expectedRevision: fassung \}\)/.test(f),
+  const f = koerper(c, /async function markRepairsPickedUp\(pickedUpDate: string\)/);
+  // v0.8.94 — derselbe gemeinsame Speicherweg wie Reparaturliste und Quick Edit (`saveRepairStatus`): je Reparatur
+  // `repairs.update_status` mit ihrer Fassung und dem tatsächlichen Abholtag; am Primary die Hausfunktion.
+  const weg = codeOf(src('src/components/repairs/repair-status-save.ts'));
+  ok(/saveRepairStatus\(w, r, 'picked_up', pickedUpDate\)/.test(f)
+    && /w\.save<Record<string, unknown>>\('repairs\.update_status'/.test(weg)
+    && /repairId: repair\.id, status, expectedRevision: repair\.revision,/.test(weg),
     'WIRE InvoiceDetail: „Mark as Picked Up" fährt je Reparatur `repairs.update_status` mit ihrer Fassung');
-  ok((c.match(/updateRepairStatus\(/g) ?? []).length === 1 && /local: \(\) => \{ updateRepairStatus\(r\.id, 'picked_up'\)/.test(f),
-    'WIRE InvoiceDetail: der Store-Aufruf steht NUR im lokalen Anschluss');
+  ok(!/updateRepairStatus\(/.test(c) && (weg.match(/updateRepairStatusOnPrimary\(/g) ?? []).length === 1
+    && /local: async \(\) => \{\s*await updateRepairStatusOnPrimary\(repair\.id, status,/.test(weg),
+    'WIRE InvoiceDetail: der Hausaufruf steht NUR im lokalen Anschluss');
 }
 {
   // ProductDetail: KI-Bestätigung → products.update { aiConfirmedAt: true }
