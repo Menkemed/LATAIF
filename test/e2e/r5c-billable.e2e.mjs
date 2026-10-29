@@ -200,7 +200,7 @@ function seed() {
     const now = new Date().toISOString();
     insert(db, 'customers', { id: 'bl-kunde', branch_id, first_name: 'Lina', last_name: 'Rechnung', country: 'BH', language: 'en', vip_level: 'NONE', preferences: '[]', customer_type: 'PRIVATE', sales_stage: 'active', created_at: now, updated_at: now });
     for (const [id, nr, status, charge] of REP) {
-      insert(db, 'repairs', { id, branch_id, repair_number: nr, customer_id: 'bl-kunde', item_brand: 'Tudor', item_model: 'Pelagos', issue_description: 'Service ' + nr, repair_type: 'internal', internal_cost: 20, charge_to_customer: charge, margin: charge - 20, tax_scheme: 'VAT_10', status, received_at: now, completed_at: now, picked_up_at: status === 'picked_up' ? now : null, voucher_code: 'B' + nr.replace(/\D/g, '').padStart(7, '0'), images: '[]', item_attributes: '{}', repair_scope: 'CUSTOMER', revision: 1, created_at: now, updated_at: now });
+      insert(db, 'repairs', { id, branch_id, repair_number: nr, customer_id: 'bl-kunde', item_brand: 'Tudor', item_model: 'Pelagos', issue_description: 'Service ' + nr, repair_type: 'internal', internal_cost: 0, charge_to_customer: charge, margin: charge, tax_scheme: 'VAT_10', status, received_at: now, completed_at: now, picked_up_at: status === 'picked_up' ? now : null, voucher_code: 'B' + nr.replace(/\D/g, '').padStart(7, '0'), images: '[]', item_attributes: '{}', repair_scope: 'CUSTOMER', revision: 1, created_at: now, updated_at: now });
     }
   } finally { try { db.close(); } catch { /* zu */ } }
 }
@@ -227,9 +227,19 @@ const fehlerAnzeige = (c) => c.ev("return [...document.querySelectorAll('[data-s
 const angebot = (c, nr) => c.ev(
   `const row=[...document.querySelectorAll('div.cursor-pointer')].find(d=>d.style&&d.style.gridTemplateColumns&&d.textContent.includes(${S(nr)}));`
   + `if(!row) return 'KEINE-ZEILE'; return (row.querySelector('input[type=checkbox]') ? 'A' : '-') + (row.querySelector('[data-repair-quick-invoice]') ? 'K' : '-');`);
-const kuerzel = (c, nr) => c.ev(
-  `const row=[...document.querySelectorAll('div.cursor-pointer')].find(d=>d.style&&d.style.gridTemplateColumns&&d.textContent.includes(${S(nr)}));`
-  + `const b=row&&row.querySelector('[data-repair-quick-invoice]'); if(!b) return 'NO'; b.click(); return 'OK';`);
+/** Das Kürzel der Liste — seit v0.8.94 mit dem Fenster „Create Invoice": Vorgabe lesen, Steuerart wählen, bestätigen.
+ *  Gibt 'OK:<Vorgabe>' zurück. */
+async function kuerzel(c, nr, steuer) {
+  const k = await c.ev(
+    `const row=[...document.querySelectorAll('div.cursor-pointer')].find(d=>d.style&&d.style.gridTemplateColumns&&d.textContent.includes(${S(nr)}));`
+    + `const b=row&&row.querySelector('[data-repair-quick-invoice]'); if(!b) return 'NO'; b.click(); return 'OK';`);
+  if (k !== 'OK') return k;
+  if (!(await warteBis(c, "!!document.querySelector('[data-combined-invoice-confirm]') && !!document.querySelector('[data-repair-invoice-tax-option]')", 15000))) return 'KEIN-FENSTER';
+  const vorgabe = await c.ev(`const r=document.querySelector('[data-repair-invoice-tax-option] input:checked'); return r ? r.closest('[data-repair-invoice-tax-option]').getAttribute('data-repair-invoice-tax-option') : 'KEINE';`);
+  if (steuer) { await click(c, `[data-repair-invoice-tax-option="${steuer}"] input`); await sleep(250); }
+  await click(c, '[data-combined-invoice-confirm]');
+  return 'OK:' + vorgabe;
+}
 /** „Create Invoice" der Detailseite: Steuerdialog (Vorgabe der Reparatur) → Nummernart (normal) → Confirm. */
 async function detailRechnung(c) {
   await click(c, '[data-repair-invoice]');
@@ -265,6 +275,11 @@ try {
   killAll(); await waitGone('lataif.exe'); await waitGone('lataif-e2e-client.exe');
   for (const d of [RUN, CLIENT_APPDATA, join(CLIENT_HOME, 'Local'), join(CLIENT_HOME, 'tmp'), join(RUN, 'tmp')]) mkdirSync(d, { recursive: true });
   if (existsSync(APP_DATA_DIR)) rmSync(APP_DATA_DIR, { recursive: true, force: true });
+  // Wie r5c-repair-parity: die ungeklärten Speichervorgänge des Test-Clients liegen im FESTEN <LocalAppData> —
+  // ein Rest eines früheren Laufs sperrte sonst das Abrechnen („An earlier save of this kind … is still unresolved").
+  if (CLIENT_IDENT.endsWith('.e2e.client')) {
+    rmSync(join(process.env.LOCALAPPDATA || join(os.homedir(), 'AppData', 'Local'), CLIENT_IDENT, 'pending-saves'), { recursive: true, force: true });
+  }
   console.log(e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: appEnv() }));
 
   // ── Der Primary ────────────────────────────────────────────────────────
@@ -294,6 +309,13 @@ try {
 
   primary = await attach(APP_CDP, APP, appEnv());
   await waitInvoke(primary);
+  // Wie in den übrigen Zwei-App-Läufen: nach dem Säen kann die gespeicherte Sitzung fremd sein — dann anmelden.
+  await waitFor(primary, SHELL + ', input[type="password"]', 90000);
+  if (!(await exists(primary, SHELL))) {
+    await setVal(primary, 'input[type="email"]', OWNER_EMAIL);
+    await setVal(primary, 'input[type="password"]', ONBOARD_PW);
+    await primary.ev("document.querySelector('button[type=submit]')?.click(); return 1;");
+  }
   await waitFor(primary, SHELL, 90000);
   await primary.ev('return await window.__TAURI_INTERNALS__.invoke("sync_server_start", {}).catch((e)=>String(e));').catch(() => null);
   {
@@ -352,7 +374,7 @@ try {
   // ── 2) „fertig" über das Kürzel, „abgeholt" über die Detailseite — PC2 und Primary ──
   client = await lade(client, '/repairs');
   await warteBis(client, "document.body.innerText.includes('BL-0001')", 30000);
-  ok(await kuerzel(client, 'BL-0001') === 'OK', 'FERTIG PC2: das Kuerzel der Liste');
+  ok(await kuerzel(client, 'BL-0001', 'ZERO') === 'OK:VAT_10', 'FERTIG PC2: das Kuerzel der Liste fragt die Steuerart (Vorgabe VAT 10 %, gewählt 0 %)');
   ok(await warteBis(client, "/^\\/invoices\\//.test(location.pathname)", 45000), `FERTIG PC2: die Rechnung entsteht (${String(await fehlerAnzeige(client)).slice(0, 160) || 'ok'})`);
   client = await lade(client, '/repairs/bl-rep-2');
   await waitFor(client, '[data-repair-invoice]', 30000);
@@ -361,7 +383,7 @@ try {
 
   await geh(primary, '/repairs');
   await warteBis(primary, "document.body.innerText.includes('BL-0006')", 30000);
-  ok(await kuerzel(primary, 'BL-0006') === 'OK', 'FERTIG Primary: dasselbe Kuerzel');
+  ok(await kuerzel(primary, 'BL-0006', 'ZERO') === 'OK:VAT_10', 'FERTIG Primary: dasselbe Kuerzel, dieselbe Frage (gewählt 0 %)');
   ok(await warteBis(primary, "/^\\/invoices\\//.test(location.pathname)", 45000), 'FERTIG Primary: die Rechnung entsteht');
   await geh(primary, '/repairs/bl-rep-7');
   await waitFor(primary, '[data-repair-invoice]', 30000);
@@ -373,8 +395,14 @@ try {
     const a = rechnungVon(pc2), b = rechnungVon(pri);
     ok(!!a && !!b && rechnung(a) === rechnung(b), `${was} Primary == PC2: Rechnungskopf, Zeilen und Buchung${a && b && rechnung(a) !== rechnung(b) ? ` (${rechnung(b)} / ${rechnung(a)})` : ''}`);
   }
-  ok(/^Combined Repair Service · BL-0001$/.test(vermerk('bl-rep-1')) && /^Combined Repair Service · BL-0006$/.test(vermerk('bl-rep-6')),
-    'FERTIG der Vermerk der Liste auf beiden Rechnern');
+  ok(/^Repair Service · BL-0001 · Service BL-0001$/.test(vermerk('bl-rep-1')) && /^Repair Service · BL-0006 · Service BL-0006$/.test(vermerk('bl-rep-6')),
+    'FERTIG der Vermerk einer Reparatur auf beiden Rechnern (v0.8.94 nach der Zahl der Reparaturen)');
+  {
+    const zeilen = dbQ(BIZ_DB, 'SELECT tax_scheme, vat_amount FROM invoice_lines WHERE invoice_id IN (?, ?)', [rechnungVon('bl-rep-1'), rechnungVon('bl-rep-6')]);
+    const steuer = dbQ(BIZ_DB, "SELECT tax_scheme FROM repairs WHERE id IN ('bl-rep-1','bl-rep-6')").map((r) => r.tax_scheme).join(',');
+    ok(zeilen.length === 2 && zeilen.every((r) => r.tax_scheme === 'ZERO' && Number(r.vat_amount) === 0) && steuer === 'ZERO,ZERO',
+      `FERTIG die Wahl 0 % aus der Liste gilt: Zeilen ohne VAT, an der Reparatur gespeichert — PC2 und Primary (${S(zeilen)} / ${steuer})`);
+  }
   ok(/^Repair Service · BL-0002 · Service BL-0002$/.test(vermerk('bl-rep-2')) && /^Repair Service · BL-0007 · Service BL-0007$/.test(vermerk('bl-rep-7')),
     'ABGEHOLT der Vermerk der Detailseite auf beiden Rechnern');
   ok(dbQ(BIZ_DB, "SELECT status FROM repairs WHERE id IN ('bl-rep-1','bl-rep-2') ORDER BY id").map((r) => r.status).join(',') === 'ready,picked_up',

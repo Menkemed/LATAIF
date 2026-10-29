@@ -22,7 +22,7 @@ import { productSearchText } from '@/core/utils/product-format';
 import { formatLotLabel } from '@/core/lots/lot-queries';
 import { useSharedRead } from '@/core/data/shared-read';
 import { productLotsFor, LEERE_LOSE } from '@/core/data/domain-reads';
-import type { Repair, RepairStatus } from '@/core/models/types';
+import type { Repair, RepairStatus, RepairTaxScheme } from '@/core/models/types';
 import { REPAIR_TAX_SCHEMES, REPAIR_TYPES } from '@/core/models/types';
 import { REPAIR_FIELDS, type RepairFieldDef } from '@/core/models/repair-fields';
 import { Bhd } from '@/components/ui/Bhd';
@@ -108,6 +108,11 @@ export function RepairList() {
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkModal, setBulkModal] = useState(false);
   const [bulkError, setBulkError] = useState('');
+  // v0.8.94 — die Liste fragt die Steuerart wie die Detailseite: das Kürzel (EINE Reparatur) und die
+  // Sammelrechnung öffnen dasselbe Fenster, vorbelegt mit der Steuerart der Reparatur(en).
+  const [einzelRechnung, setEinzelRechnung] = useState<Repair | null>(null);
+  // 'EACH' = jede Zeile behält die Steuerart IHRER Reparatur (nur angeboten, wenn die Auswahl gemischt ist).
+  const [rechnungSteuer, setRechnungSteuer] = useState<RepairTaxScheme | 'EACH'>('VAT_10');
   const [form, setForm] = useState<Partial<Repair>>({
     repairScope: 'CUSTOMER',
     repairType: 'internal',
@@ -240,6 +245,18 @@ export function RepairList() {
   );
   const sameCustomer = selectedCustomerIds.size <= 1;
   const selectedTotal = selectedRepairs.reduce((s, r) => s + (r.chargeToCustomer || 0), 0);
+  /** Die Steuerart einer Reparatur, wie die Rechnung sie ohne Wahl nimmt (Detailseite: 0 % oder sonst 10 %). */
+  const steuerVon = (r: Repair): RepairTaxScheme => (r.taxScheme === 'ZERO' ? 'ZERO' : 'VAT_10');
+  /** Vorbelegung: die gemeinsame Steuerart der Reparaturen — bei gemischter Auswahl „wie an jeder Reparatur". */
+  const steuerVorgabe = (reps: readonly Repair[]): RepairTaxScheme | 'EACH' => {
+    const arten = new Set(reps.map(steuerVon));
+    return arten.size > 1 ? 'EACH' : arten.has('ZERO') ? 'ZERO' : 'VAT_10';
+  };
+  const rechnungsListe = einzelRechnung ? [einzelRechnung] : selectedRepairs;
+  const rechnungsSumme = rechnungsListe.reduce((s, r) => s + (r.chargeToCustomer || 0), 0);
+  const steuerGemischt = new Set(rechnungsListe.map(steuerVon)).size > 1;
+  const steuerWahlen: Array<RepairTaxScheme | 'EACH'> = [...(steuerGemischt ? ['EACH' as const] : []), ...REPAIR_TAX_SCHEMES];
+  const schliesseRechnung = () => { setBulkModal(false); setEinzelRechnung(null); };
 
   const toggleSelect = (id: string, e?: React.MouseEvent) => {
     e?.stopPropagation();
@@ -253,25 +270,27 @@ export function RepairList() {
   const clearSelection = () => setSelectedIds(new Set());
 
   async function handleBulkConfirm() {
-    if (validSelectedIds.size === 0) return;
-    if (!sameCustomer) {
+    // R5C — EINE Rechnung fuer die ganze Auswahl (oder die eine Reparatur des Kuerzels), auf beiden
+    // Rechnern derselbe Weg: am Primary in EINER Klammer (Beleg, alle Verknuepfungen, Buchung), am
+    // zweiten Rechner EIN Auftrag, der jede Reparatur mit ihrer gesehenen Fassung nennt. Die
+    // Reihenfolge bleibt die der Auswahl. v0.8.94 — dazu die gewählte Steuerart.
+    const auswahl = einzelRechnung ? [einzelRechnung] : Array.from(validSelectedIds)
+      .map((rid) => repairs.find((x) => x.id === rid))
+      .filter((x): x is Repair => !!x);
+    if (auswahl.length === 0) return;
+    if (!einzelRechnung && !sameCustomer) {
       setBulkError('All selected repairs must belong to the same client.');
       return;
     }
     setBulkError('');
-    // R5C — EINE Rechnung fuer die ganze Auswahl, auf beiden Rechnern derselbe Weg: am Primary in
-    // EINER Klammer (Beleg, alle Verknuepfungen, Buchung), am zweiten Rechner EIN Auftrag, der jede
-    // Reparatur mit ihrer gesehenen Fassung nennt. Die Reihenfolge bleibt die der Auswahl.
-    const auswahl = Array.from(validSelectedIds)
-      .map((rid) => repairs.find((x) => x.id === rid))
-      .filter((x): x is Repair => !!x);
+    const wahl = rechnungSteuer === 'EACH' ? {} : { taxScheme: rechnungSteuer };
     const r = await w.save('repairs.create_invoice', {
-      local: () => invoiceRepairsOnPrimary(auswahl.map((x) => x.id)),
-      remote: () => repairInvoiceBody(auswahl),
+      local: () => invoiceRepairsOnPrimary(auswahl.map((x) => x.id), wahl),
+      remote: () => repairInvoiceBody(auswahl, wahl),
     });
     if (r.kind !== 'ok') { setBulkError(fehlertext(r)); return; }
-    setBulkModal(false);
-    setSelectedIds(new Set());
+    if (!einzelRechnung) setSelectedIds(new Set());
+    schliesseRechnung();
     loadRepairs();
     navigate(`/invoices/${r.value.invoiceId}`);
   }
@@ -377,16 +396,14 @@ export function RepairList() {
     loadRepairs();
   }
 
-  async function handleQuickInvoice(e: React.MouseEvent, rep: Repair) {
+  function handleQuickInvoice(e: React.MouseEvent, rep: Repair) {
     e.stopPropagation();
-    // R5C — das Kuerzel ist die Sammelrechnung mit genau einer Reparatur.
-    const r = await w.save('repairs.create_invoice', {
-      local: () => invoiceRepairsOnPrimary([rep.id]),
-      remote: () => repairInvoiceBody([rep]),
-    });
-    if (r.kind !== 'ok') return;
-    loadRepairs();
-    navigate(`/invoices/${r.value.invoiceId}`);
+    // R5C — das Kuerzel ist die Sammelrechnung mit genau einer Reparatur; v0.8.94 mit derselben
+    // Rückfrage nach der Steuerart.
+    setBulkError('');
+    setEinzelRechnung(rep);
+    setRechnungSteuer(steuerVorgabe([rep]));
+    setBulkModal(true);
   }
 
   const activeCount = repairs.filter(r => r.status !== 'picked_up' && r.status !== 'cancelled').length;
@@ -435,7 +452,9 @@ export function RepairList() {
           </div>
           <div className="flex gap-2">
             <Button variant="ghost" onClick={clearSelection}>Clear</Button>
-            <Button variant="primary" onClick={() => { setBulkError(''); setBulkModal(true); }} disabled={!sameCustomer}>
+            <Button variant="primary" onClick={() => {
+              setBulkError(''); setEinzelRechnung(null); setRechnungSteuer(steuerVorgabe(selectedRepairs)); setBulkModal(true);
+            }} disabled={!sameCustomer}>
               <FileText size={14} /> Create Combined Invoice
             </Button>
           </div>
@@ -653,7 +672,7 @@ export function RepairList() {
             <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', gap: 4 }}>
               {showInvoiceShortcut && (
                 <button
-                  onClick={(e) => { void handleQuickInvoice(e, rep); }}
+                  onClick={(e) => handleQuickInvoice(e, rep)}
                   disabled={w.busy}
                   data-repair-quick-invoice
                   title="Create Invoice from this repair"
@@ -1251,13 +1270,18 @@ export function RepairList() {
         </div>
       </Modal>
 
-      <Modal open={bulkModal} onClose={() => setBulkModal(false)} title="Create Combined Invoice" width={520}>
+      <Modal open={bulkModal} onClose={schliesseRechnung} title={einzelRechnung ? 'Create Invoice' : 'Create Combined Invoice'} width={520}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {(() => {
-            if (selectedRepairs.length === 0) {
+            if (rechnungsListe.length === 0) {
               return <p style={{ fontSize: 12, color: '#6B7280' }}>No repairs selected.</p>;
             }
-            const c = customers.find(cc => cc.id === selectedRepairs[0].customerId);
+            const c = customers.find(cc => cc.id === rechnungsListe[0].customerId);
+            const vat = rechnungsListe.reduce((s, r) => {
+              const art = rechnungSteuer === 'EACH' ? steuerVon(r) : rechnungSteuer;
+              const g = r.chargeToCustomer || 0;
+              return s + (art === 'VAT_10' ? g - g / 1.1 : 0);
+            }, 0);
             return (
               <>
                 <div style={{ padding: '10px 14px', background: '#F7F5EE', borderRadius: 8, fontSize: 12 }}>
@@ -1267,18 +1291,24 @@ export function RepairList() {
                   </div>
                   <div className="flex justify-between" style={{ marginBottom: 4 }}>
                     <span style={{ color: '#6B7280' }}>Repairs</span>
-                    <span className="font-mono" style={{ color: '#0F0F10' }}>{selectedRepairs.length}</span>
+                    <span className="font-mono" style={{ color: '#0F0F10' }}>{rechnungsListe.length}</span>
                   </div>
-                  <div className="flex justify-between">
-                    <span style={{ color: '#6B7280' }}>Combined Charge</span>
+                  <div className="flex justify-between" style={{ marginBottom: 4 }}>
+                    <span style={{ color: '#6B7280' }}>{rechnungsListe.length > 1 ? 'Combined Charge' : 'Charge'}</span>
                     <span className="font-mono" style={{ color: '#0F0F10' }}>
-                      {selectedTotal.toLocaleString('en-US', { maximumFractionDigits: 2 })} BHD
+                      {rechnungsSumme.toLocaleString('en-US', { maximumFractionDigits: 2 })} BHD
+                    </span>
+                  </div>
+                  <div className="flex justify-between" data-repair-invoice-vat>
+                    <span style={{ color: '#6B7280' }}>incl. VAT</span>
+                    <span className="font-mono" style={{ color: '#0F0F10' }}>
+                      {vat.toLocaleString('en-US', { maximumFractionDigits: 3 })} BHD
                     </span>
                   </div>
                 </div>
 
                 <div style={{ maxHeight: 200, overflowY: 'auto', border: '1px solid #E5E9EE', borderRadius: 6 }}>
-                  {selectedRepairs.map(r => (
+                  {rechnungsListe.map(r => (
                     <div key={r.id} style={{
                       display: 'grid', gridTemplateColumns: '110px 1fr auto',
                       gap: 8, padding: '8px 12px', alignItems: 'center', fontSize: 12,
@@ -1295,10 +1325,45 @@ export function RepairList() {
                   ))}
                 </div>
 
+                {/* v0.8.94 — dieselbe Wahl wie der Steuerdialog der Detailseite; gilt für alle Reparaturen der Rechnung
+                    (bei gemischter Auswahl zusätzlich „wie an jeder Reparatur", vorbelegt). */}
+                <div data-repair-invoice-tax>
+                  <span style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.06em', textTransform: 'uppercase', display: 'block', marginBottom: 6 }}>
+                    Tax Scheme
+                  </span>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                    {steuerWahlen.map(s => (
+                      <label key={s} data-repair-invoice-tax-option={s}
+                        style={{ display: 'flex', gap: 10, padding: 10, borderRadius: 6,
+                                 border: `1px solid ${rechnungSteuer === s ? '#0F0F10' : '#D5D9DE'}`,
+                                 background: rechnungSteuer === s ? 'rgba(15,15,16,0.04)' : 'transparent',
+                                 cursor: 'pointer' }}>
+                        <input type="radio" name="repair-invoice-tax" checked={rechnungSteuer === s}
+                          onChange={() => setRechnungSteuer(s)} style={{ marginTop: 2 }} />
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 13, color: '#0F0F10', fontWeight: 500 }}>
+                            {s === 'EACH' ? 'As set on each repair' : s === 'ZERO' ? '0% (No VAT)' : 'VAT 10%'}
+                          </div>
+                          <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>
+                            {s === 'EACH'
+                              ? 'Each line keeps the tax scheme of its repair.'
+                              : s === 'ZERO'
+                                ? 'No VAT booking — full charge is net.'
+                                : 'Charge is gross. Decomposed: net = charge / 1.10, VAT = charge − net.'}
+                          </div>
+                        </div>
+                      </label>
+                    ))}
+                  </div>
+                  {rechnungsListe.length > 1 && rechnungSteuer !== 'EACH' && (
+                    <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>Applies to all repairs on this invoice.</p>
+                  )}
+                </div>
+
                 <p style={{ fontSize: 12, color: '#6B7280' }}>
-                  These {selectedRepairs.length} repairs will be combined into ONE multi-line invoice.
-                  Each repair is linked to the new invoice. Once the invoice is paid, all linked repairs
-                  automatically move to "Paid".
+                  {rechnungsListe.length > 1
+                    ? `These ${rechnungsListe.length} repairs will be combined into ONE multi-line invoice. Each repair is linked to the new invoice. Once the invoice is paid, all linked repairs automatically move to "Paid".`
+                    : 'The repair is linked to the new invoice. Once the invoice is paid, it automatically moves to "Paid".'}
                 </p>
               </>
             );
@@ -1311,8 +1376,9 @@ export function RepairList() {
           )}
 
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setBulkModal(false)}>Cancel</Button>
-            <Button variant="primary" onClick={handleBulkConfirm} disabled={!sameCustomer || validSelectedIds.size === 0 || w.busy} data-combined-invoice-confirm>
+            <Button variant="ghost" onClick={schliesseRechnung}>Cancel</Button>
+            <Button variant="primary" onClick={handleBulkConfirm}
+              disabled={(!einzelRechnung && !sameCustomer) || rechnungsListe.length === 0 || w.busy} data-combined-invoice-confirm>
               <FileText size={14} /> Create Invoice
             </Button>
           </div>

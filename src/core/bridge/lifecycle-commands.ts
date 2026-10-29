@@ -711,15 +711,15 @@ export function parseCreateRepairInvoice(raw: unknown): CreateRepairInvoiceReque
   if (raw.specialMark !== undefined && typeof raw.specialMark !== 'boolean') {
     throw new FinancialPayloadError('specialMark is yes or no');
   }
-  // R5C FINAL — die Wahl der Dialoge gibt es nur an der Detailseite: genau EINE Reparatur, und die
-  // Nummernart nur zusammen mit dem Steuerdialog. Eine Dialogwahl über mehrere wäre eine Handlung,
-  // die keine Maske des Hauses anbietet.
-  const ausDemDialog = raw.taxScheme !== undefined;
-  if (raw.specialMark !== undefined && !ausDemDialog) {
+  // R5C FINAL / v0.8.94 — die Steuerart fragen Detailseite UND Liste (auch über mehrere Reparaturen);
+  // die Nummernart nur der Dialog der Detailseite: zusammen mit der Steuerart und für EINE Reparatur.
+  // Eine Nummernart über mehrere wäre eine Handlung, die keine Maske des Hauses anbietet.
+  const mitSteuerwahl = raw.taxScheme !== undefined;
+  if (raw.specialMark !== undefined && !mitSteuerwahl) {
     throw new FinancialPayloadError('the number type is chosen together with the tax scheme (the dialogs of the detail page)');
   }
-  if (ausDemDialog && repairs.length !== 1) {
-    throw new FinancialPayloadError('the tax and number dialogs belong to a single repair invoice');
+  if (raw.specialMark === true && repairs.length !== 1) {
+    throw new FinancialPayloadError('the number type belongs to a single repair invoice (the detail page)');
   }
   return {
     repairs,

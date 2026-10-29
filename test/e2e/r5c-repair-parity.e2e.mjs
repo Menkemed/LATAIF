@@ -182,6 +182,8 @@ async function click(c, sel) {
   if (r !== 'OK') throw new Error(`click ${sel} → ${r}`);
 }
 const clickText = (c, t) => c.ev(`const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim()===${S(t)}); if(!b) return 'NO:'+${S(t)}; if (b.disabled) return 'DISABLED'; b.click(); return 'OK';`);
+/** Klick ohne Abbruch: 'OK' oder der Grund. */
+const klick = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO:'+${S(sel)}; if (e.disabled) return 'DISABLED:'+${S(sel)}; e.click(); return 'OK';`);
 async function waitFor(c, sel, t = 45000) {
   const end = Date.now() + t;
   while (Date.now() < end) { if (await exists(c, sel)) return true; await sleep(300); }
@@ -202,7 +204,8 @@ async function waitInvoke(c) {
 async function fotoWaehlen(c, file) {
   await c.send('DOM.enable', {});
   const { root } = await c.send('DOM.getDocument', { depth: -1 });
-  const { nodeIds } = await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"]' });
+  // Seit v0.8.87 hat jedes Fotofeld daneben ein verstecktes Feld zum Ersetzen (ohne `multiple`) — gemeint ist das Anhängen.
+  const { nodeIds } = await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"][multiple]' });
   if (!nodeIds || nodeIds.length === 0) return 'KEIN-FELD';
   await c.send('DOM.setFileInputFiles', { files: [file], nodeId: nodeIds[nodeIds.length - 1] });
   return 'OK';
@@ -294,7 +297,8 @@ function seed() {
     for (const [id, first, last] of [['r5c-kunde', 'Nadia', 'Kunde'], ['r5c-kunde2', 'Omar', 'Zwei']]) {
       insert(db, 'customers', { id, branch_id, first_name: first, last_name: last, country: 'BH', language: 'en', vip_level: 'NONE', preferences: '[]', customer_type: 'PRIVATE', sales_stage: 'active', created_at: now, updated_at: now });
     }
-    insert(db, 'suppliers', { id: 'r5c-werkstatt', branch_id, name: 'R5C Werkstatt', active: 1, created_at: now, updated_at: now });
+    // v0.8.92 — die Werkstattauswahl bietet nur Lieferanten mit „Is Workshop" an.
+    insert(db, 'suppliers', { id: 'r5c-werkstatt', branch_id, name: 'R5C Werkstatt', active: 1, is_workshop: 1, created_at: now, updated_at: now });
     insert(db, 'employees', { id: 'r5c-emp', branch_id, name: 'R5C Techniker', employment_status: 'active', created_at: now, updated_at: now });
     // Zwei gleiche eigene Stücke mit je ZWEI Losen — dann bietet die Maske die Losauswahl an.
     for (const [pid, sku] of [['r5c-own-a', 'R5C-OWN-A'], ['r5c-own-b', 'R5C-OWN-B']]) {
@@ -471,6 +475,14 @@ async function zahlweg(c, weg) {
   await sleep(300);
   await click(c, '[data-repair-save]');
   return (await warteBis(c, "!document.querySelector('[data-repair-save]')", 45000)) ? 'OK' : 'NICHT-GESPEICHERT:' + (await fehlerAnzeige(c));
+}
+/** Das Rechnungskürzel der Liste — seit v0.8.94 mit dem Fenster „Create Invoice" (Steuerart, Vorgabe der
+ *  Reparatur): Kürzel, dann bestätigen. 'OK' oder der Grund. */
+async function kuerzelRechnung(c, nr) {
+  const k = await inZeile(c, nr, 'invoice');
+  if (k !== 'OK') return k;
+  if (!(await warteBis(c, "!!document.querySelector('[data-combined-invoice-confirm]') && !!document.querySelector('[data-repair-invoice-tax-option] input:checked')", 15000))) return 'KEIN-FENSTER';
+  return klick(c, '[data-combined-invoice-confirm]');
 }
 /** Eine Handlung in der Zeile einer Reparatur der Liste. */
 const inZeile = (c, nr, was) => c.ev(
@@ -917,7 +929,7 @@ try {
     ok(oben, 'FEHLER der Primary laeuft wieder — mit einer Sperre an der Verknuepfung');
     client = await lade(client, '/repairs');
     await warteBis(client, "document.body.innerText.includes('R5C-0006')", 30000);
-    ok(await inZeile(client, 'R5C-0006', 'invoice') === 'OK', 'FEHLER das Rechnungskuerzel der Liste');
+    ok(await kuerzelRechnung(client, 'R5C-0006') === 'OK', 'FEHLER das Rechnungskuerzel der Liste (mit Steuerfrage)');
     ok(await warteBis(client, "document.querySelector('[data-save-error]') && document.querySelector('[data-save-error]').textContent.length > 0", 30000),
       `FEHLER der zweite Rechner zeigt, dass es nicht geklappt hat (${String(await fehlerAnzeige(client)).slice(0, 160)})`);
     ok(!/^\/invoices\//.test(String(await client.ev('return location.pathname;'))), 'FEHLER …und springt auf keine Rechnung');
@@ -928,20 +940,20 @@ try {
     ok(await primaryNeustart((db) => db.exec('DROP TRIGGER r5c_e2e_fail')), 'FEHLER die Sperre ist weg, der Primary laeuft');
     client = await lade(client, '/repairs');
     await warteBis(client, "document.body.innerText.includes('R5C-0006')", 30000);
-    ok(await inZeile(client, 'R5C-0006', 'invoice') === 'OK', 'WIEDERHOLT dasselbe Kuerzel noch einmal');
+    ok(await kuerzelRechnung(client, 'R5C-0006') === 'OK', 'WIEDERHOLT dasselbe Kuerzel noch einmal');
     // R7C — der gescheiterte Versuch steht unter „Unresolved saves": der erste Klick sagt es, der zweite
     // ist die Entscheidung „das ist ein neuer, eigener Vorgang". Nie still.
     await warteBis(client, "/^\\/invoices\\//.test(location.pathname) || /still unresolved/i.test(document.querySelector('[data-save-error]')?.textContent || '')", 45000);
     if (!/^\/invoices\//.test(String(await client.ev('return location.pathname;')))) {
       ok(/still unresolved/i.test(String(await fehlerAnzeige(client))), `WIEDERHOLT der offene frühere Versuch wird genannt (${String(await fehlerAnzeige(client)).slice(0, 120)})`);
-      ok(await inZeile(client, 'R5C-0006', 'invoice') === 'OK', 'WIEDERHOLT bewusst noch einmal: ein neuer Vorgang');
+      ok(await klick(client, '[data-combined-invoice-confirm]') === 'OK', 'WIEDERHOLT bewusst noch einmal: ein neuer Vorgang');
     }
     ok(await warteBis(client, "/^\\/invoices\\//.test(location.pathname)", 45000), `WIEDERHOLT jetzt entsteht die Rechnung (${String(await fehlerAnzeige(client)).slice(0, 160) || 'kein Hinweis'})`);
     await spuelen(primary);
     const r6 = rechnungVon('r5c-rep-6');
     ok(!!r6 && Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM invoices')[0]?.n) === invVorher + 1, 'WIEDERHOLT genau EINE Rechnung');
-    ok(/^Combined Repair Service · R5C-0006$/.test(String(dbQ(BIZ_DB, 'SELECT notes FROM invoices WHERE id = ?', [r6])[0]?.notes)),
-      'WIEDERHOLT …fuer genau diese Reparatur, mit dem Vermerk der Liste (das Kuerzel wie vor R5C)');
+    ok(/^Repair Service · R5C-0006 · /.test(String(dbQ(BIZ_DB, 'SELECT notes FROM invoices WHERE id = ?', [r6])[0]?.notes)),
+      `WIEDERHOLT …fuer genau diese Reparatur, Vermerk einer Reparatur (${dbQ(BIZ_DB, 'SELECT notes FROM invoices WHERE id = ?', [r6])[0]?.notes})`);
   }
 
   // ── Der Client besitzt weiterhin nichts ────────────────────────────────

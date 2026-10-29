@@ -630,14 +630,15 @@ async function abrechnenZwilling(weg: 'lokal' | 'fern') {
   ok(n(db, 'SELECT special_mark FROM invoices WHERE id = ?', [inv1]) === 1, 'INVOICE die Nummernart des Dialogs erreicht die Rechnung');
   ok(/^Repair Service · REP-[\d-]+ · Batterie$/.test(s(db, 'SELECT notes FROM invoices WHERE id = ?', [inv1])),
     `INVOICE der Einzelvermerk wie an der Detailseite (${s(db, 'SELECT notes FROM invoices WHERE id = ?', [inv1])})`);
-  // R5C FINAL — ohne Dialog (das Kürzel der Liste) bleibt es beim Vermerk der Liste, wie vor R5C.
+  // v0.8.94 — der Vermerk folgt der Zahl der Reparaturen: EINE Reparatur ohne Wahl (alter Rumpf) trägt
+  // den Einzelvermerk; Nummernart normal.
   const q = await reparatur({ chargeToCustomer: 35, issueDescription: 'Band' });
   schalten(q, 'in_progress', 'ready');
   const quick = await life.runCreateRepairInvoice(deps(db), identity('515', 'repairs.create_invoice'), { repairId: q, expectedRevision: rev(db, q) });
   const invQ = String(val<Record<string, unknown>>(quick).invoiceId);
-  ok(/^Combined Repair Service · REP-[\d-]+$/.test(s(db, 'SELECT notes FROM invoices WHERE id = ?', [invQ]))
+  ok(/^Repair Service · REP-[\d-]+ · Band$/.test(s(db, 'SELECT notes FROM invoices WHERE id = ?', [invQ]))
     && n(db, 'SELECT special_mark FROM invoices WHERE id = ?', [invQ]) === 0,
-    `INVOICE das Kuerzel der Liste traegt den Vermerk der Liste (${s(db, 'SELECT notes FROM invoices WHERE id = ?', [invQ])})`);
+    `INVOICE eine Reparatur ohne Wahl: der Einzelvermerk (${s(db, 'SELECT notes FROM invoices WHERE id = ?', [invQ])})`);
 
   // §8 — die Neins.
   const d2 = await reparatur({ customerId: 'cust-2', chargeToCustomer: 50 });
@@ -682,7 +683,7 @@ async function abrechnenZwilling(weg: 'lokal' | 'fern') {
     ['einen Einstand', { repairs: [{ repairId: e, expectedRevision: 1, purchasePrice: 0 }] }],
     ['die Steuer MARGIN', { repairId: e, expectedRevision: 1, taxScheme: 'MARGIN' }],
     ['eine Nummernart als Text', { repairId: e, expectedRevision: 1, specialMark: 'yes' }],
-    ['einen Dialog ueber mehrere Reparaturen', { repairs: [{ repairId: e, expectedRevision: 1 }, { repairId: f, expectedRevision: 1 }], taxScheme: 'ZERO' }],
+    ['eine Nummernart ueber mehrere Reparaturen', { repairs: [{ repairId: e, expectedRevision: 1 }, { repairId: f, expectedRevision: 1 }], taxScheme: 'ZERO', specialMark: true }],
     ['eine Nummernart ohne Steuerdialog', { repairId: e, expectedRevision: 1, specialMark: true }],
   ] as const) {
     let t = '';
@@ -752,8 +753,8 @@ for (const weg of ['fern', 'lokal'] as const) {
 }
 
 // ══ R5C FINAL — die Verträge des Primary, festgenagelt ═════════════════════
-// Vermerk: je Handlung genau der des Hauses vor R5C — Detailseite (Dialog) „Repair Service · Nr ·
-// Problem", Liste (Auswahl UND Kürzel, ohne Dialog) „Combined Repair Service · Nr, …".
+// Vermerk (v0.8.94 nach der Zahl der Reparaturen): EINE Reparatur — Detailseite oder Kürzel der Liste —
+// „Repair Service · Nr · Problem", mehrere (Auswahl der Liste) „Combined Repair Service · Nr, …".
 {
   const bilder: Array<{ dlg: ReturnType<typeof rechnungsBild>; quick: ReturnType<typeof rechnungsBild>; tax: string }> = [];
   for (const weg of ['lokal', 'fern'] as const) {
@@ -777,8 +778,8 @@ for (const weg of ['fern', 'lokal'] as const) {
     }
     ok(/^Repair Service · REP-[\d-]+ · Glas$/.test(s(db, 'SELECT notes FROM invoices WHERE id = ?', [dlg])),
       `NOTES (${weg}) Detailseite: der Vermerk der Detailseite`);
-    ok(/^Combined Repair Service · REP-[\d-]+$/.test(s(db, 'SELECT notes FROM invoices WHERE id = ?', [quick])),
-      `NOTES (${weg}) Kuerzel der Liste: der Sammelvermerk der Liste, auch bei EINER Reparatur`);
+    ok(/^Repair Service · REP-[\d-]+ · Band$/.test(s(db, 'SELECT notes FROM invoices WHERE id = ?', [quick])),
+      `NOTES (${weg}) Kuerzel der Liste: EINE Reparatur, der Einzelvermerk`);
     bilder.push({ dlg: rechnungsBild(db, dlg), quick: rechnungsBild(db, quick), tax: s(db, 'SELECT tax_scheme FROM repairs WHERE id = ?', [d1]) });
   }
   ok(unterschiede(bilder[0].dlg.kopf, bilder[1].dlg.kopf).length === 0 && bilder[0].dlg.zeilen === bilder[1].dlg.zeilen,
@@ -791,7 +792,7 @@ for (const weg of ['fern', 'lokal'] as const) {
     const a = await reparatur({}); const b = await reparatur({});
     schalten(a, 'in_progress', 'ready'); schalten(b, 'in_progress', 'ready');
     for (const [was, ids, opts, erwartet] of [
-      ['ein Dialog ueber zwei Reparaturen', [a, b], { taxScheme: 'ZERO' }, 'DIALOG_IS_SINGLE'],
+      ['eine Nummernart ueber zwei Reparaturen', [a, b], { taxScheme: 'ZERO', specialMark: true }, 'DIALOG_IS_SINGLE'],
       ['eine Nummernart ohne Steuerdialog', [a], { specialMark: true }, 'DIALOG_INCOMPLETE'],
     ] as const) {
       let c = '';
@@ -800,6 +801,60 @@ for (const weg of ['fern', 'lokal'] as const) {
     }
     ok(n(db, 'SELECT COUNT(*) FROM invoices') === 0, 'NOTES …und es entstand kein Beleg');
   }
+}
+
+// ══ v0.8.94 — die Liste fragt die Steuerart: Sammelrechnung und Kürzel, Primary == PC2 ═════════════
+{
+  const bilder: Array<{ sammel: ReturnType<typeof rechnungsBild>; kurz: ReturnType<typeof rechnungsBild>; steuer: string }> = [];
+  for (const weg of ['lokal', 'fern'] as const) {
+    const db = freshDb();
+    const a = await reparatur({ chargeToCustomer: 15, taxScheme: 'VAT_10', issueDescription: 'Politur A' });
+    const b = await reparatur({ chargeToCustomer: 20, taxScheme: 'VAT_10', issueDescription: 'Politur B' });
+    const c = await reparatur({ chargeToCustomer: 30, taxScheme: 'ZERO', issueDescription: 'Gang' });
+    schalten(a, 'in_progress', 'ready', 'picked_up');
+    schalten(b, 'in_progress', 'ready', 'picked_up');
+    schalten(c, 'in_progress', 'ready');
+    let sammel = ''; let kurz = '';
+    if (weg === 'lokal') {
+      sammel = (await house.invoiceRepairsOnPrimary([a, b], { taxScheme: 'ZERO' })).invoiceId;
+      kurz = (await house.invoiceRepairsOnPrimary([c], { taxScheme: 'VAT_10' })).invoiceId;
+    } else {
+      const rs = useRepairStore.getState();
+      const o1 = await life.runCreateRepairInvoice(deps(db), identity('7a0', 'repairs.create_invoice'),
+        rules.repairInvoiceBody([rs.getRepair(a)!, rs.getRepair(b)!], { taxScheme: 'ZERO' }));
+      const o2 = await life.runCreateRepairInvoice(deps(db), identity('7a1', 'repairs.create_invoice'),
+        rules.repairInvoiceBody([rs.getRepair(c)!], { taxScheme: 'VAT_10' }));
+      ok(o1.kind === 'ok' && o2.kind === 'ok', `LIST-TAX (fern) beide Auftraege angenommen (${code(o1) || 'ok'} / ${code(o2) || 'ok'})`);
+      sammel = String(val<Record<string, unknown>>(o1).invoiceId);
+      kurz = String(val<Record<string, unknown>>(o2).invoiceId);
+    }
+    ok(all(db, 'SELECT tax_scheme, vat_rate, ROUND(vat_amount, 3), ROUND(line_total, 3) FROM invoice_lines WHERE invoice_id = ? ORDER BY line_total', [sammel])
+      === '[["ZERO",0,0,15],["ZERO",0,0,20]]'
+      && n(db, 'SELECT gross_amount FROM invoices WHERE id = ?', [sammel]) === 35 && n(db, 'SELECT vat_amount FROM invoices WHERE id = ?', [sammel]) === 0,
+      `LIST-TAX (${weg}) Sammelrechnung zweier VAT-10-Reparaturen mit Wahl 0 %: beide Zeilen ohne VAT, 35 brutto`);
+    ok(s(db, 'SELECT tax_scheme FROM repairs WHERE id = ?', [a]) === 'ZERO' && s(db, 'SELECT tax_scheme FROM repairs WHERE id = ?', [b]) === 'ZERO',
+      `LIST-TAX (${weg}) …die Wahl steht danach an beiden Reparaturen`);
+    ok(/^Combined Repair Service · REP-[\d-]+, REP-[\d-]+$/.test(s(db, 'SELECT notes FROM invoices WHERE id = ?', [sammel]))
+      && n(db, 'SELECT special_mark FROM invoices WHERE id = ?', [sammel]) === 0,
+      `LIST-TAX (${weg}) …Sammelvermerk, Nummernart normal (${s(db, 'SELECT notes FROM invoices WHERE id = ?', [sammel])})`);
+    ok(s(db, 'SELECT tax_scheme FROM invoice_lines WHERE invoice_id = ?', [kurz]) === 'VAT_10'
+      && Math.abs(n(db, 'SELECT vat_amount FROM invoice_lines WHERE invoice_id = ?', [kurz]) - (30 - 30 / 1.1)) < 0.0005
+      && s(db, 'SELECT tax_scheme FROM repairs WHERE id = ?', [c]) === 'VAT_10',
+      `LIST-TAX (${weg}) Kuerzel: 0-%-Reparatur mit Wahl VAT 10 % → Zeile VAT 10 % (30 brutto), an der Reparatur gespeichert`);
+    ok(/^Repair Service · REP-[\d-]+ · Gang$/.test(s(db, 'SELECT notes FROM invoices WHERE id = ?', [kurz])),
+      `LIST-TAX (${weg}) …Kuerzel mit EINER Reparatur: der Einzelvermerk`);
+    bilder.push({ sammel: rechnungsBild(db, sammel), kurz: rechnungsBild(db, kurz), steuer: all(db, 'SELECT tax_scheme FROM repairs ORDER BY charge_to_customer') });
+  }
+  ok(unterschiede(bilder[0].sammel.kopf, bilder[1].sammel.kopf).length === 0 && bilder[0].sammel.zeilen === bilder[1].sammel.zeilen
+    && unterschiede(bilder[0].kurz.kopf, bilder[1].kurz.kopf).length === 0 && bilder[0].kurz.zeilen === bilder[1].kurz.zeilen
+    && bilder[0].steuer === bilder[1].steuer,
+    'LIST-TAX PARITY Primary == PC2 (Kopf, Vermerk, Zeilen, gespeicherte Steuerart)');
+  const liste = src('src/pages/repairs/RepairList.tsx');
+  ok(/invoiceRepairsOnPrimary\(auswahl\.map\(\(x\) => x\.id\), wahl\)/.test(liste) && /repairInvoiceBody\(auswahl, wahl\)/.test(liste)
+    && /data-repair-invoice-tax-option=\{s\}/.test(liste) && /setEinzelRechnung\(rep\)/.test(liste)
+    && /const wahl = rechnungSteuer === 'EACH' \? \{\} : \{ taxScheme: rechnungSteuer \};/.test(liste)
+    && /arten\.size > 1 \? 'EACH'/.test(liste),
+    'LIST-TAX die Liste fragt die Steuerart (Kuerzel und Sammelrechnung) und schickt sie auf beiden Wegen mit; gemischte Auswahl: „wie an jeder Reparatur" (vorbelegt, ohne Wahl im Auftrag)');
 }
 
 // Ausgeblendete Felder: was die Maske in ihrem Modus NICHT zeigt, schreibt der Klick nicht.
@@ -979,7 +1034,7 @@ for (const weg of ['fern', 'lokal'] as const) {
       ok(alle === imAnschluss, `TRIPWIRE ${datei}: ${f}() steht nur im Primary-Anschluss (${imAnschluss}/${alle})`);
     }
   }
-  ok(/remote: \(\) => repairCreateBody\(form, fotos\)/.test(list) && /remote: \(\) => repairInvoiceBody\(auswahl\)/.test(list)
+  ok(/remote: \(\) => repairCreateBody\(form, fotos\)/.test(list) && /remote: \(\) => repairInvoiceBody\(auswahl, wahl\)/.test(list)
     && /remote: \(\) => repairEditBody\(id, fassung, repair, form, photos\)/.test(detail),
     'TRIPWIRE am zweiten Rechner reist der Rumpf der geteilten Regeln — nichts Eigenes');
   const house2 = codeOf(src('src/core/repairs/repair-house.ts'));

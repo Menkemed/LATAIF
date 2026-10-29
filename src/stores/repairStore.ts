@@ -1124,17 +1124,17 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     if (opts.taxScheme !== undefined && !(REPAIR_TAX_SCHEMES as readonly string[]).includes(opts.taxScheme)) {
       throw new RepairActionRejected('INVALID_TAX_SCHEME', `Unknown tax scheme: ${String(opts.taxScheme)}.`);
     }
-    // R5C FINAL — die Dialogwahl gibt es nur an der Detailseite, fuer genau EINE Reparatur, und die
-    // Nummernart nur zusammen mit dem Steuerdialog. Alles andere ist keine Handlung des Hauses.
-    const ausDemDialog = opts.taxScheme !== undefined;
-    if (!ausDemDialog && opts.specialMark === true) {
+    // R5C FINAL / v0.8.94 — die Steuerart fragen Detailseite und Liste (gilt dann fuer alle Reparaturen
+    // der Rechnung); die Nummernart nur der Dialog der Detailseite: zusammen mit der Steuerart und nur
+    // fuer EINE Reparatur. Alles andere ist keine Handlung des Hauses.
+    if (opts.taxScheme === undefined && opts.specialMark === true) {
       throw new RepairActionRejected('DIALOG_INCOMPLETE', 'The number type is chosen together with the tax scheme.');
     }
-    if (ausDemDialog && reps.length !== 1) {
-      throw new RepairActionRejected('DIALOG_IS_SINGLE', 'The tax and number dialogs belong to a single repair invoice.');
+    if (opts.specialMark === true && reps.length !== 1) {
+      throw new RepairActionRejected('DIALOG_IS_SINGLE', 'The number type is chosen on the detail page of a single repair.');
     }
-    // v0.7.6 (Detailseite) — das im Dialog bestaetigte Schema wird an der Reparatur gespeichert,
-    // damit nachfolgende Ansichten konsistent sind. Ohne Wahl gilt das gespeicherte je Reparatur.
+    // v0.7.6 — das bestaetigte Schema wird an der Reparatur gespeichert, damit nachfolgende Ansichten
+    // konsistent sind. Ohne Wahl gilt das gespeicherte je Reparatur.
     if (opts.taxScheme) {
       for (const r of reps) {
         if (r.taxScheme !== opts.taxScheme) get().updateRepair(r.id, { taxScheme: opts.taxScheme });
@@ -1176,12 +1176,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       };
     });
 
-    // R5C FINAL — der Vermerk je Handlung wie vor R5C: Detailseite (Dialog) oder Liste (Sammelvermerk,
-    // auch fuer das Kuerzel mit einer Reparatur). Die Nummernart waehlt nur der Dialog der Detailseite.
+    // Der Vermerk nach der Zahl der Reparaturen; die Nummernart waehlt nur der Dialog der Detailseite.
     const invoice = useInvoiceStore.getState().createDirectInvoice(
       customerId,
       lines,
-      repairInvoiceNotes(reps, ausDemDialog),
+      repairInvoiceNotes(reps),
       undefined,
       'repair',
       undefined,
