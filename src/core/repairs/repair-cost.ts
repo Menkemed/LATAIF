@@ -108,19 +108,36 @@ export function repairMargin(input: RepairCostInput & { chargeToCustomer?: numbe
 //   • lines — jede offene Kostenzeile (Werkstatt oder im Haus) mit ihrem Betrag;
 //   • fee   — nur ohne Zeilen und mit verknüpfter Werkstatt (Altbestand vor den Zeilen): die Gebühr.
 // Ohne Zeile und ohne Werkstatt ist ein Voranschlag nur ein Voranschlag, keine Kosten.
+// REPAIR COST FINAL SAFETY — `headerFeeKept` (`repairHeaderFeeKept`): die Gebühr gilt auch neben Zeilen weiter, solange
+// keine Werkstatt-Arbeitszeile sie ersetzt hat; eine Materialzeile oder eigene Arbeit nimmt sie nicht weg.
 export interface RepairCostParts { own: number; lines: number; fee: number; total: number }
 export function repairCostParts(
   r: { repairType?: string | null; internalCost?: number | null; estimatedCost?: number | null; workshopSupplierId?: string | null },
   openLineTotal = 0,
+  opts?: { headerFeeKept?: boolean },
 ): RepairCostParts {
   const internal = num(r.internalCost) ?? 0;
   const own = r.repairType === 'external' ? 0 : internal;
   const lines = Number.isFinite(openLineTotal) && openLineTotal > 0 ? openLineTotal : 0;
   const ext = r.repairType === 'external' || r.repairType === 'hybrid';
-  const fee = lines === 0 && ext && !!r.workshopSupplierId
+  const fee = (lines === 0 || !!opts?.headerFeeKept) && ext && !!r.workshopSupplierId
     ? (r.repairType === 'hybrid' ? (num(r.estimatedCost) ?? 0) : ((num(r.estimatedCost) || 0) || internal))
     : 0;
   return { own, lines, fee, total: own + lines + fee };
+}
+
+/**
+ * REPAIR COST FINAL SAFETY — gilt die Werkstatt-Gebühr im Kopf (Altbestand) neben offenen Zeilen weiter? Ja, solange die
+ * Werkstatt im Kopf nicht aus diesen Zeilen stammt: keine Werkstatt-Arbeitszeile und keine Zeile desselben Lieferanten.
+ * `workshop_supplier_id` kommt sonst immer aus den Zeilen; solche Reparaturen ändern sich hierdurch nicht.
+ */
+export function repairHeaderFeeKept(
+  r: { repairType?: string | null; workshopSupplierId?: string | null },
+  openLines: ReadonlyArray<{ supplierId?: string | null; materialKind?: string | null }>,
+): boolean {
+  if ((r.repairType !== 'external' && r.repairType !== 'hybrid') || !r.workshopSupplierId || openLines.length === 0) return false;
+  return !openLines.some((l) => l.supplierId === r.workshopSupplierId
+    || (!!l.supplierId && (!l.materialKind || l.materialKind === 'labor')));
 }
 
 // ── CENTRAL-C3H — die Kosten, die auf die RECHNUNGSZEILE einer Reparatur gehoeren ────────

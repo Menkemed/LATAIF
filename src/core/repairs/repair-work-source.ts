@@ -21,7 +21,7 @@
 // Gespeichertes ändert diese Datei nicht; die Kosten hier sind dieselbe Summe wie `repairCostParts`, nur aufgeteilt.
 // ════════════════════════════════════════════════════════════════════════════
 import { REPAIR_WORK_TYPES, type RepairWorkType } from '@/core/models/types';
-import { repairCostParts } from './repair-cost';
+import { repairCostParts, repairHeaderFeeKept } from './repair-cost';
 
 export type RepairWorkSourceKind = 'inhouse' | 'external' | 'hybrid' | 'none';
 
@@ -104,9 +104,10 @@ export function repairWorkSource(r: RepairWorkSourceInput, lines: readonly Repai
   const plannedRaw = text(r.plannedWorkshopSupplierId);
   const planned = plannedRaw && !lineShops.includes(plannedRaw) ? plannedRaw : null;
   if (planned) entries.push({ source: 'external', supplierId: planned, workType: null, lineId: null, basis: 'planned' });
-  // Nur ohne JEDE Zeile ist `workshop_supplier_id` eine echte Zuordnung (Altgebühr) — sonst eine Ableitung aus Zeilen.
+  // Ohne jede Zeile, oder solange die Altgebühr neben Zeilen weiter gilt (`repairHeaderFeeKept`), ist
+  // `workshop_supplier_id` eine echte Zuordnung — sonst eine Ableitung aus Zeilen.
   const altWerkstatt = text(r.workshopSupplierId);
-  const assigned = open.length === 0 && altWerkstatt && altWerkstatt !== planned ? altWerkstatt : null;
+  const assigned = (open.length === 0 || repairHeaderFeeKept(r, open)) && altWerkstatt && altWerkstatt !== planned ? altWerkstatt : null;
   if (assigned) entries.push({ source: 'external', supplierId: assigned, workType: null, lineId: null, basis: 'assigned' });
   const stored = text(r.repairType) ?? 'internal';
   const storedIn = stored === 'internal' || stored === 'hybrid';
@@ -241,7 +242,7 @@ export function repairCostView(
   const sum = (xs: readonly RepairWorkLineInput[]): number => xs.reduce((s, l) => s + (Number(l.costAmount) || 0), 0);
   const work = sum(open.filter((l) => isWorkKind(l.materialKind)));
   const material = sum(open.filter((l) => !isWorkKind(l.materialKind)));
-  const parts = repairCostParts(r, work + material);
+  const parts = repairCostParts(r, work + material, { headerFeeKept: repairHeaderFeeKept(r, open) });
   return { work, material, linesTotal: work + material, own: parts.own, fee: parts.fee, total: parts.total, hasLines: open.length > 0 };
 }
 

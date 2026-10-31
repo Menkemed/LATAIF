@@ -292,6 +292,10 @@ export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort
     // zusätzlich in die eigenen Kosten zu spiegeln, buchte ihn doppelt — an eigener Ware wie an Kundenware
     // (`internalCostOnCreate`): nur die eigene Arbeit, dieselbe Regel wie beim Ändern.
     internalCost: internalCostOnCreate(input),
+    // REPAIR COST FINAL SAFETY — der Nachweis: hier und nur hier entsteht der Spiegel (bei „external" ohne eingetragene
+    // eigene Kosten). Gleiche Beträge beweisen später nichts; das Protokoll der Anlage schon (`decideRepairType`).
+    ...(input.repairType === 'external' && !(Number(input.internalCost) > 0) && internalCostOnCreate(input) > 0
+      ? { internalCostMirrored: internalCostOnCreate(input) } : {}),
     chargeToCustomer: input.chargeToCustomer,
     estimatedReady: input.estimatedReady,
     receivedAt: input.receivedAt,

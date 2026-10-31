@@ -110,20 +110,20 @@ Eine automatische Herabstufung ist nicht sicher:
 - **REP-2026-00002**: Die Datenkorrektur hybrid → external ist vorbereitet (`fix-rep2-type.cjs`, Arbeitskopie, Vorbedingungen und Nachprüfung). Der Probelauf auf einer Produktionskopie war ok: nur `repair_type` und `revision` ändern sich, Salden, Rechnung, Ausgabe und Zahlungen nicht. Ausführung nur mit gesonderter Owner-Freigabe, App geschlossen, nach Sicherung.
 - ~~Bleibt bestehen: gespiegelter Voranschlag bei external → hybrid zählt doppelt~~ — behoben, siehe unten.
 
-## REPAIR COST DOUBLE-COUNT FIX (31.10.)
+## REPAIR COST DOUBLE-COUNT FIX + FINAL SAFETY (31.10.)
 
-- **Ursache**:
-  - Bei „external“ ist `internal_cost` nie eigene Arbeit (`repairCostParts`: own = 0), sondern ein Spiegel. Er entsteht beim Anlegen aus dem Voranschlag (`internalCostOnCreate`) und beim Bearbeiten aus Actual oder Voranschlag (`internalCostOnEdit`).
-  - Die Anlage mit Gebühr legt zugleich die Werkstattzeile über denselben Betrag an.
-  - Kam eine eigene Zeile dazu, wurde die Reparatur hybrid, und die Formel zählte den Spiegel als eigene Kosten neben der Werkstattzeile. Beispiel: Gebühr 25 + Politur 0.000 ergab Kosten 50, Marge −25 zu tief. Das betraf auch die eigene Arbeit, die bei „ready“ gebucht wird.
-- **Lösung** (`decideRepairType` → `mirror`, geschrieben in `recomputeRepairAggregates` bzw. bei einer Planänderung):
-  - Verlässt eine Reparatur „external“ und ist `internal_cost` gleich dem Voranschlag, ist es ein Spiegel. Er wird 0 (NEUTRALIZED); die Werkstattzeile trägt die Kosten.
-  - Altbestand mit Kopf-Gebühr ohne Zeile: Die Gebühr fällt mit der ersten Zeile weg. Der Spiegel bleibt dann als ihr Platzhalter stehen (CARRIED, Summe wie vorher, protokolliert als `repairFeeCarried`).
-  - Kommt danach die erste Werkstatt-Arbeitszeile, ersetzt sie den unveränderten Platzhalter (REPLACED → 0). Nach „ready“ folgt die Kopfbuchung um genau die Differenz; die eigene Arbeit wird zurückgenommen.
-  - Ein anderer Betrag (weder Voranschlag noch Gebühr) wird nicht geraten: Die Reparatur bleibt „external“, im Protokoll steht `repairTypeKept: MIRROR`.
-  - Eine geltende Gebühr darf durch die Art nicht wegfallen (`repairTypeKept: COST`).
-  - Echte eigene Kosten bei internal und hybrid bleiben unangetastet, die Kostenformel bleibt unverändert.
-  - Bestehende Reparaturen ändern sich nur bei einer neuen Zeilenänderung, Rechnungen nie (abgerechnet → bisheriges Verhalten).
+- **Ursache der Doppelzählung**: Bei „external“ zählt `internal_cost` nicht (`repairCostParts`: own = 0); die Anlage spiegelt dort den Voranschlag (`internalCostOnCreate`) und legt zugleich die Werkstattzeile über denselben Betrag an. Kam eine eigene Zeile dazu, wurde die Reparatur hybrid, und der Spiegel zählte neben der Werkstattzeile (Gebühr 25 + Politur ergab Kosten 50).
+- **Spiegel nur mit Nachweis** (`decideRepairType`): Gleiche Beträge beweisen nichts.
+  - Der Nachweis ist das Protokoll `internalCostMirrored`, das die Anlage nur dann schreibt, wenn sie selbst gespiegelt hat (external, keine eigenen Kosten eingetragen).
+  - Jede Änderung von `internal_cost` löscht den Nachweis, auch „von Hand geändert und zurück“.
+  - Mit Nachweis wird der Betrag beim Verlassen von „external“ 0 (NEUTRALIZED).
+  - Ohne Nachweis (Altbestand, eingetragene Kosten, von Hand geändert) bleibt die Reparatur „external“, der Betrag bleibt stehen und zählt weiter nicht. Im Protokoll steht `repairTypeKept: MIRROR`. Die Anzeige zeigt die eigene Arbeit trotzdem (Hybrid), die Kosten bleiben korrekt.
+- **Altgebühr im Kopf bleibt** (`repairHeaderFeeKept`, `repairCostParts(…, { headerFeeKept })`): Eine Gebühr im Kopf ohne Zeile gibt es nur im Altbestand.
+  - Sie gilt weiter neben Material und eigener Arbeit und endet erst mit einer Arbeitszeile dieser Werkstatt. Nach „ready“ wird die Kopfbuchung dann um genau die Differenz nachgezogen: keine zweite Verbindlichkeit.
+  - Nicht zuordenbar und deshalb abgewiesen (`REPAIR_HEADER_FEE_OPEN`, nichts geändert): eine Arbeitszeile einer anderen Werkstatt und Material desselben Lieferanten, solange die Gebühr gilt.
+  - Bestehende Reparaturen mit Zeilen ändern sich nicht: Ihr `workshop_supplier_id` stammt aus diesen Zeilen, deshalb greift die Regel dort nicht.
+- **Unverändert**: echte eigene Kosten bei internal und hybrid, Rechnungen, VAT, Zahlungen, Status. Altbestand ändert sich nur bei einer neuen Zeilenänderung.
 - **Offen zur Entscheidung**:
-  - Eine External-Reparatur mit `internal_cost` ≠ Voranschlag bleibt beim Hinzufügen eigener Arbeit „external“ (MIRROR). Ob der Betrag echte eigene Kosten sind, entscheidet der Owner. Er kann sie als eigene Arbeitszeile erfassen.
-  - Aus der Formel, nicht geändert: Eine Kopf-Gebühr ohne Zeile fällt mit jeder Zeile weg, auch mit einer Materialzeile. Bei „external“ bleibt dann kein Platzhalter. Betrifft nur Altbestand.
+  - External-Reparaturen ohne Nachweis, die eigene Arbeit bekommen, bleiben gespeichert „external“. Ob der Betrag echte eigene Kosten sind, entscheidet der Owner; er kann sie als eigene Arbeitszeile erfassen.
+  - Eine bezahlte Altgebühr lässt sich nicht automatisch ersetzen: Die Werkstattzeile wird dann mit `REPAIR_COST_PAID` abgewiesen.
+  - Wer den vorbelegten Spiegel unverändert speichert, „bestätigt“ ihn nicht: Er bleibt ein Spiegel, weil sich nichts geändert hat.

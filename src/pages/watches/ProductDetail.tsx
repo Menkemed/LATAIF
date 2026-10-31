@@ -25,7 +25,7 @@ import { StockAdjustmentPanel } from '@/components/products/StockAdjustmentPanel
 import { updatePayload, PRODUCT_UPDATE_FIELDS } from '@/core/data/write-payloads';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
-import { useRepairStore, computeRepairTotalCost, sumOpenRepairLineCosts } from '@/stores/repairStore';
+import { useRepairStore, repairTotalCostInHouse } from '@/stores/repairStore';
 import { usePermission } from '@/hooks/usePermission';
 import { useAuthStore } from '@/stores/authStore';
 import { useProductMediaPresentation } from '@/hooks/useProductMediaPresentation';
@@ -1681,7 +1681,7 @@ export function ProductDetail() {
                 {productRepairs.map(rep => {
                   const isOwn = rep.repairScope === 'OWN';
                   // POST-PARITY PP-13/PP-14 — EINE Ableitung (`repairCostParts`) für Anzeige, Einstand und Marge.
-                  const totalCost = computeRepairTotalCost(rep, sumOpenRepairLineCosts(rep.id));
+                  const totalCost = repairTotalCostInHouse(rep);
                   return (
                     <div key={rep.id}
                       onClick={() => navigate(`/repairs/${rep.id}`)}
@@ -1716,7 +1716,7 @@ export function ProductDetail() {
                   <div className="flex justify-between" style={{ padding: '12px 14px', marginTop: 4, fontSize: 12, color: '#6B7280' }}>
                     <span>Total Own-Item repair cost capitalized into purchase price</span>
                     <span className="font-mono" style={{ color: '#0F0F10' }}>
-                      {fmt(productRepairs.filter(r => r.repairScope === 'OWN' && r.completedAt).reduce((s, r) => s + computeRepairTotalCost(r, sumOpenRepairLineCosts(r.id)), 0))} BHD
+                      {fmt(productRepairs.filter(r => r.repairScope === 'OWN' && r.completedAt).reduce((s, r) => s + repairTotalCostInHouse(r), 0))} BHD
                     </span>
                   </div>
                 )}

@@ -10,6 +10,7 @@ import { decideRepairType, type RepairTypeDecision } from '@/core/repairs/repair
 import {
   assertRepairCostUnsettled, hasOwnWork, ownRepairCapitalized, repairCostCategory, repairHeaderCostsBooked, reverseOwnWork,
   shiftOwnRepairCost, syncOwnWork, syncRepairHeaderCosts,
+  repairHeaderFeeKeptInDb, repairHeaderFeeWorkshop,
 } from '@/core/repairs/repair-cost-booking';
 import { canonicalRepairStatus, REPAIR_CUSTOMER_PAID_FROM, REPAIR_TAX_SCHEMES } from '@/core/models/types';
 // CENTRAL-UI-PARITY R5C — die Regel „abrechenbar" und der Rechnungsvermerk: EINE Quelle für
@@ -184,11 +185,21 @@ function syncRepairCustomerPayment(repairId: string, prevBrand?: string | null):
 export function computeRepairTotalCost(
   r: Pick<Repair, 'repairType' | 'internalCost' | 'estimatedCost'> & { workshopSupplierId?: string | null },
   lineTotal = 0,
+  opts?: { headerFeeKept?: boolean },
 ): number {
   // POST-PARITY PP-13/PP-14 — EINE Ableitung für Marge, Einstand eigener Ware und Rechnungseinstand
   // (`repairCostParts`): eigene Arbeit (bei „external" ist internalCost der Spiegel), jede offene Zeile,
   // ohne Zeilen die Gebühr einer verknüpften Werkstatt. Jeder Teil ist genau eine Ausgabe.
-  return repairCostParts(r, lineTotal).total;
+  return repairCostParts(r, lineTotal, opts).total;
+}
+
+/** Die Gesamtkosten aus der Datenbank: offene Zeilen und die neben ihnen weiter geltende Altgebühr. */
+export function repairTotalCostInHouse(
+  r: Pick<Repair, 'id' | 'repairType' | 'internalCost' | 'estimatedCost'> & { workshopSupplierId?: string | null },
+): number {
+  let headerFeeKept = false;
+  try { headerFeeKept = repairHeaderFeeKeptInDb(r.id); } catch { /* ohne Datenbank: wie sumOpenRepairLineCosts */ }
+  return computeRepairTotalCost(r, sumOpenRepairLineCosts(r.id), { headerFeeKept });
 }
 
 // Helper fuer das Multi-Line-Total — wird sowohl in Store-internen Aufrufen
@@ -199,23 +210,23 @@ export function computeRepairTotalCost(
  */
 function repairTypeDecisionFor(
   repairId: string, workLines: ReadonlyArray<{ supplierId?: string | null }>, openLineTotal: number,
-  workshopSupplierId: string | null, assignedWorkshopSupplierId: string | null,
+  workshopSupplierId: string | null, assignedWorkshopSupplierId: string | null, headerFeeKept: boolean,
 ): RepairTypeDecision {
   const r = query(`SELECT repair_type, repair_scope, status, return_from_status, invoice_id, internal_cost, estimated_cost,
       planned_workshop_supplier_id FROM repairs WHERE id = ?`, [repairId])[0] ?? {};
   const warDort = query(`SELECT 1 AS x FROM audit_log WHERE entity_type = 'repairs' AND entity_id = ? AND field_name = 'status'
       AND new_value = 'sent_to_workshop' LIMIT 1`, [repairId]).length > 0;
-  // REPAIR COST DOUBLE-COUNT FIX — ein stehen gebliebener Gebühr-Platzhalter (s. `decideRepairType`, CARRIED).
-  const platz = query(`SELECT new_value AS v FROM audit_log WHERE entity_type = 'repairs' AND entity_id = ? AND field_name = 'repairFeeCarried'
+  // REPAIR COST FINAL SAFETY — der Nachweis eines Spiegels: der letzte Protokolleintrag der Anlage bzw. seine Löschung.
+  const spiegel = query(`SELECT new_value AS v FROM audit_log WHERE entity_type = 'repairs' AND entity_id = ? AND field_name = 'internalCostMirrored'
       ORDER BY rowid DESC LIMIT 1`, [repairId])[0]?.v;
   return decideRepairType({
     currentType: r.repair_type as string | null, scope: r.repair_scope as string | null, status: r.status as string | null,
     returnFromStatus: r.return_from_status as string | null, invoiceId: r.invoice_id as string | null,
     internalCost: Number(r.internal_cost) || 0, estimatedCost: r.estimated_cost === null || r.estimated_cost === undefined ? null : Number(r.estimated_cost),
     workshopSupplierId, plannedWorkshopSupplierId: (r.planned_workshop_supplier_id as string | null) ?? null,
-    assignedWorkshopSupplierId,
+    assignedWorkshopSupplierId, headerFeeKept,
     workLines, openLineTotal, everSentToWorkshop: warDort,
-    carriedFee: platz === undefined || platz === null ? null : Number(platz),
+    mirroredAmount: spiegel === undefined || spiegel === null ? null : Number(spiegel),
   });
 }
 
@@ -228,11 +239,21 @@ function applyRepairMirror(repairId: string, d: RepairTypeDecision, now: string)
   const vorher = Number(query('SELECT internal_cost AS c FROM repairs WHERE id = ?', [repairId])[0]?.c) || 0;
   const geaendert = Math.abs(vorher - d.internalCost) > 0.0005;
   if (geaendert) getDatabase().run('UPDATE repairs SET internal_cost = ?, updated_at = ? WHERE id = ?', [d.internalCost, now, repairId]);
-  trackUpdate('repairs', repairId, {
-    internalCost: d.internalCost, internalCostMirror: d.mirror,
-    ...(d.mirror === 'CARRIED' ? { repairFeeCarried: d.internalCost } : {}),
-  });
+  trackUpdate('repairs', repairId, { internalCost: d.internalCost, internalCostMirror: d.mirror, internalCostMirrored: 0 });
   return geaendert;
+}
+
+/**
+ * Solange die Altgebühr im Kopf gilt, ersetzt sie nur eine Arbeitszeile DIESER Werkstatt. Eine Arbeitszeile einer anderen
+ * Werkstatt (Ersatz oder Zusatzarbeit?) und Material desselben Lieferanten lassen sich nicht sicher zuordnen: nichts raten.
+ */
+function assertHeaderFeeLine(feeWorkshop: string | null, supplierId?: string | null, materialKind?: string | null): void {
+  if (!feeWorkshop || !supplierId) return;
+  const arbeit = !materialKind || materialKind === 'labor';
+  if (arbeit ? supplierId !== feeWorkshop : supplierId === feeWorkshop) {
+    throw new RepairActionRejected('REPAIR_HEADER_FEE_OPEN',
+      'this repair still carries the workshop fee in its header — add that workshop\'s work line first, it replaces the fee');
+  }
 }
 
 /** Ein Konflikt (Kosten, Status, abgerechnet) wird nicht still übergangen: er steht im Protokoll der Reparatur. */
@@ -538,7 +559,8 @@ interface RepairStore {
   loadRepairLines: () => void;
   getRepair: (id: string) => Repair | undefined;
   getRepairLines: (repairId: string) => RepairLine[];
-  createRepair: (data: Partial<Repair>) => Repair;
+  /** `internalCostMirrored`: der Betrag, den die Anlage nachweislich selbst gespiegelt hat (`repair-rules`). */
+  createRepair: (data: Partial<Repair> & { internalCostMirrored?: number }) => Repair;
   updateRepair: (id: string, data: Partial<Repair>) => void;
   /** REPAIR-PICKUP-DATE — `opts.pickedUpDate` (JJJJ-MM-TT) nur bei „picked_up": der tatsächliche Abholtag. */
   updateStatus: (id: string, status: RepairStatus, opts?: { pickedUpDate?: string }) => void;
@@ -552,7 +574,7 @@ interface RepairStore {
   updateRepairLine: (lineId: string, data: Partial<RepairLine>) => void;
   cancelRepairLine: (lineId: string, notes?: string) => void;
   /** `assignedWorkshopSupplierId`: die Werkstatt im Kopf vor der ERSTEN Zeile (Gebühr/Altbestand) — nur `addRepairLine`. */
-  recomputeRepairAggregates: (repairId: string, opts?: { assignedWorkshopSupplierId?: string | null }) => void;
+  recomputeRepairAggregates: (repairId: string, opts?: { assignedWorkshopSupplierId?: string | null; headerFeeWorkshopSupplierId?: string | null }) => void;
   // User-Spec §Repair Bulk-Invoice: mehrere READY-Repairs eines Customers in
   // EINE gemeinsame Multi-Line-Invoice. Validiert atomisch: alle ready, kein
   // invoiceId, alle gleicher Customer, charge>0. Linkt invoiceId auf jedem Repair.
@@ -776,6 +798,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
 
     saveDatabase();
     trackInsert('repairs', id, { repairNumber, customerId: data.customerId });
+    if (Number(data.internalCostMirrored) > 0) trackUpdate('repairs', id, { internalCostMirrored: data.internalCostMirrored });
     eventBus.emit('repair.created', 'repair', id, { customerId: data.customerId, voucherCode });
     get().loadRepairs();
     get().loadRepairLines();
@@ -876,6 +899,13 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     saveDatabase();
     trackUpdate('repairs', id, data);
 
+    // REPAIR COST FINAL SAFETY — wer `internal_cost` ändert, hat etwas erfasst: der Nachweis eines Spiegels endet.
+    if (before && data.internalCost !== undefined
+      && Math.abs((Number(data.internalCost) || 0) - (Number(before.internalCost) || 0)) > 0.0005
+      && query(`SELECT 1 AS x FROM audit_log WHERE entity_type = 'repairs' AND entity_id = ? AND field_name = 'internalCostMirrored' LIMIT 1`, [id]).length > 0) {
+      trackUpdate('repairs', id, { internalCostMirrored: 0 });
+    }
+
     // REPAIR-TYPE FINAL CORRECTION — eine eingeplante Werkstatt ist (noch nicht ausgeführte) Werkstattarbeit: ändert
     // sich der Plan, gilt dieselbe Regel wie nach einer Arbeitszeile (nur kosten- und statusneutral, vor Marge/Kopfkosten).
     if (data.plannedWorkshopSupplierId !== undefined
@@ -884,8 +914,9 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       const ws = (query('SELECT workshop_supplier_id AS w FROM repairs WHERE id = ?', [id])[0]?.w as string | null) ?? null;
       // Ohne jede Zeile ist eine Werkstatt im Kopf die Gebühr beim Anlegen / Altbestand — Werkstattarbeit.
       const ohneZeile = Number(query('SELECT COUNT(*) AS n FROM repair_lines WHERE repair_id = ?', [id])[0]?.n) === 0;
+      const gebuehrBleibt = repairHeaderFeeKeptInDb(id);
       const d = repairTypeDecisionFor(id, offen.filter((l) => !l.materialKind || l.materialKind === 'labor'),
-        offen.reduce((s, l) => s + (l.costAmount || 0), 0), ws, ohneZeile ? ws : null);
+        offen.reduce((s, l) => s + (l.costAmount || 0), 0), ws, ohneZeile || gebuehrBleibt ? ws : null, gebuehrBleibt);
       if (d.changed) {
         db.run('UPDATE repairs SET repair_type = ?, updated_at = ? WHERE id = ?', [d.type, now, id]);
         trackUpdate('repairs', id, { repairType: d.type, recomputedFromPlan: true });
@@ -927,7 +958,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         repairType: m.repair_type as string, internalCost: Number(m.internal_cost) || 0,
         estimatedCost: m.estimated_cost === null ? null : Number(m.estimated_cost),
         workshopSupplierId: (m.workshop_supplier_id as string | null) ?? null,
-      }, sumOpenRepairLineCosts(id)).total;
+      }, sumOpenRepairLineCosts(id), { headerFeeKept: repairHeaderFeeKeptInDb(id) }).total;
       if (Math.abs(margin - (Number(m.margin) || 0)) > 0.0005 || m.margin === null) {
         db.run('UPDATE repairs SET margin = ? WHERE id = ?', [margin, id]);
         trackUpdate('repairs', id, { margin, recomputedMargin: true });
@@ -977,7 +1008,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
         const lineTotal = sumOpenRepairLineCosts(id);
         const firstReady = !repair.completedAt;
         if (firstReady) syncRepairHeaderCosts(id, now, { capitalize: false });
-        const totalCost = computeRepairTotalCost(repair, lineTotal);
+        const totalCost = computeRepairTotalCost(repair, lineTotal, { headerFeeKept: repairHeaderFeeKeptInDb(id) });
 
         if (repair.repairScope === 'OWN') {
           // OWN-Item: gesamter Repair-Cost auf Artikel + Los (das gewählte, sonst das älteste aktive —
@@ -1120,7 +1151,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
             AND category != 'CardFees'`, [id]);
       for (const e of linked) assertRepairCostUnsettled(e.id as string);
       if (ownRepairCapitalized(repair)) {
-        shiftOwnRepairCost(repair, -computeRepairTotalCost(repair, sumOpenRepairLineCosts(id)), new Date().toISOString(), 'repair-deleted');
+        shiftOwnRepairCost(repair, -repairTotalCostInHouse(repair), new Date().toISOString(), 'repair-deleted');
       }
       // Die aktivierte Eigenleistung (eigene Kosten, Zeilen im Haus) geht mit.
       const jetzt = new Date().toISOString();
@@ -1312,7 +1343,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       // POST-PARITY PP-14 — der Einstand ist die EINE Kostensumme (vorher internalCost + Zeilen: bei
       // „external" zählte der Spiegel neben der Werkstattzeile). Gebucht ist sie schon (Soll COGS bei der
       // Kostenentstehung); die Rechnung trägt sie nur für Marge und Berichte.
-      const fullCost = computeRepairTotalCost(r, sumOpenRepairLineCosts(r.id));
+      const fullCost = repairTotalCostInHouse(r);
       return {
         productId,
         unitPrice: net,
@@ -1364,6 +1395,10 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       throw new RepairActionRejected('REPAIR_ALREADY_INVOICED', 'this repair is already invoiced — its cost lines are frozen');
     }
 
+    // REPAIR COST FINAL SAFETY — die Altgebühr im Kopf bleibt, bis eine Arbeitszeile dieser Werkstatt sie ersetzt.
+    const feeKopf = repairHeaderFeeWorkshop(repairId);
+    assertHeaderFeeLine(feeKopf, data.supplierId, data.materialKind);
+
     // REPAIR-TYPE FINAL CORRECTION — vor der ersten Zeile ist eine Werkstatt im Kopf die Gebühr beim Anlegen / der
     // Altbestand (Werkstattarbeit); danach kommt `workshop_supplier_id` aus den Zeilen (stornierte werden gelöscht).
     const kopfWerkstatt = Number(query('SELECT COUNT(*) AS n FROM repair_lines WHERE repair_id = ?', [repairId])[0]?.n) === 0
@@ -1405,7 +1440,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     }
     saveDatabase();
     get().loadRepairLines();
-    get().recomputeRepairAggregates(repairId, { assignedWorkshopSupplierId: kopfWerkstatt });
+    get().recomputeRepairAggregates(repairId, { assignedWorkshopSupplierId: kopfWerkstatt ?? feeKopf, headerFeeWorkshopSupplierId: feeKopf });
 
     // Plan repair-multi-supplier — Stage-based Commit: wenn der Repair schon
     // ueber DRAFT/RECEIVED hinaus ist, wird die neue Line sofort als
@@ -1442,6 +1477,8 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       throw new RepairActionRejected('REPAIR_LINE_SOURCE_LOCKED',
         'the supplier of a booked line does not change — cancel the line and add a new one');
     }
+    const feeKopf = repairHeaderFeeWorkshop(line.repairId);
+    if (data.supplierId !== undefined) assertHeaderFeeLine(feeKopf, data.supplierId, line.materialKind);
     // POST-PARITY PP-13/PP-14 — die Kostenquelle einer gebuchten Zeile (Werkstatt ↔ im Haus) wechselt nicht:
     // Werkstatt = Ausgabe an sie, im Haus = aktivierte Eigenleistung. Dafür: Zeile stornieren, neu anlegen.
     const ownWorkLine = hasOwnWork(lineId);
@@ -1544,7 +1581,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
 
     saveDatabase();
     get().loadRepairLines();
-    get().recomputeRepairAggregates(line.repairId);
+    get().recomputeRepairAggregates(line.repairId, { assignedWorkshopSupplierId: feeKopf, headerFeeWorkshopSupplierId: feeKopf });
   },
 
   cancelRepairLine: (lineId, _notes) => {
@@ -1566,6 +1603,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       throw new RepairActionRejected('REPAIR_ALREADY_INVOICED', 'this repair is already invoiced — its cost lines are frozen');
     }
     assertRepairCostUnsettled(line.expenseId);
+    const feeKopf = repairHeaderFeeWorkshop(line.repairId);
 
     // 1) Linked gold_payable(s) per line-level FK — OPEN/CANCELLED dürfen mitgehen,
     //    bereits FULFILLED-Schulden blockieren (sonst floatet die Settlement-Expense).
@@ -1604,7 +1642,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
 
     saveDatabase();
     get().loadRepairLines();
-    get().recomputeRepairAggregates(line.repairId);
+    get().recomputeRepairAggregates(line.repairId, { assignedWorkshopSupplierId: feeKopf, headerFeeWorkshopSupplierId: feeKopf });
   },
 
   // Salesforce-Pattern: legacy repairs.workshop_supplier_id + actual_cost werden
@@ -1625,7 +1663,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const workLines = lines.filter(l => !l.materialKind || l.materialKind === 'labor');
     const supplierIds = Array.from(new Set(workLines.map(l => l.supplierId).filter(Boolean) as string[]));
     const totalCost = lines.reduce((s, l) => s + (l.costAmount || 0), 0);
-    const newSupplierId = supplierIds.length === 1 ? supplierIds[0] : null;
+    // REPAIR COST FINAL SAFETY — galt VOR dieser Änderung die Altgebühr im Kopf, bleibt ihre Werkstatt, bis eine
+    // Werkstatt-Arbeitszeile kommt. Dann endet die Gebühr (und mit ihr nach „ready" die Kopfbuchung, s. unten).
+    const feeKopf = opts?.headerFeeWorkshopSupplierId ?? null;
+    const gebuehrBleibt = !!feeKopf && supplierIds.length === 0 && !lines.some((l) => l.supplierId === feeKopf);
+    const newSupplierId = gebuehrBleibt ? feeKopf : (supplierIds.length === 1 ? supplierIds[0] : null);
     // Margin-Inputs lesen (L-13).
     const currentRow = query(
       'SELECT charge_to_customer, internal_cost, estimated_cost FROM repairs WHERE id = ?',
@@ -1635,10 +1677,10 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // nur eigene → internal, nur Werkstatt (auch eingeplant) → external, beides → hybrid. Gespeichert wird das nur,
     // wenn es gegenüber dem bisherigen Verhalten kosten- und statusgleich ist; sonst bleibt das bisherige Verhalten,
     // „hybrid" bleibt, und ein Konflikt steht im Protokoll (`decideRepairType`).
-    const typEntscheid = repairTypeDecisionFor(repairId, workLines, totalCost, newSupplierId, opts?.assignedWorkshopSupplierId ?? null);
+    const typEntscheid = repairTypeDecisionFor(repairId, workLines, totalCost, newSupplierId, opts?.assignedWorkshopSupplierId ?? null, gebuehrBleibt);
     const newType: Repair['repairType'] = typEntscheid.type;
     auditKeptRepairType(repairId, typEntscheid);
-    // REPAIR COST DOUBLE-COUNT FIX — der Spiegel wird beim Verlassen von „external" nicht zu eigenen Kosten.
+    // REPAIR COST FINAL SAFETY — ein nachgewiesener Spiegel wird beim Verlassen von „external" nicht zu eigenen Kosten.
     const vorSpiegel = get().getRepair(repairId);
     const spiegelGeaendert = applyRepairMirror(repairId, typEntscheid, now);
     const internalNachher = typEntscheid.internalCost ?? (Number(currentRow?.internal_cost) || 0);
@@ -1661,6 +1703,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
           workshopSupplierId: newSupplierId,
         },
         totalCost,
+        { headerFeeKept: gebuehrBleibt },
       );
       newMargin = charge - costForMargin;
       fields.push('margin = ?');
@@ -1672,9 +1715,10 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       workshopSupplierId: newSupplierId, actualCost: totalCost, repairType: newType,
       recomputedFromLines: true, ...(newMargin !== undefined ? { margin: newMargin } : {}),
     });
-    // Nach „ready" sind die Kopfkosten gebucht: ändert der Spiegel `internal_cost`, folgt die Kopfbuchung um genau die
-    // Differenz (derselbe Abgleich wie beim Bearbeiten) — sonst stünde ein ersetzter Platzhalter neben der Werkstattzeile.
-    if (spiegelGeaendert && vorSpiegel && repairHeaderCostsBooked(vorSpiegel)) {
+    // Nach „ready" sind die Kopfkosten gebucht: ändert sich `internal_cost` oder ersetzt eine Werkstatt-Arbeitszeile die
+    // Altgebühr, folgt die Kopfbuchung um genau die Differenz (derselbe Abgleich wie beim Bearbeiten) — sonst stünde
+    // die Gebühr als zweite Verbindlichkeit neben der Werkstattzeile.
+    if ((spiegelGeaendert || (!!feeKopf && !gebuehrBleibt)) && vorSpiegel && repairHeaderCostsBooked(vorSpiegel)) {
       syncRepairHeaderCosts(repairId, now, { capitalize: ownRepairCapitalized(vorSpiegel) });
     }
     saveDatabase();

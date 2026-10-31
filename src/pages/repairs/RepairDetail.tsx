@@ -67,6 +67,7 @@ import {
 } from '@/core/repairs/repair-line-view';
 import { hasSelectableWorkshop, NO_WORKSHOP_HINT, workshopOptions } from '@/core/repairs/repair-workshop-choice';
 import { repairCostView, repairEstimateRole, repairWorkSource } from '@/core/repairs/repair-work-source';
+import { repairHeaderFeeKept } from '@/core/repairs/repair-cost';
 import {
   EMPTY_WORK_LINE, RepairWorkLineForm, RepairWorkSourceBadge, repairWorkSourceText, type WorkLineDraft, type WorkLineValues,
 } from '@/components/repairs/RepairWorkParts';
@@ -466,7 +467,7 @@ export function RepairDetail() {
   // Workshop-Kost (ueberschreibt Legacy-estimatedCost) — linesTotalCost kommt
   // aus dem Store und re-rendert automatisch bei Line-Mutationen.
   const margin = repair.chargeToCustomer != null
-    ? repair.chargeToCustomer - computeRepairTotalCost(repair, linesTotalCost)
+    ? repair.chargeToCustomer - computeRepairTotalCost(repair, linesTotalCost, { headerFeeKept: repairHeaderFeeKept(repair, offeneZeilen) })
     : null;
 
   // Workshop fee owed to supplier (for display in status panel + OWN-scope).
@@ -923,7 +924,7 @@ export function RepairDetail() {
             <div style={{ marginTop: 20, borderTop: '1px solid #E5E9EE', paddingTop: 16 }}>
               {editing ? (
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-                  <Input label={`${repairEstimateRole(repair, kostenSicht.hasLines) === 'fee' ? repairCostLabels(form.repairType).estimated : 'ESTIMATED COST'} (BHD)`} type="number" placeholder={form.repairType !== 'external' && form.repairType !== 'hybrid' ? IN_HOUSE_COST_PLACEHOLDER : 'optional'} value={form.estimatedCost ?? ''} onChange={e => setForm({ ...form, estimatedCost: e.target.value ? Number(e.target.value) : undefined })} />
+                  <Input label={`${repairEstimateRole(repair, kostenSicht.hasLines && kostenSicht.fee <= 0) === 'fee' ? repairCostLabels(form.repairType).estimated : 'ESTIMATED COST'} (BHD)`} type="number" placeholder={form.repairType !== 'external' && form.repairType !== 'hybrid' ? IN_HOUSE_COST_PLACEHOLDER : 'optional'} value={form.estimatedCost ?? ''} onChange={e => setForm({ ...form, estimatedCost: e.target.value ? Number(e.target.value) : undefined })} />
                   {kostenSicht.hasLines ? (
                     // REPAIR-REDESIGN — mit Kostenzeilen ist der Aufwand ihre Summe (das Haus schreibt sie bei jeder Zeile).
                     <Input label="ACTUAL COST (BHD)" value={String(kostenSicht.linesTotal)} disabled readOnly data-repair-actual-from-lines />

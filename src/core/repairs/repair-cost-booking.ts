@@ -29,7 +29,7 @@ import { computeExpenseSettlement, creditPaidForExpense, expenseHasActiveCreditS
 import { hasLedgerEntries, postExpense, postRepairOwnWork, reverseSource } from '@/core/ledger/posting';
 import { createExpenseInHouse } from '@/core/payables/payables-house';
 import { canonicalRepairStatus, type Expense, type ExpenseCategory, type Repair } from '@/core/models/types';
-import { repairCostParts } from './repair-cost';
+import { repairCostParts, repairHeaderFeeKept } from './repair-cost';
 import { RepairActionRejected } from './repair-rules';
 
 const EPS = 0.0005;
@@ -55,6 +55,29 @@ export function repairHeaderCostsBooked(r: Pick<Repair, 'status'>): boolean {
 function openLineTotal(repairId: string): number {
   return Number(query(`SELECT COALESCE(SUM(cost_amount), 0) AS t FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'`,
     [repairId])[0]?.t) || 0;
+}
+
+/** REPAIR COST FINAL SAFETY — `repairHeaderFeeKept` aus der Datenbank. */
+export function repairHeaderFeeKeptInDb(repairId: string): boolean {
+  const r = query('SELECT repair_type, workshop_supplier_id FROM repairs WHERE id = ?', [repairId])[0];
+  if (!r) return false;
+  const zeilen = query(`SELECT supplier_id, material_kind FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'`, [repairId]);
+  return repairHeaderFeeKept(
+    { repairType: str(r.repair_type), workshopSupplierId: str(r.workshop_supplier_id) },
+    zeilen.map((l) => ({ supplierId: str(l.supplier_id), materialKind: str(l.material_kind) })),
+  );
+}
+
+/** Die Werkstatt, deren Gebühr im Kopf JETZT gilt (Altbestand); sonst `null`. Vor einer Zeilenänderung zu lesen. */
+export function repairHeaderFeeWorkshop(repairId: string): string | null {
+  const r = query('SELECT repair_type, internal_cost, estimated_cost, workshop_supplier_id FROM repairs WHERE id = ?', [repairId])[0];
+  if (!r) return null;
+  const parts = repairCostParts({
+    repairType: str(r.repair_type), internalCost: Number(r.internal_cost) || 0,
+    estimatedCost: r.estimated_cost === null || r.estimated_cost === undefined ? null : Number(r.estimated_cost),
+    workshopSupplierId: str(r.workshop_supplier_id),
+  }, openLineTotal(repairId), { headerFeeKept: repairHeaderFeeKeptInDb(repairId) });
+  return parts.fee > EPS ? (str(r.workshop_supplier_id) ?? null) : null;
 }
 
 /** Das Los, das die Reparaturkosten trägt: das gewählte, sonst das älteste aktive (FIFO wie der Verkauf). */
@@ -204,7 +227,7 @@ export function syncRepairHeaderCosts(repairId: string, now: string, opts: { cap
     repairType: str(r.repair_type), internalCost: Number(r.internal_cost) || 0,
     estimatedCost: r.estimated_cost === null || r.estimated_cost === undefined ? null : Number(r.estimated_cost),
     workshopSupplierId: str(r.workshop_supplier_id),
-  }, openLineTotal(repairId));
+  }, openLineTotal(repairId), { headerFeeKept: repairHeaderFeeKeptInDb(repairId) });
   const { own, fee } = headerExpenses(repairId);
   const paidFrom = str(r.internal_paid_from);
   const absorbed = ownWorkPosted(repairId);

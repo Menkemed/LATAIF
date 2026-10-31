@@ -884,8 +884,8 @@ M.gegenkonto = fails.length === 0;
     '§10 postExpense bucht nach Eigentum; Rechnung und COGS-Nachtrag buchen für Reparaturzeilen keinen zweiten Wareneinsatz');
   ok((store.match(/repairCostCategory\(/g) ?? []).length === 1 && /repairCostCategory\(scope\)/.test(booking),
     '§10 EINE Kategorie-Regel für Zeilen und Kopfkosten (repairCostCategory)');
-  ok(/if \(firstReady\) syncRepairHeaderCosts\(id, now, \{ capitalize: false \}\)/.test(store) && /const totalCost = computeRepairTotalCost\(repair, lineTotal\)/.test(store)
-    && /return repairCostParts\(r, lineTotal\)\.total/.test(store) && /const fullCost = computeRepairTotalCost\(r, sumOpenRepairLineCosts\(r\.id\)\)/.test(store),
+  ok(/if \(firstReady\) syncRepairHeaderCosts\(id, now, \{ capitalize: false \}\)/.test(store) && /const totalCost = computeRepairTotalCost\(repair, lineTotal, \{ headerFeeKept: repairHeaderFeeKeptInDb\(id\) \}\)/.test(store)
+    && /return repairCostParts\(r, lineTotal, opts\)\.total/.test(store) && /const fullCost = repairTotalCostInHouse\(r\)/.test(store),
     '§10 „ready", Marge, Einstand und Rechnungseinstand: EINE Ableitung (repairCostParts)');
   ok((store.match(/shiftOwnRepairCost\(/g) ?? []).length === 5, '§10 „ready", Zeile nach „ready", Betrag, Storno, Löschen: EIN Weg für den Einstand');
   ok((lc.match(/watchLedgerPosts\(OP_REPAIRS_(UPDATE_STATUS|ADD_LINE|UPDATE_LINE|CANCEL_LINE)\)/g) ?? []).length === 4
