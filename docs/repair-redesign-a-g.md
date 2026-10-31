@@ -6,7 +6,8 @@ Stand: 29.10.2026. Grundlage: die vom Owner freigegebene Vorschau „Repair UI R
 
 **Wer arbeitet** (`src/core/repairs/repair-work-source.ts`, eine reine Ableitung für Liste, Quick Edit, Detailseite, PC2 und Handy):
 
-- Arbeitszeilen (offen, ohne `material_kind`) sind die Wahrheit: ohne Lieferant = eigene Arbeit, mit Lieferant = Werkstatt, beides = Hybrid.
+- Die angezeigte Art widerspricht der gespeicherten nie (FOLLOW-UP 31.10.): angezeigt wird die Vereinigung aus gespeicherter Art (`repair_type`) und dem, was Arbeitszeilen, geplante Werkstatt und Altzuordnung zeigen. Eine Seite ohne aktive Arbeitszeile bleibt sichtbar und ist markiert („no active work line").
+- Arbeitszeilen (offen, ohne `material_kind` oder mit dem Lohnposten „labor"): ohne Lieferant = eigene Arbeit, mit Lieferant = Werkstatt, beides = Hybrid.
 - `repairs.planned_workshop_supplier_id` (neu) = eine beim Anlegen gewählte Werkstatt **ohne** Gebühr. Sie zählt als Werkstattbeteiligung, solange es von ihr keine Arbeitszeile gibt. Die erste Arbeitszeile dieser Werkstatt beendet den Plan (`addRepairLine`). Der Plan bucht nichts.
 - Ohne Arbeitszeilen: die beim Anlegen gewählte Art (`repair_type`); eine Werkstatt, die ohne jede Zeile an der Reparatur steht (`workshop_supplier_id`, Altbestand), gilt als zugeordnet.
 - Materiallieferanten sind nie eine Werkstatt.
@@ -40,11 +41,35 @@ Stand: 29.10.2026. Grundlage: die vom Owner freigegebene Vorschau „Repair UI R
 - **Altfälle**: Kein historischer Datensatz wird umgeschrieben oder in Arbeitszeilen umgewandelt.
 - **Material**: Der Materialdialog und seine Regeln (Gold, eigener Bestand, alle aktiven Lieferanten) sind unverändert.
 
-## Gefunden, nicht geändert (Owner-Entscheidung)
+## FOLLOW-UP 31.10. — behoben
 
-1. **Materiallieferant und `repair_type`**: `recomputeRepairAggregates` stuft `repair_type` auch wegen einer Material-Lieferantenzeile auf „hybrid" hoch und trägt den Materiallieferanten in `workshop_supplier_id` ein. Die Anzeige und die Filter ignorieren das. Der gespeicherte Typ (Statusweg „Sent to workshop", Kostenbeschriftung) bleibt davon betroffen.
-2. **Zurückstufen des Typs**: Wird die einzige Werkstattzeile storniert, zeigt die Seite „In-house", gespeichert bleibt „hybrid"/„external". Ein Zurückstufen würde bei „external" die Zählung von `internal_cost` ändern. Die Regel „Zeilen + Zusatzkosten unabhängig vom Typ" ist nicht freigegeben.
-3. **Anzeige an der Detailseite**: Die Kostenkarte zählte „Total Cost" bisher als Zeilen + `internal_cost`. Bei „external" ist `internal_cost` der gespiegelte Voranschlag und zählte doppelt. Jetzt steht dort dieselbe Summe wie in Marge und Rechnung. Das ist eine reine Anzeige; Buchungen ändern sich nicht.
+1. **Materiallieferanten**: `recomputeRepairAggregates` liest Werkstatt und Hochstufung nur noch aus Arbeitszeilen.
+   - Ein Materiallieferant stuft nicht mehr auf „hybrid" hoch und steht nicht mehr in `workshop_supplier_id`.
+   - Eigenes Material stuft eine Fremdreparatur nicht mehr hoch. Vorher wurde dabei der gespiegelte Voranschlag (`internal_cost` bei „external") ab „hybrid" als eigene Kosten mitgezählt.
+   - `actual_cost` bleibt die Summe aller Zeilen. Materialbuchungen und Lager sind unverändert.
+   - Altfälle werden nicht umgeschrieben. Kostenwirkung hat `workshop_supplier_id` nur ohne jede Zeile (Altgebühr), deshalb ändert sich dadurch keine Summe.
+2. **Art und Anzeige**: Die Anzeige folgt jetzt der gespeicherten Art plus den Zeilen (Vereinigung).
+   - Nach dem Storno der letzten Werkstattzeile bleibt es Hybrid oder External, mit dem Hinweis „no active work line"; es gibt keinen Widerspruch mehr zur gespeicherten Art.
+   - Statusweg, Verbindlichkeiten, Buchungen und Kosten bleiben unverändert.
+3. **Anzeige an der Detailseite** (aus A–G): „Total Cost" ist dieselbe Summe wie Marge und Rechnung. Vorher zählte bei „external" der gespiegelte Voranschlag doppelt. Das ist eine reine Anzeige.
+
+## Zur Freigabe: bewusstes Zurückstufen der Art
+
+Eine automatische Herabstufung ist nicht sicher:
+
+- **„Sent to workshop"** verschwindet aus dem Statusweg. Eine Reparatur, die dort steht oder von dort zurückgegeben wurde, hätte keinen gültigen nächsten Schritt bzw. kein Reopen-Ziel mehr.
+- **hybrid → external** nimmt die eigenen Zusatzkosten (`internal_cost`) aus der Summe. Marge und Einstand sinken.
+- **external → internal** zählt den gespiegelten Voranschlag als eigene Kosten (Doppelzählung).
+- **hybrid → internal ohne Zeilen**: Beim nächsten Speichern wird ein von Hand eingetragener Actual Cost zu eigenen Kosten (`internalCostOnEdit`). Die Altgebühr (Werkstatt ohne Zeilen) entfiele.
+
+**Vorschlag**: eine ausdrückliche Owner-Handlung „Change work type" an der Detailseite, mit Audit-Eintrag.
+
+- **hybrid → internal** wird nur angeboten, wenn es nachweislich nichts an Kosten und Status ändert:
+  - keine offene Werkstatt-Arbeitszeile, keine geplante Werkstatt, kein `workshop_supplier_id`;
+  - mindestens eine offene Zeile, oder `actual_cost` leer;
+  - Status nicht `sent_to_workshop`, `return_from_status` nicht `sent_to_workshop`;
+  - nicht abgerechnet.
+- **hybrid → external** und **external → internal** bleiben gesperrt (kostenwirksam), nur mit Freigabe des Buchhalters.
 
 ## Vor einem Release
 

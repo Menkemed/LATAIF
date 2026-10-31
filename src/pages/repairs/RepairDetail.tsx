@@ -886,7 +886,9 @@ export function RepairDetail() {
             <div style={{ fontSize: 12, color: '#4B5563', marginTop: 6 }} data-repair-work-source-text>
               {repairWorkSourceText(quelle, lieferantName)}
               <span style={{ color: '#6B7280' }}>
-                {quelle.basis === 'lines' ? ' · follows the work lines' : quelle.plannedWorkshopId ? ' · workshop planned, no work line yet' : ' · no work line yet'}
+                {quelle.basis === 'lines' ? ' · follows the work lines'
+                  : quelle.plannedWorkshopId ? ' · workshop planned, no work line yet'
+                  : quelle.hasWorkLines ? ' · as created — one part has no active work line' : ' · no work line yet'}
               </span>
             </div>
 
@@ -1085,7 +1087,8 @@ export function RepairDetail() {
                       <span style={{ fontSize: 12, color: '#4B5563' }}>{repairWorkSourceText(quelle, lieferantName)}</span>
                     </div>
                     <p style={{ fontSize: 11, color: '#6B7280', marginTop: 4, lineHeight: 1.4 }}>
-                      Follows the work lines — add a work line (in-house or a workshop) or cancel one to change it.
+                      Set when the repair was created; a work line of the other kind extends it (In-house + workshop = Hybrid).
+                      Cancelling a line keeps the part — the type is never downgraded automatically (status steps and costs stay as booked).
                     </p>
                   </div>
                   <SearchSelect

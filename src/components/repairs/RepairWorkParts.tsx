@@ -38,10 +38,12 @@ export function RepairWorkSourceBadge({ kind, size = 11 }: { kind: RepairWorkSou
 /** „Own staff + Workshop A (planned)" — wer arbeitet, mit Namen. */
 export function repairWorkSourceText(ws: RepairWorkSource, nameOf: (supplierId: string) => string): string {
   const shops = ws.workshopIds.map((id) => `${nameOf(id)}${id === ws.plannedWorkshopId ? ' (planned)' : id === ws.assignedWorkshopId ? ' (assigned)' : ''}`);
-  if (ws.externalWithoutWorkshop) shops.push('workshop not chosen yet');
-  if (ws.kind === 'hybrid') return ['Own staff', ...shops].join(' + ');
+  // FOLLOW-UP — eine Seite der gespeicherten Art ohne aktive Arbeitszeile bleibt sichtbar und ist als solche markiert.
+  if (ws.externalWithoutWorkshop) shops.push(ws.hasWorkLines ? 'workshop (no active work line)' : 'workshop not chosen yet');
+  const eigene = ws.inHouseWithoutLine && ws.hasWorkLines ? 'Own staff (no active work line)' : 'Own staff';
+  if (ws.kind === 'hybrid') return [eigene, ...shops].join(' + ');
   if (ws.kind === 'external') return shops.join(', ') || 'Workshop not chosen yet';
-  if (ws.kind === 'inhouse') return 'Own staff';
+  if (ws.kind === 'inhouse') return eigene;
   return '—';
 }
 

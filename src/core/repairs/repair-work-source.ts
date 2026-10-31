@@ -3,20 +3,22 @@
 // Quick Edit, Detailseite, PC2 (lädt dieselben Zeilen vom Primary) und Handy (Lesebefehl des Primary).
 //
 // Bisher wählte man das zweimal: oben den Reparaturtyp (Internal / External / Hybrid) und an jeder
-// Arbeitszeile noch einmal „In-house" oder eine Werkstatt. Jetzt folgt die ANZEIGE der Arbeit:
+// Arbeitszeile noch einmal „In-house" oder eine Werkstatt. Jetzt wird die Art nicht mehr gewählt, sondern
+// angezeigt — und zwar so, dass sie der GESPEICHERTEN Art nie widerspricht (FOLLOW-UP):
 //
-//   • Arbeitszeilen (offen, ohne `material_kind`) sind die Wahrheit: eine ohne Lieferant = eigene Arbeit,
-//     eine mit Lieferant = Werkstatt. Beides zusammen = Hybrid.
-//   • Eine geplante Werkstatt (`planned_workshop_supplier_id`, gesetzt beim Anlegen ohne Gebühr) zählt als
-//     Werkstattbeteiligung, solange es von ihr keine Arbeitszeile gibt. Sie bucht NICHTS.
-//   • Ohne Arbeitszeilen (ältere Reparaturen, frisch angelegte): die beim Anlegen gewählte Art
-//     (`repair_type`) und eine Werkstatt, die OHNE jede Zeile an der Reparatur steht (Altgebühr).
-//   • Materiallieferanten sind KEINE Werkstatt. `recomputeRepairAggregates` trägt den einzigen Lieferanten
-//     ALLER Zeilen (auch Material) in `workshop_supplier_id` ein und stuft `repair_type` hoch — beides wird
-//     hier deshalb nur gelesen, wenn die Reparatur gar keine Zeile hat.
+//   • Die gespeicherte Art (`repair_type`, beim Anlegen aus „Wer arbeitet?", von Arbeitszeilen nur HOCHGESTUFT,
+//     nie zurück) bestimmt, welche Beteiligungen es gibt; Arbeitszeilen, eine geplante Werkstatt und eine
+//     Altzuordnung kommen dazu (Vereinigung). Eine Seite ohne aktive Arbeitszeile bleibt sichtbar — als
+//     „ohne Arbeitszeile" markiert, nicht weggelassen. Eine automatische Herabstufung gibt es nicht: sie änderte
+//     Statusweg („Sent to workshop") und Kostenregel (`repairCostParts`, `internalCostOnEdit`).
+//   • Arbeitszeilen = offen, ohne `material_kind` (oder der Lohnposten „labor"): ohne Lieferant eigene Arbeit,
+//     mit Lieferant Werkstatt.
+//   • Eine geplante Werkstatt (`planned_workshop_supplier_id`, beim Anlegen ohne Gebühr) zählt als Werkstatt-
+//     beteiligung, solange es von ihr keine Arbeitszeile gibt. Sie bucht NICHTS.
+//   • Materiallieferanten sind KEINE Werkstatt (seit dem FOLLOW-UP auch nicht mehr in `recomputeRepairAggregates`).
+//     `workshop_supplier_id` wird deshalb nur gelesen, wenn die Reparatur gar keine Zeile hat (Altgebühr).
 //
-// Gespeichertes ändert diese Datei nicht: `repair_type` steuert weiter Statusweg („Sent to workshop") und
-// die bestehende Kostenregel (`repairCostParts`); die Kosten hier sind dieselbe Summe, nur aufgeteilt.
+// Gespeichertes ändert diese Datei nicht; die Kosten hier sind dieselbe Summe wie `repairCostParts`, nur aufgeteilt.
 // ════════════════════════════════════════════════════════════════════════════
 import { REPAIR_WORK_TYPES, type RepairWorkType } from '@/core/models/types';
 import { repairCostParts } from './repair-cost';
@@ -62,10 +64,14 @@ export interface RepairWorkSource {
   plannedWorkshopId: string | null;
   /** Ältere Reparatur: Werkstatt direkt zugeordnet, ganz ohne Zeilen. */
   assignedWorkshopId: string | null;
-  /** Externe Arbeit beabsichtigt, aber keine Werkstatt bekannt. */
+  /** Externe Beteiligung (gespeicherte Art) ohne bekannte Werkstatt — keine Werkstattzeile, kein Plan. */
   externalWithoutWorkshop: boolean;
+  /** Eigene Arbeit laut gespeicherter Art, aber keine offene eigene Arbeitszeile. */
+  inHouseWithoutLine: boolean;
+  /** Werkstattbeteiligung, aber keine offene Werkstatt-Arbeitszeile (geplant, zugeordnet oder nach Storno). */
+  externalWithoutLine: boolean;
   hasWorkLines: boolean;
-  /** `lines`: aus den Arbeitszeilen abgeleitet; `intent`: ohne Arbeitszeile (Plan, Art beim Anlegen, Altbestand). */
+  /** `lines`: jede Seite hat eine Arbeitszeile; `intent`: mindestens eine Seite nur aus Art, Plan oder Altzuordnung. */
   basis: 'lines' | 'intent';
   entries: RepairWorkEntry[];
 }
@@ -75,15 +81,17 @@ const text = (v: unknown): string | null => (typeof v === 'string' && v.trim() !
 const uniq = <T>(xs: readonly T[]): T[] => xs.filter((x, i) => xs.indexOf(x) === i);
 const knownType = (v: unknown): RepairWorkType | null =>
   ((REPAIR_WORK_TYPES as readonly string[]).includes(String(v)) ? (v as RepairWorkType) : null);
+/** Arbeit statt Material: keine Materialart, oder der Lohnposten „labor" (wie die Werkstatt-Nutzung im Lieferantenstamm). */
+const isWorkKind = (materialKind: unknown): boolean => !text(materialKind) || text(materialKind) === 'labor';
 
-/** Eine Arbeitszeile: offen und KEIN Material (Diamant, Stein, Gold, Lohnposten des Materialdialogs). */
+/** Eine Arbeitszeile: offen und KEIN Material (Diamant, Stein, Gold). */
 export function isRepairWorkLine(l: RepairWorkLineInput): boolean {
-  return isOpen(l) && !text(l.materialKind);
+  return isOpen(l) && isWorkKind(l.materialKind);
 }
 
 export function repairWorkSource(r: RepairWorkSourceInput, lines: readonly RepairWorkLineInput[]): RepairWorkSource {
   const open = lines.filter(isOpen);
-  const work = open.filter((l) => !text(l.materialKind));
+  const work = open.filter((l) => isWorkKind(l.materialKind));
   const entries: RepairWorkEntry[] = work.map((l) => ({
     source: text(l.supplierId) ? 'external' : 'inhouse',
     supplierId: text(l.supplierId),
@@ -92,44 +100,37 @@ export function repairWorkSource(r: RepairWorkSourceInput, lines: readonly Repai
     basis: 'line',
   }));
   const lineShops = uniq(work.map((l) => text(l.supplierId)).filter((x): x is string => !!x));
+  const lineIn = work.some((l) => !text(l.supplierId));
   const plannedRaw = text(r.plannedWorkshopSupplierId);
   const planned = plannedRaw && !lineShops.includes(plannedRaw) ? plannedRaw : null;
   if (planned) entries.push({ source: 'external', supplierId: planned, workType: null, lineId: null, basis: 'planned' });
+  // Nur ohne JEDE Zeile ist `workshop_supplier_id` eine echte Zuordnung (Altgebühr) — sonst eine Ableitung aus Zeilen.
+  const altWerkstatt = text(r.workshopSupplierId);
+  const assigned = open.length === 0 && altWerkstatt && altWerkstatt !== planned ? altWerkstatt : null;
+  if (assigned) entries.push({ source: 'external', supplierId: assigned, workType: null, lineId: null, basis: 'assigned' });
   const stored = text(r.repairType) ?? 'internal';
-  let inHouse: boolean;
-  let external: boolean;
-  let assigned: string | null = null;
-  if (work.length > 0) {
-    inHouse = work.some((l) => !text(l.supplierId));
-    external = lineShops.length > 0 || !!planned;
-  } else {
-    const keineZeile = open.length === 0;
-    const altWerkstatt = text(r.workshopSupplierId);
-    // Nur ohne JEDE Zeile ist `workshop_supplier_id` eine echte Zuordnung — sonst kann es ein Materiallieferant sein.
-    assigned = keineZeile && altWerkstatt && altWerkstatt !== planned ? altWerkstatt : null;
-    if (assigned) entries.push({ source: 'external', supplierId: assigned, workType: null, lineId: null, basis: 'assigned' });
-    if (keineZeile) {
-      inHouse = stored === 'internal' || stored === 'hybrid';
-      external = !!planned || !!assigned || stored === 'external' || stored === 'hybrid';
-    } else {
-      // Nur Material: ein „hybrid" kann hier vom Materiallieferanten stammen (Hochstufung) — dann eigene Arbeit.
-      inHouse = stored !== 'external';
-      external = !!planned || stored === 'external';
-    }
-    if (inHouse) entries.push({ source: 'inhouse', supplierId: null, workType: null, lineId: null, basis: 'intent' });
-    if (external && !planned && !assigned) {
-      entries.push({ source: 'external', supplierId: null, workType: null, lineId: null, basis: 'intent' });
-    }
+  const storedIn = stored === 'internal' || stored === 'hybrid';
+  const storedEx = stored === 'external' || stored === 'hybrid';
+  // Vereinigung: die gespeicherte Art und was Zeilen, Plan und Altzuordnung zeigen (Zeilen stufen ohnehin hoch).
+  const inHouse = storedIn || lineIn;
+  const external = storedEx || lineShops.length > 0 || !!planned || !!assigned;
+  if (inHouse && !lineIn) entries.push({ source: 'inhouse', supplierId: null, workType: null, lineId: null, basis: 'intent' });
+  if (external && lineShops.length === 0 && !planned && !assigned) {
+    entries.push({ source: 'external', supplierId: null, workType: null, lineId: null, basis: 'intent' });
   }
   const kind: RepairWorkSourceKind = inHouse && external ? 'hybrid' : external ? 'external' : inHouse ? 'inhouse' : 'none';
+  const inHouseWithoutLine = inHouse && !lineIn;
+  const externalWithoutLine = external && lineShops.length === 0;
   return {
     kind, inHouse, external,
     workshopIds: uniq(entries.filter((e) => e.source === 'external' && e.supplierId).map((e) => e.supplierId as string)),
     plannedWorkshopId: planned,
     assignedWorkshopId: assigned,
     externalWithoutWorkshop: entries.some((e) => e.source === 'external' && !e.supplierId),
+    inHouseWithoutLine,
+    externalWithoutLine,
     hasWorkLines: work.length > 0,
-    basis: work.length > 0 ? 'lines' : 'intent',
+    basis: inHouseWithoutLine || externalWithoutLine ? 'intent' : 'lines',
     entries,
   };
 }
@@ -238,8 +239,8 @@ export function repairCostView(
 ): RepairCostView {
   const open = lines.filter(isOpen);
   const sum = (xs: readonly RepairWorkLineInput[]): number => xs.reduce((s, l) => s + (Number(l.costAmount) || 0), 0);
-  const work = sum(open.filter((l) => !text(l.materialKind)));
-  const material = sum(open.filter((l) => !!text(l.materialKind)));
+  const work = sum(open.filter((l) => isWorkKind(l.materialKind)));
+  const material = sum(open.filter((l) => !isWorkKind(l.materialKind)));
   const parts = repairCostParts(r, work + material);
   return { work, material, linesTotal: work + material, own: parts.own, fee: parts.fee, total: parts.total, hasLines: open.length > 0 };
 }

@@ -1544,15 +1544,20 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
   //   Internal + 1. External-Line → wird Hybrid
   //   External + 1. Interne-Line → wird Hybrid
   //   Hybrid → bleibt Hybrid (auch wenn alle externen gecanceled werden)
+  // REPAIR-REDESIGN FOLLOW-UP — Werkstatt und Hochstufung lesen NUR Arbeitszeilen (ohne `material_kind`, oder der
+  // Lohnposten „labor" — dieselbe Abgrenzung wie die Werkstatt-Nutzung im Lieferantenstamm). Ein Materiallieferant
+  // ist keine Werkstatt: er stuft nicht mehr auf „hybrid" hoch und steht nicht mehr in `workshop_supplier_id`; eigenes
+  // Material stuft eine Fremdreparatur nicht hoch. `actual_cost` bleibt die Summe ALLER offenen Zeilen (Arbeit + Material).
   recomputeRepairAggregates: (repairId) => {
     const db = getDatabase();
     const now = new Date().toISOString();
     const lines = get().repairLines.filter(l => l.repairId === repairId && l.status === 'OPEN');
-    const supplierIds = Array.from(new Set(lines.map(l => l.supplierId).filter(Boolean) as string[]));
+    const workLines = lines.filter(l => !l.materialKind || l.materialKind === 'labor');
+    const supplierIds = Array.from(new Set(workLines.map(l => l.supplierId).filter(Boolean) as string[]));
     const totalCost = lines.reduce((s, l) => s + (l.costAmount || 0), 0);
     const newSupplierId = supplierIds.length === 1 ? supplierIds[0] : null;
-    const hasExternalLine = lines.some(l => !!l.supplierId);
-    const hasInternalLine = lines.some(l => !l.supplierId);
+    const hasExternalLine = workLines.some(l => !!l.supplierId);
+    const hasInternalLine = workLines.some(l => !l.supplierId);
     // Aktuellen Typ + Margin-Inputs lesen (Promote-Only-Logik + L-13).
     const currentRow = query(
       'SELECT repair_type, charge_to_customer, internal_cost, estimated_cost FROM repairs WHERE id = ?',

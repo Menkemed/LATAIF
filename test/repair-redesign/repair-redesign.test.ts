@@ -249,14 +249,23 @@ function kopf(db: Db, id: string) {
   const L = (o: Record<string, unknown>) => ({ status: 'OPEN', ...o });
   const k = (r: Record<string, unknown>, ls: Array<Record<string, unknown>>) => ws.repairWorkSource(r as never, ls.map(L) as never).kind;
   ok(k({ repairType: 'internal' }, [{ workType: 'polishing', costAmount: 0 }]) === 'inhouse', 'SOURCE eigene Arbeitszeile → In-house');
-  ok(k({ repairType: 'internal' }, [{ workType: 'service', supplierId: 'w-a', costAmount: 20 }]) === 'external', 'SOURCE nur Werkstattzeile → External (auch wenn „internal" gespeichert)');
+  // FOLLOW-UP — die Anzeige widerspricht der gespeicherten Art nie: „internal" + Werkstattzeile = Hybrid (so stuft das Haus hoch).
+  ok(k({ repairType: 'internal' }, [{ workType: 'service', supplierId: 'w-a', costAmount: 20 }]) === 'hybrid', 'SOURCE „internal" + Werkstattzeile → Hybrid (wie die Hochstufung des Hauses)');
+  ok(k({ repairType: 'external' }, [{ workType: 'service', supplierId: 'w-a', costAmount: 20 }]) === 'external', 'SOURCE „external" + Werkstattzeile → External');
   ok(k({ repairType: 'hybrid' }, [{ workType: 'polishing' }, { workType: 'service', supplierId: 'w-a', costAmount: 20 }]) === 'hybrid', 'SOURCE eigene + Werkstattzeile → Hybrid');
-  ok(k({ repairType: 'hybrid' }, [{ workType: 'polishing' }, { workType: 'service', supplierId: 'w-a', status: 'CANCELLED' }]) === 'inhouse',
-    'SOURCE nach Storno der Werkstattzeile → In-house (gespeichertes „hybrid" zählt nicht, die Zeilen zählen)');
+  {
+    const nachStorno = ws.repairWorkSource({ repairType: 'hybrid' } as never, [L({ workType: 'polishing' }), L({ workType: 'service', supplierId: 'w-a', status: 'CANCELLED' })] as never);
+    ok(nachStorno.kind === 'hybrid' && nachStorno.externalWithoutLine && nachStorno.externalWithoutWorkshop && nachStorno.basis === 'intent',
+      'SOURCE nach Storno der Werkstattzeile: weiter Hybrid wie gespeichert, Werkstatt-Seite „ohne aktive Arbeitszeile" (keine Herabstufung)');
+  }
   ok(k({ repairType: 'internal' }, [{ workType: 'polishing' }, { materialKind: 'gold', supplierId: 'gold-sup', costAmount: 13 }]) === 'inhouse',
     'SOURCE ein Materiallieferant ist KEINE Werkstatt');
-  ok(k({ repairType: 'hybrid', workshopSupplierId: 'gold-sup' }, [{ materialKind: 'stone', supplierId: 'gold-sup', costAmount: 13 }]) === 'inhouse',
-    'SOURCE nur Material + hochgestuftes „hybrid" vom Materiallieferanten → In-house');
+  {
+    const alt = ws.repairWorkSource({ repairType: 'hybrid', workshopSupplierId: 'gold-sup' } as never, [L({ materialKind: 'stone', supplierId: 'gold-sup', costAmount: 13 })] as never);
+    ok(alt.kind === 'hybrid' && alt.workshopIds.length === 0 && alt.externalWithoutWorkshop,
+      'SOURCE Altfall „hybrid" vom Materiallieferanten: angezeigt wie gespeichert (Hybrid), der Materiallieferant ist NICHT die Werkstatt');
+  }
+  ok(k({ repairType: 'internal' }, [{ materialKind: 'labor', supplierId: 'w-a', costAmount: 9 }]) === 'hybrid', 'SOURCE ein Lohnposten „labor" einer Werkstatt ist Arbeit');
   const geplant = ws.repairWorkSource({ repairType: 'hybrid', plannedWorkshopSupplierId: 'w-a' }, []);
   ok(geplant.kind === 'hybrid' && geplant.plannedWorkshopId === 'w-a' && S(geplant.workshopIds) === S(['w-a']),
     'SOURCE neu angelegt „In-house + Werkstatt A (ohne Gebühr)" → Hybrid, A eingeplant');
@@ -467,9 +476,97 @@ for (const weg of ['lokal', 'fern'] as const) {
   else { const o = await life.runCancelRepairLine(deps(db), identity(nx(), 'repairs.cancel_line'), { repairId: id, lineId: werk.id, expectedRevision: rev(db, id) }) as Out; ok(o.kind === 'ok', `HYB (fern) Storno (${o.code || 'ok'})`); }
   reload();
   const nach = ws.repairWorkSource(kopf(db, id), zeilen(db, id));
-  ok(nach.kind === 'inhouse' && Math.abs(ap(db, 'sup-1')) < 0.0005 && kopf(db, id).repairType === 'hybrid' && ausgeglichen(db),
-    `HYB (${weg}) nach Storno: angezeigt In-house, Werkstatt-Verbindlichkeit zurückgenommen, gespeicherte Art unverändert`);
+  ok(nach.kind === 'hybrid' && nach.externalWithoutLine && Math.abs(ap(db, 'sup-1')) < 0.0005 && kopf(db, id).repairType === 'hybrid' && ausgeglichen(db),
+    `HYB (${weg}) nach Storno: weiter Hybrid wie gespeichert (Werkstatt ohne aktive Zeile), Werkstatt-Verbindlichkeit zurückgenommen`);
 }
+
+// ── 7b) FOLLOW-UP: Materiallieferanten, keine Herabstufung, Altfälle — Primary und PC2 ──
+const vertraeglich = (gespeichert: string, angezeigt: string): boolean =>
+  (gespeichert === 'hybrid' && angezeigt === 'hybrid')
+  || (gespeichert === 'external' && (angezeigt === 'external' || angezeigt === 'hybrid'))
+  || (gespeichert === 'internal' && (angezeigt === 'inhouse' || angezeigt === 'hybrid'));
+const { addRepairMaterialOnPrimary, materialRowsFromModal, repairMaterialBody } = await import('../../src/core/gold/gold-house.ts');
+const goldCmd = await import('../../src/core/bridge/gold-commands.ts');
+const flow = await import('../../src/core/repairs/repair-status-flow.ts');
+const folge: Record<string, string> = {};
+for (const weg of ['lokal', 'fern'] as const) {
+  const db = freshDb();
+  db.run('UPDATE suppliers SET is_workshop = 1');
+  db.run("INSERT INTO suppliers (id, branch_id, name, active, is_workshop, created_at, updated_at) VALUES ('gold-sup','branch-main','Gold Supplier',1,0,?,?)", [NOW, NOW]);
+  reload();
+  const material = async (rid: string, rows: Array<Record<string, unknown>>): Promise<void> => {
+    const req = { repairId: rid, expectedRevision: rev(db, rid), rows: materialRowsFromModal(rows as never) };
+    if (weg === 'lokal') await addRepairMaterialOnPrimary(req);
+    else {
+      const o = await Promise.resolve().then(() => goldCmd.runRepairMaterial(deps(db), identity(nx(), 'repairs.add_material'), repairMaterialBody(req)))
+        .catch((e: unknown) => ({ kind: 'business_error', code: code(e) })) as Out;
+      ok(o.kind === 'ok', `MAT (fern) Material angenommen (${o.code || 'ok'})`);
+    }
+    reload();
+  };
+  // (a) eigene Reparatur + Material vom (Nicht-Werkstatt-)Lieferanten: bleibt „internal", keine Werkstatt.
+  const a = await anlegen(db, 'lokal', { repairType: 'internal', issueDescription: 'Ring resize' });
+  reload();
+  await house.addRepairLineOnPrimary(a, { workType: 'gold_work', costAmount: 0 } as never);
+  reload();
+  await material(a, [{ materialKind: 'stone', description: 'Sapphire', quantity: 1, caratPerPiece: 0.4, totalCost: 15, supplierId: 'gold-sup' }]);
+  const ka = kopf(db, a);
+  const qa = ws.repairWorkSource(ka, zeilen(db, a));
+  ok(ka.repairType === 'internal' && !ka.workshopSupplierId && qa.kind === 'inhouse' && qa.workshopIds.length === 0,
+    `MAT (${weg}) Material vom Lieferanten: Art bleibt „internal", keine Werkstatt eingetragen, angezeigt In-house (${S(ka)})`);
+  await house.updateRepairStatusOnPrimary(a, 'in_progress', { expectedRevision: rev(db, a) });
+  reload();
+  ok(Math.abs(ap(db, 'gold-sup') - 15) < 0.0005 && ausgabenZahl(db, a) === 1 && ausgeglichen(db),
+    `MAT (${weg}) die Materialverbindlichkeit bucht wie bisher (15 an den Lieferanten, eine Ausgabe) (${ap(db, 'gold-sup')}/${ausgabenZahl(db, a)})`);
+  ok(S(flow.repairStatusFlow(ka.repairType, 'CUSTOMER')).indexOf('sent_to_workshop') < 0, `MAT (${weg}) kein „Sent to workshop" für Material`);
+  // (b) Fremdreparatur mit Gebühr (gespiegelte eigene Kosten) + Material aus eigenem Bestand: bleibt „external", nichts doppelt.
+  const b = await anlegen(db, 'lokal', { repairType: 'external', workshopSupplierId: 'sup-1', estimatedCost: 30 });
+  reload();
+  await material(b, [{ materialKind: 'stone', description: 'Sapphire', quantity: 1, caratPerPiece: 0.5, totalCost: 12, supplierId: '__INHOUSE__' }]);
+  const kb = kopf(db, b);
+  const vb = ws.repairCostView(kb, zeilen(db, b));
+  ok(kb.repairType === 'external' && kb.workshopSupplierId === 'sup-1' && vb.total === 42 && vb.own === 0
+    && Math.abs(vb.total - computeRepairTotalCost(kb as never, 42)) < 0.0005,
+    `MAT (${weg}) Fremdreparatur + eigenes Material: Art bleibt „external", Werkstatt sup-1, Kosten 30 + 12 = 42 (der Spiegel zählt nicht) (${S(kb)})`);
+  // (c) Werkstattzeile + Materiallieferant: die Werkstatt ist die Werkstatt.
+  const c = await anlegen(db, 'lokal', { repairType: 'hybrid', workshopSupplierId: 'sup-1', estimatedCost: 20 });
+  reload();
+  await material(c, [{ materialKind: 'gold', description: '21K clasp', weightGrams: 1, karat: '21K', totalCost: 15, supplierId: 'gold-sup' }]);
+  ok(kopf(db, c).workshopSupplierId === 'sup-1' && S(ws.repairWorkSource(kopf(db, c), zeilen(db, c)).workshopIds) === S(['sup-1']),
+    `MAT (${weg}) Werkstattzeile + Materiallieferant: Werkstatt bleibt sup-1 (vorher zwei Lieferanten → leer)`);
+  // (d) Letzte Werkstattzeile storniert: keine Herabstufung; Statusweg und Kosten wie gebucht; Anzeige stimmt mit der Art überein.
+  await house.updateRepairStatusOnPrimary(c, 'in_progress', { expectedRevision: rev(db, c) });
+  reload();
+  const vorStorno = { ziel: S(flow.repairStatusTargets(flow.repairTransitionFacts(useRepairStore.getState().getRepair(c)!, useRepairStore.getState().getRepairLines(c)))) };
+  const werk = zeilen(db, c).find((l) => l.supplierId === 'sup-1' && !l.materialKind)!;
+  if (weg === 'lokal') await house.cancelRepairLineOnPrimary(werk.id);
+  else { const o = await life.runCancelRepairLine(deps(db), identity(nx(), 'repairs.cancel_line'), { repairId: c, lineId: werk.id, expectedRevision: rev(db, c) }) as Out; ok(o.kind === 'ok', `MAT (fern) Storno (${o.code || 'ok'})`); }
+  reload();
+  const kc = kopf(db, c);
+  const qc = ws.repairWorkSource(kc, zeilen(db, c));
+  const zielNach = S(flow.repairStatusTargets(flow.repairTransitionFacts(useRepairStore.getState().getRepair(c)!, useRepairStore.getState().getRepairLines(c))));
+  ok(kc.repairType === 'hybrid' && qc.kind === 'hybrid' && qc.externalWithoutLine && vertraeglich(kc.repairType, qc.kind)
+    && zielNach === vorStorno.ziel && Math.abs(ap(db, 'sup-1')) < 0.0005 && Math.abs(ap(db, 'gold-sup') - 15) < 0.0005 && ausgeglichen(db),
+    `MAT (${weg}) letzte Werkstattzeile storniert: Art bleibt Hybrid, Anzeige Hybrid („ohne aktive Arbeitszeile"), Statusschritte gleich (${zielNach}), Werkstatt-Verbindlichkeit zurück, Material bleibt`);
+  // (e) Altfall: früher vom Materiallieferanten hochgestuft (hybrid + workshop_supplier_id = Materiallieferant).
+  const e = await anlegen(db, 'lokal', { repairType: 'internal', issueDescription: 'Altfall' });
+  reload();
+  useRepairStore.getState().addRepairLine(e, { supplierId: 'gold-sup', costAmount: 10, materialKind: 'stone', description: 'alt' } as never);
+  db.run("UPDATE repairs SET repair_type = 'hybrid', workshop_supplier_id = 'gold-sup' WHERE id = ?", [e]);
+  reload();
+  const vorAlt = buchungen(db);
+  const qe = ws.repairWorkSource(kopf(db, e), zeilen(db, e));
+  ok(qe.kind === 'hybrid' && qe.workshopIds.length === 0 && vertraeglich('hybrid', qe.kind),
+    `MAT (${weg}) Altfall wird angezeigt wie gespeichert (Hybrid), der Materiallieferant nicht als Werkstatt`);
+  await house.addRepairLineOnPrimary(e, { workType: 'polishing', costAmount: 0 } as never);
+  reload();
+  const ke = kopf(db, e);
+  ok(ke.repairType === 'hybrid' && !ke.workshopSupplierId && buchungen(db) === vorAlt
+    && Math.abs(ws.repairCostView(ke, zeilen(db, e)).total - 10) < 0.0005,
+    `MAT (${weg}) Altfall + neue eigene Zeile: keine Herabstufung, die falsche Werkstatt fällt weg, keine Buchung, Kosten unverändert 10 (${S(ke)})`);
+  folge[weg] = S([ka.repairType, ka.workshopSupplierId, kb.repairType, kb.workshopSupplierId, kopf(db, c).workshopSupplierId, kc.repairType, ke.repairType, ke.workshopSupplierId]);
+}
+ok(folge.lokal === folge.fern, `MAT Primary == PC2 (${folge.lokal})`);
 
 // ── 8) Geplante Werkstatt an der Detailseite ändern/entfernen — Primary und PC2 ──
 for (const weg of ['lokal', 'fern'] as const) {
