@@ -91,3 +91,21 @@ Eine automatische Herabstufung ist nicht sicher:
 - **Vorschlag zur Freigabe**:
   1. Code: „internal + erste Werkstatt-Arbeitszeile“ wird `external` statt `hybrid`, solange es keine eigene Arbeitszeile gibt und `internal_cost` 0 ist. Gibt es eigene Arbeit oder eigene Kosten, bleibt es hybrid. Statusweg und Summe bleiben in diesem Fall gleich. Vor dem Umsetzen nachweisen: Storno der Zeile, späteres Bearbeiten (`internalCostOnEdit`), Kopfkosten bei „ready“.
   2. Daten: REP-2026-00002 `repair_type` hybrid → external. Kosten- und statusneutral (siehe oben), nur mit Sicherung und Audit-Eintrag und nur auf gesonderte Freigabe.
+
+## REPAIR TYPE FINAL CORRECTION (31.10.) — umgesetzt
+
+- **Regel** (`src/core/repairs/repair-type-rule.ts`, rein): Die gespeicherte Art folgt der aktiven Arbeit, nicht der Vorwahl „In-house“.
+  - Eigene Arbeit: eine offene Arbeitszeile ohne Lieferant, oder eigene Kosten (`internal_cost` > 0, außer bei „external“).
+  - Werkstattarbeit: eine offene Werkstatt-Arbeitszeile, eine eingeplante Werkstatt, oder die Werkstatt im Kopf vor der ersten Zeile (Gebühr beim Anlegen / Altbestand).
+  - Nur eigene → internal, nur Werkstatt → external, beides → hybrid, keine aktive Arbeit → bleibt.
+  - Materialzeilen zählen nie.
+- **Wann geprüft wird:** nach jeder Zeilenänderung (hinzufügen, ändern, stornieren — Primary, PC2 und Handy über dieselbe Store-Funktion) und wenn sich die geplante Werkstatt im Bearbeiten-Fenster ändert. Bestehende Reparaturen ohne solche Änderung werden nie umgeschrieben.
+- **Schutz:** Die neue Art wird nur gespeichert, wenn sie gegenüber dem bisherigen Verhalten (Hochstufung seit v0.7.6) gleich bleibt bei:
+  - Kostenaufteilung: eigene Kosten, Zeilen, Gebühr (`repairCostParts`);
+  - Statusweg: aktueller Schritt, „Sent to workshop“ (aktuell, Reopen-Ziel oder je erreicht).
+  - Sonst bleibt das bisherige Verhalten, und im Protokoll steht `repairTypeKept` (COST, STATUS oder INVOICED).
+  - „Hybrid“ bleibt Hybrid.
+  - Die Kostenformel ist unverändert.
+- **Ergebnis:** Internal mit der ersten Werkstattzeile (ohne eigene Arbeit oder eigene Kosten) wird jetzt External statt Hybrid. Statusweg und Kosten sind dabei gleich wie bisher.
+- **REP-2026-00002**: Die Datenkorrektur hybrid → external ist vorbereitet (`fix-rep2-type.cjs`, Arbeitskopie, Vorbedingungen und Nachprüfung). Der Probelauf auf einer Produktionskopie war ok: nur `repair_type` und `revision` ändern sich, Salden, Rechnung, Ausgabe und Zahlungen nicht. Ausführung nur mit gesonderter Owner-Freigabe, App geschlossen, nach Sicherung.
+- **Bleibt bestehen (bisheriges Verhalten, gemeldet):** Hat eine External-Reparatur einen gespiegelten Voranschlag (`internal_cost` = Voranschlag) und bekommt sie Werkstatt- und eigene Zeilen, wird sie wie bisher hybrid. Damit zählt der Spiegel als eigene Kosten zusätzlich zur Werkstattzeile. Das zu ändern wäre eine Kostenänderung, deshalb nur auf Freigabe.

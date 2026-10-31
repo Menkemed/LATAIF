@@ -6,6 +6,7 @@ import type { SqlDb } from '@/core/sync/apply-change';
 import { v4 as uuid } from 'uuid';
 import type { Repair, RepairStatus, RepairLine, RepairLineStatus, RepairWorkType } from '@/core/models/types';
 import { repairCostParts } from '@/core/repairs/repair-cost';
+import { decideRepairType, type RepairTypeDecision } from '@/core/repairs/repair-type-rule';
 import {
   assertRepairCostUnsettled, hasOwnWork, ownRepairCapitalized, repairCostCategory, repairHeaderCostsBooked, reverseOwnWork,
   shiftOwnRepairCost, syncOwnWork, syncRepairHeaderCosts,
@@ -192,6 +193,33 @@ export function computeRepairTotalCost(
 
 // Helper fuer das Multi-Line-Total — wird sowohl in Store-internen Aufrufen
 // als auch von externen Konsumenten (ProductDetail, RepairDetail) genutzt.
+/**
+ * REPAIR-TYPE FINAL CORRECTION — die gespeicherte Art nach einer Änderung der Arbeit (`decideRepairType`): die Fakten
+ * aus der Zeile, den offenen ARBEITSzeilen (ohne Material) und dem Protokoll („je auf Sent to workshop").
+ */
+function repairTypeDecisionFor(
+  repairId: string, workLines: ReadonlyArray<{ supplierId?: string | null }>, openLineTotal: number,
+  workshopSupplierId: string | null, assignedWorkshopSupplierId: string | null,
+): RepairTypeDecision {
+  const r = query(`SELECT repair_type, repair_scope, status, return_from_status, invoice_id, internal_cost, estimated_cost,
+      planned_workshop_supplier_id FROM repairs WHERE id = ?`, [repairId])[0] ?? {};
+  const warDort = query(`SELECT 1 AS x FROM audit_log WHERE entity_type = 'repairs' AND entity_id = ? AND field_name = 'status'
+      AND new_value = 'sent_to_workshop' LIMIT 1`, [repairId]).length > 0;
+  return decideRepairType({
+    currentType: r.repair_type as string | null, scope: r.repair_scope as string | null, status: r.status as string | null,
+    returnFromStatus: r.return_from_status as string | null, invoiceId: r.invoice_id as string | null,
+    internalCost: Number(r.internal_cost) || 0, estimatedCost: r.estimated_cost === null || r.estimated_cost === undefined ? null : Number(r.estimated_cost),
+    workshopSupplierId, plannedWorkshopSupplierId: (r.planned_workshop_supplier_id as string | null) ?? null,
+    assignedWorkshopSupplierId,
+    workLines, openLineTotal, everSentToWorkshop: warDort,
+  });
+}
+
+/** Ein Konflikt (Kosten, Status, abgerechnet) wird nicht still übergangen: er steht im Protokoll der Reparatur. */
+function auditKeptRepairType(repairId: string, d: RepairTypeDecision): void {
+  if (d.kept && d.kept !== 'HYBRID_KEPT') trackUpdate('repairs', repairId, { repairTypeKept: d.kept, repairTypeTarget: d.target });
+}
+
 export function sumOpenRepairLineCosts(repairId: string): number {
   try {
     const rows = query(
@@ -503,7 +531,8 @@ interface RepairStore {
   addRepairLine: (repairId: string, data: Partial<RepairLine>) => RepairLine;
   updateRepairLine: (lineId: string, data: Partial<RepairLine>) => void;
   cancelRepairLine: (lineId: string, notes?: string) => void;
-  recomputeRepairAggregates: (repairId: string) => void;
+  /** `assignedWorkshopSupplierId`: die Werkstatt im Kopf vor der ERSTEN Zeile (Gebühr/Altbestand) — nur `addRepairLine`. */
+  recomputeRepairAggregates: (repairId: string, opts?: { assignedWorkshopSupplierId?: string | null }) => void;
   // User-Spec §Repair Bulk-Invoice: mehrere READY-Repairs eines Customers in
   // EINE gemeinsame Multi-Line-Invoice. Validiert atomisch: alle ready, kein
   // invoiceId, alle gleicher Customer, charge>0. Linkt invoiceId auf jedem Repair.
@@ -826,6 +855,23 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     db.run(`UPDATE repairs SET ${fields.join(', ')} WHERE id = ?`, values);
     saveDatabase();
     trackUpdate('repairs', id, data);
+
+    // REPAIR-TYPE FINAL CORRECTION — eine eingeplante Werkstatt ist (noch nicht ausgeführte) Werkstattarbeit: ändert
+    // sich der Plan, gilt dieselbe Regel wie nach einer Arbeitszeile (nur kosten- und statusneutral, vor Marge/Kopfkosten).
+    if (data.plannedWorkshopSupplierId !== undefined
+      && (before?.plannedWorkshopSupplierId || null) !== ((data.plannedWorkshopSupplierId as string | null) || null)) {
+      const offen = get().repairLines.filter((l) => l.repairId === id && l.status === 'OPEN');
+      const ws = (query('SELECT workshop_supplier_id AS w FROM repairs WHERE id = ?', [id])[0]?.w as string | null) ?? null;
+      // Ohne jede Zeile ist eine Werkstatt im Kopf die Gebühr beim Anlegen / Altbestand — Werkstattarbeit.
+      const ohneZeile = Number(query('SELECT COUNT(*) AS n FROM repair_lines WHERE repair_id = ?', [id])[0]?.n) === 0;
+      const d = repairTypeDecisionFor(id, offen.filter((l) => !l.materialKind || l.materialKind === 'labor'),
+        offen.reduce((s, l) => s + (l.costAmount || 0), 0), ws, ohneZeile ? ws : null);
+      if (d.changed) {
+        db.run('UPDATE repairs SET repair_type = ?, updated_at = ? WHERE id = ?', [d.type, now, id]);
+        trackUpdate('repairs', id, { repairType: d.type, recomputedFromPlan: true });
+        saveDatabase();
+      } else auditKeptRepairType(id, d);
+    }
 
     // Plan §Repair §Workshop-as-Supplier: Wenn der Supplier auf einem External/
     // Hybrid-Repair erst NACH dem READY-Uebergang per Edit gesetzt wird, muss die
@@ -1297,6 +1343,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       throw new RepairActionRejected('REPAIR_ALREADY_INVOICED', 'this repair is already invoiced — its cost lines are frozen');
     }
 
+    // REPAIR-TYPE FINAL CORRECTION — vor der ersten Zeile ist eine Werkstatt im Kopf die Gebühr beim Anlegen / der
+    // Altbestand (Werkstattarbeit); danach kommt `workshop_supplier_id` aus den Zeilen (stornierte werden gelöscht).
+    const kopfWerkstatt = Number(query('SELECT COUNT(*) AS n FROM repair_lines WHERE repair_id = ?', [repairId])[0]?.n) === 0
+      ? ((query('SELECT workshop_supplier_id AS w FROM repairs WHERE id = ?', [repairId])[0]?.w as string | null) ?? null)
+      : null;
     // Next position = max existing + 1
     const existingRows = query(
       `SELECT COALESCE(MAX(position), 0) AS max_pos FROM repair_lines WHERE repair_id = ?`,
@@ -1333,7 +1384,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     }
     saveDatabase();
     get().loadRepairLines();
-    get().recomputeRepairAggregates(repairId);
+    get().recomputeRepairAggregates(repairId, { assignedWorkshopSupplierId: kopfWerkstatt });
 
     // Plan repair-multi-supplier — Stage-based Commit: wenn der Repair schon
     // ueber DRAFT/RECEIVED hinaus ist, wird die neue Line sofort als
@@ -1539,16 +1590,14 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
   // aus den OPEN Lines abgeleitet, damit alle bestehenden Read-Pfade
   // (supplierStore.getLedger, Reports, etc.) ohne Code-Aenderung weiter
   // funktionieren. Bei N Lines (>1) gilt: workshop_supplier_id=NULL, actual_cost=SUM.
-  // v0.7.6 — repair_type wird PROMOTET aber nie DEMOTET. User-Intent
-  // bleibt erhalten (kein Flip-Flop bei Cancel der letzten externen Line):
-  //   Internal + 1. External-Line → wird Hybrid
-  //   External + 1. Interne-Line → wird Hybrid
-  //   Hybrid → bleibt Hybrid (auch wenn alle externen gecanceled werden)
+  // v0.7.6 — repair_type wurde nur hochgestuft (Internal + Werkstattzeile → Hybrid, External + eigene Zeile → Hybrid,
+  // Hybrid bleibt). REPAIR-TYPE FINAL CORRECTION — jetzt `decideRepairType` (aktive Arbeit statt Vorwahl); das alte
+  // Verhalten bleibt der Rückfall, wann immer die neue Art Kosten oder Statusweg berühren würde.
   // REPAIR-REDESIGN FOLLOW-UP — Werkstatt und Hochstufung lesen NUR Arbeitszeilen (ohne `material_kind`, oder der
   // Lohnposten „labor" — dieselbe Abgrenzung wie die Werkstatt-Nutzung im Lieferantenstamm). Ein Materiallieferant
   // ist keine Werkstatt: er stuft nicht mehr auf „hybrid" hoch und steht nicht mehr in `workshop_supplier_id`; eigenes
   // Material stuft eine Fremdreparatur nicht hoch. `actual_cost` bleibt die Summe ALLER offenen Zeilen (Arbeit + Material).
-  recomputeRepairAggregates: (repairId) => {
+  recomputeRepairAggregates: (repairId, opts) => {
     const db = getDatabase();
     const now = new Date().toISOString();
     const lines = get().repairLines.filter(l => l.repairId === repairId && l.status === 'OPEN');
@@ -1556,17 +1605,18 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const supplierIds = Array.from(new Set(workLines.map(l => l.supplierId).filter(Boolean) as string[]));
     const totalCost = lines.reduce((s, l) => s + (l.costAmount || 0), 0);
     const newSupplierId = supplierIds.length === 1 ? supplierIds[0] : null;
-    const hasExternalLine = workLines.some(l => !!l.supplierId);
-    const hasInternalLine = workLines.some(l => !l.supplierId);
-    // Aktuellen Typ + Margin-Inputs lesen (Promote-Only-Logik + L-13).
+    // Margin-Inputs lesen (L-13).
     const currentRow = query(
-      'SELECT repair_type, charge_to_customer, internal_cost, estimated_cost FROM repairs WHERE id = ?',
+      'SELECT charge_to_customer, internal_cost, estimated_cost FROM repairs WHERE id = ?',
       [repairId]
     )[0];
-    const currentType = (currentRow?.repair_type as Repair['repairType']) || 'internal';
-    let newType: Repair['repairType'] = currentType;
-    if (currentType === 'internal' && hasExternalLine) newType = 'hybrid';
-    else if (currentType === 'external' && hasInternalLine) newType = 'hybrid';
+    // REPAIR-TYPE FINAL CORRECTION — die Art folgt der AKTIVEN Arbeit (nicht der Vorwahl „In-house"):
+    // nur eigene → internal, nur Werkstatt (auch eingeplant) → external, beides → hybrid. Gespeichert wird das nur,
+    // wenn es gegenüber dem bisherigen Verhalten kosten- und statusgleich ist; sonst bleibt das bisherige Verhalten,
+    // „hybrid" bleibt, und ein Konflikt steht im Protokoll (`decideRepairType`).
+    const typEntscheid = repairTypeDecisionFor(repairId, workLines, totalCost, newSupplierId, opts?.assignedWorkshopSupplierId ?? null);
+    const newType: Repair['repairType'] = typEntscheid.type;
+    auditKeptRepairType(repairId, typEntscheid);
 
     // L-13 — Margin nach Line-Edit mitfuehren, sonst liest Analytics (SUM(margin))
     // veraltet. Gleiche Kostenbasis + Guard wie der Status-Handler (Z.~844): nur

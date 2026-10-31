@@ -198,6 +198,8 @@ const TAG = (d) => new Date(Date.now() - d * 86400000).toISOString().slice(0, 10
 const QREP = [['bq-rep-1', 'BQ-0001', 'ready'], ['bq-rep-2', 'BQ-0002', 'ready'], ['bq-rep-3', 'BQ-0003', 'ready']];
 /** REPAIR-INVOICE-INDICATOR — Sonderfälle der Rechnungsanzeige: verwaiste Verknüpfung und Rechnungsentwurf. */
 const XREP = [['bx-rep-1', 'BX-0001', 'picked_up', 'bx-inv-gibt-es-nicht'], ['bx-rep-2', 'BX-0002', 'ready', 'bx-inv-entwurf']];
+/** REPAIR-TYPE FINAL CORRECTION — je App eine Reparatur mit der Vorwahl In-house, in Arbeit, noch ohne Zeile. */
+const TREP = [['bt-rep-1', 'BT-0001'], ['bt-rep-2', 'BT-0002']];
 function seed() {
   const db = new DatabaseSync(BIZ_DB);
   try {
@@ -215,6 +217,10 @@ function seed() {
     insert(db, 'invoices', { id: 'bx-inv-entwurf', branch_id, invoice_number: 'PINV-BX-0001', customer_id: 'bl-kunde', status: 'DRAFT', net_amount: 40, vat_amount: 0, gross_amount: 40, paid_amount: 0, created_at: now, updated_at: now });
     // Die App selbst prüft keine Fremdschlüssel (sql.js ohne PRAGMA foreign_keys) — so entsteht eine verwaiste
     // invoice_id im Bestand; node:sqlite prüft sie, deshalb hier wie dort ausgeschaltet.
+    insert(db, 'suppliers', { id: 'bt-ws', branch_id, name: 'BT Werkstatt', active: 1, is_workshop: 1, created_at: now, updated_at: now });
+    for (const [id, nr] of TREP) {
+      insert(db, 'repairs', { id, branch_id, repair_number: nr, customer_id: 'bl-kunde', item_brand: 'Cartier', item_model: 'Tank', issue_description: 'Typ ' + nr, repair_type: 'internal', internal_cost: 0, charge_to_customer: 60, margin: 60, tax_scheme: 'VAT_10', status: 'in_progress', received_at: now, voucher_code: 'T' + nr.replace(/\D/g, '').padStart(7, '0'), images: '[]', item_attributes: '{}', repair_scope: 'CUSTOMER', revision: 1, created_at: now, updated_at: now });
+    }
     db.exec('PRAGMA foreign_keys = OFF');
     for (const [id, nr, status, invoice_id] of XREP) {
       insert(db, 'repairs', { id, branch_id, repair_number: nr, customer_id: 'bl-kunde', item_brand: 'Rolex', item_model: 'Datejust', issue_description: 'Sonderfall ' + nr, repair_type: 'internal', internal_cost: 0, charge_to_customer: 40, margin: 40, tax_scheme: 'VAT_10', status, invoice_id, received_at: now, completed_at: now, picked_up_at: status === 'picked_up' ? now : null, voucher_code: 'X' + nr.replace(/\D/g, '').padStart(7, '0'), images: '[]', item_attributes: '{}', repair_scope: 'CUSTOMER', revision: 1, created_at: now, updated_at: now });
@@ -500,6 +506,48 @@ try {
     && dbQ(BIZ_DB, "SELECT invoice_id FROM repairs WHERE id = 'bx-rep-1'")[0]?.invoice_id === 'bx-inv-gibt-es-nicht'
     && (await kommandos(client)).filter((x) => /^(repairs|invoices|payments)\./.test(String(x.op))).length === 0,
     'INDIKATOR Anzeige und Filter schicken nichts und legen keine Rechnung an');
+
+  // ── 3c) REPAIR-TYPE FINAL CORRECTION — Internal (Vorwahl) + erste Werkstattzeile über die Maske → External ──
+  async function werkstattZeile(c) {
+    const auf = await c.ev("const b=[...document.querySelectorAll('button')].find(x=>x.textContent.trim().endsWith('Add Work')); if(!b) return 'NO'; b.click(); return 'OK';");
+    if (auf !== 'OK') return 'KEIN-KNOPF';
+    if (!(await warteBis(c, "!!document.querySelector('[data-repair-line-source-external]')", 10000))) return 'KEINE-MASKE';
+    await click(c, '[data-repair-line-source-external]'); await sleep(300);
+    await c.ev("const t=document.querySelector('[data-ss-trigger=\"Pick a workshop / goldsmith\"]'); if(t) t.click(); return 1;"); await sleep(500);
+    const w = await c.ev("const o=document.querySelector('[data-ss-option=\"bt-ws\"]'); if(!o) return 'NO'; o.click(); return 'OK';");
+    if (w !== 'OK') return 'KEINE-WERKSTATT';
+    await sleep(300);
+    const k = await c.ev("let e=document.querySelector('[data-repair-line-cost]'); if(e&&e.tagName!=='INPUT') e=e.querySelector('input'); if(!e) return 'NO';"
+      + "Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e,'20'); e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';");
+    if (k !== 'OK') return 'KEINE-KOSTEN';
+    await sleep(300);
+    return c.ev("const b=document.querySelector('[data-add-repair-line]'); if(!b) return 'NO'; if(b.disabled) return 'DIS'; b.click(); return 'OK';");
+  }
+  const typRep = (id) => dbQ(BIZ_DB, 'SELECT repair_type, workshop_supplier_id, actual_cost, margin, status FROM repairs WHERE id = ?', [id])[0] || {};
+  for (const [wer, [rid, nr], apSoll] of [['PC2', TREP[0], 20], ['Primary', TREP[1], 40]]) {
+    let c;
+    if (wer === 'PC2') { client = await lade(client, '/repairs/' + rid); c = client; } else { await geh(primary, '/repairs/' + rid); c = primary; }
+    await warteBis(c, `document.body.innerText.includes(${S(nr)})`, 30000);
+    ok(typRep(rid).repair_type === 'internal', `TYP ${wer} ${nr}: angelegt mit der Vorwahl In-house`);
+    const z = await werkstattZeile(c);
+    ok(z === 'OK', `TYP ${wer} Werkstattzeile 20 über die Maske (${z} ${String(await fehlerAnzeige(c)).slice(0, 120)})`);
+    ok(await warteAuf(() => typRep(rid).repair_type === 'external'), `TYP ${wer} gespeichert: External, nicht Hybrid (${S(typRep(rid))})`);
+    const aud = dbQ(BIZ_DB, "SELECT new_value FROM audit_log WHERE entity_id = ? AND field_name = 'repairType'", [rid]).map((r) => r.new_value);
+    ok(!aud.includes('hybrid') && typRep(rid).workshop_supplier_id === 'bt-ws' && Number(typRep(rid).actual_cost) === 20 && Number(typRep(rid).margin) === 40,
+      `TYP ${wer} nie Hybrid im Protokoll; Werkstatt, Kosten 20, Marge 40 (${S(typRep(rid))})`);
+    const exp = dbQ(BIZ_DB, "SELECT COUNT(*) AS n, COALESCE(SUM(amount), 0) AS s FROM expenses WHERE related_module = 'repair' AND related_entity_id = ? AND status != 'CANCELLED'", [rid])[0] || {};
+    const apWs = Number(dbQ(BIZ_DB, "SELECT COALESCE(SUM(CASE WHEN direction='CREDIT' THEN amount ELSE -amount END), 0) AS s FROM ledger_entries WHERE account = 'ACCOUNTS_PAYABLE' AND counterparty_id = 'bt-ws'")[0]?.s);
+    const saldo = Number(dbQ(BIZ_DB, "SELECT ROUND(COALESCE(SUM(CASE WHEN direction='DEBIT' THEN amount ELSE -amount END), 0), 3) AS s FROM ledger_entries")[0]?.s);
+    ok(Number(exp.n) === 1 && Number(exp.s) === 20 && Math.abs(apWs - apSoll) < 0.0005 && Math.abs(saldo) < 0.0005,
+      `TYP ${wer} genau eine Werkstatt-Verbindlichkeit 20 (Werkstatt gesamt ${apWs}), Hauptbuch ausgeglichen`);
+    if (wer === 'PC2') {
+      const cm = (await kommandos(client)).filter((x) => x.op === 'repairs.add_line');
+      ok(cm.length === 1, `TYP PC2 genau EIN Auftrag repairs.add_line (${cm.length})`);
+      client = await lade(client, '/repairs/' + rid); c = client;
+    } else { await geh(primary, '/repairs'); await geh(primary, '/repairs/' + rid); }
+    ok(await warteBis(c, "document.querySelector('[data-repair-work-source]')?.getAttribute('data-repair-work-source') === 'external' && /sent to workshop/i.test(document.body.innerText)", 30000),
+      `TYP ${wer} Detailseite: Arbeitsquelle External, „Sent to workshop" wird angeboten`);
+  }
 
   // ── 3b) v0.8.94 Quick Edit aus der Liste — PC2 und Primary ────────────
   const rep = (id) => dbQ(BIZ_DB, 'SELECT * FROM repairs WHERE id = ?', [id])[0] || {};

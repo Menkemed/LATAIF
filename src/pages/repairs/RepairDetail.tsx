@@ -1087,8 +1087,8 @@ export function RepairDetail() {
                       <span style={{ fontSize: 12, color: '#4B5563' }}>{repairWorkSourceText(quelle, lieferantName)}</span>
                     </div>
                     <p style={{ fontSize: 11, color: '#6B7280', marginTop: 4, lineHeight: 1.4 }}>
-                      Set when the repair was created; a work line of the other kind extends it (In-house + workshop = Hybrid).
-                      Cancelling a line keeps the part — the type is never downgraded automatically (status steps and costs stay as booked).
+                      Follows the active work: own staff only = In-house, a workshop only (also a planned one) = External, both = Hybrid.
+                      A Hybrid stays Hybrid, and a change that would alter costs or status steps is not made automatically — it is noted in the history.
                     </p>
                   </div>
                   <SearchSelect
