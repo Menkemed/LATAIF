@@ -233,7 +233,7 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
   const antworten = (url: string, body: unknown): Antwort => {
     const b = body as { op?: string; payload?: Record<string, unknown> } | null;
     if (/staging\/media/.test(url)) return { status: 201, body: { stagingId: 'b'.repeat(64) } };
-    if (b?.op === 'repairs.list') return { status: 200, body: { ok: true, value: { items: [{ id: 'rep-9', repairNumber: 'REP-2026-00009', itemBrand: 'Rolex', itemModel: 'DJ', status: 'received' }] } } };
+    if (b?.op === 'repairs.list') return { status: 200, body: { ok: true, value: { items: [{ id: 'rep-9', repairNumber: 'REP-2026-00009', itemBrand: 'Rolex', itemModel: 'DJ', status: 'received', work: { kind: 'hybrid', label: 'Hybrid', savedLabel: 'External workshop' } }] } } };
     if (b?.op === 'repairs.get') {
       // MEDIA-REPAIR — eine Reparatur MIT Medien: die Galerie sind Kennungen und Schluessel.
       return { status: 200, body: { ok: true, value: { id: 'rep-9', repairNumber: 'REP-2026-00009', revision: fassung, status: 'received', issueDescription: 'Glas kaputt', notes: '', images: [], mediaIds: ['media-x'], mediaKeys: ['tenant-1/aa/x.jpg'], lines: [], openLineTotal: 0, allowedStatusTargets: ['diagnosed'] } } };
@@ -248,6 +248,8 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
   await warte();
   const treffer = t.document.querySelectorAll('#rpList button');
   ok(treffer.length === 1, `§2 die Liste zeigt den Treffer (${treffer.length})`);
+  // REPAIR COST FINAL CLOSURE — Typkonflikt am Handy: Arbeit und gespeicherte Art stehen beide da.
+  ok(String(treffer[0].textContent ?? '').includes('Hybrid (saved as External workshop)'), `§2 Typkonflikt in der Handy-Liste (${treffer[0].textContent})`);
   await treffer[0].onclick!();
   await warte();
   ok($('rpIssue').value === 'Glas kaputt', '§2 die Maske traegt den gelesenen Stand');
@@ -528,9 +530,9 @@ const warte = async (): Promise<void> => { for (let i = 0; i < 50; i++) await Pr
     && /eigeneArbeit \? ownWorkDescription\(l\)/.test(detail7)
     && /l\.materialKind \? materialDescription\(l\)/.test(detail7),
     '§7 …und die drei Spalten kommen aus derselben Stelle, nicht aus drei Bedingungen im Bauch');
-  // Beweis, dass nur die Beschriftung angefasst wurde: die Summe zaehlt weiter Zeilen + Pauschale.
-  ok(/const totalCost = explicitLines\.reduce\(\(s, l\) => s \+ \(l\.costAmount \|\| 0\), 0\) \+ inHouseCost;/.test(detail7),
-    '§7 die Kostensumme ist unveraendert — es wurde nichts umgerechnet');
+  // Die Karte zeigt seit dem Repair-Redesign dieselbe Summe wie Marge und Rechnung (repairCostView).
+  ok(/const totalCost = kostenSicht.total;/.test(detail7),
+    '§7 die Kostensumme der Karte ist die EINE Summe (kostenSicht), hier wird nichts umgerechnet');
   ok(!/repair-line-view/.test(readFileSync(join(repo, 'src/core/repairs/repair-cost.ts'), 'utf8')),
     '§7 …und die Rechnung des Hauses weiss von dieser Beschriftung nichts');
 }

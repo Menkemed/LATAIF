@@ -200,6 +200,7 @@ const QREP = [['bq-rep-1', 'BQ-0001', 'ready'], ['bq-rep-2', 'BQ-0002', 'ready']
 const XREP = [['bx-rep-1', 'BX-0001', 'picked_up', 'bx-inv-gibt-es-nicht'], ['bx-rep-2', 'BX-0002', 'ready', 'bx-inv-entwurf']];
 /** REPAIR-TYPE FINAL CORRECTION — je App eine Reparatur mit der Vorwahl In-house, in Arbeit, noch ohne Zeile. */
 const TREP = [['bt-rep-1', 'BT-0001'], ['bt-rep-2', 'BT-0002']];
+let WATCH = 'Watch';
 function seed() {
   const db = new DatabaseSync(BIZ_DB);
   try {
@@ -218,6 +219,14 @@ function seed() {
     // Die App selbst prüft keine Fremdschlüssel (sql.js ohne PRAGMA foreign_keys) — so entsteht eine verwaiste
     // invoice_id im Bestand; node:sqlite prüft sie, deshalb hier wie dort ausgeschaltet.
     insert(db, 'suppliers', { id: 'bt-ws', branch_id, name: 'BT Werkstatt', active: 1, is_workshop: 1, created_at: now, updated_at: now });
+    // REPAIR-BLOCK — Materiallieferant, Kategorie der Maske, Altfall mit Typkonflikt (gespeichert External, Zeilen Hybrid).
+    insert(db, 'suppliers', { id: 'bt-mat', branch_id, name: 'BT Steine', active: 1, is_workshop: 0, created_at: now, updated_at: now });
+    const kat = db.prepare("SELECT name FROM categories WHERE id = 'cat-watch'").get();
+    if (kat) WATCH = String(kat.name);
+    else insert(db, 'categories', { id: 'cat-watch', branch_id, name: 'Watch', icon: 'Watch', color: '#000', attributes: '[]', scope_options: '[]', condition_options: '[]', active: 1, sort_order: 0, created_at: now, updated_at: now });
+    insert(db, 'repairs', { id: 'bc-rep-1', branch_id, repair_number: 'BC-0001', customer_id: 'bl-kunde', item_brand: 'IWC', item_model: 'Pilot', issue_description: 'Konflikt BC-0001', repair_type: 'external', internal_cost: 25, estimated_cost: 25, charge_to_customer: 70, margin: 45, tax_scheme: 'VAT_10', status: 'in_progress', received_at: now, voucher_code: 'C0000001', images: '[]', item_attributes: '{}', repair_scope: 'CUSTOMER', revision: 1, created_at: now, updated_at: now });
+    insert(db, 'repair_lines', { id: 'bc-line-1', branch_id, repair_id: 'bc-rep-1', position: 1, supplier_id: 'bt-ws', work_type: 'service', cost_amount: 25, status: 'OPEN', created_at: now, updated_at: now });
+    insert(db, 'repair_lines', { id: 'bc-line-2', branch_id, repair_id: 'bc-rep-1', position: 2, work_type: 'polishing', cost_amount: 0, status: 'OPEN', created_at: now, updated_at: now });
     for (const [id, nr] of TREP) {
       insert(db, 'repairs', { id, branch_id, repair_number: nr, customer_id: 'bl-kunde', item_brand: 'Cartier', item_model: 'Tank', issue_description: 'Typ ' + nr, repair_type: 'internal', internal_cost: 0, charge_to_customer: 60, margin: 60, tax_scheme: 'VAT_10', status: 'in_progress', received_at: now, voucher_code: 'T' + nr.replace(/\D/g, '').padStart(7, '0'), images: '[]', item_attributes: '{}', repair_scope: 'CUSTOMER', revision: 1, created_at: now, updated_at: now });
     }
@@ -547,6 +556,112 @@ try {
     } else { await geh(primary, '/repairs'); await geh(primary, '/repairs/' + rid); }
     ok(await warteBis(c, "document.querySelector('[data-repair-work-source]')?.getAttribute('data-repair-work-source') === 'external' && /sent to workshop/i.test(document.body.innerText)", 30000),
       `TYP ${wer} Detailseite: Arbeitsquelle External, „Sent to workshop" wird angeboten`);
+  }
+
+  // ── 3d) REPAIR-BLOCK — New Repair, Quick Edit Work + Material, Kosten/Marge, Typkonflikt — PC2 und Primary ──
+  const kopfR = (id) => dbQ(BIZ_DB, 'SELECT repair_number, repair_type, planned_workshop_supplier_id, workshop_supplier_id, internal_cost, actual_cost, charge_to_customer, margin FROM repairs WHERE id = ?', [id])[0] || {};
+  const idVon = (issue) => dbQ(BIZ_DB, 'SELECT id FROM repairs WHERE issue_description = ?', [issue])[0]?.id;
+  const setLabel = (c, label, v) => c.ev(
+    `const l=[...document.querySelectorAll('label')].filter(x=>x.textContent.trim().replace(/\\*$/,'').trim()===${S(label)}).pop();`
+    + `if(!l) return 'NO-LABEL:'+${S(label)}; const e=l.parentElement.querySelector('input,textarea'); if(!e) return 'NO-INPUT';`
+    + `const p=e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(p,'value').set.call(e, ${S(v)});`
+    + `e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
+  const setFeld = (c, sel, v) => c.ev(`let e=document.querySelector(${S(sel)}); if(e&&!/^(INPUT|TEXTAREA)$/.test(e.tagName)) e=e.querySelector('input,textarea'); if(!e) return 'NO:'+${S(sel)};`
+    + `const p=e.tagName==='TEXTAREA'?HTMLTextAreaElement.prototype:HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(p,'value').set.call(e, ${S(v)});`
+    + `e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
+  async function ssWahl(c, platzhalter, id) {
+    const a = await c.ev(`const e=document.querySelector(${S(`[data-ss-trigger=${S(platzhalter)}]`)}); if(!e) return 'NO'; e.click(); return 'OK';`);
+    if (a !== 'OK') return 'KEIN-AUSLOESER:' + platzhalter;
+    if (!(await warteBis(c, `!!document.querySelector(${S(`[data-ss-option=${S(id)}]`)})`, 15000))) return 'KEIN-EINTRAG:' + id;
+    await c.ev(`document.querySelector(${S(`[data-ss-option=${S(id)}]`)}).click(); return 1;`); await sleep(300);
+    return 'OK';
+  }
+  const pruefeAlle = (r) => { const b = r.filter((x) => x !== 'OK'); return b.length ? b.join(',') : 'OK'; };
+  async function neueReparatur(c, typ, issue) {
+    await geh(c, '/tasks'); await sleep(500); await geh(c, '/repairs');
+    if (!(await warteBis(c, "[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='New Repair')", 30000))) return 'KEIN-KNOPF';
+    await clickText(c, 'New Repair');
+    if (!(await warteBis(c, "!!document.querySelector('[data-create-repair]')", 15000))) return 'KEINE-MASKE';
+    const r = [await ssWahl(c, 'Search clients by name, company, phone...', 'bl-kunde'), await clickText(c, WATCH)];
+    await sleep(300);
+    r.push(await setLabel(c, 'BRAND', 'Rolex'), await setLabel(c, 'NAME / MODEL', 'Datejust'),
+      await setFeld(c, 'textarea[placeholder="Describe the issue or requested repair..."]', issue));
+    const soll = { 'In-house': [true, false], External: [false, true], Hybrid: [true, true] }[typ];
+    for (const an of [true, false]) for (const [k, sel] of ['[data-repair-create-inhouse]', '[data-repair-create-external]'].entries()) {
+      const ist = await c.ev(`return !!document.querySelector(${S(sel)})?.checked;`);
+      if (soll[k] === an && ist !== an) { await c.ev(`document.querySelector(${S(sel)}).click(); return 1;`); await sleep(250); }
+    }
+    if (typ !== 'In-house') r.push(await ssWahl(c, 'Pick a workshop / goldsmith', 'bt-ws'));
+    r.push(await setLabel(c, 'CHARGE TO CLIENT (BHD)', '90'));
+    if (pruefeAlle(r) !== 'OK') return 'FELD:' + pruefeAlle(r);
+    await click(c, '[data-create-repair]');
+    return (await warteBis(c, "!document.querySelector('[data-create-repair]')", 30000)) ? 'OK' : 'BLEIBT-OFFEN:' + String(await fehlerAnzeige(c)).slice(0, 140);
+  }
+  async function quickAuf(c, nr) {
+    await geh(c, '/tasks'); await sleep(500); await geh(c, '/repairs');
+    if (!(await warteBis(c, `document.body.innerText.includes(${S(nr)})`, 30000))) return 'KEINE-ZEILE';
+    const k = await c.ev(`const b=document.querySelector('[data-repair-quick-edit=${S(nr)}]'); if(!b) return 'NO'; b.click(); return 'OK';`);
+    if (k !== 'OK') return k;
+    return (await warteBis(c, `!!document.querySelector('[data-repair-quick-edit-modal=${S(nr)}]')`, 15000)) ? 'OK' : 'KEIN-FENSTER';
+  }
+  const offen = (id) => dbQ(BIZ_DB, "SELECT supplier_id, material_kind, cost_amount FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'", [id]);
+  for (const wer of ['PC2', 'Primary']) {
+    const c = wer === 'PC2' ? client : primary;
+    const issue = (t) => `Block ${wer} ${t}`;
+    for (const [typ, soll, plan] of [['In-house', 'internal', null], ['External', 'external', 'bt-ws'], ['Hybrid', 'hybrid', 'bt-ws']]) {
+      const n = await neueReparatur(c, typ, issue(typ));
+      ok(n === 'OK', `BLOCK ${wer} New Repair ${typ} angelegt (${n})`);
+      ok(await warteAuf(() => !!idVon(issue(typ))), `BLOCK ${wer} ${typ} steht in der Datenbank`);
+      const k = kopfR(idVon(issue(typ)));
+      // Die Aufnahme speichert bewusst keine Marge (`repairMargin`: „null" ist eine andere Aussage als 0) — die erste Zeile setzt sie.
+      ok(k.repair_type === soll && (k.planned_workshop_supplier_id || null) === plan && !k.workshop_supplier_id && Number(k.internal_cost || 0) === 0
+        && Number(k.charge_to_customer) === 90 && k.margin === null && k.actual_cost === null,
+        `BLOCK ${wer} ${typ}: Art ${soll}, Werkstatt ${plan ? 'nur eingeplant' : 'keine'}, keine Kosten, Preis 90, Marge noch offen (${S(k)})`);
+    }
+    const inhouse = idVon(issue('In-house'));
+    const nr = kopfR(inhouse).repair_number;
+    ok(await quickAuf(c, nr) === 'OK', `BLOCK ${wer} Quick Edit öffnet ${nr}`);
+    await click(c, '[data-quick-add-work]'); await sleep(400);
+    const w1 = pruefeAlle([await setFeld(c, '[data-quick-work-cost]', '0')]);
+    await warteBis(c, "!!document.querySelector('[data-quick-work-save]') && !document.querySelector('[data-quick-work-save]').disabled", 8000);
+    await click(c, '[data-quick-work-save]');
+    ok(w1 === 'OK' && await warteAuf(() => offen(inhouse).length === 1 && Number(offen(inhouse)[0].cost_amount) === 0), `BLOCK ${wer} Quick Edit: eigene Arbeit 0.000 (${w1} ${String(await fehlerAnzeige(c)).slice(0, 120)})`);
+    ok(kopfR(inhouse).repair_type === 'internal', `BLOCK ${wer} eigene Arbeit: bleibt In-house`);
+    await warteBis(c, "!!document.querySelector('[data-quick-add-material]') && !document.querySelector('[data-quick-add-material]').disabled", 15000);
+    await click(c, '[data-quick-add-material]');
+    await warteBis(c, "!!document.querySelector('[data-material-kind=\"stone\"]')", 10000);
+    await click(c, '[data-material-kind="stone"]'); await sleep(300);
+    const m1 = pruefeAlle([await setFeld(c, '[data-material-description]', 'Saphir'), await setFeld(c, '[data-material-carat]', '1'), await setFeld(c, '[data-material-cost]', '8'),
+      await ssWahl(c, 'Pick: Shop / Own Stock OR a supplier', 'bt-mat')]);
+    await sleep(300);
+    await click(c, '[data-material-save]');
+    ok(m1 === 'OK' && await warteAuf(() => offen(inhouse).some((l) => l.material_kind === 'stone' && Number(l.cost_amount) === 8)),
+      `BLOCK ${wer} Quick Edit: Material 8 (${m1} ${await c.ev("return document.querySelector('[data-material-error]')?.textContent || '';")})`);
+    ok(kopfR(inhouse).repair_type === 'internal' && !kopfR(inhouse).workshop_supplier_id, `BLOCK ${wer} Materiallieferant: bleibt In-house, keine Werkstatt (${S(kopfR(inhouse))})`);
+    await warteBis(c, "!!document.querySelector('[data-quick-add-work]') && !document.querySelector('[data-quick-add-work]').disabled", 15000);
+    await click(c, '[data-quick-add-work]'); await sleep(400);
+    await click(c, '[data-quick-work-source-external]'); await sleep(300);
+    const w2 = pruefeAlle([await ssWahl(c, 'Pick a workshop / goldsmith', 'bt-ws'), await setFeld(c, '[data-quick-work-cost]', '20')]);
+    await warteBis(c, "!!document.querySelector('[data-quick-work-save]') && !document.querySelector('[data-quick-work-save]').disabled", 8000);
+    await click(c, '[data-quick-work-save]');
+    ok(w2 === 'OK' && await warteAuf(() => kopfR(inhouse).repair_type === 'hybrid'), `BLOCK ${wer} + Werkstattzeile 20: echte Hybrid-Reparatur (${w2} ${S(kopfR(inhouse))})`);
+    const kk = kopfR(inhouse);
+    ok(Number(kk.actual_cost) === 28 && Number(kk.margin) === 62 && kk.workshop_supplier_id === 'bt-ws', `BLOCK ${wer} Kosten 0 + 8 + 20 = 28, Marge 62, Werkstatt nur bt-ws (${S(kk)})`);
+    ok(await warteBis(c, "/28/.test(document.querySelector('[data-quick-total-cost]')?.textContent || '') && /62/.test(document.querySelector('[data-quick-margin]')?.textContent || '')", 15000),
+      `BLOCK ${wer} Quick Edit zeigt Gesamtkosten 28 und Marge 62`);
+    // Typkonflikt: gespeichert External, Zeilen Hybrid — Liste kurz, Detailseite mit Hinweis; nichts ändert sich.
+    await geh(c, '/tasks'); await sleep(500); await geh(c, '/repairs');
+    await warteBis(c, "document.body.innerText.includes('BC-0001')", 30000);
+    ok(/Saved type: External workshop/.test(await c.ev(`const r=${zeileVon('BC-0001')}; return r?.querySelector('[data-repair-type-conflict="compact"]')?.textContent || '';`))
+      && await c.ev(`const r=${zeileVon('BC-0001')}; return r?.querySelector('[data-repair-work-source]')?.getAttribute('data-repair-work-source') === 'hybrid';`),
+      `BLOCK ${wer} Liste: Arbeit Hybrid, „Saved type: External workshop"`);
+    await geh(c, '/repairs/bc-rep-1');
+    ok(await warteBis(c, "/Saved type: External workshop/.test(document.querySelector('[data-repair-type-conflict=\"full\"]')?.textContent || '') && /Work lines show: Hybrid/.test(document.querySelector('[data-repair-type-conflict=\"full\"]')?.textContent || '') && /not changed automatically/.test(document.querySelector('[data-repair-type-conflict=\"full\"]')?.textContent || '')", 20000),
+      `BLOCK ${wer} Detailseite: beide Aussagen und der Hinweis`);
+    ok(await warteBis(c, "!document.querySelector('[data-repair-type-conflict=\"full\"]') || true", 100) && kopfR('bc-rep-1').repair_type === 'external' && Number(kopfR('bc-rep-1').internal_cost) === 25,
+      `BLOCK ${wer} die Anzeige ändert nichts (gespeichert External, Betrag 25)`);
+    const fehler = await treffer(c);
+    ok(fehler.length === 0, `BLOCK ${wer} kein JS-Fehler „Database not initialized" (${S(fehler)})`);
   }
 
   // ── 3b) v0.8.94 Quick Edit aus der Liste — PC2 und Primary ────────────

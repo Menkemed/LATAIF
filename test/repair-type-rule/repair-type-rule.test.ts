@@ -712,6 +712,9 @@ for (const weg of WEGE) {
   const q = ws.repairWorkSource(kopf(db, e), zeilen(db, e));
   ok(art(db, e) === 'external' && kopf(db, e).internalCost === 25 && q.kind === 'hybrid' && q.typeConflict && q.storedKind === 'external' && Math.abs(kostenJetzt(db, e) - 25) < 0.0005,
     `§10 (${weg}) Typkonflikt: gespeichert External, Zeilen Hybrid, Kosten und Betrag unverändert`);
+  const liste = await reg.executeCommand('repairs.list', { actor: { branchId: 'branch-main', tenantId: 'tenant-1', userId: 'user-pc2', role: 'ADMIN' }, input: { limit: 50 } }) as { value?: { items: Array<Record<string, any>> } };
+  const handy = liste.value?.items.find((x) => x.id === e)?.work;
+  ok(handy?.kind === 'hybrid' && handy?.savedLabel === 'External workshop', `§10 (${weg}) Lesebefehl fürs Handy: Hybrid, gespeichert External (${S(handy)})`);
   ergebnis['C-' + weg] = konten(db);
 }
 ok(ergebnis['C-lokal'] === ergebnis['C-fern'], `§10 Primary == PC2: dieselben Buchungssummen (${ergebnis['C-lokal']} / ${ergebnis['C-fern']})`);
