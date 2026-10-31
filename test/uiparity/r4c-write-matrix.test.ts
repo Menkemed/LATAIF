@@ -297,8 +297,9 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   ok(/import \{ REPAIR_WORK_TYPES \} from '@\/core\/models\/types';/.test(src('src/core/bridge/lifecycle-commands.ts')),
     'S …sie kommt aus der Quelle des Hauses');
 
-  const ui = codeOf(src('src/pages/repairs/RepairDetail.tsx'));
-  ok(/REPAIR_WORK_TYPES\.map\(/.test(ui),
+  // Seit dem Repair-Redesign (59031bd) zeichnet die gemeinsame Maske `RepairWorkLineForm` die Auswahl.
+  const ui = codeOf(src('src/pages/repairs/RepairDetail.tsx')) + codeOf(src('src/components/repairs/RepairWorkParts.tsx'));
+  ok(/REPAIR_WORK_TYPES\.map\(/.test(ui) && /<RepairWorkLineForm\b/.test(ui),
     'S und die Maske zeichnet ihre Auswahl aus derselben Liste');
   ok(!/<option value="polishing">/.test(ui),
     'S …statt aus abgeschriebenen Eintraegen');
