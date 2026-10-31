@@ -378,25 +378,39 @@ const ergebnis: Record<string, string> = {};
     `§1 Hybrid zöge eine Gebühr (25) nach: COST-Konflikt → bisheriges Verhalten bleibt (${S(d)})`);
   d = f({ workLines: shop, openLineTotal: 20, workshopSupplierId: 'w', invoiceId: 'inv-1' });
   ok(d.type === 'hybrid' && d.kept === 'INVOICED', '§1 abgerechnet: keine neue Art, bisheriges Verhalten');
-  // Eigenschaft über ein Raster: jede NEUE Art (≠ bisheriges Verhalten) ist kosten- und statusgleich.
-  let geprueft = 0; let verletzt = 0;
+  // Eigenschaft über ein Raster: aus internal ist jede NEUE Art kosten- und statusgleich zum bisherigen Verhalten; wer
+  // „external" verlässt, zählt den Spiegel nie neben einer Werkstattzeile (eigene Kosten danach 0 oder genau die Gebühr).
+  let geprueft = 0; let verletzt = 0; let spiegel = 0;
   for (const cur of ['internal', 'external', 'hybrid']) for (const ic of [0, 30]) for (const est of [null, 25]) for (const wsId of [null, 'w'])
     for (const lines of [[], own, shop, [...own, ...shop]]) for (const planned of [null, 'p']) for (const assigned of [null, 'a'])
       for (const status of ['received', 'in_progress', 'sent_to_workshop', 'ready', 'picked_up']) for (const scope of ['CUSTOMER', 'OWN']) for (const ever of [false, true]) {
         const tot = lines.some((l) => l.supplierId) ? 20 : 0;
         const x = tr.decideRepairType({ currentType: cur, scope, status, internalCost: ic, estimatedCost: est, workshopSupplierId: wsId,
           plannedWorkshopSupplierId: planned, assignedWorkshopSupplierId: assigned, workLines: lines, openLineTotal: tot, everSentToWorkshop: ever } as never);
+        const fa = flow.repairStatusFlow(x.legacy, scope); const fb = flow.repairStatusFlow(x.type, scope);
+        const statusOk = !(fa.includes(status as never) && !fb.includes(status as never))
+          && !(fa.includes('sent_to_workshop') && !fb.includes('sent_to_workshop') && ever);
+        if (cur === 'external') {
+          // Bleibt „external", zählt internal_cost ohnehin nie. Wer „external" verlässt: kein Spiegel neben einer
+          // Werkstattzeile, eigene Kosten höchstens die frühere Kopf-Gebühr, eine geltende Gebühr bleibt gleich.
+          if (x.type === 'external') continue;
+          spiegel++;
+          const nach = costMod.repairCostParts({ repairType: x.type, internalCost: x.internalCost ?? ic, estimatedCost: est, workshopSupplierId: wsId }, tot);
+          const vor = costMod.repairCostParts({ repairType: 'external', internalCost: ic, estimatedCost: est, workshopSupplierId: wsId }, tot);
+          const gebuehr = assigned ? costMod.repairCostParts({ repairType: 'external', internalCost: ic, estimatedCost: est, workshopSupplierId: assigned }, 0).fee : 0;
+          const shopZeile = lines.some((l) => l.supplierId);
+          if ((shopZeile && nach.own > 0.0005) || nach.own > gebuehr + 0.0005 || Math.abs(nach.fee - vor.fee) > 0.0005 || (x.type !== x.legacy && !statusOk)) verletzt++;
+          continue;
+        }
         if (x.type === x.legacy) continue;
         geprueft++;
         const p = (t: string) => costMod.repairCostParts({ repairType: t, internalCost: ic, estimatedCost: est, workshopSupplierId: wsId }, tot);
         const a = p(x.legacy); const b = p(x.type);
-        const fa = flow.repairStatusFlow(x.legacy, scope); const fb = flow.repairStatusFlow(x.type, scope);
         const kostenGleich = Math.abs(a.own - b.own) + Math.abs(a.fee - b.fee) + Math.abs(a.total - b.total) < 0.0005;
-        const statusOk = !(fa.includes(status as never) && !fb.includes(status as never))
-          && !(fa.includes('sent_to_workshop') && !fb.includes('sent_to_workshop') && ever);
         if (!kostenGleich || !statusOk || x.legacy === 'hybrid' && cur === 'hybrid') verletzt++;
       }
-  ok(geprueft > 100 && verletzt === 0, `§1 Raster: ${geprueft} neue Entscheidungen, jede kosten- und statusgleich zum bisherigen Verhalten (${verletzt} Verstöße)`);
+  ok(geprueft > 100 && spiegel > 100 && verletzt === 0,
+    `§1 Raster: ${geprueft} neue Entscheidungen aus internal kosten-/statusgleich, ${spiegel} aus external ohne Spiegel neben der Werkstattzeile (${verletzt} Verstöße)`);
 }
 
 // ══ §2 Internal (Vorwahl) → erste Werkstattzeile → External; Statusweg, Kosten, Buchungen — Primary und PC2 ══
@@ -540,6 +554,69 @@ for (const weg of WEGE) {
   ok(Math.abs(kostenAlt(db, id, 'hybrid') - kostenAlt(db, id, 'external')) < 0.0005,
     '§7 die vorbereitete Korrektur hybrid → external ist hier kostengleich (eigene Kosten 0, eine Werkstattzeile)');
 }
+
+// ══ §9 REPAIR COST DOUBLE-COUNT FIX — Spiegel, echte eigene Kosten, Buchungssummen — Primary und PC2 ══════════
+{
+  const f = (o: Record<string, unknown>) => tr.decideRepairType({ currentType: 'external', scope: 'CUSTOMER', status: 'in_progress',
+    internalCost: 25, estimatedCost: 25, workshopSupplierId: 'w', plannedWorkshopSupplierId: null, workLines: [{ supplierId: 'w' }, { supplierId: null }],
+    openLineTotal: 25, ...o } as never);
+  let d = f({});
+  ok(d.type === 'hybrid' && d.mirror === 'NEUTRALIZED' && d.internalCost === 0, `§9 External + Werkstattzeile + eigene Zeile: Hybrid, Spiegel 25 → 0 (${S(d)})`);
+  d = f({ internalCost: 15 });
+  ok(d.type === 'external' && d.kept === 'MIRROR' && d.internalCost === undefined, `§9 anderer Betrag (15 ≠ Voranschlag 25): keine Annahme — bleibt External, Konflikt (${S(d)})`);
+  d = f({ workLines: [{ supplierId: null }], openLineTotal: 0, workshopSupplierId: null, assignedWorkshopSupplierId: 'w' });
+  ok(d.type === 'hybrid' && d.mirror === 'CARRIED' && d.internalCost === 25, '§9 Kopf-Gebühr 25 + erste eigene Zeile: Spiegel bleibt als Platzhalter der Gebühr');
+  d = tr.decideRepairType({ currentType: 'hybrid', internalCost: 25, estimatedCost: 25, carriedFee: 25, workLines: [{ supplierId: null }, { supplierId: 'w' }], openLineTotal: 25 } as never);
+  ok(d.type === 'hybrid' && d.mirror === 'REPLACED' && d.internalCost === 0, '§9 …dann die Werkstattzeile: sie ersetzt den Platzhalter (→ 0)');
+  d = tr.decideRepairType({ currentType: 'hybrid', internalCost: 15, estimatedCost: 25, carriedFee: 25, workLines: [{ supplierId: 'w' }], openLineTotal: 25 } as never);
+  ok(d.type === 'hybrid' && !d.mirror, '§9 Platzhalter danach von Hand geändert (15): echte eigene Kosten, bleiben');
+  d = tr.decideRepairType({ currentType: 'hybrid', internalCost: 15, estimatedCost: 25, workLines: [{ supplierId: 'w' }], openLineTotal: 25 } as never);
+  ok(!d.mirror && d.type === 'hybrid', '§9 Hybrid mit echten eigenen Kosten 15 (nie ein Platzhalter): bleiben');
+}
+for (const weg of WEGE) {
+  const db = welt();
+  // A) Fremdreparatur mit Gebühr 25: die Anlage legt die Werkstattzeile 25 an, der Kopf spiegelt 25. Dann eigene Politur:
+  //    früher Hybrid mit 25 eigenen Kosten + Zeile 25 = 50, jetzt 25.
+  const a = await anlegen(db, weg, { repairType: 'external', workshopSupplierId: 'sup-1', estimatedCost: 25 });
+  ok(kopf(db, a).internalCost === 25 && zeilen(db, a).filter((l) => l.supplierId === 'sup-1' && l.costAmount === 25).length === 1,
+    `§9 (${weg}) External mit Gebühr: Werkstattzeile 25 von der Anlage, Spiegel 25 im Kopf`);
+  await status(db, weg, a, 'in_progress');
+  ok(await zeile(db, weg, a, OWN) === 'OK' && art(db, a) === 'hybrid' && kopf(db, a).internalCost === 0,
+    `§9 (${weg}) + eigene Zeile: Hybrid, Spiegel 25 → 0 (${S(kopf(db, a))})`);
+  ok(Math.abs(kostenJetzt(db, a) - 25) < 0.0005 && Math.abs(marge(db, a) - 45) < 0.0005 && Math.abs(kostenAlt(db, a, 'hybrid') + 25 - 50) < 0.0005,
+    `§9 (${weg}) Kosten 25, Marge 45 — nicht mehr 50 (Spiegel + Werkstattzeile) (${kostenJetzt(db, a)}/${marge(db, a)}/${kostenAlt(db, a, 'hybrid')})`);
+  ok(await status(db, weg, a, 'sent_to_workshop') === 'OK' && await status(db, weg, a, 'ready') === 'OK' && await abrechnen(db, weg, a) === 'OK', `§9 (${weg}) Ready + abgerechnet`);
+  const inv = s(db, 'SELECT invoice_id FROM repairs WHERE id = ?', [a]);
+  ok(ausgabenZahl(db, a) === 1 && Math.abs(ausgaben(db, a) - 25) < 0.0005 && Math.abs(ap(db, 'sup-1') - 25) < 0.0005
+    && n(db, 'SELECT purchase_price_snapshot FROM invoice_lines WHERE invoice_id = ?', [inv]) === 25 && ausgeglichen(db),
+    `§9 (${weg}) Buchungen: eine Ausgabe 25 an die Werkstatt, keine eigene Arbeit nach „ready", Rechnungseinstand 25, ausgeglichen (${ausgabenZahl(db, a)}/${ausgaben(db, a)}/${ap(db, 'sup-1')}/${n(db, 'SELECT purchase_price_snapshot FROM invoice_lines WHERE invoice_id = ?', [inv])}/${ausgeglichen(db)})`);
+  // B) Altbestand mit Kopf-Gebühr 25 (Werkstatt im Kopf, keine Zeile): erst eigene Arbeit (Platzhalter bleibt), nach „ready"
+  //    die Werkstattzeile — sie ersetzt den Platzhalter, die Kopfbuchung folgt.
+  const b = 'alt-gebuehr-' + weg;
+  insert(db, 'repairs', { id: b, branch_id: 'branch-main', repair_number: 'ALT-G-' + weg, customer_id: 'cust-1', repair_scope: 'CUSTOMER',
+    repair_type: 'external', workshop_supplier_id: 'sup-1', estimated_cost: 25, internal_cost: 25, issue_description: 'Alt', charge_to_customer: 70,
+    status: 'in_progress', tax_scheme: 'VAT_10', images: '[]', item_attributes: '{}', voucher_code: 'VG' + weg, revision: 1, received_at: NOW, created_at: NOW, updated_at: NOW });
+  reload();
+  ok(await zeile(db, weg, b, OWN) === 'OK' && art(db, b) === 'hybrid' && kopf(db, b).internalCost === 25 && protokoll(db, b, 'repairFeeCarried').includes('25')
+    && Math.abs(kostenJetzt(db, b) - 25) < 0.0005, `§9 (${weg}) Kopf-Gebühr + eigene Zeile: Hybrid, Platzhalter 25 (Summe wie vorher 25) (${art(db, b)} ${S(kopf(db, b))} ${S(protokoll(db, b, 'repairFeeCarried'))} ${kostenJetzt(db, b)})`);
+  await status(db, weg, b, 'sent_to_workshop'); await status(db, weg, b, 'ready');
+  const vorZeile = ausgaben(db, b);
+  const zb = await zeile(db, weg, b, { ...WS, costAmount: 25 });
+  if (zb === 'OK') {
+    ok(kopf(db, b).internalCost === 0 && Math.abs(kostenJetzt(db, b) - 25) < 0.0005 && Math.abs(ausgaben(db, b) - 25) < 0.0005 && ausgeglichen(db),
+      `§9 (${weg}) Werkstattzeile nach „ready": ersetzt den Platzhalter, Ausgaben ${vorZeile} → ${ausgaben(db, b)} (nicht 50), ausgeglichen`);
+  } else ok(Math.abs(vorZeile - 25) < 0.0005 && ausgeglichen(db), `§9 (${weg}) Zeile nach „ready" nicht zugelassen (${zb}); gebucht genau 25`);
+  const eigen = (sql: string): number => n(db, sql);
+  ok(zb !== 'OK' || (eigen("SELECT ROUND(COALESCE(SUM(CASE WHEN direction='DEBIT' THEN amount ELSE -amount END), 0), 3) FROM ledger_entries WHERE source_module = 'REPAIR_OWN_WORK'") === 0
+    && eigen("SELECT ROUND(COALESCE(SUM(amount), 0), 3) FROM ledger_entries WHERE source_module = 'REPAIR_OWN_WORK' AND direction = 'DEBIT' AND account = 'COGS'") === 25),
+    `§9 (${weg}) Platzhalter bei „ready" als eigene Arbeit gebucht (25) und beim Ersetzen genau zurückgenommen (netto 0)`);
+  // C) echte zusätzliche eigene Kosten bleiben: Internal 15 + Werkstatt 20 = 35.
+  const c = await anlegen(db, weg, { repairType: 'internal', internalCost: 15 });
+  await zeile(db, weg, c, WS);
+  ok(art(db, c) === 'hybrid' && kopf(db, c).internalCost === 15 && Math.abs(kostenJetzt(db, c) - 35) < 0.0005, `§9 (${weg}) echte eigene Kosten 15 + Werkstatt 20: 35, unangetastet`);
+  ergebnis['M-' + weg] = konten(db);
+}
+ok(ergebnis['M-lokal'] === ergebnis['M-fern'], `§9 Primary == PC2: dieselben Buchungssummen (${ergebnis['M-lokal']})`);
 
 // ══ §8 Verdrahtung ═══════════════════════════════════════════════════════════════════════════════
 {
