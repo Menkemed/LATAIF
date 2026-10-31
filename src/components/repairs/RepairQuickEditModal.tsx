@@ -19,7 +19,7 @@ import { AddMaterialModal, type MaterialLineInput } from '@/components/work-orde
 import { RepairStatusDialog, type RepairStatusStep } from '@/components/repairs/RepairStatusDialog';
 import { pickupKeptInvoiceRefused, saveRepairInvoice, saveRepairStatus } from '@/components/repairs/repair-status-save';
 import {
-  EMPTY_WORK_LINE, RepairWorkLineForm, RepairWorkSourceBadge, repairWorkSourceText, type WorkLineDraft, type WorkLineValues,
+  EMPTY_WORK_LINE, RepairTypeConflictNote, RepairWorkLineForm, RepairWorkSourceBadge, repairWorkSourceText, type WorkLineDraft, type WorkLineValues,
 } from '@/components/repairs/RepairWorkParts';
 import { useRepairStore } from '@/stores/repairStore';
 import { useSupplierStore } from '@/stores/supplierStore';
@@ -296,6 +296,7 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
                 <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{rep.repairNumber}</span>
                 <RepairWorkSourceBadge kind={quelle.kind} />
               </div>
+              <RepairTypeConflictNote ws={quelle} compact />
               <div style={{ fontSize: 12, color: '#4B5563', marginTop: 2 }}>
                 {customer ? `${customer.firstName} ${customer.lastName}`.trim() : '—'} · {repairItemDisplayName(rep) || '—'}
               </div>

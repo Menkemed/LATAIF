@@ -40,7 +40,7 @@ import { quickRepairNext, repairStatusFlow } from '@/core/repairs/repair-status-
 import {
   matchRepairWork, repairCostView, repairCreateWorkshopSplit, repairWorkSource, repairWorkTypeLabel, type RepairSourceFilter,
 } from '@/core/repairs/repair-work-source';
-import { RepairWorkSourceBadge, repairWorkSourceText } from '@/components/repairs/RepairWorkParts';
+import { RepairTypeConflictNote, RepairWorkSourceBadge, repairWorkSourceText } from '@/components/repairs/RepairWorkParts';
 import { matchRepairInvoice, repairInvoiceView, type RepairInvoiceFilter } from '@/core/repairs/repair-invoice-state';
 import { repairInvoiceDateSuggestion } from '@/core/repairs/repair-rules';
 import { usePermission } from '@/hooks/usePermission';
@@ -823,6 +823,7 @@ export function RepairList() {
             {/* Source / Workshop */}
             <div style={{ minWidth: 0 }}>
               <RepairWorkSourceBadge kind={quelle.kind} />
+              <RepairTypeConflictNote ws={quelle} compact />
               <div style={{ fontSize: 12, color: '#0F0F10', marginTop: 4, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                 {repairWorkSourceText(quelle, lieferantName)}
               </div>

@@ -120,8 +120,11 @@ Eine automatische Herabstufung ist nicht sicher:
   - Ohne Nachweis (Altbestand, eingetragene Kosten, von Hand geändert) bleibt die Reparatur „external“, der Betrag bleibt stehen und zählt weiter nicht. Im Protokoll steht `repairTypeKept: MIRROR`. Die Anzeige zeigt die eigene Arbeit trotzdem (Hybrid), die Kosten bleiben korrekt.
 - **Altgebühr im Kopf bleibt** (`repairHeaderFeeKept`, `repairCostParts(…, { headerFeeKept })`): Eine Gebühr im Kopf ohne Zeile gibt es nur im Altbestand.
   - Sie gilt weiter neben Material und eigener Arbeit und endet erst mit einer Arbeitszeile dieser Werkstatt. Nach „ready“ wird die Kopfbuchung dann um genau die Differenz nachgezogen: keine zweite Verbindlichkeit.
-  - Nicht zuordenbar und deshalb abgewiesen (`REPAIR_HEADER_FEE_OPEN`, nichts geändert): eine Arbeitszeile einer anderen Werkstatt und Material desselben Lieferanten, solange die Gebühr gilt.
+  - Material ist keine Arbeit und bleibt zugelassen, auch vom selben Lieferanten: Gebühr 25 + Ersatzteil 10 derselben Werkstatt = 35, mit zwei getrennten Ausgaben. Das Haus setzt dafür das Zeichen `headerFeeSeparate` in `material_details` (keine neue Spalte).
+  - Ohne dieses Zeichen stammt `workshop_supplier_id` aus der Materialzeile selbst (Verhalten bis v0.8.94): Dort entsteht keine Gebühr rückwirkend.
+  - Nicht zuordenbar und deshalb abgewiesen (`REPAIR_HEADER_FEE_OPEN`, nichts geändert): eine Arbeitszeile einer anderen Werkstatt, solange die Gebühr gilt.
   - Bestehende Reparaturen mit Zeilen ändern sich nicht: Ihr `workshop_supplier_id` stammt aus diesen Zeilen, deshalb greift die Regel dort nicht.
+- **Typkonflikt in der Anzeige** (`repairWorkSource.typeConflict`, `RepairTypeConflictNote`): Zeigen die Arbeitszeilen etwas anderes als die gespeicherte Art, stehen beide Aussagen da. Die Detailseite zeigt den kurzen Hinweis, Liste und Quick Edit „Saved type: …“ mit Tooltip, das Handy „(saved as …)“. Filter folgen weiter der tatsächlichen Arbeit. Kosten, Status und Buchungen ändert die Anzeige nicht.
 - **Unverändert**: echte eigene Kosten bei internal und hybrid, Rechnungen, VAT, Zahlungen, Status. Altbestand ändert sich nur bei einer neuen Zeilenänderung.
 - **Offen zur Entscheidung**:
   - External-Reparaturen ohne Nachweis, die eigene Arbeit bekommen, bleiben gespeichert „external“. Ob der Betrag echte eigene Kosten sind, entscheidet der Owner; er kann sie als eigene Arbeitszeile erfassen.

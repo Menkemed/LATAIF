@@ -69,7 +69,7 @@ import { hasSelectableWorkshop, NO_WORKSHOP_HINT, workshopOptions } from '@/core
 import { repairCostView, repairEstimateRole, repairWorkSource } from '@/core/repairs/repair-work-source';
 import { repairHeaderFeeKept } from '@/core/repairs/repair-cost';
 import {
-  EMPTY_WORK_LINE, RepairWorkLineForm, RepairWorkSourceBadge, repairWorkSourceText, type WorkLineDraft, type WorkLineValues,
+  EMPTY_WORK_LINE, RepairTypeConflictNote, RepairWorkLineForm, RepairWorkSourceBadge, repairWorkSourceText, type WorkLineDraft, type WorkLineValues,
 } from '@/components/repairs/RepairWorkParts';
 import { useSharedRead } from '@/core/data/shared-read';
 import { creditPaidFor } from '@/core/data/domain-reads';
@@ -884,6 +884,7 @@ export function RepairDetail() {
               <StatusDot status={repair.status} />
               <RepairWorkSourceBadge kind={quelle.kind} size={12} />
             </div>
+            <RepairTypeConflictNote ws={quelle} />
             <div style={{ fontSize: 12, color: '#4B5563', marginTop: 6 }} data-repair-work-source-text>
               {repairWorkSourceText(quelle, lieferantName)}
               <span style={{ color: '#6B7280' }}>
@@ -1087,6 +1088,7 @@ export function RepairDetail() {
                       <RepairWorkSourceBadge kind={quelle.kind} />
                       <span style={{ fontSize: 12, color: '#4B5563' }}>{repairWorkSourceText(quelle, lieferantName)}</span>
                     </div>
+                    <RepairTypeConflictNote ws={quelle} compact />
                     <p style={{ fontSize: 11, color: '#6B7280', marginTop: 4, lineHeight: 1.4 }}>
                       Follows the active work: own staff only = In-house, a workshop only (also a planned one) = External, both = Hybrid.
                       A Hybrid stays Hybrid, and a change that would alter costs or status steps is not made automatically — it is noted in the history.
@@ -1139,7 +1141,7 @@ export function RepairDetail() {
                 </div>
               ) : (
                 <>
-                  {renderField('Work Source', <RepairWorkSourceBadge kind={quelle.kind} />)}
+                  {renderField('Work Source', <><RepairWorkSourceBadge kind={quelle.kind} /><RepairTypeConflictNote ws={quelle} compact /></>)}
                   {/* REPAIR-REDESIGN — die Werkstätten aus den Arbeitszeilen, dem Plan und der Altzuordnung — nie ein
                       Materiallieferant. Fallback auf den alten Freitext, falls nie migriert. */}
                   {quelle.workshopIds.length > 0 ? renderField('Workshop / Goldsmith', (

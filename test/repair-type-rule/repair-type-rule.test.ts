@@ -645,13 +645,76 @@ for (const weg of WEGE) {
   const vorH = S(kopf(db, h));
   ok(await zeile(db, weg, h, { ...WS, supplierId: 'sup-2' }) === 'REPAIR_HEADER_FEE_OPEN' && S(kopf(db, h)) === vorH && zeilen(db, h).length === 0,
     `§9 (${weg}) Arbeitszeile einer ANDEREN Werkstatt: nicht zuordenbar, Nein, nichts geändert`);
-  let nein2 = '';
-  try { material(h, 'sup-1'); } catch (x) { nein2 = code(x); }
-  ok(nein2 === 'REPAIR_HEADER_FEE_OPEN' && S(kopf(db, h)) === vorH, `§9 (${weg}) Material derselben Werkstatt: nicht zuordenbar, Nein (${nein2})`);
   ok(ausgeglichen(db), `§9 (${weg}) Hauptbuch ausgeglichen`);
   ergebnis['M-' + weg] = konten(db);
 }
 ok(ergebnis['M-lokal'] === ergebnis['M-fern'], `§9 Primary == PC2: dieselben Buchungssummen (${ergebnis['M-lokal']} / ${ergebnis['M-fern']})`);
+
+// ══ §10 REPAIR COST FINAL CLOSURE — Material derselben Werkstatt; Typkonflikt in der Anzeige — Primary und PC2 ═══════
+{
+  const k = (ls: Array<Record<string, unknown>>) => costMod.repairHeaderFeeKept({ repairType: 'external', workshopSupplierId: 'w' } as never, ls as never);
+  ok(k([{ supplierId: 'w', materialKind: 'stone', materialDetails: { headerFeeSeparate: true } }]), '§10 Material neben der geltenden Gebühr: Gebühr bleibt');
+  ok(!k([{ supplierId: 'w', materialKind: 'stone' }]), '§10 ohne Zeichen stammt die Werkstatt aus der Materialzeile (bis v0.8.94): keine Gebühr, auch nicht rückwirkend');
+  ok(!k([{ supplierId: 'w', materialKind: 'stone', materialDetails: { headerFeeSeparate: true } }, { supplierId: 'w' }]), '§10 die Arbeitszeile derselben Werkstatt beendet die Gebühr');
+  const w = (r: Record<string, unknown>, ls: Array<Record<string, unknown>>) => ws.repairWorkSource(r as never, ls as never);
+  const extOwn = w({ repairType: 'external', workshopSupplierId: 'w' }, [{ status: 'OPEN', costAmount: 0 }, { status: 'OPEN', supplierId: 'w', costAmount: 20 }]);
+  ok(extOwn.kind === 'hybrid' && extOwn.storedKind === 'external' && extOwn.typeConflict, '§10 gespeichert External, Zeilen zeigen eigene + Werkstatt: Konflikt, beide Aussagen');
+  ok(!w({ repairType: 'external', workshopSupplierId: 'w' }, [{ status: 'OPEN', supplierId: 'w', costAmount: 20 }]).typeConflict
+    && !w({ repairType: 'hybrid' }, []).typeConflict && !w({ repairType: 'internal' }, []).typeConflict,
+    '§10 ohne Widerspruch kein Hinweis (auch nicht beim gespeicherten Hybrid ohne aktive Zeile)');
+}
+for (const weg of WEGE) {
+  const db = welt();
+  db.run("INSERT INTO suppliers (id, branch_id, name, active, is_workshop, created_at, updated_at) VALUES ('sup-2','branch-main','Werkstatt 2',1,1,?,?)", [NOW, NOW]);
+  const alt = (id: string, extra: Record<string, unknown> = {}): string => {
+    insert(db, 'repairs', { id, branch_id: 'branch-main', repair_number: 'ALT-' + id, customer_id: 'cust-1', repair_scope: 'CUSTOMER',
+      repair_type: 'external', workshop_supplier_id: 'sup-1', estimated_cost: 25, internal_cost: 25, issue_description: 'Alt', charge_to_customer: 70,
+      status: 'in_progress', tax_scheme: 'VAT_10', images: '[]', item_attributes: '{}', voucher_code: 'V' + id, revision: 1, received_at: NOW, created_at: NOW, updated_at: NOW, ...extra });
+    reload();
+    return id;
+  };
+  const teil = (id: string, cost = 10) => {
+    useRepairStore.getState().addRepairLine(id, { supplierId: 'sup-1', costAmount: cost, materialKind: 'stone', description: 'Ersatzteil' } as never);
+    reload();
+  };
+  // Das Beispiel des Auftrags: Workshop A, Gebühr 25, Ersatzteil 10 = 35 — bis zur Rechnung.
+  const a = alt('a-' + weg);
+  teil(a);
+  const sicht = ws.repairCostView({ ...kopf(db, a) } as never, useRepairStore.getState().repairLines.filter((l) => l.repairId === a) as never);
+  ok(kopf(db, a).workshopSupplierId === 'sup-1' && Math.abs(kostenJetzt(db, a) - 35) < 0.0005 && Math.abs(marge(db, a) - 35) < 0.0005 && sicht.total === 35 && sicht.fee === 25 && sicht.material === 10,
+    `§10 (${weg}) Gebühr 25 + Ersatzteil 10 derselben Werkstatt = 35, Marge 35, Anzeige gleich (${kostenJetzt(db, a)}/${marge(db, a)}/${S(sicht)})`);
+  ok(await status(db, weg, a, 'sent_to_workshop') === 'OK' && await status(db, weg, a, 'ready') === 'OK'
+    && Math.abs(ap(db, 'sup-1') - 35) < 0.0005 && Math.abs(ausgaben(db, a) - 35) < 0.0005 && ausgabenZahl(db, a) === 2 && ausgeglichen(db),
+    `§10 (${weg}) „ready": Gebühr und Ersatzteil je einmal gebucht, Werkstatt 35 (${ap(db, 'sup-1')}, ${ausgabenZahl(db, a)} Ausgaben), ausgeglichen`);
+  const inv = await abrechnen(db, weg, a);
+  ok(inv === 'OK' && n(db, 'SELECT purchase_price_snapshot FROM invoice_lines WHERE invoice_id = (SELECT invoice_id FROM repairs WHERE id = ?)', [a]) === 35 && ausgeglichen(db),
+    `§10 (${weg}) Rechnungseinstand 35 (${inv})`);
+  // Die Arbeitszeile derselben Werkstatt ersetzt die Gebühr; das Ersatzteil bleibt: 25 + 10, keine zweite Verbindlichkeit.
+  const b = alt('b-' + weg);
+  const vorB = ap(db, 'sup-1');
+  teil(b);
+  await status(db, weg, b, 'sent_to_workshop'); await status(db, weg, b, 'ready');
+  ok(await zeile(db, weg, b, { ...WS, costAmount: 25 }) === 'OK' && Math.abs(kostenJetzt(db, b) - 35) < 0.0005 && Math.abs(ap(db, 'sup-1') - vorB - 35) < 0.0005 && ausgeglichen(db),
+    `§10 (${weg}) Arbeitszeile ersetzt die Gebühr: weiter 35, Werkstatt +${ap(db, 'sup-1') - vorB} (nicht 60)`);
+  // Ersatzteil storniert: die Gebühr gilt weiter. Andere Werkstatt: bleibt abgewiesen.
+  const c = alt('c-' + weg);
+  teil(c);
+  ok(await storno(db, weg, c, zeilen(db, c)[0].id) === 'OK' && kopf(db, c).workshopSupplierId === 'sup-1' && Math.abs(kostenJetzt(db, c) - 25) < 0.0005, `§10 (${weg}) Ersatzteil storniert: Gebühr 25 bleibt`);
+  ok(await zeile(db, weg, c, { ...WS, supplierId: 'sup-2' }) === 'REPAIR_HEADER_FEE_OPEN', `§10 (${weg}) Arbeitszeile einer anderen Werkstatt: weiter abgewiesen`);
+  // Bis v0.8.94: Werkstatt im Kopf stammt aus der Materialzeile selbst — bleibt ohne Gebühr.
+  const d = alt('d-' + weg, { repair_type: 'hybrid', internal_cost: 0 });
+  db.run("INSERT INTO repair_lines (id, branch_id, repair_id, position, supplier_id, cost_amount, status, material_kind, created_at, updated_at) VALUES (?, 'branch-main', ?, 1, 'sup-1', 10, 'OPEN', 'stone', ?, ?)", ['l-' + d, d, NOW, NOW]);
+  reload();
+  ok(Math.abs(kostenJetzt(db, d) - 10) < 0.0005, `§10 (${weg}) Altfall Material bis v0.8.94: Kosten 10, keine rückwirkende Gebühr (${kostenJetzt(db, d)})`);
+  // Altbestand ohne Nachweis + eigene Arbeit: unverändert gespeichert, die Anzeige sagt beides.
+  const e = alt('e-' + weg);
+  await zeile(db, weg, e, OWN);
+  const q = ws.repairWorkSource(kopf(db, e), zeilen(db, e));
+  ok(art(db, e) === 'external' && kopf(db, e).internalCost === 25 && q.kind === 'hybrid' && q.typeConflict && q.storedKind === 'external' && Math.abs(kostenJetzt(db, e) - 25) < 0.0005,
+    `§10 (${weg}) Typkonflikt: gespeichert External, Zeilen Hybrid, Kosten und Betrag unverändert`);
+  ergebnis['C-' + weg] = konten(db);
+}
+ok(ergebnis['C-lokal'] === ergebnis['C-fern'], `§10 Primary == PC2: dieselben Buchungssummen (${ergebnis['C-lokal']} / ${ergebnis['C-fern']})`);
 
 // ══ §8 Verdrahtung ═══════════════════════════════════════════════════════════════════════════════
 {

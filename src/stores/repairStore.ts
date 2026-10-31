@@ -245,15 +245,28 @@ function applyRepairMirror(repairId: string, d: RepairTypeDecision, now: string)
 
 /**
  * Solange die Altgebühr im Kopf gilt, ersetzt sie nur eine Arbeitszeile DIESER Werkstatt. Eine Arbeitszeile einer anderen
- * Werkstatt (Ersatz oder Zusatzarbeit?) und Material desselben Lieferanten lassen sich nicht sicher zuordnen: nichts raten.
+ * Werkstatt (Ersatz oder Zusatzarbeit?) lässt sich nicht sicher zuordnen: nichts raten. Material ist keine Arbeit und
+ * bleibt zugelassen, auch vom selben Lieferanten (`headerFeeMaterialDetails`).
  */
 function assertHeaderFeeLine(feeWorkshop: string | null, supplierId?: string | null, materialKind?: string | null): void {
-  if (!feeWorkshop || !supplierId) return;
-  const arbeit = !materialKind || materialKind === 'labor';
-  if (arbeit ? supplierId !== feeWorkshop : supplierId === feeWorkshop) {
+  if (!feeWorkshop || !supplierId || supplierId === feeWorkshop) return;
+  if (!materialKind || materialKind === 'labor') {
     throw new RepairActionRejected('REPAIR_HEADER_FEE_OPEN',
       'this repair still carries the workshop fee in its header — add that workshop\'s work line first, it replaces the fee');
   }
+}
+
+/**
+ * REPAIR COST FINAL CLOSURE — das Zeichen `headerFeeSeparate` setzt nur das Haus: Material derselben Werkstatt NEBEN der
+ * geltenden Altgebühr bekommt es, jede andere Zeile nicht (auch wenn es von außen mitgeschickt würde).
+ */
+function headerFeeMaterialDetails(
+  details: RepairLine['materialDetails'], feeWorkshop: string | null, supplierId?: string | null, materialKind?: string | null,
+): RepairLine['materialDetails'] {
+  const { headerFeeSeparate: _ignoriert, ...rest } = details ?? {};
+  const material = !!materialKind && materialKind !== 'labor';
+  if (material && !!feeWorkshop && supplierId === feeWorkshop) return { ...rest, headerFeeSeparate: true };
+  return details ? rest : details;
 }
 
 /** Ein Konflikt (Kosten, Status, abgerechnet) wird nicht still übergangen: er steht im Protokoll der Reparatur. */
@@ -1413,7 +1426,8 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     const id = uuid();
     // v0.2.1 — Material-Lines (Diamond/Stone/Gold) bekommen material_kind +
     // material_details JSON. work_type wird 'material' wenn Material gesetzt ist.
-    const matJson = data.materialDetails ? JSON.stringify(data.materialDetails) : null;
+    const zeilenDetails = headerFeeMaterialDetails(data.materialDetails, feeKopf, data.supplierId, data.materialKind);
+    const matJson = zeilenDetails ? JSON.stringify(zeilenDetails) : null;
     db.run(
       `INSERT INTO repair_lines (id, branch_id, repair_id, position, supplier_id, work_type, description,
          cost_amount, expense_id, status, due_date, notes, material_kind, material_details, created_at, updated_at)
@@ -1525,6 +1539,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       supplierId: 'supplier_id', workType: 'work_type', description: 'description',
       costAmount: 'cost_amount', dueDate: 'due_date', notes: 'notes', status: 'status',
     };
+    // REPAIR COST FINAL CLOSURE — wird eine Materialzeile zum Lieferanten der geltenden Altgebühr, gilt dasselbe wie beim Anlegen.
+    if (data.supplierId !== undefined && !!feeKopf && data.supplierId === feeKopf && !!line.materialKind && line.materialKind !== 'labor') {
+      fields.push('material_details = ?');
+      params.push(JSON.stringify(headerFeeMaterialDetails(line.materialDetails, feeKopf, data.supplierId, line.materialKind)));
+    }
     for (const [k, v] of Object.entries(data)) {
       const col = map[k];
       if (col) { fields.push(`${col} = ?`); params.push(v === undefined ? null : v); }
@@ -1666,7 +1685,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // REPAIR COST FINAL SAFETY — galt VOR dieser Änderung die Altgebühr im Kopf, bleibt ihre Werkstatt, bis eine
     // Werkstatt-Arbeitszeile kommt. Dann endet die Gebühr (und mit ihr nach „ready" die Kopfbuchung, s. unten).
     const feeKopf = opts?.headerFeeWorkshopSupplierId ?? null;
-    const gebuehrBleibt = !!feeKopf && supplierIds.length === 0 && !lines.some((l) => l.supplierId === feeKopf);
+    const gebuehrBleibt = !!feeKopf && supplierIds.length === 0;
     const newSupplierId = gebuehrBleibt ? feeKopf : (supplierIds.length === 1 ? supplierIds[0] : null);
     // Margin-Inputs lesen (L-13).
     const currentRow = query(

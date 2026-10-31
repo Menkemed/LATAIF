@@ -934,11 +934,12 @@ const REPAIR_COLUMNS =
  */
 function repairWorkSummary(r: Row): CommandResult {
   const lines = rows(
-    'SELECT id, status, supplier_id, work_type, material_kind, cost_amount FROM repair_lines WHERE repair_id = ?',
+    'SELECT id, status, supplier_id, work_type, material_kind, material_details, cost_amount FROM repair_lines WHERE repair_id = ?',
     [str(r.id)],
   ).map((l) => ({
     id: str(l.id), status: str(l.status), supplierId: str(l.supplier_id) || null, workType: str(l.work_type) || null,
-    materialKind: str(l.material_kind) || null, costAmount: num(l.cost_amount),
+    materialKind: str(l.material_kind) || null, materialDetails: materialDetailsOf(l.material_details) as { headerFeeSeparate?: boolean } | null,
+    costAmount: num(l.cost_amount),
   }));
   const kopf = {
     repairType: str(r.repair_type), workshopSupplierId: str(r.workshop_supplier_id) || null,
@@ -951,6 +952,7 @@ function repairWorkSummary(r: Row): CommandResult {
   return {
     kind: ws.kind,
     label: REPAIR_WORK_SOURCE_LABEL[ws.kind],
+    savedLabel: ws.typeConflict ? REPAIR_WORK_SOURCE_LABEL[ws.storedKind] : null,
     workshops: ws.workshopIds.map((id) => ({ id, name: name(id), planned: id === ws.plannedWorkshopId })),
     workTypes: ws.entries.map((e) => e.workType).filter((t, i, a): t is NonNullable<typeof t> => !!t && a.indexOf(t) === i),
     workCost: cost.work,

@@ -1030,6 +1030,8 @@ export interface MaterialDetails {
   karat?: string;           // bei Gold-Material
   weightGrams?: number;     // bei Gold-Material
   supplierName?: string;    // Snapshot fuer Print (auch wenn supplier_id NULL)
+  /** REPAIR COST FINAL CLOSURE — Material der Werkstatt, deren Altgebühr im Kopf gilt: getrennt von der Gebühr. */
+  headerFeeSeparate?: boolean;
 }
 
 /**

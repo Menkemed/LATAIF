@@ -61,10 +61,14 @@ function openLineTotal(repairId: string): number {
 export function repairHeaderFeeKeptInDb(repairId: string): boolean {
   const r = query('SELECT repair_type, workshop_supplier_id FROM repairs WHERE id = ?', [repairId])[0];
   if (!r) return false;
-  const zeilen = query(`SELECT supplier_id, material_kind FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'`, [repairId]);
+  const zeilen = query(`SELECT supplier_id, material_kind, material_details FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'`, [repairId]);
   return repairHeaderFeeKept(
     { repairType: str(r.repair_type), workshopSupplierId: str(r.workshop_supplier_id) },
-    zeilen.map((l) => ({ supplierId: str(l.supplier_id), materialKind: str(l.material_kind) })),
+    zeilen.map((l) => {
+      let materialDetails: { headerFeeSeparate?: boolean } | null = null;
+      try { materialDetails = l.material_details ? JSON.parse(String(l.material_details)) : null; } catch { /* kein Zeichen */ }
+      return { supplierId: str(l.supplier_id), materialKind: str(l.material_kind), materialDetails };
+    }),
   );
 }
 

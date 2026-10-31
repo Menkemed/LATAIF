@@ -329,7 +329,7 @@
     items.forEach((it) => {
       const card = el('div', { class: 'card' });
       // REPAIR-REDESIGN — wer arbeitet (In-house / External workshop / Hybrid), fertig vom Primary (`repairs.list`).
-      const wer = it.work && it.work.label ? ' · ' + it.work.label : '';
+      const wer = it.work && it.work.label ? ' · ' + it.work.label + (it.work.savedLabel ? ' (saved as ' + it.work.savedLabel + ')' : '') : '';
       const b = el('button', { type: 'button', class: 'secondary', 'data-rp-work-source': (it.work && it.work.kind) || '' },
         it.repairNumber + ' · ' + (it.itemBrand || '') + ' ' + (it.itemModel || '') + ' · ' + it.status + wer);
       b.onclick = () => rpOpen(it.id);
@@ -381,7 +381,7 @@
     }
     $('rpHeadline').textContent = rep.repairNumber || 'Repair';
     $('rpSubline').textContent = (rep.itemBrand || '') + ' ' + (rep.itemModel || '')
-      + (rep.work && rep.work.label ? ' · ' + rep.work.label : '');
+      + (rep.work && rep.work.label ? ' · ' + rep.work.label + (rep.work.savedLabel ? ' (saved as ' + rep.work.savedLabel + ')' : '') : '');
     $('rpCustomerCard').classList.add('hidden');
     $('rpDiagnosisRow').classList.remove('hidden');
     $('rpSaveBtn').textContent = 'Save Changes';

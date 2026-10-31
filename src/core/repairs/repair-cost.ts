@@ -128,16 +128,22 @@ export function repairCostParts(
 
 /**
  * REPAIR COST FINAL SAFETY — gilt die Werkstatt-Gebühr im Kopf (Altbestand) neben offenen Zeilen weiter? Ja, solange die
- * Werkstatt im Kopf nicht aus diesen Zeilen stammt: keine Werkstatt-Arbeitszeile und keine Zeile desselben Lieferanten.
- * `workshop_supplier_id` kommt sonst immer aus den Zeilen; solche Reparaturen ändern sich hierdurch nicht.
+ * Werkstatt im Kopf nicht aus diesen Zeilen stammt: keine Werkstatt-Arbeitszeile.
+ * REPAIR COST FINAL CLOSURE — Material und Arbeit sind getrennt: Material derselben Werkstatt nimmt die Gebühr nicht weg,
+ * wenn es NEBEN der geltenden Gebühr erfasst wurde (`headerFeeSeparate`, gesetzt in `addRepairLine`). Ohne dieses Zeichen
+ * stammt die Werkstatt im Kopf aus der Materialzeile selbst (bis v0.8.94) — dort gab es nie eine Gebühr, und sie entsteht
+ * auch nicht rückwirkend. `workshop_supplier_id` kommt sonst immer aus den Zeilen; solche Reparaturen ändern sich nicht.
  */
 export function repairHeaderFeeKept(
   r: { repairType?: string | null; workshopSupplierId?: string | null },
-  openLines: ReadonlyArray<{ supplierId?: string | null; materialKind?: string | null }>,
+  openLines: ReadonlyArray<{ supplierId?: string | null; materialKind?: string | null; materialDetails?: { headerFeeSeparate?: boolean } | null }>,
 ): boolean {
   if ((r.repairType !== 'external' && r.repairType !== 'hybrid') || !r.workshopSupplierId || openLines.length === 0) return false;
-  return !openLines.some((l) => l.supplierId === r.workshopSupplierId
-    || (!!l.supplierId && (!l.materialKind || l.materialKind === 'labor')));
+  return !openLines.some((l) => {
+    if (!l.supplierId) return false;
+    if (!l.materialKind || l.materialKind === 'labor') return true;
+    return l.supplierId === r.workshopSupplierId && !l.materialDetails?.headerFeeSeparate;
+  });
 }
 
 // ── CENTRAL-C3H — die Kosten, die auf die RECHNUNGSZEILE einer Reparatur gehoeren ────────

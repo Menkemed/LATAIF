@@ -51,10 +51,15 @@ export interface RepairWorkLineInput {
   supplierId?: string | null;
   workType?: string | null;
   materialKind?: string | null;
+  materialDetails?: { headerFeeSeparate?: boolean } | null;
   costAmount?: number | null;
 }
 
 export interface RepairWorkSource {
+  /** REPAIR COST FINAL CLOSURE — die gespeicherte Art in derselben Sprache wie `kind`. */
+  storedKind: RepairWorkSourceKind;
+  /** Die Arbeit zeigt etwas anderes als die gespeicherte Art (`kind` ≠ `storedKind`) — zwei Aussagen, beide sichtbar. */
+  typeConflict: boolean;
   kind: RepairWorkSourceKind;
   inHouse: boolean;
   external: boolean;
@@ -122,7 +127,9 @@ export function repairWorkSource(r: RepairWorkSourceInput, lines: readonly Repai
   const kind: RepairWorkSourceKind = inHouse && external ? 'hybrid' : external ? 'external' : inHouse ? 'inhouse' : 'none';
   const inHouseWithoutLine = inHouse && !lineIn;
   const externalWithoutLine = external && lineShops.length === 0;
+  const storedKind: RepairWorkSourceKind = stored === 'external' ? 'external' : stored === 'hybrid' ? 'hybrid' : 'inhouse';
   return {
+    storedKind, typeConflict: kind !== 'none' && kind !== storedKind,
     kind, inHouse, external,
     workshopIds: uniq(entries.filter((e) => e.source === 'external' && e.supplierId).map((e) => e.supplierId as string)),
     plannedWorkshopId: planned,
@@ -135,6 +142,10 @@ export function repairWorkSource(r: RepairWorkSourceInput, lines: readonly Repai
     entries,
   };
 }
+
+/** Warum die gespeicherte Art nicht einfach der Arbeit folgt — kurz, für Detailseite und Tooltip. */
+export const REPAIR_TYPE_CONFLICT_HINT = 'The type was not changed automatically because older cost data on this repair is unclear. '
+  + 'Costs, status and bookings stay as they are. Record real own costs as an in-house work line.';
 
 export const REPAIR_WORK_SOURCE_LABEL: Record<RepairWorkSourceKind, string> = {
   inhouse: 'In-house',

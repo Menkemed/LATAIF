@@ -14,7 +14,7 @@ import { REPAIR_WORK_TYPES, type RepairWorkType } from '@/core/models/types';
 import { IN_HOUSE_LINE_NOTE } from '@/core/repairs/repair-line-view';
 import { hasSelectableWorkshop, NO_WORKSHOP_HINT, workshopOptions, type WorkshopCandidate } from '@/core/repairs/repair-workshop-choice';
 import {
-  REPAIR_LINE_COST_MESSAGE, REPAIR_WORK_SOURCE_LABEL, repairLineCostIssue, repairWorkTypeLabel,
+  REPAIR_LINE_COST_MESSAGE, REPAIR_TYPE_CONFLICT_HINT, REPAIR_WORK_SOURCE_LABEL, repairLineCostIssue, repairWorkTypeLabel,
   type RepairWorkSource, type RepairWorkSourceKind,
 } from '@/core/repairs/repair-work-source';
 
@@ -32,6 +32,29 @@ export function RepairWorkSourceBadge({ kind, size = 11 }: { kind: RepairWorkSou
       style={{ display: 'inline-block', fontSize: size, fontWeight: 600, color: c.fg, background: c.bg, borderRadius: 999, padding: '3px 10px', whiteSpace: 'nowrap' }}>
       {REPAIR_WORK_SOURCE_LABEL[kind]}
     </span>
+  );
+}
+
+/**
+ * REPAIR COST FINAL CLOSURE — zeigt die Arbeit etwas anderes als die gespeicherte Art (Altbestand mit unklaren Kosten),
+ * stehen beide Aussagen da: was gespeichert ist, was die Zeilen zeigen, und warum nicht automatisch umgestellt wurde.
+ */
+export function RepairTypeConflictNote({ ws, compact }: { ws: RepairWorkSource; compact?: boolean }) {
+  if (!ws.typeConflict) return null;
+  const saved = REPAIR_WORK_SOURCE_LABEL[ws.storedKind];
+  if (compact) {
+    return (
+      <div data-repair-type-conflict="compact" title={REPAIR_TYPE_CONFLICT_HINT}
+        style={{ fontSize: 10, fontWeight: 600, color: '#92400E', marginTop: 3 }}>
+        ⚠ Saved type: {saved}
+      </div>
+    );
+  }
+  return (
+    <div data-repair-type-conflict="full" role="note"
+      style={{ fontSize: 12, color: '#92400E', background: '#FEF3C7', border: '1px solid #F59E0B', borderRadius: 8, padding: '8px 10px', marginTop: 8, lineHeight: 1.45 }}>
+      <strong>Saved type: {saved} · Work lines show: {REPAIR_WORK_SOURCE_LABEL[ws.kind]}.</strong> {REPAIR_TYPE_CONFLICT_HINT}
+    </div>
   );
 }
 
