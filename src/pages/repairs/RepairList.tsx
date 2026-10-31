@@ -41,6 +41,7 @@ import {
   matchRepairWork, repairCostView, repairCreateWorkshopSplit, repairWorkSource, repairWorkTypeLabel, type RepairSourceFilter,
 } from '@/core/repairs/repair-work-source';
 import { RepairWorkSourceBadge, repairWorkSourceText } from '@/components/repairs/RepairWorkParts';
+import { matchRepairInvoice, repairInvoiceView, type RepairInvoiceFilter } from '@/core/repairs/repair-invoice-state';
 import { repairInvoiceDateSuggestion } from '@/core/repairs/repair-rules';
 import { usePermission } from '@/hooks/usePermission';
 import { RepairQuickEditModal } from '@/components/repairs/RepairQuickEditModal';
@@ -67,7 +68,14 @@ function fmtDate(iso: string | undefined): string {
 
 // REPAIR-REDESIGN — kompakt: Nummer (mit Datum und Gutschein), Kunde/Artikel, Problem/Arbeitsart, Quelle/Werkstatt,
 // Status (mit Zahlung), Kosten/Preis, Aktionen.
-const GRID = '28px minmax(0,0.9fr) minmax(0,1.4fr) minmax(0,1.5fr) minmax(0,1.3fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr)';
+// REPAIR-INVOICE-INDICATOR — dazu eine eigene Spalte „Invoice", getrennt vom Reparaturstatus.
+const GRID = '28px minmax(0,0.9fr) minmax(0,1.4fr) minmax(0,1.5fr) minmax(0,1.3fr) minmax(0,0.8fr) minmax(0,0.9fr) minmax(0,0.9fr) minmax(0,0.9fr)';
+
+const INVOICE_FILTERS: { value: RepairInvoiceFilter; label: string }[] = [
+  { value: '', label: 'All' },
+  { value: 'created', label: 'Invoice Created' },
+  { value: 'not_created', label: 'Not Created' },
+];
 
 const SOURCE_FILTERS: { value: RepairSourceFilter; label: string }[] = [
   { value: '', label: 'All' },
@@ -128,6 +136,8 @@ export function RepairList() {
   const [filterSource, setFilterSource] = useState<RepairSourceFilter>('');
   const [filterWorkshopId, setFilterWorkshopId] = useState('');
   const [issueFallback, setIssueFallback] = useState(true);
+  // REPAIR-INVOICE-INDICATOR — Rechnung erstellt / nicht erstellt, aus der echten Verknüpfung (`repairInvoiceView`).
+  const [filterInvoice, setFilterInvoice] = useState<RepairInvoiceFilter>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -346,7 +356,7 @@ export function RepairList() {
   }
 
   const arbeitsFilter = { workType: filterWorkType, source: filterSource, workshopId: filterWorkshopId, issueFallback };
-  const arbeitsFilterAktiv = !!(filterWorkType || filterSource || filterWorkshopId);
+  const arbeitsFilterAktiv = !!(filterWorkType || filterSource || filterWorkshopId || filterInvoice);
   const { filtered, ausIssue } = useMemo(() => {
     let r = repairs;
     if (searchQuery) {
@@ -358,6 +368,7 @@ export function RepairList() {
     if (filterStatus) r = r.filter(rep => rep.status === filterStatus);
     if (filterCustomerId) r = r.filter(rep => rep.customerId === filterCustomerId);
     if (filterStaffId) r = r.filter(rep => rep.staffId === filterStaffId);
+    if (filterInvoice) r = r.filter((rep) => matchRepairInvoice(repairInvoiceView(rep, invoices), filterInvoice));
     const viaIssue = new Set<string>();
     if (filterWorkType || filterSource || filterWorkshopId) {
       r = r.filter((rep) => {
@@ -374,7 +385,9 @@ export function RepairList() {
     });
     return { filtered: sorted, ausIssue: viaIssue };
   }, [repairs, searchQuery, filterStatus, filterCustomerId, filterStaffId, sortDate, customers,
-    filterWorkType, filterSource, filterWorkshopId, issueFallback, offeneZeilen]);
+    filterWorkType, filterSource, filterWorkshopId, issueFallback, offeneZeilen, filterInvoice, invoices]);
+  const anzahlRechnung = (f: RepairInvoiceFilter): number =>
+    repairs.filter((rep) => matchRepairInvoice(repairInvoiceView(rep, invoices), f)).length;
 
   // Wie viele Reparaturen jede Wahl träfe — mit den übrigen Arbeitsfiltern, ohne Suche und Status (die zählen extra).
   const anzahl = (f: Partial<typeof arbeitsFilter>): number =>
@@ -387,7 +400,7 @@ export function RepairList() {
     return [...ids].map((id) => ({ id, name: suppliers.find((s) => s.id === id)?.name || 'Supplier' }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }, [repairs, offeneZeilen, suppliers]);
-  const arbeitsFilterZuruecksetzen = () => { setFilterWorkType(''); setFilterSource(''); setFilterWorkshopId(''); setIssueFallback(true); };
+  const arbeitsFilterZuruecksetzen = () => { setFilterWorkType(''); setFilterSource(''); setFilterWorkshopId(''); setIssueFallback(true); setFilterInvoice(''); };
 
   function openNew() {
     setForm({ repairScope: 'CUSTOMER', repairType: 'internal', taxScheme: 'VAT_10', itemAttributes: {} });
@@ -613,6 +626,23 @@ export function RepairList() {
       {/* REPAIR-REDESIGN — Arbeitsart, Quelle und Werkstatt. Arbeitsart und Werkstatt müssen an DERSELBEN Beteiligung
           zusammenkommen; „Hybrid" ist die ganze Reparatur. Ältere Reparaturen ohne Arbeitszeile auf Wunsch über ihr Issue. */}
       <div style={{ marginBottom: 14, padding: '12px 14px', border: '1px solid #E5E9EE', borderRadius: 12, background: '#FFFFFF', display: 'flex', flexDirection: 'column', gap: 10 }} data-repair-work-filters>
+        {/* REPAIR-INVOICE-INDICATOR — eigener Filter, unabhängig vom Reparaturstatus. */}
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-overline" style={{ width: 96 }}>INVOICE</span>
+          {INVOICE_FILTERS.map((f) => {
+            const on = filterInvoice === f.value;
+            return (
+              <button key={f.value || 'all'} type="button" onClick={() => setFilterInvoice(f.value)} aria-pressed={on} data-repair-filter-invoice={f.value || 'all'}
+                className="cursor-pointer" style={{
+                  padding: '5px 11px', fontSize: 11, borderRadius: 999, fontWeight: on ? 600 : 500,
+                  border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`, color: on ? '#FFFFFF' : '#0F0F10', background: on ? '#0F0F10' : '#FFFFFF',
+                }}>
+                {f.label}
+                <span style={{ marginLeft: 6, color: on ? '#E5E9EE' : '#4B5563' }}>{anzahlRechnung(f.value)}</span>
+              </button>
+            );
+          })}
+        </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-overline" style={{ width: 96 }}>WORK TYPE</span>
           {(['', ...REPAIR_WORK_TYPES] as Array<RepairWorkType | ''>).map((t) => {
@@ -662,7 +692,7 @@ export function RepairList() {
           </label>
           {arbeitsFilterAktiv && (
             <button type="button" onClick={arbeitsFilterZuruecksetzen} className="cursor-pointer"
-              style={{ fontSize: 11, color: '#5B3DCC', background: 'none', border: 'none', padding: '4px 8px' }}>Reset work filters</button>
+              style={{ fontSize: 11, color: '#5B3DCC', background: 'none', border: 'none', padding: '4px 8px' }}>Reset filters</button>
           )}
         </div>
       </div>
@@ -675,6 +705,7 @@ export function RepairList() {
         <span className="text-overline">ISSUE / WORK TYPE</span>
         <span className="text-overline">SOURCE / WORKSHOP</span>
         <span className="text-overline">STATUS</span>
+        <span className="text-overline">INVOICE</span>
         <span className="text-overline" style={{ textAlign: 'right' }}>COST / CHARGE</span>
         <span className="text-overline" style={{ textAlign: 'right' }}>ACTION</span>
       </div>
@@ -708,6 +739,7 @@ export function RepairList() {
         const quelle = repairWorkSource(rep, zeilen);
         const kosten = repairCostView(rep, zeilen);
         const arten = quelle.entries.map((e) => e.workType).filter((t, i, a): t is RepairWorkType => !!t && a.indexOf(t) === i);
+        const rechnung = repairInvoiceView(rep, invoices);
         const materialLieferanten = zeilen.filter((l) => l.materialKind && l.supplierId).map((l) => l.supplierId as string)
           .filter((x, i, a) => a.indexOf(x) === i && !quelle.workshopIds.includes(x));
 
@@ -812,6 +844,27 @@ export function RepairList() {
                 <span style={{ fontSize: 10, fontWeight: 500, color: payStyle.fg }}>{payStyle.label}</span>
               ) : (
                 <span style={{ fontSize: 10, color: '#9CA3AF' }}>—</span>
+              )}
+            </div>
+
+            {/* REPAIR-INVOICE-INDICATOR — Rechnung erstellt (grün, öffnet die Rechnung) oder nicht; getrennt vom Status. */}
+            <div style={{ minWidth: 0 }} data-repair-invoice-state={rechnung.state}>
+              {rechnung.created ? (
+                <button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/invoices/${rechnung.invoiceId}`); }}
+                  title={`Open invoice ${rechnung.invoiceNumber ?? ''}`.trim()} data-repair-invoice-open={rechnung.invoiceId}
+                  className="cursor-pointer" style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: 1, padding: 0, background: 'none', border: 'none', textAlign: 'left' }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: '#15803D' }}>✓ {rechnung.label}</span>
+                  {rechnung.invoiceNumber && <span className="font-mono" style={{ fontSize: 10, color: '#4B5563', textDecoration: 'underline' }}>{rechnung.invoiceNumber}</span>}
+                </button>
+              ) : rechnung.state === 'cancelled' ? (
+                <button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/invoices/${rechnung.invoiceId}`); }}
+                  title="This repair's invoice was cancelled" data-repair-invoice-open={rechnung.invoiceId}
+                  className="cursor-pointer" style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: 1, padding: 0, background: 'none', border: 'none', textAlign: 'left' }}>
+                  <span style={{ fontSize: 11, color: '#B91C1C' }}>{rechnung.label}</span>
+                  {rechnung.invoiceNumber && <span className="font-mono" style={{ fontSize: 10, color: '#4B5563', textDecoration: 'line-through' }}>{rechnung.invoiceNumber}</span>}
+                </button>
+              ) : (
+                <span style={{ fontSize: 11, color: '#9CA3AF' }}>{rechnung.label}</span>
               )}
             </div>
 

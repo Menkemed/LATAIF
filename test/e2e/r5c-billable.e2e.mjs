@@ -430,6 +430,60 @@ try {
   const c = (await kommandos(client)).filter((x) => x.op === 'repairs.create_invoice');
   ok(c.length === 0, 'EINMAL auf den Seiten danach wurde nichts mehr geschickt');
 
+  // ── 3a) REPAIR-INVOICE-INDICATOR — Rechnungsanzeige und -filter der Liste, PC2 und Primary ──
+  const zeileVon = (nr) => `[...document.querySelectorAll('div.cursor-pointer')].find(d=>d.style&&d.style.gridTemplateColumns&&d.textContent.includes(${S(nr)}))`;
+  const anzeige = (c, nr) => c.ev(
+    `const row=${zeileVon(nr)}; if(!row) return 'KEINE-ZEILE'; const z=row.querySelector('[data-repair-invoice-state]'); if(!z) return 'KEINE-ANZEIGE';`
+    + `const o=z.querySelector('[data-repair-invoice-open]');`
+    + `return z.getAttribute('data-repair-invoice-state') + '|' + (o ? o.getAttribute('data-repair-invoice-open') : '') + '|' + z.textContent.trim();`);
+  const sichtbar = (c) => c.ev(`return [...document.querySelectorAll('div.cursor-pointer')].filter(d=>d.style&&d.style.gridTemplateColumns)`
+    + `.map(d=>(d.textContent.match(/BL-000\\d/)||[''])[0]).filter(Boolean).sort().join(',');`);
+  const chip = (c, f) => c.ev(`const b=document.querySelector('[data-repair-filter-invoice=${S(f)}]'); return b ? b.textContent.trim() : 'KEIN-CHIP';`);
+  const BL = dbQ(BIZ_DB, "SELECT r.repair_number AS nr, COALESCE(r.invoice_id,'') AS inv, COALESCE(i.status,'') AS st, COALESCE(i.invoice_number,'') AS num "
+    + "FROM repairs r LEFT JOIN invoices i ON i.id = r.invoice_id WHERE r.repair_number LIKE 'BL-000%' ORDER BY r.repair_number");
+  const gilt = (r) => !!r.inv && !!r.st && r.st !== 'CANCELLED';
+  const sollMit = BL.filter(gilt).map((r) => r.nr).join(',');
+  const sollOhne = BL.filter((r) => !gilt(r)).map((r) => r.nr).join(',');
+  const alleMit = Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM repairs r JOIN invoices i ON i.id = r.invoice_id WHERE i.status <> 'CANCELLED'")[0]?.n);
+  ok(sollMit === 'BL-0001,BL-0002,BL-0006,BL-0007' && sollOhne === 'BL-0003,BL-0004,BL-0005',
+    `INDIKATOR Ausgangslage: vier mit, drei ohne Rechnung (${sollMit} / ${sollOhne})`);
+  async function indikator(wer, c) {
+    if (!(await warteBis(c, "document.body.innerText.includes('BL-0007') && !!document.querySelector('[data-repair-invoice-state]')", 30000))) {
+      ok(false, `INDIKATOR ${wer}: die Liste zeigt keine Rechnungsspalte`); return;
+    }
+    for (const r of BL) {
+      const a = await anzeige(c, r.nr);
+      ok(r.inv ? a.startsWith(`created|${r.inv}|✓ Invoice created`) && a.endsWith(r.num) && r.num !== '' : a === 'none||Not created',
+        `INDIKATOR ${wer} ${r.nr}: ${r.inv ? `✓ Invoice created ${r.num}` : 'Not created'} (${a})`);
+    }
+    ok(await chip(c, 'created') === `Invoice Created${alleMit}`, `INDIKATOR ${wer} Zähler „Invoice Created" ${alleMit} (${await chip(c, 'created')})`);
+    await click(c, '[data-repair-filter-invoice="created"]'); await sleep(400);
+    const mit = await sichtbar(c);
+    await click(c, '[data-repair-filter-invoice="not_created"]'); await sleep(400);
+    const ohne = await sichtbar(c);
+    ok(mit === sollMit && ohne === sollOhne, `INDIKATOR ${wer} Filter Invoice Created / Not Created (${mit} / ${ohne})`);
+    // UND mit dem Statusfilter: „Ready" + Not Created = keine BL-Zeile, „Ready" + Created = die beiden fertigen mit Rechnung.
+    await clickText(c, 'Ready'); await sleep(400);
+    const bereitOhne = await sichtbar(c);
+    await click(c, '[data-repair-filter-invoice="created"]'); await sleep(400);
+    const bereitMit = await sichtbar(c);
+    ok(bereitOhne === '' && bereitMit === 'BL-0001,BL-0006', `INDIKATOR ${wer} zusammen mit Status „Ready" (Not Created: ${bereitOhne || 'leer'} / Created: ${bereitMit})`);
+    await clickText(c, 'All'); await click(c, '[data-repair-filter-invoice="all"]'); await sleep(400);
+    ok(await sichtbar(c) === 'BL-0001,BL-0002,BL-0003,BL-0004,BL-0005,BL-0006,BL-0007', `INDIKATOR ${wer} „All": wieder alle sieben`);
+    // Klick auf die Anzeige öffnet die Rechnung (nicht die Reparatur).
+    const r1 = BL.find((r) => r.nr === 'BL-0002');
+    await c.ev(`const row=${zeileVon('BL-0002')}; row.querySelector('[data-repair-invoice-open]').click(); return 1;`);
+    ok(await warteBis(c, `location.pathname === ${S('/invoices/' + r1.inv)} && document.body.innerText.includes(${S(r1.num)})`, 20000),
+      `INDIKATOR ${wer} Klick öffnet die Rechnung ${r1.num}`);
+  }
+  client = await lade(client, '/repairs');
+  await indikator('PC2', client);
+  await geh(primary, '/repairs');
+  await indikator('Primary', primary);
+  ok(Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM invoices WHERE notes LIKE '%BL-000%'")[0]?.n) === 4
+    && (await kommandos(client)).filter((x) => /^(repairs|invoices|payments)\./.test(String(x.op))).length === 0,
+    'INDIKATOR Anzeige und Filter schicken nichts und legen keine Rechnung an');
+
   // ── 3b) v0.8.94 Quick Edit aus der Liste — PC2 und Primary ────────────
   const rep = (id) => dbQ(BIZ_DB, 'SELECT * FROM repairs WHERE id = ?', [id])[0] || {};
   const offeneZeilen = (id) => dbQ(BIZ_DB, "SELECT * FROM repair_lines WHERE repair_id = ? AND status = 'OPEN'", [id]);
