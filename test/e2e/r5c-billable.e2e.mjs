@@ -196,6 +196,8 @@ const REP = [
 /** v0.8.94 — Quick Edit: eigene Reparaturen (Nummern ohne „BL-000", damit die Zählungen oben unberührt bleiben). */
 const TAG = (d) => new Date(Date.now() - d * 86400000).toISOString().slice(0, 10);
 const QREP = [['bq-rep-1', 'BQ-0001', 'ready'], ['bq-rep-2', 'BQ-0002', 'ready'], ['bq-rep-3', 'BQ-0003', 'ready']];
+/** REPAIR-INVOICE-INDICATOR — Sonderfälle der Rechnungsanzeige: verwaiste Verknüpfung und Rechnungsentwurf. */
+const XREP = [['bx-rep-1', 'BX-0001', 'picked_up', 'bx-inv-gibt-es-nicht'], ['bx-rep-2', 'BX-0002', 'ready', 'bx-inv-entwurf']];
 function seed() {
   const db = new DatabaseSync(BIZ_DB);
   try {
@@ -208,6 +210,14 @@ function seed() {
     // v0.8.94 — die Quick-Edit-Reparaturen (nach dem Kunden, auf den sie zeigen).
     for (const [id, nr, status] of QREP) {
       insert(db, 'repairs', { id, branch_id, repair_number: nr, customer_id: 'bl-kunde', item_brand: 'Omega', item_model: 'Seamaster', issue_description: 'Quick ' + nr, repair_type: 'internal', internal_cost: 0, charge_to_customer: 50, margin: 50, tax_scheme: 'VAT_10', status, received_at: `${TAG(10)}T12:00:00.000Z`, completed_at: now, voucher_code: 'Q' + nr.replace(/\D/g, '').padStart(7, '0'), images: '[]', item_attributes: '{}', repair_scope: 'CUSTOMER', revision: 1, created_at: now, updated_at: now });
+    }
+    // REPAIR-INVOICE-INDICATOR — ein Rechnungsentwurf (ohne Zeilen, ohne Buchung) und eine Verknüpfung ins Leere.
+    insert(db, 'invoices', { id: 'bx-inv-entwurf', branch_id, invoice_number: 'PINV-BX-0001', customer_id: 'bl-kunde', status: 'DRAFT', net_amount: 40, vat_amount: 0, gross_amount: 40, paid_amount: 0, created_at: now, updated_at: now });
+    // Die App selbst prüft keine Fremdschlüssel (sql.js ohne PRAGMA foreign_keys) — so entsteht eine verwaiste
+    // invoice_id im Bestand; node:sqlite prüft sie, deshalb hier wie dort ausgeschaltet.
+    db.exec('PRAGMA foreign_keys = OFF');
+    for (const [id, nr, status, invoice_id] of XREP) {
+      insert(db, 'repairs', { id, branch_id, repair_number: nr, customer_id: 'bl-kunde', item_brand: 'Rolex', item_model: 'Datejust', issue_description: 'Sonderfall ' + nr, repair_type: 'internal', internal_cost: 0, charge_to_customer: 40, margin: 40, tax_scheme: 'VAT_10', status, invoice_id, received_at: now, completed_at: now, picked_up_at: status === 'picked_up' ? now : null, voucher_code: 'X' + nr.replace(/\D/g, '').padStart(7, '0'), images: '[]', item_attributes: '{}', repair_scope: 'CUSTOMER', revision: 1, created_at: now, updated_at: now });
     }
   } finally { try { db.close(); } catch { /* zu */ } }
 }
@@ -437,25 +447,30 @@ try {
     + `const o=z.querySelector('[data-repair-invoice-open]');`
     + `return z.getAttribute('data-repair-invoice-state') + '|' + (o ? o.getAttribute('data-repair-invoice-open') : '') + '|' + z.textContent.trim();`);
   const sichtbar = (c) => c.ev(`return [...document.querySelectorAll('div.cursor-pointer')].filter(d=>d.style&&d.style.gridTemplateColumns)`
-    + `.map(d=>(d.textContent.match(/BL-000\\d/)||[''])[0]).filter(Boolean).sort().join(',');`);
+    + `.map(d=>(d.textContent.match(/B[LX]-000\\d/)||[''])[0]).filter(Boolean).sort().join(',');`);
   const chip = (c, f) => c.ev(`const b=document.querySelector('[data-repair-filter-invoice=${S(f)}]'); return b ? b.textContent.trim() : 'KEIN-CHIP';`);
   const BL = dbQ(BIZ_DB, "SELECT r.repair_number AS nr, COALESCE(r.invoice_id,'') AS inv, COALESCE(i.status,'') AS st, COALESCE(i.invoice_number,'') AS num "
-    + "FROM repairs r LEFT JOIN invoices i ON i.id = r.invoice_id WHERE r.repair_number LIKE 'BL-000%' ORDER BY r.repair_number");
+    + "FROM repairs r LEFT JOIN invoices i ON i.id = r.invoice_id WHERE r.repair_number LIKE 'BL-000%' OR r.repair_number LIKE 'BX-000%' ORDER BY r.repair_number");
   const gilt = (r) => !!r.inv && !!r.st && r.st !== 'CANCELLED';
   const sollMit = BL.filter(gilt).map((r) => r.nr).join(',');
   const sollOhne = BL.filter((r) => !gilt(r)).map((r) => r.nr).join(',');
   const alleMit = Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM repairs r JOIN invoices i ON i.id = r.invoice_id WHERE i.status <> 'CANCELLED'")[0]?.n);
-  ok(sollMit === 'BL-0001,BL-0002,BL-0006,BL-0007' && sollOhne === 'BL-0003,BL-0004,BL-0005',
-    `INDIKATOR Ausgangslage: vier mit, drei ohne Rechnung (${sollMit} / ${sollOhne})`);
+  ok(sollMit === 'BL-0001,BL-0002,BL-0006,BL-0007,BX-0002' && sollOhne === 'BL-0003,BL-0004,BL-0005,BX-0001',
+    `INDIKATOR Ausgangslage: vier mit Rechnung + ein Entwurf, drei ohne + eine verwaiste Verknüpfung (${sollMit} / ${sollOhne})`);
   async function indikator(wer, c) {
     if (!(await warteBis(c, "document.body.innerText.includes('BL-0007') && !!document.querySelector('[data-repair-invoice-state]')", 30000))) {
       ok(false, `INDIKATOR ${wer}: die Liste zeigt keine Rechnungsspalte`); return;
     }
     for (const r of BL) {
       const a = await anzeige(c, r.nr);
-      ok(r.inv ? a.startsWith(`created|${r.inv}|✓ Invoice created`) && a.endsWith(r.num) && r.num !== '' : a === 'none||Not created',
-        `INDIKATOR ${wer} ${r.nr}: ${r.inv ? `✓ Invoice created ${r.num}` : 'Not created'} (${a})`);
+      const soll = !r.inv ? 'none||Not created'
+        : !r.st ? 'missing||⚠ Invoice not foundData problem'
+          : r.st === 'DRAFT' ? `draft|${r.inv}|Invoice Draft${r.num}` : null;
+      ok(soll ? a === soll : a.startsWith(`created|${r.inv}|✓ Invoice created`) && a.endsWith(r.num) && r.num !== '',
+        `INDIKATOR ${wer} ${r.nr}: ${soll ?? `✓ Invoice created ${r.num}`} (${a})`);
     }
+    ok(await c.ev(`const row=${zeileVon('BX-0001')}; return !!(row && row.querySelector('[data-repair-invoice-problem]') && !row.querySelector('[data-repair-invoice-open]'));`),
+      `INDIKATOR ${wer} BX-0001: als Datenproblem markiert, nichts zum Öffnen`);
     ok(await chip(c, 'created') === `Invoice Created${alleMit}`, `INDIKATOR ${wer} Zähler „Invoice Created" ${alleMit} (${await chip(c, 'created')})`);
     await click(c, '[data-repair-filter-invoice="created"]'); await sleep(400);
     const mit = await sichtbar(c);
@@ -467,9 +482,9 @@ try {
     const bereitOhne = await sichtbar(c);
     await click(c, '[data-repair-filter-invoice="created"]'); await sleep(400);
     const bereitMit = await sichtbar(c);
-    ok(bereitOhne === '' && bereitMit === 'BL-0001,BL-0006', `INDIKATOR ${wer} zusammen mit Status „Ready" (Not Created: ${bereitOhne || 'leer'} / Created: ${bereitMit})`);
+    ok(bereitOhne === '' && bereitMit === 'BL-0001,BL-0006,BX-0002', `INDIKATOR ${wer} zusammen mit Status „Ready" (Not Created: ${bereitOhne || 'leer'} / Created: ${bereitMit})`);
     await clickText(c, 'All'); await click(c, '[data-repair-filter-invoice="all"]'); await sleep(400);
-    ok(await sichtbar(c) === 'BL-0001,BL-0002,BL-0003,BL-0004,BL-0005,BL-0006,BL-0007', `INDIKATOR ${wer} „All": wieder alle sieben`);
+    ok(await sichtbar(c) === 'BL-0001,BL-0002,BL-0003,BL-0004,BL-0005,BL-0006,BL-0007,BX-0001,BX-0002', `INDIKATOR ${wer} „All": wieder alle neun`);
     // Klick auf die Anzeige öffnet die Rechnung (nicht die Reparatur).
     const r1 = BL.find((r) => r.nr === 'BL-0002');
     await c.ev(`const row=${zeileVon('BL-0002')}; row.querySelector('[data-repair-invoice-open]').click(); return 1;`);
@@ -481,6 +496,8 @@ try {
   await geh(primary, '/repairs');
   await indikator('Primary', primary);
   ok(Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM invoices WHERE notes LIKE '%BL-000%'")[0]?.n) === 4
+    && dbQ(BIZ_DB, "SELECT status FROM invoices WHERE id = 'bx-inv-entwurf'")[0]?.status === 'DRAFT'
+    && dbQ(BIZ_DB, "SELECT invoice_id FROM repairs WHERE id = 'bx-rep-1'")[0]?.invoice_id === 'bx-inv-gibt-es-nicht'
     && (await kommandos(client)).filter((x) => /^(repairs|invoices|payments)\./.test(String(x.op))).length === 0,
     'INDIKATOR Anzeige und Filter schicken nichts und legen keine Rechnung an');
 

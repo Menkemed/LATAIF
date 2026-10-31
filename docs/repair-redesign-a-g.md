@@ -75,3 +75,19 @@ Eine automatische Herabstufung ist nicht sicher:
 
 - Neue Spalte `repairs.planned_workshop_supplier_id`: Migration auf einer Produktionskopie, wiederholter Start, Backup/Restore über die App.
 - `sync-business-schema.json` ist geändert; der Rust-Sync-Server bindet sie ein, deshalb ist ein Neubau nötig.
+
+## Befund REP-2026-00002 (31.10., Produktionskopie, nur gelesen)
+
+- **Angelegt** am 27.10. 15:43 als `internal`, Status `received`. Belegt durch den ersten Eintrag in `sync_changelog`, der Typ war die Vorgabe des Anlegefensters.
+- **15:49:28**: Eine Arbeitszeile der Werkstatt „Watch Repair Safruddeen“ (Service, 20.000) kommt dazu. In derselben Millisekunde setzt `recomputeRepairAggregates` den Typ auf `hybrid` und trägt die Werkstatt ein. Das Audit nennt das `recomputedFromLines`.
+  - Ursache ist die Regel „internal + erste Werkstattzeile → hybrid“, die es seit v0.7.6 gibt. Der Owner hat den Typ nicht gewählt.
+  - Um 15:50:59 hat das Bearbeiten-Fenster den schon gesetzten Typ nur mitgespeichert.
+- **Wirkung**: keine fachliche.
+  - `internal_cost` ist 0, `estimated_cost` leer. Also gilt Summe = Zeile = 20.000, egal ob hybrid, external oder internal mit Zeile.
+  - Rechnung SRINV-2026-000001 ist FINAL, 30.000 bezahlt, Einstand 20. Hauptbuch: AR/REVENUE 30, COGS 20, AP 20 (EXP-2026-000003 offen).
+  - Der Schritt „Sent to workshop“ (28.10.) gibt es bei hybrid und bei external gleich.
+  - Falsch ist nur die Bezeichnung „Hybrid“.
+- **Die Regel besteht weiter.** Im Anlegefenster ist „In-house“ vorgewählt. Kommt danach eine Werkstattzeile dazu, wird die Reparatur wieder hybrid.
+- **Vorschlag zur Freigabe**:
+  1. Code: „internal + erste Werkstatt-Arbeitszeile“ wird `external` statt `hybrid`, solange es keine eigene Arbeitszeile gibt und `internal_cost` 0 ist. Gibt es eigene Arbeit oder eigene Kosten, bleibt es hybrid. Statusweg und Summe bleiben in diesem Fall gleich. Vor dem Umsetzen nachweisen: Storno der Zeile, späteres Bearbeiten (`internalCostOnEdit`), Kopfkosten bei „ready“.
+  2. Daten: REP-2026-00002 `repair_type` hybrid → external. Kosten- und statusneutral (siehe oben), nur mit Sicherung und Audit-Eintrag und nur auf gesonderte Freigabe.

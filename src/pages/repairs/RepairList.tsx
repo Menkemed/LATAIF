@@ -847,15 +847,29 @@ export function RepairList() {
               )}
             </div>
 
-            {/* REPAIR-INVOICE-INDICATOR — Rechnung erstellt (grün, öffnet die Rechnung) oder nicht; getrennt vom Status. */}
+            {/* REPAIR-INVOICE-INDICATOR — Rechnung erstellt (grün, öffnet die Rechnung), Entwurf (neutral), storniert,
+                Datenproblem oder nicht erstellt; getrennt vom Status. */}
             <div style={{ minWidth: 0 }} data-repair-invoice-state={rechnung.state}>
-              {rechnung.created ? (
+              {rechnung.state === 'created' ? (
                 <button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/invoices/${rechnung.invoiceId}`); }}
                   title={`Open invoice ${rechnung.invoiceNumber ?? ''}`.trim()} data-repair-invoice-open={rechnung.invoiceId}
                   className="cursor-pointer" style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: 1, padding: 0, background: 'none', border: 'none', textAlign: 'left' }}>
                   <span style={{ fontSize: 11, fontWeight: 600, color: '#15803D' }}>✓ {rechnung.label}</span>
                   {rechnung.invoiceNumber && <span className="font-mono" style={{ fontSize: 10, color: '#4B5563', textDecoration: 'underline' }}>{rechnung.invoiceNumber}</span>}
                 </button>
+              ) : rechnung.state === 'draft' ? (
+                <button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/invoices/${rechnung.invoiceId}`); }}
+                  title={`Open draft invoice ${rechnung.invoiceNumber ?? ''}`.trim()} data-repair-invoice-open={rechnung.invoiceId}
+                  className="cursor-pointer" style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: 1, padding: 0, background: 'none', border: 'none', textAlign: 'left' }}>
+                  <span style={{ fontSize: 11, fontWeight: 500, color: '#4B5563' }}>{rechnung.label}</span>
+                  {rechnung.invoiceNumber && <span className="font-mono" style={{ fontSize: 10, color: '#6B7280', textDecoration: 'underline' }}>{rechnung.invoiceNumber}</span>}
+                </button>
+              ) : rechnung.state === 'missing' ? (
+                <span title="Data problem: this repair is linked to an invoice that does not exist. Nothing was changed — please check before invoicing."
+                  data-repair-invoice-problem style={{ display: 'inline-flex', flexDirection: 'column', alignItems: 'flex-start', gap: 1, padding: '2px 6px', borderRadius: 6, background: '#FEF3C7', border: '1px solid #F59E0B' }}>
+                  <span style={{ fontSize: 11, fontWeight: 600, color: '#92400E' }}>⚠ {rechnung.label}</span>
+                  <span style={{ fontSize: 10, color: '#92400E' }}>Data problem</span>
+                </span>
               ) : rechnung.state === 'cancelled' ? (
                 <button type="button" onClick={(e) => { e.stopPropagation(); navigate(`/invoices/${rechnung.invoiceId}`); }}
                   title="This repair's invoice was cancelled" data-repair-invoice-open={rechnung.invoiceId}

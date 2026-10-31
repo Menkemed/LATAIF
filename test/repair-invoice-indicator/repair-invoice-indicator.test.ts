@@ -226,7 +226,7 @@ const buchStand = (db: Db) => all(db, `SELECT
     { id: 'i-canc', invoiceNumber: 'INV-5', status: 'CANCELLED' },
   ];
   const v = (r: Record<string, unknown>) => ind.repairInvoiceView(r as never, inv);
-  ok(S(v({})) === S({ state: 'none', created: false, invoiceId: null, invoiceNumber: null, invoiceStatus: null, label: 'Not created' }),
+  ok(S(v({})) === S({ state: 'none', created: false, dataProblem: false, invoiceId: null, invoiceNumber: null, invoiceStatus: null, label: 'Not created' }),
     '§1 ohne Verknüpfung: Not created');
   ok(v({ invoiceId: '' }).state === 'none' && v({ invoiceId: '   ' }).state === 'none' && v({ invoiceId: null }).state === 'none',
     '§1 leere/Leerzeichen-/null-Verknüpfung = keine Rechnung');
@@ -239,14 +239,19 @@ const buchStand = (db: Db) => all(db, `SELECT
   ok(f.state === 'created' && f.created && f.invoiceId === 'i-final' && f.invoiceNumber === 'INV-1' && f.invoiceStatus === 'FINAL'
     && f.label === 'Invoice created', '§1 FINAL: created + Nummer');
   ok(v({ invoiceId: 'i-part' }).created && v({ invoiceId: 'i-part' }).label === 'Invoice created', '§1 PARTIAL: created');
-  ok(v({ invoiceId: 'i-draft' }).created && v({ invoiceId: 'i-draft' }).label === 'Invoice created (draft)', '§1 DRAFT: created (draft)');
+  const d = v({ invoiceId: 'i-draft' });
+  ok(d.state === 'draft' && d.created && !d.dataProblem && d.label === 'Invoice Draft' && d.invoiceNumber === 'PINV-3',
+    '§1 DRAFT: eigener Zustand „Invoice Draft" (kein „created"-Häkchen), zählt aber als erstellt');
+  ok(!f.dataProblem && f.state === 'created', '§1 FINAL ist kein Datenproblem');
   ok(v({ invoiceId: 'i-ret' }).created && v({ invoiceId: 'i-ret' }).label === 'Invoice created (returned)', '§1 RETURNED: created (returned)');
   const c = v({ invoiceId: 'i-canc' });
   ok(c.state === 'cancelled' && !c.created && c.invoiceId === 'i-canc' && c.invoiceNumber === 'INV-5' && c.label === 'Invoice cancelled',
     '§1 CANCELLED: keine erstellte Rechnung, aber Nummer zum Öffnen bleibt');
   const m = v({ invoiceId: 'i-weg' });
-  ok(m.state === 'missing' && !m.created && m.invoiceId === 'i-weg' && m.invoiceNumber === null && m.label === 'Invoice not found',
-    '§1 verwaiste Verknüpfung: Invoice not found, nicht created');
+  ok(m.state === 'missing' && !m.created && m.dataProblem && m.invoiceId === 'i-weg' && m.invoiceNumber === null && m.label === 'Invoice not found',
+    '§1 verwaiste Verknüpfung: Invoice not found, Datenproblem, nicht created');
+  ok(!c.dataProblem, '§1 storniert ist kein Datenproblem');
+  ok(ind.matchRepairInvoice(d, 'created') && !ind.matchRepairInvoice(d, 'not_created'), '§1 Filter: Entwurf unter Invoice Created, nicht unter Not Created');
   ok(ind.matchRepairInvoice(f, '') && ind.matchRepairInvoice(c, '') && ind.matchRepairInvoice(m, ''), '§1 Filter All: alles');
   ok(ind.matchRepairInvoice(f, 'created') && !ind.matchRepairInvoice(c, 'created') && !ind.matchRepairInvoice(m, 'created')
     && !ind.matchRepairInvoice(v({}), 'created'), '§1 Filter Invoice Created: nur geltende Rechnung');
@@ -313,9 +318,15 @@ const buchStand = (db: Db) => all(db, `SELECT
     '§3 Reset setzt den Rechnungsfilter zurück');
   ok(/const rechnung = repairInvoiceView\(rep, invoices\);/.test(list) && list.includes('data-repair-invoice-state={rechnung.state}'),
     '§3 jede Zeile zeigt den Rechnungsstatus');
-  ok((list.match(/e\.stopPropagation\(\); navigate\(`\/invoices\/\$\{rechnung\.invoiceId\}`\)/g) ?? []).length === 2
-    && list.includes('data-repair-invoice-open={rechnung.invoiceId}'), '§3 Rechnung (auch storniert) per Klick öffnen, ohne die Zeile zu öffnen');
-  ok(list.includes("color: '#15803D' }}>✓ {rechnung.label}"), '§3 Invoice created grün mit Häkchen');
+  ok((list.match(/e\.stopPropagation\(\); navigate\(`\/invoices\/\$\{rechnung\.invoiceId\}`\)/g) ?? []).length === 3
+    && list.includes('data-repair-invoice-open={rechnung.invoiceId}'), '§3 Rechnung (erstellt, Entwurf, storniert) per Klick öffnen, ohne die Zeile zu öffnen');
+  ok(list.includes("color: '#15803D' }}>✓ {rechnung.label}") && list.includes("{rechnung.state === 'created' ? ("),
+    '§3 grünes Häkchen nur für „created" (nicht für den Entwurf)');
+  ok(/rechnung\.state === 'draft' \? \([\s\S]{0,700}color: '#4B5563' \}\}>\{rechnung\.label\}<\/span>/.test(list)
+    && !/rechnung\.state === 'draft' \? \([\s\S]{0,700}✓/.test(list.slice(0, list.indexOf("rechnung.state === 'missing'"))),
+    '§3 Entwurf neutral (grau, ohne Häkchen), öffnet die Rechnung');
+  ok(/rechnung\.state === 'missing' \? \([\s\S]{0,600}data-repair-invoice-problem[\s\S]{0,400}⚠ \{rechnung\.label\}[\s\S]{0,200}Data problem/.test(list),
+    '§3 „Invoice not found" deutlich als Datenproblem (⚠, Rahmen, „Data problem")');
   ok(/<span className="text-overline">STATUS<\/span>\s*<span className="text-overline">INVOICE<\/span>/.test(list),
     '§3 eigene Spalte INVOICE neben (nicht in) STATUS');
   const grid = /const GRID = '([^']+)'/.exec(list)?.[1] ?? '';
