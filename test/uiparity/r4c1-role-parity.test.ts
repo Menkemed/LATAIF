@@ -203,7 +203,7 @@ const SALES = { sub: 'user-staff', tenant_id: 'tenant-1', branch_id: 'branch-mai
   // auf 102 Buchungen gebracht, R7A auf 103 (`production.complete`) — kanonisch 175 = 1 + 71 + 103. MEDIA-INBOX, PARTNER-ITEMS und BULK METAL V1 brachten sie auf 114 (192 = 1 + 77 + 114).
   // Der Rollenvertrag bleibt davon unberuehrt; die Zahl steht hier nur, damit sie niemand still verschiebt.
   // PURCHASE-EDIT Phase 2: +3 (purchases.update, purchases.correct, purchases.void_payment) → 126.
-  ok(erlaubt === 126, `8 alle Buchungen der Registry: die vierzig des Kerns, invoices.cancel und die seither registrierten (bis PURCHASE-EDIT: 126) (${erlaubt})`);
+  ok(erlaubt === 127, `8 alle Buchungen der Registry: die vierzig des Kerns, invoices.cancel und die seither registrierten (bis v0.8.94: 127) (${erlaubt})`);
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central ui parity r4c.1: role authority parity: ${PASS} passed, ${fails.length} failed`);
