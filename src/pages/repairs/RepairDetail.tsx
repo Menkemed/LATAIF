@@ -943,9 +943,9 @@ export function RepairDetail() {
                           <button key={String(o)} type="button" onClick={() => setForm({ ...form, internalPaidFrom: o })}
                             className="cursor-pointer rounded transition-all"
                             style={{ padding: '7px 14px', fontSize: 12,
-                              border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
-                              color: active ? '#0F0F10' : '#6B7280',
-                              background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
+                              border: `1px solid ${active ? '#715DE3' : '#D5D9DE'}`,
+                              color: active ? '#715DE3' : '#6B7280',
+                              background: active ? 'rgba(113,93,227,0.06)' : 'transparent',
                             }}>{o === null ? 'None' : o === 'cash' ? 'Cash' : o === 'bank' ? 'Bank' : 'Benefit'}</button>
                         );
                       })}
@@ -960,9 +960,9 @@ export function RepairDetail() {
                           <button key={String(o)} type="button" onClick={() => setForm({ ...form, customerPaidFrom: o })}
                             className="cursor-pointer rounded transition-all"
                             style={{ padding: '7px 14px', fontSize: 12,
-                              border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
-                              color: active ? '#0F0F10' : '#6B7280',
-                              background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
+                              border: `1px solid ${active ? '#715DE3' : '#D5D9DE'}`,
+                              color: active ? '#715DE3' : '#6B7280',
+                              background: active ? 'rgba(113,93,227,0.06)' : 'transparent',
                             }}>{o === null ? 'None' : o === 'cash' ? 'Cash' : o === 'bank' ? 'Bank' : o === 'card' ? 'Card' : 'Benefit'}</button>
                         );
                       })}
@@ -976,9 +976,9 @@ export function RepairDetail() {
                             <button key={b} type="button" onClick={() => setForm({ ...form, customerCardBrand: b })}
                               className="cursor-pointer rounded transition-all"
                               style={{ padding: '6px 12px', fontSize: 11,
-                                border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
-                                color: active ? '#0F0F10' : '#6B7280',
-                                background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
+                                border: `1px solid ${active ? '#715DE3' : '#D5D9DE'}`,
+                                color: active ? '#715DE3' : '#6B7280',
+                                background: active ? 'rgba(113,93,227,0.06)' : 'transparent',
                               }}>{b === 'normal' ? 'Normal (Visa / MC)' : b === 'debit' ? 'Debit' : 'Amex'}</button>
                           );
                         })}
@@ -1717,8 +1717,8 @@ export function RepairDetail() {
           {REPAIR_TAX_SCHEMES.map(s => (
             <label key={s}
               style={{ display: 'flex', gap: 10, padding: 12, borderRadius: 6,
-                       border: `1px solid ${pendingTaxScheme === s ? '#0F0F10' : '#D5D9DE'}`,
-                       background: pendingTaxScheme === s ? 'rgba(15,15,16,0.04)' : 'transparent',
+                       border: `1px solid ${pendingTaxScheme === s ? '#715DE3' : '#D5D9DE'}`,
+                       background: pendingTaxScheme === s ? 'rgba(113,93,227,0.04)' : 'transparent',
                        cursor: 'pointer' }}>
               <input type="radio" checked={pendingTaxScheme === s}
                 onChange={() => setPendingTaxScheme(s)} style={{ marginTop: 2 }} />
@@ -1778,9 +1778,9 @@ export function RepairDetail() {
                 <button key={src} type="button" data-gold-usage-source={src}
                   onClick={() => setNewGoldForm({ ...newGoldForm, source: src })}
                   style={{ padding: '8px 14px', fontSize: 13, borderRadius: 6,
-                           border: `1px solid ${newGoldForm.source === src ? '#0F0F10' : '#D5D9DE'}`,
-                           background: newGoldForm.source === src ? 'rgba(15,15,16,0.06)' : 'transparent',
-                           color: newGoldForm.source === src ? '#0F0F10' : '#6B7280',
+                           border: `1px solid ${newGoldForm.source === src ? '#715DE3' : '#D5D9DE'}`,
+                           background: newGoldForm.source === src ? 'rgba(113,93,227,0.06)' : 'transparent',
+                           color: newGoldForm.source === src ? '#715DE3' : '#6B7280',
                            cursor: 'pointer' }}>
                   {src === 'workshop' ? 'Workshop/Supplier Gold' : 'Customer Gold'}
                 </button>
@@ -1828,9 +1828,9 @@ export function RepairDetail() {
                     <button key={st} type="button" data-gold-usage-settlement={st}
                       onClick={() => setNewGoldForm({ ...newGoldForm, settlementType: st })}
                       style={{ padding: '8px 14px', fontSize: 13, borderRadius: 6,
-                               border: `1px solid ${newGoldForm.settlementType === st ? '#0F0F10' : '#D5D9DE'}`,
-                               background: newGoldForm.settlementType === st ? 'rgba(15,15,16,0.06)' : 'transparent',
-                               color: newGoldForm.settlementType === st ? '#0F0F10' : '#6B7280',
+                               border: `1px solid ${newGoldForm.settlementType === st ? '#715DE3' : '#D5D9DE'}`,
+                               background: newGoldForm.settlementType === st ? 'rgba(113,93,227,0.06)' : 'transparent',
+                               color: newGoldForm.settlementType === st ? '#715DE3' : '#6B7280',
                                cursor: 'pointer' }}>
                       {st === 'return_gold' ? 'Return Gold' : 'Pay Money'}
                     </button>
@@ -1854,9 +1854,9 @@ export function RepairDetail() {
                     <button key={d} type="button" data-gold-usage-leftover={d}
                       onClick={() => setNewGoldForm({ ...newGoldForm, leftoverDest: d })}
                       style={{ padding: '8px 14px', fontSize: 13, borderRadius: 6,
-                               border: `1px solid ${newGoldForm.leftoverDest === d ? '#0F0F10' : '#D5D9DE'}`,
-                               background: newGoldForm.leftoverDest === d ? 'rgba(15,15,16,0.06)' : 'transparent',
-                               color: newGoldForm.leftoverDest === d ? '#0F0F10' : '#6B7280',
+                               border: `1px solid ${newGoldForm.leftoverDest === d ? '#715DE3' : '#D5D9DE'}`,
+                               background: newGoldForm.leftoverDest === d ? 'rgba(113,93,227,0.06)' : 'transparent',
+                               color: newGoldForm.leftoverDest === d ? '#715DE3' : '#6B7280',
                                cursor: 'pointer' }}>
                       {d === 'return' ? 'Return to Customer' : d === 'credit' ? 'Customer Credit' : 'Shop Keeps'}
                     </button>
@@ -1997,9 +1997,9 @@ function RepairItemEditor({ form, setForm, categories }: RepairItemEditorProps) 
                           className="cursor-pointer transition-all duration-200"
                           style={{
                             padding: '4px 10px', fontSize: 11, borderRadius: 999,
-                            border: `1px solid ${sel ? '#0F0F10' : '#D5D9DE'}`,
-                            color: sel ? '#0F0F10' : '#6B7280',
-                            background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
+                            border: `1px solid ${sel ? '#715DE3' : '#D5D9DE'}`,
+                            color: sel ? '#715DE3' : '#6B7280',
+                            background: sel ? 'rgba(113,93,227,0.06)' : 'transparent',
                           }}>{opt}</button>
                       );
                     })}
@@ -2024,9 +2024,9 @@ function RepairItemEditor({ form, setForm, categories }: RepairItemEditorProps) 
                           className="cursor-pointer rounded"
                           style={{
                             padding: '4px 14px', fontSize: 11, borderRadius: 999,
-                            border: `1px solid ${sel ? '#0F0F10' : '#D5D9DE'}`,
-                            color: sel ? '#0F0F10' : '#6B7280',
-                            background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
+                            border: `1px solid ${sel ? '#715DE3' : '#D5D9DE'}`,
+                            color: sel ? '#715DE3' : '#6B7280',
+                            background: sel ? 'rgba(113,93,227,0.06)' : 'transparent',
                           }}>{opt ? 'Yes' : 'No'}</button>
                       );
                     })}

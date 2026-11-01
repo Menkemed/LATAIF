@@ -128,7 +128,7 @@ export function RepairWorkLineForm({ draft, onChange, onCancel, onSubmit, suppli
   const ext = draft.source === 'external';
   const seg = (on: boolean): React.CSSProperties => ({
     flex: 1, padding: '8px 10px', fontSize: 12, fontWeight: 600, borderRadius: 6, border: 'none', cursor: 'pointer',
-    color: on ? '#FFFFFF' : '#0F0F10', background: on ? '#0F0F10' : 'transparent',
+    color: on ? '#FFFFFF' : '#0F0F10', background: on ? '#715DE3' : 'transparent',
   });
   const attr = (k: string) => ({ [`data-${prefix}-${k}`]: true });
   return (

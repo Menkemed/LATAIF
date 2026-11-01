@@ -525,8 +525,8 @@ export function RepairList() {
                 className="cursor-pointer transition-all duration-200"
                 style={{
                   padding: '5px 10px', borderRadius: 999, fontSize: 11, border: 'none',
-                  color: filterStatus === sf.value ? '#0F0F10' : '#6B7280',
-                  background: filterStatus === sf.value ? 'rgba(15,15,16,0.08)' : 'transparent',
+                  color: filterStatus === sf.value ? '#715DE3' : '#6B7280',
+                  background: filterStatus === sf.value ? 'rgba(113,93,227,0.08)' : 'transparent',
                   fontWeight: filterStatus === sf.value ? 500 : 400,
                   cursor: 'pointer',
                 }}>{sf.label}</button>
@@ -614,8 +614,8 @@ export function RepairList() {
               className="cursor-pointer transition-all duration-200"
               style={{
                 padding: '5px 10px', fontSize: 11, borderRadius: 999, border: 'none',
-                color: sortDate === o.v ? '#0F0F10' : '#6B7280',
-                background: sortDate === o.v ? 'rgba(15,15,16,0.08)' : 'transparent',
+                color: sortDate === o.v ? '#715DE3' : '#6B7280',
+                background: sortDate === o.v ? 'rgba(113,93,227,0.08)' : 'transparent',
                 fontWeight: sortDate === o.v ? 500 : 400,
                 cursor: 'pointer',
               }}>{o.label}</button>
@@ -635,7 +635,7 @@ export function RepairList() {
               <button key={f.value || 'all'} type="button" onClick={() => setFilterInvoice(f.value)} aria-pressed={on} data-repair-filter-invoice={f.value || 'all'}
                 className="cursor-pointer" style={{
                   padding: '5px 11px', fontSize: 11, borderRadius: 999, fontWeight: on ? 600 : 500,
-                  border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`, color: on ? '#FFFFFF' : '#0F0F10', background: on ? '#0F0F10' : '#FFFFFF',
+                  border: `1px solid ${on ? '#715DE3' : '#D5D9DE'}`, color: on ? '#FFFFFF' : '#0F0F10', background: on ? '#715DE3' : '#FFFFFF',
                 }}>
                 {f.label}
                 <span style={{ marginLeft: 6, color: on ? '#E5E9EE' : '#4B5563' }}>{anzahlRechnung(f.value)}</span>
@@ -651,7 +651,7 @@ export function RepairList() {
               <button key={t || 'all'} type="button" onClick={() => setFilterWorkType(t)} aria-pressed={on} data-repair-filter-worktype={t || 'all'}
                 className="cursor-pointer" style={{
                   padding: '5px 11px', fontSize: 11, borderRadius: 999, fontWeight: on ? 600 : 500,
-                  border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`, color: on ? '#FFFFFF' : '#0F0F10', background: on ? '#0F0F10' : '#FFFFFF',
+                  border: `1px solid ${on ? '#715DE3' : '#D5D9DE'}`, color: on ? '#FFFFFF' : '#0F0F10', background: on ? '#715DE3' : '#FFFFFF',
                 }}>
                 {t ? repairWorkTypeLabel(t) : 'All work types'}
                 <span style={{ marginLeft: 6, color: on ? '#E5E9EE' : '#4B5563' }}>{anzahl({ workType: t })}</span>
@@ -667,7 +667,7 @@ export function RepairList() {
               <button key={sf.value || 'all'} type="button" onClick={() => setFilterSource(sf.value)} aria-pressed={on} data-repair-filter-source={sf.value || 'all'}
                 className="cursor-pointer" style={{
                   padding: '5px 11px', fontSize: 11, borderRadius: 999, fontWeight: on ? 600 : 500,
-                  border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`, color: on ? '#FFFFFF' : '#0F0F10', background: on ? '#0F0F10' : '#FFFFFF',
+                  border: `1px solid ${on ? '#715DE3' : '#D5D9DE'}`, color: on ? '#FFFFFF' : '#0F0F10', background: on ? '#715DE3' : '#FFFFFF',
                 }}>
                 {sf.label}
                 <span style={{ marginLeft: 6, color: on ? '#E5E9EE' : '#4B5563' }}>{anzahl({ source: sf.value })}</span>
@@ -999,9 +999,9 @@ export function RepairList() {
                     className="cursor-pointer rounded-lg transition-all duration-200"
                     style={{
                       flex: 1, padding: '12px 16px', textAlign: 'left',
-                      border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
-                      background: active ? 'rgba(15,15,16,0.06)' : 'transparent',
-                      color: active ? '#0F0F10' : '#6B7280',
+                      border: `1px solid ${active ? '#715DE3' : '#D5D9DE'}`,
+                      background: active ? 'rgba(113,93,227,0.06)' : 'transparent',
+                      color: active ? '#715DE3' : '#6B7280',
                     }}>
                     <div style={{ fontSize: 13, fontWeight: 500 }}>{opt.label}</div>
                     <div style={{ fontSize: 11, color: '#6B7280', marginTop: 2 }}>{opt.sub}</div>
@@ -1087,9 +1087,9 @@ export function RepairList() {
                                     className="cursor-pointer transition-all duration-200"
                                     style={{
                                       padding: '4px 10px', fontSize: 11, borderRadius: 999,
-                                      border: `1px solid ${sel ? '#0F0F10' : '#D5D9DE'}`,
-                                      color: sel ? '#0F0F10' : '#6B7280',
-                                      background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
+                                      border: `1px solid ${sel ? '#715DE3' : '#D5D9DE'}`,
+                                      color: sel ? '#715DE3' : '#6B7280',
+                                      background: sel ? 'rgba(113,93,227,0.06)' : 'transparent',
                                     }}>{opt}</button>
                                 );
                               })}
@@ -1115,9 +1115,9 @@ export function RepairList() {
                                     className="cursor-pointer rounded"
                                     style={{
                                       padding: '4px 14px', fontSize: 11, borderRadius: 999,
-                                      border: `1px solid ${sel ? '#0F0F10' : '#D5D9DE'}`,
-                                      color: sel ? '#0F0F10' : '#6B7280',
-                                      background: sel ? 'rgba(15,15,16,0.06)' : 'transparent',
+                                      border: `1px solid ${sel ? '#715DE3' : '#D5D9DE'}`,
+                                      color: sel ? '#715DE3' : '#6B7280',
+                                      background: sel ? 'rgba(113,93,227,0.06)' : 'transparent',
                                     }}>{opt ? 'Yes' : 'No'}</button>
                                 );
                               })}
@@ -1400,9 +1400,9 @@ export function RepairList() {
                       className="cursor-pointer rounded transition-all duration-200"
                       style={{
                         padding: '7px 14px', fontSize: 12,
-                        border: `1px solid ${form.taxScheme === scheme ? '#0F0F10' : '#D5D9DE'}`,
-                        color: form.taxScheme === scheme ? '#0F0F10' : '#6B7280',
-                        background: form.taxScheme === scheme ? 'rgba(15,15,16,0.06)' : 'transparent',
+                        border: `1px solid ${form.taxScheme === scheme ? '#715DE3' : '#D5D9DE'}`,
+                        color: form.taxScheme === scheme ? '#715DE3' : '#6B7280',
+                        background: form.taxScheme === scheme ? 'rgba(113,93,227,0.06)' : 'transparent',
                       }}>{scheme === 'ZERO' ? '0% (no VAT)' : 'VAT 10%'}</button>
                   ))}
                 </div>
@@ -1624,8 +1624,8 @@ export function RepairList() {
                     {steuerWahlen.map(s => (
                       <label key={s} data-repair-invoice-tax-option={s}
                         style={{ display: 'flex', gap: 10, padding: 10, borderRadius: 6,
-                                 border: `1px solid ${rechnungSteuer === s ? '#0F0F10' : '#D5D9DE'}`,
-                                 background: rechnungSteuer === s ? 'rgba(15,15,16,0.04)' : 'transparent',
+                                 border: `1px solid ${rechnungSteuer === s ? '#715DE3' : '#D5D9DE'}`,
+                                 background: rechnungSteuer === s ? 'rgba(113,93,227,0.04)' : 'transparent',
                                  cursor: 'pointer' }}>
                         <input type="radio" name="repair-invoice-tax" checked={rechnungSteuer === s}
                           onChange={() => setRechnungSteuer(s)} style={{ marginTop: 2 }} />

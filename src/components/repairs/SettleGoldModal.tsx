@@ -230,9 +230,9 @@ export function SettleGoldModal({ open, onClose, mode, payable, credit, repairId
                   className="cursor-pointer rounded transition-all duration-200"
                   style={{
                     padding: '6px 12px', fontSize: 12,
-                    border: `1px solid ${sourceKarat === inv.karat ? '#0F0F10' : '#D5D9DE'}`,
-                    color: sourceKarat === inv.karat ? '#0F0F10' : '#6B7280',
-                    background: sourceKarat === inv.karat ? 'rgba(15,15,16,0.06)' : 'transparent',
+                    border: `1px solid ${sourceKarat === inv.karat ? '#715DE3' : '#D5D9DE'}`,
+                    color: sourceKarat === inv.karat ? '#715DE3' : '#6B7280',
+                    background: sourceKarat === inv.karat ? 'rgba(113,93,227,0.06)' : 'transparent',
                   }}
                 >
                   {inv.karat}

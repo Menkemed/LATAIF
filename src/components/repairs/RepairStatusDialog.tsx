@@ -100,8 +100,8 @@ export function RepairStatusDialog({
                 {reopenTargets.map((s) => (
                   <label key={s} data-reopen-target={s}
                     style={{ display: 'flex', gap: 10, padding: 9, borderRadius: 6, cursor: 'pointer',
-                             border: `1px solid ${ziel === s ? '#0F0F10' : '#D5D9DE'}`,
-                             background: ziel === s ? 'rgba(15,15,16,0.04)' : 'transparent' }}>
+                             border: `1px solid ${ziel === s ? '#715DE3' : '#D5D9DE'}`,
+                             background: ziel === s ? 'rgba(113,93,227,0.04)' : 'transparent' }}>
                     <input type="radio" name="repair-reopen-target" checked={ziel === s} onChange={() => setZiel(s)} />
                     <span style={{ fontSize: 13, color: '#0F0F10' }}>{name(s)}</span>
                   </label>
@@ -139,7 +139,7 @@ export function RepairStatusDialog({
                     {REPAIR_TAX_SCHEMES.map((s) => (
                       <label key={s} data-pickup-invoice-tax={s}
                         style={{ display: 'flex', gap: 6, alignItems: 'center', padding: '6px 10px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
-                                 border: `1px solid ${steuer === s ? '#0F0F10' : '#D5D9DE'}` }}>
+                                 border: `1px solid ${steuer === s ? '#715DE3' : '#D5D9DE'}` }}>
                         <input type="radio" name="pickup-invoice-tax" checked={steuer === s} onChange={() => setSteuer(s)} />
                         {s === 'ZERO' ? '0% (No VAT)' : 'VAT 10%'}
                       </label>
