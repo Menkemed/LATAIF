@@ -1574,23 +1574,9 @@ function runMigrations(database: Database): void {
     `CREATE INDEX IF NOT EXISTS idx_credit_applications_payment ON credit_applications(payment_id)`,
     `CREATE INDEX IF NOT EXISTS idx_credit_applications_credit ON credit_applications(credit_id)`,
 
-    // Backfill: existierende Single-Supplier-Repairs in eine repair_lines-Zeile
-    // migrieren. NOT EXISTS-Guard macht den Schritt idempotent.
-    `INSERT INTO repair_lines (id, branch_id, repair_id, position, supplier_id, work_type, cost_amount, expense_id, status, created_at, updated_at)
-     SELECT
-       lower(hex(randomblob(16))),
-       r.branch_id, r.id, 1, r.workshop_supplier_id, 'service',
-       COALESCE(r.actual_cost, r.estimated_cost, 0),
-       (SELECT e.id FROM expenses e
-          WHERE e.related_module = 'repair' AND e.related_entity_id = r.id
-          ORDER BY e.created_at ASC
-          LIMIT 1),
-       'OPEN',
-       COALESCE(r.created_at, datetime('now')),
-       COALESCE(r.updated_at, datetime('now'))
-     FROM repairs r
-     WHERE r.workshop_supplier_id IS NOT NULL
-       AND NOT EXISTS (SELECT 1 FROM repair_lines rl WHERE rl.repair_id = r.id)`,
+    // REPAIR-PREVIEW-PARITY — hier stand bis v0.8.95 eine Umwandlung bei JEDEM Start: Werkstatt im Kopf ohne Zeile → neue
+    // Arbeitszeile, ohne Protokoll und ohne Neuberechnung. Eine Altgebühr bleibt jetzt, wie sie ist (`repairCostParts`); eine
+    // Zeile entsteht nur noch auf ausdrücklichen Klick („Turn into a work line"). Schon angelegte Zeilen bleiben unberührt.
 
     // v0.1.46 — Metal-Inflow Audit + Ledger-Linkage:
     // Optionaler supplier_id-FK auf precious_metals erlaubt der MetalCreate-Action

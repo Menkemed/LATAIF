@@ -141,3 +141,10 @@ Abnahmeregel: `docs/ai/acceptance-rules.md`. Lauf: `test/e2e/repair-preview-acce
 - **External angekreuzt:** Die Werkstatt ist Pflicht. Mit Gebühr entsteht die Zeile mit der gewählten Arbeitsart, ohne Gebühr wird die Werkstatt eingeplant.
 - **Neue Spalte `repairs.planned_work_type`:** Sie hält die Arbeitsart der geplanten Werkstatt. Sie bucht nichts und endet mit der ersten Arbeitszeile dieser Werkstatt. Vor einem Release: Migration auf Prod-Kopie, Backup/Restore, Rust-Neubau.
 - **Mischbetrieb:** Ein neuer PC2 an einem alten Primary wird bei den neuen Feldern abgelehnt, deshalb zuerst den Primary installieren.
+
+## Altgebühr: keine Umwandlung beim Start (01.11.)
+
+- **Befund:** Bis v0.8.95 legte `runMigrations` bei jedem Start für jede Reparatur mit Werkstatt ohne Zeile eine Arbeitszeile an, ohne Protokoll und ohne Neuberechnung. Das widersprach der Vorschau G („Kept exactly as it is") und der Regel „Altfälle werden nicht umgeschrieben".
+- **Geändert:** Die Umwandlung ist entfernt. Eine Altgebühr bleibt, wie sie ist, und wird bei „ready" genau einmal gebucht. Eine Zeile entsteht nur über „Turn into a work line" (`repairs.add_line`, auch an PC2). Die Regeln stehen in `repairCostParts` und `repairHeaderFeeKept`.
+- **Daten:** Prod-Kopie am 01.11.: 9 Reparaturen, 0 betroffen, 0 Zeilen aus der Migration, 0 VAT-Meldungen. Es gibt keine Rückumwandlung; schon angelegte Zeilen anderer Installationen bleiben.
+- **Beweis:** `test/e2e/repair-legacy-fee.e2e.mjs` (echte Neustarts).

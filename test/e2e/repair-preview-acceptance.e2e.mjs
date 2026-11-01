@@ -183,7 +183,7 @@ function seedDaten() {
       insert(db, 'stock_lots', { id: 'lot-' + id, branch_id, product_id: id, purchase_id: 'e2e-pur', purchase_line_id: 'pl-' + id, unit_cost: 500, qty_total: 1, qty_remaining: 1, status: 'ACTIVE', acquired_at: '2026-10-29', created_at: now });
     }
     const alt = { branch_id, images: '[]', item_attributes: '{}', revision: 1, repair_scope: 'CUSTOMER', customer_id: 'e2e-kunde', tax_scheme: 'ZERO', item_brand: 'Omega', item_model: 'De Ville', received_at: now, created_at: now, updated_at: now };
-    // Eine Werkstatt ohne Zeile: die Startmigration macht daraus sofort eine Arbeitszeile (siehe G).
+    // Eine Werkstatt mit Gebühr, ohne Zeile: sie bleibt beim Start, wie sie ist (siehe G und repair-legacy-fee.e2e).
     insert(db, 'repairs', { ...alt, id: 'alt-gebuehr', repair_number: 'REP-ALT-1', voucher_code: 'ALT1', issue_description: 'Service', status: 'received', repair_type: 'external', workshop_supplier_id: 'ws-b', estimated_cost: 18, charge_to_customer: 35 });
     insert(db, 'repairs', { ...alt, id: 'alt-polish', repair_number: 'REP-ALT-2', voucher_code: 'ALT2', issue_description: 'Polish', status: 'picked_up', repair_type: 'internal', charge_to_customer: 25 });
   } finally { db.close(); }
@@ -537,7 +537,7 @@ try {
     ok(n.includes(NR.plan) && n.includes('REP-ALT-1') && !n.includes(NR.in), `A Suche findet die Werkstatt (${S(n)})`);
     await tippe(primary, suche, ''); await sleep(400);
     ok(/Work 20(\.0+)? · Mat\. 0/.test(await text(primary, `[data-repair-cost-split=${S(NR.hy)}]`)), `A Kosten aufgeteilt (${await text(primary, `[data-repair-cost-split=${S(NR.hy)}]`)})`);
-    ok(/No cost lines/.test(await text(primary, `[data-repair-cost-split=${S(NR.plan)}]`)), 'A „No cost lines"');
+    ok(/No cost lines/.test(await text(primary, `[data-repair-cost-split=${S(NR.plan)}]`)) && /Workshop fee/.test(await text(primary, '[data-repair-cost-split="REP-ALT-1"]')), 'A „No cost lines" und Altgebühr');
     ok(await text(primary, `[data-repair-quick-edit=${S(NR.in)}]`) === 'Quick Edit', 'A Knopf heißt „Quick Edit"');
     const farbe = await primary.ev(`return getComputedStyle(document.querySelector('[data-repair-filter-source="all"]')).backgroundColor;`);
     ok(farbe === 'rgb(113, 93, 227)', `A Auswahl violett (${farbe})`);
@@ -627,34 +627,17 @@ try {
     await foto(primary, 'G-detail-hybrid');
     await primary.ev(`document.querySelector('[data-repair-cost-group="inhouse"]').scrollIntoView({block:'center'}); return 1;`); await sleep(200);
     await foto(primary, 'G-detail-kosten');
-    // Die Startmigration (database.ts, „Backfill") macht beim Laden aus jeder Werkstatt ohne Zeile eine Arbeitszeile.
-    ok(zeilen('alt-gebuehr').length === 1 && zeilen('alt-gebuehr')[0].kosten === 18 && zeilen('alt-gebuehr')[0].ws === 'ws-b', `G Befund: Altbestand bekommt beim Start automatisch eine Zeile (${S(zeilen('alt-gebuehr'))})`);
-    // Altgebühr ohne Zeile gibt es deshalb nur bis zum nächsten Start: Fernbefehl ohne Gebühr, dann eine Schätzung — am PC2, ohne den Primary neu zu laden.
-    const anmeldung = await (await fetch(`${BASE}/api/auth/login`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ email: OWNER_EMAIL, password: OWNER_PW }) })).json();
-    const neu = await fetch(`${BASE}/api/command`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + anmeldung.token }, body: JSON.stringify({ op: 'repairs.create', commandId: crypto.randomUUID(), payload: { repairScope: 'CUSTOMER', customerId: 'e2e-kunde', issueDescription: 'Legacy fee', repairType: 'external', workshopSupplierId: 'ws-b', chargeToCustomer: 40 } }) });
-    ok(neu.status === 200, `G Altzustand angelegt (${neu.status})`);
-    const legacy = await (async () => { await warteAuf(() => dbQ("SELECT id FROM repairs WHERE issue_description = 'Legacy fee'").length === 1, 15); return String(dbQ("SELECT id FROM repairs WHERE issue_description = 'Legacy fee'")[0]?.id); })();
-    const legacyNr = rep(legacy).nr;
-    await lade('/repairs');
-    ok(await waitFor(client, `[data-repair-quick-edit=${S(legacyNr)}]`, 20000), 'G PC2 sieht die Reparatur');
-    await maus(client, `[data-repair-quick-edit=${S(legacyNr)}]`);
-    await waitFor(client, `[data-repair-quick-edit-modal=${S(legacyNr)}]`, 15000);
-    await maus(client, '[data-quick-advanced]'); await sleep(200);
-    await tippe(client, '[data-quick-estimated]', '18');
-    await maus(client, '[data-quick-save-amounts]');
-    ok(await warteAuf(() => rep(legacy).est === 18), `G Gebühr über Quick Edit eingetragen (${S(rep(legacy))})`);
-    await sleep(600);
-    await maus(client, '[data-quick-close]'); await sleep(300);
-    ok(/Workshop fee/.test(await text(client, `[data-repair-cost-split=${S(legacyNr)}]`)), 'A „Workshop fee (no lines)"');
-    await lade(`/repairs/${legacy}`);
+    // Altgebühr: Sie hat alle Starts unverändert überstanden; erst der Klick macht daraus eine Zeile (hier an PC2).
+    ok(zeilen('alt-gebuehr').length === 0, `G Altgebühr: der Start hat keine Zeile angelegt (${S(zeilen('alt-gebuehr'))})`);
+    await lade('/repairs/alt-gebuehr');
     ok(await waitFor(client, '[data-repair-legacy-fee]', 20000), 'G Altgebühr wird angezeigt');
-    ok(zeilen(legacy).length === 0 && await text(client, '[data-repair-cost-box="total"]').then(zahl) === 18, 'G sie bleibt von selbst, wie sie ist');
+    ok(await text(client, '[data-repair-cost-box="total"]').then(zahl) === 18, 'G sie zählt als Gebühr');
     ok(await maus(client, '[data-repair-legacy-convert]') === 'OK', 'G „Turn into a work line"');
-    ok(await warteAuf(() => zeilen(legacy).length === 1), `G Zeile entstanden (${await text(client, '[data-save-error]')} | ${await client.ev('return document.body.innerText.slice(0,200);')})`);
-    const zl = zeilen(legacy)[0];
+    ok(await warteAuf(() => zeilen('alt-gebuehr').length === 1), `G Zeile entstanden (${await text(client, '[data-save-error]')})`);
+    const zl = zeilen('alt-gebuehr')[0];
     ok(zl.ws === 'ws-b' && zl.kosten === 18, `G Zeile der Werkstatt über die Gebühr (${S(zl)})`);
     ok(await warteBis(client, `!document.querySelector('[data-repair-legacy-fee]')`, 10000) && await text(client, '[data-repair-cost-box="total"]').then(zahl) === 18, 'G Summe unverändert 18');
-    ok(ausgaben(legacy).length === 0, 'G Status „received": keine Buchung');
+    ok(ausgaben('alt-gebuehr').length === 0, 'G Status „received": keine Buchung');
     // Geplante Werkstatt: Add Work ist vorbelegt
     await ladeP(`/repairs/${ID.plan}`);
     ok(await maus(primary, '[data-repair-add-work]') === 'OK', 'G + Add Work');
