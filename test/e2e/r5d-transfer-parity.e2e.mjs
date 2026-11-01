@@ -16,7 +16,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { spawn, execFileSync } from 'node:child_process';
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
-import { killTestImage, tasklistTestImage } from './_e2e-process.mjs';
+import { clearTestClientPendingSaves, closeTestWindow, killTestImage, spawnTracked, startedPids, tasklistTestImage } from './_e2e-process.mjs';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
 import os from 'node:os';
@@ -121,7 +121,7 @@ async function attachOnly(cdpPort, budget = 60000) {
   return c;
 }
 async function attach(cdpPort, exe, env) {
-  spawn(exe, [], { env, stdio: 'ignore', detached: true }).unref();
+  spawnTracked(exe, [], { env, stdio: 'ignore', detached: true }).unref();
   return attachOnly(cdpPort, 120000);
 }
 const exists = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
@@ -392,6 +392,7 @@ const aufRechnung = (c) => warteBis(c, "/^\\/invoices\\//.test(location.pathname
 try {
   assertE2eClientBinary(CLIENT_APP);
   killAll(); await waitGone('lataif.exe'); await waitGone('lataif-e2e-client.exe');
+  clearTestClientPendingSaves();
   for (const d of [RUN, CLIENT_APPDATA, join(CLIENT_HOME, 'Local'), join(CLIENT_HOME, 'tmp'), join(RUN, 'tmp')]) mkdirSync(d, { recursive: true });
   if (existsSync(APP_DATA_DIR)) rmSync(APP_DATA_DIR, { recursive: true, force: true });
   console.log(e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: appEnv() }));
@@ -416,8 +417,7 @@ try {
   await waitFor(primary, SHELL, 60000);
   await spuelen(primary).catch(() => null);
   await sleep(1200);
-  primary.close(); primary = null;
-  killImage('lataif.exe'); await waitGone('lataif.exe');
+  { const pid = startedPids().pop(); primary.close(); primary = null; await closeTestWindow(pid, APP); }
   seed();
   execFileSync(SEED, ['seed-primary', SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' });
 
@@ -700,7 +700,8 @@ try {
     ok(await transferListe(client), 'WIEDERHOLT die Transferliste');
     ok(await sammelMaske(client, ['TRF-2025-09010', 'TRF-2025-09011']) === 'OK', 'WIEDERHOLT dieselbe Auswahl noch einmal');
     await click(client, '[data-transfer-bulk-confirm]');
-    ok(await aufRechnung(client), 'WIEDERHOLT jetzt entsteht die Rechnung');
+    if (await warteBis(client, "/An earlier save of this kind/.test(document.body.innerText)", 8000)) await click(client, '[data-transfer-bulk-confirm]');
+    ok(await aufRechnung(client), `WIEDERHOLT jetzt entsteht die Rechnung (${String(await fehlerAnzeige(client)).slice(0, 240)} | ${String(await client.ev("return location.pathname + ' :: ' + [...document.querySelectorAll('[data-testid=\"pending-save-row\"]')].map((e) => e.textContent).join(' ; ').slice(0, 240);"))})`);
     await warteAuf(() => !!rechnungVon('r5d-t-f1'));
     ok(rechnungVon('r5d-t-f1') !== '' && rechnungVon('r5d-t-f2') === rechnungVon('r5d-t-f1')
       && zahl('SELECT COUNT(*) AS n FROM invoices') === invVorher + 1 && zahl('SELECT COUNT(*) AS n FROM customers') === kundenVorher + 1,

@@ -24,6 +24,7 @@
 // weist jeden anderen Beende-Aufruf in `test/e2e/` ab.
 // ════════════════════════════════════════════════════════════════════════════
 import { execFileSync, spawn } from 'node:child_process';
+import { rmSync } from 'node:fs';
 import { dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -121,6 +122,12 @@ export async function closeTestWindow(pid, exe, budgetMs = 120000) {
     execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid} -ErrorAction Stop).CloseMainWindow()`], { encoding: 'utf8', windowsHide: true });
   } catch { /* schon weg */ }
   if (!await waitPidGone(pid, budgetMs)) killTestPid(pid, exe);
+}
+
+/** Offene Speichervorgänge früherer Läufe des Test-Clients entfernen (nur dessen Kennung, nie die Produktion). */
+export function clearTestClientPendingSaves() {
+  const local = process.env.LOCALAPPDATA;
+  if (local) rmSync(join(local, 'com.lataif.app.e2e.client', 'pending-saves'), { recursive: true, force: true });
 }
 
 export function killTestPid(pid, expectedPath, binaries = TEST_BINARIES) {
