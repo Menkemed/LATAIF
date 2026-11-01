@@ -2622,6 +2622,9 @@ function runMigrations(database: Database): void {
     // Gebühr kommt oft erst später). Eine reine Angabe für Anzeige und Filter: sie bucht nichts, sie ist keine
     // Verbindlichkeit und keine Altgebühr (`workshop_supplier_id` bleibt dafür, wie es ist). Bestehende Reparaturen: NULL.
     `ALTER TABLE repairs ADD COLUMN planned_workshop_supplier_id TEXT`,
+    // REPAIR-PREVIEW-PARITY — die Arbeitsart, die beim Anlegen für die geplante Werkstatt gewählt wurde. Ohne Gebühr gibt es
+    // noch keine Zeile, die sie tragen könnte; ohne diese Spalte ginge die Auswahl still verloren. Bucht nichts.
+    `ALTER TABLE repairs ADD COLUMN planned_work_type TEXT`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

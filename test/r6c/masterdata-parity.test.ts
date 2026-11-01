@@ -412,7 +412,7 @@ marker('CENTRAL_UI_R6C_PRIMARY_PARITY_PROVED');
       `QUICK ${f.split('/').pop()}: dieselbe Folge, dieselbe Buchung — kein direkter Store-Aufruf mehr`);
   }
   ok(/setSupplierId\(r\.value\.supplierId\)/.test(codeOf(src('src/pages/purchases/PurchaseCreate.tsx'))), 'QUICK Einkauf: der neue Lieferant ist danach gewählt (bestehender Vertrag)');
-  ok(/workshopSupplierId: r\.value\.supplierId/.test(codeOf(src('src/pages/repairs/RepairList.tsx'))), 'QUICK Werkstatt: der neue Lieferant ist danach gewählt (bestehender Vertrag)');
+  ok(/workshopId: r\.value\.supplierId/.test(codeOf(src('src/pages/repairs/RepairList.tsx'))), 'QUICK Werkstatt: der neue Lieferant ist danach gewählt (bestehender Vertrag)');
   const sd = codeOf(src('src/pages/suppliers/SupplierDetail.tsx'));
   ok(/saveSupplierUpdate\(aendern, supplier, form\)/.test(sd) && /saveSupplierActive\(aendern, supplier, !supplier\.active\)/.test(sd) && !/updateSupplier\(/.test(sd),
     'UI Lieferant ändern und (de)aktivieren: EINE Buchung, kein Store-Aufruf');

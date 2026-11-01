@@ -423,7 +423,7 @@ try {
       if (!(await warteBis(c, "[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='New Repair')", 45000))) return 'KEIN-KNOPF';
       await clickText(c, 'New Repair');
       // REPAIR-REDESIGN — „Wer arbeitet?" statt Typ-Knöpfen: die Werkstatt ankreuzen.
-      if (!(await warteBis(c, "document.body.innerText.includes('WHO DOES THE WORK?')", 15000))) return 'KEINE-MASKE';
+      if (!(await warteBis(c, "/who does the work\?/i.test(document.body.innerText)", 15000))) return 'KEINE-MASKE';
       const r = [await c.ev("const e=document.querySelector('[data-repair-create-external]'); if(!e) return 'NO-EXTERNAL'; if(!e.checked) e.click(); return 'OK';")];
       if (!(await warteBis(c, "[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='+ New Supplier')", 15000))) return 'KEIN-SCHNELLKNOPF';
       r.push(await clickText(c, '+ New Supplier'));

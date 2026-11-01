@@ -1435,6 +1435,7 @@
         "notes",
         "picked_up_at",
         "picked_up_recorded_at",
+        "planned_work_type",
         "planned_workshop_supplier_id",
         "product_id",
         "received_at",

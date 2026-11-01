@@ -529,7 +529,8 @@ export function canonicalRepairStatus(s: RepairStatus | string | undefined | nul
 // Vorher stand jede dieser Listen mehrfach abgeschrieben in den Masken und im Fernbefehl — und
 // dort teils anders (der Fernbefehl nahm z. B. `MARGIN` als Reparatursteuer an, die keine Maske
 // anbietet und `rowToRepair` beim Lesen still zu `VAT_10` macht).
-export const REPAIR_TYPES = ['internal', 'external', 'hybrid'] as const;
+// REPAIR-PREVIEW-PARITY — „unset": beim Anlegen ist noch nichts angekreuzt („Not set"). Kosten und Statusweg wie „internal"; die erste Arbeitszeile setzt die Art.
+export const REPAIR_TYPES = ['internal', 'external', 'hybrid', 'unset'] as const;
 /** Die Steuer einer Reparaturleistung — genau die zwei, die Anlegemaske und Rechnungsdialog anbieten. */
 export const REPAIR_TAX_SCHEMES = ['ZERO', 'VAT_10'] as const;
 export type RepairTaxScheme = typeof REPAIR_TAX_SCHEMES[number];
@@ -577,6 +578,8 @@ export interface Repair {
   workshopSupplierId?: UUID;
   /** REPAIR-REDESIGN — eingeplante Werkstatt ohne Arbeitszeile (beim Anlegen, Gebühr folgt). Bucht nichts. */
   plannedWorkshopSupplierId?: UUID;
+  /** REPAIR-PREVIEW-PARITY — die beim Anlegen gewählte Arbeitsart der geplanten Werkstatt (noch ohne Arbeitszeile). */
+  plannedWorkType?: RepairWorkType;
   estimatedCost?: number;
   actualCost?: number;
   internalCost: number;

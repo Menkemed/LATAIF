@@ -401,7 +401,7 @@ const vorschau = (input: Record<string, unknown>, actor: Record<string, unknown>
   ok(/data-find-next-sku/.test(pd) && /Find Next SKU/.test(pd) && /skuIsEmpty\(product\.sku\) && skuIsEmpty\(form\.sku\) && \(/.test(pd),
     'F ProductDetail: der Knopf nur für einen Artikel ohne SKU und bei leerem Feld');
   ok(/const skuVergeben = skuAuto && skuIsEmpty\(product\?\.sku\) && skuIsEmpty\(form\.sku\);/.test(pd)
-    && /remote: \(\) => \(\{ id, \.\.\.diff, \.\.\.zusatz \}\)/.test(pd) && /remote: \(\) => \(\{ id, \.\.\.textDiff, gallery, \.\.\.zusatz \}\)/.test(pd)
+    && /remote: \(\) => \(\{ id, \.\.\.diff, \.\.\.zusatz, \.\.\.stand \}\)/.test(pd) && /remote: \(\) => \(\{ id, \.\.\.textDiff, gallery, \.\.\.zusatz, \.\.\.stand \}\)/.test(pd)
     && /Object\.keys\(diff\)\.length === 0 && !skuVergeben/.test(pd),
   'F ProductDetail: beide Speicherwege (Text/Bild, lokal/PC2) tragen nur die Absicht; der Knopf allein ist eine Änderung');
   ok(!/setForm\(\{ \.\.\.form, sku: (preview|suggestion|peek)/.test(pd), 'F ProductDetail: die Vorschau wird nie als getippte SKU in die Maske geschrieben');

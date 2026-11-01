@@ -66,7 +66,8 @@ import {
   IN_HOUSE_COST_PLACEHOLDER, repairCostLabels,
 } from '@/core/repairs/repair-line-view';
 import { hasSelectableWorkshop, NO_WORKSHOP_HINT, workshopOptions } from '@/core/repairs/repair-workshop-choice';
-import { repairCostView, repairEstimateRole, repairWorkSource } from '@/core/repairs/repair-work-source';
+import { isRepairWorkLine, repairCostView, repairEstimateRole, repairWorkSource } from '@/core/repairs/repair-work-source';
+import { RepairQuickEditModal } from '@/components/repairs/RepairQuickEditModal';
 import { repairHeaderFeeKept } from '@/core/repairs/repair-cost';
 import {
   EMPTY_WORK_LINE, RepairTypeConflictNote, RepairWorkLineForm, RepairWorkSourceBadge, repairWorkSourceText, type WorkLineDraft, type WorkLineValues,
@@ -319,6 +320,7 @@ export function RepairDetail() {
 
   // Plan repair-multi-supplier — State fuer Add-Line + Add-Gold + Settle-Modal
   const [showAddLineModal, setShowAddLineModal] = useState(false);
+  const [quickEditOpen, setQuickEditOpen] = useState(false);
   // REPAIR-REDESIGN — dieselbe Arbeitszeilen-Maske wie Quick Edit (Quelle, Werkstatt, Arbeitsart, Kosten).
   const [newLineForm, setNewLineForm] = useState<WorkLineDraft>(EMPTY_WORK_LINE);
 
@@ -694,6 +696,9 @@ export function RepairDetail() {
               </>
             ) : (
               <>
+                {perm.canManageRepairs && (
+                  <Button variant="secondary" onClick={() => { w.clear(); setQuickEditOpen(true); }} data-repair-detail-quick-edit>Quick Edit</Button>
+                )}
                 {nextStatus && perm.canManageRepairs && (
                   <Button variant="primary" onClick={handleStatusAdvance} disabled={w.busy} data-repair-advance>
                     <ClipboardCheck size={14} /> Mark as {STATUS_LABELS[nextStatus]}
@@ -767,31 +772,31 @@ export function RepairDetail() {
                   const flow = getStatusFlow(repair.repairType, repair.repairScope);
                   const currentIdx = flow.indexOf(repair.status);
                   return flow.map((s, i) => {
-                    const isActive = i <= currentIdx;
+                    const erledigt = i < currentIdx;
                     const isCurrent = s === repair.status;
                     return (
-                      <div key={s} className="flex items-center gap-2">
+                      <div key={s} className="flex items-center gap-2" data-repair-flow-step={s} data-repair-flow-current={isCurrent ? 'true' : undefined}>
                         <span style={{
                           fontSize: 12,
-                          padding: '4px 10px',
-                          borderRadius: 4,
-                          background: isCurrent ? 'rgba(15,15,16,0.1)' : 'transparent',
-                          color: isCurrent ? '#0F0F10' : isActive ? '#0F0F10' : '#6B7280',
-                          border: isCurrent ? '1px solid rgba(15,15,16,0.15)' : '1px solid transparent',
-                          fontWeight: isCurrent ? 500 : 400,
+                          padding: '4px 12px',
+                          borderRadius: 999,
+                          background: isCurrent ? '#715DE3' : erledigt ? 'rgba(126,170,110,0.12)' : '#FFFFFF',
+                          color: isCurrent ? '#FFFFFF' : erledigt ? '#3F6F2F' : '#4B5563',
+                          border: `1px solid ${isCurrent ? '#715DE3' : '#D5D9DE'}`,
+                          fontWeight: isCurrent ? 600 : 500,
                         }}>
-                          {STATUS_LABELS[s] || s}
+                          {erledigt ? '✓ ' : ''}{STATUS_LABELS[s] || s}
                         </span>
-                        {i < flow.length - 1 && (
-                          <span style={{ color: isActive ? '#6B7280' : '#D5D9DE', fontSize: 10 }}>&#8250;</span>
-                        )}
                       </div>
                     );
                   });
                 })()}
               </div>
+              {getStatusFlow(repair.repairType, repair.repairScope).includes('sent_to_workshop') && (
+                <p style={{ margin: '8px 0 0', fontSize: 11, color: '#4B5563' }} data-repair-flow-hint>“Sent to workshop” is shown because a workshop does part of the work.</p>
+              )}
 
-              {/* Payment + Pickup als zwei unabhängige Status (User-Spec) — sichtbar
+                            {/* Payment + Pickup als zwei unabhängige Status (User-Spec) — sichtbar
                   ab Ready. Bei OWN-scope: kein Pickup (Produkt bleibt intern), stattdessen
                   Workshop-Payable-Status wenn externe Workshop-Kosten anfallen. */}
               {(repair.status === 'ready' || repair.status === 'picked_up') && (
@@ -888,7 +893,8 @@ export function RepairDetail() {
             <div style={{ fontSize: 12, color: '#4B5563', marginTop: 6 }} data-repair-work-source-text>
               {repairWorkSourceText(quelle, lieferantName)}
               <span style={{ color: '#6B7280' }}>
-                {quelle.basis === 'lines' ? ' · follows the work lines'
+                {quelle.kind === 'none' ? ' · add work below to set who does it'
+                  : quelle.basis === 'lines' ? ' · follows the work lines'
                   : quelle.plannedWorkshopId ? ' · workshop planned, no work line yet'
                   : quelle.hasWorkLines ? ' · as created — one part has no active work line' : ' · no work line yet'}
               </span>
@@ -1362,13 +1368,24 @@ export function RepairDetail() {
             const totalCost = kostenSicht.total;
             const charge = repair.chargeToCustomer || 0;
             const margin = charge - totalCost;
+            // REPAIR-PREVIEW-PARITY — getrennt wie in der Vorschau G: eigene Arbeit, jede Werkstatt, dann Material.
+            const arbeitsZeilen = explicitLines.filter((l) => isRepairWorkLine(l));
+            const kostenGruppen = [
+              { key: 'inhouse', titel: 'In-house · own staff', farbe: '#5B3DCC', zeilen: arbeitsZeilen.filter((l) => !l.supplierId) },
+              ...arbeitsZeilen.map((l) => l.supplierId).filter((x, i, a): x is string => !!x && a.indexOf(x) === i)
+                .map((sid) => ({ key: sid, titel: `External workshop · ${lieferantName(sid)}`, farbe: '#1D4ED8', zeilen: arbeitsZeilen.filter((l) => l.supplierId === sid) })),
+              { key: 'material', titel: 'Materials / Parts', farbe: '#9A3412', zeilen: explicitLines.filter((l) => !isRepairWorkLine(l)) },
+            ].filter((g) => g.zeilen.length > 0);
             return (
           <div style={{ marginTop: 24, gridColumn: '1 / -1' }}>
             <Card>
               <div className="flex items-center justify-between" style={{ marginBottom: 12 }}>
                 <span className="text-overline">COSTS / MATERIALS ({totalLineCount})</span>
                 <div className="flex gap-2">
-                  <Button variant="secondary" onClick={() => setShowAddLineModal(true)}>
+                  <Button variant="secondary" data-repair-add-work onClick={() => {
+                    if (quelle.plannedWorkshopId) setNewLineForm({ ...EMPTY_WORK_LINE, source: 'external', supplierId: quelle.plannedWorkshopId, workType: repair.plannedWorkType || EMPTY_WORK_LINE.workType });
+                    setShowAddLineModal(true);
+                  }}>
                     <span style={{ fontSize: 14, marginRight: 4 }}>+</span> Add Work
                   </Button>
                   <Button variant="secondary" onClick={() => setShowAddMaterialModal(true)} data-material-open>
@@ -1376,6 +1393,20 @@ export function RepairDetail() {
                   </Button>
                 </div>
               </div>
+              {/* REPAIR-PREVIEW-PARITY — Altbestand: Werkstatt mit Gebühr ohne Zeile bleibt, wie sie ist. Nur auf ausdrücklichen Klick wird
+                  daraus eine Arbeitszeile, über „Add Work" und seine Regeln (eine bezahlte Gebühr weist das Haus ab). */}
+              {quelle.assignedWorkshopId && !quelle.hasWorkLines && kostenSicht.fee > 0.0005 && !repair.invoiceId && perm.canManageRepairs && (
+                <div data-repair-legacy-fee style={{ background: '#FFFBEB', border: '1px solid #FDE68A', borderRadius: 12, padding: '14px 16px', marginBottom: 12, display: 'flex', flexWrap: 'wrap', gap: 12, alignItems: 'center', justifyContent: 'space-between' }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>Older repair — workshop fee without a work line</div>
+                    <div style={{ fontSize: 12, color: '#4B5563', marginTop: 2 }}>{lieferantName(quelle.assignedWorkshopId)} · fee <Bhd v={kostenSicht.fee}/> · type was chosen by hand. Kept exactly as it is.</div>
+                  </div>
+                  <Button variant="secondary" disabled={w.busy} data-repair-legacy-convert onClick={async () => {
+                    if (!(await window.confirm('Turn this workshop fee into a work line? The total cost stays the same.'))) return;
+                    void handleAddLine({ supplierId: quelle.assignedWorkshopId as string, workType: 'service', description: 'Workshop fee (from older repair)', costAmount: kostenSicht.fee });
+                  }}>Turn into a work line (optional)</Button>
+                </div>
+              )}
               {totalLineCount === 0 ? (
                 <p style={{ fontSize: 13, color: '#6B7280', padding: '8px 0' }}>
                   No costs recorded yet. Add labor, diamond, stone or gold positions — A/P at the
@@ -1411,7 +1442,12 @@ export function RepairDetail() {
                   )}
 
                   {/* Explizite Work/Material Lines */}
-                  {explicitLines.map((l: RepairLine) => {
+                  {kostenGruppen.map((g) => [
+                    <div key={`kopf-${g.key}`} data-repair-cost-group={g.key} className="flex justify-between items-center" style={{ gridColumn: '1 / -1', paddingTop: 12 }}>
+                      <span style={{ fontSize: 11, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: g.farbe }}>{g.titel}</span>
+                      <span style={{ fontSize: 12, color: '#4B5563' }}>Subtotal <span className="font-mono"><Bhd v={g.zeilen.reduce((s, l) => s + (l.costAmount || 0), 0)}/></span></span>
+                    </div>,
+                    ...g.zeilen.map((l: RepairLine) => {
                     const km = COST_KIND_META[l.materialKind || l.workType || 'other'] || COST_KIND_META.other;
                     const sup = l.supplierId ? suppliers.find(s => s.id === l.supplierId) : null;
                     const supName = sup?.name || l.materialDetails?.supplierName;
@@ -1487,27 +1523,27 @@ export function RepairDetail() {
                         </button>
                       </div>
                     );
-                  })}
+                    }),
+                    ...(g.key === 'material' ? [<p key="material-hinweis" style={{ gridColumn: '1 / -1', margin: '4px 0 0', fontSize: 11, color: '#4B5563' }}>A material supplier does not count as a workshop and does not change the work source.</p>] : []),
+                  ])}
                 </div>
               )}
-              {totalLineCount > 0 && (
-                <div className="flex items-center justify-between" style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-                  <span style={{ fontSize: 12, color: '#6B7280' }} data-repair-cost-summary>
-                    Work&nbsp;<span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={kostenSicht.work}/></span>
-                    &nbsp;·&nbsp;Material&nbsp;<span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={kostenSicht.material}/></span>
-                    {kostenSicht.own > 0.0005 && <>&nbsp;·&nbsp;Own&nbsp;<span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={kostenSicht.own}/></span></>}
-                    {kostenSicht.fee > 0.0005 && <>&nbsp;·&nbsp;Fee&nbsp;<span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={kostenSicht.fee}/></span></>}
-                    &nbsp;·&nbsp;Total Cost&nbsp;
-                    <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={totalCost}/> BHD</span>
-                  </span>
-                  {charge > 0 && (
-                    <span style={{ fontSize: 13, color: '#6B7280' }}>
-                      Margin&nbsp;
-                      <span className="font-mono" style={{ color: margin >= 0 ? '#16A34A' : '#DC2626' }}><Bhd v={margin}/> BHD</span>
-                    </span>
-                  )}
-                </div>
-              )}
+              {/* Dieselbe Summe wie Marge, Einstand und Rechnung; eigene Kosten und Altgebühr nur, wenn es sie gibt. */}
+              <div data-repair-cost-summary style={{ marginTop: 14, background: '#F2F7FA', borderRadius: 12, padding: '14px 16px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(110px, 1fr))', gap: 12 }}>
+                {[
+                  { k: 'work', t: 'Work', v: kostenSicht.work },
+                  { k: 'material', t: 'Material', v: kostenSicht.material },
+                  ...(kostenSicht.own > 0.0005 ? [{ k: 'own', t: 'Own costs', v: kostenSicht.own }] : []),
+                  ...(kostenSicht.fee > 0.0005 ? [{ k: 'fee', t: 'Workshop fee', v: kostenSicht.fee }] : []),
+                  { k: 'total', t: 'Total actual', v: totalCost },
+                  ...(repair.repairScope !== 'OWN' ? [{ k: 'charge', t: 'Charge', v: charge }, { k: 'margin', t: 'Margin', v: margin }] : []),
+                ].map((f) => (
+                  <div key={f.k}>
+                    <div style={{ fontSize: 11, color: '#4B5563' }}>{f.t}</div>
+                    <div className="font-mono" data-repair-cost-box={f.k} style={{ fontSize: 15, fontWeight: 600, color: f.k === 'margin' ? (margin >= 0 ? '#15803D' : '#B91C1C') : '#0F0F10' }}><Bhd v={f.v}/></div>
+                  </div>
+                ))}
+              </div>
             </Card>
           </div>
             );
@@ -1754,6 +1790,8 @@ export function RepairDetail() {
       )}
 
       {/* Plan repair-multi-supplier — Add-Line Modal */}
+      <RepairQuickEditModal repairId={quickEditOpen ? (id ?? null) : null} onClose={() => { setQuickEditOpen(false); loadRepairs(); loadRepairLines(); }} />
+
       <Modal open={showAddLineModal} onClose={() => setShowAddLineModal(false)} title="Add Work Line" width={520}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
           <div style={{ padding: '10px 12px', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 6, fontSize: 12, color: '#4B5563', lineHeight: 1.5 }}>

@@ -22,7 +22,7 @@ import { normalizeRecordImages } from '@/core/media/record-image';
 import { applyRepairGallery, ingestRepairPhotos, resolveRepairPhotoSlots } from '@/core/repairs/repair-media';
 import type { Repair, RepairLine, RepairStatus } from '@/core/models/types';
 import {
-  RepairActionRejected, assertRepairEditRefs, buildRepairEditPatch, normalizeRepairCreate, planRepairCreate,
+  RepairActionRejected, type RepairCreateWorkInput, assertRepairEditRefs, buildRepairEditPatch, normalizeRepairCreate, planRepairCreate,
   type RepairHousePort, type RepairInvoiceOptions,
 } from './repair-rules';
 import { repairStatusTargets, repairTransitionFacts } from './repair-status-flow';
@@ -87,7 +87,7 @@ function amPrimary<T>(work: () => T | Promise<T>): Promise<T> {
 }
 
 /** „Create Repair" am Primary — dieselbe Vorbereitung wie der Fernbefehl, dann `createRepair`. */
-export async function createRepairOnPrimary(form: Partial<Repair>): Promise<Repair> {
+export async function createRepairOnPrimary(form: Partial<Repair> & RepairCreateWorkInput): Promise<Repair> {
   // POST-PARITY R7B PP-12 — jedes Foto durch den EINEN Normalisierer (≤ 100 000 B), wie fern — VOR der
   // Klammer: das Umrechnen hält die Schreibreihenfolge des Primary nicht auf.
   // MEDIA-REPAIR — die Fotos werden VOR der Klammer zu geprüften Medienobjekten (noch ohne

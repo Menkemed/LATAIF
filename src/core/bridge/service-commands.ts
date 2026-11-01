@@ -252,6 +252,7 @@ export function parseRepairCreate(raw: unknown): RepairCreateRequest {
     'itemBrand', 'itemModel', 'itemReference', 'itemSerial', 'itemDescription', 'issueDescription',
     'repairType', 'workshopSupplierId', 'plannedWorkshopSupplierId', 'estimatedCost', 'internalCost', 'chargeToCustomer',
     'estimatedReady', 'taxScheme', 'staffId', 'notes', 'photos', 'receivedAt',
+    'inHouseWorkType', 'inHouseCost', 'workshopWorkType',
   ]);
   const scope = raw.repairScope === undefined ? 'CUSTOMER' : String(raw.repairScope);
   if (scope !== 'CUSTOMER' && scope !== 'OWN') throw new ServicePayloadError(`unknown repair scope: ${scope || '(none)'}`);
@@ -275,7 +276,7 @@ export function parseRepairCreate(raw: unknown): RepairCreateRequest {
   if (raw.taxScheme !== undefined && !(REPAIR_TAX_SCHEMES as readonly unknown[]).includes(raw.taxScheme)) {
     throw new ServicePayloadError(`unknown tax scheme: ${String(raw.taxScheme) || '(none)'}`);
   }
-  for (const k of ['estimatedCost', 'internalCost', 'chargeToCustomer'] as const) {
+  for (const k of ['estimatedCost', 'internalCost', 'chargeToCustomer', 'inHouseCost'] as const) {
     if (raw[k] !== undefined && raw[k] !== null) money(raw[k], k);
   }
   for (const k of ['customerId', 'productId', 'lotId', 'itemCategoryId', 'itemBrand', 'itemModel',

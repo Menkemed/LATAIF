@@ -310,7 +310,7 @@ const buchStand = (db: Db) => all(db, `SELECT
   ok(list.includes("from '@/core/repairs/repair-invoice-state'"), '§3 Liste nutzt die gemeinsame Regel');
   ok(/if \(filterInvoice\) r = r\.filter\(\(rep\) => matchRepairInvoice\(repairInvoiceView\(rep, invoices\), filterInvoice\)\)/.test(list),
     '§3 Filter im selben filtered-Memo wie Status/Kunde/Mitarbeiter/Arbeit (UND-Verknüpfung)');
-  ok(/filterInvoice, invoices\]\);/.test(list), '§3 Memo hängt an filterInvoice und invoices');
+  ok(/filterInvoice, invoices, suppliers\]\);/.test(list), '§3 Memo hängt an filterInvoice und invoices');
   ok(/data-repair-filter-invoice=\{f\.value \|\| 'all'\}/.test(list)
     && list.includes("{ value: '', label: 'All' }") && list.includes("{ value: 'created', label: 'Invoice Created' }")
     && list.includes("{ value: 'not_created', label: 'Not Created' }"), '§3 Chips All / Invoice Created / Not Created');

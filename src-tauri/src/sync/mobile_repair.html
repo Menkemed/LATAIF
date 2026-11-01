@@ -22,6 +22,8 @@
       <input id="rpSearch" type="search" placeholder="number, brand or model" />
     </div>
     <button id="rpSearchBtn" class="secondary">Search</button>
+    <div id="rpWorkTypeChips" data-rp-chips="worktype" style="display: flex; gap: 6px; overflow-x: auto; margin-top: 10px; padding-bottom: 2px;"></div>
+    <div id="rpSourceChips" data-rp-chips="source" style="display: flex; gap: 6px; overflow-x: auto; margin-top: 6px; padding-bottom: 2px;"></div>
   </div>
 
   <div id="rpList"></div>
@@ -165,6 +167,7 @@
       <span id="rpLinesTotal" class="badge"></span>
     </div>
     <div id="rpLines"></div>
+    <div id="rpTotals" style="margin-top: 10px; display: flex; flex-direction: column; gap: 4px; font-size: 13px;"></div>
   </div>
 
   <!-- Der Fachverlauf der Goldeinsaetze — NUR lesen. Gebucht wird ueber „Record gold" wie bisher;

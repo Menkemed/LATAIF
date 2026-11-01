@@ -152,7 +152,7 @@ async function ausfuellen(c, { kunde = true, issue = 'Service', typ = 'Internal'
   r.push(await setByLabel(c, 'BRAND', 'Rolex'));
   r.push(await setByLabel(c, 'NAME / MODEL', 'Datejust'));
   if (issue) r.push(await setVal(c, 'textarea[placeholder="Describe the issue or requested repair..."]', issue));
-  if (typ !== 'Internal') { r.push(await art(c, typ)); await sleep(300); }
+  r.push(await art(c, typ)); await sleep(300);
   return alleOk(r);
 }
 /** „Create Repair" klicken und festhalten, was danach zu sehen ist. */
@@ -259,7 +259,7 @@ try {
   ok(await neueMaske(app) === 'OK' && await ausfuellen(app, { issue: 'External neu', typ: 'External' }) === 'OK', 'EXTERNAL Maske ausgefüllt');
   {
     const r = [await ssPick(app, 'Pick a workshop / goldsmith', 'rc-werkstatt'),
-      await setByLabel(app, 'WORKSHOP FEE (BHD, OPTIONAL)', '30'), await setByLabel(app, 'CHARGE TO CLIENT (BHD)', '90')];
+      await setByLabel(app, 'WORKSHOP FEE (BHD)', '30'), await setByLabel(app, 'CHARGE TO CLIENT (BHD)', '90')];
     ok(alleOk(r) === 'OK', `EXTERNAL Werkstatt, Gebühr 30, Kunde 90 (${alleOk(r)})`);
   }
   a = await anlegen(app);
@@ -307,12 +307,17 @@ try {
     `ZEHN genau 10 BHD eigene Arbeit, keine Ausgabe/Zahlung (${S(kopf(zId))}, Eigenleistung ${eigeneArbeit(zId)}, Ausgaben ${ausgaben(zId)})`);
 
   // ── 7 Eine Schätzung ist Information: weder ohne noch mit Edit → Save wird sie gebucht ──
-  ok(await neueMaske(app) === 'OK' && await ausfuellen(app, { issue: 'Internal geschaetzt' }) === 'OK'
-    && await setByLabel(app, 'ESTIMATED ADDITIONAL IN-HOUSE COST (BHD, OPTIONAL)', '10') === 'OK', 'SCHAETZUNG Maske mit geschätzten 10');
+  ok(await neueMaske(app) === 'OK' && await ausfuellen(app, { issue: 'Internal geschaetzt' }) === 'OK', 'SCHAETZUNG Maske');
   a = await anlegen(app);
   const sId = dbQ("SELECT id FROM repairs WHERE issue_description = 'Internal geschaetzt'")[0]?.id;
   ok(!!sId && a.pfad === `/repairs/${sId}`, `SCHAETZUNG angelegt, Detailseite offen (${a.pfad})`);
-  ok(await bearbeitenSpeichern(app) === 'OK', 'SCHAETZUNG Edit → Save ohne Änderung');
+  // Die Schätzung steht seit der Vorschau nicht mehr in der Anlage, sondern am Bearbeiten (Quick Edit: Advanced).
+  await clickText(app, 'Edit'); await waitFor(app, '[data-repair-save]', 10000);
+  ok(await setByLabel(app, 'ESTIMATED COST (BHD)', '10') === 'OK', 'SCHAETZUNG geschätzte 10 eingetragen');
+  await clickText(app, 'Cancel');
+  await clickText(app, 'Edit'); await waitFor(app, '[data-repair-save]', 10000);
+  await setByLabel(app, 'ESTIMATED COST (BHD)', '10');
+  await klick(app, '[data-repair-save]'); await sleep(1200);
   await spuelen(app);
   ok(Number(kopf(sId).estimated_cost) === 10 && Number(kopf(sId).internal_cost || 0) === 0, `SCHAETZUNG nach Save: Schätzung 10 bleibt Information, 0 eigene Kosten (${S(kopf(sId))})`);
   ok(await bisReady(app, sId) === 'OK', 'SCHAETZUNG bis Ready');

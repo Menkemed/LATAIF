@@ -401,9 +401,9 @@ async function kundenMaske(c, issue, mitFoto = true) {
   r.push(await art(c, 'External')); await sleep(300);
   await click(c, '[data-ss-trigger="Pick a workshop / goldsmith"]'); await sleep(500);
   await click(c, '[data-ss-option="r5c-werkstatt"]'); await sleep(300);
-  r.push(await setByLabel(c, 'WORKSHOP FEE (BHD, OPTIONAL)', '30'));
+  r.push(await setByLabel(c, 'WORKSHOP FEE (BHD)', '30'));
   r.push(await setByLabel(c, 'CHARGE TO CLIENT (BHD)', '90'));
-  r.push(await clickText(c, '0% (no VAT)'));
+  r.push(await clickText(c, '0 %'));
   r.push(await setByLabel(c, 'ESTIMATED READY DATE', '2026-09-20'));
   r.push(await waehleIn(c, 'Unassigned', 'r5c-emp'));
   r.push(await setVal(c, 'textarea[placeholder="Internal notes..."]', 'Kunde wartet'));
@@ -425,7 +425,8 @@ async function eigeneMaske(c, productId, lotId, issue) {
   const r = [
     await waehleIn(c, 'Auto (oldest active lot', lotId),
     await setVal(c, 'textarea[placeholder="Describe the issue or requested repair..."]', issue),
-    await setByLabel(c, 'ESTIMATED ADDITIONAL IN-HOUSE COST (BHD, OPTIONAL)', '15'),
+    await art(c, 'Internal'),
+    await setByLabel(c, 'EXTRA IN-HOUSE COST (BHD)', '15'),
     await waehleIn(c, 'Unassigned', 'r5c-emp'),
   ];
   const schlecht = r.filter((x) => x !== 'OK');
@@ -468,7 +469,7 @@ async function umschaltMaske(c, productId, issue) {
   r.push(await setByLabel(c, 'SERIAL NUMBER', 'STALE-1'));
   r.push(await clickText(c, 'Steel'));
   r.push(await setByLabel(c, 'ITEM DESCRIPTION (OPTIONAL)', 'veraltet'));
-  r.push(await clickText(c, '0% (no VAT)'));
+  r.push(await clickText(c, '0 %'));
   r.push(await art(c, 'External')); await sleep(300);
   await click(c, '[data-ss-trigger="Pick a workshop / goldsmith"]'); await sleep(500);
   await click(c, '[data-ss-option="r5c-werkstatt"]'); await sleep(300);
@@ -750,7 +751,7 @@ try {
       && u1.tax_scheme === 'VAT_10' && u1.workshop_supplier_id === null && u1.charge_to_customer === null && u1.customer_id === `sys-own-shop-${HAUS}`,
       `HIDDEN nichts Verstecktes steht in der Zeile (${S({ s: u1.item_serial, d: u1.item_description, a: u1.item_attributes, t: u1.tax_scheme, w: u1.workshop_supplier_id })})`);
     ok(u1.item_brand === 'Omega' && u1.item_model === 'R5C Eigen', 'HIDDEN die Artikelangaben sind die des gewaehlten Artikels, nicht die getippten');
-    ok(Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM repair_lines WHERE repair_id = ?', [u1.id ?? ''])[0]?.n) === 0,
+    ok(Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM repair_lines WHERE repair_id = ? AND supplier_id IS NOT NULL', [u1.id ?? ''])[0]?.n) === 0,
       'HIDDEN keine Arbeitszeile fuer eine versteckte Werkstatt');
     ok(!!u2.id && repNorm(u1, ['product_id', 'lot_id', 'item_reference']) === repNorm(u2, ['product_id', 'lot_id', 'item_reference']),
       'HIDDEN Primary-Maske == PC2');

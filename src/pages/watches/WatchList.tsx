@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { Package, Trash2, X, Check, Link2, Tag } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { StockCheckInventoryModal } from '@/components/products/StockCheckInventoryModal';
+import { ProductPriceModal } from '@/components/products/ProductPriceModal';
 import { Button } from '@/components/ui/Button';
 import { usePermission } from '@/hooks/usePermission';
 import { Card } from '@/components/ui/Card';
@@ -156,6 +157,8 @@ export function WatchList() {
   const sessionBranchId = useAuthStore(s => s.session?.branchId);
   const mediaTenantId = useMemo(() => sessionTenantId(sessionBranchId), [sessionBranchId]);
   const [showNew, setShowNew] = useState(false);
+  // Verkaufs- und Mindestpreis direkt aus der Karte (Owner-Anforderung; auch bei Artikeln aus Einkäufen).
+  const [preisArtikelId, setPreisArtikelId] = useState<string | null>(null);
   // MEDIA-04A-3B2B — create-with-media flow state.
   const [createBusy, setCreateBusy] = useState(false);
   const [createWarning, setCreateWarning] = useState<string | null>(null);
@@ -753,6 +756,19 @@ export function WatchList() {
                     </div>
                     <StatusDot status={p.stockStatus} />
                   </div>
+                  <div className="flex items-center justify-between" style={{ marginTop: 8, gap: 8, fontSize: 12 }} data-collection-prices={p.id}>
+                    <span style={{ color: '#4B5563' }}>
+                      Sale <span className="font-mono" style={{ color: '#0F0F10' }} data-collection-sale={p.id}>{p.plannedSalePrice ? <Bhd v={p.plannedSalePrice}/> : '—'}</span>
+                      {' · '}Min <span className="font-mono" style={{ color: '#0F0F10' }} data-collection-min={p.id}>{p.minSalePrice ? <Bhd v={p.minSalePrice}/> : '—'}</span>
+                    </span>
+                    {perm.canEditProducts && !selectMode && !printMode && (
+                      <button type="button" data-collection-edit-prices={p.id} className="cursor-pointer"
+                        onClick={(e) => { e.stopPropagation(); setPreisArtikelId(p.id); }}
+                        style={{ padding: '4px 10px', fontSize: 11, fontWeight: 500, borderRadius: 999, border: '1px solid #715DE3', color: '#5B3DCC', background: '#FFFFFF', whiteSpace: 'nowrap' }}>
+                        Edit prices
+                      </button>
+                    )}
+                  </div>
                   {p.expectedMargin !== undefined && p.expectedMargin > 0 && (
                     <div className="flex items-center justify-between" style={{ marginTop: 8, fontSize: 12 }}>
                       <span style={{ color: '#6B7280' }}>Margin</span>
@@ -1188,6 +1204,8 @@ export function WatchList() {
       {/* v0.7.20 — Bestaetigung Bulk-Delete. Listet die ausgewaehlten (sauberen)
           Produkte; nur diese werden geloescht. Verknuepfte sind gar nicht erst
           selektierbar. */}
+      <ProductPriceModal productId={preisArtikelId} onClose={() => setPreisArtikelId(null)} />
+
       <StockCheckInventoryModal
         open={inventoryOpen}
         onClose={() => setInventoryOpen(false)}

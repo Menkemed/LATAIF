@@ -392,7 +392,7 @@ let rAlt = '';
 {
   const list = src('src/pages/repairs/RepairList.tsx');
   const detail = src('src/pages/repairs/RepairDetail.tsx');
-  ok(/workshopOptions\(suppliers, \[form\.workshopSupplierId\]\)/.test(list) && !/suppliers\.filter\(s => s\.active\)\.map/.test(list),
+  ok(/workshopOptions\(suppliers, \[arbeit\.workshopId\]\)/.test(list) && !/suppliers\.filter\(s => s\.active\)\.map/.test(list),
     '§12 Repair erstellen: nur Werkstätten, der gewählte Wert bleibt');
   ok(/useState\(true\)/.test(list) && /isWorkshop: quickSupplierWorkshop/.test(list) && /data-repair-quick-supplier-workshop/.test(list),
     '§12 „+ New Supplier" in der Werkstatt-Auswahl: Is Workshop vorbelegt, sichtbar, abwählbar');

@@ -130,3 +130,14 @@ Eine automatische Herabstufung ist nicht sicher:
   - External-Reparaturen ohne Nachweis, die eigene Arbeit bekommen, bleiben gespeichert „external“. Ob der Betrag echte eigene Kosten sind, entscheidet der Owner; er kann sie als eigene Arbeitszeile erfassen.
   - Eine bezahlte Altgebühr lässt sich nicht automatisch ersetzen: Die Werkstattzeile wird dann mit `REPAIR_COST_PAID` abgewiesen.
   - Wer den vorbelegten Spiegel unverändert speichert, „bestätigt“ ihn nicht: Er bleibt ein Spiegel, weil sich nichts geändert hat.
+
+## REPAIR PREVIEW PARITY (01.11.) — Abnahme gegen die Vorschau
+
+Abnahmeregel: `docs/ai/acceptance-rules.md`. Lauf: `test/e2e/repair-preview-acceptance.e2e.mjs`.
+
+- **New Repair (F):** Beide Häkchen sind frei an- und abwählbar; am Anfang ist nichts angekreuzt. Erst angekreuzt erscheinen die Felder. Abgewählte Eingaben bleiben im Entwurf und werden nicht gespeichert.
+- **„Not set":** Nichts angekreuzt speichert `repair_type = 'unset'`. Kosten und Statusweg wie „internal". Die erste aktive Arbeit setzt die Art (`decideRepairType`), Material allein nicht.
+- **In-house angekreuzt:** Es entsteht gleich die eigene Arbeitszeile (Arbeitsart, Kosten 0.000 oder die Zusatzkosten) über `addRepairLine`.
+- **External angekreuzt:** Die Werkstatt ist Pflicht. Mit Gebühr entsteht die Zeile mit der gewählten Arbeitsart, ohne Gebühr wird die Werkstatt eingeplant.
+- **Neue Spalte `repairs.planned_work_type`:** Sie hält die Arbeitsart der geplanten Werkstatt. Sie bucht nichts und endet mit der ersten Arbeitszeile dieser Werkstatt. Vor einem Release: Migration auf Prod-Kopie, Backup/Restore, Rust-Neubau.
+- **Mischbetrieb:** Ein neuer PC2 an einem alten Primary wird bei den neuen Feldern abgelehnt, deshalb zuerst den Primary installieren.

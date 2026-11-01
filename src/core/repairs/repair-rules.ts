@@ -18,8 +18,8 @@
 // ohne Datenbank lädt.
 // ════════════════════════════════════════════════════════════════════════════
 import {
-  REPAIR_CUSTOMER_PAID_FROM, REPAIR_INTERNAL_PAID_FROM, REPAIR_TAX_SCHEMES, REPAIR_TYPES,
-  type Repair, type RepairTaxScheme,
+  REPAIR_CUSTOMER_PAID_FROM, REPAIR_INTERNAL_PAID_FROM, REPAIR_TAX_SCHEMES, REPAIR_TYPES, REPAIR_WORK_TYPES,
+  type Repair, type RepairTaxScheme, type RepairWorkType,
 } from '@/core/models/types';
 import { CARD_BRANDS } from '@/core/finance/card-fees';
 import { REPAIR_FIELDS } from '@/core/models/repair-fields';
@@ -145,6 +145,11 @@ export interface RepairCreateInput {
   workshopSupplierId?: string;
   /** REPAIR-REDESIGN — Werkstatt eingeplant, ohne Gebühr und ohne Arbeitszeile: bucht nichts. */
   plannedWorkshopSupplierId?: string;
+  /** REPAIR-PREVIEW-PARITY — eigene Arbeit beim Anlegen: daraus wird die eigene Arbeitszeile (0.000 ist richtig). */
+  inHouseWorkType?: RepairWorkType;
+  inHouseCost?: number;
+  /** Die Arbeitsart der Werkstatt: an der Werkstattzeile, ohne Gebühr an der geplanten Werkstatt. */
+  workshopWorkType?: RepairWorkType;
   estimatedCost?: number;
   internalCost?: number;
   chargeToCustomer?: number;
@@ -154,6 +159,20 @@ export interface RepairCreateInput {
   receivedAt?: string;
   staffId?: string;
   notes?: string;
+}
+
+/** REPAIR-PREVIEW-PARITY — was „Who does the work?" zusätzlich zur Reparatur mitgibt (keine Spalten von `repairs`). */
+export interface RepairCreateWorkInput {
+  inHouseWorkType?: RepairWorkType;
+  inHouseCost?: number;
+  workshopWorkType?: RepairWorkType;
+}
+
+function workTypeOf(v: unknown): RepairWorkType | undefined {
+  const t = repairText(v);
+  if (t === undefined) return undefined;
+  if (!oneOf(REPAIR_WORK_TYPES, t)) throw new RepairActionRejected('INVALID_WORK_TYPE', `unknown work type: ${t}`);
+  return t;
 }
 
 /**
@@ -166,7 +185,7 @@ export interface RepairCreateInput {
  *  • Arbeit im eigenen Haus (`internal`): keine Werkstatt — die Maske blendet die Auswahl dann aus.
  *  • Ein leeres Zahlenfeld und eine 0 sind in der Maske dasselbe („enter later").
  */
-export function normalizeRepairCreate(form: Partial<Repair>): RepairCreateInput {
+export function normalizeRepairCreate(form: Partial<Repair> & RepairCreateWorkInput): RepairCreateInput {
   const own = form.repairScope === 'OWN';
   const repairType = repairKind(form.repairType);
   let taxScheme: RepairTaxScheme = 'VAT_10';
@@ -177,6 +196,7 @@ export function normalizeRepairCreate(form: Partial<Repair>): RepairCreateInput 
     taxScheme = form.taxScheme;
   }
   const item = (v: unknown): string | undefined => (own ? undefined : repairText(v));
+  const keineWerkstatt = repairType === 'internal' || repairType === 'unset';
   const receivedAt = repairText(form.receivedAt);
   const datum = businessDateIssue(receivedAt, 'Received date');
   if (datum) throw new RepairActionRejected('INVALID_DATE', datum);
@@ -194,8 +214,11 @@ export function normalizeRepairCreate(form: Partial<Repair>): RepairCreateInput 
     itemDescription: item(form.itemDescription),
     issueDescription: repairText(form.issueDescription) ?? '',
     repairType,
-    workshopSupplierId: repairType === 'internal' ? undefined : repairText(form.workshopSupplierId),
-    plannedWorkshopSupplierId: repairType === 'internal' ? undefined : repairText(form.plannedWorkshopSupplierId),
+    workshopSupplierId: keineWerkstatt ? undefined : repairText(form.workshopSupplierId),
+    plannedWorkshopSupplierId: keineWerkstatt ? undefined : repairText(form.plannedWorkshopSupplierId),
+    inHouseWorkType: repairType === 'internal' || repairType === 'hybrid' ? workTypeOf(form.inHouseWorkType) : undefined,
+    inHouseCost: repairType === 'internal' || repairType === 'hybrid' ? (money(form.inHouseCost, 'inHouseCost') || undefined) : undefined,
+    workshopWorkType: keineWerkstatt ? undefined : workTypeOf(form.workshopWorkType),
     estimatedCost: money(form.estimatedCost, 'estimatedCost') || undefined,
     internalCost: money(form.internalCost, 'internalCost') || undefined,
     chargeToCustomer: own ? undefined : (money(form.chargeToCustomer, 'chargeToCustomer') || undefined),
@@ -219,12 +242,19 @@ export interface RepairHousePort {
   categoryExists: (id: string) => boolean;
 }
 
+/** Die Anlage samt der Arbeit, die `createRepair` als Zeile anlegt. */
+export type RepairCreatePlan = Partial<Repair> & {
+  internalCostMirrored?: number;
+  workshopWorkType?: RepairWorkType;
+  inHouseWork?: { workType: RepairWorkType; costAmount: number };
+};
+
 /**
  * Die Anlage, wie das Haus sie schreibt: geprüft, und bei eigener Ware mit den Angaben DES
  * ARTIKELS. Belegnummer, Gutscheincode, Anfangsstatus, Bestandsstatus `in_repair` und der
  * Platzhalter-Kunde der eigenen Ware entstehen danach in `createRepair` — nie aus einer Eingabe.
  */
-export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort): Partial<Repair> {
+export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort): RepairCreatePlan {
   if (!input.issueDescription) {
     throw new RepairActionRejected('ISSUE_REQUIRED', 'describe the issue or the requested repair');
   }
@@ -286,6 +316,9 @@ export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort
     taxScheme: input.taxScheme,
     workshopSupplierId: input.workshopSupplierId,
     plannedWorkshopSupplierId: input.plannedWorkshopSupplierId,
+    plannedWorkType: input.plannedWorkshopSupplierId ? input.workshopWorkType : undefined,
+    workshopWorkType: input.workshopWorkType,
+    inHouseWork: input.inHouseWorkType ? { workType: input.inHouseWorkType, costAmount: input.inHouseCost ?? 0 } : undefined,
     estimatedCost: input.estimatedCost,
     // CENTRAL-C3F FINAL — die eigenen Kosten bei der Aufnahme, aus der geteilten Ableitung.
     // POST-PARITY PP-13 — bei „hybrid" trägt die Werkstattzeile den Voranschlag (`createRepair`); ihn
@@ -305,7 +338,7 @@ export function planRepairCreate(input: RepairCreateInput, port: RepairHousePort
 }
 
 /** Der Auftrag vom zweiten Rechner: die Eingabe wie oben, statt der Fotos ihre Ablagekennungen. */
-export function repairCreateBody(form: Partial<Repair>, stagingIds: readonly string[]): Record<string, unknown> {
+export function repairCreateBody(form: Partial<Repair> & RepairCreateWorkInput, stagingIds: readonly string[]): Record<string, unknown> {
   const i = normalizeRepairCreate(form);
   const body: Record<string, unknown> = {
     repairScope: i.repairScope, issueDescription: i.issueDescription, repairType: i.repairType,
@@ -315,6 +348,7 @@ export function repairCreateBody(form: Partial<Repair>, stagingIds: readonly str
     'customerId', 'productId', 'lotId', 'itemCategoryId', 'itemBrand', 'itemModel', 'itemReference',
     'itemSerial', 'itemDescription', 'workshopSupplierId', 'plannedWorkshopSupplierId', 'estimatedCost', 'internalCost',
     'chargeToCustomer', 'estimatedReady', 'receivedAt', 'staffId', 'notes',
+    'inHouseWorkType', 'inHouseCost', 'workshopWorkType',
   ] as const) {
     if (i[k] !== undefined) body[k] = i[k];
   }

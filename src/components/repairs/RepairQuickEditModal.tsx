@@ -351,12 +351,12 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
               `Payable to ${nameOf(sid)} — booked as before (once the work starts).`, sid))}
             {quelle.plannedWorkshopId && (
               <p style={{ fontSize: 11, color: '#1D4ED8', margin: '6px 12px' }} data-quick-planned-workshop>
-                Planned: {nameOf(quelle.plannedWorkshopId)} — no work line yet, nothing booked. Add its work line when the bill is known.
+                Planned: {nameOf(quelle.plannedWorkshopId)}{rep.plannedWorkType ? ` · ${repairWorkTypeLabel(rep.plannedWorkType)}` : ''} — no work line yet, nothing booked. Add its work line when the bill is known.
               </p>
             )}
             <div style={{ padding: '8px 12px 12px' }}>
               {darf && !abgerechnet && !arbeit && (
-                <Button variant="secondary" onClick={() => setArbeit({ ...EMPTY_WORK_LINE, ...(quelle.plannedWorkshopId ? { source: 'external', supplierId: quelle.plannedWorkshopId } : {}) })}
+                <Button variant="secondary" onClick={() => setArbeit({ ...EMPTY_WORK_LINE, ...(quelle.plannedWorkshopId ? { source: 'external', supplierId: quelle.plannedWorkshopId, workType: rep.plannedWorkType || EMPTY_WORK_LINE.workType } : {}) })}
                   disabled={w.busy} data-quick-add-work>+ Add Work</Button>
               )}
               {arbeit && (
@@ -387,15 +387,9 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
             <div>
               <Input label="CHARGE TO CLIENT (BHD)" type="number" step="0.001" value={betrag.charge} disabled={abgerechnet || !darf}
                 onChange={(e) => { setBetrag({ ...betrag, charge: e.target.value }); setBetragGeaendert(true); }} data-quick-charge />
-              {abgerechnet
-                ? <p style={{ fontSize: 11, color: '#4B5563', marginTop: 6 }}>Invoiced — cost and charge are on the invoice and are frozen here.</p>
-                : (
-                  <div className="flex justify-end" style={{ marginTop: 8 }}>
-                    <Button variant="primary" onClick={() => void betraegeSpeichern()} disabled={w.busy || !betragGeaendert || !darf} data-quick-save-amounts>
-                      Save amounts
-                    </Button>
-                  </div>
-                )}
+              <p style={{ fontSize: 11, color: '#4B5563', marginTop: 6 }}>
+                {abgerechnet ? 'Invoiced — cost and charge are on the invoice and are frozen here.' : 'What the client pays. Locked once the repair is invoiced.'}
+              </p>
             </div>
             <div style={{ fontSize: 12, display: 'flex', flexDirection: 'column', gap: 4 }} data-quick-totals>
               <div className="flex justify-between"><span style={{ color: '#4B5563' }}>Work cost</span><span className="font-mono">{fmt(kosten.work)}</span></div>
@@ -410,10 +404,11 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
                 <span style={{ color: '#4B5563' }}>Cost lines</span><span className="font-mono" data-quick-lines-total>{fmt(kosten.linesTotal)}</span>
               </div>
               <div className="flex justify-between"><span style={{ fontWeight: 600 }}>Total actual cost</span><span className="font-mono" style={{ fontWeight: 600 }} data-quick-total-cost>{fmt(total)}</span></div>
+              {kosten.hasLines && <div style={{ fontSize: 11, color: '#4B5563', marginTop: -2 }}>Calculated from the open cost lines — not typed in.</div>}
               <div className="flex justify-between"><span style={{ color: '#4B5563' }}>Charge to client</span><span className="font-mono" data-quick-charge-total>{fmt(charge)}</span></div>
               <div className="flex justify-between" style={{ borderTop: '1px solid #E5E9EE', paddingTop: 4 }}>
                 <span style={{ fontWeight: 600 }}>Margin</span>
-                <span className="font-mono" style={{ fontWeight: 600, color: charge - total >= 0 ? '#15803D' : '#B91C1C' }} data-quick-margin>{fmt(charge - total)}</span>
+                <span className="font-mono" style={{ fontWeight: 600, color: charge - total >= 0 ? '#15803D' : '#B91C1C' }} data-quick-margin>{fmt(charge - total)} · {charge > 0 ? `${((charge - total) / charge * 100).toFixed(1)} %` : '—'}</span>
               </div>
             </div>
           </div>
@@ -451,6 +446,14 @@ export function RepairQuickEditModal({ repairId, onClose }: { repairId: string |
                 </div>
                 <p style={{ gridColumn: '1 / -1', fontSize: 11, color: '#4B5563', margin: 0 }}>{IN_HOUSE_LINE_NOTE}</p>
               </div>
+            )}
+          </div>
+
+          <div className="flex justify-end items-center gap-2" style={{ borderTop: '1px solid #E5E9EE', paddingTop: 12 }} data-quick-footer>
+            {betragGeaendert && <span style={{ fontSize: 12, color: '#92400E', marginRight: 'auto' }} data-quick-unsaved>Amounts changed — press Save to keep them.</span>}
+            <Button variant="ghost" onClick={onClose} data-quick-close>Close</Button>
+            {!abgerechnet && darf && (
+              <Button variant="primary" onClick={() => void betraegeSpeichern()} disabled={w.busy || !betragGeaendert} data-quick-save-amounts>Save</Button>
             )}
           </div>
         </div>

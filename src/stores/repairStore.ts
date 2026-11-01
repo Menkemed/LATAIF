@@ -18,6 +18,7 @@ import { canonicalRepairStatus, REPAIR_CUSTOMER_PAID_FROM, REPAIR_TAX_SCHEMES } 
 import {
   RepairActionRejected, repairInvoiceBlocker, repairInvoiceDate, repairInvoiceNotes, repairPickupTimestamp,
   type RepairInvoiceOptions,
+  type RepairCreatePlan,
 } from '@/core/repairs/repair-rules';
 import { reopenRepairTargets, repairTransitionFacts } from '@/core/repairs/repair-status-flow';
 import { getDatabase, saveDatabase } from '@/core/db/database';
@@ -573,7 +574,7 @@ interface RepairStore {
   getRepair: (id: string) => Repair | undefined;
   getRepairLines: (repairId: string) => RepairLine[];
   /** `internalCostMirrored`: der Betrag, den die Anlage nachweislich selbst gespiegelt hat (`repair-rules`). */
-  createRepair: (data: Partial<Repair> & { internalCostMirrored?: number }) => Repair;
+  createRepair: (data: RepairCreatePlan) => Repair;
   updateRepair: (id: string, data: Partial<Repair>) => void;
   /** REPAIR-PICKUP-DATE — `opts.pickedUpDate` (JJJJ-MM-TT) nur bei „picked_up": der tatsächliche Abholtag. */
   updateStatus: (id: string, status: RepairStatus, opts?: { pickedUpDate?: string }) => void;
@@ -666,6 +667,7 @@ function rowToRepair(row: Record<string, unknown>): Repair {
     externalVendor: row.external_vendor as string | undefined,
     workshopSupplierId: (row.workshop_supplier_id as string) || undefined,
     plannedWorkshopSupplierId: (row.planned_workshop_supplier_id as string | null) || undefined,
+    plannedWorkType: (row.planned_work_type as RepairWorkType | null) || undefined,
     estimatedCost: row.estimated_cost as number | undefined,
     actualCost: row.actual_cost as number | undefined,
     internalCost: (row.internal_cost as number) || 0,
@@ -763,11 +765,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       `INSERT INTO repairs (id, branch_id, repair_number, customer_id, product_id, lot_id,
         item_category_id, item_attributes, tax_scheme,
         item_brand, item_model, item_reference, item_serial, item_description,
-        issue_description, diagnosis, repair_type, external_vendor, workshop_supplier_id, planned_workshop_supplier_id,
+        issue_description, diagnosis, repair_type, external_vendor, workshop_supplier_id, planned_workshop_supplier_id, planned_work_type,
         estimated_cost, internal_cost, charge_to_customer,
         status, received_at, estimated_ready, voucher_code,
         notes, images, repair_scope, staff_id, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'received', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, repairNumber, effectiveCustomerId, data.productId || null, data.lotId || null,
        // STONES — die Steinliste normalisiert, Diamond Weight abgeleitet (wie beim Artikel).
        data.itemCategoryId || null, JSON.stringify(stonesOrThrow(data.itemCategoryId, (data.itemAttributes || {}) as Record<string, unknown>)), data.taxScheme || 'VAT_10',
@@ -775,7 +777,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
        data.itemSerial || null, data.itemDescription || null,
        data.issueDescription || '', data.diagnosis || null,
        data.repairType || 'internal', data.externalVendor || null, data.workshopSupplierId || null,
-       data.plannedWorkshopSupplierId || null,
+       data.plannedWorkshopSupplierId || null, data.plannedWorkType || null,
        data.estimatedCost || null, data.internalCost || 0, effectiveCharge,
        // BUSINESS-DATE — der gewählte Tag der Annahme (nachträglich erfasst); ohne Angabe jetzt.
        businessTimestamp(isBusinessDate(data.receivedAt) ? data.receivedAt : undefined, now), data.estimatedReady || null, voucherCode,
@@ -800,11 +802,11 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
       if (cost > 0) {
         db.run(
           `INSERT INTO repair_lines (id, branch_id, repair_id, position, supplier_id, work_type, cost_amount, status, created_at, updated_at)
-           VALUES (?, ?, ?, 1, ?, 'service', ?, 'OPEN', ?, ?)`,
-          [lineId, branchId, id, data.workshopSupplierId, cost, now, now]
+           VALUES (?, ?, ?, 1, ?, ?, ?, 'OPEN', ?, ?)`,
+          [lineId, branchId, id, data.workshopSupplierId, data.workshopWorkType || 'service', cost, now, now]
         );
         trackInsert('repair_lines', lineId, {
-          repairId: id, supplierId: data.workshopSupplierId, costAmount: cost, fromCreateRepair: true,
+          repairId: id, supplierId: data.workshopSupplierId, costAmount: cost, workType: data.workshopWorkType || 'service', fromCreateRepair: true,
         });
       }
     }
@@ -815,6 +817,10 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     eventBus.emit('repair.created', 'repair', id, { customerId: data.customerId, voucherCode });
     get().loadRepairs();
     get().loadRepairLines();
+
+    // REPAIR-PREVIEW-PARITY — „In-house" angekreuzt: die eigene Arbeit steht gleich als Zeile da, über denselben Weg wie
+    // „Add Work" (0.000 ist richtig und bucht nichts). So geht die gewählte Arbeitsart nicht verloren.
+    if (data.inHouseWork) get().addRepairLine(id, { workType: data.inHouseWork.workType, costAmount: data.inHouseWork.costAmount });
 
     return get().getRepair(id)!;
   },
@@ -923,6 +929,8 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     // sich der Plan, gilt dieselbe Regel wie nach einer Arbeitszeile (nur kosten- und statusneutral, vor Marge/Kopfkosten).
     if (data.plannedWorkshopSupplierId !== undefined
       && (before?.plannedWorkshopSupplierId || null) !== ((data.plannedWorkshopSupplierId as string | null) || null)) {
+      // Ohne geplante Werkstatt gibt es auch keine geplante Arbeitsart mehr.
+      if (!data.plannedWorkshopSupplierId) db.run('UPDATE repairs SET planned_work_type = NULL WHERE id = ?', [id]);
       const offen = get().repairLines.filter((l) => l.repairId === id && l.status === 'OPEN');
       const ws = (query('SELECT workshop_supplier_id AS w FROM repairs WHERE id = ?', [id])[0]?.w as string | null) ?? null;
       // Ohne jede Zeile ist eine Werkstatt im Kopf die Gebühr beim Anlegen / Altbestand — Werkstattarbeit.
@@ -1448,7 +1456,7 @@ export const useRepairStore = create<RepairStore>((set, get) => ({
     if (data.supplierId && !data.materialKind) {
       const plan = query('SELECT planned_workshop_supplier_id AS p FROM repairs WHERE id = ?', [repairId])[0]?.p;
       if (plan && plan === data.supplierId) {
-        db.run('UPDATE repairs SET planned_workshop_supplier_id = NULL, updated_at = ? WHERE id = ?', [now, repairId]);
+        db.run('UPDATE repairs SET planned_workshop_supplier_id = NULL, planned_work_type = NULL, updated_at = ? WHERE id = ?', [now, repairId]);
         trackUpdate('repairs', repairId, { plannedWorkshopSupplierId: null, plannedFulfilledByLine: id });
       }
     }

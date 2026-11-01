@@ -36,7 +36,7 @@ import { nextOrderStatus } from '@/core/orders/order-status-flow';
 import { repairStatusTargetsOfRow as statusTargetsOfRow } from '@/core/repairs/repair-transition-row';
 import { repairPhotoRefs } from '@/core/repairs/repair-media';
 import { SELECTABLE_WORKSHOP_SQL } from '@/core/repairs/repair-workshop-choice';
-import { REPAIR_WORK_SOURCE_LABEL, repairCostView, repairWorkSource } from '@/core/repairs/repair-work-source';
+import { REPAIR_WORK_SOURCE_LABEL, matchRepairWork, repairCostView, repairWorkSource, type RepairWorkFilter } from '@/core/repairs/repair-work-source';
 
 export const OP_PRODUCTS_LIST = 'products.list';
 export const OP_PRODUCTS_GET = 'products.get';
@@ -924,7 +924,7 @@ registerCommand(OP_ORDERS_GET, {
 const REPAIR_COLUMNS =
   'id, repair_number, customer_id, product_id, item_brand, item_model, item_serial, '
   + 'issue_description, diagnosis, repair_type, repair_scope, external_vendor, '
-  + 'workshop_supplier_id, planned_workshop_supplier_id, estimated_cost, actual_cost, internal_cost, charge_to_customer, '
+  + 'workshop_supplier_id, planned_workshop_supplier_id, planned_work_type, estimated_cost, actual_cost, internal_cost, charge_to_customer, '
   + 'margin, status, received_at, estimated_ready, tax_scheme, invoice_id, updated_at, revision';
 
 /**
@@ -932,7 +932,7 @@ const REPAIR_COLUMNS =
  * Arbeit und Material: dieselbe reine Ableitung wie Liste, Quick Edit und Detailseite (`repair-work-source`). Nur
  * gelesen — das Handy zeigt sie an, es rechnet nichts nach.
  */
-function repairWorkSummary(r: Row): CommandResult {
+function repairWorkInputs(r: Row) {
   const lines = rows(
     'SELECT id, status, supplier_id, work_type, material_kind, material_details, cost_amount FROM repair_lines WHERE repair_id = ?',
     [str(r.id)],
@@ -943,9 +943,15 @@ function repairWorkSummary(r: Row): CommandResult {
   }));
   const kopf = {
     repairType: str(r.repair_type), workshopSupplierId: str(r.workshop_supplier_id) || null,
-    plannedWorkshopSupplierId: str(r.planned_workshop_supplier_id) || null, issueDescription: str(r.issue_description),
+    plannedWorkshopSupplierId: str(r.planned_workshop_supplier_id) || null, plannedWorkType: str(r.planned_work_type) || null,
+    issueDescription: str(r.issue_description),
     internalCost: num(r.internal_cost), estimatedCost: r.estimated_cost === null ? null : num(r.estimated_cost),
   };
+  return { kopf, lines };
+}
+
+function repairWorkSummary(r: Row): CommandResult {
+  const { kopf, lines } = repairWorkInputs(r);
   const ws = repairWorkSource(kopf, lines);
   const cost = repairCostView(kopf, lines);
   const name = (id: string): string => str(rows('SELECT name FROM suppliers WHERE id = ?', [id])[0]?.name);
@@ -958,6 +964,8 @@ function repairWorkSummary(r: Row): CommandResult {
     workCost: cost.work,
     materialCost: cost.material,
     totalCost: cost.total,
+    // Vom Primary gerechnet — das Handy zeigt die Marge nur an (dieselbe Summe wie Liste und Detailseite).
+    margin: r.charge_to_customer === null ? null : num(r.charge_to_customer) - cost.total,
   };
 }
 
@@ -1051,6 +1059,7 @@ function repairDto(r: Row): CommandResult {
     externalVendor: str(r.external_vendor),
     workshopSupplierId: str(r.workshop_supplier_id),
     plannedWorkshopSupplierId: str(r.planned_workshop_supplier_id),
+    plannedWorkType: str(r.planned_work_type),
     estimatedCost: r.estimated_cost === null ? null : num(r.estimated_cost),
     actualCost: r.actual_cost === null ? null : num(r.actual_cost),
     internalCost: num(r.internal_cost),
@@ -1081,17 +1090,28 @@ registerCommand(OP_REPAIRS_LIST, {
     const branch = actorBranch(p);
     const q = searchOf(p);
     const like = `%${q.toLowerCase()}%`;
+    // REPAIR-PREVIEW-PARITY — dieselben Filter wie die Liste am Rechner (`matchRepairWork`), gerechnet am Primary.
+    const workType = typeof input(p).workType === 'string' ? String(input(p).workType) : '';
+    const source = typeof input(p).source === 'string' ? String(input(p).source) : '';
+    const gefiltert = !!(workType || source);
+    const grenze = gefiltert ? MAX_ROWS : limitOf(p);
     const list = q
       ? rows(
         `SELECT ${REPAIR_COLUMNS} FROM repairs
           WHERE branch_id = ? AND (LOWER(repair_number) LIKE ? OR LOWER(COALESCE(item_brand,'')) LIKE ?
             OR LOWER(COALESCE(item_model,'')) LIKE ?)
           ORDER BY received_at DESC LIMIT ?`,
-        [branch, like, like, like, limitOf(p)],
+        [branch, like, like, like, grenze],
       )
       : rows(`SELECT ${REPAIR_COLUMNS} FROM repairs WHERE branch_id = ? ORDER BY received_at DESC LIMIT ?`,
-        [branch, limitOf(p)]);
-    return { items: list.map(repairDto), truncated: list.length >= limitOf(p) };
+        [branch, grenze]);
+    if (!gefiltert) return { items: list.map(repairDto), truncated: list.length >= limitOf(p) };
+    const treffer = list.flatMap((r) => {
+      const { kopf, lines } = repairWorkInputs(r);
+      const m = matchRepairWork(kopf, lines, { workType: workType as RepairWorkFilter['workType'], source: source as RepairWorkFilter['source'] });
+      return m.match ? [{ ...repairDto(r), viaIssue: m.viaIssue }] : [];
+    });
+    return { items: treffer.slice(0, limitOf(p)), truncated: treffer.length > limitOf(p) };
   },
 });
 

@@ -36,7 +36,8 @@
 import { repairCostParts } from './repair-cost';
 import { repairStatusFlow } from './repair-status-flow';
 
-export type StoredRepairType = 'internal' | 'external' | 'hybrid';
+// REPAIR-PREVIEW-PARITY — „unset" (beim Anlegen nichts angekreuzt): die erste aktive Arbeit setzt die Art; Material allein nicht.
+export type StoredRepairType = 'internal' | 'external' | 'hybrid' | 'unset';
 export type RepairTypeKeptReason = 'HYBRID_KEPT' | 'INVOICED' | 'COST' | 'STATUS' | 'MIRROR';
 export type RepairMirrorHandling = 'NEUTRALIZED';
 
@@ -82,7 +83,7 @@ export interface RepairTypeDecision {
 }
 
 const EPS = 0.0005;
-const art = (t: string | null | undefined): StoredRepairType => (t === 'external' || t === 'hybrid' ? t : 'internal');
+const art = (t: string | null | undefined): StoredRepairType => (t === 'external' || t === 'hybrid' || t === 'unset' ? t : 'internal');
 
 /** Das bisherige Verhalten (seit v0.7.6, nur Zeilen): hochstufen auf hybrid, nie herabstufen. */
 export function legacyRepairType(current: StoredRepairType, workLines: RepairTypeFacts['workLines']): StoredRepairType {

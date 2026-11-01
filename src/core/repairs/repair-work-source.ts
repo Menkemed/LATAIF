@@ -42,6 +42,7 @@ export interface RepairWorkSourceInput {
   repairType?: string | null;
   workshopSupplierId?: string | null;
   plannedWorkshopSupplierId?: string | null;
+  plannedWorkType?: string | null;
   issueDescription?: string | null;
 }
 
@@ -108,7 +109,7 @@ export function repairWorkSource(r: RepairWorkSourceInput, lines: readonly Repai
   const lineIn = work.some((l) => !text(l.supplierId));
   const plannedRaw = text(r.plannedWorkshopSupplierId);
   const planned = plannedRaw && !lineShops.includes(plannedRaw) ? plannedRaw : null;
-  if (planned) entries.push({ source: 'external', supplierId: planned, workType: null, lineId: null, basis: 'planned' });
+  if (planned) entries.push({ source: 'external', supplierId: planned, workType: knownType(r.plannedWorkType), lineId: null, basis: 'planned' });
   // Ohne jede Zeile, oder solange die Altgebühr neben Zeilen weiter gilt (`repairHeaderFeeKept`), ist
   // `workshop_supplier_id` eine echte Zuordnung — sonst eine Ableitung aus Zeilen.
   const altWerkstatt = text(r.workshopSupplierId);
@@ -127,9 +128,9 @@ export function repairWorkSource(r: RepairWorkSourceInput, lines: readonly Repai
   const kind: RepairWorkSourceKind = inHouse && external ? 'hybrid' : external ? 'external' : inHouse ? 'inhouse' : 'none';
   const inHouseWithoutLine = inHouse && !lineIn;
   const externalWithoutLine = external && lineShops.length === 0;
-  const storedKind: RepairWorkSourceKind = stored === 'external' ? 'external' : stored === 'hybrid' ? 'hybrid' : 'inhouse';
+  const storedKind: RepairWorkSourceKind = stored === 'external' ? 'external' : stored === 'hybrid' ? 'hybrid' : stored === 'unset' ? 'none' : 'inhouse';
   return {
-    storedKind, typeConflict: kind !== 'none' && kind !== storedKind,
+    storedKind, typeConflict: kind !== 'none' && storedKind !== 'none' && kind !== storedKind,
     kind, inHouse, external,
     workshopIds: uniq(entries.filter((e) => e.source === 'external' && e.supplierId).map((e) => e.supplierId as string)),
     plannedWorkshopId: planned,
@@ -151,7 +152,7 @@ export const REPAIR_WORK_SOURCE_LABEL: Record<RepairWorkSourceKind, string> = {
   inhouse: 'In-house',
   external: 'External workshop',
   hybrid: 'Hybrid',
-  none: 'Not set',
+  none: 'Not set yet',
 };
 
 /** Die Arbeitsart als Wort der Masken („gold_work" → „Gold Work"). */
@@ -209,6 +210,13 @@ export function matchRepairWork(
   const workshop = f.workshopId || '';
   const workType = f.workType || '';
   if (source === 'hybrid' && ws.kind !== 'hybrid') return { match: false, viaIssue: false };
+  // REPAIR-PREVIEW-PARITY — noch niemand eingetragen („Not set"): „Unassigned" trifft, eine Quelle oder Werkstatt nicht.
+  if (ws.kind === 'none') {
+    if (workshop || (source && source !== 'unassigned')) return { match: false, viaIssue: false };
+    if (!workType) return { match: true, viaIssue: false };
+    const viaIssue = f.issueFallback !== false && !ws.hasWorkLines && issueMentions(r.issueDescription, workType);
+    return { match: viaIssue, viaIssue };
+  }
   const srcOk = (e: RepairWorkEntry): boolean => {
     if (!source || source === 'hybrid') return true;
     if (source === 'inhouse') return e.source === 'inhouse';
@@ -306,6 +314,66 @@ export function repairLineCostIssue(
   if (typeof cost !== 'number' || !Number.isFinite(cost) || cost < 0) return 'LINE_COST_INVALID';
   if (text(supplierId) && !(cost > 0)) return 'LINE_COST_REQUIRED';
   return null;
+}
+
+// ── „Who does the work?" der Anlegemaske — EINE Ableitung für Maske, Anlage und Test ─────────────
+
+export interface RepairCreateWorkDraft {
+  inHouse: boolean;
+  external: boolean;
+  inHouseWorkType: RepairWorkType;
+  /** Text wie im Feld: leer = keine Zusatzkosten. */
+  inHouseCost: string;
+  workshopId: string;
+  workshopWorkType: RepairWorkType;
+  /** Text wie im Feld: leer = die Gebühr folgt später. */
+  workshopFee: string;
+}
+
+export const EMPTY_CREATE_WORK: RepairCreateWorkDraft = {
+  inHouse: false, external: false, inHouseWorkType: 'polishing', inHouseCost: '',
+  workshopId: '', workshopWorkType: 'service', workshopFee: '',
+};
+
+/** Die Art aus den beiden Häkchen. Nichts angekreuzt ist erlaubt: „Not set", die Arbeit kommt später dazu. */
+export function repairCreateKind(d: Pick<RepairCreateWorkDraft, 'inHouse' | 'external'>): 'internal' | 'external' | 'hybrid' | 'unset' {
+  if (d.inHouse && d.external) return 'hybrid';
+  if (d.external) return 'external';
+  return d.inHouse ? 'internal' : 'unset';
+}
+
+const betrag = (s: string): number | null => (s.trim() === '' ? null : Number(s));
+
+/** Was noch nicht stimmt — nur an dem, was angekreuzt ist. Abgewählte Eingaben zählen nicht. */
+export function repairCreateWorkIssue(d: RepairCreateWorkDraft): string | null {
+  if (d.inHouse) {
+    const c = betrag(d.inHouseCost);
+    if (c !== null && (!Number.isFinite(c) || c < 0)) return 'Extra in-house cost must be a number of 0 or more.';
+  }
+  if (d.external) {
+    if (!text(d.workshopId)) return 'Choose the workshop, or untick “External workshop”.';
+    const f = betrag(d.workshopFee);
+    if (f !== null && (!Number.isFinite(f) || f < 0)) return 'Workshop fee must be a number of 0 or more.';
+  }
+  return null;
+}
+
+/** Die Felder für die Anlage: nur was angekreuzt ist; was abgewählt in der Maske steht, wird nicht gespeichert. */
+export function repairCreateWorkFields(d: RepairCreateWorkDraft): {
+  repairType: 'internal' | 'external' | 'hybrid' | 'unset';
+  workshopSupplierId?: string; estimatedCost?: number;
+  inHouseWorkType?: RepairWorkType; inHouseCost?: number; workshopWorkType?: RepairWorkType;
+} {
+  return {
+    repairType: repairCreateKind(d),
+    ...(d.inHouse ? { inHouseWorkType: d.inHouseWorkType, inHouseCost: betrag(d.inHouseCost) ?? 0 } : {}),
+    ...(d.external ? { workshopSupplierId: text(d.workshopId) ?? undefined, workshopWorkType: d.workshopWorkType, estimatedCost: betrag(d.workshopFee) || undefined } : {}),
+  };
+}
+
+/** Die schon bekannten Kosten der Anlage: was angekreuzt ist (Grundlage der „Estimated margin"). */
+export function repairCreateKnownCost(d: RepairCreateWorkDraft): number {
+  return (d.inHouse ? (betrag(d.inHouseCost) || 0) : 0) + (d.external ? (betrag(d.workshopFee) || 0) : 0);
 }
 
 export const REPAIR_LINE_COST_MESSAGE: Record<'LINE_COST_INVALID' | 'LINE_COST_REQUIRED', string> = {

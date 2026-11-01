@@ -237,9 +237,9 @@ const zeilen = (db: Db, rid: string) => {
     materialKind: v[3] as string | null, costAmount: Number(v[4]), status: String(v[5]), expenseId: v[6] as string | null }));
 };
 function kopf(db: Db, id: string) {
-  const r = row(db, 'SELECT repair_type, workshop_supplier_id, planned_workshop_supplier_id, issue_description, internal_cost, estimated_cost, actual_cost FROM repairs WHERE id = ?', [id]);
+  const r = row(db, 'SELECT repair_type, workshop_supplier_id, planned_workshop_supplier_id, planned_work_type, issue_description, internal_cost, estimated_cost, actual_cost FROM repairs WHERE id = ?', [id]);
   return { repairType: r.repair_type as string, workshopSupplierId: r.workshop_supplier_id as string | null,
-    plannedWorkshopSupplierId: r.planned_workshop_supplier_id as string | null, issueDescription: r.issue_description as string,
+    plannedWorkshopSupplierId: r.planned_workshop_supplier_id as string | null, plannedWorkType: r.planned_work_type as string | null, issueDescription: r.issue_description as string,
     internalCost: Number(r.internal_cost) || 0, estimatedCost: r.estimated_cost === null ? null : Number(r.estimated_cost),
     actualCost: r.actual_cost === null ? null : Number(r.actual_cost) };
 }
@@ -614,7 +614,7 @@ for (const weg of ['lokal', 'fern'] as const) {
   ok(/matchRepairWork\(rep, offeneZeilen\.get\(rep\.id\) \?\? \[\]/.test(liste) && /data-repair-filter-worktype/.test(liste)
     && /data-repair-filter-source/.test(liste) && /data-repair-filter-workshop/.test(liste) && /data-repair-filter-issue/.test(liste),
     'WIRE Liste: Arbeitsart-, Quellen- und Werkstattfilter über die geteilte Regel, mit Issue-Schalter');
-  ok(/const anlage = repairCreateWorkshopSplit\(form\);/.test(liste) && /data-repair-create-inhouse/.test(liste) && /data-repair-create-external/.test(liste)
+  ok(/const anlage = repairCreateWorkshopSplit\(\{ \.\.\.form, \.\.\.repairCreateWorkFields\(arbeit\) \}\);/.test(liste) && /data-repair-create-inhouse/.test(liste) && /data-repair-create-external/.test(liste)
     && !/REPAIR_TYPES\.map/.test(liste), 'WIRE New Repair: „Wer arbeitet?" statt Typ-Knöpfen; Werkstatt ohne Gebühr wird eingeplant');
   ok(/data-quick-work-section/.test(quick) && /data-quick-material-section/.test(quick) && /<RepairWorkLineForm/.test(quick)
     && /actualCost: kosten\.hasLines \? rep\.actualCost/.test(quick) && /repairCostView\(rep, offen\)/.test(quick),
@@ -622,6 +622,59 @@ for (const weg of ['lokal', 'fern'] as const) {
   ok(!/REPAIR_TYPES\.map/.test(detail) && /plannedWorkshopSupplierId/.test(detail) && /<RepairWorkLineForm/.test(detail)
     && /const totalCost = kostenSicht\.total;/.test(detail), 'WIRE Detailseite: kein Typ-Knopf, geplante Werkstatt, gemeinsame Zeilenmaske, Summe = Marge');
   ok(/repairLineCostIssue/.test(teile) && /source: 'inhouse'/.test(teile), 'WIRE Zeilenmaske: dieselbe Kostenregel, Standard eigene Arbeit');
+}
+
+// ── 7) REPAIR-PREVIEW-PARITY: „Who does the work?", Primary == PC2 ──
+{
+  const leer = ws.EMPTY_CREATE_WORK;
+  ok(ws.repairCreateKind({ inHouse: false, external: false }) === 'unset' && ws.repairCreateKind({ inHouse: true, external: false }) === 'internal'
+    && ws.repairCreateKind({ inHouse: false, external: true }) === 'external' && ws.repairCreateKind({ inHouse: true, external: true }) === 'hybrid',
+    'WORK die Art folgt den beiden Häkchen, nichts angekreuzt ist erlaubt');
+  ok(ws.repairCreateWorkIssue(leer) === null, 'WORK nichts angekreuzt ist kein Fehler');
+  ok(/workshop/i.test(String(ws.repairCreateWorkIssue({ ...leer, external: true }))), 'WORK External ohne Werkstatt sagt, was fehlt');
+  ok(/Workshop fee/.test(String(ws.repairCreateWorkIssue({ ...leer, external: true, workshopId: 'w', workshopFee: '-1' }))), 'WORK negative Gebühr');
+  ok(/in-house/i.test(String(ws.repairCreateWorkIssue({ ...leer, inHouse: true, inHouseCost: '-1' }))), 'WORK negative eigene Kosten');
+  ok(ws.repairCreateWorkIssue({ ...leer, inHouse: false, inHouseCost: '-1', external: false, workshopFee: '-5' }) === null, 'WORK abgewählte Eingaben zählen nicht');
+  const nurEigen = ws.repairCreateWorkFields({ ...leer, inHouse: true, inHouseWorkType: 'plating', inHouseCost: '', workshopId: 'w', workshopFee: '20' });
+  ok(nurEigen.repairType === 'internal' && nurEigen.inHouseCost === 0 && nurEigen.inHouseWorkType === 'plating' && nurEigen.workshopSupplierId === undefined && nurEigen.estimatedCost === undefined,
+    'WORK abgewählte Werkstatt und Gebühr werden nicht gespeichert');
+  ok(ws.repairCreateKnownCost({ ...leer, inHouse: true, inHouseCost: '5', workshopFee: '20' }) === 5 && ws.repairCreateKnownCost({ ...leer, inHouse: true, external: true, inHouseCost: '5', workshopFee: '20' }) === 25,
+    'WORK die Marge zählt nur Angekreuztes');
+  const nichts = ws.repairWorkSource({ repairType: 'unset' }, []);
+  ok(nichts.kind === 'none' && !nichts.typeConflict && nichts.entries.length === 0, 'WORK „unset" ist „Not set", kein Konflikt');
+  const m = (f: Record<string, unknown>, issue = 'Polish') => ws.matchRepairWork({ repairType: 'unset', issueDescription: issue } as never, [] as never, f as never);
+  ok(m({}).match && m({ source: 'unassigned' }).match && !m({ source: 'inhouse' }).match && !m({ source: 'external' }).match && !m({ source: 'hybrid' }).match && !m({ workshopId: 'w' }).match,
+    'FILTER „Not set": ohne Filter und bei Unassigned sichtbar, bei einer Quelle nicht');
+  ok(m({ workType: 'polishing' }).viaIssue && !m({ workType: 'polishing', issueFallback: false }).match && !m({ workType: 'service' }).match, 'FILTER „Not set" über das Issue');
+  const geplant = ws.repairWorkSource({ repairType: 'external', plannedWorkshopSupplierId: 'w', plannedWorkType: 'gold_work' }, []);
+  ok(geplant.entries[0].workType === 'gold_work' && ws.matchRepairWork({ repairType: 'external', plannedWorkshopSupplierId: 'w', plannedWorkType: 'gold_work' } as never, [] as never, { workType: 'gold_work' } as never).match,
+    'FILTER die geplante Arbeitsart zählt, ohne das Issue');
+
+  const typen = await import('../../src/core/repairs/repair-type-rule.ts');
+  const fakt = (currentType: string, workLines: Array<{ supplierId?: string | null }>) => typen.decideRepairType({ currentType, workLines, openLineTotal: 0 });
+  ok(fakt('unset', []).type === 'unset' && fakt('unset', [{}]).type === 'internal' && fakt('unset', [{ supplierId: 'w' }]).type === 'external' && fakt('unset', [{}, { supplierId: 'w' }]).type === 'hybrid',
+    'TYPE die erste Arbeit setzt die Art, ohne Arbeit bleibt „unset"');
+
+  const ergebnis: Record<string, string> = {};
+  for (const weg of ['lokal', 'fern'] as const) {
+    const db = freshDb();
+    db.run('UPDATE suppliers SET is_workshop = 1');
+    const vor = buchungen(db);
+    const hyb = ws.repairCreateWorkFields({ ...leer, inHouse: true, external: true, inHouseWorkType: 'polishing', workshopId: 'sup-1', workshopWorkType: 'plating', workshopFee: '20' });
+    const a = await anlegen(db, weg, hyb); reload();
+    const za = zeilen(db, a);
+    ok(kopf(db, a).repairType === 'hybrid' && za.some((l: { supplierId?: string; workType?: string; costAmount?: number }) => l.supplierId === 'sup-1' && l.workType === 'plating' && l.costAmount === 20)
+      && za.some((l: { supplierId?: string; workType?: string; costAmount?: number }) => !l.supplierId && l.workType === 'polishing' && l.costAmount === 0), `CREATE (${weg}) Hybrid: beide Zeilen mit gewählter Art (${S(za)})`);
+    const plan = ws.repairCreateWorkFields({ ...leer, external: true, workshopId: 'sup-1', workshopWorkType: 'gold_work' });
+    const b = await anlegen(db, weg, plan); reload();
+    const kb = kopf(db, b);
+    ok(kb.repairType === 'external' && kb.plannedWorkshopSupplierId === 'sup-1' && kb.plannedWorkType === 'gold_work' && zeilen(db, b).length === 0, `CREATE (${weg}) ohne Gebühr: eingeplant samt Art (${S(kb)})`);
+    const c = await anlegen(db, weg, ws.repairCreateWorkFields(leer)); reload();
+    ok(kopf(db, c).repairType === 'unset' && zeilen(db, c).length === 0, `CREATE (${weg}) nichts angekreuzt: „Not set"`);
+    ok(S(buchungen(db)) === S(vor), `CREATE (${weg}) das Anlegen bucht nichts`);
+    ergebnis[weg] = S([kopf(db, a).repairType, kb.plannedWorkType, kopf(db, c).repairType, za.map((l: { workType?: string; costAmount?: number }) => [l.workType, l.costAmount])]);
+  }
+  ok(ergebnis.lokal === ergebnis.fern, `CREATE Primary und PC2 legen dasselbe an (${ergebnis.lokal})`);
 }
 
 console.log(fails.length ? `\nFAIL — repair redesign A–G: ${PASS} passed, ${fails.length} failed` : `\nPASS — repair redesign A–G: ${PASS} passed, 0 failed`);

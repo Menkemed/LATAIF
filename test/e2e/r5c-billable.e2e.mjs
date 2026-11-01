@@ -613,10 +613,11 @@ try {
       ok(n === 'OK', `BLOCK ${wer} New Repair ${typ} angelegt (${n})`);
       ok(await warteAuf(() => !!idVon(issue(typ))), `BLOCK ${wer} ${typ} steht in der Datenbank`);
       const k = kopfR(idVon(issue(typ)));
-      // Die Aufnahme speichert bewusst keine Marge (`repairMargin`: „null" ist eine andere Aussage als 0) — die erste Zeile setzt sie.
+      // Die Aufnahme selbst speichert keine Marge — die erste Zeile setzt sie. In-house angekreuzt legt gleich die eigene Zeile 0.000 an (Vorschau F).
+      const mitZeile = typ !== 'External';
       ok(k.repair_type === soll && (k.planned_workshop_supplier_id || null) === plan && !k.workshop_supplier_id && Number(k.internal_cost || 0) === 0
-        && Number(k.charge_to_customer) === 90 && k.margin === null && k.actual_cost === null,
-        `BLOCK ${wer} ${typ}: Art ${soll}, Werkstatt ${plan ? 'nur eingeplant' : 'keine'}, keine Kosten, Preis 90, Marge noch offen (${S(k)})`);
+        && Number(k.charge_to_customer) === 90 && k.margin === (mitZeile ? 90 : null) && k.actual_cost === (mitZeile ? 0 : null),
+        `BLOCK ${wer} ${typ}: Art ${soll}, Werkstatt ${plan ? 'nur eingeplant' : 'keine'}, keine Kosten, Preis 90, Marge ${mitZeile ? 'aus der eigenen Zeile' : 'noch offen'} (${S(k)})`);
     }
     const inhouse = idVon(issue('In-house'));
     const nr = kopfR(inhouse).repair_number;

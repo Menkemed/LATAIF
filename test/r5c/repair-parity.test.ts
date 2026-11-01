@@ -1012,7 +1012,7 @@ for (const weg of ['fern', 'lokal'] as const) {
   // REPAIR-REDESIGN — die Art wird nicht mehr gewählt: „Wer arbeitet?" (In-house / Werkstatt / beides) ergibt sie,
   // die Detailseite zeigt sie aus den Arbeitszeilen. Steuer und Arbeitsart kommen weiter aus den Listen des Hauses.
   const teile = codeOf(src('src/components/repairs/RepairWorkParts.tsx'));
-  ok(/repairType: i && a \? 'hybrid' : a \? 'external' : 'internal'/.test(list) && !/REPAIR_TYPES\.map\(/.test(detail)
+  ok(/repairCreateKind\(arbeit\)/.test(list) && !/REPAIR_TYPES\.map\(/.test(detail)
     && /REPAIR_TAX_SCHEMES\.map\(/.test(list) && /REPAIR_TAX_SCHEMES\.map\(/.test(detail)
     && /REPAIR_WORK_TYPES\.map\(/.test(teile) && /<RepairWorkLineForm/.test(detail),
     'DOMAIN Reparaturart, Steuer und Arbeitsart kommen aus den Listen des Hauses');

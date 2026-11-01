@@ -67,7 +67,7 @@ export function repairWorkSourceText(ws: RepairWorkSource, nameOf: (supplierId: 
   if (ws.kind === 'hybrid') return [eigene, ...shops].join(' + ');
   if (ws.kind === 'external') return shops.join(', ') || 'Workshop not chosen yet';
   if (ws.kind === 'inhouse') return eigene;
-  return '—';
+  return 'No work assigned yet';
 }
 
 export interface WorkLineDraft {

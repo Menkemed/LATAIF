@@ -313,10 +313,34 @@
   }
 
   // ── Liste ────────────────────────────────────────────────────────────────────────────────────
+  // REPAIR-PREVIEW-PARITY — dieselben Filter wie am Rechner; gefiltert wird am Primary (`repairs.list`).
+  const RP_FILTER = { workType: '', source: '' };
+  const RP_ART_CHIPS = [['', 'All work'], ['polishing', 'Polishing'], ['service', 'Service'], ['gold_work', 'Gold Work'], ['engraving', 'Engraving']];
+  const RP_QUELLE_CHIPS = [['', 'All sources'], ['inhouse', 'In-house'], ['external', 'Workshop'], ['hybrid', 'Hybrid']];
+  function rpChips() {
+    const mal = (id, liste, feld, attr) => {
+      const box = $(id);
+      box.innerHTML = '';
+      liste.forEach(([wert, text]) => {
+        const an = RP_FILTER[feld] === wert;
+        const b = el('button', { type: 'button', class: 'secondary', [attr]: wert || 'all', 'aria-pressed': String(an) }, text);
+        b.style.cssText = 'flex: none; width: auto; margin: 0; min-height: 36px; padding: 8px 12px; font-size: 12px;'
+          + (an ? ' background: #715DE3; border-color: #715DE3; color: #FFFFFF;' : '');
+        b.onclick = () => { RP_FILTER[feld] = wert; rpChips(); rpLoadList($('rpSearch').value); };
+        box.appendChild(b);
+      });
+    };
+    mal('rpWorkTypeChips', RP_ART_CHIPS, 'workType', 'data-rp-filter-worktype');
+    mal('rpSourceChips', RP_QUELLE_CHIPS, 'source', 'data-rp-filter-source');
+  }
+
+  function rpArtWort(t) { return String(t || '').split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' '); }
+
   async function rpLoadList(q) {
     const box = $('rpList');
     box.innerHTML = '';
-    const r = await rpClient.read('repairs.list', { q: q || '', limit: 25 });
+    rpChips();
+    const r = await rpClient.read('repairs.list', { q: q || '', limit: 25, workType: RP_FILTER.workType, source: RP_FILTER.source });
     if (!r.ok) {
       rpSay('rpHomeError', r.status === 503
         ? 'The main computer is not answering right now (is LATAIF open on it?).'
@@ -334,6 +358,15 @@
         it.repairNumber + ' · ' + (it.itemBrand || '') + ' ' + (it.itemModel || '') + ' · ' + it.status + wer);
       b.onclick = () => rpOpen(it.id);
       card.appendChild(b);
+      // Wie die Karte der Vorschau: Problem, Arbeitsarten, Kosten und Preis — alles fertig vom Primary.
+      const w = it.work || {};
+      card.appendChild(el('div', { class: 'hint', 'data-rp-card-issue': it.repairNumber }, 'Issue: ' + (it.issueDescription || '—')));
+      if ((w.workTypes || []).length || it.viaIssue) {
+        card.appendChild(el('div', { class: 'hint', 'data-rp-card-types': it.repairNumber },
+          (w.workTypes || []).map(rpArtWort).join(', ') + (it.viaIssue ? ' Found via Issue' : '')));
+      }
+      card.appendChild(el('div', { class: 'hint', 'data-rp-card-money': it.repairNumber },
+        'Cost ' + Number(w.totalCost || 0).toFixed(3) + ' · Charge ' + Number(it.chargeToCustomer || 0).toFixed(3)));
       box.appendChild(card);
     });
   }
@@ -401,7 +434,7 @@
 
   function rpRenderLines(rep) {
     const lines = rep.lines || [];
-    $('rpLinesCard').classList.toggle('hidden', lines.length === 0);
+    $('rpLinesCard').classList.remove('hidden');
     $('rpLinesTotal').textContent = 'open ' + (rep.openLineTotal || 0);
     const box = $('rpLines');
     box.innerHTML = '';
@@ -414,11 +447,26 @@
       { titel: 'Materials / Parts', summe: w.materialCost, zeilen: material, key: 'material' },
     ];
     gruppen.forEach((g) => {
-      if (!g.zeilen.length) return;
       box.appendChild(el('div', { class: 'hint', 'data-rp-line-group': g.key },
         g.titel + (g.summe !== undefined ? ' — ' + g.summe : '')));
+      if (!g.zeilen.length) {
+        box.appendChild(el('div', { class: 'hint' }, g.key === 'work' ? 'No work line yet.' : 'No material.'));
+        return;
+      }
       g.zeilen.forEach(rpZeile);
     });
+    // Die Summen und die Marge rechnet der Primary (`work`); hier stehen sie nur.
+    const sum = $('rpTotals');
+    sum.innerHTML = '';
+    const reihe = (titel, wert, key) => {
+      const z = el('div', { 'data-rp-total': key }, titel + ': ' + (wert === null || wert === undefined ? '—' : Number(wert).toFixed(3)));
+      sum.appendChild(z);
+    };
+    reihe('Work cost', w.workCost, 'work');
+    reihe('Material cost', w.materialCost, 'material');
+    reihe('Total actual cost', w.totalCost, 'total');
+    reihe('Charge to client', rep.chargeToCustomer, 'charge');
+    reihe('Margin', w.margin, 'margin');
   }
 
   function rpZeile(l) {

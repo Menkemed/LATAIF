@@ -105,7 +105,7 @@ export function materialDescription(line: RepairLineView): string {
  * ohnehin als eigene Zeile erfasst wird.
  */
 export function showsInternalCostRow(repairType: string | undefined, internalCost: number): boolean {
-  if (repairType !== 'internal' && repairType !== 'hybrid') return false;
+  if (repairType !== 'internal' && repairType !== 'hybrid' && repairType !== 'unset') return false;
   return Number(internalCost) > 0;
 }
 

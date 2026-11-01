@@ -38,7 +38,8 @@ import { WriteError } from '@/components/shared/WriteError';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { quickRepairNext, repairStatusFlow } from '@/core/repairs/repair-status-flow';
 import {
-  matchRepairWork, repairCostView, repairCreateWorkshopSplit, repairWorkSource, repairWorkTypeLabel, type RepairSourceFilter,
+  EMPTY_CREATE_WORK, REPAIR_WORK_SOURCE_LABEL, matchRepairWork, repairCostView, repairCreateKind, repairCreateKnownCost, repairCreateWorkFields, repairCreateWorkIssue,
+  repairCreateWorkshopSplit, repairWorkSource, repairWorkTypeLabel, type RepairCreateWorkDraft, type RepairSourceFilter,
 } from '@/core/repairs/repair-work-source';
 import { RepairTypeConflictNote, RepairWorkSourceBadge, repairWorkSourceText } from '@/components/repairs/RepairWorkParts';
 import { matchRepairInvoice, repairInvoiceView, type RepairInvoiceFilter } from '@/core/repairs/repair-invoice-state';
@@ -51,7 +52,7 @@ import { saveSupplierCreate } from '@/core/masterdata/masterdata-save';
 import { productDisplayName, brandModelHidden } from '@/core/products/display-name';
 import { repairItemDisplayName } from '@/core/products/display-name';
 import { StonesEditor } from '@/components/products/StonesEditor';
-import { IN_HOUSE_COST_LABEL, IN_HOUSE_COST_HINT, IN_HOUSE_COST_PLACEHOLDER, IN_HOUSE_CREATE_ESTIMATE_NOTE, repairCostLabels } from '@/core/repairs/repair-line-view';
+import { IN_HOUSE_COST_PLACEHOLDER } from '@/core/repairs/repair-line-view';
 import { hasSelectableWorkshop, NO_WORKSHOP_HINT, workshopOptions } from '@/core/repairs/repair-workshop-choice';
 import { normalizeStoneAttributes, stonesApply } from '@/core/products/stones';
 
@@ -82,7 +83,7 @@ const SOURCE_FILTERS: { value: RepairSourceFilter; label: string }[] = [
   { value: 'inhouse', label: 'In-house' },
   { value: 'external', label: 'External workshop' },
   { value: 'hybrid', label: 'Hybrid' },
-  { value: 'unassigned', label: 'No workshop yet' },
+  { value: 'unassigned', label: 'Unassigned' },
 ];
 
 const STATUS_FILTERS: { value: RepairStatus | ''; label: string }[] = [
@@ -157,10 +158,12 @@ export function RepairList() {
   const perm = usePermission();
   const [form, setForm] = useState<Partial<Repair>>({
     repairScope: 'CUSTOMER',
-    repairType: 'internal',
     taxScheme: 'VAT_10',
     itemAttributes: {},
   });
+  // REPAIR-PREVIEW-PARITY — „Who does the work?": eigener Entwurf, damit Abwählen nichts löscht (erneut ankreuzen holt die
+  // Eingaben zurück). Gespeichert wird nur, was beim Anlegen angekreuzt ist (`repairCreateWorkFields`).
+  const [arbeit, setArbeit] = useState<RepairCreateWorkDraft>(EMPTY_CREATE_WORK);
   const [searchParams, setSearchParams] = useSearchParams();
   // R5C — dieselbe Liste, zwei Anschluesse hinter jeder Handlung (anlegen, abrechnen, weiterschalten).
   const w = useSharedWrites();
@@ -195,7 +198,7 @@ export function RepairList() {
 
   // REPAIR-REDESIGN — die Werkstatt der Anlage: NUR aktive, als Werkstatt markierte Lieferanten (ein schon gewählter
   // bleibt sichtbar). Eigene Arbeit ist kein Eintrag dieser Auswahl mehr, sondern das eigene Häkchen „In-house".
-  const supplierOptions = useMemo(() => workshopOptions(suppliers, [form.workshopSupplierId]), [suppliers, form.workshopSupplierId]);
+  const supplierOptions = useMemo(() => workshopOptions(suppliers, [arbeit.workshopId]), [suppliers, arbeit.workshopId]);
   const keineWerkstatt = !hasSelectableWorkshop(suppliers);
 
   const [showQuickSupplier, setShowQuickSupplier] = useState(false);
@@ -212,7 +215,7 @@ export function RepairList() {
     setQuickSupplierFehler('');
     const r = await saveSupplierCreate(neuerLieferant, { name: quickSupplierName, phone: quickSupplierPhone, isWorkshop: quickSupplierWorkshop });
     if (r.kind !== 'ok') { setQuickSupplierFehler(`Could not create supplier: ${fehlertext(r)}`); return; }
-    setForm(f => ({ ...f, workshopSupplierId: r.value.supplierId }));
+    setArbeit(a => ({ ...a, workshopId: r.value.supplierId }));
     setQuickSupplierName('');
     setQuickSupplierPhone('');
     setQuickSupplierWorkshop(true);
@@ -362,7 +365,15 @@ export function RepairList() {
     if (searchQuery) {
       r = r.filter(rep => {
         const customer = customers.find(c => c.id === rep.customerId);
-        return matchesDeep(rep, searchQuery, [customer, rep.product]);
+        // Wie die Vorschau: auch über Werkstatt, Arbeitsart und Materiallieferant (dieselben Angaben wie die Zeile).
+        const zeilen = offeneZeilen.get(rep.id) ?? [];
+        const ws = repairWorkSource(rep, zeilen);
+        const arbeitstext = [
+          ...ws.workshopIds.map(lieferantName),
+          ...ws.entries.map((e) => (e.workType ? repairWorkTypeLabel(e.workType) : '')),
+          ...zeilen.filter((l) => l.materialKind && l.supplierId).map((l) => lieferantName(l.supplierId as string)),
+        ].join(' ');
+        return matchesDeep(rep, searchQuery, [customer, rep.product, arbeitstext]);
       });
     }
     if (filterStatus) r = r.filter(rep => rep.status === filterStatus);
@@ -385,7 +396,7 @@ export function RepairList() {
     });
     return { filtered: sorted, ausIssue: viaIssue };
   }, [repairs, searchQuery, filterStatus, filterCustomerId, filterStaffId, sortDate, customers,
-    filterWorkType, filterSource, filterWorkshopId, issueFallback, offeneZeilen, filterInvoice, invoices]);
+    filterWorkType, filterSource, filterWorkshopId, issueFallback, offeneZeilen, filterInvoice, invoices, suppliers]);
   const anzahlRechnung = (f: RepairInvoiceFilter): number =>
     repairs.filter((rep) => matchRepairInvoice(repairInvoiceView(rep, invoices), f)).length;
 
@@ -403,7 +414,8 @@ export function RepairList() {
   const arbeitsFilterZuruecksetzen = () => { setFilterWorkType(''); setFilterSource(''); setFilterWorkshopId(''); setIssueFallback(true); setFilterInvoice(''); };
 
   function openNew() {
-    setForm({ repairScope: 'CUSTOMER', repairType: 'internal', taxScheme: 'VAT_10', itemAttributes: {} });
+    setForm({ repairScope: 'CUSTOMER', taxScheme: 'VAT_10', itemAttributes: {} });
+    setArbeit(EMPTY_CREATE_WORK);
     setCreateHinweis('');
     setShowNew(true);
   }
@@ -437,6 +449,8 @@ export function RepairList() {
       const steinFehler = normalizeStoneAttributes(form.itemCategoryId, form.itemAttributes as Record<string, unknown> | undefined).issues[0];
       if (steinFehler) { setCreateHinweis(steinFehler.message); return; }
     }
+    const arbeitsFehler = repairCreateWorkIssue(arbeit);
+    if (arbeitsFehler) { setCreateHinweis(arbeitsFehler); return; }
     setCreateHinweis('');
     // v0.7.4 — Workshop optional bei Create. Discovery-Over-Time-Pattern:
     // beim Annehmen weiss man oft Workshop+Cost noch nicht, das traegt man
@@ -458,7 +472,7 @@ export function RepairList() {
     }
     // REPAIR-REDESIGN — eine gewählte Werkstatt OHNE Gebühr ist eingeplant (`plannedWorkshopSupplierId`): keine
     // Arbeitszeile, keine Zuordnung als Altgebühr, keine Buchung. Mit Gebühr wie bisher: die Werkstattzeile entsteht.
-    const anlage = repairCreateWorkshopSplit(form);
+    const anlage = repairCreateWorkshopSplit({ ...form, ...repairCreateWorkFields(arbeit) });
     const r = await w.save('repairs.create', {
       local: () => createRepairOnPrimary(anlage),
       remote: () => repairCreateBody(anlage, fotos),
@@ -515,7 +529,7 @@ export function RepairList() {
   return (
     <PageLayout
       title="Repairs"
-      subtitle={`${activeCount} active repairs`}
+      subtitle={`${activeCount} active · ${repairs.length} total`}
       showSearch onSearch={setSearchQuery} searchPlaceholder="Search by repair #, customer, item, voucher..."
       actions={
         <div className="flex items-center gap-3">
@@ -690,10 +704,11 @@ export function RepairList() {
               style={{ width: 14, height: 14, accentColor: '#715DE3' }} />
             Also find older repairs without work lines by their Issue text (e.g. “Polish”)
           </label>
-          {arbeitsFilterAktiv && (
-            <button type="button" onClick={arbeitsFilterZuruecksetzen} className="cursor-pointer"
+          <span className="flex items-center gap-3">
+            <span style={{ fontSize: 11, color: '#4B5563' }} data-repair-showing>Showing {filtered.length} of {repairs.length}</span>
+            <button type="button" onClick={arbeitsFilterZuruecksetzen} className="cursor-pointer" data-repair-filter-reset
               style={{ fontSize: 11, color: '#5B3DCC', background: 'none', border: 'none', padding: '4px 8px' }}>Reset filters</button>
-          )}
+          </span>
         </div>
       </div>
 
@@ -888,6 +903,11 @@ export function RepairList() {
               <div className="font-mono" style={{ fontSize: 12, color: '#4B5563' }} title="Total actual cost (work + material + own costs)">
                 cost <Bhd v={kosten.total}/>
               </div>
+              <div style={{ fontSize: 10, color: '#6B7280', marginTop: 1 }} data-repair-cost-split={rep.repairNumber}>
+                {kosten.hasLines
+                  ? <>Work <Bhd v={kosten.work}/> · Mat. <Bhd v={kosten.material}/></>
+                  : kosten.fee > 0.0005 ? 'Workshop fee (no lines)' : 'No cost lines'}
+              </div>
               {rep.chargeToCustomer != null ? (
                 <>
                   <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={rep.chargeToCustomer}/></span>
@@ -915,7 +935,7 @@ export function RepairList() {
                     padding: '4px 10px', fontSize: 11, borderRadius: 4, border: '1px solid #D5D9DE',
                     color: '#0F0F10', background: '#FFFFFF', cursor: 'pointer',
                   }}
-                >Edit</button>
+                >Quick Edit</button>
               )}
               {showInvoiceShortcut && (
                 <button
@@ -976,7 +996,7 @@ export function RepairList() {
       })}
 
       {/* New Repair Modal */}
-      <Modal open={showNew} onClose={() => setShowNew(false)} title="New Repair" width={660}>
+      <Modal open={showNew} onClose={() => setShowNew(false)} title="New Repair" width={780}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 20, maxHeight: '65vh', overflowY: 'auto', paddingRight: 4 }}>
 
           <div>
@@ -1275,180 +1295,173 @@ export function RepairList() {
             />
           </div>
 
-          {/* REPAIR-REDESIGN — „Wer arbeitet?" statt Reparaturtyp UND Arbeitsquelle: eigene Arbeit, eine Werkstatt oder
-              beides. Daraus ergibt sich In-house / External / Hybrid (gespeichert wie bisher als Art der Reparatur). */}
+          {/* REPAIR-REDESIGN / REPAIR-PREVIEW-PARITY — „Wer arbeitet?" wie in der freigegebenen Vorschau F: jede Karte lässt sich
+              frei an- und abwählen, und erst angekreuzt erscheinen ihre Felder. Beide = Hybrid, keine = „Not set".
+              Abgewählte Eingaben bleiben im Entwurf (erneut ankreuzen holt sie zurück), gespeichert werden sie nicht. */}
           {(() => {
-            const innen = form.repairType === 'internal' || form.repairType === 'hybrid' || !form.repairType;
-            const aussen = form.repairType === 'external' || form.repairType === 'hybrid';
-            const setze = (i: boolean, a: boolean) => {
-              if (!i && !a) return;   // eine Seite bleibt immer — sonst arbeitet niemand
-              setForm({ ...form, repairType: i && a ? 'hybrid' : a ? 'external' : 'internal',
-                ...(a ? {} : { workshopSupplierId: undefined }) });
-            };
-            const anzeige = repairWorkSource({ repairType: form.repairType,
-              plannedWorkshopSupplierId: aussen ? form.workshopSupplierId : undefined }, []);
+            const art = repairCreateKind(arbeit);
+            const anzeige = repairWorkSource({ repairType: art, plannedWorkshopSupplierId: arbeit.external ? arbeit.workshopId : undefined }, []);
+            const name = arbeit.workshopId ? lieferantName(arbeit.workshopId) : 'the workshop';
+            const satz = art === 'hybrid' ? `own staff and ${name}`
+              : art === 'external' ? `done by ${name}`
+              : art === 'internal' ? 'done by own staff' : 'nothing ticked';
             const karte = (an: boolean): React.CSSProperties => ({
               border: `1px solid ${an ? '#715DE3' : '#E5E9EE'}`, background: an ? 'rgba(113,93,227,0.04)' : '#FFFFFF',
               borderRadius: 10, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 10,
             });
+            const auswahl: React.CSSProperties = { width: '100%', padding: '9px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 8, background: '#FFFFFF', color: '#0F0F10', minHeight: 40, marginTop: 6 };
+            const inhouseBehalten = !arbeit.inHouse && (arbeit.inHouseCost.trim() !== '' || arbeit.inHouseWorkType !== EMPTY_CREATE_WORK.inHouseWorkType);
+            const externBehalten = !arbeit.external && (!!arbeit.workshopId || arbeit.workshopFee.trim() !== '' || arbeit.workshopWorkType !== EMPTY_CREATE_WORK.workshopWorkType);
+            const behalten = (attr: Record<string, boolean>) => (
+              <p {...attr} style={{ fontSize: 11, color: '#4B5563', margin: '0 0 0 28px', lineHeight: 1.5 }}>
+                Your entries are kept here: tick again to use them. They are not saved while unticked.
+              </p>
+            );
             return (
-              <div data-repair-create-work>
-                <div className="flex items-center justify-between" style={{ marginBottom: 8 }}>
-                  <span className="text-overline" style={{ display: 'block' }}>WHO DOES THE WORK?</span>
-                  <span className="flex items-center gap-2" style={{ fontSize: 11, color: '#4B5563' }}>
-                    This repair is <RepairWorkSourceBadge kind={anzeige.kind} />
-                  </span>
-                </div>
-                <p style={{ fontSize: 11, color: '#4B5563', margin: '0 0 8px' }}>Tick what applies — both is fine. Work lines can be added or changed later.</p>
-                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                  <div style={karte(innen)}>
-                    <label className="flex gap-3 cursor-pointer" style={{ alignItems: 'flex-start' }}>
-                      <input type="checkbox" checked={innen} onChange={() => setze(!innen, aussen)} data-repair-create-inhouse
-                        style={{ width: 16, height: 16, marginTop: 2, accentColor: '#715DE3' }} />
-                      <span>
-                        <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>In-house — own staff</span>
-                        <span style={{ display: 'block', fontSize: 11, color: '#4B5563' }}>Polishing, cleaning, small work. No payable.</span>
-                      </span>
-                    </label>
+              <div data-repair-create-work style={{ border: '1px solid #E5E9EE', borderRadius: 12, padding: 16, display: 'flex', flexDirection: 'column', gap: 12 }}>
+                <div className="flex justify-between" style={{ gap: 12, alignItems: 'flex-start' }}>
+                  <div>
+                    <span style={{ display: 'block', fontSize: 15, fontWeight: 600, color: '#0F0F10' }}>Who does the work?</span>
+                    <p style={{ fontSize: 12, color: '#4B5563', margin: '4px 0 0' }}>Tick what applies — both is fine. You can add or change work lines later.</p>
                   </div>
-                  <div style={karte(aussen)}>
-                    <label className="flex gap-3 cursor-pointer" style={{ alignItems: 'flex-start' }}>
-                      <input type="checkbox" checked={aussen} onChange={() => setze(innen, !aussen)} data-repair-create-external
-                        style={{ width: 16, height: 16, marginTop: 2, accentColor: '#715DE3' }} />
-                      <span>
-                        <span style={{ display: 'block', fontSize: 13, fontWeight: 600, color: '#0F0F10' }}>External workshop</span>
-                        <span style={{ display: 'block', fontSize: 11, color: '#4B5563' }}>Sent out to a workshop or goldsmith. Its fee becomes the payable to that workshop.</span>
-                      </span>
-                    </label>
-                    {aussen && (
-                      <div style={{ paddingLeft: 28 }}>
+                  <div style={{ textAlign: 'right', flexShrink: 0 }}>
+                    <RepairWorkSourceBadge kind={anzeige.kind} size={12} />
+                    <div style={{ fontSize: 11, color: '#4B5563', marginTop: 4 }}>Set automatically from the work below</div>
+                  </div>
+                </div>
+                <div style={karte(arbeit.inHouse)}>
+                  <label className="flex gap-3 cursor-pointer" style={{ alignItems: 'flex-start' }}>
+                    <input type="checkbox" checked={arbeit.inHouse} onChange={() => setArbeit({ ...arbeit, inHouse: !arbeit.inHouse })} data-repair-create-inhouse
+                      style={{ width: 18, height: 18, marginTop: 2, accentColor: '#715DE3' }} />
+                    <span>
+                      <span style={{ display: 'block', fontSize: 14, fontWeight: 600, color: '#0F0F10' }}>In-house — own staff</span>
+                      <span style={{ display: 'block', fontSize: 12, color: '#4B5563' }}>Polishing, cleaning, small work. No payable; cost only if extra (not salary).</span>
+                    </span>
+                  </label>
+                  {arbeit.inHouse && (
+                    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, paddingLeft: 28 }} data-repair-create-inhouse-fields>
+                      <div>
+                        <span className="text-overline">WORK TYPE</span>
+                        <select value={arbeit.inHouseWorkType} onChange={(e) => setArbeit({ ...arbeit, inHouseWorkType: e.target.value as RepairWorkType })}
+                          style={auswahl} data-repair-create-inhouse-type>
+                          {REPAIR_WORK_TYPES.filter((t) => t !== 'spare_part').map((t) => <option key={t} value={t}>{repairWorkTypeLabel(t)}</option>)}
+                        </select>
+                      </div>
+                      <Input label="EXTRA IN-HOUSE COST (BHD)" type="number" step="0.001" min="0" placeholder={IN_HOUSE_COST_PLACEHOLDER}
+                        value={arbeit.inHouseCost} onChange={(e) => setArbeit({ ...arbeit, inHouseCost: e.target.value })} data-repair-create-inhouse-cost />
+                    </div>
+                  )}
+                  {inhouseBehalten && behalten({ 'data-repair-create-kept-inhouse': true })}
+                </div>
+                <div style={karte(arbeit.external)}>
+                  <label className="flex gap-3 cursor-pointer" style={{ alignItems: 'flex-start' }}>
+                    <input type="checkbox" checked={arbeit.external} onChange={() => setArbeit({ ...arbeit, external: !arbeit.external })} data-repair-create-external
+                      style={{ width: 18, height: 18, marginTop: 2, accentColor: '#715DE3' }} />
+                    <span>
+                      <span style={{ display: 'block', fontSize: 14, fontWeight: 600, color: '#0F0F10' }}>External workshop</span>
+                      <span style={{ display: 'block', fontSize: 12, color: '#4B5563' }}>Sent out to a workshop or goldsmith. Its fee becomes the payable to that workshop.</span>
+                    </span>
+                  </label>
+                  {arbeit.external && (
+                    <div style={{ paddingLeft: 28, display: 'flex', flexDirection: 'column', gap: 8 }} data-repair-create-external-fields>
+                      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, minmax(0, 1fr))', gap: 12 }}>
                         <SearchSelect
-                          label="WORKSHOP"
+                          label="WORKSHOP *"
                           placeholder="Pick a workshop / goldsmith"
                           options={supplierOptions}
-                          value={form.workshopSupplierId || ''}
-                          onChange={sid => setForm({ ...form, workshopSupplierId: sid || undefined })}
+                          value={arbeit.workshopId}
+                          onChange={sid => setArbeit({ ...arbeit, workshopId: sid || '' })}
                         />
-                        {keineWerkstatt && (
-                          <p data-repair-no-workshop-hint style={{ fontSize: 11, color: '#B45309', marginTop: 6, lineHeight: 1.5 }}>{NO_WORKSHOP_HINT}</p>
-                        )}
-                        <button onClick={() => { setQuickSupplierWorkshop(true); setShowQuickSupplier(true); }} data-repair-quick-supplier-open
-                          className="cursor-pointer transition-colors"
-                          style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, marginTop: 6, padding: 0 }}
-                        >+ New Supplier</button>
-                        <p style={{ fontSize: 11, color: '#4B5563', marginTop: 6, lineHeight: 1.5 }}>
-                          With a workshop fee below, its work line is created now. Without a fee the workshop is only planned —
-                          nothing is booked until you add its work line with the real cost. Not decided yet? Leave it empty.
-                        </p>
+                        <div>
+                          <span className="text-overline">WORK TYPE</span>
+                          <select value={arbeit.workshopWorkType} onChange={(e) => setArbeit({ ...arbeit, workshopWorkType: e.target.value as RepairWorkType })}
+                            style={auswahl} data-repair-create-external-type>
+                            {REPAIR_WORK_TYPES.map((t) => <option key={t} value={t}>{repairWorkTypeLabel(t)}</option>)}
+                          </select>
+                        </div>
+                        <Input label="WORKSHOP FEE (BHD)" type="number" step="0.001" min="0" placeholder="enter later"
+                          value={arbeit.workshopFee} onChange={(e) => setArbeit({ ...arbeit, workshopFee: e.target.value })} data-repair-create-fee />
                       </div>
-                    )}
-                  </div>
+                      {keineWerkstatt && (
+                        <p data-repair-no-workshop-hint style={{ fontSize: 11, color: '#B45309', margin: 0, lineHeight: 1.5 }}>{NO_WORKSHOP_HINT}</p>
+                      )}
+                      <button onClick={() => { setQuickSupplierWorkshop(true); setShowQuickSupplier(true); }} data-repair-quick-supplier-open
+                        className="cursor-pointer transition-colors"
+                        style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 11, padding: 0, alignSelf: 'flex-start' }}
+                      >+ New Supplier</button>
+                      <p style={{ fontSize: 11, color: '#4B5563', margin: 0, lineHeight: 1.5 }}>
+                        Only suppliers marked “Is Workshop”. With a fee, a workshop work line is created; without one, the workshop is assigned and the fee follows later.
+                      </p>
+                    </div>
+                  )}
+                  {externBehalten && behalten({ 'data-repair-create-kept-external': true })}
                 </div>
-                <div className="flex flex-wrap items-center gap-1" style={{ marginTop: 8, fontSize: 11, color: '#4B5563' }}>
-                  <span style={{ marginRight: 4 }}>Status steps:</span>
-                  {repairStatusFlow(form.repairType, form.repairScope).map((st) => (
-                    <span key={st} style={{ fontSize: 10, color: '#0F0F10', background: '#FFFFFF', border: `1px solid ${st === 'sent_to_workshop' ? '#93C5FD' : '#D5D9DE'}`, borderRadius: 999, padding: '2px 8px' }}>
-                      {repairWorkTypeLabel(st)}
-                    </span>
-                  ))}
+                <div style={{ background: '#F2F7FA', borderRadius: 10, padding: '12px 14px', display: 'flex', flexDirection: 'column', gap: 6 }}>
+                  <div style={{ fontSize: 13 }} data-repair-create-summary>
+                    <span style={{ color: '#4B5563' }}>This repair is:</span> <strong>{REPAIR_WORK_SOURCE_LABEL[anzeige.kind]}</strong> <span style={{ color: '#4B5563' }}>— {satz}</span>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-1" style={{ fontSize: 12, color: '#4B5563' }} data-repair-create-steps>
+                    <span style={{ marginRight: 4 }}>Status steps:</span>
+                    {repairStatusFlow(art, form.repairScope).map((st) => (
+                      <span key={st} style={{ fontSize: 11, color: '#0F0F10', background: '#FFFFFF', border: `1px solid ${st === 'sent_to_workshop' ? '#93C5FD' : '#D5D9DE'}`, borderRadius: 999, padding: '3px 9px' }}>
+                        {repairWorkTypeLabel(st)}
+                      </span>
+                    ))}
+                  </div>
                 </div>
               </div>
             );
           })()}
 
-          <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
-            <span className="text-overline" style={{ marginBottom: 12 }}>COSTS</span>
-            {form.repairType === 'hybrid' ? (
-              <div style={{ display: 'grid', gridTemplateColumns: form.repairScope === 'OWN' ? '1fr 1fr' : '1fr 1fr 1fr', gap: 16, marginTop: 12 }}>
-                <Input label={`${IN_HOUSE_COST_LABEL} (BHD)`} type="number" placeholder="0"
-                  value={form.internalCost || ''}
-                  onChange={e => setForm({ ...form, internalCost: Number(e.target.value) || undefined })} />
-                <Input label="WORKSHOP FEE (BHD)" type="number" placeholder="0"
-                  value={form.estimatedCost || ''}
-                  onChange={e => setForm({ ...form, estimatedCost: Number(e.target.value) || undefined })} />
-                {form.repairScope !== 'OWN' && (
-                  <Input label="CHARGE TO CLIENT (BHD)" type="number" placeholder="0 = free"
-                    value={form.chargeToCustomer || ''}
-                    onChange={e => setForm({ ...form, chargeToCustomer: Number(e.target.value) || undefined })} />
-                )}
-              </div>
-            ) : (
-              <div style={{ display: 'grid', gridTemplateColumns: form.repairScope === 'OWN' ? '1fr' : '1fr 1fr', gap: 20, marginTop: 12 }}>
-                <Input label={form.repairType === 'internal' ? `${repairCostLabels('internal').estimated} (BHD, OPTIONAL)` : 'WORKSHOP FEE (BHD, OPTIONAL)'}
-                  type="number" placeholder={form.repairType === 'internal' ? IN_HOUSE_COST_PLACEHOLDER : 'enter later'}
-                  value={form.estimatedCost || ''}
-                  onChange={e => setForm({ ...form, estimatedCost: Number(e.target.value) || undefined })} />
-                {form.repairScope !== 'OWN' && (
-                  <Input label="CHARGE TO CLIENT (BHD)" type="number" placeholder="0 = free repair"
-                    value={form.chargeToCustomer || ''}
-                    onChange={e => setForm({ ...form, chargeToCustomer: Number(e.target.value) || undefined })} />
-                )}
-              </div>
-            )}
-            {form.repairType !== 'external' && (
-              <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
-                {IN_HOUSE_COST_HINT}{form.repairType === 'internal' ? ` ${IN_HOUSE_CREATE_ESTIMATE_NOTE}` : ''}
-              </p>
-            )}
-
-            {form.repairScope !== 'OWN' && (
-              <div style={{ marginTop: 16 }}>
-                <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>SERVICE TAX SCHEME (FOR INVOICE)</span>
-                <div className="flex gap-2" style={{ marginTop: 8 }}>
-                  {REPAIR_TAX_SCHEMES.map(scheme => (
-                    <button key={scheme} onClick={() => setForm({ ...form, taxScheme: scheme })}
-                      className="cursor-pointer rounded transition-all duration-200"
-                      style={{
-                        padding: '7px 14px', fontSize: 12,
-                        border: `1px solid ${form.taxScheme === scheme ? '#715DE3' : '#D5D9DE'}`,
-                        color: form.taxScheme === scheme ? '#715DE3' : '#6B7280',
-                        background: form.taxScheme === scheme ? 'rgba(113,93,227,0.06)' : 'transparent',
-                      }}>{scheme === 'ZERO' ? '0% (no VAT)' : 'VAT 10%'}</button>
-                  ))}
+          <div style={{ border: '1px solid #E5E9EE', borderRadius: 12, padding: 16, display: 'flex', flexDirection: 'column', gap: 14 }} data-repair-create-price>
+            {form.repairScope !== 'OWN' ? (
+              <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 18 }}>
+                <Input label="CHARGE TO CLIENT (BHD)" type="number" step="0.001" min="0" placeholder="0 = free repair"
+                  value={form.chargeToCustomer || ''}
+                  onChange={e => setForm({ ...form, chargeToCustomer: Number(e.target.value) || undefined })} data-repair-create-charge />
+                <div>
+                  <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>SERVICE TAX SCHEME</span>
+                  <div className="flex gap-2" style={{ marginTop: 8 }}>
+                    {REPAIR_TAX_SCHEMES.map(scheme => (
+                      <button key={scheme} onClick={() => setForm({ ...form, taxScheme: scheme })}
+                        className="cursor-pointer rounded transition-all duration-200" data-repair-create-tax={scheme}
+                        style={{
+                          flex: 1, padding: '7px 14px', fontSize: 12,
+                          border: `1px solid ${form.taxScheme === scheme ? '#715DE3' : '#D5D9DE'}`,
+                          color: form.taxScheme === scheme ? '#FFFFFF' : '#6B7280',
+                          background: form.taxScheme === scheme ? '#715DE3' : 'transparent',
+                        }}>{scheme === 'ZERO' ? '0 %' : 'VAT 10 %'}</button>
+                    ))}
+                  </div>
                 </div>
               </div>
-            )}
-
-            {form.repairScope === 'OWN' ? (
-              (() => {
-                const totalCost = (form.estimatedCost || 0) + (form.repairType === 'hybrid' ? (form.internalCost || 0) : 0);
-                if (totalCost <= 0) return null;
+            ) : null}
+            {(() => {
+              const bekannt = repairCreateKnownCost(arbeit);
+              if (form.repairScope === 'OWN') {
+                if (bekannt <= 0) return null;
                 return (
-                  <div className="rounded font-mono" style={{
-                    marginTop: 12, padding: 12, background: '#F2F7FA', border: '1px solid #E5E9EE',
-                    fontSize: 13, display: 'flex', justifyContent: 'space-between',
-                  }}>
+                  <div className="rounded font-mono" style={{ padding: 12, background: '#F2F7FA', border: '1px solid #E5E9EE', fontSize: 13, display: 'flex', justifyContent: 'space-between' }}>
                     <span style={{ color: '#6B7280' }}>Cost added to product on Ready</span>
-                    <span style={{ color: '#0F0F10' }}><Bhd v={totalCost}/> BHD</span>
+                    <span style={{ color: '#0F0F10' }}><Bhd v={bekannt}/> BHD</span>
                   </div>
                 );
-              })()
-            ) : (
-              <>
-                {(() => {
-                  const totalCost = (form.estimatedCost || 0) + (form.repairType === 'hybrid' ? (form.internalCost || 0) : 0);
-                  const charge = form.chargeToCustomer || 0;
-                  if (totalCost <= 0 || charge <= 0) return null;
-                  const margin = charge - totalCost;
-                  return (
-                    <div className="rounded font-mono" style={{
-                      marginTop: 12, padding: 12, background: '#F2F7FA', border: '1px solid #E5E9EE',
-                      fontSize: 13, display: 'flex', justifyContent: 'space-between',
-                    }}>
-                      <span style={{ color: '#6B7280' }}>
-                        Estimated Margin{form.repairType === 'hybrid' && ` (charge − internal − workshop)`}
-                      </span>
-                      <span style={{ color: margin >= 0 ? '#7EAA6E' : '#AA6E6E' }}><Bhd v={margin}/> BHD</span>
-                    </div>
-                  );
-                })()}
-                {(form.chargeToCustomer || 0) === 0 && (
-                  <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
-                    Charge = 0 → Free repair, no invoice needed. Can go directly to Picked Up after completion.
-                  </p>
-                )}
-              </>
-            )}
+              }
+              const charge = form.chargeToCustomer || 0;
+              const marge = charge - bekannt;
+              return (
+                <>
+                  <div style={{ fontSize: 12, color: '#4B5563' }} data-repair-create-margin>
+                    Estimated margin <strong className="font-mono" style={{ color: marge >= 0 ? '#15803D' : '#B91C1C' }}><Bhd v={marge}/></strong> (charge − known costs)
+                  </div>
+                  {charge === 0 && (
+                    <p style={{ fontSize: 11, color: '#6B7280', margin: 0 }}>
+                      Charge = 0 → Free repair, no invoice needed. Can go directly to Picked Up after completion.
+                    </p>
+                  )}
+                </>
+              );
+            })()}
           </div>
 
           {/* BUSINESS-DATE — der Tag der Annahme ist wählbar (nachträglich erfasste Reparatur); vorbelegt mit heute. */}
@@ -1505,7 +1518,10 @@ export function RepairList() {
 
           {/* R5C — der Ausgang des Anlegens, auf beiden Rechnern an derselben Stelle. */}
           <WriteError text={createHinweis || w.fehler} />
-          <div className="flex justify-end gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
+          <div className="flex justify-end items-center gap-3" style={{ marginTop: 8, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
+            {!arbeit.inHouse && !arbeit.external && (
+              <span style={{ fontSize: 12, color: '#92400E', marginRight: 'auto' }} data-repair-create-none>No work ticked yet — saved as “Not set”, add work later.</span>
+            )}
             <Button variant="ghost" onClick={() => setShowNew(false)}>Cancel</Button>
             <Button
               variant="primary"
