@@ -222,7 +222,7 @@ async function main(): Promise<void> {
   }
 
   // ── C/D: verknuepfter Artikel — der Koordinator weist ab, nichts wird teilweise geschrieben ──
-  for (const table of ['invoice_lines', 'purchase_lines', 'stock_lots', 'consignments']) {
+  for (const table of ['invoice_lines', 'consignments']) {
     const db = newDb(SQL);
     addProduct(db, 'p-1', { receipt: true });
     db.run(`INSERT INTO ${table} (id, product_id, frozen_price) VALUES ('r-1','p-1', 99)`);
@@ -243,6 +243,32 @@ async function main(): Promise<void> {
     const notes = db.exec(`SELECT notes FROM products WHERE id='p-1'`)[0].values[0][0];
     ok(notes === null, `CASE-C ${table}: and the allowed field was NOT committed on its own (${String(notes)})`);
     ok(dumpAll(db, table) === historyBefore, `CASE-C ${table}: the historical row is byte-identical`);
+  }
+
+  // ── E: Artikel aus einem Einkauf (Owner-Entscheidung) — Verkaufs- und Mindestpreis frei, Einkaufspreis gesperrt ──
+  for (const table of ['purchase_lines', 'stock_lots']) {
+    const db = newDb(SQL);
+    addProduct(db, 'p-1', { receipt: true });
+    db.run(`INSERT INTO ${table} (id, product_id, frozen_price) VALUES ('r-1','p-1', 99)`);
+    const co = new MediaDbCoordinator(db as never, new UnusedGateway());
+    const historyBefore = dumpAll(db, table);
+    co.applyProductTextEditDurably({
+      tenantId: TENANT, branchId: BRANCH, entityId: 'p-1', batchId: 'b-sale-' + table,
+      productEdit: mobilePriceEdit([['planned_sale_price', 165], ['min_sale_price', 150]], [150, 140]),
+    });
+    const after = priceRow(db, 'p-1');
+    ok(Number(after[0]) === 100 && Number(after[1]) === 165 && Number(after[2]) === 150,
+      `CASE-E ${table}: sale and minimum price moved, the purchase price did not (${JSON.stringify(after.slice(0, 3))})`);
+    let thrown: unknown = null;
+    try {
+      co.applyProductTextEditDurably({
+        tenantId: TENANT, branchId: BRANCH, entityId: 'p-1', batchId: 'b-buy-' + table,
+        productEdit: mobilePriceEdit([['purchase_price', 110], ['planned_sale_price', 170]], [100, 165]),
+      });
+    } catch (e) { thrown = e; }
+    ok((thrown as { message?: string })?.message === 'MOBILE_PRICE_NOT_ELIGIBLE', `CASE-E ${table}: the purchase price stays refused`);
+    ok(JSON.stringify(priceRow(db, 'p-1')) === JSON.stringify(after), `CASE-E ${table}: and nothing of that attempt was written`);
+    ok(dumpAll(db, table) === historyBefore, `CASE-E ${table}: the purchase record is byte-identical`);
   }
 
   // ── §6 ATOMAR: die Verknuepfung entsteht NACH der Vorpruefung ────────────

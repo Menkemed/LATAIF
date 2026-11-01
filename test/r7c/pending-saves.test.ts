@@ -391,6 +391,64 @@ const onDisk = (id: string) => (disk.files.has(id) ? JSON.parse(disk.files.get(i
   ok(c.kind === 'ok' && c.replayed === true && countNote('photo2') === 1, 'R1 schon gebucht: die Klärung braucht die Fotoablage nicht (Replay aus dem Nachweis)');
 }
 
+// ══ Klären fragt nur, und Entfernen ist kein Erledigt ══
+{
+  signIn();
+  const antwort = (value: unknown, status = 200) => (async () => new Response(JSON.stringify({ ok: status === 200, value }), { status })) as unknown as typeof fetch;
+  const verloren = (async () => { throw new TypeError('lost'); }) as unknown as typeof fetch;
+  let aufrufe = 0;
+  const zaehlt = (value: unknown) => (async (u: unknown) => { if (!String(u).endsWith('/api/command/status')) aufrufe++; return new Response(JSON.stringify({ ok: true, value }), { status: 200 }); }) as unknown as typeof fetch;
+  const offen = async (body: Record<string, unknown>) => {
+    const a = new save.CommandSaveAttempt('x.clarify');
+    const out = await a.send(body, verloren);
+    return { a, out };
+  };
+  const zahl = () => pend.pendingRecords(pend.currentPendingContext(), 'x.clarify').length;
+  const alt = async (a: InstanceType<typeof save.CommandSaveAttempt>) => {
+    const rec = pend.pendingRecords(pend.currentPendingContext(), 'x.clarify').find((r) => r.commandId === a.commandId)!;
+    await pend.persistPending({ ...rec, updatedAt: new Date(Date.now() - 120_000).toISOString() });
+    save.resetLiveAttemptsForTest();
+    return save.attemptForPending(pend.pendingRecords(pend.currentPendingContext(), 'x.clarify').find((r) => r.commandId === a.commandId)!);
+  };
+
+  const eins = await offen({ n: 1 });
+  ok(eins.out.kind === 'unknown' && zahl() === 1, 'CLARIFY eine verlorene Antwort steht als offener Vorgang da');
+  const saved = await eins.a.clarify(zaehlt({ state: 'completed' }));
+  ok(saved.kind === 'saved' && zahl() === 0 && eins.a.isSettled() && aufrufe === 0, `CLARIFY schon gespeichert: Vorgang beendet, nichts ging noch einmal hinaus (${J(saved)})`);
+  ok(/WAS saved/.test(save.describeClarify(saved)), 'CLARIFY die Meldung sagt, dass es gespeichert war');
+
+  const zwei = await offen({ n: 2 });
+  const refused = await zwei.a.clarify(antwort({ state: 'rejected', code: 'NOPE', message: 'not allowed' }));
+  ok(refused.kind === 'refused' && zahl() === 0 && /not allowed/.test(save.describeClarify(refused)), `CLARIFY abgelehnt: der echte Grund, Vorgang beendet (${J(refused)})`);
+
+  const drei = await offen({ n: 3 });
+  const jung = await drei.a.clarify(antwort({ state: 'absent' }));
+  ok(jung.kind === 'unknown' && zahl() === 1, `CLARIFY unbekannt und frisch: er kann noch laufen, also weiter offen (${J(jung)})`);
+  const a3 = await alt(drei.a);
+  const nie = await a3.clarify(zaehlt({ state: 'absent' }));
+  ok(nie.kind === 'not_saved' && zahl() === 1 && !a3.isSettled() && aufrufe === 0, `CLARIFY nie angekommen: nichts wird von selbst gesendet, und der Vorgang bleibt stehen (${J(nie)})`);
+  const gesendet = await a3.send({ n: 3 }, (async () => new Response(JSON.stringify({ ok: true, value: { id: 'x' } }), { status: 200 })) as unknown as typeof fetch);
+  ok(gesendet.kind === 'ok' && zahl() === 0, 'CLARIFY erst der ausdrückliche Entschluss sendet, mit derselben Kennung');
+
+  const vier = await offen({ n: 4 });
+  for (const [was, f] of [['Netz weg', verloren], ['Fehler am Primary', antwort(null, 503)], ['unlesbar', antwort({})]] as const) {
+    const u = await vier.a.clarify(f);
+    ok(u.kind === 'unknown' && zahl() === 1 && !vier.a.isSettled(), `CLARIFY ${was}: Ausgang bleibt offen, nichts wird als erledigt behandelt (${J(u)})`);
+  }
+  const konflikt = await vier.a.clarify(antwort({ state: 'conflict' }));
+  ok(konflikt.kind === 'conflict' && pend.pendingRecords(pend.currentPendingContext(), 'x.clarify')[0]?.state === 'conflict', 'CLARIFY anderer Inhalt unter der Kennung: als Konflikt markiert');
+  ok(await vier.a.abandon() && zahl() === 0 && vier.a.isSettled(), 'REMOVE entfernt die Erinnerung und beendet den Versuch');
+
+  const bar = src('src/components/shared/PendingSavesBar.tsx');
+  ok(/data-testid="pending-save-remove" disabled=\{busy !== null\} onClick=\{\(\) => void clarify\(r, true\)\}/.test(bar), 'REMOVE fragt zuerst den Primary');
+  ok(/NOT known whether this save reached the main computer/.test(bar) && !/WAS saved/.test(bar.slice(bar.indexOf('async function remove'), bar.indexOf('function dismissNote'))),
+    'REMOVE meldet nie „erledigt"');
+  const reg = src('src/core/bridge/command-registry.ts');
+  ok(/return \{ kind: 'not_executed', code: err\.code, message: err\.message \};/.test(reg), 'ANTWORT „nicht ausgeführt" kommt als klare Antwort, nicht als Störung');
+  const t = fehlertext({ kind: 'not_executed', code: 'PRODUCT_EDIT_NOT_APPLIED', message: 'the item changed' });
+  ok(/the item changed/.test(t) && !/No answer/.test(t), `ANTWORT die Maske nennt den Grund und sagt nicht „keine Antwort" (${t})`);
+}
+
 // ══ Verdrahtung: Maske, Leiste, Ablage, Meldungen ══
 {
   const sw = src('src/core/data/shared-write.ts');

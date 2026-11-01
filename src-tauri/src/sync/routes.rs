@@ -89,6 +89,8 @@ pub fn api_routes(state: Arc<AppState>) -> Router<Arc<AppState>> {
         // CENTRAL-C1 — der EINZIGE Weg fuer einen Auftrag von einem anderen Rechner. Feste
         // Namensliste, keine SQL-Uebergabe, kein generisches Ausfuehren; hinter derselben Anmeldung.
         .route("/command", post(command_execute))
+        // Nur fragen, was aus einer Kennung wurde: fuehrt nichts aus, sieht nur die eigenen Vorgaenge.
+        .route("/command/status", post(command_status))
         .route_layer(middleware::from_fn_with_state(state, auth::auth_middleware));
 
     Router::new()
@@ -324,6 +326,69 @@ async fn command_execute(
         }
         Err(e) => error_response(e),
     }
+}
+
+#[derive(Deserialize)]
+struct CommandStatusRequest {
+    #[serde(rename = "commandId")]
+    command_id: String,
+    #[serde(default)]
+    payload: serde_json::Value,
+}
+
+/// „Clarify now": Was weiss der durable Nachweis ueber diese Kennung? Liest die Geschaeftsdatei und
+/// beruehrt die Brueckenmaschine nicht. Eine unlesbare Datei ist keine Aussage ueber den Vorgang.
+async fn command_status(
+    State(state): State<Arc<AppState>>,
+    Extension(claims): Extension<Claims>,
+    Json(req): Json<CommandStatusRequest>,
+) -> axum::response::Response {
+    use axum::response::IntoResponse;
+    match command_status_lookup(
+        &state.frontend_db_path,
+        &claims.tenant_id,
+        &claims.branch_id,
+        &claims.sub,
+        &req.command_id,
+        &crate::bridge::payload_fingerprint(&req.payload),
+    ) {
+        Some(value) => (StatusCode::OK, Json(serde_json::json!({ "ok": true, "value": value }))).into_response(),
+        None => error_response(crate::bridge::BridgeError::NotReady),
+    }
+}
+
+/// Der Vorgang des angemeldeten Absenders. Eine fremde Kennung ist fuer ihn `absent`, wie eine unbekannte.
+pub(crate) fn command_status_lookup(
+    db_path: &std::path::Path,
+    tenant_id: &str,
+    branch_id: &str,
+    user_id: &str,
+    command_id: &str,
+    payload_hash: &str,
+) -> Option<serde_json::Value> {
+    let conn = super::product_query::open_read_only(db_path)?;
+    let row = conn
+        .query_row(
+            "SELECT payload_hash, status, error_code, error_message FROM remote_command_ledger
+              WHERE command_id = ?1 AND tenant_id = ?2 AND branch_id = ?3 AND user_id = ?4",
+            rusqlite::params![command_id, tenant_id, branch_id, user_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Option<String>>(2)?,
+                    r.get::<_, Option<String>>(3)?,
+                ))
+            },
+        )
+        .optional()
+        .ok()?;
+    Some(match row {
+        None => serde_json::json!({ "state": "absent" }),
+        Some((hash, _, _, _)) if hash != payload_hash => serde_json::json!({ "state": "conflict" }),
+        Some((_, status, _, _)) if status == "completed" => serde_json::json!({ "state": "completed" }),
+        Some((_, _, code, message)) => serde_json::json!({ "state": "rejected", "code": code, "message": message }),
+    })
 }
 
 /// Die Antwort des Renderers als HTTP-Status + Rumpf.
@@ -3774,5 +3839,46 @@ mod mobile_upload_role_tests {
         for r in ["ACCOUNTANT", "backoffice", " backoffice "] {
             assert!(!role_may_edit_products(r), "{r} has no products.edit");
         }
+    }
+}
+
+#[cfg(test)]
+mod command_status_tests {
+    use super::command_status_lookup;
+
+    fn ledger() -> (std::path::PathBuf, rusqlite::Connection) {
+        let dir = std::env::temp_dir().join(format!("lataif-cmd-status-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lataif.db");
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE remote_command_ledger (command_id TEXT PRIMARY KEY, tenant_id TEXT, branch_id TEXT, user_id TEXT,
+               op TEXT, payload_hash TEXT, status TEXT, result_json TEXT, error_code TEXT, error_message TEXT, protocol INTEGER, created_at TEXT);
+             INSERT INTO remote_command_ledger VALUES ('ok-1','t','b','u','products.update','h1','completed','{}',NULL,NULL,1,'now');
+             INSERT INTO remote_command_ledger VALUES ('no-1','t','b','u','products.update','h2','rejected',NULL,'NOPE','not allowed',1,'now');",
+        )
+        .unwrap();
+        (path, conn)
+    }
+
+    #[test]
+    fn it_reports_only_what_the_ledger_proves() {
+        let (path, _conn) = ledger();
+        let ask = |id: &str, user: &str, hash: &str| command_status_lookup(&path, "t", "b", user, id, hash).unwrap();
+        assert_eq!(ask("ok-1", "u", "h1")["state"], "completed");
+        let no = ask("no-1", "u", "h2");
+        assert_eq!(no["state"], "rejected");
+        assert_eq!(no["code"], "NOPE");
+        assert_eq!(no["message"], "not allowed");
+        assert_eq!(ask("unbekannt", "u", "h1")["state"], "absent");
+        // Dieselbe Kennung mit anderem Inhalt, und die Kennung eines anderen Absenders.
+        assert_eq!(ask("ok-1", "u", "anders")["state"], "conflict");
+        assert_eq!(ask("ok-1", "fremd", "h1")["state"], "absent");
+    }
+
+    #[test]
+    fn an_unreadable_file_is_no_statement_about_the_command() {
+        let dir = std::env::temp_dir().join(format!("lataif-cmd-status-{}", uuid::Uuid::new_v4()));
+        assert!(command_status_lookup(&dir.join("fehlt.db"), "t", "b", "u", "x", "h").is_none());
     }
 }

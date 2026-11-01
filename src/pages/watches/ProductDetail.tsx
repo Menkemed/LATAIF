@@ -155,11 +155,14 @@ export function ProductDetail() {
 
   // PURCHASE-EDIT D13 — `?edit=1` (aus „Edit item" der Einkaufsbearbeitung) öffnet die Maske einmal, sauber wie der Knopf.
   const autoEditDone = useRef(false);
+  // Der Stand beim Öffnen der Maske: Ein Fernauftrag nennt ihn, damit er nichts Neueres überschreibt.
+  const gesehenerStand = useRef<string | undefined>(undefined);
   useEffect(() => {
     if (searchParams.get('edit') !== '1' || !product || !perm.canEditProducts || autoEditDone.current) return;
     autoEditDone.current = true;
     setImagesDirty(false);
     setDraftSeeded(false);
+    gesehenerStand.current = product.updatedAt;
     setEditing(true);
   }, [searchParams, product, perm.canEditProducts]);
 
@@ -440,6 +443,7 @@ export function ProductDetail() {
       ...(editReason.trim() ? { editReason: editReason.trim() } : {}),
       ...(skuVergeben ? { assignSku: true as const } : {}),
     };
+    const stand = gesehenerStand.current ? { expectedUpdatedAt: gesehenerStand.current } : {};
 
     // CENTRAL-UI-PARITY R4B — der TEXTWEG geht ueber die gemeinsame Schreibweiche: am Primary
     // dieselbe durable Funktion wie bisher, am Client die vorhandene geprueste Fernbuchung
@@ -451,7 +455,7 @@ export function ProductDetail() {
       if (aendern.remote && Object.keys(diff).length === 0 && !skuVergeben) { setEditing(false); return; }
       const r = await aendern.save({
         local: async () => await editProductTextDurably(id, textPayload, Object.keys(zusatz).length ? zusatz : undefined),
-        remote: () => ({ id, ...diff, ...zusatz }),
+        remote: () => ({ id, ...diff, ...zusatz, ...stand }),
         shape: () => ({ status: 'edited' } as EditProductResult),
       });
       if (!mountedRef.current || idRef.current !== startId) return;
@@ -512,7 +516,7 @@ export function ProductDetail() {
     const r = await aendern.save({
       local: async () => await editProductWithMedia(id, textPayload, { srcs: form.images || [], resolved, status }, undefined, undefined,
         Object.keys(zusatz).length ? zusatz : undefined),
-      remote: () => ({ id, ...textDiff, gallery, ...zusatz }),
+      remote: () => ({ id, ...textDiff, gallery, ...zusatz, ...stand }),
       shape: () => ({ status: 'edited' } as EditProductResult),
     });
     // Stale-save guard: the user navigated to another product or the view
@@ -627,6 +631,7 @@ export function ProductDetail() {
                   // FINAL gallery, so an image edit can never be based on a half-loaded baseline.
                   setImagesDirty(false);
                   setDraftSeeded(false);
+                  gesehenerStand.current = product.updatedAt;
                   setEditing(true);
                 }}><Edit3 size={14} /> Edit</Button>}
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>

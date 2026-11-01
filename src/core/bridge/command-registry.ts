@@ -295,11 +295,13 @@ export async function executeCommand(op: string, payload: unknown, actor?: Comma
       // R7C R3 — die Kennungskollision ist belegt (der Nachweis hält die Kennung für eine andere
       // Anfrage): DIESE Anfrage lief nachweislich nicht. Früher kam sie als Störung (500, ohne
       // `outcome`) an und sah beim Client wie „unbekannt" aus — anders als derselbe Konflikt aus dem
-      // Kennungsspeicher der Brücke. Alle übrigen Nicht-Zustandekommen bleiben, was sie sind.
+      // Kennungsspeicher der Brücke.
       if (err.code === 'COMMAND_ID_CONFLICT') {
         return { kind: 'not_executed', code: BRIDGE_COMMAND_ID_CONFLICT, message: 'this command id is already used for a different request' };
       }
-      return { kind: 'infrastructure_error', code: err.code };
+      // Die Maschine hat zurückgerollt und nichts festgehalten (`runRemoteCommand`): auch das ist eine klare
+      // Antwort. Als Störung sah es beim Client wie „keine Antwort" aus und blieb als offener Vorgang stehen.
+      return { kind: 'not_executed', code: err.code, message: err.message };
     }
     if (err instanceof TransactionUnhealthyError) {
       // Auch das ist KEIN fachliches Nein: dieser Rechner kann nichts mehr bestaetigen, bis er

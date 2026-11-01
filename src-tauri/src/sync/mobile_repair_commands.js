@@ -408,6 +408,8 @@
     const err = (body && body.error) || '';
     if (status === 200 || status === 201) return { kind: 'ok', code: '' };
     if (status === 409 && body && body.outcome === 'not_executed') {
+      // Nur der Kennungskonflikt bleibt offen stehen. Jedes andere „nicht ausgefuehrt" ist eine klare Antwort.
+      if (err && err !== 'BRIDGE_COMMAND_ID_CONFLICT') return { kind: 'rejected', code: String(err) };
       return { kind: 'conflict', code: String(err || 'BRIDGE_COMMAND_ID_CONFLICT') };
     }
     if (status === 409 || status === 422 || status === 400) return { kind: 'rejected', code: String(err || 'REJECTED') };

@@ -122,6 +122,10 @@ export type EditProductResult =
  * so the two diff identically. `images` is deliberately NOT here — the gallery
  * is owned by the durable media system, never by a product-column write.
  */
+const MOBILE_PRICE_NOT_ELIGIBLE = 'MOBILE_PRICE_NOT_ELIGIBLE';
+const PRICE_LOCK_MESSAGE = 'This price cannot be changed here: the item is linked to a sale, offer, order, consignment, agent transfer, production, repair or return. '
+  + 'A purchase price is corrected under Purchase → Edit. Nothing was changed.';
+
 export function buildProductEditColumns(
   cur: Record<string, unknown> | undefined,
   data: Partial<Product>,
@@ -136,7 +140,12 @@ export function buildProductEditColumns(
     taxScheme: 'tax_scheme', expectedMargin: 'expected_margin',
     supplierName: 'supplier_name', purchaseSource: 'purchase_source', paidFrom: 'paid_from', notes: 'notes',
   };
-  const dd = data as Record<string, unknown>;
+  const dd = { ...(data as Record<string, unknown>) };
+  // Die erwartete Marge folgt dem Verkaufspreis, wie in der Maske am Primary. PC2 und Handy schicken sie nicht mit.
+  if ('plannedSalePrice' in dd && !('expectedMargin' in dd)) {
+    const vk = dd.plannedSalePrice as number | null | undefined;
+    dd.expectedMargin = vk ? vk - Number(dd.purchasePrice ?? cur?.purchase_price ?? 0) : null;
+  }
   for (const [k, c] of Object.entries(map)) {
     if (!(k in dd)) continue;
     const target = (dd[k] ?? null) as string | number | null;
@@ -1228,6 +1237,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     } catch (e) {
       if (isSkuTakenRefusal(e)) { retryEditBatches.delete(id); retryEditSkus.delete(id); return { status: 'blocked', errorCode: SKU_TAKEN, message: (e as Error).message }; }
       const msg = (e as { message?: string })?.message ?? String(e);
+      if (msg === MOBILE_PRICE_NOT_ELIGIBLE) { retryEditBatches.delete(id); retryEditSkus.delete(id); return { status: 'blocked', errorCode: msg, message: PRICE_LOCK_MESSAGE }; }
       if (/BASELINE_CHANGED|PLAN_CONFLICT/.test(msg)) { retryEditSkus.delete(id); return { status: 'edit_conflict', errorCode: msg }; }
       return { status: 'edit_incomplete', errorCode: msg, batchId };
     }
@@ -1304,6 +1314,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     } catch (e) {
       if (isSkuTakenRefusal(e)) { retryEditSkus.delete(id); return { status: 'blocked', errorCode: SKU_TAKEN, message: (e as Error).message }; }
       const msg = (e as { message?: string })?.message ?? String(e);
+      if (msg === MOBILE_PRICE_NOT_ELIGIBLE) { retryEditSkus.delete(id); return { status: 'blocked', errorCode: msg, message: PRICE_LOCK_MESSAGE }; }
       if (/BASELINE_CHANGED|CONFLICT/.test(msg)) { retryEditSkus.delete(id); return { status: 'edit_conflict', errorCode: msg }; }
       return { status: 'edit_incomplete', errorCode: msg, batchId };
     }

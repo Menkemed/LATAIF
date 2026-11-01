@@ -289,6 +289,10 @@ const PRICE_LOCK_RELATIONS: [(&str, &str); 13] = [
     ("repairs", "Repair"),
 ];
 
+/// Was ein Einkauf bindet: nur den Einkaufspreis. Verkaufs- und Mindestpreis bleiben frei (Owner-Entscheidung),
+/// wie `PURCHASE_ONLY_RELATIONS` in `src/core/products/price-eligibility.ts`.
+const PURCHASE_ONLY_RELATIONS: [&str; 2] = ["purchase_lines", "stock_lots"];
+
 /// Das Ergebnis dieser Auskunft. `Unknown` ist ausdruecklich kein Sammelbecken, sondern eine eigene
 /// Aussage: "gesperrt, aber der Grund ist NICHT sicher bekannt" — dann nennt die Seite auch keinen.
 /// Einen falschen Grund zu behaupten waere schlimmer als gar keinen.
@@ -301,7 +305,7 @@ enum PriceVerdict {
     Unknown,
 }
 
-fn price_verdict(conn: &Connection, product_id: &str) -> PriceVerdict {
+fn price_verdict(conn: &Connection, product_id: &str, sale_price: bool) -> PriceVerdict {
     // A — eigener, freier Bestand. Gelesen wird die echte Spalte. Ein fehlender Datensatz, ein
     // NULL-Wert oder eine Klasse, die diese Anzeige nicht kennt, sperrt OHNE Begruendung.
     match conn.query_row(
@@ -318,6 +322,9 @@ fn price_verdict(conn: &Connection, product_id: &str) -> PriceVerdict {
     // ebenfalls, ist aber kein Beleg fuer eine Verknuepfung und wird deshalb auch nicht als einer
     // ausgegeben.
     for (table, label) in PRICE_LOCK_RELATIONS {
+        if sale_price && PURCHASE_ONLY_RELATIONS.contains(&table) {
+            continue;
+        }
         match conn
             .query_row(
                 &format!("SELECT COUNT(*) FROM {table} WHERE product_id = ?1"),
@@ -338,12 +345,15 @@ fn price_verdict(conn: &Connection, product_id: &str) -> PriceVerdict {
 /// nur dann, wenn er sicher ist. Die Seite zeigt die drei Preisfelder daraufhin sichtbar, aber
 /// gesperrt, mit genau diesem Grund als Hinweis.
 fn attach_price_verdict(conn: &Connection, product_id: &str, product: &mut serde_json::Value) {
-    let (editable, reason, detail) = match price_verdict(conn, product_id) {
+    let (editable, reason, detail) = match price_verdict(conn, product_id, false) {
         PriceVerdict::Editable => (true, None, None),
         PriceVerdict::Linked(l) => (false, Some("linked"), Some(l)),
         PriceVerdict::NotOwnStock(l) => (false, Some("not_own_stock"), Some(l)),
         PriceVerdict::Unknown => (false, Some("unknown"), None),
     };
+    // `price_editable` gilt fuer den Einkaufspreis, `sale_price_editable` fuer Verkaufs- und Mindestpreis.
+    product["sale_price_editable"] =
+        serde_json::Value::Bool(matches!(price_verdict(conn, product_id, true), PriceVerdict::Editable));
     product["price_editable"] = serde_json::Value::Bool(editable);
     if let Some(r) = reason {
         product["price_lock_reason"] = serde_json::Value::String(r.to_string());

@@ -25,7 +25,7 @@ import { diffProductText } from '@/core/media/product-edit-draft';
 import { isSyncConfigured } from '@/core/sync/sync-service';
 import { editRequestId, type ProductEditIntent } from '@/core/media/coordinator';
 import type { CurrentProductState } from '@/core/media/mobile-product-patch';
-import { evaluatePriceEligibility } from '@/core/products/price-eligibility';
+import { priceEditVerdict } from '@/core/products/price-eligibility';
 import { productWasDeleted, type LeftoverDb } from '@/core/products/product-leftovers';
 import { useProductStore, buildProductEditColumns } from '@/stores/productStore';
 import { productVatLabelRefusal, VAT_PERIOD_FILED } from '@/core/tax/vat-period-lock';
@@ -274,8 +274,9 @@ function readProductState(productId: string): CurrentProductState | null {
  * Koordinator benutzt. VERBINDLICH ist die Pruefung dort, innerhalb der Schreib-Transaktion; hier
  * wird nur vermieden, dass ein aussichtsloser Job ueberhaupt bis dahin laeuft.
  */
-function priceEditAllowed(productId: string): boolean {
-  return evaluatePriceEligibility(productId, (sql, params) => {
+function priceEditAllowed(productId: string, patchKeys: readonly string[]): boolean {
+  const spalten: Record<string, string> = { purchasePrice: 'purchase_price', plannedSalePrice: 'planned_sale_price', minSalePrice: 'min_sale_price' };
+  return priceEditVerdict(productId, patchKeys.map((k) => spalten[k] ?? k), (sql, params) => {
     const rows = query(sql, params as unknown[]);
     return rows.length > 0 ? Number((rows[0] as Record<string, unknown>).c ?? -1) : -1;
   }).allowed;

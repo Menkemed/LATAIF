@@ -907,3 +907,26 @@ fn the_read_contract_carries_the_last_change_timestamp() {
     let after = by_id(&db, "t-1", "b-1", "p-dj41").unwrap();
     assert_ne!(after["updated_at"], p["updated_at"], "a change must be visible in the contract");
 }
+
+/// Owner-Entscheidung: ein Einkauf bindet den Einkaufspreis, nicht Verkaufs- und Mindestpreis. Jede andere Bindung
+/// sperrt alle drei, und der Lesevertrag sagt beides getrennt.
+#[test]
+fn a_purchase_locks_only_the_purchase_price() {
+    for (table, _) in PRICE_LOCK_RELATIONS {
+        let d = tmp_dir();
+        let db = fixture(&d);
+        Connection::open(&db)
+            .unwrap()
+            .execute(&format!("INSERT INTO {table} (id, product_id) VALUES ('x-1', 'p-dj41')"), [])
+            .unwrap();
+        let p = by_id(&db, "t-1", "b-1", "p-dj41").expect("the item is readable");
+        assert_eq!(p["price_editable"], false, "{table} locks the purchase price");
+        let frei = PURCHASE_ONLY_RELATIONS.contains(&table);
+        assert_eq!(p["sale_price_editable"], frei, "{table}: sale price free = {frei}");
+    }
+    let d = tmp_dir();
+    let db = fixture(&d);
+    let p = by_id(&db, "t-1", "b-1", "p-dj41").expect("the item is readable");
+    assert_eq!(p["price_editable"], true);
+    assert_eq!(p["sale_price_editable"], true);
+}

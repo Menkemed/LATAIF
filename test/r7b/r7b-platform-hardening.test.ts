@@ -532,7 +532,7 @@ marker('POST_PARITY_R7B_PP7_DEAD_CODE_REMOVED');
 // ══ §6 — PP-12: Dokumentfristen ══════════════════════════════════════════════
 {
   const t = fehlertext({ kind: 'unknown', code: 'BRIDGE_TIMEOUT' } as never);
-  ok(/did not finish within the time limit/.test(t) && /may still be working/.test(t) && /on this form: the same attempt is repeated and is not saved twice/.test(t) && !/No answer from the primary/.test(t),
+  ok(/did not finish within the time limit/.test(t) && /may still be working/.test(t) && /repeats the same attempt and does not save twice/.test(t) && !/No answer from the primary/.test(t),
     `UI eine abgelaufene Frist heißt „läuft vielleicht noch", nicht „keine Antwort" (${t})`);
   const u = fehlertext({ kind: 'unknown', code: 'SERVER_UNAVAILABLE' } as never);
   ok(/No answer from the primary/.test(u) && /not clear whether/.test(u), 'UI ein nicht erreichbarer Primary bleibt „keine Antwort"');

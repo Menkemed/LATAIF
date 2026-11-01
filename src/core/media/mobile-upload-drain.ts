@@ -202,7 +202,7 @@ export interface MobileDrainDeps {
   /** Darf DIESER Artikel seine Preise noch aendern? Wahr nur, wenn es keinerlei Beschaffungs- oder
    *  Kostenbeleg gibt (keine Einkaufszeile, kein Lot, Eigenbestand). Fehlt die Abhaengigkeit, wird
    *  jede Preisaenderung abgelehnt — fail closed. */
-  priceEditAllowed?: (productId: string) => boolean;
+  priceEditAllowed?: (productId: string, patchKeys: readonly string[]) => boolean;
 }
 
 export type DrainCode =
@@ -563,7 +563,7 @@ function resolvePatchForApply(
 ): { ok: true; resolved: Record<string, unknown> } | { ok: false; code: string } {
   if (patchTouchesPrices(patch)) {
     if (!deps.priceEditAllowed) return { ok: false, code: ERR_PRICE_NOT_ELIGIBLE };
-    if (!deps.priceEditAllowed(productId)) return { ok: false, code: ERR_PRICE_NOT_ELIGIBLE };
+    if (!deps.priceEditAllowed(productId, Object.keys(patch))) return { ok: false, code: ERR_PRICE_NOT_ELIGIBLE };
   }
   if (!deps.readProductState || !deps.fieldSchema) return { ok: false, code: ERR_EDIT_PATCH_INVALID };
   const current = deps.readProductState(productId);

@@ -1182,10 +1182,12 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
     const origAttrs = (function () { try { return typeof p.attributes === 'string' ? JSON.parse(p.attributes || '{}') : (p.attributes || {}); } catch (_) { return {}; } })();
     const origScope = (function () { try { return typeof p.scope_of_delivery === 'string' ? JSON.parse(p.scope_of_delivery || '[]') : (p.scope_of_delivery || []); } catch (_) { return []; } })();
     const priceEditable = p.price_editable === true;
+    const salePriceEditable = p.sale_price_editable === true;
     // Der Hinweis unter der Sperre. Benannt wird ein Grund NUR, wenn der Lesevertrag ihn sicher
     // kennt — `unknown` bleibt bewusst allgemein, statt einen plausiblen Grund zu erfinden.
     const priceLockText = (function () {
       const d = typeof p.price_lock_detail === 'string' ? p.price_lock_detail : '';
+      if (salePriceEditable) return '\uD83D\uDD12 Purchase price locked' + (p.price_lock_reason === 'linked' && d ? ' \u2014 linked to ' + d : '') + '. Sale and minimum price can be changed.';
       if (p.price_lock_reason === 'linked' && d) return '\uD83D\uDD12 Price editing locked \u2014 linked to ' + d + '.';
       if (p.price_lock_reason === 'not_own_stock' && d === 'Consignment') return '\uD83D\uDD12 Price editing locked \u2014 consignment stock, the price belongs to the consignor.';
       if (p.price_lock_reason === 'not_own_stock' && d === 'Agent') return '\uD83D\uDD12 Price editing locked \u2014 this piece is out with an agent.';
@@ -1234,8 +1236,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       }
       for (const pf of PRICE_FIELDS) {
         const e = $(pf[0]); if (!e) continue;
-        e.disabled = !priceEditable;
-        e.style.opacity = priceEditable ? '' : '.55';
+        const frei = pf[2] === 'purchasePrice' ? priceEditable : salePriceEditable;
+        e.disabled = !frei;
+        e.style.opacity = frei ? '' : '.55';
       }
     }
 
@@ -1501,8 +1504,9 @@ window.__MOBILE_FIELD_SCHEMA__ = "##, include_str!("mobile_field_schema.json"), 
       }
 
       // Preise: nur wenn der Artikel sie ueberhaupt aendern darf, und nur die geaenderten.
-      if (priceEditable) {
+      if (priceEditable || salePriceEditable) {
         for (const [id, col, key] of PRICE_FIELDS) {
+          if (!(key === 'purchasePrice' ? priceEditable : salePriceEditable)) continue;
           const e = $(id); if (!e) continue;
           const raw = (e.value || '').trim();
           const before = (p[col] === null || p[col] === undefined) ? '' : String(p[col]);

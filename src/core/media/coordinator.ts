@@ -13,7 +13,7 @@
 // in a later slice.
 // ════════════════════════════════════════════════════════════════════════════
 
-import { evaluatePriceEligibility, touchesPriceColumns } from '../products/price-eligibility.ts';
+import { priceEditVerdict, touchesPriceColumns } from '../products/price-eligibility.ts';
 import { assertSkuChangeFree } from '../products/sku-unique.ts';
 import { enterTransaction, leaveNestedTransaction, resetTransactionContext, isTransactionActive } from '../db/transaction-context.ts';
 import { isTransactionUnhealthy } from '../db/transaction-health.ts';
@@ -1399,7 +1399,7 @@ export class MediaDbCoordinator {
     // koennte sonst ein Verkauf, ein Einkauf oder ein Lot entstehen, und der Preis wuerde an einem
     // Artikel geaendert, der inzwischen an einem Geschaeftsvorgang haengt.
     if (pe.priceEligibilityRequired && touchesPriceColumns(pe.set)) {
-      const verdict = evaluatePriceEligibility(ctx.entityId, (sql, params) => {
+      const verdict = priceEditVerdict(ctx.entityId, pe.set.map(([c]) => c), (sql, params) => {
         const rows = this.db.exec(sql, params as unknown[]);
         return rows.length && rows[0].values.length ? Number(rows[0].values[0][0]) : -1;
       });

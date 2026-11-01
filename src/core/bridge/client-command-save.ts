@@ -89,6 +89,18 @@ export function resetLiveAttemptsForTest(): void {
 
 const normalized = (p: Record<string, unknown>): Record<string, unknown> => JSON.parse(JSON.stringify(p)) as Record<string, unknown>;
 
+/** Was die Nachfrage beim Primary ergab — ohne dass dabei etwas ausgeführt wurde. */
+export type ClarifyOutcome =
+  | { kind: 'saved' }
+  | { kind: 'refused'; code: string; message: string }
+  /** Der Primary kennt den Vorgang nicht und er kann nicht mehr laufen. Weder gespeichert noch erledigt. */
+  | { kind: 'not_saved' }
+  | { kind: 'conflict' }
+  | { kind: 'unknown'; code: string; message: string };
+
+/** So lange kann ein Auftrag noch laufen, auch wenn der Nachweis ihn nicht kennt (Frist der Brücke + Reserve). */
+const STILL_RUNNING_MS = 60_000;
+
 /** Der Speicherversuch eines Menschen. Ein Objekt pro Vorsatz, nicht pro Anfrage. */
 export class CommandSaveAttempt<T = Record<string, unknown>> {
   readonly op: string;
@@ -121,6 +133,59 @@ export class CommandSaveAttempt<T = Record<string, unknown>> {
   /** Der Auftrag, unter dem diese Kennung zuerst hinausging (R2) — `null`, solange keiner hinausging. */
   originalPayload(): Record<string, unknown> | null {
     return this.record ? this.record.payload : null;
+  }
+
+  /**
+   * Fragt den durablen Nachweis des Primary, was aus diesem Vorgang wurde. Führt NICHTS aus: Ein alter
+   * Auftrag geht nur auf ausdrückliche Entscheidung noch einmal hinaus (`send`). Beendet wird der Versuch
+   * nur durch eine Antwort, die den Ausgang wirklich kennt.
+   */
+  async clarify(fetchFn: Fetcher = fetch): Promise<ClarifyOutcome> {
+    const rec = this.record;
+    const c = clientConfig();
+    if (!rec || !c?.token) return { kind: 'unknown', code: 'NOT_AUTHENTICATED', message: 'not signed in' };
+    const ctx = currentPendingContext();
+    if (!ctx || !sameContext(rec.context, ctx)) return { kind: 'unknown', code: PENDING_CONTEXT_MISMATCH, message: 'this save belongs to another sign-in or main computer' };
+    let value: { state?: string; code?: string; message?: string } | undefined;
+    try {
+      const res = await fetchFn(`${c.serverUrl}/api/command/status`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${c.token}` },
+        body: JSON.stringify({ commandId: this.commandId, payload: rec.payload }),
+      });
+      if (!res.ok) return { kind: 'unknown', code: `HTTP_${res.status}`, message: 'the main computer could not check this save' };
+      value = (await res.json() as { value?: typeof value }).value;
+    } catch (e) {
+      return { kind: 'unknown', code: ERR_UNAVAILABLE, message: `no answer from the server: ${String(e)}` };
+    }
+    switch (value?.state) {
+      case 'completed':
+        await this.abandon();
+        return { kind: 'saved' };
+      case 'rejected':
+        await this.abandon();
+        return { kind: 'refused', code: String(value.code ?? ''), message: String(value.message ?? '') };
+      case 'conflict':
+        this.mayHaveRun = true;
+        await this.mark('conflict', COMMAND_ID_CONFLICT);
+        return { kind: 'conflict' };
+      case 'absent': {
+        const seit = Date.parse(rec.updatedAt);
+        if (Number.isFinite(seit) && Date.now() - seit < STILL_RUNNING_MS) {
+          return { kind: 'unknown', code: 'MAY_STILL_BE_RUNNING', message: 'the main computer may still be working on it' };
+        }
+        return { kind: 'not_saved' };
+      }
+      default:
+        return { kind: 'unknown', code: 'UNREADABLE_ANSWER', message: 'unreadable answer' };
+    }
+  }
+
+  /** Den Vorgang beenden, ohne etwas zu senden: Ablage leer, und die Maske beginnt beim nächsten Klick neu. */
+  async abandon(): Promise<boolean> {
+    this.settled = true;
+    live.delete(this.commandId);
+    return dropPending(this.commandId);
   }
 
   /**
@@ -333,6 +398,17 @@ export class CommandSaveController<T = Record<string, unknown>> {
       message: `An earlier save of this kind (${when}) is still unresolved — it may already be on the main computer. `
         + 'Clarify it under "Unresolved saves" first. If this really is a new, separate entry, press save again.',
     };
+  }
+}
+
+/** Was die Nachfrage ergeben hat — in Worten für den Menschen. */
+export function describeClarify(out: ClarifyOutcome): string {
+  switch (out.kind) {
+    case 'saved': return 'Clarified: it WAS saved on the main computer — nothing was added now.';
+    case 'refused': return `Clarified: it was NOT saved — the main computer refused it: ${out.message || out.code}`;
+    case 'not_saved': return 'Checked: it did NOT reach the main computer, so it was not saved.';
+    case 'conflict': return 'The main computer holds this number for different content. Check there what was recorded.';
+    case 'unknown': return `Still no clear answer (${out.code}): ${out.message}. Nothing was changed; try again later.`;
   }
 }
 

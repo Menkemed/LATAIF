@@ -910,6 +910,46 @@ const links = (db: Db, pid: string): number =>
   }
 }
 
+// ── 12) Artikel aus einem Einkauf: Preise, klare Ablehnung, kein Überschreiben (TUD-WCH-003) ─────
+{
+  const db = freshDb();
+  const d = deps(db);
+  const O = (o: unknown) => o as { kind: string; code?: string; message?: string; frozen?: boolean; replayed?: boolean; value?: { productId?: string } };
+  const a = O(await runProductCreate(d.deps, identity('120', 'products.create'), { ...WISH, plannedSalePrice: undefined }));
+  const pid = String(a.value?.productId);
+  const zeile = () => db.exec('SELECT planned_sale_price, min_sale_price, purchase_price, expected_margin, updated_at FROM products WHERE id = ?', [pid])[0].values[0];
+  db.run("INSERT INTO purchases (id, branch_id, purchase_number, supplier_id, status, purchase_date, created_at, updated_at) VALUES ('pu1','branch-main','PUR-X','s1','PAID','2026-10-29',?,?)", [NOW, NOW]);
+  db.run("INSERT INTO purchase_lines (id, purchase_id, product_id, quantity, unit_price, line_total, position, created_product) VALUES ('pl1','pu1',?,1,100,100,1,1)", [pid]);
+  const einkauf = () => JSON.stringify(db.exec("SELECT * FROM purchase_lines WHERE id = 'pl1'")[0].values);
+  const vorher = einkauf();
+
+  const preis = O(await runProductUpdate(d.deps, identity('121', 'products.update', 'p1'), { id: pid, plannedSalePrice: 850, minSalePrice: 700 }));
+  let z = zeile();
+  ok(preis.kind === 'ok' && z[0] === 850 && z[1] === 700 && z[2] === 100, `PURCHASE Verkaufs- und Mindestpreis gehen, der Einkaufspreis bleibt (${JSON.stringify(preis)} ${JSON.stringify(z)})`);
+  ok(z[3] === 750, `PURCHASE die erwartete Marge folgt dem Verkaufspreis (${z[3]})`);
+  ok(einkauf() === vorher, 'PURCHASE die Einkaufszeile bleibt unverändert');
+
+  const buy = O(await runProductUpdate(d.deps, identity('122', 'products.update', 'p2'), { id: pid, purchasePrice: 500 }));
+  ok(buy.kind === 'rejected' && buy.code === 'PRODUCT_PURCHASE_BOUND' && buy.frozen === true && zeile()[2] === 100,
+    `PURCHASE der Einkaufspreis bleibt beim Einkauf: ein klares, endgültiges Nein (${JSON.stringify(buy)})`);
+
+  db.run("UPDATE products SET source_type = 'CONSIGNMENT' WHERE id = ?", [pid]);
+  const gesperrt = O(await runProductUpdate(d.deps, identity('123', 'products.update', 'p3'), { id: pid, plannedSalePrice: 999 }));
+  ok(gesperrt.kind === 'rejected' && gesperrt.code === 'MOBILE_PRICE_NOT_ELIGIBLE' && gesperrt.frozen === true && /cannot be changed/.test(String(gesperrt.message)) && zeile()[0] === 850,
+    `LOCK eine echte Sperre ist ein endgültiges Nein mit Grund, kein offener Ausgang (${JSON.stringify(gesperrt)})`);
+  db.run("UPDATE products SET source_type = 'OWN' WHERE id = ?", [pid]);
+
+  const stand = String(zeile()[4]);
+  db.run('UPDATE products SET planned_sale_price = 900, expected_margin = 800, updated_at = ? WHERE id = ?', ['2026-11-01T10:00:00.000Z', pid]);
+  const alt = O(await runProductUpdate(d.deps, identity('124', 'products.update', 'p4'), { id: pid, plannedSalePrice: 860, expectedUpdatedAt: stand }));
+  ok(alt.kind === 'rejected' && alt.code === 'PRODUCT_RECORD_CHANGED' && zeile()[0] === 900,
+    `CLARIFY ein alter Auftrag überschreibt keine neueren Daten (${JSON.stringify(alt)} ${JSON.stringify(zeile())})`);
+  const gleich = O(await runProductUpdate(d.deps, identity('125', 'products.update', 'p5'), { id: pid, plannedSalePrice: 900, minSalePrice: 700, expectedUpdatedAt: stand }));
+  ok(gleich.kind === 'ok' && zeile()[0] === 900, `CLARIFY steht schon alles so da, ist die Wiederholung kein Konflikt (${JSON.stringify(gleich)})`);
+  const aktuell = O(await runProductUpdate(d.deps, identity('126', 'products.update', 'p6'), { id: pid, plannedSalePrice: 910, expectedUpdatedAt: '2026-11-01T10:00:00.000Z' }));
+  ok(aktuell.kind === 'ok' && zeile()[0] === 910, `CLARIFY mit dem aktuellen Stand geht es durch (${JSON.stringify(aktuell)})`);
+}
+
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — central c3c product remote write: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('   - ' + f); process.exit(1); }
 console.log('CENTRAL_C3C_PRODUCT_DOMAIN_REUSE_PROVED');

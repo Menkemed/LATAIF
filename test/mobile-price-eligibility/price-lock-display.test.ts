@@ -36,7 +36,11 @@ const stmt = pageSrc.slice(start, end);
 ok(/price_lock_reason/.test(stmt), 'the extracted builder reads the verdict the read contract sends');
 
 const hint = (p: Record<string, unknown>): string =>
-  new Function('p', `${stmt} return priceLockText;`)(p) as string;
+  new Function('p', `const salePriceEditable = p.sale_price_editable === true; ${stmt} return priceLockText;`)(p) as string;
+
+// Owner-Entscheidung: Beim Einkauf ist nur der Einkaufspreis gesperrt, und genau das steht da.
+const einkauf = hint({ price_editable: false, sale_price_editable: true, price_lock_reason: 'linked', price_lock_detail: 'Purchase' });
+ok(/^🔒 Purchase price locked — linked to Purchase\. Sale and minimum price can be changed\.$/.test(einkauf), `a purchase locks only the purchase price (${einkauf})`);
 
 // ── der konkrete Grund wird benannt, wenn er sicher bekannt ist ──────────────────────────────────
 const invoice = hint({ price_editable: false, price_lock_reason: 'linked', price_lock_detail: 'Invoice' });
@@ -87,7 +91,7 @@ ok(/id="pePriceLock"/.test(pageSrc), 'there is a place for the reason to be show
 ok(!/pricesBox\.classList\.toggle\('hidden'/.test(pageSrc), 'eligibility no longer hides the whole box');
 ok(/lockNote\.textContent = priceEditable \? '' : priceLockText;/.test(pageSrc),
   'the reason is shown exactly when the item is locked');
-ok(/e\.disabled = !priceEditable;/.test(pageSrc), 'a locked price field is really disabled, not merely styled');
+ok(/const frei = pf\[2\] === 'purchasePrice' \? priceEditable : salePriceEditable;\s*e\.disabled = !frei;/.test(pageSrc), 'a locked price field is really disabled, not merely styled');
 
 // Die Werte werden unabhaengig von der Sperre eingesetzt — gesperrt heisst "sichtbar, aber nicht
 // aenderbar", nicht "leer".
@@ -96,10 +100,10 @@ ok(!!fillLine, 'the form fills the price fields from the item');
 ok(!!fillLine && !fillLine.includes('priceEditable'), 'and does so whether or not they are editable');
 
 // Der Schreibpfad bleibt unveraendert gesperrt: die Anzeige oeffnet nichts.
-ok(/\/\/ Preise: nur wenn der Artikel sie ueberhaupt aendern darf[\s\S]{0,120}if \(priceEditable\) \{/.test(pageSrc),
+ok(/\/\/ Preise: nur wenn der Artikel sie ueberhaupt aendern darf[\s\S]{0,120}if \(priceEditable \|\| salePriceEditable\) \{/.test(pageSrc),
   'the submit path still refuses to send prices for a locked item');
-const submit = pageSrc.slice(pageSrc.indexOf('if (priceEditable) {'));
-ok(/changed\[key\] = n;/.test(submit.slice(0, 900)), 'the price patch is built INSIDE that guard, not next to it');
+const submit = pageSrc.slice(pageSrc.indexOf('if (priceEditable || salePriceEditable) {'));
+ok(/changed\[key\] = n;/.test(submit.slice(0, 1200)), 'the price patch is built INSIDE that guard, not next to it');
 
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — ${PASS} passed, ${FAIL} failed`);
 if (FAIL) { for (const f of failures) console.log(`  - ${f}`); process.exit(1); }

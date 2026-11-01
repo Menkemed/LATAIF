@@ -39,14 +39,19 @@
 //  • **Die Preissperre gilt auch von außen.** Ein Änderungsauftrag läuft mit
 //    `priceEligibilityRequired: true` — dieselbe Prüfung in derselben Transaktion wie beim Handy.
 //    Ein Artikel, der an einem Geschäftsvorgang hängt, ändert seinen Preis nicht, weil die Anfrage
-//    von einem anderen Rechner kam.
+//    von einem anderen Rechner kam. Verkaufs- und Mindestpreis eines Artikels aus einem Einkauf sind
+//    frei (Owner-Entscheidung, `priceEditVerdict`); den Einkaufspreis sperrt weiter der Einkauf.
+//  • **Keine alte Absicht über neuere Daten.** `expectedUpdatedAt` nennt den Stand, den die Maske gesehen
+//    hat. Hat sich der Artikel seitdem geändert und die Anfrage würde noch etwas ändern: ein Nein. Das
+//    schützt vor allem „Clarify" und „Save it now", die einen alten Auftrag noch einmal schicken.
 
 import { getDatabase, saveDatabaseDurably } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
-import { useProductStore } from '@/stores/productStore';
+import { buildProductEditColumns, useProductStore } from '@/stores/productStore';
+import { diffProductText } from '@/core/media/product-edit-draft';
 import { ProductMediaResolver } from '@/core/media/product-media-resolver';
 import { TauriMediaGateway } from '@/core/media/gateway';
 import { currentBranchId } from '@/core/db/helpers';
@@ -228,6 +233,8 @@ export interface ProductUpdateRequest {
   confirmAi?: true;
   /** PURCHASE-EDIT D7 — die Begründung, wenn ein verkaufter Artikel seine Druckangaben ändert. */
   editReason?: string;
+  /** Der Stand (`updated_at`), den die Maske beim Öffnen gesehen hat. */
+  expectedUpdatedAt?: string;
   /**
    * v0.8.91 — „Find Next SKU": nur die ABSICHT (true). Die Nummer nennt der Client nie (`sku` bleibt verboten); der
    * Primary vergibt sie aus seinem Zähler, und nur für einen Artikel ohne SKU.
@@ -237,7 +244,7 @@ export interface ProductUpdateRequest {
 
 export function parseProductUpdate(raw: unknown): ProductUpdateRequest {
   if (!isPlain(raw)) throw new ProductPayloadError('payload must be an object');
-  const { id, gallery, aiConfirmedAt, editReason, assignSku, ...rest } = raw as { id?: unknown; gallery?: unknown; aiConfirmedAt?: unknown; editReason?: unknown; assignSku?: unknown };
+  const { id, gallery, aiConfirmedAt, editReason, assignSku, expectedUpdatedAt, ...rest } = raw as { id?: unknown; gallery?: unknown; expectedUpdatedAt?: unknown; aiConfirmedAt?: unknown; editReason?: unknown; assignSku?: unknown };
   if (typeof id !== 'string' || !id.trim()) throw new ProductPayloadError('id is required');
   if (assignSku !== undefined && assignSku !== true) {
     throw new ProductPayloadError('assignSku is a request (true) — the primary picks the number, not the client');
@@ -248,6 +255,10 @@ export function parseProductUpdate(raw: unknown): ProductUpdateRequest {
     throw new ProductPayloadError('editReason must be text (at most 500 characters)');
   }
   const reason = typeof editReason === 'string' && editReason.trim() ? editReason.trim() : undefined;
+  if (expectedUpdatedAt !== undefined && typeof expectedUpdatedAt !== 'string') {
+    throw new ProductPayloadError('expectedUpdatedAt must be the updated_at the form has seen');
+  }
+  const gesehen = typeof expectedUpdatedAt === 'string' && expectedUpdatedAt ? { expectedUpdatedAt } : {};
   if (aiConfirmedAt !== undefined) {
     if (aiConfirmedAt !== true) {
       throw new ProductPayloadError('aiConfirmedAt is a confirmation (true) — the primary stamps the time, not the client');
@@ -264,7 +275,7 @@ export function parseProductUpdate(raw: unknown): ProductUpdateRequest {
 
   if (gallery === undefined || gallery === null) {
     if (Object.keys(out).length === 0 && assignSku !== true) throw new ProductPayloadError('nothing to change');
-    return { id, fields: out, ...(reason ? { editReason: reason } : {}), ...vergeben };
+    return { id, fields: out, ...(reason ? { editReason: reason } : {}), ...vergeben, ...gesehen };
   }
   if (!Array.isArray(gallery)) throw new ProductPayloadError('gallery must be a list of slots');
   if (gallery.length > MAX_REMOTE_IMAGES) throw new ProductPayloadError(`at most ${MAX_REMOTE_IMAGES} images`);
@@ -294,7 +305,7 @@ export function parseProductUpdate(raw: unknown): ProductUpdateRequest {
     }
     throw new ProductPayloadError('a gallery slot is either { keep } or { stagingId }');
   }
-  return { id, fields: out, gallery: slots, ...(reason ? { editReason: reason } : {}), ...vergeben };
+  return { id, fields: out, gallery: slots, ...(reason ? { editReason: reason } : {}), ...vergeben, ...gesehen };
 }
 
 /** Typ-Alias aus demselben Grund wie beim Kunden: als `CommandResult` herausgegeben. */
@@ -482,13 +493,15 @@ async function buildEditImages(
   return { srcs, resolved, status: baseline.status };
 }
 
+export const PRODUCT_RECORD_CHANGED = 'PRODUCT_RECORD_CHANGED';
+
 export async function runProductUpdate(
   deps: EngineDeps,
   identity: CommandIdentity,
   raw: unknown,
   extras: ProductEngineExtras = {},
 ): Promise<CommandOutcome> {
-  const { id, fields: patch, gallery, confirmAi, editReason, assignSku } = parseProductUpdate(raw);
+  const { id, fields: patch, gallery, confirmAi, editReason, assignSku, expectedUpdatedAt } = parseProductUpdate(raw);
   const readStaged = extras.readStaged ?? invokeReadStaged;
   const discard = extras.discardStaged ?? invokeDiscardStaged;
   const readGallery = extras.readGallery ?? resolveGallery;
@@ -528,6 +541,15 @@ export async function runProductUpdate(
       } as ProductCommandResult;
     }
 
+    if (expectedUpdatedAt !== undefined) {
+      const stand = query('SELECT * FROM products WHERE id = ?', [id])[0] as Record<string, unknown>;
+      // Steht schon alles so da, wie der Auftrag es will, gibt es nichts zu überschreiben: das ist die Wiederholung.
+      if (String(stand.updated_at ?? '') !== expectedUpdatedAt
+        && (gallery !== undefined || assignSku === true || diffProductText(buildProductEditColumns(stand, patch as never)).set.length > 0)) {
+        throw new CommandRejected(PRODUCT_RECORD_CHANGED, 'This item was changed after this form was opened, so these changes were not saved. Open the item again and enter them on the current data.');
+      }
+    }
+
     // ZWEI Wege, und der Unterschied ist wichtig genug für eine Verzweigung: ohne `gallery` läuft
     // der text-only Weg, der `media_links` nicht einmal LIEST (MEDIA-EDIT-PRESERVE). Mit
     // `gallery` läuft der Weg, der Text und Bilder in EINER Transaktion anwendet.
@@ -561,7 +583,9 @@ export async function runProductUpdate(
       // Der Vorgang wurde nie bewertet, nichts ist durabel geworden, dieselbe Kennung darf erneut.
       throw new CommandNotEvaluated(
         result.status === 'cutover_reload' ? 'PRODUCT_CUTOVER_RELOAD' : 'PRODUCT_EDIT_NOT_APPLIED',
-        result.status === 'cutover_reload' ? 'legacy product cut over — retry' : String(result.errorCode),
+        result.status === 'cutover_reload' ? 'the photos were moved to the new storage, please save again'
+          : result.status === 'edit_conflict' ? `the item changed on the main computer while saving (${String(result.errorCode)})`
+            : `the main computer could not finish saving this item (${String(result.errorCode)})`,
       );
     }
     const after = query('SELECT sku, name FROM products WHERE id = ?', [id])[0];

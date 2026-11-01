@@ -32,6 +32,10 @@
 // — und deren Zeilen (`invoice_lines`, `purchase_lines`, `sales_return_lines`,
 // `purchase_return_lines`) tragen den Produktbezug und stehen unten in der Liste.
 //
+// OWNER-ENTSCHEIDUNG 01.11.2026 — Verkaufs- und Mindestpreis eines Artikels aus einem Einkauf sind frei:
+// `purchase_lines` und `stock_lots` binden nur den Einkaufspreis (Korrektur: Purchase → Edit). Alle anderen
+// Bindungen unter B und die Bedingung A sperren weiter alle drei Preise. Die Spalten trennt `priceEditVerdict`.
+//
 // Diese Datei ist die EINE Definition. Der Koordinator prueft sie INNERHALB der Schreib-Transaktion
 // (verbindlich), die Verdrahtung nutzt sie fuer eine fruehe, freundliche Ablehnung, und der
 // Lesevertrag in Rust spiegelt sie fuer die Anzeige. Verbindlich ist ausschliesslich die Pruefung in
@@ -40,6 +44,9 @@
 
 /** Die Produktspalten, um die es geht. Andere Felder sind von dieser Regel nicht betroffen. */
 export const PRICE_COLUMNS: readonly string[] = ['purchase_price', 'planned_sale_price', 'min_sale_price'];
+
+/** Was ein Einkauf bindet: den Einkaufspreis, nicht den Preis, zu dem der Laden verkaufen will. */
+export const PURCHASE_ONLY_RELATIONS: readonly string[] = ['purchase_lines', 'stock_lots'];
 
 /**
  * Jede Tabelle, deren Existenz einer Zeile den Artikel zu einem Geschaeftsvorgang gehoeren laesst.
@@ -78,6 +85,15 @@ export type ValueFn = (sql: string, params: unknown[]) => string | null;
  * freizugeben nicht.
  */
 export function evaluatePriceEligibility(productId: string, count: CountFn): PriceEligibility {
+  return evaluateAgainst(productId, count, TRANSACTION_RELATIONS);
+}
+
+/** Verkaufs- und Mindestpreis: dieselbe Regel, nur ohne die Bindung durch einen Einkauf. */
+export function evaluateSalePriceEligibility(productId: string, count: CountFn): PriceEligibility {
+  return evaluateAgainst(productId, count, TRANSACTION_RELATIONS.filter((t) => !PURCHASE_ONLY_RELATIONS.includes(t)));
+}
+
+function evaluateAgainst(productId: string, count: CountFn, relations: readonly string[]): PriceEligibility {
   if (!productId) return { allowed: false, reason: 'not_own_stock' };
 
   // A — eigener, freier Bestand. Gezaehlt statt gelesen, damit dieselbe eine Abfrage-Funktion reicht:
@@ -86,11 +102,18 @@ export function evaluatePriceEligibility(productId: string, count: CountFn): Pri
   const own = safeCount(count, "SELECT COUNT(*) AS c FROM products WHERE id = ? AND source_type = 'OWN'", [productId]);
   if (own !== 1) return { allowed: false, reason: 'not_own_stock' };
 
-  for (const table of TRANSACTION_RELATIONS) {
+  for (const table of relations) {
     const n = safeCount(count, `SELECT COUNT(*) AS c FROM ${table} WHERE product_id = ?`, [productId]);
     // `-1` heisst "konnte nicht gelesen werden" (Tabelle fehlt, Abfrage scheiterte). Auch das sperrt.
     if (n !== 0) return { allowed: false, reason: 'has_transaction', relation: table };
   }
+  return { allowed: true };
+}
+
+/** Das Urteil für genau diese Spalten: der Einkaufspreis nach der vollen Regel, sonst die Verkaufsregel. */
+export function priceEditVerdict(productId: string, columns: readonly string[], count: CountFn): PriceEligibility {
+  if (columns.includes('purchase_price')) return evaluatePriceEligibility(productId, count);
+  if (columns.some((c) => PRICE_COLUMNS.includes(c))) return evaluateSalePriceEligibility(productId, count);
   return { allowed: true };
 }
 

@@ -264,7 +264,7 @@ export function fehlertext(r: WriteOutcome<unknown>): string {
       }
       if (r.code === PENDING_STORE_FAILED) return `Not sent (${r.code}): this computer could not keep a safe record of the save, so nothing was sent. You can try again.`;
       if (r.code === PENDING_CONTEXT_MISMATCH) return r.message;
-      return `Not saved (${r.code}). You can try again.`;
+      return `Not saved (${r.code})${r.message ? `: ${r.message}` : ''}. You can try again.`;
     case 'unknown':
       // R7C R2 — das Formular hat sich geändert, der frühere Vorgang ist offen: nichts ging hinaus.
       if (r.code === ORIGINAL_UNRESOLVED) {
@@ -278,11 +278,11 @@ export function fehlertext(r: WriteOutcome<unknown>): string {
       // kann noch arbeiten. Offen ist es trotzdem — und die Wiederholung bleibt dieselbe.
       if (r.code === 'BRIDGE_TIMEOUT') {
         return 'The main computer did not finish within the time limit (BRIDGE_TIMEOUT) — it may still be working, '
-          + 'and it is not clear whether this was saved. Press again on this form: the same attempt is repeated and is not saved twice. '
+          + 'and it is not clear whether this was saved. Use "Clarify now" under "Unresolved saves"; if this form is still open, pressing again repeats the same attempt and does not save twice. '
           + BLEIBT;
       }
       return `No answer from the primary (${r.code}) — it is not clear whether this was saved. `
-        + 'Press save again on this form: the same attempt is repeated and is not saved twice. '
+        + 'Use "Clarify now" under "Unresolved saves"; if this form is still open, saving again repeats the same attempt and does not save twice. '
         + BLEIBT;
   }
 }
