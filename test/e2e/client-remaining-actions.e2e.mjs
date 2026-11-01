@@ -544,13 +544,13 @@ try {
   await sleep(3000);
   client.close();
   client = await attachOnly(CLIENT_CDP);
-  await waitFor(client, 'input[type="password"], [data-client-mode]', 60000);
+  await waitFor(client, 'input[type="password"], a[href="/settings"]', 60000);
   if (await exists(client, 'input[type="password"]')) {
     await setVal(client, 'input[type="email"]', OWNER_EMAIL);
     await setVal(client, 'input[type="password"]', OWNER_PW);
     await click(client, '[data-client-signin]');
   }
-  await waitFor(client, '[data-client-mode]', 45000);
+  await waitFor(client, 'a[href="/settings"]', 45000);
   ok(true, 'UI the client signs in against the primary');
 
   const token = await (async () => {

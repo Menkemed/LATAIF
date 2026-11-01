@@ -18,7 +18,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { spawn, execFileSync } from 'node:child_process';
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
-import { killTestImage, tasklistTestImage } from './_e2e-process.mjs';
+import { closeTestWindow, killTestImage, spawnTracked, startedPids, tasklistTestImage } from './_e2e-process.mjs';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
 import os from 'node:os';
@@ -116,7 +116,7 @@ async function attachOnly(cdpPort, budget = 60000) {
   return c;
 }
 async function attach(cdpPort, exe, env) {
-  spawn(exe, [], { env, stdio: 'ignore', detached: true }).unref();
+  spawnTracked(exe, [], { env, stdio: 'ignore', detached: true }).unref();
   return attachOnly(cdpPort, 120000);
 }
 const exists = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
@@ -237,7 +237,7 @@ function seed() {
     insert(db, 'categories', { id: category_id, branch_id, name: 'R4C3 Plain', icon: 'watch', color: '#000', attributes: '[]', scope_options: '[]', condition_options: '[]', created_at: now, updated_at: now });
     insert(db, 'suppliers', { id: 'r43-sup', branch_id, name: 'R4C3 Supply', active: 1, created_at: now, updated_at: now });
     insert(db, 'customers', { id: 'r43-cust', branch_id, first_name: 'Rita', last_name: 'Lebenslauf', company: 'R4C3 Co', country: 'BH', language: 'en', vip_level: 'NONE', preferences: '[]', customer_type: 'PRIVATE', sales_stage: 'active', created_at: now, updated_at: now });
-    for (const [id, sku] of [['r43-prod', 'R43-SKU-01'], ['r43-prod2', 'R43-SKU-02'], ['r43-prod3', 'R43-SKU-03'], ['r43-prod4', 'R43-SKU-04']]) {
+    for (const [id, sku] of [['r43-prod', 'R43-SKU-01'], ['r43-prod2', 'R43-SKU-02'], ['r43-prod3', 'R43-SKU-03'], ['r43-prod4', 'R43-SKU-04'], ['r43-prod5', 'R43-SKU-05']]) {
       insert(db, 'products', {
         id, branch_id, category_id, brand: 'Zenith', name: 'R4C3 ' + sku, sku,
         condition: 'Pre-Owned', scope_of_delivery: '[]', purchase_price: 700, purchase_currency: 'BHD',
@@ -264,7 +264,7 @@ function seed() {
 
     // ── Agent mit drei Transfers ────────────────────────────────────────
     insert(db, 'agents', { id: 'r43-agent', branch_id, name: 'Rami Vertreter', company: 'R4C3 Agents', active: 1, created_at: now, updated_at: now });
-    for (const [id, nr, product_id] of [['r43-t1', 'R43TR-01', 'r43-prod2'], ['r43-t2', 'R43TR-02', 'r43-prod3'], ['r43-t3', 'R43TR-03', 'r43-prod4']]) {
+    for (const [id, nr, product_id] of [['r43-t1', 'R43TR-01', 'r43-prod5'], ['r43-t2', 'R43TR-02', 'r43-prod3'], ['r43-t3', 'R43TR-03', 'r43-prod4']]) {
       insert(db, 'agent_transfers', { id, branch_id, transfer_number: nr, agent_id: 'r43-agent', product_id, agent_price: 800, minimum_price: 700, commission_rate: 10, status: 'transferred', transferred_at: now, settlement_model: 'full', created_at: now, updated_at: now });
     }
 
@@ -331,8 +331,7 @@ try {
   await waitFor(primary, SHELL, 60000);
   await spuelen(primary).catch(() => null);
   await sleep(1200);
-  primary.close(); primary = null;
-  killImage('lataif.exe'); await waitGone('lataif.exe');
+  { const pid = startedPids().pop(); primary.close(); primary = null; await closeTestWindow(pid, APP); }
   seed();
   execFileSync(SEED, ['seed-primary', SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' });
 

@@ -23,7 +23,7 @@
 // Produktions-App wird nie beendet, nie benutzt; E:\LATAIF\Data und die Ports 3001/3443 bleiben tabu.
 // ════════════════════════════════════════════════════════════════════════════
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
-import { killStarted, killTestImage, spawnTracked, waitTestImageGone, foreignProcesses } from './_e2e-process.mjs';
+import { closeTestWindow, killStarted, killTestImage, spawnTracked, startedPids, waitTestImageGone, foreignProcesses } from './_e2e-process.mjs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, copyFileSync, writeFileSync } from 'node:fs';
@@ -476,7 +476,8 @@ function seedServerB() {
 
 // ── Die Nachweise ────────────────────────────────────────────────────────────
 const OPS = ['repairs.update_status', 'expenses.record_payment', 'repairs.create_invoice', 'repairs.cancel_line'];
-const LOST_OPS = ['repairs.update_status'];
+// Die verlorene Antwort beim Statuswechsel beweist seit dem Klär-Umbau `pc2-save-reliability.e2e` (STATUS): Die Seite lädt neu, „Clarify now“ klärt.
+const LOST_OPS = [];
 const BEWEIS = Object.fromEntries(OPS.map((o) => [o, { C: 0, P: 0, versuche: 0 }]));
 const LOST = {};
 const EXTRA = { ownWorkshop: false, ownInternal: false, customer: false, invoice: false, paid: false, reversalAllowed: false, reversalBlocked: false, sale: false, reports: false };
@@ -877,7 +878,7 @@ const rechnungDef = {
   fertig: (x) => !!zeile('repairs', RK(x)).invoice_id,
   zu: () => "/^\\/invoices\\//.test(location.pathname)",
   // Die normale Nummer schickt die Maske ohne `specialMark` (nur „Special Final" setzt es).
-  keys: ['repairs', 'taxScheme'],
+  keys: ['invoiceDate', 'repairs', 'taxScheme'],
   rumpf: (p, x, v) => p.taxScheme === 'ZERO' && p.specialMark === undefined && p.repairs?.length === 1
     && p.repairs[0].repairId === RK('C') && p.repairs[0].expectedRevision === v.rev,
   zustand: (x) => kundenRechnung(x),
@@ -922,7 +923,8 @@ const stornoDef = {
   route: (x) => `/repairs/${RC(x)}`,
   bereit: () => q('[data-cancel-repair-line]'),
   vorher: (x) => ({ rev: Number(zeile('repairs', RC(x)).revision), exp: String(zeile('repair_lines', LC(x)).expense_id || '') }),
-  fuellen: async () => 'OK',
+  // Die Rückfrage: seit 493cd7b der Dialog der App (ConfirmHost), hier abgekürzt — auch an PC2.
+  fuellen: async (c) => { await c.ev(DIALOGE_PRIMARY); return 'OK'; },
   speichern: (c) => klick(c, '[data-cancel-repair-line]'),
   fertig: (x) => !zeile('repair_lines', LC(x)).id,
   zu: () => `!${q('[data-cancel-repair-line]')}`,
@@ -988,8 +990,7 @@ try {
   await waitFor(primary, SHELL, 60000);
   await spuelen(primary).catch(() => null);
   await sleep(1200);
-  primary.close(); primary = null;
-  killTestImage('lataif.exe'); await waitTestImageGone('lataif.exe');
+  { const pid = startedPids().pop(); primary.close(); primary = null; await closeTestWindow(pid, APP); }
   const aVorlage = seedGeschaeft();
   execFileSync(SEED, ['seed-primary', SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' });
   seedServerB();
@@ -1076,7 +1077,7 @@ try {
       `PP-13 Werkstattschuld eigener Ware: EINE Ausgabe „Inventory" 100, Soll INVENTORY / Haben A/P, KEIN Aufwand, Einstand noch 0 (${S(je).slice(0, 500)})`);
   }
   await paar(weiter('RO → an Werkstatt', RO, 'sent_to_workshop', OW));
-  await paar(weiter('RO → fertig (Kapitalisierung)', RO, 'ready', OW, { lost: true }));
+  await paar(weiter('RO → fertig (Kapitalisierung)', RO, 'ready', OW));
   {
     const je = XS.map((x) => reparaturZustand(RO(x), OW(x)));
     EXTRA.ownWorkshop = je.every((z) => z.artikel.einstand === 100 && z.artikel.los === 100 && z.artikel.bestand === 'in_stock'

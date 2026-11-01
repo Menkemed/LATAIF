@@ -87,7 +87,7 @@ Eine automatische Herabstufung ist nicht sicher:
   - Rechnung SRINV-2026-000001 ist FINAL, 30.000 bezahlt, Einstand 20. Hauptbuch: AR/REVENUE 30, COGS 20, AP 20 (EXP-2026-000003 offen).
   - Der Schritt „Sent to workshop“ (28.10.) gibt es bei hybrid und bei external gleich.
   - Falsch ist nur die Bezeichnung „Hybrid“.
-- **Die Regel besteht weiter.** Im Anlegefenster ist „In-house“ vorgewählt. Kommt danach eine Werkstattzeile dazu, wird die Reparatur wieder hybrid.
+- **Die Regel besteht weiter (Stand 31.10., überholt: Seit 01.11. startet New Repair ohne Vorwahl).** Im Anlegefenster ist „In-house“ vorgewählt. Kommt danach eine Werkstattzeile dazu, wird die Reparatur wieder hybrid.
 - **Vorschlag zur Freigabe**:
   1. Code: „internal + erste Werkstatt-Arbeitszeile“ wird `external` statt `hybrid`, solange es keine eigene Arbeitszeile gibt und `internal_cost` 0 ist. Gibt es eigene Arbeit oder eigene Kosten, bleibt es hybrid. Statusweg und Summe bleiben in diesem Fall gleich. Vor dem Umsetzen nachweisen: Storno der Zeile, späteres Bearbeiten (`internalCostOnEdit`), Kopfkosten bei „ready“.
   2. Daten: REP-2026-00002 `repair_type` hybrid → external. Kosten- und statusneutral (siehe oben), nur mit Sicherung und Audit-Eintrag und nur auf gesonderte Freigabe.
@@ -147,4 +147,6 @@ Abnahmeregel: `docs/ai/acceptance-rules.md`. Lauf: `test/e2e/repair-preview-acce
 - **Befund:** Bis v0.8.95 legte `runMigrations` bei jedem Start für jede Reparatur mit Werkstatt ohne Zeile eine Arbeitszeile an, ohne Protokoll und ohne Neuberechnung. Das widersprach der Vorschau G („Kept exactly as it is") und der Regel „Altfälle werden nicht umgeschrieben".
 - **Geändert:** Die Umwandlung ist entfernt. Eine Altgebühr bleibt, wie sie ist, und wird bei „ready" genau einmal gebucht. Eine Zeile entsteht nur über „Turn into a work line" (`repairs.add_line`, auch an PC2). Die Regeln stehen in `repairCostParts` und `repairHeaderFeeKept`.
 - **Daten:** Prod-Kopie am 01.11.: 9 Reparaturen, 0 betroffen, 0 Zeilen aus der Migration, 0 VAT-Meldungen. Es gibt keine Rückumwandlung; schon angelegte Zeilen anderer Installationen bleiben.
-- **Beweis:** `test/e2e/repair-legacy-fee.e2e.mjs` (echte Neustarts).
+- **Zeitpunkt der Buchung:** Eine nicht umgewandelte Altgebühr bucht bei „ready“. Eine Arbeitszeile, auch eine umgewandelte, bucht nach der bestehenden Zeilenregel ab „in Arbeit“. Wird erst nach „ready“ umgewandelt, ersetzt die Zeile die gebuchte Gebühr; die Verbindlichkeit bleibt gleich hoch.
+- **Bezahlt:** Eine ganz oder teilweise bezahlte Altgebühr lässt sich nicht umwandeln (`REPAIR_COST_PAID`, nichts geändert). Sie bleibt und ist mit der Werkstatt zu klären.
+- **Beweis:** `test/e2e/repair-legacy-fee.e2e.mjs` (echte Neustarts, Bezahlfälle).

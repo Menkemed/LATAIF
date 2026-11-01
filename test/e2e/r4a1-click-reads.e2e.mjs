@@ -19,7 +19,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { spawn, execFileSync } from 'node:child_process';
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
-import { killTestImage, tasklistTestImage } from './_e2e-process.mjs';
+import { closeTestWindow, killTestImage, spawnTracked, startedPids, tasklistTestImage } from './_e2e-process.mjs';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync } from 'node:fs';
 import os from 'node:os';
@@ -118,7 +118,7 @@ async function attachOnly(cdpPort, budget = 60000) {
   return c;
 }
 async function attach(cdpPort, exe, env) {
-  spawn(exe, [], { env, stdio: 'ignore', detached: true }).unref();
+  spawnTracked(exe, [], { env, stdio: 'ignore', detached: true }).unref();
   return attachOnly(cdpPort, 120000);
 }
 const exists = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
@@ -255,8 +255,7 @@ try {
   await waitFor(primary, SHELL, 60000);
   await primary.ev('return await window.__TAURI_INTERNALS__.invoke("flush_database_now").catch(()=>null);').catch(() => null);
   await sleep(1200);
-  primary.close(); primary = null;
-  killImage('lataif.exe'); await waitGone('lataif.exe');
+  { const pid = startedPids().pop(); primary.close(); primary = null; await closeTestWindow(pid, APP); }
   seed();
   execFileSync(SEED, ['seed-primary', SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' });
 

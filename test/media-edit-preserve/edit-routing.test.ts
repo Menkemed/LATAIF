@@ -66,7 +66,7 @@ function ok(c: unknown, m: string): void { if (c) PASS++; else { FAIL++; failure
   ok(/<ImageUpload[\s\S]*?disabled=\{!draftSeeded\}/.test(pd), 'ImageUpload is disabled until the draft is seeded from the final gallery');
   ok(/!draftSeeded && \([\s\S]*?Images loading/.test(pd), 'a clear "Images loading…" state is shown while photo editing is locked');
   // Entering/leaving the editor always resets the proof.
-  ok(/setImagesDirty\(false\);\s*\n\s*setDraftSeeded\(false\);\s*\n\s*setEditing\(true\);/.test(pd), 'Edit resets imagesDirty AND draftSeeded');
+  ok(/setImagesDirty\(false\);\s*\n\s*setDraftSeeded\(false\);\s*\n\s*gesehenerStand\.current = product\.updatedAt;\s*\n\s*setEditing\(true\);/.test(pd), 'Edit resets imagesDirty AND draftSeeded');
   ok(/setEditing\(false\); setImagesDirty\(false\); setDraftSeeded\(false\);/.test(pd), 'Cancel resets imagesDirty AND draftSeeded');
   // ── the E2E-only seed hold must stay inert in production ──
   // It may ONLY delay the seed, must be gated on the marker that solely the `e2e` Rust build stamps,

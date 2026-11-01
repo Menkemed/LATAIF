@@ -1950,7 +1950,10 @@ mod legacy_push_tests {
                 // entsteht daraus erst durch `products.create` ueber /command — also durch
                 // dieselbe Maschine wie jede andere Fernbuchung.
                 "/staging/media",
-                "/command", "/auth/login", "/health",
+                // „Clarify now": dieselbe geschuetzte Gruppe wie /command. Liest den Nachweis mit einer
+                // read-only-Verbindung (`command_status_lookup`), nur die Vorgaenge des Absenders; fuehrt
+                // nichts aus und schreibt nichts. Unten gemessen: `command_status_route_needs_a_login`.
+                "/command", "/command/status", "/auth/login", "/health",
             ],
             "Routenmenge geaendert — Modusmatrix und Gate neu bewerten"
         );
@@ -3375,6 +3378,21 @@ mod legacy_push_tests {
                     503,
                     "{label}: the handler was NEVER reached (503 would mean it asked the bridge)"
                 );
+                assert_eq!(snapshot(&s).await, before, "{label}: DB untouched");
+            }
+        }
+
+        // Die Statusabfrage hinter derselben Anmeldung wie der Auftrag: ohne gueltigen Ausweis 401, die DB bleibt unberuehrt.
+        #[tokio::test]
+        async fn command_status_route_needs_a_login() {
+            for (label, tok) in [("no header", None), ("not a token", Some("not.a.valid.jwt"))] {
+                let s = state(primary::State::Primary);
+                let before = snapshot(&s).await;
+                let mut b = Request::builder().method("POST").uri("/api/command/status").header("content-type", "application/json");
+                if let Some(t) = tok { b = b.header("authorization", format!("Bearer {t}")); }
+                let body = Body::from(r#"{"commandId":"11111111-1111-4111-8111-111111111111","payload":{}}"#);
+                let r = router(s.clone(), MAX).oneshot(b.body(body).unwrap()).await.unwrap();
+                assert_eq!(r.status().as_u16(), 401, "{label} → 401 at the auth layer");
                 assert_eq!(snapshot(&s).await, before, "{label}: DB untouched");
             }
         }

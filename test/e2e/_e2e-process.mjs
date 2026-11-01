@@ -112,6 +112,17 @@ export function killTestImage(image, binaries = TEST_BINARIES) {
  * Eine gespeicherte PID beenden — aber nur, wenn sie JETZT zu einem Test-Programm gehört.
  * `expectedPath` engt auf genau ein Test-Programm ein; ohne ihn genügt irgendeins der Liste.
  */
+/**
+ * Das Fenster eines selbst gestarteten Test-Prozesses regulär schließen und warten, bis er weg ist. Hartes Beenden löst den
+ * Sitzungs-Riegel aus (danach Anmeldemaske); Aufbauten, die danach angemeldet weiterarbeiten, schließen deshalb so.
+ */
+export async function closeTestWindow(pid, exe, budgetMs = 120000) {
+  try {
+    execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid} -ErrorAction Stop).CloseMainWindow()`], { encoding: 'utf8', windowsHide: true });
+  } catch { /* schon weg */ }
+  if (!await waitPidGone(pid, budgetMs)) killTestPid(pid, exe);
+}
+
 export function killTestPid(pid, expectedPath, binaries = TEST_BINARIES) {
   const live = pathOfPid(pid);
   if (!live) return false;

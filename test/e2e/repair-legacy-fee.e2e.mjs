@@ -6,12 +6,13 @@
 //   KLICK  Nur „Turn into a work line" macht daraus eine Zeile; die Summe bleibt.
 //   READY  Ohne Umwandlung wird bei „Ready" genau einmal gebucht, davor nichts.
 //   NACHHER Umwandlung vor und nach „Ready": die Verbindlichkeit steht genau einmal da, nichts doppelt.
+//   BEZAHLT Eine ganz oder teilweise bezahlte Gebühr wird nicht umgewandelt: klarer Grund, nichts geändert.
 //
 // Isoliert: com.lataif.app.e2e, Port 3011 — Produktion und E:\LATAIF\Data bleiben unberührt.
 // ════════════════════════════════════════════════════════════════════════════
 import { e2ePreflight } from './_e2e-preflight.mjs';
 import { killStarted, killTestImage, killTestPid, spawnTracked, startedPids, waitPidGone, waitTestImageGone } from './_e2e-process.mjs';
-import { maus, sichtbar } from './_e2e-mouse.mjs';
+import { maus, sichtbar, tippe } from './_e2e-mouse.mjs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
@@ -90,6 +91,8 @@ function seed() {
     insert(db, 'repairs', { ...alt, id: 'a', repair_number: 'REP-ALT-A', voucher_code: 'A', estimated_cost: 18 });
     insert(db, 'repairs', { ...alt, id: 'b', repair_number: 'REP-ALT-B', voucher_code: 'B', estimated_cost: 18 });
     insert(db, 'repairs', { ...alt, id: 'c', repair_number: 'REP-ALT-C', voucher_code: 'C', estimated_cost: 18 });
+    insert(db, 'repairs', { ...alt, id: 'p', repair_number: 'REP-ALT-P', voucher_code: 'P', estimated_cost: 18 });
+    insert(db, 'repairs', { ...alt, id: 'q', repair_number: 'REP-ALT-Q', voucher_code: 'Q', estimated_cost: 18 });
     // Erfasster Aufwand ≠ Voranschlag: die frühere Umwandlung hätte hier die Summe still geändert.
     insert(db, 'repairs', { ...alt, id: 'e', repair_number: 'REP-ALT-E', voucher_code: 'E', estimated_cost: 18, actual_cost: 25 });
   } finally { db.close(); }
@@ -105,7 +108,7 @@ const schuld = (id) => {
   const r = dbQ(`SELECT direction d, amount a FROM ledger_entries WHERE account = 'ACCOUNTS_PAYABLE' AND source_module = 'EXPENSE' AND source_id IN (${ids.map(() => '?').join(',')})`, ids);
   return r.reduce((s, x) => s + (x.d === 'CREDIT' ? x.a : -x.a), 0);
 };
-const stand = () => S(['a', 'b', 'c', 'e'].map((id) => [kopf(id), dbQ('SELECT * FROM repair_lines WHERE repair_id = ?', [id])])) + S(dbQ('SELECT * FROM expenses')) + S(dbQ('SELECT * FROM ledger_entries'));
+const stand = () => S(['a', 'b', 'c', 'e', 'p', 'q'].map((id) => [kopf(id), dbQ('SELECT * FROM repair_lines WHERE repair_id = ?', [id])])) + S(dbQ('SELECT * FROM expenses')) + S(dbQ('SELECT * FROM ledger_entries'));
 
 let c = null;
 const stub = () => c.ev('window.alert = () => {}; window.confirm = () => true; return 1;');
@@ -204,8 +207,11 @@ try {
     await warte(c, `document.querySelector('[data-repair-cost-box="total"]')`, 10000);
     ok(await gesamt() === 18, 'KLICK Summe unverändert 18');
     ok(kopf('a').typ === 'external', `KLICK Art bleibt External (${kopf('a').typ})`);
-    const st = await bis('a', 'ready');
+    // Eine Arbeitszeile bucht nach ihrer bestehenden Regel ab „In Progress", die Gebühr erst bei „Ready" (siehe READY).
+    const schritte = [];
+    const st = await bis('a', 'ready', (s) => schritte.push([s, ausgaben('a').length]));
     ok(st === 'ready', `KLICK bis Ready (${st})`);
+    ok(S(schritte.filter((x) => x[0] === 'diagnosed')) === S([['diagnosed', 0]]) && schritte.filter((x) => x[0] !== 'diagnosed').every((x) => x[1] === 1), `KLICK Zeile bucht ab „In Progress", davor nichts (${S(schritte)})`);
     await warteAuf(() => ausgaben('a').length > 0, 10);
     const a = ausgaben('a');
     ok(a.length === 1 && a[0].amount === 18 && Math.abs(schuld('a') - 18) < 0.0005, `KLICK genau eine Ausgabe, Verbindlichkeit 18 (${S(a)}, ${schuld('a')})`);
@@ -228,6 +234,35 @@ try {
     await zuUndAuf(); await start();
     await sleep(1500);
     ok(S([ausgaben('c'), schuld('c'), zeilen('c').length]) === nach, 'NACHHER Neustart ändert nichts');
+  }
+  // ══ BEZAHLT — die Gebühr ist bezahlt: sie bleibt, die Umwandlung wird abgewiesen, nichts halb geändert ══
+  for (const [id, betrag, wort] of [['p', '18', 'ganz'], ['q', '5', 'teilweise']]) {
+    ok(await bis(id, 'ready') === 'ready', `BEZAHLT ${wort}: bis Ready`);
+    await warteAuf(() => ausgaben(id).length === 1, 10);
+    const ex = ausgaben(id)[0];
+    await geh('/expenses');
+    await warte(c, `document.querySelector('[data-expense-pay-open=${S(ex.id)}]')`, 20000);
+    ok(await maus(c, `[data-expense-pay-open=${S(ex.id)}]`) === 'OK', `BEZAHLT ${wort}: „Pay" an der Ausgabe`);
+    await warte(c, `document.querySelector('[data-expense-pay-amount]')`, 8000);
+    await tippe(c, '[data-expense-pay-amount]', betrag);
+    await maus(c, '[data-expense-pay-save]');
+    ok(await warteAuf(() => Math.abs(Number(dbQ('SELECT paid_amount p FROM expenses WHERE id = ?', [ex.id])[0]?.p) - Number(betrag)) < 0.0005), `BEZAHLT ${wort}: ${betrag} bezahlt`);
+    await sleep(600);
+    const belege = () => S([zeilen(id), dbQ('SELECT id, amount, paid_amount, status FROM expenses WHERE id = ?', [ex.id]), alleAusgaben(id), kopf(id), dbQ(`SELECT * FROM ledger_entries WHERE source_id = ? ORDER BY rowid`, [ex.id]), dbQ('SELECT COUNT(*) n FROM ledger_entries')]);
+    const vorher = belege();
+    await geh(`/repairs/${id}`);
+    await warte(c, `document.querySelector('[data-repair-legacy-convert]')`, 15000);
+    ok(await maus(c, '[data-repair-legacy-convert]') === 'OK', `BEZAHLT ${wort}: „Turn into a work line" geklickt`);
+    ok(await warte(c, `/already paid/i.test(document.querySelector('[data-save-error]')?.textContent || '')`, 15000), `BEZAHLT ${wort}: der Grund steht da (${await text(c, '[data-save-error]')})`);
+    await sleep(1000);
+    ok(belege() === vorher, `BEZAHLT ${wort}: Zeilen, Ausgabe, Art und Hauptbuch unverändert`);
+    ok(zeilen(id).length === 0, `BEZAHLT ${wort}: keine Zeile`);
+    await warte(c, `document.querySelector('[data-repair-cost-box="total"]')`, 10000);
+    ok(await gesamt() === 18 && await sichtbar(c, '[data-repair-legacy-fee]'), `BEZAHLT ${wort}: die Gebühr bleibt, Summe 18`);
+    const nachKlick = belege();
+    await zuUndAuf(); await start();
+    await sleep(1500);
+    ok(belege() === nachKlick, `BEZAHLT ${wort}: Neustart ändert nichts, nichts war halb gespeichert`);
   }
   ok(zeilen('e').length === 0 && kopf('e').ist === 25 && kopf('e').est === 18, 'ENDE die nicht angefasste Altreparatur steht wie am Anfang');
 } catch (e) {

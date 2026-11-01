@@ -10,7 +10,7 @@
 //   S2 R2       dieselbe offene Maske, ein Feld geändert, „Speichern": NICHTS geht hinaus („changes were NOT
 //               sent"), kein neuer Nachweis, kein zweiter Kunde, kein Kunde mit dem geänderten Wert.
 //   S3 R1       reguläres Beenden + Neustart des Primary (Speicher der Brücke leer) UND von PC2: die Leiste
-//               „Unresolved saves" zeigt genau diesen Vorgang; „Clarify now" → „WAS saved" (Replay), nichts
+//               „Unresolved saves" zeigt genau diesen Vorgang; „Clarify now" fragt nur → „WAS saved", sendet nichts, nichts
 //               doppelt, die Datei ist weg, die Leiste leer.
 //               N1: PC2 endet nach WM_CLOSE von selbst (Exit-Code 0, kein Helfer), weiter als B, keine Datenbank auf
 //               PC2. (Bis `617c2c8` ging das nicht — Lauf 2 beendete PC2 über den Helfer.)
@@ -1291,7 +1291,7 @@ try {
     R7C.changedNotSent = gut;
   }
 
-  // ══ S3 R1 — Primary UND PC2 regulär neu gestartet: die Leiste zeigt den Vorgang, „Clarify now" → Replay ══════════
+  // ══ S3 R1 — Primary UND PC2 regulär neu gestartet: die Leiste zeigt den Vorgang, „Clarify now" fragt nur ══════════
   {
     const p = await primaryNeustart('S3');
     const pGut = p.zu && p.weg && !p.hart && p.oben && p.da;
@@ -1362,10 +1362,11 @@ try {
     const keineZeile = await warteBis(client, `document.querySelectorAll(${S(ROW)}).length === 0`, 15000);
     await spuelen(primary);
     MESS.s3 = { klick: k, gesendet: cc.map((x) => String(x.commandId).slice(0, 8)), antwort: an, original: kundenMit(NACH1), geaendert: kundenMit(NACH2), nachweis: nachweisVon(CMD_ID), anlagen: [vorAnlagen, anlagenImNachweis()], dateiWeg: weg, dateien: pendAlle().length, notiz: notizText.slice(0, 160) };
-    const gleich = cc.length === 1 && cc[0].commandId === CMD_ID && stabil(cc[0].payload) === stabil(ORIG);
-    const replay = an.length === 1 && an[0].status === 200 && an[0].ok === true && an[0].replayed === true;
+    // Seit dem Klär-Umbau sendet „Clarify now" den Auftrag nicht mehr: es fragt den durablen Nachweis (`/api/command/status`).
+    const gleich = cc.length === 0;
+    const replay = an.length === 0;
     const bestand = kundenMit(NACH1) === 1 && kundenMit(NACH2) === 0 && nachweisVon(CMD_ID) === 1 && anlagenImNachweis() === vorAnlagen;
-    ok(k === 'OK' && notiz && gleich && replay, `S3 R1 „Clarify now" wiederholt den URSPRÜNGLICHEN Auftrag unter SEINER Kennung → „WAS saved" (Replay) (${S(MESS.s3)})`);
+    ok(k === 'OK' && notiz && gleich && replay, `S3 R1 „Clarify now" fragt nur: „WAS saved", kein Auftrag gesendet (${S(MESS.s3)})`);
     ok(bestand, `S3 R1 nichts doppelt: 1 Kunde „${VOR} ${NACH1}", 0 mit „${NACH2}", genau 1 Nachweis für die Kennung`);
     ok(weg && keineZeile, `S3 R1 die Datei ist weg, die Leiste hat keine Zeile mehr (${weg}/${keineZeile})`);
     const dbEnde = pc2Datenbanken();
