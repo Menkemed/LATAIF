@@ -27,6 +27,17 @@ import {
   consumePendingSave,
   markSavePending,
   resetTransactionContext,
+  isRollbackOnly,
+  markRollbackOnly,
+  leaveFailedNestedLevel,
+  pushLedgerLevel,
+  popLedgerLevel,
+  topLedgerLevelOwnsSql,
+  ledgerLevelOpen,
+  takeOuterCommitEffects,
+  runEffects,
+  transactionDepth,
+  TransactionRollbackOnly,
 } from '@/core/db/transaction-context';
 import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment, CanonicalLoanDirection, CashSource, ScrapPaymentMethod } from '@/core/models/types';
 import { canonicalLoanDirection, repairCostAccount } from '@/core/models/types';
@@ -274,7 +285,9 @@ export function inLedgerTransaction(): boolean {
 }
 
 export function beginLedgerTransaction(): void {
+  // P1a — in einer gescheiterten Transaktion beginnt keine neue Ebene (enterTransaction wirft).
   const outermost = enterTransaction();
+  pushLedgerLevel(outermost);
   if (outermost) {
     try {
       getDatabase().run('BEGIN');
@@ -290,10 +303,42 @@ export function beginLedgerTransaction(): void {
   }
 }
 
+/** P1a — eine gescheiterte Transaktion: die Ebene, der die SQL-Transaktion gehört, rollt selbst zurück. */
+function failClosed(): never {
+  const err = new TransactionRollbackOnly('an inner step failed');
+  if (topLedgerLevelOwnsSql()) {
+    resetTransactionContext();
+    try { getDatabase().run('ROLLBACK'); }
+    catch (rbErr) { console.error('[ledger] rollback of a failed transaction failed:', rbErr); }
+  }
+  throw err;
+}
+
 export function commitLedgerTransaction(): void {
+  // P1a — eine gescheiterte Transaktion committet nie. Die Ebene, der die SQL-Transaktion gehört,
+  // rollt hier selbst zurück (sonst bliebe sie offen, falls ihr Aufrufer keinen catch hat); eine
+  // innere Ebene wirft nur — ihr catch (`rollbackLedgerTransaction`) gibt die Ebene ab.
+  if (isRollbackOnly()) failClosed();
+
+  // P1a — die äußerste Ebene: erst laufen die vorgemerkten Folgen (z. B. `invoice.paid`), IN der
+  // Transaktion, nachdem alle Schritte gelungen sind. Ihre Schreibwirkungen (Artikel „sold", letzter Kauf,
+  // Erinnerungen, Auftrag/Reparatur bezahlt) gehen mit DIESEM Commit und DIESEM Speichern — nie ohne die
+  // Rechnung, nie verloren, nie bei einem Rollback. Macht eine Folge die Transaktion rollback-only, wird
+  // nichts committet.
+  if (transactionDepth() === 1 && topLedgerLevelOwnsSql()) {
+    for (let fx = takeOuterCommitEffects(); fx.length > 0; fx = takeOuterCommitEffects()) runEffects(fx);
+    if (isRollbackOnly()) failClosed();
+  }
+
   // Senkt die Tiefe; nur die äußerste Ebene committet wirklich. Wirft bei depth 0.
   const outermost = leaveNestedTransaction();
-  if (!outermost) return;
+  popLedgerLevel();
+  if (!outermost) {
+    // Die SQL-Transaktion gehört einem Koordinator ohne Ledger-Ebene (Medien, Sync-Anwendung): der
+    // committet selbst und kennt die Folgen nicht — sie laufen dann wie bisher sofort, in seiner Transaktion.
+    if (!ledgerLevelOpen()) runEffects(takeOuterCommitEffects());
+    return;
+  }
 
   // Äußerstes COMMIT. Schlägt es fehl, ist die Transaktion ungültig → der Fehler
   // propagiert in den catch des Callers (→ rollbackLedgerTransaction); nichts wird persistiert.
@@ -315,6 +360,14 @@ export function rollbackLedgerTransaction(): void {
   // Kein aktiver Zustand (z.B. COMMIT war bereits durch) → Kontext dennoch sicher leeren.
   if (!isTransactionActive()) {
     resetTransactionContext();
+    return;
+  }
+  // P1a — eine INNERE Ledger-Ebene (die SQL-Transaktion gehört einem Äußeren) rollt nicht selbst
+  // zurück und setzt nichts zurück: sie macht die Transaktion rollback-only und gibt nur ihre Ebene ab.
+  // Fängt der Äußere den Fehler, kann er weder weiterschreiben (Schreibwächter) noch committen.
+  if (popLedgerLevel() === false) {
+    markRollbackOnly('an inner step failed');
+    leaveFailedNestedLevel();
     return;
   }
   // txDepth → 0 und pendingSave verwerfen (kein Phantom-Save/-Sync für zurückgerollte Daten).

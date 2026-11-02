@@ -85,7 +85,9 @@ const INVOICE_FORM = 'src/pages/invoices/InvoiceCreate.tsx';
   const remote = at > 0 && remoteAt > at ? form.slice(remoteAt, form.indexOf('});', remoteAt)) : '';
   ok(/^remote: \(\) => \(\{\s*id: invId,\s*expectedRevision: fassung,\s*reason,\s*customerId,\s*lines: /.test(remote),
     `REQUEST das Rechnungsformular schickt Kennung, gesehene Fassung, Grund und Auswahl (${remote.length} Zeichen)`);
-  ok(/const fassung = editInvoice\.revision;/.test(form),
+  // MIXED-INVOICE P1a — „die Fassung, die es geladen hat" heißt: beim Laden in die Maske festgehalten,
+  // nicht die, die der Store beim Speichern gerade hat (ein Neuladen dazwischen hätte sie still erneuert).
+  ok(/const fassung = seenRevision;/.test(form) && /setSeenRevision\(editInvoice\.revision\);/.test(form),
     'REQUEST …und zwar genau die Fassung, die es geladen hat');
   ok(remote.length > 0 && !/grossAmount|paidAmount|status|invoiceNumber|deltaPayment/.test(remote),
     'REQUEST …und nichts, was der Primary rechnet oder entscheidet');

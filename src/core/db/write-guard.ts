@@ -25,6 +25,7 @@
 
 import { assertDurable } from '@/core/bridge/durability-state';
 import { assertTransactionHealthy } from './transaction-health';
+import { assertNotRollbackOnly } from './transaction-context';
 
 /**
  * Die beiden Gründe, aus denen dieser Prozess gerade nichts mehr ändern darf — in der Reihenfolge
@@ -67,7 +68,12 @@ export function installWriteGuard<T extends Runner>(db: T, check: () => void = a
   if (db[GUARDED]) return db;
   const raw = db.run.bind(db);
   db.run = (sql: string, params?: unknown[]): unknown => {
-    if (isDataMutation(sql)) check();
+    if (isDataMutation(sql)) {
+      // MIXED-INVOICE P1a — in einer gescheiterten (rollback-only) Transaktion wird nichts mehr
+      // geschrieben, auch wenn ein Aufrufer den Fehler gefangen hat. Unabhängig von `check`.
+      assertNotRollbackOnly();
+      check();
+    }
     return raw(sql, params);
   };
   db[GUARDED] = true;

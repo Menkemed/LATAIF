@@ -62,7 +62,9 @@ import {
 } from '@/core/identity/identity-media';
 import type { Product, Purchase, PurchaseIdentityReference, PurchasePayment, PurchaseStatus, SupplierSnapshot } from '@/core/models/types';
 import { purchaseLineConsumption, type PurchaseLineConsumption } from './purchase-consumption';
-import { restoreSupplierCreditUsage } from '@/core/finance/supplierCreditRestore';
+import {
+  restoreSupplierCreditUsage, supplierCreditRestoreIssue, SUPPLIER_CREDIT_RESTORE_MISMATCH,
+} from '@/core/finance/supplierCreditRestore';
 
 /** Die Buchungen dieses Bereichs — Maske (useSharedWrite) und Fernbefehl benutzen DIESE Namen. */
 export const PURCHASE_EDIT_OP = {
@@ -1231,6 +1233,12 @@ export function voidPurchasePaymentInHouse(
   }
   const method = String(pay.method ?? '');
   const amountF = F(pay.amount);
+  // MIXED-INVOICE P1a — eine Guthabenzahlung gibt ihr Guthaben zurück; ginge das nicht sauber (Guthaben
+  // fehlt, Kennung fehlt, zu wenig verbraucht), VOR dem ersten Schreiben ein Nein statt still zu klemmen.
+  if (method === 'credit') {
+    const issue = supplierCreditRestoreIssue(pay.reference ? String(pay.reference) : null, B(amountF));
+    if (issue) throw nein(SUPPLIER_CREDIT_RESTORE_MISMATCH, issue);
+  }
   const cashF = F(p.paid_amount);
   const newCashF = method === 'credit' ? cashF : Math.max(0, cashF - amountF);
   const creditF = F(query(

@@ -55,6 +55,7 @@ import {
   computePaymentSplit,
 } from '@/core/ledger/posting';
 import { logAudit } from '@/core/audit/audit-log';
+import { runAtOuterCommit, isPendingAtOuterCommit } from '@/core/db/transaction-context';
 import { planEditOverpayment } from '@/core/credit/overpayment-teardown';
 import { useProductStore } from '@/stores/productStore';
 import type { Expense } from '@/core/models/types';
@@ -178,6 +179,8 @@ interface InvoiceStore {
     reason: string;
     /** INVOICE-EDIT S3 — ausdrückliche Bestätigung: Rechnung MIT Zahlungen wechselt den Kunden. */
     confirmCustomerChange?: boolean;
+    /** MIXED-INVOICE P1a — die Fassung, die der Mensch gesehen hat; anders in der Datenbank ⇒ `INVOICE_CHANGED`. */
+    expectedRevision?: number;
   }) => void;
   recordPayment: (invoiceId: string, amount: number, method: string, notes?: string, specialMarkOnFinal?: boolean, cardBrand?: CardBrand, paymentIdOverride?: string, suppressOverpayCredit?: boolean, opts?: RecordPaymentTimes) => string;
   // Credit-Modell Slice 3 — Store-Guthaben des Kunden gegen eine Invoice einlösen.
@@ -287,6 +290,21 @@ function assertWholePieceLines(lines: ReadonlyArray<{ productId?: string; quanti
 function paidEventCount(id: string): number {
   return eventBus.getLog().filter(e => e.type === 'invoice.paid' && e.entityId === id).length;
 }
+
+/**
+ * MIXED-INVOICE P1a — `invoice.paid` erst, wenn ALLE Schritte der äußersten Transaktion gelungen sind: an
+ * ihrem Ende, in ihr, unmittelbar vor dem COMMIT. Der Handler schreibt Pflichtdaten (Artikel „sold", letzter
+ * Kauf, Erinnerungen, Auftrag/Reparatur bezahlt) — die gehen damit atomar mit der Rechnung in denselben
+ * Commit und dasselbe Speichern; bei einem Rollback läuft er nie. Ohne offene Transaktion sofort, wie bisher.
+ * Je Rechnung und Transaktion höchstens einmal.
+ */
+const paidKey = (id: string): string => `invoice.paid:${id}`;
+function emitInvoicePaid(id: string, payload: Record<string, unknown> = {}): void {
+  runAtOuterCommit(paidKey(id), () => { void eventBus.emit('invoice.paid', 'invoice', id, payload); });
+}
+
+export const INVOICE_CHANGED = 'INVOICE_CHANGED';
+export const INVOICE_NOT_FOUND = 'INVOICE_NOT_FOUND';
 
 export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   invoices: [],
@@ -695,7 +713,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     }
 
     if (data.status === 'FINAL' && prevStatusBeforeUpdate !== 'FINAL') {
-      eventBus.emit('invoice.paid', 'invoice', id, {});
+      emitInvoicePaid(id);
     }
     get().loadInvoices();
   },
@@ -709,6 +727,20 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // der Fernauftrag `YYYY-MM-DD`: in der Rechnung stand je nach Rechner ein anderer Wert. Die Regel
     // ist die des Anlegens (`createDirectInvoice`): ein reines Datum wird Mitternacht UTC.
     const issuedAt = issuedAtIso(input.issuedAt);
+
+    // MIXED-INVOICE P1a — geprüft aus der DATENBANK, vor allem anderen: die Rechnung steht in DIESER
+    // Filiale, und wer eine Fassung nennt (Primary-Maske), ändert nur genau diese.
+    let editBranch: string;
+    try { editBranch = currentBranchId(); } catch { editBranch = 'branch-main'; }
+    const live = query('SELECT branch_id, revision FROM invoices WHERE id = ?', [id])[0];
+    if (!live) throw new Error(`editInvoice: invoice ${id} not found`);
+    if (String(live.branch_id ?? '') !== editBranch) {
+      throw new InvoiceActionRejected(INVOICE_NOT_FOUND, 'no such invoice in this branch');
+    }
+    if (input.expectedRevision !== undefined && Number(live.revision ?? 0) !== input.expectedRevision) {
+      throw new InvoiceActionRejected(INVOICE_CHANGED,
+        `this invoice changed since you opened it (you saw ${input.expectedRevision}, it is now ${Number(live.revision ?? 0)}) — reload it and edit it again`);
+    }
 
     const inv0 = get().getInvoice(id);
     if (!inv0) throw new Error(`editInvoice: invoice ${id} not found`);
@@ -853,6 +885,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // VAT-PERIOD-LOCK — was der NBR-Export von dieser Rechnung zeigt, VOR dem Edit; verglichen wird
     // unten vor dem Commit (eingereichtes Quartal → nur Änderungen ohne Exportwirkung, z. B. Notiz).
     const vatBefore = vatFingerprint(id);
+    // MIXED-INVOICE P1a — läuft der Edit in einer äußeren Klammer (runOnPrimary, Fernauftrag), entscheidet
+    // DIE über COMMIT, Neuladen und Ereignisse.
+    const ambient = inLedgerTransaction();
     beginLedgerTransaction();
     try {
       // 1. (Regel 1) Bestehende INVOICE-Buchung reversen (AR/REVENUE/VAT/COGS/INVENTORY).
@@ -1265,16 +1300,21 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // Punkt 2 / Regel 5: vollstaendiger Rollback. Stores danach auf den
       // zurueckgerollten DB-Stand zurueckziehen (innere Funktionen wie recordPayment
       // koennten Store-State vorzeitig aktualisiert haben).
+      // P1a — geschachtelt macht der Rollback die äußere Transaktion rollback-only; zurückgerollt ist erst,
+      // wenn die äußere Klammer schließt — die lädt danach selbst neu (hier stünde noch der offene Stand).
       rollbackLedgerTransaction();
-      get().loadInvoices();
-      try { useProductStore.getState().loadProducts(); } catch { /* noop */ }
+      if (!ambient) {
+        get().loadInvoices();
+        try { useProductStore.getState().loadProducts(); } catch { /* noop */ }
+      }
       throw e;
     }
 
     // INVOICE-EDIT S4 — nach dem Commit, wie beim Zahlen: nur beim echten Übergang auf FINAL und nur,
-    // wenn die Delta-Zahlung ihn nicht schon gemeldet hat.
-    if (inv0.status !== 'FINAL' && finalStatus === 'FINAL' && paidEventCount(id) === paidEventsBefore) {
-      eventBus.emit('invoice.paid', 'invoice', id, {});
+    // wenn die Delta-Zahlung ihn nicht schon gemeldet (oder für das äußere Commit vorgemerkt) hat.
+    if (inv0.status !== 'FINAL' && finalStatus === 'FINAL' && paidEventCount(id) === paidEventsBefore
+      && !isPendingAtOuterCommit(paidKey(id))) {
+      emitInvoicePaid(id);
     }
 
     // Erfolg: Store-State NACH COMMIT synchronisieren (Invoice + Produkte/Reservierung).
@@ -1395,7 +1435,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         // erneut, und der einzige Consumer (customer-KPI-Handler) zaehlt Revenue/
         // Profit/PurchaseCount doppelt (Produkt-/Task-Logik dort ist schon idempotent).
         if (prevStatus !== 'FINAL') {
-          eventBus.emit('invoice.paid', 'invoice', invoiceId, { amount: newPaid, tip });
+          emitInvoicePaid(invoiceId, { amount: newPaid, tip });
         }
         eventBus.emit('payment.received', 'payment', paymentId, { invoiceId, amount });
       }
@@ -1973,7 +2013,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       throw e;
     }
 
-    if (becameFinal) eventBus.emit('invoice.paid', 'invoice', invoiceId, {});
+    if (becameFinal) emitInvoicePaid(invoiceId);
     get().loadInvoices();
   },
 

@@ -143,6 +143,8 @@ const EDIT_CODE_VERDICTS: ReadonlySet<string> = new Set([
   VAT_PERIOD_FILED,
   // CONSIGNMENT-INTEGRITY — keine Kommissionsware als neue Zeile; die Verkaufsrechnung einer Kommission bleibt, wie sie ist.
   CONSIGNMENT_SELL_VIA_CONSIGNMENT, CONSIGNMENT_INVOICE_LOCKED,
+  // MIXED-INVOICE P1a — die Hausfolge selbst: fremde Filiale, veraltete Fassung.
+  'INVOICE_NOT_FOUND', 'INVOICE_CHANGED',
 ]);
 
 function asEditVerdict(err: unknown): CommandRejected | null {
@@ -207,7 +209,8 @@ export function invoiceLifecycleDeps(): EngineDeps {
 export function runInvoiceUpdate(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseInvoiceUpdate(raw);
   return runRemoteCommand(deps, identity, () => {
-    const live = query('SELECT id, revision FROM invoices WHERE id = ?', [req.id])[0];
+    // MIXED-INVOICE P1a — nur eine Rechnung der Filiale des geprüften Absenders.
+    const live = query('SELECT id, revision FROM invoices WHERE id = ? AND branch_id = ?', [req.id, identity.branchId])[0];
     if (!live) throw new CommandRejected('INVOICE_NOT_FOUND', 'no such invoice');
     // Der Vergleich läuft INNERHALB der Transaktion. Zwischen Lesen und Schreiben kann hier nichts
     // mehr dazwischenkommen: die eine Schreibreihenfolge hält den Platz — und die Fassung steigt

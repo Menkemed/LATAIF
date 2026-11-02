@@ -408,9 +408,13 @@ const effekte = (db: Db, inv: string): string => all(db,
 // 8) Quelltext — ein Übergang, eine Meldung.
 {
   const store = src('src/stores/invoiceStore.ts');
-  ok((store.match(/eventBus\.emit\('invoice\.paid'/g) ?? []).length === 4, 'Q invoice.paid: Zahlen, Edit, Zahlung ändern, Alt-Update');
-  ok(/paidEventCount\(id\) === paidEventsBefore/.test(store) && /if \(becameFinal\) eventBus\.emit/.test(store),
-    'Q Edit meldet nur, wenn die Delta-Zahlung es nicht schon tat; Zahlung ändern nur beim Übergang');
+  // MIXED-INVOICE P1a — gemeldet wird über EINE Stelle (`emitInvoicePaid`: am Ende der äußersten Transaktion,
+  // in ihr); die vier Übergänge rufen sie. Das Verhalten prüft test/p1a/transaction-safety.test.ts §3.
+  ok((store.match(/eventBus\.emit\('invoice\.paid'/g) ?? []).length === 1 && (store.match(/\bemitInvoicePaid\(/g) ?? []).length === 5,
+    'Q invoice.paid: Zahlen, Edit, Zahlung ändern, Alt-Update');
+  ok(/paidEventCount\(id\) === paidEventsBefore/.test(store) && /isPendingAtOuterCommit\(paidKey\(id\)\)/.test(store)
+    && /if \(becameFinal\) emitInvoicePaid\(/.test(store),
+    'Q Edit meldet nur, wenn die Delta-Zahlung es nicht schon tat (oder vorgemerkt hat); Zahlung ändern nur beim Übergang');
   ok((store.match(/freshInvoice\(invoiceId\)/g) ?? []).length >= 4, 'Q Zahlen rechnet gegen den Stand der Datenbank, nicht den Store');
 }
 void current; void paidEvents;

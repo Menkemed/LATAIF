@@ -202,8 +202,11 @@ async function makeInvoice(d: ReturnType<typeof deps>['deps'], nth: string, prod
   ok(/restoreLot\(/.test(edit) && /consumeLot\(/.test(edit), 'SCOPE …Lose zurueckgibt und neu verbraucht');
   ok(/postInvoiceIssued\(/.test(edit), 'SCOPE …neu bucht');
   ok(/An edit reason is required/.test(edit), 'SCOPE …und einen Grund verlangt');
-  ok(!/updated_at\s*=\s*\?\s*AND\s*updated_at/.test(edit) && !/expectedRevision/.test(edit),
-    'SCOPE lokal gibt es KEINE Stale-Sicherung — deshalb baut der Fernauftrag eine eigene');
+  // MIXED-INVOICE P1a — vorher gab es lokal KEINE Stale-Sicherung (nur der Fernauftrag prüfte). Jetzt prüft
+  // editInvoice eine genannte Fassung selbst gegen die Datenbank; der Fernauftrag behält seine eigene Prüfung.
+  ok(!/updated_at\s*=\s*\?\s*AND\s*updated_at/.test(edit)
+    && /input\.expectedRevision !== undefined && Number\(live\.revision \?\? 0\) !== input\.expectedRevision/.test(edit),
+    'SCOPE lokal prüft editInvoice eine genannte Fassung gegen die Datenbank (P1a); keine updated_at-Sicherung');
 
   const pay = inv.slice(payAt, inv.indexOf('  applyCreditToInvoice: (invoiceId', payAt));
   ok(/ensureFinalInvoiceNumber\(/.test(pay) && !/getNextDocumentNumber\(/.test(pay),

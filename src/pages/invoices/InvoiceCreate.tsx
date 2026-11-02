@@ -29,6 +29,7 @@ import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrite, fehlertext, nichtAmClient } from '@/core/data/shared-write';
 import { lotAggregatesFor, productLotsBatchFor, LEERE_LOSE } from '@/core/data/domain-reads';
 import { createInvoiceOnPrimary, invoiceCreatePaymentsBody, MAX_CREATE_PAYMENTS, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
+import { editInvoiceOnPrimary } from '@/core/invoices/invoice-edit-house';
 // v0.8.87 — Kartenarten (Normal / Amex / Debit) und die Datumsregel aus je EINER Quelle.
 import { CARD_BRAND_OPTIONS, cardFeeConfigured, computeCardFee, type CardBrand } from '@/core/finance/card-fees';
 
@@ -110,7 +111,7 @@ export function InvoiceCreate() {
   const [searchParams] = useSearchParams();
   const { id: editId } = useParams<{ id: string }>();
   const isEditMode = !!editId;
-  const { invoices, loadInvoices, editInvoice: editInvoiceFn, getInvoicePayments } = useInvoiceStore();
+  const { invoices, loadInvoices, getInvoicePayments } = useInvoiceStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
   const { tenantId: mediaTenantId, branchId: mediaBranchId } = useMediaScope();
@@ -151,10 +152,14 @@ export function InvoiceCreate() {
   // 2026-05-16 — Number-Type-Dialog: erscheint wenn die Rechnung als FINAL gespeichert wird.
   const [numberDialog, setNumberDialog] = useState<{ thenPrint: boolean } | null>(null);
   const [originalPaid, setOriginalPaid] = useState<number>(0);
+  // MIXED-INVOICE P1a — die Fassung, die beim Laden in die Maske gesehen wurde. Lädt der Store danach neu
+  // (z. B. nach einer Änderung von PC2), darf das Speichern nicht still die neue Fassung übernehmen.
+  const [seenRevision, setSeenRevision] = useState<number | undefined>(undefined);
 
   // Edit-Modus: einmalig Invoice + Lines + Payments in Form laden.
   useEffect(() => {
     if (!isEditMode || !editInvoice || hydrated) return;
+    setSeenRevision(editInvoice.revision);
     setCustomerId(editInvoice.customerId);
     setNotes(editInvoice.notes || '');
     setStaffId(editInvoice.staffId || '');
@@ -501,10 +506,11 @@ export function InvoiceCreate() {
       if (aendernRechnung.remote && deltaPayment) {
         setError(fehlertext(nichtAmClient('recording a payment while editing an invoice'))); return;
       }
-      const fassung = editInvoice.revision;
+      const fassung = seenRevision;
       if (aendernRechnung.remote && !fassung) {
         setError(fehlertext(nichtAmClient('editing this invoice (no revision loaded)'))); return;
       }
+      if (!fassung) { setError('This invoice has no revision loaded — reload it and edit it again.'); return; }
       // INVOICE-EDIT S3/S5 — Kundenwechsel = Korrektur einer falschen Zuordnung: Zahlungen, Retouren,
       // Gutschriften und das Guthaben aus dieser Rechnung ziehen mit um. Das bestätigt der Mensch
       // EINMAL ausdrücklich; das Haus verlangt die Bestätigung bei Geldfluss ebenfalls. Eine neue
@@ -532,8 +538,9 @@ export function InvoiceCreate() {
       }
       const invId = editInvoice.id;
       const r = await aendernRechnung.save({
-        local: () => {
-          editInvoiceFn(invId, {
+        // MIXED-INVOICE P1a — am Primary exklusiv über die Hausklammer, gegen die gesehene Fassung.
+        local: async () => {
+          await editInvoiceOnPrimary(invId, {
             lines: payload,
             customerId,
             notes: notes || undefined,
@@ -542,7 +549,7 @@ export function InvoiceCreate() {
             deltaPayment,
             reason,
             ...(confirmCustomerChange ? { confirmCustomerChange } : {}),
-          });
+          }, fassung);
           return {};
         },
         remote: () => ({

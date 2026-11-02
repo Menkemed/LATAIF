@@ -73,11 +73,12 @@ export const R4C_MATRIX: readonly MatrixZeile[] = [
   },
   {
     // POST-PARITY R7B PP-7 — der tote „Edit Lines"-Weg in InvoiceDetail ist entfernt; geaendert wird
-    // (und wurde) im Rechnungsformular: `editInvoice` des Stores, dort als `editInvoiceFn` gebunden.
+    // (und wurde) im Rechnungsformular. MIXED-INVOICE P1a — am Primary über `editInvoiceOnPrimary`
+    // (runOnPrimary + gesehene Fassung), das `editInvoice` des Stores in der Hausklammer fährt.
     op: 'invoices.update', handlung: 'Rechnungszeilen aendern', ort: 'pages/invoices/InvoiceCreate.tsx',
-    lokal: 'editInvoiceFn', paritaet: 'exakt', verdrahtet: true, luecke: null,
+    lokal: 'editInvoiceOnPrimary', paritaet: 'exakt', verdrahtet: true, luecke: null,
     grund: 'Ein Aufruf mit Zeilen und Pflichtgrund; Umkehr, Neubuchung, Status und Audit stecken '
-      + 'in derselben Transaktion des Hauses.',
+      + 'in derselben Transaktion des Hauses — am Primary exklusiv und gegen die gesehene Fassung (P1a).',
   },
   {
     op: 'invoices.record_payment', handlung: 'Zahlung erfassen', ort: 'pages/invoices/InvoiceDetail.tsx',

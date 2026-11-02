@@ -112,7 +112,9 @@ const koerper = (code: string, kopf: RegExp, ind = 2): string => {
   const c = codeOf(src('src/pages/invoices/InvoiceCreate.tsx'));
   const save = koerper(c, /async function performSave\(/);
   ok(/useSharedWrite<.*?>\('invoices\.update'\)/.test(c) && /aendernRechnung\.save\(\{/.test(save), 'WIRE InvoiceCreate: das Ändern geht über `invoices.update`');
-  ok(/local: \(\) => \{\s*editInvoiceFn\(invId,/.test(save) && (save.match(/editInvoiceFn\(/g) ?? []).length === 1,
+  // MIXED-INVOICE P1a — der lokale Anschluss fährt editInvoice über die Hausklammer (`editInvoiceOnPrimary`).
+  ok(/local: async \(\) => \{\s*(?:\/\/[^\n]*\n\s*)?await editInvoiceOnPrimary\(invId,/.test(save)
+    && (save.match(/editInvoiceOnPrimary\(/g) ?? []).length === 1 && !/editInvoiceFn\(/.test(save),
     'WIRE InvoiceCreate: editInvoice läuft NUR im lokalen Anschluss');
   ok(/remote: \(\) => \(\{\s*id: invId,\s*expectedRevision: fassung,\s*reason,\s*customerId,/.test(save) && !/remote: \(\) => \(\{[^}]*deltaPayment/.test(save),
     'WIRE InvoiceCreate: der Rumpf nennt Rechnung, gesehene Fassung, Grund — und keine Zahlung');
