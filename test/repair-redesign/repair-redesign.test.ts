@@ -622,6 +622,10 @@ for (const weg of ['lokal', 'fern'] as const) {
   ok(!/REPAIR_TYPES\.map/.test(detail) && /plannedWorkshopSupplierId/.test(detail) && /<RepairWorkLineForm/.test(detail)
     && /const totalCost = kostenSicht\.total;/.test(detail), 'WIRE Detailseite: kein Typ-Knopf, geplante Werkstatt, gemeinsame Zeilenmaske, Summe = Marge');
   ok(/repairLineCostIssue/.test(teile) && /source: 'inhouse'/.test(teile), 'WIRE Zeilenmaske: dieselbe Kostenregel, Standard eigene Arbeit');
+  // Owner 02.11.: New Repair startet mit 0 % (beim ersten Öffnen und bei jedem neuen Öffnen); 10 % wählt man selbst. Die Regel des Hauses bleibt.
+  ok((liste.match(/taxScheme: 'ZERO'/g) || []).length === 2 && !/taxScheme: 'VAT_10'/.test(liste) && /REPAIR_TAX_SCHEMES.map(scheme =>/.test(liste),
+    'WIRE New Repair: 0 % ist vorgewählt, beide Steuerarten bleiben wählbar');
+  ok(/let taxScheme: RepairTaxScheme = 'VAT_10';/.test(src('src/core/repairs/repair-rules.ts')), 'WIRE die Regel des Hauses (Vorgabe ohne Angabe) ist unverändert');
 }
 
 // ── 7) REPAIR-PREVIEW-PARITY: „Who does the work?", Primary == PC2 ──

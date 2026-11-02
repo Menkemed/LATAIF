@@ -158,7 +158,7 @@ export function RepairList() {
   const perm = usePermission();
   const [form, setForm] = useState<Partial<Repair>>({
     repairScope: 'CUSTOMER',
-    taxScheme: 'VAT_10',
+    taxScheme: 'ZERO',
     itemAttributes: {},
   });
   // REPAIR-PREVIEW-PARITY — „Who does the work?": eigener Entwurf, damit Abwählen nichts löscht (erneut ankreuzen holt die
@@ -414,7 +414,7 @@ export function RepairList() {
   const arbeitsFilterZuruecksetzen = () => { setFilterWorkType(''); setFilterSource(''); setFilterWorkshopId(''); setIssueFallback(true); setFilterInvoice(''); };
 
   function openNew() {
-    setForm({ repairScope: 'CUSTOMER', taxScheme: 'VAT_10', itemAttributes: {} });
+    setForm({ repairScope: 'CUSTOMER', taxScheme: 'ZERO', itemAttributes: {} });
     setArbeit(EMPTY_CREATE_WORK);
     setCreateHinweis('');
     setShowNew(true);
