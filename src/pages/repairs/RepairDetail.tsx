@@ -178,6 +178,8 @@ export function RepairDetail() {
   // v0.4.4 — Lightbox: Klick auf ein Item-Foto zeigt die Vergroesserung im Popup.
   // v0.7.19 — auf shared ImageLightbox umgestellt (Galerie-Navigation, ESC).
   const [lightboxIdx, setLightboxIdx] = useState<number | null>(null);
+  // Das große Artikelbild oben links: welches Foto gezeigt wird (die übrigen als Vorschau darunter).
+  const [hauptFoto, setHauptFoto] = useState(0);
   const perm = usePermission();
 
   useEffect(() => {
@@ -752,16 +754,53 @@ export function RepairDetail() {
         {/* Hero */}
         <div className="animate-fade-in" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 32, marginBottom: 40 }}>
 
-          {/* Voucher & Status */}
-          <div>
-            {/* Voucher Code - prominent display */}
-            <div className="rounded-xl flex flex-col items-center justify-center"
-              style={{ height: 220, background: '#F2F7FA', border: '1px solid #E5E9EE', marginBottom: 24 }}>
-              <span style={{ fontSize: 11, color: '#6B7280', letterSpacing: '0.1em', textTransform: 'uppercase', marginBottom: 12 }}>Pickup Voucher Code</span>
-              <span className="font-mono" style={{ fontSize: 48, color: '#0F0F10', letterSpacing: '0.15em', fontWeight: 600 }}>
-                {repair.voucherCode}
-              </span>
-              <span style={{ fontSize: 12, color: '#6B7280', marginTop: 12 }}>Customer presents this code for pickup</span>
+          {/* Artikelbild & Status — Owner 02.11.: das Bild groß an der Stelle des früheren Voucher-Felds. */}
+          <div style={{ minWidth: 0 }}>
+            <div style={{ marginBottom: 24 }} data-repair-hero-photo>
+              {fotoFehler && <p style={{ fontSize: 12, color: '#DC2626', marginBottom: 6 }}>{fotoFehler}</p>}
+              {editing ? (
+                <div className="rounded-xl" style={{ background: '#F2F7FA', border: '1px solid #E5E9EE', padding: 16 }}>
+                  <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 8 }}>Item Photos</span>
+                  <ImageUpload
+                    images={fotos.map((f) => f.url)}
+                    onChange={(sichtbar) => {
+                      // Was sichtbar bleibt, bleibt auch im Modell: Objekt-URL → Medienkennung,
+                      // eine neue Daten-URL ist eine neue Aufnahme.
+                      const zuModell = new Map(fotos.map((f) => [f.url, f.mediaId || f.url]));
+                      setFotos(sichtbar.map((u) => fotos.find((f) => f.url === u) ?? { mediaId: '', url: u, revocable: false }));
+                      setForm({ ...form, images: sichtbar.map((u) => zuModell.get(u) ?? u) });
+                    }}
+                    maxImages={REPAIR_MAX_PHOTOS}
+                  />
+                </div>
+              ) : fotos.length > 0 ? (
+                <>
+                  {/* Proportionen bleiben: das Bild passt sich ein (contain), nichts wird beschnitten oder verzerrt. */}
+                  <button type="button" onClick={() => setLightboxIdx(Math.min(hauptFoto, fotos.length - 1))} data-repair-photo-main
+                    className="rounded-xl cursor-zoom-in" title="Open the photo"
+                    style={{ display: 'block', width: '100%', aspectRatio: '4 / 3', maxHeight: 460, padding: 0, background: '#F2F7FA', border: '1px solid #E5E9EE', overflow: 'hidden' }}>
+                    <img src={fotos[Math.min(hauptFoto, fotos.length - 1)].url} alt="Item photo"
+                      style={{ width: '100%', height: '100%', objectFit: 'contain', display: 'block' }} />
+                  </button>
+                  {fotos.length > 1 && (
+                    <div className="flex flex-wrap" style={{ gap: 8, marginTop: 10 }}>
+                      {fotos.map((f, i) => (
+                        <button key={i} type="button" onClick={() => setHauptFoto(i)} aria-pressed={i === hauptFoto} data-repair-photo-thumb={i}
+                          title={`Show photo ${i + 1}`}
+                          style={{ width: 64, height: 64, padding: 0, borderRadius: 8, overflow: 'hidden', cursor: 'pointer', background: '#FFFFFF',
+                            border: `2px solid ${i === hauptFoto ? '#715DE3' : '#E5E9EE'}` }}>
+                          <img src={f.url} alt={`Item photo ${i + 1}`} style={{ width: '100%', height: '100%', objectFit: 'cover', display: 'block' }} />
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </>
+              ) : (
+                <div className="rounded-xl flex flex-col items-center justify-center" data-repair-photo-empty
+                  style={{ aspectRatio: '4 / 3', maxHeight: 460, background: '#F2F7FA', border: '1px solid #E5E9EE', color: '#9CA3AF', fontSize: 13 }}>
+                  Keine Fotos erfasst.
+                </div>
+              )}
             </div>
 
             {/* Status Timeline */}
@@ -1273,40 +1312,16 @@ export function RepairDetail() {
                 )}
               </div>
 
-              {/* Item-Fotos \u2014 Zustand bei Annahme */}
-              <div style={{ marginTop: 16 }}>
-                <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginBottom: 6 }}>Item Photos</span>
-                {fotoFehler && <p style={{ fontSize: 12, color: '#DC2626' }}>{fotoFehler}</p>}
-                {editing ? (
-                  <ImageUpload
-                    images={fotos.map((f) => f.url)}
-                    onChange={(sichtbar) => {
-                      // Was sichtbar bleibt, bleibt auch im Modell: Objekt-URL → Medienkennung,
-                      // eine neue Daten-URL ist eine neue Aufnahme.
-                      const zuModell = new Map(fotos.map((f) => [f.url, f.mediaId || f.url]));
-                      setFotos(sichtbar.map((u) => fotos.find((f) => f.url === u) ?? { mediaId: '', url: u, revocable: false }));
-                      setForm({ ...form, images: sichtbar.map((u) => zuModell.get(u) ?? u) });
-                    }}
-                    maxImages={REPAIR_MAX_PHOTOS}
-                  />
-                ) : (fotos.length > 0) ? (
-                  <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap' }}>
-                    {fotos.map((f) => f.url).map((src, i) => (
-                      <img
-                        key={i}
-                        src={src}
-                        alt={`Item photo ${i + 1}`}
-                        onClick={() => setLightboxIdx(i)}
-                        style={{
-                          width: 96, height: 96, objectFit: 'cover', borderRadius: 8,
-                          border: '1px solid #E5E9EE', cursor: 'zoom-in',
-                        }}
-                      />
-                    ))}
-                  </div>
-                ) : (
-                  <p style={{ fontSize: 13, color: '#9CA3AF' }}>Keine Fotos erfasst.</p>
-                )}
+              {/* Voucher — Owner 02.11.: kompakt an der Stelle der früheren Foto-Leiste (die Fotos stehen groß oben links). */}
+              <div style={{ marginTop: 16, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap',
+                padding: '10px 12px', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 8 }} data-repair-voucher>
+                <div style={{ minWidth: 0 }}>
+                  <span style={{ fontSize: 10, color: '#6B7280', letterSpacing: '0.1em', textTransform: 'uppercase', display: 'block' }}>Pickup Voucher Code</span>
+                  <span style={{ fontSize: 11, color: '#6B7280' }}>Customer presents this code for pickup</span>
+                </div>
+                <span className="font-mono" style={{ fontSize: 18, color: '#0F0F10', letterSpacing: '0.12em', fontWeight: 600 }} data-repair-voucher-code>
+                  {repair.voucherCode}
+                </span>
               </div>
 
               {/* v0.7.19 — Foto-Lightbox via shared component (ESC + Galerie-Navigation). */}
