@@ -10,8 +10,12 @@
 //
 // Die Regeln selbst stehen in `repair-rules`; hier wohnen nur die Anschlüsse ans Haus.
 // ════════════════════════════════════════════════════════════════════════════
-import { query, currentBranchId } from '@/core/db/helpers';
-import { saveDatabaseDurably } from '@/core/db/database';
+import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
+import { isAdminOrManagerRole } from '@/core/auth/role-permissions';
+import { useAuthStore } from '@/stores/authStore';
+import { getDatabase, saveDatabaseDurably } from '@/core/db/database';
+import { trackChange } from '@/core/sync/sync-service';
 import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction, watchLedgerPosts } from '@/core/ledger/posting';
 import { runExclusive } from '@/core/bridge/command-scheduler';
 import { getLotsWithPurchaseNumbers } from '@/core/lots/lot-queries';
@@ -151,6 +155,60 @@ export async function updateRepairOnPrimary(id: string, form: Partial<Repair>, e
       if (galleryMediaIds) applyRepairGallery(id, galleryMediaIds);
       rs.updateRepair(id, patch);
     });
+  });
+}
+
+// ── HOTFIX F2 — falschen Kunden einer Reparatur korrigieren ──────────────────────────────────
+// Nur ADMIN/MANAGER, nur solange die Reparatur weder auf einer Rechnung steht noch eine Zahlung (oder ein
+// Kunden-Goldguthaben aus ihr) dem bisherigen Kunden gehört — dann wäre es keine reine Zuordnung mehr. Nummer, Details,
+// Bilder, Verlauf und Status bleiben; geändert wird nur `customer_id`, mit Grund im Protokoll (alt/neu, wer, wann).
+export interface RepairCustomerChange { repairId: string; customerId: string; reason: string }
+export interface RepairCustomerChangeCtx { branchId: string; userId: string; role: string | undefined }
+
+/** In der Transaktion des Aufrufers (Primary wie Fernbefehl). */
+export function changeRepairCustomerInHouse(input: RepairCustomerChange, ctx: RepairCustomerChangeCtx): void {
+  if (!isAdminOrManagerRole(ctx.role)) {
+    throw new RepairActionRejected('PERMISSION_DENIED', 'only a manager or the owner may change the customer of a repair');
+  }
+  const reason = String(input.reason ?? '').trim();
+  if (reason.length < 3) throw new RepairActionRejected('REPAIR_CUSTOMER_REASON_REQUIRED', 'give a reason for the customer change');
+  const r = query(
+    `SELECT customer_id, repair_number, invoice_id, customer_paid_amount, customer_payment_ledger_id
+       FROM repairs WHERE id = ? AND branch_id = ?`,
+    [input.repairId, ctx.branchId],
+  )[0];
+  if (!r) throw new RepairActionRejected('REPAIR_NOT_FOUND', 'no such repair');
+  if (!query('SELECT 1 FROM customers WHERE id = ? AND branch_id = ?', [input.customerId, ctx.branchId]).length) {
+    throw new RepairActionRejected('CUSTOMER_NOT_FOUND', 'no such client in this branch');
+  }
+  const vorher = String(r.customer_id ?? '');
+  if (vorher === input.customerId) throw new RepairActionRejected('REPAIR_CUSTOMER_UNCHANGED', 'this client is already on the repair');
+  if (r.invoice_id) {
+    throw new RepairActionRejected('REPAIR_CUSTOMER_LOCKED_INVOICED', 'the repair is already on an invoice — the client cannot be changed here');
+  }
+  if (Number(r.customer_paid_amount ?? 0) > 0.0005 || r.customer_payment_ledger_id) {
+    throw new RepairActionRejected('REPAIR_CUSTOMER_LOCKED_PAID', 'the client has already paid for this repair — the client cannot be changed here');
+  }
+  if (query('SELECT 1 FROM customer_gold_credits WHERE source_repair_id = ? LIMIT 1', [input.repairId]).length) {
+    throw new RepairActionRejected('REPAIR_CUSTOMER_LOCKED_GOLD_CREDIT', 'a gold credit of the client comes from this repair — the client cannot be changed here');
+  }
+  // Genau EINE Änderung an der Zeile (eine neue Fassung) — nicht über `updateRepair`, das Marge, Zahlweg und Kopfkosten
+  // nachrechnet; die Reparatur soll bis auf den Kunden bleiben, wie sie ist. Der Abgleich trägt die ganze Zeile.
+  getDatabase().run('UPDATE repairs SET customer_id = ?, updated_at = ? WHERE id = ?', [input.customerId, new Date().toISOString(), input.repairId]);
+  trackChange('repairs', input.repairId, 'update', {});
+  logAuditOrThrow({
+    module: 'Repair', entityType: 'repairs', entityId: input.repairId, action: 'UPDATE', field: 'customer_id',
+    oldValue: vorher, newValue: { customerId: input.customerId, reason, repairNumber: String(r.repair_number ?? '') },
+    actor: { userId: ctx.userId, branchId: ctx.branchId },
+  });
+}
+
+/** „Change customer" der Detailseite am Primary — gegen die gesehene Fassung, eine Klammer. */
+export function changeRepairCustomerOnPrimary(repairId: string, customerId: string, reason: string, expectedRevision: number): Promise<void> {
+  const session = useAuthStore.getState().session as { role?: string } | null | undefined;
+  return amPrimary(() => {
+    assertRepairRevision(repairId, expectedRevision);
+    changeRepairCustomerInHouse({ repairId, customerId, reason }, { branchId: currentBranchId(), userId: currentUserId(), role: session?.role });
   });
 }
 

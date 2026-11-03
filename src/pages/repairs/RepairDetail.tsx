@@ -48,7 +48,8 @@ import {
   repairPhotoPlan, repairPhotosChanged, type RepairPhotoSlot,
 } from '@/core/repairs/repair-rules';
 import {
-  addRepairLineOnPrimary, cancelRepairLineOnPrimary, invoiceRepairsOnPrimary, updateRepairOnPrimary, updateRepairStatusOnPrimary,
+  addRepairLineOnPrimary, cancelRepairLineOnPrimary, changeRepairCustomerOnPrimary, invoiceRepairsOnPrimary, updateRepairOnPrimary,
+  updateRepairStatusOnPrimary,
 } from '@/core/repairs/repair-house';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import {
@@ -162,6 +163,8 @@ export function RepairDetail() {
   const { employees, loadEmployees } = useEmployeeStore();
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<Repair>>({});
+  // HOTFIX F2 — „Change customer": Ziel-Kunde, Pflicht-Grund und die Fassung beim Öffnen.
+  const [kundeWechsel, setKundeWechsel] = useState<{ customerId: string; reason: string; revision: number | null } | null>(null);
   // 2026-05-16 — Number-Type-Dialog vor Repair→Invoice Convert.
   const [numberDialogOpen, setNumberDialogOpen] = useState(false);
   // v0.7.6 — Tax-Scheme Picker vor Convert. User soll vor Invoice-Erstellung
@@ -587,6 +590,21 @@ export function RepairDetail() {
     setEditing(false);
   }
 
+  /** HOTFIX F2 — den falschen Kunden korrigieren (eigener Speichervorgang, am Primary wie am PC2 dieselbe Hausfolge). */
+  async function kundeWechselnSpeichern() {
+    if (!id || !kundeWechsel) return;
+    const { customerId, reason, revision } = kundeWechsel;
+    if (revision === null) { alert(fehlertext(nichtAmClient('changing the client (no revision loaded)'))); return; }
+    if (!customerId) { alert('Please choose the correct client.'); return; }
+    if (reason.trim().length < 3) { alert('Please give a reason for the change.'); return; }
+    if (!await w.ok('repairs.update', {
+      local: () => changeRepairCustomerOnPrimary(id, customerId, reason.trim(), revision),
+      remote: () => ({ id, expectedRevision: revision, customerId, customerChangeReason: reason.trim() }),
+    })) return;
+    setKundeWechsel(null);
+    loadRepairs();
+  }
+
   async function handleStatusAdvance() {
     if (!id || !nextStatus || !repair) return;
     // v0.7.4 — Warnung wenn External/Hybrid auf 'sent_to_workshop' oder 'ready'
@@ -962,6 +980,15 @@ export function RepairDetail() {
                 </span>
                 {customer?.phone && (
                   <span style={{ fontSize: 13, color: '#6B7280', display: 'block', marginTop: 4 }}>{customer.phone}</span>
+                )}
+                {/* HOTFIX F2 — nur solange weder Rechnung noch Zahlung dem bisherigen Kunden gehören (das Haus prüft es erneut). */}
+                {perm.canManageRepairs && !editing && !repair.invoiceId && !((repair.customerPaidAmount ?? 0) > 0.0005) && (
+                  <button type="button" data-repair-change-customer
+                    onClick={() => setKundeWechsel({ customerId: '', reason: '', revision: editBaselineRevision(repair) })}
+                    className="cursor-pointer transition-colors"
+                    style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 12, marginTop: 6, padding: 0, display: 'block' }}>
+                    Change customer →
+                  </button>
                 )}
               </div>
             )}
@@ -1723,6 +1750,37 @@ export function RepairDetail() {
           linkedEntityId={repair.id}
         />
       )}
+
+      {/* HOTFIX F2 — den richtigen bestehenden Kunden wählen; Nummer, Details, Bilder, Verlauf und Status bleiben. */}
+      <Modal open={!!kundeWechsel} onClose={() => setKundeWechsel(null)} title="Change customer" width={480}>
+        {kundeWechsel && (
+          <div data-repair-change-customer-dialog style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+            <p style={{ fontSize: 13, color: '#4B5563' }}>
+              Repair <strong style={{ color: '#0F0F10' }}>{repair.repairNumber}</strong> is currently assigned to{' '}
+              <strong style={{ color: '#0F0F10' }}>{customer ? `${customer.firstName} ${customer.lastName}` : repair.customerId}</strong>.
+              Number, details, photos, history and status stay as they are.
+            </p>
+            <SearchSelect
+              label="CORRECT CLIENT"
+              placeholder="Search clients..."
+              options={customers.filter((c) => c.id !== repair.customerId).map((c) => ({
+                id: c.id, label: `${c.firstName} ${c.lastName}`.trim() || c.id, subtitle: c.phone || undefined,
+              }))}
+              value={kundeWechsel.customerId}
+              onChange={(cid) => setKundeWechsel({ ...kundeWechsel, customerId: cid || '' })}
+            />
+            <Input label="REASON FOR THE CHANGE *" value={kundeWechsel.reason} data-repair-change-customer-reason
+              onChange={(e) => setKundeWechsel({ ...kundeWechsel, reason: e.target.value })} placeholder="e.g. booked on the wrong client" />
+            <div className="flex justify-end gap-3">
+              <Button variant="ghost" onClick={() => setKundeWechsel(null)}>Cancel</Button>
+              <Button variant="primary" data-repair-change-customer-confirm onClick={kundeWechselnSpeichern}
+                disabled={!kundeWechsel.customerId || kundeWechsel.reason.trim().length < 3}>
+                Change customer
+              </Button>
+            </div>
+          </div>
+        )}
+      </Modal>
 
       <Modal open={confirmDelete} onClose={() => setConfirmDelete(false)} title="Delete Repair" width={400}>
         <p style={{ fontSize: 14, color: '#4B5563', marginBottom: 20 }}>

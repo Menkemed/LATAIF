@@ -1043,8 +1043,9 @@ for (const weg of ['fern', 'lokal'] as const) {
     'TRIPWIRE am zweiten Rechner reist der Rumpf der geteilten Regeln — nichts Eigenes');
   const house2 = codeOf(src('src/core/repairs/repair-house.ts'));
   // POST-PARITY PP-13: zu Anlegen/Ändern/Abrechnen kamen Status, Zeile hinzufügen, Zeile stornieren
-  // (Kapitalisierung eigener Ware) — alle sechs durch dieselbe Klammer; v0.8.94 dazu „Zeile ändern" (Quick Edit): sieben.
-  ok((house2.match(/return amPrimary\(/g) || []).length === 7, 'TRIPWIRE alle sieben Handlungen laufen durch EINE Klammer');
+  // (Kapitalisierung eigener Ware) — alle sechs durch dieselbe Klammer; v0.8.94 dazu „Zeile ändern" (Quick Edit): sieben;
+  // HOTFIX F2 dazu „Change customer": acht.
+  ok((house2.match(/return amPrimary\(/g) || []).length === 8, 'TRIPWIRE alle acht Handlungen laufen durch EINE Klammer');
 }
 
 // ── §9 Veralteter Entwurf am PRIMARY (Live-Test 19.09.2026, Schritt 34) ──────────────────────

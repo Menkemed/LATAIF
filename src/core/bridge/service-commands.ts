@@ -46,7 +46,7 @@ import {
   REPAIR_EDIT_INPUTS, REPAIR_MAX_PHOTOS, RepairActionRejected, assertRepairEditRefs, buildRepairEditPatch,
   normalizeRepairCreate, planRepairCreate, type RepairCreateInput, type RepairEditInput, type RepairPhotoSlot,
 } from '@/core/repairs/repair-rules';
-import { houseRepairPort } from '@/core/repairs/repair-house';
+import { changeRepairCustomerInHouse, houseRepairPort } from '@/core/repairs/repair-house';
 import { applyRepairGallery, resolveRepairPhotoSlots } from '@/core/repairs/repair-media';
 import { TRANSFER_SETTLEMENT_MODELS, TransferActionRejected, normalizeTransferCreate } from '@/core/agents/transfer-rules';
 import { createTransferInHouse } from '@/core/agents/transfer-house';
@@ -371,6 +371,8 @@ export interface RepairUpdateRequest {
   expectedRevision: number;
   changes: Partial<Record<RepairEditInput, unknown>>;
   photos?: RepairPhotoSlot[];
+  /** HOTFIX F2 — „Change customer": ein eigener Speichervorgang (nur zusammen mit dem Grund, ohne andere Felder). */
+  customerChange?: { customerId: string; reason: string };
 }
 
 const EDIT_FIELDS = REPAIR_EDIT_INPUTS.filter((k) => k !== 'images');
@@ -389,12 +391,19 @@ const EDIT_FIELDS = REPAIR_EDIT_INPUTS.filter((k) => k !== 'images');
  */
 export function parseRepairUpdate(raw: unknown): RepairUpdateRequest {
   if (!isPlain(raw)) throw new ServicePayloadError('payload must be an object');
-  onlyKnownFields(raw, ['id', 'expectedRevision', ...EDIT_FIELDS, 'photos']);
+  onlyKnownFields(raw, ['id', 'expectedRevision', ...EDIT_FIELDS, 'photos', 'customerId', 'customerChangeReason']);
   const out: RepairUpdateRequest = {
     id: reqString(raw.id, 'id'),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
     changes: {},
   };
+  // HOTFIX F2 — die Kundenkorrektur reist allein: Kunde + Grund, keine weiteren Felder, keine Fotos.
+  if (raw.customerId !== undefined || raw.customerChangeReason !== undefined) {
+    const andere = Object.keys(raw).filter((k) => !['id', 'expectedRevision', 'customerId', 'customerChangeReason'].includes(k));
+    if (andere.length > 0) throw new ServicePayloadError('a customer change is saved on its own');
+    out.customerChange = { customerId: reqString(raw.customerId, 'customerId'), reason: reqString(raw.customerChangeReason, 'customerChangeReason') };
+    return out;
+  }
   const c = out.changes as Record<string, unknown>;
   const nullableText = (k: string): void => {
     if (raw[k] === undefined) return;
@@ -461,6 +470,13 @@ export async function runRepairUpdate(
     rs.loadRepairs();
     const seen = rs.getRepair(req.id);
     if (!seen) throw new CommandNotEvaluated('REPAIR_NOT_LOADED', 'the repair could not be read');
+    if (req.customerChange) {
+      // HOTFIX F2 — dieselbe Hausfolge wie „Change customer" am Primary (Rolle, Sperren, Protokoll).
+      const cc = req.customerChange;
+      house(() => changeRepairCustomerInHouse({ repairId: req.id, customerId: cc.customerId, reason: cc.reason },
+        { branchId: identity.branchId, userId: identity.userId, role: (identity as { role?: string }).role }));
+      return repairState(req.id) as unknown as Record<string, unknown>;
+    }
 
     // Der Stand, der NACH dieser Änderung gilt — Feld für Feld: was der Auftrag mitbringt, sonst
     // das, was in der Zeile steht. Die Fassung hat eben bestätigt, dass die Zeile genau das ist,
