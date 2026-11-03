@@ -19,6 +19,7 @@ import { assertSkuFree } from '@/core/products/sku-unique';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Audit) — Line-Tabellen
 import { getAvailableStock, syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
+import { logAudit } from '@/core/audit/audit-log';
 import { purchaseLotUnitCost } from '@/core/lots/lot-cost';
 // BULK METAL V1 — Bulk-Zeilen: Systemartikel, Bulk-Lot (mg/Fils), Bewegung PURCHASE; Buchung streng.
 import { ensureBulkProduct } from '@/core/bulk/bulk-product';
@@ -412,6 +413,41 @@ function buildPurchaseLineRecords(lines: readonly PurchaseInputLine[], purchaseD
 }
 
 /**
+ * HOTFIX F1 — der Altbestand eines bestehenden Artikels ohne jede Los-Historie als eigenes Los (siehe Aufrufer).
+ * Nur eigene Ware (OWN, nicht Kommission) mit ganzzahliger Menge > 0; gibt es schon ein Los (auch storniert), führt der
+ * Artikel seinen Bestand bereits in Losen und es passiert nichts. Rückgabe: die neue Los-ID oder null.
+ */
+function lotForLotlessOldStock(productId: string, ctx: LineCtx): string | null {
+  if (productId.startsWith('svc-repair-')) return null;   // Dienstleistung führt keinen Bestand (stock-contract)
+  const p = query(
+    `SELECT quantity, purchase_price, purchase_date, created_at, source_type, stock_status, branch_id FROM products WHERE id = ?`,
+    [productId],
+  )[0];
+  if (!p) return null;
+  if (String(p.source_type ?? 'OWN').toUpperCase() !== 'OWN') return null;
+  if (/^consignment/i.test(String(p.stock_status ?? ''))) return null;
+  const menge = Number(p.quantity);
+  if (!Number.isInteger(menge) || menge <= 0) return null;
+  if (query('SELECT 1 FROM stock_lots WHERE product_id = ? LIMIT 1', [productId]).length > 0) return null;
+  const lotId = uuid();
+  const einstand = Math.max(0, Number(p.purchase_price) || 0);
+  const seit = String(p.purchase_date || p.created_at || ctx.now);
+  getDatabase().run(
+    `INSERT INTO stock_lots
+       (id, branch_id, product_id, purchase_id, purchase_line_id,
+        unit_cost, qty_total, qty_remaining, status, acquired_at, created_at)
+     VALUES (?, ?, ?, NULL, NULL, ?, ?, ?, 'ACTIVE', ?, ?)`,
+    [lotId, String(p.branch_id || ctx.branchId), productId, einstand, menge, menge, seit, ctx.now],
+  );
+  logAudit({
+    module: 'Stock', entityType: 'stock_lots', entityId: lotId, action: 'CREATE',
+    newValue: { productId, quantity: menge, unitCost: einstand, reason: 'OLD_STOCK_KEPT_ON_FIRST_PURCHASE' },
+    actor: { userId: ctx.userId, branchId: ctx.branchId },
+  });
+  return lotId;
+}
+
+/**
  * Die Zeilenfolge von „Save Purchase", Teil 2: Zeilen, Partner-Beteiligungen, ein Los je Zeile, Menge und
  * Lagerstatus der Artikel. Der Beleg existiert schon; gespeichert und gebucht wird beim Aufrufer.
  */
@@ -447,6 +483,18 @@ function insertPurchaseLineRows(
   );
   const affectedProductIds = new Set<string>();
   const createdLotIds: string[] = [];   // LAN-Sync Phase 1a
+  // HOTFIX F1 — Altbestand ohne Los (New Collection, Excel-Import, „Add old stock") steht nur in products.quantity.
+  // Bekommt ein solcher BESTEHENDER Artikel sein erstes Los, rechnete `syncProductQuantity` danach nur noch Σ Lose —
+  // die alten Stücke waren überschrieben (2 alt + 4 gekauft = 4). Deshalb wird der vorhandene Altbestand VOR dem ersten
+  // Einkaufslos als eigenes Los übernommen: Menge wie bisher, Einstand = historischer Einkaufspreis des Artikels (damit
+  // rechnete auch ein Verkauf ohne Los), ohne Einkauf und ohne Buchung (Altbestand bleibt ungebucht, Eröffnung offen).
+  // Nicht für Kommissions- und Auftragszeilen: dort ist der Artikel dasselbe Stück, das der Einkauf erst bucht.
+  for (const l of lineRecords) {
+    if (!l.productId || l.qty <= 0 || l.bulk || !existingProductIds.has(l.productId)) continue;
+    if (l.sourceConsignmentId || l.sourceOrderLineId) continue;
+    const altLos = lotForLotlessOldStock(l.productId, { branchId, userId, now });
+    if (altLos) createdLotIds.push(altLos);
+  }
   for (const l of lineRecords) {
     if (!l.productId || l.qty <= 0) continue;
     if (l.bulk) {
