@@ -8,12 +8,16 @@
 //
 // Gebucht wird nur mit den vorhandenen Buchungen: jede Quelle (PAYMENT, CREDIT_NOTE; die Rechnung
 // selbst in `editInvoice`) wird mit `reverseSource` beim alten Kunden ausgebucht und mit ihrer
-// eigenen Buchungsfunktion (`postInvoicePayment`, `postCreditNote`) beim neuen neu gebucht — alle
-// auf EIN Korrekturdatum, den Tag des Wechsels. Stichtage davor bleiben, wie sie waren; am
-// Korrekturtag heben sich Kasse, Bank, Umsatz, VAT und Erstattungen auf, nur die kundenbezogenen
-// Salden (Forderung, Guthaben) wandern. Nach dem Umbuchen muss jede Quelle Konto für Konto dieselben
-// Beträge tragen (sonst Rollback). Belege (Nummern, Beträge, Daten, Referenzen, Link-Zeilen) bleiben;
-// nur ihr Kunde wird korrigiert. Die Spur bleibt: Storno-Buchungen, Revision, Verlauf.
+// eigenen Buchungsfunktion (`postInvoicePayment`, `postCreditNote`) beim neuen neu gebucht.
+// MIXED-INVOICE P1b (W1, Owner-Entscheidung Option A) — RÜCKWIRKEND: die Rechnung auf ihr Rechnungsdatum,
+// jede Zahlung und Gutschrift auf IHREN eigenen Buchungstag (vorher alles auf den Tag des Wechsels). Je Tag
+// heben sich Kasse, Bank, Umsatz, VAT und Erstattungen auf, nur die kundenbezogenen Salden (Forderung,
+// Guthaben) stehen danach von Anfang an beim richtigen Kunden. Der Tag des Wechsels steht im Protokoll
+// (Revision, Verlauf, `recorded_at` der Buchungen). Liegt ein betroffener Tag vor dem Eröffnungsstichtag
+// oder in einem zugemachten VAT-Quartal, wird abgewiesen (`correction-dates.ts`, geprüft in `editInvoice`).
+// Nach dem Umbuchen muss jede Quelle Konto für Konto dieselben Beträge tragen (sonst Rollback). Belege
+// (Nummern, Beträge, Daten, Referenzen, Link-Zeilen) bleiben; nur ihr Kunde wird korrigiert. Die Spur
+// bleibt: Storno-Buchungen, Revision, Verlauf.
 //
 // Gesperrt (mit Kennung), wo eine Korrektur fremdes Eigentum oder gemeldete Steuer berührte:
 //   • Guthaben aus dieser Rechnung, das für ETWAS ANDERES verwendet wurde (dann hat der alte Kunde
@@ -32,7 +36,7 @@ import { trackChange } from '@/core/sync/sync-service';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { closedVatQuarters, nbrQuarterOfDate } from '@/core/tax/vat-period-lock';
-import { postCreditNote, postInvoicePayment, reverseSource } from '@/core/ledger/posting';
+import { activeSourceDates, postCreditNote, postInvoicePayment, reverseSource } from '@/core/ledger/posting';
 import type { CreditNote, PaymentMethod } from '@/core/models/types';
 
 /** Dieselbe Kennung wie beim Anlegen (`invoice-create-house`) — hier nicht importiert, weil jenes
@@ -69,11 +73,15 @@ export interface MovablePayment {
   signature: string;
   /** false = Altzahlung ohne Buchung: nichts umzubuchen. */
   booked: boolean;
+  /** P1b (W1) — der Tag, an dem diese Zahlung gebucht ist; dort wird sie beim neuen Kunden neu gebucht. */
+  bookedAt: string | null;
 }
 
 export interface MovableCreditNote {
   cn: CreditNote;
   signature: string;
+  /** P1b (W1) — der Tag, an dem diese Gutschrift gebucht ist. */
+  bookedAt: string;
 }
 
 export interface CustomerChangePlan {
@@ -242,10 +250,14 @@ export function planCustomerChange(
       && legs.every((l) => l.cpType === 'CUSTOMER' && l.cpId === from)
     );
     if (!ok) throw unclear();
+    // P1b (W1) — die Zahlung wird auf IHREM Buchungstag umgebucht; eine Zahlung, deren wirksame Beine an
+    // verschiedenen Tagen stehen, ist nicht in der üblichen Form → fail-closed.
+    const days = legs.length > 0 ? activeSourceDates('PAYMENT', id) : [];
+    if (days.length > 1) throw unclear();
     return {
       id, invoiceId, amount, method: String(r.method), receivedAt: String(r.received_at), createdAt: String(r.created_at),
       notes: (r.notes as string | null) ?? null, openRemainder: split.length > 0 ? arAmount : undefined,
-      signature: signatureOf(legs), booked: legs.length > 0,
+      signature: signatureOf(legs), booked: legs.length > 0, bookedAt: days[0] ?? null,
     };
   });
 
@@ -254,8 +266,11 @@ export function planCustomerChange(
     const legs = activeLegs('CREDIT_NOTE', id);
     if (legs.length === 0) continue;   // Alt-Gutschrift ohne Buchung: nur der Beleg wird korrigiert
     if (!legs.every((l) => l.cpType === 'CUSTOMER' && l.cpId === from)) throw unclear();
+    const days = activeSourceDates('CREDIT_NOTE', id);
+    if (days.length !== 1) throw unclear();
     plan.creditNotes.push({
       signature: signatureOf(legs),
+      bookedAt: days[0],
       cn: {
         id, creditNoteNumber: String(r.credit_note_number), branchId: String(r.branch_id), customerId: to,
         invoiceId, salesReturnId: (r.sales_return_id as string) || undefined,
@@ -270,13 +285,24 @@ export function planCustomerChange(
   return plan;
 }
 
+/** P1b (W1) — die Buchungstage, die ein Kundenwechsel rückwirkend umbucht (für die Perioden- und Stichtagsprüfung). */
+export function customerChangeBookingDays(plan: CustomerChangePlan): Array<{ iso: string; what: string }> {
+  return [
+    ...plan.payments.filter((p) => p.booked && p.bookedAt).map((p) => ({ iso: p.bookedAt as string, what: 'a payment of this invoice' })),
+    ...plan.creditNotes.map((c) => ({ iso: c.bookedAt, what: `credit note ${c.cn.creditNoteNumber}` })),
+  ];
+}
+
 /**
  * Führt die Korrektur aus: Zahlungen und Gutschriften beim alten Kunden aus-, beim neuen einbuchen
- * (vorhandene Buchungen, alle auf das Korrekturdatum `at` — dasselbe, auf das `editInvoice` die
- * Rechnung umbucht), dann den Kunden der Belege korrigieren. Nur innerhalb der offenen Transaktion
+ * (vorhandene Buchungen), dann den Kunden der Belege korrigieren. Nur innerhalb der offenen Transaktion
  * von `editInvoice` aufrufen; jede Abweichung wirft und rollt alles zurück.
+ * P1b (W1) — `retro`: jede Zahlung und Gutschrift wird auf IHREM Buchungstag gespiegelt und dort beim neuen
+ * Kunden neu gebucht (die Geldbewegung selbst bleibt, je Tag netto null). Ohne `retro` alles auf `at`.
  */
-export function moveInvoiceBookings(plan: CustomerChangePlan, at: string): { payments: string[]; creditNotes: string[]; recorded: CorrectionTrail } {
+export function moveInvoiceBookings(
+  plan: CustomerChangePlan, at: string, retro = false,
+): { payments: string[]; creditNotes: string[]; recorded: CorrectionTrail } {
   // Wer hat laut Beleg bezahlt / Geld erhalten? VOR dem Umbuchen festhalten — die Belege selbst
   // bleiben unverändert, aber ihr Kunde ist danach der richtige. Die Spur steht in der Revision und
   // im Verlauf JEDES Belegs, damit nie unklar ist, wem eine Auszahlung damals zugeordnet war.
@@ -284,11 +310,12 @@ export function moveInvoiceBookings(plan: CustomerChangePlan, at: string): { pay
   const moved = { payments: [] as string[], creditNotes: [] as string[], recorded };
   for (const p of plan.payments) {
     if (!p.booked) continue;
-    reverseSource('PAYMENT', p.id, at);
+    const day = retro && p.bookedAt ? p.bookedAt : at;
+    reverseSource('PAYMENT', p.id, at, { mirrorOriginalDates: retro });
     postInvoicePayment({
       id: p.id, invoiceId: p.invoiceId, amount: p.amount, method: p.method as PaymentMethod,
       receivedAt: p.receivedAt, notes: p.notes ?? undefined, createdAt: p.createdAt,
-    }, plan.to, p.openRemainder, { occurredAt: at });
+    }, plan.to, p.openRemainder, { occurredAt: day });
     const after = activeLegs('PAYMENT', p.id);
     if (signatureOf(after) !== p.signature || after.some((l) => l.cpId !== plan.to)) {
       throw new Error(`moveInvoiceBookings: payment ${p.id} would change its booking — nothing was moved.`);
@@ -296,8 +323,8 @@ export function moveInvoiceBookings(plan: CustomerChangePlan, at: string): { pay
     moved.payments.push(p.id);
   }
   for (const c of plan.creditNotes) {
-    reverseSource('CREDIT_NOTE', c.cn.id, at);
-    postCreditNote(c.cn, { occurredAt: at });
+    reverseSource('CREDIT_NOTE', c.cn.id, at, { mirrorOriginalDates: retro });
+    postCreditNote(c.cn, { occurredAt: retro ? c.bookedAt : at });
     const after = activeLegs('CREDIT_NOTE', c.cn.id);
     if (signatureOf(after) !== c.signature || after.some((l) => l.cpId !== plan.to)) {
       throw new Error(`moveInvoiceBookings: credit note ${c.cn.creditNoteNumber} would change its booking — nothing was moved.`);

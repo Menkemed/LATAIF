@@ -32,10 +32,11 @@ import { issuedAtIso } from '@/core/invoices/issued-at';
 import { ensureFinalInvoiceNumber } from '@/core/invoices/final-number';
 import {
   assertInvoiceDateNotInClosedVatQuarter, assertInvoiceNotInClosedVatQuarter, assertNotFinalizingIntoClosedVatQuarter,
-  assertPaymentDateNotInClosedVatQuarter, assertVatUnchanged, closedVatQuarters, nbrQuarterOfDate, vatFingerprint,
+  assertPaymentDateNotInClosedVatQuarter, assertVatUnchanged, vatFingerprint,
 } from '@/core/tax/vat-period-lock';
-import { planCustomerChange, moveInvoiceBookings, moveLastPurchase, customerDisplayName } from '@/core/invoices/customer-change';
-import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts } from '@/core/invoices/edit-lines';
+import { planCustomerChange, moveInvoiceBookings, moveLastPurchase, customerDisplayName, customerChangeBookingDays } from '@/core/invoices/customer-change';
+import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts, isLedgerNeutralEdit } from '@/core/invoices/edit-lines';
+import { assertCorrectionDates, correctionDateIssue } from '@/core/ledger/correction-dates';
 import { assertCardFeeConfigured, normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import {
@@ -52,6 +53,7 @@ import {
   inLedgerTransaction,
   hasLedgerEntries,
   hasReversalFor,
+  activeSourceDates,
   computePaymentSplit,
 } from '@/core/ledger/posting';
 import { logAudit } from '@/core/audit/audit-log';
@@ -872,6 +874,27 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Ledger-Relevanz VOR dem Reverse festhalten (DRAFT ohne Ledger nicht posten).
     const hadInvoiceLedger = hasLedgerEntries('INVOICE', id);
 
+    // ── MIXED-INVOICE P1b (E11 / W1 / O1 / O2) — periodengerecht korrigieren. Vorher stand die Gegenbuchung
+    // immer HEUTE und die Neubuchung auf dem Rechnungsdatum: an jedem Stichtag dazwischen zählte die Rechnung
+    // doppelt (Nachaudit, Prüfskript P1). Jetzt spiegelt die Gegenbuchung jedes Original auf SEINEM Tag, die
+    // Neubuchung steht auf dem (neuen) Rechnungsdatum, ein Kundenwechsel bucht jede Zahlung und Gutschrift auf
+    // ihrem eigenen Tag um. Das geht nur, wo die Vergangenheit offen ist: kein Tag vor dem Eröffnungsstichtag,
+    // keiner in einem eingereichten oder VAT-bezahlten Quartal — sonst wird eine steuerrelevante Korrektur
+    // abgewiesen, auch bei einer noch nicht exportierten Rechnung und auch über Datumswechsel oder Kundenwechsel.
+    // Eine Änderung OHNE Buchungswirkung (Zeilen mit Menge, Preis, Steuerart gleich; Kunde, Datum gleich; keine
+    // Zahlung) berührt das Hauptbuch gar nicht — keine Gegen-, keine Neubuchung; sie ändert nur ihre Felder und
+    // schreibt das Protokoll. In einer zugemachten Periode (vor dem Stichtag, eingereichtes/VAT-bezahltes Quartal)
+    // sind davon nur die Verwaltungsfelder frei: Notiz und Mitarbeiter — eine geänderte Zeilenbezeichnung wird
+    // dort abgewiesen. Der tatsächliche Änderungszeitpunkt steht im Protokoll (invoice_edits, audit_log,
+    // `recorded_at` der Buchungen).
+    const neuesDatum = issuedAt ?? inv0.issuedAt ?? inv0.createdAt;
+    const gleicherTag = issuedAt === undefined || issuedAt.slice(0, 10) === String(inv0.issuedAt ?? '').slice(0, 10);
+    const ohneBuchung = !customerPlan && gleicherTag && deltaAmount === 0 && isLedgerNeutralEdit(baseLines, lines, lineMatch);
+    const bezeichnung = new Map(query('SELECT id, description FROM invoice_lines WHERE invoice_id = ?', [id])
+      .map((r) => [String(r.id), String(r.description ?? '')]));
+    const nurVerwaltung = ohneBuchung
+      && lines.every((l, i) => !!lineMatch[i] && String(l.description ?? '') === (bezeichnung.get(lineMatch[i] as string) ?? ''));
+
     // ── Punkt 2: EINE echte SQL-Transaktion. reverse + header + lines + lots +
     // repost + delta-payment + status + audit laufen als Einheit. Bei Fehler ROLLBACK
     // → kein persistierter Zwischenstand (saveDatabase erst beim COMMIT). Store-State
@@ -890,17 +913,31 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const ambient = inLedgerTransaction();
     beginLedgerTransaction();
     try {
+      // P1b — Stichtag und VAT-Sperre IN der Transaktion, unmittelbar vor dem ersten Schreiben: geprüft wird genau
+      // der Stand, auf den geschrieben wird. Zwischen Prüfung und Schreiben liegt kein `await` (editInvoice ist
+      // synchron), und Primary (runOnPrimary) wie PC2 (runRemoteCommand) fahren es im exklusiven Platz der einen
+      // Schreibreihenfolge — eine VAT-Einreichung oder eine andere Änderung kann nicht dazwischen kommen.
+      const tageNein = correctionDateIssue(editBranch, [
+        ...(hadInvoiceLedger ? activeSourceDates('INVOICE', id).map((iso) => ({ iso, what: 'the reversal of this invoice' })) : []),
+        ...(hadInvoiceLedger || inv0.status !== 'DRAFT' ? [{ iso: neuesDatum, what: 'this invoice' }] : []),
+        ...(customerPlan ? customerChangeBookingDays(customerPlan) : []),
+      ]);
+      if (tageNein && !nurVerwaltung) throw tageNein;
+
       // 1. (Regel 1) Bestehende INVOICE-Buchung reversen (AR/REVENUE/VAT/COGS/INVENTORY).
       //    Multi-cycle-safe; PAYMENT-Beine (eigener sourceModule) bleiben unangetastet.
-      if (hadInvoiceLedger) {
-        reverseSource('INVOICE', id, now);
+      //    P1b (E11) — rückwirkend: jedes Original auf seinem eigenen Tag gespiegelt (auch das Überzahlungs-
+      //    Bein eines früheren Edits auf dessen Tag). Eine Änderung ohne Buchungswirkung bucht gar nichts.
+      if (hadInvoiceLedger && !ohneBuchung) {
+        reverseSource('INVOICE', id, now, { mirrorOriginalDates: true });
       }
       // Slice 3b — reverseSource('INVOICE') oben hat das CR-CUSTOMER_CREDIT-Bein eines
       // frueheren Edit-Ueberschusses bereits mit-gedreht (gleiche source). Die zugehoerige
       // Domain-Row (source_type='invoice_edit') hier loeschen, damit Step 8b sie frisch aus
       // dem NEUEN Ueberschuss aufbaut (Re-Edit-idempotent; No-op beim Erst-Edit). saveDatabase
       // deferiert in der offenen Tx → atomar mit dem Rest; Rollback verwirft die Loeschung.
-      clawbackGrantedCredit('invoice_edit', id);
+      // P1b — ohne Buchungswirkung bleibt das Guthaben samt Buchung, wie es ist.
+      if (!ohneBuchung) clawbackGrantedCredit('invoice_edit', id);
 
       // 2. Header (optional) — Kunde/Notiz/Datum/Mitarbeiter im selben Vorgang.
       const hSets: string[] = [];
@@ -914,9 +951,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         db.run(`UPDATE invoices SET ${hSets.join(', ')}, updated_at = ? WHERE id = ?`, hVals);
       }
       const effCustomerId = customerId !== undefined ? customerId : inv0.customerId;
-      // INVOICE-EDIT S3/S5 — Zahlungen, Gutschriften und Belege beim alten Kunden aus-, beim neuen einbuchen. Wie die Rechnung
-      // unten auf das Korrekturdatum `now`: nichts wird zurückdatiert, Stichtage davor bleiben.
-      const moved = customerPlan ? moveInvoiceBookings(customerPlan, now) : null;
+      // INVOICE-EDIT S3/S5 — Zahlungen, Gutschriften und Belege beim alten Kunden aus-, beim neuen einbuchen.
+      // P1b (W1) — rückwirkend, jede auf ihrem eigenen Buchungstag (ein Kundenwechsel hat immer Buchungswirkung:
+      // ging das nicht, wurde oben schon abgewiesen).
+      const moved = customerPlan ? moveInvoiceBookings(customerPlan, now, true) : null;
 
       // 3. Domain: alte Zeilen geben ihren Bestand zurueck, dann Lines loeschen.
       //    STOCK-LOT-INTEGRITY — mit Nachweis exakt dieser; Altzeile mit Los wie bisher ihr Los.
@@ -1114,8 +1152,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       //    tragen die ECHTEN invoice_lines-IDs (_id). Kein safePost: ein Repost-Fehler
       //    MUSS den Gesamt-Rollback ausloesen. Nur posten, wenn die Rechnung ledger-
       //    relevant ist (war im Ledger oder ist nicht-DRAFT) — eine reine DRAFT bleibt
-      //    ungebucht.
-      if (hadInvoiceLedger || inv0.status !== 'DRAFT') {
+      //    ungebucht. P1b — ohne Buchungswirkung (Notiz, Mitarbeiter, Bezeichnung) wird nichts neu gebucht.
+      if (!ohneBuchung && (hadInvoiceLedger || inv0.status !== 'DRAFT')) {
         const fresh: Invoice = {
           id, invoiceNumber: inv0.invoiceNumber, customerId: effCustomerId,
           status: inv0.status, currency: inv0.currency || 'BHD',
@@ -1132,18 +1170,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           })),
           createdAt: inv0.createdAt, createdBy: inv0.createdBy,
         };
-        // INVOICE-EDIT S3 — beim Kundenwechsel bucht die Rechnung auf das Korrekturdatum (wie ihre
-        // Zahlungen), nicht zurück auf das Rechnungsdatum: der neue Kunde hatte die Forderung vorher
-        // nicht. Ohne Kundenwechsel bleibt alles wie bisher.
-        // VAT-PERIOD-LOCK — läge die Neubuchung (Rechnungsdatum) in einem eingereichten oder bezahlten VAT-Quartal,
-        // entstünden dort neue Hauptbuchzeilen, während die Gegenbuchung oben heute steht: die Buchungen eines
-        // zugemachten Quartals änderten sich (auch wenn sein Export unberührt bleibt). Dann bucht die Korrektur —
-        // Gegen- UND Neubuchung — heute; das zugemachte Quartal bleibt, wie es gemeldet wurde.
-        const buchungstag = fresh.issuedAt || fresh.createdAt;
-        const buchungsquartal = buchungstag ? nbrQuarterOfDate(buchungstag) : null;
-        const quartalZu = !!buchungsquartal
-          && closedVatQuarters(String(query('SELECT branch_id FROM invoices WHERE id = ?', [id])[0]?.branch_id ?? '')).has(buchungsquartal.key);
-        postInvoiceIssued(fresh, customerPlan || quartalZu ? { occurredAt: now } : {});
+        // P1b (E11/W1) — die Neubuchung auf das (neue) Rechnungsdatum, auch beim Kundenwechsel (Owner-Entscheidung
+        // W1 Option A: die Forderung stand von Anfang an beim richtigen Kunden). Vorher: Kundenwechsel und
+        // zugemachtes Quartal buchten heute. Jetzt ist ein zugemachtes Quartal (oder ein Tag vor der Eröffnung)
+        // oben schon abgewiesen.
+        postInvoiceIssued(fresh);
       }
 
       // 7. Optionale Delta-Zahlung — innerhalb der Transaktion. recordPayment macht
@@ -1247,14 +1278,26 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       ) as { id: string; amount: number; used_amount: number }[]).map(r => ({
         id: r.id, amount: Number(r.amount) || 0, usedAmount: Number(r.used_amount) || 0,
       }));
-      const overpayPlan = planEditOverpayment({ newPaid: settled, newGross: grossAmount, existingOverpaymentCredits: existingOverpay });
+      // P1b — ohne Buchungswirkung bleibt ein Guthaben aus einem früheren Edit samt seiner Buchung stehen (oben nicht
+      // zurückgeholt); es wird hier auch nicht neu gebucht — sonst stünde es doppelt.
+      const overpayPlan: ReturnType<typeof planEditOverpayment> = ohneBuchung
+        ? { blocked: false, additionalCredit: 0 }
+        : planEditOverpayment({ newPaid: settled, newGross: grossAmount, existingOverpaymentCredits: existingOverpay });
       if (overpayPlan.blocked) {
         throw new Error(overpayPlan.reason === 'OVERPAYMENT_CREDIT_WOULD_SHRINK'
           ? 'Cannot edit: this would shrink an existing overpayment store credit below its amount. Refund or apply that credit first, then edit.'
           : 'Cannot edit: the overpayment store credit from a payment has already been used. Reverse that credit usage first.');
       }
       if (overpayPlan.additionalCredit > 0.005) {
-        postInvoiceOverpaymentCredit(id, effCustomerId, overpayPlan.additionalCredit, now);
+        // P1b (E11) — rückwirkend steht die Umgliederung an dem Tag, an dem die Überzahlung entstand: dem
+        // spätesten von Rechnungsdatum, Zahlungen und Gutschriften dieser Rechnung (vorher heute — dann zeigte
+        // jeder Stichtag dazwischen eine negative Forderung statt Guthaben). Auch dieser Tag muss offen sein.
+        const overpayAt = [String(neuesDatum),
+          ...query('SELECT received_at AS d FROM payments WHERE invoice_id = ?', [id]).map((r) => String(r.d ?? '')),
+          ...query("SELECT issued_at AS d FROM credit_notes WHERE invoice_id = ? AND status != 'CANCELLED'", [id]).map((r) => String(r.d ?? '')),
+        ].filter(Boolean).reduce((a, b) => (new Date(b).getTime() > new Date(a).getTime() ? b : a));
+        assertCorrectionDates(editBranch, [{ iso: overpayAt, what: 'the store credit from this overpayment' }]);
+        postInvoiceOverpaymentCredit(id, effCustomerId, overpayPlan.additionalCredit, overpayAt);
         const overCreditId = uuid();
         db.run(
           `INSERT INTO customer_credits (id, branch_id, customer_id, source_type, source_id, amount, used_amount, status, note, created_at, created_by)

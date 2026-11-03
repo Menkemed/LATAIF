@@ -242,19 +242,21 @@ const paidOf = (id: string) => eventBus.getLog().filter((e) => e.type === 'invoi
     && s(db, "SELECT notes FROM customers WHERE id = 'cust-2'") === 'neu', '§1a die nächste Transaktion läuft normal');
 }
 {
-  // b) echt: `editInvoice` scheitert IN seiner Transaktion (VAT-Sperre), der Äußere fängt und schreibt weiter.
+  // b) echt: `editInvoice` scheitert IN seiner Transaktion — nach der Gegenbuchung fehlt Bestand für die
+  //    höhere Menge (das Los hat 1) —, der Äußere fängt und schreibt weiter.
+  //    (P1b: die VAT-/Stichtagssperre greift jetzt schon VOR der Transaktion; dafür taugt sie hier nicht mehr.)
   const db = freshDb();
   const inv = rechnung(db, 'p1');
-  zahlung(inv, 1100);
-  insert(db, 'vat_filings', { id: 'vf-q4', branch_id: 'branch-main', year: 2026, quarter: 4, filed_at: NOW });
+  zahlung(inv, 600);
   const vor = zustand(db, inv);
   const paidVor = paidOf(inv).length;
   let innen = '', weiter = '';
+  const zwei = { ...LINE('p1', 1000, lineOf(db, inv)), quantity: 2, vatAmount: 200, lineTotal: 2200 };
   const aussen = meldung(() => imHaus(() => {
-    innen = meldung(() => useInvoiceStore.getState().editInvoice(inv, { lines: [LINE('p1', 900, lineOf(db, inv))] as never, reason: 'x' }));
+    innen = meldung(() => useInvoiceStore.getState().editInvoice(inv, { lines: [zwei] as never, reason: 'x' }));
     weiter = meldung(() => db.run("UPDATE customers SET notes = 'verschluckt' WHERE id = 'cust-2'"));
   }));
-  ok(innen.startsWith('VAT_PERIOD_FILED|'), `§1b editInvoice scheitert innen (${innen.slice(0, 40)})`);
+  ok(innen.startsWith('INVOICE_KEPT_LINE_LOT_SHORT|'), `§1b editInvoice scheitert innen, nach der Gegenbuchung (${innen.slice(0, 40)})`);
   ok(weiter.startsWith(tc.TRANSACTION_ROLLBACK_ONLY + '|') && aussen.startsWith(tc.TRANSACTION_ROLLBACK_ONLY + '|'),
     `§1b Weiterschreiben und äußeres Commit fail-closed (${aussen.slice(0, 40)})`);
   reload();

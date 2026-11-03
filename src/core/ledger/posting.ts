@@ -1143,25 +1143,45 @@ export function postCreditNote(cn: CreditNote, opts: { occurredAt?: string } = {
 // schreibt eine spiegelverkehrte Buchung (DEBIT↔CREDIT) mit
 // reverses_entry_id zum jeweiligen Original.
 
+/**
+ * MIXED-INVOICE P1b (E11) — `mirrorOriginalDates`: jede Originalbuchung wird auf IHREM eigenen Datum
+ * gespiegelt (eine Gegentransaktion je Originaltransaktion), statt alles auf `occurredAt`. Eine Korrektur
+ * wirkt so periodengerecht: an jedem Stichtag zwischen Original und Korrektur stehen weder doppelte noch
+ * fehlende Werte. Ohne die Option bleibt alles wie bisher (ein Datum für alles, z. B. Storno heute).
+ */
+export interface ReverseOptions { mirrorOriginalDates?: boolean }
+
 /** R5F.1 — auch ein gescheiterter Storno zählt (er schreibt ohne `postEntries` direkt). */
 export function reverseSource(
   sourceModule: SourceModule,
   sourceId: string,
-  occurredAt: string
+  occurredAt: string,
+  opts: ReverseOptions = {},
 ): PostingResult {
   try {
     assertLedgerHere();
-    return reverseSourceOnce(sourceModule, sourceId, occurredAt);
+    return reverseSourceOnce(sourceModule, sourceId, occurredAt, opts);
   } catch (err) {
     postFailures++;
     throw err;
   }
 }
 
+/** P1b — die Buchungstage der noch wirksamen Originale einer Quelle (für die Perioden- und Stichtagsprüfung). */
+export function activeSourceDates(sourceModule: SourceModule, sourceId: string): string[] {
+  return query(
+    `SELECT DISTINCT e1.occurred_at AS d FROM ledger_entries e1
+      WHERE e1.source_module = ? AND e1.source_id = ? AND e1.reverses_entry_id IS NULL
+        AND NOT EXISTS (SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id)`,
+    [sourceModule, sourceId],
+  ).map((r) => String(r.d));
+}
+
 function reverseSourceOnce(
   sourceModule: SourceModule,
   sourceId: string,
-  occurredAt: string
+  occurredAt: string,
+  opts: ReverseOptions = {},
 ): PostingResult {
   if (hasReversalFor(sourceModule, sourceId)) {
     throw new Error(`reverseSource: ${sourceModule}/${sourceId} already reversed`);
@@ -1171,7 +1191,8 @@ function reverseSourceOnce(
   // So koennen mehrere Reverse-and-Repost-Zyklen sauber sequenziert werden.
   const r = db.exec(
     `SELECT e1.id, e1.account, e1.direction, e1.amount, e1.counterparty_type, e1.counterparty_id,
-            e1.source_line_id, e1.tax_scheme_snapshot, e1.vat_rate_snapshot, e1.currency
+            e1.source_line_id, e1.tax_scheme_snapshot, e1.vat_rate_snapshot, e1.currency,
+            e1.transaction_id, e1.occurred_at
      FROM ledger_entries e1
      WHERE e1.source_module = ? AND e1.source_id = ? AND e1.reverses_entry_id IS NULL
        AND NOT EXISTS (
@@ -1193,17 +1214,31 @@ function reverseSourceOnce(
   const tsIdx = cols.indexOf('tax_scheme_snapshot');
   const vrIdx = cols.indexOf('vat_rate_snapshot');
   const curIdx = cols.indexOf('currency');
+  const txIdx = cols.indexOf('transaction_id');
+  const occIdx = cols.indexOf('occurred_at');
 
   // Wir schreiben EINE Reverse-Transaction mit allen gespiegelten Entries.
   // Für jede Originalzeile setzen wir reverses_entry_id; daher rufen wir
   // postEntries nicht direkt auf, sondern bauen die INSERTs selbst.
+  // P1b — gespiegelt auf die Originaldaten: je Originaltransaktion EINE Gegentransaktion auf deren Tag.
   const branchId = currentBranchId();
   const userId = currentUserId();
   const recordedAt = new Date().toISOString();
   const transactionId = uuid();
-  const rows = r[0].values;
+  const rows = opts.mirrorOriginalDates
+    ? [...r[0].values].sort((a, b) => String(a[occIdx]).localeCompare(String(b[occIdx])))
+    : r[0].values;
   const nos = reserveEntryNos(branchId, rows.length);
   const currency = (rows[0][curIdx] as string) ?? 'BHD';
+  const mirrorTx = new Map<string, string>();
+  const txOf = (row: unknown[]): string => {
+    if (!opts.mirrorOriginalDates) return transactionId;
+    const orig = String(row[txIdx]);
+    let t = mirrorTx.get(orig);
+    if (!t) { t = mirrorTx.size === 0 ? transactionId : uuid(); mirrorTx.set(orig, t); }
+    return t;
+  };
+  const dateOf = (row: unknown[]): string => (opts.mirrorOriginalDates ? String(row[occIdx]) : occurredAt);
 
   const ambient = inLedgerTransaction();
   if (!ambient) db.run('BEGIN');
@@ -1228,8 +1263,8 @@ function reverseSourceOnce(
           newId,
           branchId,
           nos[i],
-          transactionId,
-          occurredAt,
+          txOf(row),
+          dateOf(row),
           recordedAt,
           row[accIdx],
           flipped,
@@ -1243,7 +1278,7 @@ function reverseSourceOnce(
           row[idIdx],                     // reverses_entry_id → Original
           row[tsIdx],
           row[vrIdx],
-          JSON.stringify({ reversal: true }),
+          JSON.stringify(opts.mirrorOriginalDates ? { reversal: true, mirroredAt: recordedAt } : { reversal: true }),
           userId,
           recordedAt,
         ]

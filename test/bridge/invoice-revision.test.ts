@@ -69,6 +69,10 @@ const { runInvoiceUpdate, parseInvoiceUpdate } =
 const { executeCommand } = await import('../../src/core/bridge/command-registry.ts');
 await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
+// MIXED-INVOICE P1b — die Datumsfälle hier liegen 2026 VOR dem Eröffnungsstichtag (O1); sie prüfen das
+// Datumsformat des Fernwegs, nicht O1 (das prüft test/p1b mit der echten Konstante).
+const { setOpeningCutoffForTest } = await import('../../src/core/ledger/correction-dates.ts');
+setOpeningCutoffForTest('2026-01-01');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 const { useInvoiceStore } = await import('../../src/stores/invoiceStore.ts');
 

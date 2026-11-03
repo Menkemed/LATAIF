@@ -244,6 +244,35 @@ export function keptLineAmounts(
   return { unitPrice: n.unitPrice, vatAmount: calc.internalVatAmount || calc.vatAmount, lineTotal: calc.grossAmount };
 }
 
+/**
+ * MIXED-INVOICE P1b — ändert dieser Edit die Buchung der Rechnung überhaupt? Nein, wenn jede gespeicherte
+ * Zeile genau einmal fortgesetzt wird und keine dazukommt, jede mit derselben Menge, demselben Nettopreis,
+ * derselben Steuerart und demselben Satz (dieselbe Regel wie „fachlich unverändert" in `keptLineAmounts`:
+ * dann bleiben ihre Beträge und ihr Einstand stehen). Kunde, Datum und Zahlungen prüft der Aufrufer.
+ * Eine solche Änderung (Notiz, Mitarbeiter, Bezeichnung) ist steuerlich neutral.
+ */
+export function isLedgerNeutralEdit(
+  base: readonly EditBaseLine[],
+  next: readonly EditInputLine[],
+  match: ReadonlyArray<string | null>,
+): boolean {
+  if (next.length !== base.length) return false;
+  const byId = new Map(base.map((b) => [b.id, b]));
+  const used = new Set<string>();
+  for (let i = 0; i < next.length; i++) {
+    const id = match[i];
+    const b = id ? byId.get(id) : undefined;
+    if (!id || !b || used.has(id)) return false;
+    used.add(id);
+    const n = next[i];
+    const qty = Math.max(1, n.quantity || 1);
+    const rate = Number.isFinite(n.vatRate) ? Number(n.vatRate) : vatRateFor(n.taxScheme as LineScheme);
+    if (Math.abs(qty - b.qty) >= 0.0005 || !samePrice(n.unitPrice, b.unitPrice) || n.taxScheme !== b.taxScheme
+      || Math.abs(rate - b.vatRate) >= 0.0005) return false;
+  }
+  return used.size === base.length;
+}
+
 /** Der Satz, wenn eine fortgesetzte Zeile mehr braucht, als ihr eigenes Los noch hat (Maske und Haus). */
 export function keptLineLotShortMessage(label: string, rest: number): string {
   return rest > 0.0005

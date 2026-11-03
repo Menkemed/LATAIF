@@ -62,6 +62,10 @@ const { resetTransactionHealthForTest } = await import('../../src/core/db/transa
 const { installWriteGuard } = await import('../../src/core/db/write-guard.ts');
 const { SKU_SEQUENCES_DDL } = await import('../../src/core/products/sku-sequence.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
+// MIXED-INVOICE P1b — die Szenarien hier spielen 2026 VOR dem Eröffnungsstichtag (O1). Sie prüfen den
+// Kundenwechsel, nicht O1 (das prüft test/p1b mit der echten Konstante) — deshalb ein früherer Stichtag.
+const { setOpeningCutoffForTest } = await import('../../src/core/ledger/correction-dates.ts');
+setOpeningCutoffForTest('2026-01-01');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 const { applyMediaSchema } = await import('../../src/core/db/media-schema.ts');
 // Der echte invoice.paid-Handler (registriert sich beim Laden des Moduls).
@@ -370,17 +374,27 @@ const nummer = (db: Db, inv: string): string => s(db, 'SELECT invoice_number FRO
   const m = wechsel(inv, z, 'cust-2', { confirm: true });
   ok(m === '' && t0 > '2026-03-01' && vorher.ali === 700 && vorher.kasse === 400 && vorher.vat === -100,
     `2b SETUP Rechnung 15.01., Zahlung 10.02., Wechsel ${t0.slice(0, 10)} (${m})`);
-  ok(arStichtag(db, 'cust-1', FEB) === 700 && arStichtag(db, 'cust-2', FEB) === 0,
-    `2b Stichtag 28.02. unverändert: Ali 700, Nora 0 (${arStichtag(db, 'cust-1', FEB)}/${arStichtag(db, 'cust-2', FEB)})`);
+  // MIXED-INVOICE P1b (W1, Owner-Entscheidung Option A) — VERTRAGSÄNDERUNG: vorher buchte der Wechsel alles auf
+  // den Korrekturtag (Stichtag 28.02.: Ali 700, Nora 0). Jetzt rückwirkend: die Forderung stand von Anfang an
+  // bei Nora — Rechnung auf ihrem Datum, Zahlung auf ihrem Tag; Kasse und VAT bleiben, wie sie waren.
+  ok(arStichtag(db, 'cust-1', FEB) === 0 && arStichtag(db, 'cust-2', FEB) === 700,
+    `2b Stichtag 28.02. rückwirkend beim richtigen Kunden: Ali 0, Nora 700 (${arStichtag(db, 'cust-1', FEB)}/${arStichtag(db, 'cust-2', FEB)})`);
+  ok(arStichtag(db, 'cust-1', JAN) === 0 && arStichtag(db, 'cust-2', JAN) === 1100,
+    `2b …Stichtag 31.01. (vor der Zahlung): Nora 1100, Ali 0 (${arStichtag(db, 'cust-1', JAN)}/${arStichtag(db, 'cust-2', JAN)})`);
   ok(kontoStichtag(db, 'CASH', FEB) === 400 && kontoStichtag(db, 'VAT_OUTPUT', JAN) === -100,
-    `2b …Kasse zum 28.02. 400, VAT zum 31.01. 100 — nichts zurückdatiert (${kontoStichtag(db, 'CASH', FEB)}/${kontoStichtag(db, 'VAT_OUTPUT', JAN)})`);
-  ok(n(db, "SELECT COUNT(*) FROM ledger_entries WHERE occurred_at > '2026-02-10T09:00:00.000Z' AND occurred_at < ?", [t0]) === 0
-    && n(db, 'SELECT COUNT(*) FROM ledger_entries WHERE occurred_at >= ?', [t0]) > 0,
-    '2b …alle Umbuchungen tragen das Korrekturdatum, keine liegt dazwischen');
-  ok(korrektur(db, t0) === '' && n(db,
+    `2b …Kasse zum 28.02. 400, VAT zum 31.01. 100 — Geldbewegung und Steuer unverändert (${kontoStichtag(db, 'CASH', FEB)}/${kontoStichtag(db, 'VAT_OUTPUT', JAN)})`);
+  ok(n(db, 'SELECT COUNT(*) FROM ledger_entries WHERE occurred_at >= ?', [t0]) === 0
+    && n(db, "SELECT COUNT(*) FROM ledger_entries WHERE recorded_at >= ? AND source_module = 'INVOICE' AND substr(occurred_at,1,10) <> '2026-01-15'", [t0]) === 0
+    && n(db, "SELECT COUNT(*) FROM ledger_entries WHERE recorded_at >= ? AND source_module = 'PAYMENT' AND occurred_at <> '2026-02-10T09:00:00.000Z'", [t0]) === 0
+    && n(db, 'SELECT COUNT(*) FROM ledger_entries WHERE recorded_at >= ?', [t0]) > 0,
+    '2b …jede Umbuchung trägt das Datum ihres Originals (Rechnung 15.01., Zahlung 10.02.), am Korrekturtag keine');
+  const korrekturGebucht = all(db,
+    `SELECT account, ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 3) AS v FROM ledger_entries
+      WHERE recorded_at >= ? AND account != 'ACCOUNTS_RECEIVABLE' GROUP BY account HAVING ABS(v) > 0.0005`, [t0]).replace(/^\[\]$/, '');
+  ok(korrekturGebucht === '' && n(db,
     `SELECT COALESCE(ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 3), 0) FROM ledger_entries
-      WHERE occurred_at >= ? AND account = 'ACCOUNTS_RECEIVABLE' AND counterparty_id = 'cust-2'`, [t0]) === 700,
-    `2b …am Korrekturtag: nur die Forderung wandert (700 zu Nora), sonst alles netto 0 (${korrektur(db, t0) || 'ok'})`);
+      WHERE recorded_at >= ? AND account = 'ACCOUNTS_RECEIVABLE' AND counterparty_id = 'cust-2'`, [t0]) === 700,
+    `2b …die Korrektur bewegt nur die Forderung (700 zu Nora), Kasse/Umsatz/VAT je netto 0, keine doppelte Kassenwirkung (${korrekturGebucht || 'ok'})`);
   ok(arBuch(db, 'cust-1') === 0 && arBuch(db, 'cust-2') === 700 && kundenkontenOk(db) === '' && ausgeglichen(db),
     `2b …heute: Ali 0, Nora 700 ${kundenkontenOk(db)}`);
   ok(s(db, 'SELECT issued_at FROM invoices WHERE id = ?', [inv]) === ausgestellt && ausgestellt.startsWith('2026-01-15')
@@ -548,9 +562,10 @@ const nummer = (db: Db, inv: string): string => s(db, 'SELECT invoice_number FRO
     'Q …und reicht die Bestätigung an Primary und PC2 weiter');
   ok(/save the customer change first, then record the payment/.test(m), 'Q …neue Zahlung im selben Speichern wird vorher gemeldet');
   const store = src('src/stores/invoiceStore.ts');
-  ok(!/Cannot change the customer of an invoice that has payments/.test(store) && /moveInvoiceBookings\(customerPlan, now\)/.test(store)
-    // VAT-PERIOD-LOCK (v0.8.93) — ebenso heute, wenn das Rechnungsdatum in einem zugemachten VAT-Quartal liegt.
-    && /postInvoiceIssued\(fresh, customerPlan \|\| quartalZu \? \{ occurredAt: now \} : \{\}\)/.test(store),
+  ok(!/Cannot change the customer of an invoice that has payments/.test(store) && /moveInvoiceBookings\(customerPlan, now, true\)/.test(store)
+    // MIXED-INVOICE P1b (W1) — rückwirkend auf die Originaldaten; eine zugemachte Periode ist vorher abgewiesen,
+    // eine Änderung ohne Buchungswirkung bucht gar nichts (Verhalten: test/p1b).
+    && /postInvoiceIssued\(fresh\);/.test(store),
     'Q die alte Pauschalsperre ist ersetzt; Umbuchen läuft in der Edit-Transaktion');
 }
 void current;

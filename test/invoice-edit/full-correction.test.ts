@@ -61,6 +61,10 @@ const { resetTransactionHealthForTest } = await import('../../src/core/db/transa
 const { installWriteGuard } = await import('../../src/core/db/write-guard.ts');
 const { SKU_SEQUENCES_DDL } = await import('../../src/core/products/sku-sequence.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
+// MIXED-INVOICE P1b — die Szenarien hier spielen 2026 VOR dem Eröffnungsstichtag (O1). Sie prüfen die
+// vollständige Kundenkorrektur, nicht O1 (das prüft test/p1b mit der echten Konstante).
+const { setOpeningCutoffForTest } = await import('../../src/core/ledger/correction-dates.ts');
+setOpeningCutoffForTest('2026-01-01');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 const { applyMediaSchema } = await import('../../src/core/db/media-schema.ts');
 // Der echte invoice.paid-Handler (registriert sich beim Laden des Moduls).
@@ -371,11 +375,15 @@ const W = welt();
     `2 …Salden: Ali Forderung 0 / Guthaben 100 (vorher ${ali0.ar}/${-ali0.cc}), Nora Forderung 0 / Guthaben 1300 `
     + `(${saldo(db, 'ACCOUNTS_RECEIVABLE', 'cust-2')}/${-saldo(db, 'CUSTOMER_CREDIT', 'cust-2')})`);
   ok(kundenkontenOk(db) === '' && ausgeglichen(db), `2 …Hauptbuch je Kunde abgestimmt (Forderung, Guthaben), ausgeglichen ${kundenkontenOk(db)}`);
-  ok(saldo(db, 'ACCOUNTS_RECEIVABLE', 'cust-1', STICHTAG) === hist.aliAr && saldo(db, 'CUSTOMER_CREDIT', 'cust-1', STICHTAG) === hist.aliCc
-    && saldo(db, 'ACCOUNTS_RECEIVABLE', 'cust-2', STICHTAG) === 0 && saldo(db, 'CUSTOMER_CREDIT', 'cust-2', STICHTAG) === 0
+  // MIXED-INVOICE P1b (W1, Option A) — VERTRAGSÄNDERUNG: vorher blieb der Stichtag 31.08. unverändert (Ali mit
+  // R, Nora nichts). Jetzt rückwirkend: R und alles daran stand von Anfang an bei Nora — zum 31.08. hat Ali nur
+  // noch sein eigenes Guthaben aus E (100), Nora Forderung 0 / Guthaben 1300; Kasse, Bank, VAT, Umsatz gleich.
+  ok(hist.aliCc === -1400
+    && saldo(db, 'ACCOUNTS_RECEIVABLE', 'cust-1', STICHTAG) === 0 && saldo(db, 'CUSTOMER_CREDIT', 'cust-1', STICHTAG) === -100
+    && saldo(db, 'ACCOUNTS_RECEIVABLE', 'cust-2', STICHTAG) === 0 && saldo(db, 'CUSTOMER_CREDIT', 'cust-2', STICHTAG) === -1300
     && konto(db, 'CASH', STICHTAG) === hist.kasse && konto(db, 'BANK', STICHTAG) === hist.bank
     && konto(db, 'VAT_OUTPUT', STICHTAG) === hist.vat && konto(db, 'REVENUE', STICHTAG) === hist.umsatz,
-    `2 …Stichtag 31.08. unverändert: Ali wie vorher (Guthaben ${-hist.aliCc}), Nora nichts; Kasse, Bank, VAT, Umsatz gleich`);
+    `2 …Stichtag 31.08. rückwirkend beim richtigen Kunden: Ali Guthaben 100 (vorher ${-hist.aliCc}), Nora Guthaben 1300; Kasse, Bank, VAT, Umsatz gleich`);
   ok(korrektur(db, t0) === '' && n(db, "SELECT COUNT(*) FROM ledger_entries WHERE occurred_at > ? AND occurred_at < ?", [HIST, t0]) === 0,
     `2 …am Korrekturtag: Kasse/Bank/Umsatz/VAT/Erstattungen netto 0, nichts zurückdatiert (${korrektur(db, t0) || 'ok'})`);
   const snap = s(db, 'SELECT new_snapshot FROM invoice_edits WHERE invoice_id = ? ORDER BY revision DESC LIMIT 1', [inv]);

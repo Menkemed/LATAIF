@@ -51,6 +51,7 @@ import {
 import { LEGACY_STOCK_LINES } from '@/core/lots/stock-contract';
 import { CUSTOMER_CHANGE_VERDICTS } from '@/core/invoices/customer-change';
 import { VAT_PERIOD_FILED } from '@/core/tax/vat-period-lock';
+import { CORRECTION_BEFORE_OPENING_CUTOFF } from '@/core/ledger/correction-dates';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
@@ -145,6 +146,8 @@ const EDIT_CODE_VERDICTS: ReadonlySet<string> = new Set([
   CONSIGNMENT_SELL_VIA_CONSIGNMENT, CONSIGNMENT_INVOICE_LOCKED,
   // MIXED-INVOICE P1a — die Hausfolge selbst: fremde Filiale, veraltete Fassung.
   'INVOICE_NOT_FOUND', 'INVOICE_CHANGED',
+  // MIXED-INVOICE P1b (O1) — eine Korrektur, die vor dem Eröffnungsstichtag buchen würde.
+  CORRECTION_BEFORE_OPENING_CUTOFF,
 ]);
 
 function asEditVerdict(err: unknown): CommandRejected | null {

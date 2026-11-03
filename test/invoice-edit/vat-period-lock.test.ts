@@ -59,6 +59,10 @@ const { resetTransactionHealthForTest } = await import('../../src/core/db/transa
 const { installWriteGuard } = await import('../../src/core/db/write-guard.ts');
 const { SKU_SEQUENCES_DDL } = await import('../../src/core/products/sku-sequence.ts');
 const posting = await import('../../src/core/ledger/posting.ts');
+// MIXED-INVOICE P1b — die Quartale hier (Q1–Q3/2026) liegen VOR dem Eröffnungsstichtag (O1). Sie prüfen die
+// VAT-Periodensperre, nicht O1 (das prüft test/p1b mit der echten Konstante).
+const { setOpeningCutoffForTest } = await import('../../src/core/ledger/correction-dates.ts');
+setOpeningCutoffForTest('2026-01-01');
 const { A1_UPGRADE_SQL } = await import('../../src/core/db/a1-upgrade.ts');
 const { applyMediaSchema } = await import('../../src/core/db/media-schema.ts');
 // Der echte invoice.paid-Handler (registriert sich beim Laden des Moduls).
