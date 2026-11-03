@@ -261,7 +261,8 @@ const QUELLEN: Array<[string, string, string]> = [
   ok(!pay.includes(", 10) || 30"),
     'G und eine Karenz von null Tagen wird nicht mehr auf dreissig zurueckgedreht');
   // Sieben: die sechs Abfragen und die Partner-Salden (PARTNER-ITEMS), die ebenfalls nur die Filiale des Ausweises lesen.
-  ok(anzahl(pay, 'ctx.branchId') === 7, `G alle sieben Lesestellen der Verbindlichkeiten nennen den Ausweis (${anzahl(pay, 'ctx.branchId')})`);
+  // MIXED-INVOICE P1c: + der offene Rückzahlungsanspruch aus einer Rechnungskorrektur → acht.
+  ok(anzahl(pay, 'ctx.branchId') === 8, `G alle acht Lesestellen der Verbindlichkeiten nennen den Ausweis (${anzahl(pay, 'ctx.branchId')})`);
   ok(anzahl(scrap, 'ctx.branchId') === 1, `G und das Altgold ebenso (${anzahl(scrap, 'ctx.branchId')})`);
   ok(!/currentBranchId\(\)/.test(pay.slice(pay.indexOf('export function loadPayablesFor'))),
     'G in der gemeinsamen Ladefunktion steht keine Primary-Sitzung mehr');

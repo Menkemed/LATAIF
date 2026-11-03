@@ -41,6 +41,11 @@ import {
 import type { CommandIdentity } from './command-ledger';
 import { registerCommand, type CommandActor } from './command-registry';
 import {
+  INVOICE_REFUND_VERDICTS, REFUND_CLAIM_NOT_FOUND, REFUND_PAYOUT_METHODS, payOutRefundClaim, type RefundPayoutMethod,
+} from '@/core/invoices/invoice-refund';
+import { VAT_PERIOD_FILED } from '@/core/tax/vat-period-lock';
+import { CORRECTION_BEFORE_OPENING_CUTOFF } from '@/core/ledger/correction-dates';
+import {
   FinancialPayloadError, assertRevision, execFinancial, expectedRevisionOf, financialDeps,
   invoiceState, isPlain, liveInvoice, onlyKnownFields, optString, optText, positive, reqString,
 } from './financial-commands';
@@ -347,7 +352,66 @@ export function parseRecordRefundPayment(raw: unknown): RecordRefundPaymentReque
   return out;
 }
 
+// ── 4b) MIXED-INVOICE P1c — die Auszahlung eines Rückzahlungsanspruchs aus einer Rechnungskorrektur ──────────
+//
+// Dieselbe Handlung „Erstattung auszahlen", nur ohne Rückgabebeleg: der Anspruch ist die Überzahlung, die beim
+// Ändern einer Rechnung als „Refund" gewählt wurde (customer_credits 'REFUND_DUE'). Kein neuer Name — dieselben
+// Rechte (RECORD_PAYMENTS, wie die Erstattung einer Rückgabe), derselbe Fernvertrag und dieselbe Liste in Rust
+// (Muster: CONSIGNMENT D3 „Record Repayment" an `suppliers.refund_credit`). Erkennbar am Feld `creditId`.
+
+export interface InvoiceRefundPayoutRequest {
+  invoiceId: string;
+  creditId: string;
+  amount: number;
+  method: RefundPayoutMethod;
+  date?: string;
+}
+
+export function parseInvoiceRefundPayout(raw: unknown): InvoiceRefundPayoutRequest {
+  if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
+  onlyKnownFields(raw, ['invoiceId', 'creditId', 'amount', 'method', 'date']);
+  const method = String(raw.method ?? '');
+  if (!(REFUND_PAYOUT_METHODS as readonly string[]).includes(method)) {
+    throw new FinancialPayloadError(`a refund is paid out in cash, by bank or by Benefit (not ${method || '(none)'})`);
+  }
+  const out: InvoiceRefundPayoutRequest = {
+    invoiceId: reqString(raw.invoiceId, 'invoiceId'),
+    creditId: reqString(raw.creditId, 'creditId'),
+    amount: positive(raw.amount, 'amount'),
+    method: method as RefundPayoutMethod,
+  };
+  out.date = optString(raw.date, 'date');
+  return out;
+}
+
+function runInvoiceRefundPayout(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const req = parseInvoiceRefundPayout(raw);
+  return runRemoteCommand(deps, identity, () => {
+    liveInvoice(req.invoiceId, identity.branchId);
+    const c = query(`SELECT source_id FROM customer_credits WHERE id = ? AND source_type = 'invoice_edit'`, [req.creditId])[0];
+    if (!c || String(c.source_id) !== req.invoiceId) {
+      throw new CommandRejected(REFUND_CLAIM_NOT_FOUND, 'no such refund owed on this invoice');
+    }
+    let res;
+    try {
+      res = payOutRefundClaim(
+        { creditId: req.creditId, amount: req.amount, method: req.method, paidDate: req.date },
+        { branchId: identity.branchId, userId: identity.userId, now: deps.now() },
+      );
+    } catch (err) {
+      const code = (err as { code?: unknown })?.code;
+      if (typeof code === 'string' && (INVOICE_REFUND_VERDICTS.includes(code) || code === VAT_PERIOD_FILED || code === CORRECTION_BEFORE_OPENING_CUTOFF)) {
+        throw new CommandRejected(code, err instanceof Error ? err.message : String(err));
+      }
+      throw err;
+    }
+    useInvoiceStore.getState().loadInvoices();
+    return { ...res, invoice: invoiceState(req.invoiceId) };
+  });
+}
+
 export function runRecordRefundPayment(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  if (isPlain(raw) && 'creditId' in raw) return runInvoiceRefundPayout(deps, identity, raw);
   const req = parseRecordRefundPayment(raw);
   return runRemoteCommand(deps, identity, () => {
     const r = liveReturn(req.returnId, identity.branchId);

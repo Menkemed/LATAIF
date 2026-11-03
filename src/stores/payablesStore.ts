@@ -242,6 +242,36 @@ export function loadPayablesFor(ctx: BusinessReadContext): { payables: PayableRo
     }, today, gracePeriodDays));
   }
 
+  // 2b) MIXED-INVOICE P1c — offener Rückzahlungsanspruch aus einer Rechnungskorrektur (Überzahlung, Wahl „Refund"):
+  //     wir schulden dem Kunden Geld, bis es tatsächlich ausgezahlt ist (Auszahlung an der Rechnung).
+  const claimRows = query(
+    `SELECT cc.id, cc.source_id AS invoice_id, cc.customer_id, cc.amount, cc.used_amount, cc.created_at,
+            c.first_name, c.last_name, i.invoice_number
+       FROM customer_credits cc
+       LEFT JOIN customers c ON c.id = cc.customer_id
+       LEFT JOIN invoices i ON i.id = cc.source_id
+      WHERE cc.source_type = 'invoice_edit' AND cc.status = 'REFUND_DUE' AND cc.amount > COALESCE(cc.used_amount, 0)
+        AND cc.branch_id = ?`,
+    [ctx.branchId]
+  );
+  for (const r of claimRows) {
+    const customerName = `${(r.first_name as string) || ''} ${(r.last_name as string) || ''}`.trim() || 'Unknown customer';
+    rows.push(build({
+      type: 'refund',
+      sourceTable: 'customer_credits',
+      sourceId: r.id as string,
+      counterpartyId: r.customer_id as string | undefined,
+      counterpartyName: customerName,
+      counterpartyHref: r.customer_id ? `/clients/${r.customer_id}` : undefined,
+      referenceNumber: (r.invoice_number as string) || ((r.invoice_id as string) || '').slice(0, 8),
+      issuedAt: r.created_at as string,
+      totalAmount: Number(r.amount || 0),
+      paidAmount: Number(r.used_amount || 0),
+      navigateTo: `/invoices/${r.invoice_id}`,
+      detailLabel: 'Refund owed (invoice correction)',
+    }, today, gracePeriodDays));
+  }
+
   // 3) Agent Settlements gehören NICHT zu Payables — der Agent schuldet UNS
   //    den Verkaufserlös abzüglich Kommission, nicht umgekehrt. Sichtbarkeit
   //    der offenen Settlements erfolgt direkt auf /agents (AgentList) und

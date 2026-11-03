@@ -2611,6 +2611,25 @@ function runMigrations(database: Database): void {
     // REPAIR-PREVIEW-PARITY — die Arbeitsart, die beim Anlegen für die geplante Werkstatt gewählt wurde. Ohne Gebühr gibt es
     // noch keine Zeile, die sie tragen könnte; ohne diese Spalte ginge die Auswahl still verloren. Bucht nichts.
     `ALTER TABLE repairs ADD COLUMN planned_work_type TEXT`,
+    // MIXED-INVOICE P1c — die tatsächliche Rückzahlung an einen Kunden auf seinen offenen Rückzahlungsanspruch aus einer
+    // Rechnungskorrektur (customer_credits status 'REFUND_DUE'): je Auszahlung ein Beleg mit Betrag, Weg und Tag; der
+    // Anspruch (used_amount) sinkt um genau diesen Betrag. Spiegel von supplier_credit_refunds (D3), nur am Primary — PC2
+    // liest über die Brücke; Hauptbuch (CUSTOMER_CREDIT_REFUND) und Anspruch synchronisieren normal. Kein Löschen.
+    `CREATE TABLE IF NOT EXISTS customer_credit_refunds (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      customer_credit_id TEXT NOT NULL,
+      customer_id TEXT NOT NULL,
+      invoice_id TEXT,
+      amount REAL NOT NULL CHECK (amount > 0),
+      method TEXT NOT NULL CHECK (method IN ('cash','bank','benefit')),
+      paid_at TEXT NOT NULL,
+      reference TEXT,
+      note TEXT,
+      created_at TEXT NOT NULL,
+      created_by TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_customer_credit_refunds_credit ON customer_credit_refunds(customer_credit_id)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

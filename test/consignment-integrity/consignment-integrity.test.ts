@@ -776,13 +776,16 @@ for (const disp of ['RETURN_TO_OWNER', 'KEEP_AS_OWN']) {
       const vor = unberuehrt(w);
       const preis = aendern(w, [zeile(w, { taxScheme: 'MARGIN', vatRate: 10, unitPrice: 1500, lineTotal: 1500 })]);
       ok(preis === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor, `I9 Steuerart + Preis zugleich → abgewiesen (${preis || 'GEÄNDERT'})`);
-      // VAT 10 % mit demselben Nettopreis hieße Käuferpreis 1320 → abgewiesen, mit dem Nettopreis 1090.909 erlaubt.
+      // MIXED-INVOICE P1c — VAT 10 % mit demselben Nettopreis ist ein REINER Steuerartwechsel: das Haus hält den Käuferpreis
+      // (1200), das Netto folgt (1090.909). Vorher wurde er abgewiesen und der Mensch musste das Netto selbst eintippen.
       let text = '';
       try { nimm(w.db); imHaus(() => useInvoiceStore.getState().editInvoice(w.invId, { reason: 'VAT', lines: [zeile(w, { taxScheme: 'VAT_10', vatRate: 10, lineTotal: 1320 })] as never })); }
       catch (e) { text = (e as Error).message; }
       reload();
-      ok(/price incl\. VAT stays 1200\.000 BHD/.test(text) && /net price 1090\.909/.test(text) && unberuehrt(w) === vor,
-        `I9 VAT 10 % mit Nettopreis 1200 (Käufer zahlte 1320) → abgewiesen, die Meldung nennt den Nettopreis (${text.slice(0, 160)})`);
+      const b15 = basis(w);
+      ok(text === '' && String(b15.tax_scheme) === 'VAT_10' && Math.abs(Number(b15.line_total) - 1200) < 0.0005 && Math.abs(Number(b15.unit_price) - 1090.909) < 0.001
+        && kommissionsBild(w) === kons0 && einkaufsBild(w) === pur0,
+        `I9 VAT 10 % mit unverändertem Netto (reiner Steuerartwechsel) → Käuferpreis 1200 bleibt, Netto 1090.909, Kommission und Einkauf unverändert (${text.slice(0, 120) || 'ok'})`);
       const v10 = aendern(w, [zeile(w, { taxScheme: 'VAT_10', vatRate: 10, unitPrice: 1090.909, lineTotal: 1200 })]);
       const b2 = basis(w);
       ok(v10 === '' && String(b2.tax_scheme) === 'VAT_10' && Math.abs(Number(b2.line_total) - 1200) < 0.0005 && Math.abs(Number(b2.vat_amount) - 109.091) < 0.0005

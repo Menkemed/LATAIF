@@ -43,6 +43,7 @@ import { cancelInvoiceOnPrimary } from '@/core/invoices/invoice-cancel-house';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
 import { invoicePaymentBody, recordInvoicePaymentOnPrimary } from '@/core/invoices/invoice-payment-house';
+import { REFUND_PAYOUT_METHODS, recordInvoiceRefundOnPrimary, type RefundPayoutMethod } from '@/core/invoices/invoice-refund';
 import { businessDateIssue, latestBusinessDate, todayIso } from '@/core/utils/business-date';
 import { invoiceButterflyBody, setInvoiceButterflyOnPrimary } from '@/core/invoices/invoice-flag-house';
 import { allowedRepairStatusTargets } from '@/core/repairs/repair-status-flow';
@@ -112,6 +113,11 @@ export function InvoiceDetail() {
   // Plan §Returns Fix — Refund-Payment-Modal statt window.prompt()
   const [refundPayModal, setRefundPayModal] = useState<{ returnId: string; outstanding: number; cardPaid: number; cardBrand: 'normal' | 'amex' | 'debit' } | null>(null);
   const [refundPayAmount, setRefundPayAmount] = useState('');
+  // MIXED-INVOICE P1c — die Auszahlung eines offenen Rückzahlungsanspruchs aus einer Rechnungskorrektur.
+  const [refundOwedOpen, setRefundOwedOpen] = useState(false);
+  const [refundOwedAmount, setRefundOwedAmount] = useState('');
+  const [refundOwedMethod, setRefundOwedMethod] = useState<RefundPayoutMethod>('cash');
+  const [refundOwedDate, setRefundOwedDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [refundPayMethod, setRefundPayMethod] = useState<'cash' | 'bank' | 'card' | 'benefit' | 'credit' | 'other'>('bank');
   // Slice 5 — bei cash/bank-Refund einer karten-gezahlten Invoice: Gebuehr abziehen (Kunde traegt)?
   const [refundDeductFee, setRefundDeductFee] = useState(false);
@@ -474,6 +480,21 @@ export function InvoiceDetail() {
     setRefundPayModal(null);
     setRefundPayAmount('');
     setRefundDeductFee(false);
+  }
+
+  /**
+   * MIXED-INVOICE P1c — „Record refund": die tatsächliche Auszahlung auf den Rückzahlungsanspruch einer Korrektur. Erst
+   * hier bewegt sich Kasse/Bank (Tag und Weg). Dieselbe Handlung „Erstattung auszahlen" wie bei einer Rückgabe.
+   */
+  async function rueckzahlungAuszahlen(creditId: string, amount: number, method: RefundPayoutMethod, date: string) {
+    if (!invoice) return;
+    const invId = invoice.id;
+    if (!await w.ok('returns.record_refund_payment', {
+      local: async () => { await recordInvoiceRefundOnPrimary({ creditId, amount, method, paidDate: date }, () => loadInvoices()); return {}; },
+      remote: () => ({ invoiceId: invId, creditId, amount, method, date }),
+    })) return;
+    loadInvoices();
+    setRefundOwedOpen(false);
   }
 
   // INVOICE-A5 — der Beleg zum Drucken (A5, „Tax Invoice"). „PDF" und „Print" öffnen denselben
@@ -849,6 +870,40 @@ export function InvoiceDetail() {
                   <span className="text-overline">REMAINING</span>
                   <span className="font-mono" style={{ fontSize: 16, color: remaining > 0 ? '#AA6E6E' : '#7EAA6E' }}><Bhd v={Math.max(0, remaining)}/> BHD</span>
                 </div>
+                {/* MIXED-INVOICE P1c — was aus einer Überzahlung nach einer Korrektur steht: Guthaben oder Rückzahlungsanspruch. */}
+                {invoice.editOverpay && invoice.editOverpay.kind === 'credit' && invoice.editOverpay.open > 0.0005 && (
+                  <div className="flex justify-between items-baseline" style={{ marginTop: 6 }} data-invoice-overpay-credit>
+                    <span className="text-overline">CUSTOMER CREDIT (OVERPAID)</span>
+                    <span className="font-mono" style={{ fontSize: 14, color: '#7EAA6E' }}><Bhd v={invoice.editOverpay.open}/> BHD</span>
+                  </div>
+                )}
+                {invoice.editOverpay && invoice.editOverpay.kind === 'refund' && (
+                  <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 8, background: invoice.editOverpay.open > 0.0005 ? 'rgba(220,38,38,0.05)' : '#F2F7FA',
+                    border: `1px solid ${invoice.editOverpay.open > 0.0005 ? 'rgba(220,38,38,0.25)' : '#E5E9EE'}` }} data-invoice-refund-owed>
+                    <div className="flex justify-between items-baseline">
+                      <span className="text-overline">{invoice.editOverpay.open > 0.0005 ? 'REFUND OWED TO CUSTOMER' : 'REFUNDED'}</span>
+                      <span className="font-mono" style={{ fontSize: 14, color: invoice.editOverpay.open > 0.0005 ? '#DC2626' : '#6B7280' }}>
+                        <Bhd v={invoice.editOverpay.open > 0.0005 ? invoice.editOverpay.open : invoice.editOverpay.amount}/> BHD
+                      </span>
+                    </div>
+                    {invoice.editOverpay.payouts.map(p => (
+                      <div key={p.id} className="flex justify-between" style={{ fontSize: 11, color: '#6B7280', marginTop: 4 }}>
+                        <span>{fmtDate(p.paidAt)} · refund paid out · {p.method === 'cash' ? 'Cash' : p.method === 'bank' ? 'Bank' : 'Benefit'}</span>
+                        <span className="font-mono">−<Bhd v={p.amount}/> BHD</span>
+                      </div>
+                    ))}
+                    {invoice.editOverpay.open > 0.0005 && (
+                      <div className="flex justify-between items-center" style={{ marginTop: 6, gap: 8 }}>
+                        <span style={{ fontSize: 11, color: '#6B7280' }}>Open until paid out — cash and bank have not moved yet.</span>
+                        {perm.canRecordPayments && (
+                          <Button variant="secondary" data-invoice-record-refund onClick={() => {
+                            setRefundOwedAmount(invoice.editOverpay!.open.toFixed(3)); setRefundOwedOpen(true);
+                          }}>Record refund</Button>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
                 {(invoice.tipAmount || 0) > 0 && (
                   <div className="flex justify-between items-baseline" style={{ marginTop: 6 }}>
                     <span className="text-overline" style={{ color: '#0F0F10' }}>TIP</span>
@@ -1567,6 +1622,47 @@ export function InvoiceDetail() {
                 // deductCardFee nur bei cash/bank relevant; bei 'card' erstattet der Store die Gebuehr ohnehin.
                 void erstattungAuszahlen(refundPayModal.returnId, capped, refundPayMethod, refundDeductFee);
               }}>Record Payment</Button>
+            </div>
+          </div>
+        )}
+      </Modal>
+
+      {/* MIXED-INVOICE P1c — Auszahlung auf den Rückzahlungsanspruch aus einer Rechnungskorrektur. */}
+      <Modal open={refundOwedOpen} onClose={() => setRefundOwedOpen(false)} title="Record Refund to Customer" width={440}>
+        {invoice.editOverpay && invoice.editOverpay.kind === 'refund' && (
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }} data-invoice-refund-modal>
+            <div style={{ padding: 12, background: '#F2F7FA', borderRadius: 8, border: '1px solid #E5E9EE' }}>
+              <span className="text-overline" style={{ marginBottom: 4, display: 'block' }}>REFUND OWED</span>
+              <div className="font-mono" style={{ fontSize: 18, color: '#DC2626' }}><Bhd v={invoice.editOverpay.open}/> BHD</div>
+            </div>
+            <Input required label="AMOUNT (BHD)" type="number" step="0.001" value={refundOwedAmount}
+              onChange={e => setRefundOwedAmount(e.target.value)} data-invoice-refund-amount />
+            <div>
+              <span className="text-overline" style={{ marginBottom: 6, display: 'block' }}>METHOD</span>
+              <div className="flex gap-2 flex-wrap" style={{ marginTop: 6 }}>
+                {REFUND_PAYOUT_METHODS.map(m => {
+                  const active = refundOwedMethod === m;
+                  return (
+                    <button key={m} type="button" onClick={() => setRefundOwedMethod(m)} data-invoice-refund-method={m}
+                      className="cursor-pointer rounded"
+                      style={{ padding: '8px 14px', fontSize: 12, border: `1px solid ${active ? '#0F0F10' : '#D5D9DE'}`,
+                        color: active ? '#0F0F10' : '#6B7280', background: active ? 'rgba(15,15,16,0.06)' : 'transparent' }}>
+                      {m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : 'Benefit'}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+            <Input label="PAID OUT ON" type="date" value={refundOwedDate} max={latestBusinessDate()}
+              onChange={e => setRefundOwedDate(e.target.value)} data-invoice-refund-date />
+            <div style={{ fontSize: 11, color: '#6B7280' }}>Cash/bank moves on this date. What is not paid out stays an open refund owed to the customer.</div>
+            <div className="flex justify-end gap-3" style={{ paddingTop: 8, borderTop: '1px solid #E5E9EE' }}>
+              <Button variant="ghost" onClick={() => setRefundOwedOpen(false)}>Cancel</Button>
+              <Button variant="primary" disabled={w.busy} data-invoice-refund-confirm onClick={() => {
+                const amt = parseFloat(refundOwedAmount);
+                if (!amt || amt <= 0) return;
+                void rueckzahlungAuszahlen(invoice.editOverpay!.creditId, Math.round(amt * 1000) / 1000, refundOwedMethod, refundOwedDate);
+              }}>Confirm Refund</Button>
             </div>
           </div>
         )}

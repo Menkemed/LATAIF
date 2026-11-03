@@ -241,7 +241,7 @@ function zahle(inv: string, betrag: number, special?: boolean): string {
 }
 function aendern(inv: string, lines: Array<ReturnType<typeof LINE>>, delta?: number): void {
   imHaus(() => useInvoiceStore.getState().editInvoice(inv, {
-    lines: lines as never, reason: 'S1 Test',
+    lines: lines as never, reason: 'S1 Test', overpayChoice: 'credit',
     ...(delta ? { deltaPayment: { amount: delta, method: 'cash' } } : {}),
   } as never));
   reload();

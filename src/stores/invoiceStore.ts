@@ -35,7 +35,12 @@ import {
   assertPaymentDateNotInClosedVatQuarter, assertVatUnchanged, vatFingerprint,
 } from '@/core/tax/vat-period-lock';
 import { planCustomerChange, moveInvoiceBookings, moveLastPurchase, customerDisplayName, customerChangeBookingDays } from '@/core/invoices/customer-change';
-import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts, isLedgerNeutralEdit } from '@/core/invoices/edit-lines';
+import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts, isLedgerNeutralEdit, normalizeEditSplits, applyBindingGross, keepGrossOnPureTaxChange } from '@/core/invoices/edit-lines';
+import { calcInvoiceLine, vatRateFor, type LineScheme } from '@/core/invoices/line-derivation';
+import {
+  OVERPAY_CHOICE_REQUIRED, REFUND_DUE, REFUND_NOTHING_OWED, isRefundClaimStatus, payOutRefundClaim, refundClaimsByInvoice,
+  type OverpayChoice,
+} from '@/core/invoices/invoice-refund';
 import { assertCorrectionDates, correctionDateIssue } from '@/core/ledger/correction-dates';
 import { assertCardFeeConfigured, normalizeCardBrand, type CardBrand } from '@/core/finance/card-fees';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
@@ -124,10 +129,15 @@ function restoreCreditForPayment(paymentId: string): void {
 // (teil-)eingeloest, darf der Vorgang nicht laufen (sonst zerstoertes Guthaben).
 export function assertGrantedCreditUnused(sourceType: string, sourceId: string, msg: string): void {
   const used = query(
-    `SELECT 1 FROM customer_credits WHERE source_type = ? AND source_id = ? AND used_amount > 0.005 LIMIT 1`,
+    `SELECT status FROM customer_credits WHERE source_type = ? AND source_id = ? AND used_amount > 0.005 LIMIT 1`,
     [sourceType, sourceId]
   );
-  if (used.length > 0) throw new Error(msg);
+  if (used.length === 0) return;
+  // MIXED-INVOICE P1c — ein Rückzahlungsanspruch, auf den schon Geld ausgezahlt ist: derselbe Riegel, der genauere Satz.
+  if (isRefundClaimStatus(used[0].status)) {
+    throw new Error('A refund from this invoice\'s overpayment has already been paid out to the customer — the invoice cannot be changed or removed automatically any more.');
+  }
+  throw new Error(msg);
 }
 // clawback: NACH dem Ledger-Reverse aufrufen (reverseSource dreht das CR-CUSTOMER_CREDIT-
 // Bein automatisch zurueck; hier nur die DOMAIN-Row loeschen + syncen). In einer offenen
@@ -172,7 +182,7 @@ interface InvoiceStore {
   // mit Pflicht-Aenderungsgrund (Audit). Reduktion unter den bereits gezahlten Betrag
   // wird (vorerst) blockiert — Ueberzahlung→Store-Guthaben kommt als eigener Slice.
   editInvoice: (id: string, input: {
-    lines: { lineId?: string; productId: string; lotId?: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number; bulk?: BulkLineMeta; bulkIntent?: BulkLineIntent }[];
+    lines: { lineId?: string; splitOf?: string; customerGross?: number; productId: string; lotId?: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number; bulk?: BulkLineMeta; bulkIntent?: BulkLineIntent }[];
     customerId?: string;
     notes?: string;
     issuedAt?: string;
@@ -183,6 +193,13 @@ interface InvoiceStore {
     confirmCustomerChange?: boolean;
     /** MIXED-INVOICE P1a — die Fassung, die der Mensch gesehen hat; anders in der Datenbank ⇒ `INVOICE_CHANGED`. */
     expectedRevision?: number;
+    /**
+     * MIXED-INVOICE P1c — Pflichtwahl, wenn der Edit eine (neue oder geänderte) Kundenüberzahlung ergibt: Kundenguthaben
+     * oder Rückzahlung (offener Anspruch, Geld erst bei der Auszahlung). Fehlt sie dann ⇒ `OVERPAY_CHOICE_REQUIRED`.
+     */
+    overpayChoice?: OverpayChoice;
+    /** P1c — nur mit `overpayChoice: 'refund'`: im selben Vorgang ausgezahlt, mit Weg und Tag. */
+    refundNow?: { method: string; paidDate?: string };
   }) => void;
   recordPayment: (invoiceId: string, amount: number, method: string, notes?: string, specialMarkOnFinal?: boolean, cardBrand?: CardBrand, paymentIdOverride?: string, suppressOverpayCredit?: boolean, opts?: RecordPaymentTimes) => string;
   // Credit-Modell Slice 3 — Store-Guthaben des Kunden gegen eine Invoice einlösen.
@@ -760,8 +777,15 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // (Zeile entfernen/ersetzen, Menge unter die Retourenmenge, Preis der retournierten Zeile,
     // Summe unter die Gutschriften). Geprüft VOR jedem Schreiben.
     const baseLines = loadEditBaseLines(id);
+    // MIXED-INVOICE P1c — die verbindliche Preisdeutung im Haus: ein ausdrücklicher Kundenpreis inkl. VAT (`customerGross`)
+    // ist der Preis; eine Teilzeile ohne Änderung geht in ihre Zeile zurück (keine Teilung, keine Buchungswirkung).
+    lines = applyBindingGross(lines);
+    lines = normalizeEditSplits(baseLines, lines);
     assertWholePieceLines(lines);
     const lineMatch = matchEditLines(baseLines, lines);
+    // P1c — ein reiner Steuerartwechsel (Menge und Netto wie gespeichert) hält das Kundenbrutto — an jedem Weg. Die
+    // Zuordnung oben bleibt (Artikel und Zeilen-IDs ändern sich dabei nicht).
+    lines = keepGrossOnPureTaxChange(baseLines, lines, lineMatch);
     // CONSIGNMENT-INTEGRITY F7 — auch beim Ändern kommt keine Kommissionsware NEU auf eine Rechnung (neue oder
     // ersetzte Zeile). Eine fortgesetzte Zeile behält ihren Artikel.
     assertNoConsignmentGoods(lines.filter((_, i) => lineMatch[i] === null));
@@ -832,15 +856,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // (source_type='invoice_edit', source_id=id) bereits (teil-)eingeloest, darf nicht erneut
     // editiert werden — der Re-Edit loest sie via reverseSource+clawback auf (= zerstoertes
     // Guthaben). Spiegel zum deleteCreditNote-/cancelReturn-Guard.
-    assertGrantedCreditUnused('invoice_edit', id,
-      'Cannot edit this invoice because store credit from a previous edit overpayment has already been used. Reverse that credit usage first.');
-
+    // (Geprüft unten, sobald feststeht, ob der Edit überhaupt bucht — MIXED-INVOICE P1c.)
     // ── B2 — dieselbe Sperre fuer das beim Ueberzahlen ERZEUGTE 'overpayment'-Guthaben
     // (recordPayment-Split, source_type='overpayment', source_id=paymentId). Ist es bereits
     // (teil-)eingeloest, darf der Edit es nicht still veraendern → fail-fast VOR dem Reverse.
-    for (const p of query(`SELECT id FROM payments WHERE invoice_id = ?`, [id]) as { id: string }[]) {
-      assertOverpaymentCreditUnused(p.id);
-    }
 
     // STOCK-LOT-INTEGRITY — Altzeilen ohne Los (vor dem Bestandsvertrag): wie viel der alte
     // Bezahl-Abzug genommen hat, ist nur als Merker bekannt, nicht als Zeilenmenge. Ein Neuschreiben
@@ -895,6 +914,18 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const nurVerwaltung = ohneBuchung
       && lines.every((l, i) => !!lineMatch[i] && String(l.description ?? '') === (bezeichnung.get(lineMatch[i] as string) ?? ''));
 
+    // Slice 3b / B2 — die Guthaben-Sperren (s. oben). MIXED-INVOICE P1c — sie gelten für jede Änderung MIT Buchungswirkung:
+    // die würde ein schon eingelöstes Guthaben oder einen schon (teil)ausgezahlten Rückzahlungsanspruch auflösen, und dafür
+    // gibt es keinen sicheren Rückweg. Eine Änderung OHNE Buchungswirkung (Notiz, Mitarbeiter, Bezeichnung) berührt weder
+    // Guthaben noch Anspruch noch Hauptbuch — sie bleibt erlaubt. Ein Kundenwechsel ist nie „ohne Buchung" (s. oben).
+    if (!ohneBuchung) {
+      assertGrantedCreditUnused('invoice_edit', id,
+        'Cannot edit this invoice because store credit from a previous edit overpayment has already been used. Reverse that credit usage first.');
+      for (const p of query(`SELECT id FROM payments WHERE invoice_id = ?`, [id]) as { id: string }[]) {
+        assertOverpaymentCreditUnused(p.id);
+      }
+    }
+
     // ── Punkt 2: EINE echte SQL-Transaktion. reverse + header + lines + lots +
     // repost + delta-payment + status + audit laufen als Einheit. Bei Fehler ROLLBACK
     // → kein persistierter Zwischenstand (saveDatabase erst beim COMMIT). Store-State
@@ -937,6 +968,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // dem NEUEN Ueberschuss aufbaut (Re-Edit-idempotent; No-op beim Erst-Edit). saveDatabase
       // deferiert in der offenen Tx → atomar mit dem Rest; Rollback verwirft die Loeschung.
       // P1b — ohne Buchungswirkung bleibt das Guthaben samt Buchung, wie es ist.
+      // MIXED-INVOICE P1c — vorher merken, als WAS eine frühere Überzahlung stand (Guthaben oder Rückzahlung): ergibt
+      // der Edit denselben Betrag, bleibt diese Wahl (keine neue Pflichtwahl ohne neuen Betrag).
+      const prevEditCredit = query(
+        `SELECT amount, status FROM customer_credits WHERE source_type = 'invoice_edit' AND source_id = ? LIMIT 1`, [id],
+      )[0];
       if (!ohneBuchung) clawbackGrantedCredit('invoice_edit', id);
 
       // 2. Header (optional) — Kunde/Notiz/Datum/Mitarbeiter im selben Vorgang.
@@ -1009,12 +1045,33 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         _id: string; _resolvedLotId: string | null; _resolvedCost: number; _kept: boolean;
         /** Differenz-Modus: die Zeile hält ihren Bestand und bewegt nur qty − _oldTaken. */
         _delta: boolean; _oldTaken: number;
+        /** P1c — Teilzeile: die gespeicherte Zeile, deren nicht retournierte Stücke sie trägt. */
+        _splitOf?: string;
       };
+      // MIXED-INVOICE P1c — Zeilenteilung bei Teilretoure: die Teilzeile übernimmt Los, Einstand und den Bestand der
+      // nicht retournierten Stücke (kein Lagerweg); die gespeicherte Zeile behält davon genau die retournierte Menge.
+      const splitTaken = new Map<string, { keep: number; rest: number }>();
+      for (const l of lines) {
+        if (!l.splitOf) continue;
+        const b = baseById.get(l.splitOf)!;
+        if (!deltaLineIds.has(b.id)) {
+          throw new InvoiceActionRejected('INVOICE_EDIT_SPLIT_INVALID', 'This line cannot be split automatically — its stock is not recorded on the invoice.');
+        }
+        const taken = b.stockTaken ?? b.qty;
+        const keep = Math.min(taken, b.returnedQty);
+        splitTaken.set(b.id, { keep, rest: Math.max(0, taken - keep) });
+      }
       const resolvedLines: ResolvedRewriteLine[] = lines.map((l, i) => {
         const kept = lineMatch[i] ? baseById.get(lineMatch[i] as string) : undefined;
         if (kept && deltaLineIds.has(kept.id)) {
           return { ...l, _id: kept.id, _resolvedLotId: kept.lotId, _resolvedCost: kept.purchasePrice, _kept: true,
-            _delta: true, _oldTaken: kept.stockTaken ?? kept.qty };
+            _delta: true, _oldTaken: splitTaken.get(kept.id)?.keep ?? kept.stockTaken ?? kept.qty };
+        }
+        if (l.splitOf) {
+          const b = baseById.get(l.splitOf)!;
+          return { ...l, productId: b.productId ?? l.productId, description: l.description || bezeichnung.get(b.id) || undefined,
+            _id: uuid(), _resolvedLotId: b.lotId, _resolvedCost: b.purchasePrice, _kept: false,
+            _delta: true, _oldTaken: splitTaken.get(b.id)?.rest ?? 0, _splitOf: b.id };
         }
         let lotId = kept ? null : (l.lotId || null);
         let cost = kept ? kept.purchasePrice : l.purchasePrice;
@@ -1060,6 +1117,16 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       // oder PC2 mitschicken. Retournierte Zeile: pro Stück wie gespeichert; fachlich unveränderte
       // Zeile: gespeicherte Beträge bleiben.
       for (const l of resolvedLines) {
+        if (l._splitOf) {
+          // P1c — die Teilzeile rechnet das Haus aus ihrem Nettopreis und dem Einstand der Ursprungszeile (Marge!).
+          const scheme = l.taxScheme as LineScheme;
+          const rate = Number.isFinite(l.vatRate) ? Number(l.vatRate) : vatRateFor(scheme);
+          const calc = calcInvoiceLine(l.unitPrice, Math.max(1, l.quantity || 1), l._resolvedCost, scheme, rate);
+          l.vatRate = rate;
+          l.vatAmount = calc.internalVatAmount || calc.vatAmount;
+          l.lineTotal = calc.grossAmount;
+          continue;
+        }
         const b = l._kept ? baseById.get(l._id) : undefined;
         if (!b) continue;
         const a = keptLineAmounts(b, l, l._resolvedCost);
@@ -1288,7 +1355,24 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           ? 'Cannot edit: this would shrink an existing overpayment store credit below its amount. Refund or apply that credit first, then edit.'
           : 'Cannot edit: the overpayment store credit from a payment has already been used. Reverse that credit usage first.');
       }
+      let overpayMode: OverpayChoice | null = null;
       if (overpayPlan.additionalCredit > 0.005) {
+        // MIXED-INVOICE P1c — Pflichtwahl: Kundenguthaben oder Rückzahlung. Beide sind DIESELBE Zeile und DIESELBE
+        // Buchung (DR AR / CR CUSTOMER_CREDIT, kein Geld); nur die Art unterscheidet: 'OPEN' ist einlösbar, 'REFUND_DUE'
+        // nicht — sie wird ausgezahlt. Für denselben Betrag entsteht so nie beides. Ergibt ein erneuter Edit denselben
+        // Betrag, bleibt die frühere Wahl; sonst muss der Mensch wählen (Primary, PC2 und direkter Aufruf gleich).
+        const prevMode: OverpayChoice | undefined = prevEditCredit
+          && Math.abs(Number(prevEditCredit.amount) - overpayPlan.additionalCredit) < 0.0005
+          ? (isRefundClaimStatus(prevEditCredit.status) ? 'refund' : 'credit') : undefined;
+        overpayMode = input.overpayChoice ?? prevMode ?? null;
+        if (!overpayMode) {
+          throw new InvoiceActionRejected(OVERPAY_CHOICE_REQUIRED,
+            `This change leaves ${overpayPlan.additionalCredit.toFixed(3)} BHD overpaid. Choose what happens with it: keep it as `
+            + 'customer credit, or refund it to the customer. Nothing was changed.');
+        }
+        if (input.refundNow && overpayMode !== 'refund') {
+          throw new InvoiceActionRejected(OVERPAY_CHOICE_REQUIRED, 'A payout is only possible when the overpayment is refunded. Nothing was changed.');
+        }
         // P1b (E11) — rückwirkend steht die Umgliederung an dem Tag, an dem die Überzahlung entstand: dem
         // spätesten von Rechnungsdatum, Zahlungen und Gutschriften dieser Rechnung (vorher heute — dann zeigte
         // jeder Stichtag dazwischen eine negative Forderung statt Guthaben). Auch dieser Tag muss offen sein.
@@ -1296,15 +1380,23 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           ...query('SELECT received_at AS d FROM payments WHERE invoice_id = ?', [id]).map((r) => String(r.d ?? '')),
           ...query("SELECT issued_at AS d FROM credit_notes WHERE invoice_id = ? AND status != 'CANCELLED'", [id]).map((r) => String(r.d ?? '')),
         ].filter(Boolean).reduce((a, b) => (new Date(b).getTime() > new Date(a).getTime() ? b : a));
-        assertCorrectionDates(editBranch, [{ iso: overpayAt, what: 'the store credit from this overpayment' }]);
+        assertCorrectionDates(editBranch, [{ iso: overpayAt, what: overpayMode === 'refund' ? 'the refund owed from this overpayment' : 'the store credit from this overpayment' }]);
         postInvoiceOverpaymentCredit(id, effCustomerId, overpayPlan.additionalCredit, overpayAt);
         const overCreditId = uuid();
         db.run(
           `INSERT INTO customer_credits (id, branch_id, customer_id, source_type, source_id, amount, used_amount, status, note, created_at, created_by)
-           VALUES (?, ?, ?, 'invoice_edit', ?, ?, 0, 'OPEN', ?, ?, ?)`,
-          [overCreditId, branchId, effCustomerId, id, overpayPlan.additionalCredit, `Ueberzahlung ${inv0.invoiceNumber}`, now, userId]
+           VALUES (?, ?, ?, 'invoice_edit', ?, ?, 0, ?, ?, ?, ?)`,
+          [overCreditId, branchId, effCustomerId, id, overpayPlan.additionalCredit, overpayMode === 'refund' ? REFUND_DUE : 'OPEN',
+            `${overpayMode === 'refund' ? 'Rueckzahlung' : 'Ueberzahlung'} ${inv0.invoiceNumber}`, now, userId]
         );
         trackInsert('customer_credits', overCreditId, { customerId: effCustomerId, amount: overpayPlan.additionalCredit, sourceInvoiceId: id });
+        // P1c — „Paid out now": erst HIER fließt Geld, mit Weg und Tag, auf demselben Beleg wie eine spätere Auszahlung.
+        if (overpayMode === 'refund' && input.refundNow) {
+          payOutRefundClaim({ creditId: overCreditId, amount: overpayPlan.additionalCredit, method: input.refundNow.method,
+            paidDate: input.refundNow.paidDate }, { branchId: editBranch, userId, now });
+        }
+      } else if (input.refundNow) {
+        throw new InvoiceActionRejected(REFUND_NOTHING_OWED, 'This change leaves nothing overpaid — there is nothing to refund. Nothing was changed.');
       }
 
       const revRow = query(`SELECT COALESCE(MAX(revision), 0) AS r FROM invoice_edits WHERE invoice_id = ?`, [id])[0];
@@ -1313,14 +1405,22 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       db.run(
         `INSERT INTO invoice_edits (id, branch_id, invoice_id, revision, reason, old_snapshot, new_snapshot, edited_by, edited_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-        [editId, branchId, id, revision, reasonTrim, oldSnapshot, newSnapshot, userId, now]
+        [editId, branchId, id, revision, reasonTrim, oldSnapshot,
+          // P1c — die Wahl bei einer Überzahlung steht im Protokoll (Art, Betrag, ob sofort ausgezahlt).
+          overpayMode ? JSON.stringify({ ...JSON.parse(newSnapshot), overpayment: {
+            amount: overpayPlan.additionalCredit, mode: overpayMode,
+            ...(input.refundNow ? { paidOutNow: { method: input.refundNow.method, paidDate: input.refundNow.paidDate ?? null } } : {}),
+          } }) : newSnapshot,
+          userId, now]
       );
       trackInsert('invoice_edits', editId, { invoiceId: id, revision });
       logAudit({
         module: 'Sales', entityType: 'invoices', entityId: id, action: 'UPDATE',
         field: `line edit (rev ${revision})`,
         oldValue: `${inv0.grossAmount.toFixed(3)} BHD · ${inv0.status} · ${reasonTrim}`,
-        newValue: `${grossAmount.toFixed(3)} BHD · ${newStatus}`,
+        newValue: `${grossAmount.toFixed(3)} BHD · ${newStatus}`
+          + (overpayMode ? ` · overpaid ${overpayPlan.additionalCredit.toFixed(3)} → ${overpayMode === 'refund'
+            ? (input.refundNow ? 'refunded now' : 'refund owed') : 'customer credit'}` : ''),
       });
       if (customerPlan && moved) {
         logAudit({
@@ -2171,14 +2271,39 @@ export function loadInvoicesFor(ctx: BusinessReadContext): { invoices: Invoice[]
   // PURCHASE-EDIT D1 — die Einstandskorrekturen in EINER Abfrage je Ebene (die Liste bleibt eine Liste).
   const corrByInvoice = costCorrectionsByInvoice();
   const corrByLine = corrByInvoice.size > 0 ? costCorrectionsByLine() : new Map<string, number>();
+  // MIXED-INVOICE P1c — die Überzahlung aus einer Korrektur: Rückzahlungsanspruch (samt Auszahlungen) oder Guthaben.
+  const refundClaims = refundClaimsByInvoice(ctx.branchId);
+  const editCredits = new Map(query(
+    `SELECT id, source_id, amount, used_amount FROM customer_credits
+      WHERE branch_id = ? AND source_type = 'invoice_edit' AND status IN ('OPEN', 'USED')`,
+    [ctx.branchId],
+  ).map((r) => [String(r.source_id), r]));
+  // P1c — die retournierte Menge je Zeile (die Maske schützt sie und zeigt nur den Rest korrigierbar).
+  const returnedByLine = new Map(query(
+    `SELECT srl.invoice_line_id AS lid, COALESCE(SUM(srl.quantity), 0) AS q
+       FROM sales_return_lines srl JOIN sales_returns sr ON sr.id = srl.return_id
+      WHERE sr.branch_id = ? AND sr.status != 'REJECTED' AND srl.invoice_line_id IS NOT NULL
+      GROUP BY srl.invoice_line_id`,
+    [ctx.branchId],
+  ).map((r) => [String(r.lid), Number(r.q) || 0]));
   const invoices = rows.map((r) => {
     const inv = rowToInvoice(r);
     const lineRows = query('SELECT * FROM invoice_lines WHERE invoice_id = ? ORDER BY position', [inv.id]);
     inv.lines = lineRows.map(rowToLine);
+    for (const l of inv.lines) { const q = returnedByLine.get(l.id); if (q) l.returnedQty = q; }
     const c = corrByInvoice.get(inv.id);
     if (c) {
       inv.costCorrection = c;
       for (const l of inv.lines) { const lc = corrByLine.get(l.id); if (lc) l.costCorrection = lc; }
+    }
+    const rc = refundClaims.get(inv.id);
+    const ec = editCredits.get(inv.id);
+    if (rc) {
+      inv.editOverpay = { kind: 'refund', creditId: rc.creditId, amount: rc.amount, open: rc.open, paidOut: rc.paidOut, payouts: rc.payouts };
+    } else if (ec) {
+      const amount = Number(ec.amount) || 0;
+      inv.editOverpay = { kind: 'credit', creditId: String(ec.id), amount,
+        open: Math.max(0, Math.round((amount - (Number(ec.used_amount) || 0)) * 1000) / 1000), paidOut: 0, payouts: [] };
     }
     return inv;
   });

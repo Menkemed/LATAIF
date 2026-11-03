@@ -145,7 +145,7 @@ function zahlung(inv: string, betrag: number, tag: string, art = 'cash'): string
 }
 const zeile = (db: Db, inv: string): string => s(db, 'SELECT id FROM invoice_lines WHERE invoice_id = ?', [inv]);
 const edit = (inv: string, input: Record<string, unknown>): string => {
-  const m = meldung(() => useInvoiceStore.getState().editInvoice(inv, { reason: 'P1b Korrektur', ...input } as never)); reload(); return m;
+  const m = meldung(() => useInvoiceStore.getState().editInvoice(inv, { reason: 'P1b Korrektur', overpayChoice: 'credit', ...input } as never)); reload(); return m;
 };
 /** Kontostand zum Stichtag (Stand 00:00 Ortszeit des Tages) — die echte Stichtagsliste. */
 const stichtag = (tag: string, konto: string): number => trialBalanceAt({ branchId: 'branch-main' }, tag).lines.find((l: { account: string }) => l.account === konto)?.balance ?? 0;

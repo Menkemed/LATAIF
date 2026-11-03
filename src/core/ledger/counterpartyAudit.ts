@@ -317,6 +317,16 @@ function auditCreditIntegrity(run: SqlRunner, branchId: string): CreditIssue[] {
     if (String(r.status) !== 'CANCELLED') ccByTypeSource.add(`${r.source_type}|${r.source_id}`);
   }
 
+  // MIXED-INVOICE P1c — eine Auszahlung auf einen Rückzahlungsanspruch (status REFUND_DUE/REFUNDED) verbraucht den
+  // Anspruch ebenso wie eine Einlösung (used_amount) — Spiegel der Lieferanten-Rückforderung (supplier_credit_refunds).
+  const ccRefunded = new Map<string, number>();
+  try {
+    for (const r of run(`SELECT customer_credit_id AS ref, amount FROM customer_credit_refunds WHERE branch_id=?`, [branchId])) {
+      const ref = String(r.ref);
+      ccRefunded.set(ref, (ccRefunded.get(ref) ?? 0) + toFils(r.amount));
+    }
+  } catch { /* ältere Datenbank ohne die Tabelle: keine Auszahlungen */ }
+
   for (const r of ccRows) {
     // R6E-CN — CANCELLED ist ein Endstatus (Gutschrift storniert, Buchung umgekehrt): kein
     // Soll-Status aus used/amount, kein erwarteter Grant.
@@ -328,9 +338,12 @@ function auditCreditIntegrity(run: SqlRunner, branchId: string): CreditIssue[] {
     if (amt <= 0) issues.push({ kind: 'overused', severity: 'error', side: 'customer', entityId: id, counterpartyId: cp, amountFils: amt, detail: `amount<=0 (${amt} fils)` });
     if (used < 0) issues.push({ kind: 'overused', severity: 'error', side: 'customer', entityId: id, counterpartyId: cp, amountFils: used, detail: `used_amount<0 (${used} fils)` });
     if (used > amt) issues.push({ kind: 'overused', severity: 'error', side: 'customer', entityId: id, counterpartyId: cp, amountFils: used - amt, detail: `used>amount (used ${used} > amount ${amt} fils)` });
-    const expectedStatus = used >= amt - 5 ? 'USED' : 'OPEN'; // 0.005 BHD = 5 Fils (Status-Flip-SSOT)
+    // P1c — ein Rückzahlungsanspruch hat sein eigenes Paar (offen / ausgezahlt), nie einlösbar.
+    const refundClaim = String(r.status) === 'REFUND_DUE' || String(r.status) === 'REFUNDED';
+    const expectedStatus = used >= amt - 5 // 0.005 BHD = 5 Fils (Status-Flip-SSOT)
+      ? (refundClaim ? 'REFUNDED' : 'USED') : (refundClaim ? 'REFUND_DUE' : 'OPEN');
     if (String(r.status) !== expectedStatus) issues.push({ kind: 'inconsistent_status', severity: 'warning', side: 'customer', entityId: id, counterpartyId: cp, detail: `status='${r.status}' erwartet '${expectedStatus}' (used ${used}/amount ${amt} fils)` });
-    const applied = toFils(r.applied);
+    const applied = toFils(r.applied) + (ccRefunded.get(id) ?? 0);
     if (applied !== used) issues.push({ kind: 'used_drift', severity: 'warning', side: 'customer', entityId: id, counterpartyId: cp, amountFils: applied - used, detail: `Σ credit_applications ${applied} ≠ used_amount ${used} fils` });
     // credit_no_ledger
     const st = String(r.source_type ?? '');

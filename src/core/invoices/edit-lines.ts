@@ -12,6 +12,8 @@
 //   • sie darf nicht wegfallen oder durch einen anderen Artikel ersetzt werden,
 //   • ihre Menge darf nicht unter die schon zurückgenommene Menge fallen,
 //   • Preis und Steuerart bleiben, wie sie sind (die Gutschrift wurde zu diesem Preis ausgestellt).
+//     MIXED-INVOICE P1c: die NICHT retournierten Stücke einer Teilretoure sind korrigierbar — als eigene Teilzeile
+//     (`splitOf`, Zeilenteilung); die gespeicherte Zeile behält genau die retournierten Stücke.
 // Und die Rechnung darf nicht unter die Summe ihrer wirksamen Gutschriften fallen.
 //
 // Welche gespeicherte Zeile eine neue fortsetzt, sagt die ZEILEN-ID (`lineId`), die Maske und PC2
@@ -21,7 +23,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { query } from '@/core/db/helpers';
 import { hasLotHistory } from '@/core/lots/stock-contract';
-import { calcInvoiceLine, vatRateFor, type LineScheme } from '@/core/invoices/line-derivation';
+import { calcInvoiceLine, unitNetKeepingGross, vatRateFor, type LineScheme } from '@/core/invoices/line-derivation';
 
 export interface EditBaseLine {
   id: string;
@@ -43,12 +45,24 @@ export interface EditBaseLine {
 export interface EditInputLine {
   /** Die ID der gespeicherten Zeile, die diese Zeile fortsetzt (fehlt bei neuen Zeilen). */
   lineId?: string;
+  /**
+   * MIXED-INVOICE P1c — Zeilenteilung bei Teilretoure: diese NEUE Zeile trägt die nicht retournierten Stücke der
+   * gespeicherten Zeile `splitOf` (dasselbe Los, derselbe Einstand, kein Lagerweg). Die gespeicherte Zeile bleibt mit
+   * genau der retournierten Menge zu ihrem Preis stehen. Nie zusammen mit `lineId`.
+   */
+  splitOf?: string;
   productId: string;
   quantity?: number;
   unitPrice: number;
   taxScheme: string;
   vatRate?: number;
   lineTotal: number;
+  /**
+   * MIXED-INVOICE P1c — der ausdrücklich angegebene Kundenpreis inkl. VAT (Zeilenbrutto). Ist er da, ist ER der Preis:
+   * das Haus rechnet das Netto daraus (`applyBindingGross`). Fehlt er, gilt das Netto — und ein Steuerartwechsel bei
+   * unverändertem Netto ist ein reiner Steuerartwechsel, der das Brutto hält (`keptLineAmounts`).
+   */
+  customerGross?: number;
 }
 
 /** Die fachlichen Neins, als Kennung — die Oberfläche zeigt nur den Satz. */
@@ -60,6 +74,7 @@ export const EDIT_LINE_ID_INVALID = 'INVOICE_EDIT_LINE_ID_INVALID';
 export const EDIT_AMBIGUOUS_RETURNED_LINE = 'INVOICE_EDIT_AMBIGUOUS_RETURNED_LINE';
 export const EDIT_RETURNED_LINE_LOT_UNKNOWN = 'INVOICE_RETURNED_LINE_LOT_UNKNOWN';
 export const EDIT_KEPT_LINE_LOT_SHORT = 'INVOICE_KEPT_LINE_LOT_SHORT';
+export const EDIT_SPLIT_INVALID = 'INVOICE_EDIT_SPLIT_INVALID';
 
 export class InvoiceEditLineRejected extends Error {
   readonly code: string;
@@ -116,6 +131,10 @@ const RELOAD = 'The invoice has changed since it was opened — reload it and ed
 export function matchEditLines(base: readonly EditBaseLine[], next: readonly EditInputLine[]): Array<string | null> {
   const used = new Set<string>();
   const out: Array<string | null> = next.map(() => null);
+  // P1c — eine Teilzeile ist neu (eigene ID) und setzt nur über `splitOf` an; sie braucht die Zeilen-IDs der Maske.
+  if (next.some((n) => !!n.splitOf && (!!n.lineId || !next.some((m) => m.lineId === n.splitOf)))) {
+    throw new InvoiceEditLineRejected(EDIT_SPLIT_INVALID, RELOAD);
+  }
   if (next.some((n) => !!n.lineId)) {
     const byId = new Map(base.map((b) => [b.id, b]));
     next.forEach((n, i) => {
@@ -165,6 +184,16 @@ export function assertEditKeepsReturns(
   next: readonly EditInputLine[],
   match: ReadonlyArray<string | null>,
 ): void {
+  // P1c — eine Teilzeile setzt nur eine TEILWEISE retournierte Zeile fort.
+  const baseById = new Map(base.map((b) => [b.id, b]));
+  for (const n of next) {
+    if (!n.splitOf) continue;
+    const b = baseById.get(n.splitOf);
+    if (!b || !(b.returnedQty > 0.0005) || b.returnedQty >= b.qty - 0.0005) {
+      throw new InvoiceEditLineRejected(EDIT_SPLIT_INVALID,
+        'Only a line with a partial return can be split into its returned and its not returned pieces — reload the invoice and edit it again.');
+    }
+  }
   for (const b of base) {
     if (!(b.returnedQty > 0.0005)) continue;
     const i = match.indexOf(b.id);
@@ -179,6 +208,19 @@ export function assertEditKeepsReturns(
     if (qty < b.returnedQty - 0.0005) {
       throw new InvoiceEditLineRejected(EDIT_BELOW_RETURNED_QTY,
         `The quantity of ${label} cannot go below ${fmtQty(b.returnedQty)} — that many were already returned.`);
+    }
+    // P1c — Zeilenteilung: die gespeicherte Zeile behält GENAU die retournierten Stücke (ID, Los, Einstand, Preis),
+    // die Teilzeile höchstens die übrigen. Mehr Stücke gehen als neue Zeile.
+    const splits = next.filter((x) => x.splitOf === b.id);
+    if (splits.length > 0) {
+      const rest = b.qty - b.returnedQty;
+      const s = splits[0];
+      if (splits.length > 1 || Math.abs(qty - b.returnedQty) > 0.0005 || (s.productId || null) !== b.productId
+        || Math.max(1, s.quantity || 1) > rest + 0.0005) {
+        throw new InvoiceEditLineRejected(EDIT_SPLIT_INVALID,
+          `${label}: the ${fmtQty(b.returnedQty)} returned piece(s) stay on their line at their price; only the `
+          + `${fmtQty(rest)} not returned can be corrected. Add extra pieces as a new line.`);
+      }
     }
     // Preis, Steuerart, Steuersatz und Betrag PRO STÜCK (ein Rabatt ist hier eine Preisänderung).
     const unitTotalNew = (Number(n.lineTotal) || 0) / qty;
@@ -206,6 +248,30 @@ export function assertEditKeepsReturns(
     throw new InvoiceEditLineRejected(EDIT_BELOW_CREDIT_NOTES,
       `The invoice total cannot go below its credit notes (${cn.toFixed(3)} BHD).`);
   }
+}
+
+/**
+ * P1c — eine Teilzeile, die nichts ändert (gleicher Nettopreis, gleiche Steuerart, gleicher Satz), ist keine Teilung:
+ * sie geht in ihre Zeile zurück (Menge und Betrag addiert). Die Rechnung bleibt dann fachlich, wie sie war — auch für
+ * die Erkennung „ohne Buchungswirkung".
+ */
+export function normalizeEditSplits<T extends EditInputLine>(base: readonly EditBaseLine[], next: readonly T[]): T[] {
+  if (!next.some((n) => n.splitOf)) return [...next];
+  const byId = new Map(base.map((b) => [b.id, b]));
+  const rateOf = (x: EditInputLine): number => (Number.isFinite(x.vatRate) ? Number(x.vatRate) : vatRateFor(x.taxScheme as LineScheme));
+  const out = next.map((n) => ({ ...n }));
+  const drop = new Set<number>();
+  out.forEach((s, i) => {
+    if (!s.splitOf || s.lineId) return;
+    const b = byId.get(s.splitOf);
+    const k = out.findIndex((x) => x.lineId === s.splitOf);
+    if (!b || k < 0 || (s.productId || null) !== b.productId) return;
+    if (!samePrice(s.unitPrice, b.unitPrice) || s.taxScheme !== b.taxScheme || Math.abs(rateOf(s) - b.vatRate) >= 0.0005) return;
+    out[k] = { ...out[k], quantity: Math.max(1, out[k].quantity || 1) + Math.max(1, s.quantity || 1),
+      lineTotal: (Number(out[k].lineTotal) || 0) + (Number(s.lineTotal) || 0) };
+    drop.add(i);
+  });
+  return out.filter((_, i) => !drop.has(i));
 }
 
 const round3 = (v: number): number => Math.round(v * 1000) / 1000;
@@ -242,6 +308,48 @@ export function keptLineAmounts(
   if (unchanged) return { unitPrice: b.unitPrice, vatAmount: b.vatAmount, lineTotal: b.lineTotal };
   const calc = calcInvoiceLine(n.unitPrice, qty, costBasis, n.taxScheme as LineScheme, rate);
   return { unitPrice: n.unitPrice, vatAmount: calc.internalVatAmount || calc.vatAmount, lineTotal: calc.grossAmount };
+}
+
+/**
+ * MIXED-INVOICE P1c — die verbindliche Preisdeutung einer fortgesetzten Zeile, VOR allen Prüfungen. Ein REINER
+ * Steuerartwechsel — Menge und Netto wie gespeichert, kein ausdrücklicher Kundenpreis — hält den Kundenpreis inkl. VAT:
+ * das gespeicherte Zeilenbrutto wird der Kundenpreis (`customerGross`), das Netto folgt der neuen Steuerart. So verhält
+ * sich jeder Weg gleich (Maske, PC2-Auftrag, direkter Aufruf, ältere Gegenstelle). Wer Steuerart UND Preis ändert,
+ * schickt ein anderes Netto oder den Kundenpreis selbst — dann gilt dieser. Retournierte Zeilen bleiben, wie sie sind.
+ */
+export function keepGrossOnPureTaxChange<T extends EditInputLine & { purchasePrice?: number; vatAmount?: number }>(
+  base: readonly EditBaseLine[],
+  next: readonly T[],
+  match: ReadonlyArray<string | null>,
+): T[] {
+  const byId = new Map(base.map((b) => [b.id, b]));
+  return applyBindingGross(next.map((l, i) => {
+    const b = match[i] ? byId.get(match[i] as string) : undefined;
+    if (!b || l.customerGross !== undefined || b.returnedQty > 0.0005) return l;
+    const qty = Math.max(1, l.quantity || 1);
+    const rate = Number.isFinite(l.vatRate) ? Number(l.vatRate) : vatRateFor(l.taxScheme as LineScheme);
+    const taxChanged = l.taxScheme !== b.taxScheme || Math.abs(rate - b.vatRate) >= 0.0005;
+    if (!taxChanged || Math.abs(qty - b.qty) >= 0.0005 || !samePrice(l.unitPrice, b.unitPrice)) return l;
+    return { ...l, customerGross: b.lineTotal };
+  }));
+}
+
+/**
+ * MIXED-INVOICE P1c — die verbindliche Preisdeutung, VOR jeder Prüfung: trägt eine Zeile den ausdrücklichen Kundenpreis
+ * inkl. VAT (`customerGross`), rechnet das Haus Netto, Zeilenbetrag und VAT daraus — für die Steuerart der Zeile. Ein
+ * mitgeschicktes Netto zählt dann nicht. Ohne Kundenpreis bleibt die Zeile, wie sie kam (Netto-Vertrag).
+ */
+export function applyBindingGross<T extends EditInputLine & { purchasePrice?: number; vatAmount?: number }>(next: readonly T[]): T[] {
+  return next.map((l) => {
+    const g = Number(l.customerGross);
+    if (l.customerGross === undefined || !Number.isFinite(g) || g < 0) return l;
+    const qty = Math.max(1, l.quantity || 1);
+    const scheme = l.taxScheme as LineScheme;
+    const rate = Number.isFinite(l.vatRate) ? Number(l.vatRate) : vatRateFor(scheme);
+    const net = unitNetKeepingGross(g, qty, scheme, rate);
+    const calc = calcInvoiceLine(net, qty, Number(l.purchasePrice) || 0, scheme, rate);
+    return { ...l, unitPrice: net, vatRate: rate, vatAmount: calc.internalVatAmount || calc.vatAmount, lineTotal: calc.grossAmount };
+  });
 }
 
 /**

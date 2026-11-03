@@ -41,7 +41,7 @@ import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import {
   createInvoiceInHouse, invoiceCreatePayments, type InvoiceCreatePayment,
 } from '@/core/invoices/invoice-create-house';
-import { resolveLineScheme, toInvoiceLine, type InvoiceLineInput, type RequestedScheme } from '@/core/invoices/line-derivation';
+import { resolveLineScheme, toInvoiceLine, unitNetKeepingGross, vatRateFor, type InvoiceLineInput, type RequestedScheme } from '@/core/invoices/line-derivation';
 import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps } from './mutation-engine';
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
@@ -52,6 +52,10 @@ export const OP_INVOICES_CREATE = 'invoices.create';
 interface RemoteLine {
   /** INVOICE-EDIT S2 — die gespeicherte Zeile, die diese fortsetzt (nur beim Ändern; beim Anlegen leer). */
   lineId?: string;
+  /** MIXED-INVOICE P1c — Teilzeile: trägt die nicht retournierten Stücke dieser gespeicherten Zeile (nur beim Ändern). */
+  splitOf?: string;
+  /** MIXED-INVOICE P1c — der ausdrücklich gewählte Kundenpreis inkl. VAT der Zeile; ist er da, rechnet der Primary das Netto. */
+  customerGross?: number;
   productId: string;
   lotId?: string | null;
   quantity?: number;
@@ -61,7 +65,7 @@ interface RemoteLine {
   bulkIntent?: BulkLineIntent;
 }
 
-const LINE_KEYS = new Set(['lineId', 'productId', 'lotId', 'quantity', 'unitPrice', 'scheme']);
+const LINE_KEYS = new Set(['lineId', 'splitOf', 'productId', 'lotId', 'quantity', 'unitPrice', 'customerGross', 'scheme']);
 /** BULK METAL V1 — eine Bulk-Zeile schickt nur die Absicht; Einstand, Steuerart, Menge rechnet der Primary. */
 const BULK_LINE_KEYS = new Set(['kind', 'lineId', 'bulkLotId', 'weightMg', 'bulkType', 'unitPriceFils', 'description']);
 const TOP_KEYS = new Set(['customerId', 'lines', 'notes', 'issuedDate', 'staffId', 'specialMark']);
@@ -150,8 +154,18 @@ export function parseInvoicePayload(raw: unknown): {
     if (l.lineId !== undefined && (typeof l.lineId !== 'string' || !l.lineId.trim())) {
       throw new InvoicePayloadError(`line ${i + 1}: lineId must be a string`);
     }
+    if (l.splitOf !== undefined && (typeof l.splitOf !== 'string' || !l.splitOf.trim() || l.lineId !== undefined)) {
+      throw new InvoicePayloadError(`line ${i + 1}: splitOf must be a line id (and not together with lineId)`);
+    }
+    let customerGross: number | undefined;
+    if (l.customerGross !== undefined) {
+      customerGross = num(l.customerGross, `line ${i + 1}: customerGross`);
+      if (customerGross < 0) throw new InvoicePayloadError(`line ${i + 1}: customerGross cannot be negative`);
+    }
     return {
       ...(l.lineId ? { lineId: String(l.lineId) } : {}),
+      ...(l.splitOf ? { splitOf: String(l.splitOf) } : {}),
+      ...(customerGross !== undefined ? { customerGross } : {}),
       productId: l.productId, lotId: (l.lotId as string | null) ?? null, quantity: qty, unitPrice, scheme: scheme as RequestedScheme,
     };
   });
@@ -306,14 +320,22 @@ export function buildInvoiceLines(
     // Ware ohne Lose (Reparaturleistung, Kommission vor dem Auto-Einkauf) bleibt wie bisher:
     // kein Los, keine Bestandsprüfung, Einstandskosten aus dem Produkt.
 
+    const scheme = resolveLineScheme(l.scheme, product.tax_scheme as string | undefined);
+    // MIXED-INVOICE P1c — ein ausdrücklicher Kundenpreis inkl. VAT ist der Preis: das Netto rechnet der Primary daraus
+    // (dieselbe Regel wie die Maske, `unitNetKeepingGross`). Er reist weiter, damit das Haus beim Ändern weiß, dass
+    // er gewählt wurde (und ihn nicht als reinen Steuerartwechsel deutet).
+    const unitPrice = l.customerGross !== undefined
+      ? unitNetKeepingGross(l.customerGross, Math.max(1, l.quantity ?? 1), scheme, vatRateFor(scheme))
+      : l.unitPrice;
     return { ...toInvoiceLine({
       productId: l.productId,
       lotId,
       quantity: l.quantity ?? 1,
-      unitPrice: l.unitPrice,
+      unitPrice,
       costBasis,
-      scheme: resolveLineScheme(l.scheme, product.tax_scheme as string | undefined),
-    }), ...(l.lineId ? { lineId: l.lineId } : {}) };
+      scheme,
+    }), ...(l.lineId ? { lineId: l.lineId } : {}), ...(l.splitOf ? { splitOf: l.splitOf } : {}),
+      ...(l.customerGross !== undefined ? { customerGross: l.customerGross } : {}) };
   });
 }
 
@@ -374,7 +396,7 @@ export function runInvoiceCreate(deps: EngineDeps, identity: CommandIdentity, ra
   return runRemoteCommand(deps, identity, () => {
     // Beim ANLEGEN gibt es keine gespeicherte Zeile: eine mitgeschickte `lineId` wird verworfen,
     // damit sie keine fremde Zeile übernehmen kann.
-    const lines = buildInvoiceLines(wish.lines.map((l) => ({ ...l, lineId: undefined })));
+    const lines = buildInvoiceLines(wish.lines.map((l) => ({ ...l, lineId: undefined, splitOf: undefined })));
     try {
       // R6E — DIESELBE Hausfolge wie die Maske am Primary: der normale Verkaufskreis (nie der
       // Reparaturkreis), kein Agenten-Sonderweg, und die Zahlung in derselben Transaktion.

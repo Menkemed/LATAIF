@@ -176,7 +176,9 @@ const lineOf = (db: Db, inv: string): string => s(db, 'SELECT id FROM invoice_li
 // ── 1) Der Umfang und die Wiederverwendung ───────────────────────────────
 {
   const mine = codeOf('src/core/bridge/return-commands.ts');
-  ok((mine.match(/runRemoteCommand\(/g) ?? []).length === 4, 'TX alle vier laufen durch die eine Maschine');
+  // MIXED-INVOICE P1c — „record_refund_payment" hat zwei Varianten (Rückgabe / Rückzahlungsanspruch einer Korrektur),
+  // jede durch dieselbe Maschine: fünf Eingänge für die vier Namen.
+  ok((mine.match(/runRemoteCommand\(/g) ?? []).length === 5, 'TX alle vier (Auszahlung in zwei Varianten) laufen durch die eine Maschine');
   // R5F — das Anlegen laeuft ueber die geteilte Hausfolge (`return-house`), die Maske und Fernweg
   // gemeinsam rufen; sie ruft `createReturn` (und bei „sofort" `refundReturn`) des Stores.
   const haus = codeOf('src/core/returns/return-house.ts');

@@ -45,10 +45,26 @@ export function calcInvoiceLine(
   return vatEngine.calculateNet(unitPrice * qty, purchasePrice * qty, scheme, vatRate);
 }
 
+/**
+ * MIXED-INVOICE P1c — der Nettopreis pro Stück zu einem Kundenpreis inkl. VAT (Brutto). Wechselt die Steuerart einer
+ * Zeile (Margin ↔ VAT 10 % ↔ Zero-rated), bleibt der Kundenpreis stehen; neu gerechnet wird nur, wie er sich aufteilt:
+ *   VAT 10 % → netto = brutto / 1,10 · Zero-rated → netto = brutto · Margin → netto = brutto (VAT steckt in der Marge).
+ * Maske (Primary wie PC2) und Fernauftrag rechnen damit, das Haus rechnet aus dem Netto mit `calcInvoiceLine` zurück.
+ */
+export function unitNetKeepingGross(gross: number, qty: number, scheme: LineScheme, vatRate: number): number {
+  if (!(qty > 0)) return 0;
+  const totalNet = scheme === 'VAT_10' ? gross / (1 + vatRate / 100) : gross;
+  return totalNet / qty;
+}
+
 /** Genau die Form, die `createDirectInvoice` erwartet. */
 export interface InvoiceLineInput {
   /** INVOICE-EDIT S2 — beim Ändern: die gespeicherte Zeile, die diese fortsetzt. */
   lineId?: string;
+  /** MIXED-INVOICE P1c — Teilzeile einer Teilretoure (nur beim Ändern). */
+  splitOf?: string;
+  /** MIXED-INVOICE P1c — der ausdrücklich gewählte Kundenpreis inkl. VAT (verbindlich; das Haus rechnet das Netto). */
+  customerGross?: number;
   productId: string;
   lotId?: string;
   quantity: number;

@@ -47,7 +47,9 @@ import { businessDateIssue } from '@/core/utils/business-date';
 import {
   EDIT_LINE_HAS_RETURN, EDIT_BELOW_RETURNED_QTY, EDIT_RETURNED_LINE_PRICE_LOCKED, EDIT_BELOW_CREDIT_NOTES,
   EDIT_LINE_ID_INVALID, EDIT_AMBIGUOUS_RETURNED_LINE, EDIT_RETURNED_LINE_LOT_UNKNOWN, EDIT_KEPT_LINE_LOT_SHORT,
+  EDIT_SPLIT_INVALID,
 } from '@/core/invoices/edit-lines';
+import { INVOICE_REFUND_VERDICTS, OVERPAY_CHOICES, REFUND_PAYOUT_METHODS, type OverpayChoice } from '@/core/invoices/invoice-refund';
 import { LEGACY_STOCK_LINES } from '@/core/lots/stock-contract';
 import { CUSTOMER_CHANGE_VERDICTS } from '@/core/invoices/customer-change';
 import { VAT_PERIOD_FILED } from '@/core/tax/vat-period-lock';
@@ -82,13 +84,18 @@ export interface InvoiceUpdateRequest {
   reason: string;
   /** INVOICE-EDIT S3 — der Mensch hat bestätigt, dass eine Rechnung MIT Zahlungen den Kunden wechselt. */
   confirmCustomerChange: boolean;
+  /** MIXED-INVOICE P1c — die Wahl bei einer Kundenüberzahlung (Guthaben oder Rückzahlung). */
+  overpayChoice?: OverpayChoice;
+  /** P1c — nur bei Rückzahlung: im selben Vorgang ausgezahlt, mit Weg und Tag. */
+  refundNow?: { method: string; paidDate?: string };
   body: ReturnType<typeof parseInvoicePayload>;
 }
 
 export function parseInvoiceUpdate(raw: unknown): InvoiceUpdateRequest {
   if (!isPlain(raw)) throw new InvoicePayloadError('payload must be an object');
-  const { id, expectedRevision, reason, confirmCustomerChange, ...rest } = raw as {
+  const { id, expectedRevision, reason, confirmCustomerChange, overpayChoice, refundNow, ...rest } = raw as {
     id?: unknown; expectedRevision?: unknown; reason?: unknown; confirmCustomerChange?: unknown;
+    overpayChoice?: unknown; refundNow?: unknown;
   };
   if (typeof id !== 'string' || !id.trim()) throw new InvoicePayloadError('id is required');
   if (typeof expectedRevision !== 'number' || !Number.isInteger(expectedRevision) || expectedRevision < 1) {
@@ -109,9 +116,31 @@ export function parseInvoiceUpdate(raw: unknown): InvoiceUpdateRequest {
   if (confirmCustomerChange !== undefined && typeof confirmCustomerChange !== 'boolean') {
     throw new InvoicePayloadError('confirmCustomerChange must be true or false');
   }
+  // MIXED-INVOICE P1c — die Wahl bei einer Überzahlung und eine sofortige Auszahlung gehören nur zum Ändern.
+  if (overpayChoice !== undefined && !(OVERPAY_CHOICES as readonly unknown[]).includes(overpayChoice)) {
+    throw new InvoicePayloadError("overpayChoice must be 'credit' or 'refund'");
+  }
+  let sofort: InvoiceUpdateRequest['refundNow'];
+  if (refundNow !== undefined) {
+    if (!isPlain(refundNow)) throw new InvoicePayloadError('refundNow must be an object');
+    for (const k of Object.keys(refundNow)) {
+      if (k !== 'method' && k !== 'paidDate') throw new InvoicePayloadError(`unknown field in refundNow: ${k}`);
+    }
+    if (typeof refundNow.method !== 'string' || !(REFUND_PAYOUT_METHODS as readonly string[]).includes(refundNow.method)) {
+      throw new InvoicePayloadError('refundNow.method must be cash, bank or benefit');
+    }
+    if (refundNow.paidDate !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(String(refundNow.paidDate))) {
+      throw new InvoicePayloadError('refundNow.paidDate must look like YYYY-MM-DD');
+    }
+    sofort = { method: refundNow.method, ...(refundNow.paidDate !== undefined ? { paidDate: String(refundNow.paidDate) } : {}) };
+  }
   // Alles Übrige ist derselbe Rumpf wie beim Anlegen — inklusive seiner Verbotsliste.
   const body = parseInvoicePayload(rest);
-  return { id, expectedRevision, reason: reason.trim(), confirmCustomerChange: confirmCustomerChange === true, body };
+  return {
+    id, expectedRevision, reason: reason.trim(), confirmCustomerChange: confirmCustomerChange === true, body,
+    ...(overpayChoice !== undefined ? { overpayChoice: overpayChoice as OverpayChoice } : {}),
+    ...(sofort ? { refundNow: sofort } : {}),
+  };
 }
 
 /**
@@ -126,6 +155,8 @@ const EDIT_VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
   // STOCK-LOT-INTEGRITY — eine aus Agentenverkäufen umgewandelte Rechnung wird über „Undo conversion" geändert.
   [/^This invoice was converted from agent sales\. Undo the conversion to change it\.$/, 'INVOICE_FROM_AGENT_SALES'],
   [/store credit .* has already been used/i, 'EDIT_CREDIT_ALREADY_USED'],
+  // MIXED-INVOICE P1c — auf den Rückzahlungsanspruch dieser Rechnung ist schon Geld ausgezahlt.
+  [/^A refund from this invoice's overpayment has already been paid out/, 'EDIT_REFUND_ALREADY_PAID'],
   [/^Cannot edit: this would shrink an existing overpayment store credit/, 'EDIT_WOULD_SHRINK_CREDIT'],
   [/^Cannot edit: the overpayment store credit from a payment has already been used/, 'EDIT_CREDIT_ALREADY_USED'],
 ];
@@ -148,6 +179,8 @@ const EDIT_CODE_VERDICTS: ReadonlySet<string> = new Set([
   'INVOICE_NOT_FOUND', 'INVOICE_CHANGED',
   // MIXED-INVOICE P1b (O1) — eine Korrektur, die vor dem Eröffnungsstichtag buchen würde.
   CORRECTION_BEFORE_OPENING_CUTOFF,
+  // MIXED-INVOICE P1c — Zeilenteilung bei Teilretoure; Pflichtwahl und Auszahlung einer Kundenüberzahlung.
+  EDIT_SPLIT_INVALID, ...INVOICE_REFUND_VERDICTS,
 ]);
 
 function asEditVerdict(err: unknown): CommandRejected | null {
@@ -264,6 +297,8 @@ export function runInvoiceUpdate(deps: EngineDeps, identity: CommandIdentity, ra
         staffId: req.body.staffId,
         reason: req.reason,
         confirmCustomerChange: req.confirmCustomerChange,
+        ...(req.overpayChoice ? { overpayChoice: req.overpayChoice } : {}),
+        ...(req.refundNow ? { refundNow: req.refundNow } : {}),
       });
     } catch (err) {
       const verdict = asEditVerdict(err);

@@ -251,7 +251,7 @@ function zustand(db: Db): string {
   });
 }
 function aendern(inv: string, lines: Array<ReturnType<typeof LINE>>): string {
-  const m = meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(inv, { lines: lines as never, reason: 'S2 Test' } as never)));
+  const m = meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(inv, { lines: lines as never, reason: 'S2 Test', overpayChoice: 'credit' } as never)));
   reload();
   return m;
 }

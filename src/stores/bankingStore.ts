@@ -600,6 +600,32 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
     });
   }
 
+  // MIXED-INVOICE P1c — REFUND_OUT: die tatsächliche Auszahlung auf einen Rückzahlungsanspruch eines Kunden (Überzahlung
+  // nach einer Rechnungskorrektur). Der Anspruch selbst ist kein Geldfluss — erst diese Auszahlung (Tag, Weg, Betrag).
+  const customerRefunds = safeQuery('customer_credit_refunds',
+    `SELECT r.id, r.amount, r.method, r.paid_at, r.created_at, r.invoice_id, i.invoice_number
+       FROM customer_credit_refunds r
+       LEFT JOIN invoices i ON i.id = r.invoice_id
+      WHERE r.branch_id = ?`,
+    [branchId]
+  );
+  for (const r of customerRefunds) {
+    const date = (r.paid_at as string) || '';
+    txs.push({
+      id: `ccref-${r.id}`,
+      date,
+      createdAt: (r.created_at as string) || date,
+      type: 'REFUND',
+      account: accountFor(r.method as string),
+      amount: (r.amount as number) || 0,
+      flow: 'out',
+      relatedModule: 'invoice',
+      relatedEntityId: (r.invoice_id as string) || (r.id as string),
+      description: `Refund to customer · ${r.invoice_number || ''}`,
+      link: (r.invoice_id as string) ? `/invoices/${r.invoice_id}` : undefined,
+    });
+  }
+
   // Plan §8 #9 — Order-Payments (Anzahlungen + Zahlungen vor Invoice-Erstellung)
   // v0.7.26 — Karten-Anzahlungen NETTO zeigen (Brutto − gebuchte CardFee), analog
   // zu den Invoice-Zahlungen. Match ueber CardFees/related_module='order' + den

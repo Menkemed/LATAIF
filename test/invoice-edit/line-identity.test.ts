@@ -243,7 +243,7 @@ const L = (pid: string, qty: number, preis: number, lineId?: string) => ({
   ...(lineId ? { lineId } : {}), ...LINE(pid, qty, preis),
 });
 function aendern(inv: string, lines: Array<ReturnType<typeof L>>): string {
-  const m = meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(inv, { lines: lines as never, reason: 'S2-ID Test' } as never)));
+  const m = meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(inv, { lines: lines as never, reason: 'S2-ID Test', overpayChoice: 'credit' } as never)));
   reload();
   return m;
 }

@@ -302,6 +302,8 @@ export interface InvoiceLine {
   bulkLotNo?: string | null;
   /** PURCHASE-EDIT D1 — Σ der wirksamen Einstandskorrekturen dieser Zeile (positiv = Einstand gestiegen). */
   costCorrection?: number;
+  /** MIXED-INVOICE P1c — Menge, die wirksame Retouren (nicht REJECTED) von dieser Zeile schon zurückgenommen haben. */
+  returnedQty?: number;
   /**
    * D7 — die Artikelangaben, die diese Rechnung druckt, eingefroren beim ersten Ändern des Artikels danach.
    * Fehlt sie, ist der Artikel seit dem Verkauf unverändert und der Druck liest ihn selbst.
@@ -359,6 +361,20 @@ export interface Invoice {
   // INVOICE-NUMBER-FREEZE — wann die Endnummer vergeben wurde; gesetzt = Nummer und Sonder-
   // Kennzeichen stehen für immer fest, auch wenn der Status später zurückfällt.
   numberFinalizedAt?: string;
+  /**
+   * MIXED-INVOICE P1c — was aus einer Überzahlung nach einer Rechnungskorrektur steht: Kundenguthaben (einlösbar) oder
+   * Rückzahlungsanspruch (offen bis zur tatsächlichen Auszahlung). Vom Primary gerechnet, an beiden Rechnern gleich.
+   */
+  editOverpay?: {
+    kind: 'credit' | 'refund';
+    creditId: string;
+    amount: number;
+    /** Noch offen (Guthaben: nicht eingelöst; Rückzahlung: nicht ausgezahlt). */
+    open: number;
+    /** Nur Rückzahlung: schon ausgezahlt. */
+    paidOut: number;
+    payouts: Array<{ id: string; amount: number; method: string; paidAt: string }>;
+  };
   createdAt: string;
   createdBy?: UUID;
   customer?: Customer;

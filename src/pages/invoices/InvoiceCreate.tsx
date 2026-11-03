@@ -19,7 +19,8 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { useOrderStore } from '@/stores/orderStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
-import { calcInvoiceLine, toInvoiceLine } from '@/core/invoices/line-derivation';
+import { calcInvoiceLine, toInvoiceLine, unitNetKeepingGross } from '@/core/invoices/line-derivation';
+import { OVERPAY_CHOICE_REQUIRED, REFUND_PAYOUT_METHODS, type OverpayChoice, type RefundPayoutMethod } from '@/core/invoices/invoice-refund';
 import { formatLotLabel, type StockLot } from '@/core/lots/lot-queries';
 import { Bhd } from '@/components/ui/Bhd';
 import { getProductSpecs, productSearchText } from '@/core/utils/product-format';
@@ -70,6 +71,10 @@ interface DraftLine {
   kept?: { productId: string; lotId: string | null; cost: number; qty: number };
   /** BULK METAL V1 — eine Bulk-Zeile (Menge fest 1). */
   bulk?: BulkInvoiceDraft;
+  /** MIXED-INVOICE P1c — retournierte Stücke dieser Zeile: Menge, Preis und Steuerart bleiben gesperrt. */
+  returnedQty?: number;
+  /** MIXED-INVOICE P1c — Teilretoure: diese Zeile trägt die NICHT retournierten Stücke der gespeicherten Zeile `restOf`. */
+  restOf?: string;
 }
 
 /** BULK METAL V1 — Gewicht und Preis einer Bulk-Zeile exakt in mg/Fils (Text → Integer). */
@@ -82,9 +87,9 @@ function bulkIntentOf(b: BulkInvoiceDraft, scheme: string) {
   };
 }
 
-/** INVOICE-EDIT S2 — die Zeile setzt eine gespeicherte fort (gleicher Artikel) → ihr Los steht fest. */
+/** INVOICE-EDIT S2 — die Zeile setzt eine gespeicherte fort (gleicher Artikel) → ihr Los steht fest. P1c: auch die Teilzeile. */
 function keptOf(l: DraftLine): DraftLine['kept'] | null {
-  return l.lineId && l.kept && l.kept.productId === l.productId ? l.kept : null;
+  return (l.lineId || l.restOf) && l.kept && l.kept.productId === l.productId ? l.kept : null;
 }
 
 function fmt(v: number): string {
@@ -95,15 +100,12 @@ function fmt(v: number): string {
 // der Fernauftrag GENAU dieselbe benutzt. Hier bleibt nur der Name, den die Anzeige schon ruft.
 const calcLine = calcInvoiceLine;
 
-// Inverse: vom Gesamt-Brutto auf Netto-pro-Einheit zurückrechnen.
+// Inverse: vom Gesamt-Brutto auf Netto-pro-Einheit zurückrechnen — dieselbe Regel wie im Haus (`unitNetKeepingGross`).
 // VAT_10  → net = gross / 1.10
 // ZERO    → net = gross
 // MARGIN  → net = gross (VAT ist auf Marge eingebettet, kundenseitig nicht extra)
-function unitNetFromGross(gross: number, qty: number, scheme: 'VAT_10' | 'ZERO' | 'MARGIN', vatRate: number): number {
-  if (qty <= 0) return 0;
-  const totalNet = scheme === 'VAT_10' ? gross / (1 + vatRate / 100) : gross;
-  return totalNet / qty;
-}
+const unitNetFromGross = (gross: number, qty: number, scheme: 'VAT_10' | 'ZERO' | 'MARGIN', vatRate: number): number =>
+  unitNetKeepingGross(gross, qty, scheme, vatRate);
 
 export function InvoiceCreate() {
   const navigate = useNavigate();
@@ -147,6 +149,13 @@ export function InvoiceCreate() {
   const [notes, setNotes] = useState('');
   const [staffId, setStaffId] = useState<string>('');
   const [editReason, setEditReason] = useState('');  // Pflicht-Grund im Edit-Modus (Audit)
+  // MIXED-INVOICE P1c — Pflichtwahl bei einer Kundenüberzahlung nach dem Ändern: Guthaben oder Rückzahlung.
+  const [overpayChoice, setOverpayChoice] = useState<OverpayChoice | ''>('');
+  const [refundNow, setRefundNow] = useState(false);
+  const [refundMethod, setRefundMethod] = useState<RefundPayoutMethod>('cash');
+  const [refundDate, setRefundDate] = useState(() => new Date().toISOString().split('T')[0]);
+  /** Das Haus hat eine Überzahlung gesehen, die die Maske nicht schätzen konnte (z. B. mit Gutschriften). */
+  const [needOverpayChoice, setNeedOverpayChoice] = useState(false);
   const [error, setError] = useState('');
   const [hydrated, setHydrated] = useState(!isEditMode);
   // 2026-05-16 — Number-Type-Dialog: erscheint wenn die Rechnung als FINAL gespeichert wird.
@@ -166,28 +175,39 @@ export function InvoiceCreate() {
     if (editInvoice.issuedAt) setIssuedDate(editInvoice.issuedAt.slice(0, 10));
     // INVOICE-EDIT S2 — die ID der gespeicherten Zeile reist mit, damit der Speichern-Vorgang
     // nicht raten muss, welche Zeile fortgesetzt wird (zwei gleiche Artikel, einer retourniert).
-    const invLines = (editInvoice.lines || []).map(l => {
+    const invLines = (editInvoice.lines || []).flatMap((l): DraftLine[] => {
       if (l.bulkWeightMg) {
         const bulk: BulkInvoiceDraft = {
           lotId: l.lotId || '', weightText: formatMg(l.bulkWeightMg), bulkType: (l.bulkType || 'OTHER') as BulkType,
           grossText: (l.lineTotal || 0).toFixed(3), description: l.description || '',
           kept: { weightMg: l.bulkWeightMg, cogsFils: l.bulkCogsFils ?? 0, lotLabel: l.bulkLotNo || '—', scheme: String(l.taxScheme) },
         };
-        return { lineId: l.id, productId: l.productId || '', scheme: 'auto' as Scheme, quantity: 1, unitPrice: l.unitPrice || 0, bulk };
+        return [{ lineId: l.id, productId: l.productId || '', scheme: 'auto' as Scheme, quantity: 1, unitPrice: l.unitPrice || 0, bulk }];
       }
       const p = products.find(pp => pp.id === l.productId);
       const stored = (l.taxScheme as Scheme | undefined);
       const matchesProduct = stored && p && stored === p.taxScheme;
       const qty = l.quantity || 1;
       const unitNet = qty > 0 ? (l.unitPrice || 0) : 0;
-      return {
+      const scheme = (matchesProduct ? 'auto' : (stored || 'auto')) as Scheme;
+      const ret = Math.max(0, l.returnedQty || 0);
+      const row: DraftLine = {
         lineId: l.id,
         kept: { productId: l.productId || '', lotId: l.lotId ?? null, cost: l.purchasePriceSnapshot || 0, qty },
         productId: l.productId || '',
-        scheme: (matchesProduct ? 'auto' : (stored || 'auto')) as Scheme,
+        scheme,
         quantity: qty,
         unitPrice: unitNet,
       };
+      // MIXED-INVOICE P1c — Teilretoure: die retournierten Stücke bleiben gesperrt auf ihrer Zeile, die übrigen stehen als
+      // eigene, korrigierbare Zeile daneben (beim Speichern eine Teilzeile `splitOf`; unverändert geht sie zurück).
+      if (ret > 0.0005 && ret < qty - 0.0005) {
+        return [
+          { ...row, quantity: ret, returnedQty: ret },
+          { ...row, lineId: undefined, restOf: l.id, kept: { ...row.kept!, qty: qty - ret }, quantity: qty - ret },
+        ];
+      }
+      return [ret > 0.0005 ? { ...row, returnedQty: ret } : row];
     });
     setLines(invLines.length > 0 ? invLines : [{ productId: '', scheme: 'auto', quantity: 1, unitPrice: 0 }]);
     setPaidAmount(editInvoice.paidAmount || 0);
@@ -342,6 +362,13 @@ export function InvoiceCreate() {
   const paidNow = isEditMode ? paidAmount : createPaid;
   const remaining = Math.max(0, total - paidNow);
   const invoiceType: 'INV' | 'PINV' = paidNow >= total && total > 0 ? 'INV' : 'PINV';
+  // MIXED-INVOICE P1c — liegt die neue Summe unter dem Bezahlten, wählt der Mensch, was mit der Differenz geschieht.
+  // Dieselbe frühere Wahl gilt weiter, solange der Betrag gleich bleibt (wie im Haus).
+  const overpaidBy = isEditMode ? Math.max(0, Math.round((paidNow - total) * 1000) / 1000) : 0;
+  const showOverpayChoice = isEditMode && (overpaidBy > 0.0005 || needOverpayChoice);
+  const earlierOverpay = editInvoice?.editOverpay;
+  const earlierKind: OverpayChoice | '' = earlierOverpay && Math.abs(earlierOverpay.amount - overpaidBy) < 0.0005 ? earlierOverpay.kind : '';
+  const effectiveOverpayChoice: OverpayChoice | '' = overpayChoice || earlierKind;
 
   // Der vorgeschlagene Zahlungstag ist das Rechnungsdatum — bis der Mensch den Tag einer Zeile selbst wählt.
   useEffect(() => {
@@ -411,7 +438,11 @@ export function InvoiceCreate() {
     if (bad !== -1) return `Line ${bad + 1}: pick a product, set qty > 0, price ≥ 0`;
     const short = computed.findIndex(c => c.keptShort);
     if (short !== -1) return `Line ${short + 1}: ${computed[short].keptShort}`;
+    // P1c — die Teilzeile trägt höchstens die nicht retournierten Stücke; mehr gehört auf eine neue Zeile.
+    const zuViel = lines.findIndex(l => l.restOf && l.kept && l.quantity > l.kept.qty);
+    if (zuViel !== -1) return `Line ${zuViel + 1}: only ${lines[zuViel].kept!.qty} piece(s) were not returned — add extra pieces as a new line`;
     if (isEditMode && paidAmount < 0) return 'Paid amount cannot be negative';
+    if (showOverpayChoice && !effectiveOverpayChoice) return 'The invoice is overpaid — choose: keep the difference as customer credit, or refund it to the customer';
     if (!isEditMode) {
       for (let i = 0; i < payRows.length; i++) {
         const r = payRows[i];
@@ -481,8 +512,15 @@ export function InvoiceCreate() {
         unitPrice: l.unitPrice,
         costBasis: c.costBasis,
         scheme: c.scheme,
-      }), ...(l.lineId ? { lineId: l.lineId } : {}) };
+      }), ...(l.lineId ? { lineId: l.lineId } : {}), ...(l.restOf ? { splitOf: l.restOf } : {}),
+        // P1c — der Kundenpreis inkl. VAT, den der Mensch sieht, ist der Preis (das Haus rechnet das Netto daraus).
+        ...(c.product ? { customerGross: c.gross } : {}) };
     });
+    // P1c — die Wahl bei einer Überzahlung reist an beiden Rechnern gleich mit (das Haus prüft sie).
+    const ueberzahlung = showOverpayChoice && effectiveOverpayChoice ? {
+      overpayChoice: effectiveOverpayChoice,
+      ...(effectiveOverpayChoice === 'refund' && refundNow ? { refundNow: { method: refundMethod, paidDate: refundDate } } : {}),
+    } : {};
 
     if (isEditMode && editInvoice) {
       // Edit-Modus: ALLES (Header + Zeilen + Inventory + Ledger-Reverse+Repost +
@@ -549,6 +587,7 @@ export function InvoiceCreate() {
             deltaPayment,
             reason,
             ...(confirmCustomerChange ? { confirmCustomerChange } : {}),
+            ...ueberzahlung,
           }, fassung);
           return {};
         },
@@ -563,19 +602,26 @@ export function InvoiceCreate() {
             ...(bulkIntents[i]!.description ? { description: bulkIntents[i]!.description } : {}),
           }) : ({
             ...(l.lineId ? { lineId: l.lineId } : {}),
+            ...(l.restOf ? { splitOf: l.restOf } : {}),
             productId: l.productId,
             lotId: computed[i]?.lotIdOut ?? null,
             quantity: l.quantity,
             unitPrice: l.unitPrice,
+            ...(computed[i]?.product ? { customerGross: computed[i].gross } : {}),
             scheme: l.scheme,
           })),
           ...(notes ? { notes } : {}),
           ...(issuedDate ? { issuedDate } : {}),
           ...(staffId ? { staffId } : {}),
           ...(confirmCustomerChange ? { confirmCustomerChange } : {}),
+          ...ueberzahlung,
         }),
       });
-      if (r.kind !== 'ok') { setError(fehlertext(r)); return; }
+      if (r.kind !== 'ok') {
+        // P1c — das Haus hat eine Überzahlung gesehen, die die Maske nicht kannte: die Wahl einblenden.
+        if (r.code === OVERPAY_CHOICE_REQUIRED) setNeedOverpayChoice(true);
+        setError(fehlertext(r)); return;
+      }
       if (thenPrint) {
         navigate(`/invoices/${editInvoice.id}?print=1`);
       } else {
@@ -766,11 +812,25 @@ export function InvoiceCreate() {
                         options={productOptions}
                         value={l.productId}
                         onChange={pid => pickProductForLine(idx, pid)}
+                        disabled={!!l.returnedQty || !!l.restOf}
                         renderPreview={id => {
                           const p = products.find(x => x.id === id);
                           return p ? <ProductHoverCard product={p} categories={categories} /> : null;
                         }}
                       />
+                      {/* MIXED-INVOICE P1c — Teilretoure: die retournierten Stücke bleiben, nur der Rest ist korrigierbar. */}
+                      {!!l.returnedQty && (
+                        <div data-invoice-line-returned={idx} title="Returned pieces keep item, price and tax — their return stays as it is."
+                          style={{ marginTop: 4, fontSize: 10, color: '#DC2626' }}>
+                          Returned {l.returnedQty}{l.kept && l.kept.qty > l.returnedQty ? ` of ${l.kept.qty}` : ''} · price and tax stay
+                        </div>
+                      )}
+                      {!!l.restOf && (
+                        <div data-invoice-line-rest={idx} title="Only the pieces that were not returned can be corrected."
+                          style={{ marginTop: 4, fontSize: 10, color: '#B45309' }}>
+                          Not returned · {l.kept?.qty ?? l.quantity} piece(s) · correctable
+                        </div>
+                      )}
                       {/* Phase 3 — Lot-Picker wenn mehrere ACTIVE Lots fuer das Produkt
                           existieren. Single-Lot bleibt unsichtbar (UX wie bisher). */}
                       {c.kept && (
@@ -811,15 +871,26 @@ export function InvoiceCreate() {
                     <span style={{ fontSize: 12, color: cat ? cat.color : '#6B7280', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {cat?.name || '—'}
                     </span>
-                    <select value={l.scheme}
-                      onChange={e => updateLine(idx, { scheme: e.target.value as Scheme })}
+                    <select value={l.scheme} data-invoice-line-scheme={idx}
+                      disabled={!!l.returnedQty}
+                      title={l.returnedQty ? 'Returned pieces keep their tax' : 'Changing the tax keeps the customer price incl. VAT'}
+                      onChange={e => {
+                        const next = e.target.value as Scheme;
+                        if (!c.product) { updateLine(idx, { scheme: next }); return; }
+                        // MIXED-INVOICE P1c — der Kundenpreis inkl. VAT bleibt; nur seine Aufteilung (Netto/VAT) folgt der
+                        // neuen Steuerart. Dieselbe Regel an Primary und PC2 (`unitNetKeepingGross`).
+                        const resolvedNext = (next === 'auto' ? (c.product.taxScheme as 'VAT_10' | 'ZERO' | 'MARGIN') : next);
+                        const rateNext = resolvedNext === 'ZERO' ? 0 : 10;
+                        updateLine(idx, { scheme: next, unitPrice: unitNetFromGross(c.gross, l.quantity, resolvedNext, rateNext) });
+                        setLineTotalDrafts(d => { const n = { ...d }; delete n[idx]; return n; });
+                      }}
                       style={{ padding: '7px 8px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 4, background: '#FFFFFF', minWidth: 0, width: '100%' }}>
                       <option value="auto">Auto ({c.product?.taxScheme || '—'})</option>
                       <option value="VAT_10">VAT 10%</option>
                       <option value="ZERO">Zero</option>
                       <option value="MARGIN">Margin</option>
                     </select>
-                    <input type="number" min={1} step="1" value={l.quantity}
+                    <input type="number" min={1} step="1" value={l.quantity} disabled={!!l.returnedQty} data-invoice-line-qty={idx}
                       onChange={e => updateLine(idx, { quantity: Math.max(1, parseInt(e.target.value) || 1) })}
                       className="font-mono"
                       style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #D5D9DE', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%' }} />
@@ -837,7 +908,7 @@ export function InvoiceCreate() {
                         <Bhd v={c.vat}/>
                       </span>
                     )}
-                    <input type="text" inputMode="decimal"
+                    <input type="text" inputMode="decimal" disabled={!!l.returnedQty} data-invoice-line-gross={idx}
                       value={lineTotalDrafts[idx] !== undefined ? lineTotalDrafts[idx] : (Number.isFinite(c.gross) ? c.gross.toFixed(2) : '0')}
                       onChange={e => {
                         const sanitized = e.target.value.replace(/,/g, '.').replace(/[^\d.]/g, '').replace(/(\..*)\./g, '$1');
@@ -850,8 +921,8 @@ export function InvoiceCreate() {
                       className="font-mono"
                       style={{ padding: '8px 10px', fontSize: 13, border: '1px solid #0F0F10', borderRadius: 4, textAlign: 'right', minWidth: 0, width: '100%', fontWeight: 600 }} />
                     <button onClick={() => removeLine(idx)}
-                        disabled={lines.length === 1}
-                        title={lines.length === 1 ? 'Mindestens eine Zeile erforderlich' : 'Diese Zeile entfernen'}
+                        disabled={lines.length === 1 || !!l.returnedQty}
+                        title={l.returnedQty ? 'Returned pieces stay on the invoice' : lines.length === 1 ? 'Mindestens eine Zeile erforderlich' : l.restOf ? 'Take the pieces not returned off the invoice' : 'Diese Zeile entfernen'}
                         className="cursor-pointer transition-all"
                         style={{
                           width: 36, height: 36, borderRadius: 10,
@@ -1116,12 +1187,57 @@ export function InvoiceCreate() {
             </>)}
             {isEditMode && (
               <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(170,149,110,0.08)', border: '1px solid rgba(170,149,110,0.3)', borderRadius: 6, fontSize: 12, color: '#7A6B4F' }}>
-                Paid so far: <strong><Bhd v={originalPaid}/> BHD</strong>. If you raise the amount, the difference is booked as a new payment. Existing payments are not overwritten — for detailed payment management use the detail page. If the new total is below the paid amount, the difference becomes customer credit.
+                Paid so far: <strong><Bhd v={originalPaid}/> BHD</strong>. If you raise the amount, the difference is booked as a new payment. Existing payments are not overwritten — for detailed payment management use the detail page. If the new total is below the paid amount, you choose below: customer credit or refund.
               </div>
             )}
-            {isEditMode && paidAmount > total + 0.005 && (
-              <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(217,119,6,0.08)', border: '1px solid rgba(217,119,6,0.35)', borderRadius: 6, fontSize: 12, color: '#B45309' }}>
-                The paid amount exceeds the new total. The difference (<strong><Bhd v={paidAmount - total}/> BHD</strong>) will be converted into customer credit.
+            {/* MIXED-INVOICE P1c — Pflichtwahl bei Überzahlung: Guthaben ODER Rückzahlung (offener Anspruch bis zur Auszahlung). */}
+            {showOverpayChoice && (
+              <div data-invoice-overpay-choice
+                style={{ marginTop: 12, padding: '12px 14px', background: 'rgba(217,119,6,0.06)', border: '1px solid rgba(217,119,6,0.35)', borderRadius: 8, fontSize: 12, color: '#92400E' }}>
+                <div style={{ fontWeight: 600 }}>
+                  {overpaidBy > 0.0005 ? <>The invoice is overpaid by <Bhd v={overpaidBy}/> BHD.</> : 'This change leaves the invoice overpaid.'} Choose what happens with it — one of the two, never both:
+                </div>
+                <label className="flex items-center gap-2 cursor-pointer" style={{ marginTop: 8 }}>
+                  <input type="radio" name="invoice-overpay" checked={effectiveOverpayChoice === 'credit'}
+                    onChange={() => { setOverpayChoice('credit'); setRefundNow(false); }} data-invoice-overpay="credit" />
+                  <span>Keep as <strong>customer credit</strong> — usable on later purchases</span>
+                </label>
+                <label className="flex items-center gap-2 cursor-pointer" style={{ marginTop: 6 }}>
+                  <input type="radio" name="invoice-overpay" checked={effectiveOverpayChoice === 'refund'}
+                    onChange={() => setOverpayChoice('refund')} data-invoice-overpay="refund" />
+                  <span><strong>Refund</strong> to the customer</span>
+                </label>
+                {effectiveOverpayChoice === 'refund' && (
+                  <div style={{ marginLeft: 22, marginTop: 8, padding: '10px 12px', border: '1px solid #E5E9EE', borderRadius: 8, background: '#FFFFFF', color: '#4B5563' }}>
+                    <label className="flex items-center gap-2 cursor-pointer">
+                      <input type="checkbox" checked={refundNow} onChange={e => setRefundNow(e.target.checked)} data-invoice-refund-now />
+                      <span>Paid out now (with method and date)</span>
+                    </label>
+                    {refundNow ? (
+                      <div className="flex gap-3 items-end" style={{ marginTop: 8, flexWrap: 'wrap' }}>
+                        <div className="flex gap-2">
+                          {REFUND_PAYOUT_METHODS.map(m => {
+                            const on = refundMethod === m;
+                            return (
+                              <button key={m} type="button" onClick={() => setRefundMethod(m)} data-invoice-refund-method={m}
+                                className="cursor-pointer rounded"
+                                style={{ padding: '7px 14px', fontSize: 12, border: `1px solid ${on ? '#0F0F10' : '#D5D9DE'}`,
+                                  color: on ? '#0F0F10' : '#6B7280', background: on ? 'rgba(15,15,16,0.06)' : 'transparent' }}>
+                                {m === 'cash' ? 'Cash' : m === 'bank' ? 'Bank' : 'Benefit'}
+                              </button>
+                            );
+                          })}
+                        </div>
+                        <Input label="PAID OUT ON" type="date" min={issuedDate} max={latestBusinessDate()}
+                          value={refundDate} onChange={e => setRefundDate(e.target.value)} data-invoice-refund-date />
+                      </div>
+                    ) : (
+                      <div style={{ marginTop: 6, fontSize: 11 }} data-invoice-refund-claim-note>
+                        Stays an <strong>open refund owed</strong> to the customer until it is paid out (“Record refund” on the invoice). No cash or bank booking before that.
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
             )}
             <div style={{ marginTop: 16, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16 }}>

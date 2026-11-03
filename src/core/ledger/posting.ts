@@ -172,6 +172,10 @@ export type SourceModule =
   // „Refund Credit" (reverseSource SUPPLIER_PREPAYMENT), nur als eigener, teilbarer Beleg mit Tag und Weg.
   // Gekeyt auf supplier_credit_refunds.id.
   | 'SUPPLIER_CREDIT_REFUND'
+  // MIXED-INVOICE P1c — die tatsächliche Auszahlung auf einen offenen Rückzahlungsanspruch eines Kunden (Überzahlung
+  // nach einer Rechnungskorrektur, Wahl „Refund"): DR CUSTOMER_CREDIT / CR CASH|BANK|BENEFIT am Tag der Auszahlung.
+  // Spiegel von SUPPLIER_CREDIT_REFUND. Gekeyt auf customer_credit_refunds.id.
+  | 'CUSTOMER_CREDIT_REFUND'
   // M-12 Phase 1 — Opening-Balance-Seed aus settings.finance.opening_*. Idempotent
   // gekeyt auf `opening:<branchId>`.
   | 'OPENING_BALANCE'
@@ -2105,6 +2109,40 @@ export function postSupplierCreditRefund(
       },
     ],
     { occurredAt, sourceModule: 'SUPPLIER_CREDIT_REFUND', sourceId: refundId }
+  );
+}
+
+// MIXED-INVOICE P1c — Geld geht an einen Kunden auf seinen offenen Rückzahlungsanspruch hinaus:
+//   DR CUSTOMER_CREDIT   (der Anspruch sinkt um genau diesen Betrag)
+//   CR CASH|BANK|BENEFIT (das Geld verlässt Kasse/Bank tatsächlich, am Tag der Auszahlung)
+// Der Anspruch selbst entstand ohne Geldfluss (DR AR / CR CUSTOMER_CREDIT, `postInvoiceOverpaymentCredit`); erst
+// hier bewegt sich Kasse/Bank. Kein AR, kein Erlös, kein VAT. sourceId = customer_credit_refunds.id.
+export function postCustomerCreditRefund(
+  refundId: string,
+  customerId: string,
+  amount: number,
+  method: 'cash' | 'bank' | 'benefit',
+  occurredAt: string,
+  meta: { creditId: string; invoiceId?: string | null },
+): PostingResult {
+  const amt = ROUND(amount);
+  if (amt <= 0) {
+    throw new Error(`postCustomerCreditRefund: amount must be > 0 (got ${amount})`);
+  }
+  const cashAcc = expenseCashAccountFor(method);
+  const metadata = { creditId: meta.creditId, ...(meta.invoiceId ? { invoiceId: meta.invoiceId } : {}), kind: 'customer_credit_refund' };
+  return postEntries(
+    [
+      {
+        account: 'CUSTOMER_CREDIT', direction: 'DEBIT', amount: amt,
+        counterpartyType: 'CUSTOMER', counterpartyId: customerId, metadata,
+      },
+      {
+        account: cashAcc, direction: 'CREDIT', amount: amt,
+        counterpartyType: 'CUSTOMER', counterpartyId: customerId, metadata,
+      },
+    ],
+    { occurredAt, sourceModule: 'CUSTOMER_CREDIT_REFUND', sourceId: refundId }
   );
 }
 

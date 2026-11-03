@@ -339,6 +339,8 @@ const SOURCE_TABLE_MAP: Record<string, string> = {
   COST_CORRECTION: 'cost_corrections',
   // CONSIGNMENT D3 — sourceId = supplier_credit_refunds.id (ein Geldeingang auf eine Rückforderung).
   SUPPLIER_CREDIT_REFUND: 'supplier_credit_refunds',
+  // MIXED-INVOICE P1c — sourceId = customer_credit_refunds.id (eine Auszahlung auf einen Rückzahlungsanspruch).
+  CUSTOMER_CREDIT_REFUND: 'customer_credit_refunds',
 };
 
 function loadOrphans(branchId: string): Orphan[] {

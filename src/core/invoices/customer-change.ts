@@ -160,7 +160,7 @@ export function planCustomerChange(
   const activeCn = cnRows.filter((r) => String(r.status ?? 'ISSUED') !== 'CANCELLED');
   const returnRows = query('SELECT id, status FROM sales_returns WHERE invoice_id = ?', [invoiceId]);
   const creditRows = query(
-    `SELECT id, amount, used_amount, source_type FROM customer_credits
+    `SELECT id, amount, used_amount, source_type, status FROM customer_credits
       WHERE (source_type = 'overpayment' AND source_id IN (SELECT id FROM payments WHERE invoice_id = ?))
          OR (source_type = 'sales_return' AND source_id IN (SELECT id FROM credit_notes WHERE invoice_id = ?))
          OR (source_type = 'invoice_edit' AND source_id = ?)`,
@@ -213,6 +213,12 @@ export function planCustomerChange(
     const apps = query('SELECT payment_id, amount FROM credit_applications WHERE credit_id = ?', [String(c.id)]);
     const onThis = apps.filter((a) => paymentIds.has(String(a.payment_id))).reduce((s, a) => s + (Number(a.amount) || 0), 0);
     const used = Number(c.used_amount) || 0;
+    // MIXED-INVOICE P1c — auf einen Rückzahlungsanspruch dieser Rechnung ist schon Geld an den Kunden ausgezahlt.
+    if ((String(c.status) === 'REFUND_DUE' || String(c.status) === 'REFUNDED') && used > 0.005) {
+      throw new InvoiceActionRejected(CUSTOMER_CHANGE_CREDIT_USED_ELSEWHERE,
+        `The customer cannot be changed: a refund from this invoice was already paid out to ${customerName(from)}. `
+        + 'That money really went to them — handle this case separately.');
+    }
     if (apps.some((a) => !paymentIds.has(String(a.payment_id))) || used > onThis + 0.005) {
       throw new InvoiceActionRejected(CUSTOMER_CHANGE_CREDIT_USED_ELSEWHERE,
         `The customer cannot be changed: store credit from this invoice was already used by ${customerName(from)} for something else. `
