@@ -249,8 +249,9 @@ fn an_unknown_category_yields_no_attributes_at_all() {
 // keys are believed. A repair intake sits next to money (a cost estimate, a deposit) and next to
 // customer data, so everything outside those six is dropped rather than "ignored downstream".
 
-const REPAIR_SIX: [&str; 6] = [
-    "itemBrand", "itemModel", "itemReference", "itemSerial", "itemDescription", "issueDescription",
+// HOTFIX F3 — the seventh: `itemCategory` (a category name; the phone adopts only an exact match).
+const REPAIR_SIX: [&str; 7] = [
+    "itemBrand", "itemModel", "itemReference", "itemSerial", "itemDescription", "issueDescription", "itemCategory",
 ];
 
 fn hostile_repair_answer() -> serde_json::Value {
@@ -261,6 +262,7 @@ fn hostile_repair_answer() -> serde_json::Value {
         "itemSerial": "  7K5N2X1  ",
         "itemDescription": "Steel diver's watch on an Oyster bracelet",
         "issueDescription": "Cracked crystal at 3 o'clock, bezel does not turn",
+        "itemCategory": "Watch",
         // Everything below is what the model volunteers and the repair form must never adopt.
         "estimatedCost": 180,
         "repairCost": "180 BHD",

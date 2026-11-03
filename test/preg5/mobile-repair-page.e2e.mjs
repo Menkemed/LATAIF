@@ -81,6 +81,9 @@ ${helferResize}
 ${helferFolds}
 foldsWire();
 var idbReq = function (req) { return new Promise(function (res, rej) { req.onsuccess = function () { res(req.result); }; req.onerror = function () { rej(req.error); }; }); };
+// HOTFIX F3 — das Feldschema wie auf der echten Seite (window.__MOBILE_FIELD_SCHEMA__ → SCHEMA).
+window.__MOBILE_FIELD_SCHEMA__ = ${readFileSync(join(repo, 'src-tauri/src/sync/mobile_field_schema.json'), 'utf8')};
+var SCHEMA = window.__MOBILE_FIELD_SCHEMA__;
 var echtesFetch = window.fetch.bind(window);
 window.fetch = function (u, o) { window.__PROTOKOLL.push('fetch ' + u); return echtesFetch(u, o); };
 `;
@@ -676,6 +679,72 @@ try {
     const rechnung = gesehen.filter((g) => g.body && g.body.op === 'repairs.create_invoice');
     ok(leer.value === '' && leer.max === tag(1) && rechnung.length === 1 && rechnung[0].body.payload.invoiceDate === tag(-1),
       `§6 Rechnungsdatum: beim Öffnen leer, gewählter Tag reist im Auftrag (${S(leer)} ${S(rechnung[0] && rechnung[0].body.payload)})`);
+  }
+
+  // ── §F3 HOTFIX — Kategorie: Auswahl aus dem Feldschema, die AI wählt nur eine eindeutige ─────────
+  {
+    let aiAntwort = { itemBrand: 'Rolex', itemModel: 'Datejust', itemCategory: 'Watch' };
+    antwortGeber = (u, body) => {
+      if (String(u).includes('/api/ai/identify')) return { status: 200, body: { result: { fields: aiAntwort } } };
+      if (/staging/.test(u)) return { status: 201, body: { stagingId: 'b'.repeat(64) } };
+      const op = body && body.op;
+      if (op === 'customers.create') return { status: 200, body: { ok: true, value: { customerId: 'c-f3', name: 'F3 Kunde' } } };
+      if (op === 'repairs.create') return { status: 200, body: { ok: true, value: { repairId: 'rep-f3', repairNumber: 'REP-2026-00093' } } };
+      if (op === 'repairs.get') {
+        return { status: 200, body: { ok: true, value: { id: 'rep-f3', repairNumber: 'REP-2026-00093', revision: 1, status: 'received', issueDescription: 'Krone lose',
+          itemCategoryId: 'cat-accessory', notes: '', repairType: 'internal', actualCost: null, chargeToCustomer: null, receivedAt: '2026-08-15T12:00:00.000Z',
+          images: [], lines: [], openLineTotal: 0, allowedStatusTargets: ['diagnosed'] } } };
+      }
+      return { status: 200, body: { ok: true, value: { items: [] } } };
+    };
+    await c.ev("window.__rpHomeOpen(); return 1;"); await sleep(400);
+    await c.ev("document.getElementById('rpNewBtn').click(); return 1;"); await sleep(400);
+    const opts = await c.ev("return Array.from(document.getElementById('rpCategory').options).map((o) => o.value);");
+    ok(opts[0] === '' && opts.slice(1).join(',') === 'cat-watch,cat-gold-jewelry,cat-branded-gold-jewelry,cat-original-gold-jewelry,cat-accessory,cat-spare-part',
+      `§F3 Kategorie-Auswahl: leer + die sechs Kategorien des Feldschemas (${S(opts)})`);
+    const foto = async () => c.ev(`
+      const c2 = document.createElement('canvas'); c2.width = 40; c2.height = 30;
+      const x = c2.getContext('2d'); x.fillStyle = '#3a6'; x.fillRect(0, 0, 40, 30);
+      const blob = await (await fetch(c2.toDataURL('image/jpeg', 0.9))).blob();
+      const dt = new DataTransfer(); dt.items.add(new File([blob], 'ai.jpg', { type: 'image/jpeg' }));
+      const inp = document.getElementById('rpPhotoInput'); inp.files = dt.files; inp.dispatchEvent(new Event('change', { bubbles: true }));
+      return 1;`);
+    await foto();
+    for (let i = 0; i < 30; i++) { if (!(await c.ev("return document.getElementById('rpAiBtn').classList.contains('hidden');"))) break; await sleep(200); }
+    gesehen.length = 0;
+    await c.ev("document.getElementById('rpAiBtn').click(); return 1;");
+    for (let i = 0; i < 30; i++) { if (await c.ev("return document.getElementById('rpCategory').value === 'cat-watch';")) break; await sleep(200); }
+    const nachAi = await c.ev("return { cat: document.getElementById('rpCategory').value, brand: document.getElementById('rpBrand').value, msg: document.getElementById('rpAiMsg').textContent };");
+    const aiRumpf = (gesehen.find((g) => String(g.url).includes('/api/ai/identify')) || {}).body || {};
+    ok(nachAi.cat === 'cat-watch' && nachAi.brand === 'Rolex', `§F3 AI erkennt „Watch" eindeutig → Kategorie Watch gewählt (${S(nachAi)})`);
+    ok(/Categories: Watch \| Gold-Diamond Jewellery \| Branded Gold Jewelry/.test(String(aiRumpf.hints || '')),
+      `§F3 die AI bekommt die erlaubten Kategorienamen als Hinweis (${S(aiRumpf.hints)})`);
+    // Eine manuelle Wahl bleibt; eine unklare Antwort setzt nichts.
+    await c.ev("document.getElementById('rpCategory').value = 'cat-accessory'; return 1;");
+    aiAntwort = { itemCategory: 'Watch' };
+    await c.ev("document.getElementById('rpAiBtn').click(); return 1;"); await sleep(900);
+    ok(await c.ev("return document.getElementById('rpCategory').value;") === 'cat-accessory', '§F3 eine gewählte Kategorie überschreibt die AI nicht');
+    // Speichern: die MANUELL gewählte Kategorie reist mit dem Anlagebefehl; die gespeicherte steht danach in der Maske.
+    await c.ev("document.getElementById('rpCustomerFirst').value='F3'; document.getElementById('rpCustomerLast').value='Kunde'; document.getElementById('rpCustomerCreateBtn').click(); return 1;");
+    await sleep(800);
+    gesehen.length = 0;
+    await c.ev("document.getElementById('rpIssue').value='Krone lose'; document.getElementById('rpSaveBtn').click(); return 1;");
+    for (let i = 0; i < 40; i++) { if (gesehen.some((g) => g.body && g.body.op === 'repairs.create')) break; await sleep(250); }
+    await sleep(800);
+    const anlageF3 = gesehen.filter((g) => g.body && g.body.op === 'repairs.create');
+    ok(anlageF3.length === 1 && anlageF3[0].body.payload.itemCategoryId === 'cat-accessory',
+      `§F3 Speichern: die manuell gewählte Kategorie reist mit (nicht die der AI) (${S(anlageF3[0] && anlageF3[0].body.payload.itemCategoryId)})`);
+    ok(await c.ev("return document.getElementById('rpCategory').value;") === 'cat-accessory', '§F3 nach dem Speichern zeigt die Maske die gespeicherte Kategorie');
+    // Neue Erfassung: eine unklare Antwort setzt nichts.
+    await c.ev("window.__rpHomeOpen(); return 1;"); await sleep(400);
+    await c.ev("document.getElementById('rpNewBtn').click(); return 1;"); await sleep(400);
+    await foto();
+    for (let i = 0; i < 30; i++) { if (!(await c.ev("return document.getElementById('rpAiBtn').classList.contains('hidden');"))) break; await sleep(200); }
+    aiAntwort = { itemCategory: 'Gold' };
+    await c.ev("document.getElementById('rpAiBtn').click(); return 1;"); await sleep(900);
+    ok(await c.ev("return document.getElementById('rpCategory').value;") === '', '§F3 unklare Antwort („Gold" passt auf keine Kategorie genau): keine erzwungene Kategorie');
+    const protokollF3 = await c.ev('return (window.__PROTOKOLL || []).filter((x) => !/^fetch /.test(x));');
+    ok(protokollF3.length === 0, `§F3 kein Seitenfehler (${S(protokollF3.slice(0, 2))})`);
   }
 } catch (e) {
   FAIL++; fails.push('ABBRUCH: ' + String(e && e.stack ? e.stack : e));

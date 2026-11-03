@@ -17,7 +17,8 @@ use super::*;
 /// STONES — was `99b2eeedc75bb347`; the stone list instead of diamond_weight moved it once and deliberately.
 /// PLATINUM — was `ba9af9c515fa5ce1`; „Platinum" in the three jewellery notes moved it once and deliberately.
 /// PENDANT — was `19086db5c0a21ce1`; removing „Pendant" from the jewellery lists (a pendant is Necklace) moved it once and deliberately.
-const EXPECTED_FINGERPRINT: &str = "f7bb796b6a5919cc";
+/// HOTFIX F3 — was `f7bb796b6a5919cc`; the repair field `itemCategory` moved it once and deliberately.
+const EXPECTED_FINGERPRINT: &str = "9249873edc8ae371";
 
 #[test]
 fn rust_and_typescript_assemble_the_identical_prompts() {
@@ -119,13 +120,15 @@ fn money_quantity_and_system_fields_are_denied_for_mobile() {
 
 /// The six names are repeated here on purpose: if someone widens the contract's list, this test is
 /// the thing that has to be edited too, in the open.
-const REPAIR_SIX: [&str; 6] = [
+/// HOTFIX F3 — the seventh: `itemCategory`, one name out of the category list the phone sends as a hint.
+const REPAIR_SIX: [&str; 7] = [
     "itemBrand",
     "itemModel",
     "itemReference",
     "itemSerial",
     "itemDescription",
     "issueDescription",
+    "itemCategory",
 ];
 
 /// The sentence that refuses invention. Written without its leading "Never"/"never" so the same

@@ -40,6 +40,7 @@
     itemReference: 'rpReference', itemSerial: 'rpSerial', itemDescription: 'rpItemDescription',
     estimatedCost: 'rpEstimatedCost', chargeToCustomer: 'rpChargeToCustomer',
     estimatedReady: 'rpEstimatedReady', diagnosis: 'rpDiagnosis', notes: 'rpNotes',
+    itemCategoryId: 'rpCategory',
   };
   // `slots` sind die Bilder in der Reihenfolge, die der Benutzer sieht: entweder ein GESPEICHERTES
   // (`keep` = sein Platz in der gespeicherten Liste) oder ein NEUES (Daten-URL, spaeter eine
@@ -52,7 +53,26 @@
     return f;
   }
   function rpFillForm(v) {
+    rpKategorien(v ? v.itemCategoryId : null);
     for (const k in RP_INPUTS) $(RP_INPUTS[k]).value = (v && v[k] !== null && v[k] !== undefined) ? String(v[k]) : '';
+  }
+  /**
+   * HOTFIX F3 — die Auswahl der Kategorie: die bestehenden Kategorien des Hauses (dasselbe Feldschema wie die
+   * Kollektion). Traegt eine gespeicherte Reparatur eine Kategorie, die hier nicht steht, bleibt sie als eigener
+   * Eintrag waehlbar — sonst wuerde das Speichern sie still leeren.
+   */
+  function rpKategorieListe() {
+    return (typeof SCHEMA !== 'undefined' && SCHEMA && Array.isArray(SCHEMA.categories)) ? SCHEMA.categories : [];
+  }
+  function rpKategorien(behalten) {
+    const sel = $('rpCategory');
+    if (!sel) return;
+    sel.innerHTML = '';
+    sel.appendChild(el('option', { value: '' }, 'Category — choose…'));
+    const liste = rpKategorieListe();
+    for (const c of liste) sel.appendChild(el('option', { value: c.id }, c.name));
+    const id = behalten ? String(behalten) : '';
+    if (id && !liste.some((c) => c.id === id)) sel.appendChild(el('option', { value: id }, id));
   }
   /**
    * BUSINESS-DATE — der Tag der Annahme. Beim Erfassen heute vorbelegt und waehlbar (rueckdatierbar,
@@ -841,7 +861,9 @@
           kind: 'repair',
           category_id: 'repair',
           image: image,
-          hints: [$('rpBrand').value, $('rpModel').value].filter(Boolean).join(' ').trim() || null,
+          // HOTFIX F3 — dazu die erlaubten Kategorienamen: die AI nennt genau einen oder keinen (`itemCategory`).
+          hints: [[$('rpBrand').value, $('rpModel').value].filter(Boolean).join(' ').trim(), MobileRepair.categoryHint(rpKategorieListe())]
+            .filter(Boolean).join('\n') || null,
         }),
       });
       const data = await res.json().catch(() => ({}));
@@ -849,7 +871,7 @@
         rpSay('rpAiMsg', data.error ? String(data.error) : ('Identify failed (' + res.status + ').'), false);
       } else {
         const form = rpFormValues();
-        const filled = MobileRepair.applyAiSuggestions(form, data.result || {});
+        const filled = MobileRepair.applyAiSuggestions(form, data.result || {}, rpKategorieListe());
         rpFillForm(form);
         rpSay('rpAiMsg', filled
           ? ('Filled ' + filled + ' empty field' + (filled === 1 ? '' : 's') + ' — please check before saving.')

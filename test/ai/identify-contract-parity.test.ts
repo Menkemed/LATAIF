@@ -155,11 +155,14 @@ for (const id of knownCategoryIds()) {
 // here is its closed shape: exactly six fields, both prompts naming all of them, the intake framing,
 // and the refusal to invent money, customer data, ids, status or dates.
 {
-  const SIX = ['itemBrand', 'itemModel', 'itemReference', 'itemSerial', 'itemDescription', 'issueDescription'];
+  // HOTFIX F3 — dazu `itemCategory`: ein Name aus der mitgeschickten Kategorieliste (das Telefon nimmt nur einen exakten Treffer).
+  const SIX = ['itemBrand', 'itemModel', 'itemReference', 'itemSerial', 'itemDescription', 'issueDescription', 'itemCategory'];
   const FORBID = 'invent, estimate or output prices, costs, repair estimates, customer data, ids, record numbers, status values or dates';
 
   ok(JSON.stringify([...REPAIR_FIELDS]) === JSON.stringify(SIX),
-    `§1 the repair form declares exactly the six allowed fields (got ${[...REPAIR_FIELDS].join(',')})`);
+    `§1 the repair form declares exactly the seven allowed fields (got ${[...REPAIR_FIELDS].join(',')})`);
+  ok(/itemCategory — the kind of piece: EXACTLY one of the names listed after "Categories:"/.test(buildRepairSystemPrompt()),
+    '§1 itemCategory: only a name from the given category list, otherwise null');
   ok(!knownCategoryIds().includes('repair') && knownCategoryIds().length === 6,
     '§1 the repair form is NOT a product category — knownCategoryIds() stays product-only');
   ok(categorySpec('repair') === null, '§1 repair does not resolve as a category spec');
@@ -170,7 +173,7 @@ for (const id of knownCategoryIds()) {
   for (const [label, p] of [['system', sys], ['user', plain], ['user-hints', hinted]] as const) {
     ok(p.length > 0, `§2 the repair ${label} prompt assembles`);
     ok(!/\{\{[A-Z_]+\}\}/.test(p), `§2 the repair ${label} prompt resolves every placeholder`);
-    ok(SIX.every(f => p.includes(f)), `§2 the repair ${label} prompt names all six fields`);
+    ok(SIX.every(f => p.includes(f)), `§2 the repair ${label} prompt names all seven fields`);
     ok(p.includes('REPAIR INTAKE'), `§2 the repair ${label} prompt states it is a repair intake photo`);
     ok(p.includes(FORBID), `§2 the repair ${label} prompt forbids invented money/customer/ids/dates`);
   }
@@ -222,7 +225,8 @@ for (const id of knownCategoryIds()) {
   // STONES — war 99b2eeedc75bb347; die Steinliste statt diamond_weight hat ihn einmal und bewusst bewegt.
   // PLATINUM — war ba9af9c515fa5ce1; „Platinum" in den drei Schmuck-Hinweisen hat ihn einmal und bewusst bewegt.
   // PENDANT — war 19086db5c0a21ce1; „Pendant" aus den Schmuck-Listen (ein Anhänger ist Necklace) hat ihn einmal und bewusst bewegt.
-  const EXPECTED_FINGERPRINT = 'f7bb796b6a5919cc';
+  // HOTFIX F3 — war f7bb796b6a5919cc; das Reparaturfeld `itemCategory` hat ihn einmal und bewusst bewegt.
+  const EXPECTED_FINGERPRINT = '9249873edc8ae371';
   ok(contractFingerprint() === EXPECTED_FINGERPRINT,
     `the TypeScript fingerprint matches the Rust EXPECTED_FINGERPRINT (got ${contractFingerprint()})`);
   ok(/^[0-9a-f]{16}$/.test(contractFingerprint()), 'the contract fingerprint is a 16-hex-digit value');

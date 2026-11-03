@@ -35,6 +35,8 @@
     // BUSINESS-DATE — der Tag der Annahme (JJJJ-MM-TT). Die Maske schreibt ihn IMMER aus, auch „heute":
     // der Rumpf liegt mit seiner Kennung in der Ablage, eine Wiederholung traegt also denselben Tag.
     'receivedAt',
+    // HOTFIX F3 — die Kategorie der Ware (eine bestehende Kategorie-ID; der Primary prueft sie wie am Rechner).
+    'itemCategoryId',
   ];
 
   // Und die Felder einer Aenderung (Teilmenge von REPAIR_EDIT_INPUTS). Der Primary mischt sie
@@ -42,7 +44,7 @@
   const EDIT_FIELDS = [
     'diagnosis', 'estimatedCost', 'actualCost', 'chargeToCustomer', 'repairType',
     'workshopSupplierId', 'estimatedReady', 'notes', 'itemBrand', 'itemModel', 'itemReference',
-    'itemSerial', 'itemDescription', 'issueDescription',
+    'itemSerial', 'itemDescription', 'issueDescription', 'itemCategoryId',
   ];
 
   // Was die AI vorschlagen darf — beschreibende Felder der Ware und das Problem. Kein Geld, keine
@@ -258,7 +260,7 @@
    * getippt hat, bleibt stehen; gespeichert wird nichts. Gibt die Zahl der gefuellten Felder
    * zurueck.
    */
-  function applyAiSuggestions(form, suggestion) {
+  function applyAiSuggestions(form, suggestion, categories) {
     let filled = 0;
     const src = (suggestion && (suggestion.fields || suggestion)) || {};
     for (const k of AI_FIELDS) {
@@ -268,7 +270,34 @@
       form[k] = v;
       filled += 1;
     }
+    // HOTFIX F3 — die Kategorie nur in eine LEERE Auswahl und nur, wenn die AI genau eine bestehende nennt.
+    if (textOrNull(form.itemCategoryId) === null) {
+      const cid = aiCategoryId(src, categories);
+      if (cid !== null) { form.itemCategoryId = cid; filled += 1; }
+    }
     return filled;
+  }
+
+  /**
+   * HOTFIX F3 — die Kategorie aus der AI-Antwort (`itemCategory`, ein Kategoriename): nur wenn sie GENAU einer bestehenden
+   * Kategorie entspricht (Gross/Klein und Leerzeichen egal) — dann deren ID. Sonst null: lieber leer als falsch.
+   */
+  function aiCategoryId(suggestion, categories) {
+    const src = (suggestion && (suggestion.fields || suggestion)) || {};
+    const name = textOrNull(src.itemCategory);
+    if (name === null) return null;
+    const norm = function (s) { return String(s).toLowerCase().replace(/\s+/g, ' ').trim(); };
+    const hits = (Array.isArray(categories) ? categories : []).filter(function (c) {
+      return c && typeof c.id === 'string' && c.id && norm(c.name || '') === norm(name);
+    });
+    return hits.length === 1 ? hits[0].id : null;
+  }
+
+  /** HOTFIX F3 — der Hinweis an die AI: die erlaubten Kategorienamen (sie antwortet mit genau einem oder null). */
+  function categoryHint(categories) {
+    const names = (Array.isArray(categories) ? categories : []).map(function (c) { return textOrNull(c && c.name); })
+      .filter(function (n) { return n !== null; });
+    return names.length ? ('Categories: ' + names.join(' | ')) : '';
   }
 
   // ── Werkstattwege: Arbeitszeile, Storno, Material, Gold, Rechnung ───────────────────────────
@@ -561,6 +590,8 @@
     goldBody: goldBody,
     invoiceBody: invoiceBody,
     applyAiSuggestions: applyAiSuggestions,
+    aiCategoryId: aiCategoryId,
+    categoryHint: categoryHint,
     classify: classify,
     createClient: createClient,
   };
