@@ -2493,22 +2493,9 @@ function runMigrations(database: Database): void {
     // nichts wird deshalb gesperrt oder umgedeutet.
     `ALTER TABLE purchase_lines ADD COLUMN created_product INTEGER`,
     // B6 — der Auto-Einkauf beim Einlieferer kennt seine Kommission als Spalte, nicht nur im frei
-    // bearbeitbaren Vermerk. Bestand: einmalig aus dem Vermerk (dieselbe Suche wie die Kommissionsumkehr,
-    // dazu der Artikel der Zeile; bei mehreren Treffern die längste Nummer). Läuft bei jedem Start, ändert
-    // aber nur Zeilen ohne Wert.
+    // bearbeitbaren Vermerk. Der Nachtrag für den Bestand steht HINTER `purchase_lines.source_consignment_id`
+    // (CONSIGNOR-JOINT-PURCHASE, weiter unten), weil er die Kommission der Zeilen kennen muss.
     `ALTER TABLE purchases ADD COLUMN source_consignment_id TEXT`,
-    `UPDATE purchases SET source_consignment_id = (
-        SELECT c.id FROM consignments c
-         WHERE c.branch_id = purchases.branch_id
-           AND purchases.notes LIKE '%' || c.consignment_number || '%'
-           AND EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = purchases.id AND pl.product_id = c.product_id)
-         ORDER BY LENGTH(c.consignment_number) DESC, c.id LIMIT 1)
-      WHERE source_consignment_id IS NULL AND notes LIKE 'Consignor payout%'
-        AND EXISTS (
-          SELECT 1 FROM consignments c
-           WHERE c.branch_id = purchases.branch_id
-             AND purchases.notes LIKE '%' || c.consignment_number || '%'
-             AND EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = purchases.id AND pl.product_id = c.product_id))`,
     // D14 — eine falsch erfasste Zahlung wird storniert, nicht gelöscht: die Zeile bleibt mit Betrag, Weg und
     // Datum stehen, trägt ihren Storno (wann, wer, warum), und ihre Buchung ist gegengebucht.
     `ALTER TABLE purchase_payments ADD COLUMN voided_at TEXT`,
@@ -2597,6 +2584,32 @@ function runMigrations(database: Database): void {
     // Zeile je Artikel an; jede Zeile nennt ihre Kommission. Bestehende Einkäufe bleiben unberührt: ihre Zeilen haben NULL,
     // und die Suche fällt dort auf `purchases.source_consignment_id` zurück (ein Einkauf je Kommission, wie bisher).
     `ALTER TABLE purchase_lines ADD COLUMN source_consignment_id TEXT`,
+    // B6 (HOTFIX v0.8.97) — der Nachtrag der Kopfspalte, nur wo der Einkauf GENAU EINER Kommission gehört. Vorher nahm er aus
+    // dem Vermerk eines GEMEINSAMEN Einkaufs (mehrere Kommissionen desselben Einlieferers, die Kommission an der Zeile, der Kopf
+    // bewusst leer) bei jedem Start irgendeine Kommission — dann sahen Einlieferer-Seite, Rückforderung und Wiederfinden nur
+    // noch sie. Jetzt:
+    //   • nennen die Zeilen ihre Kommission: der Kopf nur, wenn alle Zeilen dieselbe EINE nennen (mehrere → bleibt leer);
+    //   • Altbestand ohne Zeilen-Kommission: der Vermerk mit dem Artikel der Zeile, nur bei GENAU EINER passenden Kommission —
+    //     die längere Nummer nur dann, wenn die kürzere bloß in ihr steckt (CON-1 in „CON-10"), sonst nichts geraten.
+    // Ein gesetzter Kopf wird nie angefasst (keine automatische Reparatur), und geändert wird nur, was einen Wert bekommt
+    // (keine neue Fassung bei jedem Start). Eine Anweisung — sie wirkt ganz oder gar nicht.
+    `WITH b6_ziel AS (
+       SELECT p.id AS pid, CASE
+         WHEN EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.source_consignment_id IS NOT NULL)
+           THEN (SELECT CASE WHEN COUNT(DISTINCT pl.source_consignment_id) = 1 THEN MIN(pl.source_consignment_id) END
+                   FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.source_consignment_id IS NOT NULL)
+         ELSE (SELECT CASE WHEN COUNT(*) = 1 THEN MIN(c.id) END FROM consignments c
+                WHERE c.branch_id = p.branch_id AND p.notes LIKE '%' || c.consignment_number || '%'
+                  AND EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.product_id = c.product_id)
+                  AND NOT EXISTS (SELECT 1 FROM consignments d
+                        WHERE d.id != c.id AND d.branch_id = p.branch_id AND p.notes LIKE '%' || d.consignment_number || '%'
+                          AND d.consignment_number LIKE '%' || c.consignment_number || '%'
+                          AND EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.product_id = d.product_id)))
+       END AS cid
+       FROM purchases p
+       WHERE p.source_consignment_id IS NULL AND p.notes LIKE 'Consignor payout%')
+     UPDATE purchases SET source_consignment_id = (SELECT cid FROM b6_ziel WHERE b6_ziel.pid = purchases.id)
+      WHERE id IN (SELECT pid FROM b6_ziel WHERE cid IS NOT NULL)`,
     // REPAIR-PICKUP-DATE — `picked_up_at` ist der TATSÄCHLICHE Tag der Abholung (gewählt, Standard heute), dieser der
     // Zeitpunkt der ERFASSUNG im ERP. Bestehende Abholungen: NULL (bei ihnen war beides dasselbe Klickdatum).
     `ALTER TABLE repairs ADD COLUMN picked_up_recorded_at TEXT`,
