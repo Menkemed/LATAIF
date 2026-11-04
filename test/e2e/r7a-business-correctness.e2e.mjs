@@ -655,7 +655,10 @@ async function nummerWahl(c, sonder) {
 async function fotoWaehlen(c, file) {
   await c.send('DOM.enable', {});
   const { root } = await c.send('DOM.getDocument', { depth: -1 });
-  const { nodeIds } = await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"]' });
+  // Seit f1ae493e (v0.8.87) trägt ImageUpload ein zweites, verstecktes Feld zum ERSETZEN eines Platzes (ohne `multiple`,
+  // es steht zuletzt): ein Foto dort ohne gewählten Platz wird verworfen. Hinzufügen geht über das Feld mit `multiple`.
+  const hinzu = await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"][multiple]' });
+  const { nodeIds } = hinzu.nodeIds?.length ? hinzu : await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"]' });
   if (!nodeIds || nodeIds.length === 0) return 'KEIN-FELD';
   await c.send('DOM.setFileInputFiles', { files: [file], nodeId: nodeIds[nodeIds.length - 1] });
   return 'OK';
@@ -1164,8 +1167,10 @@ try {
     speichern: (c) => klick(c, '[data-production-save]'),
     fertig: (x, v) => neueZeilen('production_records', v.recs).length === 1 && zeile('products', IN1(x)).stock_status === 'consumed',
     zu: () => `!${q('[data-production-save]')}`,
-    keys: ['inputProductIds', 'laborCost', 'notes', 'outputs', 'overheadCost'],
+    // Seit f5ffef1f (v0.8.72) trägt der Rumpf das gewählte Fertigungsdatum (Vorgabe: heute).
+    keys: ['inputProductIds', 'laborCost', 'notes', 'outputs', 'overheadCost', 'productionDate'],
     rumpf: (p) => S([...(p.inputProductIds || [])].sort()) === S([IN1('C'), IN2('C')].sort()) && p.laborCost === 5 && p.overheadCost === 2.5
+      && p.productionDate === HEUTE
       && p.notes === 'R6F Fertigung' && (p.outputs || []).length === 1 && p.outputs[0].value === 250
       && Array.isArray(p.outputs[0].spec?.stagingIds) && p.outputs[0].spec.stagingIds.length === 1
       && /^[0-9a-f]{64}$/.test(String(p.outputs[0].spec.stagingIds[0])) && !S(p).includes('data:image'),

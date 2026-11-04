@@ -676,7 +676,10 @@ async function nummerWahl(c, sonder) {
 async function fotoWaehlen(c, file) {
   await c.send('DOM.enable', {});
   const { root } = await c.send('DOM.getDocument', { depth: -1 });
-  const { nodeIds } = await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"]' });
+  // Seit f1ae493e (v0.8.87) trägt ImageUpload ein zweites, verstecktes Feld zum ERSETZEN eines Platzes (ohne `multiple`,
+  // es steht zuletzt): ein Foto dort ohne gewählten Platz wird verworfen. Hinzufügen geht über das Feld mit `multiple`.
+  const hinzu = await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"][multiple]' });
+  const { nodeIds } = hinzu.nodeIds?.length ? hinzu : await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"]' });
   if (!nodeIds || nodeIds.length === 0) return 'KEIN-FELD';
   await c.send('DOM.setFileInputFiles', { files: [file], nodeId: nodeIds[nodeIds.length - 1] });
   return 'OK';
@@ -1421,8 +1424,10 @@ try {
     speichern: (c) => klick(c, '[data-production-save]'),
     fertig: (x, v) => neueZeilen('production_records', v.recs).length === 1 && zeile('products', IN1(x)).stock_status === 'consumed',
     zu: () => `!${q('[data-production-save]')}`,
-    keys: ['inputProductIds', 'laborCost', 'notes', 'outputs', 'overheadCost'],
+    // Seit f5ffef1f (v0.8.72) trägt der Rumpf das gewählte Fertigungsdatum (Vorgabe: heute).
+    keys: ['inputProductIds', 'laborCost', 'notes', 'outputs', 'overheadCost', 'productionDate'],
     rumpf: (p) => S([...(p.inputProductIds || [])].sort()) === S([IN1('C'), IN2('C')].sort()) && p.laborCost === 5 && p.overheadCost === 2.5
+      && p.productionDate === HEUTE
       && p.notes === 'R6F Fertigung' && (p.outputs || []).length === 1 && p.outputs[0].value === 250
       && Array.isArray(p.outputs[0].spec?.stagingIds) && p.outputs[0].spec.stagingIds.length === 1
       && /^[0-9a-f]{64}$/.test(String(p.outputs[0].spec.stagingIds[0])) && !S(p).includes('data:image'),
@@ -1454,7 +1459,7 @@ try {
     name: 'PRODUCT-IMAGE', op: 'products.update',
     route: (x) => `/collection/${BILD(x)}`,
     bereit: () => knopfDa('Edit'),
-    vorher: (x) => ({ links: activeLinks(BILD(x)) }),
+    vorher: (x) => ({ links: activeLinks(BILD(x)), stand: zeile('products', BILD(x)).updated_at }),
     fuellen: async (c, x, v) => {
       if (v.links.length !== 2) return 'VORBEREITUNG-FEHLT:' + v.links.length;
       if (!(await enterEditor(c, 2))) return 'EDITOR-NICHT-FREI:' + await draftPhotos(c);
@@ -1472,8 +1477,10 @@ try {
         && deletedLinks(BILD(x)).some((l) => l.media_id === v.links[0].media_id);
     },
     zu: () => `!${q('[data-save-product]')}`,
-    keys: ['gallery', 'id'],
+    // Seit 981fa6f6 (v0.8.96) nennt der Rumpf den Stand, den die Maske gesehen hat („keine alte Absicht über neuere Daten“).
+    keys: ['expectedUpdatedAt', 'gallery', 'id'],
     rumpf: (p, x, v) => p.id === BILD('C') && Array.isArray(p.gallery) && p.gallery.length === 2
+      && typeof p.expectedUpdatedAt === 'string' && p.expectedUpdatedAt === v.stand
       && S(p.gallery[0]) === S({ keep: v.links[1].media_id }) && /^[0-9a-f]{64}$/.test(String(p.gallery[1]?.stagingId || '')) && !S(p).includes('data:'),
     zustand: (x, v) => ({
       p: zeile('products', BILD(x)),
@@ -1514,9 +1521,10 @@ try {
     speichern: (c) => klick(c, '[data-task-save]'),
     fertig: (x, v) => neueZeilen('tasks', v.ids, 'title = ?', [T1(x)]).length === 1,
     zu: () => `!${q('[data-task-save]')}`,
-    keys: ['description', 'dueAt', 'linkedEntityId', 'linkedEntityType', 'priority', 'title', 'type'],
+    // Seit aaa14d9b (R7A, v0.8.55) wird NOTES gespeichert; hier nicht ausgefüllt → null.
+    keys: ['description', 'dueAt', 'linkedEntityId', 'linkedEntityType', 'notes', 'priority', 'title', 'type'],
     rumpf: (p) => p.title === T1('C') && p.description === 'R6F Uhr beim Kunden abholen' && p.type === 'follow_up' && p.priority === 'high'
-      && p.dueAt === tag(5) && p.linkedEntityType === null && p.linkedEntityId === null,
+      && p.dueAt === tag(5) && p.linkedEntityType === null && p.linkedEntityId === null && p.notes === null,
     neu: (x, v) => neueZeilen('tasks', v.ids, 'title = ?', [T1(x)]),
     zustand: (x, v) => { TASK[x] = neueZeilen('tasks', v.ids, 'title = ?', [T1(x)])[0]?.id; return { t: zeile('tasks', TASK[x]), audit: auditVon([TASK[x]]) }; },
     buchungsZeilen: 0,
@@ -1538,8 +1546,9 @@ try {
     speichern: (c) => klick(c, '[data-task-save]'),
     fertig: (x) => zeile('tasks', TASK[x]).title === T2(x) && zeile('tasks', TASK[x]).priority === 'urgent',
     zu: () => `!${q('[data-task-save]')}`,
-    keys: ['description', 'dueAt', 'expectedRevision', 'linkedEntityId', 'linkedEntityType', 'priority', 'taskId', 'title', 'type'],
-    rumpf: (p, x, v) => p.taskId === TASK.C && p.expectedRevision === v.rev && p.title === T2('C') && p.priority === 'urgent' && p.type === 'follow_up',
+    keys: ['description', 'dueAt', 'expectedRevision', 'linkedEntityId', 'linkedEntityType', 'notes', 'priority', 'taskId', 'title', 'type'],
+    rumpf: (p, x, v) => p.taskId === TASK.C && p.expectedRevision === v.rev && p.title === T2('C') && p.priority === 'urgent' && p.type === 'follow_up'
+      && p.notes === null,
     zustand: (x) => ({ t: zeile('tasks', TASK[x]), audit: auditVon([TASK[x]]) }),
     buchungsZeilen: 0,
   });
