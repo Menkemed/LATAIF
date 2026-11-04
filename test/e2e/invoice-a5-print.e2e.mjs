@@ -20,9 +20,10 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
 import { killOwnChild, killStarted, killTestImage, spawnTracked, waitTestImageGone, closeTestWindow, startedPids } from './_e2e-process.mjs';
+import { closeEdge, edgeBrowserEndpoint } from './_e2e-browser.mjs';
 import { execFileSync, spawn } from 'node:child_process';
 import { join } from 'node:path';
-import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, statSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import os from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
@@ -189,6 +190,19 @@ const firma = (h) => ({
 const zahlart = (h) => (/Payment Mode<\/th><td class="colon">:<\/td><td>([^<]*)<\/td>/.exec(h) || [])[1] || '';
 
 // ── PDF und Breite aus dem gedruckten HTML (kopfloser Edge, eigener Profilordner je Aufruf) ──
+// Liegt ein Edge-Update bereit (`new_msedge.exe` neben `msedge.exe`), reicht der alte Starter an die neue Fassung weiter
+// und kehrt nach ~0,1 s zurück — die PDF entsteht ~2 s später (04.11.2026 gemessen: 6/6). Deshalb wird auf die fertige
+// Datei gewartet (da UND Größe zweimal gleich), nicht auf das Ende des Startprozesses. Die Prüfungen bleiben dieselben.
+function warteAufDatei(pf, budgetMs = 60000) {
+  const ende = Date.now() + budgetMs; let vorher = -1;
+  const schlaf = (ms) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+  while (Date.now() < ende) {
+    const n = existsSync(pf) ? statSync(pf).size : -1;
+    if (n > 0 && n === vorher) return;
+    vorher = n; schlaf(250);
+  }
+  throw new Error(`PDF nach ${budgetMs} ms nicht fertig: ${pf}`);
+}
 function pdfAus(html, name) {
   mkdirSync(OUT, { recursive: true });
   const hf = join(OUT, name + '.html'), pf = join(OUT, name + '.pdf');
@@ -196,6 +210,7 @@ function pdfAus(html, name) {
   rmSync(pf, { force: true });
   execFileSync(EDGE, ['--headless=new', '--disable-gpu', '--no-first-run', '--no-pdf-header-footer', `--user-data-dir=${join(RUN, 'edge-pdf-' + name)}`,
     `--print-to-pdf=${pf}`, pathToFileURL(hf).href], { stdio: 'ignore', timeout: 90000 });
+  warteAufDatei(pf);
   const pdf = readFileSync(pf).toString('latin1');
   return { file: pf, seiten: (pdf.match(/\/Type\s*\/Page[^s]/g) || []).length, box: ((/\/MediaBox\s*\[([^\]]*)\]/.exec(pdf) || [])[1] || '').trim() };
 }
@@ -505,6 +520,9 @@ try {
 } finally {
   clearTimeout(WACHHUND);
   try { kopflos?.close(); } catch { /* zu */ }
+  // `msedge.exe` reicht an den eigentlichen Browser weiter und endet sofort — `killOwnChild` träfe nur den Starter.
+  // Der kopflose Edge dieses Laufs wird über SEINE Debug-Verbindung geschlossen (`_e2e-browser.mjs`).
+  try { if (kopflos) await closeEdge(await edgeBrowserEndpoint(EDGE_CDP), EDGE_CDP); } catch { /* zu */ }
   try { primary?.close(); client?.close(); } catch { /* zu */ }
   aufraeumen();
   await waitTestImageGone('lataif.exe').catch(() => null); await waitTestImageGone('lataif-e2e-client.exe').catch(() => null);
