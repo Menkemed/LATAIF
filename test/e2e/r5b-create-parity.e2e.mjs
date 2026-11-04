@@ -189,7 +189,10 @@ async function waitInvoke(c) {
 async function fotoWaehlen(c, file) {
   await c.send('DOM.enable', {});
   const { root } = await c.send('DOM.getDocument', { depth: -1 });
-  const { nodeIds } = await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"]' });
+  // Seit f1ae493e (v0.8.87) trägt ImageUpload ein zweites, verstecktes Feld zum ERSETZEN eines Platzes (ohne `multiple`,
+  // es steht zuletzt): ein Foto dort ohne gewählten Platz wird verworfen. Hinzufügen geht über das Feld mit `multiple`.
+  const hinzu = await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"][multiple]' });
+  const { nodeIds } = hinzu.nodeIds?.length ? hinzu : await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"]' });
   if (!nodeIds || nodeIds.length === 0) return 'KEIN-FELD';
   await c.send('DOM.setFileInputFiles', { files: [file], nodeId: nodeIds[nodeIds.length - 1] });
   return 'OK';

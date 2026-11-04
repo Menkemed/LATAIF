@@ -244,7 +244,10 @@ function writePhoto(file, farbe) {
 async function fotoWaehlen(c, file) {
   await c.send('DOM.enable', {});
   const { root } = await c.send('DOM.getDocument', { depth: -1 });
-  const { nodeIds } = await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"]' });
+  // Seit f1ae493e (v0.8.87) trägt ImageUpload ein zweites, verstecktes Feld zum ERSETZEN eines Platzes (ohne `multiple`,
+  // es steht zuletzt): ein Foto dort ohne gewählten Platz wird verworfen. Hinzufügen geht über das Feld mit `multiple`.
+  const hinzu = await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"][multiple]' });
+  const { nodeIds } = hinzu.nodeIds?.length ? hinzu : await c.send('DOM.querySelectorAll', { nodeId: root.nodeId, selector: 'input[type="file"][accept="image/*"]' });
   if (!nodeIds || nodeIds.length === 0) return 'KEIN-FELD';
   await c.send('DOM.setFileInputFiles', { files: [file], nodeId: nodeIds[nodeIds.length - 1] });
   return 'OK';
@@ -463,6 +466,13 @@ const buchungVonZahlung = (oid) => S(dbQ(BIZ_DB, `SELECT account, direction, ROU
 const gebuehrVon = (oid) => S(dbQ(BIZ_DB, 'SELECT category, status, ROUND(amount, 3) AS a FROM expenses WHERE related_entity_id = ?', [oid]));
 const neueArtikelVon = (ids) => ids.filter((x) => x && !SEED_PRODUCTS.includes(x))
   .map((x) => norm(dbQ(BIZ_DB, 'SELECT * FROM products WHERE id = ?', [x])[0], /^(id|name|created_by|image_description|image_embedding|version|sync_status)$|_at$/));
+/** Welche Spalten zweier normalisierter Artikel abweichen — nur für die Meldung. */
+const unterschied = (a, b) => {
+  try {
+    const x = JSON.parse(a || '{}'), y = JSON.parse(b || '{}');
+    return [...new Set([...Object.keys(x), ...Object.keys(y)])].filter((k) => S(x[k]) !== S(y[k])).map((k) => `${k}: ${S(x[k])} / ${S(y[k])}`).join('; ').slice(0, 500);
+  } catch { return 'nicht lesbar'; }
+};
 const einkaufMit = (notiz) => dbQ(BIZ_DB, 'SELECT * FROM purchases WHERE notes = ?', [notiz]);
 const EIN_OHNE = /^(id|purchase_number|notes|supplier_snapshot|created_by|revision|version|sync_status|source_order_id)$|_at$/;
 const einkaufZeilen = (pid) => dbQ(BIZ_DB, 'SELECT * FROM purchase_lines WHERE purchase_id = ? ORDER BY position', [pid])
@@ -620,8 +630,12 @@ try {
       `CUSTOM die Gold-Verbindlichkeit beim Goldschmied, an der Extra-Gold-Zeile (${S(gold)})`);
     const meta = JSON.parse(String(pc2Custom.custom_meta || '{}'));
     ok(meta.customerGoldWeight === 10 && meta.customerGoldKarat === '21K', 'CUSTOM das Kundengold steht im Auftrag');
+    // Seit 137c8d8a (MEDIA-BUSINESS) hängt die Vorlage des Sonderstücks als Medium am AUFTRAG (entity_type 'order',
+    // Rolle 'reference_image'); `custom_product_spec.images` wird nicht mehr geschrieben.
     const spec = JSON.parse(String(pc2Custom.custom_product_spec || '{}'));
-    ok(Array.isArray(spec.images) && spec.images.length === 1 && /^data:image\/jpeg;base64,/.test(spec.images[0]), 'CUSTOM die Spec des fertigen Stuecks mit Foto');
+    const vorlage = dbQ(BIZ_DB, "SELECT media_role FROM media_links WHERE entity_type = 'order' AND entity_id = ? AND deleted_at IS NULL", [pc2Custom.id]);
+    ok(!('images' in spec) && vorlage.length === 1 && vorlage[0].media_role === 'reference_image',
+      `CUSTOM die Spec des fertigen Stuecks, ihr Foto als Vorlage am Auftrag im Medienspeicher (${S({ specImages: spec.images, vorlage })})`);
 
     await geh(primary, '/orders/new');
     ok(await auftragCustom(primary, 'r5e-kunde2', 'R5E Primary Custom') === 'OK', 'CUSTOM-PARITAET dieselbe Maske am Primary');
@@ -662,7 +676,9 @@ try {
     ok(await auftragAendern(client, FELDER) === 'OK', 'EDIT die „Edit"-Maske des Auftrags am zweiten Rechner');
     const up = (await buchungen(client)).filter((x) => x.op === 'orders.update');
     const p = up[0]?.payload || {};
-    ok(up.length === 1 && S(Object.keys(p).sort()) === S(['agreedPrice', 'depositAmount', 'expectedDelivery', 'expectedRevision', 'id', 'notes', 'supplierName', 'supplierPrice']),
+    // Seit f5ffef1f (v0.8.72) trägt die Änderung das Auftragsdatum der Maske (wählbar, rückdatierbar).
+    ok(up.length === 1 && S(Object.keys(p).sort()) === S(['agreedPrice', 'depositAmount', 'expectedDelivery', 'expectedRevision', 'id', 'notes', 'orderDate', 'supplierName', 'supplierPrice'])
+      && /^\d{4}-\d{2}-\d{2}$/.test(String(p.orderDate)),
       `EDIT genau EINE Buchung mit den sechs Eingaben und der Fassung (${Object.keys(p).join(',')})`);
     await warteAuf(() => (dbQ(BIZ_DB, 'SELECT notes FROM orders WHERE id = ?', [pc2Normal.id])[0] || {}).notes === 'R5E PC2 geaendert');
     const z = dbQ(BIZ_DB, 'SELECT * FROM orders WHERE id = ?', [pc2Normal.id])[0] || {};
@@ -697,7 +713,10 @@ try {
     const c = (await buchungen(client)).filter((x) => x.op === 'purchases.create');
     ok(c.length === 1, `PURCHASE genau EINE Buchung (${c.length})`);
     const p = c[0]?.payload || {};
-    ok(p.staffId === 'r5e-emp' && p.taxScheme === 'VAT_10' && p.paymentAmount === 100 && Array.isArray(p.lines?.[0]?.newProduct?.stagingIds)
+    // Seit 22eadc38 (v0.8.91) gehen die Zahlungen als Liste (je mit Betrag, Weg und Tag) statt `paymentAmount`.
+    ok(p.staffId === 'r5e-emp' && p.taxScheme === 'VAT_10' && Array.isArray(p.payments) && p.payments.length === 1
+      && p.payments[0].amount === 100 && p.payments[0].method === 'cash' && /^\d{4}-\d{2}-\d{2}$/.test(String(p.payments[0].paidDate))
+      && Array.isArray(p.lines?.[0]?.newProduct?.stagingIds)
       && !S(p).includes('base64') && !('purchaseNumber' in p) && !S(p).includes('lotId') && !S(p).includes('vatAmount'),
     `PURCHASE Mitarbeiter, Vorsteuerwahl, Zahlung, Entwurf mit Ablagekennung — keine Nummer, kein Los, keine Steuerbetraege (${Object.keys(p).join(',')})`);
     await warteAuf(() => einkaufMit('R5E PC2 Einkauf').length === 1);
@@ -719,7 +738,13 @@ try {
     ok(norm(ep, EIN_OHNE) === norm(e, EIN_OHNE), `PURCHASE-PARITAET Kopf${norm(ep, EIN_OHNE) !== norm(e, EIN_OHNE) ? ` (${norm(ep, EIN_OHNE)} / ${norm(e, EIN_OHNE)})` : ''}`);
     ok(S(einkaufZeilen(ep.id)) === S(einkaufZeilen(e.id)) && loseVon(ep.id) === loseVon(e.id), 'PURCHASE-PARITAET Zeilen und Lose');
     const nep = neueArtikelVon(dbQ(BIZ_DB, 'SELECT product_id FROM purchase_lines WHERE purchase_id = ?', [ep.id]).map((z) => z.product_id));
-    ok(S(nep) === S(neu), 'PURCHASE-PARITAET der neue Artikel (bis auf seinen Namen) derselbe — auch das Foto');
+    // Seit 61251fa0 (v0.8.91) vergibt der Einkauf die SKU beim Anlegen selbst — fortlaufend, also je Artikel die NÄCHSTE
+    // freie Nummer derselben Reihe (PC2 zuerst, dann der Primary). Verglichen wird alles andere; die SKU wird geprüft.
+    const ohneSku = (l) => l.map((x) => { const o = JSON.parse(x); delete o.sku; return S(o); });
+    const skuP = JSON.parse(nep[0] || '{}').sku, skuC = JSON.parse(neu[0] || '{}').sku;
+    ok(S(ohneSku(nep)) === S(ohneSku(neu)), `PURCHASE-PARITAET der neue Artikel (bis auf Namen und SKU) derselbe — auch das Foto${S(ohneSku(nep)) !== S(ohneSku(neu)) ? ` (${unterschied(nep[0], neu[0])})` : ''}`);
+    const reihe = (x) => String(x || '').replace(/[0-9]+$/, '');
+    ok(!!skuP && !!skuC && skuP !== skuC && reihe(skuP) === reihe(skuC), `PURCHASE-PARITAET jeder neue Artikel bekommt seine eigene SKU derselben Reihe (${skuC} / ${skuP})`);
   }
 
   // ── Verlorene Antwort beim Einkauf ──
