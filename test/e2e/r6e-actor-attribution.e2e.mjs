@@ -31,7 +31,7 @@
 // Produktions-App wird nie beendet, nie benutzt; E:\LATAIF\Data und die Ports 3001/3443 bleiben tabu.
 // ════════════════════════════════════════════════════════════════════════════
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
-import { killStarted, killTestImage, spawnTracked, waitTestImageGone, foreignProcesses } from './_e2e-process.mjs';
+import { closeTestWindow, killStarted, killTestImage, spawnTracked, startedPids, waitTestImageGone, foreignProcesses } from './_e2e-process.mjs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, copyFileSync } from 'node:fs';
@@ -565,8 +565,11 @@ try {
   await waitFor(primary, SHELL, 60000);
   await spuelen(primary).catch(() => null);
   await sleep(1200);
+  // Regulär schließen (Fenster schließen, `closeTestWindow`): ein hartes Beenden Sekunden nach dem Onboarding verliert
+  // die frische Sitzung (Sitzungs-Riegel) — der Neustart stünde dann an der Anmeldemaske statt in der Anwendung.
+  const onboardingPid = startedPids().pop();
   primary.close(); primary = null;
-  killTestImage('lataif.exe'); await waitTestImageGone('lataif.exe');
+  await closeTestWindow(onboardingPid, APP); await waitTestImageGone('lataif.exe');
   const aVorlage = seedGeschaeft();
   execFileSync(SEED, ['seed-primary', SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' });
   seedServerB();
@@ -670,9 +673,11 @@ try {
     },
     fertig: (x, v) => neueZeilen('invoices', v.iids, mitArtikel(), [PROD('pa', x)]).length === 1,
     zu: () => '/^\\/invoices\\/[^/]+$/.test(location.pathname) && !/\\/new$/.test(location.pathname)',
-    keys: ['customerId', 'issuedDate', 'lines', 'payment', 'specialMark'],
+    // v0.8.88 (bb0032c) — die Anlage trägt eine LISTE von Zahlungen, jede mit ihrem Tag (früher eine `payment`).
+    keys: ['customerId', 'issuedDate', 'lines', 'payments', 'specialMark'],
     rumpf: (p) => p.customerId === KUNDE('C') && p.issuedDate === HEUTE && p.specialMark === false
-      && S(p.payment) === S({ amount: 1100, method: 'card', cardBrand: 'normal' })
+      && Array.isArray(p.payments) && p.payments.length === 1
+      && S(Object.fromEntries(Object.entries(p.payments[0]).sort(([a], [b]) => a.localeCompare(b)))) === S({ amount: 1100, cardBrand: 'normal', method: 'card', paidDate: HEUTE })
       && S(p.lines) === S([{ productId: PROD('pa', 'C'), lotId: PROD('pa', 'C') + '-lot', quantity: 1, unitPrice: 1000, scheme: 'auto' }]),
     zustand: (x, v) => {
       INV1[x] = neueZeilen('invoices', v.iids, mitArtikel(), [PROD('pa', x)])[0]?.id;
@@ -732,8 +737,8 @@ try {
     fertig: (x, v) => dbQ(BIZ_DB, 'SELECT id FROM payments WHERE invoice_id = ?', [INV2[x]]).length === v.n + 1
       && Math.abs(Number(zeile('invoices', INV2[x]).paid_amount) - (v.paid + 200)) < 0.001,
     zu: () => `!${q('[data-invoice-list-pay]')}`,
-    keys: ['amount', 'invoiceId', 'method'],
-    rumpf: (p) => p.invoiceId === INV2.C && p.amount === 200 && p.method === 'cash',
+    keys: ['amount', 'invoiceId', 'method', 'paidDate'],   // v0.8.88 — der Zahltag reist mit
+    rumpf: (p) => p.invoiceId === INV2.C && p.amount === 200 && p.method === 'cash' && p.paidDate === HEUTE,
     zustand: (x) => ({ r: rechnungStand(INV2[x]), a: artikelStand([PROD('pb', x)]) }),
   });
   {

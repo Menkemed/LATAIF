@@ -31,7 +31,7 @@
 // Produktions-App wird nie beendet, nie benutzt; E:\LATAIF\Data und die Ports 3001/3443 bleiben tabu.
 // ════════════════════════════════════════════════════════════════════════════
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
-import { killStarted, killTestImage, spawnTracked, waitTestImageGone, foreignProcesses } from './_e2e-process.mjs';
+import { closeTestWindow, killStarted, killTestImage, spawnTracked, startedPids, waitTestImageGone, foreignProcesses } from './_e2e-process.mjs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, copyFileSync } from 'node:fs';
@@ -582,6 +582,13 @@ const rechnungStand = (id) => ({
   pays: dbQ(BIZ_DB, 'SELECT * FROM payments WHERE invoice_id = ?', [id]),
 });
 const mitArtikel = (k) => `id IN (SELECT invoice_id FROM invoice_lines WHERE product_id = ?)`;
+
+// v0.8.88 — die Zahlungen, die PC2 schickt, am Primary: an GENAU dieser Rechnung, mit dem gewählten Tag als Zahltag
+// (payments.received_at), und ihre Hauptbuchzeilen (source PAYMENT) tragen denselben Tag als Buchungstag (occurred_at).
+const zahlungsTage = (inv) => dbQ(BIZ_DB, 'SELECT id, invoice_id, amount, method, received_at FROM payments WHERE invoice_id = ? ORDER BY created_at', [inv])
+  .map((z) => ({ ...z, tag: String(z.received_at).slice(0, 10),
+    buchung: dbQ(BIZ_DB, "SELECT DISTINCT substr(occurred_at, 1, 10) AS d FROM ledger_entries WHERE source_module = 'PAYMENT' AND source_id = ?", [z.id]).map((r) => r.d) }));
+const tagStimmt = (z) => z.tag === HEUTE && S(z.buchung) === S([HEUTE]);
 const endziffern = (nr) => Number(String(nr || '').match(/(\d+)$/)?.[1] ?? NaN);
 const OFFER = {}, OFFER2 = {}, INV_OFFER = {}, INV_N = {}, INV_S = {}, INV_T = {}, RET = {}, TRF_INV = {};
 let PRIMARY_USER = '';
@@ -631,8 +638,11 @@ try {
   await waitFor(primary, SHELL, 60000);
   await spuelen(primary).catch(() => null);
   await sleep(1200);
+  // Regulär schließen (Fenster schließen, `closeTestWindow`): ein hartes Beenden Sekunden nach dem Onboarding verliert
+  // die frische Sitzung (Sitzungs-Riegel) — der Neustart stünde dann an der Anmeldemaske statt in der Anwendung.
+  const onboardingPid = startedPids().pop();
   primary.close(); primary = null;
-  killTestImage('lataif.exe'); await waitTestImageGone('lataif.exe');
+  await closeTestWindow(onboardingPid, APP); await waitTestImageGone('lataif.exe');
   seed();
   execFileSync(SEED, ['seed-primary', SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' });
 
@@ -920,9 +930,10 @@ try {
     },
     fertig: (x, v) => neueZeilen('invoices', v.iids, mitArtikel(k), [PROD(k, x)]).length === 1,
     zu: () => '/^\\/invoices\\/[^/]+$/.test(location.pathname) && !/\\/new$/.test(location.pathname)',
-    keys: ['customerId', 'issuedDate', 'lines', 'payment', 'specialMark'],
+    // v0.8.88 (bb0032c) — die Anlage trägt eine LISTE von Zahlungen, jede mit ihrem Tag (früher eine `payment`).
+    keys: ['customerId', 'issuedDate', 'lines', 'payments', 'specialMark'],
     rumpf: (p) => p.customerId === KUNDE('C') && p.issuedDate === HEUTE && p.specialMark === sonder
-      && S(p.payment) === S({ amount: betrag === 'voll' ? 1100 : betrag, method: methode })
+      && S(p.payments) === S([{ amount: betrag === 'voll' ? 1100 : betrag, method: methode, paidDate: HEUTE }])
       && S(p.lines) === S([{ productId: PROD(k, 'C'), lotId: PROD(k, 'C') + '-lot', quantity: 1, unitPrice: 1000, scheme: 'auto' }]),
     zustand: (x, v) => {
       const inv = neueZeilen('invoices', v.iids, mitArtikel(k), [PROD(k, x)]);
@@ -950,6 +961,11 @@ try {
     `INV-CREATE-SPECIAL Vollzahlung + Sonder → SINV (${zeile('invoices', INV_S.C).invoice_number} / ${zeile('invoices', INV_S.P).invoice_number})`);
   ok(['C', 'P'].every((x) => /^PINV-/.test(String(zeile('invoices', INV_T[x]).invoice_number)) && zeile('invoices', INV_T[x]).status === 'PARTIAL'),
     `INV-CREATE-PARTIAL Teilzahlung → PINV, kein Nummerndialog (${zeile('invoices', INV_T.C).invoice_number} / ${zeile('invoices', INV_T.P).invoice_number})`);
+  for (const [nm, inv, betrag, weg] of [['NORMAL', INV_N.C, 1100, 'cash'], ['SPECIAL', INV_S.C, 1100, 'bank_transfer'], ['PARTIAL', INV_T.C, 300, 'cash']]) {
+    const z = zahlungsTage(inv);
+    ok(z.length === 1 && z[0].invoice_id === inv && z[0].amount === betrag && z[0].method === weg && tagStimmt(z[0]),
+      `INV-CREATE-${nm} [PC2] am Primary genau EINE Zahlung an dieser Rechnung, Zahltag und Buchungstag = ${HEUTE} (${S(z.map((x) => ({ a: x.amount, m: x.method, tag: x.tag, buchung: x.buchung })))})`);
+  }
 
   await paar({
     name: 'PAY-FINAL-SPECIAL (Liste)', op: 'invoices.record_payment',
@@ -972,13 +988,15 @@ try {
     },
     fertig: (x) => zeile('invoices', INV_T[x]).status === 'FINAL',
     zu: () => `!${q('[data-invoice-list-pay]')}`,
-    keys: ['amount', 'invoiceId', 'method', 'specialMarkOnFinal'],
-    rumpf: (p, x, v) => p.invoiceId === INV_T.C && p.amount === v.rest && p.method === 'bank_transfer' && p.specialMarkOnFinal === true,
+    keys: ['amount', 'invoiceId', 'method', 'paidDate', 'specialMarkOnFinal'],
+    rumpf: (p, x, v) => p.invoiceId === INV_T.C && p.amount === v.rest && p.method === 'bank_transfer' && p.specialMarkOnFinal === true && p.paidDate === HEUTE,
     zustand: (x) => ({ r: rechnungStand(INV_T[x]), a: artikelStand([PROD('ph', x)]) }),
   });
 
   await paar({
     name: 'PAY-FINAL-NORMAL (Rechnungsseite)', op: 'invoices.record_payment',
+    // C3D-Ersatz (client-invoice-lifecycle D6): die Antwort der Schlusszahlung geht verloren — dieselbe Kennung, eine Zahlung.
+    lost: '[data-save-error]',
     route: (x) => `/invoices/${INV_OFFER[x]}`,
     bereit: () => knopfDa('Record Payment'),
     vorher: (x) => ({ rest: Math.round((Number(zeile('invoices', INV_OFFER[x]).gross_amount) - Number(zeile('invoices', INV_OFFER[x]).paid_amount)) * 1000) / 1000 }),
@@ -998,10 +1016,15 @@ try {
     },
     fertig: (x) => zeile('invoices', INV_OFFER[x]).status === 'FINAL',
     zu: () => `!${q('[data-record-payment]')}`,
-    keys: ['amount', 'invoiceId', 'method', 'specialMarkOnFinal'],
-    rumpf: (p, x, v) => p.invoiceId === INV_OFFER.C && p.amount === v.rest && p.method === 'cash' && p.specialMarkOnFinal === false,
+    keys: ['amount', 'invoiceId', 'method', 'paidDate', 'specialMarkOnFinal'],
+    rumpf: (p, x, v) => p.invoiceId === INV_OFFER.C && p.amount === v.rest && p.method === 'cash' && p.specialMarkOnFinal === false && p.paidDate === HEUTE,
     zustand: (x) => ({ r: rechnungStand(INV_OFFER[x]), a: artikelStand([PROD('pa', x), PROD('pc', x)]) }),
   });
+  for (const [nm, inv] of [['PAY-FINAL-SPECIAL (Liste)', INV_T.C], ['PAY-FINAL-NORMAL (Rechnungsseite)', INV_OFFER.C]]) {
+    const z = zahlungsTage(inv);
+    ok(z.length >= 1 && z.every((x) => x.invoice_id === inv) && tagStimmt(z[z.length - 1]),
+      `${nm} [PC2] die Schlusszahlung steht an dieser Rechnung, Zahltag und Buchungstag = ${HEUTE} (${S(z.map((x) => ({ a: x.amount, tag: x.tag, buchung: x.buchung })))})`);
+  }
   {
     const tT = ['C', 'P'].map((x) => zeile('invoices', INV_T[x])), tO = ['C', 'P'].map((x) => zeile('invoices', INV_OFFER[x]));
     ok(tT.every((i) => /^SINV-/.test(String(i.invoice_number)) && Number(i.special_mark) === 1),
@@ -1117,7 +1140,16 @@ try {
     bereit: () => q('[data-transfer-undo]'),
     vorher: (x) => ({ rev: Number(zeile('agent_transfers', TRF(x)).revision), inv: zeile('agent_transfers', TRF(x)).invoice_id }),
     fuellen: async () => 'OK',
-    speichern: (c) => klick(c, '[data-transfer-undo]'),
+    // Seit ea06aae4 fragt die App in IHREM Dialog (ConfirmHost, `await window.confirm`): auf PC2 überschreibt
+    // `installNativeConfirm` (main.tsx) beim Start den Stub des Beobachters — der Mensch bestätigt mit OK, ohne OK geht
+    // nichts los. Am Primary setzt der Lauf `DIALOGE_PRIMARY` NACH dem Laden; dort antwortet der Stub, ein Dialog kommt nicht.
+    speichern: async (c, x) => {
+      const k = await klick(c, '[data-transfer-undo]'); if (k !== 'OK' || x === 'P') return k;
+      if (!(await warteBis(c, q('[data-app-confirm-ok]'), 15000))) return 'KEIN-DIALOG';
+      const frage = String(await c.ev(`return document.querySelector('[data-app-confirm-text]')?.textContent || '';`));
+      if (!/Undo convert\?/.test(frage)) return 'FALSCHE-FRAGE:' + frage.slice(0, 60);
+      return klick(c, '[data-app-confirm-ok]');
+    },
     fertig: (x, v) => !zeile('agent_transfers', TRF(x)).invoice_id && zeile('invoices', v.inv).status === 'CANCELLED',
     zu: () => `!${q('[data-transfer-undo]')}`,
     keys: ['expectedRevision', 'transferId'],
@@ -1254,11 +1286,11 @@ clearTimeout(WACHHUND);
 console.log('\n  Buchung                         PC2   Primary');
 for (const o of OPS) console.log(`  ${o.padEnd(32)}${(BEWEIS[o].C > 0 ? 'ja' : 'NEIN').padEnd(6)}${BEWEIS[o].P > 0 ? 'ja' : 'NEIN'}`);
 const alleBeide = (ops) => ops.every((o) => BEWEIS[o].C > 0 && BEWEIS[o].P > 0);
-const LOST_OPS = ['offers.create', 'offers.convert_to_invoice', 'invoices.create', 'returns.cancel', 'transfers.undo_convert'];
+const LOST_OPS = ['offers.create', 'offers.convert_to_invoice', 'invoices.create', 'invoices.record_payment', 'returns.cancel', 'transfers.undo_convert'];
 console.log(`  verlorene Antwort: ${LOST_OPS.map((o) => `${o}=${LOST[o] ? 'ja' : 'NEIN'}`).join(' · ')}`);
 console.log(`  Zusatz: ${Object.entries(EXTRA).map(([k, v]) => `${k}=${v ? 'ja' : 'NEIN'}`).join(' · ')}`);
 ok(alleBeide(OPS), `ALLE ${OPS.length} Buchungen auf PC2 UND am Primary bewiesen (fehlend: ${OPS.filter((o) => !(BEWEIS[o].C > 0 && BEWEIS[o].P > 0)).join(', ') || 'keine'})`);
-ok(LOST_OPS.every((o) => LOST[o]), 'LOST alle fünf verlorenen Antworten: dieselbe Kennung, genau eine Wirkung, dieselbe Buchung');
+ok(LOST_OPS.every((o) => LOST[o]), `LOST alle ${LOST_OPS.length} verlorenen Antworten: dieselbe Kennung, genau eine Wirkung, dieselbe Buchung (${LOST_OPS.filter((o) => !LOST[o]).join(', ') || 'alle'})`);
 ok(Object.values(EXTRA).every(Boolean), `ZUSATZ Stale, Nummernkreise, Butterfly, Storno-Protokoll, Undo-Stand, Akteur, Nachricht (${Object.entries(EXTRA).filter(([, v]) => !v).map(([k]) => k).join(', ') || 'alle'})`);
 const dauer = Math.round((Date.now() - T0) / 1000);
 console.log(`\n${FAIL === 0 ? 'PASS' : 'FAIL'} — central ui parity r6e: offers + invoice + reversal + message, lost response, stale, two apps (${Math.floor(dauer / 60)}m ${dauer % 60}s): ${PASS} passed, ${FAIL} failed`);
