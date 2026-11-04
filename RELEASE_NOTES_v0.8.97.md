@@ -17,12 +17,19 @@ Corrected invoices stay right in every period, stock bought again for an item yo
   - **Change customer** (owner and manager): moves a repair booked on the wrong client to the right one, with a reason. Number, details, photos, history and status stay. Not possible once the repair is invoiced, paid, or a gold credit came from it.
 - **Phone — repair intake:** a **Category** field (Watch, Gold-Diamond Jewellery, Branded Gold Jewelry, …). **AI Identify** fills it only when it clearly recognises one of your categories; a category you chose yourself is never overwritten.
 - **Consignment — one purchase for several items of the same consignor:** such purchases are no longer assigned to a single item when the app starts. Until v0.8.96 every start could attach the whole purchase to one of the items, so the other item lost its payout and repayment view.
+- **Second computer — main computer not answering:** a red bar now says so, instead of quietly showing old data or empty lists. A save made meanwhile is kept under **Unresolved saves** until it can be checked. **Reload** brings the current data back once the main computer answers again; **Sign in** appears if the session has ended.
+- **Agents — "Sold" from the transfer list below Our Price:** the list now shows the same warning and confirmation as the transfer page. Until v0.8.96 such a sale from the list was always refused.
+- **Gold-Diamond Jewellery with stones:**
+  - Items entered on the phone now save the diamond weight from their diamond rows, like items entered on the computer.
+  - Cards, specification lists, print lines and price tags show the diamond weight from the diamond rows, also for items entered on the phone before this update (their saved data is not changed).
+  - On a new installation the stone list is available straight after setup (before, only after the next start).
 
 **Database:** the update adds one table for refund payouts to clients. The start check that fills the consignment of older consignor purchases now only fills a purchase that belongs to exactly one consignment. Existing invoices, payments, purchases, stock lots, bookings, repairs and media are not changed.
 
 **Known open points, not fixed in this version:**
 
 - Items whose old stock was already replaced before this update keep their wrong quantity until they are corrected separately.
+- Gold-Diamond items entered on the phone before this update keep their saved data without a stored diamond weight; it is shown and printed from the diamond rows. Saving such an item once on the computer stores it.
 - One invoice with your own items and consignment items together is not available yet.
 - Points listed as open in v0.8.96 stay open.
 
