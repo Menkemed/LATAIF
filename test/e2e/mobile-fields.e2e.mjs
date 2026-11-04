@@ -187,8 +187,16 @@ const CATS = [
     attrs: { case_diameter_mm: ['41', 41], dial: ['Black', 'Black'], serial_number: ['SER-1', 'SER-1'], reference_number: ['126610', '126610'], material: ['Steel', 'Steel'] },
     visible: ['case_diameter_mm', 'dial', 'material'], absent: ['weight', 'item_type'] },
   { id: 'cat-gold-jewelry', label: 'Gold', brandReq: false, cond: 'New', scope: ['Certificate'],
-    attrs: { weight: ['12.5', 12.5], diamond_weight: ['0.75', 0.75], item_type: ['Ring', 'Ring'], karat: ['18K Yellow', '18K Yellow'] },
-    visible: ['weight', 'karat', 'item_type'], absent: ['case_diameter_mm', 'dial'] },
+    attrs: { weight: ['12.5', 12.5], item_type: ['Ring', 'Ring'], karat: ['18K Yellow', '18K Yellow'] },
+    // STONES (c098463e, v0.8.68): Diamond Weight is no input of its own any more for Gold-Diamond — the phone records
+    // stone rows (attributes.stones, never diamond_weight), the save on the Primary derives diamond_weight = the sum of the
+    // DIAMOND rows' carat (the emerald is not counted), the desktop shows it from the rows.
+    stones: {
+      rows: [{ type: 'diamond', qty: '2', carat: '0.50', color: 'G', clarity: 'VS1' }, { type: 'diamond', carat: '0.25' }, { type: 'emerald', qty: '1', carat: '0.40' }],
+      exp: [{ type: 'diamond', qty: 2, carat: 0.5, color: 'G', clarity: 'VS1' }, { type: 'diamond', carat: 0.25 }, { type: 'emerald', qty: 1, carat: 0.4 }],
+      diamondWeight: 0.75, text: 'Diamond weight 0.75 ct — from the diamond rows',
+    },
+    visible: ['weight', 'karat', 'item_type', 'stones'], absent: ['case_diameter_mm', 'dial', 'diamond_weight'] },
   { id: 'cat-branded-gold-jewelry', label: 'BrandedGold', brandReq: true, cond: 'New', scope: [],
     attrs: { item_type: ['Bracelet', 'Bracelet'], size: ['52', '52'], karat: ['18K Yellow', '18K Yellow'], weight: ['20', 20] },
     visible: ['item_type', 'size', 'karat'], absent: ['case_diameter_mm', 'color'] },
@@ -227,6 +235,22 @@ const QUANTITIES = {
 };
 const expPayloadPrices = (catId) => { const e = PRICES[catId].exp; const o = {}; if (e.purchase_price) o.purchasePrice = e.purchase_price; if (e.planned_sale_price != null) o.plannedSalePrice = e.planned_sale_price; if (e.min_sale_price != null) o.minSalePrice = e.min_sale_price; return o; };
 
+// STONES — rows into the phone's stone control (#attr_stones): "+ Add stone", the type (a select change redraws the
+// rows, so every step queries again), then qty/carat/name (input) and the diamond-only selects.
+async function fillStones(edge, rows) {
+  const r0 = [];
+  // Die Liste ist anfangs zugeklappt — „+ Add stone" gibt es erst nach dem Aufklappen.
+  if (!(await existsE(edge, '#attr_stones [data-st="add"]'))) { r0.push(await clickE(edge, '#attr_stones [data-st="toggle"]')); await sleep(120); }
+  for (let i = 0; i < rows.length; i++) {
+    const r = rows[i];
+    r0.push(await clickE(edge, '#attr_stones [data-st="add"]')); await sleep(120);
+    r0.push(await setValE(edge, `#attr_stones select[data-st="type"][data-i="${i}"]`, r.type)); await sleep(120);
+    for (const k of ['qty', 'carat', 'name']) if (r[k] !== undefined) r0.push(await setValE(edge, `#attr_stones input[data-st="${k}"][data-i="${i}"]`, r[k]));
+    for (const k of ['color', 'clarity', 'shape']) if (r[k] !== undefined) { r0.push(await setValE(edge, `#attr_stones select[data-st="${k}"][data-i="${i}"]`, r[k])); await sleep(100); }
+  }
+  return r0.every((x) => x === 'OK') ? 'OK' : 'FELD:' + r0.join(',');
+}
+
 async function fillAndSubmit(edge, cat, jpg, i, doubleClick = false) {
   await setValE(edge, '#cCategory', cat.id); await sleep(500);
   for (const k of cat.visible) ok(await existsE(edge, '#attr_' + k), `${cat.label}: field ${k} visible`);
@@ -236,6 +260,7 @@ async function fillAndSubmit(edge, cat, jpg, i, doubleClick = false) {
   await setValE(edge, '#cCondition', cat.cond);
   for (const s of cat.scope) await clickChip(edge, '#cScope', s);
   for (const [k, [v]] of Object.entries(cat.attrs)) await setValE(edge, '#attr_' + k, v);
+  if (cat.stones) ok(await fillStones(edge, cat.stones.rows) === 'OK', `${cat.label}: stone rows entered in the phone's stone list`);
   // MOBILE-PRICING — fill the three price inputs (empty string leaves the field blank → optional/null).
   const pr = PRICES[cat.id].raw;
   await setValE(edge, '#cPurchasePrice', pr.purchasePrice); await setValE(edge, '#cSalePrice', pr.plannedSalePrice); await setValE(edge, '#cMinSalePrice', pr.minSalePrice);
@@ -289,6 +314,8 @@ async function main() {
     let attrsOk = true;
     for (const [k, [, exp]] of Object.entries(cat.attrs)) if (u.metadata.attributes[k] !== exp) { attrsOk = false; console.log(`  ${cat.label} attr ${k}=${JSON.stringify(u.metadata.attributes[k])} exp ${JSON.stringify(exp)}`); }
     ok(attrsOk, `${cat.label}: payload attributes exact (typed)`);
+    if (cat.stones) ok(JSON.stringify(u.metadata.attributes.stones) === JSON.stringify(cat.stones.exp),
+      `${cat.label}: payload carries the stone rows (attributes.stones), normalised (${JSON.stringify(u.metadata.attributes.stones)})`);
     ok(u.metadata.condition === cat.cond, `${cat.label}: condition in payload`);
     ok(JSON.stringify(u.metadata.scopeOfDelivery || []) === JSON.stringify(cat.scope), `${cat.label}: Included/scope in payload`);
     ok(!cat.absent.some((k) => k in (u.metadata.attributes || {})), `${cat.label}: no foreign attrs in payload`);
@@ -366,11 +393,15 @@ async function main() {
   ok((await post(token, 'ev-ver', 'prod-ver', fullM, imgB64, 1, true)).status === 201, 'full valid payload accepted under v1');
   ok((await post(token, 'ev-ver', 'prod-ver', fullM, imgB64, 2, true)).status === 409, 'same uploadEventId + same metadata but v1→v2 → 409 (version in payload identity)');
   ok(inboxCount() === before + 2, 'two legacy inbox rows added; the version conflict was a no-op');
+  // STONES — legacy data: an older phone page still sends Diamond Weight as a plain field, without stone rows. The save
+  // keeps the recorded value (no rows to derive from); the desktop shows it as "recorded before the stone list".
+  const legacyDw = await post(token, 'ev-legacy-dw', 'prod-legacy-dw', { categoryId: 'cat-gold-jewelry', brand: 'LegacyGold', name: 'Legacy Diamond Ring', sku: null, attributes: { weight: 5, item_type: 'Ring', karat: '18K Yellow', diamond_weight: 0.5 } }, imgB64, 2, true);
+  ok(legacyDw.status === 201 && inboxCount() === before + 3, `legacy Gold payload: diamond_weight without stone rows (older phone page) → 201 accepted (${legacyDw.status})`);
 
   // ── drain everything → products persisted, readback + edit per category ──
   await frontendLogin(app);
-  if (!(await pollReady(8, 70000))) { await app.ev(`window.location.reload();`).catch(() => {}); await sleep(3000); }
-  ok(await pollReady(8, 40000), 'app drain created all 8 products (6 v2 + 2 legacy) → ready');
+  if (!(await pollReady(9, 70000))) { await app.ev(`window.location.reload();`).catch(() => {}); await sleep(3000); }
+  ok(await pollReady(9, 40000), 'app drain created all 9 products (6 v2 + 2 legacy + 1 legacy diamond weight) → ready');
 
   let sixReadback = true, sixEdit = true, sixMedia = true, sixPrice = true;
   for (const cat of CATS) {
@@ -380,7 +411,10 @@ async function main() {
     let good = row.category_id === cat.id && row.condition === cat.cond
       && JSON.stringify(JSON.parse(row.scope_of_delivery || '[]')) === JSON.stringify(cat.scope);
     for (const [k, [, exp]] of Object.entries(cat.attrs)) if (a[k] !== exp) { good = false; console.log(`  ${cat.label} DB attr ${k}=${JSON.stringify(a[k])} exp ${JSON.stringify(exp)}`); }
-    ok(good, `${cat.label}: business DB has ALL fields (attributes+condition+scope, typed)`);
+    if (cat.stones && (JSON.stringify(a.stones) !== JSON.stringify(cat.stones.exp) || a.diamond_weight !== cat.stones.diamondWeight)) {
+      good = false; console.log(`  ${cat.label} DB stones=${JSON.stringify(a.stones)} diamond_weight=${JSON.stringify(a.diamond_weight)} exp ${cat.stones.diamondWeight}`);
+    }
+    ok(good, `${cat.label}: business DB has ALL fields (attributes+condition+scope, typed${cat.stones ? '; stone rows + derived diamond weight' : ''})`);
     if (!good) sixReadback = false;
     // MOBILE-PRICING — the three prices persisted EXACTLY (optional → null). Values are binary-exact.
     const expP = PRICES[cat.id].exp;
@@ -396,6 +430,12 @@ async function main() {
     const detail = await openDetailText(app, id);
     const sample = Object.values(cat.attrs)[0][1];
     ok(detail.includes(String(sample)) && detail.includes('NM-' + cat.label), `${cat.label}: desktop product detail renders the mobile values`);
+    if (cat.stones) {
+      const fuss = String(await app.ev(`return document.querySelector('[data-stones-diamond-total]')?.textContent || '';`));
+      const zeilen = String(await app.ev(`return [...document.querySelectorAll('[data-stone-row]')].map((e) => e.textContent).join(' | ');`));
+      ok(fuss.startsWith(cat.stones.text) && /Emerald/.test(zeilen) && (zeilen.match(/Diamond/g) || []).length === 2,
+        `${cat.label}: desktop detail shows the derived diamond weight and the stone rows (${fuss} · ${zeilen} · ${String(await app.ev(`const e=document.querySelector('[data-stones-editor]'); const tx=document.body.innerText; const i=tx.search(/Stones|Diamond/); return 'editor=' + !!e + ' · ' + (i < 0 ? 'kein Stones/Diamond im Text' : tx.slice(Math.max(0, i - 20), i + 140).replace(/\\s+/g, ' '));`))})`);
+    }
     // MEDIA-EDIT-PRESERVE — snapshot the mobile photo's gallery BEFORE a pure
     // text edit (name only). The uploaded product has exactly one active link.
     const linksBefore = activeLinks(id); const totalBefore = linkTotal(id); const gensBefore = blobGenTotal();
@@ -406,6 +446,11 @@ async function main() {
     const reopened = await editProductName(app, id, 'NM-' + cat.label, 'NM-' + cat.label + ' EDITED');
     if (!reopened.includes('NM-' + cat.label + ' EDITED')) { sixEdit = false; console.log('  edit failed for ' + cat.label); }
     ok(reopened.includes('NM-' + cat.label + ' EDITED'), `${cat.label}: desktop edit → save → reopen persists`);
+    if (cat.stones) {
+      const a2 = JSON.parse(productRow(id).attributes || '{}');
+      ok(JSON.stringify(a2.stones) === JSON.stringify(cat.stones.exp) && a2.diamond_weight === cat.stones.diamondWeight,
+        `${cat.label}: a text-only desktop edit keeps the stone rows and the derived diamond weight (${JSON.stringify({ dw: a2.diamond_weight })})`);
+    }
     // THE FIX: the mobile photo must survive a text-only edit — same active
     // link, same media identity, nothing retired, no new link, no new blob.
     const linksAfter = activeLinks(id);
@@ -436,12 +481,22 @@ async function main() {
   ok(sixMedia, 'six-category media SURVIVES text-only edit: 6/6 (regression guard for the photo-deletion bug)');
   ok(sixPrice, 'six-category pricing: mobile→DB readback + text-edit-preserves + price-edit-persists 6/6');
   ok(!!productRow('prod-v1') && !!productRow('prod-ver'), 'legacy v1 products persisted (backward compat end-to-end)');
+  {
+    const r = productRow('prod-legacy-dw'); const a = JSON.parse(r?.attributes || '{}');
+    ok(!!r && a.diamond_weight === 0.5 && !('stones' in a), `legacy diamond weight kept as recorded, no stone rows invented (${JSON.stringify({ dw: a.diamond_weight, stones: a.stones })})`);
+    await openDetailText(app, 'prod-legacy-dw');
+    const fuss = String(await app.ev(`return document.querySelector('[data-stones-diamond-total]')?.textContent || '';`));
+    ok(fuss.startsWith('Diamond weight 0.50 ct — recorded before the stone list'), `legacy diamond weight shown on the desktop as "recorded before the stone list" (${fuss || 'kein Feld'} · ${String(await app.ev(`const e=document.querySelector('[data-stones-editor]'); const tx=document.body.innerText; const i=tx.search(/Stones|Diamond/); return 'editor=' + !!e + ' · ' + (i < 0 ? 'kein Stones/Diamond im Text' : tx.slice(Math.max(0, i - 20), i + 140).replace(/\\s+/g, ' '));`))})`);
+    const re = await editProductName(app, 'prod-legacy-dw', 'Legacy Diamond Ring', 'Legacy Diamond Ring EDITED');
+    const a2 = JSON.parse(productRow('prod-legacy-dw')?.attributes || '{}');
+    ok(re.includes('Legacy Diamond Ring EDITED') && a2.diamond_weight === 0.5 && !('stones' in a2), `a text-only desktop edit keeps the legacy diamond weight (${JSON.stringify({ dw: a2.diamond_weight })})`);
+  }
 
   // ── restart: no re-drain (persisted inbox drains exactly once) ──
   app.close(); killApp(); await sleep(1500);
   const ws2 = await startApp(); const app2 = new CDP(ws2); await waitInvoke(app2);
-  ok(inboxCount() === 8 && readyCount() === 8, 'after restart: 8 inbox rows all ready (no re-drain duplicates)');
-  ok(productCount() >= 8, 'after restart: all products persisted');
+  ok(inboxCount() === 9 && readyCount() === 9, 'after restart: 9 inbox rows all ready (no re-drain duplicates)');
+  ok(productCount() >= 9, 'after restart: all products persisted');
   app2.close();
 
   // ── isolation ──
