@@ -2,12 +2,14 @@
 
 Corrected invoices stay right in every period, stock bought again for an item you already had adds up, repairs can be moved to the right client, and the phone picks the repair category.
 
-- **Stock — buying an item you already have:** items recorded as old stock (New Collection, Excel import, "Add old stock") keep their quantity when the same item is bought again. Until v0.8.96 the first purchase replaced the old quantity (2 old + 4 bought showed 4). The old pieces now stay as their own lot with their old cost, the new ones get the purchase cost, and selling takes the old ones first. Nothing is booked for the old stock.
+- **Stock — buying an item you already have:** items recorded as old stock (New Collection, Excel import, "Add old stock") keep their quantity when the same item is bought again. Until v0.8.96 the first purchase replaced the old quantity (2 old + 4 bought showed 4). The old pieces now stay as their own lot with their old cost, the new ones get the purchase cost, and selling takes the older pieces first. Nothing is booked for the old stock.
 - **Invoice corrections:**
   - Changing the tax scheme of a line (VAT 10 %, Zero-rated, Margin) keeps the customer price including VAT.
   - If a correction leaves the client overpaid, you choose **customer credit** or **refund**. A refund is owed until it is paid out; **Record refund** pays it out later in cash, bank or Benefit, also partly.
   - A line with returned pieces: only the pieces not returned can be corrected; the returned ones keep their price and tax.
   - Corrections are booked on the day they belong to. In a closed VAT quarter and before the opening date only the note and the staff member can be changed.
+  - Moving an invoice to another client moves its payments and credits with it, on their original days.
+  - Saving a correction checks that nobody changed the invoice since you opened it, on the main computer as on the second one. If someone did, nothing is saved; open the invoice again and repeat the change.
   - Saving a correction is all or nothing: if any part fails, nothing is saved.
 - **Repairs:**
   - **New Repair** starts with 0 % VAT; 10 % stays selectable.
