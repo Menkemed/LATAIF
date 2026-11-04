@@ -81,6 +81,7 @@ import { authService } from '@/core/auth/auth';
 import { installClientSession, refreshClientSessionContext } from '@/core/auth/client-session';
 import { ClientShell } from '@/components/startup/ClientShell';
 import { PendingSavesBar } from '@/components/shared/PendingSavesBar';
+import { PrimaryReachabilityBar } from '@/components/shared/PrimaryReachabilityBar';
 import { FirstRunGate } from '@/components/startup/FirstRunGate';
 import { prepareAndCloseApplication, createSingleFlight, type CloseStatus } from '@/core/lifecycle/close-orchestration';
 import { isRelaunchApproved, withTimeout, syncIdleBudgetMs, flushBudgetMs } from '@/core/lifecycle/relaunch-coordinator';
@@ -427,6 +428,7 @@ export default function App() {
         <GlobalSearch />
         <UpdateBanner />
         {clientMode && <PendingSavesBar />}
+        {clientMode && <PrimaryReachabilityBar />}
         <SyncDuplicateGuard />
         <Sidebar />
         <ErrorBoundary>

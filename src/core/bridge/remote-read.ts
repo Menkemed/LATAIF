@@ -27,6 +27,28 @@ export class RemoteReadError extends Error {
 export const ERR_UNAVAILABLE = 'SERVER_UNAVAILABLE';
 export const ERR_UNAUTHENTICATED = 'NOT_AUTHENTICATED';
 
+// ── Erreichbarkeit des Primary — damit PC2 es SAGT (PrimaryReachabilityBar) ─────────────────────────────────
+// Jede Lesefrage meldet, ob der Primary geantwortet hat. „unreachable" (Netz weg, aus, 503/504, unlesbar) und
+// „signed_out" (401/403) bleiben stehen, bis eine Lesefrage wieder eine Antwort bekommt — ein fachliches Nein IST
+// eine Antwort. Sonst zeigten die Seiten still den alten Stand oder leere Listen, als gäbe es nichts.
+export type PrimaryReachability =
+  | { state: 'ok' }
+  | { state: 'unreachable' | 'signed_out'; code: string; since: number };
+let erreichbarkeit: PrimaryReachability = { state: 'ok' };
+const hoerer = new Set<(r: PrimaryReachability) => void>();
+export function primaryReachability(): PrimaryReachability { return erreichbarkeit; }
+export function onPrimaryReachability(fn: (r: PrimaryReachability) => void): () => void {
+  hoerer.add(fn);
+  return () => { hoerer.delete(fn); };
+}
+function melde(state: PrimaryReachability['state'], code = ''): void {
+  if (erreichbarkeit.state === state && (state === 'ok' || (erreichbarkeit as { code: string }).code === code)) return;
+  erreichbarkeit = state === 'ok' ? { state } : { state, code, since: Date.now() };
+  for (const h of [...hoerer]) {
+    try { h(erreichbarkeit); } catch { /* die Anzeige darf das Lesen nie stören */ }
+  }
+}
+
 type Fetcher = typeof fetch;
 
 function cfg(): { url: string; token: string } {
@@ -68,14 +90,17 @@ export async function remoteRead<T = unknown>(
     });
   } catch (e) {
     // Netz weg, Server aus, Adresse falsch — für den Benutzer ist das alles dasselbe.
+    melde('unreachable', ERR_UNAVAILABLE);
     throw new RemoteReadError(ERR_UNAVAILABLE, `server not reachable: ${String(e)}`);
   }
 
   if (res.status === 401 || res.status === 403) {
     setClientToken(null);   // die Sitzung ist verbraucht; NICHT lokal ausweichen
+    melde('signed_out', ERR_UNAUTHENTICATED);
     throw new RemoteReadError(ERR_UNAUTHENTICATED, 'the session is no longer valid', true);
   }
   if (res.status === 503 || res.status === 504) {
+    melde('unreachable', ERR_UNAVAILABLE);
     throw new RemoteReadError(ERR_UNAVAILABLE, 'the primary is not answering right now');
   }
 
@@ -83,8 +108,10 @@ export async function remoteRead<T = unknown>(
   try {
     body = await res.json() as typeof body;
   } catch {
+    melde('unreachable', ERR_UNAVAILABLE);
     throw new RemoteReadError(ERR_UNAVAILABLE, `unreadable answer (${res.status})`);
   }
+  melde('ok');   // der Primary hat geantwortet — auch ein Nein ist eine Antwort
   if (!res.ok || body.ok !== true) {
     throw new RemoteReadError(body.error || `HTTP_${res.status}`, body.message || 'the request was refused');
   }
