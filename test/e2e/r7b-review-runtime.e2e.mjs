@@ -7,9 +7,11 @@
 //          nächste Start ist angemeldet und findet den Eintrag. (Der R7B-Lauf beendet hart per taskkill und
 //          wartet dafür fest 6,5 s; dieser Lauf zeigt, dass der reguläre Weg das nicht braucht.)
 //   PP-4   Der Taktgeber in der ECHTEN Anwendung: die Uhr der Seite steht per Test-Skript kurz vor
-//          Mitternacht am 30.09.; ohne Klick, ohne Neuladen, ohne Ausgabenliste entsteht der Oktober genau
-//          einmal, ein weiterer Takt legt nichts nach. Nach regulärem Neustart (Uhr 02.12.) werden November
-//          und Dezember nachgeholt — jeder Monat genau einmal, nichts doppelt.
+//          Mitternacht am letzten Tag des laufenden Monats (M0); ohne Klick, ohne Neuladen, ohne Ausgabenliste
+//          entsteht der Folgemonat (M1) genau einmal, ein weiterer Takt legt nichts nach. Nach regulärem Neustart
+//          (Uhr am 2. von M3) werden M2 und M3 nachgeholt — jeder Monat genau einmal, nichts doppelt. Die Monate
+//          kommen vom Lauftag (bis 11/2026 fest September–Dezember 2026, danach rot). Der Sprung über mehr als
+//          30 Tage lässt die Sitzung ablaufen: die Anmeldemaske ist dann richtig, der Lauf meldet sich regulär neu an.
 //   PP-12  Fristmessung ohne Oberfläche: dieselbe Fernbuchung (/api/command) mit dem größten Dokument
 //          (dreimal, wachsende Datenbank), die Inhaltsauskunft und die Erkennung an 24 MP — Zeit je Anfrage
 //          am Rechner des Aufrufers gemessen (Loopback, performance.now).
@@ -1062,55 +1064,72 @@ try {
     const { identifier } = await primary.send('Page.addScriptToEvaluateOnNewDocument', { source: uhrSkript(ziel.getTime()) });
     await primary.ev('setTimeout(() => location.reload(), 50); return 1;');
     await sleep(6000);
+    // Sitzungen gelten 30 Tage (auth.ts); springt die Seitenuhr weiter, verwirft der Start sie zu Recht → Anmeldung.
+    await warteBis(primary, `!!document.querySelector(${S(SHELL)}) || !!document.querySelector('input[type="password"]')`, 90000);
+    let neuAngemeldet = false;
+    if (!(await exists(primary, SHELL)) && await exists(primary, 'input[type="password"]')) {
+      await primary.ev(DIALOGE_PRIMARY);
+      await setVal(primary, 'input[type="email"]', OWNER_EMAIL);
+      await setVal(primary, 'input[type="password"]', ONBOARD_PW);
+      await clickText(primary, 'Sign In');
+      neuAngemeldet = true;
+    }
     await waitFor(primary, SHELL, 90000);
     const jetzt = await seitenZeit();
     if (Math.abs(jetzt - ziel.getTime()) > 30000) throw new Error(`clock not applied: page ${new Date(jetzt).toString()} vs ${ziel.toString()}`);
-    return identifier;
+    return { identifier, neuAngemeldet };
   }
 
   // ══════════════════════════════════════════════════════════════════════
   // PP-4 — der Taktgeber in der echten Anwendung
   // ══════════════════════════════════════════════════════════════════════
   let TID = '';
+  // Die Monate dieses Laufs vom Lauftag: M0 = der laufende Monat, M1..M3 die folgenden. Der Dauerauftrag beginnt am 1. von
+  // M0 — heute schon fällig, nie in der Zukunft (er legt monatsweise an, vom Startmonat bis zum Monat der Seitenuhr).
+  const JETZT = new Date();
+  const monat = (n) => { const d = new Date(JETZT.getFullYear(), JETZT.getMonth() + n, 1); return { y: d.getFullYear(), m: d.getMonth(), key: `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}` }; };
+  const [M0, M1, M2, M3] = [0, 1, 2, 3].map(monat);
+  const tagText = (d) => `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.`;
   {
     const login = await api('/api/auth/login', { email: OWNER_EMAIL, password: OWNER_PW });
     const token = login.j?.token;
     ok(login.status === 200 && !!token, `SETUP Anmeldung am Primary-Server (${login.status})`);
     MESS.token = token;
-    const tc = await befehl('expenses.template_create', { category: 'Rent', amount: 100, paymentMethod: 'bank', payNowDefault: false, description: 'R7B Review Miete', dayOfMonth: 10, startDate: '2026-09-10' }, token);
+    const tc = await befehl('expenses.template_create', { category: 'Rent', amount: 100, paymentMethod: 'bank', payNowDefault: false, description: 'R7B Review Miete', dayOfMonth: 10, startDate: `${M0.key}-01` }, token);
     TID = String(tc.j?.value?.templateId || '');
     await spuelen(primary);
     const vorher = monate(TID);
-    ok(tc.status === 200 && !!TID && S(vorher) === S(['2026-09']), `SETUP Dauerauftrag über den echten Fernbefehl: September angelegt (${tc.status}; ${S(vorher)})`);
+    ok(tc.status === 200 && !!TID && S(vorher) === S([M0.key]), `SETUP Dauerauftrag über den echten Fernbefehl: ${M0.key} angelegt (${tc.status}; ${S(vorher)})`);
 
-    // Die Uhr der Seite: 30.09. 23:59:15 Ortszeit. Danach: kein Klick, kein Neuladen, keine Ausgabenliste.
-    const ziel = new Date(2026, 8, 30, 23, 59, 15);
-    const skriptId = await uhrStellen(ziel);
+    // Die Uhr der Seite: letzter Tag von M0, 23:59:15 Ortszeit. Danach: kein Klick, kein Neuladen, keine Ausgabenliste.
+    const ziel = new Date(M0.y, M0.m + 1, 0, 23, 59, 15);
+    if (ziel.getTime() - Date.now() < 10 * 60 * 1000) throw new Error('started less than 10 minutes before the end of the month — run again after midnight');
+    const { identifier: skriptId } = await uhrStellen(ziel);
     const start = await seitenZeit();
     const route = await primary.ev('return location.pathname;');
     ok(Math.abs(start - ziel.getTime()) < 20000 && route !== '/expenses', `CLOCK die Seite steht auf ${new Date(start).toString().slice(0, 24)} (Route ${route})`);
     await sleep(3000); await spuelen(primary);
-    ok(S(monate(TID)) === S(['2026-09']), `BOOT der Start am 30.09. legt nichts an (${S(monate(TID))})`);
+    ok(S(monate(TID)) === S([M0.key]), `BOOT der Start am ${tagText(ziel)} legt nichts an (${S(monate(TID))})`);
     // Warten bis nach Mitternacht (Seite) + höchstens ein Takt (60 s) + Puffer.
-    let oktober = 0, seitenZeitBeiFund = 0;
+    let folgemonat = 0, seitenZeitBeiFund = 0;
     const ende = Date.now() + 150000;
     while (Date.now() < ende) {
       await sleep(3000);
       await spuelen(primary);
-      oktober = monate(TID).filter((m) => m === '2026-10').length;
-      if (oktober > 0) { seitenZeitBeiFund = await seitenZeit(); break; }
+      folgemonat = monate(TID).filter((m) => m === M1.key).length;
+      if (folgemonat > 0) { seitenZeitBeiFund = await seitenZeit(); break; }
     }
-    const nachMitternacht = seitenZeitBeiFund ? (seitenZeitBeiFund - new Date(2026, 9, 1, 0, 0, 0).getTime()) / 1000 : NaN;
+    const nachMitternacht = seitenZeitBeiFund ? (seitenZeitBeiFund - new Date(M1.y, M1.m, 1, 0, 0, 0).getTime()) / 1000 : NaN;
     MESS.schedulerSekNachMitternacht = nachMitternacht;
     const routeDanach = await primary.ev('return location.pathname;');
-    RV.schedulerOct = oktober === 1 && nachMitternacht >= 0 && nachMitternacht <= 75 && routeDanach === route;
-    ok(RV.schedulerOct, `SCHEDULER der Oktober entstand ohne Klick/Neuladen/Ausgabenliste, ${nachMitternacht.toFixed(1)} s nach Mitternacht der Seite (≤ 1 Takt + Abfrage), genau einmal (${S(monate(TID))}; Route ${routeDanach})`);
+    RV.schedulerOct = folgemonat === 1 && nachMitternacht >= 0 && nachMitternacht <= 75 && routeDanach === route;
+    ok(RV.schedulerOct, `SCHEDULER der Folgemonat ${M1.key} entstand ohne Klick/Neuladen/Ausgabenliste, ${nachMitternacht.toFixed(1)} s nach Mitternacht der Seite (≤ 1 Takt + Abfrage), genau einmal (${S(monate(TID))}; Route ${routeDanach})`);
     await sleep(65000); await spuelen(primary);
-    RV.schedulerOnce = S(monate(TID)) === S(['2026-09', '2026-10']);
+    RV.schedulerOnce = S(monate(TID)) === S([M0.key, M1.key]);
     ok(RV.schedulerOnce, `SCHEDULER ein weiterer Takt legt nichts nach (${S(monate(TID))})`);
     await primary.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: skriptId }).catch(() => null);
 
-    // Reguläres Beenden direkt nach einem frischen Eintrag — dann Neustart mit Uhr 02.12.: Nachholen ohne Duplikat.
+    // Reguläres Beenden direkt nach einem frischen Eintrag — dann Neustart mit Uhr am 2. von M3: Nachholen ohne Duplikat.
     const probe = String(Date.now());
     await primary.ev(`localStorage.setItem('r7b_review_probe', ${S(probe)}); return 1;`);
     const pid = eigenerPrimary();
@@ -1125,17 +1144,20 @@ try {
     RV.closeProbe = angemeldet && gefunden === probe;
     ok(RV.closeProbe, `CLOSE nach regulärem Beenden ohne Wartezeit: angemeldet und der frische Eintrag ist da (${gefunden === probe})`);
     await primary.ev(DIALOGE_PRIMARY);
-    await uhrStellen(new Date(2026, 11, 2, 9, 0, 0));
+    const neustartUhr = new Date(M3.y, M3.m, 2, 9, 0, 0);
+    const { neuAngemeldet } = await uhrStellen(neustartUhr);
+    // Mehr als 30 Tage nach der Anmeldung: die Sitzung ist abgelaufen, der Start verlangt die Anmeldung — erst danach weiter.
+    ok(neuAngemeldet, `RESTART nach dem Sprung auf den ${tagText(neustartUhr)} ist die 30-Tage-Sitzung abgelaufen: Anmeldemaske, reguläre Anmeldung, Oberfläche`);
     let nachgeholt = [];
-    for (let i = 0; i < 20; i++) {
+    for (let i = 0; i < 45; i++) {
       await sleep(2000); await spuelen(primary);
       nachgeholt = monate(TID);
-      if (nachgeholt.includes('2026-12')) break;
+      if (nachgeholt.includes(M3.key)) break;
     }
     await sleep(3000); await spuelen(primary);
     nachgeholt = monate(TID);
-    RV.restartCatchUp = S(nachgeholt) === S(['2026-09', '2026-10', '2026-11', '2026-12']);
-    ok(RV.restartCatchUp, `RESTART nach dem Neustart (Uhr 02.12.) November und Dezember nachgeholt, jeder Monat genau einmal (${S(nachgeholt)})`);
+    RV.restartCatchUp = S(nachgeholt) === S([M0.key, M1.key, M2.key, M3.key]);
+    ok(RV.restartCatchUp, `RESTART nach dem Neustart (Uhr ${tagText(neustartUhr)}) ${M2.key} und ${M3.key} nachgeholt, jeder Monat genau einmal (${S(nachgeholt)})`);
     ok(zahl('SELECT COUNT(*) AS n FROM (SELECT recurring_template_id, substr(expense_date,1,7) m, COUNT(*) c FROM expenses WHERE recurring_template_id IS NOT NULL GROUP BY 1, 2 HAVING c > 1)') === 0,
       'RESTART kein Monat doppelt (über alle Daueraufträge)');
   }

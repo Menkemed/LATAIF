@@ -12,6 +12,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
 import { killOwnChild, killTestImage, killTestPid } from './_e2e-process.mjs';
+import { edgeDebugPort, closeEdgeOnPort } from './_e2e-browser.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, writeFileSync, readFileSync } from 'node:fs';
 import { join, dirname, sep } from 'node:path';
 import { createHash } from 'node:crypto';
@@ -46,7 +47,7 @@ const ok = (c, m) => { if (c) PASS++; else { FAIL++; fails.push(m); console.log(
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const S = (v) => JSON.stringify(v);
 const MOCK_PORT = 3013;
-const EDGE_CDP = 9226;
+const EDGE_CDP = edgeDebugPort();
 const EDGE_PROFILE = join(RUN, 'edge-profile');
 const EDGE = existsSync('C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe')
   ? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
@@ -162,7 +163,8 @@ async function startEdge(url) {
   await sleep(2500);
   return { c, uploads, responses };
 }
-function killEdge() {
+async function killEdge() {
+  await closeEdgeOnPort(EDGE_CDP);
   try { killOwnChild(edgeProc); } catch (e) {}
 }
 const existsE = (c, sel) => c.ev('return !!document.querySelector(' + S(sel) + ');');
@@ -376,7 +378,7 @@ async function api(path, opts = {}, token) {
 }
 
 async function main() {
-  killAllApp(); killEdge(); await sleep(1200);
+  killAllApp(); await killEdge(); await sleep(1200);
   ok(await waitPortFree(PORT), 'isolated port ' + PORT + ' is free before start (no zombie server)');
   ok(await waitPortFree(MOCK_PORT), 'mock port ' + MOCK_PORT + ' is free before start');
   mkdirSync(join(RUN, 'tmp'), { recursive: true });
@@ -963,7 +965,7 @@ async function main() {
   }
   ok(afterManual === beforeManual + 1, 'ai-failure: a manual upload still works afterwards (' + beforeManual + ' -> ' + afterManual + ')');
 
-  killEdge();
+  await killEdge();
   stopMock();
 
   // ══ durability: a restart keeps every check ══════════════════════════════
@@ -982,8 +984,8 @@ async function main() {
   console.log(`\nMOBILE-I1D check-item/stock e2e: ${PASS} passed, ${FAIL} failed`);
 }
 
-main().catch((e) => { console.error('E2E ERROR:', e?.stack || e?.message || e); FAIL++; }).finally(() => {
-  try { killEdge(); } catch {}
+main().catch((e) => { console.error('E2E ERROR:', e?.stack || e?.message || e); FAIL++; }).finally(async () => {
+  try { await killEdge(); } catch {}
   try { stopMock(); } catch {}
   try { killAllApp(); } catch {}
   try { rmSync(RUN, { recursive: true, force: true }); } catch {}

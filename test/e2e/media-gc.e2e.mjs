@@ -21,6 +21,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
 import { killOwnChild, killTestImage, killTestPid } from './_e2e-process.mjs';
+import { edgeDebugPort, closeEdgeOnPort } from './_e2e-browser.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -34,7 +35,7 @@ const EDGE = existsSync('C:/Program Files (x86)/Microsoft/Edge/Application/msedg
   : 'C:/Program Files/Microsoft/Edge/Application/msedge.exe';
 const IDENT = 'com.lataif.app.e2e';
 const APP_CDP = 9223;      // the app's WebView2 CDP (baked into tauri.e2e.conf.json)
-const EDGE_CDP = 9224;     // our separate real-browser CDP
+const EDGE_CDP = edgeDebugPort();     // our separate real-browser CDP
 const PORT = 3011;         // isolated LAN server port (production keeps 3001)
 const BASE = `http://127.0.0.1:${PORT}`;
 const OWNER_EMAIL = 'admin@lataif.com';
@@ -186,7 +187,7 @@ async function startEdge(url, neuterRandomUUID, profile = EDGE_PROFILE) {
   await sleep(1500);
   return { c, uploads, responses };
 }
-function killEdge() { try { killOwnChild(edgeProc); } catch {} }
+async function killEdge() { await closeEdgeOnPort(EDGE_CDP); try { killOwnChild(edgeProc); } catch {} }
 const existsE = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
 const visibleE = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); return !!e && !e.classList.contains('hidden') && e.offsetParent!==null;`);
 async function waitE(c, sel, t = 20000) { const end = Date.now() + t; while (Date.now() < end) { if (await existsE(c, sel)) return true; await sleep(200); } throw new Error('waitE ' + sel); }
@@ -263,7 +264,7 @@ async function main() {
   const upEnd = Date.now() + 20000; while (Date.now() < upEnd && (uploads.length < 1 || !responses.some((s) => s === 201 || s === 200))) await sleep(200);
   ok(responses.some((s) => s === 201 || s === 200), 'referenced upload accepted (2xx)');
   const ent1 = uploads[0]?.entity_id;
-  await edge.close(); killEdge(); await sleep(1500);
+  await edge.close(); await killEdge(); await sleep(1500);
   await frontendLogin(app);
   let ready = await pollInbox('ready', 45000);
   if (!ready) { await app.ev(`window.location.reload();`).catch(() => {}); await sleep(3000); ready = await pollInbox('ready', 30000); }
@@ -336,7 +337,7 @@ async function main() {
   const e3 = Date.now() + 20000; while (Date.now() < e3 && !r3.some((s) => s === 201 || s === 200)) await sleep(200);
   await sleep(800);
   ok(dbQuery(`SELECT COUNT(*) FROM mobile_upload_inbox`)[0][0] === inboxBefore + 1, 'post-GC mobile upload is exactly-once (one new inbox event, no duplicate)');
-  await edge3.close(); killEdge();
+  await edge3.close(); await killEdge();
 
   // ── security / isolation ──
   ok(verify().secret_leaks === '0', 'no owner secret in the audit sink');
@@ -348,8 +349,8 @@ async function main() {
 
   console.log(`\nMEDIA-ROOT-GC real-app e2e: ${PASS} passed, ${FAIL} failed`);
 }
-main().catch((e) => { console.error('E2E ERROR:', e?.stack || e?.message || e); FAIL++; }).finally(() => {
-  try { killEdge(); } catch {}
+main().catch((e) => { console.error('E2E ERROR:', e?.stack || e?.message || e); FAIL++; }).finally(async () => {
+  try { await killEdge(); } catch {}
   try { killAllApp(); } catch {}
   try { rmSync(RUN, { recursive: true, force: true }); } catch {}
   try { rmSync(APP_DATA_DIR, { recursive: true, force: true }); } catch {}

@@ -13,6 +13,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
 import { killOwnChild, killTestImage } from './_e2e-process.mjs';
+import { edgeDebugPort, closeEdgeOnPort } from './_e2e-browser.mjs';
 import { mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -23,7 +24,7 @@ const APP = join(REPO, 'src-tauri/target/debug/lataif.exe');
 const SEED = join(REPO, 'src-tauri/target/debug/examples/e2e_scope_seed.exe');
 const IDENT = 'com.lataif.app.e2e';
 const APP_CDP = 9223, PORT = 3011, BASE = `http://127.0.0.1:${PORT}`;
-const EDGE_CDP = 9227;
+const EDGE_CDP = edgeDebugPort();
 const OWNER_EMAIL = 'admin@lataif.com';
 const OWNER_PW = 'e2e-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 const ONBOARD_PW = 'e2epass123';
@@ -85,7 +86,7 @@ async function startApp() {
   return c;
 }
 function killAllApp() { try { killTestImage('lataif.exe'); } catch {} }
-function killEdge() { try { edgeProc && killOwnChild(edgeProc); } catch {} }
+async function killEdge() { await closeEdgeOnPort(EDGE_CDP); try { edgeProc && killOwnChild(edgeProc); } catch {} }
 async function waitProcessGone(ms = 25000) {
   const end = Date.now() + ms;
   while (Date.now() < end) {
@@ -247,7 +248,7 @@ function seedProducts(n) {
 
 async function main() {
   console.log('POST-V0838 §G2 — mobile search detail focus e2e');
-  killAllApp(); killEdge(); await waitProcessGone(); await waitPortFree(PORT);
+  killAllApp(); await killEdge(); await waitProcessGone(); await waitPortFree(PORT);
   rmSync(APP_DATA_DIR, { recursive: true, force: true });
   rmSync(WV2_DIR, { recursive: true, force: true });
   mkdirSync(APP_DATA_DIR, { recursive: true });
@@ -447,7 +448,7 @@ async function main() {
   ok(JSON.stringify(prodBefore) === JSON.stringify(prodAfter), 'isolation: the production business DB is untouched');
 
   try { edge.close(); } catch {}
-  killEdge();
+  await killEdge();
   try { app.close(); } catch {}
   killAllApp();
   await waitProcessGone();
@@ -457,4 +458,4 @@ async function main() {
   if (FAIL > 0) { for (const f of fails) console.log('   - ' + f); process.exit(1); }
 }
 
-main().catch((e) => { console.error(e); killEdge(); killAllApp(); process.exit(1); });
+main().catch(async (e) => { console.error(e); await killEdge(); killAllApp(); process.exit(1); });

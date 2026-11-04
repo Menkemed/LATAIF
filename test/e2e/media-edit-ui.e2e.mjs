@@ -10,6 +10,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
 import { killOwnChild, killTestImage, killTestPid } from './_e2e-process.mjs';
+import { edgeDebugPort, closeEdgeOnPort } from './_e2e-browser.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -22,7 +23,7 @@ const EDGE = existsSync('C:/Program Files (x86)/Microsoft/Edge/Application/msedg
   ? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
   : 'C:/Program Files/Microsoft/Edge/Application/msedge.exe';
 const IDENT = 'com.lataif.app.e2e';
-const APP_CDP = 9223, EDGE_CDP = 9224, PORT = 3011, BASE = `http://127.0.0.1:${PORT}`;
+const APP_CDP = 9223, EDGE_CDP = edgeDebugPort(), PORT = 3011, BASE = `http://127.0.0.1:${PORT}`;
 const OWNER_EMAIL = 'admin@lataif.com';
 const OWNER_PW = 'e2e-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 const ONBOARD_PW = 'e2epass123', TENANT = 'tenant-1', BRANCH = 'branch-main';
@@ -250,7 +251,7 @@ async function startEdge(url) {
   await c.send('Page.navigate', { url }); await sleep(1500);
   return { c, uploads, responses };
 }
-function killEdge() { try { killOwnChild(edgeProc); } catch {} }
+async function killEdge() { await closeEdgeOnPort(EDGE_CDP); try { killOwnChild(edgeProc); } catch {} }
 const setOffline = (c, off) => c.send('Network.emulateNetworkConditions', { offline: off, latency: 0, downloadThroughput: off ? 0 : -1, uploadThroughput: off ? 0 : -1 });
 const existsE = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
 const visE = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); return !!e && !e.classList.contains('hidden') && e.offsetParent!==null;`);
@@ -381,7 +382,7 @@ async function main() {
   ok(inboxCount() === inboxBefore + 1, 'a SECOND retry creates no second inbox event (exactly-once)');
   const PID = q0.entityId;
 
-  await edge.close(); killEdge();
+  await edge.close(); await killEdge();
 
   // ══ drain → product + media + receipt + exact prices ══
   await frontendLogin(app);
@@ -594,8 +595,8 @@ async function main() {
 
   console.log(`\nMOBILE-MEDIA-PRICING-I1C ui/offline e2e: ${PASS} passed, ${FAIL} failed`);
 }
-main().catch((e) => { console.error('E2E ERROR:', e?.stack || e?.message || e); FAIL++; }).finally(() => {
-  try { killEdge(); } catch {} try { killAllApp(); } catch {}
+main().catch((e) => { console.error('E2E ERROR:', e?.stack || e?.message || e); FAIL++; }).finally(async () => {
+  try { await killEdge(); } catch {} try { killAllApp(); } catch {}
   try { rmSync(RUN, { recursive: true, force: true }); } catch {}
   if (FAIL > 0) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
 });

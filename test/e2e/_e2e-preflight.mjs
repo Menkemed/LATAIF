@@ -26,7 +26,7 @@
 // running — which is luck, not a guarantee.
 
 import { existsSync, readFileSync, statSync, mkdirSync } from 'node:fs';
-import { basename, join } from 'node:path';
+import { basename, dirname, join } from 'node:path';
 import { execFileSync } from 'node:child_process';
 
 /** The isolated identity every E2E app must run under. */
@@ -189,7 +189,13 @@ const REQUIRED_CLIENT_MARKERS = [
   { name: 'e2e feature build marker', bytes: 'LATAIF_E2E_BUILD_MARKER_V1' },
 ];
 
-/** Dasselbe Versprechen wie `assertE2eBinary`, fuer das Client-Artefakt. */
+/** Die Namen der eingebetteten Frontend-Dateien eines Baus (`assets/<name>-<hash>.js|css`), sortiert. */
+function frontendAssets(buf) {
+  const s = buf.toString('latin1');
+  return [...new Set([...s.matchAll(/assets\/[A-Za-z0-9_.-]+-[A-Za-z0-9_-]{8}\.(?:js|css)/g)].map((m) => m[0]))].sort();
+}
+
+/** Dasselbe Versprechen wie `assertE2eBinary`, fuer das Client-Artefakt — und vom selben Bau wie der Primary daneben. */
 export function assertE2eClientBinary(appPath) {
   if (!existsSync(appPath)) {
     throw new E2eIdentityError(
@@ -209,6 +215,22 @@ export function assertE2eClientBinary(appPath) {
   // auf demselben AppData und derselben Single-Instance-Sperre.
   if (hasMarker(buf, E2E_IDENT) && !hasMarker(buf, E2E_CLIENT_IDENT)) {
     throw new E2eIdentityError(`${basename(appPath)} carries the primary identity — it is not a separate client artefact.`);
+  }
+  // Und es ist DERSELBE STAND wie der Primary daneben: ein Client aus einem älteren Bau fuhr sonst still gegen den neuen
+  // Primary (veraltete Client-Läufe). Verglichen werden die Namen der eingebetteten Frontend-Dateien — Vite hasht sie
+  // nach Inhalt, gleiche Namen heißen dasselbe Frontend.
+  const primary = join(dirname(appPath), 'lataif.exe');
+  if (existsSync(primary)) {
+    const p = frontendAssets(readFileSync(primary)), c = frontendAssets(buf);
+    const nurP = p.filter((x) => !c.includes(x)), nurC = c.filter((x) => !p.includes(x));
+    if (p.length === 0 || nurP.length > 0 || nurC.length > 0) {
+      throw new E2eIdentityError(
+        `${basename(appPath)} is NOT from the same build as ${basename(primary)} (frontend files: ${p.length} vs ${c.length}, `
+          + `only primary ${nurP.slice(0, 3).join(', ') || '-'}, only client ${nurC.slice(0, 3).join(', ') || '-'}). Rebuild the client from this tree:\n`
+          + '  npx tauri build --debug --no-bundle --features e2e --config src-tauri/tauri.e2e-client.conf.json\n'
+          + '  cp src-tauri/target/debug/lataif.exe src-tauri/target/debug/lataif-e2e-client.exe   (then rebuild the primary)',
+      );
+    }
   }
   return { verified: REQUIRED_CLIENT_MARKERS.map((m) => m.name), sizeBytes: statSync(appPath).size };
 }

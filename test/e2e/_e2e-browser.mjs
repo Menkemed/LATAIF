@@ -48,6 +48,22 @@ export async function closeEdge(wsUrl, port, budgetMs = 10000) {
   return false;
 }
 
+/**
+ * Ein eigener Debug-Port je Lauf (9700–9979). Ein fester Port (früher 9224) traf nach einem stehengebliebenen Edge
+ * den nächsten Lauf — und 9224 ist in den Zwei-App-Läufen das Fenster von PC2 („no CDP page on 9224").
+ */
+export function edgeDebugPort() {
+  return 9700 + Math.floor(Math.random() * 280);
+}
+
+/**
+ * Schließt den Test-Edge auf dem EIGENEN Port dieses Laufs über seine Debug-Verbindung (wie `closeEdge`).
+ * Für Läufe, die die Browser-Verbindung nicht beim Start festhalten; der Port ist zufällig und gehört nur diesem Lauf.
+ */
+export async function closeEdgeOnPort(port, budgetMs = 10000) {
+  return closeEdge(await edgeBrowserEndpoint(port), port, budgetMs);
+}
+
 /** Nur lesend: wie viele `msedge.exe` laufen mit genau diesem Profil? (-1: Liste nicht lesbar) */
 export function edgeProfileProcesses(profileDir) {
   const dir = String(profileDir || '');

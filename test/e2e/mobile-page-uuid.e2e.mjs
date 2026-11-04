@@ -14,6 +14,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
 import { killOwnChild, killTestImage, killTestPid } from './_e2e-process.mjs';
+import { edgeDebugPort, closeEdgeOnPort } from './_e2e-browser.mjs';
 import { mkdirSync, rmSync, existsSync, statSync, writeFileSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -27,7 +28,7 @@ const EDGE = existsSync('C:/Program Files (x86)/Microsoft/Edge/Application/msedg
   : 'C:/Program Files/Microsoft/Edge/Application/msedge.exe';
 const IDENT = 'com.lataif.app.e2e';
 const APP_CDP = 9223;      // the app's WebView2 CDP (baked into tauri.e2e.conf.json)
-const EDGE_CDP = 9224;     // our separate real-browser CDP
+const EDGE_CDP = edgeDebugPort();     // our separate real-browser CDP
 const PORT = 3011;         // isolated LAN server port (production keeps 3001)
 const BASE = `http://127.0.0.1:${PORT}`;
 const OWNER_EMAIL = 'admin@lataif.com';
@@ -179,7 +180,7 @@ async function startEdge(url, neuterRandomUUID, profile = EDGE_PROFILE) {
   await sleep(1500);
   return { c, uploads, responses };
 }
-function killEdge() { try { killOwnChild(edgeProc); } catch {} }
+async function killEdge() { await closeEdgeOnPort(EDGE_CDP); try { killOwnChild(edgeProc); } catch {} }
 const existsE = (c, sel) => c.ev(`return !!document.querySelector(${S(sel)});`);
 const visibleE = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); return !!e && !e.classList.contains('hidden') && e.offsetParent!==null;`);
 async function waitE(c, sel, t = 20000) { const end = Date.now() + t; while (Date.now() < end) { if (await existsE(c, sel)) return true; await sleep(200); } throw new Error('waitE ' + sel); }
@@ -256,7 +257,7 @@ async function main() {
   ok(dbQuery(`SELECT COUNT(*) FROM mobile_upload_inbox`)[0][0] === 1, 'exactly one inbox row total after the first upload');
 
   // ── §4 offline → retry reuses the SAME (new) id; forces the getRandomValues branch ──
-  await edge.close(); killEdge(); await sleep(2500); // free CDP port 9224 before the second browser
+  await edge.close(); await killEdge(); await sleep(2500); // the first browser is closed (Browser.close) before the second one starts on the same port
   const { c: edge2, uploads: uploads2, responses: responses2 } = await startEdge(`${BASE}/mobile`, true, join(RUN, 'edge-profile2')); // randomUUID neutered → LAN fallback
   await mobileLogin(edge2);
   await edge2.send('Network.emulateNetworkConditions', { offline: true, latency: 0, downloadThroughput: 0, uploadThroughput: 0 });
@@ -298,8 +299,8 @@ async function main() {
 
   console.log(`\nMOBILE-UUID-I1 real-page e2e: ${PASS} passed, ${FAIL} failed`);
 }
-main().catch((e) => { console.error('E2E ERROR:', e?.stack || e?.message || e); FAIL++; }).finally(() => {
-  try { killEdge(); } catch {}
+main().catch((e) => { console.error('E2E ERROR:', e?.stack || e?.message || e); FAIL++; }).finally(async () => {
+  try { await killEdge(); } catch {}
   try { killAllApp(); } catch {}
   try { rmSync(RUN, { recursive: true, force: true }); } catch {}
   try { rmSync(APP_DATA_DIR, { recursive: true, force: true }); } catch {}

@@ -18,7 +18,11 @@ Das heißt für jede Umsetzung nach einem freigegebenen Preview:
 
 Diese E2E-Läufe sind rot, ohne dass ein Produktfehler nachgewiesen ist. Sie zählen nicht als Nachweis und nicht als Blocker, solange ihre Abdeckung anderswo steht.
 
-- `client-service`, `client-remaining-actions`: nutzen die Navigation `data-client-area`, die seit `71d1fc4` fehlt, und stoppen im Aufbau. Abgedeckt durch `r5a`, `r5c-*`, `r5d`, `r5f`, `r4c3` und die Befehls-Tests im Node-Gesamttest.
-- `r7b-review-runtime`: fest auf September 2026 eingestellt (Daueraufträge), außerdem endet er nach hartem Beenden an der Anmeldemaske. Fachlich nicht von Repair oder Preisen berührt.
+- `c5-operational-acceptance`, `client-commercial`, `client-financial`, `client-invoice-lifecycle`, `client-invoice-ui`, `client-masterdata-ui`, `client-transfer-lifecycle`: nutzen die Navigation `data-client-area` des alten Client-Bereichs, den `71d1fc4` entfernt hat, und stoppen im Aufbau. Die Abläufe fahren heute die Zwei-App-Läufe `r3`–`r6*` über die gemeinsame Oberfläche; ob jede Prüfung dort steht (bei C5 auch Neustart und Ausfall), ist je Datei noch zu belegen, bevor sie entfernt oder umgeschrieben wird.
 
-Vierzehn Läufe (`mobile-*`, `media-*`) lassen ihren Test-Browser auf Port 9224 stehen. Danach meldet jeder PC2-Lauf „no CDP page on 9224“. Das ist kein Produktfehler; nur Prozesse mit Testprofil beenden.
+Entfernt (v0.8.97): `client-service`, `client-remaining-actions` — dieselbe tote Navigation. Die Abläufe stehen in `r5a`, `r5c-*`, `r5d`, `r5d1`, `r5f`, `r4c3`, die Rennen, verlorenen Antworten und alten Stände auf Befehlsebene in `service-documents` (letztes Stück), `return-chain`, `lifecycle-actions` und `financial-actions` im Node-Gesamttest.
+
+Behoben (v0.8.97):
+- `r7b-review-runtime` leitet die Monate vom Lauftag ab. Die Anmeldemaske nach dem Uhrsprung war kein hartes Beenden, sondern die richtig abgelaufene 30-Tage-Sitzung; der Lauf meldet sich dort regulär neu an.
+- Die vierzehn `mobile-*`/`media-*`-Läufe schließen ihren Test-Edge über seine Debug-Verbindung (`closeEdgeOnPort`, `_e2e-browser.mjs`) auf einem eigenen Port je Lauf (`edgeDebugPort`) statt fest 9224.
+- `assertE2eClientBinary` weist einen Client ab, der nicht vom selben Bau wie der Primary daneben stammt (eingebettete Frontend-Dateien).

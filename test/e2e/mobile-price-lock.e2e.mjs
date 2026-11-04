@@ -21,6 +21,7 @@
 import { spawn, execFileSync } from 'node:child_process';
 import { e2ePreflight } from './_e2e-preflight.mjs';
 import { killOwnChild, killTestImage, killTestPid } from './_e2e-process.mjs';
+import { edgeDebugPort, closeEdgeOnPort } from './_e2e-browser.mjs';
 import { mkdirSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import os from 'node:os';
@@ -33,7 +34,7 @@ const EDGE = existsSync('C:/Program Files (x86)/Microsoft/Edge/Application/msedg
   ? 'C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe'
   : 'C:/Program Files/Microsoft/Edge/Application/msedge.exe';
 const IDENT = 'com.lataif.app.e2e';
-const APP_CDP = 9223, EDGE_CDP = 9224, PORT = 3011, BASE = `http://127.0.0.1:${PORT}`;
+const APP_CDP = 9223, EDGE_CDP = edgeDebugPort(), PORT = 3011, BASE = `http://127.0.0.1:${PORT}`;
 const OWNER_EMAIL = 'admin@lataif.com';
 const OWNER_PW = 'e2e-' + Math.random().toString(36).slice(2) + Math.random().toString(36).slice(2);
 const ONBOARD_PW = 'e2epass123', TENANT = 'tenant-1', BRANCH = 'branch-main';
@@ -85,7 +86,7 @@ async function startApp() {
 }
 function killApp() { try { killTestPid(appProc.pid); } catch {} }
 function killAllApp() { try { killTestImage('lataif.exe'); } catch {} }
-function killEdge() { try { killOwnChild(edgeProc); } catch {} }
+async function killEdge() { await closeEdgeOnPort(EDGE_CDP); try { killOwnChild(edgeProc); } catch {} }
 async function waitPortFree(port, ms = 15000) { const end = Date.now() + ms; while (Date.now() < end) { let n = 1; try { n = parseInt(execFileSync('powershell', ['-NoProfile', '-Command', `(Get-NetTCPConnection -State Listen -LocalPort ${port} -EA SilentlyContinue).Count`], { encoding: 'utf8' }).trim() || '0', 10); } catch { n = 0; } if (!n) return true; await sleep(500); } return false; }
 async function waitHealthy() { const end = Date.now() + 40000; while (Date.now() < end) { try { if ((await fetch(`${BASE}/api/health`, { signal: AbortSignal.timeout(2000) })).ok) return true; } catch {} await sleep(500); } throw new Error('server never healthy'); }
 async function waitInvoke(c) { const end = Date.now() + 60000; while (Date.now() < end) { if (await c.ev(`return !!(window.__TAURI_INTERNALS__ && window.__TAURI_INTERNALS__.invoke);`)) return; await sleep(400); } throw new Error('no invoke'); }
@@ -407,13 +408,13 @@ async function main() {
   ok(consoleErrors.length === 0, `no uncaught page exception (${consoleErrors.slice(0, 2).join(' | ')})`);
   ok(httpErrors.length === 0, `no unexpected HTTP error (${S(httpErrors.slice(0, 3))})`);
 
-  edge.closeWs(); killEdge(); app.closeWs(); killApp();
+  edge.closeWs(); await killEdge(); app.closeWs(); killApp();
 }
 
 main()
   .catch((e) => { FAIL++; fails.push('harness: ' + (e?.message ?? e)); console.error(e); })
   .finally(async () => {
-    killEdge(); killAllApp();
+    await killEdge(); killAllApp();
     await waitPortFree(PORT, 10000);
     try { rmSync(RUN, { recursive: true, force: true }); } catch {}
     console.log(`\nMOBILE price-lock DOM: ${PASS} passed, ${FAIL} failed`);
