@@ -543,15 +543,18 @@ try {
     ok(sichtbar, `M5 PC2 sieht die Reparatur des Telefons in seiner Liste (${REP_NR})`);
     // MOBILE-REPAIR-GALLERY — die Fotos des Telefons (Kamera + Galerie) stehen in der Reparatur auf PC2 UND am
     // Primary — wirklich geladen (naturalWidth > 0), nicht nur als leere Rahmen.
+    // Seit 2f40d944 zeigt die Reparatur das Foto gross (alt "Item photo") und darunter je Foto ein Vorschaubild
+    // (alt "Item photo 1" …) — beides getrennt zaehlen, sonst kommt das grosse Foto doppelt in die Summe.
     const sollBilder = fotosVon(REP_ID).length;
-    const geladen = `[...document.querySelectorAll('img[alt^="Item photo"]')].filter((i) => i.complete && i.naturalWidth > 0).length`;
-    const pc2Bilder = await warteBis(client, `${geladen} === ${sollBilder}`, 60000);
-    const pc2Zahl = await client.ev(`return ${geladen};`);
-    ok(sollBilder === 3 && pc2Bilder, `GALERIE PC2 zeigt alle Fotos der Telefon-Reparatur, geladen (${pc2Zahl}/${sollBilder})`);
+    const geladen = (sel) => `[...document.querySelectorAll(${S(sel)})].filter((i) => i.complete && i.naturalWidth > 0).length`;
+    const VORSCHAU = 'img[alt^="Item photo "]', GROSS = 'img[alt="Item photo"]';
+    const pc2Bilder = await warteBis(client, `${geladen(VORSCHAU)} === ${sollBilder} && ${geladen(GROSS)} === 1`, 60000);
+    const pc2Zahl = { vorschau: await client.ev(`return ${geladen(VORSCHAU)};`), gross: await client.ev(`return ${geladen(GROSS)};`) };
+    ok(sollBilder === 3 && pc2Bilder, `GALERIE PC2 zeigt alle Fotos der Telefon-Reparatur als Vorschau, geladen (${pc2Zahl.vorschau}/${sollBilder}), dazu genau ein grosses (${pc2Zahl.gross})`);
     await primary.ev(`history.pushState({}, '', '/repairs/' + ${S(REP_ID)}); window.dispatchEvent(new PopStateEvent('popstate')); return 1;`);
-    const primBilder = await warteBis(primary, `${geladen} === ${sollBilder}`, 60000);
-    const primZahl = await primary.ev(`return ${geladen};`);
-    ok(sollBilder === 3 && primBilder, `GALERIE der Primary zeigt dieselben Fotos, geladen (${primZahl}/${sollBilder})`);
+    const primBilder = await warteBis(primary, `${geladen(VORSCHAU)} === ${sollBilder} && ${geladen(GROSS)} === 1`, 60000);
+    const primZahl = { vorschau: await primary.ev(`return ${geladen(VORSCHAU)};`), gross: await primary.ev(`return ${geladen(GROSS)};`) };
+    ok(sollBilder === 3 && primBilder, `GALERIE der Primary zeigt dieselben Fotos als Vorschau, geladen (${primZahl.vorschau}/${sollBilder}), dazu genau ein grosses (${primZahl.gross})`);
     MESS.galerie = { soll: sollBilder, pc2: pc2Zahl, primary: primZahl };
 
     // Aenderung von PC2 ueber den Fernbefehl, den die Oberflaeche ohnehin benutzt.
