@@ -28,3 +28,17 @@ Behoben (v0.8.97):
 - `r7b-review-runtime` leitet die Monate vom Lauftag ab. Die Anmeldemaske nach dem Uhrsprung war kein hartes Beenden, sondern die richtig abgelaufene 30-Tage-Sitzung; der Lauf meldet sich dort regulär neu an.
 - Die vierzehn `mobile-*`/`media-*`-Läufe schließen ihren Test-Edge über seine Debug-Verbindung (`closeEdgeOnPort`, `_e2e-browser.mjs`) auf einem eigenen Port je Lauf (`edgeDebugPort`) statt fest 9224.
 - `assertE2eClientBinary` weist einen Client ab, der nicht vom selben Bau wie der Primary daneben stammt (eingebettete Frontend-Dateien).
+
+## Testtreiber und Schutz der Produktion
+
+**Beenden von Prozessen.** Der Helfer `test/e2e/_e2e-process.mjs` beendet nur eine geprüfte PID am exakten Test-Pfad. Er nutzt nie `taskkill /T`. Windows behält die Eltern-PID eines Prozesses, auch wenn der Elternprozess längst beendet und die Nummer neu vergeben ist. `/T` träfe dann einen fremden Prozess, etwa die Produktions-App, die ein inzwischen beendeter Installer gestartet hat. Kinder werden nur über `trueDescendants` mitbeendet: gleiche Eltern-PID **und** nicht vor dem Elternprozess gestartet. `closeTestWindow` schickt `CloseMainWindow` nur an eine PID, die gerade am exakten Test-Pfad läuft. Anlass: Am 04.11.2026 verschwand die Produktions-App während eines E2E-Laufs. Dieser Lauf war das einzige laufende Programm, das Prozesse beendete, und hat das Verschwinden selbst gemessen; der genaue Weg ist nicht bewiesen.
+
+**Reihen von E2E-Läufen** laufen über `node scripts/e2e-diag-runner.mjs <ordner> <tests…>`. Der Runner liefert je Lauf den vollen Exit-Code, die Reste davor und danach und einen Produktionswächter: Verschwindet eine fremde lataif.exe, bricht die Reihe ab. `test/e2e-safety/process-isolation.test.ts` startet eine Köder-lataif.exe und läuft deshalb nie parallel zu einem E2E-Lauf.
+
+**Absturz des Testtreibers (`0xC0000409`).** node.exe bricht dabei ohne Ausgabe, ohne Node-Bericht und ohne Windows-Ereignis ab. Bisher war das in 3 von etwa 95 Läufen so, immer beim Anbinden an die gerade startende App. Die Ursache ist offen; ERP-Code im Prozess, CET/Shadow-Stack und `fetch` gegen einen flatternden Port sind ausgeschlossen. Ein solcher Lauf zählt nur dann als Infrastruktur und nicht als rot, wenn **alle** Punkte gelten:
+1. Exit-Code `0xC0000409`, vom Runner als `TREIBER_ABSTURZ` gekennzeichnet.
+2. Das Protokoll enthält bis dahin keinen eigenen Fehlschlag (`x …`).
+3. Die Reste sind abgeräumt, und kein Produktionsprozess ist verschwunden.
+4. Die sofortige Wiederholung desselben Laufs ist grün.
+
+Tritt derselbe Absturz zweimal in Folge im selben Lauf auf oder in mehr als 1 von 10 Läufen einer Reihe, ist das ein Blocker und wird untersucht. Ein Speicherabbild ist dann nur mit Owner-Freigabe zu erstellen, denn das ist eine Systemeinstellung.
