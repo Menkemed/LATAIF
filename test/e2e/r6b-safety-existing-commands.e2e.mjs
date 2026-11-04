@@ -5,14 +5,14 @@
 //   B   /invoices/:id/edit Save Changes           → invoices.update          (Primary == PC2, Datum gleich)
 //       /invoices  Pay (Teil)                      → invoices.record_payment
 //       /invoices  Pay → Nummernwahl Normal        → invoices.record_payment  (zweiter Einstieg)
-//       /invoices  Pay → Nummernwahl Sonder (PC2)  → ehrliches Nein, kein Auftrag
+//       /invoices  Pay → Nummernwahl Sonder (PC2)  → invoices.record_payment  (Wahl specialMarkOnFinal, SINV vom Primary — seit R6E)
 //       /invoices/:id  Mark as Picked Up           → repairs.update_status    (nur die fertige Reparatur)
 //       /collection/:id  Confirm AI Identification → products.update {aiConfirmedAt:true}
 //       /orders  Pay                               → orders.add_payment
 //       /consignments Items → Return               → consignments.mark_returned
 //       /consignors/:id  Return                    → consignments.mark_returned (zweiter Einstieg)
 //   SAFETY auf dem datenbanklosen PC2 (mit einer ALTEN lataif.db im Datenordner):
-//       Inventur/Stock-Check gesperrt, kein Aufruf des lokalen Kerns · /import gesperrt ·
+//       Inventur/Stock-Check offen über den Primary (seit R6C; die Läufe fährt r6c), kein Aufruf des lokalen Kerns · /import gesperrt ·
 //       Löschknöpfe gesperrt · Abmelden führt zurück zur Anmeldung · nichts Lokales geschrieben.
 // ════════════════════════════════════════════════════════════════════════════
 import { spawn, execFileSync } from 'node:child_process';
@@ -47,6 +47,13 @@ let PASS = 0, FAIL = 0; const fails = [];
 const ok = (c, m) => { if (c) PASS++; else { FAIL++; fails.push(m); console.log('  x ' + m); } };
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const S = (v) => JSON.stringify(v);
+/** Dieselben Schlüssel und Werte, egal in welcher Reihenfolge der Rumpf sie trägt. */
+const gleich = (a, b) => { const s = (o) => S(Object.fromEntries(Object.entries(o || {}).sort(([x], [y]) => x.localeCompare(y)))); return s(a) === s(b); };
+// P1b: vor dem Eröffnungsstichtag bucht keine Korrektur mehr (CORRECTION_BEFORE_OPENING_CUTOFF). Die Rechnungen dieses
+// Laufs liegen deshalb danach; der Stichtag kommt aus dem Code, nicht aus einer Abschrift.
+const STICHTAG = /OPENING_CUTOFF_DATE = '(\d{4}-\d{2}-\d{2})'/.exec(readFileSync(join(process.cwd(), 'src/core/parties/opening-balances.ts'), 'utf8'))[1];
+const tagNachStichtag = (n) => new Date(Date.parse(STICHTAG + 'T00:00:00.000Z') + n * 86400000).toISOString().slice(0, 10);
+const RECHNUNGSTAG = tagNachStichtag(5), GEAENDERTER_TAG = tagNachStichtag(1);
 const WACHHUND = setTimeout(() => {
   console.log('  x ABBRUCH: Zeitgrenze erreicht — der Lauf steht.');
   try { killTestImage('lataif.exe'); } catch { /* weg */ }
@@ -283,7 +290,7 @@ function seed() {
       insert(db, 'stock_lots', { id: `${pid}-lot`, branch_id, product_id: pid, unit_cost: 100, qty_total: 1, qty_remaining: 0, status: 'EXHAUSTED', acquired_at: now, created_at: now });
     };
     const rechnungAnlegen = (inv, status, gross, bezahlt, pid) => {
-      insert(db, 'invoices', { id: inv, branch_id, invoice_number: inv.toUpperCase(), customer_id: 'r6b-kunde', status, currency: 'BHD', net_amount: gross / 1.1, vat_rate_snapshot: 10, vat_amount: gross - gross / 1.1, gross_amount: gross, paid_amount: bezahlt, tax_scheme_snapshot: 'VAT_10', issued_at: '2026-09-10T00:00:00.000Z', revision: 1, created_at: now, updated_at: now });
+      insert(db, 'invoices', { id: inv, branch_id, invoice_number: inv.toUpperCase(), customer_id: 'r6b-kunde', status, currency: 'BHD', net_amount: gross / 1.1, vat_rate_snapshot: 10, vat_amount: gross - gross / 1.1, gross_amount: gross, paid_amount: bezahlt, tax_scheme_snapshot: 'VAT_10', issued_at: RECHNUNGSTAG + 'T00:00:00.000Z', revision: 1, created_at: now, updated_at: now });
       insert(db, 'invoice_lines', { id: `${inv}-l1`, invoice_id: inv, product_id: pid, lot_id: `${pid}-lot`, quantity: 1, unit_price: 200, purchase_price: 100, vat_rate: 10, tax_scheme: 'VAT_10', vat_amount: 20, line_total: 220, position: 1 });
       if (bezahlt > 0) insert(db, 'payments', { id: `${inv}-pay`, branch_id, invoice_id: inv, amount: bezahlt, method: 'cash', received_at: now, created_at: now });
     };
@@ -318,7 +325,7 @@ async function rechnungAendern(c) {
   await sleep(800);
   const r = [
     await setVal(c, 'textarea[placeholder^="e.g. delivery details"]', 'R6B geaenderte Notiz'),
-    await setVal(c, 'input[type="date"]', '2026-09-01'),
+    await setVal(c, 'input[type="date"]', GEAENDERTER_TAG),
     await setVal(c, 'textarea[placeholder^="Explain why"]', 'R6B Grund der Aenderung'),
   ];
   await sleep(300);
@@ -437,7 +444,7 @@ try {
     const c = (await buchungen(client)).filter((x) => x.op !== 'customers.create');
     const p = c[0]?.payload || {};
     ok(c.length === 1 && c[0].op === 'invoices.update' && p.id === 'r6b-inv-EC' && p.expectedRevision === 1 && p.reason === 'R6B Grund der Aenderung'
-      && p.issuedDate === '2026-09-01' && !('deltaPayment' in p) && Array.isArray(p.lines) && p.lines.length === 1,
+      && p.issuedDate === GEAENDERTER_TAG && !('deltaPayment' in p) && Array.isArray(p.lines) && p.lines.length === 1,
     `EDIT genau EIN Auftrag invoices.update — Rechnung, Fassung, Grund, Datum, Zeilen, keine Zahlung (${c.map((x) => x.op).join(',')} · ${Object.keys(p).join(',')})`);
     await gehZu(primary, '/invoices/r6b-inv-EP/edit', 'Save Changes');
     { const m = await rechnungAendern(primary); ok(m === 'OK', `EDIT-PARITAET dieselbe Maske am Primary (${m})`); }
@@ -445,7 +452,7 @@ try {
     ok(await warteAuf(() => rechnung('r6b-inv-EP').notes === 'R6B geaenderte Notiz'), 'EDIT-PARITAET der Primary ändert');
     ok(rechnungN('r6b-inv-EP') === rechnungN('r6b-inv-EC'), `EDIT-PARITAET Rechnung: Primary == PC2${rechnungN('r6b-inv-EP') !== rechnungN('r6b-inv-EC') ? ` (${rechnungN('r6b-inv-EP')} / ${rechnungN('r6b-inv-EC')})` : ''}`);
     const dP = rechnung('r6b-inv-EP').issued_at, dC = rechnung('r6b-inv-EC').issued_at;
-    ok(dP === '2026-09-01T00:00:00.000Z' && dC === dP, `EDIT-PARITAET das Datum steht auf beiden Wegen gleich (${dP} / ${dC})`);
+    ok(dP === GEAENDERTER_TAG + 'T00:00:00.000Z' && dC === dP, `EDIT-PARITAET das Datum steht auf beiden Wegen gleich (${dP} / ${dC})`);
     const eP = dbQ(BIZ_DB, 'SELECT reason FROM invoice_edits WHERE invoice_id = ?', ['r6b-inv-EP']);
     const eC = dbQ(BIZ_DB, 'SELECT reason FROM invoice_edits WHERE invoice_id = ?', ['r6b-inv-EC']);
     ok(eP.length === 1 && eC.length === 1 && eP[0].reason === eC[0].reason, `EDIT-PARITAET je EIN Prüfvermerk mit demselben Grund (${eP.length}/${eC.length})`);
@@ -456,13 +463,15 @@ try {
   // ══════════════════════════════════════════════════════════════════════
   {
     client = await lade(client, '/invoices');
+    // v0.8.88 — der Zahltag reist mit (die Maske belegt heute vor, todayIso); R6E — die Schlusszahlung trägt die Nummernwahl.
+    const heute = new Date().toISOString().slice(0, 10);
     const vorher = (await buchungen(client)).length;
     { const m = await listenZahlung(client, 'r6b-inv-LC', 100); ok(m === 'OK', `PAY die Zahlmaske der Liste am zweiten Rechner (${m})`); }
     await click(client, '[data-invoice-list-pay]');
     ok(await warteAuf(() => Number(rechnung('r6b-inv-LC').paid_amount) === 100), `PAY die Teilzahlung steht am Primary (Hinweis: ${String(await fehlerAnzeige(client)).slice(0, 200) || 'keiner'})`);
     let c = (await buchungen(client)).slice(vorher);
-    ok(c.length === 1 && c[0].op === 'invoices.record_payment' && S(c[0].payload) === S({ invoiceId: 'r6b-inv-LC', amount: 100, method: 'cash' }),
-      `PAY genau EIN Auftrag invoices.record_payment — Rechnung, Betrag, Weg (${c.map((x) => x.op + S(x.payload)).join(',')})`);
+    ok(c.length === 1 && c[0].op === 'invoices.record_payment' && gleich(c[0].payload, { invoiceId: 'r6b-inv-LC', amount: 100, method: 'cash', paidDate: heute }),
+      `PAY genau EIN Auftrag invoices.record_payment — Rechnung, Betrag, Weg, Zahltag (${c.map((x) => x.op + S(x.payload)).join(',')})`);
 
     await sleep(1500);
     const vorher2 = (await buchungen(client)).length;
@@ -471,8 +480,8 @@ try {
     { const m = await nummerWaehlen(client, false); ok(m === 'OK', `PAY-FINAL die Nummernwahl „Normal" — der zweite Einstieg (${m})`); }
     ok(await warteAuf(() => rechnung('r6b-inv-NC').status === 'FINAL' && Number(rechnung('r6b-inv-NC').paid_amount) === 220), 'PAY-FINAL die Rechnung ist voll bezahlt und endgültig');
     c = (await buchungen(client)).slice(vorher2);
-    ok(c.length === 1 && c[0].op === 'invoices.record_payment' && S(c[0].payload) === S({ invoiceId: 'r6b-inv-NC', amount: 220, method: 'cash' }),
-      `PAY-FINAL auch der zweite Einstieg erreicht dieselbe Buchung, genau einmal (${c.map((x) => x.op).join(',')})`);
+    ok(c.length === 1 && c[0].op === 'invoices.record_payment' && gleich(c[0].payload, { invoiceId: 'r6b-inv-NC', amount: 220, method: 'cash', specialMarkOnFinal: false, paidDate: heute }),
+      `PAY-FINAL auch der zweite Einstieg erreicht dieselbe Buchung, genau einmal (${c.map((x) => x.op + S(x.payload)).join(',')})`);
 
     await sleep(1500);
     const vorher3 = (await buchungen(client)).length;
@@ -480,11 +489,19 @@ try {
     { const m = await listenZahlung(client, 'r6b-inv-SC', 220); ok(m === 'OK', `SONDER die Zahlmaske (${m})`); }
     await click(client, '[data-invoice-list-pay]');
     { const m = await nummerWaehlen(client, true); ok(m === 'OK', `SONDER die Nummernwahl „Special" (${m})`); }
-    await sleep(1500);
+    // R6E (040e2a5c): kein Nein mehr am zweiten Rechner — er schickt nur die WAHL (specialMarkOnFinal), die Nummer
+    // vergibt der Primary aus dem eigenen Sonderkreis SINV; der Normalkreis wird dabei nicht angefasst.
+    ok(await warteAuf(() => rechnung('r6b-inv-SC').status === 'FINAL' && Number(rechnung('r6b-inv-SC').paid_amount) === 220),
+      `SONDER die Rechnung ist voll bezahlt und endgültig (Hinweis: ${String(await fehlerAnzeige(client)).slice(0, 200) || 'keiner'})`);
     const h = (await hinweise(client)).slice(hinweisVorher);
-    ok(h.some((x) => /special number circle/.test(x) && /not available on a connected client/.test(x)), `SONDER ehrliches Nein am zweiten Rechner (${S(h).slice(0, 160)})`);
-    ok((await buchungen(client)).length === vorher3 && Number(rechnung('r6b-inv-SC').paid_amount) === 0 && rechnung('r6b-inv-SC').status === 'PARTIAL',
-      'SONDER kein Auftrag, keine Zahlung, kein stiller Normalkreis');
+    ok(!h.some((x) => /special number circle/.test(x) || /not available on a connected client/.test(x)), `SONDER kein Nein mehr am zweiten Rechner (${S(h).slice(0, 160)})`);
+    c = (await buchungen(client)).slice(vorher3);
+    ok(c.length === 1 && c[0].op === 'invoices.record_payment'
+      && gleich(c[0].payload, { invoiceId: 'r6b-inv-SC', amount: 220, method: 'cash', specialMarkOnFinal: true, paidDate: heute }),
+      `SONDER genau EIN Auftrag invoices.record_payment mit der Wahl „Sonder", keine Nummer im Rumpf (${c.map((x) => x.op + S(x.payload)).join(',')})`);
+    ok(/^SINV-/.test(String(rechnung('r6b-inv-SC').invoice_number)) && Number(rechnung('r6b-inv-SC').special_mark) === 1
+      && /^INV-/.test(String(rechnung('r6b-inv-NC').invoice_number)),
+      `SONDER die Nummer kommt aus dem Sonderkreis, die Normalnummer davor bleibt normal (${rechnung('r6b-inv-SC').invoice_number} / ${rechnung('r6b-inv-NC').invoice_number})`);
 
     await gehZu(primary, '/invoices', 'R6B-INV-LP');
     await primary.ev(DIALOGE_PRIMARY);
@@ -623,15 +640,17 @@ try {
     // Inventur und Stock-Check
     client = await lade(client, '/collection');
     await warteBis(client, "document.querySelector('[data-testid=\"open-inventory\"]')", 30000);
-    ok(await gesperrt(client, '[data-testid="open-inventory"]', 'inventory') === 'GESPERRT', 'INVENTUR „Stock Check" ist auf dem Client gesperrt und erklärt');
-    await client.ev("document.querySelector('[data-testid=\"open-inventory\"]').click(); return 1;");
-    await sleep(800);
-    ok(!(await exists(client, '[data-testid="inv-save"]')), 'INVENTUR es öffnet sich keine Inventurmaske');
+    // R6C (e03478cb): die Inventur läuft auf beiden Rechnern über den Primary (inventory.start/save/finish/record_check).
+    // Hier nur: offen und ohne Primary-only-Riegel — die Läufe selbst fährt r6c-masterdata-inventory (kein Start hier,
+    // damit dieser Lauf keinen Inventurstand am Primary hinterlässt).
+    ok(await client.ev("const e=document.querySelector('[data-testid=\"open-inventory\"]'); return !!e && !e.disabled && !e.getAttribute('data-primary-only');"),
+      `INVENTUR „Stock Check" ist auf dem Client offen, ohne Primary-only-Riegel (${await gesperrt(client, '[data-testid="open-inventory"]', 'inventory')})`);
     ok(await gesperrt(client, '[data-primary-only="import"]', 'import') === 'GESPERRT', 'IMPORT „Import Excel" ist auf dem Client gesperrt und erklärt');
     ok(await knopfMitText(client, 'Select') === 'D:delete', 'DELETE „Select" (Mehrfach löschen) ist gesperrt');
     client = await lade(client, '/collection/r6b-ai-C');
-    ok(await warteBis(client, "document.querySelector('[data-primary-only=\"stock-check\"]')", 30000), 'INVENTUR der Einzel-Check zeigt einen Satz statt Knöpfen');
-    ok(await knopfMitText(client, 'Available') === 'NO' && await knopfMitText(client, 'Not available') === 'NO', 'INVENTUR kein „Available"/„Not available" auf dem Client');
+    ok(await warteBis(client, "document.querySelector('[data-stock-check=\"available\"]') && document.querySelector('[data-stock-check=\"not_available\"]')", 30000)
+      && !(await exists(client, '[data-primary-only="stock-check"]')),
+      'INVENTUR der Einzel-Check zeigt „Available"/„Not available" (über den Primary), keinen Primary-only-Satz');
     const inv = await aufrufe(client);
     ok(!inv.some((x) => /stock_check/.test(x)), `INVENTUR kein Aufruf des lokalen Kerns für Stock-Checks (${[...new Set(inv)].join(',').slice(0, 300)})`);
 
