@@ -10,7 +10,7 @@
 // Isoliert: com.lataif.app.e2e, Port 3011 — Produktion und E:\LATAIF\Data bleiben unberührt.
 // ════════════════════════════════════════════════════════════════════════════
 import { e2ePreflight } from './_e2e-preflight.mjs';
-import { killStarted, killTestImage, spawnTracked, waitTestImageGone } from './_e2e-process.mjs';
+import { killStarted, killTestImage, spawnTracked, waitTestImageGone, closeTestWindow, startedPids } from './_e2e-process.mjs';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync } from 'node:fs';
 import os from 'node:os';
@@ -221,7 +221,10 @@ try {
   }
   await waitFor(app, 'a[href="/settings"]', 60000);
   await spuelen(app).catch(() => null); await sleep(1200);
-  app.close(); app = null; killTestImage('lataif.exe'); await waitTestImageGone('lataif.exe');
+  // Regulär schließen (`closeTestWindow`): ein hartes Beenden direkt nach dem Onboarding verliert die neueste Sitzung,
+  // wenn sie noch nicht in der Datei steht („not-issued-here") — der Neustart stünde dann an der Anmeldemaske.
+  const onboardingPid = startedPids().pop();
+  app.close(); app = null; await closeTestWindow(onboardingPid, APP); await waitTestImageGone('lataif.exe');
   seed();
   app = await attach();
   await waitFor(app, 'a[href="/settings"], input[type="password"]', 90000);

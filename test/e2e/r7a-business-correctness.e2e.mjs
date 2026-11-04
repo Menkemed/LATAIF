@@ -25,7 +25,7 @@
 // Produktions-App wird nie beendet, nie benutzt; E:\LATAIF\Data und die Ports 3001/3443 bleiben tabu.
 // ════════════════════════════════════════════════════════════════════════════
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
-import { killStarted, killTestImage, spawnTracked, waitTestImageGone, foreignProcesses } from './_e2e-process.mjs';
+import { killStarted, killTestImage, spawnTracked, waitTestImageGone, foreignProcesses, closeTestWindow, startedPids } from './_e2e-process.mjs';
 import { execFileSync } from 'node:child_process';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync, readFileSync, copyFileSync, writeFileSync } from 'node:fs';
@@ -898,8 +898,11 @@ try {
   await waitFor(primary, SHELL, 60000);
   await spuelen(primary).catch(() => null);
   await sleep(1200);
+  // Regulär schließen (`closeTestWindow`): ein hartes Beenden direkt nach dem Onboarding verliert die neueste Sitzung,
+  // wenn sie noch nicht in der Datei steht („not-issued-here") — der Neustart stünde dann an der Anmeldemaske.
+  const onboardingPid = startedPids().pop();
   primary.close(); primary = null;
-  killTestImage('lataif.exe'); await waitTestImageGone('lataif.exe');
+  await closeTestWindow(onboardingPid, APP); await waitTestImageGone('lataif.exe');
   const aVorlage = seedGeschaeft();
   execFileSync(SEED, ['seed-primary', SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' });
   seedServerB();
