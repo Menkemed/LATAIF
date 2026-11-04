@@ -134,6 +134,13 @@ async function waitFor(c, sel, t = 45000) {
   try { seen = String(await c.ev('return document.body.innerText.slice(0,300);')).replace(/\s+/g, ' '); } catch { /* egal */ }
   throw new Error(`waitFor ${sel} — Bildschirm sagt: ${seen}`);
 }
+/** „Settle sale" / „Correct settlement": der Knopf öffnet den Abrechnungsdialog der App (493cd7bb); erst „Confirm" bucht. */
+async function abrechnen(c, invoiceLineId) {
+  await click(c, `[data-partner-item-settle="${invoiceLineId}"]`);
+  if (!(await warteBis(c, "!!document.querySelector('[data-settle-modal]') && !!document.querySelector('[data-settle-confirm]')", 15000))) throw new Error('kein Abrechnungsdialog');
+  await click(c, '[data-settle-confirm]');
+  await warteBis(c, "!document.querySelector('[data-settle-modal]')", 30000);
+}
 async function warteBis(c, ausdruck, t = 30000) {
   const end = Date.now() + t;
   while (Date.now() < end) { if (await c.ev(`return !!(${ausdruck});`)) return true; await sleep(350); }
@@ -485,7 +492,8 @@ try {
   // ── 3 Abrechnung auf PC2 ──────────────────────────────────────────────────
   await partnerSeite();
   await aufklappen(PL('A'));
-  await click(client, `[data-partner-item-settle="${IL_A}"]`);
+  // Seit 493cd7bb öffnet „Settle sale" den Dialog der App (Aufstellung) — gebucht wird erst mit „Confirm".
+  await abrechnen(client, IL_A);
   await warteBis(client, `document.querySelector('[data-partner-item-sale="${IL_A}"]')?.getAttribute('data-sale-state') === 'SETTLED'`, 30000);
   await spuelen(primary);
   const share = mv(PL('A'), 'PROFIT_SHARE');
@@ -526,7 +534,7 @@ try {
     await aufklappen(PL('A'));
     ok(await client.ev(`return document.querySelector('[data-partner-item-sale="${IL_A}"]')?.getAttribute('data-sale-state');`) === 'NEEDS_CORRECTION',
       'RETURN die Abrechnung ist als nachzurechnen markiert');
-    await click(client, `[data-partner-item-settle="${IL_A}"]`);
+    await abrechnen(client, IL_A);
     await warteBis(client, `document.querySelector('[data-partner-item-sale="${IL_A}"]')?.getAttribute('data-sale-state') === 'SETTLED'`, 30000);
     await spuelen(primary);
     const korr = mv(PL('A'), 'PROFIT_CORRECTION');
@@ -576,6 +584,11 @@ try {
     await aufklappen(PL('A'));
     const offId = dbQ(BIZ_DB, "SELECT id FROM item_partner_movements WHERE kind = 'OFFSET' AND purchase_line_id = ?", [PL('A')])[0]?.id;
     await click(client, `[data-partner-item-cancel="${offId}"]`);
+    // Seit 493cd7bb fragt die App in IHREM Dialog (ConfirmHost) — auch auf PC2; der Stub des Beobachters greift dort nicht mehr.
+    if (!(await warteBis(client, "!!document.querySelector('[data-app-confirm-ok]')", 15000))) throw new Error('keine Rückfrage beim Zurücknehmen');
+    const frage = String(await client.ev("return document.querySelector('[data-app-confirm-text]')?.textContent || '';"));
+    if (!/Reverse this entry as an entry error?/.test(frage)) throw new Error('falsche Rückfrage: ' + frage.slice(0, 80));
+    await click(client, '[data-app-confirm-ok]');
     await sleep(1500);
     await spuelen(primary);
     ok(zahl("SELECT COUNT(*) AS n FROM item_partner_movements WHERE kind = 'OFFSET' AND cancelled_at IS NOT NULL") === 2, 'CANCEL auf PC2: das Verrechnungspaar gemeinsam zurückgenommen');
