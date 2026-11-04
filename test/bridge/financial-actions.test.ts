@@ -573,6 +573,12 @@ const CONSIGN = {
     `SOLD unter unserem Preis braucht eine Bestaetigung (${JSON.stringify(below)})`);
   ok(s(db, 'SELECT status FROM agent_transfers WHERE id = ?', [tid]) === 'transferred',
     'SOLD …und ohne sie passiert nichts');
+  // C3G-Ersatz (client-transfer-lifecycle T1): das Nein hinterlässt auch keine Spur — kein Verkaufspreis, keine Buchung,
+  // dieselbe Fassung.
+  ok(n(db, 'SELECT actual_sale_price IS NULL FROM agent_transfers WHERE id = ?', [tid]) === 1
+    && n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'AGENT_TRANSFER_SOLD' AND source_id = ?", [tid]) === 0
+    && n(db, 'SELECT revision FROM agent_transfers WHERE id = ?', [tid]) === rBelow,
+    'SOLD …keine Spur: kein Verkaufspreis, keine Forderungsbuchung, dieselbe Fassung');
 
   // Mit Bestaetigung — NEUE Kennung, wie am Duplikatsweg.
   const r2 = n(db, 'SELECT revision FROM agent_transfers WHERE id = ?', [tid]);
@@ -608,11 +614,21 @@ const CONSIGN = {
   const stv = val<{ settlementPaidAmount: number; settlementOpenAmount: number }>(settled);
   ok(Math.abs(stv.settlementPaidAmount - total) < 0.005, `SETTLE voll abgerechnet (${stv.settlementPaidAmount})`);
   ok(stv.settlementOpenAmount === 0, 'SETTLE nichts mehr offen');
+  // C3G-Ersatz (T3/T4): genau EINE Abrechnungszahlung mit ihrer Geldbuchung, Status „paid", die Fassung steigt.
+  const zahlungenSettle = () => n(db, 'SELECT COUNT(*) FROM agent_settlement_payments WHERE transfer_id = ?', [tid]);
+  const buchungenSettle = () => n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'AGENT_SETTLEMENT' AND source_id IN (SELECT id FROM agent_settlement_payments WHERE transfer_id = ?)", [tid]);
+  const zVor = zahlungenSettle(), bVor = buchungenSettle();
+  ok(zVor === 1 && bVor > 0, `SETTLE genau eine Abrechnungszahlung, im Hauptbuch gebucht (${zVor} / ${bVor} Zeilen)`);
+  ok(s(db, 'SELECT settlement_status FROM agent_transfers WHERE id = ?', [tid]) === 'paid'
+    && n(db, 'SELECT revision FROM agent_transfers WHERE id = ?', [tid]) > r3,
+    `SETTLE Status „paid", Fassung gestiegen (${s(db, 'SELECT settlement_status FROM agent_transfers WHERE id = ?', [tid])})`);
   const againSettle = await fin.runMarkSettled(d, identity('74', 'transfers.mark_settled'),
     { transferId: tid, amount: total, method: 'cash', expectedRevision: r3 });
   ok(againSettle.kind === 'ok' && (againSettle as { replayed: boolean }).replayed === true, 'SETTLE-RETRY antwortet');
   ok(Math.abs(n(db, 'SELECT settlement_paid_amount FROM agent_transfers WHERE id = ?', [tid]) - total) < 0.005,
     'SETTLE-RETRY nicht doppelt abgerechnet');
+  ok(zahlungenSettle() === zVor && buchungenSettle() === bVor,
+    `SETTLE-RETRY keine zweite Abrechnungszahlung, keine zweite Geldbuchung (${zahlungenSettle()} / ${buchungenSettle()})`);
   const r4 = n(db, 'SELECT revision FROM agent_transfers WHERE id = ?', [tid]);
   const twice = await fin.runMarkSettled(d, identity('75', 'transfers.mark_settled'),
     { transferId: tid, amount: 10, method: 'cash', expectedRevision: r4 });
@@ -621,6 +637,48 @@ const CONSIGN = {
   ok(/settled/.test((twice as { message: string }).message),
     'SETTLE …und die Begruendung nennt den Zustand, in dem er wirklich ist');
   ok((twice as { frozen: boolean }).frozen === true, 'SETTLE …endgueltig');
+}
+
+// ── 7b) C3G-Ersatz (client-transfer-lifecycle T5/T6) — zwei Rechner, derselbe Transfer ──
+// Über den Scheduler wie zwei echte Fernaufträge: derselbe Stand, verschiedene Kennungen. Genau einer verkauft (mit
+// SEINEM Preis), genau EINE Forderung; danach rechnen zwei gleichzeitig ab — genau einer, genau eine Zahlung.
+{
+  resetDurabilityStateForTest();
+  const db = freshDb();
+  const d = deps(db);
+  seedProduct(db, 'p1', 1);
+  const t = await cmdS.runTransferCreate(d, identity('76', 'transfers.create'),
+    { customerId: 'cust-1', productId: 'p1', agentPrice: 500 });
+  const tid = (t as { value: { transferId: string } }).value.transferId;
+  const base = n(db, 'SELECT revision FROM agent_transfers WHERE id = ?', [tid]);
+  const [x, y] = await Promise.all([
+    executeCommand('transfers.mark_sold', { input: { transferId: tid, salePrice: 600, expectedRevision: base } },
+      identity('77', 'transfers.mark_sold', 'a')),
+    executeCommand('transfers.mark_sold', { input: { transferId: tid, salePrice: 700, expectedRevision: base } },
+      identity('78', 'transfers.mark_sold', 'b')),
+  ]);
+  const gewinner = [x, y].findIndex((r) => r.kind === 'ok');
+  const verlierer = [x, y].find((r) => r.kind !== 'ok') as { kind: string; code?: string } | undefined;
+  ok([x, y].filter((r) => r.kind === 'ok').length === 1 && verlierer?.kind === 'business_error' && !!verlierer.code,
+    `RACE-SOLD genau ein Rechner verkauft, der andere bekommt ein fachliches Nein mit Grund (${JSON.stringify([x.kind, y.kind, verlierer?.code])})`);
+  ok(n(db, 'SELECT actual_sale_price FROM agent_transfers WHERE id = ?', [tid]) === [600, 700][gewinner],
+    `RACE-SOLD …mit dem Preis des Gewinners (${n(db, 'SELECT actual_sale_price FROM agent_transfers WHERE id = ?', [tid])})`);
+  ok(n(db, "SELECT COUNT(DISTINCT source_id) FROM ledger_entries WHERE source_module = 'AGENT_TRANSFER_SOLD' AND source_id = ?", [tid]) === 1
+    && n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'AGENT_TRANSFER_SOLD' AND source_id = ? AND reverses_entry_id IS NOT NULL", [tid]) === 0,
+    'RACE-SOLD genau EINE Forderung, nichts storniert und neu gebucht');
+  const total = n(db, 'SELECT settlement_amount FROM agent_transfers WHERE id = ?', [tid]);
+  const r1 = n(db, 'SELECT revision FROM agent_transfers WHERE id = ?', [tid]);
+  const [u, v] = await Promise.all([
+    executeCommand('transfers.mark_settled', { input: { transferId: tid, amount: total, method: 'cash', expectedRevision: r1 } },
+      identity('79', 'transfers.mark_settled', 'a')),
+    executeCommand('transfers.mark_settled', { input: { transferId: tid, amount: total, method: 'bank', expectedRevision: r1 } },
+      identity('7a', 'transfers.mark_settled', 'b')),
+  ]);
+  ok([u, v].filter((r) => r.kind === 'ok').length === 1,
+    `RACE-SETTLE genau einer rechnet ab (${JSON.stringify([u.kind, v.kind])})`);
+  ok(n(db, 'SELECT COUNT(*) FROM agent_settlement_payments WHERE transfer_id = ?', [tid]) === 1
+    && Math.abs(n(db, 'SELECT settlement_paid_amount FROM agent_transfers WHERE id = ?', [tid]) - total) < 0.005,
+    `RACE-SETTLE genau eine Abrechnungszahlung über den vollen Betrag, nicht das Doppelte (${n(db, 'SELECT settlement_paid_amount FROM agent_transfers WHERE id = ?', [tid])})`);
 }
 
 // ── 5b) R5A.2 — die Wahl der Dialoge reist mit, die Zeilen rechnet das Haus ──

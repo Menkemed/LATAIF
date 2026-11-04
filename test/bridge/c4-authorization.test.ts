@@ -507,6 +507,10 @@ const ACT = (over: Record<string, unknown> = {}) => ({
   const libRs = src('src-tauri/src/lib.rs');
   ok(!/LATAIF_E2E_SECOND_INSTANCE|allow_second_instance/.test(libRs),
     'SECRET kein Testschalter im Produktionsbinary');
+  // C3B B0 / C3G F10 (die alten Client-Läufe prüften das zuletzt): die Single-Instance-Sperre ist im Bau — zwei Instanzen
+  // DERSELBEN Kennung (zwei Primaries auf einer Datenbank) bleiben unmöglich.
+  ok(/\.plugin\(tauri_plugin_single_instance::init\(/.test(libRs),
+    'SECRET die Single-Instance-Sperre ist eingebaut');
   ok(/#\[cfg\(feature = "e2e"\)\]/.test(libRs) || /feature = "e2e"/.test(libRs),
     'SECRET E2E-Material haengt am Testmerkmal');
 }

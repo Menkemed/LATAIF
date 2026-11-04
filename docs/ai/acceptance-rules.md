@@ -18,9 +18,11 @@ Das heißt für jede Umsetzung nach einem freigegebenen Preview:
 
 Diese E2E-Läufe sind rot, ohne dass ein Produktfehler nachgewiesen ist. Sie zählen nicht als Nachweis und nicht als Blocker, solange ihre Abdeckung anderswo steht.
 
-- `c5-operational-acceptance`, `client-commercial`, `client-financial`, `client-invoice-lifecycle`, `client-invoice-ui`, `client-masterdata-ui`, `client-transfer-lifecycle`: nutzen die Navigation `data-client-area` des alten Client-Bereichs, den `71d1fc4` entfernt hat, und stoppen im Aufbau. Die Abläufe fahren heute die Zwei-App-Läufe `r3`–`r6*` über die gemeinsame Oberfläche; ob jede Prüfung dort steht (bei C5 auch Neustart und Ausfall), ist je Datei noch zu belegen, bevor sie entfernt oder umgeschrieben wird.
+- `c6-release-hardening`: wartet auf `[data-client-mode]`, das es nicht mehr gibt (nicht Teil der Client-Läufe unten, unverändert).
 
-Entfernt (v0.8.97): `client-service`, `client-remaining-actions` — dieselbe tote Navigation. Die Abläufe stehen in `r5a`, `r5c-*`, `r5d`, `r5d1`, `r5f`, `r4c3`, die Rennen, verlorenen Antworten und alten Stände auf Befehlsebene in `service-documents` (letztes Stück), `return-chain`, `lifecycle-actions` und `financial-actions` im Node-Gesamttest.
+Entfernt (v0.8.97), jede Prüfung zugeordnet bzw. ersetzt in `docs/ai/client-e2e-coverage.md`:
+- `c5-operational-acceptance`, `client-commercial`, `client-financial`, `client-invoice-lifecycle`, `client-invoice-ui`, `client-masterdata-ui`, `client-transfer-lifecycle`. Sie nutzten die tote Navigation `data-client-area` (seit `71d1fc4`). Ihre noch nicht anderswo laufenden Prüfungen (Ausfall, Neustart, verlorene Antworten, alte Stände, Rennen) stehen jetzt in `pc2-reliability` und `financial-actions` §7/§7b.
+- `client-service`, `client-remaining-actions` — dieselbe tote Navigation. Die Abläufe stehen in `r5a`, `r5c-*`, `r5d`, `r5d1`, `r5f`, `r4c3`, die Rennen, verlorenen Antworten und alten Stände auf Befehlsebene in `service-documents` (letztes Stück), `return-chain`, `lifecycle-actions` und `financial-actions` im Node-Gesamttest.
 
 Behoben (v0.8.97):
 - `r7b-review-runtime` leitet die Monate vom Lauftag ab. Die Anmeldemaske nach dem Uhrsprung war kein hartes Beenden, sondern die richtig abgelaufene 30-Tage-Sitzung; der Lauf meldet sich dort regulär neu an.
