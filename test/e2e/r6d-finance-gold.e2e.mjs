@@ -1293,7 +1293,7 @@ try {
     fuellen: async () => 'OK',
     speichern: async (c, x) => {
       const k = await klick(c, `[data-order-cost-remove="${LINE_STEIN[x]}"]`); if (k !== 'OK') return k;
-      return appOk(c, x, /Kostenposition löschen?/);
+      return appOk(c, x, /Kostenposition löschen\?/);
     },
     fertig: (x) => !zeile('order_lines', LINE_STEIN[x]).id,
     zu: (x) => `!${q(`[data-order-cost-remove="${LINE_STEIN[x]}"]`)}`,

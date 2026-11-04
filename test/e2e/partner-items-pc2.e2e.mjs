@@ -511,7 +511,10 @@ try {
       `CONCURRENT zwei gleichzeitige Auszahlungen → genau eine (${S([r1.status, r2.status])}; ${JSON.stringify([r1.body?.error, r2.body?.error])})`);
     await partnerSeite();
     await aufklappen(PL('A'));
-    ok(await c_disabled(`[data-partner-item-payout="${PL('A')}"]`), 'CONCURRENT danach bietet PC2 keine Auszahlung mehr an (offen 0)');
+    // Seit 409ffe71 folgt der Knopf dem, was offen ist: bei offen 0 gibt es „Pay out" nicht mehr (statt gesperrt).
+    const knopfDa = await exists(client, `[data-partner-item-payout="${PL('A')}"]`);
+    const offen = await offenA();
+    ok(!knopfDa && offen === 0, `CONCURRENT danach bietet PC2 keine Auszahlung mehr an (Knopf ${knopfDa ? 'da' : 'weg'}, offen ${offen})`);
   }
 
   // ── 5 Kundenretoure auf PC2, Nachabrechnung auf PC2 ───────────────────────
@@ -587,7 +590,7 @@ try {
     // Seit 493cd7bb fragt die App in IHREM Dialog (ConfirmHost) — auch auf PC2; der Stub des Beobachters greift dort nicht mehr.
     if (!(await warteBis(client, "!!document.querySelector('[data-app-confirm-ok]')", 15000))) throw new Error('keine Rückfrage beim Zurücknehmen');
     const frage = String(await client.ev("return document.querySelector('[data-app-confirm-text]')?.textContent || '';"));
-    if (!/Reverse this entry as an entry error?/.test(frage)) throw new Error('falsche Rückfrage: ' + frage.slice(0, 80));
+    if (!/Reverse this entry as an entry error\?/.test(frage)) throw new Error('falsche Rückfrage: ' + frage.slice(0, 80));
     await click(client, '[data-app-confirm-ok]');
     await sleep(1500);
     await spuelen(primary);
@@ -672,7 +675,3 @@ console.log(`\npartner-items-pc2 e2e: ${PASS} passed, ${FAIL} failed (${Math.rou
 if (FAIL) { for (const f of fails) console.log('  FAIL ' + f); process.exit(1); }
 console.log('PARTNER_ITEMS_PC2_E2E_PROVED');
 process.exit(0);
-
-async function c_disabled(sel) {
-  return client.ev(`const e=document.querySelector(${S(sel)}); return !!(e && e.disabled);`);
-}
