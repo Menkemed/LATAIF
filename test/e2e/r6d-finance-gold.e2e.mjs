@@ -356,7 +356,8 @@ function seed() {
     insert(db, 'precious_metals', { id: 'r6d-stock-21k', branch_id, metal_type: 'gold', karat: '21K', weight_grams: 50, description: 'R6D Bestand', status: 'in_stock', images: '[]', paid_amount: 0, payment_status: 'PAID', created_at: alt, updated_at: alt });
     for (const x of ['C', 'P']) {
       insert(db, 'customers', { id: KUNDE(x), branch_id, first_name: 'R6D', last_name: `Kunde ${x}`, phone: x === 'C' ? '+973 3600 0111' : '+973 3600 0222', created_at: now, updated_at: now });
-      insert(db, 'suppliers', { id: LIEF(x), branch_id, name: `R6D Lief ${x}`, phone: x === 'C' ? '+973 1700 0111' : '+973 1700 0222', active: 1, created_at: now, updated_at: now });
+      // Seit 53cf1544 (v0.8.92) ist als Werkstatt (Gold vom Workshop) nur wählbar, wer aktiv UND „Is Workshop“ ist.
+      insert(db, 'suppliers', { id: LIEF(x), branch_id, name: `R6D Lief ${x}`, phone: x === 'C' ? '+973 1700 0111' : '+973 1700 0222', active: 1, is_workshop: 1, created_at: now, updated_at: now });
       insert(db, 'partners', { id: PARTNER(x), branch_id, name: `R6D Partner ${x}`, share_percentage: 10, active: 1, created_at: now, updated_at: now });
       insert(db, 'repairs', { id: REP(x), branch_id, repair_number: `REP-R6D-${x}`, customer_id: KUNDE(x), item_brand: 'R6D', item_model: 'Uhr', issue_description: 'R6D Service', repair_type: 'internal', status: 'in_progress', received_at: alt, images: '[]', item_attributes: '{}', created_at: alt, updated_at: alt });
       insert(db, 'orders', { id: ORD(x), branch_id, order_number: `ORD-R6D-${x}`, customer_id: KUNDE(x), requested_brand: 'R6D', requested_model: 'Ring', agreed_price: 500, status: 'pending', type: 'custom', attributes: '{}', created_at: alt, updated_at: alt });
@@ -371,8 +372,14 @@ function seed() {
       insert(db, 'purchases', { id: PUR(x), branch_id, purchase_number: `R6D-PUR-${x}`, supplier_id: LIEF(x), status: 'UNPAID', total_amount: 200, paid_amount: 0, remaining_amount: 200, purchase_date: tag(-10), notes: 'R6D Einkauf', created_at: alt, updated_at: alt });
       insert(db, 'supplier_credits', { id: K2(x), branch_id, supplier_id: LIEF(x), amount: 200, used_amount: 0, status: 'OPEN', note: 'R6D Guthaben', created_at: alt });
     }
-    // Eine abgeschlossene Rechnung mit Umsatzsteuer im laufenden Quartal → das Quartal ist offen.
-    insert(db, 'invoices', { id: 'r6d-inv-1', branch_id, invoice_number: 'R6D-INV-1', customer_id: KUNDE('C'), status: 'FINAL', currency: 'BHD', net_amount: 1000, vat_rate_snapshot: 10, vat_amount: 100, gross_amount: 1100, tax_scheme_snapshot: 'VAT_10', paid_amount: 0, issued_at: now, created_at: now, updated_at: now });
+    // Eine abgeschlossene, VOLL bezahlte Rechnung mit Umsatzsteuer im laufenden Quartal → das Quartal ist offen.
+    // Seit b8a52c11 (v0.8.60) rechnet die Quartalsübersicht wie der NBR-Export: FINAL, voll bezahlt, aus den
+    // Rechnungszeilen, im Monat der Vollzahlung — eine Rechnung ohne Zeile und ohne Zahlung steht in keinem Quartal.
+    const kategorie = (db.prepare('SELECT id FROM categories ORDER BY id LIMIT 1').get() || {}).id;
+    insert(db, 'products', { id: 'r6d-prod-inv', branch_id, category_id: kategorie, brand: 'R6D', name: 'R6D Rechnungsstück', purchase_price: 500, status: 'sold', quantity: 0, attributes: '{}', images: '[]', created_at: now, updated_at: now });
+    insert(db, 'invoices', { id: 'r6d-inv-1', branch_id, invoice_number: 'R6D-INV-1', customer_id: KUNDE('C'), status: 'FINAL', currency: 'BHD', net_amount: 1000, vat_rate_snapshot: 10, vat_amount: 100, gross_amount: 1100, tax_scheme_snapshot: 'VAT_10', paid_amount: 1100, issued_at: now, created_at: now, updated_at: now });
+    insert(db, 'invoice_lines', { id: 'r6d-inv-1-l1', invoice_id: 'r6d-inv-1', product_id: 'r6d-prod-inv', description: 'R6D Rechnungsstück', unit_price: 1100, purchase_price_snapshot: 500, vat_rate: 10, tax_scheme: 'VAT_10', vat_amount: 100, line_total: 1100, quantity: 1, position: 1 });
+    insert(db, 'payments', { id: 'r6d-inv-1-pay', branch_id, invoice_id: 'r6d-inv-1', amount: 1100, method: 'cash', received_at: now, created_at: now });
   } finally { try { db.close(); } catch { /* zu */ } }
 }
 
@@ -470,6 +477,19 @@ async function paar(def) {
   if (erg.C.gut && z && l) BEWEIS[def.op].C++;
   if (erg.P.gut && z && l) BEWEIS[def.op].P++;
   return erg;
+}
+
+/**
+ * Seit 493cd7b fragt die App in IHREM Dialog (ConfirmHost) — er ersetzt den `window.confirm`-Stub des Beobachters.
+ * PC2 bestätigt mit OK (die Frage wird geprüft); am Primary setzt der Lauf `DIALOGE_PRIMARY` NACH dem Laden, dort
+ * antwortet der Stub und es kommt kein Dialog.
+ */
+async function appOk(c, x, muster) {
+  if (x === 'P') return 'OK';
+  if (!(await warteBis(c, q('[data-app-confirm-ok]'), 15000))) return 'KEIN-DIALOG';
+  const frage = String(await c.ev("return document.querySelector('[data-app-confirm-text]')?.textContent || '';"));
+  if (!muster.test(frage)) return 'FALSCHE-FRAGE:' + frage.slice(0, 80);
+  return klick(c, '[data-app-confirm-ok]');
 }
 
 /** Ein Eintrag einer Suchauswahl (SearchSelect) wählen: Auslöser in der Hülle, dann die Option. */
@@ -1004,12 +1024,19 @@ try {
       if (!(await warteBis(c, `${q('[data-supplier-pay-save]')} && !${q('[data-supplier-pay-save]')}.disabled`, 10000))) return 'KNOPF-GESPERRT';
       return alleOk(r);
     },
-    speichern: (c) => klick(c, '[data-supplier-pay-save]'),
+    // 150 auf 100 Offenes: die Maske fragt nach dem Überschuss (SETTLEMENT S2) — auch bei der Wiederholung.
+    speichern: async (c, x) => {
+      const k = await klick(c, '[data-supplier-pay-save]'); if (k !== 'OK') return k;
+      return appOk(c, x, /excess will be kept as redeemable supplier credit/);
+    },
     fertig: (x, v) => zeile('expenses', EXP1(x)).status === 'PAID' && zeile('expenses', EXP2(x)).status === 'PAID'
       && neueZeilen('supplier_credits', v.kids, 'supplier_id = ? AND source_purchase_id IS NULL AND source_return_id IS NULL', [LIEF(x)]).length === 1,
     zu: () => `!${q('[data-supplier-pay-amount]')}`,
-    keys: ['amount', 'method', 'mode', 'supplierId'],
-    rumpf: (p) => p.supplierId === LIEF('C') && p.amount === 150 && p.method === 'bank' && p.mode === 'fifo',
+    // Seit v0.8.83: die ausdrückliche Wahl für den Überschuss (e7ec8314) und der Stand der offenen Posten, den die
+    // Maske gezeigt hat (0bcfd49a) — der Primary prüft ihn in seiner Transaktion.
+    keys: ['amount', 'confirmExcessAsCredit', 'expectedOpenStamp', 'method', 'mode', 'supplierId'],
+    rumpf: (p) => p.supplierId === LIEF('C') && p.amount === 150 && p.method === 'bank' && p.mode === 'fifo'
+      && p.confirmExcessAsCredit === true && typeof p.expectedOpenStamp === 'string' && p.expectedOpenStamp.length > 0,
     zustand: (x, v) => {
       const k = neueZeilen('supplier_credits', v.kids, 'supplier_id = ?', [LIEF(x)]);
       K1[x] = k[0]?.id;
@@ -1264,7 +1291,10 @@ try {
     bereit: (x) => q(`[data-order-cost-remove="${LINE_STEIN[x]}"]`),
     vorher: (x) => ({ exp: zeile('order_lines', LINE_STEIN[x]).expense_id, rev: Number(zeile('orders', ORD(x)).revision) }),
     fuellen: async () => 'OK',
-    speichern: (c, x) => klick(c, `[data-order-cost-remove="${LINE_STEIN[x]}"]`),
+    speichern: async (c, x) => {
+      const k = await klick(c, `[data-order-cost-remove="${LINE_STEIN[x]}"]`); if (k !== 'OK') return k;
+      return appOk(c, x, /Kostenposition löschen?/);
+    },
     fertig: (x) => !zeile('order_lines', LINE_STEIN[x]).id,
     zu: (x) => `!${q(`[data-order-cost-remove="${LINE_STEIN[x]}"]`)}`,
     keys: ['expectedRevision', 'lineId', 'orderId'],
