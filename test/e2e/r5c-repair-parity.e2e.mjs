@@ -17,7 +17,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { spawn, execFileSync } from 'node:child_process';
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
-import { killTestImage, tasklistTestImage } from './_e2e-process.mjs';
+import { killTestImage, tasklistTestImage, testProcesses, closeTestWindow } from './_e2e-process.mjs';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
@@ -583,8 +583,12 @@ try {
   await waitFor(primary, SHELL, 60000);
   await spuelen(primary).catch(() => null);
   await sleep(1200);
+  // Regulär schließen (`closeTestWindow`, nur der exakte Test-Pfad): ein hartes Beenden direkt nach dem Onboarding verliert
+  // die neueste Sitzung, wenn sie noch nicht in der Datei steht („not-issued-here") — der Neustart stünde an der Anmeldemaske.
+  const onboardingPids = testProcesses('lataif.exe').map((p) => p.pid);
   primary.close(); primary = null;
-  killImage('lataif.exe'); await waitGone('lataif.exe');
+  for (const pid of onboardingPids) await closeTestWindow(pid, APP);
+  await waitGone('lataif.exe');
   seed();
   execFileSync(SEED, ['seed-primary', SERVER_DB], { env: { ...process.env, E2E_OWNER_PW: OWNER_PW }, encoding: 'utf8' });
 
