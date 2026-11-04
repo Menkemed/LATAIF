@@ -318,7 +318,10 @@ const imKundenfeld = (c, name) => warteBis(c,
   `(document.querySelector('[data-ss-trigger="Search clients..."]')?.textContent || '').includes(${S(name)})`, 30000);
 
 // ── Was am Primary steht ──
-const TR_OHNE = /^(id|agent_id|product_id|transfer_number|version|sync_status)$|_at$/;
+// `stock_lot_id` (seit 8519a9db, v0.8.59) ist wie `product_id` eine Kennung JE SEITE — sie wird nicht roh verglichen,
+// sondern ausdrücklich geprüft: jeder Verkauf nimmt aus dem Los SEINES Artikels (`eigenesLos`).
+const TR_OHNE = /^(id|agent_id|product_id|stock_lot_id|transfer_number|version|sync_status)$|_at$/;
+const eigenesLos = (t) => !!t.stock_lot_id && t.stock_lot_id === t.product_id + '-lot';
 const KU_OHNE = /^(id|first_name|last_name|version|sync_status)$|_at$/;
 const norm = (r, ohne) => S(Object.fromEntries(Object.entries(r || {}).filter(([k]) => !ohne.test(k)).sort(([a], [b]) => a.localeCompare(b))));
 const transfer = (id) => dbQ(BIZ_DB, 'SELECT * FROM agent_transfers WHERE id = ?', [id])[0] || {};
@@ -440,6 +443,7 @@ try {
     await warteAuf(() => transfer('r5d1-o2').status === 'sold');
     const a = norm(transfer('r5d1-o2'), TR_OHNE), b = norm(transfer('r5d1-o1'), TR_OHNE);
     ok(a === b, `DETAIL-PARITAET Transfer: Primary-Maske == PC2${a !== b ? ` (${a} / ${b})` : ''}`);
+    ok(eigenesLos(transfer('r5d1-o1')) && eigenesLos(transfer('r5d1-o2')), `DETAIL-PARITAET jeder Verkauf nimmt aus dem Los seines Artikels (${transfer('r5d1-o1').stock_lot_id} / ${transfer('r5d1-o2').stock_lot_id})`);
     ok(forderung('r5d1-o2') === forderung('r5d1-o1') && forderung('r5d1-o1') !== '[]', `DETAIL-PARITAET dieselbe Forderung aus dem Verkauf (${forderung('r5d1-o1')})`);
     ok(stueck('r5d1-o2') === stueck('r5d1-o1'), 'DETAIL-PARITAET derselbe Bestand');
   }
@@ -459,6 +463,7 @@ try {
     await warteAuf(() => transfer('r5d1-o6').status === 'sold');
     ok(norm(transfer('r5d1-o6'), TR_OHNE) === norm(transfer('r5d1-o5'), TR_OHNE) && forderung('r5d1-o6') === forderung('r5d1-o5'),
       'DETAIL-UNTER Primary-Maske == PC2 (Transfer und Forderung)');
+    ok(eigenesLos(transfer('r5d1-o5')) && eigenesLos(transfer('r5d1-o6')), `DETAIL-UNTER jeder Verkauf nimmt aus dem Los seines Artikels (${transfer('r5d1-o5').stock_lot_id} / ${transfer('r5d1-o6').stock_lot_id})`);
   }
 
   // ── Return ──
