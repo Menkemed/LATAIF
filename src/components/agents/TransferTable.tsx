@@ -28,6 +28,7 @@ import {
   canUndoTransferConvert, convertTransferOnPrimary, convertTransfersOnPrimary, deleteTransferOnPrimary, transferUndoBody, undoTransferConversionOnPrimary,
 } from '@/core/agents/transfer-house';
 import { productDisplayName } from '@/core/products/display-name';
+import { computeAgentTransferSale } from '@/core/agent/economics';
 
 
 // Display-Status (User-Spec: Transfer ↔ Invoice synchron). Wenn der Transfer
@@ -99,15 +100,17 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
     loadTransfers();
   }
 
-  /** R4C.2 — verkauft. Der Preis unter „Our Price" braucht die ausdrueckliche Bestaetigung. */
-  async function transferVerkauft(transferId: string, salePrice: number) {
+  /** R4C.2 — verkauft. Der Preis unter „Our Price" braucht die ausdrueckliche Bestaetigung — dieselbe wie auf der
+   *  Detailseite (Checkbox im Dialog); ohne sie lehnten beide Rechner den Verkauf aus der Liste immer ab. */
+  async function transferVerkauft(transferId: string, salePrice: number, ack: boolean): Promise<boolean> {
     const fassung = fassungVon(transferId, 'marking this transfer sold');
-    if (fassung === null) return;
+    if (fassung === null) return false;
     if (!await w.ok('transfers.mark_sold', {
-      local: () => { markTransferSold(transferId, salePrice); return {}; },
-      remote: () => ({ transferId, salePrice, expectedRevision: fassung }),
-    })) return;
+      local: () => { markTransferSold(transferId, salePrice, undefined, ack); return {}; },
+      remote: () => ({ transferId, salePrice, expectedRevision: fassung, ...(ack ? { acknowledgeBelowPrice: true } : {}) }),
+    })) return false;
     loadTransfers();
+    return true;
   }
 
   /** R6E — „Undo": die Rechnung wird STORNIERT (nicht mehr geloescht), jeder Transfer dieser Rechnung
@@ -146,6 +149,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
   // Sold
   const [soldModal, setSoldModal] = useState<string | null>(null);
   const [soldPrice, setSoldPrice] = useState(0);
+  const [soldAck, setSoldAck] = useState(false);
 
   // Convert (single)
   const [convertModal, setConvertModal] = useState<string | null>(null);
@@ -446,7 +450,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
             <div className="flex gap-1 flex-wrap" onClick={e => e.stopPropagation()}>
               {t.status === 'transferred' && (
                 <>
-                  <button data-transfer-sold onClick={() => { setSoldModal(t.id); setSoldPrice(t.agentPrice); }}
+                  <button data-transfer-sold onClick={() => { setSoldModal(t.id); setSoldPrice(t.agentPrice); setSoldAck(false); }}
                     className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #7EAA6E', color: '#7EAA6E', borderRadius: 4, background: 'none' }}>Sold</button>
                   <button data-transfer-return onClick={() => void transferZurueck(t.id)} disabled={w.busy}
                     className="cursor-pointer" style={{ padding: '3px 8px', fontSize: 11, border: '1px solid #6B7280', color: '#6B7280', borderRadius: 4, background: 'none' }}>Return</button>
@@ -495,7 +499,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
       {/* Sold Modal — User-Spec: tatsächlicher Verkaufspreis darf vom Our Price abweichen.
           z.B. Our Price 285.000, tatsächlich verkauft 280.000 → das System speichert
           den Actual-Wert, ohne den ursprünglichen Our Price zu überschreiben. */}
-      <Modal open={!!soldModal} onClose={() => setSoldModal(null)} title="Record Sale" width={420}>
+      <Modal open={!!soldModal} onClose={() => { setSoldModal(null); setSoldAck(false); }} title="Record Sale" width={420}>
         <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
           {soldModal && (() => {
             const t = findTransfer(soldModal);
@@ -510,16 +514,47 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
               </div>
             );
           })()}
+          <WriteError text={w.fehler} />
           <Input required label="ACTUAL SALE PRICE (BHD)" type="number"
             placeholder="Actually sold — may differ"
             value={soldPrice || ''}
-            onChange={e => setSoldPrice(Number(e.target.value))} />
-          <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
-            <Button variant="ghost" onClick={() => setSoldModal(null)}>Cancel</Button>
-            <Button variant="primary" onClick={() => {
-              if (soldModal && soldPrice > 0) { void transferVerkauft(soldModal, soldPrice).then(() => setSoldModal(null)); }
-            }} disabled={soldPrice <= 0 || w.busy} data-transfer-sold-confirm>Confirm Sale</Button>
-          </div>
+            onChange={e => { setSoldPrice(Number(e.target.value)); setSoldAck(false); }} />
+          {(() => {
+            // Dieselbe Unter-Preis-Warnung wie auf der Detailseite (nur split): ohne Bestätigung kein Verkauf.
+            const t = soldModal ? findTransfer(soldModal) : undefined;
+            const needsAck = !!t && (t.settlementModel || 'full') === 'split' && soldPrice > 0
+              && computeAgentTransferSale(t, soldPrice).belowPrice;
+            return (
+              <>
+                {needsAck && t && (
+                  <div data-transfer-sold-below style={{
+                    padding: '12px 14px', borderRadius: 8,
+                    background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.30)',
+                    fontSize: 12, color: '#DC2626',
+                  }}>
+                    <div style={{ fontWeight: 600, marginBottom: 6 }}>
+                      ⚠ Sale below Our Price (<Bhd v={t.agentPrice || 0}/> BHD)
+                    </div>
+                    <div style={{ marginBottom: 10, color: '#7A2A2A' }}>
+                      No split — we receive only the actual amount (<Bhd v={soldPrice}/> BHD).
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer" style={{ fontSize: 12 }}>
+                      <input type="checkbox" checked={soldAck} onChange={e => setSoldAck(e.target.checked)} data-transfer-sold-ack />
+                      <span>I confirm the below-price sale</span>
+                    </label>
+                  </div>
+                )}
+                <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
+                  <Button variant="ghost" onClick={() => { setSoldModal(null); setSoldAck(false); }}>Cancel</Button>
+                  <Button variant="primary" onClick={() => {
+                    if (soldModal && soldPrice > 0) {
+                      void transferVerkauft(soldModal, soldPrice, needsAck && soldAck).then((gut) => { if (gut) { setSoldModal(null); setSoldAck(false); } });
+                    }
+                  }} disabled={soldPrice <= 0 || (needsAck && !soldAck) || w.busy} data-transfer-sold-confirm>Confirm Sale</Button>
+                </div>
+              </>
+            );
+          })()}
         </div>
       </Modal>
 
