@@ -43,7 +43,7 @@ import { hydrateFromPrimary, readsFromPrimary } from '@/core/data/primary-source
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 import { productDisplayName } from '../core/products/display-name.ts';
-import { stonesOrThrow } from '../core/products/stones.ts';
+import { stonesOrThrow, StonesRejected } from '../core/products/stones.ts';
 import { belongsToConsignment } from '@/core/consignment/consignment-sale-link';
 // F9 — Menge, Bestandsstatus und Herkunft folgen aus den Vorgängen, nicht aus der Artikelbearbeitung.
 import { PRODUCT_LIFECYCLE_LOCKED, lifecycleEditRefusal } from '@/core/products/lifecycle-fields';
@@ -948,6 +948,10 @@ export const useProductStore = create<ProductStore>((set, get) => ({
       productExists: (pid) => query('SELECT 1 FROM products WHERE id = ?', [pid]).length > 0,
       insertProductRow: (pid) => {
         assertSkuFree(query, data.sku, null, branchId);
+        // STONES — dieselbe EINE Übernahme der Steinliste wie in `createProduct`: normalisiert, Diamond Weight aus den
+        // Diamant-Zeilen abgeleitet. Ohne sie legte der Handy-Weg (und jede Anlage mit Fotos) die Zeilen roh ab, und
+        // das abgeleitete Diamond Weight fehlte in der Datenbank.
+        const attributes = stonesOrThrow(data.categoryId, (data.attributes || {}) as Record<string, unknown>);
         const margin = data.plannedSalePrice ? data.plannedSalePrice - (data.purchasePrice || 0) : undefined;
         // Identical column set to createProduct, but images is ALWAYS '[]' — no
         // base64/data URL is ever written to products.images on this path.
@@ -964,7 +968,7 @@ export const useProductStore = create<ProductStore>((set, get) => ({
            data.minSalePrice || null, data.maxSalePrice || null,
            (data.stockStatus as StockStatus) || 'in_stock', data.taxScheme || 'MARGIN', margin || null,
            data.supplierName || null, data.purchaseSource || null, data.paidFrom || null, data.sourceType || 'OWN', data.notes || null,
-           JSON.stringify(data.attributes || {}), now, now,
+           JSON.stringify(attributes), now, now,
            (() => { try { return currentUserId(); } catch { return null; } })()],
         );
       },
@@ -1091,6 +1095,8 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     });
     } catch (e) {
       if (e instanceof SkuTakenError) return { status: 'product_save_failed', productId: id, errorCode: SKU_TAKEN };
+      // Eine ungültige Steinliste: nichts angelegt, fester Code (das Telefon prüft dieselben Regeln schon vorher).
+      if (e instanceof StonesRejected) return { status: 'product_save_failed', productId: id, errorCode: e.code };
       throw e;
     }
 
@@ -1125,6 +1131,20 @@ export const useProductStore = create<ProductStore>((set, get) => ({
     const lebenslauf = lifecycleEditRefusal(
       query('SELECT * FROM products WHERE id = ?', [id])[0] as Record<string, unknown> | undefined, data as Record<string, unknown>);
     if (lebenslauf) return { status: 'blocked', errorCode: PRODUCT_LIFECYCLE_LOCKED, message: lebenslauf };
+    // STONES — dieselbe Übernahme wie in `updateProduct`: gegen den gespeicherten Stand normalisiert (ein abgeleitetes
+    // Diamond Weight folgt seinen Diamant-Zeilen, ein Wert von vor der Steinliste bleibt); ungültig wird nie geschrieben.
+    if (data.attributes) {
+      const zeile = query('SELECT category_id, attributes FROM products WHERE id = ?', [id])[0];
+      let vorher: Record<string, unknown> | undefined;
+      try { vorher = zeile?.attributes ? JSON.parse(String(zeile.attributes)) : undefined; } catch { vorher = undefined; }
+      const kat = data.categoryId ?? (zeile?.category_id as string | undefined);
+      try {
+        data = { ...data, attributes: stonesOrThrow(kat, data.attributes as Record<string, unknown>, vorher) as Product['attributes'] };
+      } catch (e) {
+        if (e instanceof StonesRejected) return { status: 'blocked', errorCode: e.code, message: e.message };
+        throw e;
+      }
+    }
     const role = 'stock_image';
     const scope: EditScope = { tenantId, scopeKind: 'branch', branchId, entityType: 'product', entityId: id, role };
     const orchestrator = await getStockMediaOrchestrator();

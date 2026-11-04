@@ -244,6 +244,20 @@ export function normalizeStoneAttributes<T extends Record<string, unknown>>(
   return { attributes: out as T, issues: [] };
 }
 
+/**
+ * Die Merkmale zum ANZEIGEN und DRUCKEN (Karte, Merkmalliste, Druckzeile, Etikett): bei Gold-Diamond steht Diamond Weight
+ * aus den Diamant-Zeilen — wie `diamondWeightInfo` —, ein Wert von vor der Steinliste bleibt. Artikel, deren Zeilen ohne
+ * abgeleitetes Gewicht gespeichert wurden (Handy-Weg bis v0.8.96), zeigen und drucken damit das richtige Gewicht, ohne
+ * dass die gespeicherten Daten geändert werden.
+ */
+export function attributesForDisplay<T extends Record<string, unknown>>(categoryId: string | null | undefined, attributes: T | null | undefined): T {
+  const a = { ...(attributes || {}) } as Record<string, unknown>;
+  if (!stonesApply(categoryId)) return a as T;
+  const dw = diamondWeightInfo(a);
+  if (dw.source === 'stones' && dw.thousandths !== null) a[DIAMOND_WEIGHT_KEY] = dw.thousandths / 1000;
+  return a as T;
+}
+
 /** Woher kommt das angezeigte Diamond Weight? */
 export function diamondWeightInfo(attributes: Record<string, unknown> | null | undefined):
   { thousandths: number | null; source: 'stones' | 'legacy' | 'none' } {

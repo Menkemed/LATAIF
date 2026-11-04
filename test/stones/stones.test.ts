@@ -197,8 +197,8 @@ migrateCategoryStonesV1(db as never);
 const zweimal = JSON.parse(String(db.exec(`SELECT attributes FROM categories WHERE id = '${GOLD}'`)[0].values[0][0]));
 ok(zweimal.filter((a: { key: string }) => a.key === 'stones').length === 1, 'MIGRATION idempotent');
 ok(String(db.exec("SELECT attributes FROM products WHERE id = 'p1'")[0].values[0][0]) === JSON.stringify({ diamond_weight: 0.6, weight: 3 }), 'MIGRATION Produktdaten unberührt');
-ok(/migrateCategoryStonesV1\(db\);/.test(src('src/core/db/database.ts')) && (src('src/core/db/database.ts').match(/migrateCategoryStonesV1\(db\);/g) || []).length === 3,
-  'MIGRATION läuft bei Upgrade, Neuanlage und Browser-Neuanlage');
+ok(/migrateCategoryStonesV1\(db\);/.test(src('src/core/db/database.ts')) && (src('src/core/db/database.ts').match(/migrateCategoryStonesV1\(db\);/g) || []).length === 4,
+  'MIGRATION läuft bei Upgrade, Neuanlage, Browser-Neuanlage und beim Neuladen von der Platte (v0.8.97)');
 
 // ── 9 Reparatur ──
 const rep = REPAIR_FIELDS[GOLD];
@@ -214,6 +214,22 @@ ok(/normalizeStoneAttributes\(input\.itemCategoryId/.test(src('src/core/repairs/
 // ── 10 die Schreibstellen und Masken nutzen die EINE Liste ──
 ok(/stonesOrThrow\(data\.categoryId/.test(src('src/stores/productStore.ts')) && /stonesOrThrow\(kat, data\.attributes/.test(src('src/stores/productStore.ts')),
   'SCHREIBSTELLE Anlegen und Ändern normalisieren');
+// v0.8.97 — der Befund aus dem Handy-Weg: `createProductWithMedia` (Handy-Übernahme, jede Anlage mit Fotos) und
+// `editProductWithMedia` (Ändern mit Galerie) schrieben die Steinliste ROH — ohne abgeleitetes Diamond Weight. Jetzt
+// laufen ALLE Anlage- und Änderungswege des Artikelstores durch dieselbe Übernahme.
+{
+  const ps = src('src/stores/productStore.ts');
+  const block = (start: string, ende: string): string => { const i = ps.indexOf(start); return i < 0 ? '' : ps.slice(i, ps.indexOf(ende, i + start.length)); };
+  const mitMedien = block('createProductWithMedia: (data, retryProductId', 'buildBatchItems:');
+  ok(/const attributes = stonesOrThrow\(data\.categoryId/.test(mitMedien) && /JSON\.stringify\(attributes\), now, now/.test(mitMedien)
+    && !/JSON\.stringify\(data\.attributes/.test(mitMedien),
+    'SCHREIBSTELLE die Anlage mit Fotos (Handy-Weg) schreibt die normalisierte Liste, nie data.attributes roh');
+  const aendern = block('editProductWithMedia: (id, data, editImages', 'const role = \'stock_image\';');
+  ok(/stonesOrThrow\(kat, data\.attributes as Record<string, unknown>, vorher\)/.test(aendern) && /e instanceof StonesRejected/.test(aendern),
+    'SCHREIBSTELLE das Ändern mit Galerie normalisiert gegen den gespeicherten Stand und lehnt Ungültiges mit Code ab');
+  ok((ps.match(/INSERT INTO products \(/g) || []).length === 2 && (ps.match(/stonesOrThrow\(data\.categoryId/g) || []).length === 2,
+    `SCHREIBSTELLE jede der beiden Anlagen in productStore normalisiert (${(ps.match(/INSERT INTO products \(/g) || []).length} INSERT)`);
+}
 for (const f of ['src/components/products/NewProductModal.tsx', 'src/pages/watches/WatchList.tsx', 'src/pages/watches/ProductDetail.tsx',
   'src/pages/consignments/ConsignmentList.tsx', 'src/pages/repairs/RepairList.tsx', 'src/pages/repairs/RepairDetail.tsx']) {
   ok(/<StonesEditor /.test(src(f)), `RECHNER ${f.split('/').pop()} nutzt die EINE Steinliste`);
@@ -401,6 +417,44 @@ ok(/stonesFromLabels, normalizeStoneAttributes/.test(src('src/core/import/produc
   ok(/None \| Some\(Value::Null\) => true,\s*Some\(Value::String\(s\)\) if s\.trim\(\)\.is_empty\(\) => true,/.test(rsSrc), 'QTY Rust (Handy-Upload) nimmt eine fehlende oder leere Menge an');
   ok(!/qty: *1\b|qty: *'1'/.test(src('src/components/products/StonesEditor.tsx')) && /box\._rows\.push\(\{ type: '', qty: '' \}\)/.test(src('src-tauri/src/sync/mobile_page.rs')),
     'QTY neue Zeilen starten am Rechner und am Telefon mit leerer Menge');
+}
+
+// ── v0.8.97 jeder Weg, der die Datenbank aufbaut, legt die Steinliste wieder an ─────────────────────────────────────
+// `runMigrations` setzt bei jedem Lauf die Merkmale von Gold-Diamond (database.ts, ohne `stones`); erst
+// `migrateCategoryStonesV1` legt `stones` wieder an. `reloadDbFromDisk` (Onboarding, Schritt 4/5) rief nur das Erste —
+// bis zum nächsten Start fehlte die Steinliste am Desktop.
+{
+  const db = src('src/core/db/database.ts');
+  const migrationen = (db.match(/\n\s+runMigrations\(db\);/g) || []).length;
+  const steine = (db.match(/runMigrations\(db\);[\s\S]{0,700}?migrateCategoryStonesV1\(db\);/g) || []).length;
+  ok(migrationen === 4 && steine === migrationen, `STARTWEGE auf JEDES runMigrations(db) folgt migrateCategoryStonesV1(db) (${steine}/${migrationen})`);
+  const neu = db.slice(db.indexOf('export async function reloadDbFromDisk'), db.indexOf('export async function resetDatabase'));
+  ok(/runMigrations\(db\);[\s\S]*?migrateCategoryStonesV1\(db\);/.test(neu), 'STARTWEGE auch das Neuladen von der Platte (Onboarding) legt die Steinliste wieder an');
+}
+
+// ── v0.8.97 Lesen und Drucken: Diamond Weight aus den Zeilen, auch wo es nie gespeichert wurde ─────────────────────
+// Befund: der Handy-Weg (createProductWithMedia) legte bis v0.8.96 die Zeilen ROH ab, ohne abgeleitetes Diamond Weight
+// (in der Produktion 77 von 80 Gold-Diamond-Artikeln mit Diamant-Karat). Karte, Merkmalliste, Druckzeile und Etikett
+// lasen das Feld direkt und zeigten bzw. druckten kein Karat. Jetzt lesen sie über `attributesForDisplay` — ohne die
+// gespeicherten Daten zu ändern.
+{
+  const zpl = await import('../../src/core/print/zpl-tag.ts');
+  const kategorie = DEFAULT_CATEGORIES.find((c) => c.id === GOLD)!;
+  const rohVomHandy = { weight: 6.4, item_type: 'Ring', karat: '18K Yellow',
+    stones: [{ carat: 0.5, clarity: 'VS1', color: 'G', qty: 2, type: 'diamond' }, { carat: 0.25, type: 'diamond' }, { carat: 0.4, type: 'emerald' }] };
+  const angezeigt = st.attributesForDisplay(GOLD, rohVomHandy as Record<string, unknown>);
+  ok(angezeigt.diamond_weight === 0.75 && !('diamond_weight' in rohVomHandy), 'LESEN Diamond Weight aus den Diamant-Zeilen — die gespeicherten Merkmale bleiben unverändert');
+  ok(st.attributesForDisplay(GOLD, { weight: 5, diamond_weight: 0.5 }).diamond_weight === 0.5, 'LESEN ein Wert von vor der Steinliste bleibt');
+  ok(st.attributesForDisplay('cat-branded-gold-jewelry', { diamond_weight: 0.3, stones: [{ type: 'diamond', carat: 1 }] }).diamond_weight === 0.3,
+    'LESEN andere Kategorien: unverändert');
+  ok(/0\.75 ct/.test(pf.cardAttributeText(kategorie as never, rohVomHandy)), `LESEN die Karte zeigt das Karat (${pf.cardAttributeText(kategorie as never, rohVomHandy)})`);
+  const spec = pf.getProductSpecs({ id: 'x', categoryId: GOLD, attributes: rohVomHandy } as never, [kategorie as never]).find((s) => s.label === 'Diamond Weight');
+  ok(!!spec && /0\.75/.test(spec.value), `LESEN die Merkmalliste nennt Diamond Weight (${spec?.value})`);
+  const gesicht = zpl.buildProductFace({ id: 'x', sku: 'ITM-GLD-T1', categoryId: GOLD, attributes: rohVomHandy, plannedSalePrice: 300 } as never, kategorie as never);
+  const zeilen = JSON.stringify(gesicht);
+  ok(/0\.75CT/.test(zeilen), `DRUCK das Etikett trägt das Karat (${zeilen.slice(0, 200)})`);
+  const altGesicht = JSON.stringify(zpl.buildProductFace({ id: 'y', sku: 'ITM-GLD-T2', categoryId: GOLD, attributes: { weight: 5, item_type: 'Ring', diamond_weight: 0.5 }, plannedSalePrice: 300 } as never, kategorie as never));
+  ok(/0\.5CT/.test(altGesicht), `DRUCK ein Altwert wird gedruckt wie bisher (${altGesicht.slice(0, 160)})`);
 }
 
 console.log(`\nstones: ${PASS} passed, ${fails.length} failed`);

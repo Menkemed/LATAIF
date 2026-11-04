@@ -4013,6 +4013,10 @@ export async function reloadDbFromDisk(): Promise<boolean> {
     db = new SQL.Database(saved.data);
     db.run(SCHEMA);
     runMigrations(db);
+    // STONES — dieselbe Folge wie an jedem Startweg: runMigrations setzt die Merkmale von Gold-Diamond (ohne die
+    // Steinliste), erst diese Migration legt `stones` wieder an. Ohne sie fehlte die Steinliste nach dem Neuladen (das
+    // Onboarding lädt die Datei zur Prüfung neu) bis zum nächsten Start — keine Steine, kein Diamond Weight am Desktop.
+    migrateCategoryStonesV1(db);
     dbLifecycle.bumpEpoch();
     ok = true;
   });

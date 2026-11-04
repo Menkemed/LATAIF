@@ -3,7 +3,7 @@
 // aus Brand, Name, SKU, Condition + allen Kategorie-Attributen.
 import type { Product, Category, CategoryAttribute } from '@/core/models/types';
 import { lookupCategory } from './category-lookup.ts';
-import { STONES_KEY, stonesSearchText, stonesSummary, caratThousandths, fmtCarat } from '../products/stones.ts';
+import { STONES_KEY, stonesSearchText, stonesSummary, caratThousandths, fmtCarat, attributesForDisplay } from '../products/stones.ts';
 import { productDisplayName, formatGrams } from '../products/display-name.ts';
 
 function formatAttrValue(attr: CategoryAttribute, value: unknown): string | null {
@@ -52,7 +52,7 @@ export function getProductSpecs(
   if (cat) {
     const attrs = cat.attributes || [];
     const filtered = opts.prominentOnly ? attrs.filter(a => a.showInList) : attrs;
-    const values = (product.attributes as Record<string, unknown>) || {};
+    const values = attributesForDisplay(product.categoryId, product.attributes as Record<string, unknown>);
     for (const attr of filtered) {
       // Beschreibung wird separat behandelt → skip in Specs-Liste damit nicht doppelt erscheint.
       if (attr.key === 'description') continue;
@@ -69,7 +69,7 @@ export function getProductSpecs(
  * mit zwei Stellen), leere Werte und 0 fallen weg — wie bisher.
  */
 export function cardAttributeText(category: Category | undefined, attributes: Record<string, unknown> | undefined): string {
-  const values = attributes || {};
+  const values = attributesForDisplay(category?.id, attributes);
   return (category?.attributes || [])
     .filter(a => a.showInList && values[a.key])
     .map(a => (a.type === 'number' && a.unit === 'g' ? formatGrams(values[a.key]) : formatAttrValue(a, values[a.key])) || '')

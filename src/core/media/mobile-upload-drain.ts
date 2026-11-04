@@ -19,6 +19,7 @@ import type { PrepareResult } from './gateway';
 import { runtimeScopeAvailable, runtimeBindingRevisionOf, type RuntimeScopeEvidence } from './runtime-scope-evidence.ts';
 import { buildSkuSeed, skuIsEmpty } from '../products/sku-allocation.ts';
 import { SKU_TAKEN } from '../products/sku-unique.ts';
+import { normalizeStoneAttributes } from '../products/stones.ts';
 import { parseMobileGalleryPlan, ERR_GALLERY_PLAN_INVALID, type MobileGalleryPlan } from './mobile-gallery-edit.ts';
 import {
   parseMobileProductPatch, resolveMobileProductPatch, patchTouchesPrices,
@@ -325,6 +326,29 @@ export function withAllocatedSku(grant: ClaimGrant, deps: MobileDrainDeps): Clai
   return { ...grant, metadataJson: JSON.stringify({ ...m, sku }) };
 }
 
+/**
+ * STONES (v0.8.97) — die Steinliste des Telefons in die EINE Form der Anlage bringen (`normalizeStoneAttributes`:
+ * Zeilen normalisiert, Diamond Weight aus den Diamant-Zeilen), BEVOR Beleg-Hash und Artikel entstehen — wie die SKU in
+ * `withAllocatedSku`. Sonst bände der Beleg die rohe Projektion, die Anlage schriebe die normalisierte, und die Prüfung
+ * vor „ready" legte den Auftrag als ERR_METADATA_MISMATCH beiseite. Ungültige Zeilen bleiben unverändert (die Anlage
+ * lehnt sie mit STONES_INVALID ab; das Telefon und der Server prüfen dieselben Regeln schon vorher).
+ */
+export function withNormalizedStones(grant: ClaimGrant): ClaimGrant {
+  let m: Record<string, unknown>;
+  try {
+    const parsed: unknown = JSON.parse(grant.metadataJson);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return grant;
+    m = parsed as Record<string, unknown>;
+  } catch {
+    return grant;
+  }
+  const attrs = m.attributes;
+  if (!attrs || typeof attrs !== 'object' || Array.isArray(attrs)) return grant;
+  const r = normalizeStoneAttributes(typeof m.categoryId === 'string' ? m.categoryId : null, attrs as Record<string, unknown>);
+  if (r.issues.length) return grant;
+  return { ...grant, metadataJson: JSON.stringify({ ...m, attributes: r.attributes }) };
+}
+
 /** A prepared image's identity — the SERVER-derived prepareRequestId (which itself binds
  *  scope+originUser+uploadEventId+slot+contentHash) plus the request hash of its bytes. */
 export interface PreparedIdentity { prepareRequestId: string; requestHash: string }
@@ -484,7 +508,7 @@ export async function processMobileUploadClaim(grant: ClaimGrant, deps: MobileDr
   // and "next free" is only true at insert time. It is folded into the metadata BEFORE the hash, so
   // the receipt binds exactly what the row will contain — hash it after the fact and the pre-ready
   // projection check would find a SKU that was never bound and quarantine the job.
-  const created = withAllocatedSku(grant, deps);
+  const created = withNormalizedStones(withAllocatedSku(grant, deps));
   const metadataHash = await canonicalProductMetadataHash(projectionFieldsFromMetadata(created.metadataJson));
   const manifestHash = await preparedManifestHash(grant.images, identitiesFromPrepared(prepared));
   const result = await deps.createProduct(created, prepared, {

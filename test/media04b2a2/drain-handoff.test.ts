@@ -20,13 +20,14 @@ import { ProductMediaResolver } from '../../src/core/media/product-media-resolve
 import { createProductWithDurableMedia } from '../../src/core/media/product-media-create.ts';
 import { assertSkuFree, SkuTakenError, SKU_TAKEN } from '../../src/core/products/sku-unique.ts';
 import { purgeProductLeftovers, productWasDeleted } from '../../src/core/products/product-leftovers.ts';
+import { stonesOrThrow } from '../../src/core/products/stones.ts';
 import type {
   AbortInput, AbortResult, CommitInput, CommitResult, MediaBytes,
   MediaCommandGateway, PrepareInput, PrepareResult, ReadVerifiedInput, RecoveryOutcome,
 } from '../../src/core/media/gateway.ts';
 import {
   processMobileUploadClaim, drainMobileUploads, verifyGrantManifest, getMobileUploadDrainWorker,
-  triggerMobileUploadDrainSafe,
+  triggerMobileUploadDrainSafe, withNormalizedStones,
   canonicalProductMetadataHash, projectionFieldsFromMetadata, preparedManifestHash, identitiesFromPrepared,
   MaterializeError,
   type ClaimGrant, type ClaimedImage, type MobileUploadBridge, type ReadyResult, type MobileDrainDeps, type ReadyVerdict, type PreparedMediaItem, type BoundBatchJob, type GallerySlot,
@@ -677,6 +678,36 @@ async function main(): Promise<void> {
       ok(neu[0].code === 'ready' && count(db, `SELECT COUNT(*) FROM products WHERE id='prod-neu'`) === 1, `gelöscht: ein anderer, neuer Artikel wird normal angelegt (${neu[0].code})`);
     }
     db.close();
+  }
+
+  // ── STONES (v0.8.97) — die Steinliste des Telefons wird VOR Beleg-Hash und Anlage normalisiert ─────────────────────
+  // Befund: ohne diesen Schritt band der Beleg die rohe Projektion, die Anlage (stonesOrThrow) schrieb die normalisierte
+  // samt abgeleitetem Diamond Weight — die Prüfung vor „ready" hätte jeden Gold-Diamond-Auftrag mit Diamant-Zeilen als
+  // ERR_METADATA_MISMATCH in Quarantäne gelegt.
+  {
+    const roh = { categoryId: 'cat-gold-jewelry', name: 'Ring', attributes: { weight: 5, item_type: 'Ring', karat: '18K Yellow',
+      stones: [{ carat: 0.5, clarity: 'VS1', color: 'G', qty: 2, type: 'diamond' }, { carat: 0.25, type: 'diamond' }, { carat: 0.4, qty: 1, type: 'emerald' }] } };
+    const g = { metadataJson: JSON.stringify(roh) } as unknown as ClaimGrant;
+    const n = JSON.parse(withNormalizedStones(g).metadataJson);
+    ok(n.attributes.diamond_weight === 0.75, `STONES Diamond Weight = Summe der Diamant-Zeilen (${n.attributes.diamond_weight})`);
+    ok(JSON.stringify(n.attributes.stones) === JSON.stringify([{ type: 'diamond', qty: 2, carat: 0.5, color: 'G', clarity: 'VS1' }, { type: 'diamond', carat: 0.25 }, { type: 'emerald', qty: 1, carat: 0.4 }]),
+      'STONES die Zeilen in der EINEN Form der Anlage');
+    const geschrieben = stonesOrThrow(roh.categoryId, roh.attributes as Record<string, unknown>);
+    const hBeleg = await canonicalProductMetadataHash(projectionFieldsFromMetadata(withNormalizedStones(g).metadataJson));
+    const hArtikel = await canonicalProductMetadataHash({ name: roh.name, categoryId: roh.categoryId, attributes: geschrieben });
+    const hRoh = await canonicalProductMetadataHash(projectionFieldsFromMetadata(g.metadataJson));
+    ok(hBeleg === hArtikel && hRoh !== hArtikel, 'STONES Beleg-Hash == Hash des angelegten Artikels (ohne den Schritt: verschieden → Quarantäne)');
+    const nochmal = JSON.parse(withNormalizedStones({ metadataJson: withNormalizedStones(g).metadataJson } as unknown as ClaimGrant).metadataJson);
+    ok(JSON.stringify(nochmal) === JSON.stringify(n), 'STONES idempotent: ein Wiederholungslauf bindet denselben Stand');
+    const uhr = { categoryId: 'cat-watch', attributes: { dial: 'Black' } };
+    ok(withNormalizedStones({ metadataJson: JSON.stringify(uhr) } as unknown as ClaimGrant).metadataJson === JSON.stringify(uhr), 'STONES andere Kategorien: unverändert');
+    const kaputt = { categoryId: 'cat-gold-jewelry', attributes: { stones: [{ type: 'nope' }] } };
+    ok(withNormalizedStones({ metadataJson: JSON.stringify(kaputt) } as unknown as ClaimGrant).metadataJson === JSON.stringify(kaputt), 'STONES ungültige Zeilen: unverändert (die Anlage lehnt sie mit STONES_INVALID ab)');
+    const alt = { categoryId: 'cat-gold-jewelry', attributes: { weight: 5, diamond_weight: 0.5 } };
+    ok(JSON.parse(withNormalizedStones({ metadataJson: JSON.stringify(alt) } as unknown as ClaimGrant).metadataJson).attributes.diamond_weight === 0.5,
+      'STONES ein Altwert ohne Zeilen bleibt stehen');
+    const quelle = readFileSync(join(repo, 'src/core/media/mobile-upload-drain.ts'), 'utf8');
+    ok(/const created = withNormalizedStones\(withAllocatedSku\(grant, deps\)\);/.test(quelle), 'STONES der Schritt steht im Anlageweg, vor Beleg-Hash und Anlage');
   }
 
   console.log(`\nMOBILE-04B2A2 drain-handoff: ${PASS} passed, ${FAIL} failed`);

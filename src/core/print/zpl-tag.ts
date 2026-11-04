@@ -7,6 +7,7 @@
 // ═══════════════════════════════════════════════════════════
 
 import type { Product, Category } from '@/core/models/types';
+import { attributesForDisplay } from '../products/stones.ts';
 
 // ── Gelockte Geometrie (NICHT ändern ohne erneuten physischen Test) ──
 const FONT = '^A0N,17,18';
@@ -96,7 +97,8 @@ function karatShortJewelry(karat: unknown): string {
 // ── Gold-Diamond Jewellery (2026-06-04, abgenommen) — Scan-Tag mit Barcode ──
 // Oben: SKU, Barcode, Preis. Unten: Weight/Carat, Item Type + Karat, Description.
 function buildGoldJewelryFace(p: Product): TagFace {
-  const a = (p.attributes || {}) as Record<string, unknown>;
+  // STONES — Diamond Weight aus den Diamant-Zeilen (auch bei Zeilen ohne gespeichertes Gewicht, Handy-Weg bis v0.8.96).
+  const a = attributesForDisplay(p.categoryId, p.attributes as Record<string, unknown>);
   const sku = fit(up(p.sku || ''));
   const barcode = String(p.sku || '').trim();
   const price = fit(`BD ${Math.round(p.plannedSalePrice || p.purchasePrice || 0)}`);
@@ -234,7 +236,7 @@ function buildSparePartFace(p: Product): TagFace {
 
 // ── Generischer Fallback für andere Kategorien (noch ohne eigenes Layout) ──
 function buildGenericFace(p: Product, category?: Category): TagFace {
-  const a = (p.attributes || {}) as Record<string, unknown>;
+  const a = attributesForDisplay(p.categoryId, p.attributes as Record<string, unknown>);
   const upper: string[] = [];
   if (p.sku) upper.push(fit(up(p.sku)));
   if (p.brand) upper.push(fit(up(p.brand)));
