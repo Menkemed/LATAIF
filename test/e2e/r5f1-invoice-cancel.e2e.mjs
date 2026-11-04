@@ -11,7 +11,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { spawn, execFileSync } from 'node:child_process';
 import { assertE2eClientBinary, e2ePreflight } from './_e2e-preflight.mjs';
-import { killTestImage, tasklistTestImage, testProcesses, closeTestWindow } from './_e2e-process.mjs';
+import { killTestImage, tasklistTestImage, testProcesses, closeTestWindow, clearTestClientPendingSaves } from './_e2e-process.mjs';
 import { join } from 'node:path';
 import { existsSync, mkdirSync, rmSync, readdirSync, writeFileSync } from 'node:fs';
 import { deflateSync } from 'node:zlib';
@@ -449,6 +449,9 @@ const statusVon = (inv) => (dbQ(BIZ_DB, 'SELECT status FROM invoices WHERE id = 
 try {
   assertE2eClientBinary(CLIENT_APP);
   killAll(); await waitGone('lataif.exe'); await waitGone('lataif-e2e-client.exe');
+  // Offene Vorgänge früherer Läufe des Test-Clients liegen im echten LocalAppData (nur dessen Kennung) — ein Eintrag
+  // „invoices.cancel“ von dort ließe die erste Stornierung hier fragen (R7C R1). Wie r5d / pc2-reliability: leeren.
+  clearTestClientPendingSaves();
   for (const d of [RUN, CLIENT_APPDATA, join(CLIENT_HOME, 'Local'), join(CLIENT_HOME, 'tmp'), join(RUN, 'tmp')]) mkdirSync(d, { recursive: true });
   if (existsSync(APP_DATA_DIR)) rmSync(APP_DATA_DIR, { recursive: true, force: true });
   console.log(e2ePreflight({ appPath: APP, appDataDir: APP_DATA_DIR, port: PORT, env: appEnv() }));
@@ -560,6 +563,15 @@ try {
     ok(await warteBis(client, "/not clear whether/i.test(document.body.innerText)", 30000), 'VERLOREN-C der Dialog meldet den offenen Ausgang');
     await click(client, '[data-invoice-cancel]');
     ok(await warteAuf(() => statusVon('r5g-inv-H') === 'CANCELLED'), 'VERLOREN-C der zweite Versuch derselben Absicht kommt durch');
+    // Die Rechnung steht schon seit dem ERSTEN (verlorenen) Versuch auf CANCELLED. Abgeschlossen ist die Wiederholung
+    // erst, wenn die Maske es sagt (Dialog zu) — vorher neu laden hieße, sie mitten im Speichern abzubrechen; dann
+    // bliebe der Vorgang (gewollt) unter „Unresolved saves“ stehen.
+    ok(await warteBis(client, "!document.querySelector('[data-invoice-cancel]')", 30000), 'VERLOREN-C die Maske meldet den Abschluss (Dialog zu)');
+    {
+      const ablage = join(process.env.LOCALAPPDATA || '', 'com.lataif.app.e2e.client', 'pending-saves');
+      const offen = existsSync(ablage) ? readdirSync(ablage).filter((n) => n.endsWith('.json')) : [];
+      ok(offen.length === 0, `VERLOREN-C nach der beantworteten Wiederholung bleibt kein offener Vorgang (${S(offen)})`);
+    }
     const c = (await kommandos(client)).filter((x) => x.op === 'invoices.cancel');
     ok(c.length === 2 && c[0].commandId === c[1].commandId && S(c[0].payload) === S(c[1].payload), `VERLOREN-C dieselbe Kennung, derselbe Rumpf (${c.length})`);
     ok(retoureVon('r5g-inv-H').length === 1 && dbQ(BIZ_DB, 'SELECT id FROM credit_notes WHERE invoice_id = ?', ['r5g-inv-H']).length === 1
