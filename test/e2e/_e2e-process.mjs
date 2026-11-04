@@ -82,8 +82,48 @@ export function pidAlive(pid) {
   return ps(`Get-CimInstance Win32_Process -Filter "ProcessId=${n}" | ForEach-Object { $_.ProcessId }`).trim() === String(n);
 }
 
+// Genau EINE PID, nie `/T`: Windows behält die Eltern-PID eines Prozesses, auch wenn der Elternprozess längst beendet und
+// die Nummer neu vergeben ist. `taskkill /T` beendet jeden Prozess mit dieser Eltern-PID — auch einen fremden, z. B. die
+// Produktions-App, die ein inzwischen beendeter Installer gestartet hat (04.11.2026: Produktions-App während r6e weg).
 function taskkillPid(pid) {
-  try { execFileSync('taskkill', ['/F', '/T', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true }); } catch { /* schon weg */ }
+  try { execFileSync('taskkill', ['/F', '/PID', String(pid)], { stdio: 'ignore', windowsHide: true }); } catch { /* schon weg */ }
+}
+
+/**
+ * Die ECHTEN Nachkommen einer PID aus einer Prozessliste `{ pid, ppid, created }` (`created` = FILETIME UTC): Kind ist nur,
+ * wer die Eltern-PID trägt UND nicht vor dem Elternprozess entstanden ist. Ein älterer Prozess mit dieser Eltern-PID hatte
+ * einen ANDEREN Elternprozess gleicher Nummer — er gehört nicht zu diesem Lauf. Rein, ohne Systemzugriff (geprüft in
+ * test/e2e-safety/process-isolation.test.ts).
+ */
+export function trueDescendants(rows, rootPid) {
+  const root = rows.find((r) => r.pid === Number(rootPid));
+  if (!root) return [];
+  const out = [];
+  const seen = new Set([root.pid]);
+  const queue = [root];
+  while (queue.length) {
+    const eltern = queue.shift();
+    for (const r of rows) {
+      if (seen.has(r.pid) || r.ppid !== eltern.pid) continue;
+      if (!(Number.isFinite(r.created) && Number.isFinite(eltern.created) && r.created >= eltern.created)) continue;
+      seen.add(r.pid); out.push(r); queue.push(r);
+    }
+  }
+  return out;
+}
+
+/** Alle Prozesse mit Eltern-PID und Startzeit — nur lesend, für `trueDescendants`. */
+function processTable() {
+  const out = ps('Get-CimInstance Win32_Process | ForEach-Object { "$($_.ProcessId)|$($_.ParentProcessId)|$(if ($_.CreationDate) { $_.CreationDate.ToFileTimeUtc() } else { 0 })" }');
+  return out.split(/\r?\n/).map((l) => l.trim().split('|')).filter((x) => x.length === 3)
+    .map(([a, b, c]) => ({ pid: Number(a), ppid: Number(b), created: Number(c) }))
+    .filter((r) => Number.isInteger(r.pid) && r.pid > 0);
+}
+
+/** Eine geprüfte PID samt ihren ECHTEN Nachkommen beenden (tiefste zuerst) — nie über `/T`. */
+function beendeBaumSicher(pid) {
+  for (const k of trueDescendants(processTable(), pid).reverse()) taskkillPid(k.pid);
+  taskkillPid(pid);
 }
 
 /** Die Test-Prozesse dieses Namens: exakt am Test-Pfad, sonst keiner. */
@@ -104,7 +144,7 @@ export function foreignProcesses(image, binaries = TEST_BINARIES) {
  */
 export function killTestImage(image, binaries = TEST_BINARIES) {
   const victims = testProcesses(image, binaries);
-  for (const v of victims) taskkillPid(v.pid);
+  for (const v of victims) beendeBaumSicher(v.pid);
   for (const v of victims) started.delete(v.pid);
   return victims.map((v) => v.pid);
 }
@@ -118,10 +158,16 @@ export function killTestImage(image, binaries = TEST_BINARIES) {
  * Sitzungs-Riegel aus (danach Anmeldemaske); Aufbauten, die danach angemeldet weiterarbeiten, schließen deshalb so.
  */
 export async function closeTestWindow(pid, exe, budgetMs = 120000) {
+  // Nur das Fenster eines Test-Programms: die PID muss JETZT am exakten Test-Pfad laufen. Eine bloße oder wieder-
+  // vergebene PID könnte ein fremdes Fenster sein — auch das der Produktions-App.
+  const live = pathOfPid(pid);
+  const erlaubt = Object.values(TEST_BINARIES).map(norm);
+  if (!live || !exe || norm(live) !== norm(exe) || !erlaubt.includes(norm(exe))) return false;
   try {
     execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', `(Get-Process -Id ${pid} -ErrorAction Stop).CloseMainWindow()`], { encoding: 'utf8', windowsHide: true });
   } catch { /* schon weg */ }
   if (!await waitPidGone(pid, budgetMs)) killTestPid(pid, exe);
+  return true;
 }
 
 /** Offene Speichervorgänge früherer Läufe des Test-Clients entfernen (nur dessen Kennung, nie die Produktion). */
@@ -136,7 +182,7 @@ export function killTestPid(pid, expectedPath, binaries = TEST_BINARIES) {
   const allowed = expectedPath ? [norm(expectedPath)] : Object.values(binaries).map(norm);
   if (!allowed.includes(norm(live))) return false;
   if (expectedPath && !Object.values(binaries).map(norm).includes(norm(expectedPath))) return false;
-  taskkillPid(pid);
+  beendeBaumSicher(pid);
   started.delete(Number(pid));
   return true;
 }
@@ -153,7 +199,7 @@ export function killOwnChild(child) {
   if (!from || !isAbsolute(from)) return false;
   const live = pathOfPid(child.pid);
   if (!live || norm(live) !== norm(from)) return false;
-  taskkillPid(child.pid);
+  beendeBaumSicher(child.pid);
   return true;
 }
 

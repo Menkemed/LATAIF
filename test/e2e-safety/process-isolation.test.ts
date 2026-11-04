@@ -15,7 +15,7 @@
 //      Test-Pfad gehört, wird nicht angefasst; fremde `lataif.exe` (die Produktion) bleiben stehen.
 // ════════════════════════════════════════════════════════════════════════════
 import { readFileSync, readdirSync, mkdirSync, copyFileSync, rmSync, existsSync } from 'node:fs';
-import { spawn } from 'node:child_process';
+import { spawn, execFileSync } from 'node:child_process';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import os from 'node:os';
@@ -63,18 +63,22 @@ const dateien = readdirSync(E2E).filter((f) => f.endsWith('.mjs')).sort();
   ok(dateien.length >= 50 && dateien.includes(HELPER), `GATE die E2E-Dateien sind gefunden, der Helfer ist dabei (${dateien.length})`);
   const helper = readFileSync(join(E2E, HELPER), 'utf8');
   const hc = ohneKommentare(helper);
-  ok((hc.match(/'taskkill'/g) ?? []).length === 1 && /execFileSync\('taskkill', \['\/F', '\/T', '\/PID', String\(pid\)\]/.test(hc),
+  ok((hc.match(/'taskkill'/g) ?? []).length === 1 && hc.includes("execFileSync('taskkill', ['/F', '/PID', String(pid)]"),
     'GATE der Helfer ruft taskkill genau EINMAL und nur mit /PID');
+  ok(!hc.includes("'/T'"), 'GATE der Helfer beendet nie mit /T (Baum über die Eltern-PID trifft auch Fremde mit wiederverwendeter Eltern-PID)');
   ok(!/\/IM\b|IMAGENAME|Stop-Process|process\.kill\(/.test(hc), 'GATE der Helfer beendet nie nach Image-Namen');
   ok(!/killTestBrowserByProfile|CommandLine/.test(hc), 'GATE der Helfer beendet nie nach Befehlszeile (auch keinen Browser)');
   {
     const own = hc.slice(hc.indexOf('export function killOwnChild'), hc.indexOf('export function spawnTracked'));
-    ok(/isAbsolute\(from\)/.test(own) && own.indexOf('pathOfPid(child.pid)') > 0 && own.indexOf('pathOfPid(child.pid)') < own.indexOf('taskkillPid(child.pid)')
+    ok(/isAbsolute\(from\)/.test(own) && own.indexOf('pathOfPid(child.pid)') > 0 && own.indexOf('pathOfPid(child.pid)') < own.indexOf('beendeBaumSicher(child.pid)')
       && /norm\(live\) !== norm\(from\)/.test(own), 'GATE killOwnChild prüft Identität (absoluter Startpfad == laufender Pfad) VOR dem Beenden — nie eine bloße PID');
     const pid = hc.slice(hc.indexOf('export function killTestPid'), hc.indexOf('export function killOwnChild'));
-    ok(pid.indexOf('pathOfPid(pid)') > 0 && pid.indexOf('pathOfPid(pid)') < pid.indexOf('taskkillPid(pid)'), 'GATE killTestPid prüft den exakten Test-Pfad VOR dem Beenden');
+    ok(pid.indexOf('pathOfPid(pid)') > 0 && pid.indexOf('pathOfPid(pid)') < pid.indexOf('beendeBaumSicher(pid)'), 'GATE killTestPid prüft den exakten Test-Pfad VOR dem Beenden');
     const img = hc.slice(hc.indexOf('export function killTestImage'), hc.indexOf('export function killTestPid'));
     ok(/testProcesses\(image, binaries\)/.test(img), 'GATE Reste früherer Läufe nur am exakten Test-Pfad (testProcesses)');
+    const fenster = hc.slice(hc.indexOf('export async function closeTestWindow'), hc.indexOf('export function clearTestClientPendingSaves'));
+    ok(fenster.indexOf('pathOfPid(pid)') > 0 && fenster.indexOf('pathOfPid(pid)') < fenster.indexOf('CloseMainWindow'),
+      'GATE closeTestWindow prüft den exakten Test-Pfad VOR CloseMainWindow (nie das Fenster einer bloßen PID)');
   }
   ok(/TEST_BINARIES = Object\.freeze\(\{\s*'lataif\.exe': join\(REPO, 'src-tauri', 'target', 'debug', 'lataif\.exe'\),\s*'lataif-e2e-client\.exe': join\(REPO, 'src-tauri', 'target', 'debug', 'lataif-e2e-client\.exe'\),\s*\}\)/.test(hc),
     'GATE die einzigen beendbaren Programme sind die zwei Test-Pfade unter target/debug');
@@ -130,6 +134,22 @@ const dateien = readdirSync(E2E).filter((f) => f.endsWith('.mjs')).sort();
   ok((ohneZeichenketten(ohneKommentare("const PORT = 3001;")).match(/\b3001\b/g) ?? []).length === 1, 'GATE die Selbstprobe: PORT = 3001 würde erkannt');
 }
 
+// ══ §1b TREE — echte Nachkommen statt Eltern-PID allein ═══════════════════════
+{
+  const h = await import(pathToFileURL(join(E2E, HELPER)).href);
+  // R (Test-App, Start 100) → C (Kind, 110) → G (Enkel, 120). A (Start 50) trägt dieselbe Eltern-PID wie C — sein echter
+  // Elternprozess gleicher Nummer ist längst weg (z. B. die Produktions-App, gestartet vom beendeten Installer). A und sein
+  // Kind dürfen NIE mitbeendet werden.
+  const rows = [
+    { pid: 10, ppid: 4, created: 100 }, { pid: 11, ppid: 10, created: 110 }, { pid: 12, ppid: 11, created: 120 },
+    { pid: 20, ppid: 10, created: 50 }, { pid: 21, ppid: 20, created: 60 }, { pid: 30, ppid: 99, created: 130 },
+  ];
+  const d = h.trueDescendants(rows, 10).map((r: { pid: number }) => r.pid).sort();
+  ok(JSON.stringify(d) === '[11,12]', `TREE nur echte Nachkommen (Kind, Enkel) — nie ein älterer Prozess mit wiederverwendeter Eltern-PID (${JSON.stringify(d)})`);
+  ok(h.trueDescendants(rows, 77).length === 0, 'TREE eine unbekannte Wurzel hat keine Nachkommen');
+  ok(h.trueDescendants([{ pid: 1, ppid: 0, created: 5 }, { pid: 2, ppid: 1, created: Number.NaN }], 1).length === 0, 'TREE ohne lesbare Startzeit kein Nachkomme');
+}
+
 // ══ §2 HARNESS — echte Prozesse, ein Köder gleichen Namens ═══════════════════
 if (process.platform !== 'win32') {
   ok(false, 'HARNESS läuft nur unter Windows — hier gibt es keinen Beweis');
@@ -174,6 +194,18 @@ if (process.platform !== 'win32') {
     ok(helper.pidAlive(decoy.pid), 'HARNESS der Köder gleichen Namens an einem anderen Pfad ÜBERLEBT die Aufräumroutine');
     ok(!helper.isTestImageRunning('lataif.exe', BIN) && helper.tasklistTestImage('lataif.exe', BIN) === '', 'HARNESS die Warteschleifen sehen nur den Test-Pfad');
     ok(await helper.waitTestImageGone('lataif.exe', BIN, 3000), 'HARNESS waitTestImageGone wartet nicht auf den Köder');
+
+    // Ein ECHTER Nachkomme (nach dem Test-Prozess gestartet) geht mit — ohne /T, über trueDescendants; der Köder bleibt.
+    const eltern = spawn(TEST_EXE, ['-e', "require('child_process').spawn('cmd.exe', ['/c', 'ping -n 600 127.0.0.1 >nul'], { stdio: 'ignore' }); setInterval(() => {}, 1e9)"], { stdio: 'ignore', windowsHide: true });
+    kinder.push(eltern);
+    await sleep(1500);
+    const kindPids = execFileSync('powershell', ['-NoProfile', '-NonInteractive', '-Command', `@(Get-CimInstance Win32_Process -Filter "ParentProcessId=${eltern.pid}" | ForEach-Object { $_.ProcessId }) -join ','`], { encoding: 'utf8', windowsHide: true })
+      .trim().split(',').filter(Boolean).map(Number);
+    ok(kindPids.length >= 1, `HARNESS der Test-Prozess hat ein echtes Kind (${JSON.stringify(kindPids)})`);
+    ok(helper.killTestPid(eltern.pid, TEST_EXE, BIN) === true, 'HARNESS killTestPid beendet den Test-Prozess');
+    await sleep(1200);
+    ok(kindPids.every((k: number) => !helper.pidAlive(k)) && !helper.pidAlive(eltern.pid), 'HARNESS …samt seinem echten Kind — ohne /T');
+    ok(helper.pidAlive(decoy.pid), 'HARNESS der Köder lebt weiter');
 
     // Kein fremdes Programm lässt sich als Test-Programm ausgeben.
     let t1 = false; try { helper.killTestImage('notepad.exe', BIN); } catch { t1 = true; }
