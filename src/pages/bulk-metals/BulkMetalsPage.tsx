@@ -121,7 +121,7 @@ export function BulkMetalsPage() {
             <div style={{ display: 'grid', gridTemplateColumns: '0.8fr 1.4fr 0.8fr 0.8fr 0.8fr 0.8fr 1fr 0.8fr 1fr 0.7fr 0.7fr 0.6fr', gap: 10, padding: '6px 10px', fontSize: 11, color: '#6B7280' }}>
               <span>LOT</span><span>PURCHASE</span><span style={{ textAlign: 'right' }}>ORIGINAL g</span><span style={{ textAlign: 'right' }}>REMAINING g</span>
               <span style={{ textAlign: 'right' }}>ORIG. COST/g</span><span style={{ textAlign: 'right' }}>CURRENT COST/g</span><span style={{ textAlign: 'right' }}>REMAINING VALUE</span>
-              <span style={{ textAlign: 'right' }}>LIVE/g</span><span style={{ textAlign: 'right' }}>LIVE VALUE</span><span>TAX</span><span>STATUS</span><span />
+              <span style={{ textAlign: 'right' }}>LIVE/g</span><span style={{ textAlign: 'right' }}>LIVE VALUE</span><span title="Pre-selected on the invoice; any tax can be chosen there">DEFAULT TAX</span><span>STATUS</span><span />
             </div>
             {a.lots.map((l) => (
               <div key={l.id} data-bulk-lot={l.lotNo} style={{ display: 'grid', gridTemplateColumns: '0.8fr 1.4fr 0.8fr 0.8fr 0.8fr 0.8fr 1fr 0.8fr 1fr 0.7fr 0.7fr 0.6fr', gap: 10, padding: '8px 10px', borderTop: '1px solid #E5E9EE', fontSize: 13, alignItems: 'center' }}>
@@ -195,7 +195,7 @@ function LotDetailModal({ lotId, refresh, onClose, canAdjust, canReverse, onActi
           <span>Value <b className="font-mono">{bhd(l.remainingValueFils)} BHD</b></span>
           <span>Original cost/g <b className="font-mono">{costPerGramText(l.originalValueFils, l.originalWeightMg)}</b></span>
           <span>Current cost/g <b className="font-mono">{costPerGramText(l.remainingValueFils, l.remainingWeightMg)}</b></span>
-          <span>Tax <b>{l.saleTaxScheme}</b></span>
+          <span title="Pre-selected on the invoice; any tax can be chosen there">Default sale tax <b>{l.saleTaxScheme}</b></span>
           <span>Status <b>{l.status}</b></span>
         </div>
         {canAdjust && (

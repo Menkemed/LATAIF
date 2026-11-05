@@ -39,9 +39,9 @@ import { businessDateIssue, latestBusinessDate } from '@/core/utils/business-dat
 import { currentBranchId } from '@/core/db/helpers';
 import { productDisplayName } from '@/core/products/display-name';
 // BULK METAL V1 — Bulk-Zeile: Absicht (Lot, Gewicht, Typ, Preis); Zeile rechnet das Haus mit dem Zeilenvertrag.
-import { BulkInvoiceLineRow, previewBulkCogs, type BulkInvoiceDraft } from '@/components/bulk/BulkInvoiceLineRow';
+import { BulkInvoiceLineRow, previewBulkCogs, resolvedBulkScheme, type BulkInvoiceDraft } from '@/components/bulk/BulkInvoiceLineRow';
 import { bulkLotsForSaleFor, type BulkLotForSale } from '@/core/bulk/bulk-reads';
-import { formatMg, netFilsFromGross, parseBhdToFils, parseGramsToMg, type BulkType } from '@/core/bulk/bulk-math';
+import { bulkAmountsFromGross, formatMg, parseBhdToFils, parseGramsToMg, type BulkType } from '@/core/bulk/bulk-math';
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 type Method = 'cash' | 'bank_transfer' | 'card' | 'benefit';
@@ -78,11 +78,13 @@ interface DraftLine {
 }
 
 /** BULK METAL V1 — Gewicht und Preis einer Bulk-Zeile exakt in mg/Fils (Text → Integer). */
-function bulkIntentOf(b: BulkInvoiceDraft, scheme: string) {
+// v0.8.98 — der Kundenbetrag inkl. VAT reist als Preis (`grossFils`), dazu die aufgelöste Steuerart; Netto und VAT
+// rechnet das Haus daraus (auf das Fils genau, an Primary und PC2 gleich).
+function bulkIntentOf(b: BulkInvoiceDraft, scheme: 'VAT_10' | 'ZERO' | 'MARGIN') {
   const weightMg = b.kept ? b.kept.weightMg : parseGramsToMg(b.weightText.trim());
   const grossFils = parseBhdToFils(b.grossText.trim(), true);
   return {
-    lotId: b.lotId, weightMg, bulkType: b.bulkType, unitPriceFils: netFilsFromGross(grossFils, scheme),
+    lotId: b.lotId, weightMg, bulkType: b.bulkType, grossFils, scheme,
     ...(b.description.trim() ? { description: b.description.trim() } : {}),
   };
 }
@@ -180,9 +182,13 @@ export function InvoiceCreate() {
         const bulk: BulkInvoiceDraft = {
           lotId: l.lotId || '', weightText: formatMg(l.bulkWeightMg), bulkType: (l.bulkType || 'OTHER') as BulkType,
           grossText: (l.lineTotal || 0).toFixed(3), description: l.description || '',
+          // v0.8.98 — die gespeicherte Steuerart ist der Startwert der Auswahl.
+          scheme: String(l.taxScheme) as BulkInvoiceDraft['scheme'],
           kept: { weightMg: l.bulkWeightMg, cogsFils: l.bulkCogsFils ?? 0, lotLabel: l.bulkLotNo || '—', scheme: String(l.taxScheme) },
         };
-        return [{ lineId: l.id, productId: l.productId || '', scheme: 'auto' as Scheme, quantity: 1, unitPrice: l.unitPrice || 0, bulk }];
+        const retBulk = Math.max(0, l.returnedQty || 0);
+        return [{ lineId: l.id, productId: l.productId || '', scheme: 'auto' as Scheme, quantity: 1, unitPrice: l.unitPrice || 0, bulk,
+          ...(retBulk > 0.0005 ? { returnedQty: retBulk } : {}) }];
       }
       const p = products.find(pp => pp.id === l.productId);
       const stored = (l.taxScheme as Scheme | undefined);
@@ -309,17 +315,18 @@ export function InvoiceCreate() {
     if (l.bulk) {
       const b = l.bulk;
       const lot = bulkLots.find((x) => x.lotId === b.lotId);
-      const scheme = (b.kept?.scheme || lot?.saleTaxScheme || 'MARGIN') as 'VAT_10' | 'ZERO' | 'MARGIN';
+      // v0.8.98 — Steuerart wählbar (Auto = die des Lots); Beträge aus dem Kundenbetrag mit DERSELBEN Funktion wie das
+      // Haus (`bulkAmountsFromGross`) — die Anzeige ist, was gespeichert wird.
+      const scheme = resolvedBulkScheme(b, lot?.saleTaxScheme ?? null);
       const vatRate = scheme === 'ZERO' ? 0 : 10;
       const cogs = b.kept ? b.kept.cogsFils : (b.previewCogsFils ?? 0);
-      let unitNet = 0;
-      try { unitNet = netFilsFromGross(parseBhdToFils(b.grossText.trim(), true), scheme) / 1000; } catch { unitNet = 0; }
-      const calc = calcLine(unitNet, 1, cogs / 1000, scheme, vatRate);
+      let a = { netFils: 0, vatFils: 0, taxFils: 0, grossFils: 0 };
+      try { a = bulkAmountsFromGross(parseBhdToFils(b.grossText.trim(), true), scheme, cogs); } catch { /* Eingabe noch unfertig */ }
       return { product: undefined, lots: [] as Array<StockLot & { purchaseNumber: string | null }>,
         selectedLot: null as (StockLot & { purchaseNumber: string | null }) | null,
         kept: null as DraftLine['kept'] | null, lotIdOut: b.lotId as string | undefined, costBasis: cogs / 1000,
         keptShort: null as string | null, scheme, vatRate,
-        net: calc.netAmount, vat: calc.vatAmount, internalVat: calc.internalVatAmount || 0, gross: calc.grossAmount };
+        net: a.netFils / 1000, vat: a.vatFils / 1000, internalVat: a.taxFils / 1000, gross: a.grossFils / 1000 };
     }
     const product = products.find(p => p.id === l.productId);
     if (!product) {
@@ -424,7 +431,7 @@ export function InvoiceCreate() {
   // BULK METAL V1 — eine Bulk-Zeile (Lot manuell wählen).
   function addBulkLine() {
     setLines(prev => [...prev, { productId: '', scheme: 'auto', quantity: 1, unitPrice: 0,
-      bulk: { lotId: '', weightText: '', bulkType: 'RING', grossText: '', description: '' } }]);
+      bulk: { lotId: '', weightText: '', bulkType: 'RING', grossText: '', description: '', scheme: 'auto' } }]);
   }
 
   function removeLine(idx: number) {
@@ -598,7 +605,7 @@ export function InvoiceCreate() {
           customerId,
           lines: lines.map((l, i) => bulkIntents[i] ? ({
             kind: 'bulk', ...(l.lineId ? { lineId: l.lineId } : {}), bulkLotId: bulkIntents[i]!.lotId, weightMg: bulkIntents[i]!.weightMg,
-            bulkType: bulkIntents[i]!.bulkType, unitPriceFils: bulkIntents[i]!.unitPriceFils,
+            bulkType: bulkIntents[i]!.bulkType, grossFils: bulkIntents[i]!.grossFils, scheme: bulkIntents[i]!.scheme,
             ...(bulkIntents[i]!.description ? { description: bulkIntents[i]!.description } : {}),
           }) : ({
             ...(l.lineId ? { lineId: l.lineId } : {}),
@@ -646,7 +653,7 @@ export function InvoiceCreate() {
         customerId,
         lines: lines.map((l, i) => bulkIntents[i] ? ({
           kind: 'bulk', bulkLotId: bulkIntents[i]!.lotId, weightMg: bulkIntents[i]!.weightMg,
-          bulkType: bulkIntents[i]!.bulkType, unitPriceFils: bulkIntents[i]!.unitPriceFils,
+          bulkType: bulkIntents[i]!.bulkType, grossFils: bulkIntents[i]!.grossFils, scheme: bulkIntents[i]!.scheme,
           ...(bulkIntents[i]!.description ? { description: bulkIntents[i]!.description } : {}),
         }) : ({
           productId: l.productId,
@@ -772,8 +779,10 @@ export function InvoiceCreate() {
                   const b = l.bulk;
                   return (
                     <BulkInvoiceLineRow key={idx} draft={b} lots={bulkLots} scheme={c.scheme}
-                      cogsFils={b.kept ? b.kept.cogsFils : (b.previewCogsFils ?? null)} vat={c.vat} internalVat={c.internalVat}
-                      removable={lines.length > 1} onRemove={() => removeLine(idx)}
+                      lotScheme={bulkLots.find((x) => x.lotId === b.lotId)?.saleTaxScheme ?? null}
+                      cogsFils={b.kept ? b.kept.cogsFils : (b.previewCogsFils ?? null)} net={c.net} vat={c.vat} internalVat={c.internalVat} gross={c.gross}
+                      returned={!!l.returnedQty}
+                      removable={lines.length > 1 && !l.returnedQty} onRemove={() => removeLine(idx)}
                       onChange={(d) => {
                         const lot = bulkLots.find((x) => x.lotId === d.lotId);
                         updateLine(idx, { bulk: d, productId: d.kept ? l.productId : (lot?.productId ?? ''), quantity: 1 });

@@ -18,7 +18,7 @@ import { canonicalRole } from '@/core/models/types';
 import { businessDateIssue, businessTimestamp } from '@/core/utils/business-date';
 import { postBulkWriteOff, reverseSource } from '@/core/ledger/posting';
 import {
-  BulkRejected, allocateFils, assertFils, assertWeightMg, checkComposition, compositionSumMg, filsOfStoredAmount,
+  BulkRejected, allocateFils, assertFils, assertWeightMg, bulkAmountsIssue, checkComposition, compositionSumMg, filsOfStoredAmount,
   formatMg, payloadHash, type BulkSaleTaxScheme, type BulkType, type CompositionEntry,
 } from './bulk-math';
 import type { BulkMetal } from './bulk-product';
@@ -714,9 +714,16 @@ export function assertBulkLotInvariants(lotId: string): void {
   else if ((lot.status === 'ACTIVE') !== (lot.remainingWeightMg > 0)) fail(`status ${lot.status} with ${lot.remainingWeightMg} mg`);
   if ((lot.closedAt !== null) !== (lot.status === 'CLOSED')) fail('closed_at and status disagree');
   if (compositionSumMg(lot.composition) > lot.originalWeightMg) fail('composition exceeds the lot weight');
+  // BULK TAX SELECTION (v0.8.98) — die Steuerart einer Bulk-Zeile ist wählbar; sie muss erlaubt sein und zu den Beträgen
+  // passen (ältere und neue Zeilen gleich). Die interne Margin-VAT prüft die Zeile beim Schreiben; hier nicht, damit
+  // eine Los-Aktion nie an einem Einstand hängt.
   for (const l of query(
-    `SELECT quantity, purchase_price_snapshot, bulk_cogs_fils, tax_scheme FROM invoice_lines WHERE lot_id = ? AND bulk_weight_mg IS NOT NULL`, [lotId])) {
+    `SELECT quantity, purchase_price_snapshot, bulk_cogs_fils, tax_scheme, unit_price, vat_amount, line_total
+       FROM invoice_lines WHERE lot_id = ? AND bulk_weight_mg IS NOT NULL`, [lotId])) {
     if (int(l.quantity) !== 1 || filsOfStoredAmount(Number(l.purchase_price_snapshot) || 0) !== int(l.bulk_cogs_fils)
-      || String(l.tax_scheme) !== lot.saleTaxScheme) fail('a bulk invoice line does not match its lot');
+      || bulkAmountsIssue(String(l.tax_scheme), filsOfStoredAmount(Number(l.unit_price) || 0),
+        filsOfStoredAmount(Number(l.vat_amount) || 0), filsOfStoredAmount(Number(l.line_total) || 0)) !== null) {
+      fail('a bulk invoice line does not match its lot');
+    }
   }
 }

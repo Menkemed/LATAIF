@@ -66,8 +66,12 @@ interface RemoteLine {
 }
 
 const LINE_KEYS = new Set(['lineId', 'splitOf', 'productId', 'lotId', 'quantity', 'unitPrice', 'customerGross', 'scheme']);
-/** BULK METAL V1 — eine Bulk-Zeile schickt nur die Absicht; Einstand, Steuerart, Menge rechnet der Primary. */
-const BULK_LINE_KEYS = new Set(['kind', 'lineId', 'bulkLotId', 'weightMg', 'bulkType', 'unitPriceFils', 'description']);
+/**
+ * BULK METAL V1 — eine Bulk-Zeile schickt nur die Absicht; Einstand, Menge, Netto und VAT rechnet der Primary.
+ * v0.8.98 — dazu der Kundenbetrag inkl. VAT (`grossFils`) und die gewählte Steuerart (`scheme`, wie bei normalen
+ * Zeilen; `taxScheme` bleibt verboten). Ältere Clients schicken nur `unitPriceFils`.
+ */
+const BULK_LINE_KEYS = new Set(['kind', 'lineId', 'bulkLotId', 'weightMg', 'bulkType', 'unitPriceFils', 'grossFils', 'scheme', 'description']);
 const TOP_KEYS = new Set(['customerId', 'lines', 'notes', 'issuedDate', 'staffId', 'specialMark']);
 
 /**
@@ -129,7 +133,8 @@ export function parseInvoicePayload(raw: unknown): {
       }
       let bulkIntent: BulkLineIntent;
       try {
-        bulkIntent = checkBulkIntent({ lotId: l.bulkLotId, weightMg: l.weightMg, bulkType: l.bulkType, unitPriceFils: l.unitPriceFils, description: l.description }, `line ${i + 1}`);
+        bulkIntent = checkBulkIntent({ lotId: l.bulkLotId, weightMg: l.weightMg, bulkType: l.bulkType, unitPriceFils: l.unitPriceFils,
+          grossFils: l.grossFils, scheme: l.scheme, description: l.description }, `line ${i + 1}`);
       } catch (e) {
         throw new InvoicePayloadError(e instanceof Error ? e.message : String(e));
       }
@@ -261,7 +266,7 @@ export function buildInvoiceLines(
     if (l.bulkIntent) {
       const lot = getBulkLot(l.bulkIntent.lotId);
       return {
-        productId: lot?.productId ?? '', quantity: 1, unitPrice: 0, purchasePrice: 0, taxScheme: lot?.saleTaxScheme ?? 'MARGIN',
+        productId: lot?.productId ?? '', quantity: 1, unitPrice: 0, purchasePrice: 0, taxScheme: l.bulkIntent.scheme ?? lot?.saleTaxScheme ?? 'MARGIN',
         vatRate: 0, vatAmount: 0, lineTotal: 0, bulkIntent: l.bulkIntent, ...(l.lineId ? { lineId: l.lineId } : {}),
       };
     }

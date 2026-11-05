@@ -112,8 +112,8 @@ Auf einer Bulk-Zeile gilt immer:
 | `lot_id` | das manuell gewählte Bulk-Lot |
 | `quantity` | 1 |
 | `stock_taken` | 1 (Ware entnommen; s. 2.5 für die Restore-Pfade) |
-| `tax_scheme` | `stock_lots.sale_tax_scheme` des Lots, nicht wählbar |
-| `unit_price`, `vat_amount`, `line_total` | exakt wie eine normale Zeile desselben Steuerschemas (7.2) |
+| `tax_scheme` | wählbar (v0.8.98): VAT_10, ZERO oder MARGIN; Vorauswahl „Auto" = `stock_lots.sale_tax_scheme` des Lots. Keine Sperre und keine Warnung wegen der Einkaufssteuerart |
+| `unit_price`, `vat_amount`, `line_total` | aus dem Kundenbetrag inkl. VAT G, auf das Fils genau (v0.8.98, `bulkAmountsFromGross`): VAT_10 → VAT = round_half_up(G · 10/110), Netto = G − VAT; ZERO → Netto = G; MARGIN → Netto = G, interne VAT = round_half_up(max(0, G − COGS) · 10/110). `line_total` = G bei jeder Steuerart. Bestehende Zeilen werden nicht umgerechnet (die Regel ergibt auf ihre Summe genau ihre gespeicherten Beträge) |
 | `purchase_price_snapshot` | `bulk_cogs_fils / 1000` (exakt 3 Dezimalen) |
 | `description` | Eingabe oder automatisch `Ring · Silver 925 · 7.000 g` |
 

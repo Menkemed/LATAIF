@@ -996,6 +996,262 @@ function projection(db: Db): string {
     `T5 gemeldetes Quartal: Notiz mit retournierter Bulk-Zeile fern → angenommen, Export unverändert (${S(vNote)})`);
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+// BULK TAX SELECTION (v0.8.98) — Steuerart wählbar, Kundenbetrag auf das Fils genau.
+// Preview V2 (Owner-Abnahme 05.11.2026): R1–R14, T1–T12, Q2b.
+// ════════════════════════════════════════════════════════════════════════════
+{
+  const { toInvoiceLine } = await import('../../src/core/invoices/line-derivation.ts');
+  const F = (bhd: string): number => bm.parseBhdToFils(bhd, true);
+  const fils = (v: unknown): number => Math.round(Number(v) * 1000);
+  interface SaleG { lotId: string; weight: string; gross: string; scheme?: string; type?: string }
+  const intentG = (x: SaleG) => ({ bulkIntent: { lotId: x.lotId, weightMg: bm.parseGramsToMg(x.weight), bulkType: x.type ?? 'RING', grossFils: F(x.gross), ...(x.scheme ? { scheme: x.scheme } : {}) } });
+  const verkaufG = (sales: SaleG[]): string => {
+    const r = imHaus(() => createInvoiceInHouse({ customerId: 'cust-1', lines: sales.map(intentG) as never, specialMark: false }, 'branch-main'));
+    reload();
+    return r.invoiceId;
+  };
+  const editG = (inv: string, lineId: string, lotId: string, weightMg: number, gross: string, scheme?: string, extra: Record<string, unknown> = {}): void => {
+    imHaus(() => useInvoiceStore.getState().editInvoice(inv, { reason: 'Steuerart', ...extra, lines: [{ lineId, productId: 'bulk-silver-925-branch-main', unitPrice: 0, purchasePrice: 0, taxScheme: 'MARGIN', vatRate: 10, vatAmount: 0, lineTotal: 0,
+      bulkIntent: { lotId, weightMg, bulkType: 'RING', grossFils: F(gross), ...(scheme ? { scheme } : {}) } }] as never }));
+    reload();
+  };
+  const tri = (db: Db, lineId: string): string => { const r = lineRow(db, lineId); return `${r.tax_scheme} ${Number(r.unit_price).toFixed(3)}/${Number(r.vat_amount).toFixed(3)}/${Number(r.line_total).toFixed(3)} r${r.vat_rate}`; };
+  const ledgerCount = (db: Db): number => n(db, 'SELECT COUNT(*) FROM ledger_entries');
+  const accTotal = (db: Db, acc: string): number => r3(n(db, `SELECT COALESCE(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 0) FROM ledger_entries WHERE account = ?`, [acc]));
+
+  // ══ R14 — die Regel als reine Funktion, jedes Fils 0 … 300 BHD ══
+  {
+    let bad = 0, badNet = 0, badOther = 0;
+    for (let g = 0; g <= 300000; g++) {
+      const a = bm.bulkAmountsFromGross(g, 'VAT_10', 0);
+      if (a.grossFils !== g || a.netFils + a.vatFils !== g || a.taxFils !== a.vatFils) bad++;
+      if (a.netFils !== bm.netFilsFromGross(g, 'VAT_10')) badNet++;
+      const z = bm.bulkAmountsFromGross(g, 'ZERO', 0), m = bm.bulkAmountsFromGross(g, 'MARGIN', 14000);
+      if (z.netFils !== g || z.taxFils !== 0 || m.netFils !== g || m.grossFils !== g || m.taxFils !== bm.vatFilsOfGross(Math.max(0, g - 14000), 10)) badOther++;
+    }
+    ok(bad === 0 && badNet === 0 && badOther === 0, `R14 jedes Fils bis 300 BHD: Summe = Eingabe, Netto = netFilsFromGross, Zero/Margin Netto = Eingabe (${bad}/${badNet}/${badOther})`);
+    // Bestehende (netto-gerechnete) Zeilen: die neue Regel auf ihre Summe ergibt genau ihr gespeichertes Netto und VAT.
+    let drift = 0;
+    for (let nf = 0; nf <= 300000; nf++) {
+      const old = toInvoiceLine({ productId: 'x', quantity: 1, unitPrice: nf / 1000, costBasis: 0, scheme: 'VAT_10' });
+      const a = bm.bulkAmountsFromGross(fils(old.lineTotal), 'VAT_10', 0);
+      if (a.netFils !== nf || a.vatFils !== fils(old.vatAmount)) drift++;
+    }
+    ok(drift === 0, `R14 alte Zeilen bis 300 BHD Netto: neue Regel auf ihre Summe = gespeichertes Netto/VAT (${drift})`);
+    // R1–R5 Tabelle (Erwartung aus dem Preview)
+    const T: Array<[string, string, string]> = [['50.000', '45.455', '4.545'], ['6.000', '5.455', '0.545'], ['17.000', '15.455', '1.545'], ['55.500', '50.455', '5.045'],
+      ['25.000', '22.727', '2.273'], ['27.500', '25.000', '2.500'], ['330.000', '300.000', '30.000'], ['0.005', '0.005', '0.000'], ['0.001', '0.001', '0.000'], ['0.000', '0.000', '0.000'],
+      ['12345.678', '11223.344', '1122.334']];
+    const miss = T.filter(([g, nn, v]) => { const a = bm.bulkAmountsFromGross(F(g), 'VAT_10', 0); return a.netFils !== F(nn) || a.vatFils !== F(v) || a.grossFils !== F(g); });
+    ok(miss.length === 0, `R1–R5 Tabelle VAT 10 %: 50.000 = 45.455 + 4.545 usw. (${S(miss)})`);
+    const heute = fils(toInvoiceLine({ productId: 'x', quantity: 1, unitPrice: 45.455, costBasis: 0, scheme: 'VAT_10' }).lineTotal);
+    ok(heute === 50001, `R1 Gegenprobe: der normale Zeilenweg (unverändert) ergibt aus 45.455 weiter 50.001 (${heute})`);
+    ok(bm.bulkAmountsFromGross(F('50'), 'MARGIN', F('14')).taxFils === F('3.273') && bm.bulkAmountsFromGross(F('10'), 'MARGIN', F('14')).taxFils === 0, 'R6 Margin intern 3.273 (50 − 14), unter Einstand 0');
+    ok(bm.bulkGrossOfNet(F('45.455'), 'VAT_10') === null && bm.bulkGrossOfNet(F('22.727'), 'VAT_10') === F('25') && bm.bulkGrossOfNet(F('50'), 'MARGIN') === F('50'),
+      'R11 Netto ohne Brutto: 45.455 mehrdeutig (50.000/50.001) → null; 22.727 → 25.000; Margin = Netto');
+  }
+
+  // ══ T1–T4 — Verkauf mit gewählter Steuerart, Brutto exakt, Los unberührt ══
+  {
+    const db = neu();
+    const idM = lotOfPurchase(db, bulkKauf({ weight: '500', cost: '1000' }));          // MARGIN-Lot, 2.000/g
+    const idV = lotOfPurchase(db, bulkKauf({ weight: '500', cost: '1100', vat: true }));   // VAT_10-Lot, netto 2.000/g
+    const i1 = verkaufG([{ lotId: idM, weight: '7', gross: '50', scheme: 'VAT_10' }]);
+    const l1 = lineRow(db, lineOf(db, i1));
+    ok(tri(db, lineOf(db, i1)) === 'VAT_10 45.455/4.545/50.000 r10' && Number(l1.purchase_price_snapshot) === 14 && Number(l1.bulk_cogs_fils) === 14000,
+      `T1/R1 MARGIN-Lot, Wahl VAT 10%: 45.455 + 4.545 = 50.000, COGS 14 (${tri(db, lineOf(db, i1))})`);
+    ok(n(db, 'SELECT gross_amount FROM invoices WHERE id = ?', [i1]) === 50 && eq(n(db, 'SELECT vat_amount FROM invoices WHERE id = ?', [i1]), 4.545)
+      && eq(n(db, 'SELECT net_amount FROM invoices WHERE id = ?', [i1]), 45.455), 'T1 Rechnungskopf 45.455 / 4.545 / 50.000');
+    ok(ledgerOf(db, 'INVOICE', i1, 'ACCOUNTS_RECEIVABLE') === 50 && ledgerOf(db, 'INVOICE', i1, 'REVENUE') === -45.455 && ledgerOf(db, 'INVOICE', i1, 'VAT_OUTPUT') === -4.545
+      && ledgerOf(db, 'INVOICE', i1, 'COGS') === 14 && ledgerOf(db, 'INVOICE', i1, 'INVENTORY') === -14, 'T1 Hauptbuch AR 50 / REVENUE 45.455 / VAT_OUTPUT 4.545 / COGS 14');
+    ok(lot(idM).remainingWeightMg === 493000 && lot(idM).remainingValueFils === 986000 && lot(idM).saleTaxScheme === 'MARGIN' && invOk(idM),
+      'T1 Lot wie beim Margin-Verkauf (493.000 g / 986.000), Lot-Steuerart bleibt MARGIN, Invarianten');
+    const i2 = verkaufG([{ lotId: idV, weight: '7', gross: '50', scheme: 'MARGIN' }]);
+    ok(tri(db, lineOf(db, i2)) === 'MARGIN 50.000/3.273/50.000 r10' && ledgerOf(db, 'INVOICE', i2, 'MARGIN_VAT') === -3.273 && ledgerOf(db, 'INVOICE', i2, 'REVENUE') === -46.727,
+      `T2 VAT-Lot, Wahl Margin ohne Sperre: intern 3.273, REVENUE 46.727 (${tri(db, lineOf(db, i2))})`);
+    const i3 = verkaufG([{ lotId: idM, weight: '7', gross: '50', scheme: 'ZERO' }]);
+    ok(tri(db, lineOf(db, i3)) === 'ZERO 50.000/0.000/50.000 r0' && ledgerOf(db, 'INVOICE', i3, 'REVENUE') === -50 && ledgerOf(db, 'INVOICE', i3, 'VAT_OUTPUT') === 0,
+      `T3 Zero ohne Begründung: 50.000, keine VAT (${tri(db, lineOf(db, i3))})`);
+    const i4 = verkaufG([{ lotId: idM, weight: '7', gross: '50' }, { lotId: idV, weight: '7', gross: '50' }, { lotId: idV, weight: '1', gross: '6', scheme: 'auto' }]);
+    ok(tri(db, lineOf(db, i4, 1)) === 'MARGIN 50.000/3.273/50.000 r10' && tri(db, lineOf(db, i4, 2)) === 'VAT_10 45.455/4.545/50.000 r10'
+      && tri(db, lineOf(db, i4, 3)) === 'VAT_10 5.455/0.545/6.000 r10', `T4 ohne Angabe / auto → Steuerart des Lots (${tri(db, lineOf(db, i4, 2))})`);
+    ok(n(db, 'SELECT gross_amount FROM invoices WHERE id = ?', [i4]) === 106, 'T4 Rechnungssumme 50 + 50 + 6 = 106.000 exakt');
+    const nInv = n(db, 'SELECT COUNT(*) FROM invoices'), w0 = lot(idM).remainingWeightMg;
+    ok(meldung(() => verkaufG([{ lotId: idM, weight: '1', gross: '5', scheme: 'VAT_5' }])).includes('BULK_TAX_SCHEME_INVALID')
+      && n(db, 'SELECT COUNT(*) FROM invoices') === nInv && lot(idM).remainingWeightMg === w0, 'T5 unbekannte Steuerart → abgewiesen, nichts geschrieben');
+    ok(meldung(() => verkaufG([{ lotId: idM, weight: '1', gross: '5.0001' }])).includes('BULK_AMOUNT_INVALID'), 'R12 mehr als 3 Dezimalen → abgewiesen');
+    ok(meldung(() => imHaus(() => createInvoiceInHouse({ customerId: 'cust-1', lines: [{ bulkIntent: { lotId: idV, weightMg: 1000, bulkType: 'RING', grossFils: 50000, unitPriceFils: 45000, scheme: 'VAT_10' } }] as never, specialMark: false }, 'branch-main'))).includes('BULK_PRICE_MISMATCH'),
+      'R12 Brutto und Netto widersprechen sich → abgewiesen');
+    // House-Werte = dieselbe Funktion, die die Maske zur Anzeige ruft (Anzeige = Speicherung).
+    const same = [i1, i2, i3].every((inv) => { const r = lineRow(db, lineOf(db, inv)); const a = bm.bulkAmountsFromGross(fils(r.line_total), String(r.tax_scheme), Number(r.bulk_cogs_fils));
+      return a.netFils === fils(r.unit_price) && a.taxFils === fils(r.vat_amount) && a.grossFils === fils(r.line_total); });
+    ok(same, 'R13 gespeicherte Zeilen = bulkAmountsFromGross (die Funktion der Maske)');
+    const ui = src('src/pages/invoices/InvoiceCreate.tsx');
+    ok(/resolvedBulkScheme\(b, lot\?\.saleTaxScheme/.test(ui) && /bulkAmountsFromGross\(parseBhdToFils\(b\.grossText/.test(ui) && !/netFilsFromGross/.test(ui) && /grossFils: bulkIntents\[i\]!\.grossFils, scheme: bulkIntents\[i\]!\.scheme/.test(ui),
+      'R13 Maske rechnet Bulk mit bulkAmountsFromGross und schickt grossFils + scheme (Primary und PC2)');
+    ok(balancedInventory(db) && invOk(idM) && invOk(idV), 'T1–T4 INVENTORY = Σ Restwert, Invarianten');
+  }
+
+  // ══ R7/R9/R10/T6/T7 — Rechnungskorrektur: Steuerwechsel hält das Brutto, nichts wird still neu gerechnet ══
+  {
+    const db = neu();
+    const id = lotOfPurchase(db, bulkKauf({ weight: '500', cost: '1000' }));
+    const inv = verkaufG([{ lotId: id, weight: '7', gross: '50' }]);
+    const lid = lineOf(db, inv);
+    const lot0 = S([lot(id).remainingWeightMg, lot(id).remainingValueFils, moves(id).length]);
+    const seen: string[] = [];
+    for (const sch of ['VAT_10', 'ZERO', 'MARGIN', 'VAT_10']) { editG(inv, lid, id, 7000, '50', sch); seen.push(tri(db, lid)); }
+    ok(S(seen) === S(['VAT_10 45.455/4.545/50.000 r10', 'ZERO 50.000/0.000/50.000 r0', 'MARGIN 50.000/3.273/50.000 r10', 'VAT_10 45.455/4.545/50.000 r10']),
+      `R7/T6/T7 Wechsel VAT 10% → Zero → Margin → VAT 10%: Summe jedes Mal 50.000, Satz folgt (${S(seen)})`);
+    ok(S([lot(id).remainingWeightMg, lot(id).remainingValueFils, moves(id).length]) === lot0 && Number(lineRow(db, lid).bulk_cogs_fils) === 14000 && lineOf(db, inv) === lid,
+      'R7 Los, Bewegungen, COGS und Zeilen-ID unverändert');
+    ok(ledgerOf(db, 'INVOICE', inv, 'ACCOUNTS_RECEIVABLE') === 50 && ledgerOf(db, 'INVOICE', inv, 'VAT_OUTPUT') === -4.545 && ledgerOf(db, 'INVOICE', inv, 'MARGIN_VAT') === 0
+      && ledgerOf(db, 'INVOICE', inv, 'REVENUE') === -45.455 && ledgerOf(db, 'INVOICE', inv, 'COGS') === 14, 'R7 Hauptbuch nach den Wechseln: AR 50, VAT_OUTPUT 4.545, MARGIN_VAT 0, COGS 14');
+    // Wieder öffnen und speichern (gleiches Brutto, gleiche Steuerart, nur Beschreibung) → keine Buchung, Beträge genau gleich.
+    const before = S([tri(db, lid), ledgerCount(db)]);
+    editG(inv, lid, id, 7000, '50.000', 'VAT_10', { reason: 'Beschreibung' });
+    ok(S([tri(db, lid), ledgerCount(db)]) === before, 'R10 erneut öffnen und speichern: 50.000 bleibt 50.000, keine Buchung');
+    // Alte Zeile (netto-gerechnet, 45.455 + 4.546 = 50.001) bleibt, bis jemand sie ändert …
+    const inv2 = verkaufG([{ lotId: id, weight: '7', gross: '50.001', scheme: 'VAT_10' }]);
+    const l2 = lineOf(db, inv2);
+    ok(tri(db, l2) === 'VAT_10 45.455/4.546/50.001 r10', `R9 Ausgangslage alte Zeile 45.455 / 4.546 / 50.001 (${tri(db, l2)})`);
+    const c0 = ledgerCount(db);
+    editG(inv2, l2, id, 7000, '50.001', 'VAT_10', { reason: 'Notiz', notes: 'x' });
+    ok(tri(db, l2) === 'VAT_10 45.455/4.546/50.001 r10' && ledgerCount(db) === c0, 'R10 alte Zeile unverändert gespeichert → bleibt 50.001, keine Buchung');
+    // … und die Korrektur auf 50.000 (gleiches Netto!) bucht: kein „neutral".
+    editG(inv2, l2, id, 7000, '50', 'VAT_10', { reason: 'Brutto korrigiert' });
+    ok(tri(db, l2) === 'VAT_10 45.455/4.545/50.000 r10' && n(db, 'SELECT gross_amount FROM invoices WHERE id = ?', [inv2]) === 50 && ledgerCount(db) > c0
+      && ledgerOf(db, 'INVOICE', inv2, 'ACCOUNTS_RECEIVABLE') === 50 && ledgerOf(db, 'INVOICE', inv2, 'VAT_OUTPUT') === -4.545,
+      `R9 Korrektur 50.001 → 50.000 bei gleichem Netto: neu gerechnet und gebucht (AR 50, VAT 4.545) (${tri(db, l2)})`);
+    ok(balancedInventory(db) && invOk(id) && accTotal(db, 'VAT_OUTPUT') === -9.09, `R7–R10 INVENTORY = Σ Restwert, Invarianten, VAT_OUTPUT gesamt 9.090 (${accTotal(db, 'VAT_OUTPUT')})`);
+  }
+
+  // ══ R8/T11/T12 — Durchlauf Rechnung → NBR → volle Retoure; retournierte Zeile bleibt gesperrt ══
+  {
+    const db = neu();
+    const id = lotOfPurchase(db, bulkKauf({ weight: '500', cost: '1000' }));
+    const inv = verkaufG([{ lotId: id, weight: '7', gross: '50', scheme: 'VAT_10' }]);
+    const invM = verkaufG([{ lotId: id, weight: '7', gross: '50', type: 'PENDANT' }]);
+    zahlen(db, inv); zahlen(db, invM);
+    const invoices = useInvoiceStore.getState().invoices.filter((i) => i.id === inv || i.id === invM);
+    const sheet = buildMonthSheet({ year: 2026, month: new Date(invoices[0].issuedAt ?? NOW).getMonth(), invoices } as never, useCustomerStore.getState().customers, useProductStore.getState().products);
+    const vRow = sheet.find((r) => Array.isArray(r) && r.includes('Ring · Silver 925 · 7.000 g')) as Array<unknown> | undefined;
+    ok(!!vRow && vRow.includes(45.455) && vRow.includes(4.545) && vRow.includes(50), `T12 NBR Standard: 45.455 / 4.545 / 50.000 (${S(vRow)})`);
+    const mRow = sheet.find((r) => Array.isArray(r) && r.includes('Pendant · Silver 925 · 7.000 g')) as Array<unknown> | undefined;
+    ok(!!mRow && mRow[7] === 14 && mRow[8] === 50 && mRow[9] === 36 && mRow[10] === Number(lineRow(db, lineOf(db, invM)).vat_amount) && mRow[10] === 3.273,
+      `T12 NBR Margin: VAT auf Marge 3.273 = gespeicherte Zeile (${S(mRow)})`);
+    const inv0 = useInvoiceStore.getState().invoices.find((i) => i.id === inv)!;
+    const a5 = buildInvoiceA5Data({ company: {} as never, invoice: { number: inv0.invoiceNumber, status: inv0.status, issuedAt: inv0.issuedAt, grossAmount: inv0.grossAmount, paidAmount: inv0.paidAmount, lines: inv0.lines }, customer: null, products: useProductStore.getState().products, paymentMethods: [] } as never);
+    ok(a5.lines[0].amount === 50 && a5.lines[0].vatAmount === 4.545 && a5.lines[0].rate === 45.455, `R13 A5-Druck: 45.455 + 4.545 = 50.000 (${S([a5.lines[0].rate, a5.lines[0].vatAmount, a5.lines[0].amount])})`);
+    const lid = lineOf(db, inv);
+    const rid = retoureBulk(db, inv, lid);
+    ok(eq(n(db, 'SELECT vat_amount FROM credit_notes WHERE invoice_id = ?', [inv]), 4.545) && n(db, 'SELECT total_amount FROM credit_notes WHERE invoice_id = ?', [inv]) === 50,
+      'R8/T11 volle Retoure: Gutschrift 50.000, VAT 4.545');
+    ok(ledgerOf(db, 'SALES_RETURN_COGS', rid, 'INVENTORY') === 14 && accTotal(db, 'VAT_OUTPUT') === 0, `R8 VAT_OUTPUT nach der Retoure 0, COGS 14 zurück (${accTotal(db, 'VAT_OUTPUT')})`);
+    ok(lot(id).remainingWeightMg === 493000 && lot(id).remainingValueFils === 986000 && invOk(id), 'T11 Los zurück wie bei der Los-Steuerart (nur der Margin-Verkauf bleibt draußen)');
+    ok(meldung(() => editG(inv, lid, id, 7000, '50.001', 'VAT_10')).includes('INVOICE_RETURNED_LINE_PRICE_LOCKED')
+      && meldung(() => editG(inv, lid, id, 7000, '50', 'ZERO')).includes('INVOICE_RETURNED_LINE_PRICE_LOCKED'),
+      'T8 retournierte Bulk-Zeile: 1 Fils mehr oder andere Steuerart → gesperrt');
+    editG(inv, lid, id, 7000, '50', 'VAT_10', { reason: 'Notiz', notes: 'nur Notiz' });
+    ok(tri(db, lid) === 'VAT_10 45.455/4.545/50.000 r10' && s(db, 'SELECT notes FROM invoices WHERE id = ?', [inv]) === 'nur Notiz', 'T8 Notiz mit retournierter Zeile geht, Beträge bleiben');
+  }
+
+  // ══ R11/Q2b — PC2: neue Felder, alter Client ohne Brutto, Parität ══
+  {
+    const dbR = neu();
+    const d = dps(dbR);
+    const pr = await cmdC.runPurchaseCreate(d, ident('901', 'purchases.create'), { ...bulkKaufInput([{ weight: '500', cost: '1100', vat: true }], true), purchaseDate: PDATE });
+    ok(pr.kind === 'ok', `Q2b Einkauf fern (VAT-Lot) (${S(pr)})`);
+    reload();
+    const lotR = s(dbR, "SELECT id FROM stock_lots WHERE unit = 'mg'");
+    const tryRun = async (f: () => Promise<unknown>): Promise<unknown> => { try { return await f(); } catch (e) { return e; } };
+    const msg = (r: unknown): string => `${(r as { code?: string }).code ?? ''} ${(r as Error).message ?? S(r)}`;
+    const create = (x: string, line: Record<string, unknown>) => cmdI.runInvoiceCreate(d, ident(x, 'invoices.create'), { customerId: 'cust-1', lines: [{ kind: 'bulk', bulkLotId: lotR, weightMg: 7000, bulkType: 'RING', ...line }] });
+    ok(msg(await tryRun(() => create('902', { grossFils: 50000, scheme: 'X' }))).includes('unknown tax scheme'), 'Q2b scheme X → unknown tax scheme');
+    ok(msg(await tryRun(() => create('903', { grossFils: 50000, vatAmount: 4545 }))).includes('the primary decides vatAmount'), 'Q2b vatAmount vom Client → verboten');
+    ok(msg(await tryRun(() => create('904', { grossFils: 50000, lineTotal: 50 }))).includes('the primary decides lineTotal'), 'Q2b lineTotal vom Client → verboten');
+    ok(msg(await tryRun(() => create('905', { grossFils: 50000, taxScheme: 'ZERO' }))).includes('the primary decides taxScheme'), 'Q2b taxScheme bleibt verboten');
+    const nInv = n(dbR, 'SELECT COUNT(*) FROM invoices');
+    const amb = await tryRun(() => create('906', { unitPriceFils: 45455 }));
+    ok(msg(amb).includes('BULK_GROSS_REQUIRED') && n(dbR, 'SELECT COUNT(*) FROM invoices') === nInv && lot(lotR).remainingWeightMg === 500000,
+      `R11 alter PC2, VAT-Lot, Netto 45.455 (Brutto 50.000 oder 50.001?) → abgewiesen statt geraten, nichts geschrieben (${msg(amb)})`);
+    const old = await create('907', { unitPriceFils: 22727 });
+    reload();
+    const iOld = okv<{ invoiceId: string }>(old).invoiceId;
+    ok(old.kind === 'ok' && tri(dbR, lineOf(dbR, iOld)) === 'VAT_10 22.727/2.273/25.000 r10', `R11 alter PC2, eindeutiges Netto 22.727 → genau 25.000 (${S(old)})`);
+    const nw = await create('908', { grossFils: 50000, scheme: 'ZERO' });
+    reload();
+    const iNew = okv<{ invoiceId: string }>(nw).invoiceId;
+    ok(nw.kind === 'ok' && tri(dbR, lineOf(dbR, iNew)) === 'ZERO 50.000/0.000/50.000 r0', `Q2b neuer PC2: VAT-Lot, Wahl Zero, 50.000 (${S(nw)})`);
+    const v10 = await create('909', { grossFils: 50000, scheme: 'VAT_10' });
+    reload();
+    const iV = okv<{ invoiceId: string }>(v10).invoiceId;
+    const lV = lineOf(dbR, iV);
+    ok(v10.kind === 'ok' && tri(dbR, lV) === 'VAT_10 45.455/4.545/50.000 r10', `Q2b neuer PC2: 50.000 VAT 10% exakt (${tri(dbR, lV)})`);
+    // Parität: dieselbe Absicht direkt im Haus ergibt dieselbe Zeile.
+    const iDirect = verkaufG([{ lotId: lotR, weight: '7', gross: '50', scheme: 'VAT_10' }]);
+    const pick = (lid0: string): string => { const r = lineRow(dbR, lid0); return S([r.tax_scheme, r.unit_price, r.vat_amount, r.line_total, r.vat_rate, r.purchase_price_snapshot, r.bulk_cogs_fils]); };
+    ok(pick(lineOf(dbR, iDirect)) === pick(lV), `Q2b Parität Primary/PC2 (${pick(lV)})`);
+    const rev = (id0: string): number => n(dbR, 'SELECT revision FROM invoices WHERE id = ?', [id0]);
+    // Alter PC2 ändert nur die Beschreibung einer exakten Zeile: schickt ihr Netto, keine Steuerart → Zeile bleibt genau.
+    const c0 = ledgerCount(dbR);
+    const oldEdit = await cmdIL.runInvoiceUpdate(d, ident('910', 'invoices.update'), { id: iV, expectedRevision: rev(iV), reason: 'Beschreibung', customerId: 'cust-1',
+      lines: [{ kind: 'bulk', lineId: lV, bulkLotId: lotR, weightMg: 7000, bulkType: 'RING', unitPriceFils: 45455, description: 'Ring 7 g' }] });
+    reload();
+    ok(oldEdit.kind === 'ok' && tri(dbR, lV) === 'VAT_10 45.455/4.545/50.000 r10' && String(lineRow(dbR, lV).description) === 'Ring 7 g' && ledgerCount(dbR) === c0,
+      `R11 alter PC2 ändert die Beschreibung: 50.000 bleibt, keine Buchung (${S(oldEdit)})`);
+    // Neuer PC2 wechselt die Steuerart einer gehaltenen Zeile.
+    const sw = await cmdIL.runInvoiceUpdate(d, ident('911', 'invoices.update'), { id: iV, expectedRevision: rev(iV), reason: 'Steuerart', customerId: 'cust-1',
+      lines: [{ kind: 'bulk', lineId: lV, bulkLotId: lotR, weightMg: 7000, bulkType: 'RING', grossFils: 50000, scheme: 'MARGIN' }] });
+    reload();
+    ok(sw.kind === 'ok' && tri(dbR, lV) === 'MARGIN 50.000/3.273/50.000 r10' && ledgerOf(dbR, 'INVOICE', iV, 'ACCOUNTS_RECEIVABLE') === 50,
+      `Q-Edit PC2 wechselt VAT 10% → Margin: 50.000 bleibt (${tri(dbR, lV)})`);
+    ok(invOk(lotR) && reconOk(), 'Q2b Invarianten und Abgleich');
+  }
+
+  // ══ T9 — gemeldetes Quartal: Steuerwechsel und reine Bruttokorrektur gesperrt, Notiz geht ══
+  {
+    const dbV = neu();
+    const dV = dps(dbV);
+    const idV = lotOfPurchase(dbV, bulkKauf({ weight: '20', cost: '40' }));
+    const invV = verkaufG([{ lotId: idV, weight: '5', gross: '50.001', scheme: 'VAT_10' }]);
+    zahlen(dbV, invV);
+    const lV = lineOf(dbV, invV);
+    const fp = vatLock.vatFingerprint(invV)!;
+    const [yy, qq] = fp.quarter.split('-Q').map(Number);
+    dbV.run(`INSERT INTO vat_filings (id, branch_id, year, quarter, filed_at, filed_by, note, invoice_count, snapshot_json, created_at)
+             VALUES ('vf-9', 'branch-main', ?, ?, ?, 'user-test', NULL, 1, '[]', ?)`, [yy, qq, NOW, NOW]);
+    const revV = (): number => n(dbV, 'SELECT revision FROM invoices WHERE id = ?', [invV]);
+    const line = (extra: Record<string, unknown>) => ({ kind: 'bulk', lineId: lV, bulkLotId: idV, weightMg: 5000, bulkType: 'RING', ...extra });
+    const before = S([tri(dbV, lV), ledgerCount(dbV)]);
+    const sw = await cmdIL.runInvoiceUpdate(dV, ident('921', 'invoices.update'), { id: invV, expectedRevision: revV(), reason: 'Steuerart', customerId: 'cust-1', lines: [line({ grossFils: 50001, scheme: 'ZERO' })] });
+    const gr = await cmdIL.runInvoiceUpdate(dV, ident('922', 'invoices.update'), { id: invV, expectedRevision: revV(), reason: 'Brutto', customerId: 'cust-1', lines: [line({ grossFils: 50000, scheme: 'VAT_10' })] });
+    const codeOf = (r: unknown): string => String((r as { code?: string }).code ?? S(r));
+    ok(sw.kind === 'rejected' && gr.kind === 'rejected' && S([tri(dbV, lV), ledgerCount(dbV)]) === before,
+      `T9 gemeldetes Quartal: Steuerwechsel (${codeOf(sw)}) und Brutto 50.001 → 50.000 bei gleichem Netto (${codeOf(gr)}) → abgewiesen, nichts geändert`);
+    const note = await cmdIL.runInvoiceUpdate(dV, ident('923', 'invoices.update'), { id: invV, expectedRevision: revV(), reason: 'Notiz', customerId: 'cust-1', notes: 'Notiz', lines: [line({ grossFils: 50001, scheme: 'VAT_10' })] });
+    ok(note.kind === 'ok' && S([tri(dbV, lV), ledgerCount(dbV)]) === before && s(dbV, 'SELECT notes FROM invoices WHERE id = ?', [invV]) === 'Notiz', `T9 Notiz geht, Zeile bleibt (${S(note)})`);
+  }
+
+  // ══ T10 — Invarianten mit abweichender Steuerart nach Los-Aktionen; manipulierte Zeile wird erkannt ══
+  {
+    const db = neu();
+    const id = lotOfPurchase(db, bulkKauf({ weight: '100', cost: '200' }));
+    const inv = verkaufG([{ lotId: id, weight: '10', gross: '50', scheme: 'VAT_10' }]);
+    imHaus(() => lh.writeOffInHouse({ actionId: 'local-wo-9-xxxx', lotId: id, expectedRevision: lot(id).revision, weightMg: 1000, reason: 'Waage' }, CTXB));
+    reload();
+    ok(invOk(id), 'T10 Abschreibung nach Verkauf mit VAT 10% aus MARGIN-Lot: Invarianten grün');
+    const lid = lineOf(db, inv);
+    db.run(`UPDATE invoice_lines SET tax_scheme = 'FOO' WHERE id = ?`, [lid]);
+    const a = invOk(id);
+    db.run(`UPDATE invoice_lines SET tax_scheme = 'VAT_10', vat_amount = 4.546 WHERE id = ?`, [lid]);
+    const b = invOk(id);
+    db.run(`UPDATE invoice_lines SET vat_amount = 4.545 WHERE id = ?`, [lid]);
+    ok(!a && !b && invOk(id), 'T10 manipulierte Steuerart oder VAT wird erkannt, Original grün');
+  }
+}
+
 console.log(`
 bulk-metal: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) process.exit(1);

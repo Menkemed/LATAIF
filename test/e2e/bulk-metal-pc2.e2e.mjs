@@ -321,6 +321,39 @@ const movesOf = (lotId) => dbQ(BIZ_DB, 'SELECT * FROM bulk_lot_movements WHERE l
 const konto = (acc) => zahl("SELECT ROUND(COALESCE(SUM(CASE direction WHEN 'DEBIT' THEN amount ELSE -amount END),0),3) AS n FROM ledger_entries WHERE account = ?", [acc]);
 const bulkRest = () => zahl("SELECT COALESCE(SUM(remaining_value_fils),0) AS n FROM stock_lots WHERE unit = 'mg'");
 const selectSetByOption = (c, optionValue, nth, value) => c.ev(`const l=[...document.querySelectorAll('select')].filter(s=>[...s.options].some(o=>o.value===${S(optionValue)})); const e=l[${nth}]; if(!e) return 'NO-SELECT:'+${S(optionValue)}; Object.getOwnPropertyDescriptor(HTMLSelectElement.prototype,'value').set.call(e, ${S(value)}); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`);
+// v0.8.98 — echte Eingabe über CDP Input (Tastatur/Maus), keine Wert-Setter: Steuerauswahl, Betrag, Speichern.
+const TASTE = { ArrowDown: 40, ArrowUp: 38 };
+const fokus = (c, sel) => c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return 'NO:'+${S(sel)}; if (e.disabled) return 'DISABLED:'+${S(sel)}; e.scrollIntoView({block:'center'}); e.focus(); if (e.select) e.select(); return document.activeElement===e ? 'OK' : 'NO-FOCUS:'+${S(sel)};`);
+async function taste(c, sel, key, n = 1) {
+  const f = await fokus(c, sel); if (f !== 'OK') return f;
+  for (let i = 0; i < n; i++) {
+    await c.send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key, code: key, windowsVirtualKeyCode: TASTE[key], nativeVirtualKeyCode: TASTE[key] });
+    await c.send('Input.dispatchKeyEvent', { type: 'keyUp', key, code: key, windowsVirtualKeyCode: TASTE[key], nativeVirtualKeyCode: TASTE[key] });
+    await sleep(300);
+  }
+  return 'OK';
+}
+async function tippe(c, sel, text) {
+  const f = await fokus(c, sel); if (f !== 'OK') return f;
+  await c.send('Input.insertText', { text });
+  await sleep(300);
+  return 'OK';
+}
+async function mausKlick(c, sel) {
+  const p = await c.ev(`const e=document.querySelector(${S(sel)}); if(!e) return null; if (e.disabled) return 'DISABLED'; e.scrollIntoView({block:'center'}); const r=e.getBoundingClientRect(); return JSON.stringify({x:r.left+r.width/2, y:r.top+r.height/2});`);
+  if (!p || p === 'DISABLED') return 'NO-MAUS:' + sel + (p ? ':DISABLED' : '');
+  const { x, y } = JSON.parse(p);
+  await c.send('Input.dispatchMouseEvent', { type: 'mouseMoved', x, y });
+  await c.send('Input.dispatchMouseEvent', { type: 'mousePressed', x, y, button: 'left', clickCount: 1 });
+  await c.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x, y, button: 'left', clickCount: 1 });
+  return 'OK';
+}
+/** Fußzeile der Bulk-Zeile: Netto / VAT / Summe, wie angezeigt. */
+const fuss = (c) => c.ev("const q=(s)=>(document.querySelector(s)?.innerText||'').replace(/[^0-9.]/g,''); return [q('[data-bulk-net]'), q('[data-bulk-vat]'), q('[data-bulk-total]')].join('/');");
+const wahl = (c) => c.ev("const e=document.querySelector('[data-bulk-tax-scheme]'); return e ? e.value + '|' + (e.options[e.selectedIndex]?.text||'') + '|' + (document.querySelector('[data-bulk-gross]')?.value||'') : 'NO';");
+const zeileDB = (id) => { const l = dbQ(BIZ_DB, 'SELECT tax_scheme, unit_price, vat_amount, line_total, vat_rate FROM invoice_lines WHERE id = ?', [id])[0] || {};
+  return `${l.tax_scheme} ${Number(l.unit_price).toFixed(3)}/${Number(l.vat_amount).toFixed(3)}/${Number(l.line_total).toFixed(3)} r${l.vat_rate}`; };
+
 async function ssPick(c, placeholder, optionId) {
   const a = await c.ev(`const l=[...document.querySelectorAll('[data-ss-trigger=${S(placeholder)}]')]; const e=l[l.length-1]; if(!e) return 'NO'; e.click(); return 'OK';`);
   if (a !== 'OK') return 'KEIN-AUSLOESER:' + placeholder;
@@ -528,6 +561,81 @@ try {
     ok(zp === zc && JSON.parse(zp).length === 2, `PAGE Bulk Metals zeigt auf Primary und PC2 dasselbe (${zc})`);
     const check = (c) => c.ev("return [...document.querySelectorAll('*')].some(e=>e.childElementCount===0 && e.textContent.trim()==='OK');");
     ok(await check(client), 'PAGE Hauptbuch-Abgleich auf PC2: OK');
+  }
+
+  // ── 6b v0.8.98 Steuerart wählbar, Brutto exakt: PC2 legt an, Primary ändert, PC2 öffnet erneut ──
+  // Echte Tastatur für Auswahl und Betrag, echte Maus für Speichern. Lot BM-0002 (Primary-Einkauf).
+  let INV2 = null, LINE2 = null;
+  {
+    await syncRuhe();
+    client = await lade(client, '/invoices/new');
+    const r = [];
+    if (!(await warteBis(client, "document.querySelector('[data-invoice-save]')", 45000))) r.push('KEINE-MASKE');
+    r.push(await ssPick(client, 'Search clients...', 'bm-kunde'));
+    r.push(await klick(client, '[data-bulk-add-invoice-line]')); await sleep(400);
+    r.push(await client.ev("const b=[...document.querySelectorAll('button[title=\"Diese Zeile entfernen\"]')][0]; if(!b) return 'NO-REMOVE'; b.click(); return 'OK';")); await sleep(300);
+    if (!(await warteBis(client, `document.querySelector('[data-bulk-lot-select] option[value=${S(L2.id)}]')`, 20000))) r.push('KEIN-LOT-IN-AUSWAHL');
+    r.push(await setVal(client, '[data-bulk-lot-select]', L2.id)); await sleep(300);
+    r.push(await tippe(client, '[data-bulk-sale-weight]', '5'));
+    r.push(await tippe(client, '[data-bulk-gross]', '50'));
+    await warteBis(client, "/COGS \\d/.test(document.querySelector('[data-bulk-invoice-line]')?.innerText || '')", 15000);
+    const losArt = String(L2.sale_tax_scheme);
+    const start = await wahl(client);
+    ok(start.startsWith('auto|') && start.includes(`lot · ${losArt}`), `TAX-UI Vorauswahl Auto = Steuerart des Loses (${start})`);
+    const verlauf = [];
+    r.push(await taste(client, '[data-bulk-tax-scheme]', 'ArrowDown')); verlauf.push(`${await wahl(client)} ${await fuss(client)}`);
+    r.push(await taste(client, '[data-bulk-tax-scheme]', 'ArrowDown')); verlauf.push(`${await wahl(client)} ${await fuss(client)}`);
+    r.push(await taste(client, '[data-bulk-tax-scheme]', 'ArrowDown')); verlauf.push(`${await wahl(client)} ${await fuss(client)}`);
+    r.push(await taste(client, '[data-bulk-tax-scheme]', 'ArrowUp', 2)); verlauf.push(`${await wahl(client)} ${await fuss(client)}`);
+    ok(/^VAT_10\|VAT 10%\|50 45\.455\/4\.545\/50\.000$/.test(verlauf[0]) && /^ZERO\|Zero\|50 50\.000\/0\.000\/50\.000$/.test(verlauf[1])
+      && /^MARGIN\|Margin\|50 50\.000\/[0-9.]+\/50\.000$/.test(verlauf[2]) && /^VAT_10\|VAT 10%\|50 45\.455\/4\.545\/50\.000$/.test(verlauf[3]),
+    `TAX-UI Tastatur VAT 10% → Zero → Margin → VAT 10%: Betrag bleibt 50, Summe jedes Mal 50.000 (${S(verlauf)})`);
+    r.push(await mausKlick(client, '[data-invoice-save]'));
+    if (!(await warteBis(client, "!document.querySelector('[data-invoice-save]')", 45000))) r.push('NICHT-GESPEICHERT:' + (await fehlerText(client)));
+    await spuelen(primary);
+    const row = dbQ(BIZ_DB, 'SELECT id, invoice_id FROM invoice_lines WHERE lot_id = ? AND bulk_weight_mg = 5000', [L2.id])[0] || {};
+    INV2 = row.invoice_id; LINE2 = row.id;
+    ok(alleOk(r) === 'OK' && zeileDB(LINE2) === 'VAT_10 45.455/4.545/50.000 r10'
+      && Number(dbQ(BIZ_DB, 'SELECT gross_amount FROM invoices WHERE id = ?', [INV2])[0]?.gross_amount) === 50,
+    `TAX-PC2 gespeichert: 45.455 + 4.545 = 50.000, Rechnung 50.000 (${alleOk(r)} ${zeileDB(LINE2)})`);
+    const icmd = (await kommandos(client)).filter((x) => x.op === 'invoices.create').at(-1);
+    const bl = icmd?.payload?.lines?.[0] || {};
+    ok(bl.kind === 'bulk' && bl.grossFils === 50000 && bl.scheme === 'VAT_10' && !('taxScheme' in bl) && !('vatAmount' in bl) && !('lineTotal' in bl) && !('unitPriceFils' in bl),
+      `TAX-PC2 …als Absicht mit Kundenbetrag und Steuerart, ohne Beträge (${S(bl)})`);
+  }
+  {
+    await gehFrisch(primary, `/invoices/${INV2}/edit`);
+    const r = [];
+    if (!(await warteBis(primary, "document.querySelector('[data-bulk-tax-scheme]')", 30000))) r.push('KEINE-MASKE');
+    await sleep(1500);
+    const offen = await wahl(primary);
+    ok(/^VAT_10\|VAT 10%\|50\.000$/.test(offen) && (await fuss(primary)) === '45.455/4.545/50.000', `TAX-EDIT Primary öffnet: VAT 10%, 50.000 (${offen})`);
+    r.push(await taste(primary, '[data-bulk-tax-scheme]', 'ArrowDown'));
+    const zero = `${await wahl(primary)} ${await fuss(primary)}`;
+    r.push(await tippe(primary, 'textarea[placeholder^="Explain why this invoice"]', 'E2E Steuerart Zero'));
+    r.push(await mausKlick(primary, '[data-invoice-save]'));
+    if (!(await warteBis(primary, `location.pathname === ${S('/invoices/' + INV2)}`, 30000))) r.push('NICHT-GESPEICHERT:' + (await fehlerText(primary)));
+    await spuelen(primary);
+    ok(alleOk(r) === 'OK' && zero === 'ZERO|Zero|50.000 50.000/0.000/50.000' && zeileDB(LINE2) === 'ZERO 50.000/0.000/50.000 r0',
+      `TAX-EDIT Primary wechselt auf Zero: 50.000 bleibt (${alleOk(r)} ${zero} → ${zeileDB(LINE2)})`);
+  }
+  {
+    const vorher = S([zeileDB(LINE2), dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM ledger_entries')[0]?.n]);
+    client = await lade(client, `/invoices/${INV2}/edit`);
+    const r = [];
+    if (!(await warteBis(client, "document.querySelector('[data-bulk-tax-scheme]')", 45000))) r.push('KEINE-MASKE');
+    await sleep(1500);
+    const offen = await wahl(client);
+    r.push(await tippe(client, 'textarea[placeholder^="Explain why this invoice"]', 'E2E nur geöffnet'));
+    r.push(await mausKlick(client, '[data-invoice-save]'));
+    if (!(await warteBis(client, "!document.querySelector('[data-invoice-save]')", 45000))) r.push('NICHT-GESPEICHERT:' + (await fehlerText(client)));
+    await spuelen(primary);
+    const nachher = S([zeileDB(LINE2), dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM ledger_entries')[0]?.n]);
+    ok(alleOk(r) === 'OK' && /^ZERO\|Zero\|50\.000$/.test(offen) && nachher === vorher,
+      `TAX-REOPEN PC2 öffnet und speichert unverändert: Zeile und Hauptbuch bleiben (${alleOk(r)} ${offen} ${nachher})`);
+    const ucmd = (await kommandos(client)).filter((x) => x.op === 'invoices.update').at(-1);
+    const ul = ucmd?.payload?.lines?.[0] || {};
+    ok(ul.grossFils === 50000 && ul.scheme === 'ZERO' && ul.lineId === LINE2, `TAX-REOPEN …PC2 schickt 50000 Fils und Zero (${S(ul)})`);
   }
 
   // ── 7 Hauptbuch, Abstimmung, PC2 ohne Datenbank, Prozesse ────────────────

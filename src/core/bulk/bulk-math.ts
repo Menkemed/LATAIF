@@ -133,6 +133,71 @@ export function vatFilsOfGross(grossFils: number, ratePct: number): number {
   return Number(divHalfUp(BigInt(grossFils) * BigInt(ratePct), BigInt(100 + ratePct)));
 }
 
+/** BULK TAX SELECTION (v0.8.98) — die Beträge einer Bulk-Verkaufszeile in ganzen Fils. */
+export interface BulkSaleAmounts {
+  /** Netto der Zeile (= `unit_price` bei Menge 1). */
+  netFils: number;
+  /** VAT auf der Rechnung (nur VAT_10, sonst 0). */
+  vatFils: number;
+  /** Die gespeicherte Steuer der Zeile (`vat_amount`): VAT_10 = VAT, MARGIN = interne Margin-VAT, ZERO = 0. */
+  taxFils: number;
+  /** Kundenbetrag inkl. VAT (`line_total`) — genau die Eingabe. */
+  grossFils: number;
+}
+
+/**
+ * BULK TAX SELECTION (v0.8.98) — die Zeile aus dem Kundenbetrag inkl. VAT G. G bleibt auf das Fils genau, bei jeder
+ * Steuerart:
+ *   VAT_10 → VAT = round_half_up(G · 10 / 110) (Steuerbruchteil, wie `vatFilsOfGross` beim Einkauf), Netto = G − VAT;
+ *   ZERO   → Netto = G, VAT 0;
+ *   MARGIN → Netto = G, Kunden-VAT 0, interne VAT = round_half_up(max(0, G − COGS) · 10 / 110).
+ * Ein halber Fils kann bei 10/110 nicht entstehen (der Rest ist immer k/11) — die Rundungsart ist eindeutig. Das Netto
+ * ist dasselbe wie `netFilsFromGross`. Auf die Summe einer älteren, netto-gerechneten Zeile angewandt ergibt die Regel
+ * genau deren Netto und VAT — bestehende Zeilen bleiben damit stimmig, ohne dass sie umgerechnet werden.
+ */
+export function bulkAmountsFromGross(grossFils: number, scheme: string, cogsFils: number): BulkSaleAmounts {
+  const g = assertFils(grossFils, 'price incl. VAT', true);
+  const c = assertFils(cogsFils, 'COGS', true);
+  switch (assertSaleTaxScheme(scheme)) {
+    case 'VAT_10': {
+      const vat = vatFilsOfGross(g, 10);
+      return { netFils: g - vat, vatFils: vat, taxFils: vat, grossFils: g };
+    }
+    case 'MARGIN': return { netFils: g, vatFils: 0, taxFils: vatFilsOfGross(Math.max(0, g - c), 10), grossFils: g };
+    case 'ZERO': return { netFils: g, vatFils: 0, taxFils: 0, grossFils: g };
+  }
+}
+
+/**
+ * BULK TAX SELECTION (v0.8.98) — älterer Client ohne Kundenbetrag: welches Brutto gehört zu diesem Netto? Bei ZERO und
+ * MARGIN ist es das Netto selbst. Bei VAT_10 können zwei Bruttobeträge dasselbe Netto haben (50.000 und 50.001 →
+ * 45.455) — dann ist der Kundenpreis aus dem Netto nicht sicher bekannt, und es gibt `null` (der Aufrufer weist ab,
+ * statt einen Preis zu raten).
+ */
+export function bulkGrossOfNet(netFils: number, scheme: string): number | null {
+  const n = assertFils(netFils, 'price', true);
+  if (assertSaleTaxScheme(scheme) !== 'VAT_10') return n;
+  const near = Number(divHalfUp(BigInt(n) * 110n, 100n));
+  const hits = [near - 2, near - 1, near, near + 1, near + 2].filter((g) => g >= 0 && netFilsFromGross(g, 'VAT_10') === n);
+  return hits.length === 1 ? hits[0] : null;
+}
+
+/**
+ * BULK TAX SELECTION (v0.8.98) — passen die gespeicherten Beträge einer Bulk-Zeile zu ihrer Steuerart? `null` = ja.
+ * VAT_10: Netto + VAT = Summe und VAT = Steuerbruchteil der Summe; ZERO: VAT 0, Netto = Summe; MARGIN: Netto = Summe
+ * und — nur mit `cogsFils` — interne VAT aus Summe und Einstand. Gilt für ältere und neue Zeilen gleich.
+ */
+export function bulkAmountsIssue(scheme: string, netFils: number, taxFils: number, grossFils: number, cogsFils?: number): string | null {
+  if (!(BULK_SALE_TAX_SCHEMES as readonly string[]).includes(scheme)) return `tax scheme ${scheme} is not allowed`;
+  if (scheme === 'VAT_10') {
+    return netFils + taxFils === grossFils && taxFils === vatFilsOfGross(grossFils, 10) ? null : 'net + VAT does not match the total';
+  }
+  if (netFils !== grossFils) return 'net must equal the total';
+  if (scheme === 'ZERO') return taxFils === 0 ? null : 'zero-rated line with VAT';
+  if (cogsFils !== undefined && taxFils !== vatFilsOfGross(Math.max(0, grossFils - cogsFils), 10)) return 'margin VAT does not match';
+  return null;
+}
+
 /** BHD pro Gramm als Text mit 3 Dezimalen: Fils / mg = (BHD/1000)/(g/1000). */
 export function costPerGramText(valueFils: number, weightMg: number): string {
   if (!(weightMg > 0)) return '—';

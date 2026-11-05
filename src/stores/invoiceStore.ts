@@ -35,7 +35,7 @@ import {
   assertPaymentDateNotInClosedVatQuarter, assertVatUnchanged, vatFingerprint,
 } from '@/core/tax/vat-period-lock';
 import { planCustomerChange, moveInvoiceBookings, moveLastPurchase, customerDisplayName, customerChangeBookingDays } from '@/core/invoices/customer-change';
-import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts, isLedgerNeutralEdit, normalizeEditSplits, applyBindingGross, keepGrossOnPureTaxChange } from '@/core/invoices/edit-lines';
+import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts, isLedgerNeutralEdit, normalizeEditSplits, applyBindingGross, keepGrossOnPureTaxChange, InvoiceEditLineRejected, EDIT_RETURNED_LINE_PRICE_LOCKED } from '@/core/invoices/edit-lines';
 import { calcInvoiceLine, vatRateFor, type LineScheme } from '@/core/invoices/line-derivation';
 import {
   OVERPAY_CHOICE_REQUIRED, REFUND_DUE, REFUND_NOTHING_OWED, isRefundClaimStatus, payOutRefundClaim, refundClaimsByInvoice,
@@ -798,8 +798,13 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Beschreibung bleiben änderbar. Korrektur von Lot/Gewicht: Zeile entfernen und neu anlegen.
     // Beträge rechnet das Haus schon HIER (Zeilenvertrag), nicht erst bei der Zuteilung: die Absicht trägt
     // 0, und die Prüfung unten (Retoure, Summe nicht unter die Gutschriften) muss die echten Beträge sehen.
+    // BULK TAX SELECTION (v0.8.98) — Steuerart wählbar, Beträge aus dem Kundenbetrag (genau auf das Fils). Bleiben
+    // Steuerart und Kundenbetrag gleich, bleiben die gespeicherten Beträge GENAU stehen. Ändert sich nur das Brutto
+    // (Netto gleich, z. B. 50.001 → 50.000), ist das eine Änderung mit Buchungswirkung (`bulkLineChanged`), auch wenn
+    // Menge, Netto und Steuerart gleich aussehen.
     const bulkBase = new Map(storedBulkLines(id).map(b => [b.id, b]));
     const keptBulkType = new Map<string, string>();
+    let bulkLineChanged = false;
     lines = lines.map((l, i) => {
       const b = lineMatch[i] ? bulkBase.get(lineMatch[i] as string) : undefined;
       if (!b) {
@@ -807,7 +812,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           throw new BulkRejected('BULK_PRODUCT_DIRECT_SALE', 'bulk metal is sold with “Add bulk metal” — choose a lot and a weight');
         }
         const priced = l.bulkIntent ? bulkLineAmountsForEdit(l.bulkIntent) : null;
-        return priced ? { ...l, lineTotal: priced.lineTotal } : l;
+        return priced ? { ...l, taxScheme: priced.scheme, lineTotal: priced.lineTotal } : l;
       }
       const it = l.bulkIntent;
       if (!it || it.lotId !== b.lotId || it.weightMg !== b.weightMg) {
@@ -815,10 +820,20 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       }
       const base = baseById.get(b.id)!;
       if (it.bulkType) keptBulkType.set(b.id, it.bulkType);
-      const priced = bulkLineAmountsForEdit(it, { productId: b.productId, lotId: b.lotId, purchasePrice: base.purchasePrice, taxScheme: base.taxScheme })!;
+      const priced = bulkLineAmountsForEdit(it, { productId: b.productId, lotId: b.lotId, purchasePrice: base.purchasePrice,
+        taxScheme: base.taxScheme, unitPrice: base.unitPrice, vatAmount: base.vatAmount, lineTotal: base.lineTotal })!;
+      if (priced.changed) {
+        // Eine retournierte Bulk-Zeile behält Preis und Steuerart (ihre Gutschrift steht) — auch bei einem einzigen Fils.
+        if (base.returnedQty > 0.0005) {
+          throw new InvoiceEditLineRejected(EDIT_RETURNED_LINE_PRICE_LOCKED,
+            `The price of ${l.description || 'this bulk metal line'} cannot be changed — it has a return, and its credit note was issued at the current price.`);
+        }
+        bulkLineChanged = true;
+      }
       const { bulkIntent: _drop, ...rest } = l;
       void _drop;
-      return { ...rest, productId: b.productId, lotId: b.lotId, quantity: 1, taxScheme: base.taxScheme, vatRate: base.vatRate,
+      return { ...rest, productId: b.productId, lotId: b.lotId, quantity: 1, taxScheme: priced.scheme,
+        vatRate: priced.changed ? vatRateFor(priced.scheme) : base.vatRate,
         purchasePrice: base.purchasePrice, unitPrice: priced.unitPrice, vatAmount: priced.vatAmount, lineTotal: priced.lineTotal,
         description: it.description || String(query('SELECT description FROM invoice_lines WHERE id = ?', [b.id])[0]?.description ?? '') };
     });
@@ -908,7 +923,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // `recorded_at` der Buchungen).
     const neuesDatum = issuedAt ?? inv0.issuedAt ?? inv0.createdAt;
     const gleicherTag = issuedAt === undefined || issuedAt.slice(0, 10) === String(inv0.issuedAt ?? '').slice(0, 10);
-    const ohneBuchung = !customerPlan && gleicherTag && deltaAmount === 0 && isLedgerNeutralEdit(baseLines, lines, lineMatch);
+    const ohneBuchung = !customerPlan && gleicherTag && deltaAmount === 0 && !bulkLineChanged && isLedgerNeutralEdit(baseLines, lines, lineMatch);
     const bezeichnung = new Map(query('SELECT id, description FROM invoice_lines WHERE invoice_id = ?', [id])
       .map((r) => [String(r.id), String(r.description ?? '')]));
     const nurVerwaltung = ohneBuchung
@@ -1128,7 +1143,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           continue;
         }
         const b = l._kept ? baseById.get(l._id) : undefined;
-        if (!b) continue;
+        // BULK TAX SELECTION (v0.8.98) — eine fortgesetzte Bulk-Zeile hat ihre Beträge schon oben aus dem Kundenbetrag
+        // (oder genau die gespeicherten). Ein Nachrechnen aus dem Netto würde das exakte Brutto wieder verschieben.
+        if (!b || bulkBase.has(b.id)) continue;
         const a = keptLineAmounts(b, l, l._resolvedCost);
         l.unitPrice = a.unitPrice;
         l.vatAmount = a.vatAmount;
