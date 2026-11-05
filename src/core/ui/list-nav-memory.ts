@@ -53,7 +53,26 @@ export function clampScrollTop(target: number, scrollHeight: number, clientHeigh
   return Math.min(target, max);
 }
 
+// ── Verlauf: welche Seite steht an welcher Stelle des Verlaufs (für „nach dem Löschen zurück zur Liste") ──
+const trail = new Map<number, string>();
+
+/** Die Seite an Verlaufsstelle `idx` (vom Router in `history.state.idx`) merken; spätere Besuche überschreiben. */
+export function recordNavVisit(idx: unknown, pathname: string): void {
+  if (typeof idx === 'number' && Number.isInteger(idx) && idx >= 0) trail.set(idx, pathname);
+}
+
+/**
+ * Nach dem Löschen eines Eintrags: zurück (`back`) nur, wenn der Schritt davor genau die Liste ist — dann kommt sie
+ * mit Suche, Filtern und Position wieder. Sonst (direkt geöffnet, von einer anderen Seite gekommen, davor eine
+ * Bearbeiten-Seite des gelöschten Eintrags, Verlauf unbekannt) frisch zur Liste (`list`), wie bisher.
+ */
+export function listReturnAction(idx: unknown, listPath: string): 'back' | 'list' {
+  if (typeof idx !== 'number' || !Number.isInteger(idx) || idx < 1) return 'list';
+  return trail.get(idx - 1) === listPath ? 'back' : 'list';
+}
+
 /** Nur für Tests: alles vergessen. */
 export function resetListNavMemoryForTest(): void {
   memory.clear();
+  trail.clear();
 }

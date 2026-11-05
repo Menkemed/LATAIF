@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
 import { ArrowLeft, Edit3, XCircle, CreditCard, Printer, Download, Table, ExternalLink, ChevronDown } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
+import { useReturnToList } from '@/hooks/useListNav';
 import { productDisplayName } from '@/core/products/display-name';
 
 // Butterfly icon as inline SVG — renders reliably in all webviews (no emoji font dependency).
@@ -77,6 +78,9 @@ export function InvoiceDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/invoices');
+  // LIST NAVIGATION UX (v0.8.98) — nach dem Löschen: kam man direkt aus der Liste, zurück dorthin (Suche, Filter,
+  // Position); sonst frisch zur Liste wie bisher.
+  const returnToList = useReturnToList('/invoices');
   const [searchParams, setSearchParams] = useSearchParams();
   const { invoices, loadInvoices, applyCreditToInvoice, updatePayment, deletePayment, deleteInvoice } = useInvoiceStore();
   // CENTRAL-UI-PARITY R4C — dieselben Masken, zwei Anschluesse hinter jeder Geldhandlung.
@@ -299,7 +303,7 @@ export function InvoiceDetail() {
       alert(e instanceof Error ? e.message : String(e));
       return;
     }
-    navigate('/invoices');
+    returnToList();
   }
 
   function openReturnModal() {

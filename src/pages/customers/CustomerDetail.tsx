@@ -5,6 +5,7 @@ import {
   Receipt, FileMinus, Wallet, TrendingUp, BarChart3, Plus, Building2, CreditCard, Banknote, Smartphone, AlertTriangle, PiggyBank,
 } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
+import { useReturnToList } from '@/hooks/useListNav';
 import { Button } from '@/components/ui/Button';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
@@ -97,6 +98,9 @@ export function CustomerDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/clients');
+  // LIST NAVIGATION UX (v0.8.98) — nach dem Löschen: kam man direkt aus der Liste, zurück dorthin (Suche, Filter,
+  // Position); sonst frisch zur Liste wie bisher.
+  const returnToList = useReturnToList('/clients');
   const { customers, loadCustomers, updateCustomer, deleteCustomer } = useCustomerStore();
   const { loadReturns: loadSalesReturns, getCustomerRefundPayable } = useSalesReturnStore();
   const { products, loadProducts } = useProductStore();
@@ -271,7 +275,7 @@ export function CustomerDetail() {
     if (!id) return;
     if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
     deleteCustomer(id);
-    navigate('/clients');
+    returnToList();
   }
 
   const initials = `${(customer.firstName || '').charAt(0)}${(customer.lastName || '').charAt(0)}`.toUpperCase() || '?';

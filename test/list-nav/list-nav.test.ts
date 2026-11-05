@@ -38,6 +38,27 @@ const S = JSON.stringify;
     'M4 zuletzt gemerkt bleibt am längsten (k5 erneuert, k6 fällt heraus)');
 }
 
+// ── Nach dem Löschen: zurück nur, wenn der Schritt davor genau die Liste ist ──
+{
+  m.resetListNavMemoryForTest();
+  ok(m.listReturnAction(undefined, '/invoices') === 'list' && m.listReturnAction(0, '/invoices') === 'list', 'D1 Verlauf unbekannt oder erster Schritt → frisch zur Liste');
+  m.recordNavVisit(0, '/');
+  m.recordNavVisit(1, '/invoices');
+  m.recordNavVisit(2, '/invoices/inv-1');
+  ok(m.listReturnAction(2, '/invoices') === 'back', 'D2 Liste → Detail → Löschen: zurück zur Liste (mit Suche, Filtern, Position)');
+  m.recordNavVisit(2, '/invoices/inv-1/edit');
+  m.recordNavVisit(3, '/invoices/inv-1');
+  ok(m.listReturnAction(3, '/invoices') === 'list', 'D3 davor die Bearbeiten-Seite des gelöschten Eintrags → nicht zurück, frisch zur Liste');
+  m.recordNavVisit(1, '/clients/c-1');
+  m.recordNavVisit(2, '/invoices/inv-2');
+  ok(m.listReturnAction(2, '/invoices') === 'list', 'D4 von einer anderen Seite gekommen → frisch zur Liste (wie bisher)');
+  m.recordNavVisit(1, '/collection');
+  ok(m.listReturnAction(2, '/collection') === 'back' && m.listReturnAction(2, '/clients') === 'list', 'D5 späterer Besuch überschreibt die Stelle; Liste muss genau passen');
+  m.recordNavVisit(-1, '/x'); m.recordNavVisit(1.5, '/x'); m.recordNavVisit('2', '/x');
+  ok(m.listReturnAction(2, '/collection') === 'back', 'D6 ungültige Verlaufsstellen werden ignoriert');
+  m.resetListNavMemoryForTest();
+}
+
 // ── Scroll-Ziel immer gültig ───────────────────────────────────────────────
 {
   ok(m.clampScrollTop(800, 3000, 700) === 800, 'C1 erreichbare Position bleibt genau');
@@ -80,8 +101,17 @@ const S = JSON.stringify;
   const wl = src('src/pages/watches/WatchList.tsx'), cl = src('src/pages/customers/CustomerList.tsx');
   ok(!/searchQuery, setSearchQuery,? ?(filterCategory)?/.test(wl.split('useProductStore();')[0].split('const {').pop() ?? '') && !/searchQuery, setSearchQuery \} = useCustomerStore/.test(cl),
     'V7 Collection und Clients: keine unsichtbare Store-Suche mehr');
-  const rd = src('src/pages/repairs/RepairDetail.tsx');
-  ok(/deleteRepair\(id\);[\s\S]{0,400}goBack\(\);/.test(rd) && !/deleteRepair\(id\);[\s\S]{0,200}navigate\('\/repairs'\)/.test(rd), 'V8 nach dem Löschen einer Reparatur zurück zur Liste, wie sie verlassen wurde');
+  // V8 — nach dem Löschen: Reparaturen, Rechnungen, Collection, Clients nehmen den sicheren Rückweg; Sperren und
+  // Löschaufruf bleiben unverändert davor (nur am Primary, Store-Sperren).
+  const del: Array<[string, string, RegExp]> = [
+    ['src/pages/repairs/RepairDetail.tsx', '/repairs', /if \(blockDeleteOnClient\(\)\) \{ setConfirmDelete\(false\); return; \}[\s\S]{0,200}try \{ deleteRepair\(id\); \} catch[\s\S]{0,120}\n {4}returnToList\(\);/],
+    ['src/pages/invoices/InvoiceDetail.tsx', '/invoices', /if \(blockDeleteOnClient\(\)\) \{ setConfirmDelete\(false\); return; \}\n {4}try \{\n {6}deleteInvoice\(id\);[\s\S]{0,260}return;\n {4}\}\n {4}returnToList\(\);/],
+    ['src/pages/watches/ProductDetail.tsx', '/collection', /if \(blockDeleteOnClient\(\)\) return;\n {4}try \{\n {6}deleteProduct\(id\);\n {6}returnToList\(\);/],
+    ['src/pages/customers/CustomerDetail.tsx', '/clients', /if \(blockDeleteOnClient\(\)\) \{ setConfirmDelete\(false\); return; \}\n {4}deleteCustomer\(id\);\n {4}returnToList\(\);/],
+  ];
+  const delBad = del.filter(([f, list, re]) => { const t = src(f); return !re.test(t) || !t.includes(`useReturnToList('${list}')`) || new RegExp(`navigate\\('${list.replace('/', '\\/')}'\\);\\n  \\}`).test(t); }).map((x) => x[0]);
+  ok(delBad.length === 0, `V8 nach dem Löschen sicher zurück zur Liste; Sperren und Löschaufruf unverändert (${S(delBad)})`);
+  ok(/useNavigationTrail\(\);/.test(src('src/components/layout/Sidebar.tsx')), 'V8 der Verlauf wird in der immer sichtbaren Seitenleiste mitgeschrieben');
   ok(/onClick=\{goBack\}>Back/.test(src('src/pages/production/ProductionDetail.tsx')) && /onClick=\{goBack\}>Back/.test(src('src/pages/scrap-trades/ScrapTradeDetail.tsx')),
     'V9 Production und Scrap Trades: Back geht zurück statt neu zur Liste');
   ok(/navigate\(`\/repairs\?customer=\$\{id\}`\)/.test(src('src/pages/customers/CustomerDetail.tsx')) && /searchParams\.get\('customer'\)/.test(src('src/pages/repairs/RepairList.tsx')),

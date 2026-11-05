@@ -10,6 +10,7 @@ import { ChevronDown, ChevronsDownUp, ChevronsUpDown, Scale } from 'lucide-react
 import { useAuthStore } from '@/stores/authStore';
 import { useOrderStore } from '@/stores/orderStore';
 import { useProductStore } from '@/stores/productStore';
+import { useNavigationTrail } from '@/hooks/useListNav';
 
 // localStorage-Key fuer expanded-Group-Persistence. Speichert ein JSON-Array
 // von Group-Labels, die der User offen lassen will.
@@ -100,6 +101,8 @@ const TONE_FG: Record<string, string> = {
 
 export function Sidebar() {
   const location = useLocation();
+  // LIST NAVIGATION UX (v0.8.98) — welche Seite an welcher Verlaufsstelle steht (für „nach dem Löschen zurück zur Liste").
+  useNavigationTrail();
   const { session, branches, logout, switchBranch } = useAuthStore();
   const [branchOpen, setBranchOpen] = useState(false);
 

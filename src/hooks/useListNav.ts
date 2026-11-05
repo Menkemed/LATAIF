@@ -10,9 +10,32 @@
 // mehr ändert — dann auf die letzte gültige Position begrenzt). Solange wartet der Inhalt unsichtbar, damit nichts
 // sichtbar nach oben springt.
 // ════════════════════════════════════════════════════════════════════════════
-import { useEffect, useLayoutEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from 'react';
-import { useLocation, useNavigationType } from 'react-router-dom';
-import { clampScrollTop, listNavId, listNavSnapshot, rememberListNav } from '@/core/ui/list-nav-memory';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Dispatch, type RefObject, type SetStateAction } from 'react';
+import { useLocation, useNavigate, useNavigationType } from 'react-router-dom';
+import { clampScrollTop, listNavId, listNavSnapshot, listReturnAction, recordNavVisit, rememberListNav } from '@/core/ui/list-nav-memory';
+
+/** Die Verlaufsstelle, die der Router in `history.state.idx` führt. */
+function historyIdx(): unknown {
+  return (window.history.state as { idx?: unknown } | null)?.idx;
+}
+
+/** Schreibt mit, welche Seite an welcher Verlaufsstelle steht (einmal, in der immer sichtbaren Seitenleiste). */
+export function useNavigationTrail(): void {
+  const location = useLocation();
+  useEffect(() => { recordNavVisit(historyIdx(), location.pathname); }, [location.key, location.pathname]);
+}
+
+/**
+ * Nach dem Löschen eines Eintrags: kam man direkt aus der Liste, geht es dorthin zurück — mit Suche, Filtern und
+ * Position (auf die kürzere Liste begrenzt). In jedem anderen Fall frisch zur Liste, genau wie bisher.
+ */
+export function useReturnToList(listPath: string): () => void {
+  const navigate = useNavigate();
+  return useCallback(() => {
+    if (listReturnAction(historyIdx(), listPath) === 'back') navigate(-1);
+    else navigate(listPath);
+  }, [navigate, listPath]);
+}
 
 /** So lange darf der Inhalt ruhig bleiben, bevor auf die erreichbare Position begrenzt wird (Liste kürzer geworden). */
 const QUIET_MS = 350;

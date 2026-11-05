@@ -645,14 +645,42 @@ try {
   }
 
   // Primary: Rechner mit Datenbank. PC2: liest alles über den Primary (kein Löschen, das ist am PC2 gesperrt).
-  await gehFrisch(primary, '/tasks');
-  await sleep(800);
+  // Start über die Seitenleiste (echter Klick). Kein rohes history.pushState: damit verlöre der Router seine
+  // Verlaufsposition (history.state.idx), und „nach dem Löschen zurück zur Liste" fiele zu Recht auf „frisch" zurück.
+  ok((await seite(primary, '/tasks', 'true')) === 'OK', 'SETUP Primary startet über die Seitenleiste');
   await reparaturen(primary, 'PRIMARY', true);
   await collection(primary, 'PRIMARY');
   await clients(primary, 'PRIMARY');
   await reparaturen(client, 'PC2', false);
   await collection(client, 'PC2');
   await clients(client, 'PC2');
+
+  /** Löschen am Primary aus der gesuchten, gescrollten Liste: zurück zur Liste mit Suche, Position gültig begrenzt. */
+  async function loeschenAusListe(c, wer, { href, vorbereiten, suchText, muster, detail, loeschKnopf, editKnopf = 'Edit', sql }) {
+    const r = [await seite(c, href, "!!document.querySelector('[data-page-search]')")];
+    if (vorbereiten) r.push(await vorbereiten(c));
+    r.push(await tippe(c, '[data-page-search]', suchText)); await sleep(900);
+    const n0 = await zaehle(c, muster);
+    await rad(c, 8000);
+    const sMax = await pos(c);
+    const geklickt = await klickSichtbar(c, muster); r.push(geklickt.r);
+    if (!(await warteBis(c, `/^${detail}\\/.+/.test(location.pathname)`, 20000))) r.push('KEINE-DETAILSEITE');
+    await sleep(1000);
+    if ((await knopf(c, loeschKnopf)) !== 'OK') { r.push(await knopf(c, editKnopf)); await sleep(700); r.push(await knopf(c, loeschKnopf)); }
+    await sleep(500);
+    r.push(await knopf(c, 'Delete', true));
+    if (!(await warteBis(c, `location.pathname === ${S(href)}`, 20000))) r.push('NICHT-ZURUECK');
+    await sleep(1500);
+    await spuelen(primary);
+    const nach = { q: await suche(c), n: await zaehle(c, muster), s: await pos(c), max: await maxPos(c) };
+    const weg = zahl(sql, [geklickt.t]);
+    ok(alleOk(r) === 'OK' && weg === 0 && nach.q === suchText && nach.n === n0 - 1 && nach.s > 0 && nach.s <= nach.max && nah(nach.s, Math.min(sMax, nach.max)),
+      `${wer} ${href} nach dem Löschen zurück zur gesuchten Liste, Position gültig begrenzt (${alleOk(r)} ${geklickt.t} ${S({ n0, sMax, ...nach, weg })})`);
+  }
+  await loeschenAusListe(primary, 'PRIMARY', { href: '/collection', vorbereiten: (c) => knopf(c, 'All'), suchText: 'Rolex', muster: '^RX Liste \\d\\d$',
+    detail: '\\/collection', loeschKnopf: 'Delete Item', sql: 'SELECT COUNT(*) AS n FROM products WHERE name = ?' });
+  await loeschenAusListe(primary, 'PRIMARY', { href: '/clients', suchText: 'Liste', muster: '^Liste Kunde \\d\\d$',
+    detail: '\\/clients', loeschKnopf: 'Delete Client', editKnopf: 'Edit Client', sql: "SELECT COUNT(*) AS n FROM customers WHERE first_name || ' ' || last_name = ?" });
 
   // ── Sicherheit: PC2 ohne Datenbank, Prozesse ─────────────────────────────
   {

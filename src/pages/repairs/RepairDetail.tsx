@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Trash2, Save, ClipboardCheck, ExternalLink, Download, MessageCircle, FileText, RotateCcw } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
+import { useReturnToList } from '@/hooks/useListNav';
 import { shouldAdoptRecord, editBaselineRevision } from '@/core/data/form-sync';
 import { loadRepairPhotos, revokeRepairPhotos, type RepairPhotoView } from '@/core/repairs/repair-photo-view';
 import { Button } from '@/components/ui/Button';
@@ -142,6 +143,9 @@ export function RepairDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/repairs');
+  // LIST NAVIGATION UX (v0.8.98) — nach dem Löschen: kam man direkt aus der Liste, zurück dorthin (Suche, Filter,
+  // Position); sonst frisch zur Liste wie bisher.
+  const returnToList = useReturnToList('/repairs');
   const {
     repairs, loadRepairs, deleteRepair,
     repairLines, loadRepairLines, getRepairLines,
@@ -640,9 +644,7 @@ export function RepairDetail() {
     if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
     // POST-PARITY PP-13 — bezahlte Werkstattkosten / verkaufter Artikel an eigener Ware sperren das Löschen.
     try { deleteRepair(id); } catch (e) { alert((e as Error).message); setConfirmDelete(false); return; }
-    // LIST NAVIGATION UX (v0.8.98) — zurück zur Liste, wie sie verlassen wurde (Filter, Suche, Position; die
-    // Position wird auf die kürzere Liste begrenzt). Direkt geöffnet: die Reparaturliste.
-    goBack();
+    returnToList();
   }
 
   function handleDownloadVoucher() {

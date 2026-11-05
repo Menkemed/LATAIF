@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate, useSearchParams } from 'react-router-dom';
 import { ArrowLeft, Edit3, Package, Trash2, Save, Tag, Sparkles, AlertTriangle, ChevronDown, BarChart3, PieChart, Receipt, Factory } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
+import { useReturnToList } from '@/hooks/useListNav';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
@@ -57,6 +58,9 @@ export function ProductDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/collection');
+  // LIST NAVIGATION UX (v0.8.98) — nach dem Löschen: kam man direkt aus der Liste, zurück dorthin (Suche, Filter,
+  // Position); sonst frisch zur Liste wie bisher.
+  const returnToList = useReturnToList('/collection');
   const { products, categories, loadProducts, loadCategories, editProductWithMedia, editProductTextDurably, deleteProduct, isSkuTaken, getProductLinks } = useProductStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { purchases, loadPurchases } = usePurchaseStore();
@@ -570,7 +574,7 @@ export function ProductDetail() {
     if (blockDeleteOnClient()) return;
     try {
       deleteProduct(id);
-      navigate('/collection');
+      returnToList();
     } catch (e) {
       // Sollte nicht passieren — der Delete-Button ist bei verknuepften Produkten
       // disabled. Safety-Net falls sich der Link-Status zwischendurch aenderte.
