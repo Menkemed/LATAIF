@@ -27,6 +27,7 @@ import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { saveDebtCreate, saveDebtPayment, saveDebtUpdate } from '@/core/finance/money-save';
 import { WriteError } from '@/components/shared/WriteError';
 import type { DebtView } from '@/stores/debtStore';
+import { useListState } from '@/hooks/useListNav';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -141,7 +142,7 @@ export function DebtsPage() {
   const [editFehler, setEditFehler] = useState('');
   const { customers, loadCustomers } = useCustomerStore();
   const { loadEmployees } = useEmployeeStore();
-  const [overdueOnly, setOverdueOnly] = useState(false);
+  const [overdueOnly, setOverdueOnly] = useListState('overdueOnly', false);
 
   // Plan §Filter — Dashboard-Klick übergibt ?direction=MONEY_GIVEN/MONEY_RECEIVED → in lokalen Filter mappen.
   const [searchParams, setSearchParams] = useSearchParams();
@@ -153,8 +154,8 @@ export function DebtsPage() {
     if (f && ['all', 'open', 'settled', 'partial', 'we_lend', 'we_borrow'].includes(f)) return f;
     return 'all';
   })();
-  const [filter, setFilter] = useState<Filter>(initialFilter);
-  const [search, setSearch] = useState('');
+  const [filter, setFilter] = useListState<Filter>('filter', initialFilter);
+  const [search, setSearch] = useListState('search', '');
 
   useEffect(() => {
     const next = new URLSearchParams(searchParams);
@@ -322,7 +323,7 @@ export function DebtsPage() {
     <PageLayout
       title="Debts"
       subtitle={`${openRowsAll.length} open \u00b7 ${overdueN} overdue \u00b7 ${fmt(totalOpen)} BHD total`}
-      showSearch onSearch={setSearch} searchPlaceholder="Search counterparty, notes..."
+      showSearch onSearch={setSearch} searchValue={search} searchPlaceholder="Search counterparty, notes..."
       actions={
         <div className="flex items-center gap-2">
           <StaffFilterPill />

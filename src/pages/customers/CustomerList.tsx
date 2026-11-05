@@ -20,6 +20,7 @@ import { Bhd } from '@/components/ui/Bhd';
 import { IdentityPhotoField } from '@/components/identity/IdentityPhotoField';
 import { saveCustomerCreate } from '@/core/customers/customer-save';
 import { intentOf } from '@/core/identity/identity-save';
+import { useListState } from '@/hooks/useListNav';
 
 
 const BRANDS = ['Rolex', 'Patek Philippe', 'Audemars Piguet', 'Richard Mille', 'Vacheron Constantin', 'A. Lange & Sohne', 'Omega', 'Cartier'];
@@ -27,7 +28,10 @@ const BRANDS = ['Rolex', 'Patek Philippe', 'Audemars Piguet', 'Richard Mille', '
 export function CustomerList() {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
-  const { customers, loadCustomers, searchQuery, setSearchQuery } = useCustomerStore();
+  const { customers, loadCustomers } = useCustomerStore();
+  // LIST NAVIGATION UX (v0.8.98) — Suche je Verlaufsschritt (gemeinsame Lösung aller Listen): nach „Back" wieder da und
+  // im Suchfeld sichtbar, nach normaler Navigation frisch. Vorher lag sie im Store und blieb unsichtbar aktiv.
+  const [searchQuery, setSearchQuery] = useListState('searchQuery', '');
   const [showNew, setShowNew] = useState(false);
   const [saveError, setSaveError] = useState('');
   const anlegen = useSharedWrite<{ customerId: string }>('customers.create');
@@ -98,7 +102,7 @@ export function CustomerList() {
       subtitle={filterMode === 'outstanding'
         ? `${filtered.length} client${filtered.length === 1 ? '' : 's'} with outstanding receivables`
         : `${customers.length} clients`}
-      showSearch onSearch={setSearchQuery} searchPlaceholder="Search clients..."
+      showSearch onSearch={setSearchQuery} searchValue={searchQuery} searchPlaceholder="Search clients..."
       actions={<Button variant="primary" onClick={() => setShowNew(true)}>New Client</Button>}
     >
       {filterMode === 'outstanding' && (

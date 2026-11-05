@@ -16,6 +16,7 @@ import { usePermission } from '@/hooks/usePermission';
 import {
   OLD_STOCK_REVIEW_REASONS, oldStockReconciliationFor, type OldStockClass, type OldStockReconciliation,
 } from '@/core/stock/old-stock-reconciliation';
+import { useListState } from '@/hooks/useListNav';
 
 const EMPTY: OldStockReconciliation = {
   branchId: '', rows: [],
@@ -33,7 +34,7 @@ export function OldStockPage() {
   const perm = usePermission();
   const navigate = useNavigate();
   const [refresh, setRefresh] = useState(0);
-  const [filter, setFilter] = useState<Filter>('OPENING_CANDIDATE');
+  const [filter, setFilter] = useListState<Filter>('filter', 'OPENING_CANDIDATE');
   const data = useSharedRead<OldStockReconciliation>('page.old_stock.get', { r: refresh }, (ctx) => oldStockReconciliationFor(ctx), EMPTY, [refresh]);
   const rows = useMemo(() => data.rows.filter((r) => filter === 'ALL' || r.klass === filter), [data, filter]);
 

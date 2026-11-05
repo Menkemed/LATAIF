@@ -23,6 +23,7 @@ import { savePartnerTx } from '@/core/finance/money-save';
 // PARTNER-ITEMS — Beteiligungen an gemeinsam gekauften Artikeln (eigenes Ausgleichskonto).
 import { PartnerItemsPanel } from '@/components/partners/PartnerItemsPanel';
 import { PartnerCardItems, type PartnerItemAction } from '@/components/partners/PartnerCardItems';
+import { useListState } from '@/hooks/useListNav';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -38,7 +39,7 @@ export function PartnersPage() {
   const w = useSharedWrites();
 
   const [searchParams, setSearchParams] = useSearchParams();
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useListState('search', '');
   const [showNewPartner, setShowNewPartner] = useState(false);
   const [partnerForm, setPartnerForm] = useState<Partial<Partner>>({});
 
@@ -127,7 +128,7 @@ export function PartnersPage() {
     <PageLayout
       title="Partners"
       subtitle={`${partners.length} partners · ${fmt(totalCapital)} BHD total capital`}
-      showSearch onSearch={setSearch} searchPlaceholder="Search partners..."
+      showSearch onSearch={setSearch} searchValue={search} searchPlaceholder="Search partners..."
       actions={<Button variant="primary" onClick={() => setShowNewPartner(true)}>New Partner</Button>}
     >
       {filtered.length === 0 ? (

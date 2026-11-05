@@ -37,6 +37,7 @@ import { cardAttributeText } from '@/core/utils/product-format';
 import { getStockAggregates, summarizeInventory, isOwnStockAsset, type LotAggregate } from '@/core/lots/lot-queries';
 import { exportFile } from '@/core/utils/export-file';
 import type { Product, TaxScheme, StockStatus, Category } from '@/core/models/types';
+import { useListState } from '@/hooks/useListNav';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 import { Bhd } from '@/components/ui/Bhd';
 // CENTRAL-UI-PARITY R2D — Mandant und Artikelhistorie ohne eigene Abfrage in der Seite.
@@ -146,10 +147,15 @@ export function WatchList() {
   const perm = usePermission();
   const {
     products, categories, loadProducts, loadCategories, createProductWithMedia,
-    searchQuery, setSearchQuery, filterCategory, setFilterCategory,
-    filterStatus, setFilterStatus, allocateSkuOnCreate,
+    allocateSkuOnCreate,
     isSkuTaken, findPossibleDuplicates, getProductLinks, deleteProducts,
   } = useProductStore();
+  // LIST NAVIGATION UX (v0.8.98) — Suche, Kategorie und Status je Verlaufsschritt (gemeinsame Lösung aller Listen):
+  // nach „Back" genau wie verlassen und im Suchfeld sichtbar; nach normaler Navigation frisch. Vorher lag die Suche
+  // im Store — sie blieb unsichtbar aktiv, während das Feld leer war.
+  const [searchQuery, setSearchQuery] = useListState('searchQuery', '');
+  const [filterCategory, setFilterCategory] = useListState('filterCategory', '');
+  const [filterStatus, setFilterStatus] = useListState<StockStatus | ''>('filterStatus', '');
   // MOBILE-04B2A10 — authorised media scope for the collection thumbnails,
   // derived ONCE (not per card). Same derivation as ProductDetail: branchId from
   // the session, tenantId = branches.tenant_id (DB-authoritative). Missing either
@@ -177,7 +183,7 @@ export function WatchList() {
   // 'consignment' (nur Kommissionsware) und 'all' (alles). Filtert ueber
   // product.sourceType, damit auch bereits verkaufte Consignment-Items
   // korrekt zugeordnet bleiben.
-  const [filterOwnership, setFilterOwnership] = useState<'own' | 'consignment' | 'all'>('own');
+  const [filterOwnership, setFilterOwnership] = useListState<'own' | 'consignment' | 'all'>('filterOwnership', 'own');
   const [form, setForm] = useState<Partial<Product>>({
     condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [], purchaseCurrency: 'BHD', attributes: {},
   });
@@ -508,7 +514,7 @@ export function WatchList() {
             ? `${shown.records} product${s(shown.records)} \u00b7 ${shown.units} item${s(shown.units)} (own + consignment) \u00b7 ${fmt(owned.cost)} BHD own stock`
             : `${shown.records} product${s(shown.records)} \u00b7 ${shown.units} item${s(shown.units)} \u00b7 ${fmt(owned.cost)} BHD stock value`
       }
-      showSearch onSearch={setSearchQuery} searchPlaceholder="Search by brand, name, SKU..."
+      showSearch onSearch={setSearchQuery} searchValue={searchQuery} searchPlaceholder="Search by brand, name, SKU..."
       actions={
         <div className="flex items-center gap-2" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>
           {printMode ? (

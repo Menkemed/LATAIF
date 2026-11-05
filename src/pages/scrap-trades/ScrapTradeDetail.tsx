@@ -5,6 +5,7 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { useGoBack } from '@/hooks/useGoBack';
 import { ArrowLeft, Edit2, Ban, Trash2 } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
@@ -23,6 +24,8 @@ import {
 export function ScrapTradeDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  // LIST NAVIGATION UX (v0.8.98) — Back = ein Schritt zurück (Liste mit Suche, Filter und Position), nicht neu laden.
+  const goBack = useGoBack('/scrap-trades');
   const { trades, loadTrades, deleteTrade } = useScrapTradeStore();
   const w = useSharedWrites();
   const [editing, setEditing] = useState(false);
@@ -39,7 +42,7 @@ export function ScrapTradeDetail() {
     return (
       <PageLayout
         title="Trade not found"
-        actions={<Button icon={<ArrowLeft size={14} />} onClick={() => navigate('/scrap-trades')}>Back</Button>}
+        actions={<Button icon={<ArrowLeft size={14} />} onClick={goBack}>Back</Button>}
       >
         <div style={{ maxWidth: 600, margin: '40px auto', textAlign: 'center', color: '#6B7280' }}>
           The trade you're looking for doesn't exist or was deleted.
@@ -101,7 +104,7 @@ export function ScrapTradeDetail() {
       subtitle={subtitle}
       actions={
         <div style={{ display: 'flex', gap: 8 }}>
-          <Button variant="ghost" icon={<ArrowLeft size={14} />} onClick={() => navigate('/scrap-trades')}>Back</Button>
+          <Button variant="ghost" icon={<ArrowLeft size={14} />} onClick={goBack}>Back</Button>
           {!isCancelled && !editing && (
             <>
               <Button variant="secondary" icon={<Edit2 size={14} />} onClick={() => { w.clear(); setEditing(true); }} data-scrap-edit-open>Edit</Button>

@@ -24,6 +24,7 @@ import { saveInboxDismiss } from '@/core/purchases/purchase-house';
 // Objekt-URL, die mit der Kachel wieder verschwindet. `images[0]` bleibt für Einträge von früher.
 import { loadVerifiedMedia, revokeVerifiedMedia } from '@/core/media/verified-view';
 import type { PurchaseInboxItem } from '@/stores/purchaseStore';
+import { useListState } from '@/hooks/useListNav';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -74,8 +75,8 @@ export function PurchaseList() {
   }
 
   const [searchParams, setSearchParams] = useSearchParams();
-  const [search, setSearch] = useState('');
-  const [filter, setFilter] = useState<StatusFilter>((searchParams.get('filter') as StatusFilter) || '');
+  const [search, setSearch] = useListState('search', '');
+  const [filter, setFilter] = useListState<StatusFilter>('filter', (searchParams.get('filter') as StatusFilter) || '');
   const staffFilter = searchParams.get('staff') || '';
 
   useEffect(() => {
@@ -113,7 +114,7 @@ export function PurchaseList() {
     <PageLayout
       title="Purchases"
       subtitle={`${purchases.length} purchases · ${fmt(totalOutstanding)} BHD outstanding`}
-      showSearch onSearch={setSearch} searchPlaceholder="Search purchase # or supplier..."
+      showSearch onSearch={setSearch} searchValue={search} searchPlaceholder="Search purchase # or supplier..."
       actions={
         <div className="flex gap-2 items-center">
           <StaffFilterPill />

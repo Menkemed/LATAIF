@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { AlertTriangle, Calendar, Clock, Download, ExternalLink, FileText, X } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
@@ -9,6 +9,7 @@ import {
   PAYABLE_TYPE_LABELS, PAYABLE_TYPE_COLORS,
   type PayableType, type AgeBucket, type PayableRow,
 } from '@/stores/payablesStore';
+import { useListState } from '@/hooks/useListNav';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -68,13 +69,13 @@ export function PayablesPage() {
   const initialTypeParam = searchParams.get('type');
   const initialOverdue = searchParams.get('overdue') === '1';
 
-  const [search, setSearch] = useState('');
-  const [activeTypes, setActiveTypes] = useState<PayableType[]>(
+  const [search, setSearch] = useListState('search', '');
+  const [activeTypes, setActiveTypes] = useListState<PayableType[]>('activeTypes',
     initialTypeParam && ALL_TYPES.includes(initialTypeParam as PayableType)
       ? [initialTypeParam as PayableType]
       : []
   );
-  const [overdueOnly, setOverdueOnly] = useState(initialOverdue);
+  const [overdueOnly, setOverdueOnly] = useListState('overdueOnly', initialOverdue);
 
   useEffect(() => { loadPayables(); }, [loadPayables]);
 
@@ -117,7 +118,7 @@ export function PayablesPage() {
       title="Payables"
       subtitle={`${payables.length} open · ${overdueN} overdue · ${fmt(total)} BHD total`
         + (partnerTotal > 0 ? ` · of which partners ${fmt(partnerTotal)}` : '')}
-      showSearch onSearch={setSearch} searchPlaceholder="Search reference or counterparty..."
+      showSearch onSearch={setSearch} searchValue={search} searchPlaceholder="Search reference or counterparty..."
       actions={
         <button
           onClick={() => downloadCsv(filtered)}

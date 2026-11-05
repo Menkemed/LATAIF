@@ -35,6 +35,7 @@ import { PAYABLES_OP } from '@/core/payables/payables-house';
 import {
   runDueGeneratorOnPrimary, saveExpenseCreate, saveExpenseUpdate, saveTemplateCreate, saveTemplateUpdate, viaWrites,
 } from '@/core/payables/payables-save';
+import { useListState } from '@/hooks/useListNav';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -85,8 +86,8 @@ export function ExpenseList() {
     () => employees.filter(e => e.employmentStatus !== 'inactive'),
     [employees]
   );
-  const [search, setSearch] = useState('');
-  const [categoryFilter, setCategoryFilter] = useState<ExpenseCategory | ''>('');
+  const [search, setSearch] = useListState('search', '');
+  const [categoryFilter, setCategoryFilter] = useListState<ExpenseCategory | ''>('categoryFilter', '');
   const [showNew, setShowNew] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [editId, setEditId] = useState<string | null>(null);
@@ -306,7 +307,7 @@ export function ExpenseList() {
       subtitle={capitalizedTotal > 0.005
         ? `${expenses.length} records · ${fmt(operatingTotal)} operating · ${fmt(capitalizedTotal)} capitalized (→ stock/COGS) · ${fmt(totalPaid)} paid · ${fmt(totalUnpaid)} open`
         : `${expenses.length} records · ${fmt(grandTotal)} total · ${fmt(totalPaid)} paid · ${fmt(totalUnpaid)} open`}
-      showSearch onSearch={setSearch} searchPlaceholder="Search description, number, reference..."
+      showSearch onSearch={setSearch} searchValue={search} searchPlaceholder="Search description, number, reference..."
       actions={
         <div className="flex gap-2 items-center">
           <div className="flex gap-1" style={{ marginRight: 4 }}>

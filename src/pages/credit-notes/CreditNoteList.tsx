@@ -1,5 +1,5 @@
 // Credit Notes List — Storno-Rechnungen, eigene Sidebar-Page (SALES → Credit Notes).
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { FileMinus, ExternalLink } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
@@ -9,6 +9,7 @@ import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { Bhd } from '@/components/ui/Bhd';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
+import { useListState } from '@/hooks/useListNav';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -23,7 +24,7 @@ export function CreditNoteList() {
   const { creditNotes, loadCreditNotes } = useCreditNoteStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { invoices, loadInvoices } = useInvoiceStore();
-  const [search, setSearch] = useState('');
+  const [search, setSearch] = useListState('search', '');
 
   useEffect(() => { loadCreditNotes(); loadCustomers(); loadInvoices(); }, [loadCreditNotes, loadCustomers, loadInvoices]);
 
@@ -49,7 +50,7 @@ export function CreditNoteList() {
     <PageLayout
       title="Credit Notes"
       subtitle={`${creditNotes.length} credit note${creditNotes.length === 1 ? '' : 's'}${cancelledCount > 0 ? ` (${cancelledCount} cancelled)` : ''} \u00b7 ${fmt(totalCash)} BHD cash refunded \u00b7 ${fmt(totalCancel)} BHD receivable cancelled`}
-      showSearch onSearch={setSearch} searchPlaceholder="Search CN-, INV-, customer..."
+      showSearch onSearch={setSearch} searchValue={search} searchPlaceholder="Search CN-, INV-, customer..."
     >
       {filtered.length === 0 ? (
         <div style={{ padding: '64px 0', textAlign: 'center' }}>

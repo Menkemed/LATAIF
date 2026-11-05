@@ -29,6 +29,7 @@ import {
   changeMetalStatusOnPrimary, createMetalOnPrimary, metalCreateBody, metalStatusBody,
   setSpotPriceOnPrimary, spotPriceBody,
 } from '@/core/metals/metal-actions';
+import { useListState } from '@/hooks/useListNav';
 
 const STATUS_FILTERS: { value: MetalStatus | ''; label: string }[] = [
   { value: '', label: 'All' },
@@ -60,8 +61,8 @@ export function MetalList() {
   const { suppliers, loadSuppliers } = useSupplierStore();
   const w = useSharedWrites();
   const [showNew, setShowNew] = useState(false);
-  const [filterStatus, setFilterStatus] = useState<MetalStatus | ''>('');
-  const [searchQuery, setSearchQuery] = useState('');
+  const [filterStatus, setFilterStatus] = useListState<MetalStatus | ''>('filterStatus', '');
+  const [searchQuery, setSearchQuery] = useListState('searchQuery', '');
   const [form, setForm] = useState<Partial<PreciousMetal>>({ metalType: 'gold', karat: '24K' });
   const [sellTarget, setSellTarget] = useState<MetalRecord | null>(null);
   const [sellPrice, setSellPrice] = useState('');
@@ -222,7 +223,7 @@ export function MetalList() {
     <PageLayout
       title="Precious Metals"
       subtitle={`${inStock.length} items in stock`}
-      showSearch onSearch={setSearchQuery}
+      showSearch onSearch={setSearchQuery} searchValue={searchQuery}
       searchPlaceholder="Search by metal, karat, description, supplier..."
       actions={
         <div className="flex items-center gap-3">

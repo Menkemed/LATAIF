@@ -22,6 +22,7 @@ import { workshopSuggestions } from '@/core/repairs/repair-workshop-choice';
 import { UseCustomerAsSupplier } from '@/components/suppliers/UseCustomerAsSupplier';
 import type { Supplier } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
+import { useListState } from '@/hooks/useListNav';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -46,8 +47,8 @@ export function SupplierList() {
     const r = await saveSupplierUpdate(markieren, s, { ...s, cprImage: undefined, isWorkshop: true });
     if (r.kind !== 'ok') setVorschlagFehler(`Could not mark ${s.name} as workshop: ${fehlertext(r)}`);
   }
-  const [search, setSearch] = useState('');
-  const [showInactive, setShowInactive] = useState(false);
+  const [search, setSearch] = useListState('search', '');
+  const [showInactive, setShowInactive] = useListState('showInactive', false);
   const [showNew, setShowNew] = useState(false);
   const [form, setForm] = useState<Partial<Supplier>>({});
   // CUSTOMER-SUPPLIER-ROLE-LINK — „New Supplier": neu erfassen ODER die Lieferanten-Rolle eines Kunden.
@@ -93,7 +94,7 @@ export function SupplierList() {
     <PageLayout
       title="Suppliers"
       subtitle={`${activeCount} active${inactiveCount > 0 ? ` · ${inactiveCount} inactive` : ''} · ${fmt(totalOutstanding)} BHD outstanding · ${fmt(totalCredit)} BHD credit`}
-      showSearch onSearch={setSearch} searchPlaceholder="Search supplier by name or phone..."
+      showSearch onSearch={setSearch} searchValue={search} searchPlaceholder="Search supplier by name or phone..."
       actions={
         <>
           {inactiveCount > 0 && (

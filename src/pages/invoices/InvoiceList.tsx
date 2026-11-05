@@ -24,6 +24,7 @@ import { invoicePaymentBody, recordInvoicePaymentOnPrimary } from '@/core/invoic
 import { businessDateIssue, latestBusinessDate, todayIso } from '@/core/utils/business-date';
 import { WriteError } from '@/components/shared/WriteError';
 import { invoiceListExtrasFor } from '@/core/data/page-reads';
+import { useListState } from '@/hooks/useListNav';
 
 function fmtDate(iso?: string): string {
   if (!iso) return '\u2014';
@@ -69,7 +70,7 @@ export function InvoiceList() {
   const [searchParams, setSearchParams] = useSearchParams();
   // Plan §Filter — Dashboard-Klick → ?filter=PARTIAL etc. übernimmt initialen Filter.
   const [filterStatus, setFilterStatus] = useState(searchParams.get('filter') || '');
-  const [searchQuery, setSearchQuery] = useState('');
+  const [searchQuery, setSearchQuery] = useListState('searchQuery', '');
 
   // Bei Filter-Änderung URL syncen (für Browser-Back/Forward + bookmarkable)
   useEffect(() => {
@@ -301,7 +302,7 @@ export function InvoiceList() {
         : staffFilter
         ? `Filtered by staff: ${staffFilterName || staffFilter} \u00b7 ${filtered.length} invoice${filtered.length === 1 ? '' : 's'}`
         : `${invoices.length} invoices \u00b7 ${openInvoiceCount} open`}
-      showSearch onSearch={setSearchQuery} searchPlaceholder="Search by invoice #, client, product..."
+      showSearch onSearch={setSearchQuery} searchValue={searchQuery} searchPlaceholder="Search by invoice #, client, product..."
       actions={
         <div className="flex gap-2">
           {customerFilter && (

@@ -29,6 +29,7 @@ import {
 } from '@/core/agents/transfer-house';
 import { productDisplayName } from '@/core/products/display-name';
 import { computeAgentTransferSale } from '@/core/agent/economics';
+import { useListState } from '@/hooks/useListNav';
 
 
 // Display-Status (User-Spec: Transfer ↔ Invoice synchron). Wenn der Transfer
@@ -144,7 +145,7 @@ export function TransferTable({ transfers, showAgentColumn = true, emptyMessage 
   const { customers } = useCustomerStore();
   const { invoices } = useInvoiceStore();
 
-  const [filterStatus, setFilterStatus] = useState<'' | TransferDisplayStatus>('');
+  const [filterStatus, setFilterStatus] = useListState<'' | TransferDisplayStatus>('transferFilterStatus', '');
 
   // Sold
   const [soldModal, setSoldModal] = useState<string | null>(null);

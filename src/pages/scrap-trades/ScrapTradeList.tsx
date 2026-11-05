@@ -6,11 +6,13 @@ import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Coins, Plus, TrendingUp, TrendingDown } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
+import { SearchClearButton } from '@/components/ui/SearchClearButton';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Bhd } from '@/components/ui/Bhd';
 import { useScrapTradeStore } from '@/stores/scrapTradeStore';
 import type { ScrapTrade, ScrapTradeStatus } from '@/core/models/types';
+import { useListState } from '@/hooks/useListNav';
 
 function fmtDate(iso: string | undefined): string {
   if (!iso) return '—';
@@ -35,8 +37,8 @@ const GRID = 'minmax(0,0.9fr) minmax(0,1fr) minmax(0,1.3fr) minmax(0,1.3fr) minm
 export function ScrapTradeList() {
   const navigate = useNavigate();
   const { trades, loadTrades } = useScrapTradeStore();
-  const [search, setSearch] = useState('');
-  const [filterStatus, setFilterStatus] = useState<ScrapTradeStatus | ''>('');
+  const [search, setSearch] = useListState('search', '');
+  const [filterStatus, setFilterStatus] = useListState<ScrapTradeStatus | ''>('filterStatus', '');
 
   useEffect(() => { loadTrades(); }, [loadTrades]);
 
@@ -99,18 +101,22 @@ export function ScrapTradeList() {
         {/* Filter Bar */}
         <Card style={{ marginBottom: 16 }}>
           <div style={{ display: 'flex', gap: 12, alignItems: 'center', flexWrap: 'wrap' }}>
-            <input
-              type="text"
-              placeholder="Search by seller, buyer, trade #, karat..."
-              value={search}
-              onChange={e => setSearch(e.target.value)}
-              style={{
-                flex: 1, minWidth: 240,
-                background: '#F2F7FA', border: '1px solid #E5E9EE',
-                borderRadius: 8, padding: '10px 14px', fontSize: 13,
-                outline: 'none',
-              }}
-            />
+            <div className="relative" style={{ flex: 1, minWidth: 240 }}>
+              <input
+                type="text"
+                placeholder="Search by seller, buyer, trade #, karat..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                data-page-search
+                style={{
+                  width: '100%',
+                  background: '#F2F7FA', border: '1px solid #E5E9EE',
+                  borderRadius: 8, padding: '10px 38px 10px 14px', fontSize: 13,
+                  outline: 'none',
+                }}
+              />
+              {search && <SearchClearButton onClear={() => setSearch('')} />}
+            </div>
             <div style={{ display: 'flex', gap: 4 }}>
               {STATUS_FILTERS.map(opt => (
                 <button

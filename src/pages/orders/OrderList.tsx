@@ -19,6 +19,7 @@ import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-w
 import { WriteError } from '@/components/shared/WriteError';
 import { orderPaidTotalsFor } from '@/core/data/page-reads';
 import { orderDateOf } from '@/core/orders/order-edit';
+import { useListState } from '@/hooks/useListNav';
 
 function fmtDate(iso?: string): string {
   if (!iso) return '—';
@@ -77,9 +78,9 @@ export function OrderList() {
   const { customers, loadCustomers } = useCustomerStore();
 
   const [searchParams, setSearchParams] = useSearchParams();
-  const [filterStatus, setFilterStatus] = useState<OrderStatus | ''>('');
-  const [filterType, setFilterType] = useState<OrderType | ''>('');
-  const [searchQuery, setSearchQuery] = useState('');
+  const [filterStatus, setFilterStatus] = useListState<OrderStatus | ''>('filterStatus', '');
+  const [filterType, setFilterType] = useListState<OrderType | ''>('filterType', '');
+  const [searchQuery, setSearchQuery] = useListState('searchQuery', '');
 
   // Pay-Modal — analog InvoiceList
   const [payOrderId, setPayOrderId] = useState<string | null>(null);
@@ -173,7 +174,7 @@ export function OrderList() {
     <PageLayout
       title="Orders"
       subtitle={`${orders.length} order${orders.length === 1 ? '' : 's'} · ${activeCount} open`}
-      showSearch onSearch={setSearchQuery} searchPlaceholder="Search by order #, brand, model, customer..."
+      showSearch onSearch={setSearchQuery} searchValue={searchQuery} searchPlaceholder="Search by order #, brand, model, customer..."
       actions={
         <div className="flex items-center gap-3">
           <div className="flex gap-1" style={{ marginRight: 4 }}>

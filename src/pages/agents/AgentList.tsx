@@ -36,6 +36,7 @@ import { clampTransferSplitPct, isTransferableStock, transferCreateBody } from '
 import { createTransferOnPrimary } from '@/core/agents/transfer-house';
 import { saveAgentUpdate } from '@/core/masterdata/masterdata-save';
 import { productDisplayName } from '@/core/products/display-name';
+import { useListState } from '@/hooks/useListNav';
 
 
 interface NewTransferForm {
@@ -69,7 +70,7 @@ export function AgentList() {
   const [searchParams] = useSearchParams();
   const [showNewTransfer, setShowNewTransfer] = useState(false);
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
-  const [tab, setTab] = useState<'agents' | 'transfers'>('agents');
+  const [tab, setTab] = useListState<'agents' | 'transfers'>('tab', 'agents');
   const [transferForm, setTransferForm] = useState<NewTransferForm>({});
   const [editAgent, setEditAgent] = useState<Agent | null>(null);
   const [editAgentForm, setEditAgentForm] = useState<Partial<Agent>>({});

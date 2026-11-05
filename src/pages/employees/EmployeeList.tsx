@@ -17,6 +17,7 @@ import { Bhd } from '@/components/ui/Bhd';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { saveEmployeeCreate, saveEmployeeUpdate } from '@/core/masterdata/masterdata-save';
+import { useListState } from '@/hooks/useListNav';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -34,8 +35,8 @@ export function EmployeeList() {
   // CENTRAL-UI-PARITY R6C — anlegen und „On Leave/Reactivate": am Primary die Hausfunktion, auf PC2
   // `employees.create` / `employees.update` (der Status reist als Zielwert).
   const w = useSharedWrites();
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<EmploymentStatus | ''>('');
+  const [search, setSearch] = useListState('search', '');
+  const [statusFilter, setStatusFilter] = useListState<EmploymentStatus | ''>('statusFilter', '');
   const [showNew, setShowNew] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [form, setForm] = useState<Partial<Employee>>({
@@ -106,7 +107,7 @@ export function EmployeeList() {
     <PageLayout
       title="Employees"
       subtitle={`${employees.length} total · ${totals.active} active · ${totals.onLeave} on leave · ${fmt(totals.totalBase)} BHD monthly base`}
-      showSearch onSearch={setSearch} searchPlaceholder="Search name, role, phone, email..."
+      showSearch onSearch={setSearch} searchValue={search} searchPlaceholder="Search name, role, phone, email..."
       actions={
         <div className="flex gap-2 items-center">
           <div className="flex gap-1" style={{ marginRight: 4 }}>

@@ -55,6 +55,7 @@ import { StonesEditor } from '@/components/products/StonesEditor';
 import { IN_HOUSE_COST_PLACEHOLDER } from '@/core/repairs/repair-line-view';
 import { hasSelectableWorkshop, NO_WORKSHOP_HINT, workshopOptions } from '@/core/repairs/repair-workshop-choice';
 import { normalizeStoneAttributes, stonesApply } from '@/core/products/stones';
+import { useListState } from '@/hooks/useListNav';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -127,19 +128,19 @@ export function RepairList() {
   const [showNew, setShowNew] = useState(false);
   // Was beim Anlegen noch fehlt — in der Maske, nicht als stiller Abbruch (Feldbefund: „Create Repair tut nichts").
   const [createHinweis, setCreateHinweis] = useState('');
-  const [filterStatus, setFilterStatus] = useState<RepairStatus | ''>('');
-  const [filterCustomerId, setFilterCustomerId] = useState<string>('');
-  const [filterStaffId, setFilterStaffId] = useState<string>('');
-  const [sortDate, setSortDate] = useState<'desc' | 'asc'>('desc');
+  const [filterStatus, setFilterStatus] = useListState<RepairStatus | ''>('filterStatus', '');
+  const [filterCustomerId, setFilterCustomerId] = useListState<string>('filterCustomerId', '');
+  const [filterStaffId, setFilterStaffId] = useListState<string>('filterStaffId', '');
+  const [sortDate, setSortDate] = useListState<'desc' | 'asc'>('sortDate', 'desc');
   // REPAIR-REDESIGN — Arbeitsart, Quelle und Werkstatt; zusammen mit Suche und Status. Arbeitsart und Werkstatt
   // gehören dabei zur SELBEN Beteiligung (`matchRepairWork`).
-  const [filterWorkType, setFilterWorkType] = useState<RepairWorkType | ''>('');
-  const [filterSource, setFilterSource] = useState<RepairSourceFilter>('');
-  const [filterWorkshopId, setFilterWorkshopId] = useState('');
-  const [issueFallback, setIssueFallback] = useState(true);
+  const [filterWorkType, setFilterWorkType] = useListState<RepairWorkType | ''>('filterWorkType', '');
+  const [filterSource, setFilterSource] = useListState<RepairSourceFilter>('filterSource', '');
+  const [filterWorkshopId, setFilterWorkshopId] = useListState('filterWorkshopId', '');
+  const [issueFallback, setIssueFallback] = useListState('issueFallback', true);
   // REPAIR-INVOICE-INDICATOR — Rechnung erstellt / nicht erstellt, aus der echten Verknüpfung (`repairInvoiceView`).
-  const [filterInvoice, setFilterInvoice] = useState<RepairInvoiceFilter>('');
-  const [searchQuery, setSearchQuery] = useState('');
+  const [filterInvoice, setFilterInvoice] = useListState<RepairInvoiceFilter>('filterInvoice', '');
+  const [searchQuery, setSearchQuery] = useListState('searchQuery', '');
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
   const [bulkModal, setBulkModal] = useState(false);
@@ -530,7 +531,7 @@ export function RepairList() {
     <PageLayout
       title="Repairs"
       subtitle={`${activeCount} active · ${repairs.length} total`}
-      showSearch onSearch={setSearchQuery} searchPlaceholder="Search by repair #, customer, item, voucher..."
+      showSearch onSearch={setSearchQuery} searchValue={searchQuery} searchPlaceholder="Search by repair #, customer, item, voucher..."
       actions={
         <div className="flex items-center gap-3">
           <div className="flex gap-1">

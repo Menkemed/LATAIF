@@ -46,6 +46,7 @@ import { productDisplayName, brandModelHidden } from '@/core/products/display-na
 import { StonesEditor } from '@/components/products/StonesEditor';
 import { editableAttributes } from '@/core/products/field-contract';
 import { normalizeStoneAttributes, mergeAiAttributes } from '@/core/products/stones';
+import { useListState } from '@/hooks/useListNav';
 
 // SQLite gibt fehlende REAL-Spalten als JS-`null` zurück, nicht `undefined`.
 // fmt darf nicht crashen — sonst killt eine NULL-Spalte den ganzen Render.
@@ -71,11 +72,11 @@ export function ConsignmentList() {
   const [searchParams] = useSearchParams();
   const staffFilter = searchParams.get('staff') || '';
 
-  const [search, setSearch] = useState('');
-  const [statusFilter, setStatusFilter] = useState<StatusFilter>('');
+  const [search, setSearch] = useListState('search', '');
+  const [statusFilter, setStatusFilter] = useListState<StatusFilter>('statusFilter', '');
   // 2026-05-18: Approval-Style 2-Tab-Layout. 'consignors' zeigt Cards pro
   // Customer mit aggregierten KPIs; 'items' bleibt die flache Tabelle wie zuvor.
-  const [tab, setTab] = useState<'consignors' | 'items'>('consignors');
+  const [tab, setTab] = useListState<'consignors' | 'items'>('tab', 'consignors');
   const [showNew, setShowNew] = useState(false);
   const [showPrintAll, setShowPrintAll] = useState(false);
   const [showQuickCustomer, setShowQuickCustomer] = useState(false);
@@ -485,7 +486,7 @@ export function ConsignmentList() {
     <PageLayout
       title="Consignments"
       subtitle={`${activeCount} active \u00b7 ${fmt(totalAgreed)} BHD total agreed value`}
-      showSearch onSearch={setSearch} searchPlaceholder="Search by number, consignor, product..."
+      showSearch onSearch={setSearch} searchValue={search} searchPlaceholder="Search by number, consignor, product..."
       actions={
         <div className="flex items-center gap-3">
           {tab === 'items' && <StaffFilterPill />}

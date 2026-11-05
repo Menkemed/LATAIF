@@ -23,6 +23,7 @@ import type { Task, TaskType, TaskPriority, TaskStatus, LinkedEntityType } from 
 import { useSharedWrites } from '@/core/data/shared-write';
 import { WriteError } from '@/components/shared/WriteError';
 import { taskCompleteBody, taskCreateBody, taskUpdateBody } from '@/core/office/task-house';
+import { useListState } from '@/hooks/useListNav';
 
 // ── Constants ──
 
@@ -353,10 +354,10 @@ export function TaskList() {
   // R6F — EINE Weiche fuer die drei Schreibhandlungen der Seite (ein Waechter je Befehl).
   const w = useSharedWrites();
 
-  const [filterStatus, setFilterStatus] = useState<TaskStatus | ''>('');
-  const [filterPriority, setFilterPriority] = useState<TaskPriority | ''>('');
-  const [filterType, setFilterType] = useState<TaskType | ''>('');
-  const [searchQuery, setSearchQuery] = useState('');
+  const [filterStatus, setFilterStatus] = useListState<TaskStatus | ''>('filterStatus', '');
+  const [filterPriority, setFilterPriority] = useListState<TaskPriority | ''>('filterPriority', '');
+  const [filterType, setFilterType] = useListState<TaskType | ''>('filterType', '');
+  const [searchQuery, setSearchQuery] = useListState('searchQuery', '');
 
   const [modalOpen, setModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<TaskRow | null>(null);
@@ -420,7 +421,7 @@ export function TaskList() {
       title="Tasks"
       subtitle={`${counts.total} total \u00b7 ${counts.open} open \u00b7 ${counts.overdue} overdue`}
       showSearch
-      onSearch={setSearchQuery}
+      onSearch={setSearchQuery} searchValue={searchQuery}
       searchPlaceholder="Search tasks..."
       actions={
         <Button variant="primary" icon={<Plus size={16} />} onClick={openNew} data-task-new>

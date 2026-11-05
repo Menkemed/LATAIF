@@ -5,6 +5,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
+import { useGoBack } from '@/hooks/useGoBack';
 import { ArrowLeft, Trash2, Factory, ArrowDownCircle, ArrowUpCircle, CheckCircle } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
@@ -31,6 +32,8 @@ function fmtDate(iso: string | undefined): string {
 export function ProductionDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  // LIST NAVIGATION UX (v0.8.98) — Back = ein Schritt zurück (Liste mit Position), nicht neu laden.
+  const goBack = useGoBack('/production');
   const { records, loadRecords, deleteRecord } = useProductionStore();
   const { products, categories, loadProducts, loadCategories } = useProductStore();
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -62,7 +65,7 @@ export function ProductionDetail() {
     return (
       <PageLayout
         title="Record not found"
-        actions={<Button icon={<ArrowLeft size={14} />} onClick={() => navigate('/production')}>Back</Button>}
+        actions={<Button icon={<ArrowLeft size={14} />} onClick={goBack}>Back</Button>}
       >
         <div style={{ maxWidth: 600, margin: '40px auto', textAlign: 'center', color: '#6B7280' }}>
           The production record doesn't exist or was deleted.
@@ -103,7 +106,7 @@ export function ProductionDetail() {
       subtitle={`${fmtDate(record.productionDate)} · ${record.inputs.length} input${record.inputs.length === 1 ? '' : 's'} → ${record.outputs.length} output${record.outputs.length === 1 ? '' : 's'} · ${record.status}`}
       actions={
         <div style={{ display: 'flex', gap: 8 }}>
-          <Button variant="ghost" icon={<ArrowLeft size={14} />} onClick={() => navigate('/production')}>Back</Button>
+          <Button variant="ghost" icon={<ArrowLeft size={14} />} onClick={goBack}>Back</Button>
           {record.status === 'CONFIRMED' && (
             <Button variant="primary" icon={<CheckCircle size={14} />} onClick={openComplete} data-production-complete>
               Complete Production

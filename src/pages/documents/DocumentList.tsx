@@ -24,6 +24,7 @@ import {
 import { clientConfig } from '@/core/bridge/client-mode';
 import { readsFromPrimary } from '@/core/data/primary-source';
 import { loadVerifiedMedia, revokeVerifiedMedia } from '@/core/media/verified-view';
+import { useListState } from '@/hooks/useListNav';
 
 const DOC_CLASSES: DocumentClass[] = ['invoice', 'receipt', 'certificate', 'warranty', 'photo', 'note', 'other'];
 const ENTITY_TYPES: LinkedEntityType[] = ['customer', 'product', 'offer', 'invoice', 'repair', 'consignment', 'agent_transfer', 'order'];
@@ -65,8 +66,8 @@ export function DocumentList() {
   const { documents, loadDocuments, deleteDocument, getContent } = useDocumentStore();
   // R6F — EINE Weiche fuer beide Schreibhandlungen der Seite (ein Waechter je Befehl).
   const w = useSharedWrites();
-  const [filterClass, setFilterClass] = useState<DocumentClass | ''>('');
-  const [viewMode, setViewMode] = useState<'grid' | 'list'>('grid');
+  const [filterClass, setFilterClass] = useListState<DocumentClass | ''>('filterClass', '');
+  const [viewMode, setViewMode] = useListState<'grid' | 'list'>('viewMode', 'grid');
   const [showUpload, setShowUpload] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const [ocrError, setOcrError] = useState('');

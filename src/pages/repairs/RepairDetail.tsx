@@ -640,7 +640,9 @@ export function RepairDetail() {
     if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
     // POST-PARITY PP-13 — bezahlte Werkstattkosten / verkaufter Artikel an eigener Ware sperren das Löschen.
     try { deleteRepair(id); } catch (e) { alert((e as Error).message); setConfirmDelete(false); return; }
-    navigate('/repairs');
+    // LIST NAVIGATION UX (v0.8.98) — zurück zur Liste, wie sie verlassen wurde (Filter, Suche, Position; die
+    // Position wird auf die kürzere Liste begrenzt). Direkt geöffnet: die Reparaturliste.
+    goBack();
   }
 
   function handleDownloadVoucher() {

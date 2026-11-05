@@ -15,6 +15,7 @@ import { ledgerBalancesFor, LEERE_SALDEN } from '@/core/data/domain-reads';
 import { useSharedWrites, fehlertext } from '@/core/data/shared-write';
 import { saveBankTransfer } from '@/core/finance/money-save';
 import { WriteError } from '@/components/shared/WriteError';
+import { useListState } from '@/hooks/useListNav';
 
 
 const TYPE_LABELS: Record<BankTransactionType, string> = {
@@ -53,8 +54,8 @@ export function BankingPage() {
   const [toAcc, setToAcc] = useState<BankAccount>('bank');
   const [date, setDate] = useState(new Date().toISOString().split('T')[0]);
   const [notes, setNotes] = useState('');
-  const [accountFilter, setAccountFilter] = useState<BankAccount | 'all'>('all');
-  const [typeFilter, setTypeFilter] = useState<BankTransactionType | 'all'>('all');
+  const [accountFilter, setAccountFilter] = useListState<BankAccount | 'all'>('accountFilter', 'all');
+  const [typeFilter, setTypeFilter] = useListState<BankTransactionType | 'all'>('typeFilter', 'all');
   // v0.3.3 — gehoverte Transaktions-Zeile fuer das Klick-Highlight.
   const [hoverId, setHoverId] = useState<string | null>(null);
 

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { AlertTriangle, Calendar, Clock, Download, ExternalLink, FileText, X } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
@@ -17,6 +17,7 @@ import { useDebtStore } from '@/stores/debtStore';
 import { usePartnerStore } from '@/stores/partnerStore';
 import { useSharedRead } from '@/core/data/shared-read';
 import { receivableRowsFor } from '@/core/data/domain-reads';
+import { useListState } from '@/hooks/useListNav';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -82,13 +83,13 @@ export function ReceivablesPage() {
   const initialSourceParam = searchParams.get('source') || searchParams.get('type');
   const initialOverdue = searchParams.get('overdue') === '1';
 
-  const [search, setSearch] = useState('');
-  const [activeSources, setActiveSources] = useState<ReceivableSource[]>(
+  const [search, setSearch] = useListState('search', '');
+  const [activeSources, setActiveSources] = useListState<ReceivableSource[]>('activeSources',
     initialSourceParam && ALL_SOURCES.includes(initialSourceParam.toUpperCase() as ReceivableSource)
       ? [initialSourceParam.toUpperCase() as ReceivableSource]
       : []
   );
-  const [overdueOnly, setOverdueOnly] = useState(initialOverdue);
+  const [overdueOnly, setOverdueOnly] = useListState('overdueOnly', initialOverdue);
 
   useEffect(() => {
     loadInvoices(); loadConsignments(); loadTransfers(); loadRepairs(); loadDebts(); loadPartners();
@@ -140,7 +141,7 @@ export function ReceivablesPage() {
       title="Receivables"
       subtitle={`${allRows.length} open · ${overdueN} overdue · ${fmt(total)} BHD total`
         + (summen.partners > 0 ? ` · customers ${fmt(summen.customers)} · partners ${fmt(summen.partners)}` : '')}
-      showSearch onSearch={setSearch} searchPlaceholder="Search reference, client or partner..."
+      showSearch onSearch={setSearch} searchValue={search} searchPlaceholder="Search reference, client or partner..."
       actions={
         <button
           onClick={() => downloadCsv(filtered)}

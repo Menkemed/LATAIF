@@ -26,6 +26,7 @@ import { saveOfferCreate, saveOfferStatus } from '@/core/offers/offer-actions';
 import type { OfferTargetStatus } from '@/core/offers/offer-rules';
 import type { Offer } from '@/core/models/types';
 import { productDisplayName } from '@/core/products/display-name';
+import { useListState } from '@/hooks/useListNav';
 
 function fmt(v: number): string {
   return v.toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
@@ -44,8 +45,8 @@ export function OfferList() {
   const { orders, loadOrders, getAllProductReservations } = useOrderStore();
   const [searchParams, setSearchParams] = useSearchParams();
   const [showNew, setShowNew] = useState(false);
-  const [filterStatus, setFilterStatus] = useState('');
-  const [searchQuery, setSearchQuery] = useState('');
+  const [filterStatus, setFilterStatus] = useListState('filterStatus', '');
+  const [searchQuery, setSearchQuery] = useListState('searchQuery', '');
   const [selectedCustomerId, setSelectedCustomerId] = useState('');
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
   const [linePrices, setLinePrices] = useState<Record<string, number>>({});
@@ -173,7 +174,7 @@ export function OfferList() {
     <PageLayout
       title="Offers"
       subtitle={`${offers.length} offers`}
-      showSearch onSearch={setSearchQuery} searchPlaceholder="Search by offer #, client, product..."
+      showSearch onSearch={setSearchQuery} searchValue={searchQuery} searchPlaceholder="Search by offer #, client, product..."
       actions={
         <div className="flex gap-2">
           <div className="flex gap-1" style={{ marginRight: 8 }}>
