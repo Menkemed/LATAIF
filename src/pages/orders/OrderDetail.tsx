@@ -4,6 +4,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Trash2, Save, XCircle, ShoppingBag, MessageCircle, Download, Plus } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
+import { useReturnToList } from '@/hooks/useListNav';
 import { Button } from '@/components/ui/Button';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
@@ -98,6 +99,9 @@ export function OrderDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/orders');
+  // LIST NAVIGATION UX (v0.8.98) — nach dem Löschen: kam man direkt aus der Liste, zurück dorthin (Suche, Filter,
+  // Position); sonst frisch zur Liste wie bisher.
+  const returnToList = useReturnToList('/orders');
   const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines,
     getBillableLines, markOrderLinesInvoiced, assertOrderLinesBillable, updateOrderLineStatus } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
@@ -517,7 +521,7 @@ export function OrderDetail() {
     const blocked = orderDeleteBlocker(id);
     if (blocked) { setConfirmDelete(false); alert(blocked.message); return; }
     deleteOrder(id);
-    navigate('/orders');
+    returnToList();
   }
 
   // CENTRAL-UI-PARITY R6F — ein Statusknopf einer Position (auch „↺ Undo"): EIN Uebergang; die

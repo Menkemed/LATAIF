@@ -11,9 +11,13 @@ keine Datenbank, kein Sync, keine Geschäftslogik.
 - **Scroll-Position** wird erst gesetzt, wenn der Inhalt sie zulässt; ist die Liste kürzer geworden, auf die letzte
   gültige Position begrenzt. Bis dahin bleibt der Inhalt unsichtbar — kein sichtbares Springen.
 - **Suchfelder** zeigen immer den aktiven Suchtext und haben ein „×“ zum Löschen.
-- **Nach dem Löschen** eines Eintrags (Reparaturen, Rechnungen, Collection, Clients): kam man direkt aus der Liste,
-  geht es dorthin zurück (mit Suche, Filtern, Position); sonst frisch zur Liste wie bisher. Davor liegende
+- **Nach dem Löschen** eines Eintrags (Reparaturen, Rechnungen, Collection, Clients, Aufträge): kam man direkt aus
+  der Liste, geht es dorthin zurück (mit Suche, Filtern, Position); sonst frisch zur Liste wie bisher. Davor liegende
   Bearbeiten-Seiten des gelöschten Eintrags werden nie angesprungen. Sperren und Löschabläufe sind unverändert.
+  - Einkäufe haben kein Löschen: sie werden storniert und bleiben als Beleg auf ihrer Detailseite; „Back" führt
+    danach wie überall zur Liste wie verlassen.
+  - Noch mit hartem Sprung zur frischen Liste nach dem Löschen (offen, gleiche Lösung anwendbar): Consignments,
+    Credit Notes, Offers, Production, Scrap Trades, Suppliers.
 - Der Zustand liegt nur im Arbeitsspeicher; nach einem Neustart der App ist er leer.
 
 ## Technik

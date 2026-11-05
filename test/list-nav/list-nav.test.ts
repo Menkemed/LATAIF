@@ -108,6 +108,8 @@ const S = JSON.stringify;
     ['src/pages/invoices/InvoiceDetail.tsx', '/invoices', /if \(blockDeleteOnClient\(\)\) \{ setConfirmDelete\(false\); return; \}\n {4}try \{\n {6}deleteInvoice\(id\);[\s\S]{0,260}return;\n {4}\}\n {4}returnToList\(\);/],
     ['src/pages/watches/ProductDetail.tsx', '/collection', /if \(blockDeleteOnClient\(\)\) return;\n {4}try \{\n {6}deleteProduct\(id\);\n {6}returnToList\(\);/],
     ['src/pages/customers/CustomerDetail.tsx', '/clients', /if \(blockDeleteOnClient\(\)\) \{ setConfirmDelete\(false\); return; \}\n {4}deleteCustomer\(id\);\n {4}returnToList\(\);/],
+    // Aufträge: Sperren davor unverändert (nur Primary; bezahlt → Storno-Assistent statt Löschen; Gold/Kosten → Sperre).
+    ['src/pages/orders/OrderDetail.tsx', '/orders', /if \(blockDeleteOnClient\(\)\) \{ setConfirmDelete\(false\); return; \}[\s\S]{0,260}if \(totalPaid > 0\.005\) \{[\s\S]{0,220}setCancelFromDelete\(true\);\n {6}return;\n {4}\}[\s\S]{0,200}const blocked = orderDeleteBlocker\(id\);\n {4}if \(blocked\) \{ setConfirmDelete\(false\); alert\(blocked\.message\); return; \}\n {4}deleteOrder\(id\);\n {4}returnToList\(\);/],
   ];
   const delBad = del.filter(([f, list, re]) => { const t = src(f); return !re.test(t) || !t.includes(`useReturnToList('${list}')`) || new RegExp(`navigate\\('${list.replace('/', '\\/')}'\\);\\n  \\}`).test(t); }).map((x) => x[0]);
   ok(delBad.length === 0, `V8 nach dem Löschen sicher zurück zur Liste; Sperren und Löschaufruf unverändert (${S(delBad)})`);
