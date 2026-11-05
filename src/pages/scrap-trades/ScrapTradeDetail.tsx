@@ -4,8 +4,9 @@
 // (`scrap_trades.update` / `scrap_trades.cancel`) gegen die Fassung, die diese Seite geladen hat.
 
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate, useParams } from 'react-router-dom';
+import { useParams } from 'react-router-dom';
 import { useGoBack } from '@/hooks/useGoBack';
+import { useReturnToList } from '@/hooks/useListNav';
 import { ArrowLeft, Edit2, Ban, Trash2 } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
@@ -23,9 +24,11 @@ import {
 
 export function ScrapTradeDetail() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   // LIST NAVIGATION UX (v0.8.98) — Back = ein Schritt zurück (Liste mit Suche, Filter und Position), nicht neu laden.
   const goBack = useGoBack('/scrap-trades');
+  // LIST NAVIGATION UX (v0.8.98) — nach dem Löschen: kam man direkt aus der Liste, zurück dorthin (Suche, Filter,
+  // Position); sonst frisch zur Liste wie bisher.
+  const returnToList = useReturnToList('/scrap-trades');
   const { trades, loadTrades, deleteTrade } = useScrapTradeStore();
   const w = useSharedWrites();
   const [editing, setEditing] = useState(false);
@@ -158,7 +161,7 @@ export function ScrapTradeDetail() {
               if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
               deleteTrade(trade.id);
               setConfirmDelete(false);
-              navigate('/scrap-trades');
+              returnToList();
             }}>
               Delete Permanently
             </Button>

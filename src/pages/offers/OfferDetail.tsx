@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Save, Trash2, Plus, X, FileText, Download, Sparkles } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
+import { useReturnToList } from '@/hooks/useListNav';
 import { Button } from '@/components/ui/Button';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
@@ -41,6 +42,9 @@ export function OfferDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/offers');
+  // LIST NAVIGATION UX (v0.8.98) — nach dem Löschen: kam man direkt aus der Liste, zurück dorthin (Suche, Filter,
+  // Position); sonst frisch zur Liste wie bisher.
+  const returnToList = useReturnToList('/offers');
   const { offers, loadOffers, deleteOffer } = useOfferStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { products, loadProducts, categories, loadCategories } = useProductStore();
@@ -119,7 +123,7 @@ export function OfferDetail() {
     if (!id) return;
     if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
     deleteOffer(id);
-    navigate('/offers');
+    returnToList();
   }
 
   async function handleStatus(status: OfferTargetStatus) {

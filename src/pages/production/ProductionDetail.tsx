@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useParams } from 'react-router-dom';
 import { useGoBack } from '@/hooks/useGoBack';
+import { useReturnToList } from '@/hooks/useListNav';
 import { ArrowLeft, Trash2, Factory, ArrowDownCircle, ArrowUpCircle, CheckCircle } from 'lucide-react';
 import { PageLayout } from '@/components/layout/PageLayout';
 import { Button } from '@/components/ui/Button';
@@ -34,6 +35,9 @@ export function ProductionDetail() {
   const navigate = useNavigate();
   // LIST NAVIGATION UX (v0.8.98) — Back = ein Schritt zurück (Liste mit Position), nicht neu laden.
   const goBack = useGoBack('/production');
+  // LIST NAVIGATION UX (v0.8.98) — nach dem Löschen: kam man direkt aus der Liste, zurück dorthin (Suche, Filter,
+  // Position); sonst frisch zur Liste wie bisher.
+  const returnToList = useReturnToList('/production');
   const { records, loadRecords, deleteRecord } = useProductionStore();
   const { products, categories, loadProducts, loadCategories } = useProductStore();
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -265,7 +269,7 @@ export function ProductionDetail() {
             if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
             // Atomar am Primary: scheitert ein Schritt, bleibt alles, wie es war — und die Meldung kommt an.
             try { if (record) await deleteRecord(record.id); } catch (e) { setConfirmDelete(false); alert(e instanceof Error ? e.message : String(e)); return; }
-            navigate('/production');
+            returnToList();
           }}>Delete</Button>
         </div>
       </Modal>

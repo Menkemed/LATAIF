@@ -1,9 +1,10 @@
 // Credit Note Detail — eigenständige Steuerurkunde mit PDF-Export.
 // Industry Standard: NBR-Bahrain VAT-konform (alle Pflichtangaben + Verweis auf Original-Invoice).
 import { useEffect, useMemo } from 'react';
-import { useParams, useNavigate, Link } from 'react-router-dom';
+import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Download, Trash2, ExternalLink } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
+import { useReturnToList } from '@/hooks/useListNav';
 import { Button } from '@/components/ui/Button';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
@@ -28,8 +29,10 @@ function fmtDate(iso?: string): string {
 
 export function CreditNoteDetail() {
   const { id } = useParams<{ id: string }>();
-  const navigate = useNavigate();
   const goBack = useGoBack('/credit-notes');
+  // LIST NAVIGATION UX (v0.8.98) — nach dem Löschen: kam man direkt aus der Liste, zurück dorthin (Suche, Filter,
+  // Position); sonst frisch zur Liste wie bisher.
+  const returnToList = useReturnToList('/credit-notes');
   const { creditNotes, loadCreditNotes, deleteCreditNote } = useCreditNoteStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { invoices, loadInvoices } = useInvoiceStore();
@@ -97,7 +100,7 @@ export function CreditNoteDetail() {
     if (blockDeleteOnClient()) return;
     if (!(await window.confirm(`Delete credit note ${cn.creditNoteNumber}? This is destructive — only do this if it was created by mistake.`))) return;
     deleteCreditNote(cn.id);
-    navigate('/credit-notes');
+    returnToList();
   }
 
   return (

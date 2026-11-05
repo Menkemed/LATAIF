@@ -5,6 +5,7 @@ import { ArrowLeft, Building2, Edit3, Save, Trash2, User } from 'lucide-react';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useGoBack } from '@/hooks/useGoBack';
+import { useReturnToList } from '@/hooks/useListNav';
 import { Button } from '@/components/ui/Button';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
@@ -61,6 +62,9 @@ export function SupplierDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/suppliers');
+  // LIST NAVIGATION UX (v0.8.98) — nach dem Löschen: kam man direkt aus der Liste, zurück dorthin (Suche, Filter,
+  // Position); sonst frisch zur Liste wie bisher.
+  const returnToList = useReturnToList('/suppliers');
   const { suppliers, loadSuppliers, deleteSupplier } = useSupplierStore();
   // CENTRAL-UI-PARITY R6C — „Save" und „Deactivate/Reactivate" sind EINE Buchung (`suppliers.update`):
   // am Primary die Hausfunktion, auf PC2 die Fernbuchung. Nur das Geänderte reist; der Aktiv-
@@ -257,7 +261,7 @@ export function SupplierDetail() {
     try {
       deleteSupplier(id);
       setConfirmDelete(false);
-      navigate('/suppliers');
+      returnToList();
     } catch (e) {
       // Supplier ist verknuepft (Guard) → Meldung zeigen, NICHT navigieren,
       // Daten bleiben unveraendert. Stattdessen deaktivieren empfohlen.

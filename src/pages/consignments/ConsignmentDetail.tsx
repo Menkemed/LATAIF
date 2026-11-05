@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Edit3, Save, Trash2, AlertTriangle, FileText, Receipt, ShoppingBag, Package } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
+import { useReturnToList } from '@/hooks/useListNav';
 import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { StatusDot } from '@/components/ui/StatusDot';
@@ -107,6 +108,9 @@ export function ConsignmentDetail() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   const goBack = useGoBack('/consignments');
+  // LIST NAVIGATION UX (v0.8.98) — nach dem Löschen: kam man direkt aus der Liste, zurück dorthin (Suche, Filter,
+  // Position); sonst frisch zur Liste wie bisher.
+  const returnToList = useReturnToList('/consignments');
   const {
     consignments, loadConsignments, updateConsignment, updateConsignmentPayoutModel,
     markReturned, deleteConsignment,
@@ -417,7 +421,7 @@ export function ConsignmentDetail() {
     if (!id) return;
     if (blockDeleteOnClient()) { setConfirmDelete(false); return; }
     deleteConsignment(id);
-    navigate('/consignments');
+    returnToList();
   }
 
   const consignorName = consignor

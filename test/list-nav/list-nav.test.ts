@@ -110,7 +110,20 @@ const S = JSON.stringify;
     ['src/pages/customers/CustomerDetail.tsx', '/clients', /if \(blockDeleteOnClient\(\)\) \{ setConfirmDelete\(false\); return; \}\n {4}deleteCustomer\(id\);\n {4}returnToList\(\);/],
     // Aufträge: Sperren davor unverändert (nur Primary; bezahlt → Storno-Assistent statt Löschen; Gold/Kosten → Sperre).
     ['src/pages/orders/OrderDetail.tsx', '/orders', /if \(blockDeleteOnClient\(\)\) \{ setConfirmDelete\(false\); return; \}[\s\S]{0,260}if \(totalPaid > 0\.005\) \{[\s\S]{0,220}setCancelFromDelete\(true\);\n {6}return;\n {4}\}[\s\S]{0,200}const blocked = orderDeleteBlocker\(id\);\n {4}if \(blocked\) \{ setConfirmDelete\(false\); alert\(blocked\.message\); return; \}\n {4}deleteOrder\(id\);\n {4}returnToList\(\);/],
+    ['src/pages/consignments/ConsignmentDetail.tsx', '/consignments', /if \(blockDeleteOnClient\(\)\) \{ setConfirmDelete\(false\); return; \}\n {4}deleteConsignment\(id\);\n {4}returnToList\(\);/],
+    ['src/pages/credit-notes/CreditNoteDetail.tsx', '/credit-notes', /if \(blockDeleteOnClient\(\)\) return;\n {4}if \(!\(await window\.confirm\([^\n]*\)\)\) return;\n {4}deleteCreditNote\(cn\.id\);\n {4}returnToList\(\);/],
+    ['src/pages/offers/OfferDetail.tsx', '/offers', /if \(blockDeleteOnClient\(\)\) \{ setConfirmDelete\(false\); return; \}\n {4}deleteOffer\(id\);\n {4}returnToList\(\);/],
+    ['src/pages/production/ProductionDetail.tsx', '/production', /if \(blockDeleteOnClient\(\)\) \{ setConfirmDelete\(false\); return; \}[\s\S]{0,140}try \{ if \(record\) await deleteRecord\(record\.id\); \} catch \(e\) \{ setConfirmDelete\(false\); alert\([^\n]*\); return; \}\n {12}returnToList\(\);/],
+    ['src/pages/scrap-trades/ScrapTradeDetail.tsx', '/scrap-trades', /if \(blockDeleteOnClient\(\)\) \{ setConfirmDelete\(false\); return; \}\n {14}deleteTrade\(trade\.id\);\n {14}setConfirmDelete\(false\);\n {14}returnToList\(\);/],
+    ['src/pages/suppliers/SupplierDetail.tsx', '/suppliers', /if \(blockDeleteOnClient\(\)\) \{ setConfirmDelete\(false\); return; \}\n {4}try \{\n {6}deleteSupplier\(id\);\n {6}setConfirmDelete\(false\);\n {6}returnToList\(\);\n {4}\} catch \(e\) \{[\s\S]{0,240}alert\(/],
   ];
+  // V12 — keine Detailseite springt nach einem Löschaufruf noch hart zur Liste.
+  const details = files.filter((f) => /Detail\.tsx$/.test(f));
+  const hart = details.flatMap((f) => {
+    const t = src(f);
+    return [...t.matchAll(/\b(?:await )?delete[A-Z]\w*\([^)]*\);/g)].filter((mm) => /navigate\('\/[a-z-]*'\)/.test(t.slice(mm.index!, mm.index! + 220).split(/\n {0,4}\}\n|\}\}>/)[0])).map(() => f);
+  });
+  ok(hart.length === 0, `V12 keine Detailseite springt nach dem Löschen hart zur Liste (${S([...new Set(hart)])})`);
   const delBad = del.filter(([f, list, re]) => { const t = src(f); return !re.test(t) || !t.includes(`useReturnToList('${list}')`) || new RegExp(`navigate\\('${list.replace('/', '\\/')}'\\);\\n  \\}`).test(t); }).map((x) => x[0]);
   ok(delBad.length === 0, `V8 nach dem Löschen sicher zurück zur Liste; Sperren und Löschaufruf unverändert (${S(delBad)})`);
   ok(/useNavigationTrail\(\);/.test(src('src/components/layout/Sidebar.tsx')), 'V8 der Verlauf wird in der immer sichtbaren Seitenleiste mitgeschrieben');
