@@ -12,7 +12,9 @@ Skript: `scripts/data-fix-v0897.mts`. Es läuft nur bei geschlossener App und nu
 | Artikel | gezählt | ERP | Altlos | Einstand |
 |---|---|---|---|---|
 | VAN-BGJ-005 | 7 | 4 | +3 | 190 BHD (Owner; seit 20.10. als Einkaufspreis gespeichert; Wingold Jewe-13148 „sicher“) |
-| VAN-BGJ-006 | 2 | 1 | +1 | **nicht belegt**. In allen Fassungen steht 0. Einziger Kandidat: Wingold Jewe-13127 „butterfly Neckl · mop“, 140 BHD, nur „wahrscheinlich“. Ohne `--cost006=<BHD>` bleibt 006 unberührt. |
+| VAN-BGJ-006 | 2 | 1 | +1 | **140 BHD**, vom Owner am 05.11.2026 endgültig bestätigt (Wingold Jewe-13127 „butterfly Neckl · mop“). In den ERP-Daten stand in allen Fassungen 0. |
+
+Beide Einstände stehen fest im Skript. Es gibt keinen Schalter dafür; ein unbekannter Schalter wird abgewiesen.
 
 Auf der Kopie vom 04.11. hat sonst kein Artikel überschriebenen Altbestand.
 
@@ -39,7 +41,8 @@ v0.8.97 zeigt dieses Gewicht auf Karte, Merkmalliste, Artikelansicht und Etikett
 ## Auf der Kopie geprüft (04.11.2026, Kopie sha 760bfad4…)
 
 - **Plan:** Die Datei bleibt unverändert.
-- **Anwenden:** 2 Altbestands-Korrekturen und 77 Gewichtsnachträge. 006 lief dabei nur zum Test mit 140 BHD. Geschützte Tabellen sind unverändert, Protokoll und Änderungsliste haben je +81 Zeilen.
+- **Anwenden:** 2 Altbestands-Korrekturen und 77 Gewichtsnachträge. Geschützte Tabellen sind unverändert, Protokoll und Änderungsliste haben je +81 Zeilen.
+- **Endgültige Fassung (05.11.2026, frische Kopie):** 005 bekommt 3 × 190, 006 bekommt 1 × 140. Danach stehen die Mengen bei 7 bzw. 2, das Hauptbuch bei 301 Zeilen wie vorher. Die Wiederholung ist bytegleich, und `--cost006` wird abgewiesen.
 - **Wiederholung:** ändert nichts, die Datei ist bytegleich.
 - **Gegenprobe:** Mit abweichender Menge bricht das Skript ab und ändert nichts.
 - **FIFO mit dem echten Abfrageweg** (`getActiveLots`):
@@ -53,13 +56,13 @@ v0.8.97 zeigt dieses Gewicht auf Karte, Merkmalliste, Artikelansicht und Etikett
 
 ## Reihenfolge für die Echtdaten
 
-1. **Owner-Freigabe:** für den Plan und den Einstand von VAN-BGJ-006 (Wert nennen oder 006 auslassen).
-2. **v0.8.97 veröffentlichen und installieren:** zuerst den Primary, gleich danach PC2. Unter v0.8.96 bleibt der F1-Fehler für andere Artikel aktiv. Für den korrigierten Zustand selbst ist die Version egal, denn der Leseweg von Losen und Mengen ist in beiden gleich.
+1. **Werte:** Der Owner hat sie bestätigt (05.11.2026). Das Ausführen selbst braucht eine eigene Freigabe.
+2. **v0.8.97 installieren:** v0.8.97 ist seit 05.11.2026 veröffentlicht. Zuerst den Primary installieren, gleich danach PC2. Unter v0.8.96 bleibt der F1-Fehler für andere Artikel aktiv. Für den korrigierten Zustand selbst ist die Version egal, denn der Leseweg von Losen und Mengen ist in beiden gleich.
 3. **App schließen:** auf PC2 und auf dem Primary.
 4. **Sicherung:** vollständige Sicherung von `E:\LATAIF\Data`, danach prüfen.
 5. **Plan prüfen:**
    ```
-   node scripts/data-fix-v0897.mts E:\LATAIF\Data\lataif.db --cost006=<BHD>
+   node scripts/data-fix-v0897.mts E:\LATAIF\Data\lataif.db
    ```
 6. **Anwenden:** derselbe Aufruf mit `--apply`.
 7. **Nachkontrolle:** dasselbe noch einmal; erwartet wird „bereits korrigiert“.

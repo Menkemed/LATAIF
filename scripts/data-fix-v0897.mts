@@ -7,14 +7,14 @@
 //      `acquired_at` = Eingangstag des Artikels (FIFO: die alten Stücke gehen zuerst). Menge = Σ Lose. Das Einkaufslos,
 //      sein Einstand, der Einkauf und das Hauptbuch bleiben unverändert.
 //      Gezählt (Owner, endgültig): VAN-BGJ-005 7 Stück (ERP 4), VAN-BGJ-006 2 Stück (ERP 1).
-//      Einstand alt: VAN-BGJ-005 190 BHD (Owner; = products.purchase_price seit 20.10.). VAN-BGJ-006: NICHT belegt —
-//      nur mit ausdrücklichem `--cost006=<BHD>` (sonst bleibt 006 unberührt).
+//      Einstand alt (Owner, endgültig bestätigt 05.11.2026): VAN-BGJ-005 3 × 190 BHD (= products.purchase_price seit 20.10.,
+//      Wingold Jewe-13148), VAN-BGJ-006 1 × 140 BHD (Wingold Jewe-13127). Fest im Skript — es gibt keinen Schalter dafür.
 //   B  Gold-Diamond: das aus den Diamant-Zeilen abgeleitete Diamond Weight wird gespeichert, wo es fehlt (kanonische
 //      Steinlogik `normalizeStoneAttributes`). Nur `attributes.diamond_weight` kommt dazu; Steinzeilen, Preise, VAT,
 //      Mengen, Buchungen, `updated_at` und alle anderen Merkmale bleiben, wie sie sind. Diamantzeilen ohne Karat →
 //      Prüfbedarf, nichts wird erfunden.
 //
-// Aufruf:   node scripts/data-fix-v0897.mts <lataif.db> [--apply] [--cost006=<BHD>] [--only=A|B]
+// Aufruf:   node scripts/data-fix-v0897.mts <lataif.db> [--apply] [--only=A|B]
 //   ohne --apply: nur Plan und Prüfungen, die Datei wird NICHT geöffnet zum Schreiben.
 //   Alles in EINER Transaktion; jede Abweichung vom erwarteten Stand → ROLLBACK, nichts geändert.
 // ════════════════════════════════════════════════════════════════════════════
@@ -27,10 +27,9 @@ const args = process.argv.slice(2);
 const DB = args.find((a) => !a.startsWith('--'));
 const APPLY = args.includes('--apply');
 const ONLY = (args.find((a) => a.startsWith('--only=')) || '').slice(7).toUpperCase();
-const COST006_RAW = (args.find((a) => a.startsWith('--cost006=')) || '').slice(10);
-if (!DB) { console.error('Aufruf: node scripts/data-fix-v0897.mts <lataif.db> [--apply] [--cost006=<BHD>] [--only=A|B]'); process.exit(2); }
-const COST006 = COST006_RAW === '' ? null : Number(COST006_RAW);
-if (COST006 !== null && !(Number.isFinite(COST006) && COST006 >= 0)) { console.error('--cost006 muss eine Zahl >= 0 sein'); process.exit(2); }
+if (!DB) { console.error('Aufruf: node scripts/data-fix-v0897.mts <lataif.db> [--apply] [--only=A|B]'); process.exit(2); }
+const UNBEKANNT = args.filter((a) => a.startsWith('--') && a !== '--apply' && !a.startsWith('--only='));
+if (UNBEKANNT.length) { console.error(`Unbekannte Schalter: ${UNBEKANNT.join(' ')} (die Einstände stehen fest im Skript)`); process.exit(2); }
 
 const NOW = new Date().toISOString();
 const ACTOR = 'user-owner';
@@ -71,7 +70,7 @@ function track(table: string, id: string, action: 'insert' | 'update', branchId:
 // ── A: Altbestand VAN-BGJ-005/006 ────────────────────────────────────────────
 const VAN = [
   { sku: 'VAN-BGJ-005', id: '25e7eea7-27cf-4260-a84f-3ee2910038f9', erp: 4, gezaehlt: 7, kaufLos: '788b90b2-4d2e-41c8-85c5-3efbc7f5a7e0', kaufLosKosten: 180, einstand: 190 as number | null },
-  { sku: 'VAN-BGJ-006', id: '8619ba77-bbc5-4c6d-8951-3b7c848ba0a0', erp: 1, gezaehlt: 2, kaufLos: '73be20b8-48ea-474b-a4d9-e30b60d828a8', kaufLosKosten: 130, einstand: COST006 },
+  { sku: 'VAN-BGJ-006', id: '8619ba77-bbc5-4c6d-8951-3b7c848ba0a0', erp: 1, gezaehlt: 2, kaufLos: '73be20b8-48ea-474b-a4d9-e30b60d828a8', kaufLosKosten: 130, einstand: 140 as number | null },
 ];
 const EINKAUF = 'baf1522a-2687-426b-a91b-9e82f3e76892';   // PUR-2026-000024
 const altLosId = (productId: string) => `f1-oldstock-${productId}`;
@@ -87,7 +86,7 @@ function planVan(v: (typeof VAN)[number]): Plan {
     const gleich = Number(vorhanden.qty_total) === delta && (v.einstand === null || Number(vorhanden.unit_cost) === v.einstand) && Number(p.quantity) === v.gezaehlt;
     return { art: 'A', sku: v.sku, status: gleich ? 'BEREITS_KORRIGIERT' : 'ABBRUCH', detail: gleich ? `Altlos ${delta} × ${vorhanden.unit_cost} da, Menge ${p.quantity}` : `Altlos weicht ab: ${S(vorhanden)} / Menge ${p.quantity}` };
   }
-  if (v.einstand === null) return { art: 'A', sku: v.sku, status: 'WARTET_AUF_EINSTAND', detail: `Einstand des Altstücks nicht belegt — ohne --cost006 keine Korrektur (+${delta} Stück)` };
+  if (v.einstand === null) return { art: 'A', sku: v.sku, status: 'ABBRUCH', detail: `Einstand des Altstücks fehlt (+${delta} Stück)` };
   const fehler: string[] = [];
   if (Number(p.quantity) !== v.erp) fehler.push(`Menge ${p.quantity} statt ${v.erp}`);
   if (String(p.source_type ?? 'OWN').toUpperCase() !== 'OWN') fehler.push('nicht eigene Ware');
