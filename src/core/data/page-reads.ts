@@ -393,9 +393,44 @@ export interface ProductDetailReads {
   provenance: { supplier: string | null; paidFrom: string | null };
   /** PURCHASE-EDIT D13 — der Einkauf, dem Einkaufspreis und -datum gehören (dort zu korrigieren), oder null. */
   purchaseBound?: { purchaseId: string; purchaseNumber: string } | null;
+  /**
+   * CUSTOM-ORDER Review — woher der Artikel stammt, wenn er aus einer Order entstand: Art, Order und ALLE Rechnungen
+   * mit ihm (auch stornierte) — so bleibt die Herkunft nach einem Rechnungsstorno nachvollziehbar.
+   */
+  origin?: ProductOrigin | null;
 }
 
-const LEER_PRODUCT_DETAIL: ProductDetailReads = { sales: [], purchases: [], production: [], provenance: { supplier: null, paidFrom: null }, purchaseBound: null };
+export interface ProductOrigin {
+  type: 'CUSTOM_ORDER' | 'ORDER';
+  orderId: string;
+  orderNumber: string;
+  invoices: Array<{ invoiceId: string; invoiceNumber: string; status: string; specialMark: boolean; numberFinalizedAt?: string; issuedAt: string }>;
+}
+
+/** Die Herkunft eines Artikels aus einer Order (gespeichert am Artikel; Altbestand: über die Verknüpfung der Order). */
+export function productOriginOf(productId: string): ProductOrigin | null {
+  const p = query('SELECT origin_type, origin_order_id, origin_order_number FROM products WHERE id = ?', [productId])[0];
+  let type = s(p?.origin_type), orderId = s(p?.origin_order_id), orderNumber = s(p?.origin_order_number);
+  if (!type || !orderId) {
+    const o = query(
+      `SELECT o.id, o.order_number, o.type, MAX(CASE WHEN ol.material_kind = 'custom' THEN 1 ELSE 0 END) AS custom
+         FROM orders o LEFT JOIN order_lines ol ON ol.order_id = o.id AND ol.product_id = ?
+        WHERE o.product_id = ? OR ol.id IS NOT NULL GROUP BY o.id ORDER BY o.created_at LIMIT 1`, [productId, productId])[0];
+    if (!o) return null;
+    type = Number(o.custom) === 1 || s(o.type) === 'custom' ? 'CUSTOM_ORDER' : 'ORDER';
+    orderId = s(o.id); orderNumber = s(o.order_number);
+  }
+  const inv = query(
+    `SELECT DISTINCT i.id, i.invoice_number, i.status, i.special_mark, i.number_finalized_at, i.issued_at
+       FROM invoice_lines il JOIN invoices i ON i.id = il.invoice_id WHERE il.product_id = ? ORDER BY i.issued_at, i.created_at`, [productId]);
+  return {
+    type: type === 'ORDER' ? 'ORDER' : 'CUSTOM_ORDER', orderId, orderNumber,
+    invoices: inv.map((r) => ({ invoiceId: s(r.id), invoiceNumber: s(r.invoice_number), status: s(r.status),
+      specialMark: Number(r.special_mark) === 1, numberFinalizedAt: (r.number_finalized_at as string | null) || undefined, issuedAt: s(r.issued_at) })),
+  };
+}
+
+const LEER_PRODUCT_DETAIL: ProductDetailReads = { sales: [], purchases: [], production: [], provenance: { supplier: null, paidFrom: null }, purchaseBound: null, origin: null };
 
 export function productDetailReadsFor(ctx: BusinessReadContext, productId: string): ProductDetailReads {
   // Zuerst die Frage, wem der Artikel gehört. Gehört er nicht hierher, gibt es nichts —
@@ -523,6 +558,7 @@ export function productDetailReadsFor(ctx: BusinessReadContext, productId: strin
         : null,
     },
     purchaseBound: purchaseBoundOf(productId),
+    origin: productOriginOf(productId),
   };
 }
 

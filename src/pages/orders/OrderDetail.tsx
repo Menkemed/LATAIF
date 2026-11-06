@@ -1,5 +1,4 @@
 import { SettleOrderGoldModal } from '@/components/gold/SettleOrderGoldModal';
-import { adoptOrderPhotosToProduct } from '@/core/orders/order-media';
 import { optionsWithStored } from '@/core/products/choice-value';
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
@@ -31,17 +30,14 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { computeExpenseSettlement } from '@/core/finance/expenseSettlement';
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
-import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction, watchLedgerPosts } from '@/core/ledger/posting';
+import { watchLedgerPosts } from '@/core/ledger/posting';
 import { runOnPrimary } from '@/core/data/primary-action';
-import { convertOrderLinesToInvoiceTx } from '@/core/orders/order-invoice-tx';
-import { carryOverOrderPaymentsToInvoice, assertOrderCarryOverMayFinalize } from '@/core/orders/order-payment-carryover';
 import { orderCustomCostBasis } from '@/core/orders/order-invoice-lines';
 import { convertOrderToInvoiceInHouse, type OrderConverted } from '@/core/orders/order-convert-house';
 import { currentBranchId } from '@/core/db/helpers';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
-import { vatEngine } from '@/core/tax/vat-engine';
 import { usePermission } from '@/hooks/usePermission';
-import type { Order, OrderLine, OrderStatus, Product, TaxScheme, GoldPayable, Invoice } from '@/core/models/types';
+import type { Order, OrderLine, OrderStatus, TaxScheme, GoldPayable } from '@/core/models/types';
 import { ConfirmTaxSchemeModal } from '@/components/shared/ConfirmTaxSchemeModal';
 import { NumberTypeDialog } from '@/components/ui/NumberTypeDialog';
 import { HistoryDrawer } from '@/components/shared/HistoryPanel';
@@ -106,21 +102,19 @@ export function OrderDetail() {
   // LIST NAVIGATION UX (v0.8.98) — nach dem Löschen: kam man direkt aus der Liste, zurück dorthin (Suche, Filter,
   // Position); sonst frisch zur Liste wie bisher.
   const returnToList = useReturnToList('/orders');
-  const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines,
-    getBillableLines, markOrderLinesInvoiced, assertOrderLinesBillable } = useOrderStore();
+  const { orders, loadOrders, updateStatus, deleteOrder, getOrderLines, getBillableLines } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
   const { goldPayables, loadGoldPayables, deleteGoldPayable } = useGoldStore();
-  const { products, loadProducts, createProduct } = useProductStore();
+  const { products, loadProducts } = useProductStore();
   // v0.7.7 — expenseStore: A/P-Chip-Klick auf einer Cost-Line oeffnet das Pay-
   // Modal in-place. Cross-Store-Reload triggert nach Submit den lineRefresh-Tick.
   const { expenses, loadExpenses } = useExpenseStore();
   const [payExpenseId, setPayExpenseId] = useState<string | null>(null);
-  // Plan §Order §Convert: Wenn die Order kein verlinktes Produkt hat (manuell beschrieben),
-  // wird beim Convert eines automatisch erzeugt und hier gehalten — wird vom VAT-Modal +
-  // handleConfirmFinalInvoice anstelle von linkedProduct verwendet.
-  const [pendingProduct, setPendingProduct] = useState<Product | null>(null);
+  // CUSTOM-ORDER Review — der Altweg (Order ohne Steuerart je Position) legt KEINEN Artikel mehr vor dem Dialog an:
+  // der Dialog zeigt EINE Zeile (Bezeichnung, Brutto, Vorauswahl), angelegt wird erst in der Hausfolge.
+  const [legacyLine, setLegacyLine] = useState<{ label: string; scheme: TaxScheme; gross: number } | null>(null);
   const [editing, setEditing] = useState(false);
   const [form, setForm] = useState<Partial<Order>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -137,7 +131,6 @@ export function OrderDetail() {
   // v0.7.26 — Karten-Brand fuer Order-Folgezahlung (nur bei method 'card').
   const [payCardBrand, setPayCardBrand] = useState<'normal' | 'amex' | 'debit'>('normal');
   const [payNote, setPayNote] = useState('');
-  const [showInvoiceVatConfirm, setShowInvoiceVatConfirm] = useState(false);
   // v0.6.7 — VAT-Picker auch fuer persistierte Multi-Line-Orders, damit der User
   // beim Convert-to-Invoice pro Zeile umschalten kann (Custom-Quote eingeschlossen).
   const [showPersistedVatConfirm, setShowPersistedVatConfirm] = useState(false);
@@ -166,7 +159,7 @@ export function OrderDetail() {
   // CUSTOM-ORDER K3a — BHD-Begleichung der Order-Goldschuld (Teil, Kurs, Tag).
   const [settleOrderGold, setSettleOrderGold] = useState<GoldPayable | null>(null);
   const { paymentsByOrder, loadPayments, addPayment, deletePayment } = useOrderPaymentStore();
-  const { createDirectInvoice, invoices, loadInvoices } = useInvoiceStore();
+  const { invoices, loadInvoices } = useInvoiceStore();
   const perm = usePermission();
 
   useEffect(() => { loadOrders(); loadCustomers(); loadProducts(); loadCategories(); loadInvoices(); loadSuppliers(); loadGoldPayables(); loadExpenses(); }, [loadOrders, loadCustomers, loadProducts, loadCategories, loadInvoices, loadSuppliers, loadGoldPayables, loadExpenses]);
@@ -277,7 +270,6 @@ export function OrderDetail() {
     const pid = order.productId || order.existingProductId;
     return pid ? products.find(p => p.id === pid) : undefined;
   }, [order, products]);
-  const productForConvert = linkedProduct ?? pendingProduct;
 
   useEffect(() => {
     if (order) setForm({ ...order });
@@ -595,38 +587,8 @@ export function OrderDetail() {
   // R5A — die Rechnung dahinter wohnt jetzt in `core/orders/order-payment-carryover`, damit der
   // Fernbefehl DIESELBE benutzen kann. Hier bleibt der Aufruf.
 
-  // B5-B — zentrale ATOMARE Order→Invoice-Konvertierung (genutzt von modernem UND Legacy-Pfad).
-  // convertOrderLinesToInvoiceTx fuehrt assertBillable → createDirectInvoice → markOrderLinesInvoiced
-  // → updateOrder(invoiceId) in EINER Ledger-Transaktion aus; JEDER Fehler → voller Rollback (keine
-  // Invoice, keine Line-Markierung, keine Order-Aenderung) → eine Wiederholung erzeugt KEINE zweite
-  // Invoice, auch bei lot-losen Positionen (die der Lot-Guard nicht schuetzt). Keine Invoice-Logik
-  // dupliziert (createInvoice ruft das echte createDirectInvoice).
-  function convertOrderToInvoiceAtomic(
-    customerId: string,
-    billableLineIds: string[],
-    lines: Parameters<typeof createDirectInvoice>[1],
-    notes: string,
-    specialMark: boolean,
-  ): Invoice {
-    let created: Invoice | null = null;
-    convertOrderLinesToInvoiceTx({
-      begin: beginLedgerTransaction,
-      commit: commitLedgerTransaction,
-      rollback: rollbackLedgerTransaction,
-      assertBillable: () => assertOrderLinesBillable(billableLineIds),
-      createInvoice: () => {
-        const inv = createDirectInvoice(customerId, lines, notes, undefined, undefined, undefined, specialMark);
-        created = inv;
-        return inv;
-      },
-      linkLinesAndOrder: (invId) => {
-        markOrderLinesInvoiced(billableLineIds, invId);
-        if (id) updateOrder(id, { invoiceId: invId });
-      },
-      refresh: () => { loadOrders(); loadInvoices(); loadProducts(); },
-    });
-    return created!;
-  }
+  // B5-B / CUSTOM-ORDER Review — die atomare Umwandlung (prüfen → Artikel → Rechnung → Verknüpfung → Anrechnung) läuft
+  // für BEIDE Wege in der Hausfolge `convertOrderToInvoiceInHouse` (eine Klammer; jeder Fehler rollt alles zurück).
 
   async function handleCreateFinalInvoice() {
     if (!id || !order) return;
@@ -658,53 +620,27 @@ export function OrderDetail() {
     // die Rechnung erzeugt wird. Vorher: stilles 1:1 Durchreichen.
     const allPersisted = billable.every(l => !!l.taxScheme);
     if (allPersisted) {
+      setLegacyLine(null);
       setPendingBillable(billable);
       setConvertInvoiceDate(new Date().toISOString().slice(0, 10));
       setConvertSpecialMark(false);
       setShowPersistedVatConfirm(true);
       return;
     }
-    // R5A.2 — der Altweg (Auftrag ohne gespeichertes Schema) legt HIER schon einen Artikel an und
-    // aendert den Auftrag, bevor ein Dialog kommt. Auf einem Rechner ohne Datenbank waere das ein
-    // lokaler Schreibversuch — also ein ausdrueckliches Nein, kein stilles Nichts.
-    if (w.remote) { alert(fehlertext(nichtAmClient('converting an order without saved tax schemes'))); return; }
-    const gross = order.agreedPrice || totalPaid;
+    // CUSTOM-ORDER Review — der Altweg (Auftrag ohne gespeichertes Schema): EINE Zeile über den vereinbarten Preis. Kein
+    // Artikel und keine Order-Änderung vor dem Dialog; Primary und PC2 schicken dieselbe Absicht an die Hausfolge.
+    const gross = (order.agreedPrice || 0) > 0 ? (order.agreedPrice || 0) : totalPaidActive;
     if (gross <= 0) { alert('Agreed price required.'); return; }
-
-    // Legacy-Order ohne Scheme-Snapshot (vor v0.1.15 angelegt) → Modal als Fallback.
-    if (!linkedProduct) {
-      // v0.6.7 — Wenn der Custom-Order eine strukturierte Produkt-Spec mitbringt
-      // (Karte 3e via NewProductModal), das Convert-Produkt damit anlegen.
-      // Sonst Fallback auf die Legacy-Felder (requestedBrand/Model/...).
-      const spec = order.customProductSpec || {};
-      const newProduct = createProduct({
-        categoryId: spec.categoryId || order.categoryId || '',
-        brand: spec.brand || order.requestedBrand || '',
-        name: spec.name || order.requestedModel || order.requestedBrand || 'Custom Item',
-        sku: spec.sku,
-        condition: spec.condition || order.condition || '',
-        attributes: (spec.attributes as Record<string, string | number | boolean | string[]>) || order.attributes || {},
-        images: spec.images || [],
-        scopeOfDelivery: spec.scopeOfDelivery || [],
-        // v0.6.0 Model B — Kostenbasis = kapitalisierte Custom-Kosten (COGS),
-        // sonst Supplier-Preis. Kein Purchase, kein Lager-Durchlauf.
-        purchasePrice: customCostBasis > 0 ? customCostBasis : (order.supplierPrice || 0),
-        plannedSalePrice: order.agreedPrice,
-        // v0.6.0 — made-to-order, geht direkt auf die Invoice → nie 'in_stock'.
-        stockStatus: 'reserved',
-        taxScheme: spec.taxScheme || 'MARGIN',
-        sourceType: 'OWN',
-        supplierName: order.supplierName,
-        notes: spec.notes
-          || (order.requestedDetails ? `From order ${order.orderNumber}: ${order.requestedDetails}` : `From order ${order.orderNumber}`),
-      });
-      // MEDIA-ORDER §7 — die Vorlage des Auftrags wird zum Artikelbild: DASSELBE Medienobjekt,
-      // neue Verknüpfung, Rolle `stock_image`, Klasse unverändert. Keine zweite Datei.
-      adoptOrderPhotosToProduct(order.id, newProduct.id);
-      setPendingProduct(newProduct);
-      updateOrder(id, { productId: newProduct.id });
-    }
-    setShowInvoiceVatConfirm(true);
+    const spec = order.customProductSpec || {};
+    setLegacyLine({
+      label: linkedProduct ? (productDisplayName(linkedProduct) || 'Custom Item') : (spec.name || order.requestedModel || order.requestedBrand || 'Custom Item'),
+      scheme: ((linkedProduct?.taxScheme || spec.taxScheme || 'MARGIN') as TaxScheme),
+      gross: Math.round(gross * 1000) / 1000,
+    });
+    setPendingBillable(billable);
+    setConvertInvoiceDate(new Date().toISOString().slice(0, 10));
+    setConvertSpecialMark(false);
+    setShowPersistedVatConfirm(true);
   }
 
   // Direkter Convert-Pfad: Pro Order-Line wird eine Invoice-Line gebaut, mit
@@ -717,6 +653,7 @@ export function OrderDetail() {
     specialMark: boolean = false,
     perLineSchemes?: Record<string, TaxScheme>,
     invoiceDate?: string,
+    legacyScheme?: TaxScheme,
   ) {
     if (!id || !order) return;
 
@@ -739,7 +676,7 @@ export function OrderDetail() {
       const r = await w.save<{ invoiceId?: string }>('orders.convert_to_invoice', {
         local: () => ({}),
         remote: () => ({
-          orderId: id, expectedRevision: fassung, taxSchemes,
+          orderId: id, expectedRevision: fassung, ...(legacyScheme ? { legacyScheme } : { taxSchemes }),
           specialMark: specialMark === true, markComplete: markCompleteOnConvert === true,
           ...(invoiceDate ? { invoiceDate } : {}),
         }),
@@ -764,7 +701,7 @@ export function OrderDetail() {
         const check = watchLedgerPosts('orders.convert_to_invoice');
         const r = convertOrderToInvoiceInHouse({
           orderId: id,
-          taxSchemes: Object.fromEntries(billableLines.map(l => [l.id, (perLineSchemes?.[l.id] as TaxScheme | undefined) || (l.taxScheme as TaxScheme)])),
+          ...(legacyScheme ? { legacyScheme } : { taxSchemes: Object.fromEntries(billableLines.map(l => [l.id, (perLineSchemes?.[l.id] as TaxScheme | undefined) || (l.taxScheme as TaxScheme)])) }),
           specialMark: specialMark === true,
           markComplete: markCompleteOnConvert === true,
           ...(invoiceDate ? { invoiceDate } : {}),
@@ -776,66 +713,7 @@ export function OrderDetail() {
       alert(e instanceof Error ? e.message : String(e));
       return;
     }
-    setPendingProduct(null);
     navigate(`/invoices/${out.invoiceId}`);
-  }
-
-  // Legacy-Pfad nur für Orders ohne persistierten Scheme-Snapshot.
-  // KRITISCHER FIX: order.agreedPrice ist GROSS (= subtotal + totalVat in OrderCreate),
-  // nicht NET. Vorher wurde es 1:1 in calculateNet() reingegeben → bei VAT_10
-  // wurden 10% nochmal on top gerechnet → Doppelbesteuerung. Jetzt: Decompose
-  // Gross → Net je nach gewähltem Scheme, dann calculateNet → resultierender
-  // Gross == ursprünglicher agreedPrice.
-  async function handleConfirmFinalInvoice(perLine: Record<string, TaxScheme>) {
-    setShowInvoiceVatConfirm(false);
-    // Nach VAT-Confirm — Number-Type-Dialog vor dem Create.
-    setPendingNumberAction(() => async (special: boolean) => executeLegacyFinalInvoice(perLine, special));
-  }
-
-  async function executeLegacyFinalInvoice(perLine: Record<string, TaxScheme>, specialMark: boolean) {
-    const prod = productForConvert;
-    if (!id || !order || !prod) return;
-    const grossAgreed = order.agreedPrice || totalPaid;
-    if (grossAgreed <= 0) { alert('Agreed price required.'); return; }
-
-    const taxScheme = (perLine[prod.id] || prod.taxScheme || 'MARGIN') as TaxScheme;
-    const vatRate = taxScheme === 'ZERO' ? 0 : 10;
-    const netInput = taxScheme === 'VAT_10'
-      ? grossAgreed / (1 + vatRate / 100)
-      : grossAgreed;
-    const calc = vatEngine.calculateNet(netInput, prod.purchasePrice || 0, taxScheme, vatRate);
-    // v0.7.1 — NBR: siehe analoge Stelle weiter oben.
-    const persistedVat = calc.internalVatAmount ?? calc.vatAmount;
-    // B5-B — Legacy-Konvertierung ATOMAR (wie moderner Pfad): assertBillable + createDirectInvoice
-    // + markOrderLinesInvoiced + updateOrder(invoiceId) in EINER Ledger-Tx. Jeder Fehler → voller
-    // Rollback → keine zweite Invoice bei Wiederholung, auch fuer lot-lose Custom-Stuecke ('reserved',
-    // kein stock_lot; der Lot-Guard schuetzt sie nicht). getBillableLines liefert die billbaren Lines
-    // der Legacy-Order (Voll-Konvertierung ueber agreedPrice, keine Teil-Konvertierung).
-    let invoice: Invoice;
-    try {
-      assertOrderCarryOverMayFinalize(id, calc.grossAmount, totalPaid);
-      invoice = convertOrderToInvoiceAtomic(
-        order.customerId,
-        getBillableLines(id).map(l => l.id),
-        [{
-          productId: prod.id,
-          unitPrice: calc.netAmount,
-          purchasePrice: prod.purchasePrice || 0,
-          taxScheme,
-          vatRate,
-          vatAmount: persistedVat,
-          lineTotal: calc.grossAmount,
-        }],
-        `Final invoice for order ${order.orderNumber}`,
-        specialMark,
-      );
-    } catch (e) {
-      alert(e instanceof Error ? e.message : String(e));
-      return;
-    }
-    setPendingProduct(null);
-    await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber, invoice.grossAmount, totalPaid);
-    navigate(`/invoices/${invoice.id}`);
   }
 
   function renderField(label: string, value: React.ReactNode, editField?: React.ReactNode) {
@@ -1942,31 +1820,21 @@ export function OrderDetail() {
         onConfirm={(choice, refundMethod, note) => { void handleCancel(choice, refundMethod, note); }}
       />
 
-      {/* Convert-to-Invoice VAT-Scheme Picker */}
-      <ConfirmTaxSchemeModal
-        open={showInvoiceVatConfirm}
-        lines={productForConvert ? [{
-          id: productForConvert.id,
-          label: productDisplayName(productForConvert) || 'Custom Item',
-          currentScheme: (productForConvert.taxScheme as TaxScheme) || 'MARGIN',
-        }] : []}
-        onCancel={() => setShowInvoiceVatConfirm(false)}
-        onConfirm={handleConfirmFinalInvoice}
-        title="Create Final Invoice"
-      />
-
       {/* v0.6.7 — VAT-Picker fuer persistierte Multi-Line-Orders (inkl. Custom-Quote). */}
       {/* CUSTOM-ORDER K2 — EIN Dialog: Steuerart je Zeile (die der Order ist nur Vorauswahl, Brutto bleibt),
           Rechnungsdatum (heute vorgeschlagen, wählbar) und Nummernart. */}
       <ConfirmTaxSchemeModal
         open={showPersistedVatConfirm}
-        lines={persistedVatLines}
-        onCancel={() => { setShowPersistedVatConfirm(false); setPendingBillable([]); }}
+        lines={legacyLine ? [{ id: 'legacy', label: legacyLine.label, currentScheme: legacyLine.scheme, gross: legacyLine.gross }] : persistedVatLines}
+        onCancel={() => { setShowPersistedVatConfirm(false); setPendingBillable([]); setLegacyLine(null); }}
         onConfirm={(perLine) => {
           const billable = pendingBillable;
+          const altweg = legacyLine;
           setShowPersistedVatConfirm(false);
           setPendingBillable([]);
-          void convertWithPersistedSchemes(billable, convertSpecialMark, perLine, convertInvoiceDate);
+          setLegacyLine(null);
+          void convertWithPersistedSchemes(billable, convertSpecialMark, altweg ? undefined : perLine, convertInvoiceDate,
+            altweg ? ((perLine.legacy as TaxScheme | undefined) || altweg.scheme) : undefined);
         }}
         title="Create Invoice"
         confirmLabel="Create Invoice"

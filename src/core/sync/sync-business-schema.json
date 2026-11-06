@@ -554,6 +554,7 @@
         "amount",
         "book_share",
         "branch_id",
+        "cost_mode",
         "created_at",
         "created_by",
         "difference",
@@ -573,7 +574,8 @@
         "rate_per_gram",
         "reversed_at",
         "settled_on",
-        "status"
+        "status",
+        "vat_status"
       ],
       "required_fields": [],
       "immutable_fields": []
@@ -1207,6 +1209,9 @@
         "min_sale_price",
         "name",
         "notes",
+        "origin_order_id",
+        "origin_order_number",
+        "origin_type",
         "paid_from",
         "planned_sale_price",
         "purchase_currency",

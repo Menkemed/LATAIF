@@ -125,6 +125,10 @@ export interface Product {
   purchaseSource?: string;
   paidFrom?: 'cash' | 'bank' | 'benefit' | null;
   sourceType: ProductSourceType;
+  /** CUSTOM-ORDER Review — dauerhafte Herkunft: aus einer Custom Order (Sonderstück) oder einer normalen Order entstanden. */
+  originType?: 'CUSTOM_ORDER' | 'ORDER';
+  originOrderId?: string;
+  originOrderNumber?: string;
   notes?: string;
   images: string[];
   /** Plan §Image-Duplicate-Detection: perceptual hash des ersten Bildes (16-stelliger Hex / 64bit DCT-pHash). */

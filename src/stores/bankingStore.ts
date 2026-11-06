@@ -278,11 +278,14 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
                  AND e.created_at = p.created_at
                  AND e.status != 'CANCELLED') AS card_fee
      FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id
-     WHERE p.branch_id = ? AND COALESCE(p.method, '') != 'order_deposit'`,
+     WHERE p.branch_id = ? AND COALESCE(p.method, '') NOT IN ('order_deposit', 'credit')`,
     [branchId]
   );
   // CUSTOM-ORDER K2 — die Anrechnung einer Anzahlung ('order_deposit') bewegt kein Geld: das Geld steht als
   // Order-Zahlung am Zahlungstag (unten); hier nicht noch einmal.
+  // CUSTOM-ORDER Review — ebenso die Verrechnung mit Kundenguthaben ('credit', Soll CUSTOMER_CREDIT / Haben AR): kein Geld,
+  // sie stand bisher als Bankeingang da (accountFor → 'bank'). Das Geld des Guthabens kam früher (Überzahlung, Retoure) und
+  // steht dort; eine Erstattung des Guthabens steht als customer_credit_refunds (unten). Wie D3 bei den Lieferanten.
   for (const p of payments) {
     const date = (p.received_at as string) || '';
     const method = (p.method as string) || '';

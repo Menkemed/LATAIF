@@ -9,20 +9,33 @@ export function hasCostCorrectionTable(): boolean {
 }
 
 /**
+ * CUSTOM-ORDER Review — die zweite Art Einstandskorrektur einer UNVERÄNDERTEN Rechnung: die Differenz einer Goldschuld-
+ * Begleichung in BHD, deren Rechnung in einem geschlossenen Quartal liegt (gold_payable_settlements, cost_mode SEPARATE).
+ * Sie wird von denselben Lesern genauso dazugenommen (Gewinn) bzw. ausdrücklich nicht (Steuer).
+ */
+export function hasGoldSettlementTable(): boolean {
+  return query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'gold_payable_settlements' LIMIT 1").length > 0;
+}
+const GOLD_SEPARATE = "gs.status = 'ACTIVE' AND gs.cost_mode = 'SEPARATE'";
+const summe = (teile: string[]): string => (teile.length === 0 ? '0' : teile.length === 1 ? teile[0] : `(${teile.join(' + ')})`);
+
+/**
  * SQL-Ausdruck: Σ der wirksamen Korrekturbeträge einer Rechnung (Spalte `i.id`). Positiv = Einstand
  * gestiegen (Gewinn kleiner). Für Leser, die Rechnungen per SQL summieren. Ohne die Tabelle: `0`.
  */
 export function invoiceCostCorrectionSql(): string {
-  return hasCostCorrectionTable()
-    ? `(SELECT COALESCE(SUM(cc.amount), 0) FROM cost_corrections cc WHERE cc.invoice_id = i.id AND cc.status = 'ACTIVE')`
-    : '0';
+  const teile: string[] = [];
+  if (hasCostCorrectionTable()) teile.push(`(SELECT COALESCE(SUM(cc.amount), 0) FROM cost_corrections cc WHERE cc.invoice_id = i.id AND cc.status = 'ACTIVE')`);
+  if (hasGoldSettlementTable()) teile.push(`(SELECT COALESCE(SUM(gs.difference), 0) FROM gold_payable_settlements gs WHERE gs.invoice_id = i.id AND ${GOLD_SEPARATE})`);
+  return summe(teile);
 }
 
 /** Dasselbe je Rechnungszeile (Spalte `il.id`). */
 export function lineCostCorrectionSql(): string {
-  return hasCostCorrectionTable()
-    ? `(SELECT COALESCE(SUM(cc.amount), 0) FROM cost_corrections cc WHERE cc.invoice_line_id = il.id AND cc.status = 'ACTIVE')`
-    : '0';
+  const teile: string[] = [];
+  if (hasCostCorrectionTable()) teile.push(`(SELECT COALESCE(SUM(cc.amount), 0) FROM cost_corrections cc WHERE cc.invoice_line_id = il.id AND cc.status = 'ACTIVE')`);
+  if (hasGoldSettlementTable()) teile.push(`(SELECT COALESCE(SUM(gs.difference), 0) FROM gold_payable_settlements gs WHERE gs.invoice_line_id = il.id AND ${GOLD_SEPARATE})`);
+  return summe(teile);
 }
 
 /** Σ der wirksamen Korrekturbeträge je Rechnung. */
@@ -34,6 +47,7 @@ export function costCorrectionsByInvoice(invoiceIds?: readonly string[]): Map<st
                AND invoice_id IN (${invoiceIds.map(() => '?').join(',')}) GROUP BY invoice_id`, [...invoiceIds])
     : query(`SELECT invoice_id, COALESCE(SUM(amount), 0) AS t FROM cost_corrections WHERE status = 'ACTIVE' GROUP BY invoice_id`);
   for (const r of rows) out.set(String(r.invoice_id), Number(r.t) || 0);
+  addGoldSeparate(out, 'invoice_id', invoiceIds);
   return out;
 }
 
@@ -46,7 +60,18 @@ export function costCorrectionsByLine(invoiceLineIds?: readonly string[]): Map<s
                AND invoice_line_id IN (${invoiceLineIds.map(() => '?').join(',')}) GROUP BY invoice_line_id`, [...invoiceLineIds])
     : query(`SELECT invoice_line_id, COALESCE(SUM(amount), 0) AS t FROM cost_corrections WHERE status = 'ACTIVE' GROUP BY invoice_line_id`);
   for (const r of rows) out.set(String(r.invoice_line_id), Number(r.t) || 0);
+  addGoldSeparate(out, 'invoice_line_id', invoiceLineIds);
   return out;
+}
+
+/** Die Gold-Differenzen (SEPARATE) je Rechnung bzw. Rechnungszeile auf die Karte addieren. */
+function addGoldSeparate(out: Map<string, number>, key: 'invoice_id' | 'invoice_line_id', ids?: readonly string[]): void {
+  if (!hasGoldSettlementTable()) return;
+  const rows = ids && ids.length > 0
+    ? query(`SELECT gs.${key} AS k, COALESCE(SUM(gs.difference), 0) AS t FROM gold_payable_settlements gs WHERE ${GOLD_SEPARATE}
+               AND gs.${key} IN (${ids.map(() => '?').join(',')}) GROUP BY gs.${key}`, [...ids])
+    : query(`SELECT gs.${key} AS k, COALESCE(SUM(gs.difference), 0) AS t FROM gold_payable_settlements gs WHERE ${GOLD_SEPARATE} AND gs.${key} IS NOT NULL GROUP BY gs.${key}`);
+  for (const r of rows) out.set(String(r.k), (out.get(String(r.k)) ?? 0) + (Number(r.t) || 0));
 }
 
 /** Hat diese Rechnung wirksame Einstandskorrekturen? (Hinweis „korrigiert" an Beleg und Bericht) */
@@ -70,9 +95,14 @@ export function invoiceCostCorrections(invoiceId: string): Array<{
 
 /** Die Rechnungszeilen dieser Rechnung, die eine wirksame Korrektur tragen. */
 export function correctedLinesOf(invoiceId: string): Set<string> {
-  if (!hasCostCorrectionTable()) return new Set();
-  return new Set(query(`SELECT DISTINCT invoice_line_id FROM cost_corrections WHERE invoice_id = ? AND status = 'ACTIVE'`, [invoiceId])
-    .map((r) => String(r.invoice_line_id)));
+  const out = new Set<string>();
+  if (hasCostCorrectionTable()) {
+    for (const r of query(`SELECT DISTINCT invoice_line_id FROM cost_corrections WHERE invoice_id = ? AND status = 'ACTIVE'`, [invoiceId])) out.add(String(r.invoice_line_id));
+  }
+  if (hasGoldSettlementTable()) {
+    for (const r of query(`SELECT DISTINCT gs.invoice_line_id FROM gold_payable_settlements gs WHERE gs.invoice_id = ? AND gs.invoice_line_id IS NOT NULL AND ${GOLD_SEPARATE}`, [invoiceId])) out.add(String(r.invoice_line_id));
+  }
+  return out;
 }
 
 /** Die Überleitungsansicht (D1): jede Korrektur genau einmal, mit beiden Daten. Nur lesend. */

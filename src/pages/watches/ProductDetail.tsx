@@ -1243,6 +1243,29 @@ export function ProductDetail() {
           <StockAdjustmentPanel productId={product.id} quantity={product.quantity} purchasePrice={product.purchasePrice} onChanged={() => loadProducts()} />
         )}
 
+        {/* CUSTOM-ORDER Review — die Herkunft eines Artikels aus einer Order: Art, Order-Nummer und JEDE Rechnung mit ihm
+            (auch stornierte). Gespeichert am Artikel, gelesen über dieselbe Auskunft wie am PC2. */}
+        {!editing && detail.origin && (
+          <div data-product-origin={detail.origin.type}><Card style={{ marginBottom: 24, padding: '12px 14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', fontSize: 13 }}>
+              <span style={{ fontWeight: 600, color: '#0F0F10' }}>Origin</span>
+              <span style={{ color: '#4B5563' }}>{detail.origin.type === 'CUSTOM_ORDER' ? 'Custom Order' : 'Order'}</span>
+              <button type="button" data-product-origin-order onClick={() => navigate(`/orders/${detail.origin!.orderId}`)}
+                style={{ border: 'none', background: 'none', padding: 0, color: '#3D7FFF', fontFamily: 'monospace', fontSize: 12, cursor: 'pointer' }}>
+                {detail.origin.orderNumber || detail.origin.orderId}
+              </button>
+              {detail.origin.invoices.length > 0 && <span style={{ color: '#9CA3AF' }}>·</span>}
+              {detail.origin.invoices.map((iv) => (
+                <button key={iv.invoiceId} type="button" data-product-origin-invoice={iv.status}
+                  onClick={() => navigate(`/invoices/${iv.invoiceId}`)}
+                  style={{ border: 'none', background: 'none', padding: 0, color: iv.status === 'CANCELLED' ? '#9CA3AF' : '#3D7FFF', fontFamily: 'monospace', fontSize: 12, cursor: 'pointer', textDecoration: iv.status === 'CANCELLED' ? 'line-through' : 'none' }}>
+                  {formatInvoiceDisplayShort(iv) || iv.invoiceNumber} ({iv.status})
+                </button>
+              ))}
+            </div>
+          </Card></div>
+        )}
+
         {/* Sales History — alle Invoices mit diesem Produkt, neueste zuerst.
             Klick auf Zeile öffnet die Invoice. */}
         {!editing && productSales.length > 0 && (

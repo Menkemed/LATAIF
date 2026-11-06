@@ -84,7 +84,8 @@ const nim = await import('../../src/core/media/new-item-media.ts');
     ['src/stores/orderStore.ts', /createProduct\(\{\s*\.\.\.l\.newProduct/],
     ['src/stores/orderStore.ts', /createProduct\(\{\s*\.\.\.patch\.newProduct/],
     ['src/stores/orderStore.ts', /images: spec\.images \|\| \[\]/],
-    ['src/pages/orders/OrderDetail.tsx', /images: spec\.images \|\| \[\]/],
+    // CUSTOM-ORDER Review — der Altweg legt den Artikel nicht mehr in der Ansicht an, sondern in der Hausfolge.
+    ['src/core/orders/order-convert-house.ts', /images: spec\.images \|\| \[\]/],
     ['src/core/orders/order-invoice-lines.ts', /images: spec\.images \|\| \[\]/],
   ];
   for (const [f, re] of callers) ok(re.test(src(f)), `ANLAGEWEG ${f} legt den Artikel mit seinen Fotos über createProduct an (${re.source.slice(0, 40)})`);

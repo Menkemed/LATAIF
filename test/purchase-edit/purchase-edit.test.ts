@@ -288,23 +288,21 @@ const purchaseLive = (db: Db, pid: string, account: string, dir: string): number
   ok(check.lines[0].price.allowed && check.lines[0].soldUnits === 1, `C Prüfauskunft: Preis änderbar, 1 verkauft (${S(check.lines[0])})`);
   ok(!check.lines[0].quantityLock.allowed && check.lines[0].quantityLock.code === 'PURCHASE_EDIT_QTY_STOCK_USED', 'C Menge gesperrt (verkauft)');
 
+  // CUSTOM-ORDER Review (O2, Owner-Regel) — die Margin-VAT folgt der aktualisierten Marge. Der Verkauf liegt im OFFENEN
+  // Quartal: die Rechnungszeile bekommt den berichtigten Einstand 500, die Margin-VAT wird aus 700 − 500 neu gerechnet,
+  // die Rechnung wird gegen- und neu gebucht (Protokoll). Ein eigener Beleg entsteht nur noch, wo die Rechnung nicht
+  // berichtigt werden darf (gemeldetes Quartal → N, Retoure, andere Steuerart → D).
   const out = editIt(db, { purchaseId: pid, reason: 'Einkaufspreis falsch erfasst', lines: [{ lineId, unitPrice: 500 }], correctionKind: 'ENTRY_ERROR' });
-  ok(out.corrections.length === 1 && eq(out.corrections[0].amount, -50), `C eine Einstandskorrektur −50 (${S(out.corrections)})`);
-  const cc = db.exec('SELECT * FROM cost_corrections')[0];
-  const row = Object.fromEntries(cc.columns.map((c, i) => [c, cc.values[0][i]]));
-  ok(row.invoice_line_id === ilId && row.kind === 'ENTRY_ERROR' && row.status === 'ACTIVE' && row.vat_status === 'REVIEW', 'C Beleg: Rechnungszeile, Erfassungsfehler, wirksam, VAT zur Prüfung');
-  ok(row.economic_date === SDATE && row.booking_date === NOW.slice(0, 10), `C zwei Daten: wirtschaftlich ${row.economic_date}, gebucht ${row.booking_date} (D1-B)`);
-  ok(eq(Number(row.vat_estimate), 4.545), `C mögliche Margen-VAT-Wirkung +4,545 gekennzeichnet (${row.vat_estimate})`);
-  ok(eq(Number(row.old_unit_cost), 550) && eq(Number(row.new_unit_cost), 500), 'C alter und neuer Einstand im Beleg');
-  ok(String(row.correction_number).startsWith('CC-'), `C Belegnummer ${row.correction_number}`);
-  // Die Rechnung bleibt unverändert.
-  ok(n(db, 'SELECT purchase_price_snapshot FROM invoice_lines WHERE id = ?', [ilId]) === 550 && eq(n(db, 'SELECT margin_snapshot FROM invoices WHERE id = ?', [inv]), 150),
-    'C die Rechnung trägt weiter ihren Verkaufsstand (550 / Marge 150)');
-  ok(S(vatFingerprint(inv)) === fpVorher, 'C der VAT-Fingerabdruck der Rechnung ist unverändert (nichts geht in eine Erklärung)');
-  // Hauptbuch: Wareneinsatz netto 500, kein VAT-Konto berührt.
-  ok(balance(db, 'COGS') === 500, `C Wareneinsatz netto 500 (${balance(db, 'COGS')})`);
-  ok(n(db, "SELECT COUNT(*) FROM ledger_entries WHERE source_module = 'COST_CORRECTION' AND account IN ('VAT_OUTPUT','MARGIN_VAT','VAT_INPUT')") === 0,
-    'C die Korrekturbuchung berührt kein VAT-Konto');
+  ok(out.corrections.length === 1 && eq(out.corrections[0].amount, -50) && out.corrections[0].appliedToInvoice === true
+    // Die tatsächliche Änderung der gebuchten (auf Fils gerundeten) Beträge: 18,182 − 13,636 = 4,546.
+    && eq(out.corrections[0].vatEstimate, 4.546), `C Einstand −50, an der Rechnung berichtigt, Margin-VAT +4,546 (${S(out.corrections)})`);
+  ok(n(db, 'SELECT COUNT(*) FROM cost_corrections') === 0, 'C kein eigener Korrekturbeleg (die Rechnung trägt den Einstand selbst)');
+  ok(n(db, 'SELECT purchase_price_snapshot FROM invoice_lines WHERE id = ?', [ilId]) === 500 && eq(n(db, 'SELECT margin_snapshot FROM invoices WHERE id = ?', [inv]), 200)
+    && eq(n(db, 'SELECT vat_amount FROM invoice_lines WHERE id = ?', [ilId]), 18.182) && eq(n(db, 'SELECT vat_amount FROM invoices WHERE id = ?', [inv]), 18.182),
+    'C Rechnung: Einstand 500, Marge 200, Margin-VAT 18,182 (vorher 13,636)');
+  ok(S(vatFingerprint(inv)) !== fpVorher && n(db, 'SELECT COUNT(*) FROM vat_filings') === 0, 'C der VAT-Fingerabdruck folgt (offenes, nicht gemeldetes Quartal)');
+  ok(balance(db, 'COGS') === 500 && balance(db, 'MARGIN_VAT') === -18.182, `C Hauptbuch: Wareneinsatz 500, Margin-VAT 18,182 (${balance(db, 'COGS')} / ${balance(db, 'MARGIN_VAT')})`);
+  ok(n(db, "SELECT COUNT(*) FROM audit_log WHERE field_name = 'cost_correction_purchase_edit'") === 1, 'C die Berichtigung steht im Protokoll (nicht still)');
   invariant(db, 'C nach Korrektur');
   // Gewinn wirtschaftlich korrigiert (+50) — in der Periode des Verkaufs.
   const metrics = computeSalesMetrics(loadSalesData({ branchId: 'branch-main' }).invoices, []);
@@ -312,10 +310,11 @@ const purchaseLive = (db: Db, pid: string, account: string, dir: string): number
   const okt = computeSalesMetrics(loadSalesData({ branchId: 'branch-main' }).invoices, [], { from: '2026-10-01T00:00:00.000Z', to: '2026-10-31T23:59:59.999Z' });
   ok(eq(okt.profit, 200), `C …im Monat des Verkaufs (${okt.profit})`);
   const invStore = loadInvoicesFor({ branchId: 'branch-main' } as never).invoices.find((i) => i.id === inv)!;
-  ok(eq(invStore.costCorrection ?? 0, -50) && eq(invStore.lines[0].costCorrection ?? 0, -50), 'C die Rechnung im Store trägt die Korrektur (Kopf und Zeile)');
+  ok(eq(invStore.costCorrection ?? 0, 0) && eq(invStore.lines[0].costCorrection ?? 0, 0) && eq(invStore.lines[0].purchasePriceSnapshot ?? 0, 500),
+    'C die Rechnung im Store trägt den Einstand selbst (keine Zusatz-Korrektur)');
   const bridge = costCorrectionBridge('branch-main');
-  ok(bridge.length === 1 && eq(bridge[0].booked, -50) && eq(bridge[0].attributed, -50), `C Überleitung: gebucht und zugeordnet im selben Monat (${S(bridge)})`);
-  ok(costCorrectionRows('branch-main').length === 1, 'C Überleitungsansicht listet die Korrektur genau einmal');
+  ok(bridge.every((r) => eq(r.booked, 0) && eq(r.attributed, 0)) && costCorrectionRows('branch-main').length === 0,
+    `C Überleitung der Einstandskorrekturen: nichts (die Rechnung selbst ist berichtigt) (${S(bridge)})`);
   // Bezahlt 550 > neue Summe 500 → 50 Lieferantenguthaben (Slice 4b).
   ok(out.status === 'PAID' && eq(out.overpayCredit, 50), `C bezahlt 550 > 500: PAID + 50 Guthaben (${S(out)})`);
   ok(apOf(db, 'sup-1') === 0, `C A/P 0 (${apOf(db, 'sup-1')})`);
@@ -352,17 +351,19 @@ const purchaseLive = (db: Db, pid: string, account: string, dir: string): number
   });
   reload();
   ok(r3(n(db, "SELECT COALESCE(SUM(amount),0) FROM ledger_entries WHERE source_module = 'SALES_RETURN_COGS' AND source_id = ? AND account = 'COGS' AND direction = 'CREDIT'", [rid])) === 500,
-    'C die Retoure dreht 500 Wareneinsatz zurück (Verkaufstag 550 + Korrektur −50)');
+    'C die Retoure dreht 500 Wareneinsatz zurück (der berichtigte Einstand der Rechnungszeile)');
   ok(eq(unitCost(db, lotOfLine(db, lineId)), 500) && n(db, 'SELECT qty_remaining FROM stock_lots WHERE purchase_line_id = ?', [lineId]) === 1, 'C das Stück liegt wieder im Los, zu 500');
   ok(balance(db, 'COGS') === 0, `C Wareneinsatz danach 0 (${balance(db, 'COGS')})`);
   invariant(db, 'C nach Retoure');
 }
 
 // ══ D — Rechnung stornieren nimmt die Korrektur mit; Rechnung bearbeiten sperrt die Menge ═══
+// CUSTOM-ORDER Review — der eigene Beleg gilt weiter, wo die Rechnung nicht berichtigt wird; hier ein VAT-10-Verkauf
+// (der Einstand berührt seine VAT nicht). Margin im offenen Quartal: siehe C.
 {
   const db = freshDb();
   const { pid, productId, lineId } = kaufNeu({ price: 550, qty: 2 });
-  const inv = rechnung([LINE(productId, 1, 700, 'MARGIN')]);
+  const inv = rechnung([LINE(productId, 1, 700, 'VAT_10')]);
   editIt(db, { purchaseId: pid, reason: 'falsch', lines: [{ lineId, unitPrice: 500 }], correctionKind: 'ENTRY_ERROR' });
   ok(n(db, "SELECT COUNT(*) FROM cost_corrections WHERE status = 'ACTIVE'") === 1, 'D eine wirksame Korrektur (1 von 2 verkauft)');
   ok(eq(unitCost(db, lotOfLine(db, lineId)), 500) && n(db, 'SELECT qty_remaining FROM stock_lots WHERE purchase_line_id = ?', [lineId]) === 1, 'D das unverkaufte Stück steht zu 500 im Los');
@@ -370,7 +371,7 @@ const purchaseLive = (db: Db, pid: string, account: string, dir: string): number
   // Rechnung bearbeiten: Menge der korrigierten Zeile bleibt gesperrt.
   const il = useInvoiceStore.getState().getInvoice(inv)!.lines[0];
   const editNein = meldung(() => imHaus(() => useInvoiceStore.getState().editInvoice(inv, {
-    reason: 'Menge', lines: [{ ...LINE(productId, 2, 700, 'MARGIN'), lineId: il.id }],
+    reason: 'Menge', lines: [{ ...LINE(productId, 2, 700, 'VAT_10'), lineId: il.id }],
   } as never)));
   ok(code(editNein) === 'INVOICE_LINE_COST_CORRECTED', `D Rechnung bearbeiten: Menge der korrigierten Zeile gesperrt (${editNein.slice(0, 80)})`);
   // Storno der Rechnung: Korrektur gegengebucht, Stück zum berichtigten Einstand zurück.
@@ -621,7 +622,9 @@ const purchaseLive = (db: Db, pid: string, account: string, dir: string): number
   ok(p.ok && r.ok, `J beide Wege speichern (${p.code || 'ok'} / ${r.code || 'ok'})`);
   const diff = (Object.keys(bP) as Array<keyof typeof bP>).filter((key) => bP[key] !== bR[key]).map((key) => `${key}: ${bP[key]} vs ${bR[key]}`);
   ok(diff.length === 0, `J Primary == PC2: Einkauf, Lose, Korrektur, Guthaben, Artikel, Protokoll, Salden (${diff.join(' · ') || 'gleich'})`);
-  ok(bR.korrekturen.includes('-50') && bR.guthaben === S([[100, 0, 'OPEN']]), `J fern: Korrektur −50 und Überzahlung 100 als Guthaben (${bR.korrekturen} / ${bR.guthaben})`);
+  // CUSTOM-ORDER Review (O2) — Margin-Verkauf im offenen Quartal: die Rechnungszeile wird berichtigt, kein eigener Beleg.
+  ok(bR.korrekturen === '[]' && n(wR.db, 'SELECT purchase_price_snapshot FROM invoice_lines') === 500 && bR.guthaben === S([[100, 0, 'OPEN']]),
+    `J fern: Rechnungszeile auf 500 berichtigt und Überzahlung 100 als Guthaben (${bR.korrekturen} / ${bR.guthaben})`);
   ok(s(wR.db, 'SELECT edited_by FROM purchase_edits') === 'user-pc2' && s(wP.db, 'SELECT edited_by FROM purchase_edits') === 'user-test',
     'J das Protokoll nennt den, der bearbeitet hat (PC2-Absender / Primary-Anmeldung)');
   invariant(wR.db, 'J fern');
@@ -667,7 +670,9 @@ const purchaseLive = (db: Db, pid: string, account: string, dir: string): number
       ? await primary(() => purchaseHouse.editPurchaseOnPrimary(w.pid,
         { reason: 'Preis falsch erfasst', lines: [{ lineId: w.lineId, unitPrice: 500 }], correctionKind: 'ENTRY_ERROR' }, rev(w.db, w.pid)))
       : await fern(() => cmds.runPurchaseEdit(deps(w.db), identity(x, 'purchases.correct'), rumpf(w), true));
-    ok(heil.ok && n(w.db, "SELECT COUNT(*) FROM cost_corrections WHERE status = 'ACTIVE'") === 1, `J Rollback ${weg}: danach gelingt es genau einmal (${heil.code || 'ok'})`);
+    ok(heil.ok && n(w.db, 'SELECT purchase_price_snapshot FROM invoice_lines') === 500
+      && n(w.db, "SELECT COUNT(*) FROM audit_log WHERE field_name = 'cost_correction_purchase_edit'") === 1,
+      `J Rollback ${weg}: danach gelingt es genau einmal (${heil.code || 'ok'})`);
     invariant(w.db, `J Rollback ${weg}`);
   }
 

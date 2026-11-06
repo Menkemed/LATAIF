@@ -674,7 +674,15 @@ export function SupplierDetail() {
                               Settle in BHD
                             </button>
                           )}
-                          {gp.status === 'OPEN' && remaining > 0 && !gp.sourceOrderId && (
+                          {/* CUSTOM-ORDER Review (C1) — UNSER Gold beim Goldschmied (they_owe): er gibt es zurück — seine Balance ↓,
+                              unser Bestand ↑; eine Goldschuld derselben Werkstatt bleibt davon unberührt. */}
+                          {gp.status === 'OPEN' && remaining > 0 && gp.direction === 'they_owe' && (
+                            <button data-gold-settle-open="settle_supplier_return" onClick={() => setSettleModal({ open: true, mode: 'settle_supplier_return', payable: gp })}
+                              style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#0F0F10', cursor: 'pointer' }}>
+                              Return gold
+                            </button>
+                          )}
+                          {gp.status === 'OPEN' && remaining > 0 && !gp.sourceOrderId && gp.direction !== 'they_owe' && (
                             <>
                               <button onClick={() => setSettleModal({ open: true, mode: 'apply_shop_to_supplier', payable: gp })}
                                 style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#0F0F10', cursor: 'pointer' }}>

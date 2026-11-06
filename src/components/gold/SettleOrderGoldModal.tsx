@@ -2,7 +2,8 @@
 // CUSTOM-ORDER K3a — die Goldschuld einer Order in BHD begleichen: Gramm (ganz oder teilweise), Goldpreis je Gramm
 // (manuell), Tag. Die Vorschau zeigt Betrag, aufgelösten Buchwert und die Differenz, die den Einstand der Order
 // ändert. Rechnen und buchen tut das Haus (`settleOrderGoldInBhd`); am Primary in einer Klammer, an PC2 über
-// `gold.payables.settle` (Art 'money_order'). Am Primary stehen darunter die wirksamen Begleichungen mit „Reverse".
+// `gold.payables.settle` (Art 'money_order'). Darunter stehen die wirksamen Begleichungen mit „Reverse" — seit dem Review
+// auch am PC2: dieselbe Liste aus dem Gold-Bestand (`store.gold.get`), Rücknahme über 'money_order_reverse'.
 // ════════════════════════════════════════════════════════════════════════════
 import { useEffect, useMemo, useState } from 'react';
 import { Modal } from '@/components/ui/Modal';
@@ -13,8 +14,6 @@ import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-w
 import {
   orderGoldReverseBody, orderGoldSettleBody, reverseOrderGoldSettlementOnPrimary, settleOrderGoldOnPrimary,
 } from '@/core/gold/gold-house';
-import { activeOrderGoldSettlements, type ActiveOrderGoldSettlement } from '@/core/gold/order-gold-settle';
-import { readsFromPrimary } from '@/core/data/primary-source';
 
 interface Props {
   open: boolean;
@@ -26,7 +25,6 @@ const F = (v: number): number => Math.round(v * 1000);
 const fmt = (fils: number): string => (fils / 1000).toFixed(3);
 const mulDiv = (a: number, b: number, c: number): number => Number((2n * BigInt(Math.max(0, a)) * BigInt(Math.max(0, b)) + BigInt(c)) / (2n * BigInt(c)));
 
-type SettlementRow = ActiveOrderGoldSettlement;
 
 export function SettleOrderGoldModal({ open, onClose, payable }: Props) {
   const w = useSharedWrites();
@@ -36,17 +34,16 @@ export function SettleOrderGoldModal({ open, onClose, payable }: Props) {
   const [day, setDay] = useState(() => new Date().toISOString().slice(0, 10));
   const [notes, setNotes] = useState('');
   const [error, setError] = useState('');
-  const [rows, setRows] = useState<SettlementRow[]>([]);
-  const local = !readsFromPrimary();
+  const alle = useGoldStore((s) => s.orderGoldSettlements);
+  const rows = useMemo(() => alle.filter((x) => x.payableId === payable.id && x.status === 'ACTIVE'), [alle, payable.id]);
 
   useEffect(() => {
     if (!open) return;
     setGrams(remaining.toFixed(3)); setRate(''); setError(''); setNotes('');
     setDay(new Date().toISOString().slice(0, 10));
-    if (local) {
-      try { setRows(activeOrderGoldSettlements(payable.id)); } catch { setRows([]); }
-    }
-  }, [open, payable.id, remaining, local]);
+    // Frisch vom Primary (am PC2) bzw. aus der eigenen Datenbank: Schulden UND ihre Begleichungen.
+    useGoldStore.getState().loadGoldPayables();
+  }, [open, payable.id, remaining]);
 
   const preview = useMemo(() => {
     const g = F(parseFloat(grams) || 0), r = F(parseFloat(rate) || 0);
@@ -114,7 +111,9 @@ export function SettleOrderGoldModal({ open, onClose, payable }: Props) {
           <span className="text-overline">ACTIVE SETTLEMENTS</span>
           {rows.map((r) => (
             <div key={r.id} className="flex justify-between items-center" style={{ fontSize: 12.5, padding: '6px 0' }}>
-              <span className="font-mono">{r.settledOn} · {r.grams.toFixed(3)} g × {r.rate.toFixed(3)} = {r.amount.toFixed(3)} BHD ({r.difference >= 0 ? '+' : ''}{r.difference.toFixed(3)})</span>
+              <span className="font-mono" data-order-gold-settlement={r.costMode}>{r.settledOn} · {r.grams.toFixed(3)} g × {r.ratePerGram.toFixed(3)} = {r.amount.toFixed(3)} BHD ({r.difference >= 0 ? '+' : ''}{r.difference.toFixed(3)})
+                {r.costMode === 'SEPARATE' && <span style={{ color: '#9A3412' }}> · invoice in a closed VAT period — cost booked separately{r.vatStatus === 'REVIEW' ? ', VAT review' : ''}</span>}
+              </span>
               <Button variant="ghost" onClick={() => { void reverse(r.id); }}>Reverse</Button>
             </div>
           ))}

@@ -2648,6 +2648,12 @@ function runMigrations(database: Database): void {
     // (Altbestand, Reparatur-Goldschuld). Bucht beim Anlegen der Spalte nichts.
     `ALTER TABLE gold_payables ADD COLUMN book_value REAL`,
     `ALTER TABLE gold_payables ADD COLUMN book_value_date TEXT`,
+    // CUSTOM-ORDER Review (SKU/Herkunft) — ein Artikel, der aus einer Order entsteht, trägt seine Herkunft dauerhaft
+    // selbst: Art (CUSTOM_ORDER | ORDER), die Order und ihre Nummer. Gesetzt beim Anlegen im Haus, von keiner Maske
+    // änderbar; überlebt Rechnungsstorno und erneute Umwandlung. Altbestand: NULL (Herkunft dann über die Order-Verknüpfung).
+    `ALTER TABLE products ADD COLUMN origin_type TEXT`,
+    `ALTER TABLE products ADD COLUMN origin_order_id TEXT`,
+    `ALTER TABLE products ADD COLUMN origin_order_number TEXT`,
     // CUSTOM-ORDER K2 — eine Anzahlung wird auf die Rechnung ANGERECHNET, nicht zurückgedreht und neu gebucht: der
     // Geldeingang (order_payments + ORDER_PAYMENT-Buchung + Kartengebühr) bleibt, wie er war; die Rechnung bekommt eine
     // Zahlung der Art 'order_deposit' (Soll CUSTOMER_DEPOSITS / Haben AR). Je Anrechnung eine Zeile: welche Order-Zahlung,
@@ -2692,6 +2698,12 @@ function runMigrations(database: Database): void {
       new_unit_cost REAL,
       old_vat_amount REAL,
       new_vat_amount REAL,
+      -- CUSTOM-ORDER Review — wohin die Differenz ging: UNSOLD (Einstand des Stücks, INVENTORY), INVOICE (Rechnungszeile
+      -- im offenen Quartal berichtigt) oder SEPARATE (Rechnung im geschlossenen Quartal/vor dem Stichtag: Differenz im
+      -- Wareneinsatz der offenen Periode, Rechnung unverändert). vat_status: REVIEW = eine mögliche Margin-VAT-Wirkung
+      -- wartet auf den gesonderten Korrekturvorgang (Schätzung in old/new_vat_amount), sonst NONE.
+      cost_mode TEXT NOT NULL DEFAULT 'UNSOLD' CHECK (cost_mode IN ('UNSOLD','INVOICE','SEPARATE')),
+      vat_status TEXT NOT NULL DEFAULT 'NONE' CHECK (vat_status IN ('NONE','REVIEW')),
       status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','REVERSED')),
       reversed_at TEXT,
       notes TEXT,

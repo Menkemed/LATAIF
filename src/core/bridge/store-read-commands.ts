@@ -284,6 +284,8 @@ registerCommand(OP_STORE_GOLD_GET, {
       data: {
         ...s.loadGoldPayablesFor(ctx), ...s.loadCustomerGoldCreditsFor(ctx),
         ...s.loadRepairGoldUsageFor(ctx),
+        // CUSTOM-ORDER Review — die BHD-Begleichungen der Order-Goldschulden: PC2 listet und nimmt zurück wie der Primary.
+        ...s.loadOrderGoldSettlementsFor(ctx),
       },
     };
   },

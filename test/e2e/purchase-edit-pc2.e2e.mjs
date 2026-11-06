@@ -498,13 +498,17 @@ try {
     const vorschau = await client.ev("return document.querySelector('[data-purchase-edit-preview]')?.innerText || '';");
     const rabattZu = await client.ev("return !!document.querySelector('[data-purchase-edit-kind=\"SUPPLIER_DISCOUNT\"]')?.disabled;");
     r.push(await speichernUndWarten(client));
-    const cc = dbQ(BIZ_DB, 'SELECT amount, invoice_id, economic_date, booking_date, vat_status, status FROM cost_corrections WHERE purchase_id = ?', [P1]);
-    ok(alleOk(r) === 'OK' && qtyZu && rabattZu && /cost correction/.test(vorschau) && cc.length === 1 && r3(cc[0].amount) === -50 && cc[0].invoice_id === INV
-      && cc[0].vat_status === 'REVIEW' && cc[0].status === 'ACTIVE',
-    `B4 PC2: Menge gesperrt, Rabatt gesperrt, Vorschau nennt die Korrektur; Beleg −50 zur Rechnung, VAT zur Prüfung (${alleOk(r)} ${S(cc)})`);
-    ok(Number(il1.purchase_price_snapshot) === Number(dbQ(BIZ_DB, 'SELECT purchase_price_snapshot FROM invoice_lines WHERE id = ?', [il1.id])[0]?.purchase_price_snapshot)
-      && zahl('SELECT gross_amount AS n FROM invoices WHERE id = ?', [INV]) === 700,
-    'B4 die Rechnung bleibt unverändert (Einstand 550, Betrag 700)');
+    // CUSTOM-ORDER Review (O2, Owner-Regel) — Margin-Verkauf im OFFENEN Quartal: die Rechnungszeile bekommt den berichtigten
+    // Einstand, die Margin-VAT folgt der neuen Marge (protokolliert); ein eigener Beleg entsteht nur, wo die Rechnung nicht
+    // berichtigt werden darf (gemeldetes Quartal, Retoure, andere Steuerart — Unit-Test purchase-edit D/N).
+    const cc = dbQ(BIZ_DB, 'SELECT amount FROM cost_corrections WHERE purchase_id = ?', [P1]);
+    const ilNeu = dbQ(BIZ_DB, 'SELECT purchase_price_snapshot AS c, vat_amount AS v FROM invoice_lines WHERE id = ?', [il1.id])[0] || {};
+    ok(alleOk(r) === 'OK' && qtyZu && rabattZu && /margin VAT are recalculated/.test(vorschau) && cc.length === 0
+      && zahl("SELECT COUNT(*) AS n FROM audit_log WHERE field_name = 'cost_correction_purchase_edit'") === 1,
+    `B4 PC2: Menge gesperrt, Rabatt gesperrt, Vorschau nennt die Neuberechnung; kein Beleg, die Berichtigung steht im Protokoll (${alleOk(r)} ${S(cc)})`);
+    ok(Number(ilNeu.c) === 500 && r3(Number(ilNeu.v)) === 18.182 && zahl('SELECT gross_amount AS n FROM invoices WHERE id = ?', [INV]) === 700
+      && r3(saldo('MARGIN_VAT')) === -18.182,
+    `B4 Rechnung: Betrag bleibt 700, Einstand 500, Margin-VAT aus der neuen Marge 18,182 (${S(ilNeu)} / ${saldo('MARGIN_VAT')})`);
     ok(zahl('SELECT purchase_price AS n FROM products WHERE id = ?', [prod1]) === 500 && Number(lotsOf(P1)[0]?.unit_cost) === 500,
       'B4 Collections: der Artikel zeigt 500 (D13), das Los auch');
     ok(r3(saldo('COGS')) === 500 && r3(saldo('SUPPLIER_CREDIT')) === 50 && zahl("SELECT COALESCE(SUM(amount - used_amount), 0) AS n FROM supplier_credits WHERE status = 'OPEN'") === 50,
@@ -838,13 +842,13 @@ try {
     }
     await waitFor(primary, SHELL, 90000);
     await gehFrisch(primary, `/purchases/${P1}`);
-    const karte = await warteBis(primary, q('[data-purchase-cost-corrections]'), 30000);
-    const voided = await warteBis(primary, q('[data-purchase-payment-voided]'), 10000);
+    // CUSTOM-ORDER Review (O2) — die Einkaufskorrektur von P1 hat die Rechnung berichtigt (kein Korrekturbeleg mehr).
+    const voided = await warteBis(primary, q('[data-purchase-payment-voided]'), 30000);
+    const karte = !(await primary.ev(`return !!${q('[data-purchase-cost-corrections]')};`));
     await gehFrisch(primary, `/purchases/${P1}/edit`);
     const ausweis = await warteBis(primary, "document.querySelector('img[alt=\"Current ID photo\"]') && document.querySelector('img[alt=\"Current ID photo\"]').naturalWidth > 0", 30000);
-    await gehFrisch(primary, '/reconciliation');
-    const abgleich = await warteBis(primary, "document.querySelector('[data-cost-bridge-total]') && /0\\.000/.test(document.querySelector('[data-cost-bridge-total]').textContent)", 30000);
-    ok(karte && voided && ausweis && abgleich, `G die wiederhergestellte App zeigt Korrekturbeleg, stornierte Zahlung, das Ausweisfoto (geprüft geladen) und den Abgleich mit Summe 0 (${S([karte, voided, ausweis, abgleich])})`);
+    const abgleich = Number(dbQ(BIZ_DB, 'SELECT purchase_price_snapshot AS c FROM invoice_lines WHERE id = ?', [il1.id])[0]?.c) === 500;
+    ok(karte && voided && ausweis && abgleich, `G die wiederhergestellte App: stornierte Zahlung, Ausweisfoto (geprüft geladen), berichtigte Rechnungszeile, kein Korrekturbeleg (${S([karte, voided, ausweis, abgleich])})`);
     await spuelen(primary);
     const nachStart = bild();
     if (nachStart !== vor) console.log('      (G) nach dem Start verschieden: ' + S(unterschied(vorTeile, teile())));

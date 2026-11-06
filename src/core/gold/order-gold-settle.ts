@@ -12,9 +12,12 @@
 // Ist das Stück noch nicht verkauft, trägt der Artikel bzw. die Gold-Zeile der Order den neuen Einstand. Ist es
 // verkauft, wird die Rechnungszeile ausdrücklich berichtigt: Einstand neu und — bei Margin — die Margin-VAT aus der
 // neuen Marge (Owner-Entscheidung O2), gebucht wie eine Rechnungskorrektur (Gegenbuchung an den Originaltagen,
-// Neubuchung am Rechnungstag; Wareneinsatz und Margin-VAT folgen). Eingereichte/bezahlte VAT-Quartale und der
-// Eröffnungsstichtag sind geschützt: liegt die Rechnung dort, wird die Begleichung abgelehnt — still geändert wird
-// nichts (eine Steuerkorrektur in einer späteren Periode gibt es im System nicht; offener Punkt im Bericht).
+// Neubuchung am Rechnungstag; Wareneinsatz und Margin-VAT folgen) — `core/invoices/sold-line-cost-correction`.
+// CUSTOM-ORDER Review — liegt die Rechnung in einem gemeldeten Quartal (oder vor dem Stichtag), darf die Goldschuld
+// trotzdem beglichen werden: die Rechnung bleibt unverändert, die Differenz geht in der offenen Periode (Tag der
+// Begleichung) in den Wareneinsatz (cost_mode SEPARATE, zugeordnet der Rechnungszeile); eine mögliche Margin-VAT-Wirkung
+// steht geschätzt als REVIEW an der Begleichung — der gesonderte VAT-Korrekturvorgang ist eine Owner-/Buchhalter-
+// Entscheidung und wird hier NICHT gebucht.
 // Storno einer Begleichung: nur solange ihre Lieferantenschuld unbezahlt ist; dreht genau die gespeicherten Werte zurück.
 // ════════════════════════════════════════════════════════════════════════════
 import { v4 as uuid } from 'uuid';
@@ -22,12 +25,9 @@ import { getDatabase } from '@/core/db/database';
 import { query, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate } from '@/core/sync/track';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
-import {
-  postEntries, reverseSource, postInvoiceIssued, activeSourceDates, hasLedgerEntries, type LedgerEntryInput,
-} from '@/core/ledger/posting';
+import { postEntries, reverseSource, hasLedgerEntries, type LedgerEntryInput } from '@/core/ledger/posting';
 import { assertCorrectionDates } from '@/core/ledger/correction-dates';
-import { vatFingerprint, assertVatUnchanged } from '@/core/tax/vat-period-lock';
-import { vatEngine } from '@/core/tax/vat-engine';
+import { planSoldLineCostCorrection, applySoldLineCostCorrection, type SoldLinePlan } from '@/core/invoices/sold-line-cost-correction';
 import { businessDateIssue } from '@/core/utils/business-date';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useProductStore } from '@/stores/productStore';
@@ -59,6 +59,8 @@ export interface OrderGoldSettled {
   settlementId: string; payableId: string; expenseId: string;
   grams: number; amount: number; bookShare: number; difference: number;
   openGrams: number; status: string; invoiceLineCorrected: boolean;
+  /** CUSTOM-ORDER Review — wohin die Differenz ging (UNSOLD | INVOICE | SEPARATE). */
+  costMode: 'UNSOLD' | 'INVOICE' | 'SEPARATE';
 }
 
 interface Actor { branchId: string; userId: string }
@@ -80,71 +82,11 @@ function soldLineOf(orderId: string): { invoiceId: string; lineId: string } | nu
   return r ? { invoiceId: String(r.invoice_id), lineId: String(r.line_id) } : null;
 }
 
-/**
- * Berichtigt die Rechnungszeile eines schon verkauften Stücks um `deltaFils` Einstand (Margin: Margin-VAT neu).
- * Prüft Retouren, Sperren und VAT-Quartale VOR dem ersten Schreiben; bucht wie eine Rechnungskorrektur.
- * Gibt alten/neuen Einstand je Stück und alte/neue VAT der Zeile zurück.
- */
-function correctSoldLine(sold: { invoiceId: string; lineId: string }, deltaFils: number, branchId: string, nowIso: string, dryRun: boolean):
-  { oldUnit: number; newUnit: number; oldVat: number; newVat: number } {
-  const line = query('SELECT * FROM invoice_lines WHERE id = ?', [sold.lineId])[0];
-  const inv = query('SELECT id, issued_at, status FROM invoices WHERE id = ?', [sold.invoiceId])[0];
-  if (!line || !inv) throw nein('INVOICE_NOT_FOUND', 'The invoice of this order is missing.');
-  const zurueck = Number(query(
-    `SELECT (SELECT COUNT(*) FROM sales_returns WHERE invoice_id = ? AND status != 'REJECTED')
-          + (SELECT COUNT(*) FROM credit_notes WHERE invoice_id = ? AND status != 'CANCELLED') AS c`,
-    [sold.invoiceId, sold.invoiceId])[0]?.c ?? 0);
-  if (zurueck > 0) throw nein('INVOICE_HAS_RETURNS', 'The invoice of this piece already has a return or credit note — its cost cannot be corrected automatically.');
-  const fremd = query(
-    `SELECT 1 FROM ledger_entries e1 WHERE e1.source_module = 'INVOICE' AND e1.source_id = ? AND e1.reverses_entry_id IS NULL
-        AND e1.account NOT IN ('ACCOUNTS_RECEIVABLE','REVENUE','VAT_OUTPUT','MARGIN_VAT','COGS','INVENTORY')
-        AND NOT EXISTS (SELECT 1 FROM ledger_entries e2 WHERE e2.reverses_entry_id = e1.id) LIMIT 1`, [sold.invoiceId]);
-  if (fremd.length > 0) throw nein('INVOICE_HAS_EDIT_CREDIT', 'The invoice carries a credit from an earlier correction — correct its cost by hand.');
-  const qty = Math.max(1, Number(line.quantity) || 1);
-  const oldUnit = Number(line.purchase_price_snapshot) || 0;
-  const newTotalF = F(oldUnit * qty) + deltaFils;
-  if (newTotalF < 0) throw nein('COST_NEGATIVE', 'The cost of the piece would become negative.');
-  const newUnit = Math.round((newTotalF / 1000 / qty) * 1e6) / 1e6;
-  const oldVat = Number(line.vat_amount) || 0;
-  let newVat = oldVat;
-  if (String(line.tax_scheme) === 'MARGIN') {
-    // O2 — Margin-VAT aus der aktualisierten Marge (Kundenpreis − tatsächlicher Einstand), dieselbe Formel wie beim Anlegen.
-    newVat = vatEngine.calcMarginFromNet(Number(line.line_total) || 0, B(newTotalF), Number(line.vat_rate) || 10).internalVatAmount ?? 0;
-  }
-  // Perioden: Gegenbuchung an den Originaltagen, Neubuchung am Rechnungstag — beide müssen offen sein.
-  const dates = [...activeSourceDates('INVOICE', sold.invoiceId), String(inv.issued_at)].map((iso) => ({ iso, what: 'the correction of this invoice' }));
-  assertCorrectionDates(branchId, dates);
-  if (dryRun) return { oldUnit, newUnit, oldVat, newVat };
-
-  const before = vatFingerprint(sold.invoiceId);
-  const db = getDatabase();
-  db.run('UPDATE invoice_lines SET purchase_price_snapshot = ?, vat_amount = ? WHERE id = ?', [newUnit, newVat, sold.lineId]);
-  trackUpdate('invoice_lines', sold.lineId, { purchasePriceSnapshot: newUnit, vatAmount: newVat });
-  const sums = query(
-    `SELECT COALESCE(SUM(unit_price * MAX(1, quantity)), 0) AS net, COALESCE(SUM(vat_amount), 0) AS vat,
-            COALESCE(SUM(purchase_price_snapshot * MAX(1, quantity)), 0) AS cost FROM invoice_lines WHERE invoice_id = ?`, [sold.invoiceId])[0];
-  const r3 = (x: number): number => Math.round(x * 1000) / 1000;
-  const net = Number(sums?.net) || 0, cost = r3(Number(sums?.cost) || 0), vat = r3(Number(sums?.vat) || 0);
-  db.run('UPDATE invoices SET vat_amount = ?, purchase_price_snapshot = ?, margin_snapshot = ?, updated_at = ? WHERE id = ?',
-    [vat, cost, r3(net - cost), nowIso, sold.invoiceId]);
-  trackUpdate('invoices', sold.invoiceId, { vatAmount: vat, purchasePriceSnapshot: cost, marginSnapshot: r3(net - cost) });
-  if (line.product_id) {
-    db.run('UPDATE products SET purchase_price = ?, updated_at = ? WHERE id = ?', [newUnit, nowIso, String(line.product_id)]);
-    trackUpdate('products', String(line.product_id), { purchasePrice: newUnit });
-  }
-  // Buchung wie jede Rechnungskorrektur: alles der Rechnung an den Originaltagen zurück, neu zum Rechnungstag.
-  if (hasLedgerEntries('INVOICE', sold.invoiceId)) reverseSource('INVOICE', sold.invoiceId, nowIso, { mirrorOriginalDates: true });
-  useInvoiceStore.getState().loadInvoices();
-  const fresh = useInvoiceStore.getState().getInvoice(sold.invoiceId);
-  if (!fresh) throw new Error('order gold settle: the invoice could not be reloaded');
-  postInvoiceIssued(fresh);
-  // Ein gemeldetes Quartal (Export-Fingerabdruck) darf sich nicht still ändern.
-  assertVatUnchanged(branchId, before, vatFingerprint(sold.invoiceId));
-  logAuditOrThrow({
-    module: 'Invoice', entityType: 'invoice_lines', entityId: sold.lineId, action: 'UPDATE', field: 'cost_correction_order_gold',
-    oldValue: { purchasePriceSnapshot: oldUnit, vatAmount: oldVat }, newValue: { purchasePriceSnapshot: newUnit, vatAmount: newVat, deltaFils },
-  });
-  return { oldUnit, newUnit, oldVat, newVat };
+/** Plan einer Berichtigung des verkauften Stücks; ein Sperrgrund (Retoure, Korrektur-Guthaben, negativ) ist ein Nein. */
+function planSold(sold: { invoiceId: string; lineId: string }, deltaFils: number, branchId: string): SoldLinePlan {
+  const plan = planSoldLineCostCorrection(sold, deltaFils, branchId);
+  if (plan.blocker) throw nein(plan.blocker.code, plan.blocker.message);
+  return plan;
 }
 
 /** Wirkung einer Differenz auf das noch nicht verkaufte Stück: Gold-Zeile der Order und (falls schon da) Artikel. */
@@ -194,6 +136,7 @@ export function settleOrderGoldInBhd(actor: Actor, req: OrderGoldSettleRequest):
   const nowIso = new Date().toISOString();
   const settledOn = day || nowIso.slice(0, 10);
   const occurredAt = settledOn === nowIso.slice(0, 10) ? nowIso : `${settledOn}T12:00:00.000Z`;
+  // Ein zurückdatierter Tag der Begleichung muss offen sein (wie bei jeder anderen Buchung von heute gilt „heute" als offen).
   if (settledOn !== nowIso.slice(0, 10)) assertCorrectionDates(actor.branchId, [{ iso: occurredAt, what: 'this settlement' }]);
 
   const amountF = mulDiv(gramsMg, rateF, 1000);
@@ -203,8 +146,12 @@ export function settleOrderGoldInBhd(actor: Actor, req: OrderGoldSettleRequest):
   const diffF = amountF - shareF;
   const orderId = String(p.source_order_id);
   const sold = soldLineOf(orderId);
-  // Prüfen, bevor geschrieben wird (Sperren der Rechnung, Retouren).
-  if (sold && diffF !== 0) correctSoldLine(sold, diffF, actor.branchId, nowIso, true);
+  // Prüfen, bevor geschrieben wird (Sperren der Rechnung, Retouren) — und wohin die Differenz geht.
+  const plan = sold && diffF !== 0 ? planSold(sold, diffF, actor.branchId) : null;
+  const costMode: OrderGoldSettled['costMode'] = !plan ? 'UNSOLD' : plan.mode === 'INVOICE' ? 'INVOICE' : 'SEPARATE';
+  // Owner-Regel: die getrennte Differenz wird in einer ZULÄSSIGEN OFFENEN Periode gebucht — auch „heute" muss dann offen sein
+  // (ist das laufende Quartal schon gemeldet/bezahlt, gibt es keinen offenen Tag: Nein, nichts geändert).
+  if (costMode === 'SEPARATE') assertCorrectionDates(actor.branchId, [{ iso: occurredAt, what: 'the cost difference of this settlement' }]);
 
   const db = getDatabase();
   const order = query('SELECT order_number FROM orders WHERE id = ?', [orderId])[0];
@@ -222,8 +169,12 @@ export function settleOrderGoldInBhd(actor: Actor, req: OrderGoldSettleRequest):
   const entries: LedgerEntryInput[] = [];
   if (shareF > 0) entries.push({ account: 'GOLD_LIABILITY', direction: 'DEBIT', amount: B(shareF), counterpartyType: 'SUPPLIER', counterpartyId: String(p.supplier_id), metadata: meta });
   entries.push({ account: 'ACCOUNTS_PAYABLE', direction: 'CREDIT', amount: B(amountF), counterpartyType: 'SUPPLIER', counterpartyId: String(p.supplier_id), metadata: meta });
-  if (diffF > 0) entries.push({ account: 'INVENTORY', direction: 'DEBIT', amount: B(diffF), metadata: { ...meta, part: 'cost_difference' } });
-  if (diffF < 0) entries.push({ account: 'INVENTORY', direction: 'CREDIT', amount: B(-diffF), metadata: { ...meta, part: 'cost_difference' } });
+  // SEPARATE: die Rechnung (geschlossenes Quartal) bleibt — die Differenz ist Wareneinsatz der offenen Periode, der
+  // Rechnungszeile zugeordnet (Zuordnung je Artikel wie jede COGS-Zeile). Sonst: Einstand des Stücks (INVENTORY).
+  const diffAccount = costMode === 'SEPARATE' ? 'COGS' : 'INVENTORY';
+  const diffLine = costMode === 'SEPARATE' && sold ? { sourceLineId: sold.lineId } : {};
+  if (diffF > 0) entries.push({ account: diffAccount, direction: 'DEBIT', amount: B(diffF), ...diffLine, metadata: { ...meta, part: 'cost_difference', costMode } });
+  if (diffF < 0) entries.push({ account: diffAccount, direction: 'CREDIT', amount: B(-diffF), ...diffLine, metadata: { ...meta, part: 'cost_difference', costMode } });
   postEntries(entries, { occurredAt, sourceModule: 'EXPENSE', sourceId: expenseId });
 
   const nextDoneMg = doneMg + gramsMg;
@@ -235,44 +186,41 @@ export function settleOrderGoldInBhd(actor: Actor, req: OrderGoldSettleRequest):
   let corr: { oldUnit: number; newUnit: number; oldVat: number; newVat: number } | null = null;
   if (diffF !== 0) {
     shiftUnsoldCost(orderId, String(p.source_order_line_id ?? ''), diffF, nowIso);
-    if (sold) {
+    if (sold && costMode === 'INVOICE') {
       // Das Produkt bekam oben schon den Einstand (+Diff); die Rechnungszeile folgt hier ausdrücklich.
-      corr = correctSoldLine(sold, diffF, actor.branchId, nowIso, false);
+      corr = applySoldLineCostCorrection(sold, diffF, actor.branchId, nowIso, {
+        setProductCost: true, auditField: 'cost_correction_order_gold', auditContext: { payableId: req.payableId, orderId } });
+    } else if (sold && plan && costMode === 'SEPARATE') {
+      // Nur festhalten (Schätzung), nicht buchen: alter/neuer Einstand und Margin-VAT der unveränderten Rechnungszeile.
+      corr = { oldUnit: plan.oldUnit, newUnit: plan.newUnit, oldVat: plan.oldVat, newVat: plan.newVat };
     }
   }
+  const vatStatus = costMode === 'SEPARATE' && plan && plan.taxScheme === 'MARGIN' && Math.abs(plan.newVat - plan.oldVat) > 0.0005 ? 'REVIEW' : 'NONE';
   const settlementId = uuid();
   db.run(
     `INSERT INTO gold_payable_settlements (id, branch_id, payable_id, order_id, kind, grams, rate_per_gram, amount, book_share, difference,
-       settled_on, expense_id, invoice_id, invoice_line_id, old_unit_cost, new_unit_cost, old_vat_amount, new_vat_amount, status, notes, created_at, created_by)
-     VALUES (?, ?, ?, ?, 'MONEY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)`,
+       settled_on, expense_id, invoice_id, invoice_line_id, old_unit_cost, new_unit_cost, old_vat_amount, new_vat_amount, cost_mode, vat_status,
+       status, notes, created_at, created_by)
+     VALUES (?, ?, ?, ?, 'MONEY', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)`,
     [settlementId, actor.branchId, req.payableId, orderId, B(gramsMg), B(rateF), B(amountF), B(shareF), B(diffF), settledOn, expenseId,
      corr ? sold!.invoiceId : null, corr ? sold!.lineId : null, corr?.oldUnit ?? null, corr?.newUnit ?? null, corr?.oldVat ?? null, corr?.newVat ?? null,
-     req.notes ?? null, nowIso, actor.userId],
+     costMode, vatStatus, req.notes ?? null, nowIso, actor.userId],
   );
-  trackInsert('gold_payable_settlements', settlementId, { payableId: req.payableId, grams: B(gramsMg), amount: B(amountF), difference: B(diffF) });
+  trackInsert('gold_payable_settlements', settlementId, { payableId: req.payableId, grams: B(gramsMg), amount: B(amountF), difference: B(diffF), costMode, vatStatus });
   logAuditOrThrow({
     module: 'Gold', entityType: 'gold_payable_settlements', entityId: settlementId, action: 'CREATE', field: 'settlement',
-    newValue: { payableId: req.payableId, grams: B(gramsMg), ratePerGram: B(rateF), amount: B(amountF), bookShare: B(shareF), difference: B(diffF), settledOn, expenseId },
+    newValue: { payableId: req.payableId, grams: B(gramsMg), ratePerGram: B(rateF), amount: B(amountF), bookShare: B(shareF), difference: B(diffF), settledOn, expenseId,
+      costMode, vatStatus, ...(plan?.periodReason ? { periodReason: plan.periodReason } : {}) },
     actor,
   });
   reloadStores();
   return {
     settlementId, payableId: req.payableId, expenseId, grams: B(gramsMg), amount: B(amountF), bookShare: B(shareF), difference: B(diffF),
-    openGrams: B(weightMg - nextDoneMg), status: fertig ? 'FULFILLED' : 'OPEN', invoiceLineCorrected: !!corr,
+    openGrams: B(weightMg - nextDoneMg), status: fertig ? 'FULFILLED' : 'OPEN', invoiceLineCorrected: costMode === 'INVOICE', costMode,
   };
 }
 
 /** Nimmt eine Begleichung zurück, solange ihre Lieferantenschuld unbezahlt ist. In der Klammer des Aufrufers. */
-/** Die wirksamen BHD-Begleichungen einer Goldschuld (für die Liste mit „Reverse" am Primary) — nur lesend. */
-export interface ActiveOrderGoldSettlement { id: string; grams: number; rate: number; amount: number; difference: number; settledOn: string }
-export function activeOrderGoldSettlements(payableId: string): ActiveOrderGoldSettlement[] {
-  return query(
-    `SELECT id, grams, rate_per_gram, amount, difference, settled_on FROM gold_payable_settlements
-      WHERE payable_id = ? AND status = 'ACTIVE' ORDER BY created_at`, [payableId],
-  ).map((r) => ({ id: String(r.id), grams: Number(r.grams), rate: Number(r.rate_per_gram), amount: Number(r.amount),
-    difference: Number(r.difference), settledOn: String(r.settled_on) }));
-}
-
 export function reverseOrderGoldSettlement(actor: Actor, settlementId: string): { settlementId: string; payableId: string } {
   const st = query('SELECT * FROM gold_payable_settlements WHERE id = ? AND branch_id = ?', [settlementId, actor.branchId])[0];
   if (!st) throw nein('SETTLEMENT_NOT_FOUND', 'No such settlement in this branch.');
@@ -283,9 +231,17 @@ export function reverseOrderGoldSettlement(actor: Actor, settlementId: string): 
   if (bezahlt) throw nein('SETTLEMENT_PAID', 'The supplier debt of this settlement is already (partly) paid — reverse that payment first.');
   const diffF = F(st.difference);
   const orderId = String(st.order_id ?? '');
-  const sold = orderId ? soldLineOf(orderId) : null;
+  const separate = String(st.cost_mode ?? 'UNSOLD') === 'SEPARATE';
+  // SEPARATE: die Differenz steht als eigener Wareneinsatz in der Ausgabe — ihre Gegenbuchung nimmt sie mit; die Rechnung
+  // war und bleibt unverändert. Sonst steckt die Differenz im Einstand des Stücks: ist es verkauft, folgt die Rechnung.
+  const sold = !separate && orderId ? soldLineOf(orderId) : null;
   const nowIso = new Date().toISOString();
-  if (sold && diffF !== 0) correctSoldLine(sold, -diffF, actor.branchId, nowIso, true);
+  if (sold && diffF !== 0) {
+    const back = planSold(sold, -diffF, actor.branchId);
+    if (back.mode !== 'INVOICE') {
+      throw nein('SETTLEMENT_INVOICE_PERIOD_CLOSED', `The invoice that carries this cost is in a closed VAT period or before the opening cut-off (${back.periodReason ?? ''}). Record a new settlement instead of reversing this one.`);
+    }
+  }
 
   const db = getDatabase();
   if (hasLedgerEntries('EXPENSE', String(st.expense_id))) reverseSource('EXPENSE', String(st.expense_id), nowIso);
@@ -298,7 +254,8 @@ export function reverseOrderGoldSettlement(actor: Actor, settlementId: string): 
   if (diffF !== 0) {
     const gp = query('SELECT source_order_line_id FROM gold_payables WHERE id = ?', [String(st.payable_id)])[0];
     shiftUnsoldCost(orderId, String(gp?.source_order_line_id ?? ''), -diffF, nowIso);
-    if (sold) correctSoldLine(sold, -diffF, actor.branchId, nowIso, false);
+    if (sold) applySoldLineCostCorrection(sold, -diffF, actor.branchId, nowIso, {
+      setProductCost: true, auditField: 'cost_correction_order_gold', auditContext: { settlementId, reversal: true } });
   }
   db.run(`UPDATE gold_payable_settlements SET status = 'REVERSED', reversed_at = ? WHERE id = ?`, [nowIso, settlementId]);
   trackUpdate('gold_payable_settlements', settlementId, { status: 'REVERSED' });

@@ -297,8 +297,8 @@ let orderE = '';
   ok(String(inv?.issued_at).startsWith('2026-11-01') && Number(inv.gross_amount) === 240 && Number(inv.vat_amount) === 0 && Number(inv.vat_rate_snapshot) === 0,
     `E Rechnung am gewählten Tag, Zero: Brutto 240, VAT 0, Satz 0 (${S(inv)})`);
   const prod = rows(db, 'SELECT id, sku, category_id, purchase_price, stock_status FROM products WHERE id = ?', [out.productIds[0]])[0];
-  // Die SKU folgt der vorhandenen Regel: Marke der Order („Custom Order" → CUS) + Kategorie (GLD) + Zähler.
-  ok(prod && /^CUS-GLD-\d{3,}$/.test(String(prod.sku)) && prod.category_id === 'cat-gold-jewelry' && Number(prod.purchase_price) === 210,
+  // CUSTOM-ORDER Review (Owner) — ein Sonderstück hat keine Marke („Custom Order" ist seine Herkunft): ITM + Kategorie (GLD) + Zähler.
+  ok(prod && /^ITM-GLD-\d{3,}$/.test(String(prod.sku)) && prod.category_id === 'cat-gold-jewelry' && Number(prod.purchase_price) === 210,
     `E Artikel: SKU aus dem Zähler, Kategorie der Order, Einstand 210 (${S(prod)})`);
   ok(s(db, 'SELECT product_id FROM orders WHERE id = ?', [oid]) === prod?.id
     && s(db, "SELECT product_id FROM order_lines WHERE order_id = ? AND material_kind = 'custom'", [oid]) === prod?.id,
@@ -425,7 +425,7 @@ for (const [scheme, vat, rate] of [['VAT_10', 21.818, 10], ['MARGIN', 2.727, 10]
   ok(r.ok, `J PC2: Sonderstück umgewandelt (${r.code})`);
   const invId = String(r.value?.invoiceId ?? '');
   ok(s(db, 'SELECT substr(issued_at,1,10) FROM invoices WHERE id = ?', [invId]) === '2026-11-02'
-    && /^CUS-GLD-\d{3,}$/.test(s(db, 'SELECT p.sku FROM products p JOIN orders o ON o.product_id = p.id WHERE o.id = ?', [oid])),
+    && /^ITM-GLD-\d{3,}$/.test(s(db, 'SELECT p.sku FROM products p JOIN orders o ON o.product_id = p.id WHERE o.id = ?', [oid])),
   'J PC2: Rechnungsdatum und Artikel mit SKU wie am Primary');
   const credits = rows(db, "SELECT source_type, amount, status FROM customer_credits WHERE status = 'OPEN'");
   ok(credits.length === 1 && credits[0].source_type === 'overpayment' && Number(credits[0].amount) === 60

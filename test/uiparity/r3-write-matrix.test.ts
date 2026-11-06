@@ -258,7 +258,8 @@ const MATRIX: Record<string, Zeile> = {
     'D Auftrag→Rechnung: die vorhandene Buchung ist ENGER als die Handlung der Oberflaeche');
   const fin = src('src/core/bridge/financial-commands.ts');
   const seite = src('src/pages/orders/OrderDetail.tsx');
-  ok(/carryOverOrderPaymentsToInvoice/.test(seite),
+  // CUSTOM-ORDER K2/Review — die Oberfläche ruft die Hausfolge, die den Anzahlungstopf anrechnet.
+  ok(/convertOrderToInvoiceInHouse\(/.test(seite) && /carryOverOrderPaymentsToInvoice\(/.test(src('src/core/orders/order-convert-house.ts')),
     'D die Oberflaeche traegt den Anzahlungstopf ueber…');
   // R5A — der Befund von R3 ist geschlossen: die Buchung fuehrt den Uebertrag jetzt selbst aus,
   // ueber DIESELBE Funktion wie die Oberflaeche. Geprueft wird deshalb der neue Stand.

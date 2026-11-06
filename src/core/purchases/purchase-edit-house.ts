@@ -62,6 +62,7 @@ import {
 } from '@/core/identity/identity-media';
 import type { Product, Purchase, PurchaseIdentityReference, PurchasePayment, PurchaseStatus, SupplierSnapshot } from '@/core/models/types';
 import { purchaseLineConsumption, type PurchaseLineConsumption } from './purchase-consumption';
+import { planSoldLineCostCorrection, applySoldLineCostCorrection } from '@/core/invoices/sold-line-cost-correction';
 import {
   restoreSupplierCreditUsage, supplierCreditRestoreIssue, SUPPLIER_CREDIT_RESTORE_MISMATCH,
 } from '@/core/finance/supplierCreditRestore';
@@ -177,7 +178,11 @@ export interface PurchaseEdited {
   status: PurchaseStatus;
   revision: number;
   overpayCredit: number;
-  corrections: Array<{ correctionNumber: string; invoiceNumber: string; amount: number; economicDate: string; vatEstimate: number }>;
+  /**
+   * CUSTOM-ORDER Review (O2) — `appliedToInvoice`: ein Margin-Verkauf im offenen Zeitraum, dessen Rechnungszeile den neuen
+   * Einstand und die neu gerechnete Margin-VAT bekam (kein eigener Beleg, `vatEstimate` = die tatsächliche Änderung).
+   */
+  corrections: Array<{ correctionNumber: string; invoiceNumber: string; amount: number; economicDate: string; vatEstimate: number; appliedToInvoice?: boolean }>;
   /** Teil 2/3 — die nachgetragenen und die entfernten Zeilen, und welche Artikel mit ihrer Zeile gingen. */
   addedLineIds: string[];
   removedLineIds: string[];
@@ -382,7 +387,11 @@ function preisSperre(k: Kontext, line: Record<string, unknown>): EditLock {
       }
     }
     const sold = c.sales.reduce((n, s) => n + s.unitsInCogs, 0);
-    if (sold > 0) return offen(`${sold} sold — a separate cost correction is recorded, the invoice stays unchanged`);
+    if (sold > 0) {
+      // CUSTOM-ORDER Review (O2) — Margin-Verkäufe im offenen Zeitraum: die Rechnungszeile bekommt den Einstand, die Margin-VAT
+      // folgt; sonst (geschlossenes Quartal, Retoure, andere Steuerart) ein eigener Korrekturbeleg, die Rechnung bleibt.
+      return offen(`${sold} sold — margin sales in an open VAT period: the invoice cost and margin VAT are recalculated; otherwise a separate cost correction is recorded and the invoice stays unchanged`);
+    }
   }
   return offen();
 }
@@ -1119,6 +1128,24 @@ export function editPurchaseInHouse(
   const corrections: PurchaseEdited['corrections'] = [];
   const editId = uuid();
   for (const kz of korrekturen) {
+    // CUSTOM-ORDER Review (O2) — die Margin-VAT folgt der aktualisierten Marge: ein Margin-Verkauf, dessen Rechnung in einem
+    // OFFENEN Zeitraum liegt (und keine Retoure/Korrektur trägt), wird über den gemeinsamen Weg berichtigt (Rechnungszeile,
+    // Margin-VAT, Gegen- und Neubuchung der Rechnung, Protokoll). Alle anderen: eigener Beleg wie bisher (VAT → REVIEW).
+    if (String(kz.sale.taxScheme) === 'MARGIN') {
+      const ref = { invoiceId: kz.sale.invoiceId, lineId: kz.sale.invoiceLineId };
+      const plan = planSoldLineCostCorrection(ref, F(kz.amount), ctx.branchId);
+      if (plan.mode === 'INVOICE' && !plan.blocker) {
+        const res = applySoldLineCostCorrection(ref, F(kz.amount), ctx.branchId, ctx.now, {
+          setProductCost: false, auditField: 'cost_correction_purchase_edit',
+          auditContext: { purchaseId, purchaseLineId: String(kz.line.id), editId, amount: kz.amount },
+        });
+        corrections.push({
+          correctionNumber: '', invoiceNumber: kz.sale.invoiceNumber, amount: kz.amount,
+          economicDate: kz.sale.issuedDate, vatEstimate: R3(res.newVat - res.oldVat), appliedToInvoice: true,
+        });
+        continue;
+      }
+    }
     const id = uuid();
     const number = getNextDocumentNumber('CC');
     db.run(

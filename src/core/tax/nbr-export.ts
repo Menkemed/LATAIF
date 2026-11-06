@@ -10,6 +10,7 @@
 //   Ledger:         Realisierung bei ISSUE (Accrual, siehe posting.ts postInvoiceIssued).
 // Abweichungen zwischen den dreien sind gewollt, kein Bug.
 
+import { paymentMethodLabel } from '../utils/payment-method-label.ts';
 import * as XLSX from 'xlsx';
 import type { Invoice, Customer, Product } from '@/core/models/types';
 import { productDisplayName } from '../products/display-name.ts';
@@ -86,7 +87,8 @@ function paymentNote(inv: Invoice, payments?: NbrPayment[]): string {
   if (!payments || payments.length === 0) return base;
   const sorted = [...payments].sort((a, b) => (a.receivedAt < b.receivedAt ? -1 : a.receivedAt > b.receivedAt ? 1 : 0));
   const payStr = sorted
-    .map(p => `${round3(p.amount).toFixed(3)} (${fmtDate(p.receivedAt)}, ${p.method})`)
+    // CUSTOM-ORDER Review — die Zahlart lesbar (eine angerechnete Anzahlung heisst "Order deposit", nicht "order_deposit").
+    .map(p => `${round3(p.amount).toFixed(3)} (${fmtDate(p.receivedAt)}, ${paymentMethodLabel(p.method)})`)
     .join('; ');
   return `${base} · Payments: ${payStr}`;
 }

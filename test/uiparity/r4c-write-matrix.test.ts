@@ -253,18 +253,15 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
     && /INSERT INTO order_deposit_applications/.test(apply),
     'R5A …und er enthaelt den ganzen Vertrag: Umkehr, Anrechnung, Ueberschuss');
   // Beide Seiten rufen DIESELBE — kopiert ist nichts.
-  // CUSTOM-ORDER K2 — der Fernbefehl ruft die Hausfolge, die Hausfolge den Übertrag; die Ansicht ruft ihn noch im Altweg.
+  // CUSTOM-ORDER K2/Review — der Fernbefehl UND die Ansicht rufen die Hausfolge; nur die Hausfolge ruft den Übertrag
+  // (neuer Weg und Altweg).
   ok(/convertOrderToInvoiceInHouse\(/.test(codeOf(src('src/core/bridge/financial-commands.ts')))
     && /convertOrderToInvoiceInHouse\(/.test(codeOf(src('src/pages/orders/OrderDetail.tsx'))),
     'R5A Ansicht und Fernbefehl rufen DIESELBE Hausfolge');
-  for (const [datei, wer] of [
-    ['src/pages/orders/OrderDetail.tsx', 'die Auftragsansicht'],
-    ['src/core/orders/order-convert-house.ts', 'die Hausfolge (Primary + Fernbefehl)'],
-  ] as const) {
-    ok(/carryOverOrderPaymentsToInvoice\(/.test(codeOf(src(datei))),
-      `R5A ${wer} ruft dieselbe Funktion`);
-    ok(/order-payment-carryover/.test(src(datei)), `R5A …und importiert sie von dort`);
-  }
+  const hf = codeOf(src('src/core/orders/order-convert-house.ts'));
+  ok((hf.match(/carryOverOrderPaymentsToInvoice\(/g) ?? []).length === 2 && /order-payment-carryover/.test(src('src/core/orders/order-convert-house.ts')),
+    'R5A die Hausfolge ruft dieselbe Funktion (neuer Weg + Altweg) und importiert sie von dort');
+  ok(!/carryOverOrderPaymentsToInvoice\(/.test(codeOf(src('src/pages/orders/OrderDetail.tsx'))), 'R5A …die Ansicht rechnet keinen Übertrag selbst');
   const ui = codeOf(src('src/pages/orders/OrderDetail.tsx'));
   ok(!/const poolRows = query\(/.test(ui),
     'R5A in der Oberflaeche steht keine Uebertragungsrechnung mehr');
@@ -346,7 +343,7 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
     'R5A.2 Ansicht und Fernbefehl rufen DIESELBE');
   ok(!/for \(const ol of billableLines\)/.test(ui), 'R5A.2 …und in der Ansicht steht keine zweite');
   ok(!/net \* rate \/ 100/.test(fc), 'R5A.2 der Fernbefehl setzt die Steuer nicht mehr selbst obendrauf');
-  ok(/'taxSchemes', 'specialMark', 'markComplete', 'invoiceDate'\]/.test(fc), 'R5A.2 die Wahl der Dialoge ist Teil des Vertrags (seit K2 mit Rechnungsdatum)');
+  ok(/'taxSchemes', 'specialMark', 'markComplete', 'invoiceDate', 'legacyScheme'\]/.test(fc), 'R5A.2 die Wahl der Dialoge ist Teil des Vertrags (seit K2 mit Rechnungsdatum, Review: Altweg)');
   ok(/TAX_SCHEMES as readonly unknown\[\]/.test(fc), 'R5A.2 …das Schema geprueft gegen die Liste des Hauses');
   ok(/export const TAX_SCHEMES = \['VAT_10', 'ZERO', 'MARGIN'\] as const;/.test(src('src/core/models/types.ts'))
     && /export type TaxSchemeCanonical = typeof TAX_SCHEMES\[number\];/.test(src('src/core/models/types.ts')),
@@ -356,10 +353,12 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   // CUSTOM-ORDER K2 — der Artikel des Sonderstücks entsteht IM HAUS (SKU, Kategorie, Bilder, Verknüpfung), auf beiden Wegen.
   ok(!/ORDER_LINE_WITHOUT_PRODUCT/.test(fc) && /function createCustomPieceProduct\(/.test(house) && /allocateSkuOnCreate\(/.test(house),
     'R5A.2 …und der Artikel entsteht in der Hausfolge, nicht im Fernbefehl');
-  ok(/taxSchemes,\s*specialMark: specialMark === true, markComplete: markCompleteOnConvert === true/.test(ui),
-    'R5A.2 der Client schickt, was die Dialoge bestaetigt haben');
-  ok(/converting an order without saved tax schemes/.test(ui),
-    'R5A.2 der Altweg ist auf dem Client ein ausdrueckliches Nein, kein lokaler Schreibversuch');
+  ok(/\.\.\.\(legacyScheme \? \{ legacyScheme \} : \{ taxSchemes \}\),\s*specialMark: specialMark === true, markComplete: markCompleteOnConvert === true/.test(ui),
+    'R5A.2 der Client schickt, was der Dialog bestaetigt hat (Schema je Zeile oder — Altweg — die eine Steuerart)');
+  // CUSTOM-ORDER Review — der Altweg legt keinen Artikel mehr vor dem Dialog an: am Client gibt es dafür kein Nein mehr,
+  // er schickt dieselbe Absicht wie der Primary an die Hausfolge.
+  ok(!/converting an order without saved tax schemes/.test(ui) && !/createProduct\(/.test(ui),
+    'R5A.2 der Altweg geht auch vom Client über die Hausfolge — kein lokaler Schreibversuch, kein Artikel vor dem Dialog');
   ok(!/converting an order line that has no article yet/.test(ui), 'R5A.2 …eine Position ohne Artikel ist auf dem Client kein Nein mehr (K2: das Haus legt ihn an)');
   ok(/markConvertedLinesDelivered\(/.test(house) && /markComplete: markCompleteOnConvert === true/.test(ui),
     'R5A.2 „abschliessen" laeuft ueber dieselbe Funktion');

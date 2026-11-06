@@ -512,7 +512,8 @@ const code = (m: string): string => m.split('|')[0];
     `10 Auftrag → Rechnung: Anrechnung der Anzahlung abgewiesen, bevor sie umgebucht wird (${code(mOrd)})`);
   // CUSTOM-ORDER K2 — der Weg mit gespeicherten Steuerarten fragt in der Hausfolge (Primary + PC2) vor dem Anlegen.
   ok(/assertOrderCarryOverMayFinalize\(req\.orderId, probeGross/.test(src('src/core/orders/order-convert-house.ts'))
-    && /assertOrderCarryOverMayFinalize\(id, calc\.grossAmount/.test(src('src/pages/orders/OrderDetail.tsx'))
+    // CUSTOM-ORDER Review — auch der Altweg (eine Zeile über den Preis) fragt seit dem Review in der Hausfolge vor dem Anlegen.
+    && /assertOrderCarryOverMayFinalize\(req\.orderId, calc\.grossAmount/.test(src('src/core/orders/order-convert-house.ts'))
     && /VatPeriodFiled\) return new CommandRejected/.test(src('src/core/bridge/lifecycle-commands.ts'))
     && /VatPeriodFiled\) throw new CommandRejected\(VAT_PERIOD_FILED/.test(src('src/core/bridge/financial-commands.ts')),
     '10 …Auftragsansicht fragt vor dem Anlegen; PC2-Umwandlungen (Agent, Auftrag) geben das Nein als endgültiges Urteil weiter');

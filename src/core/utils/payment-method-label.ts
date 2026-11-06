@@ -1,0 +1,15 @@
+// ════════════════════════════════════════════════════════════════════════════
+// CUSTOM-ORDER Review — die Anzeige einer Zahlart (Rechnungszahlung) an EINER Stelle.
+// Vorher stand im NBR-Export der Rohwert („order_deposit", „bank_transfer"), in der Rechnungsansicht eine eigene Liste.
+// 'order_deposit' ist die ANRECHNUNG einer Order-Anzahlung (kein neuer Geldeingang; das Geld kam am Zahltag der Anzahlung).
+// ════════════════════════════════════════════════════════════════════════════
+const LABELS: Readonly<Record<string, string>> = {
+  cash: 'Cash', bank: 'Bank', bank_transfer: 'Bank Transfer', card: 'Card', benefit: 'Benefit', other: 'Other',
+  credit: 'Store Credit', order_deposit: 'Order deposit',
+};
+
+export function paymentMethodLabel(method: string | null | undefined): string {
+  const m = String(method ?? '').trim();
+  if (!m) return '—';
+  return LABELS[m] ?? (m.charAt(0).toUpperCase() + m.slice(1).replace(/_/g, ' '));
+}

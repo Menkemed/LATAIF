@@ -916,9 +916,13 @@ marker('CENTRAL_UI_R6D_GOLD_UI_WIRING_PROVED');
   ok(seite.indexOf('GOLD USAGE HISTORY (') > 0 && seite.indexOf('GOLD USAGE HISTORY (') < seite.indexOf('GOLD DEBTS & CREDITS ('),
     'HIST-UI erst der Verlauf (was passiert ist), dann was daraus offen ist');
   // CUSTOM-ORDER C1 — „Settle" (return_gold) entfällt für eine Schuld, die wir haben; „→ BHD" bleibt.
-  ok(/repairGoldPayables\.map\(/.test(seite) && !/data-gold-settle-open="settle_supplier_return"/.test(seite)
+  // CUSTOM-ORDER Review — „Return gold" nur bei UNSERER Forderung (they_owe); bei einer Schuld nur „→ BHD".
+  ok(/repairGoldPayables\.map\(/.test(seite)
+    && (seite.match(/data-gold-settle-open="settle_supplier_return"/g) ?? []).length === 1
+    && /gp\.direction === 'they_owe' && \(\s*<div[^>]*>\s*\{\/\*[^*]*\*\/\}\s*<button data-gold-settle-open="settle_supplier_return"/.test(seite)
+    && /gp\.direction !== 'they_owe' && \(/.test(seite)
     && /data-gold-settle-open="convert_supplier_money"/.test(seite) && /repairCustomerGoldCredits\.map\(/.test(seite),
-  'HIST-UI die Schuld- und Guthabenzeilen samt ihren Knoepfen sind da (ohne „Return gold" für unsere Schuld)');
+  'HIST-UI die Schuld- und Guthabenzeilen samt ihren Knoepfen sind da („Return gold" nur für unsere Forderung)');
   // Vollstaendig verbrauchtes Kundengold (oben, Fall 1): Verlauf ja, Schuld/Guthaben nein — genau
   // die Lage, in der die erste Karte etwas zeigt und die zweite „Nothing to settle".
   {

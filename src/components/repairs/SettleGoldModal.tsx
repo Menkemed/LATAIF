@@ -50,7 +50,7 @@ interface SettleGoldModalProps {
 
 function modeTitle(mode: SettleGoldMode): string {
   switch (mode) {
-    case 'settle_supplier_return':  return 'Settle — Workshop returns gold';
+    case 'settle_supplier_return':  return 'Return gold — the goldsmith returns our gold';
     case 'convert_supplier_money':  return 'Convert gold debt to BHD';
     case 'apply_shop_to_supplier':  return 'Apply shop gold to supplier debt';
     case 'return_customer':         return 'Return gold to customer';
@@ -61,7 +61,8 @@ function modeTitle(mode: SettleGoldMode): string {
 function modeHint(mode: SettleGoldMode): string {
   switch (mode) {
     case 'settle_supplier_return':
-      return 'Workshop liefert das geschuldete Gold physisch zurueck — wird ins Shop-Inventar (precious_metals) gebucht.';
+      // CUSTOM-ORDER Review (C1) — nur für UNSER Gold beim Goldschmied (they_owe); eine Goldschuld bleibt davon unberührt.
+      return 'Der Goldschmied gibt UNSER Gold zurück — seine Goldbalance sinkt, der Ladenbestand (precious_metals) steigt. Eine Goldschuld bei ihm bleibt unverändert.';
     case 'convert_supplier_money':
       return 'Wir verhandeln einen BHD-Betrag fuer die Gold-Schuld. Es wird eine Expense gegen den Supplier erzeugt + Ledger gebucht.';
     case 'apply_shop_to_supplier':

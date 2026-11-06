@@ -1673,10 +1673,20 @@ export function RepairDetail() {
                                 {remaining.toFixed(3)}g {gp.karat}
                               </span>
                               <span style={{ color: '#9CA3AF', marginLeft: 8, fontSize: 11 }}>
-                                · {gp.settlementType === 'return_gold' ? 'return gold' : 'pay money'} · {gp.status}
+                                {/* CUSTOM-ORDER Review — Schuld (wir schulden Gold) und Forderung (unser Gold beim Goldschmied) unterscheiden. */}
+                                · {gp.direction === 'they_owe' ? 'our gold at the goldsmith' : gp.settlementType === 'return_gold' ? 'we owe gold' : 'pay money'} · {gp.status}
                               </span>
                             </div>
-                            {gp.status === 'OPEN' && remaining > 0 && (
+                            {gp.status === 'OPEN' && remaining > 0 && gp.direction === 'they_owe' && (
+                              <div style={{ display: 'flex', gap: 6 }}>
+                                {/* CUSTOM-ORDER Review (C1) — der Goldschmied gibt UNSER Gold zurück: seine Balance ↓, unser Bestand ↑. */}
+                                <button data-gold-settle-open="settle_supplier_return" onClick={() => setSettleModal({ open: true, mode: 'settle_supplier_return', payable: gp })}
+                                  style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#0F0F10', cursor: 'pointer' }}>
+                                  Return gold
+                                </button>
+                              </div>
+                            )}
+                            {gp.status === 'OPEN' && remaining > 0 && gp.direction !== 'they_owe' && (
                               <div style={{ display: 'flex', gap: 6 }}>
                                 {/* CUSTOM-ORDER C1 — „Settle" (return_gold) erhöhte unseren Bestand für eine Schuld, die WIR haben; entfällt.
                                     Beglichen wird mit Ladengold (Supplier Detail) oder in BHD. */}

@@ -942,7 +942,10 @@ marker('CENTRAL_UI_R6D_PAYABLES_CLIENT_NO_LOCAL_WRITE_PROVED');
   ok(/saveSupplierRefund\(erstatten, refundCredit\.id\)/.test(sd) && !/deleteStandaloneSupplierCredit\(|getSupplierCreditsForDisplay\(/.test(sd)
     && /data-supplier-refund-save/.test(sd) && /data-supplier-pay-open/.test(sd)
     // CUSTOM-ORDER C1/K3a — „Return gold" entfällt für unsere Schuld; Order-Gold „Settle in BHD", sonst Ladengold / → BHD.
-    && !/>\s*Return gold\s*</.test(sd) && /data-gold-settle-open="order_money"/.test(sd) && /Apply shop gold/.test(sd),
+    // CUSTOM-ORDER Review — „Return gold" nur bei unserer Forderung (they_owe), nie bei einer Schuld.
+    && /gp\.direction === 'they_owe' && \(\s*<button data-gold-settle-open="settle_supplier_return"/.test(sd)
+    && /!gp\.sourceOrderId && gp\.direction !== 'they_owe'/.test(sd)
+    && /data-gold-settle-open="order_money"/.test(sd) && /Apply shop gold/.test(sd),
   'UI SupplierDetail: Refund ist EINE Buchung; die Gold-Knöpfe folgen C1/K3a');
   const ps = codeOf(src('src/components/expenses/PaySupplierModal.tsx'));
   ok(/saveSupplierPay\(/.test(ps) && /saveSupplierCredit\(/.test(ps)

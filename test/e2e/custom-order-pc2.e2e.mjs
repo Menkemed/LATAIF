@@ -7,7 +7,9 @@
 //   2 PC2 „Create Invoice": EIN Dialog (Datum, Steuerart Zero vorgewählt, Nummernart); Rechnung am gewählten Tag,
 //     der Artikel entsteht im Haus mit SKU/Kategorie/Einstand, Wareneinsatz 210, Lager 0.
 //   3 PC2 begleicht die Goldschuld in BHD (4.330 g × 44): die Rechnungszeile trägt den tatsächlichen Einstand 215.520.
-//   4 Primary nimmt die Begleichung im Dialog zurück: alles wie vorher; Hauptbuch ausgeglichen.
+//   4 PC2 sieht die Begleichung im Dialog und nimmt sie zurück (Review: PC2-Parität): alles wie vorher; Hauptbuch ausgeglichen.
+//   5 PC2 Artikelseite: Herkunft „Custom Order" mit Order-Nummer und Rechnung (Review: SKU/Herkunft).
+//   6 PC2 Altweg (Order ohne Steuerart je Position): kein Artikel vor dem Dialog; danach EINE Zeile über den Preis (Review).
 //
 // PROZESS-ISOLATION: gestartet nur über spawnTracked; Ports 3011/9223/9224, Daten com.lataif.app.e2e(.client).
 // Die installierte Produktions-App, E:\LATAIF\Data und die Ports 3001/3443 werden nie berührt.
@@ -202,6 +204,11 @@ function seed() {
       material_details: JSON.stringify({ weightGrams: 4.33, karat: '21K', supplierName: 'Arup Goldsmith' }) });
     insert(db, 'gold_payables', { id: 'co-gp', branch_id, supplier_id: 'co-arup', source_order_id: ORD, source_order_line_id: 'co-l3', direction: 'we_owe',
       weight_grams: 4.33, karat: '21K', settlement_type: 'return_gold', fulfilled_grams: 0, status: 'OPEN', created_at: now, updated_at: now });
+    // Altbestand: eine abgeschlossene Order OHNE Steuerart an ihrer Position (vor v0.1.15) und ohne Artikel.
+    insert(db, 'orders', { id: 'co-leg', branch_id, order_number: 'ORD-2026-E2E02', customer_id: 'co-kunde', type: 'normal', status: 'completed',
+      agreed_price: 500, remaining_amount: 500, requested_brand: 'Omega', requested_model: 'Speedmaster', order_date: '2026-10-28', created_at: now, updated_at: now });
+    insert(db, 'order_lines', { id: 'co-leg-l1', order_id: 'co-leg', position: 1, quantity: 1, status: 'ARRIVED', description: 'Omega Speedmaster',
+      unit_price: 500, is_customer_facing: 1, created_at: now, updated_at: now });
   } finally { try { db.close(); } catch { /* zu */ } }
 }
 const saldo = (account, where = '1=1', p = []) => Math.round(Number(dbQ(BIZ_DB,
@@ -318,11 +325,12 @@ try {
   await spuelen(primary).catch(() => null);
   ok(go === 'OK' && await warteAuf(() => !!dbQ(BIZ_DB, `SELECT invoice_id FROM orders WHERE id = '${ORD}'`)[0]?.invoice_id, 40000), `K2 PC2 wandelt um (${go})`);
   const inv = dbQ(BIZ_DB, `SELECT i.id, substr(i.issued_at,1,10) AS tag, i.gross_amount, i.vat_amount, i.vat_rate_snapshot FROM invoices i JOIN orders o ON o.invoice_id = i.id WHERE o.id = '${ORD}'`)[0];
-  const prod = dbQ(BIZ_DB, `SELECT p.sku, p.category_id, p.purchase_price FROM products p JOIN orders o ON o.product_id = p.id WHERE o.id = '${ORD}'`)[0];
+  const prod = dbQ(BIZ_DB, `SELECT p.id, p.sku, p.category_id, p.purchase_price, p.origin_type, p.origin_order_number FROM products p JOIN orders o ON o.product_id = p.id WHERE o.id = '${ORD}'`)[0];
   ok(inv?.tag === gestern && Number(inv.gross_amount) === 240 && Number(inv.vat_amount) === 0 && Number(inv.vat_rate_snapshot) === 0,
     `K2 Rechnung am gewählten Tag, Zero, 240, Satz 0 (${S(inv)})`);
-  ok(prod && /^[A-Z]{3}-GLD-\d{3,}$/.test(String(prod.sku)) && prod.category_id === 'cat-gold-jewelry' && Number(prod.purchase_price) === 210,
-    `K2 Artikel am Primary im Haus angelegt: SKU, Kategorie, Einstand (${S(prod)})`);
+  ok(prod && /^ITM-GLD-\d{3,}$/.test(String(prod.sku)) && prod.category_id === 'cat-gold-jewelry' && Number(prod.purchase_price) === 210
+    && prod.origin_type === 'CUSTOM_ORDER' && prod.origin_order_number === 'ORD-2026-E2E01',
+    `K2 Artikel am Primary im Haus angelegt: SKU ITM-GLD, Kategorie, Einstand, Herkunft (${S(prod)})`);
   ok(saldo('COGS') === 210 && saldo('INVENTORY') === 0, `K2 Wareneinsatz 210, Lager 0 (${saldo('COGS')}/${saldo('INVENTORY')})`);
   const ops = (await befehle(client)).map((x) => x.op);
   ok(ops.includes('orders.convert_to_invoice') && ops.includes('orders.update_status'), `K2 PC2 über die Fernbefehle (${[...new Set(ops)].filter((o) => /orders|gold/.test(o)).join(',')})`);
@@ -342,20 +350,56 @@ try {
   ok(Number(il?.c) === 215.52 && saldo('COGS') === 215.52 && saldo('GOLD_LIABILITY') === 0 && saldo('INVENTORY') === 0,
     `K3a Mehrpreis 5.520 im Einstand der Rechnung, Goldschuld-Wert 0 (${S(il)} / ${saldo('COGS')})`);
 
-  // ── 4 K3a am Primary: Rücknahme über den Dialog ──────────────────────────────────────────────────────────
+  // ── 4 K3a am PC2: die Begleichung im Dialog sehen und zurücknehmen (dieselbe Hausfolge am Primary) ─────────
   {
-    await gehFrisch(primary, `/orders/${ORD}`);
-    await warteBis(primary, "!!document.querySelector('[data-gold-settle-open=\"order_settlements\"]')", 40000);
-    await klick(primary, '[data-gold-settle-open="order_settlements"]');
-    await warteBis(primary, "[...document.querySelectorAll('button')].some((b)=>b.textContent.trim()==='Reverse')", 20000);
-    const rv = await clickText(primary, 'Reverse');
+    await gehFrisch(client, `/orders/${ORD}`);
+    await warteBis(client, "!!document.querySelector('[data-gold-settle-open=\"order_settlements\"]')", 40000);
+    await klick(client, '[data-gold-settle-open="order_settlements"]');
+    const liste = await warteBis(client, "!!document.querySelector('[data-order-gold-settlement]')", 20000);
+    const zeile = await client.ev("const z=document.querySelector('[data-order-gold-settlement]'); return z ? z.textContent : '';");
+    ok(liste && /4\.330 g × 44\.000 = 190\.520 BHD/.test(String(zeile)), `K3a PC2 sieht die Begleichung im Dialog (${String(zeile).slice(0, 90)})`);
+    const rv = await clickText(client, 'Reverse');
     await spuelen(primary).catch(() => null);
-    ok(rv === 'OK' && await warteAuf(() => dbQ(BIZ_DB, "SELECT status FROM gold_payables WHERE id = 'co-gp'")[0]?.status === 'OPEN', 30000), `K3a Primary nimmt die Begleichung zurück (${rv})`);
+    ok(rv === 'OK' && await warteAuf(() => dbQ(BIZ_DB, "SELECT status FROM gold_payables WHERE id = 'co-gp'")[0]?.status === 'OPEN', 30000), `K3a PC2 nimmt die Begleichung zurück (${rv})`);
+    const zur = (await befehle(client)).filter((x) => x.op === 'gold.payables.settle').map((x) => x.payload?.mode);
+    ok(zur.includes('money_order') && zur.includes('money_order_reverse'), `K3a PC2 über den Fernbefehl (${zur.join(',')})`);
     const il2 = dbQ(BIZ_DB, `SELECT purchase_price_snapshot AS c FROM invoice_lines WHERE invoice_id = '${inv?.id}'`)[0];
     ok(Number(il2?.c) === 210 && saldo('COGS') === 210 && saldo('GOLD_LIABILITY') === -185 && dbQ(BIZ_DB, "SELECT status FROM gold_payable_settlements")[0]?.status === 'REVERSED',
       `K3a Rücknahme: Rechnungszeile 210, Wareneinsatz 210, Goldschuld-Wert 185 (${S(il2)} / ${saldo('COGS')})`);
     const bal = dbQ(BIZ_DB, "SELECT ROUND(SUM(CASE direction WHEN 'DEBIT' THEN amount ELSE -amount END), 3) AS d FROM ledger_entries")[0]?.d;
     ok(Math.abs(Number(bal) || 0) < 0.0005, `Hauptbuch ausgeglichen (${bal})`);
+  }
+
+  // ── 5 PC2 Artikelseite: Herkunft „Custom Order" mit Order-Nummer und Rechnung ─────────────────────────────
+  {
+    await gehFrisch(client, `/collection/${prod?.id}`);
+    const da = await warteBis(client, "!!document.querySelector('[data-product-origin=\"CUSTOM_ORDER\"]')", 40000);
+    const txt = await client.ev("const z=document.querySelector('[data-product-origin]'); return z ? z.textContent : '';");
+    ok(da && /Custom Order/.test(String(txt)) && /ORD-2026-E2E01/.test(String(txt)) && !!(await client.ev("return !!document.querySelector('[data-product-origin-invoice]');")),
+      `Herkunft am PC2 sichtbar: Custom Order, Order-Nummer, Rechnung (${String(txt).slice(0, 120)})`);
+    ok((await client.ev('return window.__dbHits.length;')) === 0, 'PC2 greift auch hier auf keine lokale Datenbank zu');
+  }
+
+  // ── 6 PC2 Altweg: kein Artikel vor dem Dialog, danach eine Zeile über den vereinbarten Preis ─────────────────
+  {
+    const artikel = () => Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM products')[0]?.n ?? 0);
+    const vor = artikel();
+    await gehFrisch(client, '/orders/co-leg');
+    await warteBis(client, "[...document.querySelectorAll('button')].some((b)=>b.textContent.trim()==='Create Invoice')", 40000);
+    await clickText(client, 'Create Invoice');
+    const dlg = await warteBis(client, "!!document.querySelector('[data-testid=\"order-invoice-date\"]')", 20000);
+    const zeigt = await client.ev("const m=[...document.querySelectorAll('[role=\"dialog\"], .fixed')].find((d)=>d.querySelector('[data-testid=\"order-invoice-date\"]')); return m ? m.textContent : '';");
+    ok(dlg && /Speedmaster/.test(String(zeigt)) && /500\.000 BHD/.test(String(zeigt)) && artikel() === vor,
+      `Altweg PC2: der Dialog zeigt die eine Zeile (Speedmaster, 500.000) — noch kein Artikel angelegt (${artikel()} = ${vor})`);
+    const go = await client.ev("const m=[...document.querySelectorAll('[role=\"dialog\"], .fixed')].find((d)=>d.querySelector('[data-testid=\"order-invoice-date\"]')); const b=[...m.querySelectorAll('button')].filter((x)=>x.textContent.trim()==='Create Invoice').pop(); if(!b) return 'NO'; if(b.disabled) return 'DISABLED'; b.click(); return 'OK';");
+    await spuelen(primary).catch(() => null);
+    ok(go === 'OK' && await warteAuf(() => !!dbQ(BIZ_DB, "SELECT invoice_id FROM orders WHERE id = 'co-leg'")[0]?.invoice_id, 40000), `Altweg PC2 wandelt um (${go})`);
+    const inv = dbQ(BIZ_DB, "SELECT i.gross_amount, (SELECT COUNT(*) FROM invoice_lines il WHERE il.invoice_id = i.id) AS zeilen, (SELECT il.tax_scheme FROM invoice_lines il WHERE il.invoice_id = i.id) AS art FROM invoices i JOIN orders o ON o.invoice_id = i.id WHERE o.id = 'co-leg'")[0];
+    const p = dbQ(BIZ_DB, "SELECT p.origin_type, p.origin_order_number, p.sku FROM products p JOIN orders o ON o.product_id = p.id WHERE o.id = 'co-leg'")[0];
+    ok(inv && Number(inv.gross_amount) === 500 && Number(inv.zeilen) === 1 && artikel() === vor + 1 && p?.origin_type === 'ORDER' && p?.origin_order_number === 'ORD-2026-E2E02',
+      `Altweg PC2: eine Rechnungszeile 500 (${inv?.art}), genau EIN Artikel mit Herkunft (${S(inv)} / ${S(p)})`);
+    const leg = (await befehle(client)).filter((x) => x.op === 'orders.convert_to_invoice' && x.payload?.orderId === 'co-leg');
+    ok(leg.length === 1 && typeof leg[0].payload?.legacyScheme === 'string' && !leg[0].payload?.taxSchemes, `Altweg PC2: EIN Befehl mit der einen Steuerart (${S(leg.map((x) => x.payload))})`);
   }
 } catch (e) {
   FAIL++; fails.push('harness: ' + (e?.message ?? e)); console.error(e);

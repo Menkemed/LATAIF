@@ -412,6 +412,8 @@ export interface ConvertOrderRequest {
   markComplete?: boolean;
   /** CUSTOM-ORDER K2 — Rechnungsdatum aus dem Dialog (JJJJ-MM-TT). */
   invoiceDate?: string;
+  /** CUSTOM-ORDER Review — Altweg (Auftrag ohne Steuerart je Position): die eine Steuerart aus dem Dialog. */
+  legacyScheme?: TaxScheme;
 }
 
 const MAX_CONVERT_LINES = 500;
@@ -430,7 +432,8 @@ export function parseConvertOrder(raw: unknown): ConvertOrderRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
   // CUSTOM-ORDER K2 — `invoiceDate` (JJJJ-MM-TT, optional): das im Dialog gewählte Rechnungsdatum. Ein älterer Client
   // schickt es nicht — dann gilt heute (wie bisher).
-  onlyKnownFields(raw, ['orderId', 'expectedRevision', 'taxSchemes', 'specialMark', 'markComplete', 'invoiceDate']);
+  // CUSTOM-ORDER Review — `legacyScheme`: der Altweg geht seit dem Review über DIESELBE Hausfolge (auch von PC2).
+  onlyKnownFields(raw, ['orderId', 'expectedRevision', 'taxSchemes', 'specialMark', 'markComplete', 'invoiceDate', 'legacyScheme']);
   const out: ConvertOrderRequest = {
     orderId: reqString(raw.orderId, 'orderId'),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
@@ -462,6 +465,11 @@ export function parseConvertOrder(raw: unknown): ConvertOrderRequest {
     }
     out.taxSchemes = schemes;
   }
+  if (raw.legacyScheme !== undefined) {
+    if (!(TAX_SCHEMES as readonly unknown[]).includes(raw.legacyScheme)) throw new FinancialPayloadError(`unknown tax scheme: ${String(raw.legacyScheme)}`);
+    if (out.taxSchemes) throw new FinancialPayloadError('taxSchemes and legacyScheme exclude each other');
+    out.legacyScheme = raw.legacyScheme as TaxScheme;
+  }
   return out;
 }
 
@@ -478,6 +486,7 @@ export function runConvertOrder(deps: EngineDeps, identity: CommandIdentity, raw
         ...(req.specialMark !== undefined ? { specialMark: req.specialMark } : {}),
         ...(req.markComplete !== undefined ? { markComplete: req.markComplete } : {}),
         ...(req.invoiceDate ? { invoiceDate: req.invoiceDate } : {}),
+        ...(req.legacyScheme ? { legacyScheme: req.legacyScheme } : {}),
       }, identity.branchId, () => assertRevision('orders', req.orderId, req.expectedRevision, 'ORDER_NOT_FOUND'));
       return {
         orderId: out.orderId,

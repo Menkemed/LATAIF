@@ -699,8 +699,9 @@ marker('CENTRAL_UI_R6E_PAID_REFUND_CANCEL_CONTRACT_PINNED');
     'src/core/bridge/store-read-ops.ts': 'Name der Auskunft store.credit_notes.get',
     'src/core/data/page-reads.ts': 'Summen/Zählungen ohne CANCELLED',
     'src/core/finance/receivables.ts': 'Summen ohne CANCELLED',
-    // CUSTOM-ORDER K3a — die Einstandskorrektur nach dem Verkauf sperrt bei wirksamer Gutschrift (ohne CANCELLED).
-    'src/core/gold/order-gold-settle.ts': 'Sperre der Einstandskorrektur bei wirksamer Gutschrift ohne CANCELLED',
+    // CUSTOM-ORDER K3a / Review — die Einstandsberichtigung einer verkauften Zeile (K3a + D1) sperrt bei wirksamer
+    // Gutschrift (ohne CANCELLED); seit dem Review an EINER Stelle.
+    'src/core/invoices/sold-line-cost-correction.ts': 'Sperre der Einstandsberichtigung bei wirksamer Gutschrift ohne CANCELLED',
     'src/core/invoices/invoice-cancel-house.ts': 'Storno-Sperre bei wirksamer Gutschrift ohne CANCELLED',
     'src/core/invoices/edit-lines.ts': 'Edit-Grenzen (INVOICE-EDIT S2): Gutschriften-Deckel und Forderungsminderung ohne CANCELLED',
     'src/core/invoices/customer-change.ts': 'Kundenwechsel (INVOICE-EDIT S3): wirksame Gutschrift (ohne CANCELLED) sperrt den Wechsel',

@@ -663,6 +663,10 @@ function rowToProduct(row: Record<string, unknown>): Product {
     purchaseSource: row.purchase_source as string | undefined,
     paidFrom: (row.paid_from as 'cash' | 'bank' | null) ?? null,
     sourceType: (row.source_type as 'OWN' | 'CONSIGNMENT' | 'AGENT') || 'OWN',
+    // CUSTOM-ORDER Review — die dauerhafte Herkunft aus einer Order (nur lesen; gesetzt im Haus beim Anlegen).
+    originType: (row.origin_type as Product['originType']) || undefined,
+    originOrderId: (row.origin_order_id as string) || undefined,
+    originOrderNumber: (row.origin_order_number as string) || undefined,
     notes: row.notes as string | undefined,
     images: JSON.parse((row.images as string) || '[]'),
     imageHash: (row.image_hash as string) || undefined,

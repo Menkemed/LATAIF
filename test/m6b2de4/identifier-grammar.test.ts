@@ -85,7 +85,8 @@ for (const c of columns) check(isValidSyncIdentifier(c), `frontend column ${JSON
 // CUSTOM-ORDER K2/K3a: +2 synced tables `order_deposit_applications`, `gold_payable_settlements` and the gold_payables
 // columns book_value/book_value_date, with 9 previously-unseen column identifiers — canonical.
 check(tables.size === 64, `frontend table count is 64 (got ${tables.size})`);
-check(columns.size === 271, `frontend distinct column count is 271 (got ${columns.size})`);
+// CUSTOM-ORDER Review: gold_payable_settlements.cost_mode (vat_status gibt es schon) — +1 → 272.
+check(columns.size === 272, `frontend distinct column count is 272 (got ${columns.size})`);
 
 console.log(
   `M6-B2DE4 identifier-grammar: ${pass}/${pass + fails.length} checks passed ` +

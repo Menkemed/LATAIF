@@ -237,7 +237,9 @@ export function PurchaseEdit() {
         const delta = ch.unitPrice - l.unitPrice;
         const deltaNet = l.taxScheme === 'VAT_10' ? delta / 1.1 : delta;
         if (c && c.soldUnits > 0) {
-          hinweise.push(`${name}: ${c.soldUnits} sold piece(s) get a cost correction of ${fmt(deltaNet * c.soldUnits)} BHD — booked today, profit attributed to the sale month. The sales invoice stays unchanged.`);
+          // CUSTOM-ORDER Review (O2) — ein Margin-Verkauf im offenen VAT-Zeitraum: Rechnungszeile und Margin-VAT werden neu
+          // gerechnet; sonst (gemeldetes Quartal, Retoure, andere Steuerart) ein eigener Korrekturbeleg, die Rechnung bleibt.
+          hinweise.push(`${name}: ${c.soldUnits} sold piece(s) get a cost correction of ${fmt(deltaNet * c.soldUnits)} BHD — a margin sale in an open VAT period: the invoice cost and margin VAT are recalculated; otherwise booked today as a separate cost correction and the sales invoice stays unchanged.`);
         }
         if (l.taxScheme === 'VAT_10') hinweise.push(`${name}: the 10% input VAT of this line is recalculated (${fmt(delta - deltaNet)} BHD VAT difference).`);
         hinweise.push(c?.productFollows

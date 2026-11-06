@@ -424,6 +424,13 @@ export function settleGoldPayable(actor: GoldActor, req: PayableSettleRequest): 
     throw new GoldRejected('GOLD_RETURN_NOT_A_SETTLEMENT',
       'a gold debt we owe is settled with our gold or in BHD — a return of our gold from the goldsmith is a separate step. Nothing was changed.');
   }
+  // CUSTOM-ORDER Review (C1) — UNSERE Goldforderung an den Goldschmied (`they_owe`, unser Gold liegt bei ihm) kennt genau
+  // einen Weg: er gibt es zurück („return_gold": seine Goldbalance sinkt, unser Bestand steigt). Ladengold dazugeben oder
+  // in BHD umwandeln wäre ein Verkauf/Ankauf ohne Bewertung (G1/G2) — dafür gibt es hier keinen Weg.
+  if (str(p.direction ?? 'we_owe') === 'they_owe' && req.mode !== 'return_gold') {
+    throw new GoldRejected('GOLD_CLAIM_RETURN_ONLY',
+      'our gold at the goldsmith comes back as gold ("Return gold") — it is not settled with shop gold or in BHD here. Nothing was changed.');
+  }
   // CUSTOM-ORDER K3a — die Goldschuld einer Order trägt ihren Wert (K1): sie wird in BHD zum Kurs beglichen (auch in Teilen,
   // `settleOrderGoldInBhd`); „→ BHD" (ganzer Rest als Aufwand) und „Apply shop gold" (ohne Wertführung) gingen an diesem Wert
   // vorbei. Die Begleichung mit eigenem Gold folgt mit K3b.

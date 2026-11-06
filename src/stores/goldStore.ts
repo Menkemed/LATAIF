@@ -127,6 +127,8 @@ interface GoldStore {
   customerGoldCredits: CustomerGoldCredit[];
   /** Fachverlauf der Goldeinsaetze an Reparaturen — Nachweis, keine Buchung. */
   repairGoldUsage: RepairGoldUsage[];
+  /** CUSTOM-ORDER Review — die BHD-Begleichungen der Order-Goldschulden (für Liste + Reverse auch am PC2). */
+  orderGoldSettlements: OrderGoldSettlementRow[];
   loading: boolean;
 
   // Loaders
@@ -229,6 +231,7 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
   goldPayables: [],
   customerGoldCredits: [],
   repairGoldUsage: [],
+  orderGoldSettlements: [],
   loading: false,
 
   // R6D — auch die Einzel-Loader holen auf PC2 den Stand vom Primary (vorher lasen sie dort gar
@@ -236,6 +239,8 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
   loadGoldPayables: () => {
     if (hydrateFromPrimary('store.gold.get', (d) => set(d as never))) return;
     try { set(loadGoldPayablesFor(localReadContext())); } catch { set({ goldPayables: [] }); }
+    // CUSTOM-ORDER Review — die Begleichungen gehören zur Schuld: dieselbe Ladestelle, dieselbe Auskunft wie am PC2.
+    try { set(loadOrderGoldSettlementsFor(localReadContext())); } catch { set({ orderGoldSettlements: [] }); }
   },
 
   loadCustomerGoldCredits: () => {
@@ -806,6 +811,31 @@ export function loadGoldPayablesFor(ctx: BusinessReadContext): { goldPayables: G
 }
 
 /** CENTRAL-UI-PARITY R2B — die Gold-Guthaben der Kunden einer Filiale, zustandsfrei. */
+/** CUSTOM-ORDER Review — eine BHD-Begleichung einer Order-Goldschuld (Anzeige; gerechnet und gebucht wird im Haus). */
+export interface OrderGoldSettlementRow {
+  id: string; payableId: string; orderId?: string; grams: number; ratePerGram: number; amount: number; bookShare: number;
+  difference: number; settledOn: string; costMode: 'UNSOLD' | 'INVOICE' | 'SEPARATE'; vatStatus: 'NONE' | 'REVIEW';
+  status: 'ACTIVE' | 'REVERSED'; invoiceId?: string; oldVatAmount?: number; newVatAmount?: number; createdAt: string;
+}
+
+/** Die Begleichungen einer Filiale, zustandsfrei (Primary lokal; PC2 über `store.gold.get`). */
+export function loadOrderGoldSettlementsFor(ctx: BusinessReadContext): { orderGoldSettlements: OrderGoldSettlementRow[] } {
+  if (query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'gold_payable_settlements' LIMIT 1").length === 0) return { orderGoldSettlements: [] };
+  const z = (v: unknown): number | undefined => (v === null || v === undefined ? undefined : Number(v));
+  const rows = query('SELECT * FROM gold_payable_settlements WHERE branch_id = ? ORDER BY created_at', [ctx.branchId]);
+  return {
+    orderGoldSettlements: rows.map((r) => ({
+      id: String(r.id), payableId: String(r.payable_id), orderId: (r.order_id as string) || undefined,
+      grams: Number(r.grams) || 0, ratePerGram: Number(r.rate_per_gram) || 0, amount: Number(r.amount) || 0,
+      bookShare: Number(r.book_share) || 0, difference: Number(r.difference) || 0, settledOn: String(r.settled_on ?? ''),
+      costMode: (String(r.cost_mode ?? 'UNSOLD') as OrderGoldSettlementRow['costMode']),
+      vatStatus: (String(r.vat_status ?? 'NONE') as OrderGoldSettlementRow['vatStatus']),
+      status: (String(r.status) === 'REVERSED' ? 'REVERSED' : 'ACTIVE'), invoiceId: (r.invoice_id as string) || undefined,
+      oldVatAmount: z(r.old_vat_amount), newVatAmount: z(r.new_vat_amount), createdAt: String(r.created_at ?? ''),
+    })),
+  };
+}
+
 export function loadCustomerGoldCreditsFor(ctx: BusinessReadContext): { customerGoldCredits: CustomerGoldCredit[] } {
   const rows = query(
     `SELECT * FROM customer_gold_credits WHERE branch_id = ? ORDER BY created_at DESC`,

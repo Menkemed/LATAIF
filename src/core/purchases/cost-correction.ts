@@ -14,8 +14,9 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
-import { hasCostCorrectionTable } from './cost-correction-read';
-import { hasLedgerEntries, reverseSource } from '@/core/ledger/posting';
+import { hasCostCorrectionTable, hasGoldSettlementTable } from './cost-correction-read';
+import { hasLedgerEntries, reverseSource, postEntries } from '@/core/ledger/posting';
+import { trackUpdate } from '@/core/sync/track';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 
 export * from './cost-correction-read';
@@ -26,7 +27,8 @@ export * from './cost-correction-read';
  * stehen, während das Stück zum berichtigten Einstand ins Los zurückkehrt. Im Rahmen des Aufrufers.
  */
 export function reverseCostCorrectionsOfInvoice(invoiceId: string, now: string, reason: string): number {
-  if (!hasCostCorrectionTable()) return 0;
+  const gold = moveGoldSeparateBackToStock(invoiceId, now, reason);
+  if (!hasCostCorrectionTable()) return gold;
   const rows = query(`SELECT id, correction_number FROM cost_corrections WHERE invoice_id = ? AND status = 'ACTIVE'`, [invoiceId]);
   const db = getDatabase();
   for (const r of rows) {
@@ -36,6 +38,38 @@ export function reverseCostCorrectionsOfInvoice(invoiceId: string, now: string, 
     logAuditOrThrow({
       module: 'Purchase', entityType: 'cost_corrections', entityId: id, action: 'STATUS_CHANGE', field: 'status',
       oldValue: 'ACTIVE', newValue: { status: 'REVERSED', reason, invoiceId, correctionNumber: String(r.correction_number) },
+    });
+  }
+  return rows.length + gold;
+}
+
+/**
+ * CUSTOM-ORDER Review — eine Goldschuld-Differenz, die (Rechnung im geschlossenen Quartal) als eigener Wareneinsatz
+ * gebucht ist, geht mit dem Stück ins Lager zurück, wenn dessen Rechnung storniert/gelöscht wird: Soll INVENTORY / Haben COGS
+ * (heute, unter der Ausgabe der Begleichung — ein späterer Storno der Begleichung dreht alles zusammen zurück); die Differenz
+ * ist danach wieder Einstand des Stücks (cost_mode UNSOLD). Im Rahmen des Aufrufers.
+ */
+function moveGoldSeparateBackToStock(invoiceId: string, now: string, reason: string): number {
+  if (!hasGoldSettlementTable()) return 0;
+  const rows = query(
+    `SELECT id, expense_id, difference, invoice_line_id, payable_id FROM gold_payable_settlements
+      WHERE invoice_id = ? AND status = 'ACTIVE' AND cost_mode = 'SEPARATE'`, [invoiceId]);
+  const db = getDatabase();
+  for (const r of rows) {
+    const diff = Math.round((Number(r.difference) || 0) * 1000) / 1000;
+    if (Math.abs(diff) > 0.0005) {
+      const meta = { kind: 'order_gold_settlement_back_to_stock', settlementId: String(r.id), invoiceId, reason };
+      const line = r.invoice_line_id ? { sourceLineId: String(r.invoice_line_id) } : {};
+      postEntries([
+        { account: diff > 0 ? 'INVENTORY' : 'COGS', direction: 'DEBIT', amount: Math.abs(diff), ...line, metadata: meta },
+        { account: diff > 0 ? 'COGS' : 'INVENTORY', direction: 'CREDIT', amount: Math.abs(diff), ...line, metadata: meta },
+      ], { occurredAt: now, sourceModule: 'EXPENSE', sourceId: String(r.expense_id) });
+    }
+    db.run(`UPDATE gold_payable_settlements SET cost_mode = 'UNSOLD', vat_status = 'NONE' WHERE id = ?`, [String(r.id)]);
+    trackUpdate('gold_payable_settlements', String(r.id), { costMode: 'UNSOLD', vatStatus: 'NONE' });
+    logAuditOrThrow({
+      module: 'Gold', entityType: 'gold_payable_settlements', entityId: String(r.id), action: 'UPDATE', field: 'cost_mode',
+      oldValue: 'SEPARATE', newValue: { costMode: 'UNSOLD', reason, invoiceId, difference: diff },
     });
   }
   return rows.length;
