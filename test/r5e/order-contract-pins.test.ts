@@ -236,6 +236,7 @@ const pid = (v: unknown): unknown => (typeof v === 'string' && SEED_PRODUCTS.inc
 
 
 const { useGoldStore } = await import('../../src/stores/goldStore.ts');
+const orderGold = await import('../../src/core/gold/order-gold-settle.ts');
 
 type OI = import('../../src/core/orders/order-create.ts').OrderCreateInput;
 const LEER: OI = {
@@ -372,8 +373,16 @@ async function editWelt(weg: 'primary' | 'fern', status: string, form: Record<st
   ok(useGoldStore.getState().goldPayables.filter((g) => g.sourceOrderId === oid).map((g) => g.id).join() === made.goldPayableId,
     'GOLD die Auftragsseite findet sie (sourceOrderId)');
   ok(useGoldStore.getState().getGoldPayablesBySupplier('sup-gold').some((g) => g.id === made.goldPayableId), 'GOLD die Lieferantenseite findet sie');
-  useGoldStore.getState().settleGoldReturn(made.goldPayableId!, 5);
-  ok(s(dbA, 'SELECT status FROM gold_payables WHERE id = ?', [made.goldPayableId]) === 'FULFILLED', 'GOLD in Gold beglichen');
+  // CUSTOM-ORDER K3a/C1 — eine Goldschuld, die WIR schulden, ist kein „Return gold" (das ist ein eigener Vorgang) und
+  // wird bis K3b nur in BHD beglichen: der alte Weg wird abgewiesen und ändert nichts.
+  let alt = '';
+  try { useGoldStore.getState().settleGoldReturn(made.goldPayableId!, 5); } catch (e) { alt = String((e as { code?: string }).code ?? e); }
+  ok(alt === 'GOLD_RETURN_NOT_A_SETTLEMENT' && s(dbA, 'SELECT status FROM gold_payables WHERE id = ?', [made.goldPayableId]) === 'OPEN',
+    `GOLD „Return gold" begleicht keine Goldschuld des Auftrags (${alt})`);
+  orderGold.settleOrderGoldInBhd(ACTOR as never, { payableId: made.goldPayableId!, grams: 5, ratePerGram: 24 });
+  ok(s(dbA, 'SELECT status FROM gold_payables WHERE id = ?', [made.goldPayableId]) === 'FULFILLED'
+    && n(dbA, "SELECT COUNT(*) FROM expenses WHERE related_module = 'gold_payable' AND supplier_id = 'sup-gold'") === 1,
+    'GOLD in BHD beglichen: EINE Geldschuld an den Goldschmied — erst jetzt');
 
   const dbB = freshDb();
   const r = await fern(async () => cmd.runOrderCreate(deps(dbB), identity(nextId(), 'orders.create'), await orderRules.orderCreateBody(CUSTOM, stage)));
@@ -381,10 +390,16 @@ async function editWelt(weg: 'primary' | 'fern', status: string, form: Record<st
   const gpB = s(dbB, 'SELECT id FROM gold_payables WHERE source_order_id = ?', [oidB]);
   ok(r.ok && gpB !== '' && String(r.value?.goldPayableId) === gpB, 'GOLD fern angelegt: dieselbe Verbindlichkeit, gemeldet');
   useGoldStore.getState().loadGoldPayables();
-  useGoldStore.getState().convertGoldPayableToMoney(gpB, 300, 'bank');
+  // CUSTOM-ORDER K3a — „Convert to money" ohne Kurs ist für eine Order-Goldschuld gesperrt (Settle in BHD).
+  let geld = '';
+  try { useGoldStore.getState().convertGoldPayableToMoney(gpB, 300, 'bank'); } catch (e) { geld = String((e as { code?: string }).code ?? e); }
+  ok(geld === 'ORDER_GOLD_DEBT_SETTLE_IN_BHD' && s(dbB, 'SELECT status FROM gold_payables WHERE id = ?', [gpB]) === 'OPEN'
+    && n(dbB, "SELECT COUNT(*) FROM expenses WHERE related_module = 'gold_payable'") === 0,
+  `GOLD fern angelegt: der alte Geldweg ändert nichts (${geld})`);
+  orderGold.settleOrderGoldInBhd(ACTOR as never, { payableId: gpB, grams: 5, ratePerGram: 24 });
   ok(n(dbB, "SELECT COUNT(*) FROM expenses WHERE related_module = 'gold_payable' AND supplier_id = 'sup-gold'") === 1
     && s(dbB, 'SELECT status FROM gold_payables WHERE id = ?', [gpB]) === 'FULFILLED',
-  'GOLD in Geld beglichen: EINE Geldschuld an den Goldschmied — erst jetzt');
+  'GOLD in BHD beglichen: EINE Geldschuld an den Goldschmied — erst jetzt');
 
   const dbC = freshDb();
   const madeC = await orderHouse.createOrderOnPrimary({ ...CUSTOM, status: 'pending' });

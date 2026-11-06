@@ -40,7 +40,7 @@ import {
   TransactionRollbackOnly,
 } from '@/core/db/transaction-context';
 import type { Invoice, Payment, CreditNote, PaymentMethod, Purchase, PurchasePayment, Expense, ExpensePayment, BankTransfer, Debt, DebtPayment, CanonicalLoanDirection, CashSource, ScrapPaymentMethod } from '@/core/models/types';
-import { canonicalLoanDirection, repairCostAccount } from '@/core/models/types';
+import { canonicalLoanDirection, capitalizedExpenseAccount } from '@/core/models/types';
 import { capitalizedLineCost } from '@/core/lots/lot-cost';
 import { hasCostCorrectionTable } from '@/core/purchases/cost-correction-read';
 
@@ -88,6 +88,10 @@ export type LedgerAccount =
   // BHD-Wert des in Buch B (out→external) ausgebuchten Gold-Obligos auditierbar; spaetere
   // Aufloesung wenn das Gold tatsaechlich monetarisiert wird. „Gold bleibt Gold, Geld bleibt Geld."
   | 'GOLD_CREDIT_CLEARING'
+  // CUSTOM-ORDER K1 — Goldschuld beim Lieferanten (wir schulden Gramm), bewertet mit den Goldkosten der
+  // Order-Zeile: entsteht Soll INVENTORY / Haben GOLD_LIABILITY, sobald das Gold da ist; jede Begleichung löst
+  // ihren Anteil auf. CREDIT-natur, getrennt von ACCOUNTS_PAYABLE (BHD-Schuld) — sonst stünde dasselbe Gold doppelt offen.
+  | 'GOLD_LIABILITY'
   // Loans-Receivable: wir haben Geld verliehen (we_lend / MONEY_GIVEN). Asset, DEBIT-natur.
   | 'LOAN_RECEIVABLE'
   // Loans-Payable: wir haben Geld geliehen (we_borrow / MONEY_RECEIVED). Liability, CREDIT-natur.
@@ -186,7 +190,10 @@ export type SourceModule =
   // PURCHASE-EDIT D1 — die Einstandskorrektur eines schon verkauften Stücks: der Wareneinsatz der
   // Rechnungszeile wird um die Differenz berichtigt (INVENTORY ↔ COGS), die Rechnung selbst bleibt.
   // Gekeyt auf die cost_corrections-Zeile, source_line_id = die Rechnungszeile. Kein VAT-Konto.
-  | 'COST_CORRECTION';
+  | 'COST_CORRECTION'
+  // CUSTOM-ORDER K1 — der Wert einer Goldschuld aus einer Order (Soll INVENTORY / Haben GOLD_LIABILITY),
+  // gekeyt auf gold_payables.id. Zurückgedreht über reverseSource, solange nichts davon beglichen ist.
+  | 'GOLD_PAYABLE';
 
 export type CounterpartyType =
   | 'CUSTOMER'
@@ -596,8 +603,11 @@ function lookupInvoiceTaxScheme(invoiceId: string): string | undefined {
 // method-Typ lokal um 'credit' geweitet (NICHT der geteilte PaymentMethod-Typ —
 // das wuerde in ~12 Dateien rippeln). 'credit' = Einloesung von Store-Guthaben:
 // das spaetere applyCreditToInvoice bucht damit DR CUSTOMER_CREDIT / CR AR.
-function cashAccountFor(method: PaymentMethod | 'credit'): LedgerAccount {
+// CUSTOM-ORDER K2 — 'order_deposit' = die Anrechnung einer Order-Anzahlung: Soll CUSTOMER_DEPOSITS (die Verbindlichkeit
+// gegenüber dem Kunden erlischt), kein Geldkonto. Ohne diesen Fall fiele sie still auf BANK (default).
+function cashAccountFor(method: PaymentMethod | 'credit' | 'order_deposit'): LedgerAccount {
   switch (method) {
+    case 'order_deposit': return 'CUSTOMER_DEPOSITS';
     case 'cash':          return 'CASH';
     case 'bank_transfer': return 'BANK';
     case 'card':          return 'CARD_CLEARING';
@@ -1623,7 +1633,7 @@ export function postExpense(expense: Expense): PostingResult {
   return postEntries(
     [
       {
-        account: repairCostAccount(expense) ?? 'EXPENSES_OPERATING',
+        account: capitalizedExpenseAccount(expense) ?? 'EXPENSES_OPERATING',
         direction: 'DEBIT',
         amount,
         counterpartyType,
@@ -1750,6 +1760,30 @@ export function postExpenseSupplierCreditPayment(
 
 export function postExpenseCancelled(expense: Expense): PostingResult {
   return reverseSource('EXPENSE', expense.id, new Date().toISOString());
+}
+
+// ── CUSTOM-ORDER K1 — Wert einer Goldschuld aus einer Order ──────────────────
+//   DEBIT  INVENTORY       by Goldkosten der Order-Zeile (Einstand des entstehenden Stücks)
+//   CREDIT GOLD_LIABILITY  by dieselbe Summe, Gegenpartei der Lieferant (wir schulden ihm Gramm)
+// Gekeyt auf gold_payables.id; die Begleichung löst ihren Anteil auf (K3a), ein Storno vor jeder
+// Begleichung dreht genau diese Buchung zurück (reverseSource GOLD_PAYABLE).
+export function postGoldPayableValue(args: {
+  payableId: string; supplierId: string; amount: number; occurredAt: string;
+  orderId: string; orderNumber: string; orderLineId: string; weightGrams: number; karat: string;
+}): PostingResult {
+  const amount = ROUND(args.amount);
+  if (!(amount > 0)) throw new Error(`postGoldPayableValue: amount must be > 0 (got ${args.amount})`);
+  const metadata = {
+    orderId: args.orderId, orderNumber: args.orderNumber, orderLineId: args.orderLineId,
+    weightGrams: args.weightGrams, karat: args.karat, kind: 'order_gold_value',
+  };
+  return postEntries(
+    [
+      { account: 'INVENTORY', direction: 'DEBIT', amount, metadata },
+      { account: 'GOLD_LIABILITY', direction: 'CREDIT', amount, counterpartyType: 'SUPPLIER', counterpartyId: args.supplierId, metadata },
+    ],
+    { occurredAt: args.occurredAt, sourceModule: 'GOLD_PAYABLE', sourceId: args.payableId },
+  );
 }
 
 // ── Bank Transfer (internal: cash ↔ bank) ─────────────────────

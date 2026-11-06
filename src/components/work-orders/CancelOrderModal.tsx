@@ -68,13 +68,18 @@ export function CancelOrderModal({
     // Supplier) bleiben offen, das Stueck wird in Lager ueberfuehrt.
     const realizedCostLines = costLines.filter(l => l.expenseId);
     const realizedCostTotal = realizedCostLines.reduce((s, l) => s + (l.costAmount || 0), 0);
-    const allCustomCostBasis = costLines.reduce((s, l) => s + (l.costAmount || 0), 0);
+    // CUSTOM-ORDER K1 — derselbe Einstand wie der Storno im Haus (orderStore.cancelOrder): nur angekommene Kosten;
+    // geplante (PENDING/ORDERED) entstehen nie. Angekommenes Goldschmied-Gold ist bewertet und bleibt geschuldet.
+    const arrivedCostLines = costLines.filter(l => l.status === 'ARRIVED' || l.status === 'DELIVERED');
+    const allCustomCostBasis = arrivedCostLines.reduce((s, l) => s + (l.costAmount || 0), 0);
+    const arrivedGoldDebt = arrivedCostLines.some(l => l.materialKind === 'gold');
     return {
       customerLineCount: customerLines.length,
       costLineCount: costLines.length,
       sourcedArrivedCount: sourcedArrived.length,
       orderedMarkerCount: orderedMarker.length,
       realizedCostCount: realizedCostLines.length,
+      startedWork: realizedCostLines.length > 0 || arrivedGoldDebt,
       realizedCostTotal,
       customCostBasis: allCustomCostBasis,
     };
@@ -200,7 +205,7 @@ export function CancelOrderModal({
 
       {/* v0.7.0 — Custom-Order in Arbeit (Goldsmith hat schon angefangen):
           A/P bleibt real, Stueck wird in Lager ueberfuehrt. Eigene Warn-Sektion. */}
-      {stats.realizedCostCount > 0 && (
+      {stats.startedWork && (
         <div style={{ padding: '12px 14px', background: '#FFF7ED',
                       border: '1px solid #F0A258', borderRadius: 8, marginBottom: 14 }}>
           <span className="text-overline" style={{ marginBottom: 8, display: 'block', color: '#9A3412' }}>

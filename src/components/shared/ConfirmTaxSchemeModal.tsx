@@ -7,6 +7,19 @@ export interface TaxSchemeLine {
   id: string;
   label: string;
   currentScheme: TaxScheme;
+  /** CUSTOM-ORDER K2 — der Bruttopreis der Zeile (bleibt bei jeder Steuerart gleich); nur Anzeige. */
+  gross?: number;
+}
+
+/** CUSTOM-ORDER K2 — optional: Rechnungsdatum und Nummernart im SELBEN Dialog (Create Invoice einer Order). */
+export interface InvoiceDialogExtras {
+  invoiceDate: string;
+  maxDate: string;
+  onInvoiceDateChange: (d: string) => void;
+  specialMark: boolean;
+  onSpecialMarkChange: (v: boolean) => void;
+  /** Fehlermeldung zum Datum (leer = in Ordnung). */
+  dateError?: string;
 }
 
 interface Props {
@@ -16,6 +29,7 @@ interface Props {
   onConfirm: (perLine: Record<string, TaxScheme>) => void;
   title?: string;
   confirmLabel?: string;
+  extras?: InvoiceDialogExtras;
 }
 
 const SCHEMES: { key: TaxScheme; label: string; desc: string }[] = [
@@ -26,7 +40,7 @@ const SCHEMES: { key: TaxScheme; label: string; desc: string }[] = [
 
 export function ConfirmTaxSchemeModal({
   open, lines, onCancel, onConfirm,
-  title = 'Create Invoice', confirmLabel = 'Create Invoice',
+  title = 'Create Invoice', confirmLabel = 'Create Invoice', extras,
 }: Props) {
   const [schemes, setSchemes] = useState<Record<string, TaxScheme>>({});
 
@@ -67,7 +81,27 @@ export function ConfirmTaxSchemeModal({
     <Modal open={open} onClose={onCancel} title={title} width={600}>
       <p style={{ fontSize: 13, color: '#4B5563', marginBottom: 14 }}>
         Review the VAT scheme for each line. You can change per line or apply one to all.
+        {extras && ' The customer price (gross) stays the same for every scheme.'}
       </p>
+
+      {extras && (
+        <div className="flex gap-4" style={{ marginBottom: 16, flexWrap: 'wrap', alignItems: 'flex-end' }}>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span className="text-overline">INVOICE DATE</span>
+            <input type="date" data-testid="order-invoice-date" value={extras.invoiceDate} max={extras.maxDate}
+              onChange={(e) => extras.onInvoiceDateChange(e.target.value)}
+              style={{ padding: '7px 9px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 13 }} />
+          </label>
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span className="text-overline">NUMBER TYPE</span>
+            <div className="flex gap-1">
+              <button type="button" data-testid="order-invoice-number-standard" onClick={() => extras.onSpecialMarkChange(false)} style={pill(!extras.specialMark)}>Standard</button>
+              <button type="button" data-testid="order-invoice-number-special" onClick={() => extras.onSpecialMarkChange(true)} style={pill(extras.specialMark)}>Special</button>
+            </div>
+          </div>
+          {extras.dateError && <span style={{ fontSize: 12, color: '#B91C1C' }}>{extras.dateError}</span>}
+        </div>
+      )}
 
       {/* Bulk apply */}
       <div style={{ marginBottom: 16, padding: '10px 12px', background: '#F2F7FA', border: '1px solid #E5E9EE', borderRadius: 8 }}>
@@ -95,6 +129,9 @@ export function ConfirmTaxSchemeModal({
             <span style={{ flex: 1, fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
               {line.label}
             </span>
+            {line.gross !== undefined && (
+              <span className="font-mono" style={{ fontSize: 12, color: '#4B5563', flexShrink: 0 }}>{line.gross.toFixed(3)} BHD</span>
+            )}
             <div className="flex gap-1" style={{ flexShrink: 0 }}>
               {SCHEMES.map(s => {
                 const active = schemes[line.id] === s.key;
@@ -114,7 +151,7 @@ export function ConfirmTaxSchemeModal({
 
       <div className="flex justify-end gap-3" style={{ marginTop: 20, paddingTop: 16, borderTop: '1px solid #E5E9EE' }}>
         <Button variant="ghost" onClick={onCancel}>Cancel</Button>
-        <Button variant="primary" onClick={() => onConfirm(schemes)} disabled={lines.length === 0}>{confirmLabel}</Button>
+        <Button variant="primary" onClick={() => onConfirm(schemes)} disabled={lines.length === 0 || !!extras?.dateError}>{confirmLabel}</Button>
       </div>
     </Modal>
   );

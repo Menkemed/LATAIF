@@ -4,7 +4,7 @@
 
 import { create } from 'zustand';
 import type { Expense, ExpenseCategory, ExpensePayment } from '@/core/models/types';
-import { isBookedRepairCost } from '@/core/models/types';
+import { isBookedRepairCost, isBookedOrderCost } from '@/core/models/types';
 import { getDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
 import { trackUpdate, trackDelete } from '@/core/sync/track';
@@ -244,6 +244,13 @@ export const useExpenseStore = create<ExpenseStore>((set, get) => ({
     const own = query('SELECT category, related_module FROM expenses WHERE id = ?', [id])[0];
     if (own && isBookedRepairCost({ category: String(own.category), relatedModule: (own.related_module as string | null) ?? null })) {
       throw new Error('This is a booked repair cost — cancel its repair line (or change the repair) instead.');
+    }
+    // CUSTOM-ORDER K1/K3a — eine Custom-Order-Kostenzeile bzw. die Begleichung einer Goldschuld geht nur mit ihrer Order.
+    if (own && isBookedOrderCost({ category: String(own.category), relatedModule: (own.related_module as string | null) ?? null })) {
+      throw new Error('This is a booked custom-order cost — remove its cost line on the order instead.');
+    }
+    if (own && String(own.related_module ?? '') === 'gold_payable') {
+      throw new Error('This expense settles a gold debt — reverse the settlement instead.');
     }
     // M-03 — Ledger-Storno VOR dem Löschen. Slice A: jetzt ATOMAR in EINER Ledger-Transaktion
     // + Credit-Restore. Der Capture der einzuloesenden Credit-Zahlungen MUSS VOR dem (Cascade-)

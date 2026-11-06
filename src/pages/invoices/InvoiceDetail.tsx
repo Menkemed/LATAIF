@@ -838,6 +838,7 @@ export function InvoiceDetail() {
                             const methodLabel = ({
                               cash: 'Cash', bank: 'Bank', bank_transfer: 'Bank Transfer',
                               card: 'Card', benefit: 'Benefit', other: 'Other',
+                              credit: 'Store Credit', order_deposit: 'Order deposit',
                             } as Record<string, string>)[p.method] || p.method;
                             return (
                               <div key={p.id} className="flex justify-between items-center"

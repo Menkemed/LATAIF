@@ -2887,7 +2887,9 @@ mod legacy_push_tests {
         // gains update (40 → 41 update).
         // PURCHASE-EDIT Teil 3 (v0.8.91): an untouched purchase line is removed from a saved purchase → purchase_lines
         // gains delete, like invoice_lines/order_lines (38 → 39 delete).
-        assert_eq!((ins, upd, del), (57, 41, 39),"insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
+        // CUSTOM-ORDER K2/K3a: order_deposit_applications and gold_payable_settlements are inserted and updated (status
+        // ACTIVE → REVERSED), never deleted (57 → 59 insert, 41 → 43 update).
+        assert_eq!((ins, upd, del), (59, 43, 39),"insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
     }
 
     // O6 — a mixed batch with one disallowed operation writes NOTHING (all-or-nothing).

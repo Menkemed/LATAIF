@@ -244,12 +244,22 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
   const dom = codeOf(src('src/core/orders/order-payment-carryover.ts'));
   ok(/export function carryOverOrderPaymentsToInvoice\(/.test(dom),
     'R5A der Anzahlungsuebertrag ist eine Domaenenfunktion');
-  ok(/markConvertedToInvoice\(orderId\)/.test(dom) && /recordPayment\(/.test(dom),
+  // CUSTOM-ORDER K2 — die Anzahlung wird ANGERECHNET (nicht umgebucht): order-deposit-apply hält den Vertrag —
+  // Überschuss-Guthaben zurücknehmen, je Anzahlung eine Zahlung 'order_deposit', Rest bleibt offen.
+  const apply = codeOf(src('src/core/orders/order-deposit-apply.ts'));
+  ok(/applyOrderDepositsToInvoice\(/.test(dom) && /teardownOrderOverpayCredit\(/.test(apply) && /recordPayment\(/.test(apply)
+    && /recordPayment\(invoiceId, take, ORDER_DEPOSIT_METHOD,/.test(apply)
+    && /export const ORDER_DEPOSIT_METHOD = 'order_deposit';/.test(src('src/core/orders/order-deposit-sql.ts'))
+    && /INSERT INTO order_deposit_applications/.test(apply),
     'R5A …und er enthaelt den ganzen Vertrag: Umkehr, Anrechnung, Ueberschuss');
   // Beide Seiten rufen DIESELBE — kopiert ist nichts.
+  // CUSTOM-ORDER K2 — der Fernbefehl ruft die Hausfolge, die Hausfolge den Übertrag; die Ansicht ruft ihn noch im Altweg.
+  ok(/convertOrderToInvoiceInHouse\(/.test(codeOf(src('src/core/bridge/financial-commands.ts')))
+    && /convertOrderToInvoiceInHouse\(/.test(codeOf(src('src/pages/orders/OrderDetail.tsx'))),
+    'R5A Ansicht und Fernbefehl rufen DIESELBE Hausfolge');
   for (const [datei, wer] of [
     ['src/pages/orders/OrderDetail.tsx', 'die Auftragsansicht'],
-    ['src/core/bridge/financial-commands.ts', 'der Fernbefehl'],
+    ['src/core/orders/order-convert-house.ts', 'die Hausfolge (Primary + Fernbefehl)'],
   ] as const) {
     ok(/carryOverOrderPaymentsToInvoice\(/.test(codeOf(src(datei))),
       `R5A ${wer} ruft dieselbe Funktion`);
@@ -330,24 +340,28 @@ for (const z of R4C_MATRIX.filter((x) => !x.verdrahtet && x.ort !== '(keine)')) 
     'R5A.2 die Rechnungszeilen eines Auftrags sind eine Domaenenfunktion');
   const ui = codeOf(src('src/pages/orders/OrderDetail.tsx'));
   const fc = codeOf(src('src/core/bridge/financial-commands.ts'));
-  ok(/buildOrderInvoiceLines\(/.test(ui) && /buildOrderInvoiceLines\(/.test(fc),
+  // CUSTOM-ORDER K2 — die Zeilen baut die gemeinsame Hausfolge; Ansicht und Fernbefehl rufen sie.
+  const house = codeOf(src('src/core/orders/order-convert-house.ts'));
+  ok(/buildOrderInvoiceLines\(/.test(house) && /convertOrderToInvoiceInHouse\(/.test(ui) && /convertOrderToInvoiceInHouse\(/.test(fc),
     'R5A.2 Ansicht und Fernbefehl rufen DIESELBE');
   ok(!/for \(const ol of billableLines\)/.test(ui), 'R5A.2 …und in der Ansicht steht keine zweite');
   ok(!/net \* rate \/ 100/.test(fc), 'R5A.2 der Fernbefehl setzt die Steuer nicht mehr selbst obendrauf');
-  ok(/'taxSchemes', 'specialMark', 'markComplete'\]/.test(fc), 'R5A.2 die Wahl der Dialoge ist Teil des Vertrags');
+  ok(/'taxSchemes', 'specialMark', 'markComplete', 'invoiceDate'\]/.test(fc), 'R5A.2 die Wahl der Dialoge ist Teil des Vertrags (seit K2 mit Rechnungsdatum)');
   ok(/TAX_SCHEMES as readonly unknown\[\]/.test(fc), 'R5A.2 …das Schema geprueft gegen die Liste des Hauses');
   ok(/export const TAX_SCHEMES = \['VAT_10', 'ZERO', 'MARGIN'\] as const;/.test(src('src/core/models/types.ts'))
     && /export type TaxSchemeCanonical = typeof TAX_SCHEMES\[number\];/.test(src('src/core/models/types.ts')),
     'R5A.2 die Steuerschemata sind ein WERT, aus dem der Typ folgt');
-  ok(/req\.specialMark === true/.test(fc), 'R5A.2 die Nummernart erreicht die Rechnung');
-  ok(/ORDER_LINES_CHANGED/.test(fc), 'R5A.2 eine andere als die gezeigte Zeilenmenge wird abgelehnt');
-  ok(/ORDER_LINE_WITHOUT_PRODUCT/.test(fc), 'R5A.2 …und der Fernbefehl legt keinen Artikel an');
+  ok(/req\.specialMark === true/.test(house), 'R5A.2 die Nummernart erreicht die Rechnung');
+  ok(/ORDER_LINES_CHANGED/.test(house), 'R5A.2 eine andere als die gezeigte Zeilenmenge wird abgelehnt');
+  // CUSTOM-ORDER K2 — der Artikel des Sonderstücks entsteht IM HAUS (SKU, Kategorie, Bilder, Verknüpfung), auf beiden Wegen.
+  ok(!/ORDER_LINE_WITHOUT_PRODUCT/.test(fc) && /function createCustomPieceProduct\(/.test(house) && /allocateSkuOnCreate\(/.test(house),
+    'R5A.2 …und der Artikel entsteht in der Hausfolge, nicht im Fernbefehl');
   ok(/taxSchemes,\s*specialMark: specialMark === true, markComplete: markCompleteOnConvert === true/.test(ui),
     'R5A.2 der Client schickt, was die Dialoge bestaetigt haben');
   ok(/converting an order without saved tax schemes/.test(ui),
     'R5A.2 der Altweg ist auf dem Client ein ausdrueckliches Nein, kein lokaler Schreibversuch');
-  ok(/converting an order line that has no article yet/.test(ui), 'R5A.2 …ebenso eine Position ohne Artikel');
-  ok(/markConvertedLinesDelivered\(/.test(ui) && /markConvertedLinesDelivered\(/.test(fc),
+  ok(!/converting an order line that has no article yet/.test(ui), 'R5A.2 …eine Position ohne Artikel ist auf dem Client kein Nein mehr (K2: das Haus legt ihn an)');
+  ok(/markConvertedLinesDelivered\(/.test(house) && /markComplete: markCompleteOnConvert === true/.test(ui),
     'R5A.2 „abschliessen" laeuft ueber dieselbe Funktion');
   ok(/if \(r\.kind !== 'ok'\) setFehler\(fehlertext\(r\)\);/.test(codeOf(src('src/core/data/shared-write.ts'))),
     'R5A.2 auch `save` legt den Grund in die Anzeige — kein Ausgang verschwindet still');

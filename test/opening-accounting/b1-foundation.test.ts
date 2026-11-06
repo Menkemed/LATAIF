@@ -520,7 +520,8 @@ const CASH = { kind: 'CASH_BALANCE', reference: 'Cash count 15.10.2026', reason:
     const debitNatur = info.klass === 'ASSET' || info.klass === 'EXPENSE';
     return info.contra ? debitNatur === natural.includes(acc) : debitNatur !== natural.includes(acc);
   });
-  ok(union.length === 31 && widersprueche.length === 0 && Object.keys(ac.ACCOUNT_CLASSES).length === union.length && posted === 'LEGACY_OPENING_FROZEN',
+  // CUSTOM-ORDER K1: +1 Konto GOLD_LIABILITY (Goldschuld in BHD, Passiva) → 32.
+  ok(union.length === 32 && widersprueche.length === 0 && Object.keys(ac.ACCOUNT_CLASSES).length === union.length && posted === 'LEGACY_OPENING_FROZEN',
     `E4 jedes Hauptbuchkonto hat eine Klasse, passend zu seiner Soll-/Haben-Natur (Gegenkonten TAX_PAID, REFUNDS ausdrücklich) (${widersprueche.join(',') || union.length})`);
   insert(db, 'ledger_entries', { id: 'le-m1', branch_id: 'branch-main', entry_no: 9001, transaction_id: 'tx-m', account: 'MYSTERY', direction: 'DEBIT', amount: 7, source_module: 'MANUAL', source_id: 'm', occurred_at: '2026-10-01T12:00:00.000Z', recorded_at: NOW, currency: 'BHD' });
   insert(db, 'ledger_entries', { id: 'le-m2', branch_id: 'branch-main', entry_no: 9002, transaction_id: 'tx-m', account: 'CASH', direction: 'CREDIT', amount: 7, source_module: 'MANUAL', source_id: 'm', occurred_at: '2026-10-01T12:00:00.000Z', recorded_at: NOW, currency: 'BHD' });

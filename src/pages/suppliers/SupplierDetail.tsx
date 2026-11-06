@@ -1,4 +1,5 @@
 // Plan §Supplier §8: Detail-View mit Ledger + Purchase/Payment/Return-Historie
+import { SettleOrderGoldModal } from '@/components/gold/SettleOrderGoldModal';
 import { useEffect, useMemo, useState } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, Building2, Edit3, Save, Trash2, User } from 'lucide-react';
@@ -96,6 +97,8 @@ export function SupplierDetail() {
   const getGoldPayablesBySupplier = useGoldStore(s => s.getGoldPayablesBySupplier);
   const goldPayables = useGoldStore(s => s.goldPayables);
   const [settleModal, setSettleModal] = useState<{ open: boolean; mode: SettleGoldMode; payable?: GoldPayable }>({ open: false, mode: 'settle_supplier_return' });
+  // CUSTOM-ORDER K3a — BHD-Begleichung einer Order-Goldschuld.
+  const [settleOrderGold, setSettleOrderGold] = useState<GoldPayable | null>(null);
   const [editing, setEditing] = useState(false);
   // OPENING BALANCES — der Bereich „Opening balances" nur für den Owner; eine nicht erfasste Eingabe schützt „Save".
   const perm = usePermission();
@@ -663,12 +666,16 @@ export function SupplierDetail() {
                           {gp.fulfilledGrams.toFixed(3)}
                         </span>
                         <div style={{ padding: '6px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
-                          {gp.status === 'OPEN' && remaining > 0 && (
+                          {/* CUSTOM-ORDER K3a — Goldschuld einer Order: nur „Settle in BHD" (Wert, Teil, Kurs). C1: „Return gold"
+                              ist keine Begleichung einer Schuld, die wir haben — der Knopf entfällt für alle. */}
+                          {gp.status === 'OPEN' && remaining > 0 && gp.sourceOrderId && (
+                            <button data-gold-settle-open="order_money" onClick={() => setSettleOrderGold(gp)}
+                              style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #C6A36D', borderRadius: 4, background: 'rgba(198,163,109,0.08)', color: '#8A7548', cursor: 'pointer' }}>
+                              Settle in BHD
+                            </button>
+                          )}
+                          {gp.status === 'OPEN' && remaining > 0 && !gp.sourceOrderId && (
                             <>
-                              <button onClick={() => setSettleModal({ open: true, mode: 'settle_supplier_return', payable: gp })}
-                                style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#0F0F10', cursor: 'pointer' }}>
-                                Return gold
-                              </button>
                               <button onClick={() => setSettleModal({ open: true, mode: 'apply_shop_to_supplier', payable: gp })}
                                 style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#0F0F10', cursor: 'pointer' }}>
                                 Apply shop gold
@@ -862,6 +869,9 @@ export function SupplierDetail() {
         title={`History · ${supplier.name}`}
       />
 
+      {settleOrderGold && (
+        <SettleOrderGoldModal open payable={settleOrderGold} onClose={() => setSettleOrderGold(null)} />
+      )}
       <SettleGoldModal
         open={settleModal.open}
         mode={settleModal.mode}

@@ -572,7 +572,7 @@ export function openingAccountingFor(ctx: { branchId: string }, input: OpeningAc
   plain('LOANS_PAYABLE', 'Loans taken', 'LIABILITY', ['LOAN_PAYABLE'], draftOf('LOAN_PAYABLE'), 'LATAIF loans (ledger) + opening documents');
   plain('VAT_PAYABLE', 'VAT (output, margin VAT, paid to NBR)', 'LIABILITY', ['VAT_OUTPUT', 'MARGIN_VAT', 'TAX_PAID'], draftOf('VAT_PAYABLE'), 'Ledger + opening documents',
     ['VAT period lock and NBR export stay unchanged; an opening VAT balance is only recorded (E3).']);
-  plain('OTHER_LIABILITIES', 'Other liabilities', 'LIABILITY', ['COMMISSION_PAYABLE_AGENT', 'COMMISSION_PAYABLE_CONSIGNOR', 'PARTNER_ITEM_BALANCE'], draftOf('OTHER_LIABILITY'), 'Ledger + opening documents');
+  plain('OTHER_LIABILITIES', 'Other liabilities', 'LIABILITY', ['COMMISSION_PAYABLE_AGENT', 'COMMISSION_PAYABLE_CONSIGNOR', 'PARTNER_ITEM_BALANCE', 'GOLD_LIABILITY'], draftOf('OTHER_LIABILITY'), 'Ledger + opening documents');
 
   const pendingParty = partyRows.filter((r) => r.status === 'RECORDED').length;
   if (pendingParty > 0) issues.push(`${pendingParty} customer/supplier opening position(s) recorded, not booked and not payable.`);

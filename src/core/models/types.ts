@@ -873,6 +873,9 @@ export interface GoldPayable {
   notes?: string;
   createdAt: string;
   updatedAt: string;
+  /** CUSTOM-ORDER K1 — der gebuchte Wert (Goldkosten der Order-Zeile); fehlt = noch nicht bewertet. */
+  bookValue?: number;
+  bookValueDate?: string;
 }
 
 // Customer-Gold-Credit: Kunde hat Gold gebracht, nur Teil davon im Repair
@@ -1686,6 +1689,21 @@ export function repairCostAccount(e: { category?: string | null; relatedModule?:
 }
 export function isBookedRepairCost(e: { category?: string | null; relatedModule?: string | null }): boolean {
   return repairCostAccount(e) !== null;
+}
+
+// CUSTOM-ORDER K1 — die Kostenzeile einer Custom-Order (Arbeitslohn, Material vom Lieferanten; Bezug 'order',
+// Kategorie „Inventory") ist Einstand des entstehenden Stücks: Soll INVENTORY, beim Verkauf genau einmal COGS.
+// Vorher Soll EXPENSES_OPERATING — zusammen mit dem Wareneinsatz der Rechnung zählte derselbe Betrag doppelt und
+// INVENTORY lief ins Minus. Kartengebühren derselben Order (Kategorie CardFees) bleiben, wie sie sind.
+export function orderCostAccount(e: { category?: string | null; relatedModule?: string | null }): 'INVENTORY' | null {
+  return e.relatedModule === 'order' && e.category === 'Inventory' ? 'INVENTORY' : null;
+}
+export function isBookedOrderCost(e: { category?: string | null; relatedModule?: string | null }): boolean {
+  return orderCostAccount(e) !== null;
+}
+/** Das Sollkonto einer Ausgabe, die Einstand ist (Reparatur nach Eigentum, Custom-Order); sonst null = Aufwand. */
+export function capitalizedExpenseAccount(e: { category?: string | null; relatedModule?: string | null }): 'INVENTORY' | 'COGS' | null {
+  return repairCostAccount(e) ?? orderCostAccount(e);
 }
 
 export interface Expense {

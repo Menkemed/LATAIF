@@ -62,7 +62,9 @@ export type StockAdjustmentAccounting = 'BOOKED' | 'ACCOUNTING_RECONCILIATION_PE
 /** Abgeschlossene Reparaturen — jede andere bindet den Artikel. */
 const REPAIR_CLOSED = ['picked_up', 'cancelled', 'returned', 'DELIVERED', 'CANCELLED'];
 /** INVENTORY-Sollbuchungen dieser Herkunft sind bekannt und zuordenbar (s. Kopf); jede andere ist „unbekannt". */
-const KNOWN_INVENTORY_DEBIT_SOURCES = ['PURCHASE', 'EXPENSE', 'REPAIR_OWN_WORK', 'SALES_RETURN_COGS'];
+// CUSTOM-ORDER K1/K3a — dazu der Wert einer Goldschuld aus einer Order (GOLD_PAYABLE) und die Einstandsbuchungen
+// einer Custom-Order (Ausgaben mit Bezug 'order' bzw. die BHD-Begleichung ihrer Goldschuld, Bezug 'gold_payable').
+const KNOWN_INVENTORY_DEBIT_SOURCES = ['PURCHASE', 'EXPENSE', 'REPAIR_OWN_WORK', 'SALES_RETURN_COGS', 'GOLD_PAYABLE'];
 
 const round3 = (n: number): number => Math.round(n * 1000) / 1000;
 const placeholders = (a: readonly unknown[]): string => a.map(() => '?').join(',');
@@ -89,7 +91,7 @@ export function unknownInventoryDebits(): number {
       WHERE le.account = 'INVENTORY' AND le.direction = 'DEBIT' AND le.reverses_entry_id IS NULL
         AND (le.source_module NOT IN (${placeholders(KNOWN_INVENTORY_DEBIT_SOURCES)})
              OR (le.source_module = 'EXPENSE' AND NOT EXISTS (
-                   SELECT 1 FROM expenses e WHERE e.id = le.source_id AND e.related_module = 'repair')))`,
+                   SELECT 1 FROM expenses e WHERE e.id = le.source_id AND e.related_module IN ('repair', 'order', 'gold_payable'))))`,
     KNOWN_INVENTORY_DEBIT_SOURCES,
   )[0]?.n) || 0;
 }
@@ -109,6 +111,17 @@ export function lotlessValueIssue(productId: string): string | null {
     [productId, productId],
   );
   if (aktiviert.length > 0) return 'repair costs of this item were booked to inventory';
+  // CUSTOM-ORDER K1 — ein Sonderstück aus einer Order trägt die dort gebuchten Kosten (Lohn, Gold) als Einstand.
+  const orderIds = `SELECT id FROM orders WHERE product_id = ? UNION SELECT order_id FROM order_lines WHERE product_id = ?`;
+  const ausOrder = query(
+    `SELECT 1 FROM ledger_entries le
+      WHERE le.account = 'INVENTORY' AND le.direction = 'DEBIT'
+        AND ((le.source_module = 'EXPENSE' AND le.source_id IN (SELECT e.id FROM expenses e WHERE e.related_module = 'order' AND e.related_entity_id IN (${orderIds})))
+          OR (le.source_module = 'GOLD_PAYABLE' AND le.source_id IN (SELECT gp.id FROM gold_payables gp WHERE gp.source_order_id IN (${orderIds}))))
+      LIMIT 1`,
+    [productId, productId, productId, productId],
+  );
+  if (ausOrder.length > 0) return 'custom-order costs of this item were booked to inventory';
   if (unknownInventoryDebits() > 0) return 'the ledger holds inventory bookings of unknown origin';
   return null;
 }

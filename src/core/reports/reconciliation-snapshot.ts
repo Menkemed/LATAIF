@@ -9,6 +9,7 @@
 // Jetzt steht die Rechnung hier: zustandsfrei, mit dem Ausweis der Anfrage, von der Seite wie
 // von der Fernauskunft benutzt. Was am Hauptrechner bleibt, ist das REPARIEREN — jede
 // Storno-Schaltfläche schreibt, und Schreiben gehört zu den geprüften Buchungen, nicht hierher.
+import { openDepositSql } from '@/core/orders/order-deposit-sql';
 import { query } from '@/core/db/helpers';
 import {
   balanceOf,
@@ -191,8 +192,7 @@ function domainCustomerDeposits(branchId: string): number {
   const rows = query(
     `SELECT COALESCE(SUM(MIN(pp.paid, o.agreed_price)), 0) AS t
      FROM orders o
-     JOIN (SELECT order_id, SUM(amount) AS paid FROM order_payments
-            WHERE COALESCE(converted_to_invoice, 0) = 0 GROUP BY order_id) pp
+     JOIN (SELECT op.order_id, SUM(${openDepositSql('op')}) AS paid FROM order_payments op GROUP BY op.order_id) pp
        ON pp.order_id = o.id
      WHERE o.branch_id = ? AND o.status != 'cancelled'`,
     [branchId]

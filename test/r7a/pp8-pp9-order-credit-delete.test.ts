@@ -262,7 +262,11 @@ function welt(art: Art): Welt {
     if (art === 'moved') {
       // Der Laden hat 2 g seines 22K-Bestands schon an den Goldschmied gegeben (Goldkern, shop_gold).
       creditShopGoldCore(ACT, '22K', 10, { sourceLabel: 'Anfangsbestand' });
+      // CUSTOM-ORDER K3a — Ladengold an eine Order-Goldschuld ist bis K3b gesperrt; dieser Stand ist ALTBESTAND (vor K3a
+      // entstanden). Er wird hergestellt, indem die Schuld für den einen Schritt nicht als Order-Schuld erscheint.
+      db.run('UPDATE gold_payables SET source_order_id = NULL WHERE id = ?', [goldPayableId ?? '']);
       settleGoldPayable(ACT, { payableId: goldPayableId ?? '', mode: 'shop_gold', grams: 2 });
+      db.run('UPDATE gold_payables SET source_order_id = ? WHERE id = ?', [order.id, goldPayableId ?? '']);
     }
     const gl = s(db, "SELECT id FROM order_lines WHERE order_id = ? AND material_kind = 'gold'", [order.id]);
     return { oid: order.id, gp: goldPayableId ?? '', goldLine: gl };
@@ -485,7 +489,14 @@ for (const art of ['delivered', 'moved'] as const) {
 {
   const w = welt('plan');
   setTestDatabase(w.db as never); reload();
+  // CUSTOM-ORDER K3a — „→ BHD" ohne Kurs ist für eine Order-Goldschuld gesperrt; eine so beglichene Schuld ist ALTBESTAND
+  // (vor K3a) und wird hier so hergestellt: für den einen Schritt erscheint sie nicht als Order-Schuld.
+  let gesperrt = '';
+  try { useGoldStore.getState().convertGoldPayableToMoney(w.gp, 95, 'bank', 'R7A'); } catch (e) { gesperrt = String((e as { code?: string }).code ?? e); }
+  ok(gesperrt === 'ORDER_GOLD_DEBT_SETTLE_IN_BHD', `FULFILLED der alte Geldweg ist für eine Order-Goldschuld gesperrt (${gesperrt})`);
+  w.db.run('UPDATE gold_payables SET source_order_id = NULL WHERE id = ?', [w.gp]);
   useGoldStore.getState().convertGoldPayableToMoney(w.gp, 95, 'bank', 'R7A');
+  w.db.run('UPDATE gold_payables SET source_order_id = ? WHERE id = ?', [w.oid, w.gp]);
   const st = s(w.db, 'SELECT status FROM gold_payables WHERE id = ?', [w.gp]);
   const d = loeschen(w);
   ok(st === 'FULFILLED' && d.code === 'ORDER_DELETE_GOLD_MOVED' && d.gleich && s(w.db, 'SELECT status FROM gold_payables WHERE id = ?', [w.gp]) === 'FULFILLED',

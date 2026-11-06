@@ -21,6 +21,8 @@ import type { Order, Product } from '@/core/models/types';
 import { normalizeSpecImages } from '@/core/media/record-image';
 import { OrderActionRejected, planOrderCreate, type OrderCreateInput, type OrderCreatePort } from './order-create';
 import { planOrderEdit, orderEditInput, type OrderEditInput } from './order-edit';
+import { correctionDateIssue } from '@/core/ledger/correction-dates';
+import { bookingTimestamp } from './order-gold-value';
 
 const str = (v: unknown): string | undefined => (v === null || v === undefined || v === '' ? undefined : String(v));
 
@@ -82,6 +84,17 @@ export function createOrderInHouse(
   referenceMediaIds: readonly string[] = [],
 ): OrderCreated {
   const plan = planOrderCreate(input, houseOrderPort(branchId));
+  // CUSTOM-ORDER K1 — wird der Auftrag gleich als angekommen/benachrichtigt/abgeschlossen angelegt, sind seine
+  // Kosten schon entstanden: Arbeitslohn als Lieferantenschuld und der Wert der Goldschuld, gebucht am Order-Datum.
+  // Ein Tag vor dem Eröffnungsstichtag oder in einem zugemachten VAT-Quartal wird VOR jedem Schreiben abgelehnt.
+  const initial = String((plan.order as { status?: string }).status || 'pending');
+  const sofortGebucht = initial === 'arrived' || initial === 'notified' || initial === 'completed';
+  const nowIso = new Date().toISOString();
+  const bookingDay = String((plan.order as { orderDate?: string }).orderDate || nowIso.slice(0, 10)).slice(0, 10);
+  if (sofortGebucht) {
+    const issue = correctionDateIssue(branchId, [{ iso: bookingTimestamp(bookingDay, nowIso), what: 'the costs of this order' }]);
+    if (issue) throw new OrderActionRejected(issue.code, issue.message);
+  }
   const os = useOrderStore.getState();
   const order = os.createOrder({ ...plan.order, ...extras } as never);
   // Die Auftragszeile ist gerade entstanden; sie IST die Änderung, also keine zweite Fassung.
@@ -98,7 +111,12 @@ export function createOrderInHouse(
       karat: plan.goldPayable.karat,
     }).id;
   }
-  return { order, goldPayableId };
+  if (sofortGebucht) {
+    // Der Tag, an dem das Stück fertig/da war: beim direkten Anlegen der Order-Tag (sonst setzt ihn erst „arrived").
+    if (!order.actualDelivery) useOrderStore.getState().updateOrder(order.id, { actualDelivery: bookingDay });
+    useOrderStore.getState().commitOrderLineExpenses(order.id, { bookingDate: bookingDay });
+  }
+  return { order: useOrderStore.getState().getOrder(order.id) ?? order, goldPayableId };
 }
 
 /**

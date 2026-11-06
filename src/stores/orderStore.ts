@@ -14,6 +14,8 @@ import { trackChange } from '@/core/sync/sync-service';   // sync-only (kein Aud
 import { trackProductRow } from '@/core/lots/lot-queries';
 import { adoptOrderPhotosToProduct } from '@/core/orders/order-media';
 import { GRAM_EPS, assertGoldPayablesRemovable } from '@/core/gold/gold-settle';
+import { bookOrderGoldValues, unbookGoldPayableValue } from '@/core/orders/order-gold-value';
+import { OPEN_DEPOSIT_TOTAL_SQL } from '@/core/orders/order-deposit-sql';
 import { useProductStore } from '@/stores/productStore';
 import { bookCardFee, reverseCardFees } from '@/core/finance/card-fee-booking';
 import { assertCardFeeConfigured, normalizeCardBrand } from '@/core/finance/card-fees';
@@ -168,6 +170,12 @@ export function orderDeleteBlocker(orderId: string): OrderDeleteBlocked | null {
     return new OrderDeleteBlocked('ORDER_DELETE_COSTS_PAID',
       'This order cannot be deleted: a supplier cost of it has already been paid. Cancel the order instead.');
   }
+  // CUSTOM-ORDER K2 — eine auf eine Rechnung angerechnete Anzahlung trägt diese Rechnung; das Löschen der Order drehte
+  // den Geldeingang zurück, während die Rechnung bezahlt bliebe.
+  if (query(`SELECT 1 FROM order_deposit_applications WHERE order_id = ? AND status = 'ACTIVE' LIMIT 1`, [orderId]).length > 0) {
+    return new OrderDeleteBlocked('ORDER_DELETE_DEPOSIT_APPLIED',
+      'This order cannot be deleted: its deposit is applied to an invoice. Cancel that invoice first.');
+  }
   return null;
 }
 
@@ -255,7 +263,8 @@ interface OrderStore {
   // v0.2.1 — Trigger A/P-Expense fuer jede order_line mit supplier_id + cost_amount > 0
   // (analog zu repairStore.commitRepairLineExpenses). Idempotent: ueberspringt lines
   // die bereits expense_id haben. v0.3.0: committed nur Lines mit status='ARRIVED'.
-  commitOrderLineExpenses: (orderId: string) => void;
+  /** CUSTOM-ORDER K1 — `bookingDate` (JJJJ-MM-TT): der Buchungstag (Anlegen als Completed = Order-Datum); sonst heute. */
+  commitOrderLineExpenses: (orderId: string, opts?: { bookingDate?: string }) => void;
   // v0.3.0 — Per-Line Fulfillment-Status
   updateOrderLineStatus: (lineId: string, status: OrderLineStatus) => void;
   // Back-to-Back — Zeile als "beim Supplier bestellt" markieren (Status ORDERED)
@@ -687,9 +696,10 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     // v0.2.1/v0.3.0 — Bei status='arrived'/'completed' werden die jetzt
     // ARRIVED-Lines mit supplier_id als A/P-Expense gebucht. commitOrderLineExpenses
     // filtert intern auf status IN ('ARRIVED','DELIVERED') + idempotent.
+    // CUSTOM-ORDER K1 — nicht mehr still geschluckt: scheitert die Buchung, scheitert der Statuswechsel mit
+    // (Primary: runOnPrimary-Klammer; PC2: runRemoteCommand) — sonst stünde die Order auf „arrived" ohne ihre Schuld.
     if (status === 'arrived' || status === 'completed') {
-      try { get().commitOrderLineExpenses(id); }
-      catch (err) { console.error('[order] commitOrderLineExpenses failed:', err); }
+      get().commitOrderLineExpenses(id);
     }
 
     const eventMap: Record<OrderStatus, string> = {
@@ -765,8 +775,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
 
     // Bei ARRIVED: A/P-Expense fuer Supplier-Lines buchen (idempotent).
     if (status === 'ARRIVED' || status === 'DELIVERED') {
-      try { get().commitOrderLineExpenses(orderId); }
-      catch (err) { console.error('[order] commitOrderLineExpenses failed:', err); }
+      get().commitOrderLineExpenses(orderId);
     }
 
     saveDatabase();
@@ -923,6 +932,8 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     const linkedGp = query(`SELECT id, status, fulfilled_grams FROM gold_payables WHERE source_order_line_id = ?`, [lineId]);
     assertGoldPayablesRemovable(linkedGp, 'Position');
     for (const g of linkedGp) {
+      // CUSTOM-ORDER K1 — der Wert der Schuld (Soll INVENTORY / Haben GOLD_LIABILITY) geht mit ihr.
+      unbookGoldPayableValue(g.id as string, new Date().toISOString());
       db.run(`DELETE FROM gold_payables WHERE id = ?`, [g.id as string]);
       trackDelete('gold_payables', g.id as string);
     }
@@ -1055,9 +1066,10 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
   // v0.2.1 — Port von repairStore.commitRepairLineExpenses. Postet pro
   // order_line mit supplier_id + cost_amount > 0 einen Expense + Ledger A/P.
   // Idempotent: ueberspringt lines die bereits expense_id haben.
-  commitOrderLineExpenses: (orderId) => {
+  commitOrderLineExpenses: (orderId, opts = {}) => {
     const db = getDatabase();
     const now = new Date().toISOString();
+    const bookingDay = opts.bookingDate || now.split('T')[0];
     const orderRows = query(
       `SELECT id, branch_id, order_number, payment_method FROM orders WHERE id = ?`,
       [orderId]
@@ -1081,7 +1093,6 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
          ORDER BY position`,
       [orderId]
     );
-    if (lineRows.length === 0) return;
 
     for (const lr of lineRows) {
       const lineId = lr.id as string;
@@ -1112,7 +1123,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
            expense_date, description, related_module, related_entity_id, supplier_id, status, created_at, created_by)
          VALUES (?, ?, ?, 'Inventory', ?, 0, ?, ?, ?, 'order', ?, ?, ?, ?, ?)`,
         [expenseId, branchId, expenseNumber, cost, method,
-         now.split('T')[0], desc, orderId, supplierId, expStatus, now, userId]
+         bookingDay, desc, orderId, supplierId, expStatus, now, userId]
       );
       trackInsert('expenses', expenseId, {
         category: 'Inventory', amount: cost, orderId, orderLineId: lineId,
@@ -1132,7 +1143,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         amount: cost,
         paidAmount: 0,
         paymentMethod: method,
-        expenseDate: now.split('T')[0],
+        expenseDate: bookingDay,
         description: desc,
         relatedModule: 'order',
         relatedEntityId: orderId,
@@ -1141,11 +1152,13 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         createdAt: now,
         createdBy: userId,
       };
-      safePost(`postExpense(${expenseId}) [order-line]`, () => {
-        if (hasLedgerEntries('EXPENSE', expenseId)) return;
-        postExpense(expFresh);
-      });
+      // CUSTOM-ORDER K1 — strikt: Soll INVENTORY (Einstand des Stücks, orderCostAccount) / Haben A/P. Scheitert die
+      // Buchung, scheitert der Vorgang mit (der Aufrufer läuft in einer Klammer) — keine Ausgabe ohne Buchung.
+      if (!hasLedgerEntries('EXPENSE', expenseId)) postExpense(expFresh);
     }
+    // CUSTOM-ORDER K1 — dazu der Wert jeder angekommenen Goldschuld dieser Order (Soll INVENTORY / Haben GOLD_LIABILITY).
+    const bewertet = bookOrderGoldValues(orderId, bookingDay, now);
+    if (lineRows.length === 0 && bewertet.length === 0) return;
 
     saveDatabase();
     get().loadOrders();
@@ -1307,10 +1320,8 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     // umgewandelte Anzahlung ist beim Convert aus CUSTOMER_DEPOSITS herausgebucht worden; wurde die
     // Rechnung spaeter storniert, loeste das nur die Zeilen — der Storno zahlte dasselbe Geld ein
     // zweites Mal zurueck (bzw. schrieb es noch einmal gut / buchte es als Verfall).
-    const payRows = query(
-      `SELECT COALESCE(SUM(amount),0) AS t FROM order_payments WHERE order_id = ? AND COALESCE(converted_to_invoice, 0) = 0`,
-      [id]
-    );
+    // CUSTOM-ORDER K2 — offen = nicht angerechnet (order-deposit-sql), auch teilweise.
+    const payRows = query(OPEN_DEPOSIT_TOTAL_SQL, [id]);
     const totalPaid = Number(payRows[0]?.t || 0);
     if (totalPaid > 0 && choice === 'refund' && !refundMethod) {
       throw new Error('Refund braucht eine Zahlmethode (Cash / Bank / Benefit).');
@@ -1367,13 +1378,17 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     //    manuell verhandelt werden (dann macht der User die Expense-Storno selbst).
     //    Lines OHNE expense_id (noch nie ARRIVED) haben keine A/P → einfach weg.
     const costRows = query(
-      `SELECT id, expense_id, cost_amount, material_kind, supplier_id
+      `SELECT id, expense_id, cost_amount, material_kind, supplier_id, status
          FROM order_lines
          WHERE order_id = ? AND COALESCE(is_customer_facing, 1) = 0`,
       [id]
     );
     const realizedCosts = costRows.filter(r => r.expense_id);
-    const customCostBasis = costRows.reduce((s, r) => s + ((r.cost_amount as number) || 0), 0);
+    // CUSTOM-ORDER K1 — Einstand des Stücks = die Kosten, die wirklich entstanden sind (Zeile angekommen), nicht
+    // die geplanten (PENDING/ORDERED) und nie die stornierten; sonst stünde im Artikel ein fiktiver Wert.
+    const customCostBasis = costRows
+      .filter(r => r.status === 'ARRIVED' || r.status === 'DELIVERED')
+      .reduce((s, r) => s + ((r.cost_amount as number) || 0), 0);
     // expense_id auf der order_line nullen, damit die nachfolgende Status-Cascade
     // nicht den Eindruck erweckt, die Line haenge weiter an einer Expense.
     // Die Expense selbst BLEIBT (real A/P-Schuld).
@@ -1403,6 +1418,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
         effects.openGoldPayableIds.push(gpId);
         continue;
       }
+      unbookGoldPayableValue(gpId, now);
       db.run(`UPDATE gold_payables SET status = 'CANCELLED', updated_at = ? WHERE id = ?`,
         [now, gpId]);
       trackUpdate('gold_payables', gpId, { status: 'CANCELLED' });
@@ -1453,7 +1469,9 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     //    Goldschmied bleibt offen, also muss das Stueck, fuer das sie steht, im Bestand auftauchen.
     //    Vorher lief das Anlegen in einem try/catch, das nur protokollierte — der Auftrag war
     //    storniert, die Schuld offen, und das Stueck gab es nirgends. Jetzt scheitert der Storno mit.
-    if (!freedReservedProduct && customCostBasis > 0 && realizedCosts.length > 0) {
+    // CUSTOM-ORDER K1 — auch eine bewertete Goldschuld, die bleibt, ist Einstand im Lager (Soll INVENTORY gebucht).
+    const bewerteteGoldschuld = effects.openGoldPayableIds.some((gpId) => Number(query('SELECT book_value FROM gold_payables WHERE id = ?', [gpId])[0]?.book_value ?? 0) > 0);
+    if (!freedReservedProduct && customCostBasis > 0 && (realizedCosts.length > 0 || bewerteteGoldschuld)) {
       const ord = query(
         `SELECT category_id, attributes, condition, requested_brand, requested_model,
                 agreed_price, custom_product_spec FROM orders WHERE id = ?`, [id]);
@@ -1548,6 +1566,7 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
     const gpRows = query(`SELECT id FROM gold_payables WHERE source_order_id = ? AND status = 'OPEN'`, [id]);
     for (const gr of gpRows) {
       const gpId = gr.id as string;
+      unbookGoldPayableValue(gpId, new Date().toISOString());
       db.run(`UPDATE gold_payables SET status = 'CANCELLED', updated_at = ? WHERE id = ?`,
         [new Date().toISOString(), gpId]);
       trackUpdate('gold_payables', gpId, { status: 'CANCELLED' });

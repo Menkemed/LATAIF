@@ -548,7 +548,8 @@ export function backfillBankTransfers(branchId: string): BackfillResult {
 export function backfillOrderPayments(branchId: string): BackfillResult {
   const res = emptyResult('order_payments');
   const rows = query(
-    `SELECT op.*, o.customer_id, COALESCE(op.converted_to_invoice, 0) AS converted, o.status AS order_status
+    `SELECT op.*, o.customer_id, COALESCE(op.converted_to_invoice, 0) AS converted, o.status AS order_status,
+            (SELECT COUNT(*) FROM order_deposit_applications oda WHERE oda.order_payment_id = op.id) AS applications
      FROM order_payments op JOIN orders o ON o.id = op.order_id
      WHERE o.branch_id = ?`,
     [branchId]
@@ -561,7 +562,9 @@ export function backfillOrderPayments(branchId: string): BackfillResult {
     if (hasAnyLedgerEntries('ORDER_PAYMENT', id)) { res.skipped++; continue; }
     const customerId = r.customer_id as string;
     if (!customerId) { res.skipped++; continue; }
-    const converted = Number(r.converted) === 1;
+    // CUSTOM-ORDER K2 — eine ANGERECHNETE Anzahlung (Anrechnungszeilen vorhanden) bleibt als Geldeingang gebucht;
+    // nur der Altbestand (umgewandelt = zurückgedreht + auf der Rechnung neu gebucht) wird sofort gegengebucht.
+    const converted = Number(r.converted) === 1 && Number(r.applications ?? 0) === 0;
     const cancelled = String(r.order_status || '').toLowerCase() === 'cancelled';
 
     safeStep(res, `op ${id.slice(0, 8)}`, () => {

@@ -65,11 +65,16 @@ export function cancelInvoiceInHouse(input: InvoiceCancelInput, branchId: string
   if (blocker) throw new InvoiceActionRejected(blocker.code, blocker.message);
   // VAT-PERIOD-LOCK — eine gemeldete Rechnung wird nicht aus einem eingereichten Quartal storniert.
   assertInvoiceNotInClosedVatQuarter(input.invoiceId);
+  // CUSTOM-ORDER K2 — eine angerechnete Order-Anzahlung ist kein Geld dieser Rechnung: beim Storno geht sie an ihre
+  // Order zurück (wieder offen) statt ausgezahlt zu werden. Erstattet wird nur, was wirklich auf die Rechnung gezahlt wurde.
+  const depositPayments = query(`SELECT id, amount FROM payments WHERE invoice_id = ? AND method = 'order_deposit'`, [input.invoiceId]);
+  const depositSum = depositPayments.reduce((s, p) => s + Number(p.amount ?? 0), 0);
+  const paidMoney = Math.round((Number(inv.paid_amount ?? 0) - depositSum) * 1000) / 1000;
   // Ohne Geld läuft der Storno NICHT über eine Retoure: er gibt die Ware der Zeilen frei und setzt
   // CANCELLED. Eine schon wirksame Teil-Retoure/Gutschrift hätte dann ihre Ware ein zweites Mal im
   // Bestand und die Rechnung (Forderung + Erlös des Rests) bliebe gebucht, weil updateInvoice bei
   // aktiver Gutschrift nicht mehr reversiert. Deshalb hier ablehnen — der Rest geht als Retoure.
-  if (!(Number(inv.paid_amount ?? 0) > 0)) {
+  if (!(paidMoney > 0)) {
     const aktiv = query(
       `SELECT (SELECT COUNT(*) FROM sales_returns WHERE invoice_id = ? AND status != 'REJECTED')
             + (SELECT COUNT(*) FROM credit_notes WHERE invoice_id = ? AND status != 'CANCELLED') AS c`,
@@ -85,7 +90,9 @@ export function cancelInvoiceInHouse(input: InvoiceCancelInput, branchId: string
   const buchung = watchLedgerPosts('invoice cancel');
   let returnId: string | undefined;
   try {
-    if (Number(inv.paid_amount ?? 0) > 0) {
+    for (const p of depositPayments) useInvoiceStore.getState().deletePayment(String(p.id), input.invoiceId);
+    if (depositPayments.length > 0) useInvoiceStore.getState().loadInvoices();
+    if (paidMoney > 0) {
       // Was noch nicht zurück ist, zum Preis der Rechnung — dieselbe Ableitung wie jede Retoure.
       const lines = query(
         `SELECT il.id, il.product_id, il.quantity, il.line_total, il.vat_amount,

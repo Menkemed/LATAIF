@@ -22,6 +22,7 @@
 //
 // Bewusst NICHT hier: „Delete Order" — Löschen bleibt am Primary (R6B, Klasse E).
 // ════════════════════════════════════════════════════════════════════════════
+import { OPEN_DEPOSIT_TOTAL_SQL } from '@/core/orders/order-deposit-sql';
 import { query, currentBranchId } from '@/core/db/helpers';
 import { getDatabase } from '@/core/db/database';
 import { runOnPrimary } from '@/core/data/primary-action';
@@ -102,7 +103,7 @@ function sourcedByActivePurchase(lineId: string): boolean {
 
 function nonConvertedPaid(orderId: string): number {
   return num(query(
-    'SELECT COALESCE(SUM(amount), 0) AS t FROM order_payments WHERE order_id = ? AND COALESCE(converted_to_invoice, 0) = 0',
+    OPEN_DEPOSIT_TOTAL_SQL, // CUSTOM-ORDER K2 — offen = nicht angerechnet
     [orderId],
   )[0]?.t);
 }

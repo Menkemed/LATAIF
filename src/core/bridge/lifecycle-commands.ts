@@ -25,6 +25,7 @@
 //     Forderung aus einem Agentenverkauf verschluckt; sie wird hier nicht wiederholt.
 //  4. **Ändern braucht die gesehene FASSUNG**, verglichen INNERHALB der Transaktion.
 
+import { OPEN_DEPOSIT_TOTAL_SQL } from '@/core/orders/order-deposit-sql';
 import { query } from '@/core/db/helpers';
 import { REPAIR_WORK_TYPES } from '@/core/models/types';
 import { CARD_BRANDS, CardFeeNotConfigured, type CardBrand } from '@/core/finance/card-fees';
@@ -98,7 +99,7 @@ export function orderState(id: string): Record<string, unknown> {
     + 'invoice_id, revision FROM orders WHERE id = ?', [id],
   )[0];
   const paid = query(
-    'SELECT COALESCE(SUM(amount), 0) AS s FROM order_payments WHERE order_id = ? AND COALESCE(converted_to_invoice, 0) = 0',
+    OPEN_DEPOSIT_TOTAL_SQL.replace(' AS t ', ' AS s '), // CUSTOM-ORDER K2 — offen = nicht angerechnet
     [id],
   )[0];
   return {
@@ -170,7 +171,10 @@ export function runUpdateOrderStatus(deps: EngineDeps, identity: CommandIdentity
     os.loadOrders();
     // Der Weg des Hauses: Positionen mitziehen, Wareneingang datieren und — an genau dieser
     // Stufe — die Lieferanten-Verbindlichkeiten der angekommenen Positionen buchen.
+    // CUSTOM-ORDER K1 — eine dabei gescheiterte Buchung kippt den ganzen Befehl (vorher still geschluckt).
+    const check = watchLedgerPosts('orders.update_status');
     os.updateStatus(req.orderId, req.status);
+    check();
     const after = orderState(req.orderId);
     if (s(after.status) !== req.status) {
       throw new CommandNotEvaluated('ORDER_STATUS_NOT_APPLIED', `status is ${s(after.status)}`);
@@ -310,7 +314,8 @@ export function runDeleteOrderPayment(deps: EngineDeps, identity: CommandIdentit
     if (s(p.order_id) !== req.orderId) {
       throw new CommandRejected('PAYMENT_NOT_ON_ORDER', 'this payment belongs to another order');
     }
-    if (Number(p.converted_to_invoice ?? 0) === 1) {
+    if (Number(p.converted_to_invoice ?? 0) === 1
+      || query(`SELECT 1 FROM order_deposit_applications WHERE order_payment_id = ? AND status = 'ACTIVE' LIMIT 1`, [req.paymentId]).length > 0) {
       // Eine übergegangene Anzahlung gehört zur Rechnung. Sie hier zu löschen risse das Geld
       // aus einem Beleg, der es schon ausweist.
       throw new CommandRejected('PAYMENT_ALREADY_CONVERTED',

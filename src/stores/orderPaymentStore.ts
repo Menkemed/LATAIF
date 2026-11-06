@@ -26,6 +26,7 @@ import { assertCardFeeConfigured, normalizeCardBrand, type CardBrand } from '@/c
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 import { hydrateOneFromPrimary } from '@/core/data/primary-source';
+import { OPEN_DEPOSIT_TOTAL_SQL, openDepositSql } from '@/core/orders/order-deposit-sql';
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 function safePost(label: string, fn: () => void): void {
@@ -41,8 +42,11 @@ function reconcileOrderFromPayments(orderId: string): void {
   const now = new Date().toISOString();
   // M-08 — converted Payments (Geld zur Invoice gewandert) zaehlen nicht mehr zum
   // Order-Saldo; deckt sich mit Banking/Analytics/Reconciliation.
-  const sumRow = query(`SELECT COALESCE(SUM(amount), 0) AS t FROM order_payments WHERE order_id = ? AND COALESCE(converted_to_invoice, 0) = 0`, [orderId]);
-  const totalPaid = Number(sumRow[0]?.t || 0);
+  // CUSTOM-ORDER K2 — offen ist, was noch nicht angerechnet ist (auch teilweise; order-deposit-sql).
+  const sumRow = query(OPEN_DEPOSIT_TOTAL_SQL, [orderId]);
+  const totalPaid = Math.round(Number(sumRow[0]?.t || 0) * 1000) / 1000;
+  // CUSTOM-ORDER K2 — der Anzahlungstag im Kopf ist der Tag der ersten Zahlung, nicht der Tag der Erfassung.
+  const firstPaid = query(`SELECT MIN(paid_at) AS d FROM order_payments WHERE order_id = ?`, [orderId])[0]?.d as string | null | undefined;
 
   const orderRow = query(`SELECT agreed_price FROM orders WHERE id = ?`, [orderId]);
   if (orderRow.length === 0) return;
@@ -60,19 +64,26 @@ function reconcileOrderFromPayments(orderId: string): void {
        deposit_paid = ?,
        remaining_amount = ?,
        fully_paid = ?,
-       deposit_date = COALESCE(deposit_date, CASE WHEN ? > 0 THEN ? ELSE NULL END),
+       deposit_date = COALESCE(?, deposit_date, CASE WHEN ? > 0 THEN ? ELSE NULL END),
        updated_at = ?
      WHERE id = ?`,
     [totalPaid, depositPaid ? 1 : 0, remaining, fullyPaid ? 1 : 0,
-     totalPaid, now.split('T')[0], now, orderId]
+     firstPaid ? String(firstPaid).slice(0, 10) : null, totalPaid, now.split('T')[0], now, orderId]
   );
 }
 
 // ── Slice 4a — Order-Ueberzahlung → Store-Guthaben ────────────────────────────
 // Nicht-konvertierter Zahlungs-Saldo der Order (deckungsgleich mit reconcileOrderFromPayments).
 function nonConvertedTotal(orderId: string): number {
-  const r = query(`SELECT COALESCE(SUM(amount), 0) AS t FROM order_payments WHERE order_id = ? AND COALESCE(converted_to_invoice, 0) = 0`, [orderId]);
-  return Number(r[0]?.t || 0);
+  const r = query(OPEN_DEPOSIT_TOTAL_SQL, [orderId]);
+  return Math.round(Number(r[0]?.t || 0) * 1000) / 1000;
+}
+
+/** CUSTOM-ORDER K2 — nach einer Anrechnung oder ihrer Rücknahme: Kopfzahlen der Order + Überzahlungs-Gutschrift nachziehen. */
+export function refreshOrderPaymentSummary(orderId: string): void {
+  reconcileOrderFromPayments(orderId);
+  reconcileOrderOverpayCredit(orderId);
+  trackChange('orders', orderId, 'update', {});
 }
 function orderAgreedPrice(orderId: string): number {
   const r = query(`SELECT agreed_price FROM orders WHERE id = ?`, [orderId]);
@@ -200,6 +211,8 @@ export interface OrderPayment {
   note?: string;
   createdAt: string;
   convertedToInvoice?: boolean;   // M-08 — true wenn beim Convert ans Invoice abgegeben
+  /** CUSTOM-ORDER K2 — der noch nicht auf eine Rechnung angerechnete Betrag (order-deposit-sql). */
+  openAmount?: number;
 }
 
 interface OrderPaymentStore {
@@ -227,6 +240,9 @@ function rowToPayment(r: Record<string, unknown>): OrderPayment {
     note: r.note as string | undefined,
     createdAt: r.created_at as string,
     convertedToInvoice: !!r.converted_to_invoice,
+    openAmount: r.open_amount !== undefined && r.open_amount !== null
+      ? Math.round(Number(r.open_amount) * 1000) / 1000
+      : (r.converted_to_invoice ? 0 : ((r.amount as number) || 0)),
   };
 }
 
@@ -311,7 +327,13 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
   deletePayment: (id, orderId) => {
     const db = getDatabase();
     // v0.7.26 — method + created_at merken (fuer evtl. CardFee-Reversal nach Delete).
-    const before = query('SELECT method, created_at, amount FROM order_payments WHERE id = ?', [id])[0];
+    const before = query('SELECT method, created_at, amount, converted_to_invoice FROM order_payments WHERE id = ?', [id])[0];
+    // CUSTOM-ORDER K2 — eine (auch teilweise) angerechnete Anzahlung trägt eine Rechnungszahlung: erst die Rechnung
+    // stornieren oder die Zahlung dort löschen — sonst stünde die Rechnung bezahlt da, ohne Geld dahinter.
+    if (before && (Number(before.converted_to_invoice ?? 0) === 1
+      || query(`SELECT 1 FROM order_deposit_applications WHERE order_payment_id = ? AND status = 'ACTIVE' LIMIT 1`, [id]).length > 0)) {
+      throw new Error('This deposit is applied to an invoice — cancel that invoice (or remove the payment there) first. Nothing was changed.');
+    }
     // Slice 4a — Pre-Check VOR dem DELETE: senkt das Loeschen den Ueberzahlungs-Betrag,
     // waehrend die order_overpayment-Gutschrift schon eingeloest ist → BLOCK.
     const delAmt = before ? Number(before.amount || 0) : 0;
@@ -378,7 +400,8 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
   totalPaid: (orderId) => {
     const list = get().paymentsByOrder[orderId] || [];
     // M-08 — converted Payments ausschliessen (konsistent zu reconcileOrderFromPayments).
-    return list.filter(p => !p.convertedToInvoice).reduce((sum, p) => sum + p.amount, 0);
+    // CUSTOM-ORDER K2 — offen ist der nicht angerechnete Teil.
+    return list.reduce((sum, p) => sum + (p.openAmount ?? (p.convertedToInvoice ? 0 : p.amount)), 0);
   },
 }));
 
@@ -390,7 +413,7 @@ export const useOrderPaymentStore = create<OrderPaymentStore>((set, get) => ({
  */
 export function loadOrderPaymentsFor(ctx: BusinessReadContext, orderId: string): { payments: OrderPayment[] } {
   const rows = query(
-    `SELECT p.* FROM order_payments p
+    `SELECT p.*, ${openDepositSql('p')} AS open_amount FROM order_payments p
        JOIN orders o ON o.id = p.order_id
       WHERE p.order_id = ? AND o.branch_id = ?
       ORDER BY p.paid_at ASC, p.created_at ASC`,

@@ -43,6 +43,7 @@ export const ACCOUNT_CLASSES: Readonly<Record<LedgerAccount, AccountClassInfo>> 
   MARGIN_VAT: { klass: 'LIABILITY', group: 'VAT' },
   TAX_PAID: { klass: 'LIABILITY', group: 'VAT', contra: true },
   PARTNER_ITEM_BALANCE: { klass: 'LIABILITY', group: 'OTHER_LIABILITIES' },
+  GOLD_LIABILITY: { klass: 'LIABILITY', group: 'OTHER_LIABILITIES' },
   OPENING_BALANCE_EQUITY: { klass: 'EQUITY', group: 'OPENING_EQUITY' },
   PARTNER_EQUITY: { klass: 'EQUITY', group: 'PARTNER_EQUITY' },
   REVENUE: { klass: 'INCOME', group: 'INCOME' },

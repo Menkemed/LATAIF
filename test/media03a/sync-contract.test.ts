@@ -60,13 +60,15 @@ const source = (t: string) => [S.has(t) ? 'schema.sql' : null, D.has(t) ? 'datab
 // PURCHASE-EDIT Phase 2: +2 primary-only tables (purchase_edits, cost_corrections) → 60.
 // CONSIGNMENT D3: +1 primary-only table (supplier_credit_refunds) → 61.
 // MIXED-INVOICE P1c: +1 primary-only table (customer_credit_refunds) → 62.
-ok(b2de48.size === 62, `b2de48 (database.ts ∪ migration.ts CREATE TABLE) = 62 (got ${b2de48.size})`);
+// CUSTOM-ORDER K2/K3a: +2 (order_deposit_applications, gold_payable_settlements, synced) → 64.
+ok(b2de48.size === 64, `b2de48 (database.ts ∪ migration.ts CREATE TABLE) = 64 (got ${b2de48.size})`);
 // POST-PARITY R7A (PP-10) — production_inputs/production_outputs sind jetzt synchronisiert → 52.
 // BULK METAL V1 — bulk_lot_movements reist mit seinem Lot → 54.
 // STOCK-ADJUSTMENT Phase 1 — stock_adjustments reist zum Spiegel → 55.
 // OPENING BALANCES — opening_balance_items reist zum Spiegel → 56.
 // B1 OPENING ACCOUNTING — opening_account_items reist zum Spiegel → 57.
-ok(sync50.size === 57, `sync50 (allowlist) = 57 (got ${sync50.size})`);
+// CUSTOM-ORDER K2/K3a — order_deposit_applications, gold_payable_settlements reisen zum Spiegel → 59.
+ok(sync50.size === 59, `sync50 (allowlist) = 59 (got ${sync50.size})`);
 
 // ── sync50 − b2de48 : in the allowlist, NOT scanned by B2DE4 (all live in schema.sql) ──
 const syncOnly = diff(sync50, b2de48);
@@ -115,9 +117,10 @@ const inter = [...sync50].filter((t) => b2de48.has(t));
 // STOCK-ADJUSTMENT Phase 1: stock_adjustments is declared in database.ts and synced → 40.
 // OPENING BALANCES: opening_balance_items is declared in database.ts and synced → 41.
 // B1 OPENING ACCOUNTING: opening_account_items is declared in database.ts and synced → 42.
-ok(inter.length === 42, `sync50 ∩ b2de48 = 42 (got ${inter.length})`);
-ok(inter.length + syncOnly.length === 57, 'intersection + sync-only accounts for all 57 sync tables');
-ok(inter.length + b2deOnly.length === 62, 'intersection + b2de-only accounts for all 62 B2DE4 tables');
+// CUSTOM-ORDER K2/K3a: both new tables are declared in database.ts and synced → 44.
+ok(inter.length === 44, `sync50 ∩ b2de48 = 44 (got ${inter.length})`);
+ok(inter.length + syncOnly.length === 59, 'intersection + sync-only accounts for all 59 sync tables');
+ok(inter.length + b2deOnly.length === 64, 'intersection + b2de-only accounts for all 64 B2DE4 tables');
 
 // ── B2DE4 is a documented grammar subset, not the sync schema ──
 // (its scan excludes schema.sql on purpose; that is WHY 15 real sync tables are absent from it)

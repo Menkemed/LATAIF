@@ -2643,6 +2643,62 @@ function runMigrations(database: Database): void {
       created_by TEXT
     )`,
     `CREATE INDEX IF NOT EXISTS idx_customer_credit_refunds_credit ON customer_credit_refunds(customer_credit_id)`,
+    // CUSTOM-ORDER K1 — der Wert einer Goldschuld aus einer Order: die Goldkosten der Order-Zeile, gebucht Soll
+    // INVENTORY / Haben GOLD_LIABILITY, sobald das Gold da ist (Tag der Buchung daneben). NULL = noch nicht bewertet
+    // (Altbestand, Reparatur-Goldschuld). Bucht beim Anlegen der Spalte nichts.
+    `ALTER TABLE gold_payables ADD COLUMN book_value REAL`,
+    `ALTER TABLE gold_payables ADD COLUMN book_value_date TEXT`,
+    // CUSTOM-ORDER K2 — eine Anzahlung wird auf die Rechnung ANGERECHNET, nicht zurückgedreht und neu gebucht: der
+    // Geldeingang (order_payments + ORDER_PAYMENT-Buchung + Kartengebühr) bleibt, wie er war; die Rechnung bekommt eine
+    // Zahlung der Art 'order_deposit' (Soll CUSTOMER_DEPOSITS / Haben AR). Je Anrechnung eine Zeile: welche Order-Zahlung,
+    // welche Rechnungszahlung, welcher Betrag. Ein Storno der Rechnung setzt sie auf REVERSED — die Anzahlung ist dann
+    // wieder offen. Offen ist eine Order-Zahlung um amount − Σ aktive Anrechnungen.
+    `CREATE TABLE IF NOT EXISTS order_deposit_applications (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      order_id TEXT NOT NULL,
+      order_payment_id TEXT NOT NULL,
+      invoice_id TEXT NOT NULL,
+      payment_id TEXT NOT NULL,
+      amount REAL NOT NULL CHECK (amount > 0),
+      applied_at TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','REVERSED')),
+      reversed_at TEXT,
+      created_at TEXT NOT NULL,
+      created_by TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_order_deposit_applications_payment ON order_deposit_applications(order_payment_id, status)`,
+    `CREATE INDEX IF NOT EXISTS idx_order_deposit_applications_invoice ON order_deposit_applications(invoice_id, status)`,
+    // CUSTOM-ORDER K3a — die Begleichung einer Goldschuld in BHD, auch in Teilen: Gramm, Kurs je Gramm, Betrag, der
+    // aufgelöste Anteil am Buchwert und die Differenz (Mehr-/Minderpreis), die den Einstand der Order ändert. Die Ausgabe
+    // (expense_id) trägt die Lieferantenschuld und die Buchung; ist das Stück schon verkauft, steht daneben die berichtigte
+    // Rechnungszeile mit altem und neuem Einstand (und bei Margin alter/neuer Margin-VAT). Storno → REVERSED.
+    `CREATE TABLE IF NOT EXISTS gold_payable_settlements (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      payable_id TEXT NOT NULL,
+      order_id TEXT,
+      kind TEXT NOT NULL CHECK (kind IN ('MONEY')),
+      grams REAL NOT NULL CHECK (grams > 0),
+      rate_per_gram REAL NOT NULL CHECK (rate_per_gram > 0),
+      amount REAL NOT NULL CHECK (amount > 0),
+      book_share REAL NOT NULL,
+      difference REAL NOT NULL,
+      settled_on TEXT NOT NULL,
+      expense_id TEXT NOT NULL,
+      invoice_id TEXT,
+      invoice_line_id TEXT,
+      old_unit_cost REAL,
+      new_unit_cost REAL,
+      old_vat_amount REAL,
+      new_vat_amount REAL,
+      status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','REVERSED')),
+      reversed_at TEXT,
+      notes TEXT,
+      created_at TEXT NOT NULL,
+      created_by TEXT
+    )`,
+    `CREATE INDEX IF NOT EXISTS idx_gold_payable_settlements_payable ON gold_payable_settlements(payable_id, status)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

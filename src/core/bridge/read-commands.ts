@@ -14,6 +14,7 @@
 // Bewusst NICHT alle 28 Stores: Bestand, Kunden und Rechnungen decken die drei Oberflächen ab, an
 // denen sich der Client-Modus überhaupt beurteilen lässt.
 
+import { OPEN_DEPOSIT_TOTAL_SQL, openDepositSql } from '@/core/orders/order-deposit-sql';
 import { registerCommand, BusinessError, type CommandResult } from './command-registry';
 import { getDatabase } from '@/core/db/database';
 import { summarizeInventory, isOwnStockAsset, type LotAggregate } from '@/core/lots/lot-queries';
@@ -569,7 +570,7 @@ registerCommand(OP_INVOICES_GET, {
       notes: str(x.notes),
       // Eine Guthaben-Zahlung hängt an einer Guthabenzeile — der Client darf sie sehen, aber
       // nicht anfassen. Der Primary weist sie ohnehin ab; hier steht der Grund sichtbar.
-      editable: str(x.method) !== 'credit',
+      editable: str(x.method) !== 'credit' && str(x.method) !== 'order_deposit',
     }));
     // Und was an offenem Guthaben dieses Kunden wirklich da ist — vom Primary summiert.
     const credit = rows(
@@ -887,15 +888,17 @@ registerCommand(OP_ORDERS_GET, {
         && ['ARRIVED', 'DELIVERED'].includes(str(l.status)),
     }));
     const paid = rows(
-      'SELECT COALESCE(SUM(amount), 0) AS s FROM order_payments WHERE order_id = ? AND COALESCE(converted_to_invoice, 0) = 0',
+      OPEN_DEPOSIT_TOTAL_SQL.replace(' AS t ', ' AS s '), // CUSTOM-ORDER K2 — offen = nicht angerechnet
       [id],
     );
     // CENTRAL-C3H — die Anzahlungen EINZELN: wer eine zuruecknehmen will, muss sehen, welche es
     // gibt. Eine bereits an die Rechnung uebergegangene ist sichtbar, aber nicht mehr loeschbar
     // — das Geld steht dort in einem Beleg.
     const payments = rows(
-      `SELECT id, amount, method, card_brand, paid_at, reference, note, converted_to_invoice
-         FROM order_payments WHERE order_id = ? ORDER BY paid_at ASC, created_at ASC`,
+      `SELECT op.id, op.amount, op.method, op.card_brand, op.paid_at, op.reference, op.note, op.converted_to_invoice,
+              ${openDepositSql('op')} AS open_amount,
+              (SELECT COUNT(*) FROM order_deposit_applications oda WHERE oda.order_payment_id = op.id AND oda.status = 'ACTIVE') AS active_apps
+         FROM order_payments op WHERE op.order_id = ? ORDER BY op.paid_at ASC, op.created_at ASC`,
       [id],
     ).map((x) => ({
       id: str(x.id),
@@ -906,7 +909,9 @@ registerCommand(OP_ORDERS_GET, {
       reference: str(x.reference),
       note: str(x.note),
       convertedToInvoice: Number(x.converted_to_invoice ?? 0) === 1,
-      deletable: Number(x.converted_to_invoice ?? 0) === 0,
+      // CUSTOM-ORDER K2 — offen = nicht angerechnet; eine (auch teilweise) angerechnete ist nicht löschbar.
+      openAmount: Math.round(num(x.open_amount) * 1000) / 1000,
+      deletable: Number(x.converted_to_invoice ?? 0) === 0 && Number(x.active_apps ?? 0) === 0,
     }));
     return {
       ...orderDto(found[0]),

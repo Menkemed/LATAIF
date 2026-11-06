@@ -880,7 +880,11 @@ M.gegenkonto = fails.length === 0;
   const lc = codeOf(src('src/core/bridge/lifecycle-commands.ts'));
   const sc = codeOf(src('src/core/bridge/service-commands.ts'));
   const an = codeOf(src('src/core/reports/analytics-snapshot.ts'));
-  ok(/account: repairCostAccount\(expense\) \?\? 'EXPENSES_OPERATING'/.test(post) && (post.match(/!isRepairServiceLine\(line\.productId\)/g) ?? []).length === 2,
+  // CUSTOM-ORDER K1 — die Kontowahl läuft über capitalizedExpenseAccount: zuerst die Reparaturregel, dann die Order-Kosten.
+  const ty = codeOf(src('src/core/models/types.ts'));
+  ok(/account: capitalizedExpenseAccount\(expense\) \?\? 'EXPENSES_OPERATING'/.test(post)
+    && /return repairCostAccount\(e\) \?\? orderCostAccount\(e\);/.test(ty)
+    && (post.match(/!isRepairServiceLine\(line\.productId\)/g) ?? []).length === 2,
     '§10 postExpense bucht nach Eigentum; Rechnung und COGS-Nachtrag buchen für Reparaturzeilen keinen zweiten Wareneinsatz');
   ok((store.match(/repairCostCategory\(/g) ?? []).length === 1 && /repairCostCategory\(scope\)/.test(booking),
     '§10 EINE Kategorie-Regel für Zeilen und Kopfkosten (repairCostCategory)');

@@ -240,7 +240,8 @@ function giveCredit(db: Db, customerId: string, amount: number, id = 'cr-1'): vo
     'REUSE …und schreibt keine Geldzeile');
   ok(!/getNextDocumentNumber|createDirectInvoice\(\s*customerId,\s*lines\s*as\s*never,\s*\)/.test(mine.replace(/\s+/g, ' ')) || true,
     'REUSE die Rechnungsnummer vergibt das Haus');
-  ok(/convertOrderLinesToInvoiceTx/.test(mine), 'REUSE die Umwandlung faehrt die GETEILTE Klammer des Hauses');
+  // CUSTOM-ORDER K2 — Primary und PC2 fahren dieselbe Hausfolge (Artikel, Rechnung, Anrechnung in einer Klammer).
+  ok(/convertOrderToInvoiceInHouse/.test(mine), 'REUSE die Umwandlung faehrt die GETEILTE Klammer des Hauses');
   ok((mine.match(/runRemoteCommand\(/g) ?? []).length === 7, 'TX alle sieben laufen durch die eine Maschine');
 }
 
@@ -714,9 +715,9 @@ const CONSIGN = {
   ok(out.kind === 'ok', `R5A.2 die Umwandlung mit der Wahl der Dialoge laeuft (${JSON.stringify(out)})`);
   const inv = val<{ invoiceId: string }>(out).invoiceId;
   const brutto = n(db, 'SELECT gross_amount FROM invoices WHERE id = ?', [inv]);
-  // Differenzbesteuerung: der Kunde zahlt den Preis, die Steuer steckt in der Marge. Die alte
-  // Fernrechnung setzte 10 % obendrauf (330).
-  ok(Math.abs(brutto - 300) < 0.001, `R5A.2 MARGIN rechnet wie das Haus, nicht Steuer obendrauf (${brutto})`);
+  // CUSTOM-ORDER K2/O2 — die Steuerart der Order ist nur die Vorauswahl, das Brutto des Kunden bleibt: die Zeile
+  // stand mit 300 netto + 10 % = 330 auf der Order; mit MARGIN zahlt der Kunde weiter 330 (Steuer in der Marge).
+  ok(Math.abs(brutto - 330) < 0.001, `R5A.2 MARGIN behaelt das Brutto der Order (${brutto})`);
   ok(s(db, 'SELECT tax_scheme FROM invoice_lines WHERE invoice_id = ?', [inv]) === 'MARGIN',
     'R5A.2 …mit dem im Dialog gewaehlten Schema');
   ok(n(db, 'SELECT special_mark FROM invoices WHERE id = ?', [inv]) === 1, 'R5A.2 die Nummernart des Dialogs gilt');
@@ -757,7 +758,9 @@ const CONSIGN = {
   const echt = useInvoiceStore.getState().recordPayment;
   let imFehler = '';
   useInvoiceStore.setState({ recordPayment: (() => {
-    imFehler = `${n(db, 'SELECT COUNT(*) FROM invoices')}/${n(db, 'SELECT COALESCE(SUM(converted_to_invoice),0) FROM order_payments WHERE order_id = ?', [oid])}`;
+    // CUSTOM-ORDER K2 — die Anzahlung wird nicht mehr umgebucht, sondern angerechnet: im Fehler ist die Rechnung da
+    // und noch keine Anrechnung geschrieben.
+    imFehler = `${n(db, 'SELECT COUNT(*) FROM invoices')}/${n(db, 'SELECT COUNT(*) FROM order_deposit_applications WHERE order_id = ?', [oid])}`;
     throw new Error('INJECTED: the carry-over breaks after the invoice exists');
   }) as never });
   let out: unknown = null; let geworfen = '';
@@ -765,7 +768,7 @@ const CONSIGN = {
     out = await fin.runConvertOrder(d, identity('81', 'orders.convert_to_invoice'), { orderId: oid, expectedRevision: rev });
   } catch (e) { geworfen = String(e); }
   finally { useInvoiceStore.setState({ recordPayment: echt }); }
-  ok(imFehler === '1/1', `ATOMIC der Fehler fiel MITTEN in den Uebertrag: Rechnung da, Anzahlung schon umgebucht (${imFehler})`);
+  ok(imFehler === '1/0', `ATOMIC der Fehler fiel MITTEN in den Uebertrag: Rechnung da, Anrechnung noch nicht fertig (${imFehler})`);
   ok(/INJECTED/.test(geworfen) || (out as { kind?: string } | null)?.kind !== 'ok',
     `ATOMIC …und die Umwandlung meldet keinen Erfolg (${geworfen.slice(0, 90) || JSON.stringify(out)})`);
   const nachher = stand();

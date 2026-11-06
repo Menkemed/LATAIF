@@ -940,8 +940,10 @@ marker('CENTRAL_UI_R6D_PAYABLES_CLIENT_NO_LOCAL_WRITE_PROVED');
   'UI PurchaseDetail: Zahlung und Credit-Modus je EINE Buchung, Guthaben aus der Auskunft — keine Schleife in der Maske');
   const sd = codeOf(src('src/pages/suppliers/SupplierDetail.tsx'));
   ok(/saveSupplierRefund\(erstatten, refundCredit\.id\)/.test(sd) && !/deleteStandaloneSupplierCredit\(|getSupplierCreditsForDisplay\(/.test(sd)
-    && /data-supplier-refund-save/.test(sd) && /data-supplier-pay-open/.test(sd) && /Return gold/.test(sd),
-  'UI SupplierDetail: Refund ist EINE Buchung; die Gold-Knöpfe sind unberührt');
+    && /data-supplier-refund-save/.test(sd) && /data-supplier-pay-open/.test(sd)
+    // CUSTOM-ORDER C1/K3a — „Return gold" entfällt für unsere Schuld; Order-Gold „Settle in BHD", sonst Ladengold / → BHD.
+    && !/>\s*Return gold\s*</.test(sd) && /data-gold-settle-open="order_money"/.test(sd) && /Apply shop gold/.test(sd),
+  'UI SupplierDetail: Refund ist EINE Buchung; die Gold-Knöpfe folgen C1/K3a');
   const ps = codeOf(src('src/components/expenses/PaySupplierModal.tsx'));
   ok(/saveSupplierPay\(/.test(ps) && /saveSupplierCredit\(/.test(ps)
     && !/applySupplierCreditViaServer|recordExpensePayment\(|addPurchasePayment\(|grantStandaloneCredit\(|getOpenCredits\(/.test(ps)

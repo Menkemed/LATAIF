@@ -33,7 +33,7 @@
 // ════════════════════════════════════════════════════════════════════════════
 import { v4 as uuid } from 'uuid';
 import type { Expense, ExpenseCategory, PurchasePayment, PurchaseStatus } from '@/core/models/types';
-import { isBookedRepairCost } from '@/core/models/types';
+import { isBookedRepairCost, isBookedOrderCost } from '@/core/models/types';
 import { getDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate, trackDelete, trackPayment, trackStatusChange } from '@/core/sync/track';
@@ -403,6 +403,28 @@ export function updateExpenseInHouse(expenseId: string, raw: ExpenseEditFields, 
     if ((catChange && (toBooked || booked)) || (booked && amountChange)) {
       throw nein('EXPENSE_REPAIR_COST_LOCKED',
         'this is a booked repair cost — change or cancel its repair line (or change the repair) instead');
+    }
+  }
+  // CUSTOM-ORDER K1 — die Kostenzeile einer Custom-Order ist Einstand des Stücks (Soll INVENTORY): ihren Betrag ändert
+  // nur die Order, und keine Kategorie wechselt zwischen Aufwand und Bestand. Das Datum bleibt korrigierbar (neu gebucht
+  // am neuen Tag, Sperren wie jede Ausgabe).
+  if (txt(row.related_module) === 'order') {
+    const booked = isBookedOrderCost({ category: String(row.category), relatedModule: 'order' });
+    const catChange = f.category !== undefined && f.category !== row.category;
+    const toBooked = f.category !== undefined && isBookedOrderCost({ category: f.category, relatedModule: 'order' });
+    const amountChange = f.amount !== undefined && F(f.amount) !== F(row.amount);
+    if ((catChange && (toBooked || booked)) || (booked && amountChange)) {
+      throw nein('EXPENSE_ORDER_COST_LOCKED', 'this is a booked custom-order cost — change it on the order instead');
+    }
+  }
+  // CUSTOM-ORDER K3a — die BHD-Begleichung einer Goldschuld bucht Goldschuld, Lieferantenschuld und Einstand zusammen:
+  // Betrag, Kategorie und Tag ändert nur ihr Storno (dann neu begleichen).
+  if (txt(row.related_module) === 'gold_payable') {
+    const dateChange = f.expenseDate !== undefined && String(f.expenseDate) !== String(row.expense_date);
+    const catChange = f.category !== undefined && f.category !== row.category;
+    const amountChange = f.amount !== undefined && F(f.amount) !== F(row.amount);
+    if (catChange || amountChange || dateChange) {
+      throw nein('EXPENSE_GOLD_SETTLEMENT_LOCKED', 'this expense is the settlement of a gold debt — reverse the settlement instead');
     }
   }
   // v0.8.90 — eine AUTOMATISCHE Kartengebühr bleibt mit ihrer Zahlung und dem Karten-Clearing verbunden: keine andere

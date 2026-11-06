@@ -12,9 +12,9 @@
 // unterscheidet, wird HINEINGEREICHT (woher ein Artikel kommt, wie einer entsteht) — nicht
 // nachgebaut.
 // ════════════════════════════════════════════════════════════════════════════
-import { adoptOrderPhotosToProduct } from '@/core/orders/order-media';
 import { vatEngine } from '@/core/tax/vat-engine';
 import type { Order, OrderLine, Product, TaxScheme } from '@/core/models/types';
+import { canonicalTaxScheme } from '@/core/models/types';
 
 export interface OrderInvoiceLineInput {
   productId: string; quantity: number; unitPrice: number; purchasePrice: number;
@@ -26,7 +26,8 @@ export interface OrderInvoiceLineInput {
  * Kostenpositionen (Labor + Diamond + Gold) des Auftrags.
  */
 export function orderCustomCostBasis(lines: readonly OrderLine[]): number {
-  return lines.reduce((s, l) => s + (l.costAmount || 0), 0);
+  // CUSTOM-ORDER K1 — eine stornierte Kostenzeile ist kein Einstand mehr (ihre Schuld ist gegengebucht).
+  return lines.filter((l) => l.status !== 'CANCELLED').reduce((s, l) => s + (l.costAmount || 0), 0);
 }
 
 export interface BuildOrderInvoiceLinesArgs {
@@ -37,8 +38,8 @@ export interface BuildOrderInvoiceLinesArgs {
   perLineSchemes?: Record<string, TaxScheme>;
   customCostBasis: number;
   findProduct: (productId: string) => Product | undefined;
-  /** Wie ein fehlender Artikel entsteht — am Primary `createProduct`, im Fernbefehl ein Nein. */
-  createProduct: (data: Partial<Product>) => Product;
+  /** Wie ein fehlender Artikel entsteht (CUSTOM-ORDER K2: im Haus, mit SKU, Kategorie und Verknüpfung zur Zeile). */
+  createProduct: (data: Partial<Product>, line: OrderLine) => Product;
 }
 
 // Direkter Convert-Pfad: Pro Order-Line wird eine Invoice-Line gebaut, mit
@@ -79,12 +80,9 @@ export function buildOrderInvoiceLines(args: BuildOrderInvoiceLinesArgs): OrderI
         taxScheme: scheme,
         sourceType: 'OWN',
         notes: spec.notes || `From order ${order.orderNumber}`,
-      });
-      // MEDIA-ORDER §7 — aus der Vorlage wird ein Artikelbild: DASSELBE Medienobjekt bekommt eine
-      // neue, legitime Verknüpfung am Artikel (Rolle `stock_image`, Klasse unverändert `internal`).
-      // Keine zweite Datei, kein Neucodieren. `spec.images` oben ist nur noch der Altbestand eines
-      // Auftrags von früher — für den findet sich hier nichts, und das ist richtig.
-      if (isCustomPiece) adoptOrderPhotosToProduct(order.id, prod.id);
+      }, ol);
+      // MEDIA-ORDER §7 — die Bilder der Order übernimmt seit CUSTOM-ORDER K2 der Anlegeweg selbst (`createProduct`
+      // der Hausfolge), damit die Probe-Rechnung vor dem ersten Schreiben nichts verknüpft.
     }
     const qty = Math.max(1, ol.quantity);
     // v0.6.7 — Custom-Quote-Lines speichern BRUTTO (Quoted Price = Endpreis).
@@ -92,14 +90,23 @@ export function buildOrderInvoiceLines(args: BuildOrderInvoiceLinesArgs): OrderI
     // calculateNet 10% on-top und der Kunde wuerde Quoted * 1.10 zahlen.
     // Normal-Produkt-Lines speichern Netto (siehe OrderCreate.unitNetFromGross),
     // dort lineNet = unitPrice * qty wie bisher.
-    const grossPerLine = ol.unitPrice * qty;
-    let lineNet: number;
-    if (ol.materialKind === 'custom' && scheme === 'VAT_10') {
-      lineNet = grossPerLine / 1.10;
-    } else {
-      lineNet = grossPerLine;
-    }
-    const calc = vatEngine.calculateNet(lineNet, (prod.purchasePrice || 0) * qty, scheme, rate);
+    const cost = (prod.purchasePrice || 0) * qty;
+    // CUSTOM-ORDER K2 — der Bruttopreis des Kunden bleibt bei jeder Steuerart gleich; die Steuerart der Order ist nur
+    // die Vorauswahl. Das Brutto der Zeile ist das, was die Order zeigt: beim Sonderstück der gespeicherte Bruttopreis,
+    // bei einer Artikelzeile Netto + Steuer ihrer EIGENEN Steuerart (dieselbe Rechnung wie bisher — ohne Wechsel bleibt
+    // jede Zeile Fils für Fils, wie sie war). Bei VAT 10 % wird die Steuer aus dem Brutto gezogen (exakt), bei Zero und
+    // Margin ist Netto = Brutto (Margin-VAT intern aus Preis − Einstand).
+    const origScheme = canonicalTaxScheme(ol.taxScheme as string) as TaxScheme;
+    const unveraendert = ol.materialKind !== 'custom' && origScheme === scheme;
+    const origGross = ol.materialKind === 'custom'
+      ? Math.round(ol.unitPrice * qty * 1000) / 1000
+      : vatEngine.calculateNet(ol.unitPrice * qty, cost, origScheme, origScheme === 'ZERO' ? 0 : 10).grossAmount;
+    const calc = unveraendert
+      ? vatEngine.calculateNet(ol.unitPrice * qty, cost, scheme, rate)
+      : scheme === 'VAT_10'
+        ? vatEngine.calculateStandardVAT(origGross, rate)
+        : vatEngine.calculateNet(origGross, cost, scheme, rate);
+    const lineNet = calc.netAmount;
     // v0.7.1 — NBR: MARGIN persistiert internalVatAmount damit MARGIN_VAT-Ledger
     // + invoice.vatAmount-Hero korrekt sind. Display-Schicht versteckt VAT bei
     // MARGIN-Print weiterhin (gesetzliche Differenzbesteuerung).

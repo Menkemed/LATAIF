@@ -417,6 +417,20 @@ export function settleGoldPayable(actor: GoldActor, req: PayableSettleRequest): 
   const status = str(p.status);
   if (status !== 'OPEN') throw new GoldRejected('GOLD_PAYABLE_NOT_OPEN', `this gold payable is already ${status}`);
   if (!PAYABLE_SETTLE_MODES.includes(req.mode)) throw new GoldRejected('GOLD_SETTLE_MODE_INVALID', `unknown settle mode ${String(req.mode)}`);
+  // CUSTOM-ORDER K3a / C1 — eine Goldschuld, die WIR haben, wird nie durch eine Rückgabe „beglichen": „return_gold" erhöhte
+  // hier unseren eigenen Bestand und erklärte die Schuld für erfüllt. Die Rückgabe UNSERES Goldes vom Goldschmied ist ein
+  // eigener Vorgang (Gold beim Goldschmied, G2); eine Goldschuld bleibt davon unberührt. Gilt für Order und Reparatur.
+  if (req.mode === 'return_gold' && str(p.direction ?? 'we_owe') === 'we_owe') {
+    throw new GoldRejected('GOLD_RETURN_NOT_A_SETTLEMENT',
+      'a gold debt we owe is settled with our gold or in BHD — a return of our gold from the goldsmith is a separate step. Nothing was changed.');
+  }
+  // CUSTOM-ORDER K3a — die Goldschuld einer Order trägt ihren Wert (K1): sie wird in BHD zum Kurs beglichen (auch in Teilen,
+  // `settleOrderGoldInBhd`); „→ BHD" (ganzer Rest als Aufwand) und „Apply shop gold" (ohne Wertführung) gingen an diesem Wert
+  // vorbei. Die Begleichung mit eigenem Gold folgt mit K3b.
+  if (p.source_order_id && (req.mode === 'money' || req.mode === 'shop_gold')) {
+    throw new GoldRejected('ORDER_GOLD_DEBT_SETTLE_IN_BHD',
+      'the gold debt of a custom order is settled in BHD at a gold price per gram (also in parts). Nothing was changed.');
+  }
 
   const db = getDatabase();
   const now = nowIso();

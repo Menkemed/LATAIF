@@ -278,9 +278,11 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
                  AND e.created_at = p.created_at
                  AND e.status != 'CANCELLED') AS card_fee
      FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id
-     WHERE p.branch_id = ?`,
+     WHERE p.branch_id = ? AND COALESCE(p.method, '') != 'order_deposit'`,
     [branchId]
   );
+  // CUSTOM-ORDER K2 — die Anrechnung einer Anzahlung ('order_deposit') bewegt kein Geld: das Geld steht als
+  // Order-Zahlung am Zahlungstag (unten); hier nicht noch einmal.
   for (const p of payments) {
     const date = (p.received_at as string) || '';
     const method = (p.method as string) || '';
@@ -633,6 +635,7 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
   const orderPay = safeQuery('order_payments',
     `SELECT op.id, op.amount, op.method, op.paid_at, op.order_id, o.order_number,
             COALESCE(op.converted_to_invoice, 0) AS converted, op.created_at AS created_at,
+            (SELECT COUNT(*) FROM order_deposit_applications oda WHERE oda.order_payment_id = op.id) AS applications,
             (SELECT COALESCE(SUM(e.amount), 0) FROM expenses e
                WHERE e.category = 'CardFees' AND e.related_module = 'order'
                  AND e.related_entity_id = op.order_id
@@ -644,7 +647,9 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
   );
   for (const p of orderPay) {
     // Bereits in Invoice konvertiert? Dann dort schon gezählt — skip.
-    if (Number(p.converted) === 1) continue;
+    // CUSTOM-ORDER K2 — nur der Altbestand (vor K2 umgewandelt: zurückgedreht + neu als Rechnungszahlung gebucht).
+    // Eine angerechnete Anzahlung bleibt der Geldeingang am Zahlungstag.
+    if (Number(p.converted) === 1 && Number(p.applications ?? 0) === 0) continue;
     const date = (p.paid_at as string) || '';
     const method = (p.method as string) || '';
     const gross = (p.amount as number) || 0;

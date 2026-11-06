@@ -17,6 +17,7 @@
 // beruehrt — Gold bleibt Gold, Geld bleibt Geld.
 // ═══════════════════════════════════════════════════════════
 
+import { unbookGoldPayableValue } from '@/core/orders/order-gold-value';
 import { create } from 'zustand';
 import type {
   GoldPayable, CustomerGoldCredit, GoldMovement, GoldBucket, RepairGoldUsage,
@@ -71,6 +72,7 @@ function rowToGoldPayable(row: Record<string, unknown>): GoldPayable {
     settlementType: row.settlement_type as GoldPayable['settlementType'],
     fulfilledGrams: (row.fulfilled_grams as number) || 0,
     settlementExpenseId: (row.settlement_expense_id as string) || undefined,
+    ...(row.book_value !== null && row.book_value !== undefined ? { bookValue: Number(row.book_value), bookValueDate: (row.book_value_date as string) || undefined } : {}),
     status: ((row.status as string) || 'OPEN') as GoldPayable['status'],
     notes: (row.notes as string) || undefined,
     createdAt: row.created_at as string,
@@ -327,6 +329,9 @@ export const useGoldStore = create<GoldStore>((set, get) => ({
     const p = query('SELECT id, status, fulfilled_grams FROM gold_payables WHERE id = ?', [payableId])[0];
     if (!p) return;
     assertGoldPayablesRemovable([p], 'Verbindlichkeit');
+    // CUSTOM-ORDER K1 — ein gebuchter Wert (Soll INVENTORY / Haben GOLD_LIABILITY) geht mit der Schuld; mit einer
+    // aktiven BHD-Begleichung ist das Löschen ein Nein (erst die Begleichung zurücknehmen).
+    unbookGoldPayableValue(payableId, new Date().toISOString());
     db.run(`DELETE FROM gold_payables WHERE id = ?`, [payableId]);
     trackDelete('gold_payables', payableId);
     saveDatabase();

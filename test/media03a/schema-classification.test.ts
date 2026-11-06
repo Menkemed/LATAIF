@@ -115,7 +115,8 @@ for (let i = 0; i < names.length; i++) for (let j = i + 1; j < names.length; j++
 // STOCK-ADJUSTMENT Phase 1: +1 synced table stock_adjustments (the stock correction document) → 55.
 // OPENING BALANCES: +1 synced table opening_balance_items (the opening position document) → 56.
 // B1 OPENING ACCOUNTING: +1 synced table opening_account_items (the opening document) → 57.
-ok(LEGACY_SYNC_APPLY.size === 57, `legacy_sync_apply = 57 sync allowlist tables (got ${LEGACY_SYNC_APPLY.size})`);
+// CUSTOM-ORDER K2/K3a: +2 synced tables order_deposit_applications, gold_payable_settlements → 59.
+ok(LEGACY_SYNC_APPLY.size === 59, `legacy_sync_apply = 59 sync allowlist tables (got ${LEGACY_SYNC_APPLY.size})`);
 for (const t of LEGACY_SYNC_APPLY) ok(actualLegacy.has(t), `sync_apply table ${t} is present in the legacy DDL`);
 // PURCHASE-EDIT Phase 2: +2 primary-only tables purchase_edits, cost_corrections → 29.
 // CONSIGNMENT D3: +1 primary-only table supplier_credit_refunds → 30.

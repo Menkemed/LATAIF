@@ -544,6 +544,40 @@
       "required_fields": [],
       "immutable_fields": []
     },
+    "gold_payable_settlements": {
+      "allowed_operations": [
+        "insert",
+        "update"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "book_share",
+        "branch_id",
+        "created_at",
+        "created_by",
+        "difference",
+        "expense_id",
+        "grams",
+        "id",
+        "invoice_id",
+        "invoice_line_id",
+        "kind",
+        "new_unit_cost",
+        "new_vat_amount",
+        "notes",
+        "old_unit_cost",
+        "old_vat_amount",
+        "order_id",
+        "payable_id",
+        "rate_per_gram",
+        "reversed_at",
+        "settled_on",
+        "status"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
     "gold_payables": {
       "allowed_operations": [
         "insert",
@@ -552,6 +586,8 @@
       ],
       "record_id_field": "id",
       "allowed_fields": [
+        "book_value",
+        "book_value_date",
         "branch_id",
         "created_at",
         "direction",
@@ -837,6 +873,29 @@
         "reference_key",
         "revision",
         "scope",
+        "status"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
+    "order_deposit_applications": {
+      "allowed_operations": [
+        "insert",
+        "update"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "applied_at",
+        "branch_id",
+        "created_at",
+        "created_by",
+        "id",
+        "invoice_id",
+        "order_id",
+        "order_payment_id",
+        "payment_id",
+        "reversed_at",
         "status"
       ],
       "required_fields": [],

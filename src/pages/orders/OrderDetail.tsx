@@ -1,3 +1,4 @@
+import { SettleOrderGoldModal } from '@/components/gold/SettleOrderGoldModal';
 import { adoptOrderPhotosToProduct } from '@/core/orders/order-media';
 import { optionsWithStored } from '@/core/products/choice-value';
 import { useEffect, useMemo, useState } from 'react';
@@ -30,10 +31,13 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { computeExpenseSettlement } from '@/core/finance/expenseSettlement';
 import { PayExpenseModal } from '@/components/expenses/PayExpenseModal';
-import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction } from '@/core/ledger/posting';
+import { beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction, watchLedgerPosts } from '@/core/ledger/posting';
+import { runOnPrimary } from '@/core/data/primary-action';
 import { convertOrderLinesToInvoiceTx } from '@/core/orders/order-invoice-tx';
 import { carryOverOrderPaymentsToInvoice, assertOrderCarryOverMayFinalize } from '@/core/orders/order-payment-carryover';
-import { buildOrderInvoiceLines, orderCustomCostBasis, markConvertedLinesDelivered } from '@/core/orders/order-invoice-lines';
+import { orderCustomCostBasis } from '@/core/orders/order-invoice-lines';
+import { convertOrderToInvoiceInHouse, type OrderConverted } from '@/core/orders/order-convert-house';
+import { currentBranchId } from '@/core/db/helpers';
 import { downloadPdf } from '@/core/pdf/pdf-generator';
 import { vatEngine } from '@/core/tax/vat-engine';
 import { usePermission } from '@/hooks/usePermission';
@@ -53,7 +57,7 @@ import {
   type OrderCostRemoveRequest, type OrderCostRequest,
 } from '@/core/gold/gold-house';
 import { orderEditBody, orderDateOf } from '@/core/orders/order-edit';
-import { latestBusinessDate } from '@/core/utils/business-date';
+import { latestBusinessDate, businessDateIssue } from '@/core/utils/business-date';
 // CENTRAL-UI-PARITY R6F — Stornieren, Positionsstatus, „beim Supplier bestellt" und Positionsdialog:
 // dieselbe Hausfolge wie der Fernbefehl (am Primary in EINER Klammer, auf PC2 als Befehl).
 import {
@@ -103,7 +107,7 @@ export function OrderDetail() {
   // Position); sonst frisch zur Liste wie bisher.
   const returnToList = useReturnToList('/orders');
   const { orders, loadOrders, updateOrder, updateStatus, deleteOrder, getOrderLines,
-    getBillableLines, markOrderLinesInvoiced, assertOrderLinesBillable, updateOrderLineStatus } = useOrderStore();
+    getBillableLines, markOrderLinesInvoiced, assertOrderLinesBillable } = useOrderStore();
   const { categories, loadCategories } = useProductStore();
   const { customers, loadCustomers } = useCustomerStore();
   const { suppliers, loadSuppliers } = useSupplierStore();
@@ -140,6 +144,9 @@ export function OrderDetail() {
   const [pendingBillable, setPendingBillable] = useState<OrderLine[]>([]);
   // M-07 — Option 3: beim Convert kann der User den Auftrag direkt abschliessen.
   const [markCompleteOnConvert, setMarkCompleteOnConvert] = useState(false);
+  // CUSTOM-ORDER K2 — Rechnungsdatum und Nummernart im SELBEN Dialog wie die Steuerart (vorher: Datum immer „jetzt").
+  const [convertInvoiceDate, setConvertInvoiceDate] = useState(() => new Date().toISOString().slice(0, 10));
+  const [convertSpecialMark, setConvertSpecialMark] = useState(false);
   const [showHistory, setShowHistory] = useState(false);
   // 2026-05-16 — Pending action waiting for Number-Type selection.
   const [pendingNumberAction, setPendingNumberAction] = useState<((special: boolean) => Promise<void>) | null>(null);
@@ -156,6 +163,8 @@ export function OrderDetail() {
   const [showAddCost, setShowAddCost] = useState(false);
   // v0.6.0 — Gold-Verbindlichkeit begleichen (Gold geben / in Geld umwandeln)
   const [settleGold, setSettleGold] = useState<{ mode: SettleGoldMode; payable: GoldPayable } | null>(null);
+  // CUSTOM-ORDER K3a — BHD-Begleichung der Order-Goldschuld (Teil, Kurs, Tag).
+  const [settleOrderGold, setSettleOrderGold] = useState<GoldPayable | null>(null);
   const { paymentsByOrder, loadPayments, addPayment, deletePayment } = useOrderPaymentStore();
   const { createDirectInvoice, invoices, loadInvoices } = useInvoiceStore();
   const perm = usePermission();
@@ -172,7 +181,21 @@ export function OrderDetail() {
   const expenseCreditPaid = useMemo(() => new Map(Object.entries(guthaben.byExpense)), [guthaben]);
   // M-08 — angezeigter offener Saldo: konvertierte Order-Payments (Geld zur Invoice
   // gewandert) ausschliessen. totalPaid (roh) bleibt fuer Flow-Logik (Convert/Delete/Cancel).
-  const totalPaidActive = useMemo(() => payments.filter(p => !p.convertedToInvoice).reduce((s, p) => s + p.amount, 0), [payments]);
+  // CUSTOM-ORDER K2 — die Zeilen des Dialogs EINMAL je Auswahl (sonst setzte jede Datumsänderung die Steuerart zurück).
+  const persistedVatLines = useMemo(() => pendingBillable.map(l => {
+    const qty = Math.max(1, l.quantity || 1);
+    const gross = l.materialKind === 'custom' || l.taxScheme !== 'VAT_10'
+      ? Math.round((l.unitPrice || 0) * qty * 1000) / 1000
+      : Math.round((l.unitPrice || 0) * qty * 1.1 * 1000) / 1000;
+    return {
+      id: l.id,
+      label: l.description || (l.materialKind === 'custom' ? 'Custom Item' : 'Item'),
+      currentScheme: (l.taxScheme as TaxScheme) || 'MARGIN',
+      gross,
+    };
+  }), [pendingBillable]);
+  // CUSTOM-ORDER K2 — offen = noch nicht auf eine Rechnung angerechnet (auch teilweise).
+  const totalPaidActive = useMemo(() => payments.reduce((s, p) => s + (p.openAmount ?? (p.convertedToInvoice ? 0 : p.amount)), 0), [payments]);
   // v0.3.0 — Order-Lines fuer das Fulfillment-Grid (re-lädt bei lineRefresh)
   const orderLineList = useMemo(
     () => (id ? getOrderLines(id) : []),
@@ -452,7 +475,14 @@ export function OrderDetail() {
     const fassung = order.revision;
     if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('changing the order status (no revision loaded)'))); return; }
     if (!await w.ok('orders.update_status', {
-      local: () => { updateStatus(id, status); return {}; },
+      // CUSTOM-ORDER K1 — am Primary in EINER Klammer: Status, Positionen und die dabei entstehenden Buchungen
+      // (Lieferantenschuld, Goldwert) gelingen zusammen oder gar nicht.
+      local: () => runOnPrimary(() => {
+        const check = watchLedgerPosts('orders.update_status');
+        updateStatus(id, status);
+        check();
+        return {};
+      }, () => { loadOrders(); }),
       remote: () => ({ orderId: id, status, expectedRevision: fassung }),
     })) return;
     // Nach dem Erfolg frisch lesen — die naechste Handlung braucht die NEUE Fassung.
@@ -629,6 +659,8 @@ export function OrderDetail() {
     const allPersisted = billable.every(l => !!l.taxScheme);
     if (allPersisted) {
       setPendingBillable(billable);
+      setConvertInvoiceDate(new Date().toISOString().slice(0, 10));
+      setConvertSpecialMark(false);
       setShowPersistedVatConfirm(true);
       return;
     }
@@ -684,6 +716,7 @@ export function OrderDetail() {
     orderLines: OrderLine[],
     specialMark: boolean = false,
     perLineSchemes?: Record<string, TaxScheme>,
+    invoiceDate?: string,
   ) {
     if (!id || !order) return;
 
@@ -694,13 +727,8 @@ export function OrderDetail() {
     if (w.remote) {
       const fassung = order.revision;
       if (!fassung) { alert(fehlertext(nichtAmClient('converting this order (no revision loaded)'))); return; }
-      // R5A.2 — eine Position ohne Artikel wuerde am Primary einen Artikel ANLEGEN. Das ist ein
-      // eigener Weg (`products.create`, mit SKU und Medien); der Fernbefehl legt keinen an.
+      // CUSTOM-ORDER K2 — der Artikel eines Sonderstücks entsteht jetzt im Haus (SKU, Kategorie, Bilder), auch von PC2.
       const faellig = orderLines.filter(l => l.isCustomerFacing !== false);
-      if (faellig.some(l => !l.productId)) {
-        alert(fehlertext(nichtAmClient('converting an order line that has no article yet')));
-        return;
-      }
       // Was der Mensch in den beiden Dialogen gewaehlt hat, reist mit — das Schema je Zeile, die
       // Nummernart und „abschliessen". Ohne das rechnete der Primary etwas anderes, als die Maske
       // gezeigt hat. Welche Zeilen abgerechnet werden, entscheidet weiterhin der Primary; stimmt
@@ -713,6 +741,7 @@ export function OrderDetail() {
         remote: () => ({
           orderId: id, expectedRevision: fassung, taxSchemes,
           specialMark: specialMark === true, markComplete: markCompleteOnConvert === true,
+          ...(invoiceDate ? { invoiceDate } : {}),
         }),
       });
       if (r.kind !== 'ok') return;
@@ -721,51 +750,34 @@ export function OrderDetail() {
       return;
     }
 
-    // v0.3.0 — defensiv: nur customer-facing Lines invoicen (cost-only NIE).
+    // CUSTOM-ORDER K2 — EINE Hausfolge in EINER Klammer (dieselbe wie der Fernbefehl): Artikel des Sonderstücks mit
+    // SKU/Kategorie/Bildern, Rechnung zum gewählten Datum, Verknüpfung, „abschließen" und die Anrechnung der Anzahlung.
+    // Jeder Fehler rollt alles zurück — keine Rechnung, kein Artikel, keine Anrechnung.
     const billableLines = orderLines.filter(l => l.isCustomerFacing !== false);
     if (billableLines.length === 0) {
       alert('Keine customer-facing Lines zum Invoicen.');
       return;
     }
-
-    // R5A.2 — die Zeilenrechnung wohnt in `core/orders/order-invoice-lines`; der Fernbefehl ruft
-    // DIESELBE. Hier werden nur die Quellen hineingereicht.
-    const invoiceLineInputs = buildOrderInvoiceLines({
-      order, billableLines, perLineSchemes, customCostBasis,
-      findProduct: (pid) => products.find(p => p.id === pid),
-      createProduct,
-    });
-
-    // B5-B — atomare Konvertierung: assertBillable + createDirectInvoice + markOrderLinesInvoiced
-    // + updateOrder(invoiceId) laufen in EINER Ledger-Transaktion (convertOrderToInvoiceAtomic).
-    // Jeder Fehler → voller Rollback (keine Invoice, keine Line-Markierung) → eine Wiederholung
-    // erzeugt keine zweite Invoice. assertOrderLinesBillable liest FRISCH aus der DB.
-    let invoice: Invoice;
+    let out: OrderConverted;
     try {
-      // VAT-PERIOD-LOCK — die Anzahlung wird erst nach dem Anlegen angerechnet; ein Nein muss davor fallen.
-      assertOrderCarryOverMayFinalize(id, invoiceLineInputs.reduce((s, l) => s + l.lineTotal, 0), totalPaid);
-      invoice = convertOrderToInvoiceAtomic(
-        order.customerId,
-        billableLines.map(l => l.id),
-        invoiceLineInputs,
-        `Invoice for order ${order.orderNumber}`,
-        specialMark,
-      );
+      out = await runOnPrimary(() => {
+        const check = watchLedgerPosts('orders.convert_to_invoice');
+        const r = convertOrderToInvoiceInHouse({
+          orderId: id,
+          taxSchemes: Object.fromEntries(billableLines.map(l => [l.id, (perLineSchemes?.[l.id] as TaxScheme | undefined) || (l.taxScheme as TaxScheme)])),
+          specialMark: specialMark === true,
+          markComplete: markCompleteOnConvert === true,
+          ...(invoiceDate ? { invoiceDate } : {}),
+        }, currentBranchId());
+        check();
+        return r;
+      }, () => { loadOrders(); loadInvoices(); loadProducts(); loadPayments(id); });
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e));
       return;
     }
-    // M-07 — Option 3: "Auftrag abschliessen" angehakt → die invoicten Positionen auf DELIVERED
-    // setzen (NACH der atomaren Konvertierung). recomputeOrderStatus (in updateOrderLineStatus)
-    // rollt die Order auf 'completed', sobald ALLE kundenseitigen Lines DELIVERED sind; bei
-    // Teil-Convert bleibt sie 'arrived'. Default leer → unveraendertes Verhalten.
-    if (markCompleteOnConvert) markConvertedLinesDelivered(billableLines, updateOrderLineStatus);
     setPendingProduct(null);
-    // v0.3.1 — Deposit-Pool auf die Invoice anrechnen, gedeckelt aufs Invoice-Total.
-    // Ein Ueberschuss bleibt fuer die naechste Teil-Invoice stehen; ist der Pool
-    // leer (Deposit schon verbraucht), startet diese Invoice UNPAID.
-    await carryOverOrderPaymentsToInvoice(invoice.id, id, order.orderNumber, invoice.grossAmount, totalPaid);
-    navigate(`/invoices/${invoice.id}`);
+    navigate(`/invoices/${out.invoiceId}`);
   }
 
   // Legacy-Pfad nur für Orders ohne persistierten Scheme-Snapshot.
@@ -1585,15 +1597,12 @@ export function OrderDetail() {
                       <div style={{ padding: '7px 0', borderTop: '1px solid #E5E9EE', display: 'flex', gap: 6, flexWrap: 'wrap' }}>
                         {open && !isCancelled && perm.canManageOrders ? (
                           <>
-                            <button type="button" data-gold-settle-open="apply_shop_to_supplier" onClick={() => setSettleGold({ mode: 'apply_shop_to_supplier', payable: gp })}
-                              className="cursor-pointer"
-                              style={{ fontSize: 11, padding: '4px 10px', borderRadius: 4, border: '1px solid #C6A36D', color: '#9A7B3F', background: 'transparent' }}>
-                              Gold geben
-                            </button>
-                            <button type="button" data-gold-settle-open="convert_supplier_money" onClick={() => setSettleGold({ mode: 'convert_supplier_money', payable: gp })}
+                            {/* CUSTOM-ORDER K3a — die Goldschuld der Order wird in BHD zum Kurs beglichen (auch in Teilen);
+                                die Begleichung mit eigenem Gold folgt mit K3b. */}
+                            <button type="button" data-gold-settle-open="order_money" onClick={() => setSettleOrderGold(gp)}
                               className="cursor-pointer"
                               style={{ fontSize: 11, padding: '4px 10px', borderRadius: 4, border: '1px solid #6E8AAA', color: '#4B6A8A', background: 'transparent' }}>
-                              In Geld
+                              Settle in BHD
                             </button>
                             <button type="button"
                               onClick={async () => {
@@ -1609,6 +1618,13 @@ export function OrderDetail() {
                               ✕
                             </button>
                           </>
+                        ) : gp.status === 'FULFILLED' && !isCancelled && perm.canManageOrders ? (
+                          // CUSTOM-ORDER K3a — eine beglichene Order-Goldschuld: die Begleichungen ansehen und (unbezahlt) zurücknehmen.
+                          <button type="button" data-gold-settle-open="order_settlements" onClick={() => setSettleOrderGold(gp)}
+                            className="cursor-pointer"
+                            style={{ fontSize: 11, padding: '4px 10px', borderRadius: 4, border: '1px solid #D5D9DE', color: '#4B5563', background: 'transparent' }}>
+                            Settlements
+                          </button>
                         ) : <span style={{ fontSize: 11, color: '#9CA3AF' }}>—</span>}
                       </div>
                     </div>
@@ -1651,9 +1667,14 @@ export function OrderDetail() {
                       <button onClick={() => handleDownloadReceipt(p)}
                         className="cursor-pointer transition-colors" style={{ background: 'none', border: 'none', color: '#0F0F10', fontSize: 12, paddingTop: 10, borderTop: '1px solid #E5E9EE', display: 'flex', alignItems: 'center', gap: 4 }}
                       ><Download size={12} /> PDF</button>
+                      {/* CUSTOM-ORDER K2 — eine (auch teilweise) angerechnete Anzahlung trägt ihre Rechnung: kein Löschen hier. */}
+                      {(p.convertedToInvoice || (p.openAmount !== undefined && p.openAmount < p.amount - 0.0005)) ? (
+                        <span style={{ fontSize: 11, color: '#6B7280', paddingTop: 10, borderTop: '1px solid #E5E9EE' }}>Applied to invoice</span>
+                      ) : (
                       <button onClick={() => { if (id) void anzahlungLoeschen(p.id); }}
                         className="cursor-pointer transition-colors" style={{ background: 'none', border: 'none', color: '#6B7280', fontSize: 11, paddingTop: 10, borderTop: '1px solid #E5E9EE' }}
                       >Delete</button>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -1853,6 +1874,9 @@ export function OrderDetail() {
       </Modal>
 
       {/* v0.6.0 — Gold-Verbindlichkeit begleichen (Gold geben / in Geld umwandeln) */}
+      {settleOrderGold && (
+        <SettleOrderGoldModal open payable={settleOrderGold} onClose={() => { setSettleOrderGold(null); loadGoldPayables(); loadOrders(); }} />
+      )}
       {settleGold && (
         <SettleGoldModal
           open={true}
@@ -1932,22 +1956,28 @@ export function OrderDetail() {
       />
 
       {/* v0.6.7 — VAT-Picker fuer persistierte Multi-Line-Orders (inkl. Custom-Quote). */}
+      {/* CUSTOM-ORDER K2 — EIN Dialog: Steuerart je Zeile (die der Order ist nur Vorauswahl, Brutto bleibt),
+          Rechnungsdatum (heute vorgeschlagen, wählbar) und Nummernart. */}
       <ConfirmTaxSchemeModal
         open={showPersistedVatConfirm}
-        lines={pendingBillable.map(l => ({
-          id: l.id,
-          label: l.description || (l.materialKind === 'custom' ? 'Custom Item' : 'Item'),
-          currentScheme: (l.taxScheme as TaxScheme) || 'MARGIN',
-        }))}
+        lines={persistedVatLines}
         onCancel={() => { setShowPersistedVatConfirm(false); setPendingBillable([]); }}
         onConfirm={(perLine) => {
           const billable = pendingBillable;
           setShowPersistedVatConfirm(false);
           setPendingBillable([]);
-          setPendingNumberAction(() => async (special: boolean) => convertWithPersistedSchemes(billable, special, perLine));
+          void convertWithPersistedSchemes(billable, convertSpecialMark, perLine, convertInvoiceDate);
         }}
-        title="VAT-Schema bestaetigen"
-        confirmLabel="Weiter"
+        title="Create Invoice"
+        confirmLabel="Create Invoice"
+        extras={{
+          invoiceDate: convertInvoiceDate,
+          maxDate: new Date().toISOString().slice(0, 10),
+          onInvoiceDateChange: setConvertInvoiceDate,
+          specialMark: convertSpecialMark,
+          onSpecialMarkChange: setConvertSpecialMark,
+          dateError: convertInvoiceDate ? (businessDateIssue(convertInvoiceDate, 'The invoice date') ?? '') : 'Choose an invoice date',
+        }}
       />
 
       <NumberTypeDialog

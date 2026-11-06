@@ -292,8 +292,11 @@ marker('CENTRAL_UI_R6D_GOLD_COMMAND_MODEL_PROVED');
   // (a) Mehr zurückgeben als offen — die Maske kündigte das Nein an, geprüft wurde es nie.
   let db = freshDb();
   let vor = snap(db);
-  let a = await primary(() => house.settleGoldPayableOnPrimary({ payableId: 'gp-r', mode: 'return_gold', grams: 10.5, expectedRevision: 1 }));
-  ok(a.code === 'GOLD_OVER_SETTLEMENT' && snap(db) === vor, `RULE return_gold über dem Offenen: Nein, nichts geschrieben (${a.code})`);
+  // CUSTOM-ORDER C1 — „Return gold" ist für eine Schuld, die WIR haben, kein Begleichungsweg mehr (es erhöhte unseren Bestand).
+  let a = await primary(() => house.settleGoldPayableOnPrimary({ payableId: 'gp-r', mode: 'return_gold', grams: 1, expectedRevision: 1 }));
+  ok(a.code === 'GOLD_RETURN_NOT_A_SETTLEMENT' && snap(db) === vor, `RULE return_gold bei einer Schuld, die wir haben: Nein, nichts geschrieben (${a.code})`);
+  a = await primary(() => house.settleGoldPayableOnPrimary({ payableId: 'gp-o', mode: 'money', agreedBhd: 50, expectedRevision: 1 }));
+  ok(a.code === 'ORDER_GOLD_DEBT_SETTLE_IN_BHD' && snap(db) === vor, `RULE eine Order-Goldschuld nur über „Settle in BHD" (Kurs): Nein, nichts geschrieben (${a.code})`);
   a = await primary(() => house.settleGoldCreditOnPrimary({ creditId: 'gc-1', mode: 'return', grams: 5.5 }));
   ok(a.code === 'GOLD_OVER_SETTLEMENT' && snap(db) === vor, `RULE Kundengold zurück über dem Offenen: Nein (${a.code})`);
   a = await primary(() => house.settleGoldPayableOnPrimary({ payableId: 'gp-r', mode: 'shop_gold', grams: 10.5 }));
@@ -338,7 +341,8 @@ marker('CENTRAL_UI_R6D_GOLD_COMMAND_MODEL_PROVED');
   await primary(() => house.addOrderCostOnPrimary({ orderId: 'ord-2', rows: [{ materialKind: 'gold', description: 'Bar', weightGrams: 4, karat: '22K', totalCost: 100, supplierId: 'sup-2' }] }));
   const olGold = String(one(db, "SELECT id FROM order_lines WHERE order_id = 'ord-2'"));
   const gpGold = String(one(db, 'SELECT id FROM gold_payables WHERE source_order_line_id = ?', [olGold]));
-  await primary(() => house.settleGoldPayableOnPrimary({ payableId: gpGold, mode: 'return_gold', grams: 1 }));
+  const teilO = await primary(() => house.settleOrderGoldOnPrimary({ payableId: gpGold, grams: 1, ratePerGram: 25 }));
+  ok(teilO.kind === 'ok' && n(db, 'SELECT fulfilled_grams FROM gold_payables WHERE id = ?', [gpGold]) === 1, `PARTLY Order-Gold 1 g in BHD beglichen (${teilO.code})`);
   vor = snap(db);
   a = await primary(() => house.removeOrderCostOnPrimary({ orderId: 'ord-2', lineId: olGold }));
   ok(a.code === 'GOLD_PAYABLE_PARTLY_SETTLED' && snap(db) === vor, `PARTLY Kostenzeile mit teilweise beglichener Schuld: Nein, nichts gelöscht (${a.code})`);
@@ -349,7 +353,8 @@ marker('CENTRAL_UI_R6D_GOLD_COMMAND_MODEL_PROVED');
   await primary(() => house.addRepairMaterialOnPrimary({ repairId: 'rep-1', rows: [{ materialKind: 'gold', description: 'Wire', weightGrams: 2, karat: '18K', totalCost: 50, supplierId: 'sup-2' }] }));
   const rlGold = String(one(db, "SELECT id FROM repair_lines WHERE repair_id = 'rep-1' AND material_kind = 'gold'"));
   const gpRl = String(one(db, 'SELECT id FROM gold_payables WHERE source_repair_line_id = ?', [rlGold]));
-  await primary(() => house.settleGoldPayableOnPrimary({ payableId: gpRl, mode: 'return_gold', grams: 0.5 }));
+  const teilR = await primary(() => house.settleGoldPayableOnPrimary({ payableId: gpRl, mode: 'shop_gold', grams: 0.5, sourceKarat: '21K' }));
+  ok(teilR.kind === 'ok' && n(db, 'SELECT fulfilled_grams FROM gold_payables WHERE id = ?', [gpRl]) > 0, `PARTLY Reparatur-Gold teilweise mit Ladengold beglichen (${teilR.code})`);
   vor = snap(db);
   useRepairStore.getState().loadRepairLines();
   const rlCode = wirft(() => useRepairStore.getState().cancelRepairLine(rlGold));
@@ -389,6 +394,7 @@ const setupCost = async (db: Db): Promise<void> => {
 };
 const laborLine = (db: Db): string => String(one(db, "SELECT id FROM order_lines WHERE order_id = 'ord-2' AND material_kind = 'labor'"));
 const goldLine = (db: Db): string => String(one(db, "SELECT id FROM order_lines WHERE order_id = 'ord-2' AND material_kind = 'gold'"));
+const orderGp = (db: Db): string => String(one(db, "SELECT id FROM gold_payables WHERE source_order_id = 'ord-2'"));
 const MAT_ROWS = [
   { materialKind: 'diamond', description: 'Round Brilliant', quantity: 2, caratPerPiece: 0.5, totalCost: 400, supplierId: 'sup-1' },
   { materialKind: 'gold', description: 'Gold wire', weightGrams: 3.25, karat: '21K', totalCost: 150, supplierId: 'sup-2' },
@@ -400,10 +406,11 @@ const COST_ROWS = [
   { materialKind: 'diamond', description: 'Melee', quantity: 10, caratPerPiece: 0.02, totalCost: 75, supplierId: '__INHOUSE__' },
 ];
 const FAELLE: Fall[] = [
-  { name: 'payable return_gold (Teil)', op: 'gold.payables.settle',
-    primary: () => house.settleGoldPayableOnPrimary({ payableId: 'gp-r', expectedRevision: 1, mode: 'return_gold', grams: 4, notes: 'part' }),
-    run: cmd.runGoldPayableSettle, body: () => ({ payableId: 'gp-r', expectedRevision: 1, mode: 'return_gold', grams: 4, notes: 'part' }),
-    expect: (db) => (n(db, "SELECT fulfilled_grams FROM gold_payables WHERE id='gp-r'") === 4 && n(db, "SELECT weight_grams FROM precious_metals WHERE id='pm-21'") === 24 ? null : 'return_gold bucht NICHT 4 g in den Bestand') },
+  // CUSTOM-ORDER C1 — „return_gold" bei `we_owe` ist kein Weg mehr; der Teilfall läuft über Ladengold.
+  { name: 'payable shop_gold (Teil)', op: 'gold.payables.settle',
+    primary: () => house.settleGoldPayableOnPrimary({ payableId: 'gp-r', expectedRevision: 1, mode: 'shop_gold', grams: 4, notes: 'part' }),
+    run: cmd.runGoldPayableSettle, body: () => ({ payableId: 'gp-r', expectedRevision: 1, mode: 'shop_gold', grams: 4, notes: 'part' }),
+    expect: (db) => (n(db, "SELECT fulfilled_grams FROM gold_payables WHERE id='gp-r'") === 4 && n(db, "SELECT weight_grams FROM precious_metals WHERE id='pm-21'") === 16 ? null : 'shop_gold nimmt NICHT 4 g aus dem Bestand') },
   { name: 'payable shop_gold (voll, gleiches Karat)', op: 'gold.payables.settle',
     primary: () => house.settleGoldPayableOnPrimary({ payableId: 'gp-r', expectedRevision: 1, mode: 'shop_gold', grams: 10 }),
     run: cmd.runGoldPayableSettle, body: () => ({ payableId: 'gp-r', expectedRevision: 1, mode: 'shop_gold', grams: 10 }),
@@ -412,15 +419,19 @@ const FAELLE: Fall[] = [
     primary: () => house.settleGoldPayableOnPrimary({ payableId: 'gp-r', expectedRevision: 1, mode: 'shop_gold', grams: 8.759, sourceKarat: '24K' }),
     run: cmd.runGoldPayableSettle, body: () => ({ payableId: 'gp-r', expectedRevision: 1, mode: 'shop_gold', grams: 8.759, sourceKarat: '24K' }),
     expect: (db) => (n(db, "SELECT fulfilled_grams FROM gold_payables WHERE id='gp-r'") === 10 ? null : 'nicht genau erfüllt') },
-  { name: 'payable money (Auftrags-Gold → Inventory)', op: 'gold.payables.settle',
-    primary: () => house.settleGoldPayableOnPrimary({ payableId: 'gp-o', expectedRevision: 1, mode: 'money', agreedBhd: 245.5 }),
-    run: cmd.runGoldPayableSettle, body: () => ({ payableId: 'gp-o', expectedRevision: 1, mode: 'money', agreedBhd: 245.5 }),
+  // CUSTOM-ORDER K3a — eine Order-Goldschuld wird in BHD mit Kurs beglichen: Buchwert-Anteil aus GOLD_LIABILITY, der
+  // Unterschied an den Einstand (INVENTORY), die Geldschuld an den Goldschmied (A/P). Vorher: Betriebsaufwand.
+  { name: 'payable money_order (Auftrags-Gold in BHD)', op: 'gold.payables.settle', setup: setupCost,
+    primary: (db) => house.settleOrderGoldOnPrimary({ payableId: orderGp(db), grams: 4, ratePerGram: 30 }),
+    run: cmd.runGoldPayableSettle, body: (db) => ({ payableId: orderGp(db), expectedRevision: rev(db, 'gold_payables', orderGp(db)), mode: 'money_order', grams: 4, ratePerGram: 30 }),
     expect: (db) => {
-      const e = rows(db, "SELECT category, amount, payment_method, status FROM expenses WHERE related_module = 'gold_payable'")[0];
-      const l = rows(db, "SELECT account, direction, amount FROM ledger_entries WHERE source_module = 'EXPENSE' ORDER BY direction");
-      return e?.category === 'Inventory' && e.payment_method === 'bank' && Number(e.amount) === 245.5
-        && S(l.map((x) => [x.account, x.direction, x.amount])) === S([['ACCOUNTS_PAYABLE', 'CREDIT', 245.5], ['EXPENSES_OPERATING', 'DEBIT', 245.5]])
-        ? null : `Ausgabe/Buchung falsch (${S(e)} ${S(l)})`;
+      const e = rows(db, "SELECT category, amount, status FROM expenses WHERE related_module = 'gold_payable'")[0];
+      const l = rows(db, "SELECT account, direction, amount FROM ledger_entries WHERE source_module = 'EXPENSE' AND source_id = ? ORDER BY account", [String(one(db, "SELECT id FROM expenses WHERE related_module = 'gold_payable'"))]);
+      const gl = n(db, "SELECT COALESCE(SUM(CASE direction WHEN 'DEBIT' THEN amount ELSE -amount END), 0) FROM ledger_entries WHERE account = 'GOLD_LIABILITY'");
+      return e?.category === 'Inventory' && Number(e.amount) === 120 && one(db, 'SELECT status FROM gold_payables WHERE id = ?', [orderGp(db)]) === 'FULFILLED'
+        && S(l.map((x) => [x.account, x.direction, x.amount])) === S([['ACCOUNTS_PAYABLE', 'CREDIT', 120], ['GOLD_LIABILITY', 'DEBIT', 100], ['INVENTORY', 'DEBIT', 20]])
+        && Math.abs(gl) < 0.0005
+        ? null : `Ausgabe/Buchung falsch (${S(e)} ${S(l)} GOLD_LIABILITY ${gl})`;
     } },
   { name: 'payable money (Reparatur-Gold → RepairCosts)', op: 'gold.payables.settle',
     primary: () => house.settleGoldPayableOnPrimary({ payableId: 'gp-r', expectedRevision: 1, mode: 'money', agreedBhd: 99 }),
@@ -514,9 +525,9 @@ marker('CENTRAL_UI_R6D_GOLD_LEDGER_BALANCED_PROVED');
 {
   // Zwei Masken sehen dieselbe Schuld (Fassung 1). Vorher schrieb die zweite ABSOLUT „gesehen + neu" zurück.
   const db = freshDb();
-  const a = await primary(() => house.settleGoldPayableOnPrimary({ payableId: 'gp-r', expectedRevision: 1, mode: 'return_gold', grams: 3 }));
+  const a = await primary(() => house.settleGoldPayableOnPrimary({ payableId: 'gp-r', expectedRevision: 1, mode: 'shop_gold', grams: 3 }));
   const vor = snap(db);
-  const b = await primary(() => house.settleGoldPayableOnPrimary({ payableId: 'gp-r', expectedRevision: 1, mode: 'return_gold', grams: 3 }));
+  const b = await primary(() => house.settleGoldPayableOnPrimary({ payableId: 'gp-r', expectedRevision: 1, mode: 'shop_gold', grams: 3 }));
   ok(a.kind === 'ok' && b.code === 'RECORD_CHANGED' && snap(db) === vor && n(db, "SELECT fulfilled_grams FROM gold_payables WHERE id='gp-r'") === 3,
     `STALE am Primary: die zweite Maske mit der alten Fassung bekommt ein Nein, nichts überschrieben (${b.code})`);
   const stale = async (op: string, run: Run, body: Record<string, unknown>, what: string) => {
@@ -525,7 +536,7 @@ marker('CENTRAL_UI_R6D_GOLD_LEDGER_BALANCED_PROVED');
     const o = await fern(() => run(deps(d), identity(nextId(), op), body));
     ok(o.kind === 'rejected' && o.code === 'RECORD_CHANGED' && o.frozen && snap(d) === before, `STALE PC2 ${what}: alte Fassung → RECORD_CHANGED, eingefroren, nichts geschrieben (${o.code})`);
   };
-  await stale('gold.payables.settle', cmd.runGoldPayableSettle, { payableId: 'gp-r', expectedRevision: 2, mode: 'return_gold', grams: 1 }, 'Gold-Schuld');
+  await stale('gold.payables.settle', cmd.runGoldPayableSettle, { payableId: 'gp-r', expectedRevision: 2, mode: 'shop_gold', grams: 1 }, 'Gold-Schuld');
   await stale('gold.customer_credits.settle', cmd.runGoldCreditSettle, { creditId: 'gc-1', expectedRevision: 7, mode: 'return', grams: 1 }, 'Kundengold');
   await stale('repairs.record_gold_usage', cmd.runRepairGoldUsage, { repairId: 'rep-1', expectedRevision: 9, source: 'workshop', karat: '21K', receivedGrams: 1, supplierId: 'sup-1' }, 'Gold-Verbrauch');
   await stale('repairs.add_material', cmd.runRepairMaterial, { repairId: 'rep-1', expectedRevision: 9, rows: MAT_ROWS }, 'Material');
@@ -552,10 +563,12 @@ marker('CENTRAL_UI_R6D_GOLD_STALE_REVISION_PROVED');
     const retry = await fern(() => run(deps(db), id, body));
     ok(retry.kind === 'ok' && !retry.replayed, `ATOMIC ${what}: dieselbe Kennung danach läuft genau einmal`);
   };
-  await inject('Gold → BHD, Buchung scheitert', /INSERT INTO ledger_entries/, 1, 'gold.payables.settle', cmd.runGoldPayableSettle,
-    () => ({ payableId: 'gp-o', expectedRevision: 1, mode: 'money', agreedBhd: 120 }));
-  await inject('Gold zurück, Audit-Zeile scheitert (nach Schuld + Bestand)', /INSERT INTO gold_movements/, 1, 'gold.payables.settle', cmd.runGoldPayableSettle,
-    () => ({ payableId: 'gp-r', expectedRevision: 1, mode: 'return_gold', grams: 2 }));
+  await inject('Order-Gold → BHD, Buchung scheitert', /INSERT INTO ledger_entries/, 1, 'gold.payables.settle', cmd.runGoldPayableSettle,
+    (db) => ({ payableId: orderGp(db), expectedRevision: rev(db, 'gold_payables', orderGp(db)), mode: 'money_order', grams: 2, ratePerGram: 30 }), setupCost);
+  await inject('Order-Gold → BHD, Nachweis scheitert (nach Ausgabe + Buchung + Schuld)', /INSERT INTO gold_payable_settlements/, 1, 'gold.payables.settle', cmd.runGoldPayableSettle,
+    (db) => ({ payableId: orderGp(db), expectedRevision: rev(db, 'gold_payables', orderGp(db)), mode: 'money_order', grams: 2, ratePerGram: 30 }), setupCost);
+  await inject('Ladengold, Audit-Zeile scheitert (nach Schuld + Bestand)', /INSERT INTO gold_movements/, 1, 'gold.payables.settle', cmd.runGoldPayableSettle,
+    () => ({ payableId: 'gp-r', expectedRevision: 1, mode: 'shop_gold', grams: 2 }));
   await inject('Karat gegen Karat, zweite Audit-Zeile scheitert', /INSERT INTO gold_movements/, 2, 'gold.payables.settle', cmd.runGoldPayableSettle,
     () => ({ payableId: 'gp-r', expectedRevision: 1, mode: 'shop_gold', grams: 4, sourceKarat: '24K' }));
   await inject('Kundengold → BHD, Gold-Guthaben scheitert (nach Guthaben + Buchung)', /UPDATE customer_gold_credits/, 1, 'gold.customer_credits.settle', cmd.runGoldCreditSettle,
@@ -632,11 +645,17 @@ marker('CENTRAL_UI_R6D_GOLD_ATOMICITY_PROVED');
   ok(o.code === 'GOLD_USED_EXCEEDS_RECEIVED', `SECURITY verbraucht > erhalten (${o.code})`);
   o = await fr('gold.payables.settle', cmd.runGoldPayableSettle, { payableId: 'gp-r', expectedRevision: 1, mode: 'shop_gold', grams: 1, sourceKarat: '99K' });
   ok(o.code === 'GOLD_KARAT_UNKNOWN', `SECURITY unbekanntes Karat (${o.code})`);
-  o = await fr('gold.payables.settle', cmd.runGoldPayableSettle, { payableId: 'gp-r', expectedRevision: 1, mode: 'return_gold', grams: 10.01 });
+  o = await fr('gold.payables.settle', cmd.runGoldPayableSettle, { payableId: 'gp-r', expectedRevision: 1, mode: 'shop_gold', grams: 10.01 });
   ok(o.code === 'GOLD_OVER_SETTLEMENT', `SECURITY Überbegleichung (${o.code})`);
+  o = await fr('gold.payables.settle', cmd.runGoldPayableSettle, { payableId: 'gp-r', expectedRevision: 1, mode: 'return_gold', grams: 1 });
+  ok(o.code === 'GOLD_RETURN_NOT_A_SETTLEMENT' && o.frozen, `SECURITY PC2: „Return gold" begleicht keine Schuld, die wir haben (${o.code})`);
+  o = await fr('gold.payables.settle', cmd.runGoldPayableSettle, { payableId: 'gp-o', expectedRevision: 1, mode: 'money', agreedBhd: 50 });
+  ok(o.code === 'ORDER_GOLD_DEBT_SETTLE_IN_BHD' && o.frozen, `SECURITY PC2: eine Order-Goldschuld nicht ohne Kurs in Geld (${o.code})`);
+  o = await fr('gold.payables.settle', cmd.runGoldPayableSettle, { payableId: 'gp-o', expectedRevision: 1, mode: 'money_order', grams: 1, ratePerGram: 30 });
+  ok(o.code === 'GOLD_DEBT_NOT_VALUED', `SECURITY PC2: eine noch nicht bewertete Order-Goldschuld wird nicht beglichen (${o.code})`);
   o = await fr('gold.payables.settle', cmd.runGoldPayableSettle, { payableId: 'gp-big', expectedRevision: 1, mode: 'shop_gold', grams: 21 });
   ok(o.code === 'GOLD_SHOP_STOCK_INSUFFICIENT', `SECURITY mehr als im Laden (${o.code})`);
-  o = await fr('gold.payables.settle', cmd.runGoldPayableSettle, { payableId: 'gp-r', expectedRevision: 1, mode: 'return_gold', grams: 1.0005 });
+  o = await fr('gold.payables.settle', cmd.runGoldPayableSettle, { payableId: 'gp-r', expectedRevision: 1, mode: 'shop_gold', grams: 1.0005 });
   ok(o.code === 'GOLD_GRAMS_INVALID', `SECURITY Gramm in 0.001-g-Schritten (${o.code})`);
   o = await fr('repairs.add_material', cmd.runRepairMaterial, { repairId: 'rep-1', expectedRevision: 1, rows: [{ ...MAT_ROWS[0], materialKind: 'labor', quantity: undefined, caratPerPiece: undefined }] });
   ok(o.code === 'MATERIAL_KIND_INVALID', `SECURITY „Labor" bietet die Reparatur-Maske nicht an (${o.code})`);
@@ -896,9 +915,10 @@ marker('CENTRAL_UI_R6D_GOLD_UI_WIRING_PROVED');
   'HIST-UI …leer sagt sie „Nothing to settle", statt einen erfassten Goldeinsatz zu verleugnen');
   ok(seite.indexOf('GOLD USAGE HISTORY (') > 0 && seite.indexOf('GOLD USAGE HISTORY (') < seite.indexOf('GOLD DEBTS & CREDITS ('),
     'HIST-UI erst der Verlauf (was passiert ist), dann was daraus offen ist');
-  ok(/repairGoldPayables\.map\(/.test(seite) && /data-gold-settle-open="settle_supplier_return"/.test(seite)
+  // CUSTOM-ORDER C1 — „Settle" (return_gold) entfällt für eine Schuld, die wir haben; „→ BHD" bleibt.
+  ok(/repairGoldPayables\.map\(/.test(seite) && !/data-gold-settle-open="settle_supplier_return"/.test(seite)
     && /data-gold-settle-open="convert_supplier_money"/.test(seite) && /repairCustomerGoldCredits\.map\(/.test(seite),
-  'HIST-UI die Schuld- und Guthabenzeilen samt ihren Knoepfen sind unveraendert da');
+  'HIST-UI die Schuld- und Guthabenzeilen samt ihren Knoepfen sind da (ohne „Return gold" für unsere Schuld)');
   // Vollstaendig verbrauchtes Kundengold (oben, Fall 1): Verlauf ja, Schuld/Guthaben nein — genau
   // die Lage, in der die erste Karte etwas zeigt und die zweite „Nothing to settle".
   {

@@ -262,7 +262,10 @@ const MATRIX: Record<string, Zeile> = {
     'D die Oberflaeche traegt den Anzahlungstopf ueber…');
   // R5A — der Befund von R3 ist geschlossen: die Buchung fuehrt den Uebertrag jetzt selbst aus,
   // ueber DIESELBE Funktion wie die Oberflaeche. Geprueft wird deshalb der neue Stand.
-  ok(/carryOverOrderPaymentsToInvoice\(/.test(fin.slice(fin.indexOf('function runConvertOrder'), fin.indexOf('// ── Einlieferer auszahlen'))),
+  // CUSTOM-ORDER K2 — Primary und Fernbefehl fahren seit K2 DIESELBE Hausfolge (`convertOrderToInvoiceInHouse`), und die
+  // rechnet die Anzahlung in derselben Klammer an.
+  ok(/convertOrderToInvoiceInHouse\(/.test(fin.slice(fin.indexOf('function runConvertOrder'), fin.indexOf('// ── Einlieferer auszahlen')))
+    && /carryOverOrderPaymentsToInvoice\(/.test(src('src/core/orders/order-convert-house.ts')),
     'D …seit R5A tut die Buchung es auch — dieselbe Kennung, eine Wirkung');
 
   // Die anderen drei haben ueberhaupt keine passende Buchung.

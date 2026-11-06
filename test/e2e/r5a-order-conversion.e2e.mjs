@@ -447,15 +447,20 @@ try {
   /** Was die Seite direkt vor der Entscheidung zeigt — gelesen, nicht erraten. */
   const BEREIT = "const m=/(\\d+) item\\(s\\) bereit zum Invoicen/.exec(document.body.innerText); return m ? Number(m[1]) : 0;";
   const DIALOG = "const p=[...document.querySelectorAll('p')].find(x=>x.textContent.includes('Review the VAT scheme'));"
-    + "if(!p) return 'null'; const rows=[...p.parentElement.querySelectorAll('div')].filter(d=>d.children.length===2"
-    + "&&d.children[0].tagName==='SPAN'&&d.children[1].querySelectorAll('button').length===3"
+    // CUSTOM-ORDER K2 — eine Zeile zeigt zwischen Bezeichnung und Steuerarten ihr Brutto (bleibt bei jeder Steuerart).
+    + "if(!p) return 'null'; const rows=[...p.parentElement.querySelectorAll('div')].filter(d=>d.children.length>=2"
+    + "&&d.children[0].tagName==='SPAN'&&d.lastElementChild.querySelectorAll('button').length===3"
     + "&&d.children[0].textContent.trim()!=='APPLY TO ALL LINES');"
-    + "return JSON.stringify(rows.map(r=>({zeile:r.children[0].textContent.trim(),"
-    + "schema:([...r.children[1].querySelectorAll('button')].find(b=>/15, 15, 16/.test(b.style.border))||{}).textContent||null})));";
+    + "return JSON.stringify(rows.map(r=>({zeile:r.children[0].textContent.trim(),brutto:r.children.length>2?r.children[1].textContent.trim():null,"
+    + "schema:([...r.lastElementChild.querySelectorAll('button')].find(b=>/15, 15, 16/.test(b.style.border))||{}).textContent||null})));";
   const DIALOG_ABBRECHEN = "const p=[...document.querySelectorAll('p')].find(x=>x.textContent.includes('Review the VAT scheme'));"
     + "const b=p&&[...p.parentElement.querySelectorAll('button')].find(x=>x.textContent.trim()==='Cancel'); if(!b) return 'NO'; b.click(); return 'OK';";
-  const SCHEMA_OFFEN = "document.body.innerText.includes('VAT-Schema bestaetigen')";
-  const NUMMER_OFFEN = "document.body.innerText.includes('Choose Invoice Number Type')";
+  // CUSTOM-ORDER K2 — EIN Dialog: Steuerart je Zeile, Rechnungsdatum (heute vorgeschlagen) und Nummernart.
+  const SCHEMA_OFFEN = "!!document.querySelector('[data-testid=\"order-invoice-date\"]')";
+  const DIALOG_OK = "const m=[...document.querySelectorAll('[role=\"dialog\"], .fixed')].find((d)=>d.querySelector('[data-testid=\"order-invoice-date\"]'));"
+    + "const b=m&&[...m.querySelectorAll('button')].filter((x)=>x.textContent.trim()==='Create Invoice').pop(); if(!b) return 'NO'; if(b.disabled) return 'DISABLED'; b.click(); return 'OK';";
+  const DIALOG_STAND = "const d=document.querySelector('[data-testid=\"order-invoice-date\"]'); const s=document.querySelector('[data-testid=\"order-invoice-number-standard\"]');"
+    + "return JSON.stringify({ datum: d ? d.value : null, standard: !!s });";
   /** Der Weg des Primary, ohne Neuaufbau: dieselbe Seite, dieselbe Anwendung — nur die Adresse. */
   const primaryZu = (route) => primary.ev(`history.pushState({}, '', ${S(route)}); window.dispatchEvent(new PopStateEvent('popstate')); return 1;`);
 
@@ -513,11 +518,9 @@ try {
     const lokalWeg = await warteBis(primary, "document.body.innerText.includes('R5AORD-0P')", 30000)
       && (await clickText(primary, 'Create Invoice')) === 'OK'
       && await warteBis(primary, SCHEMA_OFFEN, 15000)
-      && (await clickText(primary, 'Weiter')) === 'OK'
-      && await warteBis(primary, NUMMER_OFFEN, 15000)
-      && (await clickText(primary, 'Confirm')) === 'OK'
+      && (await primary.ev(DIALOG_OK)) === 'OK'
       && await warteBis(primary, "location.pathname.startsWith('/invoices/')", 30000);
-    ok(lokalWeg, 'LOKAL der Primary wandelt den Zwilling ueber seine normale Oberflaeche um (beide Dialoge)');
+    ok(lokalWeg, 'LOKAL der Primary wandelt den Zwilling ueber seine normale Oberflaeche um (der eine Dialog)');
     // Der lokale Weg speichert ueber den normalen (verzoegerten) Speicherpfad — nicht ueber den
     // durablen des Fernbefehls. Deshalb wird gewartet, bis der Stand wirklich auf der Platte steht:
     // die Rechnung UND der fertige Anzahlungsuebertrag (der laeuft lokal nach dem Commit).
@@ -546,14 +549,14 @@ try {
       `PARITAET Primary und PC2 sehen vor der Entscheidung dasselbe (${S(pZeilen)} / ${S(cZeilen)})`);
     ok((await buchungen(client)).length === 0, 'WEG bis hierher ging keine Buchung ueber die Bruecke');
 
-    // ── Die beiden Dialoge: bedient, nicht umgangen ──
-    ok(await clickText(client, 'Weiter') === 'OK', 'DIALOG der Schema-Dialog wird mit „Weiter" bestaetigt');
-    const nummer = await warteBis(client, NUMMER_OFFEN, 15000);
-    ok(nummer, 'DIALOG danach fragt die Maske nach der Nummernart — der normale Weg');
-    ok((await buchungen(client)).length === 0, 'DIALOG …und auch der Schema-Dialog hat nichts geschickt');
+    // ── Der eine Dialog: bedient, nicht umgangen ──
+    const stand = JSON.parse(await client.ev(DIALOG_STAND));
+    ok(stand.datum === new Date().toISOString().slice(0, 10) && stand.standard,
+      `DIALOG derselbe Dialog fragt Rechnungsdatum (heute vorgeschlagen) und Nummernart (${S(stand)})`);
+    ok((await buchungen(client)).length === 0, 'DIALOG …und das Öffnen hat nichts geschickt');
     await spuelen(primary);
     const abFern = maxRowid();
-    ok(await clickText(client, 'Confirm') === 'OK', 'DIALOG die Nummernart wird mit „Confirm" bestaetigt (Normal Final)');
+    ok(await client.ev(DIALOG_OK) === 'OK', 'DIALOG „Create Invoice" im Dialog bestaetigt (Standard-Nummer)');
 
     const weg = await warteBis(client, "location.pathname.startsWith('/invoices/')", 45000);
     const fehler = await client.ev("const e=document.querySelector('[data-save-error]'); return e ? e.textContent : '';");
@@ -616,8 +619,13 @@ try {
     ok(fern.gutBetraege.length === 1 && Number(fern.gutBetraege[0].amount) === 200 && fern.gutBetraege[0].source_type === 'overpayment'
       && Number(fern.gutBetraege[0].used_amount || 0) === 0 && fern.gutBetraege[0].status === 'OPEN',
       `KONTO …und als genau EINE offene Gutschrift ueber 200 aus der Ueberzahlung (${S(fern.gutBetraege)})`);
-    ok(S(fern.zahlBetraege) === S([{ amount: 200, method: 'cash' }, { amount: 400, method: 'cash' }, { amount: 600, method: 'cash' }]),
-      `KONTO die Zahlungszeilen: 400 + 600 bis zur Summe, 200 als Ueberzahlungsanteil (${S(fern.zahlBetraege)})`);
+    // CUSTOM-ORDER K2 — die Anzahlungen werden ANGERECHNET (Zahlart order_deposit), nicht als neue Barzahlung gebucht.
+    // …je Anzahlung GENAU EINE Zahlungszeile (nachvollziehbar zur Order-Zahlung); der Überschuss 200 steckt in der zweiten
+    // und geht als Kundenguthaben ins Haben (CUSTOMER_CREDIT, s. oben) — nicht als eigene Zeile.
+    ok(S(fern.zahlBetraege) === S([{ amount: 400, method: 'order_deposit' }, { amount: 800, method: 'order_deposit' }]),
+      `KONTO die Zahlungszeilen: je Anzahlung eine (400 + 800), Überschuss 200 als Guthaben (${S(fern.zahlBetraege)})`);
+    ok(!('CASH' in fern.saldo) && fern.saldo.CUSTOMER_DEPOSITS === 1200,
+      `KONTO keine erfundene Kasse — die Anzahlungsschuld wird aufgelöst (${S(fern.saldo)})`);
     ok(Number(fern.kopf?.paid_amount) === 1200 && Number(fern.kopf?.gross_amount) === 1000 && fern.kopf?.status === 'FINAL',
       `KONTO der Rechnungskopf fuehrt 1200 als ERHALTEN (Hausvertrag Slice 3: Ueberschuss → Guthaben statt Forderung) bei 1000 Summe, FINAL (${S(fern.kopf)})`);
     ok(fern.offen === 0, `KONTO beim Auftrag bleibt keine Anzahlung liegen (${fern.offen})`);
@@ -653,17 +661,15 @@ try {
     const durchDieDialoge = async () => {
       if (await clickText(client, 'Create Invoice') !== 'OK') return 'kein Knopf';
       if (!(await warteBis(client, SCHEMA_OFFEN, 15000))) return 'kein Schema-Dialog';
-      if (await clickText(client, 'Weiter') !== 'OK') return 'kein Weiter';
-      if (!(await warteBis(client, NUMMER_OFFEN, 15000))) return 'kein Nummern-Dialog';
       return 'OK';
     };
 
     client = await lade(client, '/orders/r5a-ord3');
     await waitFor(client, SHELL, 45000);
     await warteBis(client, "document.body.innerText.includes('R5AORD-03')", 40000);
-    ok(await durchDieDialoge() === 'OK', 'VERLOREN der erste Versuch geht den normalen Weg durch beide Dialoge');
+    ok(await durchDieDialoge() === 'OK', 'VERLOREN der erste Versuch geht den normalen Weg durch den Dialog');
     await client.ev('window.__killNext = true; return 1;');
-    await clickText(client, 'Confirm');
+    await client.ev(DIALOG_OK);
     const gemeldet = await warteBis(client, "/not clear whether/i.test(document.body.innerText)", 30000);
     ok(gemeldet, 'VERLOREN die Seite meldet den offenen Ausgang, statt Erfolg zu behaupten');
     ok(await client.ev("return location.pathname === '/orders/r5a-ord3';"), 'VERLOREN …und bleibt beim Auftrag stehen');
@@ -675,7 +681,7 @@ try {
 
     // Derselbe Vorsatz, erneut — kein neuer Rumpf, kein Kniff, derselbe Klickweg.
     ok(await durchDieDialoge() === 'OK', 'VERLOREN der zweite Versuch geht denselben Weg');
-    await clickText(client, 'Confirm');
+    await client.ev(DIALOG_OK);
     const weg = await warteBis(client, "location.pathname.startsWith('/invoices/')", 40000);
     ok(weg, 'VERLOREN …kommt durch und zeigt die Rechnung');
     const c = (await kommandos(client)).filter((x) => x.op === 'orders.convert_to_invoice');

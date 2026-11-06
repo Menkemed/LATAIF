@@ -349,6 +349,8 @@ export function financeFor(ctx: BusinessReadContext) {
     for (const row of payByMethod) {
       const m = row.method as string;
       const amt = (row.total as number) || 0;
+      // CUSTOM-ORDER K2 — die Anrechnung einer Anzahlung ist kein Zahlungseingang (das Geld steht bei der Order-Zahlung).
+      if (m === 'order_deposit') continue;
       if (m === 'cash') cashReceived += amt;
       else if (m === 'bank_transfer') bankReceived += amt;
       else if (m === 'card') cardReceived += amt;
@@ -536,7 +538,8 @@ export function financeFor(ctx: BusinessReadContext) {
       const opRows = qry(
         `SELECT op.method, COALESCE(SUM(op.amount),0) as total
          FROM order_payments op JOIN orders o ON o.id = op.order_id
-         WHERE o.branch_id = ? AND COALESCE(op.converted_to_invoice,0) = 0
+         WHERE o.branch_id = ? AND (COALESCE(op.converted_to_invoice,0) = 0
+             OR EXISTS (SELECT 1 FROM order_deposit_applications oda WHERE oda.order_payment_id = op.id))
            AND o.status != 'cancelled'
          GROUP BY op.method`,
         [branchId]

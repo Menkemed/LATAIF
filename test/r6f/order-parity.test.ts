@@ -387,9 +387,12 @@ async function stornoPaar(choice: 'refund' | 'credit' | 'forfeit', extra: Record
     && s(w.db, 'SELECT expense_id FROM order_lines WHERE id = ?', [w.labor]) === '',
   'A/P die Schuld an den Goldschmied bleibt OFFEN (er hat gearbeitet); die Zeile hängt nicht mehr daran');
   const stueck = row(w.db, "SELECT brand, name, quantity, purchase_price, planned_sale_price, stock_status, source_type, created_by FROM products WHERE brand = 'Atelier'");
-  ok(stueck.name === 'Ring R6F' && Number(stueck.quantity) === 1 && Number(stueck.purchase_price) === 250
+  // CUSTOM-ORDER K1 — Einstand = angekommene Kosten: die Arbeit (150, A/P offen). Das Extra-Gold war nur geplant (PENDING),
+  // seine Gramm-Schuld wird mit dem Storno gestrichen — es steckt nicht im Stück (vorher 250 mit fiktiven 100).
+  ok(stueck.name === 'Ring R6F' && Number(stueck.quantity) === 1 && Number(stueck.purchase_price) === 150
     && Number(stueck.planned_sale_price) === 2300 && stueck.stock_status === 'in_stock' && stueck.source_type === 'OWN',
-  `STOCK das angefangene Sonderstück ist ein Lagerartikel zur Kostenbasis (Arbeit + Gold = 250), wie die Maske verspricht (${S(stueck)})`);
+  `STOCK das angefangene Sonderstück ist ein Lagerartikel zur Kostenbasis der angekommenen Kosten (Arbeit 150) (${S(stueck)})`);
+  ok(Math.abs(saldo(w.db, 'INVENTORY') - 150) < 0.0005, `STOCK …und genau dieser Einstand steht im Lager-Hauptbuch (${saldo(w.db, 'INVENTORY')})`);
   // v0.8.91 — die Übernahme in den Bestand IST die Stelle, an der das Stück seine SKU bekommt (zentraler Zähler, beide Wege gleich).
   const skuP = s(wP.db, "SELECT sku FROM products WHERE brand = 'Atelier'");
   const skuR = s(wR.db, "SELECT sku FROM products WHERE brand = 'Atelier'");
@@ -952,9 +955,10 @@ marker('CENTRAL_UI_R6F_ORDER_CLIENT_NO_LOCAL_DB_PROVED');
   ok((oh.match(/watchLedgerPosts\('/g) ?? []).length === 3, 'UI …jede abgefangene Buchung (Storno, Status, Dialog) bricht die Handlung ab');
   const st = codeOf(src('src/stores/orderStore.ts'));
   const storno = st.slice(st.indexOf('cancelOrderWithMoney: (id, choice, refundMethod, note) =>'), st.indexOf('  deleteOrder: (id) =>'));
-  ok(storno.length > 500 && !/safePost\(/.test(storno) && !/catch \(err\)/.test(storno) && /converted_to_invoice, 0\) = 0/.test(storno),
+  // CUSTOM-ORDER K2 — „nicht umgewandelt" ist jetzt der offene (nicht angerechnete) Teil (OPEN_DEPOSIT_TOTAL_SQL).
+  ok(storno.length > 500 && !/safePost\(/.test(storno) && !/catch \(err\)/.test(storno) && /query\(OPEN_DEPOSIT_TOTAL_SQL, \[id\]\)/.test(storno),
     'STORE der Storno bucht ohne safePost, legt das Lagerstück ohne verschlucktes try/catch an und zählt nur nicht umgewandelte Anzahlungen');
-  const edit = st.slice(st.indexOf('updateOrderLine: (lineId, patch) =>'), st.indexOf('commitOrderLineExpenses: (orderId) =>'));
+  const edit = st.slice(st.indexOf('updateOrderLine: (lineId, patch) =>'), st.indexOf('commitOrderLineExpenses: (orderId, opts = {}) =>'));
   ok(edit.length > 300 && !/catch \(err\)/.test(edit) && /trackUpdate\('order_lines', lineId, written\)/.test(edit),
     'STORE der Positionsdialog legt den Artikel ohne verschlucktes try/catch an und protokolliert die geschriebenen Spalten (kein Foto im Protokoll)');
 }

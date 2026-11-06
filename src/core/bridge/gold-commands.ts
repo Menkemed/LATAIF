@@ -17,6 +17,7 @@
 // ändert, nennt die Fassung, die er gesehen hat — verglichen wird IN der Transaktion.
 // ════════════════════════════════════════════════════════════════════════════
 import { getDatabase, saveDatabaseDurably } from '@/core/db/database';
+import { query } from '@/core/db/helpers';
 import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
@@ -24,6 +25,9 @@ import { CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOut
 import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import { assertHouseBranch } from './remote-create-support';
+import { settleOrderGoldInBhd, reverseOrderGoldSettlement, OrderGoldSettleRejected } from '@/core/gold/order-gold-settle';
+import { VatPeriodFiled } from '@/core/tax/vat-period-lock';
+import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import {
   FinancialPayloadError, expectedRevisionOf, isPlain, optText, positive, reqString,
 } from './financial-commands';
@@ -112,6 +116,36 @@ function absent(r: Record<string, unknown>, keys: readonly string[], why: string
 }
 
 // ── gold.payables.settle ──────────────────────────────────────────────────
+
+/** CUSTOM-ORDER K3a — die Begleichung einer Order-Goldschuld in BHD (Teil, Kurs, Tag) und ihre Rücknahme. */
+export type OrderGoldCommand =
+  | { mode: 'money_order'; payableId: string; expectedRevision: number; grams: number; ratePerGram: number; settledOn?: string; notes?: string }
+  | { mode: 'money_order_reverse'; payableId: string; expectedRevision: number; settlementId: string };
+
+export function parseOrderGoldCommand(raw: unknown): OrderGoldCommand | null {
+  if (!isPlain(raw) || (raw.mode !== 'money_order' && raw.mode !== 'money_order_reverse')) return null;
+  if (raw.mode === 'money_order') {
+    const r = strict(raw, ['payableId', 'expectedRevision', 'mode', 'grams', 'ratePerGram', 'settledOn', 'notes'], SETTLE_FORBIDDEN);
+    const settledOn = optStr(r.settledOn, 'settledOn');
+    if (settledOn !== undefined && !/^\d{4}-\d{2}-\d{2}$/.test(settledOn)) throw new GoldPayloadError('settledOn must look like YYYY-MM-DD');
+    return {
+      mode: 'money_order',
+      payableId: feld(() => reqString(r.payableId, 'payableId')),
+      expectedRevision: feld(() => expectedRevisionOf(r.expectedRevision)),
+      grams: feld(() => positive(r.grams, 'grams')),
+      ratePerGram: feld(() => positive(r.ratePerGram, 'ratePerGram')),
+      ...(settledOn ? { settledOn } : {}),
+      ...(r.notes !== undefined ? { notes: feld(() => optText(r.notes, 'notes')) } : {}),
+    };
+  }
+  const r = strict(raw, ['payableId', 'expectedRevision', 'mode', 'settlementId'], SETTLE_FORBIDDEN);
+  return {
+    mode: 'money_order_reverse',
+    payableId: feld(() => reqString(r.payableId, 'payableId')),
+    expectedRevision: feld(() => expectedRevisionOf(r.expectedRevision)),
+    settlementId: feld(() => reqString(r.settlementId, 'settlementId')),
+  };
+}
 
 export function parsePayableSettle(raw: unknown): PayableSettleRequest {
   const r = strict(raw, ['payableId', 'expectedRevision', 'mode', 'grams', 'sourceKarat', 'agreedBhd', 'notes'], SETTLE_FORBIDDEN);
@@ -279,6 +313,25 @@ function inHouse<T>(identity: CommandIdentity, fn: (actor: GoldActor) => T): T {
 }
 
 export function runGoldPayableSettle(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  // CUSTOM-ORDER K3a — dieselbe Buchung (gold.payables.settle), zwei neue Arten für die Goldschuld einer Order. Ein älterer
+  // Client kennt sie nicht und schickt die bisherigen Arten (die das Haus für eine Order-Schuld ablehnt).
+  const orderCmd = parseOrderGoldCommand(raw);
+  if (orderCmd) {
+    return runRemoteCommand(deps, identity, () => inHouse(identity, (a) => {
+      const p = query('SELECT revision FROM gold_payables WHERE id = ? AND branch_id = ?', [orderCmd.payableId, a.branchId])[0];
+      if (!p) throw new CommandRejected('GOLD_PAYABLE_NOT_FOUND', 'no such gold debt in this branch');
+      if (Number(p.revision ?? 0) !== orderCmd.expectedRevision) throw new CommandRejected('RECORD_CHANGED', 'this gold debt was changed meanwhile — reload');
+      try {
+        return (orderCmd.mode === 'money_order'
+          ? settleOrderGoldInBhd(a, orderCmd)
+          : reverseOrderGoldSettlement(a, orderCmd.settlementId)) as unknown as Record<string, unknown>;
+      } catch (e) {
+        if (e instanceof OrderGoldSettleRejected) throw new CommandRejected(e.code, e.message);
+        if (e instanceof VatPeriodFiled || e instanceof InvoiceActionRejected) throw new CommandRejected((e as { code: string }).code, e.message);
+        throw e;
+      }
+    }));
+  }
   const req = parsePayableSettle(raw);
   return runRemoteCommand(deps, identity, () => inHouse(identity, (a) => settleGoldPayable(a, req)));
 }

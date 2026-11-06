@@ -362,7 +362,8 @@ function seed() {
       insert(db, 'repairs', { id: REP(x), branch_id, repair_number: `REP-R6D-${x}`, customer_id: KUNDE(x), item_brand: 'R6D', item_model: 'Uhr', issue_description: 'R6D Service', repair_type: 'internal', status: 'in_progress', received_at: alt, images: '[]', item_attributes: '{}', created_at: alt, updated_at: alt });
       insert(db, 'orders', { id: ORD(x), branch_id, order_number: `ORD-R6D-${x}`, customer_id: KUNDE(x), requested_brand: 'R6D', requested_model: 'Ring', agreed_price: 500, status: 'pending', type: 'custom', attributes: '{}', created_at: alt, updated_at: alt });
       insert(db, 'gold_payables', { id: GP1(x), branch_id, supplier_id: LIEF(x), source_repair_id: REP(x), direction: 'we_owe', weight_grams: 10, karat: '21K', settlement_type: 'return_gold', fulfilled_grams: 0, status: 'OPEN', created_at: alt, updated_at: alt });
-      insert(db, 'gold_payables', { id: GP2(x), branch_id, supplier_id: LIEF(x), source_order_id: ORD(x), direction: 'we_owe', weight_grams: 5, karat: '21K', settlement_type: 'return_gold', fulfilled_grams: 0, status: 'OPEN', created_at: alt, updated_at: alt });
+      // CUSTOM-ORDER K1 — bewertet (Buchwert 150), wie eine angekommene Order-Goldschuld.
+      insert(db, 'gold_payables', { id: GP2(x), branch_id, supplier_id: LIEF(x), source_order_id: ORD(x), direction: 'we_owe', weight_grams: 5, karat: '21K', settlement_type: 'return_gold', fulfilled_grams: 0, status: 'OPEN', book_value: 150, book_value_date: alt.slice(0, 10), created_at: alt, updated_at: alt });
       insert(db, 'customer_gold_credits', { id: CGC(x), branch_id, customer_id: KUNDE(x), source_repair_id: REP(x), weight_grams: 8, karat: '22K', fulfilled_grams: 0, status: 'OPEN', created_at: alt, updated_at: alt });
       for (const [id, was] of [[SELL(x), 'Verkauf'], [MELT(x), 'Schmelze']]) {
         insert(db, 'precious_metals', { id, branch_id, metal_type: 'silver', karat: '925', weight_grams: 100, purchase_total: 50, description: `R6D Silber ${was} ${x}`, status: 'in_stock', images: '[]', paid_amount: 0, payment_status: 'PAID', created_at: alt, updated_at: alt });
@@ -1076,19 +1077,38 @@ try {
     await sleep(250);
     return alleOk(r);
   };
+  // CUSTOM-ORDER C1/K3a — „Return gold" ist für eine Schuld, die WIR haben, entfallen (beide Seiten zeigen den Knopf nicht
+  // mehr); die Goldschuld einer Order wird in BHD zum Kurs beglichen — hier mit dem Fall „Antwort verloren".
+  for (const x of ['C', 'P']) {
+    const c = x === 'C' ? (client = await lade(client, `/repairs/${REP(x)}`)) : primary;
+    if (x === 'P') await gehFrisch(primary, `/repairs/${REP(x)}`);
+    await warteBis(c, q('[data-gold-settle-open="convert_supplier_money"]'), 45000);
+    ok(!(await c.ev(`return !!${q('[data-gold-settle-open="settle_supplier_return"]')};`)), `GOLD-RETURN [${x === 'C' ? 'PC2' : 'Primary'}] die Reparatur bietet für unsere Goldschuld kein „Return gold" mehr (C1)`);
+  }
   await paar({
-    name: 'GOLD-RETURN', op: 'gold.payables.settle', lost: '[data-gold-settle-error]',
-    route: (x) => `/repairs/${REP(x)}`,
-    bereit: () => q('[data-gold-settle-open="settle_supplier_return"]'),
-    vorher: (x) => ({ rev: Number(zeile('gold_payables', GP1(x)).revision), bestand: bestand21() }),
-    fuellen: settleFuellen('[data-gold-settle-open="settle_supplier_return"]', [['[data-gold-settle-grams]', '4'], ['[data-gold-settle-notes]', 'R6D Rueckgabe']]),
-    speichern: (c) => klick(c, '[data-gold-settle-confirm]'),
-    fertig: (x) => Number(zeile('gold_payables', GP1(x)).fulfilled_grams) === 4 && bewegungen(GP1(x)).length === 1,
-    zu: () => `!${q('[data-gold-settle-confirm]')}`,
-    keys: ['expectedRevision', 'grams', 'mode', 'notes', 'payableId'],
-    rumpf: (p, x, v) => p.payableId === GP1('C') && p.mode === 'return_gold' && p.grams === 4 && p.notes === 'R6D Rueckgabe' && p.expectedRevision === v.rev,
-    zustand: (x, v) => ({ gp: zeile('gold_payables', GP1(x)), bestandDelta: Math.round((bestand21() - v.bestand) * 1000) / 1000, bew: bewegungen(GP1(x)) }),
-    buchungsZeilen: 0,
+    name: 'ORDER-GOLD-BHD', op: 'gold.payables.settle', lost: '[data-gold-settle-error]',
+    route: (x) => `/orders/${ORD(x)}`,
+    bereit: () => q('[data-gold-settle-open="order_money"]'),
+    vorher: (x) => ({ rev: Number(zeile('gold_payables', GP2(x)).revision), eids: idSet('expenses') }),
+    fuellen: async (c) => {
+      const r = [await klick(c, '[data-gold-settle-open="order_money"]')];
+      if (!(await warteBis(c, q('[data-testid="order-gold-rate"]'), 10000))) return 'KEINE-MASKE';
+      await sleep(400);
+      r.push(await setVal(c, '[data-testid="order-gold-grams"]', '5'));
+      r.push(await setVal(c, '[data-testid="order-gold-rate"]', '30'));
+      await sleep(250);
+      return alleOk(r);
+    },
+    speichern: (c) => c.ev("const b=[...document.querySelectorAll('button')].filter(x=>x.textContent.trim()==='Settle in BHD').pop(); if(!b) return 'NO'; if(b.disabled) return 'DISABLED'; b.click(); return 'OK';"),
+    fertig: (x) => zeile('gold_payables', GP2(x)).status === 'FULFILLED'
+      && zahl(`SELECT COUNT(*) AS g FROM gold_payable_settlements WHERE payable_id = '${GP2(x)}' AND status = 'ACTIVE'`) === 1,
+    zu: () => `!${q('[data-testid="order-gold-rate"]')}`,
+    keys: ['expectedRevision', 'grams', 'mode', 'payableId', 'ratePerGram', 'settledOn'],
+    rumpf: (p, x, v) => p.payableId === GP2('C') && p.mode === 'money_order' && p.grams === 5 && p.ratePerGram === 30 && p.settledOn === HEUTE && p.expectedRevision === v.rev,
+    zustand: (x, v) => ({ gp: zeile('gold_payables', GP2(x)), e: neueZeilen('expenses', v.eids),
+      st: dbQ(BIZ_DB, 'SELECT grams, rate_per_gram, amount, book_share, difference, settled_on, status FROM gold_payable_settlements WHERE payable_id = ?', [GP2(x)]) }),
+    // Buchwert 150 (5 g), Kurs 30 → 150: Soll GOLD_LIABILITY 150 / Haben A/P 150, kein Unterschied am Einstand.
+    buchungsZeilen: 2,
   });
 
   await paar({
@@ -1106,20 +1126,13 @@ try {
     buchungsZeilen: 2,
   });
 
-  await paar({
-    name: 'GOLD-SHOP', op: 'gold.payables.settle',
-    route: (x) => `/orders/${ORD(x)}`,
-    bereit: () => q('[data-gold-settle-open="apply_shop_to_supplier"]'),
-    vorher: (x) => ({ rev: Number(zeile('gold_payables', GP2(x)).revision), bestand: bestand21() }),
-    fuellen: settleFuellen('[data-gold-settle-open="apply_shop_to_supplier"]', [['[data-gold-settle-grams]', '5']]),
-    speichern: (c) => klick(c, '[data-gold-settle-confirm]'),
-    fertig: (x) => zeile('gold_payables', GP2(x)).status === 'FULFILLED' && bewegungen(GP2(x)).length === 1,
-    zu: () => `!${q('[data-gold-settle-confirm]')}`,
-    keys: ['expectedRevision', 'grams', 'mode', 'payableId'],
-    rumpf: (p, x, v) => p.payableId === GP2('C') && p.mode === 'shop_gold' && p.grams === 5 && p.expectedRevision === v.rev,
-    zustand: (x, v) => ({ gp: zeile('gold_payables', GP2(x)), bestandDelta: Math.round((bestand21() - v.bestand) * 1000) / 1000, bew: bewegungen(GP2(x)) }),
-    buchungsZeilen: 0,
-  });
+  // CUSTOM-ORDER K3a — Ladengold an eine Order-Goldschuld gibt es bis K3b nicht; die Order zeigt nur „Settle in BHD".
+  for (const x of ['C', 'P']) {
+    const c = x === 'C' ? (client = await lade(client, `/orders/${ORD(x)}`)) : primary;
+    if (x === 'P') await gehFrisch(primary, `/orders/${ORD(x)}`);
+    await warteBis(c, `document.body.innerText.includes('ORD-R6D-${x}')`, 45000);
+    ok(!(await c.ev(`return !!${q('[data-gold-settle-open="apply_shop_to_supplier"]')};`)), `GOLD-SHOP [${x === 'C' ? 'PC2' : 'Primary'}] die Order bietet kein Ladengold für ihre Goldschuld (bis K3b)`);
+  }
 
   await paar({
     name: 'CREDIT-RETURN', op: 'gold.customer_credits.settle',

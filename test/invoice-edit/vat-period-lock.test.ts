@@ -510,7 +510,8 @@ const code = (m: string): string => m.split('|')[0];
   reload();
   ok(code(mPre) === VAT_PERIOD_FILED && code(mOrd) === VAT_PERIOD_FILED && zOrd() === vorOrd,
     `10 Auftrag → Rechnung: Anrechnung der Anzahlung abgewiesen, bevor sie umgebucht wird (${code(mOrd)})`);
-  ok(/assertOrderCarryOverMayFinalize\(id, invoiceLineInputs/.test(src('src/pages/orders/OrderDetail.tsx'))
+  // CUSTOM-ORDER K2 — der Weg mit gespeicherten Steuerarten fragt in der Hausfolge (Primary + PC2) vor dem Anlegen.
+  ok(/assertOrderCarryOverMayFinalize\(req\.orderId, probeGross/.test(src('src/core/orders/order-convert-house.ts'))
     && /assertOrderCarryOverMayFinalize\(id, calc\.grossAmount/.test(src('src/pages/orders/OrderDetail.tsx'))
     && /VatPeriodFiled\) return new CommandRejected/.test(src('src/core/bridge/lifecycle-commands.ts'))
     && /VatPeriodFiled\) throw new CommandRejected\(VAT_PERIOD_FILED/.test(src('src/core/bridge/financial-commands.ts')),

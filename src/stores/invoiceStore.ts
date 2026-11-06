@@ -3,6 +3,7 @@ import { v4 as uuid } from 'uuid';
 import type { Invoice, InvoiceLine, InvoiceStatus, InvoiceTaxScheme, TaxScheme, PaymentMethod } from '@/core/models/types';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
+import { restoreOrderDepositForPayment } from '@/core/orders/order-deposit-restore';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
@@ -476,7 +477,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         paid_amount, issued_at, due_at, notes, staff_id, special_mark, created_at, updated_at, created_by)
        VALUES (?, ?, ?, ?, ?, 'PARTIAL', 'BHD', ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, invoiceNumber, opts?.offerId ?? null, customerId,
-       netAmount, lines[0]?.vatRate || 10, totalVat, grossAmount,
+       netAmount, lines[0]?.vatRate ?? 10, totalVat, grossAmount,
        taxScheme, totalPurchase, netAmount, margin, issuedAt, dueDate, notes || null, staffId || null, specialMark ? 1 : 0, now, now, userId]
     );
 
@@ -533,7 +534,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
       if (hasLedgerEntries('INVOICE', id)) return;
       const fresh: Invoice = {
         id, invoiceNumber, customerId, status: 'PARTIAL', currency: 'BHD',
-        netAmount, vatRateSnapshot: lines[0]?.vatRate || 10, vatAmount: totalVat,
+        netAmount, vatRateSnapshot: lines[0]?.vatRate ?? 10, vatAmount: totalVat,
         grossAmount, taxSchemeSnapshot: taxScheme as InvoiceTaxScheme,
         purchasePriceSnapshot: totalPurchase, salePriceSnapshot: netAmount, marginSnapshot: margin,
         paidAmount: 0, issuedAt, notes,
@@ -696,6 +697,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         // !reversedByReturn-Zweig: bei reversedByReturn=true behandelt der Return-/CN-Pfad
         // das Guthaben separat (sonst Doppel-Reverse). payments-Rows bleiben hier bestehen.
         for (const pid of cancelPayIds) restoreCreditForPayment(pid);
+        // CUSTOM-ORDER K2 — eine angerechnete Anzahlung wird wieder offen bei ihrer Order (die Buchung oben drehte sie zurück).
+        for (const pid of cancelPayIds) restoreOrderDepositForPayment(pid);
         // Slice 3 — beim Ueberzahlen ERZEUGTES Guthaben dieser Zahlungen abraeumen (Ledger-
         // CR-Bein via reverseSource('PAYMENT') oben schon gedreht; hier nur die Domain-Row).
         for (const pid of cancelPayIds) clawbackOverpaymentCredit(pid);
@@ -1241,7 +1244,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         const fresh: Invoice = {
           id, invoiceNumber: inv0.invoiceNumber, customerId: effCustomerId,
           status: inv0.status, currency: inv0.currency || 'BHD',
-          netAmount, vatRateSnapshot: lines[0]?.vatRate || 10, vatAmount: totalVat,
+          netAmount, vatRateSnapshot: lines[0]?.vatRate ?? 10, vatAmount: totalVat,
           grossAmount, taxSchemeSnapshot: taxScheme as InvoiceTaxScheme,
           purchasePriceSnapshot: totalPurchase, salePriceSnapshot: netAmount, marginSnapshot: margin,
           paidAmount: inv0.paidAmount, issuedAt: issuedAt ?? inv0.issuedAt, notes: notes ?? inv0.notes,
@@ -1922,6 +1925,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Zahlungen; credit_applications keyt auf payment_id und ueberlebt den
     // payments-DELETE oben (kein FK-Cascade).
     for (const pid of linkedPaymentIds) restoreCreditForPayment(pid);
+    // CUSTOM-ORDER K2 — angerechnete Anzahlungen gehen an ihre Order zurück (offen, kein Geld bewegt).
+    for (const pid of linkedPaymentIds) restoreOrderDepositForPayment(pid);
     // Slice 3 — beim Ueberzahlen ERZEUGTES Guthaben dieser Zahlungen abraeumen (Ledger-
     // CR-Bein via reverseSource('PAYMENT') oben schon gedreht; hier nur die Domain-Row).
     for (const pid of linkedPaymentIds) clawbackOverpaymentCredit(pid);
@@ -1986,6 +1991,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // 'credit' (Store-Guthaben-Einloesung) hier nicht editierbar — ein generischer
     // Repost wuerde CUSTOMER_CREDIT ohne used_amount-Buchhaltung bewegen. Kommt im
     // dedizierten Credit-Slice.
+    // CUSTOM-ORDER K2 — die Anrechnung einer Anzahlung ist kein Geld: sie ändert nur ihre Order bzw. ein Storno.
+    if (newMethod === 'order_deposit' || oldMethod === 'order_deposit') {
+      throw new Error('This payment is an applied order deposit — remove it (it returns to the order) instead of editing it.');
+    }
     if (newMethod === 'credit' || oldMethod === 'credit') {
       throw new Error('Credit-Zahlungen koennen hier nicht bearbeitet werden.');
     }
@@ -2253,6 +2262,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // updatePayment (das credit-Edits blockt): deletePayment behandelt credit jetzt korrekt
     // statt das Guthaben still zu verlieren.
     if (delMethod === 'credit') restoreCreditForPayment(paymentId);
+    if (delMethod === 'order_deposit') restoreOrderDepositForPayment(paymentId);
 
     // Slice 1 — die Auto-Card-Fee dieser Zahlung mit-stornieren, sonst bleibt eine
     // verwaiste CardFees-Expense (DR EXPENSES / CR CARD_CLEARING) stehen. Bei

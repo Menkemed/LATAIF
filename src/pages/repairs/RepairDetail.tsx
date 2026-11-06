@@ -1678,10 +1678,8 @@ export function RepairDetail() {
                             </div>
                             {gp.status === 'OPEN' && remaining > 0 && (
                               <div style={{ display: 'flex', gap: 6 }}>
-                                <button data-gold-settle-open="settle_supplier_return" onClick={() => setSettleModal({ open: true, mode: 'settle_supplier_return', payable: gp })}
-                                  style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #D5D9DE', borderRadius: 4, background: 'transparent', color: '#0F0F10', cursor: 'pointer' }}>
-                                  Settle
-                                </button>
+                                {/* CUSTOM-ORDER C1 — „Settle" (return_gold) erhöhte unseren Bestand für eine Schuld, die WIR haben; entfällt.
+                                    Beglichen wird mit Ladengold (Supplier Detail) oder in BHD. */}
                                 <button data-gold-settle-open="convert_supplier_money" onClick={() => setSettleModal({ open: true, mode: 'convert_supplier_money', payable: gp })}
                                   style={{ fontSize: 10, padding: '3px 8px', border: '1px solid #C6A36D', borderRadius: 4, background: 'rgba(198,163,109,0.08)', color: '#8A7548', cursor: 'pointer' }}>
                                   → BHD

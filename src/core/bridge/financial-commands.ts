@@ -44,20 +44,14 @@ import {
   beginLedgerTransaction, commitLedgerTransaction, rollbackLedgerTransaction,
 } from '@/core/ledger/posting';
 import { useInvoiceStore } from '@/stores/invoiceStore';
-import { useOrderStore } from '@/stores/orderStore';
-import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
-import { carryOverOrderPaymentsToInvoice } from '@/core/orders/order-payment-carryover';
-import { useProductStore } from '@/stores/productStore';
+import { convertOrderToInvoiceInHouse } from '@/core/orders/order-convert-house';
+import { OrderActionRejected } from '@/core/orders/order-create';
 import { useAgentStore } from '@/stores/agentStore';
 // CONSIGNMENT-AGENT — ein Nein der Agentenregeln (Kommissionsware) ist ein fachliches Nein, kein Fehler.
 import { TransferActionRejected } from '@/core/agents/transfer-rules';
 import { ACCEPTED_PAYOUT_METHODS, ConsignmentActionRejected } from '@/core/consignment/consignment-finance';
 import { payOutConsignmentInHouse } from '@/core/consignment/consignment-finance-house';
-import { convertOrderLinesToInvoiceTx } from '@/core/orders/order-invoice-tx';
-import {
-  buildOrderInvoiceLines, orderCustomCostBasis, markConvertedLinesDelivered,
-} from '@/core/orders/order-invoice-lines';
-import { TAX_SCHEMES, canonicalTaxScheme, type TaxScheme } from '@/core/models/types';
+import { TAX_SCHEMES, type TaxScheme } from '@/core/models/types';
 import {
   CommandNotEvaluated, CommandRejected, runRemoteCommand, type CommandOutcome, type EngineDeps,
 } from './mutation-engine';
@@ -306,6 +300,11 @@ function livePayment(paymentId: string, invoiceId: string): Record<string, unkno
     throw new CommandRejected('PAYMENT_IS_CREDIT',
       'a store-credit payment is tied to a credit line — it is corrected on the primary, not here');
   }
+  // CUSTOM-ORDER K2 — die Anrechnung einer Order-Anzahlung hängt an ihrer Order-Zahlung: korrigiert am Primary.
+  if (String(p.method) === 'order_deposit') {
+    throw new CommandRejected('PAYMENT_IS_ORDER_DEPOSIT',
+      'an applied order deposit is tied to its order payment — it is corrected on the primary, not here');
+  }
   return p;
 }
 
@@ -411,6 +410,8 @@ export interface ConvertOrderRequest {
   specialMark?: boolean;
   /** R5A.2 — „Auftrag mit dieser Rechnung abschliessen". */
   markComplete?: boolean;
+  /** CUSTOM-ORDER K2 — Rechnungsdatum aus dem Dialog (JJJJ-MM-TT). */
+  invoiceDate?: string;
 }
 
 const MAX_CONVERT_LINES = 500;
@@ -427,7 +428,9 @@ const MAX_CONVERT_LINES = 500;
  */
 export function parseConvertOrder(raw: unknown): ConvertOrderRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['orderId', 'expectedRevision', 'taxSchemes', 'specialMark', 'markComplete']);
+  // CUSTOM-ORDER K2 — `invoiceDate` (JJJJ-MM-TT, optional): das im Dialog gewählte Rechnungsdatum. Ein älterer Client
+  // schickt es nicht — dann gilt heute (wie bisher).
+  onlyKnownFields(raw, ['orderId', 'expectedRevision', 'taxSchemes', 'specialMark', 'markComplete', 'invoiceDate']);
   const out: ConvertOrderRequest = {
     orderId: reqString(raw.orderId, 'orderId'),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
@@ -436,6 +439,12 @@ export function parseConvertOrder(raw: unknown): ConvertOrderRequest {
     if (raw[k] === undefined) continue;
     if (typeof raw[k] !== 'boolean') throw new FinancialPayloadError(`${k} must be true or false`);
     out[k] = raw[k] as boolean;
+  }
+  if (raw.invoiceDate !== undefined) {
+    if (typeof raw.invoiceDate !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(raw.invoiceDate)) {
+      throw new FinancialPayloadError('invoiceDate must look like YYYY-MM-DD');
+    }
+    out.invoiceDate = raw.invoiceDate;
   }
   if (raw.taxSchemes !== undefined) {
     if (!isPlain(raw.taxSchemes)) throw new FinancialPayloadError('taxSchemes must be an object');
@@ -459,139 +468,33 @@ export function parseConvertOrder(raw: unknown): ConvertOrderRequest {
 export function runConvertOrder(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseConvertOrder(raw);
   return runRemoteCommand(deps, identity, () => {
-    const order = query(
-      'SELECT id, customer_id, status, invoice_id, order_number FROM orders WHERE id = ? AND branch_id = ?',
-      [req.orderId, identity.branchId],
-    )[0];
-    if (!order) throw new CommandRejected('ORDER_NOT_FOUND', 'no such order in this branch');
-    if (order.invoice_id) {
-      throw new CommandRejected('ORDER_ALREADY_INVOICED', 'this order already has an invoice');
-    }
-    if (String(order.status) === 'cancelled') {
-      throw new CommandRejected('ORDER_CANCELLED', 'a cancelled order is not invoiced');
-    }
-    assertRevision('orders', req.orderId, req.expectedRevision, 'ORDER_NOT_FOUND');
-
-    const os = useOrderStore.getState();
-    os.loadOrders();
-    const billable = os.getBillableLines(req.orderId);
-    if (billable.length === 0) {
-      throw new CommandRejected('ORDER_NOTHING_BILLABLE',
-        'nothing on this order is ready to invoice yet');
-    }
-    const customerId = String(order.customer_id ?? '');
-    if (!customerId) throw new CommandRejected('ORDER_HAS_NO_CUSTOMER', 'this order has no client');
-
-    // R5A.2 — die gezeigten Positionen muessen die abzurechnenden sein. Hat sich dazwischen etwas
-    // bewegt (eine Position ist fertig geworden, eine andere schon berechnet), rechnet der Primary
-    // NICHT still eine andere Menge ab, als der Mensch bestaetigt hat.
-    if (req.taxSchemes) {
-      const gezeigt = Object.keys(req.taxSchemes).sort().join('|');
-      const faellig = billable.map((l) => l.id).sort().join('|');
-      if (gezeigt !== faellig) {
-        throw new CommandRejected('ORDER_LINES_CHANGED',
-          'the lines to invoice are not the ones that were confirmed — reload the order');
-      }
-    }
-    const auftrag = os.getOrder(req.orderId);
-    if (!auftrag) throw new CommandRejected('ORDER_NOT_FOUND', 'no such order in this branch');
-    // Der Artikelbestand des Hauses, frisch — die Einstandskosten kommen von dort, wie am Primary.
-    const ps = useProductStore.getState();
-    ps.loadProducts();
-    // Das Schema je Position: die Wahl aus dem Dialog, sonst das festgehaltene, sonst das des
-    // Artikels (Auftraege, die ohne Schema angelegt wurden).
-    const schemes: Record<string, TaxScheme> = {};
-    for (const l of billable) {
-      const p = query('SELECT tax_scheme FROM products WHERE id = ?', [l.productId])[0];
-      schemes[l.id] = req.taxSchemes?.[l.id]
-        ?? canonicalTaxScheme(String(l.taxScheme ?? p?.tax_scheme ?? 'ZERO'));
-    }
-    // Die Zeilen der Rechnung rechnet DIESELBE Funktion wie die Auftragsansicht — Steuer,
-    // Differenzbesteuerung und Sonderstueck-Brutto inklusive. Nachgebaut wird hier nichts.
-    const lines = buildOrderInvoiceLines({
-      order: auftrag,
-      billableLines: billable,
-      perLineSchemes: schemes,
-      customCostBasis: orderCustomCostBasis(os.getOrderLines(req.orderId)),
-      findProduct: (pid) => useProductStore.getState().products.find((p) => p.id === pid),
-      // Eine Position ohne Artikel wuerde hier einen ANLEGEN — das ist `products.create`, mit
-      // eigenem Nachweis (SKU, Medien). Der Fernbefehl legt keinen an.
-      createProduct: () => {
-        throw new CommandRejected('ORDER_LINE_WITHOUT_PRODUCT',
-          'a line of this order has no article yet — create it first');
-      },
-    });
-
-    let created: { id: string } | null = null;
+    // CUSTOM-ORDER K2 — DIESELBE Hausfolge wie am Primary (core/orders/order-convert-house): Sonderstück-Artikel mit
+    // SKU/Kategorie/Bildern im Haus, Rechnungsdatum, Brutto bleibt, Anzahlung angerechnet — alles in DIESER Klammer.
+    // Die Fassung prüft der letzte Wächter vor dem ersten Schreiben.
     try {
-      // GENAU die geteilte Klammer des Hauses — dieselbe, die auch die Auftragsseite fährt.
-      // Sie prüft frisch, ob eine Zielzeile schon berechnet ist, legt die Rechnung an, verknüpft
-      // Zeilen und Auftrag, und nimmt bei JEDEM Fehler alles zurück.
-      created = convertOrderLinesToInvoiceTx({
-        begin: () => { /* die äußere Klammer hält bereits der Fernauftrag */ },
-        commit: () => { /* dito — nur das äußerste COMMIT persistiert */ },
-        rollback: () => { /* dito — der Fernauftrag rollt zurück */ },
-        assertBillable: () => os.assertOrderLinesBillable(billable.map((l) => l.id)),
-        createInvoice: () => useInvoiceStore.getState().createDirectInvoice(
-          customerId, lines, `Invoice for order ${String(order.order_number ?? '')}`,
-          undefined, undefined, undefined, req.specialMark === true,
-        ),
-        linkLinesAndOrder: (invoiceId: string) => {
-          os.markOrderLinesInvoiced(billable.map((l) => l.id), invoiceId);
-          os.updateOrder(req.orderId, { invoiceId } as never);
-        },
-        refresh: () => { /* der Fernauftrag lädt nach dem COMMIT selbst nach */ },
-      });
+      const out = convertOrderToInvoiceInHouse({
+        orderId: req.orderId,
+        ...(req.taxSchemes ? { taxSchemes: req.taxSchemes } : {}),
+        ...(req.specialMark !== undefined ? { specialMark: req.specialMark } : {}),
+        ...(req.markComplete !== undefined ? { markComplete: req.markComplete } : {}),
+        ...(req.invoiceDate ? { invoiceDate: req.invoiceDate } : {}),
+      }, identity.branchId, () => assertRevision('orders', req.orderId, req.expectedRevision, 'ORDER_NOT_FOUND'));
+      return {
+        orderId: out.orderId,
+        invoiceId: out.invoiceId,
+        invoiceNumber: out.invoiceNumber,
+        grossAmount: out.grossAmount,
+        invoicedLines: out.invoicedLines,
+        revision: out.revision,
+      } as unknown as Record<string, unknown>;
     } catch (err) {
+      // VAT-PERIOD-LOCK — ein Nein des Periodenschutzes ist ein Urteil, keine Störung.
+      if (err instanceof VatPeriodFiled) throw new CommandRejected(VAT_PERIOD_FILED, err.message);
+      if (err instanceof OrderActionRejected) throw new CommandRejected(err.code, err.message);
       const msg = err instanceof Error ? err.message : String(err);
-      if (/already invoiced|bereits/i.test(msg)) {
-        throw new CommandRejected('ORDER_ALREADY_INVOICED', msg);
-      }
+      if (/already invoiced|bereits|already on an invoice/i.test(msg)) throw new CommandRejected('ORDER_ALREADY_INVOICED', msg);
       throw err;
     }
-    // R5A.2 — „abschliessen", in derselben Reihenfolge wie am Primary: nach der Umwandlung, vor
-    // dem Anzahlungsuebertrag, ueber DIESELBE Funktion.
-    if (req.markComplete) markConvertedLinesDelivered(billable, os.updateOrderLineStatus);
-    // R5A — der Anzahlungsuebertrag gehoert zu DERSELBEN Handlung, nicht zu einer zweiten.
-    //
-    // Bis hierher legte dieser Befehl nur die Rechnung an und verknuepfte die Zeilen — das Geld
-    // blieb beim Auftrag liegen. Genau deshalb stand die Umwandlung als Klasse-B-Luecke da: eine
-    // halbe Handlung, die wie ein Erfolg aussieht. Sie laeuft jetzt INNERHALB derselben
-    // Transaktion dieses Befehls und ruft DIESELBE Funktion wie die Auftragsansicht
-    // (`core/orders/order-payment-carryover`) — kopiert ist nichts.
-    //
-    // Scheitert sie, faellt der ganze Auftrag zurueck: keine Rechnung, keine Verknuepfung, keine
-    // halb verschobene Anzahlung.
-    {
-      const gross = Number(query('SELECT gross_amount FROM invoices WHERE id = ?', [created.id])[0]?.gross_amount ?? 0);
-      const gezahlt = Number(query(
-        'SELECT COALESCE(SUM(amount), 0) AS s FROM order_payments WHERE order_id = ?', [req.orderId],
-      )[0]?.s ?? 0);
-      try {
-        carryOverOrderPaymentsToInvoice(
-          created.id, req.orderId, String(order.order_number ?? ''), gross, gezahlt,
-        );
-      } catch (err) {
-        // VAT-PERIOD-LOCK — ein Nein des Periodenschutzes ist ein Urteil, keine Störung.
-        if (err instanceof VatPeriodFiled) throw new CommandRejected(VAT_PERIOD_FILED, err.message);
-        throw err;
-      }
-    }
-
-    useOrderStore.getState().loadOrders();
-    useInvoiceStore.getState().loadInvoices();
-    useProductStore.getState().loadProducts();
-    useOrderPaymentStore.getState().loadPayments(req.orderId);
-
-    const inv = query('SELECT invoice_number, gross_amount FROM invoices WHERE id = ?', [created.id])[0];
-    return {
-      orderId: req.orderId,
-      invoiceId: created.id,
-      invoiceNumber: String(inv?.invoice_number ?? ''),
-      grossAmount: Number(inv?.gross_amount ?? 0),
-      invoicedLines: billable.length,
-      revision: Number(query('SELECT revision FROM orders WHERE id = ?', [req.orderId])[0]?.revision ?? 0),
-    } as unknown as Record<string, unknown>;
   });
 }
 

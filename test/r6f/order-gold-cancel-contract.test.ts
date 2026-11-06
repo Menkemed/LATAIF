@@ -82,6 +82,7 @@ const house = await import('../../src/core/orders/order-lifecycle-house.ts');
 const { createOrderInHouse } = await import('../../src/core/orders/order-house.ts');
 const { addOrderCostInHouse } = await import('../../src/core/gold/gold-house.ts');
 const { settleGoldPayable, creditShopGoldCore, shopGoldStock } = await import('../../src/core/gold/gold-settle.ts');
+const { settleOrderGoldInBhd } = await import('../../src/core/gold/order-gold-settle.ts');
 
 let PASS = 0; const fails: string[] = [];
 const ok = (c: unknown, m: string): void => { if (c) PASS++; else { fails.push(m); console.log('  x ' + m); } };
@@ -262,7 +263,11 @@ function welt(art: Art): Welt {
     if (art === 'moved') {
       // Der Laden hat 2 g seines 22K-Bestands schon an den Goldschmied gegeben (Goldkern, shop_gold).
       creditShopGoldCore(ACT, '22K', 10, { sourceLabel: 'Anfangsbestand' });
+      // CUSTOM-ORDER K3a — Ladengold an eine Order-Goldschuld ist bis K3b gesperrt; dieser Stand ist ALTBESTAND (vor K3a
+      // entstanden). Er wird hergestellt, indem die Schuld für den einen Schritt nicht als Order-Schuld erscheint.
+      db.run('UPDATE gold_payables SET source_order_id = NULL WHERE id = ?', [goldPayableId ?? '']);
       settleGoldPayable(ACT, { payableId: goldPayableId ?? '', mode: 'shop_gold', grams: 2 });
+      db.run('UPDATE gold_payables SET source_order_id = ? WHERE id = ?', [order.id, goldPayableId ?? '']);
     }
     const gl = s(db, "SELECT id FROM order_lines WHERE order_id = ? AND material_kind = 'gold'", [order.id]);
     return { oid: order.id, gp: goldPayableId ?? '', goldLine: gl };
@@ -361,10 +366,17 @@ async function paar(art: Art) {
   // Der Anspruch ist lebendig: er wird nach dem Storno regulär beglichen (Goldkern, in BHD).
   auf(w);
   const lcVor = lc(w.db);
-  imHaus(() => settleGoldPayable(ACT, { payableId: w.gp, mode: 'money', agreedBhd: 60 }));
+  // CUSTOM-ORDER K1 — der Wert des gelieferten Golds (60) steht als Goldschuld in BHD im Hauptbuch, im Lagerstück steckt er.
+  ok(Math.abs(saldo(w.db, 'GOLD_LIABILITY') + 60) < 0.0005 && Math.abs(saldo(w.db, 'INVENTORY') - 140) < 0.0005,
+    `DELIVERED nachher: Goldschuld 60 BHD offen, Lager 140 (Arbeit 80 + Gold 60) (${saldo(w.db, 'GOLD_LIABILITY')} / ${saldo(w.db, 'INVENTORY')})`);
+  let alt = '';
+  try { imHaus(() => settleGoldPayable(ACT, { payableId: w.gp, mode: 'money', agreedBhd: 60 })); } catch (e) { alt = String((e as { code?: string }).code ?? e); }
+  ok(alt === 'ORDER_GOLD_DEBT_SETTLE_IN_BHD' && lc(w.db) === lcVor, `DELIVERED danach: „→ BHD" ohne Kurs ist für eine Order-Goldschuld gesperrt (${alt})`);
+  imHaus(() => settleOrderGoldInBhd(ACT as never, { payableId: w.gp, grams: 3, ratePerGram: 20 }));
   ok(s(w.db, 'SELECT status FROM gold_payables WHERE id = ?', [w.gp]) === 'FULFILLED' && owed(w.db, 'sup-2') === 0
-    && Math.abs(saldo(w.db, 'ACCOUNTS_PAYABLE') + 140) < 0.0005 && lc(w.db) > lcVor && balanced(w.db),
-  'DELIVERED danach: die überlebende Schuld wird beglichen — FULFILLED, A/P 80 + 60, ausgeglichen');
+    && Math.abs(saldo(w.db, 'ACCOUNTS_PAYABLE') + 140) < 0.0005 && Math.abs(saldo(w.db, 'GOLD_LIABILITY')) < 0.0005
+    && Math.abs(saldo(w.db, 'INVENTORY') - 140) < 0.0005 && lc(w.db) > lcVor && balanced(w.db),
+  'DELIVERED danach: die überlebende Schuld wird in BHD beglichen (3 g × 20) — FULFILLED, A/P 80 + 60, Goldschuld 0, Lager unverändert 140');
 }
 
 // ══ §3 — Gramm bewegt: 2 g der 5-g-Schuld schon aus dem Ladenbestand gegeben ══

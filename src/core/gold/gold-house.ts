@@ -15,6 +15,7 @@
 // `…OnPrimary` in `runOnPrimary` (exklusiv, eine Klammer, durabel). Die Gramm-, Karat- und
 // Begleichungslogik selbst steht NUR im Goldkern (`gold-settle.ts`); diese Datei setzt zusammen.
 // ════════════════════════════════════════════════════════════════════════════
+import { settleOrderGoldInBhd, reverseOrderGoldSettlement, type OrderGoldSettleRequest, type OrderGoldSettled } from './order-gold-settle';
 import { v4 as uuid } from 'uuid';
 import { getDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
@@ -364,6 +365,19 @@ export function recordRepairGoldUsageInHouse(actor: GoldActor, req: RepairGoldUs
 
 // ── Auftrag: „Add Cost" und eine Kostenzeile löschen ─────────────────────
 
+/**
+ * CUSTOM-ORDER K1 — ist das Sonderstück dieser Order schon abgerechnet, sind seine Kosten im Wareneinsatz der
+ * Rechnung. Eine neue oder entfernte Kostenzeile änderte ihn still; abgelehnt, bevor etwas geschrieben wird.
+ * (Die nachträgliche Begleichung einer Goldschuld in BHD berichtigt die Rechnung ausdrücklich — K3a.)
+ */
+function assertCustomPieceNotInvoiced(orderId: string): void {
+  const inv = query(`SELECT 1 FROM order_lines WHERE order_id = ? AND material_kind = 'custom' AND invoice_id IS NOT NULL LIMIT 1`, [orderId]);
+  if (inv.length > 0) {
+    throw new GoldRejected('ORDER_COSTS_LOCKED',
+      'the custom piece of this order is already invoiced — its costs are part of that invoice. Cancel the invoice first. Nothing was changed.');
+  }
+}
+
 export interface OrderCostRequest { orderId: string; expectedRevision?: number; rows: MaterialRowInput[] }
 export interface OrderCostResult { orderId: string; lineIds: string[]; goldPayableIds: string[]; expenseIds: string[]; revision: number }
 
@@ -372,6 +386,7 @@ export function addOrderCostInHouse(actor: GoldActor, req: OrderCostRequest): Or
   assertSeenRevision(o, seenRevision(req.expectedRevision));
   // Die Maske bietet „Add Cost" nur für einen nicht stornierten Auftrag an.
   if (str(o.status) === 'cancelled') throw new GoldRejected('ORDER_CANCELLED', 'this order is cancelled — it takes no new cost lines');
+  assertCustomPieceNotInvoiced(req.orderId);
   const rows = checkMaterialRows(req.rows, actor.branchId, true);
   const check = watchLedgerPosts('orders.add_cost');
   const lineIds: string[] = [];
@@ -399,6 +414,9 @@ export function addOrderCostInHouse(actor: GoldActor, req: OrderCostRequest): Or
       }));
     }
   }
+  // CUSTOM-ORDER K1 — die Gramm-Schuld entsteht erst NACH ihrer (sofort angekommenen) Zeile: ihr Wert wird jetzt
+  // gebucht (Soll INVENTORY / Haben GOLD_LIABILITY). Idempotent; schon gebuchte Zeilen bleiben unberührt.
+  if (goldPayableIds.length > 0) useOrderStore.getState().commitOrderLineExpenses(req.orderId);
   check();
   const expenseIds = lineIds.length === 0 ? [] : query(
     `SELECT expense_id FROM order_lines WHERE id IN (${lineIds.map(() => '?').join(',')}) AND expense_id IS NOT NULL ORDER BY position`,
@@ -422,6 +440,7 @@ export function removeOrderCostInHouse(actor: GoldActor, req: OrderCostRemoveReq
   // Der Löschknopf steht nur in der Kostenkarte — eine Kundenposition geht diesen Weg nicht.
   if (num(line.is_customer_facing) !== 0) throw new GoldRejected('LINE_NOT_A_COST_LINE', 'this is a customer line, not a cost line');
   if (str(line.invoice_id)) throw new GoldRejected('LINE_INVOICED', 'Diese Position ist bereits in einer Invoice — erst die Invoice stornieren.');
+  assertCustomPieceNotInvoiced(req.orderId);
   const linked = query('SELECT id, status, fulfilled_grams FROM gold_payables WHERE source_order_line_id = ?', [req.lineId]);
   assertGoldPayablesRemovable(linked, 'Position');
   const check = watchLedgerPosts('orders.remove_cost');
@@ -501,6 +520,37 @@ function frischLesen(): void {
 export async function settleGoldPayableOnPrimary(req: PayableSettleRequest): Promise<PayableSettleResult> {
   const actor = primaryActor('settling a gold payable');
   return runOnPrimary(() => settleGoldPayable(actor, req), frischLesen);
+}
+
+/** CUSTOM-ORDER K3a — Goldschuld einer Order in BHD begleichen (Teil, Kurs, Tag) — am Primary in EINER Klammer. */
+export async function settleOrderGoldOnPrimary(req: OrderGoldSettleRequest): Promise<OrderGoldSettled> {
+  const actor = primaryActor('settling a gold debt in BHD');
+  return runOnPrimary(() => {
+    const check = watchLedgerPosts('gold.payables.settle (BHD)');
+    const out = settleOrderGoldInBhd(actor, req);
+    check();
+    return out;
+  }, frischLesen);
+}
+
+/** CUSTOM-ORDER K3a — eine BHD-Begleichung zurücknehmen (solange unbezahlt). */
+export async function reverseOrderGoldSettlementOnPrimary(settlementId: string): Promise<{ settlementId: string; payableId: string }> {
+  const actor = primaryActor('reversing a gold settlement');
+  return runOnPrimary(() => {
+    const check = watchLedgerPosts('gold.payables.settle (reverse)');
+    const out = reverseOrderGoldSettlement(actor, settlementId);
+    check();
+    return out;
+  }, frischLesen);
+}
+
+/** Die Rümpfe des Fernbefehls `gold.payables.settle` für die beiden neuen Arten. */
+export function orderGoldSettleBody(req: OrderGoldSettleRequest, expectedRevision: number): Record<string, unknown> {
+  return { payableId: req.payableId, expectedRevision, mode: 'money_order', grams: req.grams, ratePerGram: req.ratePerGram,
+    ...(req.settledOn ? { settledOn: req.settledOn } : {}), ...(req.notes ? { notes: req.notes } : {}) };
+}
+export function orderGoldReverseBody(payableId: string, settlementId: string, expectedRevision: number): Record<string, unknown> {
+  return { payableId, expectedRevision, mode: 'money_order_reverse', settlementId };
 }
 
 export async function settleGoldCreditOnPrimary(req: CreditSettleRequest): Promise<CreditSettleResult> {

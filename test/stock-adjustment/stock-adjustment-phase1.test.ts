@@ -506,9 +506,15 @@ for (const [name, trigger, mitLos] of [
     if (!/\.(ts|tsx)$/.test(rel) || /ledger[\\/]posting\.ts$/.test(rel)) continue;
     if (/account: 'INVENTORY',\s*direction: 'DEBIT'/.test(src('src/' + rel.replace(/\\/g, '/')))) fremd.push(rel);
   }
-  ok(soll === 2 && fremd.length === 0 && /if \(e\.category === 'Inventory'\) return 'INVENTORY'/.test(src('src/core/models/types.ts'))
+  // CUSTOM-ORDER K1/K3a — dazu der Wert einer Order-Goldschuld (postGoldPayableValue, Quelle GOLD_PAYABLE) und der
+  // Unterschied der BHD-Begleichung an den Einstand (order-gold-settle.ts, Quelle EXPENSE/gold_payable); beide stehen in
+  // KNOWN_INVENTORY_DEBIT_SOURCES bzw. der EXPENSE-Ausnahme von stock-adjustment.ts.
+  const sa = src('src/core/stock/stock-adjustment.ts');
+  ok(soll === 3 && fremd.map((f) => f.replace(/\\/g, '/')).join() === 'core/gold/order-gold-settle.ts'
+    && /'GOLD_PAYABLE'\]/.test(sa) && /e\.related_module IN \('repair', 'order', 'gold_payable'\)/.test(sa)
+    && /if \(e\.category === 'Inventory'\) return 'INVENTORY'/.test(src('src/core/models/types.ts'))
     && /account: 'INVENTORY' \| 'COGS'; amount: number/.test(post),
-    `P INVENTORY im Soll nur aus Einkauf und Retouren-Wareneinsatz (2 Stellen), dazu Reparaturkosten — ein neuer Weg muss die Herkunftsregel anpassen (${soll}; ${fremd.join(', ') || 'keine fremden'})`);
+    `P INVENTORY im Soll nur aus Einkauf, Retouren-Wareneinsatz und Order-Goldwert (3 Stellen), dazu Reparatur-/Order-Kosten und die Goldschuld-Begleichung — ein neuer Weg muss die Herkunftsregel anpassen (${soll}; ${fremd.join(', ') || 'keine fremden'})`);
   const nutzer: string[] = [];
   for (const rel of readdirSync(resolvePath(repo, 'src'), { recursive: true, encoding: 'utf8' })) {
     if (!/\.(ts|tsx)$/.test(rel)) continue;

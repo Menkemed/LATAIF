@@ -33,6 +33,7 @@ export const OLD_STOCK_REVIEW_REASONS: Record<string, string> = {
   LOT_NOT_FROM_BOOKED_PURCHASE: 'a lot of this item does not come from a booked purchase (production, keep or legacy)',
   QUANTITY_DIFFERS_FROM_LOTS: 'the quantity differs from what the lots hold — part of it has no booked value',
   REPAIR_COSTS_CAPITALISED: 'repair costs of this item were booked to inventory',
+  ORDER_COSTS_CAPITALISED: 'custom-order costs of this item were booked to inventory',
   FROM_PRODUCTION: 'the item was made in production — its value came from consumed materials',
   FROM_CANCELLED_CUSTOM_ORDER: 'the item comes from a cancelled custom order — its costs were already booked as expenses',
   LEGACY_SALE_LINES: 'it has sales from before the stock tracking with more than one piece — the quantity on hand is uncertain',
@@ -131,6 +132,15 @@ export function oldStockRowsFor(ctx: { branchId: string }, onlyProductId?: strin
       WHERE le.account = 'INVENTORY' AND le.direction = 'DEBIT' AND r.product_id IS NOT NULL`,
   ).map((r) => String(r.pid)));
   const fromProduction = new Set(query('SELECT DISTINCT product_id AS pid FROM production_outputs').map((r) => String(r.pid)));
+  // CUSTOM-ORDER K1 — ein Sonderstück trägt die in seiner Order gebuchten Kosten (Lohn, Goldwert) als Einstand.
+  const orderCapitalised = new Set(query(
+    `SELECT DISTINCT COALESCE(o.product_id, ol.product_id) AS pid FROM ledger_entries le
+       JOIN orders o ON (
+            (le.source_module = 'EXPENSE' AND le.source_id IN (SELECT e.id FROM expenses e WHERE e.related_module = 'order' AND e.related_entity_id = o.id))
+         OR (le.source_module = 'GOLD_PAYABLE' AND le.source_id IN (SELECT gp.id FROM gold_payables gp WHERE gp.source_order_id = o.id)))
+       LEFT JOIN order_lines ol ON ol.order_id = o.id AND ol.material_kind = 'custom'
+      WHERE le.account = 'INVENTORY' AND le.direction = 'DEBIT' AND COALESCE(o.product_id, ol.product_id) IS NOT NULL`,
+  ).map((r) => String(r.pid)));
   // (a) Wareneinsatz netto je Artikel: Rechnungszeile oder Agentenverkauf; Stornos und Retouren tragen dieselbe Zuordnung.
   const cogsByLine = groupNum(
     `SELECT il.product_id AS pid, SUM(CASE le.direction WHEN 'DEBIT' THEN le.amount ELSE -le.amount END) AS v
@@ -215,6 +225,7 @@ export function oldStockRowsFor(ctx: { branchId: string }, onlyProductId?: strin
       if (shelfQty === 0 && Math.abs(soldCogs) < 0.0005 && rem.qty === 0 && rec.n === 0 && qtyOk) continue;
       if (globalUnknown) reasons.push('LEDGER_UNKNOWN_INVENTORY_DEBIT');
       if (repairCapitalised.has(pid)) reasons.push('REPAIR_COSTS_CAPITALISED');
+      if (orderCapitalised.has(pid)) reasons.push('ORDER_COSTS_CAPITALISED');
       if (fromProduction.has(pid)) reasons.push('FROM_PRODUCTION');
       if (/From cancelled custom order/i.test(String(p.notes ?? ''))) reasons.push('FROM_CANCELLED_CUSTOM_ORDER');
       if (legacyMulti.has(pid)) reasons.push('LEGACY_SALE_LINES');

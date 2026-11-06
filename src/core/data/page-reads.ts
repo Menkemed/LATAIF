@@ -16,6 +16,7 @@
 //      fragen darf, entscheidet allein der geprüfte Absender. Eine fremde Kennung ist deshalb
 //      nicht „verboten", sondern schlicht leer.
 // ════════════════════════════════════════════════════════════════════════════
+import { openDepositSql } from '@/core/orders/order-deposit-sql';
 import { inboxGalleryMediaIds } from '@/core/purchases/inbox-media';
 import { query } from '@/core/db/helpers';
 import type { BusinessReadContext } from '@/core/data/read-context';
@@ -104,10 +105,12 @@ export interface OrderPaidTotals { totals: Array<{ orderId: string; paid: number
 
 export function orderPaidTotalsFor(ctx: BusinessReadContext): OrderPaidTotals {
   const rows = query(
-    `SELECT op.order_id, COALESCE(SUM(op.amount), 0) AS t
+    // CUSTOM-ORDER K2 — offen = nicht angerechnet (auch teilweise; order-deposit-sql).
+    `SELECT op.order_id, COALESCE(SUM(${openDepositSql('op')}), 0) AS t
        FROM order_payments op JOIN orders o ON o.id = op.order_id
-      WHERE o.branch_id = ? AND COALESCE(op.converted_to_invoice, 0) = 0
-      GROUP BY op.order_id`,
+      WHERE o.branch_id = ?
+      GROUP BY op.order_id
+     HAVING t > 0.0005`,
     [ctx.branchId],
   );
   return { totals: rows.map((r) => ({ orderId: s(r.order_id), paid: n(r.t) })) };
@@ -213,9 +216,9 @@ export const EMPTY_ORDER_DEPOSITS: CustomerOrderDeposits = { orders: [], total: 
 function customerOrderDepositsFor(ctx: BusinessReadContext, customerId: string): CustomerOrderDeposits {
   const rows = query(
     `SELECT o.id AS order_id, o.order_number, o.status, o.agreed_price,
-            op.id AS payment_id, op.amount, op.method, op.card_brand, op.paid_at
+            op.id AS payment_id, ${openDepositSql('op')} AS amount, op.method, op.card_brand, op.paid_at
        FROM orders o JOIN order_payments op ON op.order_id = o.id
-      WHERE o.customer_id = ? AND o.branch_id = ? AND o.status != 'cancelled' AND COALESCE(op.converted_to_invoice, 0) = 0
+      WHERE o.customer_id = ? AND o.branch_id = ? AND o.status != 'cancelled' AND ${openDepositSql('op')} > 0.0005
       ORDER BY o.created_at DESC, o.id, op.paid_at ASC, op.created_at ASC, op.id`,
     [customerId, ctx.branchId],
   );

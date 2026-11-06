@@ -273,7 +273,8 @@ for (const choice of ['refund', 'credit', 'forfeit'] as const) {
     'G Forderungen und Guthaben bleiben eigene Kennzahlen — die Anzahlungen fließen in keine davon ein');
   ok(/orderDeposits: EMPTY_ORDER_DEPOSITS/.test(cd) && /customerReads\.orderDeposits \?\? EMPTY_ORDER_DEPOSITS/.test(cd), 'G ohne Antwort (älterer Primary) einfach leer');
   const pr = src('src/core/data/page-reads.ts');
-  ok(/COALESCE\(op\.converted_to_invoice, 0\) = 0/.test(pr) && /o\.status != 'cancelled'/.test(pr) && /Math\.min\(paid, o\.agreedPrice\)/.test(pr),
+  // CUSTOM-ORDER K2 — „nicht umgewandelt" heißt jetzt: nicht (vollständig) auf eine Rechnung angerechnet.
+  ok(/\$\{openDepositSql\('op'\)\} > 0\.0005/.test(pr) && /o\.status != 'cancelled'/.test(pr) && /Math\.min\(paid, o\.agreedPrice\)/.test(pr),
     'G dieselbe Regel wie die Abstimmung: nicht umgewandelt, nicht storniert, je Auftrag auf den vereinbarten Preis gedeckelt');
   ok(!/INSERT|UPDATE|DELETE/.test(pr.slice(pr.indexOf('function customerOrderDepositsFor'), pr.indexOf('export function customerDetailReadsFor'))),
     'G die Auskunft liest nur — keine Buchungslogik berührt');
