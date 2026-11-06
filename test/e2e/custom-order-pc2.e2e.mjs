@@ -209,6 +209,12 @@ function seed() {
       agreed_price: 500, remaining_amount: 500, requested_brand: 'Omega', requested_model: 'Speedmaster', order_date: '2026-10-28', created_at: now, updated_at: now });
     insert(db, 'order_lines', { id: 'co-leg-l1', order_id: 'co-leg', position: 1, quantity: 1, status: 'ARRIVED', description: 'Omega Speedmaster',
       unit_price: 500, is_customer_facing: 1, created_at: now, updated_at: now });
+    // CUSTOM-ORDER Abschluss — eine ALTE Custom Order (ohne Steuerart an der Position, ohne Sonderstück-Zeile) OHNE Kategorie.
+    insert(db, 'orders', { id: 'co-nocat', branch_id, order_number: 'ORD-2026-E2E03', customer_id: 'co-kunde', type: 'custom', status: 'completed',
+      agreed_price: 300, remaining_amount: 300, requested_brand: 'Custom Order', requested_model: 'Bangle', order_date: '2026-10-28',
+      custom_product_spec: JSON.stringify({ ...spec, categoryId: '', name: 'Bangle' }), created_at: now, updated_at: now });
+    insert(db, 'order_lines', { id: 'co-nocat-l1', order_id: 'co-nocat', position: 1, quantity: 1, status: 'ARRIVED', description: 'Bangle 21K',
+      unit_price: 300, is_customer_facing: 1, created_at: now, updated_at: now });
   } finally { try { db.close(); } catch { /* zu */ } }
 }
 const saldo = (account, where = '1=1', p = []) => Math.round(Number(dbQ(BIZ_DB,
@@ -400,6 +406,31 @@ try {
       `Altweg PC2: eine Rechnungszeile 500 (${inv?.art}), genau EIN Artikel mit Herkunft (${S(inv)} / ${S(p)})`);
     const leg = (await befehle(client)).filter((x) => x.op === 'orders.convert_to_invoice' && x.payload?.orderId === 'co-leg');
     ok(leg.length === 1 && typeof leg[0].payload?.legacyScheme === 'string' && !leg[0].payload?.taxSchemes, `Altweg PC2: EIN Befehl mit der einen Steuerart (${S(leg.map((x) => x.payload))})`);
+  }
+
+  // ── 7 PC2 Sonderstück OHNE Kategorie: verständliches Nein vor jedem Schreiben, kein ITM-GEN ─────────────────────
+  {
+    const stand = () => S({
+      p: dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM products')[0]?.n, i: dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM invoices')[0]?.n,
+      sq: dbQ(BIZ_DB, 'SELECT stem, next_number FROM sku_sequences ORDER BY stem'),
+      o: dbQ(BIZ_DB, "SELECT product_id, invoice_id, status FROM orders WHERE id = 'co-nocat'"),
+      l: dbQ(BIZ_DB, "SELECT product_id, invoice_id, status FROM order_lines WHERE order_id = 'co-nocat'"),
+    });
+    await spuelen(primary).catch(() => null);
+    const vor = stand();
+    await gehFrisch(client, '/orders/co-nocat');
+    await warteBis(client, "[...document.querySelectorAll('button')].some((b)=>b.textContent.trim()==='Create Invoice')", 40000);
+    await clickText(client, 'Create Invoice');
+    const dlg = await warteBis(client, "!!document.querySelector('[data-testid=\"order-invoice-date\"]')", 20000);
+    const go = await client.ev("const m=[...document.querySelectorAll('[role=\"dialog\"], .fixed')].find((d)=>d.querySelector('[data-testid=\"order-invoice-date\"]')); const b=m && [...m.querySelectorAll('button')].filter((x)=>x.textContent.trim()==='Create Invoice').pop(); if(!b) return 'NO'; if(b.disabled) return 'DISABLED'; b.click(); return 'OK';");
+    const meldet = await warteBis(client, "[...document.querySelectorAll('[data-save-error]')].some((d)=>/no category/.test(d.textContent||''))", 30000);
+    const text = await client.ev("return [...document.querySelectorAll('[data-save-error]')].map((d)=>d.textContent).join(' | ');");
+    await spuelen(primary).catch(() => null);
+    await sleep(800);
+    ok(dlg && go === 'OK' && meldet && /ITM-GLD/.test(String(text)) && /Nothing was changed/.test(String(text)),
+      `Kategorie fehlt PC2: die Maske zeigt das Nein mit Grund (${String(text).slice(0, 200)})`);
+    ok(stand() === vor && Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM products WHERE sku LIKE 'ITM-GEN%'")[0]?.n ?? 0) === 0,
+      `Kategorie fehlt PC2: nichts geschrieben — kein Artikel, keine Rechnung, Zähler unverändert, kein ITM-GEN (${stand() === vor ? 'gleich' : stand()})`);
   }
 } catch (e) {
   FAIL++; fails.push('harness: ' + (e?.message ?? e)); console.error(e);

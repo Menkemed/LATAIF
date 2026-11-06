@@ -9,7 +9,8 @@
 // Jetzt, in genau einer Klammer des Aufrufers (runOnPrimary bzw. runRemoteCommand):
 //   1. prüfen — VOR jedem Schreiben: Auftrag, fertige Positionen, gezeigte = abzurechnende Positionen,
 //      Rechnungsdatum (gültig, nicht künftig; das VAT-Quartal prüft die Rechnung selbst), die Kosten des
-//      Sonderstücks (vorhanden und angekommen), seine Kategorie (vorhanden, aktiv), die Anzahlung;
+//      Sonderstücks (vorhanden und angekommen), seine Kategorie (vorhanden, aktiv, mit SKU-Kürzel — nie ITM-GEN),
+//      die Anzahlung;
 //   2. den Artikel des Sonderstücks anlegen oder WIEDERVERWENDEN — mit SKU aus dem Zähler, der Kategorie
 //      der Order, den Bildern der Order, Einstand = Kosten der Order — und an Zeile und Order binden;
 //   3. die Zeilen rechnen (Brutto bleibt bei jeder Steuerart; die der Order ist nur Vorauswahl);
@@ -25,8 +26,8 @@ import { useProductStore } from '@/stores/productStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useOrderPaymentStore } from '@/stores/orderPaymentStore';
 import { businessDateIssue } from '@/core/utils/business-date';
-import { skuIsEmpty } from '@/core/products/sku-allocation';
-import { canonicalTaxScheme, type OrderLine, type Product, type TaxScheme } from '@/core/models/types';
+import { skuCategoryCode, skuIsEmpty } from '@/core/products/sku-allocation';
+import { canonicalTaxScheme, type Order, type OrderLine, type Product, type TaxScheme } from '@/core/models/types';
 import { buildOrderInvoiceLines, markConvertedLinesDelivered, orderCustomCostBasis } from './order-invoice-lines';
 import { OrderActionRejected } from './order-create';
 import { watchLedgerPosts } from '@/core/ledger/posting';
@@ -116,17 +117,13 @@ function planConvert(req: OrderConvertRequest, branchId: string) {
     if (offen.length > 0) {
       throw nein('CUSTOM_COSTS_NOT_ARRIVED', `${offen.length} cost line(s) of this order have not arrived yet — their cost is not booked. Mark them as arrived first.`);
     }
-    if (!customLine.productId) {
-      const spec = auftrag.customProductSpec || {};
-      const catId = String(spec.categoryId || auftrag.categoryId || '');
-      const cat = catId ? query('SELECT id, active FROM categories WHERE id = ?', [catId])[0] : undefined;
-      if (!cat) throw nein('CUSTOM_CATEGORY_MISSING', 'The custom piece has no category — set it on the order (product details) first.');
-      if (Number(cat.active ?? 1) === 0) throw nein('CUSTOM_CATEGORY_INACTIVE', 'The category of the custom piece is inactive — choose an active one first.');
-      // Eine in der Order eingetragene SKU muss frei sein (sonst stünde das Nein erst mitten im Schreiben).
-      if (!skuIsEmpty(spec.sku) && useProductStore.getState().isSkuTaken(String(spec.sku))) {
-        throw nein('SKU_TAKEN', `The SKU ${String(spec.sku)} entered on the order is already used by another item — change it on the order first.`);
-      }
-    }
+    if (!customLine.productId) assertCustomPieceCategory(auftrag);
+  }
+  // CUSTOM-ORDER Abschluss — der Altweg legt den Artikel eines Sonderstücks ebenfalls neu an (ohne verknüpften Artikel):
+  // dieselbe Prüfung VOR jedem Schreiben, auch wenn der alte Auftrag keine Sonderstück-Zeile führt.
+  if (req.legacyScheme !== undefined && !(auftrag.productId || auftrag.existingProductId)
+    && (auftrag.type === 'custom' || billable.some((l) => l.materialKind === 'custom'))) {
+    assertCustomPieceCategory(auftrag);
   }
   // Steuerart je Position: die Wahl im Dialog, sonst die festgehaltene, sonst die des Artikels.
   const schemes: Record<string, TaxScheme> = {};
@@ -135,6 +132,37 @@ function planConvert(req: OrderConvertRequest, branchId: string) {
     schemes[l.id] = req.taxSchemes?.[l.id] ?? (canonicalTaxScheme(String(l.taxScheme ?? p?.tax_scheme ?? 'ZERO')) as TaxScheme);
   }
   return { order, customerId, billable, auftrag, schemes, costBasis, day };
+}
+
+/**
+ * CUSTOM-ORDER Abschluss — die Kategorie eines NEU anzulegenden Sonderstücks, geprüft VOR jedem Schreiben (neuer Weg und
+ * Altweg, Primary und PC2): vorhanden, aktiv und mit eigenem SKU-Kürzel (Gold-Diamond Jewellery → ITM-GLD). Ohne sie gäbe
+ * der Zähler still `ITM-GEN` — das ist ausgeschlossen. Eine an der Order eingetragene SKU muss frei sein und wird dann
+ * übernommen. Ein schon verknüpfter Artikel (erneute Umwandlung nach Storno) behält seine SKU und wird hier nicht geprüft.
+ */
+function assertCustomPieceCategory(auftrag: Order): void {
+  const spec = auftrag.customProductSpec || {};
+  const catId = String(spec.categoryId || auftrag.categoryId || '');
+  const cat = catId ? query('SELECT id, name, active FROM categories WHERE id = ?', [catId])[0] : undefined;
+  if (!cat) {
+    throw nein('CUSTOM_CATEGORY_MISSING',
+      'The custom piece has no category — without it the item would get no ITM-GLD number. Set the category on the order (product details) first.');
+  }
+  const name = String(cat.name ?? catId);
+  if (Number(cat.active ?? 1) === 0) {
+    throw nein('CUSTOM_CATEGORY_INACTIVE', `The category "${name}" of the custom piece is inactive — choose an active one on the order first.`);
+  }
+  if (!skuIsEmpty(spec.sku)) {
+    // Eine in der Order eingetragene SKU muss frei sein (sonst stünde das Nein erst mitten im Schreiben).
+    if (useProductStore.getState().isSkuTaken(String(spec.sku))) {
+      throw nein('SKU_TAKEN', `The SKU ${String(spec.sku)} entered on the order is already used by another item — change it on the order first.`);
+    }
+    return;
+  }
+  if (skuCategoryCode(catId) === 'GEN') {
+    throw nein('CUSTOM_CATEGORY_NO_SKU_CODE',
+      `The category "${name}" has no SKU code — the custom piece would be numbered ITM-GEN. Choose a jewellery category on the order (Gold-Diamond Jewellery → ITM-GLD) or enter a SKU there first.`);
+  }
 }
 
 /**

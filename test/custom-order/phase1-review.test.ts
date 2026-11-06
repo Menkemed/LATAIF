@@ -457,5 +457,119 @@ setOpeningCutoffForTest(null);
     'R7 Oberfläche: „Return gold" nur bei unserer Forderung (Reparatur und Lieferant)');
 }
 
+// ══ R8 — Abschluss: Sonderstück ohne passende Kategorie → Nein VOR jedem Schreiben, nie ITM-GEN ════════════════════
+{
+  const db = freshDb();
+  db.run("INSERT INTO categories (id, branch_id, name, icon, color, created_at, updated_at) VALUES ('cat-silver','branch-main','Silver','s','#000',?,?)", [NOW, NOW]);
+  reload();
+  /** Alles, was eine Umwandlung schreiben würde — bleibt bei einem Nein gleich. */
+  const stand = (): string => S({
+    i: n(db, 'SELECT COUNT(*) FROM invoices'), il: n(db, 'SELECT COUNT(*) FROM invoice_lines'), p: n(db, 'SELECT COUNT(*) FROM products'),
+    l: n(db, 'SELECT COUNT(*) FROM ledger_entries'), a: n(db, 'SELECT COUNT(*) FROM order_deposit_applications'),
+    sq: rows(db, 'SELECT stem, next_number FROM sku_sequences ORDER BY stem'),
+    ol: rows(db, 'SELECT id, product_id, invoice_id, status FROM order_lines ORDER BY id'),
+    o: rows(db, 'SELECT id, product_id, invoice_id, status, revision FROM orders ORDER BY id'),
+  });
+  const setCat = (oid: string, catId: string, sku = ''): void => {
+    db.run('UPDATE orders SET custom_product_spec = ?, category_id = ? WHERE id = ?', [JSON.stringify({ ...SPEC, categoryId: catId, sku }), catId || null, oid]);
+    reload();
+  };
+  const msgOf = (fn: () => unknown): string => { try { fn(); return 'KEIN NEIN'; } catch (e) { return e instanceof Error ? e.message : String(e); } };
+
+  // Primary, neuer Weg — Kategorie fehlt / inaktiv / ohne SKU-Kürzel.
+  const oid = anlegen({ ...ORD2, depositAmount: 100, paymentMethod: 'benefit' });
+  setCat(oid, '');
+  let vor = stand();
+  const c1 = nein(() => umwandeln(oid));
+  const m1 = msgOf(() => umwandeln(oid));
+  ok(c1 === 'CUSTOM_CATEGORY_MISSING' && /no category/.test(m1) && /ITM-GLD/.test(m1) && /Nothing was changed/.test(m1) && stand() === vor,
+    `R8 Primary ohne Kategorie: verständliches Nein, nichts geschrieben, Zähler unverändert (${c1}: ${m1})`);
+  setCat(oid, 'cat-off');
+  vor = stand();
+  const c2 = nein(() => umwandeln(oid));
+  ok(c2 === 'CUSTOM_CATEGORY_INACTIVE' && stand() === vor, `R8 Primary inaktive Kategorie: Nein, nichts geschrieben (${c2})`);
+  setCat(oid, 'cat-silver');
+  vor = stand();
+  const c3 = nein(() => umwandeln(oid));
+  const m3 = msgOf(() => umwandeln(oid));
+  ok(c3 === 'CUSTOM_CATEGORY_NO_SKU_CODE' && /ITM-GEN/.test(m3) && /Silver/.test(m3) && stand() === vor,
+    `R8 Primary Kategorie ohne SKU-Kürzel: Nein statt ITM-GEN, nichts geschrieben (${c3}: ${m3})`);
+  ok(n(db, "SELECT COUNT(*) FROM products WHERE sku LIKE 'ITM-GEN%'") === 0, 'R8 kein ITM-GEN-Artikel entstanden');
+  // Eine an der Order eingetragene SKU gilt auch in einer Kategorie ohne Kürzel (kein Zähler, kein ITM-GEN).
+  setCat(oid, 'cat-silver', 'SLV-RING-001');
+  const typed = umwandeln(oid);
+  ok(s(db, 'SELECT sku FROM products WHERE id = ?', [typed.productIds[0]]) === 'SLV-RING-001'
+    && n(db, "SELECT COUNT(*) FROM sku_sequences WHERE stem LIKE 'ITM-GEN%'") === 0,
+    'R8 eingetragene SKU in einer Kategorie ohne Kürzel: übernommen, kein ITM-GEN');
+  // Gold-Kategorie: ITM-GLD. Storno + erneut ohne Kategorie: der verknüpfte Artikel bleibt (keine Sperre, kein Duplikat).
+  const oidG = anlegen({ ...ORD2, depositAmount: 50, paymentMethod: 'benefit' });
+  setCat(oidG, '');
+  ok(nein(() => umwandeln(oidG)) === 'CUSTOM_CATEGORY_MISSING', 'R8 Gold-Order ohne Kategorie: Nein');
+  setCat(oidG, 'cat-gold-jewelry');
+  const g1 = umwandeln(oidG);
+  const gSku = s(db, 'SELECT sku FROM products WHERE id = ?', [g1.productIds[0]]);
+  ok(/^ITM-GLD-\d{3}$/.test(gSku), `R8 mit Gold-Kategorie: ${gSku}`);
+  cancelInv(g1.invoiceId);
+  setCat(oidG, '');
+  const prodVor = n(db, 'SELECT COUNT(*) FROM products');
+  const g2 = umwandeln(oidG);
+  ok(g2.productIds[0] === g1.productIds[0] && s(db, 'SELECT sku FROM products WHERE id = ?', [g2.productIds[0]]) === gSku
+    && n(db, 'SELECT COUNT(*) FROM products') === prodVor && n(db, "SELECT COUNT(*) FROM order_deposit_applications WHERE status = 'ACTIVE' AND order_id = ?", [oidG]) === 1,
+    'R8 Storno + erneute Umwandlung: derselbe Artikel und dieselbe SKU, Anzahlung genau einmal — auch ohne Kategorie an der Order');
+
+  // PC2, neuer Weg: dasselbe Nein aus derselben Hausfolge, nichts geschrieben; mit Kategorie ITM-GLD.
+  const oidP = anlegen({ ...ORD2, depositAmount: 0 });
+  setCat(oidP, '');
+  vor = stand();
+  const lineP = customLineOf(db, oidP);
+  const rP = await fern(() => fin.runConvertOrder(deps(db), identity('81', 'orders.convert_to_invoice'),
+    { orderId: oidP, expectedRevision: orev(db, oidP), taxSchemes: { [lineP]: 'ZERO' }, invoiceDate: '2026-11-01' }));
+  ok(!rP.ok && /CUSTOM_CATEGORY_MISSING/.test(rP.code) && stand() === vor, `R8 PC2 ohne Kategorie: Nein, nichts geschrieben (${rP.code})`);
+  setCat(oidP, 'cat-gold-jewelry');
+  const rP2 = await fern(() => fin.runConvertOrder(deps(db), identity('82', 'orders.convert_to_invoice'),
+    { orderId: oidP, expectedRevision: orev(db, oidP), taxSchemes: { [lineP]: 'ZERO' }, invoiceDate: '2026-11-01' }));
+  const pSku = rP2.ok ? s(db, 'SELECT p.sku FROM products p JOIN order_lines l ON l.product_id = p.id WHERE l.id = ?', [lineP]) : '';
+  ok(rP2.ok && /^ITM-GLD-\d{3}$/.test(pSku), `R8 PC2 mit Gold-Kategorie: ${pSku} (${rP2.code})`);
+
+  // Altweg (ohne Steuerart je Position) — auch ein alter Auftrag OHNE Sonderstück-Zeile: Primary und PC2.
+  const oidL = anlegen({ ...ORD2, depositAmount: 100, paymentMethod: 'benefit' });
+  db.run("UPDATE order_lines SET tax_scheme = NULL, material_kind = CASE WHEN material_kind = 'custom' THEN NULL ELSE material_kind END WHERE order_id = ?", [oidL]);
+  setCat(oidL, '');
+  vor = stand();
+  const cL = nein(() => umwandeln(oidL, { legacyScheme: 'MARGIN' }));
+  ok(cL === 'CUSTOM_CATEGORY_MISSING' && stand() === vor, `R8 Altweg Primary ohne Kategorie (alte Order ohne Sonderstück-Zeile): Nein, nichts geschrieben (${cL})`);
+  const rL = await fern(() => fin.runConvertOrder(deps(db), identity('83', 'orders.convert_to_invoice'),
+    { orderId: oidL, expectedRevision: orev(db, oidL), legacyScheme: 'MARGIN', invoiceDate: '2026-11-01' }));
+  ok(!rL.ok && /CUSTOM_CATEGORY_MISSING/.test(rL.code) && stand() === vor, `R8 Altweg PC2 ohne Kategorie: Nein, nichts geschrieben (${rL.code})`);
+  setCat(oidL, 'cat-silver');
+  vor = stand();
+  ok(nein(() => umwandeln(oidL, { legacyScheme: 'MARGIN' })) === 'CUSTOM_CATEGORY_NO_SKU_CODE' && stand() === vor, 'R8 Altweg Kategorie ohne Kürzel: Nein statt ITM-GEN');
+  setCat(oidL, 'cat-gold-jewelry');
+  const l1 = umwandeln(oidL, { legacyScheme: 'MARGIN' });
+  const lSku = s(db, 'SELECT sku FROM products WHERE id = ?', [l1.productIds[0]]);
+  ok(/^ITM-GLD-\d{3}$/.test(lSku) && s(db, 'SELECT origin_type FROM products WHERE id = ?', [l1.productIds[0]]) === 'CUSTOM_ORDER',
+    `R8 Altweg mit Gold-Kategorie: ${lSku}, Herkunft Custom Order`);
+  cancelInv(l1.invoiceId);
+  const prodVorL = n(db, 'SELECT COUNT(*) FROM products');
+  const rL2 = await fern(() => fin.runConvertOrder(deps(db), identity('84', 'orders.convert_to_invoice'),
+    { orderId: oidL, expectedRevision: orev(db, oidL), legacyScheme: 'ZERO', invoiceDate: '2026-11-01' }));
+  ok(rL2.ok && n(db, 'SELECT COUNT(*) FROM products') === prodVorL && s(db, 'SELECT product_id FROM orders WHERE id = ?', [oidL]) === l1.productIds[0]
+    && s(db, 'SELECT sku FROM products WHERE id = ?', [l1.productIds[0]]) === lSku
+    && n(db, "SELECT COUNT(*) FROM order_deposit_applications WHERE status = 'ACTIVE' AND order_id = ?", [oidL]) === 1,
+    `R8 Altweg Storno + erneut am PC2: derselbe Artikel, dieselbe SKU, Anzahlung einmal (${rL2.code})`);
+
+  // Andere Artikeltypen unverändert: eine normale (alte) Order ohne Sonderstück wird nicht gesperrt; ihre SKU folgt wie
+  // bisher Marke + Kategorie.
+  const oidN = anlegen({ ...ORD2, depositAmount: 0 });
+  db.run("UPDATE order_lines SET tax_scheme = NULL, material_kind = CASE WHEN material_kind = 'custom' THEN NULL ELSE material_kind END WHERE order_id = ?", [oidN]);
+  db.run("UPDATE orders SET type = 'normal', requested_brand = 'Rolex', custom_product_spec = NULL, category_id = 'cat-watch' WHERE id = ?", [oidN]);
+  db.run("INSERT INTO categories (id, branch_id, name, icon, color, created_at, updated_at) VALUES ('cat-watch','branch-main','Watches','w','#000',?,?)", [NOW, NOW]);
+  reload();
+  const nOut = umwandeln(oidN, { legacyScheme: 'MARGIN' });
+  const nP = rows(db, 'SELECT sku, origin_type FROM products WHERE id = ?', [nOut.productIds[0]])[0];
+  ok(nP.sku === 'RLX-WCH-001' && nP.origin_type === 'ORDER', `R8 normale Order (Altweg): wie bisher Marke + Kategorie RLX-WCH-001, Herkunft Order (${S(nP)})`);
+  ok(n(db, "SELECT COUNT(*) FROM products WHERE sku LIKE 'ITM-GEN%'") === 0 && buchAusgeglichen(db), 'R8 kein ITM-GEN, Hauptbuch ausgeglichen');
+}
+
 console.log(`\nCUSTOM-ORDER Review: ${PASS} passed, ${fails.length} failed`);
 if (fails.length) { for (const f of fails) console.log('  - ' + f); process.exit(1); }
