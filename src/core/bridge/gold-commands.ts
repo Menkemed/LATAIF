@@ -8,7 +8,9 @@
 //   repairs.record_gold_usage     — „Add Gold Usage" (Workshop-Gold oder Kundengold samt Rest)
 //   repairs.add_material          — „Add Material": alle Positionen in EINER Transaktion
 //   orders.add_cost               — „Add Cost": Kostenzeilen (+ A/P, + Gramm-Schuld) in EINER Transaktion
-//   orders.remove_cost            — eine Kostenzeile löschen, samt Ausgabe und offener Gramm-Schuld
+//   orders.remove_cost            — eine Kostenzeile löschen, samt Ausgabe und offener Gramm-Schuld; mit `newCost` ihren
+//                                   Betrag ändern („Change Cost"). Bei einer echten Überzahlung nennt `overpayChoice`
+//                                   Guthaben ('credit') oder Rückforderung ('refund') — CUSTOM-ORDER Kostenkorrektur.
 //
 // Der Rumpf ist ein Wunsch: Kennungen, Filiale, Benutzer, Fassungen, Zustände und alles, was das
 // Haus selbst rechnet (erfüllte/offene Gramm, Äquivalente, Feingold, Spot, Schmelzwert, Ausgabe,
@@ -37,10 +39,11 @@ import {
 } from '@/core/gold/gold-settle';
 import {
   GOLD_LEFTOVER_DESTINATIONS, addOrderCostInHouse, addRepairMaterialInHouse, recordRepairGoldUsageInHouse,
-  removeOrderCostInHouse,
+  removeOrderCostInHouse, changeOrderCostInHouse,
   type GoldLeftover, type MaterialRowInput, type OrderCostRemoveRequest, type OrderCostRequest,
   type RepairGoldUsageRequest, type RepairMaterialRequest,
 } from '@/core/gold/gold-house';
+import { COST_OVERPAY_CHOICES, type CostOverpayChoice } from '@/core/payables/order-cost-claim';
 
 export const OP_GOLD_PAYABLES_SETTLE = 'gold.payables.settle';
 export const OP_GOLD_CUSTOMER_CREDITS_SETTLE = 'gold.customer_credits.settle';
@@ -276,12 +279,19 @@ export function parseOrderCost(raw: unknown): OrderCostRequest {
 
 // ── orders.remove_cost ────────────────────────────────────────────────────
 
-export function parseOrderCostRemove(raw: unknown): OrderCostRemoveRequest {
-  const r = strict(raw, ['orderId', 'expectedRevision', 'lineId'], COMMAND_FORBIDDEN);
+export function parseOrderCostRemove(raw: unknown): OrderCostRemoveRequest & { newCost?: number } {
+  const r = strict(raw, ['orderId', 'expectedRevision', 'lineId', 'newCost', 'overpayChoice'], COMMAND_FORBIDDEN);
+  const choice = r.overpayChoice;
+  if (choice !== undefined && !(COST_OVERPAY_CHOICES as readonly unknown[]).includes(choice)) {
+    throw new GoldPayloadError("overpayChoice must be 'credit' or 'refund'");
+  }
+  const newCost = optNumber(r.newCost, 'newCost');
   return {
     orderId: feld(() => reqString(r.orderId, 'orderId')),
     expectedRevision: feld(() => expectedRevisionOf(r.expectedRevision)),
     lineId: feld(() => reqString(r.lineId, 'lineId')),
+    ...(newCost !== undefined ? { newCost } : {}),
+    ...(choice !== undefined ? { overpayChoice: choice as CostOverpayChoice } : {}),
   };
 }
 
@@ -358,6 +368,11 @@ export function runOrderCost(deps: EngineDeps, identity: CommandIdentity, raw: u
 
 export function runOrderCostRemove(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
   const req = parseOrderCostRemove(raw);
+  // CUSTOM-ORDER Kostenkorrektur — `newCost` genannt: „Change Cost" (dieselbe Hausfolge wie die Maske des Primary).
+  if (req.newCost !== undefined) {
+    const { newCost, ...rest } = req;
+    return runRemoteCommand(deps, identity, () => inHouse(identity, (a) => changeOrderCostInHouse(a, { ...rest, newCost })));
+  }
   return runRemoteCommand(deps, identity, () => inHouse(identity, (a) => removeOrderCostInHouse(a, req)));
 }
 

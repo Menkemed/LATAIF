@@ -526,6 +526,67 @@ try {
     const ziel = await warteBis(client, `location.pathname === '/invoices/${inv}/edit'`, 20000);
     ok(link && ziel, 'Edit nach Rechnung PC2: „Change client" an der Order öffnet die Rechnungskorrektur dieser Rechnung');
   }
+
+  // ── 11 Kostenkorrektur (Owner, ersetzt ORDER_COST_PAID): am PC2 an der umgewandelten Order (FINAL) die Lohnzeile ändern —
+  //       unbezahlt ohne Wahl; dann voll bezahlen und senken → Wahl Pflicht, „Claim back" → Rückforderung; Lieferant zeigt
+  //       „Record Repayment". Echte Maske, echte Klicks; geprüft in der Datenbank des Primary.
+  {
+    await spuelen(primary).catch(() => null);
+    const inv = dbQ(BIZ_DB, `SELECT invoice_id FROM orders WHERE id = '${ORD}'`)[0]?.invoice_id;
+    const snap = () => Number(dbQ(BIZ_DB, 'SELECT purchase_price_snapshot AS c FROM invoice_lines WHERE invoice_id = ?', [inv])[0]?.c ?? NaN);
+    const lab = dbQ(BIZ_DB, "SELECT id, expense_id FROM order_lines WHERE order_id = ? AND description = 'PC2 Nacharbeit'", [ORD])[0];
+    const ausgabe = () => dbQ(BIZ_DB, 'SELECT amount, paid_amount, status FROM expenses WHERE id = ?', [lab?.expense_id])[0] ?? {};
+    const s0 = snap();
+    await gehFrisch(client, `/orders/${ORD}`);
+    await warteBis(client, `!!document.querySelector('[data-order-cost-edit="${lab?.id}"]')`, 30000);
+    const r = [await klick(client, `[data-order-cost-edit="${lab?.id}"]`)];
+    await warteBis(client, "!!document.querySelector('[data-order-cost-edit-amount]')", 10000);
+    r.push(await setVal(client, '[data-order-cost-edit-amount]', '4'));
+    await sleep(250);
+    const ohneWahl = await client.ev("return !document.querySelector('[data-order-cost-overpay-choice]') ? 'OK' : 'CHOICE-SHOWN';");
+    r.push(await klick(client, '[data-order-cost-edit-save]'));
+    await spuelen(primary).catch(() => null);
+    const gefolgt = await warteAuf(() => Math.abs(snap() - (s0 - 1)) < 0.0005 && Number(ausgabe().amount) === 4, 30000);
+    const cmd1 = (await befehle(client)).filter((x) => x.op === 'orders.remove_cost' && x.payload?.orderId === ORD && x.payload?.newCost !== undefined);
+    ok(r.every((x) => x === 'OK') && ohneWahl === 'OK' && gefolgt && Number(ausgabe().paid_amount) === 0,
+      `Kostenkorrektur PC2 unbezahlt: 5 → 4 ohne Dialog, Schuld 4, Einstand ${s0} → ${snap()} (${S(r)} / ${S(ausgabe())})`);
+    // Voll bezahlen über den A/P-Chip (PayExpenseModal), dann 4 → 3: Überzahlung 1 → Wahl Pflicht.
+    await gehFrisch(client, `/orders/${ORD}`);
+    await warteBis(client, "!!document.querySelector('button[title=\"Click to record payment for this supplier expense\"]')", 30000);
+    // Der Chip in DERSELBEN Zeile (jede Werkstattzeile hat einen) — über den Stift dieser Zeile gefunden.
+    const z = [await client.ev(`const e=document.querySelector('[data-order-cost-edit="${lab?.id}"]'); const row=e&&e.parentElement&&e.parentElement.parentElement; const b=row&&row.querySelector('button[title="Click to record payment for this supplier expense"]'); if(!b) return 'NO-CHIP'; b.click(); return 'OK';`)];
+    await warteBis(client, "!!document.querySelector('[data-expense-pay-amount]')", 10000);
+    z.push(await setVal(client, '[data-expense-pay-amount]', '4'));
+    z.push(await klick(client, '[data-expense-pay-method="bank"]'));
+    await sleep(200);
+    z.push(await klick(client, '[data-expense-pay-save]'));
+    await spuelen(primary).catch(() => null);
+    const bezahlt = await warteAuf(() => Number(ausgabe().paid_amount) === 4, 30000);
+    ok(z.every((x) => x === 'OK') && bezahlt, `Kostenkorrektur PC2: Lohn 4 voll bezahlt (${S(z)} / ${S(ausgabe())})`);
+    await gehFrisch(client, `/orders/${ORD}`);
+    await warteBis(client, `!!document.querySelector('[data-order-cost-edit="${lab?.id}"]')`, 30000);
+    const k = [await klick(client, `[data-order-cost-edit="${lab?.id}"]`)];
+    await warteBis(client, "!!document.querySelector('[data-order-cost-edit-amount]')", 10000);
+    k.push(await setVal(client, '[data-order-cost-edit-amount]', '3'));
+    await warteBis(client, "!!document.querySelector('[data-order-cost-overpay-choice]')", 10000);
+    const gesperrt = await client.ev("const b=document.querySelector('[data-order-cost-edit-save]'); return b && b.disabled ? 'OK' : 'NOT-DISABLED';");
+    k.push(await klick(client, '[data-order-cost-overpay="refund"]'));
+    await sleep(200);
+    k.push(await klick(client, '[data-order-cost-edit-save]'));
+    await spuelen(primary).catch(() => null);
+    const claim = () => dbQ(BIZ_DB, "SELECT amount, status FROM supplier_credits WHERE supplier_id = 'co-arup' AND status IN ('OPEN','REFUND_DUE')");
+    const gebucht = await warteAuf(() => claim().length === 1 && claim()[0].status === 'REFUND_DUE' && Number(claim()[0].amount) === 1, 30000);
+    ok(k.every((x) => x === 'OK') && gesperrt === 'OK' && gebucht && Math.abs(snap() - (s0 - 2)) < 0.0005 && Number(ausgabe().amount) === 3 && Number(ausgabe().paid_amount) === 4
+      && Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM expense_payments WHERE expense_id = ?', [lab?.expense_id])[0]?.n) === 1,
+      `Kostenkorrektur PC2 bezahlt 4 → 3: Wahl Pflicht (Speichern gesperrt), „Claim back" → Rückforderung 1, Zahlung bleibt, Einstand ${snap()} (${S(k)} / ${S(claim())})`);
+    const cmd2 = (await befehle(client)).filter((x) => x.op === 'orders.remove_cost' && x.payload?.orderId === ORD && x.payload?.newCost !== undefined);
+    const c1 = cmd1[cmd1.length - 1]?.payload, c2 = cmd2[cmd2.length - 1]?.payload;
+    ok(c1?.newCost === 4 && c1?.overpayChoice === undefined && c2?.newCost === 3 && c2?.overpayChoice === 'refund',
+      `Kostenkorrektur PC2: orders.remove_cost mit newCost — erst ohne Wahl, dann mit „refund" (${S([c1, c2])})`);
+    await gehFrisch(client, '/suppliers/co-arup');
+    const repay = await warteBis(client, "!!document.querySelector('[data-supplier-repay-open]')", 30000);
+    ok(repay, 'Kostenkorrektur PC2: Lieferant Arup zeigt die Rückforderung mit „Record Repayment"');
+  }
 } catch (e) {
   FAIL++; fails.push('harness: ' + (e?.message ?? e)); console.error(e);
 } finally {

@@ -346,7 +346,15 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
     `SELECT id, COALESCE(paid_amount, 0) AS paid_amount, payment_method,
             expense_date, description, expense_number, category, created_at
      FROM expenses
-     WHERE branch_id = ? AND status != 'CANCELLED' AND COALESCE(paid_amount, 0) > 0
+     WHERE branch_id = ? AND COALESCE(paid_amount, 0) > 0
+       AND (status != 'CANCELLED'
+            -- CUSTOM-ORDER Kostenkorrektur: eine gelöschte, schon bezahlte Order-Kostenzeile — die Ausgabe ist storniert,
+            -- ihre Zahlungen (echtes Geld) bleiben gebucht (die Überzahlung ist Guthaben/Rückforderung). Ein normales
+            -- Storno nimmt die Zahlungsbuchungen zurück und bleibt hier draußen.
+            OR EXISTS (SELECT 1 FROM expense_payments ep
+                         JOIN ledger_entries le ON le.source_module = 'EXPENSE_PAYMENT' AND le.source_id = ep.id
+                        WHERE ep.expense_id = expenses.id AND le.reverses_entry_id IS NULL
+                          AND NOT EXISTS (SELECT 1 FROM ledger_entries r WHERE r.reverses_entry_id = le.id)))
        AND NOT (category = 'CardFees' AND related_module IN ('invoice', 'order', 'repair'))`,
     [branchId]
   );
@@ -580,7 +588,8 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
 
   // CONSIGNMENT D3 — REFUND_IN: der tatsächliche spätere Geldeingang auf eine Rückforderung (Tag, Weg, Betrag).
   const creditRefunds = safeQuery('supplier_credit_refunds',
-    `SELECT r.id, r.amount, r.method, r.received_at, r.created_at, r.consignment_id, pr.return_number, pr.purchase_id
+    `SELECT r.id, r.amount, r.method, r.received_at, r.created_at, r.consignment_id, pr.return_number, pr.purchase_id,
+            sc.note AS credit_note, r.supplier_id AS supplier_id
        FROM supplier_credit_refunds r
        LEFT JOIN supplier_credits sc ON sc.id = r.supplier_credit_id
        LEFT JOIN purchase_returns pr ON pr.id = sc.source_return_id
@@ -599,9 +608,10 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
       flow: 'in',
       relatedModule: 'purchase_return',
       relatedEntityId: r.id as string,
-      description: `Repayment received · ${r.return_number || ''}`,
+      // CUSTOM-ORDER Kostenkorrektur — eine Rückforderung aus einer Order-Kostenzeile hat keine Retoure: Text und Ziel vom Guthaben.
+      description: `Repayment received · ${r.return_number || r.credit_note || ''}`,
       link: (r.consignment_id as string) ? `/consignments/${r.consignment_id}`
-        : ((r.purchase_id as string) ? `/purchases/${r.purchase_id}` : undefined),
+        : ((r.purchase_id as string) ? `/purchases/${r.purchase_id}` : ((r.supplier_id as string) ? `/suppliers/${r.supplier_id}` : undefined)),
     });
   }
 

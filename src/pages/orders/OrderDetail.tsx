@@ -50,7 +50,8 @@ import { updateOrderOnPrimary, updateOrderDatesOnPrimary } from '@/core/orders/o
 // CENTRAL-UI-PARITY R6D — „Add Cost" und das Löschen einer Kostenzeile: dieselbe Hausfolge wie der Fernbefehl.
 import {
   addOrderCostOnPrimary, materialRowsFromModal, orderCostBody, orderCostRemoveBody, removeOrderCostOnPrimary,
-  type OrderCostRemoveRequest, type OrderCostRequest,
+  changeOrderCostOnPrimary, orderCostChangeBody,
+  type OrderCostRemoveRequest, type OrderCostRequest, type OrderCostChangeRequest,
 } from '@/core/gold/gold-house';
 import { orderEditBody, orderDateOf } from '@/core/orders/order-edit';
 import { latestBusinessDate, businessDateIssue } from '@/core/utils/business-date';
@@ -112,6 +113,10 @@ export function OrderDetail() {
   // Modal in-place. Cross-Store-Reload triggert nach Submit den lineRefresh-Tick.
   const { expenses, loadExpenses } = useExpenseStore();
   const [payExpenseId, setPayExpenseId] = useState<string | null>(null);
+  // CUSTOM-ORDER Kostenkorrektur — „Change Cost" bzw. Löschen einer schon (teil-)bezahlten Kostenzeile.
+  const [costEdit, setCostEdit] = useState<{ line: OrderLine; mode: 'change' | 'delete' } | null>(null);
+  const [costEditAmount, setCostEditAmount] = useState('');
+  const [costEditChoice, setCostEditChoice] = useState<'' | 'credit' | 'refund'>('');
   // CUSTOM-ORDER Review — der Altweg (Order ohne Steuerart je Position) legt KEINEN Artikel mehr vor dem Dialog an:
   // der Dialog zeigt EINE Zeile (Bezeichnung, Brutto, Vorauswahl), angelegt wird erst in der Hausfolge.
   const [legacyLine, setLegacyLine] = useState<{ label: string; scheme: TaxScheme; gross: number } | null>(null);
@@ -349,6 +354,40 @@ export function OrderDetail() {
       local: () => removeOrderCostOnPrimary(req),
       remote: () => orderCostRemoveBody(req),
     })) return;
+    loadOrders(); loadGoldPayables(); loadExpenses();
+    setLineRefresh(k => k + 1);
+  }
+
+  /** CUSTOM-ORDER Kostenkorrektur — was an der Lieferantenschuld einer Kostenzeile schon beglichen ist (bar + Guthaben). */
+  function beglichenVon(l: OrderLine): number {
+    if (!l.expenseId) return 0;
+    const exp = expenses.find(e => e.id === l.expenseId);
+    if (!exp || exp.status === 'CANCELLED') return 0;
+    return computeExpenseSettlement(exp.amount, exp.paidAmount || 0, expenseCreditPaid.get(exp.id) || 0, exp.status).settled;
+  }
+
+  /** „Change Cost" / Löschen mit Überzahlung: dieselbe Hausfolge am Primary und von PC2 (orders.remove_cost). */
+  async function kostenKorrigieren() {
+    if (!id || !order || !costEdit) return;
+    const fassung = order.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('changing an order cost (no revision loaded)'))); return; }
+    const choice = costEditChoice || undefined;
+    if (costEdit.mode === 'change') {
+      const neu = Number(costEditAmount);
+      if (!(neu > 0)) { w.clear(); alert('Enter the new cost (more than 0). To drop the cost, delete the line.'); return; }
+      const req: OrderCostChangeRequest = { orderId: id, expectedRevision: fassung || undefined, lineId: costEdit.line.id, newCost: neu, overpayChoice: choice };
+      if (!await w.ok('orders.remove_cost', {
+        local: () => changeOrderCostOnPrimary(req),
+        remote: () => orderCostChangeBody(req),
+      })) return;
+    } else {
+      const req: OrderCostRemoveRequest = { orderId: id, expectedRevision: fassung || undefined, lineId: costEdit.line.id, overpayChoice: choice };
+      if (!await w.ok('orders.remove_cost', {
+        local: () => removeOrderCostOnPrimary(req),
+        remote: () => orderCostRemoveBody(req),
+      })) return;
+    }
+    setCostEdit(null);
     loadOrders(); loadGoldPayables(); loadExpenses();
     setLineRefresh(k => k + 1);
   }
@@ -1394,7 +1433,7 @@ export function OrderDetail() {
                   ist — die A/P-Schuld an den Supplier wird dabei automatisch gebucht.
                 </p>
               ) : (
-                <div style={{ display: 'grid', gridTemplateColumns: '0.7fr 1.2fr 1.5fr 0.8fr 0.9fr 0.9fr 40px', gap: 10, fontSize: 12 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: '0.7fr 1.2fr 1.5fr 0.8fr 0.9fr 0.9fr 64px', gap: 10, fontSize: 12 }}>
                   <span className="text-overline">KIND</span>
                   <span className="text-overline">SUPPLIER</span>
                   <span className="text-overline">DESCRIPTION</span>
@@ -1466,18 +1505,36 @@ export function OrderDetail() {
                           })()}
                         </span>
                         {!isCancelled && perm.canManageOrders ? (
-                          <button
-                            data-order-cost-remove={l.id}
-                            disabled={w.busy}
-                            onClick={async () => {
-                              if (!(await window.confirm('Diese Kostenposition löschen? Eine gebuchte A/P-Schuld wird storniert.'))) return;
-                              void kostenzeileEntfernen(l.id);
-                            }}
-                            className="cursor-pointer"
-                            style={{ background: 'none', border: 'none', color: '#DC2626', borderTop: '1px solid #E5E9EE', padding: '10px 0' }}
-                            title="Kostenposition löschen">
-                            <Trash2 size={14} />
-                          </button>
+                          <span className="flex items-center justify-end gap-2" style={{ borderTop: '1px solid #E5E9EE', padding: '10px 0' }}>
+                            {!isGoldDebt && (
+                              <button
+                                data-order-cost-edit={l.id}
+                                disabled={w.busy}
+                                onClick={() => { w.clear(); setCostEditAmount(String(l.costAmount || 0)); setCostEditChoice(''); setCostEdit({ line: l, mode: 'change' }); }}
+                                className="cursor-pointer"
+                                style={{ background: 'none', border: 'none', color: '#4B5563', padding: 0 }}
+                                title="Change cost">
+                                <Edit3 size={14} />
+                              </button>
+                            )}
+                            <button
+                              data-order-cost-remove={l.id}
+                              disabled={w.busy}
+                              onClick={async () => {
+                                // Schon (teil-)bezahlt: die Maske fragt nach Guthaben oder Rückforderung (statt eines Neins).
+                                if (beglichenVon(l) > 0.0005) {
+                                  w.clear(); setCostEditChoice(''); setCostEdit({ line: l, mode: 'delete' });
+                                  return;
+                                }
+                                if (!(await window.confirm('Diese Kostenposition löschen? Eine gebuchte A/P-Schuld wird storniert.'))) return;
+                                void kostenzeileEntfernen(l.id);
+                              }}
+                              className="cursor-pointer"
+                              style={{ background: 'none', border: 'none', color: '#DC2626', padding: 0 }}
+                              title="Kostenposition löschen">
+                              <Trash2 size={14} />
+                            </button>
+                          </span>
                         ) : <span style={{ borderTop: '1px solid #E5E9EE' }} />}
                       </div>
                     );
@@ -1824,6 +1881,64 @@ export function OrderDetail() {
           onClose={() => { setSettleGold(null); loadGoldPayables(); }}
         />
       )}
+
+      {/* CUSTOM-ORDER Kostenkorrektur — „Change Cost" / Löschen einer bezahlten Kostenzeile */}
+      <Modal open={!!costEdit} onClose={() => { if (!w.busy) setCostEdit(null); }}
+        title={costEdit?.mode === 'delete' ? 'Delete Cost Line' : 'Change Cost'} width={480}>
+        {costEdit && (() => {
+          const alt = costEdit.line.costAmount || 0;
+          const neu = costEdit.mode === 'delete' ? 0 : (Number(costEditAmount) || 0);
+          const bezahlt = beglichenVon(costEdit.line);
+          const offen = Math.max(0, neu - bezahlt);
+          const ueber = Math.max(0, Math.round((bezahlt - neu) * 1000) / 1000);
+          return (
+            <div data-order-cost-edit-form>
+              <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '8px 16px', marginBottom: 16, fontSize: 13 }}>
+                <span style={{ color: '#6B7280' }}>Cost line</span>
+                <span style={{ color: '#0F0F10', fontWeight: 500 }}>{costEdit.line.description || '—'}</span>
+                <span style={{ color: '#6B7280' }}>Current cost</span>
+                <span className="font-mono" style={{ color: '#0F0F10' }}><Bhd v={alt}/> BHD</span>
+                <span style={{ color: '#6B7280' }}>Paid to supplier</span>
+                <span className="font-mono" style={{ color: '#0F0F10' }} data-order-cost-edit-paid><Bhd v={bezahlt}/> BHD</span>
+              </div>
+              {costEdit.mode === 'change' && (
+                <div style={{ marginBottom: 16 }}>
+                  <Input label="NEW COST (BHD)" type="number" value={costEditAmount} onChange={e => setCostEditAmount(e.target.value)} data-order-cost-edit-amount />
+                </div>
+              )}
+              <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '8px 16px', marginBottom: 16, fontSize: 13 }}>
+                <span style={{ color: '#6B7280' }}>Open to supplier after</span>
+                <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 600 }} data-order-cost-edit-open><Bhd v={offen}/> BHD</span>
+                {ueber > 0.0005 && (<>
+                  <span style={{ color: '#B45309' }}>Overpaid</span>
+                  <span className="font-mono" style={{ color: '#B45309', fontWeight: 600 }} data-order-cost-edit-overpay><Bhd v={ueber}/> BHD</span>
+                </>)}
+              </div>
+              {ueber > 0.0005 && (
+                <div style={{ display: 'grid', gap: 8, marginBottom: 16, fontSize: 13 }} data-order-cost-overpay-choice>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input type="radio" name="cost-overpay" checked={costEditChoice === 'credit'} onChange={() => setCostEditChoice('credit')} data-order-cost-overpay="credit" />
+                    <span><strong>Supplier credit</strong> — keep <Bhd v={ueber}/> BHD as credit with the supplier (used against the next purchase or expense).</span>
+                  </label>
+                  <label className="flex items-start gap-2 cursor-pointer">
+                    <input type="radio" name="cost-overpay" checked={costEditChoice === 'refund'} onChange={() => setCostEditChoice('refund')} data-order-cost-overpay="refund" />
+                    <span><strong>Claim back</strong> — the supplier owes <Bhd v={ueber}/> BHD back (open claim; record the repayment on the supplier).</span>
+                  </label>
+                </div>
+              )}
+              <WriteError text={w.fehler} />
+              <div className="flex justify-end gap-3">
+                <Button variant="ghost" onClick={() => setCostEdit(null)} disabled={w.busy}>Cancel</Button>
+                <Button variant={costEdit.mode === 'delete' ? 'danger' : 'primary'} data-order-cost-edit-save
+                  disabled={w.busy || (ueber > 0.0005 && !costEditChoice) || (costEdit.mode === 'change' && !(neu > 0))}
+                  onClick={() => void kostenKorrigieren()}>
+                  {w.busy ? 'Saving…' : costEdit.mode === 'delete' ? 'Delete Cost Line' : 'Save Cost'}
+                </Button>
+              </div>
+            </div>
+          );
+        })()}
+      </Modal>
 
       {/* v0.7.7 — Pay-Expense Modal aus A/P-Chip-Klick. recordExpensePayment
           triggert Cross-Store-Reload, der lineRefresh-Tick bumpt nach Submit

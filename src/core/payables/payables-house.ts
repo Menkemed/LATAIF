@@ -55,6 +55,7 @@ import { closedVatQuarters, nbrQuarterOfDate } from '@/core/tax/vat-period-lock'
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { businessTimestamp } from '@/core/utils/business-date';
 import { assertSupplierOverpayMutable, reconcilePurchaseOverpayCredit, OverpayCreditRedeemed } from './purchase-overpay';
+import { isOrderCostClaim, ORDER_COST_CLAIM_OPEN, ORDER_COST_CLAIM_DONE } from './order-cost-claim';
 
 // ── Grundlagen ─────────────────────────────────────────────────────────────
 
@@ -386,7 +387,12 @@ export interface ExpenseUpdated { expenseId: string; status: string; amount: num
  * „Edit Expense": nur das Genannte, gegen die gesehene Fassung. Aendern sich Betrag oder Datum,
  * wird die Aufwandsbuchung storniert und neu gebucht (vorher blieb sie auf dem alten Stand).
  */
-export function updateExpenseInHouse(expenseId: string, raw: ExpenseEditFields, ctx: HouseCtx, expectedRevision?: number): ExpenseUpdated {
+export function updateExpenseInHouse(
+  expenseId: string, raw: ExpenseEditFields, ctx: HouseCtx, expectedRevision?: number,
+  /** CUSTOM-ORDER Kostenkorrektur — nur die Order (order-cost-correction.ts) ändert den Betrag ihrer Kostenzeile; sie
+   *  bucht eine Überzahlung selbst als Guthaben/Rückforderung (daher hier weder Order-Sperre noch „nie unter das Bezahlte"). */
+  opts: { orderCostCorrection?: boolean } = {},
+): ExpenseUpdated {
   assertHouseBooks();
   const row = liveExpense(expenseId, ctx.branchId);
   assertSeen('expenses', expenseId, expectedRevision);
@@ -408,7 +414,7 @@ export function updateExpenseInHouse(expenseId: string, raw: ExpenseEditFields, 
   // CUSTOM-ORDER K1 — die Kostenzeile einer Custom-Order ist Einstand des Stücks (Soll INVENTORY): ihren Betrag ändert
   // nur die Order, und keine Kategorie wechselt zwischen Aufwand und Bestand. Das Datum bleibt korrigierbar (neu gebucht
   // am neuen Tag, Sperren wie jede Ausgabe).
-  if (txt(row.related_module) === 'order') {
+  if (txt(row.related_module) === 'order' && !opts.orderCostCorrection) {
     const booked = isBookedOrderCost({ category: String(row.category), relatedModule: 'order' });
     const catChange = f.category !== undefined && f.category !== row.category;
     const toBooked = f.category !== undefined && isBookedOrderCost({ category: f.category, relatedModule: 'order' });
@@ -471,7 +477,7 @@ export function updateExpenseInHouse(expenseId: string, raw: ExpenseEditFields, 
   }
   const creditPaid = creditPaidForExpense(expenseId);
   const nextAmount = amountChanged ? Number(f.amount) : Number(row.amount);
-  if (amountChanged && !kartengebuehr) {
+  if (amountChanged && !kartengebuehr && !opts.orderCostCorrection) {
     // D1 erweitert: nie unter das schon Beglichene (cash + credit). Vorher nur bei aktiver
     // Guthaben-Einloesung — bei Barzahlung ging der Betrag unter das Bezahlte.
     const settledF = F(row.paid_amount) + F(creditPaid);
@@ -1125,7 +1131,7 @@ export interface SupplierCreditRefundRecorded {
   receivedDate: string;
   /** Was danach noch offen ist (0 = vollständig zurückgezahlt bzw. verrechnet). */
   openAmount: number;
-  creditStatus: 'OPEN' | 'USED';
+  creditStatus: 'OPEN' | 'USED' | 'REFUND_DUE' | 'REFUNDED';
 }
 
 /**
@@ -1143,7 +1149,7 @@ export function recordSupplierCreditRefundInHouse(input: SupplierCreditRefundInp
   const amtF = positiveF(input.amount, 'PAYMENT_AMOUNT_INVALID', 'the repayment');
   const m = methodOf(input.method);
   const c = query(
-    `SELECT sc.id, sc.supplier_id, sc.amount, sc.used_amount, sc.status, sc.source_return_id,
+    `SELECT sc.id, sc.supplier_id, sc.amount, sc.used_amount, sc.status, sc.source_return_id, sc.source_purchase_id, sc.created_at,
             pr.status AS return_status, pr.return_date, pr.return_number,
             COALESCE(p.source_consignment_id,
               (SELECT pl.source_consignment_id FROM purchase_return_lines prl JOIN purchase_lines pl ON pl.id = prl.purchase_line_id
@@ -1155,11 +1161,13 @@ export function recordSupplierCreditRefundInHouse(input: SupplierCreditRefundInp
     [input.creditId, ctx.branchId],
   )[0];
   if (!c) throw nein('SUPPLIER_CREDIT_NOT_FOUND', 'no such supplier credit in this branch');
-  if (!c.source_return_id || !c.return_status || String(c.return_status) === 'CANCELLED') {
+  // CUSTOM-ORDER Kostenkorrektur — eine Rückforderung aus einer gesenkten/gelöschten Order-Kostenzeile (REFUND_DUE).
+  const orderClaim = isOrderCostClaim(c);
+  if (!orderClaim && (!c.source_return_id || !c.return_status || String(c.return_status) === 'CANCELLED')) {
     throw nein('SUPPLIER_CREDIT_NOT_A_RETURN_CREDIT',
       'only the open repayment from a return can be recorded as money received — a prepayment is refunded with "Refund Credit", an overpayment is applied to the next purchase');
   }
-  if (String(c.status) !== 'OPEN') throw nein('SUPPLIER_CREDIT_NOT_OPEN', 'this repayment is already settled in full');
+  if (String(c.status) !== (orderClaim ? ORDER_COST_CLAIM_OPEN : 'OPEN')) throw nein('SUPPLIER_CREDIT_NOT_OPEN', 'this repayment is already settled in full');
   const openF = F(c.amount) - F(c.used_amount);
   if (openF <= 0) throw nein('SUPPLIER_CREDIT_NOT_OPEN', 'this repayment is already settled in full');
   if (amtF > openF) {
@@ -1169,8 +1177,12 @@ export function recordSupplierCreditRefundInHouse(input: SupplierCreditRefundInp
   const tag = input.receivedDate === undefined || input.receivedDate === '' ? today
     : isoDateOf(input.receivedDate, 'PAYMENT_DATE_INVALID', 'the date the money came');
   if (tag > today) throw nein('PAYMENT_DATE_INVALID', 'the date the money came cannot be in the future');
-  const ab = String(c.return_date ?? '').slice(0, 10);
-  if (ab && tag < ab) throw nein('PAYMENT_DATE_BEFORE_CLAIM', `the money cannot have come before the return it repays (${ab})`);
+  const ab = orderClaim ? dayOf(String(c.created_at ?? '')) : String(c.return_date ?? '').slice(0, 10);
+  if (ab && tag < ab) {
+    throw nein('PAYMENT_DATE_BEFORE_CLAIM', orderClaim
+      ? `the money cannot have come before the claim it repays (${ab})`
+      : `the money cannot have come before the return it repays (${ab})`);
+  }
   const q = nbrQuarterOfDate(tag);
   if (q && closedVatQuarters(ctx.branchId).has(q.key)) {
     throw nein('VAT_PERIOD_FILED', `the VAT return for ${q.key} is already filed or paid — a money movement is not dated into that quarter afterwards; choose a date in an open quarter`);
@@ -1184,7 +1196,9 @@ export function recordSupplierCreditRefundInHouse(input: SupplierCreditRefundInp
   // Der Zeitpunkt: heute → jetzt; ein früherer Tag → dieser Tag (Kasse/Bank stehen am Tag des Eingangs).
   const receivedAt = businessTimestamp(tag, ctx.now);
   const newUsedF = F(c.used_amount) + amtF;
-  const status: 'OPEN' | 'USED' = newUsedF >= F(c.amount) ? 'USED' : 'OPEN';
+  const status: string = orderClaim
+    ? (newUsedF >= F(c.amount) ? ORDER_COST_CLAIM_DONE : ORDER_COST_CLAIM_OPEN)
+    : (newUsedF >= F(c.amount) ? 'USED' : 'OPEN');
   const db = getDatabase();
   db.run(
     `INSERT INTO supplier_credit_refunds (id, branch_id, supplier_credit_id, supplier_id, consignment_id, amount, method,
@@ -1201,14 +1215,14 @@ export function recordSupplierCreditRefundInHouse(input: SupplierCreditRefundInp
     oldValue: { usedAmount: Number(c.used_amount ?? 0), status: String(c.status) },
     newValue: {
       refundId, amount: B(amtF), method: m, receivedDate: tag, usedAmount: B(newUsedF), status,
-      returnNumber: String(c.return_number ?? ''), ...(consignmentId ? { consignmentId } : {}),
+      ...(orderClaim ? { orderCostClaim: true } : { returnNumber: String(c.return_number ?? '') }), ...(consignmentId ? { consignmentId } : {}),
       ...(reference ? { reference } : {}),
     },
     actor: { userId: ctx.userId || undefined, branchId: ctx.branchId },
   });
   return {
     refundId, creditId: input.creditId, supplierId, amount: B(amtF), method: m, receivedDate: tag,
-    openAmount: B(F(c.amount) - newUsedF), creditStatus: status,
+    openAmount: B(F(c.amount) - newUsedF), creditStatus: status as SupplierCreditRefundRecorded['creditStatus'],
   };
 }
 

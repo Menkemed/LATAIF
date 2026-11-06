@@ -380,7 +380,8 @@ const umgewandelt = (db: Db, extra: Partial<OI> = {}, scheme = 'ZERO') => {
 }
 
 {
-  // A11 schon an Arup bezahlter Lohn: die Zeile bleibt (sonst blieben Zahlungsbuchungen ohne Zahlung/Schuld stehen).
+  // A11 schon an Arup (teil-)bezahlter Lohn — Owner-Entscheidung „Kostenkorrektur" (ersetzt ORDER_COST_PAID): ohne Wahl Nein,
+  // nichts geändert; mit Wahl (Guthaben/Rückforderung) geht die Zeile, die Zahlung bleibt stehen (order-cost-correction.test).
   const db = freshDb();
   const { oid, out } = umgewandelt(db);
   const { recordExpensePaymentInHouse } = await import('../../src/core/payables/payables-house.ts');
@@ -390,16 +391,21 @@ const umgewandelt = (db: Db, extra: Partial<OI> = {}, scheme = 'ZERO') => {
   reload();
   const vor = stand(db, oid);
   const c11 = nein(() => imHaus(() => goldHouse.removeOrderCostInHouse(ACTORX, { orderId: oid, lineId: lab })));
-  ok(c11 === 'ORDER_COST_PAID' && stand(db, oid) === vor && n(db, 'SELECT COUNT(*) FROM expense_payments WHERE expense_id = ?', [exp]) === 1 && snap(db, out.invoiceId) === 210,
-    `A11 teilweise bezahlter Lohn: Entfernen Nein, Zahlung und Buchung bleiben (${c11})`);
-  // Vor der Rechnung gilt dieselbe Sperre (der Fehler war älter als diese Phase).
+  ok(c11 === 'ORDER_COST_OVERPAY_CHOICE_REQUIRED' && stand(db, oid) === vor && n(db, 'SELECT COUNT(*) FROM expense_payments WHERE expense_id = ?', [exp]) === 1 && snap(db, out.invoiceId) === 210,
+    `A11 teilweise bezahlter Lohn ohne Wahl: Nein, Zahlung und Buchung bleiben (${c11})`);
+  imHaus(() => goldHouse.removeOrderCostInHouse(ACTORX, { orderId: oid, lineId: lab, overpayChoice: 'refund' }));
+  reload();
+  ok(n(db, 'SELECT COUNT(*) FROM order_lines WHERE id = ?', [lab]) === 0 && n(db, 'SELECT COUNT(*) FROM expense_payments WHERE expense_id = ?', [exp]) === 1
+    && snap(db, out.invoiceId) === 185 && n(db, "SELECT COUNT(*) FROM supplier_credits WHERE status = 'REFUND_DUE' AND amount = 10") === 1,
+    'A11 mit Wahl Rückforderung: Zeile weg, Zahlung bleibt, Rückforderung 10, Einstand 185');
+  // Vor der Rechnung gilt dieselbe Regel.
   const oid2 = anlegen({ ...ORD2, status: 'pending', depositAmount: 0 });
   imHaus(() => goldHouse.addOrderCostInHouse(ACTORX, { orderId: oid2, rows: [{ materialKind: 'labor', description: 'Paid work', totalCost: 20, supplierId: 'sup-arup' }] }));
   reload();
   const lab2 = laborLine(db, oid2, 'Paid work');
   imHaus(() => recordExpensePaymentInHouse(s(db, 'SELECT expense_id FROM order_lines WHERE id = ?', [lab2]), 20, 'cash', { branchId: 'branch-main', userId: 'user-test', now: NOW }));
   reload();
-  ok(nein(() => imHaus(() => goldHouse.removeOrderCostInHouse(ACTORX, { orderId: oid2, lineId: lab2 }))) === 'ORDER_COST_PAID', 'A11 auch vor der Rechnung: bezahlte Kostenzeile bleibt');
+  ok(nein(() => imHaus(() => goldHouse.removeOrderCostInHouse(ACTORX, { orderId: oid2, lineId: lab2 }))) === 'ORDER_COST_OVERPAY_CHOICE_REQUIRED', 'A11 auch vor der Rechnung: bezahlte Kostenzeile nur mit Wahl');
   ok(buchAusgeglichen(db), 'A11 Hauptbuch ausgeglichen');
 }
 

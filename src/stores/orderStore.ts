@@ -159,12 +159,15 @@ export function orderDeleteBlocker(orderId: string): OrderDeleteBlocked | null {
     return new OrderDeleteBlocked('ORDER_DELETE_GOLD_MOVED',
       'This order cannot be deleted: gold for it has already been delivered or settled with the goldsmith. Cancel the order instead — cancelling keeps that gold liability.');
   }
+  // CUSTOM-ORDER Kostenkorrektur — auch eine gelöschte, schon bezahlte Kostenzeile: ihre (stornierte) Ausgabe trägt die
+  // Originalzahlungen, ihre Überzahlung ist Guthaben/Rückforderung — das Löschen der Order ließe sie ohne Auftrag stehen.
   const paid = query(
-    `SELECT 1 FROM order_lines ol JOIN expenses e ON e.id = ol.expense_id
-      WHERE ol.order_id = ?
+    `SELECT 1 FROM expenses e
+      WHERE (e.id IN (SELECT ol.expense_id FROM order_lines ol WHERE ol.order_id = ?)
+             OR (e.related_module = 'order' AND e.related_entity_id = ?))
         AND (COALESCE(e.paid_amount, 0) > 0.005 OR EXISTS (SELECT 1 FROM expense_payments ep WHERE ep.expense_id = e.id))
       LIMIT 1`,
-    [orderId],
+    [orderId, orderId],
   );
   if (paid.length > 0) {
     return new OrderDeleteBlocked('ORDER_DELETE_COSTS_PAID',

@@ -124,8 +124,8 @@ hat, kann sein Verbrauch für eine Order gegen `GOLD_STOCK` aktiviert werden. F�
 Eine umgewandelte Custom Order bleibt über die Order korrigierbar, solange die Rechnung im offenen Zeitraum berichtigt
 werden kann. Das gilt auch, wenn sie FINAL und voll bezahlt ist.
 - **Kosten** (Lohn, Gold, Karat, Goldquelle, Goldschuld):
-  - Weg: „Add Cost" / Kostenzeile entfernen. Ein Wert in einer bestehenden Kostenzeile wird nicht geändert; Gold mit
-    anderen Gramm, anderem Karat oder anderer Werkstatt = alte Goldzeile entfernen und neue hinzufügen.
+  - Weg: „Add Cost", „Change Cost" (Stift an der Kostenzeile) oder Kostenzeile entfernen. Gold mit anderen Gramm, anderem
+    Karat oder anderer Werkstatt = alte Goldzeile entfernen und neue hinzufügen (`ORDER_COST_GOLD_DEBT` bei „Change Cost").
   - Rechnungszeile (Einstand, bei Margin die Margin-VAT) und Artikel folgen in derselben Klammer
     (`applySoldLineCostCorrection`, wie K3a/D1). Lager bleibt, Wareneinsatz und Lieferantenschuld/Goldschuld folgen.
   - Gesperrt:
@@ -134,7 +134,6 @@ werden kann. Das gilt auch, wenn sie FINAL und voll bezahlt ist.
     - Retoure oder Gutschrift an der Rechnung (`INVOICE_HAS_RETURNS`), ein Korrektur-Guthaben
     - eigene Kosten ohne Werkstatt (OF3)
     - eine schon (teil-)beglichene Goldschuld (erst die Begleichung zurücknehmen)
-    - eine schon (teil-)bezahlte Lieferantenschuld (`ORDER_COST_PAID`, gilt auch vor der Rechnung, siehe OF6)
 - **Kunde:** „Change client" an der Order öffnet die vorhandene Rechnungskorrektur (Grund + Bestätigung).
   - Was umzieht: Order, Rechnung, Anrechnung (PAYMENT) und die Anzahlungen der Order (ORDER_PAYMENT), rückwirkend auf
     ihre eigenen Buchungstage. Geldkonten und unbeteiligte Kunden bleiben unverändert.
@@ -146,10 +145,35 @@ werden kann. Das gilt auch, wenn sie FINAL und voll bezahlt ist.
 - **Nicht über die Order:** Verkaufspreis und Steuerart der Rechnung (Rechnungskorrektur), Storno einer FINAL-Rechnung
   (bestehende Regel: Retoure).
 
+## Owner-Entscheidung „Kostenkorrektur bezahlter und unbezahlter Order-Kosten" (umgesetzt, ersetzt `ORDER_COST_PAID`)
+
+Kosten einer Order ändern („Change Cost") oder löschen — vor und nach der Rechnung (FINAL/bezahlt, Quartal offen),
+Primary und PC2 (derselbe Befehl `orders.remove_cost`, mit `newCost` = Ändern):
+- **Nichts bezahlt:** Betrag ändern/löschen, die offene Lieferantenschuld folgt (Gegen-/Neubuchung über „Edit Expense"
+  am Ausgabetag). Kein Dialog.
+- **Teilweise bezahlt:** offene Schuld = neuer Betrag − Bezahltes. Nur bei einer echten Überzahlung fragt die Maske:
+  - **Guthaben** (`supplier_credits` OPEN): verrechenbar gegen den nächsten Einkauf / die nächste Ausgabe;
+  - **Rückforderung** (`supplier_credits` REFUND_DUE): nicht verrechenbar, „Record Repayment" am Lieferanten
+    (DR Kasse/Bank/Benefit / CR SUPPLIER_CREDIT), voll zurückgezahlt → REFUNDED.
+  - Buchung beider: `ORDER_COST_OVERPAY` DR SUPPLIER_CREDIT / CR ACCOUNTS_PAYABLE (heute), gekeyt auf die Guthabenzeile.
+- **Löschen einer bezahlten Zeile:** die Ausgabe wird storniert, ihre Zahlungen bleiben unverändert stehen (Beleg), das
+  Bezahlte wird Guthaben oder Rückforderung. Das Löschen der Order ist danach gesperrt (`ORDER_DELETE_COSTS_PAID`).
+- **Nie doppelt:** je Ausgabe gilt immer „Überzahlung = Bezahltes − neuer Betrag"; eine weitere Änderung gleicht das
+  (unbenutzte) Guthaben an, eine Wiederholung bucht nichts. Ist es schon verrechnet/zurückgezahlt →
+  `ORDER_COST_OVERPAY_USED`, nichts geändert.
+- **Perioden:** Rechnungsquartal gemeldet → `ORDER_COSTS_PERIOD_CLOSED`; Ausgabetag oder heute in gemeldetem Quartal /
+  vor dem Stichtag → Nein (`VAT_PERIOD_FILED` / Stichtag), nichts geändert. Das Löschen einer UNBEZAHLTEN Zeile bleibt der
+  bisherige Weg (keine zusätzliche Sperre).
+- **Abgleich:** AP-Domäne zählt Ausgabenzahlungen je Ausgabe höchstens bis zu ihrem Betrag (wie Einkäufe); die
+  Gegenparteiprüfung kennt `ORDER_COST_OVERPAY` und den Status REFUND_DUE/REFUNDED.
+- **Grenzen:** Goldschuld-Zeilen (Gramm) nur über Entfernen + neu; eigene Kosten am verkauften Stück weiter OF3. Die
+  Rückforderung wird nur am Lieferanten erfasst (keine eigene Mahnung/Liste).
+
 ## OF6 — Weitere Funde aus dem Abschluss (dokumentiert, zurückgestellt)
 
 - **Bezahlte Kostenzeile entfernen (behoben):** `deleteOrderLine` löschte die Zahlungszeilen einer schon bezahlten
-  Lieferantenschuld mit, ließ deren Buchungen aber stehen (älter als diese Phase). Jetzt Nein (`ORDER_COST_PAID`).
+  Lieferantenschuld mit, ließ deren Buchungen aber stehen (älter als diese Phase). Erst Nein (`ORDER_COST_PAID`), jetzt
+  ersetzt durch die Kostenkorrektur oben (Zahlungen bleiben, Bezahltes wird Guthaben/Rückforderung).
 
 - **GOLD SOURCE und Goldhändler (K4):** Preview V4 zeigt unter „Gold vom Lieferanten" auch einen Goldhändler. Es gibt
   kein Merkmal „Goldhändler"; umgesetzt sind nur Werkstätten (aktiv + „Is Workshop", wie Reparaturen). Ein Goldhändler,

@@ -133,7 +133,10 @@ interface SupplierCredit {
 //   standalone       = source_return_id IS NULL AND source_purchase_id IS NULL
 //   purchase_overpay = source_purchase_id IS NOT NULL AND source_return_id IS NULL
 //   return           = source_return_id IS NOT NULL
-type SupplierCreditKind = 'standalone' | 'purchase_overpay' | 'return';
+//   CUSTOM-ORDER Kostenkorrektur (beide ohne Quell-IDs, Buchung ORDER_COST_OVERPAY):
+//   order_cost_overpay = Guthaben aus einer gesenkten/gelöschten Order-Kostenzeile (OPEN, verrechenbar)
+//   repayment_claim    = Rückforderung daraus (REFUND_DUE, „Record Repayment")
+type SupplierCreditKind = 'standalone' | 'purchase_overpay' | 'return' | 'order_cost_overpay' | 'repayment_claim';
 
 // Zeile fuer die SUPPLIER-CREDITS-Card: zeigt ALLE offenen Credits typisiert. `method` wird
 // nur fuer standalone aus dem Ledger abgeleitet (Option B), sonst null. `refundable` = standalone
@@ -144,7 +147,7 @@ export interface SupplierCreditDisplay {
   amount: number;
   usedAmount: number;
   remaining: number;
-  status: 'OPEN' | 'USED' | 'EXPIRED';
+  status: 'OPEN' | 'USED' | 'EXPIRED' | 'REFUND_DUE' | 'REFUNDED';
   createdAt: string;
   kind: SupplierCreditKind;
   method: 'Cash' | 'Bank' | 'Benefit' | null;
@@ -212,9 +215,13 @@ function rowToSupplier(row: Record<string, unknown>): Supplier {
 function creditDisplayRow(r: Record<string, unknown>): SupplierCreditDisplay {
   const amount = (r.amount as number) || 0;
   const used = (r.used_amount as number) || 0;
+  const st = String(r.status ?? '');
   const kind: SupplierCreditKind = r.source_return_id
     ? 'return'
-    : (r.source_purchase_id ? 'purchase_overpay' : 'standalone');
+    : r.source_purchase_id ? 'purchase_overpay'
+      : st === 'REFUND_DUE' || st === 'REFUNDED' ? 'repayment_claim'
+        : query(`SELECT 1 FROM ledger_entries WHERE source_module = 'ORDER_COST_OVERPAY' AND source_id = ? LIMIT 1`, [r.id as string]).length > 0
+          ? 'order_cost_overpay' : 'standalone';
   const method = kind === 'standalone' ? validateStandaloneCreditRefundSource(r.id as string, amount) : null;
   const refundable = kind === 'standalone' && toFils(used) === 0 && method !== null;
   return {
@@ -223,7 +230,7 @@ function creditDisplayRow(r: Record<string, unknown>): SupplierCreditDisplay {
     amount,
     usedAmount: used,
     remaining: Math.max(0, amount - used),
-    status: (r.status as 'OPEN' | 'USED' | 'EXPIRED') || 'OPEN',
+    status: (r.status as SupplierCreditDisplay['status']) || 'OPEN',
     createdAt: r.created_at as string,
     kind,
     method,
@@ -540,11 +547,13 @@ export function supplierCreditsFor(ctx: BusinessReadContext, supplierId: string)
   if (!supplierId) return { credits: [], availableAmount: 0 };
   const rows = query(
     `SELECT id, supplier_id, source_return_id, source_purchase_id, amount, used_amount, status, created_at
-       FROM supplier_credits WHERE supplier_id = ? AND branch_id = ? AND status = 'OPEN' ORDER BY created_at DESC, id DESC`,
+       FROM supplier_credits WHERE supplier_id = ? AND branch_id = ? AND status IN ('OPEN', 'REFUND_DUE') ORDER BY created_at DESC, id DESC`,
     [supplierId, ctx.branchId]
   );
   const credits = rows.map(creditDisplayRow);
-  const availableF = credits.reduce((s, c) => s + Math.max(0, toFils(c.amount) - toFils(c.usedAmount)), 0);
+  // Verrechenbar ist nur ein Guthaben (OPEN) — eine Rückforderung (REFUND_DUE) wartet auf das Geld des Lieferanten.
+  const availableF = credits.filter((c) => c.status === 'OPEN')
+    .reduce((s, c) => s + Math.max(0, toFils(c.amount) - toFils(c.usedAmount)), 0);
   return { credits, availableAmount: availableF / 1000 };
 }
 

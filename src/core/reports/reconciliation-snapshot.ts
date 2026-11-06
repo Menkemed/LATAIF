@@ -137,10 +137,15 @@ function domainAP(branchId: string): number {
   // Domain diese Payments weiter → Domain-AP < Ledger-AP nach Cancel (gilt fuer Cash UND Credit).
   // WICHTIG: Filter auf EXPENSE-STATUS, NICHT auf Payment-Methode — Credit-Payments AKTIVER Expenses
   // (status != 'CANCELLED') zaehlen weiterhin VOLL als AP-Settlement (sie reduzieren AP wie Cash).
+  // CUSTOM-ORDER Kostenkorrektur — je Ausgabe auf ihren Betrag GEDECKELT (wie die Purchase-Payments oben): sinkt eine
+  // schon bezahlte Order-Kostenzeile, wird die Überzahlung per ORDER_COST_OVERPAY nach SUPPLIER_CREDIT reklassiert und
+  // lebt nicht mehr auf AP. Vorher war eine Ausgaben-Überzahlung unmöglich — der Deckel ändert bestehende Daten nicht.
   const expPayments = query(
-    `SELECT COALESCE(SUM(ep.amount), 0) AS t
-     FROM expense_payments ep JOIN expenses e ON e.id = ep.expense_id
-     WHERE e.branch_id = ? AND e.status != 'CANCELLED'`,
+    `SELECT COALESCE(SUM(MIN(x.paid, x.amount)), 0) AS t
+     FROM (SELECT e.amount AS amount, SUM(ep.amount) AS paid
+             FROM expense_payments ep JOIN expenses e ON e.id = ep.expense_id
+            WHERE e.branch_id = ? AND e.status != 'CANCELLED'
+            GROUP BY e.id) x`,
     [branchId]
   );
   return (
@@ -339,6 +344,8 @@ const SOURCE_TABLE_MAP: Record<string, string> = {
   COST_CORRECTION: 'cost_corrections',
   // CONSIGNMENT D3 — sourceId = supplier_credit_refunds.id (ein Geldeingang auf eine Rückforderung).
   SUPPLIER_CREDIT_REFUND: 'supplier_credit_refunds',
+  // CUSTOM-ORDER Kostenkorrektur — sourceId = supplier_credits.id (Guthaben/Rückforderung aus einer Order-Kostenzeile).
+  ORDER_COST_OVERPAY: 'supplier_credits',
   // MIXED-INVOICE P1c — sourceId = customer_credit_refunds.id (eine Auszahlung auf einen Rückzahlungsanspruch).
   CUSTOMER_CREDIT_REFUND: 'customer_credit_refunds',
 };

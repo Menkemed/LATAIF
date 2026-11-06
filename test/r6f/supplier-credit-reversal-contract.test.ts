@@ -338,13 +338,16 @@ function overWelt(): OverWelt {
     return out;
   };
   const del = treffer(/DELETE FROM supplier_credits/g);
+  // CUSTOM-ORDER Kostenkorrektur (Owner) — vierte Stelle: die unbenutzte Überzahlung einer Order-Kostenzeile wird bei einer
+  // Folgeänderung angeglichen (Gegenbuchung ORDER_COST_OVERPAY + Zeile weg, wie der Overpay-Clawback des Einkaufs).
   ok(S(del) === S({
+    'src/core/orders/order-cost-correction.ts': 1,
     'src/core/payables/payables-house.ts': 1, 'src/core/payables/purchase-overpay.ts': 1, 'src/core/purchases/purchase-lifecycle-house.ts': 1,
-  }), `WRITER genau drei Loeschstellen: Standalone-Refund, Overpay-Clawback, Retouren-Umkehr (${S(del)})`);
+  }), `WRITER genau vier Loeschstellen: Standalone-Refund, Overpay-Clawback, Retouren-Umkehr, Order-Kostenkorrektur (${S(del)})`);
   const ins = treffer(/INSERT INTO supplier_credits/g);
-  ok(S(Object.keys(ins).sort()) === S(['src/core/operations/b1-protocol.ts', 'src/core/payables/payables-house.ts',
-    'src/core/payables/purchase-overpay.ts', 'src/core/purchases/purchase-lifecycle-house.ts']),
-  `WRITER Anlage: Retoure (Guthaben), Overpay-Rebook, Standalone-Grant, B1-Fallback (${S(ins)})`);
+  ok(S(Object.keys(ins).sort()) === S(['src/core/operations/b1-protocol.ts', 'src/core/orders/order-cost-correction.ts',
+    'src/core/payables/payables-house.ts', 'src/core/payables/purchase-overpay.ts', 'src/core/purchases/purchase-lifecycle-house.ts']),
+  `WRITER Anlage: Retoure (Guthaben), Overpay-Rebook, Standalone-Grant, B1-Fallback, Order-Kostenkorrektur (${S(ins)})`);
   const upd = treffer(/UPDATE supplier_credits/g);
   ok(S(Object.keys(upd).sort()) === S(['src/core/finance/supplierCreditRestore.ts', 'src/core/operations/b1-protocol.ts', 'src/core/payables/payables-house.ts']),
     `WRITER Aenderung nur used_amount/status: Einloesung (Einkauf, Ausgaben), Restore, B1 (${S(upd)})`);
@@ -379,12 +382,15 @@ function overWelt(): OverWelt {
   const m = findTable(manifest);
   ok(!!m && S((m.allowed_operations as string[]).slice().sort()) === S(['delete', 'insert', 'update']),
     `SYNC das Manifest erlaubt insert/update/delete — die Loeschung reist zum PC2 (${S(m?.allowed_operations)})`);
-  // Leser: Auswahl/Karte nur OPEN; Salden summieren ALLE Zeilen (eine Storno-Zeile muesste dort gefiltert werden).
+  // Leser: Auswahl nur OPEN; die Karte zeigt OPEN und die Rückforderung REFUND_DUE (CUSTOM-ORDER Kostenkorrektur), verfügbar
+  // ist nur OPEN; Salden summieren ALLE Zeilen (eine Storno-Zeile muesste dort gefiltert werden).
   const ss = codeOf(src('src/stores/supplierStore.ts'));
-  ok(/FROM supplier_credits WHERE supplier_id = \? AND branch_id = \? AND status = 'OPEN'/.test(ss)
+  ok(/FROM supplier_credits WHERE supplier_id = \? AND branch_id = \? AND status IN \('OPEN', 'REFUND_DUE'\)/.test(ss)
+    && /credits\.filter\(\(c\) => c\.status === 'OPEN'\)/.test(ss)
+    && /FROM supplier_credits WHERE supplier_id = \? AND status = 'OPEN'/.test(ss)
     // PARTY-BALANCES S0 — dieselbe Summe, jetzt an die Filiale gebunden (supplierLedgerStrict).
     && /SUM\(amount - used_amount\), 0\) AS bal\s*FROM supplier_credits WHERE supplier_id = \? AND branch_id = \?`/.test(ss),
-  'READER Karte/Auswahl lesen nur OPEN; die KPI summiert alle Zeilen');
+  'READER Auswahl liest nur OPEN, die Karte zusätzlich die Rückforderung (verfügbar nur OPEN); die KPI summiert alle Zeilen');
   ok(/FROM supplier_credits\s*WHERE branch_id = \?/.test(codeOf(src('src/core/reports/reconciliation-snapshot.ts')))
     && /FROM supplier_credits WHERE branch_id=\? GROUP BY cid/.test(codeOf(src('src/core/ledger/counterpartyAudit.ts'))),
   'READER Reconciliation und Counterparty-Sektion summieren alle Zeilen der Filiale');

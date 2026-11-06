@@ -27,6 +27,8 @@ import { trackInsert } from '@/core/sync/track';
 import { runOnPrimary } from '@/core/data/primary-action';
 import { readsFromPrimary } from '@/core/data/primary-source';
 import { watchLedgerPosts } from '@/core/ledger/posting';
+import { planOrderCostExpense, applyOrderCostExpense, type CostOverpayChoice, type OrderCostExpenseApplied } from '@/core/orders/order-cost-correction';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { useGoldStore } from '@/stores/goldStore';
 import { useRepairStore } from '@/stores/repairStore';
 import { useOrderStore } from '@/stores/orderStore';
@@ -476,9 +478,15 @@ export function addOrderCostInHouse(actor: GoldActor, req: OrderCostRequest): Or
   return { orderId: req.orderId, lineIds, goldPayableIds, expenseIds, revision: num(liveOrder(req.orderId, actor.branchId).revision) };
 }
 
-export interface OrderCostRemoveRequest { orderId: string; expectedRevision?: number; lineId: string }
+export interface OrderCostRemoveRequest {
+  orderId: string; expectedRevision?: number; lineId: string;
+  /** CUSTOM-ORDER Kostenkorrektur — nur bei einer echten Überzahlung: Guthaben ('credit') oder Rückforderung ('refund'). */
+  overpayChoice?: CostOverpayChoice;
+}
 export interface OrderCostRemoveResult {
   orderId: string; lineId: string; removedGoldPayableIds: string[]; cancelledExpenseId?: string; revision: number;
+  /** Überzahlung aus der schon bezahlten Schuld (0 = keine). */
+  overpay?: number; overpayCreditId?: string; overpayKind?: CostOverpayChoice;
 }
 
 export function removeOrderCostInHouse(actor: GoldActor, req: OrderCostRemoveRequest): OrderCostRemoveResult {
@@ -491,20 +499,19 @@ export function removeOrderCostInHouse(actor: GoldActor, req: OrderCostRemoveReq
   // Der Löschknopf steht nur in der Kostenkarte — eine Kundenposition geht diesen Weg nicht.
   if (num(line.is_customer_facing) !== 0) throw new GoldRejected('LINE_NOT_A_COST_LINE', 'this is a customer line, not a cost line');
   if (str(line.invoice_id)) throw new GoldRejected('LINE_INVOICED', 'Diese Position ist bereits in einer Invoice — erst die Invoice stornieren.');
-  // Eine schon (teil-)bezahlte Lieferantenschuld bleibt: das Löschen der Zeile nähme ihre Zahlungszeilen mit, ließe deren
-  // Buchung (Kasse/Bank an Lieferantenschuld) aber stehen — Schuld und Kasse stimmten nicht mehr. Vor jedem Schreiben.
-  if (str(line.expense_id)) {
-    const e = query('SELECT paid_amount, (SELECT COUNT(*) FROM expense_payments p WHERE p.expense_id = expenses.id) AS n FROM expenses WHERE id = ?', [str(line.expense_id)])[0];
-    if (e && (num(e.paid_amount) > 0.0005 || num(e.n) > 0)) {
-      throw new GoldRejected('ORDER_COST_PAID',
-        'this cost is already (partly) paid to the supplier — reverse that payment first. Nothing was changed.');
-    }
-  }
   const sold = invoicedPieceCorrection(req.orderId, actor.branchId);
   const linked = query('SELECT id, status, fulfilled_grams FROM gold_payables WHERE source_order_line_id = ?', [req.lineId]);
   assertGoldPayablesRemovable(linked, 'Position');
+  // CUSTOM-ORDER Kostenkorrektur (Owner) — eine schon (teil-)bezahlte Lieferantenschuld: die Ausgabe wird storniert, ihre
+  // Zahlungen bleiben stehen, das Bezahlte wird Guthaben oder Rückforderung (Wahl). Geplant VOR jedem Schreiben.
+  // (Vorher: Nein ORDER_COST_PAID — und noch früher nahm das Löschen die Zahlungszeilen mit und ließ ihre Buchung stehen.)
+  const nowIso = new Date().toISOString();
+  const plan = planOrderCostExpense(req.lineId, 0, req.overpayChoice, actor.branchId, nowIso);
   const vorher = sold ? costBasisFils(req.orderId) : 0;
   const check = watchLedgerPosts('orders.remove_cost');
+  const ueber: OrderCostExpenseApplied | null = plan && plan.settledF > 0
+    ? applyOrderCostExpense(plan, { branchId: actor.branchId, userId: actor.userId, now: nowIso }, { orderId: req.orderId, orderLineId: req.lineId })
+    : null;
   useOrderStore.getState().deleteOrderLine(req.lineId);
   if (sold) followInvoicedPiece(sold, req.orderId, actor.branchId, vorher, { removedLineId: req.lineId });
   check();
@@ -515,7 +522,89 @@ export function removeOrderCostInHouse(actor: GoldActor, req: OrderCostRemoveReq
     orderId: req.orderId, lineId: req.lineId,
     removedGoldPayableIds: linked.map((g) => str(g.id)),
     ...(str(line.expense_id) ? { cancelledExpenseId: str(line.expense_id) } : {}),
+    ...(ueber ? { overpay: ueber.overpay, ...(ueber.overpayCreditId ? { overpayCreditId: ueber.overpayCreditId, overpayKind: ueber.overpayKind } : {}) } : {}),
     revision: num(liveOrder(req.orderId, actor.branchId).revision),
+  };
+}
+
+// ── CUSTOM-ORDER Kostenkorrektur: den Betrag einer Kostenzeile ändern ─────────────────────────────────────────
+
+export interface OrderCostChangeRequest {
+  orderId: string; expectedRevision?: number; lineId: string;
+  /** Der neue Betrag der Kostenzeile (> 0; „0" ist Löschen). */
+  newCost: number;
+  /** Nur bei einer echten Überzahlung: Guthaben ('credit') oder Rückforderung ('refund'). */
+  overpayChoice?: CostOverpayChoice;
+}
+export interface OrderCostChangeResult {
+  orderId: string; lineId: string; oldCost: number; newCost: number; expenseId?: string;
+  overpay: number; overpayCreditId?: string; overpayKind?: CostOverpayChoice; revision: number;
+}
+
+/**
+ * „Change Cost" an einer Kostenzeile (Owner-Entscheidung): die Lieferantenschuld folgt dem neuen Betrag (offen bleibt
+ * Betrag − Bezahltes); nur bei einer echten Überzahlung wird gewählt (Guthaben / Rückforderung). Am verkauften Stück
+ * folgt die Rechnungszeile (Einstand, Wareneinsatz, ggf. Margin-VAT) und der Artikel — wie bei „Add Cost".
+ * Goldschuld-Zeilen (Gramm) ändern sich weiter über Entfernen + neu Anlegen.
+ */
+export function changeOrderCostInHouse(actor: GoldActor, req: OrderCostChangeRequest): OrderCostChangeResult {
+  const o = liveOrder(req.orderId, actor.branchId);
+  assertSeenRevision(o, seenRevision(req.expectedRevision));
+  if (str(o.status) === 'cancelled') throw new GoldRejected('ORDER_CANCELLED', 'this order is cancelled — its cost lines stay as they are');
+  const line = query(
+    'SELECT id, order_id, invoice_id, expense_id, is_customer_facing, supplier_id, cost_amount, status FROM order_lines WHERE id = ?', [req.lineId],
+  )[0];
+  if (!line) throw new GoldRejected('LINE_NOT_FOUND', 'no such order line');
+  if (str(line.order_id) !== req.orderId) throw new GoldRejected('LINE_NOT_ON_ORDER', 'this line belongs to another order');
+  if (num(line.is_customer_facing) !== 0) throw new GoldRejected('LINE_NOT_A_COST_LINE', 'this is a customer line, not a cost line');
+  if (str(line.invoice_id)) throw new GoldRejected('LINE_INVOICED', 'this line is on an invoice');
+  if (typeof req.newCost !== 'number' || !Number.isFinite(req.newCost) || Math.round(req.newCost * 1000) <= 0) {
+    throw new GoldRejected('INVALID_INPUT', 'the new cost must be more than 0 — to drop the cost, delete the line');
+  }
+  if (query('SELECT 1 FROM gold_payables WHERE source_order_line_id = ? LIMIT 1', [req.lineId]).length > 0) {
+    throw new GoldRejected('ORDER_COST_GOLD_DEBT',
+      'this is a gold debt in grams — change it by removing the line and adding the gold again. Nothing was changed.');
+  }
+  const altF = Math.round(num(line.cost_amount) * 1000);
+  const neuF = Math.round(req.newCost * 1000);
+  const rev = (): number => num(liveOrder(req.orderId, actor.branchId).revision);
+  if (neuF === altF) {
+    return { orderId: req.orderId, lineId: req.lineId, oldCost: altF / 1000, newCost: neuF / 1000, overpay: 0, revision: rev() };
+  }
+  const sold = invoicedPieceCorrection(req.orderId, actor.branchId);
+  // CUSTOM-ORDER OF3 — am verkauften Stück nur Kosten, die im Lager gebucht sind (Werkstatt).
+  if (sold && !str(line.supplier_id)) {
+    throw new GoldRejected('CUSTOM_COSTS_NOT_BOOKED',
+      'own labour / own gold without a workshop is not supported on an invoiced piece — record the cost with the workshop. Nothing was changed.');
+  }
+  const nowIso = new Date().toISOString();
+  const plan = planOrderCostExpense(req.lineId, neuF, req.overpayChoice, actor.branchId, nowIso);
+  const vorher = sold ? costBasisFils(req.orderId) : 0;
+  const check = watchLedgerPosts('orders.change_cost');
+  getDatabase().run('UPDATE order_lines SET cost_amount = ? WHERE id = ?', [neuF / 1000, req.lineId]);
+  trackUpdate('order_lines', req.lineId, { costAmount: neuF / 1000 });
+  const ueber = plan
+    ? applyOrderCostExpense(plan, { branchId: actor.branchId, userId: actor.userId, now: nowIso }, { orderId: req.orderId, orderLineId: req.lineId })
+    : null;
+  // Eine angekommene Werkstattzeile ohne gebuchte Schuld (bisher 0): jetzt wie bei „Add Cost" als Lieferantenschuld buchen.
+  if (!plan && str(line.supplier_id) && ['ARRIVED', 'DELIVERED'].includes(str(line.status))) {
+    useOrderStore.getState().commitOrderLineExpenses(req.orderId);
+  }
+  logAuditOrThrow({
+    module: 'Orders', entityType: 'order_lines', entityId: req.lineId, action: 'UPDATE', field: 'cost_amount',
+    oldValue: { costAmount: altF / 1000 },
+    newValue: { costAmount: neuF / 1000, orderId: req.orderId, ...(ueber ? { expenseId: ueber.expenseId, overpay: ueber.overpay } : {}) },
+    actor: { userId: actor.userId || undefined, branchId: actor.branchId },
+  });
+  if (sold) followInvoicedPiece(sold, req.orderId, actor.branchId, vorher, { changedLineId: req.lineId, oldCost: altF / 1000, newCost: neuF / 1000 });
+  check();
+  useOrderStore.getState().loadOrders();
+  return {
+    orderId: req.orderId, lineId: req.lineId, oldCost: altF / 1000, newCost: neuF / 1000,
+    ...(ueber ? { expenseId: ueber.expenseId } : {}),
+    overpay: ueber?.overpay ?? 0,
+    ...(ueber?.overpayCreditId ? { overpayCreditId: ueber.overpayCreditId, overpayKind: ueber.overpayKind } : {}),
+    revision: rev(),
   };
 }
 
@@ -552,7 +641,12 @@ export function orderCostBody(req: OrderCostRequest): Record<string, unknown> {
 }
 
 export function orderCostRemoveBody(req: OrderCostRemoveRequest): Record<string, unknown> {
-  return compact({ orderId: req.orderId, expectedRevision: req.expectedRevision, lineId: req.lineId });
+  return compact({ orderId: req.orderId, expectedRevision: req.expectedRevision, lineId: req.lineId, overpayChoice: req.overpayChoice });
+}
+
+/** CUSTOM-ORDER Kostenkorrektur — derselbe Fernbefehl `orders.remove_cost`, mit `newCost` = „Change Cost". */
+export function orderCostChangeBody(req: OrderCostChangeRequest): Record<string, unknown> {
+  return compact({ orderId: req.orderId, expectedRevision: req.expectedRevision, lineId: req.lineId, newCost: req.newCost, overpayChoice: req.overpayChoice });
 }
 
 // ── Die Maske des Primary ─────────────────────────────────────────────────
@@ -638,4 +732,9 @@ export async function addOrderCostOnPrimary(req: OrderCostRequest): Promise<Orde
 export async function removeOrderCostOnPrimary(req: OrderCostRemoveRequest): Promise<OrderCostRemoveResult> {
   const actor = primaryActor('removing an order cost line');
   return runOnPrimary(() => removeOrderCostInHouse(actor, req), frischLesen);
+}
+
+export async function changeOrderCostOnPrimary(req: OrderCostChangeRequest): Promise<OrderCostChangeResult> {
+  const actor = primaryActor('changing an order cost');
+  return runOnPrimary(() => changeOrderCostInHouse(actor, req), frischLesen);
 }

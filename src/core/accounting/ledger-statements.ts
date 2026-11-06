@@ -206,6 +206,7 @@ const DOCUMENT_LOOKUPS: Readonly<Record<string, readonly string[]>> = {
   PURCHASE_PAYMENT: ['SELECT p.purchase_number AS n FROM purchase_payments pp JOIN purchases p ON p.id = pp.purchase_id WHERE pp.id = ?', 'SELECT purchase_number AS n FROM purchases WHERE id = ?'],
   PURCHASE_RETURN: ['SELECT purchase_number AS n FROM purchases WHERE id = ?'],
   PURCHASE_OVERPAY: ['SELECT purchase_number AS n FROM purchases WHERE id = ?'],
+  ORDER_COST_OVERPAY: ['SELECT note AS n FROM supplier_credits WHERE id = ?'],
   EXPENSE: ['SELECT expense_number AS n FROM expenses WHERE id = ?'],
   EXPENSE_PAYMENT: ['SELECT e.expense_number AS n FROM expense_payments ep JOIN expenses e ON e.id = ep.expense_id WHERE ep.id = ?', 'SELECT expense_number AS n FROM expenses WHERE id = ?'],
   LOAN: ['SELECT loan_number AS n FROM debts WHERE id = ?'],

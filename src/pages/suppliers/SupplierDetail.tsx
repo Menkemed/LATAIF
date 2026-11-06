@@ -40,7 +40,7 @@ import { saveSupplierActive, saveSupplierUpdate } from '@/core/masterdata/master
 // CENTRAL-UI-PARITY R6D — „Refund Credit" ist EINE Buchung (`suppliers.refund_credit`); die Guthaben-
 // Karte liest die filialgebundene Auskunft `suppliers.credits.get` (auch auf PC2).
 import { PAYABLES_OP } from '@/core/payables/payables-house';
-import { saveSupplierRefund } from '@/core/payables/payables-save';
+import { saveSupplierRefund, saveSupplierCreditRepayment } from '@/core/payables/payables-save';
 import { IdentityPhotoField } from '@/components/identity/IdentityPhotoField';
 
 function fmt(v: number): string {
@@ -57,6 +57,8 @@ const CREDIT_KIND_LABEL: Record<SupplierCreditDisplay['kind'], string> = {
   standalone: 'Standalone',
   purchase_overpay: 'Purchase Overpayment',
   return: 'Purchase Return Credit',
+  order_cost_overpay: 'Order Cost Overpayment',
+  repayment_claim: 'Repayment Claim (Order Cost)',
 };
 
 export function SupplierDetail() {
@@ -115,6 +117,12 @@ export function SupplierDetail() {
   // offener Ausgang wiederholt DIESELBE Absicht.
   const erstatten = useSharedWrite<Record<string, unknown>>(PAYABLES_OP.SUPPLIERS_REFUND_CREDIT);
   const [refundFehler, setRefundFehler] = useState('');
+  // CUSTOM-ORDER Kostenkorrektur — „Record Repayment" auf eine Rückforderung aus einer Order-Kostenzeile (dieselbe
+  // Buchung suppliers.refund_credit wie bei der Konsignations-Rückforderung).
+  const [repayCredit, setRepayCredit] = useState<SupplierCreditDisplay | null>(null);
+  const [repayAmount, setRepayAmount] = useState('');
+  const [repayMethod, setRepayMethod] = useState<'cash' | 'bank' | 'benefit'>('bank');
+  const [repayDate, setRepayDate] = useState('');
 
   useEffect(() => {
     loadSuppliers(); loadPurchases(); loadExpenses(); loadCustomers(); loadInvoices(); goldLoadAll();
@@ -283,6 +291,20 @@ export function SupplierDetail() {
     setRefreshKey(k => k + 1);
     if (r.kind !== 'ok') { setRefundFehler(fehlertext(r)); return; }
     setRefundCredit(null);
+  }
+
+  async function handleRecordRepayment() {
+    if (!repayCredit || erstatten.busy) return;
+    const amount = Number(repayAmount);
+    if (!(amount > 0)) { setRefundFehler('Enter the amount that came back.'); return; }
+    if (amount > repayCredit.remaining + 0.0005) { setRefundFehler(`At most ${repayCredit.remaining.toFixed(3)} BHD is still open.`); return; }
+    setRefundFehler('');
+    const r = await saveSupplierCreditRepayment(erstatten, {
+      creditId: repayCredit.id, amount, method: repayMethod, receivedDate: repayDate || undefined,
+    });
+    setRefreshKey(k => k + 1);
+    if (r.kind !== 'ok') { setRefundFehler(fehlertext(r)); return; }
+    setRepayCredit(null);
   }
 
   async function handleToggleActive() {
@@ -788,7 +810,19 @@ export function SupplierDetail() {
                       {c.kind === 'standalone' ? (c.method ?? 'Unavailable') : '—'}
                     </span>
                     <span style={{ padding: '6px 0', borderTop: '1px solid #E5E9EE', textAlign: 'right' }}>
-                      {c.refundable ? (
+                      {c.kind === 'repayment_claim' ? (
+                        <button
+                          onClick={() => { setRefundFehler(''); setRepayAmount(c.remaining.toFixed(3)); setRepayDate(''); setRepayCredit(c); }}
+                          data-supplier-repay-open={c.id}
+                          style={{
+                            fontSize: 11, padding: '4px 12px', border: '1px solid #0F0F10',
+                            borderRadius: 4, background: 'transparent', color: '#0F0F10',
+                            cursor: 'pointer', fontWeight: 500,
+                          }}
+                          title="The supplier paid this claim back (fully or partly)">
+                          Record Repayment
+                        </button>
+                      ) : c.refundable ? (
                         <button
                           onClick={() => { setRefundFehler(''); setRefundCredit(c); }}
                           data-supplier-refund-open={c.id}
@@ -863,6 +897,39 @@ export function SupplierDetail() {
               <Button variant="ghost" onClick={() => setRefundCredit(null)} disabled={erstatten.busy}>Cancel</Button>
               <Button variant="danger" onClick={() => void handleRefundCredit()} disabled={erstatten.busy} data-supplier-refund-save>
                 {erstatten.busy ? 'Refunding…' : 'Refund Credit'}
+              </Button>
+            </div>
+          </>
+        )}
+      </Modal>
+
+      <Modal open={!!repayCredit} onClose={() => { if (!erstatten.busy) setRepayCredit(null); }} title="Record Repayment" width={440}>
+        {repayCredit && (
+          <>
+            <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '8px 16px', marginBottom: 16, fontSize: 13 }}>
+              <span style={{ color: '#6B7280' }}>Supplier</span>
+              <span style={{ color: '#0F0F10', fontWeight: 500 }}>{supplier.name}</span>
+              <span style={{ color: '#6B7280' }}>Still open</span>
+              <span className="font-mono" style={{ color: '#0F0F10', fontWeight: 600 }}><Bhd v={repayCredit.remaining}/> BHD</span>
+            </div>
+            <div style={{ display: 'grid', gap: 12, marginBottom: 16 }}>
+              <Input label="AMOUNT RECEIVED (BHD)" type="number" value={repayAmount} onChange={e => setRepayAmount(e.target.value)} data-supplier-repay-amount />
+              <label style={{ fontSize: 12, color: '#6B7280' }}>
+                METHOD
+                <select value={repayMethod} onChange={e => setRepayMethod(e.target.value as 'cash' | 'bank' | 'benefit')} data-supplier-repay-method
+                  style={{ display: 'block', width: '100%', marginTop: 4, padding: '8px 10px', border: '1px solid #D5D9DE', borderRadius: 6, fontSize: 13 }}>
+                  <option value="bank">Bank</option>
+                  <option value="cash">Cash</option>
+                  <option value="benefit">Benefit</option>
+                </select>
+              </label>
+              <Input label="DATE RECEIVED (empty = today)" type="date" value={repayDate} onChange={e => setRepayDate(e.target.value)} data-supplier-repay-date />
+            </div>
+            <WriteError text={refundFehler} />
+            <div className="flex justify-end gap-3">
+              <Button variant="ghost" onClick={() => setRepayCredit(null)} disabled={erstatten.busy}>Cancel</Button>
+              <Button variant="primary" onClick={() => void handleRecordRepayment()} disabled={erstatten.busy} data-supplier-repay-save>
+                {erstatten.busy ? 'Saving…' : 'Record Repayment'}
               </Button>
             </div>
           </>

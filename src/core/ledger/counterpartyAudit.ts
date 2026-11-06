@@ -203,10 +203,12 @@ function domainApMap(run: SqlRunner, branchId: string): FilsMap {
      JOIN purchases pu ON pu.id=pp.purchase_id
      WHERE pu.branch_id=? AND pu.status!='CANCELLED' GROUP BY cid`,
     [branchId], -1, bhd);
+  // CUSTOM-ORDER Kostenkorrektur — je Ausgabe auf ihren Betrag gedeckelt (Überzahlung lebt als ORDER_COST_OVERPAY).
   accumulate(run,
-    `SELECT COALESCE(e.supplier_id,'') AS cid, COALESCE(SUM(ep.amount),0) AS t
-     FROM expense_payments ep JOIN expenses e ON e.id=ep.expense_id
-     WHERE e.branch_id=? AND e.status!='CANCELLED' GROUP BY cid`,
+    `SELECT x.cid AS cid, COALESCE(SUM(MIN(x.paid, x.amount)),0) AS t
+     FROM (SELECT COALESCE(e.supplier_id,'') AS cid, e.amount AS amount, SUM(ep.amount) AS paid
+             FROM expense_payments ep JOIN expenses e ON e.id=ep.expense_id
+            WHERE e.branch_id=? AND e.status!='CANCELLED' GROUP BY e.id) x GROUP BY x.cid`,
     [branchId], -1, bhd);
   return toFilsMap(bhd);
 }
@@ -435,7 +437,9 @@ function auditCreditIntegrity(run: SqlRunner, branchId: string): CreditIssue[] {
     if (amt <= 0) issues.push({ kind: 'overused', severity: 'error', side: 'supplier', entityId: id, counterpartyId: cp, amountFils: amt, detail: `amount<=0 (${amt} fils)` });
     if (used < 0) issues.push({ kind: 'overused', severity: 'error', side: 'supplier', entityId: id, counterpartyId: cp, amountFils: used, detail: `used_amount<0 (${used} fils)` });
     if (used > amt) issues.push({ kind: 'overused', severity: 'error', side: 'supplier', entityId: id, counterpartyId: cp, amountFils: used - amt, detail: `used>amount (used ${used} > amount ${amt} fils)` });
-    const expectedStatus = used >= amt - 5 ? 'USED' : 'OPEN';
+    // CUSTOM-ORDER Kostenkorrektur — eine Rückforderung (REFUND_DUE) ist voll zurückgezahlt 'REFUNDED'.
+    const claim = String(r.status) === 'REFUND_DUE' || String(r.status) === 'REFUNDED';
+    const expectedStatus = claim ? (used >= amt - 5 ? 'REFUNDED' : 'REFUND_DUE') : (used >= amt - 5 ? 'USED' : 'OPEN');
     if (String(r.status) !== expectedStatus) issues.push({ kind: 'inconsistent_status', severity: 'warning', side: 'supplier', entityId: id, counterpartyId: cp, detail: `status='${r.status}' erwartet '${expectedStatus}' (used ${used}/amount ${amt} fils)` });
     const applied = appliedFils.get(id) ?? 0;
     if (applied !== used) issues.push({ kind: 'used_drift', severity: 'warning', side: 'supplier', entityId: id, counterpartyId: cp, amountFils: applied - used, detail: `Σ credit-Payments ${applied} ≠ used_amount ${used} fils` });
@@ -444,6 +448,7 @@ function auditCreditIntegrity(run: SqlRunner, branchId: string): CreditIssue[] {
     let sev: CreditIssueSeverity = 'error';
     if (r.source_return_id) { expectKey = null; sev = 'warning'; }                                    // Return-Credit: Ledger-Key nicht 1:1 bewiesen
     else if (r.source_purchase_id) expectKey = `PURCHASE_OVERPAY|${r.source_purchase_id}`;            // Purchase-Overpay
+    else if (scGrantKeys.has(`ORDER_COST_OVERPAY|${id}`)) expectKey = `ORDER_COST_OVERPAY|${id}`;          // Order-Kostenkorrektur
     else expectKey = `SUPPLIER_PREPAYMENT|${id}`;                                                     // Standalone
     if (expectKey === null) {
       issues.push({ kind: 'credit_no_ledger', severity: 'warning', side: 'supplier', entityId: id, counterpartyId: cp, detail: `Return-Credit (source_return_id gesetzt) — Ledger-Key nicht eindeutig beweisbar (unverifiable)` });
@@ -458,7 +463,7 @@ function auditCreditIntegrity(run: SqlRunner, branchId: string): CreditIssue[] {
     let found = false;
     let sev: CreditIssueSeverity = 'error';
     if (mod === 'PURCHASE_OVERPAY') found = scByPurchase.has(sid);
-    else if (mod === 'SUPPLIER_PREPAYMENT') found = scIds.has(sid);
+    else if (mod === 'SUPPLIER_PREPAYMENT' || mod === 'ORDER_COST_OVERPAY') found = scIds.has(sid);
     else { sev = 'warning'; found = true; } // Return-/unbekannte Module → nicht hart werten
     if (!found) issues.push({ kind: 'ledger_no_credit', severity: sev, side: 'supplier', entityId: `${mod}|${sid}`, detail: `SUPPLIER_CREDIT-Grant ohne passende supplier_credits-Row (${mod})` });
   }

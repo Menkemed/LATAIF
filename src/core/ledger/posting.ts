@@ -171,6 +171,11 @@ export type SourceModule =
   // NICHT dokument-gebunden (supplier_credits source_purchase_id IS NULL AND source_return_id IS NULL).
   // Gekeyt auf die supplier_credits-Row-id; Reverse via deleteStandaloneSupplierCredit (Refund).
   | 'SUPPLIER_PREPAYMENT'
+  // CUSTOM-ORDER Kostenkorrektur — sinkt eine Order-Kostenzeile unter das schon an den Lieferanten Bezahlte, wird die
+  // Überzahlung DR SUPPLIER_CREDIT / CR ACCOUNTS_PAYABLE reklassiert (dieselbe Paarung wie PURCHASE_OVERPAY). Gekeyt auf
+  // supplier_credits.id (Zeile ohne source_purchase_id/source_return_id): Guthaben (status OPEN, verrechenbar) oder
+  // Rückforderung (status REFUND_DUE, „Record Repayment"). Die Originalzahlungen bleiben unverändert.
+  | 'ORDER_COST_OVERPAY'
   // CONSIGNMENT D3 — ein tatsächlicher Geldeingang auf ein Lieferanten-Guthaben aus einer Retoure (die offene
   // Rückforderung an den Einlieferer): DR CASH|BANK|BENEFIT / CR SUPPLIER_CREDIT — dieselbe Kontenpaarung wie der
   // „Refund Credit" (reverseSource SUPPLIER_PREPAYMENT), nur als eigener, teilbarer Beleg mit Tag und Weg.
@@ -2069,6 +2074,37 @@ export function postPurchaseOverpaymentCredit(
       },
     ],
     { occurredAt, sourceModule: 'PURCHASE_OVERPAY', sourceId: purchaseId }
+  );
+}
+
+// CUSTOM-ORDER Kostenkorrektur — die Überzahlung einer gesenkten oder gelöschten Order-Kostenzeile:
+//   DR SUPPLIER_CREDIT  (der Lieferant schuldet die Differenz: Guthaben oder Rückforderung)
+//   CR ACCOUNTS_PAYABLE (die schon bezahlte, nun zu hohe Lieferantenschuld wird auf den neuen Betrag gebracht)
+// Kein Geld fließt; die Originalzahlungen (EXPENSE_PAYMENT) bleiben. sourceId = supplier_credits.id.
+export function postOrderCostOverpay(
+  creditId: string,
+  supplierId: string,
+  amount: number,
+  occurredAt: string,
+  meta: { expenseId: string; orderId: string; orderLineId: string; choice: 'credit' | 'refund' },
+): PostingResult {
+  const amt = ROUND(amount);
+  if (amt <= 0) {
+    throw new Error(`postOrderCostOverpay: amount must be > 0 (got ${amount})`);
+  }
+  const metadata = { ...meta, kind: 'order_cost_overpay' };
+  return postEntries(
+    [
+      {
+        account: 'SUPPLIER_CREDIT', direction: 'DEBIT', amount: amt,
+        counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata,
+      },
+      {
+        account: 'ACCOUNTS_PAYABLE', direction: 'CREDIT', amount: amt,
+        counterpartyType: 'SUPPLIER', counterpartyId: supplierId, metadata,
+      },
+    ],
+    { occurredAt, sourceModule: 'ORDER_COST_OVERPAY', sourceId: creditId }
   );
 }
 
