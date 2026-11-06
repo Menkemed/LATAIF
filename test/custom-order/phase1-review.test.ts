@@ -495,12 +495,32 @@ setOpeningCutoffForTest(null);
   ok(c3 === 'CUSTOM_CATEGORY_NO_SKU_CODE' && /ITM-GEN/.test(m3) && /Silver/.test(m3) && stand() === vor,
     `R8 Primary Kategorie ohne SKU-Kürzel: Nein statt ITM-GEN, nichts geschrieben (${c3}: ${m3})`);
   ok(n(db, "SELECT COUNT(*) FROM products WHERE sku LIKE 'ITM-GEN%'") === 0, 'R8 kein ITM-GEN-Artikel entstanden');
-  // Eine an der Order eingetragene SKU gilt auch in einer Kategorie ohne Kürzel (kein Zähler, kein ITM-GEN).
-  setCat(oid, 'cat-silver', 'SLV-RING-001');
+  ok(!/enter a SKU/i.test(m3), `R8 die Meldung bietet keine manuelle SKU als Ausweg an (${m3})`);
+  // Owner-Regel: eine an der Order eingetragene (manuelle) SKU umgeht die Kategorieprüfung NICHT.
+  for (const [cat, code, was] of [['', 'CUSTOM_CATEGORY_MISSING', 'ohne Kategorie'], ['cat-off', 'CUSTOM_CATEGORY_INACTIVE', 'inaktive Kategorie'],
+    ['cat-silver', 'CUSTOM_CATEGORY_NO_SKU_CODE', 'Kategorie ohne Kürzel']] as const) {
+    setCat(oid, cat, 'LAT-RING-001');
+    vor = stand();
+    const c = nein(() => umwandeln(oid));
+    ok(c === code && stand() === vor && n(db, "SELECT COUNT(*) FROM products WHERE sku = 'LAT-RING-001'") === 0,
+      `R8 Primary manuelle SKU + ${was}: trotzdem Nein, nichts geschrieben (${c})`);
+  }
+  // Manuelle SKU in einer gültigen Kategorie: übernommen, Kategorie am Artikel, kein Zählerschritt.
+  setCat(oid, 'cat-gold-jewelry', 'LAT-RING-001');
+  const zaehlerVor = S(rows(db, 'SELECT stem, next_number FROM sku_sequences ORDER BY stem'));
   const typed = umwandeln(oid);
-  ok(s(db, 'SELECT sku FROM products WHERE id = ?', [typed.productIds[0]]) === 'SLV-RING-001'
-    && n(db, "SELECT COUNT(*) FROM sku_sequences WHERE stem LIKE 'ITM-GEN%'") === 0,
-    'R8 eingetragene SKU in einer Kategorie ohne Kürzel: übernommen, kein ITM-GEN');
+  const tp = rows(db, 'SELECT sku, category_id, origin_type FROM products WHERE id = ?', [typed.productIds[0]])[0];
+  ok(tp.sku === 'LAT-RING-001' && tp.category_id === 'cat-gold-jewelry' && tp.origin_type === 'CUSTOM_ORDER'
+    && S(rows(db, 'SELECT stem, next_number FROM sku_sequences ORDER BY stem')) === zaehlerVor,
+    `R8 manuelle SKU + Gold-Kategorie: übernommen, Kategorie am Artikel, Zähler unverändert (${S(tp)})`);
+  // Storno + erneut, während die Order inzwischen eine ungültige Kategorie trägt: der verknüpfte Artikel bleibt unbeschädigt.
+  cancelInv(typed.invoiceId);
+  setCat(oid, 'cat-silver', 'LAT-RING-001');
+  const tAgain = umwandeln(oid);
+  const tp2 = rows(db, 'SELECT sku, category_id, origin_type, origin_order_id FROM products WHERE id = ?', [typed.productIds[0]])[0];
+  ok(tAgain.productIds[0] === typed.productIds[0] && tp2.sku === 'LAT-RING-001' && tp2.category_id === 'cat-gold-jewelry'
+    && tp2.origin_order_id === oid && n(db, "SELECT COUNT(*) FROM products WHERE sku = 'LAT-RING-001'") === 1,
+    `R8 Storno + erneut (manuelle SKU): derselbe Artikel, SKU und Kategorie unverändert, kein Duplikat (${S(tp2)})`);
   // Gold-Kategorie: ITM-GLD. Storno + erneut ohne Kategorie: der verknüpfte Artikel bleibt (keine Sperre, kein Duplikat).
   const oidG = anlegen({ ...ORD2, depositAmount: 50, paymentMethod: 'benefit' });
   setCat(oidG, '');
@@ -525,6 +545,13 @@ setOpeningCutoffForTest(null);
   const rP = await fern(() => fin.runConvertOrder(deps(db), identity('81', 'orders.convert_to_invoice'),
     { orderId: oidP, expectedRevision: orev(db, oidP), taxSchemes: { [lineP]: 'ZERO' }, invoiceDate: '2026-11-01' }));
   ok(!rP.ok && /CUSTOM_CATEGORY_MISSING/.test(rP.code) && stand() === vor, `R8 PC2 ohne Kategorie: Nein, nichts geschrieben (${rP.code})`);
+  for (const [cat, code, nr] of [['', 'CUSTOM_CATEGORY_MISSING', '85'], ['cat-silver', 'CUSTOM_CATEGORY_NO_SKU_CODE', '86']] as const) {
+    setCat(oidP, cat, 'LAT-PC2-001');
+    vor = stand();
+    const r = await fern(() => fin.runConvertOrder(deps(db), identity(nr, 'orders.convert_to_invoice'),
+      { orderId: oidP, expectedRevision: orev(db, oidP), taxSchemes: { [lineP]: 'ZERO' }, invoiceDate: '2026-11-01' }));
+    ok(!r.ok && r.code.includes(code) && stand() === vor, `R8 PC2 manuelle SKU + ${cat || 'keine Kategorie'}: dasselbe Nein, nichts geschrieben (${r.code})`);
+  }
   setCat(oidP, 'cat-gold-jewelry');
   const rP2 = await fern(() => fin.runConvertOrder(deps(db), identity('82', 'orders.convert_to_invoice'),
     { orderId: oidP, expectedRevision: orev(db, oidP), taxSchemes: { [lineP]: 'ZERO' }, invoiceDate: '2026-11-01' }));
@@ -544,6 +571,16 @@ setOpeningCutoffForTest(null);
   setCat(oidL, 'cat-silver');
   vor = stand();
   ok(nein(() => umwandeln(oidL, { legacyScheme: 'MARGIN' })) === 'CUSTOM_CATEGORY_NO_SKU_CODE' && stand() === vor, 'R8 Altweg Kategorie ohne Kürzel: Nein statt ITM-GEN');
+  // Altweg mit manueller SKU: Primary und PC2 prüfen die Kategorie trotzdem.
+  for (const [cat, code, nr] of [['', 'CUSTOM_CATEGORY_MISSING', '87'], ['cat-off', 'CUSTOM_CATEGORY_INACTIVE', '88'], ['cat-silver', 'CUSTOM_CATEGORY_NO_SKU_CODE', '89']] as const) {
+    setCat(oidL, cat, 'LAT-LEG-001');
+    vor = stand();
+    const cP = nein(() => umwandeln(oidL, { legacyScheme: 'MARGIN' }));
+    const rR = await fern(() => fin.runConvertOrder(deps(db), identity(nr, 'orders.convert_to_invoice'),
+      { orderId: oidL, expectedRevision: orev(db, oidL), legacyScheme: 'MARGIN', invoiceDate: '2026-11-01' }));
+    ok(cP === code && !rR.ok && rR.code.includes(code) && stand() === vor,
+      `R8 Altweg manuelle SKU + ${cat || 'keine Kategorie'}: Primary und PC2 dasselbe Nein, nichts geschrieben (${cP} / ${rR.code})`);
+  }
   setCat(oidL, 'cat-gold-jewelry');
   const l1 = umwandeln(oidL, { legacyScheme: 'MARGIN' });
   const lSku = s(db, 'SELECT sku FROM products WHERE id = ?', [l1.productIds[0]]);

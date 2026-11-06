@@ -215,6 +215,13 @@ function seed() {
       custom_product_spec: JSON.stringify({ ...spec, categoryId: '', name: 'Bangle' }), created_at: now, updated_at: now });
     insert(db, 'order_lines', { id: 'co-nocat-l1', order_id: 'co-nocat', position: 1, quantity: 1, status: 'ARRIVED', description: 'Bangle 21K',
       unit_price: 300, is_customer_facing: 1, created_at: now, updated_at: now });
+    // …und eine mit MANUELLER SKU in einer Kategorie ohne SKU-Kürzel: die SKU umgeht die Kategorieprüfung nicht.
+    insert(db, 'categories', { id: 'co-cat-silver', branch_id, name: 'Silver E2E', icon: 'Gem', color: '#999', attributes: '[]', scope_options: '[]', condition_options: '[]', active: 1, sort_order: 9, created_at: now, updated_at: now });
+    insert(db, 'orders', { id: 'co-skucat', branch_id, order_number: 'ORD-2026-E2E04', customer_id: 'co-kunde', type: 'custom', status: 'completed',
+      agreed_price: 280, remaining_amount: 280, requested_brand: 'Custom Order', requested_model: 'Pendant', order_date: '2026-10-28', category_id: 'co-cat-silver',
+      custom_product_spec: JSON.stringify({ ...spec, categoryId: 'co-cat-silver', sku: 'LAT-E2E-001', name: 'Pendant' }), created_at: now, updated_at: now });
+    insert(db, 'order_lines', { id: 'co-skucat-l1', order_id: 'co-skucat', position: 1, quantity: 1, status: 'ARRIVED', description: 'Pendant',
+      unit_price: 280, is_customer_facing: 1, created_at: now, updated_at: now });
   } finally { try { db.close(); } catch { /* zu */ } }
 }
 const saldo = (account, where = '1=1', p = []) => Math.round(Number(dbQ(BIZ_DB,
@@ -431,6 +438,30 @@ try {
       `Kategorie fehlt PC2: die Maske zeigt das Nein mit Grund (${String(text).slice(0, 200)})`);
     ok(stand() === vor && Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM products WHERE sku LIKE 'ITM-GEN%'")[0]?.n ?? 0) === 0,
       `Kategorie fehlt PC2: nichts geschrieben — kein Artikel, keine Rechnung, Zähler unverändert, kein ITM-GEN (${stand() === vor ? 'gleich' : stand()})`);
+  }
+
+  // ── 8 PC2 manuelle SKU an der Order + Kategorie ohne SKU-Kürzel: trotzdem Nein, nichts geschrieben ────────────────
+  {
+    const stand = () => S({
+      p: dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM products')[0]?.n, i: dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM invoices')[0]?.n,
+      sq: dbQ(BIZ_DB, 'SELECT stem, next_number FROM sku_sequences ORDER BY stem'),
+      o: dbQ(BIZ_DB, "SELECT product_id, invoice_id, status FROM orders WHERE id = 'co-skucat'"),
+    });
+    await spuelen(primary).catch(() => null);
+    const vor = stand();
+    await gehFrisch(client, '/orders/co-skucat');
+    await warteBis(client, "[...document.querySelectorAll('button')].some((b)=>b.textContent.trim()==='Create Invoice')", 40000);
+    await clickText(client, 'Create Invoice');
+    const dlg = await warteBis(client, "!!document.querySelector('[data-testid=\"order-invoice-date\"]')", 20000);
+    const go = await client.ev("const m=[...document.querySelectorAll('[role=\"dialog\"], .fixed')].find((d)=>d.querySelector('[data-testid=\"order-invoice-date\"]')); const b=m && [...m.querySelectorAll('button')].filter((x)=>x.textContent.trim()==='Create Invoice').pop(); if(!b) return 'NO'; if(b.disabled) return 'DISABLED'; b.click(); return 'OK';");
+    const meldet = await warteBis(client, "[...document.querySelectorAll('[data-save-error]')].some((d)=>/not valid for a custom piece/.test(d.textContent||''))", 30000);
+    const text = await client.ev("return [...document.querySelectorAll('[data-save-error]')].map((d)=>d.textContent).join(' | ');");
+    await spuelen(primary).catch(() => null);
+    await sleep(800);
+    ok(dlg && go === 'OK' && meldet && /Silver E2E/.test(String(text)) && !/enter a SKU/i.test(String(text)),
+      `manuelle SKU PC2: die Kategorie wird trotzdem geprüft — Nein mit Grund (${String(text).slice(0, 200)})`);
+    ok(stand() === vor && Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM products WHERE sku = 'LAT-E2E-001'")[0]?.n ?? 0) === 0,
+      `manuelle SKU PC2: nichts geschrieben, kein Artikel mit der eingetragenen SKU (${stand() === vor ? 'gleich' : stand()})`);
   }
 } catch (e) {
   FAIL++; fails.push('harness: ' + (e?.message ?? e)); console.error(e);

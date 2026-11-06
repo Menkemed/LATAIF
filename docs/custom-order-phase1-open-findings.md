@@ -4,6 +4,15 @@ Stand: Branch `feature/custom-order-k1-k2-k3a` (K1, K2, K3a, Review-Findings, Ab
 Keiner dieser Punkte ist umgesetzt. Jeder braucht eine eigene Freigabe; wo eine fachliche Entscheidung fehlt, steht sie
 unter **Zu entscheiden**. Kein Gegenkonto, keine NBR-Zeile und kein Ablauf ist festgelegt.
 
+> **⚠ Mögliche Release-Blocker (vor einem Release dieser Phase zu entscheiden):**
+> - **OF3** — eigene Kosten ohne Lieferant: `INVENTORY` im Hauptbuch sinkt beim Verkauf eines Sonderstücks unter den
+>   Lagerwert (kann negativ werden).
+> - **OF5a** — Retoure nach getrennt gebuchter Goldschuld-Differenz: die Differenz bleibt im Wareneinsatz, obwohl das
+>   Stück zurück im Lager ist.
+>
+> Beide betreffen Hauptbuch und Gewinn eines verkauften Sonderstücks, nicht nur die Anzeige. Noch nicht umgesetzt; Owner
+> entscheidet, ob sie vor dem Release behoben oder ausdrücklich in Kauf genommen werden.
+
 ## OF1 — Gesonderter VAT-Korrekturvorgang bei geschlossenen Quartalen (Buchhaltung, mittel)
 
 **Heute:** Eine Einstandsänderung an einem verkauften Stück, dessen Rechnung nicht mehr berichtigt werden darf, wird
@@ -57,7 +66,7 @@ Kategorie `Inventory` ausschließen. Alternativ direkt aus dem Hauptbuch (Aufwan
 **Zu entscheiden:** Zahlungssicht (Geldabfluss) oder Aufwandssicht (Hauptbuch)? Gehören aktivierte Kosten in
 eine eigene Zeile „Inventory purchases"?
 
-## OF3 — Eigene Kosten ohne Lieferant werden nicht aktiviert (Hauptbuch, mittel; Paket G1)
+## OF3 — Eigene Kosten ohne Lieferant werden nicht aktiviert (Hauptbuch, mittel bis hoch; Paket G1) — ⚠ MÖGLICHER RELEASE-BLOCKER
 
 **Heute:** `commitOrderLineExpenses` (`src/stores/orderStore.ts:1088–1091`) bucht nur Kostenzeilen **mit**
 `supplier_id` (Soll `INVENTORY` / Haben A/P bzw. `GOLD_LIABILITY`). Eine Kostenzeile ohne Lieferant (eigene Arbeit,
@@ -85,9 +94,12 @@ hat, kann sein Verbrauch für eine Order gegen `GOLD_STOCK` aktiviert werden. F�
 
 ## OF5 — Kleinere Randfälle (gering)
 
-- **Retoure nach getrennter Korrektur:** Wird ein Stück nach einer `SEPARATE`-Begleichung (OF1) per Retoure
-  zurückgenommen, bleibt die Differenz im Wareneinsatz. Das ist dieselbe Lücke wie bei D1-Belegen und Retouren. Der
-  Rechnungsstorno nimmt die Differenz dagegen ins Lager zurück (`moveGoldSeparateBackToStock`).
+- **OF5a — Retoure nach getrennter Korrektur — ⚠ MÖGLICHER RELEASE-BLOCKER (Hauptbuch, mittel):** Wird ein Stück
+  nach einer `SEPARATE`-Begleichung (OF1) per Retoure zurückgenommen, bleibt die Differenz im Wareneinsatz
+  (`COGS`), obwohl das Stück zum tatsächlichen Einstand zurück im Lager steht. Gewinn und Lagerwert passen dann nicht
+  zusammen. Dieselbe Lücke besteht bei D1-Belegen und Retouren. Der Rechnungsstorno nimmt die Differenz dagegen ins
+  Lager zurück (`moveGoldSeparateBackToStock`). **Zu entscheiden:** die Retoure nimmt die Differenz wie der Storno mit
+  (Soll `INVENTORY` / Haben `COGS`, im Retourendatum), oder der Fall wird ausdrücklich in Kauf genommen.
 - **Rücknahme einer berichtigten Begleichung nach Quartalsmeldung:** Wurde die Rechnung im offenen Quartal berichtigt
   (`cost_mode = 'INVOICE'`) und ist das Quartal inzwischen gemeldet, wird die Rücknahme abgelehnt
   (`SETTLEMENT_INVOICE_PERIOD_CLOSED`). Der Weg ist eine neue Begleichung. Eine `SEPARATE`-Begleichung braucht zum
@@ -97,8 +109,8 @@ hat, kann sein Verbrauch für eine Order gegen `GOLD_STOCK` aktiviert werden. F�
   Sonderstücke (Custom Order).
 - **Sonderstück in einer anderen Kategorie mit Kürzel:** Uhr, Accessoire usw. ergeben `ITM-WCH-nnn` usw. (Kürzel der
   gewählten Kategorie). Nur Gold-Diamond Jewellery ergibt `ITM-GLD-nnn`. Eine Kategorie **ohne** Kürzel (selbst
-  angelegt) wird für ein Sonderstück abgelehnt (`CUSTOM_CATEGORY_NO_SKU_CODE`), außer an der Order ist eine SKU
-  eingetragen.
+  angelegt) wird für ein Sonderstück abgelehnt (`CUSTOM_CATEGORY_NO_SKU_CODE`). Eine an der Order eingetragene,
+  manuelle SKU umgeht diese Prüfung nicht (Owner-Regel): Kategorie vorhanden, aktiv und gültig ist immer Pflicht.
 - **`src/core/orders/order-invoice-tx.ts`** wird von der App nicht mehr benutzt (nur noch vom b5-Test). Entfernen in
   einem eigenen Aufräumschritt.
 - **FINAL-Rechnungen** sind nicht stornierbar (bestehende Regel, unverändert).

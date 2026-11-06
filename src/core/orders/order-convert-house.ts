@@ -137,8 +137,9 @@ function planConvert(req: OrderConvertRequest, branchId: string) {
 /**
  * CUSTOM-ORDER Abschluss — die Kategorie eines NEU anzulegenden Sonderstücks, geprüft VOR jedem Schreiben (neuer Weg und
  * Altweg, Primary und PC2): vorhanden, aktiv und mit eigenem SKU-Kürzel (Gold-Diamond Jewellery → ITM-GLD). Ohne sie gäbe
- * der Zähler still `ITM-GEN` — das ist ausgeschlossen. Eine an der Order eingetragene SKU muss frei sein und wird dann
- * übernommen. Ein schon verknüpfter Artikel (erneute Umwandlung nach Storno) behält seine SKU und wird hier nicht geprüft.
+ * der Zähler still `ITM-GEN` — das ist ausgeschlossen. Eine an der Order eingetragene SKU umgeht diese Prüfung NICHT;
+ * sie muss zusätzlich frei sein und wird dann übernommen. Ein schon verknüpfter Artikel (erneute Umwandlung nach Storno)
+ * behält Kategorie und SKU und wird hier nicht geprüft.
  */
 function assertCustomPieceCategory(auftrag: Order): void {
   const spec = auftrag.customProductSpec || {};
@@ -152,16 +153,15 @@ function assertCustomPieceCategory(auftrag: Order): void {
   if (Number(cat.active ?? 1) === 0) {
     throw nein('CUSTOM_CATEGORY_INACTIVE', `The category "${name}" of the custom piece is inactive — choose an active one on the order first.`);
   }
-  if (!skuIsEmpty(spec.sku)) {
-    // Eine in der Order eingetragene SKU muss frei sein (sonst stünde das Nein erst mitten im Schreiben).
-    if (useProductStore.getState().isSkuTaken(String(spec.sku))) {
-      throw nein('SKU_TAKEN', `The SKU ${String(spec.sku)} entered on the order is already used by another item — change it on the order first.`);
-    }
-    return;
-  }
+  // Die Kategorie muss GÜLTIG sein (eigenes SKU-Kürzel) — auch wenn an der Order eine SKU eingetragen ist: eine manuelle
+  // SKU ersetzt nur die Nummer, nie die Kategorie des Artikels.
   if (skuCategoryCode(catId) === 'GEN') {
     throw nein('CUSTOM_CATEGORY_NO_SKU_CODE',
-      `The category "${name}" has no SKU code — the custom piece would be numbered ITM-GEN. Choose a jewellery category on the order (Gold-Diamond Jewellery → ITM-GLD) or enter a SKU there first.`);
+      `The category "${name}" is not valid for a custom piece (it has no SKU code — the item would be numbered ITM-GEN). Choose a jewellery category on the order first (Gold-Diamond Jewellery → ITM-GLD).`);
+  }
+  // Eine in der Order eingetragene SKU muss frei sein (sonst stünde das Nein erst mitten im Schreiben).
+  if (!skuIsEmpty(spec.sku) && useProductStore.getState().isSkuTaken(String(spec.sku))) {
+    throw nein('SKU_TAKEN', `The SKU ${String(spec.sku)} entered on the order is already used by another item — change it on the order first.`);
   }
 }
 
