@@ -24,6 +24,7 @@ import { SearchSelect } from '@/components/ui/SearchSelect';
 import { useSupplierStore } from '@/stores/supplierStore';
 import { getSpotPrices, bhdPerGramFine, marketValuePerGram } from '@/core/market/spot-prices';
 import { goldPurity } from '@/core/gold/purity';
+import { workshopOptions, NO_WORKSHOP_HINT, type WorkshopCandidate } from '@/core/repairs/repair-workshop-choice';
 
 export interface MaterialLineInput {
   materialKind: 'labor' | 'diamond' | 'stone' | 'gold';
@@ -57,6 +58,11 @@ interface AddMaterialModalProps {
   allowLabor?: boolean;         // v0.5.0 — Labor-Kostenposition zulassen (OrderDetail)
   /** Zusatz unter „From own stock" — die Reparatur sagt hier, dass schon Bezahltes nicht noch einmal zählt. */
   ownStockNote?: string;
+  /**
+   * CUSTOM-ORDER K4 — für diese Arten nur Werkstätten (aktiv + „Is Workshop") als Lieferant anbieten. Nur der Auftrag
+   * setzt das (Lohn, Gold); Reparaturen und andere Arten (Steine, Diamanten) behalten alle aktiven Lieferanten.
+   */
+  workshopOnlyKinds?: ReadonlyArray<'labor' | 'diamond' | 'stone' | 'gold'>;
 }
 
 const KARAT_OPTIONS = ['24K', '22K', '21K', '18K', '14K', '9K'];
@@ -75,7 +81,7 @@ function round3(n: number): string {
 }
 
 export function AddMaterialModal({
-  open, onClose, onSubmit, onSubmitAll, busy = false, submitError, showCustomerPrice = false, allowLabor = false, ownStockNote,
+  open, onClose, onSubmit, onSubmitAll, busy = false, submitError, showCustomerPrice = false, allowLabor = false, ownStockNote, workshopOnlyKinds,
 }: AddMaterialModalProps) {
   const { suppliers, loadSuppliers } = useSupplierStore();
   const [kind, setKind] = useState<Kind>('diamond');
@@ -144,12 +150,16 @@ export function AddMaterialModal({
   // v0.7.6 — Explizite In-house-Option (Shop / Own Stock) als ersten Eintrag.
   // Verhindert "vergessene" Supplier-Auswahl die still als own gebucht wird.
   // Sentinel '__INHOUSE__' wird beim Submit zu undefined uebersetzt.
+  const nurWerkstatt = !!workshopOnlyKinds?.includes(kind);
   const supplierOptions = useMemo(() => [
     { id: '__INHOUSE__', label: '🏠 Shop / Own Stock', subtitle: 'No supplier — material from own inventory', meta: '' },
-    ...suppliers.filter(s => s.active).map(s => ({
-      id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '',
-    })),
-  ], [suppliers]);
+    ...(nurWerkstatt
+      ? workshopOptions(suppliers as unknown as WorkshopCandidate[], [supplierId])
+      : suppliers.filter(s => s.active).map(s => ({
+        id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '',
+      }))),
+  ], [suppliers, nurWerkstatt, supplierId]);
+  const keineWerkstatt = nurWerkstatt && supplierOptions.length === 1;
 
   const totalCt = (parseFloat(qty) || 0) * (parseFloat(ct) || 0);
 
@@ -483,12 +493,16 @@ export function AddMaterialModal({
               options={supplierOptions}
               value={supplierId}
               onChange={(id) => setSupplierId(id)}
-              placeholder="Pick: Shop / Own Stock OR a supplier"
+              placeholder={nurWerkstatt ? 'Pick: Shop / Own Stock OR a workshop' : 'Pick: Shop / Own Stock OR a supplier'}
             />
           </div>
+          {keineWerkstatt && (
+            <p data-material-no-workshop style={{ fontSize: 11, color: '#9A3412', marginTop: 6 }}>{NO_WORKSHOP_HINT}</p>
+          )}
           {supplierId === '__INHOUSE__' && (
             <p style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
               ℹ️ From own stock — no A/P booking.{ownStockNote ? ` ${ownStockNote}` : ''}
+              {workshopOnlyKinds && <span data-material-own-cost-warning style={{ display: 'block', color: '#9A3412', marginTop: 4 }}>Own costs without a workshop are not booked to stock yet — an order with them cannot be invoiced. Pick the workshop, or remove the cost before invoicing.</span>}
             </p>
           )}
           {supplierId && supplierId !== '__INHOUSE__' && (

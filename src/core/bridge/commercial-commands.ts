@@ -59,6 +59,7 @@ import {
 } from '@/core/orders/order-create';
 import { ORDER_EDIT_FIELDS, type OrderEditInput } from '@/core/orders/order-edit';
 import { createOrderInHouse, updateOrderInHouse } from '@/core/orders/order-house';
+import { updateOrderDatesInHouse } from '@/core/orders/order-dates';
 import { CARD_BRANDS, CardFeeNotConfigured } from '@/core/finance/card-fees';
 import {
   PURCHASE_PAYMENT_METHODS, PURCHASE_TAX_SCHEMES, PurchaseActionRejected, purchaseCreateIssue, type PurchaseCreateInput,
@@ -981,6 +982,8 @@ export async function runOrderCreate(
 export interface OrderUpdateRequest extends Partial<OrderEditInput> {
   id: string;
   expectedRevision: number;
+  /** CUSTOM-ORDER K4 — Fertigstellung (JJJJ-MM-TT); nur zusammen mit höchstens dem Auftragsdatum (Datumskorrektur). */
+  completedOn?: string;
 }
 
 /**
@@ -991,7 +994,7 @@ export interface OrderUpdateRequest extends Partial<OrderEditInput> {
  */
 export function parseOrderUpdate(raw: unknown): OrderUpdateRequest {
   if (!isPlain(raw)) throw new CommercialPayloadError('payload must be an object');
-  onlyKnownFields(raw, ['id', 'expectedRevision', ...ORDER_EDIT_FIELDS]);
+  onlyKnownFields(raw, ['id', 'expectedRevision', ...ORDER_EDIT_FIELDS, 'completedOn']);
   const out: OrderUpdateRequest = {
     id: reqString(raw.id, 'id'),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
@@ -1002,10 +1005,26 @@ export function parseOrderUpdate(raw: unknown): OrderUpdateRequest {
   for (const k of ['supplierName', 'expectedDelivery', 'notes', 'orderDate'] as const) {
     if (raw[k] !== undefined) out[k] = raw[k] === null ? null : text0(raw[k], k);
   }
-  if (!ORDER_EDIT_FIELDS.some((k) => out[k] !== undefined)) {
+  // CUSTOM-ORDER K4 — die Datumskorrektur (auch nach „Completed"): nur Auftragsdatum und/oder Fertigstellung.
+  if (raw.completedOn !== undefined) {
+    out.completedOn = text0(raw.completedOn, 'completedOn');
+    if (ORDER_EDIT_FIELDS.some((k) => k !== 'orderDate' && out[k] !== undefined)) {
+      throw new CommercialPayloadError('completedOn is corrected on its own (with at most orderDate)');
+    }
+  }
+  if (!ORDER_EDIT_FIELDS.some((k) => out[k] !== undefined) && out.completedOn === undefined) {
     throw new CommercialPayloadError('an edit must change something');
   }
   return out;
+}
+
+/**
+ * CUSTOM-ORDER K4 — ein Rumpf, der nur Daten korrigiert: mit Fertigstellung immer; nur mit Auftragsdatum dann, wenn der
+ * Auftrag abgeschlossen ist (ein laufender Auftrag ändert sein Datum wie bisher über „Save").
+ */
+export function isOrderDatesOnly(req: OrderUpdateRequest, status: string): boolean {
+  if (ORDER_EDIT_FIELDS.some((k) => k !== 'orderDate' && req[k] !== undefined)) return false;
+  return req.completedOn !== undefined || (status === 'completed' && req.orderDate !== undefined && req.orderDate !== null);
 }
 
 export function runOrderUpdate(
@@ -1015,11 +1034,18 @@ export function runOrderUpdate(
   return runRemoteCommand(deps, identity, () => {
     assertHouseBranch(identity);
     const live = query(
-      'SELECT agreed_price, deposit_amount, supplier_name, supplier_price, expected_delivery, notes, order_date '
+      'SELECT agreed_price, deposit_amount, supplier_name, supplier_price, expected_delivery, notes, order_date, status '
       + 'FROM orders WHERE id = ? AND branch_id = ?', [req.id, identity.branchId],
     )[0];
     if (!live) throw new CommandRejected('ORDER_NOT_FOUND', 'no such order in this branch');
     assertRevision('orders', req.id, req.expectedRevision, 'ORDER_NOT_FOUND');
+    // CUSTOM-ORDER K4 — nur Datumsfelder: dieselbe Hausfolge wie am Primary (auch für einen abgeschlossenen Auftrag).
+    if (isOrderDatesOnly(req, String(live.status))) {
+      urteil(() => updateOrderDatesInHouse(req.id, {
+        ...(req.orderDate ? { orderDate: req.orderDate } : {}), ...(req.completedOn ? { completedOn: req.completedOn } : {}),
+      }, identity.branchId, { userId: identity.userId, branchId: identity.branchId }));
+      return orderState(req.id) as unknown as Record<string, unknown>;
+    }
     // Der Stand, der NACH dieser Änderung gilt — Feld für Feld: was der Auftrag mitbringt, sonst das,
     // was in der Zeile steht. Nur so stimmen Marge und Rest auch bei einer Teiländerung.
     const n = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));

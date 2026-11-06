@@ -463,6 +463,36 @@ try {
     ok(stand() === vor && Number(dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM products WHERE sku = 'LAT-E2E-001'")[0]?.n ?? 0) === 0,
       `manuelle SKU PC2: nichts geschrieben, kein Artikel mit der eingetragenen SKU (${stand() === vor ? 'gleich' : stand()})`);
   }
+
+  // ── 9 K4 PC2: Daten eines abgeschlossenen Auftrags korrigieren — nur Datumsfelder, protokolliert, keine Buchung ────────
+  {
+    await spuelen(primary).catch(() => null);
+    const o0 = dbQ(BIZ_DB, `SELECT status, order_date, actual_delivery FROM orders WHERE id = '${ORD}'`)[0];
+    const buch = () => S(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n, ROUND(SUM(amount), 3) AS s, MAX(occurred_at) AS m FROM ledger_entries')[0]);
+    const buch0 = buch();
+    await gehFrisch(client, `/orders/${ORD}`);
+    const knopf = await warteBis(client, "!!document.querySelector('[data-order-dates-edit]')", 30000);
+    await klick(client, '[data-order-dates-edit]');
+    await waitFor(client, '[data-order-dates-form]', 10000);
+    const s1 = await setVal(client, '[data-order-dates-order]', '2026-10-24');
+    const s2 = await setVal(client, '[data-order-dates-completed]', '2026-10-25');
+    const go = await klick(client, '[data-order-dates-save]');
+    await spuelen(primary).catch(() => null);
+    const gesetzt = await warteAuf(() => {
+      const o = dbQ(BIZ_DB, `SELECT order_date, actual_delivery FROM orders WHERE id = '${ORD}'`)[0];
+      return o?.order_date === '2026-10-24' && o?.actual_delivery === '2026-10-25';
+    }, 30000);
+    const aud = dbQ(BIZ_DB, `SELECT field_name, old_value, new_value FROM audit_log WHERE entity_id = '${ORD}' AND field_name IN ('order_date', 'actual_delivery') ORDER BY rowid`);
+    ok(knopf && o0?.status === 'completed' && s1 === 'OK' && s2 === 'OK' && go === 'OK' && gesetzt,
+      `K4 PC2: „Correct dates\" am abgeschlossenen Auftrag, Auftragsdatum 24.10., Fertigstellung 25.10. (${S(o0)})`);
+    ok(buch() === buch0 && aud.length === 2 && aud[0].old_value === String(o0?.order_date) && aud[0].new_value === '2026-10-24',
+      `K4 PC2: keine Buchung verschoben, Protokoll alt → neu (${S(aud)})`);
+    const cmd = (await befehle(client)).filter((x) => x.op === 'orders.update' && x.payload?.id === ORD);
+    ok(cmd.length === 1 && cmd[0].payload?.completedOn === '2026-10-25' && cmd[0].payload?.orderDate === '2026-10-24'
+      && Object.keys(cmd[0].payload).sort().join(',') === 'completedOn,expectedRevision,id,orderDate',
+      `K4 PC2: EIN orders.update nur mit den Datumsfeldern (${S(cmd.map((x) => x.payload))})`);
+    ok((await client.ev('return window.__dbHits.length;')) === 0, 'K4 PC2 greift auf keine lokale Datenbank zu');
+  }
 } catch (e) {
   FAIL++; fails.push('harness: ' + (e?.message ?? e)); console.error(e);
 } finally {

@@ -41,6 +41,7 @@ import {
 } from '@/core/products/embedded-product';
 import { normalizeSpecImages } from '@/core/media/record-image';
 import { OrderActionRejected } from './order-create';
+import { assertOrderCostsBooked, cancelWouldStockPiece } from './order-cost-booking';
 import { planOrderEdit } from './order-edit';
 import { houseOrderPort } from './order-house';
 
@@ -185,6 +186,9 @@ export function cancelOrderInHouse(req: OrderCancelRequest, branchId: string): O
     nein('ORDER_OVERPAY_CREDIT_USED',
       'Cannot cancel this order because the store credit from its overpayment has already been used. Reverse that credit usage first.');
   }
+  // CUSTOM-ORDER OF3 — wird das angefangene Stück zum Lagerartikel, trägt es den Einstand der angekommenen Kosten: jede
+  // davon muss im Lager gebucht sein (sonst stünde ein Lagerwert ohne INVENTORY). Vor dem ersten Schreiben.
+  if (cancelWouldStockPiece(req.orderId)) assertOrderCostsBooked(req.orderId, 'cancelling into a stock item');
   const check = watchLedgerPosts('orders.cancel');
   const fx = useOrderStore.getState().cancelOrderWithMoney(req.orderId, req.choice, req.refundMethod, req.note);
   check();

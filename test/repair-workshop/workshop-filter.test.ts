@@ -407,7 +407,11 @@ let rAlt = '';
   ok(!/supplierOptions/.test(detail) && (detail.match(/data-repair-no-workshop-hint/g) || []).length === 2
     && (teile.match(/data-repair-no-workshop-hint/g) || []).length === 1, '§12 keine alte Liste mehr; Hinweis an allen drei Stellen');
   const mat = src('src/components/work-orders/AddMaterialModal.tsx');
-  ok(!/isWorkshop|workshopOptions/.test(mat) && /<AddMaterialModal/.test(detail), '§12 Material (AddMaterialModal) bleibt bei allen aktiven Lieferanten');
+  // CUSTOM-ORDER K4 — der Dialog filtert nur, wenn der AUFRUFER es verlangt (der Auftrag für Lohn/Gold); die Reparatur
+  // verlangt es nicht — Material bleibt dort bei allen aktiven Lieferanten.
+  ok(/const nurWerkstatt = !!workshopOnlyKinds\?\.includes\(kind\)/.test(mat) && /suppliers\.filter\(s => s\.active\)\.map/.test(mat)
+    && /<AddMaterialModal/.test(detail) && !/workshopOnlyKinds/.test(detail) && !/workshopOnlyKinds/.test(src('src/components/repairs/RepairQuickEditModal.tsx')),
+    '§12 Material (AddMaterialModal) bleibt bei Reparaturen bei allen aktiven Lieferanten');
   const sd = src('src/pages/suppliers/SupplierDetail.tsx'), sl = src('src/pages/suppliers/SupplierList.tsx');
   ok(/data-supplier-is-workshop/.test(sd) && /isWorkshop: e\.target\.checked/.test(sd), '§12 Edit Supplier: Checkbox „Is Workshop"');
   ok(/data-supplier-create-is-workshop/.test(sl) && /data-workshop-suggestion-mark/.test(sl) && /isWorkshop: true \}\)/.test(sl),

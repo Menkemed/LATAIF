@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/Button';
 import { Card } from '@/components/ui/Card';
 import { Input } from '@/components/ui/Input';
 import { SearchSelect } from '@/components/ui/SearchSelect';
+import { workshopOptions, hasSelectableWorkshop, NO_WORKSHOP_HINT, type WorkshopCandidate } from '@/core/repairs/repair-workshop-choice';
 import { ProductHoverCard } from '@/components/products/ProductHoverCard';
 import { CollectionProductThumb } from '@/components/products/CollectionProductThumb';
 import { useMediaScope } from '@/hooks/useMediaScope';
@@ -539,14 +540,16 @@ export function OrderCreate() {
                     <SearchSelect
                       options={[
                         { id: '__INHOUSE__', label: '🏠 In-house / Own labor', subtitle: 'No supplier — own goldsmith work', meta: '' },
-                        ...suppliers.filter(s => s.active).map(s => ({
-                          id: s.id, label: s.name, subtitle: s.phone || '', meta: s.email || '',
-                        })),
+                        // CUSTOM-ORDER K4 — nur Werkstätten (aktiv + „Is Workshop"), wie bei Reparaturen.
+                        ...workshopOptions(suppliers as unknown as WorkshopCandidate[], [goldsmithSupplierId]),
                       ]}
                       value={goldsmithSupplierId}
                       onChange={(sid) => setGoldsmithSupplierId(sid === '__INHOUSE__' ? '' : sid)}
                       placeholder="Pick: In-house OR a goldsmith"
                     />
+                    {!hasSelectableWorkshop(suppliers as unknown as WorkshopCandidate[]) && (
+                      <p data-order-no-workshop style={{ fontSize: 11, color: '#9A3412', marginTop: 6 }}>{NO_WORKSHOP_HINT}</p>
+                    )}
                   </div>
                   <Input
                     label="LABOR COST (BHD)"
@@ -560,6 +563,10 @@ export function OrderCreate() {
                 <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
                   Costs are optional — you can also enter them later on the order detail page once the piece is finished.
                 </p>
+                {/* CUSTOM-ORDER OF3 — eigene Arbeit ohne Werkstatt bucht nichts ins Lager. */}
+                {!goldsmithSupplierId && (parseFloat(laborCost) || 0) > 0 && (
+                  <p data-order-own-cost-warning style={{ fontSize: 11, color: '#9A3412', marginTop: 6 }}>Own costs without a workshop are not booked to stock yet — an order with them cannot be invoiced. Pick the workshop, or remove the cost before invoicing.</p>
+                )}
               </Card>
             </div>
             )}
@@ -611,7 +618,8 @@ export function OrderCreate() {
                   <SearchSelect
                     options={[
                       { id: '__INHOUSE__', label: '🏠 Own Gold / Shop Stock', subtitle: 'From own precious_metals — pure cost position', meta: '' },
-                      ...suppliers.filter(s => s.active).map(s => ({ id: s.id, label: s.name, subtitle: s.phone || '', meta: '' })),
+                      // CUSTOM-ORDER K4 — die Goldschuld entsteht beim Goldschmied: nur Werkstätten.
+                      ...workshopOptions(suppliers as unknown as WorkshopCandidate[], [extraGoldSupplierId]),
                     ]}
                     value={extraGoldSupplierId}
                     onChange={(sid) => setExtraGoldSupplierId(sid === '__INHOUSE__' ? '' : sid)}
@@ -622,7 +630,7 @@ export function OrderCreate() {
                   <span>
                     {extraGoldSupplierId
                       ? 'Goldsmith gold → gold liability (grams), settled later in gold or money.'
-                      : 'Own gold → pure money cost position.'}
+                      : (parseFloat(extraGoldCost) || 0) > 0 ? 'Own costs without a workshop are not booked to stock yet — an order with them cannot be invoiced. Pick the workshop, or remove the cost before invoicing.' : 'Own gold → no booking (not supported yet).'}
                   </span>
                   {(parseFloat(extraGoldGrams) || 0) > 0 && (
                     extraGoldCostTouched ? (
@@ -1232,6 +1240,7 @@ export function OrderCreate() {
           setMaterialLines(prev => [...prev, { ...data, _id: genId() }]);
         }}
         showCustomerPrice={false}
+        workshopOnlyKinds={['labor', 'gold']}
       />
 
       {/* Back-to-Back: New-Product-Zeile — volle Produkt-Spec via shared Modal */}

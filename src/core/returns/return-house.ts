@@ -36,6 +36,22 @@ import { CONSIGNOR_REFUND_REQUIRED } from '@/core/consignment/consignment-revers
 import { ReturnCancelRejected } from './return-cancel-house';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { PurchaseLifecycleRejected } from '@/core/purchases/purchase-lifecycle-house';
+import { hasGoldSettlementTable } from '@/core/purchases/cost-correction-read';
+
+/**
+ * CUSTOM-ORDER OF5a — eine Rechnungszeile, deren Goldschuld nach Abschluss ihres VAT-Quartals beglichen wurde
+ * (`cost_mode = 'SEPARATE'`): die Differenz steht im Wareneinsatz der Begleichung. Eine Retoure buchte das Stück zum
+ * alten Einstand zurück ins Lager und ließe die Differenz im Wareneinsatz — Lagerwert und Gewinn passten nicht mehr.
+ * Bis das unterstützt ist: Nein, bevor etwas geschrieben wird. (Der Rechnungsstorno nimmt die Differenz mit.)
+ */
+export function separateGoldSettledLines(invoiceLineIds: readonly string[]): string[] {
+  if (invoiceLineIds.length === 0 || !hasGoldSettlementTable()) return [];
+  return query(
+    `SELECT DISTINCT invoice_line_id AS id FROM gold_payable_settlements
+      WHERE status = 'ACTIVE' AND cost_mode = 'SEPARATE' AND invoice_line_id IN (${invoiceLineIds.map(() => '?').join(',')})`,
+    [...invoiceLineIds],
+  ).map((r) => String(r.id));
+}
 
 /** Die Urteile, die die Store-Funktionen wirklich fällen — als Liste, nicht als „klingt fachlich". */
 const VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
@@ -106,6 +122,11 @@ export function createReturnInHouse(
       vatAmount: a.vatAmount,
     };
   });
+  if (separateGoldSettledLines(lines.map((l) => l.invoiceLineId)).length > 0) {
+    throw new ReturnActionRejected('RETURN_GOLD_SETTLED_SEPARATELY',
+      'The gold debt of this item was settled after the invoice\'s VAT quarter was closed — that cost difference sits in cost of goods. '
+      + 'A return of it is not supported yet: reverse that settlement first (order → Settle in BHD → Reverse), or cancel the invoice instead. Nothing was changed.');
+  }
   // „Return to Owner" / „Keep (→ OWN)" schreiben die Kommission und den Einstand um — die Maske
   // bietet sie nur an, wenn Kommissionsware unter den Zeilen ist.
   if (CONSIGNMENT_DISPOSITIONS.includes(input.productDisposition)

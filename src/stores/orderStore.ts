@@ -1105,7 +1105,10 @@ export const useOrderStore = create<OrderStore>((set, get) => ({
 
       const expenseId = uuid();
       const expenseNumber = getNextDocumentNumber('EXP');
-      const method = ((order.payment_method as 'cash' | 'bank' | 'benefit' | null) || 'bank');
+      // CUSTOM-ORDER K5-Vorbereitung — der vorgesehene Zahlweg der Lieferantenschuld ist ein Ausgaben-Zahlweg (cash/bank/
+      // benefit). Die Anzahlung des Kunden per Karte ('card') ist keiner — dann wie bisher ohne Angabe: 'bank'.
+      const om = String(order.payment_method ?? '');
+      const method = (om === 'cash' || om === 'bank' || om === 'benefit' ? om : 'bank') as 'cash' | 'bank' | 'benefit';
       const expStatus = 'PENDING' as const;
 
       // Supplier-Label

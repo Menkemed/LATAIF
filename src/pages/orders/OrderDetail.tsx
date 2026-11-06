@@ -46,7 +46,7 @@ import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 // CENTRAL-UI-PARITY R2D — die Anzeige liest ueber die gemeinsame Ladefunktion.
 import { useSharedRead } from '@/core/data/shared-read';
 import { useSharedWrites, nichtAmClient, fehlertext } from '@/core/data/shared-write';
-import { updateOrderOnPrimary } from '@/core/orders/order-house';
+import { updateOrderOnPrimary, updateOrderDatesOnPrimary } from '@/core/orders/order-house';
 // CENTRAL-UI-PARITY R6D — „Add Cost" und das Löschen einer Kostenzeile: dieselbe Hausfolge wie der Fernbefehl.
 import {
   addOrderCostOnPrimary, materialRowsFromModal, orderCostBody, orderCostRemoveBody, removeOrderCostOnPrimary,
@@ -116,6 +116,8 @@ export function OrderDetail() {
   // der Dialog zeigt EINE Zeile (Bezeichnung, Brutto, Vorauswahl), angelegt wird erst in der Hausfolge.
   const [legacyLine, setLegacyLine] = useState<{ label: string; scheme: TaxScheme; gross: number } | null>(null);
   const [editing, setEditing] = useState(false);
+  // CUSTOM-ORDER K4 — Auftragsdatum / Fertigstellung eines abgeschlossenen Auftrags korrigieren (nur diese zwei Felder).
+  const [datesEdit, setDatesEdit] = useState<{ orderDate: string; completedOn: string } | null>(null);
   const [form, setForm] = useState<Partial<Order>>({});
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
@@ -445,6 +447,24 @@ export function OrderDetail() {
     })) return;
     loadOrders();
     setEditing(false);
+  }
+
+  // CUSTOM-ORDER K4 — die Datumskorrektur: dieselbe Hausfolge am Primary und vom PC2 („orders.update", nur Datumsfelder).
+  // Sie ändert Anzeige, Sortierung, Suche und Beleg — keine Buchung.
+  async function saveDates() {
+    if (!id || !order || !datesEdit) return;
+    const fassung = order.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('correcting the order dates (no revision loaded)'))); return; }
+    const input: { orderDate?: string; completedOn?: string } = {};
+    if (datesEdit.orderDate && datesEdit.orderDate !== orderDateOf(order)) input.orderDate = datesEdit.orderDate;
+    if (datesEdit.completedOn && datesEdit.completedOn !== String(order.actualDelivery || '').slice(0, 10)) input.completedOn = datesEdit.completedOn;
+    if (!input.orderDate && !input.completedOn) { setDatesEdit(null); return; }
+    if (!await w.ok('orders.update', {
+      local: () => updateOrderDatesOnPrimary(id, input),
+      remote: () => ({ id, expectedRevision: fassung, ...input }),
+    })) return;
+    loadOrders();
+    setDatesEdit(null);
   }
 
   /** R4C.2 — eine Anzahlung loeschen. Fassungsbasiert wie jede Geldhandlung am Auftrag. */
@@ -1072,6 +1092,30 @@ export function OrderDetail() {
                   {renderField('Expected Delivery', order.expectedDelivery)}
                   {renderField('Actual Delivery', order.actualDelivery)}
                   {renderField('Deposit Date', order.depositDate)}
+                  {/* CUSTOM-ORDER K4 — nach „Completed": nur Auftragsdatum und Fertigstellung korrigierbar. */}
+                  {isCompleted && perm.canManageOrders && !datesEdit && (
+                    <button type="button" data-order-dates-edit
+                      onClick={() => setDatesEdit({ orderDate: orderDateOf(order), completedOn: String(order.actualDelivery || '').slice(0, 10) })}
+                      className="cursor-pointer"
+                      style={{ fontSize: 12, color: '#0F0F10', textDecoration: 'underline', background: 'none', border: 'none', padding: 0, margin: '6px 0 10px' }}>
+                      Correct dates
+                    </button>
+                  )}
+                  {datesEdit && (
+                    <div data-order-dates-form style={{ display: 'flex', flexDirection: 'column', gap: 10, margin: '8px 0 14px', padding: 12, border: '1px solid #E5E9EE', borderRadius: 6 }}>
+                      <Input label="ORDER DATE" type="date" data-order-dates-order value={datesEdit.orderDate} max={latestBusinessDate()}
+                        onChange={e => setDatesEdit({ ...datesEdit, orderDate: e.target.value })} />
+                      <Input label="COMPLETED ON" type="date" data-order-dates-completed value={datesEdit.completedOn} max={latestBusinessDate()}
+                        onChange={e => setDatesEdit({ ...datesEdit, completedOn: e.target.value })} />
+                      <p style={{ fontSize: 11, color: '#6B7280', margin: 0 }}>
+                        Changes display, sorting, search and the receipt. Bookings (costs, gold, deposit, card fee) keep their own dates.
+                      </p>
+                      <div className="flex gap-2 justify-end">
+                        <Button variant="ghost" onClick={() => setDatesEdit(null)}>Cancel</Button>
+                        <Button variant="primary" data-order-dates-save disabled={w.busy} onClick={() => { void saveDates(); }}>Save dates</Button>
+                      </div>
+                    </div>
+                  )}
                   {renderField('Created', order.createdAt?.split('T')[0])}
                   {renderField('Updated', order.updatedAt?.split('T')[0])}
                   {order.notes && (
@@ -1703,6 +1747,7 @@ export function OrderDetail() {
         submitError={w.fehler}
         showCustomerPrice={false}
         allowLabor={true}
+        workshopOnlyKinds={['labor', 'gold']}
       />
 
       {/* Back-to-Back — Order-Position bearbeiten */}

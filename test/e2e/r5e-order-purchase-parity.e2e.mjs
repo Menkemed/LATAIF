@@ -265,7 +265,8 @@ function seed() {
       insert(db, 'customers', { id, branch_id, first_name: first, last_name: last, country: 'BH', language: 'en', vip_level: 'NONE', preferences: '[]', customer_type: 'PRIVATE', sales_stage: 'active', created_at: now, updated_at: now });
     }
     for (const [id, name] of [['r5e-sup', 'R5E Lieferant'], ['r5e-gold', 'R5E Goldschmied']]) {
-      insert(db, 'suppliers', { id, branch_id, name, active: 1, created_at: now, updated_at: now });
+      // CUSTOM-ORDER K4 — Lohn (SOURCE) und GOLD SOURCE eines Sonderauftrags zeigen nur Werkstätten (wie Reparaturen).
+      insert(db, 'suppliers', { id, branch_id, name, active: 1, is_workshop: 1, created_at: now, updated_at: now });
     }
     insert(db, 'employees', { id: 'r5e-emp', branch_id, name: 'R5E Einkauf', employment_status: 'active', created_at: now, updated_at: now });
     for (const [id, tax, planned, cost] of [['r5e-p1', 'VAT_10', 150, 100], ['r5e-p2', 'MARGIN', 200, 120], ['r5e-p3', 'ZERO', 90, 80]]) {
@@ -466,6 +467,8 @@ const buchungVonZahlung = (oid) => S(dbQ(BIZ_DB, `SELECT account, direction, ROU
 const gebuehrVon = (oid) => S(dbQ(BIZ_DB, 'SELECT category, status, ROUND(amount, 3) AS a FROM expenses WHERE related_entity_id = ?', [oid]));
 const neueArtikelVon = (ids) => ids.filter((x) => x && !SEED_PRODUCTS.includes(x))
   .map((x) => norm(dbQ(BIZ_DB, 'SELECT * FROM products WHERE id = ?', [x])[0], /^(id|name|created_by|image_description|image_embedding|version|sync_status)$|_at$/));
+/** Nur die Namen abweichender Spalten (bei Bildern samt Länge/Anzahl) — für die Meldung. */
+const spaltenDiff = (a, b) => { try { const x = JSON.parse(a || '{}'), y = JSON.parse(b || '{}'); return [...new Set([...Object.keys(x), ...Object.keys(y)])].filter((k) => S(x[k]) !== S(y[k])).map((k) => { const v = (z) => { const s = typeof z === 'string' ? z : S(z); return /data:image/.test(s) ? (() => { try { const arr = JSON.parse(s); return 'bilder ' + arr.length + ' / ' + arr.map((q) => String(q).length).join(','); } catch { return 'len ' + s.length; } })() : s.slice(0, 80); }; return k + ': ' + v(x[k]) + ' | ' + v(y[k]); }).join('; '); } catch { return 'nicht lesbar'; } };
 /** Welche Spalten zweier normalisierter Artikel abweichen — nur für die Meldung. */
 const unterschied = (a, b) => {
   try {
@@ -602,7 +605,7 @@ try {
       && gebuehrVon(pNormal.id) === gebuehrVon(pc2Normal.id), 'ORDER-PARITAET Anzahlung, Buchung, Kartengebuehr');
     const np = neueArtikelVon(dbQ(BIZ_DB, 'SELECT product_id FROM order_lines WHERE order_id = ?', [pNormal.id]).map((z) => z.product_id));
     const nc = neueArtikelVon(dbQ(BIZ_DB, 'SELECT product_id FROM order_lines WHERE order_id = ?', [pc2Normal.id]).map((z) => z.product_id));
-    ok(S(np) === S(nc), 'ORDER-PARITAET der neue Artikel (bis auf seinen Namen) derselbe — auch das Foto');
+    ok(S(np) === S(nc), `ORDER-PARITAET der neue Artikel (bis auf seinen Namen) derselbe — auch das Foto${S(np) === S(nc) ? '' : ' (' + spaltenDiff(np[0], nc[0]) + ')'}`);
   }
 
   // ── Sonderanfertigung mit Gold-Verbindlichkeit ──

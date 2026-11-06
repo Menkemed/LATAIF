@@ -1,17 +1,19 @@
-# Custom Order Phase 1 — offene Funde (dokumentiert, nicht umgesetzt)
+# Custom Order Phase 1 — offene Funde
 
-Stand: Branch `feature/custom-order-k1-k2-k3a` (K1, K2, K3a, Review-Findings, Abschluss).
-Keiner dieser Punkte ist umgesetzt. Jeder braucht eine eigene Freigabe; wo eine fachliche Entscheidung fehlt, steht sie
-unter **Zu entscheiden**. Kein Gegenkonto, keine NBR-Zeile und kein Ablauf ist festgelegt.
+Stand: Branch `feature/custom-order-k1-k2-k3a` (K1, K2, K3a, Review-Findings, Abschluss, K4, OF3/OF5a-Sperren, K5-Skript).
+Wo nicht anders vermerkt, ist ein Punkt nicht umgesetzt und braucht eine eigene Freigabe; wo eine fachliche Entscheidung
+fehlt, steht sie unter **Zu entscheiden**. Kein Gegenkonto, keine NBR-Zeile und kein Ablauf ist festgelegt.
 
-> **⚠ Mögliche Release-Blocker (vor einem Release dieser Phase zu entscheiden):**
-> - **OF3** — eigene Kosten ohne Lieferant: `INVENTORY` im Hauptbuch sinkt beim Verkauf eines Sonderstücks unter den
->   Lagerwert (kann negativ werden).
-> - **OF5a** — Retoure nach getrennt gebuchter Goldschuld-Differenz: die Differenz bleibt im Wareneinsatz, obwohl das
->   Stück zurück im Lager ist.
+> **Release-Blocker OF3 und OF5a — BEHANDELT durch Sperren (nicht durch neue Buchungslogik):**
+> - **OF3** — Rechnungsumwandlung (neuer Weg, Altweg, Primary und PC2) und „Cancel Order → Lagerartikel" lehnen ab,
+>   solange eine angekommene Kostenzeile nicht im Lager gebucht ist (`CUSTOM_COSTS_NOT_BOOKED`, vor jedem Schreiben;
+>   `src/core/orders/order-cost-booking.ts`). Die Maske warnt schon bei der Eingabe. Für ORD-2 (Lohn bei Arup + Goldschuld
+>   bei Arup) ist nach K5 alles gebucht — die Rechnung geht und bucht Wareneinsatz 210 gegen Lager 210.
+> - **OF5a** — die Retoure einer Rechnungszeile mit getrennt gebuchter Goldschuld-Differenz (`cost_mode = 'SEPARATE'`)
+>   wird abgelehnt (`RETURN_GOLD_SETTLED_SEPARATELY`, Primary und PC2). Weg: Begleichung zurücknehmen, dann Retoure;
+>   oder die Rechnung stornieren (nimmt die Differenz mit).
 >
-> Beide betreffen Hauptbuch und Gewinn eines verkauften Sonderstücks, nicht nur die Anzeige. Noch nicht umgesetzt; Owner
-> entscheidet, ob sie vor dem Release behoben oder ausdrücklich in Kauf genommen werden.
+> Offen bleibt das eigentliche Aktivieren eigener Kosten (G1) und eine Retoure, die die Differenz mitnimmt.
 
 ## OF1 — Gesonderter VAT-Korrekturvorgang bei geschlossenen Quartalen (Buchhaltung, mittel)
 
@@ -66,7 +68,7 @@ Kategorie `Inventory` ausschließen. Alternativ direkt aus dem Hauptbuch (Aufwan
 **Zu entscheiden:** Zahlungssicht (Geldabfluss) oder Aufwandssicht (Hauptbuch)? Gehören aktivierte Kosten in
 eine eigene Zeile „Inventory purchases"?
 
-## OF3 — Eigene Kosten ohne Lieferant werden nicht aktiviert (Hauptbuch, mittel bis hoch; Paket G1) — ⚠ MÖGLICHER RELEASE-BLOCKER
+## OF3 — Eigene Kosten ohne Lieferant werden nicht aktiviert (Hauptbuch, mittel bis hoch; Paket G1) — GESPERRT (siehe oben)
 
 **Heute:** `commitOrderLineExpenses` (`src/stores/orderStore.ts:1088–1091`) bucht nur Kostenzeilen **mit**
 `supplier_id` (Soll `INVENTORY` / Haben A/P bzw. `GOLD_LIABILITY`). Eine Kostenzeile ohne Lieferant (eigene Arbeit,
@@ -94,7 +96,7 @@ hat, kann sein Verbrauch für eine Order gegen `GOLD_STOCK` aktiviert werden. F�
 
 ## OF5 — Kleinere Randfälle (gering)
 
-- **OF5a — Retoure nach getrennter Korrektur — ⚠ MÖGLICHER RELEASE-BLOCKER (Hauptbuch, mittel):** Wird ein Stück
+- **OF5a — Retoure nach getrennter Korrektur — GESPERRT (siehe oben); die Retoure MIT Differenz bleibt offen:** Wird ein Stück
   nach einer `SEPARATE`-Begleichung (OF1) per Retoure zurückgenommen, bleibt die Differenz im Wareneinsatz
   (`COGS`), obwohl das Stück zum tatsächlichen Einstand zurück im Lager steht. Gewinn und Lagerwert passen dann nicht
   zusammen. Dieselbe Lücke besteht bei D1-Belegen und Retouren. Der Rechnungsstorno nimmt die Differenz dagegen ins
@@ -113,4 +115,29 @@ hat, kann sein Verbrauch für eine Order gegen `GOLD_STOCK` aktiviert werden. F�
   manuelle SKU umgeht diese Prüfung nicht (Owner-Regel): Kategorie vorhanden, aktiv und gültig ist immer Pflicht.
 - **`src/core/orders/order-invoice-tx.ts`** wird von der App nicht mehr benutzt (nur noch vom b5-Test). Entfernen in
   einem eigenen Aufräumschritt.
-- **FINAL-Rechnungen** sind nicht stornierbar (bestehende Regel, unverändert).
+- **FINAL-Rechnungen** sind nicht stornierbar (bestehende Regel, unverändert). Wichtig für ORD-2: die Anzahlung (240)
+  deckt die Rechnung voll → die Rechnung ist sofort FINAL; eine Korrektur geht danach nur über eine Retoure. Steuerart
+  (Zero) und Rechnungsdatum (25.10.) im Dialog vor dem Bestätigen prüfen.
+
+## OF6 — Weitere Funde aus dem Abschluss (dokumentiert, zurückgestellt)
+
+- **GOLD SOURCE und Goldhändler (K4):** Preview V4 zeigt unter „Gold vom Lieferanten" auch einen Goldhändler. Es gibt
+  kein Merkmal „Goldhändler"; umgesetzt sind nur Werkstätten (aktiv + „Is Workshop", wie Reparaturen). Ein Goldhändler,
+  bei dem eine Goldschuld entstehen soll, wird als Werkstatt markiert — oder ein eigenes Merkmal wird beschlossen.
+- **Eigene Kosten anlegen:** Order-Anlage und „Add Cost" nehmen eigene Kosten (ohne Werkstatt) weiterhin an und warnen;
+  gesperrt sind Rechnung und Storno-ins-Lager. Wer früher sperren will (schon beim Anlegen), braucht eine Freigabe.
+- **Artikel eines Sonderstücks direkt verkaufen:** Nach einem Rechnungsstorno könnte das Stück über „New Invoice"
+  verkauft werden; diese Rechnung prüft OF3 nicht (Einstand steht am Artikel). Gering, da OF3 schon die erste Rechnung
+  sperrt.
+- **D1-Belege und Retouren:** dieselbe Lücke wie OF5a für Einkaufskorrekturen (`cost_corrections`), älter als diese
+  Phase, nicht gesperrt.
+- **Altweg normaler Orders:** Ein sehr alter Auftrag ohne Steuerart legt den Artikel mit dem Einkaufspreis der Order an,
+  ohne Lagerbuchung (Verhalten unverändert seit vor v0.1.15). In der Produktion gibt es keinen solchen Auftrag.
+- **Kartengebühr umdatieren:** „Edit Expense" storniert die alte Buchung am Tag der Änderung und bucht am neuen Tag
+  (bestehende Regel). K5 nutzt genau diesen Weg; das Quartal Q4/2026 ist offen.
+- **E2E r5e, Foto eines neuen Artikels (schwankt):** „ORDER-PARITAET der neue Artikel … auch das Foto" war in 2 von 3
+  Läufen rot (die Bilddaten des am Primary und des am PC2 angelegten Artikels unterschieden sich), im dritten Lauf grün
+  (74/0, wie bei v0.8.97). Phase 1 ändert am Bildweg neuer Artikel nichts; die Ursache ist offen. Die Prüfung meldet
+  jetzt die abweichenden Spalten. Kein Bezug zu ORD-2.
+- **Zahlweg der Lohn-Verbindlichkeit (behoben):** `commitOrderLineExpenses` übernahm den Zahlweg der Kundenanzahlung
+  (`card`) — kein gültiger Ausgaben-Zahlweg. Jetzt cash/bank/benefit, sonst `bank`.

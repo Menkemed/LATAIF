@@ -35,6 +35,7 @@ import { adoptOrderPhotosToProduct } from './order-media';
 import { assertOrderCarryOverMayFinalize, carryOverOrderPaymentsToInvoice } from './order-payment-carryover';
 import { OPEN_DEPOSIT_TOTAL_SQL } from './order-deposit-sql';
 import { vatEngine } from '@/core/tax/vat-engine';
+import { assertOrderCostsBooked } from './order-cost-booking';
 
 export interface OrderConvertRequest {
   orderId: string;
@@ -117,13 +118,16 @@ function planConvert(req: OrderConvertRequest, branchId: string) {
     if (offen.length > 0) {
       throw nein('CUSTOM_COSTS_NOT_ARRIVED', `${offen.length} cost line(s) of this order have not arrived yet — their cost is not booked. Mark them as arrived first.`);
     }
+    // CUSTOM-ORDER OF3 — jeder Betrag im Einstand muss vorher im Lager gebucht sein (sonst COGS ohne Lager).
+    assertOrderCostsBooked(req.orderId, 'the invoice');
     if (!customLine.productId) assertCustomPieceCategory(auftrag);
   }
   // CUSTOM-ORDER Abschluss — der Altweg legt den Artikel eines Sonderstücks ebenfalls neu an (ohne verknüpften Artikel):
   // dieselbe Prüfung VOR jedem Schreiben, auch wenn der alte Auftrag keine Sonderstück-Zeile führt.
-  if (req.legacyScheme !== undefined && !(auftrag.productId || auftrag.existingProductId)
-    && (auftrag.type === 'custom' || billable.some((l) => l.materialKind === 'custom'))) {
-    assertCustomPieceCategory(auftrag);
+  if (req.legacyScheme !== undefined && (auftrag.type === 'custom' || billable.some((l) => l.materialKind === 'custom'))) {
+    if (!(auftrag.productId || auftrag.existingProductId)) assertCustomPieceCategory(auftrag);
+    // CUSTOM-ORDER OF3 — auch der Altweg nimmt die Order-Kosten als Einstand.
+    if (!customLine && costBasis > EPS) assertOrderCostsBooked(req.orderId, 'the invoice');
   }
   // Steuerart je Position: die Wahl im Dialog, sonst die festgehaltene, sonst die des Artikels.
   const schemes: Record<string, TaxScheme> = {};

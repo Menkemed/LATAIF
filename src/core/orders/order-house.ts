@@ -21,6 +21,7 @@ import type { Order, Product } from '@/core/models/types';
 import { normalizeSpecImages } from '@/core/media/record-image';
 import { OrderActionRejected, planOrderCreate, type OrderCreateInput, type OrderCreatePort } from './order-create';
 import { planOrderEdit, orderEditInput, type OrderEditInput } from './order-edit';
+import { updateOrderDatesInHouse, type OrderDatesInput } from './order-dates';
 import { correctionDateIssue } from '@/core/ledger/correction-dates';
 import { bookingTimestamp } from './order-gold-value';
 
@@ -169,6 +170,11 @@ export function ohneVorlagenbilder(
   const rest = { ...spec };
   delete rest.images;
   return { spec: rest, urls };
+}
+
+/** CUSTOM-ORDER K4 — Auftragsdatum / Fertigstellung am Primary korrigieren (auch nach „Completed"). */
+export function updateOrderDatesOnPrimary(id: string, input: OrderDatesInput): Promise<{ changed: string[] }> {
+  return runOnPrimary(() => updateOrderDatesInHouse(id, input, currentBranchId()), frischLesen);
 }
 
 /** „Save" der Auftragsseite am Primary — die sechs Werte des Formulars. */
