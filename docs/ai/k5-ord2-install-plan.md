@@ -101,7 +101,9 @@ node --experimental-strip-types scripts/k5-ord2-fix.mts E:\LATAIF\Data\lataif.db
 
 **9 Rechnung durch den Owner:** ORD-2 → „Create Invoice".
 - Im Dialog Steuerart **Zero** und Rechnungsdatum **25.10.2026** prüfen. Die Anzahlung deckt 240 voll, die Rechnung ist
-  danach FINAL und nur noch über eine Retoure korrigierbar.
+  danach FINAL und nicht stornierbar.
+- Solange Q4/2026 offen ist, bleiben Kosten (Lohn, Gold, Goldquelle), Kunde, Name und Daten über die Order korrigierbar
+  (Owner-Regel „Edit Order After Invoice"). Steuerart und Preis gehen nur über die Rechnungskorrektur.
 - Erwartet: Rechnung 240 bezahlt, Artikel ITM-GLD-nnn. Die Goldschuld kann danach in BHD beglichen werden.
 
 ## Wiederherstellung
@@ -117,6 +119,7 @@ node --experimental-strip-types scripts/k5-ord2-fix.mts E:\LATAIF\Data\lataif.db
 
 **Go (lokal belegt):**
 - TS grün, Node-Sweep, gezielte Unit-, Ledger-, VAT- und Storno-Tests, E2E Primary/PC2 (Belege im Abschlussbericht).
+- Owner-Regel „Edit Order After Invoice" umgesetzt und am echten ORD-2-Ablauf auf der Kopie geprüft (nur im Speicher).
 - K5 auf der Produktionskopie geprüft.
 
 **Vor Go noch nötig (Owner):**

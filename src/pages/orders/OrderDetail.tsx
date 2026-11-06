@@ -869,6 +869,22 @@ export function OrderDetail() {
                 {customer.company && (
                   <span style={{ fontSize: 12, color: '#6B7280', display: 'block', marginTop: 2 }}>{customer.company}</span>
                 )}
+                {/* CUSTOM-ORDER Owner-Regel — nach der Umwandlung: den Kunden über die Rechnungskorrektur wechseln (Order,
+                    Anzahlungen und Rechnung ziehen gemeinsam um) oder den Namen in den Stammdaten korrigieren. */}
+                {order.invoiceId && perm.canManageOrders && (
+                  <div className="flex gap-3" style={{ marginTop: 8 }}>
+                    <button type="button" data-order-change-client className="cursor-pointer"
+                      onClick={() => navigate(`/invoices/${order.invoiceId}/edit`)}
+                      style={{ fontSize: 12, color: '#0F0F10', textDecoration: 'underline', background: 'none', border: 'none', padding: 0 }}>
+                      Change client
+                    </button>
+                    <button type="button" data-order-edit-client className="cursor-pointer"
+                      onClick={() => navigate(`/clients/${customer.id}`)}
+                      style={{ fontSize: 12, color: '#6B7280', textDecoration: 'underline', background: 'none', border: 'none', padding: 0 }}>
+                      Correct client name
+                    </button>
+                  </div>
+                )}
               </div>
             )}
 

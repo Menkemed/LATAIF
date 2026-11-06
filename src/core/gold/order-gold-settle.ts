@@ -72,7 +72,7 @@ function livePayable(id: string, branchId: string): Record<string, unknown> {
 }
 
 /** Die verkaufte Rechnungszeile des Sonderstücks dieser Order (oder null, solange es nicht verkauft ist). */
-function soldLineOf(orderId: string): { invoiceId: string; lineId: string } | null {
+export function soldLineOf(orderId: string): { invoiceId: string; lineId: string } | null {
   const r = query(
     `SELECT il.invoice_id, il.id AS line_id FROM order_lines ol
        JOIN invoices i ON i.id = ol.invoice_id AND i.status != 'CANCELLED'

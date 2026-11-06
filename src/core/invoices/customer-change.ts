@@ -23,8 +23,11 @@
 //   • Guthaben aus dieser Rechnung, das für ETWAS ANDERES verwendet wurde (dann hat der alte Kunde
 //     echten Gegenwert erhalten — das ist ein eigener Fall),
 //   • eine Rate, bezahlt mit UNABHÄNGIGEM Guthaben des alten Kunden (dessen Guthaben bleibt seins),
-//   • eine Rechnung aus einem Auftrag oder einer Reparatur mit Geldfluss (die haben eigene Kunden-
-//     buchungen),
+//   • eine Rechnung aus einer Reparatur mit Geldfluss (die hat eigene Kundenbuchungen),
+//   • CUSTOM-ORDER Owner-Regel: eine Rechnung aus einem Auftrag zieht MIT ihm um — der Auftrag, seine Anzahlungen
+//     (ORDER_PAYMENT, rückwirkend auf ihren Buchungstag) und die Anrechnung. Gesperrt bleibt nur, was kein einfacher
+//     Fall ist: mehrere Aufträge, ein auf mehrere Rechnungen verteilter Auftrag, ein Überzahlungs-Guthaben des Auftrags
+//     oder eine Anzahlung in unüblicher Buchungsform,
 //   • eine Rechnung oder Gutschrift in einem Quartal, das als VAT eingereicht markiert oder schon
 //     bezahlt ist — dort stünde im NBR-Export ein anderer Käufer; das braucht einen Korrekturbeleg.
 // Mit Geldfluss braucht die Korrektur eine ausdrückliche Bestätigung; eine neue Zahlung im selben
@@ -36,7 +39,7 @@ import { trackChange } from '@/core/sync/sync-service';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { closedVatQuarters, nbrQuarterOfDate } from '@/core/tax/vat-period-lock';
-import { activeSourceDates, postCreditNote, postInvoicePayment, reverseSource } from '@/core/ledger/posting';
+import { activeSourceDates, postCreditNote, postInvoicePayment, postOrderPayment, reverseSource } from '@/core/ledger/posting';
 import type { CreditNote, PaymentMethod } from '@/core/models/types';
 
 /** Dieselbe Kennung wie beim Anlegen (`invoice-create-house`) — hier nicht importiert, weil jenes
@@ -77,6 +80,16 @@ export interface MovablePayment {
   bookedAt: string | null;
 }
 
+/** CUSTOM-ORDER — eine gebuchte Anzahlung des Auftrags dieser Rechnung (zieht mit um). */
+export interface MovableOrderPayment {
+  id: string;
+  orderId: string;
+  amount: number;
+  method: string;
+  signature: string;
+  bookedAt: string;
+}
+
 export interface MovableCreditNote {
   cn: CreditNote;
   signature: string;
@@ -97,6 +110,8 @@ export interface CustomerChangePlan {
   creditIds: string[];
   /** Angebote, aus denen diese Rechnung wurde und die noch auf den alten Kunden lauten. */
   offerIds: string[];
+  /** CUSTOM-ORDER — der Auftrag dieser Rechnung und seine gebuchten Anzahlungen (ziehen mit um). */
+  order?: { id: string; payments: MovableOrderPayment[] };
 }
 
 /** Die wirksamen (nicht gegengebuchten) Beine einer Quelle. */
@@ -167,7 +182,7 @@ export function planCustomerChange(
     [invoiceId, invoiceId, invoiceId],
   );
   const invoiceCreditIds = new Set(ids(creditRows));
-  const moneyFlow = payRows.length > 0 || activeCn.length > 0 || creditRows.length > 0
+  let moneyFlow = payRows.length > 0 || activeCn.length > 0 || creditRows.length > 0
     || returnRows.some((r) => String(r.status) !== 'REJECTED');
 
   const plan: CustomerChangePlan = {
@@ -175,13 +190,44 @@ export function planCustomerChange(
     creditIds: creditRows.filter((r) => String(r.source_type) !== 'invoice_edit').map((r) => String(r.id)),
     offerIds: ids(query('SELECT id FROM offers WHERE invoice_id = ? AND customer_id = ?', [invoiceId, from])),
   };
-  if (!moneyFlow) return plan;
 
-  // Auftrag / Reparatur: eigene Kundenbuchungen (Anzahlungen, Reparaturzahlungen) — eigener Fall.
-  if (query(`SELECT 1 FROM order_lines WHERE invoice_id = ? UNION SELECT 1 FROM orders WHERE invoice_id = ? LIMIT 1`, [invoiceId, invoiceId]).length > 0) {
-    throw new InvoiceActionRejected(CUSTOMER_CHANGE_FROM_ORDER,
-      'The customer cannot be changed here: this invoice was created from an order, and its payments belong to that order. Correct the order first.');
+  // CUSTOM-ORDER Owner-Regel — Auftrag dieser Rechnung: er und seine Anzahlungen ziehen mit (nur der einfache Fall).
+  const orderIds = [...new Set(query(
+    'SELECT order_id AS id FROM order_lines WHERE invoice_id = ? UNION SELECT id FROM orders WHERE invoice_id = ?', [invoiceId, invoiceId],
+  ).map((r) => String(r.id)))];
+  if (orderIds.length > 0) {
+    const fromOrder = (why: string): InvoiceActionRejected => new InvoiceActionRejected(CUSTOMER_CHANGE_FROM_ORDER,
+      `The customer cannot be changed automatically: ${why}. Nothing was changed.`);
+    if (orderIds.length > 1) throw fromOrder('this invoice comes from more than one order');
+    const oid = orderIds[0];
+    const o = query('SELECT customer_id FROM orders WHERE id = ?', [oid])[0];
+    if (!o || String(o.customer_id) !== from) throw fromOrder('the order of this invoice belongs to another client');
+    const andere = query(
+      `SELECT DISTINCT ol.invoice_id AS id FROM order_lines ol JOIN invoices i ON i.id = ol.invoice_id AND i.status != 'CANCELLED'
+        WHERE ol.order_id = ? AND ol.invoice_id != ?`, [oid, invoiceId]);
+    if (andere.length > 0) throw fromOrder('the order is split over several invoices — correct them together');
+    if (query("SELECT 1 FROM customer_credits WHERE source_type = 'order_overpayment' AND source_id = ? LIMIT 1", [oid]).length > 0) {
+      throw fromOrder('the order has store credit from an overpayment');
+    }
+    const orderPayments: MovableOrderPayment[] = [];
+    for (const r of query('SELECT id, amount, method FROM order_payments WHERE order_id = ? ORDER BY paid_at, id', [oid])) {
+      const id = String(r.id);
+      const legs = activeLegs('ORDER_PAYMENT', id);
+      if (legs.length === 0) continue;   // ohne (wirksame) Buchung: nichts umzubuchen
+      const amount = Number(r.amount) || 0;
+      const dep = legs.filter((l) => l.account === 'CUSTOMER_DEPOSITS' && l.direction === 'CREDIT');
+      const geld = legs.filter((l) => l.direction === 'DEBIT' && l.account !== 'ACCOUNTS_RECEIVABLE');
+      const days = activeSourceDates('ORDER_PAYMENT', id);
+      if (legs.length !== 2 || dep.length !== 1 || geld.length !== 1 || Math.abs(dep[0].amount - amount) > 0.0005
+        || Math.abs(geld[0].amount - amount) > 0.0005 || !legs.every((l) => l.cpType === 'CUSTOMER' && l.cpId === from) || days.length !== 1) {
+        throw fromOrder('a deposit of the order is not booked in its usual form');
+      }
+      orderPayments.push({ id, orderId: oid, amount, method: String(r.method ?? 'cash'), signature: signatureOf(legs), bookedAt: days[0] });
+    }
+    plan.order = { id: oid, payments: orderPayments };
+    if (orderPayments.length > 0) moneyFlow = true;
   }
+  if (!moneyFlow) return plan;
   if (query('SELECT 1 FROM repairs WHERE invoice_id = ? LIMIT 1', [invoiceId]).length > 0) {
     throw new InvoiceActionRejected(CUSTOMER_CHANGE_FROM_REPAIR,
       'The customer cannot be changed here: this invoice belongs to a repair with its own customer bookings. Correct the repair first.');
@@ -296,6 +342,7 @@ export function customerChangeBookingDays(plan: CustomerChangePlan): Array<{ iso
   return [
     ...plan.payments.filter((p) => p.booked && p.bookedAt).map((p) => ({ iso: p.bookedAt as string, what: 'a payment of this invoice' })),
     ...plan.creditNotes.map((c) => ({ iso: c.bookedAt, what: `credit note ${c.cn.creditNoteNumber}` })),
+    ...(plan.order?.payments ?? []).map((p) => ({ iso: p.bookedAt, what: 'a deposit of the order' })),
   ];
 }
 
@@ -337,6 +384,15 @@ export function moveInvoiceBookings(
     }
     moved.creditNotes.push(c.cn.id);
   }
+  // CUSTOM-ORDER — die Anzahlungen des Auftrags: beim alten Kunden aus-, beim neuen am selben Tag wieder einbuchen.
+  for (const p of plan.order?.payments ?? []) {
+    reverseSource('ORDER_PAYMENT', p.id, at, { mirrorOriginalDates: retro });
+    postOrderPayment({ id: p.id, orderId: p.orderId, amount: p.amount, method: p.method, paidAt: retro ? p.bookedAt : at }, plan.to);
+    const after = activeLegs('ORDER_PAYMENT', p.id);
+    if (signatureOf(after) !== p.signature || after.some((l) => l.cpId !== plan.to)) {
+      throw new Error(`moveInvoiceBookings: order deposit ${p.id} would change its booking — nothing was moved.`);
+    }
+  }
   const db = getDatabase();
   const relink = (table: string, rowIds: string[]): void => {
     for (const id of rowIds) {
@@ -348,6 +404,13 @@ export function moveInvoiceBookings(
   relink('sales_returns', plan.returnIds);
   relink('customer_credits', plan.creditIds);
   relink('offers', plan.offerIds);
+  if (plan.order) {
+    relink('orders', [plan.order.id]);
+    logAuditOrThrow({
+      module: 'Order', entityType: 'orders', entityId: plan.order.id, action: 'UPDATE', field: 'customer (correction)',
+      oldValue: customerName(plan.from), newValue: `${customerName(plan.to)} · ${plan.order.payments.length} deposit(s) moved`,
+    });
+  }
   writeTrailToHistory(plan, recorded);
   return moved;
 }

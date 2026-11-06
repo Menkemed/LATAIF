@@ -493,6 +493,39 @@ try {
       `K4 PC2: EIN orders.update nur mit den Datumsfeldern (${S(cmd.map((x) => x.payload))})`);
     ok((await client.ev('return window.__dbHits.length;')) === 0, 'K4 PC2 greift auf keine lokale Datenbank zu');
   }
+
+  // ── 10 Owner-Regel: umgewandelte Order am PC2 nachträglich korrigieren (Add Cost) — Rechnung folgt, Lager bleibt ───────
+  {
+    await spuelen(primary).catch(() => null);
+    const inv = dbQ(BIZ_DB, `SELECT invoice_id FROM orders WHERE id = '${ORD}'`)[0]?.invoice_id;
+    const snap = () => Number(dbQ(BIZ_DB, 'SELECT purchase_price_snapshot AS c FROM invoice_lines WHERE invoice_id = ?', [inv])[0]?.c ?? NaN);
+    const s0 = snap(), inv0 = saldo('INVENTORY'), nInv0 = Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM invoices')[0]?.n);
+    await gehFrisch(client, `/orders/${ORD}`);
+    await warteBis(client, "!!document.querySelector('[data-order-add-cost-open]')", 30000);
+    const r = [await klick(client, '[data-order-add-cost-open]')];
+    await warteBis(client, "!!document.querySelector('[data-material-save]')", 10000);
+    await sleep(300);
+    r.push(await klick(client, '[data-material-kind="labor"]'));
+    r.push(await setVal(client, '[data-material-description]', 'PC2 Nacharbeit'));
+    r.push(await setVal(client, '[data-material-cost]', '5'));
+    r.push(await client.ev("const t=document.querySelector('[data-material-source] [data-ss-trigger]'); if(!t) return 'NO-TRIGGER'; t.click(); return 'OK';"));
+    await warteBis(client, "!!document.querySelector('[data-ss-option=\"co-arup\"]')", 15000);
+    r.push(await klick(client, '[data-ss-option="co-arup"]'));
+    await sleep(250);
+    r.push(await klick(client, '[data-material-save]'));
+    await spuelen(primary).catch(() => null);
+    const gefolgt = await warteAuf(() => Math.abs(snap() - (s0 + 5)) < 0.0005, 30000);
+    ok(r.every((x) => x === 'OK') && gefolgt && Math.abs(saldo('INVENTORY') - inv0) < 0.0005
+      && Number(dbQ(BIZ_DB, 'SELECT COUNT(*) AS n FROM invoices')[0]?.n) === nInv0,
+      `Edit nach Rechnung PC2: Add Cost 5 → Einstand der Rechnung ${s0} → ${snap()}, Lager unverändert, keine neue Rechnung (${S(r)})`);
+    const cmd = (await befehle(client)).filter((x) => x.op === 'orders.add_cost' && x.payload?.orderId === ORD);
+    ok(cmd.length >= 1 && cmd[cmd.length - 1].payload.rows?.[0]?.supplierId === 'co-arup', 'Edit nach Rechnung PC2: EIN orders.add_cost mit der Werkstatt');
+    await gehFrisch(client, `/orders/${ORD}`);
+    const link = await warteBis(client, "!!document.querySelector('[data-order-change-client]')", 20000);
+    await klick(client, '[data-order-change-client]');
+    const ziel = await warteBis(client, `location.pathname === '/invoices/${inv}/edit'`, 20000);
+    ok(link && ziel, 'Edit nach Rechnung PC2: „Change client" an der Order öffnet die Rechnungskorrektur dieser Rechnung');
+  }
 } catch (e) {
   FAIL++; fails.push('harness: ' + (e?.message ?? e)); console.error(e);
 } finally {

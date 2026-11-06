@@ -119,7 +119,37 @@ hat, kann sein Verbrauch für eine Order gegen `GOLD_STOCK` aktiviert werden. F�
   deckt die Rechnung voll → die Rechnung ist sofort FINAL; eine Korrektur geht danach nur über eine Retoure. Steuerart
   (Zero) und Rechnungsdatum (25.10.) im Dialog vor dem Bestätigen prüfen.
 
+## Owner-Regel „Edit Order After Invoice Conversion" (umgesetzt) — Grenzen
+
+Eine umgewandelte Custom Order bleibt über die Order korrigierbar, solange die Rechnung im offenen Zeitraum berichtigt
+werden kann. Das gilt auch, wenn sie FINAL und voll bezahlt ist.
+- **Kosten** (Lohn, Gold, Karat, Goldquelle, Goldschuld):
+  - Weg: „Add Cost" / Kostenzeile entfernen. Ein Wert in einer bestehenden Kostenzeile wird nicht geändert; Gold mit
+    anderen Gramm, anderem Karat oder anderer Werkstatt = alte Goldzeile entfernen und neue hinzufügen.
+  - Rechnungszeile (Einstand, bei Margin die Margin-VAT) und Artikel folgen in derselben Klammer
+    (`applySoldLineCostCorrection`, wie K3a/D1). Lager bleibt, Wareneinsatz und Lieferantenschuld/Goldschuld folgen.
+  - Gesperrt:
+    - Quartal der Rechnung oder heute gemeldet/vor dem Stichtag (`ORDER_COSTS_PERIOD_CLOSED`, kein Weg über einen
+      getrennten Beleg)
+    - Retoure oder Gutschrift an der Rechnung (`INVOICE_HAS_RETURNS`), ein Korrektur-Guthaben
+    - eigene Kosten ohne Werkstatt (OF3)
+    - eine schon (teil-)beglichene Goldschuld (erst die Begleichung zurücknehmen)
+    - eine schon (teil-)bezahlte Lieferantenschuld (`ORDER_COST_PAID`, gilt auch vor der Rechnung, siehe OF6)
+- **Kunde:** „Change client" an der Order öffnet die vorhandene Rechnungskorrektur (Grund + Bestätigung).
+  - Was umzieht: Order, Rechnung, Anrechnung (PAYMENT) und die Anzahlungen der Order (ORDER_PAYMENT), rückwirkend auf
+    ihre eigenen Buchungstage. Geldkonten und unbeteiligte Kunden bleiben unverändert.
+  - Gesperrt: mehrere Orders, eine auf mehrere Rechnungen verteilte Order, ein Überzahlungs-Guthaben der Order, eine
+    Anzahlung in unüblicher Buchungsform, gemeldetes Quartal (bestehende Regeln).
+- **Kundenname:** Stammdaten („Correct client name" → Kunde), mit der bestehenden VAT-Sperre der Stammdaten.
+- **Daten:** K4 („Correct dates"), nur Anzeige. Das Rechnungsdatum folgt dem Order-Datum NICHT; es wird bei Bedarf in der
+  Rechnungskorrektur geändert.
+- **Nicht über die Order:** Verkaufspreis und Steuerart der Rechnung (Rechnungskorrektur), Storno einer FINAL-Rechnung
+  (bestehende Regel: Retoure).
+
 ## OF6 — Weitere Funde aus dem Abschluss (dokumentiert, zurückgestellt)
+
+- **Bezahlte Kostenzeile entfernen (behoben):** `deleteOrderLine` löschte die Zahlungszeilen einer schon bezahlten
+  Lieferantenschuld mit, ließ deren Buchungen aber stehen (älter als diese Phase). Jetzt Nein (`ORDER_COST_PAID`).
 
 - **GOLD SOURCE und Goldhändler (K4):** Preview V4 zeigt unter „Gold vom Lieferanten" auch einen Goldhändler. Es gibt
   kein Merkmal „Goldhändler"; umgesetzt sind nur Werkstätten (aktiv + „Is Workshop", wie Reparaturen). Ein Goldhändler,

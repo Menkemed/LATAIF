@@ -15,7 +15,11 @@
 // `…OnPrimary` in `runOnPrimary` (exklusiv, eine Klammer, durabel). Die Gramm-, Karat- und
 // Begleichungslogik selbst steht NUR im Goldkern (`gold-settle.ts`); diese Datei setzt zusammen.
 // ════════════════════════════════════════════════════════════════════════════
-import { settleOrderGoldInBhd, reverseOrderGoldSettlement, type OrderGoldSettleRequest, type OrderGoldSettled } from './order-gold-settle';
+import { settleOrderGoldInBhd, reverseOrderGoldSettlement, soldLineOf, type OrderGoldSettleRequest, type OrderGoldSettled } from './order-gold-settle';
+import { planSoldLineCostCorrection, applySoldLineCostCorrection, type SoldLineRef } from '@/core/invoices/sold-line-cost-correction';
+import { correctionDateIssue } from '@/core/ledger/correction-dates';
+import { orderCustomCostBasis } from '@/core/orders/order-invoice-lines';
+import { trackUpdate } from '@/core/sync/track';
 import { v4 as uuid } from 'uuid';
 import { getDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId } from '@/core/db/helpers';
@@ -370,13 +374,53 @@ export function recordRepairGoldUsageInHouse(actor: GoldActor, req: RepairGoldUs
  * Rechnung. Eine neue oder entfernte Kostenzeile änderte ihn still; abgelehnt, bevor etwas geschrieben wird.
  * (Die nachträgliche Begleichung einer Goldschuld in BHD berichtigt die Rechnung ausdrücklich — K3a.)
  */
-function assertCustomPieceNotInvoiced(orderId: string): void {
+/**
+ * CUSTOM-ORDER Owner-Regel (Edit Order After Invoice Conversion) — ist das Sonderstück schon verkauft, bleiben seine
+ * Kosten über die Order korrigierbar, solange die Rechnung im OFFENEN Zeitraum berichtigt werden kann — auch FINAL und
+ * voll bezahlt. Geprüft VOR jedem Schreiben: Rechnungszeile vorhanden, keine Retoure/Gutschrift, kein Korrektur-Guthaben,
+ * Rechnungs- und Buchungstag offen. `null` = noch nicht verkauft (dann gilt das bisherige „vor der Rechnung").
+ */
+function invoicedPieceCorrection(orderId: string, branchId: string): SoldLineRef | null {
   const inv = query(`SELECT 1 FROM order_lines WHERE order_id = ? AND material_kind = 'custom' AND invoice_id IS NOT NULL LIMIT 1`, [orderId]);
-  if (inv.length > 0) {
+  if (inv.length === 0) return null;
+  const sold = soldLineOf(orderId);
+  if (!sold) {
     throw new GoldRejected('ORDER_COSTS_LOCKED',
-      'the custom piece of this order is already invoiced — its costs are part of that invoice. Cancel the invoice first. Nothing was changed.');
+      'the invoice line of the custom piece is not found — its costs stay as they are. Nothing was changed.');
+  }
+  const plan = planSoldLineCostCorrection(sold, 0, branchId);
+  if (plan.blocker) {
+    throw new GoldRejected(plan.blocker.code, `${plan.blocker.message} The costs of this order stay as they are. Nothing was changed.`);
+  }
+  if (plan.mode !== 'INVOICE') {
+    throw new GoldRejected('ORDER_COSTS_PERIOD_CLOSED',
+      `The invoice of this order lies in a closed period — its costs are no longer corrected via the order. ${plan.periodReason ?? ''} Nothing was changed.`.trim());
+  }
+  const heute = correctionDateIssue(branchId, [{ iso: new Date().toISOString(), what: 'the cost correction' }]);
+  if (heute) throw new GoldRejected(heute.code, heute.message);
+  return sold;
+}
+
+/** Nach dem Schreiben der Kosten: die Rechnungszeile (Einstand, ggf. Margin-VAT) und der Artikel folgen um die Differenz. */
+function followInvoicedPiece(sold: SoldLineRef, orderId: string, branchId: string, beforeFils: number, context: Record<string, unknown>): void {
+  const afterFils = Math.round(orderCustomCostBasis(useOrderStore.getState().getOrderLines(orderId)) * 1000);
+  const delta = afterFils - beforeFils;
+  if (delta === 0) return;
+  const nowIso = new Date().toISOString();
+  applySoldLineCostCorrection(sold, delta, branchId, nowIso, {
+    setProductCost: false, auditField: 'cost_correction_order_after_invoice', auditContext: { orderId, ...context },
+  });
+  // Der Artikel trägt den tatsächlichen Einstand: + Differenz (eine getrennt gebuchte Goldschuld-Differenz bleibt darin).
+  const p = query('SELECT product_id FROM invoice_lines WHERE id = ?', [sold.lineId])[0];
+  if (p?.product_id) {
+    const pid = String(p.product_id);
+    const alt = Math.round((Number(query('SELECT purchase_price FROM products WHERE id = ?', [pid])[0]?.purchase_price) || 0) * 1000);
+    const neu = Math.max(0, alt + delta) / 1000;
+    getDatabase().run('UPDATE products SET purchase_price = ?, updated_at = ? WHERE id = ?', [neu, nowIso, pid]);
+    trackUpdate('products', pid, { purchasePrice: neu });
   }
 }
+const costBasisFils = (orderId: string): number => Math.round(orderCustomCostBasis(useOrderStore.getState().getOrderLines(orderId)) * 1000);
 
 export interface OrderCostRequest { orderId: string; expectedRevision?: number; rows: MaterialRowInput[] }
 export interface OrderCostResult { orderId: string; lineIds: string[]; goldPayableIds: string[]; expenseIds: string[]; revision: number }
@@ -386,8 +430,14 @@ export function addOrderCostInHouse(actor: GoldActor, req: OrderCostRequest): Or
   assertSeenRevision(o, seenRevision(req.expectedRevision));
   // Die Maske bietet „Add Cost" nur für einen nicht stornierten Auftrag an.
   if (str(o.status) === 'cancelled') throw new GoldRejected('ORDER_CANCELLED', 'this order is cancelled — it takes no new cost lines');
-  assertCustomPieceNotInvoiced(req.orderId);
+  const sold = invoicedPieceCorrection(req.orderId, actor.branchId);
   const rows = checkMaterialRows(req.rows, actor.branchId, true);
+  // CUSTOM-ORDER OF3 — am verkauften Stück nur Kosten, die im Lager gebucht werden (Werkstatt / Goldschuld).
+  if (sold && rows.some((r) => !r.supplierId && !r.goldAsPayable && r.totalCost > 0.0005)) {
+    throw new GoldRejected('CUSTOM_COSTS_NOT_BOOKED',
+      'own labour / own gold without a workshop is not supported on an invoiced piece — record the cost with the workshop. Nothing was changed.');
+  }
+  const vorher = sold ? costBasisFils(req.orderId) : 0;
   const check = watchLedgerPosts('orders.add_cost');
   const lineIds: string[] = [];
   const goldPayableIds: string[] = [];
@@ -417,6 +467,7 @@ export function addOrderCostInHouse(actor: GoldActor, req: OrderCostRequest): Or
   // CUSTOM-ORDER K1 — die Gramm-Schuld entsteht erst NACH ihrer (sofort angekommenen) Zeile: ihr Wert wird jetzt
   // gebucht (Soll INVENTORY / Haben GOLD_LIABILITY). Idempotent; schon gebuchte Zeilen bleiben unberührt.
   if (goldPayableIds.length > 0) useOrderStore.getState().commitOrderLineExpenses(req.orderId);
+  if (sold) followInvoicedPiece(sold, req.orderId, actor.branchId, vorher, { addedLineIds: lineIds });
   check();
   const expenseIds = lineIds.length === 0 ? [] : query(
     `SELECT expense_id FROM order_lines WHERE id IN (${lineIds.map(() => '?').join(',')}) AND expense_id IS NOT NULL ORDER BY position`,
@@ -440,11 +491,22 @@ export function removeOrderCostInHouse(actor: GoldActor, req: OrderCostRemoveReq
   // Der Löschknopf steht nur in der Kostenkarte — eine Kundenposition geht diesen Weg nicht.
   if (num(line.is_customer_facing) !== 0) throw new GoldRejected('LINE_NOT_A_COST_LINE', 'this is a customer line, not a cost line');
   if (str(line.invoice_id)) throw new GoldRejected('LINE_INVOICED', 'Diese Position ist bereits in einer Invoice — erst die Invoice stornieren.');
-  assertCustomPieceNotInvoiced(req.orderId);
+  // Eine schon (teil-)bezahlte Lieferantenschuld bleibt: das Löschen der Zeile nähme ihre Zahlungszeilen mit, ließe deren
+  // Buchung (Kasse/Bank an Lieferantenschuld) aber stehen — Schuld und Kasse stimmten nicht mehr. Vor jedem Schreiben.
+  if (str(line.expense_id)) {
+    const e = query('SELECT paid_amount, (SELECT COUNT(*) FROM expense_payments p WHERE p.expense_id = expenses.id) AS n FROM expenses WHERE id = ?', [str(line.expense_id)])[0];
+    if (e && (num(e.paid_amount) > 0.0005 || num(e.n) > 0)) {
+      throw new GoldRejected('ORDER_COST_PAID',
+        'this cost is already (partly) paid to the supplier — reverse that payment first. Nothing was changed.');
+    }
+  }
+  const sold = invoicedPieceCorrection(req.orderId, actor.branchId);
   const linked = query('SELECT id, status, fulfilled_grams FROM gold_payables WHERE source_order_line_id = ?', [req.lineId]);
   assertGoldPayablesRemovable(linked, 'Position');
+  const vorher = sold ? costBasisFils(req.orderId) : 0;
   const check = watchLedgerPosts('orders.remove_cost');
   useOrderStore.getState().deleteOrderLine(req.lineId);
+  if (sold) followInvoicedPiece(sold, req.orderId, actor.branchId, vorher, { removedLineId: req.lineId });
   check();
   if (query('SELECT id FROM order_lines WHERE id = ?', [req.lineId])[0]) {
     throw new Error('orders.remove_cost: the cost line is still there');
