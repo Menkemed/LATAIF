@@ -42,6 +42,15 @@ import { productDisplayName } from '@/core/products/display-name';
 import { BulkInvoiceLineRow, previewBulkCogs, resolvedBulkScheme, type BulkInvoiceDraft } from '@/components/bulk/BulkInvoiceLineRow';
 import { bulkLotsForSaleFor, type BulkLotForSale } from '@/core/bulk/bulk-reads';
 import { bulkAmountsFromGross, formatMg, parseBhdToFils, parseGramsToMg, type BulkType } from '@/core/bulk/bulk-math';
+// MIXED-INVOICE P3 — Kommissionsartikel auf derselben Rechnung (nur ADMIN/MANAGER), gebucht über die Verkaufsfolge.
+import { usePermission } from '@/hooks/usePermission';
+import { useConsignmentStore } from '@/stores/consignmentStore';
+import { ConsignmentInvoiceLines, consignmentRowsIssue, useConsignmentInvoiceRows, type ConsignmentDraft } from '@/components/invoices/ConsignmentInvoiceLines';
+import { createMixedInvoiceOnPrimary } from '@/core/consignment/consignment-finance-house';
+import { mixedInvoiceBody, type MixedInvoiceInput } from '@/core/invoices/mixed-invoice';
+import type { ConsignorPurchaseTaxScheme } from '@/core/consignment/consignment-finance';
+// Die Maske rechnet die Kommissionszeile mit derselben Funktion wie die Buchung (`consignmentLineAmounts`) und prüft E7 mit
+// `consignmentVatShortfall` — beides in `ConsignmentInvoiceLines`.
 
 type Scheme = 'auto' | 'VAT_10' | 'ZERO' | 'MARGIN';
 type Method = 'cash' | 'bank_transfer' | 'card' | 'benefit';
@@ -148,6 +157,17 @@ export function InvoiceCreate() {
   const anlegen = useSharedWrite<{ invoiceId: string }>('invoices.create');
   // CENTRAL-UI-PARITY R6B — das Ändern dieser Seite geht fern über die vorhandene Buchung.
   const aendernRechnung = useSharedWrite<Record<string, unknown>>('invoices.update');
+  // MIXED-INVOICE P3 — die gemischte Rechnung: am Primary `createMixedInvoiceOnPrimary`, fern `consignments.record_sale`
+  // mit `ownLines` (dieselbe Hausfolge). Nur ADMIN/MANAGER sehen die Kommissionsartikel; das Haus prüft es erneut.
+  const anlegenGemischt = useSharedWrite<{ invoiceId: string }>('consignments.record_sale');
+  const { isAdmin } = usePermission();
+  const { loadConsignments } = useConsignmentStore();
+  const [conDrafts, setConDrafts] = useState<ConsignmentDraft[]>([]);
+  const [consignorVat, setConsignorVat] = useState<Record<string, ConsignorPurchaseTaxScheme>>({});
+  const mixedAllowed = !isEditMode && isAdmin;
+  useEffect(() => { if (mixedAllowed) loadConsignments(); }, [mixedAllowed, loadConsignments]);
+  const conRows = useConsignmentInvoiceRows(mixedAllowed ? conDrafts : []);
+  const isMixed = mixedAllowed && conRows.length > 0;
   const [notes, setNotes] = useState('');
   const [staffId, setStaffId] = useState<string>('');
   const [editReason, setEditReason] = useState('');  // Pflicht-Grund im Edit-Modus (Audit)
@@ -361,8 +381,9 @@ export function InvoiceCreate() {
     };
   });
 
-  const subtotal = computed.reduce((s, c) => s + c.net, 0);
-  const totalVat = computed.reduce((s, c) => s + c.vat, 0);
+  // MIXED-INVOICE P3 — die Kommissionsartikel gehören zur selben Rechnung (Netto, VAT, Summe).
+  const subtotal = computed.reduce((s, c) => s + c.net, 0) + conRows.reduce((s, r) => s + r.net, 0);
+  const totalVat = computed.reduce((s, c) => s + c.vat, 0) + conRows.reduce((s, r) => s + r.vat, 0);
   const total = subtotal + totalVat;
   // v0.8.87 — beim Anlegen: die Summe der Zahlungszeilen; beim Ändern: der bezahlte Betrag wie bisher.
   const createPaid = payRows.reduce((sum, r) => sum + Math.max(0, payAmountOf(r)), 0);
@@ -438,11 +459,21 @@ export function InvoiceCreate() {
     setLines(prev => prev.length === 1 ? prev : prev.filter((_, i) => i !== idx));
   }
 
+  /** MIXED-INVOICE P3 — die noch leere Produktzeile (kein Artikel, keine Bulk-Zeile). */
+  function leereZeile(l: DraftLine): boolean {
+    return !l.productId && !l.bulk;
+  }
+
   function validate(): string | null {
     if (!customerId) return 'Please select a customer';
     if (lines.length === 0) return 'Please add at least one product';
-    const bad = lines.findIndex(l => !l.productId || l.quantity <= 0 || l.unitPrice < 0);
+    // MIXED-INVOICE P3 — mit Kommissionsartikeln zählt eine leere Produktzeile nicht (sie wird nicht gespeichert).
+    const bad = lines.findIndex(l => !(isMixed && leereZeile(l)) && (!l.productId || l.quantity <= 0 || l.unitPrice < 0));
     if (bad !== -1) return `Line ${bad + 1}: pick a product, set qty > 0, price ≥ 0`;
+    if (isMixed) {
+      const issue = consignmentRowsIssue(conRows, customerId, consignorVat);
+      if (issue) return issue;
+    }
     const short = computed.findIndex(c => c.keptShort);
     if (short !== -1) return `Line ${short + 1}: ${computed[short].keptShort}`;
     // P1c — die Teilzeile trägt höchstens die nicht retournierten Stücke; mehr gehört auf eine neue Zeile.
@@ -634,6 +665,49 @@ export function InvoiceCreate() {
       } else {
         navigate(`/invoices/${editInvoice.id}`);
       }
+      return;
+    }
+
+    // MIXED-INVOICE P3 — mit Kommissionsartikeln: EINE Rechnung über die Verkaufsfolge (je Einlieferer ein Einkauf,
+    // Provision, Verlust-Ausgabe, Kommission sold), die eigenen Zeilen auf derselben Rechnung, die Zahlungen wie hier.
+    if (isMixed) {
+      const eigene = lines.map((_, i) => i).filter((i) => !leereZeile(lines[i]));
+      const kons = useConsignmentStore.getState().consignments;
+      const input: Omit<MixedInvoiceInput, 'ownLines'> = {
+        customerId,
+        items: conRows.map((r) => ({
+          consignmentId: r.draft.consignmentId, salePrice: r.price, acknowledgeShortfall: r.draft.ack === true,
+          taxScheme: r.draft.scheme, consignorTaxScheme: r.con ? consignorVat[r.con.consignorId] : undefined,
+          ...(r.vatShortfall !== null && r.draft.vatAck ? { acknowledgeVatShortfall: true } : {}),
+        })),
+        issuedDate, notes: notes || undefined, ...(staffId ? { staffId } : {}), specialMark,
+        ...(zahlungen.length > 0 ? { payments: zahlungen as unknown as InvoiceCreatePayment[] } : {}),
+      };
+      const revisions = Object.fromEntries(conRows.map((r) => [r.draft.consignmentId, Number(kons.find((c) => c.id === r.draft.consignmentId)?.revision ?? 0)]));
+      if (anlegenGemischt.remote && Object.values(revisions).some((v) => !v)) {
+        setError(fehlertext(nichtAmClient('selling these consignment items (no revision loaded)'))); return;
+      }
+      const g = await anlegenGemischt.save({
+        local: async () => {
+          const sold = await createMixedInvoiceOnPrimary({ ...input, ownLines: eigene.map((i) => payload[i]) as MixedInvoiceInput['ownLines'] });
+          return { invoiceId: sold.invoiceId };
+        },
+        remote: () => mixedInvoiceBody(input, eigene.map((i) => (bulkIntents[i] ? {
+          kind: 'bulk', bulkLotId: bulkIntents[i]!.lotId, weightMg: bulkIntents[i]!.weightMg,
+          bulkType: bulkIntents[i]!.bulkType, grossFils: bulkIntents[i]!.grossFils, scheme: bulkIntents[i]!.scheme,
+          ...(bulkIntents[i]!.description ? { description: bulkIntents[i]!.description } : {}),
+        } : {
+          productId: lines[i].productId,
+          lotId: computed[i]?.selectedLot?.id ?? null,
+          quantity: lines[i].quantity,
+          unitPrice: lines[i].unitPrice,
+          scheme: lines[i].scheme,
+        })), revisions),
+        shape: (v) => ({ invoiceId: String(v.invoiceId ?? '') }),
+      });
+      if (g.kind !== 'ok') { setError(fehlertext(g)); return; }
+      loadConsignments();
+      navigate(thenPrint ? `/invoices/${g.value.invoiceId}?print=1` : `/invoices/${g.value.invoiceId}`);
       return;
     }
 
@@ -998,6 +1072,18 @@ export function InvoiceCreate() {
             </p>
           </Card>
         </div>
+
+        {/* 2b. MIXED-INVOICE P3 — Kommissionsartikel auf derselben Rechnung (nur ADMIN/MANAGER, nur beim Anlegen). */}
+        {mixedAllowed && (
+          <ConsignmentInvoiceLines
+            drafts={conDrafts}
+            rows={conRows}
+            onDrafts={setConDrafts}
+            consignorVat={consignorVat}
+            onConsignorVat={(k, v) => setConsignorVat((prev) => ({ ...prev, [k]: v }))}
+            customerId={customerId}
+          />
+        )}
 
         {/* 3. + 4. PRICING (Net / Tax / Total auf einen Blick) */}
         <div style={{ marginTop: 16 }}>
@@ -1390,8 +1476,8 @@ export function InvoiceCreate() {
         <div className="flex justify-between" style={{ marginTop: 24, paddingTop: 20, borderTop: '1px solid #E5E9EE' }}>
           <Button variant="ghost" onClick={() => navigate(isEditMode && editInvoice ? `/invoices/${editInvoice.id}` : '/invoices')}><X size={14} /> Cancel</Button>
           <div className="flex gap-2">
-            <Button variant="secondary" onClick={() => handleSave(true)} disabled={anlegen.busy || aendernRechnung.busy} data-invoice-save-print><Printer size={14} /> Save & Print</Button>
-            <Button variant="primary" onClick={() => handleSave(false)} disabled={anlegen.busy || aendernRechnung.busy} data-save-invoice data-invoice-save><Save size={14} /> {anlegen.busy || aendernRechnung.busy ? 'Saving…' : (isEditMode ? 'Save Changes' : 'Save Invoice')}</Button>
+            <Button variant="secondary" onClick={() => handleSave(true)} disabled={anlegen.busy || aendernRechnung.busy || anlegenGemischt.busy} data-invoice-save-print><Printer size={14} /> Save & Print</Button>
+            <Button variant="primary" onClick={() => handleSave(false)} disabled={anlegen.busy || aendernRechnung.busy || anlegenGemischt.busy} data-save-invoice data-invoice-save><Save size={14} /> {anlegen.busy || aendernRechnung.busy || anlegenGemischt.busy ? 'Saving…' : (isEditMode ? 'Save Changes' : 'Save Invoice')}</Button>
           </div>
         </div>
       </div>

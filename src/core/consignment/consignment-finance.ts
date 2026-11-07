@@ -49,6 +49,9 @@ export interface ConsignmentSaleItemInput {
   /** CONSIGNOR-PURCHASE-VAT — die Steuer des Einkaufs beim Einlieferer, GETRENNT von der Rechnung: ohne VAT (Vorgabe,
    *  nicht steuerpflichtiger Einlieferer) oder VAT 10 % (steuerpflichtige Lieferung mit gültiger Steuerrechnung). */
   consignorTaxScheme?: ConsignorPurchaseTaxScheme;
+  /** MIXED-INVOICE P3 (E7) — wirkt NUR auf der gemischten Rechnung: Bestätigung des negativen LATAIF-Ergebnisses unter
+   *  VAT 10 %. „Record Sale" fragt danach (noch) nicht — das wäre eine eigene Freigabe (Plan §5.4). */
+  acknowledgeVatShortfall?: boolean;
 }
 
 /** CONSIGNOR-PURCHASE-VAT — was der Einkauf beim Einlieferer annimmt. */

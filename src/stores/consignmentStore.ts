@@ -21,13 +21,13 @@ import {
 import { useSupplierStore } from './supplierStore';
 import { usePurchaseStore } from './purchaseStore';
 import { useExpenseStore } from './expenseStore';
-import { vatEngine } from '@/core/tax/vat-engine';
 import { computeConsignmentSale } from '@/core/consignment/economics';
 // CONSIGNMENT-INTEGRITY F7 — nur dieser Verkauf darf Kommissionsware auf eine Rechnung setzen.
 import { withConsignmentSalePermit } from '@/core/consignment/consignment-sale-link';
 // CONSIGNMENT MULTI-SALE (D5) — die Rechnung samt Zahlungen über DENSELBEN Weg wie „Save Invoice" (Mehrfachzahlung,
 // Kartenmarke und -gebühr, Zahlungstag, Nummernkreis) — keine zweite Zahlungslogik.
-import { createInvoiceInHouse, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
+import { createInvoiceInHouse, type InvoiceCreateLine, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
+import { consignmentLineAmounts, consignmentVatShortfall } from '@/core/invoices/mixed-invoice';
 import { consignorSidesFor } from '@/core/consignment/consignor-side';
 import { payoutModelLock, buildPayoutPatch, PayoutPatchError, PAYOUT_EDITABLE_SQL, type PayoutInput } from '@/core/consignment/payout-edit';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
@@ -157,6 +157,8 @@ export interface RecordSalesItem {
   /** CONSIGNOR-PURCHASE-VAT — der Einkauf beim Einlieferer: ohne VAT (Privatperson, Vorgabe) oder VAT 10 % (er stellt eine
    *  Steuerrechnung). Die Auszahlung bleibt der Betrag inkl. VAT. Je Einlieferer EINE Wahl (ein Einkauf). */
   consignorTaxScheme?: 'ZERO' | 'VAT_10';
+  /** MIXED-INVOICE P3 (E7) — nur auf der gemischten Rechnung: Bestätigung des negativen LATAIF-Ergebnisses unter VAT 10 %. */
+  acknowledgeVatShortfall?: boolean;
 }
 
 /**
@@ -170,6 +172,12 @@ export interface RecordSalesParams {
   notes?: string;
   specialMark?: boolean;
   payments?: InvoiceCreatePayment[];
+  /**
+   * MIXED-INVOICE P3 — die gemischte Rechnung (Maske „Direct Sale", nur ADMIN/MANAGER, geprüft im Haus): die eigenen
+   * Zeilen stehen auf DERSELBEN Rechnung vor den Kommissionszeilen, die Notiz ist die der Rechnung, der Mitarbeiter
+   * gilt; E7 wird je Kommissionszeile verlangt. Ohne dieses Feld bleibt „Record Sale" genau wie bisher.
+   */
+  mixed?: { ownLines: InvoiceCreateLine[]; staffId?: string };
 }
 
 export interface RecordSalesResult {
@@ -547,7 +555,10 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       if (item.consignorTaxScheme !== undefined && item.consignorTaxScheme !== 'ZERO' && item.consignorTaxScheme !== 'VAT_10') {
         throw new Error(`Unknown VAT for the consignor's purchase "${String(item.consignorTaxScheme)}" (${con.consignmentNumber})`);
       }
-      return { con, salePrice: item.salePrice, econ, taxScheme: item.taxScheme, consignorTaxScheme: item.consignorTaxScheme ?? 'ZERO' };
+      return {
+        con, salePrice: item.salePrice, econ, taxScheme: item.taxScheme, consignorTaxScheme: item.consignorTaxScheme ?? 'ZERO',
+        acknowledgeVatShortfall: item.acknowledgeVatShortfall === true,
+      };
     });
     // CONSIGNOR-JOINT-PURCHASE — je Einlieferer EIN Einkauf: also auch EINE Steuerwahl für seinen Einkauf.
     {
@@ -564,7 +575,7 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     const db = getDatabase();
     const lines: Parameters<typeof createInvoiceInHouse>[0]['lines'] = [];
     // 1. Je Artikel: Steuer der Rechnungszeile (ähnlich agentStore convertTransferToInvoice) und der Betrag des Einkaufs.
-    const teile = plan.map(({ con, salePrice, econ, taxScheme, consignorTaxScheme }) => {
+    const teile = plan.map(({ con, salePrice, econ, taxScheme, consignorTaxScheme, acknowledgeVatShortfall }) => {
       const consignorPayout = econ.payout;
       const consignorLoss = econ.loss;
       const prod = query(
@@ -574,11 +585,19 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       // CONSIGNMENT-SALE-TAX — die im Verkaufsdialog gewählte Steuerart; ohne Wahl die des Artikels (sonst MARGIN).
       const scheme = (taxScheme || (prod?.tax_scheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme;
       const purchasePrice = (prod?.purchase_price as number | undefined) || consignorPayout;
-      const rate = scheme === 'ZERO' ? 0 : 10;
-      const netInput = scheme === 'VAT_10' ? salePrice / (1 + rate / 100) : salePrice;
-      const calc = vatEngine.calculateNet(netInput, purchasePrice, scheme, rate);
+      // MIXED-INVOICE P3 — dieselbe Rechnung der Zeile wie bisher, jetzt an EINER Stelle (auch die Maske rechnet damit).
       // v0.7.1 — NBR: MARGIN persistiert internalVat.
-      const persistedVat = calc.internalVatAmount ?? calc.vatAmount;
+      const { rate, calc, persistedVat } = consignmentLineAmounts(salePrice, scheme, purchasePrice);
+      // MIXED-INVOICE P3 (E7) — nur auf der gemischten Rechnung: ein negatives LATAIF-Ergebnis unter VAT 10 % braucht
+      // die ausdrückliche Bestätigung je Zeile — sonst Abbruch, bevor irgendetwas geschrieben ist.
+      if (params.mixed) {
+        const ergebnis = consignmentVatShortfall(econ, scheme, persistedVat);
+        if (ergebnis !== null && !acknowledgeVatShortfall) {
+          throw new Error(
+            `${con.consignmentNumber}: with VAT 10 % the LATAIF result is ${ergebnis.toFixed(3)} BHD — the commission is taken from the price incl. VAT, the VAT is carried by LATAIF. Confirm the negative result on the line (acknowledgeVatShortfall=true).`
+          );
+        }
+      }
       // Bei Shortfall: Purchase = echter Marktwert (= Sale Price), Loss läuft separat als Expense.
       // Bei normalem/excess Sale: Purchase = consignorPayout (was Frau Y wirklich kriegt).
       const purchaseAmount = consignorLoss > 0 ? salePrice : consignorPayout;
@@ -645,11 +664,16 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
     // über denselben Weg wie „Save Invoice". Der auto-FIFO findet je Zeile den frisch angelegten Lot aus
     // Schritt 2 und konsumiert ihn. Kommissionsware ist dort nur für GENAU diese Artikel erlaubt.
     const nummern = plan.map((p) => p.con.consignmentNumber).join(', ');
+    // MIXED-INVOICE P3 — die gemischte Rechnung: die eigenen Zeilen vorn auf DERSELBEN Rechnung (Los, Einstand, Bestand
+    // nach den Regeln von „Save Invoice"), die Notiz und der Mitarbeiter der Maske. Die Erlaubnis für Kommissionsware gilt
+    // weiter NUR für die gewählten Kommissionsartikel — eine eigene Zeile mit Kommissionsware weist das Haus ab.
+    const mixed = params.mixed;
     const invoice = withConsignmentSalePermit(plan.map((p) => p.con.productId), () => createInvoiceInHouse({
       customerId: params.buyerId,
-      lines,
-      notes: `Consignment sale · ${nummern}`,
+      lines: mixed ? [...mixed.ownLines, ...lines] : lines,
+      notes: mixed ? (params.notes || undefined) : `Consignment sale · ${nummern}`,
       issuedDate: saleDate,
+      ...(mixed?.staffId ? { staffId: mixed.staffId } : {}),
       specialMark: params.specialMark === true,
       ...(params.payments && params.payments.length > 0 ? { payments: params.payments } : {}),
     }, currentBranchId()));
@@ -696,12 +720,19 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       // 'sold' (FINAL via invoice.paid event). Ein hartes 'sold' hier wuerde
       // den Reserved-Lifecycle ueberspringen, sodass ein Teilzahlungs-Verkauf
       // sofort als komplett bezahlt aussieht.
-      db.run(
-        `UPDATE products SET
-           quantity = CASE WHEN COALESCE(quantity,1) > 1 THEN COALESCE(quantity,1) - 1 ELSE 0 END,
-           last_sale_price = ?, updated_at = ? WHERE id = ?`,
-        [salePrice, new Date().toISOString(), con.productId]
-      );
+      // MIXED-INVOICE P3 — auf der gemischten Rechnung kein zweiter Mengenabzug: die Rechnung hat das Los des
+      // Auto-Einkaufs schon verbraucht und die Menge daraus gesetzt (Plan P3: den Doppelabzug nicht übertragen).
+      if (mixed) {
+        db.run(`UPDATE products SET last_sale_price = ?, updated_at = ? WHERE id = ?`,
+          [salePrice, new Date().toISOString(), con.productId]);
+      } else {
+        db.run(
+          `UPDATE products SET
+             quantity = CASE WHEN COALESCE(quantity,1) > 1 THEN COALESCE(quantity,1) - 1 ELSE 0 END,
+             last_sale_price = ?, updated_at = ? WHERE id = ?`,
+          [salePrice, new Date().toISOString(), con.productId]
+        );
+      }
 
       eventBus.emit('consignment.sale_recorded', 'consignment', con.id, {
         invoiceId: invoice.invoiceId,

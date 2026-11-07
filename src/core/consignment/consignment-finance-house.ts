@@ -22,8 +22,8 @@ import {
   type ConsignmentMultiSaleInput, type ConsignmentPayoutInput, type ConsignmentSaleInput,
 } from './consignment-finance';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
-import { invoiceCreatePayments, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
-import { businessDateIssue } from '@/core/utils/business-date';
+import { invoiceCreatePayments, PRODUCT_NOT_FOUND, type InvoiceCreateLine, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
+import { businessDateIssue, todayIso } from '@/core/utils/business-date';
 // R6F — die Rücknahmen nach dem Verkauf: dieselbe Klammer, dieselben Listen danach.
 import { isClientMode } from '@/core/bridge/client-mode';
 import { CONSIGNMENT_PRIMARY_ONLY, type ConsignmentReturnAfterSaleInput, type ConsignorRefundChoice } from './consignment-reversal';
@@ -31,9 +31,18 @@ import {
   cancelConsignmentSaleInHouse, localConsignmentActor, returnConsignmentAfterSaleInHouse,
   type ConsignmentReturnedAfterSale, type ConsignmentSaleCancelled,
 } from './consignment-reversal-house';
+// MIXED-INVOICE P3 — die gemischte Rechnung (eigene Ware + Kommission) über DIESELBE Verkaufsfolge.
+import { assertMixedInvoiceActor } from '@/core/invoices/mixed-invoice-permission';
+import {
+  MIXED_INVOICE_NEEDS_CONSIGNMENT, OWN_LINE_IS_CONSIGNMENT, SALE_BEFORE_CONSIGNMENT, VAT_SHORTFALL_UNCONFIRMED, type MixedInvoiceInput,
+} from '@/core/invoices/mixed-invoice';
+import { isConsignmentGoods } from './consignment-sale-link';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
 
 const SALE_VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/below consignor floor/i, 'SALE_BELOW_FLOOR'],
+  // MIXED-INVOICE P3 (E7) — nur die gemischte Rechnung verlangt diese Bestätigung.
+  [/with VAT 10 % the LATAIF result is/i, VAT_SHORTFALL_UNCONFIRMED],
   [/Buyer cannot be the same as the consignor/i, 'BUYER_IS_CONSIGNOR'],
   [/Unsupported commission type/i, 'UNSUPPORTED_PAYOUT_MODEL'],
   [/cannot record sale/i, 'CONSIGNMENT_NOT_ACTIVE'],
@@ -90,6 +99,89 @@ export interface ConsignmentsSold {
  */
 export function recordConsignmentSalesInHouse(
   input: ConsignmentMultiSaleInput, branchId: string, beforeWrite?: () => void,
+): ConsignmentsSold {
+  return verkaufen(input, branchId, beforeWrite);
+}
+
+/**
+ * MIXED-INVOICE P3 — die gemischte Rechnung: eigene Lagerartikel UND Kommissionsartikel auf EINER Kundenrechnung, in
+ * EINER Transaktion des Aufrufers. Gebaut auf genau der Folge von „Record Sale" (je Einlieferer ein Einkauf, Boden-
+ * Bestätigung, Käufer ≠ Einlieferer, Verlust-Ausgabe, Kommissionsstatus, Zahlungen wie „Save Invoice"); die eigenen
+ * Zeilen stehen auf derselben Rechnung (Los, Einstand, Bestand, Steuer wie „Save Invoice"). Nur ADMIN/MANAGER — geprüft
+ * HIER gegen den Handelnden (am Primary die Sitzung, fern der geprüfte Absender). E7 je Kommissionszeile. Alles wird
+ * vor dem ersten Schreiben geprüft; ein Fehler danach rollt die GANZE Handlung zurück.
+ */
+export function createMixedInvoiceInHouse(
+  input: MixedInvoiceInput, branchId: string, actor: { userId?: string; role?: string | null }, beforeWrite?: () => void,
+): ConsignmentsSold {
+  const nein = (code: string, message: string): never => { throw new ConsignmentActionRejected(code, message); };
+  try {
+    assertMixedInvoiceActor(actor);
+  } catch (e) {
+    if (e instanceof InvoiceActionRejected) nein(e.code, e.message);
+    throw e;
+  }
+  if (!Array.isArray(input.items) || input.items.length === 0) {
+    nein(MIXED_INVOICE_NEEDS_CONSIGNMENT, 'a mixed invoice needs at least one consignment item — without one, save it as an ordinary invoice');
+  }
+  // MIXED-INVOICE P2 (D2) — jeder neue Einlieferer-Einkauf nennt seine Einkaufs-VAT ausdrücklich, nie still „ohne VAT".
+  if (input.items.some((it) => !it.consignorTaxScheme)) {
+    nein('CONSIGNOR_VAT_REQUIRED', "choose the VAT of each consignor's purchase — no VAT or VAT 10 %");
+  }
+  // E3 (Owner) — kein Rechnungsdatum vor der Einlieferung: die Ware war da noch nicht bei LATAIF.
+  const tag = input.issuedDate || todayIso();
+  for (const it of input.items) {
+    const c = query('SELECT consignment_number, agreement_date FROM consignments WHERE id = ? AND branch_id = ?', [it.consignmentId, branchId])[0];
+    const seit = String(c?.agreement_date ?? '').slice(0, 10);
+    if (c && /^\d{4}-\d{2}-\d{2}$/.test(seit) && tag < seit) {
+      nein(SALE_BEFORE_CONSIGNMENT, `${String(c.consignment_number ?? '')}: the invoice date cannot lie before the item was consigned (${seit})`);
+    }
+  }
+  const ownLines: InvoiceCreateLine[] = Array.isArray(input.ownLines) ? input.ownLines : [];
+  for (const l of ownLines) {
+    const bulk = !!(l as { bulkIntent?: unknown }).bulkIntent;
+    if (bulk || !l.productId) continue;
+    if (!query('SELECT id FROM products WHERE id = ? AND branch_id = ?', [l.productId, branchId])[0]) {
+      nein(PRODUCT_NOT_FOUND, 'no such article in this branch');
+    }
+    // Kommissionsware gehört NUR als Kommissionsartikel auf die Rechnung (Einlieferer-Einkauf, Provision, Verknüpfung) —
+    // auch nicht als eigene Zeile neben ihrem eigenen Kommissionsartikel.
+    if (isConsignmentGoods(l.productId)) {
+      nein(OWN_LINE_IS_CONSIGNMENT, 'an own-stock line cannot be a consignment item — add it as a consignment item instead');
+    }
+  }
+  const out = verkaufen({
+    items: input.items.map((it) => ({
+      consignmentId: it.consignmentId, salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall === true,
+      ...(it.taxScheme ? { taxScheme: it.taxScheme } : {}),
+      ...(it.consignorTaxScheme ? { consignorTaxScheme: it.consignorTaxScheme } : {}),
+      ...(it.acknowledgeVatShortfall === true ? { acknowledgeVatShortfall: true } : {}),
+    })),
+    buyerId: input.customerId,
+    saleDate: input.issuedDate,
+    notes: input.notes,
+    specialMark: input.specialMark === true,
+    ...(input.payments && input.payments.length > 0 ? { payments: input.payments } : {}),
+  }, branchId, beforeWrite, { ownLines, ...(input.staffId ? { staffId: input.staffId } : {}) });
+  // Nachvollziehbar: wer die gemischte Rechnung angelegt hat, mit welchen Kommissionen — in DERSELBEN Transaktion.
+  logAuditOrThrow({
+    module: 'Invoice', entityType: 'invoices', entityId: out.invoiceId, action: 'CREATE', field: 'mixed_invoice',
+    newValue: {
+      ownLines: ownLines.length,
+      consignments: out.items.map((it) => it.consignmentId),
+      purchases: [...new Set(out.items.map((it) => it.purchaseId))],
+      role: actor.role ?? null,
+    },
+    actor: { branchId, ...(actor.userId ? { userId: actor.userId } : {}) },
+  });
+  return out;
+}
+
+/** Die EINE Verkaufsfolge — „Record Sale" (ohne `mixed`) und die gemischte Rechnung (mit). */
+function verkaufen(
+  input: ConsignmentMultiSaleInput,
+  branchId: string, beforeWrite?: () => void,
+  mixed?: { ownLines: InvoiceCreateLine[]; staffId?: string },
 ): ConsignmentsSold {
   const nein = (code: string, message: string): never => { throw new ConsignmentActionRejected(code, message); };
   if (!Array.isArray(input.items) || input.items.length === 0) nein('NO_ITEMS', 'select at least one consignment to sell');
@@ -148,12 +240,14 @@ export function recordConsignmentSalesInHouse(
         consignmentId: it.consignmentId, salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall,
         ...(it.taxScheme ? { taxScheme: it.taxScheme } : {}),
         ...(it.consignorTaxScheme ? { consignorTaxScheme: it.consignorTaxScheme } : {}),
+        ...(mixed && it.acknowledgeVatShortfall === true ? { acknowledgeVatShortfall: true } : {}),
       })),
       buyerId: input.buyerId,
       saleDate: input.saleDate,
       notes: input.notes,
       specialMark: input.specialMark,
       payments,
+      ...(mixed ? { mixed } : {}),
     });
   } catch (e) {
     // Ein fachliches Nein der Rechnung (Zahlung, VAT-Quartal …) oder der Lieferanten-Rolle bleibt ein fachliches Nein.
@@ -231,6 +325,11 @@ export function recordConsignmentSaleOnPrimary(id: string, input: ConsignmentSal
 /** CONSIGNMENT MULTI-SALE — der gemeinsame „Record Sale" am Primary (ein oder mehrere Artikel). */
 export function recordConsignmentSalesOnPrimary(input: ConsignmentMultiSaleInput): Promise<ConsignmentsSold> {
   return runOnPrimary(() => recordConsignmentSalesInHouse(input, currentBranchId()), frischLesen);
+}
+
+/** MIXED-INVOICE P3 — die gemischte Rechnung am Primary: exklusiv, EINE Transaktion; verantwortlich ist die Sitzung. */
+export function createMixedInvoiceOnPrimary(input: MixedInvoiceInput): Promise<ConsignmentsSold> {
+  return runOnPrimary(() => createMixedInvoiceInHouse(input, currentBranchId(), localConsignmentActor()), frischLesen);
 }
 
 /** „Pay Out Consignor" am Primary. */

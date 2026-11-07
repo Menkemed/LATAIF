@@ -41,7 +41,9 @@ import {
   ConsignmentActionRejected, MAX_SALE_ITEMS, isConsignmentSaleTaxScheme, isConsignorPurchaseTaxScheme,
   type ConsignmentSaleTaxScheme, type ConsignorPurchaseTaxScheme,
 } from '@/core/consignment/consignment-finance';
-import { recordConsignmentSalesInHouse, type ConsignmentsSold } from '@/core/consignment/consignment-finance-house';
+import { createMixedInvoiceInHouse, recordConsignmentSalesInHouse, type ConsignmentsSold } from '@/core/consignment/consignment-finance-house';
+// MIXED-INVOICE P3 — die eigenen Zeilen der gemischten Rechnung: dieselbe Prüfung und Ableitung wie `invoices.create`.
+import { InvoicePayloadError, asDomainVerdict, buildInvoiceLines, parseInvoicePayload } from './invoice-command';
 import { invoiceCreatePayments, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { useOrderStore } from '@/stores/orderStore';
@@ -385,9 +387,19 @@ export interface RecordSaleRequest {
   items?: Array<{
     consignmentId: string; expectedRevision: number; salePrice: number; acknowledgeShortfall: boolean;
     taxScheme?: ConsignmentSaleTaxScheme; consignorTaxScheme?: ConsignorPurchaseTaxScheme;
+    /** MIXED-INVOICE P3 (E7) — nur mit `ownLines`: Bestätigung des negativen LATAIF-Ergebnisses unter VAT 10 %. */
+    acknowledgeVatShortfall?: boolean;
   }>;
   /** CONSIGNMENT MULTI-SALE (D5) — Zahlungen beim Verkauf, dieselben Zeilen wie bei `invoices.create`. */
   payments?: InvoiceCreatePayment[];
+  /**
+   * MIXED-INVOICE P3 — die gemischte Rechnung aus der Maske „Direct Sale": die eigenen Zeilen als ABSICHT, geprüft wie
+   * bei `invoices.create` (Einstand, Los und Steuer rechnet der Primary). Gesetzt (auch leer) = der gemischte Weg:
+   * Rolle ADMIN/MANAGER im Haus, E7 je Kommissionszeile, Notiz und Mitarbeiter der Rechnung.
+   */
+  ownLines?: ReturnType<typeof parseInvoicePayload>['lines'];
+  /** MIXED-INVOICE P3 — der Mitarbeiter der Rechnung (nur mit `ownLines`). */
+  staffId?: string;
 }
 
 /**
@@ -448,7 +460,9 @@ function parseSalePayments(raw: unknown): InvoiceCreatePayment[] | undefined {
 
 /** CONSIGNMENT MULTI-SALE — der Rumpf des gemeinsamen Verkaufs: `items` (je Artikel mit seiner Fassung), Käufer, Tag, Zahlungen. */
 function parseRecordSales(raw: Record<string, unknown>): RecordSaleRequest {
-  onlyKnownFields(raw, ['items', 'buyerId', 'saleDate', 'notes', 'specialMark', 'payments']);
+  // MIXED-INVOICE P3 — `ownLines` macht daraus die gemischte Rechnung; nur dann gibt es Mitarbeiter und E7-Bestätigung.
+  const gemischt = raw.ownLines !== undefined;
+  onlyKnownFields(raw, ['items', 'buyerId', 'saleDate', 'notes', 'specialMark', 'payments', ...(gemischt ? ['ownLines', 'staffId'] : [])]);
   if (raw.specialMark !== undefined && typeof raw.specialMark !== 'boolean') {
     throw new FinancialPayloadError('specialMark is yes or no');
   }
@@ -456,7 +470,11 @@ function parseRecordSales(raw: Record<string, unknown>): RecordSaleRequest {
   if (raw.items.length > MAX_SALE_ITEMS) throw new FinancialPayloadError(`at most ${MAX_SALE_ITEMS} items in one sale`);
   const items = raw.items.map((it, i) => {
     if (!isPlain(it)) throw new FinancialPayloadError(`item ${i + 1} must be an object`);
-    onlyKnownFields(it, ['consignmentId', 'expectedRevision', 'salePrice', 'acknowledgeShortfall', 'taxScheme', 'consignorTaxScheme']);
+    onlyKnownFields(it, ['consignmentId', 'expectedRevision', 'salePrice', 'acknowledgeShortfall', 'taxScheme', 'consignorTaxScheme',
+      ...(gemischt ? ['acknowledgeVatShortfall'] : [])]);
+    if (it.acknowledgeVatShortfall !== undefined && typeof it.acknowledgeVatShortfall !== 'boolean') {
+      throw new FinancialPayloadError(`item ${i + 1} acknowledgeVatShortfall is yes or no`);
+    }
     if (it.taxScheme !== undefined && !isConsignmentSaleTaxScheme(it.taxScheme)) {
       throw new FinancialPayloadError(`item ${i + 1} taxScheme must be MARGIN, VAT_10 or ZERO`);
     }
@@ -470,6 +488,7 @@ function parseRecordSales(raw: Record<string, unknown>): RecordSaleRequest {
       acknowledgeShortfall: it.acknowledgeShortfall === true,
       ...(it.taxScheme !== undefined ? { taxScheme: it.taxScheme as ConsignmentSaleTaxScheme } : {}),
       ...(it.consignorTaxScheme !== undefined ? { consignorTaxScheme: it.consignorTaxScheme as ConsignorPurchaseTaxScheme } : {}),
+      ...(it.acknowledgeVatShortfall === true ? { acknowledgeVatShortfall: true } : {}),
     };
   });
   if (new Set(items.map((it) => it.consignmentId)).size !== items.length) {
@@ -488,6 +507,17 @@ function parseRecordSales(raw: Record<string, unknown>): RecordSaleRequest {
   out.notes = optText(raw.notes, 'notes');
   const payments = parseSalePayments(raw.payments);
   if (payments) out.payments = payments;
+  if (gemischt) {
+    if (!Array.isArray(raw.ownLines)) throw new FinancialPayloadError('ownLines must be a list');
+    // Dieselbe strenge Prüfung wie `invoices.create` (verbotene und unbekannte Felder, Menge, Preis, Steuerart, Bulk).
+    try {
+      out.ownLines = raw.ownLines.length === 0 ? [] : parseInvoicePayload({ customerId: out.buyerId, lines: raw.ownLines }).lines;
+    } catch (err) {
+      if (err instanceof InvoicePayloadError) throw new FinancialPayloadError(`ownLines: ${err.message}`);
+      throw err;
+    }
+    if (raw.staffId !== undefined) out.staffId = reqString(raw.staffId, 'staffId');
+  }
   return out;
 }
 
@@ -509,23 +539,50 @@ export function runRecordSale(deps: EngineDeps, identity: CommandIdentity, raw: 
         "choose the VAT of the consignor's purchase — no VAT or VAT 10 % (reload the page if this choice is missing)");
     }
     let result: ConsignmentsSold;
+    const fassungen = (): void => {
+      for (const it of items) assertRevision('consignments', it.consignmentId, it.expectedRevision, 'CONSIGNMENT_NOT_FOUND');
+    };
     try {
-      // R5F — dieselbe Folge wie „Record Sale" am Primary: Einkauf beim Einlieferer (damit ein Los
-      // entsteht), Rechnung an den Käufer im gewählten Kreis, bei Unterdeckung die Verlust-Ausgabe,
-      // Status und Menge — in DIESER Transaktion. Die gesehene Fassung JEDER Kommission ist der letzte Wächter.
-      result = recordConsignmentSalesInHouse({
-        items: items.map((it) => ({
-          consignmentId: it.consignmentId, salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall,
-          ...('taxScheme' in it && it.taxScheme ? { taxScheme: it.taxScheme } : {}),
-          ...('consignorTaxScheme' in it && it.consignorTaxScheme ? { consignorTaxScheme: it.consignorTaxScheme } : {}),
-        })),
-        buyerId: req.buyerId, saleDate: req.saleDate, notes: req.notes, specialMark: req.specialMark,
-        ...(req.payments ? { payments: req.payments } : {}),
-      }, identity.branchId, () => {
-        for (const it of items) assertRevision('consignments', it.consignmentId, it.expectedRevision, 'CONSIGNMENT_NOT_FOUND');
-      });
+      if (req.ownLines !== undefined) {
+        // MIXED-INVOICE P3 — die gemischte Rechnung: die eigenen Zeilen rechnet der Primary aus der Absicht (wie
+        // `invoices.create`; beim Anlegen gibt es keine gespeicherte Zeile), dann DIESELBE Hausfolge wie am Primary —
+        // Rolle des geprüften Absenders, E7, Fassung jeder Kommission als letzter Wächter.
+        const ownLines = buildInvoiceLines(req.ownLines.map((l) => ({ ...l, lineId: undefined, splitOf: undefined })));
+        result = createMixedInvoiceInHouse({
+          customerId: req.buyerId,
+          ownLines,
+          items: items.map((it) => ({
+            consignmentId: it.consignmentId, salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall,
+            ...('taxScheme' in it && it.taxScheme ? { taxScheme: it.taxScheme } : {}),
+            ...('consignorTaxScheme' in it && it.consignorTaxScheme ? { consignorTaxScheme: it.consignorTaxScheme } : {}),
+            ...('acknowledgeVatShortfall' in it && it.acknowledgeVatShortfall ? { acknowledgeVatShortfall: true } : {}),
+          })),
+          issuedDate: req.saleDate, notes: req.notes, specialMark: req.specialMark,
+          ...(req.staffId ? { staffId: req.staffId } : {}),
+          ...(req.payments ? { payments: req.payments } : {}),
+        }, identity.branchId, { userId: identity.userId, role: (identity as CommandIdentity & { role?: string }).role }, fassungen);
+      } else {
+        // R5F — dieselbe Folge wie „Record Sale" am Primary: Einkauf beim Einlieferer (damit ein Los
+        // entsteht), Rechnung an den Käufer im gewählten Kreis, bei Unterdeckung die Verlust-Ausgabe,
+        // Status und Menge — in DIESER Transaktion. Die gesehene Fassung JEDER Kommission ist der letzte Wächter.
+        result = recordConsignmentSalesInHouse({
+          items: items.map((it) => ({
+            consignmentId: it.consignmentId, salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall,
+            ...('taxScheme' in it && it.taxScheme ? { taxScheme: it.taxScheme } : {}),
+            ...('consignorTaxScheme' in it && it.consignorTaxScheme ? { consignorTaxScheme: it.consignorTaxScheme } : {}),
+          })),
+          buyerId: req.buyerId, saleDate: req.saleDate, notes: req.notes, specialMark: req.specialMark,
+          ...(req.payments ? { payments: req.payments } : {}),
+        }, identity.branchId, fassungen);
+      }
     } catch (e) {
       if (e instanceof ConsignmentActionRejected) throw new CommandRejected(e.code, e.message);
+      if (e instanceof InvoiceActionRejected) throw new CommandRejected(e.code, e.message);
+      // Ein unbrauchbarer Rumpf einer eigenen Zeile (fremdes Los, unbekannter Artikel) ist eine Antwort, kein Urteil.
+      if (e instanceof InvoicePayloadError) throw new FinancialPayloadError(`ownLines: ${e.message}`);
+      // Ein eigenes Stück nicht mehr auf Lager / beim Agenten — dasselbe fachliche Nein wie bei `invoices.create`.
+      const verdict = asDomainVerdict(e);
+      if (verdict) throw verdict;
       throw e;
     }
     const states = items.map((it) => consignmentState(it.consignmentId));
