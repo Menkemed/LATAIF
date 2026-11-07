@@ -704,7 +704,7 @@ function marginVatPerUnit(saleUnit: number, cost: number, rate: number): number 
 }
 
 /** Einen Einkauf für die Buchung aus der Datenbank bauen (die Hausfolge kennt den Store nicht). */
-function belegFuerBuchung(purchaseId: string): Purchase {
+export function belegFuerBuchung(purchaseId: string): Purchase {
   const p = query('SELECT * FROM purchases WHERE id = ?', [purchaseId])[0] ?? {};
   const lines = query('SELECT * FROM purchase_lines WHERE purchase_id = ? ORDER BY position, id', [purchaseId]);
   return {

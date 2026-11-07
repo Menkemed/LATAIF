@@ -721,8 +721,20 @@ for (const disp of ['RETURN_TO_OWNER', 'KEEP_AS_OWN']) {
     vor = unberuehrt(w);
     const ersetzt = aendern(w, [ZEILE('p-eigen-i', 1200)]);
     ok(ersetzt === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor, `I3 Zeile ersetzen/entfernen → abgewiesen (${ersetzt || 'GEÄNDERT'})`);
-    const dazu = aendern(w, [zeile(w), ZEILE('p-eigen-i', 300)]);
-    ok(dazu === 'CONSIGNMENT_INVOICE_LOCKED' && unberuehrt(w) === vor, `I3 Zeile hinzufügen → abgewiesen (${dazu || 'GEÄNDERT'})`);
+    // MIXED-INVOICE P4 — eine EIGENE Zeile dazu ist jetzt erlaubt (die Rechnung wird gemischt, wie beim Anlegen in P3); die
+    // Kommissionszeile, die Kommission und der Einkauf beim Einlieferer bleiben unberührt. Eigene Welt, damit I4/I5 unverändert laufen.
+    {
+      const w2 = await welt();
+      eigenerArtikel(w2.db, 'p-eigen-j');
+      reload();
+      const seite = (x: Welt) => S([all(x.db, 'SELECT id, status, invoice_id, sale_price, payout_amount FROM consignments ORDER BY id'),
+        all(x.db, 'SELECT id, status, total_amount, remaining_amount FROM purchases ORDER BY id'),
+        all(x.db, `SELECT ROUND(line_total,3), tax_scheme FROM invoice_lines WHERE product_id = (SELECT product_id FROM consignments WHERE id = ?)`, [x.cid])]);
+      const vorher2 = seite(w2);
+      const dazu = aendern(w2, [zeile(w2), ZEILE('p-eigen-j', 300)]);
+      ok(dazu === '' && n(w2.db, 'SELECT COUNT(*) FROM invoice_lines WHERE invoice_id = ?', [w2.invId]) === 2 && seite(w2) === vorher2 && kstatus(w2.db, w2.cid) === 'sold',
+        `I3 eigene Zeile hinzufügen → erlaubt seit P4 (gemischte Rechnung); Kommissionszeile, Kommission, Einkauf unberührt (${dazu || 'ok'})`);
+    }
     insert(w.db, 'customers', { id: 'cust-3', branch_id: 'branch-main', first_name: 'Dritte', last_name: 'K', country: 'BH', language: 'en',
       vip_level: 0, preferences: '[]', customer_type: 'collector', sales_stage: 'active', created_at: NOW, updated_at: NOW });
     reload();

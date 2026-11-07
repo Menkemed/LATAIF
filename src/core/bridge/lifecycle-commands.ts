@@ -375,6 +375,8 @@ export interface RecordSaleRequest {
   saleDate?: string;
   notes?: string;
   acknowledgeShortfall?: boolean;
+  /** MIXED-INVOICE E7 (Owner A) — Einzelrumpf (Handy): Bestätigung des negativen LATAIF-Ergebnisses unter VAT 10 %. */
+  acknowledgeVatShortfall?: boolean;
   specialMark: boolean;
   /** MIXED-INVOICE P2 (D4) — Einzelrumpf: Steuerart der Rechnungszeile; fehlt = die des Artikels (sonst MARGIN). */
   taxScheme?: ConsignmentSaleTaxScheme;
@@ -387,7 +389,7 @@ export interface RecordSaleRequest {
   items?: Array<{
     consignmentId: string; expectedRevision: number; salePrice: number; acknowledgeShortfall: boolean;
     taxScheme?: ConsignmentSaleTaxScheme; consignorTaxScheme?: ConsignorPurchaseTaxScheme;
-    /** MIXED-INVOICE P3 (E7) — nur mit `ownLines`: Bestätigung des negativen LATAIF-Ergebnisses unter VAT 10 %. */
+    /** MIXED-INVOICE E7 (Owner A) — Bestätigung des negativen LATAIF-Ergebnisses unter VAT 10 % (jeder Verkauf). */
     acknowledgeVatShortfall?: boolean;
   }>;
   /** CONSIGNMENT MULTI-SALE (D5) — Zahlungen beim Verkauf, dieselben Zeilen wie bei `invoices.create`. */
@@ -411,9 +413,12 @@ export function parseRecordSale(raw: unknown): RecordSaleRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
   // CONSIGNMENT MULTI-SALE — der gemeinsame Verkauf (`items`) neben dem bisherigen Einzelrumpf; nie beides.
   if (raw.items !== undefined) return parseRecordSales(raw);
-  onlyKnownFields(raw, ['consignmentId', 'buyerId', 'salePrice', 'expectedRevision', 'saleDate', 'notes', 'acknowledgeShortfall', 'specialMark', 'payments', 'taxScheme', 'consignorTaxScheme']);
+  onlyKnownFields(raw, ['consignmentId', 'buyerId', 'salePrice', 'expectedRevision', 'saleDate', 'notes', 'acknowledgeShortfall', 'acknowledgeVatShortfall', 'specialMark', 'payments', 'taxScheme', 'consignorTaxScheme']);
   if (raw.specialMark !== undefined && typeof raw.specialMark !== 'boolean') {
     throw new FinancialPayloadError('specialMark is yes or no');
+  }
+  if (raw.acknowledgeVatShortfall !== undefined && typeof raw.acknowledgeVatShortfall !== 'boolean') {
+    throw new FinancialPayloadError('acknowledgeVatShortfall is yes or no');
   }
   // MIXED-INVOICE P2 (D2/D4) — auch der Einzelrumpf (Telefon) nennt die Steuerart der Rechnungszeile und die
   // Einkaufs-VAT des Einlieferers; dieselben Werte und Prüfungen wie je Artikel im gemeinsamen Verkauf.
@@ -437,6 +442,8 @@ export function parseRecordSale(raw: unknown): RecordSaleRequest {
   // Dieselbe Bedeutung wie am Bildschirm: ein Verkauf unter dem Boden des Einlieferers
   // erzeugt einen Verlust und braucht eine ausdrückliche Bestätigung. Sie bestätigt genau das.
   out.acknowledgeShortfall = raw.acknowledgeShortfall === true;
+  // MIXED-INVOICE E7 (Owner A) — ebenso: ein negatives LATAIF-Ergebnis unter VAT 10 % bestätigt der Mensch ausdrücklich.
+  if (raw.acknowledgeVatShortfall === true) out.acknowledgeVatShortfall = true;
   const payments = parseSalePayments(raw.payments);
   if (payments) out.payments = payments;
   return out;
@@ -460,7 +467,8 @@ function parseSalePayments(raw: unknown): InvoiceCreatePayment[] | undefined {
 
 /** CONSIGNMENT MULTI-SALE — der Rumpf des gemeinsamen Verkaufs: `items` (je Artikel mit seiner Fassung), Käufer, Tag, Zahlungen. */
 function parseRecordSales(raw: Record<string, unknown>): RecordSaleRequest {
-  // MIXED-INVOICE P3 — `ownLines` macht daraus die gemischte Rechnung; nur dann gibt es Mitarbeiter und E7-Bestätigung.
+  // MIXED-INVOICE P3 — `ownLines` macht daraus die gemischte Rechnung; nur dann gibt es einen Mitarbeiter. E7 (Owner A)
+  // gilt je Artikel bei JEDEM Verkauf.
   const gemischt = raw.ownLines !== undefined;
   onlyKnownFields(raw, ['items', 'buyerId', 'saleDate', 'notes', 'specialMark', 'payments', ...(gemischt ? ['ownLines', 'staffId'] : [])]);
   if (raw.specialMark !== undefined && typeof raw.specialMark !== 'boolean') {
@@ -470,8 +478,7 @@ function parseRecordSales(raw: Record<string, unknown>): RecordSaleRequest {
   if (raw.items.length > MAX_SALE_ITEMS) throw new FinancialPayloadError(`at most ${MAX_SALE_ITEMS} items in one sale`);
   const items = raw.items.map((it, i) => {
     if (!isPlain(it)) throw new FinancialPayloadError(`item ${i + 1} must be an object`);
-    onlyKnownFields(it, ['consignmentId', 'expectedRevision', 'salePrice', 'acknowledgeShortfall', 'taxScheme', 'consignorTaxScheme',
-      ...(gemischt ? ['acknowledgeVatShortfall'] : [])]);
+    onlyKnownFields(it, ['consignmentId', 'expectedRevision', 'salePrice', 'acknowledgeShortfall', 'acknowledgeVatShortfall', 'taxScheme', 'consignorTaxScheme']);
     if (it.acknowledgeVatShortfall !== undefined && typeof it.acknowledgeVatShortfall !== 'boolean') {
       throw new FinancialPayloadError(`item ${i + 1} acknowledgeVatShortfall is yes or no`);
     }
@@ -527,6 +534,7 @@ export function runRecordSale(deps: EngineDeps, identity: CommandIdentity, raw: 
   const items = req.items ?? [{
     consignmentId: req.consignmentId, expectedRevision: req.expectedRevision, salePrice: req.salePrice,
     acknowledgeShortfall: req.acknowledgeShortfall === true,
+    ...(req.acknowledgeVatShortfall ? { acknowledgeVatShortfall: true } : {}),
     ...(req.taxScheme ? { taxScheme: req.taxScheme } : {}),
     ...(req.consignorTaxScheme ? { consignorTaxScheme: req.consignorTaxScheme } : {}),
   }];
@@ -570,6 +578,7 @@ export function runRecordSale(deps: EngineDeps, identity: CommandIdentity, raw: 
             consignmentId: it.consignmentId, salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall,
             ...('taxScheme' in it && it.taxScheme ? { taxScheme: it.taxScheme } : {}),
             ...('consignorTaxScheme' in it && it.consignorTaxScheme ? { consignorTaxScheme: it.consignorTaxScheme } : {}),
+            ...('acknowledgeVatShortfall' in it && it.acknowledgeVatShortfall ? { acknowledgeVatShortfall: true } : {}),
           })),
           buyerId: req.buyerId, saleDate: req.saleDate, notes: req.notes, specialMark: req.specialMark,
           ...(req.payments ? { payments: req.payments } : {}),

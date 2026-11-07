@@ -58,6 +58,82 @@ export function consignmentVatShortfall(
 /** Ein Kommissionsartikel der gemischten Rechnung: die Felder des Verkaufs samt E7-Bestätigung (`acknowledgeVatShortfall`). */
 export type MixedConsignmentItem = ConsignmentSaleItemInput;
 
+// ════════════════════════════════════════════════════════════════════════════
+// MIXED-INVOICE P4 — eine Rechnung mit Kommissionszeilen korrigieren (rein: Typen, Codes, Regeln für Maske und Haus).
+// ════════════════════════════════════════════════════════════════════════════
+
+/** Eine Kommission mit Rückgabe nach dem Verkauf (oder Altauszahlung) bleibt auf der Rechnung, wie sie ist. */
+export const CONSIGNMENT_LINE_LOCKED = 'CONSIGNMENT_LINE_LOCKED';
+/** E10 — die Einkaufs-VAT eines Einlieferer-Einkaufs ist nach der ersten Auszahlung fest. */
+export const CONSIGNOR_VAT_LOCKED = 'CONSIGNOR_VAT_LOCKED';
+/** E2 — einem schon bezahlten Einlieferer steht weniger zu: Guthaben (Verrechnung) oder Rückforderung — Pflichtwahl. */
+export const CONSIGNOR_OVERPAY_CHOICE_REQUIRED = 'CONSIGNOR_OVERPAY_CHOICE_REQUIRED';
+/** E3 — kein Rechnungsdatum vor dem Datum eines (teil)bezahlten Einlieferer-Einkaufs (der behält sein Datum). */
+export const SALE_BEFORE_PAID_PURCHASE = 'SALE_BEFORE_PAID_PURCHASE';
+/** Der Einlieferer-Einkauf einer Kommissionszeile ist nicht eindeutig (Altbestand) — dann bleibt die Zeile, wie sie ist. */
+export const CONSIGNMENT_PURCHASE_UNCLEAR = 'CONSIGNMENT_PURCHASE_UNCLEAR';
+/** Ein (teil)bezahlter Einkauf: in EINER Korrektur entweder eine Zeile zurück ODER Beträge korrigiert — nicht beides. */
+export const CONSIGNOR_PURCHASE_MIXED_CHANGE = 'CONSIGNOR_PURCHASE_MIXED_CHANGE';
+/** Jede betroffene Kommission und jeder betroffene Einkauf nennt die gesehene Fassung. */
+export const CORRECTION_REVISION_REQUIRED = 'CORRECTION_REVISION_REQUIRED';
+/** Keine leere Rechnung: mindestens eine Zeile bleibt (für den ganzen Verkauf gibt es „Cancel Sale"). */
+export const INVOICE_NEEDS_A_LINE = 'INVOICE_NEEDS_A_LINE';
+
+/** E2 — die Wahl bei einem schon bezahlten Einlieferer, dem jetzt weniger zusteht (wie bei der Order-Kostenkorrektur). */
+export type ConsignorOverpayChoice = 'credit' | 'refund';
+export const CONSIGNOR_OVERPAY_CHOICES: readonly ConsignorOverpayChoice[] = ['credit', 'refund'];
+
+/** Eine Kommissionszeile NACH der Korrektur — sie bleibt (gebunden) oder kommt neu (aktive Kommission, E6). */
+export interface MixedCorrectionItem {
+  consignmentId: string;
+  /** Kundenpreis inkl. VAT. */
+  salePrice: number;
+  taxScheme: SaleScheme;
+  /** Unterdeckung bestätigt (nur verlangt, wenn Preis neu oder geändert). */
+  acknowledgeShortfall?: boolean;
+  /** E7 bestätigt (nur verlangt, wenn Preis oder Steuerart neu oder geändert). */
+  acknowledgeVatShortfall?: boolean;
+}
+
+/**
+ * Der Kommissionsteil einer Korrektur. Eine gebundene Kommission, die in `items` fehlt, verlässt die Rechnung (E5:
+ * Fehlerfassung → Active; eine echte Rückgabe bleibt „Post-Sale Return").
+ */
+export interface MixedInvoiceCorrection {
+  items: MixedCorrectionItem[];
+  /** Die gesehene Fassung jeder gebundenen und jeder neuen Kommission. */
+  consignmentRevisions: Record<string, number>;
+  /** Die gesehene Fassung jedes Einlieferer-Einkaufs dieser Rechnung, den die Korrektur ändert. */
+  purchaseRevisions: Record<string, number>;
+  /** E10 — Einkaufs-VAT eines bestehenden, noch nie bezahlten Einkaufs ändern (purchaseId → VAT). */
+  purchaseTaxSchemes?: Record<string, 'ZERO' | 'VAT_10'>;
+  /** D2 — Einkaufs-VAT eines NEUEN Einkaufs je Einlieferer (consignorId → VAT); Pflicht, sobald einer entsteht. */
+  consignorTaxSchemes?: Record<string, 'ZERO' | 'VAT_10'>;
+  /** E2 — je Einkauf (purchaseId): Guthaben oder Rückforderung, wenn dem bezahlten Einlieferer weniger zusteht. */
+  consignorOverpay?: Record<string, ConsignorOverpayChoice>;
+}
+
+/** Was der Einkauf beim Einlieferer für einen Verkauf trägt: bei Unterdeckung der Verkaufspreis (Rest = Verlust), sonst die Auszahlung. */
+export function consignorPurchaseAmount(econ: Pick<ConsignmentSaleResult, 'loss' | 'payout'>, salePrice: number): number {
+  return econ.loss > 0 ? salePrice : econ.payout;
+}
+
+/** Der Fernrumpf des Kommissionsteils (rein; Primary und PC2 schicken dasselbe). */
+export function mixedCorrectionBody(c: MixedInvoiceCorrection): Record<string, unknown> {
+  return {
+    items: c.items.map((it) => ({
+      consignmentId: it.consignmentId, salePrice: it.salePrice, taxScheme: it.taxScheme,
+      ...(it.acknowledgeShortfall ? { acknowledgeShortfall: true } : {}),
+      ...(it.acknowledgeVatShortfall ? { acknowledgeVatShortfall: true } : {}),
+    })),
+    consignmentRevisions: { ...c.consignmentRevisions },
+    purchaseRevisions: { ...c.purchaseRevisions },
+    ...(c.purchaseTaxSchemes && Object.keys(c.purchaseTaxSchemes).length ? { purchaseTaxSchemes: { ...c.purchaseTaxSchemes } } : {}),
+    ...(c.consignorTaxSchemes && Object.keys(c.consignorTaxSchemes).length ? { consignorTaxSchemes: { ...c.consignorTaxSchemes } } : {}),
+    ...(c.consignorOverpay && Object.keys(c.consignorOverpay).length ? { consignorOverpay: { ...c.consignorOverpay } } : {}),
+  };
+}
+
 /** Die EINGABEN der gemischten Rechnung, wie die Maske „Direct Sale" sie am Primary schickt. */
 export interface MixedInvoiceInput {
   customerId: string;

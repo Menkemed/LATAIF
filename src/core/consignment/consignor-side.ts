@@ -142,6 +142,31 @@ export function consignorSidesFor(branchId: string, rows: ReadonlyArray<Record<s
     });
     s.refundOpen = r3(s.refundOpen + open);
   }
+  // MIXED-INVOICE P4 (E2) — die Rückforderung aus der Minderung eines schon bezahlten Einlieferer-Einkaufs (Korrektur der
+  // Rechnung): dasselbe Guthaben wie jede Einkaufsüberzahlung, als Rückforderung (REFUND_DUE) — „Record Repayment" wie D3.
+  for (const r of query(
+    `SELECT sc.id, sc.amount, sc.used_amount, sc.created_at, p.purchase_number,
+            COALESCE(p.source_consignment_id,
+              (SELECT pl.source_consignment_id FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.source_consignment_id IS NOT NULL
+                ORDER BY pl.position, pl.id LIMIT 1)) AS cid
+       FROM supplier_credits sc JOIN purchases p ON p.id = sc.source_purchase_id
+      WHERE sc.branch_id = ? AND sc.source_return_id IS NULL AND sc.status IN ('REFUND_DUE', 'REFUNDED') AND p.status != 'CANCELLED'
+      ORDER BY sc.created_at ASC, sc.id ASC`,
+    [branchId],
+  )) {
+    if (!r.cid) continue;
+    const s = seite(String(r.cid));
+    const creditId = String(r.id);
+    const receipts = eingaenge.get(creditId) ?? [];
+    const received = r3(receipts.reduce((x, e) => x + e.amount, 0));
+    const open = Math.max(0, r3(Number(r.amount ?? 0) - Number(r.used_amount ?? 0)));
+    s.refunds.push({
+      returnId: `overpay:${creditId}`, returnNumber: `${String(r.purchase_number ?? '')} (corrected)`, date: String(r.created_at ?? '').slice(0, 10),
+      mode: 'pending', method: null, amount: r3(r.amount), open, currentSale: true, creditId, receipts, received,
+      offset: Math.max(0, r3(Number(r.used_amount ?? 0) - received)),
+    });
+    s.refundOpen = r3(s.refundOpen + open);
+  }
   // Der Altweg ohne Rechnung (`markSold` + „Pay Out Consignor"): die Schuld steht an der Kommission selbst.
   for (const c of rows) {
     if (String(c.invoice_id ?? '') !== '') continue;

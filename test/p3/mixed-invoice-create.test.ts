@@ -6,7 +6,7 @@
 //      Einstand, Verbindlichkeiten, VAT je Zeile — Primary und PC2 buchen GLEICH (ohne Kennungen verglichen)
 //   §2 Abnahme 6: Lager je Artikel genau −1, Hauptbuch je Quelle einmal; Abgleich (Lager, AP, AR, ausgeglichen); Audit
 //   §3 Abnahme 2: SALES/ACCOUNTANT ⇒ Nein (Haus am Primary und fern; zentrale Rechte fern), nichts gebucht
-//   §4 Abnahme 3: E7 ohne Bestätigung ⇒ Nein (Primary + PC2), mit Bestätigung ⇒ gebucht; „Record Sale" unverändert ohne E7
+//   §4 Abnahme 3: E7 ohne Bestätigung ⇒ Nein (Primary + PC2), mit Bestätigung ⇒ gebucht; seit P4 (Owner A) auch „Record Sale"
 //   §5 Abnahme 4: Fehler im Einkauf / im Protokoll ⇒ nichts gebucht (Rollback)
 //   §6 Abnahme 5: wiederholter PC2-Befehl ⇒ einmal gebucht; veraltete Fassung ⇒ Nein
 //   §7 Zahlungen: Teilzahlung (PINV, Rest offen, Reserved) und Vollzahlung (Endnummer, verkauft) über die Rechnungswege
@@ -378,15 +378,19 @@ for (const role of ['SALES', 'ACCOUNTANT'] as const) {
     ok(mit.ok && n(w.db, 'SELECT COUNT(*) FROM invoices') === 1 && s(w.db, 'SELECT status FROM consignments WHERE id = ?', [w.k3]) === 'sold',
       `§4 ${weg}: E7 mit Bestätigung ⇒ gebucht (${mit.code || 'ok'})`);
   }
-  // „Record Sale" (ohne eigene Zeilen, alter Weg) fragt NICHT nach E7 — dessen Änderung wäre eine eigene Freigabe.
+  // MIXED-INVOICE E7 — Owner-Entscheidung A (P4): auch „Record Sale" (ohne eigene Zeilen) verlangt die Bestätigung.
+  // Vorher (P3) bewusst ohne E7 bis zu dieser Freigabe; die Prüfung folgt jetzt der neuen Regel.
   const w = await welt();
   setTestDatabase(w.db as never); reload();
-  const alt = await primary(() => conHouse.recordConsignmentSalesOnPrimary({ items: [{ consignmentId: w.k3, salePrice: 1050, acknowledgeShortfall: false, taxScheme: 'VAT_10', consignorTaxScheme: 'ZERO' }],
-    buyerId: 'cust-2', specialMark: false }));
-  ok(alt.ok, `§4 „Record Sale" bleibt unverändert: bucht ohne E7-Bestätigung (${alt.code || 'ok'})`);
+  const altItem = (ack: boolean) => ({ consignmentId: w.k3, salePrice: 1050, acknowledgeShortfall: false, taxScheme: 'VAT_10' as const, consignorTaxScheme: 'ZERO' as const,
+    ...(ack ? { acknowledgeVatShortfall: true } : {}) });
+  const alt = await primary(() => conHouse.recordConsignmentSalesOnPrimary({ items: [altItem(false)], buyerId: 'cust-2', specialMark: false }));
+  ok(!alt.ok && alt.code === 'VAT_SHORTFALL_UNCONFIRMED', `§4 „Record Sale" (E7 Owner A): ohne Bestätigung ⇒ Nein (${alt.code})`);
+  const altMit = await primary(() => conHouse.recordConsignmentSalesOnPrimary({ items: [altItem(true)], buyerId: 'cust-2', specialMark: false }));
+  ok(altMit.ok, `§4 „Record Sale" (E7 Owner A): mit Bestätigung ⇒ gebucht (${altMit.code || 'ok'})`);
   ok((() => {
-    try { life.parseRecordSale({ items: [{ consignmentId: 'c', expectedRevision: 1, salePrice: 1, acknowledgeVatShortfall: true }], buyerId: 'b' }); return false; } catch { return true; }
-  })(), '§4 ohne `ownLines` nimmt der Rumpf keine E7-Bestätigung an (unbekanntes Feld)');
+    try { life.parseRecordSale({ items: [{ consignmentId: 'c', expectedRevision: 1, salePrice: 1, acknowledgeVatShortfall: true }], buyerId: 'b' }); return true; } catch { return false; }
+  })(), '§4 (E7 Owner A) auch ohne `ownLines` nimmt der Rumpf die E7-Bestätigung an');
 }
 
 // ══ §5 — Abnahme 4: Fehler ⇒ nichts gebucht ═══════════════════════════════════════════════════════════════════

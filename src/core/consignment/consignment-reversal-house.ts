@@ -114,8 +114,8 @@ export function consignorPurchases(consignmentId: string, consignmentNumber: str
  * CONSIGNOR-JOINT-PURCHASE — gehört ein Einkauf NICHT dieser Kommission allein (mehrere Zeilen, je Artikel eine), dann die
  * Zeile dieser Kommission: Rückgabe wirkt nur auf sie. `null`: der Einkauf gehört ihr allein (wie bisher, ganz).
  */
-interface GemeinsameZeile { lineId: string; quantity: number; unitPrice: number; wertF: number; zurueck: string | null }
-function gemeinsameZeile(purchaseId: string, consignmentId: string, productId: string): GemeinsameZeile | null {
+export interface GemeinsameZeile { lineId: string; quantity: number; unitPrice: number; wertF: number; zurueck: string | null }
+export function gemeinsameZeile(purchaseId: string, consignmentId: string, productId: string): GemeinsameZeile | null {
   const zeilen = query('SELECT id, product_id, quantity, unit_price, line_total, source_consignment_id FROM purchase_lines WHERE purchase_id = ? ORDER BY position, id', [purchaseId]);
   if (zeilen.length <= 1) return null;
   const z = zeilen.find((l) => String(l.source_consignment_id ?? '') === consignmentId)
@@ -138,7 +138,7 @@ function gemeinsameZeile(purchaseId: string, consignmentId: string, productId: s
  * Verkauf — zugeordnet wird über das Los des Einkaufs auf einer Zeile der jetzigen Rechnung. Ohne diese Zuordnung
  * (Altbestand ohne Los) bleiben es alle wie bisher.
  */
-function zumVerkauf(invoiceId: string, purchases: string[]): string[] {
+export function zumVerkauf(invoiceId: string, purchases: string[]): string[] {
   if (!invoiceId || purchases.length <= 1) return purchases;
   const verknuepft = purchases.filter((pid) => query(
     `SELECT 1 FROM invoice_lines il JOIN stock_lots sl ON sl.id = il.lot_id WHERE il.invoice_id = ? AND sl.purchase_id = ? LIMIT 1`,
@@ -148,7 +148,7 @@ function zumVerkauf(invoiceId: string, purchases: string[]): string[] {
 }
 
 /** Die Verlust-Ausgabe (Verkauf unter dem Boden des Einlieferers), die `recordSale` anlegt. */
-function consignorLosses(consignmentId: string, branchId: string): string[] {
+export function consignorLosses(consignmentId: string, branchId: string): string[] {
   return query(
     `SELECT id FROM expenses
       WHERE branch_id = ? AND related_module = 'consignment' AND related_entity_id = ?
@@ -192,9 +192,9 @@ const B = (f: number): number => f / 1000;
 
 /** Was ein Einkauf beim Einlieferer schon gesehen hat: Bezahltes (bar UND per Guthaben) und eine wirksame Lieferanten-Retoure.
  *  CONSIGNOR-JOINT-PURCHASE — `offenF`: der offene Rest des Einkaufs (eine Zeilen-Retoure mindert zuerst ihn). */
-interface EinkaufLage { id: string; number: string; bezahltF: number; guthabenF: number; retoure: string | null; offenF: number }
+export interface EinkaufLage { id: string; number: string; bezahltF: number; guthabenF: number; retoure: string | null; offenF: number }
 
-function einkaufLage(purchaseId: string): EinkaufLage {
+export function einkaufLage(purchaseId: string): EinkaufLage {
   const p = query('SELECT purchase_number, paid_amount, remaining_amount FROM purchases WHERE id = ?', [purchaseId])[0];
   const guthabenF = F(query(
     `SELECT COALESCE(SUM(amount), 0) AS t FROM purchase_payments WHERE purchase_id = ? AND method = 'credit' AND voided_at IS NULL`,
@@ -213,8 +213,15 @@ function einkaufLage(purchaseId: string): EinkaufLage {
  */
 const zeilenErstattungF = (lage: EinkaufLage, zeile: GemeinsameZeile): number => Math.max(0, zeile.wertF - lage.offenF);
 
+/** MIXED-INVOICE P4 — die Kennung des Neins, wenn ein Einlieferer-Einkauf nach einer Minderung überzahlt ist. */
+export const CONSIGNOR_OVERPAID = 'CONSIGNOR_OVERPAID';
+/** Hat dieser Einkauf eine Überzahlung (Lieferanten-Guthaben ohne Retoure, mit Betrag)? */
+export function consignorOverpaid(purchaseId: string): boolean {
+  return query(`SELECT 1 FROM supplier_credits WHERE source_purchase_id = ? AND source_return_id IS NULL AND amount > 0.0005 LIMIT 1`, [purchaseId]).length > 0;
+}
+
 /** Was auf eine Verlust-Ausgabe schon gezahlt ist (bar und per Guthaben). */
-function verlustBezahltF(expenseId: string): number {
+export function verlustBezahltF(expenseId: string): number {
   const e = query('SELECT paid_amount FROM expenses WHERE id = ?', [expenseId])[0];
   const guthaben = query(`SELECT COALESCE(SUM(amount), 0) AS t FROM expense_payments WHERE expense_id = ? AND method = 'credit'`, [expenseId])[0];
   return F(e?.paid_amount) + F(guthaben?.t);
@@ -268,6 +275,12 @@ function pruefeEinlieferer(
       throw nein(CONSIGNOR_PAID_BY_CREDIT,
         `${nr}: the consignor's purchase ${l.number} was paid with supplier credit — it is not undone automatically; please check it with the accountant`);
     }
+    // MIXED-INVOICE P4 (E2) — nach einer Minderung ist der Einkauf überzahlt (Guthaben oder Rückforderung beim Einlieferer):
+    // eine Rücknahme rechnete das Bezahlte doppelt zurück. Erst die Überzahlung klären (verrechnen oder zurückzahlen lassen).
+    if (consignorOverpaid(l.id)) {
+      throw nein(CONSIGNOR_OVERPAID,
+        `${nr}: the consignor's purchase ${l.number} is overpaid (consignor credit or repayment claim from a correction) — settle that first; please check it with the accountant`);
+    }
     erstattungF += zeile ? zeilenErstattungF(l, zeile) : l.bezahltF;
   }
   const bezahltF = erstattungF;
@@ -293,7 +306,7 @@ function pruefeEinlieferer(
  * die VORHANDENE Lieferanten-Retoure — die Verbindlichkeit fällt, das schon Bezahlte kommt zurück (received: auf
  * dem gewählten Weg) oder wird Lieferanten-Guthaben beim Einlieferer (pending). Die Auszahlung selbst bleibt stehen.
  */
-function einkaufZurueck(
+export function einkaufZurueck(
   con: Record<string, unknown>, lage: EinkaufLage, wahl: ConsignorRefundChoice | undefined, branchId: string, now: string,
   nurZeile = false,
 ): ConsignorRefundBooked | null {

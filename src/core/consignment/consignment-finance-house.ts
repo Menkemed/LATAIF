@@ -41,7 +41,7 @@ import { logAuditOrThrow } from '@/core/audit/audit-log';
 
 const SALE_VERDICTS: ReadonlyArray<readonly [RegExp, string]> = [
   [/below consignor floor/i, 'SALE_BELOW_FLOOR'],
-  // MIXED-INVOICE P3 (E7) — nur die gemischte Rechnung verlangt diese Bestätigung.
+  // MIXED-INVOICE E7 (Owner A) — jeder Kommissionsverkauf verlangt diese Bestätigung.
   [/with VAT 10 % the LATAIF result is/i, VAT_SHORTFALL_UNCONFIRMED],
   [/Buyer cannot be the same as the consignor/i, 'BUYER_IS_CONSIGNOR'],
   [/Unsupported commission type/i, 'UNSUPPORTED_PAYOUT_MODEL'],
@@ -240,7 +240,7 @@ function verkaufen(
         consignmentId: it.consignmentId, salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall,
         ...(it.taxScheme ? { taxScheme: it.taxScheme } : {}),
         ...(it.consignorTaxScheme ? { consignorTaxScheme: it.consignorTaxScheme } : {}),
-        ...(mixed && it.acknowledgeVatShortfall === true ? { acknowledgeVatShortfall: true } : {}),
+        ...(it.acknowledgeVatShortfall === true ? { acknowledgeVatShortfall: true } : {}),
       })),
       buyerId: input.buyerId,
       saleDate: input.saleDate,

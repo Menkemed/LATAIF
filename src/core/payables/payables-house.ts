@@ -391,7 +391,12 @@ export function updateExpenseInHouse(
   expenseId: string, raw: ExpenseEditFields, ctx: HouseCtx, expectedRevision?: number,
   /** CUSTOM-ORDER Kostenkorrektur — nur die Order (order-cost-correction.ts) ändert den Betrag ihrer Kostenzeile; sie
    *  bucht eine Überzahlung selbst als Guthaben/Rückforderung (daher hier weder Order-Sperre noch „nie unter das Bezahlte"). */
-  opts: { orderCostCorrection?: boolean } = {},
+  opts: {
+    orderCostCorrection?: boolean;
+    /** MIXED-INVOICE P4 (E11) — die Korrekturfolge einer Kommissionsrechnung: die alte Buchung der Verlust-Ausgabe wird auf
+     *  ihrem eigenen Tag gespiegelt (nicht heute), die neue steht am (neuen) Ausgabetag. */
+    mirrorOriginalDates?: boolean;
+  } = {},
 ): ExpenseUpdated {
   assertHouseBooks();
   const row = liveExpense(expenseId, ctx.branchId);
@@ -496,7 +501,7 @@ export function updateExpenseInHouse(
   if (status !== row.status) db.run('UPDATE expenses SET status = ? WHERE id = ?', [status, expenseId]);
 
   if ((amountChanged || dateChanged) && hasLedgerEntries('EXPENSE', expenseId)) {
-    reverseSource('EXPENSE', expenseId, ctx.now);
+    reverseSource('EXPENSE', expenseId, ctx.now, opts.mirrorOriginalDates ? { mirrorOriginalDates: true } : {});
     const neu = expenseOf(query('SELECT * FROM expenses WHERE id = ?', [expenseId])[0]);
     if (kartengebuehr) {
       postCardFeeEntries({
@@ -1153,21 +1158,33 @@ export function recordSupplierCreditRefundInHouse(input: SupplierCreditRefundInp
             pr.status AS return_status, pr.return_date, pr.return_number,
             COALESCE(p.source_consignment_id,
               (SELECT pl.source_consignment_id FROM purchase_return_lines prl JOIN purchase_lines pl ON pl.id = prl.purchase_line_id
-                WHERE prl.return_id = pr.id AND pl.source_consignment_id IS NOT NULL LIMIT 1)) AS source_consignment_id
+                WHERE prl.return_id = pr.id AND pl.source_consignment_id IS NOT NULL LIMIT 1),
+              po.source_consignment_id,
+              (SELECT pl2.source_consignment_id FROM purchase_lines pl2
+                WHERE pl2.purchase_id = po.id AND pl2.source_consignment_id IS NOT NULL ORDER BY pl2.position, pl2.id LIMIT 1)) AS source_consignment_id,
+            po.id AS overpay_purchase_id, po.status AS overpay_purchase_status
        FROM supplier_credits sc
        LEFT JOIN purchase_returns pr ON pr.id = sc.source_return_id
        LEFT JOIN purchases p ON p.id = pr.purchase_id
+       LEFT JOIN purchases po ON po.id = sc.source_purchase_id AND sc.source_return_id IS NULL
       WHERE sc.id = ? AND sc.branch_id = ?`,
     [input.creditId, ctx.branchId],
   )[0];
   if (!c) throw nein('SUPPLIER_CREDIT_NOT_FOUND', 'no such supplier credit in this branch');
   // CUSTOM-ORDER Kostenkorrektur — eine Rückforderung aus einer gesenkten/gelöschten Order-Kostenzeile (REFUND_DUE).
   const orderClaim = isOrderCostClaim(c);
-  if (!orderClaim && (!c.source_return_id || !c.return_status || String(c.return_status) === 'CANCELLED')) {
+  // MIXED-INVOICE P4 (E2) — die Rückforderung an einen schon bezahlten Einlieferer aus der Korrektur einer Kommissionsrechnung
+  // (status REFUND_DUE): aus der Rückgabe seiner Einkaufszeile ODER aus der Überzahlung seines geminderten Einkaufs.
+  const consignorOverpayClaim = !orderClaim && !c.source_return_id && !!c.overpay_purchase_id
+    && String(c.overpay_purchase_status ?? '') !== 'CANCELLED' && !!c.source_consignment_id
+    && String(c.status) === ORDER_COST_CLAIM_OPEN;
+  const returnClaim = !!c.source_return_id && (String(c.status) === ORDER_COST_CLAIM_OPEN || String(c.status) === ORDER_COST_CLAIM_DONE);
+  const claim = orderClaim || consignorOverpayClaim || returnClaim;
+  if (!orderClaim && !consignorOverpayClaim && (!c.source_return_id || !c.return_status || String(c.return_status) === 'CANCELLED')) {
     throw nein('SUPPLIER_CREDIT_NOT_A_RETURN_CREDIT',
       'only the open repayment from a return can be recorded as money received — a prepayment is refunded with "Refund Credit", an overpayment is applied to the next purchase');
   }
-  if (String(c.status) !== (orderClaim ? ORDER_COST_CLAIM_OPEN : 'OPEN')) throw nein('SUPPLIER_CREDIT_NOT_OPEN', 'this repayment is already settled in full');
+  if (String(c.status) !== (claim ? ORDER_COST_CLAIM_OPEN : 'OPEN')) throw nein('SUPPLIER_CREDIT_NOT_OPEN', 'this repayment is already settled in full');
   const openF = F(c.amount) - F(c.used_amount);
   if (openF <= 0) throw nein('SUPPLIER_CREDIT_NOT_OPEN', 'this repayment is already settled in full');
   if (amtF > openF) {
@@ -1177,9 +1194,9 @@ export function recordSupplierCreditRefundInHouse(input: SupplierCreditRefundInp
   const tag = input.receivedDate === undefined || input.receivedDate === '' ? today
     : isoDateOf(input.receivedDate, 'PAYMENT_DATE_INVALID', 'the date the money came');
   if (tag > today) throw nein('PAYMENT_DATE_INVALID', 'the date the money came cannot be in the future');
-  const ab = orderClaim ? dayOf(String(c.created_at ?? '')) : String(c.return_date ?? '').slice(0, 10);
+  const ab = orderClaim || consignorOverpayClaim ? dayOf(String(c.created_at ?? '')) : String(c.return_date ?? '').slice(0, 10);
   if (ab && tag < ab) {
-    throw nein('PAYMENT_DATE_BEFORE_CLAIM', orderClaim
+    throw nein('PAYMENT_DATE_BEFORE_CLAIM', orderClaim || consignorOverpayClaim
       ? `the money cannot have come before the claim it repays (${ab})`
       : `the money cannot have come before the return it repays (${ab})`);
   }
@@ -1196,7 +1213,7 @@ export function recordSupplierCreditRefundInHouse(input: SupplierCreditRefundInp
   // Der Zeitpunkt: heute → jetzt; ein früherer Tag → dieser Tag (Kasse/Bank stehen am Tag des Eingangs).
   const receivedAt = businessTimestamp(tag, ctx.now);
   const newUsedF = F(c.used_amount) + amtF;
-  const status: string = orderClaim
+  const status: string = claim
     ? (newUsedF >= F(c.amount) ? ORDER_COST_CLAIM_DONE : ORDER_COST_CLAIM_OPEN)
     : (newUsedF >= F(c.amount) ? 'USED' : 'OPEN');
   const db = getDatabase();
@@ -1224,6 +1241,35 @@ export function recordSupplierCreditRefundInHouse(input: SupplierCreditRefundInp
     refundId, creditId: input.creditId, supplierId, amount: B(amtF), method: m, receivedDate: tag,
     openAmount: B(F(c.amount) - newUsedF), creditStatus: status as SupplierCreditRefundRecorded['creditStatus'],
   };
+}
+
+/**
+ * MIXED-INVOICE P4 (E2) — die Wahl „Rückforderung" für ein soeben entstandenes Guthaben eines schon bezahlten Einlieferers aus
+ * der Korrektur seiner Kommissionsrechnung: aus der Rückgabe seiner Einkaufszeile (D3) oder aus der Überzahlung seines geminderten
+ * Einkaufs. Dieselbe Zeile, dieselbe Buchung — nur die Art: REFUND_DUE ist nicht verrechenbar und offen bis „Record Repayment".
+ * Nur ein unbenutztes, offenes Guthaben eines Einlieferer-Einkaufs; sonst ein Fehler (in der Klammer des Aufrufers → Rollback).
+ */
+export function markConsignorRepaymentClaim(creditId: string, note?: string): void {
+  const c = query(
+    `SELECT sc.id, sc.status, sc.used_amount, sc.source_purchase_id,
+            COALESCE(p.id, pr.purchase_id) AS purchase_id
+       FROM supplier_credits sc
+       LEFT JOIN purchases p ON p.id = sc.source_purchase_id AND sc.source_return_id IS NULL
+       LEFT JOIN purchase_returns pr ON pr.id = sc.source_return_id
+      WHERE sc.id = ?`,
+    [creditId],
+  )[0];
+  if (!c || String(c.status) !== 'OPEN' || F(c.used_amount) > 0) throw new Error(`consignor repayment claim ${creditId}: not an unused open credit`);
+  const pid = String(c.purchase_id ?? '');
+  const kommission = !!pid && query(
+    `SELECT 1 FROM purchases p WHERE p.id = ? AND (p.source_consignment_id IS NOT NULL
+       OR EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.source_consignment_id IS NOT NULL))`,
+    [pid],
+  ).length > 0;
+  if (!kommission) throw new Error(`consignor repayment claim ${creditId}: not a credit of a consignor purchase`);
+  getDatabase().run(`UPDATE supplier_credits SET status = ?${note ? ', note = ?' : ''} WHERE id = ?`,
+    note ? [ORDER_COST_CLAIM_OPEN, note, creditId] : [ORDER_COST_CLAIM_OPEN, creditId]);
+  trackChange('supplier_credits', creditId, 'update', {});
 }
 
 /** Standalone-Guthaben (Vorauszahlung): Zeile + DR SUPPLIER_CREDIT / CR Kasse, strikt. */

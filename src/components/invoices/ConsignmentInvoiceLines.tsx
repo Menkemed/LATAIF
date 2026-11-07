@@ -4,20 +4,29 @@
 // je Einlieferer EIN Einkauf mit seiner Einkaufs-VAT (Pflichtwahl, nichts vorbelegt — D2).
 // Gerechnet wird mit DENSELBEN Funktionen wie die Buchung: `computeConsignmentSale` (Ökonomie), `consignmentLineAmounts`
 // (Zeile) und `consignmentVatShortfall` (E7) — die Vorschau ist, was gebucht wird.
+//
+// MIXED-INVOICE P4 — dieselbe Karte beim ÄNDERN einer Rechnung mit Kommissionszeilen: die gebundenen Kommissionen stehen
+// als bleibende Zeilen (Preis, Steuerart korrigierbar; entfernen = zurück auf Active, E5), neue kommen dazu (E6). Je
+// Einlieferer-Einkauf dieses Verkaufs: Zahlungsstand, Einkaufs-VAT (nur vor der ersten Auszahlung, E10) und — wenn dem
+// schon bezahlten Einlieferer weniger zusteht — die Pflichtwahl Guthaben oder Rückforderung (E2). Das Haus
+// (`correctMixedInvoiceInHouse`) prüft und rechnet alles noch einmal; die Karte schätzt, um zu zeigen und zu fragen.
 // ════════════════════════════════════════════════════════════════════════════
 import { useMemo } from 'react';
-import { Trash2 } from 'lucide-react';
+import { Trash2, RotateCcw } from 'lucide-react';
 import { Card } from '@/components/ui/Card';
 import { SearchSelect } from '@/components/ui/SearchSelect';
 import { Bhd } from '@/components/ui/Bhd';
 import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
+import { usePurchaseStore } from '@/stores/purchaseStore';
 import { commissionModelLabel, computeConsignmentSale, type ConsignmentSaleResult } from '@/core/consignment/economics';
-import { consignmentLineAmounts, consignmentVatShortfall, type SaleScheme } from '@/core/invoices/mixed-invoice';
+import {
+  consignmentLineAmounts, consignmentVatShortfall, consignorPurchaseAmount, type ConsignorOverpayChoice, type SaleScheme,
+} from '@/core/invoices/mixed-invoice';
 import type { ConsignorPurchaseTaxScheme } from '@/core/consignment/consignment-finance';
 import { productDisplayName } from '@/core/products/display-name';
-import type { Consignment } from '@/core/models/types';
+import type { Consignment, Purchase } from '@/core/models/types';
 
 /** Was der Mensch je Kommissionsartikel eingibt. */
 export interface ConsignmentDraft {
@@ -29,6 +38,8 @@ export interface ConsignmentDraft {
   ack: boolean;
   /** E7 bestätigt (gilt für Preis und Steuerart, bei denen sie gesetzt wurde). */
   vatAck: boolean;
+  /** P4 — die Zeile steht schon auf der Rechnung: Preis und Steuerart, wie gespeichert. */
+  kept?: { salePrice: number; scheme: SaleScheme };
 }
 
 /** Ein gerechneter Kommissionsartikel — Anzeige, Prüfung und Rumpf lesen DIESELBEN Werte. */
@@ -45,16 +56,23 @@ export interface ConsignmentRow {
   /** Margen-VAT (intern) bei Margin. */
   internalVat: number;
   gross: number;
-  /** E7: negatives LATAIF-Ergebnis unter VAT 10 % (sonst null). */
+  /** E7: negatives LATAIF-Ergebnis unter VAT 10 % (sonst null) — bei einer bleibenden Zeile nur, wenn sie sich ändert. */
   vatShortfall: number | null;
+  /** P4 — Preis oder Steuerart einer bleibenden Zeile geändert (eine neue Zeile ist immer „geändert"). */
+  changed: boolean;
+  /** Unterdeckung zu bestätigen (nur bei neuem oder geändertem Preis). */
+  needsAck: boolean;
+  /** Was der Einkauf beim Einlieferer für diesen Verkauf trägt. */
+  purchaseAmount: number;
 }
 
 const SCHEMES: Array<{ id: SaleScheme; label: string }> = [
   { id: 'MARGIN', label: 'Margin' }, { id: 'VAT_10', label: 'VAT 10 %' }, { id: 'ZERO', label: 'Zero-rated' },
 ];
+const same = (a: number, b: number): boolean => Math.abs(a - b) < 0.0005;
 
-/** Die gerechneten Zeilen der Kommissionsartikel. */
-export function useConsignmentInvoiceRows(drafts: readonly ConsignmentDraft[]): ConsignmentRow[] {
+/** Die gerechneten Zeilen der Kommissionsartikel. `edit`: die Regel der Korrektur (Margen-Basis = Auszahlung, wie das Haus). */
+export function useConsignmentInvoiceRows(drafts: readonly ConsignmentDraft[], edit = false): ConsignmentRow[] {
   const { consignments } = useConsignmentStore();
   const { customers } = useCustomerStore();
   const { products } = useProductStore();
@@ -65,10 +83,13 @@ export function useConsignmentInvoiceRows(drafts: readonly ConsignmentDraft[]): 
     const v = parseFloat(d.priceText);
     const price = Number.isFinite(v) && v > 0 ? v : 0;
     const econ = computeConsignmentSale(con ?? { commissionType: 'percent', commissionRate: 0, agreedPrice: 0 }, price);
-    // Dieselbe Quelle wie die Buchung: Einkaufspreis des Artikels, sonst die Auszahlung (G4 unverändert).
-    const purchasePrice = prod?.purchasePrice || econ.payout;
+    // Dieselbe Quelle wie die Buchung: beim Anlegen der Einkaufspreis des Artikels, sonst die Auszahlung (G4 unverändert);
+    // beim Korrigieren die Auszahlung (der Einkaufspreis des Artikels ist dann schon der des alten Verkaufs).
+    const purchasePrice = edit ? econ.payout : (prod?.purchasePrice || econ.payout);
     const a = price > 0 ? consignmentLineAmounts(price, d.scheme, purchasePrice) : null;
     const persisted = a ? a.persistedVat : 0;
+    const priceChanged = !d.kept || !same(d.kept.salePrice, price);
+    const changed = priceChanged || d.kept!.scheme !== d.scheme;
     return {
       draft: d, con,
       label: prod ? productDisplayName(prod) : (con?.consignmentNumber ?? d.consignmentId),
@@ -78,9 +99,12 @@ export function useConsignmentInvoiceRows(drafts: readonly ConsignmentDraft[]): 
       vat: a ? a.calc.vatAmount : 0,
       internalVat: d.scheme === 'MARGIN' ? persisted : 0,
       gross: a ? a.calc.grossAmount : 0,
-      vatShortfall: price > 0 ? consignmentVatShortfall(econ, d.scheme, persisted) : null,
+      vatShortfall: price > 0 && changed ? consignmentVatShortfall(econ, d.scheme, persisted) : null,
+      changed,
+      needsAck: price > 0 && econ.belowFloor && priceChanged,
+      purchaseAmount: consignorPurchaseAmount(econ, price),
     };
-  }), [drafts, consignments, customers, products]);
+  }), [drafts, consignments, customers, products, edit]);
 }
 
 /** Je Einlieferer EIN Einkauf: Name, Artikel, Summe der Auszahlungen. */
@@ -95,22 +119,165 @@ export function consignorGroupsOf(rows: readonly ConsignmentRow[]): Array<{ cons
   return [...m.values()];
 }
 
+// ── P4 — die Einlieferer-Seite einer Korrektur (Schätzung für die Maske; das Haus entscheidet) ─────────────────
+
+/** Ein Einlieferer-Einkauf dieses Verkaufs, wie die Korrektur ihn ändern würde. */
+export interface CorrectionPurchase {
+  id: string;
+  number: string;
+  revision: number;
+  consignorId: string;
+  consignorName: string;
+  total: number;
+  /** Bar und per Guthaben bezahlt. */
+  paid: number;
+  remaining: number;
+  scheme: 'ZERO' | 'VAT_10';
+  /** Die gespeicherte Einkaufs-VAT (vor einer Wahl in der Maske). */
+  originalScheme: 'ZERO' | 'VAT_10';
+  /** Schon einmal (auch storniert) bezahlt — dann ist die Einkaufs-VAT fest (E10). */
+  everPaid: boolean;
+  /** Der Einkauf nach der Korrektur (geschätzt). */
+  newTotal: number;
+  /** Was ein bezahlter Einlieferer zurückschuldet (Rückgabe einer Zeile oder Minderung) — > 0 ⇒ Pflichtwahl E2. */
+  owedBack: number;
+  /** Kommissionen dieses Einkaufs, die die Rechnung verlassen. */
+  removed: string[];
+  /** Neue Kommissionen, die an diesen (unbezahlten) Einkauf kommen. */
+  appended: string[];
+}
+
+export interface CorrectionPlan {
+  purchases: CorrectionPurchase[];
+  /** Neue Kommissionen ohne unbezahlten Einkauf ihres Einlieferers ⇒ neuer Einkauf mit Pflichtwahl der Einkaufs-VAT. */
+  newPurchases: Array<{ consignorId: string; name: string; count: number; payout: number }>;
+  /** Gebundene Kommissionen, die die Rechnung verlassen (zurück auf Active). */
+  removed: Consignment[];
+  /** Die gesehenen Fassungen der Einkäufe dieses Verkaufs. */
+  purchaseRevisions: Record<string, number>;
+}
+
+const r3 = (n: number): number => Math.round(n * 1000) / 1000;
+function paidOf(p: Purchase): number {
+  const credit = (p.payments ?? []).filter((x) => x.method === 'credit' && !x.voidedAt).reduce((s, x) => s + (Number(x.amount) || 0), 0);
+  return r3((Number(p.paidAmount) || 0) + credit);
+}
+
+/** Die Einlieferer-Seite der Korrektur — dieselbe Reihenfolge wie das Haus (entfernen, ändern, anhängen, neu). */
+export function useConsignmentCorrectionPlan(
+  bound: readonly Consignment[], rows: readonly ConsignmentRow[], purchaseVat: Readonly<Record<string, 'ZERO' | 'VAT_10'>>,
+): CorrectionPlan {
+  const { purchases } = usePurchaseStore();
+  const { customers } = useCustomerStore();
+  return useMemo(() => {
+    const name = (id: string): string => { const k = customers.find((x) => x.id === id); return k ? `${k.firstName} ${k.lastName}`.trim() : '—'; };
+    const ofCon = (cid: string): Purchase | undefined => purchases
+      .filter((p) => p.status !== 'CANCELLED' && (p.sourceConsignmentId === cid || p.lines.some((l) => l.sourceConsignmentId === cid)))
+      .sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt))).pop();
+    const rowById = new Map(rows.map((r) => [r.draft.consignmentId, r]));
+    const boundIds = new Set(bound.map((c) => c.id));
+    const plans = new Map<string, CorrectionPurchase>();
+    const linien = new Map<string, Purchase>();
+    for (const c of bound) {
+      const p = ofCon(c.id);
+      if (!p) continue;
+      linien.set(p.id, p);
+      if (!plans.has(p.id)) {
+        const paid = paidOf(p);
+        const gespeichert: 'ZERO' | 'VAT_10' = p.lines[0]?.taxScheme === 'VAT_10' ? 'VAT_10' : 'ZERO';
+        plans.set(p.id, {
+          originalScheme: gespeichert,
+          id: p.id, number: p.purchaseNumber, revision: Number((p as Purchase & { revision?: number }).revision ?? 0), consignorId: c.consignorId,
+          consignorName: name(c.consignorId), total: r3(p.totalAmount), paid, remaining: r3(p.remainingAmount),
+          scheme: (p.lines[0]?.taxScheme === 'VAT_10' ? 'VAT_10' : 'ZERO'),
+          everPaid: paid > 0.0005 || (p.payments ?? []).length > 0, newTotal: 0, owedBack: 0, removed: [], appended: [],
+        });
+      }
+      if (!rowById.has(c.id)) plans.get(p.id)!.removed.push(c.id);
+    }
+    // Neue Zeilen: an den ersten unbezahlten Einkauf desselben Einlieferers, der nicht ganz geht; sonst neuer Einkauf.
+    const neu = new Map<string, { consignorId: string; name: string; count: number; payout: number }>();
+    for (const r of rows) {
+      if (!r.con || boundIds.has(r.con.id)) continue;
+      const ziel = [...plans.values()].find((x) => x.consignorId === r.con!.consignorId && !x.everPaid
+        && x.removed.length < (linien.get(x.id)?.lines.length ?? 0));
+      if (ziel) { ziel.appended.push(r.con.id); continue; }
+      const g = neu.get(r.con.consignorId) ?? { consignorId: r.con.consignorId, name: r.consignorName, count: 0, payout: 0 };
+      g.count += 1; g.payout = r3(g.payout + r.purchaseAmount);
+      neu.set(r.con.consignorId, g);
+    }
+    for (const plan of plans.values()) {
+      const p = linien.get(plan.id)!;
+      let total = 0;
+      let offen = plan.remaining;
+      let zurueck = 0;
+      const ganz = p.lines.length === 1;
+      for (const l of p.lines) {
+        const c = l.sourceConsignmentId ? bound.find((b) => b.id === l.sourceConsignmentId)
+          : ganz && p.sourceConsignmentId ? bound.find((b) => b.id === p.sourceConsignmentId)
+          : bound.find((b) => b.productId === l.productId);
+        if (c && plan.removed.includes(c.id)) {
+          if (plan.paid > 0.0005) { zurueck += ganz ? plan.paid : Math.max(0, l.lineTotal - offen); offen = Math.max(0, offen - l.lineTotal); }
+          continue;
+        }
+        const r = c ? rowById.get(c.id) : undefined;
+        total += r && r.changed ? r.purchaseAmount : l.lineTotal;
+      }
+      for (const cid of plan.appended) total += rowById.get(cid)?.purchaseAmount ?? 0;
+      plan.newTotal = r3(total);
+      const minderung = plan.removed.length === 0 && plan.paid > total + 0.0005 ? plan.paid - total : 0;
+      plan.owedBack = r3(zurueck + minderung);
+      if (purchaseVat[plan.id]) plan.scheme = purchaseVat[plan.id];
+    }
+    return {
+      purchases: [...plans.values()],
+      newPurchases: [...neu.values()],
+      removed: bound.filter((c) => !rowById.has(c.id)),
+      purchaseRevisions: Object.fromEntries([...plans.values()].map((p) => [p.id, p.revision])),
+    };
+  }, [bound, rows, purchases, customers, purchaseVat]);
+}
+
 /** Die Prüfung der Kommissionsartikel vor dem Speichern (das Haus prüft dasselbe noch einmal). */
 export function consignmentRowsIssue(
   rows: readonly ConsignmentRow[], buyerId: string, consignorVat: Readonly<Record<string, ConsignorPurchaseTaxScheme>>,
+  edit?: { plan: CorrectionPlan; overpay: Readonly<Record<string, ConsignorOverpayChoice>>; invoiceId: string },
 ): string | null {
   for (const r of rows) {
     if (!r.con) return 'One of the consignment items is no longer available — remove it and add it again';
     const nr = r.con.consignmentNumber;
-    if (r.con.status !== 'active' || r.con.invoiceId) return `${nr} is "${r.con.status}" — only an active consignment is sold`;
+    const bleibt = !!r.draft.kept && !!edit && r.con.invoiceId === edit.invoiceId;
+    if (!bleibt && (r.con.status !== 'active' || r.con.invoiceId)) return `${nr} is "${r.con.status}" — only an active consignment is sold`;
+    if (bleibt && r.con.status !== 'sold' && r.changed) return `${nr} is "${r.con.status}" — a returned item stays on its invoice as it is`;
     if (!(r.price > 0)) return `${nr}: enter a price above 0`;
     if (buyerId && r.con.consignorId === buyerId) return `${nr}: the customer is the consignor of this item — buyer and consignor must differ`;
-    if (r.econ.belowFloor && !r.draft.ack) return `${nr}: sold below the consignor's floor — confirm the Consignor Loss on the line`;
+    if (r.needsAck && !r.draft.ack) return `${nr}: sold below the consignor's floor — confirm the Consignor Loss on the line`;
     if (r.vatShortfall !== null && !r.draft.vatAck) return `${nr}: with VAT 10 % the LATAIF result is negative — confirm it on the line`;
+  }
+  if (edit) {
+    const ohne = edit.plan.newPurchases.find((g) => !consignorVat[g.consignorId]);
+    if (ohne) return `${ohne.name}: choose the VAT of the consignor's new purchase — No VAT or VAT 10 %`;
+    const offen = edit.plan.purchases.find((p) => p.owedBack > 0.0005 && !edit.overpay[p.id]);
+    if (offen) return `${offen.consignorName}: he was already paid more than he is now owed — choose consignor credit or reclaim (purchase ${offen.number})`;
+    return null;
   }
   const ohne = consignorGroupsOf(rows).find((g) => !consignorVat[g.consignorId]);
   if (ohne) return `${ohne.name}: choose the VAT of the consignor's purchase — No VAT or VAT 10 %`;
   return null;
+}
+
+/** P4 — was die Karte beim Ändern zusätzlich braucht. */
+export interface ConsignmentEditProps {
+  invoiceId: string;
+  plan: CorrectionPlan;
+  purchaseVat: Record<string, 'ZERO' | 'VAT_10'>;
+  onPurchaseVat: (purchaseId: string, v: 'ZERO' | 'VAT_10') => void;
+  overpay: Record<string, ConsignorOverpayChoice>;
+  onOverpay: (purchaseId: string, v: ConsignorOverpayChoice) => void;
+  /** Eine entfernte Kommission bleibt doch auf der Rechnung (Preis und Steuerart wie gespeichert). */
+  onKeep: (c: Consignment) => void;
+  /** Das Haus hat eine Wahl verlangt, die die Schätzung nicht sah: für jeden bezahlten Einkauf fragen. */
+  askAllPaid?: boolean;
 }
 
 interface Props {
@@ -120,9 +287,15 @@ interface Props {
   consignorVat: Record<string, ConsignorPurchaseTaxScheme>;
   onConsignorVat: (consignorId: string, v: ConsignorPurchaseTaxScheme) => void;
   customerId: string;
+  edit?: ConsignmentEditProps;
 }
 
-export function ConsignmentInvoiceLines({ drafts, rows, onDrafts, consignorVat, onConsignorVat, customerId }: Props) {
+const knopf = (an: boolean): React.CSSProperties => ({
+  padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
+  border: an ? '1px solid #0F0F10' : '1px solid #D5D9DE', background: an ? '#0F0F10' : '#FFFFFF', color: an ? '#FFFFFF' : '#0F0F10',
+});
+
+export function ConsignmentInvoiceLines({ drafts, rows, onDrafts, consignorVat, onConsignorVat, customerId, edit }: Props) {
   const { consignments } = useConsignmentStore();
   const { customers } = useCustomerStore();
   const { products } = useProductStore();
@@ -171,12 +344,15 @@ export function ConsignmentInvoiceLines({ drafts, rows, onDrafts, consignorVat, 
             {rows.map((r) => {
               const id = r.draft.consignmentId;
               return (
-                <div key={id} data-mixed-con-row={id} style={{ border: '1px solid #E5E9EE', borderRadius: 8, padding: '12px 14px' }}>
+                <div key={id} data-mixed-con-row={id} data-mixed-con-kept={r.draft.kept ? '1' : '0'} style={{ border: '1px solid #E5E9EE', borderRadius: 8, padding: '12px 14px' }}>
                   <div style={{ display: 'grid', gridTemplateColumns: 'minmax(0,2.2fr) 140px 150px 110px 120px 120px 32px', gap: 12, alignItems: 'end' }}>
                     <div style={{ minWidth: 0 }}>
                       <div style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.label}</div>
                       <div style={{ fontSize: 11, color: '#6B7280' }}>
                         <span className="font-mono">{r.con?.consignmentNumber}</span> · Consignor {r.consignorName}{r.con ? ` · ${commissionModelLabel(r.con)}` : ''}
+                        {edit && (r.draft.kept
+                          ? <span style={{ marginLeft: 6, color: r.changed ? '#B45309' : '#6B7280' }}>· on this invoice{r.changed ? ` (was ${r.draft.kept.salePrice.toFixed(3)})` : ''}</span>
+                          : <span style={{ marginLeft: 6, color: '#2563EB' }}>· new on this invoice</span>)}
                       </div>
                     </div>
                     <label style={{ fontSize: 10, color: '#6B7280' }}>TAX SCHEME
@@ -203,14 +379,14 @@ export function ConsignmentInvoiceLines({ drafts, rows, onDrafts, consignorVat, 
                       <div style={{ fontSize: 10, color: '#6B7280' }}>LATAIF SHARE</div>
                       <div className="font-mono" style={{ color: r.econ.commission < 0 ? '#DC2626' : '#0F0F10' }} data-mixed-con-share={id}><Bhd v={r.econ.commission}/></div>
                     </div>
-                    <button type="button" title="Remove this consignment item" data-mixed-con-remove={id}
+                    <button type="button" title={r.draft.kept ? 'Remove from this invoice (entry error — the consignment goes back to Active)' : 'Remove this consignment item'} data-mixed-con-remove={id}
                       onClick={() => onDrafts(drafts.filter((d) => d.consignmentId !== id))}
                       style={{ background: 'none', border: 'none', cursor: 'pointer', color: '#9CA3AF', paddingBottom: 6 }}><Trash2 size={15} /></button>
                   </div>
                   {r.con && customerIsConsignor(r.con.consignorId) && (
                     <div style={{ marginTop: 8, fontSize: 12, color: '#DC2626' }}>The customer is the consignor of this item — buyer and consignor must differ (use “Return” if the consignor takes it back).</div>
                   )}
-                  {r.price > 0 && r.econ.belowFloor && (
+                  {r.price > 0 && r.econ.belowFloor && r.needsAck && (
                     <div style={{ marginTop: 8, padding: '8px 10px', borderRadius: 6, background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.3)', fontSize: 12, color: '#7A2A2A' }}>
                       <b style={{ color: '#DC2626' }}><Bhd v={r.econ.loss}/> BHD below the consignor's floor</b> — the consignor still receives <Bhd v={r.econ.floor}/> BHD; the difference is booked as Consignor Loss (a separate expense).
                       <label style={{ display: 'flex', gap: 8, alignItems: 'center', marginTop: 6, cursor: 'pointer' }}>
@@ -233,7 +409,22 @@ export function ConsignmentInvoiceLines({ drafts, rows, onDrafts, consignorVat, 
             })}
           </div>
         )}
-        {groups.length > 0 && (
+        {edit && edit.plan.removed.length > 0 && (
+          <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 6 }} data-mixed-con-removed-list>
+            {edit.plan.removed.map((c) => {
+              const prod = products.find((p) => p.id === c.productId);
+              return (
+                <div key={c.id} data-mixed-con-removed={c.id}
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '8px 12px', borderRadius: 8, border: '1px dashed #D5D9DE', fontSize: 12, color: '#6B7280' }}>
+                  <span><span className="font-mono">{c.consignmentNumber}</span> · {prod ? productDisplayName(prod) : '—'} — leaves this invoice (entry error): the consignment goes back to Active, the consignor's purchase line is undone. A real return stays “Post-Sale Return”.</span>
+                  <button type="button" data-mixed-con-keep={c.id} onClick={() => edit.onKeep(c)}
+                    style={{ ...knopf(false), display: 'inline-flex', alignItems: 'center', gap: 6 }}><RotateCcw size={13} /> Keep on invoice</button>
+                </div>
+              );
+            })}
+          </div>
+        )}
+        {!edit && groups.length > 0 && (
           <div style={{ marginTop: 16 }} data-mixed-consignor-settlement>
             <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>CONSIGNOR SETTLEMENT</span>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -249,12 +440,7 @@ export function ConsignmentInvoiceLines({ drafts, rows, onDrafts, consignorVat, 
                     {(['ZERO', 'VAT_10'] as const).map((v) => (
                       <button key={v} type="button" data-mixed-consignor-vat={`${g.consignorId}:${v}`}
                         onClick={() => onConsignorVat(g.consignorId, v)}
-                        style={{
-                          padding: '6px 12px', borderRadius: 6, cursor: 'pointer', fontSize: 12,
-                          border: consignorVat[g.consignorId] === v ? '1px solid #0F0F10' : '1px solid #D5D9DE',
-                          background: consignorVat[g.consignorId] === v ? '#0F0F10' : '#FFFFFF',
-                          color: consignorVat[g.consignorId] === v ? '#FFFFFF' : '#0F0F10',
-                        }}>{v === 'ZERO' ? 'No VAT' : 'VAT 10 %'}</button>
+                        style={knopf(consignorVat[g.consignorId] === v)}>{v === 'ZERO' ? 'No VAT' : 'VAT 10 %'}</button>
                     ))}
                   </div>
                 </div>
@@ -262,6 +448,69 @@ export function ConsignmentInvoiceLines({ drafts, rows, onDrafts, consignorVat, 
             </div>
             <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
               VAT 10 % only if the consignor delivers taxably and issues a valid tax invoice. The resale tax of the items stays your choice per line.
+            </p>
+          </div>
+        )}
+        {edit && (edit.plan.purchases.length > 0 || edit.plan.newPurchases.length > 0) && (
+          <div style={{ marginTop: 16 }} data-mixed-consignor-settlement>
+            <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>CONSIGNOR SETTLEMENT</span>
+            <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+              {edit.plan.purchases.map((p) => {
+                const vat = edit.purchaseVat[p.id] ?? p.scheme;
+                const fragen = p.owedBack > 0.0005 || (!!edit.askAllPaid && p.paid > 0.0005);
+                return (
+                  <div key={p.id} data-mixed-purchase={p.id} style={{ padding: '10px 12px', border: '1px solid #E5E9EE', borderRadius: 8 }}>
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+                      <div style={{ fontSize: 13 }}>
+                        <div style={{ color: '#0F0F10' }}>{p.consignorName} · <span className="font-mono">{p.number}</span></div>
+                        <div style={{ fontSize: 11, color: '#6B7280' }} data-mixed-purchase-state={p.id}>
+                          purchase <Bhd v={p.total}/> BHD · {p.paid > 0.0005 ? <>paid <Bhd v={p.paid}/></> : 'unpaid'}
+                          {Math.abs(p.newTotal - p.total) > 0.0005 && <> · after this correction <b><Bhd v={p.newTotal}/></b> BHD</>}
+                          {p.appended.length > 0 && <> · {p.appended.length} new item{p.appended.length === 1 ? '' : 's'} added to it</>}
+                        </div>
+                      </div>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                        <span style={{ color: '#6B7280', marginRight: 4 }}>Purchase VAT{p.everPaid ? ' (fixed after payout)' : ''}</span>
+                        {(['ZERO', 'VAT_10'] as const).map((v) => (
+                          <button key={v} type="button" data-mixed-purchase-vat={`${p.id}:${v}`} disabled={p.everPaid && v !== vat}
+                            onClick={() => { if (!p.everPaid) edit.onPurchaseVat(p.id, v); }}
+                            style={{ ...knopf(vat === v), opacity: p.everPaid && v !== vat ? 0.4 : 1, cursor: p.everPaid ? 'default' : 'pointer' }}>{v === 'ZERO' ? 'No VAT' : 'VAT 10 %'}</button>
+                        ))}
+                      </div>
+                    </div>
+                    {fragen && (
+                      <div data-mixed-overpay={p.id} style={{ marginTop: 8, padding: '8px 10px', borderRadius: 6, background: 'rgba(37,99,235,0.05)', border: '1px solid rgba(37,99,235,0.25)', fontSize: 12, color: '#1E3A8A' }}>
+                        <div style={{ marginBottom: 6 }}>
+                          {p.consignorName} was already paid {p.owedBack > 0.0005 ? <><b><Bhd v={p.owedBack}/> BHD</b> more</> : 'more'} than he is now owed. Historical payments stay. Choose:
+                        </div>
+                        <div style={{ display: 'flex', gap: 6 }}>
+                          <button type="button" data-mixed-overpay-choice={`${p.id}:credit`} onClick={() => edit.onOverpay(p.id, 'credit')} style={knopf(edit.overpay[p.id] === 'credit')}>Consignor credit (offset later)</button>
+                          <button type="button" data-mixed-overpay-choice={`${p.id}:refund`} onClick={() => edit.onOverpay(p.id, 'refund')} style={knopf(edit.overpay[p.id] === 'refund')}>Reclaim from consignor</button>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+              {edit.plan.newPurchases.map((g) => (
+                <div key={g.consignorId} data-mixed-consignor={g.consignorId}
+                  style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 12px', border: '1px solid #E5E9EE', borderRadius: 8 }}>
+                  <div style={{ fontSize: 13 }}>
+                    <div style={{ color: '#0F0F10' }}>{g.name}</div>
+                    <div style={{ fontSize: 11, color: '#6B7280' }}>{g.count} new item{g.count === 1 ? '' : 's'} · new consignor purchase <Bhd v={g.payout}/> BHD (unpaid)</div>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: 12 }}>
+                    <span style={{ color: '#6B7280', marginRight: 4 }}>Purchase VAT *</span>
+                    {(['ZERO', 'VAT_10'] as const).map((v) => (
+                      <button key={v} type="button" data-mixed-consignor-vat={`${g.consignorId}:${v}`}
+                        onClick={() => onConsignorVat(g.consignorId, v)} style={knopf(consignorVat[g.consignorId] === v)}>{v === 'ZERO' ? 'No VAT' : 'VAT 10 %'}</button>
+                    ))}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <p style={{ fontSize: 11, color: '#6B7280', marginTop: 8 }}>
+              An unpaid consignor purchase follows the correction (amount, VAT, date); a paid one keeps its date and payments. A new item goes to the consignor's unpaid purchase of this sale, otherwise to a new purchase.
             </p>
           </div>
         )}

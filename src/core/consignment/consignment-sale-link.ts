@@ -167,6 +167,22 @@ const gleich = (a: number, b: number): boolean => Math.abs((Number(a) || 0) - (N
  * die VAT der Rechnung, nicht Provision, Auszahlung oder den Einkauf beim Einlieferer (der rechnet mit dem
  * Verkaufspreis). Was der Käufer zahlt — der Preis inkl. VAT — bleibt der Verkaufspreis der Kommission.
  */
+// ── MIXED-INVOICE P4 — die Korrekturfolge einer Rechnung mit Kommissionszeilen ──────────────────────────
+// Kunde, Datum und Kommissionszeilen einer solchen Rechnung ändert NUR die Korrekturfolge (`mixed-invoice-correction.ts`):
+// sie zieht Einkauf, Verlust und Kommission in derselben Transaktion nach. Nur während ihres Aufrufs (synchron) lässt die
+// Sperre unten genau diese Rechnung durch — danach in jedem Fall wieder zu.
+let correctionPermit: string | null = null;
+
+export function withConsignmentCorrectionPermit<T>(invoiceId: string, fn: () => T): T {
+  const before = correctionPermit;
+  correctionPermit = invoiceId;
+  try {
+    return fn();
+  } finally {
+    correctionPermit = before;
+  }
+}
+
 export function assertConsignmentSaleInvoiceEdit(
   invoiceId: string,
   base: ReadonlyArray<{ id: string; productId: string | null; qty: number; unitPrice: number; taxScheme: string; lineTotal: number }>,
@@ -177,18 +193,29 @@ export function assertConsignmentSaleInvoiceEdit(
   // Verschöbe nur die Rechnung, lägen Verkauf und Einkauf an anderen Tagen (bis in eine andere VAT-Periode).
   dateChanged = false,
 ): void {
+  if (correctionPermit === invoiceId) return;
   const c = boundSaleConsignments(invoiceId);
   if (c.length === 0) return;
   if (customerChanged) throw gesperrt(c, 'Its buyer belongs to the consignment.');
   if (dateChanged) throw gesperrt(c, 'Its date is the date of the consignment sale (and of the consignor\'s purchase).');
-  if (next.length !== base.length || lineMatch.some((m) => m === null)) {
-    throw gesperrt(c, 'Its lines cannot be added, removed or replaced.');
+  // MIXED-INVOICE P4 — gesperrt sind nur die Zeilen der Kommissionen (Artikel einer gebundenen Kommission): die eigenen
+  // Zeilen einer gemischten Rechnung bleiben nach den Regeln jeder Rechnung änderbar (hinzufügen, entfernen, Preis).
+  // Eine Kommissionszeile bleibt, wie „Record Sale" sie schrieb — fehlt sie oder ist sie ersetzt, sperrt das.
+  const gebunden = new Set(c.map((k) => k.productId));
+  const kommZeilen = base.filter((b) => !!b.productId && gebunden.has(b.productId));
+  const fortgesetzt = new Set(lineMatch.filter((m): m is string => !!m));
+  if (kommZeilen.some((b) => !fortgesetzt.has(b.id))) {
+    throw gesperrt(c, 'Its consignment lines cannot be removed or replaced here.');
   }
   const byId = new Map(base.map((b) => [b.id, b]));
   const artikel = 'Its item, quantity and price belong to the consignment (commission, payout and the consignor\'s purchase).';
   next.forEach((n, i) => {
-    const b = byId.get(lineMatch[i] as string);
-    if (!b || (n.productId ?? null) !== b.productId || !gleich(n.quantity ?? 1, b.qty)) throw gesperrt(c, artikel);
+    const m = lineMatch[i];
+    const b = m ? byId.get(m) : undefined;
+    // Eine neue oder eine eigene Zeile: die Regeln der Rechnung (Kommissionsware als neue Zeile verbietet schon
+    // `assertNoConsignmentGoods`).
+    if (!b || !b.productId || !gebunden.has(b.productId)) return;
+    if ((n.productId ?? null) !== b.productId || !gleich(n.quantity ?? 1, b.qty)) throw gesperrt(c, artikel);
     if (String(n.taxScheme) === String(b.taxScheme)) {
       if (!gleich(n.unitPrice, b.unitPrice) || !gleich(n.lineTotal, b.lineTotal)) throw gesperrt(c, artikel);
       return;

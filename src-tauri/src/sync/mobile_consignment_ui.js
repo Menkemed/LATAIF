@@ -474,8 +474,18 @@
     $('cnShortfallAckRow').classList.add('hidden');
     $('cnShortfallMsg').classList.add('hidden');
     $('cnShortfallMsg').textContent = '';
+    cnVatShortfallZuruecksetzen();
+  }
+  /** MIXED-INVOICE E7 — das Ja zum negativen LATAIF-Ergebnis gilt ebenso nur fuer genau diesen Verkauf (Preis, Steuerart). */
+  function cnVatShortfallZuruecksetzen() {
+    CN.vatShortfallOffen = false;
+    $('cnVatShortfallAck').checked = false;
+    $('cnVatShortfallAckRow').classList.add('hidden');
+    $('cnVatShortfallMsg').classList.add('hidden');
+    $('cnVatShortfallMsg').textContent = '';
   }
   $('cnSalePrice').addEventListener('input', cnShortfallZuruecksetzen);
+  $('cnSaleTaxScheme').addEventListener('change', cnVatShortfallZuruecksetzen);
 
   function cnSetBuyer(id, name) {
     cnShortfallZuruecksetzen();
@@ -892,6 +902,17 @@
         cnSay('cnActionMsg', 'Not booked — the sale is below the consignor floor.', false);
         return false;
       }
+      if (r.kind === 'rejected' && r.code === 'VAT_SHORTFALL_UNCONFIRMED') {
+        // MIXED-INVOICE E7 (Owner A) — ebenso: der Primary hat gerechnet; erst sein Nein macht die Frage sichtbar.
+        CN.vatShortfallOffen = true;
+        $('cnVatShortfallMsg').classList.remove('hidden');
+        $('cnVatShortfallMsg').textContent = (r.message || 'With VAT 10 % the LATAIF result of this sale is negative.')
+          + ' Tick the box below to confirm the negative result.';
+        $('cnVatShortfallAck').checked = false;
+        $('cnVatShortfallAckRow').classList.remove('hidden');
+        cnSay('cnActionMsg', 'Not booked — with VAT 10 % the LATAIF result is negative.', false);
+        return false;
+      }
       cnSay('cnActionMsg', r.code === 'RECORD_CHANGED'
         ? 'Someone changed this consignment in the meantime. Nothing was booked — open it again.'
         : cnMessageFor(r, 'Not booked'), false);
@@ -909,12 +930,19 @@
       cnSay('cnActionMsg', 'Not booked — tick "I confirm — record this shortfall as Consignor Loss" or change the price.', false);
       return;
     }
+    if (CN.vatShortfallOffen === true && !$('cnVatShortfallAck').checked) {
+      cnSay('cnActionMsg', 'Not booked — tick "I confirm the negative LATAIF result" or change the price or tax scheme.', false);
+      return;
+    }
     const bestaetigt = CN.shortfallOffen === true && $('cnShortfallAck').checked === true;
-    const gut = await cnHandlung('consignments.record_sale', bestaetigt ? 'sale-ack' : 'sale', () => MobileConsignment.saleBody(CN.con, {
+    // MIXED-INVOICE E7 — das zweite Ja; ein eigener Auftragsschlüssel je Antwort (ein Nein bleibt seinem Auftrag).
+    const vatBestaetigt = CN.vatShortfallOffen === true && $('cnVatShortfallAck').checked === true;
+    const zweck = 'sale' + (bestaetigt ? '-ack' : '') + (vatBestaetigt ? '-vatack' : '');
+    const gut = await cnHandlung('consignments.record_sale', zweck, () => MobileConsignment.saleBody(CN.con, {
       buyerId: CN.buyer ? CN.buyer.id : '', salePrice: $('cnSalePrice').value,
       specialMark: $('cnSpecialMark').value === 'special', notes: $('cnSaleNotes').value,
       taxScheme: $('cnSaleTaxScheme').value, consignorTaxScheme: $('cnSaleConsignorVat').value,
-    }, { acknowledgeShortfall: bestaetigt }), 'The sale was recorded.');
+    }, { acknowledgeShortfall: bestaetigt, acknowledgeVatShortfall: vatBestaetigt }), 'The sale was recorded.');
     if (gut) {
       cnShortfallZuruecksetzen();
       $('cnSalePrice').value = ''; $('cnSaleNotes').value = '';

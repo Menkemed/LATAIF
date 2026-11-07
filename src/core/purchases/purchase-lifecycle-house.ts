@@ -679,6 +679,12 @@ export interface PurchaseCancelOptions {
    */
   blockPaid?: boolean;
   now?: string;
+  /**
+   * MIXED-INVOICE P4 (E11) — nur die Korrekturfolge einer Kommissionsrechnung, nur für einen UNBEZAHLTEN Auto-Einkauf: der
+   * Einkauf war eine Fehlerfassung, seine Buchung wird auf ihrem eigenen Tag gespiegelt (wie die Gegenbuchung der Rechnung),
+   * nicht heute — sonst stünde zwischen Einkaufstag und heute ein Lager ohne Verkauf.
+   */
+  mirrorOriginalDates?: boolean;
 }
 
 export interface PurchaseCancelled {
@@ -853,7 +859,12 @@ export function cancelPurchaseInHouse(purchaseId: string, branchId: string, opts
     reversedPayments++;
   }
   if (hasLedgerEntries('PURCHASE', purchaseId) && !hasReversalFor('PURCHASE', purchaseId)) {
-    postPurchaseCancelled({ id: purchaseId } as Purchase);
+    if (opts.mirrorOriginalDates) {
+      if (reversedPayments > 0) throw nein('PURCHASE_PAID_NOT_CANCELLABLE', 'only an unpaid purchase is cancelled on its own date');
+      reverseSource('PURCHASE', purchaseId, now, { mirrorOriginalDates: true });
+    } else {
+      postPurchaseCancelled({ id: purchaseId } as Purchase);
+    }
   }
   for (const cp of creditPaysToRestore) {
     restoreSupplierCreditUsage(cp.reference as string, Number(cp.amount) || 0);

@@ -62,6 +62,9 @@ import { CONSIGNMENT_INVOICE_LOCKED, CONSIGNMENT_SELL_VIA_CONSIGNMENT } from '@/
 import {
   InvoicePayloadError, asDomainVerdict, buildInvoiceLines, parseInvoicePayload,
 } from './invoice-command';
+import { ConsignmentActionRejected, MAX_SALE_ITEMS } from '@/core/consignment/consignment-finance';
+import { VAT_SHORTFALL_UNCONFIRMED, type MixedInvoiceCorrection } from '@/core/invoices/mixed-invoice';
+import { correctMixedInvoiceInHouse, plainEditVatShortfall } from '@/core/invoices/mixed-invoice-correction';
 
 export const OP_INVOICES_UPDATE = 'invoices.update';
 export const OP_INVOICES_RECORD_PAYMENT = 'invoices.record_payment';
@@ -88,14 +91,75 @@ export interface InvoiceUpdateRequest {
   overpayChoice?: OverpayChoice;
   /** P1c — nur bei Rückzahlung: im selben Vorgang ausgezahlt, mit Weg und Tag. */
   refundNow?: { method: string; paidDate?: string };
+  /**
+   * MIXED-INVOICE P4 — die Korrektur einer Rechnung mit Kommissionszeilen: `lines` sind dann nur die EIGENEN Zeilen, dieser
+   * Teil nennt die Kommissionszeilen danach, die gesehenen Fassungen und die Wahlen (E2/E10/D2). Ohne ihn: wie bisher.
+   */
+  consignment?: MixedInvoiceCorrection;
   body: ReturnType<typeof parseInvoicePayload>;
+}
+
+const isRev = (v: unknown): v is number => typeof v === 'number' && Number.isInteger(v) && v >= 0;
+
+/** P4 — der Kommissionsteil, streng: unbekannte Felder, Typen und Werte sind ein Nein, nie still verworfen. */
+function parseConsignmentCorrection(raw: unknown): MixedInvoiceCorrection {
+  if (!isPlain(raw)) throw new InvoicePayloadError('consignment must be an object');
+  for (const k of Object.keys(raw)) {
+    if (!['items', 'consignmentRevisions', 'purchaseRevisions', 'purchaseTaxSchemes', 'consignorTaxSchemes', 'consignorOverpay'].includes(k)) {
+      throw new InvoicePayloadError(`unknown field in consignment: ${k}`);
+    }
+  }
+  if (!Array.isArray(raw.items)) throw new InvoicePayloadError('consignment.items must be a list');
+  if (raw.items.length > MAX_SALE_ITEMS) throw new InvoicePayloadError(`at most ${MAX_SALE_ITEMS} consignment items on one invoice`);
+  const items = raw.items.map((it, i) => {
+    if (!isPlain(it)) throw new InvoicePayloadError(`consignment item ${i + 1} must be an object`);
+    for (const k of Object.keys(it)) {
+      if (!['consignmentId', 'salePrice', 'taxScheme', 'acknowledgeShortfall', 'acknowledgeVatShortfall'].includes(k)) {
+        throw new InvoicePayloadError(`unknown field in consignment item ${i + 1}: ${k}`);
+      }
+    }
+    if (typeof it.consignmentId !== 'string' || !it.consignmentId.trim()) throw new InvoicePayloadError(`consignment item ${i + 1}: consignmentId is required`);
+    if (typeof it.salePrice !== 'number' || !Number.isFinite(it.salePrice) || !(it.salePrice > 0)) {
+      throw new InvoicePayloadError(`consignment item ${i + 1}: salePrice must be a positive number`);
+    }
+    if (it.taxScheme !== 'MARGIN' && it.taxScheme !== 'VAT_10' && it.taxScheme !== 'ZERO') {
+      throw new InvoicePayloadError(`consignment item ${i + 1}: taxScheme must be MARGIN, VAT_10 or ZERO`);
+    }
+    for (const k of ['acknowledgeShortfall', 'acknowledgeVatShortfall'] as const) {
+      if (it[k] !== undefined && typeof it[k] !== 'boolean') throw new InvoicePayloadError(`consignment item ${i + 1}: ${k} is yes or no`);
+    }
+    return {
+      consignmentId: it.consignmentId, salePrice: it.salePrice, taxScheme: it.taxScheme as 'MARGIN' | 'VAT_10' | 'ZERO',
+      ...(it.acknowledgeShortfall === true ? { acknowledgeShortfall: true } : {}),
+      ...(it.acknowledgeVatShortfall === true ? { acknowledgeVatShortfall: true } : {}),
+    };
+  });
+  const map = <T>(v: unknown, name: string, ok: (x: unknown) => boolean, what: string): Record<string, T> => {
+    if (v === undefined) return {};
+    if (!isPlain(v)) throw new InvoicePayloadError(`consignment.${name} must be an object`);
+    for (const [k, x] of Object.entries(v)) if (!k || !ok(x)) throw new InvoicePayloadError(`consignment.${name}: ${what}`);
+    return { ...(v as Record<string, T>) };
+  };
+  const vat = (x: unknown): boolean => x === 'ZERO' || x === 'VAT_10';
+  const out: MixedInvoiceCorrection = {
+    items,
+    consignmentRevisions: map<number>(raw.consignmentRevisions, 'consignmentRevisions', isRev, 'each revision is a whole number'),
+    purchaseRevisions: map<number>(raw.purchaseRevisions, 'purchaseRevisions', isRev, 'each revision is a whole number'),
+  };
+  const pts = map<'ZERO' | 'VAT_10'>(raw.purchaseTaxSchemes, 'purchaseTaxSchemes', vat, 'ZERO or VAT_10');
+  const cts = map<'ZERO' | 'VAT_10'>(raw.consignorTaxSchemes, 'consignorTaxSchemes', vat, 'ZERO or VAT_10');
+  const ov = map<'credit' | 'refund'>(raw.consignorOverpay, 'consignorOverpay', (x) => x === 'credit' || x === 'refund', "'credit' or 'refund'");
+  if (Object.keys(pts).length) out.purchaseTaxSchemes = pts;
+  if (Object.keys(cts).length) out.consignorTaxSchemes = cts;
+  if (Object.keys(ov).length) out.consignorOverpay = ov;
+  return out;
 }
 
 export function parseInvoiceUpdate(raw: unknown): InvoiceUpdateRequest {
   if (!isPlain(raw)) throw new InvoicePayloadError('payload must be an object');
-  const { id, expectedRevision, reason, confirmCustomerChange, overpayChoice, refundNow, ...rest } = raw as {
+  const { id, expectedRevision, reason, confirmCustomerChange, overpayChoice, refundNow, consignment, ...rest } = raw as {
     id?: unknown; expectedRevision?: unknown; reason?: unknown; confirmCustomerChange?: unknown;
-    overpayChoice?: unknown; refundNow?: unknown;
+    overpayChoice?: unknown; refundNow?: unknown; consignment?: unknown;
   };
   if (typeof id !== 'string' || !id.trim()) throw new InvoicePayloadError('id is required');
   if (typeof expectedRevision !== 'number' || !Number.isInteger(expectedRevision) || expectedRevision < 1) {
@@ -134,12 +198,15 @@ export function parseInvoiceUpdate(raw: unknown): InvoiceUpdateRequest {
     }
     sofort = { method: refundNow.method, ...(refundNow.paidDate !== undefined ? { paidDate: String(refundNow.paidDate) } : {}) };
   }
+  // MIXED-INVOICE P4 — der Kommissionsteil (nur mit ihm sind die Zeilen allein die eigenen; eine leere Liste ist dann erlaubt).
+  const kommission = consignment !== undefined ? parseConsignmentCorrection(consignment) : undefined;
   // Alles Übrige ist derselbe Rumpf wie beim Anlegen — inklusive seiner Verbotsliste.
-  const body = parseInvoicePayload(rest);
+  const body = parseInvoicePayload(rest, { allowNoLines: !!kommission });
   return {
     id, expectedRevision, reason: reason.trim(), confirmCustomerChange: confirmCustomerChange === true, body,
     ...(overpayChoice !== undefined ? { overpayChoice: overpayChoice as OverpayChoice } : {}),
     ...(sofort ? { refundNow: sofort } : {}),
+    ...(kommission ? { consignment: kommission } : {}),
   };
 }
 
@@ -285,9 +352,33 @@ export function runInvoiceUpdate(deps: EngineDeps, identity: CommandIdentity, ra
       if (lot) heldLots.add(lot);
       if (pid && lot && !held.has(pid)) held.set(pid, lot);
     }
-    const lines = buildInvoiceLines(req.body.lines.map((l) => (
+    const lines = req.body.lines.length === 0 ? [] : buildInvoiceLines(req.body.lines.map((l) => (
       l.lotId || !held.has(l.productId) ? l : { ...l, lotId: held.get(l.productId)! }
     )), { alsoConsumable: [...heldLots] });
+    if (req.consignment) {
+      // MIXED-INVOICE P4 — die Korrektur einer Rechnung mit Kommissionszeilen: DIESELBE Hausfolge wie am Primary (Rolle des
+      // geprüften Absenders, Fassungen jeder Kommission und jedes Einkaufs, Einlieferer-Seite in dieser Transaktion).
+      try {
+        correctMixedInvoiceInHouse({
+          invoiceId: req.id, expectedRevision: req.expectedRevision, reason: req.reason, ownLines: lines,
+          customerId: req.body.customerId, notes: req.body.notes, issuedAt: req.body.issuedDate, staffId: req.body.staffId,
+          ...(req.confirmCustomerChange ? { confirmCustomerChange: true } : {}),
+          ...(req.overpayChoice ? { overpayChoice: req.overpayChoice } : {}),
+          ...(req.refundNow ? { refundNow: req.refundNow } : {}),
+          consignment: req.consignment,
+        }, identity.branchId, { userId: identity.userId, role: (identity as CommandIdentity & { role?: string }).role });
+      } catch (err) {
+        if (err instanceof ConsignmentActionRejected || err instanceof InvoiceActionRejected) throw new CommandRejected(err.code, err.message);
+        const verdict = asEditVerdict(err);
+        if (verdict) throw verdict;
+        throw err;
+      }
+      return stateOf(req.id) as unknown as Record<string, unknown>;
+    }
+    // MIXED-INVOICE E7 (Owner A) — eine ältere Maske ändert die Steuerart einer Kommissionszeile über den gewöhnlichen Weg:
+    // macht VAT 10 % das LATAIF-Ergebnis negativ, bucht das Haus ohne die Bestätigung nichts (sie gibt es nur in der Korrektur).
+    const e7 = plainEditVatShortfall(req.id, identity.branchId, lines);
+    if (e7) throw new CommandRejected(VAT_SHORTFALL_UNCONFIRMED, e7);
     try {
       useInvoiceStore.getState().editInvoice(req.id, {
         lines,

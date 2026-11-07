@@ -183,7 +183,10 @@ interface InvoiceStore {
   // mit Pflicht-Aenderungsgrund (Audit). Reduktion unter den bereits gezahlten Betrag
   // wird (vorerst) blockiert — Ueberzahlung→Store-Guthaben kommt als eigener Slice.
   editInvoice: (id: string, input: {
-    lines: { lineId?: string; splitOf?: string; customerGross?: number; productId: string; lotId?: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number; bulk?: BulkLineMeta; bulkIntent?: BulkLineIntent }[];
+    lines: { lineId?: string; splitOf?: string; customerGross?: number; productId: string; lotId?: string; unitPrice: number; purchasePrice: number; taxScheme: string; vatRate: number; vatAmount: number; lineTotal: number; description?: string; quantity?: number; bulk?: BulkLineMeta; bulkIntent?: BulkLineIntent;
+      /** MIXED-INVOICE P4 — nur die Korrekturfolge (intern, kein Fernfeld): die Beträge dieser Kommissionszeile hat das Haus
+       *  nach der Regel von „Record Sale" gerechnet; sie werden nicht nachgerechnet. */
+      houseAmounts?: boolean }[];
     customerId?: string;
     notes?: string;
     issuedAt?: string;
@@ -201,6 +204,11 @@ interface InvoiceStore {
     overpayChoice?: OverpayChoice;
     /** P1c — nur mit `overpayChoice: 'refund'`: im selben Vorgang ausgezahlt, mit Weg und Tag. */
     refundNow?: { method: string; paidDate?: string };
+    /**
+     * MIXED-INVOICE P4 — nur die Korrekturfolge (intern): der Einstand einer Kommissionszeile hat sich geändert (Einkauf beim
+     * Einlieferer korrigiert) — die Rechnung wird gegen- und neu gebucht, auch wenn Menge, Preis und Steuerart gleich blieben.
+     */
+    rebook?: boolean;
   }) => void;
   recordPayment: (invoiceId: string, amount: number, method: string, notes?: string, specialMarkOnFinal?: boolean, cardBrand?: CardBrand, paymentIdOverride?: string, suppressOverpayCredit?: boolean, opts?: RecordPaymentTimes) => string;
   // Credit-Modell Slice 3 — Store-Guthaben des Kunden gegen eine Invoice einlösen.
@@ -788,7 +796,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const lineMatch = matchEditLines(baseLines, lines);
     // P1c — ein reiner Steuerartwechsel (Menge und Netto wie gespeichert) hält das Kundenbrutto — an jedem Weg. Die
     // Zuordnung oben bleibt (Artikel und Zeilen-IDs ändern sich dabei nicht).
-    lines = keepGrossOnPureTaxChange(baseLines, lines, lineMatch);
+    {
+      // MIXED-INVOICE P4 — eine Zeile mit Hausbeträgen (Kommission, Korrekturfolge) behält genau ihre Beträge.
+      const kept = keepGrossOnPureTaxChange(baseLines, lines, lineMatch);
+      lines = kept.map((l, i) => (lines[i].houseAmounts ? lines[i] : l));
+    }
     // CONSIGNMENT-INTEGRITY F7 — auch beim Ändern kommt keine Kommissionsware NEU auf eine Rechnung (neue oder
     // ersetzte Zeile). Eine fortgesetzte Zeile behält ihren Artikel.
     assertNoConsignmentGoods(lines.filter((_, i) => lineMatch[i] === null));
@@ -926,7 +938,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // `recorded_at` der Buchungen).
     const neuesDatum = issuedAt ?? inv0.issuedAt ?? inv0.createdAt;
     const gleicherTag = issuedAt === undefined || issuedAt.slice(0, 10) === String(inv0.issuedAt ?? '').slice(0, 10);
-    const ohneBuchung = !customerPlan && gleicherTag && deltaAmount === 0 && !bulkLineChanged && isLedgerNeutralEdit(baseLines, lines, lineMatch);
+    const ohneBuchung = !input.rebook && !customerPlan && gleicherTag && deltaAmount === 0 && !bulkLineChanged && isLedgerNeutralEdit(baseLines, lines, lineMatch);
     const bezeichnung = new Map(query('SELECT id, description FROM invoice_lines WHERE invoice_id = ?', [id])
       .map((r) => [String(r.id), String(r.description ?? '')]));
     const nurVerwaltung = ohneBuchung
@@ -1148,7 +1160,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         const b = l._kept ? baseById.get(l._id) : undefined;
         // BULK TAX SELECTION (v0.8.98) — eine fortgesetzte Bulk-Zeile hat ihre Beträge schon oben aus dem Kundenbetrag
         // (oder genau die gespeicherten). Ein Nachrechnen aus dem Netto würde das exakte Brutto wieder verschieben.
-        if (!b || bulkBase.has(b.id)) continue;
+        // MIXED-INVOICE P4 — ebenso eine Kommissionszeile der Korrekturfolge (Beträge nach der Regel von „Record Sale").
+        if (!b || bulkBase.has(b.id) || l.houseAmounts) continue;
         const a = keptLineAmounts(b, l, l._resolvedCost);
         l.unitPrice = a.unitPrice;
         l.vatAmount = a.vatAmount;

@@ -27,7 +27,7 @@ import { invoiceCreatePaymentsBody, MAX_CREATE_PAYMENTS, type InvoiceCreatePayme
 import { CARD_BRAND_OPTIONS, cardFeeConfigured, computeCardFee, type CardBrand } from '@/core/finance/card-fees';
 import { businessDateIssue, latestBusinessDate } from '@/core/utils/business-date';
 import { currentBranchId } from '@/core/db/helpers';
-import { vatEngine } from '@/core/tax/vat-engine';
+import { consignmentLineAmounts, consignmentVatShortfall, type SaleScheme } from '@/core/invoices/mixed-invoice';
 import { productDisplayName } from '@/core/products/display-name';
 import type { TaxScheme } from '@/core/models/types';
 
@@ -65,6 +65,9 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
 
   const [prices, setPrices] = useState<Record<string, string>>({});
   const [acks, setAcks] = useState<Record<string, boolean>>({});
+  // MIXED-INVOICE E7 (Owner A) — je Artikel: ein negatives LATAIF-Ergebnis unter VAT 10 % ausdrücklich bestätigt.
+  // Gilt nur für Preis und Steuerart, bei denen es gesetzt wurde (eine Änderung nimmt es zurück).
+  const [vatAcks, setVatAcks] = useState<Record<string, boolean>>({});
   // CONSIGNMENT-SALE-TAX — die Steuerart je Artikel; vorbelegt mit der des Artikels (sonst Margin), frei wählbar.
   const [schemes, setSchemes] = useState<Record<string, TaxScheme>>({});
   // CONSIGNOR-PURCHASE-VAT — je Einlieferer (EIN Einkauf) die Steuer seines Einkaufs, GETRENNT von der Rechnung:
@@ -94,6 +97,7 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
       return [id, c?.agreedPrice ? String(c.agreedPrice) : ''];
     })));
     setAcks({});
+    setVatAcks({});
     setSchemes(Object.fromEntries(consignmentIds.map((id) => {
       const c = useConsignmentStore.getState().consignments.find((k) => k.id === id);
       const p = c ? useProductStore.getState().products.find((pp) => pp.id === c.productId) : undefined;
@@ -118,16 +122,17 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
     const econ = computeConsignmentSale(c, price);
     const prod = products.find((p) => p.id === c.productId);
     const scheme = (schemes[c.id] || (prod?.taxScheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme;
-    const rate = scheme === 'ZERO' ? 0 : 10;
     const purchasePrice = prod?.purchasePrice || econ.payout;
-    const calc = price > 0 ? vatEngine.calculateNet(scheme === 'VAT_10' ? price / (1 + rate / 100) : price, purchasePrice, scheme, rate) : null;
-    const vat = calc ? (calc.internalVatAmount ?? calc.vatAmount) : 0;
+    // MIXED-INVOICE E7 — dieselbe Zeilenrechnung wie die Buchung (`consignmentLineAmounts`), dieselbe Prüfung wie das Haus.
+    const a = price > 0 ? consignmentLineAmounts(price, scheme as SaleScheme, purchasePrice) : null;
+    const vat = a ? a.persistedVat : 0;
     const consignor = customers.find((k) => k.id === c.consignorId);
     return {
       c, price, econ, scheme, vat, prod,
       label: prod ? productDisplayName(prod) : c.consignmentNumber,
       consignorName: consignor ? `${consignor.firstName} ${consignor.lastName}`.trim() : '—',
       needsAck: price > 0 && econ.belowFloor,
+      vatShortfall: price > 0 ? consignmentVatShortfall(econ, scheme as SaleScheme, vat) : null,
     };
   }), [items, prices, products, customers, schemes]);
 
@@ -184,6 +189,8 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
     if (ohnePreis) return `${ohnePreis.c.consignmentNumber}: enter a sale price above 0`;
     const ohneAck = rows.find((r) => r.needsAck && !acks[r.c.id]);
     if (ohneAck) return `${ohneAck.c.consignmentNumber}: confirm the consignor-loss shortfall`;
+    const ohneVatAck = rows.find((r) => r.vatShortfall !== null && !vatAcks[r.c.id]);
+    if (ohneVatAck) return `${ohneVatAck.c.consignmentNumber}: with VAT 10 % the LATAIF result is negative — confirm it on the item`;
     // MIXED-INVOICE P2 (D2) — die Einkaufs-VAT jedes Einlieferers wird ausdrücklich gewählt, nichts ist vorbelegt.
     const ohneVat = consignorGroups.find((g) => !consignorVat[g.consignorId]);
     if (ohneVat) return `${ohneVat.name}: choose the VAT of the consignor's purchase — No VAT or VAT 10 %`;
@@ -221,6 +228,7 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
       items: rows.map((r) => ({
         consignmentId: r.c.id, salePrice: r.price, acknowledgeShortfall: acks[r.c.id] === true, taxScheme: r.scheme,
         consignorTaxScheme: consignorVat[r.c.consignorId],
+        ...(r.vatShortfall !== null && vatAcks[r.c.id] ? { acknowledgeVatShortfall: true } : {}),
       })),
       buyerId,
       saleDate,
@@ -281,7 +289,7 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
                 <div style={{ display: 'grid', gridTemplateColumns: single ? '1fr 1fr' : '160px 1fr', gap: 16, alignItems: 'end' }}>
                   <Input required label="SALE PRICE (BHD)" type="number" placeholder="0"
                     value={prices[r.c.id] ?? ''} data-consignment-sale-price={r.c.id}
-                    onChange={(e) => { const v = e.target.value; setPrices((p) => ({ ...p, [r.c.id]: v })); setAcks((a) => ({ ...a, [r.c.id]: false })); }} />
+                    onChange={(e) => { const v = e.target.value; setPrices((p) => ({ ...p, [r.c.id]: v })); setAcks((a) => ({ ...a, [r.c.id]: false })); setVatAcks((a) => ({ ...a, [r.c.id]: false })); }} />
                   {single ? (
                     <Input label="SALE DATE" type="date" max={latestBusinessDate()} value={saleDate} data-consignment-sale-date
                       onChange={(e) => setSaleDate(e.target.value)} />
@@ -299,7 +307,7 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
                   <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
                     {(['MARGIN', 'VAT_10', 'ZERO'] as const).map((s) => (
                       <button key={s} type="button" data-consignment-sale-scheme={r.c.id} data-scheme={s}
-                        onClick={() => setSchemes((m) => ({ ...m, [r.c.id]: s }))}
+                        onClick={() => { setSchemes((m) => ({ ...m, [r.c.id]: s })); setVatAcks((a) => ({ ...a, [r.c.id]: false })); }}
                         className="cursor-pointer rounded"
                         style={{ padding: '6px 12px', fontSize: 12, border: `1px solid ${r.scheme === s ? '#0F0F10' : '#D5D9DE'}`,
                           color: r.scheme === s ? '#0F0F10' : '#6B7280', background: r.scheme === s ? 'rgba(15,15,16,0.06)' : 'transparent' }}>
@@ -336,6 +344,23 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
                       <input type="checkbox" checked={acks[r.c.id] === true} data-consignment-sale-ack={r.c.id}
                         onChange={(e) => { const v = e.target.checked; setAcks((a) => ({ ...a, [r.c.id]: v })); }} />
                       <span>I confirm — record this shortfall as Consignor Loss</span>
+                    </label>
+                  </div>
+                )}
+                {/* MIXED-INVOICE E7 (Owner A) — VAT 10 % macht das LATAIF-Ergebnis negativ: nur mit ausdrücklicher Bestätigung. */}
+                {r.vatShortfall !== null && (
+                  <div data-consignment-sale-e7={r.c.id}
+                    style={{ marginTop: 10, padding: '10px 12px', borderRadius: 8, background: 'rgba(198,163,109,0.10)', border: '1px solid rgba(198,163,109,0.45)', fontSize: 12, color: '#5B4A2B' }}>
+                    <div style={{ fontWeight: 600, marginBottom: 4 }}>
+                      With VAT 10 % the LATAIF result is <Bhd v={r.vatShortfall}/> BHD
+                    </div>
+                    <div style={{ marginBottom: 8 }}>
+                      The commission of <Bhd v={r.econ.commission}/> BHD is taken from the price incl. VAT; the VAT of <Bhd v={r.vat}/> BHD is carried by LATAIF.
+                    </div>
+                    <label className="flex items-center gap-2 cursor-pointer" style={{ fontSize: 12 }}>
+                      <input type="checkbox" checked={vatAcks[r.c.id] === true} data-consignment-sale-vatack={r.c.id}
+                        onChange={(e) => { const v = e.target.checked; setVatAcks((a) => ({ ...a, [r.c.id]: v })); }} />
+                      <span>I confirm the negative LATAIF result</span>
                     </label>
                   </div>
                 )}
@@ -495,7 +520,7 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
           <div className="flex justify-end gap-3" style={{ paddingTop: 12, borderTop: '1px solid #E5E9EE' }}>
             <Button variant="ghost" onClick={onClose}>Cancel</Button>
             <Button variant="primary" onClick={handleConfirm} data-consignment-sale
-              disabled={w.busy || items.length === 0 || !buyerId || buyerIsConsignor || rows.some((r) => !(r.price > 0) || (r.needsAck && !acks[r.c.id]))}
+              disabled={w.busy || items.length === 0 || !buyerId || buyerIsConsignor || rows.some((r) => !(r.price > 0) || (r.needsAck && !acks[r.c.id]) || (r.vatShortfall !== null && !vatAcks[r.c.id]))}
             >{single ? 'Confirm Sale' : `Confirm Sale (${rows.length} items · ${total.toFixed(3)} BHD)`}</Button>
           </div>
         </div>

@@ -157,7 +157,7 @@ export interface RecordSalesItem {
   /** CONSIGNOR-PURCHASE-VAT — der Einkauf beim Einlieferer: ohne VAT (Privatperson, Vorgabe) oder VAT 10 % (er stellt eine
    *  Steuerrechnung). Die Auszahlung bleibt der Betrag inkl. VAT. Je Einlieferer EINE Wahl (ein Einkauf). */
   consignorTaxScheme?: 'ZERO' | 'VAT_10';
-  /** MIXED-INVOICE P3 (E7) — nur auf der gemischten Rechnung: Bestätigung des negativen LATAIF-Ergebnisses unter VAT 10 %. */
+  /** MIXED-INVOICE E7 (Owner A) — Bestätigung des negativen LATAIF-Ergebnisses unter VAT 10 % (gemischte Rechnung, Record Sale, Handy). */
   acknowledgeVatShortfall?: boolean;
 }
 
@@ -588,9 +588,10 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       // MIXED-INVOICE P3 — dieselbe Rechnung der Zeile wie bisher, jetzt an EINER Stelle (auch die Maske rechnet damit).
       // v0.7.1 — NBR: MARGIN persistiert internalVat.
       const { rate, calc, persistedVat } = consignmentLineAmounts(salePrice, scheme, purchasePrice);
-      // MIXED-INVOICE P3 (E7) — nur auf der gemischten Rechnung: ein negatives LATAIF-Ergebnis unter VAT 10 % braucht
-      // die ausdrückliche Bestätigung je Zeile — sonst Abbruch, bevor irgendetwas geschrieben ist.
-      if (params.mixed) {
+      // MIXED-INVOICE E7 (Owner-Entscheidung A) — für JEDEN Kommissionsverkauf (gemischte Rechnung, „Record Sale", Handy):
+      // ein negatives LATAIF-Ergebnis unter VAT 10 % braucht die ausdrückliche Bestätigung je Zeile — sonst Abbruch, bevor
+      // irgendetwas geschrieben ist. Die Rechnung selbst (Provision vom Brutto, VAT trägt LATAIF) bleibt unverändert.
+      {
         const ergebnis = consignmentVatShortfall(econ, scheme, persistedVat);
         if (ergebnis !== null && !acknowledgeVatShortfall) {
           throw new Error(

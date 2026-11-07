@@ -49,8 +49,8 @@ export interface ConsignmentSaleItemInput {
   /** CONSIGNOR-PURCHASE-VAT — die Steuer des Einkaufs beim Einlieferer, GETRENNT von der Rechnung: ohne VAT (Vorgabe,
    *  nicht steuerpflichtiger Einlieferer) oder VAT 10 % (steuerpflichtige Lieferung mit gültiger Steuerrechnung). */
   consignorTaxScheme?: ConsignorPurchaseTaxScheme;
-  /** MIXED-INVOICE P3 (E7) — wirkt NUR auf der gemischten Rechnung: Bestätigung des negativen LATAIF-Ergebnisses unter
-   *  VAT 10 %. „Record Sale" fragt danach (noch) nicht — das wäre eine eigene Freigabe (Plan §5.4). */
+  /** MIXED-INVOICE E7 (Owner-Entscheidung A) — Bestätigung des negativen LATAIF-Ergebnisses unter VAT 10 %: gilt für die
+   *  gemischte Rechnung, „Record Sale" und den Handy-Verkauf gleich; ohne sie bucht das Haus nichts (VAT_SHORTFALL_UNCONFIRMED). */
   acknowledgeVatShortfall?: boolean;
 }
 
@@ -113,6 +113,8 @@ export function consignmentSalesBody(i: ConsignmentMultiSaleInput, revisions: Re
       salePrice: it.salePrice, acknowledgeShortfall: it.acknowledgeShortfall,
       ...(it.taxScheme ? { taxScheme: it.taxScheme } : {}),
       ...(it.consignorTaxScheme ? { consignorTaxScheme: it.consignorTaxScheme } : {}),
+      // MIXED-INVOICE E7 (Owner A) — die Bestätigung reist an beiden Rechnern gleich mit.
+      ...(it.acknowledgeVatShortfall === true ? { acknowledgeVatShortfall: true } : {}),
     })),
     buyerId: i.buyerId,
     specialMark: i.specialMark,

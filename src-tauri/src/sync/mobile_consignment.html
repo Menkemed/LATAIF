@@ -217,6 +217,14 @@
           <span>I confirm — record this shortfall as Consignor Loss</span>
         </label>
       </div>
+      <!-- MIXED-INVOICE E7 (Owner A) — VAT 10 % macht das LATAIF-Ergebnis negativ: ebenfalls nur mit ausdruecklichem Ja. -->
+      <div id="cnVatShortfallMsg" class="hint hidden"></div>
+      <div id="cnVatShortfallAckRow" class="hidden">
+        <label style="display:flex; align-items:center; gap:10px; text-transform:none; letter-spacing:0; font-size:13px; color:#EAEAEA; margin-top:10px;">
+          <input id="cnVatShortfallAck" type="checkbox" style="width:auto;" />
+          <span>I confirm the negative LATAIF result</span>
+        </label>
+      </div>
     </div>
     <button id="cnSaleBtn" class="secondary">Record sale</button>
 

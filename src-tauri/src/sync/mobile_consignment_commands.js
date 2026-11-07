@@ -219,6 +219,9 @@
     if (CONSIGNOR_VAT.indexOf(einkaufVat) < 0) return { ok: false, code: 'CONSIGNOR_VAT_INVALID' };
     body.consignorTaxScheme = einkaufVat;
     if (options.acknowledgeShortfall) body.acknowledgeShortfall = true;
+    // MIXED-INVOICE E7 (Owner A) — dasselbe ausdrueckliche Ja wie am Rechner: macht VAT 10 % das LATAIF-Ergebnis negativ,
+    // fragt der Primary (`VAT_SHORTFALL_UNCONFIRMED`); erst danach reist die Bestaetigung mit. Gerechnet wird hier nichts.
+    if (options.acknowledgeVatShortfall) body.acknowledgeVatShortfall = true;
     return { ok: true, body: body };
   }
 

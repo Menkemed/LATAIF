@@ -108,7 +108,7 @@ const num = (v: unknown, what: string): number => {
  * abgewiesen, statt still ignoriert zu werden — sonst hinge die Sicherheit dieser Grenze daran,
  * dass jemand an jede neue Option gedacht hat.
  */
-export function parseInvoicePayload(raw: unknown): {
+export function parseInvoicePayload(raw: unknown, opts: { allowNoLines?: boolean } = {}): {
   customerId: string; lines: RemoteLine[]; notes?: string; issuedDate?: string; staffId?: string; specialMark: boolean;
 } {
   if (!isPlain(raw)) throw new InvoicePayloadError('payload must be an object');
@@ -118,7 +118,9 @@ export function parseInvoicePayload(raw: unknown): {
   }
   const customerId = raw.customerId;
   if (typeof customerId !== 'string' || !customerId.trim()) throw new InvoicePayloadError('customerId is required');
-  if (!Array.isArray(raw.lines) || raw.lines.length === 0) throw new InvoicePayloadError('at least one line is required');
+  // MIXED-INVOICE P4 — die Korrektur einer Rechnung mit Kommissionszeilen darf alle EIGENEN Zeilen entfernen (die
+  // Kommissionszeilen stehen dann im eigenen Teil; eine leere Rechnung verhindert das Haus).
+  if (!Array.isArray(raw.lines) || (raw.lines.length === 0 && !opts.allowNoLines)) throw new InvoicePayloadError('at least one line is required');
 
   const lines: RemoteLine[] = raw.lines.map((l, i) => {
     if (!isPlain(l)) throw new InvoicePayloadError(`line ${i + 1} must be an object`);

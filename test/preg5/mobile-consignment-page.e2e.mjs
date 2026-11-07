@@ -816,6 +816,61 @@ try {
   k = await kaestchen();
   ok(!k.sichtbar && !k.an, '§4 nach dem gebuchten Verkauf ist die Frage wieder weg');
 
+  // ── §4b MIXED-INVOICE E7 (Owner A) — VAT 10 % macht das LATAIF-Ergebnis negativ: erst das Nein des Primary, dann das Ja ──
+  let e7Versuche = 0;
+  antwortGeber = (u, body) => {
+    const op = body && body.op;
+    if (op === 'consignments.list') {
+      return { status: 200, body: { ok: true, value: { items: [{ id: 'con-1', consignmentNumber: 'CON-2026-0007', agreedPrice: 560, status: 'active' }] } } };
+    }
+    if (op === 'consignments.get') return { status: 200, body: { ok: true, value: KOMMISSION(8) } };
+    if (op === 'products.get') return { status: 200, body: { ok: true, value: ARTIKEL } };
+    if (op === 'customers.list') return { status: 200, body: { ok: true, value: { items: [{ id: 'cust-9', firstName: 'Sara', lastName: 'Ahmed' }] } } };
+    if (op === 'consignments.record_sale') {
+      e7Versuche += 1;
+      if (!body.payload.acknowledgeVatShortfall) {
+        return { status: 409, body: { ok: false, error: 'VAT_SHORTFALL_UNCONFIRMED', message: 'CON-2026-0007: with VAT 10 % the LATAIF result is -45.455 BHD.' } };
+      }
+      return { status: 200, body: { ok: true, value: {} } };
+    }
+    return { status: 200, body: { ok: true, value: { items: [] } } };
+  };
+  const vorE7 = gesehen.filter((g) => g.body?.op === 'consignments.record_sale').length;
+  await c.ev(`
+    document.getElementById('cnBuyerSearchBtn').click();
+    await new Promise((r) => setTimeout(r, 400));
+    document.querySelector('#cnBuyerResults button').click();
+    const p = document.getElementById('cnSalePrice'); p.value = '1050'; p.dispatchEvent(new Event('input', { bubbles: true }));
+    const t = document.getElementById('cnSaleTaxScheme'); t.value = 'VAT_10'; t.dispatchEvent(new Event('change', { bubbles: true }));
+    document.getElementById('cnSaleConsignorVat').value = 'ZERO';
+    document.getElementById('cnSaleBtn').click();
+    await new Promise((r) => setTimeout(r, 800));
+    return 1;`);
+  const e7Box = () => c.ev(`return {
+    sichtbar: !document.getElementById('cnVatShortfallAckRow').classList.contains('hidden'),
+    an: document.getElementById('cnVatShortfallAck').checked,
+    hinweis: document.getElementById('cnVatShortfallMsg').textContent };`);
+  let e7 = await e7Box();
+  const e7Erst = gesehen.filter((g) => g.body?.op === 'consignments.record_sale').slice(vorE7);
+  ok(e7.sichtbar && !e7.an && /LATAIF result is -45\.455/.test(e7.hinweis) && e7Erst.length === 1 && e7Erst[0].body.payload.acknowledgeVatShortfall === undefined
+    && e7Erst[0].body.payload.taxScheme === 'VAT_10',
+    `§4b E7: das Nein kommt vom PRIMARY, der erste Versuch ohne Bestätigung, das Kästchen steht LEER da (${S(e7)})`);
+  await c.ev("document.getElementById('cnSaleBtn').click(); await new Promise((r) => setTimeout(r, 600)); return 1;");
+  ok(gesehen.filter((g) => g.body?.op === 'consignments.record_sale').length === vorE7 + 1 && /negative LATAIF result/.test(await c.ev("return document.getElementById('cnActionMsg').textContent;")),
+    '§4b E7: ohne Häkchen geht beim zweiten Tippen NICHTS hinaus, die Maske sagt, was fehlt');
+  // Steuerart geändert → anderer Verkauf: das Ja ist weg.
+  await c.ev("document.getElementById('cnVatShortfallAck').click(); return 1;");
+  await c.ev("const t = document.getElementById('cnSaleTaxScheme'); t.value = 'MARGIN'; t.dispatchEvent(new Event('change', { bubbles: true })); return 1;");
+  e7 = await e7Box();
+  ok(!e7.sichtbar && !e7.an, `§4b E7: STEUERART geändert → Frage und Häkchen zurückgesetzt (${S(e7)})`);
+  await c.ev("const t = document.getElementById('cnSaleTaxScheme'); t.value = 'VAT_10'; t.dispatchEvent(new Event('change', { bubbles: true })); document.getElementById('cnSaleBtn').click(); await new Promise((r) => setTimeout(r, 800)); return 1;");
+  await c.ev("document.getElementById('cnVatShortfallAck').click(); document.getElementById('cnSaleBtn').click(); await new Promise((r) => setTimeout(r, 900)); return 1;");
+  const e7Alle = gesehen.filter((g) => g.body?.op === 'consignments.record_sale').slice(vorE7);
+  const e7Ja = e7Alle[e7Alle.length - 1];
+  ok(e7Ja && e7Ja.body.payload.acknowledgeVatShortfall === true && e7Alle.slice(0, -1).every((g) => g.body.commandId !== e7Ja.body.commandId && g.body.payload.acknowledgeVatShortfall === undefined),
+    `§4b E7: mit Häkchen geht der Verkauf bestätigt hinaus, unter eigener Kennung (${e7Alle.length} Versuche)`);
+  ok(!(await e7Box()).sichtbar && e7Versuche === e7Alle.length, '§4b E7: nach dem gebuchten Verkauf ist die Frage wieder weg');
+
   // ── §5 Verlorene Antwort: der Vorgang bleibt offen und wird unter DERSELBEN Kennung geklaert ─
   antwortGeber = (u, body) => {
     const op = body && body.op;
