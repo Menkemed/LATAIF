@@ -105,7 +105,7 @@ const isRev = (v: unknown): v is number => typeof v === 'number' && Number.isInt
 function parseConsignmentCorrection(raw: unknown): MixedInvoiceCorrection {
   if (!isPlain(raw)) throw new InvoicePayloadError('consignment must be an object');
   for (const k of Object.keys(raw)) {
-    if (!['items', 'consignmentRevisions', 'purchaseRevisions', 'purchaseTaxSchemes', 'consignorTaxSchemes', 'consignorOverpay'].includes(k)) {
+    if (!['items', 'consignmentRevisions', 'purchaseRevisions', 'purchaseTaxSchemes', 'consignorTaxSchemes', 'consignorOverpay', 'lossOverpay'].includes(k)) {
       throw new InvoicePayloadError(`unknown field in consignment: ${k}`);
     }
   }
@@ -152,6 +152,8 @@ function parseConsignmentCorrection(raw: unknown): MixedInvoiceCorrection {
   if (Object.keys(pts).length) out.purchaseTaxSchemes = pts;
   if (Object.keys(cts).length) out.consignorTaxSchemes = cts;
   if (Object.keys(ov).length) out.consignorOverpay = ov;
+  const lo = map<'credit' | 'refund'>(raw.lossOverpay, 'lossOverpay', (x) => x === 'credit' || x === 'refund', "'credit' or 'refund'");
+  if (Object.keys(lo).length) out.lossOverpay = lo;
   return out;
 }
 

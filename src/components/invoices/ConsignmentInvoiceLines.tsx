@@ -20,6 +20,7 @@ import { useConsignmentStore } from '@/stores/consignmentStore';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useProductStore } from '@/stores/productStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
+import { useExpenseStore } from '@/stores/expenseStore';
 import { commissionModelLabel, computeConsignmentSale, type ConsignmentSaleResult } from '@/core/consignment/economics';
 import {
   consignmentLineAmounts, consignmentVatShortfall, consignorPurchaseAmount, type ConsignorOverpayChoice, type SaleScheme,
@@ -155,6 +156,10 @@ export interface CorrectionPlan {
   removed: Consignment[];
   /** Die gesehenen Fassungen der Einkäufe dieses Verkaufs. */
   purchaseRevisions: Record<string, number>;
+  /** E5/E9 — Kommissionen, deren schon bezahlte Verlust-Ausgabe den neuen Verlust übersteigt (Pflichtwahl). */
+  lossOverpays: Array<{ consignmentId: string; number: string; consignorName: string; paid: number; newLoss: number; overpay: number }>;
+  /** Kommissionen mit schon (teil)bezahlter Verlust-Ausgabe (für die Nachfrage, wenn das Haus eine Wahl verlangt). */
+  paidLosses: string[];
 }
 
 const r3 = (n: number): number => Math.round(n * 1000) / 1000;
@@ -169,6 +174,7 @@ export function useConsignmentCorrectionPlan(
 ): CorrectionPlan {
   const { purchases } = usePurchaseStore();
   const { customers } = useCustomerStore();
+  const { expenses } = useExpenseStore();
   return useMemo(() => {
     const name = (id: string): string => { const k = customers.find((x) => x.id === id); return k ? `${k.firstName} ${k.lastName}`.trim() : '—'; };
     const ofCon = (cid: string): Purchase | undefined => purchases
@@ -229,19 +235,35 @@ export function useConsignmentCorrectionPlan(
       plan.owedBack = r3(zurueck + minderung);
       if (purchaseVat[plan.id]) plan.scheme = purchaseVat[plan.id];
     }
+    // E5/E9 — die Verlust-Ausgaben jeder gebundenen Kommission: bezahlt, und was nach der Korrektur noch zusteht.
+    const lossOverpays: CorrectionPlan['lossOverpays'] = [];
+    const paidLosses: string[] = [];
+    for (const c of bound) {
+      const ls = expenses.filter((e) => e.category === 'ConsignorLoss' && e.relatedEntityId === c.id && e.status !== 'CANCELLED');
+      const paid = r3(ls.reduce((x, e) => x + (Number(e.paidAmount) || 0), 0));
+      if (paid <= 0.0005) continue;
+      paidLosses.push(c.id);
+      const r = rowById.get(c.id);
+      const alt = r3(ls.reduce((x, e) => x + (Number(e.amount) || 0), 0));
+      const newLoss = !r ? 0 : r.changed ? r3(r.econ.loss) : alt;
+      if (paid > newLoss + 0.0005) {
+        lossOverpays.push({ consignmentId: c.id, number: c.consignmentNumber, consignorName: name(c.consignorId), paid, newLoss, overpay: r3(paid - newLoss) });
+      }
+    }
     return {
+      lossOverpays, paidLosses,
       purchases: [...plans.values()],
       newPurchases: [...neu.values()],
       removed: bound.filter((c) => !rowById.has(c.id)),
       purchaseRevisions: Object.fromEntries([...plans.values()].map((p) => [p.id, p.revision])),
     };
-  }, [bound, rows, purchases, customers, purchaseVat]);
+  }, [bound, rows, purchases, customers, purchaseVat, expenses]);
 }
 
 /** Die Prüfung der Kommissionsartikel vor dem Speichern (das Haus prüft dasselbe noch einmal). */
 export function consignmentRowsIssue(
   rows: readonly ConsignmentRow[], buyerId: string, consignorVat: Readonly<Record<string, ConsignorPurchaseTaxScheme>>,
-  edit?: { plan: CorrectionPlan; overpay: Readonly<Record<string, ConsignorOverpayChoice>>; invoiceId: string },
+  edit?: { plan: CorrectionPlan; overpay: Readonly<Record<string, ConsignorOverpayChoice>>; invoiceId: string; lossOverpay?: Readonly<Record<string, ConsignorOverpayChoice>> },
 ): string | null {
   for (const r of rows) {
     if (!r.con) return 'One of the consignment items is no longer available — remove it and add it again';
@@ -259,6 +281,8 @@ export function consignmentRowsIssue(
     if (ohne) return `${ohne.name}: choose the VAT of the consignor's new purchase — No VAT or VAT 10 %`;
     const offen = edit.plan.purchases.find((p) => p.owedBack > 0.0005 && !edit.overpay[p.id]);
     if (offen) return `${offen.consignorName}: he was already paid more than he is now owed — choose consignor credit or reclaim (purchase ${offen.number})`;
+    const verlust = edit.plan.lossOverpays.find((l) => !edit.lossOverpay?.[l.consignmentId]);
+    if (verlust) return `${verlust.number}: the consignor's loss was already paid — choose consignor credit or reclaim`;
     return null;
   }
   const ohne = consignorGroupsOf(rows).find((g) => !consignorVat[g.consignorId]);
@@ -274,6 +298,9 @@ export interface ConsignmentEditProps {
   onPurchaseVat: (purchaseId: string, v: 'ZERO' | 'VAT_10') => void;
   overpay: Record<string, ConsignorOverpayChoice>;
   onOverpay: (purchaseId: string, v: ConsignorOverpayChoice) => void;
+  /** E5/E9 — die Wahl je Kommission für eine überzahlte Verlust-Ausgabe. */
+  lossOverpay: Record<string, ConsignorOverpayChoice>;
+  onLossOverpay: (consignmentId: string, v: ConsignorOverpayChoice) => void;
   /** Eine entfernte Kommission bleibt doch auf der Rechnung (Preis und Steuerart wie gespeichert). */
   onKeep: (c: Consignment) => void;
   /** Das Haus hat eine Wahl verlangt, die die Schätzung nicht sah: für jeden bezahlten Einkauf fragen. */
@@ -451,7 +478,7 @@ export function ConsignmentInvoiceLines({ drafts, rows, onDrafts, consignorVat, 
             </p>
           </div>
         )}
-        {edit && (edit.plan.purchases.length > 0 || edit.plan.newPurchases.length > 0) && (
+        {edit && (edit.plan.purchases.length > 0 || edit.plan.newPurchases.length > 0 || edit.plan.lossOverpays.length > 0) && (
           <div style={{ marginTop: 16 }} data-mixed-consignor-settlement>
             <span className="text-overline" style={{ display: 'block', marginBottom: 8 }}>CONSIGNOR SETTLEMENT</span>
             <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
@@ -492,6 +519,24 @@ export function ConsignmentInvoiceLines({ drafts, rows, onDrafts, consignorVat, 
                   </div>
                 );
               })}
+              {/* E5/E9 (Owner) — eine schon bezahlte Verlust-Ausgabe übersteigt den neuen Verlust: Guthaben oder Rückforderung. */}
+              {[...edit.plan.lossOverpays, ...(edit.askAllPaid
+                ? edit.plan.paidLosses.filter((id) => !edit.plan.lossOverpays.some((l) => l.consignmentId === id))
+                  .map((id) => ({ consignmentId: id, number: consignments.find((c) => c.id === id)?.consignmentNumber ?? id, consignorName: '', paid: 0, newLoss: 0, overpay: 0 }))
+                : [])].map((l) => (
+                <div key={`loss-${l.consignmentId}`} data-mixed-loss-overpay={l.consignmentId}
+                  style={{ padding: '8px 10px', borderRadius: 6, background: 'rgba(37,99,235,0.05)', border: '1px solid rgba(37,99,235,0.25)', fontSize: 12, color: '#1E3A8A' }}>
+                  <div style={{ marginBottom: 6 }}>
+                    <span className="font-mono">{l.number}</span> · the consignor's guarantee shortfall was already paid
+                    {l.overpay > 0.0005 ? <> (<Bhd v={l.paid}/> BHD) — <b><Bhd v={l.overpay}/> BHD</b> more than he is now owed</> : ' — more than he is now owed'}.
+                    The payment stays. Choose:
+                  </div>
+                  <div style={{ display: 'flex', gap: 6 }}>
+                    <button type="button" data-mixed-loss-overpay-choice={`${l.consignmentId}:credit`} onClick={() => edit.onLossOverpay(l.consignmentId, 'credit')} style={knopf(edit.lossOverpay[l.consignmentId] === 'credit')}>Consignor credit (offset later)</button>
+                    <button type="button" data-mixed-loss-overpay-choice={`${l.consignmentId}:refund`} onClick={() => edit.onLossOverpay(l.consignmentId, 'refund')} style={knopf(edit.lossOverpay[l.consignmentId] === 'refund')}>Reclaim from consignor</button>
+                  </div>
+                </div>
+              ))}
               {edit.plan.newPurchases.map((g) => (
                 <div key={g.consignorId} data-mixed-consignor={g.consignorId}
                   style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, padding: '10px 12px', border: '1px solid #E5E9EE', borderRadius: 8 }}>

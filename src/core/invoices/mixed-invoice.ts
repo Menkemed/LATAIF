@@ -111,6 +111,8 @@ export interface MixedInvoiceCorrection {
   consignorTaxSchemes?: Record<string, 'ZERO' | 'VAT_10'>;
   /** E2 — je Einkauf (purchaseId): Guthaben oder Rückforderung, wenn dem bezahlten Einlieferer weniger zusteht. */
   consignorOverpay?: Record<string, ConsignorOverpayChoice>;
+  /** E5/E9 (Owner) — je Kommission (consignmentId): ihre schon bezahlte Verlust-Ausgabe übersteigt den neuen Verlust → Guthaben oder Rückforderung. */
+  lossOverpay?: Record<string, ConsignorOverpayChoice>;
 }
 
 /** Was der Einkauf beim Einlieferer für einen Verkauf trägt: bei Unterdeckung der Verkaufspreis (Rest = Verlust), sonst die Auszahlung. */
@@ -131,6 +133,7 @@ export function mixedCorrectionBody(c: MixedInvoiceCorrection): Record<string, u
     ...(c.purchaseTaxSchemes && Object.keys(c.purchaseTaxSchemes).length ? { purchaseTaxSchemes: { ...c.purchaseTaxSchemes } } : {}),
     ...(c.consignorTaxSchemes && Object.keys(c.consignorTaxSchemes).length ? { consignorTaxSchemes: { ...c.consignorTaxSchemes } } : {}),
     ...(c.consignorOverpay && Object.keys(c.consignorOverpay).length ? { consignorOverpay: { ...c.consignorOverpay } } : {}),
+    ...(c.lossOverpay && Object.keys(c.lossOverpay).length ? { lossOverpay: { ...c.lossOverpay } } : {}),
   };
 }
 

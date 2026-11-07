@@ -515,7 +515,8 @@ try {
   const K3 = await kommission('p3-con-b', 'Calatrava P4', { model: 'consignor_fixed' });
   const K4 = await kommission('p3-con-a', 'Twenty-4 P4', { model: 'percent', commissionRate: 20 });
   const K5 = await kommission('p3-con-a', 'Ellipse P4', { model: 'percent', commissionRate: 5 });
-  ok([K1, K2, K3, K4, K5].every((k) => k && kon(k).status === 'active'), 'A fünf aktive Kommissionen, zwei Einlieferer');
+  const K6 = await kommission('p3-con-b', 'Gondolo P4', { model: 'consignor_fixed' });
+  ok([K1, K2, K3, K4, K5, K6].every((k) => k && kon(k).status === 'active'), 'A sechs aktive Kommissionen, zwei Einlieferer');
   // Die gemischte Rechnung (P3, über den Fernauftrag — die Maske des Anlegens hat P3 bewiesen).
   const los = (pid) => dbQ(BIZ_DB, 'SELECT id FROM stock_lots WHERE product_id = ? AND qty_remaining > 0 ORDER BY acquired_at, id LIMIT 1', [pid])[0]?.id || null;
   const anlage = await sende(client, 'consignments.record_sale', {
@@ -639,6 +640,45 @@ try {
     ok(Number(k5z.v) === 100 && Number(k5z.g) === 1100 && Number(kon(K5).commission_amount) === 55, `D Rechnung unverändert gerechnet: VAT 100, 1.100, Provision 55 (${S(k5z)})`);
   }
 
+  // ── D2 Primary „Edit Invoice" (E5/E9 Owner): Verlust-Ausgabe schon bezahlt, Preis höher ⇒ Pflichtwahl, Guthaben ──────────
+  {
+    await gehFrisch(primary, `/invoices/${INV}/edit`);
+    const r = [];
+    if (!(await warteBis(primary, "document.querySelectorAll('[data-mixed-con-kept=\"1\"]').length === 2", 45000))) r.push('KEINE-KOMMISSIONSZEILEN');
+    r.push(await kommissionsZeile(primary, K6, 900, 'ZERO'));
+    if (!(await warteBis(primary, `document.querySelector('[data-mixed-con-ack=${S(K6)}]')`, 5000))) r.push('KEIN-BODEN-HAKEN');
+    r.push(await mausKlick(primary, `[data-mixed-con-ack=${S(K6)}]`)); await sleep(200);
+    r.push(await mausKlick(primary, '[data-mixed-consignor-vat="p3-con-b:ZERO"]')); await sleep(200);
+    r.push(await tippe(primary, GRUND, 'Gondolo nachgetragen (unter dem Boden)'));
+    r.push(await mausKlick(primary, '[data-invoice-save]'));
+    if (!(await warteBis(primary, "!document.querySelector('[data-invoice-save]')", 45000))) r.push('NICHT-GESPEICHERT:' + (await maskenFehler(primary)));
+    await spuelen(primary);
+    const verlust = dbQ(BIZ_DB, "SELECT id, ROUND(amount,3) AS a, ROUND(paid_amount,3) AS p, status, revision FROM expenses WHERE category = 'ConsignorLoss' AND related_entity_id = ? AND status != 'CANCELLED'", [K6])[0] || {};
+    ok(alleOk(r) === 'OK' && kon(K6).status === 'sold' && Number(verlust.a) === 100 && Number(verlust.p) === 0,
+      `D2 Primary: K6 für 900 (Boden 1.000) hinzugefügt, Verlust-Ausgabe 100 unbezahlt (${alleOk(r)} ${S(verlust)})`);
+    const pay = await sende(client, 'expenses.record_payment', { expenseId: verlust.id, expectedRevision: Number(verlust.revision ?? 0), amount: 100, method: 'cash' });
+    await spuelen(primary);
+    ok(pay.body?.ok === true && Number(zeile('expenses', verlust.id).paid_amount) === 100, `D2 der Verlust ist an den Einlieferer ausgezahlt (100) (${S(pay.body?.error || 'ok')})`);
+    await gehFrisch(primary, `/invoices/${INV}/edit`);
+    const r2 = [];
+    if (!(await warteBis(primary, "document.querySelectorAll('[data-mixed-con-kept=\"1\"]').length === 3", 45000))) r2.push('KEINE-KOMMISSIONSZEILEN');
+    r2.push(await tippe(primary, `[data-mixed-con-price=${S(K6)}]`, '1000')); await sleep(400);
+    const frage = await warteBis(primary, `/100\\.000/.test(document.querySelector('[data-mixed-loss-overpay=${S(K6)}]')?.innerText || '')`, 5000);
+    ok(frage, 'D2 Primary: der bezahlte Verlust (100) übersteigt den neuen (0) — die Maske fragt: Guthaben oder Rückforderung');
+    r2.push(await tippe(primary, GRUND, 'Gondolo doch zum vereinbarten Preis'));
+    r2.push(await mausKlick(primary, '[data-invoice-save]')); await sleep(800);
+    const nein = await maskenFehler(primary);
+    ok(/loss was already paid — choose consignor credit or reclaim/.test(nein) && Number(zeile('expenses', verlust.id).amount) === 100, `D2 ohne Wahl: Nein in der Maske, nichts gebucht (${nein.slice(0, 140)})`);
+    r2.push(await mausKlick(primary, `[data-mixed-loss-overpay-choice="${K6}:credit"]`)); await sleep(200);
+    r2.push(await mausKlick(primary, '[data-invoice-save]'));
+    if (!(await warteBis(primary, "!document.querySelector('[data-invoice-save]')", 45000))) r2.push('NICHT-GESPEICHERT:' + (await maskenFehler(primary)));
+    await spuelen(primary);
+    const kredit = dbQ(BIZ_DB, "SELECT ROUND(amount,3) AS a, status FROM supplier_credits WHERE source_purchase_id IS NULL AND source_return_id IS NULL ORDER BY created_at DESC LIMIT 1")[0] || {};
+    const zahlung = dbQ(BIZ_DB, 'SELECT ROUND(SUM(amount),3) AS a FROM expense_payments WHERE expense_id = ?', [verlust.id])[0]?.a;
+    ok(alleOk(r2) === 'OK' && zeile('expenses', verlust.id).status === 'CANCELLED' && Number(kredit.a) === 100 && kredit.status === 'OPEN' && Number(zahlung) === 100,
+      `D2 gespeichert: Verlust storniert, Auszahlung 100 bleibt, 100 als verrechenbares Lieferanten-Guthaben (${alleOk(r2)} ${S(kredit)})`);
+  }
+
   // ── E Hauptbuch: jede Buchung ausgeglichen, Lager = Lose, AP = offene Einkäufe, Lieferanten-Guthaben = offene ─────
   {
     await spuelen(primary);
@@ -648,14 +688,14 @@ try {
     const lose = zahl("SELECT COALESCE(ROUND(SUM(qty_remaining * unit_cost), 3), 0) AS n FROM stock_lots WHERE status = 'ACTIVE'");
     ok(Math.abs(konto('INVENTORY') - lose) < 0.005, `LEDGER INVENTORY ${konto('INVENTORY')} = Σ Lose ${lose}`);
     const ap = zahl(`SELECT ROUND(COALESCE((SELECT SUM(remaining_amount) FROM purchases WHERE status NOT IN ('CANCELLED','DRAFT')), 0)
-      + COALESCE((SELECT SUM(amount - paid_amount) FROM expenses WHERE status != 'CANCELLED' AND supplier_id IS NOT NULL), 0), 3) AS n`);
+      + COALESCE((SELECT SUM(MAX(0, amount - paid_amount)) FROM expenses WHERE status != 'CANCELLED' AND supplier_id IS NOT NULL), 0), 3) AS n`);
     ok(Math.abs(-konto('ACCOUNTS_PAYABLE') - ap) < 0.005, `LEDGER AP ${-konto('ACCOUNTS_PAYABLE')} = offene Einkäufe/Ausgaben ${ap}`);
     const sc = zahl("SELECT COALESCE(ROUND(SUM(amount - used_amount), 3), 0) AS n FROM supplier_credits WHERE status IN ('OPEN','REFUND_DUE')");
     ok(Math.abs(konto('SUPPLIER_CREDIT') - sc) < 0.005, `LEDGER SUPPLIER_CREDIT ${konto('SUPPLIER_CREDIT')} = offene Guthaben/Rückforderungen ${sc}`);
     const ar = zahl("SELECT COALESCE(ROUND(SUM(gross_amount - paid_amount), 3), 0) AS n FROM invoices WHERE status != 'CANCELLED'");
     ok(Math.abs(konto('ACCOUNTS_RECEIVABLE') - ar) < 0.005, `LEDGER AR ${konto('ACCOUNTS_RECEIVABLE')} = offene Rechnungen ${ar}`);
     const audit = dbQ(BIZ_DB, "SELECT COUNT(*) AS n FROM audit_log WHERE field_name = 'mixed_invoice_correction' AND entity_id = ?", [INV])[0]?.n;
-    ok(Number(audit) === 2, `AUDIT zwei Korrekturen dieser Rechnung protokolliert (${audit})`);
+    ok(Number(audit) === 4, `AUDIT vier Korrekturen dieser Rechnung protokolliert (${audit})`);
     ok(!existsSync(join(CLIENT_DATA_DIR, 'lataif.db')), 'SAFETY PC2 hat keine eigene Geschäftsdatenbank angelegt');
     ok((await treffer(client)).length === 0, 'SAFETY PC2 hat nie eine lokale Datenbank angefragt');
     const fremdNachher = foreignProcesses('lataif.exe').map((p) => p.pid).sort();

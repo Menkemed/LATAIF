@@ -2086,13 +2086,14 @@ export function postOrderCostOverpay(
   supplierId: string,
   amount: number,
   occurredAt: string,
-  meta: { expenseId: string; orderId: string; orderLineId: string; choice: 'credit' | 'refund' },
+  // MIXED-INVOICE P4 — dieselbe Buchung für die Überzahlung einer Verlust-Ausgabe aus einer Kommission (consignmentId statt Order).
+  meta: { expenseId: string; orderId?: string; orderLineId?: string; consignmentId?: string; choice: 'credit' | 'refund' },
 ): PostingResult {
   const amt = ROUND(amount);
   if (amt <= 0) {
     throw new Error(`postOrderCostOverpay: amount must be > 0 (got ${amount})`);
   }
-  const metadata = { ...meta, kind: 'order_cost_overpay' };
+  const metadata = { ...meta, kind: meta.consignmentId ? 'consignor_loss_overpay' : 'order_cost_overpay' };
   return postEntries(
     [
       {

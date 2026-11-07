@@ -93,6 +93,17 @@ export function planOrderCostExpense(
   const line = query('SELECT expense_id FROM order_lines WHERE id = ?', [lineId])[0];
   const expenseId = str(line?.expense_id);
   if (!expenseId) return null;
+  return planCostExpense(expenseId, newAmountF, choice, branchId, nowIso);
+}
+
+/**
+ * Der Kern — für JEDE Ausgabe mit Lieferantenschuld (Order-Kostenzeile; MIXED-INVOICE P4: die Verlust-Ausgabe eines
+ * Kommissionsverkaufs, Owner-Entscheidung „dieselbe Logik wie die Custom-Order-Kosten"): neuer Betrag (0 = weg), was beglichen
+ * ist, was offen bleibt, die Überzahlung danach (Pflichtwahl Guthaben/Rückforderung) und alle Neins — VOR jedem Schreiben.
+ */
+export function planCostExpense(
+  expenseId: string, newAmountF: number, choice: CostOverpayChoice | undefined, branchId: string, nowIso: string,
+): OrderCostExpensePlan | null {
   const e = query('SELECT id, amount, paid_amount, status, supplier_id, expense_date FROM expenses WHERE id = ?', [expenseId])[0];
   if (!e || str(e.status) === 'CANCELLED') return null;
   if (choice !== undefined && !COST_OVERPAY_CHOICES.includes(choice)) {
@@ -144,18 +155,50 @@ export function applyOrderCostExpense(
   plan: OrderCostExpensePlan, ctx: { branchId: string; userId: string; now: string },
   meta: { orderId: string; orderLineId: string },
 ): OrderCostExpenseApplied {
+  const ord = query('SELECT order_number FROM orders WHERE id = ?', [meta.orderId])[0];
+  return applyCostExpense(plan, ctx, {
+    link: { orderId: meta.orderId, orderLineId: meta.orderLineId },
+    unlinkOrderLine: meta.orderLineId,
+    noteFor: (choice, expenseNumber) => `${choice === 'credit' ? 'Order cost overpayment' : 'Repayment claim — order cost'} ${str(ord?.order_number)} (${expenseNumber})`,
+    auditField: 'order_cost_overpay',
+    reason: 'order-cost-removed',
+  });
+}
+
+/** Wie der Kern eine Ausgabe verknüpft und protokolliert — je Aufrufer (Order-Kostenzeile, Kommission). */
+export interface CostExpenseApplyMeta {
+  /** Steht an der Überzahlungsbuchung und im Protokoll (z. B. orderId/orderLineId oder consignmentId). */
+  link: { orderId?: string; orderLineId?: string; consignmentId?: string };
+  /** Nur die Order: beim Löschen die Kostenzeile von ihrer Ausgabe lösen. */
+  unlinkOrderLine?: string;
+  noteFor: (choice: CostOverpayChoice, expenseNumber: string) => string;
+  auditField: string;
+  reason: string;
+  /** MIXED-INVOICE P4 (E11) — die Gegenbuchung der Ausgabe auf dem Tag ihres Originals (die Order bucht heute, wie bisher). */
+  mirrorOriginalDates?: boolean;
+  /** Der Tag, an dem die Überzahlung entsteht (Vorgabe: der Vorgang selbst). */
+  overpayAt?: string;
+}
+
+/** Der Kern der Ausführung — EINE Stelle für Order-Kosten und Verlust-Ausgaben einer Kommission. */
+export function applyCostExpense(
+  plan: OrderCostExpensePlan, ctx: { branchId: string; userId: string; now: string }, meta: CostExpenseApplyMeta,
+): OrderCostExpenseApplied {
   const db = getDatabase();
+  const gespiegelt = meta.mirrorOriginalDates ? { mirrorOriginalDates: true } : {};
   if (plan.newAmountF > 0) {
     if (plan.newAmountF !== plan.oldAmountF) {
-      updateExpenseInHouse(plan.expenseId, { amount: B(plan.newAmountF) }, ctx, undefined, { orderCostCorrection: true });
+      updateExpenseInHouse(plan.expenseId, { amount: B(plan.newAmountF) }, ctx, undefined, { orderCostCorrection: true, ...gespiegelt });
     }
   } else if (plan.settledF > 0) {
     // Löschen einer (teil-)bezahlten Zeile: die Schuld fällt weg (Storno), die Zahlungen bleiben als Beleg stehen.
     db.run(`UPDATE expenses SET status = 'CANCELLED' WHERE id = ?`, [plan.expenseId]);
-    if (hasLedgerEntries('EXPENSE', plan.expenseId)) reverseSource('EXPENSE', plan.expenseId, ctx.now);
-    trackUpdate('expenses', plan.expenseId, { status: 'CANCELLED', reason: 'order-cost-removed' });
-    db.run('UPDATE order_lines SET expense_id = NULL WHERE id = ?', [meta.orderLineId]);
-    trackUpdate('order_lines', meta.orderLineId, { expenseId: null });
+    if (hasLedgerEntries('EXPENSE', plan.expenseId)) reverseSource('EXPENSE', plan.expenseId, ctx.now, gespiegelt);
+    trackUpdate('expenses', plan.expenseId, { status: 'CANCELLED', reason: meta.reason });
+    if (meta.unlinkOrderLine) {
+      db.run('UPDATE order_lines SET expense_id = NULL WHERE id = ?', [meta.unlinkOrderLine]);
+      trackUpdate('order_lines', meta.unlinkOrderLine, { expenseId: null });
+    }
   }
   // (Löschen ohne Zahlung: das bisherige deleteOrderLine storniert und entfernt die Ausgabe.)
 
@@ -172,22 +215,21 @@ export function applyOrderCostExpense(
   const choice = plan.choice as CostOverpayChoice;
   const creditId = uuid();
   const status = choice === 'credit' ? 'OPEN' : ORDER_COST_CLAIM_OPEN;
-  const ord = query('SELECT order_number FROM orders WHERE id = ?', [meta.orderId])[0];
   const exp = query('SELECT expense_number FROM expenses WHERE id = ?', [plan.expenseId])[0];
-  const note = `${choice === 'credit' ? 'Order cost overpayment' : 'Repayment claim — order cost'} ${str(ord?.order_number)} (${str(exp?.expense_number)})`;
+  const note = meta.noteFor(choice, str(exp?.expense_number));
+  const at = meta.overpayAt ?? ctx.now;
   db.run(
     `INSERT INTO supplier_credits (id, branch_id, supplier_id, source_return_id, source_purchase_id,
        amount, used_amount, status, note, created_at, created_by)
      VALUES (?, ?, ?, NULL, NULL, ?, 0, ?, ?, ?, ?)`,
-    [creditId, ctx.branchId, plan.supplierId, B(plan.overpayF), status, note, ctx.now, ctx.userId || null],
+    [creditId, ctx.branchId, plan.supplierId, B(plan.overpayF), status, note, at, ctx.userId || null],
   );
   trackInsert('supplier_credits', creditId, { supplierId: plan.supplierId, amount: B(plan.overpayF), status });
-  postOrderCostOverpay(creditId, plan.supplierId, B(plan.overpayF), ctx.now,
-    { expenseId: plan.expenseId, orderId: meta.orderId, orderLineId: meta.orderLineId, choice });
+  postOrderCostOverpay(creditId, plan.supplierId, B(plan.overpayF), at, { expenseId: plan.expenseId, ...meta.link, choice });
   logAuditOrThrow({
-    module: 'Supplier', entityType: 'supplier_credits', entityId: creditId, action: 'CREATE', field: 'order_cost_overpay',
+    module: 'Supplier', entityType: 'supplier_credits', entityId: creditId, action: 'CREATE', field: meta.auditField,
     newValue: {
-      kind: choice, amount: B(plan.overpayF), expenseId: plan.expenseId, orderId: meta.orderId, orderLineId: meta.orderLineId,
+      kind: choice, amount: B(plan.overpayF), expenseId: plan.expenseId, ...meta.link,
       settled: B(plan.settledF), newCost: B(plan.newAmountF), replaced: plan.existing.map((c) => c.id),
     },
     actor: { userId: ctx.userId || undefined, branchId: ctx.branchId },

@@ -270,7 +270,7 @@ const invVon = (r: Ausgang): string => String(r.value.invoiceId ?? '');
 const korr = await import('../../src/core/invoices/mixed-invoice-correction.ts');
 const invLife = await import('../../src/core/bridge/invoice-lifecycle-commands.ts');
 const { editInvoiceOnPrimary } = await import('../../src/core/invoices/invoice-edit-house.ts');
-const { recordSupplierCreditRefundInHouse, recordPurchasePaymentInHouse, recordExpensePaymentInHouse } = await import('../../src/core/payables/payables-house.ts');
+const { recordSupplierCreditRefundInHouse, recordPurchasePaymentInHouse, recordExpensePaymentInHouse, applyOneCreditToPurchaseInHouse } = await import('../../src/core/payables/payables-house.ts');
 type Korr = import('../../src/core/invoices/mixed-invoice.ts').MixedCorrectionItem;
 type KorrIn = import('../../src/core/invoices/mixed-invoice-correction.ts').MixedInvoiceCorrectionInput;
 
@@ -309,7 +309,7 @@ interface KOpt {
   items?: (ist: Korr[]) => Korr[]; extra?: string[]; preis?: Record<string, number>; own?: 'none';
   customerId?: string; issuedAt?: string; reason?: string; confirmCustomerChange?: boolean; overpayChoice?: 'credit' | 'refund';
   purchaseTaxSchemes?: Record<string, 'ZERO' | 'VAT_10'>; consignorTaxSchemes?: Record<string, 'ZERO' | 'VAT_10'>;
-  consignorOverpay?: Record<string, 'credit' | 'refund'>; revs?: (r: ReturnType<typeof revisionen>) => ReturnType<typeof revisionen>;
+  consignorOverpay?: Record<string, 'credit' | 'refund'>; lossOverpay?: Record<string, 'credit' | 'refund'>; revs?: (r: ReturnType<typeof revisionen>) => ReturnType<typeof revisionen>;
 }
 function korrekturTeil(db: Db, inv: string, o: KOpt) {
   const ist = kommIst(db, inv);
@@ -320,6 +320,7 @@ function korrekturTeil(db: Db, inv: string, o: KOpt) {
     ...(o.purchaseTaxSchemes ? { purchaseTaxSchemes: o.purchaseTaxSchemes } : {}),
     ...(o.consignorTaxSchemes ? { consignorTaxSchemes: o.consignorTaxSchemes } : {}),
     ...(o.consignorOverpay ? { consignorOverpay: o.consignorOverpay } : {}),
+    ...(o.lossOverpay ? { lossOverpay: o.lossOverpay } : {}),
   };
 }
 const invRev = (db: Db, inv: string): number => n(db, 'SELECT revision FROM invoices WHERE id = ?', [inv]);
@@ -351,7 +352,13 @@ const korrWeg = (weg: 'primary' | 'pc2', w: Welt, inv: string, o: KOpt = {}): Pr
 /** Supplier-Credits im Hauptbuch == offene Guthaben; dazu der Abgleich aus P3. */
 function abgleich4(db: Db): string[] {
   // AR: offene Rechnungen abzüglich Gutschriften (Retouren), dazu die Umgliederung einer Kundenüberzahlung (P1c).
-  const out = abgleich(db).filter((x) => !x.startsWith('AR '));
+  // AP: offene Einkäufe + offene Ausgaben, je Ausgabe nie unter 0 (eine Überzahlung lebt als Lieferanten-Guthaben — wie im
+  // Gegenparteien-Abgleich des Hauses, `counterpartyAudit`: Zahlungen je Ausgabe auf ihren Betrag gedeckelt).
+  const out = abgleich(db).filter((x) => !x.startsWith('AR ') && !x.startsWith('AP '));
+  const apLedger = -n(db, "SELECT COALESCE(ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 3), 0) FROM ledger_entries WHERE account = 'ACCOUNTS_PAYABLE'");
+  const apDom = n(db, `SELECT ROUND(COALESCE((SELECT SUM(remaining_amount) FROM purchases WHERE status NOT IN ('CANCELLED','DRAFT')), 0)
+    + COALESCE((SELECT SUM(MAX(0, amount - paid_amount)) FROM expenses WHERE status != 'CANCELLED' AND supplier_id IS NOT NULL), 0), 3)`);
+  if (Math.abs(apLedger - apDom) > 0.005) out.push(`AP ${apLedger} vs domain ${apDom}`);
   const arLedger = n(db, "SELECT COALESCE(ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 3), 0) FROM ledger_entries WHERE account = 'ACCOUNTS_RECEIVABLE'");
   const offen = (db.exec("SELECT id, gross_amount - paid_amount FROM invoices WHERE status != 'CANCELLED'")[0]?.values ?? [])
     .reduce((x, r) => x + Number(r[1]) - creditNoteReceivableCancel(String(r[0])), 0);
@@ -595,7 +602,7 @@ for (const wahl of ['credit', 'refund'] as const) {
     && abgleich4(w.db).length === 0, `§4 bezahlt + Preis höher: Einkauf 1.920, 80 offen, keine Wahl nötig (${r.code || 'ok'} ${abgleich4(w.db).join('; ')})`);
 }
 
-// ══ §5 E9 — Verlust-Ausgabe: unbezahlt angepasst, bezahlt bleibt, Mehrbetrag getrennt; Minderung unter Bezahltes gesperrt ══
+// ══ §5 E9 + E5/E9 Owner — Verlust-Ausgabe: unbezahlt direkt, teilbezahlt folgt die offene Schuld, Überzahlung mit Pflichtwahl (wie die Order-Kosten) ══
 {
   const { w, inv } = await gemischt();
   const sara = einkaufDer(w.db, w.k3);
@@ -620,25 +627,127 @@ for (const wahl of ['credit', 'refund'] as const) {
   reload();
   ok(r2.ok && verlust().startsWith('[[50,') && n(w.db, "SELECT COUNT(*) FROM expenses WHERE category = 'ConsignorLoss'") === 1 && abgleich4(w.db).length === 0,
     `§5 unbezahlt 950: dieselbe Ausgabe auf 50 angepasst, keine zweite (${r2.code || 'ok'} ${verlust()})`);
-  // Der Verlust wird bezahlt — dann bleibt er; ein Mehrbetrag ist eine eigene Ausgabe, eine Minderung darunter gesperrt.
+  // ── E5/E9 Owner-Entscheidung: dieselbe Logik wie die Custom-Order-Kosten ──
   const eid = s(w.db, "SELECT id FROM expenses WHERE category = 'ConsignorLoss' AND status != 'CANCELLED'");
   setTestDatabase(w.db as never);
-  imHaus(() => recordExpensePaymentInHouse(eid, 50, 'cash', ctxH));
+  imHaus(() => recordExpensePaymentInHouse(eid, 30, 'cash', ctxH));
   reload();
+  const kredite = () => all(w.db, "SELECT ROUND(amount,3), status, ROUND(used_amount,3) FROM supplier_credits WHERE source_purchase_id IS NULL AND source_return_id IS NULL ORDER BY created_at, id");
+  const ausgabe = () => all(w.db, 'SELECT ROUND(amount,3), ROUND(paid_amount,3), status FROM expenses WHERE id = ?', [eid]);
+  // Fall 2 — teilweise bezahlt (30 von 50), keine Überzahlung: Preis 960 ⇒ Verlust 40, offene Schuld 10, ohne Dialog.
+  const teil = await korrPrimary(w, inv, { items: preis(960) });
+  reload();
+  ok(teil.ok && ausgabe() === S([[40, 30, s(w.db, 'SELECT status FROM expenses WHERE id = ?', [eid])]]) && kredite() === '[]' && abgleich4(w.db).length === 0,
+    `§5 teilbezahlt 30, Verlust 50 → 40: offene Schuld folgt (10), kein Dialog, kein Guthaben (${teil.code || 'ok'} ${ausgabe()} ${abgleich4(w.db).join('; ')})`);
+  // Fall 3 — echte Überzahlung: Preis 990 ⇒ Verlust 10 < bezahlt 30. Ohne Wahl ⇒ Nein; mit Guthaben ⇒ 20 verrechenbar.
   const v2 = zaehler4(w.db);
-  const hoch = await korrPrimary(w, inv, { items: preis(1000) });
-  ok(!hoch.ok && hoch.code === 'CONSIGNOR_LOSS_PAID' && zaehler4(w.db) === v2,
-    `§5 (E5/E9-Prüfpunkt) bezahlter Verlust 50, Preis 1.000 (Verlust 0) ⇒ Nein, nichts geändert (${hoch.code})`);
-  const weg = await korrPrimary(w, inv, { items: (ist) => ist.filter((i) => i.consignmentId !== w.k3) });
-  ok(!weg.ok && weg.code === 'CONSIGNOR_LOSS_PAID' && zaehler4(w.db) === v2, `§5 (E5/E9-Prüfpunkt) Zeile mit bezahltem Verlust entfernen ⇒ Nein, nichts geändert (${weg.code})`);
-  const tiefer = await korrPrimary(w, inv, { items: preis(900) });
+  const ohneWahl = await korrPrimary(w, inv, { items: preis(990) });
+  ok(!ohneWahl.ok && ohneWahl.code === 'CONSIGNOR_OVERPAY_CHOICE_REQUIRED' && zaehler4(w.db) === v2,
+    `§5 Überzahlung (bezahlt 30, neuer Verlust 10) ohne Wahl ⇒ Nein, nichts geändert (${ohneWahl.code})`);
+  const gut = await korrPrimary(w, inv, { items: preis(990), lossOverpay: { [w.k3]: 'credit' } });
   reload();
-  ok(tiefer.ok && verlust() === all(w.db, "SELECT ROUND(amount,3), status, expense_date FROM expenses WHERE category = 'ConsignorLoss' AND status != 'CANCELLED' ORDER BY created_at, id")
-    && n(w.db, "SELECT COUNT(*) FROM expenses WHERE category = 'ConsignorLoss' AND status != 'CANCELLED'") === 2
-    && n(w.db, "SELECT ROUND(SUM(amount),3) FROM expenses WHERE category = 'ConsignorLoss' AND status != 'CANCELLED'") === 100
-    && n(w.db, 'SELECT ROUND(amount,3) FROM expenses WHERE id = ?', [eid]) === 50,
-    `§5 bezahlter Verlust 50 bleibt, Mehrbetrag 50 als eigene Ausgabe (${tiefer.code || 'ok'} ${verlust()})`);
-  ok(abgleich4(w.db).length === 0, `§5 Abgleich ohne Abweichung (${abgleich4(w.db).join('; ')})`);
+  ok(gut.ok && ausgabe() === S([[10, 30, s(w.db, 'SELECT status FROM expenses WHERE id = ?', [eid])]]) && kredite() === S([[20, 'OPEN', 0]])
+    && n(w.db, 'SELECT ROUND(SUM(amount),3) FROM expense_payments WHERE expense_id = ?', [eid]) === 30,
+    `§5 mit „Guthaben": Verlust 10, Zahlung 30 bleibt, 20 als verrechenbares Lieferanten-Guthaben (${gut.code || 'ok'} ${ausgabe()} ${kredite()})`);
+  const meta = s(w.db, "SELECT metadata_json FROM ledger_entries WHERE source_module = 'ORDER_COST_OVERPAY' AND reverses_entry_id IS NULL LIMIT 1");
+  ok(new RegExp(`"consignmentId":"${w.k3}"`).test(meta) && /"expenseId"/.test(meta) && /consignor_loss_overpay/.test(meta)
+    && n(w.db, "SELECT COUNT(*) FROM audit_log WHERE field_name = 'consignor_loss_overpay'") === 1,
+    `§5 dieselbe Buchung wie die Order-Kosten (ORDER_COST_OVERPAY, mit Kommission und Ausgabe), Protokoll (${meta.slice(0, 120)})`);
+  ok(abgleich4(w.db).length === 0, `§5 Abgleich nach der Überzahlung ohne Abweichung (${abgleich4(w.db).join('; ')})`);
+  // Fall 4 — die Kosten ganz weg (Preis 1.000 ⇒ Verlust 0): dieselbe Logik; die frühere Überzahlung wird angeglichen.
+  const weg = await korrPrimary(w, inv, { items: preis(1000), lossOverpay: { [w.k3]: 'refund' } });
+  reload();
+  ok(weg.ok && s(w.db, 'SELECT status FROM expenses WHERE id = ?', [eid]) === 'CANCELLED' && kredite() === S([[30, 'REFUND_DUE', 0]])
+    && n(w.db, 'SELECT ROUND(SUM(amount),3) FROM expense_payments WHERE expense_id = ?', [eid]) === 30 && abgleich4(w.db).length === 0,
+    `§5 Verlust 0: Ausgabe storniert, Zahlung bleibt, 30 als Rückforderung (das frühere Guthaben 20 angeglichen) (${weg.code || 'ok'} ${kredite()} ${abgleich4(w.db).join('; ')})`);
+  // Die Rückforderung: in der Einlieferer-Seite der Kommission, „Record Repayment" zahlt sie zurück.
+  const claim = s(w.db, "SELECT id FROM supplier_credits WHERE status = 'REFUND_DUE' AND source_purchase_id IS NULL AND source_return_id IS NULL");
+  reload();
+  const zeileK3 = useConsignmentStore.getState().consignments.find((c) => c.id === w.k3)?.consignorSide?.refunds.find((x) => x.creditId === claim);
+  ok(!!zeileK3 && zeileK3.mode === 'pending' && Math.abs(zeileK3.open - 30) < 0.001, `§5 die Rückforderung steht an der Kommission (offen 30) (${S(zeileK3)})`);
+  setTestDatabase(w.db as never);
+  const rp = await primary(() => imHaus(() => recordSupplierCreditRefundInHouse({ creditId: claim, amount: 30, method: 'cash' }, ctxH)));
+  ok(rp.ok && s(w.db, 'SELECT status FROM supplier_credits WHERE id = ?', [claim]) === 'REFUNDED' && abgleich4(w.db).length === 0,
+    `§5 „Record Repayment" ⇒ REFUNDED, Abgleich ok (${rp.code || 'ok'} ${abgleich4(w.db).join('; ')})`);
+  // Danach wieder ein Verlust (Preis 900): die alte Ausgabe bleibt storniert, ihre zurückgezahlte Rückforderung unberührt — der
+  // neue Verlust ist eine NEUE, unbezahlte Ausgabe (der Einlieferer hat nichts mehr offen, wir schulden ihm 100).
+  const neu = await korrPrimary(w, inv, { items: preis(900) });
+  reload();
+  ok(neu.ok && s(w.db, 'SELECT status FROM expenses WHERE id = ?', [eid]) === 'CANCELLED' && s(w.db, 'SELECT status FROM supplier_credits WHERE id = ?', [claim]) === 'REFUNDED'
+    && all(w.db, "SELECT ROUND(amount,3), ROUND(paid_amount,3) FROM expenses WHERE category = 'ConsignorLoss' AND status != 'CANCELLED'") === S([[100, 0]]) && abgleich4(w.db).length === 0,
+    `§5 danach neuer Verlust 100 als neue Ausgabe; die alte (storniert) und ihre zurückgezahlte Rückforderung bleiben (${neu.code || 'ok'} ${abgleich4(w.db).join('; ')})`);
+}
+// Eine schon verrechnete Überzahlung wird nicht still angeglichen (dieselbe Sperre wie bei den Order-Kosten).
+{
+  const { w, inv } = await gemischt();
+  const preis = (p: number) => (ist: Korr[]) => ist.map((i) => (i.consignmentId === w.k3 ? { ...i, salePrice: p, acknowledgeShortfall: true } : i));
+  await korrPrimary(w, inv, { items: preis(900) });
+  reload();
+  const eid = s(w.db, "SELECT id FROM expenses WHERE category = 'ConsignorLoss' AND status != 'CANCELLED'");
+  setTestDatabase(w.db as never);
+  imHaus(() => recordExpensePaymentInHouse(eid, 100, 'cash', ctxH));
+  reload();
+  const g = await korrPrimary(w, inv, { items: preis(980), lossOverpay: { [w.k3]: 'credit' } });
+  reload();
+  const credit = s(w.db, "SELECT id FROM supplier_credits WHERE status = 'OPEN' AND source_purchase_id IS NULL AND source_return_id IS NULL");
+  // Saras Einkauf (unbezahlt, 980) wird teilweise mit diesem Guthaben beglichen — die Überzahlung ist damit verrechnet.
+  setTestDatabase(w.db as never);
+  const off = await primary(() => imHaus(() => applyOneCreditToPurchaseInHouse(credit, einkaufDer(w.db, w.k3), 30, ctxH)));
+  reload();
+  const v3 = zaehler4(w.db);
+  const zurueck = await korrPrimary(w, inv, { items: preis(1000), lossOverpay: { [w.k3]: 'credit' } });
+  ok(g.ok && off.ok && !zurueck.ok && zurueck.code === 'ORDER_COST_OVERPAY_USED' && zaehler4(w.db) === v3 && abgleich4(w.db).length === 0,
+    `§5 Überzahlung (80) schon zum Teil verrechnet (30) ⇒ der Verlust wird danach nicht mehr still geändert, nichts geändert (${g.code || 'ok'}/${off.code || 'ok'}/${zurueck.code})`);
+}
+
+// ══ §5b E5/E9 — Zeile mit bezahltem Verlust entfernen (Primary und PC2 gleich), Rollback ══
+{
+  const bilder5: string[] = [];
+  for (const weg of ['primary', 'pc2'] as const) {
+    const { w, inv } = await gemischt();
+    const preis900 = (ist: Korr[]) => ist.map((i) => (i.consignmentId === w.k3 ? { ...i, salePrice: 900, acknowledgeShortfall: true } : i));
+    const r0 = await korrWeg(weg, w, inv, { items: preis900 });
+    reload();
+    const eid = s(w.db, "SELECT id FROM expenses WHERE category = 'ConsignorLoss' AND status != 'CANCELLED'");
+    setTestDatabase(w.db as never);
+    imHaus(() => recordExpensePaymentInHouse(eid, 100, 'cash', ctxH));
+    reload();
+    const sara = einkaufDer(w.db, w.k3);
+    const v = zaehler4(w.db);
+    const ohne = await korrWeg(weg, w, inv, { items: (ist) => ist.filter((i) => i.consignmentId !== w.k3) });
+    ok(r0.ok && !ohne.ok && ohne.code === 'CONSIGNOR_OVERPAY_CHOICE_REQUIRED' && zaehler4(w.db) === v,
+      `§5b ${weg}: Zeile mit voll bezahltem Verlust (100) entfernen ohne Wahl ⇒ Nein, nichts geändert (${ohne.code})`);
+    const r = await korrWeg(weg, w, inv, { items: (ist) => ist.filter((i) => i.consignmentId !== w.k3), lossOverpay: { [w.k3]: 'refund' } });
+    reload();
+    ok(r.ok && s(w.db, 'SELECT status FROM consignments WHERE id = ?', [w.k3]) === 'active' && s(w.db, 'SELECT status FROM expenses WHERE id = ?', [eid]) === 'CANCELLED'
+      && s(w.db, 'SELECT status FROM purchases WHERE id = ?', [sara]) === 'CANCELLED'
+      && all(w.db, "SELECT ROUND(amount,3), status FROM supplier_credits WHERE source_purchase_id IS NULL AND source_return_id IS NULL") === S([[100, 'REFUND_DUE']])
+      && n(w.db, 'SELECT ROUND(SUM(amount),3) FROM expense_payments WHERE expense_id = ?', [eid]) === 100,
+      `§5b ${weg}: entfernt — Kommission Active, unbezahlter Einkauf storniert, Verlust storniert, Zahlung 100 bleibt, 100 als Rückforderung (${r.code || 'ok'})`);
+    ok(abgleich4(w.db).length === 0, `§5b ${weg}: Abgleich ohne Abweichung (${abgleich4(w.db).join('; ')})`);
+    bilder5.push(S([all(w.db, 'SELECT status, ROUND(amount,3), ROUND(paid_amount,3) FROM expenses ORDER BY amount'),
+      all(w.db, 'SELECT ROUND(amount,3), status, used_amount FROM supplier_credits ORDER BY amount'),
+      all(w.db, `SELECT account, ROUND(SUM(CASE WHEN direction = 'DEBIT' THEN amount ELSE -amount END), 3) AS x FROM ledger_entries GROUP BY account HAVING ABS(x) > 0.0005 ORDER BY account`)]));
+  }
+  ok(bilder5.length === 2 && bilder5[0] === bilder5[1], `§5b Primary und PC2 buchen GLEICH (${bilder5[0]?.slice(0, 140)} …)`);
+  // Rollback: ein Fehler beim Anlegen der Rückforderung ⇒ nichts geändert.
+  const { w, inv } = await gemischt();
+  const r0 = await korrPrimary(w, inv, { items: (ist) => ist.map((i) => (i.consignmentId === w.k3 ? { ...i, salePrice: 900, acknowledgeShortfall: true } : i)) });
+  reload();
+  const eid = s(w.db, "SELECT id FROM expenses WHERE category = 'ConsignorLoss' AND status != 'CANCELLED'");
+  setTestDatabase(w.db as never);
+  imHaus(() => recordExpensePaymentInHouse(eid, 100, 'cash', ctxH));
+  reload();
+  const eingabe: KorrIn = { invoiceId: inv, expectedRevision: invRev(w.db, inv), reason: 'Rollback-Probe Verlust', ownLines: eigeneEdit(w.db, inv),
+    consignment: korrekturTeil(w.db, inv, { items: (ist) => ist.filter((i) => i.consignmentId !== w.k3), lossOverpay: { [w.k3]: 'credit' } }) };
+  const vorher = zaehler4(w.db);
+  const { db: kaputt, f } = faulty4(w.db, (sql: string) => /INSERT INTO supplier_credits/i.test(sql));
+  setTestDatabase(kaputt as never); reload();
+  const rr = await primary(() => korr.correctMixedInvoiceOnPrimary(eingabe));
+  f.armed = false;
+  setTestDatabase(w.db as never); reload();
+  ok(r0.ok && f.fired && !rr.ok && zaehler4(w.db) === vorher && abgleich4(w.db).length === 0,
+    `§5b Fehler beim Anlegen des Guthabens ⇒ voller Rollback, nichts geändert (${rr.code.slice(0, 70)})`);
 }
 
 // ══ §6 E6 — neue Kommissionszeile: an den unbezahlten Einkauf desselben Einlieferers, sonst eigener Einkauf ══

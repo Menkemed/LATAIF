@@ -55,6 +55,7 @@ import {
 } from '@/core/invoices/mixed-invoice';
 import { correctMixedInvoiceOnPrimary } from '@/core/invoices/mixed-invoice-correction';
 import { usePurchaseStore } from '@/stores/purchaseStore';
+import { useExpenseStore } from '@/stores/expenseStore';
 import type { Consignment } from '@/core/models/types';
 import type { ConsignorPurchaseTaxScheme } from '@/core/consignment/consignment-finance';
 // Die Maske rechnet die Kommissionszeile mit derselben Funktion wie die Buchung (`consignmentLineAmounts`) und prüft E7 mit
@@ -178,7 +179,8 @@ export function InvoiceCreate() {
   useEffect(() => {
     if (!mixedAllowed) return;
     loadConsignments();
-    if (isEditMode) loadPurchases();
+    // P4 — Einkäufe und Verlust-Ausgaben der Einlieferer (am PC2 vom Primary): Zahlungsstand, Einkaufs-VAT, E2/E9-Wahl.
+    if (isEditMode) { loadPurchases(); useExpenseStore.getState().loadExpenses(); }
   }, [mixedAllowed, isEditMode, loadConsignments, loadPurchases]);
   const conRows = useConsignmentInvoiceRows(mixedAllowed ? conDrafts : [], isEditMode);
   const isMixed = mixedAllowed && !isEditMode && conRows.length > 0;
@@ -188,6 +190,8 @@ export function InvoiceCreate() {
   const [conHydrated, setConHydrated] = useState(!isEditMode);
   const [purchaseVat, setPurchaseVat] = useState<Record<string, 'ZERO' | 'VAT_10'>>({});
   const [overpay, setOverpay] = useState<Record<string, ConsignorOverpayChoice>>({});
+  // E5/E9 — die Wahl je Kommission für eine schon bezahlte Verlust-Ausgabe, die den neuen Verlust übersteigt.
+  const [lossOverpay, setLossOverpay] = useState<Record<string, ConsignorOverpayChoice>>({});
   const [askAllPaid, setAskAllPaid] = useState(false);
   const isCorrection = isEditMode && mixedAllowed && (bound.length > 0 || conDrafts.length > 0);
   const plan = useConsignmentCorrectionPlan(isCorrection ? bound : [], isCorrection ? conRows : [], purchaseVat);
@@ -531,11 +535,13 @@ export function InvoiceCreate() {
       if (conRows.length === 0 && lines.every(leereZeile)) {
         return 'An invoice keeps at least one line — to undo the whole consignment sale, use “Cancel Sale” on the consignment';
       }
-      const issue = consignmentRowsIssue(conRows, customerId, consignorVat, { plan, overpay, invoiceId: editInvoice?.id ?? '' });
+      const issue = consignmentRowsIssue(conRows, customerId, consignorVat, { plan, overpay, lossOverpay, invoiceId: editInvoice?.id ?? '' });
       if (issue) return issue;
       if (askAllPaid) {
         const offen = plan.purchases.find((p) => p.paid > 0.0005 && !overpay[p.id]);
         if (offen) return `${offen.consignorName}: choose consignor credit or reclaim (purchase ${offen.number})`;
+        const verlust = plan.paidLosses.find((id) => !lossOverpay[id]);
+        if (verlust) return 'The consignor loss was already paid — choose consignor credit or reclaim';
       }
     }
     const short = computed.findIndex(c => c.keptShort);
@@ -698,6 +704,7 @@ export function InvoiceCreate() {
           ...(Object.keys(geaenderteVat).length ? { purchaseTaxSchemes: geaenderteVat as Record<string, 'ZERO' | 'VAT_10'> } : {}),
           ...(Object.keys(neueVat).length ? { consignorTaxSchemes: neueVat as Record<string, 'ZERO' | 'VAT_10'> } : {}),
           ...(Object.keys(overpay).length ? { consignorOverpay: overpay } : {}),
+          ...(Object.keys(lossOverpay).length ? { lossOverpay } : {}),
         };
         if (aendernRechnung.remote && conIds.some((id) => !revOf(id))) {
           setError(fehlertext(nichtAmClient('correcting this invoice (no consignment revision loaded)'))); return;
@@ -1224,6 +1231,8 @@ export function InvoiceCreate() {
               onPurchaseVat: (pid: string, v: 'ZERO' | 'VAT_10') => setPurchaseVat((prev) => ({ ...prev, [pid]: v })),
               overpay,
               onOverpay: (pid: string, v: ConsignorOverpayChoice) => setOverpay((prev) => ({ ...prev, [pid]: v })),
+              lossOverpay,
+              onLossOverpay: (cid: string, v: ConsignorOverpayChoice) => setLossOverpay((prev) => ({ ...prev, [cid]: v })),
               onKeep: (c: Consignment) => {
                 const l = (editInvoice.lines || []).find((x) => x.productId === c.productId);
                 const gross = Math.round((Number(l?.lineTotal) || 0) * 1000) / 1000;

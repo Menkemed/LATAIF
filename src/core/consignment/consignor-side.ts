@@ -167,6 +167,30 @@ export function consignorSidesFor(branchId: string, rows: ReadonlyArray<Record<s
     });
     s.refundOpen = r3(s.refundOpen + open);
   }
+  // MIXED-INVOICE P4 (E5/E9) — die Rückforderung aus einer schon bezahlten Verlust-Ausgabe, die die Korrektur gemindert oder
+  // entfernt hat: dieselbe Zeile wie bei den Custom-Order-Kosten (ohne Quell-IDs, Buchung ORDER_COST_OVERPAY mit der Kommission).
+  for (const r of query(
+    `SELECT sc.id, sc.amount, sc.used_amount, sc.created_at, sc.note,
+            (SELECT json_extract(le.metadata_json, '$.consignmentId') FROM ledger_entries le
+              WHERE le.source_module = 'ORDER_COST_OVERPAY' AND le.source_id = sc.id AND le.reverses_entry_id IS NULL LIMIT 1) AS cid
+       FROM supplier_credits sc
+      WHERE sc.branch_id = ? AND sc.source_return_id IS NULL AND sc.source_purchase_id IS NULL AND sc.status IN ('REFUND_DUE', 'REFUNDED')
+      ORDER BY sc.created_at ASC, sc.id ASC`,
+    [branchId],
+  )) {
+    if (!r.cid) continue;
+    const s = seite(String(r.cid));
+    const creditId = String(r.id);
+    const receipts = eingaenge.get(creditId) ?? [];
+    const received = r3(receipts.reduce((x, e) => x + e.amount, 0));
+    const open = Math.max(0, r3(Number(r.amount ?? 0) - Number(r.used_amount ?? 0)));
+    s.refunds.push({
+      returnId: `loss:${creditId}`, returnNumber: 'Consignor loss (corrected)', date: String(r.created_at ?? '').slice(0, 10),
+      mode: 'pending', method: null, amount: r3(r.amount), open, currentSale: false, creditId, receipts, received,
+      offset: Math.max(0, r3(Number(r.used_amount ?? 0) - received)),
+    });
+    s.refundOpen = r3(s.refundOpen + open);
+  }
   // Der Altweg ohne Rechnung (`markSold` + „Pay Out Consignor"): die Schuld steht an der Kommission selbst.
   for (const c of rows) {
     if (String(c.invoice_id ?? '') !== '') continue;

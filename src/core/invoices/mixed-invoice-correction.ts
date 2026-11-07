@@ -48,6 +48,8 @@ import { cancelPurchaseInHouse } from '@/core/purchases/purchase-lifecycle-house
 import { belegFuerBuchung } from '@/core/purchases/purchase-edit-house';
 import { reconcilePurchaseOverpayCredit, assertSupplierOverpayMutable, OverpayCreditRedeemed } from '@/core/payables/purchase-overpay';
 import { markConsignorRepaymentClaim, updateExpenseInHouse } from '@/core/payables/payables-house';
+import { applyCostExpense, planCostExpense } from '@/core/orders/order-cost-correction';
+import { GoldRejected } from '@/core/gold/gold-settle';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { issuedAtIso } from '@/core/invoices/issued-at';
 import { assertMixedInvoiceActor } from '@/core/invoices/mixed-invoice-permission';
@@ -99,6 +101,8 @@ export interface MixedInvoiceCorrected {
   purchases: Array<{ purchaseId: string; purchaseNumber: string; action: 'corrected' | 'cancelled' | 'returned' | 'created' }>;
   /** E2 — was ein bezahlter Einlieferer jetzt schuldet: als Guthaben (verrechenbar) oder Rückforderung. */
   consignorClaims: Array<{ purchaseId: string; creditId: string; amount: number; kind: ConsignorOverpayChoice }>;
+  /** E5/E9 — was ein Einlieferer aus einer schon bezahlten Verlust-Ausgabe zu viel erhielt: Guthaben oder Rückforderung. */
+  lossClaims: Array<{ consignmentId: string; expenseId: string; creditId: string; amount: number; kind: ConsignorOverpayChoice }>;
 }
 
 const F = (n: unknown): number => Math.round((Number(n) || 0) * 1000);
@@ -178,14 +182,21 @@ function verluste(consignmentId: string, branchId: string): Array<{ id: string; 
 }
 
 /**
- * E9 — die Verlust-Ausgaben auf den neuen Gesamtverlust verteilen: nie unter das schon Beglichene einer Ausgabe; ein
- * Mehrbetrag erhöht die jüngste UNBEZAHLTE Ausgabe, sonst wird er eine eigene neue Ausgabe. `null`: der neue Verlust
- * läge unter dem schon Bezahlten (E5/E9-Prüfpunkt — gesperrt).
+ * E9 — die Verlust-Ausgaben auf den neuen Gesamtverlust verteilen: zuerst bis zum schon Beglichenen jeder Ausgabe; ein
+ * Mehrbetrag erhöht die jüngste UNBEZAHLTE Ausgabe, sonst wird er eine eigene neue Ausgabe.
+ * E5/E9 (Owner-Entscheidung, wie die Custom-Order-Kosten): liegt der neue Verlust UNTER dem schon Bezahlten, bekommen die
+ * Ausgaben (älteste zuerst) höchstens ihr Beglichenes — der Rest ist eine echte Überzahlung (`overpayF`), die je Ausgabe als
+ * Guthaben oder Rückforderung gebucht wird (`applyCostExpense`). Die Zahlungen selbst bleiben.
  */
 function verlustPlan(rows: ReadonlyArray<{ id: string; amountF: number; settledF: number }>, targetF: number):
-  { amounts: Map<string, number>; extraF: number } | null {
+  { amounts: Map<string, number>; extraF: number; overpayF: number } {
   const bezahltF = rows.reduce((x, r) => x + r.settledF, 0);
-  if (targetF < bezahltF) return null;
+  if (targetF < bezahltF) {
+    const amounts = new Map<string, number>();
+    let restF = targetF;
+    for (const r of rows) { const a = Math.min(r.settledF, restF); amounts.set(r.id, a); restF -= a; }
+    return { amounts, extraF: 0, overpayF: bezahltF - targetF };
+  }
   const amounts = new Map(rows.map((r) => [r.id, r.settledF]));
   let restF = targetF - bezahltF;
   for (const r of rows) {
@@ -199,7 +210,15 @@ function verlustPlan(rows: ReadonlyArray<{ id: string; amountF: number; settledF
     if (last && last.settledF === 0) amounts.set(last.id, (amounts.get(last.id) ?? 0) + restF);
     else extraF = restF;
   }
-  return { amounts, extraF };
+  return { amounts, extraF, overpayF: 0 };
+}
+
+/** E2/E11 — der Tag, an dem die Überzahlung einer Ausgabe entsteht: der spätere von Ausgabetag und ihren Zahlungen. */
+function verlustUeberTag(expenseId: string, now: string): string {
+  const tage = [dayOf(query('SELECT expense_date FROM expenses WHERE id = ?', [expenseId])[0]?.expense_date),
+    ...query('SELECT paid_at FROM expense_payments WHERE expense_id = ?', [expenseId]).map((r) => dayOf(r.paid_at))].filter(Boolean).sort();
+  const tag = tage.pop() ?? dayOf(now);
+  return tag < dayOf(now) ? `${tag}T12:00:00.000Z` : now;
 }
 
 /** Eine UNBEZAHLTE Verlust-Ausgabe zurücknehmen, ihre Buchung auf ihrem eigenen Tag gespiegelt (E11). */
@@ -560,8 +579,37 @@ export function correctMixedInvoiceInHouse(
     if (jetzt !== gesehen) nein('RECORD_CHANGED', `the consignor's purchase ${p.number} changed since you opened the invoice (you saw ${gesehen}, it is now ${jetzt}) — reload it`);
   }
 
-  // E9 — die Verlust-Ausgaben.
-  type VerlustPlan = { teil: Teil; rows: ReturnType<typeof verluste>; plan: NonNullable<ReturnType<typeof verlustPlan>> };
+  // E9 — die Verlust-Ausgaben. E5/E9 (Owner-Entscheidung): eine schon (teil)bezahlte Ausgabe läuft über DENSELBEN Kern wie
+  // die Custom-Order-Kosten (`planCostExpense`/`applyCostExpense`): unbezahlt und ohne Überzahlung folgt die offene Schuld
+  // ohne Dialog; eine echte Überzahlung (auch beim Entfernen der Zeile) braucht die Wahl Guthaben oder Rückforderung. Die
+  // Originalzahlungen bleiben. Eine unbezahlte Ausgabe wird wie bisher direkt angepasst bzw. storniert.
+  type KostenPlan = NonNullable<ReturnType<typeof planCostExpense>>;
+  type VerlustRows = ReturnType<typeof verluste>;
+  const lossWahl = corr.lossOverpay ?? {};
+  const kostenPlanen = (con: Record<string, unknown>, rows: VerlustRows, amounts: ReadonlyMap<string, number>): Map<string, { plan: KostenPlan; at: string }> => {
+    const out = new Map<string, { plan: KostenPlan; at: string }>();
+    const ueberF = rows.reduce((x, r) => x + Math.max(0, r.settledF - (amounts.get(r.id) ?? r.amountF)), 0);
+    const w = lossWahl[s(con.id)];
+    if (ueberF > 0 && w !== 'credit' && w !== 'refund') {
+      nein(CONSIGNOR_OVERPAY_CHOICE_REQUIRED,
+        `${s(con.consignment_number)}: the consignor's guarantee shortfall was already paid (${fmt(rows.reduce((x, r) => x + r.settledF, 0))} BHD) — ${fmt(ueberF)} BHD more than he is now owed. Choose: keep it as consignor credit (offset) or reclaim it from him`);
+    }
+    for (const r of rows) {
+      if (r.settledF === 0) continue;
+      const neu = amounts.get(r.id) ?? r.amountF;
+      if (neu === r.amountF) continue;
+      const at = verlustUeberTag(r.id, now);
+      try {
+        const kp = planCostExpense(r.id, neu, neu < r.settledF ? w : undefined, branchId, at);
+        if (kp) out.set(r.id, { plan: kp, at });
+      } catch (e) {
+        if (e instanceof GoldRejected) nein(e.code, e.message);
+        throw e;
+      }
+    }
+    return out;
+  };
+  type VerlustPlan = { teil: Teil; rows: VerlustRows; plan: ReturnType<typeof verlustPlan>; kosten: Map<string, { plan: KostenPlan; at: string }> };
   const verlustPlaene: VerlustPlan[] = [];
   for (const t of teile) {
     if (t.added) continue;
@@ -570,18 +618,12 @@ export function correctMixedInvoiceInHouse(
     const altF = rows.reduce((x, r) => x + r.amountF, 0);
     if (zielF === altF && !datumWechsel) continue;
     const plan = verlustPlan(rows, zielF);
-    if (!plan) {
-      nein('CONSIGNOR_LOSS_PAID', `${t.nr}: the consignor's guarantee shortfall was already paid (${fmt(rows.reduce((x, r) => x + r.settledF, 0))} BHD) — it is not reduced below that automatically; please check it with the accountant`);
-    }
-    verlustPlaene.push({ teil: t, rows, plan: plan! });
+    verlustPlaene.push({ teil: t, rows, plan, kosten: kostenPlanen(t.con, rows, plan.amounts) });
   }
-  const entfernteVerluste = new Map<string, string[]>();
+  const entfernteVerluste = new Map<string, { con: Record<string, unknown>; rows: VerlustRows; kosten: Map<string, { plan: KostenPlan; at: string }> }>();
   for (const c of entfernt) {
     const rows = verluste(s(c.id), branchId);
-    if (rows.some((r) => r.settledF > 0)) {
-      nein('CONSIGNOR_LOSS_PAID', `${s(c.consignment_number)}: the consignor's guarantee shortfall was already paid — the line is not removed automatically; please check it with the accountant`);
-    }
-    entfernteVerluste.set(s(c.id), rows.map((r) => r.id));
+    entfernteVerluste.set(s(c.id), { con: c, rows, kosten: kostenPlanen(c, rows, new Map(rows.map((r) => [r.id, 0]))) });
   }
 
   // E8/E11 — jede Gegen- und Neubuchung der Einlieferer-Seite in einer offenen Periode, nach dem Eröffnungsstichtag.
@@ -599,8 +641,8 @@ export function correctMixedInvoiceInHouse(
     for (const iso of activeSourceDates('EXPENSE', r.id)) tage.push({ iso, what: 'the reversal of the consignor loss' });
     if (neu > 0) tage.push({ iso: wandert ? neuerTag : r.date, what: 'the consignor loss' });
   }
-  for (const ids2 of entfernteVerluste.values()) for (const id of ids2) {
-    for (const iso of activeSourceDates('EXPENSE', id)) tage.push({ iso, what: 'the reversal of the consignor loss' });
+  for (const ev of entfernteVerluste.values()) for (const r of ev.rows) {
+    for (const iso of activeSourceDates('EXPENSE', r.id)) tage.push({ iso, what: 'the reversal of the consignor loss' });
   }
   if (neueEinkaeufe.size > 0 || teile.some((t) => t.added && t.econ.loss > 0) || verlustPlaene.some((v) => v.plan.extraF > 0)) {
     tage.push({ iso: neuerTag, what: 'the consignor side of this sale' });
@@ -827,11 +869,27 @@ export function correctMixedInvoiceInHouse(
     ergebnisEinkaeufe.push({ purchaseId: p.id, purchaseNumber: p.number, action: 'corrected' });
   }
 
-  // g) Verlust-Ausgaben (E9): unbezahlt angepasst bzw. storniert, Mehrbetrag auf bezahltem Verlust als eigene Ausgabe.
+  // g) Verlust-Ausgaben (E9): unbezahlt angepasst bzw. storniert, Mehrbetrag auf bezahltem Verlust als eigene Ausgabe; eine
+  //    (teil)bezahlte über den Kern der Custom-Order-Kosten (offene Schuld folgt; Überzahlung → Guthaben/Rückforderung).
+  const lossClaims: MixedInvoiceCorrected['lossClaims'] = [];
+  const kostenAusfuehren = (con: Record<string, unknown>, k: { plan: KostenPlan; at: string }): void => {
+    const cid = s(con.id);
+    const res = applyCostExpense(k.plan, ctx, {
+      link: { consignmentId: cid },
+      noteFor: (choice, expenseNumber) => `${choice === 'credit' ? 'Consignor loss overpayment' : 'Repayment claim — consignor loss'} ${s(con.consignment_number)} (${expenseNumber})`,
+      auditField: 'consignor_loss_overpay', reason: 'consignment-correction', mirrorOriginalDates: true, overpayAt: k.at,
+    });
+    if (res.overpayCreditId && res.overpay > 0 && res.overpayKind) {
+      lossClaims.push({ consignmentId: cid, expenseId: res.expenseId, creditId: res.overpayCreditId, amount: res.overpay, kind: res.overpayKind });
+    }
+  };
   for (const v of verlustPlaene) {
     for (const r of v.rows) {
+      const k = v.kosten.get(r.id);
+      if (k) { kostenAusfuehren(v.teil.con, k); continue; }
+      if (r.settledF > 0) continue;
       const neuF = v.plan.amounts.get(r.id) ?? r.amountF;
-      const wandert = datumWechsel && r.settledF === 0 && r.date !== neuerTag;
+      const wandert = datumWechsel && r.date !== neuerTag;
       if (neuF <= 0) { verlustStornieren(r.id, now); continue; }
       if (neuF === r.amountF && !wandert) continue;
       updateExpenseInHouse(r.id, { ...(neuF !== r.amountF ? { amount: B(neuF) } : {}), ...(wandert ? { expenseDate: neuerTag } : {}) },
@@ -842,7 +900,13 @@ export function correctMixedInvoiceInHouse(
       verlustAnlegen(v.teil.con, supplierOf(v.teil.consignorId), B(betragF), v.teil.salePrice, neuerTag);
     }
   }
-  for (const ids2 of entfernteVerluste.values()) for (const id of ids2) verlustStornieren(id, now);
+  for (const ev of entfernteVerluste.values()) {
+    for (const r of ev.rows) {
+      const k = ev.kosten.get(r.id);
+      if (k) kostenAusfuehren(ev.con, k);
+      else if (r.settledF === 0) verlustStornieren(r.id, now);
+    }
+  }
   for (const t of teile) {
     if (t.added && t.econ.loss > 0) verlustAnlegen(t.con, supplierOf(t.consignorId), t.econ.loss, t.salePrice, neuerTag);
   }
@@ -909,6 +973,7 @@ export function correctMixedInvoiceInHouse(
     corrected: teile.filter((t) => !t.added && t.changed).map((t) => t.id),
     purchases: ergebnisEinkaeufe,
     consignorClaims: claims,
+    lossClaims,
   };
   logAuditOrThrow({
     module: 'Invoice', entityType: 'invoices', entityId: invoiceId, action: 'UPDATE', field: 'mixed_invoice_correction',
