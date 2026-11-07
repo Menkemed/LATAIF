@@ -12,6 +12,7 @@
 // bestätigt der Mensch das ausdrücklich je Zeile. Eine Kommission = ein Stück (E12 folgt in P5). Kein Rabatt (E1).
 // ════════════════════════════════════════════════════════════════════════════
 import { vatEngine } from '@/core/tax/vat-engine';
+import { purchaseLotUnitCost } from '@/core/lots/lot-cost';
 import type { ConsignmentSaleResult } from '@/core/consignment/economics';
 import type { ConsignmentSaleItemInput } from '@/core/consignment/consignment-finance';
 import type { InvoiceCreateLine, InvoiceCreatePayment } from './invoice-create-house';
@@ -30,7 +31,8 @@ export type SaleScheme = 'MARGIN' | 'VAT_10' | 'ZERO';
 /**
  * Die Beträge der Rechnungszeile eines Kommissionsartikels — GENAU die Rechnung des Verkaufs („Record Sale"):
  * der Verkaufspreis ist der Kundenpreis inkl. VAT; bei VAT 10 % wird das Netto daraus zurückgerechnet, bei Margin
- * die Margen-VAT aus Preis und Einkaufspreis des Artikels (sonst Auszahlung, G4 unverändert).
+ * die Margen-VAT aus Preis und `purchasePrice` — dem tatsächlichen Einstand des Stücks (`consignorLotCost`), nie dem bei
+ * der Aufnahme geschätzten Artikel-Einkaufspreis (VAT-CONSISTENCY v0.8.99).
  */
 export function consignmentLineAmounts(salePrice: number, scheme: SaleScheme, purchasePrice: number) {
   const rate = scheme === 'ZERO' ? 0 : 10;
@@ -118,6 +120,22 @@ export interface MixedInvoiceCorrection {
 /** Was der Einkauf beim Einlieferer für einen Verkauf trägt: bei Unterdeckung der Verkaufspreis (Rest = Verlust), sonst die Auszahlung. */
 export function consignorPurchaseAmount(econ: Pick<ConsignmentSaleResult, 'loss' | 'payout'>, salePrice: number): number {
   return econ.loss > 0 ? salePrice : econ.payout;
+}
+
+/**
+ * VAT-CONSISTENCY (v0.8.99) — der Einstand, den der Einlieferer-Einkauf für dieses Stück aktiviert: GENAU das Los, das die
+ * Rechnungszeile verbraucht (Wareneinsatz, NBR-Export, Auswertung) und damit die Basis der Margen-VAT.
+ *   • ohne Einkaufs-VAT: der volle bezahlte Betrag (Auszahlung, bei Unterdeckung der Verkaufspreis) — die Bruttobasis (G4);
+ *   • mit VAT 10 %: ohne die als Vorsteuer abgezogene VAT (wie `createPurchase`/`purchaseLotUnitCost`). Eine Bruttobasis
+ *     TROTZ Vorsteuerabzug wäre eine doppelte Begünstigung — dieser Fall bleibt netto (G4-Blocker, Buchhalter/NBR).
+ * Nie der bei der Aufnahme geschätzte Artikel-Einkaufspreis.
+ */
+export function consignorLotCost(
+  econ: Pick<ConsignmentSaleResult, 'loss' | 'payout'>, salePrice: number, consignorScheme: 'ZERO' | 'VAT_10' | undefined,
+): number {
+  const amount = consignorPurchaseAmount(econ, salePrice);
+  if (consignorScheme !== 'VAT_10') return amount;
+  return purchaseLotUnitCost({ qty: 1, unitPrice: amount, lineTotal: amount, vatAmount: amount * 10 / 110 });
 }
 
 /** Der Fernrumpf des Kommissionsteils (rein; Primary und PC2 schicken dasselbe). */

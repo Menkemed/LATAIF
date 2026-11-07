@@ -29,6 +29,7 @@ import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queri
 import { bulkInventoryLossFils, bulkInventoryValuation } from '@/core/bulk/bulk-reads';
 import type { BusinessReadContext } from '@/core/data/read-context';
 import { liveVatQuarters, partialVatSummary, filedVatFigures } from '@/core/tax/vat-quarter-overview';
+import { vatEngine } from '@/core/tax/vat-engine';
 
 export function safeDiv(a: number, b: number): number {
   return b === 0 ? 0 : a / b;
@@ -225,39 +226,35 @@ export function financeFor(ctx: BusinessReadContext) {
     if (!branchId) return null;
 
     // Revenue totals from final invoices.
-    // Total VAT muss BEIDE Steuern erfassen — auch in mixed-Scheme-Invoices (typisch: Watch via MARGIN
-    // + Strap/Box via VAT_10 in derselben Rechnung). Lösung: per-Line aggregieren.
-    //  - Stored vat_amount (Invoice-Level): erfasst nur VAT_10/ZERO-Anteile (MARGIN-Lines speichern 0)
-    //  - Margin-VAT muss live aus invoice_lines berechnet werden:
-    //    qty × max(0, unit_price − purchase_price) × vat_rate / (100 + vat_rate)
     const rev = qry(
       `SELECT COALESCE(SUM(i.net_amount),0) as net,
               COALESCE(SUM(i.gross_amount),0) as gross,
-              COALESCE(SUM(i.vat_amount),0) as stored_vat,
               COALESCE(SUM(i.margin_snapshot - ${invoiceCostCorrectionSql()}),0) as profit
        FROM invoices i WHERE i.branch_id = ? AND i.status = 'FINAL'`,
       [branchId]
     );
-    // Per-Line MARGIN-VAT — über alle FINAL-Invoices, alle Lines mit tax_scheme='MARGIN'.
-    const marginVatRow = qry(
-      `SELECT COALESCE(SUM(
-         CASE WHEN il.tax_scheme = 'MARGIN' AND il.unit_price > il.purchase_price_snapshot
-           THEN COALESCE(il.quantity, 1) * (il.unit_price - il.purchase_price_snapshot)
-                * il.vat_rate / (100 + il.vat_rate)
-         ELSE 0 END
-       ),0) AS margin_vat
-       FROM invoice_lines il
-       JOIN invoices i ON i.id = il.invoice_id
+    // Total VAT muss BEIDE Steuern erfassen — auch in mixed-Scheme-Invoices — per Zeile.
+    // VAT-CONSISTENCY (v0.8.99): VAT 10 % / Zero = die gespeicherte Zeilen-VAT; Margin = je Zeile aus Zeilenbetrag und
+    // Einstand (`vatEngine.marginVatOfLine`, dieselbe Zahl wie NBR-Export und Haus). Vorher kam die Rechnungs-VAT
+    // (enthält seit v0.7.1 die Margen-VAT der Zeilen) PLUS die Margen-VAT noch einmal — doppelt gezählt.
+    let totalVat = 0;
+    for (const l of qry(
+      `SELECT il.tax_scheme, il.vat_amount, il.line_total, il.purchase_price_snapshot, il.quantity, il.vat_rate
+       FROM invoice_lines il JOIN invoices i ON i.id = il.invoice_id
        WHERE i.branch_id = ? AND i.status = 'FINAL'`,
       [branchId]
-    );
+    )) {
+      totalVat += String(l.tax_scheme) === 'MARGIN'
+        ? vatEngine.marginVatOfLine(Number(l.line_total) || 0, Number(l.purchase_price_snapshot) || 0, Number(l.quantity) || 1, Number(l.vat_rate) || 10)
+        : Number(l.vat_amount) || 0;
+    }
+    totalVat = Math.round(totalVat * 1000) / 1000;
     const r = rev[0] || {};
     // Refund-Abzug: identisch zu sales-block — pro-rata net/gross/profit aus Cash-Refunds
     // auf FINAL-Invoices (SSOT-Helper). Sonst zeigt der Finance-Tab inflated Revenue & Profit.
     const fRefunds = finalRefundTotals(branchId);
     const netRevenue = num(r, 'net') - fRefunds.net;
     const grossRevenue = num(r, 'gross') - fRefunds.cash;
-    const totalVat = num(r, 'stored_vat') + num(marginVatRow[0] || {}, 'margin_vat');
     const profitAfterVat = num(r, 'profit') - fRefunds.profit;
 
     // Plan §Purchase §Tax: Input-VAT (Vorsteuer aus Purchases) für Verrechnung

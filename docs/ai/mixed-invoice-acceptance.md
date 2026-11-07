@@ -12,7 +12,7 @@ Bilder (Stand 07.11.2026, Test-App mit Testdaten): `E:\software\lataif\abnahme\m
 | # | Funktion (Preview) | In der App | Benutzeraktion im Lauf | Ergebnis | Bild | Owner |
 |---|---|---|---|---|---|---|
 | 3.1 | Abschnitt „2b · Consignment items" (nur Admin/Manager) | „Direct Sale", Abschnitt 2b | Kommissionsartikel über die Auswahl, Steuerart gewählt, Preis per Tastatur | PASS | p3-b1 | offen |
-| 3.2 | Je Zeile VAT/Margin-VAT, Auszahlung, LATAIF-Anteil | dieselbe Zeile | Anzeige gegen die Buchung verglichen | PASS | p3-b1 | offen |
+| 3.2 | Je Zeile VAT/Margin-VAT, Auszahlung, LATAIF-Anteil | dieselbe Zeile | Anzeige gegen die Buchung verglichen; seit VAT-CONSISTENCY auch gegen den NBR-Export: Nautilus 1.200/960 ⇒ Margin VAT 21,818 (vorher 36,364 aus der Aufnahme-Schätzung 800) | PASS | p3-b1 | offen |
 | 3.3 | E7-Hinweis nur an der betroffenen Zeile; ohne Häkchen kein Speichern | Hinweis + Häkchen je Zeile | Speichern ohne Häkchen (Nein, kein Auftrag), dann mit Häkchen | PASS | p3-b1 | offen |
 | 3.4 | Einlieferer-Abrechnung, Einkaufs-VAT je Einlieferer Pflicht, nicht vorbelegt | „Consignor settlement" | beide Einlieferer per Maus gewählt | PASS | p3-b2 | offen |
 | 3.5 | Speichern: eine Rechnung, ein Auftrag, je Einlieferer ein Einkauf, Teilzahlung → PINV | Save Invoice | Speichern per Maus | PASS | — | offen |
@@ -59,11 +59,37 @@ Bilder (Stand 07.11.2026, Test-App mit Testdaten): `E:\software\lataif\abnahme\m
 | R1 | „Pick product…" bei schon verkauftem/reserviertem eigenem Artikel im Änderungsmodus | Die Zeile zeigt ihren Artikel („on this invoice"); keine andere Zeile kann ihn wählen | P4 4.1 | p4-b1 | offen |
 | R2 | PC2-Leiste „Unresolved saves" verdeckte „Save Invoice" bei 1400×900 | Platz am Seitenende in Höhe der Leiste; „Hide"/„Show"; Vorgänge bleiben bis zur Klärung | P5 H: ganz unten gescrollt liegt „Save Invoice" über der Leiste, echter Mausklick erreicht ihn; nach Neuladen noch da; „Clarify now" leert die Leiste | p5-h1, p5-h2 | offen |
 
+## 5a. Margin VAT — eine Regel (VAT-CONSISTENCY, G4; Vertrag §2)
+
+| # | Befund | Korrektur | Beleg | Owner |
+|---|---|---|---|---|
+| V1 | Record Sale und gemischte Rechnung rechneten die Margin VAT einer Kommission aus der Aufnahme-Schätzung (`products.purchase_price`, Prozent-Modell: Agreed × (1 − Satz)), der Wareneinsatz aber aus der Auszahlung. Folge: Hauptbuch ≠ NBR. | Basis = tatsächlicher Einkauf beim Einlieferer (`consignorLotCost`), in Haus, Vorschau 2b und „Record Sale"-Dialog | `test/vat` §2–§4, P3 B (Maske und Datenbank 21,818) | offen |
+| V2 | Korrektur (P4) rechnete mit der Auszahlung brutto, das Anlegen mit der Schätzung; ein gewechselter Einstand ließ die VAT stehen | Neue und geänderte Zeilen aus dem Einstand nach den Einkäufen; unveränderte behalten ihre VAT, außer ihr Einstand ändert sich | `test/vat` §5, P4 | offen |
+| V3 | Agent, Auftrag u. a. konnten eine VAT mit anderem Einstand als dem Los mitschicken | Das Haus setzt die Margin VAT aus dem gehaltenen Einstand (Anlegen, neue Zeile beim Ändern) | `test/vat` §7 | offen |
+| V4 | Finanzauswertung „Total VAT" zählte die Margin VAT doppelt | Je Zeile dieselbe Formel wie NBR | `test/vat` §2/§3/§6; Bestand: 60 → 30 | offen |
+| V5 | G4: Bruttobasis bei Einkauf ohne abziehbare VAT | gilt (Einkauf ohne VAT = voller Preis): 150/110 ⇒ 3,636 | `test/vat` §6 | offen |
+| V6 | G4 nach Einkauf mit Vorsteuerabzug | **nicht aktiviert** (doppelte Begünstigung). Basis bleibt netto: 150/100 ⇒ 4,545. Freigabe Buchhalter/NBR, Vertrag §9 | `test/vat` §6 | Buchhalter |
+
 ## 6. Ergebnisse der Läufe (07.11.2026)
 
 Alle E2E-Läufe streng nacheinander, jeder über `e2ePreflight` (Zeigerprüfung) im isolierten Testordner `com.lataif.app.e2e`; die Produktions-App lief daneben unberührt (nur in der Prozessliste beobachtet).
 
-**Endstand (Bau 20:48: Laufzeitsperre `e2e_assert_isolated_data_root` + Leisten-Knöpfe):**
+**VAT-CONSISTENCY (Bau 22:50, Margin VAT §5a):**
+
+| Lauf | Ergebnis |
+|---|---|
+| `test/e2e-safety/data-root-isolation.e2e.mjs` (zuerst) | 6/0 |
+| `mixed-invoice-p3` (neu: Maske und Datenbank 21,818) | 29/0 |
+| `mixed-invoice-p4` | 37/0 |
+| `consignment-quantities-p5` | 39/0 |
+| `p1a-primary-edit` | 21/0 |
+| `p1c-invoice-correction` | 31/0 |
+| `test/vat/margin-vat-consistency.test.ts` (auf dem alten Stand `9caab992`: 27 rot) | 51/0 |
+| Node-Gesamtlauf | 296/299. Nachgeprüft: `p2/e10-tax-choice` 42/0 (Erwartung der alten Schätzungsbasis auf G4 umgestellt), `e2e-safety/process-isolation` 44/0 (Pfadtext in `_e2e-preflight.mjs` entfernt). Offen: `e2e-binary-identity` (Release-Build) |
+
+Die Handy-Seite rechnet keine Margin VAT selbst. Ihr Verkauf läuft über denselben Befehl `consignments.record_sale` wie PC2 (`test/vat` §2 pc2).
+
+**Stand davor (Bau 20:48: Laufzeitsperre `e2e_assert_isolated_data_root` + Leisten-Knöpfe):**
 
 | Lauf | Ergebnis |
 |---|---|

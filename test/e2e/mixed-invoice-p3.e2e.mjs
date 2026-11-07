@@ -550,8 +550,9 @@ try {
     ok(e7 && keinE7, `B E7-Hinweis nur an der Calatrava-Zeile (−45,455), nicht an Margin/VAT-10-mit-Provision (${e7}/${keinE7})`);
     await foto(client, 'p3-b1-pc2-direktverkauf-2b-e7', `[data-mixed-con-e7=${S(K3)}]`);
     const anzeige = await client.ev(`return JSON.stringify(['${K1}','${K2}','${K3}'].map((id)=>[document.querySelector('[data-mixed-con-payout="'+id+'"]')?.innerText, document.querySelector('[data-mixed-con-share="'+id+'"]')?.innerText, document.querySelector('[data-mixed-con-vat="'+id+'"]')?.innerText]));`);
-    ok(/960\.000.*240\.000/.test(anzeige) && /880\.000.*220\.000.*100\.000/.test(anzeige) && /1,000\.000.*50\.000.*95\.455/.test(anzeige),
-      `B je Zeile Auszahlung, LATAIF-Anteil, VAT wie die Buchung (${anzeige})`);
+    // VAT-CONSISTENCY (v0.8.99): Margen-VAT der Nautilus-Zeile aus der Auszahlung 960 = 21,818 (nicht aus der Aufnahme-Schätzung 800 = 36,364).
+    ok(/960\.000.*240\.000.*21\.818/.test(anzeige) && !/36\.364/.test(anzeige) && /880\.000.*220\.000.*100\.000/.test(anzeige) && /1,000\.000.*50\.000.*95\.455/.test(anzeige),
+      `B je Zeile Auszahlung, LATAIF-Anteil, VAT wie die Buchung — Margen-VAT 21,818 aus der Auszahlung (${anzeige})`);
     // Die Einkaufs-VAT je Einlieferer ist Pflicht und nicht vorbelegt.
     const vorbelegt = await client.ev("return [...document.querySelectorAll('[data-mixed-consignor-vat]')].filter(b=>getComputedStyle(b).backgroundColor==='rgb(15, 15, 16)').length;");
     ok(Number(vorbelegt) === 0 && (await client.ev("return document.querySelectorAll('[data-mixed-consignor]').length;")) === 2,
@@ -586,6 +587,8 @@ try {
       `B Primary: EINE Rechnung, 5 Zeilen, 6.510, PINV, Teilzahlung 1.000 (${z.length} ${inv.gross_amount} ${inv.status} ${inv.invoice_number})`);
     ok(S(z.map((x) => [x.t, x.g, x.c])) === S([['MARGIN', 2500, 2000], ['VAT_10', 660, 550], ['MARGIN', 1200, 960], ['VAT_10', 1100, 880], ['VAT_10', 1050, 909.091]]),
       `B Zeilen: eigene mit Los-Einstand, Kommission mit Auszahlung als Einstand, Steuer je Zeile (${S(z.map((x) => [x.t, x.g, x.c]))})`);
+    ok(Number(z[0].v) === 45.455 && Number(z[2].v) === 21.818,
+      `B Margen-VAT gebucht wie angezeigt: eigene Ware 45,455, Nautilus 21,818 aus dem Einstand 960 (${S(z.map((x) => x.v))})`);
     const ea = einkaeufeVon('%Alpha%'); const eb = einkaeufeVon('%Beta%');
     ok(ea.length === 1 && Number(ea[0].total) === 1840 && Number(ea[0].rest) === 1840 && eb.length === 1 && Number(eb[0].total) === 1000,
       `B je Einlieferer EIN Einkauf: Alpha 1.840 (960 + 880), Beta 1.000 (VAT 10 %), unbezahlt (${S(ea)} ${S(eb)})`);

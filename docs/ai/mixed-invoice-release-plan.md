@@ -1,6 +1,6 @@
 # Mixed Invoice P1–P5 — Release- und Installationsplan (vorbereitet, nicht ausgeführt)
 
-Inhalt des Releases (nächste Version, vorgeschlagen **v0.8.99**): P2–P5 der gemischten Rechnung (P1a–P1c sind seit v0.8.98 ausgeliefert), dazu die zwei Release-Korrekturen „Pick product…" und PC2-Leiste „Unresolved saves". Regeln: `docs/mixed-invoice-contract.md`. Allgemeiner Ablauf: `docs/ai/upgrade-runbook.md` — dieser Plan konkretisiert ihn.
+Inhalt des Releases (nächste Version, vorgeschlagen **v0.8.99**): P2–P5 der gemischten Rechnung (P1a–P1c sind seit v0.8.98 ausgeliefert), dazu die Release-Korrekturen „Pick product…", PC2-Leiste „Unresolved saves" und die einheitliche Margin VAT (VAT-CONSISTENCY, G4; Vertrag §2). Regeln: `docs/mixed-invoice-contract.md`. Allgemeiner Ablauf: `docs/ai/upgrade-runbook.md` — dieser Plan konkretisiert ihn.
 
 **Jeder Schritt braucht eine eigene Owner-Freigabe:** Push, Release, Sicherung, Installation Primary, Installation PC2. Produktions-Apps schließt nur der Owner. Nichts davon ist ausgeführt.
 
@@ -52,6 +52,7 @@ Achtung: Sobald das Release „Latest" ist, zeigen beide Rechner das Update-Bann
    - Version 0.8.99, `integrity_check` ok.
    - Neu sind nur die drei Gruppenspalten (alle leer) und der Index; keine fachliche Zeile neu, weg oder geändert (erlaubt: `categories.updated_at`, `products.days_in_stock`, Protokoll, Sitzungen).
    - Hauptbuch-Salden gleich der Sicherung, jede Buchung ausgeglichen.
+   - Margin VAT: `E:\software\lataif\vat-pruefung\2026-11-07\historie.ts` auf der Sicherung „vor-v0.8.99" (Quelle umstellen). Erwartet sind 0 Abweichungen; sonst gilt der Korrekturvorschlag dort, nichts automatisch.
 4. Erst dann §5.
 
 ## 5 PC2 installieren (direkt danach, Owner-Freigabe)
@@ -74,6 +75,12 @@ Eine erste gemischte Rechnung bzw. Gruppenaufnahme ist eine echte Buchung. Vorsc
 - Startprobe der neuen Version (echte Test-App, Automations-Build mit Laufzeitsperre) auf `lataif.db` aus `2026-11-07_nach-vorfall` (Hash gegen Manifest): **18/0**. Testordner vor dem Start ohne Zeiger, Datenort der App = Testordner; einzige Schemaänderung die drei Gruppenspalten + Index, bestehende 2 Kommissionen ohne Gruppe, keine fachliche Zeile neu/weg/geändert (nur `categories.updated_at`), Hauptbuch-Salden gleich; zweiter Start ohne Wirkung; Sicherung danach bytegleich. `E:\LATAIF\Data` nicht berührt.
 - Isolationsnachweis vorher im selben Lauf: `data-root-isolation` **6/0** (Zeiger auf einen fremden Ordner → Testtreiber bricht ab; Test-App ohne Testtreiber beendet den Start mit „E2E ISOLATION", fremder Ordner unverändert, keine Datenbank angelegt).
 - Wiederherstellung in der neuen Version (Settings → Backup & Restore, echter Neustart-Pfad): `restore-safety` **45/0**; Datenort-Umzug `data-root-move` **55/0**.
+- Margin VAT (VAT-CONSISTENCY): `test/vat/margin-vat-consistency.test.ts`. Gegenprobe auf dem alten Stand `9caab992`: 27 Prüfungen rot, darunter 36,364 statt 21,818 und die doppelte Auswertung.
+- Historische Prüfung auf einer Kopie der Sicherung `nach-vorfall` (nur gelesen; Ergebnis in `E:\software\lataif\vat-pruefung\2026-11-07\`):
+  - 6 Margin-Zeilen in 4 Rechnungen, keine Abweichung, Hauptbuch = NBR.
+  - Kein G4-Fall, kein Quartal geschlossen.
+  - Nur die Anzeige „Total VAT" zeigte 60 statt 30.
+  - Keine Korrektur nötig; nach der Installation dieselbe Prüfung auf „vor-v0.8.99" wiederholen.
 - Versionswechsel auf Befehlsebene: `test/p5/consignment-quantities.test.ts` §13. PC2 hält keine Datenbank; Primary und PC2 lesen dasselbe Sync-Manifest (Rust bindet es beim Bau ein), der Drift-Test `test/m6b3a/manifest-drift.test.ts` ist grün.
 
 ## 8a Lehre aus dem Vorfall vom 07.11.2026
@@ -109,6 +116,10 @@ Kommission: Mengen
 Korrekturen
 - Rechnung bearbeiten: eigene, schon verkaufte Artikel zeigen ihren Namen statt "Pick product...".
 - PC2: Die Leiste "Unresolved saves" verdeckt keine Knöpfe mehr und lässt sich einklappen.
+- Margin VAT: Kommissionsverkäufe rechnen mit der tatsächlichen Auszahlung an den Einlieferer
+  (bisher teils mit dem bei der Aufnahme geschätzten Einstand). Rechnung, Hauptbuch, NBR-Export
+  und Auswertung zeigen für jede Zeile dieselbe Margin VAT.
+- Finanzauswertung: "Total VAT" zählte die Margin VAT doppelt.
 
 Installation: zuerst Primary, direkt danach PC2. Die Datenbank wird beim ersten Start um drei Spalten erweitert.
 ```

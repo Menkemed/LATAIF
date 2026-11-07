@@ -268,8 +268,9 @@ const conInv = (db: Db, id: string): string => s(db, 'SELECT invoice_id FROM con
 const einkaufSig = (db: Db, id: string): string => all(db,
   `SELECT pl.tax_scheme, ROUND(pl.vat_amount,3), ROUND(pl.line_total,3) FROM purchase_lines pl JOIN consignments c ON c.product_id = pl.product_id WHERE c.id = ?`, [id]);
 {
-  // Bestehende Kommissionsformel (G4 bewusst unverändert): Margen-VAT auf Verkauf − Einkaufspreis des Artikels
-  // (`products.purchase_price`, sonst Auszahlung) × 10/110 — der Artikel trägt beim Anlegen den Vorschlag 800.
+  // VAT-CONSISTENCY (v0.8.99, Owner G4 07.11.): Margen-VAT auf Verkauf − TATSÄCHLICHER Einstand (Einkauf beim Einlieferer,
+  // hier mit Einkaufs-VAT 10 % netto: 960 − 87,273 = 872,727) × 10/110 — nicht mehr der Aufnahme-Vorschlag 800 am Artikel
+  // (bis v0.8.98: 36,364 in Zeile und Hauptbuch, 29,752 im NBR-Export).
   const margeVat = (pp: number): number => Math.round((1200 - pp) * 10 / 110 * 1000) / 1000;
   for (const sch of ['VAT_10', 'ZERO', 'MARGIN'] as const) {
     const db = freshDb();
@@ -278,7 +279,7 @@ const einkaufSig = (db: Db, id: string): string => all(db,
     const erwartet: Record<string, string> = {
       VAT_10: '"VAT_10",1090.909,109.091,1200',
       ZERO: '"ZERO",1200,0,1200',
-      MARGIN: `"MARGIN",1200,${margeVat(pp || 960)},1200`,
+      MARGIN: `"MARGIN",1200,${margeVat(872.727)},1200,872.727`,
     };
     // Primary (Verkaufsdialog am Primary)
     setTestDatabase(db as never); reload();
@@ -324,7 +325,9 @@ const einkaufSig = (db: Db, id: string): string => all(db,
   const neu = M.saleBody({ id: k, consignorId: 'cust-1', revision: conRev(db, k) }, { buyerId: 'cust-2', salePrice: '1200', specialMark: false, consignorTaxScheme: 'ZERO' });
   const ra = await fern(() => life.runRecordSale(deps(db), ident('consignments.record_sale') as never, neu.body));
   reload();
-  ok(ra.ok && zeileSig(db, conInv(db, k)).includes(`"MARGIN",1200,${Math.round((1200 - (ppAlt || 960)) * 10 / 110 * 1000) / 1000},1200`) && einkaufSig(db, k) === '[["ZERO",0,960]]',
+  // VAT-CONSISTENCY: Einkauf ohne VAT ⇒ Einstand = Auszahlung 960 (Bruttobasis, G4) ⇒ 21,818 — der Aufnahme-Vorschlag
+  // `ppAlt` (800) zählt nicht mehr.
+  ok(ra.ok && ppAlt === 800 && zeileSig(db, conInv(db, k)).includes('"MARGIN",1200,21.818,1200,960') && einkaufSig(db, k) === '[["ZERO",0,960]]',
     `§D ausdrücklich „ohne VAT", Artikel ohne Steuerart ⇒ MARGIN, Einkauf ohne VAT (${zeileSig(db, conInv(db, k))} ${einkaufSig(db, k)} ${ra.code})`);
   ok(/ZERO\|.*consignorTaxScheme must be ZERO or VAT_10|consignorTaxScheme must be ZERO or VAT_10/.test(meldung(() => life.parseRecordSale({ consignmentId: 'c', buyerId: 'b', salePrice: 1, expectedRevision: 1, consignorTaxScheme: 'MARGIN' })))
     && /taxScheme must be MARGIN, VAT_10 or ZERO/.test(meldung(() => life.parseRecordSale({ consignmentId: 'c', buyerId: 'b', salePrice: 1, expectedRevision: 1, taxScheme: 'STANDARD' }))),

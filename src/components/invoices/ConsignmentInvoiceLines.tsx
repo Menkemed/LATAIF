@@ -23,7 +23,7 @@ import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useExpenseStore } from '@/stores/expenseStore';
 import { commissionModelLabel, computeConsignmentSale, type ConsignmentSaleResult } from '@/core/consignment/economics';
 import {
-  consignmentLineAmounts, consignmentVatShortfall, consignorPurchaseAmount, type ConsignorOverpayChoice, type SaleScheme,
+  consignmentLineAmounts, consignmentVatShortfall, consignorLotCost, consignorPurchaseAmount, type ConsignorOverpayChoice, type SaleScheme,
 } from '@/core/invoices/mixed-invoice';
 import type { ConsignorPurchaseTaxScheme } from '@/core/consignment/consignment-finance';
 import { productDisplayName } from '@/core/products/display-name';
@@ -73,8 +73,14 @@ const SCHEMES: Array<{ id: SaleScheme; label: string }> = [
 ];
 const same = (a: number, b: number): boolean => Math.abs(a - b) < 0.0005;
 
-/** Die gerechneten Zeilen der Kommissionsartikel. `edit`: die Regel der Korrektur (Margen-Basis = Auszahlung, wie das Haus). */
-export function useConsignmentInvoiceRows(drafts: readonly ConsignmentDraft[], edit = false): ConsignmentRow[] {
+/**
+ * Die gerechneten Zeilen der Kommissionsartikel. Margen-Basis (VAT-CONSISTENCY v0.8.99) beim Anlegen wie beim Korrigieren:
+ * der Einstand des Einlieferer-Einkaufs (`consignorLotCost` mit der Einkaufs-VAT aus `useConsignorSchemes`) — dieselbe Regel
+ * wie das Haus, nie der bei der Aufnahme geschätzte Artikel-Einkaufspreis.
+ */
+export function useConsignmentInvoiceRows(
+  drafts: readonly ConsignmentDraft[], consignorSchemes: Readonly<Record<string, 'ZERO' | 'VAT_10'>> = {},
+): ConsignmentRow[] {
   const { consignments } = useConsignmentStore();
   const { customers } = useCustomerStore();
   const { products } = useProductStore();
@@ -85,9 +91,7 @@ export function useConsignmentInvoiceRows(drafts: readonly ConsignmentDraft[], e
     const v = parseFloat(d.priceText);
     const price = Number.isFinite(v) && v > 0 ? v : 0;
     const econ = computeConsignmentSale(con ?? { commissionType: 'percent', commissionRate: 0, agreedPrice: 0 }, price);
-    // Dieselbe Quelle wie die Buchung: beim Anlegen der Einkaufspreis des Artikels, sonst die Auszahlung (G4 unverändert);
-    // beim Korrigieren die Auszahlung (der Einkaufspreis des Artikels ist dann schon der des alten Verkaufs).
-    const purchasePrice = edit ? econ.payout : (prod?.purchasePrice || econ.payout);
+    const purchasePrice = consignorLotCost(econ, price, con ? consignorSchemes[con.id] : undefined);
     const a = price > 0 ? consignmentLineAmounts(price, d.scheme, purchasePrice) : null;
     const persisted = a ? a.persistedVat : 0;
     const priceChanged = !d.kept || !same(d.kept.salePrice, price);
@@ -106,7 +110,7 @@ export function useConsignmentInvoiceRows(drafts: readonly ConsignmentDraft[], e
       needsAck: price > 0 && econ.belowFloor && priceChanged,
       purchaseAmount: consignorPurchaseAmount(econ, price),
     };
-  }), [drafts, consignments, customers, products, edit]);
+  }), [drafts, consignments, customers, products, consignorSchemes]);
 }
 
 /** Je Einlieferer EIN Einkauf: Name, Artikel, Summe der Auszahlungen. */

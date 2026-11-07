@@ -18,6 +18,7 @@ import { useRepairStore } from '@/stores/repairStore';
 import { exportCsv, exportExcel } from '@/core/utils/export-file';
 import { computeSalesMetrics, effectiveCost, effectiveMargin } from '@/core/reports/sales-metrics';
 import { isCapitalizedExpenseCategory } from '@/core/models/types';
+import { vatEngine } from '@/core/tax/vat-engine';
 import { usePartnerStore } from '@/stores/partnerStore';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useAgentStore } from '@/stores/agentStore';
@@ -280,10 +281,9 @@ export function BusinessReportsPage() {
     for (const i of finalInvs) {
       for (const l of i.lines) {
         if (l.taxScheme === 'VAT_10') vat10 += l.vatAmount;
-        else if (l.taxScheme === 'MARGIN') {
-          const profit = Math.max(0, (l.unitPrice - l.purchasePriceSnapshot) * Math.max(1, l.quantity || 1));
-          marginVat += profit * 10 / 110;
-        } else if (l.taxScheme === 'ZERO') zero += l.lineTotal;
+        // VAT-CONSISTENCY (v0.8.99) — je Zeile dieselbe Margen-VAT wie Haus, Hauptbuch und NBR-Export (auf Fils gerundet).
+        else if (l.taxScheme === 'MARGIN') marginVat += vatEngine.marginVatOfLine(l.lineTotal, l.purchasePriceSnapshot, l.quantity, l.vatRate);
+        else if (l.taxScheme === 'ZERO') zero += l.lineTotal;
       }
     }
     return { vat10, marginVat, zero };

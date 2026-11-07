@@ -27,7 +27,7 @@ import { withConsignmentSalePermit } from '@/core/consignment/consignment-sale-l
 // CONSIGNMENT MULTI-SALE (D5) — die Rechnung samt Zahlungen über DENSELBEN Weg wie „Save Invoice" (Mehrfachzahlung,
 // Kartenmarke und -gebühr, Zahlungstag, Nummernkreis) — keine zweite Zahlungslogik.
 import { createInvoiceInHouse, type InvoiceCreateLine, type InvoiceCreatePayment } from '@/core/invoices/invoice-create-house';
-import { consignmentLineAmounts, consignmentVatShortfall } from '@/core/invoices/mixed-invoice';
+import { consignmentLineAmounts, consignmentVatShortfall, consignorLotCost } from '@/core/invoices/mixed-invoice';
 import { consignorSidesFor } from '@/core/consignment/consignor-side';
 import { payoutModelLock, buildPayoutPatch, PayoutPatchError, PAYOUT_EDITABLE_SQL, type PayoutInput } from '@/core/consignment/payout-edit';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
@@ -593,7 +593,10 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
       )[0];
       // CONSIGNMENT-SALE-TAX — die im Verkaufsdialog gewählte Steuerart; ohne Wahl die des Artikels (sonst MARGIN).
       const scheme = (taxScheme || (prod?.tax_scheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme;
-      const purchasePrice = (prod?.purchase_price as number | undefined) || consignorPayout;
+      // VAT-CONSISTENCY (v0.8.99) — die Margen-VAT rechnet mit dem Einstand, den der Einlieferer-Einkauf unten wirklich
+      // aktiviert (Auszahlung bzw. Verkaufspreis bei Unterdeckung; mit Einkaufs-VAT netto) — nicht mehr mit dem bei der
+      // Aufnahme geschätzten `products.purchase_price` (Prozent-Modell: Agreed × (1 − Satz), z. B. 800 statt 960).
+      const purchasePrice = consignorLotCost(econ, salePrice, consignorTaxScheme);
       // MIXED-INVOICE P3 — dieselbe Rechnung der Zeile wie bisher, jetzt an EINER Stelle (auch die Maske rechnet damit).
       // v0.7.1 — NBR: MARGIN persistiert internalVat.
       const { rate, calc, persistedVat } = consignmentLineAmounts(salePrice, scheme, purchasePrice);

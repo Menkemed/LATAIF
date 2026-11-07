@@ -97,7 +97,7 @@ export function assertE2eBinary(appPath) {
 /**
  * TEST-ISOLATION (Vorfall 07.11.2026) — ein Datenort-Zeiger (`data-location.json`) im Testordner darf nur in diesen
  * Testordner selbst oder ins Temp-Verzeichnis zeigen. Am 07.11. lag dort ein aus einer Produktionssicherung kopierter
- * Zeiger auf `E:\LATAIF\Data`; `preseedInstallation` übernahm ihn ungeprüft, und die Test-App migrierte die
+ * Zeiger auf den Produktions-Datenordner; `preseedInstallation` übernahm ihn ungeprüft, und die Test-App migrierte die
  * Produktionsdatenbank. Jetzt bricht der Lauf ab, bevor eine App startet. (Die Test-App prüft denselben Ort zur
  * Laufzeit noch einmal, siehe `e2e_assert_isolated_data_root` in `src-tauri/src/lib.rs`.)
  */

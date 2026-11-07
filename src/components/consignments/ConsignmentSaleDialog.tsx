@@ -27,7 +27,7 @@ import { invoiceCreatePaymentsBody, MAX_CREATE_PAYMENTS, type InvoiceCreatePayme
 import { CARD_BRAND_OPTIONS, cardFeeConfigured, computeCardFee, type CardBrand } from '@/core/finance/card-fees';
 import { businessDateIssue, latestBusinessDate } from '@/core/utils/business-date';
 import { currentBranchId } from '@/core/db/helpers';
-import { consignmentLineAmounts, consignmentVatShortfall, type SaleScheme } from '@/core/invoices/mixed-invoice';
+import { consignmentLineAmounts, consignmentVatShortfall, consignorLotCost, type SaleScheme } from '@/core/invoices/mixed-invoice';
 import { productDisplayName } from '@/core/products/display-name';
 import { expandGroupSelection, summarizeGroup, groupStatusLine, pieceLabel } from '@/core/consignment/consignment-group';
 import type { TaxScheme } from '@/core/models/types';
@@ -131,7 +131,9 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
     const econ = computeConsignmentSale(c, price);
     const prod = products.find((p) => p.id === c.productId);
     const scheme = (schemes[c.id] || (prod?.taxScheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme;
-    const purchasePrice = prod?.purchasePrice || econ.payout;
+    // VAT-CONSISTENCY (v0.8.99) — dieselbe Basis wie die Buchung: der Einstand des Einlieferer-Einkaufs (gewählte Einkaufs-VAT;
+    // ungewählt = ohne VAT), nie der bei der Aufnahme geschätzte Artikel-Einkaufspreis.
+    const purchasePrice = consignorLotCost(econ, price, consignorVat[c.consignorId]);
     // MIXED-INVOICE E7 — dieselbe Zeilenrechnung wie die Buchung (`consignmentLineAmounts`), dieselbe Prüfung wie das Haus.
     const a = price > 0 ? consignmentLineAmounts(price, scheme as SaleScheme, purchasePrice) : null;
     const vat = a ? a.persistedVat : 0;
@@ -143,7 +145,7 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
       needsAck: price > 0 && econ.belowFloor,
       vatShortfall: price > 0 ? consignmentVatShortfall(econ, scheme as SaleScheme, vat) : null,
     };
-  }), [items, prices, products, customers, schemes]);
+  }), [items, prices, products, customers, schemes, consignorVat]);
 
   /** P5 (E12) — die Gruppen in diesem Verkauf: Zusammenfassung, Stücke im Verkauf, höchstens verkaufbar. */
   const saleGroups = useMemo(() => {

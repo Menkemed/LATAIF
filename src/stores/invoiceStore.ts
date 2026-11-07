@@ -38,6 +38,7 @@ import {
 import { planCustomerChange, moveInvoiceBookings, moveLastPurchase, customerDisplayName, customerChangeBookingDays } from '@/core/invoices/customer-change';
 import { loadEditBaseLines, matchEditLines, assertEditKeepsReturns, assertKeptLinesStock, creditNoteReceivableCancel, keptLineAmounts, isLedgerNeutralEdit, normalizeEditSplits, applyBindingGross, keepGrossOnPureTaxChange, InvoiceEditLineRejected, EDIT_RETURNED_LINE_PRICE_LOCKED } from '@/core/invoices/edit-lines';
 import { calcInvoiceLine, vatRateFor, type LineScheme } from '@/core/invoices/line-derivation';
+import { vatEngine } from '@/core/tax/vat-engine';
 import {
   OVERPAY_CHOICE_REQUIRED, REFUND_DUE, REFUND_NOTHING_OWED, isRefundClaimStatus, payOutRefundClaim, refundClaimsByInvoice,
   type OverpayChoice,
@@ -74,6 +75,18 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
 // CENTRAL-UI-PARITY R6E — die Umwandlung Angebot → Rechnung lebt in der Hausfolge des Angebots.
 import { convertOfferToInvoiceInHouse, offerAction } from '@/core/offers/offer-house';
+
+/**
+ * VAT-CONSISTENCY (v0.8.99) — eine neu geschriebene Margin-Zeile (keine Bulk-Zeile) trägt die Margen-VAT ihres
+ * tatsächlichen Einstands: `vatEngine.marginVatOfLine` — dieselbe Zahl, die NBR-Export, VAT-Auswertung und Berichte aus
+ * Zeilenbetrag und `purchase_price_snapshot` rechnen; das Hauptbuch bucht genau diesen Betrag (MARGIN_VAT).
+ */
+function marginVatFromHeldCost(
+  l: { bulk?: unknown; taxScheme: string; lineTotal: number; quantity?: number; vatRate: number; vatAmount: number }, cost: number,
+): void {
+  if (l.bulk || (l.taxScheme !== 'MARGIN' && l.taxScheme !== 'margin')) return;
+  l.vatAmount = vatEngine.marginVatOfLine(l.lineTotal, cost, Math.max(1, l.quantity || 1), l.vatRate);
+}
 
 // ZIEL.md §3a — Posting-Service ist der einzige Schreibpfad für Finanzbuchungen.
 // Domain-Insert + Ledger-Posting laufen in einem Try/Catch. Posting-Fehler werden
@@ -454,6 +467,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     if (!opts?.allowWithAgent) {
       assertProductsSellable(resolvedLines.map(l => l.productId));
     }
+    // VAT-CONSISTENCY (v0.8.99) — die Margen-VAT folgt dem Einstand, den die Zeile WIRKLICH hält (oben aufgelöst; der wird
+    // Wareneinsatz und NBR-Basis). Ein Aufrufer, der mit einem anderen Wert rechnete (Aufnahme-Schätzung, Artikelpreis statt
+    // Los), verschiebt so nicht mehr Hauptbuch gegen NBR-Export.
+    for (const l of resolvedLines) marginVatFromHeldCost(l, l._resolvedCost);
     const toTake = resolvedLines.filter(l => !l.stockPreTaken && !l.bulk);
     assertLotsConsumable(toTake.map(l => ({ lotId: l._resolvedLotId, qty: Math.max(1, l.quantity || 1) })));
     assertLotTrackedLinesResolved(toTake.map(l => ({ productId: l.productId, lotId: l._resolvedLotId })));
@@ -1158,10 +1175,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           continue;
         }
         const b = l._kept ? baseById.get(l._id) : undefined;
+        // VAT-CONSISTENCY (v0.8.99) — eine NEUE Zeile: Margen-VAT aus dem Einstand, den sie wirklich hält (wie beim Anlegen).
+        if (!b) { marginVatFromHeldCost(l, l._resolvedCost); continue; }
         // BULK TAX SELECTION (v0.8.98) — eine fortgesetzte Bulk-Zeile hat ihre Beträge schon oben aus dem Kundenbetrag
         // (oder genau die gespeicherten). Ein Nachrechnen aus dem Netto würde das exakte Brutto wieder verschieben.
         // MIXED-INVOICE P4 — ebenso eine Kommissionszeile der Korrekturfolge (Beträge nach der Regel von „Record Sale").
-        if (!b || bulkBase.has(b.id) || l.houseAmounts) continue;
+        if (bulkBase.has(b.id) || l.houseAmounts) continue;
         const a = keptLineAmounts(b, l, l._resolvedCost);
         l.unitPrice = a.unitPrice;
         l.vatAmount = a.vatAmount;

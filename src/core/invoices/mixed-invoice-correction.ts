@@ -36,6 +36,7 @@ import {
 } from '@/core/ledger/posting';
 import { assertCorrectionDates, type CorrectionDate } from '@/core/ledger/correction-dates';
 import { purchaseLotUnitCost } from '@/core/lots/lot-cost';
+import { vatEngine } from '@/core/tax/vat-engine';
 import { syncProductQuantity, trackLotRow, trackProductRow } from '@/core/lots/lot-queries';
 import { computeConsignmentSale, type ConsignmentSaleResult } from '@/core/consignment/economics';
 import { boundSaleConsignments, withConsignmentCorrectionPermit, withConsignmentSalePermit } from '@/core/consignment/consignment-sale-link';
@@ -365,8 +366,9 @@ export function correctMixedInvoiceInHouse(
       nein(SALE_BEFORE_CONSIGNMENT, `${nr}: the invoice date ${neuerTag} is before the consignment was taken in (${seit})`);
     }
     const econ = computeConsignmentSale(model, it.salePrice);
-    // Dieselbe Basis wie „Record Sale" für die Margen-VAT: die Auszahlung (G4 unverändert).
-    const a = consignmentLineAmounts(it.salePrice, it.taxScheme, econ.payout);
+    // Netto, Brutto und die VAT 10 % (E7) hängen nicht am Einstand. Die Margen-VAT einer neuen oder geänderten Zeile rechnet
+    // Schritt d) aus dem Einstand, den die Zeile NACH den Einkäufen wirklich hält (VAT-CONSISTENCY v0.8.99); hier nur geplant.
+    const a = consignmentLineAmounts(it.salePrice, it.taxScheme, consignorPurchaseAmount(econ, it.salePrice));
     const line = added ? undefined : query('SELECT * FROM invoice_lines WHERE invoice_id = ? AND product_id = ? ORDER BY position, id', [invoiceId, productId])[0];
     if (!added && !line) nein('CONSIGNMENT_INVOICE_LINE_NOT_FOUND', `${nr}: the invoice has no line for this consigned item`);
     const changed = added || F(line!.line_total) !== F(a.calc.grossAmount) || s(line!.tax_scheme) !== it.taxScheme;
@@ -754,20 +756,27 @@ export function correctMixedInvoiceInHouse(
   }
 
   // d) Die Rechnung — über `editInvoice`, geschachtelt: eigene Zeilen wie gewohnt, Kommissionszeilen mit den Hausbeträgen.
+  // VAT-CONSISTENCY (v0.8.99) — Margen-VAT = f(Zeilenbetrag, Einstand der Zeile), dieselbe Zahl wie Wareneinsatz, NBR und
+  // Hauptbuch. Eine unveränderte Zeile behält ihre gespeicherte VAT — außer ihr Einstand selbst ändert sich (Einkauf
+  // korrigiert, z. B. Einkaufs-VAT gewechselt, Schritt c): dann folgt die Margen-VAT dem neuen Einstand.
   const kommZeilen: EditLine[] = teile.map((t) => {
     if (!t.added && !t.changed) {
       const l = t.line!;
+      const einstand = neuerEinstand.get(t.productId);
+      const folgt = s(l.tax_scheme) === 'MARGIN' && einstand !== undefined && F(einstand) !== F(l.purchase_price_snapshot);
       return {
         lineId: s(l.id), productId: t.productId, lotId: s(l.lot_id) || undefined, quantity: 1,
-        unitPrice: Number(l.unit_price) || 0, purchasePrice: neuerEinstand.get(t.productId) ?? (Number(l.purchase_price_snapshot) || 0),
-        taxScheme: s(l.tax_scheme), vatRate: Number(l.vat_rate) || 0, vatAmount: Number(l.vat_amount) || 0,
+        unitPrice: Number(l.unit_price) || 0, purchasePrice: einstand ?? (Number(l.purchase_price_snapshot) || 0),
+        taxScheme: s(l.tax_scheme), vatRate: Number(l.vat_rate) || 0,
+        vatAmount: folgt ? vatEngine.marginVatOfLine(Number(l.line_total) || 0, einstand!, Number(l.quantity) || 1, Number(l.vat_rate) || 10) : Number(l.vat_amount) || 0,
         lineTotal: Number(l.line_total) || 0, ...(l.description ? { description: s(l.description) } : {}), houseAmounts: true,
       };
     }
+    const einstand = neuerEinstand.get(t.productId) ?? (Number(t.line?.purchase_price_snapshot) || 0);
     const base: EditLine = {
       productId: t.productId, quantity: 1, unitPrice: t.net, taxScheme: t.scheme, vatRate: t.scheme === 'ZERO' ? 0 : 10,
-      vatAmount: t.vat, lineTotal: t.gross, houseAmounts: true,
-      purchasePrice: neuerEinstand.get(t.productId) ?? (Number(t.line?.purchase_price_snapshot) || 0),
+      vatAmount: t.scheme === 'MARGIN' ? vatEngine.marginVatOfLine(t.gross, einstand, 1, 10) : t.vat, lineTotal: t.gross, houseAmounts: true,
+      purchasePrice: einstand,
     };
     if (t.added) return { ...base, lotId: neuesLos.get(t.productId) };
     return { ...base, lineId: s(t.line!.id), lotId: s(t.line!.lot_id) || undefined,

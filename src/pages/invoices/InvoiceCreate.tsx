@@ -48,6 +48,7 @@ import { useConsignmentStore } from '@/stores/consignmentStore';
 import {
   ConsignmentInvoiceLines, consignmentRowsIssue, useConsignmentCorrectionPlan, useConsignmentInvoiceRows, type ConsignmentDraft,
 } from '@/components/invoices/ConsignmentInvoiceLines';
+import { useConsignorSchemes } from '@/components/invoices/consignor-schemes';
 import { createMixedInvoiceOnPrimary } from '@/core/consignment/consignment-finance-house';
 import {
   CONSIGNOR_OVERPAY_CHOICE_REQUIRED, mixedCorrectionBody, mixedInvoiceBody, type ConsignorOverpayChoice, type MixedInvoiceCorrection,
@@ -203,13 +204,15 @@ export function InvoiceCreate() {
     // P4 — Einkäufe und Verlust-Ausgaben der Einlieferer (am PC2 vom Primary): Zahlungsstand, Einkaufs-VAT, E2/E9-Wahl.
     if (isEditMode) { loadPurchases(); useExpenseStore.getState().loadExpenses(); }
   }, [mixedAllowed, isEditMode, loadConsignments, loadPurchases]);
-  const conRows = useConsignmentInvoiceRows(mixedAllowed ? conDrafts : [], isEditMode);
+  const [purchaseVat, setPurchaseVat] = useState<Record<string, 'ZERO' | 'VAT_10'>>({});
+  // VAT-CONSISTENCY (v0.8.99) — die Margen-VAT der Vorschau rechnet mit dem Einstand des Einlieferer-Einkaufs (seine Einkaufs-VAT).
+  const conSchemes = useConsignorSchemes(mixedAllowed ? conDrafts : [], consignorVat, purchaseVat, isEditMode);
+  const conRows = useConsignmentInvoiceRows(mixedAllowed ? conDrafts : [], conSchemes);
   const isMixed = mixedAllowed && !isEditMode && conRows.length > 0;
   /** P4 — die Kommissionen, die beim Laden an dieser Rechnung hingen (gebunden). */
   const [bound, setBound] = useState<Consignment[]>([]);
   /** P4 — die Kommissionszeilen sind aus den Rechnungszeilen in den Abschnitt 2b gewandert (oder es gibt keine). */
   const [conHydrated, setConHydrated] = useState(!isEditMode);
-  const [purchaseVat, setPurchaseVat] = useState<Record<string, 'ZERO' | 'VAT_10'>>({});
   const [overpay, setOverpay] = useState<Record<string, ConsignorOverpayChoice>>({});
   // E5/E9 — die Wahl je Kommission für eine schon bezahlte Verlust-Ausgabe, die den neuen Verlust übersteigt.
   const [lossOverpay, setLossOverpay] = useState<Record<string, ConsignorOverpayChoice>>({});

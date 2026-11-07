@@ -136,10 +136,14 @@ export class VATEngine {
     };
   }
 
-  /** Plan §6 + §8: Netto = Kundenpreis. Sichtbar 0%, intern = profit/11 bei rate=10. */
+  /**
+   * Plan §6 + §8: Netto = Kundenpreis. Sichtbar 0%, intern = profit/11 bei rate=10.
+   * VAT-CONSISTENCY (v0.8.99) — der Einkauf zählt auf Fils gerundet, genau wie im NBR-Export (`purchase = round3(Einstand
+   * × Menge)`): so ergibt dieselbe Zeile in Rechnung, Hauptbuch, NBR und Auswertung dieselbe Margen-VAT. Negative Marge = 0.
+   */
   calcMarginFromNet(netAmount: number, purchasePrice: number, vatRate: number): TaxCalculation {
     const net = round(netAmount);
-    const profit = Math.max(0, net - purchasePrice);
+    const profit = Math.max(0, net - round(purchasePrice));
     const internalVat = round(profit * vatRate / (100 + vatRate));
     return {
       netAmount: net,
@@ -151,6 +155,17 @@ export class VATEngine {
       purchasePriceSnapshot: purchasePrice,
       marginUsedForTax: round(profit),
     };
+  }
+
+  /**
+   * VAT-CONSISTENCY (v0.8.99) — die Margen-VAT EINER gespeicherten Rechnungszeile: aus dem Zeilenbetrag (bei Margin =
+   * Kundenpreis) und dem Einstand je Stück, den die Zeile wirklich hält (`purchase_price_snapshot` = Wareneinsatz).
+   * Eine Stelle für das Haus (Anlegen, Ändern, Kommission), die VAT-Auswertung und die Berichte; der NBR-Export rechnet
+   * dieselbe Zahl (`test/vat/margin-vat-consistency.test.ts` vergleicht beide). Satz 0/fehlend = 10 wie im Export.
+   */
+  marginVatOfLine(lineTotal: number, unitCost: number, quantity: number, vatRate: number): number {
+    const qty = Math.max(1, Number(quantity) || 1);
+    return this.calcMarginFromNet(Number(lineTotal) || 0, (Number(unitCost) || 0) * qty, Number(vatRate) || 10).internalVatAmount ?? 0;
   }
 
   /**

@@ -24,6 +24,17 @@ Eine Kundenrechnung kann eigene Lagerware und Kommissionsware gleichzeitig trage
 | E11 | Korrekturen buchen auf den Tag des Originals (Gegenbuchung je Originaltransaktion), das Änderungsdatum steht im Protokoll. |
 | E12 | Mengen: **Weg A** — eine Kommissionsgruppe aus Einzelstücken (D-P5-1); vereinbarter Preis und Minimum **je Stück** (D-P5-2); eine Rechnungszeile **je Stück** (D-P5-3). |
 | E13 | Gemischte Rechnung anlegen und korrigieren: ADMIN und MANAGER. |
+| G4 (Owner 07.11.) | Margin VAT = (Verkaufspreis − **tatsächlicher Einkauf**) × 10/110. Bei zulässigem Margin Scheme ist das der Bruttoeinkauf einschließlich einer nicht abgezogenen Einkaufs-VAT. Es gibt keine doppelte Begünstigung: Wurde die Vorsteuer abgezogen, bleibt die Basis netto (siehe §9). |
+
+**Margin VAT, eine Regel (v0.8.99, VAT-CONSISTENCY).**
+- **Basis:** Die Margin VAT einer Zeile folgt dem Einstand, den die Zeile wirklich hält (`purchase_price_snapshot` = Wareneinsatz):
+  - Eigenware: der Los-Einstand. Ein Einkauf ohne VAT ergibt den vollen Preis (brutto), ein Einkauf mit VAT 10 % den Preis ohne die als Vorsteuer gebuchte VAT.
+  - Kommission: der Einkauf beim Einlieferer (`consignorLotCost`), also die Auszahlung, bei Unterdeckung der Verkaufspreis; mit Einkaufs-VAT 10 % netto.
+  - Nie der bei der Aufnahme geschätzte Artikel-Einkaufspreis.
+- **Formel:** `vatEngine.marginVatOfLine` / `calcMarginFromNet`. Der Einkauf wird auf Fils gerundet, wie im NBR-Export. Eine negative Marge ergibt 0.
+- **Haus:** Anlegen und neue Zeilen beim Ändern setzen die Margin VAT aus dem gehaltenen Einstand (`marginVatFromHeldCost`, `invoiceStore`). Ein Aufrufer mit anderem Wert (Agent, Auftrag, Aufnahme-Schätzung) verschiebt so nichts mehr.
+- **Korrektur (P4):** Eine unveränderte Zeile behält ihre gespeicherte VAT. Ändert sich nur ihr Einstand (Einkauf korrigiert, Einkaufs-VAT gewechselt), folgt die VAT dem neuen Einstand.
+- **Verbraucher:** Rechnungszeile, Hauptbuch (MARGIN_VAT), NBR-Export, VAT-Quartalsübersicht, Finanzauswertung („Total VAT", bis v0.8.98 doppelt gezählt) und Berichte rechnen dieselbe Zahl (`test/vat/margin-vat-consistency.test.ts`).
 
 ## 3. Wege (Haus = dieselbe Folge am Primary und für PC2)
 
@@ -71,7 +82,7 @@ Die Kommissionssperre am gewöhnlichen Änderungsweg (`assertConsignmentSaleInvo
 
 ## 8. Tests
 
-- Node: `test/p1a`, `test/p1b`, `test/p1c`, `test/p2/e10-tax-choice`, `test/p3/mixed-invoice-create`, `test/p4/mixed-invoice-correction`, `test/p5/consignment-quantities` (inkl. Migration auf dem v0.8.98-Schema und Versionswechsel), dazu die Kommissions-, Rechnungs-, Einkaufs- und Manifest-Suiten.
+- Node: `test/p1a`, `test/p1b`, `test/p1c`, `test/p2/e10-tax-choice`, `test/p3/mixed-invoice-create`, `test/p4/mixed-invoice-correction`, `test/p5/consignment-quantities` (inkl. Migration auf dem v0.8.98-Schema und Versionswechsel), `test/vat/margin-vat-consistency` (Margin VAT: Zeile = Hauptbuch = NBR = Auswertung, G4), dazu die Kommissions-, Rechnungs-, Einkaufs- und Manifest-Suiten.
 - E2E (zwei echte Test-Apps): `mixed-invoice-p3`, `mixed-invoice-p4`, `consignment-quantities-p5` (inkl. PC2-Leiste bei 1400×900), `consignment-multi-sale-pc2`, `r5f`, `r5f1`, `r6f`, `custom-order-pc2`, `r5b-create-parity`, `consignment-duplicate-create`, `restore-safety`; Handy: `test/preg5/mobile-consignment-page.e2e.mjs` und `pre-g5-mobile-consignment`.
 - Die Generatoren der P3–P5-Tests lagen während der Entwicklung außerhalb des Repositorys; die erzeugten Dateien sind die Quelle.
 - Testisolation (seit 07.11.2026): `test/e2e-safety/locator-isolation.test.ts` (Testtreiber) und `test/e2e-safety/data-root-isolation.e2e.mjs` (Laufzeitsperre der Test-App).
@@ -79,5 +90,9 @@ Die Kommissionssperre am gewöhnlichen Änderungsweg (`assertConsignmentSaleInvo
 
 ## 9. Bekannte offene Punkte
 
-- **G4:** Margen-Basis nach einem VAT-10-%-Einkauf (D5: Formel unverändert) — Frage an den Buchhalter.
+- **G4-Blocker, Freigabe Buchhalter/NBR:** Margin-Verkauf nach einem Einkauf mit Vorsteuerabzug. Das betrifft Eigenware mit VAT 10 % und Kommission mit Einkaufs-VAT 10 %.
+  - **Heute:** Die Vorsteuer ist gebucht und die Margenbasis netto (D5, unverändert). Eine Bruttobasis würde Vorsteuer und Bruttobasis doppelt begünstigen; deshalb wird sie hier nicht aktiviert.
+  - **Offen:** ob für diese Ware das Margin Scheme überhaupt zulässig ist (Bahrain-VAT-Ausführungsverordnung Art. 31, NBR-Leitfäden; Einschränkungen u. a. für Edelmetalle, Edelsteine, Perlen, Schmuck), sonst Verkauf mit VAT 10 %.
+  - Die App prüft weder die NBR-Zulassung noch die Warenberechtigung; „Margin" ist eine Auswahl des Bedieners.
+  - Im Bestand vom 07.11.2026 kommt kein solcher Fall vor (`E:\software\lataif\vat-pruefung\2026-11-07\`).
 - `posting.ts` liegt mit CRLF im Repository: `git diff --check` mit `-c core.whitespace=cr-at-eol` prüfen.
