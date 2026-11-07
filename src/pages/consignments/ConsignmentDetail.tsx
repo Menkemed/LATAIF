@@ -46,6 +46,7 @@ import type { ReturnRefundMethod } from '@/core/returns/return-create';
 import { saveSupplierCreditRepayment, viaWrites } from '@/core/payables/payables-save';
 import { latestBusinessDate } from '@/core/utils/business-date';
 import { productDisplayName } from '@/core/products/display-name';
+import { summarizeGroup, groupStatusLine, pieceLabel } from '@/core/consignment/consignment-group';
 
 const REFUND_LABEL: Record<ReturnRefundMethod, string> = {
   cash: 'Cash', bank: 'Bank Transfer', card: 'Card', benefit: 'Benefit', credit: 'Store Credit', other: 'Other',
@@ -209,6 +210,11 @@ export function ConsignmentDetail() {
       || purchases.find(p => p.status !== 'CANCELLED' && (p.lines || []).some(l => l.sourceConsignmentId === consignment.id))
       || purchases.find(p => !p.sourceConsignmentId && p.status !== 'CANCELLED' && (p.notes || '').includes(consignment.consignmentNumber)) || null;
   }, [purchases, consignment]);
+  // P5 (E12) — die Gruppe dieser Kommission (alle Stücke derselben Aufnahme); eine Einzelkommission hat keine.
+  const pieceGroup = useMemo(() => {
+    if (!consignment?.groupId) return null;
+    return summarizeGroup(consignments.filter(c => c.groupId === consignment.groupId));
+  }, [consignments, consignment]);
   // D2 — die Kommissionen DESSELBEN Verkaufs (eine Rechnung): Cancel Sale nimmt sie alle zurück.
   const saleGroup = useMemo(() => {
     if (!consignment?.invoiceId) return consignment ? [consignment] : [];
@@ -584,6 +590,62 @@ export function ConsignmentDetail() {
                 </Button>
               )}
             </div>
+          </Card>
+        )}
+
+        {/* P5 (E12) — die Gruppe: ursprüngliche Menge, verfügbarer Rest, jedes Stück mit Status, Rechnung und Auszahlung.
+            Jedes Stück bleibt eine eigene Kommission: Verkauf, Retoure, Auszahlung und Korrektur laufen je Stück. */}
+        {pieceGroup && (
+          <Card style={{ padding: 14, marginBottom: 18 }}>
+            <div data-consignment-detail-group={pieceGroup.groupId} className="flex items-center justify-between" style={{ marginBottom: 10 }}>
+              <span className="text-overline" style={{ display: 'block' }}>
+                Group {'\u00B7'} {pieceLabel(consignment)}
+              </span>
+              <span data-consignment-detail-group-status style={{ fontSize: 12, color: '#4B5563' }}>{groupStatusLine(pieceGroup)}</span>
+            </div>
+            <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+              <thead>
+                <tr style={{ borderBottom: '1px solid #E5E9EE' }}>
+                  {['Piece', 'Number', 'SKU', 'Status', 'Invoice', 'Payout'].map(h => (
+                    <th key={h} style={{ padding: '6px 8px', textAlign: 'left', fontSize: 10, fontWeight: 500, letterSpacing: '0.06em', color: '#6B7280', textTransform: 'uppercase' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {pieceGroup.pieces.map(pc => {
+                  const pProd = products.find(x => x.id === pc.productId);
+                  const pInv = pc.invoiceId ? invoices.find(x => x.id === pc.invoiceId) : undefined;
+                  const diese = pc.id === consignment.id;
+                  return (
+                    <tr key={pc.id} data-consignment-detail-piece={pc.groupSeq ?? ''}
+                      style={{ borderBottom: '1px solid #F1F3F5', background: diese ? 'rgba(113,93,227,0.06)' : 'transparent' }}>
+                      <td style={{ padding: '6px 8px', fontSize: 12, color: '#0F0F10' }}>{pc.groupSeq ?? '\u2014'}</td>
+                      <td style={{ padding: '6px 8px' }}>
+                        {diese
+                          ? <span className="font-mono" style={{ fontSize: 12, color: '#0F0F10', fontWeight: 600 }}>{pc.consignmentNumber}</span>
+                          : <button type="button" onClick={() => navigate(`/consignments/${pc.id}`)} className="cursor-pointer font-mono"
+                              style={{ background: 'none', border: 'none', padding: 0, fontSize: 12, color: '#715DE3', textDecoration: 'underline', textDecorationStyle: 'dotted', textUnderlineOffset: 2 }}>
+                              {pc.consignmentNumber}
+                            </button>}
+                      </td>
+                      <td className="font-mono" style={{ padding: '6px 8px', fontSize: 11, color: '#6B7280' }}>{pProd?.sku || '\u2014'}</td>
+                      <td style={{ padding: '6px 8px' }}><StatusDot status={pc.status} /></td>
+                      <td style={{ padding: '6px 8px', fontSize: 12 }}>
+                        {pInv
+                          ? <button type="button" onClick={() => navigate(`/invoices/${pInv.id}`)} className="cursor-pointer font-mono"
+                              style={{ background: 'none', border: 'none', padding: 0, fontSize: 12, color: '#715DE3', textDecoration: 'underline', textDecorationStyle: 'dotted', textUnderlineOffset: 2 }}>
+                              {formatInvoiceDisplayShort(pInv)}
+                            </button>
+                          : <span style={{ color: '#9CA3AF' }}>{'\u2014'}</span>}
+                      </td>
+                      <td style={{ padding: '6px 8px', fontSize: 12, color: '#4B5563' }}>
+                        {pc.status === 'active' ? '\u2014' : pc.payoutStatus.replace(/_/g, ' ')}
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
           </Card>
         )}
 

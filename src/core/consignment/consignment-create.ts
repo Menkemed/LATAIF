@@ -33,6 +33,8 @@ import { businessDateIssue } from '@/core/utils/business-date';
 import { CONSIGNMENT_PRODUCT_FIELDS, createPayload } from '@/core/data/write-payloads';
 import { useProductStore } from '@/stores/productStore';
 import { useConsignmentStore } from '@/stores/consignmentStore';
+import { logAuditOrThrow } from '@/core/audit/audit-log';
+import { v4 as uuid } from 'uuid';
 import type { Category, Consignment, Product } from '@/core/models/types';
 import type { MediaSource, ProductCreateResult } from '@/core/media/product-media-create';
 
@@ -67,6 +69,26 @@ export interface ConsignmentCreateInput {
   agreementDate?: string;
   notes?: string;
   staffId?: string;
+  /** P5 (E12, Owner D-P5-1/2) — Menge identischer Stücke (1–50, ohne Angabe 1). Jedes Stück wird ein eigener
+   *  Artikel und eine eigene Kommission; der vereinbarte Preis und das Minimum gelten JE STÜCK. */
+  quantity?: number;
+}
+
+/** P5 — die größte Gruppe einer Aufnahme (gleich der Obergrenze des Mehrfachverkaufs). */
+export const CONSIGNMENT_GROUP_MAX = 50;
+
+/** P5 — die Menge prüfen: fehlt sie, gilt 1; sonst nur eine ganze Zahl von 1 bis 50. */
+export function consignmentQuantityIssue(q: unknown): string | null {
+  if (q === undefined || q === null) return null;
+  if (typeof q !== 'number' || !Number.isInteger(q) || q < 1 || q > CONSIGNMENT_GROUP_MAX) {
+    return `Quantity must be a whole number from 1 to ${CONSIGNMENT_GROUP_MAX}.`;
+  }
+  return null;
+}
+
+/** P5 — die SKU eines Stücks aus einer getippten SKU: bei einer Gruppe `SKU-1 … SKU-N`, sonst unverändert. */
+export function groupPieceSku(typed: string, seq: number, quantity: number): string {
+  return quantity > 1 ? `${typed}-${seq}` : typed;
 }
 
 export interface ConsignmentCreatePort {
@@ -78,16 +100,26 @@ export interface ConsignmentCreatePort {
   createConsignment: (data: Partial<Consignment>) => Consignment;
 }
 
-export interface ConsignmentCreated {
+export interface ConsignmentPiece {
   consignment: Consignment;
   productId: string;
   sku: string;
+}
+
+export interface ConsignmentCreated extends ConsignmentPiece {
+  /** P5 — alle Stücke der Aufnahme in Stückfolge (bei Menge 1 genau eines; das erste steht auch oben). */
+  pieces: ConsignmentPiece[];
+  /** P5 — die Gruppenkennung, nur bei Menge ≥ 2. */
+  groupId?: string;
 }
 
 /** Der Vorgang selbst — ohne eigene Klammer. Wer ihn ruft, hält die Transaktion. */
 export async function createConsignmentWithProduct(
   input: ConsignmentCreateInput, images: MediaSource, port: ConsignmentCreatePort,
 ): Promise<ConsignmentCreated> {
+  const mengeFehler = consignmentQuantityIssue(input.quantity);
+  if (mengeFehler) throw new ConsignmentCreateRejected('QUANTITY_INVALID', mengeFehler);
+  const menge = input.quantity ?? 1;
   if (!input.consignorId || !port.consignorExists(input.consignorId)) {
     throw new ConsignmentCreateRejected('CONSIGNOR_NOT_FOUND', 'no such client in this branch');
   }
@@ -107,44 +139,73 @@ export async function createConsignmentWithProduct(
   }
 
   const categoryId = String(input.product.categoryId ?? '');
-  const plan = planProductCreate({ ...input.product, categoryId }, {
-    category: port.category(categoryId), isSkuTaken: port.isSkuTaken, allocateSku: port.allocateSku,
-  });
-  if (plan.kind !== 'ok') {
-    const r = productCreateRefusal(plan);
-    throw new ConsignmentCreateRejected(r.code, r.message);
+  const planPort = { category: port.category(categoryId), isSkuTaken: port.isSkuTaken, allocateSku: port.allocateSku };
+  // P5 — ALLE Stücke werden vor dem ersten Artikel geplant: Pflichtfelder einmal, die SKU je Stück. Eine getippte
+  // SKU wird bei einer Gruppe `SKU-1 … SKU-N`; ist eine davon vergeben, entsteht nichts. Ohne getippte SKU vergibt
+  // der Zähler je Stück eine (in derselben Transaktion — ein Fehlschlag gibt die Nummern zurück).
+  const typed = skuIsEmpty(input.product.sku) ? '' : String(input.product.sku).trim();
+  const plaene = [];
+  for (let seq = 1; seq <= menge; seq++) {
+    const plan = planProductCreate({ ...input.product, categoryId, sku: typed ? groupPieceSku(typed, seq, menge) : input.product.sku }, planPort);
+    if (plan.kind !== 'ok') {
+      const r = productCreateRefusal(plan);
+      throw new ConsignmentCreateRejected(r.code, r.message);
+    }
+    plaene.push(plan);
   }
+  const groupId = menge > 1 ? uuid() : undefined;
 
-  // Der Artikel über DENSELBEN Anlageweg wie jede andere Anlage — mit den vier festen Werten des
-  // Kommissionseingangs: die Ware gehört uns nicht, was sie uns kostet, entscheidet der Verkauf.
-  const { images: _nichtHier, ...ohneBilder } = plan.data;
-  void _nichtHier;
-  const made = await port.createProductWithMedia({
-    ...ohneBilder,
-    purchasePrice: 0,
-    stockStatus: 'consignment',
-    sourceType: 'CONSIGNMENT',
-    quantity: 1,
-  }, images);
-  if (made.status !== 'created') {
-    throw new ConsignmentMediaIncomplete(`${made.status}: ${made.errorCode}`);
+  const pieces: ConsignmentPiece[] = [];
+  for (let i = 0; i < plaene.length; i++) {
+    const plan = plaene[i];
+    // Der Artikel über DENSELBEN Anlageweg wie jede andere Anlage — mit den vier festen Werten des
+    // Kommissionseingangs: die Ware gehört uns nicht, was sie uns kostet, entscheidet der Verkauf.
+    // P5 — dieselben Bilder je Stück: der Medienspeicher legt jede Datei nur EINMAL ab (Inhaltsschlüssel) und
+    // verknüpft sie mit jedem Artikel.
+    const { images: _nichtHier, ...ohneBilder } = plan.data;
+    void _nichtHier;
+    const made = await port.createProductWithMedia({
+      ...ohneBilder,
+      purchasePrice: 0,
+      stockStatus: 'consignment',
+      sourceType: 'CONSIGNMENT',
+      quantity: 1,
+    }, images);
+    if (made.status !== 'created') {
+      throw new ConsignmentMediaIncomplete(`${made.status}: ${made.errorCode}`);
+    }
+
+    const consignment = port.createConsignment({
+      consignorId: input.consignorId,
+      productId: made.productId,
+      // D-P5-2 — der vereinbarte Preis und das Minimum gelten je Stück.
+      agreedPrice: Number(input.agreedPrice),
+      minimumPrice: input.minimumPrice,
+      commissionType: patch.commissionType,
+      // Model 1 (percent): der Satz. Model 2/3: kein eigener Satz — genau wie bisher an der Maske.
+      commissionRate: patch.commissionType === 'percent' ? patch.commissionRate : 0,
+      excessSplitPct: patch.excessSplitPct ?? undefined,
+      expiryDate: input.expiryDate || undefined,
+      agreementDate: input.agreementDate || undefined,
+      notes: input.notes || undefined,
+      staffId: input.staffId || undefined,
+      ...(groupId ? { groupId, groupSeq: i + 1, groupQuantity: menge } : {}),
+    });
+    pieces.push({ consignment, productId: made.productId, sku: plan.data.sku });
   }
-
-  const consignment = port.createConsignment({
-    consignorId: input.consignorId,
-    productId: made.productId,
-    agreedPrice: Number(input.agreedPrice),
-    minimumPrice: input.minimumPrice,
-    commissionType: patch.commissionType,
-    // Model 1 (percent): der Satz. Model 2/3: kein eigener Satz — genau wie bisher an der Maske.
-    commissionRate: patch.commissionType === 'percent' ? patch.commissionRate : 0,
-    excessSplitPct: patch.excessSplitPct ?? undefined,
-    expiryDate: input.expiryDate || undefined,
-    agreementDate: input.agreementDate || undefined,
-    notes: input.notes || undefined,
-    staffId: input.staffId || undefined,
-  });
-  return { consignment, productId: made.productId, sku: plan.data.sku };
+  if (groupId) {
+    // Das Protokoll der Gruppe — im selben Vorgang: scheitert es, entsteht keine Gruppe.
+    logAuditOrThrow({
+      module: 'Consignment', entityType: 'consignments', entityId: pieces[0].consignment.id, action: 'CREATE',
+      field: 'consignment_group_created',
+      newValue: {
+        groupId, quantity: menge, consignorId: input.consignorId, agreedPricePerPiece: Number(input.agreedPrice),
+        consignments: pieces.map((p) => p.consignment.id), numbers: pieces.map((p) => p.consignment.consignmentNumber),
+        products: pieces.map((p) => p.productId), skus: pieces.map((p) => p.sku),
+      },
+    });
+  }
+  return { ...pieces[0], pieces, ...(groupId ? { groupId } : {}) };
 }
 
 /**
@@ -218,6 +279,9 @@ export function consignmentCreateRequest(input: ConsignmentCreateInput, stagingI
   if (input.agreementDate) body.agreementDate = input.agreementDate;
   if (input.notes) body.notes = input.notes;
   if (input.staffId) body.staffId = input.staffId;
+  // P5 — die Menge reist nur, wenn sie mehr als ein Stück ist: der Rumpf einer Einzelaufnahme bleibt wie bisher, und ein
+  // älterer Primary (strenger Rumpf) weist eine Gruppe ab, statt still ein Stück anzulegen.
+  if (input.quantity !== undefined && input.quantity > 1) body.quantity = input.quantity;
   if (stagingIds.length > 0) body.stagingIds = [...stagingIds];
   return body;
 }

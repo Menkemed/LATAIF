@@ -231,6 +231,9 @@
     AMOUNT_REQUIRED: 'Please enter an amount greater than zero.',
     METHOD_REQUIRED: 'Please choose how the consignor is paid.',
     PRODUCT_REQUIRED: 'This consignment has no item loaded.',
+    QUANTITY_INVALID: 'The quantity must be a whole number from 1 to 50.',
+    SALE_QUANTITY_INVALID: 'The pieces to sell must be a whole number from 1 to 50.',
+    SALE_QUANTITY_TOO_HIGH: 'Not that many pieces of this group are still available — open it again.',
   };
   function cnMessageFor(r, was) {
     if (r.kind === 'rejected') return was + ': ' + (r.code || 'refused by the main computer') + '.';
@@ -285,7 +288,26 @@
     cnSay('cnHomeError', '');
     const items = (r.value && r.value.items) || [];
     if (!items.length) { box.appendChild(el('div', { class: 'hint' }, 'No consignments found.')); return; }
+    // P5 (E12) — die Stuecke einer Gruppe stehen als EINE Karte („Group × 5 · 3 available"); sie oeffnet das
+    // verfuegbare Stueck mit der kleinsten Nummer (sonst das erste). Einzelkommissionen wie bisher.
+    const gesehen = {};
     items.forEach((it) => {
+      if (it.groupId) {
+        if (gesehen[it.groupId]) return;
+        gesehen[it.groupId] = true;
+        const stuecke = items.filter((x) => x.groupId === it.groupId)
+          .sort((a, b) => (Number(a.groupSeq) || 0) - (Number(b.groupSeq) || 0));
+        const frei = stuecke.filter((x) => x.status === 'active' && !x.invoiceId);
+        const ziel = frei[0] || stuecke[0];
+        const card = el('div', { class: 'card' });
+        const b = el('button', { type: 'button', class: 'secondary', 'data-cn-group': it.groupId },
+          'Group × ' + (it.groupQuantity || stuecke.length) + ' · ' + frei.length + ' available · ' + it.agreedPrice + ' / piece · '
+          + stuecke[0].consignmentNumber + (stuecke.length > 1 ? ' … ' + stuecke[stuecke.length - 1].consignmentNumber : ''));
+        b.onclick = () => cnOpen(ziel.id);
+        card.appendChild(b);
+        box.appendChild(card);
+        return;
+      }
       const card = el('div', { class: 'card' });
       const b = el('button', { type: 'button', class: 'secondary' },
         it.consignmentNumber + ' · ' + it.agreedPrice + ' · ' + it.status);
@@ -339,6 +361,7 @@
     $('cnHeadline').textContent = con.consignmentNumber || 'Consignment';
     $('cnSubline').textContent = (CN.product ? MobileDisplayName.displayName(CN.product, (catById(CN.product.categoryId || CN.product.category_id) || {}).name) : '') || 'Consigned item';
     $('cnConsignorCard').classList.add('hidden');
+    $('cnQuantityRow').classList.add('hidden');    // P5 — eine bestehende Kommission ist genau ein Stueck
     $('cnItemCard').classList.add('hidden');       // die Ware selbst wird am Rechner geaendert
     $('cnDuplicateCard').classList.add('hidden');
     $('cnSaveBtn').textContent = 'Save Changes';
@@ -436,6 +459,7 @@
       con.invoiceId ? 'Invoiced' : '',
     ].filter(Boolean);
     $('cnStateLines').textContent = zeilen.join(' · ');
+    cnRenderGroup(con);
     // Was der Primary nicht mehr annimmt, bietet die Maske nicht an: ein verkaufter Artikel wird
     // nicht noch einmal verkauft, ein zurueckgegebener nicht ausgezahlt.
     const verkauft = !!con.salePrice || con.status === 'sold';
@@ -448,6 +472,62 @@
     $('cnReturnBtn').classList.toggle('hidden', verkauft || beendet);
     if (offenerRest && !$('cnPayoutAmount').value) $('cnPayoutAmount').value = String(con.payoutOpenAmount);
   }
+
+  /**
+   * P5 (E12) — die Gruppe der geoeffneten Kommission: Menge, Rest, jedes Stueck (antippen oeffnet es), und beim Verkauf
+   * die Wahl „Pieces to sell" (1 … verfuegbar). Eine Einzelkommission zeigt nichts davon.
+   */
+  function cnRenderGroup(con) {
+    const gruppe = (con && Array.isArray(con.group)) ? con.group : [];
+    const karte = $('cnGroupCard');
+    const liste = $('cnGroupPieces');
+    liste.innerHTML = '';
+    if (!con || !con.groupId || gruppe.length === 0) {
+      karte.classList.add('hidden');
+      $('cnSaleQtyRow').classList.add('hidden');
+      $('cnSaleQty').value = '1';
+      return;
+    }
+    karte.classList.remove('hidden');
+    const frei = MobileConsignment.availablePieces(con);
+    const zaehler = {};
+    gruppe.forEach((g) => { zaehler[g.status] = (zaehler[g.status] || 0) + 1; });
+    $('cnGroupBadge').textContent = 'piece ' + (con.groupSeq || '?') + ' of ' + (con.groupQuantity || gruppe.length);
+    $('cnGroupLines').textContent = ['Group of ' + (con.groupQuantity || gruppe.length), frei.length + ' available']
+      .concat(Object.keys(zaehler).filter((k) => k !== 'active').map((k) => zaehler[k] + ' ' + k.replace('_', ' ')))
+      .join(' · ');
+    gruppe.forEach((g) => {
+      const b = el('button', { type: 'button', class: 'secondary', 'data-cn-piece': String(g.groupSeq || '') },
+        (g.groupSeq || '?') + ' · ' + g.consignmentNumber + ' · ' + g.status + (g.id === con.id ? ' (open)' : ''));
+      b.disabled = g.id === con.id;
+      b.onclick = () => cnOpen(g.id);
+      liste.appendChild(b);
+    });
+    const mehr = frei.length > 1 && con.status === 'active' && !con.invoiceId;
+    $('cnSaleQtyRow').classList.toggle('hidden', !mehr);
+    $('cnSaleQty').max = String(Math.max(1, frei.length));
+    if (!mehr || Number($('cnSaleQty').value) > frei.length) $('cnSaleQty').value = '1';
+    $('cnSaleQtyHint').textContent = 'Pieces to sell — of ' + frei.length + ' available (this piece first, then the lowest numbers). One invoice line per piece at the price per piece.';
+  }
+  $('cnSaleQty').oninput = () => cnShortfallZuruecksetzen();
+  /** P5 — beim Erfassen: ab zwei Stuecken gilt der Preis je Stueck (Owner D-P5-2); die Maske sagt, was entsteht. */
+  function cnMengeHinweis() {
+    const menge = Number($('cnQuantity').value);
+    const gruppe = Number.isInteger(menge) && menge > 1;
+    $('cnAgreedPriceLabel').innerHTML = (gruppe ? 'Agreed price per piece (BHD)' : 'Agreed price (BHD)') + ' <span class="req">*</span>';
+    const hinweis = $('cnQuantityHint');
+    if (gruppe && menge <= MobileConsignment.MAX_GROUP) {
+      hinweis.textContent = menge + ' pieces as one group — each its own item (own SKU) and its own consignment, same photos and terms. Agreed and minimum price apply per piece.';
+      hinweis.classList.remove('hidden');
+    } else if ($('cnQuantity').value.trim() !== '' && !(Number.isInteger(menge) && menge >= 1 && menge <= MobileConsignment.MAX_GROUP)) {
+      hinweis.textContent = CN_GRUND.QUANTITY_INVALID;
+      hinweis.classList.remove('hidden');
+    } else {
+      hinweis.textContent = '';
+      hinweis.classList.add('hidden');
+    }
+  }
+  $('cnQuantity').oninput = cnMengeHinweis;
 
   /** Welche Felder ein Auszahlungsmodell braucht — dieselbe Weiche wie `payoutFieldsFor`. */
   function cnPayoutFelder() {
@@ -619,6 +699,11 @@
     $('cnPayoutLockMsg').classList.add('hidden');
     cnPayoutFelder();
     cnRenderFields($('cnCategory').value);
+    // P5 (E12) — die Menge nur beim Erfassen; eine bestehende Kommission ist genau ein Stueck.
+    $('cnQuantity').value = '1';
+    $('cnQuantityRow').classList.remove('hidden');
+    cnMengeHinweis();
+    $('cnGroupCard').classList.add('hidden');
     $('cnHeadline').textContent = 'New Consignment Intake';
     $('cnSubline').textContent = 'An item left with us to sell';
     $('cnConsignorCard').classList.remove('hidden');
@@ -648,6 +733,7 @@
       attributes: merkmale.attributes, scopeOfDelivery: Array.from(CN.scope),
       agreedPrice: $('cnAgreedPrice').value, minimumPrice: $('cnMinimumPrice').value,
       expiryDate: $('cnExpiryDate').value, notes: $('cnNotes').value,
+      quantity: $('cnQuantity').value,
       payoutModel: $('cnPayoutModel').value,
       commissionRate: $('cnCommissionRate').value, excessSplitPct: $('cnExcessSplitPct').value,
     };
@@ -677,7 +763,11 @@
       $('cnDuplicateCard').classList.add('hidden');
       const neu = r.value || {};
       if (neu.consignmentId) await cnOpen(neu.consignmentId, { keepMsgs: true });
-      cnSay('cnSuccess', 'Saved as ' + (neu.consignmentNumber || 'a new consignment') + '.');
+      // P5 — eine Gruppe nennt alle Stuecke.
+      const stuecke = Array.isArray(neu.pieces) ? neu.pieces : [];
+      cnSay('cnSuccess', stuecke.length > 1
+        ? ('Saved ' + stuecke.length + ' pieces as one group: ' + stuecke[0].consignmentNumber + ' … ' + stuecke[stuecke.length - 1].consignmentNumber + '.')
+        : ('Saved as ' + (neu.consignmentNumber || 'a new consignment') + '.'));
       return;
     }
     if (r.kind === 'rejected' && r.code === 'POSSIBLE_DUPLICATE') {
@@ -937,15 +1027,20 @@
     const bestaetigt = CN.shortfallOffen === true && $('cnShortfallAck').checked === true;
     // MIXED-INVOICE E7 — das zweite Ja; ein eigener Auftragsschlüssel je Antwort (ein Nein bleibt seinem Auftrag).
     const vatBestaetigt = CN.vatShortfallOffen === true && $('cnVatShortfallAck').checked === true;
-    const zweck = 'sale' + (bestaetigt ? '-ack' : '') + (vatBestaetigt ? '-vatack' : '');
-    const gut = await cnHandlung('consignments.record_sale', zweck, () => MobileConsignment.saleBody(CN.con, {
+    // P5 (E12) — „Pieces to sell" (nur bei einer Gruppe mit mehreren verfuegbaren Stuecken): k Stuecke ueber `items[]`.
+    // Ein eigener Auftragsschluessel je Menge — ein anderer Umfang ist ein anderer Verkauf.
+    const stueckzahl = $('cnSaleQtyRow').classList.contains('hidden') ? '1' : $('cnSaleQty').value;
+    const zweck = 'sale' + (stueckzahl !== '1' ? '-x' + stueckzahl : '') + (bestaetigt ? '-ack' : '') + (vatBestaetigt ? '-vatack' : '');
+    const gut = await cnHandlung('consignments.record_sale', zweck, () => MobileConsignment.groupSaleBody(CN.con, stueckzahl, {
       buyerId: CN.buyer ? CN.buyer.id : '', salePrice: $('cnSalePrice').value,
       specialMark: $('cnSpecialMark').value === 'special', notes: $('cnSaleNotes').value,
       taxScheme: $('cnSaleTaxScheme').value, consignorTaxScheme: $('cnSaleConsignorVat').value,
-    }, { acknowledgeShortfall: bestaetigt, acknowledgeVatShortfall: vatBestaetigt }), 'The sale was recorded.');
+    }, { acknowledgeShortfall: bestaetigt, acknowledgeVatShortfall: vatBestaetigt }), stueckzahl !== '1'
+      ? ('The sale of ' + stueckzahl + ' pieces was recorded.') : 'The sale was recorded.');
     if (gut) {
       cnShortfallZuruecksetzen();
       $('cnSalePrice').value = ''; $('cnSaleNotes').value = '';
+      $('cnSaleQty').value = '1';
       cnSetBuyer(null, '');
     }
   };

@@ -27,6 +27,7 @@ import {
 } from '@/core/invoices/mixed-invoice';
 import type { ConsignorPurchaseTaxScheme } from '@/core/consignment/consignment-finance';
 import { productDisplayName } from '@/core/products/display-name';
+import { pickAvailablePieces, pieceLabel, groupStatusLine, summarizeGroup } from '@/core/consignment/consignment-group';
 import type { Consignment, Purchase } from '@/core/models/types';
 
 /** Was der Mensch je Kommissionsartikel eingibt. */
@@ -328,26 +329,98 @@ export function ConsignmentInvoiceLines({ drafts, rows, onDrafts, consignorVat, 
   const { products } = useProductStore();
   const gewaehlt = useMemo(() => new Set(drafts.map((d) => d.consignmentId)), [drafts]);
   // Nur aktive Kommissionen ohne Rechnung; ein Artikel nur einmal je Rechnung.
-  const options = useMemo(() => consignments
+  const frei = useMemo(() => consignments
     .filter((c) => c.status === 'active' && !c.invoiceId && !gewaehlt.has(c.id)
-      && !drafts.some((d) => consignments.find((x) => x.id === d.consignmentId)?.productId === c.productId))
-    .map((c) => {
+      && !drafts.some((d) => consignments.find((x) => x.id === d.consignmentId)?.productId === c.productId)),
+  [consignments, gewaehlt, drafts]);
+  // P5 (E12) — eine Kommissionsgruppe erscheint EINMAL („group × 3 available"); gewählt wird das Stück mit der
+  // kleinsten Nummer, die Menge danach im Gruppenblock. Jedes Stück wird eine eigene Zeile (Owner D-P5-3).
+  const options = useMemo(() => {
+    const out: Array<{ id: string; label: string; subtitle: string; meta: string }> = [];
+    const gesehen = new Set<string>();
+    for (const c of frei) {
       const prod = products.find((p) => p.id === c.productId);
       const k = customers.find((x) => x.id === c.consignorId);
-      return {
+      const kName = k ? `${k.firstName} ${k.lastName}`.trim() : '—';
+      if (c.groupId) {
+        if (gesehen.has(c.groupId)) continue;
+        gesehen.add(c.groupId);
+        const n = frei.filter((x) => x.groupId === c.groupId).length;
+        out.push({
+          id: `group:${c.groupId}`,
+          label: `${prod ? productDisplayName(prod) : '—'} · group \u00D7 ${n} available`,
+          subtitle: `Consignor: ${kName} · agreed ${(c.agreedPrice || 0).toFixed(3)} BHD per piece`,
+          meta: commissionModelLabel(c),
+        });
+        continue;
+      }
+      out.push({
         id: c.id,
         label: `${c.consignmentNumber} · ${prod ? productDisplayName(prod) : '—'}`,
-        subtitle: `Consignor: ${k ? `${k.firstName} ${k.lastName}`.trim() : '—'} · agreed ${(c.agreedPrice || 0).toFixed(3)} BHD`,
+        subtitle: `Consignor: ${kName} · agreed ${(c.agreedPrice || 0).toFixed(3)} BHD`,
         meta: commissionModelLabel(c),
-      };
-    }), [consignments, products, customers, gewaehlt, drafts]);
+      });
+    }
+    return out;
+  }, [frei, products, customers]);
 
+  function draftFor(c: Consignment, vorlage?: ConsignmentDraft): ConsignmentDraft {
+    const prod = products.find((p) => p.id === c.productId);
+    const scheme = vorlage?.scheme ?? (((prod?.taxScheme as SaleScheme | undefined) || 'MARGIN') as SaleScheme);
+    const priceText = vorlage ? vorlage.priceText : (c.agreedPrice ? String(c.agreedPrice) : '');
+    return { consignmentId: c.id, priceText, scheme, ack: false, vatAck: false };
+  }
   function add(id: string) {
+    if (id.startsWith('group:')) {
+      const gid = id.slice('group:'.length);
+      const erstes = pickAvailablePieces(frei.filter((x) => x.groupId === gid), 1)[0];
+      if (erstes) onDrafts([...drafts, draftFor(erstes)]);
+      return;
+    }
     const c = consignments.find((x) => x.id === id);
     if (!c) return;
-    const prod = products.find((p) => p.id === c.productId);
-    const scheme = ((prod?.taxScheme as SaleScheme | undefined) || 'MARGIN') as SaleScheme;
-    onDrafts([...drafts, { consignmentId: id, priceText: c.agreedPrice ? String(c.agreedPrice) : '', scheme, ack: false, vatAck: false }]);
+    onDrafts([...drafts, draftFor(c)]);
+  }
+  // P5 — die Gruppen auf dieser Rechnung: Stücke auf der Rechnung, davon schon gespeichert (P4), höchstens möglich.
+  const invoiceGroups = useMemo(() => {
+    const gids: string[] = [];
+    for (const d of drafts) {
+      const g = consignments.find((x) => x.id === d.consignmentId)?.groupId;
+      if (g && !gids.includes(g)) gids.push(g);
+    }
+    return gids.map((gid) => {
+      const summary = summarizeGroup(consignments.filter((x) => x.groupId === gid))!;
+      const inInvoice = drafts.filter((d) => consignments.find((x) => x.id === d.consignmentId)?.groupId === gid);
+      const kept = inInvoice.filter((d) => !!d.kept).length;
+      const verfuegbar = frei.filter((x) => x.groupId === gid).length;
+      const neuePreise = [...new Set(inInvoice.filter((d) => !d.kept).map((d) => d.priceText))];
+      return { gid, summary, count: inInvoice.length, kept, min: Math.max(1, kept), max: inInvoice.length + verfuegbar, price: neuePreise.length === 1 ? neuePreise[0] : '' };
+    });
+  }, [drafts, consignments, frei]);
+  /** P5 — „Pieces on this invoice": mehr Stücke ⇒ die nächsten verfügbaren (Preis und Steuerart wie das erste Stück der
+   *  Gruppe); weniger ⇒ zuletzt hinzugefügte NEUE Zeilen fallen weg. Eine gespeicherte Zeile entfernt nur ihr Papierkorb (P4). */
+  function setGroupCount(gid: string, k: number) {
+    const inInvoice = drafts.filter((d) => consignments.find((x) => x.id === d.consignmentId)?.groupId === gid);
+    if (k > inInvoice.length) {
+      const vorlage = inInvoice.find((d) => !d.kept) ?? inInvoice[0];
+      const dazu = pickAvailablePieces(frei.filter((x) => x.groupId === gid), k - inInvoice.length);
+      onDrafts([...drafts, ...dazu.map((c) => draftFor(c, vorlage))]);
+      return;
+    }
+    let weg = inInvoice.length - k;
+    const raus = new Set<string>();
+    for (let i = drafts.length - 1; i >= 0 && weg > 0; i--) {
+      const d = drafts[i];
+      if (d.kept || consignments.find((x) => x.id === d.consignmentId)?.groupId !== gid) continue;
+      raus.add(d.consignmentId);
+      weg--;
+    }
+    if (raus.size > 0) onDrafts(drafts.filter((d) => !raus.has(d.consignmentId)));
+  }
+  /** P5 — „Price per piece" der Gruppe: für alle NEUEN Zeilen der Gruppe (eine gespeicherte Zeile ändert ihr eigenes Feld). */
+  function setGroupPrice(gid: string, v: string) {
+    onDrafts(drafts.map((d) => (!d.kept && consignments.find((x) => x.id === d.consignmentId)?.groupId === gid
+      ? { ...d, priceText: v, ack: false, vatAck: false } : d)));
   }
   // Eine Änderung von Preis oder Steuerart nimmt die Bestätigungen zurück — sie galten für die alten Werte.
   function patch(id: string, p: Partial<ConsignmentDraft>) {
@@ -366,6 +439,35 @@ export function ConsignmentInvoiceLines({ drafts, rows, onDrafts, consignorVat, 
         <div style={{ maxWidth: 520 }} data-mixed-con-add>
           <SearchSelect placeholder="Add a consignment item…" options={options} value="" onChange={(id) => { if (id) add(id); }} />
         </div>
+        {invoiceGroups.length > 0 && (
+          <div style={{ marginTop: 12, display: 'flex', flexDirection: 'column', gap: 8 }}>
+            {invoiceGroups.map((g) => {
+              const prod = products.find((p) => p.id === g.summary.pieces[0].productId);
+              return (
+                <div key={g.gid} data-mixed-con-group={g.gid}
+                  style={{ display: 'flex', alignItems: 'flex-end', gap: 16, flexWrap: 'wrap', padding: '10px 12px', borderRadius: 8, border: '1px solid rgba(198,163,109,0.45)', background: 'rgba(198,163,109,0.06)' }}>
+                  <div style={{ minWidth: 0, flex: '1 1 220px' }}>
+                    <div style={{ fontSize: 13, color: '#0F0F10' }}><b>{prod ? productDisplayName(prod) : 'Group'}</b>{` \u00B7 group of ${g.summary.quantity}`}</div>
+                    <div style={{ fontSize: 11, color: '#6B7280' }} data-mixed-con-group-status>{groupStatusLine(g.summary)}</div>
+                  </div>
+                  <label style={{ fontSize: 10, color: '#6B7280' }}>PIECES ON THIS INVOICE
+                    <input type="number" min={g.min} max={g.max} step={1} value={g.count} data-mixed-con-group-qty={g.gid}
+                      onChange={(e) => setGroupCount(g.gid, Math.max(g.min, Math.min(g.max, Math.floor(Number(e.target.value) || g.min))))}
+                      style={{ display: 'block', width: 110, marginTop: 4, height: 34, border: '1px solid #D5D9DE', borderRadius: 6, padding: '0 8px', fontSize: 13, textAlign: 'right' }} />
+                  </label>
+                  <label style={{ fontSize: 10, color: '#6B7280' }}>{g.kept > 0 ? 'PRICE PER NEW PIECE' : 'PRICE PER PIECE'}
+                    <input type="number" min="0" step="0.001" value={g.price} data-mixed-con-group-price={g.gid}
+                      onChange={(e) => setGroupPrice(g.gid, e.target.value)}
+                      style={{ display: 'block', width: 130, marginTop: 4, height: 34, border: '1px solid #D5D9DE', borderRadius: 6, padding: '0 8px', fontSize: 13, textAlign: 'right' }} />
+                  </label>
+                  <div style={{ flexBasis: '100%', fontSize: 11, color: '#6B7280' }}>
+                    {`of ${g.max} possible \u2014 the lowest available piece numbers are added. One line per piece; price and tax scheme stay editable per line.`}
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        )}
         {rows.length > 0 && (
           <div style={{ marginTop: 14, display: 'flex', flexDirection: 'column', gap: 10 }}>
             {rows.map((r) => {
@@ -376,7 +478,7 @@ export function ConsignmentInvoiceLines({ drafts, rows, onDrafts, consignorVat, 
                     <div style={{ minWidth: 0 }}>
                       <div style={{ fontSize: 13, color: '#0F0F10', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{r.label}</div>
                       <div style={{ fontSize: 11, color: '#6B7280' }}>
-                        <span className="font-mono">{r.con?.consignmentNumber}</span> · Consignor {r.consignorName}{r.con ? ` · ${commissionModelLabel(r.con)}` : ''}
+                        <span className="font-mono">{r.con?.consignmentNumber}</span>{r.con?.groupId ? <span data-mixed-con-piece={r.con.groupSeq ?? ''}>{` · ${pieceLabel(r.con)}`}</span> : null} · Consignor {r.consignorName}{r.con ? ` · ${commissionModelLabel(r.con)}` : ''}
                         {edit && (r.draft.kept
                           ? <span style={{ marginLeft: 6, color: r.changed ? '#B45309' : '#6B7280' }}>· on this invoice{r.changed ? ` (was ${r.draft.kept.salePrice.toFixed(3)})` : ''}</span>
                           : <span style={{ marginLeft: 6, color: '#2563EB' }}>· new on this invoice</span>)}

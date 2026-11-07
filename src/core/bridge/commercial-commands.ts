@@ -79,7 +79,7 @@ import {
   invokeReadStagedRecord, readStagedAsRecordImages,
 } from './remote-create-support';
 import {
-  createConsignmentWithProduct, houseConsignmentPort, ConsignmentCreateRejected, ConsignmentMediaIncomplete,
+  createConsignmentWithProduct, houseConsignmentPort, ConsignmentCreateRejected, ConsignmentMediaIncomplete, consignmentQuantityIssue,
   type ConsignmentCreateInput,
 } from '@/core/consignment/consignment-create';
 import { CONSIGNMENT_PRODUCT_FIELDS } from '@/core/data/write-payloads';
@@ -524,6 +524,8 @@ export interface ConsignmentCreateRequest {
   stagingIds: string[];
   /** „Trotzdem anlegen" — die bewusste Antwort auf einen Duplikatsverdacht. */
   acknowledgeDuplicate?: boolean;
+  /** P5 (E12) — Menge identischer Stücke (1–50); fehlt sie, ein Stück. */
+  quantity?: number;
 }
 
 /**
@@ -541,8 +543,11 @@ export function parseConsignmentCreate(raw: unknown): ConsignmentCreateRequest {
   if (!isPlain(raw)) throw new CommercialPayloadError('payload must be an object');
   onlyKnownFields(raw, [
     'consignorId', 'product', 'agreedPrice', 'minimumPrice', 'payout',
-    'expiryDate', 'notes', 'staffId', 'stagingIds', 'acknowledgeDuplicate', 'agreementDate',
+    'expiryDate', 'notes', 'staffId', 'stagingIds', 'acknowledgeDuplicate', 'agreementDate', 'quantity',
   ]);
+  // P5 — streng: eine ganze Zahl von 1 bis 50, sonst ist der Rumpf ungültig (kein stilles Abrunden, kein „1").
+  const mengeFehler = consignmentQuantityIssue(raw.quantity);
+  if (mengeFehler) throw new CommercialPayloadError(mengeFehler);
   if (!isPlain(raw.product)) throw new CommercialPayloadError('product is required');
   onlyKnownFields(raw.product, [...CONSIGNMENT_PRODUCT_FIELDS, 'sku']);
   if (!isPlain(raw.payout)) throw new CommercialPayloadError('payout is required');
@@ -596,6 +601,7 @@ export function parseConsignmentCreate(raw: unknown): ConsignmentCreateRequest {
     staffId: optString(raw.staffId, 'staffId'),
     stagingIds: parseStagingIds(raw.stagingIds, (m) => new CommercialPayloadError(m)),
     acknowledgeDuplicate: raw.acknowledgeDuplicate === true,
+    ...(raw.quantity === undefined || raw.quantity === null ? {} : { quantity: raw.quantity as number }),
   };
 }
 
@@ -649,6 +655,7 @@ export async function runConsignmentCreate(
       agreementDate: req.agreementDate,
       notes: req.notes,
       staffId: req.staffId,
+      ...(req.quantity !== undefined ? { quantity: req.quantity } : {}),
     };
     let made;
     try {
@@ -675,6 +682,19 @@ export async function runConsignmentCreate(
       status: created.status,
       imageCount: images.length,
       revision: Number(query('SELECT revision FROM consignments WHERE id = ?', [created.id])[0]?.revision ?? 1),
+      // P5 — eine Gruppe nennt alle Stücke (das erste steht oben, wie bei einer Einzelaufnahme).
+      ...(made.groupId ? {
+        groupId: made.groupId,
+        quantity: made.pieces.length,
+        pieces: made.pieces.map((pc) => ({
+          consignmentId: pc.consignment.id,
+          consignmentNumber: pc.consignment.consignmentNumber,
+          productId: pc.productId,
+          sku: pc.sku,
+          groupSeq: pc.consignment.groupSeq ?? null,
+          revision: Number(query('SELECT revision FROM consignments WHERE id = ?', [pc.consignment.id])[0]?.revision ?? 1),
+        })),
+      } : {}),
     };
     return value as unknown as Record<string, unknown>;
   });

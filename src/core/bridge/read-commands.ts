@@ -736,7 +736,7 @@ const CONSIGNMENT_COLUMNS =
   'id, consignment_number, consignor_id, product_id, agreed_price, minimum_price, commission_rate, '
   + 'commission_type, commission_value, excess_split_pct, status, agreement_date, expiry_date, '
   + 'payout_status, payout_paid_amount, sale_price, commission_amount, payout_amount, invoice_id, '
-  + 'updated_at, revision';
+  + 'updated_at, revision, group_id, group_seq, group_quantity';
 
 function consignmentDto(r: Row): CommandResult {
   return {
@@ -770,6 +770,10 @@ function consignmentDto(r: Row): CommandResult {
     invoiceId: str(r.invoice_id),
     revision: num(r.revision),
     updatedAt: str(r.updated_at),
+    // P5 (E12) — die Gruppe: Kennung, Stücknummer, ursprüngliche Menge (Altzeilen: keine Gruppe = null).
+    groupId: r.group_id === null || r.group_id === undefined ? null : str(r.group_id),
+    groupSeq: r.group_seq === null || r.group_seq === undefined ? null : num(r.group_seq),
+    groupQuantity: r.group_quantity === null || r.group_quantity === undefined ? null : num(r.group_quantity),
   };
 }
 
@@ -801,7 +805,20 @@ registerCommand(OP_CONSIGNMENTS_GET, {
     const branch = actorBranch(p);
     const found = rows(`SELECT ${CONSIGNMENT_COLUMNS}, notes FROM consignments WHERE id = ? AND branch_id = ?`, [idOf(p), branch]);
     if (found.length === 0) throw new BusinessError('NOT_FOUND', 'no such consignment in this branch');
-    return { ...consignmentDto(found[0]), notes: str(found[0].notes) };
+    // P5 (E12) — die Stücke derselben Gruppe (mit Fassung): daraus wählt das Handy die k verfügbaren Stücke eines
+    // Teilverkaufs; gebucht wird je Stück über den vorhandenen Mehrfachverkauf (`items[]`).
+    const gruppe = found[0].group_id
+      ? rows(
+        `SELECT ${CONSIGNMENT_COLUMNS} FROM consignments WHERE branch_id = ? AND group_id = ? ORDER BY group_seq ASC, consignment_number ASC`,
+        [branch, found[0].group_id],
+      ).map((g) => ({
+        id: str(g.id), consignmentNumber: str(g.consignment_number), productId: str(g.product_id),
+        groupSeq: g.group_seq === null ? null : num(g.group_seq), status: str(g.status), revision: num(g.revision),
+        agreedPrice: num(g.agreed_price), minimumPrice: g.minimum_price === null ? null : num(g.minimum_price),
+        invoiceId: str(g.invoice_id), payoutStatus: str(g.payout_status),
+      }))
+      : [];
+    return { ...consignmentDto(found[0]), notes: str(found[0].notes), group: gruppe };
   },
 });
 

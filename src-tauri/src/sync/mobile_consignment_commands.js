@@ -29,6 +29,10 @@
   const TAX_SCHEMES = ['VAT_10', 'ZERO', 'MARGIN'];
   // MIXED-INVOICE P2 (D2) — die Einkaufs-VAT des Einlieferers beim Verkauf: ohne VAT oder VAT 10 % (wie am Rechner).
   const CONSIGNOR_VAT = ['ZERO', 'VAT_10'];
+  // MIXED-INVOICE P5 (E12) — hoechstens so viele identische Stuecke je Aufnahme (= `CONSIGNMENT_GROUP_MAX`) und je
+  // Verkauf (= `MAX_SALE_ITEMS`); der Primary prueft beides noch einmal.
+  const MAX_GROUP = 50;
+  const MAX_SALE_ITEMS = 50;
 
   /** Die Felder des Artikels, die `consignments.create` annimmt (plus `sku`). */
   // `itemNotes` ist die Notiz AM ARTIKEL; die Notiz der Kommission heisst `notes` und geht an
@@ -121,6 +125,14 @@
     const ids = (stagingIds || []).slice(0, MAX_PHOTOS);
     if (ids.length) body.stagingIds = ids;
     if (options.acknowledgeDuplicate) body.acknowledgeDuplicate = true;
+    // P5 (E12, Owner D-P5-1/2) — Menge identischer Stuecke: jedes Stueck wird eine eigene Kommission (eine Gruppe),
+    // der vereinbarte Preis gilt je Stueck. Leer = 1; die Menge reist nur, wenn sie mehr als ein Stueck ist.
+    const mengeText = form.quantity === undefined || form.quantity === null ? '' : String(form.quantity).trim();
+    if (mengeText !== '') {
+      const menge = Number(mengeText);
+      if (!Number.isInteger(menge) || menge < 1 || menge > MAX_GROUP) return { ok: false, code: 'QUANTITY_INVALID' };
+      if (menge > 1) body.quantity = menge;
+    }
     return { ok: true, body: body };
   }
 
@@ -225,6 +237,49 @@
     return { ok: true, body: body };
   }
 
+  /**
+   * P5 (E12) — die verkaufbaren Stuecke der Gruppe dieser Kommission (aus `consignments.get` → `group`): aktiv und
+   * ohne Rechnung; das geoeffnete Stueck zuerst, dann nach Stuecknummer. Eine Einzelkommission: nur sie selbst.
+   */
+  function availablePieces(con) {
+    const gruppe = (con && Array.isArray(con.group)) ? con.group : [];
+    const frei = gruppe.filter(function (g) { return g && g.status === 'active' && !g.invoiceId; });
+    if (!frei.length) return (con && con.status === 'active' && !con.invoiceId) ? [con] : [];
+    frei.sort(function (a, b) {
+      if (a.id === con.id) return -1;
+      if (b.id === con.id) return 1;
+      return (Number(a.groupSeq) || 0) - (Number(b.groupSeq) || 0);
+    });
+    return frei;
+  }
+
+  /**
+   * P5 (E12) — ein Teilverkauf aus der Gruppe: k Stuecke zum selben Preis je Stueck, gebucht ueber den vorhandenen
+   * Mehrfachverkauf (`items[]`, eine Rechnungszeile je Stueck, Owner D-P5-3). k = 1 ist der bisherige Einzelrumpf.
+   * Gerechnet wird hier nichts: Boden, E7 und Einkauf entscheidet der Primary je Stueck.
+   */
+  function groupSaleBody(con, k, form, opts) {
+    const einzel = saleBody(con, form, opts);
+    if (!einzel.ok) return einzel;
+    const mengeText = k === undefined || k === null ? '' : String(k).trim();
+    const menge = mengeText === '' ? 1 : Number(mengeText);
+    if (!Number.isInteger(menge) || menge < 1 || menge > MAX_SALE_ITEMS) return { ok: false, code: 'SALE_QUANTITY_INVALID' };
+    if (menge === 1) return einzel;
+    const stuecke = availablePieces(con);
+    if (menge > stuecke.length) return { ok: false, code: 'SALE_QUANTITY_TOO_HIGH' };
+    const b = einzel.body;
+    const items = stuecke.slice(0, menge).map(function (pc) {
+      const it = { consignmentId: pc.id, expectedRevision: pc.revision, salePrice: b.salePrice, acknowledgeShortfall: b.acknowledgeShortfall === true };
+      if (b.taxScheme) it.taxScheme = b.taxScheme;
+      it.consignorTaxScheme = b.consignorTaxScheme;
+      if (b.acknowledgeVatShortfall) it.acknowledgeVatShortfall = true;
+      return it;
+    });
+    const body = { items: items, buyerId: b.buyerId, specialMark: b.specialMark };
+    if (b.notes !== undefined) body.notes = b.notes;
+    return { ok: true, body: body };
+  }
+
   /** Eine Auszahlung an den Einlieferer — ausdruecklich der Betrag, den die Maske gezeigt hat. */
   function payoutBody(con, form) {
     const betrag = moneyOrNull(form.amount);
@@ -326,6 +381,9 @@
     galleryUnchanged: galleryUnchanged,
     galleryBody: galleryBody,
     saleBody: saleBody,
+    groupSaleBody: groupSaleBody,
+    availablePieces: availablePieces,
+    MAX_GROUP: MAX_GROUP,
     payoutBody: payoutBody,
     returnBody: returnBody,
     duplicateQuery: duplicateQuery,

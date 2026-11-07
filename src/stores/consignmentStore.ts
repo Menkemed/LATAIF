@@ -251,6 +251,10 @@ export function rowToConsignment(row: Record<string, unknown>): Consignment {
     invoiceId: row.invoice_id as string | undefined,
     notes: row.notes as string | undefined,
     staffId: (row.staff_id as string) || undefined,
+    // P5 (E12) — Gruppe; eine Altzeile (NULL) ist eine Gruppe aus einem Stück.
+    groupId: (row.group_id as string) || undefined,
+    groupSeq: row.group_seq === undefined || row.group_seq === null ? undefined : Number(row.group_seq),
+    groupQuantity: row.group_quantity === undefined || row.group_quantity === null ? undefined : Number(row.group_quantity),
     createdAt: row.created_at as string,
     updatedAt: row.updated_at as string,
     createdBy: row.created_by as string | undefined,
@@ -322,8 +326,9 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
         agreed_price, minimum_price, commission_rate, commission_type, commission_value,
         excess_split_pct,
         status, agreement_date, expiry_date,
-        notes, staff_id, created_at, updated_at, created_by)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?)`,
+        notes, staff_id, created_at, updated_at, created_by,
+        group_id, group_seq, group_quantity)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       [id, branchId, consignmentNumber, data.consignorId, data.productId,
        data.agreedPrice || 0, data.minimumPrice || null,
        data.commissionRate || 15,
@@ -333,7 +338,11 @@ export const useConsignmentStore = create<ConsignmentStore>((set, get) => ({
        // bei anderen Modi).
        data.commissionType === 'cost_split' ? (data.excessSplitPct ?? 50) : null,
        data.agreementDate || now.split('T')[0], data.expiryDate || null,
-       data.notes || null, data.staffId || null, now, now, userId]
+       data.notes || null, data.staffId || null, now, now, userId,
+       // P5 (E12) — nur ein Stück einer Gruppe trägt die Kennung; eine Einzelaufnahme bleibt NULL wie bisher.
+       data.groupId || null,
+       data.groupId ? (data.groupSeq ?? null) : null,
+       data.groupId ? (data.groupQuantity ?? null) : null]
     );
 
     saveDatabase();

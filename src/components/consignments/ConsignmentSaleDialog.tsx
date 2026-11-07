@@ -29,6 +29,7 @@ import { businessDateIssue, latestBusinessDate } from '@/core/utils/business-dat
 import { currentBranchId } from '@/core/db/helpers';
 import { consignmentLineAmounts, consignmentVatShortfall, type SaleScheme } from '@/core/invoices/mixed-invoice';
 import { productDisplayName } from '@/core/products/display-name';
+import { expandGroupSelection, summarizeGroup, groupStatusLine, pieceLabel } from '@/core/consignment/consignment-group';
 import type { TaxScheme } from '@/core/models/types';
 
 type Method = 'cash' | 'bank_transfer' | 'card' | 'benefit';
@@ -81,10 +82,17 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
   const [showQuickBuyer, setShowQuickBuyer] = useState(false);
   const [numberDialogOpen, setNumberDialogOpen] = useState(false);
   const [error, setError] = useState('');
+  // P5 (E12) — je Kommissionsgruppe die Zahl der Stücke in diesem Verkauf (fehlt sie, gilt die geöffnete Auswahl).
+  const [groupK, setGroupK] = useState<Record<string, number>>({});
 
+  // P5 — die tatsächliche Auswahl: die geöffnete, je Gruppe auf k Stücke erweitert (die kleinsten verfügbaren Nummern).
+  const saleIds = useMemo(
+    () => expandGroupSelection(consignmentIds, consignments, groupK),
+    [consignmentIds, consignments, groupK],
+  );
   const items = useMemo(
-    () => consignmentIds.map((id) => consignments.find((c) => c.id === id)).filter((c): c is NonNullable<typeof c> => !!c),
-    [consignmentIds, consignments],
+    () => saleIds.map((id) => consignments.find((c) => c.id === id)).filter((c): c is NonNullable<typeof c> => !!c),
+    [saleIds, consignments],
   );
 
   // Beim Öffnen: Preise = vereinbarter Preis, alles andere leer — der Dialog beginnt immer frisch.
@@ -104,6 +112,7 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
       return [id, ((p?.taxScheme as TaxScheme | undefined) || 'MARGIN') as TaxScheme];
     })));
     setConsignorVat({});
+    setGroupK({});
     setBuyerId('');
     setSaleDate(today());
     setNotes('');
@@ -135,6 +144,38 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
       vatShortfall: price > 0 ? consignmentVatShortfall(econ, scheme as SaleScheme, vat) : null,
     };
   }), [items, prices, products, customers, schemes]);
+
+  /** P5 (E12) — die Gruppen in diesem Verkauf: Zusammenfassung, Stücke im Verkauf, höchstens verkaufbar. */
+  const saleGroups = useMemo(() => {
+    const gids = [...new Set(items.map((c) => c.groupId).filter((g): g is string => !!g))];
+    return gids.map((gid) => {
+      const summary = summarizeGroup(consignments.filter((c) => c.groupId === gid))!;
+      const inSale = items.filter((c) => c.groupId === gid);
+      const preise = [...new Set(inSale.map((c) => prices[c.id] ?? ''))];
+      return { gid, summary, inSale, max: Math.max(inSale.length, summary.available), price: preise.length === 1 ? preise[0] : '' };
+    });
+  }, [items, consignments, prices]);
+  /** P5 — „Pieces to sell": k Stücke der Gruppe; neue Stücke übernehmen Preis und Steuerart des ersten Stücks der Gruppe. */
+  function setGroupQuantity(gid: string, k: number) {
+    const naechste = { ...groupK, [gid]: k };
+    const ids = expandGroupSelection(consignmentIds, consignments, naechste);
+    const vorlage = items.find((c) => c.groupId === gid);
+    const neu = ids.filter((id) => !items.some((c) => c.id === id));
+    if (vorlage && neu.length > 0) {
+      setPrices((pr) => ({ ...pr, ...Object.fromEntries(neu.map((id) => [id, pr[vorlage.id] ?? ''])) }));
+      setSchemes((m) => (m[vorlage.id] ? { ...m, ...Object.fromEntries(neu.map((id) => [id, m[vorlage.id]])) } : m));
+      setAcks((a) => ({ ...a, ...Object.fromEntries(neu.map((id) => [id, false])) }));
+      setVatAcks((a) => ({ ...a, ...Object.fromEntries(neu.map((id) => [id, false])) }));
+    }
+    setGroupK(naechste);
+  }
+  /** P5 — „Price per piece" der Gruppe: gilt für alle Stücke der Gruppe in diesem Verkauf (je Zeile änderbar). */
+  function setGroupPrice(gid: string, v: string) {
+    const ids = items.filter((c) => c.groupId === gid).map((c) => c.id);
+    setPrices((pr) => ({ ...pr, ...Object.fromEntries(ids.map((id) => [id, v])) }));
+    setAcks((a) => ({ ...a, ...Object.fromEntries(ids.map((id) => [id, false])) }));
+    setVatAcks((a) => ({ ...a, ...Object.fromEntries(ids.map((id) => [id, false])) }));
+  }
 
   /** CONSIGNOR-JOINT-PURCHASE — je Einlieferer ein Einkauf: Name, Zahl der Artikel, Summe der Auszahlungen. */
   const consignorGroups = useMemo(() => {
@@ -179,7 +220,7 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
 
   function validate(): string | null {
     if (items.length === 0) return 'Select at least one consignment';
-    if (items.length !== consignmentIds.length) return 'One of the selected consignments is no longer available — reopen the dialog';
+    if (items.length !== saleIds.length) return 'One of the selected consignments is no longer available — reopen the dialog';
     if (items.length > MAX_SALE_ITEMS) return `At most ${MAX_SALE_ITEMS} items in one sale`;
     const nichtAktiv = items.find((c) => c.status !== 'active');
     if (nichtAktiv) return `${nichtAktiv.consignmentNumber} is "${nichtAktiv.status}" — only active consignments are sold`;
@@ -273,6 +314,34 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
             </div>
           )}
 
+          {/* P5 (E12) — eine Kommissionsgruppe: wie viele Stücke dieser Verkauf nimmt und ein Preis je Stück für alle.
+              Gebucht wird je Stück (eine Rechnungszeile je Stück, Owner D-P5-3); Preis und Steuerart bleiben je Zeile änderbar. */}
+          {saleGroups.map((g) => {
+            const erstes = products.find((p) => p.id === g.summary.pieces[0].productId);
+            return (
+              <div key={g.gid} data-consignment-sale-group={g.gid}
+                style={{ padding: '12px 14px', border: '1px solid rgba(198,163,109,0.45)', borderRadius: 8, background: 'rgba(198,163,109,0.06)' }}>
+                <div className="flex justify-between" style={{ marginBottom: 8, fontSize: 13, gap: 12 }}>
+                  <span style={{ color: '#0F0F10' }}>
+                    <strong>{erstes ? productDisplayName(erstes) : 'Group'}</strong>{` \u00B7 group of ${g.summary.quantity}`}
+                  </span>
+                  <span style={{ fontSize: 12, color: '#6B7280' }} data-consignment-sale-group-status>{groupStatusLine(g.summary)}</span>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '160px 200px', gap: 16, alignItems: 'end' }}>
+                  <Input label="PIECES TO SELL" type="number" min={1} max={g.max} step={1}
+                    value={String(g.inSale.length)} data-consignment-sale-group-qty={g.gid}
+                    onChange={(e) => setGroupQuantity(g.gid, Math.max(1, Math.min(g.max, Math.floor(Number(e.target.value) || 1))))} />
+                  <Input label="PRICE PER PIECE (BHD)" type="number" placeholder="0"
+                    value={g.price} data-consignment-sale-group-price={g.gid}
+                    onChange={(e) => setGroupPrice(g.gid, e.target.value)} />
+                </div>
+                <div style={{ fontSize: 11, color: '#6B7280', marginTop: 6 }}>
+                  {`${g.inSale.length} of ${g.max} available pieces \u2014 the lowest piece numbers are taken. One invoice line per piece; price and tax scheme stay editable per line.`}
+                </div>
+              </div>
+            );
+          })}
+
           <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
             {rows.map((r) => (
               <div key={r.c.id} data-consignment-sale-row={r.c.id}
@@ -282,6 +351,7 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
                     <span style={{ color: '#0F0F10' }}>
                       <span className="font-mono" style={{ fontSize: 12, color: '#6B7280', marginRight: 8 }}>{r.c.consignmentNumber}</span>
                       {r.label}
+                      {r.c.groupId && <span style={{ fontSize: 11, color: '#6B7280', marginLeft: 8 }} data-consignment-sale-piece={r.c.groupSeq ?? ''}>{pieceLabel(r.c)}</span>}
                     </span>
                     <span style={{ color: '#6B7280', fontSize: 12 }}>Consignor: {r.consignorName}</span>
                   </div>

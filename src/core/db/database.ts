@@ -2711,6 +2711,15 @@ function runMigrations(database: Database): void {
       created_by TEXT
     )`,
     `CREATE INDEX IF NOT EXISTS idx_gold_payable_settlements_payable ON gold_payable_settlements(payable_id, status)`,
+
+    // ── MIXED INVOICE P5 (E12, Owner D-P5-1) — Kommissionsgruppe aus Einzelstücken ──
+    // Eine Aufnahme mit Menge N legt N Kommissionen (je ein Artikel) mit gemeinsamer Gruppenkennung an.
+    // group_seq = Stücknummer 1..N, group_quantity = ursprüngliche Menge der Aufnahme. Rein additiv:
+    // Altzeilen bleiben NULL und gelten als Gruppe aus einem Stück; kein Leser verlangt die Spalten.
+    `ALTER TABLE consignments ADD COLUMN group_id TEXT`,
+    `ALTER TABLE consignments ADD COLUMN group_seq INTEGER`,
+    `ALTER TABLE consignments ADD COLUMN group_quantity INTEGER`,
+    `CREATE INDEX IF NOT EXISTS idx_consignments_group ON consignments(group_id)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

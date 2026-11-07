@@ -957,6 +957,119 @@ try {
   wP2 = await wahlP2();
   ok(wP2.steuer === 'MARGIN' && wP2.einkauf === '', `§P2 Artikel ohne Steuerart: Vorwahl Margin wie am Rechner, Einkaufs-VAT offen (${S(wP2)})`);
 
+  // ── §P5 MIXED-INVOICE P5 (E12) — Menge bei der Aufnahme, Gruppe in Liste und Detail, Teilverkauf über items[] ──
+  {
+    const stueckP5 = (seq, status) => ({ id: 'con-g' + seq, consignmentNumber: 'CON-2026-002' + seq, productId: 'prod-g' + seq, groupSeq: seq,
+      status, revision: 10 + seq, agreedPrice: 400, minimumPrice: 380, invoiceId: status === 'active' ? '' : 'inv-9', payoutStatus: 'pending' });
+    let gruppeP5 = [stueckP5(1, 'active'), stueckP5(2, 'active'), stueckP5(3, 'active')];
+    const kommissionP5 = (id) => {
+      const g = gruppeP5.find((x) => x.id === id) || gruppeP5[0];
+      return KOMMISSION(g.revision, { id: g.id, consignmentNumber: g.consignmentNumber, productId: g.productId, agreedPrice: 400, minimumPrice: 380,
+        status: g.status, invoiceId: g.invoiceId, groupId: 'grp-1', groupSeq: g.groupSeq, groupQuantity: 3, group: gruppeP5 });
+    };
+    let p5Get = [];
+    antwortGeber = (u, body) => {
+      if (/staging/.test(u)) return { status: 201, body: { stagingId: 'b'.repeat(64) } };
+      const op = body && body.op;
+      const p = (body && body.payload) || {};
+      if (op === 'customers.create') return { status: 200, body: { ok: true, value: { customerId: 'cust-5', name: 'Perlen Frau' } } };
+      if (op === 'consignments.create') {
+        return { status: 200, body: { ok: true, value: { consignmentId: 'con-g1', consignmentNumber: 'CON-2026-0021', groupId: 'grp-1', quantity: 3,
+          pieces: gruppeP5.map((g) => ({ consignmentId: g.id, consignmentNumber: g.consignmentNumber, productId: g.productId, sku: 'PRL-' + g.groupSeq, groupSeq: g.groupSeq, revision: g.revision })) } } };
+      }
+      if (op === 'consignments.list') {
+        return { status: 200, body: { ok: true, value: { items: [
+          ...gruppeP5.map((g) => ({ id: g.id, consignmentNumber: g.consignmentNumber, agreedPrice: 400, status: g.status, invoiceId: g.invoiceId, groupId: 'grp-1', groupSeq: g.groupSeq, groupQuantity: 3 })),
+          { id: 'con-1', consignmentNumber: 'CON-2026-0007', agreedPrice: 500, status: 'active', invoiceId: '', groupId: null, groupSeq: null, groupQuantity: null },
+        ] } } };
+      }
+      if (op === 'consignments.get') { p5Get.push(p.id); return { status: 200, body: { ok: true, value: kommissionP5(p.id) } }; }
+      if (op === 'products.get') return { status: 200, body: { ok: true, value: Object.assign({}, ARTIKEL, { id: p.id, mediaKeys: [], mediaIds: [] }) } };
+      if (op === 'customers.list') return { status: 200, body: { ok: true, value: { items: [{ id: 'cust-9', firstName: 'Sara', lastName: 'Ahmed' }] } } };
+      if (op === 'consignments.record_sale') return { status: 200, body: { ok: true, value: {} } };
+      return { status: 200, body: { ok: true, value: { items: [] } } };
+    };
+    await c.ev("document.querySelector('[data-back-consign]').click(); await new Promise((r) => setTimeout(r, 300)); return 1;");
+    await c.ev("document.getElementById('cnNewBtn').click(); await new Promise((r) => setTimeout(r, 200)); return 1;");
+    const mengeVor = await c.ev(`return { sichtbar: !document.getElementById('cnQuantityRow').classList.contains('hidden'), wert: document.getElementById('cnQuantity').value,
+      etikett: document.getElementById('cnAgreedPriceLabel').textContent, hinweis: !document.getElementById('cnQuantityHint').classList.contains('hidden') };`);
+    ok(mengeVor.sichtbar && mengeVor.wert === '1' && /^Agreed price \(BHD\)/.test(mengeVor.etikett) && !mengeVor.hinweis,
+      `§P5 neue Aufnahme: Mengenfeld sichtbar, 1 vorbelegt, Preis wie bisher (${S(mengeVor)})`);
+    const mengeFalsch = await c.ev(`const q = document.getElementById('cnQuantity'); q.value = '51'; q.dispatchEvent(new Event('input', { bubbles: true }));
+      return document.getElementById('cnQuantityHint').textContent;`);
+    ok(/whole number from 1 to 50/.test(mengeFalsch), `§P5 Menge 51: der Hinweis nennt die Grenze (${S(mengeFalsch)})`);
+    const mengeDrei = await c.ev(`const q = document.getElementById('cnQuantity'); q.value = '3'; q.dispatchEvent(new Event('input', { bubbles: true }));
+      return { etikett: document.getElementById('cnAgreedPriceLabel').textContent, hinweis: document.getElementById('cnQuantityHint').textContent };`);
+    ok(/^Agreed price per piece/.test(mengeDrei.etikett) && /3 pieces as one group/.test(mengeDrei.hinweis) && /per piece/.test(mengeDrei.hinweis),
+      `§P5 Menge 3: „Agreed price per piece" und der Hinweis auf die Gruppe (${S(mengeDrei)})`);
+    await c.ev(`
+      document.getElementById('cnConsignorFirst').value = 'Perlen';
+      document.getElementById('cnConsignorLast').value = 'Frau';
+      document.getElementById('cnConsignorCreateBtn').click();
+      await new Promise((r) => setTimeout(r, 700));
+      document.getElementById('cnBrand').value = 'Mikimoto';
+      document.getElementById('cnName').value = 'Perlenstecker';
+      document.getElementById('cnAgreedPrice').value = '400';
+      document.getElementById('cnMinimumPrice').value = '380';
+      document.getElementById('cnPayoutModel').value = 'percent';
+      document.getElementById('cnCommissionRate').value = '20';
+      document.getElementById('cna_dial').value = 'White';
+      const mat = document.getElementById('cna_material'); mat.value = 'Steel'; mat.dispatchEvent(new Event('change'));
+      await new Promise((r) => setTimeout(r, 60));
+      document.getElementById('cnSaveBtn').click();
+      await new Promise((r) => setTimeout(r, 1200));
+      return 1;`);
+    const anlageP5 = gesehen.filter((g) => g.body?.op === 'consignments.create').pop();
+    const nachAnlage = await c.ev(`return { erfolg: document.getElementById('cnSuccess').textContent, fehler: document.getElementById('cnError').textContent,
+      mengeSichtbar: !document.getElementById('cnQuantityRow').classList.contains('hidden'),
+      gruppe: !document.getElementById('cnGroupCard').classList.contains('hidden'), badge: document.getElementById('cnGroupBadge').textContent,
+      zeilen: document.getElementById('cnGroupLines').textContent, stuecke: document.querySelectorAll('[data-cn-piece]').length,
+      verkaufMenge: !document.getElementById('cnSaleQtyRow').classList.contains('hidden') };`);
+    ok(anlageP5 && anlageP5.body.payload.quantity === 3 && anlageP5.body.payload.agreedPrice === 400 && anlageP5.body.payload.minimumPrice === 380,
+      `§P5 consignments.create trägt quantity 3, Preis und Minimum je Stück (${S(anlageP5 && { q: anlageP5.body.payload.quantity, a: anlageP5.body.payload.agreedPrice })})`);
+    ok(/Saved 3 pieces as one group: CON-2026-0021 … CON-2026-0023/.test(nachAnlage.erfolg),
+      `§P5 die Maske nennt alle drei Stücke (${S(nachAnlage.erfolg)} ${S(nachAnlage.fehler)})`);
+    ok(!nachAnlage.mengeSichtbar && nachAnlage.gruppe && nachAnlage.badge === 'piece 1 of 3' && /Group of 3 · 3 available/.test(nachAnlage.zeilen)
+      && nachAnlage.stuecke === 3 && nachAnlage.verkaufMenge,
+      `§P5 geöffnet: kein Mengenfeld mehr, Gruppenkarte „piece 1 of 3 · Group of 3 · 3 available", 3 Stücke, „Pieces to sell" (${S(nachAnlage)})`);
+
+    // Teilverkauf: 2 Stück zum Preis je Stück — EIN Auftrag mit items[] (das geöffnete Stück zuerst, dann die kleinste Nummer).
+    const vorP5 = gesehen.filter((g) => g.body?.op === 'consignments.record_sale').length;
+    await c.ev(`
+      document.getElementById('cnBuyerSearchBtn').click();
+      await new Promise((r) => setTimeout(r, 400));
+      document.querySelector('#cnBuyerResults button').click();
+      const p = document.getElementById('cnSalePrice'); p.value = '450'; p.dispatchEvent(new Event('input', { bubbles: true }));
+      const t = document.getElementById('cnSaleTaxScheme'); t.value = 'MARGIN'; t.dispatchEvent(new Event('change', { bubbles: true }));
+      document.getElementById('cnSaleConsignorVat').value = 'ZERO';
+      const k = document.getElementById('cnSaleQty'); k.value = '2'; k.dispatchEvent(new Event('input', { bubbles: true }));
+      document.getElementById('cnSaleBtn').click();
+      await new Promise((r) => setTimeout(r, 1000));
+      return 1;`);
+    const p5Verkauf = gesehen.filter((g) => g.body?.op === 'consignments.record_sale').slice(vorP5);
+    const vp = p5Verkauf[0] && p5Verkauf[0].body.payload;
+    ok(p5Verkauf.length === 1 && Array.isArray(vp.items) && vp.items.length === 2
+      && S(vp.items.map((x) => [x.consignmentId, x.expectedRevision, x.salePrice, x.consignorTaxScheme, x.taxScheme])) === S([['con-g1', 11, 450, 'ZERO', 'MARGIN'], ['con-g2', 12, 450, 'ZERO', 'MARGIN']])
+      && vp.buyerId === 'cust-9' && !('consignmentId' in vp),
+      `§P5 „Record sale" mit 2 Stück: EIN Auftrag, items[] je Stück mit eigener Fassung (${S(vp)})`);
+    ok(/sale of 2 pieces was recorded/.test(await c.ev("return document.getElementById('cnActionMsg').textContent;")), '§P5 die Maske bestätigt 2 Stücke');
+
+    // Liste: die Gruppe als EINE Karte; sie öffnet das verfügbare Stück mit der kleinsten Nummer.
+    gruppeP5 = [stueckP5(1, 'sold'), stueckP5(2, 'sold'), stueckP5(3, 'active')];
+    await c.ev("document.querySelector('[data-back-consign]').click(); await new Promise((r) => setTimeout(r, 300)); return 1;");
+    await c.ev("document.getElementById('cnSearchBtn').click(); await new Promise((r) => setTimeout(r, 500)); return 1;");
+    const liste = await c.ev(`return { karten: [...document.querySelectorAll('#cnList button')].map((b) => b.textContent), gruppe: document.querySelectorAll('[data-cn-group]').length };`);
+    ok(liste.gruppe === 1 && liste.karten.length === 2 && /^Group × 3 · 1 available · 400 \/ piece · CON-2026-0021 … CON-2026-0023$/.test(liste.karten[0])
+      && /^CON-2026-0007/.test(liste.karten[1]),
+      `§P5 Liste: die drei Stücke als EINE Gruppenkarte („Group × 3 · 1 available"), die Einzelkommission wie bisher (${S(liste)})`);
+    p5Get = [];
+    await c.ev("document.querySelector('[data-cn-group]').click(); await new Promise((r) => setTimeout(r, 700)); return 1;");
+    const offen = await c.ev(`return { kopf: document.getElementById('cnHeadline').textContent, verkaufMenge: !document.getElementById('cnSaleQtyRow').classList.contains('hidden'),
+      zeilen: document.getElementById('cnGroupLines').textContent };`);
+    ok(p5Get[0] === 'con-g3' && offen.kopf === 'CON-2026-0023' && !offen.verkaufMenge && /1 available · 2 sold/.test(offen.zeilen),
+      `§P5 die Gruppenkarte öffnet das letzte verfügbare Stück; bei 1 verfügbarem Stück keine Mengenwahl (${S(offen)} ${S(p5Get)})`);
+  }
+
   const protokoll = await c.ev('return window.__PROTOKOLL;');
   ok(protokoll.length === 0, `§6 die Seite hat keinen einzigen Fehler geworfen (${S(protokoll.slice(0, 2))})`);
 } catch (e) {

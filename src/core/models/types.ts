@@ -728,6 +728,11 @@ export interface Consignment {
   invoiceId?: UUID;
   notes?: string;
   staffId?: UUID;
+  /** P5 (E12) — Kommissionsgruppe: gemeinsame Kennung aller Stücke einer Aufnahme mit Menge N, Stücknummer
+   *  1..N und die ursprüngliche Menge. Altzeilen ohne Gruppe = Gruppe aus einem Stück (alles undefined). */
+  groupId?: string;
+  groupSeq?: number;
+  groupQuantity?: number;
   createdAt: string;
   updatedAt: string;
   createdBy?: UUID;

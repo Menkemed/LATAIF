@@ -28,7 +28,7 @@ import { useProductStore } from '@/stores/productStore';
 import { useEmployeeStore } from '@/stores/employeeStore';
 import { matchesDeep } from '@/core/utils/deep-search';
 import { buildSkuSeed } from '@/core/products/sku-allocation';
-import type { ConsignmentStatus, Product, Category, TaxScheme } from '@/core/models/types';
+import type { Consignment, ConsignmentStatus, Product, Category, TaxScheme } from '@/core/models/types';
 import type { AiCategoryId } from '@/core/ai/ai-service';
 import { Bhd } from '@/components/ui/Bhd';
 import { commissionModelLabel } from '@/core/consignment/economics';
@@ -40,7 +40,11 @@ import {
 import { payOutConsignmentOnPrimary } from '@/core/consignment/consignment-finance-house';
 import { WriteError } from '@/components/shared/WriteError';
 import { stageDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
-import { createConsignmentOnPrimary, consignmentCreateRequest, type ConsignmentCreateInput } from '@/core/consignment/consignment-create';
+import {
+  createConsignmentOnPrimary, consignmentCreateRequest, consignmentQuantityIssue, groupPieceSku, CONSIGNMENT_GROUP_MAX,
+  type ConsignmentCreateInput,
+} from '@/core/consignment/consignment-create';
+import { groupsOf, groupStatusLine, pieceLabel, pickAvailablePieces } from '@/core/consignment/consignment-group';
 import { useAiIdentifyGate } from '@/core/ai/ai-availability';
 import { productDisplayName, brandModelHidden } from '@/core/products/display-name';
 import { StonesEditor } from '@/components/products/StonesEditor';
@@ -93,6 +97,8 @@ export function ConsignmentList() {
   // CONSIGNMENT MULTI-SALE — welche Kommissionen der Verkaufsdialog verkauft (null = zu), und die Auswahl der Liste.
   const [saleIds, setSaleIds] = useState<string[] | null>(null);
   const [selected, setSelected] = useState<Set<string>>(() => new Set());
+  // P5 (E12) — aufgeklappte Kommissionsgruppen in der Liste „Items" (zu Beginn zugeklappt).
+  const [openGroups, setOpenGroups] = useState<Set<string>>(() => new Set());
   const [paidModal, setPaidModal] = useState<string | null>(null);
   const [paidMethod, setPaidMethod] = useState('bank_transfer');
   const [paidRef, setPaidRef] = useState('');
@@ -109,6 +115,8 @@ export function ConsignmentList() {
     notes: '',
     consignorSearch: '',
     staffId: '',
+    // P5 (E12) — Menge identischer Stücke (1–50); 1 = die Aufnahme wie bisher.
+    quantity: '1',
   });
 
   // Plan §Consignment §New: Das Produkt wird beim Anlegen NEU erfasst (Kundenware), nicht
@@ -286,7 +294,7 @@ export function ConsignmentList() {
     setForm({
       consignorId: '',
       agreedPrice: '', minimumPrice: '', commissionRate: '15',
-      expiryDate: '', notes: '', consignorSearch: '', staffId: '',
+      expiryDate: '', notes: '', consignorSearch: '', staffId: '', quantity: '1',
     });
     setCommissionType('percent');
     setExcessSplitPct('50');
@@ -348,12 +356,19 @@ export function ConsignmentList() {
       }
     }
     if (!form.agreedPrice || Number(form.agreedPrice) <= 0) missing.push('Agreed Price');
+    // P5 — die Menge: eine ganze Zahl von 1 bis 50 (der Primary prüft dasselbe noch einmal).
+    const mengeFehler = consignmentQuantityIssue(Number(form.quantity));
+    if (mengeFehler) missing.push(mengeFehler);
     if (missing.length > 0) {
       alert(`Please fill in the required fields:\n• ${missing.join('\n• ')}`);
       return;
     }
-    // SKU-Duplicate hart blocken (Datenintegrität).
-    if (productForm.sku && isSkuTaken(productForm.sku)) {
+    // SKU-Duplicate hart blocken (Datenintegrität). P5 — bei einer Gruppe bekommt jedes Stück `SKU-1 … SKU-N`.
+    const menge = Number(form.quantity) || 1;
+    const belegt = productForm.sku
+      ? Array.from({ length: menge }, (_, i) => groupPieceSku(String(productForm.sku).trim(), i + 1, menge)).find((k) => isSkuTaken(k))
+      : undefined;
+    if (belegt) {
       alert('Diese SKU / Reference ist bereits vergeben. Bitte eine andere Nummer verwenden.');
       return;
     }
@@ -395,6 +410,8 @@ export function ConsignmentList() {
         agreementDate: agreementDate || undefined,
         notes: form.notes || undefined,
         staffId: form.staffId || undefined,
+        // P5 (E12) — Menge > 1: N Stücke als eine Gruppe (je Stück ein Artikel und eine Kommission).
+        ...(Number(form.quantity) > 1 ? { quantity: Number(form.quantity) } : {}),
       };
       // Auf einem verbundenen Rechner zuerst die Bilder in die Zwischenablage des Primary.
       let stagingIds: string[] = [];
@@ -418,7 +435,7 @@ export function ConsignmentList() {
       setDuplicateMatches([]);
       setForm({
         consignorId: '', agreedPrice: '', minimumPrice: '',
-        commissionRate: '15', expiryDate: '', notes: '', consignorSearch: '', staffId: '',
+        commissionRate: '15', expiryDate: '', notes: '', consignorSearch: '', staffId: '', quantity: '1',
       });
       setProductForm({
         condition: '', taxScheme: 'MARGIN', scopeOfDelivery: [],
@@ -451,6 +468,45 @@ export function ConsignmentList() {
     setSelected(prev => {
       const next = new Set(prev);
       for (const c of visibleActive) { if (allVisibleSelected) next.delete(c.id); else next.add(c.id); }
+      return next;
+    });
+  }
+
+  // P5 (E12) — Gruppen: die Zusammenfassung zählt ALLE Stücke (nicht nur die gefilterten), die Liste hält die
+  // Stücke einer Gruppe beisammen (Kopfzeile, darunter aufgeklappt die Stücke nach Stücknummer).
+  const groupMap = useMemo(() => groupsOf(consignments), [consignments]);
+  type ListRow = { kind: 'group'; groupId: string } | { kind: 'piece'; con: Consignment };
+  const listRows = useMemo<ListRow[]>(() => {
+    const out: ListRow[] = [];
+    const gesehen = new Set<string>();
+    for (const c of filtered) {
+      if (!c.groupId || !groupMap.has(c.groupId)) { out.push({ kind: 'piece', con: c }); continue; }
+      if (gesehen.has(c.groupId)) continue;
+      gesehen.add(c.groupId);
+      out.push({ kind: 'group', groupId: c.groupId });
+      if (openGroups.has(c.groupId)) {
+        const stuecke = filtered.filter((x) => x.groupId === c.groupId)
+          .sort((a, b) => (a.groupSeq ?? 0) - (b.groupSeq ?? 0));
+        for (const st of stuecke) out.push({ kind: 'piece', con: st });
+      }
+    }
+    return out;
+  }, [filtered, groupMap, openGroups]);
+  function toggleGroupOpen(gid: string) {
+    setOpenGroups(prev => {
+      const next = new Set(prev);
+      if (next.has(gid)) next.delete(gid); else next.add(gid);
+      return next;
+    });
+  }
+  /** „Select k" einer Gruppe: die k verfügbaren Stücke mit der kleinsten Nummer — der Verkauf ist der heutige Mehrfachverkauf. */
+  function selectFromGroup(gid: string, k: number) {
+    const g = groupMap.get(gid);
+    if (!g) return;
+    setSelected(prev => {
+      const next = new Set(prev);
+      for (const st of g.pieces) next.delete(st.id);
+      for (const st of pickAvailablePieces(g.pieces, k)) next.add(st.id);
       return next;
     });
   }
@@ -643,7 +699,59 @@ export function ConsignmentList() {
               </tr>
             </thead>
             <tbody>
-              {filtered.map(con => {
+              {listRows.map(row => {
+                if (row.kind === 'group') {
+                  const g = groupMap.get(row.groupId)!;
+                  const erstes = g.pieces[0];
+                  const gCust = getCustomer(erstes.consignorId);
+                  const gProd = getProduct(erstes.productId);
+                  const offen = openGroups.has(row.groupId);
+                  const gewaehlt = g.pieces.filter((st) => selected.has(st.id)).length;
+                  return (
+                    <tr key={`group-${row.groupId}`} data-consignment-group={row.groupId}
+                      style={{ borderBottom: '1px solid #E5E9EE', background: 'rgba(15,15,16,0.025)' }}>
+                      <td style={{ padding: '14px 0 14px 18px' }} />
+                      <td style={{ padding: '14px 18px' }}>
+                        <button type="button" data-consignment-group-toggle={row.groupId}
+                          onClick={() => toggleGroupOpen(row.groupId)}
+                          className="cursor-pointer"
+                          style={{ padding: '2px 8px', fontSize: 12, borderRadius: 6, border: '1px solid #D5D9DE', background: '#FFFFFF', color: '#0F0F10' }}>
+                          {offen ? '\u25BE' : '\u25B8'} {`Group \u00D7 ${g.quantity}`}
+                        </button>
+                      </td>
+                      <td style={{ padding: '14px 18px', fontSize: 13, color: '#0F0F10' }}>
+                        {gCust ? `${gCust.firstName} ${gCust.lastName}` : '\u2014'}
+                      </td>
+                      <td style={{ padding: '14px 18px' }}>
+                        <span style={{ fontSize: 13, color: '#0F0F10' }}>{gProd ? productDisplayName(gProd) : '\u2014'}</span>
+                        <span data-consignment-group-status style={{ fontSize: 11, color: '#6B7280', display: 'block', marginTop: 2 }}>{groupStatusLine(g)}</span>
+                      </td>
+                      <td style={{ padding: '14px 18px' }}>
+                        <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}><Bhd v={erstes.agreedPrice}/></span>
+                        <span style={{ fontSize: 10, color: '#6B7280', marginLeft: 4 }}>BHD / piece</span>
+                      </td>
+                      <td style={{ padding: '14px 18px' }}>
+                        <span style={{ fontSize: 12, color: '#0F0F10' }}>{commissionModelLabel(erstes)}</span>
+                      </td>
+                      <td style={{ padding: '14px 18px', fontSize: 12, color: '#0F0F10' }}>
+                        <span data-consignment-group-available={g.available}>{g.available} available</span>
+                      </td>
+                      <td style={{ padding: '14px 18px' }}>
+                        {g.available > 0 ? (
+                          <label style={{ fontSize: 11, color: '#6B7280', display: 'flex', alignItems: 'center', gap: 6 }}>
+                            Select
+                            <input type="number" min={0} max={g.available} step={1} value={gewaehlt}
+                              data-consignment-group-select={row.groupId}
+                              onChange={(e) => selectFromGroup(row.groupId, Math.max(0, Math.min(g.available, Math.floor(Number(e.target.value) || 0))))}
+                              style={{ width: 56, padding: '3px 6px', fontSize: 12, border: '1px solid #D5D9DE', borderRadius: 6 }} />
+                            of {g.available}
+                          </label>
+                        ) : <span style={{ fontSize: 11, color: '#9CA3AF' }}>{'\u2014'}</span>}
+                      </td>
+                    </tr>
+                  );
+                }
+                const con = row.con;
                 const cust = getCustomer(con.consignorId);
                 const prod = getProduct(con.productId);
                 const custName = cust ? `${cust.firstName} ${cust.lastName}` : '\u2014';
@@ -665,6 +773,9 @@ export function ConsignmentList() {
                     </td>
                     <td style={{ padding: '14px 18px' }}>
                       <span className="font-mono" style={{ fontSize: 13, color: '#0F0F10' }}>{con.consignmentNumber}</span>
+                      {con.groupId && (
+                        <span data-consignment-piece={con.groupSeq ?? ''} style={{ fontSize: 10, color: '#6B7280', display: 'block', marginTop: 2 }}>{pieceLabel(con)}</span>
+                      )}
                     </td>
                     <td style={{ padding: '14px 18px' }}>
                       {cust ? (
@@ -1120,14 +1231,27 @@ export function ConsignmentList() {
           {/* Pricing */}
           <div style={{ borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
             <span className="text-overline" style={{ marginBottom: 12 }}>PRICING</span>
-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 20, marginTop: 12 }}>
-              <Input label="AGREED PRICE (BHD)" type="number" placeholder={'Optional \u2014 set at sale'}
+            <div style={{ display: 'grid', gridTemplateColumns: '120px 1fr 1fr', gap: 20, marginTop: 12 }}>
+              {/* P5 (E12) — Menge identischer Stücke; der Preis gilt dann je Stück (Owner D-P5-2). */}
+              <div data-consignment-quantity>
+                <Input label="QUANTITY" type="number" min={1} max={CONSIGNMENT_GROUP_MAX} step={1}
+                  value={form.quantity}
+                  onChange={e => setForm({ ...form, quantity: e.target.value })} />
+              </div>
+              <Input label={Number(form.quantity) > 1 ? 'AGREED PRICE PER PIECE (BHD)' : 'AGREED PRICE (BHD)'} type="number" placeholder={'Optional \u2014 set at sale'}
                 value={form.agreedPrice}
                 onChange={e => setForm({ ...form, agreedPrice: e.target.value })} />
-              <Input label="MINIMUM PRICE (BHD)" type="number" placeholder="Optional"
+              <Input label={Number(form.quantity) > 1 ? 'MINIMUM PRICE PER PIECE (BHD)' : 'MINIMUM PRICE (BHD)'} type="number" placeholder="Optional"
                 value={form.minimumPrice}
                 onChange={e => setForm({ ...form, minimumPrice: e.target.value })} />
             </div>
+            {Number(form.quantity) !== 1 && (
+              <div data-consignment-group-note className="rounded" style={{ marginTop: 12, padding: '10px 14px', fontSize: 12, color: '#4B5563', background: 'rgba(15,15,16,0.04)', border: '1px solid #E5E9EE' }}>
+                {consignmentQuantityIssue(Number(form.quantity))
+                  ? consignmentQuantityIssue(Number(form.quantity))
+                  : <>Creates <strong>{Number(form.quantity)} pieces</strong> as one group — each its own item ({productForm.sku ? `SKU ${String(productForm.sku).trim()}-1 … -${Number(form.quantity)}` : 'own SKU each'}) and its own consignment, with the same photos and terms. The agreed and minimum prices apply <strong>per piece</strong>. Each piece is sold, returned, paid out and corrected on its own.</>}
+              </div>
+            )}
             <div style={{ marginTop: 16 }}>
               <span className="text-overline" style={{ marginBottom: 8, display: 'block' }}>PAYOUT MODEL</span>
               <div className="flex flex-wrap gap-2" style={{ marginTop: 8 }}>

@@ -81,6 +81,16 @@
     <div id="cnStateLines" class="hint"></div>
   </div>
 
+  <!-- MIXED-INVOICE P5 (E12) — die Gruppe dieser Kommission: urspruengliche Menge, verfuegbarer Rest, jedes Stueck. -->
+  <div class="card hidden" id="cnGroupCard">
+    <div class="header-row">
+      <span style="font-size: 13px; color: #A1A1AA;">Group</span>
+      <span id="cnGroupBadge" class="badge"></span>
+    </div>
+    <div id="cnGroupLines" class="hint"></div>
+    <div id="cnGroupPieces"></div>
+  </div>
+
   <!-- Fotos: Kamera oder Galerie, bis zu acht. -->
   <div class="card">
     <div class="header-row">
@@ -145,8 +155,14 @@
 
   <!-- Die Vereinbarung. -->
   <div class="card">
+    <!-- MIXED-INVOICE P5 (E12) — Menge identischer Stuecke (nur beim Erfassen): jedes Stueck wird eine eigene Kommission. -->
+    <div class="row" id="cnQuantityRow">
+      <label>Quantity (identical pieces)</label>
+      <input id="cnQuantity" type="number" inputmode="numeric" step="1" min="1" max="50" value="1" />
+      <div id="cnQuantityHint" class="hint hidden"></div>
+    </div>
     <div class="row">
-      <label>Agreed price (BHD) <span class="req">*</span></label>
+      <label id="cnAgreedPriceLabel">Agreed price (BHD) <span class="req">*</span></label>
       <input id="cnAgreedPrice" type="number" inputmode="decimal" step="0.001" min="0" placeholder="what the consignor gets as a basis" />
     </div>
     <div class="row">
@@ -203,6 +219,11 @@
       <div id="cnBuyerResults"></div>
       <span id="cnBuyerPicked" class="badge hidden"></span>
       <input id="cnSalePrice" type="number" inputmode="decimal" step="0.001" min="0" placeholder="Sale price (BHD) *" />
+      <!-- MIXED-INVOICE P5 (E12) — Teilverkauf aus der Gruppe: k Stuecke zum Preis je Stueck (eine Zeile je Stueck). -->
+      <div id="cnSaleQtyRow" class="hidden">
+        <input id="cnSaleQty" type="number" inputmode="numeric" step="1" min="1" value="1" placeholder="Pieces to sell" />
+        <div id="cnSaleQtyHint" class="hint"></div>
+      </div>
       <!-- MIXED-INVOICE P2 (D4/D2) — wie im Verkaufsdialog am Rechner: Steuerart der Rechnung und Einkaufs-VAT des Einlieferers. -->
       <select id="cnSaleTaxScheme"></select>
       <select id="cnSaleConsignorVat"></select>
