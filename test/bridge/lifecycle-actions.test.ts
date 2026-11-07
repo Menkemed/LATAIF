@@ -450,7 +450,7 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
 
   const seen = crev(db, cid);
   const sale = await life.runRecordSale(d, identity('3', 'consignments.record_sale'),
-    { consignmentId: cid, buyerId: 'cust-2', salePrice: 500, expectedRevision: seen });
+    { consignmentId: cid, buyerId: 'cust-2', salePrice: 500, expectedRevision: seen, consignorTaxScheme: 'ZERO' });
   ok(sale.kind === 'ok', 'SALE der Verkauf laeuft');
   const sv = val<Record<string, unknown>>(sale);
   ok(s(db, 'SELECT status FROM consignments WHERE id = ?', [cid]) === 'sold', 'SALE die Kommission ist verkauft');
@@ -477,14 +477,14 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
 
   // Zweimal verkaufen geht nicht.
   const twice = await life.runRecordSale(d, identity('5', 'consignments.record_sale'),
-    { consignmentId: cid, buyerId: 'cust-2', salePrice: 500, expectedRevision: crev(db, cid) });
+    { consignmentId: cid, buyerId: 'cust-2', salePrice: 500, expectedRevision: crev(db, cid), consignorTaxScheme: 'ZERO' });
   ok(twice.kind === 'rejected' && ['CONSIGNMENT_NOT_ACTIVE', 'CONSIGNMENT_ALREADY_SOLD'].includes(code(twice)),
     `SALE ein zweiter Verkauf wird abgewiesen (${code(twice)})`);
 
   // Der Einlieferer darf nicht sein eigener Kaeufer sein.
   const cid2 = await makeConsignment(d, '6', 500);
   const self = await life.runRecordSale(d, identity('7', 'consignments.record_sale'),
-    { consignmentId: cid2, buyerId: 'cust-1', salePrice: 500, expectedRevision: crev(db, cid2) });
+    { consignmentId: cid2, buyerId: 'cust-1', salePrice: 500, expectedRevision: crev(db, cid2), consignorTaxScheme: 'ZERO' });
   ok(self.kind === 'rejected' && code(self) === 'BUYER_IS_CONSIGNOR',
     `SALE der Einlieferer kauft nicht sein eigenes Stueck (${code(self)})`);
 
@@ -518,7 +518,7 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
 
   // Erster Vorsatz: OHNE Bestaetigung, unter dem Boden.
   const low = await life.runRecordSale(d, identity('2', 'consignments.record_sale'),
-    { consignmentId: cid, buyerId: 'cust-2', salePrice: 300, expectedRevision: seen });
+    { consignmentId: cid, buyerId: 'cust-2', salePrice: 300, expectedRevision: seen, consignorTaxScheme: 'ZERO' });
   ok(low.kind === 'rejected' && code(low) === 'SALE_BELOW_FLOOR',
     `CONFIRM ein Verkauf unter dem Boden wird abgewiesen (${code(low)})`);
   ok(low.kind === 'rejected' && (low as { frozen: boolean }).frozen, 'CONFIRM …und das Urteil ist eingefroren');
@@ -531,14 +531,14 @@ async function makeConsignment(d: ReturnType<typeof deps>, nth: string, agreed =
   // Dieselbe Kennung mit geaendertem Rumpf waere ein Konflikt — genau das darf ein Client NICHT tun.
   const sneaky = await life.runRecordSale(
     d, { ...identity('2', 'consignments.record_sale'), payloadHash: 'anders' },
-    { consignmentId: cid, buyerId: 'cust-2', salePrice: 300, expectedRevision: seen, acknowledgeShortfall: true },
+    { consignmentId: cid, buyerId: 'cust-2', salePrice: 300, expectedRevision: seen, acknowledgeShortfall: true, consignorTaxScheme: 'ZERO' },
   );
   ok(sneaky.kind === 'rejected' && code(sneaky) === 'COMMAND_ID_CONFLICT',
     `CONFIRM gleiche Kennung + anderer Rumpf = Konflikt (${code(sneaky)})`);
 
   // Der ZWEITE Vorsatz: neue Kennung, ausdrueckliche Bestaetigung.
   const yes = await life.runRecordSale(d, identity('3', 'consignments.record_sale'),
-    { consignmentId: cid, buyerId: 'cust-2', salePrice: 300, expectedRevision: seen, acknowledgeShortfall: true });
+    { consignmentId: cid, buyerId: 'cust-2', salePrice: 300, expectedRevision: seen, acknowledgeShortfall: true, consignorTaxScheme: 'ZERO' });
   ok(yes.kind === 'ok', 'CONFIRM der bestaetigte Verkauf laeuft');
   ok(s(db, 'SELECT status FROM consignments WHERE id = ?', [cid]) === 'sold', 'CONFIRM die Kommission ist verkauft');
   ok(Number(val<Record<string, unknown>>(yes).consignorLossAmount) > 0,

@@ -361,6 +361,8 @@ async function verkaufMaske(c, kaeufer, preis) {
   if (!(await warteBis(c, "document.querySelector('[data-consignment-sale]')", 15000))) return 'KEINE-MASKE';
   r.push(await ssPick(c, 'Search clients...', kaeufer));
   r.push(await setByLabel(c, 'SALE PRICE (BHD)', String(preis)));
+  // MIXED-INVOICE P2 (D2) — die Einkaufs-VAT des Einlieferers wird ausdrücklich gewählt (hier: ohne VAT).
+  r.push(await c.ev(`const b=[...document.querySelectorAll('[data-consignor-purchase-vat][data-vat="ZERO"]')]; b.forEach((x)=>x.click()); return b.length ? 'OK' : 'KEINE-EINKAUFS-VAT';`));
   await sleep(300);
   const schlecht = r.filter((x) => x !== 'OK');
   return schlecht.length ? 'FELD:' + schlecht.join(',') : 'OK';

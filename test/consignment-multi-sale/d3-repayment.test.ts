@@ -327,7 +327,9 @@ function verkauf(weg: Weg, db: Db, input: MI, x = nx()): Promise<Ausgang> {
   nimm(db);
   if (weg === 'primary') return primary(() => conHouse.recordConsignmentSalesOnPrimary(input));
   const revs = Object.fromEntries(input.items.map((it) => [it.consignmentId, rev(db, it.consignmentId)]));
-  return fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(input, revs)));
+  // MIXED-INVOICE P2 (D2) — der Fernrumpf nennt die Einkaufs-VAT immer (der Dialog verlangt die Wahl).
+  const mitVat = { ...input, items: input.items.map((it) => ({ ...it, consignorTaxScheme: it.consignorTaxScheme ?? 'ZERO' as const })) };
+  return fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(mitVat, revs)));
 }
 function rueckgabeK(weg: Weg, db: Db, cid: string, input: RI): Promise<Ausgang> {
   nimm(db);

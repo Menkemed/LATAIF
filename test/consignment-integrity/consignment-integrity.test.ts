@@ -870,7 +870,7 @@ for (const disp of ['RETURN_TO_OWNER', 'KEEP_AS_OWN']) {
       const r = weg === 'primary'
         ? await primary(() => conHouse.recordConsignmentSalesOnPrimary(input))
         : await fern(() => life.runRecordSale(deps(w.db), identity(nx(), 'consignments.record_sale'), {
-          items: [{ consignmentId: w.cid, expectedRevision: crev(w.db, w.cid), salePrice: 1200, acknowledgeShortfall: false, taxScheme: 'ZERO' }],
+          items: [{ consignmentId: w.cid, expectedRevision: crev(w.db, w.cid), salePrice: 1200, acknowledgeShortfall: false, taxScheme: 'ZERO', consignorTaxScheme: 'ZERO' }],
           buyerId: 'cust-2', saleDate: '2026-09-13', specialMark: false,
         }));
       reload();
@@ -921,7 +921,7 @@ for (const disp of ['RETURN_TO_OWNER', 'KEEP_AS_OWN']) {
         ? primary(() => conHouse.recordConsignmentSalesOnPrimary({ items: [{ consignmentId: w.cid, salePrice: 1200, acknowledgeShortfall: false }],
           buyerId: 'cust-2', saleDate, specialMark: false }))
         : fern(() => life.runRecordSale(deps(w.db), identity(nx(), 'consignments.record_sale'), {
-          items: [{ consignmentId: w.cid, expectedRevision: crev(w.db, w.cid), salePrice: 1200, acknowledgeShortfall: false }],
+          items: [{ consignmentId: w.cid, expectedRevision: crev(w.db, w.cid), salePrice: 1200, acknowledgeShortfall: false, consignorTaxScheme: 'ZERO' }],
           buyerId: 'cust-2', saleDate, specialMark: false,
         }));
       const r = await verkauf('2026-05-20');

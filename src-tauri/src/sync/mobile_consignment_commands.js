@@ -27,6 +27,8 @@
   const PAYOUT_METHODS = ['bank_transfer', 'cash', 'card', 'benefit'];
   // Die Steuerarten des Hauses (`TAX_SCHEMES`) — `consignments.create` prueft gegen genau diese.
   const TAX_SCHEMES = ['VAT_10', 'ZERO', 'MARGIN'];
+  // MIXED-INVOICE P2 (D2) — die Einkaufs-VAT des Einlieferers beim Verkauf: ohne VAT oder VAT 10 % (wie am Rechner).
+  const CONSIGNOR_VAT = ['ZERO', 'VAT_10'];
 
   /** Die Felder des Artikels, die `consignments.create` annimmt (plus `sku`). */
   // `itemNotes` ist die Notiz AM ARTIKEL; die Notiz der Kommission heisst `notes` und geht an
@@ -204,6 +206,18 @@
     };
     const notiz = textOrNull(form.notes);
     if (notiz !== null) body.notes = notiz;
+    // MIXED-INVOICE P2 (D4/D2) — dieselbe Wahl wie im Verkaufsdialog am Rechner: Steuerart der Rechnungszeile
+    // (VAT 10 % / Zero-rated / Margin; ungewaehlt gilt die des Artikels) und die Einkaufs-VAT des Einlieferers —
+    // diese ist PFLICHT und nie vorbelegt (ohne VAT / VAT 10 %); der Primary verlangt sie ebenso.
+    const steuer = textOrNull(form.taxScheme);
+    if (steuer !== null) {
+      if (TAX_SCHEMES.indexOf(steuer) < 0) return { ok: false, code: 'TAX_SCHEME_INVALID' };
+      body.taxScheme = steuer;
+    }
+    const einkaufVat = textOrNull(form.consignorTaxScheme);
+    if (einkaufVat === null) return { ok: false, code: 'CONSIGNOR_VAT_REQUIRED' };
+    if (CONSIGNOR_VAT.indexOf(einkaufVat) < 0) return { ok: false, code: 'CONSIGNOR_VAT_INVALID' };
+    body.consignorTaxScheme = einkaufVat;
     if (options.acknowledgeShortfall) body.acknowledgeShortfall = true;
     return { ok: true, body: body };
   }
@@ -296,6 +310,7 @@
     PAYOUT_MODELS: PAYOUT_MODELS,
     PAYOUT_METHODS: PAYOUT_METHODS,
     TAX_SCHEMES: TAX_SCHEMES,
+    CONSIGNOR_VAT: CONSIGNOR_VAT,
     PRODUCT_TEXT_FIELDS: PRODUCT_TEXT_FIELDS,
     PRODUCT_MONEY_FIELDS: PRODUCT_MONEY_FIELDS,
     EDIT_FIELDS: EDIT_FIELDS,

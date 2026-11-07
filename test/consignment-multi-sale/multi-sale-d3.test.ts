@@ -326,11 +326,13 @@ function dritterKunde(db: Db): void {
   useCustomerStore.getState().loadCustomers();
 }
 const rev = (db: Db, id: string): number => n(db, 'SELECT revision FROM consignments WHERE id = ?', [id]);
+/** MIXED-INVOICE P2 (D2) — der Fernrumpf nennt die Einkaufs-VAT immer (der Dialog verlangt die Wahl); ohne Angabe hier „ohne VAT". */
+const mitVat = (i: MI): MI => ({ ...i, items: i.items.map((it) => ({ ...it, consignorTaxScheme: it.consignorTaxScheme ?? 'ZERO' })) });
 function verkauf(weg: Weg, db: Db, input: MI, x = nx()): Promise<Ausgang> {
   nimm(db);
   if (weg === 'primary') return primary(() => conHouse.recordConsignmentSalesOnPrimary(input));
   const revs = Object.fromEntries(input.items.map((it) => [it.consignmentId, rev(db, it.consignmentId)]));
-  return fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(input, revs)));
+  return fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(mitVat(input), revs)));
 }
 function rueckgabeK(weg: Weg, db: Db, cid: string, input: RI): Promise<Ausgang> {
   nimm(db);
@@ -506,8 +508,8 @@ marker('CONSIGNMENT_MULTI_SALE_TWO_CONSIGNORS_PAYMENTS_PROVED');
   const x = nx();
   const revs = { [a]: rev(db, a), [b]: rev(db, b) };
   nimm(db);
-  const r1 = await fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(input, revs)));
-  const r2 = await fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(input, revs)));
+  const r1 = await fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(mitVat(input), revs)));
+  const r2 = await fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(mitVat(input), revs)));
   ok(r1.ok && r2.ok && r2.replayed && n(db, 'SELECT COUNT(*) FROM invoices') === 1 && n(db, 'SELECT COUNT(*) FROM purchases') === 2,
     `S3 PC2 derselbe Auftrag zweimal → ein Verkauf, Wiederholung = Replay (${r1.code || 'ok'}/${r2.code || 'ok'} replay=${r2.replayed})`);
   ok(n(db, "SELECT COUNT(*) FROM expenses WHERE category = 'ConsignorLoss' AND related_entity_id = ?", [b]) === 1
@@ -874,8 +876,8 @@ marker('CONSIGNMENT_D3_PAID_CONSIGNOR_PROVED');
     const x = nx();
     const revs = { [a]: rev(db, a), [b]: rev(db, b) };
     nimm(db);
-    const r1 = await fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(input, revs)));
-    const r2 = await fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(input, revs)));
+    const r1 = await fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(mitVat(input), revs)));
+    const r2 = await fern(() => life.runRecordSale(deps(db), identity(x, OP_S), finance.consignmentSalesBody(mitVat(input), revs)));
     ok(r1.ok && r2.ok && r2.replayed && n(db, 'SELECT COUNT(*) FROM purchases') === 1 && n(db, 'SELECT COUNT(*) FROM purchase_lines') === 2,
       `J6 derselbe Auftrag zweimal → ein Einkauf mit zwei Zeilen, Wiederholung = Replay (${r1.code || 'ok'}/${r2.code || 'ok'})`);
     bezahleEinlieferer(db, a, 300, 'cash');

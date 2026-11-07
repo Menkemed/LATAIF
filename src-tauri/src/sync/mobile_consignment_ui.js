@@ -227,6 +227,7 @@
     BUYER_REQUIRED: 'Please choose the buyer.',
     BUYER_IS_CONSIGNOR: 'The buyer cannot be the consignor — that would be a return, not a sale.',
     SALE_PRICE_REQUIRED: 'Please enter the sale price (greater than zero).',
+    CONSIGNOR_VAT_REQUIRED: "Please choose the VAT of the consignor's purchase — No VAT or VAT 10 %.",
     AMOUNT_REQUIRED: 'Please enter an amount greater than zero.',
     METHOD_REQUIRED: 'Please choose how the consignor is paid.',
     PRODUCT_REQUIRED: 'This consignment has no item loaded.',
@@ -344,6 +345,7 @@
     cnRenderState(con);
     cnRenderPhotos();
     await cnLadeAuswahlen();
+    cnVerkaufSteuerVorwahl();
     screen('formConsign');
   }
 
@@ -555,6 +557,20 @@
   async function cnLadeAuswahlen() {
     cnFuelle('cnPayoutMethod', MobileConsignment.PAYOUT_METHODS.map((w) => ({ wert: w, text: CN_WORT(w) })), 'How is the consignor paid…');
     cnFuelle('cnSpecialMark', [{ wert: '', text: 'Normal invoice number' }, { wert: 'special', text: 'Special number series' }], undefined);
+    // MIXED-INVOICE P2 (D4/D2) — dieselben Worte wie im Verkaufsdialog am Rechner.
+    const rechnung = { VAT_10: 'VAT 10 %', ZERO: 'Zero-rated', MARGIN: 'Margin scheme' };
+    const einkauf = { ZERO: 'No VAT (private / not VAT-registered)', VAT_10: 'VAT 10 % (consignor issues a VAT invoice)' };
+    cnFuelle('cnSaleTaxScheme', MobileConsignment.TAX_SCHEMES.map((w) => ({ wert: w, text: 'Invoice tax: ' + rechnung[w] })), undefined);
+    cnFuelle('cnSaleConsignorVat', MobileConsignment.CONSIGNOR_VAT.map((w) => ({ wert: w, text: 'Consignor purchase: ' + einkauf[w] })),
+      'Consignor purchase: choose the VAT… *');
+  }
+
+  // MIXED-INVOICE P2 (D4/D2) — wie am Rechner: die Steuerart der Rechnung ist die des Artikels vorgewählt (ohne = Margin)
+  // und frei änderbar; die Einkaufs-VAT des Einlieferers ist NICHT vorbelegt — sie wird ausdrücklich gewählt.
+  function cnVerkaufSteuerVorwahl() {
+    const art = CN.product ? CN.product.taxScheme : undefined;
+    $('cnSaleTaxScheme').value = MobileConsignment.TAX_SCHEMES.indexOf(art) >= 0 ? art : 'MARGIN';
+    $('cnSaleConsignorVat').value = '';
   }
 
   function cnSteuerAuswahl() {
@@ -897,6 +913,7 @@
     const gut = await cnHandlung('consignments.record_sale', bestaetigt ? 'sale-ack' : 'sale', () => MobileConsignment.saleBody(CN.con, {
       buyerId: CN.buyer ? CN.buyer.id : '', salePrice: $('cnSalePrice').value,
       specialMark: $('cnSpecialMark').value === 'special', notes: $('cnSaleNotes').value,
+      taxScheme: $('cnSaleTaxScheme').value, consignorTaxScheme: $('cnSaleConsignorVat').value,
     }, { acknowledgeShortfall: bestaetigt }), 'The sale was recorded.');
     if (gut) {
       cnShortfallZuruecksetzen();

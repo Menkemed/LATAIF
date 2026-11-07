@@ -753,6 +753,7 @@ try {
     await new Promise((r) => setTimeout(r, 400));
     document.querySelector('#cnBuyerResults button').click();
     document.getElementById('cnSalePrice').value = '300';
+    document.getElementById('cnSaleConsignorVat').value = 'ZERO';
     document.getElementById('cnSaleBtn').click();
     await new Promise((r) => setTimeout(r, 800));
     return 1;`);
@@ -846,6 +847,60 @@ try {
   const rueckgaben = gesehen.filter((g) => g.body?.op === 'consignments.mark_returned');
   ok(rueckgaben.length === 2 && rueckgaben[0].body.commandId === rueckgaben[1].body.commandId,
     `§5 „Clarify now" wiederholt DIESELBE Kennung — keine zweite Ruecknahme (${rueckgaben.length})`);
+
+  // ── §P2 MIXED-INVOICE P2 (D4/D2/D5) — Steuerart der Rechnung und Einkaufs-VAT beim Verkauf, wie am Rechner ─
+  let artikelP2 = Object.assign({}, ARTIKEL, { taxScheme: 'VAT_10' });
+  antwortGeber = (u, body) => {
+    const op = body && body.op;
+    if (op === 'consignments.list') {
+      return { status: 200, body: { ok: true, value: { items: [{ id: 'con-1', consignmentNumber: 'CON-2026-0007', agreedPrice: 500, status: 'active' }] } } };
+    }
+    if (op === 'consignments.get') return { status: 200, body: { ok: true, value: KOMMISSION(10) } };
+    if (op === 'products.get') return { status: 200, body: { ok: true, value: artikelP2 } };
+    if (op === 'customers.list') return { status: 200, body: { ok: true, value: { items: [{ id: 'cust-9', firstName: 'Sara', lastName: 'Ahmed' }] } } };
+    if (op === 'consignments.record_sale') return { status: 200, body: { ok: true, value: {} } };
+    return { status: 200, body: { ok: true, value: { items: [] } } };
+  };
+  const oeffnenP2 = async () => {
+    await c.ev("document.querySelector('[data-back-consign]').click(); await new Promise((r) => setTimeout(r, 300)); return 1;");
+    await c.ev("document.getElementById('cnSearchBtn').click(); await new Promise((r) => setTimeout(r, 400)); return 1;");
+    await c.ev("document.querySelector('#cnList button').click(); await new Promise((r) => setTimeout(r, 700)); return 1;");
+  };
+  const wahlP2 = () => c.ev(`return {
+    steuer: document.getElementById('cnSaleTaxScheme').value, einkauf: document.getElementById('cnSaleConsignorVat').value,
+    steuerOpts: Array.from(document.getElementById('cnSaleTaxScheme').options).map((o) => o.value),
+    einkaufOpts: Array.from(document.getElementById('cnSaleConsignorVat').options).map((o) => o.value),
+    sichtbar: !document.getElementById('cnSaleRow').classList.contains('hidden') };`);
+  await oeffnenP2();
+  let wP2 = await wahlP2();
+  ok(wP2.sichtbar && S(wP2.steuerOpts) === S(['VAT_10', 'ZERO', 'MARGIN']) && S(wP2.einkaufOpts) === S(['', 'ZERO', 'VAT_10'])
+    && wP2.steuer === 'VAT_10' && wP2.einkauf === '',
+    `§P2 Verkauf: drei Steuerarten (Vorwahl = Artikel) + Einkauf ohne VAT / VAT 10 % OHNE Vorbelegung (${S(wP2)})`);
+  // Ohne gewählte Einkaufs-VAT geht nichts hinaus — die Maske sagt, was fehlt.
+  const vorP2 = gesehen.filter((g) => g.body?.op === 'consignments.record_sale').length;
+  await c.ev(`document.getElementById('cnBuyerSearchBtn').click();
+    await new Promise((r) => setTimeout(r, 400));
+    document.querySelector('#cnBuyerResults button').click();
+    document.getElementById('cnSalePrice').value = '600';
+    document.getElementById('cnSaleBtn').click();
+    await new Promise((r) => setTimeout(r, 600));
+    return 1;`);
+  ok(gesehen.filter((g) => g.body?.op === 'consignments.record_sale').length === vorP2
+    && /consignor's purchase/.test(await c.ev("return document.getElementById('cnActionMsg').textContent;")),
+    '§P2 ohne gewählte Einkaufs-VAT: kein Verkauf, Hinweis „choose the VAT of the consignor\'s purchase"');
+  await c.ev(`document.getElementById('cnSaleTaxScheme').value = 'MARGIN';
+    document.getElementById('cnSaleConsignorVat').value = 'VAT_10';
+    document.getElementById('cnSaleBtn').click();
+    await new Promise((r) => setTimeout(r, 900));
+    return 1;`);
+  const p2Verkauf = gesehen.filter((g) => g.body?.op === 'consignments.record_sale').pop();
+  ok(p2Verkauf && p2Verkauf.body.payload.taxScheme === 'MARGIN' && p2Verkauf.body.payload.consignorTaxScheme === 'VAT_10'
+    && p2Verkauf.body.payload.salePrice === 600 && p2Verkauf.body.payload.buyerId === 'cust-9',
+    `§P2 Margin trotz VAT 10 % beim Einlieferer wählbar — beides reist mit „Record sale" (${S(p2Verkauf && p2Verkauf.body.payload)})`);
+  artikelP2 = Object.assign({}, ARTIKEL, { taxScheme: '' });
+  await oeffnenP2();
+  wP2 = await wahlP2();
+  ok(wP2.steuer === 'MARGIN' && wP2.einkauf === '', `§P2 Artikel ohne Steuerart: Vorwahl Margin wie am Rechner, Einkaufs-VAT offen (${S(wP2)})`);
 
   const protokoll = await c.ev('return window.__PROTOKOLL;');
   ok(protokoll.length === 0, `§6 die Seite hat keinen einzigen Fehler geworfen (${S(protokoll.slice(0, 2))})`);

@@ -870,6 +870,8 @@ async function verkaufAmPrimary(nr, x) {
     if (await warteBis(primary, q('[data-consignment-sale]'), 15000)) {
       r.push(await ssPick(primary, 'Search clients...', KAEUFER(x)));
       r.push(await setByLabel(primary, 'SALE PRICE (BHD)', '1200'));
+      // MIXED-INVOICE P2 (D2) — die Einkaufs-VAT des Einlieferers wird ausdrücklich gewählt (hier: ohne VAT).
+      r.push(await primary.ev(`const b=[...document.querySelectorAll('[data-consignor-purchase-vat][data-vat="ZERO"]')]; b.forEach((x)=>x.click()); return b.length ? 'OK' : 'KEINE-EINKAUFS-VAT';`));
       await sleep(300);
       r.push(await klick(primary, '[data-consignment-sale]'));
       r.push(await nummerWahl(primary, false));

@@ -20,10 +20,15 @@ export type LineScheme = 'VAT_10' | 'ZERO' | 'MARGIN';
 /** Was in einer Zeile stehen darf, bevor gerechnet wurde. `auto` heißt: das Schema des Produkts. */
 export type RequestedScheme = LineScheme | 'auto';
 
+/**
+ * MIXED-INVOICE P2 (D3) — ein Artikel ohne Steuerart gilt überall als MARGIN: wie der Spalten-Default
+ * (`products.tax_scheme DEFAULT 'MARGIN'`), der Artikel-Lader (Maske an Primary und PC2) und „Record Sale".
+ * Vorher fiel nur dieser Weg (PC2-Rechnung mit „Auto") auf VAT 10 % — die Maske zeigte Margin, gebucht wurde VAT 10 %.
+ */
 export function resolveLineScheme(requested: RequestedScheme | undefined, productScheme: string | undefined): LineScheme {
   if (requested && requested !== 'auto') return requested;
   const p = productScheme as LineScheme | undefined;
-  return p === 'ZERO' || p === 'MARGIN' || p === 'VAT_10' ? p : 'VAT_10';
+  return p === 'ZERO' || p === 'MARGIN' || p === 'VAT_10' ? p : 'MARGIN';
 }
 
 /** Nullsatz nur bei ZERO — die Zahl stand vorher genauso im Formular. */

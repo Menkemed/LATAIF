@@ -184,6 +184,9 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
     if (ohnePreis) return `${ohnePreis.c.consignmentNumber}: enter a sale price above 0`;
     const ohneAck = rows.find((r) => r.needsAck && !acks[r.c.id]);
     if (ohneAck) return `${ohneAck.c.consignmentNumber}: confirm the consignor-loss shortfall`;
+    // MIXED-INVOICE P2 (D2) — die Einkaufs-VAT jedes Einlieferers wird ausdrücklich gewählt, nichts ist vorbelegt.
+    const ohneVat = consignorGroups.find((g) => !consignorVat[g.consignorId]);
+    if (ohneVat) return `${ohneVat.name}: choose the VAT of the consignor's purchase — No VAT or VAT 10 %`;
     const tag = businessDateIssue(saleDate, 'Sale date');
     if (tag || !saleDate) return tag || 'Please choose the sale date';
     for (let i = 0; i < payRows.length; i++) {
@@ -217,7 +220,7 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
     const input: ConsignmentMultiSaleInput = {
       items: rows.map((r) => ({
         consignmentId: r.c.id, salePrice: r.price, acknowledgeShortfall: acks[r.c.id] === true, taxScheme: r.scheme,
-        consignorTaxScheme: consignorVat[r.c.consignorId] ?? 'ZERO',
+        consignorTaxScheme: consignorVat[r.c.consignorId],
       })),
       buyerId,
       saleDate,
@@ -353,7 +356,7 @@ export function ConsignmentSaleDialog({ open, consignmentIds, onClose, onSold }:
                 </div>
                 <div className="flex gap-2" style={{ flexWrap: 'wrap' }}>
                   {(['ZERO', 'VAT_10'] as const).map((v) => {
-                    const an = (consignorVat[g.consignorId] ?? 'ZERO') === v;
+                    const an = consignorVat[g.consignorId] === v;
                     return (
                       <button key={v} type="button" data-consignor-purchase-vat={g.consignorId} data-vat={v}
                         onClick={() => setConsignorVat((m) => ({ ...m, [g.consignorId]: v }))}

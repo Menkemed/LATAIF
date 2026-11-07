@@ -374,6 +374,10 @@ export interface RecordSaleRequest {
   notes?: string;
   acknowledgeShortfall?: boolean;
   specialMark: boolean;
+  /** MIXED-INVOICE P2 (D4) — Einzelrumpf: Steuerart der Rechnungszeile; fehlt = die des Artikels (sonst MARGIN). */
+  taxScheme?: ConsignmentSaleTaxScheme;
+  /** MIXED-INVOICE P2 (D2) — Einzelrumpf: Einkaufs-VAT des Einlieferers (ohne VAT / VAT 10 %); Pflicht (sonst CONSIGNOR_VAT_REQUIRED). */
+  consignorTaxScheme?: ConsignorPurchaseTaxScheme;
   /**
    * CONSIGNMENT MULTI-SALE — der gemeinsame Verkauf: je Artikel Kommission, gesehene Fassung, Preis und Bestätigung.
    * Gesetzt, wenn der Rumpf `items` trägt; dann sind `consignmentId`/`salePrice`/`expectedRevision` die des ersten.
@@ -395,9 +399,17 @@ export function parseRecordSale(raw: unknown): RecordSaleRequest {
   if (!isPlain(raw)) throw new FinancialPayloadError('payload must be an object');
   // CONSIGNMENT MULTI-SALE — der gemeinsame Verkauf (`items`) neben dem bisherigen Einzelrumpf; nie beides.
   if (raw.items !== undefined) return parseRecordSales(raw);
-  onlyKnownFields(raw, ['consignmentId', 'buyerId', 'salePrice', 'expectedRevision', 'saleDate', 'notes', 'acknowledgeShortfall', 'specialMark', 'payments']);
+  onlyKnownFields(raw, ['consignmentId', 'buyerId', 'salePrice', 'expectedRevision', 'saleDate', 'notes', 'acknowledgeShortfall', 'specialMark', 'payments', 'taxScheme', 'consignorTaxScheme']);
   if (raw.specialMark !== undefined && typeof raw.specialMark !== 'boolean') {
     throw new FinancialPayloadError('specialMark is yes or no');
+  }
+  // MIXED-INVOICE P2 (D2/D4) — auch der Einzelrumpf (Telefon) nennt die Steuerart der Rechnungszeile und die
+  // Einkaufs-VAT des Einlieferers; dieselben Werte und Prüfungen wie je Artikel im gemeinsamen Verkauf.
+  if (raw.taxScheme !== undefined && !isConsignmentSaleTaxScheme(raw.taxScheme)) {
+    throw new FinancialPayloadError('taxScheme must be MARGIN, VAT_10 or ZERO');
+  }
+  if (raw.consignorTaxScheme !== undefined && !isConsignorPurchaseTaxScheme(raw.consignorTaxScheme)) {
+    throw new FinancialPayloadError('consignorTaxScheme must be ZERO or VAT_10');
   }
   const out: RecordSaleRequest = {
     consignmentId: reqString(raw.consignmentId, 'consignmentId'),
@@ -405,6 +417,8 @@ export function parseRecordSale(raw: unknown): RecordSaleRequest {
     salePrice: positive(raw.salePrice, 'salePrice'),
     expectedRevision: expectedRevisionOf(raw.expectedRevision),
     specialMark: raw.specialMark === true,
+    ...(raw.taxScheme !== undefined ? { taxScheme: raw.taxScheme as ConsignmentSaleTaxScheme } : {}),
+    ...(raw.consignorTaxScheme !== undefined ? { consignorTaxScheme: raw.consignorTaxScheme as ConsignorPurchaseTaxScheme } : {}),
   };
   out.saleDate = optString(raw.saleDate, 'saleDate');
   out.notes = optText(raw.notes, 'notes');
@@ -483,8 +497,17 @@ export function runRecordSale(deps: EngineDeps, identity: CommandIdentity, raw: 
   const items = req.items ?? [{
     consignmentId: req.consignmentId, expectedRevision: req.expectedRevision, salePrice: req.salePrice,
     acknowledgeShortfall: req.acknowledgeShortfall === true,
+    ...(req.taxScheme ? { taxScheme: req.taxScheme } : {}),
+    ...(req.consignorTaxScheme ? { consignorTaxScheme: req.consignorTaxScheme } : {}),
   }];
   return runRemoteCommand(deps, identity, () => {
+    // MIXED-INVOICE P2 (D2) — jeder neue Einkauf beim Einlieferer braucht die ausdrücklich gewählte Einkaufs-VAT
+    // (ohne VAT / VAT 10 %); still „ohne VAT" anzunehmen wäre eine unbegründete Einstufung. Ein älterer Rumpf ohne
+    // diese Wahl (alte Handy-Seite) bucht NICHTS und bekommt ein klares Nein — neu laden, wählen, erneut senden.
+    if (items.some((it) => !('consignorTaxScheme' in it && it.consignorTaxScheme))) {
+      throw new CommandRejected('CONSIGNOR_VAT_REQUIRED',
+        "choose the VAT of the consignor's purchase — no VAT or VAT 10 % (reload the page if this choice is missing)");
+    }
     let result: ConsignmentsSold;
     try {
       // R5F — dieselbe Folge wie „Record Sale" am Primary: Einkauf beim Einlieferer (damit ein Los

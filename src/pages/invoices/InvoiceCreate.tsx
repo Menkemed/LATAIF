@@ -986,11 +986,6 @@ export function InvoiceCreate() {
                             </div>
                           ))}
                         </div>
-                        {c.scheme === 'MARGIN' && (
-                          <div style={{ marginTop: 10, fontSize: 10, color: '#AA956E' }}>
-                            Tax scheme "Margin Scheme" applied: VAT 0% on margin.
-                          </div>
-                        )}
                       </div>
                     </div>
                   )}

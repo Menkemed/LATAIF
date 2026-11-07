@@ -409,7 +409,8 @@ async function kommission(db: Db, body: Record<string, unknown> = CONSIGN): Prom
 async function verkauf(weg: 'primary' | 'fern', db: Db, cid: string, input: SI, x = nextId()): Promise<Ausgang> {
   return weg === 'primary'
     ? primary(() => conHouse.recordConsignmentSaleOnPrimary(cid, input))
-    : fern(() => life.runRecordSale(deps(db), identity(x, 'consignments.record_sale'), conRules.consignmentSaleBody(cid, crev(db, cid) || 1, input)));
+    // MIXED-INVOICE P2 (D2) — der Fernrumpf nennt die Einkaufs-VAT immer (hier: ohne VAT).
+    : fern(() => life.runRecordSale(deps(db), identity(x, 'consignments.record_sale'), { ...conRules.consignmentSaleBody(cid, crev(db, cid) || 1, input), consignorTaxScheme: 'ZERO' }));
 }
 async function auszahlung(weg: 'primary' | 'fern', db: Db, cid: string, input: PI, x = nextId()): Promise<Ausgang> {
   return weg === 'primary'
@@ -665,7 +666,7 @@ async function bruch(was: string, weg: 'primary' | 'fern', aufbau: () => Promise
   {
     const db = welt();
     const cid = await kommission(db);
-    const aus = await fern(() => life.runRecordSale(deps(db), fremd(nextId(), 'consignments.record_sale'), conRules.consignmentSaleBody(cid, crev(db, cid), S0)));
+    const aus = await fern(() => life.runRecordSale(deps(db), fremd(nextId(), 'consignments.record_sale'), { ...conRules.consignmentSaleBody(cid, crev(db, cid), S0), consignorTaxScheme: 'ZERO' }));
     ok(!aus.ok && aus.code === 'CONSIGNMENT_NOT_FOUND', `AUTH SALE ein Ausweis einer fremden Filiale (${aus.code})`);
     const pay = await fern(() => fin.runRecordPayout(deps(db), fremd(nextId(), 'consignments.record_payout'), { consignmentId: cid, amount: 1, method: 'cash', expectedRevision: crev(db, cid) }));
     ok(!pay.ok && pay.code === 'CONSIGNMENT_NOT_FOUND', `AUTH PAYOUT ein Ausweis einer fremden Filiale (${pay.code})`);

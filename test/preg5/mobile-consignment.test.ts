@@ -203,15 +203,18 @@ group('§4 Galerie');
 // §5 — Verkauf, Auszahlung, Ruecknahme
 // ══════════════════════════════════════════════════════════════════════════════
 {
-  const verkauf = M.saleBody(KOMMISSION, { buyerId: 'cust-9', salePrice: '650', specialMark: false }) as Required<Ergebnis>;
+  const verkauf = M.saleBody(KOMMISSION, { buyerId: 'cust-9', salePrice: '650', specialMark: false, consignorTaxScheme: 'ZERO' }) as Required<Ergebnis>;
   ok(verkauf.ok && verkauf.body.salePrice === 650 && verkauf.body.specialMark === false
-    && verkauf.body.expectedRevision === 3 && !('acknowledgeShortfall' in verkauf.body),
-    `§5 ein Verkauf nennt Kaeufer, Preis, Belegkreis und Fassung (${J(verkauf.body)})`);
+    && verkauf.body.expectedRevision === 3 && !('acknowledgeShortfall' in verkauf.body) && verkauf.body.consignorTaxScheme === 'ZERO',
+    `§5 ein Verkauf nennt Kaeufer, Preis, Belegkreis, Fassung und die Einkaufs-VAT (${J(verkauf.body)})`);
+  // MIXED-INVOICE P2 (D2) — die Einkaufs-VAT des Einlieferers ist Pflicht und nie vorbelegt.
+  ok((M.saleBody(KOMMISSION, { buyerId: 'cust-9', salePrice: '650' }) as Ergebnis).code === 'CONSIGNOR_VAT_REQUIRED',
+    '§5 ohne gewaehlte Einkaufs-VAT geht kein Verkauf hinaus');
   ok((M.saleBody(KOMMISSION, { buyerId: 'cust-1', salePrice: '650' }) as Ergebnis).code === 'BUYER_IS_CONSIGNOR',
     '§5 der Kaeufer darf nicht der Einlieferer sein — das waere eine Ruecknahme');
   ok((M.saleBody(KOMMISSION, { buyerId: 'cust-9', salePrice: '0' }) as Ergebnis).code === 'SALE_PRICE_REQUIRED',
     '§5 ohne Preis kein Verkauf');
-  const bestaetigt = M.saleBody(KOMMISSION, { buyerId: 'cust-9', salePrice: '300' }, { acknowledgeShortfall: true }) as Required<Ergebnis>;
+  const bestaetigt = M.saleBody(KOMMISSION, { buyerId: 'cust-9', salePrice: '300', consignorTaxScheme: 'ZERO' }, { acknowledgeShortfall: true }) as Required<Ergebnis>;
   ok(bestaetigt.body.acknowledgeShortfall === true,
     '§5 der Fehlbetrag wird erst NACH dem Nein des Primary ausdruecklich bestaetigt');
   // Kein Nachrechnen am Telefon: keine Abrechnung, kein Boden, keine Multiplikation mit einem Satz.

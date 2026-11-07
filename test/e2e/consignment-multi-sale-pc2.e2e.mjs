@@ -437,6 +437,8 @@ try {
       r.push(await client.ev(`const rows=[...document.querySelectorAll('[data-consignment-sale-pay-row]')]; const e=rows[${i}].querySelector('[data-consignment-sale-pay-amount]');
         Object.getOwnPropertyDescriptor(HTMLInputElement.prototype,'value').set.call(e, ${S(String(z.amount))}); e.dispatchEvent(new Event('input',{bubbles:true})); e.dispatchEvent(new Event('change',{bubbles:true})); return 'OK';`));
     }
+    // MIXED-INVOICE P2 (D2) — die Einkaufs-VAT jedes Einlieferers wird ausdrücklich gewählt (hier: ohne VAT).
+    r.push(await client.ev(`const b=[...document.querySelectorAll('[data-consignor-purchase-vat][data-vat="ZERO"]')]; b.forEach((x)=>x.click()); return b.length ? 'OK' : 'KEINE-EINKAUFS-VAT';`));
     await sleep(300);
     r.push(await klick(client, '[data-consignment-sale]'));
     r.push(await nummerWaehlen(client));
