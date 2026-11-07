@@ -3,7 +3,7 @@
 Regeln: `docs/ai/acceptance-rules.md`. Abnahmegrundlage sind die freigegebenen Previews `docs/mixed-invoice/preview-p1-p4.html` und `docs/mixed-invoice/preview-p5-quantities.html`. Regeln der Funktion: `docs/mixed-invoice-contract.md`.
 
 **Status:** Jede Zeile ist in der echten Test-App belegt: zwei Apps (Primary + PC2), Maus über `mausKlick`/`_e2e-mouse.mjs`, Tastatur über `Input.insertText`, danach die Wirkung in der Datenbank des Primary und beim erneuten Öffnen geprüft.
-**Die persönliche Sichtabnahme des Owners steht für alle Zeilen noch aus** (Spalte „Owner"). Ein grüner Lauf ersetzt sie nicht.
+**Owner 07.11.2026 (Release-Auftrag v0.8.99):** Die Abnahmebilder sind geprüft, und es ist keine größere UI-Entwicklung erforderlich. Die Spalte „Owner" gibt den Stand vor dieser Prüfung wieder. Die Bedienung an Primary und PC2 nach der Installation bleibt Teil des Installationsplans (§5).
 
 Bilder (Stand 07.11.2026, Test-App mit Testdaten): `E:\software\lataif\abnahme\mixed-invoice-2026-11-07\` — bewusst außerhalb des Repositorys.
 
@@ -67,8 +67,8 @@ Bilder (Stand 07.11.2026, Test-App mit Testdaten): `E:\software\lataif\abnahme\m
 | V2 | Korrektur (P4) rechnete mit der Auszahlung brutto, das Anlegen mit der Schätzung; ein gewechselter Einstand ließ die VAT stehen | Neue und geänderte Zeilen aus dem Einstand nach den Einkäufen; unveränderte behalten ihre VAT, außer ihr Einstand ändert sich | `test/vat` §5, P4 | offen |
 | V3 | Agent, Auftrag u. a. konnten eine VAT mit anderem Einstand als dem Los mitschicken | Das Haus setzt die Margin VAT aus dem gehaltenen Einstand (Anlegen, neue Zeile beim Ändern) | `test/vat` §7 | offen |
 | V4 | Finanzauswertung „Total VAT" zählte die Margin VAT doppelt | Je Zeile dieselbe Formel wie NBR | `test/vat` §2/§3/§6; Bestand: 60 → 30 | offen |
-| V5 | G4: Bruttobasis bei Einkauf ohne abziehbare VAT | gilt (Einkauf ohne VAT = voller Preis): 150/110 ⇒ 3,636 | `test/vat` §6 | offen |
-| V6 | G4 nach Einkauf mit Vorsteuerabzug | **nicht aktiviert** (doppelte Begünstigung). Basis bleibt netto: 150/100 ⇒ 4,545. Freigabe Buchhalter/NBR, Vertrag §9 | `test/vat` §6 | Buchhalter |
+| V5 | G4: Einkauf ohne abziehbare VAT | Basis = tatsächlich bezahlter Preis: 150/110 ⇒ 3,636 | `test/vat` §6 | entschieden (Owner, endgültig) |
+| V6 | G4: Einkauf mit abziehbarer Vorsteuer 10 % | Basis = Nettoeinkauf, keine Bruttobasis: 150/100 ⇒ 4,545 (Vertrag §2) | `test/vat` §6 | entschieden (Owner, endgültig) |
 
 ## 6. Ergebnisse der Läufe (07.11.2026)
 

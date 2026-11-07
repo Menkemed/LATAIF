@@ -1,6 +1,6 @@
 # Mixed Invoice P1–P5 — Release- und Installationsplan (vorbereitet, nicht ausgeführt)
 
-Inhalt des Releases (nächste Version, vorgeschlagen **v0.8.99**): P2–P5 der gemischten Rechnung (P1a–P1c sind seit v0.8.98 ausgeliefert), dazu die Release-Korrekturen „Pick product…", PC2-Leiste „Unresolved saves" und die einheitliche Margin VAT (VAT-CONSISTENCY, G4; Vertrag §2). Regeln: `docs/mixed-invoice-contract.md`. Allgemeiner Ablauf: `docs/ai/upgrade-runbook.md` — dieser Plan konkretisiert ihn.
+Inhalt des Releases **v0.8.99**: P2–P5 der gemischten Rechnung (P1a–P1c sind seit v0.8.98 ausgeliefert), dazu die Release-Korrekturen „Pick product…", PC2-Leiste „Unresolved saves" und die einheitliche Margin VAT (VAT-CONSISTENCY, G4; Vertrag §2). Regeln: `docs/mixed-invoice-contract.md`. Allgemeiner Ablauf: `docs/ai/upgrade-runbook.md` — dieser Plan konkretisiert ihn.
 
 **Jeder Schritt braucht eine eigene Owner-Freigabe:** Push, Release, Sicherung, Installation Primary, Installation PC2. Produktions-Apps schließt nur der Owner. Nichts davon ist ausgeführt.
 
@@ -17,13 +17,22 @@ Inhalt des Releases (nächste Version, vorgeschlagen **v0.8.99**): P2–P5 der g
 
 Weil PC2 noch v0.8.97 hat, springt er direkt auf die neue Version. Zwischenstände (alter PC2 am neuen Primary) sind nur für die Minuten zwischen den Installationen erlaubt, siehe §5.
 
-## 1 Release vorbereiten (Freigabe „push + release")
+## 1 Release (lokal vorbereitet; Push, Tag und Veröffentlichung nur mit Freigabe „push + release")
 
-1. Branch per Fast-Forward auf `main` (origin/main = `112c03be` ist Vorfahr, kein Merge nötig), pushen.
-2. Release-Commit: Version in den vier Dateien auf 0.8.99, `RELEASE_NOTES_v0.8.99.md` (Text unten), Tag `v0.8.99`.
-3. Gates auf dem Release-Commit: TS (`tsconfig.app.json`), `cargo test --lib`, Node-Gesamtlauf, die E2E-Liste aus `docs/ai/mixed-invoice-acceptance.md` §6 (bereits grün auf dem Code-Stand; nach dem Versions-Commit nur, wenn sich Code ändert). **Erst hier, mit dem Release-Build:** `test/storage-perf/e2e-binary-identity.test.ts` (ohne Release-Build fehlt ihm die zu vergleichende Datei; vorher 11/1 aus genau diesem Grund).
-4. Release-Build und Signatur wie bei v0.8.98 (`scripts/release.mjs`, eigener `CARGO_TARGET_DIR`, nie im P2-Ordner `desktop`), Staging mit `SHA256SUMS.txt`, `latest.json` ohne BOM, Draft prüfen (Dateien bytegleich zum Staging), dann „Latest".
-5. Den Installer v0.8.98 aufbewahren (`E:\LATAIF\Installer\v0.8.98`) — er ist der Rückweg.
+Lokal erledigt:
+- Release-Commit „release: v0.8.99 vorbereitet": Version in den vier Dateien, `RELEASE_NOTES_v0.8.99.md`.
+- Gates auf dem Release-Commit: TS, `cargo test --lib` und der signierte Release-Build im Arbeitsbaum `desktop-mixed-p2`, nie im P2-Ordner `desktop`.
+- `e2e-binary-identity` mit diesem Build.
+- Staging `E:\software\lataif\release-staging\v0.8.99`: Installer, `.sig`, `latest.json` ohne BOM, `SHA256SUMS.txt`. Signatur gegen den Updater-Schlüssel geprüft.
+- Der Versions-Commit ändert keinen Code. Node-Gesamtlauf und E2E-Liste (Abnahmematrix §6) gelten deshalb vom Code-Stand `0cbbfdee`.
+
+Mit Freigabe:
+1. `feature/mixed-invoice-p2` per Fast-Forward nach `origin/main` pushen (`112c03be` ist Vorfahr).
+2. Annotierten Tag `v0.8.99` auf den Release-Commit setzen und pushen.
+3. Draft mit genau den Staging-Dateien anlegen, Draft-Dateien bytegleich zum Staging prüfen, dann „Latest" setzen.
+4. Prüfen, dass der Updater-Endpunkt `latest.json` mit 0.8.99 liefert.
+
+Den Installer v0.8.98 aufbewahren (`E:\LATAIF\Installer\v0.8.98`); er ist der Rückweg.
 
 Achtung: Sobald das Release „Latest" ist, zeigen beide Rechner das Update-Banner. Auf PC2 **nicht** klicken, bevor der Primary installiert ist.
 
@@ -97,29 +106,6 @@ Eine Startprobe übernahm `data-location.json` aus einer Produktionssicherung; d
 
 Eine ältere App allein reicht nie: Die migrierte Datenbank trägt die Gruppenspalten, und eine v0.8.98-App würde Kommissionszeilen mit diesen Feldern in ihrer eigenen Synchronisierung abweisen.
 
-## 10 Release Notes v0.8.99 (Entwurf)
+## 10 Release Notes v0.8.99
 
-```
-LATAIF v0.8.99
-
-Gemischte Rechnung
-- Eine Rechnung kann eigene Ware und Kommissionsware gleichzeitig tragen ("Direct Sale", Abschnitt 2b; Admin/Manager).
-- Rechnungen mit Kommissionszeilen lassen sich korrigieren: Preis, Steuerart, Zeile entfernen (Erfassungsfehler),
-  Zeile hinzufügen; bezahlte Einlieferer und bezahlte Verluste mit Pflichtwahl Guthaben oder Rückforderung.
-- Steuerart der Kommissionszeile frei wählbar; Einkaufs-VAT des Einlieferers ist Pflicht (ohne VAT / VAT 10 %).
-- Macht VAT 10 % das LATAIF-Ergebnis negativ, wird jeder Kommissionsverkauf erst nach Bestätigung gebucht.
-
-Kommission: Mengen
-- Aufnahme von 1–50 identischen Stücken als Gruppe; Preis und Minimum je Stück; jedes Stück eigene SKU.
-- Teilverkauf beliebiger Stücke (Record Sale, Rechnung, Handy); Rest und Status je Stück in Liste und Detail.
-
-Korrekturen
-- Rechnung bearbeiten: eigene, schon verkaufte Artikel zeigen ihren Namen statt "Pick product...".
-- PC2: Die Leiste "Unresolved saves" verdeckt keine Knöpfe mehr und lässt sich einklappen.
-- Margin VAT: Kommissionsverkäufe rechnen mit der tatsächlichen Auszahlung an den Einlieferer
-  (bisher teils mit dem bei der Aufnahme geschätzten Einstand). Rechnung, Hauptbuch, NBR-Export
-  und Auswertung zeigen für jede Zeile dieselbe Margin VAT.
-- Finanzauswertung: "Total VAT" zählte die Margin VAT doppelt.
-
-Installation: zuerst Primary, direkt danach PC2. Die Datenbank wird beim ersten Start um drei Spalten erweitert.
-```
+Verbindlicher Text: `RELEASE_NOTES_v0.8.99.md` (englisch, wie v0.8.98). Er enthält die G4-Netto-Regel (Vertrag §2) und die dokumentierte Grenze zur Margin-Berechtigung.

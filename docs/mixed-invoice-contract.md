@@ -24,7 +24,7 @@ Eine Kundenrechnung kann eigene Lagerware und Kommissionsware gleichzeitig trage
 | E11 | Korrekturen buchen auf den Tag des Originals (Gegenbuchung je Originaltransaktion), das Änderungsdatum steht im Protokoll. |
 | E12 | Mengen: **Weg A** — eine Kommissionsgruppe aus Einzelstücken (D-P5-1); vereinbarter Preis und Minimum **je Stück** (D-P5-2); eine Rechnungszeile **je Stück** (D-P5-3). |
 | E13 | Gemischte Rechnung anlegen und korrigieren: ADMIN und MANAGER. |
-| G4 (Owner 07.11.) | Margin VAT = (Verkaufspreis − **tatsächlicher Einkauf**) × 10/110. Bei zulässigem Margin Scheme ist das der Bruttoeinkauf einschließlich einer nicht abgezogenen Einkaufs-VAT. Es gibt keine doppelte Begünstigung: Wurde die Vorsteuer abgezogen, bleibt die Basis netto (siehe §9). |
+| G4 (Owner, endgültig 07.11.) | Margin VAT = (Verkaufspreis − **tatsächlicher Einkauf**) × 10/110. **Einkauf mit abziehbarer Einkaufs-VAT 10 %:** der Nettoeinkauf, die Vorsteuer läuft getrennt. **Einkauf ohne abziehbare VAT:** der tatsächlich bezahlte Preis. Keine Bruttobasis bei Vorsteuerabzug, keine weitere G4-Umsetzung, keine automatische Änderung historischer Rechnungen. Rechenlogik `0cbbfdee`. |
 
 **Margin VAT, eine Regel (v0.8.99, VAT-CONSISTENCY).**
 - **Basis:** Die Margin VAT einer Zeile folgt dem Einstand, den die Zeile wirklich hält (`purchase_price_snapshot` = Wareneinsatz):
@@ -35,6 +35,7 @@ Eine Kundenrechnung kann eigene Lagerware und Kommissionsware gleichzeitig trage
 - **Haus:** Anlegen und neue Zeilen beim Ändern setzen die Margin VAT aus dem gehaltenen Einstand (`marginVatFromHeldCost`, `invoiceStore`). Ein Aufrufer mit anderem Wert (Agent, Auftrag, Aufnahme-Schätzung) verschiebt so nichts mehr.
 - **Korrektur (P4):** Eine unveränderte Zeile behält ihre gespeicherte VAT. Ändert sich nur ihr Einstand (Einkauf korrigiert, Einkaufs-VAT gewechselt), folgt die VAT dem neuen Einstand.
 - **Verbraucher:** Rechnungszeile, Hauptbuch (MARGIN_VAT), NBR-Export, VAT-Quartalsübersicht, Finanzauswertung („Total VAT", bis v0.8.98 doppelt gezählt) und Berichte rechnen dieselbe Zahl (`test/vat/margin-vat-consistency.test.ts`).
+- **Beispiele:** Kommission 1.200 bei Auszahlung 960 ⇒ 21,818. Einkauf ohne abziehbare VAT 110, Verkauf 150 ⇒ 3,636. Einkauf netto 100 + 10 Vorsteuer, Verkauf 150 ⇒ 4,545 (G4-Netto-Regel).
 
 ## 3. Wege (Haus = dieselbe Folge am Primary und für PC2)
 
@@ -90,9 +91,6 @@ Die Kommissionssperre am gewöhnlichen Änderungsweg (`assertConsignmentSaleInvo
 
 ## 9. Bekannte offene Punkte
 
-- **G4-Blocker, Freigabe Buchhalter/NBR:** Margin-Verkauf nach einem Einkauf mit Vorsteuerabzug. Das betrifft Eigenware mit VAT 10 % und Kommission mit Einkaufs-VAT 10 %.
-  - **Heute:** Die Vorsteuer ist gebucht und die Margenbasis netto (D5, unverändert). Eine Bruttobasis würde Vorsteuer und Bruttobasis doppelt begünstigen; deshalb wird sie hier nicht aktiviert.
-  - **Offen:** ob für diese Ware das Margin Scheme überhaupt zulässig ist (Bahrain-VAT-Ausführungsverordnung Art. 31, NBR-Leitfäden; Einschränkungen u. a. für Edelmetalle, Edelsteine, Perlen, Schmuck), sonst Verkauf mit VAT 10 %.
-  - Die App prüft weder die NBR-Zulassung noch die Warenberechtigung; „Margin" ist eine Auswahl des Bedieners.
-  - Im Bestand vom 07.11.2026 kommt kein solcher Fall vor (`E:\software\lataif\vat-pruefung\2026-11-07\`).
+- **G4 ist entschieden** (Owner, endgültig 07.11., §2): Bei abziehbarer Vorsteuer ist die Basis netto, ohne abziehbare VAT der tatsächliche Preis. Daraus folgt keine weitere Entwicklung.
+- **Dokumentierte Grenze (keine Entwicklung):** Die App prüft weder die NBR-Zulassung zum Margin Scheme noch die Warenberechtigung (Bahrain-VAT-Ausführungsverordnung Art. 31, NBR-Leitfäden; Einschränkungen u. a. für Edelmetalle, Edelsteine, Perlen, Schmuck). „Margin" ist eine Auswahl des Bedieners. Im Bestand vom 07.11.2026 kommt kein Margin-Verkauf nach Vorsteuerabzug vor (`E:\software\lataif\vat-pruefung\2026-11-07\`).
 - `posting.ts` liegt mit CRLF im Repository: `git diff --check` mit `-c core.whitespace=cr-at-eol` prüfen.
