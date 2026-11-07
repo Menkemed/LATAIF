@@ -899,6 +899,68 @@ for (const weg of ['primary', 'pc2'] as const) {
     '§11 das Sync-Manifest erlaubt die drei Gruppenfelder (Primary ↔ PC2)');
 }
 
+// ══ §13 Versionswechsel Primary ↔ PC2 (Release-Prüfung): alte Rümpfe gegen den neuen Primary, neue gegen den alten ══
+{
+  const alt = (p: string): string => execFileSync('git', ['show', `112c03be:${p}`], { cwd: repo, encoding: 'utf8', maxBuffer: 64 * 1024 * 1024 });
+  // a) Ein PC2 mit v0.8.98 (noch nicht aktualisiert) am neuen Primary — seine Rümpfe wörtlich nach den v0.8.98-Bauern.
+  const { w, gid, teile } = await gruppenWelt();
+  const alteAnlage = await fern(() => cmd.runConsignmentCreate(deps(w.db), ident('consignments.create') as never, {
+    consignorId: 'cust-3', product: { categoryId: 'cat-w', brand: 'Cartier', name: 'Tank alt' }, agreedPrice: 900,
+    payout: { model: 'percent', commissionRate: 20 }, acknowledgeDuplicate: true,
+  }));
+  reload();
+  const neuId = String(alteAnlage.value.consignmentId ?? '');
+  ok(alteAnlage.ok && !('groupId' in alteAnlage.value) && s(w.db, 'SELECT COALESCE(group_id, \'\') FROM consignments WHERE id = ?', [neuId]) === '',
+    `§13 v0.8.98-PC2 → neuer Primary: Aufnahme ohne Menge wie bisher (eine Kommission, keine Gruppe) (${alteAnlage.code || 'ok'})`);
+  // Der Mehrfachverkauf eines v0.8.98-PC2 (consignmentSalesBody 112c03be: mit Einkaufs-VAT, ohne E7-Bestätigung).
+  const altRumpf = (ids: string[], scheme: string) => ({
+    items: ids.map((id) => ({ consignmentId: id, expectedRevision: conRev(w.db, id), salePrice: 450, acknowledgeShortfall: false, taxScheme: scheme, consignorTaxScheme: 'ZERO' })),
+    buyerId: 'cust-2', specialMark: false,
+  });
+  const alterVerkauf = await fern(() => life.runRecordSale(deps(w.db), ident('consignments.record_sale') as never, altRumpf([teile[0]], 'MARGIN')));
+  reload();
+  ok(alterVerkauf.ok && s(w.db, 'SELECT status FROM consignments WHERE id = ?', [teile[0]]) === 'sold',
+    `§13 …sein Verkauf eines Stücks wird gebucht (${alterVerkauf.code || 'ok'})`);
+  w.db.run('UPDATE consignments SET commission_rate = 5 WHERE id = ?', [teile[1]]);
+  reload();
+  const vorher = zaehler(w.db);
+  const e7Alt = await fern(() => life.runRecordSale(deps(w.db), ident('consignments.record_sale') as never, altRumpf([teile[1]], 'VAT_10')));
+  ok(!e7Alt.ok && e7Alt.code === 'VAT_SHORTFALL_UNCONFIRMED' && zaehler(w.db) === vorher,
+    `§13 …ein VAT-10-%-Verlust (E7) ist für ihn ein klares Nein, nichts gebucht — erst der aktualisierte PC2 kann bestätigen (${e7Alt.code})`);
+  // Was ein v0.8.98-PC2 von consignments.get liest, steht weiter da (die Gruppe kommt nur hinzu).
+  const altSchluessel = [...alt('src/core/bridge/read-commands.ts').matchAll(/^ {4}([a-zA-Z]+):/gm)].map((m) => m[1]);
+  const dtoAlt = (() => { const t = alt('src/core/bridge/read-commands.ts'); const a = t.indexOf('function consignmentDto'); return [...t.slice(a, t.indexOf('\n}\n', a)).matchAll(/^ {4}([a-zA-Z]+):/gm)].map((m) => m[1]); })();
+  const jetzt = await lies('consignments.get', { id: teile[2] });
+  ok(dtoAlt.length >= 20 && dtoAlt.every((k) => k in jetzt) && altSchluessel.length > 0 && ['groupId', 'groupSeq', 'groupQuantity', 'group'].every((k) => k in jetzt),
+    `§13 …consignments.get liefert jedes v0.8.98-Feld weiter, die Gruppenfelder kommen hinzu (${dtoAlt.filter((k) => !(k in jetzt)).join(', ') || 'alle da'})`);
+  void gid;
+  // b) Ein neuer PC2 an einem v0.8.98-Primary: die neuen Felder kennt der alte Rumpf nicht ⇒ „unknown field", nichts gebucht.
+  const altCreate = alt('src/core/bridge/commercial-commands.ts');
+  const aC = altCreate.indexOf("'consignorId', 'product', 'agreedPrice'");
+  const altCreateFelder = altCreate.slice(aC, altCreate.indexOf(']', aC));
+  const altSale = alt('src/core/bridge/lifecycle-commands.ts');
+  const altInvoice = alt('src/core/bridge/invoice-command.ts');
+  const aT = altInvoice.indexOf('const TOP_KEYS');
+  ok(!/'quantity'/.test(altCreateFelder) && !/acknowledgeVatShortfall/.test(altSale) && !/'ownLines'/.test(altSale)
+    && !/'consignment'/.test(altInvoice.slice(aT, altInvoice.indexOf('\n', aT))),
+    '§13 neuer PC2 → v0.8.98-Primary: quantity, acknowledgeVatShortfall, ownLines und consignment fehlen in dessen strengen Rümpfen');
+  const strengAlt = alt('src/core/bridge/financial-commands.ts');
+  const strengNeu = src('src/core/bridge/financial-commands.ts');
+  const fn = (t: string): string => { const a = t.indexOf('export function onlyKnownFields'); return t.slice(a, t.indexOf('\n}\n', a)); };
+  let wirft = '';
+  try { (await import('../../src/core/bridge/financial-commands.ts')).onlyKnownFields({ consignorId: 'x', quantity: 3 }, ['consignorId']); } catch (e) { wirft = String((e as Error).message); }
+  ok(fn(strengAlt).replace(/\r\n/g, '\n') === fn(strengNeu).replace(/\r\n/g, '\n') && /quantity/.test(wirft),
+    `§13 …und der Feldwächter ist in beiden Fassungen derselbe: ein unbekanntes Feld wird abgewiesen, nicht still übergangen (${wirft.slice(0, 80)})`);
+  // c) Sync-Manifest: die neue Fassung erweitert nur. Eine Rückkehr der App auf v0.8.98 OHNE Rückspielen der Sicherung
+  //    würde Kommissionszeilen mit Gruppenfeldern in der eigenen Synchronisierung abweisen ⇒ Rückweg nur mit Sicherung.
+  const mAlt = JSON.parse(alt('src/core/sync/sync-business-schema.json')) as { tables: Record<string, { allowed_fields: string[] }> };
+  const mNeu = JSON.parse(src('src/core/sync/sync-business-schema.json')) as { tables: Record<string, { allowed_fields: string[] }> };
+  const nurNeu = Object.entries(mNeu.tables).flatMap(([t, c]) => c.allowed_fields.filter((f) => !(mAlt.tables[t]?.allowed_fields ?? []).includes(f)).map((f) => `${t}.${f}`));
+  const weg = Object.entries(mAlt.tables).flatMap(([t, c]) => c.allowed_fields.filter((f) => !(mNeu.tables[t]?.allowed_fields ?? []).includes(f)).map((f) => `${t}.${f}`));
+  ok(weg.length === 0 && Object.keys(mAlt.tables).every((t) => t in mNeu.tables) && nurNeu.includes('consignments.group_id'),
+    `§13 Manifest v0.8.98 → neu: nichts entfernt, nur ergänzt (${nurNeu.join(', ')})`);
+}
+
 // ══ §12 Quelltext: P1–P4 und der Bestandskern bleiben, wie sie sind ═════════════════════════════════════════════
 {
   const create = src('src/core/consignment/consignment-create.ts');

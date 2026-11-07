@@ -465,6 +465,18 @@ try {
   const LEDGER_BASIS = ledgerMax();
 
   // ══ MIXED-INVOICE P3 — Hilfen dieses Laufs ═══════════════════════════════════════════════════════
+  /** Sichtabnahme: ein Bild der sichtbaren Maske, nur wenn LATAIF_SHOTS gesetzt ist (ändert nichts am Lauf). */
+  async function foto(c, name, sel) {
+    const dir = process.env.LATAIF_SHOTS || '';
+    if (!dir) return;
+    try {
+      const fsx = await import('node:fs');
+      fsx.mkdirSync(dir, { recursive: true });
+      if (sel) { await c.ev(`document.querySelector(${S(sel)})?.scrollIntoView({ block: 'center' }); return 1;`); await sleep(250); }
+      const r = await c.send('Page.captureScreenshot', { format: 'png' });
+      fsx.writeFileSync(join(dir, name + '.png'), Buffer.from(r.data, 'base64'));
+    } catch (e) { console.log('  (Foto ' + name + ' nicht möglich: ' + String(e).slice(0, 80) + ')'); }
+  }
   /** Ein Fernauftrag von PC2 mit DESSEN Anmeldung, genau wie die Maske ihn schickt (Aufbau der Welt). */
   async function sende(c, op, payload) {
     const auth = (await kommandos(c)).map((x) => x.auth).find(Boolean) || '';
@@ -536,6 +548,7 @@ try {
     const e7 = await warteBis(client, `/45\\.455/.test(document.querySelector('[data-mixed-con-e7=${S(K3)}]')?.innerText || '')`, 10000);
     const keinE7 = !(await exists(client, `[data-mixed-con-e7=${S(K1)}]`)) && !(await exists(client, `[data-mixed-con-e7=${S(K2)}]`));
     ok(e7 && keinE7, `B E7-Hinweis nur an der Calatrava-Zeile (−45,455), nicht an Margin/VAT-10-mit-Provision (${e7}/${keinE7})`);
+    await foto(client, 'p3-b1-pc2-direktverkauf-2b-e7', `[data-mixed-con-e7=${S(K3)}]`);
     const anzeige = await client.ev(`return JSON.stringify(['${K1}','${K2}','${K3}'].map((id)=>[document.querySelector('[data-mixed-con-payout="'+id+'"]')?.innerText, document.querySelector('[data-mixed-con-share="'+id+'"]')?.innerText, document.querySelector('[data-mixed-con-vat="'+id+'"]')?.innerText]));`);
     ok(/960\.000.*240\.000/.test(anzeige) && /880\.000.*220\.000.*100\.000/.test(anzeige) && /1,000\.000.*50\.000.*95\.455/.test(anzeige),
       `B je Zeile Auszahlung, LATAIF-Anteil, VAT wie die Buchung (${anzeige})`);
@@ -556,6 +569,7 @@ try {
     r.push(await mausKlick(client, `[data-mixed-con-vatack=${S(K3)}]`)); await sleep(200);
     const summe = await client.ev("return document.body.innerText.match(/\\nTOTAL\\n([0-9,]+\\.[0-9]{3})/)?.[1] || '';");
     ok(String(summe) === '6,510.000', `B Summe der Maske: 2.500 + 660 + 1.200 + 1.100 + 1.050 = 6.510 (${summe})`);
+    await foto(client, 'p3-b2-pc2-einlieferer-abrechnung', '[data-mixed-consignor-settlement]');
     r.push(await mausKlick(client, '[data-invoice-save]'));
     if (!(await warteBis(client, "!document.querySelector('[data-invoice-save]')", 45000))) r.push('NICHT-GESPEICHERT:' + (await maskenFehler(client)));
     await spuelen(primary);

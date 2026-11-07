@@ -33,6 +33,12 @@ Behoben (v0.8.97):
 
 **Beenden von Prozessen.** Der Helfer `test/e2e/_e2e-process.mjs` beendet nur eine geprüfte PID am exakten Test-Pfad. Er nutzt nie `taskkill /T`. Windows behält die Eltern-PID eines Prozesses, auch wenn der Elternprozess längst beendet und die Nummer neu vergeben ist. `/T` träfe dann einen fremden Prozess, etwa die Produktions-App, die ein inzwischen beendeter Installer gestartet hat. Kinder werden nur über `trueDescendants` mitbeendet: gleiche Eltern-PID **und** nicht vor dem Elternprozess gestartet. `closeTestWindow` schickt `CloseMainWindow` nur an eine PID, die gerade am exakten Test-Pfad läuft. Anlass: Am 04.11.2026 verschwand die Produktions-App während eines E2E-Laufs. Dieser Lauf war das einzige laufende Programm, das Prozesse beendete, und hat das Verschwinden selbst gemessen; der genaue Weg ist nicht bewiesen.
 
+**Datenort einer Test-App.** Eine Test-App darf nur aus ihrem eigenen Testordner oder dem Temp-Verzeichnis lesen. Aus einer Produktionssicherung kommt nur `lataif.db` (bei Bedarf Server-DB und Medien) in einen Testordner, nie der Inhalt von `_schluessel/`. Dort liegt `data-location.json` mit `E:\LATAIF\Data`.
+- `e2ePreflight` bricht bei einem Zeiger außerhalb von Testordner und Temp ab (`assertIsolatedLocator`).
+- Die Test-App prüft im Automations-Build ihren aufgelösten Datenort vor dem ersten Zugriff selbst und beendet sonst den Start (`e2e_assert_isolated_data_root`, `src-tauri/src/lib.rs`).
+- Prüfskripte lesen `E:\LATAIF\Data` nicht, auch nicht zum Hashen.
+- Anlass: Am 07.11.2026 migrierte eine Startprobe mit kopiertem Zeiger die Produktionsdatenbank (`docs/ai/mixed-invoice-release-plan.md` §8a).
+
 **Reihen von E2E-Läufen** laufen über `node scripts/e2e-diag-runner.mjs <ordner> <tests…>`. Der Runner liefert je Lauf den vollen Exit-Code, die Reste davor und danach und einen Produktionswächter: Verschwindet eine fremde lataif.exe, bricht die Reihe ab. `test/e2e-safety/process-isolation.test.ts` startet eine Köder-lataif.exe und läuft deshalb nie parallel zu einem E2E-Lauf.
 
 **Absturz des Testtreibers (`0xC0000409`).** node.exe bricht dabei ohne Ausgabe, ohne Node-Bericht und ohne Windows-Ereignis ab. Bisher war das in 3 von etwa 95 Läufen so, immer beim Anbinden an die gerade startende App. Die Ursache ist offen; ERP-Code im Prozess, CET/Shadow-Stack und `fetch` gegen einen flatternden Port sind ausgeschlossen. Ein solcher Lauf zählt nur dann als Infrastruktur und nicht als rot, wenn **alle** Punkte gelten:

@@ -84,6 +84,13 @@ body { min-height: 100vh; overflow: hidden; background: var(--color-void); }
   overflow-x: hidden;
   background: var(--color-void);
 }
+/* RELEASE-FIX — Platz am Seitenende für die Leiste „Unresolved saves" (PendingSavesBar setzt die Höhe; ohne Leiste 0). */
+.app-content::after {
+  content: '';
+  display: block;
+  flex: none;
+  height: var(--pending-saves-space, 0px);
+}
 
 /* ── SCROLLBAR ── */
 ::-webkit-scrollbar { width: 6px; }
@@ -249,6 +256,7 @@ input[type="date"]::-webkit-calendar-picker-indicator:hover {
   .app-layout { display: block !important; height: auto !important; overflow: visible !important; }
   .app-sidebar, .no-print { display: none !important; }
   .app-content { height: auto !important; overflow: visible !important; }
+  .app-content::after { display: none !important; }
 
   .print-receipt {
     width: 80mm;

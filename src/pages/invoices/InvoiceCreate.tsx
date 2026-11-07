@@ -56,7 +56,7 @@ import {
 import { correctMixedInvoiceOnPrimary } from '@/core/invoices/mixed-invoice-correction';
 import { usePurchaseStore } from '@/stores/purchaseStore';
 import { useExpenseStore } from '@/stores/expenseStore';
-import type { Consignment } from '@/core/models/types';
+import type { Consignment, Product } from '@/core/models/types';
 import type { ConsignorPurchaseTaxScheme } from '@/core/consignment/consignment-finance';
 // Die Maske rechnet die Kommissionszeile mit derselben Funktion wie die Buchung (`consignmentLineAmounts`) und prüft E7 mit
 // `consignmentVatShortfall` — beides in `ConsignmentInvoiceLines`.
@@ -126,6 +126,27 @@ const calcLine = calcInvoiceLine;
 // MARGIN  → net = gross (VAT ist auf Marge eingebettet, kundenseitig nicht extra)
 const unitNetFromGross = (gross: number, qty: number, scheme: 'VAT_10' | 'ZERO' | 'MARGIN', vatRate: number): number =>
   unitNetKeepingGross(gross, qty, scheme, vatRate);
+
+/** Die Option eines Artikels in der Produktauswahl (Lot-Bestand, Soft-Reservierung). */
+function productOptionOf(
+  p: Product, agg: ReadonlyMap<string, { totalQty?: number }>,
+  reservations: ReadonlyMap<string, { qty: number; orderNumbers: string[] }>, suffix = '',
+) {
+  const stock = agg.get(p.id)?.totalQty ?? (p.quantity || 1);
+  // v0.6.9 — Soft-Reservation: zeige im Picker an, wenn dieses Stueck in einer
+  // offenen Order versprochen ist. Nicht blockierend — der User entscheidet.
+  const res = reservations.get(p.id);
+  const resHint = res && res.qty > 0
+    ? ` · 🔒 ${res.qty} reserviert (${res.orderNumbers.slice(0, 2).join(', ')}${res.orderNumbers.length > 2 ? '…' : ''})`
+    : '';
+  return {
+    id: p.id,
+    label: productDisplayName(p),
+    subtitle: `${fmt(p.plannedSalePrice ?? p.purchasePrice ?? 0)} BHD · stock ${stock}${resHint}${suffix}`,
+    meta: p.sku,
+    searchText: productSearchText(p),
+  };
+}
 
 export function InvoiceCreate() {
   const navigate = useNavigate();
@@ -348,23 +369,19 @@ export function InvoiceCreate() {
     // Phase 7: "stock N" zeigt Lot-Total (echte verfuegbare Stuecke) statt
     // legacy product.quantity. Eine Query fuer alle Produkte (Bulk).
     const agg = lotAgg;
-    return visible.map(p => {
-      const stock = agg.get(p.id)?.totalQty ?? (p.quantity || 1);
-      // v0.6.9 — Soft-Reservation: zeige im Picker an, wenn dieses Stueck in einer
-      // offenen Order versprochen ist. Nicht blockierend — der User entscheidet.
-      const res = productReservations.get(p.id);
-      const resHint = res && res.qty > 0
-        ? ` · 🔒 ${res.qty} reserviert (${res.orderNumbers.slice(0, 2).join(', ')}${res.orderNumbers.length > 2 ? '…' : ''})`
-        : '';
-      return {
-        id: p.id,
-        label: productDisplayName(p),
-        subtitle: `${fmt(p.plannedSalePrice ?? p.purchasePrice ?? 0)} BHD · stock ${stock}${resHint}`,
-        meta: p.sku,
-        searchText: productSearchText(p),
-      };
-    });
+    return visible.map(p => productOptionOf(p, agg, productReservations));
   }, [products, productReservations]);
+  /**
+   * RELEASE-FIX „Pick product…" — die Auswahl einer Zeile. Ein Artikel, den DIESE Rechnung schon reserviert oder verkauft
+   * hat, fehlt in der allgemeinen Liste (er ist nicht mehr verkaufbar) — die Zeile zeigte dann nur den Platzhalter, obwohl
+   * sie ihren Artikel behielt. Jetzt steht er in der Auswahl GENAU dieser Zeile („on this invoice"); keine andere Zeile
+   * kann ihn wählen, und die Regel, was verkaufbar ist, bleibt unverändert.
+   */
+  function productOptionsForLine(l: DraftLine) {
+    if (!l.productId || productOptions.some(o => o.id === l.productId)) return productOptions;
+    const p = products.find(x => x.id === l.productId);
+    return p ? [productOptionOf(p, lotAgg, productReservations, ' · on this invoice'), ...productOptions] : productOptions;
+  }
 
   // Pro Zeile: aufgelöstes Scheme + Berechnung (Memo via direkter map)
   // Phase 3 — Cost-Snapshot kommt aus dem ausgewaehlten Lot statt aus
@@ -1034,7 +1051,7 @@ export function InvoiceCreate() {
                     <div style={{ minWidth: 0 }}>
                       <SearchSelect
                         placeholder="Pick product..."
-                        options={productOptions}
+                        options={productOptionsForLine(l)}
                         value={l.productId}
                         onChange={pid => pickProductForLine(idx, pid)}
                         disabled={!!l.returnedQty || !!l.restOf}

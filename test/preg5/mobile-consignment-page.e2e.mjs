@@ -1032,6 +1032,20 @@ try {
     ok(!nachAnlage.mengeSichtbar && nachAnlage.gruppe && nachAnlage.badge === 'piece 1 of 3' && /Group of 3 · 3 available/.test(nachAnlage.zeilen)
       && nachAnlage.stuecke === 3 && nachAnlage.verkaufMenge,
       `§P5 geöffnet: kein Mengenfeld mehr, Gruppenkarte „piece 1 of 3 · Group of 3 · 3 available", 3 Stücke, „Pieces to sell" (${S(nachAnlage)})`);
+    if (process.env.LATAIF_SHOTS) {
+      // Sichtabnahme: die echte Seite mit ihren Stilen bei 360 px (ändert nichts am Lauf).
+      const fsx = await import('node:fs');
+      fsx.mkdirSync(process.env.LATAIF_SHOTS, { recursive: true });
+      await c.send('Emulation.setDeviceMetricsOverride', { width: 360, height: 780, deviceScaleFactor: 2, mobile: true });
+      for (const [name, ziel] of [['p5-handy-gruppenkarte', 'cnGroupCard'], ['p5-handy-pieces-to-sell', 'cnSaleQtyRow']]) {
+        await c.ev(`const st = document.createElement('style'); st.id = 'p5foto'; st.textContent = ${S(SEITEN_CSS)}; document.head.appendChild(st);
+          document.getElementById(${S(ziel)}).scrollIntoView({ block: 'center' }); await new Promise((r) => setTimeout(r, 200)); return 1;`);
+        const bild = await c.send('Page.captureScreenshot', { format: 'png' });
+        fsx.writeFileSync(join(process.env.LATAIF_SHOTS, name + '.png'), Buffer.from(bild.data, 'base64'));
+        await c.ev("document.getElementById('p5foto')?.remove(); return 1;");
+      }
+      await c.send('Emulation.clearDeviceMetricsOverride');
+    }
 
     // Teilverkauf: 2 Stück zum Preis je Stück — EIN Auftrag mit items[] (das geöffnete Stück zuerst, dann die kleinste Nummer).
     const vorP5 = gesehen.filter((g) => g.body?.op === 'consignments.record_sale').length;

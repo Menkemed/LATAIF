@@ -1,0 +1,344 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>P5 Consignment Quantities — Preview</title>
+<style>
+  :root { --ink:#0F0F10; --muted:#6B7280; --line:#E5E9EE; --soft:#F2F7FA; --gold:#C6A36D; --green:#5C8550; --red:#DC2626; --blue:#1E3A8A; --bg:#FFFFFF; }
+  * { box-sizing: border-box; }
+  body { margin:0; font-family: Inter, system-ui, -apple-system, "Segoe UI", sans-serif; color:var(--ink); background:var(--bg); font-size:13px; }
+  header { padding:18px 28px 0; border-bottom:1px solid var(--line); }
+  header h1 { font-size:18px; margin:0 0 4px; font-weight:600; }
+  header p { margin:0 0 12px; color:var(--muted); font-size:12px; }
+  nav { display:flex; gap:4px; flex-wrap:wrap; }
+  nav button { border:none; background:none; padding:9px 14px; cursor:pointer; font-size:13px; color:var(--muted); border-bottom:2px solid transparent; }
+  nav button.on { color:var(--ink); border-bottom-color:var(--ink); }
+  main { padding:24px 28px 60px; max-width:1180px; }
+  .card { border:1px solid var(--line); border-radius:10px; padding:16px 18px; margin-bottom:16px; background:#fff; }
+  .ov { font-size:10px; letter-spacing:.08em; text-transform:uppercase; color:var(--muted); display:block; margin-bottom:8px; }
+  .grid { display:grid; gap:12px; }
+  label.f { display:flex; flex-direction:column; gap:4px; font-size:10px; color:var(--muted); text-transform:uppercase; letter-spacing:.05em; }
+  input, select { height:34px; border:1px solid #D5D9DE; border-radius:6px; padding:0 9px; font-size:13px; color:var(--ink); background:#fff; }
+  input[type=checkbox] { height:auto; }
+  .btn { padding:7px 13px; border-radius:6px; border:1px solid #D5D9DE; background:#fff; cursor:pointer; font-size:12px; color:var(--ink); }
+  .btn.pri { background:var(--ink); color:#fff; border-color:var(--ink); }
+  .btn.on { background:var(--ink); color:#fff; border-color:var(--ink); }
+  .btn:disabled { opacity:.45; cursor:default; }
+  .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+  .muted { color:var(--muted); }
+  .note { border-radius:8px; padding:10px 12px; font-size:12px; }
+  .note.new { background:rgba(198,163,109,.10); border:1px solid rgba(198,163,109,.45); color:#5B4A2B; }
+  .note.info { background:rgba(37,99,235,.05); border:1px solid rgba(37,99,235,.25); color:var(--blue); }
+  .note.warn { background:rgba(220,38,38,.06); border:1px solid rgba(220,38,38,.3); color:#7A2A2A; }
+  table { width:100%; border-collapse:collapse; }
+  th { text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted); padding:8px 10px; border-bottom:1px solid var(--line); font-weight:500; }
+  td { padding:9px 10px; border-bottom:1px solid var(--line); vertical-align:middle; }
+  tr.grp td { background:#FAFBFC; }
+  tr.piece td { font-size:12px; }
+  tr.piece td:first-child { padding-left:34px; }
+  .dot { display:inline-block; width:7px; height:7px; border-radius:50%; margin-right:6px; vertical-align:middle; }
+  .d-active { background:#2563EB; } .d-sold { background:var(--green); } .d-ret { background:#9CA3AF; }
+  .pill { display:inline-block; padding:2px 8px; border-radius:20px; font-size:11px; border:1px solid var(--line); color:var(--muted); }
+  .pill.new { border-color:rgba(198,163,109,.6); color:#8A6A3A; background:rgba(198,163,109,.08); }
+  .stepper { display:inline-flex; align-items:center; border:1px solid #D5D9DE; border-radius:6px; overflow:hidden; }
+  .stepper button { width:30px; height:32px; border:none; background:#F7F8FA; cursor:pointer; font-size:15px; }
+  .stepper span { min-width:38px; text-align:center; font-weight:600; }
+  .row-card { border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .r { text-align:right; }
+  .phone { width:380px; border:10px solid #1C1C1E; border-radius:34px; background:#111; color:#EAEAEA; padding:18px 14px; min-height:640px; }
+  .phone h3 { margin:4px 0 12px; font-size:15px; }
+  .phone input, .phone select { width:100%; background:#1E1E20; border-color:#333; color:#EAEAEA; margin-bottom:8px; }
+  .phone .pbtn { width:100%; padding:11px; border-radius:8px; border:none; background:var(--gold); color:#111; font-weight:600; margin-top:6px; }
+  .phone .item { border:1px solid #333; border-radius:8px; padding:9px 10px; margin-bottom:8px; }
+  .phone .hint { color:#A1A1AA; font-size:11px; }
+  .cmp td, .cmp th { vertical-align:top; }
+  .ok { color:var(--green); } .no { color:var(--red); }
+  .hide { display:none; }
+  .tag { font-size:10px; color:#8A6A3A; text-transform:uppercase; letter-spacing:.06em; margin-left:6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>P5 · Consignment quantities and partial sales — preview</h1>
+  <p>Recommended design “A”: one intake with a quantity creates a <b>group of single pieces</b>. Each piece stays an ordinary consignment (P1–P4 unchanged). Demo data only — nothing is saved. Gold marks what is new.</p>
+  <nav id="tabs"></nav>
+</header>
+<main id="app"></main>
+
+<script>
+// ── Demo-Daten ─────────────────────────────────────────────────────────────────────────────
+const fmt = (n) => (Math.round(n * 1000) / 1000).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+const S = {
+  tab: 'intake',
+  intake: { qty: 3, agreed: 400, minimum: 350, model: 'percent', rate: 20, priceMode: 'piece', name: 'Pearl stud earrings 18K', consignor: 'Mariam Al-Khalifa', sku: '' },
+  groups: [
+    { id: 'G41', name: 'Pearl stud earrings 18K', consignor: 'Mariam Al-Khalifa', model: 'percent', rate: 20, agreed: 400,
+      pieces: [
+        { nr: 'CON-2026-00041', sku: 'JWL-0412-1', status: 'sold', buyer: 'Sara Ahmed', inv: 'INV-2026-0188', price: 450, payout: 360, paid: 360 },
+        { nr: 'CON-2026-00042', sku: 'JWL-0412-2', status: 'sold', buyer: 'Sara Ahmed', inv: 'INV-2026-0188', price: 450, payout: 360, paid: 0 },
+        { nr: 'CON-2026-00043', sku: 'JWL-0412-3', status: 'active' },
+        { nr: 'CON-2026-00044', sku: 'JWL-0412-4', status: 'active' },
+        { nr: 'CON-2026-00045', sku: 'JWL-0412-5', status: 'active' },
+      ] },
+    { id: 'G46', name: 'Rolex Datejust 36', consignor: 'Omar Saleh', model: 'consignor_fixed', agreed: 5200, single: true,
+      pieces: [{ nr: 'CON-2026-00046', sku: 'WCH-0219', status: 'active' }] },
+  ],
+  open: { G41: true },
+  sel: {},          // groupId -> Anzahl gewählter Stücke
+  sale: { groupId: 'G41', k: 2, price: 450, scheme: 'MARGIN', vatAck: false, consignorVat: '' },
+  inv: { groupId: '', k: 1, price: 450, scheme: 'MARGIN' },
+  mob: { qty: 2, saleK: 1 },
+};
+const active = (g) => g.pieces.filter((p) => p.status === 'active');
+const econ = (g, price) => (g.model === 'consignor_fixed'
+  ? { payout: g.agreed, commission: price - g.agreed, loss: price < g.agreed ? g.agreed - price : 0 }
+  : { payout: price * (1 - g.rate / 100), commission: price * g.rate / 100, loss: 0 });
+const vatOf = (scheme, price, base) => (scheme === 'VAT_10' ? price - price / 1.1 : scheme === 'MARGIN' ? Math.max(0, price - base) / 11 : 0);
+
+const TABS = [
+  ['intake', '1 · Intake (desktop)'], ['list', '2 · Items list'], ['sale', '3 · Record Sale'], ['invoice', '4 · Invoice 2b'],
+  ['detail', '5 · Group on the detail page'], ['mobile', '6 · Mobile'], ['decide', '7 · Decisions'],
+];
+function tabs() {
+  document.getElementById('tabs').innerHTML = TABS.map(([k, l]) => `<button class="${S.tab === k ? 'on' : ''}" onclick="S.tab='${k}';render()">${l}</button>`).join('');
+}
+function stepper(val, fn, min, max) {
+  return `<span class="stepper"><button onclick="${fn}(Math.max(${min},${val}-1))">−</button><span>${val}</span><button onclick="${fn}(Math.min(${max},${val}+1))">+</button></span>`;
+}
+
+// ── 1 · Aufnahme ───────────────────────────────────────────────────────────────────────────
+function vIntake() {
+  const i = S.intake;
+  const perPiece = i.priceMode === 'piece' ? i.agreed : i.agreed / i.qty;
+  const nums = Array.from({ length: i.qty }, (_, k) => `CON-2026-${String(47 + k).padStart(5, '0')}`);
+  return `
+  <div class="card">
+    <span class="ov">New Consignment</span>
+    <div class="grid" style="grid-template-columns:1.2fr 1.4fr 140px;">
+      <label class="f">Consignor<input value="${i.consignor}" readonly /></label>
+      <label class="f">Name / Model<input value="${i.name}" oninput="S.intake.name=this.value" /></label>
+      <label class="f">Quantity <span class="tag">new</span>${stepper(i.qty, 'setQty', 1, 50)}</label>
+    </div>
+    <div class="grid" style="grid-template-columns:1fr 1fr 1fr 1fr; margin-top:12px;">
+      <label class="f">Agreed price ${i.priceMode === 'piece' ? '<b>per piece</b>' : 'for all pieces'} *<input type="number" value="${i.agreed}" oninput="S.intake.agreed=+this.value||0;render()" /></label>
+      <label class="f">Minimum price ${i.priceMode === 'piece' ? 'per piece' : 'for all'}<input type="number" value="${i.minimum}" oninput="S.intake.minimum=+this.value||0" /></label>
+      <label class="f">Payout model<select onchange="S.intake.model=this.value;render()"><option value="percent" ${i.model === 'percent' ? 'selected' : ''}>Commission %</option><option value="consignor_fixed" ${i.model === 'consignor_fixed' ? 'selected' : ''}>Consignor fixed</option></select></label>
+      <label class="f">SKU (optional)<input placeholder="auto per piece" value="${i.sku}" oninput="S.intake.sku=this.value;render()" /></label>
+    </div>
+    ${i.qty > 1 ? `
+    <div class="note new" style="margin-top:14px;" data-p5-intake-preview>
+      <b>Saving creates ${i.qty} consignments — one item each</b>, all with the same consignor, terms and photos (stored once, linked to each piece):
+      <div class="mono" style="margin-top:6px;">${nums.map((n, k) => `${n} · SKU ${i.sku ? i.sku + '-' + (k + 1) : 'auto'} · agreed ${fmt(perPiece)}`).join('<br>')}</div>
+      <div style="margin-top:6px;">They are listed as one group (“${i.name} × ${i.qty}”). Each piece is sold, returned, paid out and corrected on its own — exactly like today.</div>
+      ${i.priceMode === 'total' ? `<div style="margin-top:6px; color:#7A2A2A;">Variant “price for all pieces”: ${fmt(i.agreed)} ÷ ${i.qty} = ${fmt(perPiece)} per piece (rounding to the fils) — see decision D-P5-2.</div>` : ''}
+    </div>` : '<div class="note info" style="margin-top:14px;">Quantity 1 = exactly today’s intake (no change).</div>'}
+    <div style="margin-top:12px; display:flex; gap:8px; align-items:center;">
+      <span class="muted">Preview the open price question:</span>
+      <button class="btn ${i.priceMode === 'piece' ? 'on' : ''}" onclick="S.intake.priceMode='piece';render()">Agreed price per piece (recommended)</button>
+      <button class="btn ${i.priceMode === 'total' ? 'on' : ''}" onclick="S.intake.priceMode='total';render()">Price for all pieces</button>
+    </div>
+  </div>`;
+}
+window.setQty = (v) => { S.intake.qty = v; render(); };
+
+// ── 2 · Liste „Items" ──────────────────────────────────────────────────────────────────────
+function vList() {
+  const rows = S.groups.map((g) => {
+    const a = active(g).length;
+    const sold = g.pieces.filter((p) => p.status === 'sold').length;
+    const k = S.sel[g.id] || 0;
+    const head = g.single ? '' : `
+      <tr class="grp" data-p5-group="${g.id}">
+        <td><button class="btn" style="padding:2px 8px;" onclick="S.open['${g.id}']=!S.open['${g.id}'];render()">${S.open[g.id] ? '▾' : '▸'}</button>
+          <b style="margin-left:6px;">${g.name} × ${g.pieces.length}</b> <span class="pill new">group</span></td>
+        <td>${g.consignor}</td>
+        <td class="mono">${fmt(g.agreed)} / piece</td>
+        <td><span class="dot d-active"></span>${a} active · <span class="dot d-sold"></span>${sold} sold</td>
+        <td>${a > 0 ? `select ${stepper(k, `selG('${g.id}')`, 0, a)}` : '—'}</td>
+      </tr>`;
+    const pieces = (g.single || S.open[g.id]) ? g.pieces.map((p) => `
+      <tr class="piece">
+        <td><input type="checkbox" ${p.status !== 'active' ? 'disabled' : ''} ${p.status === 'active' && active(g).indexOf(p) < k ? 'checked' : ''} onchange="togglePiece('${g.id}')" />
+          <span class="mono" style="margin-left:8px;">${p.nr}</span> <span class="muted">${g.single ? g.name : ''} ${p.sku}</span></td>
+        <td>${g.single ? g.consignor : ''}</td>
+        <td class="mono">${fmt(g.agreed)}</td>
+        <td><span class="dot ${p.status === 'active' ? 'd-active' : 'd-sold'}"></span>${p.status}${p.inv ? ` · <span class="mono">${p.inv}</span>` : ''}</td>
+        <td>${p.status === 'active' ? '<button class="btn">Sold</button> <button class="btn">Return</button>' : '<button class="btn">Invoice</button>'}</td>
+      </tr>`).join('') : '';
+    return head + pieces;
+  }).join('');
+  const total = Object.values(S.sel).reduce((x, y) => x + y, 0);
+  return `
+  <div class="card">
+    <span class="ov">Consignments · Items</span>
+    <table><tr><th>Item</th><th>Consignor</th><th>Agreed</th><th>Status / stock</th><th>Sell</th></tr>${rows}</table>
+    <div style="margin-top:12px; display:flex; align-items:center; gap:12px;">
+      <span>${total} item${total === 1 ? '' : 's'} selected</span>
+      <button class="btn pri" ${total ? '' : 'disabled'} onclick="S.sale.groupId='G41';S.sale.k=Math.max(1,S.sel.G41||1);S.tab='sale';render()">Record Sale (${total})</button>
+    </div>
+    <div class="note new" style="margin-top:12px;">New: pieces of one intake are shown as a group with their remaining stock. “Select 2” ticks the two active pieces with the lowest numbers — the sale is today’s multi-item sale (one invoice, one purchase per consignor).</div>
+  </div>`;
+}
+window.selG = (id) => (v) => { S.sel[id] = v; render(); };
+window.togglePiece = (id) => { const g = S.groups.find((x) => x.id === id); S.sel[id] = Math.min(active(g).length, (S.sel[id] || 0) + 1); render(); };
+
+// ── 3 · Record Sale ────────────────────────────────────────────────────────────────────────
+function vSale() {
+  const g = S.groups.find((x) => x.id === S.sale.groupId);
+  const pcs = active(g).slice(0, S.sale.k);
+  const e = econ(g, S.sale.price);
+  const vat = vatOf(S.sale.scheme, S.sale.price, e.payout);
+  const lataif = S.sale.scheme === 'VAT_10' ? e.commission - vat : e.commission;
+  const e7 = S.sale.scheme === 'VAT_10' && lataif < 0;
+  return `
+  <div class="card" style="max-width:860px;">
+    <span class="ov">Record Sale — ${pcs.length} item${pcs.length === 1 ? '' : 's'}</span>
+    <div class="grid" style="grid-template-columns:1fr 1fr;">
+      <label class="f">Buyer<input value="Sara Ahmed" readonly /></label>
+      <label class="f">Sale date<input value="2026-11-07" readonly /></label>
+    </div>
+    <div class="row-card" style="margin-top:14px;" data-p5-sale-group>
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; flex-wrap:wrap;">
+        <div><b>${g.name}</b> <span class="pill new">group · ${active(g).length} available</span><div class="muted" style="font-size:11px;">Consignor ${g.consignor} · Commission ${g.rate}%</div></div>
+        <div style="display:flex; gap:12px; align-items:end;">
+          <label class="f">Pieces <span class="tag">new</span>${stepper(S.sale.k, 'setK', 1, active(g).length)}</label>
+          <label class="f">Price per piece incl. VAT<input type="number" style="width:120px;" value="${S.sale.price}" oninput="S.sale.price=+this.value||0;S.sale.vatAck=false;render()" /></label>
+          <label class="f">Tax scheme<select onchange="S.sale.scheme=this.value;S.sale.vatAck=false;render()">${['MARGIN', 'VAT_10', 'ZERO'].map((s) => `<option ${S.sale.scheme === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
+        </div>
+      </div>
+      <table style="margin-top:10px;"><tr><th>Piece</th><th class="r">Price</th><th class="r">VAT</th><th class="r">To consignor</th><th class="r">LATAIF</th></tr>
+        ${pcs.map((p) => `<tr class="piece"><td><span class="mono">${p.nr}</span> <span class="muted">${p.sku}</span></td><td class="r mono">${fmt(S.sale.price)}</td><td class="r mono">${fmt(vat)}</td><td class="r mono">${fmt(e.payout)}</td><td class="r mono" style="color:${lataif < 0 ? 'var(--red)' : 'inherit'}">${fmt(lataif)}</td></tr>`).join('')}
+      </table>
+      <div class="muted" style="font-size:11px; margin-top:6px;">One invoice line per piece. Price and tax scheme apply to all chosen pieces and stay editable per line (as today).</div>
+      ${e7 ? `<div class="note new" style="margin-top:8px;">With VAT 10 % the LATAIF result is ${fmt(lataif)} BHD per piece — confirm (E7, per line as today).
+        <label style="display:flex; gap:8px; margin-top:6px;"><input type="checkbox" ${S.sale.vatAck ? 'checked' : ''} onchange="S.sale.vatAck=this.checked;render()" /> I confirm the negative LATAIF result</label></div>` : ''}
+    </div>
+    <div class="row-card" style="margin-top:12px; display:flex; justify-content:space-between; align-items:center;">
+      <div><b>Consignor purchase</b> · ${g.consignor}<div class="muted" style="font-size:11px;">one purchase, ${pcs.length} line${pcs.length === 1 ? '' : 's'} · ${fmt(e.payout * pcs.length)} BHD (unpaid)</div></div>
+      <div>Purchase VAT * <button class="btn ${S.sale.consignorVat === 'ZERO' ? 'on' : ''}" onclick="S.sale.consignorVat='ZERO';render()">No VAT</button> <button class="btn ${S.sale.consignorVat === 'VAT_10' ? 'on' : ''}" onclick="S.sale.consignorVat='VAT_10';render()">VAT 10 %</button></div>
+    </div>
+    <div style="margin-top:14px; display:flex; justify-content:space-between; align-items:center;">
+      <span>Total <b class="mono">${fmt(S.sale.price * pcs.length)}</b> BHD · remaining in the group after the sale: <b>${active(g).length - pcs.length}</b></span>
+      <button class="btn pri" ${(!S.sale.consignorVat || (e7 && !S.sale.vatAck)) ? 'disabled' : ''}>Confirm sale</button>
+    </div>
+  </div>`;
+}
+window.setK = (v) => { S.sale.k = v; render(); };
+
+// ── 4 · Rechnung, Abschnitt 2b ─────────────────────────────────────────────────────────────
+function vInvoice() {
+  const g = S.inv.groupId ? S.groups.find((x) => x.id === S.inv.groupId) : null;
+  const pcs = g ? active(g).slice(0, S.inv.k) : [];
+  const e = g ? econ(g, S.inv.price) : null;
+  return `
+  <div class="card" style="max-width:980px;">
+    <span class="ov">2b · Consignment items</span>
+    <label class="f" style="max-width:520px;">Add a consignment item…
+      <select onchange="S.inv.groupId=this.value;S.inv.k=1;render()">
+        <option value="">—</option>
+        ${S.groups.map((x) => `<option value="${x.id}" ${S.inv.groupId === x.id ? 'selected' : ''}>${x.single ? x.pieces[0].nr + ' · ' + x.name : `${x.name} · group × ${active(x).length} available`}</option>`).join('')}
+      </select></label>
+    ${g ? `
+    <div class="row-card" style="margin-top:12px;">
+      <div style="display:flex; justify-content:space-between; align-items:end; gap:12px; flex-wrap:wrap;">
+        <div><b>${g.name}</b> ${g.single ? '' : `<span class="pill new">${active(g).length} available</span>`}</div>
+        <div style="display:flex; gap:12px; align-items:end;">
+          ${g.single ? '' : `<label class="f">Pieces <span class="tag">new</span>${stepper(S.inv.k, 'setIK', 1, active(g).length)}</label>`}
+          <label class="f">Price incl. VAT (per piece)<input type="number" style="width:120px;" value="${S.inv.price}" oninput="S.inv.price=+this.value||0;render()" /></label>
+          <label class="f">Tax scheme<select onchange="S.inv.scheme=this.value;render()">${['MARGIN', 'VAT_10', 'ZERO'].map((s) => `<option ${S.inv.scheme === s ? 'selected' : ''}>${s}</option>`).join('')}</select></label>
+        </div>
+      </div>
+      <table style="margin-top:10px;"><tr><th>Line</th><th class="r">Price incl. VAT</th><th class="r">VAT</th><th class="r">To consignor</th><th class="r">LATAIF share</th><th></th></tr>
+        ${pcs.map((p) => `<tr class="piece"><td><span class="mono">${p.nr}</span> · ${g.name}</td><td class="r mono">${fmt(S.inv.price)}</td><td class="r mono">${fmt(vatOf(S.inv.scheme, S.inv.price, e.payout))}</td><td class="r mono">${fmt(e.payout)}</td><td class="r mono">${fmt(e.commission)}</td><td>🗑</td></tr>`).join('')}
+      </table>
+      <div class="note new" style="margin-top:8px;">The group expands into ${pcs.length} line${pcs.length === 1 ? '' : 's'} — one per piece. Saving, payments, the consignor purchase and later corrections (P4) work exactly as for single consignments.</div>
+    </div>` : '<p class="muted" style="margin-top:10px;">Pick a group to see the quantity selector.</p>'}
+  </div>`;
+}
+window.setIK = (v) => { S.inv.k = v; render(); };
+
+// ── 5 · Gruppe auf der Detailseite ─────────────────────────────────────────────────────────
+function vDetail() {
+  const g = S.groups[0];
+  const owed = g.pieces.reduce((x, p) => x + (p.payout || 0) - (p.paid || 0), 0);
+  return `
+  <div class="card">
+    <span class="ov">CON-2026-00042 · ${g.name}</span>
+    <p class="muted" style="margin-top:0;">The detail page of one piece stays as today (Record Sale, Post-Sale Return, Cancel Sale, Consignor Purchase …). New is the group block:</p>
+    <div class="row-card" data-p5-group-block>
+      <div style="display:flex; justify-content:space-between;"><b>Group · ${g.pieces.length} pieces from one intake</b><span>${active(g).length} active · ${g.pieces.length - active(g).length} sold · open to consignor <b class="mono">${fmt(owed)}</b></span></div>
+      <table style="margin-top:8px;"><tr><th>Piece</th><th>Status</th><th>Buyer</th><th>Invoice</th><th class="r">Sale</th><th class="r">To consignor</th><th class="r">Paid</th></tr>
+        ${g.pieces.map((p) => `<tr class="piece"><td class="mono">${p.nr}${p.nr === 'CON-2026-00042' ? ' ◂ this' : ''}</td><td><span class="dot ${p.status === 'active' ? 'd-active' : 'd-sold'}"></span>${p.status}</td><td>${p.buyer || '—'}</td><td class="mono">${p.inv || '—'}</td><td class="r mono">${p.price ? fmt(p.price) : '—'}</td><td class="r mono">${p.payout ? fmt(p.payout) : '—'}</td><td class="r mono">${p.payout ? fmt(p.paid) : '—'}</td></tr>`).join('')}
+      </table>
+    </div>
+    <div class="note info" style="margin-top:12px;">Returns stay per piece: “Post-Sale Return” takes back one sold piece; “Return to owner” hands back one active piece (several via the list selection). Cancel Sale, payouts and the consignor purchase stay per sale.</div>
+  </div>`;
+}
+
+// ── 6 · Handy ──────────────────────────────────────────────────────────────────────────────
+function vMobile() {
+  const g = S.groups[0];
+  return `
+  <div style="display:flex; gap:28px; flex-wrap:wrap;">
+    <div class="phone">
+      <h3>New consignment</h3>
+      <input value="Mariam Al-Khalifa" readonly /><input value="Pearl stud earrings 18K" readonly />
+      <div class="hint">Quantity <span style="color:var(--gold)">NEW</span></div>
+      <div style="display:flex; gap:8px; align-items:center; margin:4px 0 10px;">${stepper(S.mob.qty, 'setMQ', 1, 50)}<span class="hint">pieces — one consignment each</span></div>
+      <input value="Agreed per piece: 400.000" readonly /><select><option>Commission % · 20</option></select>
+      <button class="pbtn">Save ${S.mob.qty} consignment${S.mob.qty === 1 ? '' : 's'}</button>
+    </div>
+    <div class="phone">
+      <h3>Consignments</h3>
+      <div class="item"><b>${g.name} × ${g.pieces.length}</b><div class="hint">${active(g).length} active · ${g.pieces.length - active(g).length} sold · agreed 400.000 / piece</div></div>
+      <div class="item"><b>CON-2026-00046 · Rolex Datejust 36</b><div class="hint">active · 5,200.000</div></div>
+      <h3 style="margin-top:18px;">Sell from the group</h3>
+      <div style="display:flex; gap:8px; align-items:center;">${stepper(S.mob.saleK, 'setMS', 1, active(g).length)}<span class="hint">of ${active(g).length} available</span></div>
+      <input value="Buyer: Sara Ahmed" readonly /><input value="Price per piece: 450.000" readonly />
+      <select><option>Tax scheme: Margin</option></select><select><option>Consignor VAT: choose *</option></select>
+      <button class="pbtn">Record sale (${S.mob.saleK})</button>
+      <div class="hint" style="margin-top:8px;">Sends ONE sale with ${S.mob.saleK} item${S.mob.saleK === 1 ? '' : 's'} (the existing multi-item sale), not ${S.mob.saleK} separate invoices. Floor and E7 questions come from the main computer, as today.</div>
+    </div>
+  </div>`;
+}
+window.setMQ = (v) => { S.mob.qty = v; render(); };
+window.setMS = (v) => { S.mob.saleK = v; render(); };
+
+// ── 7 · Entscheidungen ─────────────────────────────────────────────────────────────────────
+function vDecide() {
+  const row = (t, a, b) => `<tr><td><b>${t}</b></td><td>${a}</td><td>${b}</td></tr>`;
+  return `
+  <div class="card">
+    <span class="ov">D-P5-1 · Architecture</span>
+    <table class="cmp"><tr><th style="width:22%"></th><th>A · group of single pieces (recommended)</th><th>B · real quantity, split on sale</th></tr>
+      ${row('Data model', '<span class="ok">+ one column</span> <span class="mono">group_id</span>, additive', '<span class="no">quantity + sale parts</span>, every single-value reader changes (~20 places)')}
+      ${row('Existing data', '<span class="ok">untouched</span> (each = group of 1)', 'migration of every consignment and sale')}
+      ${row('P1–P4 (mixed invoice, corrections, E2/E5/E7/E9)', '<span class="ok">unchanged</span> — one piece = one line', '<span class="no">reworked</span>: amounts × quantity, partial corrections')}
+      ${row('Stock core', '<span class="ok">unchanged</span>', '<span class="no">changed</span>: first lot would overwrite the remaining quantity; double decrement')}
+      ${row('Ownership after “Keep as own”', '<span class="ok">per piece</span>', '<span class="no">mixed own/consignment inside one item</span>')}
+      ${row('Invoice', 'one line per piece', 'one line “× k”')}
+      ${row('Collection', 'one item per piece (own SKU each)', 'one item with quantity')}
+      ${row('Rollback', '<span class="ok">old version ignores the column</span>', 'not without data repair')}
+    </table>
+  </div>
+  <div class="card">
+    <span class="ov">D-P5-2 · Agreed / minimum price</span>
+    <p style="margin:0;"><b>Per piece (recommended)</b> — floor, payout, consignor loss and E7 stay per line. Alternative “for all pieces” would split the price and round to the fils (see tab 1).</p>
+  </div>
+  <div class="card">
+    <span class="ov">D-P5-3 · Invoice lines</span>
+    <p style="margin:0;">With A: one invoice line per piece (k lines for k pieces). A combined print line would be its own topic (not in P5).</p>
+  </div>
+  <div class="note info">Not in P5 (no extension): combined print lines, a bulk “return group” command, design B. Returns stay per piece (several via the list selection).</div>`;
+}
+
+function render() {
+  tabs();
+  const v = { intake: vIntake, list: vList, sale: vSale, invoice: vInvoice, detail: vDetail, mobile: vMobile, decide: vDecide }[S.tab];
+  document.getElementById('app').innerHTML = v();
+}
+render();
+</script>
+</body>
+</html>

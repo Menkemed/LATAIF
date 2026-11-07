@@ -5,8 +5,8 @@
 // führt nichts aus. Kam der Vorgang dort nie an, entscheidet der Mensch: „Save it now" schickt den
 // URSPRÜNGLICHEN Auftrag unter SEINER Kennung, „Discard" verwirft ihn. Auch „Remove" fragt zuerst: Ein
 // offener Vorgang verschwindet nie still, und kein Entfernen gilt als „erledigt".
-import { useEffect, useState, type CSSProperties } from 'react';
-import { AlertTriangle } from 'lucide-react';
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties } from 'react';
+import { AlertTriangle, ChevronDown, ChevronUp } from 'lucide-react';
 import {
   ensurePendingLoaded, subscribePending, currentPendingContext, pendingRecords, pendingElsewhereCount,
   pendingProblems, dropPending, type PendingRecord,
@@ -21,6 +21,18 @@ function when(iso: string): string {
 const btn: CSSProperties = {
   border: '1px solid #C9A04A', background: '#FFFFFF', borderRadius: 6, padding: '3px 10px', cursor: 'pointer', fontSize: 12,
 };
+/** RELEASE-FIX — Knöpfe mit Symbol: Symbol und Wort in EINER Zeile. */
+const btnIcon: CSSProperties = { ...btn, display: 'inline-flex', alignItems: 'center', gap: 4, whiteSpace: 'nowrap' };
+
+/**
+ * RELEASE-FIX — die Leiste liegt unten rechts ÜBER der Seite. Damit sie nie einen Knopf am Seitenende verdeckt (z. B.
+ * „Save Invoice" bei 1400×900), meldet sie ihre Höhe als `--pending-saves-space`; jede Seite (`.app-content`) bekommt am
+ * Ende genau so viel Platz und lässt sich damit über die Leiste hinaus scrollen. Ohne Leiste ist der Platz 0.
+ */
+const SPACE_VAR = '--pending-saves-space';
+function reserveSpace(px: number): void {
+  try { document.documentElement.style.setProperty(SPACE_VAR, `${Math.max(0, Math.ceil(px))}px`); } catch { /* kein DOM */ }
+}
 
 export function PendingSavesBar() {
   const [, setTick] = useState(0);
@@ -29,6 +41,9 @@ export function PendingSavesBar() {
   const [askRemove, setAskRemove] = useState<string | null>(null);
   // Was die Nachfrage je Vorgang ergab, solange noch eine Entscheidung offen ist.
   const [checked, setChecked] = useState<Record<string, ClarifyOutcome['kind']>>({});
+  // RELEASE-FIX — eingeklappt bleibt nur die Plakette mit der Zahl; die Vorgänge selbst bleiben gespeichert und offen.
+  const [collapsed, setCollapsed] = useState(false);
+  const boxRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
     const off = subscribePending(() => setTick((t) => t + 1));
@@ -41,7 +56,36 @@ export function PendingSavesBar() {
   const elsewhere = pendingElsewhereCount(ctx);
   const { unreadable, loadError } = pendingProblems();
   const noteIds = Object.keys(notes);
-  if (!mine.length && !elsewhere && !unreadable.length && !loadError && !noteIds.length) return null;
+  const sichtbar = !!(mine.length || elsewhere || unreadable.length || loadError || noteIds.length);
+
+  // Platz am Seitenende = Höhe der Leiste + ihr Abstand zum Fensterrand (bottom 16) + etwas Luft.
+  useLayoutEffect(() => {
+    const el = boxRef.current;
+    if (!sichtbar || !el) { reserveSpace(0); return undefined; }
+    const messen = (): void => reserveSpace(el.getBoundingClientRect().height + 32);
+    messen();
+    let ro: ResizeObserver | null = null;
+    try { ro = new ResizeObserver(messen); ro.observe(el); } catch { /* ohne ResizeObserver: einmal gemessen */ }
+    return () => { ro?.disconnect(); reserveSpace(0); };
+  }, [sichtbar, collapsed]);
+
+  if (!sichtbar) return null;
+  const offen = mine.length + elsewhere + unreadable.length;
+
+  if (collapsed) {
+    return (
+      <div ref={boxRef} data-testid="pending-saves-bar" data-collapsed="1" role="status" style={{
+        position: 'fixed', right: 16, bottom: 16, zIndex: 60,
+        background: '#FFF8E6', border: '1px solid #E0B24C', borderRadius: 999, padding: '6px 12px',
+        boxShadow: '0 6px 24px rgba(0,0,0,.12)', fontSize: 13, color: '#3A2E12', display: 'flex', alignItems: 'center', gap: 8,
+      }}>
+        <AlertTriangle size={14} />
+        <b>Unresolved saves{offen > 0 ? ` (${offen})` : ''}</b>
+        <button type="button" style={btnIcon} data-testid="pending-saves-expand" onClick={() => setCollapsed(false)}
+          title="Show the unresolved saves"><ChevronUp size={12} /> Show</button>
+      </div>
+    );
+  }
 
   /** Nur fragen. `removing`: Die Frage kam von „Remove…", ein offenes Ergebnis wird dort angesprochen. */
   async function clarify(r: PendingRecord, removing = false): Promise<void> {
@@ -87,13 +131,18 @@ export function PendingSavesBar() {
   }
 
   return (
-    <div data-testid="pending-saves-bar" role="status" style={{
+    <div ref={boxRef} data-testid="pending-saves-bar" role="status" style={{
       position: 'fixed', right: 16, bottom: 16, zIndex: 60, width: 440, maxWidth: 'calc(100vw - 32px)',
+      maxHeight: '45vh', overflowY: 'auto',
       background: '#FFF8E6', border: '1px solid #E0B24C', borderRadius: 10, padding: '12px 14px',
       boxShadow: '0 6px 24px rgba(0,0,0,.12)', fontSize: 13, color: '#3A2E12',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontWeight: 600, marginBottom: 6 }}>
         <AlertTriangle size={16} /> Unresolved saves
+        <button type="button" style={{ ...btnIcon, marginLeft: 'auto', fontWeight: 400 }} data-testid="pending-saves-collapse"
+          onClick={() => setCollapsed(true)} title="Make this smaller — the saves stay open until they are clarified">
+          <ChevronDown size={12} /> Hide
+        </button>
       </div>
       {mine.length > 0 && (
         <div style={{ marginBottom: 6 }}>

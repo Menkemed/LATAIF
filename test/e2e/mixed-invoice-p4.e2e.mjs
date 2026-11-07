@@ -500,6 +500,18 @@ try {
     AND (p.source_consignment_id = ? OR EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.source_consignment_id = ?))
     ORDER BY p.rowid DESC`, [cid, cid])[0] || {};
   const GRUND = 'textarea[placeholder^="Explain why this invoice"]';
+  /** Sichtabnahme: ein Bild der sichtbaren Maske, nur wenn LATAIF_SHOTS gesetzt ist (ändert nichts am Lauf). */
+  async function foto(c, name, sel) {
+    const dir = process.env.LATAIF_SHOTS || '';
+    if (!dir) return;
+    try {
+      const fsx = await import('node:fs');
+      fsx.mkdirSync(dir, { recursive: true });
+      if (sel) { await c.ev(`document.querySelector(${S(sel)})?.scrollIntoView({ block: 'center' }); return 1;`); await sleep(250); }
+      const r = await c.send('Page.captureScreenshot', { format: 'png' });
+      fsx.writeFileSync(join(dir, name + '.png'), Buffer.from(r.data, 'base64'));
+    } catch (e) { console.log('  (Foto ' + name + ' nicht möglich: ' + String(e).slice(0, 80) + ')'); }
+  }
 
   // ── A Die Welt: eigene Ware mit Einkauf, fünf Kommissionen zweier Einlieferer (echte PC2-Befehle) ──────────
   client = await lade(client, '/purchases');
@@ -543,18 +555,21 @@ try {
     const r = [];
     const geladen = await warteBis(client, "document.querySelectorAll('[data-mixed-con-kept=\"1\"]').length === 3", 45000);
     ok(geladen, 'B PC2: die drei Kommissionszeilen stehen als bleibende Zeilen im Abschnitt 2b');
-    // Genau zwei eigene Zeilen (Produktauswahl), keine Kommissionsware darunter. (Bestehend, nicht P4: ein reservierter
-    // eigener Artikel fehlt in der Auswahlliste und zeigt dort den Platzhalter — die Zeile behält ihn.)
+    // Genau zwei eigene Zeilen (Produktauswahl), keine Kommissionsware darunter. RELEASE-FIX „Pick product…": auch der
+    // schon verkaufte/reservierte eigene Artikel (Datejust) zeigt seinen Namen, nicht den Platzhalter.
     const eigeneSichtbar = await client.ev(`return JSON.stringify({ n: document.querySelectorAll('[data-ss-trigger="Pick product..."]').length,
       t: [...document.querySelectorAll('[data-ss-trigger="Pick product..."]')].map(e=>e.innerText).join('|') });`);
     const eigene = JSON.parse(String(eigeneSichtbar));
-    ok(eigene.n === 2 && /Goldkette P3/.test(eigene.t) && !/Nautilus P4|Aquanaut P4|Calatrava P4/.test(eigene.t),
-      `B PC2: zwei eigene Zeilen oben, Kommissionsartikel NICHT als eigene Zeile (${String(eigeneSichtbar).slice(0, 160)})`);
+    ok(eigene.n === 2 && /Datejust P3/.test(eigene.t) && /Goldkette P3/.test(eigene.t) && /on this invoice/.test(eigene.t)
+      && !/Pick product/.test(eigene.t) && !/Nautilus P4|Aquanaut P4|Calatrava P4/.test(eigene.t),
+      `B PC2: beide eigenen Zeilen zeigen ihren Artikel (kein Platzhalter), Kommissionsartikel NICHT als eigene Zeile (${String(eigeneSichtbar).slice(0, 200)})`);
+    await foto(client, 'p4-b1-pc2-korrektur-eigene-zeilen', '[data-ss-trigger="Pick product..."]');
     r.push(await tippe(client, `[data-mixed-con-price=${S(K1)}]`, '1000')); await sleep(300);
     r.push(await mausKlick(client, `[data-mixed-con-remove=${S(K2)}]`)); await sleep(300);
     const entfernt = await warteBis(client, `document.querySelector('[data-mixed-con-removed=${S(K2)}]')`, 5000);
     ok(entfernt, 'B PC2: K2 steht als „leaves this invoice — back to Active" (mit „Keep on invoice")');
     r.push(await kommissionsZeile(client, K4, 1500, 'MARGIN'));
+    await foto(client, 'p4-b2-pc2-korrektur-2b', `[data-mixed-con-removed=${S(K2)}]`);
     const stand = String(await client.ev(`return document.querySelector('[data-mixed-purchase-state=${S(ALPHA)}]')?.innerText || '';`));
     ok(/after this correction 2,000\.000/.test(stand) && /1 new item/.test(stand),
       `B PC2: Alphas unbezahlter Einkauf nach der Korrektur 2.000 (800 + 1.200), K4 kommt an ihn (${stand})`);
@@ -592,6 +607,7 @@ try {
     const wahl = await warteBis(primary, `document.querySelector('[data-mixed-overpay=${S(BETA)}]')`, 5000);
     ok(wahl && /1,000\.000/.test(String(await primary.ev(`return document.querySelector('[data-mixed-overpay=${S(BETA)}]')?.innerText || '';`))),
       'C Primary: der bezahlte Einlieferer bekäme 1.000 zu viel — die Maske fragt: Guthaben oder Rückforderung');
+    await foto(primary, 'p4-c-primary-pflichtwahl-guthaben-rueckforderung', `[data-mixed-overpay=${S(BETA)}]`);
     r.push(await tippe(primary, GRUND, 'Calatrava war nie verkauft'));
     r.push(await mausKlick(primary, '[data-invoice-save]')); await sleep(800);
     const nein = await maskenFehler(primary);
@@ -626,6 +642,7 @@ try {
     r.push(await mausKlick(client, `[data-consignor-purchase-vat="p3-con-a"][data-vat="ZERO"]`)); await sleep(200);
     const hinweis = String(await client.ev(`return document.querySelector('[data-consignment-sale-e7="${K5}"]')?.innerText || '';`));
     const gesperrt = await client.ev("return document.querySelector('[data-consignment-sale]')?.disabled === true;");
+    await foto(client, 'p4-d-pc2-recordsale-e7', `[data-consignment-sale-e7="${K5}"]`);
     ok(/LATAIF result is -45\.000/.test(hinweis) && gesperrt === true,
       `D PC2: E7-Hinweis (−45,000: Provision 55, VAT 100) und „Confirm" gesperrt, solange nicht bestätigt (${hinweis.slice(0, 120)} / ${gesperrt})`);
     r.push(await mausKlick(client, `[data-consignment-sale-vatack="${K5}"]`)); await sleep(200);
@@ -665,6 +682,7 @@ try {
     r2.push(await tippe(primary, `[data-mixed-con-price=${S(K6)}]`, '1000')); await sleep(400);
     const frage = await warteBis(primary, `/100\\.000/.test(document.querySelector('[data-mixed-loss-overpay=${S(K6)}]')?.innerText || '')`, 5000);
     ok(frage, 'D2 Primary: der bezahlte Verlust (100) übersteigt den neuen (0) — die Maske fragt: Guthaben oder Rückforderung');
+    await foto(primary, 'p4-d2-primary-verlust-pflichtwahl', `[data-mixed-loss-overpay=${S(K6)}]`);
     r2.push(await tippe(primary, GRUND, 'Gondolo doch zum vereinbarten Preis'));
     r2.push(await mausKlick(primary, '[data-invoice-save]')); await sleep(800);
     const nein = await maskenFehler(primary);

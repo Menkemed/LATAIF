@@ -493,6 +493,18 @@ try {
     AND (p.source_consignment_id = ? OR EXISTS (SELECT 1 FROM purchase_lines pl WHERE pl.purchase_id = p.id AND pl.source_consignment_id = ?))
     ORDER BY p.rowid DESC`, [cid, cid])[0] || {};
   const GRUND = 'textarea[placeholder^="Explain why this invoice"]';
+  /** Sichtabnahme: ein Bild der sichtbaren Maske, nur wenn LATAIF_SHOTS gesetzt ist (ändert nichts am Lauf). */
+  async function foto(c, name, sel) {
+    const dir = process.env.LATAIF_SHOTS || '';
+    if (!dir) return;
+    try {
+      const fsx = await import('node:fs');
+      fsx.mkdirSync(dir, { recursive: true });
+      if (sel) { await c.ev(`document.querySelector(${S(sel)})?.scrollIntoView({ block: 'center' }); return 1;`); await sleep(250); }
+      const r = await c.send('Page.captureScreenshot', { format: 'png' });
+      fsx.writeFileSync(join(dir, name + '.png'), Buffer.from(r.data, 'base64'));
+    } catch (e) { console.log('  (Foto ' + name + ' nicht möglich: ' + String(e).slice(0, 80) + ')'); }
+  }
   const gruppe = (gid) => dbQ(BIZ_DB, 'SELECT id, group_seq AS seq, group_quantity AS menge, status, invoice_id AS inv, product_id AS pid, agreed_price AS preis, minimum_price AS mini FROM consignments WHERE group_id = ? ORDER BY group_seq', [gid]);
   const stand = (gid) => S(gruppe(gid).map((x) => [x.seq, x.status, x.inv ? 1 : 0]));
   const vielleichtNummer = async (c) => {
@@ -532,6 +544,7 @@ try {
     const jeStueck = (await labelDa(client, 'AGREED PRICE PER PIECE (BHD)')) && (await labelDa(client, 'MINIMUM PRICE PER PIECE (BHD)'));
     ok(/Creates 4 pieces/.test(hinweis) && /per piece/.test(hinweis) && jeStueck,
       `B PC2-Maske: Menge 4 per Tastatur — „Agreed/Minimum price per piece" und der Hinweis auf die Gruppe (${hinweis.slice(0, 160)})`);
+    await foto(client, 'p5-b-pc2-aufnahme-menge-4', '[data-consignment-group-note]');
     const vor = (await kommandos(client)).filter((x) => x.op === 'consignments.create').length;
     r.push(await mausKlick(client, '[data-cn-create]'));
     if (!(await warteBis(client, "!document.querySelector('[data-cn-create]')", 45000))) r.push('NICHT-ZU:' + String(await client.ev("const e=document.querySelector('[data-save-error]'); return e ? e.textContent : '';")).slice(0, 160));
@@ -568,6 +581,7 @@ try {
     r.push(await mausKlick(client, `[data-consignment-group-toggle="${GID}"]`)); await sleep(300);
     const aufStuecke = await client.ev(`return [...document.querySelectorAll('[data-consignment-piece]')].map(e=>e.textContent).join('|');`);
     ok(String(aufStuecke) === 'piece 1 of 4|piece 2 of 4|piece 3 of 4|piece 4 of 4', `C aufgeklappt: die vier Stücke mit Nummer (${aufStuecke})`);
+    await foto(client, 'p5-c1-pc2-liste-gruppe-aufgeklappt', `[data-consignment-group="${GID}"]`);
     r.push(await tippe(client, `[data-consignment-group-select="${GID}"]`, '1')); await sleep(300);
     const gewaehlt = await client.ev(`return [...document.querySelectorAll('[data-consignment-select]')].filter(e=>e.checked).map(e=>e.getAttribute('data-consignment-select'));`);
     ok(S(gewaehlt) === S([S1]), `C „Select 1": das Stück mit der kleinsten Nummer ist gewählt (${S(gewaehlt)})`);
@@ -581,6 +595,7 @@ try {
     r.push(await tippe(client, `[data-consignment-sale-group-price="${GID}"]`, '450')); await sleep(300);
     const preise = await client.ev(`return ['${S1}','${S2}'].map((id)=>document.querySelector('[data-consignment-sale-price="'+id+'"]')?.value);`);
     ok(S(preise) === S(['450', '450']), `C „Price per piece" gilt für beide Zeilen (${S(preise)})`);
+    await foto(client, 'p5-c2-pc2-recordsale-2-stuecke', `[data-consignment-sale-group="${GID}"]`);
     r.push(await mausKlick(client, `[data-consignor-purchase-vat="p3-con-a"][data-vat="ZERO"]`)); await sleep(200);
     const vor = (await kommandos(client)).filter((x) => x.op === 'consignments.record_sale').length;
     r.push(await klick(client, '[data-consignment-sale]'));
@@ -607,6 +622,7 @@ try {
     const stuecke = await primary.ev("return [...document.querySelectorAll('[data-consignment-detail-piece]')].map(e=>e.innerText.replace(/\\s+/g,' ').trim());");
     ok(da && status === 'Group of 4 · 2 available · 2 sold' && stuecke.length === 4 && /^1 /.test(stuecke[0]) && /^3 /.test(stuecke[2]),
       `D Primary-Detail: „Group · piece 3 of 4", Status „Group of 4 · 2 available · 2 sold", vier Stücke (${status} ${S(stuecke).slice(0, 200)})`);
+    await foto(primary, 'p5-d-primary-detail-gruppe', `[data-consignment-detail-group="${GID}"]`);
   }
 
   // ── E PC2 „Direct Sale": eigener Artikel + Gruppe über 2b („group × 2 available"), 2 Stücke ─────────────────
@@ -627,6 +643,7 @@ try {
     const zeilen = await client.ev("return [...document.querySelectorAll('[data-mixed-con-row]')].map(e=>e.getAttribute('data-mixed-con-row'));");
     const stueckEtiketten = await client.ev("return [...document.querySelectorAll('[data-mixed-con-piece]')].map(e=>e.textContent.trim());");
     ok(S(zeilen) === S([S3, S4]) && S(stueckEtiketten) === S(['· piece 3 of 4', '· piece 4 of 4']), `E „Pieces on this invoice" 2: Zeilen für Stück 3 und 4 (${S(zeilen)} ${S(stueckEtiketten)})`);
+    await foto(client, 'p5-e-pc2-direktverkauf-2b-gruppe', `[data-mixed-con-group="${GID}"]`);
     r.push(await mausKlick(client, '[data-mixed-consignor-vat="p3-con-a:ZERO"]'));
     const vor = (await kommandos(client)).filter((x) => x.op === 'consignments.record_sale').length;
     r.push(await mausKlick(client, '[data-invoice-save]'));
@@ -651,6 +668,7 @@ try {
     ok(/group of 4/.test(block) && /PRICE PER NEW PIECE/.test(block), `F Primary-Korrektur: Gruppenblock mit den gespeicherten Stücken (${block.replace(/\s+/g, ' ').slice(0, 160)})`);
     r.push(await mausKlick(primary, `[data-mixed-con-remove=${S(S4)}]`)); await sleep(400);
     if (!(await warteBis(primary, `document.querySelector('[data-mixed-con-removed=${S(S4)}]')`, 5000))) r.push('NICHT-ENTFERNT');
+    await foto(primary, 'p5-f-primary-korrektur-stueck-entfernt', `[data-mixed-con-group="${GID}"]`);
     r.push(await tippe(primary, GRUND, 'Stück 4 irrtümlich berechnet'));
     r.push(await mausKlick(primary, '[data-invoice-save]'));
     if (!(await warteBis(primary, "!document.querySelector('[data-invoice-save]')", 45000))) r.push('NICHT-GESPEICHERT:' + (await maskenFehler(primary)));
@@ -659,6 +677,63 @@ try {
       `F gespeichert: nur Stück 4 wieder verfügbar, die Rechnung hat 2 Zeilen (${alleOk(r)} ${stand(GID)})`);
     const lines = dbQ(BIZ_DB, 'SELECT source_consignment_id AS c FROM purchase_lines WHERE purchase_id = ?', [einkaufVon(S3).id]).map((x) => x.c);
     ok(lines.includes(S3) && !lines.includes(S4), `F der Einkauf beim Einlieferer verliert nur die Zeile von Stück 4 (${S(lines)})`);
+  }
+
+  // ── H RELEASE-FIX PC2-Leiste „Unresolved saves" bei 1400×900: ein offener Vorgang verdeckt „Save Invoice" nicht ─────
+  {
+    const { maus } = await import('./_e2e-mouse.mjs');
+    await syncRuhe();
+    client = await lade(client, `/consignments/${S4}`);
+    await client.send('Emulation.setDeviceMetricsOverride', { width: 1400, height: 900, deviceScaleFactor: 1, mobile: false });
+    const r = [];
+    if (!(await warteBis(client, "[...document.querySelectorAll('button')].some(b=>b.textContent.trim()==='Edit')", 30000))) r.push('KEIN-EDIT');
+    r.push(await clickText(client, 'Edit')); await sleep(400);
+    r.push(await client.ev(`const s=[...document.querySelectorAll('span')].find(x=>x.textContent.trim()==='NOTES'); const t=s && s.parentElement.querySelector('textarea'); if(!t) return 'KEIN-NOTIZFELD';
+      Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype,'value').set.call(t, 'P5 Leiste'); t.dispatchEvent(new Event('input',{bubbles:true})); return 'OK';`));
+    await client.ev("window.__dropNext = 'consignments.update'; return 1;");
+    r.push(await mausKlick(client, '[data-save-consignment]'));
+    const offen = await warteBis(client, `document.querySelector('[data-testid="pending-save-row"]')`, 45000);
+    await spuelen(primary);
+    ok(alleOk(r) === 'OK' && offen && kon(S4).notes === 'P5 Leiste',
+      `H verlorene Antwort: der Vorgang steht in „Unresolved saves", am Primary ist er angekommen (${alleOk(r)} ${kon(S4).notes})`);
+    // Neu laden auf „New Invoice": der offene Vorgang ist noch da (nichts geht verloren).
+    client = await lade(client, '/invoices/new');
+    await client.send('Emulation.setDeviceMetricsOverride', { width: 1400, height: 900, deviceScaleFactor: 1, mobile: false });
+    const nochDa = await warteBis(client, `document.querySelector('[data-testid="pending-save-row"]') && document.querySelector('[data-invoice-save]')`, 45000);
+    ok(nochDa, 'H nach dem Neuladen steht der offene Vorgang weiter in der Leiste');
+    const lage = JSON.parse(String(await client.ev(`const sc=[...document.querySelectorAll('.app-content')].find(e=>e.contains(document.querySelector('[data-invoice-save]')));
+      sc.scrollTop = sc.scrollHeight; await new Promise((x)=>setTimeout(x,300));
+      const b=document.querySelector('[data-invoice-save]').getBoundingClientRect(); const l=document.querySelector('[data-testid="pending-saves-bar"]').getBoundingClientRect();
+      const platz=getComputedStyle(document.documentElement).getPropertyValue('--pending-saves-space').trim();
+      const ueber = !(b.right <= l.left || b.left >= l.right || b.bottom <= l.top || b.top >= l.bottom);
+      return JSON.stringify({ ueber, knopfUnten: Math.round(b.bottom), leisteOben: Math.round(l.top), platz, fenster: window.innerWidth + 'x' + window.innerHeight });`)));
+    ok(!lage.ueber && lage.knopfUnten <= lage.leisteOben && /px$/.test(lage.platz) && parseInt(lage.platz, 10) > 0 && lage.fenster === '1400x900',
+      `H 1400×900, ganz nach unten gescrollt: „Save Invoice" liegt ÜBER der Leiste, nicht darunter (${S(lage)})`);
+    await foto(client, 'p5-h1-pc2-leiste-1400x900-save-frei');
+    const rechnungenVor = zahl('SELECT COUNT(*) AS n FROM invoices');
+    const treffer = await maus(client, '[data-invoice-save]');
+    ok(treffer === 'OK' || treffer === 'GESPERRT:[data-invoice-save]', `H der echte Mausklick erreicht „Save Invoice" (nicht verdeckt) (${treffer})`);
+    await sleep(800);
+    await spuelen(primary);
+    ok(zahl('SELECT COUNT(*) AS n FROM invoices') === rechnungenVor, `H …die leere Maske bucht nichts (${await maskenFehler(client)})`);
+    // Einklappen: nur die Plakette bleibt, die Zahl steht darauf; Aufklappen zeigt den Vorgang wieder.
+    r.push(await maus(client, '[data-testid="pending-saves-collapse"]')); await sleep(300);
+    const klein = JSON.parse(String(await client.ev(`const l=document.querySelector('[data-testid="pending-saves-bar"]'); const r=l.getBoundingClientRect();
+      return JSON.stringify({ zu: l.getAttribute('data-collapsed'), text: l.innerText.replace(/\\s+/g,' ').trim(), h: Math.round(r.height), w: Math.round(r.width),
+        zeilen: document.querySelectorAll('[data-testid="pending-save-row"]').length });`)));
+    ok(klein.zu === '1' && /Unresolved saves \(1\)/.test(klein.text) && klein.h < 60 && klein.w < 320 && klein.zeilen === 0,
+      `H „Hide": nur die Plakette „Unresolved saves (1)" bleibt (${S(klein)})`);
+    await foto(client, 'p5-h2-pc2-leiste-eingeklappt');
+    r.push(await maus(client, '[data-testid="pending-saves-expand"]')); await sleep(300);
+    ok(await exists(client, '[data-testid="pending-save-row"]'), 'H „Show": der offene Vorgang ist unverändert da');
+    // Klären: er WAR gespeichert ⇒ die Zeile geht, nach „OK" ist die Leiste weg und der Platz wieder 0.
+    r.push(await maus(client, '[data-testid="pending-save-clarify"]'));
+    const geklaert = await warteBis(client, `/WAS saved/.test([...document.querySelectorAll('[data-testid="pending-save-note"]')].map((n) => n.textContent).join(' '))`, 20000);
+    await client.ev("[...document.querySelectorAll('[data-testid=\"pending-save-note\"] button')].forEach(b=>b.click()); return 1;"); await sleep(400);
+    const leer = await client.ev(`return JSON.stringify({ bar: !!document.querySelector('[data-testid="pending-saves-bar"]'), platz: getComputedStyle(document.documentElement).getPropertyValue('--pending-saves-space').trim() });`);
+    ok(geklaert && /"bar":false/.test(String(leer)) && /"platz":"0px"/.test(String(leer)) && alleOk(r) === 'OK',
+      `H „Clarify now": war gespeichert, die Leiste ist weg und der Platz wieder 0 (${leer} ${alleOk(r)})`);
+    await client.send('Emulation.clearDeviceMetricsOverride');
   }
 
   // ── G Hauptbuch, Lager, AP, AR — und die Isolation ─────────────────────────────────────────────────────

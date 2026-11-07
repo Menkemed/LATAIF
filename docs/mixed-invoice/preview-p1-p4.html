@@ -1,0 +1,1351 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mixed Invoice Preview</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+:root{
+  --bg:#F2F7FA; --card:#FFFFFF; --alt:#FAFBFC; --b1:#E5E9EE; --b2:#D5D9DE;
+  --v:#715DE3; --vd:#5B3DCC; --vl:#E5E0FA; --vs:rgba(113,93,227,.08);
+  --t1:#0F0F10; --t2:#4B5563; --t3:#6B7280; --t4:#9CA3AF;
+  --ok:#16A34A; --oks:#7EAA6E; --bad:#DC2626; --warn:#D97706; --gold:#AA956E;
+  --own:#0E7490; --owns:rgba(14,116,144,.08); --con:#7C3AED; --cons:rgba(124,58,237,.08);
+  --note:#B45309; --notes:#FFFBEB; --noteb:#F59E0B;
+  --sans:'Inter','Segoe UI',system-ui,sans-serif; --mono:'JetBrains Mono',ui-monospace,Consolas,monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+html,body{height:100%}
+body{font-family:var(--sans);font-size:14px;line-height:1.5;color:var(--t1);background:var(--bg);-webkit-font-smoothing:antialiased}
+button{font-family:inherit;font-size:inherit;color:inherit;cursor:pointer}
+input,select,textarea{font-family:inherit;font-size:13px;color:var(--t1)}
+.app{display:flex;height:100vh;overflow:hidden}
+/* Sidebar — wie die ERP */
+.side{width:250px;flex-shrink:0;background:#fff;border-right:1px solid var(--b1);display:flex;flex-direction:column;overflow-y:auto}
+.brand{font-size:21px;letter-spacing:.32em;font-weight:600;padding:14px 16px 6px}
+.branch{margin:4px 8px 10px;padding:7px 10px;border:1px solid var(--b1);border-radius:8px;background:#F7FAFC;font-size:13px;display:flex;gap:8px;align-items:center}
+.sec{font-size:10px;letter-spacing:.1em;color:var(--t3);padding:14px 16px 6px;font-weight:600}
+.nav{display:flex;align-items:center;gap:12px;padding:8px 10px;margin:1px 8px;border-radius:8px;border:none;background:none;width:calc(100% - 16px);text-align:left;font-size:14px;color:var(--t1)}
+.nav .ic{width:30px;height:30px;border-radius:8px;display:flex;align-items:center;justify-content:center}
+.nav.on{background:#F2F5F9;font-weight:600}
+.nav.off{opacity:.45;cursor:default}
+.nav:not(.off):hover{background:#F5F7FA}
+.side .foot{margin-top:auto;border-top:1px solid var(--b1);padding:12px 14px;display:flex;gap:10px;align-items:center}
+.avatar{width:34px;height:34px;border-radius:50%;background:var(--v);color:#fff;display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600}
+.main{flex:1;overflow-y:auto;background:var(--bg)}
+.page{padding:28px 44px 120px;max-width:1500px}
+.pvbar{position:sticky;top:0;z-index:20;background:#FFF7E6;border-bottom:1px solid #F5D9A8;color:#8A5A12;font-size:12px;padding:6px 44px;display:flex;gap:14px;align-items:center}
+.pvbar b{font-weight:600}
+/* Bausteine */
+.card{background:var(--card);border:1px solid var(--b1);border-radius:16px;padding:22px}
+.ov{font-size:11px;line-height:14px;letter-spacing:.06em;text-transform:uppercase;font-weight:500;color:var(--t3);display:block}
+.h1{font-size:30px;font-weight:600;letter-spacing:-.02em;line-height:1.2}
+.sub{font-size:13px;color:var(--t3);margin-top:4px}
+.back{background:none;border:none;color:var(--t3);font-size:13px;display:flex;gap:6px;align-items:center;margin-bottom:8px}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:9px 16px;border-radius:10px;font-size:13px;font-weight:500;border:1px solid var(--b1);background:#fff;color:var(--t1);transition:all .12s;white-space:nowrap}
+.btn:hover{border-color:var(--b2);background:#F7F9FB}
+.btn.pri{background:var(--v);border-color:var(--v);color:#fff}
+.btn.pri:hover{background:var(--vd);border-color:var(--vd)}
+.btn.ghost{background:transparent;border-color:transparent;color:var(--t3)}
+.btn.danger{color:var(--bad);border-color:var(--bad)}
+.btn.sm{padding:6px 11px;font-size:12px;border-radius:8px}
+.btn[disabled]{opacity:.45;cursor:not-allowed}
+.chip{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border-radius:999px;font-size:11px;font-weight:500;white-space:nowrap;border:1px solid transparent}
+.chip.own{background:var(--owns);color:var(--own);border-color:rgba(14,116,144,.25)}
+.chip.con{background:var(--cons);color:var(--con);border-color:rgba(124,58,237,.25)}
+.chip.mix{background:linear-gradient(90deg,var(--owns),var(--cons));color:#4338CA;border-color:rgba(67,56,202,.25)}
+.chip.ok{background:rgba(22,163,74,.08);color:#15803D;border-color:rgba(22,163,74,.25)}
+.chip.part{background:rgba(217,119,6,.08);color:#B45309;border-color:rgba(217,119,6,.3)}
+.chip.bad{background:rgba(220,38,38,.07);color:var(--bad);border-color:rgba(220,38,38,.25)}
+.chip.grey{background:#F3F4F6;color:var(--t2);border-color:var(--b1)}
+.chip.lock{background:#F3F4F6;color:var(--t2);border-color:var(--b2)}
+.dchip{display:inline-flex;align-items:center;padding:1px 6px;border-radius:5px;font-size:10px;font-weight:600;background:var(--notes);color:var(--note);border:1px dashed var(--noteb);cursor:pointer;vertical-align:middle;margin-left:4px;white-space:nowrap}
+.pvnote{border:1px dashed var(--noteb);background:var(--notes);color:#7C4A03;border-radius:10px;padding:10px 12px;font-size:12px;line-height:1.55}
+.pvnote b{color:#7C4A03}
+.mono{font-family:var(--mono)}
+.dec{font-size:.78em;color:inherit;opacity:.7}
+.num{font-family:var(--mono);text-align:right;white-space:nowrap}
+.in{padding:8px 10px;border:1px solid var(--b2);border-radius:6px;background:#fff;width:100%;min-width:0}
+.in:focus{outline:2px solid rgba(113,93,227,.25);border-color:var(--v)}
+.in[disabled]{background:#F3F5F8;color:var(--t3);cursor:not-allowed}
+.in.err{border-color:var(--bad)}
+.in.strong{border-color:var(--t1);font-weight:600}
+.auto{padding:8px 10px;font-size:13px;color:var(--t2);background:var(--bg);border:1px solid var(--b1);border-radius:6px;text-align:right;font-family:var(--mono);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.grid{display:grid;gap:16px}
+.row{display:flex;gap:8px;align-items:center}
+.between{display:flex;justify-content:space-between;align-items:center;gap:12px}
+.mt8{margin-top:8px}.mt12{margin-top:12px}.mt16{margin-top:16px}.mt24{margin-top:24px}
+.muted{color:var(--t3)}.small{font-size:12px}.tiny{font-size:11px}
+.seg{display:inline-flex;gap:6px;flex-wrap:wrap}
+.seg button{padding:7px 13px;font-size:12px;border:1px solid var(--b2);border-radius:6px;background:transparent;color:var(--t3)}
+.seg button.on{border-color:var(--t1);color:var(--t1);background:rgba(15,15,16,.06)}
+.seg button[disabled]{opacity:.45;cursor:not-allowed}
+.err-box{padding:10px 14px;background:rgba(220,38,38,.06);border:1px solid rgba(220,38,38,.3);border-radius:8px;font-size:12px;color:var(--bad)}
+.warn-box{padding:10px 12px;background:rgba(217,119,6,.07);border:1px solid rgba(217,119,6,.35);border-radius:8px;font-size:12px;color:#92400E}
+.info-box{padding:10px 12px;background:rgba(170,149,110,.08);border:1px solid rgba(170,149,110,.3);border-radius:8px;font-size:12px;color:#7A6B4F}
+.lock-box{padding:10px 12px;background:#F3F5F8;border:1px solid var(--b2);border-radius:8px;font-size:12px;color:var(--t2)}
+/* Tabelle */
+.tbl{border:1px solid var(--b1);border-radius:10px;overflow:hidden;background:#fff}
+.tr{display:grid;gap:10px;padding:10px 12px;align-items:center;border-bottom:1px solid var(--b1)}
+.tr:last-child{border-bottom:none}
+.th{background:#F2F7FA;font-size:10px;color:var(--t3);text-transform:uppercase;letter-spacing:.06em;align-items:end}
+.tr.click{cursor:pointer}.tr.click:hover{background:#FAFBFD}
+.lines .tr{grid-template-columns:28px minmax(0,3.4fr) minmax(0,1.15fr) 58px minmax(0,1.05fr) minmax(0,.85fr) minmax(0,1.05fr) 40px}
+.ln-desc{font-size:13.5px;font-weight:500;display:flex;gap:6px;align-items:center;min-width:0}
+.ln-desc span.t{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.ln-meta{font-size:11px;color:var(--t3);margin-top:3px;display:flex;gap:6px;flex-wrap:wrap;align-items:center}
+.ln-econ{font-size:11px;margin-top:4px;color:var(--t2);font-family:var(--mono)}
+.iconbtn{width:28px;height:28px;border-radius:6px;display:inline-flex;align-items:center;justify-content:center;border:1px solid var(--b2);background:#fff;color:var(--t3);padding:0}
+.iconbtn.on{background:rgba(126,91,239,.1);border-color:rgba(126,91,239,.3);color:#7E5BEF}
+.rm{width:34px;height:34px;border-radius:10px;display:flex;align-items:center;justify-content:center;background:rgba(220,38,38,.1);border:1px solid rgba(220,38,38,.3);color:var(--bad);padding:0}
+.rm:hover{background:var(--bad);color:#fff}
+.rm[disabled]{opacity:.35;cursor:not-allowed;background:rgba(220,38,38,.05)}
+.rm[disabled]:hover{color:var(--bad)}
+.expand{padding:14px 16px 16px 50px;background:var(--alt);border-top:1px solid var(--b1);display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px 24px;font-size:12px}
+.kv .k{font-size:9.5px;color:var(--t4);letter-spacing:.06em;text-transform:uppercase}
+.kv .v{font-family:var(--mono);font-size:12.5px;margin-top:2px}
+/* Summary — lila Karte wie in der ERP */
+.summary{position:relative;margin-top:24px;padding:24px 28px;border-radius:20px;background:linear-gradient(135deg,#5B3DCC 0%,#715DE3 50%,#8B7AE8 100%);color:#fff;overflow:hidden;box-shadow:0 16px 48px rgba(91,61,204,.25)}
+.summary:before{content:"";position:absolute;left:-80px;bottom:-120px;width:320px;height:320px;background:radial-gradient(circle,rgba(236,72,153,.55) 0%,rgba(236,72,153,0) 70%);filter:blur(20px)}
+.summary:after{content:"";position:absolute;right:-100px;top:-100px;width:280px;height:280px;background:radial-gradient(circle,rgba(115,217,237,.35) 0%,rgba(115,217,237,0) 70%);filter:blur(30px)}
+.summary>*{position:relative;z-index:1}
+.summary .lbl{font-size:10px;color:rgba(255,255,255,.62);margin-bottom:4px;letter-spacing:.04em}
+.summary .val{font-family:var(--mono);font-size:16px}
+.sgrid{display:grid;grid-template-columns:repeat(5,1fr);gap:16px;margin-top:12px}
+/* KPI */
+.kpis{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:14px}
+.kpi{background:#fff;border:1px solid var(--b1);border-radius:14px;padding:14px 16px}
+.kpi .v{font-family:var(--mono);font-size:19px;margin-top:6px;font-weight:500}
+/* Modal */
+.backdrop{position:fixed;inset:0;background:rgba(15,15,16,.38);display:flex;align-items:flex-start;justify-content:center;z-index:60;padding:48px 16px;overflow-y:auto}
+.modal{background:#fff;border-radius:16px;width:100%;max-width:560px;box-shadow:0 24px 64px rgba(15,15,16,.25);display:flex;flex-direction:column}
+.modal .mh{padding:18px 22px;border-bottom:1px solid var(--b1);display:flex;justify-content:space-between;align-items:center}
+.modal .mh h3{font-size:17px;font-weight:600}
+.modal .mb{padding:18px 22px;display:flex;flex-direction:column;gap:14px}
+.modal .mf{padding:14px 22px;border-top:1px solid var(--b1);display:flex;justify-content:flex-end;gap:8px}
+.x{background:none;border:none;color:var(--t3);font-size:20px;line-height:1;padding:4px}
+/* Review */
+.rv-sec{border:1px solid var(--b1);border-radius:12px;overflow:hidden}
+.rv-sec .hd{padding:10px 14px;background:var(--bg);font-size:11px;letter-spacing:.06em;text-transform:uppercase;color:var(--t3);font-weight:600;display:flex;justify-content:space-between}
+.rv-row{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr) minmax(0,1fr) minmax(0,.9fr);gap:10px;padding:8px 14px;border-top:1px solid var(--b1);font-size:13px;align-items:center}
+.rv-row.h{font-size:10px;color:var(--t4);text-transform:uppercase;letter-spacing:.06em;border-top:none;padding-top:8px;padding-bottom:2px}
+.up{color:#15803D}.down{color:var(--bad)}
+.delta{font-family:var(--mono);font-size:12px;text-align:right}
+/* Drawer */
+.fab{position:fixed;right:20px;bottom:20px;z-index:50;background:#0F0F10;color:#fff;border:none;border-radius:999px;padding:11px 18px;font-size:13px;font-weight:600;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+.drawer{position:fixed;right:20px;bottom:72px;z-index:55;width:380px;max-height:calc(100vh - 100px);overflow-y:auto;background:#fff;border:1px solid var(--b1);border-radius:16px;box-shadow:0 24px 64px rgba(15,15,16,.22);padding:16px 18px;display:flex;flex-direction:column;gap:14px}
+.drawer h4{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--t3)}
+.toggle{display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px}
+.sw{width:38px;height:22px;border-radius:999px;background:#D5D9DE;position:relative;border:none;flex-shrink:0}
+.sw:after{content:"";position:absolute;top:3px;left:3px;width:16px;height:16px;border-radius:50%;background:#fff;transition:left .15s}
+.sw.on{background:var(--v)}.sw.on:after{left:19px}
+.scn{display:flex;flex-direction:column;gap:6px}
+.scn button{text-align:left;padding:8px 10px;border:1px solid var(--b1);border-radius:8px;background:#fff;font-size:12.5px}
+.scn button:hover{border-color:var(--v);background:var(--vs)}
+.toast{position:fixed;left:50%;transform:translateX(-50%);bottom:24px;z-index:70;background:#0F0F10;color:#fff;padding:10px 18px;border-radius:10px;font-size:13px;box-shadow:0 10px 30px rgba(0,0,0,.25)}
+.thumb{width:40px;height:40px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:600;color:#fff;flex-shrink:0}
+.list .tr{grid-template-columns:minmax(0,1.25fr) 96px minmax(0,1.4fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) 150px}
+.dec-list li{margin:0 0 10px 18px;font-size:13px;line-height:1.55}
+.dec-list li b{color:var(--t1)}
+a.lnk{color:var(--v);text-decoration:none;cursor:pointer}
+a.lnk:hover{text-decoration:underline}
+@media (max-width:1100px){.side{width:72px}.side .lbl,.brand,.branch span,.sec,.side .foot .who{display:none}.page{padding:22px 20px 120px}.pvbar{padding:6px 20px}.kpis{grid-template-columns:repeat(3,minmax(0,1fr))}.sgrid{grid-template-columns:repeat(3,1fr)}}
+</style>
+</head>
+<body>
+<div class="app">
+  <aside class="side" id="side"></aside>
+  <main class="main" id="main"></main>
+</div>
+<div id="modal"></div>
+<div id="drawer"></div>
+<div id="toast"></div>
+<script>
+'use strict';
+// ════════════════════════════════════════════════════════════════════════════
+// LATAIF — Mixed Own + Consignment Invoice — interaktives Preview (Demo-Daten, nichts wird gespeichert).
+// Stand 03.11.2026: an die bestätigten Owner-Entscheidungen angeglichen. E1 (Rabatt) ist zurückgestellt und fehlt
+// bewusst. Schwerpunkt der Abnahme: P1c (Steuerartwechsel, Kundenüberzahlung, Teilretoure, zugemachte Perioden).
+// ════════════════════════════════════════════════════════════════════════════
+const TODAY = '2026-11-03';
+// = OPENING_CUTOFF_DATE (Owner-Konstante, src/core/parties/opening-balances.ts) — davor keine Korrekturbuchungen (O1).
+const OPENING_CUTOFF = '2026-10-15';
+const STORE_KEY = 'lataif-mixed-invoice-preview-v2';
+
+// ── Demo-Daten ──────────────────────────────────────────────────────────────
+function seed() {
+  return {
+    customers: [
+      { id: 'c1', name: 'Khalid Al-Mansoori', phone: '+973 3612 4410' },
+      { id: 'c2', name: 'Noura Al-Sayed', phone: '+973 3988 2051' },
+      { id: 'c3', name: 'Sara Al-Mahmood', phone: '+973 3301 7720', consignor: 'k1' },
+      { id: 'c4', name: 'Ahmed Rashid', phone: '+973 3655 1094' },
+      { id: 'c5', name: 'Mariam Bucheeri', phone: '+973 3922 4471' },
+    ],
+    consignors: [
+      { id: 'k1', name: 'Sara Al-Mahmood' },
+      { id: 'k2', name: 'Yusuf Haddad' },
+      { id: 'k3', name: 'Layla Faris' },
+    ],
+    products: [
+      // buyVat = Einkaufs-VAT laut Beleg: 'VAT_10' (VAT-Rechnung), 'ZERO' (ohne VAT), null (unbekannt, Altbestand) — E10.
+      { id: 'p1', sku: 'ROL-WCH-014', name: 'Rolex Datejust 41 · 126300', cat: 'Watch', cost: 3200, price: 4100, scheme: 'MARGIN', buyVat: 'ZERO', stock: 0, color: '#3D7FFF' },
+      { id: 'p2', sku: 'TUD-WCH-007', name: 'Tudor Black Bay 58 · 79030N', cat: 'Watch', cost: 2350, price: 2950, scheme: 'MARGIN', buyVat: null, stock: 1, color: '#3D7FFF' },
+      { id: 'p3', sku: 'ITM-GLD-131', name: '21K gold chain · 18.4 g', cat: 'Gold', cost: 520, price: 690, scheme: 'VAT_10', buyVat: 'VAT_10', stock: 2, color: '#C6A36D' },
+      { id: 'p4', sku: 'ITM-DIA-022', name: 'Diamond studs · 0.50 ct', cat: 'Diamonds', cost: 900, price: 1350, scheme: 'VAT_10', buyVat: 'VAT_10', stock: 2, color: '#73D9ED' },
+      { id: 'p5', sku: 'CAR-WCH-003', name: 'Cartier Santos Medium', cat: 'Watch', cost: 4700, price: 5600, scheme: 'MARGIN', buyVat: 'ZERO', stock: 0, color: '#3D7FFF' },
+      { id: 'p6', sku: 'ITM-GLD-118', name: '18K bangle · 12.1 g', cat: 'Gold', cost: 610, price: 840, scheme: 'VAT_10', buyVat: 'VAT_10', stock: 1, color: '#C6A36D' },
+      { id: 'p7', sku: 'ITM-SLV-009', name: 'Silver cufflinks', cat: 'Silver', cost: 45, price: 120, scheme: 'VAT_10', buyVat: null, stock: 3, color: '#9CA3AF' },
+    ],
+    consignments: [
+      // since = Einlieferungsdatum — kein Rechnungsdatum davor (E3).
+      { id: 'cs1', no: 'CON-2026-0011', name: 'Cartier Love Bracelet 18K YG', sku: 'CON-JWL-011', k: 'k1', model: 'percent', rate: 15, agreed: 0, split: 0, ask: 5200, status: 'active', inv: null, since: '2026-10-02', color: '#E5486D' },
+      { id: 'cs2', no: 'CON-2026-0014', name: 'Omega Seamaster 300M · 210.30', sku: 'CON-WCH-014', k: 'k2', model: 'consignor_fixed', rate: 0, agreed: 1800, split: 0, ask: 2300, status: 'sold', inv: 'i41', since: '2026-10-05', color: '#715DE3' },
+      { id: 'cs3', no: 'CON-2026-0015', name: 'Patek Philippe Calatrava 5196J', sku: 'CON-WCH-015', k: 'k3', model: 'cost_split', rate: 0, agreed: 14500, split: 50, ask: 17800, status: 'active', inv: null, since: '2026-10-08', color: '#715DE3' },
+      { id: 'cs4', no: 'CON-2026-0016', name: 'Van Cleef Alhambra pendant', sku: 'CON-JWL-016', k: 'k2', model: 'percent', rate: 20, agreed: 0, split: 0, ask: 3100, status: 'sold', inv: 'i41', since: '2026-10-18', color: '#E5486D' },
+      { id: 'cs5', no: 'CON-2026-0009', name: 'Rolex Submariner · 124060', sku: 'CON-WCH-009', k: 'k3', model: 'percent', rate: 12, agreed: 0, split: 0, ask: 11500, status: 'sold', inv: 'i38', since: '2026-09-30', color: '#715DE3' },
+      { id: 'cs6', no: 'CON-2026-0012', name: 'Bvlgari Serpenti Viper ring', sku: 'CON-JWL-012', k: 'k1', model: 'percent', rate: 18, agreed: 0, split: 0, ask: 1450, status: 'active', inv: null, since: '2026-10-20', color: '#E5486D' },
+      { id: 'cs7', no: 'CON-2026-0017', name: 'IWC Portugieser · 3716', sku: 'CON-WCH-017', k: 'k2', model: 'cost_split', rate: 0, agreed: 6200, split: 40, ask: 7400, status: 'active', inv: null, since: '2026-10-24', color: '#715DE3' },
+    ],
+    // refunds = an den Kunden ausgezahlte Rückzahlungen; overMode = Wahl bei Überzahlung ('credit' | 'refund').
+    invoices: [
+      { id: 'i41', no: 'INV-2026-000041', customer: 'c1', date: '2026-10-28', staff: 'Hassan', notes: '',
+        lines: [
+          { id: 'L1', kind: 'own', ref: 'p1', desc: 'Rolex Datejust 41 · 126300', qty: 1, unit: 4100, scheme: 'MARGIN' },
+          { id: 'L2', kind: 'con', ref: 'cs2', desc: 'Omega Seamaster 300M · 210.30', qty: 1, unit: 2300, scheme: 'MARGIN' },
+          { id: 'L3', kind: 'con', ref: 'cs4', desc: 'Van Cleef Alhambra pendant', qty: 1, unit: 3100, scheme: 'ZERO' },
+        ],
+        payments: [{ id: 'y1', date: '2026-10-28', method: 'card', amount: 5000 }], refunds: [], overMode: null,
+        history: [{ at: '2026-10-28 16:42', who: 'Admin (Owner)', reason: 'Created', changes: ['Invoice created · 3 items · 9,500.000 BHD'] }] },
+      { id: 'i40', no: 'INV-2026-000040', customer: 'c4', date: '2026-10-26', staff: 'Fatima', notes: '',
+        lines: [
+          { id: 'L1', kind: 'own', ref: 'p4', desc: 'Diamond studs · 0.50 ct', qty: 1, unit: 1350, scheme: 'VAT_10' },
+          { id: 'L2', kind: 'own', ref: 'p2', desc: 'Tudor Black Bay 58 · 79030N', qty: 1, unit: 2950, scheme: 'MARGIN' },
+        ],
+        payments: [{ id: 'y1', date: '2026-10-26', method: 'card', amount: 4300 }], refunds: [], overMode: null,
+        history: [{ at: '2026-10-26 15:10', who: 'Manager', reason: 'Created', changes: ['Invoice created · 2 items · 4,300.000 BHD'] }] },
+      { id: 'i38', no: 'INV-2026-000038', customer: 'c2', date: '2026-10-21', staff: 'Hassan', notes: '',
+        lines: [
+          { id: 'L1', kind: 'con', ref: 'cs5', desc: 'Rolex Submariner · 124060', qty: 1, unit: 11200, scheme: 'MARGIN' },
+        ],
+        payments: [{ id: 'y1', date: '2026-10-21', method: 'bank_transfer', amount: 11200 }], refunds: [], overMode: null,
+        history: [{ at: '2026-10-21 12:05', who: 'Admin (Owner)', reason: 'Created (Record Sale on CON-2026-0009)', changes: ['Invoice created · 1 item · 11,200.000 BHD'] }] },
+      { id: 'i36', no: 'INV-2026-000036', customer: 'c5', date: '2026-10-22', staff: '', notes: '',
+        lines: [
+          { id: 'L1', kind: 'own', ref: 'p7', desc: 'Silver cufflinks', qty: 3, unit: 120, scheme: 'VAT_10', returnedQty: 1, retNo: 'RET-2026-0004' },
+          { id: 'L2', kind: 'own', ref: 'p3', desc: '21K gold chain · 18.4 g', qty: 1, unit: 690, scheme: 'VAT_10' },
+        ],
+        payments: [{ id: 'y1', date: '2026-10-22', method: 'benefit', amount: 1050 }], refunds: [], overMode: null,
+        history: [{ at: '2026-10-22 18:20', who: 'Manager', reason: 'Created', changes: ['Invoice created · 2 items · 1,050.000 BHD'] }, { at: '2026-10-27 11:02', who: 'Admin (Owner)', reason: 'Return RET-2026-0004', changes: ['1 of 3 Silver cufflinks returned · 120.000 BHD as customer credit'] }] },
+      { id: 'i33', no: 'INV-2026-000033', customer: 'c4', date: '2026-09-14', staff: 'Hassan', notes: '',
+        lines: [
+          { id: 'L1', kind: 'own', ref: 'p5', desc: 'Cartier Santos Medium', qty: 1, unit: 5600, scheme: 'MARGIN' },
+          { id: 'L2', kind: 'own', ref: 'p7', desc: 'Silver cufflinks', qty: 2, unit: 120, scheme: 'VAT_10' },
+        ],
+        payments: [{ id: 'y1', date: '2026-09-14', method: 'cash', amount: 5840 }], refunds: [], overMode: null,
+        history: [{ at: '2026-09-14 17:31', who: 'Admin (Owner)', reason: 'Created', changes: ['Invoice created · 2 items · 5,840.000 BHD'] }] },
+    ],
+    // Einkauf beim Einlieferer (wie heute „Record Sale“); items = die Kommissionen, die er trägt (E6).
+    purchases: [
+      { id: 'u118', no: 'PUR-2026-0118', k: 'k2', inv: 'i41', date: '2026-10-28', vat: 'ZERO', amount: 4280, paid: 0, payouts: [], claim: 0, claimMode: null, status: 'open', items: ['cs2', 'cs4'] },
+      { id: 'u112', no: 'PUR-2026-0112', k: 'k3', inv: 'i38', date: '2026-10-21', vat: 'ZERO', amount: 9856, paid: 9856, payouts: [{ date: '2026-10-25', method: 'bank_transfer', amount: 9856 }], claim: 0, claimMode: null, status: 'open', items: ['cs5'] },
+    ],
+    // Consignor-Loss-Ausgaben je Kommission und Rechnung (E9).
+    losses: [],
+    returnCredit: { i36: 120 },
+    seq: { inv: 42, pur: 119, ret: 5, line: 100, pay: 100, exp: 31 },
+  };
+}
+
+// ── Zustand ─────────────────────────────────────────────────────────────────
+const S = { data: null, role: 'ADMIN', q3Filed: true, route: { page: 'list' }, draft: null, modal: null, drawer: false, toast: '', expanded: {}, review: null, lastSaved: null };
+function load() {
+  try { const raw = localStorage.getItem(STORE_KEY); if (raw) { const o = JSON.parse(raw); S.data = o.data; S.role = ROLES.some((x) => x[0] === o.role) ? o.role : 'ADMIN'; S.q3Filed = o.q3Filed !== false; return; } } catch (e) { /* ohne Speicher */ }
+  S.data = seed();
+}
+function persist() { try { localStorage.setItem(STORE_KEY, JSON.stringify({ data: S.data, role: S.role, q3Filed: S.q3Filed })); } catch (e) { /* ohne Speicher */ } }
+
+// ── Hilfen ──────────────────────────────────────────────────────────────────
+const r3 = (v) => Math.round((Number(v) || 0) * 1000) / 1000;
+const num = (v) => { const n = parseFloat(String(v ?? '').replace(/,/g, '')); return Number.isFinite(n) ? n : 0; };
+const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+const clone = (o) => JSON.parse(JSON.stringify(o));
+function fmt(v) { const n = r3(v); const s = Math.abs(n).toFixed(3); const [a, b] = s.split('.'); return (n < 0 ? '−' : '') + a.replace(/\B(?=(\d{3})+(?!\d))/g, ',') + '.' + b; }
+function money(v, unit = true) { const t = fmt(v); const i = t.lastIndexOf('.'); return `<span class="mono">${t.slice(0, i)}<span class="dec">${t.slice(i)}</span>${unit ? ' <span class="dec">BHD</span>' : ''}</span>`; }
+function delta(a, b) { const d = r3(b - a); if (Math.abs(d) < 0.0005) return '<span class="muted">—</span>'; return `<span class="${d > 0 ? 'up' : 'down'}">${d > 0 ? '+' : ''}${fmt(d)}</span>`; }
+function dmy(d) { if (!d) return '—'; const [y, m, x] = d.split('-'); return `${x}/${m}/${y}`; }
+const cust = (id) => S.data.customers.find((c) => c.id === id);
+const prod = (id) => S.data.products.find((p) => p.id === id);
+const cons = (id) => S.data.consignments.find((c) => c.id === id);
+const kon = (id) => S.data.consignors.find((k) => k.id === id);
+const inv = (id) => S.data.invoices.find((i) => i.id === id);
+const METHODS = [{ id: 'cash', label: 'Cash' }, { id: 'bank_transfer', label: 'Bank' }, { id: 'card', label: 'Card' }, { id: 'benefit', label: 'Benefit' }];
+const methodLabel = (m) => (METHODS.find((x) => x.id === m) || { label: m }).label;
+const SCHEMES = [{ id: 'MARGIN', label: 'Margin' }, { id: 'VAT_10', label: 'VAT 10%' }, { id: 'ZERO', label: 'Zero-rated' }];
+const schemeLabel = (s) => (SCHEMES.find((x) => x.id === s) || { label: s }).label;
+function quarterOf(d) { const [y, m] = d.split('-').map(Number); return `${y}-Q${Math.floor((m - 1) / 3) + 1}`; }
+function quarterLabel(q) { const [y, n] = q.split('-'); return `${n} ${y}`; }
+function isFiled(d) { if (!d) return false; const q = quarterOf(d); if (q < '2026-Q3') return true; return q === '2026-Q3' && S.q3Filed; }
+const ROLES = [['ADMIN', 'Admin (Owner)'], ['MANAGER', 'Manager'], ['SALES', 'Sales'], ['ACCOUNTANT', 'Accountant']];
+const roleLabel = (r) => (ROLES.find((x) => x[0] === r) || [r, r])[1];
+// E13 / Anlegen: Rechnungen ändern und Kommissionsware auf eine Rechnung nehmen nur ADMIN und MANAGER.
+const canEdit = () => S.role === 'ADMIN' || S.role === 'MANAGER';
+const stamp = () => TODAY + ' ' + new Date().toTimeString().slice(0, 5);
+const nid = (p) => p + (++S.data.seq.line);
+
+// ── Consignment-Ökonomie (wie core/consignment/economics.ts) ───────────────
+function modelLabel(c) { if (c.model === 'consignor_fixed') return `Agreed + Excess (${fmt(c.agreed)})`; if (c.model === 'cost_split') return `Cost ${fmt(c.agreed)} + ${c.split}% split`; return `${c.rate.toFixed(1)}% commission`; }
+function econ(c, sale) {
+  if (c.model === 'consignor_fixed') { const below = sale < c.agreed; return { commission: r3(sale - c.agreed), payout: c.agreed, loss: below ? r3(c.agreed - sale) : 0, below, floor: c.agreed }; }
+  if (c.model === 'cost_split') {
+    if (sale >= c.agreed) { const profit = sale - c.agreed; const com = r3(profit * c.split / 100); return { commission: com, payout: r3(sale - com), loss: 0, below: false, floor: c.agreed }; }
+    return { commission: r3(sale - c.agreed), payout: c.agreed, loss: r3(c.agreed - sale), below: true, floor: c.agreed };
+  }
+  const com = r3(sale * c.rate / 100); return { commission: com, payout: r3(sale - com), loss: 0, below: false, floor: 0 };
+}
+
+// ── Rechnen ─────────────────────────────────────────────────────────────────
+function calcLine(l) {
+  const qty = Math.max(1, Math.round(num(l.qty) || 1));
+  // Der eingegebene Preis ist der Kundenpreis inkl. VAT. Die Steuerart teilt ihn nur anders auf — ein Wechsel
+  // Margin / VAT 10 % / Zero-rated ändert den Kundenpreis nie (P1c). Kein Rabatt (E1 zurückgestellt).
+  const gross = r3(num(l.unit) * qty);
+  let cost = 0, e = null, c = null, p = null;
+  if (l.kind === 'own') { p = prod(l.ref); cost = r3((p ? p.cost : 0) * qty); }
+  else { c = cons(l.ref); e = econ(c, gross); cost = e.payout; }
+  let vat = 0, ivat = 0;
+  if (l.scheme === 'VAT_10') vat = r3(gross - gross / 1.1);
+  else if (l.scheme === 'MARGIN') ivat = r3(Math.max(0, gross - cost) / 11);
+  const net = r3(gross - vat);
+  const profit = r3(gross - vat - ivat - cost);
+  const share = e ? r3(gross - e.payout) : 0;
+  return { qty, price: gross, gross, vat, ivat, net, cost, profit, e, c, p, share };
+}
+function calcInv(d) {
+  const lines = d.lines.map((l) => ({ l, r: calcLine(l) }));
+  const t = { net: 0, vat: 0, ivat: 0, gross: 0, profit: 0, payouts: 0, ownCost: 0, groups: {} };
+  for (const { l, r } of lines) {
+    t.net += r.net; t.vat += r.vat; t.ivat += r.ivat; t.gross += r.gross; t.profit += r.profit;
+    if (l.kind === 'con') { t.payouts += r.e.payout; const g = (t.groups[r.c.k] = t.groups[r.c.k] || { k: r.c.k, payout: 0, share: 0, loss: 0, lines: [] }); g.payout = r3(g.payout + r.e.payout); g.share = r3(g.share + r.share); g.loss = r3(g.loss + r.e.loss); g.lines.push({ l, r }); }
+    else t.ownCost += r.cost;
+  }
+  for (const k of ['net', 'vat', 'ivat', 'gross', 'profit', 'payouts', 'ownCost']) t[k] = r3(t[k]);
+  const paidOld = r3((d.payments || []).reduce((s, y) => s + num(y.amount), 0));
+  const paidNew = r3((d.payRows || []).reduce((s, y) => s + num(y.amount), 0));
+  // Ausgezahlte Rückzahlungen an den Kunden mindern das Bezahlte — der Abfluss entsteht erst am Auszahlungstag.
+  const refunded = r3((d.refunds || []).reduce((s, y) => s + num(y.amount), 0));
+  t.paidOld = paidOld; t.paidNew = paidNew; t.refunded = refunded; t.paid = r3(paidOld + paidNew - refunded);
+  t.remaining = r3(t.gross - t.paid);
+  t.over = r3(Math.max(0, -t.remaining));
+  t.lines = lines;
+  return t;
+}
+function invKind(d) { const k = new Set(d.lines.map((l) => l.kind)); if (k.size === 2) return 'mix'; return k.has('con') ? 'con' : 'own'; }
+function kindChip(kind) { return kind === 'mix' ? '<span class="chip mix">Own + Consignment</span>' : kind === 'con' ? '<span class="chip con">Consignment</span>' : '<span class="chip own">Own stock</span>'; }
+function payStatus(t) { if (t.gross > 0 && t.paid >= t.gross - 0.0005) return '<span class="chip ok">Paid</span>'; if (t.paid > 0) return '<span class="chip part">Partially paid</span>'; return '<span class="chip grey">Unpaid</span>'; }
+function purchasesOf(invId) { return S.data.purchases.filter((u) => u.inv === invId && u.status !== 'cancelled'); }
+function purOpen(u) { return r3(Math.max(0, u.amount - u.paid)); }
+const purchaseItems = (u) => u.items || [];
+
+// E9: Consignor-Loss-Ausgaben je Kommission und Rechnung. Eine bezahlte bleibt stehen, ein Mehrbetrag wird eine eigene.
+const lossesOf = (cs, invId) => S.data.losses.filter((x) => x.cs === cs && x.inv === invId && !x.cancelled);
+const lossPaid = (cs, invId) => r3(lossesOf(cs, invId).filter((x) => x.paid).reduce((s, x) => s + x.amount, 0));
+const lossOpen = (cs, invId) => r3(lossesOf(cs, invId).filter((x) => !x.paid).reduce((s, x) => s + x.amount, 0));
+function addLoss(cs, invId, amount, date) { S.data.losses.push({ id: 'x' + S.data.seq.exp, no: 'EXP-2026-' + String(S.data.seq.exp++).padStart(4, '0'), cs, inv: invId, amount: r3(amount), paid: false, date }); }
+
+// ── Einlieferer-Einkäufe (E6 / E9 / E10) ────────────────────────────────────
+// Jede Kommissionszeile gehört zu genau einem Einkauf: zu dem, der sie schon trägt; eine neue Zeile an den UNBEZAHLTEN
+// Einkauf desselben Einlieferers dieser Rechnung, sonst an einen neuen, separaten Einkauf (E6).
+// Einkaufsbetrag = Anspruch des Einlieferers − gebuchter Verlust; eine bezahlte Verlust-Ausgabe bleibt gebucht (E9).
+function planPurchases(d) {
+  const t = calcInv(d);
+  const plans = (d.mode === 'edit' ? purchasesOf(d.id) : []).map((u) => ({ key: u.id, u, k: u.k, items: [] }));
+  for (const x of t.lines) {
+    if (x.l.kind !== 'con') continue;
+    let p = plans.find((q) => q.u && purchaseItems(q.u).includes(x.l.ref));
+    if (!p) p = plans.find((q) => q.k === x.r.c.k && (!q.u || q.u.paid === 0));
+    if (!p) { p = { key: 'new-' + x.r.c.k, u: null, k: x.r.c.k, items: [] }; plans.push(p); }
+    p.items.push(x);
+  }
+  for (const p of plans) {
+    let payout = 0, amount = 0, share = 0, loss = 0;
+    for (const { l, r } of p.items) {
+      const booked = Math.max(d.mode === 'edit' ? lossPaid(l.ref, d.id) : 0, r.e.loss);
+      payout += r.e.payout; amount += r.e.payout - booked; share += r.share; loss += booked;
+    }
+    p.vat = d.groupVat[p.key] || (p.u ? p.u.vat : 'ZERO');
+    p.paid = p.u ? p.u.paid : 0;
+    p.oldAmount = p.u ? p.u.amount : 0;
+    Object.assign(p, { payout: r3(payout), share: r3(share), loss: r3(loss) });
+    // E5/E9: Kommt eine Zeile mit BEZAHLTEM Consignor Loss von der Rechnung, bleibt die bezahlte Ausgabe (Historie); was der
+    // Einlieferer damit mehr erhalten hat, als ihm noch zusteht, mindert zuerst den offenen Einkauf; nur ein Rest darüber ist ein
+    // tatsächlicher Anspruch (E2). Ob P4 das Entfernen so zulässt: Prüfpunkt.
+    // lossOff = Kommissionen, die schon früher mit bezahltem Verlust von der Rechnung kamen (bleibt beim nächsten Edit erhalten).
+    p.lossOff = d.mode === 'edit' && p.u ? [...new Set([...(p.u.lossOff || []), ...purchaseItems(p.u)])].filter((cs) => !p.items.some((x) => x.l.ref === cs) && lossPaid(cs, d.id) > 0) : [];
+    p.lossBack = r3(p.lossOff.reduce((s, cs) => s + lossPaid(cs, d.id), 0));
+    p.amount = r3(Math.max(0, amount - p.lossBack));
+    p.over = r3(Math.max(0, p.paid + p.lossBack - amount));
+    p.open = r3(Math.max(0, p.amount - p.paid));
+  }
+  return plans;
+}
+const planOfLine = (d, l) => planPurchases(d).find((p) => p.items.some((x) => x.l.id === l.id));
+
+// ── Verfügbarkeit für die Artikelauswahl ────────────────────────────────────
+function availableOwn(p, d) {
+  const orig = d.mode === 'edit' ? inv(d.id).lines.filter((l) => l.kind === 'own' && l.ref === p.id).reduce((s, l) => s + (num(l.qty) - num(l.returnedQty || 0)), 0) : 0;
+  const used = d.lines.filter((l) => l.kind === 'own' && l.ref === p.id).reduce((s, l) => s + (num(l.qty) - num(l.returnedQty || 0)), 0);
+  return p.stock + orig - used;
+}
+function consAvailable(c, d) {
+  if (d.lines.some((l) => l.kind === 'con' && l.ref === c.id)) return false;
+  return c.status === 'active' || (d.mode === 'edit' && c.inv === d.id);
+}
+
+// ── Sperren ─────────────────────────────────────────────────────────────────
+// Zugemachte Periode — eingereichtes oder VAT-bezahltes Quartal (E8/O2) oder vor dem Eröffnungsstichtag (O1):
+// dort sind nur Notiz und Mitarbeiter änderbar, jede andere Korrektur würde in diese Periode buchen.
+function periodLock(date) {
+  if (!date) return null;
+  const q = quarterLabel(quarterOf(date));
+  if (isFiled(date)) return { code: 'E8', short: `${q} filed`, text: `VAT period ${q} has been filed (or its VAT paid).` };
+  if (date < OPENING_CUTOFF) return { code: 'O1', short: 'before opening cut-off', text: `${dmy(date)} lies before the opening cut-off ${dmy(OPENING_CUTOFF)}.` };
+  return null;
+}
+function locks(d) {
+  const o = d.mode === 'edit' ? inv(d.id) : null;
+  const pl = o ? periodLock(o.date) : null;
+  return { vat: !!pl, pl };
+}
+function lineLocked(d, l) {
+  const lk = locks(d);
+  if (lk.pl) return `${lk.pl.code === 'O1' ? 'Dated before the opening cut-off' : 'VAT period ' + lk.pl.short} — only staff and notes can change`;
+  if (num(l.returnedQty) > 0) return `Returned (${l.retNo}) — the returned pieces keep item, price and tax`;
+  return '';
+}
+const origLine = (d, l) => (d.mode === 'edit' ? inv(d.id).lines.find((x) => x.id === l.id) : null);
+// E10 (Owner 03.11.2026): Alle drei Steuerarten bleiben manuell wählbar — auch bei VAT-10-%-Einkaufsrechnung, für Eigenware und
+// Kommission; nichts wird gesperrt oder automatisch umgestellt. Die Auswahl bestätigt keine steuerliche Zulässigkeit: Profit Margin
+// und Zero-rated nur, wenn die gesetzlichen Voraussetzungen erfüllt sind. Das Preview kennzeichnet nur, was nachzuweisen und
+// steuerlich freizugeben ist. Unbekannte Einkaufs-VAT (Altbestand) ist nicht „No VAT“.
+const purchaseVat = (d, l, r) => (l.kind === 'con' ? (planOfLine(d, l) || {}).vat || 'ZERO' : r.p.buyVat);
+function taxCheck(d, l, r) {
+  if (l.scheme === 'VAT_10') return null;
+  const vat10 = purchaseVat(d, l, r) === 'VAT_10';
+  if (l.scheme === 'MARGIN') return { strong: vat10, t: vat10 ? 'Profit Margin although bought with a VAT 10 % invoice — only if the legal margin-scheme conditions are met. Evidence and tax approval: accountant (open).' : 'Profit Margin — only if the legal margin-scheme conditions are met. Evidence and tax approval: accountant.' };
+  return { strong: vat10, t: `Zero-rated — only if the legal conditions for zero-rating are met (evidence, e.g. export documents). Tax approval: accountant${vat10 ? ' (open) — bought with a VAT 10 % invoice' : ''}.` };
+}
+
+// Die Bestätigung „unter Floor“ gilt für genau diesen Verlust; ändert er sich, wird neu bestätigt.
+const ackOk = (l, r) => !!l.ack && r3(l.ackLoss) === r.e.loss;
+// E7: Provision vom Brutto, VAT trägt LATAIF. Macht VAT 10 % das LATAIF-Ergebnis negativ, bestätigt ADMIN/MANAGER ausdrücklich.
+const vatShort = (l, r) => l.kind === 'con' && l.scheme === 'VAT_10' && r.share >= 0 && r.profit < -0.0005;
+const vatAckOk = (l, r) => !!l.vatAck && r3(l.vatAckAt) === r.profit;
+// ── Prüfen ──────────────────────────────────────────────────────────────────
+function validate(d) {
+  const errs = []; const t = calcInv(d);
+  if (!d.customer) errs.push('Choose a customer.');
+  if (d.lines.length === 0) errs.push('Add at least one item.');
+  if (d.date > TODAY) errs.push('The invoice date cannot be in the future.');
+  const o = d.mode === 'edit' ? inv(d.id) : null;
+  if (!o || o.date !== d.date) { const pl = periodLock(d.date); if (pl) errs.push(`The date ${pl.text} Use a date in an open period.`); }
+  // W1: Der Kundenwechsel bucht jede Zahlung auf ihrem eigenen Tag um — keiner davon darf in einer zugemachten Periode liegen.
+  if (o && o.customer !== d.customer) for (const y of o.payments) { const pl = periodLock(y.date); if (pl) { errs.push(`The customer cannot be changed: the payment of ${dmy(y.date)} would be rebooked in a closed period (${pl.short}).`); break; } }
+  // E8/O2/O1: In einer zugemachten Periode sind nur Notiz und Mitarbeiter änderbar — hier beim Speichern erzwungen, nicht nur
+  // über gesperrte Felder (eine Änderung auf anderem Weg oder ein inzwischen eingereichtes Quartal wird so trotzdem abgewiesen).
+  const plOld = o ? periodLock(o.date) : null;
+  if (plOld) {
+    const dv = diff(d);
+    if (dv.rows.length || dv.gv.length || dv.newPays.length || dv.head.some((h) => h !== 'Notes changed' && !h.startsWith('Staff ')))
+      errs.push(`${plOld.text} Only staff and notes can change on this invoice — undo the other changes. New payments are recorded on the detail page.`);
+  }
+  // E3: kein Rechnungsdatum vor dem Datum eines (teil)bezahlten Einlieferer-Einkaufs.
+  if (o && o.date !== d.date) for (const u of purchasesOf(o.id)) if (u.paid > 0 && d.date < u.date) errs.push(`The invoice date cannot lie before ${u.no} (${dmy(u.date)}), which is already (partly) paid.`);
+  const buyer = cust(d.customer);
+  for (const { l, r } of t.lines) {
+    if (r.gross <= 0) errs.push(`${l.desc}: the price must be above 0.`);
+    if (!String(l.desc || '').trim()) errs.push('Every line needs an item description.');
+    if (l.kind === 'own') { const p = r.p; if (availableOwn(p, d) < 0) errs.push(`${l.desc}: only ${p.stock + (o ? o.lines.filter((x) => x.ref === p.id).reduce((s, x) => s + num(x.qty) - num(x.returnedQty || 0), 0) : 0)} in stock.`); }
+    if (l.kind === 'con') {
+      if (r.e.below && !ackOk(l, r)) errs.push(`${l.desc}: sold below the consignor's floor — confirm the Consignor Loss on the line.`);
+      if (vatShort(l, r) && !vatAckOk(l, r)) errs.push(`${l.desc}: with VAT 10 % the LATAIF result is negative — confirm it on the line (Admin/Manager).`);
+      if (buyer && buyer.consignor === r.c.k) errs.push(`${l.desc}: the buyer is the consignor of this item. Buyer and consignor must differ.`);
+      if (d.date < r.c.since) errs.push(`${l.desc}: the invoice date cannot lie before the item was consigned (${dmy(r.c.since)}).`);
+    }
+  }
+  for (const y of d.payRows || []) {
+    if (y.amount === '' || y.amount == null) continue;
+    if (num(y.amount) <= 0) errs.push('A payment amount must be above 0.');
+    if (y.date < d.date) errs.push('A payment cannot be dated before the invoice.');
+    if (y.date > TODAY) errs.push('A payment cannot be in the future.');
+  }
+  if (d.mode === 'new' && t.paid > t.gross + 0.0005) errs.push(`The payments (${fmt(t.paid)}) exceed the invoice total (${fmt(t.gross)}).`);
+  if (d.mode === 'edit' && !String(d.reason || '').trim()) errs.push('Enter the reason for this correction (saved to the history).');
+  return [...new Set(errs)];
+}
+
+// ── Entwurf ─────────────────────────────────────────────────────────────────
+function newDraft() {
+  return { mode: 'new', id: null, customer: '', date: TODAY, staff: '', notes: '', lines: [], payments: [], refunds: [], payRows: [{ id: 'n1', method: 'cash', amount: '', date: TODAY }], groupVat: {}, reason: '' };
+}
+function editDraft(id) {
+  const o = clone(inv(id));
+  const groupVat = {}; for (const u of purchasesOf(id)) groupVat[u.id] = u.vat;
+  // Teilretoure: Die retournierte Menge bleibt als eigene, gesperrte Zeile (ID, Los, Einstand, Preis); nur der nicht
+  // retournierte Rest wird als korrigierbare Zeile daneben gezeigt.
+  const lines = [];
+  for (const l of o.lines) {
+    if (partlyReturned(l)) { lines.push({ ...l, qty: num(l.returnedQty) }); lines.push({ ...restOfLine(l), id: l.id + 'r', restOf: l.id }); }
+    else lines.push(l);
+  }
+  return { mode: 'edit', id, customer: o.customer, date: o.date, staff: o.staff, notes: o.notes, lines, payments: o.payments, refunds: o.refunds || [], payRows: [], groupVat, reason: '' };
+}
+
+// ── Änderungen (Review) ─────────────────────────────────────────────────────
+const vatTxt = (l) => { const r = calcLine(l); return l.scheme === 'MARGIN' ? `${fmt(r.ivat)} margin VAT` : `${fmt(r.vat)} VAT`; };
+function lineChanges(b, l) {
+  const ch = []; const gb = calcLine(b).gross, gl = calcLine(l).gross;
+  if (String(b.desc) !== String(l.desc)) ch.push(`description “${b.desc}” → “${l.desc}”`);
+  if (num(b.qty) !== num(l.qty)) ch.push(`qty ${b.qty} → ${l.qty}`);
+  if (gb !== gl) ch.push(`price ${fmt(gb)} → ${fmt(gl)}`);
+  if (b.scheme !== l.scheme) ch.push(`tax ${schemeLabel(b.scheme)} → ${schemeLabel(l.scheme)}${gb === gl ? ` — customer price stays ${fmt(gl)}, ${vatTxt(b)} → ${vatTxt(l)}` : ''}`);
+  return ch;
+}
+// Teilretoure: der nicht retournierte Rest einer Zeile, so wie er vor der Korrektur stand.
+const partlyReturned = (b) => num(b.returnedQty) > 0 && num(b.returnedQty) < num(b.qty);
+const restOfLine = (b) => ({ ...b, qty: num(b.qty) - num(b.returnedQty || 0), returnedQty: 0, retNo: undefined });
+// Spätester Geldtag der Rechnung — dort steht ein Überzahlungs-Guthaben (P1b), davor kann keine Rückzahlung liegen.
+function lastMoneyDay(d) { return [d.date, ...(d.payments || []).map((y) => y.date), ...(d.payRows || []).filter((y) => num(y.amount) > 0).map((y) => y.date), ...(d.refunds || []).map((y) => y.date)].sort().pop(); }
+function diff(d) {
+  const o = inv(d.id); const to = calcInv({ ...o, payRows: [] }); const tn = calcInv(d);
+  const rows = [];
+  const byId = new Map(o.lines.map((l) => [l.id, l]));
+  const nIds = new Set(d.lines.map((l) => l.id));
+  for (const l of o.lines) if (!nIds.has(l.id)) rows.push({ type: 'removed', l, txt: `Removed: ${l.desc}`, old: calcLine(l).gross, neu: 0 });
+  for (const l of d.lines) {
+    if (l.restOf) {
+      const b = byId.get(l.restOf); const rest = restOfLine(b); const ch = lineChanges(rest, l);
+      if (ch.length) rows.push({ type: 'split', l, txt: `${l.desc}: the ${rest.qty} piece(s) not returned — ${ch.join(', ')}. The ${b.returnedQty} returned piece(s) (${b.retNo}) stay as they are.`, old: calcLine(rest).gross, neu: calcLine(l).gross });
+      continue;
+    }
+    const b = byId.get(l.id);
+    if (!b) { rows.push({ type: 'added', l, txt: `Added: ${l.desc}`, old: 0, neu: calcLine(l).gross }); continue; }
+    const base = partlyReturned(b) ? { ...b, qty: num(b.returnedQty) } : b;
+    const ch = lineChanges(base, l);
+    if (ch.length) rows.push({ type: 'changed', l, txt: `${l.desc}: ${ch.join(', ')}`, old: calcLine(base).gross, neu: calcLine(l).gross });
+  }
+  for (const b of o.lines) if (partlyReturned(b) && nIds.has(b.id) && !d.lines.some((l) => l.restOf === b.id)) { const rest = restOfLine(b); rows.push({ type: 'removed', l: b, txt: `${b.desc}: the ${rest.qty} piece(s) not returned come off the invoice (back in stock); the returned piece(s) stay`, old: calcLine(rest).gross, neu: 0 }); }
+  const head = [];
+  if (o.customer !== d.customer) head.push(`Customer ${cust(o.customer).name} → ${cust(d.customer).name}`);
+  if (o.date !== d.date) head.push(`Invoice date ${dmy(o.date)} → ${dmy(d.date)}`);
+  if ((o.notes || '') !== (d.notes || '')) head.push('Notes changed');
+  if ((o.staff || '') !== (d.staff || '')) head.push(`Staff ${o.staff || '—'} → ${d.staff || '—'}`);
+  const plans = planPurchases(d);
+  const gv = plans.filter((p) => p.u && p.vat !== p.u.vat).map((p) => `${p.u.no}: consignor purchase VAT ${p.u.vat === 'ZERO' ? 'No VAT' : 'VAT 10 %'} → ${p.vat === 'ZERO' ? 'No VAT' : 'VAT 10 %'}`);
+  // Kommissionen
+  const oc = new Set(o.lines.filter((l) => l.kind === 'con').map((l) => l.ref));
+  const nc = new Set(d.lines.filter((l) => l.kind === 'con').map((l) => l.ref));
+  const consMoves = [];
+  for (const id of oc) if (!nc.has(id)) consMoves.push(`${cons(id).no} ${cons(id).name}: back to Active (stays on consignment with LATAIF — a real return stays a separate process)`);
+  for (const id of nc) if (!oc.has(id)) consMoves.push(`${cons(id).no} ${cons(id).name}: Active → Sold on this invoice`);
+  const qOwn = {};
+  for (const l of o.lines) if (l.kind === 'own') qOwn[l.ref] = (qOwn[l.ref] || 0) + num(l.qty) - num(l.returnedQty || 0);
+  for (const l of d.lines) if (l.kind === 'own') qOwn[l.ref] = (qOwn[l.ref] || 0) - (num(l.qty) - num(l.returnedQty || 0));
+  for (const [id, q] of Object.entries(qOwn)) if (q) consMoves.push(`${prod(id).sku} ${prod(id).name}: ${Math.abs(q)} ${q > 0 ? 'back in stock' : 'taken from stock'}`);
+  const newPays = (d.payRows || []).filter((y) => num(y.amount) > 0);
+  // Nur Notiz/Mitarbeiter geändert ⇒ keine Hauptbuchwirkung (P1b-Vertrag).
+  const adminOnly = !rows.length && !gv.length && !newPays.length && head.length > 0 && head.every((h) => h === 'Notes changed' || h.startsWith('Staff '));
+  // Neue oder geänderte Kundenüberzahlung ⇒ Pflichtwahl Guthaben / Rückzahlung.
+  const custChoice = tn.over > 0.0005 && (r3(tn.over) !== r3(to.over) || !o.overMode);
+  const creditDay = lastMoneyDay(d);
+  // Warnungen
+  const warn = [];
+  if (o.customer !== d.customer) warn.push({ lvl: 'warn', t: `The invoice and its ${o.payments.length} payment(s) move to ${cust(d.customer).name}, each on its own date (invoice ${dmy(d.date)}${o.payments.length ? ', payments ' + o.payments.map((y) => dmy(y.date)).join(', ') : ''}). Cash and bank do not change.`, dec: 'E4' });
+  for (const p of plans) {
+    const name = kon(p.k).name;
+    if (p.over > 0) warn.push({ lvl: 'bad', t: `${name} has received ${fmt(p.paid + p.lossBack)} BHD for ${p.u.no}${p.lossBack ? ` (incl. paid Consignor Loss ${fmt(p.lossBack)})` : ''}, but is now owed only ${fmt(p.amount)} BHD there. Nothing paid is changed — choose below how the ${fmt(p.over)} BHD are settled.`, dec: 'E2' });
+    else if (p.paid > 0 && p.amount !== p.oldAmount) warn.push({ lvl: 'warn', t: `${name} has already received ${fmt(p.paid)} BHD on ${p.u.no}. The open amount changes from ${fmt(Math.max(0, p.oldAmount - p.paid))} to ${fmt(p.open)} BHD; the paid amount stays.`, dec: '' });
+    if (p.u && !p.items.length && p.paid === 0 && p.over === 0) warn.push({ lvl: 'info', t: `Consignor purchase ${p.u.no} (${name}) is cancelled — nothing was paid on it.`, dec: 'E5' });
+    if (p.u && p.items.length && o.date !== d.date) warn.push({ lvl: p.paid > 0 ? 'warn' : 'info', t: p.paid > 0 ? `${p.u.no} is already (partly) paid — its date stays ${dmy(p.u.date)}.` : `${p.u.no} follows the new date ${dmy(d.date)} (unpaid).`, dec: 'E3' });
+    const added = p.items.filter((x) => !(p.u && purchaseItems(p.u).includes(x.l.ref)));
+    if (p.u && added.length) warn.push({ lvl: 'info', t: `${added.map((x) => x.l.desc).join(', ')}: added to the unpaid purchase ${p.u.no} (${name}).`, dec: 'E6' });
+    if (!p.u && p.items.length) { const paidOne = purchasesOf(o.id).find((u) => u.k === p.k && u.paid > 0); warn.push({ lvl: 'info', t: paidOne ? `${paidOne.no} (${name}) is already (partly) paid — a separate consignor purchase of ${fmt(p.amount)} BHD (unpaid) is created.` : `A new consignor purchase for ${name} (${fmt(p.amount)} BHD, unpaid) is created.`, dec: 'E6' }); }
+    if (p.vat === 'VAT_10' && p.items.length) warn.push({ lvl: 'info', t: `${p.u ? p.u.no : 'The new purchase'} carries VAT 10 % (consignor VAT invoice). The resale tax of its items stays a manual choice; Profit Margin or Zero-rated only if the legal conditions are met.`, dec: 'E10' });
+    for (const { l, r } of p.items) {
+      const lp = d.mode === 'edit' ? lossPaid(l.ref, o.id) : 0, lu = lossOpen(l.ref, o.id), ln = r.e.loss;
+      if (lp > 0 && ln > lp) warn.push({ lvl: 'warn', t: `${l.desc}: the Consignor Loss of ${fmt(lp)} BHD is already paid and stays; the additional ${fmt(ln - lp)} BHD becomes a separate expense.`, dec: 'E9' });
+      else if (lp > 0 && ln < lp) warn.push({ lvl: 'warn', t: `${l.desc}: the Consignor Loss of ${fmt(lp)} BHD is already paid and stays; the shortfall is now ${fmt(ln)} BHD — ${fmt(lp - ln)} BHD is offset against the consignor purchase. A claim arises only if ${name} received more than owed in total.`, dec: 'E9' });
+      else if (lp === 0 && r3(ln) !== lu) warn.push({ lvl: ln > 0 ? 'warn' : 'info', t: ln > 0 ? `${l.desc}: sold below the consignor's floor — Consignor Loss ${fmt(ln)} BHD (unpaid expense${lu ? `, was ${fmt(lu)}` : ''}).` : `${l.desc}: the unpaid Consignor Loss of ${fmt(lu)} BHD is cancelled.`, dec: 'E9' });
+    }
+  }
+  for (const l of o.lines) if (l.kind === 'con' && !nIds.has(l.id) && lossOpen(l.ref, o.id) > 0) warn.push({ lvl: 'info', t: `${l.desc}: the unpaid Consignor Loss of ${fmt(lossOpen(l.ref, o.id))} BHD is cancelled.`, dec: 'E9' });
+  for (const l of o.lines) if (l.kind === 'con' && !nIds.has(l.id) && lossPaid(l.ref, o.id) > 0) warn.push({ lvl: 'warn', t: `${l.desc}: P4 checkpoint — its Consignor Loss of ${fmt(lossPaid(l.ref, o.id))} BHD is already paid and stays in the history. Without this sale ${kon(cons(l.ref).k).name} has received more than owed: that amount first reduces the open consignor purchase, only a rest above it is a real claim (E2, below). Whether and how such a removal is allowed is checked in P4 (today the code blocks cancel/return when the loss is paid).`, dec: 'E5' });
+  // E10: Profit Margin / Zero-rated auf neuen oder umgestellten Zeilen — kennzeichnen, nicht sperren; Altzeilen bleiben unverändert (O3).
+  for (const l of d.lines) {
+    const b = byId.get(l.restOf || l.id); if (b && b.scheme === l.scheme) continue;
+    const tc = taxCheck(d, l, calcLine(l)); if (tc) warn.push({ lvl: tc.strong ? 'warn' : 'info', t: `${l.desc}: ${tc.t}`, dec: 'E10' });
+  }
+  if (o.lines.some((l) => num(l.returnedQty) > 0)) warn.push({ lvl: 'info', t: 'This invoice has a return. Returned pieces keep item, price and tax; only the pieces not returned can be corrected.', dec: 'Teilretoure' });
+  if (custChoice) warn.push({ lvl: 'warn', t: `Paid ${fmt(tn.paid)} BHD is more than the new total ${fmt(tn.gross)} BHD — choose below what happens with ${fmt(tn.over)} BHD.`, dec: 'Überzahlung' });
+  warn.push(adminOnly
+    ? { lvl: 'info', t: 'Only notes or staff change — no ledger booking.', dec: 'E11' }
+    : { lvl: 'info', t: `Bookings: each original booking is reversed on its own date; the new booking is dated ${dmy(d.date)} (invoice date). Payments keep their dates. The edit day ${dmy(TODAY)} is recorded in the history.`, dec: 'E11' });
+  return { o, to, tn, rows, head, gv, plans, consMoves, warn, adminOnly, custChoice, creditDay, newPays };
+}
+
+// ── Speichern (Simulation) ──────────────────────────────────────────────────
+function stripLine(l) { const x = { ...l }; delete x.priceText; delete x.restOf; x.qty = Math.max(1, Math.round(num(x.qty) || 1)); x.unit = r3(num(x.unit)); x.desc = String(x.desc).trim(); return x; }
+function adjustStock(oldLines, newLines) {
+  const q = {};
+  for (const l of oldLines) if (l.kind === 'own') q[l.ref] = (q[l.ref] || 0) + num(l.qty) - num(l.returnedQty || 0);
+  for (const l of newLines) if (l.kind === 'own') q[l.ref] = (q[l.ref] || 0) - (num(l.qty) - num(l.returnedQty || 0));
+  for (const [id, v] of Object.entries(q)) prod(id).stock += v;
+}
+function saveNew(d) {
+  const t = calcInv(d); const plans = planPurchases(d); const id = 'i' + S.data.seq.inv; const no = 'INV-2026-' + String(S.data.seq.inv).padStart(6, '0'); S.data.seq.inv++;
+  const lines = d.lines.map(stripLine);
+  adjustStock([], lines);
+  for (const l of lines) if (l.kind === 'con') { const c = cons(l.ref); c.status = 'sold'; c.inv = id; }
+  for (const p of plans) S.data.purchases.push({ id: 'u' + S.data.seq.pur, no: 'PUR-2026-' + String(S.data.seq.pur++).padStart(4, '0'), k: p.k, inv: id, date: d.date, vat: p.vat, amount: p.amount, paid: 0, payouts: [], claim: 0, claimMode: null, status: 'open', items: p.items.map((x) => x.l.ref) });
+  const lossLines = t.lines.filter((x) => x.l.kind === 'con' && x.r.e.loss > 0);
+  for (const { l, r } of lossLines) addLoss(l.ref, id, r.e.loss, d.date);
+  const payments = d.payRows.filter((y) => num(y.amount) > 0).map((y) => ({ id: 'y' + (++S.data.seq.pay), date: y.date, method: y.method, amount: r3(num(y.amount)) }));
+  S.data.invoices.unshift({ id, no, customer: d.customer, date: d.date, staff: d.staff, notes: d.notes, lines, payments, refunds: [], overMode: null,
+    history: [{ at: stamp(), who: roleLabel(S.role), reason: 'Created', changes: [`Invoice created · ${lines.length} item(s) · ${fmt(t.gross)} BHD`, ...plans.map((p) => `Consignor purchase for ${kon(p.k).name}: ${fmt(p.amount)} BHD (unpaid)`), ...lossLines.map((x) => `Consignor Loss ${x.l.desc}: ${fmt(x.r.e.loss)} BHD (unpaid expense)`)] }] });
+  persist(); return id;
+}
+function saveEdit(d, dv, m) {
+  const o = inv(d.id); const dec = m.dec || {};
+  // Teilretoure: Ein unveränderter Rest geht zurück in seine Zeile; ein korrigierter Rest wird eine eigene, neue Zeile.
+  // Die retournierte Menge behält ID, Los, Einstand und Preis.
+  const lines = [];
+  for (const raw of d.lines) {
+    const l = stripLine(raw);
+    if (!raw.restOf) { lines.push(l); continue; }
+    const b = o.lines.find((x) => x.id === raw.restOf); const base = lines.find((x) => x.id === raw.restOf);
+    if (base && !lineChanges(restOfLine(b), raw).length) { base.qty = num(b.qty); continue; }
+    lines.push({ ...l, id: nid('N'), returnedQty: 0, retNo: undefined });
+  }
+  adjustStock(o.lines, lines);
+  const oc = new Set(o.lines.filter((l) => l.kind === 'con').map((l) => l.ref));
+  const nc = new Set(lines.filter((l) => l.kind === 'con').map((l) => l.ref));
+  for (const id of oc) if (!nc.has(id)) { const c = cons(id); c.status = 'active'; c.inv = null; }
+  for (const id of nc) if (!oc.has(id)) { const c = cons(id); c.status = 'sold'; c.inv = o.id; }
+  for (const p of dv.plans) {
+    let u = p.u;
+    if (!u) { if (!p.items.length) continue; u = { id: 'u' + S.data.seq.pur, no: 'PUR-2026-' + String(S.data.seq.pur++).padStart(4, '0'), k: p.k, inv: o.id, date: d.date, vat: p.vat, amount: 0, paid: 0, payouts: [], claim: 0, claimMode: null, status: 'open', items: [] }; S.data.purchases.push(u); }
+    u.items = p.items.map((x) => x.l.ref); u.amount = p.amount; u.vat = p.vat; u.lossOff = p.lossOff;
+    if (u.paid === 0 && o.date !== d.date) u.date = d.date;
+    if (!p.items.length && u.paid === 0 && p.over === 0) u.status = 'cancelled';
+    if (p.over > 0) { u.claim = p.over; u.claimMode = dec[p.key]; }
+    else { u.claim = 0; u.claimMode = null; }
+  }
+  // E9: Die unbezahlte Verlust-Ausgabe folgt dem neuen Fehlbetrag; bezahlte bleiben, ein Mehrbetrag wird eine eigene Ausgabe.
+  const lossNow = new Map(dv.tn.lines.filter((x) => x.l.kind === 'con').map((x) => [x.l.ref, x.r.e.loss]));
+  for (const cs of new Set([...oc, ...lossNow.keys()])) {
+    const rest = r3((lossNow.get(cs) || 0) - lossPaid(cs, o.id)); const open = lossesOf(cs, o.id).find((x) => !x.paid);
+    if (rest > 0) { if (open) open.amount = rest; else addLoss(cs, o.id, rest, d.date); }
+    else if (open) open.cancelled = true;
+  }
+  const newPays = dv.newPays.map((y) => ({ id: 'y' + (++S.data.seq.pay), date: y.date, method: y.method, amount: r3(num(y.amount)) }));
+  const over = !dv.custChoice ? null : m.cust === 'credit' ? `Overpaid ${fmt(dv.tn.over)} BHD → customer credit (booked on ${dmy(dv.creditDay)})`
+    : m.now ? `Overpaid ${fmt(dv.tn.over)} BHD → refund paid out on ${dmy(m.rdate)} (${methodLabel(m.rmethod)})`
+    : `Overpaid ${fmt(dv.tn.over)} BHD → refund owed to the customer (open until paid out — no cash/bank booking yet)`;
+  const changes = [...dv.head, ...dv.rows.map((r) => r.txt), ...dv.gv, ...newPays.map((y) => `Payment added: ${fmt(y.amount)} BHD ${methodLabel(y.method)} (${dmy(y.date)})`),
+    `Total ${fmt(dv.to.gross)} → ${fmt(dv.tn.gross)} BHD`,
+    ...dv.plans.filter((p) => (p.u || p.items.length) && p.amount !== p.oldAmount).map((p) => `${kon(p.k).name} · ${p.u ? p.u.no : 'new purchase'}: ${fmt(p.oldAmount)} → ${fmt(p.amount)} BHD${p.over > 0 ? ` · overpaid ${fmt(p.over)} → ${dec[p.key] === 'offset' ? 'consignor credit (offset)' : 'repayment claim'}` : ''}`),
+    ...(over ? [over] : [])];
+  Object.assign(o, { customer: d.customer, date: d.date, staff: d.staff, notes: d.notes, lines, payments: [...o.payments, ...newPays] });
+  if (dv.custChoice) { o.overMode = m.cust; if (m.cust === 'refund' && m.now) o.refunds = [...(o.refunds || []), { date: m.rdate, method: m.rmethod, amount: dv.tn.over }]; }
+  else if (dv.tn.over <= 0.0005) o.overMode = null;
+  o.history.push({ at: stamp(), who: roleLabel(S.role), reason: d.reason.trim(), changes,
+    booked: dv.adminOnly ? 'No ledger booking — notes/staff only.' : `Booked on the invoice date ${dmy(d.date)}: originals reversed on their own dates, payments on their dates. Edited on ${dmy(TODAY)}.` });
+  persist();
+}
+
+// ── Icons ───────────────────────────────────────────────────────────────────
+const I = {
+  back: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>',
+  plus: '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>',
+  trash: '<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6"/></svg>',
+  chev: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="m6 9 6 6 6-6"/></svg>',
+  edit: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>',
+  lock: '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+  save: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>',
+  card: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="5" width="20" height="14" rx="2"/><path d="M2 10h20"/></svg>',
+  undo: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M3 7v6h6"/><path d="M21 17a9 9 0 0 0-15-6.7L3 13"/></svg>',
+  print: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 9V2h12v7M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2"/><rect x="6" y="14" width="12" height="8"/></svg>',
+  eye: '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/></svg>',
+};
+function navIcon(color, path) { return `<span class="ic" style="background:${color}1A;color:${color}"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">${path}</svg></span>`; }
+
+// ── Sidebar ─────────────────────────────────────────────────────────────────
+function renderSide() {
+  const on = S.route.page === 'consignments' ? 'consignments' : 'invoices';
+  const item = (key, label, color, path, live) => `<button class="nav ${on === key ? 'on' : ''} ${live ? '' : 'off'}" ${live ? `data-a="go" data-to="${key}"` : 'title="Not part of this preview"'}>${navIcon(color, path)}<span class="lbl">${label}</span></button>`;
+  document.getElementById('side').innerHTML = `
+    <div class="brand">LATAIF</div>
+    <div class="branch">${navIcon('#715DE3', '<path d="M3 21h18M5 21V7l7-4 7 4v14M9 9h1M14 9h1M9 13h1M14 13h1"/>')}<span>Main Store</span></div>
+    ${item('dash', 'Dashboard', '#715DE3', '<rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/>', false)}
+    <div class="sec">SALES</div>
+    ${item('clients', 'Clients', '#3D7FFF', '<circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4a4 4 0 0 1 4 4v2M16 3.1a4 4 0 0 1 0 7.8M21 21v-2a4 4 0 0 0-3-3.9"/>', false)}
+    ${item('offers', 'Offers', '#0EA5E9', '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/>', false)}
+    ${item('invoices', 'Invoices', '#16A34A', '<rect x="4" y="3" width="16" height="18" rx="2"/><path d="M12 7v10M9.5 9.5c0-1 1-1.5 2.5-1.5s2.5.7 2.5 1.7c0 2.3-5 1.3-5 3.6 0 1 1 1.7 2.5 1.7s2.5-.5 2.5-1.5"/>', true)}
+    ${item('cn', 'Credit Notes', '#FF8730', '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M9 15h6"/>', false)}
+    ${item('orders', 'Orders', '#FF8730', '<circle cx="9" cy="21" r="1"/><circle cx="20" cy="21" r="1"/><path d="M1 1h4l2.7 13.4a2 2 0 0 0 2 1.6h9.7a2 2 0 0 0 2-1.6L23 6H6"/>', false)}
+    ${item('approval', 'Approval', '#715DE3', '<circle cx="9" cy="7" r="4"/><path d="M3 21v-2a4 4 0 0 1 4-4h4M16 11l2 2 4-4"/>', false)}
+    ${item('consignments', 'Consignment', '#E5486D', '<path d="M11 17l2 2a1 1 0 1 0 3-3"/><path d="m14 14 2.5 2.5a1 1 0 1 0 3-3l-3.9-3.9a3 3 0 0 0-4.2 0l-.9.9a1 1 0 1 1-3-3l2.8-2.8a5.8 5.8 0 0 1 7.1-.9l.5.3a2 2 0 0 0 1.4.3L21 4"/><path d="m21 3 1 11h-2M3 3 2 14l6.5 6.5a1 1 0 1 0 3-3M3 4h8"/>', true)}
+    <div class="sec">INVENTORY</div>
+    ${item('collection', 'Collection', '#3D7FFF', '<path d="M21 8 12 3 3 8v8l9 5 9-5z"/><path d="m3 8 9 5 9-5M12 13v8"/>', false)}
+    ${item('bulk', 'Bulk Metals', '#0EA5E9', '<path d="M12 3v18M5 7h14M5 7l-3 7a3 3 0 0 0 6 0zM19 7l-3 7a3 3 0 0 0 6 0z"/>', false)}
+    <div class="foot"><div class="avatar">${S.role.slice(0, 2).toUpperCase()}</div><div class="who"><div style="font-size:13px;font-weight:600">Preview User</div><div class="tiny muted">${S.role.toUpperCase()}</div></div></div>`;
+}
+
+// ── Seiten ──────────────────────────────────────────────────────────────────
+function pvbar() { return `<div class="pvbar"><b>PREVIEW</b><span>Demo data · saving is simulated · nothing reaches LATAIF ERP</span><span style="margin-left:auto">Today ${dmy(TODAY)} · Role <b>${roleLabel(S.role)}</b> · VAT Q3 2026 ${S.q3Filed ? '<b>filed</b>' : 'open'} · Opening cut-off ${dmy(OPENING_CUTOFF)}</span></div>`; }
+function dchip(code) { return code ? `<span class="dchip" data-a="decisions" data-focus="${code}" title="Open business decision ${code} — click for details">${code}</span>` : ''; }
+
+function pageList() {
+  const rows = S.data.invoices.map((d) => {
+    const t = calcInv({ ...d, payRows: [] });
+    const pl = periodLock(d.date);
+    return `<div class="tr click" data-a="open" data-id="${d.id}" data-test="inv-row-${d.no}">
+      <div><div class="mono" style="font-size:13px;font-weight:500">${d.no}</div><div class="tiny muted">${d.lines.length} item${d.lines.length === 1 ? '' : 's'}</div></div>
+      <div class="small">${dmy(d.date)}</div>
+      <div class="small">${esc(cust(d.customer).name)}</div>
+      <div>${kindChip(invKind(d))}</div>
+      <div class="num small">${money(t.gross, false)}</div>
+      <div class="num small">${money(t.paid, false)}</div>
+      <div>${payStatus(t)}</div>
+      <div class="tiny muted">${pl ? `<span class="chip lock">${I.lock} ${pl.short}</span>` : quarterLabel(quarterOf(d.date)) + ' open'}</div>
+    </div>`;
+  }).join('');
+  return `${pvbar()}<div class="page">
+    <div class="between" style="margin-bottom:24px"><div><div class="h1">Invoices</div><div class="sub">Own stock and consignment items can be sold on one invoice.</div></div>
+      <button class="btn pri" data-a="new" data-test="new-invoice">${I.plus} New Invoice</button></div>
+    <div class="pvnote" style="margin-bottom:16px"><b>So testen Sie das Preview:</b> Unten rechts öffnet <b>„Preview controls“</b> die Abnahme-Szenarien (zuerst P1c), die Rolle (ADMIN/MANAGER/SALES/ACCOUNTANT), den VAT-Status von Q3 2026 und die bestätigten Entscheidungen. Alles lässt sich frei anklicken, speichern (Simulation) und erneut bearbeiten. „Reset demo“ stellt den Anfangszustand her. Rabatte gibt es bewusst nicht (E1 zurückgestellt).</div>
+    <div class="tbl list">
+      <div class="tr th"><span>Invoice</span><span>Date</span><span>Customer</span><span>Items</span><span style="text-align:right">Total (BHD)</span><span style="text-align:right">Paid (BHD)</span><span>Payment</span><span>VAT period</span></div>
+      ${rows}
+    </div></div>`;
+}
+
+function custSelect(d, disabled) {
+  const opts = S.data.customers.map((c) => `<option value="${c.id}" ${d.customer === c.id ? 'selected' : ''}>${esc(c.name)}${c.consignor ? ' (also consignor)' : ''}</option>`).join('');
+  return `<select class="in" data-f="d.customer" data-k="cust" ${disabled ? 'disabled' : ''}><option value="">Search clients…</option>${opts}</select>`;
+}
+
+function pageForm() {
+  const d = S.draft; const t = calcInv(d); const lk = locks(d); const edit = d.mode === 'edit'; const o = edit ? inv(d.id) : null;
+  const c = cust(d.customer);
+  const errs = S.formErrors || [];
+  const lineRows = t.lines.map(({ l, r }) => lineRow(d, l, r)).join('') || `<div class="tr" style="grid-template-columns:1fr;padding:28px;text-align:center;color:var(--t3);font-size:13px">No items yet — use <b>Add Item</b> to pick own stock or consignment items.</div>`;
+  const plans = planPurchases(d).filter((p) => p.items.length || p.u);
+  const kind = d.lines.length ? invKind(d) : null;
+  return `${pvbar()}<div class="page">
+    <div class="between" style="margin-bottom:28px">
+      <div><button class="back" data-a="${edit ? 'open' : 'go'}" data-id="${d.id || ''}" data-to="invoices">${I.back} Back</button>
+        <div class="h1">${edit ? `Edit Invoice ${o.no}` : 'New Invoice'}</div>
+        <div class="sub">${edit ? 'Correct customer, date, items, prices and tax. Saving shows a review of all effects first; a reason is required.' : 'Customer, own stock and consignment items, tax, payment — all on one page.'}</div></div>
+      <div class="row">${kind ? kindChip(kind) : ''}<span class="chip ${t.paid >= t.gross - 0.0005 && t.gross > 0 ? 'ok' : 'part'}" style="padding:6px 14px;font-size:11px;letter-spacing:.06em">${t.paid >= t.gross - 0.0005 && t.gross > 0 ? 'FINAL INVOICE (INV)' : 'PARTIAL INVOICE (PINV)'}</span></div>
+    </div>
+    ${lk.pl ? `<div class="lock-box" style="margin-bottom:16px" data-test="vat-lock">${I.lock} <b>${esc(lk.pl.text)}</b> Only <b>staff</b> and <b>notes</b> can change — customer, date, items, item descriptions, prices and tax are locked, because a correction would book in that period. Such a change creates no ledger booking. New payments can be recorded on the detail page. ${dchip(lk.pl.code)}${lk.pl.code === 'E8' && o.date < OPENING_CUTOFF ? ' ' + dchip('O1') : ''}</div>` : ''}
+
+    <div class="card">
+      <div class="between" style="align-items:flex-start;margin-bottom:12px"><span class="ov">1 · Customer</span>
+        <div style="min-width:170px"><span class="ov" style="margin-bottom:4px">Invoice date ${edit && kind && kind !== 'own' ? dchip('E3') : ''}</span><input type="date" class="in" data-f="d.date" data-k="date" value="${d.date}" max="${TODAY}" ${lk.vat ? 'disabled' : ''} data-test="inv-date"></div></div>
+      <div class="grid" style="grid-template-columns:2fr 1fr">
+        <div><span class="ov" style="margin-bottom:6px">Customer ${edit && kind && kind !== 'own' ? dchip('E4') : ''}</span>${custSelect(d, lk.vat)}
+          ${lk.vat ? '' : `<button class="btn ghost sm" style="padding-left:0;color:var(--t1)" data-a="newClient">+ New Client</button>`}</div>
+        ${c ? `<div style="padding:12px 14px;border:1px solid var(--b1);border-radius:8px"><span class="tiny muted">SELECTED</span><div style="font-size:14px">${esc(c.name)}</div><div class="small muted">${esc(c.phone || '')}</div>${c.consignor ? '<div class="tiny" style="color:var(--con);margin-top:4px">Also a consignor — cannot buy own consignment items.</div>' : ''}</div>` : '<div></div>'}
+      </div>
+    </div>
+
+    <div class="card mt16">
+      <div class="between" style="margin-bottom:12px"><span class="ov">2 · Items</span>
+        <div class="row"><button class="btn sm" data-a="picker" ${lk.vat ? 'disabled' : ''} data-test="add-item">${I.plus} Add Item</button><button class="btn sm" disabled title="Unchanged — not part of this preview">${I.plus} Add bulk metal</button></div></div>
+      <div class="tbl lines">
+        <div class="tr th"><span></span><span>Item</span><span>Tax scheme ${dchip('Brutto')}</span><span style="text-align:center">Qty</span><span style="text-align:right">Price incl. VAT<br><span style="font-size:9px;color:var(--t4);text-transform:none;letter-spacing:0">customer price</span></span><span style="text-align:right">VAT<br><span style="font-size:9px;color:var(--t4);text-transform:none;letter-spacing:0">auto</span></span><span style="text-align:right">Line total<br><span style="font-size:9px;color:var(--t4);text-transform:none;letter-spacing:0">auto</span></span><span></span></div>
+        ${lineRows}
+      </div>
+      <p class="tiny muted mt8" data-test="tax-hint"><b style="color:var(--t2)">Changing the tax scheme keeps the customer price incl. VAT — only the VAT split is recalculated.</b> ${dchip('Brutto')} Own stock follows the product's tax default. All three tax schemes stay selectable, also after a VAT 10 % purchase invoice — the choice does not confirm the tax treatment: Profit Margin and Zero-rated only if the legal conditions are met (evidence and tax approval: accountant). Unknown purchase VAT (old stock) is not “No VAT” ${dchip('E10')}. Consignment items keep their consignor terms; one consignment = one piece until P5 ${dchip('E12')}. Click the chevron for the full breakdown of a line.</p>
+    </div>
+
+    ${plans.length ? `<div class="card mt16" data-test="consignor-section">
+      <div class="between" style="margin-bottom:12px"><span class="ov">3 · Consignor settlement</span><span class="tiny muted">${plans.length} consignor purchase${plans.length === 1 ? '' : 's'} · separate from the customer invoice · Admin/Manager only ${dchip('E13')}</span></div>
+      <div class="grid" style="gap:10px">${plans.map((p) => consignorBox(d, p)).join('')}</div>
+    </div>` : ''}
+
+    <div class="card mt16">
+      <span class="ov" style="margin-bottom:12px">${plans.length ? '4' : '3'} · Payment</span>
+      ${edit ? paymentsEdit(d, t) : paymentsNew(d, t)}
+      <div class="grid mt16" style="grid-template-columns:1fr 1fr">
+        <div style="padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--b1)"><span class="ov">Paid</span><div class="mono" style="font-size:17px;color:var(--oks);margin-top:4px">${money(t.paid)}</div></div>
+        <div style="padding:12px;background:var(--bg);border-radius:8px;border:1px solid var(--b1)"><span class="ov">${t.remaining < 0 ? (edit ? 'Overpaid — credit or refund, chosen in the review' : 'Overpaid') : 'Remaining'}</span><div class="mono" style="font-size:17px;color:${t.remaining > 0 ? 'var(--gold)' : 'var(--oks)'};margin-top:4px">${money(Math.abs(t.remaining))}</div></div>
+      </div>
+    </div>
+
+    <div class="grid mt16" style="grid-template-columns:minmax(0,.7fr) minmax(0,1.3fr)">
+      <div class="card"><span class="ov" style="margin-bottom:12px">Staff</span><select class="in" data-f="d.staff" data-k="staff"><option value="">— Unassigned —</option>${['Hassan', 'Fatima', 'Ali'].map((s) => `<option ${d.staff === s ? 'selected' : ''}>${s}</option>`).join('')}</select><span class="tiny muted" style="display:block;margin-top:6px">Who closed this sale (optional).</span></div>
+      <div class="card"><span class="ov" style="margin-bottom:12px">Notes (optional)</span><textarea class="in" rows="3" data-f="d.notes" data-k="notes" placeholder="e.g. delivery details, special requests…">${esc(d.notes)}</textarea></div>
+    </div>
+    ${edit ? `<div class="card mt16"><span class="ov" style="margin-bottom:8px">Reason for edit * ${dchip('Begründung')}</span><textarea class="in ${errs.some((e) => e.startsWith('Enter the reason')) ? 'err' : ''}" rows="2" data-f="d.reason" data-k="reason" data-test="edit-reason" placeholder="Explain why this invoice is being changed… (required — saved to the history)">${esc(d.reason)}</textarea></div>` : ''}
+
+    <div class="summary">
+      <span style="font-size:11px;color:rgba(255,255,255,.75);letter-spacing:.1em;text-transform:uppercase;font-weight:600">Summary</span>
+      <div class="sgrid">
+        <div><div class="lbl">SUBTOTAL</div><div class="val">${money(t.net)}</div></div>
+        <div><div class="lbl">VAT</div><div class="val" style="color:#FFD27D">${money(t.vat)}</div></div>
+        <div><div class="lbl">TOTAL</div><div class="val" style="font-size:18px" data-test="sum-total">${money(t.gross)}</div></div>
+        <div><div class="lbl">PAID</div><div class="val" style="color:#86E5A4">${money(t.paid)}</div></div>
+        <div><div class="lbl">REMAINING</div><div class="val" style="color:${t.remaining > 0 ? '#FFD27D' : '#86E5A4'}">${money(t.remaining)}</div></div>
+      </div>
+      <div class="sgrid" style="margin-top:14px;padding-top:14px;border-top:1px solid rgba(255,255,255,.18)">
+        <div><div class="lbl">OWN STOCK COST</div><div class="val">${money(t.ownCost)}</div></div>
+        <div><div class="lbl">TO CONSIGNORS</div><div class="val" data-test="sum-payouts">${money(t.payouts)}</div></div>
+        <div><div class="lbl">MARGIN VAT (INTERNAL)</div><div class="val" style="color:#FFD27D">${money(t.ivat)}</div></div>
+        <div><div class="lbl">LATAIF PROFIT</div><div class="val" style="font-size:18px;color:${t.profit < 0 ? '#FFB4B4' : '#86E5A4'}" data-test="sum-profit">${money(t.profit)}</div></div>
+        <div></div>
+      </div>
+    </div>
+    ${errs.length ? `<div class="err-box mt16" data-test="form-errors">${errs.map((e) => `<div>• ${esc(e)}</div>`).join('')}</div>` : ''}
+    <div class="between mt24" style="padding-top:20px;border-top:1px solid var(--b1)">
+      <button class="btn ghost" data-a="${edit ? 'open' : 'go'}" data-id="${d.id || ''}" data-to="invoices">✕ Cancel</button>
+      <div class="row">${edit ? `<button class="btn pri" data-a="review" data-test="review-changes">${I.eye} Review Changes</button>` : `<button class="btn" data-a="saveNew" data-print="1">${I.print} Save &amp; Print</button><button class="btn pri" data-a="saveNew" data-test="save-invoice">${I.save} Save Invoice</button>`}</div>
+    </div>
+  </div>`;
+}
+
+function lineRow(d, l, r) {
+  const locked = lineLocked(d, l); const dis = locked ? 'disabled' : ''; const ex = !!S.expanded[l.id];
+  const tc = taxCheck(d, l, r);
+  const buyVat = l.kind === 'own' ? (r.p.buyVat === 'VAT_10' ? '10 % (VAT invoice)' : r.p.buyVat === 'ZERO' ? 'none' : 'unknown (old stock) — choose the tax manually') : '';
+  const src = l.kind === 'own'
+    ? `<span class="chip own">Own stock</span><span>${esc(r.p.sku)} · ${esc(r.p.cat)}</span><span>· cost ${fmt(r.cost)}</span><span>· purchase VAT ${buyVat}</span>`
+    : `<span class="chip con">Consignment</span><span>${esc(r.c.no)}</span><span>· ${esc(kon(r.c.k).name)}</span><span>· ${esc(modelLabel(r.c))}</span>`;
+  const p = l.kind === 'con' ? planOfLine(d, l) : null;
+  const lp = d.mode === 'edit' && l.kind === 'con' ? lossPaid(l.ref, d.id) : 0;
+  const o0 = origLine(d, l); const rest = l.restOf ? inv(d.id).lines.find((x) => x.id === l.restOf) : null;
+  const retChip = num(l.returnedQty) > 0 ? `<span class="chip bad">Returned ${l.returnedQty}${o0 && num(o0.qty) > num(l.returnedQty) ? ` of ${o0.qty}` : ''} · ${esc(l.retNo)}</span>` : '';
+  const restChip = rest ? `<span class="chip part" data-test="rest-${l.id}">Not returned · ${num(rest.qty) - num(rest.returnedQty)} of ${rest.qty} · correctable</span>${dchip('Teilretoure')}` : '';
+  const econLine = l.kind === 'con'
+    ? `<div class="ln-econ">To consignor ${fmt(r.e.payout)} · LATAIF share <span style="color:${r.share < 0 ? 'var(--bad)' : 'inherit'}">${fmt(r.share)}</span>${p && p.paid > 0 ? ` · <span class="chip part" style="font-family:var(--sans)">consignor paid ${fmt(p.paid)}</span>` : ''}${lp > 0 ? ` · <span class="chip part" style="font-family:var(--sans)">Consignor Loss paid ${fmt(lp)}</span>` : ''}</div>` : '';
+  const below = l.kind === 'con' && r.e.below ? `<div class="warn-box mt8" style="background:rgba(220,38,38,.06);border-color:rgba(220,38,38,.3);color:#7A2A2A"><b style="color:var(--bad)">⚠ ${fmt(r.e.loss)} BHD below ${r.c.model === 'cost_split' ? "the consignor's cost" : 'the agreed price'}</b> — the consignor still receives ${fmt(r.e.floor)} BHD; the difference is booked as Consignor Loss (a separate expense).${lp > 0 ? ` ${fmt(lp)} BHD of it is already paid — that expense stays.` : ''} ${dchip('E9')}
+      <label class="row mt8" style="cursor:pointer"><input type="checkbox" data-f="l.${l.id}.ack" ${ackOk(l, r) ? 'checked' : ''} data-test="ack-${l.id}"> <span>I confirm — record this shortfall as Consignor Loss</span></label></div>` : '';
+  const vs = vatShort(l, r) ? `<div class="warn-box mt8" data-test="e7-${l.id}"><b>⚠ With VAT 10 % the LATAIF result is ${fmt(r.profit)} BHD</b> — the commission ${fmt(r.share)} BHD is taken from the price incl. VAT, the VAT of ${fmt(r.vat)} BHD is carried by LATAIF. ${dchip('E7')}
+      <label class="row mt8" style="cursor:pointer"><input type="checkbox" data-f="l.${l.id}.vatAck" ${vatAckOk(l, r) ? 'checked' : ''} data-test="vatack-${l.id}"> <span>I confirm the negative LATAIF result (Admin/Manager)</span></label></div>` : '';
+  return `<div style="border-bottom:1px solid var(--b1)" data-test="line-${l.id}">
+    <div class="tr" style="border-bottom:none">
+      <button class="iconbtn ${ex ? 'on' : ''}" data-a="expand" data-id="${l.id}" title="Show breakdown"><span style="display:inline-flex;transform:rotate(${ex ? 180 : 0}deg)">${I.chev}</span></button>
+      <div style="min-width:0">
+        ${S.editDesc === l.id && !locked ? `<input class="in" style="font-weight:500" data-f="l.${l.id}.desc" data-k="desc-${l.id}" value="${esc(l.desc)}" data-test="desc-${l.id}">`
+        : `<div class="ln-desc"><span class="t" title="${esc(l.desc)}">${esc(l.desc)}</span>${locked ? '' : `<button class="iconbtn" style="width:22px;height:22px;border:none" data-a="editDesc" data-id="${l.id}" title="Correct the item description on this invoice">${I.edit}</button>`}</div>`}
+        <div class="ln-meta">${src}${retChip}${restChip}${locked ? `<span class="chip lock" title="${esc(locked)}">${I.lock} locked</span>` : ''}</div>
+        ${econLine}${below}${vs}
+        ${tc ? `<div class="${tc.strong ? 'warn-box mt8' : 'tiny muted mt8'}" data-test="taxcheck-${l.id}">Tax check: ${esc(tc.t)} ${dchip('E10')}</div>` : ''}
+      </div>
+      <select class="in" data-f="l.${l.id}.scheme" data-k="scheme-${l.id}" ${dis} data-test="scheme-${l.id}" title="${esc(locked || 'Changing the tax keeps the customer price incl. VAT')}">${SCHEMES.map((s) => `<option value="${s.id}" ${l.scheme === s.id ? 'selected' : ''}>${s.label}</option>`).join('')}</select>
+      <input class="in num" data-f="l.${l.id}.qty" data-k="qty-${l.id}" value="${esc(l.qty)}" ${dis || (l.kind === 'con' ? 'disabled title="One consignment = one piece — quantities and partial sales follow in P5 (E12)"' : '')} inputmode="numeric" data-test="qty-${l.id}">
+      <input class="in num strong" data-f="l.${l.id}.price" data-k="price-${l.id}" value="${l.priceText != null ? esc(l.priceText) : r.price.toFixed(3)}" ${dis} inputmode="decimal" data-test="price-${l.id}">
+      ${l.scheme === 'MARGIN' ? `<span class="auto" style="color:#FF8730;background:rgba(255,135,48,.06);border-color:rgba(255,135,48,.25)" title="Internal VAT on the margin (not shown to the customer)">${fmt(r.ivat)} <span style="font-size:9px;opacity:.75">int</span></span>` : `<span class="auto" data-test="vat-${l.id}">${fmt(r.vat)}</span>`}
+      <span class="auto" style="color:var(--t1);font-weight:600" data-test="total-${l.id}">${fmt(r.gross)}</span>
+      <button class="rm" data-a="removeLine" data-id="${l.id}" ${locked ? 'disabled' : ''} title="${locked ? esc(locked) : lp > 0 ? 'Take off the invoice — the paid Consignor Loss stays; P4 checkpoint, see the review' : rest ? 'Take the pieces not returned off the invoice' : 'Remove this line'}" data-test="rm-${l.id}">${I.trash}</button>
+    </div>
+    ${ex ? `<div class="expand">
+      <div class="kv"><div class="k">Price incl. VAT</div><div class="v">${fmt(r.price)}</div></div>
+      <div class="kv"><div class="k">Net (excl. VAT)</div><div class="v">${fmt(r.net)}</div></div>
+      <div class="kv"><div class="k">${l.scheme === 'MARGIN' ? 'Margin VAT (internal)' : 'VAT to customer'}</div><div class="v">${fmt(l.scheme === 'MARGIN' ? r.ivat : r.vat)}</div></div>
+      ${l.kind === 'con' ? `<div class="kv"><div class="k">Consignor purchase</div><div class="v" style="font-family:var(--sans)">${p ? `${p.u ? esc(p.u.no) : 'new'} · ${p.vat === 'VAT_10' ? 'VAT 10 %' : 'No VAT'}` : '—'}</div></div>
+      <div class="kv"><div class="k">Consignor model</div><div class="v" style="font-family:var(--sans)">${esc(modelLabel(r.c))}</div></div>
+      <div class="kv"><div class="k">To consignor</div><div class="v" style="color:var(--oks)">${fmt(r.e.payout)}</div></div>
+      <div class="kv"><div class="k">LATAIF share (before VAT)</div><div class="v">${fmt(r.share)}</div></div>`
+      : `<div class="kv"><div class="k">Purchase VAT</div><div class="v" style="font-family:var(--sans)">${esc(buyVat)}</div></div><div class="kv"><div class="k">Stock cost</div><div class="v">${fmt(r.cost)}</div></div><div class="kv"><div class="k">In stock (after this invoice)</div><div class="v">${availableOwn(r.p, d)}</div></div><div class="kv"></div>`}
+      <div class="kv"><div class="k">LATAIF profit</div><div class="v" style="color:${r.profit < 0 ? 'var(--bad)' : 'var(--ok)'}">${fmt(r.profit)}</div></div>
+    </div>` : ''}
+  </div>`;
+}
+
+function consignorBox(d, p) {
+  const paidLock = p.paid > 0; const lk = locks(d).vat;
+  const sep = !p.u && d.mode === 'edit' && purchasesOf(d.id).some((u) => u.k === p.k && u.paid > 0);
+  const lossBooked = p.loss;
+  return `<div style="padding:12px 14px;border:1px solid var(--b1);border-radius:10px" data-test="group-${p.key}">
+    <div class="between"><div><span style="font-weight:500">${esc(kon(p.k).name)}</span> <span class="tiny muted">· ${p.items.length} item${p.items.length === 1 ? '' : 's'} · ${p.u ? `purchase ${p.u.no}` : sep ? 'separate new purchase on save' : 'new purchase on save'}</span>${sep ? ' ' + dchip('E6') : ''}</div>
+      <div class="row small"><span class="muted">To consignor</span> <b>${money(p.payout)}</b><span class="muted" style="margin-left:10px">LATAIF share</span> ${money(p.share)}</div></div>
+    ${lossBooked > 0 ? `<div class="tiny mt8" style="color:#92400E">Of this, ${fmt(lossBooked)} BHD is Consignor Loss (separate expense); the purchase is ${fmt(p.amount)} BHD. ${dchip('E9')}</div>` : ''}
+    ${p.lossBack > 0 ? `<div class="tiny mt8" style="color:#92400E">Paid Consignor Loss of an item taken off: ${fmt(p.lossBack)} BHD — stays paid, reduces this purchase (P4 checkpoint). ${dchip('E5')}</div>` : ''}
+    ${p.u ? `<div class="tiny muted mt8">Paid to consignor so far: <b style="color:var(--t1)">${fmt(p.paid)} BHD</b> · open ${fmt(p.open)} BHD${p.over > 0 ? ` · <span style="color:var(--bad)">overpaid ${fmt(p.over)} — decided in the review</span> ${dchip('E2')}` : ''}${!p.items.length ? ' · no items left on this invoice' : ''}</div>` : ''}
+    <div class="seg mt8">${[['ZERO', 'No VAT (private / not VAT-registered)'], ['VAT_10', 'VAT 10 % (consignor issues a VAT invoice)']].map(([v, lbl]) => `<button data-a="groupVat" data-kid="${p.key}" data-v="${v}" class="${p.vat === v ? 'on' : ''}" ${paidLock || lk ? `disabled title="${lk ? 'Closed period — only staff and notes can change' : 'The consignor purchase is already (partly) paid — its VAT is fixed'}"` : ''}>${lbl}</button>`).join('')} ${dchip('E10')}</div>
+    <div class="tiny muted mt8">Purchase VAT can change until the first payout and is separate from the resale tax. The resale tax of these items stays a manual choice; the customer price stays.</div>
+  </div>`;
+}
+
+function payRowsHtml(d) {
+  return d.payRows.map((y, i) => `<div class="grid mt8" style="grid-template-columns:auto 150px 160px 36px;align-items:end;gap:12px" data-test="payrow-${i}">
+    <div><span class="ov" style="margin-bottom:6px">${d.payRows.length > 1 ? `Payment ${i + 1} · ` : ''}Method</span><div class="seg">${METHODS.map((m) => `<button data-a="payMethod" data-id="${y.id}" data-v="${m.id}" class="${y.method === m.id ? 'on' : ''}">${m.label}</button>`).join('')}</div></div>
+    <div><span class="ov" style="margin-bottom:6px">Amount (BHD)</span><input class="in num" data-f="p.${y.id}.amount" data-k="pay-${y.id}" value="${esc(y.amount)}" placeholder="0.000" inputmode="decimal" data-test="pay-amount-${i}"></div>
+    <div><span class="ov" style="margin-bottom:6px">Payment date</span><input type="date" class="in" data-f="p.${y.id}.date" data-k="pdate-${y.id}" value="${y.date}" max="${TODAY}"></div>
+    <button class="rm" data-a="rmPay" data-id="${y.id}" title="Remove this payment">${I.trash}</button>
+  </div>`).join('');
+}
+function paymentsNew(d, t) {
+  return `${payRowsHtml(d)}<div class="row mt12"><button class="btn sm" data-a="addPay">${I.plus} Add payment</button><button class="btn sm" data-a="payFull">Paid in full</button><button class="btn sm" data-a="payLater">Pay later</button></div>`;
+}
+function paymentsEdit(d, t) {
+  const o = inv(d.id);
+  return `<div class="tbl"><div class="tr th" style="grid-template-columns:1fr 1fr 1fr"><span>Received</span><span>Method</span><span style="text-align:right">Amount</span></div>
+    ${o.payments.map((y) => `<div class="tr" style="grid-template-columns:1fr 1fr 1fr"><span class="small">${dmy(y.date)}</span><span class="small">${methodLabel(y.method)}</span><span class="num small">${money(y.amount)}</span></div>`).join('') || '<div class="tr small muted" style="grid-template-columns:1fr">No payments yet.</div>'}
+    ${(o.refunds || []).map((y) => `<div class="tr" style="grid-template-columns:1fr 1fr 1fr"><span class="small">${dmy(y.date)}</span><span class="small">Refund paid out · ${methodLabel(y.method)}</span><span class="num small">${money(-y.amount)}</span></div>`).join('')}
+  </div>
+  <div class="info-box mt12">Payments already received stay as they are. If the new total is below the paid amount, you choose in the review: <b>customer credit</b> or <b>refund</b> — a refund stays owed to the customer until it is actually paid out. ${dchip('Überzahlung')} New payments can be added here.</div>
+  ${payRowsHtml(d)}<div class="row mt12"><button class="btn sm" data-a="addPay" ${locks(d).vat ? 'disabled' : ''}>${I.plus} Add payment</button></div>`;
+}
+
+function pageDetail() {
+  const d = inv(S.route.id); if (!d) return pageList();
+  const t = calcInv({ ...d, payRows: [] }); const pl = periodLock(d.date); const kind = invKind(d); const c = cust(d.customer);
+  const owed = d.overMode === 'refund' ? t.over : 0;
+  const pus = purchasesOf(d.id); const conLines = t.lines.filter((x) => x.l.kind === 'con');
+  const losses = S.data.losses.filter((x) => x.inv === d.id && !x.cancelled);
+  const canReturn = !pl && d.lines.some((l) => l.kind === 'own' && num(l.qty) - num(l.returnedQty || 0) > 0);
+  const last = t.remaining > 0.0005 ? ['Remaining', t.remaining, 'var(--gold)'] : owed > 0 ? ['Refund owed to customer', owed, 'var(--bad)'] : t.over > 0 ? [d.overMode === 'credit' ? 'Customer credit' : 'Overpaid', t.over, 'var(--oks)'] : ['Remaining', 0, 'var(--oks)'];
+  return `${pvbar()}<div class="page">
+    <div class="between" style="margin-bottom:24px;align-items:flex-start">
+      <div><button class="back" data-a="go" data-to="invoices">${I.back} Back to invoices</button>
+        <div class="row"><div class="h1 mono" style="font-size:26px">${d.no}</div>${kindChip(kind)}${payStatus(t)}${pl ? `<span class="chip lock">${I.lock} ${pl.code === 'O1' ? 'Before opening cut-off' : 'VAT ' + pl.short}</span>` : ''}</div>
+        <div class="sub">${esc(c.name)} · ${dmy(d.date)}${d.staff ? ' · ' + esc(d.staff) : ''}</div></div>
+      <div class="row" style="flex-wrap:wrap;justify-content:flex-end">
+        <button class="btn" data-a="edit" data-id="${d.id}" ${canEdit() ? '' : 'disabled title="Only Admin and Manager can edit invoices"'} data-test="edit-invoice">${I.edit} Edit</button>
+        <button class="btn" disabled title="Unchanged — not part of this preview">${I.print} Print</button>
+        <button class="btn ghost" data-a="history" data-id="${d.id}" data-test="history">History (${d.history.length})</button>
+        <button class="btn" data-a="returnOpen" data-id="${d.id}" ${canReturn ? '' : 'disabled'}>${I.undo} Create Return</button>
+        ${owed > 0 ? `<button class="btn" data-a="refundOpen" data-id="${d.id}" data-test="record-refund">${I.card} Record refund</button>` : ''}
+        ${t.remaining > 0.0005 ? `<button class="btn pri" data-a="payOpen" data-id="${d.id}" data-test="record-payment">${I.card} Record Payment</button>` : ''}
+      </div>
+    </div>
+    ${S.lastSaved === d.id ? `<div class="pvnote" style="margin-bottom:16px;border-style:solid;background:#F0FDF4;border-color:#86EFAC;color:#166534" data-test="saved-banner"><b style="color:#166534">Saved (simulation).</b> Nothing was written to LATAIF. You can open <b>Edit</b> again to change this invoice, or check <b>History</b>.</div>` : ''}
+    <div class="kpis">
+      <div class="kpi"><span class="ov">Net amount</span><div class="v">${money(t.net)}</div></div>
+      <div class="kpi"><span class="ov">VAT</span><div class="v" style="color:var(--gold)">${money(t.vat)}</div>${t.ivat ? `<div class="tiny" style="color:#FF8730;margin-top:2px">+ ${fmt(t.ivat)} margin VAT (internal)</div>` : ''}</div>
+      <div class="kpi"><span class="ov">Gross total</span><div class="v" data-test="detail-total">${money(t.gross)}</div></div>
+      <div class="kpi"><span class="ov">Paid</span><div class="v" style="color:var(--oks)">${money(t.paid)}</div></div>
+      <div class="kpi" data-test="kpi-last"><span class="ov">${last[0]}</span><div class="v" style="color:${last[2]}">${money(last[1])}</div>${S.data.returnCredit[d.id] ? `<div class="tiny muted">Customer credit from return ${fmt(S.data.returnCredit[d.id])}</div>` : ''}</div>
+    </div>
+
+    <div class="card mt16"><span class="ov" style="margin-bottom:14px">Invoice lines</span>
+      <div class="tbl"><div class="tr th" style="grid-template-columns:minmax(0,3fr) minmax(0,1fr) 50px minmax(0,1fr) minmax(0,.9fr) minmax(0,1fr)"><span>Item</span><span>Tax</span><span style="text-align:center">Qty</span><span style="text-align:right">Price incl. VAT</span><span style="text-align:right">VAT</span><span style="text-align:right">Line total</span></div>
+      ${t.lines.map(({ l, r }) => `<div class="tr" style="grid-template-columns:minmax(0,3fr) minmax(0,1fr) 50px minmax(0,1fr) minmax(0,.9fr) minmax(0,1fr)">
+        <div style="min-width:0"><div class="ln-desc"><span class="t">${esc(l.desc)}</span></div><div class="ln-meta">${l.kind === 'own' ? `<span class="chip own">Own stock</span><span>${esc(r.p.sku)}</span>` : `<span class="chip con">Consignment</span><span>${esc(r.c.no)} · ${esc(kon(r.c.k).name)}</span>`}${num(l.returnedQty) > 0 ? `<span class="chip bad">Returned ${l.returnedQty}${num(l.qty) > num(l.returnedQty) ? ` of ${l.qty}` : ''} · ${esc(l.retNo)}</span>` : ''}</div></div>
+        <span class="small">${schemeLabel(l.scheme)}</span><span class="small" style="text-align:center">${r.qty}</span><span class="num small">${money(r.price, false)}</span><span class="num small">${l.scheme === 'MARGIN' ? `<span style="color:#FF8730">${fmt(r.ivat)} int</span>` : money(r.vat, false)}</span><span class="num small" style="font-weight:600">${money(r.gross, false)}</span></div>`).join('')}</div>
+    </div>
+
+    ${conLines.length || pus.length ? `<div class="card mt16" data-test="settlement">
+      <div class="between" style="margin-bottom:14px"><span class="ov">Consignment settlement</span><span class="tiny muted">Derived from the invoice lines and the consignor purchases</span></div>
+      <div class="tbl"><div class="tr th" style="grid-template-columns:minmax(0,2.4fr) minmax(0,1.3fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)"><span>Consignment</span><span>Model</span><span style="text-align:right">Sale price</span><span style="text-align:right">To consignor</span><span style="text-align:right">LATAIF share</span><span style="text-align:right">LATAIF profit</span></div>
+      ${conLines.map(({ l, r }) => `<div class="tr" style="grid-template-columns:minmax(0,2.4fr) minmax(0,1.3fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr) minmax(0,1fr)"><div><div class="small" style="font-weight:500">${esc(l.desc)}</div><div class="tiny muted">${esc(r.c.no)} · ${esc(kon(r.c.k).name)}</div></div><span class="small">${esc(modelLabel(r.c))}${r.e.below ? ' <span class="chip bad">below floor</span>' : ''}</span><span class="num small">${money(r.gross, false)}</span><span class="num small" style="color:var(--oks)">${money(r.e.payout, false)}</span><span class="num small">${money(r.share, false)}</span><span class="num small" style="color:${r.profit < 0 ? 'var(--bad)' : 'var(--ok)'}">${money(r.profit, false)}</span></div>`).join('') || '<div class="tr small muted" style="grid-template-columns:1fr">No consignment items on this invoice any more.</div>'}</div>
+      <div class="grid mt16" style="grid-template-columns:repeat(auto-fill,minmax(320px,1fr));gap:12px">
+      ${pus.map((u) => `<div style="border:1px solid var(--b1);border-radius:12px;padding:14px 16px" data-test="pur-${u.no}">
+        <div class="between"><div><div style="font-weight:600">${esc(kon(u.k).name)}</div><div class="tiny muted mono">${u.no} · ${dmy(u.date)} · ${u.vat === 'ZERO' ? 'No VAT' : 'VAT 10 %'}</div></div>${u.claim > 0 ? '<span class="chip bad">Overpaid</span>' : u.paid >= u.amount - 0.0005 && u.amount > 0 ? '<span class="chip ok">Paid out</span>' : u.paid > 0 ? '<span class="chip part">Partly paid</span>' : '<span class="chip grey">Open</span>'}</div>
+        <div class="mt12" style="display:grid;grid-template-columns:1fr auto;gap:4px 12px;font-size:13px">
+          <span class="muted">Agreed amount for consignor</span><span class="num">${money(u.amount)}</span>
+          <span class="muted">Already paid out</span><span class="num" style="color:var(--oks)">${money(u.paid)}</span>
+          <span class="muted">Open liability</span><span class="num" style="font-weight:600">${money(purOpen(u))}</span>
+          ${u.claim > 0 ? `<span style="color:var(--bad)">${u.claimMode === 'offset' ? 'Consignor credit (offset later)' : 'Repayment claim (consignor owes)'}</span><span class="num" style="color:var(--bad)">${money(u.claim)}</span>` : ''}
+        </div>
+        <div class="tiny muted mt8">Items: ${purchaseItems(u).map((id) => esc(cons(id).no)).join(', ') || '—'}</div>
+        ${u.payouts.length ? `<div class="tiny muted mt8">${u.payouts.map((p) => `${dmy(p.date)} · ${methodLabel(p.method)} · ${fmt(p.amount)}`).join('<br>')}</div>` : ''}
+        <div class="row mt12"><button class="btn sm" data-a="payoutOpen" data-id="${u.id}" ${purOpen(u) > 0 ? '' : 'disabled'} data-test="payout-${u.no}">Record payout</button></div>
+      </div>`).join('')}
+      </div>
+      ${losses.length ? `<div class="mt16"><span class="ov" style="margin-bottom:8px">Consignor Loss expenses ${dchip('E9')}</span><div class="tbl">${losses.map((x) => `<div class="tr" style="grid-template-columns:minmax(0,1.1fr) minmax(0,2.2fr) minmax(0,1fr) minmax(0,.8fr) 130px" data-test="loss-${x.no}"><span class="mono small">${x.no}</span><span class="small">${esc(cons(x.cs).name)} · ${esc(kon(cons(x.cs).k).name)}</span><span class="num small">${money(x.amount, false)}</span><span>${x.paid ? '<span class="chip ok">Paid</span>' : '<span class="chip grey">Unpaid</span>'}</span><span>${x.paid ? '' : `<button class="btn sm" data-a="payLoss" data-id="${x.id}">Pay expense</button>`}</span></div>`).join('')}</div></div>` : ''}
+      <div class="pvnote mt12">Heute steht die Auszahlung an den Einlieferer als Zahlung am Einkauf (Payables), der Consignor Loss als eigene Ausgabe. „Record payout“ und „Pay expense“ simulieren das hier, damit sich die Fälle E2 und E9 bei späteren Korrekturen ausprobieren lassen (Umsetzung P4).</div>
+    </div>` : ''}
+
+    <div class="grid mt16" style="grid-template-columns:1fr 1fr">
+      <div class="card"><span class="ov" style="margin-bottom:12px">Margin analysis</span>
+        <div style="display:grid;grid-template-columns:1fr auto;gap:6px 12px;font-size:13px">
+          <span class="muted">Revenue (net)</span><span class="num">${money(t.net)}</span>
+          <span class="muted">Own stock cost</span><span class="num">${money(-t.ownCost)}</span>
+          <span class="muted">To consignors</span><span class="num">${money(-t.payouts)}</span>
+          <span class="muted">Margin VAT (internal)</span><span class="num">${money(-t.ivat)}</span>
+          <span style="font-weight:600;border-top:1px solid var(--b1);padding-top:6px">LATAIF profit</span><span class="num" style="font-weight:600;border-top:1px solid var(--b1);padding-top:6px;color:${t.profit < 0 ? 'var(--bad)' : 'var(--ok)'}">${money(t.profit)}</span>
+        </div></div>
+      <div class="card"><span class="ov" style="margin-bottom:12px">Payments</span>
+        ${d.payments.map((y) => `<div class="between small" style="padding:6px 0;border-bottom:1px solid var(--b1)"><span>${dmy(y.date)} · ${methodLabel(y.method)}</span>${money(y.amount)}</div>`).join('') || '<span class="small muted">No payments yet.</span>'}
+        ${(d.refunds || []).map((y) => `<div class="between small" style="padding:6px 0;border-bottom:1px solid var(--b1)"><span>${dmy(y.date)} · Refund paid out · ${methodLabel(y.method)}</span>${money(-y.amount)}</div>`).join('')}
+        ${owed > 0 ? `<div class="warn-box mt12" data-test="refund-owed">Refund owed to ${esc(c.name)}: <b>${fmt(owed)} BHD</b> — open until it is paid out (“Record refund”). Cash and bank have not moved yet. ${dchip('Überzahlung')}</div>` : ''}
+        ${d.overMode === 'credit' && t.over > 0 ? `<div class="info-box mt12" data-test="credit-kept">${fmt(t.over)} BHD stay with ${esc(c.name)} as customer credit. ${dchip('Überzahlung')}</div>` : ''}        ${d.notes ? `<div class="mt12 small"><span class="ov">Notes</span>${esc(d.notes)}</div>` : ''}
+      </div>
+    </div>
+  </div>`;
+}
+
+function pageConsignments() {
+  const all = S.data.consignments;
+  const bal = S.data.consignors.map((k) => {
+    const us = S.data.purchases.filter((u) => u.k === k.id && u.status !== 'cancelled');
+    const ls = S.data.losses.filter((x) => !x.cancelled && cons(x.cs).k === k.id);
+    return { k, owed: r3(us.reduce((s, u) => s + u.amount, 0)), paid: r3(us.reduce((s, u) => s + u.paid, 0)), open: r3(us.reduce((s, u) => s + purOpen(u), 0)), claim: r3(us.reduce((s, u) => s + u.claim, 0)), loss: r3(ls.reduce((s, x) => s + x.amount, 0)), lossPaid: r3(ls.filter((x) => x.paid).reduce((s, x) => s + x.amount, 0)), active: all.filter((c) => c.k === k.id && c.status === 'active').length };
+  });
+  return `${pvbar()}<div class="page">
+    <div style="margin-bottom:24px"><div class="h1">Consignment</div><div class="sub">Items held for consignors and what LATAIF owes them after a sale.</div></div>
+    <div class="grid" style="grid-template-columns:repeat(3,minmax(0,1fr))">${bal.map((b) => `<div class="card" style="padding:16px 18px"><div class="between"><b>${esc(b.k.name)}</b><span class="tiny muted">${b.active} active</span></div>
+      <div class="mt12" style="display:grid;grid-template-columns:1fr auto;gap:4px 10px;font-size:13px"><span class="muted">Agreed amounts (sold)</span><span class="num">${money(b.owed)}</span><span class="muted">Paid out</span><span class="num" style="color:var(--oks)">${money(b.paid)}</span><span class="muted">Open liability</span><span class="num" style="font-weight:600">${money(b.open)}</span>${b.claim ? `<span style="color:var(--bad)">Overpaid (claim / credit)</span><span class="num" style="color:var(--bad)">${money(b.claim)}</span>` : ''}${b.loss ? `<span class="muted">Consignor Loss (paid ${fmt(b.lossPaid)})</span><span class="num">${money(b.loss)}</span>` : ''}</div></div>`).join('')}</div>
+    <div class="tbl mt16"><div class="tr th" style="grid-template-columns:120px minmax(0,2fr) minmax(0,1fr) minmax(0,1.3fr) minmax(0,.9fr) minmax(0,1.2fr) minmax(0,1fr)"><span>No.</span><span>Item</span><span>Consignor</span><span>Model</span><span style="text-align:right">Asking</span><span>Status</span><span style="text-align:right">To consignor</span></div>
+    ${all.map((c) => { const i = c.inv ? inv(c.inv) : null; const l = i ? i.lines.find((x) => x.kind === 'con' && x.ref === c.id) : null; const r = l ? calcLine(l) : null;
+      return `<div class="tr ${i ? 'click' : ''}" ${i ? `data-a="open" data-id="${i.id}"` : ''} style="grid-template-columns:120px minmax(0,2fr) minmax(0,1fr) minmax(0,1.3fr) minmax(0,.9fr) minmax(0,1.2fr) minmax(0,1fr)"><span class="mono small">${c.no}</span><span class="small">${esc(c.name)}</span><span class="small">${esc(kon(c.k).name)}</span><span class="small">${esc(modelLabel(c))}</span><span class="num small">${money(c.ask, false)}</span><span>${i ? `<span class="chip con">Sold · ${i.no.slice(-6)}</span>` : '<span class="chip ok">Active</span>'}</span><span class="num small">${r ? money(r.e.payout, false) : '—'}</span></div>`; }).join('')}
+    </div></div>`;
+}
+
+// ── Modals ──────────────────────────────────────────────────────────────────
+function modalShell(title, body, foot, width) { return `<div class="backdrop" data-a="closeModalBg"><div class="modal" style="max-width:${width || 560}px" data-stop="1"><div class="mh"><h3>${title}</h3><button class="x" data-a="closeModal">×</button></div><div class="mb">${body}</div>${foot ? `<div class="mf">${foot}</div>` : ''}</div></div>`; }
+
+function modalPicker() {
+  const d = S.draft; const m = S.modal; const q = (m.q || '').toLowerCase(); const f = m.filter || 'all';
+  const own = S.data.products.map((p) => ({ kind: 'own', id: p.id, name: p.name, sku: p.sku, sub: p.cat, price: p.price, avail: availableOwn(p, d), color: p.color, p }))
+    .filter((x) => x.avail > 0);
+  const con = S.data.consignments.filter((c) => consAvailable(c, d)).map((c) => ({ kind: 'con', id: c.id, name: c.name, sku: c.no, sub: kon(c.k).name + ' · ' + modelLabel(c), price: c.ask, avail: 1, color: c.color, c }));
+  let rows = [...own, ...con].filter((x) => f === 'all' || x.kind === f).filter((x) => !q || (x.name + ' ' + x.sku + ' ' + x.sub).toLowerCase().includes(q));
+  const added = m.added || [];
+  return modalShell('Add Item', `
+    <div class="row"><input class="in" data-f="m.q" data-k="pick-q" value="${esc(m.q || '')}" placeholder="Search by name, SKU, consignment no. or consignor…" data-test="pick-search">
+      <div class="seg" style="flex-shrink:0">${[['all', 'All'], ['own', 'Own stock'], ['con', 'Consignment']].map(([k, l]) => `<button data-a="pickFilter" data-v="${k}" class="${f === k ? 'on' : ''}">${l}</button>`).join('')}</div></div>
+    <div class="tbl" style="max-height:52vh;overflow-y:auto">${rows.map((x) => `<div class="tr" style="grid-template-columns:40px minmax(0,1fr) 110px 90px">
+      <div class="thumb" style="background:${x.color}">${x.kind === 'con' ? 'CON' : x.sku.slice(0, 3)}</div>
+      <div style="min-width:0"><div class="small" style="font-weight:500">${esc(x.name)}</div><div class="ln-meta">${x.kind === 'own' ? '<span class="chip own">Own stock</span>' : '<span class="chip con">Consignment</span>'}<span>${esc(x.sku)} · ${esc(x.sub)}</span>${x.kind === 'own' ? `<span>· ${x.avail} in stock</span>` : ''}</div></div>
+      <div class="num small">${money(x.price, false)}</div>
+      <button class="btn sm" data-a="pickAdd" data-kind="${x.kind}" data-id="${x.id}" data-test="pick-${x.sku}" ${x.kind === 'con' && !canEdit() ? 'disabled title="Consignment items on an invoice: Admin and Manager only"' : ''}>${I.plus} Add</button></div>`).join('') || '<div class="tr small muted" style="grid-template-columns:1fr;padding:24px;text-align:center">Nothing available for this search.</div>'}</div>
+    ${added.length ? `<div class="small" style="color:var(--ok)">Added: ${added.map(esc).join(', ')}</div>` : ''}
+    ${!canEdit() ? `<div class="lock-box">Consignment items can only be put on an invoice by Admin or Manager. Sales and Accountant keep the normal invoice rights for own stock. ${dchip('E13')}</div>` : ''}
+    <div class="tiny muted">Sold consignment items and items already on this invoice are not listed. A consignment item removed from this invoice appears here again. One consignment = one piece until P5 ${dchip('E12')}.</div>`,
+    `<button class="btn pri" data-a="closeModal" data-test="pick-done">Done</button>`, 820);
+}
+
+function modalReview() {
+  const d = S.draft; const dv = S.review; const m = S.modal; const dec = m.dec || {};
+  const plans = dv.plans.filter((p) => p.u || p.items.length);
+  const needDec = plans.filter((p) => p.over > 0 && !dec[p.key]);
+  const rowsTot = (lbl, a, b, bold) => `<div class="rv-row" ${bold ? 'style="font-weight:600"' : ''}><span>${lbl}</span><span class="num">${money(a, false)}</span><span class="num">${money(b, false)}</span><span class="delta">${delta(a, b)}</span></div>`;
+  const nothing = !dv.rows.length && !dv.head.length && !dv.gv.length && !dv.newPays.length;
+  // Kundenüberzahlung: Rückzahlung „jetzt ausgezahlt“ nur mit gültigem Tag; sonst bleibt sie ein offener Anspruch.
+  const refundErr = dv.custChoice && m.cust === 'refund' && m.now
+    ? (m.rdate > TODAY ? 'The refund cannot be dated in the future.' : m.rdate < dv.creditDay ? `The refund cannot be dated before ${dmy(dv.creditDay)} (last payment).` : periodLock(m.rdate) ? 'The refund date lies in a closed period.' : '') : '';
+  const custOk = !dv.custChoice || m.cust === 'credit' || (m.cust === 'refund' && !refundErr);
+  const custBox = dv.custChoice ? `<div class="rv-sec" data-test="cust-over"><div class="hd"><span>Customer overpayment ${dchip('Überzahlung')}</span><span>${fmt(dv.tn.over)} BHD</span></div>
+      <div style="padding:10px 14px;display:flex;flex-direction:column;gap:8px">
+        <div class="small">${esc(cust(d.customer).name)} has paid <b>${fmt(dv.tn.paid)} BHD</b>, the new total is <b>${fmt(dv.tn.gross)} BHD</b>. Choose what happens with ${fmt(dv.tn.over)} BHD — one of the two, never both:</div>
+        <label class="row small" style="cursor:pointer"><input type="radio" name="cust-over" data-f="m.cust" value="credit" ${m.cust === 'credit' ? 'checked' : ''} data-test="over-credit"> Keep as <b>customer credit</b> — booked on ${dmy(dv.creditDay)}, usable on later purchases</label>
+        <label class="row small" style="cursor:pointer"><input type="radio" name="cust-over" data-f="m.cust" value="refund" ${m.cust === 'refund' ? 'checked' : ''} data-test="over-refund"> <b>Refund</b> to the customer</label>
+        ${m.cust === 'refund' ? `<div style="margin-left:22px;padding:10px 12px;border:1px solid var(--b1);border-radius:8px;background:var(--alt)">
+          <label class="row small" style="cursor:pointer"><input type="checkbox" data-f="m.now" ${m.now ? 'checked' : ''} data-test="refund-now"> Paid out now (with date and method)</label>
+          ${m.now ? `<div class="grid mt8" style="grid-template-columns:auto 170px;gap:12px;align-items:end"><div><span class="ov" style="margin-bottom:6px">Method</span><div class="seg">${METHODS.map((x) => `<button data-a="mSet" data-f="rmethod" data-v="${x.id}" class="${m.rmethod === x.id ? 'on' : ''}">${x.label}</button>`).join('')}</div></div><div><span class="ov" style="margin-bottom:6px">Paid out on</span><input type="date" class="in" data-f="m.rdate" data-k="m-rdate" value="${m.rdate}" min="${dv.creditDay}" max="${TODAY}" data-test="refund-date"></div></div>
+            <div class="tiny muted mt8">Cash/bank outflow of ${fmt(dv.tn.over)} BHD on ${dmy(m.rdate)} (${methodLabel(m.rmethod)}).</div>${refundErr ? `<div class="err-box mt8">${esc(refundErr)}</div>` : ''}`
+          : `<div class="tiny muted mt8" data-test="refund-claim-note">Stays an <b>open refund owed</b> to the customer until it is paid out (“Record refund” on the invoice). No cash or bank booking before that.</div>`}
+        </div>` : ''}
+      </div></div>` : '';
+  const body = `
+    ${nothing ? '<div class="warn-box">Nothing has changed yet.</div>' : ''}
+    <div class="rv-sec"><div class="hd"><span>Invoice ${dv.o.no}</span><span>${kindChip(invKind(d))}</span></div>
+      <div class="rv-row h"><span></span><span style="text-align:right">Before</span><span style="text-align:right">After</span><span style="text-align:right">Change</span></div>
+      ${rowsTot('Net amount', dv.to.net, dv.tn.net)}${rowsTot('VAT', dv.to.vat, dv.tn.vat)}${rowsTot('Margin VAT (internal)', dv.to.ivat, dv.tn.ivat)}${rowsTot('Invoice total (customer)', dv.to.gross, dv.tn.gross, true)}${rowsTot('LATAIF profit', dv.to.profit, dv.tn.profit, true)}
+    </div>
+    <div class="rv-sec"><div class="hd"><span>What changes</span><span>${dv.rows.length + dv.head.length + dv.gv.length}</span></div>
+      ${[...dv.head.map((h) => `<div class="rv-row" style="grid-template-columns:1fr"><span>${esc(h)}</span></div>`), ...dv.rows.map((r) => `<div class="rv-row" style="grid-template-columns:minmax(0,2.6fr) minmax(0,1fr)"><span><span class="chip ${r.type === 'added' ? 'ok' : r.type === 'removed' ? 'bad' : r.type === 'split' ? 'part' : 'grey'}" style="margin-right:6px">${r.type}</span>${r.l.kind === 'con' ? '<span class="chip con" style="margin-right:6px">Consignment</span>' : '<span class="chip own" style="margin-right:6px">Own</span>'}${esc(r.txt)}</span><span class="delta">${fmt(r.old)} → ${fmt(r.neu)}</span></div>`), ...dv.gv.map((g) => `<div class="rv-row" style="grid-template-columns:1fr"><span>${esc(g)}</span></div>`)].join('') || '<div class="rv-row small muted" style="grid-template-columns:1fr">Only payments are added.</div>'}
+      ${dv.consMoves.map((x) => `<div class="rv-row small" style="grid-template-columns:1fr;color:var(--con)">↳ ${esc(x)}</div>`).join('')}
+    </div>
+    <div class="rv-sec"><div class="hd"><span>Customer payments</span><span>${esc(cust(d.customer).name)}</span></div>
+      <div class="rv-row h"><span></span><span style="text-align:right">Before</span><span style="text-align:right">After</span><span style="text-align:right">Change</span></div>
+      ${rowsTot('Paid', dv.to.paid, dv.tn.paid)}${rowsTot('Remaining', Math.max(0, dv.to.remaining), Math.max(0, dv.tn.remaining))}${rowsTot('Overpaid', dv.to.over, dv.tn.over)}
+    </div>
+    ${custBox}
+    ${plans.length ? `<div class="rv-sec"><div class="hd"><span>Consignor liabilities</span><span>${plans.length}</span></div>
+      <div class="rv-row h" style="grid-template-columns:minmax(0,1.3fr) repeat(4,minmax(0,1fr))"><span></span><span style="text-align:right">Purchase before</span><span style="text-align:right">Purchase after</span><span style="text-align:right">Paid out</span><span style="text-align:right">Open after</span></div>
+      ${plans.map((p) => `<div class="rv-row" style="grid-template-columns:minmax(0,1.3fr) repeat(4,minmax(0,1fr))"><span>${esc(kon(p.k).name)}<div class="tiny muted mono">${p.u ? p.u.no : 'new purchase'}</div></span><span class="num">${money(p.oldAmount, false)}</span><span class="num">${money(p.amount, false)}</span><span class="num" style="color:var(--oks)">${money(p.paid, false)}</span><span class="num" style="font-weight:600">${money(p.open, false)}</span></div>
+        ${p.over > 0 ? `<div style="padding:10px 14px;border-top:1px solid var(--b1);background:rgba(220,38,38,.04)" data-test="over-${p.key}">
+          <div class="small" style="color:var(--bad);font-weight:600">Overpaid by ${fmt(p.over)} BHD — ${p.lossBack ? `the payout of ${fmt(p.paid)} BHD and the paid Consignor Loss of ${fmt(p.lossBack)} BHD stay` : `the payout of ${fmt(p.paid)} BHD stays`} untouched. How is the difference settled? ${dchip('E2')}</div>
+          <label class="row mt8 small" style="cursor:pointer"><input type="radio" name="dec-${p.key}" data-f="r.${p.key}" value="offset" ${dec[p.key] === 'offset' ? 'checked' : ''} data-test="dec-offset-${p.key}"> Offset — keep as consignor credit against the next payout to ${esc(kon(p.k).name)}. A later removal of this item then first reverses that offset in one step, otherwise it stays blocked.</label>
+          <label class="row mt8 small" style="cursor:pointer"><input type="radio" name="dec-${p.key}" data-f="r.${p.key}" value="repay" ${dec[p.key] === 'repay' ? 'checked' : ''}> Claim back — ${esc(kon(p.k).name)} repays; the repayment is recorded later</label>
+        </div>` : ''}`).join('')}
+    </div>` : ''}
+    <div class="rv-sec"><div class="hd"><span>Warnings &amp; effects</span><span>${dv.warn.length}</span></div>
+      ${dv.warn.map((w) => `<div class="rv-row small" style="grid-template-columns:20px 1fr;color:${w.lvl === 'bad' ? 'var(--bad)' : w.lvl === 'warn' ? '#92400E' : 'var(--t2)'}"><span>${w.lvl === 'bad' ? '⛔' : w.lvl === 'warn' ? '⚠' : 'ℹ'}</span><span>${esc(w.t)} ${dchip(w.dec)}</span></div>`).join('')}
+    </div>
+    <div class="small"><span class="ov" style="margin-bottom:4px">Reason for edit ${dchip('Begründung')}</span>${esc(d.reason)}</div>
+    ${needDec.length ? `<div class="warn-box">Choose how the overpayment of ${needDec.map((p) => kon(p.k).name).join(', ')} is settled.</div>` : ''}
+    ${dv.custChoice && !m.cust ? '<div class="warn-box" data-test="cust-choice-missing">Choose what happens with the customer overpayment: credit or refund.</div>' : ''}`;
+  const ok = !nothing && needDec.length === 0 && custOk;
+  return modalShell('Review Changes', body, `<button class="btn ghost" data-a="closeModal">Back to edit</button><button class="btn pri" data-a="confirmEdit" ${ok ? '' : 'disabled'} data-test="confirm-save">${I.save} Confirm &amp; Save</button>`, 860);
+}
+
+function modalPayment() {
+  const m = S.modal; const d = inv(m.id); const t = calcInv({ ...d, payRows: [] });
+  return modalShell('Record Payment', `
+    <div class="small muted">Open on ${d.no}: <b style="color:var(--t1)">${fmt(t.remaining)} BHD</b></div>
+    <div><span class="ov" style="margin-bottom:6px">Payment method</span><div class="seg">${METHODS.map((x) => `<button data-a="mSet" data-f="method" data-v="${x.id}" class="${m.method === x.id ? 'on' : ''}">${x.label}</button>`).join('')}</div></div>
+    <div class="grid" style="grid-template-columns:1fr 1fr"><div><span class="ov" style="margin-bottom:6px">Amount (BHD)</span><input class="in num" data-f="m.amount" data-k="m-amount" value="${esc(m.amount)}" inputmode="decimal"></div><div><span class="ov" style="margin-bottom:6px">Date</span><input type="date" class="in" data-f="m.date" data-k="m-date" value="${m.date}" min="${d.date}" max="${TODAY}"></div></div>
+    ${m.err ? `<div class="err-box">${esc(m.err)}</div>` : ''}`,
+    `<button class="btn ghost" data-a="closeModal">Cancel</button><button class="btn pri" data-a="payConfirm">Confirm Payment</button>`, 460);
+}
+function modalPayout() {
+  const m = S.modal; const u = S.data.purchases.find((x) => x.id === m.id);
+  return modalShell('Record Payout to Consignor', `
+    <div class="small">${esc(kon(u.k).name)} · <span class="mono">${u.no}</span> · open <b>${fmt(purOpen(u))} BHD</b></div>
+    <div><span class="ov" style="margin-bottom:6px">Method</span><div class="seg">${METHODS.filter((x) => x.id !== 'card').map((x) => `<button data-a="mSet" data-f="method" data-v="${x.id}" class="${m.method === x.id ? 'on' : ''}">${x.label}</button>`).join('')}</div></div>
+    <div class="grid" style="grid-template-columns:1fr 1fr"><div><span class="ov" style="margin-bottom:6px">Amount (BHD)</span><input class="in num" data-f="m.amount" data-k="m-amount" value="${esc(m.amount)}" inputmode="decimal" data-test="payout-amount"></div><div><span class="ov" style="margin-bottom:6px">Date</span><input type="date" class="in" data-f="m.date" data-k="m-date" value="${m.date}" max="${TODAY}"></div></div>
+    ${m.err ? `<div class="err-box">${esc(m.err)}</div>` : ''}
+    <div class="tiny muted">In LATAIF this is the payment on the consignor's purchase (Payables).</div>`,
+    `<button class="btn ghost" data-a="closeModal">Cancel</button><button class="btn pri" data-a="payoutConfirm" data-test="payout-confirm">Confirm Payout</button>`, 460);
+}
+function modalReturn() {
+  const m = S.modal; const d = inv(m.id);
+  const left = (l) => num(l.qty) - num(l.returnedQty || 0);
+  const opts = d.lines.filter((l) => l.kind === 'own' && left(l) > 0);
+  const sel = opts.find((l) => l.id === m.line);
+  return modalShell('Return from Customer (RET)', `
+    <div class="small muted">Simplified for the preview: the chosen pieces come back to stock, the refund becomes customer credit. Consignment items go back via the consignment (unchanged).</div>
+    ${opts.map((l) => `<label class="row small" style="cursor:pointer;padding:8px 10px;border:1px solid var(--b1);border-radius:8px"><input type="radio" name="ret" data-f="m.line" value="${l.id}" ${m.line === l.id ? 'checked' : ''}> ${esc(l.desc)} · ${left(l)} of ${l.qty} not returned · ${fmt(l.unit)} BHD each</label>`).join('')}
+    ${sel ? `<div><span class="ov" style="margin-bottom:6px">Pieces to return (max ${left(sel)})</span><input class="in num" style="max-width:120px" data-f="m.qty" data-k="m-qty" value="${esc(m.qty)}" inputmode="numeric" data-test="ret-qty"></div>` : ''}
+    ${m.err ? `<div class="err-box">${esc(m.err)}</div>` : ''}`,
+    `<button class="btn ghost" data-a="closeModal">Cancel</button><button class="btn pri" data-a="returnConfirm" ${m.line ? '' : 'disabled'}>Create Return</button>`, 520);
+}
+// Rückzahlung an den Kunden: erst hier fließt Geld aus Kasse/Bank — bis dahin steht der Betrag als offener Anspruch.
+function modalRefund() {
+  const m = S.modal; const d = inv(m.id); const t = calcInv({ ...d, payRows: [] });
+  return modalShell('Record Refund to Customer', `
+    <div class="small">${esc(cust(d.customer).name)} · <span class="mono">${d.no}</span> · refund owed <b>${fmt(t.over)} BHD</b></div>
+    <div><span class="ov" style="margin-bottom:6px">Method</span><div class="seg">${METHODS.map((x) => `<button data-a="mSet" data-f="method" data-v="${x.id}" class="${m.method === x.id ? 'on' : ''}">${x.label}</button>`).join('')}</div></div>
+    <div class="grid" style="grid-template-columns:1fr 1fr"><div><span class="ov" style="margin-bottom:6px">Amount (BHD)</span><input class="in num" data-f="m.amount" data-k="m-amount" value="${esc(m.amount)}" inputmode="decimal" data-test="refund-amount"></div><div><span class="ov" style="margin-bottom:6px">Paid out on</span><input type="date" class="in" data-f="m.date" data-k="m-date" value="${m.date}" min="${lastMoneyDay(d)}" max="${TODAY}"></div></div>
+    ${m.err ? `<div class="err-box">${esc(m.err)}</div>` : ''}
+    <div class="tiny muted">Cash/bank moves on this date. What is not paid out stays an open refund owed to the customer. ${dchip('Überzahlung')}</div>`,
+    `<button class="btn ghost" data-a="closeModal">Cancel</button><button class="btn pri" data-a="refundConfirm" data-test="refund-confirm">Confirm Refund</button>`, 460);
+}
+function modalHistory() {
+  const d = inv(S.modal.id);
+  return modalShell(`History · ${d.no}`, d.history.slice().reverse().map((h) => `<div style="border:1px solid var(--b1);border-radius:10px;padding:10px 12px"><div class="between small"><b>${esc(h.reason)}</b><span class="muted mono tiny">${h.at} · ${esc(h.who)}</span></div><ul style="margin:6px 0 0 18px;font-size:12.5px;color:var(--t2)">${h.changes.map((c) => `<li>${esc(c)}</li>`).join('')}</ul>${h.booked ? `<div class="tiny muted mt8">${esc(h.booked)}</div>` : ''}</div>`).join(''), `<button class="btn pri" data-a="closeModal">Close</button>`, 620);
+}
+function modalNewClient() {
+  const m = S.modal;
+  return modalShell('New Client', `<div><span class="ov" style="margin-bottom:6px">Full name *</span><input class="in" data-f="m.name" data-k="m-name" value="${esc(m.name || '')}" placeholder="First and last name"></div><div><span class="ov" style="margin-bottom:6px">Phone</span><input class="in" data-f="m.phone" data-k="m-phone" value="${esc(m.phone || '')}" placeholder="+973 …"></div>`,
+    `<button class="btn ghost" data-a="closeModal">Cancel</button><button class="btn pri" data-a="newClientSave" ${String(m.name || '').trim() ? '' : 'disabled'}>Create Client</button>`, 440);
+}
+// Bestätigte Owner-Entscheidungen (Plan docs/ai/audits/mixed-invoice-implementation-plan.md §1). Nichts davon ist hier neu entschieden.
+// Status: 'P1c' = jetzt abnehmen · '✓ …' = schon umgesetzt und gepusht · 'später …' = eigenes Paket mit eigener Abnahme.
+const DECISIONS = [
+  ['Brutto', 'Steuerartwechsel hält den Kundenpreis', 'Wechsel Margin / VAT 10 % / Zero-rated: Der Kundenpreis inkl. VAT bleibt gleich, nur die VAT wird neu gerechnet. Gilt für eigene und Kommissionszeilen, in der Maske und im Haus.', 'P1c'],
+  ['Überzahlung', 'Kundenüberzahlung: Guthaben oder Rückzahlung', 'Liegt die neue Summe unter dem Bezahlten, wählt der Mensch im Review ausdrücklich: <b>Kundenguthaben</b> oder <b>Rückzahlung</b>. Eine Rückzahlung bleibt ein <b>offener Rückzahlungsanspruch</b> des Kunden, bis sie tatsächlich ausgezahlt wird — vorher keine Kasse-/Bankbuchung. Nur „jetzt ausgezahlt“ mit Tag und Weg bucht den Abfluss sofort. Nie Guthaben und Anspruch für denselben Betrag.', 'P1c'],
+  ['Teilretoure', 'Teilretoure: nur der Rest ist korrigierbar', 'Bei einer Teilretoure bleibt nur die <b>nicht retournierte Menge</b> korrigierbar (Preis, Steuerart, Menge, Entfernen). Die retournierte Menge behält ID, Los, Einstand und Preis; ihre Retoure bleibt unverändert. Ein korrigierter Rest wird eine eigene Zeile (Zeilenteilung).', 'P1c'],
+  ['Begründung', 'Begründung und Historie', 'Jede Änderung braucht eine Begründung. Die Historie zeigt Änderungstag, Benutzer, Vorher/Nachher und wie gebucht wurde.', 'P1c'],
+  ['E8', 'Zugemachte VAT-Quartale (mit O2)', 'Eingereichtes oder VAT-bezahltes Quartal: nur <b>Notiz und Mitarbeiter</b> änderbar — auch die Zeilenbezeichnung nicht. Gilt auch für nicht exportierte Rechnungen und für Zahlungstage; keine Umgehung über Korrekturfolgen. Reine Notiz-/Mitarbeiteränderung bucht nichts.', '✓ P1b · Maske P1c'],
+  ['O1', 'Eröffnungsstichtag 15.10.2026', 'Keine rückwirkenden Korrekturbuchungen vor dem Eröffnungsstichtag (OPENING_CUTOFF_DATE). Rechnungen davor: ebenfalls nur Notiz und Mitarbeiter.', '✓ P1b · Maske P1c'],
+  ['E11', 'Buchungsdatum der Korrektur', 'Gegenbuchung jedes Originals auf dessen eigenem Tag, Neubuchung auf dem Rechnungsdatum; der Änderungstag steht in der Historie. Eine reine Notiz-/Mitarbeiteränderung erzeugt keine Hauptbuchbewegung.', '✓ P1b'],
+  ['E4', 'Kundenwechsel (W1)', 'Rückwirkend: Rechnung auf ihr Datum, jede Zahlung und Gutschrift auf ihr eigenes Datum; Geldflüsse bleiben; liegt ein betroffener Tag in einer zugemachten Periode, ist der Wechsel gesperrt. Bei Kommission zusätzlich Käufer ≠ Einlieferer.', '✓ P1b eigene Rechnungen · Kommission P4'],
+  ['E1', 'Rabatt — zurückgestellt', 'Kein Rabattfeld, keine Rabattrechnung, keine Anzeige und kein Druck. Eine Preissenkung ist eine Preiskorrektur: bei percent/cost_split sinkt die Auszahlung mit, bei Agreed + Excess nicht. Eigenes Paket später.', 'zurückgestellt'],
+  ['E10', 'Einkaufs-VAT und Weiterverkauf (Owner 03.11.2026)', 'Auch nach einer VAT-10-%-Einkaufsrechnung bleiben beim Weiterverkauf <b>alle drei Steuerarten manuell wählbar</b>: VAT 10 %, Zero-rated (0 %), Profit Margin — für Eigenware und Kommission. Keine automatische Sperre, keine automatische Umstellung; der Kundenpreis inkl. VAT bleibt beim Wechsel gleich. <b>Die Auswahl bestätigt keine steuerliche Zulässigkeit:</b> Profit Margin und Zero-rated nur, wenn die gesetzlichen Voraussetzungen erfüllt sind; die nötigen Nachweise und die steuerliche Freigabe sind als offene Punkte gekennzeichnet (Buchhalter). Einkaufs-VAT des Einlieferers bis zur ersten Auszahlung änderbar, danach gesperrt; Einkaufs- und Verkaufs-VAT getrennt. Unbekannte Einkaufs-VAT (Altbestand) ist nicht „No VAT“. Margin wird nie automatisch gesetzt. Historische Rechnungen werden nicht automatisch umklassifiziert (O3).', 'später P2 · Kommission P4'],
+  ['E7', 'Provision und VAT 10 %', 'Provision vom Brutto vor VAT, die VAT trägt LATAIF. Macht VAT 10 % das LATAIF-Ergebnis negativ: Warnung und ausdrückliche Bestätigung durch ADMIN/MANAGER. Margin wird getrennt gerechnet.', 'später P3'],
+  ['E13', 'Rechte', 'ADMIN und MANAGER dürfen Mixed-Invoice-Korrekturen samt verbundener Einlieferer-Einkäufe ausführen. Eine gemischte Rechnung mit Kommissionsware legen nur ADMIN/MANAGER an; SALES/ACCOUNTANT behalten die normalen Rechnungsrechte.', 'später P3/P4'],
+  ['E2', 'Einlieferer überzahlt', 'Sinkt der Einlieferer-Betrag unter das Ausgezahlte, bleibt die Auszahlung. Pflichtwahl Rückforderung oder Verrechnung. Rücknahme nach einer Verrechnung nur über eine sichere atomare Rückabwicklung, sonst gesperrt.', 'später P4'],
+  ['E3', 'Rechnungsdatum bei Kommission', 'Datum änderbar. Unbezahlter Einlieferer-Einkauf folgt, (teil)bezahlter behält sein Datum. Kein Rechnungsdatum vor der Einlieferung oder vor dem Datum eines bezahlten Einkaufs.', 'später P4'],
+  ['E5', 'Kommissionszeile entfernen', 'Einzelne Kommissionszeile korrigieren oder entfernen; die übrigen Zeilen bleiben. Fehlerfassung → Artikel zurück auf Active; eine echte Retoure bleibt ein eigener Vorgang. <b>Prüfpunkt P4 (keine Owner-Entscheidung):</b> Entfernen einer Zeile mit bereits bezahltem Consignor Loss. Die bezahlte Ausgabe bleibt als Historie; was der Einlieferer dadurch mehr erhalten hat, als ihm zusteht, ist ein tatsächlicher Anspruch (E2). Heute sperrt der Code Storno/Rückgabe in diesem Fall; P4 prüft, ob und wie das sicher geht.', 'später P4'],
+  ['E6', 'Kommissionszeile hinzufügen', 'Neue Kommissionszeile an den unbezahlten verknüpften Einkauf desselben Einlieferers; ist er (teil)bezahlt, entsteht ein separater Einkauf.', 'später P4'],
+  ['E9', 'Consignor Loss', 'Bezahlte Verlust-Ausgaben bleiben; Mehrbeträge werden eine eigene Ausgabe; eine Minderung wird mit dem Einkauf verrechnet. Eine Forderung (E2) entsteht nur, wenn der Einlieferer insgesamt mehr erhalten hat, als ihm zusteht. Keine Doppelbuchung.', 'später P4'],
+  ['E12', 'Mengen und Teilverkäufe', 'Pflichtteil des Projekts, eigenes Audit und eigenes Preview (P5). Bis dahin: eine Kommission = ein Stück, Menge fest 1.', 'später P5'],
+];
+function modalDecisions() {
+  const f = S.modal.focus;
+  const st = (s) => s === 'P1c' ? '<span class="chip part">P1c · jetzt abnehmen</span>' : s.startsWith('✓') ? `<span class="chip ok">${esc(s)}</span>` : `<span class="chip grey">${esc(s)}</span>`;
+  return modalShell('Bestätigte Owner-Entscheidungen', `<div class="small muted">Gelbe Kürzel im Preview führen hierher. Das Preview zeigt die bestätigte Regel; nichts davon ist hier neu entschieden. <b>P1c</b> = jetzt abnehmen · <b>✓</b> = schon umgesetzt (P1a/P1b gepusht) · <b>später</b> = eigenes Paket mit eigener Abnahme.</div>
+    <ol class="dec-list" style="list-style:none">${DECISIONS.map(([k, t, x, s]) => `<li id="dec-${k}" style="${f === k ? 'background:var(--notes);border:1px dashed var(--noteb);border-radius:8px;padding:8px 10px;margin-left:0' : 'margin-left:0;padding:0 10px'}"><span class="dchip" style="cursor:default">${k}</span> <b>${t}</b> ${st(s)}<br>${x}</li>`).join('')}</ol>
+    <div class="pvnote" data-test="open-points"><b>Offen bzw. gekennzeichnet (keine neue Entscheidung):</b><br>
+      • <b>E10 steuerliche Freigabe:</b> Welche Nachweise Profit Margin und Zero-rated verlangen — auch nach einer VAT-10-%-Einkaufsrechnung — und wer die Freigabe erteilt: offen beim Buchhalter. Das System prüft die Voraussetzungen nicht, es kennzeichnet sie nur („Tax check“ auf der Zeile und im Review).<br>
+      • <b>E5/E9 Prüfpunkt P4:</b> Entfernen einer Kommissionszeile mit bezahltem Consignor Loss — das Preview zeigt den Anspruch nach E2, die Zulässigkeit klärt P4.<br>
+      • <b>Rückzahlung an den Kunden:</b> Welcher vorhandene Auszahlungsweg wiederverwendet wird, prüft P1c zu Beginn (ungeprüft). Das Preview zeigt nur Anspruch und Auszahlung.<br>
+      • Retouren, Stornos und Einkaufskorrekturen buchen weiter am Korrekturtag (nicht Teil von P1b/P1c).<br>
+      • „Record Payment“ und „Create Return“ in zugemachten Perioden: unverändert aus dem bisherigen Preview übernommen, nicht neu entschieden.</div>`, `<button class="btn pri" data-a="closeModal">Close</button>`, 800);
+}
+
+// ── Drawer ──────────────────────────────────────────────────────────────────
+function renderDrawer() {
+  const el = document.getElementById('drawer');
+  if (!S.drawer) { el.innerHTML = `<button class="fab" data-a="drawer" data-test="preview-controls">Preview controls</button>`; return; }
+  el.innerHTML = `<button class="fab" data-a="drawer">Close</button><div class="drawer" data-test="drawer">
+    <div><h4>P1c — jetzt abnehmen</h4><div class="scn mt8">
+      <button data-a="scn" data-v="i41" data-test="scn-tax">1 · INV-41: Steuerart wechseln (Margin ↔ VAT 10 % ↔ Zero) — Kundenpreis bleibt</button>
+      <button data-a="scn" data-v="i40" data-test="scn-over">2 · INV-40 (voll bezahlt): Preis senken → Guthaben oder Rückzahlung</button>
+      <button data-a="scn" data-v="i36" data-test="scn-ret">3 · INV-36: Teilretoure 1 von 3 — nur der Rest ist korrigierbar</button>
+      <button data-a="scn" data-v="i33" data-test="scn-lock">4 · INV-33: zugemachte Periode — nur Notiz und Mitarbeiter</button>
+    </div></div>
+    <div><h4>Später (P3/P4) — nur zur Ansicht</h4><div class="scn mt8">
+      <button data-a="scn" data-v="new">5 · Neue gemischte Rechnung (nur ADMIN/MANAGER)</button>
+      <button data-a="scn" data-v="i38">6 · INV-38: Einlieferer voll ausgezahlt, Preis senken (E2/E9)</button>
+      <button data-a="scn" data-v="cons">7 · Consignment-Abrechnung je Einlieferer</button>
+    </div></div>
+    <div><h4>Rolle</h4><div class="seg mt8">${ROLES.map(([r, lbl]) => `<button data-a="role" data-v="${r}" class="${S.role === r ? 'on' : ''}" data-test="role-${r}">${lbl}</button>`).join('')}</div><div class="tiny muted mt8">ADMIN und MANAGER: Rechnungen ändern, Kommissionsware auf die Rechnung (E13). SALES und ACCOUNTANT: normale Rechnungen mit eigener Ware, kein Edit.</div></div>
+    <div><h4>VAT</h4><div class="toggle mt8"><span>Q3 2026 (Jul–Sep) eingereicht</span><button class="sw ${S.q3Filed ? 'on' : ''}" data-a="q3" data-test="toggle-q3"></button></div><div class="tiny muted mt8">Q3 liegt ganz vor dem Eröffnungsstichtag ${dmy(OPENING_CUTOFF)} — auch „offen“ bleibt INV-33 gesperrt (O1).</div></div>
+    <div class="row"><button class="btn sm" data-a="decisions" data-test="open-decisions">Bestätigte Entscheidungen (${DECISIONS.length})</button><button class="btn sm danger" data-a="reset" data-test="reset">Reset demo</button></div>
+  </div>`;
+}
+
+// ── Rendern ─────────────────────────────────────────────────────────────────
+function render() {
+  renderSide();
+  const p = S.route.page; const main = document.getElementById('main');
+  main.innerHTML = p === 'new' || p === 'edit' ? pageForm() : p === 'detail' ? pageDetail() : p === 'consignments' ? pageConsignments() : pageList();
+  const m = S.modal; const mr = document.getElementById('modal');
+  mr.innerHTML = !m ? '' : m.type === 'picker' ? modalPicker() : m.type === 'review' ? modalReview() : m.type === 'payment' ? modalPayment() : m.type === 'payout' ? modalPayout() : m.type === 'return' ? modalReturn() : m.type === 'refund' ? modalRefund() : m.type === 'history' ? modalHistory() : m.type === 'newClient' ? modalNewClient() : m.type === 'decisions' ? modalDecisions() : '';
+  if (m && m.type === 'decisions' && m.focus && !m.scrolled) { m.scrolled = true; const x = document.getElementById('dec-' + m.focus); if (x) x.scrollIntoView({ block: 'center' }); }
+  renderDrawer();
+  document.getElementById('toast').innerHTML = S.toast ? `<div class="toast" data-test="toast">${esc(S.toast)}</div>` : '';
+}
+function rerender() {
+  const a = document.activeElement; const key = a && a.dataset ? a.dataset.k : null; let s = null, e = null;
+  try { s = a.selectionStart; e = a.selectionEnd; } catch (x) { /* kein Text */ }
+  const scroll = document.getElementById('main').scrollTop;
+  render();
+  document.getElementById('main').scrollTop = scroll;
+  if (key) { const n = document.querySelector(`[data-k="${CSS.escape(key)}"]`); if (n) { n.focus(); try { if (s != null) n.setSelectionRange(s, e); } catch (x) { /* kein Text */ } } }
+}
+function toast(t) { S.toast = t; clearTimeout(toast.h); toast.h = setTimeout(() => { S.toast = ''; rerender(); }, 3200); }
+// Navigation im Speicher; die Adresse folgt nur, wo der Browser es erlaubt (Datei, Server — nicht in jeder Vorschau).
+function go(hash) { applyRoute(hash); try { if (location.hash !== hash) history.pushState(null, '', hash); } catch (e) { /* ohne Adresse */ } }
+function route() { applyRoute(location.hash); }
+function applyRoute(hash) {
+  const h = String(hash || '').replace(/^#\/?/, '');
+  const parts = h.split('/');
+  S.modal = null; S.formErrors = null; S.editDesc = null;
+  if (parts[0] === 'consignments') S.route = { page: 'consignments' };
+  else if (parts[0] === 'invoices' && parts[1] === 'new') { S.route = { page: 'new' }; if (!S.draft || S.draft.mode !== 'new') S.draft = newDraft(); }
+  else if (parts[0] === 'invoices' && parts[1] && parts[2] === 'edit' && inv(parts[1])) { S.route = { page: 'edit', id: parts[1] }; if (!S.draft || S.draft.mode !== 'edit' || S.draft.id !== parts[1]) S.draft = editDraft(parts[1]); }
+  else if (parts[0] === 'invoices' && parts[1] && inv(parts[1])) { S.route = { page: 'detail', id: parts[1] }; }
+  else S.route = { page: 'list' };
+  if (S.route.page !== 'detail') S.lastSaved = null;
+  render(); document.getElementById('main').scrollTop = 0;
+}
+
+// ── Eingaben ────────────────────────────────────────────────────────────────
+function setField(path, val, el) {
+  const [scope, a, b] = path.split('.');
+  const d = S.draft;
+  if (scope === 'd') { d[a] = val; if (a === 'date') for (const y of d.payRows) if (!y.dateTouched && d.mode === 'new') y.date = val; }
+  else if (scope === 'l') {
+    const l = d.lines.find((x) => x.id === a); if (!l) return;
+    if (b === 'price') { l.priceText = val; l.unit = r3(num(val) / Math.max(1, Math.round(num(l.qty) || 1))); }
+    else if (b === 'qty') { const q = val.replace(/[^\d]/g, ''); l.qty = q === '' ? '' : Number(q); delete l.priceText; }
+    else if (b === 'ack') { l.ack = !!val; l.ackLoss = val ? calcLine(l).e.loss : 0; }
+    else if (b === 'vatAck') { l.vatAck = !!val; l.vatAckAt = val ? calcLine(l).profit : 0; }
+    else l[b] = val;
+  }
+  else if (scope === 'p') { const y = d.payRows.find((x) => x.id === a); if (!y) return; if (b === 'amount') y.amount = val.replace(/,/g, '.').replace(/[^\d.]/g, ''); else { y[b] = val; y.dateTouched = true; } }
+  else if (scope === 'm') { S.modal[a] = val; S.modal.err = ''; }
+  else if (scope === 'r') { S.modal.dec = S.modal.dec || {}; S.modal.dec[a] = val; }
+  if (S.formErrors && scope !== 'm' && scope !== 'r') S.formErrors = validate(d).length ? validate(d) : null;
+}
+document.addEventListener('input', (ev) => {
+  const t = ev.target; if (!t.dataset || !t.dataset.f) return;
+  if (t.type === 'checkbox' || t.type === 'radio' || t.tagName === 'SELECT') return;
+  setField(t.dataset.f, t.value, t); rerender();
+});
+document.addEventListener('change', (ev) => {
+  const t = ev.target; if (!t.dataset || !t.dataset.f) return;
+  if (t.type === 'checkbox') setField(t.dataset.f, t.checked, t);
+  else if (t.type === 'radio' || t.tagName === 'SELECT') setField(t.dataset.f, t.value, t);
+  else return;
+  rerender();
+});
+document.addEventListener('focusout', (ev) => { const t = ev.target; if (t.dataset && t.dataset.f && /^l\..+\.price$/.test(t.dataset.f) && S.draft) { const l = S.draft.lines.find((x) => x.id === t.dataset.f.split('.')[1]); if (l) delete l.priceText; } });
+
+// ── Aktionen ────────────────────────────────────────────────────────────────
+const A = {
+  go: (ds) => go(ds.to === 'consignments' ? '#/consignments' : '#/invoices'),
+  open: (ds) => { if (ds.id) go('#/invoices/' + ds.id); else go('#/invoices'); },
+  new: () => { S.draft = newDraft(); go('#/invoices/new'); },
+  edit: (ds) => { if (!canEdit()) return; S.draft = editDraft(ds.id); go('#/invoices/' + ds.id + '/edit'); },
+  picker: () => { S.modal = { type: 'picker', filter: 'all', q: '', added: [] }; },
+  pickFilter: (ds) => { S.modal.filter = ds.v; },
+  pickAdd: (ds) => {
+    const d = S.draft;
+    if (ds.kind === 'own') { const p = prod(ds.id); const ex = d.lines.find((l) => l.kind === 'own' && l.ref === p.id && !num(l.returnedQty) && !lineLocked(d, l)); if (ex) ex.qty = num(ex.qty) + 1; else d.lines.push({ id: nid('N'), kind: 'own', ref: p.id, desc: p.name, qty: 1, unit: p.price, scheme: p.scheme }); S.modal.added.push(p.name); }
+    else {
+      if (!canEdit()) return;
+      const c = cons(ds.id); const nl = { id: nid('N'), kind: 'con', ref: c.id, desc: c.name, qty: 1, unit: c.ask, scheme: 'MARGIN' }; d.lines.push(nl);
+      S.modal.added.push(c.name);
+    }
+    if (S.formErrors) S.formErrors = validate(d).length ? validate(d) : null;
+  },
+  removeLine: (ds) => { S.draft.lines = S.draft.lines.filter((l) => l.id !== ds.id); if (S.formErrors) S.formErrors = validate(S.draft).length ? validate(S.draft) : null; },
+  expand: (ds) => { S.expanded[ds.id] = !S.expanded[ds.id]; },
+  editDesc: (ds) => { S.editDesc = ds.id; setTimeout(() => { const n = document.querySelector(`[data-k="desc-${ds.id}"]`); if (n) { n.focus(); n.select(); } }, 0); },
+  // E10: Die Einkaufs-VAT des Einlieferers stellt die Verkaufssteuer NICHT um — die bleibt eine manuelle Wahl.
+  groupVat: (ds) => { S.draft.groupVat[ds.kid] = ds.v; },
+  payMethod: (ds) => { const y = S.draft.payRows.find((x) => x.id === ds.id); if (y) y.method = ds.v; },
+  addPay: () => { const d = S.draft; const t = calcInv(d); d.payRows.push({ id: 'n' + (++S.data.seq.pay), method: 'cash', amount: t.remaining > 0 ? t.remaining.toFixed(3) : '', date: d.mode === 'new' ? d.date : TODAY }); },
+  rmPay: (ds) => { S.draft.payRows = S.draft.payRows.filter((y) => y.id !== ds.id); },
+  payFull: () => { const d = S.draft; const t = calcInv(d); if (!d.payRows.length) A.addPay(); const others = r3(d.payRows.slice(1).reduce((s, y) => s + num(y.amount), 0)); d.payRows[0].amount = Math.max(0, r3(t.gross - others)).toFixed(3); },
+  payLater: () => { S.draft.payRows = S.draft.payRows.slice(0, 1).map((y) => ({ ...y, amount: '' })); },
+  newClient: () => { S.modal = { type: 'newClient', name: '', phone: '' }; },
+  newClientSave: () => { const m = S.modal; const id = 'c' + (S.data.customers.length + 1) + '_' + (++S.data.seq.line); S.data.customers.push({ id, name: m.name.trim(), phone: (m.phone || '').trim() }); S.draft.customer = id; S.modal = null; persist(); toast('Client created (simulation)'); },
+  saveNew: (ds) => {
+    const d = S.draft; const errs = validate(d); S.formErrors = errs.length ? errs : null;
+    if (errs.length) { setTimeout(() => { const e = document.querySelector('[data-test="form-errors"]'); if (e) e.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, 0); return; }
+    const id = saveNew(d); S.draft = null; S.lastSaved = id; go('#/invoices/' + id);
+    toast(ds.print ? 'Saved (simulation) — printing is not part of the preview' : 'Invoice saved (simulation)');
+  },
+  review: () => {
+    const d = S.draft; const errs = validate(d); S.formErrors = errs.length ? errs : null;
+    if (errs.length) { setTimeout(() => { const e = document.querySelector('[data-test="form-errors"]'); if (e) e.scrollIntoView({ block: 'center', behavior: 'smooth' }); }, 0); return; }
+    S.review = diff(d); S.modal = { type: 'review', dec: {}, cust: '', now: false, rmethod: 'cash', rdate: TODAY };
+  },
+  // Abschließende Speicherprüfung: dieselbe Validierung wie beim Review, gegen den Stand JETZT (z. B. inzwischen eingereichtes Quartal).
+  confirmEdit: () => {
+    const d = S.draft; const errs = validate(d);
+    if (errs.length) { S.modal = null; S.formErrors = errs; toast('Not saved — see the errors on the form'); return; }
+    const dv = diff(d); saveEdit(d, dv, S.modal); const id = d.id; S.draft = null; S.modal = null; S.lastSaved = id; go('#/invoices/' + id); toast('Changes saved (simulation)');
+  },
+  payOpen: (ds) => { const t = calcInv({ ...inv(ds.id), payRows: [] }); S.modal = { type: 'payment', id: ds.id, method: 'cash', amount: t.remaining.toFixed(3), date: TODAY }; },
+  mSet: (ds) => { S.modal[ds.f] = ds.v; },
+  payConfirm: () => { const m = S.modal; const d = inv(m.id); const t = calcInv({ ...d, payRows: [] }); const a = r3(num(m.amount));
+    if (a <= 0) { m.err = 'Enter an amount above 0.'; return; } if (a > t.remaining + 0.0005) { m.err = `More than the open amount (${fmt(t.remaining)}).`; return; } if (m.date < d.date || m.date > TODAY) { m.err = 'The date must lie between the invoice date and today.'; return; }
+    d.payments.push({ id: 'y' + (++S.data.seq.pay), date: m.date, method: m.method, amount: a }); d.history.push({ at: stamp(), who: roleLabel(S.role), reason: 'Payment', changes: [`Payment ${fmt(a)} BHD ${methodLabel(m.method)} (${dmy(m.date)})`] }); S.modal = null; persist(); toast('Payment recorded (simulation)'); },
+  payoutOpen: (ds) => { const u = S.data.purchases.find((x) => x.id === ds.id); S.modal = { type: 'payout', id: ds.id, method: 'bank_transfer', amount: purOpen(u).toFixed(3), date: TODAY }; },
+  payoutConfirm: () => { const m = S.modal; const u = S.data.purchases.find((x) => x.id === m.id); const a = r3(num(m.amount));
+    if (a <= 0) { m.err = 'Enter an amount above 0.'; return; } if (a > purOpen(u) + 0.0005) { m.err = `More than the open amount (${fmt(purOpen(u))}).`; return; } if (m.date > TODAY) { m.err = 'The date cannot be in the future.'; return; }
+    u.paid = r3(u.paid + a); u.payouts.push({ date: m.date, method: m.method, amount: a }); const d = inv(u.inv); d.history.push({ at: stamp(), who: roleLabel(S.role), reason: 'Consignor payout', changes: [`${kon(u.k).name}: ${fmt(a)} BHD paid out on ${u.no}`] }); S.modal = null; persist(); toast('Payout recorded (simulation)'); },
+  returnOpen: (ds) => { S.modal = { type: 'return', id: ds.id, line: '', qty: '1' }; },
+  returnConfirm: () => { const m = S.modal; const d = inv(m.id); const l = d.lines.find((x) => x.id === m.line); if (!l) return;
+    const left = num(l.qty) - num(l.returnedQty || 0); const q = Math.round(num(m.qty));
+    if (q < 1 || q > left) { m.err = `Return between 1 and ${left} piece(s).`; return; }
+    const no = 'RET-2026-' + String(S.data.seq.ret++).padStart(4, '0'); const amt = r3(num(l.unit) * q);
+    l.returnedQty = num(l.returnedQty || 0) + q; l.retNo = l.retNo ? l.retNo + ', ' + no : no; prod(l.ref).stock += q;
+    S.data.returnCredit[d.id] = r3((S.data.returnCredit[d.id] || 0) + amt); d.history.push({ at: stamp(), who: roleLabel(S.role), reason: 'Return ' + no, changes: [`${q} of ${l.qty} ${l.desc} returned · ${fmt(amt)} BHD as customer credit`] }); S.modal = null; persist(); toast(`Return ${no} created (simulation)`); },
+  refundOpen: (ds) => { const t = calcInv({ ...inv(ds.id), payRows: [] }); S.modal = { type: 'refund', id: ds.id, method: 'cash', amount: t.over.toFixed(3), date: TODAY }; },
+  refundConfirm: () => { const m = S.modal; const d = inv(m.id); const t = calcInv({ ...d, payRows: [] }); const a = r3(num(m.amount));
+    if (a <= 0) { m.err = 'Enter an amount above 0.'; return; } if (a > t.over + 0.0005) { m.err = `More than the refund owed (${fmt(t.over)}).`; return; }
+    if (m.date > TODAY || m.date < lastMoneyDay(d)) { m.err = `The date must lie between ${dmy(lastMoneyDay(d))} and today.`; return; }
+    d.refunds = [...(d.refunds || []), { date: m.date, method: m.method, amount: a }]; d.history.push({ at: stamp(), who: roleLabel(S.role), reason: 'Refund to customer', changes: [`Refund ${fmt(a)} BHD ${methodLabel(m.method)} paid out (${dmy(m.date)}) · still owed ${fmt(t.over - a)} BHD`] }); S.modal = null; persist(); toast('Refund recorded (simulation)'); },
+  payLoss: (ds) => { const x = S.data.losses.find((y) => y.id === ds.id); if (!x) return; x.paid = true; inv(x.inv).history.push({ at: stamp(), who: roleLabel(S.role), reason: 'Consignor Loss paid', changes: [`${x.no}: ${fmt(x.amount)} BHD paid (${cons(x.cs).name})`] }); persist(); toast('Expense paid (simulation)'); },
+  history: (ds) => { S.modal = { type: 'history', id: ds.id }; },
+  decisions: (ds) => { S.modal = { type: 'decisions', focus: ds.focus || null }; },
+  closeModal: () => { S.modal = null; },
+  closeModalBg: (ds, el, ev) => { if (ev.target === el) S.modal = null; else return 'skip'; },
+  drawer: () => { S.drawer = !S.drawer; },
+  role: (ds) => { S.role = ds.v; persist(); },
+  q3: () => { S.q3Filed = !S.q3Filed; persist(); if (S.draft && S.draft.mode === 'edit') S.draft = editDraft(S.draft.id); },
+  reset: () => { try { localStorage.removeItem(STORE_KEY); } catch (e) { /* ohne Speicher */ } S.data = seed(); S.role = 'ADMIN'; S.q3Filed = true; S.draft = null; S.expanded = {}; S.drawer = false; go('#/invoices'); toast('Demo data reset'); },
+  scn: (ds) => { S.drawer = false; if (ds.v === 'new') A.new(); else if (ds.v === 'cons') go('#/consignments'); else go('#/invoices/' + ds.v); },
+};
+document.addEventListener('click', (ev) => {
+  const el = ev.target.closest('[data-a]'); if (!el || el.disabled) return;
+  const fn = A[el.dataset.a]; if (!fn) return;
+  const res = fn(el.dataset, el, ev);
+  if (res === 'skip') return;
+  if (!['go', 'open', 'new', 'edit', 'scn', 'reset'].includes(el.dataset.a)) rerender();
+});
+document.addEventListener('keydown', (ev) => { if (ev.key === 'Escape' && S.modal) { S.modal = null; rerender(); } if (ev.key === 'Enter' && ev.target.dataset && ev.target.dataset.k && ev.target.dataset.k.startsWith('desc-')) { S.editDesc = null; rerender(); } });
+window.addEventListener('popstate', route);
+
+load();
+route();
+</script>
+</body>
+</html>

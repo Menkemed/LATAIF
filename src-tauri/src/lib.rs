@@ -114,6 +114,50 @@ fn show_fatal_data_root_error(message: &str) {
     show_fatal_box("LATAIF — data location", message);
 }
 
+/// TEST-ISOLATION (Vorfall 07.11.2026) — NUR im Automations-Build. Eine Test-App darf ihre Daten ausschließlich aus
+/// ihrem eigenen Kontrollverzeichnis oder aus dem System-Temp lesen. Ein eingeschleppter Datenort-Zeiger (z. B. aus
+/// einer Produktionssicherung kopiert) zeigte am 07.11. auf `E:\LATAIF\Data`, und die Test-App migrierte die
+/// Produktionsdatenbank. Diese Prüfung läuft auf dem TATSÄCHLICH aufgelösten Datenort, BEVOR irgendeine Datei
+/// geöffnet, aufgeräumt oder geschrieben wird; jede Abweichung beendet den Start.
+#[cfg(feature = "e2e")]
+fn e2e_assert_isolated_data_root(root: &std::path::Path, control_dir: &std::path::Path) -> Result<(), String> {
+    use std::path::{Path, PathBuf};
+    // Vergleich als normalisierter Text: Kleinbuchstaben, Backslash, ohne `\\?\`-Präfix und ohne Schlussstrich.
+    let norm = |p: &Path| -> String {
+        let s = p.to_string_lossy().replace('/', "\\").to_lowercase();
+        s.trim_start_matches(r"\\?\").trim_end_matches('\\').to_string()
+    };
+    let canon = |p: &Path| -> PathBuf { std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf()) };
+    let mut basen: Vec<PathBuf> = vec![control_dir.to_path_buf(), std::env::temp_dir()];
+    // Das echte System-Temp: Die Läufe biegen TEMP/TMP auf einen Unterordner um, ihre Zielordner liegen aber im
+    // Temp des Testtreibers (z. B. data-root-move).
+    if let Some(local) = std::env::var_os("LOCALAPPDATA") {
+        basen.push(Path::new(&local).join("Temp"));
+    }
+    let mut erlaubt: Vec<String> = Vec::new();
+    for b in &basen {
+        erlaubt.push(norm(b));
+        erlaubt.push(norm(&canon(b)));
+    }
+    let innen = |s: &str| erlaubt.iter().any(|b| !b.is_empty() && (s == b || s.starts_with(&format!("{b}\\"))));
+    let verweigert = |was: &str| Err(format!(
+        "E2E ISOLATION: the automation build refuses the data location {was} — it is neither inside its own test \
+         folder ({}) nor inside the temp directory. Nothing was opened.",
+        control_dir.display()
+    ));
+    // 1) Rein als Text — ein fremder Ort wird dabei nicht einmal berührt.
+    let roh = norm(root);
+    if !innen(&roh) {
+        return verweigert(&root.display().to_string());
+    }
+    // 2) Erst jetzt aufgelöst (Verknüpfung/Junction im Testordner, die nach außen zeigt).
+    let echt = norm(&canon(root));
+    if !innen(&echt) {
+        return verweigert(&echt);
+    }
+    Ok(())
+}
+
 /// INSTANCE-LOCK — die Meldung an eine zweite Kopie, bevor sie sich beendet.
 const ALREADY_RUNNING_MESSAGE: &str = "LATAIF is already running on this computer.\n\n\
 Please use the LATAIF window that is already open (check the taskbar).\n\n\
@@ -3289,6 +3333,16 @@ pub fn run() {
             // In diesem Zustand startet NICHTS: keine Business-DB, kein LAN-Server, kein Mobile-
             // Server, keine Backup-/Restore-/GC-Wege, kein Drain, kein Timer. Nur das Fenster und
             // die zwei Kommandos, die die Weiche braucht.
+            // TEST-ISOLATION — der Zeiger selbst wird geprüft, BEVOR die Auflösung irgendetwas am Ziel anfasst
+            // (sie darf dort eine halbfertige Markierung abschließen). Nur im Automations-Build.
+            #[cfg(feature = "e2e")]
+            if let Ok(Some(loc)) = data_root::read_locator(&locator_dir) {
+                if let Err(msg) = e2e_assert_isolated_data_root(std::path::Path::new(loc.data_root.trim()), &locator_dir) {
+                    eprintln!("[data-root] {msg}");
+                    show_fatal_data_root_error(&msg);
+                    return Err(msg.into());
+                }
+            }
             if matches!(
                 data_root::resolve_or_first_run(&locator_dir),
                 Ok(data_root::Resolution::FirstRunUndecided)
@@ -3321,6 +3375,13 @@ pub fn run() {
                 root.path().display(),
                 root.is_legacy_in_place()
             );
+            // TEST-ISOLATION — im Automations-Build vor JEDEM weiteren Schritt (Aufräumen, Recovery, DB, Medien).
+            #[cfg(feature = "e2e")]
+            if let Err(msg) = e2e_assert_isolated_data_root(root.path(), &locator_dir) {
+                eprintln!("[data-root] {msg}");
+                show_fatal_data_root_error(&msg);
+                return Err(msg.into());
+            }
             let app_dir = root.path().to_path_buf();
             // v0.8.44 — dead copies of the locator / move intent that an earlier move carried into the
             // data root. Narrowly gated (never on a legacy in-place root, never during a move) — see

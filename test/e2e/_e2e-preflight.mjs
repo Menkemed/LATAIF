@@ -26,7 +26,8 @@
 // running — which is luck, not a guarantee.
 
 import { existsSync, readFileSync, statSync, mkdirSync } from 'node:fs';
-import { basename, dirname, join } from 'node:path';
+import { basename, dirname, join, resolve as resolvePath } from 'node:path';
+import os from 'node:os';
 import { execFileSync } from 'node:child_process';
 
 /** The isolated identity every E2E app must run under. */
@@ -93,6 +94,31 @@ export function assertE2eBinary(appPath) {
  * Both are cheap and both have been wrong in this repo before — `runtime-scope-provisioning` shipped
  * without `LATAIF_E2E_SYNC_PORT` at all, so its app bound 3001.
  */
+/**
+ * TEST-ISOLATION (Vorfall 07.11.2026) — ein Datenort-Zeiger (`data-location.json`) im Testordner darf nur in diesen
+ * Testordner selbst oder ins Temp-Verzeichnis zeigen. Am 07.11. lag dort ein aus einer Produktionssicherung kopierter
+ * Zeiger auf `E:\LATAIF\Data`; `preseedInstallation` übernahm ihn ungeprüft, und die Test-App migrierte die
+ * Produktionsdatenbank. Jetzt bricht der Lauf ab, bevor eine App startet. (Die Test-App prüft denselben Ort zur
+ * Laufzeit noch einmal, siehe `e2e_assert_isolated_data_root` in `src-tauri/src/lib.rs`.)
+ */
+export function assertIsolatedLocator(appDataDir) {
+  const locator = join(appDataDir, 'data-location.json');
+  if (!existsSync(locator)) return true;
+  let dataRoot = '';
+  try { dataRoot = String(JSON.parse(readFileSync(locator, 'utf8')).dataRoot ?? ''); } catch {
+    throw new E2eIdentityError(`the data locator in ${appDataDir} is unreadable — isolation cannot be proven`);
+  }
+  const norm = (p) => resolvePath(String(p)).replace(/\//g, '\\').replace(/\\+$/, '').toLowerCase();
+  const innen = (p, basis) => { const a = norm(p), b = norm(basis); return a === b || a.startsWith(b + '\\'); };
+  if (!dataRoot || !(innen(dataRoot, appDataDir) || innen(dataRoot, os.tmpdir()))) {
+    throw new E2eIdentityError(
+      `the data locator in ${appDataDir} points to "${dataRoot}" — outside the test folder and the temp directory. `
+      + 'Never copy data-location.json / .lataif-data-root.json from a production backup into a test folder.',
+    );
+  }
+  return true;
+}
+
 export function assertE2eScope({ appDataDir, port, env }) {
   if (typeof appDataDir === 'string' && appDataDir.length > 0) {
     const tail = appDataDir.replace(/[\\/]+$/, '').split(/[\\/]/).pop();
@@ -100,6 +126,7 @@ export function assertE2eScope({ appDataDir, port, env }) {
       throw new E2eIdentityError(`AppData root "${appDataDir}" is not the isolated ${E2E_IDENT} directory`);
     }
   }
+  if (typeof appDataDir === 'string' && appDataDir.length > 0) assertIsolatedLocator(appDataDir);
   if (port !== undefined && Number(port) === PROD_PORT) {
     throw new E2eIdentityError(`port ${PROD_PORT} is the PRODUCTION sync port and may never be bound by a test`);
   }
