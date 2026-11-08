@@ -84,7 +84,7 @@ Die Kommissionssperre am gewöhnlichen Änderungsweg (`assertConsignmentSaleInvo
 ## 8. Tests
 
 - Node: `test/p1a`, `test/p1b`, `test/p1c`, `test/p2/e10-tax-choice`, `test/p3/mixed-invoice-create`, `test/p4/mixed-invoice-correction`, `test/p5/consignment-quantities` (inkl. Migration auf dem v0.8.98-Schema und Versionswechsel), `test/vat/margin-vat-consistency` (Margin VAT: Zeile = Hauptbuch = NBR = Auswertung, G4), dazu die Kommissions-, Rechnungs-, Einkaufs- und Manifest-Suiten.
-- E2E (zwei echte Test-Apps): `mixed-invoice-p3`, `mixed-invoice-p4`, `consignment-quantities-p5` (inkl. PC2-Leiste bei 1400×900), `consignment-multi-sale-pc2`, `r5f`, `r5f1`, `r6f`, `custom-order-pc2`, `r5b-create-parity`, `consignment-duplicate-create`, `restore-safety`; Handy: `test/preg5/mobile-consignment-page.e2e.mjs` und `pre-g5-mobile-consignment`.
+- E2E (zwei echte Test-Apps): `mixed-invoice-p3`, `mixed-invoice-p4`, `consignment-quantities-p5`, `order-invoice-billing` (Order zeigt Betrag/Zahlstand der Rechnung) (inkl. PC2-Leiste bei 1400×900), `consignment-multi-sale-pc2`, `r5f`, `r5f1`, `r6f`, `custom-order-pc2`, `r5b-create-parity`, `consignment-duplicate-create`, `restore-safety`; Handy: `test/preg5/mobile-consignment-page.e2e.mjs` und `pre-g5-mobile-consignment`.
 - Die Generatoren der P3–P5-Tests lagen während der Entwicklung außerhalb des Repositorys; die erzeugten Dateien sind die Quelle.
 - Testisolation (seit 07.11.2026): `test/e2e-safety/locator-isolation.test.ts` (Testtreiber) und `test/e2e-safety/data-root-isolation.e2e.mjs` (Laufzeitsperre der Test-App).
 - Abnahme: `docs/ai/mixed-invoice-acceptance.md` — die persönliche Sichtabnahme des Owners ist dort für jede Zeile als offen geführt.
