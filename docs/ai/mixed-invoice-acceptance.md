@@ -57,6 +57,7 @@ Bilder (Stand 07.11.2026, Test-App mit Testdaten): `E:\software\lataif\abnahme\m
 | # | Befund | Korrektur | Beleg | Bild | Owner |
 |---|---|---|---|---|---|
 | R1 | „Pick product…" bei schon verkauftem/reserviertem eigenem Artikel im Änderungsmodus | Die Zeile zeigt ihren Artikel („on this invoice"); keine andere Zeile kann ihn wählen | P4 4.1 | p4-b1 | offen |
+| R3 | Order nach „Create Invoice": blieb „Unpaid" trotz bezahlter Rechnung und zeigte nach einer Preisänderung der Rechnung den alten Betrag (Liste/Detail rechneten nur Auftragspreis und offene Anzahlungen) | Abgeleitet, nichts geschrieben: `order-billing.ts` + `orderPaidTotalsFor` (Lesebefehl `page.order_list.get`, auch PC2). Betrag = Rechnungsbrutto (+ Rest einer Teilumwandlung), bezahlt = Rechnungszahlungen inkl. angerechneter Anzahlung + offene Anzahlung, Gutschriften abgezogen; Auftragspreis als Original; ganz berechnet ⇒ „Pay invoice" | `test/custom-order/order-invoice-billing.test.ts` 22/0 | — | offen |
 | R2 | PC2-Leiste „Unresolved saves" verdeckte „Save Invoice" bei 1400×900 | Platz am Seitenende in Höhe der Leiste; „Hide"/„Show"; Vorgänge bleiben bis zur Klärung | P5 H: ganz unten gescrollt liegt „Save Invoice" über der Leiste, echter Mausklick erreicht ihn; nach Neuladen noch da; „Clarify now" leert die Leiste | p5-h1, p5-h2 | offen |
 
 ## 5a. Margin VAT — eine Regel (VAT-CONSISTENCY, G4; Vertrag §2)

@@ -65,7 +65,7 @@ import {
 } from '@/core/orders/order-lifecycle-house';
 import { stageRecordDataUrls, StagingUploadError } from '@/core/bridge/client-staging-upload';
 import { WriteError } from '@/components/shared/WriteError';
-import { orderDetailReadsFor } from '@/core/data/page-reads';
+import { orderDetailReadsFor, orderPaidTotalsFor } from '@/core/data/page-reads';
 import { creditPaidFor } from '@/core/data/domain-reads';
 import { productDisplayName } from '@/core/products/display-name';
 // v0.8.87 — Kartenarten aus der EINEN Quelle (Normal / Amex / Debit).
@@ -178,6 +178,8 @@ export function OrderDetail() {
   // Slice B — Credit-Einloesungen je Expense gebuendelt (EINE GROUP-BY-Query, kein N+1). Der A/P-Chip
   // pro Kostenzeile rechnet settled = cash+credit, sonst zeigt eine credit-beglichene Zeile "Pay".
   const guthaben = useSharedRead('expenses.credit_paid.get', {}, creditPaidFor, { byExpense: {} }, [expenses]);
+  // ORDER ↔ INVOICE (v0.8.99) — derselbe Lesebefehl wie die Auftragsliste: nach der Umwandlung Betrag und Zahlstand aus der Rechnung.
+  const orderPaid = useSharedRead('page.order_list.get', {}, orderPaidTotalsFor, { totals: [] }, [id, invoices, payments]);
   const expenseCreditPaid = useMemo(() => new Map(Object.entries(guthaben.byExpense)), [guthaben]);
   // M-08 — angezeigter offener Saldo: konvertierte Order-Payments (Geld zur Invoice
   // gewandert) ausschliessen. totalPaid (roh) bleibt fuer Flow-Logik (Convert/Delete/Cancel).
@@ -295,6 +297,11 @@ export function OrderDetail() {
   const isCompleted = order.status === 'completed';
   const remaining = (order.agreedPrice || 0) - totalPaidActive;
   const fullyPaid = (order.agreedPrice || 0) > 0 && totalPaidActive >= (order.agreedPrice || 0);
+  // ORDER ↔ INVOICE — Anzeige der Preisübersicht (die Abläufe Convert/Delete/Cancel rechnen weiter mit den Anzahlungen).
+  const billing = (orderPaid.billing ?? []).find((b) => b.orderId === order.id);
+  const shownPaid = billing ? billing.paid : totalPaidActive;
+  const shownRemaining = billing ? billing.remaining : Math.max(0, remaining);
+  const shownPaidUp = billing ? billing.status === 'PAID' : fullyPaid;
 
   async function handleAddPayment() {
     if (!id || !order) return;
@@ -929,20 +936,41 @@ export function OrderDetail() {
 
             {/* Pricing Summary */}
             <div style={{ marginTop: 28, borderTop: '1px solid #E5E9EE', paddingTop: 20 }}>
-              <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
-                <span className="text-overline">AGREED PRICE</span>
-                <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}><Bhd v={order.agreedPrice}/> BHD</span>
-              </div>
+              {billing ? (
+                <>
+                  <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
+                    <span className="text-overline">INVOICE TOTAL</span>
+                    <span className="font-display" data-order-invoice-total style={{ fontSize: 26, color: '#0F0F10' }}><Bhd v={billing.total}/> BHD</span>
+                  </div>
+                  <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
+                    <span className="text-overline">AGREED PRICE (ORIGINAL)</span>
+                    <span className="font-mono" data-order-agreed style={{ fontSize: 14, color: '#6B7280' }}><Bhd v={order.agreedPrice}/> BHD</span>
+                  </div>
+                </>
+              ) : (
+                <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
+                  <span className="text-overline">AGREED PRICE</span>
+                  <span className="font-display" style={{ fontSize: 26, color: '#0F0F10' }}><Bhd v={order.agreedPrice}/> BHD</span>
+                </div>
+              )}
               <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                 <span className="text-overline">TOTAL PAID</span>
-                <span className="font-display" style={{ fontSize: 20, color: fullyPaid ? '#7EAA6E' : '#AA956E' }}>
-                  <Bhd v={totalPaidActive}/> BHD
+                <span className="font-display" data-order-paid style={{ fontSize: 20, color: shownPaidUp ? '#7EAA6E' : '#AA956E' }}>
+                  <Bhd v={shownPaid}/> BHD
                 </span>
               </div>
               <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
                 <span className="text-overline">REMAINING</span>
-                <span className="font-mono" style={{ fontSize: 16, color: remaining <= 0 ? '#7EAA6E' : '#4B5563' }}><Bhd v={Math.max(0, remaining)}/> BHD</span>
+                <span className="font-mono" data-order-remaining style={{ fontSize: 16, color: shownRemaining <= 0.005 ? '#7EAA6E' : '#4B5563' }}><Bhd v={shownRemaining}/> BHD</span>
               </div>
+              {billing && (
+                <div className="flex justify-between items-baseline" style={{ marginBottom: 10 }}>
+                  <span className="text-overline">PAYMENT</span>
+                  <span data-order-pay-status style={{ fontSize: 12, color: shownPaidUp ? '#16A34A' : '#4B5563' }}>
+                    {billing.status === 'PAID' ? 'Paid' : billing.status === 'PARTIALLY_PAID' ? 'Partially Paid' : 'Unpaid'} · on invoice {billing.invoices.map((i) => i.invoiceNumber).join(', ')}
+                  </span>
+                </div>
+              )}
             </div>
 
             {/* Status Advance */}
@@ -1639,9 +1667,18 @@ export function OrderDetail() {
             <Card>
               <div className="flex items-center justify-between" style={{ marginBottom: 16 }}>
                 <span className="text-overline">PAYMENTS ({payments.length})</span>
-                <Button variant="secondary" onClick={() => setShowPayment(true)}>
-                  <Plus size={14} /> Add Payment
-                </Button>
+                {/* ORDER ↔ INVOICE — ganz berechnet: gezahlt wird auf der Rechnung (keine neue Anzahlung, nichts doppelt). */}
+                {billing?.fullyInvoiced ? (
+                  billing.payInvoiceId ? (
+                    <Button variant="secondary" data-order-pay-invoice onClick={() => navigate(`/invoices/${billing.payInvoiceId}`)}>
+                      Pay on invoice
+                    </Button>
+                  ) : null
+                ) : (
+                  <Button variant="secondary" onClick={() => setShowPayment(true)}>
+                    <Plus size={14} /> Add Payment
+                  </Button>
+                )}
               </div>
               {payments.length === 0 ? (
                 <p style={{ fontSize: 13, color: '#6B7280', padding: '12px 0' }}>No payments recorded yet.</p>

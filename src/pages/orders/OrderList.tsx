@@ -106,6 +106,8 @@ export function OrderList() {
     for (const t of paidTotals.totals) m.set(t.orderId, t.paid);
     return m;
   }, [paidTotals]);
+  // ORDER ↔ INVOICE (v0.8.99) — nach der Umwandlung ist die Rechnung maßgeblich (Betrag, Zahlstand); `order-billing.ts`.
+  const billingByOrder = useMemo(() => new Map((paidTotals.billing ?? []).map((b) => [b.orderId, b])), [paidTotals]);
 
   // Pre-fill from URL — forward customer to /orders/new
   useEffect(() => {
@@ -222,12 +224,14 @@ export function OrderList() {
 
       {filtered.map(order => {
         const cust = custMap.get(order.customerId);
-        const total = order.agreedPrice || 0;
+        const billing = billingByOrder.get(order.id);
+        const total = billing ? billing.total : (order.agreedPrice || 0);
         // Single source of truth: SUM(order_payments). Fallback auf deposit_amount falls
         // reconcile-cycle noch nicht durchgelaufen ist (z.B. unmittelbar nach createOrder).
-        const paid = paidByOrder.get(order.id) ?? (order.depositAmount || 0);
-        const remaining = Math.max(0, total - paid);
-        const paymentStatus = deriveOrderPaymentStatus(total, paid);
+        // ORDER ↔ INVOICE — mit Rechnung: Rechnungszahlungen (inkl. angerechneter Anzahlung) + noch offene Anzahlungen.
+        const paid = billing ? billing.paid : (paidByOrder.get(order.id) ?? (order.depositAmount || 0));
+        const remaining = billing ? billing.remaining : Math.max(0, total - paid);
+        const paymentStatus = billing ? billing.status : deriveOrderPaymentStatus(total, paid);
         const orderStatus = order.status as OrderStatus;
         const payStyle = PAYMENT_STATUS_STYLE[paymentStatus];
         const ordStyle = ORDER_STATUS_STYLE[orderStatus] || ORDER_STATUS_STYLE.pending;
@@ -291,8 +295,11 @@ export function OrderList() {
             </span>
 
             {/* Total */}
-            <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }}>
+            <span className="font-mono" style={{ fontSize: 14, color: '#0F0F10' }} data-order-total={order.id}>
               {total > 0 ? <Bhd v={total}/> : '—'}
+              {billing && Math.abs(billing.total - billing.originalPrice) > 0.0005 && (
+                <span style={{ display: 'block', fontSize: 10, color: '#9CA3AF' }}>agreed <Bhd v={billing.originalPrice}/></span>
+              )}
             </span>
 
             {/* Paid */}
@@ -307,15 +314,25 @@ export function OrderList() {
 
             {/* Payment Status + Pay Button */}
             <div className="flex items-center gap-2" style={{ minWidth: 0 }}>
-              <span style={{
+              <span data-order-pay-status={order.id} style={{
                 padding: '3px 10px', borderRadius: 999, fontSize: 11, fontWeight: 500,
                 color: payStyle.fg, background: payStyle.bg,
                 border: `1px solid ${payStyle.fg}33`, whiteSpace: 'nowrap',
               }}>
                 {PAYMENT_STATUS_LABELS[paymentStatus]}
               </span>
-              {isOpenPayment && total > 0 && (
-                <button data-pay-order={order.id} onClick={(e) => { e.stopPropagation(); w.clear(); setPayOrderId(order.id); setPayAmount(remaining); }}
+              {/* ORDER ↔ INVOICE — ganz berechnet: gezahlt wird auf der Rechnung (keine neue Order-Anzahlung, nichts doppelt). */}
+              {isOpenPayment && total > 0 && billing?.fullyInvoiced && billing.payInvoiceId && (
+                <button data-pay-order={order.id} onClick={(e) => { e.stopPropagation(); navigate(`/invoices/${billing.payInvoiceId}`); }}
+                  className="cursor-pointer" style={{
+                    padding: '3px 8px', fontSize: 10, border: '1px solid #16A34A',
+                    color: '#16A34A', borderRadius: 4, background: 'none',
+                  }}>Pay invoice</button>
+              )}
+              {isOpenPayment && total > 0 && !billing?.fullyInvoiced && (
+                // Teilweise berechnet: die Anzahlung gilt nur noch dem nicht berechneten Rest (die Rechnung bezahlt man dort).
+                <button data-pay-order={order.id} onClick={(e) => { e.stopPropagation(); w.clear(); setPayOrderId(order.id);
+                  setPayAmount(billing ? Math.max(0, Math.round((billing.uninvoiced - (paidByOrder.get(order.id) ?? 0)) * 1000) / 1000) : remaining); }}
                   className="cursor-pointer" style={{
                     padding: '3px 8px', fontSize: 10, border: '1px solid #16A34A',
                     color: '#16A34A', borderRadius: 4, background: 'none',

@@ -17,6 +17,7 @@
 //      nicht „verboten", sondern schlicht leer.
 // ════════════════════════════════════════════════════════════════════════════
 import { openDepositSql } from '@/core/orders/order-deposit-sql';
+import { orderBillingOf, orderLineGross, type OrderBilling, type OrderInvoiceFigure } from '@/core/orders/order-billing';
 import { inboxGalleryMediaIds } from '@/core/purchases/inbox-media';
 import { query } from '@/core/db/helpers';
 import type { BusinessReadContext } from '@/core/data/read-context';
@@ -101,7 +102,10 @@ export function invoiceListExtrasFor(ctx: BusinessReadContext): InvoiceListExtra
 }
 
 // ── Auftragsliste: die Summe der noch nicht umgewandelten Anzahlungen ─────
-export interface OrderPaidTotals { totals: Array<{ orderId: string; paid: number }> }
+// ORDER ↔ INVOICE (v0.8.99) — dazu `billing`: für jede Order mit aktiver Rechnung der aus der Rechnung abgeleitete Stand
+// (Betrag, bezahlt, offen, Status; `order-billing.ts`). Nur gelesen, nichts gespeichert — Liste, Detail und PC2 (derselbe
+// Lesebefehl `page.order_list.get`) zeigen denselben Stand, auch nach einem Neustart.
+export interface OrderPaidTotals { totals: Array<{ orderId: string; paid: number }>; billing?: OrderBilling[] }
 
 export function orderPaidTotalsFor(ctx: BusinessReadContext): OrderPaidTotals {
   const rows = query(
@@ -113,7 +117,56 @@ export function orderPaidTotalsFor(ctx: BusinessReadContext): OrderPaidTotals {
      HAVING t > 0.0005`,
     [ctx.branchId],
   );
-  return { totals: rows.map((r) => ({ orderId: s(r.order_id), paid: n(r.t) })) };
+  const totals = rows.map((r) => ({ orderId: s(r.order_id), paid: n(r.t) }));
+  return { totals, billing: orderBillingRows(ctx.branchId, new Map(totals.map((t) => [t.orderId, t.paid]))) };
+}
+
+/** Der abgeleitete Stand jeder Order mit mindestens einer aktiven (nicht stornierten) Rechnung. */
+function orderBillingRows(branchId: string, offeneAnzahlung: ReadonlyMap<string, number>): OrderBilling[] {
+  const links = query(
+    `SELECT DISTINCT o.id AS order_id, o.agreed_price, i.id AS invoice_id, i.invoice_number, i.status, i.gross_amount, i.paid_amount
+       FROM orders o
+       JOIN invoices i ON i.branch_id = o.branch_id AND i.status NOT IN ('CANCELLED', 'DRAFT')
+        AND (i.id = o.invoice_id OR i.id IN (SELECT ol.invoice_id FROM order_lines ol WHERE ol.order_id = o.id AND ol.invoice_id IS NOT NULL))
+      WHERE o.branch_id = ?
+      ORDER BY o.id, i.created_at, i.id`,
+    [branchId],
+  );
+  if (links.length === 0) return [];
+  const gutschrift = new Map(query(
+    `SELECT cn.invoice_id, COALESCE(SUM(cn.receivable_cancel_amount), 0) AS c FROM credit_notes cn
+       JOIN invoices i ON i.id = cn.invoice_id WHERE i.branch_id = ? AND cn.status != 'CANCELLED' GROUP BY cn.invoice_id`,
+    [branchId],
+  ).map((r) => [s(r.invoice_id), n(r.c)]));
+  const jeOrder = new Map<string, { agreed: number; invoices: OrderInvoiceFigure[] }>();
+  for (const l of links) {
+    const id = s(l.order_id);
+    const e = jeOrder.get(id) ?? { agreed: n(l.agreed_price), invoices: [] };
+    e.invoices.push({ invoiceId: s(l.invoice_id), invoiceNumber: s(l.invoice_number), status: s(l.status),
+      gross: n(l.gross_amount), paid: n(l.paid_amount), creditCancel: gutschrift.get(s(l.invoice_id)) ?? 0 });
+    jeOrder.set(id, e);
+  }
+  // Kundenzeilen dieser Orders: verknüpft je Zeile? und der Wert der noch nicht berechneten (Teilumwandlung).
+  const ids = [...jeOrder.keys()];
+  const zeilen = query(
+    `SELECT order_id, unit_price, quantity, tax_scheme, material_kind, invoice_id FROM order_lines
+      WHERE order_id IN (${ids.map(() => '?').join(', ')}) AND COALESCE(is_customer_facing, 1) = 1 AND status <> 'CANCELLED'`,
+    ids,
+  );
+  const rest = new Map<string, { linked: boolean; gross: number }>();
+  for (const z of zeilen) {
+    const id = s(z.order_id);
+    const e = rest.get(id) ?? { linked: false, gross: 0 };
+    if (z.invoice_id) e.linked = true;
+    else e.gross += orderLineGross({ unitPrice: n(z.unit_price), quantity: n(z.quantity), taxScheme: z.tax_scheme as string | null, materialKind: z.material_kind as string | null });
+    rest.set(id, e);
+  }
+  return ids.map((id) => {
+    const e = jeOrder.get(id)!;
+    const r = rest.get(id) ?? { linked: false, gross: 0 };
+    return orderBillingOf({ orderId: id, agreedPrice: e.agreed, openDeposits: offeneAnzahlung.get(id) ?? 0, invoices: e.invoices,
+      uninvoicedGross: r.gross, lineLinked: r.linked });
+  });
 }
 
 // ── Gold-Modal: der Ladenbestand je Karat ─────────────────────────────────

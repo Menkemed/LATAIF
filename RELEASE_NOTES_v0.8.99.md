@@ -20,6 +20,7 @@ One invoice can now carry own stock and consignment items together, invoices wit
   - **Purchase without deductible VAT:** the price actually paid.
   - Invoice, ledger, NBR export, VAT overview and reports now show the same margin VAT for every line. Existing invoices are not changed.
 - **Fixes:**
+  - **Orders after Create Invoice:** the order now shows the amount and payment status of its invoice (Unpaid, Partially Paid, Paid), in the list and on the order page, also on the second computer. A changed invoice price appears on the order; the agreed price stays visible as the original value. Deposits already applied to the invoice are counted once. A fully invoiced order is paid on its invoice (**Pay invoice**), not with a new order deposit.
   - **Finance → Total VAT** counted the margin VAT twice.
   - **Edit invoice:** own items that are already sold show their name instead of "Pick product…".
   - **Second computer:** the **Unresolved saves** bar no longer covers buttons and can be collapsed. Open entries stay until they are clarified.
