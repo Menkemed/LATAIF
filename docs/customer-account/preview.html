@@ -1,0 +1,579 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Client Account — Preview</title>
+<style>
+  :root { --ink:#0F0F10; --grey:#6B7280; --line:#E5E9EE; --soft:#F7F8FA; --gold:#AA956E; --green:#16A34A; --red:#DC2626; --amber:#B45309; --blue:#1D4ED8; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font-family: -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; color: var(--ink); background: #fff; }
+  .mono { font-family: ui-monospace, "SF Mono", Consolas, monospace; }
+  .app { display: grid; grid-template-columns: 240px minmax(0, 1fr); min-height: 100vh; }
+  aside { border-right: 1px solid var(--line); padding: 18px 12px; background: #fff; }
+  aside h1 { font-size: 18px; letter-spacing: 4px; margin: 0 0 18px 6px; }
+  .nav { display: block; width: 100%; text-align: left; padding: 9px 12px; border: 0; background: none; border-radius: 8px; font-size: 14px; color: var(--ink); cursor: pointer; margin-bottom: 2px; }
+  .nav.on { background: #F1F3F6; font-weight: 600; }
+  .nav small { display: block; color: var(--grey); font-weight: 400; font-size: 11px; }
+  .tour { margin-top: 22px; padding: 12px; background: var(--soft); border-radius: 10px; font-size: 12px; line-height: 1.5; }
+  .tour ol { margin: 6px 0 0; padding-left: 18px; }
+  main { padding: 28px 36px; max-width: 1180px; }
+  .banner { background: #FFF7E6; border: 1px solid #F3D9A4; color: #7A5B1E; border-radius: 10px; padding: 10px 14px; font-size: 13px; margin-bottom: 20px; }
+  .card { border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; margin-bottom: 18px; background: #fff; }
+  .overline { font-size: 11px; letter-spacing: 1.2px; color: var(--grey); text-transform: uppercase; }
+  .row { display: flex; justify-content: space-between; align-items: baseline; padding: 5px 0; gap: 12px; }
+  .big { font-size: 26px; }
+  .huge { font-size: 34px; font-weight: 600; }
+  .kpis { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) minmax(0, 1.2fr); gap: 16px; }
+  .two { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 18px; }
+  .pill { display: inline-block; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; border: 1px solid; white-space: nowrap; }
+  .pill.open { color: var(--amber); background: #FFF7ED; border-color: #F5C78E; }
+  .pill.part { color: var(--blue); background: #EFF6FF; border-color: #BFDBFE; }
+  .pill.paid { color: var(--green); background: #F0FDF4; border-color: #BBF7D0; }
+  .pill.grey { color: var(--grey); background: var(--soft); border-color: var(--line); }
+  .pill.gold { color: #7A6338; background: #FBF7EF; border-color: #E7DAC0; }
+  .tag { display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 6px; background: #F5F3FF; color: #5B4FD6; border: 1px solid #DDD6FE; margin-left: 4px; white-space: nowrap; }
+  button.b { padding: 9px 16px; border-radius: 10px; font-size: 13px; cursor: pointer; border: 1px solid var(--line); background: #fff; color: var(--ink); }
+  button.b.pri { background: #5B4FD6; border-color: #5B4FD6; color: #fff; }
+  button.b.dark { background: var(--ink); border-color: var(--ink); color: #fff; }
+  button.b.sm { padding: 4px 10px; font-size: 12px; border-radius: 8px; }
+  button.b:disabled { opacity: .45; cursor: not-allowed; }
+  button.link { border: 0; background: none; color: #2563EB; text-decoration: underline; cursor: pointer; padding: 0; font-size: inherit; text-align: left; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th { text-align: left; font-size: 11px; color: var(--grey); letter-spacing: .8px; text-transform: uppercase; font-weight: 500; padding: 6px 8px; border-bottom: 1px solid var(--line); }
+  td { padding: 8px 8px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  td.r, th.r { text-align: right; }
+  .muted { color: var(--grey); font-size: 12px; }
+  .new { background: #F5F3FF; }
+  .gone { color: #9CA3AF; text-decoration: line-through; }
+  .done td { color: #9CA3AF; }
+  .done td .pill { opacity: 1; }
+  .modal-bg { position: fixed; inset: 0; background: rgba(15,15,16,.35); display: flex; align-items: flex-start; justify-content: center; padding: 40px 16px; z-index: 10; overflow-y: auto; }
+  .modal { background: #fff; border-radius: 16px; width: 560px; max-width: 100%; padding: 22px 24px; box-shadow: 0 20px 50px rgba(0,0,0,.18); }
+  .modal.wide { width: 900px; }
+  .modal h3 { margin: 0 0 6px; font-size: 18px; }
+  .seg { display: flex; gap: 6px; background: var(--soft); padding: 4px; border-radius: 10px; margin: 12px 0 4px; }
+  .seg button { flex: 1; border: 0; background: none; padding: 8px; border-radius: 8px; cursor: pointer; font-size: 13px; color: var(--grey); }
+  .seg button.on { background: #fff; color: var(--ink); font-weight: 600; box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+  .seg button:disabled { cursor: not-allowed; }
+  label.f { display: block; font-size: 11px; letter-spacing: 1px; color: var(--grey); margin: 12px 0 6px; text-transform: uppercase; }
+  input[type=number], input[type=date] { width: 100%; padding: 10px 12px; border: 1px solid #D5D9DE; border-radius: 10px; font-size: 14px; }
+  .chk { display: flex; gap: 10px; align-items: flex-start; border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px; margin-bottom: 6px; cursor: pointer; font-size: 13px; }
+  .chk.on { border-color: var(--ink); background: #FAFAFB; }
+  .chk .grow { flex: 1; }
+  .chk input { margin-top: 2px; }
+  .grp { font-size: 11px; color: var(--gold); letter-spacing: 1px; text-transform: uppercase; margin: 10px 0 4px; }
+  .sum { background: var(--soft); border-radius: 10px; padding: 12px 14px; margin-top: 14px; font-size: 13px; }
+  .hint { font-size: 12px; color: var(--grey); margin-top: 10px; }
+  .err { font-size: 12px; color: var(--red); margin-top: 8px; }
+  .warnbox { border: 1px dashed #F5C78E; background: #FFFBF3; border-radius: 12px; padding: 12px 14px; margin-bottom: 18px; font-size: 13px; }
+  .actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; flex-wrap: wrap; }
+  .chips button { padding: 6px 12px; font-size: 12px; border-radius: 8px; border: 1px solid #D5D9DE; background: none; cursor: pointer; margin: 0 6px 6px 0; }
+  .chips button.on { border-color: var(--ink); background: rgba(15,15,16,.06); }
+  .choice { display: flex; gap: 8px; align-items: center; justify-content: space-between; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+  .choice .opts button { padding: 6px 10px; font-size: 12px; border-radius: 8px; border: 1px solid #D5D9DE; background: none; cursor: pointer; margin-left: 6px; }
+  .choice .opts button.on { border-color: var(--ink); background: rgba(15,15,16,.06); font-weight: 600; }
+  .toolbar { display: flex; gap: 8px; align-items: center; margin-bottom: 14px; flex-wrap: wrap; }
+  .pos { color: var(--ink); } .neg { color: var(--amber); }
+  .scroll { overflow-x: auto; }
+  @media (max-width: 860px) {
+    .app { grid-template-columns: minmax(0, 1fr); } aside { border-right: 0; border-bottom: 1px solid var(--line); }
+    main { padding: 18px 16px; } .kpis, .two { grid-template-columns: minmax(0, 1fr); }
+  }
+</style>
+</head>
+<body>
+<div class="app">
+  <aside>
+    <h1>LATAIF</h1>
+    <button class="nav" data-tab="account">Client account <small>Ahmed Karimi</small></button>
+    <button class="nav" data-tab="invoices">Invoices <small>3 sales invoices</small></button>
+    <button class="nav" data-tab="debts">Debts <small>We Borrowed</small></button>
+    <button class="nav" data-tab="purchases">Purchases <small>Ahmed Karimi (Supplier)</small></button>
+    <button class="nav" data-tab="consignments">Consignments <small>Ahmed as consignor</small></button>
+    <button class="nav" data-tab="banking">Banking <small>Cash · Bank · Benefit</small></button>
+    <div style="margin-top:18px; padding: 0 6px;">
+      <button class="b" id="reset" style="width:100%;">Start again</button>
+      <p class="muted" style="margin-top:8px;">Klickbare Vorschau mit Beispieldaten. Es wird nichts gespeichert.</p>
+    </div>
+    <div class="tour">
+      <b>Rundgang</b>
+      <ol>
+        <li>Konto ansehen: beide Seiten, Saldo, Kontoauszug, Gold getrennt.</li>
+        <li>Kasten „Not linked“: LOA-2026-000005 zuordnen (optional).</li>
+        <li><b>Settle Balance</b>: Vorschlag ansehen, Häkchen ändern, einmal bestätigen, Endnummern wählen.</li>
+        <li><b>Receive Payment</b>: z. B. 400 Cash, ohne Rechnung wählen; Rest als Store Credit.</li>
+        <li>Noch einmal <b>Receive Payment</b>, wenn nichts mehr offen ist: „Payment on account“.</li>
+        <li>Belege prüfen: Invoices, Debts, Purchases, Consignments, Banking.</li>
+        <li>Rückgängig: ganze STL im Konto oder eine Zeile auf der Rechnung.</li>
+      </ol>
+    </div>
+  </aside>
+  <main id="main"></main>
+</div>
+<div id="modal"></div>
+
+<script>
+const fmt = (v) => (Math.abs(v) < 0.0005 ? 0 : v).toLocaleString('en-US', { minimumFractionDigits: 3, maximumFractionDigits: 3 });
+const r3 = (v) => Math.round(v * 1000) / 1000;
+const pad6 = (n) => String(n).padStart(6, '0');
+const TODAY = '2026-11-08';
+const EPS = 0.0005;
+const TYPE_ORDER = { credit: 1, debt: 2, purchase: 3, consignment: 4 };
+const TYPE_LABEL = { credit: 'Store credit', debt: 'We Borrowed', purchase: 'Purchase', consignment: 'Consignment payout' };
+const TYPE_TAB = { credit: 'account', debt: 'debts', purchase: 'purchases', consignment: 'consignments' };
+
+const fresh = () => ({
+  tab: 'account',
+  sel: { invoices: 'i14', debts: 'd3', purchases: 'p31', consignments: 'c9' },
+  invoices: [
+    { id: 'i14', no: 'PINV-2026-000014', final: null, date: '2026-10-05', gross: 1500, item: 'Rolex Datejust 36 · ITM-WCH-118' },
+    { id: 'i19', no: 'PINV-2026-000019', final: null, date: '2026-10-28', gross: 500, item: 'Gold bracelet 21K · ITM-GLD-204' },
+    { id: 'i22', no: 'PINV-2026-000022', final: null, date: '2026-11-03', gross: 900, item: 'Diamond ring · ITM-JWL-077' },
+  ],
+  invPays: [],
+  sources: [
+    { id: 'sc1', type: 'credit', no: 'Store credit', ref: 'from return CN-2026-000006', date: '2026-09-30', amount: 100, linked: true, prior: [] },
+    { id: 'd3', type: 'debt', no: 'LOA-2026-000003', ref: 'Cash taken from Ahmed for the September purchase', date: '2026-09-14', amount: 2000, linked: true,
+      prior: [{ date: '2026-10-02', amount: 800, text: 'Cash' }] },
+    { id: 'p31', type: 'purchase', no: 'PUR-2026-000031', ref: 'Omega Speedmaster (used), bought from Ahmed', date: '2026-10-12', amount: 800, linked: true, prior: [] },
+    { id: 'c9', type: 'consignment', no: 'CON-2026-00009', ref: 'Cartier Tank sold on 30.10. — payout due to Ahmed', date: '2026-10-30', amount: 450, linked: true, prior: [] },
+    { id: 'd5', type: 'debt', no: 'LOA-2026-000005', ref: 'Counterparty text “Ahmed K.” — no client linked', date: '2026-08-20', amount: 300, linked: false, prior: [] },
+  ],
+  srcPays: [],
+  deposit: { no: 'ORD-2026-00007', date: '2026-10-21', amount: 200 },
+  goldGrams: 12.5,
+  stls: [],
+  events: [],
+  seq: 1000,
+  stlSeq: 1, sinvSeq: 31, specSeq: 4, creditSeq: 2,
+  money: { cash: 4250, bank: 18640.5, benefit: 312 },
+  moves: [],
+  modal: null, pending: null, back: null,
+  st: { inv: {}, src: {}, date: TODAY },
+  rp: { amount: null, date: TODAY, method: 'Cash', keepRest: false },
+  numberChoice: {},
+});
+let S = fresh();
+
+// ── Rechenregeln ────────────────────────────────────────────────────────────
+const inv = (id) => S.invoices.find((x) => x.id === id);
+const src = (id) => S.sources.find((x) => x.id === id);
+const invLabel = (i) => i.final || i.no;
+const invPaid = (i) => r3(S.invPays.filter((p) => p.inv === i.id && !p.removed).reduce((s, p) => s + p.amount, 0));
+const invOpen = (i) => r3(i.gross - invPaid(i));
+const srcUsed = (s) => r3(s.prior.reduce((a, p) => a + p.amount, 0) + S.srcPays.filter((p) => p.src === s.id && !p.removed).reduce((a, p) => a + p.amount, 0));
+const srcOpen = (s) => r3(s.amount - srcUsed(s));
+const linkedSources = () => S.sources.filter((s) => s.linked);
+const v7 = (a, b) => (TYPE_ORDER[a.type] - TYPE_ORDER[b.type]) || a.date.localeCompare(b.date);
+const oweUs = () => r3(S.invoices.reduce((s, i) => s + invOpen(i), 0));
+const weOweFree = () => r3(linkedSources().reduce((s, x) => s + srcOpen(x), 0));
+const weOwe = () => r3(weOweFree() + S.deposit.amount);
+const net = () => r3(oweUs() - weOwe());
+
+function invStatus(i) {
+  if (invOpen(i) <= EPS) return ['Paid', 'paid'];
+  return invPaid(i) > EPS ? ['Partially paid', 'part'] : ['Unpaid', 'open'];
+}
+function srcStatus(s) {
+  const open = srcOpen(s), used = srcUsed(s);
+  const names = {
+    credit: ['Used', 'Partly used', 'Available'],
+    debt: ['Repaid', 'Partially repaid', 'Open'],
+    purchase: ['Paid', 'Partially paid', 'Unpaid'],
+    consignment: ['Paid out', 'Partly paid out', 'Payout due'],
+  }[s.type];
+  if (open <= EPS) return [names[0], 'paid'];
+  return used > EPS ? [names[1], 'part'] : [names[2], 'open'];
+}
+
+function allocate(invoices, sources) {
+  const iv = invoices.map((i) => ({ id: i.id, left: invOpen(i) })).filter((x) => x.left > EPS);
+  const sv = sources.map((s) => ({ id: s.id, left: srcOpen(s) })).filter((x) => x.left > EPS);
+  const pairs = [];
+  let a = 0, b = 0;
+  while (a < iv.length && b < sv.length) {
+    const amt = r3(Math.min(iv[a].left, sv[b].left));
+    pairs.push({ inv: iv[a].id, src: sv[b].id, amt });
+    iv[a].left = r3(iv[a].left - amt); sv[b].left = r3(sv[b].left - amt);
+    if (iv[a].left <= EPS) a++;
+    if (sv[b].left <= EPS) b++;
+  }
+  return pairs;
+}
+function settleProposal() {
+  const invoices = S.invoices.filter((i) => invOpen(i) > EPS && S.st.inv[i.id]).sort((x, y) => x.date.localeCompare(y.date));
+  const sources = linkedSources().filter((s) => srcOpen(s) > EPS && S.st.src[s.id]).sort(v7);
+  return allocate(invoices, sources);
+}
+function payProposal() {
+  let left = r3(S.rp.amount ?? 0);
+  const out = [];
+  S.invoices.filter((i) => invOpen(i) > EPS).sort((x, y) => x.date.localeCompare(y.date)).forEach((i) => {
+    if (left <= EPS) return;
+    const amt = r3(Math.min(left, invOpen(i)));
+    out.push({ inv: i.id, amt }); left = r3(left - amt);
+  });
+  return { alloc: out, rest: left };
+}
+
+// ── Kontoauszug ─────────────────────────────────────────────────────────────
+function statement() {
+  const base = [
+    { date: '2026-09-14', doc: 'LOA-2026-000003', go: 'debts:d3', what: 'We Borrowed — we owe Ahmed', change: -2000 },
+    { date: '2026-09-30', doc: 'CN-2026-000006', what: 'Store credit from a return', change: -100 },
+    { date: '2026-10-02', doc: 'LOA-2026-000003', go: 'debts:d3', what: 'Repayment to Ahmed · Cash', change: 800 },
+    { date: '2026-10-05', doc: invLabel(inv('i14')), go: 'invoices:i14', what: 'Sales invoice', change: 1500 },
+    { date: '2026-10-12', doc: 'PUR-2026-000031', go: 'purchases:p31', what: 'Purchase from Ahmed (supplier role)', change: -800 },
+    { date: '2026-10-21', doc: 'ORD-2026-00007', what: 'Deposit on an order — bound to that order', change: -200 },
+    { date: '2026-10-28', doc: invLabel(inv('i19')), go: 'invoices:i19', what: 'Sales invoice', change: 500 },
+    { date: '2026-10-30', doc: 'CON-2026-00009', go: 'consignments:c9', what: 'Consignment sold — payout due to Ahmed', change: -450 },
+    { date: '2026-11-03', doc: invLabel(inv('i22')), go: 'invoices:i22', what: 'Sales invoice', change: 900 },
+  ].map((e, k) => ({ ...e, seq: k }));
+  const d5 = src('d5');
+  if (d5.linked) base.push({ date: d5.date, doc: d5.no, go: 'debts:d5', what: 'We Borrowed — linked to Ahmed today', change: -300, seq: -1, isNew: d5.justLinked });
+  const all = base.concat(S.events).sort((a, b) => a.date.localeCompare(b.date) || a.seq - b.seq);
+  let bal = 0;
+  return all.map((e) => { bal = r3(bal + e.change); return { ...e, bal }; });
+}
+const sgn = (v) => (v > EPS ? '+' : v < -EPS ? '−' : '') + fmt(Math.abs(v));
+
+// ── Ansichten ───────────────────────────────────────────────────────────────
+function render() {
+  document.querySelectorAll('.nav').forEach((b) => b.classList.toggle('on', b.dataset.tab === S.tab));
+  document.getElementById('main').innerHTML = { account: viewAccount, invoices: viewInvoices, debts: viewDebts, purchases: viewPurchases, consignments: viewConsignments, banking: viewBanking }[S.tab]();
+  document.getElementById('modal').innerHTML = S.modal ? { settle: viewSettle, pay: viewPay, numbers: viewNumbers }[S.modal]() : '';
+  wire();
+}
+
+function viewAccount() {
+  const n = net();
+  const canSettle = oweUs() > EPS && weOweFree() > EPS;
+  const unlinked = S.sources.filter((s) => !s.linked);
+  const invRows = S.invoices.slice().sort((a, b) => a.date.localeCompare(b.date)).map((i) => { const [st, c] = invStatus(i); return `
+    <tr class="${invOpen(i) <= EPS ? 'done' : ''}"><td><button class="link" data-go="invoices:${i.id}">${invLabel(i)}</button><div class="muted">${i.date}</div></td>
+    <td class="r mono">${fmt(i.gross)}</td><td class="r mono">${fmt(invOpen(i))}</td><td><span class="pill ${c}">${st}</span></td></tr>`; }).join('');
+  const srcRows = linkedSources().slice().sort(v7).map((s) => { const [st, c] = srcStatus(s); const k = TYPE_ORDER[s.type]; return `
+    <tr class="${srcOpen(s) <= EPS ? 'done' : ''}"><td>${s.type === 'credit' ? `<b>${s.no}</b>` : `<button class="link" data-go="${TYPE_TAB[s.type]}:${s.id}">${s.no}</button>`}
+      <div class="muted">${TYPE_LABEL[s.type]} · ${s.date}${s.type === 'credit' ? ' · ' + s.ref : ''}</div></td>
+    <td class="r mono">${fmt(srcOpen(s))}</td><td><span class="pill ${c}">${st}</span></td>
+    <td class="muted">${k}. in Settle Balance${s.type === 'purchase' ? '<span class="tag">B3 · accountant</span>' : ''}</td></tr>`; }).join('')
+    + `<tr><td><b>${S.deposit.no}</b><div class="muted">Order deposit · ${S.deposit.date}</div></td><td class="r mono">${fmt(S.deposit.amount)}</td>
+       <td><span class="pill gold">Bound to order</span></td><td class="muted">not offset — applied on that order's invoice</td></tr>`;
+  const st = statement();
+  const stRows = st.map((e) => `<tr class="${e.isNew ? 'new' : ''}">
+    <td class="mono" style="white-space:nowrap">${e.date}</td>
+    <td>${e.go ? `<button class="link" data-go="${e.go}">${e.doc}</button>` : `<b>${e.doc}</b>`} <span class="muted">· ${e.what}</span></td>
+    <td class="r mono ${e.change < -EPS ? 'neg' : ''}">${Math.abs(e.change) <= EPS ? '<span class="muted">no change</span>' : sgn(e.change)}</td>
+    <td class="r mono ${e.bal < -EPS ? 'neg' : ''}">${sgn(e.bal)}</td></tr>`).join('');
+  const stlRows = S.stls.map((t) => `<tr class="${t.isNew ? 'new' : ''}"><td class="mono">${t.no}</td><td class="mono">${t.date}</td>
+    <td>${t.pairs} offsets · no cash</td><td class="r mono ${t.removed ? 'gone' : ''}">${fmt(t.total)}</td>
+    <td class="r">${t.removed ? '<span class="muted">undone</span>' : `<button class="b sm" data-undo="${t.no}">Undo settlement</button>`}</td></tr>`).join('');
+  return `
+    <div class="banner"><b>Vorschau Kundenkonto.</b> Der Saldo ist eine Anzeige. Rechnungen und Schulden ändern sich erst, wenn du eine Zahlung oder Verrechnung bestätigst.</div>
+    <div class="toolbar"><span class="overline">Client</span><span class="pill grey">Supplier role linked</span><span class="pill grey">Consignor</span></div>
+    <div class="row" style="margin-bottom:12px;"><div><div class="big" style="font-weight:600">Ahmed Karimi</div><div class="muted">Main Branch · account statement</div></div>
+      <div style="display:flex;gap:10px;flex-wrap:wrap;"><button class="b" id="openPay">Receive Payment</button>
+      <button class="b pri" id="openSettle" ${canSettle ? '' : 'disabled'}>Settle Balance</button></div></div>
+    <div class="kpis">
+      <div class="card"><div class="overline">Ahmed owes us</div><div class="big mono">${fmt(oweUs())}</div><div class="muted">open sales invoices</div></div>
+      <div class="card"><div class="overline">We owe Ahmed</div><div class="big mono">${fmt(weOwe())}</div><div class="muted">incl. ${fmt(S.deposit.amount)} bound to ${S.deposit.no}</div></div>
+      <div class="card" style="border-color:var(--ink)"><div class="overline">Net balance</div><div class="huge mono">${fmt(Math.abs(n))} <span style="font-size:14px;font-weight:400">BHD</span></div>
+        <div class="muted">${n > EPS ? 'Ahmed owes LATAIF more than the other way round.' : n < -EPS ? 'LATAIF owes Ahmed more than the other way round.' : 'Balanced.'}</div>
+        <div class="hint" style="margin-top:6px">Overview only — nothing is paid or offset by looking at it.</div></div>
+    </div>
+    <div class="card" style="display:flex;justify-content:space-between;align-items:center;gap:12px;flex-wrap:wrap;">
+      <div><div class="overline">Gold credit (Book B)</div><div class="big mono">${S.goldGrams.toFixed(3)} g <span class="muted">fine gold</span></div></div>
+      <div class="muted" style="max-width:380px">Shown separately in grams. Never part of the BHD balance and never offset.</div></div>
+    ${unlinked.length ? `<div class="warnbox"><b>Not linked to this client — please check</b>
+      <div class="muted" style="margin:4px 0 8px">These items are not counted in the balance until they are linked.</div>
+      ${unlinked.map((s) => `<div class="row"><span><b>${s.no}</b> · We Borrowed · ${s.date} · <span class="mono">${fmt(s.amount)}</span> <span class="muted">· ${s.ref}</span></span>
+        <button class="b sm" data-link="${s.id}">Assign to this client</button></div>`).join('')}
+      <div class="row"><span><b>“Ahmed Karimi”</b> · supplier with the same name, not linked <span class="muted">· hint only — the app never links by name or phone</span></span><span></span></div>
+    </div>` : ''}
+    <div class="two">
+      <div class="card"><div class="overline" style="margin-bottom:8px">Ahmed owes us</div>
+        <table><tr><th>Invoice</th><th class="r">Total</th><th class="r">Open</th><th>Status</th></tr>${invRows}</table></div>
+      <div class="card"><div class="overline" style="margin-bottom:8px">We owe Ahmed</div>
+        <div class="scroll"><table><tr><th>Item</th><th class="r">Open</th><th>Status</th><th>Order</th></tr>${srcRows}</table></div></div>
+    </div>
+    ${S.stls.length ? `<div class="card"><div class="overline" style="margin-bottom:8px">Settlements</div>
+      <table><tr><th>No.</th><th>Date</th><th>What</th><th class="r">Amount</th><th></th></tr>${stlRows}</table>
+      <p class="hint">Undo reverses every offset of that settlement at once. Single lines can also be removed on the invoice.</p></div>` : ''}
+    <div class="card"><div class="overline" style="margin-bottom:8px">Account statement</div>
+      <div class="scroll"><table><tr><th>Date</th><th>Document</th><th class="r">Change</th><th class="r">Balance</th></tr>${stRows}</table></div>
+      <p class="hint">+ = Ahmed owes LATAIF · − = LATAIF owes Ahmed. An offset changes nothing in the balance — both sides go down by the same amount.</p></div>`;
+}
+
+function payRowsFor(i) {
+  return S.invPays.filter((p) => p.inv === i.id).map((p) => {
+    const s = p.src ? src(p.src) : null;
+    const what = p.kind === 'offset'
+      ? `<b>Offset</b> · <button class="link" data-go="${TYPE_TAB[s.type]}:${s.id}">${s.no}</button> <span class="muted">· ${TYPE_LABEL[s.type]} · no cash · ${p.stl}</span>`
+      : `${p.kind} <span class="muted">· Receive Payment</span>`;
+    return `<tr class="${p.isNew ? 'new' : ''}"><td class="${p.removed ? 'gone' : ''}">${p.date}</td><td class="${p.removed ? 'gone' : ''}">${what}</td>
+      <td class="r mono ${p.removed ? 'gone' : ''}">${fmt(p.amount)}</td>
+      <td class="r">${p.removed ? '<span class="muted">removed — open again on both sides</span>' : p.kind === 'offset' ? `<button class="b sm" data-remove="${p.id}">Remove</button>` : ''}</td></tr>`;
+  }).join('');
+}
+
+function viewInvoices() {
+  const i = inv(S.sel.invoices);
+  const list = S.invoices.map((x) => { const [st, c] = invStatus(x); return `<tr class="${x.id === i.id ? 'new' : ''}" style="cursor:pointer" data-sel="invoices:${x.id}">
+    <td>${invLabel(x)}</td><td>${x.date}</td><td class="r mono">${fmt(x.gross)}</td><td class="r mono">${fmt(invOpen(x))}</td><td><span class="pill ${c}">${st}</span></td></tr>`; }).join('');
+  const [st, c] = invStatus(i);
+  const rows = payRowsFor(i);
+  return `
+    <div class="toolbar"><span class="overline">Invoices · Ahmed Karimi</span></div>
+    <div class="card"><table><tr><th>Invoice</th><th>Date</th><th class="r">Total</th><th class="r">Open</th><th>Status</th></tr>${list}</table></div>
+    <div class="card">
+      <div class="row"><div><div class="overline">Sales invoice</div><div class="big">${invLabel(i)}</div>
+        <div class="muted">${i.final ? `was ${i.no} · ` : ''}Ahmed Karimi · issued ${i.date}</div></div><span class="pill ${c}">${st}</span></div>
+      <table style="margin-top:10px"><tr><th>Item</th><th class="r">Amount</th></tr><tr><td>${i.item}</td><td class="r mono">${fmt(i.gross)}</td></tr></table>
+      <div style="margin-top:10px">
+        <div class="row"><span class="overline">Total</span><span class="mono">${fmt(i.gross)} BHD</span></div>
+        <div class="row"><span class="overline">Paid / settled</span><span class="mono">${fmt(invPaid(i))} BHD</span></div>
+        <div class="row"><span class="overline">Outstanding</span><span class="mono" style="color:${invOpen(i) > EPS ? 'var(--red)' : 'var(--green)'}">${fmt(invOpen(i))} BHD</span></div>
+      </div>
+      <div class="overline" style="margin:14px 0 6px">How it was settled</div>
+      ${rows ? `<table><tr><th>Date</th><th>How</th><th class="r">Amount</th><th></th></tr>${rows}</table>` : '<p class="muted">Nothing paid or offset yet.</p>'}
+      ${i.final ? '<p class="hint">The final number stays for good, even if an offset is removed later.</p>' : ''}
+    </div>`;
+}
+
+function srcDetail(s, title) {
+  const [st, c] = srcStatus(s);
+  const verb = { debt: 'Offset with', purchase: 'Paid by offset with', consignment: 'Payout by offset with', credit: 'Applied to' }[s.type];
+  const rows = s.prior.map((p) => `<tr><td>${p.date}</td><td>${p.text}</td><td class="r mono">${fmt(p.amount)}</td><td></td></tr>`).join('')
+    + S.srcPays.filter((p) => p.src === s.id).map((p) => { const i = inv(p.inv); return `<tr class="${p.isNew ? 'new' : ''}">
+      <td class="${p.removed ? 'gone' : ''}">${p.date}</td>
+      <td class="${p.removed ? 'gone' : ''}"><b>${verb}</b> <button class="link" data-go="invoices:${i.id}">${invLabel(i)}</button> <span class="muted">· no cash · ${p.stl}</span></td>
+      <td class="r mono ${p.removed ? 'gone' : ''}">${fmt(p.amount)}</td><td class="muted">${p.removed ? 'removed' : ''}</td></tr>`; }).join('');
+  return `<div class="card">
+    <div class="row"><div><div class="overline">${title}</div><div class="big">${s.no}</div><div class="muted">${s.ref}</div></div><span class="pill ${c}">${st}</span></div>
+    <div class="row"><span class="overline">Amount</span><span class="mono">${fmt(s.amount)} BHD</span></div>
+    <div class="row"><span class="overline">Settled</span><span class="mono">${fmt(srcUsed(s))} BHD</span></div>
+    <div class="row"><span class="overline">Open</span><span class="mono">${fmt(srcOpen(s))} BHD</span></div>
+    <div class="overline" style="margin:14px 0 6px">Payments</div>
+    ${rows ? `<table><tr><th>Date</th><th>How</th><th class="r">Amount</th><th></th></tr>${rows}</table>` : '<p class="muted">Nothing paid or offset yet.</p>'}
+    <p class="hint">While an offset is active, this ${s.type === 'debt' ? 'loan' : s.type} cannot be deleted, cancelled or lowered below what is settled.</p>
+  </div>`;
+}
+
+function viewDebts() {
+  const debts = S.sources.filter((s) => s.type === 'debt');
+  const d = src(S.sel.debts);
+  const list = debts.map((x) => { const [st, c] = srcStatus(x); return `<tr class="${x.id === d.id ? 'new' : ''}" style="cursor:pointer" data-sel="debts:${x.id}">
+    <td>${x.no}</td><td>${x.date}</td><td>${x.linked ? 'Ahmed Karimi' : '<span class="muted">“Ahmed K.” · not linked</span>'}</td>
+    <td class="r mono">${fmt(x.amount)}</td><td class="r mono">${fmt(srcOpen(x))}</td><td><span class="pill ${c}">${st}</span></td></tr>`; }).join('');
+  return `<div class="toolbar"><span class="overline">Debts · We Borrowed</span></div>
+    <div class="card"><table><tr><th>Loan</th><th>Date</th><th>Client</th><th class="r">Amount</th><th class="r">Open</th><th>Status</th></tr>${list}</table></div>
+    ${srcDetail(d, 'We Borrowed — we owe the client')}`;
+}
+function viewPurchases() {
+  return `<div class="toolbar"><span class="overline">Purchases · Ahmed Karimi (Supplier)</span><span class="tag">B3 · after the accountant confirms</span></div>
+    ${srcDetail(src('p31'), 'Purchase — we owe the supplier')}
+    <p class="muted">The purchase, its receipt and its VAT stay as they are. An offset is a payment, not a new purchase.</p>`;
+}
+function viewConsignments() {
+  return `<div class="toolbar"><span class="overline">Consignments · Ahmed as consignor</span></div>${srcDetail(src('c9'), 'Consignment — payout due to the consignor')}`;
+}
+function viewBanking() {
+  const mv = S.moves.map((m) => `<tr class="${m.isNew ? 'new' : ''}"><td>${m.date}</td><td>${m.account}</td><td>${m.text}</td><td class="r mono">+${fmt(m.amount)}</td></tr>`).join('');
+  const offs = S.invPays.filter((p) => p.kind === 'offset' && !p.removed).reduce((s, p) => s + p.amount, 0);
+  return `<div class="toolbar"><span class="overline">Banking</span></div>
+    <div class="card" style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px;">
+      ${[['Cash', 'cash'], ['Bank', 'bank'], ['Benefit', 'benefit']].map(([n, k]) => `<div><div class="overline">${n}</div><div class="big mono">${fmt(S.money[k])}</div></div>`).join('')}</div>
+    <div class="card"><div class="overline" style="margin-bottom:8px">Movements</div>
+      ${mv ? `<table><tr><th>Date</th><th>Account</th><th>Text</th><th class="r">Amount</th></tr>${mv}</table>` : '<p class="muted">No movements yet.</p>'}
+      <p class="hint">${offs > EPS ? `Offsets of ${fmt(offs)} BHD do not appear here — no money moved.` : 'Only real money appears here. Offsets never do.'}</p></div>`;
+}
+
+// ── Dialoge ────────────────────────────────────────────────────────────────
+function viewSettle() {
+  const invs = S.invoices.filter((i) => invOpen(i) > EPS).sort((a, b) => a.date.localeCompare(b.date));
+  const srcs = linkedSources().filter((s) => srcOpen(s) > EPS).sort(v7);
+  const pairs = settleProposal();
+  const total = r3(pairs.reduce((a, p) => a + p.amt, 0));
+  const usedInv = (id) => r3(pairs.filter((p) => p.inv === id).reduce((a, p) => a + p.amt, 0));
+  const usedSrc = (id) => r3(pairs.filter((p) => p.src === id).reduce((a, p) => a + p.amt, 0));
+  let lastType = null;
+  const srcList = srcs.map((s) => {
+    const head = s.type !== lastType ? `<div class="grp">${TYPE_ORDER[s.type]}. ${TYPE_LABEL[s.type]}${s.type === 'purchase' ? ' <span class="tag">B3 · accountant</span>' : ''}</div>` : '';
+    lastType = s.type;
+    const on = !!S.st.src[s.id];
+    return `${head}<label class="chk ${on ? 'on' : ''}"><input type="checkbox" data-st-src="${s.id}" ${on ? 'checked' : ''}>
+      <span class="grow"><b>${s.no}</b> <span class="muted">· ${s.date}</span><div class="muted">${on && usedSrc(s.id) > EPS ? `uses ${fmt(usedSrc(s.id))} → open after ${fmt(srcOpen(s) - usedSrc(s.id))}` : on ? 'not needed' : 'excluded'}</div></span>
+      <span class="mono">${fmt(srcOpen(s))}</span></label>`;
+  }).join('');
+  const invList = invs.map((i) => { const on = !!S.st.inv[i.id]; const after = r3(invOpen(i) - usedInv(i.id)); return `<label class="chk ${on ? 'on' : ''}">
+    <input type="checkbox" data-st-inv="${i.id}" ${on ? 'checked' : ''}><span class="grow"><b>${invLabel(i)}</b> <span class="muted">· ${i.date}</span>
+    <div class="muted">${on ? (after <= EPS ? '→ fully settled' : usedInv(i.id) > EPS ? `→ ${fmt(after)} stays open` : 'nothing left to offset') : 'excluded'}</div></span>
+    <span class="mono">${fmt(invOpen(i))}</span></label>`; }).join('');
+  const pairRows = pairs.map((p) => { const s = src(p.src), i = inv(p.inv); return `<tr><td><b>${s.no}</b> <span class="muted">· ${s.type === 'credit' ? s.ref : TYPE_LABEL[s.type]}</span></td><td>→</td>
+    <td><b>${invLabel(i)}</b></td><td class="r mono">${fmt(p.amt)}</td></tr>`; }).join('');
+  return `<div class="modal-bg"><div class="modal wide">
+    <h3>Settle Balance — Ahmed Karimi</h3>
+    <p class="muted" style="margin:0 0 10px">The app proposes what to offset. Untick what should stay out. No money moves.</p>
+    <div class="two">
+      <div><div class="overline">Ahmed owes us — oldest first</div>${invList || '<p class="muted">Nothing open.</p>'}</div>
+      <div><div class="overline">We owe Ahmed — in this order</div>${srcList || '<p class="muted">Nothing open.</p>'}
+        <p class="hint">${S.deposit.no} (${fmt(S.deposit.amount)}) is a deposit bound to its order and is not offered here.</p></div>
+    </div>
+    <label class="f">Settlement date</label><input type="date" id="stDate" value="${S.st.date}" max="${TODAY}" style="max-width:220px">
+    <div class="overline" style="margin:16px 0 6px">What will happen</div>
+    ${pairs.length ? `<table><tr><th>We owe</th><th></th><th>Invoice</th><th class="r">Amount</th></tr>${pairRows}</table>` : '<p class="err">Nothing to offset with this selection.</p>'}
+    <div class="sum">
+      <div class="row"><span>Ahmed owes us</span><span class="mono">${fmt(oweUs())} → <b>${fmt(oweUs() - total)}</b></span></div>
+      <div class="row"><span>We owe Ahmed</span><span class="mono">${fmt(weOwe())} → <b>${fmt(weOwe() - total)}</b></span></div>
+      <div class="row"><span>Net balance</span><span class="mono">${fmt(Math.abs(net()))} — unchanged</span></div>
+    </div>
+    <p class="hint">All lines are booked together under one number (STL-2026-${pad6(S.stlSeq)}). If anything changed in the meantime, nothing is booked and the proposal is shown again. Cash, bank and benefit stay as they are.</p>
+    <div class="actions"><button class="b" id="closeModal">Cancel</button>
+      <button class="b pri" id="confirmSettle" ${pairs.length ? '' : 'disabled'}>Confirm settlement · ${pairs.length} offset${pairs.length === 1 ? '' : 's'} · ${fmt(total)}</button></div>
+  </div></div>`;
+}
+
+function viewPay() {
+  const openTotal = oweUs();
+  const amt = S.rp.amount ?? 0;
+  const { alloc, rest } = payProposal();
+  const nothingOpen = openTotal <= EPS;
+  const needTick = rest > EPS && !S.rp.keepRest;
+  const rows = alloc.map((a) => { const i = inv(a.inv); const after = r3(invOpen(i) - a.amt); return `<tr><td><b>${invLabel(i)}</b> <span class="muted">· ${i.date}</span></td>
+    <td class="r mono">${fmt(invOpen(i))}</td><td class="r mono">${fmt(a.amt)}</td><td class="r mono">${fmt(after)}</td>
+    <td><span class="pill ${after <= EPS ? 'paid' : 'part'}">${after <= EPS ? 'Paid' : 'Partially paid'}</span></td></tr>`; }).join('');
+  return `<div class="modal-bg"><div class="modal" style="width:640px">
+    <h3>Receive Payment — Ahmed Karimi</h3>
+    <p class="muted" style="margin:0">Open invoices: <span class="mono" style="color:var(--ink)">${fmt(openTotal)} BHD</span>. You do not need to choose an invoice.</p>
+    <div class="seg"><button class="on">Oldest invoice first</button><button disabled title="exists today, unchanged">Choose invoices</button></div>
+    <div class="two">
+      <div><label class="f">Amount received (BHD)</label><input type="number" id="rpAmt" step="0.001" value="${amt}"></div>
+      <div><label class="f">Payment date</label><input type="date" id="rpDate" value="${S.rp.date}" max="${TODAY}"></div>
+    </div>
+    <label class="f">Payment method</label>
+    <div class="chips">${['Cash', 'Bank Transfer', 'Card', 'Benefit'].map((m) => `<button data-method="${m}" class="${S.rp.method === m ? 'on' : ''}">${m}</button>`).join('')}</div>
+    ${nothingOpen ? `<div class="sum"><b>No open invoice.</b> The payment can be kept as <b>payment on account</b> — it becomes store credit and can be used on a later invoice or in Settle Balance. No invoice is marked as paid.</div>`
+      : `<div class="overline" style="margin:14px 0 6px">The app will apply it like this</div>
+         ${rows ? `<table><tr><th>Invoice</th><th class="r">Open</th><th class="r">Paid now</th><th class="r">Open after</th><th></th></tr>${rows}</table>` : '<p class="muted">Enter an amount.</p>'}`}
+    ${rest > EPS ? `<label class="chk ${S.rp.keepRest ? 'on' : ''}" style="margin-top:12px"><input type="checkbox" id="rpKeep" ${S.rp.keepRest ? 'checked' : ''}>
+      <span class="grow"><b>${nothingOpen ? 'Keep as payment on account' : 'Keep the rest as store credit'}</b><div class="muted">${fmt(rest)} BHD → store credit for Ahmed</div></span></label>` : ''}
+    ${needTick ? `<div class="err">${nothingOpen ? 'Tick “payment on account” to continue.' : `The payment is ${fmt(rest)} more than everything open. Tick the box or lower the amount.`}</div>` : ''}
+    ${S.rp.method === 'Card' ? '<p class="hint">Card fee as today.</p>' : ''}
+    <div class="actions"><button class="b" id="closeModal">Cancel</button>
+      <button class="b pri" id="confirmPay" ${amt > EPS && !needTick ? '' : 'disabled'}>Confirm payment · ${fmt(amt)}</button></div>
+  </div></div>`;
+}
+
+function viewNumbers() {
+  const ids = S.pending.finalize;
+  return `<div class="modal-bg"><div class="modal"><h3>Final invoice numbers</h3>
+    <p class="muted">These invoices will be fully paid. Choose the number type for each.</p>
+    ${ids.map((id) => { const i = inv(id); const ch = S.numberChoice[id] || 'normal'; return `<div class="choice"><span><b>${i.no}</b> <span class="muted">· ${fmt(i.gross)}</span></span>
+      <span class="opts"><button data-num="${id}:normal" class="${ch === 'normal' ? 'on' : ''}">Normal Final</button><button data-num="${id}:special" class="${ch === 'special' ? 'on' : ''}">Special Final</button></span></div>`; }).join('')}
+    <div class="actions"><button class="b" id="numBack">Back</button><button class="b pri" id="numConfirm">Confirm</button></div></div></div>`;
+}
+
+// ── Buchen (nur in der Vorschau) ───────────────────────────────────────────
+function clearNew() {
+  S.invPays.forEach((p) => { p.isNew = false; }); S.srcPays.forEach((p) => { p.isNew = false; });
+  S.events.forEach((e) => { e.isNew = false; }); S.stls.forEach((t) => { t.isNew = false; }); S.moves.forEach((m) => { m.isNew = false; });
+  S.sources.forEach((s) => { s.justLinked = false; });
+}
+function willFinalize(paidNow) {
+  return Object.keys(paidNow).filter((id) => { const i = inv(id); return !i.final && invOpen(i) - paidNow[id] <= EPS; });
+}
+function startCommit(pending) {
+  const paidNow = {};
+  pending.lines.forEach((l) => { paidNow[l.inv] = r3((paidNow[l.inv] || 0) + l.amt); });
+  pending.finalize = willFinalize(paidNow);
+  S.pending = pending;
+  if (pending.finalize.length) { S.back = S.modal; S.modal = 'numbers'; pending.finalize.forEach((id) => { S.numberChoice[id] = S.numberChoice[id] || 'normal'; }); render(); return; }
+  commit();
+}
+function commit() {
+  const P = S.pending; clearNew();
+  P.finalize.forEach((id) => { const i = inv(id); i.final = S.numberChoice[id] === 'special' ? `.SINV-2026-${pad6(S.specSeq++)}` : `SINV-2026-${pad6(S.sinvSeq++)}`; });
+  if (P.kind === 'settle') {
+    const no = `STL-2026-${pad6(S.stlSeq++)}`;
+    P.lines.forEach((l, k) => {
+      const id = `${no}-${k}`;
+      S.invPays.push({ id, inv: l.inv, date: P.date, kind: 'offset', src: l.src, stl: no, amount: l.amt, isNew: true });
+      S.srcPays.push({ id: `s-${id}`, link: id, src: l.src, inv: l.inv, date: P.date, stl: no, amount: l.amt, isNew: true });
+    });
+    const total = r3(P.lines.reduce((a, l) => a + l.amt, 0));
+    S.stls.push({ no, date: P.date, pairs: P.lines.length, total, isNew: true });
+    S.events.push({ date: P.date, seq: S.seq++, doc: no, what: `Settlement · ${P.lines.length} offsets · ${fmt(total)} · no cash`, change: 0, isNew: true });
+  } else {
+    const acct = { Cash: 'cash', 'Bank Transfer': 'bank', Card: 'bank', Benefit: 'benefit' }[P.method];
+    P.lines.forEach((l, k) => S.invPays.push({ id: `rp${S.seq}-${k}`, inv: l.inv, date: P.date, kind: P.method, amount: l.amt, isNew: true }));
+    const parts = P.lines.map((l) => `${invLabel(inv(l.inv))} ${fmt(l.amt)}`);
+    if (P.rest > EPS) {
+      S.sources.push({ id: `sc${S.creditSeq++}`, type: 'credit', no: 'Store credit', ref: P.lines.length ? 'rest of a payment' : 'payment on account', date: P.date, amount: P.rest, linked: true, prior: [] });
+      parts.push(`store credit ${fmt(P.rest)}`);
+    }
+    S.money[acct] = r3(S.money[acct] + P.amount);
+    S.moves.push({ date: P.date, account: acct === 'bank' ? 'Bank' : acct === 'cash' ? 'Cash' : 'Benefit', text: `Ahmed Karimi · Receive Payment (${P.method})`, amount: P.amount, isNew: true });
+    S.events.push({ date: P.date, seq: S.seq++, doc: 'Receive Payment', what: `${P.method} ${fmt(P.amount)} → ${parts.join(', ')}`, change: -P.amount, isNew: true });
+  }
+  S.pending = null; S.modal = null; S.tab = 'account'; render();
+}
+function removeOffset(id, why) {
+  const p = S.invPays.find((x) => x.id === id); if (!p || p.removed) return false;
+  p.removed = true; const sp = S.srcPays.find((x) => x.link === id); if (sp) sp.removed = true;
+  return true;
+}
+
+function wire() {
+  const on = (sel, ev, fn) => document.querySelectorAll(sel).forEach((e) => e.addEventListener(ev, fn));
+  on('.nav', 'click', (e) => { S.tab = e.currentTarget.dataset.tab; render(); });
+  on('#reset', 'click', () => { S = fresh(); render(); });
+  on('[data-go]', 'click', (e) => { const [tab, id] = e.currentTarget.dataset.go.split(':'); S.tab = tab; if (id && S.sel[tab] !== undefined) S.sel[tab] = id; S.modal = null; render(); });
+  on('[data-sel]', 'click', (e) => { const [tab, id] = e.currentTarget.dataset.sel.split(':'); S.sel[tab] = id; render(); });
+  on('[data-link]', 'click', (e) => { clearNew(); const s = src(e.currentTarget.dataset.link); s.linked = true; s.justLinked = true; s.ref = 'Linked to Ahmed Karimi on ' + TODAY; render(); });
+  on('#openSettle', 'click', () => {
+    S.st = { inv: {}, src: {}, date: TODAY };
+    S.invoices.forEach((i) => { if (invOpen(i) > EPS) S.st.inv[i.id] = true; });
+    linkedSources().forEach((s) => { if (srcOpen(s) > EPS) S.st.src[s.id] = true; });
+    S.modal = 'settle'; render();
+  });
+  on('#openPay', 'click', () => { const o = oweUs(); S.rp = { amount: o > EPS ? Math.min(o, 400) : 250, date: TODAY, method: 'Cash', keepRest: false }; S.modal = 'pay'; render(); });
+  on('#closeModal', 'click', () => { S.modal = null; render(); });
+  on('[data-st-inv]', 'change', (e) => { S.st.inv[e.target.dataset.stInv] = e.target.checked; render(); });
+  on('[data-st-src]', 'change', (e) => { S.st.src[e.target.dataset.stSrc] = e.target.checked; render(); });
+  on('#stDate', 'change', (e) => { S.st.date = e.target.value || TODAY; });
+  on('#confirmSettle', 'click', () => { const pairs = settleProposal(); if (!pairs.length) return; startCommit({ kind: 'settle', date: S.st.date, lines: pairs }); });
+  on('#rpAmt', 'change', (e) => { S.rp.amount = r3(Math.max(0, parseFloat(e.target.value) || 0)); S.rp.keepRest = false; render(); });
+  on('#rpDate', 'change', (e) => { S.rp.date = e.target.value || TODAY; });
+  on('[data-method]', 'click', (e) => { S.rp.method = e.currentTarget.dataset.method; render(); });
+  on('#rpKeep', 'change', (e) => { S.rp.keepRest = e.target.checked; render(); });
+  on('#confirmPay', 'click', () => {
+    const { alloc, rest } = payProposal();
+    startCommit({ kind: 'pay', date: S.rp.date, method: S.rp.method, amount: r3(S.rp.amount), lines: alloc.map((a) => ({ inv: a.inv, amt: a.amt })), rest });
+  });
+  on('[data-num]', 'click', (e) => { const [id, v] = e.currentTarget.dataset.num.split(':'); S.numberChoice[id] = v; render(); });
+  on('#numBack', 'click', () => { S.modal = S.back; S.pending = null; render(); });
+  on('#numConfirm', 'click', () => commit());
+  on('[data-remove]', 'click', (e) => {
+    const id = e.currentTarget.dataset.remove; const p = S.invPays.find((x) => x.id === id);
+    clearNew();
+    if (removeOffset(id)) {
+      const s = src(p.src);
+      S.events.push({ date: TODAY, seq: S.seq++, doc: p.stl, what: `Offset removed: ${s.no} → ${invLabel(inv(p.inv))} ${fmt(p.amount)} — open again on both sides`, change: 0, isNew: true });
+      const t = S.stls.find((x) => x.no === p.stl);
+      if (t && S.invPays.filter((x) => x.stl === t.no).every((x) => x.removed)) t.removed = true;
+    }
+    render();
+  });
+  on('[data-undo]', 'click', (e) => {
+    const no = e.currentTarget.dataset.undo; clearNew();
+    S.invPays.filter((x) => x.stl === no && !x.removed).forEach((x) => removeOffset(x.id));
+    const t = S.stls.find((x) => x.no === no); t.removed = true;
+    S.events.push({ date: TODAY, seq: S.seq++, doc: no, what: 'Settlement undone — every offset is open again', change: 0, isNew: true });
+    render();
+  });
+}
+render();
+</script>
+</body>
+</html>

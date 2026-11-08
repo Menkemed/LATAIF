@@ -266,7 +266,7 @@ export interface CustomerOrderDeposits {
 
 export const EMPTY_ORDER_DEPOSITS: CustomerOrderDeposits = { orders: [], total: 0 };
 
-function customerOrderDepositsFor(ctx: BusinessReadContext, customerId: string): CustomerOrderDeposits {
+export function customerOrderDepositsFor(ctx: BusinessReadContext, customerId: string): CustomerOrderDeposits {
   const rows = query(
     `SELECT o.id AS order_id, o.order_number, o.status, o.agreed_price,
             op.id AS payment_id, ${openDepositSql('op')} AS amount, op.method, op.card_brand, op.paid_at

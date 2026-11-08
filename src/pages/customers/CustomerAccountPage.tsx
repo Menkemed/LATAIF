@@ -1,0 +1,300 @@
+// ════════════════════════════════════════════════════════════════════════════
+// CUSTOMER ACCOUNT A1 — die Ansicht „Account" eines Kunden: was er LATAIF schuldet, was LATAIF ihm schuldet, Nettosaldo,
+// Partnerkonto, Gold getrennt, Hinweise auf nicht verknüpfte Posten und der Kontoauszug. NUR LESEN — hier wird nichts
+// gebucht, nichts verrechnet, nichts geändert. Die Zahlen kommen aus `parties.account.get` (view = customer_account):
+// am Primary lokal, am PC2 vom Primary.
+// ════════════════════════════════════════════════════════════════════════════
+import { useMemo, useState } from 'react';
+import { useParams, Link } from 'react-router-dom';
+import { ArrowLeft, RefreshCw } from 'lucide-react';
+import { Card } from '@/components/ui/Card';
+import { Bhd } from '@/components/ui/Bhd';
+import { useGoBack } from '@/hooks/useGoBack';
+import { useSharedRead } from '@/core/data/shared-read';
+import { OP_PARTIES_ACCOUNT_GET, partyAccountReadFor, type PartyAccountRead } from '@/core/parties/party-account';
+import { CUSTOMER_ACCOUNT_VIEW, type AccountDoc, type CustomerAccount, type PartnerAccountView, type StatementRow } from '@/core/parties/customer-account';
+
+const INK = '#0F0F10';
+const GREY = '#6B7280';
+const LINE = '#E5E9EE';
+const GOLD = '#AA956E';
+const AMBER = '#B45309';
+
+const fmtDate = (d: string): string => {
+  if (!d) return '—';
+  const [y, m, dd] = d.split('-');
+  return y && m && dd ? `${dd}.${m}.${y}` : d;
+};
+
+const STATUS_STYLE: Record<AccountDoc['status'], { label: string; fg: string; bg: string }> = {
+  OPEN: { label: 'Open', fg: AMBER, bg: 'rgba(245,158,11,0.10)' },
+  PARTIAL: { label: 'Partly settled', fg: '#1D4ED8', bg: 'rgba(59,130,246,0.10)' },
+  SETTLED: { label: 'Settled', fg: '#15803D', bg: 'rgba(22,163,74,0.10)' },
+};
+
+function Pill({ status }: { status: AccountDoc['status'] }) {
+  const s = STATUS_STYLE[status];
+  return <span style={{ fontSize: 11, fontWeight: 600, padding: '2px 9px', borderRadius: 999, color: s.fg, background: s.bg, whiteSpace: 'nowrap' }}>{s.label}</span>;
+}
+
+function DocLink({ href, children }: { href: string | null; children: React.ReactNode }) {
+  return href ? <Link to={href} style={{ color: INK, fontWeight: 500, textDecoration: 'underline', textUnderlineOffset: 2 }}>{children}</Link> : <span style={{ fontWeight: 500 }}>{children}</span>;
+}
+
+const th: React.CSSProperties = { textAlign: 'left', fontSize: 11, color: GREY, letterSpacing: '0.06em', textTransform: 'uppercase', fontWeight: 500, padding: '6px 8px', borderBottom: `1px solid ${LINE}` };
+const td: React.CSSProperties = { padding: '9px 8px', borderBottom: `1px solid ${LINE}`, fontSize: 13, verticalAlign: 'top' };
+const num: React.CSSProperties = { ...td, textAlign: 'right', fontFamily: 'ui-monospace, Consolas, monospace', whiteSpace: 'nowrap' };
+
+function SideTable({ title, docs, testId, showSettled }: { title: string; docs: AccountDoc[]; testId: string; showSettled: boolean }) {
+  const rows = docs.filter((d) => showSettled || d.status !== 'SETTLED');
+  return (
+    <Card style={{ minWidth: 0 }}>
+      <h3 style={{ fontSize: 15, fontWeight: 600, color: INK, marginBottom: 10 }}>{title}</h3>
+      {rows.length === 0 ? <p style={{ fontSize: 13, color: GREY }}>Nothing open.</p> : (
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }} data-account-side={testId}>
+            <thead><tr><th style={th}>Document</th><th style={{ ...th, textAlign: 'right' }}>Total</th><th style={{ ...th, textAlign: 'right' }}>Open</th><th style={th}>Status</th></tr></thead>
+            <tbody>
+              {rows.map((d) => (
+                <tr key={d.key} data-account-doc={d.key} data-doc-open={d.open}>
+                  <td style={td}>
+                    <DocLink href={d.href}>{d.number}</DocLink>
+                    <div style={{ fontSize: 11, color: GREY, marginTop: 2 }}>{d.kindLabel} · {fmtDate(d.date)}{d.detail && d.detail !== d.kindLabel ? ` · ${d.detail}` : ''}</div>
+                    {d.bound && <div style={{ fontSize: 11, color: GOLD, marginTop: 2 }} data-doc-bound>Bound: {d.bound}</div>}
+                  </td>
+                  <td style={num}><Bhd v={d.total} /></td>
+                  <td style={{ ...num, fontWeight: d.open > 0 ? 600 : 400, color: d.open > 0 ? INK : GREY }}><Bhd v={d.open} /></td>
+                  <td style={td}><Pill status={d.status} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Card>
+  );
+}
+
+function PartnerBlock({ p }: { p: PartnerAccountView }) {
+  const possible = p.link === 'POSSIBLE';
+  return (
+    <div style={{ border: `1px ${possible ? 'dashed' : 'solid'} ${possible ? '#F5C78E' : LINE}`, borderRadius: 12, padding: 14, marginTop: 10, background: possible ? '#FFFBF3' : '#fff' }} data-partner-block={p.partnerId} data-partner-link={p.link}>
+      <div className="flex items-center justify-between" style={{ gap: 12, flexWrap: 'wrap' }}>
+        <div>
+          <Link to={`/partners?partner=${encodeURIComponent(p.partnerId)}`} style={{ color: INK, fontWeight: 600 }}>{p.name}</Link>
+          <span style={{ fontSize: 12, color: possible ? AMBER : GREY, marginLeft: 8 }}>
+            {possible ? `possible match by ${p.matchedBy} — not linked, NOT counted in the balance` : 'linked partner — counted in the balance'}
+          </span>
+        </div>
+        <div style={{ fontSize: 12, color: GREY }}>
+          We owe the partner <b style={{ color: INK }}><Bhd v={p.owedToPartner} /></b> · partner owes us <b style={{ color: INK }}><Bhd v={p.owedByPartner} /></b>
+        </div>
+      </div>
+      {p.items.length > 0 && (
+        <div style={{ overflowX: 'auto', marginTop: 8 }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse' }}>
+            <thead><tr>
+              <th style={th}>Item / purchase</th><th style={{ ...th, textAlign: 'right' }}>Share</th><th style={{ ...th, textAlign: 'right' }}>Agreed contribution</th>
+              <th style={{ ...th, textAlign: 'right' }}>Paid in</th><th style={th}>Sale</th><th style={{ ...th, textAlign: 'right' }}>Profit share</th>
+              <th style={{ ...th, textAlign: 'right' }}>Paid out / offset</th><th style={{ ...th, textAlign: 'right' }}>Open</th>
+            </tr></thead>
+            <tbody>
+              {p.items.map((it) => (
+                <tr key={it.href}>
+                  <td style={td}><Link to={it.href} style={{ color: INK }}>{it.productLabel}</Link><div style={{ fontSize: 11, color: GREY }}>{it.purchaseNumber} · {fmtDate(it.purchaseDate)}</div></td>
+                  <td style={num}>{it.sharePct}%</td>
+                  <td style={num}><Bhd v={it.costShare} /></td>
+                  <td style={num}><Bhd v={it.contributed} /></td>
+                  <td style={td}>{it.sales.length === 0 ? <span style={{ color: GREY }}>not sold</span> : it.sales.map((s) => (
+                    <div key={s.invoiceId + s.invoiceNumber} style={{ fontSize: 12 }}><Link to={`/invoices/${s.invoiceId}`} style={{ color: INK }}>{s.invoiceNumber}</Link> <span style={{ color: GREY }}>· {fmtDate(s.issuedAt)} · {s.state.toLowerCase().replace('_', ' ')}</span></div>
+                  ))}</td>
+                  <td style={num}><Bhd v={it.profitShare} />{it.profitNotSettled > 0 && <div style={{ fontSize: 11, color: GREY }} title="computed from sales that are not settled yet — never counted">+<Bhd v={it.profitNotSettled} /> not settled</div>}</td>
+                  <td style={num}><Bhd v={it.paidOut + it.offsets} /></td>
+                  <td style={{ ...num, fontWeight: 600 }}>{it.open > 0 ? 'we owe ' : it.open < 0 ? 'owes us ' : ''}<Bhd v={Math.abs(it.open)} />{it.onHold && <div style={{ fontSize: 11, color: GOLD }}>on hold</div>}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function Statement({ rows, showSettled }: { rows: StatementRow[]; showSettled: boolean }) {
+  const shown = showSettled ? rows : rows.filter((r) => r.status !== 'SETTLED');
+  return (
+    <div style={{ overflowX: 'auto' }}>
+      <table style={{ width: '100%', borderCollapse: 'collapse' }} data-account-statement>
+        <thead><tr>
+          <th style={th}>Date</th><th style={th}>Document</th><th style={th}>Transaction</th>
+          <th style={{ ...th, textAlign: 'right' }}>Amount</th><th style={{ ...th, textAlign: 'right' }}>Balance</th><th style={th}>Status</th>
+        </tr></thead>
+        <tbody>
+          {shown.map((r, k) => (
+            <tr key={k} data-statement-row={r.docKey}>
+              <td style={{ ...td, whiteSpace: 'nowrap' }}>{fmtDate(r.date)}</td>
+              <td style={td}><DocLink href={r.href}>{r.number}</DocLink><div style={{ fontSize: 11, color: GREY }}>{r.kindLabel}</div></td>
+              <td style={td}>{r.text}</td>
+              <td style={{ ...num, color: r.change < 0 ? AMBER : INK }}>{r.change > 0 ? '+' : r.change < 0 ? '−' : ''}<Bhd v={Math.abs(r.change)} /></td>
+              <td style={{ ...num, color: r.balance < 0 ? AMBER : INK }} data-statement-balance={r.balance}>{r.balance > 0 ? '+' : r.balance < 0 ? '−' : ''}<Bhd v={Math.abs(r.balance)} /></td>
+              <td style={td}><Pill status={r.status} /></td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {!showSettled && rows.length !== shown.length && (
+        <p style={{ fontSize: 11, color: GREY, marginTop: 8 }}>Settled documents are hidden — the running balance still includes them.</p>
+      )}
+    </div>
+  );
+}
+
+export function CustomerAccountPage() {
+  const { id } = useParams<{ id: string }>();
+  const goBack = useGoBack(id ? `/clients/${id}` : '/clients');
+  const [tick, setTick] = useState(0);
+  const [showSettled, setShowSettled] = useState(true);
+  const params = { partyType: 'CUSTOMER', partyId: id ?? '', view: CUSTOMER_ACCOUNT_VIEW, v: tick };
+  const read = useSharedRead<PartyAccountRead | null>(
+    OP_PARTIES_ACCOUNT_GET, params,
+    (ctx) => partyAccountReadFor(ctx, { partyType: 'CUSTOMER', partyId: id, view: CUSTOMER_ACCOUNT_VIEW }),
+    null, [id, tick],
+  );
+  const acc: CustomerAccount | null = read?.customerAccount ?? null;
+  const owes = useMemo(() => acc?.docs.filter((d) => d.side === 'OWES_US') ?? [], [acc]);
+  const weOwe = useMemo(() => acc?.docs.filter((d) => d.side === 'WE_OWE') ?? [], [acc]);
+  const possiblePartners = acc?.hints.partners ?? [];
+
+  return (
+    <div className="app-content" style={{ background: '#FFFFFF' }}>
+      <div style={{ padding: '32px 48px 64px', maxWidth: 1500 }} data-customer-account={id}>
+        <div className="flex items-center justify-between" style={{ marginBottom: 20 }}>
+          <button onClick={goBack} className="flex items-center gap-2 cursor-pointer" style={{ background: 'none', border: 'none', color: GREY, fontSize: 13 }}>
+            <ArrowLeft size={16} /> Back
+          </button>
+          <button onClick={() => setTick((t) => t + 1)} className="flex items-center gap-2 cursor-pointer" data-account-refresh
+            style={{ background: 'none', border: `1px solid ${LINE}`, borderRadius: 8, padding: '6px 14px', fontSize: 12, color: INK }}>
+            <RefreshCw size={13} /> Refresh
+          </button>
+        </div>
+
+        {!acc ? (
+          <p style={{ fontSize: 13, color: GREY }} data-account-loading>{read === null ? 'Loading the account…' : 'This client has no account in this branch.'}</p>
+        ) : (
+          <>
+            <div style={{ marginBottom: 18 }}>
+              <h1 className="font-display" style={{ fontSize: 30, color: INK, margin: 0 }}>{acc.customer.name}</h1>
+              <div style={{ fontSize: 13, color: GREY, marginTop: 4 }}>
+                Account statement · read-only overview
+                {acc.supplierRole && <> · supplier role <Link to={`/suppliers/${acc.supplierRole.id}`} style={{ color: INK }}>{acc.supplierRole.name}</Link> (linked)</>}
+              </div>
+            </div>
+
+            <div style={{ background: '#FFF7E6', border: '1px solid #F3D9A4', color: '#7A5B1E', borderRadius: 10, padding: '10px 14px', fontSize: 13, marginBottom: 18 }}>
+              The balance is an overview. Nothing is paid or offset by opening this page — invoices and debts change only when a payment or settlement is confirmed.
+            </div>
+
+            {!acc.complete && (
+              <div style={{ border: '1px dashed #F5C78E', background: '#FFFBF3', borderRadius: 12, padding: '12px 14px', marginBottom: 18, fontSize: 13 }} data-account-incomplete>
+                <b>The balance may be incomplete.</b>
+                <ul style={{ margin: '6px 0 0 18px', padding: 0, color: '#7A5B1E' }}>{acc.incomplete.map((t) => <li key={t}>{t}</li>)}</ul>
+              </div>
+            )}
+
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 16, marginBottom: 18 }}>
+              <Card>
+                <div style={{ fontSize: 11, color: GREY, letterSpacing: '0.08em', textTransform: 'uppercase' }}>{acc.customer.name} owes us</div>
+                <div className="font-display" style={{ fontSize: 26, color: INK, marginTop: 6 }} data-account-owes-us={acc.owesUs.total}><Bhd v={acc.owesUs.total} /> <span style={{ fontSize: 12, color: GREY }}>BHD</span></div>
+                <div style={{ fontSize: 11, color: GREY, marginTop: 6 }}>free <Bhd v={acc.owesUs.free} />{acc.owesUs.bound > 0 && <> · bound <Bhd v={acc.owesUs.bound} /></>}</div>
+              </Card>
+              <Card>
+                <div style={{ fontSize: 11, color: GREY, letterSpacing: '0.08em', textTransform: 'uppercase' }}>We owe {acc.customer.name}</div>
+                <div className="font-display" style={{ fontSize: 26, color: INK, marginTop: 6 }} data-account-we-owe={acc.weOwe.total}><Bhd v={acc.weOwe.total} /> <span style={{ fontSize: 12, color: GREY }}>BHD</span></div>
+                <div style={{ fontSize: 11, color: GREY, marginTop: 6 }}>free <Bhd v={acc.weOwe.free} />{acc.weOwe.bound > 0 && <> · bound <Bhd v={acc.weOwe.bound} /></>}</div>
+              </Card>
+              <Card style={{ border: `1px solid ${INK}` }}>
+                <div style={{ fontSize: 11, color: GREY, letterSpacing: '0.08em', textTransform: 'uppercase' }}>Net balance</div>
+                <div className="font-display" style={{ fontSize: 30, color: INK, marginTop: 6 }} data-account-net={acc.net} data-account-direction={acc.direction}>
+                  <Bhd v={Math.abs(acc.net)} /> <span style={{ fontSize: 12, color: GREY }}>BHD</span>
+                </div>
+                <div style={{ fontSize: 12, color: INK, marginTop: 6 }}>
+                  {acc.direction === 'CLIENT_OWES' ? `${acc.customer.name} owes LATAIF.` : acc.direction === 'WE_OWE' ? `LATAIF owes ${acc.customer.name}.` : 'Balanced — nobody owes anything.'}
+                </div>
+                <div style={{ fontSize: 11, color: GREY, marginTop: 4 }} data-account-net-free={acc.netFree}>
+                  Free amounts only: {acc.netFree > 0 ? 'client owes ' : acc.netFree < 0 ? 'we owe ' : ''}<Bhd v={Math.abs(acc.netFree)} /> BHD
+                </div>
+              </Card>
+            </div>
+
+            <div className="flex items-center gap-2" style={{ marginBottom: 10, fontSize: 12, color: GREY }}>
+              <label className="flex items-center gap-2 cursor-pointer"><input type="checkbox" checked={showSettled} onChange={(e) => setShowSettled(e.target.checked)} data-account-show-settled /> Show settled documents</label>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(420px, 1fr))', gap: 16, marginBottom: 18 }}>
+              <SideTable title={`${acc.customer.name} owes us`} docs={owes} testId="owes-us" showSettled={showSettled} />
+              <SideTable title={`We owe ${acc.customer.name}`} docs={weOwe} testId="we-owe" showSettled={showSettled} />
+            </div>
+
+            <Card style={{ marginBottom: 18 }}>
+              <h3 style={{ fontSize: 15, fontWeight: 600, color: INK }}>Partner account</h3>
+              {acc.partners.length === 0 && possiblePartners.length === 0 && (
+                <p style={{ fontSize: 13, color: GREY, marginTop: 6 }} data-partner-none>No partner account belongs to this client.</p>
+              )}
+              {acc.partners.map((p) => <PartnerBlock key={p.partnerId} p={p} />)}
+              {possiblePartners.length > 0 && (
+                <p style={{ fontSize: 12, color: GREY, marginTop: 8 }}>
+                  Partners cannot be linked to a client yet. A partner with the same name or phone is shown below for checking; its amounts are not part of the balance.
+                </p>
+              )}
+              {possiblePartners.map((p) => <PartnerBlock key={p.partnerId} p={p} />)}
+            </Card>
+
+            <Card style={{ marginBottom: 18 }}>
+              <div className="flex items-center justify-between" style={{ gap: 12, flexWrap: 'wrap' }}>
+                <h3 style={{ fontSize: 15, fontWeight: 600, color: INK }}>Gold account</h3>
+                <span style={{ fontSize: 12, color: GREY }}>In grams, separate from BHD — never converted or offset.</span>
+              </div>
+              {acc.gold.length === 0 ? <p style={{ fontSize: 13, color: GREY, marginTop: 6 }} data-gold-none>No open gold credit.</p> : (
+                <div className="flex gap-6" style={{ marginTop: 8, flexWrap: 'wrap' }} data-account-gold>
+                  {acc.gold.map((g) => (
+                    <div key={g.karat} data-gold-karat={g.karat} data-gold-grams={g.grams}>
+                      <div className="font-display" style={{ fontSize: 22, color: INK }}>{g.grams.toFixed(3)} g</div>
+                      <div style={{ fontSize: 11, color: GREY }}>{g.karat} · {g.count} credit{g.count === 1 ? '' : 's'} · we owe the client</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </Card>
+
+            {(acc.hints.debts.length > 0 || acc.hints.suppliers.length > 0) && (
+              <div style={{ border: '1px dashed #F5C78E', background: '#FFFBF3', borderRadius: 12, padding: '12px 14px', marginBottom: 18, fontSize: 13 }} data-account-hints>
+                <b>Not linked to this client — please check</b>
+                <div style={{ fontSize: 12, color: GREY, margin: '4px 0 8px' }}>These are not counted in the balance. The app never links by name or phone.</div>
+                {acc.hints.debts.map((h) => (
+                  <div key={h.id} className="flex items-center justify-between" style={{ padding: '4px 0', gap: 12 }} data-hint-debt={h.id}>
+                    <span><Link to="/debts" style={{ color: INK, fontWeight: 500 }}>{h.loanNumber}</Link> · {h.direction === 'WE_LENT' ? 'We Lent' : 'We Borrowed'} · {fmtDate(h.date)} · counterparty “{h.counterparty}”</span>
+                    <span className="font-mono">open <Bhd v={h.open} /></span>
+                  </div>
+                ))}
+                {acc.hints.suppliers.map((h) => (
+                  <div key={h.id} className="flex items-center justify-between" style={{ padding: '4px 0', gap: 12 }} data-hint-supplier={h.id}>
+                    <span>Supplier <Link to={`/suppliers/${h.id}`} style={{ color: INK, fontWeight: 500 }}>{h.name}</Link> · same {h.matchedBy} · not linked</span>
+                    <span className="font-mono">open purchases <Bhd v={h.outstanding} /></span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <Card>
+              <div className="flex items-center justify-between" style={{ marginBottom: 8, gap: 12, flexWrap: 'wrap' }}>
+                <h3 style={{ fontSize: 15, fontWeight: 600, color: INK }}>Account statement</h3>
+                <span style={{ fontSize: 12, color: GREY }}>+ = {acc.customer.name} owes LATAIF · − = LATAIF owes {acc.customer.name}</span>
+              </div>
+              {acc.statement.length === 0 ? <p style={{ fontSize: 13, color: GREY }}>No transactions yet.</p> : <Statement rows={acc.statement} showSettled={showSettled} />}
+            </Card>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}

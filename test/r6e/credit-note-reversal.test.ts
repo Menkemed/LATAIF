@@ -711,6 +711,9 @@ marker('CENTRAL_UI_R6E_PAID_REFUND_CANCEL_CONTRACT_PINNED');
     // OPENING BALANCES & SETTLEMENT — offene Rechnungen eines Kunden (Forderungsstorno nur wirksamer Gutschriften).
     'src/core/parties/customer-settlement.ts': 'Offen je Rechnung ohne CANCELLED (Receive Payment)',
     'src/core/parties/opening-balances.ts': 'offene LATAIF-Belege der Partei ohne CANCELLED',
+    // CUSTOMER ACCOUNT A1 — das Kundenkonto (nur lesen): Forderungsstorno je Rechnung nur wirksamer Gutschriften, Verweis
+    // auf die Gutschrift einer Retoure.
+    'src/core/parties/customer-account.ts': 'Offen je Rechnung ohne CANCELLED (Kundenkonto, nur lesen); Verweis der Retoure',
     'src/core/reports/reconciliation-snapshot.ts': 'Abstimmung ohne CANCELLED',
     'src/core/returns/return-cancel-house.ts': 'der Storno selbst (setzt CANCELLED)',
     'src/core/sync/sync-service.ts': 'Tabellenzuordnung des Abgleichs',

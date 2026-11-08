@@ -360,6 +360,8 @@ export function CustomerDetail() {
               </>
             ) : (
               <>
+                {/* CUSTOMER ACCOUNT A1 — das gemeinsame Kundenkonto (nur lesen). */}
+                <Button variant="secondary" onClick={() => navigate(`/clients/${id}/account`)} data-open-customer-account>Account</Button>
                 {perm.canEditCustomers && <Button variant="secondary" onClick={() => setEditing(true)}><Edit3 size={14} /> Edit Client</Button>}
                 {(customer.whatsapp || customer.phone) && (
                   <Button variant="secondary" onClick={() => setShowMessage(true)}><Sparkles size={14} /> AI Message</Button>

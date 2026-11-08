@@ -342,7 +342,11 @@ const gegenparteien = (db: Db): string => all(db,
     'stores/customerStore.ts', 'stores/supplierStore.ts',
     // MEDIA-IDENTITY — der verknuepfte Lieferant zeigt den Ausweis SEINES Kunden (keine Spiegelkopie).
     // Gelesen wird nur, WESSEN Dokument gilt — kein Betrag, kein Saldo, keine Verrechnung.
-    'core/identity/identity-media.ts'];
+    'core/identity/identity-media.ts',
+    // CUSTOMER ACCOUNT A1 (Owner 08.11.2026) — das Kundenkonto ZEIGT die offenen Posten der ausdrücklich verknüpften
+    // Rolle neben denen des Kunden (nur lesen). Es bucht nichts und verrechnet nichts; Ledger, Rechnungen und Einkäufe
+    // lesen die Verknüpfung weiterhin nicht.
+    'core/parties/customer-account.ts'];
   ok(leser.every((p) => erlaubt.includes(p)), `ACCOUNTING kein Ledger-/Rechnungs-/Einkaufscode liest die Verknüpfung (${S(leser)})`);
   ok(!/linked_customer_id/.test(src('src/core/ledger/posting.ts')) && !/linked_customer_id/.test(src('src/core/ledger/queries.ts')), 'ACCOUNTING Buchung und Saldo kennen nur Art + Kennung');
   const ui = src('src/components/suppliers/UseCustomerAsSupplier.tsx');

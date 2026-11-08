@@ -4,6 +4,7 @@ import { Sidebar } from '@/components/layout/Sidebar';
 import { Dashboard } from '@/pages/dashboard/Dashboard';
 import { CustomerList } from '@/pages/customers/CustomerList';
 import { CustomerDetail } from '@/pages/customers/CustomerDetail';
+import { CustomerAccountPage } from '@/pages/customers/CustomerAccountPage';
 import { WatchList } from '@/pages/watches/WatchList';
 import { ProductDetail } from '@/pages/watches/ProductDetail';
 import { OfferList } from '@/pages/offers/OfferList';
@@ -436,6 +437,7 @@ export default function App() {
           <Route path="/" element={<Dashboard />} />
           <Route path="/clients" element={<CustomerList />} />
           <Route path="/clients/:id" element={<CustomerDetail />} />
+          <Route path="/clients/:id/account" element={<CustomerAccountPage />} />
           <Route path="/collection" element={<WatchList />} />
           <Route path="/collection/:id" element={<ProductDetail />} />
           <Route path="/offers" element={<OfferList />} />

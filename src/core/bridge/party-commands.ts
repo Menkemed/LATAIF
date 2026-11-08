@@ -205,7 +205,7 @@ registerCommand(OP_PARTIES_ACCOUNT_GET, {
     const ctx = remoteReadContext(actor ?? (payload as Envelope | null)?.actor);
     const input = (payload as Envelope | null)?.input ?? {};
     try {
-      return { data: { ...partyAccountReadFor(ctx, { partyType: input.partyType, partyId: input.partyId, preview: input.preview }) } };
+      return { data: { ...partyAccountReadFor(ctx, { partyType: input.partyType, partyId: input.partyId, preview: input.preview, view: input.view }) } };
     } catch (err) {
       if (err instanceof OpeningBalanceRejected) throw new BusinessError(err.code, err.message);
       throw err;
