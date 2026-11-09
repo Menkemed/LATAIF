@@ -487,6 +487,43 @@ reload();
   ok(n(DB, "SELECT COUNT(DISTINCT source_id) FROM ledger_entries WHERE source_module = 'LOAN_PAYMENT'") === 1, 'U-21 einzige Darlehens-Rückzahlungsbuchung ist die echte Barzahlung an L2');
 }
 
+// ══ S — Status nach „Remove offset" (Owner-Beispiel: Rechnung 600, voll verrechnet, dann aufgehoben, keine echte Zahlung) ══
+// Eine frisch ausgestellte, unbezahlte Rechnung steht als PARTIAL mit bezahlt 0 (Anzeige „Unpaid": InvoiceList/InvoiceDetail
+// leiten aus paid_amount ab; „Record Payment" und „Settle Balance" sichtbar). Genau diesen Stand muss das Aufheben herstellen —
+// nicht DRAFT („Pending", ohne Zahlungserfassung) und keine vorgetäuschte Teilzahlung.
+{
+  const frischId = sale('pk7', 600, '2026-10-23');
+  const frisch = S(DB.exec('SELECT status, paid_amount FROM invoices WHERE id = ?', [frischId])[0].values[0]);
+  const l2Vor = debtState(L2).open;
+  const E = sale('pk6', 600, '2026-10-23');
+  const T5 = create({ invoiceId: E, debtId: L2, amount: 600 });
+  reload();
+  const nrFinal = String(inv(E)[2]);
+  ok(inv(E)[0] === 'FINAL' && !nrFinal.startsWith('PINV') && eq(Number(inv(E)[1]), 600), `S-1 voll verrechnet: FINAL mit Endnummer ${nrFinal}`);
+  imHaus(() => po.reverseDebtOffsetInHouse({ offsetId: T5.offsetId }, HCTX));
+  reload();
+  const e = DB.exec('SELECT status, paid_amount FROM invoices WHERE id = ?', [E])[0].values[0];
+  ok(S(e) === frisch && e[0] === 'PARTIAL' && eq(Number(e[1]), 0) && n(DB, 'SELECT COUNT(*) FROM payments WHERE invoice_id = ?', [E]) === 0,
+    `S-2 nach „Remove offset": genau der Stand einer frisch ausgestellten unbezahlten Rechnung (${S(e)} = ${frisch}), keine Zahlung übrig`);
+  ok(String(inv(E)[2]) === nrFinal && eq(debtState(L2).open, l2Vor), 'S-3 Endnummer bleibt (einmal vergeben), L2 wieder ganz offen');
+  ok(!['DRAFT', 'CANCELLED', 'FINAL', 'RETURNED'].includes(String(e[0])) && eq(po.invoiceOpenFils(E) / 1000, 600),
+    'S-4 Zahlungserfassung wieder möglich (dieselbe Regel wie „Record Payment": nicht DRAFT/CANCELLED/FINAL/RETURNED, offen 600)');
+  const c = po.debtOffsetCandidatesFor(CTX, E);
+  ok(c.candidates.some((x) => x.debtId === L2) && eq(c.invoiceOpen, 600) && eq(c.suggested, 600), 'S-5 wieder verrechenbar (L2, Vorschlag 600)');
+  imHaus(() => useInvoiceStore.getState().recordPayment(E, 600, 'cash'));
+  ok(inv(E)[0] === 'FINAL' && String(inv(E)[2]) === nrFinal, 'S-6 erneut bar bezahlt: FINAL, keine zweite Nummer');
+  // Derselbe Fall über PC2 (invoices.record_payment → invoices.delete_payment).
+  const P = sale('pk8', 600, '2026-10-23');
+  const a = await fern(() => lc.runInvoicePayment(deps() as never, identity('601', 'invoices.record_payment'), po.debtOffsetBody({ invoiceId: P, debtId: L2, amount: 600, specialMarkOnFinal: false })));
+  const payP = s(DB, "SELECT id FROM payments WHERE invoice_id = ? AND method = 'debt_offset'", [P]);
+  const d = await fern(() => fc.runDeletePayment(deps() as never, identity('602', 'invoices.delete_payment'), { invoiceId: P, paymentId: payP, expectedRevision: invRev(P) }));
+  const pz = DB.exec('SELECT status, paid_amount FROM invoices WHERE id = ?', [P])[0].values[0];
+  ok(a.kind === 'ok' && d.kind === 'ok' && S(pz) === frisch && eq(debtState(L2).open, l2Vor),
+    `S-7 PC2: verrechnet und aufgehoben → derselbe Stand wie frisch (${S(pz)}), L2 wieder ganz offen (${a.kind}/${d.kind})`);
+  const again = await fern(() => lc.runInvoicePayment(deps() as never, identity('603', 'invoices.record_payment'), { invoiceId: P, amount: 600, method: 'cash' }));
+  ok(again.kind === 'ok' && inv(P)[0] === 'FINAL', 'S-8 PC2: danach regulär bar bezahlbar');
+}
+
 // ══ Q — Quelltext: keine zweite Buchungslogik je Oberfläche ═══════════════════════════════════════════════════════════
 {
   const ui = src('src/components/invoices/SettleBalance.tsx');
