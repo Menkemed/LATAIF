@@ -62,8 +62,8 @@ export function CreditNoteDetail() {
   // R6E-CN — eine stornierte Gutschrift bleibt als Urkunde sichtbar, klar markiert; sie wirkt auf
   // keine Forderung, kein Guthaben und keine Steuer mehr und lässt sich nicht löschen (sie IST die Spur).
   const cancelled = cn.status === 'CANCELLED';
-  // B1-Abschluss V3 — Gutschrift einer Rückgabe nur über „Cancel Return“; Löschen nur für den Owner (wie der Schreibweg).
-  const deleteBlock = creditNoteDeleteBlock(cn, perm.isOwner);
+  // B1-Abschluss V3 — Gutschrift einer Rückgabe nur über „Cancel Return“; Löschen nur für die Rolle Admin (= Owner), wie der Schreibweg.
+  const deleteBlock = creditNoteDeleteBlock(cn, perm.role);
 
   function handleDownload() {
     if (!cn) return;

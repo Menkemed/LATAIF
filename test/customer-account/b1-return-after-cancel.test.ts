@@ -546,39 +546,73 @@ await teilFall('R-4 (B1 200)', 'cust-8', 'pk14', 'pk15', true);
     `R-8e zulässig wie bisher: Gutschrift CANCELLED, Rechnung wieder offen 700, Ware wieder verkauft (${e || 'ok'}, ${artikel('pk25')})`);
 }
 
-// ══ R-9 Unabhängige Gutschrift (ohne Rückgabe): Löschweg bleibt — nur für den Owner, nur am Primary ══════════════
+// ══ R-9 Unabhängige Gutschrift (ohne Rückgabe): löschbar für Admin und Owner (Rolle ADMIN), nur am Primary ═══════
 {
   const cid = 'cust-11';
+  const als = (userId: string, role: string) => useAuthStore.setState({ session: { userId, branchId: 'branch-main', role } as never });
+  const zurueck = () => als('user-test', 'ADMIN');
+  /** Eine unabhängige Gutschrift 100 auf einer neuen offenen Rechnung 500. */
+  const gutschrift = (pid: string): { id: string; cnId: string } => {
+    const id = verkauf(cid, [[pid, 500]]);
+    const cn = imHaus(() => useCreditNoteStore.getState().createCreditNote({ invoiceId: id, customerId: cid, totalAmount: 100, vatAmount: 0,
+      cashRefundAmount: 0, receivableCancelAmount: 100, reason: 'b1-rac unabhängig' }));
+    reload();
+    return { id, cnId: cn.id };
+  };
+  const del = (cnId: string) => wirft(() => imHaus(() => { useCreditNoteStore.getState().loadCreditNotes(); useCreditNoteStore.getState().deleteCreditNote(cnId); }));
   neuerFall();
-  const id = verkauf(cid, [['pk27', 500]]);
-  const cn = imHaus(() => useCreditNoteStore.getState().createCreditNote({ invoiceId: id, customerId: cid, totalAmount: 100, vatAmount: 0,
-    cashRefundAmount: 0, receivableCancelAmount: 100, reason: 'b1-rac unabhängig' }));
-  reload();
-  einig('R-9a unabhängige Gutschrift 100 auf offener Rechnung', id, cid);
-  const v0 = stand0(id, cid);
-  const del = () => wirft(() => imHaus(() => { useCreditNoteStore.getState().loadCreditNotes(); useCreditNoteStore.getState().deleteCreditNote(cn.id); }));
-  useAuthStore.setState({ session: { userId: 'user-staff', branchId: 'branch-main', role: 'SALES' } as never });
-  const e1 = del();
-  useAuthStore.setState({ session: { userId: 'user-test', branchId: 'branch-main', role: 'ADMIN' } as never });
-  ok(e1 === cnS.CREDIT_NOTE_OWNER_ONLY, `R-9b ohne Owner-Recht abgelehnt (${e1})`);
-  unveraendert('R-9b', v0, id, cid);
+  const g = gutschrift('pk27');
+  einig('R-9a unabhängige Gutschrift 100 auf offener Rechnung', g.id, cid);
+  const v0 = stand0(g.id, cid);
+  // Nicht berechtigt: Manager (auch wenn usePermission().isAdmin ihn einschließt), Sales, Accountant, Altwerte.
+  for (const [rolle, user] of [['MANAGER', 'user-manager'], ['SALES', 'user-staff'], ['ACCOUNTANT', 'user-acc'], ['manager', 'user-alt-m'], ['backoffice', 'user-alt-b'], ['viewer', 'user-alt-v']]) {
+    als(user, rolle);
+    const e = del(g.cnId);
+    zurueck();
+    ok(e === cnS.CREDIT_NOTE_ADMIN_ONLY, `R-9b ${rolle} darf nicht löschen (${e})`);
+    unveraendert(`R-9b ${rolle}`, v0, g.id, cid);
+  }
   store.set('lataif_runtime_mode', 'client');
-  const e2 = del();
+  const e2 = del(g.cnId);
   store.delete('lataif_runtime_mode');
-  ok(e2 === cnS.CREDIT_NOTE_PRIMARY_ONLY, `R-9c im PC2-Modus abgelehnt (${e2})`);
-  unveraendert('R-9c', v0, id, cid);
-  const e3 = del();
-  reload();
-  const v = einig('R-9d Owner löscht die unabhängige Gutschrift', id, cid);
-  ok(e3 === '' && n(DB, 'SELECT COUNT(*) FROM credit_notes WHERE id = ?', [cn.id]) === 0 && eq(v.ar, 500), `R-9d zulässig wie bisher: Gutschrift weg, Forderung wieder 500 (${e3 || 'ok'})`);
+  ok(e2 === cnS.CREDIT_NOTE_PRIMARY_ONLY, `R-9c im PC2-Modus abgelehnt, auch für Admin (${e2})`);
+  unveraendert('R-9c', v0, g.id, cid);
+  // Berechtigt: der Owner (Rolle ADMIN), ein weiterer Admin-Benutzer, der Altwert 'owner'.
+  const faelle: Array<[string, string, string]> = [['Owner', 'user-owner', 'ADMIN'], ['weiterer Admin', 'user-admin-2', 'ADMIN'], ['Altwert owner', 'user-alt-o', 'owner']];
+  faelle.forEach(([wer, user, rolle], i) => {
+    const x = i === 0 ? g : gutschrift(['pk28', 'pk29'][i - 1]);
+    als(user, rolle);
+    const e = del(x.cnId);
+    zurueck();
+    reload();
+    const v = einig(`R-9d ${wer} löscht die unabhängige Gutschrift`, x.id, cid);
+    ok(e === '' && n(DB, 'SELECT COUNT(*) FROM credit_notes WHERE id = ?', [x.cnId]) === 0 && eq(v.ar, 500),
+      `R-9d ${wer} (${rolle}) darf: Gutschrift weg, Forderung wieder 500 (${e || 'ok'})`);
+  });
+  // Rückgabe-Gutschrift: für JEDE Rolle direkt unlöschbar (auch für den Owner).
+  const r = verkauf(cid, [['pk30', 400]]);
+  const rid = rueckgabe(r, zeilenVon(r));
+  const vr = stand0(r, cid);
+  for (const [rolle, user] of [['ADMIN', 'user-owner'], ['ADMIN', 'user-admin-2'], ['MANAGER', 'user-manager']]) {
+    als(user, rolle);
+    const e = del(cnVon(rid));
+    zurueck();
+    ok(e === (rolle === 'ADMIN' ? cnS.CREDIT_NOTE_VIA_RETURN : cnS.CREDIT_NOTE_ADMIN_ONLY), `R-9e Rückgabe-Gutschrift für ${user} (${rolle}) direkt unlöschbar (${e})`);
+    unveraendert(`R-9e ${user}`, vr, r, cid);
+  }
+  // Die Regel der Maske ist dieselbe.
+  ok(cnS.creditNoteDeleteBlock({}, 'ADMIN') === null && cnS.creditNoteDeleteBlock({}, 'owner') === null
+    && ['MANAGER', 'SALES', 'ACCOUNTANT', 'viewer', undefined].every((ro) => cnS.creditNoteDeleteBlock({}, ro) !== null)
+    && cnS.creditNoteDeleteBlock({ salesReturnId: 'x' }, 'ADMIN') !== null,
+  'R-9f Maske: Admin/Owner frei, alle anderen Rollen gesperrt, Rückgabe-Gutschrift für alle gesperrt');
 }
 
 // ══ Quelltext: Maske und Schreibwege ════════════════════════════════════════════════════════════════════════════
 {
   const det = src('src/pages/credit-notes/CreditNoteDetail.tsx');
-  ok(/const deleteBlock = creditNoteDeleteBlock\(cn, perm\.isOwner\);/.test(det) && /\{\.\.\.primaryOnlyDeleteProps\(\)\}\s*\{\.\.\.\(deleteBlock \? \{ disabled: true, title: deleteBlock/.test(det),
-    'Q-1 Gutschriftseite: „Delete" nur ohne Rückgabe und nur für den Owner (dieselbe Regel wie der Schreibweg)');
-  ok(cnS.creditNoteDeleteBlock({ salesReturnId: 'x' }, true) !== null && cnS.creditNoteDeleteBlock({}, false) !== null && cnS.creditNoteDeleteBlock({}, true) === null,
+  ok(/const deleteBlock = creditNoteDeleteBlock\(cn, perm\.role\);/.test(det) && /\{\.\.\.primaryOnlyDeleteProps\(\)\}\s*\{\.\.\.\(deleteBlock \? \{ disabled: true, title: deleteBlock/.test(det),
+    'Q-1 Gutschriftseite: „Delete" nur ohne Rückgabe und nur für die Rolle Admin (dieselbe Regel wie der Schreibweg)');
+  ok(cnS.creditNoteDeleteBlock({ salesReturnId: 'x' }, 'ADMIN') !== null && cnS.creditNoteDeleteBlock({}, 'MANAGER') !== null && cnS.creditNoteDeleteBlock({}, 'ADMIN') === null,
     'Q-2 Regel der Maske: Rückgabe-Gutschrift gesperrt, Nicht-Owner gesperrt, Owner bei unabhängiger Gutschrift frei');
   const bridge = ['src/core/bridge/sales-reversal-commands.ts', 'src/core/bridge/return-commands.ts', 'src/core/bridge/financial-commands.ts',
     'src/core/bridge/invoice-lifecycle-commands.ts', 'src/core/bridge/invoice-cancel-command.ts'].map(src).join('\n');

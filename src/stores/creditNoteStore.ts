@@ -37,13 +37,22 @@ export class CreditNoteDeleteRejected extends Error {
   }
 }
 export const CREDIT_NOTE_VIA_RETURN = 'CREDIT_NOTE_VIA_RETURN';
-export const CREDIT_NOTE_OWNER_ONLY = 'CREDIT_NOTE_OWNER_ONLY';
+export const CREDIT_NOTE_ADMIN_ONLY = 'CREDIT_NOTE_ADMIN_ONLY';
 export const CREDIT_NOTE_PRIMARY_ONLY = 'CREDIT_NOTE_PRIMARY_ONLY';
+const CREDIT_NOTE_ADMIN_ONLY_TEXT = 'Only an Admin (the owner or another user with the Admin role) can delete a credit note.';
+/**
+ * Owner 09.11.2026 — wer eine UNABHÄNGIGE Gutschrift (ohne Rückgabe) löschen darf: Admin und Owner. Im Rollenmodell der
+ * Software sind das dieselbe Rolle: `ADMIN` (in der Benutzerverwaltung „Admin"; `usePermission().isOwner`, Altwert
+ * 'owner'). Manager, Sales und Accountant nicht — auch nicht über `usePermission().isAdmin`, das den Manager einschließt.
+ */
+export function mayDeleteCreditNote(role: string | null | undefined): boolean {
+  return canonicalRole(role) === 'ADMIN';
+}
 /** Warum „Delete" für diese Gutschrift nicht angeboten wird — dieselben Regeln wie `deleteCreditNote` (ohne Datenbank). */
-export function creditNoteDeleteBlock(cn: { status?: string; salesReturnId?: string | null }, isOwner: boolean): string | null {
+export function creditNoteDeleteBlock(cn: { status?: string; salesReturnId?: string | null }, role: string | null | undefined): string | null {
   if (cn.status === 'CANCELLED') return 'This credit note is cancelled — it stays on record as a historical document.';
-  if (cn.salesReturnId) return 'This credit note belongs to a return — undo it with "Cancel Return" on the invoice (owner only).';
-  if (!isOwner) return 'Only the owner can delete a credit note.';
+  if (cn.salesReturnId) return 'This credit note belongs to a return — undo it with "Cancel Return" on the invoice (Admin only).';
+  if (!mayDeleteCreditNote(role)) return CREDIT_NOTE_ADMIN_ONLY_TEXT;
   return null;
 }
 
@@ -227,11 +236,11 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
     if (isClientMode()) {
       throw new CreditNoteDeleteRejected(CREDIT_NOTE_PRIMARY_ONLY, 'A credit note is deleted on the main computer only.');
     }
-    // V3 — Owner-only, aus der Sitzung des Primary (wie „Cancel Return" und das Löschen einer Rechnung).
+    // V3 / Owner 09.11.2026 — nur Admin (und damit Owner), aus der Sitzung des Primary; Manager, Sales, Accountant nicht.
     let actorRole: string | undefined;
     try { actorRole = useAuthStore.getState().role(); } catch { actorRole = undefined; }
-    if (canonicalRole(actorRole) !== 'ADMIN') {
-      throw new CreditNoteDeleteRejected(CREDIT_NOTE_OWNER_ONLY, 'Only the owner can delete a credit note.');
+    if (!mayDeleteCreditNote(actorRole)) {
+      throw new CreditNoteDeleteRejected(CREDIT_NOTE_ADMIN_ONLY, CREDIT_NOTE_ADMIN_ONLY_TEXT);
     }
     const db = getDatabase();
 
@@ -251,7 +260,7 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
     if (zuRueckgabe) {
       const nr = String(zuRueckgabe.return_number ?? '');
       throw new CreditNoteDeleteRejected(CREDIT_NOTE_VIA_RETURN,
-        `This credit note belongs to return ${nr || '(unknown)'} — it is not deleted directly. Undo it with "Cancel Return" on the invoice (owner only). Nothing was changed.`);
+        `This credit note belongs to return ${nr || '(unknown)'} — it is not deleted directly. Undo it with "Cancel Return" on the invoice (Admin only). Nothing was changed.`);
     }
 
     // Credit-Modell Slice 3.5 / B2 — Guard GANZ OBEN: ein CN darf NICHT geloescht werden, wenn
