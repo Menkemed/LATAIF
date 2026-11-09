@@ -33,7 +33,7 @@ import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { assertInvoiceHouse, localInvoiceBranch } from '@/core/invoices/invoice-house-guards';
 import { OPENING_CUTOFF_DATE } from '@/core/parties/opening-balances';
 import { paidFilsOfDebt, reconcileDebtStatus } from '@/core/finance/debt-status';
-import { DEBT_OFFSET_METHOD, DEBT_OFFSET_SOURCE, OffsetRestoreError } from './party-offset-restore';
+import { DEBT_OFFSET_METHOD, DEBT_OFFSET_SOURCE, OffsetRestoreError, assertOffsetUndoSafe } from './party-offset-restore';
 import { invoiceOpenFils, isBorrowedDirection as borrowed, isDebtClosed as debtClosed, OFFSET_CLOSED_INVOICE } from './party-offset-reads';
 
 export { DEBT_OFFSET_METHOD, DEBT_OFFSET_SOURCE } from './party-offset-restore';
@@ -94,7 +94,13 @@ export interface DebtOffsetCreated {
 }
 
 /** „Settle Balance" — eine Rechnung mit EINEM Darlehen verrechnen. In der Transaktion des Aufrufers. */
-export function createDebtOffsetInHouse(input: DebtOffsetInput, ctx: OffsetCtx): DebtOffsetCreated {
+/**
+ * CUSTOMER ACCOUNT C — eine Zuordnung innerhalb einer gemeinsamen Verrechnung (`settleBalanceInHouse`): die Zeile trägt die
+ * gemeinsame Nummer (`settlement_number`) und ihre eigene `STL-…/n`. Ohne Angabe (B1, Einzelverrechnung): eigene STL-Nummer.
+ */
+export interface OffsetSettlementLink { settlementNumber: string; line: number }
+
+export function createDebtOffsetInHouse(input: DebtOffsetInput, ctx: OffsetCtx, link?: OffsetSettlementLink): DebtOffsetCreated {
   assertInvoiceHouse(ctx.branchId);
   const amountF = F(input.amount);
   if (typeof input.amount !== 'number' || !Number.isFinite(input.amount) || amountF <= 0 || Math.abs(input.amount * 1000 - amountF) > 1e-6) {
@@ -146,7 +152,7 @@ export function createDebtOffsetInHouse(input: DebtOffsetInput, ctx: OffsetCtx):
   useInvoiceStore.getState().loadInvoices();
   const paymentId = uuid();
   // Die Nummer der Verrechnung zuerst: beide Zeilen nennen sie (Gegenbeleg auf Rechnung UND Darlehen).
-  const offsetNumber = getNextDocumentNumber('STL');
+  const offsetNumber = link ? `${link.settlementNumber}/${link.line}` : getNextDocumentNumber('STL');
   useInvoiceStore.getState().recordPayment(
     input.invoiceId, B(amountF), DEBT_OFFSET_METHOD, `Offset ${offsetNumber} · loan ${loanNumber} · no cash`, input.specialMarkOnFinal, undefined,
     paymentId, false, { receivedAt, createdAt },
@@ -174,9 +180,9 @@ export function createDebtOffsetInHouse(input: DebtOffsetInput, ctx: OffsetCtx):
   const offsetId = uuid();
   db.run(
     `INSERT INTO party_offsets (id, branch_id, offset_number, customer_id, receivable_type, receivable_id, receivable_payment_id,
-       payable_type, payable_id, payable_payment_id, amount, offset_date, status, note, created_at, created_by)
-     VALUES (?, ?, ?, ?, 'INVOICE', ?, ?, 'DEBT', ?, ?, ?, ?, 'ACTIVE', NULL, ?, ?)`,
-    [offsetId, ctx.branchId, offsetNumber, String(inv.customer_id), input.invoiceId, paymentId, input.debtId, debtPaymentId, B(amountF), tag, createdAt, userId || null],
+       payable_type, payable_id, payable_payment_id, amount, offset_date, status, note, created_at, created_by, settlement_number)
+     VALUES (?, ?, ?, ?, 'INVOICE', ?, ?, 'DEBT', ?, ?, ?, ?, 'ACTIVE', NULL, ?, ?, ?)`,
+    [offsetId, ctx.branchId, offsetNumber, String(inv.customer_id), input.invoiceId, paymentId, input.debtId, debtPaymentId, B(amountF), tag, createdAt, userId || null, link?.settlementNumber ?? null],
   );
   trackInsert('party_offsets', offsetId, { offsetNumber, invoiceId: input.invoiceId, debtId: input.debtId, amount: B(amountF) });
   logAuditOrThrow({
@@ -207,6 +213,8 @@ export function reverseDebtOffsetInHouse(input: { offsetId: string; reason?: str
   const o = query('SELECT * FROM party_offsets WHERE id = ? AND branch_id = ?', [String(input.offsetId ?? ''), ctx.branchId])[0];
   if (!o) throw new InvoiceActionRejected(OFFSET_NOT_FOUND, 'no such offset in this branch');
   if (String(o.status) !== 'ACTIVE') throw new InvoiceActionRejected(OFFSET_ALREADY_REVERSED, `${String(o.offset_number)} is already reversed`);
+  // CUSTOMER ACCOUNT C — keine doppelte Erstattung: eine spätere Rückgabe/Gutschrift an der Rechnung zuerst stornieren.
+  assertOffsetUndoSafe(o);
   const paymentId = String(o.receivable_payment_id);
   if (!query('SELECT 1 FROM payments WHERE id = ?', [paymentId])[0]) throw new InvoiceActionRejected(OFFSET_NOT_FOUND, 'the invoice payment of this offset is gone');
   useInvoiceStore.getState().loadInvoices();

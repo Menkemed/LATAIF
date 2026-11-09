@@ -238,6 +238,10 @@ export const OPERATION_PERMISSIONS: Readonly<Record<string, PermissionRule | nul
   'purchases.correct': owner('PurchaseDetail Edit: perm.isOwner (date, supplier, prices, quantities)'),
   'purchases.void_payment': owner('PurchaseDetail: perm.isOwner (void a payment)'),
   'purchases.correct_payment_date': owner('PurchaseDetail: perm.isOwner (correct a payment date)'),
+  // CUSTOMER ACCOUNT C — „Settle Balance" und „Undo settlement" im Kundenkonto: dasselbe Recht wie „Record Payment"
+  // (und wie „Remove offset" auf der Rechnung, `invoices.delete_payment`). Keine neue Rolle.
+  'customers.settle_balance': RECORD_PAYMENTS,
+  'customers.settlement_reverse': RECORD_PAYMENTS,
   // MEDIA-INBOX — dasselbe Recht wie das Anlegen eines Einkaufs: wer einkaufen darf, darf ein Foto
   // in den Posteingang legen. Am Telefon gibt es keine Maske, die ein eigenes Recht prüfen könnte;
   // die Rolle des geprüften Absenders entscheidet.

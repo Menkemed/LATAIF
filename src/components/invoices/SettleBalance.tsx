@@ -186,7 +186,10 @@ export function SettleBalanceDialog({ open, invoice, choice, onClose, onDone }: 
   );
 }
 
-/** Die Verrechnungen einer Rechnung (wirksam und aufgehoben) mit Gegenbeleg; „Remove offset" nur für eine wirksame. */
+/**
+ * Die Verrechnungen einer Rechnung (wirksam und aufgehoben) mit Gegenbeleg; „Remove offset" nur für eine wirksame.
+ * CUSTOMER ACCOUNT C — auch die Zuordnungen aus „Settle Balance" (STL-…/n; Gegenbeleg Darlehen oder Store Credit).
+ */
 export function InvoiceOffsetList({ offsets, canRemove, busy, onRemove }: {
   offsets: OffsetRef[]; canRemove: boolean; busy: boolean; onRemove: (o: OffsetRef) => void;
 }) {
@@ -200,8 +203,8 @@ export function InvoiceOffsetList({ offsets, canRemove, busy, onRemove }: {
           <div key={o.offsetId} data-invoice-offset={o.offsetNumber} data-invoice-offset-status={o.status}
             className="flex justify-between items-center" style={{ padding: '5px 0', borderBottom: '1px solid #EEF0F2', fontSize: 11, gap: 8 }}>
             <span style={{ color: aktiv ? '#4B5563' : '#9CA3AF', minWidth: 0 }}>
-              {tag(o.offsetDate)} · {o.offsetNumber} · loan{' '}
-              <Link to={`/debts?filter=all&loan=${encodeURIComponent(o.loanNumber)}`} style={{ color: 'inherit', textDecoration: 'underline' }}>{o.loanNumber}</Link>
+              {tag(o.offsetDate)} · {o.offsetNumber}{o.settlementNumber ? ' (settlement)' : ''} · {o.payableType === 'STORE_CREDIT' ? o.sourceLabel : (<>loan{' '}
+              <Link to={`/debts?filter=all&loan=${encodeURIComponent(o.loanNumber)}`} style={{ color: 'inherit', textDecoration: 'underline' }}>{o.loanNumber}</Link></>)}
               {' '}· Offset – no cash{aktiv ? '' : ` · reversed${o.reverseReason ? ` (${o.reverseReason})` : ''}`}
             </span>
             <span className="flex items-center" style={{ gap: 8, flexShrink: 0 }}>

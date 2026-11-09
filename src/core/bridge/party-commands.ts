@@ -7,6 +7,9 @@
 //   • `opening_balances.create`     (Owner)     einen Eröffnungsposten erfassen — Beleg, keine Buchung.
 //   • `opening_balances.cancel`     (Owner)     einen noch nicht gebuchten Eröffnungsposten stornieren.
 //   • `customers.settle`            (Zahlungen) „Receive Payment" über offene Rechnungen — der vorhandene Zahlungsweg.
+//   • `customers.settle_balance`    (Zahlungen) CUSTOMER ACCOUNT C — „Settle Balance": Rechnungen gegen Store Credit / We
+//                                   Borrowed desselben Kunden, ohne Geld, eine STL-Nummer, eine Transaktion.
+//   • `customers.settlement_reverse` (Zahlungen) eine ganze STL-Verrechnung aufheben (je Zuordnung `deletePayment`).
 //
 // PC2 schickt nur Absicht. Prüfung, Verteilung, Beleg, Buchung, Protokoll, Sync und das Replay einer schon ausgeführten
 // Kennung macht am Primary DIESELBE Hausfolge wie an der Maske des Primary, in der Transaktion des Auftrags. Die Rolle
@@ -28,11 +31,15 @@ import {
   type OpeningCtx, type OpeningItem,
 } from '@/core/parties/opening-balances';
 import { settleCustomerInHouse, type CustomerSettleRequest } from '@/core/parties/customer-settlement';
+import { OP_CUSTOMERS_SETTLE_BALANCE, OP_CUSTOMERS_SETTLEMENT_REVERSE } from '@/core/offsets/party-settlement-reads';
+import { reverseSettlementInHouse, settleBalanceInHouse, type SettleBalanceRequest, type SettlementReverseRequest } from '@/core/offsets/party-settlement';
+import { OffsetRestoreError } from '@/core/offsets/party-offset-restore';
 import { mayReadOpeningAccounting } from '@/core/accounting/opening-accounting';
 
 export const OP_OPENING_CREATE = 'opening_balances.create';
 export const OP_OPENING_CANCEL = 'opening_balances.cancel';
 export const OP_CUSTOMERS_SETTLE = 'customers.settle';
+export { OP_CUSTOMERS_SETTLE_BALANCE, OP_CUSTOMERS_SETTLEMENT_REVERSE };
 export { OP_PARTIES_BALANCES_GET, OP_PARTIES_ACCOUNT_GET, OP_PAGE_OPENING_BALANCES_GET };
 
 export class PartyPayloadError extends Error {
@@ -137,6 +144,76 @@ export function runCustomerSettle(deps: EngineDeps, identity: CommandIdentity, r
   });
 }
 
+// ── CUSTOMER ACCOUNT C — „Settle Balance" und ihre Aufhebung ─────────────────
+export const SETTLE_BALANCE_KEYS = ['customerId', 'invoiceIds', 'sourceIds', 'settlementDate', 'expectedStamp', 'expectedTotal', 'finalNumbers'] as const;
+export const SETTLEMENT_REVERSE_KEYS = ['settlementNumber', 'reason', 'expectedActiveLines'] as const;
+
+const idList = (v: unknown, name: string): string[] => {
+  if (!Array.isArray(v) || v.length > 500 || !v.every((x) => typeof x === 'string' && x.trim() !== '')) throw new PartyPayloadError(`${name} must be a list of ids`);
+  return v as string[];
+};
+
+/** Streng: nur Absicht (Auswahl, Tag, gesehener Stand, gesehene Summe, Endnummernwahl). Zuordnung und Buchung rechnet der Primary. */
+export function parseSettleBalance(raw: unknown): SettleBalanceRequest {
+  const r = only(raw, SETTLE_BALANCE_KEYS);
+  if (typeof r.customerId !== 'string' || !r.customerId.trim()) throw new PartyPayloadError('customerId is required');
+  if (r.settlementDate !== undefined && typeof r.settlementDate !== 'string') throw new PartyPayloadError('settlementDate must be a date (YYYY-MM-DD)');
+  if (typeof r.expectedStamp !== 'string' || r.expectedStamp.length > 64) throw new PartyPayloadError('expectedStamp must be text');
+  if (typeof r.expectedTotal !== 'number' || !Number.isFinite(r.expectedTotal)) throw new PartyPayloadError('expectedTotal must be a number');
+  let finalNumbers: Record<string, 'normal' | 'special'> | undefined;
+  if (r.finalNumbers !== undefined) {
+    if (!isPlain(r.finalNumbers)) throw new PartyPayloadError('finalNumbers must be an object');
+    finalNumbers = {};
+    for (const [k, v] of Object.entries(r.finalNumbers)) {
+      if (v !== 'normal' && v !== 'special') throw new PartyPayloadError('a final number type is normal or special');
+      finalNumbers[k] = v;
+    }
+  }
+  return {
+    customerId: r.customerId, invoiceIds: idList(r.invoiceIds, 'invoiceIds'), sourceIds: idList(r.sourceIds, 'sourceIds'),
+    ...(r.settlementDate ? { settlementDate: r.settlementDate as string } : {}),
+    expectedStamp: r.expectedStamp, expectedTotal: r.expectedTotal, ...(finalNumbers ? { finalNumbers } : {}),
+  };
+}
+
+export function parseSettlementReverse(raw: unknown): SettlementReverseRequest {
+  const r = only(raw, SETTLEMENT_REVERSE_KEYS);
+  if (typeof r.settlementNumber !== 'string' || !r.settlementNumber.trim() || r.settlementNumber.length > 64) throw new PartyPayloadError('settlementNumber is required');
+  if (r.reason !== undefined && typeof r.reason !== 'string') throw new PartyPayloadError('reason must be text');
+  if (r.expectedActiveLines !== undefined && (typeof r.expectedActiveLines !== 'number' || !Number.isInteger(r.expectedActiveLines) || r.expectedActiveLines < 1)) {
+    throw new PartyPayloadError('expectedActiveLines must be a positive whole number');
+  }
+  return {
+    settlementNumber: r.settlementNumber, ...(r.reason ? { reason: r.reason as string } : {}),
+    ...(r.expectedActiveLines !== undefined ? { expectedActiveLines: r.expectedActiveLines as number } : {}),
+  };
+}
+
+/** Ein fachliches Nein der Verrechnung — eingefroren (Wiederholung bekommt dasselbe). */
+function verrechnungsUrteil(err: unknown): never {
+  if (err instanceof InvoiceActionRejected || err instanceof OffsetRestoreError) throw new CommandRejected(err.code, err.message);
+  throw err;
+}
+
+export function runSettleBalance(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const req = parseSettleBalance(raw);
+  return runRemoteCommand(deps, identity, () => {
+    assertHouseBranch(identity);
+    // DIESELBE Hausfolge wie „Confirm settlement" am Primary — alle Zuordnungen in der Transaktion dieses Auftrags.
+    try { return settleBalanceInHouse(req, { branchId: identity.branchId, userId: identity.userId }) as unknown as Record<string, unknown>; }
+    catch (err) { return verrechnungsUrteil(err); }
+  });
+}
+
+export function runSettlementReverse(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  const req = parseSettlementReverse(raw);
+  return runRemoteCommand(deps, identity, () => {
+    assertHouseBranch(identity);
+    try { return reverseSettlementInHouse(req, { branchId: identity.branchId }) as unknown as Record<string, unknown>; }
+    catch (err) { return verrechnungsUrteil(err); }
+  });
+}
+
 async function execute(run: () => Promise<CommandOutcome>): Promise<Record<string, unknown>> {
   let outcome: CommandOutcome;
   try {
@@ -179,6 +256,21 @@ registerCommand(OP_CUSTOMERS_SETTLE, {
   handler: (p, a) => {
     const actor = needActor(OP_CUSTOMERS_SETTLE, a);
     return execute(() => runCustomerSettle(partyDeps(), { ...actor, op: OP_CUSTOMERS_SETTLE }, bodyOf(p)));
+  },
+});
+
+registerCommand(OP_CUSTOMERS_SETTLE_BALANCE, {
+  kind: 'mutation',
+  handler: (p, a) => {
+    const actor = needActor(OP_CUSTOMERS_SETTLE_BALANCE, a);
+    return execute(() => runSettleBalance(partyDeps(), { ...actor, op: OP_CUSTOMERS_SETTLE_BALANCE }, bodyOf(p)));
+  },
+});
+registerCommand(OP_CUSTOMERS_SETTLEMENT_REVERSE, {
+  kind: 'mutation',
+  handler: (p, a) => {
+    const actor = needActor(OP_CUSTOMERS_SETTLEMENT_REVERSE, a);
+    return execute(() => runSettlementReverse(partyDeps(), { ...actor, op: OP_CUSTOMERS_SETTLEMENT_REVERSE }, bodyOf(p)));
   },
 });
 

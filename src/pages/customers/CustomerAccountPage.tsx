@@ -3,6 +3,10 @@
 // Partnerkonto, Gold getrennt, Hinweise auf nicht verknüpfte Posten und der Kontoauszug. NUR LESEN — hier wird nichts
 // gebucht, nichts verrechnet, nichts geändert. Die Zahlen kommen aus `parties.account.get` (view = customer_account):
 // am Primary lokal, am PC2 vom Primary.
+//
+// CUSTOMER ACCOUNT C — „Settle Balance": verrechnet offene Rechnungen mit Store Credit und We Borrowed desselben Kunden
+// (Vorschlag, Häkchen, eine Bestätigung, eine STL-Nummer, keine Geldbewegung). Die Übersicht „Settlements" zeigt jede
+// Verrechnung mit allen Zuordnungen; „Undo settlement" hebt eine ganze STL in einem Zug auf.
 // ════════════════════════════════════════════════════════════════════════════
 import { useMemo, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
@@ -16,6 +20,66 @@ import { CUSTOMER_ACCOUNT_VIEW, type AccountDoc, type CustomerAccount, type Debt
 import { useSharedWrites, fehlertext, type WriteAdapters } from '@/core/data/shared-write';
 import { saveDebtAssignCustomer } from '@/core/finance/money-save';
 import { savePartnerLinkToCustomer } from '@/core/masterdata/masterdata-save';
+import { usePermission } from '@/hooks/usePermission';
+import { SettleBalanceModal, type NotOfferedItem } from '@/components/parties/SettleBalanceModal';
+import type { SettlementView } from '@/core/offsets/party-settlement-reads';
+import { reverseSettlementOnPrimary, settlementReverseBody, type SettlementBooked, type SettlementReversed } from '@/core/offsets/party-settlement';
+
+/** Warum ein offener Posten, den LATAIF schuldet, in „Settle Balance" NICHT angeboten wird (Owner 09.11.2026: nur Store Credit + We Borrowed). */
+const NICHT_ANGEBOTEN: Partial<Record<AccountDoc['kind'], string>> = {
+  PURCHASE: 'purchases are not offset yet (waits for the accountant)',
+  SUPPLIER_EXPENSE: 'supplier expenses are not offset yet (waits for the accountant)',
+  CONSIGNMENT_PAYOUT: 'consignment payouts are not offset yet (waits for the accountant)',
+  PARTNER_PAYABLE: 'partner amounts are settled in the partner account',
+  ORDER_DEPOSIT: 'bound to its order — applied with that order’s invoice',
+  OPENING_ADVANCE: 'opening balance — waits for the accountant',
+  OPENING_SUPPLIER_PAYABLE: 'opening balance — waits for the accountant',
+  REFUND_DUE: 'a refund to pay out, not store credit',
+  RETURN_REFUND: 'a refund to pay out, not store credit',
+};
+
+/** CUSTOMER ACCOUNT C — die Verrechnungen dieses Kunden mit allen Zuordnungen; „Undo settlement" für eine noch wirksame. */
+function Settlements({ list, canUndo, busy, onUndo }: { list: SettlementView[]; canUndo: boolean; busy: boolean; onUndo: (s: SettlementView) => void }) {
+  if (list.length === 0) return <p style={{ fontSize: 13, color: GREY, marginTop: 6 }} data-settlements-none>No settlement yet.</p>;
+  return (
+    <div style={{ marginTop: 6 }} data-settlements={list.length}>
+      {list.map((st) => (
+        <div key={st.number} data-settlement={st.number} data-settlement-status={st.status} style={{ borderTop: `1px solid ${LINE}`, padding: '10px 0' }}>
+          <div className="flex items-center justify-between" style={{ gap: 12, flexWrap: 'wrap' }}>
+            <span style={{ fontSize: 13 }}>
+              <b>{st.number}</b> <span style={{ color: GREY }}>· {fmtDate(st.date)} · {st.single ? 'single offset on the invoice' : `${st.lines.length} offsets`} · no cash</span>
+              {st.status !== 'ACTIVE' && <span style={{ marginLeft: 8, fontSize: 11, color: st.status === 'REVERSED' ? GREY : AMBER }}>{st.status === 'REVERSED' ? 'undone' : 'partly undone'}</span>}
+            </span>
+            <span className="flex items-center" style={{ gap: 10 }}>
+              <span className="font-mono" style={{ fontSize: 13, color: st.status === 'REVERSED' ? GREY : INK }}><Bhd v={st.status === 'REVERSED' ? st.total : st.activeTotal} /> BHD</span>
+              {st.status !== 'REVERSED' && canUndo && (
+                <button onClick={() => onUndo(st)} disabled={busy} className="cursor-pointer" data-settlement-undo={st.number}
+                  style={{ background: '#fff', border: `1px solid ${LINE}`, borderRadius: 8, padding: '4px 10px', fontSize: 12, color: '#AA6E6E' }}>
+                  Undo settlement
+                </button>
+              )}
+            </span>
+          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse', marginTop: 6 }}>
+            <tbody>
+              {st.lines.map((l) => (
+                <tr key={l.offsetId} data-settlement-line={l.offsetNumber} data-settlement-line-status={l.status}>
+                  <td style={{ ...td, fontSize: 12, color: l.status === 'ACTIVE' ? INK : GREY }}>{l.offsetNumber}</td>
+                  <td style={{ ...td, fontSize: 12 }}>{l.sourceKind === 'STORE_CREDIT'
+                    ? (l.sourceNumber === 'Store credit' ? 'Store credit' : `Store credit ${l.sourceNumber}`)
+                    : <>We Borrowed <Link to={`/debts?filter=all&loan=${encodeURIComponent(l.sourceNumber)}`} style={{ color: INK }}>{l.sourceNumber}</Link></>}</td>
+                  <td style={{ ...td, fontSize: 12 }}>→ <Link to={`/invoices/${l.invoiceId}`} style={{ color: INK }}>{l.invoiceNumber}</Link></td>
+                  <td style={{ ...td, fontSize: 12, color: GREY }}>{l.status === 'ACTIVE' ? 'Offset – no cash' : `removed${l.reverseReason ? ` (${l.reverseReason})` : ''}`}</td>
+                  <td style={{ ...num, fontSize: 12, textDecoration: l.status === 'ACTIVE' ? 'none' : 'line-through', color: l.status === 'ACTIVE' ? INK : GREY }}><Bhd v={l.amount} /></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 const INK = '#0F0F10';
 const GREY = '#6B7280';
@@ -195,6 +259,36 @@ export function CustomerAccountPage() {
   const owes = useMemo(() => acc?.docs.filter((d) => d.side === 'OWES_US') ?? [], [acc]);
   const weOwe = useMemo(() => acc?.docs.filter((d) => d.side === 'WE_OWE') ?? [], [acc]);
   const possiblePartners = acc?.hints.partners ?? [];
+  // CUSTOMER ACCOUNT C — „Settle Balance": dieselbe Auskunft liefert die angebotenen Posten, den Fingerabdruck und die Verrechnungen.
+  const perm = usePermission();
+  const settle = read?.settleBalance ?? null;
+  const [settleOpen, setSettleOpen] = useState(false);
+  const [settleNotice, setSettleNotice] = useState<string | null>(null);
+  const [gebucht, setGebucht] = useState<string | null>(null);
+  const kannVerrechnen = !!settle && settle.invoices.length > 0 && settle.sources.length > 0;
+  const nichtAngeboten = useMemo<NotOfferedItem[]>(() => (acc?.docs ?? [])
+    .filter((d) => d.side === 'WE_OWE' && d.open > 0.0045 && NICHT_ANGEBOTEN[d.kind])
+    .map((d) => ({ key: d.key, number: d.number, label: d.kindLabel, open: d.open, why: NICHT_ANGEBOTEN[d.kind] as string })), [acc]);
+  async function verrechnungAufheben(st: SettlementView) {
+    setAktionFehler('');
+    setGebucht(null);
+    const ok = await window.confirm(`Undo ${st.number}?\n\nEvery offset of this settlement that is still active (${st.activeLines}, ${st.activeTotal.toFixed(3)} BHD) is removed at once: the invoices are open again by these amounts, the store credit and the loans are open again. No cash moves. Final invoice numbers stay as they are.`);
+    if (!ok) return;
+    const req = { settlementNumber: st.number, expectedActiveLines: st.activeLines, reason: 'settlement undone in the client account' };
+    const r = await w.save<SettlementReversed>('customers.settlement_reverse', {
+      local: () => reverseSettlementOnPrimary(req),
+      remote: () => settlementReverseBody(req),
+    });
+    if (r.kind !== 'ok') { setAktionFehler(`Could not undo ${st.number}: ${fehlertext(r)}`); setTick((t) => t + 1); return; }
+    setGebucht(`${st.number} undone — ${r.value.reversedLines} offset${r.value.reversedLines === 1 ? '' : 's'}, ${r.value.amount.toFixed(3)} BHD open again on both sides. No cash moved.`);
+    setTick((t) => t + 1);
+  }
+  function verrechnet(b: SettlementBooked) {
+    setSettleOpen(false);
+    setSettleNotice(null);
+    setGebucht(`Settlement ${b.settlementNumber} booked — ${b.lines.length} offset${b.lines.length === 1 ? '' : 's'}, ${b.total.toFixed(3)} BHD, dated ${fmtDate(b.settlementDate)}. No cash moved.`);
+    setTick((t) => t + 1);
+  }
 
   // CUSTOMER ACCOUNT A2 — die beiden ausdrücklichen Zuordnungen aus dem Konto heraus, je mit Rückfrage: ein Darlehen ohne
   // Kunde diesem Kunden zuordnen (P2), einen möglichen Partner mit diesem Kunden verknüpfen (P1). Danach neu lesen.
@@ -229,10 +323,19 @@ export function CustomerAccountPage() {
           <button onClick={goBack} className="flex items-center gap-2 cursor-pointer" style={{ background: 'none', border: 'none', color: GREY, fontSize: 13 }}>
             <ArrowLeft size={16} /> Back
           </button>
-          <button onClick={() => setTick((t) => t + 1)} className="flex items-center gap-2 cursor-pointer" data-account-refresh
-            style={{ background: 'none', border: `1px solid ${LINE}`, borderRadius: 8, padding: '6px 14px', fontSize: 12, color: INK }}>
-            <RefreshCw size={13} /> Refresh
-          </button>
+          <span className="flex items-center gap-2">
+            {acc && perm.canRecordPayments && (
+              <button onClick={() => { setGebucht(null); setSettleNotice(null); setSettleOpen(true); }} disabled={!kannVerrechnen} data-account-settle
+                title={kannVerrechnen ? 'Offset open invoices with store credit and We Borrowed — no cash' : 'Nothing to offset: it needs an open invoice and open store credit or We Borrowed of this client'}
+                className="cursor-pointer" style={{ background: kannVerrechnen ? INK : '#E5E7EB', color: kannVerrechnen ? '#FFF' : GREY, border: 'none', borderRadius: 8, padding: '7px 16px', fontSize: 12, fontWeight: 600 }}>
+                Settle Balance
+              </button>
+            )}
+            <button onClick={() => setTick((t) => t + 1)} className="flex items-center gap-2 cursor-pointer" data-account-refresh
+              style={{ background: 'none', border: `1px solid ${LINE}`, borderRadius: 8, padding: '6px 14px', fontSize: 12, color: INK }}>
+              <RefreshCw size={13} /> Refresh
+            </button>
+          </span>
         </div>
 
         {!acc ? (
@@ -255,6 +358,11 @@ export function CustomerAccountPage() {
               <div style={{ border: '1px dashed #F5C78E', background: '#FFFBF3', borderRadius: 12, padding: '12px 14px', marginBottom: 18, fontSize: 13 }} data-account-incomplete>
                 <b>The balance may be incomplete.</b>
                 <ul style={{ margin: '6px 0 0 18px', padding: 0, color: '#7A5B1E' }}>{acc.incomplete.map((t) => <li key={t}>{t}</li>)}</ul>
+              </div>
+            )}
+            {gebucht && (
+              <div style={{ border: '1px solid #A7F3D0', background: '#ECFDF5', color: '#065F46', borderRadius: 10, padding: '10px 14px', marginBottom: 18, fontSize: 13 }} data-account-settled>
+                {gebucht}
               </div>
             )}
             {aktionFehler && (
@@ -358,6 +466,14 @@ export function CustomerAccountPage() {
               </div>
             )}
 
+            <Card style={{ marginBottom: 18 }}>
+              <div className="flex items-center justify-between" style={{ gap: 12, flexWrap: 'wrap' }}>
+                <h3 style={{ fontSize: 15, fontWeight: 600, color: INK }}>Settlements</h3>
+                <span style={{ fontSize: 12, color: GREY }}>Offsets without cash. Undo removes every active offset of a settlement at once; single lines can also be removed on the invoice.</span>
+              </div>
+              <Settlements list={settle?.settlements ?? []} canUndo={perm.canRecordPayments} busy={w.busy} onUndo={(st) => { void verrechnungAufheben(st); }} />
+            </Card>
+
             <Card>
               <div className="flex items-center justify-between" style={{ marginBottom: 8, gap: 12, flexWrap: 'wrap' }}>
                 <h3 style={{ fontSize: 15, fontWeight: 600, color: INK }}>Account statement</h3>
@@ -366,6 +482,22 @@ export function CustomerAccountPage() {
               {acc.statement.length === 0 ? <p style={{ fontSize: 13, color: GREY }}>No transactions yet.</p> : <Statement rows={acc.statement} showSettled={showSettled} />}
             </Card>
           </>
+        )}
+        {settleOpen && acc && settle && (
+          <SettleBalanceModal
+            key={settle.stamp}
+            customerName={acc.customer.name}
+            data={settle}
+            totals={{ owesUs: acc.owesUs.total, weOwe: acc.weOwe.total, net: acc.net }}
+            notOffered={nichtAngeboten}
+            notice={settleNotice}
+            onClose={() => { setSettleOpen(false); setSettleNotice(null); }}
+            onDone={verrechnet}
+            onStale={() => {
+              setSettleNotice('The open items changed in the meantime (another payment, offset or change). Nothing was booked — this is the proposal for the current state. Check it and confirm again.');
+              setTick((t) => t + 1);
+            }}
+          />
         )}
       </div>
     </div>

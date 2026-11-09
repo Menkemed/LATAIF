@@ -59,6 +59,8 @@ import type { CommandIdentity } from './command-ledger';
 import { BusinessError, registerCommand, type CommandActor } from './command-registry';
 import { VAT_PERIOD_FILED, VatPeriodFiled } from '@/core/tax/vat-period-lock';
 import { CardFeeNotConfigured } from '@/core/finance/card-fees';
+import { assertOffsetUndoSafe } from '@/core/offsets/party-offset-restore';
+import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 
 export const OP_INVOICES_APPLY_CREDIT = 'invoices.apply_credit';
 export const OP_INVOICES_UPDATE_PAYMENT = 'invoices.update_payment';
@@ -386,6 +388,14 @@ export function runDeletePayment(deps: EngineDeps, identity: CommandIdentity, ra
     liveInvoice(req.invoiceId, identity.branchId);
     livePayment(req.paymentId, req.invoiceId, true);
     assertRevision('invoices', req.invoiceId, req.expectedRevision, 'INVOICE_NOT_FOUND');
+    // CUSTOMER ACCOUNT C — eine Verrechnung („Remove offset" vom PC2): keine doppelte Erstattung nach einer späteren Rückgabe.
+    const verrechnung = query("SELECT * FROM party_offsets WHERE receivable_payment_id = ? AND status = 'ACTIVE'", [req.paymentId])[0];
+    if (verrechnung) {
+      try { assertOffsetUndoSafe(verrechnung); } catch (err) {
+        if (err instanceof InvoiceActionRejected) throw new CommandRejected(err.code, err.message);
+        throw err;
+      }
+    }
     useInvoiceStore.getState().loadInvoices();
     try {
       // Die Schutzregeln des Hauses gelten unverändert: eine Zahlung, deren

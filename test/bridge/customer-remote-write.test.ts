@@ -357,7 +357,7 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
   const known = registry.knownCommands();
   const reads = known.filter((o) => o.endsWith('.list') || o.endsWith('.get'));
   const mutations = registry.ALLOWED_MUTATIONS;
-  ok(mutations.length === 127 && mutations.includes('invoices.create')
+  ok(mutations.length === 129 && mutations.includes('invoices.create')
     && mutations.includes('customers.create') && mutations.includes('customers.update'),
     `ALLOWLIST genau vierzig Mutationen (${mutations.join(', ')})`);
   // CENTRAL-UI-PARITY R1: dazu 48 typisierte Auskuenfte mit gepruefter Identitaet und ohne Nebenwirkung
@@ -374,7 +374,7 @@ const WISH = { firstName: 'Ali', lastName: 'Hassan', phone: '+973 1234', email: 
 
   const rs = src('src-tauri/src/bridge.rs');
   const list = rs.slice(rs.indexOf('pub const REMOTE_OPS'), rs.indexOf('];', rs.indexOf('pub const REMOTE_OPS')));
-  ok((list.match(/OP_[A-Z_]+/g) || []).length === 214, 'ALLOWLIST Rust kennt dieselben zweihundertvierzehn Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION)');
+  ok((list.match(/OP_[A-Z_]+/g) || []).length === 216, 'ALLOWLIST Rust kennt dieselben zweihundertsechzehn Namen (PRE-G5 + PARTNER-ITEMS + BULK METAL V1 + STOCK CORRECTION)');
   ok(/OP_CUSTOMERS_CREATE: &str = "customers.create"/.test(rs) && /OP_CUSTOMERS_UPDATE: &str = "customers.update"/.test(rs),
     'ALLOWLIST …namentlich, nicht generisch');
 }

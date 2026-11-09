@@ -1090,6 +1090,7 @@
         "reverse_reason",
         "reversed_at",
         "reversed_by",
+        "settlement_number",
         "status"
       ],
       "required_fields": [],

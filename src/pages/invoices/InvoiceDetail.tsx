@@ -482,7 +482,7 @@ export function InvoiceDetail() {
     if (!id || !invoice) return;
     const fassung = invoice.revision;
     if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('removing an offset (no revision loaded)'))); return; }
-    if (!await window.confirm(`Remove offset ${o.offsetNumber}? The invoice is open again by ${o.amount.toFixed(3)} BHD and loan ${o.loanNumber} is open again. No cash moves.`)) return;
+    if (!await window.confirm(`Remove offset ${o.offsetNumber}? The invoice is open again by ${o.amount.toFixed(3)} BHD and ${o.sourceLabel} is open again by the same amount. No cash moves.`)) return;
     if (!await w.ok('invoices.delete_payment', {
       local: () => reverseDebtOffsetOnPrimary(o.offsetId, 'offset removed'),
       remote: () => ({ invoiceId: id, paymentId: o.invoicePaymentId, expectedRevision: fassung }),
@@ -1333,8 +1333,8 @@ export function InvoiceDetail() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1.5fr 0.5fr', gap: 8, padding: '8px 12px', background: '#F2F7FA', fontSize: 10, color: '#6B7280', textTransform: 'uppercase' }}>
                   <span>Date</span><span>Amount (BHD)</span><span>Method</span><span>Notes</span><span></span>
                 </div>
-                {list.map(p => p.method === 'debt_offset' ? (
-                  // CUSTOMER ACCOUNT B1 — eine Verrechnung wird nicht geändert, nur als Ganzes aufgehoben.
+                {list.map(p => (p.method === 'debt_offset' || offsetView.offsets.some(x => x.invoicePaymentId === p.id && x.status === 'ACTIVE')) ? (
+                  // CUSTOMER ACCOUNT B1/C — eine Verrechnung (Darlehen oder Store Credit aus „Settle Balance") wird nicht geändert, nur als Ganzes aufgehoben.
                   <div key={p.id} data-manage-payment-offset style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1.5fr 0.5fr', gap: 8, padding: '8px 12px', borderTop: '1px solid #E5E9EE', alignItems: 'center', fontSize: 12 }}>
                     <span>{fmtDate(p.receivedAt)}</span>
                     <span className="font-mono"><Bhd v={p.amount}/></span>

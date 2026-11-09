@@ -2760,6 +2760,12 @@ function runMigrations(database: Database): void {
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_party_offsets_receivable_payment ON party_offsets(receivable_payment_id)`,
     `CREATE INDEX IF NOT EXISTS idx_party_offsets_receivable ON party_offsets(receivable_type, receivable_id, status)`,
     `CREATE INDEX IF NOT EXISTS idx_party_offsets_payable ON party_offsets(payable_type, payable_id, status)`,
+    // CUSTOMER ACCOUNT C — „Settle Balance" im Kundenkonto: mehrere Zuordnungen (Rechnung ↔ Store Credit / We Borrowed)
+    // unter EINER gemeinsamen Nummer STL-…. Jede Zuordnung bleibt eine eigene Zeile mit eigener `offset_number`
+    // (`STL-…/1`, `/2` … — der Index oben bleibt eindeutig); `settlement_number` verbindet sie. Eine Einzelverrechnung (B1)
+    // hat keine: NULL. Rein additiv, Altzeilen bleiben unverändert.
+    `ALTER TABLE party_offsets ADD COLUMN settlement_number TEXT`,
+    `CREATE INDEX IF NOT EXISTS idx_party_offsets_settlement ON party_offsets(branch_id, settlement_number)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

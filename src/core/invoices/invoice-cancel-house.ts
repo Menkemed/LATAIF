@@ -69,8 +69,13 @@ export function cancelInvoiceInHouse(input: InvoiceCancelInput, branchId: string
   // Order zurück (wieder offen) statt ausgezahlt zu werden. Erstattet wird nur, was wirklich auf die Rechnung gezahlt wurde.
   // CUSTOMER ACCOUNT B1 — ebenso eine Verrechnung mit einem Darlehen ('debt_offset'): sie wird aufgehoben, das Darlehen
   // ist wieder offen; erstattet wird sie nie (es floss kein Geld).
+  // CUSTOMER ACCOUNT C — ebenso eine Store-Guthaben-Anrechnung aus einer Verrechnung (STL, „Settle Balance"): sie geht an
+  // ihr Guthaben zurück, statt bar erstattet zu werden (kein künstliches Geld). Eine gewöhnliche Anrechnung bleibt wie bisher.
   const depositPayments = query(
-    `SELECT id, amount, method FROM payments WHERE invoice_id = ? AND method IN ('order_deposit', 'debt_offset')`, [input.invoiceId]);
+    `SELECT id, amount, method FROM payments WHERE invoice_id = ?
+        AND (method IN ('order_deposit', 'debt_offset')
+             OR (method = 'credit' AND EXISTS (SELECT 1 FROM party_offsets o WHERE o.receivable_payment_id = payments.id AND o.status = 'ACTIVE')))`,
+    [input.invoiceId]);
   const depositSum = depositPayments.reduce((s, p) => s + Number(p.amount ?? 0), 0);
   const paidMoney = Math.round((Number(inv.paid_amount ?? 0) - depositSum) * 1000) / 1000;
   // Ohne Geld läuft der Storno NICHT über eine Retoure: er gibt die Ware der Zeilen frei und setzt

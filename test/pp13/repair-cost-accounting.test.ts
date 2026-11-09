@@ -899,7 +899,7 @@ M.gegenkonto = fails.length === 0;
     && /account: 'EXPENSES_OPERATING', direction: 'CREDIT', amount, metadata: \{ repairId: input\.repairId, kind: 'repair_own_work' \}/.test(post)
     && !/Paid with the repair \(in-house cost\)/.test(store),
     '§10 Zeile im Haus / eigene Kosten ohne Zahlweg: aktivierte Eigenleistung (Haben EXPENSES_OPERATING) — keine künstliche Verbindlichkeit, kein künstlicher Geldfluss');
-  ok(ALLOWED_MUTATIONS.length === 127, `§10 Registry unverändert: 127 Buchungen (bis v0.8.94: zuletzt purchases.correct_payment_date) (${ALLOWED_MUTATIONS.length}) — keine neue Fähigkeit`);
+  ok(ALLOWED_MUTATIONS.length === 129, `§10 Registry unverändert: 127 Buchungen (bis v0.8.94: zuletzt purchases.correct_payment_date) (${ALLOWED_MUTATIONS.length}) — keine neue Fähigkeit`);
 }
 
 console.log(`\n${fails.length === 0 ? 'PASS' : 'FAIL'} — post-parity pp-13 + pp-14 repair cost accounting: ${PASS} passed, ${fails.length} failed`);

@@ -716,6 +716,10 @@ marker('CENTRAL_UI_R6E_PAID_REFUND_CANCEL_CONTRACT_PINNED');
     'src/core/parties/customer-account.ts': 'Offen je Rechnung ohne CANCELLED (Kundenkonto, nur lesen); Verweis der Retoure',
     // CUSTOMER ACCOUNT B1 — der offene Rest einer Rechnung für „Settle Balance" (dieselbe Regel wie Receive Payment).
     'src/core/offsets/party-offset-reads.ts': 'Offen je Rechnung ohne CANCELLED (Verrechnung mit Darlehen)',
+    // CUSTOMER ACCOUNT C — „Settle Balance": offen je Rechnung ohne CANCELLED; die Gutschriftnummer nur als Name des Guthabens.
+    'src/core/offsets/party-settlement-reads.ts': 'Offen je Rechnung ohne CANCELLED (Settle Balance); Nummer der Gutschrift eines Guthabens',
+    // CUSTOMER ACCOUNT C — Aufheben einer Verrechnung: eine spätere wirksame Gutschrift (ohne CANCELLED) sperrt.
+    'src/core/offsets/party-offset-restore.ts': 'Sperre beim Aufheben einer Verrechnung: spätere Gutschrift ohne CANCELLED',
     'src/core/reports/reconciliation-snapshot.ts': 'Abstimmung ohne CANCELLED',
     'src/core/returns/return-cancel-house.ts': 'der Storno selbst (setzt CANCELLED)',
     'src/core/sync/sync-service.ts': 'Tabellenzuordnung des Abgleichs',

@@ -361,7 +361,8 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
   const payByInv = new Map<string, AccountEventRaw[]>();
   for (const p of query(
     `SELECT p.invoice_id, p.amount, p.method, p.received_at,
-            (SELECT o.offset_number || ' · ' || COALESCE(d.loan_number, '') FROM party_offsets o LEFT JOIN debts d ON d.id = o.payable_id
+            (SELECT o.offset_number || ' · ' || CASE WHEN o.payable_type = 'STORE_CREDIT' THEN 'store credit' ELSE COALESCE(d.loan_number, '') END
+               FROM party_offsets o LEFT JOIN debts d ON d.id = o.payable_id AND o.payable_type = 'DEBT'
               WHERE o.receivable_payment_id = p.id) AS offset_ref
        FROM payments p JOIN invoices i ON i.id = p.invoice_id
       WHERE i.customer_id = ? AND i.branch_id = ?`,
@@ -369,8 +370,8 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
   )) {
     const k = txt(p.invoice_id);
     const list = payByInv.get(k) ?? [];
-    // CUSTOMER ACCOUNT B1 — eine Verrechnung nennt ihren Gegenbeleg (STL-… · Darlehen) und „no cash".
-    const text = txt(p.method) === 'debt_offset' && txt(p.offset_ref) ? `Offset ${txt(p.offset_ref)} · no cash` : payLabel(p.method);
+    // CUSTOMER ACCOUNT B1/C — eine Verrechnung nennt ihren Gegenbeleg (STL-… · Darlehen bzw. Store Credit) und „no cash".
+    const text = txt(p.offset_ref) ? `Offset ${txt(p.offset_ref)} · no cash` : payLabel(p.method);
     list.push({ date: day(p.received_at), text, amountF: F(p.amount) });
     payByInv.set(k, list);
   }
@@ -465,14 +466,18 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
   }) || txt(r.invoice_number);
   const appByCredit = new Map<string, AccountEventRaw[]>();
   for (const a of query(
-    `SELECT ca.credit_id, ca.amount, p.received_at, i.invoice_number, i.status, i.special_mark, i.number_finalized_at FROM credit_applications ca
+    `SELECT ca.credit_id, ca.amount, p.received_at, i.invoice_number, i.status, i.special_mark, i.number_finalized_at,
+            (SELECT o.offset_number FROM party_offsets o WHERE o.receivable_payment_id = ca.payment_id) AS offset_number
+       FROM credit_applications ca
        JOIN customer_credits cc ON cc.id = ca.credit_id
        LEFT JOIN payments p ON p.id = ca.payment_id LEFT JOIN invoices i ON i.id = p.invoice_id
       WHERE cc.customer_id = ? AND cc.branch_id = ?`,
     [customerId, branchId],
   )) {
     const list = appByCredit.get(txt(a.credit_id)) ?? [];
-    list.push({ date: day(a.received_at), text: `Applied to ${a.invoice_number ? invNo(a) : 'an invoice'}`, amountF: F(a.amount) });
+    // CUSTOMER ACCOUNT C — aus „Settle Balance": die STL-Nummer und „no cash".
+    const ziel = a.invoice_number ? invNo(a) : 'an invoice';
+    list.push({ date: day(a.received_at), text: a.offset_number ? `Offset ${txt(a.offset_number)} → ${ziel} · no cash` : `Applied to ${ziel}`, amountF: F(a.amount) });
     appByCredit.set(txt(a.credit_id), list);
   }
   const CREDIT_SOURCE: Record<string, string> = {

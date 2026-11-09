@@ -306,6 +306,10 @@ pub const OP_PURCHASES_CORRECT: &str = "purchases.correct";
 pub const OP_PURCHASES_VOID_PAYMENT: &str = "purchases.void_payment";
 // v0.8.94 — das Datum einer erfassten Einkaufszahlung berichtigen (nur Owner; Gegenbuchung heute, Neubuchung am richtigen Tag).
 pub const OP_PURCHASES_CORRECT_PAYMENT_DATE: &str = "purchases.correct_payment_date";
+// CUSTOMER ACCOUNT C — „Settle Balance" im Kundenkonto (Rechnungen gegen Store Credit / We Borrowed, ohne Geld, eine
+// STL-Nummer, eine Transaktion am Primary) und die Aufhebung einer ganzen STL.
+pub const OP_CUSTOMERS_SETTLE_BALANCE: &str = "customers.settle_balance";
+pub const OP_CUSTOMERS_SETTLEMENT_REVERSE: &str = "customers.settlement_reverse";
 pub const OP_PURCHASE_EDIT_CHECK_GET: &str = "purchase.edit_check.get";
 pub const OP_PAGE_COST_CORRECTIONS_GET: &str = "page.cost_corrections.get";
 // CENTRAL-UI-PARITY R6E — Angebot, Rechnungs-Lebenszyklus, Nachrichtenprotokoll.
@@ -582,6 +586,9 @@ pub const REMOTE_OPS: &[&str] = &[
     OP_PAGE_COST_CORRECTIONS_GET,
     // v0.8.91 — die SKU-Vorschau aus dem Zähler des Primary (nur gelesen).
     OP_PRODUCTS_SKU_PREVIEW_GET,
+    // CUSTOMER ACCOUNT C — zwei Buchungen: „Settle Balance" und „Undo settlement".
+    OP_CUSTOMERS_SETTLE_BALANCE,
+    OP_CUSTOMERS_SETTLEMENT_REVERSE,
 ];
 
 /// Wie lange auf den Renderer gewartet wird, wenn niemand etwas anderes vorgibt.

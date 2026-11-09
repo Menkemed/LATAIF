@@ -57,12 +57,28 @@ export interface OffsetRef {
   invoiceId: string; invoicePaymentId: string; invoiceNumber: string;
   debtId: string; debtPaymentId: string; loanNumber: string;
   reversedAt: string | null; reverseReason: string | null; reversalPaymentId: string | null;
+  /** CUSTOMER ACCOUNT C — Art der Gegenposition ('DEBT' = We Borrowed, 'STORE_CREDIT') und die gemeinsame Nummer (STL). */
+  payableType: string;
+  settlementNumber: string | null;
+  /** Kurzer Gegenbeleg für die Anzeige: „loan LOA-…" bzw. „store credit · from a return". */
+  sourceLabel: string;
 }
 
-const REF_SQL = `SELECT o.*, i.invoice_number AS inv_number, d.loan_number AS loan_number
+const CREDIT_SOURCE_LABEL: Record<string, string> = {
+  sales_return: 'from a return', order_overpayment: 'order overpayment', overpayment: 'overpayment', order_cancel: 'order cancelled',
+  gold_conversion: 'gold converted to money', invoice_edit: 'invoice correction',
+};
+/** Der Gegenbeleg eines Store-Guthabens (für Rechnung, Kundenkonto, Verrechnungsliste). */
+export function storeCreditLabel(sourceType: unknown): string {
+  const src = CREDIT_SOURCE_LABEL[String(sourceType ?? '')];
+  return src ? `store credit · ${src}` : 'store credit';
+}
+
+const REF_SQL = `SELECT o.*, i.invoice_number AS inv_number, d.loan_number AS loan_number, cc.source_type AS credit_source
                    FROM party_offsets o
                    LEFT JOIN invoices i ON i.id = o.receivable_id
-                   LEFT JOIN debts d ON d.id = o.payable_id`;
+                   LEFT JOIN debts d ON d.id = o.payable_id AND o.payable_type = 'DEBT'
+                   LEFT JOIN customer_credits cc ON cc.id = o.payable_id AND o.payable_type = 'STORE_CREDIT'`;
 
 function ref(o: Record<string, unknown>): OffsetRef {
   return {
@@ -72,6 +88,11 @@ function ref(o: Record<string, unknown>): OffsetRef {
     loanNumber: String(o.loan_number ?? '') || String(o.payable_id).slice(0, 8),
     reversedAt: (o.reversed_at as string | null) ?? null, reverseReason: (o.reverse_reason as string | null) ?? null,
     reversalPaymentId: (o.reversal_payment_id as string | null) ?? null,
+    payableType: String(o.payable_type ?? 'DEBT'),
+    settlementNumber: (o.settlement_number as string | null) ?? null,
+    sourceLabel: String(o.payable_type ?? 'DEBT') === 'STORE_CREDIT'
+      ? storeCreditLabel(o.credit_source)
+      : `loan ${String(o.loan_number ?? '') || String(o.payable_id).slice(0, 8)}`,
   };
 }
 

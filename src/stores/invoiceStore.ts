@@ -4,7 +4,7 @@ import type { Invoice, InvoiceLine, InvoiceStatus, InvoiceTaxScheme, TaxScheme, 
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { restoreOrderDepositForPayment } from '@/core/orders/order-deposit-restore';
-import { DEBT_OFFSET_METHOD, INVOICE_HAS_OFFSET, invoiceHasActiveOffsets, restoreDebtOffsetForPayment } from '@/core/offsets/party-offset-restore';
+import { DEBT_OFFSET_METHOD, INVOICE_HAS_OFFSET, invoiceHasActiveOffsets, restoreDebtOffsetForPayment, restoreStoreCreditOffsetForPayment } from '@/core/offsets/party-offset-restore';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
@@ -177,6 +177,18 @@ function clawbackOverpaymentCredit(paymentId: string): void {
 }
 
 /** v0.8.87 — die zwei Zeiten einer Zahlung: wann das Geld kam (`receivedAt`) und wann sie erfasst wurde (`createdAt`). */
+/**
+ * CUSTOMER ACCOUNT C — die Store-Guthaben-Anrechnung für „Settle Balance": GENAU die gewählten Guthaben (in dieser
+ * Reihenfolge, nur OPEN, derselbe Kunde und dieselbe Filiale), eine vorgegebene Zahlungskennung (die Verrechnungszeile
+ * keyt darauf), die Endnummernwahl und der Geschäftstag der Verrechnung. Ohne Angabe: unverändert FIFO über alle.
+ */
+export interface ApplyCreditOptions {
+  creditIds?: readonly string[];
+  paymentId?: string;
+  specialMarkOnFinal?: boolean;
+  times?: RecordPaymentTimes;
+}
+
 export interface RecordPaymentTimes {
   /** Zeitpunkt des Zahlungseingangs (received_at, Buchungsdatum). Ohne Angabe: der Erfassungszeitpunkt. */
   receivedAt?: string;
@@ -228,7 +240,7 @@ interface InvoiceStore {
   // Credit-Modell Slice 3 — Store-Guthaben des Kunden gegen eine Invoice einlösen.
   // Konsumiert OPEN-customer_credits FIFO (used_amount↑) und bucht via recordPayment('credit')
   // DR CUSTOMER_CREDIT / CR AR. Gibt den tatsächlich verrechneten Betrag zurück.
-  applyCreditToInvoice: (invoiceId: string, amount: number, note?: string) => number;
+  applyCreditToInvoice: (invoiceId: string, amount: number, note?: string, opts?: ApplyCreditOptions) => number;
   setSpecialMark: (invoiceId: string, special: boolean) => void;
   // Plan §Edit: einzelne Payments später ändern oder löschen.
   updatePayment: (paymentId: string, invoiceId: string, data: { amount?: number; method?: string; notes?: string; receivedAt?: string }) => void;
@@ -735,6 +747,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         // !reversedByReturn-Zweig: bei reversedByReturn=true behandelt der Return-/CN-Pfad
         // das Guthaben separat (sonst Doppel-Reverse). payments-Rows bleiben hier bestehen.
         for (const pid of cancelPayIds) restoreCreditForPayment(pid);
+        // CUSTOMER ACCOUNT C — eine Anrechnung aus einer Verrechnung (STL): die Zuordnung auf REVERSED (Guthaben oben zurück).
+        for (const pid of cancelPayIds) restoreStoreCreditOffsetForPayment(pid, { reason: 'invoice cancelled' });
         // CUSTOM-ORDER K2 — eine angerechnete Anzahlung wird wieder offen bei ihrer Order (die Buchung oben drehte sie zurück).
         for (const pid of cancelPayIds) restoreOrderDepositForPayment(pid);
         // CUSTOMER ACCOUNT B1 — eine Verrechnung mit einem Darlehen: das Darlehen öffnet wieder (Buchung oben gedreht, geprüft).
@@ -1744,7 +1758,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   //   3. recordPayment(method='credit') bucht via cashAccountFor('credit')→CUSTOMER_CREDIT
   //      automatisch DR CUSTOMER_CREDIT / CR AR — kein Geldfluss, reiner Liability/AR-Abbau.
   // Domain (used_amount) und Ledger (CUSTOMER_CREDIT-Saldo) bleiben dadurch spiegelgleich.
-  applyCreditToInvoice: (invoiceId, amount, note) => {
+  applyCreditToInvoice: (invoiceId, amount, note, opts) => {
     if (!Number.isFinite(amount) || amount <= 0) return 0;
     const db = getDatabase();
     const inv = get().getInvoice(invoiceId);
@@ -1762,12 +1776,17 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
 
     // FIFO über OPEN-Credits (älteste zuerst) — erst NUR planen (read-only), welche Rows
     // in welcher Höhe konsumiert werden; geschrieben wird ausschliesslich in der Tx unten.
-    const credits = query(
+    const offen = query(
       `SELECT id, amount, used_amount FROM customer_credits
         WHERE branch_id = ? AND customer_id = ? AND status = 'OPEN'
         ORDER BY created_at ASC`,
       [branchId, customerId]
     );
+    // CUSTOMER ACCOUNT C — nur die gewählten Guthaben, in ihrer Reihenfolge (ein nicht mehr offenes fällt still heraus;
+    // der Aufrufer prüft den verrechneten Betrag).
+    const credits = opts?.creditIds
+      ? opts.creditIds.map((cid) => offen.find((c) => c.id === cid)).filter((c): c is Record<string, unknown> => !!c)
+      : offen;
     const applied: Array<{ creditId: string; take: number; newUsed: number; newStatus: string }> = [];
     let remaining = toApply;
     let consumed = 0;
@@ -1792,7 +1811,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // sodass ein Fehler hier den vollstaendigen Rollback ausloest — kein halb-verbrauchtes
     // Guthaben ohne Gegenbuchung mehr. paymentId fix vorgegeben, damit die Link-Rows darauf
     // keyen. Alle trackUpdate/trackInsert laufen IN der Tx (atomar; Rollback → 0 Changelog).
-    const paymentId = uuid();
+    const paymentId = opts?.paymentId ?? uuid();
     beginLedgerTransaction();
     try {
       for (const a of applied) {
@@ -1806,7 +1825,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         trackInsert('credit_applications', appId, { paymentId, creditId: a.creditId, amount: a.take });
       }
       // Verrechneten Betrag als Invoice-Payment method='credit' verbuchen (feste paymentId).
-      get().recordPayment(invoiceId, consumed, 'credit', note || 'Store-Guthaben verrechnet', undefined, undefined, paymentId);
+      get().recordPayment(invoiceId, consumed, 'credit', note || 'Store-Guthaben verrechnet', opts?.specialMarkOnFinal, undefined, paymentId, undefined, opts?.times);
       commitLedgerTransaction();
     } catch (e) {
       rollbackLedgerTransaction();
@@ -2330,7 +2349,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // (used_amount-=Anteil, status→OPEN, Link-Rows weg). Schliesst die Asymmetrie zu
     // updatePayment (das credit-Edits blockt): deletePayment behandelt credit jetzt korrekt
     // statt das Guthaben still zu verlieren.
-    if (delMethod === 'credit') restoreCreditForPayment(paymentId);
+    if (delMethod === 'credit') {
+      restoreCreditForPayment(paymentId);
+      // CUSTOMER ACCOUNT C — gehörte die Anrechnung zu einer Verrechnung (STL), steht diese jetzt auf REVERSED.
+      restoreStoreCreditOffsetForPayment(paymentId, { reason: opts?.offsetReason });
+    }
     if (delMethod === 'order_deposit') restoreOrderDepositForPayment(paymentId);
     // CUSTOMER ACCOUNT B1 — eine Verrechnung mit einem Darlehen: das Darlehen wieder öffnen (Gegenzeile), die Verrechnung
     // auf REVERSED. Prüft, dass die Gegenbuchung oben steht; sonst geht der ganze Vorgang zurück.

@@ -20,6 +20,7 @@ import { trackInsert, trackUpdate } from '@/core/sync/track';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
 import { hasLedgerEntries, hasReversalFor } from '@/core/ledger/posting';
 import { paidFilsOfDebt, reconcileDebtStatus } from '@/core/finance/debt-status';
+import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 
 export const DEBT_OFFSET_METHOD = 'debt_offset';
 export const DEBT_OFFSET_SOURCE = 'offset';
@@ -38,6 +39,14 @@ export class OffsetRestoreError extends Error {
 }
 
 const F = (n: unknown): number => Math.round((Number(n) || 0) * 1000);
+
+/**
+ * CUSTOMER ACCOUNT C — die Arten einer Gegenposition in `party_offsets`: ein Darlehen „We Borrowed" (B1) und ein
+ * Store-Guthaben (C). Ein Store-Guthaben wird über die VORHANDENE Anrechnung verrechnet (Zahlart 'credit',
+ * `credit_applications`, Soll CUSTOMER_CREDIT / Haben AR); die Verrechnungszeile verbindet nur.
+ */
+export const OFFSET_PAYABLE_DEBT = 'DEBT';
+export const OFFSET_PAYABLE_STORE_CREDIT = 'STORE_CREDIT';
 
 /** Hat diese Rechnung eine wirksame Verrechnung? (Sperre für Kundenwechsel, Überzahlung durch Korrektur …) */
 export function invoiceHasActiveOffsets(invoiceId: string): boolean {
@@ -92,4 +101,67 @@ export function restoreDebtOffsetForPayment(paymentId: string, opts: { reason?: 
     actor: { userId: userId || undefined, branchId: String(o.branch_id) },
   });
   return { offsetId: String(o.id), offsetNumber: nummer, debtId, reversalPaymentId: reversalId, amount: amountF / 1000 };
+}
+
+export interface StoreCreditOffsetRestored { offsetId: string; offsetNumber: string; creditId: string; amount: number }
+
+/**
+ * CUSTOMER ACCOUNT C — die Zuordnung „Store Credit → Rechnung" dieser Rechnungszahlung ('credit') aufheben, wenn die
+ * Zahlung verschwindet ("Remove offset" auf der Rechnung, ganze STL rückgängig, Rechnungsstorno). Das Guthaben gibt der
+ * vorhandene Weg zurück (`restoreCreditForPayment`, vorher aufgerufen); hier steht nur noch die Verrechnungszeile auf
+ * REVERSED — nie gelöscht, mit Zeit, Person und Grund. Ohne wirksame Zuordnung: nichts (eine gewöhnliche Anrechnung,
+ * oder schon aufgehoben). Die Gegenbuchung der Zahlung MUSS stehen, sonst geht der ganze Vorgang zurück.
+ */
+export function restoreStoreCreditOffsetForPayment(paymentId: string, opts: { reason?: string; userId?: string; now?: string } = {}): StoreCreditOffsetRestored | null {
+  const o = query(
+    `SELECT * FROM party_offsets WHERE receivable_payment_id = ? AND payable_type = '${OFFSET_PAYABLE_STORE_CREDIT}' AND status = 'ACTIVE'`,
+    [paymentId],
+  )[0];
+  if (!o) return null;
+  if (hasLedgerEntries('PAYMENT', paymentId) && !hasReversalFor('PAYMENT', paymentId)) {
+    throw new OffsetRestoreError('OFFSET_REVERSAL_NOT_BOOKED', 'the booking of the offset could not be reversed — nothing was changed');
+  }
+  // Das Guthaben muss zurück sein: keine Anrechnungszeile dieser Zahlung mehr (der vorhandene Weg löscht sie).
+  if (query('SELECT 1 FROM credit_applications WHERE payment_id = ? LIMIT 1', [paymentId]).length > 0) {
+    throw new OffsetRestoreError('OFFSET_CREDIT_NOT_RESTORED', 'the store credit of the offset could not be restored — nothing was changed');
+  }
+  const now = opts.now ?? new Date().toISOString();
+  let userId = opts.userId ?? '';
+  if (!userId) { try { userId = currentUserId(); } catch { userId = ''; } }
+  const db = getDatabase();
+  const nummer = String(o.offset_number);
+  const amountF = F(o.amount);
+  const reason = (opts.reason ?? '').trim() || 'invoice payment removed';
+  db.run(
+    `UPDATE party_offsets SET status = 'REVERSED', reversed_at = ?, reversed_by = ?, reverse_reason = ? WHERE id = ? AND status = 'ACTIVE'`,
+    [now, userId || null, reason, String(o.id)],
+  );
+  if (Number(query('SELECT changes() AS n')[0]?.n) !== 1) throw new OffsetRestoreError('OFFSET_CHANGED', 'the offset changed meanwhile — nothing was changed');
+  trackUpdate('party_offsets', String(o.id), { status: 'REVERSED', reversedAt: now });
+  logAuditOrThrow({
+    module: 'Finance', entityType: 'party_offsets', entityId: String(o.id), action: 'STATUS_CHANGE', field: 'status',
+    oldValue: 'ACTIVE', newValue: { status: 'REVERSED', offsetNumber: nummer, amount: amountF / 1000, invoiceId: o.receivable_id, creditId: o.payable_id, reason },
+    actor: { userId: userId || undefined, branchId: String(o.branch_id) },
+  });
+  return { offsetId: String(o.id), offsetNumber: nummer, creditId: String(o.payable_id), amount: amountF / 1000 };
+}
+
+export const OFFSET_HAS_LATER_RETURN = 'OFFSET_HAS_LATER_RETURN';
+
+/**
+ * Eine Rückgabe/Gutschrift, die NACH der Verrechnung an der Rechnung entstand, hat ihre Erstattung schon nach dem damals
+ * Bezahlten bemessen — die Verrechnung jetzt aufzuheben, gäbe dem Kunden denselben Betrag ein zweites Mal (Guthaben bzw.
+ * Darlehen wieder offen). Erst die Rückgabe stornieren. (Der Rechnungsstorno nimmt Verrechnungen VOR seiner Rückgabe zurück.)
+ */
+export function assertOffsetUndoSafe(o: Record<string, unknown>): void {
+  const seit = String(o.created_at ?? '');
+  const spaeter = query(
+    `SELECT (SELECT COUNT(*) FROM sales_returns WHERE invoice_id = ? AND status != 'REJECTED' AND created_at >= ?)
+          + (SELECT COUNT(*) FROM credit_notes WHERE invoice_id = ? AND status != 'CANCELLED' AND created_at >= ?) AS n`,
+    [String(o.receivable_id), seit, String(o.receivable_id), seit],
+  )[0];
+  if (Number(spaeter?.n ?? 0) > 0) {
+    throw new InvoiceActionRejected(OFFSET_HAS_LATER_RETURN,
+      `a return or credit note was recorded on this invoice after ${String(o.offset_number)} — cancel it first, then undo the offset (no double refund). Nothing was changed`);
+  }
 }

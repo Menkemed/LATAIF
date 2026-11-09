@@ -188,6 +188,9 @@ export const ALLOWED_MUTATIONS: readonly string[] = [
   // v0.8.94 — das Datum einer erfassten Einkaufszahlung berichtigen (nur Owner; Gegenbuchung heute, Neubuchung am
   // richtigen Tag, Grund und Verlauf; gesperrt in eingereichten/VAT-bezahlten Quartalen).
   'purchases.correct_payment_date',
+  // CUSTOMER ACCOUNT C — „Settle Balance" im Kundenkonto (Rechnungen gegen Store Credit / We Borrowed, ohne Geld, eine
+  // STL-Nummer, eine Transaktion) und die Aufhebung einer ganzen STL. Recht wie „Record Payment".
+  'customers.settle_balance', 'customers.settlement_reverse',
 ];
 
 export interface CommandSpec {
