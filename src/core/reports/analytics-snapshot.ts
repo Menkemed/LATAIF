@@ -28,6 +28,7 @@ import { getStockAggregates, computeStockValuation } from '@/core/lots/lot-queri
 // BULK METAL V1 — Bulk-Wert als eigene Zeile im Lagerwert; Bestandsverlust als eigene Zeile beim Gewinn.
 import { bulkInventoryLossFils, bulkInventoryValuation } from '@/core/bulk/bulk-reads';
 import type { BusinessReadContext } from '@/core/data/read-context';
+import { isLoanGiven } from '@/core/models/types';
 import { liveVatQuarters, partialVatSummary, filedVatFigures } from '@/core/tax/vat-quarter-overview';
 import { vatEngine } from '@/core/tax/vat-engine';
 
@@ -390,7 +391,9 @@ export function financeFor(ctx: BusinessReadContext) {
       for (const d of debts) {
         const a = (d.amount as number) || 0;
         const src = d.source as string;
-        if (d.direction === 'we_lend') {
+        // CUSTOMER ACCOUNT A2 — beide Schreibweisen der Richtung (we_lend / kanonisch MONEY_GIVEN). Vorher zählte ein
+        // kanonisch gespeichertes verliehenes Darlehen als „geliehen" (falsche Richtung im Geldfluss).
+        if (isLoanGiven(d.direction as string)) {
           if (src === 'cash') lentOutCash += a; else lentOutBank += a;
         } else {
           if (src === 'cash') borrowedInCash += a; else borrowedInBank += a;
@@ -405,7 +408,7 @@ export function financeFor(ctx: BusinessReadContext) {
       for (const p of dpays) {
         const a = (p.amount as number) || 0;
         const src = p.source as string;
-        if (p.direction === 'we_lend') {
+        if (isLoanGiven(p.direction as string)) {
           if (src === 'cash') debtRepaidToUsCash += a; else debtRepaidToUsBank += a;
         } else {
           if (src === 'cash') debtRepaidByUsCash += a; else debtRepaidByUsBank += a;
