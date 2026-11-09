@@ -1,8 +1,11 @@
 // ════════════════════════════════════════════════════════════════════════════
-// B1-Abschlussprüfung (Owner 09.11.2026) — Rückgabe/Gutschrift NACH einem Rechnungsstorno stornieren oder löschen.
-//   Ablauf: Rechnung gebucht → Rückgabe mit Gutschrift → Rechnung storniert (die Gutschrift übernimmt die Gegenbuchung)
-//   → danach die Rückgabe stornieren („Cancel Return", Primary und PC2) bzw. die Gutschrift löschen.
-//   Je Variante: Hauptbuch, offene Forderungen, Kundenkonto und beide Forderungsabstimmungen (gesamt, je Kunde).
+// B1-Sicherheitsabschluss V1–V3 (Owner 09.11.2026) — Rückgabe/Gutschrift NACH einem Rechnungsstorno.
+//   V1: eine Rückgabe einer STORNIERTEN Rechnung wird nicht zurückgenommen (Hausfolge: Maske, PC2, Kommissionsstorno).
+//   V2: kein Rechnungsstorno, solange eine Rückgabe nur ANGELEGT ist (REQUESTED, ohne Gutschrift) — Primary und PC2.
+//   V3: eine Gutschrift einer Rückgabe wird nie direkt gelöscht (nur „Cancel Return"); unabhängige Gutschriften bleiben
+//       löschbar — nur Owner, nur Primary.
+//   Je Schritt: Hauptbuch, Receivables, Kundenkonto, Geld und beide Forderungsabstimmungen einig; jede Ablehnung ohne
+//   Teiländerung (Abdruck aller berührten Tabellen); PC2-Wiederholung liefert dasselbe Nein; zulässige Wege bleiben.
 // Nur künstliche Testdaten (In-Memory-sql.js). Gerüst aus test/customer-account/b1-followup.test.ts.
 // Run: node test/customer-account/b1-return-after-cancel.test.ts
 // ════════════════════════════════════════════════════════════════════════════
@@ -332,12 +335,6 @@ function einig(tag: string, id: string, cid: string): Sicht {
     `${tag} — Hauptbuch, Receivables, Kundenkonto, Geld und beide Abstimmungen einig (${fmt(v)})`);
   return v;
 }
-/** Ein abgelehnter Versuch ändert nichts: dieselben Sichten, dieselben Buchungen. */
-function nichtsGeaendert(tag: string, vorher: Sicht, id: string, cid: string, buchungenVor: number): void {
-  const v = sicht(id, cid);
-  ok(S(v) === S(vorher) && n(DB, 'SELECT COUNT(*) FROM ledger_entries') === buchungenVor, `${tag} — nichts geändert (${fmt(v)})`);
-}
-const buchungen = (): number => n(DB, 'SELECT COUNT(*) FROM ledger_entries');
 const owner = { userId: 'user-test', role: 'ADMIN' };
 const cancelRet = (rid: string): string => wirft(() => imHaus(() => cancelReturnInHouse(rid, 'Prüfung', owner, 'branch-main')));
 const cancelRetFern = async (x: string, rid: string): Promise<Outcome & { thrown?: string }> => {
@@ -350,20 +347,32 @@ const delCN = (rid: string): string => wirft(() => imHaus(() => { useCreditNoteS
 
 ok(abstand('cust-3').gesamt === 0, 'Ausgangslage: Abstimmung ohne Abstand');
 
-/**
- * BEFUND (Owner-Freigabe offen) — der heutige, bestätigte Ist-Zustand eines offenen Wegs, exakt festgehalten.
- * Mit der freigegebenen Korrektur wird der Weg gesperrt; dann wird dieser Check zu `nichtsGeaendert` umgedreht.
- */
-function befund(tag: string, id: string, cid: string, w: { status: string; ar: number; geldHB: number; gesamt: number; kunde: number }): void {
+const { returnCancelability, RETURN_INVOICE_CANCELLED } = await import('../../src/core/returns/return-cancel-house.ts');
+const cnS = await import('../../src/stores/creditNoteStore.ts');
+const icc = await import('../../src/core/bridge/invoice-cancel-command.ts');
+
+/** Abdruck aller Geschäftstabellen, die ein Storno, eine Rückgabe oder eine Gutschrift berührt (Zeile für Zeile). */
+const TABELLEN = ['invoices', 'invoice_lines', 'payments', 'sales_returns', 'sales_return_lines', 'credit_notes', 'customer_credits',
+  'products', 'stock_lots', 'party_offsets', 'debts', 'debt_payments', 'expenses', 'ledger_entries', 'audit_log'];
+const abdruck = (): string => S(TABELLEN.map((t) => { try { return DB.exec(`SELECT * FROM ${t} ORDER BY rowid`)[0]?.values ?? []; } catch { return 'n/a'; } }));
+/** Eine abgelehnte Aktion ändert NICHTS: dieselben Sichten und jede Zeile jeder betroffenen Tabelle gleich. */
+function unveraendert(tag: string, vorher: { sicht: Sicht; abdruck: string }, id: string, cid: string): void {
   const v = sicht(id, cid);
-  const hit = v.balanced && v.status === w.status && eq(v.ar, w.ar) && eq(Number(v.recv), 0) && eq(Number(v.konto), 0)
-    && eq(v.geldHB, w.geldHB) && eq(v.geldBeleg, 0) && v.gesamt === w.gesamt && v.kunde === w.kunde;
-  ok(hit, `${tag} BEFUND Ist-Zustand wie bestätigt (${fmt(v)})`);
-  console.log(`  BEFUND ${tag}: ${fmt(v)}`);
+  ok(S(v) === S(vorher.sicht) && abdruck() === vorher.abdruck, `${tag} — keine Teiländerung (Datenbank, Bestand, Finanzkonten gleich; ${fmt(v)})`);
 }
+const stand0 = (id: string, cid: string) => ({ sicht: sicht(id, cid), abdruck: abdruck() });
+const cancelInvFern = async (x: string, id: string): Promise<Outcome & { thrown?: string }> => {
+  const o = await fern(() => icc.runCancelInvoice(deps() as never, identity(x, 'invoices.cancel'), { invoiceId: id, expectedRevision: invRev(id), refundMethod: 'cash' }));
+  reload();
+  return o;
+};
+const cancelability = (rid: string) => {
+  const r = DB.exec('SELECT id, status, refund_paid_amount, product_disposition FROM sales_returns WHERE id = ?', [rid])[0].values[0];
+  return returnCancelability({ id: String(r[0]), status: String(r[1]), refundPaidAmount: Number(r[2] ?? 0), productDisposition: String(r[3] ?? '') || undefined });
+};
 const artikel = (pid: string): string => S(DB.exec('SELECT stock_status, quantity FROM products WHERE id = ?', [pid])[0]?.values?.[0] ?? []);
 
-// ══ R-1 Storno mit Rückgabe, Erstattung BAR AUSGEZAHLT — dann die Rückgabe des Stornos stornieren / Gutschrift löschen
+// ══ R-1 Storno mit Rückgabe, Erstattung BAR AUSGEZAHLT — Rückgabe des Stornos stornieren / Gutschrift löschen ═════
 {
   const cid = 'cust-3';
   neuerFall();
@@ -371,24 +380,24 @@ const artikel = (pid: string): string => S(DB.exec('SELECT stock_status, quantit
   imHaus(() => useInvoiceStore.getState().recordPayment(id, 300, 'cash'));
   storno(id);
   const rid = s(DB, 'SELECT id FROM sales_returns WHERE invoice_id = ?', [id]);
-  const v0 = einig('R-1a nach dem Storno (Rückgabe 900, 300 bar erstattet)', id, cid);
+  einig('R-1a zulässiger Storno mit Rückgabe (900, 300 bar erstattet)', id, cid);
   ok(rueckStatus(rid) === S(['APPROVED', 'PARTIALLY_REFUNDED', 300]) && cnStatus(rid) === 'ISSUED', `R-1a Storno-Rückgabe ${rueckStatus(rid)}, Gutschrift ${cnStatus(rid)}`);
-  const b0 = buchungen();
+  const v0 = stand0(id, cid);
   const e1 = cancelRet(rid);
+  // Die bisherige Sperre (ausgezahlt) behält ihren Code; V1 steht dahinter.
   ok(e1 === 'RETURN_REFUND_PAID_OUT', `R-1b Cancel Return am Primary gesperrt (${e1})`);
-  nichtsGeaendert('R-1b', v0, id, cid, b0);
+  unveraendert('R-1b', v0, id, cid);
   const f1 = await cancelRetFern('901', rid);
   ok(f1.code === 'RETURN_REFUND_PAID_OUT', `R-1c Cancel Return über PC2 gesperrt (${S({ kind: f1.kind, code: f1.code })})`);
-  nichtsGeaendert('R-1c', v0, id, cid, b0);
-  // „Delete" auf der Gutschriftseite (nur Primary, ohne Owner-Prüfung) — kennt keine dieser Sperren.
+  unveraendert('R-1c', v0, id, cid);
+  // V3 — „Delete" auf der Gutschriftseite: vorher lief es und kehrte die AUSGEZAHLTE Erstattung im Hauptbuch um.
   const d1 = delCN(rid);
   reload();
-  ok(d1 === '' && cnStatus(rid) === 'gelöscht' && rueckStatus(rid) === S(['APPROVED', 'PARTIALLY_REFUNDED', 300]),
-    `R-1d BEFUND „Delete credit note" läuft trotz ausgezahlter Erstattung: Gutschrift weg, Rückgabe bleibt ${rueckStatus(rid)}`);
-  befund('R-1d', id, cid, { status: 'CANCELLED', ar: 600, geldHB: 300, gesamt: 900000, kunde: 900000 });
+  ok(d1 === cnS.CREDIT_NOTE_VIA_RETURN && cnStatus(rid) === 'ISSUED', `R-1d V3 Gutschrift einer Rückgabe lässt sich nicht direkt löschen (${d1})`);
+  unveraendert('R-1d', v0, id, cid);
 }
 
-// ══ R-2…R-4 Teilrückgabe OHNE Auszahlung (Kunde hatte zu wenig gezahlt), Storno des Rests, dann Teilrückgabe stornieren
+// ══ R-2…R-4 Teilrückgabe OHNE Auszahlung, Storno des Rests, dann Teilrückgabe stornieren (Primary, PC2, mit B1) ════
 async function teilFall(tag: string, cid: string, p1: string, p2: string, mitB1: boolean, fernX?: string): Promise<void> {
   neuerFall();
   const id = verkauf(cid, [[p1, 400], [p2, 600]]);
@@ -399,23 +408,36 @@ async function teilFall(tag: string, cid: string, p1: string, p2: string, mitB1:
   ok(rueckStatus(r1) === S(['REFUNDED', 'PENDING_REFUND', 0]) && inv(id)[0] === 'PARTIAL',
     `${tag}a Teilrückgabe 400 ohne Auszahlung (${rueckStatus(r1)}), Rechnung offen (${S(inv(id))})`);
   einig(`${tag}a nach der Teilrückgabe`, id, cid);
+  ok(cancelability(r1).canCancel, `${tag}a vor dem Storno darf die Teilrückgabe storniert werden (Knopf angeboten)`);
   storno(id);
-  const v0 = einig(`${tag}b nach dem Storno des Rests (600, 300 bar erstattet)`, id, cid);
+  einig(`${tag}b zulässiger Storno des Rests (600, 300 bar erstattet)`, id, cid);
   if (mitB1) ok(eq(debtState(L).open, 5000), `${tag}b das Darlehen ist nach dem Storno wieder ganz offen`);
-  const b0 = buchungen();
-  let e = '';
-  if (fernX) { const o = await cancelRetFern(fernX, r1); if (o.kind !== 'ok') e = o.code || o.thrown || o.kind; }
-  else e = cancelRet(r1);
-  reload();
-  ok(e === '' && rueckStatus(r1) === S(['REJECTED', 'PENDING_REFUND', 0]) && cnStatus(r1) === 'CANCELLED' && inv(id)[0] === 'CANCELLED'
-    && n(DB, 'SELECT COUNT(*) FROM ledger_entries') > b0,
-  `${tag}c BEFUND Cancel Return der Teilrückgabe nach dem Storno läuft${fernX ? ' (PC2)' : ''}: Rückgabe ${rueckStatus(r1)}, Gutschrift ${cnStatus(r1)}, Rechnung bleibt ${inv(id)[0]}, Artikel ${artikel(p1)}`);
-  befund(`${tag}c`, id, cid, { status: 'CANCELLED', ar: 400, geldHB: 0, gesamt: 0, kunde: 0 });
-  console.log(`  ${tag}c Artikel ${p1} ${artikel(p1)}, Erlös der stornierten Rechnung ${(-netto(id, ['REVENUE'])).toFixed(3)}`);
-  void v0;
+  const cb = cancelability(r1);
+  ok(!cb.canCancel && /invoice of this return is cancelled/.test(String(cb.blockReason)), `${tag}b V1 der Knopf sagt es vorher (${cb.blockReason})`);
+  const v0 = stand0(id, cid);
+  if (fernX) {
+    const o = await cancelRetFern(fernX, r1);
+    ok(o.code === RETURN_INVOICE_CANCELLED, `${tag}c V1 Cancel Return über PC2 abgelehnt (${S({ kind: o.kind, code: o.code })})`);
+    unveraendert(`${tag}c`, v0, id, cid);
+    const w = await cancelRetFern(fernX, r1);
+    ok(w.code === RETURN_INVOICE_CANCELLED && w.replayed === true, `${tag}d PC2-Wiederholung: dasselbe eingefrorene Nein (${S({ kind: w.kind, code: w.code, replayed: w.replayed })})`);
+    unveraendert(`${tag}d`, v0, id, cid);
+  } else {
+    const e = cancelRet(r1);
+    ok(e === RETURN_INVOICE_CANCELLED, `${tag}c V1 Cancel Return am Primary abgelehnt (${e})`);
+    unveraendert(`${tag}c`, v0, id, cid);
+    // Auch der Weg der Maske (Store, Owner-Sitzung, eigene Transaktion) lehnt ab.
+    const m = await useSalesReturnStore.getState().cancelReturn(r1, 'Prüfung Maske').then(() => '', (x: { code?: string }) => String(x.code ?? x));
+    reload();
+    ok(m === RETURN_INVOICE_CANCELLED, `${tag}d V1 auch über die Maske des Primary abgelehnt (${m})`);
+    unveraendert(`${tag}d`, v0, id, cid);
+  }
+  ok(artikel(p1) === S(['in_stock', 1]) && rueckStatus(r1) === S(['REFUNDED', 'PENDING_REFUND', 0]) && cnStatus(r1) === 'ISSUED',
+    `${tag}e Ware bleibt im Bestand (${artikel(p1)}), Rückgabe und Gutschrift bleiben wirksam`);
+  if (mitB1) ok(eq(debtState(L).open, 5000), `${tag}e das Darlehen bleibt ganz offen`);
 }
 await teilFall('R-2', 'cust-4', 'pk10', 'pk11', false);
-await teilFall('R-3', 'cust-5', 'pk12', 'pk13', false, '902');
+await teilFall('R-3 (PC2)', 'cust-5', 'pk12', 'pk13', false, '902');
 await teilFall('R-4 (B1 200)', 'cust-8', 'pk14', 'pk15', true);
 
 // ══ R-5 Teilrückgabe ohne Auszahlung, Storno, dann die Gutschrift der Teilrückgabe LÖSCHEN ══════════════════════
@@ -427,30 +449,29 @@ await teilFall('R-4 (B1 200)', 'cust-8', 'pk14', 'pk15', true);
   const r1 = rueckgabe(id, [zeilenVon(id)[0]]);
   storno(id);
   einig('R-5a nach dem Storno', id, cid);
+  const v0 = stand0(id, cid);
   const d = delCN(r1);
   reload();
-  ok(d === '' && cnStatus(r1) === 'gelöscht' && rueckStatus(r1) === S(['REFUNDED', 'PENDING_REFUND', 0]),
-    `R-5b BEFUND „Delete credit note" der Teilrückgabe nach dem Storno läuft: Gutschrift weg, Rückgabe bleibt ${rueckStatus(r1)}`);
-  befund('R-5b', id, cid, { status: 'CANCELLED', ar: 400, geldHB: 0, gesamt: 0, kunde: 0 });
+  ok(d === cnS.CREDIT_NOTE_VIA_RETURN, `R-5b V3 Gutschrift der Teilrückgabe lässt sich nicht direkt löschen (${d})`);
+  unveraendert('R-5b', v0, id, cid);
 }
 
-// ══ R-6 Teilrückgabe als Store Credit vor dem Storno — nicht erreichbar ═════════════════════════════════════════
+// ══ R-6 Teilrückgabe als Store Credit vor dem Storno — nicht erreichbar (unverändert) ═══════════════════════════
 {
   const cid = 'cust-7';
   neuerFall();
   const id = verkauf(cid, [['pk18', 400], ['pk19', 600]]);
   imHaus(() => useInvoiceStore.getState().recordPayment(id, 700, 'cash'));
   rueckgabe(id, [zeilenVon(id)[0]], 'credit');
-  const v0 = einig('R-6a nach der Guthaben-Rückgabe', id, cid);
-  const b0 = buchungen();
+  einig('R-6a nach der Guthaben-Rückgabe', id, cid);
+  const v0 = stand0(id, cid);
   const es = wirft(() => storno(id));
   reload();
-  ok(es === 'INVOICE_NOT_CANCELLABLE' && inv(id)[0] === 'RETURNED',
-    `R-6b Guthaben entsteht nur bei Überzahlung → Rechnung RETURNED, Storno abgelehnt (${es})`);
-  nichtsGeaendert('R-6b', v0, id, cid, b0);
+  ok(es === 'INVOICE_NOT_CANCELLABLE' && inv(id)[0] === 'RETURNED', `R-6b Guthaben nur bei Überzahlung → RETURNED, Storno abgelehnt (${es})`);
+  unveraendert('R-6b', v0, id, cid);
 }
 
-// ══ R-7 Rückgabe nur ANGELEGT („Pending", noch keine Gutschrift), dann Storno, dann diese Rückgabe stornieren ═════
+// ══ R-7 Rückgabe nur ANGELEGT („Pending") → Storno abgelehnt (Primary + PC2); zulässige Wege danach ═══════════════
 {
   const cid = 'cust-9';
   neuerFall();
@@ -458,33 +479,118 @@ await teilFall('R-4 (B1 200)', 'cust-8', 'pk14', 'pk15', true);
   imHaus(() => useInvoiceStore.getState().recordPayment(id, 300, 'cash'));
   const r1 = rueckgabe(id, [zeilenVon(id)[0]], 'cash', true);
   einig('R-7a nach der angelegten Rückgabe', id, cid);
+  const v0 = stand0(id, cid);
   const es = wirft(() => storno(id));
   reload();
-  ok(es === '' && inv(id)[0] === 'CANCELLED' && rueckStatus(r1) === S(['REQUESTED', 'PENDING_REFUND', 0]) && cnVon(r1) === '',
-    `R-7b BEFUND Storno läuft trotz offener Rückgabe: die Storno-Rückgabe lässt deren Zeile aus, keine Gutschrift dafür (Rückgabe ${rueckStatus(r1)})`);
-  befund('R-7b', id, cid, { status: 'CANCELLED', ar: 400, geldHB: 0, gesamt: 0, kunde: 0 });
+  ok(es === 'INVOICE_HAS_PENDING_RETURN', `R-7b V2 Storno am Primary abgelehnt, solange die Rückgabe angelegt ist (${es})`);
+  unveraendert('R-7b', v0, id, cid);
+  const f = await cancelInvFern('903', id);
+  ok(f.code === 'INVOICE_HAS_PENDING_RETURN', `R-7c V2 Storno über PC2 abgelehnt (${S({ kind: f.kind, code: f.code })})`);
+  unveraendert('R-7c', v0, id, cid);
+  const w = await cancelInvFern('903', id);
+  ok(w.code === 'INVOICE_HAS_PENDING_RETURN' && w.replayed === true, `R-7d PC2-Wiederholung: dasselbe eingefrorene Nein (${S({ kind: w.kind, code: w.code, replayed: w.replayed })})`);
+  unveraendert('R-7d', v0, id, cid);
+  // Zulässig: erst die angelegte Rückgabe kontrolliert stornieren (Rechnung lebt noch), dann die Rechnung.
   const e = cancelRet(r1);
   reload();
-  ok(e === '' && rueckStatus(r1).startsWith('["REJECTED"'), `R-7c Cancel Return der angelegten Rückgabe läuft (${rueckStatus(r1)}) — ändert an der Forderung nichts`);
-  befund('R-7c', id, cid, { status: 'CANCELLED', ar: 400, geldHB: 0, gesamt: 0, kunde: 0 });
+  ok(e === '' && rueckStatus(r1).startsWith('["REJECTED"') && artikel('pk20') !== S(['in_stock', 1]), `R-7e angelegte Rückgabe an der lebenden Rechnung storniert (${rueckStatus(r1)}, Artikel ${artikel('pk20')})`);
+  storno(id);
+  const v = einig('R-7f danach Storno zulässig', id, cid);
+  ok(v.status === 'CANCELLED' && eq(v.ar, 0) && artikel('pk20') === S(['in_stock', 1]) && artikel('pk21') === S(['in_stock', 1]),
+    `R-7f Rechnung CANCELLED, keine Forderung, beide Artikel zurück im Bestand (${artikel('pk20')} ${artikel('pk21')})`);
+}
+{
+  const cid = 'cust-11';
+  neuerFall();
+  const id = verkauf(cid, [['pk23', 400], ['pk24', 600]]);
+  imHaus(() => useInvoiceStore.getState().recordPayment(id, 300, 'cash'));
+  const r1 = rueckgabe(id, [zeilenVon(id)[0]], 'cash', true);
+  ok(wirft(() => storno(id)) === 'INVOICE_HAS_PENDING_RETURN', 'R-7g V2 auch hier: Storno abgelehnt');
+  // Zulässig: die angelegte Rückgabe abschließen (freigeben, Erstattung soweit Geld da ist), dann die Rechnung.
+  imHaus(() => { useSalesReturnStore.getState().loadReturns(); useSalesReturnStore.getState().approveReturn(r1); useSalesReturnStore.getState().refundReturn(r1); });
+  reload();
+  ok(cnStatus(r1) === 'ISSUED', `R-7h Rückgabe abgeschlossen (${rueckStatus(r1)}), Gutschrift ausgestellt`);
+  storno(id);
+  const v = einig('R-7i danach Storno zulässig', id, cid);
+  ok(v.status === 'CANCELLED' && eq(v.ar, 0), `R-7i Rechnung CANCELLED ohne offene Forderung (${fmt(v)})`);
 }
 
-// ══ R-8 Gegencheck OHNE Rechnungsstorno: volle Rückgabe mit bar ausgezahlter Erstattung, dann Gutschrift löschen ═══
+// ══ R-8 Ohne Rechnungsstorno: Rückgabe mit ausgezahlter Erstattung — Gutschrift löschen gesperrt; Korrektur über Cancel Return
 {
   const cid = 'cust-10';
   neuerFall();
   const id = verkauf(cid, [['pk22', 500]]);
   imHaus(() => useInvoiceStore.getState().recordPayment(id, 200, 'cash'));
   const r1 = rueckgabe(id, zeilenVon(id));
-  const v0 = einig('R-8a nach der Rückgabe (RETURNED, 200 erstattet)', id, cid);
-  const b0 = buchungen();
-  const e = cancelRet(r1);
-  ok(e === 'RETURN_REFUND_PAID_OUT', `R-8b Cancel Return gesperrt (${e})`);
-  nichtsGeaendert('R-8b', v0, id, cid, b0);
+  einig('R-8a nach der Rückgabe (RETURNED, 200 erstattet)', id, cid);
+  const v0 = stand0(id, cid);
+  ok(cancelRet(r1) === 'RETURN_REFUND_PAID_OUT', 'R-8b Cancel Return gesperrt (ausgezahlt)');
+  unveraendert('R-8b', v0, id, cid);
   const d = delCN(r1);
   reload();
-  ok(d === '' && cnStatus(r1) === 'gelöscht', `R-8c BEFUND „Delete credit note" läuft auch ohne Storno trotz ausgezahlter Erstattung (${rueckStatus(r1)})`);
-  befund('R-8c', id, cid, { status: 'RETURNED', ar: 300, geldHB: 200, gesamt: 0, kunde: 0 });
+  ok(d === cnS.CREDIT_NOTE_VIA_RETURN, `R-8c V3 Gutschrift löschen gesperrt (${d})`);
+  unveraendert('R-8c', v0, id, cid);
+}
+{
+  // Zulässige Rückgabekorrektur an einer lebenden Rechnung bleibt möglich (Cancel Return ohne Auszahlung).
+  const cid = 'cust-12';
+  neuerFall();
+  const id = verkauf(cid, [['pk25', 400], ['pk26', 600]]);
+  imHaus(() => useInvoiceStore.getState().recordPayment(id, 300, 'cash'));
+  const r1 = rueckgabe(id, [zeilenVon(id)[0]]);
+  ok(delCN(r1) === cnS.CREDIT_NOTE_VIA_RETURN, 'R-8d V3 auch an der lebenden Rechnung: nur über Cancel Return');
+  const e = cancelRet(r1);
+  reload();
+  const v = einig('R-8e Cancel Return an der lebenden Rechnung', id, cid);
+  ok(e === '' && v.status === 'PARTIAL' && eq(v.ar, 700) && cnStatus(r1) === 'CANCELLED' && artikel('pk25') !== S(['in_stock', 1]),
+    `R-8e zulässig wie bisher: Gutschrift CANCELLED, Rechnung wieder offen 700, Ware wieder verkauft (${e || 'ok'}, ${artikel('pk25')})`);
+}
+
+// ══ R-9 Unabhängige Gutschrift (ohne Rückgabe): Löschweg bleibt — nur für den Owner, nur am Primary ══════════════
+{
+  const cid = 'cust-11';
+  neuerFall();
+  const id = verkauf(cid, [['pk27', 500]]);
+  const cn = imHaus(() => useCreditNoteStore.getState().createCreditNote({ invoiceId: id, customerId: cid, totalAmount: 100, vatAmount: 0,
+    cashRefundAmount: 0, receivableCancelAmount: 100, reason: 'b1-rac unabhängig' }));
+  reload();
+  einig('R-9a unabhängige Gutschrift 100 auf offener Rechnung', id, cid);
+  const v0 = stand0(id, cid);
+  const del = () => wirft(() => imHaus(() => { useCreditNoteStore.getState().loadCreditNotes(); useCreditNoteStore.getState().deleteCreditNote(cn.id); }));
+  useAuthStore.setState({ session: { userId: 'user-staff', branchId: 'branch-main', role: 'SALES' } as never });
+  const e1 = del();
+  useAuthStore.setState({ session: { userId: 'user-test', branchId: 'branch-main', role: 'ADMIN' } as never });
+  ok(e1 === cnS.CREDIT_NOTE_OWNER_ONLY, `R-9b ohne Owner-Recht abgelehnt (${e1})`);
+  unveraendert('R-9b', v0, id, cid);
+  store.set('lataif_runtime_mode', 'client');
+  const e2 = del();
+  store.delete('lataif_runtime_mode');
+  ok(e2 === cnS.CREDIT_NOTE_PRIMARY_ONLY, `R-9c im PC2-Modus abgelehnt (${e2})`);
+  unveraendert('R-9c', v0, id, cid);
+  const e3 = del();
+  reload();
+  const v = einig('R-9d Owner löscht die unabhängige Gutschrift', id, cid);
+  ok(e3 === '' && n(DB, 'SELECT COUNT(*) FROM credit_notes WHERE id = ?', [cn.id]) === 0 && eq(v.ar, 500), `R-9d zulässig wie bisher: Gutschrift weg, Forderung wieder 500 (${e3 || 'ok'})`);
+}
+
+// ══ Quelltext: Maske und Schreibwege ════════════════════════════════════════════════════════════════════════════
+{
+  const det = src('src/pages/credit-notes/CreditNoteDetail.tsx');
+  ok(/const deleteBlock = creditNoteDeleteBlock\(cn, perm\.isOwner\);/.test(det) && /\{\.\.\.primaryOnlyDeleteProps\(\)\}\s*\{\.\.\.\(deleteBlock \? \{ disabled: true, title: deleteBlock/.test(det),
+    'Q-1 Gutschriftseite: „Delete" nur ohne Rückgabe und nur für den Owner (dieselbe Regel wie der Schreibweg)');
+  ok(cnS.creditNoteDeleteBlock({ salesReturnId: 'x' }, true) !== null && cnS.creditNoteDeleteBlock({}, false) !== null && cnS.creditNoteDeleteBlock({}, true) === null,
+    'Q-2 Regel der Maske: Rückgabe-Gutschrift gesperrt, Nicht-Owner gesperrt, Owner bei unabhängiger Gutschrift frei');
+  const bridge = ['src/core/bridge/sales-reversal-commands.ts', 'src/core/bridge/return-commands.ts', 'src/core/bridge/financial-commands.ts',
+    'src/core/bridge/invoice-lifecycle-commands.ts', 'src/core/bridge/invoice-cancel-command.ts'].map(src).join('\n');
+  ok(!/deleteCreditNote|DELETE FROM credit_notes/.test(bridge), 'Q-3 kein Fernbefehl löscht Gutschriften (PC2 erreicht den Löschweg nicht)');
+  const house = src('src/core/returns/return-cancel-house.ts');
+  ok(/if \(String\(inv\.status \?\? ''\) === 'CANCELLED'\) throw new ReturnCancelRejected\(RETURN_INVOICE_CANCELLED/.test(house)
+    && house.indexOf('RETURN_INVOICE_CANCELLED, RETURN_INVOICE_CANCELLED_TEXT') > house.indexOf('RETURN_KEEP_CONSIGNMENT_CHANGED,')
+    && house.indexOf('RETURN_INVOICE_CANCELLED, RETURN_INVOICE_CANCELLED_TEXT') < house.indexOf('revertDisposition(db, lines, disposition'),
+  'Q-4 V1 steht in der Hausfolge nach den bisherigen Sperren, vor dem ersten Schreiben (Maske, PC2, Kommissionsstorno)');
+  const ich = src('src/core/invoices/invoice-cancel-house.ts');
+  ok(ich.indexOf("'INVOICE_HAS_PENDING_RETURN'") > 0 && ich.indexOf("'INVOICE_HAS_PENDING_RETURN'") < ich.indexOf('beforeWrite?.();'),
+    'Q-5 V2 steht im Storno-Schreibweg vor dem ersten Schreiben (Primary und invoices.cancel von PC2)');
 }
 
 void [loadDebtPaymentsFor, payS, banking, analytics, backfill, executeCommand, lc, fc, money, po, geld, stand, sale, gap, TODAY, debtState, invRev, HCTX, insert, src, readFileSync, existsSync];

@@ -360,8 +360,10 @@ function bildDesStornos(db: Db, inv: string) {
 const FAELLE: Array<[string, number, 'cash' | 'bank' | 'benefit', ((db: Db, r: { inv: string; l9: string; l1: string }) => Promise<void>) | null]> = [
   ['teilbezahlt 300, bar', 300, 'cash', null],
   ['unbezahlt', 0, 'bank', null],
+  // B1-Abschluss V2 (Owner 09.11.2026): die Teilretoure ist ABGESCHLOSSEN (freigegeben, Gutschrift) — eine nur angelegte
+  // (refundNow: false → REQUESTED) sperrt den Storno jetzt (§4 RULE). Hier floss bei 500 von 770 für sie kein Geld zurück.
   ['teilbezahlt 500, eine Zeile schon zurueck, Bank', 500, 'bank', async (_db, r) => {
-    await returnHouse.createReturnOnPrimary({ invoiceId: r.inv, lines: [{ invoiceLineId: r.l9, quantity: 1 }], refundMethod: 'bank', productDisposition: 'IN_STOCK', refundNow: false });
+    await returnHouse.createReturnOnPrimary({ invoiceId: r.inv, lines: [{ invoiceLineId: r.l9, quantity: 1 }], refundMethod: 'bank', productDisposition: 'IN_STOCK', refundNow: true });
   }],
 ];
 for (const [was, bezahlt, weg, vorab] of FAELLE) {
@@ -420,6 +422,12 @@ for (const [was, bezahlt, weg, vorab] of FAELLE) {
   await beide('eine zurueckgegebene Rechnung', (db) => { const r = rechnung(db, 300); db.run("UPDATE invoices SET status = 'RETURNED' WHERE id = ?", [r.inv]); return { inv: r.inv }; }, 'INVOICE_NOT_CANCELLABLE');
   await beide('eine schon stornierte', (db) => { const r = rechnung(db, 0); db.run("UPDATE invoices SET status = 'CANCELLED' WHERE id = ?", [r.inv]); return { inv: r.inv }; }, 'INVOICE_CANCELLED');
   await beide('eine unbekannte', () => ({ inv: 'gibt-es-nicht' }), 'INVOICE_NOT_FOUND');
+  // B1-Abschluss V2 — eine nur ANGELEGTE Retoure (REQUESTED, ohne Gutschrift): erst abschließen oder stornieren.
+  await beide('eine teilbezahlte mit nur angelegter Retoure', (db) => {
+    const r = rechnung(db, 500);
+    returnHouse.createReturnInHouse({ invoiceId: r.inv, lines: [{ invoiceLineId: r.l9, quantity: 1 }], refundMethod: 'bank', productDisposition: 'IN_STOCK', refundNow: false } as never, 'branch-main');
+    return { inv: r.inv };
+  }, 'INVOICE_HAS_PENDING_RETURN');
   {
     const db = welt();
     const r = rechnung(db, 300);
@@ -563,7 +571,9 @@ function dreier(db: Db, bezahlt: number, mitP1 = false): { inv: string; l9: stri
   for (const weg of ['primary', 'fern'] as const) {
     const db = welt();
     const r = dreier(db, 400);
-    const erste = await returnHouse.createReturnOnPrimary({ invoiceId: r.inv, lines: [{ invoiceLineId: r.l9, quantity: 1 }], refundMethod: 'cash', productDisposition: 'IN_STOCK', refundNow: false });
+    // B1-Abschluss V2 (Owner 09.11.2026): die frühere Retoure ist ABGESCHLOSSEN (Gutschrift; bei 400 von 1000 floss für sie
+    // kein Geld). Eine nur angelegte (refundNow: false) sperrt den Storno jetzt — §4 RULE.
+    const erste = await returnHouse.createReturnOnPrimary({ invoiceId: r.inv, lines: [{ invoiceLineId: r.l9, quantity: 1 }], refundMethod: 'cash', productDisposition: 'IN_STOCK', refundNow: true });
     const aus = await storno(weg, db, r.inv, 'cash');
     const zweite = row(db, 'SELECT * FROM sales_returns WHERE invoice_id = ? AND id != ?', [r.inv, erste.returnId]);
     const zl = rows(db, 'SELECT quantity, line_total FROM sales_return_lines WHERE return_id = ?', [String(zweite.id ?? '')]);
@@ -575,7 +585,7 @@ function dreier(db: Db, bezahlt: number, mitP1 = false): { inv: string; l9: stri
     const spaeter = await fern(() => ret5.runRecordRefundPayment(deps(db), identity(nextId(), 'returns.record_refund_payment'),
       { returnId: erste.returnId, amount: 100, method: 'cash', expectedRevision: n(db, 'SELECT revision FROM sales_returns WHERE id = ?', [erste.returnId]) }));
     ok(!spaeter.ok && nah(n(db, 'SELECT SUM(refund_paid_amount) FROM sales_returns WHERE invoice_id = ?', [r.inv]), 400),
-      `AMOUNT B: die fruehere, offene Retoure zahlt danach nichts mehr aus — kein doppeltes Geld (${spaeter.code} · ${S(spaeter.value ?? {}).slice(0, 160)} · ${S(rows(db, 'SELECT status, refund_status, total_amount, refund_paid_amount FROM sales_returns WHERE invoice_id = ?', [r.inv]))} · paid ${n(db, 'SELECT paid_amount FROM invoices WHERE id = ?', [r.inv])})`);
+      `AMOUNT B: die fruehere Retoure zahlt danach nichts mehr aus — kein doppeltes Geld (${spaeter.code} · ${S(spaeter.value ?? {}).slice(0, 160)} · ${S(rows(db, 'SELECT status, refund_status, total_amount, refund_paid_amount FROM sales_returns WHERE invoice_id = ?', [r.inv]))} · paid ${n(db, 'SELECT paid_amount FROM invoices WHERE id = ?', [r.inv])})`);
   }
 }
 

@@ -17,6 +17,35 @@ import { hydrateFromPrimary } from '@/core/data/primary-source';
 // CENTRAL-UI-PARITY R1 — der Ausweis der Leseanfrage reist als Parameter, nicht als globaler
 // Zustand: am Primary aus der eigenen Sitzung, aus der Ferne aus dem geprueften Absender.
 import { localReadContext, type BusinessReadContext } from '@/core/data/read-context';
+import { isClientMode } from '@/core/bridge/client-mode';
+import { canonicalRole } from '@/core/models/types';
+import { useAuthStore } from '@/stores/authStore';
+
+/**
+ * B1-Abschluss V3 (Owner 09.11.2026) — ein fachliches Nein beim Löschen einer Gutschrift, mit festem Code.
+ * `CREDIT_NOTE_VIA_RETURN`: die Gutschrift gehört zu einer Rückgabe. Das Löschen kehrte ihre ganze Buchung um — auch
+ * eine schon AUSGEZAHLTE Erstattung (Kasse im Hauptbuch zurück, das Geld ist aber fort) — und ließe die Rückgabe ohne
+ * Gutschrift stehen; nach einem Rechnungsstorno lag die Forderung wieder auf der stornierten Rechnung. Der kontrollierte
+ * Weg ist „Cancel Return" (Owner, mit allen Sperren: ausgezahlt, Guthaben verbraucht, Ware weiterverkauft, Rechnung storniert).
+ */
+export class CreditNoteDeleteRejected extends Error {
+  readonly code: string;
+  constructor(code: string, message: string) {
+    super(message);
+    this.name = 'CreditNoteDeleteRejected';
+    this.code = code;
+  }
+}
+export const CREDIT_NOTE_VIA_RETURN = 'CREDIT_NOTE_VIA_RETURN';
+export const CREDIT_NOTE_OWNER_ONLY = 'CREDIT_NOTE_OWNER_ONLY';
+export const CREDIT_NOTE_PRIMARY_ONLY = 'CREDIT_NOTE_PRIMARY_ONLY';
+/** Warum „Delete" für diese Gutschrift nicht angeboten wird — dieselben Regeln wie `deleteCreditNote` (ohne Datenbank). */
+export function creditNoteDeleteBlock(cn: { status?: string; salesReturnId?: string | null }, isOwner: boolean): string | null {
+  if (cn.status === 'CANCELLED') return 'This credit note is cancelled — it stays on record as a historical document.';
+  if (cn.salesReturnId) return 'This credit note belongs to a return — undo it with "Cancel Return" on the invoice (owner only).';
+  if (!isOwner) return 'Only the owner can delete a credit note.';
+  return null;
+}
 
 interface CreditNoteStore {
   creditNotes: CreditNote[];
@@ -194,6 +223,16 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
   },
 
   deleteCreditNote: (id) => {
+    // V3 — am Schreibweg, nicht nur in der Maske: am PC2 gibt es keine Geschäftsdatenbank (und keinen Fernbefehl dafür).
+    if (isClientMode()) {
+      throw new CreditNoteDeleteRejected(CREDIT_NOTE_PRIMARY_ONLY, 'A credit note is deleted on the main computer only.');
+    }
+    // V3 — Owner-only, aus der Sitzung des Primary (wie „Cancel Return" und das Löschen einer Rechnung).
+    let actorRole: string | undefined;
+    try { actorRole = useAuthStore.getState().role(); } catch { actorRole = undefined; }
+    if (canonicalRole(actorRole) !== 'ADMIN') {
+      throw new CreditNoteDeleteRejected(CREDIT_NOTE_OWNER_ONLY, 'Only the owner can delete a credit note.');
+    }
     const db = getDatabase();
 
     // R6E-CN — eine STORNIERTE Gutschrift ist die Spur ihres Stornos (Nummer, wann, wer, warum);
@@ -201,6 +240,18 @@ export const useCreditNoteStore = create<CreditNoteStore>((set, get) => ({
     const stRow = query('SELECT status FROM credit_notes WHERE id = ?', [id])[0];
     if (stRow && String(stRow.status) === 'CANCELLED') {
       throw new Error('This credit note is cancelled — it stays on record as a historical document.');
+    }
+    // V3 — eine Gutschrift einer Rückgabe wird nie direkt gelöscht: nur „Cancel Return" nimmt sie kontrolliert zurück.
+    // Vor jedem Schreiben; unabhängige Gutschriften (ohne Rückgabe) behalten ihren bisherigen Löschweg.
+    const zuRueckgabe = query(
+      `SELECT sr.return_number FROM credit_notes cn LEFT JOIN sales_returns sr ON sr.id = cn.sales_return_id
+        WHERE cn.id = ? AND COALESCE(cn.sales_return_id, '') != ''`,
+      [id]
+    )[0];
+    if (zuRueckgabe) {
+      const nr = String(zuRueckgabe.return_number ?? '');
+      throw new CreditNoteDeleteRejected(CREDIT_NOTE_VIA_RETURN,
+        `This credit note belongs to return ${nr || '(unknown)'} — it is not deleted directly. Undo it with "Cancel Return" on the invoice (owner only). Nothing was changed.`);
     }
 
     // Credit-Modell Slice 3.5 / B2 — Guard GANZ OBEN: ein CN darf NICHT geloescht werden, wenn

@@ -68,6 +68,16 @@ export const RETURN_NOT_FOUND = 'RETURN_NOT_FOUND';
 export const RETURN_REASON_REQUIRED = 'RETURN_REASON_REQUIRED';
 export const RETURN_ALREADY_CANCELLED = 'RETURN_ALREADY_CANCELLED';
 export const RETURN_REFUND_PAID_OUT = 'RETURN_REFUND_PAID_OUT';
+/**
+ * B1-Abschluss V1 (Owner 09.11.2026) — die Rechnung der Retoure ist storniert. Ihre Retouren und Gutschriften gehören
+ * zu jenem Storno (bzw. trugen ihn: `updateInvoice` kehrt die Rechnungsbuchung bei wirksamer Gutschrift nicht um).
+ * Eine solche Retoure zurückzunehmen, legte Forderung und Erlös wieder auf eine stornierte Rechnung — offen im
+ * Hauptbuch, unsichtbar in Receivables und Kundenkonto, nicht mehr kassierbar. Dieselbe Haltung wie der
+ * Kommissionsstorno („eine schon stornierte Rechnung … ihre Retouren und Gutschriften bleiben, wie sie sind").
+ */
+export const RETURN_INVOICE_CANCELLED = 'RETURN_INVOICE_CANCELLED';
+const RETURN_INVOICE_CANCELLED_TEXT =
+  'The invoice of this return is cancelled — the return belongs to that cancellation and stays. If the customer keeps the item, issue a new invoice. Nothing was changed.';
 export const RETURN_CREDIT_USED = 'RETURN_CREDIT_USED';
 export const RECORD_CHANGED = 'RECORD_CHANGED';
 export const RETURN_STOCK_RESOLD = 'RETURN_STOCK_RESOLD';
@@ -111,6 +121,14 @@ export interface ReturnCancelView {
 
 /** Echtes Geld ist schon hinaus (Kasse, Bank, Karte) — ein Storno holte es nur buchhalterisch zurück. */
 const auszahlungGeflossen = (r: ReturnCancelView): boolean => Number(r.refundPaidAmount ?? 0) > 0.005;
+
+/** V1 — die Rechnung dieser Retoure ist storniert (aus der Datenbank, nicht aus einer Liste). */
+function rechnungStorniert(returnId: string): boolean {
+  return query(
+    `SELECT 1 FROM sales_returns r JOIN invoices i ON i.id = r.invoice_id WHERE r.id = ? AND i.status = 'CANCELLED' LIMIT 1`,
+    [returnId],
+  ).length > 0;
+}
 
 /** Das Store-Guthaben aus dieser Retoure floss schon (teilweise) auf eine andere Rechnung. */
 function guthabenVerbraucht(returnId: string): boolean {
@@ -156,6 +174,8 @@ export function returnCancelability(r: ReturnCancelView): ReturnCancelability {
       needsStockWarning: false,
     };
   }
+  // V1 — nach den bisherigen Sperren (ihre Worte bleiben), dieselbe Regel wie die Hausfolge.
+  if (rechnungStorniert(r.id)) return { canCancel: false, blockReason: RETURN_INVOICE_CANCELLED_TEXT, needsStockWarning: false };
   return { canCancel: true, blockReason: null, needsStockWarning: unsichereWarenfolge(r.productDisposition || 'IN_STOCK') };
 }
 
@@ -457,6 +477,9 @@ export function cancelReturnInHouse(
       }
     }
   }
+  // Sperre 5 — B1-Abschluss V1: die Rechnung ist storniert. Nach den bisherigen Sperren (deren Codes bleiben), vor dem
+  // ersten Schreiben — für jeden Weg (Maske des Primary, `returns.cancel` von PC2, Kommissionsstorno).
+  if (String(inv.status ?? '') === 'CANCELLED') throw new ReturnCancelRejected(RETURN_INVOICE_CANCELLED, RETURN_INVOICE_CANCELLED_TEXT);
   const oldSnapshot = {
     status,
     refundStatus: String(r.refund_status ?? ''),

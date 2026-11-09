@@ -88,6 +88,19 @@ export function cancelInvoiceInHouse(input: InvoiceCancelInput, branchId: string
         'this invoice already has a return or credit note — return the remaining items instead of cancelling');
     }
   }
+  // B1-Abschluss V2 (Owner 09.11.2026) — eine nur ANGELEGTE Retoure (REQUESTED: noch keine Gutschrift). Die eigene
+  // Retoure des Stornos lässt ihre Zeilen aus (sie gelten als zurück), eine Gutschrift dafür gibt es aber nicht — und
+  // `updateInvoice` kehrt die Rechnungsbuchung bei wirksamer Gutschrift nicht um. Der Betrag dieser Zeilen bliebe als
+  // Forderung und Erlös auf der stornierten Rechnung. Erst abschließen (freigeben) oder stornieren, dann die Rechnung.
+  // Freigegebene Retouren (mit Gutschrift, auch bei offener Erstattung) bleiben wie bisher.
+  const angelegt = query(
+    `SELECT return_number FROM sales_returns WHERE invoice_id = ? AND status = 'REQUESTED' ORDER BY created_at ASC, id ASC LIMIT 1`,
+    [input.invoiceId],
+  )[0];
+  if (angelegt) {
+    throw new InvoiceActionRejected('INVOICE_HAS_PENDING_RETURN',
+      `Return ${String(angelegt.return_number ?? '')} of this invoice is still pending — complete it (approve) or cancel it first, then cancel the invoice. Nothing was changed.`);
+  }
   beforeWrite?.();
 
   const buchung = watchLedgerPosts('invoice cancel');

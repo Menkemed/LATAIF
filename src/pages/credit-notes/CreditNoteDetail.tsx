@@ -8,7 +8,8 @@ import { useReturnToList } from '@/hooks/useListNav';
 import { Button } from '@/components/ui/Button';
 import { primaryOnlyDeleteProps, blockDeleteOnClient } from '@/core/data/primary-only';
 import { Card } from '@/components/ui/Card';
-import { useCreditNoteStore } from '@/stores/creditNoteStore';
+import { useCreditNoteStore, creditNoteDeleteBlock } from '@/stores/creditNoteStore';
+import { usePermission } from '@/hooks/usePermission';
 import { useCustomerStore } from '@/stores/customerStore';
 import { useInvoiceStore } from '@/stores/invoiceStore';
 import { useSalesReturnStore } from '@/stores/salesReturnStore';
@@ -34,6 +35,7 @@ export function CreditNoteDetail() {
   // Position); sonst frisch zur Liste wie bisher.
   const returnToList = useReturnToList('/credit-notes');
   const { creditNotes, loadCreditNotes, deleteCreditNote } = useCreditNoteStore();
+  const perm = usePermission();
   const { customers, loadCustomers } = useCustomerStore();
   const { invoices, loadInvoices } = useInvoiceStore();
   const { returns: salesReturns, loadReturns } = useSalesReturnStore();
@@ -60,6 +62,8 @@ export function CreditNoteDetail() {
   // R6E-CN — eine stornierte Gutschrift bleibt als Urkunde sichtbar, klar markiert; sie wirkt auf
   // keine Forderung, kein Guthaben und keine Steuer mehr und lässt sich nicht löschen (sie IST die Spur).
   const cancelled = cn.status === 'CANCELLED';
+  // B1-Abschluss V3 — Gutschrift einer Rückgabe nur über „Cancel Return“; Löschen nur für den Owner (wie der Schreibweg).
+  const deleteBlock = creditNoteDeleteBlock(cn, perm.isOwner);
 
   function handleDownload() {
     if (!cn) return;
@@ -116,7 +120,9 @@ export function CreditNoteDetail() {
           <div className="flex gap-2">
             <Button variant="secondary" onClick={handleDownload}><Download size={14} /> Download PDF</Button>
             {!cancelled && (
-              <Button variant="ghost" {...primaryOnlyDeleteProps()} onClick={handleDelete} style={{ color: '#DC2626' }}><Trash2 size={14} /> Delete</Button>
+              <Button variant="ghost" {...primaryOnlyDeleteProps()}
+                {...(deleteBlock ? { disabled: true, title: deleteBlock, 'data-credit-note-delete-block': 'true' } : {})}
+                onClick={handleDelete} style={{ color: '#DC2626' }}><Trash2 size={14} /> Delete</Button>
             )}
           </div>
         </div>
