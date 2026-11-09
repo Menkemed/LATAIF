@@ -349,6 +349,8 @@ export function financeFor(ctx: BusinessReadContext) {
       const amt = (row.total as number) || 0;
       // CUSTOM-ORDER K2 — die Anrechnung einer Anzahlung ist kein Zahlungseingang (das Geld steht bei der Order-Zahlung).
       if (m === 'order_deposit') continue;
+      // CUSTOMER ACCOUNT B1 — die Verrechnung mit einem Darlehen ist kein Zahlungseingang (kein Geld).
+      if (m === 'debt_offset') continue;
       if (m === 'cash') cashReceived += amt;
       else if (m === 'bank_transfer') bankReceived += amt;
       else if (m === 'card') cardReceived += amt;
@@ -402,7 +404,7 @@ export function financeFor(ctx: BusinessReadContext) {
       const dpays = qry(
         `SELECT dp.amount, dp.source, d.direction
          FROM debt_payments dp JOIN debts d ON d.id = dp.debt_id
-         WHERE d.branch_id = ?`,
+         WHERE d.branch_id = ? AND COALESCE(dp.source, '') NOT IN ('offset', 'offset_reversal')`,
         [branchId]
       );
       for (const p of dpays) {

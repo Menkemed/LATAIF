@@ -67,7 +67,10 @@ export function cancelInvoiceInHouse(input: InvoiceCancelInput, branchId: string
   assertInvoiceNotInClosedVatQuarter(input.invoiceId);
   // CUSTOM-ORDER K2 — eine angerechnete Order-Anzahlung ist kein Geld dieser Rechnung: beim Storno geht sie an ihre
   // Order zurück (wieder offen) statt ausgezahlt zu werden. Erstattet wird nur, was wirklich auf die Rechnung gezahlt wurde.
-  const depositPayments = query(`SELECT id, amount FROM payments WHERE invoice_id = ? AND method = 'order_deposit'`, [input.invoiceId]);
+  // CUSTOMER ACCOUNT B1 — ebenso eine Verrechnung mit einem Darlehen ('debt_offset'): sie wird aufgehoben, das Darlehen
+  // ist wieder offen; erstattet wird sie nie (es floss kein Geld).
+  const depositPayments = query(
+    `SELECT id, amount, method FROM payments WHERE invoice_id = ? AND method IN ('order_deposit', 'debt_offset')`, [input.invoiceId]);
   const depositSum = depositPayments.reduce((s, p) => s + Number(p.amount ?? 0), 0);
   const paidMoney = Math.round((Number(inv.paid_amount ?? 0) - depositSum) * 1000) / 1000;
   // Ohne Geld läuft der Storno NICHT über eine Retoure: er gibt die Ware der Zeilen frei und setzt
@@ -90,7 +93,7 @@ export function cancelInvoiceInHouse(input: InvoiceCancelInput, branchId: string
   const buchung = watchLedgerPosts('invoice cancel');
   let returnId: string | undefined;
   try {
-    for (const p of depositPayments) useInvoiceStore.getState().deletePayment(String(p.id), input.invoiceId);
+    for (const p of depositPayments) useInvoiceStore.getState().deletePayment(String(p.id), input.invoiceId, { offsetReason: 'invoice cancelled' });
     if (depositPayments.length > 0) useInvoiceStore.getState().loadInvoices();
     if (paidMoney > 0) {
       // Was noch nicht zurück ist, zum Preis der Rechnung — dieselbe Ableitung wie jede Retoure.

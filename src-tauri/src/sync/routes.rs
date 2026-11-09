@@ -2889,7 +2889,9 @@ mod legacy_push_tests {
         // gains delete, like invoice_lines/order_lines (38 → 39 delete).
         // CUSTOM-ORDER K2/K3a: order_deposit_applications and gold_payable_settlements are inserted and updated (status
         // ACTIVE → REVERSED), never deleted (57 → 59 insert, 41 → 43 update).
-        assert_eq!((ins, upd, del), (59, 43, 39),"insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
+        // CUSTOMER ACCOUNT B1: party_offsets (invoice ↔ loan offset) is inserted and set REVERSED, never deleted
+        // (59 → 60 insert, 43 → 44 update).
+        assert_eq!((ins, upd, del), (60, 44, 39),"insert/update/delete table counts (O1: some tables have all 3; O4: e.g. purchase_inbox has no delete)");
     }
 
     // O6 — a mixed batch with one disallowed operation writes NOTHING (all-or-nothing).

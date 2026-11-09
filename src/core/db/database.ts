@@ -2728,6 +2728,38 @@ function runMigrations(database: Database): void {
     // die Sperre gegen eine versehentliche Doppelzuordnung (wie bei der Lieferantenrolle `uq_suppliers_linked_customer`).
     `ALTER TABLE partners ADD COLUMN linked_customer_id TEXT REFERENCES customers(id) ON DELETE SET NULL`,
     `CREATE UNIQUE INDEX IF NOT EXISTS uq_partners_linked_customer ON partners(branch_id, linked_customer_id) WHERE linked_customer_id IS NOT NULL`,
+
+    // CUSTOMER ACCOUNT B1 — die Verrechnung einer Forderung (Rechnung) mit einer Verbindlichkeit (zuerst: Darlehen „We
+    // Borrowed") desselben Kunden, ohne Geld. Je Verrechnung EINE Zeile: beide Belege, ihre beiden Zahlungszeilen
+    // (Rechnungszahlung 'debt_offset' / Darlehensrückzahlung 'offset'), Betrag, Tag, Status ACTIVE → REVERSED (nie
+    // gelöscht). Die Buchung steht an der Rechnungszahlung (Soll LOAN_PAYABLE / Haben AR). Die Arten sind offen
+    // gehalten (Prüfung im Haus), damit Einkauf/Kommission später ohne Tabellenumbau dazukommen.
+    `CREATE TABLE IF NOT EXISTS party_offsets (
+      id TEXT PRIMARY KEY,
+      branch_id TEXT NOT NULL,
+      offset_number TEXT NOT NULL,
+      customer_id TEXT NOT NULL,
+      receivable_type TEXT NOT NULL,
+      receivable_id TEXT NOT NULL,
+      receivable_payment_id TEXT NOT NULL,
+      payable_type TEXT NOT NULL,
+      payable_id TEXT NOT NULL,
+      payable_payment_id TEXT NOT NULL,
+      amount REAL NOT NULL CHECK (amount > 0),
+      offset_date TEXT NOT NULL,
+      status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE','REVERSED')),
+      note TEXT,
+      created_at TEXT NOT NULL,
+      created_by TEXT,
+      reversed_at TEXT,
+      reversed_by TEXT,
+      reversal_payment_id TEXT,
+      reverse_reason TEXT
+    )`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_party_offsets_number ON party_offsets(branch_id, offset_number)`,
+    `CREATE UNIQUE INDEX IF NOT EXISTS uq_party_offsets_receivable_payment ON party_offsets(receivable_payment_id)`,
+    `CREATE INDEX IF NOT EXISTS idx_party_offsets_receivable ON party_offsets(receivable_type, receivable_id, status)`,
+    `CREATE INDEX IF NOT EXISTS idx_party_offsets_payable ON party_offsets(payable_type, payable_id, status)`,
   ];
   for (const sql of migrations) {
     try { database.run(sql); } catch (err) {

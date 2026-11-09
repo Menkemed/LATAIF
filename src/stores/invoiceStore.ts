@@ -4,6 +4,7 @@ import type { Invoice, InvoiceLine, InvoiceStatus, InvoiceTaxScheme, TaxScheme, 
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { restoreOrderDepositForPayment } from '@/core/orders/order-deposit-restore';
+import { DEBT_OFFSET_METHOD, INVOICE_HAS_OFFSET, invoiceHasActiveOffsets, restoreDebtOffsetForPayment } from '@/core/offsets/party-offset-restore';
 import { eventBus } from '@/core/events/event-bus';
 import { trackInsert, trackUpdate, trackDelete, trackStatusChange, trackPayment } from '@/core/sync/track';
 import { trackChange } from '@/core/sync/sync-service';
@@ -231,7 +232,7 @@ interface InvoiceStore {
   setSpecialMark: (invoiceId: string, special: boolean) => void;
   // Plan §Edit: einzelne Payments später ändern oder löschen.
   updatePayment: (paymentId: string, invoiceId: string, data: { amount?: number; method?: string; notes?: string; receivedAt?: string }) => void;
-  deletePayment: (paymentId: string, invoiceId: string) => void;
+  deletePayment: (paymentId: string, invoiceId: string, opts?: { offsetReason?: string }) => void;
   getInvoicePayments: (invoiceId: string) => Array<{ id: string; amount: number; method: string; receivedAt: string; notes?: string }>;
   deleteInvoice: (id: string) => void;
   getNextInvoiceNumber: () => string;
@@ -724,6 +725,8 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
         for (const pid of cancelPayIds) restoreCreditForPayment(pid);
         // CUSTOM-ORDER K2 — eine angerechnete Anzahlung wird wieder offen bei ihrer Order (die Buchung oben drehte sie zurück).
         for (const pid of cancelPayIds) restoreOrderDepositForPayment(pid);
+        // CUSTOMER ACCOUNT B1 — eine Verrechnung mit einem Darlehen: das Darlehen öffnet wieder (Buchung oben gedreht, geprüft).
+        for (const pid of cancelPayIds) restoreDebtOffsetForPayment(pid, { reason: 'invoice cancelled' });
         // Slice 3 — beim Ueberzahlen ERZEUGTES Guthaben dieser Zahlungen abraeumen (Ledger-
         // CR-Bein via reverseSource('PAYMENT') oben schon gedreht; hier nur die Domain-Row).
         for (const pid of cancelPayIds) clawbackOverpaymentCredit(pid);
@@ -896,6 +899,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // Geldfluss nur nach ausdrücklicher Bestätigung; eine Delta-Zahlung im selben Speichern nie
     // (recordPayment würde sie beim alten Kunden buchen). Vor den allgemeinen Guthaben-Sperren, damit
     // ein Kundenwechsel seinen eigenen, genaueren Satz bekommt.
+    // CUSTOMER ACCOUNT B1 — eine Verrechnung verbindet DIESEN Kunden mit seinem Darlehen: der Kunde bleibt, solange sie wirkt.
+    if (customerId && customerId !== inv0.customerId && invoiceHasActiveOffsets(id)) {
+      throw new InvoiceActionRejected(INVOICE_HAS_OFFSET,
+        'This invoice is settled by an offset with a loan of this client — remove the offset first, then change the client.');
+    }
     const customerPlan = planCustomerChange(id, inv0.customerId, customerId,
       { confirmed: input.confirmCustomerChange === true, newPayment: deltaAmount > 0 });
 
@@ -1408,6 +1416,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
           : 'Cannot edit: the overpayment store credit from a payment has already been used. Reverse that credit usage first.');
       }
       let overpayMode: OverpayChoice | null = null;
+      // CUSTOMER ACCOUNT B1 — eine Korrektur unter den beglichenen Betrag machte aus einer Verrechnung (kein Geld) ein
+      // Guthaben oder eine Auszahlung. Erst die Verrechnung aufheben (das Darlehen öffnet wieder), dann ändern.
+      if (overpayPlan.additionalCredit > 0.005 && invoiceHasActiveOffsets(id)) {
+        throw new InvoiceActionRejected(INVOICE_HAS_OFFSET,
+          'This invoice is settled by an offset with a loan — lowering it below the settled amount would pay that out. Remove the offset first, then edit.');
+      }
       if (overpayPlan.additionalCredit > 0.005) {
         // MIXED-INVOICE P1c — Pflichtwahl: Kundenguthaben oder Rückzahlung. Beide sind DIESELBE Zeile und DIESELBE
         // Buchung (DR AR / CR CUSTOMER_CREDIT, kein Geld); nur die Art unterscheidet: 'OPEN' ist einlösbar, 'REFUND_DUE'
@@ -1814,6 +1828,12 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     assertNotConsignmentSaleInvoice(id, 'It cannot be deleted on its own.');
     // VAT-PERIOD-LOCK — eine gemeldete Rechnung verschwindet nicht aus einem eingereichten Quartal.
     assertInvoiceNotInClosedVatQuarter(id);
+    // CUSTOMER ACCOUNT B1 — eine Rechnung mit wirksamer Verrechnung wird nicht gelöscht: das Darlehen öffnet nur der
+    // sichere Weg wieder („Remove offset" bzw. Storno, je EINE Transaktion) — nie dieser Löschpfad.
+    if (invoiceHasActiveOffsets(id)) {
+      throw new InvoiceActionRejected(INVOICE_HAS_OFFSET,
+        'This invoice is settled by an offset with a loan — remove the offset first (the loan opens again), then delete.');
+    }
     // Bestandsschutz VOR jedem Write: eine stornierte Rechnung hat ihre Lose schon zurueckgegeben,
     // eine Retoure/Gutschrift hat Ware schon zurueckgebucht — der Lot-Restore unten gaebe dasselbe
     // Stueck ein zweites Mal frei (Phantom-Bestand, erneut verkaufbar).
@@ -2027,6 +2047,10 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     if (newMethod === 'order_deposit' || oldMethod === 'order_deposit') {
       throw new Error('This payment is an applied order deposit — remove it (it returns to the order) instead of editing it.');
     }
+    // CUSTOMER ACCOUNT B1 — eine Verrechnung mit einem Darlehen ist kein Geld: nur als Ganzes aufheben, nie ändern.
+    if (newMethod === DEBT_OFFSET_METHOD || oldMethod === DEBT_OFFSET_METHOD) {
+      throw new Error('This payment is an offset with a loan — remove the offset (the loan opens again) instead of editing it.');
+    }
     if (newMethod === 'credit' || oldMethod === 'credit') {
       throw new Error('Credit-Zahlungen koennen hier nicht bearbeitet werden.');
     }
@@ -2219,7 +2243,7 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
   },
 
   // Payment löschen + Invoice paid_amount/Status neu berechnen.
-  deletePayment: (paymentId, invoiceId) => {
+  deletePayment: (paymentId, invoiceId, opts) => {
     const db = getDatabase();
     const now = new Date().toISOString();
     // VAT-PERIOD-LOCK — eine Zahlung einer gemeldeten FINAL-Rechnung zu löschen nähme sie aus dem
@@ -2263,9 +2287,11 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     const inv = get().getInvoice(invoiceId);
     if (inv) {
       const tip = 0; // Slice 3 — Ueberschuss ist Store-Guthaben, kein tip (Scope A)
+      // CUSTOMER ACCOUNT B1 — eine aufgehobene Verrechnung stellt den Stand davor her: die Rechnung war offen (PARTIAL;
+      // ein Entwurf wird nie verrechnet), nicht „Pending". Der Rückfall auf DRAFT bleibt für alle anderen Zahlungen wie bisher.
       const newStatus: InvoiceStatus = newPaid >= inv.grossAmount - 0.005 ? 'FINAL'
         : newPaid > 0 ? 'PARTIAL'
-        : (inv.status === 'CANCELLED' ? 'CANCELLED' : 'DRAFT');
+        : (inv.status === 'CANCELLED' ? 'CANCELLED' : delMethod === DEBT_OFFSET_METHOD ? 'PARTIAL' : 'DRAFT');
       db.run(`UPDATE invoices SET paid_amount = ?, tip_amount = ?, status = ?, updated_at = ? WHERE id = ?`,
         [newPaid, tip, newStatus, now, invoiceId]);
       if (newStatus !== inv.status) trackStatusChange('invoices', invoiceId, inv.status, newStatus);
@@ -2295,6 +2321,9 @@ export const useInvoiceStore = create<InvoiceStore>((set, get) => ({
     // statt das Guthaben still zu verlieren.
     if (delMethod === 'credit') restoreCreditForPayment(paymentId);
     if (delMethod === 'order_deposit') restoreOrderDepositForPayment(paymentId);
+    // CUSTOMER ACCOUNT B1 — eine Verrechnung mit einem Darlehen: das Darlehen wieder öffnen (Gegenzeile), die Verrechnung
+    // auf REVERSED. Prüft, dass die Gegenbuchung oben steht; sonst geht der ganze Vorgang zurück.
+    if (delMethod === DEBT_OFFSET_METHOD) restoreDebtOffsetForPayment(paymentId, { reason: opts?.offsetReason });
 
     // Slice 1 — die Auto-Card-Fee dieser Zahlung mit-stornieren, sonst bleibt eine
     // verwaiste CardFees-Expense (DR EXPENSES / CR CARD_CLEARING) stehen. Bei

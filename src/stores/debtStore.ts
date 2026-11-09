@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { getDatabase, saveDatabase } from '@/core/db/database';
 import { query } from '@/core/db/helpers';
+import { debtHasActiveOffsets } from '@/core/offsets/party-offset-restore';
 import { trackUpdate, trackDelete } from '@/core/sync/track';
 import type { Debt, DebtPayment, DebtDirection, CashSource, DebtStatus } from '@/core/models/types';
 // CENTRAL-UI-PARITY — auf einem Rechner ohne Datenbank holt derselbe Aufruf den Stand vom Primary.
@@ -158,6 +159,14 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
     }
     if (fields.length === 0) { get().loadDebts(); return; }
     const before = get().debts.find(d => d.id === id);
+    // CUSTOMER ACCOUNT B1 — an einem Darlehen mit wirksamer Verrechnung bleiben Richtung, Kunde und Bestand (kein Storno):
+    // sonst stünde eine Rechnung als bezahlt durch ein Darlehen, das es so nicht mehr gibt. Erst die Verrechnung aufheben.
+    if (before && debtHasActiveOffsets(id)) {
+      const wechsel = ('direction' in data && data.direction !== before.direction)
+        || ('customerId' in data && (data.customerId ?? null) !== (before.customerId ?? null))
+        || ('status' in data && String(data.status).toUpperCase() === 'CANCELLED');
+      if (wechsel) throw new Error('This loan settles an invoice by an offset — remove the offset on the invoice first.');
+    }
     const db = getDatabase();
     db.run(`UPDATE debts SET ${fields.join(', ')}, updated_at = ? WHERE id = ?`, [...values, new Date().toISOString(), id]);
     saveDatabase();
@@ -195,6 +204,8 @@ export const useDebtStore = create<DebtStore>((set, get) => ({
   },
 
   deleteDebt: (id) => {
+    // CUSTOMER ACCOUNT B1 — ein Darlehen, das eine Rechnung verrechnet, wird nicht gelöscht (die Rechnung bliebe bezahlt).
+    if (debtHasActiveOffsets(id)) throw new Error('This loan settles an invoice by an offset — remove the offset on the invoice first.');
     const db = getDatabase();
     // ZIEL.md §3a — Vor dem CASCADE-Delete der debt_payments deren Ledger-Buchungen reversen.
     const payRows = query('SELECT id FROM debt_payments WHERE debt_id = ?', [id]);

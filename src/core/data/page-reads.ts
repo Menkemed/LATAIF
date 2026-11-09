@@ -24,6 +24,7 @@ import type { BusinessReadContext } from '@/core/data/read-context';
 import { productDisplayName } from '../products/display-name.ts';
 import { INVOICE_COMPANY_KEYS, invoiceCompany, type InvoiceA5Company } from '@/core/pdf/invoice-a5';
 import { purchaseBoundOf } from '@/core/products/purchase-bound';
+import { debtOffsetCandidatesFor, offsetsOfInvoice, type DebtOffsetChoice, type OffsetRef } from '@/core/offsets/party-offset-reads';
 
 const s = (v: unknown): string => (v as string) ?? '';
 const n = (v: unknown): number => Number(v ?? 0) || 0;
@@ -39,6 +40,10 @@ export interface InvoicePrintExtras {
   paymentMethods: string[];
   /** Die Zahlungen dieser Rechnung, älteste zuerst — genau die Zeilen, die die Rechnungsseite listet. */
   payments: Array<{ id: string; amount: number; method: string; receivedAt: string; notes?: string }>;
+  /** CUSTOMER ACCOUNT B1 — die Verrechnungen dieser Rechnung (Gegenbeleg, Stand) … */
+  offsets: OffsetRef[];
+  /** … und die Darlehen „We Borrowed" desselben Kunden, mit denen sie verrechnet werden kann (vom Primary geprüft). */
+  debtOffset: DebtOffsetChoice;
 }
 
 export function invoicePrintFor(ctx: BusinessReadContext, invoiceId: string): InvoicePrintExtras {
@@ -53,7 +58,10 @@ export function invoicePrintFor(ctx: BusinessReadContext, invoiceId: string): In
       WHERE p.invoice_id = ? AND i.branch_id = ? ORDER BY p.received_at ASC, p.created_at ASC`,
     [invoiceId, ctx.branchId],
   ).map((r) => ({ id: s(r.id), amount: n(r.amount), method: s(r.method), receivedAt: s(r.received_at), notes: (r.notes as string | null) || undefined }));
-  return { company: invoiceCompany((k) => werte.get(k)), paymentMethods: payments.map((p) => p.method), payments };
+  return {
+    company: invoiceCompany((k) => werte.get(k)), paymentMethods: payments.map((p) => p.method), payments,
+    offsets: offsetsOfInvoice(invoiceId, ctx.branchId), debtOffset: debtOffsetCandidatesFor(ctx, invoiceId),
+  };
 }
 
 // ── Übersicht: das Monatsziel ─────────────────────────────────────────────

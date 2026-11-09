@@ -242,7 +242,8 @@ for (const t of manifestTables) {
 // PURCHASE-EDIT Teil 3 (v0.8.91) — `purchase_lines` + delete: eine unberührte Position wird entfernt (wie invoice_lines/order_lines) → 57/41/39.
 // CUSTOM-ORDER K2/K3a — +2 Tabellen mit insert/update: order_deposit_applications (Anrechnung einer Anzahlung) und
 // gold_payable_settlements (BHD-Begleichung einer Order-Goldschuld) → 59/43/39.
-check(iC === 59 && uC === 43 && dC === 39, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 59/43/39 — incl. the order deposit applications and gold payable settlements (K2/K3a), the purchase line removal, incl. the purchase payment void, incl. the mobile purchase_inbox insert, the R7A production child rows, the PRE-G5 gold usage history, the bulk lot movements, the invoice_lines update of the invoice edit, the agent settlement payment delete, the stock adjustment insert/update and the opening position insert/update)`);
+// CUSTOMER ACCOUNT B1 — party_offsets (Verrechnung Rechnung ↔ Darlehen): insert und update (REVERSED), nie delete → 60/44/39.
+check(iC === 60 && uC === 44 && dC === 39, `operation counts insert=${iC} update=${uC} delete=${dC} (expected 60/44/39 — incl. the party offsets (B1), the order deposit applications and gold payable settlements (K2/K3a), the purchase line removal, incl. the purchase payment void, incl. the mobile purchase_inbox insert, the R7A production child rows, the PRE-G5 gold usage history, the bulk lot movements, the invoice_lines update of the invoice edit, the agent settlement payment delete, the stock adjustment insert/update and the opening position insert/update)`);
 
 // ── 5. Rust/TS semantic parity: the SAME shared fixture the Rust test runs. Both sides must map
 //    each vector to the same verdict → transitively, Rust and TS agree byte-for-byte. ──

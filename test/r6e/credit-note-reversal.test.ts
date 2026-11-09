@@ -714,6 +714,8 @@ marker('CENTRAL_UI_R6E_PAID_REFUND_CANCEL_CONTRACT_PINNED');
     // CUSTOMER ACCOUNT A1 — das Kundenkonto (nur lesen): Forderungsstorno je Rechnung nur wirksamer Gutschriften, Verweis
     // auf die Gutschrift einer Retoure.
     'src/core/parties/customer-account.ts': 'Offen je Rechnung ohne CANCELLED (Kundenkonto, nur lesen); Verweis der Retoure',
+    // CUSTOMER ACCOUNT B1 — der offene Rest einer Rechnung für „Settle Balance" (dieselbe Regel wie Receive Payment).
+    'src/core/offsets/party-offset-reads.ts': 'Offen je Rechnung ohne CANCELLED (Verrechnung mit Darlehen)',
     'src/core/reports/reconciliation-snapshot.ts': 'Abstimmung ohne CANCELLED',
     'src/core/returns/return-cancel-house.ts': 'der Storno selbst (setzt CANCELLED)',
     'src/core/sync/sync-service.ts': 'Tabellenzuordnung des Abgleichs',

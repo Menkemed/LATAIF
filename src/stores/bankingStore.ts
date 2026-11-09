@@ -278,7 +278,7 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
                  AND e.created_at = p.created_at
                  AND e.status != 'CANCELLED') AS card_fee
      FROM payments p LEFT JOIN invoices i ON i.id = p.invoice_id
-     WHERE p.branch_id = ? AND COALESCE(p.method, '') NOT IN ('order_deposit', 'credit')`,
+     WHERE p.branch_id = ? AND COALESCE(p.method, '') NOT IN ('order_deposit', 'credit', 'debt_offset')`,
     [branchId]
   );
   // CUSTOM-ORDER K2 — die Anrechnung einer Anzahlung ('order_deposit') bewegt kein Geld: das Geld steht als
@@ -286,6 +286,7 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
   // CUSTOM-ORDER Review — ebenso die Verrechnung mit Kundenguthaben ('credit', Soll CUSTOMER_CREDIT / Haben AR): kein Geld,
   // sie stand bisher als Bankeingang da (accountFor → 'bank'). Das Geld des Guthabens kam früher (Überzahlung, Retoure) und
   // steht dort; eine Erstattung des Guthabens steht als customer_credit_refunds (unten). Wie D3 bei den Lieferanten.
+  // CUSTOMER ACCOUNT B1 — ebenso die Verrechnung mit einem Darlehen ('debt_offset', Soll LOAN_PAYABLE / Haben AR): kein Geld.
   for (const p of payments) {
     const date = (p.received_at as string) || '';
     const method = (p.method as string) || '';
@@ -402,9 +403,10 @@ export function bankTransactionsFor(ctx: BusinessReadContext, transfers: BankTra
   const debtPay = safeQuery('debt_payments',
     `SELECT dp.id, dp.amount, dp.source, dp.paid_at, dp.debt_id, d.direction, d.counterparty, dp.created_at AS created_at
      FROM debt_payments dp JOIN debts d ON d.id = dp.debt_id
-     WHERE d.branch_id = ?`,
+     WHERE d.branch_id = ? AND COALESCE(dp.source, '') NOT IN ('offset', 'offset_reversal')`,
     [branchId]
   );
+  // CUSTOMER ACCOUNT B1 — Rückzahlungen durch Verrechnung (und ihre Aufhebung) sind kein Geld: nicht in Kasse/Bank.
   for (const p of debtPay) {
     const dir = String(p.direction || '').toUpperCase();
     const isGiven = dir === 'MONEY_GIVEN' || dir === 'WE_LEND';

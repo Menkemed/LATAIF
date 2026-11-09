@@ -43,6 +43,7 @@ import { useInvoiceStore } from '@/stores/invoiceStore';
 import { CARD_BRANDS as CARD_BRAND_LIST } from '@/core/finance/card-fees';
 import { InvoiceActionRejected } from '@/core/invoices/invoice-cancel';
 import { recordInvoicePaymentInHouse } from '@/core/invoices/invoice-payment-house';
+import { createDebtOffsetInHouse, DEBT_OFFSET_METHOD, type DebtOffsetInput } from '@/core/offsets/party-offsets';
 import { businessDateIssue } from '@/core/utils/business-date';
 import {
   EDIT_LINE_HAS_RETURN, EDIT_BELOW_RETURNED_QTY, EDIT_RETURNED_LINE_PRICE_LOCKED, EDIT_BELOW_CREDIT_NOTES,
@@ -474,7 +475,62 @@ export function parsePaymentPayload(raw: unknown): PaymentRequest {
   };
 }
 
+/**
+ * CUSTOMER ACCOUNT B1 — „Settle Balance" von PC2: dieselbe Zahlungs-Operation mit der Zahlart 'debt_offset' und dem
+ * Darlehen, mit dem verrechnet wird. Keine eigene Operation, keine eigene Buchung: der Primary prüft (Filiale, Kunde,
+ * offene Beträge, gesehene Fassungen, Tag) und bucht über `createDebtOffsetInHouse` — dieselbe Hausfolge wie an der Maske.
+ * Weder Schlüssel noch Nummer, Status, Konto oder Kunde kommen vom Client.
+ */
+export function parseDebtOffsetPayload(raw: Record<string, unknown>): DebtOffsetInput {
+  const allowed = new Set(['invoiceId', 'amount', 'method', 'debtId', 'specialMarkOnFinal', 'paidDate', 'expectedInvoiceRevision', 'expectedDebtRevision']);
+  for (const k of Object.keys(raw)) {
+    if (PAYMENT_FORBIDDEN.includes(k) || k === 'customerId' || k === 'offsetNumber') throw new InvoicePayloadError(`the primary decides ${k}, not the client`);
+    if (!allowed.has(k)) throw new InvoicePayloadError(`unknown field: ${k}`);
+  }
+  if (raw.method !== DEBT_OFFSET_METHOD) throw new InvoicePayloadError('method must be debt_offset');
+  const invoiceId = raw.invoiceId;
+  if (typeof invoiceId !== 'string' || !invoiceId.trim()) throw new InvoicePayloadError('invoiceId is required');
+  const debtId = raw.debtId;
+  if (typeof debtId !== 'string' || !debtId.trim()) throw new InvoicePayloadError('debtId is required');
+  const amount = raw.amount;
+  if (typeof amount !== 'number' || !Number.isFinite(amount) || amount <= 0) throw new InvoicePayloadError('amount must be a positive number');
+  if (raw.specialMarkOnFinal !== undefined && typeof raw.specialMarkOnFinal !== 'boolean') {
+    throw new InvoicePayloadError('specialMarkOnFinal must be true or false');
+  }
+  if (raw.paidDate !== undefined) {
+    const issue = businessDateIssue(raw.paidDate, 'Offset date');
+    if (issue || typeof raw.paidDate !== 'string' || raw.paidDate === '') throw new InvoicePayloadError(issue || 'Offset date is not a valid date');
+  }
+  for (const k of ['expectedInvoiceRevision', 'expectedDebtRevision'] as const) {
+    const v = raw[k];
+    if (v !== undefined && !(typeof v === 'number' && Number.isInteger(v) && v >= 0)) throw new InvoicePayloadError(`${k} must be a whole number`);
+  }
+  return {
+    invoiceId, debtId, amount,
+    ...(typeof raw.paidDate === 'string' ? { offsetDate: raw.paidDate } : {}),
+    ...(typeof raw.specialMarkOnFinal === 'boolean' ? { specialMarkOnFinal: raw.specialMarkOnFinal } : {}),
+    ...(typeof raw.expectedInvoiceRevision === 'number' ? { expectedInvoiceRevision: raw.expectedInvoiceRevision } : {}),
+    ...(typeof raw.expectedDebtRevision === 'number' ? { expectedDebtRevision: raw.expectedDebtRevision } : {}),
+  };
+}
+
+function runDebtOffset(deps: EngineDeps, identity: CommandIdentity, raw: Record<string, unknown>): Promise<CommandOutcome> {
+  const req = parseDebtOffsetPayload(raw);
+  return runRemoteCommand(deps, identity, () => {
+    try {
+      const r = createDebtOffsetInHouse(req, { branchId: identity.branchId, userId: identity.userId });
+      return { ...r } as unknown as Record<string, unknown>;
+    } catch (err) {
+      if (err instanceof InvoiceActionRejected) throw new CommandRejected(err.code, err.message);
+      const verdict = asEditVerdict(err);
+      if (verdict) throw verdict;
+      throw err;
+    }
+  });
+}
+
 export function runInvoicePayment(deps: EngineDeps, identity: CommandIdentity, raw: unknown): Promise<CommandOutcome> {
+  if (isPlain(raw) && raw.method === DEBT_OFFSET_METHOD) return runDebtOffset(deps, identity, raw);
   const req = parsePaymentPayload(raw);
   return runRemoteCommand(deps, identity, () => {
     try {

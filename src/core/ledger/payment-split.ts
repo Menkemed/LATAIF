@@ -32,7 +32,8 @@ export function computePaymentSplit(
   method: string
 ): { arCredit: number; creditCredit: number } {
   const amt = ROUND(amount);
-  if (openRemainder === undefined || method === 'credit') return { arCredit: amt, creditCredit: 0 };
+  // CUSTOMER ACCOUNT B1 — 'debt_offset' ist auf den offenen Rest gekappt (party-offsets prüft vorher); nie ein Guthaben-Bein.
+  if (openRemainder === undefined || method === 'credit' || method === 'debt_offset') return { arCredit: amt, creditCredit: 0 };
   const arCredit = Math.min(amt, Math.max(0, ROUND(openRemainder)));
   return { arCredit, creditCredit: ROUND(amt - arCredit) };
 }

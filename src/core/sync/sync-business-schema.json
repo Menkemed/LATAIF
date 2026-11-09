@@ -1064,6 +1064,37 @@
       "required_fields": [],
       "immutable_fields": []
     },
+    "party_offsets": {
+      "allowed_operations": [
+        "insert",
+        "update"
+      ],
+      "record_id_field": "id",
+      "allowed_fields": [
+        "amount",
+        "branch_id",
+        "created_at",
+        "created_by",
+        "customer_id",
+        "id",
+        "note",
+        "offset_date",
+        "offset_number",
+        "payable_id",
+        "payable_payment_id",
+        "payable_type",
+        "receivable_id",
+        "receivable_payment_id",
+        "receivable_type",
+        "reversal_payment_id",
+        "reverse_reason",
+        "reversed_at",
+        "reversed_by",
+        "status"
+      ],
+      "required_fields": [],
+      "immutable_fields": []
+    },
     "payments": {
       "allowed_operations": [
         "insert",

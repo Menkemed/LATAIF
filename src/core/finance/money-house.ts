@@ -32,6 +32,7 @@ import { getDatabase } from '@/core/db/database';
 import { query, currentBranchId, currentUserId, getNextDocumentNumber } from '@/core/db/helpers';
 import { trackInsert, trackUpdate } from '@/core/sync/track';
 import { logAuditOrThrow } from '@/core/audit/audit-log';
+import { paidFilsOfDebt, reconcileDebtStatus } from './debt-status';
 import { isClientMode } from '@/core/bridge/client-mode';
 import { financeFor } from '@/core/reports/analytics-snapshot';
 import {
@@ -463,36 +464,11 @@ function assertDebtRevision(d: Record<string, unknown>, expected: number | undef
   }
 }
 
-function paidFilsOf(debtId: string): number {
-  const rows = query('SELECT amount FROM debt_payments WHERE debt_id = ?', [debtId]);
-  return rows.reduce((s, r) => s + toFils(Number(r.amount ?? 0)), 0);
-}
+// CUSTOMER ACCOUNT B1 — Summe und Statusregel leben in `debt-status.ts` (eine Regel, auch für die Verrechnung).
+const paidFilsOf = paidFilsOfDebt;
 
 function revisionOfDebt(debtId: string): number {
   return Number(query('SELECT revision FROM debts WHERE id = ?', [debtId])[0]?.revision ?? 0);
-}
-
-/**
- * Plan §Loan §10: OPEN / PARTIALLY_REPAID / REPAID. Dieselbe Ableitung wie bisher im Store — in Fils
- * gerechnet, und jetzt auch dem Abgleich gemeldet (vorher änderte sich der Status still).
- */
-function reconcileDebtStatus(debtId: string, amountFils: number, paidFils: number): { status: DebtStatus; settledAt: string | null } {
-  const now = new Date().toISOString();
-  const db = getDatabase();
-  let status: DebtStatus;
-  if (paidFils >= amountFils) {
-    db.run(`UPDATE debts SET status = 'REPAID', settled_at = COALESCE(settled_at, ?), updated_at = ? WHERE id = ?`, [now, now, debtId]);
-    status = 'REPAID';
-  } else if (paidFils > 0) {
-    db.run(`UPDATE debts SET status = 'PARTIALLY_REPAID', settled_at = NULL, updated_at = ? WHERE id = ?`, [now, debtId]);
-    status = 'PARTIALLY_REPAID';
-  } else {
-    db.run(`UPDATE debts SET status = 'OPEN', settled_at = NULL, updated_at = ? WHERE id = ?`, [now, debtId]);
-    status = 'OPEN';
-  }
-  const settledAt = (query('SELECT settled_at FROM debts WHERE id = ?', [debtId])[0]?.settled_at as string | null) ?? null;
-  trackUpdate('debts', debtId, { status, settledAt });
-  return { status, settledAt };
 }
 
 export interface DebtCreated { debt: Debt; revision: number }

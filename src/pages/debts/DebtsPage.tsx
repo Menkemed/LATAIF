@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  ArrowUpRight, ArrowDownLeft, HandCoins, Plus, Wallet, Building2, Trash2, Smartphone,
+  ArrowUpRight, ArrowDownLeft, ArrowLeftRight, HandCoins, Plus, Wallet, Building2, Trash2, Smartphone,
   AlertTriangle, Calendar, Clock, Download, FileText, X,
 } from 'lucide-react';
 import { StaffSelect } from '@/components/employees/StaffSelect';
@@ -140,6 +140,7 @@ export function DebtsPage() {
   const w = useSharedWrites();
   const [createFehler, setCreateFehler] = useState('');
   const [payFehler, setPayFehler] = useState('');
+  const [deleteFehler, setDeleteFehler] = useState('');
   const [editFehler, setEditFehler] = useState('');
   const { customers, loadCustomers } = useCustomerStore();
   const { loadEmployees } = useEmployeeStore();
@@ -180,6 +181,14 @@ export function DebtsPage() {
   });
 
   const [detailId, setDetailId] = useState<string | null>(null);
+  // CUSTOMER ACCOUNT B1 — der Gegenbeleg einer Verrechnung (Rechnung → Darlehen) öffnet das Darlehen direkt: ?loan=LOA-…
+  // Abgeleiteter Zustand während des Renderns (einmal je Parameter), kein Effekt.
+  const loanParam = searchParams.get('loan') || '';
+  const [loanOpened, setLoanOpened] = useState('');
+  if (loanParam && loanParam !== loanOpened) {
+    const d = debts.find((x) => x.loanNumber === loanParam || x.id === loanParam);
+    if (d) { setLoanOpened(loanParam); setDetailId(d.id); }
+  }
   const [payAmount, setPayAmount] = useState('');
   const [paySource, setPaySource] = useState<CashSource>('cash');
   const [payDate, setPayDate] = useState('');
@@ -730,18 +739,26 @@ export function DebtsPage() {
               {detailPayments.length === 0 && (
                 <p style={{ fontSize: 12, color: '#6B7280', marginTop: 8 }}>No repayments yet.</p>
               )}
-              {detailPayments.map(p => (
-                <div key={p.id} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 12 }}>
+              {detailPayments.map(p => {
+                // CUSTOMER ACCOUNT B1 — Rückzahlung durch Verrechnung mit einer Rechnung (kein Geld) bzw. ihre Aufhebung.
+                const quelle = String(p.source);
+                const offset = quelle === 'offset' || quelle === 'offset_reversal';
+                return (
+                <div key={p.id} className="flex justify-between items-center" style={{ padding: '10px 0', borderBottom: '1px solid #E5E9EE', fontSize: 12 }}
+                  data-debt-payment-row data-debt-payment-source={quelle}>
                   <div className="flex items-center gap-2">
-                    {p.source === 'cash' ? <Wallet size={12} style={{ color: '#4B5563' }} />
+                    {offset ? <ArrowLeftRight size={12} style={{ color: '#4B5563' }} />
+                      : p.source === 'cash' ? <Wallet size={12} style={{ color: '#4B5563' }} />
                       : p.source === 'bank' ? <Building2 size={12} style={{ color: '#4B5563' }} />
                       : <Smartphone size={12} style={{ color: '#FF8730' }} />}
                     <span style={{ color: '#4B5563' }}>{fmtDate(p.paidAt)}</span>
-                    {p.notes && <span style={{ color: '#6B7280' }}>· {p.notes}</span>}
+                    {offset && !p.notes && <span style={{ color: '#6B7280' }}>· Offset · no cash</span>}
+                    {p.notes && <span style={{ color: '#6B7280' }} data-debt-payment-note>· {p.notes}</span>}
                   </div>
-                  <span className="font-mono" style={{ color: '#7EAA6E' }}><Bhd v={p.amount}/> BHD</span>
+                  <span className="font-mono" style={{ color: p.amount < 0 ? '#9CA3AF' : '#7EAA6E' }}><Bhd v={p.amount}/> BHD</span>
                 </div>
-              ))}
+                );
+              })}
             </div>
 
             {/* Record payment form */}
@@ -850,15 +867,18 @@ export function DebtsPage() {
         title="Debt History"
       />
 
-      <Modal open={!!confirmDelete} onClose={() => setConfirmDelete(null)} title="Delete Debt?" width={420}>
+      <Modal open={!!confirmDelete} onClose={() => { setConfirmDelete(null); setDeleteFehler(''); }} title="Delete Debt?" width={420}>
         <div>
           <p style={{ fontSize: 13, color: '#4B5563', marginBottom: 20 }}>This deletes the debt and all recorded repayments. Cannot be undone.</p>
+          <WriteError text={deleteFehler} />
           <div className="flex justify-end gap-3">
             <Button variant="ghost" onClick={() => setConfirmDelete(null)}>Cancel</Button>
             <Button variant="danger" onClick={() => {
               if (blockDeleteOnClient()) { setConfirmDelete(null); return; }
               if (confirmDelete) {
-                deleteDebt(confirmDelete);
+                // CUSTOMER ACCOUNT B1 — ein Darlehen mit wirksamer Verrechnung lehnt das Haus ab; der Grund steht im Dialog.
+                try { deleteDebt(confirmDelete); } catch (e) { setDeleteFehler(e instanceof Error ? e.message : String(e)); return; }
+                setDeleteFehler('');
                 if (detailId === confirmDelete) setDetailId(null);
                 setConfirmDelete(null);
               }

@@ -632,7 +632,7 @@ export function backfillDebtPayments(branchId: string): BackfillResult {
   const rows = query(
     `SELECT dp.*, d.direction
      FROM debt_payments dp JOIN debts d ON d.id = dp.debt_id
-     WHERE d.branch_id = ?`,
+     WHERE d.branch_id = ? AND COALESCE(dp.source, '') NOT IN ('offset', 'offset_reversal')`,
     [branchId]
   );
   res.total = rows.length;

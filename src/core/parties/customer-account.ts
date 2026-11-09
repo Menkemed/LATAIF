@@ -280,6 +280,7 @@ export function buildCustomerAccount(raw: CustomerAccountRaw): CustomerAccount {
 const PAYMENT_LABEL: Record<string, string> = {
   cash: 'Cash', bank_transfer: 'Bank transfer', bank: 'Bank', card: 'Card', benefit: 'Benefit', credit: 'Store credit applied',
   order_deposit: 'Order deposit applied', other: 'Other', cheque: 'Cheque',
+  debt_offset: 'Offset with loan · no cash',
 };
 const payLabel = (m: unknown): string => PAYMENT_LABEL[txt(m)] || txt(m) || 'Payment';
 
@@ -359,13 +360,18 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
   );
   const payByInv = new Map<string, AccountEventRaw[]>();
   for (const p of query(
-    `SELECT p.invoice_id, p.amount, p.method, p.received_at FROM payments p JOIN invoices i ON i.id = p.invoice_id
+    `SELECT p.invoice_id, p.amount, p.method, p.received_at,
+            (SELECT o.offset_number || ' · ' || COALESCE(d.loan_number, '') FROM party_offsets o LEFT JOIN debts d ON d.id = o.payable_id
+              WHERE o.receivable_payment_id = p.id) AS offset_ref
+       FROM payments p JOIN invoices i ON i.id = p.invoice_id
       WHERE i.customer_id = ? AND i.branch_id = ?`,
     [customerId, branchId],
   )) {
     const k = txt(p.invoice_id);
     const list = payByInv.get(k) ?? [];
-    list.push({ date: day(p.received_at), text: payLabel(p.method), amountF: F(p.amount) });
+    // CUSTOMER ACCOUNT B1 — eine Verrechnung nennt ihren Gegenbeleg (STL-… · Darlehen) und „no cash".
+    const text = txt(p.method) === 'debt_offset' && txt(p.offset_ref) ? `Offset ${txt(p.offset_ref)} · no cash` : payLabel(p.method);
+    list.push({ date: day(p.received_at), text, amountF: F(p.amount) });
     payByInv.set(k, list);
   }
   for (const r of invRows) {
@@ -424,12 +430,14 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
   //    ohne Storno; getilgt = nichts offen. Die kanonischen Namen (MONEY_GIVEN/RECEIVED) zählen mit.
   const debtPays = new Map<string, AccountEventRaw[]>();
   for (const p of query(
-    `SELECT dp.debt_id, dp.amount, dp.source, dp.paid_at FROM debt_payments dp JOIN debts d ON d.id = dp.debt_id
+    `SELECT dp.debt_id, dp.amount, dp.source, dp.paid_at, dp.notes FROM debt_payments dp JOIN debts d ON d.id = dp.debt_id
       WHERE d.customer_id = ? AND d.branch_id = ?`,
     [customerId, branchId],
   )) {
     const list = debtPays.get(txt(p.debt_id)) ?? [];
-    list.push({ date: day(p.paid_at), text: `Repayment · ${payLabel(p.source)}`, amountF: F(p.amount) });
+    // CUSTOMER ACCOUNT B1 — Rückzahlung durch Verrechnung (bzw. ihre Aufhebung): der Text der Zeile nennt den Gegenbeleg.
+    const offset = txt(p.source) === 'offset' || txt(p.source) === 'offset_reversal';
+    list.push({ date: day(p.paid_at), text: offset ? (txt(p.notes) || 'Offset · no cash') : `Repayment · ${payLabel(p.source)}`, amountF: F(p.amount) });
     debtPays.set(txt(p.debt_id), list);
   }
   for (const r of query(

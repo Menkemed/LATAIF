@@ -290,7 +290,7 @@ export function parseUpdatePayment(raw: unknown): UpdatePaymentRequest {
 }
 
 /** Die Zahlung muss zu DIESER Rechnung gehören — und darf keine Guthaben-Zahlung sein. */
-function livePayment(paymentId: string, invoiceId: string): Record<string, unknown> {
+function livePayment(paymentId: string, invoiceId: string, forDelete = false): Record<string, unknown> {
   const p = query('SELECT id, invoice_id, method, amount FROM payments WHERE id = ?', [paymentId])[0];
   if (!p) throw new CommandRejected('PAYMENT_NOT_FOUND', 'no such payment');
   if (String(p.invoice_id) !== invoiceId) {
@@ -304,6 +304,12 @@ function livePayment(paymentId: string, invoiceId: string): Record<string, unkno
   if (String(p.method) === 'order_deposit') {
     throw new CommandRejected('PAYMENT_IS_ORDER_DEPOSIT',
       'an applied order deposit is tied to its order payment — it is corrected on the primary, not here');
+  }
+  // CUSTOMER ACCOUNT B1 — eine Verrechnung mit einem Darlehen wird nie geändert, nur als Ganzes aufgehoben (Löschen:
+  // `deletePayment` öffnet das Darlehen wieder über die Gegenzeile).
+  if (String(p.method) === 'debt_offset' && !forDelete) {
+    throw new CommandRejected('PAYMENT_IS_DEBT_OFFSET',
+      'an offset with a loan is not edited — remove the offset (the loan opens again) instead');
   }
   return p;
 }
@@ -378,13 +384,13 @@ export function runDeletePayment(deps: EngineDeps, identity: CommandIdentity, ra
   const req = parseDeletePayment(raw);
   return runRemoteCommand(deps, identity, () => {
     liveInvoice(req.invoiceId, identity.branchId);
-    livePayment(req.paymentId, req.invoiceId);
+    livePayment(req.paymentId, req.invoiceId, true);
     assertRevision('invoices', req.invoiceId, req.expectedRevision, 'INVOICE_NOT_FOUND');
     useInvoiceStore.getState().loadInvoices();
     try {
       // Die Schutzregeln des Hauses gelten unverändert: eine Zahlung, deren
       // Überzahlungs-Guthaben schon eingelöst ist, wird nicht zurückgenommen.
-      useInvoiceStore.getState().deletePayment(req.paymentId, req.invoiceId);
+      useInvoiceStore.getState().deletePayment(req.paymentId, req.invoiceId, { offsetReason: 'offset removed' });
     } catch (err) {
       const verdict = asDeleteVerdict(err);
       if (verdict) throw verdict;

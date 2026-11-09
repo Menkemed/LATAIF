@@ -15,6 +15,7 @@
 // denen sich der Client-Modus überhaupt beurteilen lässt.
 
 import { OPEN_DEPOSIT_TOTAL_SQL, openDepositSql } from '@/core/orders/order-deposit-sql';
+import { debtOffsetCandidatesFor, offsetsOfInvoice } from '@/core/offsets/party-offset-reads';
 import { registerCommand, BusinessError, type CommandResult } from './command-registry';
 import { getDatabase } from '@/core/db/database';
 import { summarizeInventory, isOwnStockAsset, type LotAggregate } from '@/core/lots/lot-queries';
@@ -570,8 +571,12 @@ registerCommand(OP_INVOICES_GET, {
       notes: str(x.notes),
       // Eine Guthaben-Zahlung hängt an einer Guthabenzeile — der Client darf sie sehen, aber
       // nicht anfassen. Der Primary weist sie ohnehin ab; hier steht der Grund sichtbar.
-      editable: str(x.method) !== 'credit' && str(x.method) !== 'order_deposit',
+      editable: str(x.method) !== 'credit' && str(x.method) !== 'order_deposit' && str(x.method) !== 'debt_offset',
     }));
+    // CUSTOMER ACCOUNT B1 — die Verrechnungen dieser Rechnung (Gegenbeleg, Nummer, Stand) und die Darlehen „We Borrowed"
+    // desselben Kunden, mit denen sie verrechnet werden kann — vom Primary geprüft, nicht vom Client nachgerechnet.
+    const offsets = offsetsOfInvoice(id, branch);
+    const debtOffset = debtOffsetCandidatesFor({ branchId: branch }, id);
     // Und was an offenem Guthaben dieses Kunden wirklich da ist — vom Primary summiert.
     const credit = rows(
       `SELECT COALESCE(SUM(amount - COALESCE(used_amount, 0)), 0) AS c
@@ -585,6 +590,8 @@ registerCommand(OP_INVOICES_GET, {
       payments,
       returns,
       creditAvailable: Math.max(0, num(credit[0]?.c)),
+      offsets,
+      debtOffset,
     };
   },
 });

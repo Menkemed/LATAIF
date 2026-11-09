@@ -1,7 +1,7 @@
 import { paymentMethodLabel } from '@/core/utils/payment-method-label';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useParams, useNavigate, useSearchParams, Link } from 'react-router-dom';
-import { ArrowLeft, Edit3, XCircle, CreditCard, Printer, Download, Table, ExternalLink, ChevronDown } from 'lucide-react';
+import { ArrowLeft, Edit3, XCircle, CreditCard, Printer, Download, Table, ExternalLink, ChevronDown, ArrowLeftRight } from 'lucide-react';
 import { useGoBack } from '@/hooks/useGoBack';
 import { useReturnToList } from '@/hooks/useListNav';
 import { productDisplayName } from '@/core/products/display-name';
@@ -61,6 +61,9 @@ import { exportCsv } from '@/core/utils/export-file';
 import type { ProductDisposition } from '@/core/models/types';
 import { RotateCcw } from 'lucide-react';
 import { Bhd } from '@/components/ui/Bhd';
+import { InvoiceOffsetList, SettleBalanceDialog } from '@/components/invoices/SettleBalance';
+import { reverseDebtOffsetOnPrimary } from '@/core/offsets/party-offsets';
+import { NO_DEBT_OFFSET, type OffsetRef } from '@/core/offsets/party-offset-reads';
 import { movesPieceStock } from '@/core/lots/stock-contract';
 
 function fmtDate(iso?: string): string {
@@ -143,6 +146,8 @@ export function InvoiceDetail() {
   // v0.8.88 — der Tag, an dem das Geld kam (heute vorgeschlagen, änderbar); die Meldung bleibt im Dialog.
   const [paymentDate, setPaymentDate] = useState(todayIso());
   const [paymentFehler, setPaymentFehler] = useState('');
+  // CUSTOMER ACCOUNT B1 — „Settle Balance": Verrechnung mit einem Darlehen „We Borrowed" desselben Kunden.
+  const [settleOpen, setSettleOpen] = useState(false);
 
   // Cancel confirm
   const [confirmCancel, setConfirmCancel] = useState(false);
@@ -174,10 +179,13 @@ export function InvoiceDetail() {
   // Die Zahlungen dieser Rechnung (PAID aufklappen, „Manage payments") — aus derselben Auskunft wie
   // der Druck: am Primary aus seiner Datenbank, auf PC2 vom Primary. `stand` ist nur der Schlüssel:
   // nach einer Zahlung oder Berichtigung (neue Fassung der Rechnung) fragt PC2 neu.
-  const zahlungen = useSharedRead<InvoicePrintExtras | null>(
+  const seitenAuskunft = useSharedRead<InvoicePrintExtras | null>(
     'page.invoice_print.get', { invoiceId: id ?? '', stand: `${invoice?.revision ?? 0}|${invoice?.paidAmount ?? 0}` },
     (ctx) => invoicePrintFor(ctx, id ?? ''), null, [id, invoices],
-  )?.payments ?? [];
+  );
+  const zahlungen = seitenAuskunft?.payments ?? [];
+  // CUSTOMER ACCOUNT B1 — aus derselben Auskunft: Verrechnungen dieser Rechnung und die möglichen Darlehen (am PC2 vom Primary).
+  const offsetView = { debtOffset: seitenAuskunft?.debtOffset ?? NO_DEBT_OFFSET, offsets: seitenAuskunft?.offsets ?? [] };
 
   // Plan §Sales — Save & Print: Detail-Page lädt, dann der A5-Beleg in den Druckdialog. Gedruckt wird
   // mit dem Stand beim Auslösen (Artikel und Kunde geladen), nicht mit dem des ersten Zeichnens.
@@ -468,6 +476,20 @@ export function InvoiceDetail() {
     loadInvoices();
   }
 
+  // CUSTOMER ACCOUNT B1 — eine Verrechnung aufheben: die Rechnungszahlung geht (Gegenbuchung), das Darlehen ist wieder
+  // offen (Gegenzeile), die Verrechnung bleibt als REVERSED stehen. Am Primary die Hausfolge, fern `invoices.delete_payment`.
+  async function offsetEntfernen(o: OffsetRef) {
+    if (!id || !invoice) return;
+    const fassung = invoice.revision;
+    if (w.remote && !fassung) { alert(fehlertext(nichtAmClient('removing an offset (no revision loaded)'))); return; }
+    if (!await window.confirm(`Remove offset ${o.offsetNumber}? The invoice is open again by ${o.amount.toFixed(3)} BHD and loan ${o.loanNumber} is open again. No cash moves.`)) return;
+    if (!await w.ok('invoices.delete_payment', {
+      local: () => reverseDebtOffsetOnPrimary(o.offsetId, 'offset removed'),
+      remote: () => ({ invoiceId: id, paymentId: o.invoicePaymentId, expectedRevision: fassung }),
+    })) return;
+    loadInvoices();
+  }
+
   /**
    * R4C.2 — die Auszahlung einer Erstattung. Fassungsbasiert: der Auftrag nennt die Fassung der
    * RETOURE, die dieser Bildschirm gesehen hat.
@@ -644,6 +666,9 @@ export function InvoiceDetail() {
                 <Button variant="ghost" onClick={() => setShowHistory(true)}>History</Button>
                 {perm.canExportData && <Button variant="ghost" onClick={handleExportVat}><Table size={14} /> VAT Export</Button>}
                 {canRecordPayment && perm.canRecordPayments && <Button variant="primary" onClick={openPaymentModal}><CreditCard size={14} /> Record Payment</Button>}
+                {canRecordPayment && perm.canRecordPayments && offsetView.debtOffset.candidates.length > 0 && (
+                  <Button variant="secondary" data-settle-balance onClick={() => { w.clear(); setSettleOpen(true); }}><ArrowLeftRight size={14} /> Settle Balance</Button>
+                )}
                 {canMarkRepairPickedUp && (
                   <Button variant="primary" data-repair-pickup disabled={w.busy} onClick={() => { w.clear(); setAbholFrage(true); }}>
                     <ExternalLink size={14} /> Mark as Picked Up
@@ -838,7 +863,7 @@ export function InvoiceDetail() {
                           {payList.map(p => {
                             const methodLabel = paymentMethodLabel(p.method);
                             return (
-                              <div key={p.id} className="flex justify-between items-center"
+                              <div key={p.id} className="flex justify-between items-center" data-invoice-payment-method={p.method}
                                 style={{ padding: '6px 0', borderBottom: '1px solid #EEF0F2' }}>
                                 <div className="flex items-center" style={{ gap: 8, minWidth: 0 }}>
                                   <span style={{ fontSize: 11, color: '#4B5563' }}>{fmtDate(p.receivedAt)}</span>
@@ -872,6 +897,8 @@ export function InvoiceDetail() {
                   <span className="text-overline">REMAINING</span>
                   <span className="font-mono" style={{ fontSize: 16, color: remaining > 0 ? '#AA6E6E' : '#7EAA6E' }}><Bhd v={Math.max(0, remaining)}/> BHD</span>
                 </div>
+                <InvoiceOffsetList offsets={offsetView.offsets} canRemove={perm.canRecordPayments && !isCancelled} busy={w.busy}
+                  onRemove={(o) => { void offsetEntfernen(o); }} />
                 {/* MIXED-INVOICE P1c — was aus einer Überzahlung nach einer Korrektur steht: Guthaben oder Rückzahlungsanspruch. */}
                 {invoice.editOverpay && invoice.editOverpay.kind === 'credit' && invoice.editOverpay.open > 0.0005 && (
                   <div className="flex justify-between items-baseline" style={{ marginTop: 6 }} data-invoice-overpay-credit>
@@ -1306,7 +1333,22 @@ export function InvoiceDetail() {
                 <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1.5fr 0.5fr', gap: 8, padding: '8px 12px', background: '#F2F7FA', fontSize: 10, color: '#6B7280', textTransform: 'uppercase' }}>
                   <span>Date</span><span>Amount (BHD)</span><span>Method</span><span>Notes</span><span></span>
                 </div>
-                {list.map(p => (
+                {list.map(p => p.method === 'debt_offset' ? (
+                  // CUSTOMER ACCOUNT B1 — eine Verrechnung wird nicht geändert, nur als Ganzes aufgehoben.
+                  <div key={p.id} data-manage-payment-offset style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1.5fr 0.5fr', gap: 8, padding: '8px 12px', borderTop: '1px solid #E5E9EE', alignItems: 'center', fontSize: 12 }}>
+                    <span>{fmtDate(p.receivedAt)}</span>
+                    <span className="font-mono"><Bhd v={p.amount}/></span>
+                    <span>{paymentMethodLabel(p.method)}</span>
+                    <span style={{ color: '#6B7280' }}>{p.notes || 'Offset – no cash'}</span>
+                    {(() => {
+                      const o = offsetView.offsets.find(x => x.invoicePaymentId === p.id && x.status === 'ACTIVE');
+                      return o ? (
+                        <button onClick={() => { void offsetEntfernen(o); }} title="Remove offset" data-manage-offset-remove
+                          className="cursor-pointer" style={{ padding: '4px 8px', fontSize: 12, background: 'none', border: '1px solid #D5D9DE', borderRadius: 4, color: '#AA6E6E' }}>×</button>
+                      ) : <span />;
+                    })()}
+                  </div>
+                ) : (
                   <div key={p.id} style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1.5fr 0.5fr', gap: 8, padding: '8px 12px', borderTop: '1px solid #E5E9EE', alignItems: 'center' }}>
                     <input type="date" defaultValue={(p.receivedAt || '').split('T')[0]}
                       onBlur={e => { if (e.target.value && id) void zahlungBerichtigen(p.id, { receivedAt: new Date(e.target.value).toISOString() }); }}
@@ -1940,6 +1982,18 @@ export function InvoiceDetail() {
           </div>
         </div>
       </Modal>
+
+      <SettleBalanceDialog
+        open={settleOpen}
+        invoice={{
+          id: invoice.id, label: formatInvoiceDisplayShort(invoice), status: invoice.status, revision: invoice.revision,
+          invoiceNumber: invoice.invoiceNumber, numberFinalizedAt: invoice.numberFinalizedAt ?? null,
+          issuedAt: invoice.issuedAt, createdAt: invoice.createdAt,
+        }}
+        choice={offsetView.debtOffset}
+        onClose={() => setSettleOpen(false)}
+        onDone={() => { setSettleOpen(false); loadInvoices(); }}
+      />
 
       <NumberTypeDialog
         open={!!pendingFinalPayment}

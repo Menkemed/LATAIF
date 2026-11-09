@@ -100,7 +100,7 @@ export function amountInWordsBhd(amount: number): string {
 
 const ZAHLWEG: Record<string, string> = {
   cash: 'Cash', card: 'Card', bank: 'Bank Transfer', bank_transfer: 'Bank Transfer', benefit: 'Benefit',
-  credit: 'Store Credit', order_deposit: 'Deposit', other: 'Other',
+  credit: 'Store Credit', order_deposit: 'Deposit', debt_offset: 'Offset', other: 'Other',
 };
 /** „Credit", solange nichts bezahlt ist; sonst die Zahlungswege — und „Credit" für einen offenen Rest. */
 export function paymentModeText(methods: readonly string[], paid: number, balance: number): string {
