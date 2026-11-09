@@ -31,6 +31,7 @@ import { usePermission } from '@/hooks/usePermission';
 import { useProductStore } from '@/stores/productStore';
 import { Truck } from 'lucide-react';
 import type { Customer, VIPLevel, SalesStage, CustomerType } from '@/core/models/types';
+import { isLoanGiven } from '@/core/models/types';
 import { Bhd } from '@/components/ui/Bhd';
 import { formatInvoiceDisplayShort } from '@/core/utils/invoiceNumber';
 // CENTRAL-UI-PARITY R2D — die Seite liest ueber die gemeinsame Ladefunktion.
@@ -905,8 +906,9 @@ export function CustomerDetail() {
 
             {/* LOANS / CASH GIVEN TABLE — split nach direction (we_lend = unsere Forderung, we_borrow = unsere Schuld) */}
             {customerLoans.length > 0 && (() => {
-              const lent = customerLoans.filter(d => d.direction === 'we_lend');
-              const borrowed = customerLoans.filter(d => d.direction === 'we_borrow');
+              // CUSTOMER ACCOUNT A1.1 — beide Schreibweisen der Richtung (we_lend/MONEY_GIVEN, we_borrow/MONEY_RECEIVED).
+              const lent = customerLoans.filter(d => isLoanGiven(d.direction));
+              const borrowed = customerLoans.filter(d => !isLoanGiven(d.direction));
               const renderRow = (d: typeof customerLoans[number], variant: 'lent' | 'borrowed') => {
                 const open = Math.max(0, d.amount - d.paidAmount);
                 const colors = variant === 'lent'

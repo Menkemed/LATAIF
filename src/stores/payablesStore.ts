@@ -181,17 +181,24 @@ export function loadPayablesFor(ctx: BusinessReadContext): { payables: PayableRo
   const rows: PayableRow[] = [];
 
   // 1) Supplier purchases — wir schulden Lieferanten Geld
+  //    CUSTOMER ACCOUNT A1.1 — beglichen = bar bezahlt (paid_amount, nur Geld) + eingelöstes Lieferantenguthaben
+  //    (purchase_payments 'credit', nicht storniert) — dieselbe Regel wie „Pay Supplier" (`openSupplierItems`), das
+  //    Lieferantenkonto (`supplierLedgerStrict`) und der Einkaufsstatus (`refreshPurchaseSettlement`). Vorher stand ein
+  //    teils mit Guthaben beglichener Einkauf um den Guthabenbetrag zu hoch in Payables.
   const purchaseRows = query(
     `SELECT p.id, p.purchase_number, p.supplier_id, s.name AS supplier_name,
-            p.total_amount, p.paid_amount, p.purchase_date, p.created_at
+            p.total_amount, p.paid_amount, p.purchase_date, p.created_at,
+            COALESCE((SELECT SUM(pp.amount) FROM purchase_payments pp
+                       WHERE pp.purchase_id = p.id AND pp.method = 'credit' AND pp.voided_at IS NULL), 0) AS credit_paid
      FROM purchases p
      LEFT JOIN suppliers s ON s.id = p.supplier_id
      WHERE p.status IN ('UNPAID', 'PARTIALLY_PAID')
-       AND p.total_amount > p.paid_amount
        AND p.branch_id = ?`,
     [ctx.branchId]
   );
   for (const r of purchaseRows) {
+    const settled = (Math.round(Number(r.paid_amount || 0) * 1000) + Math.round(Number(r.credit_paid || 0) * 1000)) / 1000;
+    if (Math.round(Number(r.total_amount || 0) * 1000) - Math.round(settled * 1000) <= 0) continue;
     rows.push(build({
       type: 'supplier',
       sourceTable: 'purchases',
@@ -202,7 +209,7 @@ export function loadPayablesFor(ctx: BusinessReadContext): { payables: PayableRo
       referenceNumber: (r.purchase_number as string) || ((r.id as string) || '').slice(0, 8),
       issuedAt: (r.purchase_date as string) || (r.created_at as string),
       totalAmount: Number(r.total_amount || 0),
-      paidAmount: Number(r.paid_amount || 0),
+      paidAmount: settled,
       navigateTo: `/purchases/${r.id}`,
       detailLabel: 'Supplier purchase',
     }, today, gracePeriodDays));
@@ -354,12 +361,14 @@ export function loadPayablesFor(ctx: BusinessReadContext): { payables: PayableRo
   }
 
   // 6) We-Borrow Loans — Kunde/Dritter hat uns Geld geliehen
+  //    CUSTOMER ACCOUNT A1.1 — beide Schreibweisen (we_borrow / kanonisch MONEY_RECEIVED, die `createDebtInHouse` ebenso
+  //    annimmt); Status ohne Groß-/Kleinschreibung wie `canonicalLoanStatus` (settled = REPAID).
   const loanRows = query(
     `SELECT d.id, d.loan_number, d.counterparty, d.customer_id, d.amount, d.due_date, d.created_at,
             COALESCE((SELECT SUM(amount) FROM debt_payments WHERE debt_id = d.id), 0) AS paid
      FROM debts d
-     WHERE d.direction = 'we_borrow'
-       AND d.status NOT IN ('CANCELLED', 'REPAID', 'settled')
+     WHERE d.direction IN ('we_borrow', 'MONEY_RECEIVED')
+       AND UPPER(d.status) NOT IN ('CANCELLED', 'REPAID', 'SETTLED')
        AND d.branch_id = ?`,
     [ctx.branchId]
   );

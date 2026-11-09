@@ -379,6 +379,9 @@ export function customerStatsFor(ctx: BusinessReadContext, customerId: string): 
   );
 
   // Loans: offene we_lend-Beträge — Raten leben in debt_payments (Subselect).
+  // CUSTOMER ACCOUNT A1.1 — „we lend" hat zwei Schreibweisen: die der Maske (we_lend) und die kanonische (MONEY_GIVEN,
+  // `isLoanGiven`), die `createDebtInHouse` ebenso annimmt. Vorher fehlte ein kanonisch gespeichertes Darlehen hier.
+  // Der Status wird wie `canonicalLoanStatus` ohne Groß-/Kleinschreibung gelesen (settled = REPAID).
   const loanRow = query(
     `SELECT COALESCE(SUM(d.amount - COALESCE(p.total_paid, 0)), 0) AS open_lent,
             COUNT(*) AS cnt
@@ -388,8 +391,8 @@ export function customerStatsFor(ctx: BusinessReadContext, customerId: string): 
        FROM debt_payments
        GROUP BY debt_id
      ) p ON p.debt_id = d.id
-     WHERE d.customer_id = ? AND d.branch_id = ? AND d.direction = 'we_lend'
-       AND d.status NOT IN ('CANCELLED', 'REPAID', 'settled')`,
+     WHERE d.customer_id = ? AND d.branch_id = ? AND d.direction IN ('we_lend', 'MONEY_GIVEN')
+       AND UPPER(d.status) NOT IN ('CANCELLED', 'REPAID', 'SETTLED')`,
     [customerId, ctx.branchId]
   );
 

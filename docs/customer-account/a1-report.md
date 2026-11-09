@@ -55,13 +55,24 @@ Stand 08.11.2026, Branch `feature/customer-account` (Basis `origin/main` = v0.8.
   - Dafür braucht es eine Schemaänderung und einen Schreibweg, deshalb ist es nicht im A1.
   - Bis dahin bleibt es beim Hinweis.
 - **P2 „Assign to this client"** für Darlehen ohne Kunde. Geplant als A2, ein Schreibweg, deshalb nicht im A1.
-- **P3 Lieferantenguthaben** (OPEN, auf seine Einkäufe einlösbar): Es zählt jetzt als frei „schuldet uns". Alternativ wäre es gebunden. Bitte bestätigen.
+- **P3 Lieferantenguthaben — entschieden und umgesetzt in A1.1 (09.11.):** Die Unterscheidung folgt dem gespeicherten Status (`supplier_credits.status`; dieselbe Regel wie `supplierCreditsFor`):
+  - `REFUND_DUE`: Der Lieferant muss Geld zurückzahlen („Record Repayment"). Zählt **frei**.
+  - `OPEN`: Die App löst es nur auf seine Einkäufe oder Ausgaben ein (Retoure, Überzahlung, Kostenkorrektur, Vorauszahlung). Zählt **gebunden**.
+  - Auch ein Vorauszahlungs-Guthaben, für das sich eine Rückzahlung erfassen ließe, bleibt gebunden, solange es kein `REFUND_DUE` ist.
 
-## Befunde in bestehenden Flächen (nicht geändert, nur dokumentiert)
+## Befunde in bestehenden Flächen — Stand A1.1 (09.11.)
 
-1. **Darlehen mit kanonischer Richtung** (`MONEY_GIVEN` / `MONEY_RECEIVED`): Kundenkennzahlen und Payables zählen nur `we_lend` / `we_borrow`. Das Kundenkonto zählt beide Schreibweisen.
-2. **`supplierLedgerStrict`** (Lieferanten-Detail) zählt Einkaufs**entwürfe** (DRAFT) als offen. Payables und das Kundenkonto zählen sie nicht.
-3. **Payables „Supplier"** zieht Guthaben-Einlösungen (`purchase_payments.method = 'credit'`) bei teilbezahlten Einkäufen nicht ab. Lieferantenkonto und Kundenkonto ziehen sie ab.
+1. **Darlehen mit kanonischer Richtung — bestätigt und behoben.**
+   - `createDebtInHouse` nimmt auch `MONEY_GIVEN` / `MONEY_RECEIVED` an.
+   - Kundenkennzahlen (`customerStatsFor`) und Payables zählen jetzt beide Schreibweisen. Der Status wird ohne Groß-/Kleinschreibung gelesen, wie bei `canonicalLoanStatus`; ein „repaid" in Kleinschrift galt vorher als offen.
+   - Die Darlehensliste auf der Kundenseite trennt die Richtungen jetzt über `isLoanGiven`.
+   - **Nicht behoben (außerhalb des Auftrags):** Der Geldfluss in Analytics (`analytics-snapshot.ts`) zählt `MONEY_GIVEN` als „geliehen".
+2. **Einkaufsentwürfe — nicht bestätigt, keine Änderung.**
+   - Jede Statusregel setzt `DRAFT` nur bei Betrag ≤ 0.
+   - Ein Entwurf trägt im Lieferantenkonto deshalb nie etwas Offenes (`max(0, …)`). Der Test belegt das.
+3. **Eingelöstes Lieferantenguthaben — bestätigt und behoben.**
+   - `paid_amount` enthält nur Geld; das Guthaben steht in `purchase_payments` (`credit`).
+   - Payables zieht es jetzt ab, wie „Pay Supplier", das Lieferantenkonto und der Einkaufsstatus.
 4. **Datumsangaben:**
    - Darlehen haben kein Geschäftsdatum; der Kontoauszug nimmt `created_at`.
    - Zahlungen an Reparaturen, Approval und Kommission (Altweg) haben kein eigenes Datum; sie stehen am Belegdatum.

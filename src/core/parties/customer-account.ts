@@ -628,21 +628,30 @@ export function customerAccountFor(ctx: BusinessReadContext | { branchId: string
         totalF: F(r.amount), openF: F(r.amount) - F(r.paid_amount) - creditF, href: '/expenses', events,
       });
     }
-    // Guthaben bei der Rolle (OPEN: auf seine Einkäufe einlösbar) und Rückforderung (REFUND_DUE: er zahlt zurück).
+    // Guthaben bei der Rolle und Rückforderung — P3 (Owner 09.11.2026), belegt durch den gespeicherten Status
+    // (`supplierCreditsFor`: „Verrechenbar ist nur ein Guthaben (OPEN) — eine Rückforderung (REFUND_DUE) wartet auf das
+    // Geld des Lieferanten"):
+    //   • REFUND_DUE — der Lieferant muss Geld zurückzahlen (Rückforderung, „Record Repayment") → FREI.
+    //   • OPEN — ein Guthaben, das die App nur auf seine Einkäufe/Ausgaben einlöst (Retoure, Überzahlung, Kostenkorrektur,
+    //     Vorauszahlung) → GEBUNDEN. Auch ein Vorauszahlungs-Guthaben, für das sich eine Rückzahlung erfassen ließe, ist
+    //     keine fällige Rückzahlung, solange es kein REFUND_DUE ist — keine pauschale Freigabe.
     for (const r of query(
-      `SELECT id, amount, used_amount, status, created_at FROM supplier_credits WHERE supplier_id = ? AND branch_id = ? AND status != 'CANCELLED'`,
+      `SELECT id, amount, used_amount, status, created_at, source_return_id, source_purchase_id
+         FROM supplier_credits WHERE supplier_id = ? AND branch_id = ? AND status != 'CANCELLED'`,
       [supplierRole.id, branchId],
     )) {
       const status = txt(r.status);
       const refund = status === 'REFUND_DUE' || status === 'REFUNDED';
       const usedF = F(r.used_amount);
       const live = status === 'OPEN' || status === 'REFUND_DUE';
+      const herkunft = r.source_return_id ? 'from a supplier return' : r.source_purchase_id ? 'from an overpaid purchase' : 'credit / prepayment';
       docs.push({
         key: `supcredit:${txt(r.id)}`, kind: refund ? 'SUPPLIER_REFUND' : 'SUPPLIER_CREDIT', side: 'OWES_US',
         number: refund ? 'Supplier refund' : 'Supplier credit', date: day(r.created_at),
-        detail: refund ? 'his supplier role owes us a refund' : 'credit we hold with his supplier role (usable on his purchases)',
+        detail: refund ? 'his supplier role must pay this back' : `credit we hold with his supplier role · ${herkunft}`,
         totalF: F(r.amount), openF: live ? F(r.amount) - usedF : 0, href: `/suppliers/${supplierRole.id}`,
-        events: usedF > 0 ? [{ date: day(r.created_at), text: refund ? 'Refunded' : 'Used on purchases', amountF: usedF }] : [],
+        bound: refund ? undefined : 'usable only on his purchases / expenses — not money he has to pay back',
+        events: usedF > 0 ? [{ date: day(r.created_at), text: refund ? 'Repaid by the supplier' : 'Used on purchases', amountF: usedF }] : [],
       });
     }
     opening(openingItemsFor(ctx, 'SUPPLIER', supplierRole.id));

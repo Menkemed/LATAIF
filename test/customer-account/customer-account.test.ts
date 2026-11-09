@@ -220,6 +220,8 @@ debt('d-lend', 'we_lend', 300, 'open', 'cust-1', 'Ahmed Karimi', 'LOA-2026-00000
 debt('d-repaid', 'we_borrow', 400, 'REPAID', 'cust-1', 'Ahmed Karimi', 'LOA-2026-000006');
 insert(DB, 'debt_payments', { id: 'dp-2', debt_id: 'd-repaid', amount: 400, source: 'bank', paid_at: '2026-09-20T09:00:00.000Z', created_at: NOW });
 debt('d-canon', 'MONEY_RECEIVED', 100, 'OPEN', 'cust-1', 'Ahmed Karimi', 'LOA-2026-000007');
+debt('d-canon-lend', 'MONEY_GIVEN', 120, 'OPEN', 'cust-1', 'Ahmed Karimi', 'LOA-2026-000010');   // A1.1: kanonische Richtung (we lend)
+debt('d-lower', 'we_lend', 50, 'repaid', 'cust-1', 'Ahmed Karimi', 'LOA-2026-000011');          // A1.1: getilgt, Status klein geschrieben
 debt('d-cancel', 'we_lend', 999, 'CANCELLED', 'cust-1', 'Ahmed Karimi', 'LOA-2026-000008');
 debt('d-hint', 'we_borrow', 250, 'open', null, 'ahmed  karimi', 'LOA-2026-000005');
 debt('d-other', 'we_borrow', 90, 'open', null, 'Someone Else', 'LOA-2026-000009');
@@ -231,7 +233,7 @@ const EINKAUF = (supplierId: string, pid: string, price: number, pay: number) =>
 });
 const P1 = (await purchaseHouse.createPurchaseOnPrimary(EINKAUF('sup-ak', 'pk5', 800, 0) as never)).id;
 const P2 = (await purchaseHouse.createPurchaseOnPrimary(EINKAUF('sup-ak', 'pk6', 400, 400) as never)).id;
-insert(DB, 'purchases', { id: 'pur-draft', branch_id: 'branch-main', purchase_number: 'PUR-DRAFT', supplier_id: 'sup-ak', status: 'DRAFT', total_amount: 999, paid_amount: 0, remaining_amount: 999, purchase_date: '2026-10-13', created_at: NOW, updated_at: NOW });
+insert(DB, 'purchases', { id: 'pur-draft', branch_id: 'branch-main', purchase_number: 'PUR-DRAFT', supplier_id: 'sup-ak', status: 'DRAFT', total_amount: 0, paid_amount: 0, remaining_amount: 0, purchase_date: '2026-10-13', created_at: NOW, updated_at: NOW });
 insert(DB, 'supplier_credits', { id: 'sc-1', branch_id: 'branch-main', supplier_id: 'sup-ak', amount: 70, used_amount: 0, status: 'OPEN', created_at: '2026-10-14T09:00:00.000Z' });
 
 // Kommission: Altweg (verkauft, Auszahlung offen 450) und Record Sale (Schuld als Einkauf bei einem NICHT verknüpften Lieferanten).
@@ -266,13 +268,13 @@ reload();
 // ══ A — Summen und Netto gegen den erwarteten Stand ═══════════════════════════════════════════════════════════
 const A0 = acc();
 {
-  ok(eq(A0.owesUs.total, 1500 + 300 + 300 + 250 + 70) && eq(A0.owesUs.bound, 250) && eq(A0.owesUs.free, 2170),
-    `A1 Ahmed schuldet uns 2420 (Rechnungen 1800, We Lent 300, Eröffnung 250 gebunden, Lieferantenguthaben 70) (${S(A0.owesUs)})`);
+  ok(eq(A0.owesUs.total, 1500 + 300 + 300 + 120 + 250 + 70) && eq(A0.owesUs.bound, 250 + 70) && eq(A0.owesUs.free, 2220),
+    `A1 Ahmed schuldet uns 2540 (Rechnungen 1800, We Lent 300 + kanonisch 120, Eröffnung 250 und Lieferantenguthaben 70 gebunden) (${S(A0.owesUs)})`);
   const weOwe = 100 + 30 + 1200 + 100 + 800 + 450 + 250 + 200 + 60;
   ok(eq(A0.weOwe.total, weOwe) && eq(A0.weOwe.bound, 260) && eq(A0.weOwe.free, weOwe - 260),
     `A2 wir schulden 3190 (Guthaben 100, Rückzahlung 30, We Borrowed 1200+100, Einkauf 800, Kommission 450+250, Anzahlung 200 und Eröffnung 60 gebunden) (${S(A0.weOwe)})`);
-  ok(eq(A0.net, 2420 - weOwe) && A0.direction === 'WE_OWE' && eq(A0.netFree, 2170 - (weOwe - 260)),
-    `A3 Netto −770: LATAIF schuldet Ahmed; nur freie Beträge −760 (${A0.net} / ${A0.netFree})`);
+  ok(eq(A0.net, 2540 - weOwe) && A0.direction === 'WE_OWE' && eq(A0.netFree, 2220 - (weOwe - 260)),
+    `A3 Netto −650: LATAIF schuldet Ahmed; nur freie Beträge −710 (${A0.net} / ${A0.netFree})`);
   const keys = A0.docs.map((d) => d.key);
   ok(!keys.includes('invoice:inv-cancel') && !keys.includes(`invoice:${IOTHER}`) && !keys.includes('credit:cc-void') && !keys.includes('debt:d-cancel')
     && !keys.includes('purchase:pur-draft') && !keys.includes('order:o2') && !keys.includes('opening:ob2') && !keys.includes('debt:d-hint') && !keys.includes('consignment:con-2'),
@@ -296,13 +298,13 @@ if (process.env.CA_DUMP) (await import('node:fs')).writeFileSync(process.env.CA_
   ok(eq(inv, r.reduce((t, x) => t + F(x.open), 0) / 1000) && eq(inv, 1800), `B1 Rechnungen = Receivables des Kunden (${inv})`);
   ok(eq(inv, ar(DB)), `B2 Rechnungen = Hauptbuch-Forderung des Kunden (${inv} / ${ar(DB)})`);
   const stats = customerStatsFor(CTX as never, 'cust-1')!;
-  ok(eq(sumOpen(A0, (d) => d.kind === 'LOAN_LENT'), stats.loanOutstanding) && eq(stats.invoiceOutstanding, inv),
-    `B3 We Lent und Rechnungen = Kundenkennzahlen (${stats.loanOutstanding} / ${stats.invoiceOutstanding})`);
+  ok(eq(sumOpen(A0, (d) => d.kind === 'LOAN_LENT'), stats.loanOutstanding) && eq(stats.loanOutstanding, 420) && eq(stats.invoiceOutstanding, inv),
+    `B3 We Lent (inkl. kanonisch MONEY_GIVEN 120, ohne „repaid") und Rechnungen = Kundenkennzahlen (${stats.loanOutstanding} / ${stats.invoiceOutstanding})`);
   ok(eq(sumOpen(A0, (d) => d.kind === 'STORE_CREDIT'), customerStoreCreditFor(CTX as never, 'cust-1')), 'B4 Store Credit = einlösbares Guthaben des Kunden');
   const p = payS.loadPayablesFor(CTX as never).payables;
   const pc = (type: string) => p.filter((x) => x.type === type && x.counterpartyId === 'cust-1').reduce((t, x) => t + F(x.outstanding), 0) / 1000;
-  ok(eq(sumOpen(A0, (d) => d.key === 'debt:d-borrow'), pc('loan')),
-    `B5 We Borrowed (we_borrow) = Payables des Kunden (${pc('loan')}); dazu zählt das kanonische MONEY_RECEIVED-Darlehen (100), das Payables nicht kennt`);
+  ok(eq(sumOpen(A0, (d) => d.kind === 'LOAN_BORROWED'), pc('loan')) && eq(pc('loan'), 1300),
+    `B5 We Borrowed = Payables des Kunden, beide Schreibweisen (we_borrow 1200 + MONEY_RECEIVED 100) (${pc('loan')})`);
   ok(eq(sumOpen(A0, (d) => d.kind === 'REFUND_DUE' || d.kind === 'RETURN_REFUND'), pc('refund')), `B6 Rückzahlungsansprüche = Payables „Refund" (${pc('refund')})`);
   ok(eq(sumOpen(A0, (d) => d.key === 'consignment:con-1'), pc('consignor')), `B7 Kommission Altweg = Payables „Consignor" (${pc('consignor')})`);
   const supP = (sid: string) => p.filter((x) => x.type === 'supplier' && x.counterpartyId === sid).reduce((t, x) => t + F(x.outstanding), 0) / 1000;
@@ -452,6 +454,54 @@ if (process.env.CA_DUMP) (await import('node:fs')).writeFileSync(process.env.CA_
     'I2 das Kundenkonto schreibt nichts (kein INSERT/UPDATE/DELETE, keine Buchung, kein Sync)');
   ok(!/partner_transactions/.test(core.replace(/\/\/.*$/gm, '')), 'I3 keine Gesellschafter-/Eigenkapitalkonten im Kundenkonto');
   ok(/linkedPartnerIds[\s\S]{0,400}return \[\];/.test(core), 'I4 Partner zählen nur über eine ausdrückliche Verknüpfung (heute keine — Owner-Entscheidung P1)');
+}
+
+// ══ J — A1.1: P3 Lieferantenguthaben, Befunde 1–3, Oberfläche ══════════════════════════════════════════════════
+{
+  const { supplierLedgerStrict } = await import('../../src/stores/supplierStore.ts');
+  const ph = await import('../../src/core/payables/payables-house.ts');
+  // P3 — gebunden ist ein Guthaben, das nur auf seine Einkäufe einlösbar ist (OPEN); frei nur eine Rückforderung (REFUND_DUE).
+  const a = acc();
+  const sc = a.docs.find((d) => d.key === 'supcredit:sc-1');
+  ok(sc?.kind === 'SUPPLIER_CREDIT' && sc.bound?.startsWith('usable only') === true && sc.side === 'OWES_US',
+    `J1 P3 Lieferantenguthaben (OPEN, nur einlösbar) steht unter „schuldet uns", GEBUNDEN (${sc?.bound})`);
+  insert(DB, 'supplier_credits', { id: 'sc-r', branch_id: 'branch-main', supplier_id: 'sup-ak', amount: 40, used_amount: 0, status: 'REFUND_DUE', created_at: '2026-10-21T09:00:00.000Z' });
+  const b = acc();
+  const rf = b.docs.find((d) => d.key === 'supcredit:sc-r');
+  ok(rf?.kind === 'SUPPLIER_REFUND' && rf.bound === null && eq(b.owesUs.free, a.owesUs.free + 40) && eq(b.owesUs.bound, a.owesUs.bound),
+    'J2 P3 Rückforderung an den Lieferanten (REFUND_DUE, er muss Geld zurückzahlen) zählt FREI');
+
+  // Befund 3 — ein teils mit Lieferantenguthaben beglichener Einkauf: Payables, Pay Supplier, Lieferantenkonto und Kundenkonto gleich.
+  const P3 = (await purchaseHouse.createPurchaseOnPrimary(EINKAUF('sup-ak', 'pk10', 600, 0) as never)).id;
+  imHaus(() => ph.applyCreditToPurchaseInHouse(P3, 70, ph.localHouseCtx()));
+  reload();
+  const row = payS.loadPayablesFor(CTX as never).payables.find((x) => x.type === 'supplier' && x.sourceId === P3);
+  const item = ph.openSupplierItems('sup-ak', 'branch-main').find((x) => x.id === P3);
+  const accP = acc().docs.find((d) => d.key === `purchase:${P3}`);
+  ok(eq(n(DB, 'SELECT paid_amount FROM purchases WHERE id = ?', [P3]), 0) && s(DB, 'SELECT status FROM purchases WHERE id = ?', [P3]) === 'PARTIALLY_PAID',
+    'J3 Ausgang: Guthaben 70 eingelöst — paid_amount bleibt Geld (0), der Status sieht das Guthaben (PARTIALLY_PAID)');
+  ok(row !== undefined && eq(row.outstanding, 530) && eq(row.paidAmount, 70) && item?.remainingF === 530000 && eq(accP?.open ?? -1, 530),
+    `J4 Befund 3 behoben: Payables 530 (vorher 600) = Pay Supplier = Kundenkonto (${row?.outstanding} / ${item?.remainingF} / ${accP?.open})`);
+
+  // Befund 2 — nicht bestätigt: ein Einkauf steht nur bei Betrag ≤ 0 auf DRAFT (jede Statusregel), trägt also nie etwas Offenes.
+  const regeln = ['src/stores/purchaseStore.ts', 'src/core/payables/payables-house.ts', 'src/core/purchases/purchase-edit-house.ts', 'src/core/purchases/purchase-lifecycle-house.ts']
+    .flatMap((f) => src(f).split('\n').filter((l) => /return 'DRAFT'/.test(l)).map((l) => [f, l.trim()]));
+  ok(regeln.length >= 4 && regeln.every(([, l]) => /<= 0\) return 'DRAFT'/.test(l)), `J5 Befund 2 geprüft: DRAFT nur bei Betrag ≤ 0 (${regeln.length} Statusregeln)`);
+  const accRolle = sumOpen(acc(), (d) => d.kind === 'PURCHASE' || d.kind === 'SUPPLIER_EXPENSE');
+  ok(eq(supplierLedgerStrict('sup-ak', 'branch-main').outstandingBalance, accRolle),
+    `J6 Lieferantenkonto der Rolle = Kundenkonto (Einkäufe, mit Entwurf und Guthaben-Einlösung) (${supplierLedgerStrict('sup-ak', 'branch-main').outstandingBalance} / ${accRolle})`);
+
+  // Befund 1 — die Kundenseite listet Darlehen nach beiden Schreibweisen der Richtung.
+  const detail = src('src/pages/customers/CustomerDetail.tsx');
+  ok(/customerLoans\.filter\(d => isLoanGiven\(d\.direction\)\)/.test(detail) && /customerLoans\.filter\(d => !isLoanGiven\(d\.direction\)\)/.test(detail)
+    && !/d\.direction === 'we_lend'/.test(detail), 'J7 Befund 1 auch in der Darlehensliste des Kunden: Richtung über isLoanGiven');
+  const payP = payS.loadPayablesFor(CTX as never).payables.filter((x) => x.type === 'loan');
+  ok(payP.some((x) => x.sourceId === 'd-canon') && !payP.some((x) => x.sourceId === 'd-repaid'), 'J8 Payables: kanonisches MONEY_RECEIVED offen, getilgtes nicht');
+
+  // Oberfläche
+  const page = src('src/pages/customers/CustomerAccountPage.tsx');
+  ok(page.includes('data-account-net-incomplete') && page.includes('Status today') && page.includes('Charge (+)') && page.includes('Credit (−)') && page.includes('data-statement-balance'),
+    'J9 Oberfläche: Hinweis „unvollständig" am Netto, Belastung/Gutschrift getrennt, „Status today" erklärt');
 }
 
 console.log(`\nCUSTOMER ACCOUNT A1: ${PASS} passed, ${fails.length} failed`);

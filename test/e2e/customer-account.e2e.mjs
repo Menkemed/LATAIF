@@ -280,6 +280,8 @@ function seed() {
       amount: 250, cutoff_date: '2026-10-15', status: 'RECORDED', accounting: 'PENDING', action_id: 'ca-ob-action-0001', payload_hash: 'h', created_at: now });
     insert(db, 'customer_gold_credits', { id: 'ca-gold', branch_id, customer_id: K, weight_grams: 12.5, karat: '21K', fulfilled_grams: 0, status: 'OPEN', created_at: now, updated_at: now });
     insert(db, 'partners', { id: 'ca-partner', branch_id, name: 'Partner AK', phone: '+97333000001', share_percentage: 0, active: 1, created_at: now, updated_at: now });
+    // A1.1 P3 — Guthaben bei seiner Lieferantenrolle, nur auf seine Einkäufe einlösbar (OPEN) → „schuldet uns", gebunden.
+    insert(db, 'supplier_credits', { id: 'ca-sc', branch_id, supplier_id: 'ca-sup', amount: 70, used_amount: 0, status: 'OPEN', created_at: '2026-10-14T09:00:00.000Z' });
   } finally { db.close(); }
 }
 
@@ -291,16 +293,22 @@ const ansicht = async (c) => JSON.parse(await c.ev(`const q=(s)=>document.queryS
     docs: [...document.querySelectorAll('[data-account-doc]')].map(e=>e.getAttribute('data-account-doc')+':'+e.getAttribute('data-doc-open')).sort(),
     lastBalance: rows.length ? Number(rows[rows.length-1].getAttribute('data-statement-balance')) : null, statementRows: rows.length,
     incomplete: !!q('[data-account-incomplete]'), debtHint: !!q('[data-hint-debt="ca-hint"]'), partner: d('[data-partner-block="ca-partner"]','data-partner-link'),
-    gold: d('[data-gold-karat="21K"]','data-gold-grams'), bound: document.querySelectorAll('[data-doc-bound]').length });`));
+    gold: d('[data-gold-karat="21K"]','data-gold-grams'), bound: document.querySelectorAll('[data-doc-bound]').length,
+    scBound: !!q('[data-account-doc="supcredit:ca-sc"] [data-doc-bound]'),
+    netIncomplete: !!q('[data-account-net-incomplete]'), statusHead: (q('[data-statement-status-head]')?.textContent || '').trim(),
+    charge: [...document.querySelectorAll('[data-statement-charge]')].reduce((t,e)=>t+Math.round(Number(e.getAttribute('data-statement-charge'))*1000),0)/1000,
+    credit: [...document.querySelectorAll('[data-statement-credit]')].reduce((t,e)=>t+Math.round(Number(e.getAttribute('data-statement-credit'))*1000),0)/1000 });`));
 const ERWARTET_DOCS = ['consignment:ca-con:450', 'credit:ca-cc:100', 'debt:ca-borrow:1200', 'debt:ca-lend:300', 'invoice:ca-inv-a:1500', 'invoice:ca-inv-b:300',
-  'invoice:ca-inv-c:0', 'opening:ca-ob:250', 'order:ca-ord:200', 'purchase:ca-pur:800'].sort();
+  'invoice:ca-inv-c:0', 'opening:ca-ob:250', 'order:ca-ord:200', 'purchase:ca-pur:800', 'supcredit:ca-sc:70'].sort();
 const pruefeAnsicht = (v, wer) => {
-  ok(v.owes === 2350 && v.weOwe === 2750 && v.net === -400 && v.dir === 'WE_OWE' && v.netFree === -450,
-    `${wer} Saldo: Ahmed schuldet 2.350, wir schulden 2.750, Netto −400 (LATAIF schuldet), nur freie Beträge −450 (${S([v.owes, v.weOwe, v.net, v.dir, v.netFree])})`);
+  ok(v.owes === 2420 && v.weOwe === 2750 && v.net === -330 && v.dir === 'WE_OWE' && v.netFree === -450,
+    `${wer} Saldo: Ahmed schuldet 2.420, wir schulden 2.750, Netto −330 (LATAIF schuldet), nur freie Beträge −450 (${S([v.owes, v.weOwe, v.net, v.dir, v.netFree])})`);
   ok(S(v.docs) === S(ERWARTET_DOCS), `${wer} Belege beider Seiten genau wie erwartet, die erledigte Rechnung mit 0 (${S(v.docs)})`);
-  ok(v.lastBalance === -400 && v.statementRows === 13, `${wer} Kontoauszug: 13 Zeilen (Belege, Zahlungen, Rückzahlung), endet beim Netto −400 (${v.lastBalance}, ${v.statementRows} Zeilen)`);
-  ok(v.incomplete && v.debtHint && v.partner === 'POSSIBLE' && v.gold === '12.5' && v.bound === 2,
-    `${wer} Hinweise (Darlehen ohne Kunde, Partner gleiches Telefon) nicht gezählt; Gold 12,5 g getrennt; 2 gebundene Posten (${S([v.incomplete, v.debtHint, v.partner, v.gold, v.bound])})`);
+  ok(v.lastBalance === -330 && v.statementRows === 14, `${wer} Kontoauszug: 14 Zeilen (Belege, Zahlungen, Rückzahlung), endet beim Netto −330 (${v.lastBalance}, ${v.statementRows} Zeilen)`);
+  ok(v.incomplete && v.debtHint && v.partner === 'POSSIBLE' && v.gold === '12.5' && v.bound === 3,
+    `${wer} Hinweise (Darlehen ohne Kunde, Partner gleiches Telefon) nicht gezählt; Gold 12,5 g getrennt; 3 gebundene Posten (${S([v.incomplete, v.debtHint, v.partner, v.gold, v.bound])})`);
+  ok(v.scBound && v.netIncomplete && v.statusHead === 'Status today' && Math.round((v.charge - v.credit) * 1000) === Math.round(v.lastBalance * 1000),
+    `${wer} A1.1: Lieferantenguthaben gebunden, Hinweis „unvollständig" am Netto, „Status today", Belastung − Gutschrift = Saldo (${S([v.scBound, v.netIncomplete, v.statusHead, v.charge, v.credit])})`);
 };
 /** Die Belege, Zahlungen und Buchungen — was ein Lesen nie ändern darf (ohne Fassungs-/Zeitspalten des Sync-Echos). */
 const fingerabdruck = () => createHash('sha256').update(S([
@@ -430,8 +438,8 @@ try {
     ok(await mausKlick(client, '[data-account-show-settled]') === 'OK', 'C Maus auf „Show settled documents"');
     await warteBis(client, "!document.querySelector('[data-account-doc=\"invoice:ca-inv-c\"]')", 8000);
     const aus = await ansicht(client);
-    ok(!aus.docs.includes('invoice:ca-inv-c:0') && aus.docs.length === ERWARTET_DOCS.length - 1 && aus.net === -400 && aus.lastBalance === -400,
-      `C ausgeblendet: die bezahlte Rechnung fehlt, Saldo und letzter Kontostand bleiben −400 (${aus.docs.length} Belege)`);
+    ok(!aus.docs.includes('invoice:ca-inv-c:0') && aus.docs.length === ERWARTET_DOCS.length - 1 && aus.net === -330 && aus.lastBalance === -330,
+      `C ausgeblendet: die bezahlte Rechnung fehlt, Saldo und letzter Kontostand bleiben −330 (${aus.docs.length} Belege)`);
     ok(await mausKlick(client, '[data-account-show-settled]') === 'OK', 'C noch einmal: wieder einblenden');
     await warteBis(client, "document.querySelector('[data-account-doc=\"invoice:ca-inv-c\"]')", 8000);
     const an = await ansicht(client);

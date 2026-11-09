@@ -53,7 +53,7 @@ function SideTable({ title, docs, testId, showSettled }: { title: string; docs: 
       {rows.length === 0 ? <p style={{ fontSize: 13, color: GREY }}>Nothing open.</p> : (
         <div style={{ overflowX: 'auto' }}>
           <table style={{ width: '100%', borderCollapse: 'collapse' }} data-account-side={testId}>
-            <thead><tr><th style={th}>Document</th><th style={{ ...th, textAlign: 'right' }}>Total</th><th style={{ ...th, textAlign: 'right' }}>Open</th><th style={th}>Status</th></tr></thead>
+            <thead><tr><th style={th}>Document</th><th style={{ ...th, textAlign: 'right' }}>Total</th><th style={{ ...th, textAlign: 'right' }}>Open</th><th style={th}>Status today</th></tr></thead>
             <tbody>
               {rows.map((d) => (
                 <tr key={d.key} data-account-doc={d.key} data-doc-open={d.open}>
@@ -121,6 +121,21 @@ function PartnerBlock({ p }: { p: PartnerAccountView }) {
   );
 }
 
+// CUSTOMER ACCOUNT A1.1 — Beträge lesbarer: getrennte Spalten für Belastung (+) und Gutschrift (−), volle Nachkommastellen,
+// der laufende Saldo mit Klartext (wer schuldet wem). Der Status ist der HEUTIGE Stand des Belegs.
+const amountCell: React.CSSProperties = { ...num, fontSize: 13, fontVariantNumeric: 'tabular-nums' };
+const FULL = '1em';
+
+function BalanceCell({ v }: { v: number }) {
+  const who = v > 0 ? 'client owes' : v < 0 ? 'LATAIF owes' : 'settled';
+  return (
+    <td style={{ ...amountCell, color: v < 0 ? AMBER : INK, fontWeight: 600 }} data-statement-balance={v}>
+      <Bhd v={Math.abs(v)} fracSize={FULL} />
+      <div style={{ fontSize: 10, fontWeight: 400, color: GREY, fontFamily: 'inherit', letterSpacing: '0.02em' }}>{who}</div>
+    </td>
+  );
+}
+
 function Statement({ rows, showSettled }: { rows: StatementRow[]; showSettled: boolean }) {
   const shown = showSettled ? rows : rows.filter((r) => r.status !== 'SETTLED');
   return (
@@ -128,7 +143,10 @@ function Statement({ rows, showSettled }: { rows: StatementRow[]; showSettled: b
       <table style={{ width: '100%', borderCollapse: 'collapse' }} data-account-statement>
         <thead><tr>
           <th style={th}>Date</th><th style={th}>Document</th><th style={th}>Transaction</th>
-          <th style={{ ...th, textAlign: 'right' }}>Amount</th><th style={{ ...th, textAlign: 'right' }}>Balance</th><th style={th}>Status</th>
+          <th style={{ ...th, textAlign: 'right' }} title="Raises what the client owes LATAIF (or lowers what LATAIF owes the client)">Charge (+)</th>
+          <th style={{ ...th, textAlign: 'right' }} title="Lowers what the client owes LATAIF (or raises what LATAIF owes the client)">Credit (−)</th>
+          <th style={{ ...th, textAlign: 'right' }}>Balance</th>
+          <th style={th} title="The document's status today — not its status on the date of this line" data-statement-status-head>Status today</th>
         </tr></thead>
         <tbody>
           {shown.map((r, k) => (
@@ -136,16 +154,19 @@ function Statement({ rows, showSettled }: { rows: StatementRow[]; showSettled: b
               <td style={{ ...td, whiteSpace: 'nowrap' }}>{fmtDate(r.date)}</td>
               <td style={td}><DocLink href={r.href}>{r.number}</DocLink><div style={{ fontSize: 11, color: GREY }}>{r.kindLabel}</div></td>
               <td style={td}>{r.text}</td>
-              <td style={{ ...num, color: r.change < 0 ? AMBER : INK }}>{r.change > 0 ? '+' : r.change < 0 ? '−' : ''}<Bhd v={Math.abs(r.change)} /></td>
-              <td style={{ ...num, color: r.balance < 0 ? AMBER : INK }} data-statement-balance={r.balance}>{r.balance > 0 ? '+' : r.balance < 0 ? '−' : ''}<Bhd v={Math.abs(r.balance)} /></td>
+              <td style={amountCell} data-statement-charge={r.change > 0 ? r.change : 0}>{r.change > 0 ? <Bhd v={r.change} fracSize={FULL} /> : ''}</td>
+              <td style={{ ...amountCell, color: AMBER }} data-statement-credit={r.change < 0 ? -r.change : 0}>{r.change < 0 ? <Bhd v={-r.change} fracSize={FULL} /> : ''}</td>
+              <BalanceCell v={r.balance} />
               <td style={td}><Pill status={r.status} /></td>
             </tr>
           ))}
         </tbody>
       </table>
-      {!showSettled && rows.length !== shown.length && (
-        <p style={{ fontSize: 11, color: GREY, marginTop: 8 }}>Settled documents are hidden — the running balance still includes them.</p>
-      )}
+      <p style={{ fontSize: 11, color: GREY, marginTop: 8 }}>
+        Charge raises what the client owes LATAIF; credit lowers it or raises what LATAIF owes the client. “Status today” is the
+        document's current status, not its status on the date of the line.
+        {!showSettled && rows.length !== shown.length && ' Settled documents are hidden — the running balance still includes them.'}
+      </p>
     </div>
   );
 }
@@ -224,6 +245,12 @@ export function CustomerAccountPage() {
                 <div style={{ fontSize: 11, color: GREY, marginTop: 4 }} data-account-net-free={acc.netFree}>
                   Free amounts only: {acc.netFree > 0 ? 'client owes ' : acc.netFree < 0 ? 'we owe ' : ''}<Bhd v={Math.abs(acc.netFree)} /> BHD
                 </div>
+                {/* CUSTOMER ACCOUNT A1.1 — direkt am Netto: es fehlen womöglich nicht verknüpfte Posten. */}
+                {!acc.complete && (
+                  <div style={{ fontSize: 11, color: AMBER, marginTop: 6, fontWeight: 600 }} data-account-net-incomplete={acc.incomplete.length}>
+                    ⚠ May be incomplete — unlinked items that may belong to this client are not included (see below).
+                  </div>
+                )}
               </Card>
             </div>
 
